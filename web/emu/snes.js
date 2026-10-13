@@ -34,6 +34,7 @@
         if (base === 0x7fc0 && (mode & 0xef) === 0x20) s += 2;
         if (base === 0xffc0 && (mode & 0xef) === 0x21) s += 2;
         if (base === 0x40ffc0 && (mode & 0xef) === 0x25) s += 3;
+        if (base === 0x7fc0 && mode === 0x23) s += 2; // SA-1 cartridges
         let printable = 0; for (let i = 0; i < 21; i++) { const c = r[base + i]; if (c >= 0x20 && c < 0x7f) printable++; }
         if (printable > 16) s += 1;
         const op = r[(base & ~0x7fff) + (reset & 0x7fff)];
@@ -762,7 +763,7 @@
       opts = opts || {};
       this.cart = new Cart(romIn, opts.sram);
       const chip = this.cart.special();
-      if (chip) throw new Error(`This game uses the ${chip} chip inside the cartridge, which RetroPixels' SNES emulator doesn't support yet.`);
+      if (chip && chip !== "SA-1") throw new Error(`This game uses the ${chip} chip inside the cartridge, which RetroPixels' SNES emulator doesn't support yet.`);
       this.chip = chip;
       this.pal = this.cart.pal;
       this.masterHz = this.pal ? PAL_HZ : NTSC_HZ;
@@ -775,6 +776,9 @@
       this.ppu = new PPU(this);
       const self = this;
       this.cpu = new global.RP65816({ read: (a) => self.read(a), write: (a, v) => self.write(a, v), idle: () => { self.clock += 6; } });
+      this.clock = 0;
+      // SA-1 chip (snes_sa1.js): takes over the cartridge bus and runs alongside the CPU
+      this.sa1 = chip === "SA-1" ? new global.RPSA1(this) : null;
       this.dma = new Uint8Array(0x80);
       this.hdma = [0, 1, 2, 3, 4, 5, 6, 7].map(() => ({ active: false, doTransfer: false, line: 0, addr: 0, ind: 0 }));
       this.input = [0, 0];
@@ -794,6 +798,7 @@
       this.rddiv = 0; this.rdmpy = 0; this.joy = new Uint16Array(4); this.ser = [0, 0]; this.strobe = 0;
       this.wmadd = 0;
       this.rsPos = 0; this.prevL = 0; this.prevR = 0;
+      if (this.sa1) this.sa1.reset(); // SA-1 chip
       this.cpu.reset();
     }
 
@@ -803,7 +808,12 @@
       const bank = addr >>> 16, off = addr & 0xffff;
       if (!(bank & 0x40)) {
         if (off < 0x2000) { this.cost = 8; if (write) { this.wram[off] = v; return 0; } return this.wram[off]; }
-        if (off < 0x4000) { this.cost = 6; if (off >= 0x2100 && off < 0x2200) { if (write) { this.writeB(off & 0xff, v); return 0; } return this.readB(off & 0xff); } return write ? 0 : this.mdr; }
+        if (off < 0x4000) {
+          this.cost = 6;
+          if (off >= 0x2100 && off < 0x2200) { if (write) { this.writeB(off & 0xff, v); return 0; } return this.readB(off & 0xff); }
+          if (this.sa1 && off >= 0x2200) return this.sa1.snesIO(off, write, v); // SA-1 chip registers and I-RAM
+          return write ? 0 : this.mdr;
+        }
         if (off < 0x4200) { this.cost = 12; if (write) { if (off === 0x4016) this.writeStrobe(v); return 0; } return this.readSerial(off); }
         if (off < 0x6000) { this.cost = 6; if (write) { this.writeIO(off, v); return 0; } return this.readIO(off); }
         this.cost = off >= 0x8000 && (bank & 0x80) && (this.memsel & 1) ? 6 : 8;
@@ -861,7 +871,7 @@
       if (off >= 0x4300 && off < 0x4380) return this.dma[off - 0x4300];
       switch (off) {
         case 0x4210: { const v = (this.nmiFlag ? 0x80 : 0) | 0x02 | (this.mdr & 0x70); this.nmiFlag = false; return v; }
-        case 0x4211: { const v = (this.irqFlag ? 0x80 : 0) | (this.mdr & 0x7f); this.irqFlag = false; this.cpu.irqLine = false; return v; }
+        case 0x4211: { const v = (this.irqFlag ? 0x80 : 0) | (this.mdr & 0x7f); this.irqFlag = false; this.setIrqLine(); return v; }
         case 0x4212: {
           const pos = this.clock - this.lineStart;
           return (this.vblank ? 0x80 : 0) | (pos >= HBLANK || pos < 4 ? 0x40 : 0) | (this.clock < this.autoJoyUntil ? 1 : 0) | (this.mdr & 0x3e);
@@ -885,7 +895,7 @@
           const was = this.nmitimen;
           this.nmitimen = v;
           if (!(was & 0x80) && (v & 0x80) && this.nmiFlag && this.vblank) this.cpu.nmiPending = true;
-          if (!(v & 0x30)) { this.irqFlag = false; this.cpu.irqLine = false; }
+          if (!(v & 0x30)) { this.irqFlag = false; this.setIrqLine(); }
           return;
         }
         case 0x4201: if ((this.wrio & 0x80) && !(v & 0x80)) this.ppu.latchCounters(); this.wrio = v; return;
@@ -992,9 +1002,13 @@
     // ---------- running ----------
     runTo(t) {
       const cpu = this.cpu;
+      const sa1 = this.sa1;
+      if (sa1) { while (this.clock < t) { cpu.step(); sa1.catchUp(this.clock); } return; } // SA-1 chip runs in step
       while (this.clock < t) cpu.step();
     }
-    fireIrq() { this.irqFlag = true; this.cpu.irqLine = true; }
+    fireIrq() { this.irqFlag = true; this.setIrqLine(); }
+    // the CPU's IRQ input: the timer IRQ, or the SA-1 chip asking for attention
+    setIrqLine() { this.cpu.irqLine = this.irqFlag || (this.sa1 ? this.sa1.snesIrq : false); }
     runFrame() {
       const ppu = this.ppu;
       const visible = (ppu.setini & 4) ? 239 : 224;
@@ -1067,6 +1081,7 @@
         dma: this.dma.slice(), hdma: this.hdma.map((h) => Object.assign({}, h)), joy: this.joy.slice(),
         m: [this.clock, this.frameStart, this.mdr, this.nmitimen, this.wrio, this.wrmpya, this.wrdiv, this.htime, this.vtime, this.memsel, this.hdmaen,
           this.nmiFlag ? 1 : 0, this.irqFlag ? 1 : 0, this.autoJoyUntil, this.rddiv, this.rdmpy, this.ser[0], this.ser[1], this.strobe, this.wmadd, this.rsPos, this.prevL, this.prevR],
+        sa1: this.sa1 ? this.sa1.saveState() : null,
       };
     }
     loadState(s) {
@@ -1076,6 +1091,7 @@
       [this.clock, this.frameStart, this.mdr, this.nmitimen, this.wrio, this.wrmpya, this.wrdiv, this.htime, this.vtime, this.memsel, this.hdmaen] = m;
       this.nmiFlag = !!m[11]; this.irqFlag = !!m[12];
       [this.autoJoyUntil, this.rddiv, this.rdmpy] = m.slice(13, 16); this.ser = [m[16], m[17]]; [this.strobe, this.wmadd, this.rsPos, this.prevL, this.prevR] = m.slice(18);
+      if (this.sa1 && s.sa1) { this.sa1.loadState(s.sa1); this.setIrqLine(); }
     }
   }
   SNES.info = { system: "snes", name: "Super Nintendo", width: 256, height: 224, aspect: 4 / 3, fps: 60.0988, stereo: true, players: 2, buttons: BUTTONS };
