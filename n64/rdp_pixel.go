@@ -507,6 +507,28 @@ func (d *RDP) drawSpan(y, x0, x1 int32, at *[atN]int32) {
 		d.fillSpan(y, x0, x1)
 		return
 	case 2:
+		// copy-mode triangles draw the pixels whose first sample is covered
+		sp := &d.sp
+		if sp.rect {
+			d.copySpan(y, x0, x1, at)
+			return
+		}
+		if sp.lq[0] >= sp.rq[0] {
+			return
+		}
+		a, b := (sp.lq[0]+3)>>2, (sp.rq[0]-1)>>2
+		if a > x0 {
+			for i := range at {
+				at[i] += d.sp.dx[i] * (a - x0)
+			}
+			x0 = a
+		}
+		if b < x1 {
+			x1 = b
+		}
+		if x0 > x1 {
+			return
+		}
 		d.copySpan(y, x0, x1, at)
 		return
 	}
