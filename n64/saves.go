@@ -164,32 +164,20 @@ func (s *Saves) cartWrite32(addr uint32, v uint32) {
 
 func (s *Saves) flashCommand(v uint32) {
 	switch v >> 24 {
-	case 0x4b: // erase sector offset
+	case 0x4b: // pick the sector to erase
 		s.fOffset = (v & 0xffff) * 128
 		s.fMode = 2
-	case 0x78: // erase mode
-		s.fMode = 2
+	case 0x78: // start the erase
 		s.fStatus = 0x08
-	case 0xa5: // set write page
-		s.fOffset = (v & 0xffff) * 128
-		s.fStatus = 0x04
+		s.flashExecute()
 	case 0xb4: // write buffer mode
 		s.fMode = 3
-	case 0xd2: // execute
-		if s.fMode == 2 {
-			start := s.fOffset &^ 0x3fff
-			for i := start; i < start+0x4000 && int(i) < len(s.sram); i++ {
-				s.sram[i] = 0xff
-			}
-			s.dirty = true
-		} else if s.fMode == 3 {
-			for i := uint32(0); i < 128; i++ {
-				if int(s.fOffset+i) < len(s.sram) {
-					s.sram[s.fOffset+i] = s.fBuf[i]
-				}
-			}
-			s.dirty = true
-		}
+	case 0xa5: // pick the page and program it from the buffer
+		s.fOffset = (v & 0xffff) * 128
+		s.fStatus = 0x04
+		s.flashExecute()
+	case 0xd2: // run the pending erase or program again (harmless)
+		s.flashExecute()
 	case 0xe1:
 		s.fMode = 1
 	case 0xf0:
@@ -197,6 +185,25 @@ func (s *Saves) flashCommand(v uint32) {
 	case 0x3c: // chip erase
 		for i := range s.sram {
 			s.sram[i] = 0xff
+		}
+		s.dirty = true
+	}
+}
+
+// flashExecute does the erase or page program the current mode asks for.
+func (s *Saves) flashExecute() {
+	switch s.fMode {
+	case 2: // erase a 16 KB sector
+		start := s.fOffset &^ 0x3fff
+		for i := start; i < start+0x4000 && int(i) < len(s.sram); i++ {
+			s.sram[i] = 0xff
+		}
+		s.dirty = true
+	case 3: // write the 128-byte buffer
+		for i := uint32(0); i < 128; i++ {
+			if int(s.fOffset+i) < len(s.sram) {
+				s.sram[s.fOffset+i] = s.fBuf[i]
+			}
 		}
 		s.dirty = true
 	}

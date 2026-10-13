@@ -226,23 +226,23 @@ func (r *RSP) st32(a uint32, v uint32) {
 // run executes up to n cycles (one instruction per cycle).
 func (r *RSP) run(n int) {
 	m := r.m
-	for i := 0; i < n; i++ {
-		if m.sp.status&1 != 0 {
-			return
-		}
+	imem := (*[0x1000]byte)(m.spmem[0x1000:])
+	st := &m.sp.status
+	i := 0
+	for ; i < n && *st&1 == 0; i++ {
 		pc := r.pc & 0xffc
-		op := r.imem32(pc)
+		op := binary.BigEndian.Uint32(imem[pc:])
 		r.delay = r.nDelay
 		r.nDelay = false
 		r.pc = r.next & 0xffc
 		r.next = (r.pc + 4) & 0xffc
 		r.exec(op, pc)
 		r.r[0] = 0
-		r.Cycles++
-		if m.sp.status&32 != 0 && !r.nDelay { // single step
-			m.sp.status |= 1
+		if *st&32 != 0 && !r.nDelay { // single step
+			*st |= 1
 		}
 	}
+	r.Cycles += uint64(i)
 }
 
 func (r *RSP) branch(cond bool, target uint32) {

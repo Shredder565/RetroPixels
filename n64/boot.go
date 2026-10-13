@@ -84,11 +84,10 @@ func (m *Machine) hleBoot() {
 	c.cop0[c0Compare] = 0
 	c.updateCompare()
 	// memory size the game reads
-	memSizeAt := uint32(0x318)
-	if m.cic == cic6105 {
-		memSizeAt = 0x3f0
+	binary.BigEndian.PutUint32(m.rdram[0x318:], rdramSize)
+	if m.cic == cic6105 { // the 6105 boot code keeps it here as well
+		binary.BigEndian.PutUint32(m.rdram[0x3f0:], rdramSize)
 	}
-	binary.BigEndian.PutUint32(m.rdram[memSizeAt:], rdramSize)
 	// PI timing from the header
 	m.pi[5] = uint32(m.rom[3])      // DOM1 latency
 	m.pi[6] = uint32(m.rom[2])      // DOM1 pulse width
