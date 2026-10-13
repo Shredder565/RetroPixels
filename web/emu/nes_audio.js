@@ -137,7 +137,7 @@
         const v = r[8 + i];
         out += v & 0x10 ? VOL5B[this.envVal] : (v & 15 ? VOL5B[(v & 15) * 2 + 1] : 0);
       }
-      this.level = out * 0.12;
+      this.level = out * 0.45;
     }
     output() { return this.level; }
   }

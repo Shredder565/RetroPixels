@@ -856,11 +856,16 @@
     cpuWrite(a, v) { if ((a & 0xe001) === 0xa000) return; super.cpuWrite(a, v); }
   }
 
-  // 119 — TQROM (Pinbot, High Speed): CHR ROM plus 8 KB CHR RAM, picked by bank bit 6
+  // 119 — TQROM (Pinbot, High Speed): CHR ROM plus 8 KB CHR RAM, picked by bank bit 6.
+  // 74 / 191 / 192 / 194 / 195 — Chinese MMC3 boards where some bank numbers select CHR RAM instead of ROM.
   class M119 extends M4 {
-    constructor(cart) { super(cart); this.vram8 = new Uint8Array(0x2000); this.ramSlot = new Uint8Array(8); this.update(); }
+    constructor(cart, isRam) {
+      super(cart);
+      this.isRam = isRam || ((b) => (b & 0x40) !== 0);
+      this.vram8 = new Uint8Array(0x2000); this.ramSlot = new Uint8Array(8); this.update();
+    }
     setChr1(slot, bank) {
-      if (this.ramSlot && (bank & 0x40)) { this.ramSlot[slot] = 1; this.chrMap[slot] = (bank & 7) * 0x400; return; }
+      if (this.ramSlot && this.isRam(bank & 0xff)) { this.ramSlot[slot] = 1; this.chrMap[slot] = (bank & 7) * 0x400; return; }
       if (this.ramSlot) this.ramSlot[slot] = 0;
       super.setChr1(slot, bank);
     }
@@ -1438,7 +1443,9 @@
     76: M76, 77: M77, 78: M78, 79: (c) => new M79(c, false), 146: (c) => new M79(c, false), 113: (c) => new M79(c, true),
     80: (c) => new M80(c, false), 207: (c) => new M80(c, true), 82: M82, 86: M86, 87: M87,
     88: (c) => new N108(c, 88), 154: (c) => new N108(c, 154), 95: (c) => new N108(c, 95),
-    89: M89, 93: M93, 94: M94, 97: M97, 105: M105, 107: M107, 111: M111, 112: M112, 118: M118, 119: M119,
+    89: M89, 93: M93, 94: M94, 97: M97, 105: M105, 107: M107, 111: M111, 112: M112, 118: M118, 119: (c) => new M119(c),
+    74: (c) => new M119(c, (b) => b === 8 || b === 9), 191: (c) => new M119(c, (b) => (b & 0x80) !== 0),
+    192: (c) => new M119(c, (b) => b >= 8 && b <= 11), 194: (c) => new M119(c, (b) => b <= 1), 195: (c) => new M119(c, (b) => b <= 3),
     132: M132, 133: M133, 137: (c) => new M8259(c, 137), 138: (c) => new M8259(c, 138), 139: (c) => new M8259(c, 139), 141: (c) => new M8259(c, 141),
     143: M143, 145: M145, 147: M147, 148: M148, 149: M149, 155: M1, 156: M156,
     166: (c) => new M166(c, false), 167: (c) => new M166(c, true), 168: M168, 171: M171, 184: M184, 185: M185, 190: M190, 193: M193,
