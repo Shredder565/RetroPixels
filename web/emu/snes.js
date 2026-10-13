@@ -59,6 +59,10 @@
     }
     special() {
       const c = this.chip;
+      // [chips] the snes_*.js files name the cartridge chips they recognise;
+      // ones they can run return null here (no error), the rest return their name
+      const known = global.RPSNESChips ? global.RPSNESChips.find((e) => e.detect(this)) : null;
+      if (known) return known.create ? null : known.name;
       if (c === 0x03 || c === 0x05) return "DSP-1";
       if (c >= 0x13 && c <= 0x1a) return "Super FX";
       if (c === 0x34 || c === 0x35) return "SA-1";
@@ -763,6 +767,11 @@
       opts = opts || {};
       this.cart = new Cart(romIn, opts.sram);
       const chip = this.cart.special();
+      // [chips] cartridge coprocessor from the snes_*.js files, mapped over the
+      // 4 KB pages it claims in chipPages (bank << 4 | address >> 12)
+      this.chipPages = new Uint8Array(4096);
+      const known = chip || !global.RPSNESChips ? null : global.RPSNESChips.find((e) => e.detect(this.cart));
+      this.coproc = known && known.create ? known.create(this, opts) : null;
       if (chip && chip !== "SA-1" && !(chip === "Super FX" && global.RPSuperFX)) throw new Error(`This game uses the ${chip} chip inside the cartridge, which RetroPixels' SNES emulator doesn't support yet.`);
       this.chip = chip;
       this.gsu = null; // [Super FX] see snes_superfx.js
@@ -802,6 +811,7 @@
       this.wmadd = 0;
       this.rsPos = 0; this.prevL = 0; this.prevR = 0;
       if (this.sa1) this.sa1.reset(); // SA-1 chip
+      if (this.coproc) this.coproc.reset(); // [chips]
       this.cpu.reset();
       if (this.gsu) this.gsu.reset(); // [Super FX]
     }
@@ -811,6 +821,10 @@
     decode(addr, write, v) {
       // returns value (read) ; sets this.cost
       const bank = addr >>> 16, off = addr & 0xffff;
+      if (this.chipPages[addr >>> 12]) { // [chips] coprocessor registers / memory
+        const r = write ? (this.coproc.write(bank, off, v) ? 0 : -1) : this.coproc.read(bank, off);
+        if (r >= 0) { this.cost = (bank & 0x80) && (off & 0x8000 || bank >= 0xc0) && (this.memsel & 1) ? 6 : 8; return r; }
+      }
       if (!(bank & 0x40)) {
         if (off < 0x2000) { this.cost = 8; if (write) { this.wram[off] = v; return 0; } return this.wram[off]; }
         if (off < 0x4000) {
@@ -942,12 +956,14 @@
         const pat = PATTERN[ctrl & 7];
         const step = (ctrl & 8) ? 0 : (ctrl & 0x10) ? -1 : 1;
         this.clock += 8;
+        // [chips] a coprocessor may supply the data itself (S-DD1 decompression)
+        const feed = this.coproc && this.coproc.dmaFeed && !(ctrl & 0x80) ? this.coproc.dmaFeed(ch, (a1b << 16) | a1t, count) : null;
         let i = 0;
         while (count > 0) {
           const b = (bbad + pat[i % pat.length]) & 0xff;
           const a = (a1b << 16) | a1t;
           if (ctrl & 0x80) this.pokeA(a, this.readB(b));
-          else this.writeB(b, this.peekA(a));
+          else this.writeB(b, feed ? feed() : this.peekA(a));
           this.clock += 8;
           a1t = (a1t + step) & 0xffff;
           count--; i++;
@@ -1089,12 +1105,17 @@
       a.nSamples = 0;
       return out.slice(0, k);
     }
-    getSRAM() { if (this.gsu) return this.gsu.getSRAM(); return this.cart.sramSize ? this.cart.sram.slice(0, this.cart.sramSize) : null; }
+    getSRAM() {
+      if (this.gsu) return this.gsu.getSRAM(); // [Super FX]
+      if (this.coproc && this.coproc.getSRAM) return this.coproc.getSRAM(); // [chips]
+      return this.cart.sramSize ? this.cart.sram.slice(0, this.cart.sramSize) : null;
+    }
     saveState() {
       return {
         v: 1, cpu: this.cpu.getState(), wram: this.wram.slice(), apu: this.apu.saveState(), ppu: this.ppu.saveState(), sram: this.cart.sram.slice(),
         dma: this.dma.slice(), hdma: this.hdma.map((h) => Object.assign({}, h)), joy: this.joy.slice(),
         gsu: this.gsu ? this.gsu.saveState() : undefined, // [Super FX]
+        chip: this.coproc ? this.coproc.saveState() : null, // [chips]
         m: [this.clock, this.frameStart, this.mdr, this.nmitimen, this.wrio, this.wrmpya, this.wrdiv, this.htime, this.vtime, this.memsel, this.hdmaen,
           this.nmiFlag ? 1 : 0, this.irqFlag ? 1 : 0, this.autoJoyUntil, this.rddiv, this.rdmpy, this.ser[0], this.ser[1], this.strobe, this.wmadd, this.rsPos, this.prevL, this.prevR],
         sa1: this.sa1 ? this.sa1.saveState() : null,
@@ -1103,6 +1124,7 @@
     loadState(s) {
       this.cpu.setState(s.cpu); this.wram.set(s.wram); this.apu.loadState(s.apu); this.ppu.loadState(s.ppu); this.cart.sram.set(s.sram);
       this.dma.set(s.dma); s.hdma.forEach((h, i) => Object.assign(this.hdma[i], h)); this.joy.set(s.joy);
+      if (this.coproc && s.chip) this.coproc.loadState(s.chip); // [chips]
       const m = s.m;
       [this.clock, this.frameStart, this.mdr, this.nmitimen, this.wrio, this.wrmpya, this.wrdiv, this.htime, this.vtime, this.memsel, this.hdmaen] = m;
       this.nmiFlag = !!m[11]; this.irqFlag = !!m[12];
