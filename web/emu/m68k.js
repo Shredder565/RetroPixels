@@ -673,37 +673,34 @@
     c.d[rx] = (((r & 0xffff) << 16) | (q & 0xffff)) >>> 0;
     c.n = (q >> 15) & 1; c.z = q === 0 ? 1 : 0; c.v = 0; c.c = 0;
   }
-  // Division takes a data-dependent time: the chip's divide loop spends a
-  // different number of steps on each quotient bit. These return the total
-  // instruction time (register operand) minus the 4-cycle opcode fetch.
+  // Division takes a data-dependent time: the chip works out the quotient one
+  // bit at a time, and how long a bit takes depends on that bit and on the
+  // partial remainder before it. These return the instruction's time with a
+  // register operand, minus the 4-cycle opcode fetch.
+  //
+  // DIVU: 72 cycles, plus for each quotient bit 15..1: nothing when the partial
+  // remainder going in had its top bit set, otherwise 2 for a 1 bit, 4 for a 0 bit.
+  // An overflow (quotient wider than 16 bits) is caught after 6 cycles.
   function divuTime(dividend, divisor) {
-    if ((dividend >>> 16) >= divisor) return 6;          // overflow is detected straight away
-    let steps = 38, rem = dividend >>> 0;
-    const shifted = divisor * 65536;
-    for (let i = 0; i < 15; i++) {
-      const top = rem >= 0x80000000;
-      rem = (rem * 2) % 0x100000000;
-      if (top) rem = (rem - shifted + 0x100000000) % 0x100000000;
-      else {
-        steps += 2;
-        if (rem >= shifted) { rem -= shifted; steps--; }
-      }
+    dividend >>>= 0;
+    if (Math.floor(dividend / 65536) >= divisor) return 6;
+    const q = Math.floor(dividend / divisor);
+    let t = 72;
+    for (let bit = 15; bit >= 1; bit--) {
+      const partial = Math.floor(dividend / 2 ** (bit + 1)) % divisor;
+      if (partial < 0x8000) t += (q >> bit) & 1 ? 2 : 4;
     }
-    return steps * 2 - 4;
+    return t;
   }
+  // DIVS: a base time set by the operands' signs, plus 2 cycles for every 0 among
+  // bits 15..1 of the unsigned quotient. Overflow: 12 cycles (14 for a negative dividend).
   function divsTime(dividend, divisor) {
-    let steps = 6;
-    if (dividend < 0) steps++;
-    const ad = Math.abs(dividend), ds = Math.abs(divisor);
-    if (Math.floor(ad / 65536) >= ds) return (steps + 2) * 2 - 4;
-    steps += 55;
-    if (divisor >= 0) steps += dividend >= 0 ? -1 : 1;
-    let q = Math.floor(ad / ds);
-    for (let i = 0; i < 15; i++) {
-      if (!(q & 0x8000)) steps++;
-      q = (q << 1) & 0xffff;
-    }
-    return steps * 2 - 4;
+    const negN = dividend < 0 ? 1 : 0, negD = divisor < 0 ? 1 : 0;
+    const n = Math.abs(dividend), d = Math.abs(divisor);
+    if (Math.floor(n / 65536) >= d) return 12 + 2 * negN;
+    let q = (Math.floor(n / d) >> 1) & 0x7fff, ones = 0;
+    for (; q; q &= q - 1) ones++;
+    return [[116, 118], [122, 120]][negN][negD] + 2 * (15 - ones);
   }
 
   function logicOp(op, rx, opm, mode, reg, fn) {
