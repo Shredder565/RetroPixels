@@ -191,28 +191,59 @@
   // operator; both follow attack/decay/sustain/release envelopes.
   // The chip produces one sample every 36 CPU cycles (about 49.7 kHz).
   // -------------------------------------------------------------------
-  // The chip's 15 built-in instruments (instrument 0 is the game's own).
+  // The chip has 15 built-in instruments (instrument 0 is the game's own, set in
+  // registers $00-$07). The real chip's set is stored inside it; RetroPixels uses
+  // its own set, designed to fill the same roles. Each is written out by field
+  // and packed into the chip's 8-byte layout:
+  //   bytes 0 / 1  modulator / carrier: AM, vibrato, sustained, key-rate scaling, multiplier
+  //   byte 2       modulator key-level scaling (2 bits) and total level (6 bits)
+  //   byte 3       carrier key-level scaling, half-wave carrier, half-wave modulator, feedback
+  //   bytes 4 / 5  attack and decay rates;  bytes 6 / 7  sustain level and release rate
+  // An operator: mult, ar, dr, sl, rr, plus the optional flags am, vib, sus, ksr, half, ksl.
+  function voice(m, c, tl, fb) {
+    const flags = (o) => (o.am ? 0x80 : 0) | (o.vib ? 0x40 : 0) | (o.sus ? 0x20 : 0) | (o.ksr ? 0x10 : 0) | o.mult;
+    return [flags(m), flags(c), ((m.ksl || 0) << 6) | tl, ((c.ksl || 0) << 6) | (c.half ? 0x10 : 0) | (m.half ? 0x08 : 0) | fb,
+      (m.ar << 4) | m.dr, (c.ar << 4) | c.dr, (m.sl << 4) | m.rr, (c.sl << 4) | c.rr];
+  }
   const VRC7_PATCHES = [
-    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
-    [0x03, 0x21, 0x05, 0x06, 0xe8, 0x81, 0x42, 0x27],
-    [0x13, 0x41, 0x14, 0x0d, 0xd8, 0xf6, 0x23, 0x12],
-    [0x11, 0x11, 0x08, 0x08, 0xfa, 0xb2, 0x20, 0x12],
-    [0x31, 0x61, 0x0c, 0x07, 0xa8, 0x64, 0x61, 0x27],
-    [0x32, 0x21, 0x1e, 0x06, 0xe1, 0x76, 0x01, 0x28],
-    [0x02, 0x01, 0x06, 0x00, 0xa3, 0xe2, 0xf4, 0xf4],
-    [0x21, 0x61, 0x1d, 0x07, 0x82, 0x81, 0x11, 0x07],
-    [0x23, 0x21, 0x22, 0x17, 0xa2, 0x72, 0x01, 0x17],
-    [0x35, 0x11, 0x25, 0x00, 0x40, 0x73, 0x72, 0x01],
-    [0xb5, 0x01, 0x0f, 0x0f, 0xa8, 0xa5, 0x51, 0x02],
-    [0x17, 0xc1, 0x24, 0x07, 0xf8, 0xf8, 0x22, 0x12],
-    [0x71, 0x23, 0x11, 0x06, 0x65, 0x74, 0x18, 0x16],
-    [0x01, 0x02, 0xd3, 0x05, 0xc9, 0x95, 0x03, 0x02],
-    [0x61, 0x63, 0x0c, 0x00, 0x94, 0xc0, 0x33, 0xf6],
-    [0x21, 0x72, 0x0d, 0x00, 0xc1, 0xd5, 0x56, 0x06],
+    null,
+    // 1 bowed strings: slow swell, vibrato, held
+    voice({ mult: 1, vib: 1, sus: 1, ar: 7, dr: 4, sl: 2, rr: 4 }, { mult: 1, vib: 1, sus: 1, ar: 7, dr: 2, sl: 1, rr: 6 }, 22, 5),
+    // 2 plucked guitar: bright attack that dies away
+    voice({ mult: 3, ksr: 1, ar: 15, dr: 5, sl: 3, rr: 4 }, { mult: 1, ar: 15, dr: 3, sl: 5, rr: 4 }, 24, 6),
+    // 3 piano: hammered, darker towards the top
+    voice({ mult: 1, ksr: 1, ar: 14, dr: 6, sl: 4, rr: 3 }, { mult: 1, ksr: 1, ksl: 1, ar: 15, dr: 3, sl: 6, rr: 5 }, 16, 3),
+    // 4 flute: soft, breathy start
+    voice({ mult: 1, vib: 1, sus: 1, ar: 6, dr: 1, sl: 3, rr: 7 }, { mult: 1, vib: 1, sus: 1, ar: 8, dr: 1, sl: 0, rr: 7 }, 34, 6),
+    // 5 clarinet: hollow (modulator an octave up, half-wave)
+    voice({ mult: 2, sus: 1, half: 1, ar: 9, dr: 2, sl: 1, rr: 6 }, { mult: 1, vib: 1, sus: 1, ar: 9, dr: 1, sl: 0, rr: 7 }, 20, 2),
+    // 6 bell: inharmonic ring
+    voice({ mult: 5, ar: 15, dr: 4, sl: 6, rr: 3 }, { mult: 1, ar: 15, dr: 2, sl: 8, rr: 2 }, 18, 0),
+    // 7 trumpet: brassy, with vibrato
+    voice({ mult: 1, vib: 1, sus: 1, ar: 8, dr: 4, sl: 3, rr: 6 }, { mult: 1, vib: 1, sus: 1, ar: 9, dr: 2, sl: 1, rr: 7 }, 14, 7),
+    // 8 organ: steady, quick on and off
+    voice({ mult: 2, sus: 1, ar: 13, dr: 0, sl: 0, rr: 8 }, { mult: 1, sus: 1, ar: 13, dr: 0, sl: 0, rr: 8 }, 26, 4),
+    // 9 celesta: soft bell
+    voice({ mult: 4, ar: 15, dr: 6, sl: 7, rr: 3 }, { mult: 2, ar: 15, dr: 3, sl: 9, rr: 3 }, 28, 1),
+    // 10 xylophone: short and woody
+    voice({ mult: 7, ar: 15, dr: 8, sl: 10, rr: 6 }, { mult: 3, ar: 15, dr: 6, sl: 12, rr: 5 }, 20, 0),
+    // 11 vibraphone: tremolo on both operators
+    voice({ mult: 1, am: 1, ar: 15, dr: 5, sl: 5, rr: 3 }, { mult: 1, am: 1, half: 1, ar: 15, dr: 3, sl: 6, rr: 3 }, 30, 2),
+    // 12 brass section: fuller and slower than the trumpet
+    voice({ mult: 1, vib: 1, sus: 1, ar: 7, dr: 5, sl: 4, rr: 5 }, { mult: 1, vib: 1, sus: 1, ar: 10, dr: 3, sl: 2, rr: 6 }, 12, 6),
+    // 13 bass: plucked low end
+    voice({ mult: 0, ksr: 1, half: 1, ar: 15, dr: 7, sl: 5, rr: 4 }, { mult: 1, sus: 1, ar: 15, dr: 4, sl: 4, rr: 5 }, 18, 5),
+    // 14 synth lead: buzzy and held
+    voice({ mult: 1, sus: 1, ar: 15, dr: 2, sl: 2, rr: 7 }, { mult: 1, sus: 1, half: 1, ar: 15, dr: 1, sl: 1, rr: 8 }, 10, 7),
+    // 15 chorus pad: slow, shimmering
+    voice({ mult: 1, am: 1, vib: 1, sus: 1, ar: 5, dr: 2, sl: 2, rr: 4 }, { mult: 2, am: 1, vib: 1, sus: 1, ar: 6, dr: 1, sl: 1, rr: 5 }, 26, 3),
   ];
   const FM_RATE = 1789773 / 36;
   const MULT = [0.5, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 12, 12, 15, 15];
-  const KSL_DB = [0, 9, 12, 13.875, 15, 16.125, 16.875, 17.625, 18, 18.75, 19.125, 19.5, 19.875, 20.25, 20.625, 21];
+  // Key-level scaling: extra attenuation for higher notes, in dB at block 7 for the
+  // top 4 bits of the frequency number: 3 dB per octave above the lowest, on
+  // the chip's 0.375 dB step (rounded up), starting at 9 dB.
+  const KSL_DB = Array.from({ length: 16 }, (_, i) => i ? Math.ceil((9 + 3 * Math.log2(i)) / 0.375 - 1e-9) * 0.375 : 0);
   const SIN = new Float64Array(4096);
   for (let i = 0; i < 4096; i++) SIN[i] = Math.sin(i * TAU / 4096);
   const DB_MAX = 48; // the envelope's range; quieter than this is silence
