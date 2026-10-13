@@ -47,7 +47,6 @@
     if (Kit.titleHas(cart, "TOP GEAR 3000") || Kit.titleHas(cart, "PLANETS CHAMP")) return 4;
     return 1;
   };
-  const lorom = (cart) => (Kit.mapMode(cart) & 0x0f) === 0 || (Kit.mapMode(cart) & 0x0f) === 2 || cart.map === "lo";
 
   // Chips that still need work (listed first so they win over the general checks).
   list.push(
@@ -55,6 +54,5 @@
     { name: "DSP-4", detect: (c) => Kit.dspKind(c) === 4 },
     { name: "ST010", detect: (c) => c.chip === 0xf6 && Kit.titleHas(c, "F1 ROC") },
     { name: "ST011", detect: (c) => c.chip === 0xf6 },
-    { name: "ST018", detect: (c) => c.chip === 0xf5 && lorom(c) && Kit.mapMode(c) !== 0x3a },
   );
 })(typeof window !== "undefined" ? window : globalThis);
