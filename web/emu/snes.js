@@ -762,8 +762,9 @@
       opts = opts || {};
       this.cart = new Cart(romIn, opts.sram);
       const chip = this.cart.special();
-      if (chip) throw new Error(`This game uses the ${chip} chip inside the cartridge, which RetroPixels' SNES emulator doesn't support yet.`);
+      if (chip && !(chip === "Super FX" && global.RPSuperFX)) throw new Error(`This game uses the ${chip} chip inside the cartridge, which RetroPixels' SNES emulator doesn't support yet.`);
       this.chip = chip;
+      this.gsu = null; // [Super FX] see snes_superfx.js
       this.pal = this.cart.pal;
       this.masterHz = this.pal ? PAL_HZ : NTSC_HZ;
       this.lines = this.pal ? 312 : 262;
@@ -781,6 +782,8 @@
       this.width = 256; this.height = 224;
       this.screen = this.ppu.frame256;
       this.out = new Float32Array(8192);
+      this.clock = 0;
+      if (chip === "Super FX") this.gsu = new global.RPSuperFX(this.cart, this, opts.sram); // [Super FX]
       this.reset();
     }
     reset() {
@@ -795,7 +798,10 @@
       this.wmadd = 0;
       this.rsPos = 0; this.prevL = 0; this.prevR = 0;
       this.cpu.reset();
+      if (this.gsu) this.gsu.reset(); // [Super FX]
     }
+    // [Super FX] the CPU's IRQ line: timer IRQ or the cartridge chip's IRQ
+    updateIrq() { this.cpu.irqLine = this.irqFlag || !!(this.gsu && this.gsu.irqOut()); }
 
     // ---------- bus ----------
     decode(addr, write, v) {
@@ -803,7 +809,10 @@
       const bank = addr >>> 16, off = addr & 0xffff;
       if (!(bank & 0x40)) {
         if (off < 0x2000) { this.cost = 8; if (write) { this.wram[off] = v; return 0; } return this.wram[off]; }
-        if (off < 0x4000) { this.cost = 6; if (off >= 0x2100 && off < 0x2200) { if (write) { this.writeB(off & 0xff, v); return 0; } return this.readB(off & 0xff); } return write ? 0 : this.mdr; }
+        if (off < 0x4000) {
+          this.cost = 6;
+          if (this.gsu && off >= 0x3000 && off < 0x3500) { if (write) { this.gsu.regWrite(off, v); return 0; } return this.gsu.regRead(off); } // [Super FX]
+          if (off >= 0x2100 && off < 0x2200) { if (write) { this.writeB(off & 0xff, v); return 0; } return this.readB(off & 0xff); } return write ? 0 : this.mdr; }
         if (off < 0x4200) { this.cost = 12; if (write) { if (off === 0x4016) this.writeStrobe(v); return 0; } return this.readSerial(off); }
         if (off < 0x6000) { this.cost = 6; if (write) { this.writeIO(off, v); return 0; } return this.readIO(off); }
         this.cost = off >= 0x8000 && (bank & 0x80) && (this.memsel & 1) ? 6 : 8;
@@ -813,6 +822,11 @@
         if (write) { this.wram[a] = v; return 0; }
         return this.wram[a];
       } else this.cost = bank >= 0xc0 && (this.memsel & 1) ? 6 : 8;
+      if (this.gsu) { // [Super FX] cartridge ROM / RAM through the chip
+        if (write) { this.gsu.snesWrite(bank, off, v); return 0; }
+        const g = this.gsu.snesRead(bank, off);
+        return g < 0 ? this.mdr : g;
+      }
       if (write) { this.cart.write(bank, off, v); return 0; }
       const r = this.cart.read(bank, off);
       return r < 0 ? this.mdr : r;
@@ -861,7 +875,7 @@
       if (off >= 0x4300 && off < 0x4380) return this.dma[off - 0x4300];
       switch (off) {
         case 0x4210: { const v = (this.nmiFlag ? 0x80 : 0) | 0x02 | (this.mdr & 0x70); this.nmiFlag = false; return v; }
-        case 0x4211: { const v = (this.irqFlag ? 0x80 : 0) | (this.mdr & 0x7f); this.irqFlag = false; this.cpu.irqLine = false; return v; }
+        case 0x4211: { const v = (this.irqFlag ? 0x80 : 0) | (this.mdr & 0x7f); this.irqFlag = false; this.updateIrq(); return v; }
         case 0x4212: {
           const pos = this.clock - this.lineStart;
           return (this.vblank ? 0x80 : 0) | (pos >= HBLANK || pos < 4 ? 0x40 : 0) | (this.clock < this.autoJoyUntil ? 1 : 0) | (this.mdr & 0x3e);
@@ -885,7 +899,7 @@
           const was = this.nmitimen;
           this.nmitimen = v;
           if (!(was & 0x80) && (v & 0x80) && this.nmiFlag && this.vblank) this.cpu.nmiPending = true;
-          if (!(v & 0x30)) { this.irqFlag = false; this.cpu.irqLine = false; }
+          if (!(v & 0x30)) { this.irqFlag = false; this.updateIrq(); }
           return;
         }
         case 0x4201: if ((this.wrio & 0x80) && !(v & 0x80)) this.ppu.latchCounters(); this.wrio = v; return;
@@ -992,6 +1006,10 @@
     // ---------- running ----------
     runTo(t) {
       const cpu = this.cpu;
+      if (this.gsu) { // [Super FX] run the chip alongside the CPU in short slices
+        while (this.clock < t) { const end = Math.min(t, this.clock + 256); while (this.clock < end) cpu.step(); this.gsu.run(this.clock); }
+        return;
+      }
       while (this.clock < t) cpu.step();
     }
     fireIrq() { this.irqFlag = true; this.cpu.irqLine = true; }
@@ -1060,11 +1078,12 @@
       a.nSamples = 0;
       return out.slice(0, k);
     }
-    getSRAM() { return this.cart.sramSize ? this.cart.sram.slice(0, this.cart.sramSize) : null; }
+    getSRAM() { if (this.gsu) return this.gsu.getSRAM(); return this.cart.sramSize ? this.cart.sram.slice(0, this.cart.sramSize) : null; }
     saveState() {
       return {
         v: 1, cpu: this.cpu.getState(), wram: this.wram.slice(), apu: this.apu.saveState(), ppu: this.ppu.saveState(), sram: this.cart.sram.slice(),
         dma: this.dma.slice(), hdma: this.hdma.map((h) => Object.assign({}, h)), joy: this.joy.slice(),
+        gsu: this.gsu ? this.gsu.saveState() : undefined, // [Super FX]
         m: [this.clock, this.frameStart, this.mdr, this.nmitimen, this.wrio, this.wrmpya, this.wrdiv, this.htime, this.vtime, this.memsel, this.hdmaen,
           this.nmiFlag ? 1 : 0, this.irqFlag ? 1 : 0, this.autoJoyUntil, this.rddiv, this.rdmpy, this.ser[0], this.ser[1], this.strobe, this.wmadd, this.rsPos, this.prevL, this.prevR],
       };
@@ -1075,6 +1094,7 @@
       const m = s.m;
       [this.clock, this.frameStart, this.mdr, this.nmitimen, this.wrio, this.wrmpya, this.wrdiv, this.htime, this.vtime, this.memsel, this.hdmaen] = m;
       this.nmiFlag = !!m[11]; this.irqFlag = !!m[12];
+      if (this.gsu && s.gsu) this.gsu.loadState(s.gsu); // [Super FX]
       [this.autoJoyUntil, this.rddiv, this.rdmpy] = m.slice(13, 16); this.ser = [m[16], m[17]]; [this.strobe, this.wmadd, this.rsPos, this.prevL, this.prevR] = m.slice(18);
     }
   }
