@@ -1457,7 +1457,7 @@
     segaMD: ["emu/m68k.js", "emu/z80.js", "emu/ym2612.js", "emu/sn76489.js", "emu/genesis_cart.js", "emu/genesis.js"],
     sms: ["emu/z80.js", "emu/sn76489.js", "emu/sms.js"],
     gba: ["emu/arm7.js", "emu/gba_gpio.js", "emu/gba.js"],
-    snes: ["emu/w65816.js", "emu/spc700.js", "emu/sdsp.js", "emu/snes_sa1.js", "emu/snes_superfx.js", "emu/snes.js", "emu/snes_chips.js", "emu/snes_dsp.js", "emu/snes_cx4.js", "emu/snes_sdd1.js", "emu/snes_spc7110.js", "emu/snes_misc.js"],
+    snes: ["emu/w65816.js", "emu/spc700.js", "emu/sdsp.js", "emu/snes_sa1.js", "emu/snes_superfx.js", "emu/snes.js", "emu/snes_chips.js", "emu/snes_necdsp.js", "emu/snes_dsp.js", "emu/snes_cx4.js", "emu/snes_sdd1.js", "emu/snes_spc7110.js", "emu/snes_misc.js"],
     n64: ["emu/n64.js"],
   };
   const loadedScripts = {};
@@ -1468,19 +1468,30 @@
     document.body.appendChild(s);
   }));
 
-  // Battery saves (the cartridge's own save memory) for RetroPixels' emulators.
+  // Battery saves (the cartridge's own save memory) for RetroPixels' emulators, and
+  // chip programs the player supplied for cartridges that need one ("firmware", keyed by chip name).
   const sramDb = new Promise((resolve, reject) => {
-    const r = indexedDB.open("retropixels-sram", 1);
-    r.onupgradeneeded = () => r.result.createObjectStore("sram");
+    const r = indexedDB.open("retropixels-sram", 2);
+    r.onupgradeneeded = () => { for (const n of ["sram", "firmware"]) if (!r.result.objectStoreNames.contains(n)) r.result.createObjectStore(n); };
     r.onsuccess = () => resolve(r.result);
     r.onerror = () => reject(r.error);
   });
-  const sramOp = (mode, fn) => sramDb.then(db => new Promise((resolve, reject) => {
-    const tx = db.transaction("sram", mode);
-    const r = fn(tx.objectStore("sram"));
+  const ownDbOp = (store, mode, fn) => sramDb.then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(store, mode);
+    const r = fn(tx.objectStore(store));
     tx.oncomplete = () => resolve(r && r.result);
     tx.onerror = () => reject(tx.error);
   }));
+  const sramOp = (mode, fn) => ownDbOp("sram", mode, fn);
+  // every stored chip program, as { "DSP-3": Uint8Array, ... }
+  async function storedFirmware() {
+    const all = {};
+    await ownDbOp("firmware", "readonly", s => {
+      const c = s.openCursor();
+      c.onsuccess = () => { const k = c.result; if (k) { all[k.key] = new Uint8Array(k.value); k.continue(); } };
+    }).catch(() => {});
+    return all;
+  }
 
   // A small .zip reader (stored and deflated files), so zipped games open directly.
   async function readZip(u8) {
@@ -1530,11 +1541,13 @@
       for (const s of ["emu/host.js", ...OWN[core]]) await loadScript(s);
       const sram = await sramOp("readonly", s => s.get(gameKey)).catch(() => null);
       player = new window.RPPlayer({
-        container: gameEl, system: core, name, sram: sram || null,
+        container: gameEl, system: core, name, sram: sram || null, firmware: await storedFirmware(),
         onSram: data => sramOp("readwrite", s => s.put(data, gameKey)).catch(() => {}),
       });
       await player.start(rom);
     } catch (e) {
+      if (player) { try { player.destroy(); } catch (x) { /* it never started */ } player = null; }
+      if (e.needsFirmware) { askFirmware(gameEl, e); return; }
       gameEl.innerHTML = `<p style="padding:24px">${esc(e.message)}</p>`;
       return;
     }
@@ -1549,6 +1562,32 @@
     // Sound can only start after a click or key press in some browsers.
     const wake = () => { const c = player.audio && player.audio.ctx; if (c && c.state === "suspended") c.resume().catch(() => {}); };
     window.addEventListener("pointerdown", wake); window.addEventListener("keydown", wake);
+  }
+
+  // A cartridge chip needs its program (e.g. DSP-3): ask for the file once, keep it, restart the game.
+  function askFirmware(gameEl, e) {
+    const need = e.needsFirmware, sizes = [need.size, ...(need.alt || [])];
+    gameEl.innerHTML = `<div id="fwPanel" style="padding:24px;max-width:560px">
+      <p>${esc(e.message)}</p>
+      <p><button class="btn" id="fwPick">Choose file…</button> <input type="file" id="fwInput" hidden></p>
+      <p class="muted">Use a copy of the chip program you dumped yourself. RetroPixels keeps it for next time.</p>
+      <p id="fwMsg" class="bad"></p></div>`;
+    const input = document.getElementById("fwInput");
+    document.getElementById("fwPick").addEventListener("click", () => input.click());
+    input.addEventListener("change", async () => {
+      const f = input.files[0];
+      input.value = "";
+      if (!f) return;
+      if (!sizes.includes(f.size)) {
+        document.getElementById("fwMsg").textContent = `"${f.name}" is ${f.size.toLocaleString()} bytes, but the ${need.chip} program (${need.file}) is ${need.size.toLocaleString()} bytes. Choose the right file.`;
+        return;
+      }
+      const data = new Uint8Array(await f.arrayBuffer());
+      try { await ownDbOp("firmware", "readwrite", s => s.put(data, need.chip)); }
+      catch (x) { toast("Couldn't keep the chip program: " + x.message, true); }
+      toast(`${need.chip} program saved — starting the game`);
+      startOwn(ownGame.core, ownGame.rom, ownGame.name);
+    });
   }
 
   // Import / export the battery save (e.g. a .srm or .sav from another emulator).

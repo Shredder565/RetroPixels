@@ -209,7 +209,8 @@
     async start(rom) {
       this.rom = rom;
       await this.audio.start().catch(() => {});
-      this.core = new this.Core(rom, { sampleRate: this.audio.rate || 48000, sram: this.opts.sram || null, name: this.opts.name });
+      // firmware: chip programs the player supplied ({ "DSP-3": bytes, ... }), for cartridges with such chips
+      this.core = new this.Core(rom, { sampleRate: this.audio.rate || 48000, sram: this.opts.sram || null, name: this.opts.name, firmware: this.opts.firmware || null });
       // Cores that run elsewhere (Nintendo 64 runs inside RetroPixels.exe) say when they're ready.
       if (this.core.ready) await this.core.ready;
       // Some games bring extra controls (tilt or light sensor keys) — the core lists them.

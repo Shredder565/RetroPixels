@@ -50,6 +50,8 @@
   const lorom = (cart) => (Kit.mapMode(cart) & 0x0f) === 0 || (Kit.mapMode(cart) & 0x0f) === 2 || cart.map === "lo";
 
   // Chips that still need work (listed first so they win over the general checks).
+  // DSP-3, DSP-4, ST010 and ST011 run in snes_necdsp.js, which puts its own
+  // entries ahead of these; these names only show if that file isn't loaded.
   list.push(
     { name: "DSP-3", detect: (c) => Kit.dspKind(c) === 3 },
     { name: "DSP-4", detect: (c) => Kit.dspKind(c) === 4 },

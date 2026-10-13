@@ -476,10 +476,18 @@
   // ===================================================================
   // ranges: { drBanks:[lo,hi], mirror, dr:[o0,o1], sr:[o2,o3] }
   class DSPChip {
-    constructor(snes, kind) {
+    constructor(snes, kind, opts) {
       this.snes = snes; this.kind = kind;
-      this.core = kind === 2 ? new DSP2Core() : new DSP1Core();
-      this.port = new DSPPort(this.core, kind !== 2);
+      // A DSP-1 / DSP-2 program supplied by the player runs on the real
+      // processor (snes_necdsp.js) instead of the high-level version.
+      const N = global.RPNECDSP, fw = N ? N.findFirmware(snes, opts, kind === 2 ? "DSP-2" : "DSP-1") : null;
+      if (fw) {
+        this.core = { reset() {}, saveState() { return null; }, loadState() {} };
+        this.port = new N.Clocked(snes, new N.NECDSP("upd7725", fw), 7600000);
+      } else {
+        this.core = kind === 2 ? new DSP2Core() : new DSP1Core();
+        this.port = new DSPPort(this.core, kind !== 2);
+      }
       const cart = snes.cart;
       // where the chip's two registers appear
       if (kind === 2) this.m = { b0: 0x20, b1: 0x3f, dr0: 0x8000, dr1: 0xbfff, sr0: 0xc000, sr1: 0xffff };
@@ -504,8 +512,8 @@
   }
 
   global.RPSNESChips.push(
-    { name: "DSP-2", detect: (c) => Kit.dspKind(c) === 2, create: (snes) => new DSPChip(snes, 2) },
-    { name: "DSP-1", detect: (c) => Kit.dspKind(c) === 1, create: (snes) => new DSPChip(snes, 1) },
+    { name: "DSP-2", detect: (c) => Kit.dspKind(c) === 2, create: (snes, opts) => new DSPChip(snes, 2, opts) },
+    { name: "DSP-1", detect: (c) => Kit.dspKind(c) === 1, create: (snes, opts) => new DSPChip(snes, 1, opts) },
   );
   // exposed for RetroPixels' own tests
   global.RPSNESDSP = { DSP1Core, DSP2Core, DSPPort, dsin, dcos, norm, normD, inv, trunc };
