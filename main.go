@@ -33,6 +33,8 @@ var webFS embed.FS
 const (
 	port    = 47821
 	appName = "RetroPixels"
+	// appVersion is shown in the app and goes in the download's name and VERSION.txt.
+	appVersion = "2.2.0"
 )
 
 var (
@@ -177,7 +179,7 @@ func newMux() *http.ServeMux {
 	indexHTML, _ := fs.ReadFile(sub, "index.html")
 	page := bytes.Replace(indexHTML,
 		[]byte("/*__RETRO_DESKTOP__*/"),
-		[]byte(fmt.Sprintf(`window.RETRO_DESKTOP = { token: %q, version: "2.0" };`, token)), 1)
+		[]byte(fmt.Sprintf(`window.RETRO_DESKTOP = { token: %q, version: %q };`, token, appVersion)), 1)
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if !hostOK[r.Host] {

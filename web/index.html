@@ -257,7 +257,7 @@
 </head>
 <body>
 <header>
-  <h1>RETRO<span>PIXELS</span></h1>
+  <h1>RETRO<span>PIXELS</span> <small id="appVersion" class="muted" style="font-size:12px;font-weight:400;letter-spacing:0"></small></h1>
   <div class="pad-status" title="Press any button on the controller if it isn't detected">
     <span class="dot" id="padDot"></span>
     <span id="padName">No controller — press any button on your Xbox controller</span>
@@ -562,6 +562,7 @@
 
   // ---------- Desktop app ----------
   const DESKTOP = window.RETRO_DESKTOP || null;
+  if (DESKTOP && DESKTOP.version) document.getElementById("appVersion").textContent = "v" + DESKTOP.version;
 
   const api = async (path, body) => {
     const res = await fetch(path, {
