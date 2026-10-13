@@ -22,8 +22,8 @@ const (
 
 type asm struct{ code []uint32 }
 
-func (a *asm) emit(w ...uint32)         { a.code = append(a.code, w...) }
-func (a *asm) lui(rt uint32, v uint16)  { a.emit(iType(0x0f, 0, rt, v)) }
+func (a *asm) emit(w ...uint32)        { a.code = append(a.code, w...) }
+func (a *asm) lui(rt uint32, v uint16) { a.emit(iType(0x0f, 0, rt, v)) }
 func (a *asm) ori(rt, rs uint32, v uint16) {
 	a.emit(iType(0x0d, rs, rt, v))
 }
