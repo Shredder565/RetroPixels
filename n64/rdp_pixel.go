@@ -29,13 +29,14 @@ type rdpPipe struct {
 	binv   [2]bool // b is 1 - a
 
 	// registers the pointers above select from
-	tex0, tex1, texN, shade, comb, cyc1 [4]int32 // texN: next pixel's TEX0
-	mem, prim, env, blend, fog          [4]int32
-	keyC, keyS, raw                     [4]int32
-	alpha, memA                         int32
-	noise, lodFrac, primLod             int32
-	k4, k5, zero, one, full             int32
-	k                                   [4]int32
+	tex0, tex1, texN, shade, cyc1 [4]int32
+	comb, combC                   [4]int32 // combiner output: 9-bit signed, and clamped // texN: next pixel's TEX0
+	mem, prim, env, blend, fog    [4]int32
+	keyC, keyS, raw               [4]int32
+	alpha, memA                   int32
+	noise, lodFrac, primLod       int32
+	k4, k5, zero, one, full       int32
+	k                             [4]int32
 
 	primZ, dz, dzEnc int32
 	tx               [8]rdpTileX
@@ -158,7 +159,7 @@ func (d *RDP) setupPipe() {
 		m1b := uint32(mo>>(24+sh)) & 3
 		m2a := uint32(mo>>(20+sh)) & 3
 		m2b := uint32(mo>>(16+sh)) & 3
-		pix := &p.comb
+		pix := &p.combC
 		if c == 1 {
 			pix = &p.cyc1
 		}
@@ -334,15 +335,23 @@ func (p *rdpPipe) ccAlpha(v uint32, mul bool) *int32 {
 	return &p.zero
 }
 
-// ccClamp folds a combiner result to 0-255 the way the 9-bit hardware does:
-// small overflows saturate, large ones (and negatives) give 0.
+// ccClamp clamps a combiner result to 0-255.
 func ccClamp(v int32) int32 {
-	v &= 0x1ff
-	if v&0x100 != 0 {
-		if v&0x80 != 0 {
-			return 0
-		}
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
 		return 255
+	}
+	return v
+}
+
+// ccWrap keeps the 9 bits the combiner carries: 0x180-0x1ff are negative,
+// 0x100-0x17f overflow above 255.
+func ccWrap(v int32) int32 {
+	v &= 0x1ff
+	if v&0x180 == 0x180 {
+		return v - 0x200
 	}
 	return v
 }
@@ -351,9 +360,12 @@ func (p *rdpPipe) combine(c int) {
 	var o [4]int32
 	a, b, m, ad := &p.ca[c], &p.cb[c], &p.cc[c], &p.cd[c]
 	for i := 0; i < 4; i++ {
-		o[i] = ccClamp(((*a[i]-*b[i])**m[i] + *ad[i]<<8 + 0x80) >> 8)
+		o[i] = ccWrap(((*a[i]-*b[i])**m[i] + *ad[i]<<8 + 0x80) >> 8)
 	}
 	p.comb = o
+	for i := 0; i < 4; i++ {
+		p.combC[i] = ccClamp(o[i])
+	}
 }
 
 // blendCycle runs one blender cycle into out.
@@ -523,6 +535,11 @@ func (d *RDP) drawSpan(y, x0, x1 int32, at *[atN]int32) {
 			if cvg == 0 {
 				continue
 			}
+			// without antialiasing only pixels whose first sample (top
+			// left corner) is covered are drawn
+			if !p.aa && (x*4 < sp.lq[0] || x*4 >= sp.rq[0]) {
+				continue
+			}
 		}
 		idx := row + uint32(x)
 
@@ -577,10 +594,10 @@ func (d *RDP) drawSpan(y, x0, x1 int32, at *[atN]int32) {
 			}
 		}
 		if p.useShade {
-			p.shade[0] = ccClamp(v[atR] >> 16)
-			p.shade[1] = ccClamp(v[atG] >> 16)
-			p.shade[2] = ccClamp(v[atB] >> 16)
-			p.shade[3] = ccClamp(v[atA] >> 16)
+			p.shade[0] = ccClamp(ccWrap(v[atR] >> 16))
+			p.shade[1] = ccClamp(ccWrap(v[atG] >> 16))
+			p.shade[2] = ccClamp(ccWrap(v[atB] >> 16))
+			p.shade[3] = ccClamp(ccWrap(v[atA] >> 16))
 		}
 		if p.useNoise {
 			p.noise = (d.noise()&7)<<6 | 0x20
@@ -593,7 +610,7 @@ func (d *RDP) drawSpan(y, x0, x1 int32, at *[atN]int32) {
 		p.combine(1)
 
 		// coverage and alpha
-		alpha := p.comb[3]
+		alpha := p.combC[3]
 		if p.cvgXA {
 			cvg = (cvg * (alpha + 1)) >> 8
 			if cvg == 0 {
@@ -770,7 +787,7 @@ func (d *RDP) copySpan(y, x0, x1 int32, at *[atN]int32) {
 	var c [4]int32
 	for x := x0; x <= x1; x, s, t = x+1, s+dsdx, t+dtdx {
 		d.sample(tx, s>>16, t>>16, false, false, p.tlutIA, &c)
-		if p.alphaCompare && c[3] == 0 {
+		if p.alphaCompare && c[3] == 0 && p.bpp != 1 {
 			continue
 		}
 		switch p.bpp {
@@ -782,8 +799,13 @@ func (d *RDP) copySpan(y, x0, x1 int32, at *[atN]int32) {
 			a := (d.Color.Addr + (row+uint32(x))*4) & (rdramSize - 4)
 			rd[a], rd[a+1], rd[a+2], rd[a+3] = byte(c[0]), byte(c[1]), byte(c[2]), byte(c[3])
 		default:
+			// 8-bit: the texel's upper byte (the index itself for CI/I)
 			a := (d.Color.Addr + row + uint32(x)) & (rdramSize - 1)
-			rd[a] = byte(c[0])
+			v := uint32(c[0]>>3)<<3 | uint32(c[1]>>3)>>2
+			if k := tx.kind; k == tkCI8 || k == tkI8 || k == tkCI4 || k == tkI4 {
+				v = uint32(c[0])
+			}
+			rd[a] = byte(v)
 		}
 	}
 }

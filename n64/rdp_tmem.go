@@ -224,17 +224,17 @@ func (d *RDP) sample(x *rdpTileX, s, t int32, filter, mid, tlutIA bool, out *[4]
 	si, ti := s>>5, t>>5
 	fs, ft := s&31, t&31
 	if x.clampS {
-		if s < 0 {
-			si, fs = 0, 0
-		} else if si >= x.maxS {
+		if si >= x.maxS {
 			si, fs = x.maxS, 0
+		} else if s < 0 {
+			si, fs = 0, 0
 		}
 	}
 	if x.clampT {
-		if t < 0 {
-			ti, ft = 0, 0
-		} else if ti >= x.maxT {
+		if ti >= x.maxT {
 			ti, ft = x.maxT, 0
+		} else if t < 0 {
+			ti, ft = 0, 0
 		}
 	}
 	if !filter || (fs == 0 && ft == 0) {
