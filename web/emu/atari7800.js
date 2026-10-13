@@ -3,8 +3,11 @@
 // 6502 ("Sally") processor, MARIA graphics chip (display-list DMA, all six
 // graphics modes, character mode, holey DMA, display-list interrupts and the
 // processor time MARIA's DMA takes), TIA sound, RIOT, POKEY sound and the
-// cartridge bank-switching schemes in the .a78 header. The console's BIOS is
-// not needed: the cartridge starts directly in 7800 mode.
+// cartridge boards the .a78 header (version 3 or 4) describes: SuperGame
+// banking with RAM, banked RAM, mirrored RAM or an extra ROM bank at $4000,
+// Absolute, Activision, bankset boards, and POKEYs at $4000, $0440, $0450
+// (two at once) or $0800. The console's BIOS is not needed: the cartridge
+// starts directly in 7800 mode.
 // Uses the TIA sound generator and RIOT from atari2600.js.
 "use strict";
 
@@ -21,7 +24,7 @@
     for (let h = 0; h < 16; h++) for (let l = 0; l < 16; l++) {
       let y = l / 15, u = 0, v = 0;
       if (h) {
-        const a = (180 - (h - 1) * 25.7) * Math.PI / 180;
+        const a = (167 - (h - 1) * 27) * Math.PI / 180; // hue 1 yellow; hue 15 near orange, not a copy of hue 1
         u = Math.cos(a) * 0.3; v = Math.sin(a) * 0.3;
         y = 0.1 + y * 0.85;
       } else y = y * 0.93;
@@ -59,11 +62,13 @@
         case 9: for (let i = 0; i < 4; i++) this.cnt[i] = this.period(i); break; // STIMER
       }
     }
-    read(r) {
+    // now: processor clocks since power-on (the random generator runs all the time)
+    read(r, now) {
       if ((r & 15) === 10) { // RANDOM
+        const t = now === undefined ? this.t : Math.floor(now);
         let v = 0;
-        if (this.audctl & 0x80) for (let i = 0; i < 8; i++) v |= P9[(this.t + i) % 511] << i;
-        else for (let i = 0; i < 8; i++) v |= P17[(this.t + i) % 131071] << i;
+        if (this.audctl & 0x80) for (let i = 0; i < 8; i++) v |= P9[(t + i) % 511] << i;
+        else for (let i = 0; i < 8; i++) v |= P17[(t + i) % 131071] << i;
         return v;
       }
       return 0xff;
@@ -125,43 +130,86 @@
   // ------------------------------------------------------------------
   // Cartridge
   // ------------------------------------------------------------------
+  // The .a78 header describes the board. Version 3 headers use the "cart
+  // type" bits at bytes 53-54; version 4 headers have separate mapper, option
+  // and audio bytes at 64-67 (and may fill the old bits with $FFFF).
   function parseCart(data) {
-    let rom = data, type = 0, name = "";
+    let rom = data, name = "";
+    const c = { mapper: "flat", ram: "", rom4000: "", pokeys: [], ym: false, souper: false, bankset: false, tv: 0, save: 0, header: false };
     if (data.length > 128 && String.fromCharCode(...data.subarray(1, 10)) === "ATARI7800") {
-      type = (data[53] << 8) | data[54];
+      c.header = true;
       for (let i = 17; i < 49 && data[i]; i++) name += String.fromCharCode(data[i]);
       rom = data.subarray(128);
+      const ver = data[0], t = (data[53] << 8) | data[54];
+      c.tv = data[57] & 1; c.save = data[58];
+      const v4 = ver >= 4 && (t === 0xffff || data[64] || data[65] || data[66] || data[67]);
+      if (v4) {
+        c.mapper = ["flat", "supergame", "activision", "absolute", "souper"][data[64]] || "flat";
+        c.ram = ["", "ram", "mram", "hram", "", "", "bankram"][data[65] & 7] || "";
+        c.rom4000 = ["", "", "", "", "rom", "bank6"][data[65] & 7] || "";
+        c.bankset = !!(data[65] & 0x80);
+        const au = data[67] & 7;
+        if (au === 1 || au === 3) c.pokeys.push(0x440);
+        if (au === 2 || au === 3) c.pokeys.push(0x450);
+        if (au === 4) c.pokeys.push(0x800);
+        if (au === 5) c.pokeys.push(0x4000);
+        c.ym = !!(data[67] & 8);
+      } else {
+        if (t & 0x0100) c.mapper = "activision";
+        else if (t & 0x0200) c.mapper = "absolute";
+        else if (t & 0x1000) c.mapper = "souper";
+        else if (t & 0x0002) c.mapper = "supergame";
+        if (t & 0x0004) c.ram = "ram";
+        if (t & 0x0020) c.ram = "bankram";
+        if (t & 0x0080) c.ram = "mram";
+        if (t & 0x4000) c.ram = "hram";
+        if (t & 0x0008) c.rom4000 = "rom";
+        if (t & 0x0010) c.rom4000 = "bank6";
+        if (t & 0x2000) c.bankset = true;
+        if (t & 0x0001) c.pokeys.push(0x4000);
+        if (t & 0x0040) c.pokeys.push(0x450);
+        if (t & 0x0400) c.pokeys.push(0x440);
+        if (t & 0x8000) c.pokeys.push(0x800);
+        c.ym = !!(t & 0x0800);
+      }
     }
     // Headerless dumps: guess from the size.
-    if (!type && rom.length > 49152) type = rom.length === 147456 ? 0x0a : 0x02;
-    return { rom, type, name: name.trim() };
+    if (!c.header && rom.length > 49152) { c.mapper = "supergame"; if (rom.length === 147456) c.rom4000 = "rom"; }
+    return { rom, c, name: name.trim() };
   }
 
   class Cart {
     constructor(data) {
-      const { rom, type } = parseCart(data);
-      this.rom = rom; this.type = type;
-      this.pokey = (type & 1) || (type & 0x40) ? new POKEY() : null;
-      this.pokeyAt = (type & 0x40) ? 0x0450 : 0x4000;
-      this.ram4000 = (type & 4) ? new Uint8Array(0x4000) : null;
+      const { rom, c } = parseCart(data);
+      if (c.mapper === "souper") throw new Error("This Atari 7800 game uses the SOUPER cartridge board, which RetroPixels doesn't support yet.");
+      this.c = c;
+      // Bankset boards hold two ROM images: the processor reads the first, MARIA the second.
+      this.rom = c.bankset ? rom.subarray(0, rom.length >> 1) : rom;
+      this.mrom = c.bankset ? rom.subarray(rom.length >> 1) : this.rom;
+      this.kind = c.mapper;
+      this.pokeys = c.pokeys.map((at) => ({ at, chip: new POKEY() }));
+      this.pokey4000 = this.pokeys.find((p) => p.at === 0x4000) || null;
+      // RAM at $4000: 16K, two switchable 16K banks, or 2K repeated through the 16K
+      this.ram4000 = c.ram === "bankram" ? new Uint8Array(0x8000) : c.ram === "mram" ? new Uint8Array(0x800) : c.ram ? new Uint8Array(0x4000) : null;
+      this.ramMask = c.ram === "mram" ? 0x7ff : 0x3fff;
+      this.ramBank = 0;
       this.bank = 0;
-      if (type & 0x0100) this.kind = "activision";
-      else if (type & 0x0200) this.kind = "absolute";
-      else if (type & 0x02) this.kind = "supergame";
-      else this.kind = "flat";
-      this.banks = rom.length >> 14;
-      this.extra = (type & 0x08) ? 1 : 0; // 144K carts: an extra first bank sits at $4000
-      if (this.kind === "flat") this.base = 0x10000 - rom.length;
+      this.banks = Math.max(1, this.rom.length >> 14);
+      this.extra = c.rom4000 === "rom" ? 1 : 0; // 144K boards: an extra first bank sits at $4000
+      if (this.kind === "flat") this.base = 0x10000 - this.rom.length;
+      this.now = () => 0; // set by the console: processor clocks so far
+      this.guessRam = this.kind === "supergame" && !this.ram4000 && !this.extra && !this.pokey4000 && c.rom4000 !== "bank6";
     }
-    read(a) {
-      const rom = this.rom;
-      if (this.pokey && this.pokeyAt === 0x4000 && a < 0x8000 && !this.ram4000) return this.pokey.read(a);
+    // a: $4000-$FFFF; maria: read by MARIA's DMA (bankset boards show it the second ROM)
+    read(a, maria) {
+      if (this.pokey4000 && a < 0x8000 && !this.ram4000) return this.pokey4000.chip.read(a, this.now());
+      if (this.ram4000 && a < 0x8000) return this.ram4000[(this.ramBank << 14) | (a & this.ramMask)];
+      const rom = maria ? this.mrom : this.rom;
       switch (this.kind) {
         case "flat": return a >= this.base ? rom[a - this.base] : 0xff;
         case "supergame": {
           if (a >= 0xc000) return rom[(this.banks - 1) * 0x4000 + (a - 0xc000)];
           if (a >= 0x8000) return rom[((this.bank + this.extra) % this.banks) * 0x4000 + (a - 0x8000)];
-          if (this.ram4000) return this.ram4000[a - 0x4000];
           if (this.extra) return rom[a - 0x4000];
           return rom[Math.max(0, this.banks - 2) * 0x4000 + (a - 0x4000)];
         }
@@ -183,21 +231,37 @@
       return 0xff;
     }
     write(a, v) {
-      if (this.pokey && this.pokeyAt === 0x4000 && a < 0x8000 && !this.ram4000) { this.pokey.write(a, v); return; }
-      // Some SuperGame dumps don't flag their $4000 RAM; a write there means it's present.
-      if (!this.ram4000 && this.kind === "supergame" && a < 0x8000 && !this.extra) {
-        this.ram4000 = new Uint8Array(0x4000);
+      if (this.pokey4000 && a < 0x8000 && !this.ram4000) { this.pokey4000.chip.write(a, v); return; }
+      // Some SuperGame dumps don't say they have RAM at $4000; a write there means it's present.
+      if (!this.ram4000 && this.guessRam && a < 0x8000) {
+        this.ram4000 = new Uint8Array(0x4000); this.ramMask = 0x3fff;
         for (let i = 0; i < 0x4000; i++) this.ram4000[i] = this.read(0x4000 + i);
       }
-      if (this.ram4000 && a < 0x8000) { this.ram4000[a - 0x4000] = v; return; }
+      if (this.ram4000 && a < 0x8000) { this.ram4000[(this.ramBank << 14) | (a & this.ramMask)] = v; return; }
       switch (this.kind) {
-        case "supergame": if (a >= 0x8000 && a < 0xc000) this.bank = v & 0xff; return;
+        case "supergame":
+          if (a >= 0x8000 && a < 0xc000) {
+            if (this.c.ram === "bankram") { this.ramBank = (v >> 5) & 1; this.bank = v & 0x1f; } else this.bank = v;
+          }
+          return;
         case "activision": if (a >= 0xff80 && a <= 0xff8f) this.bank = a & 7; return;
         case "absolute": if (a === 0x8000) { if (v & 1) this.bank = 0; else if (v & 2) this.bank = 1; } return;
       }
     }
-    saveState() { return { bank: this.bank, ram4000: this.ram4000, pokey: this.pokey ? this.pokey.saveState() : null }; }
-    loadState(o) { this.bank = o.bank; if (o.ram4000) { if (!this.ram4000) this.ram4000 = new Uint8Array(0x4000); this.ram4000.set(o.ram4000); } if (this.pokey && o.pokey) this.pokey.loadState(o.pokey); }
+    // POKEYs in the $0400-$0FFF area
+    ioChip(a) {
+      for (const p of this.pokeys) if (p.at !== 0x4000 && a >= p.at && a < p.at + 16) return p.chip;
+      return null;
+    }
+    saveState() {
+      return { bank: this.bank, ramBank: this.ramBank, ram4000: this.ram4000, pokeys: this.pokeys.map((p) => p.chip.saveState()) };
+    }
+    loadState(o) {
+      this.bank = o.bank; this.ramBank = o.ramBank || 0;
+      if (o.ram4000) { if (!this.ram4000 || this.ram4000.length !== o.ram4000.length) this.ram4000 = new Uint8Array(o.ram4000.length); this.ram4000.set(o.ram4000); this.ramMask = o.ram4000.length === 0x800 ? 0x7ff : 0x3fff; }
+      const ps = o.pokeys || (o.pokey ? [o.pokey] : []);
+      ps.forEach((st, i) => { if (this.pokeys[i] && st) this.pokeys[i].chip.loadState(st); });
+    }
   }
 
   // ------------------------------------------------------------------
@@ -216,6 +280,7 @@
     }
     init() {
       this.cart = new Cart(this.data);
+      this.clk = 0; this.cart.now = () => this.clk / 4;
       this.ram = new Uint8Array(0x1000);
       for (let i = 0; i < this.ram.length; i++) this.ram[i] = (i * 151 + 7) & 0xff;
       this.riot = new global.RPAtari.RIOT();
@@ -244,12 +309,13 @@
     }
     // time passing (sound, timer) — also while MARIA holds the processor
     pass(c) {
-      this.mclk += c;
+      this.mclk += c; this.clk += c;
       this.audClk += c;
       while (this.audClk >= 228) {
         this.audClk -= 228;
         this.sound.tick();
-        if (this.cart.pokey) this.sound.raw[this.sound.rawLen - 1] += this.cart.pokey.run(57) * 0.9;
+        const pk = this.cart.pokeys;
+        for (let i = 0; i < pk.length; i++) this.sound.raw[this.sound.rawLen - 1] += pk[i].chip.run(57) * (pk.length > 1 ? 0.6 : 0.9);
       }
       this.riotFrac += c;
       while (this.riotFrac >= 4) { this.riotFrac -= 4; this.riot.tick(); }
@@ -400,7 +466,7 @@
     // read without side effects or time (MARIA's DMA)
     peek(a) {
       a &= 0xffff;
-      if (a >= 0x4000) return this.cart.read(a);
+      if (a >= 0x4000) return this.cart.read(a, true);
       if (a >= 0x1800) return a < 0x2800 ? this.ram[a - 0x1800] : this.ram[0x800 + (a & 0x7ff)];
       if (a < 0x400) {
         const lo = a & 0xff;
@@ -423,10 +489,11 @@
           return this.ram[0x800 + (a & 0x1ff)];
         }
         if (a >= 0x280 && a < 0x300) return this.riot.read(a);
-        if (this.cart.pokey && this.cart.pokeyAt === 0x450 && a >= 0x450 && a < 0x460) return this.cart.pokey.read(a);
         return 0;
       }
       if (a >= 0x480 && a < 0x500) return this.riot.ram[a & 0x7f];
+      const chip = this.cart.ioChip(a);
+      if (chip) return chip.read(a, this.clk / 4);
       return 0;
     }
     write(a, v) {
@@ -442,10 +509,11 @@
           this.ram[0x800 + (a & 0x1ff)] = v; return;
         }
         if (a >= 0x280 && a < 0x300) { this.riot.write(a, v); return; }
-        if (this.cart.pokey && this.cart.pokeyAt === 0x450 && a >= 0x450 && a < 0x460) this.cart.pokey.write(a, v);
         return;
       }
-      if (a >= 0x480 && a < 0x500) this.riot.ram[a & 0x7f] = v;
+      if (a >= 0x480 && a < 0x500) { this.riot.ram[a & 0x7f] = v; return; }
+      const chip = this.cart.ioChip(a);
+      if (chip) chip.write(a, v);
     }
     mariaRead(r) {
       if (r === 0x28) return this.vblank() ? 0x80 : 0;

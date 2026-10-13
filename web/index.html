@@ -300,6 +300,9 @@
       <button class="sys" data-core="segaMD" aria-pressed="false">
         <strong>Sega Genesis</strong><small>.md .gen .smd .bin</small>
       </button>
+      <button class="sys" data-core="sms" aria-pressed="false">
+        <strong>Master System</strong><small>.sms</small>
+      </button>
       <button class="sys" data-core="atari2600" aria-pressed="false">
         <strong>Atari 2600</strong><small>.a26 .bin</small>
       </button>
@@ -315,7 +318,7 @@
       <p style="margin-top:16px">
         <button class="btn" id="pickBtn">Choose game file…</button>
         <input type="file" id="fileInput" hidden
-               accept=".nes,.fds,.unf,.unif,.sfc,.smc,.fig,.swc,.gb,.gbc,.gba,.agb,.z64,.n64,.v64,.md,.gen,.smd,.bin,.a26,.a78,.zip">
+               accept=".nes,.fds,.unf,.unif,.sfc,.smc,.fig,.swc,.gb,.gbc,.gba,.agb,.z64,.n64,.v64,.md,.gen,.smd,.sms,.bin,.a26,.a78,.zip">
       </p>
       <p class="muted" id="msg"></p>
     </div>
@@ -521,6 +524,7 @@
     gba:  { label: "Game Boy Advance", exts: ["gba", "agb"] },
     n64:       { label: "Nintendo 64",  exts: ["z64", "n64", "v64"] },
     segaMD:    { label: "Sega Genesis", exts: ["md", "gen", "smd"] },
+    sms:       { label: "Master System", exts: ["sms"] },
     atari2600: { label: "Atari 2600",   exts: ["a26"] },
     atari7800: { label: "Atari 7800",   exts: ["a78"] },
   };
@@ -1448,9 +1452,10 @@
   const OWN = {
     nes: ["emu/cpu6502.js", "emu/nes.js"],
     gb: ["emu/gb.js"],
-    atari2600: ["emu/cpu6502.js", "emu/atari2600.js"],
+    atari2600: ["emu/cpu6502.js", "emu/arm7.js", "emu/atari2600_carts.js", "emu/atari2600_dpcplus.js", "emu/atari2600.js"],
     atari7800: ["emu/cpu6502.js", "emu/atari2600.js", "emu/atari7800.js"],
-    segaMD: ["emu/m68k.js", "emu/z80.js", "emu/ym2612.js", "emu/genesis.js"],
+    segaMD: ["emu/m68k.js", "emu/z80.js", "emu/ym2612.js", "emu/sn76489.js", "emu/genesis_cart.js", "emu/genesis.js"],
+    sms: ["emu/z80.js", "emu/sn76489.js", "emu/sms.js"],
     gba: ["emu/arm7.js", "emu/gba.js"],
     snes: ["emu/w65816.js", "emu/spc700.js", "emu/sdsp.js", "emu/snes_sa1.js", "emu/snes_superfx.js", "emu/snes.js", "emu/snes_chips.js", "emu/snes_dsp.js", "emu/snes_cx4.js", "emu/snes_sdd1.js", "emu/snes_spc7110.js", "emu/snes_misc.js"],
     n64: ["emu/n64.js"],
@@ -1511,9 +1516,10 @@
   function guessBin(u8) {
     if (u8.length > 128 && String.fromCharCode(...u8.subarray(1, 10)) === "ATARI7800") return "atari7800";
     if (u8.length > 0x104 && String.fromCharCode(...u8.subarray(0x100, 0x104)) === "SEGA") return "segaMD";
+    if (u8.length >= 0x8000 && [0x1ff0, 0x3ff0, 0x7ff0].some(o => o + 8 <= u8.length && String.fromCharCode(...u8.subarray(o, o + 8)) === "TMR SEGA")) return "sms";
     return u8.length <= 65536 ? "atari2600" : "segaMD";
   }
-  const BIN_SYSTEMS = ["segaMD", "atari2600", "atari7800"];
+  const BIN_SYSTEMS = ["segaMD", "sms", "atari2600", "atari7800"];
 
   let player = null, ownGame = null;
   async function startOwn(core, rom, name) {

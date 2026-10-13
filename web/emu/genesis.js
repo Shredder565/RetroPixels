@@ -1,10 +1,11 @@
 // RetroPixels — Sega Genesis / Mega Drive emulator. Original code.
 //
 // Machine: Motorola 68000 (RPM68K), Zilog Z80 sound CPU (RPZ80), Yamaha YM2612
-// FM (RPYM2612), SN76489-compatible PSG, and the Sega VDP (planes A/B, window,
+// FM (RPYM2612), SN76489-compatible PSG (RPSN76489), and the Sega VDP (planes A/B, window,
 // sprites, shadow/highlight, DMA, interlace), written from the documented
-// hardware behaviour. Cartridge battery saves, the >2 MB SRAM switch and the
-// Super Street Fighter II bank mapper are supported; pads are 6-button.
+// hardware behaviour. The cartridge hardware (battery saves, EEPROMs, bank
+// mappers, J-Cart) is in genesis_cart.js. Pads are 6-button, or 3-button for
+// games that need it (or when Mode is held at power-on).
 "use strict";
 
 (function (global) {
@@ -19,57 +20,7 @@
   const LV_S = [0, 29, 52, 70, 87, 101, 116, 130];
   const LV_H = [130, 144, 158, 172, 187, 206, 228, 255];
 
-  // ===================================================================
-  // PSG (SN76489 compatible)
-  // ===================================================================
-  class PSG {
-    constructor() {
-      this.vol = new Float32Array(16);
-      for (let i = 0; i < 15; i++) this.vol[i] = Math.pow(10, -i * 2 / 20);
-      this.reg = new Uint16Array(8); this.cnt = new Int32Array(4); this.pol = new Int8Array(4);
-      this.reset();
-    }
-    reset() {
-      this.reg.fill(0); for (let c = 0; c < 4; c++) this.reg[c * 2 + 1] = 15;
-      this.cnt.fill(0); this.pol.fill(1); this.lfsr = 0x8000; this.latch = 0;
-    }
-    write(v) {
-      if (v & 0x80) {
-        this.latch = (v >> 4) & 7;
-        const r = this.latch;
-        if (r & 1) this.reg[r] = v & 15;
-        else if (r === 6) { this.reg[6] = v & 7; this.lfsr = 0x8000; }
-        else this.reg[r] = (this.reg[r] & 0x3f0) | (v & 15);
-      } else {
-        const r = this.latch;
-        if (r & 1) this.reg[r] = v & 15;
-        else if (r === 6) { this.reg[6] = v & 7; this.lfsr = 0x8000; }
-        else this.reg[r] = (this.reg[r] & 15) | ((v & 0x3f) << 4);
-      }
-    }
-    // Advance one step; returns the mixed output.
-    step() {
-      let out = 0;
-      for (let c = 0; c < 3; c++) {
-        const per = this.reg[c * 2];
-        if (--this.cnt[c] <= 0) { this.cnt[c] = per; this.pol[c] = -this.pol[c]; }
-        out += (per <= 1 ? 1 : this.pol[c]) * this.vol[this.reg[c * 2 + 1]];
-      }
-      const nr = this.reg[6] & 3, nper = nr === 3 ? this.reg[4] : 0x10 << nr;
-      if (--this.cnt[3] <= 0) {
-        this.cnt[3] = nper;
-        this.pol[3] = -this.pol[3];
-        if (this.pol[3] > 0) {
-          const fb = (this.reg[6] & 4) ? ((this.lfsr ^ (this.lfsr >> 3)) & 1) : (this.lfsr & 1);
-          this.lfsr = (this.lfsr >> 1) | (fb << 15);
-        }
-      }
-      out += ((this.lfsr & 1) ? 1 : -1) * this.vol[this.reg[7]] * 0.5;
-      return out;
-    }
-    saveState() { return { reg: this.reg.slice(), cnt: this.cnt.slice(), pol: this.pol.slice(), lfsr: this.lfsr, latch: this.latch }; }
-    loadState(o) { this.reg.set(o.reg); this.cnt.set(o.cnt); this.pol.set(o.pol); this.lfsr = o.lfsr; this.latch = o.latch; }
-  }
+  const PSG = global.RPSN76489; // the sound chip the Genesis shares with the Master System (sn76489.js)
 
   // ===================================================================
   // VDP
@@ -431,80 +382,6 @@
 
 
   // ===================================================================
-  // Serial (I2C) EEPROM used by a few cartridges for saves
-  // ===================================================================
-  class EEPROM {
-    constructor(size, x24c01, page) {
-      this.mem = new Uint8Array(size).fill(0xff);
-      this.mask = size - 1; this.x24c01 = x24c01; this.pageMask = page - 1;
-      this.scl = 1; this.sda = 1; this.out = 1; this.phase = 0; this.cnt = 0; this.shift = 0; this.addr = 0; this.hi = 0;
-    }
-    // phases: 0 idle, 1 address (24C01), 2 device, 3 word address, 4 write data, 5 read
-    set(scl, sda) {
-      if (scl && this.scl) {
-        if (this.sda && !sda) { this.phase = this.x24c01 ? 1 : 2; this.cnt = 0; this.shift = 0; this.out = 1; }
-        else if (!this.sda && sda) { this.phase = 0; this.out = 1; }
-      } else if (!this.scl && scl) this.rise(sda);
-      else if (this.scl && !scl) this.fall();
-      this.scl = scl; this.sda = sda;
-    }
-    rise(sda) {
-      const ph = this.phase;
-      if (!ph) return;
-      if (ph === 5) {
-        if (this.cnt < 8) this.cnt++;
-        else if (sda) this.phase = 0;
-        else { this.addr = (this.addr + 1) & this.mask; this.cnt = 0; }
-        return;
-      }
-      if (this.cnt < 8) { this.shift = ((this.shift << 1) | sda) & 0xff; this.cnt++; return; }
-      this.cnt = 0;
-      const b = this.shift; this.shift = 0;
-      switch (ph) {
-        case 1: this.addr = (b >> 1) & this.mask; this.phase = (b & 1) ? 5 : 4; break;
-        case 2:
-          if ((b & 0xf0) !== 0xa0) { this.phase = 0; break; }
-          this.hi = ((b >> 1) & 7) << 8;
-          if (b & 1) { this.addr = (this.hi | (this.addr & 0xff)) & this.mask; this.phase = 5; } else this.phase = 3;
-          break;
-        case 3: this.addr = (this.hi | b) & this.mask; this.phase = 4; break;
-        case 4:
-          this.mem[this.addr] = b; this.dirty = true;
-          this.addr = (this.addr & ~this.pageMask) | ((this.addr + 1) & this.pageMask);
-          break;
-      }
-    }
-    fall() {
-      const ph = this.phase;
-      if (ph === 5) this.out = this.cnt < 8 ? (this.mem[this.addr] >> (7 - this.cnt)) & 1 : 1;
-      else if (ph) this.out = this.cnt === 8 ? 0 : 1;
-      else this.out = 1;
-    }
-    saveState() { return { mem: this.mem.slice(), r: [this.scl, this.sda, this.out, this.phase, this.cnt, this.shift, this.addr, this.hi] }; }
-    loadState(o) { this.mem.set(o.mem); [this.scl, this.sda, this.out, this.phase, this.cnt, this.shift, this.addr, this.hi] = o.r; }
-  }
-  // Which cartridges use one, and how it's wired:
-  //  sda / scl = [address, bit] the game writes; out = [address, bit] it reads back.
-  const SEGA_WIRING = { sda: [0x200001, 0], scl: [0x200001, 1], out: [0x200001, 0] };
-  const ACCLAIM32 = { sda: [0x200001, 0], scl: [0x200000, 0], out: [0x200001, 0] };
-  const ACCLAIM16 = { sda: [0x200001, 0], scl: [0x200001, 1], out: [0x200001, 1] };
-  const EEPROM_GAMES = {
-    "T-81406": [ACCLAIM32, 512, false, 16],   // NBA Jam Tournament Edition
-    "T-081326": [ACCLAIM16, 256, false, 4],   // NBA Jam
-    "T-81033": [ACCLAIM16, 256, false, 4],    // NBA Jam (Japan)
-    "T-081276": [ACCLAIM32, 256, false, 4],   // NFL Quarterback Club
-    "T-81476": [ACCLAIM32, 2048, false, 16],  // Frank Thomas Big Hurt Baseball
-    "T-81576": [ACCLAIM32, 2048, false, 16],  // College Slam
-    "T-081586": [ACCLAIM32, 2048, false, 16], // NFL Quarterback Club 96
-  };
-  function eepromFor(rom) {
-    const serial = String.fromCharCode(...rom.subarray(0x183, 0x18b)).trim().split(" ")[0];
-    if (EEPROM_GAMES[serial]) return EEPROM_GAMES[serial];
-    if (rom[0x1b0] === 0x52 && rom[0x1b1] === 0x41 && rom[0x1b2] === 0xe8 && rom[0x1b3] === 0x40) return [SEGA_WIRING, 128, true, 4];
-    return null;
-  }
-
-  // ===================================================================
   // Cartridge helpers
   // ===================================================================
   function prepareRom(u8) {
@@ -558,28 +435,10 @@
 
       this.ram = new Uint8Array(0x10000);
       this.zram = new Uint8Array(0x2000);
-      // cartridge save memory (0x200000-0x20FFFF)
-      this.sram = new Uint8Array(0x10000).fill(0xff);
-      const hasRA = rom[0x1b0] === 0x52 && rom[0x1b1] === 0x41;
-      this.sramStart = 0x200000; this.sramEnd = 0x20ffff;
-      if (hasRA) {
-        const st = ((rom[0x1b4] << 24) | (rom[0x1b5] << 16) | (rom[0x1b6] << 8) | rom[0x1b7]) >>> 0;
-        const en = ((rom[0x1b8] << 24) | (rom[0x1b9] << 16) | (rom[0x1ba] << 8) | rom[0x1bb]) >>> 0;
-        if (st >= 0x200000 && st < 0x400000 && en >= st) { this.sramStart = st & ~1; this.sramEnd = Math.min(en | 1, this.sramStart + 0xffff); }
-      }
-      this.hasSaveHeader = hasRA;
-      this.sramMapped = realSize <= 0x200000; // bigger games switch it in through 0xA130F1
-      this.sramUsed = hasRA;
-      if (opts.sram && opts.sram.length) { this.sram.set(opts.sram.subarray(0, 0x10000)); this.sramUsed = true; }
-      this.ssf2 = realSize > 0x400000;
-      const ee = eepromFor(rom);
-      if (ee) {
-        this.eeWire = ee[0]; this.eeprom = new EEPROM(ee[1], ee[2], ee[3]);
-        this.sramMapped = false; this.sramUsed = true;
-        if (opts.sram && opts.sram.length) this.eeprom.mem.set(opts.sram.subarray(0, ee[1]));
-      }
-      this.banks = new Uint8Array(8); for (let i = 0; i < 8; i++) this.banks[i] = i;
-
+      this.input = [0, 0, 0, 0];
+      // the cartridge: save memory, EEPROM, mappers, J-Cart (genesis_cart.js)
+      this.cart = new global.RPGenesisCart.Cart(rom, realSize, opts.sram, (p) => this.input[p] || 0);
+      this.three = [this.cart.threeButton, this.cart.threeButton]; // pads acting as 3-button pads
       this.vdp = new VDP(this);
       this.ym = new global.RPYM2612();
       this.psg = new PSG();
@@ -597,7 +456,6 @@
 
       this.width = 320; this.height = 224;
       this.screen = new Uint32Array(320 * 480);
-      this.input = [0, 0];
       this.audioL = new Float32Array(2048); this.audioR = new Float32Array(2048); this.audioN = 0;
       this.outBuf = new Float32Array(8192);
       this.reset(true);
@@ -606,12 +464,13 @@
     reset(hard) {
       if (hard) { this.ram.fill(0); this.zram.fill(0); }
       this.vdp.reset(); this.ym.reset(); this.psg.reset(); this.z80.reset();
+      this.cart.reset();
       this.ioData = new Uint8Array([0x7f, 0x7f, 0x7f]); this.ioCtrl = new Uint8Array(3);
       this.thCount = new Uint8Array(2); this.thTime = [0, 0];
       this.busReq = 0; this.zReset = 1; this.zBank = 0;
       this.mclk = 0; this.zc = 0; this.ymNext = YM_CLKS; this.psgAcc = 0;
       this.line = 0; this.lineStart = 0; this.vblank = false; this.hvLatch = -1;
-      this.frame = 0; this.rsPos = 0; this.prevL = 0; this.prevR = 0; this.lpL = 0; this.lpR = 0;
+      this.frame = 0; this.bootFrames = 3; this.rsPos = 0; this.prevL = 0; this.prevR = 0; this.lpL = 0; this.lpR = 0;
       this.cpu.cycles = 0;
       this.cpu.reset();
       this.cpu.cycles = 0;
@@ -628,7 +487,7 @@
     }
     dmaRead(a) {
       a &= 0xfffffe;
-      if (a < 0x400000) return this.romWord(a);
+      if (a < 0x400000) return this.cart.read16(a);
       if (a >= 0xe00000) { a &= 0xffff; return (this.ram[a] << 8) | this.ram[a + 1]; }
       return 0;
     }
@@ -667,40 +526,6 @@
     ymRead(t) { this.syncAudio(t); return this.ym.readStatus(); }
     psgWrite(v, t) { this.syncAudio(t); this.psg.write(v); }
 
-    // ---- cartridge ----
-    romWord(a) {
-      if (this.eeprom && a === (this.eeWire.out[0] & ~1)) return (this.romByte(a) << 8) | this.romByte(a + 1);
-      if (a >= this.sramStart && a <= this.sramEnd && this.sramMapped) { const o = a - 0x200000; return (this.sram[o] << 8) | this.sram[o + 1]; }
-      if (this.ssf2) a = (this.banks[a >> 19] << 19) | (a & 0x7ffff);
-      a &= this.rom.length - 1;
-      return (this.rom[a] << 8) | this.rom[a + 1];
-    }
-    romByte(a) {
-      if (this.eeprom && (a & ~1) === (this.eeWire.out[0] & ~1)) {
-        const w = this.eeWire.out;
-        return a === w[0] ? (this.eeprom.out & this.eeprom.sda) << w[1] : 0;
-      }
-      if (a >= this.sramStart && a <= this.sramEnd && this.sramMapped) return this.sram[a - 0x200000];
-      if (this.ssf2) a = (this.banks[a >> 19] << 19) | (a & 0x7ffff);
-      return this.rom[a & (this.rom.length - 1)];
-    }
-    sramWrite(a, v) {
-      if (this.eeprom) {
-        const w = this.eeWire;
-        if (a === w.sda[0] || a === w.scl[0]) {
-          const e = this.eeprom;
-          const sda = a === w.sda[0] ? (v >> w.sda[1]) & 1 : e.sda;
-          const scl = a === w.scl[0] ? (v >> w.scl[1]) & 1 : e.scl;
-          e.set(scl, sda);
-        }
-        return;
-      }
-      if (a >= this.sramStart && a <= this.sramEnd && this.sramMapped && !this.sramProtect) {
-        const o = a - 0x200000;
-        if (this.sram[o] !== v) { this.sram[o] = v; this.sramUsed = true; }
-      }
-    }
-
     // ---- I/O (pads) ----
     padRead(p) {
       const ctrl = this.ioCtrl[p], data = this.ioData[p];
@@ -709,7 +534,7 @@
         const b = this.input[p] || 0;
         const th = (ctrl & 0x40) ? (data & 0x40) : 0x40;
         this.thTimeout(p);
-        const c = this.thCount[p];
+        const c = this.three[p] ? 0 : this.thCount[p];
         const on = (n) => (b & BIT[n] ? 0 : 1);
         if (th) {
           if (c === 3) v = 0x40 | (on("C") << 5) | (on("B") << 4) | (on("Mode") << 3) | (on("X") << 2) | (on("Y") << 1) | on("Z");
@@ -773,7 +598,7 @@
     // ---- 68000 side ----
     read8(a) {
       a &= 0xffffff;
-      if (a < 0x400000) return this.romByte(a);
+      if (a < 0x400000) return this.cart.read8(a);
       if (a >= 0xe00000) return this.ram[a & 0xffff];
       if (a >= 0xc00000 && a < 0xe00000) {
         if ((a & 0xe700e0) !== 0xc00000) return 0xff;
@@ -794,7 +619,7 @@
     }
     read16(a) {
       a &= 0xfffffe;
-      if (a < 0x400000) return this.romWord(a);
+      if (a < 0x400000) return this.cart.read16(a);
       if (a >= 0xe00000) { a &= 0xffff; return (this.ram[a] << 8) | this.ram[a + 1]; }
       if (a >= 0xc00000 && a < 0xe00000) { if ((a & 0xe700e0) !== 0xc00000) return 0xffff; return this.vdpRead(a & 0x1e); }
       if (a >= 0xa00000 && a < 0xa10000) { const b = this.read8(a); return (b << 8) | b; }
@@ -805,7 +630,8 @@
     write8(a, v) {
       a &= 0xffffff; v &= 0xff;
       if (a >= 0xe00000) { this.ram[a & 0xffff] = v; return; }
-      if (a < 0x400000) { this.sramWrite(a, v); return; }
+      if (a < 0x400000) { this.cart.write8(a, v); return; }
+      if (a < 0x800000) { this.cart.highWrite(a, v); return; }
       if (a >= 0xc00000 && a < 0xe00000) {
         if ((a & 0xe700e0) !== 0xc00000) return;
         const r = a & 0x1f;
@@ -825,10 +651,7 @@
       if (a >= 0xa10000 && a < 0xa10020) { if (a & 1) this.ioWrite((a >> 1) & 0xf, v); return; }
       if (a === 0xa11100) { this.setBusReq(v & 1); return; }
       if (a === 0xa11200) { this.setZReset(!(v & 1)); return; }
-      if (a >= 0xa130f0 && a < 0xa13100) {
-        if (a === 0xa130f1) { this.sramMapped = (v & 1) !== 0 || this.romSize <= 0x200000; this.sramProtect = (v & 2) !== 0; }
-        else if (this.ssf2 && (a & 1)) this.banks[(a & 0xf) >> 1] = v & 0x3f;
-      }
+      if (a >= 0xa13000 && a < 0xa13100) this.cart.timeWrite(a, v);
     }
     write16(a, v) {
       a &= 0xfffffe; v &= 0xffff;
@@ -840,10 +663,7 @@
         this.vdpWrite(r & 0x1e, v);
         return;
       }
-      if (a < 0x400000) {
-        if (this.eeprom) { this.eeWrite16(a, v); return; }
-        this.sramWrite(a, v >> 8); this.sramWrite(a + 1, v & 0xff); return;
-      }
+      if (a < 0x400000) { this.cart.write16(a, v); return; }
       if (a >= 0xa00000 && a < 0xa10000) { this.write8(a, v >> 8); return; }
       if (a >= 0xa10000 && a < 0xa10020) { this.ioWrite((a >> 1) & 0xf, v & 0xff); return; }
       if (a === 0xa11100) { this.setBusReq((v >> 8) & 1); return; }
@@ -879,6 +699,8 @@
     }
     runFrame() {
       const vdp = this.vdp;
+      // Holding Mode while switching on makes a 6-button pad act as a 3-button one (for games that misread it).
+      if (this.bootFrames > 0) { this.bootFrames--; for (let p = 0; p < 2; p++) if (this.input[p] & BIT.Mode) this.three[p] = true; }
       const H = vdp.lines, total = this.linesPerFrame;
       if (vdp.reg[12] & 2) vdp.odd ^= 1; else vdp.odd = 0;
       const im2 = vdp.im2;
@@ -931,41 +753,34 @@
       this.audioN = 0;
       return out.slice(0, k);
     }
-    eeWrite16(a, v) {
-      const w = this.eeWire, e = this.eeprom;
-      let sda = e.sda, scl = e.scl, hit = false;
-      for (const [ad, b] of [[a, v >> 8], [a + 1, v & 0xff]]) {
-        if (ad === w.sda[0]) { sda = (b >> w.sda[1]) & 1; hit = true; }
-        if (ad === w.scl[0]) { scl = (b >> w.scl[1]) & 1; hit = true; }
-      }
-      if (hit) e.set(scl, sda);
-    }
-    getSRAM() { if (this.eeprom) return this.eeprom.mem.slice(); return this.sramUsed ? this.sram.slice(0, Math.max(0x4000, this.sramEnd - 0x200000 + 1)) : null; }
+    getSRAM() { return this.cart.getSRAM(); }
 
     saveState() {
       return {
         v: 1, cpu: this.cpu.saveState(), z80: this.z80.getState(), vdp: this.vdp.saveState(), ym: this.ym.saveState(), psg: this.psg.saveState(),
-        ram: this.ram.slice(), zram: this.zram.slice(), sram: this.sram.slice(), banks: this.banks.slice(),
+        ram: this.ram.slice(), zram: this.zram.slice(), cart: this.cart.saveState(), three: this.three.slice(),
         ioData: this.ioData.slice(), ioCtrl: this.ioCtrl.slice(), thCount: this.thCount.slice(),
-        m: [this.busReq, this.zReset, this.zBank, this.mclk, this.zc, this.ymNext, this.psgAcc, this.sramMapped ? 1 : 0, this.sramProtect ? 1 : 0,
+        m: [this.busReq, this.zReset, this.zBank, this.mclk, this.zc, this.ymNext, this.psgAcc, 0, 0,
           this.hvLatch, this.frame, this.rsPos, this.lpL, this.lpR, this.prevL, this.prevR],
-        thTime: this.thTime.slice(), ee: this.eeprom ? this.eeprom.saveState() : null,
+        thTime: this.thTime.slice(),
       };
     }
     loadState(s) {
       this.cpu.loadState(s.cpu); this.z80.setState(s.z80); this.vdp.loadState(s.vdp); this.ym.loadState(s.ym); this.psg.loadState(s.psg);
-      this.ram.set(s.ram); this.zram.set(s.zram); this.sram.set(s.sram); this.banks.set(s.banks);
+      this.ram.set(s.ram); this.zram.set(s.zram);
+      if (s.cart) this.cart.loadState(s.cart);
+      else this.cart.loadState({ sram: s.sram, banks: s.banks, m: [s.m[7], s.m[8], 0], ee: s.ee }); // states from before genesis_cart.js
+      if (s.three) this.three = s.three.slice();
       this.ioData.set(s.ioData); this.ioCtrl.set(s.ioCtrl); this.thCount.set(s.thCount); this.thTime = s.thTime.slice();
       [this.busReq, this.zReset, this.zBank, this.mclk, this.zc, this.ymNext, this.psgAcc] = s.m;
-      this.sramMapped = !!s.m[7]; this.sramProtect = !!s.m[8]; this.hvLatch = s.m[9]; this.frame = s.m[10];
+      this.hvLatch = s.m[9]; this.frame = s.m[10];
       [this.rsPos, this.lpL, this.lpR, this.prevL, this.prevR] = s.m.slice(11, 16);
-      if (this.eeprom && s.ee) this.eeprom.loadState(s.ee);
       this.audioN = 0;
     }
   }
 
   Genesis.info = {
-    system: "segaMD", name: "Sega Genesis", width: 320, height: 224, aspect: 4 / 3, fps: 59.92, stereo: true, players: 2,
+    system: "segaMD", name: "Sega Genesis", width: 320, height: 224, aspect: 4 / 3, fps: 59.92, stereo: true, players: 4, // 3 and 4: J-Cart
     buttons: BUTTONS,
   };
 

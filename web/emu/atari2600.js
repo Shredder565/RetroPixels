@@ -1,7 +1,8 @@
 // RetroPixels — Atari 2600 emulator. Original code.
 //
 // 6507 processor (the shared 6502 core with decimal mode), TIA video and sound,
-// RIOT (RAM, I/O, timer) and the common cartridge bank-switching schemes.
+// RIOT (RAM, I/O, timer); the cartridges are in atari2600_carts.js (and
+// atari2600_dpcplus.js).
 // The TIA picture is drawn lazily: pixels are produced up to "now" whenever a
 // register that affects them changes and at the end of every line, so the
 // result is exact to the colour clock without simulating every clock one by one.
@@ -27,7 +28,7 @@
     for (let h = 0; h < 16; h++) for (let l = 0; l < 8; l++) {
       let y = LUMA[l], u = 0, v = 0;
       if (h) {
-        const deg = 180 - (h - 1) * 25.7;
+        const deg = 167 - (h - 1) * 27; // hue 1 (the colour burst) is yellow; hue 15 lands near orange, not back on hue 1
         const a = deg * Math.PI / 180, sat = 0.3;
         u = Math.cos(a) * sat; v = Math.sin(a) * sat;
         y = 0.1 + y * 0.85; // colour levels never reach black
@@ -225,7 +226,7 @@
       this.line++;
       this.rendered = 0; this.hmoveBlank = false; this.noMain0 = this.noMain1 = false;
       if (this.lateHmove) { this.lateHmove = false; this.applyHmove(8); }
-      if (this.line >= 300 && this.line >= this.frameLines + 40) this.endFrame(); // game isn't sending VSYNC
+      if (this.line >= 330 && this.line >= this.frameLines + 40) this.endFrame(); // game isn't sending VSYNC (PAL games use 312 lines)
       else if (this.line >= MAXL + 20) this.endFrame();
     }
     endFrame() {
@@ -430,206 +431,6 @@
   }
 
   // ------------------------------------------------------------------
-  // Cartridges
-  // ------------------------------------------------------------------
-  function hasSig(rom, sigs) {
-    for (const s of sigs) {
-      outer: for (let i = 0; i + s.length <= rom.length; i++) {
-        for (let j = 0; j < s.length; j++) if (rom[i + j] !== s[j]) continue outer;
-        return true;
-      }
-    }
-    return false;
-  }
-  function countSig(rom, s) {
-    let n = 0;
-    outer: for (let i = 0; i + s.length <= rom.length; i++) {
-      for (let j = 0; j < s.length; j++) if (rom[i + j] !== s[j]) continue outer;
-      n++;
-    }
-    return n;
-  }
-  // A Superchip cart leaves the RAM's address range in every bank unused (filled with one value).
-  // (Some dumps instead show the RAM's read port as a copy of its write port.)
-  function hasSuperchip(rom) {
-    let filled = true, mirrored = true;
-    for (let b = 0; b < rom.length; b += 4096) {
-      const v = rom[b];
-      for (let i = 1; i < 256; i++) if (rom[b + i] !== v) { filled = false; break; }
-      for (let i = 0; i < 128; i++) if (rom[b + i] !== rom[b + 128 + i]) { mirrored = false; break; }
-    }
-    return filled || mirrored;
-  }
-
-  function detectType(rom) {
-    const n = rom.length;
-    if (n === 10240 || n === 10495) return "DPC";
-    if (n <= 4096) return "4K";
-    if (n === 8192) {
-      if (hasSig(rom, [[0x8d, 0xe0, 0x1f], [0x8d, 0xe0, 0x5f], [0x8d, 0xe9, 0xff], [0x0c, 0xe0, 0x1f], [0xad, 0xe0, 0x1f], [0xad, 0xe9, 0xff], [0xad, 0xed, 0xff], [0xad, 0xf3, 0xbf]])) return "E0";
-      if (hasSig(rom, [[0x20, 0x00, 0xd0, 0xc6, 0xc5], [0x20, 0xc3, 0xf8, 0xa5, 0x82], [0xd0, 0xfb, 0x20, 0x73, 0xfe], [0x20, 0x00, 0xf0, 0x84, 0xd6]])) return "FE";
-      if (countSig(rom, [0x85, 0x3f]) >= 2) return "3F";
-      return hasSuperchip(rom) ? "F8SC" : "F8";
-    }
-    if (n === 12288) return "FA";
-    if (n === 16384) {
-      if (hasSig(rom, [[0xad, 0xe2, 0xff], [0xad, 0xe5, 0xff], [0xad, 0xe5, 0x1f], [0xad, 0xe7, 0x1f], [0x0c, 0xe7, 0x1f], [0x8d, 0xe7, 0xff], [0x8d, 0xe7, 0x1f]])) return "E7";
-      if (countSig(rom, [0x85, 0x3f]) >= 2) return "3F";
-      return hasSuperchip(rom) ? "F6SC" : "F6";
-    }
-    if (n === 32768) {
-      if (countSig(rom, [0x85, 0x3f]) >= 2) return "3F";
-      return hasSuperchip(rom) ? "F4SC" : "F4";
-    }
-    if (n === 65536) return countSig(rom, [0x85, 0x3f]) >= 2 ? "3F" : (hasSuperchip(rom) ? "EFSC" : "EF");
-    if (n % 2048 === 0 && countSig(rom, [0x85, 0x3f]) >= 2) return "3F";
-    throw new Error("This Atari 2600 cartridge uses hardware RetroPixels doesn't support yet (" + n + " bytes).");
-  }
-
-  class Cart {
-    constructor(rom) {
-      this.type = detectType(rom);
-      const t = this.type;
-      if (rom.length < 4096 && t === "4K") { // 2K and smaller carts repeat
-        const r = new Uint8Array(4096); for (let i = 0; i < 4096; i++) r[i] = rom[i % rom.length]; rom = r;
-      }
-      this.rom = rom.length > 4096 && t === "4K" ? rom.subarray(0, 4096) : rom;
-      this.ram = null; this.ramSize = 0; this.bank = 0;
-      this.hsLo = -1; this.hsHi = -1;
-      const fx = { F8: [0xff8, 0xff9, 1], F6: [0xff6, 0xff9, 0], F4: [0xff4, 0xffb, 0], FA: [0xff8, 0xffa, 2], EF: [0xfe0, 0xfef, 15] };
-      const base = t.replace("SC", "");
-      if (fx[base]) {
-        [this.hsLo, this.hsHi, this.bank] = fx[base];
-        if (t.endsWith("SC")) { this.ramSize = 128; this.ram = new Uint8Array(128); }
-        if (t === "FA") { this.ramSize = 256; this.ram = new Uint8Array(256); }
-        this.kind = "fx";
-      } else if (t === "DPC") {
-        this.kind = "dpc"; this.hsLo = 0xff8; this.hsHi = 0xff9; this.bank = 1;
-        this.dd = rom.subarray(8192, 10240);
-        this.tops = new Uint8Array(8); this.bottoms = new Uint8Array(8); this.counters = new Uint16Array(8);
-        this.flags = new Uint8Array(8); this.music = [false, false, false]; this.rand = 1; this.musicCycles = 0;
-      } else if (t === "E0") { this.kind = "e0"; this.slices = [4, 5, 6, 7]; }
-      else if (t === "E7") { this.kind = "e7"; this.bank = 0; this.ramBank = 0; this.ram = new Uint8Array(2048); }
-      else if (t === "FE") { this.kind = "fe"; this.bank = 0; this.lastFE = false; }
-      else if (t === "3F") { this.kind = "3f"; this.bank = 0; this.last = (rom.length >> 11) - 1; }
-      else this.kind = "4k";
-    }
-    hotspot(off) { if (off >= this.hsLo && off <= this.hsHi) this.bank = off - this.hsLo; }
-    read(a, m) {
-      const off = a & 0xfff, rom = this.rom;
-      switch (this.kind) {
-        case "4k": return rom[off];
-        case "fx": {
-          this.hotspot(off);
-          if (this.ram && off >= this.ramSize && off < 2 * this.ramSize) return this.ram[off - this.ramSize];
-          return rom[this.bank * 4096 + off];
-        }
-        case "dpc": {
-          if (off < 0x40) return this.dpcRead(off, m);
-          this.hotspot(off);
-          return rom[this.bank * 4096 + off];
-        }
-        case "e0": {
-          if (off >= 0xfe0 && off <= 0xff7) this.slices[(off - 0xfe0) >> 3] = off & 7;
-          return rom[this.slices[off >> 10] * 1024 + (off & 0x3ff)];
-        }
-        case "e7": {
-          if (off >= 0xfe0 && off <= 0xfe7) this.bank = off - 0xfe0;
-          else if (off >= 0xfe8 && off <= 0xfeb) this.ramBank = off - 0xfe8;
-          if (off < 0x800) {
-            if (this.bank === 7) return off >= 0x400 ? this.ram[off - 0x400] : 0;
-            return rom[this.bank * 2048 + off];
-          }
-          if (off < 0x900) return 0;
-          if (off < 0xa00) return this.ram[1024 + this.ramBank * 256 + (off - 0x900)];
-          return rom[7 * 2048 + (off - 0x800)];
-        }
-        case "fe": return rom[this.bank * 4096 + off];
-        case "3f": return off < 0x800 ? rom[this.bank * 2048 + off] : rom[this.last * 2048 + (off - 0x800)];
-      }
-      return 0;
-    }
-    write(a, v) {
-      const off = a & 0xfff;
-      switch (this.kind) {
-        case "fx": this.hotspot(off); if (this.ram && off < this.ramSize) this.ram[off] = v; return;
-        case "dpc": if (off >= 0x40 && off < 0x80) this.dpcWrite(off, v); else this.hotspot(off); return;
-        case "e0": if (off >= 0xfe0 && off <= 0xff7) this.slices[(off - 0xfe0) >> 3] = off & 7; return;
-        case "e7":
-          if (off >= 0xfe0 && off <= 0xfe7) this.bank = off - 0xfe0;
-          else if (off >= 0xfe8 && off <= 0xfeb) this.ramBank = off - 0xfe8;
-          else if (off < 0x400 && this.bank === 7) this.ram[off] = v;
-          else if (off >= 0x800 && off < 0x900) this.ram[1024 + this.ramBank * 256 + (off - 0x800)] = v;
-          return;
-      }
-    }
-    // Activision (FE): the bank follows the high byte of a JSR/RTS address on the stack.
-    snoop(a, v) {
-      if (this.lastFE) this.bank = (v & 0x20) ? 0 : 1;
-      this.lastFE = a === 0x01fe;
-    }
-    tiaWrite(a, v) { if (this.kind === "3f" && a < 0x40) this.bank = (v % ((this.rom.length >> 11))) | 0; }
-
-    // ---- DPC (Pitfall II) ----
-    dpcMusic(m) {
-      const now = m.cycles;
-      const clocks = Math.floor((now - this.musicCycles) * 20000 / (CLOCK / 3));
-      if (clocks <= 0) return;
-      this.musicCycles += clocks * (CLOCK / 3) / 20000;
-      for (let x = 5; x < 8; x++) if (this.music[x - 5]) {
-        const top = this.tops[x] + 1;
-        let low = this.counters[x] & 0xff;
-        if (this.tops[x] !== 0) { low -= clocks % top; if (low < 0) low += top; } else low = 0;
-        if (low <= this.bottoms[x]) this.flags[x] = 0; else if (low <= this.tops[x]) this.flags[x] = 0xff;
-        this.counters[x] = (this.counters[x] & 0x700) | low;
-      }
-    }
-    dpcRead(off, m) {
-      const r = this.rand;
-      this.rand = ((r << 1) | (~((r >> 7) ^ (r >> 5) ^ (r >> 4) ^ (r >> 3)) & 1)) & 0xff;
-      const i = off & 7, fn = (off >> 3) & 7;
-      let res = 0;
-      if (fn === 0 && i >= 4) {
-        this.dpcMusic(m);
-        const k = (this.music[0] && this.flags[5] ? 1 : 0) | (this.music[1] && this.flags[6] ? 2 : 0) | (this.music[2] && this.flags[7] ? 4 : 0);
-        return [0x00, 0x04, 0x05, 0x09, 0x06, 0x0a, 0x0b, 0x0f][k];
-      }
-      if ((this.counters[i] & 0xff) === this.tops[i]) this.flags[i] = 0xff;
-      else if ((this.counters[i] & 0xff) === this.bottoms[i]) this.flags[i] = 0;
-      switch (fn) {
-        case 0: res = r; break;
-        case 1: res = this.dd[2047 - this.counters[i]]; break;
-        case 2: res = this.dd[2047 - this.counters[i]] & this.flags[i]; break;
-        case 7: res = this.flags[i]; break;
-      }
-      if (i < 5 || !this.music[i - 5]) this.counters[i] = (this.counters[i] - 1) & 0x7ff;
-      return res;
-    }
-    dpcWrite(off, v) {
-      const i = off & 7, fn = (off >> 3) & 7;
-      switch (fn) {
-        case 0: this.tops[i] = v; this.flags[i] = 0; break;
-        case 1: this.bottoms[i] = v; break;
-        case 2: this.counters[i] = (this.counters[i] & 0x700) | v; break;
-        case 3: this.counters[i] = (this.counters[i] & 0xff) | ((v & 7) << 8); if (i >= 5) this.music[i - 5] = !!(v & 0x10); break;
-        case 6: this.rand = 1; break;
-      }
-    }
-    saveState() {
-      const o = { bank: this.bank };
-      for (const k of ["ram", "slices", "ramBank", "lastFE", "tops", "bottoms", "counters", "flags", "music", "rand", "musicCycles"])
-        if (this[k] !== undefined && this[k] !== null) o[k] = Array.isArray(this[k]) ? this[k].slice() : this[k];
-      return o;
-    }
-    loadState(o) {
-      for (const k in o) {
-        if (ArrayBuffer.isView(this[k])) this[k].set(o[k]);
-        else this[k] = Array.isArray(o[k]) ? o[k].slice() : o[k];
-      }
-    }
-  }
-
-  // ------------------------------------------------------------------
   // The console
   // ------------------------------------------------------------------
   // buttons bit order (see info.buttons)
@@ -638,12 +439,13 @@
   class Atari2600 {
     constructor(rom, opts = {}) {
       this.romData = rom;
+      this.name = opts.name || ""; this.sram = opts.sram || null;
       this.sampleRate = opts.sampleRate || 48000;
       this.width = 160; this.height = OUT_H; this.fps = FPS;
       this.init();
     }
     init() {
-      this.cart = new Cart(this.romData);
+      this.cart = global.RPAtariCarts.create(this.romData, { name: this.name, sram: this.sram });
       this.riot = new RIOT();
       this.sound = new TIASound(this.sampleRate);
       this.tia = new TIA(this);
@@ -665,21 +467,27 @@
       if (this.tia.wsync) { this.tia.wsync = false; while (this.tia.hclock !== 0) this.cycle(); }
       this.cycle();
       a &= 0x1fff;
+      const cart = this.cart;
+      this.isOp = this.opNext; this.opNext = false; // is this the opcode fetch of an instruction?
+      if (cart.snoop) cart.access(a);
       let v;
-      if (a & 0x1000) v = this.cart.read(a, this);
+      if (a & 0x1000) v = cart.read(a, this);
       else if (a & 0x80) v = (a & 0x200) ? this.riot.read(a) : this.riot.ram[a & 0x7f];
       else { v = (this.tia.read(a) & 0xc0) | (this.bus & 0x3f); if ((a & 15) >= 8 && (a & 15) < 12) this.paddleReads++; }
-      if (this.cart.kind === "fe") this.cart.snoop(a, v);
+      if (cart.watch) cart.watch(a, v);
       this.bus = v;
       return v;
     }
     write(a, v) {
       this.cycle();
       a &= 0x1fff; this.bus = v;
-      if (a & 0x1000) this.cart.write(a, v);
+      const cart = this.cart;
+      this.isOp = this.opNext = false;
+      if (cart.snoop) cart.access(a);
+      if (a & 0x1000) cart.write(a, v, this);
       else if (a & 0x80) { if (a & 0x200) this.riot.write(a, v); else this.riot.ram[a & 0x7f] = v; }
-      else { this.tia.write(a & 0x3f, v); if (this.cart.kind === "3f") this.cart.tiaWrite(a, v); }
-      if (this.cart.kind === "fe") this.cart.snoop(a, v);
+      else { this.tia.write(a & 0x3f, v); if (cart.tiaHook && a < 0x40) cart.tiaWrite(a, v); }
+      if (cart.watch) cart.watch(a, v);
     }
 
     // ---- controllers ----
@@ -726,6 +534,7 @@
       this.paddleReads = 0;
       const limit = this.cycles + 76 * 400;
       while (!t.frameDone) {
+        this.opNext = true;
         this.cpu.step();
         if (this.cycles > limit) { t.endFrame(); break; }
       }
@@ -736,8 +545,8 @@
       }
     }
     takeAudio() { return this.sound.take(); }
-    reset() { const keep = this.input.slice(); this.init(); this.input = keep; this.updatePorts(); }
-    getSRAM() { return null; }
+    reset() { const s = this.getSRAM(); if (s) this.sram = s; const keep = this.input.slice(); this.init(); this.input = keep; this.updatePorts(); }
+    getSRAM() { return this.cart.getSRAM(); }
     saveState() {
       return { v: 1, cpu: this.cpu.saveState(), riot: this.riot.saveState(), tia: this.tia.saveState(), sound: this.sound.saveState(),
         cart: this.cart.saveState(), cycles: this.cycles, bus: this.bus, paddleMode: this.paddleMode, paddle: this.paddle.slice() };
