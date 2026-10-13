@@ -1421,17 +1421,11 @@
     else for (let k = 0; k < bytes.length; k++) this.write8raw(dst + k, bytes[k]);
     this.cpu.cycles += bytes.length * 3;
   };
+  // ArcTan: r0 is a tangent in 1.14 fixed point (-1 to 1 is the useful range);
+  // the angle comes back with a full circle as 0x10000.
   function arcTan(v) {
     v = (v << 16) >> 16;
-    const a = -((Math.imul(v, v)) >> 14);
-    let b = ((Math.imul(0xa9, a)) >> 14) + 0x390;
-    b = (Math.imul(b, a) >> 14) + 0x91c;
-    b = (Math.imul(b, a) >> 14) + 0xfb6;
-    b = (Math.imul(b, a) >> 14) + 0x16aa;
-    b = (Math.imul(b, a) >> 14) + 0x2081;
-    b = (Math.imul(b, a) >> 14) + 0x3651;
-    b = (Math.imul(b, a) >> 14) + 0xa2f9;
-    return Math.imul(v, b) >> 16;
+    return Math.floor(Math.atan(v / 0x4000) * 0x8000 / Math.PI);
   }
   function lz77(rd8, src) {
     const hdr = rd8(src) | (rd8(src + 1) << 8) | (rd8(src + 2) << 16) | (rd8(src + 3) << 24);

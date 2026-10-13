@@ -212,12 +212,24 @@
   // ===================================================================
   // The machine (CPU + memory + PPU + timers)
   // ===================================================================
-  const DMG_PALETTES = {
-    green: [0xff0fbc9b, 0xff0fac8b, 0xff306230, 0xff0f380f].map((x) => x), // ABGR
-    gray: [0xffffffff, 0xffaaaaaa, 0xff555555, 0xff000000],
-  };
+  const DMG_PALETTES = {};
   // ABGR from RGB helpers
   const abgr = (r, g, b) => 0xff000000 | (b << 16) | (g << 8) | r;
+  // Game Boy Color colours. Raw 15-bit values look harsher on a modern screen
+  // than on the console's LCD, whose colours bleed into each other a little.
+  // RetroPixels' correction: decode each 5-bit channel to linear light, let a
+  // little of the other two channels into it, and encode it again.
+  const CGB_RGB = (() => {
+    const MIX = [[0.84, 0.12, 0.04], [0.06, 0.80, 0.14], [0.10, 0.12, 0.78]];
+    const lin = (x) => Math.pow(x / 31, 2.2), enc = (y) => Math.round(255 * Math.pow(Math.min(1, y), 1 / 2.2));
+    const out = new Uint32Array(32768);
+    for (let v = 0; v < 32768; v++) {
+      const c = [lin(v & 31), lin((v >> 5) & 31), lin((v >> 10) & 31)];
+      const [r, g, b] = MIX.map((m) => enc(m[0] * c[0] + m[1] * c[1] + m[2] * c[2]));
+      out[v] = abgr(r, g, b);
+    }
+    return out;
+  })();
   DMG_PALETTES.green = [abgr(0xe0, 0xf0, 0xc8), abgr(0x98, 0xc0, 0x78), abgr(0x48, 0x70, 0x50), abgr(0x10, 0x24, 0x20)];
   DMG_PALETTES.gray = [abgr(0xf4, 0xf4, 0xf4), abgr(0xaa, 0xaa, 0xaa), abgr(0x55, 0x55, 0x55), abgr(0x10, 0x10, 0x10)];
 
@@ -599,10 +611,7 @@
 
     color(palIdx, c, obj) { // CGB 15-bit colour -> ABGR (with gentle correction)
       const p = obj ? this.obPal : this.bgPal, i = palIdx * 8 + c * 2;
-      const v = p[i] | (p[i + 1] << 8);
-      const r = v & 31, g = (v >> 5) & 31, b = (v >> 10) & 31;
-      const R = (r * 26 + g * 4 + b * 2) >> 2, G = (g * 24 + b * 8) >> 2, B = (r * 6 + g * 4 + b * 22) >> 2;
-      return abgr(Math.min(255, R), Math.min(255, G), Math.min(255, B));
+      return CGB_RGB[(p[i] | (p[i + 1] << 8)) & 0x7fff];
     }
 
     renderLine() {
