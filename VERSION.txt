@@ -1,7 +1,23 @@
-RetroPixels 2.2.0
+RetroPixels 2.3.0
 Released 2026-10-13
 
-What's new in 2.2.0
+What's new in 2.3.0
+- Super Nintendo: DSP-3, DSP-4, ST010, ST011 and ST018 games now play. These
+  chips need their built-in program, which RetroPixels can't include: the
+  first time, it asks you to choose your own dump of it (dsp3.rom, dsp4.rom,
+  st010.rom, st011.rom or st018.rom) and remembers it.
+- Originality check: every file was reviewed and the parts that followed other
+  emulators too closely were rewritten in RetroPixels' own way (DSP-1, Cx4,
+  S-DD1 and SPC7110 chips, SNES sound filter, 68000 divide timing, Atari 2600
+  cartridge detection and DPC music, Game Boy Color colours, Genesis and
+  Master System colours, GBA BIOS ArcTan, N64 6105 boot check and Controller
+  Pak checksum, the 7-Zip ARM64 filter).
+- Things you may notice: Konami VRC7 games (Lagrange Point) use RetroPixels'
+  own instrument sounds; Game Boy Color colours look slightly different;
+  DSP-1 games (Pilotwings, Super Mario Kart) compute 3D maths slightly
+  differently from the real chip.
+
+2.2.0
 - Super Nintendo: games with cartridge chips now play: Super FX (Star Fox,
   Yoshi's Island), SA-1 (Super Mario RPG, Kirby Super Star), DSP-1 (Super
   Mario Kart, Pilotwings), DSP-2, Cx4 (Mega Man X2 / X3), S-DD1 (Star Ocean),

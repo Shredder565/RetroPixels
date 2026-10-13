@@ -39,8 +39,14 @@ What each system supports
   Master), Cx4 (Mega Man X2 / X3), S-DD1 (Star Ocean, Street Fighter Alpha 2),
   SPC7110 (Far East of Eden Zero, Momotarou Dentetsu Happy, Super Power League
   4, with its clock), OBC1 (Metal Combat) and S-RTC (Daikaijuu Monogatari II).
-  Games with the DSP-3, DSP-4, ST010, ST011 or ST018 chips aren't supported
-  yet and show a message saying so.
+  DSP-3 (SD Gundam GX), DSP-4 (Top Gear 3000), ST010 (F1 ROC II), ST011
+  (Hayazashi Nidan Morita Shougi) and ST018 (Morita Shougi 2) run on
+  RetroPixels' own processor emulation, but these chips run a program stored
+  inside the chip, which can't come with RetroPixels. The first time you
+  start such a game, RetroPixels asks for your own dump of it (dsp3.rom /
+  dsp4.rom 8 KB, st010.rom / st011.rom 52 KB, st018.rom 160 KB) and keeps it,
+  so you're only asked once. A game file with the chip program attached at
+  its end works with no question. F1 ROC II's records are its battery save.
 - Game Boy / Color: MBC1 (including multicarts), MBC2, MBC3 with clock, MBC30,
   MBC5 with rumble (your controller vibrates), MBC6, MBC7 (Kirby Tilt 'n'
   Tumble: tilt with the right stick or I / J / K / L), HuC1, HuC3, MMM01, TAMA5
@@ -138,7 +144,12 @@ Credits & licences
   chips (S-DSP, YM2612, PSG...), the cartridge hardware, and replacements
   for the Game Boy Advance BIOS, the SNES sound start-up program and the N64
   boot program, so no Nintendo or Sega code is used. It uses only Go's
-  standard library.
+  standard library. Version 2.3.0 was checked file by file for code that
+  followed other emulators too closely, and those parts were rewritten. Lists
+  of facts about particular games (which save chip or controller a game uses)
+  and measured hardware values are still facts others have published too.
+  The DSP-3, DSP-4, ST010, ST011 and ST018 chip programs are never included;
+  you supply your own.
 - It works together with separate programs that keep their own licences and
   are not part of RetroPixels:
   * ffmpeg (GPL): video encoding for recordings; downloaded on request from
