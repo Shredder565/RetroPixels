@@ -28,7 +28,7 @@
     for (let h = 0; h < 16; h++) for (let l = 0; l < 8; l++) {
       let y = LUMA[l], u = 0, v = 0;
       if (h) {
-        const deg = 180 - (h - 1) * 25.7;
+        const deg = 167 - (h - 1) * 27; // hue 1 (the colour burst) is yellow; hue 15 lands near orange, not back on hue 1
         const a = deg * Math.PI / 180, sat = 0.3;
         u = Math.cos(a) * sat; v = Math.sin(a) * sat;
         y = 0.1 + y * 0.85; // colour levels never reach black
