@@ -52,7 +52,37 @@
   // ===================================================================
   // Cartridges (mappers)
   // ===================================================================
-  const MIRROR = { H: 0, V: 1, ONE_LO: 2, ONE_HI: 3, FOUR: 4 };
+  const MIRROR = { H: 0, V: 1, ONE_LO: 2, ONE_HI: 3, FOUR: 4, CUSTOM: 5 };
+
+  // Mapper state for save states: every plain field of the mapper (numbers, flags,
+  // typed arrays and nested chip objects) is saved automatically.
+  const NO_SAVE = new Set(["cart", "prg", "chr", "chrRam", "prgRam", "prgMap", "chrMap", "mirror", "irq", "ciram", "nes", "mapper", "audio"]);
+  function packFields(o) {
+    const r = {};
+    for (const k of Object.keys(o)) {
+      if (NO_SAVE.has(k)) continue;
+      const v = o[k];
+      if (v === null || typeof v === "number" || typeof v === "boolean" || typeof v === "string") r[k] = v;
+      else if (ArrayBuffer.isView(v)) r[k] = v.slice();
+      else if (Array.isArray(v)) r[k] = v.map(x => (x && typeof x === "object" && !ArrayBuffer.isView(x)) ? packFields(x) : (ArrayBuffer.isView(x) ? x.slice() : x));
+      else if (typeof v === "object") r[k] = packFields(v);
+    }
+    return r;
+  }
+  function unpackFields(o, r) {
+    for (const k of Object.keys(r)) {
+      if (NO_SAVE.has(k)) continue;
+      const v = r[k], cur = o[k];
+      if (ArrayBuffer.isView(cur) && v && v.length !== undefined) cur.set(v.length > cur.length ? v.subarray(0, cur.length) : v);
+      else if (Array.isArray(cur) && Array.isArray(v)) {
+        for (let i = 0; i < v.length; i++) {
+          if (cur[i] && typeof cur[i] === "object" && !ArrayBuffer.isView(cur[i])) unpackFields(cur[i], v[i]);
+          else if (ArrayBuffer.isView(cur[i])) cur[i].set(v[i]); else cur[i] = v[i];
+        }
+      } else if (cur && typeof cur === "object" && v && typeof v === "object") unpackFields(cur, v);
+      else if (typeof cur !== "function") o[k] = v;
+    }
+  }
 
   class Mapper {
     constructor(cart) {
@@ -75,6 +105,8 @@
     setChr2(slot, bank) { this.setChr1(slot * 2, bank * 2); this.setChr1(slot * 2 + 1, bank * 2 + 1); }
     setChr4(slot, bank) { for (let i = 0; i < 4; i++) this.setChr1(slot * 4 + i, bank * 4 + i); }
     setChr8(bank) { for (let i = 0; i < 8; i++) this.setChr1(i, bank * 8 + i); }
+    // Map each of the four nametables to a 1 KB page of nametable RAM.
+    setNt(a, b, c, d) { this.mirror = MIRROR.CUSTOM; this.ntPages = [a, b, c, d]; }
     cpuRead(a) {
       if (a >= 0x8000) return this.prg[this.prgMap[(a >> 13) & 3] + (a & 0x1fff)];
       if (a >= 0x6000) return this.prgRam[a & 0x1fff];
@@ -90,17 +122,22 @@
         case MIRROR.V: return ((t & 1) << 10) | off;
         case MIRROR.ONE_LO: return off;
         case MIRROR.ONE_HI: return 0x400 | off;
+        case MIRROR.CUSTOM: return (this.ntPages[t] << 10) | off;
         default: return (t << 10) | off;
       }
     }
     cpuClock() {}
     scanline() {}
     saveState() { return { prgRam: this.prgRam, chr: this.chrRam ? this.chr : null, mirror: this.mirror, irq: this.irq,
-      prgMap: this.prgMap, chrMap: this.chrMap, regs: this.regs ? this.regs() : null }; }
+      prgMap: this.prgMap, chrMap: this.chrMap, regs: this.regs ? this.regs() : null, fields: packFields(this),
+      audio: this.audio ? packFields(this.audio) : null }; }
     loadState(o) {
       this.prgRam.set(o.prgRam); if (o.chr && this.chrRam) this.chr.set(o.chr);
+      if (o.fields) unpackFields(this, o.fields);
+      if (o.audio && this.audio) unpackFields(this.audio, o.audio);
       this.mirror = o.mirror; this.irq = o.irq; this.prgMap.set(o.prgMap); this.chrMap.set(o.chrMap);
       if (o.regs && this.setRegs) this.setRegs(o.regs);
+      if (this.afterLoad) this.afterLoad();
     }
   }
 
@@ -285,6 +322,7 @@
     constructor(cart) {
       super(cart); this.cmd = 0; this.ramMode = 0; this.ramBank = 0; this.irqEnable = 0; this.irqCount = 0;
       this.setPrg8(3, -1);
+      if (global.RPNesAudio) this.audio = new global.RPNesAudio.S5B(); // Sunsoft 5B sound (Gimmick!)
     }
     cpuRead(a) {
       if (a >= 0x6000 && a < 0x8000) {
@@ -296,6 +334,7 @@
     cpuWrite(a, v) {
       if (a >= 0x6000 && a < 0x8000) { if ((this.ramMode & 0xc0) === 0xc0) this.prgRam[a & 0x1fff] = v; return; }
       if (a >= 0x8000 && a < 0xa000) { this.cmd = v & 15; return; }
+      if (a >= 0xc000) { if (this.audio) { if (a < 0xe000) this.audio.writeAddr(v); else this.audio.writeData(v); } return; }
       if (a >= 0xa000 && a < 0xc000) {
         const c = this.cmd;
         if (c < 8) this.setChr1(c, v);
@@ -308,6 +347,7 @@
       }
     }
     cpuClock() {
+      if (this.audio) this.audio.clock();
       if (this.irqEnable & 0x80) {
         this.irqCount = (this.irqCount - 1) & 0xffff;
         if (this.irqCount === 0xffff && (this.irqEnable & 1)) this.irq = true;
@@ -348,7 +388,9 @@
       this.chrA = new Uint16Array(8); this.chrB = new Uint16Array(4); this.chrHi = 0; this.lastSet = 0;
       this.irqCompare = 0; this.irqEnable = false; this.irqPending = false; this.inFrame = false; this.lineCount = 0;
       this.mulA = 0xff; this.mulB = 0xff; this.exAttr = 0;
+      this.splitCtl = 0; this.splitScroll = 0; this.splitBank = 0; this.inSplit = false; this.splitFineY = 0; this.splitAttr = 0;
       this.ciram = cart.vram; // the console's 2 KB of nametable RAM
+      if (global.RPNesAudio) this.audio = new global.RPNesAudio.MMC5Audio();
       this.win = [null, null, null, null];
       this.updatePrg();
     }
@@ -378,6 +420,7 @@
         const v = (this.irqPending ? 0x80 : 0) | (this.inFrame ? 0x40 : 0);
         this.irqPending = false; return v;
       }
+      if (a === 0x5015 && this.audio) return this.audio.status();
       if (a === 0x5205) return (this.mulA * this.mulB) & 0xff;
       if (a === 0x5206) return (this.mulA * this.mulB) >> 8;
       return -1;
@@ -397,11 +440,15 @@
         case 0x5106: this.fillTile = v; return;
         case 0x5107: this.fillAttr = v & 3; return;
         case 0x5130: this.chrHi = v & 3; return;
+        case 0x5200: this.splitCtl = v; return;
+        case 0x5201: this.splitScroll = v; return;
+        case 0x5202: this.splitBank = v; return;
         case 0x5203: this.irqCompare = v; return;
         case 0x5204: this.irqEnable = !!(v & 0x80); return;
         case 0x5205: this.mulA = v; return;
         case 0x5206: this.mulB = v; return;
       }
+      if (a >= 0x5000 && a <= 0x5015) { if (this.audio) this.audio.write(a, v); return; }
       if (a >= 0x5113 && a <= 0x5117) { this.prgRegs[a - 0x5113] = v; this.updatePrg(); return; }
       if (a >= 0x5120 && a <= 0x5127) { this.chrA[a - 0x5120] = v | (this.chrHi << 8); this.lastSet = 0; return; }
       if (a >= 0x5128 && a <= 0x512b) { this.chrB[a - 0x5128] = v | (this.chrHi << 8); this.lastSet = 1; return; }
@@ -431,8 +478,11 @@
       return ((bank * span) + (a & (span - 1))) % this.chr.length;
     }
     ppuRead(a) {
+      const fetch = this.cart.ppu().fetch;
+      // Split-screen tiles come from their own 4 KB CHR bank, at the split's own fine scroll.
+      if (fetch === 1 && this.inSplit) return this.chr[((this.splitBank * 0x1000) + ((a & 0xff8) | this.splitFineY)) % this.chr.length];
       // Extended attribute mode: each background tile picks its own 4 KB CHR bank.
-      if (this.exMode === 1 && this.cart.ppu().fetch === 1) {
+      if (this.exMode === 1 && fetch === 1) {
         const bank = (this.exAttr & 0x3f) | (this.chrHi << 6);
         return this.chr[((bank * 0x1000) + (a & 0xfff)) % this.chr.length];
       }
@@ -441,6 +491,23 @@
     ppuWrite(a, v) { if (this.chrRam) this.chr[this.chrAddr(a)] = v; }
     ntRead(a) {
       const ppu = this.cart.ppu(), off = a & 0x3ff, src = (this.ntMap >> (((a >> 10) & 3) * 2)) & 3;
+      if (ppu.fetch === 1 && (this.splitCtl & 0x80) && this.exMode <= 1) {
+        // Vertical split: tiles on one side of a column come from ExRAM with their own vertical scroll.
+        if (off < 0x3c0) {
+          const dot = ppu.dot, col = dot >= 321 ? (dot - 321) >> 3 : ((dot - 1) >> 3) + 2;
+          const t = this.splitCtl & 0x1f;
+          this.inSplit = this.splitCtl & 0x40 ? col >= t : col < t;
+          if (this.inSplit) {
+            const line = dot >= 321 ? (ppu.line === 261 ? 0 : ppu.line + 1) : ppu.line;
+            let y = this.splitScroll + line; if (y >= 240) y -= 240; y %= 240;
+            const row = y >> 3, c = col & 31;
+            this.splitFineY = y & 7;
+            const at = this.exram[0x3c0 + ((row >> 2) << 3) + (c >> 2)];
+            this.splitAttr = (at >> (((row & 2) << 1) | (c & 2))) & 3;
+            return this.exram[(row << 5) + c];
+          }
+        } else if (this.inSplit) return this.splitAttr * 0x55;
+      }
       if (this.exMode === 1 && ppu.fetch === 1) {
         if (off < 0x3c0) this.exAttr = this.exram[off];
         else { const p = (this.exAttr >> 6) & 3; return p | (p << 2) | (p << 4) | (p << 6); }
@@ -462,7 +529,8 @@
       if (!this.inFrame) { this.inFrame = true; this.lineCount = 0; this.irqPending = false; }
       else { this.lineCount++; if (this.lineCount === this.irqCompare) this.irqPending = true; }
     }
-    vblank() { this.inFrame = false; }
+    vblank() { this.inFrame = false; this.inSplit = false; }
+    cpuClock() { if (this.audio) this.audio.clock(); }
     saveState() {
       const o = super.saveState();
       o.exram = this.exram;
@@ -486,22 +554,76 @@
   const MAPPERS = { 0: M0, 1: M1, 2: M2, 3: M3, 4: M4, 5: M5, 7: M7, 9: (c) => new M9(c, false), 10: (c) => new M9(c, true),
     11: M11, 13: M13, 34: M34, 66: M66, 69: M69, 71: M71, 140: M140, 180: M180, 206: M206 };
 
+  // UNIF files name the circuit board instead of giving a mapper number.
+  const UNIF_BOARDS = {
+    NROM: 0, "NROM-128": 0, "NROM-256": 0, RROM: 0, "RROM-128": 0,
+    SAROM: 1, SBROM: 1, SCROM: 1, SEROM: 1, SFROM: 1, SGROM: 1, SHROM: 1, SJROM: 1, SKROM: 1, SLROM: 1, SL1ROM: 1, SNROM: 1, SOROM: 1, SUROM: 1, SXROM: 1,
+    UNROM: 2, UOROM: 2, CNROM: 3, TBROM: 4, TEROM: 4, TFROM: 4, TGROM: 4, TKROM: 4, TLROM: 4, TNROM: 4, TR1ROM: 4, TSROM: 4, TVROM: 4, B4: 4, HKROM: 4,
+    EKROM: 5, ELROM: 5, ETROM: 5, EWROM: 5, AMROM: 7, ANROM: 7, AN1ROM: 7, AOROM: 7, PEEOROM: 9, PNROM: 9, FJROM: 10, FKROM: 10,
+    "UNROM-512-8": 30, "UNROM-512-16": 30, "UNROM-512-32": 30, CPROM: 13, BNROM: 34, NINA001: 34, GNROM: 66, MHROM: 66, CDREAMS: 11,
+    TLSROM: 118, TKSROM: 118, TQROM: 119, "SA-72007": 145, "SA-72008": 133, "SA-0036": 149, "SA-0037": 148, "SA-016-1M": 79, "TC-U01-1.5M": 147,
+    "SACHEN-8259A": 141, "SACHEN-8259B": 138, "SACHEN-8259C": 139, "SACHEN-8259D": 137, "SA-NROM": 143, "22211": 132, "NTBROM": 68,
+    KS7058: 171, 
+  };
+  function parseUNIF(data) {
+    const chunks = {}; const prgs = [], chrs = [];
+    for (let p = 32; p + 8 <= data.length;) {
+      const id = String.fromCharCode(data[p], data[p + 1], data[p + 2], data[p + 3]);
+      const len = data[p + 4] | (data[p + 5] << 8) | (data[p + 6] << 16) | (data[p + 7] << 24);
+      const body = data.subarray(p + 8, p + 8 + len);
+      if (/^PRG[0-9A-F]$/.test(id)) prgs[parseInt(id[3], 16)] = body;
+      else if (/^CHR[0-9A-F]$/.test(id)) chrs[parseInt(id[3], 16)] = body;
+      else chunks[id] = body;
+      p += 8 + len;
+    }
+    let name = chunks.MAPR ? String.fromCharCode(...chunks.MAPR).replace(/\0.*$/s, "").trim().toUpperCase() : "";
+    const board = name.replace(/^(NES|HVC|UNL|BMC|BTL|IREM|KONAMI|TENGEN|TAITO|NAMCOT|SUNSOFT|JALECO|BANDAI|AVE|TXC)-/, "");
+    let mapper = UNIF_BOARDS[board];
+    if (mapper === undefined && /^S.ROM$/.test(board)) mapper = 1;
+    if (mapper === undefined && /^T.ROM$/.test(board)) mapper = 4;
+    if (mapper === undefined) throw new Error(`This NES game uses a circuit board RetroPixels doesn't support yet (${name || "unknown board"}).`);
+    const cat = (list) => { const parts = list.filter(Boolean); const n = parts.reduce((t, x) => t + x.length, 0); const o = new Uint8Array(n); let i = 0; for (const x of parts) { o.set(x, i); i += x.length; } return o; };
+    const prg = cat(prgs); let chr = cat(chrs);
+    const chrRam = chr.length === 0;
+    if (chrRam) chr = new Uint8Array(0x2000);
+    const m = chunks.MIRR ? chunks.MIRR[0] : 5;
+    const mirror = m === 0 ? MIRROR.H : m === 1 ? MIRROR.V : m === 2 ? MIRROR.ONE_LO : m === 3 ? MIRROR.ONE_HI : m === 4 ? MIRROR.FOUR : MIRROR.H;
+    return { prg, chr, chrRam, mapper, submapper: 0, mirror, battery: !!chunks.BATR, nes2: false, prgRamSize: 0x2000, prgNvramSize: 0, chrRamSize: chrRam ? 0x2000 : 0, flags6: m === 1 ? 1 : 0, board };
+  }
+
   function parseROM(data) {
+    if ((data[0] === 0x46 && data[1] === 0x44 && data[2] === 0x53 && data[3] === 0x1a) ||
+        (data[0] === 0x01 && String.fromCharCode(...data.subarray(1, 15)) === "*NINTENDO-HVC*"))
+      throw new Error("This is a Famicom Disk System game. The Disk System needs Nintendo's own start-up program (its BIOS), " +
+        "which RetroPixels can't include, so disk games can't be played. Cartridge (.nes) games work.");
+    if (data[0] === 0x55 && data[1] === 0x4e && data[2] === 0x49 && data[3] === 0x46) return parseUNIF(data);
     if (data[0] !== 0x4e || data[1] !== 0x45 || data[2] !== 0x53 || data[3] !== 0x1a) throw new Error("This isn't an NES game file (.nes)");
     const nes2 = (data[7] & 0x0c) === 0x08;
     let prgSize = data[4] * 0x4000, chrSize = data[5] * 0x2000;
-    let mapper = (data[6] >> 4) | (data[7] & 0xf0);
-    if (nes2) { mapper |= (data[8] & 0x0f) << 8; prgSize += ((data[9] & 0x0f) << 8) * 0x4000; chrSize += ((data[9] >> 4) << 8) * 0x2000; }
+    let mapper = (data[6] >> 4) | (data[7] & 0xf0), submapper = 0;
+    let prgRamSize = 0x2000, prgNvramSize = 0, chrRamSize = 0x2000;
+    if (nes2) {
+      mapper |= (data[8] & 0x0f) << 8; submapper = data[8] >> 4;
+      // Sizes: either a bank count, or (when the top nibble is $F) an exponent-multiplier.
+      const big = (lo, hi, unit) => hi === 0x0f ? (1 << (lo >> 2)) * ((lo & 3) * 2 + 1) : ((hi << 8) | lo) * unit;
+      prgSize = big(data[4], data[9] & 0x0f, 0x4000);
+      chrSize = big(data[5], data[9] >> 4, 0x2000);
+      const shift = (n) => n ? 64 << n : 0;
+      prgRamSize = shift(data[10] & 0x0f); prgNvramSize = shift(data[10] >> 4);
+      chrRamSize = shift(data[11] & 0x0f) + shift(data[11] >> 4);
+    }
     // Old dumps sometimes have junk in bytes 7-15; ignore the high nibble then.
     if (!nes2 && (data[12] || data[13] || data[14] || data[15])) mapper &= 0x0f;
     const trainer = data[6] & 4 ? 512 : 0;
     let off = 16 + trainer;
-    const prg = data.slice(off, off + prgSize); off += prgSize;
+    let prg = data.slice(off, off + prgSize); off += prgSize;
+    if (prg.length < 0x2000) { const p = new Uint8Array(0x2000); for (let i = 0; i < p.length; i++) p[i] = prg[i % Math.max(1, prg.length)]; prg = p; }
     let chr = data.slice(off, off + chrSize);
-    const chrRam = chrSize === 0;
-    if (chrRam) chr = new Uint8Array(0x2000);
+    const chrRam = chr.length === 0;
+    if (chrRam) chr = new Uint8Array(Math.max(0x2000, chrRamSize));
     const mirror = data[6] & 8 ? MIRROR.FOUR : (data[6] & 1 ? MIRROR.V : MIRROR.H);
-    return { prg, chr, chrRam, mapper, mirror, battery: !!(data[6] & 2) };
+    return { prg, chr, chrRam, mapper, submapper, mirror, battery: !!(data[6] & 2), nes2, prgRamSize, prgNvramSize, chrRamSize: chrRam ? chr.length : chrRamSize,
+      flags6: data[6], trainer: trainer ? data.slice(16, 16 + 512) : null };
   }
 
   // ===================================================================
@@ -947,7 +1069,8 @@
         if (f >= 37282) this.frameCycle = 0;
       }
       // mix and resample
-      const s = this.pulseTab[this.p1.out() + this.p2.out()] + this.tndTab[3 * this.tri.out() + 2 * this.noise.out() + this.dmc.level];
+      let s = this.pulseTab[this.p1.out() + this.p2.out()] + this.tndTab[3 * this.tri.out() + 2 * this.noise.out() + this.dmc.level];
+      if (this.ext) s += this.ext.output();
       this.sum += s; this.n++;
       this.acc += 1;
       if (this.acc >= this.step) {
@@ -981,11 +1104,13 @@
       cart.ppu = () => this.ppu;
       cart.vram = new Uint8Array(0x1000);
       cart.busConflict = cart.mapper === 2 && cart.prg.length <= 0x20000 && false;
+      cart.nes = this;
       const M = MAPPERS[cart.mapper];
       if (!M) throw new Error(`This NES game uses cartridge hardware RetroPixels doesn't support yet (mapper ${cart.mapper}).`);
       this.cart = cart;
       this.mapper = M.prototype ? new M(cart) : M(cart);
-      this.battery = cart.battery;
+      this.battery = cart.battery || !!this.mapper.batteryData;
+      if (cart.trainer) this.mapper.prgRam.set(cart.trainer, 0x1000);
       this.ram = new Uint8Array(0x800);
       this.ppu = new PPU(this);
       this.ppu.vram = cart.vram;
@@ -999,7 +1124,12 @@
         write(a, v) { self.clock(); self.openBus = v; self.cpuWrite(a, v); },
       }, { decimal: false, machinePolls: true });
       this.width = 256; this.height = 240; this.fps = FPS;
-      if (opts.sram && this.battery) this.mapper.prgRam.set(opts.sram.subarray(0, 0x2000));
+      if (opts.sram && this.battery) {
+        if (this.mapper.loadBattery) this.mapper.loadBattery(opts.sram);
+        else this.mapper.prgRam.set(opts.sram.subarray(0, Math.min(opts.sram.length, this.mapper.prgRam.length)));
+      }
+      this.apu.ext = this.mapper.audio || null; // expansion sound on the cartridge
+      this.cpu.s = 0; // the stack pointer powers up at 0; the reset sequence moves it to $FD
       this.cpu.reset();
     }
     // Advance everything by one CPU cycle.
@@ -1068,8 +1198,8 @@
     }
     get screen() { return this.ppu.screen; }
     takeAudio() { const a = this.apu.out.slice(0, this.apu.outLen); this.apu.outLen = 0; return a; }
-    reset() { this.cpu.reset(); this.apu.write(0x4015, 0); }
-    getSRAM() { return this.battery ? this.mapper.prgRam : null; }
+    reset() { if (this.mapper.reset) this.mapper.reset(); this.cpu.reset(); this.apu.write(0x4015, 0); }
+    getSRAM() { return this.battery ? (this.mapper.batteryData ? this.mapper.batteryData() : this.mapper.prgRam) : null; }
     saveState() {
       return { v: 1, cpu: this.cpu.saveState(), ram: this.ram, ppu: this.ppu.saveState(), apu: this.apu.saveState(),
         mapper: this.mapper.saveState(), strobe: this.strobe, padShift: this.padShift.slice() };
@@ -1084,4 +1214,6 @@
 
   global.RPCores = global.RPCores || {};
   global.RPCores.nes = NES;
+  // Parts the extra cartridge files (nes_mappers.js, nes_audio.js) build on.
+  global.RPNes = { Mapper, MIRROR, MAPPERS, M1, M4, M206, CPU_HZ, packFields, unpackFields };
 })(typeof window !== "undefined" ? window : globalThis);
