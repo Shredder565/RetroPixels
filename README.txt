@@ -8,23 +8,62 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
+Version 2.2.0 (the number also shows next to the RetroPixels name in the app).
+
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
-Sega Genesis, Atari 2600, Atari 7800, plus GameCube and Wii through Dolphin.
+Sega Genesis, Sega Master System, Atari 2600, Atari 7800, plus GameCube and
+Wii through Dolphin.
 Your Xbox controller works automatically.
 
 First run
 - Windows may show "Windows protected your PC" because this program isn't
   signed by a publisher. Click "More info", then "Run anyway".
 - NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
-  Genesis, Atari 2600 and Atari 7800 run on RetroPixels' own emulators, built
+  Genesis, Master System, Atari 2600 and Atari 7800 run on RetroPixels' own emulators, built
   into the program, so they work offline. No BIOS files are needed.
 - Nintendo 64 runs inside RetroPixels.exe itself (it's too heavy for the
-  page), so N64 games need the desktop app. Its 3D graphics are still being
-  finished, so many games don't show their picture yet.
-- Super Nintendo games with extra chips in the cartridge (DSP-1: Super Mario
-  Kart, Pilotwings; Super FX: Star Fox, Yoshi's Island; SA-1: Super Mario RPG,
-  Kirby Super Star; and a few others) aren't supported yet and show a message
-  saying so.
+  page), so N64 games need the desktop app.
+
+What each system supports
+- NES: about 120 cartridge types (mappers), covering nearly all licensed
+  Nintendo, Konami, Namco, Bandai, Jaleco, Irem, Taito and Sunsoft games plus
+  common multicarts and unlicensed boards. Famicom games with extra sound chips
+  play their full soundtrack (Konami VRC6 and VRC7, Namco 163, Sunsoft 5B,
+  MMC5). NES 2.0 and UNIF (.unf) files work. Famicom Disk System (.fds) games
+  can't be played: the Disk System needs Nintendo's own BIOS.
+- Super Nintendo: games with chips in the cartridge work, recreated by
+  RetroPixels' own code (no chip firmware needed): Super FX (Star Fox, Stunt
+  Race FX, Yoshi's Island, Doom, Vortex, Winter Gold, Dirt Trax FX), SA-1
+  (Super Mario RPG, Kirby Super Star, Kirby's Dream Land 3, PGA Tour 96 and
+  others), DSP-1 (Super Mario Kart, Pilotwings and others), DSP-2 (Dungeon
+  Master), Cx4 (Mega Man X2 / X3), S-DD1 (Star Ocean, Street Fighter Alpha 2),
+  SPC7110 (Far East of Eden Zero, Momotarou Dentetsu Happy, Super Power League
+  4, with its clock), OBC1 (Metal Combat) and S-RTC (Daikaijuu Monogatari II).
+  Games with the DSP-3, DSP-4, ST010, ST011 or ST018 chips aren't supported
+  yet and show a message saying so.
+- Game Boy / Color: MBC1 (including multicarts), MBC2, MBC3 with clock, MBC30,
+  MBC5 with rumble (your controller vibrates), MBC6, MBC7 (Kirby Tilt 'n'
+  Tumble: tilt with the right stick or I / J / K / L), HuC1, HuC3, MMM01, TAMA5
+  and the Pocket Camera (shows a test picture). Clocks keep time while the
+  game is closed.
+- Game Boy Advance: sensor cartridges work. Boktai's sunlight sensor: More Sun
+  / Less Sun (I / K), or push the right stick up. WarioWare: Twisted!: turn with
+  the right stick or J / L. Yoshi Topsy-Turvy and Koro Koro Puzzle: tilt with
+  the right stick or I / J / K / L. Drill Dozer and WarioWare rumble through
+  your controller.
+- Genesis / Mega Drive: battery and EEPROM saves, Realtec and SSF2 mappers,
+  J-Cart 4-player games, and an automatic 3-button pad for games that need one
+  (or hold Mode while the game starts). Virtua Racing (SVP chip) isn't
+  supported.
+- Master System / Mark III (new): .sms files (NTSC). 1 = Z, 2 = X,
+  Pause = Enter, Reset = R.
+- Atari 2600: nearly every bank-switching scheme, including Superchip RAM,
+  3E / 3E+, DPC (Pitfall II), DPC+ (including the game's ARM code) and the
+  Starpath Supercharger (no BIOS needed). The scheme is detected automatically;
+  you can force one by putting it in the file name, e.g. "Game (F8SC).bin".
+  CDF / CDFJ and 4A50 cartridges aren't supported yet.
+- Atari 7800: .a78 headers (v3 and v4), SuperGame with extra RAM, Absolute,
+  Activision, banksets and POKEY sound.
 
 Playing classic games
 - Drop a game file on the window or click "Choose game file…". Zipped games

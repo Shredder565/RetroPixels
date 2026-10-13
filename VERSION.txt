@@ -1,0 +1,27 @@
+RetroPixels 2.2.0
+Released 2026-10-13
+
+What's new in 2.2.0
+- Super Nintendo: games with cartridge chips now play: Super FX (Star Fox,
+  Yoshi's Island), SA-1 (Super Mario RPG, Kirby Super Star), DSP-1 (Super
+  Mario Kart, Pilotwings), DSP-2, Cx4 (Mega Man X2 / X3), S-DD1 (Star Ocean),
+  SPC7110, OBC1 and S-RTC.
+- NES: about 120 cartridge types (up from 18) and the Famicom sound chips
+  (VRC6, VRC7, Namco 163, Sunsoft 5B, MMC5); many accuracy fixes.
+- Game Boy / Color: more cartridge chips (MBC6, MBC7 tilt, HuC3, TAMA5, rumble
+  and others) and accuracy fixes (passes the blargg, mooneye and acid2 tests).
+- Game Boy Advance: sensor cartridges (Boktai sun sensor, WarioWare: Twisted!
+  gyro, Yoshi Topsy-Turvy tilt, rumble) and BIOS call fixes.
+- Genesis: EEPROM saves, Realtec mapper, J-Cart 4-player games, automatic
+  3-button pad mode.
+- New: Sega Master System / Mark III.
+- Atari 2600: nearly every bank-switching scheme, DPC+ and the Supercharger.
+  Atari 7800: more cartridge types and POKEY sound.
+- The version number shows in the app.
+
+2.1.0
+- Nintendo 64 runs on RetroPixels' own emulator inside RetroPixels.exe
+  (EmulatorJS removed; no internet needed).
+- "Download Dolphin" button in the GameCube tab.
+- GameCube / Wii games play inside the RetroPixels window; Stop game closes
+  Dolphin completely.
