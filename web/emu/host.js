@@ -69,6 +69,8 @@
     segaMD: { A: { pad: [2], keys: ["a"] }, B: { pad: [0], keys: ["s"] }, C: { pad: [1], keys: ["d"] },
       X: { pad: [4], keys: ["q"] }, Y: { pad: [3], keys: ["w"] }, Z: { pad: [5], keys: ["e"] },
       Start: { pad: [9], keys: ["enter"] }, Mode: { pad: [8], keys: ["shift"] } },
+    // Master System: Xbox A / B = buttons 1 / 2 (the same spots as on the SMS pad); Menu = the console's Pause button.
+    sms: { "1": { pad: [0], keys: ["z"] }, "2": { pad: [1], keys: ["x"] }, Pause: { pad: [9], keys: ["enter"] }, Reset: { pad: [], keys: ["r"] } },
     gba: { A: { pad: [1], keys: ["x"] }, B: { pad: [0], keys: ["z"] }, L: { pad: [4], keys: ["q"] }, R: { pad: [5], keys: ["w"] },
       Select: { pad: [8], keys: ["shift"] }, Start: { pad: [9], keys: ["enter"] } },
     // SNES: same button positions as the Xbox pad's diamond (Xbox B = A, A = B, Y = X, X = Y)
