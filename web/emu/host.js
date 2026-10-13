@@ -89,6 +89,11 @@
       "C-Up": { pad: [], keys: ["i"] }, "C-Down": { pad: [], keys: ["k"] }, "C-Left": { pad: [], keys: ["j"] }, "C-Right": { pad: [], keys: ["l"] },
       "Stick Up": { pad: [], keys: ["arrowup"] }, "Stick Down": { pad: [], keys: ["arrowdown"] },
       "Stick Left": { pad: [], keys: ["arrowleft"] }, "Stick Right": { pad: [], keys: ["arrowright"] } },
+    // Arcade: Coin = View / 5, Start = Menu / 1 (the keys arcade players know), first button = Xbox A.
+    arcade: { Coin: { pad: [8], keys: ["5", "c"] }, "Coin 2": { pad: [], keys: ["6"] }, "Start (1P)": { pad: [9], keys: ["1", "enter"] },
+      "Start (2P)": { pad: [], keys: ["2"] }, Fire: { pad: [0], keys: ["z"] }, Jump: { pad: [0], keys: ["z"] },
+      "Button 1": { pad: [0], keys: ["z"] }, "Button 2": { pad: [1], keys: ["x"] }, "Button 3": { pad: [2], keys: ["a"] },
+      "Button 4": { pad: [3], keys: ["s"] }, Service: { pad: [], keys: ["9"] } },
   };
   const ARROWS = { Up: "arrowup", Down: "arrowdown", Left: "arrowleft", Right: "arrowright" };
 
@@ -210,11 +215,14 @@
       this.rom = rom;
       await this.audio.start().catch(() => {});
       // firmware: chip programs the player supplied ({ "DSP-3": bytes, ... }), for cartridges with such chips
-      this.core = new this.Core(rom, { sampleRate: this.audio.rate || 48000, sram: this.opts.sram || null, name: this.opts.name, firmware: this.opts.firmware || null });
+      // coreOpts: anything else a core needs from the page (the arcade core gets the zip's files)
+      this.core = new this.Core(rom, { sampleRate: this.audio.rate || 48000, sram: this.opts.sram || null, name: this.opts.name, firmware: this.opts.firmware || null, ...(this.opts.coreOpts || {}) });
       // Cores that run elsewhere (Nintendo 64 runs inside RetroPixels.exe) say when they're ready.
       if (this.core.ready) await this.core.ready;
       // Some games bring extra controls (tilt or light sensor keys) — the core lists them.
       if (this.core.buttons) this.info = Object.assign({}, this.info, { buttons: this.core.buttons });
+      // ...and some pick the screen's shape per game (arcade games on an upright monitor)
+      if (this.core.aspect) this.info = Object.assign({}, this.info, { aspect: this.core.aspect });
       this.lastSram = this.sramSnapshot();
       this.resize();
       this.frameTime = 1000 / this.core.fps;
