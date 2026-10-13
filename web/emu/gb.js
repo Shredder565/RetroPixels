@@ -311,8 +311,34 @@
       this.tima = (this.tima + 1) & 0xff;
       if (this.tima === 0) this.timaReload = 1;
     }
-    rd(a) { this.tick(); return this.dmaActive && a < 0xff00 ? this.dmaBusRead(a) : this.read(a); }
-    wr(a, v) { this.tick(); if (this.dmaActive && a < 0xff00 && this.dmaBusBlocked(a)) return; this.write(a, v); }
+    rd(a) { this.tick(); if (a >= 0xfe00 && a < 0xff00) this.oamBug(a, this.iduRead ? 2 : 1); return this.dmaActive && a < 0xff00 ? this.dmaBusRead(a) : this.read(a); }
+    wr(a, v) { this.tick(); if (a >= 0xfe00 && a < 0xff00) this.oamBug(a, 0); if (this.dmaActive && a < 0xff00 && this.dmaBusBlocked(a)) return; this.write(a, v); }
+    // ---- the original Game Boy's OAM corruption bug ----
+    // While the video chip scans OAM (mode 2) it reads one 8-byte row per M-cycle. If the CPU
+    // puts an address in FE00-FEFF on the bus then (a read, a write, or the 16-bit
+    // increment/decrement unit of INC rr, DEC rr, PUSH, POP, LD A,(HL+/-)), that row gets
+    // mixed with the one before it. kind: 0 write (or inc/dec), 1 read, 2 read + inc/dec together.
+    oamScanRow() {
+      if (this.cgb || !this.lcdOn() || this.ly >= 144 || this.firstLine) return -1;
+      const r = this.lineDot >> 2; // row r is read in the M-cycle that ends at dot 4r
+      return r >= 0 && r < 20 ? r : -1;
+    }
+    oamBug(a, kind) {
+      if (this.cgb || a < 0xfe00 || a >= 0xff00) return;
+      const row = this.oamScanRow();
+      if (row < 1) return; // the first row (objects 0 and 1) is never damaged
+      const o = this.oam, w = (r, i) => o[r * 8 + i * 2] | (o[r * 8 + i * 2 + 1] << 8);
+      const setw = (r, i, v) => { o[r * 8 + i * 2] = v & 255; o[r * 8 + i * 2 + 1] = (v >> 8) & 255; };
+      const copyRow = (to, from) => { for (let k = 0; k < 8; k++) o[to * 8 + k] = o[from * 8 + k]; };
+      if (kind === 2 && row >= 4 && row < 19) {
+        const a2 = w(row - 2, 0), b = w(row - 1, 0), c = w(row, 0), d = w(row - 1, 2);
+        setw(row - 1, 0, (b & (a2 | c | d)) | (a2 & c & d));
+        copyRow(row, row - 1); copyRow(row - 2, row - 1);
+      }
+      const a0 = w(row, 0), b = w(row - 1, 0), c = w(row - 1, 2);
+      const first = kind === 0 ? ((a0 ^ c) & (b ^ c)) ^ c : b | (a0 & c);
+      copyRow(row, row - 1); setw(row, 0, first);
+    }
     // ---- OAM DMA: one byte per M-cycle after a cycle of set-up; meanwhile the CPU
     // can't use the bus the copy reads from (it sees the byte being copied), nor OAM.
     oamDmaStep() {
@@ -652,8 +678,8 @@
     get hl() { return (this.h << 8) | this.l; } set hl(v) { this.h = (v >> 8) & 255; this.l = v & 255; }
     fetch() { const v = this.rd(this.pc); this.pc = (this.pc + 1) & 0xffff; return v; }
     fetch16() { const lo = this.fetch(); return lo | (this.fetch() << 8); }
-    push16(v) { this.idle(); this.sp = (this.sp - 1) & 0xffff; this.wr(this.sp, v >> 8); this.sp = (this.sp - 1) & 0xffff; this.wr(this.sp, v & 255); }
-    pop16() { const lo = this.rd(this.sp); this.sp = (this.sp + 1) & 0xffff; const hi = this.rd(this.sp); this.sp = (this.sp + 1) & 0xffff; return lo | (hi << 8); }
+    push16(v) { this.idle(); this.oamBug(this.sp, 0); this.sp = (this.sp - 1) & 0xffff; this.wr(this.sp, v >> 8); this.sp = (this.sp - 1) & 0xffff; this.wr(this.sp, v & 255); }
+    pop16() { this.iduRead = true; const lo = this.rd(this.sp); this.sp = (this.sp + 1) & 0xffff; const hi = this.rd(this.sp); this.sp = (this.sp + 1) & 0xffff; this.iduRead = false; return lo | (hi << 8); }
     getR(i) {
       switch (i) { case 0: return this.b; case 1: return this.c; case 2: return this.d; case 3: return this.e; case 4: return this.h; case 5: return this.l; case 6: return this.rd(this.hl); default: return this.a; }
     }
@@ -744,11 +770,11 @@
               this.f = (this.f & 0x80) | (((hl & 0xfff) + (v & 0xfff)) > 0xfff ? 0x20 : 0) | (r > 0xffff ? 0x10 : 0); this.hl = r; return; }
           case 2: {
             const addr = p === 0 ? this.bc : p === 1 ? this.de : this.hl;
-            if (!q) this.wr(addr, this.a); else this.a = this.rd(addr);
+            if (!q) this.wr(addr, this.a); else { this.iduRead = p >= 2; this.a = this.rd(addr); this.iduRead = false; }
             if (p === 2) this.hl = this.hl + 1; else if (p === 3) this.hl = this.hl - 1;
             return;
           }
-          case 3: this.idle(); this.setRR(p, this.getRR(p) + (q ? -1 : 1)); return;
+          case 3: { const v = this.getRR(p); this.idle(); this.oamBug(v, 0); this.setRR(p, v + (q ? -1 : 1)); return; }
           case 4: { const v = this.getR(y), r = (v + 1) & 255; this.f = (this.f & 0x10) | (r ? 0 : 0x80) | ((v & 15) === 15 ? 0x20 : 0); this.setR(y, r); return; }
           case 5: { const v = this.getR(y), r = (v - 1) & 255; this.f = (this.f & 0x10) | 0x40 | (r ? 0 : 0x80) | ((v & 15) === 0 ? 0x20 : 0); this.setR(y, r); return; }
           case 6: this.setR(y, this.fetch()); return;
