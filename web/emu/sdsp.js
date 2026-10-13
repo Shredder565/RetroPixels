@@ -5,8 +5,16 @@
 "use strict";
 
 (function (global) {
-  const RATE = [0, 2048, 1536, 1280, 1024, 768, 640, 512, 384, 320, 256, 192, 160, 128, 96, 80, 64, 48, 40, 32, 24, 20, 16, 12, 10, 8, 6, 5, 4, 3, 2, 1];
-  const OFFSET = [0, 0, 1040, 536, 0, 1040, 536, 0, 1040, 536, 0, 1040, 536, 0, 1040, 536, 0, 1040, 536, 0, 1040, 536, 0, 1040, 536, 0, 1040, 536, 0, 1040, 536, 0];
+  // Envelope / noise rate counter: rate r fires every RATE[r] samples. Rates
+  // 1-30 come in groups of three (2048, 1536, 1280 samples, halving each group),
+  // rate 31 fires every sample and rate 0 never. OFFSET staggers the three rates
+  // of a group so they don't all fire on the same sample.
+  const RATE = new Int32Array(32), OFFSET = new Int32Array(32);
+  for (let r = 1; r < 32; r++) {
+    const k = (r - 1) % 3;
+    RATE[r] = r === 31 ? 1 : [2048, 1536, 1280][k] >> ((r - 1) / 3 | 0);
+    OFFSET[r] = [0, 1040, 536][k];
+  }
   // 4-tap interpolation weights (a smooth bell-shaped kernel), 256 fractional positions
   const KERN = new Int32Array(256 * 4);
   for (let f = 0; f < 256; f++) {
@@ -51,21 +59,22 @@
       const hdr = ram[addr & 0xffff], shift = hdr >> 4, filter = (hdr >> 2) & 3;
       // keep the last three samples for interpolation / the filters
       b[bo] = b[bo + 16]; b[bo + 1] = b[bo + 17]; b[bo + 2] = b[bo + 18];
-      let p1 = b[bo + 2], p2 = b[bo + 1];
+      // the buffer holds doubled samples; the filters work on the plain 15-bit ones
+      let p1 = b[bo + 2] >> 1, p2 = b[bo + 1] >> 1;
       for (let k = 0; k < 16; k++) {
         const byte = ram[(addr + 1 + (k >> 1)) & 0xffff];
         let n = (k & 1) ? byte & 15 : byte >> 4;
         if (n >= 8) n -= 16;
         let s = shift <= 12 ? (n << shift) >> 1 : (n < 0 ? -2048 : 0);
-        switch (filter) {
-          case 1: s += (p1 >> 1) + ((-p1) >> 5); break;
-          case 2: s += p1 - (p2 >> 1) + (p2 >> 5) + ((p1 * -3) >> 6); break;
-          case 3: s += p1 - (p2 >> 1) + ((p1 * -13) >> 7) + ((p2 * 3) >> 5); break;
-        }
+        // prediction from the previous two samples (filter 1: old * 15/16;
+        // 2: old * 61/32 - older * 15/16; 3: old * 115/64 - older * 13/16)
+        if (filter === 1) s += p1 + ((-p1) >> 4);
+        else if (filter === 2) s += 2 * p1 + ((-3 * p1) >> 5) - p2 + (p2 >> 4);
+        else if (filter === 3) s += 2 * p1 + ((-13 * p1) >> 6) - p2 + ((3 * p2) >> 4);
         s = clamp16(s);
-        s = (s << 17) >> 16; // double, wrapping to 16 bits
-        b[bo + 3 + k] = s;
-        p2 = p1; p1 = s;
+        const w = (s << 17) >> 16; // stored doubled, wrapping to 16 bits
+        b[bo + 3 + k] = w;
+        p2 = p1; p1 = w >> 1;
       }
       V[o + 7] = hdr; // remember flags of the block being played
     }

@@ -17,7 +17,11 @@
   const Kit = global.RPSNESChipKit;
   const s16 = Kit.s16;
 
-  // Arithmetic decoder states: [LPS probability, next on LPS, next on MPS, swap MPS on LPS]
+  // The chip's adaptive probability states (53 of them, in four chains that a
+  // context climbs while its guesses keep coming true). Each entry: [size of the
+  // less likely symbol's share of the range (out of 256), next state after that
+  // symbol, next state after a likely symbol that needed renormalising, 1 when the
+  // less likely symbol makes the context swap which symbol it expects].
   const EVOLUTION = [
     [0x5a, 1, 1, 1], [0x25, 6, 2, 0], [0x11, 8, 3, 0], [0x08, 10, 4, 0], [0x03, 12, 5, 0], [0x01, 15, 5, 0],
     [0x5a, 7, 7, 1], [0x3f, 19, 8, 0], [0x2c, 21, 9, 0], [0x20, 22, 10, 0], [0x17, 23, 11, 0], [0x11, 25, 12, 0], [0x0c, 26, 13, 0], [0x09, 28, 14, 0],
@@ -28,116 +32,142 @@
     [0x58, 39, 40, 1], [0x4d, 47, 41, 0], [0x43, 48, 42, 0], [0x3b, 49, 43, 0], [0x34, 50, 44, 0], [0x2e, 51, 45, 0], [0x29, 44, 46, 0], [0x25, 45, 24, 0],
     [0x56, 47, 48, 1], [0x4f, 47, 49, 0], [0x47, 48, 50, 0], [0x41, 49, 51, 0], [0x3c, 50, 52, 0], [0x37, 51, 43, 0],
   ];
-  // Mode 2 walks a small tree of contexts while reading the 4 bits of a pixel.
-  const TREE2 = [[1, 2], [3, 8], [13, 14], [15, 16], [17, 18], [19, 20], [21, 22], [23, 24], [25, 26], [25, 26], [25, 26], [25, 26], [25, 26], [27, 28], [29, 30]];
-  while (TREE2.length < 32) TREE2.push([31, 31]);
-
-  // How the three neighbouring pixels (left, above, above-left) relate.
+  // How the three neighbouring pixels (left a, above b, above-left c) relate:
+  // all equal, a = b, b = c, a = c, or all different.
   function shape(a, b, c) {
-    if (a === b && b === c) return 0;
-    if (a === b) return 1;
+    if (a === b) return b === c ? 0 : 1;
     if (b === c) return 2;
-    if (a === c) return 3;
-    return 4;
+    return a === c ? 3 : 4;
   }
-  // move value v to the front of list l
-  function toFront(l, v) { const i = l.indexOf(v); for (let k = i; k > 0; k--) l[k] = l[k - 1]; l[0] = v; }
+  // Context of the k-th decision (k = 0..3) for a mode 2 pixel, from the
+  // decisions so far (`path`, earliest first) and the neighbour shape. The first
+  // two decisions have fixed contexts; after a first decision of 0 the neighbour
+  // shape is mixed in, and some branches share contexts.
+  function ctxMode2(k, path, ref) {
+    const p0 = (path >> (k - 1)) & 1;
+    switch (k) {
+      case 0: return 0;
+      case 1: return 1 + (path & 1);
+      case 2: return p0 ? 13 + (path & 1) : (path & 1 ? 8 : 3) + ref;
+      default: {
+        const p1 = (path >> 1) & 1, last = path & 1;
+        if (!p0) return p1 ? 25 + last : 15 + 2 * ref + last;
+        return 27 + 2 * p1 + last;
+      }
+    }
+  }
+  // A colour list kept in most-recently-used order.
+  function bump(list, v) { const i = list.indexOf(v); if (i > 0) list.copyWithin(1, 0, i); list[0] = v; }
 
   class Decompressor {
-    constructor(read) { this.readByte = read; this.idx = new Uint8Array(32); this.inv = new Uint8Array(32); this.queue = []; this.mode = 0; this.addr = 0; this.ready = false; }
+    constructor(read) {
+      this.readByte = read;
+      this.idx = new Uint8Array(32); // probability state per context
+      this.inv = new Uint8Array(32); // per context: 1 when the likely symbol is "1"
+      this.queue = []; this.mode = 0; this.addr = 0; this.ready = false;
+    }
     start(mode, addr, skip) {
       this.mode = mode > 2 ? 0 : mode; this.addr = addr;
       this.idx.fill(0); this.inv.fill(0); this.queue = [];
-      this.val = this.nextIn(); this.inb = this.nextIn(); this.inCount = 8; this.span = 0xff;
-      this.out = 0; this.out1 = 0; this.lpsH = 0; this.invH = 0;
+      // arithmetic decoder: an 8-bit window on the code stream and the current range
+      this.code = this.nextIn(); this.inByte = this.nextIn(); this.inLeft = 8; this.range = 0xff;
+      this.out = 0; this.out1 = 0; // recently decoded bits / pixels (newest lowest)
       this.order = this.mode === 2 ? Array.from({ length: 16 }, (_, i) => i) : [0, 1, 2, 3];
       this.ready = true;
       for (let i = 0; i < skip; i++) this.next();
     }
     nextIn() { const v = this.readByte(this.addr); this.addr = (this.addr + 1) & 0xffffff; return v; }
-    // decode one binary decision in context `con`; returns 1 for the less likely symbol
+    // Decode one binary decision in context `con`. The context's state gives the
+    // part of the range that belongs to the less likely symbol (at the top);
+    // returns 1 when that symbol was coded, then adapts the context.
     decide(con) {
-      const st = EVOLUTION[this.idx[con]], prob = st[0];
-      let lps;
-      if (this.val <= this.span - prob) { this.span -= prob; lps = 0; } else { this.val -= this.span - (prob - 1); this.span = prob - 1; lps = 1; }
-      let shift = 0;
-      while (this.span < 0x7f) {
-        shift++;
-        this.span = (this.span << 1) | 1;
-        this.val = ((this.val << 1) | (this.inb >> 7)) & 0xff;
-        this.inb = (this.inb << 1) & 0xff;
-        if (--this.inCount === 0) { this.inb = this.nextIn(); this.inCount = 8; }
+      const [prob, onLps, onMps, swap] = EVOLUTION[this.idx[con]];
+      const split = this.range - prob; // likely symbol: codes 0..split
+      let lps = 0;
+      if (this.code > split) { lps = 1; this.code -= split + 1; this.range = prob - 1; } else this.range = split;
+      let renorm = false;
+      while (this.range < 0x7f) { // keep the range above half: shift in more code bits
+        renorm = true;
+        this.range = (this.range << 1) | 1;
+        this.code = ((this.code << 1) | (this.inByte >> 7)) & 0xff;
+        this.inByte = (this.inByte << 1) & 0xff;
+        if (--this.inLeft === 0) { this.inByte = this.nextIn(); this.inLeft = 8; }
       }
-      this.lpsH = ((this.lpsH << 1) | lps) >>> 0;
-      this.invH = ((this.invH << 1) | this.inv[con]) >>> 0;
-      if (lps && st[3]) this.inv[con] ^= 1;
-      if (lps) this.idx[con] = st[1]; else if (shift) this.idx[con] = st[2];
+      if (lps) { this.inv[con] ^= swap; this.idx[con] = onLps; } else if (renorm) this.idx[con] = onMps;
       return lps;
     }
+    // decision in context `con` as a plain 0 / 1 (the likely symbol's value folded in)
+    bitIn(con) { const inv = this.inv[con]; return this.decide(con) ^ inv; }
     next() {
       if (!this.ready) return 0;
       if (!this.queue.length) this.fill();
       return this.queue.shift();
     }
+    // the colour order a pixel's index refers to: the neighbours first, then by recent use
+    pixelOrder(a, b, c) {
+      bump(this.order, a);
+      const r = this.real = this.order.slice();
+      bump(r, c); bump(r, b); bump(r, a);
+      return r;
+    }
     fill() {
-      if (this.mode === 0) { // plain bytes; each bit guessed from the bit 16 places back
-        for (let bit = 0; bit < 8; bit++) {
-          const mask = (1 << (bit & 3)) - 1;
-          let con = mask + ((this.invH & mask) ^ (this.lpsH & mask));
-          if (bit > 3) con += 15;
-          const mps = ((this.out >> 15) & 1) ^ this.inv[con];
-          const lps = this.decide(con);
-          this.out = ((this.out << 1) | (lps ? 1 - mps : mps)) >>> 0;
+      if (this.mode === 0) { // plain bytes, 4 bits at a time down a binary tree of contexts
+        for (let half = 0; half < 2; half++) {
+          let node = 0;
+          for (let k = 0; k < 4; k++) {
+            // a decision of 0 repeats the bit 16 places back, 1 flips it
+            const d = this.bitIn(node + half * 15);
+            this.out = ((this.out << 1) | (d ^ ((this.out >> 15) & 1))) >>> 0;
+            node = 2 * node + 1 + d;
+          }
         }
         this.queue.push(this.out & 0xff);
         return;
       }
-      if (this.mode === 1) { // 2 bitplanes, one 8-pixel row at a time
+      if (this.mode === 1) { // 2 bitplanes: each pixel is 2 decisions, a row of 8 pixels gives 2 bytes
         for (let px = 0; px < 8; px++) {
           const a = this.out & 3, b = (this.out >>> 14) & 3, c = (this.out >>> 16) & 3;
-          let con = shape(a, b, c);
-          toFront(this.order, a);
-          const real = this.real = this.order.slice(); toFront(real, c); toFront(real, b); toFront(real, a);
-          this.decide(con);
-          con = 5 + con * 2 + ((this.lpsH ^ this.invH) & 1);
-          this.decide(con);
-          this.out = ((this.out << 2) | real[(this.lpsH ^ this.invH) & 3]) >>> 0;
+          const r = this.pixelOrder(a, b, c), sh = shape(a, b, c);
+          const d0 = this.bitIn(sh);
+          const d1 = this.bitIn(5 + 2 * sh + d0);
+          this.out = ((this.out << 2) | r[(d0 << 1) | d1]) >>> 0;
         }
-        let p0 = 0, p1 = 0;
-        for (let i = 0; i < 8; i++) { const v = (this.out >>> (14 - 2 * i)) & 3; p0 |= (v & 1) << (7 - i); p1 |= (v >> 1) << (7 - i); }
-        this.queue.push(p0, p1);
+        this.queue.push(...planesOf(this.out, 2));
         return;
       }
-      // mode 2: 4 bitplanes; planes 2-3 of a tile follow its planes 0-1
+      // mode 2: 4 bitplanes; a tile's planes 2-3 follow its planes 0-1
       const hi = [];
       for (let row = 0; row < 8; row++) {
         for (let px = 0; px < 8; px++) {
           const a = this.out & 15, b = (this.out >>> 28) & 15, c = this.out1 & 15;
-          const ref = shape(a, b, c);
-          toFront(this.order, a);
-          const real = this.real = this.order.slice(); toFront(real, c); toFront(real, b); toFront(real, a);
-          let con = 0;
-          for (let bit = 0; bit < 4; bit++) {
-            this.decide(con);
-            con = TREE2[con][(this.lpsH ^ this.invH) & 1] + (con === 1 ? ref : 0);
-          }
+          const r = this.pixelOrder(a, b, c), sh = shape(a, b, c);
+          let path = 0;
+          for (let k = 0; k < 4; k++) path = (path << 1) | this.bitIn(ctxMode2(k, path, sh));
           this.out1 = ((this.out1 << 4) | (this.out >>> 28)) >>> 0;
-          this.out = ((this.out << 4) | real[(this.lpsH ^ this.invH) & 15]) >>> 0;
+          this.out = ((this.out << 4) | r[path]) >>> 0;
         }
-        const pl = [0, 0, 0, 0];
-        for (let i = 0; i < 8; i++) { const v = (this.out >>> (28 - 4 * i)) & 15; for (let k = 0; k < 4; k++) pl[k] |= ((v >> k) & 1) << (7 - i); }
+        const pl = planesOf(this.out, 4);
         this.queue.push(pl[0], pl[1]); hi.push(pl[2], pl[3]);
       }
       this.queue.push(...hi);
     }
     saveState() {
       return { mode: this.mode, addr: this.addr, ready: this.ready, idx: this.idx.slice(), inv: this.inv.slice(), queue: this.queue.slice(),
-        r: [this.val, this.inb, this.inCount, this.span, this.out, this.out1, this.lpsH, this.invH], order: this.order ? this.order.slice() : null };
+        r: [this.code, this.inByte, this.inLeft, this.range, this.out, this.out1], order: this.order ? this.order.slice() : null };
     }
     loadState(o) {
       this.mode = o.mode; this.addr = o.addr; this.ready = o.ready; this.idx.set(o.idx); this.inv.set(o.inv); this.queue = o.queue.slice();
-      [this.val, this.inb, this.inCount, this.span, this.out, this.out1, this.lpsH, this.invH] = o.r; this.order = o.order ? o.order.slice() : null;
+      [this.code, this.inByte, this.inLeft, this.range, this.out, this.out1] = o.r; this.order = o.order ? o.order.slice() : null;
     }
+  }
+  // Split the 8 newest pixels of `bits` (bpp bits each, oldest highest) into bitplane bytes.
+  function planesOf(bits, bpp) {
+    const pl = new Array(bpp).fill(0);
+    for (let i = 0; i < 8; i++) {
+      const v = (bits >>> ((7 - i) * bpp)) & ((1 << bpp) - 1);
+      for (let k = 0; k < bpp; k++) pl[k] |= ((v >> k) & 1) << (7 - i);
+    }
+    return pl;
   }
 
   // ===================================================================
@@ -367,5 +397,5 @@
   }
 
   global.RPSNESChips.push({ name: "SPC7110", detect: (c) => c.chip === 0xf9 || (c.chip === 0xf5 && Kit.mapMode(c) === 0x3a), create: (snes, opts) => new SPC7110(snes, opts) });
-  global.RPSNESSPC7110 = { SPC7110, Decompressor, RTC4513, EVOLUTION, TREE2 };
+  global.RPSNESSPC7110 = { SPC7110, Decompressor, RTC4513, EVOLUTION };
 })(typeof window !== "undefined" ? window : globalThis);
