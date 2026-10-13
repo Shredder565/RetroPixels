@@ -285,29 +285,31 @@ func writeArchive(t *testing.T, data []byte) string {
 // ---------------- range encoder and BCJ2 encoder ----------------
 
 // rangeEncoder is the encoding side of rangeDecoder, used to build BCJ2
-// streams for tests.
+// streams for tests. low is the bottom of the current interval; its bits
+// 24-31 are the next byte to go out. When an addition carries past bit 31
+// the carry is added straight into the bytes already written.
 type rangeEncoder struct {
-	low       uint64
-	rng       uint32
-	cache     byte
-	cacheSize int
-	out       bytes.Buffer
+	low uint64
+	rng uint32
+	out []byte
 }
 
-func newRangeEncoder() *rangeEncoder { return &rangeEncoder{rng: 0xFFFFFFFF, cacheSize: 1} }
+// The stream starts with a zero byte, which the decoder skips.
+func newRangeEncoder() *rangeEncoder { return &rangeEncoder{rng: 0xFFFFFFFF, out: []byte{0}} }
 
-func (e *rangeEncoder) shiftLow() {
-	if uint32(e.low) < 0xFF000000 || e.low >= 1<<32 {
-		carry := byte(e.low >> 32)
-		c := e.cache
-		for ; e.cacheSize > 0; e.cacheSize-- {
-			e.out.WriteByte(c + carry)
-			c = 0xFF
+// emit writes the top byte of low and moves the rest up by eight bits.
+func (e *rangeEncoder) emit() {
+	if e.low > 0xFFFFFFFF {
+		for i := len(e.out) - 1; i >= 0; i-- {
+			e.out[i]++
+			if e.out[i] != 0 {
+				break
+			}
 		}
-		e.cache = byte(e.low >> 24)
+		e.low &= 0xFFFFFFFF
 	}
-	e.cacheSize++
-	e.low = (e.low & 0x00FFFFFF) << 8
+	e.out = append(e.out, byte(e.low>>24))
+	e.low = e.low << 8 & 0xFFFFFFFF
 }
 
 func (e *rangeEncoder) encode(p *uint16, bit bool) {
@@ -323,15 +325,16 @@ func (e *rangeEncoder) encode(p *uint16, bit bool) {
 	}
 	for e.rng < 1<<24 {
 		e.rng <<= 8
-		e.shiftLow()
+		e.emit()
 	}
 }
 
+// flush writes out the four remaining bytes of low.
 func (e *rangeEncoder) flush() []byte {
-	for i := 0; i < 5; i++ {
-		e.shiftLow()
+	for i := 0; i < 4; i++ {
+		e.emit()
 	}
-	return e.out.Bytes()
+	return e.out
 }
 
 // bcj2Encode splits x86 code into the four BCJ2 streams. It converts every

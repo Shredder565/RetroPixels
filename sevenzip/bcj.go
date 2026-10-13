@@ -179,19 +179,21 @@ func (c *arm64Converter) convert(buf []byte, final bool) int {
 		ins := binary.LittleEndian.Uint32(buf[i:])
 		pc := c.pos + uint32(i)
 		switch {
-		case ins>>26 == 0x25: // BL
-			off := ins - pc>>2
-			binary.LittleEndian.PutUint32(buf[i:], 0x94000000|off&0x03FFFFFF)
+		case ins>>26 == 0x25: // BL: the low 26 bits hold an absolute word address
+			target := ins & 0x03FFFFFF
+			rel := (target - pc/4) & 0x03FFFFFF
+			binary.LittleEndian.PutUint32(buf[i:], 0x94000000|rel)
 		case ins&0x9F000000 == 0x90000000: // ADRP
-			page := ins>>29&3 | ins>>3&0x001FFFFC
-			if (page+0x00020000)&0x001C0000 != 0 {
-				continue
+			// The 21-bit page number is split: two low bits at 29-30, the
+			// other nineteen at 5-23.
+			page := int32((ins>>29&3|(ins>>5&0x7FFFF)<<2)<<11) >> 11
+			if page < -1<<17 || page >= 1<<17 {
+				continue // outside +-512 MiB: the encoder left it alone
 			}
-			page -= pc >> 12
-			ins &= 0x9000001F
-			ins |= (page & 3) << 29
-			ins |= (page & 0x0003FFFC) << 3
-			ins |= -(page & 0x00020000) & 0x00E00000
+			// Back to relative, kept as an 18-bit signed value.
+			rel := int32((uint32(page)-pc>>12)<<14) >> 14
+			field := uint32(rel) & 0x1FFFFF
+			ins = ins&0x9000001F | (field&3)<<29 | (field>>2)<<5
 			binary.LittleEndian.PutUint32(buf[i:], ins)
 		}
 	}
