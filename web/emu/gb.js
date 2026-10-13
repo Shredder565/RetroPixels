@@ -316,9 +316,9 @@
       else { this.a = 0x01; this.f = 0xb0; this.b = 0x00; this.c = 0x13; this.d = 0x00; this.e = 0xd8; this.h = 0x01; this.l = 0x4d; }
       this.sp = 0xfffe; this.pc = 0x100;
       this.ime = false; this.eiDelay = 0; this.halted = false; this.haltBug = false; this.stopped = false;
-      this.div = this.cgb ? 0x1ea0 : 0xabcc; this.tima = 0; this.tma = 0; this.tac = 0xf8; this.timaReload = 0;
+      this.div = this.cgb ? 0x1ea0 : 0xabc8; this.tima = 0; this.tma = 0; this.tac = 0xf8; this.timaReload = 0;
       this.ly = 0; this.lineDot = 0; this.mode = 2; this.statLine = false; this.winLine = 0; this.frameDone = false;
-      this.lyReg = 0; this.lyCmp = 0; this.m3end = 256; this.firstLine = false; this.oamLock = false; this.vramLock = false;
+      this.lyReg = 0; this.lyCmp = 0; this.m3end = 256; this.firstLine = false; this.oamLock = false; this.vramLock = false; this.oamWLock = false; this.vramWLock = false; this.lycFlag = false;
       this.double = false; this.key1 = 0;
       this.hdmaSrc = 0; this.hdmaDst = 0; this.hdmaLen = 0; this.hdmaActive = false;
       this.cycles = 0;
@@ -332,7 +332,7 @@
         [0xff1a, 0x7f], [0xff1b, 0xff], [0xff1c, 0x9f], [0xff1e, 0xbf], [0xff20, 0xff], [0xff21, 0x00], [0xff22, 0x00], [0xff23, 0xbf],
         [0xff24, 0x77], [0xff25, 0xf3]];
       for (const [a, v] of apuInit) if ((a & 0xf) % 5 !== 4 || a === 0xff24) this.apu.write(a, v); else this.apu.regs[a - 0xff10] = v;
-      this.apu.ch[0].on = false;
+      this.apu.ch[0].on = true; this.apu.ch[0].vol = 0; // the start-up chime's channel is left on, silent
       if (this.cgb) for (let i = 0; i < 64; i++) this.bgPal[i] = 0xff;
     }
 
@@ -346,7 +346,6 @@
       this.ppuTick(t);
       this.ppuNewIf = this.if & ~ifBefore;
       this.apu.tick(t);
-      if (this.serialTimer > 0 && (this.serialTimer -= 4) <= 0) { this.io[1] = 0xff; this.io[2] &= 0x7f; this.if |= 8; }
     }
     // DIV is a 16-bit counter; TIMA counts falling edges of one of its bits.
     timerTick() {
@@ -358,6 +357,11 @@
       const old = this.div;
       this.div = (this.div + 4) & 0xffff;
       this.timerEdge(old, this.div);
+      // serial port with its own clock: one bit per falling edge of a divider bit (8192 Hz, or 262144 Hz on Color)
+      if (this.serialBits) {
+        const bit = this.cgb && (this.io[2] & 2) ? 3 : 8;
+        if (((old >> bit) & 1) && !((this.div >> bit) & 1) && --this.serialBits === 0) { this.io[1] = 0xff; this.io[2] &= 0x7f; this.if |= 8; }
+      }
     }
     timerBit() { return [9, 3, 5, 7][this.tac & 3]; }
     timerEdge(old, now) {
@@ -414,12 +418,12 @@
     }
     write(a, v) {
       if (a < 0x8000) { this.cart.romWrite(a, v); return; }
-      if (a < 0xa000) { if (!this.vramLock) this.vram[this.vbank * 0x2000 + (a & 0x1fff)] = v; return; }
+      if (a < 0xa000) { if (!this.vramWLock) this.vram[this.vbank * 0x2000 + (a & 0x1fff)] = v; return; }
       if (a < 0xc000) { this.cart.ramWrite(a, v); return; }
       if (a < 0xd000) { this.wram[a & 0xfff] = v; return; }
       if (a < 0xe000) { this.wram[this.wbank * 0x1000 + (a & 0xfff)] = v; return; }
       if (a < 0xfe00) { this.write(a - 0x2000, v); return; }
-      if (a < 0xfea0) { if (!this.oamLock) this.oam[a - 0xfe00] = v; return; }
+      if (a < 0xfea0) { if (!this.oamWLock) this.oam[a - 0xfe00] = v; return; }
       if (a < 0xff00) return;
       if (a < 0xff80) { this.ioWrite(a, v); return; }
       if (a < 0xffff) { this.hram[a - 0xff80] = v; return; }
@@ -443,7 +447,7 @@
         case 0x06: return this.tma;
         case 0x07: return this.tac | 0xf8;
         case 0x0f: return this.if | 0xe0;
-        case 0x41: return 0x80 | (this.io[0x41] & 0x78) | (this.lyCmp === this.io[0x45] ? 4 : 0) | (this.lcdOn() ? this.mode : 0);
+        case 0x41: return 0x80 | (this.io[0x41] & 0x78) | (this.lycFlag ? 4 : 0) | (this.lcdOn() ? this.mode : 0);
         case 0x44: return this.lyReg;
         case 0x4d: return this.cgb ? (this.double ? 0x80 : 0) | (this.key1 & 1) | 0x7e : 0xff;
         case 0x4f: return this.cgb ? 0xfe | this.vbank : 0xff;
@@ -465,7 +469,7 @@
         case 0x01: this.io[1] = v; return;
         case 0x02:
           this.io[2] = v;
-          if ((v & 0x81) === 0x81) { this.serialOut += String.fromCharCode(this.io[1]); this.serialTimer = 8 * 512; }
+          if ((v & 0x81) === 0x81) { this.serialOut += String.fromCharCode(this.io[1]); this.serialBits = 8; } else this.serialBits = 0;
           return;
         case 0x04: { const old = this.div; this.div = 0; this.timerEdge(old, 0); return; }
         case 0x05: if (!this.timaJustLoaded) { this.tima = v; this.timaReload = 0; } return; // a write in the 0 cycle cancels the reload
@@ -483,7 +487,7 @@
           const was = this.lcdOn();
           this.io[0x40] = v;
           if (was && !(v & 0x80)) {
-            this.ly = this.lyReg = this.lyCmp = 0; this.lineDot = 0; this.mode = 0; this.oamLock = this.vramLock = false;
+            this.ly = this.lyReg = this.lyCmp = 0; this.lineDot = 0; this.mode = 0; this.oamLock = this.vramLock = this.oamWLock = this.vramWLock = false;
             this.screen.fill(this.cgb ? 0xffffffff : this.dmgPalette[0]);
           }
           // Switched on: line 0 starts in mode 0 (no OAM scan) and runs a little late.
@@ -532,11 +536,14 @@
     // ---- PPU ----
     // The STAT interrupt line is the OR of the enabled sources; an interrupt is requested on its rising edge.
     checkStat() {
+      // With the screen off nothing changes: the LY=LYC flag and the interrupt line keep their state.
+      if (!this.lcdOn()) return;
       const st = this.io[0x41], d = this.lineDot, ly = this.ly;
+      this.lycFlag = this.lyCmp === this.io[0x45];
       let line = false;
-      if (this.lcdOn()) {
+      {
         const vis = ly < 144;
-        line = ((st & 0x40) && this.lyCmp === this.io[0x45]) ||
+        line = ((st & 0x40) && this.lycFlag) ||
           ((st & 0x08) && vis && (this.mode === 0 || (this.mode === 3 && d >= this.m3end - 4))) ||
           ((st & 0x10) && !vis) ||
           ((st & 0x20) && this.mode2Source(ly, d));
@@ -578,6 +585,9 @@
         this.mode = mode;
         this.oamLock = this.firstLine ? (d >= 84 && d < this.m3end) : d < this.m3end;
         this.vramLock = d >= (this.firstLine ? 84 : 80) && d < this.m3end;
+        // writes are refused a little later than reads
+        this.oamWLock = this.firstLine ? this.oamLock : (d >= 4 && d < 80) || (d >= 84 && d < this.m3end);
+        this.vramWLock = d >= 84 && d < this.m3end;
         this.lyReg = ly;
         this.lyCmp = d < 4 && !this.firstLine ? -1 : ly;
         if (mode === 3 && d >= this.m3end) this.m3end = 456;
@@ -591,7 +601,7 @@
           if (ly === 153) { this.lyReg = d < 4 ? 153 : 0; this.lyCmp = d < 4 ? -1 : d < 8 ? 153 : 0; }
           else { this.lyReg = ly; this.lyCmp = d < 4 ? -1 : ly; }
         }
-        this.oamLock = this.vramLock = false;
+        this.oamLock = this.vramLock = this.oamWLock = this.vramWLock = false;
       }
       this.checkStat();
     }
@@ -609,13 +619,16 @@
           if (this.ly >= sy && this.ly < sy + h) xs.push(this.oam[i * 4 + 1]);
         }
         xs.sort((a, b) => a - b);
+        // each object costs 6 dots, plus a wait for the background fetch of the first object in a tile
         const seen = new Set();
+        let pen = 0;
         for (const x of xs) {
           if (x >= 168) continue;
           const px = x + scx, tile = px >> 3;
-          len += 6;
-          if (!seen.has(tile)) { seen.add(tile); len += Math.max(0, 5 - (px & 7)); }
+          pen += 6;
+          if (!seen.has(tile)) { seen.add(tile); pen += Math.max(0, 5 - (px & 7)); }
         }
+        if (pen) len += pen - 3; // the last fetch overlaps the end of the line
       }
       return len;
     }
@@ -905,7 +918,7 @@
     saveState() {
       const regs = {};
       for (const k of ["a", "f", "b", "c", "d", "e", "h", "l", "sp", "pc", "ime", "eiDelay", "halted", "haltBug", "stopped", "div", "tima", "tma", "tac",
-        "timaReload", "timaJustLoaded", "ly", "lyReg", "lyCmp", "m3end", "firstLine", "oamLock", "vramLock", "lineDot", "mode", "statLine", "winLine", "double", "key1", "hdmaSrc", "hdmaDst", "hdmaLen", "hdmaActive", "vbank", "wbank",
+        "timaReload", "timaJustLoaded", "ly", "lyReg", "lyCmp", "m3end", "firstLine", "oamLock", "vramLock", "oamWLock", "vramWLock", "lycFlag", "serialBits", "lineDot", "mode", "statLine", "winLine", "double", "key1", "hdmaSrc", "hdmaDst", "hdmaLen", "hdmaActive", "vbank", "wbank",
         "bcps", "ocps", "ie", "if", "joyp", "cycles", "locked", "lcdOffDots",
         "dmaActive", "dmaDelay", "dmaIdx", "dmaBase", "dmaReq", "dmaByte"]) regs[k] = this[k];
       return { v: 1, regs, vram: this.vram, wram: this.wram, oam: this.oam, hram: this.hram, io: this.io, bgPal: this.bgPal, obPal: this.obPal,
