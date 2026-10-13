@@ -57,7 +57,8 @@
       this.push(brk ? (this.p | U | B) : ((this.p | U) & ~B));
       this.p |= I;
       // An NMI arriving during a BRK/IRQ takes over its vector.
-      if (vector === 0xfffe && this.nmiPending) { vector = 0xfffa; this.nmiPending = false; }
+      // (With machine polling, only an NMI already sampled by this point counts.)
+      if (vector === 0xfffe && (this.machinePolls ? this.pollNmi : this.nmiPending)) { vector = 0xfffa; this.nmiPending = false; }
       this.pc = this.rd(vector) | (this.rd(vector + 1) << 8);
     }
 
@@ -77,8 +78,8 @@
       const op = this.fetch();
       this.ops[op].call(this);
       if (this.branchPoll) { this.pollNmi = this.branchPoll[0]; this.pollIrq = this.branchPoll[1]; }
-      this.prevNmi = this.pollNmi;
-      this.prevIrq = this.pollIrq;
+      if (op === 0x00) { this.prevNmi = false; this.prevIrq = false; } // like any interrupt, BRK's handler runs one instruction first
+      else { this.prevNmi = this.pollNmi; this.prevIrq = this.pollIrq; }
       return this.cycles - start;
     }
 
@@ -286,7 +287,7 @@
         this.p = (this.pull() & ~B) | U;
         const lo = this.pull(); this.pc = lo | (this.pull() << 8);
       };
-      t[0x00] = function () { this.fetch(); this.interrupt(0xfffe, true); this.prevNmi = false; };
+      t[0x00] = function () { this.fetch(); this.interrupt(0xfffe, true); };
 
       // branches
       t[0x10] = function () { this.branch(!(this.p & N)); };
