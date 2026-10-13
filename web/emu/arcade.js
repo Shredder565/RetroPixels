@@ -144,17 +144,26 @@
     files = normFiles(files);
     const zip = baseName(zipName || "").replace(/\.[^.]*$/, "");
     const games = allGames();
-    if (zip) { const hit = games.find((g) => g.game.id === zip); if (hit) return hit; }
-    let best = null, bestFound = 0;
-    for (const g of games) {
-      const c = check(g.game, files);
-      if (c.ok && c.found > bestFound) { best = g; bestFound = c.found; }
-    }
-    return best;
+    // A game can be listed more than once (different dumps of the same chips): take the
+    // listing whose files are all there, else the one with the most files there.
+    const pick = (list, needOk) => {
+      let best = null, bestScore = -1;
+      for (const g of list) {
+        const c = check(g.game, files);
+        if (needOk && !c.ok) continue;
+        const score = (c.ok ? 10000 : 0) + c.found;
+        if (score > bestScore) { best = g; bestScore = score; }
+      }
+      return best;
+    };
+    if (zip) { const named = games.filter((g) => g.game.id === zip); if (named.length) return pick(named, false); }
+    return pick(games, true);
   };
 
   RPArcade.supportedText = function () {
-    return allGames().map((g) => `${g.game.title} (${g.game.id}.zip)`).join(", ") || "none yet";
+    const seen = new Set(), names = [];
+    for (const g of allGames()) if (!seen.has(g.game.id)) { seen.add(g.game.id); names.push(`${g.game.title} (${g.game.id}.zip)`); }
+    return names.join(", ") || "none yet";
   };
 
   // The friendly error when a set can't be used.
@@ -165,8 +174,8 @@
     if (c.missing.length) parts.push(`${zip} is missing ${c.missing.length === 1 ? "this chip file" : "these chip files"} for ${game.title}: ${c.missing.join(", ")}.`);
     if (c.wrongSize.length) parts.push(`${c.wrongSize.length === 1 ? "This file is" : "These files are"} the wrong size: ` +
       c.wrongSize.map((w) => `${w.name} (${w.actual.toLocaleString()} bytes, should be ${w.size.toLocaleString()})`).join(", ") + ".");
-    if (game.parent) parts.push(`${game.title} is a version of the game in ${game.parent}.zip, so some of its chips may be in that set: use a full (non-merged) ROM set, or add the missing files into ${zip}.`);
-    else parts.push("Use a complete ROM set for this game.");
+    if (game.parent && c.missing.length) parts.push(`${game.title} is a version of the game in ${game.parent}.zip, so some of its chips may be in that set: use a full (non-merged) ROM set, or add the missing files into ${zip}.`);
+    else parts.push(c.missing.length ? "Use a complete ROM set for this game." : "The set may be a different version of the game, or damaged.");
     return new Error(parts.join(" "));
   }
 
