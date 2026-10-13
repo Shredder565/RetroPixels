@@ -149,10 +149,20 @@
     constructor(cart) {
       super(cart);
       this.shift = 0x10; this.ctrl = 0x0c; this.chr0 = 0; this.chr1 = 0; this.prgReg = 0; this.lastWrite = -10;
+      // SOROM / SXROM boards have 16-32 KB of RAM, banked by CHR register bits.
+      const ram = (cart.prgRamSize || 0) + (cart.prgNvramSize || 0);
+      if (ram > 0x2000) this.prgRam = new Uint8Array(ram);
+      this.ramBank = 0;
+      this.canDisableRam = cart.mapper === 1; // the MMC1A (mapper 155) can't switch its RAM off
+      this.noRam = cart.nes2 && ram === 0;
       this.update();
     }
+    cpuRead(a) {
+      if (a >= 0x6000 && a < 0x8000) return !this.noRam && (this.ramEnabled || !this.canDisableRam) ? this.prgRam[this.ramBank + (a & 0x1fff)] : -1;
+      return super.cpuRead(a);
+    }
     cpuWrite(a, v) {
-      if (a < 0x8000) return super.cpuWrite(a, v);
+      if (a < 0x8000) { if (a >= 0x6000 && (this.ramEnabled || !this.canDisableRam)) this.prgRam[this.ramBank + (a & 0x1fff)] = v; return; }
       // Writes on back-to-back cycles (from RMW instructions) are ignored by the chip.
       const now = this.cart.cpuCycles(); const consecutive = now - this.lastWrite < 2; this.lastWrite = now;
       if (v & 0x80) { this.shift = 0x10; this.ctrl |= 0x0c; this.update(); return; }
@@ -183,6 +193,8 @@
       if (this.ctrl & 0x10) { this.setChr4(0, this.chr0); this.setChr4(1, this.chr1); }
       else this.setChr8(this.chr0 >> 1);
       this.ramEnabled = !(this.prgReg & 0x10);
+      const banks = this.prgRam.length >> 13;
+      this.ramBank = banks > 1 ? (((this.chr0 >> 2) & 3) % banks) << 13 : 0;
     }
     regs() { return [this.shift, this.ctrl, this.chr0, this.chr1, this.prgReg]; }
     setRegs(r) { [this.shift, this.ctrl, this.chr0, this.chr1, this.prgReg] = r; this.update(); }
@@ -207,14 +219,22 @@
       this.irqLatch = 0; this.irqCounter = 0; this.irqReload = false; this.irqEnable = false;
       this.lastA12 = 0; this.a12LowSince = 0;
       this.fourScreen = cart.mirror === MIRROR.FOUR;
+      // $A001 RAM enable/write-protect. Old (iNES) headers can't tell MMC3 from MMC6 games,
+      // whose RAM control works differently, so it's only honoured for NES 2.0 MMC3 headers.
+      this.ramCtl = 0x80; this.useRamCtl = (cart.mapper === 4 || cart.mapper === 118 || cart.mapper === 119) && cart.nes2 && cart.submapper !== 1;
+      this.revA = cart.mapper === 4 && cart.submapper === 4; // MMC3A: no IRQ on a natural reload to 0
       this.update();
     }
+    cpuRead(a) {
+      if (a >= 0x6000 && a < 0x8000 && this.useRamCtl && !(this.ramCtl & 0x80)) return -1;
+      return super.cpuRead(a);
+    }
     cpuWrite(a, v) {
-      if (a < 0x8000) return super.cpuWrite(a, v);
+      if (a < 0x8000) { if (!this.useRamCtl || (this.ramCtl & 0xc0) === 0x80) super.cpuWrite(a, v); return; }
       const even = !(a & 1);
       switch (a & 0xe000) {
         case 0x8000: if (even) this.bankSel = v; else this.r[this.bankSel & 7] = v; this.update(); break;
-        case 0xa000: if (even && !this.fourScreen) this.mirror = v & 1 ? MIRROR.H : MIRROR.V; break;
+        case 0xa000: if (even) { if (!this.fourScreen) this.mirror = v & 1 ? MIRROR.H : MIRROR.V; } else this.ramCtl = v; break;
         case 0xc000: if (even) this.irqLatch = v; else { this.irqCounter = 0; this.irqReload = true; } break;
         case 0xe000: if (even) { this.irqEnable = false; this.irq = false; } else this.irqEnable = true; break;
       }
@@ -242,9 +262,10 @@
     }
     ppuRead(a) { this.ppuAddr(a); return super.ppuRead(a); }
     clockIrq() {
+      const was = this.irqCounter, forced = this.irqReload;
       if (this.irqCounter === 0 || this.irqReload) { this.irqCounter = this.irqLatch; this.irqReload = false; }
       else this.irqCounter--;
-      if (this.irqCounter === 0 && this.irqEnable) this.irq = true;
+      if (this.irqCounter === 0 && this.irqEnable && (!this.revA || was !== 0 || forced)) this.irq = true;
     }
     regs() { return [this.bankSel, ...this.r, this.irqLatch, this.irqCounter, this.irqReload ? 1 : 0, this.irqEnable ? 1 : 0, this.lastA12, this.a12LowSince]; }
     setRegs(x) {
@@ -306,13 +327,16 @@
     cpuWrite(a, v) { if (a >= 0x8000) this.setChr4(1, v & 3); else super.cpuWrite(a, v); }
   }
 
-  // 34 — BNROM / NINA-001
+  // 34 — BNROM / NINA-001 (NINA-001 boards have CHR ROM; BNROM has CHR RAM)
   class M34 extends Mapper {
+    constructor(cart) { super(cart); this.nina = cart.submapper === 1 || (cart.submapper !== 2 && !cart.chrRam); }
     cpuWrite(a, v) {
-      if (a >= 0x8000) { this.setPrg32(v); return; }
-      if (a === 0x7ffd) this.setPrg32(v & 1);
-      else if (a === 0x7ffe && this.chr.length > 0x2000) this.setChr4(0, v & 15);
-      else if (a === 0x7fff && this.chr.length > 0x2000) this.setChr4(1, v & 15);
+      if (a >= 0x8000) { if (!this.nina) this.setPrg32(v & this.cpuRead(a)); return; }
+      if (this.nina) {
+        if (a === 0x7ffd) this.setPrg32(v & 1);
+        else if (a === 0x7ffe) this.setChr4(0, v & 15);
+        else if (a === 0x7fff) this.setChr4(1, v & 15);
+      }
       super.cpuWrite(a, v);
     }
   }
