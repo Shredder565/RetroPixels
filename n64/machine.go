@@ -77,10 +77,10 @@ const (
 )
 
 type spRegs struct {
-	memAddr, dramAddr  uint32 // addresses for the next DMA (as written)
-	curMem, curDram    uint32 // where the last DMA got to (as read)
-	length             uint32 // length register as read back
-	status, semaphore  uint32
+	memAddr, dramAddr uint32 // addresses for the next DMA (as written)
+	curMem, curDram   uint32 // where the last DMA got to (as read)
+	length            uint32 // length register as read back
+	status, semaphore uint32
 }
 
 type dpRegs struct {
