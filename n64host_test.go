@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The test ROM comes from RP_N64_TEST_ROM (a CPU test that draws text works best).
@@ -151,7 +152,15 @@ func TestN64Session(t *testing.T) {
 		}
 	}
 	c.c.Close()
-	if code, _ := get("GET", nil); code != http.StatusNotFound {
+	// the server frees the session just after it answers the close
+	code = 0
+	for i := 0; i < 100; i++ {
+		if code, _ = get("GET", nil); code == http.StatusNotFound {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if code != http.StatusNotFound {
 		t.Fatalf("session still there after close: %d", code)
 	}
 }
