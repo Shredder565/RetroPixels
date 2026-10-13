@@ -522,16 +522,24 @@
       if (off >= 0x40 && off < 0x80) this.dpcWrite(off, v);
       else if (off === 0xff8 || off === 0xff9) this.bank = off - 0xff8;
     }
+    // Fetchers 5-7 in music mode count their low byte down at 20 kHz (from
+    // their top value to 0, then round again). The flag is set while the count
+    // is above the bottom value: a square wave.
     dpcMusic(m) {
-      const clocks = Math.floor((m.cycles - this.musicCycles) * 20000 / (CLOCK / 3));
-      if (clocks <= 0) return;
-      this.musicCycles += clocks * (CLOCK / 3) / 20000;
-      for (let x = 5; x < 8; x++) if (this.music[x - 5]) {
-        const top = this.tops[x] + 1;
-        let low = this.counters[x] & 0xff;
-        if (this.tops[x] !== 0) { low -= clocks % top; if (low < 0) low += top; } else low = 0;
-        if (low <= this.bottoms[x]) this.flags[x] = 0; else if (low <= this.tops[x]) this.flags[x] = 0xff;
-        this.counters[x] = (this.counters[x] & 0x700) | low;
+      const ticks = Math.floor((m.cycles - this.musicCycles) * 20000 / (CLOCK / 3));
+      if (ticks <= 0) return;
+      this.musicCycles += ticks * (CLOCK / 3) / 20000;
+      for (let ch = 0; ch < 3; ch++) {
+        const f = 5 + ch, top = this.tops[f];
+        if (!this.music[ch]) continue;
+        let count = 0;
+        if (top) {
+          count = (this.counters[f] & 0xff) - ticks % (top + 1);
+          if (count < 0) count += top + 1;
+        }
+        if (count <= this.bottoms[f]) this.flags[f] = 0;
+        else if (count <= top) this.flags[f] = 0xff;
+        this.counters[f] = (this.counters[f] & 0x700) | count;
       }
     }
     dpcRead(off, m) {
@@ -540,8 +548,10 @@
       const i = off & 7, fn = (off >> 3) & 7;
       if (fn === 0 && i >= 4) {
         this.dpcMusic(m);
-        const k = (this.music[0] && this.flags[5] ? 1 : 0) | (this.music[1] && this.flags[6] ? 2 : 0) | (this.music[2] && this.flags[7] ? 4 : 0);
-        return [0x00, 0x04, 0x05, 0x09, 0x06, 0x0a, 0x0b, 0x0f][k];
+        // the three square waves, mixed with weights 4, 5 and 6 into a 4-bit level
+        let level = 0;
+        for (let ch = 0; ch < 3; ch++) if (this.music[ch] && this.flags[5 + ch]) level += 4 + ch;
+        return level;
       }
       if ((this.counters[i] & 0xff) === this.tops[i]) this.flags[i] = 0xff;
       else if ((this.counters[i] & 0xff) === this.bottoms[i]) this.flags[i] = 0;
