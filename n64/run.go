@@ -49,8 +49,11 @@ func (m *Machine) runCycles(n uint64) {
 		if c.compareAt < limit {
 			limit = c.compareAt
 		}
-		start := c.Cycles
-		m.idle = false
+		// The RSP runs first, up to the end of this slice (at 2/3 of the
+		// CPU clock), so work the CPU hands it is done by the time the CPU
+		// looks again.
+		m.runRSP(limit)
+		m.stop = false
 		for c.Cycles < limit {
 			if c.irqPending {
 				c.irqPending = false
@@ -58,14 +61,16 @@ func (m *Machine) runCycles(n uint64) {
 			}
 			c.Step()
 			c.Cycles++
-			if m.idle {
-				c.Cycles = limit
+			if m.stop {
 				break
 			}
 		}
-		// the RSP runs at 2/3 of the CPU clock
-		if m.sp.status&1 == 0 {
-			m.RSP.run(int((c.Cycles - start) * 2 / 3))
+		if m.idle {
+			// waiting in a loop for an interrupt: skip ahead
+			m.idle = false
+			if c.Cycles < limit {
+				c.Cycles = limit
+			}
 		}
 		if c.Cycles >= c.compareAt {
 			c.cop0[c0Cause] |= 1 << 15
@@ -77,4 +82,19 @@ func (m *Machine) runCycles(n uint64) {
 			c.irqPending = true
 		}
 	}
+}
+
+// runRSP lets the RSP catch up with CPU time t.
+func (m *Machine) runRSP(t uint64) {
+	if m.sp.status&1 != 0 || t <= m.rspTime {
+		if m.rspTime < t && m.sp.status&1 != 0 {
+			m.rspTime = t
+		}
+		return
+	}
+	d := t - m.rspTime
+	m.rspTime = t
+	m.rspFrac += d * 2
+	m.RSP.run(int(m.rspFrac / 3))
+	m.rspFrac %= 3
 }

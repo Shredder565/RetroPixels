@@ -390,6 +390,7 @@ func (c *CPU) branch(cond bool, target uint64) {
 		if target == c.curPC && c.m.idleSkip {
 			if p, ok := c.translate(c.curPC+4, false); ok && c.m.read32(p) == 0 {
 				c.m.idle = true
+				c.m.stop = true
 			}
 		}
 	}

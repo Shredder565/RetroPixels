@@ -57,6 +57,13 @@ func (r *RSP) reset() {
 	r.next = 4
 }
 
+// setPC moves the RSP to a new address (from the CPU side).
+func (r *RSP) setPC(v uint32) {
+	r.pc = v & 0xffc
+	r.next = (r.pc + 4) & 0xffc
+	r.nDelay = false
+}
+
 func (r *RSP) dmem() []byte { return r.m.spmem[:0x1000] }
 
 // ---------------------------------------------------------------------
@@ -67,13 +74,11 @@ func (m *Machine) spRead(r uint32) uint32 {
 	sp := &m.sp
 	switch r {
 	case 0:
-		return sp.memAddr
+		return sp.curMem
 	case 1:
-		return sp.dramAddr
-	case 2:
-		return sp.rdLen
-	case 3:
-		return sp.wrLen
+		return sp.curDram
+	case 2, 3:
+		return sp.length
 	case 4:
 		return sp.status
 	case 5, 6:
@@ -94,10 +99,8 @@ func (m *Machine) spWrite(r uint32, v uint32) {
 	case 1:
 		sp.dramAddr = v & 0xfffff8
 	case 2:
-		sp.rdLen = v
 		m.spDMA(v, true)
 	case 3:
-		sp.wrLen = v
 		m.spDMA(v, false)
 	case 4:
 		m.spStatusWrite(v)
@@ -108,8 +111,11 @@ func (m *Machine) spWrite(r uint32, v uint32) {
 
 func (m *Machine) spStatusWrite(v uint32) {
 	s := m.sp.status
-	if v&1 != 0 {
+	if v&1 != 0 && s&1 != 0 {
+		// starting: let the RSP run before the CPU goes on
 		s &^= 1
+		m.rspTime = m.CPU.Cycles
+		m.stop = true
 	}
 	if v&2 != 0 {
 		s |= 1
@@ -146,37 +152,39 @@ func (m *Machine) spStatusWrite(v uint32) {
 	m.sp.status = s
 }
 
+// spDMA copies count rows of length bytes between RDRAM and DMEM/IMEM, skipping
+// skip bytes in RDRAM between rows. The written address registers stay as
+// they are for the next transfer; reads show where this one ended.
 func (m *Machine) spDMA(v uint32, toSP bool) {
 	sp := &m.sp
 	length := ((v & 0xfff) | 7) + 1
 	count := ((v >> 12) & 0xff) + 1
-	skip := (v >> 20) & 0xff8
+	skip := (v >> 20) & 0xfff
 	mem := sp.memAddr & 0x1000
 	ma := sp.memAddr & 0xff8
 	da := sp.dramAddr & 0xfffff8
 	for c := uint32(0); c < count; c++ {
-		for i := uint32(0); i < length; i += 4 {
-			sa := mem | ((ma + i) & 0xffc)
-			d := (da + i) & 0xfffffc
-			if d+3 >= rdramSize {
+		if c > 0 {
+			da = (da + skip) & 0xfffff8
+		}
+		for i := uint32(0); i < length; i += 8 {
+			sa := mem | ((ma + i) & 0xff8)
+			d := (da + i) & 0xfffff8
+			if d+8 > rdramSize {
 				continue
 			}
 			if toSP {
-				copy(m.spmem[sa:sa+4], m.rdram[d:d+4])
+				copy(m.spmem[sa:sa+8], m.rdram[d:d+8])
 			} else {
-				copy(m.rdram[d:d+4], m.spmem[sa:sa+4])
+				copy(m.rdram[d:d+8], m.spmem[sa:sa+8])
 			}
 		}
 		ma = (ma + length) & 0xff8
-		da = (da + length + skip) & 0xfffff8
+		da = (da + length) & 0xfffff8
 	}
-	sp.memAddr = mem | ma
-	sp.dramAddr = da
-	if toSP {
-		sp.rdLen = 0xff8
-	} else {
-		sp.wrLen = 0xff8
-	}
+	sp.curMem = mem | ma
+	sp.curDram = da
+	sp.length = skip<<20 | 0xff8
 }
 
 // ---------------------------------------------------------------------
@@ -868,7 +876,8 @@ func (r *RSP) cop2(op uint32) {
 		for i := 0; i < 8; i++ {
 			setAccLo(acc, i, t[i])
 		}
-		r.vr[vd][de] = t[e&7]
+		// the source lane is the destination lane after the element pattern
+		r.vr[vd][de] = t[de]
 		return
 	case 0x37, 0x3f: // VNOP / VNULL
 		return

@@ -57,7 +57,10 @@ type Machine struct {
 	// settings
 	CPUSpeed float64 // instructions per cycle multiplier (1 = one instruction per CPU cycle)
 	idleSkip bool
-	idle     bool
+	idle     bool   // the CPU is spinning in a wait loop
+	stop     bool   // end the CPU's current time slice early
+	rspTime  uint64 // CPU time the RSP has run up to
+	rspFrac  uint64
 	viField  uint32
 }
 
@@ -74,7 +77,10 @@ const (
 )
 
 type spRegs struct {
-	memAddr, dramAddr, rdLen, wrLen, status, semaphore uint32
+	memAddr, dramAddr  uint32 // addresses for the next DMA (as written)
+	curMem, curDram    uint32 // where the last DMA got to (as read)
+	length             uint32 // length register as read back
+	status, semaphore  uint32
 }
 
 type dpRegs struct {
@@ -371,7 +377,7 @@ func (m *Machine) writeIO(p uint32, v uint32) {
 	case p >= 0x04040000 && p < 0x04040020:
 		m.spWrite((p>>2)&7, v)
 	case p == 0x04080000:
-		m.RSP.pc = v & 0xffc
+		m.RSP.setPC(v)
 	case p >= 0x04100000 && p < 0x04100020:
 		m.dpWrite((p>>2)&7, v)
 	case p >= 0x04300000 && p < 0x04300010:
