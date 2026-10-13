@@ -74,23 +74,29 @@ func (m *Machine) hleBoot() {
 	g[23] = 0
 	g[29] = 0xffffffffa4001ff0
 	g[31] = 0xffffffffa4001550
-	c.cop0[c0Status] = 0x34000000
-	c.cop0[c0Config] = 0x0006e463
+	// COP0 as the boot code leaves it
+	c.cop0[c0Status] = 0x241000e0
+	c.cop0[c0Config] = 0x7006e463
+	c.cop0[c0Cause] = 0xb000007c
+	c.cop0[c0EPC] = 0xffffffffffffffff
+	c.cop0[c0ErrorEPC] = 0xffffffffffffffff
 	c.writeCop0(c0Count, 0x5000)
 	c.cop0[c0Compare] = 0
 	c.updateCompare()
 	// memory size the game reads
-	memSizeAt := uint32(0x318)
-	if m.cic == cic6105 {
-		memSizeAt = 0x3f0
+	binary.BigEndian.PutUint32(m.rdram[0x318:], rdramSize)
+	if m.cic == cic6105 { // the 6105 boot code keeps it here as well
+		binary.BigEndian.PutUint32(m.rdram[0x3f0:], rdramSize)
 	}
-	binary.BigEndian.PutUint32(m.rdram[memSizeAt:], rdramSize)
 	// PI timing from the header
-	m.pi[5] = uint32(m.rom[3])        // DOM1 latency
-	m.pi[6] = uint32(m.rom[2])        // DOM1 pulse width
-	m.pi[7] = uint32(m.rom[1]) & 15   // DOM1 page size
-	m.pi[8] = uint32(m.rom[1]) >> 4   // DOM1 release
-	m.sp.status = 1                   // RSP halted
+	m.pi[5] = uint32(m.rom[3])      // DOM1 latency
+	m.pi[6] = uint32(m.rom[2])      // DOM1 pulse width
+	m.pi[7] = uint32(m.rom[1]) & 15 // DOM1 page size
+	m.pi[8] = uint32(m.rom[1]) >> 4 // DOM1 release
+	// PI registers as the boot code's last transfer leaves them
+	m.pi[0] = dst + 0x100000
+	m.pi[1] = 0x1000000c
+	m.sp.status = 1 // RSP halted
 	m.vi[0] = 0
 	m.ri = [8]uint32{0x0e, 0x40, 0x336, 0x14, 0, 0, 0, 0}
 	// PIF RAM: the 6105 boot leaves a value here that some games check

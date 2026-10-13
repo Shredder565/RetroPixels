@@ -3,11 +3,12 @@ package n64
 // AI (audio output) and VI (video output).
 
 type aiState struct {
-	dramNext                 uint32
-	queue                    [2]struct{ addr, length uint32 }
-	queued                   int
+	dramNext                  uint32
+	queue                     [2]struct{ addr, length uint32 }
+	queued                    int
 	control, dacrate, bitrate uint32
-	playStart, playEnd       uint64
+	playStart, playEnd        uint64
+	sent                      uint32 // bytes of the front buffer already output
 }
 
 func (m *Machine) videoClock() float64 {
@@ -81,24 +82,13 @@ func (m *Machine) aiFreq() int {
 	return f
 }
 
-// aiStart begins playing the front buffer: its samples go to the output and an
-// interrupt tells the game it can queue the next one.
+// aiStart begins playing the front buffer; an interrupt tells the game it
+// can queue the next one.
 func (m *Machine) aiStart() {
 	a := &m.ai
 	b := a.queue[0]
 	freq := m.aiFreq()
 	m.AudioRate = freq
-	if a.control&1 != 0 {
-		for i := uint32(0); i+3 < b.length; i += 4 {
-			p := b.addr + i
-			if p+3 >= rdramSize {
-				break
-			}
-			l := int16(uint16(m.rdram[p])<<8 | uint16(m.rdram[p+1]))
-			rr := int16(uint16(m.rdram[p+2])<<8 | uint16(m.rdram[p+3]))
-			m.Audio = append(m.Audio, l, rr)
-		}
-	}
 	samples := uint64(b.length / 4)
 	dur := samples * cpuHz / uint64(freq)
 	if dur == 0 {
@@ -106,8 +96,36 @@ func (m *Machine) aiStart() {
 	}
 	a.playStart = m.CPU.Cycles
 	a.playEnd = m.CPU.Cycles + dur
+	a.sent = 0
 	m.schedule(a.playEnd, evAI)
 	m.raise(intAI)
+}
+
+// aiOutput sends the samples of the front buffer that have played by now.
+func (m *Machine) aiOutput(now uint64) {
+	a := &m.ai
+	if a.queued == 0 {
+		return
+	}
+	b := a.queue[0]
+	upto := b.length
+	if now < a.playEnd && a.playEnd > a.playStart {
+		upto = uint32(uint64(b.length)*(now-a.playStart)/(a.playEnd-a.playStart)) &^ 3
+	}
+	if a.control&1 != 0 {
+		for i := a.sent; i+3 < upto; i += 4 {
+			p := b.addr + i
+			if p+3 >= rdramSize {
+				break
+			}
+			l := int16(uint16(m.rdram[p])<<8 | uint16(m.rdram[p+1]))
+			r := int16(uint16(m.rdram[p+2])<<8 | uint16(m.rdram[p+3]))
+			m.Audio = append(m.Audio, l, r)
+		}
+	}
+	if upto > a.sent {
+		a.sent = upto
+	}
 }
 
 func (m *Machine) aiDone() {
@@ -115,6 +133,7 @@ func (m *Machine) aiDone() {
 	if a.queued == 0 {
 		return
 	}
+	m.aiOutput(a.playEnd)
 	a.queue[0] = a.queue[1]
 	a.queued--
 	if a.queued > 0 {
@@ -134,14 +153,35 @@ func (m *Machine) renderVI() {
 	hs, he := (vi[9]>>16)&0x3ff, vi[9]&0x3ff
 	vs, ve := (vi[10]>>16)&0x3ff, vi[10]&0x3ff
 	xs, ys := vi[12]&0xfff, vi[13]&0xfff
-	outW, outH := 320, 240
-	if he > hs && xs > 0 {
-		outW = int((he - hs) * xs >> 10)
-	}
+	// The picture is the frame buffer area the VI shows, at the frame
+	// buffer's own resolution: the screen window (in screen pixels and
+	// half-lines) times the scale factors (2.10 fixed point, frame buffer
+	// pixels per screen pixel / per field line).
+	lines := 240
 	if ve > vs {
-		outH = int((ve - vs) >> 1) // lines per field
+		lines = int(ve-vs) >> 1
 	}
-	if outW <= 0 || outW > 1024 || outH <= 0 || outH > 1024 {
+	// a window close to the full screen shows the whole standard area
+	std := 240
+	if m.pal {
+		std = 288
+	}
+	if lines >= std-16 && lines < std {
+		lines = std
+	}
+	cols := 640
+	if he > hs {
+		cols = int(he - hs)
+	}
+	if xs == 0 {
+		xs = 0x400
+	}
+	if ys == 0 {
+		ys = 0x400
+	}
+	outW := (cols*int(xs) + 0x200) >> 10
+	outH := (lines*int(ys) + 0x200) >> 10
+	if outW <= 0 || outW > 1280 || outH <= 0 || outH > 1024 {
 		outW, outH = 320, 240
 	}
 	if len(m.Frame) < outW*outH {
@@ -149,36 +189,43 @@ func (m *Machine) renderVI() {
 	}
 	m.FrameW, m.FrameH = outW, outH
 	f := m.Frame[:outW*outH]
-	if typ < 2 || width == 0 || origin == 0 {
+	if typ < 2 || width == 0 {
 		for i := range f {
 			f[i] = 0xff000000
 		}
 		return
 	}
-	xstep := xs
-	ystep := ys
+	rd := m.rdram
 	for y := 0; y < outH; y++ {
-		sy := uint32(y) * ystep >> 10
 		o := y * outW
-		for x := 0; x < outW; x++ {
-			sx := uint32(x) * xstep >> 10
-			var c uint32
-			if typ == 2 {
-				a := origin + (sy*width+sx)*2
-				if a+1 < rdramSize {
-					p := uint32(m.rdram[a])<<8 | uint32(m.rdram[a+1])
-					r := (p >> 11) & 31
-					g := (p >> 6) & 31
-					b := (p >> 1) & 31
-					c = 0xff000000 | (b<<3|b>>2)<<16 | (g<<3|g>>2)<<8 | (r<<3 | r>>2)
+		row := f[o : o+outW]
+		if typ == 2 {
+			a := origin + uint32(y)*width*2
+			for x := range row {
+				p := a + uint32(x)*2
+				if p+1 >= rdramSize {
+					row[x] = 0xff000000
+					continue
 				}
-			} else {
-				a := origin + (sy*width+sx)*4
-				if a+3 < rdramSize {
-					c = 0xff000000 | uint32(m.rdram[a+2])<<16 | uint32(m.rdram[a+1])<<8 | uint32(m.rdram[a])
-				}
+				v := uint32(rd[p])<<8 | uint32(rd[p+1])
+				r := (v >> 11) & 31
+				g := (v >> 6) & 31
+				b := (v >> 1) & 31
+				row[x] = 0xff000000 | (b<<3|b>>2)<<16 | (g<<3|g>>2)<<8 | (r<<3 | r>>2)
 			}
-			f[o+x] = c
+		} else {
+			a := origin + uint32(y)*width*4
+			for x := range row {
+				p := a + uint32(x)*4
+				if p+3 >= rdramSize {
+					row[x] = 0xff000000
+					continue
+				}
+				row[x] = 0xff000000 | uint32(rd[p+2])<<16 | uint32(rd[p+1])<<8 | uint32(rd[p])
+			}
 		}
 	}
 }
+
+// VIRegs returns the VI registers (for debugging tools).
+func (m *Machine) VIRegs() [14]uint32 { return m.vi }

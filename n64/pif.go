@@ -207,3 +207,22 @@ func (m *Machine) cicChallenge() {
 		m.pif[0x30+i] = resp[i*2]<<4 | resp[i*2+1]
 	}
 }
+
+// SetInput sets controller port's buttons (Btn* bits) and analog stick
+// (-128..127, up is positive). Ports are 0-3; others are ignored.
+func (m *Machine) SetInput(port int, buttons uint16, x, y int8) {
+	if port < 0 || port >= len(m.Pad) {
+		return
+	}
+	p := &m.Pad[port]
+	p.Buttons, p.X, p.Y = buttons, x, y
+}
+
+// ConnectPad plugs a controller into a port (or unplugs it), with or without
+// a Controller Pak.
+func (m *Machine) ConnectPad(port int, present, pak bool) {
+	if port < 0 || port >= len(m.Pad) {
+		return
+	}
+	m.Pad[port].Present, m.Pad[port].Pak = present, pak
+}

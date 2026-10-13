@@ -57,7 +57,10 @@ type Machine struct {
 	// settings
 	CPUSpeed float64 // instructions per cycle multiplier (1 = one instruction per CPU cycle)
 	idleSkip bool
-	idle     bool
+	idle     bool   // the CPU is spinning in a wait loop
+	stop     bool   // end the CPU's current time slice early
+	rspTime  uint64 // CPU time the RSP has run up to
+	rspFrac  uint64
 	viField  uint32
 }
 
@@ -74,7 +77,10 @@ const (
 )
 
 type spRegs struct {
-	memAddr, dramAddr, rdLen, wrLen, status, semaphore uint32
+	memAddr, dramAddr uint32 // addresses for the next DMA (as written)
+	curMem, curDram   uint32 // where the last DMA got to (as read)
+	length            uint32 // length register as read back
+	status, semaphore uint32
 }
 
 type dpRegs struct {
@@ -95,8 +101,10 @@ func New(romIn []byte) (*Machine, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &Machine{rom: rom, rdram: make([]byte, rdramSize), CPUSpeed: 1, idleSkip: true}
+	ram := new([rdramSize + 8]byte)
+	m := &Machine{rom: rom, rdram: ram[:rdramSize], CPUSpeed: 1, idleSkip: true}
 	m.CPU.m = m
+	m.CPU.ram = ram
 	m.RSP.m = m
 	m.RDP.m = m
 	m.Save = newSaves(rom)
@@ -230,6 +238,11 @@ func (m *Machine) read16(p uint32) uint16 {
 	if p < rdramSize {
 		return binary.BigEndian.Uint16(m.rdram[p:])
 	}
+	if p >= 0x10000000 && p < 0x1fc00000 {
+		// the cartridge bus answers 16-bit reads with the upper half of
+		// the word the address rounds to
+		return uint16(m.readIO((p+2)&^3) >> 16)
+	}
 	v := m.readIO(p &^ 3)
 	return uint16(v >> ((2 - (p & 2)) * 8))
 }
@@ -237,6 +250,9 @@ func (m *Machine) read16(p uint32) uint16 {
 func (m *Machine) read8(p uint32) uint8 {
 	if p < rdramSize {
 		return m.rdram[p]
+	}
+	if p >= 0x10000000 && p < 0x1fc00000 {
+		return uint8(m.read16(p&^1) >> ((1 - (p & 1)) * 8))
 	}
 	v := m.readIO(p &^ 3)
 	return uint8(v >> ((3 - (p & 3)) * 8))
@@ -328,6 +344,9 @@ func (m *Machine) readIO(p uint32) uint32 {
 			}
 			return st
 		}
+		if r == 2 || r == 3 { // length registers read back as 0x7f
+			return 0x7f
+		}
 		return m.pi[r]
 	case p >= 0x04700000 && p < 0x04700020:
 		return m.ri[(p>>2)&7]
@@ -360,7 +379,7 @@ func (m *Machine) writeIO(p uint32, v uint32) {
 	case p >= 0x04040000 && p < 0x04040020:
 		m.spWrite((p>>2)&7, v)
 	case p == 0x04080000:
-		m.RSP.pc = v & 0xffc
+		m.RSP.setPC(v)
 	case p >= 0x04100000 && p < 0x04100020:
 		m.dpWrite((p>>2)&7, v)
 	case p >= 0x04300000 && p < 0x04300010:
@@ -440,29 +459,24 @@ func (m *Machine) piWrite(r uint32, v uint32) {
 		if cart >= 0x08000000 && cart < 0x10000000 && dram+n <= rdramSize {
 			m.Save.dmaWrite(cart, m.rdram[dram:dram+n])
 		}
-		m.piDone(n)
+		m.piDone(cart, n)
 	case 3: // cart -> RDRAM
 		n := (v & 0xffffff) + 1
 		dram, cart := m.pi[0], m.pi[1]
-		if dram+n > rdramSize {
-			n = rdramSize - dram
+		// The PI moves data in blocks of up to 128 bytes. The first block
+		// is shortened by the RDRAM address's misalignment, and its last
+		// misaligned bytes never reach memory.
+		first := 128 - dram&7
+		if first > n {
+			first = n
 		}
-		dst := m.rdram[dram : dram+n]
-		if cart >= 0x10000000 && cart < 0x1fc00000 {
-			o := int(cart - 0x10000000)
-			k := 0
-			if o < len(m.rom) {
-				k = copy(dst, m.rom[o:])
-			}
-			for ; k < len(dst); k++ {
-				dst[k] = 0
-			}
-		} else if cart >= 0x08000000 && cart < 0x10000000 {
-			m.Save.dmaRead(cart, dst)
+		m.piCopy(dram, cart, first-dram&7)
+		if n > first {
+			m.piCopy(dram+first, cart+first, n-first)
 		}
 		m.pi[0] = (dram + n + 7) &^ 7
 		m.pi[1] = (cart + n + 1) &^ 1
-		m.piDone(n)
+		m.piDone(cart, n)
 	case 4:
 		if v&2 != 0 {
 			m.clear(intPI)
@@ -474,8 +488,44 @@ func (m *Machine) piWrite(r uint32, v uint32) {
 	}
 }
 
-func (m *Machine) piDone(n uint32) {
-	dur := uint64(n)*9/4 + 100
+// piCopy copies n bytes from the cartridge bus to RDRAM.
+func (m *Machine) piCopy(dram, cart, n uint32) {
+	if dram >= rdramSize || n == 0 {
+		return
+	}
+	if dram+n > rdramSize {
+		n = rdramSize - dram
+	}
+	dst := m.rdram[dram : dram+n]
+	if cart >= 0x10000000 && cart < 0x1fc00000 {
+		o := int(cart - 0x10000000)
+		k := 0
+		if o < len(m.rom) {
+			k = copy(dst, m.rom[o:])
+		}
+		for ; k < len(dst); k++ {
+			dst[k] = 0
+		}
+	} else if cart >= 0x08000000 && cart < 0x10000000 {
+		m.Save.dmaRead(cart, dst)
+	}
+}
+
+// piDone marks the PI busy for as long as moving n bytes over the cartridge
+// bus takes with the domain's timing settings, then interrupts.
+func (m *Machine) piDone(cart, n uint32) {
+	// domain 2 (SRAM / FlashRAM, 64DD registers) has its own timing registers
+	r := uint32(5)
+	if (cart >= 0x05000000 && cart < 0x06000000) || (cart >= 0x08000000 && cart < 0x10000000) {
+		r = 9
+	}
+	lat, pwd, pgs, rls := uint64(m.pi[r]&0xff), uint64(m.pi[r+1]&0xff), uint64(m.pi[r+2]&15), uint64(m.pi[r+3]&3)
+	page := uint64(4) << pgs // bytes per page
+	pages := (uint64(n) + page - 1) / page
+	// each page costs the latency, then every 16-bit word a pulse and a
+	// release, in RCP clocks (2/3 of the CPU clock)
+	rcp := pages*(lat+1) + (uint64(n)+1)/2*(pwd+1+rls+1)
+	dur := rcp*3/2 + 50
 	m.piBusyUntil = m.CPU.Cycles + dur
 	m.schedule(m.piBusyUntil, evPI)
 }

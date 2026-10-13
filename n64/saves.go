@@ -1,5 +1,7 @@
 package n64
 
+import "errors"
+
 // Cartridge save memory (EEPROM, SRAM, FlashRAM) and Controller Paks.
 
 // Games whose EEPROM is the 16 Kbit size (by the header's game code).
@@ -27,6 +29,7 @@ type Saves struct {
 	eepromSize int
 	sram       []byte // 32 KB SRAM or 128 KB FlashRAM
 	flash      bool
+	hasSRAM    bool // the game is known to use SRAM
 	paks       [4][]byte
 	dirty      bool
 
@@ -46,6 +49,7 @@ func newSaves(rom []byte) *Saves {
 	}
 	s.eeprom = filled(s.eepromSize, 0xff)
 	s.flash = saveFlash[id]
+	s.hasSRAM = saveSRAM[id]
 	if s.flash {
 		s.sram = filled(0x20000, 0xff)
 	} else {
@@ -160,32 +164,20 @@ func (s *Saves) cartWrite32(addr uint32, v uint32) {
 
 func (s *Saves) flashCommand(v uint32) {
 	switch v >> 24 {
-	case 0x4b: // erase sector offset
+	case 0x4b: // pick the sector to erase
 		s.fOffset = (v & 0xffff) * 128
 		s.fMode = 2
-	case 0x78: // erase mode
-		s.fMode = 2
+	case 0x78: // start the erase
 		s.fStatus = 0x08
-	case 0xa5: // set write page
-		s.fOffset = (v & 0xffff) * 128
-		s.fStatus = 0x04
+		s.flashExecute()
 	case 0xb4: // write buffer mode
 		s.fMode = 3
-	case 0xd2: // execute
-		if s.fMode == 2 {
-			start := s.fOffset &^ 0x3fff
-			for i := start; i < start+0x4000 && int(i) < len(s.sram); i++ {
-				s.sram[i] = 0xff
-			}
-			s.dirty = true
-		} else if s.fMode == 3 {
-			for i := uint32(0); i < 128; i++ {
-				if int(s.fOffset+i) < len(s.sram) {
-					s.sram[s.fOffset+i] = s.fBuf[i]
-				}
-			}
-			s.dirty = true
-		}
+	case 0xa5: // pick the page and program it from the buffer
+		s.fOffset = (v & 0xffff) * 128
+		s.fStatus = 0x04
+		s.flashExecute()
+	case 0xd2: // run the pending erase or program again (harmless)
+		s.flashExecute()
 	case 0xe1:
 		s.fMode = 1
 	case 0xf0:
@@ -193,6 +185,25 @@ func (s *Saves) flashCommand(v uint32) {
 	case 0x3c: // chip erase
 		for i := range s.sram {
 			s.sram[i] = 0xff
+		}
+		s.dirty = true
+	}
+}
+
+// flashExecute does the erase or page program the current mode asks for.
+func (s *Saves) flashExecute() {
+	switch s.fMode {
+	case 2: // erase a 16 KB sector
+		start := s.fOffset &^ 0x3fff
+		for i := start; i < start+0x4000 && int(i) < len(s.sram); i++ {
+			s.sram[i] = 0xff
+		}
+		s.dirty = true
+	case 3: // write the 128-byte buffer
+		for i := uint32(0); i < 128; i++ {
+			if int(s.fOffset+i) < len(s.sram) {
+				s.sram[s.fOffset+i] = s.fBuf[i]
+			}
 		}
 		s.dirty = true
 	}
@@ -253,9 +264,11 @@ func formatPak(p []byte) {
 	}
 }
 
-// Export packs all save memory into one blob (for battery-save storage).
+// Export packs all save memory into one blob (for battery-save storage):
+// "RP64", the EEPROM size and data, the FlashRAM flag, the 128 KB SRAM /
+// FlashRAM area and the four Controller Paks.
 func (s *Saves) Export() []byte {
-	out := make([]byte, 0, 4+len(s.eeprom)+len(s.sram)+4*0x8000+8)
+	out := make([]byte, 0, 8+len(s.eeprom)+len(s.sram)+4*0x8000)
 	out = append(out, 'R', 'P', '6', '4')
 	out = append(out, byte(len(s.eeprom)>>8), byte(len(s.eeprom)))
 	out = append(out, s.eeprom...)
@@ -268,50 +281,47 @@ func (s *Saves) Export() []byte {
 }
 
 // Import restores Export's blob, or a plain .eep / .sra / .fla / .mpk file.
-func (s *Saves) Import(b []byte) {
-	if len(b) > 6 && string(b[:4]) == "RP64" {
+func (s *Saves) Import(b []byte) error {
+	if len(b) >= 6 && string(b[:4]) == "RP64" {
 		n := int(b[4])<<8 | int(b[5])
+		if n != 512 && n != 2048 {
+			return errors.New("the save file is damaged")
+		}
+		need := 6 + n + 2 + 0x20000 + 4*0x8000
+		if len(b) != need {
+			return errors.New("the save file is damaged")
+		}
 		p := 6
-		if p+n <= len(b) {
-			copy(s.eeprom, b[p:p+n])
-			p += n
-		}
-		if p+2 <= len(b) {
-			if b[p] == 1 {
-				s.flash = true
-			}
-			p += 2
-		}
-		if p+len(s.sram) <= len(b) {
-			copy(s.sram, b[p:p+len(s.sram)])
-			p += len(s.sram)
-		}
+		s.eepromSize = n
+		s.eeprom = append([]byte(nil), b[p:p+n]...)
+		p += n
+		s.flash = b[p] == 1
+		p += 2
+		copy(s.sram, b[p:p+0x20000])
+		p += 0x20000
 		for i := range s.paks {
-			if p+0x8000 <= len(b) {
-				copy(s.paks[i], b[p:p+0x8000])
-				p += 0x8000
-			}
+			copy(s.paks[i], b[p:p+0x8000])
+			p += 0x8000
 		}
-		return
+		s.dirty = false
+		return nil
 	}
 	switch len(b) {
-	case 512, 2048:
+	case 512, 2048: // EEPROM
 		s.eepromSize = len(b)
 		s.eeprom = append([]byte(nil), b...)
-	case 0x8000:
-		if string(b[0x20:0x20]) == "" && !s.flash && b[0] == 0x81 {
-			copy(s.paks[0], b)
-		} else {
+	case 0x8000: // SRAM, or a Controller Pak for games without SRAM
+		if s.hasSRAM {
 			copy(s.sram, b)
+		} else {
+			copy(s.paks[0], b)
 		}
-	case 0x20000:
-		s.flash = true
+	case 0x20000: // FlashRAM (or 128 KB SRAM)
 		copy(s.sram, b)
 	default:
-		if len(b) <= len(s.sram) {
-			copy(s.sram, b)
-		}
+		return errors.New("that doesn't look like a Nintendo 64 save file")
 	}
+	return nil
 }
 
 func boolByte(b bool) byte {
