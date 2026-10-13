@@ -217,6 +217,7 @@ func newMux() *http.ServeMux {
 	registerFFmpegRoutes(mux)
 	registerDolphinRoutes(mux)
 	registerLifetimeRoutes(mux)
+	registerN64Routes(mux)
 	return mux
 }
 

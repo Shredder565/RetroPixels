@@ -315,7 +315,7 @@
       <p style="margin-top:16px">
         <button class="btn" id="pickBtn">Choose game file…</button>
         <input type="file" id="fileInput" hidden
-               accept=".nes,.fds,.unf,.unif,.sfc,.smc,.fig,.swc,.gb,.gbc,.gba,.agb,.z64,.n64,.v64,.md,.gen,.smd,.bin,.a26,.a78,.zip,.7z">
+               accept=".nes,.fds,.unf,.unif,.sfc,.smc,.fig,.swc,.gb,.gbc,.gba,.agb,.z64,.n64,.v64,.md,.gen,.smd,.bin,.a26,.a78,.zip">
       </p>
       <p class="muted" id="msg"></p>
     </div>
@@ -378,7 +378,7 @@
         <h2 style="margin-top:18px">Nintendo 64, Sega &amp; Atari</h2>
         <table>
           <tbody>
-            <tr><td>Nintendo 64</td><td><span class="key k-a">A</span> = A &nbsp;·&nbsp; <span class="key k-x">X</span> = B &nbsp;·&nbsp; <span class="key">LT</span> = Z &nbsp;·&nbsp; <span class="key">LB</span>/<span class="key">RB</span> = L/R &nbsp;·&nbsp; left stick = analog stick &nbsp;·&nbsp; right stick = C buttons &nbsp;·&nbsp; <span class="key">Menu</span> = Start</td></tr>
+            <tr><td>Nintendo 64</td><td><span class="key k-a">A</span> = A &nbsp;·&nbsp; <span class="key k-x">X</span> = B &nbsp;·&nbsp; <span class="key">LT</span> = Z &nbsp;·&nbsp; <span class="key">LB</span>/<span class="key">RB</span> = L/R &nbsp;·&nbsp; left stick = analog stick &nbsp;·&nbsp; right stick = C buttons &nbsp;·&nbsp; <span class="key">Menu</span> = Start<br><span class="muted" style="font-size:13px">Keyboard: arrows = stick · X / Z = A / B · A = Z · Q / W = L / R · I J K L = C buttons · T F G H = D-pad · Enter = Start</span></td></tr>
             <tr><td>Genesis</td><td><span class="key k-x">X</span> <span class="key k-a">A</span> <span class="key k-b">B</span> = A B C &nbsp;·&nbsp; <span class="key">LB</span> <span class="key k-y">Y</span> <span class="key">RB</span> = X Y Z &nbsp;·&nbsp; <span class="key">View</span> = Mode</td></tr>
             <tr><td>Atari 2600</td><td><span class="key k-a">A</span> = Fire &nbsp;·&nbsp; <span class="key">Menu</span> = Reset switch &nbsp;·&nbsp; <span class="key">View</span> = Select switch &nbsp;·&nbsp; <span class="key">LB</span>/<span class="key">RB</span> = difficulty switches &nbsp;·&nbsp; <span class="key k-y">Y</span> = Color/B&amp;W &nbsp;·&nbsp; paddle games: left stick</td></tr>
             <tr><td>Atari 7800</td><td><span class="key k-a">A</span> / <span class="key k-b">B</span> = fire buttons &nbsp;·&nbsp; <span class="key">Menu</span> = Pause &nbsp;·&nbsp; <span class="key">View</span> = Select &nbsp;·&nbsp; <span class="key k-y">Y</span> = Reset</td></tr>
@@ -396,7 +396,7 @@
         </table>
         <p class="muted" style="margin:10px 0 0;font-size:13px">
           The layout follows button <em>position</em>, like the original pads: Xbox A (bottom) is the bottom Nintendo button, Xbox B (right) is the right one.
-          Remap anytime: <b>🎮 Controls</b> in the game's bar (NES, Game Boy, Atari) or the gamepad icon in the emulator's menu (other systems).
+          Remap anytime: <b>🎮 Controls</b> in the game's bar.
         </p>
       </div>
     </div>
@@ -1032,58 +1032,6 @@
     toastTimer = setTimeout(() => toastEl.classList.remove("show"), 1800);
   };
 
-  // ---------- Xbox controller default mapping ----------
-  // Libretro ids: 0 B, 1 Y, 2 Select, 3 Start, 4-7 D-pad, 8 A, 9 X, 10 L, 11 R,
-  // 12 L2, 13 R2, 14 L3, 15 R3, 16-23 analog sticks.
-  // Browser "standard" gamepad ids (what Xbox controllers report):
-  // BUTTON_1 = Xbox A (bottom), BUTTON_2 = Xbox B (right), BUTTON_3 = Xbox X (left), BUTTON_4 = Xbox Y (top).
-  // Stick clicks and the right stick are left unmapped in the emulator: this page uses them for save states.
-  const xboxPad = {
-    0:  "BUTTON_1",              // Nintendo B  <- Xbox A
-    8:  "BUTTON_2",              // Nintendo A  <- Xbox B
-    1:  "BUTTON_3",              // SNES Y      <- Xbox X
-    9:  "BUTTON_4",              // SNES X      <- Xbox Y
-    2:  "SELECT",                // Select      <- View
-    3:  "START",                 // Start       <- Menu
-    4:  "DPAD_UP", 5: "DPAD_DOWN", 6: "DPAD_LEFT", 7: "DPAD_RIGHT",
-    10: "LEFT_TOP_SHOULDER",     // L  <- LB
-    11: "RIGHT_TOP_SHOULDER",    // R  <- RB
-    12: "LEFT_BOTTOM_SHOULDER",  // L2 <- LT
-    13: "RIGHT_BOTTOM_SHOULDER", // R2 <- RT
-    16: "LEFT_STICK_X:+1", 17: "LEFT_STICK_X:-1",
-    18: "LEFT_STICK_Y:+1", 19: "LEFT_STICK_Y:-1",
-  };
-  const keyboard = {
-    0: "z", 8: "x", 1: "a", 9: "s", 2: "shift", 3: "enter",
-    4: "up arrow", 5: "down arrow", 6: "left arrow", 7: "right arrow",
-    10: "q", 11: "w",
-  };
-  // Nintendo 64: the right stick drives the C buttons, and View (no N64 equivalent)
-  // becomes the modifier for this page's slot/recording shortcuts.
-  const n64Extra = {
-    2: "",
-    20: "RIGHT_STICK_X:+1", 21: "RIGHT_STICK_X:-1",
-    22: "RIGHT_STICK_Y:+1", 23: "RIGHT_STICK_Y:-1",
-  };
-  const n64Keys = { 2: "", 20: "l", 21: "j", 22: "k", 23: "i" }; // C buttons on IJKL
-  const buildControls = core => {
-    const pad = core === "n64" ? { ...xboxPad, ...n64Extra } : xboxPad;
-    const keys = core === "n64" ? { ...keyboard, ...n64Keys } : keyboard;
-    const controls = {};
-    for (let p = 0; p < 4; p++) {
-      controls[p] = {};
-      for (let i = 0; i <= 23; i++) {
-        controls[p][i] = { value: p === 0 ? (keys[i] || "") : "", value2: pad[i] || "" };
-      }
-    }
-    // Emulator's own hotkeys: keep fast-forward / slow-motion, hand save/load to this page.
-    Object.assign(controls[0], {
-      24: { value: "" }, 25: { value: "" }, 26: { value: "" },
-      27: { value: "add" }, 28: { value: "space" }, 29: { value: "subtract" },
-    });
-    return controls;
-  };
-
   // ---------- Save-state storage (IndexedDB) ----------
   const SLOT_COUNT = 4;
   const dbPromise = new Promise((resolve, reject) => {
@@ -1106,7 +1054,9 @@
   let currentSlot = 0;
   let undoState = null;
   const slotKey = i => `${gameKey}#${i}`;
-  const emu = () => window.EJS_emulator && window.EJS_emulator.gameManager;
+  let gameApi = null;        // save states and thumbnails go through this once the game runs
+  let gameName = "game";     // for file names
+  const emu = () => gameApi;
   let gameReady = false;
 
   const bytesToDataUrl = (bytes, type) => new Promise(resolve => {
@@ -1116,7 +1066,7 @@
   });
 
   async function takeThumbnail() {
-    // Ask the emulator core for a screenshot (works with WebGL canvases).
+    // Ask the player for a screenshot.
     try {
       const gm = emu();
       if (gm && typeof gm.screenshot === "function") {
@@ -1185,7 +1135,7 @@
   async function exportSlot(i) {
     const rec = await dbGet(slotKey(i));
     if (!rec) return;
-    const name = (window.EJS_gameName || "game").replace(/[^\w\- ]+/g, "");
+    const name = gameName;
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([rec.state], { type: "application/octet-stream" }));
     a.download = `${name} - slot ${i + 1}.state`;
@@ -1305,7 +1255,7 @@
     recorder.onstop = () => {
       const isMp4 = recMime.startsWith("video/mp4");
       const blob = new Blob(recChunks, { type: isMp4 ? "video/mp4" : "video/webm" });
-      const name = (window.EJS_gameName || "gameplay").replace(/[^\w\- ]+/g, "");
+      const name = gameName;
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
       a.download = `${name} - ${fileStamp()}.${isMp4 ? "mp4" : "webm"}`;
@@ -1409,7 +1359,7 @@
         if (r3 && !prev.r3) saveSlot(currentSlot);
         if (l3 && !prev.l3) loadSlot(currentSlot);
         prev.r3 = r3; prev.l3 = l3;
-        if (window.EJS_core === "n64") {
+        if (ownGame && ownGame.core === "n64") {
           // N64: View + D-pad left/right = slot, View + D-pad down = record
           const view = pressed(8);
           const vl = view && pressed(14), vr = view && pressed(15), vd = view && pressed(13);
@@ -1459,8 +1409,8 @@
   });
 
   // ---------- RetroPixels' own emulators ----------
-  // NES, SNES, Game Boy / Color, Game Boy Advance, Atari 2600 / 7800 and Genesis run on RetroPixels' own code
-  // (the files in emu/). Nintendo 64 still uses EmulatorJS until its replacement is finished.
+  // Every classic system runs on RetroPixels' own code (the files in emu/). The Nintendo 64 emulator is
+  // inside RetroPixels.exe itself; emu/n64.js connects the player to it.
   const OWN = {
     nes: ["emu/cpu6502.js", "emu/nes.js"],
     gb: ["emu/gb.js"],
@@ -1469,6 +1419,7 @@
     segaMD: ["emu/m68k.js", "emu/z80.js", "emu/ym2612.js", "emu/genesis.js"],
     gba: ["emu/arm7.js", "emu/gba.js"],
     snes: ["emu/w65816.js", "emu/spc700.js", "emu/sdsp.js", "emu/snes.js"],
+    n64: ["emu/n64.js"],
   };
   const loadedScripts = {};
   const loadScript = src => loadedScripts[src] || (loadedScripts[src] = new Promise((resolve, reject) => {
@@ -1548,11 +1499,11 @@
       return;
     }
     // The save-state, thumbnail and recording code talks to this.
-    window.EJS_emulator = { gameManager: {
+    gameApi = {
       getState: () => player.saveState(),
       loadState: b => player.loadState(b),
       screenshot: () => player.screenshotPNG(),
-    } };
+    };
     gameReady = true;
     document.getElementById("sramTools").hidden = !player.core.getSRAM();
     // Sound can only start after a click or key press in some browsers.
@@ -1566,7 +1517,7 @@
     if (!s) return;
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([s.slice()], { type: "application/octet-stream" }));
-    a.download = `${window.EJS_gameName || "game"}.sav`;
+    a.download = `${gameName}.sav`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 5000);
   });
@@ -1584,34 +1535,6 @@
     startOwn(ownGame.core, ownGame.rom, ownGame.name);
   });
 
-  function startEJS(core, file, name) {
-    window.EJS_player = "#game";
-    window.EJS_core = core;
-    window.EJS_gameName = name;
-    window.EJS_gameUrl = URL.createObjectURL(file);
-    window.EJS_pathtodata = "https://cdn.emulatorjs.org/stable/data/";
-    window.EJS_defaultControls = buildControls(core);
-    window.EJS_startOnLoaded = true;
-    window.EJS_color = "#107c10";
-    window.EJS_volume = 0.7;
-    window.EJS_onGameStart = () => { gameReady = true; };
-
-    const s = document.createElement("script");
-    s.src = "https://cdn.emulatorjs.org/stable/data/loader.js";
-    s.onerror = () => {
-      document.getElementById("game").innerHTML =
-        '<p style="padding:24px">Couldn\'t load the emulator engine. Check your internet connection and reload the page.</p>';
-    };
-    document.body.appendChild(s);
-
-    // Safety net in case the start callback isn't fired by this emulator version.
-    const readyCheck = setInterval(() => {
-      if (gameReady) return clearInterval(readyCheck);
-      const gm = emu();
-      if (gm && typeof gm.getState === "function") { gameReady = true; clearInterval(readyCheck); }
-    }, 1000);
-  }
-
   let started = false;
   async function startGame(file) {
     if (started) return;
@@ -1621,6 +1544,7 @@
       if (DESKTOP) { showTab(["wbfs", "wad"].includes(ext) ? "wii" : "gc"); toast("Those games play from this tab — add their folder if they aren't listed"); return; }
       return fail(`"${file.name}" looks like a GameCube or Wii game. Those need the RetroPixels desktop app.`);
     }
+    if (ext === "7z") return fail(`RetroPixels can't open .7z files. Unzip "${file.name}" first (or zip it as .zip).`);
     let core = coreForExt(ext), rom = null;
     try {
       if (ext === "zip") {
@@ -1630,11 +1554,8 @@
           .filter(i => coreForExt(i.x) || i.x === "bin").sort((a, b) => b.e.size - a.e.size)[0];
         if (inner) {
           core = coreForExt(inner.x);
-          if (!core || OWN[core]) {
-            rom = await z.extract(inner.e);
-            if (!core) core = BIN_SYSTEMS.includes(selectedCore) ? selectedCore : guessBin(rom);
-          }
-          if (core && !OWN[core]) rom = null; // EmulatorJS opens the .zip itself
+          rom = await z.extract(inner.e);
+          if (!core) core = BIN_SYSTEMS.includes(selectedCore) ? selectedCore : guessBin(rom);
         } else core = selectedCore;
       } else if (ext === "bin") {
         rom = new Uint8Array(await file.arrayBuffer());
@@ -1646,9 +1567,9 @@
     if (started) return;
     started = true;
     const name = file.name.replace(/\.[^.]+$/, "");
-    // RetroPixels' emulators keep their save states apart from the old EmulatorJS ones.
-    gameKey = OWN[core] ? `rp:${core}:${name}` : `${core}:${name}`;
-    window.EJS_gameName = name;
+    // "rp:" keeps these save states apart from ones made by the engine RetroPixels used before.
+    gameKey = `rp:${core}:${name}`;
+    gameName = name.replace(/[^\w\- ]+/g, "") || "game";
 
     launcherEl.hidden = true;
     recTab.hidden = true;
@@ -1661,8 +1582,7 @@
     document.getElementById("game").classList.toggle("gba", core === "gba");
     renderSlots();
 
-    if (OWN[core]) startOwn(core, rom || new Uint8Array(await file.arrayBuffer()), name);
-    else startEJS(core, file, name);
+    startOwn(core, rom || new Uint8Array(await file.arrayBuffer()), name);
   }
 
   document.getElementById("backBtn").addEventListener("click", () => {

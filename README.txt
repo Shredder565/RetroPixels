@@ -15,11 +15,12 @@ Your Xbox controller works automatically.
 First run
 - Windows may show "Windows protected your PC" because this program isn't
   signed by a publisher. Click "More info", then "Run anyway".
-- NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Genesis, Atari 2600
-  and Atari 7800 run on RetroPixels' own emulators, built into the program, so
-  they work offline. No BIOS files are needed.
-- Nintendo 64 still needs an internet connection the first time (that engine
-  downloads on demand) until RetroPixels' own N64 emulator is finished.
+- NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
+  Genesis, Atari 2600 and Atari 7800 run on RetroPixels' own emulators, built
+  into the program, so they work offline. No BIOS files are needed.
+- Nintendo 64 runs inside RetroPixels.exe itself (it's too heavy for the
+  page), so N64 games need the desktop app. Its 3D graphics are still being
+  finished, so many games don't show their picture yet.
 - Super Nintendo games with extra chips in the cartridge (DSP-1: Super Mario
   Kart, Pilotwings; Super FX: Star Fox, Yoshi's Island; SA-1: Super Mario RPG,
   Kirby Super Star; and a few others) aren't supported yet and show a message
@@ -40,6 +41,11 @@ Playing classic games
   Nintendo / Game Boy Advance / Genesis engine) can't be loaded by the new
   emulators; in-game saves can be brought over with "Import battery save…"
   (.srm / .sav files from other emulators work too).
+- Nintendo 64: the left stick is the analog stick and the right stick works
+  the C buttons; Xbox A / X = A / B, LT = Z, LB / RB = L / R, Menu = Start.
+  On the keyboard: arrows = stick, X / Z = A / B, A = Z, IJKL = C buttons,
+  TFGH = D-pad. Since the right stick is busy, change save slot with View +
+  D-pad left / right and start or stop recording with View + D-pad down.
 - Atari 7800 light-gun games (Alien Brigade, Barnyard Blaster, Sentinel) start,
   but can't be aimed yet.
 
@@ -84,17 +90,15 @@ Where things are kept
 Credits & licences
 - RetroPixels' own code was written for this project and uses no copied code:
   the program, its screens, and its NES, Super Nintendo, Game Boy / Game Boy
-  Color, Game Boy Advance, Sega Genesis, Atari 2600 and Atari 7800 emulators -
-  including the 6502, 65C816, SPC700, Game Boy, ARM7TDMI, 68000 and Z80
-  processors, the graphics and sound chips (S-DSP, YM2612, PSG...), the
-  cartridge hardware, and replacements for the Game Boy Advance BIOS and the
-  SNES sound start-up program, so no Nintendo or Sega code is used. It uses
-  only Go's standard library.
+  Color, Game Boy Advance, Nintendo 64, Sega Genesis, Atari 2600 and Atari
+  7800 emulators - including the 6502, 65C816, SPC700, Game Boy, ARM7TDMI,
+  68000, Z80 and N64 (VR4300 and RSP) processors, the graphics and sound
+  chips (S-DSP, YM2612, PSG...), the cartridge hardware, and replacements
+  for the Game Boy Advance BIOS, the SNES sound start-up program and the N64
+  boot program, so no Nintendo or Sega code is used. It uses only Go's
+  standard library.
 - It works together with separate programs that keep their own licences and
   are not part of RetroPixels:
-  * EmulatorJS (GPL-3.0): runs Nintendo 64 for now; downloaded on demand from
-    cdn.emulatorjs.org. Its N64 core has its own licence. It will be removed
-    when RetroPixels' own N64 emulator is done.
   * ffmpeg (GPL): video encoding for recordings; downloaded on request from
     github.com/BtbN/FFmpeg-Builds. Its licence is saved next to it.
   * Dolphin (GPL-2.0+): your own install, launched by RetroPixels and shown

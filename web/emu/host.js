@@ -74,6 +74,14 @@
     // SNES: same button positions as the Xbox pad's diamond (Xbox B = A, A = B, Y = X, X = Y)
     snes: { A: { pad: [1], keys: ["x"] }, B: { pad: [0], keys: ["z"] }, X: { pad: [3], keys: ["s"] }, Y: { pad: [2], keys: ["a"] },
       L: { pad: [4], keys: ["q"] }, R: { pad: [5], keys: ["w"] }, Select: { pad: [8], keys: ["shift"] }, Start: { pad: [9], keys: ["enter"] } },
+    // Nintendo 64: Xbox A / X = A / B (same spots as the N64's big buttons), LT = Z. The left stick is the
+    // analog stick and the right stick the C buttons; on the keyboard the arrows move the stick.
+    n64: { A: { pad: [0], keys: ["x"] }, B: { pad: [2], keys: ["z"] }, Z: { pad: [6], keys: ["a"] }, Start: { pad: [9], keys: ["enter"] },
+      Up: { pad: [], keys: ["t"] }, Down: { pad: [], keys: ["g"] }, Left: { pad: [], keys: ["f"] }, Right: { pad: [], keys: ["h"] },
+      L: { pad: [4], keys: ["q"] }, R: { pad: [5], keys: ["w"] },
+      "C-Up": { pad: [], keys: ["i"] }, "C-Down": { pad: [], keys: ["k"] }, "C-Left": { pad: [], keys: ["j"] }, "C-Right": { pad: [], keys: ["l"] },
+      "Stick Up": { pad: [], keys: ["arrowup"] }, "Stick Down": { pad: [], keys: ["arrowdown"] },
+      "Stick Left": { pad: [], keys: ["arrowleft"] }, "Stick Right": { pad: [], keys: ["arrowright"] } },
   };
   const ARROWS = { Up: "arrowup", Down: "arrowdown", Left: "arrowleft", Right: "arrowright" };
 
@@ -195,6 +203,8 @@
       this.rom = rom;
       await this.audio.start().catch(() => {});
       this.core = new this.Core(rom, { sampleRate: this.audio.rate || 48000, sram: this.opts.sram || null, name: this.opts.name });
+      // Cores that run elsewhere (Nintendo 64 runs inside RetroPixels.exe) say when they're ready.
+      if (this.core.ready) await this.core.ready;
       this.lastSram = this.sramSnapshot();
       this.resize();
       this.frameTime = 1000 / this.core.fps;
@@ -299,12 +309,12 @@
           let on = false;
           if (gp) for (const b of m.pad || []) if (gp.buttons[b] && (gp.buttons[b].pressed || gp.buttons[b].value > 0.5)) on = true;
           if (p === 0) for (const k of m.keys || []) if (this.keys.has(k)) on = true;
-          // D-pad directions also follow the left stick
+          // D-pad directions also follow the left stick (unless the core reads the stick itself)
           const dir = DIRS.find(d => d[0] === name);
           if (dir && gp) {
             if (gp.buttons[dir[1]] && gp.buttons[dir[1]].pressed) on = true;
             const ax = gp.axes[dir[2]] || 0;
-            if (dir[3] < 0 ? ax < -0.5 : ax > 0.5) on = true;
+            if (!this.info.analogStick && (dir[3] < 0 ? ax < -0.5 : ax > 0.5)) on = true;
           }
           // switches that flip each press (Atari console switches)
           if (m.toggle) {
@@ -316,8 +326,11 @@
           if (on) bits |= 1 << i;
         });
         this.core.setInput(p, bits);
-        // analog stick for cores that use it (Atari paddles)
-        if (this.core.setAnalog) this.core.setAnalog(p, gp ? (gp.axes[0] || 0) : 0);
+        // analog sticks for cores that use them (Atari paddles: left X; N64: both sticks)
+        if (this.core.setAnalog) {
+          const ax = gp ? gp.axes : [];
+          this.core.setAnalog(p, ax[0] || 0, ax[1] || 0, ax[2] || 0, ax[3] || 0);
+        }
       }
     }
 
@@ -418,7 +431,9 @@
             return `<tr><td>${n}</td><td>${(m.pad || []).map(b => PAD_NAMES[b]).join(", ") || "—"}</td><td>${(m.keys || []).map(k => k === " " ? "Space" : k.replace("arrow", "")).join(", ") || "—"}</td>
               <td><button data-set="${n}">Change</button></td></tr>`;
           }).join("")}</table>
-          <p style="color:#8b90a0;font-size:12px;margin:10px 0">Click Change, then press a controller button or a key. Esc cancels. The left stick always moves too. Clicking the sticks (L3/R3) and the right stick are used for save states.</p>
+          <p style="color:#8b90a0;font-size:12px;margin:10px 0">Click Change, then press a controller button or a key. Esc cancels. ${this.info.analogStick
+            ? "The left stick is the analog stick and the right stick works the C buttons. Clicking the sticks (L3/R3) is used for save states."
+            : "The left stick always moves too. Clicking the sticks (L3/R3) and the right stick are used for save states."}</p>
           <div style="display:flex;gap:8px;justify-content:flex-end"><button data-reset>Reset to default</button><button data-close>Done</button></div></div>`;
       };
       render();
@@ -463,6 +478,7 @@
       window.removeEventListener("keyup", this.onKey);
       window.removeEventListener("blur", this.onBlur);
       if (this.ro) this.ro.disconnect();
+      if (this.core && this.core.close) this.core.close();
       this.audio.close();
     }
   }
