@@ -1,7 +1,8 @@
 // RetroPixels — Game Boy / Game Boy Color emulator. Original code.
 //
 // SM83 CPU (timed per memory access), PPU with DMG and CGB modes, four-channel
-// stereo APU, timers, serial port, OAM/HDMA transfers and MBC1/2/3/5 cartridges.
+// stereo APU, timers, serial port and OAM/HDMA transfers. The cartridge chips
+// (memory bank controllers, clocks, sensors...) are in gb_carts.js.
 // No boot ROM is used; the machine starts in the state the boot ROM leaves it in.
 "use strict";
 
@@ -9,167 +10,73 @@
   const FPS = 4194304 / 70224; // 59.7275
 
   // ===================================================================
-  // Cartridge
-  // ===================================================================
-  class Cart {
-    constructor(rom) {
-      this.rom = rom;
-      const type = rom[0x147];
-      this.type = type;
-      const ramSizes = [0, 0x800, 0x2000, 0x8000, 0x20000, 0x10000];
-      this.ramSize = ramSizes[rom[0x149]] || 0;
-      this.mbc = 0;
-      if (type >= 1 && type <= 3) this.mbc = 1;
-      else if (type === 5 || type === 6) { this.mbc = 2; this.ramSize = 512; }
-      else if (type >= 0x0f && type <= 0x13) this.mbc = 3;
-      else if (type >= 0x19 && type <= 0x1e) this.mbc = 5;
-      else if (type === 0xff) this.mbc = 1; // HuC1 behaves like MBC1 for banking
-      else if (type !== 0 && type !== 8 && type !== 9) throw new Error(`This Game Boy game uses a cartridge chip RetroPixels doesn't support yet (type $${type.toString(16)}).`);
-      this.battery = [3, 6, 9, 0x0d, 0x0f, 0x10, 0x13, 0x1b, 0x1e, 0xff].includes(type);
-      this.hasRtc = type === 0x0f || type === 0x10;
-      this.ram = new Uint8Array(Math.max(this.ramSize, 0));
-      this.romBanks = Math.max(2, rom.length >> 14);
-      this.romBank = 1; this.ramBank = 0; this.ramOn = false; this.mode = 0; this.bank2 = 0;
-      // MBC3 clock: live seconds counter, latched copy
-      this.rtc = { s: 0, m: 0, h: 0, d: 0, halt: false, carry: false, base: Date.now() };
-      this.rtcLatched = [0, 0, 0, 0, 0]; this.latchPrev = 0xff;
-      this.cgb = (rom[0x143] & 0x80) !== 0;
-      this.title = String.fromCharCode(...rom.slice(0x134, 0x143)).replace(/\0.*$/, "").trim();
-    }
-    romRead(a) {
-      if (a < 0x4000) {
-        if (this.mbc === 1 && this.mode) { const b = (this.bank2 << 5) % this.romBanks; return this.rom[b * 0x4000 + a]; }
-        return this.rom[a];
-      }
-      return this.rom[((this.romBank % this.romBanks) * 0x4000) + (a & 0x3fff)];
-    }
-    romWrite(a, v) {
-      switch (this.mbc) {
-        case 1:
-          if (a < 0x2000) this.ramOn = (v & 0x0f) === 0x0a;
-          else if (a < 0x4000) { let b = v & 0x1f; if (!b) b = 1; this.low5 = b; this.romBank = (this.bank2 << 5) | b; }
-          else if (a < 0x6000) { this.bank2 = v & 3; this.romBank = (this.bank2 << 5) | (this.low5 || 1); }
-          else this.mode = v & 1;
-          break;
-        case 2:
-          if (a < 0x4000) { if (a & 0x100) { this.romBank = (v & 0x0f) || 1; } else this.ramOn = (v & 0x0f) === 0x0a; }
-          break;
-        case 3:
-          if (a < 0x2000) this.ramOn = (v & 0x0f) === 0x0a;
-          else if (a < 0x4000) this.romBank = (v & 0x7f) || 1;
-          else if (a < 0x6000) this.ramBank = v;
-          else { if (this.latchPrev === 0 && v === 1) this.latchRtc(); this.latchPrev = v; }
-          break;
-        case 5:
-          if (a < 0x2000) this.ramOn = (v & 0x0f) === 0x0a;
-          else if (a < 0x3000) this.romBank = (this.romBank & 0x100) | v;
-          else if (a < 0x4000) this.romBank = (this.romBank & 0xff) | ((v & 1) << 8);
-          else if (a < 0x6000) this.ramBank = v & 0x0f;
-          break;
-      }
-    }
-    ramIndex(a) {
-      const off = a & 0x1fff;
-      if (this.mbc === 1) return ((this.mode ? this.bank2 : 0) * 0x2000 + off) % Math.max(1, this.ram.length);
-      return (this.ramBank * 0x2000 + off) % Math.max(1, this.ram.length);
-    }
-    ramRead(a) {
-      if (!this.ramOn && this.mbc) return 0xff;
-      if (this.mbc === 2) return 0xf0 | this.ram[a & 0x1ff];
-      if (this.mbc === 3 && this.ramBank >= 8) return this.ramBank <= 0x0c ? this.rtcLatched[this.ramBank - 8] : 0xff;
-      if (!this.ram.length) return 0xff;
-      return this.ram[this.ramIndex(a)];
-    }
-    ramWrite(a, v) {
-      if (!this.ramOn && this.mbc) return;
-      if (this.mbc === 2) { this.ram[a & 0x1ff] = v & 0x0f; this.dirty = true; return; }
-      if (this.mbc === 3 && this.ramBank >= 8) { this.writeRtc(this.ramBank - 8, v); return; }
-      if (!this.ram.length) return;
-      this.ram[this.ramIndex(a)] = v; this.dirty = true;
-    }
-    // --- MBC3 real-time clock (counts from the computer's clock) ---
-    rtcSeconds() { const r = this.rtc; return r.halt ? r.frozen : Math.floor((Date.now() - r.base) / 1000); }
-    latchRtc() {
-      let t = this.rtcSeconds();
-      const days = Math.floor(t / 86400);
-      this.rtcLatched = [t % 60, Math.floor(t / 60) % 60, Math.floor(t / 3600) % 24, days & 0xff,
-        ((days >> 8) & 1) | (this.rtc.halt ? 0x40 : 0) | (days > 511 ? 0x80 : 0)];
-    }
-    writeRtc(reg, v) {
-      this.latchRtc();
-      const l = this.rtcLatched.slice(); l[reg] = v;
-      const days = l[3] | ((l[4] & 1) << 8);
-      const total = l[0] + l[1] * 60 + l[2] * 3600 + days * 86400;
-      this.rtc.halt = !!(l[4] & 0x40);
-      if (this.rtc.halt) this.rtc.frozen = total;
-      this.rtc.base = Date.now() - total * 1000;
-      this.dirty = true;
-    }
-    // Battery save: RAM followed by 16 bytes of clock (RetroPixels' own layout).
-    sram() {
-      if (!this.battery) return null;
-      const out = new Uint8Array(this.ram.length + (this.hasRtc ? 16 : 0));
-      out.set(this.ram);
-      if (this.hasRtc) {
-        const dv = new DataView(out.buffer, this.ram.length);
-        dv.setFloat64(0, this.rtc.base, true); dv.setUint32(8, this.rtc.halt ? (this.rtc.frozen | 0) : 0, true); dv.setUint8(12, this.rtc.halt ? 1 : 0);
-      }
-      return out;
-    }
-    loadSram(s) {
-      this.ram.set(s.subarray(0, this.ram.length));
-      if (this.hasRtc && s.length >= this.ram.length + 16) {
-        const dv = new DataView(s.buffer, s.byteOffset + this.ram.length);
-        this.rtc.base = dv.getFloat64(0, true); this.rtc.halt = !!dv.getUint8(12); this.rtc.frozen = dv.getUint32(8, true);
-      }
-    }
-    saveState() { return { ram: this.ram, romBank: this.romBank, ramBank: this.ramBank, ramOn: this.ramOn, mode: this.mode, bank2: this.bank2, low5: this.low5, rtc: Object.assign({}, this.rtc), rtcLatched: this.rtcLatched, latchPrev: this.latchPrev }; }
-    loadState(o) { this.ram.set(o.ram); Object.assign(this, { romBank: o.romBank, ramBank: o.ramBank, ramOn: o.ramOn, mode: o.mode, bank2: o.bank2, low5: o.low5, rtcLatched: o.rtcLatched, latchPrev: o.latchPrev }); Object.assign(this.rtc, o.rtc); }
-  }
-
-  // ===================================================================
   // Sound
   // ===================================================================
   const DUTY = [0x01, 0x81, 0x87, 0x7e];
+  const NOISE_DIV = [8, 16, 32, 48, 64, 80, 96, 112];
+  const READ_OR = [0x80, 0x3f, 0x00, 0xff, 0xbf, 0xff, 0x3f, 0x00, 0xff, 0xbf, 0x7f, 0xff, 0x9f, 0xff, 0xbf, 0xff, 0xff, 0x00, 0x00, 0xbf, 0x00, 0x00, 0x70];
   class APU {
-    constructor(sampleRate) {
+    constructor(sampleRate, gb) {
+      this.gb = gb; // for the model (Game Boy or Color), which changes a few details
       this.sampleRate = sampleRate;
       this.regs = new Uint8Array(0x30);
       this.wave = new Uint8Array(16);
       this.on = true;
       this.ch = [0, 1, 2, 3].map(() => ({ on: false, dac: false, len: 0, lenOn: false, vol: 0, envDir: 0, envPeriod: 0, envTimer: 0,
-        freq: 0, timer: 0, pos: 0, duty: 0, lfsr: 0x7fff, sweepPeriod: 0, sweepTimer: 0, sweepShift: 0, sweepNeg: false, sweepOn: false, shadow: 0, out: 0 }));
-      this.seqStep = 0; this.seqTimer = 8192;
+        freq: 0, timer: 0, pos: 0, duty: 0, lfsr: 0x7fff, sweepPeriod: 0, sweepTimer: 0, sweepShift: 0, sweepNeg: false, sweepOn: false,
+        shadow: 0, negUsed: false, sample: 0, fetched: 0 }));
+      this.seqStep = 0; // the next frame-sequencer step (0-7), clocked by the divider
       this.acc = 0; this.step = 4194304 / sampleRate; this.sumL = 0; this.sumR = 0; this.n = 0;
       this.hpL = 0; this.hpR = 0; this.prevL = 0; this.prevR = 0;
       this.out = new Float32Array(8192); this.outLen = 0;
+      this.now = 0; // T-cycles since start, for wave RAM access timing
+    }
+    get cgb() { return this.gb ? this.gb.cgb : false; }
+    // While channel 3 plays, the CPU sees wave RAM only through the byte the channel is reading:
+    // always on the Color, and on the original only in the same moment the channel reads it.
+    waveIndex() {
+      const c = this.ch[2];
+      if (!c.on) return -1;
+      if (this.cgb || this.now - c.fetched < 2) return c.pos >> 1;
+      return -2;
     }
     read(a) {
+      if (a >= 0xff30) { const i = this.waveIndex(); return i === -1 ? this.wave[a - 0xff30] : i === -2 ? 0xff : this.wave[i]; }
       const r = a - 0xff10;
-      if (a >= 0xff30) return this.wave[a - 0xff30];
-      const OR = [0x80, 0x3f, 0x00, 0xff, 0xbf, 0xff, 0x3f, 0x00, 0xff, 0xbf, 0x7f, 0xff, 0x9f, 0xff, 0xbf, 0xff, 0xff, 0x00, 0x00, 0xbf, 0x00, 0x00, 0x70,
-        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
       if (a === 0xff26) return 0x70 | (this.on ? 0x80 : 0) | this.ch.reduce((m, c, i) => m | (c.on ? 1 << i : 0), 0);
-      return this.regs[r] | OR[r];
+      if (r >= READ_OR.length) return 0xff;
+      return this.regs[r] | READ_OR[r];
     }
     write(a, v) {
-      if (a >= 0xff30) { this.wave[a - 0xff30] = v; return; }
+      if (a >= 0xff30) { const i = this.waveIndex(); if (i === -1) this.wave[a - 0xff30] = v; else if (i >= 0) this.wave[i] = v; return; }
       const r = a - 0xff10;
-      if (!this.on && a !== 0xff26 && !(a >= 0xff11 && (r % 5 === 1)) ) { if (a !== 0xff20) return; }
       if (a === 0xff26) {
         const on = !!(v & 0x80);
-        if (!on && this.on) { for (let i = 0; i < 0x16; i++) this.regs[i] = 0; this.ch.forEach(c => { c.on = false; c.dac = false; }); }
-        if (on && !this.on) this.seqStep = 0;
+        if (!on && this.on) this.powerOff();
+        if (on && !this.on) { this.seqStep = 0; for (const c of this.ch) { c.pos = 0; c.sample = 0; } }
         this.on = on; return;
       }
-      if (!this.on) return;
+      if (r >= 0x17) return;
+      if (!this.on) {
+        // powered off: only the original Game Boy still accepts the length counters
+        if (!this.cgb && (r === 1 || r === 6 || r === 11 || r === 16)) {
+          const ch = (r / 5) | 0, c = this.ch[ch];
+          if (ch === 2) c.len = 256 - v; else c.len = 64 - (v & 0x3f);
+        }
+        return;
+      }
       this.regs[r] = v;
       const ch = (r / 5) | 0, sub = r % 5;
       if (ch > 3) return;
       const c = this.ch[ch];
       switch (sub) {
         case 0:
-          if (ch === 0) { c.sweepPeriod = (v >> 4) & 7; c.sweepNeg = !!(v & 8); c.sweepShift = v & 7; }
+          if (ch === 0) {
+            c.sweepPeriod = (v >> 4) & 7; c.sweepShift = v & 7;
+            const neg = !!(v & 8);
+            if (c.sweepNeg && !neg && c.negUsed) c.on = false; // leaving subtract mode after using it
+            c.sweepNeg = neg;
+          }
           if (ch === 2) { c.dac = !!(v & 0x80); if (!c.dac) c.on = false; }
           break;
         case 1:
@@ -179,31 +86,55 @@
           if (ch !== 2) { c.dac = (v & 0xf8) !== 0; if (!c.dac) c.on = false; }
           break;
         case 3: if (ch !== 3) c.freq = (c.freq & 0x700) | v; break;
-        case 4:
+        case 4: {
           if (ch !== 3) c.freq = (c.freq & 0xff) | ((v & 7) << 8);
-          c.lenOn = !!(v & 0x40);
-          if (v & 0x80) this.trigger(ch);
+          const wasOn = c.lenOn, nowOn = !!(v & 0x40);
+          c.lenOn = nowOn;
+          // Turning the length counter on in the first half of a length period clocks it once.
+          const extra = (this.seqStep & 1) === 1;
+          if (extra && nowOn && !wasOn && c.len > 0) { if (--c.len === 0 && !(v & 0x80)) c.on = false; }
+          if (v & 0x80) this.trigger(ch, extra && nowOn);
           break;
+        }
       }
     }
-    trigger(i) {
+    powerOff() {
+      for (let i = 0; i < 0x16; i++) this.regs[i] = 0;
+      for (const c of this.ch) {
+        Object.assign(c, { on: false, dac: false, lenOn: false, vol: 0, envDir: 0, envPeriod: 0, freq: 0, duty: 0,
+          sweepPeriod: 0, sweepShift: 0, sweepNeg: false, sweepOn: false });
+        if (this.cgb) c.len = 0; // the original keeps its length counters
+      }
+    }
+    trigger(i, extraClock) {
       const c = this.ch[i], R = this.regs, base = i * 5;
+      // DMG: restarting channel 3 just as it reads wave RAM scrambles the first bytes
+      if (i === 2 && c.on && !this.cgb && c.timer <= 2) {
+        const next = ((c.pos + 1) & 31) >> 1;
+        if (next < 4) this.wave[0] = this.wave[next];
+        else { const b = next & ~3; for (let k = 0; k < 4; k++) this.wave[k] = this.wave[b + k]; }
+      }
       c.on = c.dac;
-      if (!c.len) c.len = i === 2 ? 256 : 64;
-      if (i === 2) { c.timer = (2048 - c.freq) * 2; c.pos = 0; }
+      if (!c.len) { c.len = i === 2 ? 256 : 64; if (extraClock) c.len--; }
+      if (i === 2) { c.timer = (2048 - c.freq) * 2 + 6; c.pos = 0; }
       else if (i === 3) {
         const v = R[base + 3];
-        const div = [8, 16, 32, 48, 64, 80, 96, 112][v & 7];
-        c.timer = div << (v >> 4); c.lfsr = 0x7fff;
-      } else c.timer = (2048 - c.freq) * 4;
+        c.timer = NOISE_DIV[v & 7] << (v >> 4); c.lfsr = 0x7fff;
+      } else c.timer = (2048 - c.freq) * 4 + (c.timer & 3);
       if (i !== 2) { const e = R[base + 2]; c.vol = e >> 4; c.envDir = e & 8 ? 1 : -1; c.envPeriod = e & 7; c.envTimer = c.envPeriod || 8; }
       if (i === 0) {
-        c.shadow = c.freq; c.sweepTimer = c.sweepPeriod || 8; c.sweepOn = !!(c.sweepPeriod || c.sweepShift);
+        c.shadow = c.freq; c.sweepTimer = c.sweepPeriod || 8; c.sweepOn = !!(c.sweepPeriod || c.sweepShift); c.negUsed = false;
         if (c.sweepShift && this.sweepCalc(c) > 2047) c.on = false;
       }
     }
-    sweepCalc(c) { const d = c.shadow >> c.sweepShift; return c.sweepNeg ? c.shadow - d : c.shadow + d; }
+    sweepCalc(c) {
+      const d = c.shadow >> c.sweepShift;
+      if (c.sweepNeg) { c.negUsed = true; return c.shadow - d; }
+      return c.shadow + d;
+    }
+    // frame sequencer: 512 Hz, from the divider
     clockSeq() {
+      if (!this.on) return;
       const s = this.seqStep;
       if ((s & 1) === 0) for (const c of this.ch) if (c.lenOn && c.len > 0 && --c.len === 0) c.on = false;
       if (s === 2 || s === 6) {
@@ -225,17 +156,20 @@
     }
     // advance n T-cycles (4.19 MHz)
     tick(n) {
+      const t0 = this.now;
+      this.now += n;
       if (!this.on) { this.mix(n, 0, 0); return; }
-      this.seqTimer -= n;
-      while (this.seqTimer <= 0) { this.seqTimer += 8192; this.clockSeq(); }
       for (let i = 0; i < 4; i++) {
         const c = this.ch[i];
         c.timer -= n;
         while (c.timer <= 0) {
-          if (i === 2) { c.timer += (2048 - c.freq) * 2; c.pos = (c.pos + 1) & 31; }
-          else if (i === 3) {
+          if (i === 2) {
+            const at = this.now + c.timer; // when this read happened
+            c.timer += (2048 - c.freq) * 2; c.pos = (c.pos + 1) & 31;
+            const b = this.wave[c.pos >> 1]; c.sample = c.pos & 1 ? b & 15 : b >> 4; c.fetched = at > t0 ? at : t0;
+          } else if (i === 3) {
             const v = this.regs[3 * 5 + 3];
-            c.timer += [8, 16, 32, 48, 64, 80, 96, 112][v & 7] << (v >> 4);
+            c.timer += NOISE_DIV[v & 7] << (v >> 4);
             const x = (c.lfsr ^ (c.lfsr >> 1)) & 1;
             c.lfsr = (c.lfsr >> 1) | (x << 14);
             if (v & 8) c.lfsr = (c.lfsr & ~0x40) | (x << 6);
@@ -243,19 +177,17 @@
         }
       }
       // channel outputs (0..15) -> DAC (-1..1)
-      const o = [0, 0, 0, 0];
       const c0 = this.ch[0], c1 = this.ch[1], c2 = this.ch[2], c3 = this.ch[3];
-      if (c0.on) o[0] = (DUTY[c0.duty] >> (7 - c0.pos)) & 1 ? c0.vol : 0;
-      if (c1.on) o[1] = (DUTY[c1.duty] >> (7 - c1.pos)) & 1 ? c1.vol : 0;
-      if (c2.on) {
-        const b = this.wave[c2.pos >> 1], s = c2.pos & 1 ? b & 15 : b >> 4, vc = (this.regs[2 * 5 + 2] >> 5) & 3;
-        o[2] = vc ? s >> (vc - 1) : 0;
-      }
-      if (c3.on) o[3] = c3.lfsr & 1 ? 0 : c3.vol;
+      const o0 = c0.on && (DUTY[c0.duty] >> (7 - c0.pos)) & 1 ? c0.vol : 0;
+      const o1 = c1.on && (DUTY[c1.duty] >> (7 - c1.pos)) & 1 ? c1.vol : 0;
+      let o2 = 0;
+      if (c2.on) { const vc = (this.regs[2 * 5 + 2] >> 5) & 3; o2 = vc ? c2.sample >> (vc - 1) : 0; }
+      const o3 = c3.on && !(c3.lfsr & 1) ? c3.vol : 0;
       const pan = this.regs[0x15], vol = this.regs[0x14];
       let L = 0, R = 0;
+      const os = [o0, o1, o2, o3];
       for (let i = 0; i < 4; i++) {
-        const dac = this.ch[i].dac ? o[i] / 7.5 - 1 : 0;
+        const dac = this.ch[i].dac ? os[i] / 7.5 - 1 : 0;
         if (pan & (0x10 << i)) L += dac;
         if (pan & (1 << i)) R += dac;
       }
@@ -273,8 +205,8 @@
         if (this.outLen < this.out.length - 1) { this.out[this.outLen++] = this.hpL * 0.6; this.out[this.outLen++] = this.hpR * 0.6; }
       }
     }
-    saveState() { return { regs: this.regs, wave: this.wave, on: this.on, ch: this.ch.map(c => Object.assign({}, c)), seqStep: this.seqStep, seqTimer: this.seqTimer }; }
-    loadState(o) { this.regs.set(o.regs); this.wave.set(o.wave); this.on = o.on; o.ch.forEach((c, i) => Object.assign(this.ch[i], c)); this.seqStep = o.seqStep; this.seqTimer = o.seqTimer; }
+    saveState() { return { regs: this.regs, wave: this.wave, on: this.on, ch: this.ch.map(c => Object.assign({}, c)), seqStep: this.seqStep, now: this.now }; }
+    loadState(o) { this.regs.set(o.regs); this.wave.set(o.wave); this.on = o.on; o.ch.forEach((c, i) => Object.assign(this.ch[i], c)); this.seqStep = o.seqStep; this.now = o.now || 0; }
   }
 
   // ===================================================================
@@ -292,7 +224,9 @@
   class GB {
     constructor(rom, opts = {}) {
       if (rom.length < 0x150) throw new Error("This isn't a Game Boy game file");
-      this.cart = new Cart(rom);
+      this.clock = 0; // real time in 4.19 MHz clocks (for cartridge clocks and the camera)
+      this.tilt = { x: 0, y: 0 }; this.stick = { x: 0, y: 0 }; this.tiltKeys = 0;
+      this.cart = global.RPGBCarts.create(rom, this);
       this.cgb = this.cart.cgb;
       this.battery = this.cart.battery;
       if (opts.sram && this.battery) this.cart.loadSram(opts.sram);
@@ -302,7 +236,7 @@
       this.oam = new Uint8Array(0xa0); this.hram = new Uint8Array(0x7f); this.io = new Uint8Array(0x80);
       this.bgPal = new Uint8Array(64); this.obPal = new Uint8Array(64); this.bcps = 0; this.ocps = 0;
       this.ie = 0; this.if = 0xe1;
-      this.apu = new APU(opts.sampleRate || 48000);
+      this.apu = new APU(opts.sampleRate || 48000, this);
       this.screen = new Uint32Array(160 * 144);
       this.width = 160; this.height = 144; this.fps = FPS;
       this.keys = 0; // bit set = pressed: A B Select Start Right Left Up Down (GB order)
@@ -316,11 +250,13 @@
       else { this.a = 0x01; this.f = 0xb0; this.b = 0x00; this.c = 0x13; this.d = 0x00; this.e = 0xd8; this.h = 0x01; this.l = 0x4d; }
       this.sp = 0xfffe; this.pc = 0x100;
       this.ime = false; this.eiDelay = 0; this.halted = false; this.haltBug = false; this.stopped = false;
-      this.div = this.cgb ? 0x1ea0 : 0xabcc; this.tima = 0; this.tma = 0; this.tac = 0xf8; this.timaReload = 0;
+      this.div = this.cgb ? 0x1ea0 : 0xabc8; this.tima = 0; this.tma = 0; this.tac = 0xf8; this.timaReload = 0;
       this.ly = 0; this.lineDot = 0; this.mode = 2; this.statLine = false; this.winLine = 0; this.frameDone = false;
+      this.lyReg = 0; this.lyCmp = 0; this.m3end = 256; this.firstLine = false; this.oamLock = false; this.vramLock = false; this.oamWLock = false; this.vramWLock = false; this.lycFlag = false;
       this.double = false; this.key1 = 0;
       this.hdmaSrc = 0; this.hdmaDst = 0; this.hdmaLen = 0; this.hdmaActive = false;
       this.cycles = 0;
+      this.dmaActive = false; this.dmaDelay = 0; this.dmaIdx = 0; this.dmaBase = 0; this.dmaReq = 0; this.dmaByte = 0xff;
       const io = this.io;
       io.fill(0);
       this.joyp = 0xcf;
@@ -329,29 +265,42 @@
       const apuInit = [[0xff10, 0x80], [0xff11, 0xbf], [0xff12, 0xf3], [0xff14, 0xbf], [0xff16, 0x3f], [0xff17, 0x00], [0xff19, 0xbf],
         [0xff1a, 0x7f], [0xff1b, 0xff], [0xff1c, 0x9f], [0xff1e, 0xbf], [0xff20, 0xff], [0xff21, 0x00], [0xff22, 0x00], [0xff23, 0xbf],
         [0xff24, 0x77], [0xff25, 0xf3]];
-      for (const [a, v] of apuInit) if ((a & 0xf) % 5 !== 4 || a === 0xff24) this.apu.write(a, v); else this.apu.regs[a - 0xff10] = v;
-      this.apu.ch[0].on = false;
+      this.apu.powerOff(); this.apu.on = true; this.apu.seqStep = 0;
+      for (const [a, v] of apuInit) { const r = a - 0xff10; if (r % 5 === 4 && r < 0x14) this.apu.regs[r] = v; else this.apu.write(a, v); } // no triggers
+      this.apu.ch[0].on = true; this.apu.ch[0].vol = 0; // the start-up chime's channel is left on, silent
       if (this.cgb) for (let i = 0; i < 64; i++) this.bgPal[i] = 0xff;
     }
 
     // ---- timing: every memory access costs one M-cycle (4 T-cycles) ----
     tick() {
       const t = this.double ? 2 : 4; // PPU/APU see half as much time per M-cycle at double speed
-      this.cycles += 4;
+      this.cycles += 4; this.clock += t;
+      if (this.dmaActive || this.dmaDelay) this.oamDmaStep();
       this.timerTick();
+      const ifBefore = this.if;
       this.ppuTick(t);
+      this.ppuNewIf = this.if & ~ifBefore;
       this.apu.tick(t);
-      if (this.serialTimer > 0 && (this.serialTimer -= 4) <= 0) { this.io[1] = 0xff; this.io[2] &= 0x7f; this.if |= 8; }
     }
     // DIV is a 16-bit counter; TIMA counts falling edges of one of its bits.
     timerTick() {
+      // after TIMA overflows it reads 0 for one M-cycle, then TMA is loaded
+      this.timaJustLoaded = false;
       if (this.timaReload) {
-        if (--this.timaReload === 0) { this.tima = this.tma; this.if |= 4; }
+        if (--this.timaReload === 0) { this.tima = this.tma; this.if |= 4; this.timaJustLoaded = true; }
       }
       const old = this.div;
       this.div = (this.div + 4) & 0xffff;
       this.timerEdge(old, this.div);
+      this.apuEdge(old, this.div);
+      // serial port with its own clock: one bit per falling edge of a divider bit (8192 Hz, or 262144 Hz on Color)
+      if (this.serialBits) {
+        const bit = this.cgb && (this.io[2] & 2) ? 3 : 8;
+        if (((old >> bit) & 1) && !((this.div >> bit) & 1) && --this.serialBits === 0) { this.io[1] = 0xff; this.io[2] &= 0x7f; this.if |= 8; }
+      }
     }
+    // the sound frame sequencer steps on falling edges of divider bit 12 (bit 13 at double speed)
+    apuEdge(old, now) { const b = this.double ? 13 : 12; if (((old >> b) & 1) && !((now >> b) & 1)) this.apu.clockSeq(); }
     timerBit() { return [9, 3, 5, 7][this.tac & 3]; }
     timerEdge(old, now) {
       if (!(this.tac & 4)) return;
@@ -362,18 +311,70 @@
       this.tima = (this.tima + 1) & 0xff;
       if (this.tima === 0) this.timaReload = 1;
     }
-    rd(a) { this.tick(); return this.read(a); }
-    wr(a, v) { this.tick(); this.write(a, v); }
+    rd(a) { this.tick(); if (a >= 0xfe00 && a < 0xff00) this.oamBug(a, this.iduRead ? 2 : 1); return this.dmaActive && a < 0xff00 ? this.dmaBusRead(a) : this.read(a); }
+    wr(a, v) { this.tick(); if (a >= 0xfe00 && a < 0xff00) this.oamBug(a, 0); if (this.dmaActive && a < 0xff00 && this.dmaBusBlocked(a)) return; this.write(a, v); }
+    // ---- the original Game Boy's OAM corruption bug ----
+    // While the video chip scans OAM (mode 2) it reads one 8-byte row per M-cycle. If the CPU
+    // puts an address in FE00-FEFF on the bus then (a read, a write, or the 16-bit
+    // increment/decrement unit of INC rr, DEC rr, PUSH, POP, LD A,(HL+/-)), that row gets
+    // mixed with the one before it. kind: 0 write (or inc/dec), 1 read, 2 read + inc/dec together.
+    oamScanRow() {
+      if (this.cgb || !this.lcdOn() || this.ly >= 144 || this.firstLine) return -1;
+      const r = this.lineDot >> 2; // row r is read in the M-cycle that ends at dot 4r
+      return r >= 0 && r < 20 ? r : -1;
+    }
+    oamBug(a, kind) {
+      if (this.cgb || a < 0xfe00 || a >= 0xff00) return;
+      const row = this.oamScanRow();
+      if (row < 1) return; // the first row (objects 0 and 1) is never damaged
+      const o = this.oam, w = (r, i) => o[r * 8 + i * 2] | (o[r * 8 + i * 2 + 1] << 8);
+      const setw = (r, i, v) => { o[r * 8 + i * 2] = v & 255; o[r * 8 + i * 2 + 1] = (v >> 8) & 255; };
+      const copyRow = (to, from) => { for (let k = 0; k < 8; k++) o[to * 8 + k] = o[from * 8 + k]; };
+      if (kind === 2 && row >= 4 && row < 19) {
+        const a2 = w(row - 2, 0), b = w(row - 1, 0), c = w(row, 0), d = w(row - 1, 2);
+        setw(row - 1, 0, (b & (a2 | c | d)) | (a2 & c & d));
+        copyRow(row, row - 1); copyRow(row - 2, row - 1);
+      }
+      const a0 = w(row, 0), b = w(row - 1, 0), c = w(row - 1, 2);
+      const first = kind === 0 ? ((a0 ^ c) & (b ^ c)) ^ c : b | (a0 & c);
+      copyRow(row, row - 1); setw(row, 0, first);
+    }
+    // ---- OAM DMA: one byte per M-cycle after a cycle of set-up; meanwhile the CPU
+    // can't use the bus the copy reads from (it sees the byte being copied), nor OAM.
+    oamDmaStep() {
+      if (this.dmaDelay && --this.dmaDelay === 0) { this.dmaActive = true; this.dmaIdx = 0; this.dmaBase = this.dmaReq; }
+      if (this.dmaActive) {
+        if (this.dmaIdx >= 160) this.dmaActive = false;
+        else { const a = this.dmaBase + this.dmaIdx; this.dmaByte = this.dmaRead(a >= 0xe000 ? a - 0x2000 : a); this.oam[this.dmaIdx++] = this.dmaByte; }
+      }
+    }
+    dmaRead(a) {
+      if (a < 0x8000) return this.cart.romRead(a);
+      if (a < 0xa000) return this.vram[this.vbank * 0x2000 + (a & 0x1fff)];
+      if (a < 0xc000) return this.cart.ramRead(a);
+      if (a < 0xd000) return this.wram[a & 0xfff];
+      return this.wram[this.wbank * 0x1000 + (a & 0xfff)];
+    }
+    // the copy's source is on the video bus (8000-9FFF) or the cartridge / work RAM bus
+    dmaBusBlocked(a) {
+      if (a >= 0xfe00) return true;
+      const srcVram = this.dmaBase >= 0x8000 && this.dmaBase < 0xa000, isVram = a >= 0x8000 && a < 0xa000;
+      if (srcVram !== isVram) return false;
+      // the Color model has work RAM on a bus of its own
+      if (this.cgb && !srcVram && ((a >= 0xc000) !== (this.dmaBase >= 0xc000))) return false;
+      return true;
+    }
+    dmaBusRead(a) { return !this.dmaBusBlocked(a) ? this.read(a) : a >= 0xfe00 ? 0xff : this.dmaByte; }
     idle() { this.tick(); }
 
     read(a) {
       if (a < 0x8000) return this.cart.romRead(a);
-      if (a < 0xa000) return this.mode === 3 && this.lcdOn() ? 0xff : this.vram[this.vbank * 0x2000 + (a & 0x1fff)];
+      if (a < 0xa000) return this.vramLock ? 0xff : this.vram[this.vbank * 0x2000 + (a & 0x1fff)];
       if (a < 0xc000) return this.cart.ramRead(a);
       if (a < 0xd000) return this.wram[a & 0xfff];
       if (a < 0xe000) return this.wram[this.wbank * 0x1000 + (a & 0xfff)];
       if (a < 0xfe00) return this.read(a - 0x2000);
-      if (a < 0xfea0) return (this.mode >= 2 && this.lcdOn()) ? 0xff : this.oam[a - 0xfe00];
+      if (a < 0xfea0) return this.oamLock ? 0xff : this.oam[a - 0xfe00];
       if (a < 0xff00) return 0xff;
       if (a < 0xff80) return this.ioRead(a);
       if (a < 0xffff) return this.hram[a - 0xff80];
@@ -381,12 +382,12 @@
     }
     write(a, v) {
       if (a < 0x8000) { this.cart.romWrite(a, v); return; }
-      if (a < 0xa000) { if (!(this.mode === 3 && this.lcdOn())) this.vram[this.vbank * 0x2000 + (a & 0x1fff)] = v; return; }
+      if (a < 0xa000) { if (!this.vramWLock) this.vram[this.vbank * 0x2000 + (a & 0x1fff)] = v; return; }
       if (a < 0xc000) { this.cart.ramWrite(a, v); return; }
       if (a < 0xd000) { this.wram[a & 0xfff] = v; return; }
       if (a < 0xe000) { this.wram[this.wbank * 0x1000 + (a & 0xfff)] = v; return; }
       if (a < 0xfe00) { this.write(a - 0x2000, v); return; }
-      if (a < 0xfea0) { if (!(this.mode >= 2 && this.lcdOn())) this.oam[a - 0xfe00] = v; return; }
+      if (a < 0xfea0) { if (!this.oamWLock) this.oam[a - 0xfe00] = v; return; }
       if (a < 0xff00) return;
       if (a < 0xff80) { this.ioWrite(a, v); return; }
       if (a < 0xffff) { this.hram[a - 0xff80] = v; return; }
@@ -410,8 +411,8 @@
         case 0x06: return this.tma;
         case 0x07: return this.tac | 0xf8;
         case 0x0f: return this.if | 0xe0;
-        case 0x41: return 0x80 | (this.io[0x41] & 0x78) | (this.ly === this.io[0x45] ? 4 : 0) | (this.lcdOn() ? this.mode : 0);
-        case 0x44: return this.ly;
+        case 0x41: return 0x80 | (this.io[0x41] & 0x78) | (this.lycFlag ? 4 : 0) | (this.lcdOn() ? this.mode : 0);
+        case 0x44: return this.lyReg;
         case 0x4d: return this.cgb ? (this.double ? 0x80 : 0) | (this.key1 & 1) | 0x7e : 0xff;
         case 0x4f: return this.cgb ? 0xfe | this.vbank : 0xff;
         case 0x55: return this.cgb ? (this.hdmaActive ? ((this.hdmaLen - 1) & 0x7f) : 0xff) : 0xff;
@@ -432,11 +433,11 @@
         case 0x01: this.io[1] = v; return;
         case 0x02:
           this.io[2] = v;
-          if ((v & 0x81) === 0x81) { this.serialOut += String.fromCharCode(this.io[1]); this.serialTimer = 8 * 512; }
+          if ((v & 0x81) === 0x81) { this.serialOut += String.fromCharCode(this.io[1]); this.serialBits = 8; } else this.serialBits = 0;
           return;
-        case 0x04: { const old = this.div; this.div = 0; this.timerEdge(old, 0); return; }
-        case 0x05: if (this.timaReload !== 1) { this.tima = v; this.timaReload = 0; } return;
-        case 0x06: this.tma = v; if (this.timaReload === 1) this.tima = v; return;
+        case 0x04: { const old = this.div; this.div = 0; this.timerEdge(old, 0); this.apuEdge(old, 0); return; }
+        case 0x05: if (!this.timaJustLoaded) { this.tima = v; this.timaReload = 0; } return; // a write in the 0 cycle cancels the reload
+        case 0x06: this.tma = v; if (this.timaJustLoaded) this.tima = v; return;
         case 0x07: {
           // changing the timer setting can itself produce a falling edge
           const oldBit = (this.tac & 4) && ((this.div >> this.timerBit()) & 1);
@@ -449,18 +450,20 @@
         case 0x40: {
           const was = this.lcdOn();
           this.io[0x40] = v;
-          if (was && !(v & 0x80)) { this.ly = 0; this.lineDot = 0; this.mode = 0; this.screen.fill(this.cgb ? 0xffffffff : this.dmgPalette[0]); }
-          if (!was && (v & 0x80)) { this.ly = 0; this.lineDot = 4; this.mode = 2; this.winLine = 0; this.checkStat(); }
+          if (was && !(v & 0x80)) {
+            this.ly = this.lyReg = this.lyCmp = 0; this.lineDot = 0; this.mode = 0; this.oamLock = this.vramLock = this.oamWLock = this.vramWLock = false;
+            this.screen.fill(this.cgb ? 0xffffffff : this.dmgPalette[0]);
+          }
+          // Switched on: line 0 starts in mode 0 (no OAM scan) and runs a little late.
+          if (!was && (v & 0x80)) { this.ly = this.lyReg = this.lyCmp = 0; this.lineDot = 4; this.mode = 0; this.winLine = 0; this.firstLine = true; this.checkStat(); }
           return;
         }
         case 0x41: this.io[0x41] = v & 0x78; this.checkStat(); return;
         case 0x44: return;
         case 0x45: this.io[0x45] = v; this.checkStat(); return;
-        case 0x46: { // OAM DMA (copied at once)
-          const src = v << 8;
-          for (let i = 0; i < 0xa0; i++) this.oam[i] = this.read(src + i < 0xe000 ? src + i : src + i - 0x2000);
+        case 0x46: // OAM DMA: the first byte is copied two M-cycles later
+          this.dmaReq = v << 8; this.dmaDelay = 2;
           this.io[0x46] = v; return;
-        }
         case 0x4d: if (this.cgb) this.key1 = v & 1; return;
         case 0x4f: if (this.cgb) this.vbank = v & 1; return;
         case 0x51: this.hdmaSrc = (this.hdmaSrc & 0xff) | (v << 8); return;
@@ -495,14 +498,32 @@
     }
 
     // ---- PPU ----
+    // The STAT interrupt line is the OR of the enabled sources; an interrupt is requested on its rising edge.
     checkStat() {
-      const s = this.io[0x41];
-      const line = this.lcdOn() && (
-        ((s & 0x40) && this.ly === this.io[0x45]) ||
-        ((s & 0x08) && this.mode === 0) || ((s & 0x10) && this.mode === 1) || ((s & 0x20) && this.mode === 2));
-      if (line && !this.statLine) this.if |= 2; // interrupt on the rising edge only
+      // With the screen off nothing changes: the LY=LYC flag and the interrupt line keep their state.
+      if (!this.lcdOn()) return;
+      const st = this.io[0x41], d = this.lineDot, ly = this.ly;
+      this.lycFlag = this.lyCmp === this.io[0x45];
+      let line = false;
+      {
+        const vis = ly < 144;
+        line = ((st & 0x40) && this.lycFlag) ||
+          ((st & 0x08) && vis && (this.mode === 0 || (this.mode === 3 && d >= this.m3end - 4))) ||
+          ((st & 0x10) && !vis) ||
+          ((st & 0x20) && this.mode2Source(ly, d));
+      }
+      if (line && !this.statLine) this.if |= 2;
       this.statLine = !!line;
     }
+    // The mode 2 interrupt source: from LY's change to the end of the OAM scan, plus a
+    // short pulse at the start of line 144 (together with the vertical blank interrupt).
+    mode2Source(ly, d) {
+      if (this.firstLine) return false;
+      return ly < 144 ? d < 84 : ly === 144 && d < 4;
+    }
+    // Timing of a visible line, in dots from the moment LY changes:
+    //   0-3 LY changes (STAT still shows mode 0, OAM already locked), 4-83 mode 2 (VRAM locked from 80),
+    //   84 mode 3, which ends at 256 + SCX&7 + objects + window, then mode 0 until 456.
     ppuTick(t) {
       if (!this.lcdOn()) {
         this.lcdOffDots = (this.lcdOffDots || 0) + t;
@@ -510,24 +531,70 @@
         return;
       }
       this.lineDot += t;
-      if (this.ly < 144) {
-        if (this.mode === 2 && this.lineDot >= 80) { this.mode = 3; this.checkStat(); }
-        else if (this.mode === 3 && this.lineDot >= 252) {
-          this.renderLine();
-          this.mode = 0; this.checkStat();
-          if (this.hdmaActive) this.hdmaPending = true;
-        }
-      }
       if (this.lineDot >= 456) {
         this.lineDot -= 456;
-        this.ly++;
-        if (this.ly === 144) {
-          this.mode = 1; this.if |= 1; this.frameDone = true;
-        } else if (this.ly > 153) {
-          this.ly = 0; this.winLine = 0; this.mode = 2;
-        } else if (this.ly < 144) this.mode = 2;
-        this.checkStat();
+        this.firstLine = false;
+        if (++this.ly > 153) { this.ly = 0; this.winLine = 0; }
       }
+      const d = this.lineDot, ly = this.ly;
+      if (ly < 144) {
+        let mode;
+        if (this.firstLine) mode = d < 84 ? 0 : d < this.m3end ? 3 : 0;
+        else mode = d < 4 ? 0 : d < 84 ? 2 : d < this.m3end ? 3 : 0;
+        if (mode === 3 && this.mode !== 3) this.m3end = this.mode3Length();
+        if (mode === 0 && this.mode === 3) {
+          this.renderLine();
+          if (this.hdmaActive) this.hdmaPending = true;
+        }
+        this.mode = mode;
+        this.oamLock = this.firstLine ? (d >= 84 && d < this.m3end) : d < this.m3end;
+        this.vramLock = d >= (this.firstLine ? 84 : 80) && d < this.m3end;
+        // writes are refused a little later than reads
+        this.oamWLock = this.firstLine ? this.oamLock : (d >= 4 && d < 80) || (d >= 84 && d < this.m3end);
+        this.vramWLock = d >= 84 && d < this.m3end;
+        this.lyReg = ly;
+        this.lyCmp = d < 4 && !this.firstLine ? -1 : ly;
+        if (mode === 3 && d >= this.m3end) this.m3end = 456;
+      } else {
+        if (ly === 144 && d < 4) {
+          if (this.lyReg !== 144) { this.if |= 1; this.frameDone = true; } // vertical blank begins
+          this.lyReg = 144; this.lyCmp = -1; this.mode = 0;
+        } else {
+          this.mode = 1;
+          // line 153 reports LY = 0 after its first M-cycle
+          if (ly === 153) { this.lyReg = d < 4 ? 153 : 0; this.lyCmp = d < 4 ? -1 : d < 8 ? 153 : 0; }
+          else { this.lyReg = ly; this.lyCmp = d < 4 ? -1 : ly; }
+        }
+        this.oamLock = this.vramLock = this.oamWLock = this.vramWLock = false;
+      }
+      this.checkStat();
+    }
+    // Mode 3 length in dots (from dot 0 of the line to the start of mode 0)
+    mode3Length() {
+      const lcdc = this.io[0x40], scx = this.io[0x43] & 7;
+      let len = 256 + scx;
+      // window: the fetcher restarts when it reaches the window
+      const wx = this.io[0x4b];
+      if ((lcdc & 0x20) && this.ly >= this.io[0x4a] && wx < 167) len += 6;
+      if (lcdc & 2) {
+        const h = lcdc & 4 ? 16 : 8, xs = [];
+        for (let i = 0; i < 40 && xs.length < 10; i++) {
+          const sy = this.oam[i * 4] - 16;
+          if (this.ly >= sy && this.ly < sy + h) xs.push(this.oam[i * 4 + 1]);
+        }
+        xs.sort((a, b) => a - b);
+        // each object costs 6 dots, plus a wait for the background fetch of the first object in a tile
+        const seen = new Set();
+        let pen = 0;
+        for (const x of xs) {
+          if (x >= 168) continue;
+          const px = x + scx, tile = px >> 3;
+          pen += 6;
+          if (!seen.has(tile)) { seen.add(tile); pen += Math.max(0, 5 - (px & 7)); }
+        }
+        if (pen) len += pen - 3; // the last fetch overlaps the end of the line
+      }
+      return len;
     }
 
     color(palIdx, c, obj) { // CGB 15-bit colour -> ABGR (with gentle correction)
@@ -611,8 +678,8 @@
     get hl() { return (this.h << 8) | this.l; } set hl(v) { this.h = (v >> 8) & 255; this.l = v & 255; }
     fetch() { const v = this.rd(this.pc); this.pc = (this.pc + 1) & 0xffff; return v; }
     fetch16() { const lo = this.fetch(); return lo | (this.fetch() << 8); }
-    push16(v) { this.idle(); this.sp = (this.sp - 1) & 0xffff; this.wr(this.sp, v >> 8); this.sp = (this.sp - 1) & 0xffff; this.wr(this.sp, v & 255); }
-    pop16() { const lo = this.rd(this.sp); this.sp = (this.sp + 1) & 0xffff; const hi = this.rd(this.sp); this.sp = (this.sp + 1) & 0xffff; return lo | (hi << 8); }
+    push16(v) { this.idle(); this.oamBug(this.sp, 0); this.sp = (this.sp - 1) & 0xffff; this.wr(this.sp, v >> 8); this.sp = (this.sp - 1) & 0xffff; this.wr(this.sp, v & 255); }
+    pop16() { this.iduRead = true; const lo = this.rd(this.sp); this.sp = (this.sp + 1) & 0xffff; const hi = this.rd(this.sp); this.sp = (this.sp + 1) & 0xffff; this.iduRead = false; return lo | (hi << 8); }
     getR(i) {
       switch (i) { case 0: return this.b; case 1: return this.c; case 2: return this.d; case 3: return this.e; case 4: return this.h; case 5: return this.l; case 6: return this.rd(this.hl); default: return this.a; }
     }
@@ -641,13 +708,17 @@
     getRR(i) { switch (i) { case 0: return this.bc; case 1: return this.de; case 2: return this.hl; default: return this.sp; } }
     setRR(i, v) { v &= 0xffff; switch (i) { case 0: this.bc = v; break; case 1: this.de = v; break; case 2: this.hl = v; break; default: this.sp = v; } }
 
-    interrupts() {
-      const pending = this.ie & this.if & 0x1f;
+    // idles: wait cycles before the pushes (2 when waking from HALT, 1 after a dropped opcode fetch).
+    // mask: requests too recent to be seen yet.
+    interrupts(idles, mask = 0) {
+      const pending = this.ie & this.if & 0x1f & ~mask;
       if (!pending) return false;
       if (this.halted) { this.halted = false; }
       if (!this.ime) return false;
       this.ime = false;
-      this.idle(); this.idle();
+      // "EI, HALT" with an interrupt already waiting: the handler returns to the HALT
+      if (this.haltBug) { this.haltBug = false; this.pc = (this.pc - 1) & 0xffff; }
+      for (let i = 0; i < idles; i++) this.idle();
       this.sp = (this.sp - 1) & 0xffff; this.wr(this.sp, this.pc >> 8);
       // Which interrupt wins is decided after the high byte is pushed.
       const p2 = this.ie & this.if & 0x1f;
@@ -662,11 +733,17 @@
 
     step() {
       if (this.hdmaPending) { this.hdmaPending = false; if (this.hdmaActive && !this.halted) this.hdmaBlock(); }
-      if (this.interrupts()) return;
-      if (this.halted || this.stopped) { this.idle(); if (this.stopped && (this.keys & 0xff)) this.stopped = false; return; }
+      // EI takes effect after the instruction that follows it
       if (this.eiDelay && --this.eiDelay === 0) this.ime = true;
-      let op = this.fetch();
-      if (this.haltBug) { this.haltBug = false; this.pc = (this.pc - 1) & 0xffff; }
+      if (this.halted || this.stopped) {
+        if (this.interrupts(2)) return;
+        if (this.halted || this.stopped) { this.idle(); if (this.stopped && (this.keys & 0xff)) this.stopped = false; return; }
+      }
+      // Opcode fetch. An interrupt that arrives during it is still taken (the fetched byte is dropped),
+      // except the video chip's, which come too late in the M-cycle.
+      const op = this.rd(this.pc);
+      if (this.interrupts(1, this.ppuNewIf)) return;
+      if (this.haltBug) this.haltBug = false; else this.pc = (this.pc + 1) & 0xffff;
       this.exec(op);
     }
 
@@ -693,11 +770,11 @@
               this.f = (this.f & 0x80) | (((hl & 0xfff) + (v & 0xfff)) > 0xfff ? 0x20 : 0) | (r > 0xffff ? 0x10 : 0); this.hl = r; return; }
           case 2: {
             const addr = p === 0 ? this.bc : p === 1 ? this.de : this.hl;
-            if (!q) this.wr(addr, this.a); else this.a = this.rd(addr);
+            if (!q) this.wr(addr, this.a); else { this.iduRead = p >= 2; this.a = this.rd(addr); this.iduRead = false; }
             if (p === 2) this.hl = this.hl + 1; else if (p === 3) this.hl = this.hl - 1;
             return;
           }
-          case 3: this.idle(); this.setRR(p, this.getRR(p) + (q ? -1 : 1)); return;
+          case 3: { const v = this.getRR(p); this.idle(); this.oamBug(v, 0); this.setRR(p, v + (q ? -1 : 1)); return; }
           case 4: { const v = this.getR(y), r = (v + 1) & 255; this.f = (this.f & 0x10) | (r ? 0 : 0x80) | ((v & 15) === 15 ? 0x20 : 0); this.setR(y, r); return; }
           case 5: { const v = this.getR(y), r = (v - 1) & 255; this.f = (this.f & 0x10) | 0x40 | (r ? 0 : 0x80) | ((v & 15) === 0 ? 0x20 : 0); this.setR(y, r); return; }
           case 6: this.setR(y, this.fetch()); return;
@@ -746,7 +823,7 @@
           if (y === 0) { const a = this.fetch16(); this.idle(); this.pc = a; return; }                       // JP nn
           if (y === 1) { this.execCB(this.fetch()); return; }
           if (y === 6) { this.ime = false; this.eiDelay = 0; return; }                                        // DI
-          if (y === 7) { this.eiDelay = 2; return; }                                                          // EI (takes effect after the next instruction)
+          if (y === 7) { if (!this.ime && !this.eiDelay) this.eiDelay = 2; return; }                                                          // EI (takes effect after the next instruction)
           this.locked = true; this.pc = (this.pc - 1) & 0xffff; return;                                       // illegal opcode: CPU stops
         case 4:
           if (y < 4) { const a = this.fetch16(); if (this.cond(y)) { this.push16(this.pc); this.pc = a; } return; }
@@ -787,26 +864,40 @@
     // RetroPixels' button order: A, B, Select, Start, Up, Down, Left, Right
     setInput(player, bits) {
       if (player) return;
+      this.tiltKeys = bits >> 8;
       // GB order: A B Select Start (low nibble), Right Left Up Down (high nibble)
       const k = (bits & 15) | ((bits & 0x80) ? 0x10 : 0) | ((bits & 0x40) ? 0x20 : 0) | ((bits & 0x10) ? 0x40 : 0) | ((bits & 0x20) ? 0x80 : 0);
       if (k & ~this.keys) this.if |= 0x10; // joypad interrupt on a new press
       this.keys = k;
     }
+    // Tilt carts (MBC7) read the right stick, or the tilt keys
+    setAnalog(player, x, y, rx, ry) { if (!player) { this.stick.x = rx; this.stick.y = ry; } }
     runFrame() {
       this.frameDone = false;
+      const k = this.tiltKeys;
+      this.tilt.x = Math.max(-1, Math.min(1, this.stick.x + ((k & 8) ? 1 : 0) - ((k & 4) ? 1 : 0)));
+      this.tilt.y = Math.max(-1, Math.min(1, this.stick.y + ((k & 2) ? 1 : 0) - ((k & 1) ? 1 : 0)));
       let guard = 0;
       while (!this.frameDone && guard++ < 300000) {
         if (this.locked) { this.idle(); continue; }
         this.step();
       }
+      this.cart.frame();
     }
+    // 0..1: how hard the cartridge's rumble motor ran this frame
+    get rumble() { return this.cart.hasRumble ? this.cart.rumbleLevel : undefined; }
+    get usesRightStick() { return this.cart.kind === "MBC7"; }
+    get controlsNote() { return this.usesRightStick ? "Tilt the game with the right stick, or with the tilt keys (I J K L to start with). Clicking the sticks (L3/R3) is used for save states." : null; }
+    // extra controls shown for this game only (tilt keys for MBC7 carts)
+    get buttons() { return this.cart.kind === "MBC7" ? GB.info.buttons.concat(["Tilt Up", "Tilt Down", "Tilt Left", "Tilt Right"]) : null; }
     takeAudio() { const a = this.apu.out.slice(0, this.apu.outLen); this.apu.outLen = 0; return a; }
     getSRAM() { return this.cart.sram(); }
     saveState() {
       const regs = {};
       for (const k of ["a", "f", "b", "c", "d", "e", "h", "l", "sp", "pc", "ime", "eiDelay", "halted", "haltBug", "stopped", "div", "tima", "tma", "tac",
-        "timaReload", "ly", "lineDot", "mode", "statLine", "winLine", "double", "key1", "hdmaSrc", "hdmaDst", "hdmaLen", "hdmaActive", "vbank", "wbank",
-        "bcps", "ocps", "ie", "if", "joyp", "cycles", "locked", "lcdOffDots"]) regs[k] = this[k];
+        "timaReload", "timaJustLoaded", "ly", "lyReg", "lyCmp", "m3end", "firstLine", "oamLock", "vramLock", "oamWLock", "vramWLock", "lycFlag", "serialBits", "lineDot", "mode", "statLine", "winLine", "double", "key1", "hdmaSrc", "hdmaDst", "hdmaLen", "hdmaActive", "vbank", "wbank",
+        "bcps", "ocps", "ie", "if", "joyp", "cycles", "clock", "locked", "lcdOffDots",
+        "dmaActive", "dmaDelay", "dmaIdx", "dmaBase", "dmaReq", "dmaByte"]) regs[k] = this[k];
       return { v: 1, regs, vram: this.vram, wram: this.wram, oam: this.oam, hram: this.hram, io: this.io, bgPal: this.bgPal, obPal: this.obPal,
         cart: this.cart.saveState(), apu: this.apu.saveState() };
     }

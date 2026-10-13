@@ -3,7 +3,7 @@
 // ARM7TDMI CPU (RPARM7), memory bus with wait states, video (modes 0-5,
 // sprites, windows, blending, mosaic), sound (four PSG channels + two DMA
 // sound FIFOs), DMA, timers, interrupts, keypad, cartridge saves (SRAM, Flash,
-// EEPROM) and real-time clock, written from the documented hardware behaviour.
+// EEPROM), real-time clock and sensor carts (gba_gpio.js), written from the documented hardware behaviour.
 // No Nintendo BIOS is used: RetroPixels' own small BIOS handles interrupts and
 // the BIOS calls (division, decompression, copy, affine set-up, waits...).
 "use strict";
@@ -736,7 +736,9 @@
       [this.io, this.io16, this.io32] = mk(0x400);
       this.save = new Save(this.rom);
       if (opts.sram && opts.sram.length) this.save.load(opts.sram);
-      this.rtc = this.save.rtc ? new RTC() : null;
+      // extra chips on the cartridge's GPIO pins (clock, sensors, rumble): see gba_gpio.js
+      this.gpio = global.RPGBAGpio ? global.RPGBAGpio.create(this, this.rom, RTC, this.save.rtc) : null;
+      this.rtc = this.gpio ? this.gpio.rtc : null;
       this.eepromBase = this.romSize > 0x1000000 ? 0x0dffff00 : 0x0d000000;
       this.sampleRate = opts.sampleRate || 48000;
       this.apu = new APU(this, this.sampleRate);
@@ -761,9 +763,9 @@
     reset() {
       for (const m of [this.ewram, this.iwram, this.pal, this.vram, this.oam, this.io]) m.fill(0);
       this.timers = [0, 1, 2, 3].map(() => ({ reload: 0, ctrl: 0, count: 0, start: 0 }));
-      this.dma = [0, 1, 2, 3].map(() => ({ src: 0, dst: 0, count: 0, pending: false }));
+      this.dma = [0, 1, 2, 3].map(() => ({ src: 0, dst: 0, count: 0, pending: false, latch: 0 }));
       this.apu.reset(); this.ppu.affX.fill(0); this.ppu.affY.fill(0);
-      this.time = 0; this.line = 0; this.lineStart = 0; this.nextTimer = Infinity;
+      this.time = 0; this.line = 0; this.lineStart = 0; this.nextTimer = Infinity; this.waiting = false; this.stopped = false;
       const c = this.cpu;
       c.reset();
       // state the real start-up code leaves behind
@@ -834,13 +836,13 @@
     }
     romRead16(a) {
       const o = a & 0x1fffffe;
-      if (this.rtc && o >= 0xc4 && o <= 0xc8 && (this.rtc.ctrl & 1)) return o === 0xc4 ? this.rtc.read() : o === 0xc6 ? this.rtc.dir : this.rtc.ctrl;
+      if (this.gpio && this.gpio.onPins && o >= 0xc4 && o <= 0xc8 && (this.gpio.ctrl & 1)) return this.gpio.read16(o);
       if (o >= this.rom.length) return (o >> 1) & 0xffff;
       return this.rom16[o >> 1];
     }
     romRead32(a) {
       const o = a & 0x1fffffc;
-      if (o >= this.rom.length || (this.rtc && o >= 0xc4 && o <= 0xc8)) return (this.romRead16(o) | (this.romRead16(o + 2) << 16));
+      if (o >= this.rom.length || (this.gpio && o >= 0xc4 && o <= 0xc8)) return (this.romRead16(o) | (this.romRead16(o + 2) << 16));
       return this.rom32[o >> 2];
     }
 
@@ -862,11 +864,11 @@
         case 3: return this.iwram[a & 0x7fff];
         case 4: return (a & 0xffffff) < 0x400 ? (this.ioRead16(a & 0x3fe) >> ((a & 1) * 8)) & 0xff : 0;
         case 5: return this.pal[a & 0x3ff];
-        case 6: return this.vram[this.vaddr(a)];
+        case 6: return this.vramHole(a) ? 0 : this.vram[this.vaddr(a)];
         case 7: return this.oam[a & 0x3ff];
         case 8: case 9: case 10: case 11: case 12: return (this.romRead16(a) >> ((a & 1) * 8)) & 0xff;
         case 13: if (this.save.type === "eeprom" && a >= this.eepromBase) return this.save.eepromRead(); return (this.romRead16(a) >> ((a & 1) * 8)) & 0xff;
-        case 14: case 15: return this.save.read8(a);
+        case 14: case 15: return this.sramRead8(a);
         default: return (this.openBus(a) >>> ((a & 3) * 8)) & 0xff;
       }
     }
@@ -877,11 +879,11 @@
         case 3: return this.iwram16[(a & 0x7fff) >> 1];
         case 4: return (a & 0xffffff) < 0x400 ? this.ioRead16(a & 0x3fe) : 0;
         case 5: return this.pal16[(a & 0x3ff) >> 1];
-        case 6: return this.vram16[this.vaddr(a) >> 1];
+        case 6: return this.vramHole(a) ? 0 : this.vram16[this.vaddr(a) >> 1];
         case 7: return this.oam16[(a & 0x3ff) >> 1];
         case 8: case 9: case 10: case 11: case 12: return this.romRead16(a);
         case 13: if (this.save.type === "eeprom" && a >= this.eepromBase) return this.save.eepromRead(); return this.romRead16(a);
-        case 14: case 15: return this.save.read8(a) * 0x101;
+        case 14: case 15: return this.sramRead8(a) * 0x101;
         default: return (this.openBus(a) >>> ((a & 2) * 8)) & 0xffff;
       }
     }
@@ -892,15 +894,20 @@
         case 3: return this.iwram32[(a & 0x7ffc) >> 2];
         case 4: { const o = a & 0x3fc; return (a & 0xffffff) < 0x400 ? this.ioRead16(o) | (this.ioRead16(o + 2) << 16) : 0; }
         case 5: return this.pal32[(a & 0x3fc) >> 2];
-        case 6: return this.vram32[this.vaddr(a) >> 2];
+        case 6: return this.vramHole(a) ? 0 : this.vram32[this.vaddr(a) >> 2];
         case 7: return this.oam32[(a & 0x3fc) >> 2];
         case 8: case 9: case 10: case 11: case 12: return this.romRead32(a);
         case 13: if (this.save.type === "eeprom" && a >= this.eepromBase) return this.save.eepromRead(); return this.romRead32(a);
-        case 14: case 15: return this.save.read8(a) * 0x1010101;
+        case 14: case 15: return this.sramRead8(a) * 0x1010101;
         default: return this.openBus(a);
       }
     }
     vaddr(a) { a &= 0x1ffff; return a >= 0x18000 ? a - 0x8000 : a; }
+    // in the bitmap modes the mirror at 0x18000-0x1BFFF goes nowhere (its bank belongs to the backgrounds)
+    vramHole(a) { a &= 0x1ffff; return a >= 0x18000 && a < 0x1c000 && (this.io16[0] & 7) >= 3; }
+    // save memory area (the tilt sensor of a few carts answers here too)
+    sramRead8(a) { if (this.gpio && this.gpio.tilt) { const v = this.gpio.busRead8(a); if (v >= 0) return v; } return this.save.read8(a); }
+    sramWrite8(a, v) { if (this.gpio && this.gpio.tilt && this.gpio.busWrite8(a, v)) return; this.save.write8(a, v); }
 
     write8raw(a, v) {
       v &= 0xff;
@@ -909,9 +916,9 @@
         case 3: this.iwram[a & 0x7fff] = v; return;
         case 4: if ((a & 0xffffff) < 0x400) this.ioWrite8(a & 0x3ff, v); return;
         case 5: this.pal16[(a & 0x3fe) >> 1] = v * 0x101; return;
-        case 6: { const o = this.vaddr(a); const lim = (this.io16[0] & 7) >= 3 ? 0x14000 : 0x10000; if (o < lim) this.vram16[o >> 1] = v * 0x101; return; }
-        case 8: if (this.rtc && (a & 0x1ffffff) >= 0xc4 && (a & 0x1ffffff) <= 0xc9) this.gpioWrite(a & 0x1fffffe, v); return;
-        case 14: case 15: this.save.write8(a, v); return;
+        case 6: { const o = this.vaddr(a); const lim = (this.io16[0] & 7) >= 3 ? 0x14000 : 0x10000; if (o < lim && !this.vramHole(a)) this.vram16[o >> 1] = v * 0x101; return; }
+        case 8: if (this.gpio && !(a & 1) && (a & 0x1ffffff) >= 0xc4 && (a & 0x1ffffff) <= 0xc8) this.gpio.write16(a & 0x1fffffe, v); return;
+        case 14: case 15: this.sramWrite8(a, v); return;
       }
     }
     write16raw(a, v) {
@@ -921,11 +928,11 @@
         case 3: this.iwram16[(a & 0x7fff) >> 1] = v; return;
         case 4: if ((a & 0xffffff) < 0x400) this.ioWrite16(a & 0x3fe, v); return;
         case 5: this.pal16[(a & 0x3ff) >> 1] = v; return;
-        case 6: this.vram16[this.vaddr(a) >> 1] = v; return;
+        case 6: if (!this.vramHole(a)) this.vram16[this.vaddr(a) >> 1] = v; return;
         case 7: this.oam16[(a & 0x3ff) >> 1] = v; return;
-        case 8: if (this.rtc && (a & 0x1fffffe) >= 0xc4 && (a & 0x1fffffe) <= 0xc8) this.gpioWrite(a & 0x1fffffe, v); return;
+        case 8: if (this.gpio && (a & 0x1fffffe) >= 0xc4 && (a & 0x1fffffe) <= 0xc8) this.gpio.write16(a & 0x1fffffe, v); return;
         case 13: if (this.save.type === "eeprom" && a >= this.eepromBase) this.save.eepromWrite(v & 1); return;
-        case 14: case 15: this.save.write8(a, (v >>> ((a & 1) * 8)) & 0xff); return;
+        case 14: case 15: this.sramWrite8(a, (v >>> ((a & 1) * 8)) & 0xff); return;
       }
     }
     write32raw(a, v) {
@@ -934,18 +941,12 @@
         case 3: this.iwram32[(a & 0x7ffc) >> 2] = v; return;
         case 4: if ((a & 0xffffff) < 0x400) { const o = a & 0x3fc; if (o === 0xa0 || o === 0xa4) { this.apu.fifoWrite(o === 0xa0 ? 0 : 1, v); return; } this.ioWrite16(o, v & 0xffff); this.ioWrite16(o + 2, (v >>> 16) & 0xffff); } return;
         case 5: this.pal32[(a & 0x3fc) >> 2] = v; return;
-        case 6: this.vram32[this.vaddr(a) >> 2] = v; return;
+        case 6: if (!this.vramHole(a)) this.vram32[this.vaddr(a) >> 2] = v; return;
         case 7: this.oam32[(a & 0x3fc) >> 2] = v; return;
-        case 8: if (this.rtc) { this.write16raw(a & ~3, v & 0xffff); this.write16raw((a & ~3) + 2, v >>> 16); } return;
+        case 8: if (this.gpio) { this.write16raw(a & ~3, v & 0xffff); this.write16raw((a & ~3) + 2, v >>> 16); } return;
         case 13: if (this.save.type === "eeprom" && a >= this.eepromBase) this.save.eepromWrite(v & 1); return;
-        case 14: case 15: this.save.write8(a, (v >>> ((a & 3) * 8)) & 0xff); return;
+        case 14: case 15: this.sramWrite8(a, (v >>> ((a & 3) * 8)) & 0xff); return;
       }
-    }
-    gpioWrite(o, v) {
-      const r = this.rtc;
-      if (o === 0xc4) r.write(v & 15);
-      else if (o === 0xc6) r.dir = v & 15;
-      else if (o === 0xc8) r.ctrl = v & 1;
     }
 
     // ---------- I/O registers ----------
@@ -974,7 +975,7 @@
       return io[o >> 1];
     }
     ioWrite8(o, v) {
-      if (o === 0x301) { this.cpu.halted = true; return; } // HALTCNT
+      if (o === 0x301) { this.cpu.halted = true; this.stopped = !!(v & 0x80); return; } // HALTCNT: bit 7 = Stop (deep sleep)
       if (o === 0x202 || o === 0x203) { this.io16[0x101] &= ~(v << ((o & 1) * 8)); this.updateIrq(); return; }
       if (o >= 0xa0 && o < 0xa8) { this.apu.fifoWrite(o < 0xa4 ? 0 : 1, v, 1); return; }
       const cur = this.ioRead16raw(o & ~1);
@@ -1021,7 +1022,7 @@
         case 0x202: io[0x101] &= ~v; this.updateIrq(); return;
         case 0x204: this.updateWait(v & 0x5fff); return;
         case 0x208: io[0x104] = v & 1; this.updateIrq(); return;
-        case 0x300: io[0x180] = (io[0x180] & 0xff00) | (v & 1); if (v & 0xff00) this.cpu.halted = true; return;
+        case 0x300: io[0x180] = (io[0x180] & 0xff00) | (v & 1); if (v & 0xff00) { this.cpu.halted = true; this.stopped = !!(v & 0x8000); } return;
       }
       io[o >> 1] = v;
     }
@@ -1031,7 +1032,8 @@
     updateIrq() {
       const io = this.io16, pend = io[0x100] & io[0x101] & 0x3fff;
       this.cpu.irqLine = !!(pend && (io[0x104] & 1));
-      if (pend) this.cpu.halted = false;
+      // Stop mode only wakes for the keypad, the cartridge or the link port
+      if (pend && (!this.stopped || (pend & 0x3080))) { this.cpu.halted = false; this.stopped = false; }
     }
     checkKeyIrq() {
       const cnt = this.io16[0x99];
@@ -1043,14 +1045,19 @@
     // ---------- timers ----------
     timerCount(i) {
       const t = this.timers[i];
-      if ((t.ctrl & 0x80) && !(t.ctrl & 4) ) return (t.count + Math.floor((this.cpu.cycles - t.start) / PRESCALE[t.ctrl & 3])) & 0xffff;
+      if ((t.ctrl & 0x80) && !(t.ctrl & 4)) {
+        let v = t.count + Math.floor(Math.max(0, this.cpu.cycles - t.start) / PRESCALE[t.ctrl & 3]);
+        // an overflow that is due but not handled yet (we're mid-instruction): count on from the reload value
+        if (v > 0xffff) v = t.reload + (v - 0x10000) % (0x10000 - t.reload);
+        return v & 0xffff;
+      }
       return t.count & 0xffff;
     }
     syncTimers() { this.runTimers(this.cpu.cycles); }
     timerControl(i, v) {
       this.syncTimers();
       const t = this.timers[i], was = t.ctrl & 0x80;
-      if ((t.ctrl & 0x80) && !(t.ctrl & 4)) { t.count = this.timerCount(i); t.start = this.cpu.cycles; }
+      if ((t.ctrl & 0x80) && !(t.ctrl & 4)) { t.count = this.timerCount(i); t.start = Math.max(t.start, this.cpu.cycles); }
       t.ctrl = v & 0xc7;
       this.io16[(0x102 + i * 4) >> 1] = t.ctrl;
       if (!was && (v & 0x80)) { t.count = t.reload; t.start = this.cpu.cycles; }
@@ -1131,9 +1138,16 @@
       const eeprom = this.save.type === "eeprom" && ((dst >>> 24) === 13 || (src >>> 24) === 13);
       const cyc = this.cpu.cycles;
       if (word) {
-        for (let k = 0; k < n; k++) { this.write32(dst & ~3, this.read32(src & ~3)); src = (src + sstep) >>> 0; dst = (dst + dstep) >>> 0; }
+        for (let k = 0; k < n; k++) {
+          if (src >= 0x02000000) d.latch = this.read32(src & ~3); else this.cpu.cycles++;
+          this.write32(dst & ~3, d.latch | 0); src = (src + sstep) >>> 0; dst = (dst + dstep) >>> 0;
+        }
       } else {
-        for (let k = 0; k < n; k++) { this.write16(dst & ~1, this.read16(src & ~1)); src = (src + sstep) >>> 0; dst = (dst + dstep) >>> 0; }
+        // each channel keeps the last value it read; reads below 0x02000000 (the BIOS) don't reach the bus and reuse it
+        for (let k = 0; k < n; k++) {
+          if (src >= 0x02000000) { const v = this.read16(src & ~1); d.latch = (v | (v << 16)) >>> 0; } else this.cpu.cycles++;
+          this.write16(dst & ~1, (dst & 2) ? d.latch >>> 16 : d.latch & 0xffff); src = (src + sstep) >>> 0; dst = (dst + dstep) >>> 0;
+        }
       }
       this.cpu.cycles += 2;
       void cyc;
@@ -1160,6 +1174,7 @@
     }
     runFrame() {
       const io = this.io16, ppu = this.ppu;
+      if (this.gpio) this.gpio.frameStart();
       for (let line = 0; line < FRAME_LINES; line++) {
         this.line = line;
         this.lineStart = this.time + line * LINE_CYCLES;
@@ -1178,6 +1193,7 @@
       }
       this.time += LINE_CYCLES * FRAME_LINES;
       this.apu.advance(this.cpu.cycles);
+      if (this.gpio) this.gpio.frameEnd(LINE_CYCLES * FRAME_LINES);
     }
 
     setInput(p, bits) {
@@ -1185,7 +1201,14 @@
       const was = this.keys;
       this.keys = bits & 0x3ff;
       if (this.keys !== was) this.checkKeyIrq();
+      if (this.gpio) this.gpio.setExtra(bits >>> 10); // sensor keys come after the ten GBA buttons
     }
+    // sensor carts read the right stick
+    setAnalog(p, x, y, rx, ry) { if (!p && this.gpio) { this.gpio.stick.x = rx; this.gpio.stick.y = ry; } }
+    get buttons() { const b = this.gpio && this.gpio.buttons; return b ? BUTTONS.concat(b) : null; }
+    get usesRightStick() { return !!(this.gpio && this.gpio.buttons); }
+    get controlsNote() { return this.gpio ? this.gpio.note : null; }
+    get rumble() { return this.gpio && this.gpio.hasRumble ? this.gpio.rumbleLevel : undefined; }
     takeAudio() { const a = this.apu.out.slice(0, this.apu.outLen); this.apu.outLen = 0; return a; }
     getSRAM() { return this.save.type === "none" && !this.save.dirty ? null : this.save.bytes(); }
 
@@ -1193,18 +1216,20 @@
       return {
         v: 1, cpu: this.cpu.saveState(), ewram: this.ewram.slice(), iwram: this.iwram.slice(), pal: this.pal.slice(), vram: this.vram.slice(), oam: this.oam.slice(), io: this.io.slice(),
         timers: this.timers.map((t) => Object.assign({}, t)), dma: this.dma.map((d) => Object.assign({}, d)), apu: this.apu.saveState(), ppu: this.ppu.saveState(),
-        save: this.save.saveState(), rtc: this.rtc ? this.rtc.saveState() : null,
-        m: [this.time, this.line, this.lineStart, this.lastFetch, this.biosLatch, this.keys, this.waiting ? 1 : 0],
+        save: this.save.saveState(), rtc: this.rtc ? this.rtc.saveState() : null, gpio: this.gpio ? this.gpio.saveState() : null,
+        m: [this.time, this.line, this.lineStart, this.lastFetch, this.biosLatch, this.keys, this.waiting ? 1 : 0, this.stopped ? 1 : 0],
       };
     }
     loadState(s) {
       this.cpu.loadState(s.cpu);
       this.ewram.set(s.ewram); this.iwram.set(s.iwram); this.pal.set(s.pal); this.vram.set(s.vram); this.oam.set(s.oam); this.io.set(s.io);
-      this.timers = s.timers.map((t) => Object.assign({}, t)); this.dma = s.dma.map((d) => Object.assign({}, d));
+      this.timers = s.timers.map((t) => Object.assign({}, t)); this.dma = s.dma.map((d) => Object.assign({ latch: 0 }, d));
       this.apu.loadState(s.apu); this.ppu.loadState(s.ppu); this.save.loadState(s.save);
       if (this.rtc && s.rtc) this.rtc.loadState(s.rtc);
+      if (this.gpio && s.gpio) this.gpio.loadState(s.gpio);
+      else if (this.gpio && s.rtc) { this.gpio.dir = s.rtc.dir; this.gpio.ctrl = s.rtc.ctrl; } // states from before gba_gpio.js
       [this.time, this.line, this.lineStart, this.lastFetch, this.biosLatch] = s.m;
-      this.waiting = !!s.m[6];
+      this.waiting = !!s.m[6]; this.stopped = !!s.m[7];
       this.updateWait(this.io16[0x204 >> 1]);
       this.scheduleTimers();
     }
@@ -1248,13 +1273,29 @@
         if (f & 4) this.pal.fill(0);
         if (f & 8) this.vram.fill(0);
         if (f & 16) this.oam.fill(0);
-        if (f & 64) for (let a = 0x60; a < 0xb0; a += 2) this.io16[a >> 1] = 0;
-        if (f & 128) { for (let a = 0; a < 0x60; a += 2) this.io16[a >> 1] = 0; this.io16[0] = 0x80; this.io16[0x10] = this.io16[0x13] = this.io16[0x18] = this.io16[0x1b] = 0x100; }
+        if (f & 32) { // link port registers
+          for (let a = 0x120; a < 0x130; a += 2) this.io16[a >> 1] = 0;
+          this.io16[0x134 >> 1] = 0x8000; this.io16[0x140 >> 1] = 0; this.io16[0x150 >> 1] = this.io16[0x152 >> 1] = this.io16[0x154 >> 1] = this.io16[0x156 >> 1] = 0;
+        }
+        if (f & 64) { // sound registers (and the sound chip with them)
+          this.ioWrite16(0x84, 0);
+          for (let a = 0x60; a < 0xa8; a += 2) if (a !== 0x84 && a !== 0x88) this.io16[a >> 1] = 0;
+          this.ioWrite16(0x88, 0x200);
+        }
+        if (f & 128) { // everything else: display, DMA, timers, keypad control, interrupts
+          for (let a = 0; a < 0x60; a += 2) this.io16[a >> 1] = 0;
+          this.io16[0] = 0x80; this.io16[0x10] = this.io16[0x13] = this.io16[0x18] = this.io16[0x1b] = 0x100;
+          for (const k of [0, 1]) { this.ppu.writeRef(k, false); this.ppu.writeRef(k, true); }
+          for (let a = 0xb0; a < 0xe0; a += 2) this.ioWrite16(a, 0);
+          for (let a = 0x100; a < 0x110; a += 2) this.ioWrite16(a, 0);
+          this.io16[0x132 >> 1] = 0; this.ioWrite16(0x200, 0); this.ioWrite16(0x202, 0xffff); this.ioWrite16(0x208, 0);
+        }
         break;
       }
-      case 0x02: case 0x03: c.halted = true; break; // Halt / Stop
+      case 0x02: c.halted = true; break; // Halt: sleep until any enabled interrupt
+      case 0x03: c.halted = true; this.stopped = true; break; // Stop: deep sleep until keypad / cartridge / link interrupt
       case 0x04: this.intrWait(r[0] & 1, r[1] & 0x3fff); break;
-      case 0x05: this.intrWait(1, 1); break;
+      case 0x05: r[0] = 1; r[1] = 1; this.intrWait(1, 1); break; // VBlankIntrWait (leaves r0 = r1 = 1, like the real call)
       case 0x06: case 0x07: { // Div / DivArm
         const num = n === 6 ? r[0] : r[1], den = n === 6 ? r[1] : r[0];
         if (den === 0) { r[0] = num < 0 ? -1 : 1; r[1] = num; r[3] = 1; break; }
@@ -1330,7 +1371,7 @@
         break;
       }
       case 0x11: case 0x12: this.writeOut(r[1] >>> 0, lz77(rd8, r[0] >>> 0), n === 0x12); break;
-      case 0x13: this.writeOut(r[1] >>> 0, huffman(rd8, rd32, r[0] >>> 0), false); break;
+      case 0x13: { const out = huffman(rd8, rd32, r[0] >>> 0); for (let k = 0; k < out.length; k += 4) wr32(r[1] + k, out[k] | (out[k + 1] << 8) | (out[k + 2] << 16) | (out[k + 3] << 24)); c.cycles += out.length * 3; break; } // writes 32 bits at a time
       case 0x14: case 0x15: this.writeOut(r[1] >>> 0, rle(rd8, r[0] >>> 0), n === 0x15); break;
       case 0x16: case 0x17: case 0x18: {
         const src = r[0] >>> 0, hdr = rd32(src), size = hdr >>> 8, out = new Uint8Array(size);
@@ -1339,13 +1380,24 @@
         this.writeOut(r[1] >>> 0, out, n !== 0x16);
         break;
       }
-      case 0x19: break; // SoundBias
+      case 0x19: { // SoundBias: move the bias level to 0x200 (r0 != 0) or 0
+        const b = this.io16[0x88 >> 1];
+        this.ioWrite16(0x88, (b & 0xc000) | (r[0] ? 0x200 : 0));
+        c.cycles += Math.abs((b & 0x3ff) - (r[0] ? 0x200 : 0)) * 8;
+        break;
+      }
       case 0x1f: { // MidiKey2Freq
         const freq = rd32(r[0] + 4) >>> 0;
         r[0] = Math.floor(freq / Math.pow(2, (180 - r[1] - r[2] / 256) / 12)) | 0;
         break;
       }
-      default: break; // other sound-driver calls: nothing to do
+      case 0x25: r[0] = 1; break; // MultiBoot: no link cable here, report failure
+      case 0x26: // HardReset: start the cartridge again from the top
+        this.reset(); break;
+      case 0x27: // CustomHalt: r2 bit 7 picks Stop over Halt
+        this.ioWrite8(0x301, r[2] & 0x80); break;
+      case 0x28: case 0x29: break; // SoundDriverVSyncOff / On: the sound driver isn't built in (see below)
+      default: break; // the BIOS sound driver (0x1A-0x1E, 0x20-0x24) and GetJumpList: games bring their own, nothing to do
     }
     return true;
   };

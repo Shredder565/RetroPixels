@@ -1405,7 +1405,7 @@
           if (vr && !prev.vr) changeSlot(1);
           if (vd && !prev.vd) toggleRecording();
           prev.vl = vl; prev.vr = vr; prev.vd = vd;
-        } else {
+        } else if (!(player && player.core && player.core.usesRightStick)) { // tilt / motion games use the right stick themselves
           const x = ax[2] || 0;
           const dir = x > 0.7 ? 1 : x < -0.7 ? -1 : 0;
           if (dir && dir !== prev.rsx) changeSlot(dir);
@@ -1451,12 +1451,12 @@
   // inside RetroPixels.exe itself; emu/n64.js connects the player to it.
   const OWN = {
     nes: ["emu/cpu6502.js", "emu/nes.js"],
-    gb: ["emu/gb.js"],
+    gb: ["emu/gb_carts.js", "emu/gb.js"],
     atari2600: ["emu/cpu6502.js", "emu/arm7.js", "emu/atari2600_carts.js", "emu/atari2600_dpcplus.js", "emu/atari2600.js"],
     atari7800: ["emu/cpu6502.js", "emu/atari2600.js", "emu/atari7800.js"],
     segaMD: ["emu/m68k.js", "emu/z80.js", "emu/ym2612.js", "emu/sn76489.js", "emu/genesis_cart.js", "emu/genesis.js"],
     sms: ["emu/z80.js", "emu/sn76489.js", "emu/sms.js"],
-    gba: ["emu/arm7.js", "emu/gba.js"],
+    gba: ["emu/arm7.js", "emu/gba_gpio.js", "emu/gba.js"],
     snes: ["emu/w65816.js", "emu/spc700.js", "emu/sdsp.js", "emu/snes_sa1.js", "emu/snes_superfx.js", "emu/snes.js", "emu/snes_chips.js", "emu/snes_dsp.js", "emu/snes_cx4.js", "emu/snes_sdd1.js", "emu/snes_spc7110.js", "emu/snes_misc.js"],
     n64: ["emu/n64.js"],
   };
