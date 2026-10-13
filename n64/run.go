@@ -32,6 +32,7 @@ func (m *Machine) RunFrame() {
 		}
 		m.runCycles(perLine)
 	}
+	m.aiOutput(m.CPU.Cycles)
 	m.renderVI()
 }
 

@@ -8,6 +8,7 @@ type aiState struct {
 	queued                    int
 	control, dacrate, bitrate uint32
 	playStart, playEnd        uint64
+	sent                      uint32 // bytes of the front buffer already output
 }
 
 func (m *Machine) videoClock() float64 {
@@ -81,24 +82,13 @@ func (m *Machine) aiFreq() int {
 	return f
 }
 
-// aiStart begins playing the front buffer: its samples go to the output and an
-// interrupt tells the game it can queue the next one.
+// aiStart begins playing the front buffer; an interrupt tells the game it
+// can queue the next one.
 func (m *Machine) aiStart() {
 	a := &m.ai
 	b := a.queue[0]
 	freq := m.aiFreq()
 	m.AudioRate = freq
-	if a.control&1 != 0 {
-		for i := uint32(0); i+3 < b.length; i += 4 {
-			p := b.addr + i
-			if p+3 >= rdramSize {
-				break
-			}
-			l := int16(uint16(m.rdram[p])<<8 | uint16(m.rdram[p+1]))
-			rr := int16(uint16(m.rdram[p+2])<<8 | uint16(m.rdram[p+3]))
-			m.Audio = append(m.Audio, l, rr)
-		}
-	}
 	samples := uint64(b.length / 4)
 	dur := samples * cpuHz / uint64(freq)
 	if dur == 0 {
@@ -106,8 +96,36 @@ func (m *Machine) aiStart() {
 	}
 	a.playStart = m.CPU.Cycles
 	a.playEnd = m.CPU.Cycles + dur
+	a.sent = 0
 	m.schedule(a.playEnd, evAI)
 	m.raise(intAI)
+}
+
+// aiOutput sends the samples of the front buffer that have played by now.
+func (m *Machine) aiOutput(now uint64) {
+	a := &m.ai
+	if a.queued == 0 {
+		return
+	}
+	b := a.queue[0]
+	upto := b.length
+	if now < a.playEnd && a.playEnd > a.playStart {
+		upto = uint32(uint64(b.length)*(now-a.playStart)/(a.playEnd-a.playStart)) &^ 3
+	}
+	if a.control&1 != 0 {
+		for i := a.sent; i+3 < upto; i += 4 {
+			p := b.addr + i
+			if p+3 >= rdramSize {
+				break
+			}
+			l := int16(uint16(m.rdram[p])<<8 | uint16(m.rdram[p+1]))
+			r := int16(uint16(m.rdram[p+2])<<8 | uint16(m.rdram[p+3]))
+			m.Audio = append(m.Audio, l, r)
+		}
+	}
+	if upto > a.sent {
+		a.sent = upto
+	}
 }
 
 func (m *Machine) aiDone() {
@@ -115,6 +133,7 @@ func (m *Machine) aiDone() {
 	if a.queued == 0 {
 		return
 	}
+	m.aiOutput(a.playEnd)
 	a.queue[0] = a.queue[1]
 	a.queued--
 	if a.queued > 0 {

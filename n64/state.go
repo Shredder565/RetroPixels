@@ -198,6 +198,7 @@ func (m *Machine) SaveState() []byte {
 	w.u32(a.bitrate)
 	w.u64(a.playStart)
 	w.u64(a.playEnd)
+	w.u32(a.sent)
 	for _, v := range m.pi {
 		w.u32(v)
 	}
@@ -383,6 +384,7 @@ func (m *Machine) LoadState(b []byte) error {
 	a.bitrate = r.u32()
 	a.playStart = r.u64()
 	a.playEnd = r.u64()
+	a.sent = r.u32()
 	for i := range n.pi {
 		n.pi[i] = r.u32()
 	}
