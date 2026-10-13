@@ -15,10 +15,12 @@
   const YM_CLKS = 7 * 144;    // master clocks per YM2612 sample
   const PSG_CLKS = 15 * 16;   // master clocks per PSG step
 
-  // Measured output levels of the VDP's colour DAC (normal / shadow / highlight).
-  const LV_N = [0, 52, 87, 116, 144, 172, 206, 255];
-  const LV_S = [0, 29, 52, 70, 87, 101, 116, 130];
-  const LV_H = [130, 144, 158, 172, 187, 206, 228, 255];
+  // The VDP's colour DAC has 15 output steps: shadow uses steps 0-7, normal the
+  // even steps 0-14 and highlight steps 7-14. The steps aren't evenly spaced
+  // (closer together in the middle); RetroPixels models them with a cubic
+  // S-curve from black to full brightness.
+  const DAC = Array.from({ length: 15 }, (_, k) => { const x = (k - 7) / 7; return Math.round(127.5 + 92.5 * x + 35 * x * x * x); });
+  const LV_N = DAC.filter((_, k) => !(k & 1)), LV_S = DAC.slice(0, 8), LV_H = DAC.slice(7);
 
   const PSG = global.RPSN76489; // the sound chip the Genesis shares with the Master System (sn76489.js)
 
