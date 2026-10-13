@@ -17,6 +17,14 @@
   // ===================================================================
   // VDP (mode 4)
   // ===================================================================
+  // TMS9918 colours (RGB), each channel rounded to the nearest of 0/85/170/255.
+  const TMS_RGB = [0x000000, 0x000000, 0x21c842, 0x5edc78, 0x5455ed, 0x7d76fc, 0xd4524d, 0x42ebf5,
+    0xfc5554, 0xff7978, 0xd4c154, 0xe6ce80, 0x21b03b, 0xc95bba, 0xcccccc, 0xffffff];
+  const TMS_PAL = new Uint32Array(TMS_RGB.map((v) => {
+    const q = (c) => Math.round(c / 85) * 85;
+    return (0xff000000 | (q(v & 255) << 16) | (q((v >> 8) & 255) << 8) | q(v >> 16)) >>> 0;
+  }));
+
   class VDP {
     constructor(sms) {
       this.sms = sms;
@@ -40,7 +48,7 @@
       const c = this.cram[i], L = (v) => v * 85;
       this.pal[i] = 0xff000000 | (L((c >> 4) & 3) << 16) | (L((c >> 2) & 3) << 8) | L(c & 3);
     }
-    get lines() { return (this.reg[0] & 2) && (this.reg[1] & 0x18) === 0x10 ? 224 : 192; }
+    get lines() { return (this.reg[0] & 6) === 6 && (this.reg[1] & 0x18) === 0x10 ? 224 : 192; }
     get displayOn() { return (this.reg[1] & 0x40) !== 0; }
     irqLine() { return ((this.status & 0x80) && (this.reg[1] & 0x20)) || (this.lineIrq && (this.reg[0] & 0x10)); }
 
@@ -90,6 +98,7 @@
     renderLine(y, out, W) {
       const o = y * W, backdrop = this.pal[16 + (this.reg[7] & 15)];
       if (!this.displayOn) { out.fill(backdrop, o, o + W); return; }
+      if (!(this.reg[0] & 4)) { this.renderTMS(y, out, W); return; }
       const vram = this.vram, r0 = this.reg[0];
       const tall = this.lines === 224;
       const nameBase = tall ? ((this.reg[2] & 0x0c) << 10) | 0x0700 : (this.reg[2] & 0x0e) << 10;
@@ -155,6 +164,80 @@
         out[o + x] = c;
       }
       if (r0 & 0x20) out.fill(backdrop, o, o + 8); // left column hidden
+    }
+
+    // ---- the older TMS9918 modes (Graphics I / II, Text, Multicolor) ----
+    // Used by SG-1000 era games and some homebrew. Fixed 16-colour palette, rounded
+    // to the 2-bit-per-channel colours this VDP can make.
+    renderTMS(y, out, W) {
+      const vram = this.vram, reg = this.reg, o = y * W;
+      const tc = (i) => TMS_PAL[i || (reg[7] & 15)];
+      const backdrop = tc(reg[7] & 15);
+      if (!this.displayOn) { out.fill(backdrop, o, o + W); return; }
+      const m1 = reg[1] & 0x10, m2 = reg[1] & 8, m3 = reg[0] & 2;
+      const nameBase = (reg[2] & 0x0f) << 10, row = y >> 3, line = y & 7;
+      const col = this.bgCol; // TMS colour index per pixel, 0 = transparent
+      if (m1) { // Text: 40 columns of 6 pixels, no sprites
+        const fg = reg[7] >> 4, bg = reg[7] & 15, patBase = (reg[4] & 7) << 11;
+        col.fill(bg);
+        for (let cx = 0; cx < 40; cx++) {
+          const p = vram[(patBase + (vram[(nameBase + row * 40 + cx) & 0x3fff] << 3) + line) & 0x3fff];
+          for (let b = 0; b < 6; b++) col[8 + cx * 6 + b] = (p & (0x80 >> b)) ? fg : bg;
+        }
+        for (let x = 0; x < W; x++) out[o + x] = tc(col[x]);
+        return;
+      }
+      for (let cx = 0; cx < 32; cx++) {
+        const name = vram[(nameBase + row * 32 + cx) & 0x3fff];
+        let p, c;
+        if (m2) { // Multicolor: 4x4 blocks
+          const a = ((reg[4] & 7) << 11) + (name << 3) + ((row & 3) << 1) + (line >> 2);
+          const v = vram[a & 0x3fff];
+          for (let b = 0; b < 8; b++) col[cx * 8 + b] = b < 4 ? v >> 4 : v & 15;
+          continue;
+        }
+        if (m3) { // Graphics II: the screen in three thirds, a colour byte per pattern line
+          const idx = ((row >> 3) << 8) | name;
+          p = vram[(((reg[4] & 4) << 11) + ((idx & (((reg[4] & 3) << 8) | 0xff)) << 3) + line) & 0x3fff];
+          c = vram[(((reg[3] & 0x80) << 6) + ((idx & (((reg[3] & 0x7f) << 3) | 7)) << 3) + line) & 0x3fff];
+        } else { // Graphics I: a colour byte per 8 patterns
+          p = vram[(((reg[4] & 7) << 11) + (name << 3) + line) & 0x3fff];
+          c = vram[((reg[3] << 6) + (name >> 3)) & 0x3fff];
+        }
+        for (let b = 0; b < 8; b++) col[cx * 8 + b] = (p & (0x80 >> b)) ? c >> 4 : c & 15;
+      }
+      // sprites: 32 of them, 4 per line, one colour each
+      const spr = this.spr; spr.fill(0);
+      const sat = (reg[5] & 0x7f) << 7, pg = (reg[6] & 7) << 11;
+      const big = reg[1] & 2, mag = reg[1] & 1, size = (big ? 16 : 8) << (mag ? 1 : 0);
+      let n = 0;
+      for (let i = 0; i < 32; i++) {
+        const a = sat + i * 4, sy0 = vram[a];
+        if (sy0 === 0xd0) break;
+        let sy = sy0 + 1; if (sy > 0xe0) sy -= 256;
+        if (y < sy || y >= sy + size) continue;
+        if (n === 4) { if (!(this.status & 0x40)) this.status = (this.status & 0xe0) | 0x40 | i; break; }
+        n++;
+        const attr = vram[a + 3], c = attr & 15;
+        let sx = vram[a + 1] - ((attr & 0x80) ? 32 : 0);
+        const r = (y - sy) >> (mag ? 1 : 0), pat = big ? vram[a + 2] & 0xfc : vram[a + 2];
+        for (let half = 0; half < (big ? 2 : 1); half++) {
+          const bits = vram[(pg + (pat << 3) + r + half * 16) & 0x3fff];
+          for (let b = 0; b < 8; b++) {
+            if (!(bits & (0x80 >> b))) continue;
+            for (let z = 0; z <= (mag ? 1 : 0); z++) {
+              const x = sx + ((half * 8 + b) << (mag ? 1 : 0)) + z;
+              if (x < 0 || x >= 256) continue;
+              if (spr[x]) { this.status |= 0x20; continue; }
+              spr[x] = 16 | c;
+            }
+          }
+        }
+      }
+      for (let x = 0; x < W; x++) {
+        const s = spr[x] & 15;
+        out[o + x] = tc(s ? s : col[x]);
+      }
     }
 
     saveState() {

@@ -226,7 +226,7 @@
       this.line++;
       this.rendered = 0; this.hmoveBlank = false; this.noMain0 = this.noMain1 = false;
       if (this.lateHmove) { this.lateHmove = false; this.applyHmove(8); }
-      if (this.line >= 300 && this.line >= this.frameLines + 40) this.endFrame(); // game isn't sending VSYNC
+      if (this.line >= 330 && this.line >= this.frameLines + 40) this.endFrame(); // game isn't sending VSYNC (PAL games use 312 lines)
       else if (this.line >= MAXL + 20) this.endFrame();
     }
     endFrame() {
