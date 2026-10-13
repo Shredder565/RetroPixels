@@ -43,8 +43,9 @@
       opts = opts || {};
       this.game = game;
       this.sampleRate = opts.sampleRate || 48000;
-      const dips = Object.assign({}, InvadersBoard.dipDefaults(), opts.dips || {});
-      this.dips = dips;
+      // the framework changes values in this object when the player changes a setting
+      this.dips = opts.dips || InvadersBoard.dipDefaults();
+      for (const d of InvadersBoard.dips) if (this.dips[d.id] === undefined) this.dips[d.id] = d.default;
       // program ROM: 8 KB at 0000
       this.rom = new Uint8Array(0x2000);
       for (const fi of game.files) {
@@ -54,12 +55,9 @@
       this.ram = new Uint8Array(0x2000);
       this.screen = new Uint32Array(W * H);
       this.width = W; this.height = H;
-      this.input = {};
-      // colour of each pixel when lit (the strips), in the board's own (unrotated) layout
+      this.p1 = {}; this.p2 = {};
       this.tint = new Uint32Array(W * H);
-      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-        this.tint[y * W + x] = dips.overlay ? overlayColour(y, 255 - x) : WHITE;
-      }
+      this.makeTint();
       const self = this;
       this.cpu = new global.RP8080({
         read(a) {
@@ -74,6 +72,14 @@
       this.audio = this.audioBuf.subarray(0, 0);
       this.voices = new Float64Array(NV * 4); // per voice: time since start, phase, phase2, on flag
       this.reset();
+    }
+
+    // colour of each pixel when lit (the strips), in the board's own (unrotated) layout
+    makeTint() {
+      this.tintOn = this.dips.overlay;
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        this.tint[y * W + x] = this.tintOn ? overlayColour(y, 255 - x) : WHITE;
+      }
     }
 
     static dipDefaults() { const o = {}; for (const d of InvadersBoard.dips) o[d.id] = d.default; return o; }
@@ -91,19 +97,20 @@
       this.screen.fill(0xff000000);
     }
 
-    setInput(state) { this.input = state || {}; }
+    setInput(p1, p2) { this.p1 = p1 || {}; this.p2 = p2 || {}; }
 
     portIn(p) {
-      const i = this.input, d = this.dips;
+      const i = this.p1, j = this.p2, d = this.dips;
       switch (p) {
         case 0: return 0x0e;
         case 1:
           return (i.Coin ? 0x01 : 0) | (i["Start (2P)"] ? 0x02 : 0) | (i["Start (1P)"] ? 0x04 : 0) | 0x08 |
             (i.Fire ? 0x10 : 0) | (i.Left ? 0x20 : 0) | (i.Right ? 0x40 : 0);
         case 2:
-          // the second player's controls are the same buttons on an upright cabinet
-          return (d.lives & 3) | (i.Tilt ? 0x04 : 0) | (d.bonus ? 0x08 : 0) |
-            (i.Fire ? 0x10 : 0) | (i.Left ? 0x20 : 0) | (i.Right ? 0x40 : 0) | (d.coinInfo ? 0 : 0x80);
+          // the second player's controls (on an upright cabinet the players share the first set,
+          // so either controller works for player 2)
+          return (d.lives & 3) | (d.bonus ? 0x08 : 0) |
+            (i.Fire || j.Fire ? 0x10 : 0) | (i.Left || j.Left ? 0x20 : 0) | (i.Right || j.Right ? 0x40 : 0) | (d.coinInfo ? 0 : 0x80);
         case 3: return (this.shiftData >> (8 - this.shiftAmount)) & 0xff;
         default: return 0;
       }
@@ -246,6 +253,7 @@
 
     runFrame() {
       const cpu = this.cpu;
+      if (this.tintOn !== this.dips.overlay) this.makeTint();
       this.audioN = 0;
       let done = 0;
       for (let line = 0; line < LINES; line++) {
@@ -290,7 +298,7 @@
   InvadersBoard.height = H;
   InvadersBoard.rotate = 270;  // the monitor is mounted on its side
   InvadersBoard.fps = FPS;
-  InvadersBoard.buttons = ["Up", "Down", "Left", "Right", "Fire", "Coin", "Start (1P)", "Start (2P)", "Tilt"];
+  InvadersBoard.buttons = ["Left", "Right", "Fire", "Coin", "Start (1P)", "Start (2P)"];
   InvadersBoard.dips = [
     { id: "lives", label: "Cannons", options: [{ label: "3", value: 0 }, { label: "4", value: 1 }, { label: "5", value: 2 }, { label: "6", value: 3 }], default: 0 },
     { id: "bonus", label: "Extra cannon at", options: [{ label: "1500 points", value: 0 }, { label: "1000 points", value: 1 }], default: 0 },
