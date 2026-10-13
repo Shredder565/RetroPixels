@@ -230,6 +230,11 @@ func (m *Machine) read16(p uint32) uint16 {
 	if p < rdramSize {
 		return binary.BigEndian.Uint16(m.rdram[p:])
 	}
+	if p >= 0x10000000 && p < 0x1fc00000 {
+		// the cartridge bus answers 16-bit reads with the upper half of
+		// the word the address rounds to
+		return uint16(m.readIO((p+2)&^3) >> 16)
+	}
 	v := m.readIO(p &^ 3)
 	return uint16(v >> ((2 - (p & 2)) * 8))
 }
@@ -237,6 +242,9 @@ func (m *Machine) read16(p uint32) uint16 {
 func (m *Machine) read8(p uint32) uint8 {
 	if p < rdramSize {
 		return m.rdram[p]
+	}
+	if p >= 0x10000000 && p < 0x1fc00000 {
+		return uint8(m.read16(p&^1) >> ((1 - (p & 1)) * 8))
 	}
 	v := m.readIO(p &^ 3)
 	return uint8(v >> ((3 - (p & 3)) * 8))
@@ -327,6 +335,9 @@ func (m *Machine) readIO(p uint32) uint32 {
 				st |= 8
 			}
 			return st
+		}
+		if r == 2 || r == 3 { // length registers read back as 0x7f
+			return 0x7f
 		}
 		return m.pi[r]
 	case p >= 0x04700000 && p < 0x04700020:
@@ -444,21 +455,16 @@ func (m *Machine) piWrite(r uint32, v uint32) {
 	case 3: // cart -> RDRAM
 		n := (v & 0xffffff) + 1
 		dram, cart := m.pi[0], m.pi[1]
-		if dram+n > rdramSize {
-			n = rdramSize - dram
+		// The PI moves data in blocks of up to 128 bytes. The first block
+		// is shortened by the RDRAM address's misalignment, and its last
+		// misaligned bytes never reach memory.
+		first := 128 - dram&7
+		if first > n {
+			first = n
 		}
-		dst := m.rdram[dram : dram+n]
-		if cart >= 0x10000000 && cart < 0x1fc00000 {
-			o := int(cart - 0x10000000)
-			k := 0
-			if o < len(m.rom) {
-				k = copy(dst, m.rom[o:])
-			}
-			for ; k < len(dst); k++ {
-				dst[k] = 0
-			}
-		} else if cart >= 0x08000000 && cart < 0x10000000 {
-			m.Save.dmaRead(cart, dst)
+		m.piCopy(dram, cart, first-dram&7)
+		if n > first {
+			m.piCopy(dram+first, cart+first, n-first)
 		}
 		m.pi[0] = (dram + n + 7) &^ 7
 		m.pi[1] = (cart + n + 1) &^ 1
@@ -471,6 +477,29 @@ func (m *Machine) piWrite(r uint32, v uint32) {
 		if r < 13 {
 			m.pi[r] = v & 0xff
 		}
+	}
+}
+
+// piCopy copies n bytes from the cartridge bus to RDRAM.
+func (m *Machine) piCopy(dram, cart, n uint32) {
+	if dram >= rdramSize || n == 0 {
+		return
+	}
+	if dram+n > rdramSize {
+		n = rdramSize - dram
+	}
+	dst := m.rdram[dram : dram+n]
+	if cart >= 0x10000000 && cart < 0x1fc00000 {
+		o := int(cart - 0x10000000)
+		k := 0
+		if o < len(m.rom) {
+			k = copy(dst, m.rom[o:])
+		}
+		for ; k < len(dst); k++ {
+			dst[k] = 0
+		}
+	} else if cart >= 0x08000000 && cart < 0x10000000 {
+		m.Save.dmaRead(cart, dst)
 	}
 }
 

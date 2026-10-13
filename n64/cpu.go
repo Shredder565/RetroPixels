@@ -89,7 +89,7 @@ type CPU struct {
 func (c *CPU) reset() {
 	*c = CPU{m: c.m}
 	c.cop0[c0Status] = 0x34000000
-	c.cop0[c0Config] = 0x0006e463
+	c.cop0[c0Config] = 0x7006e463
 	c.cop0[c0PRId] = 0x00000b22
 	c.cop0[c0Random] = 31
 	c.fcr31 = 0
@@ -1047,7 +1047,7 @@ func (c *CPU) cop0op(op uint32) {
 			for i := range c.tlb {
 				e := &c.tlb[i]
 				mask := e.mask | 0x1fff
-				if (hi & 0xffffe000 &^ mask) == (e.hi & 0xffffe000 &^ mask) && (e.lo0&e.lo1&1 != 0 || e.hi&0xff == hi&0xff) {
+				if (hi&0xffffe000&^mask) == (e.hi&0xffffe000&^mask) && (e.lo0&e.lo1&1 != 0 || e.hi&0xff == hi&0xff) {
 					c.cop0[c0Index] = uint64(i)
 					break
 				}

@@ -3,11 +3,11 @@ package n64
 // AI (audio output) and VI (video output).
 
 type aiState struct {
-	dramNext                 uint32
-	queue                    [2]struct{ addr, length uint32 }
-	queued                   int
+	dramNext                  uint32
+	queue                     [2]struct{ addr, length uint32 }
+	queued                    int
 	control, dacrate, bitrate uint32
-	playStart, playEnd       uint64
+	playStart, playEnd        uint64
 }
 
 func (m *Machine) videoClock() float64 {
@@ -207,3 +207,6 @@ func (m *Machine) renderVI() {
 		}
 	}
 }
+
+// VIRegs returns the VI registers (for debugging tools).
+func (m *Machine) VIRegs() [14]uint32 { return m.vi }

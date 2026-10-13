@@ -37,6 +37,7 @@ func main() {
 	}
 	dt := time.Since(t0).Seconds()
 	fmt.Printf("%d frames in %.1fs = %.0f fps, pc=%x %dx%d\n", *frames, dt, float64(*frames)/dt, m.CPU.PC(), m.FrameW, m.FrameH)
+	fmt.Printf("vi %x\n", m.VIRegs())
 }
 
 func save(m *n64.Machine, name string) {

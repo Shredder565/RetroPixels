@@ -44,8 +44,8 @@ func (c *CPU) setFPR64(n uint32, v uint64) {
 	c.fpr[n&^1] = v
 }
 
-func (c *CPU) fS(n uint32) float32 { return math.Float32frombits(c.getFPR32(n)) }
-func (c *CPU) fD(n uint32) float64 { return math.Float64frombits(c.getFPR64(n)) }
+func (c *CPU) fS(n uint32) float32      { return math.Float32frombits(c.getFPR32(n)) }
+func (c *CPU) fD(n uint32) float64      { return math.Float64frombits(c.getFPR64(n)) }
 func (c *CPU) setS(n uint32, v float32) { c.setFPR32(n, math.Float32bits(v)) }
 func (c *CPU) setD(n uint32, v float64) { c.setFPR64(n, math.Float64bits(v)) }
 

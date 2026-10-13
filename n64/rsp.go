@@ -551,11 +551,12 @@ func (r *RSP) cop2(op uint32) {
 				}
 				acc[i] = sext48(p)
 			} else {
+				// nudge toward zero unless bit 21 is already set
 				a := acc[i]
-				if a&(1<<37) == 0 {
-					if a < 0 && a&(1<<21) == 0 {
+				if a&(1<<21) == 0 {
+					if a < 0 {
 						a += 32 << 16
-					} else if a >= 0 && a&(1<<21) == 0 {
+					} else {
 						a -= 32 << 16
 					}
 				}
@@ -872,7 +873,10 @@ func (r *RSP) cop2(op uint32) {
 	case 0x37, 0x3f: // VNOP / VNULL
 		return
 	default:
+		// reserved opcodes: the adder still runs into the accumulator's
+		// low part, the result register gets zero
 		for i := 0; i < 8; i++ {
+			setAccLo(acc, i, s[i]+t[i])
 			res[i] = 0
 		}
 	}
