@@ -1,131 +1,13 @@
 // RetroPixels — Game Boy / Game Boy Color emulator. Original code.
 //
 // SM83 CPU (timed per memory access), PPU with DMG and CGB modes, four-channel
-// stereo APU, timers, serial port, OAM/HDMA transfers and MBC1/2/3/5 cartridges.
+// stereo APU, timers, serial port and OAM/HDMA transfers. The cartridge chips
+// (memory bank controllers, clocks, sensors...) are in gb_carts.js.
 // No boot ROM is used; the machine starts in the state the boot ROM leaves it in.
 "use strict";
 
 (function (global) {
   const FPS = 4194304 / 70224; // 59.7275
-
-  // ===================================================================
-  // Cartridge
-  // ===================================================================
-  class Cart {
-    constructor(rom) {
-      this.rom = rom;
-      const type = rom[0x147];
-      this.type = type;
-      const ramSizes = [0, 0x800, 0x2000, 0x8000, 0x20000, 0x10000];
-      this.ramSize = ramSizes[rom[0x149]] || 0;
-      this.mbc = 0;
-      if (type >= 1 && type <= 3) this.mbc = 1;
-      else if (type === 5 || type === 6) { this.mbc = 2; this.ramSize = 512; }
-      else if (type >= 0x0f && type <= 0x13) this.mbc = 3;
-      else if (type >= 0x19 && type <= 0x1e) this.mbc = 5;
-      else if (type === 0xff) this.mbc = 1; // HuC1 behaves like MBC1 for banking
-      else if (type !== 0 && type !== 8 && type !== 9) throw new Error(`This Game Boy game uses a cartridge chip RetroPixels doesn't support yet (type $${type.toString(16)}).`);
-      this.battery = [3, 6, 9, 0x0d, 0x0f, 0x10, 0x13, 0x1b, 0x1e, 0xff].includes(type);
-      this.hasRtc = type === 0x0f || type === 0x10;
-      this.ram = new Uint8Array(Math.max(this.ramSize, 0));
-      this.romBanks = Math.max(2, rom.length >> 14);
-      this.romBank = 1; this.ramBank = 0; this.ramOn = false; this.mode = 0; this.bank2 = 0;
-      // MBC3 clock: live seconds counter, latched copy
-      this.rtc = { s: 0, m: 0, h: 0, d: 0, halt: false, carry: false, base: Date.now() };
-      this.rtcLatched = [0, 0, 0, 0, 0]; this.latchPrev = 0xff;
-      this.cgb = (rom[0x143] & 0x80) !== 0;
-      this.title = String.fromCharCode(...rom.slice(0x134, 0x143)).replace(/\0.*$/, "").trim();
-    }
-    romRead(a) {
-      if (a < 0x4000) {
-        if (this.mbc === 1 && this.mode) { const b = (this.bank2 << 5) % this.romBanks; return this.rom[b * 0x4000 + a]; }
-        return this.rom[a];
-      }
-      return this.rom[((this.romBank % this.romBanks) * 0x4000) + (a & 0x3fff)];
-    }
-    romWrite(a, v) {
-      switch (this.mbc) {
-        case 1:
-          if (a < 0x2000) this.ramOn = (v & 0x0f) === 0x0a;
-          else if (a < 0x4000) { let b = v & 0x1f; if (!b) b = 1; this.low5 = b; this.romBank = (this.bank2 << 5) | b; }
-          else if (a < 0x6000) { this.bank2 = v & 3; this.romBank = (this.bank2 << 5) | (this.low5 || 1); }
-          else this.mode = v & 1;
-          break;
-        case 2:
-          if (a < 0x4000) { if (a & 0x100) { this.romBank = (v & 0x0f) || 1; } else this.ramOn = (v & 0x0f) === 0x0a; }
-          break;
-        case 3:
-          if (a < 0x2000) this.ramOn = (v & 0x0f) === 0x0a;
-          else if (a < 0x4000) this.romBank = (v & 0x7f) || 1;
-          else if (a < 0x6000) this.ramBank = v;
-          else { if (this.latchPrev === 0 && v === 1) this.latchRtc(); this.latchPrev = v; }
-          break;
-        case 5:
-          if (a < 0x2000) this.ramOn = (v & 0x0f) === 0x0a;
-          else if (a < 0x3000) this.romBank = (this.romBank & 0x100) | v;
-          else if (a < 0x4000) this.romBank = (this.romBank & 0xff) | ((v & 1) << 8);
-          else if (a < 0x6000) this.ramBank = v & 0x0f;
-          break;
-      }
-    }
-    ramIndex(a) {
-      const off = a & 0x1fff;
-      if (this.mbc === 1) return ((this.mode ? this.bank2 : 0) * 0x2000 + off) % Math.max(1, this.ram.length);
-      return (this.ramBank * 0x2000 + off) % Math.max(1, this.ram.length);
-    }
-    ramRead(a) {
-      if (!this.ramOn && this.mbc) return 0xff;
-      if (this.mbc === 2) return 0xf0 | this.ram[a & 0x1ff];
-      if (this.mbc === 3 && this.ramBank >= 8) return this.ramBank <= 0x0c ? this.rtcLatched[this.ramBank - 8] : 0xff;
-      if (!this.ram.length) return 0xff;
-      return this.ram[this.ramIndex(a)];
-    }
-    ramWrite(a, v) {
-      if (!this.ramOn && this.mbc) return;
-      if (this.mbc === 2) { this.ram[a & 0x1ff] = v & 0x0f; this.dirty = true; return; }
-      if (this.mbc === 3 && this.ramBank >= 8) { this.writeRtc(this.ramBank - 8, v); return; }
-      if (!this.ram.length) return;
-      this.ram[this.ramIndex(a)] = v; this.dirty = true;
-    }
-    // --- MBC3 real-time clock (counts from the computer's clock) ---
-    rtcSeconds() { const r = this.rtc; return r.halt ? r.frozen : Math.floor((Date.now() - r.base) / 1000); }
-    latchRtc() {
-      let t = this.rtcSeconds();
-      const days = Math.floor(t / 86400);
-      this.rtcLatched = [t % 60, Math.floor(t / 60) % 60, Math.floor(t / 3600) % 24, days & 0xff,
-        ((days >> 8) & 1) | (this.rtc.halt ? 0x40 : 0) | (days > 511 ? 0x80 : 0)];
-    }
-    writeRtc(reg, v) {
-      this.latchRtc();
-      const l = this.rtcLatched.slice(); l[reg] = v;
-      const days = l[3] | ((l[4] & 1) << 8);
-      const total = l[0] + l[1] * 60 + l[2] * 3600 + days * 86400;
-      this.rtc.halt = !!(l[4] & 0x40);
-      if (this.rtc.halt) this.rtc.frozen = total;
-      this.rtc.base = Date.now() - total * 1000;
-      this.dirty = true;
-    }
-    // Battery save: RAM followed by 16 bytes of clock (RetroPixels' own layout).
-    sram() {
-      if (!this.battery) return null;
-      const out = new Uint8Array(this.ram.length + (this.hasRtc ? 16 : 0));
-      out.set(this.ram);
-      if (this.hasRtc) {
-        const dv = new DataView(out.buffer, this.ram.length);
-        dv.setFloat64(0, this.rtc.base, true); dv.setUint32(8, this.rtc.halt ? (this.rtc.frozen | 0) : 0, true); dv.setUint8(12, this.rtc.halt ? 1 : 0);
-      }
-      return out;
-    }
-    loadSram(s) {
-      this.ram.set(s.subarray(0, this.ram.length));
-      if (this.hasRtc && s.length >= this.ram.length + 16) {
-        const dv = new DataView(s.buffer, s.byteOffset + this.ram.length);
-        this.rtc.base = dv.getFloat64(0, true); this.rtc.halt = !!dv.getUint8(12); this.rtc.frozen = dv.getUint32(8, true);
-      }
-    }
-    saveState() { return { ram: this.ram, romBank: this.romBank, ramBank: this.ramBank, ramOn: this.ramOn, mode: this.mode, bank2: this.bank2, low5: this.low5, rtc: Object.assign({}, this.rtc), rtcLatched: this.rtcLatched, latchPrev: this.latchPrev }; }
-    loadState(o) { this.ram.set(o.ram); Object.assign(this, { romBank: o.romBank, ramBank: o.ramBank, ramOn: o.ramOn, mode: o.mode, bank2: o.bank2, low5: o.low5, rtcLatched: o.rtcLatched, latchPrev: o.latchPrev }); Object.assign(this.rtc, o.rtc); }
-  }
 
   // ===================================================================
   // Sound
@@ -342,7 +224,9 @@
   class GB {
     constructor(rom, opts = {}) {
       if (rom.length < 0x150) throw new Error("This isn't a Game Boy game file");
-      this.cart = new Cart(rom);
+      this.clock = 0; // real time in 4.19 MHz clocks (for cartridge clocks and the camera)
+      this.tilt = { x: 0, y: 0 }; this.stick = { x: 0, y: 0 }; this.tiltKeys = 0;
+      this.cart = global.RPGBCarts.create(rom, this);
       this.cgb = this.cart.cgb;
       this.battery = this.cart.battery;
       if (opts.sram && this.battery) this.cart.loadSram(opts.sram);
@@ -390,7 +274,7 @@
     // ---- timing: every memory access costs one M-cycle (4 T-cycles) ----
     tick() {
       const t = this.double ? 2 : 4; // PPU/APU see half as much time per M-cycle at double speed
-      this.cycles += 4;
+      this.cycles += 4; this.clock += t;
       if (this.dmaActive || this.dmaDelay) this.oamDmaStep();
       this.timerTick();
       const ifBefore = this.if;
@@ -954,26 +838,38 @@
     // RetroPixels' button order: A, B, Select, Start, Up, Down, Left, Right
     setInput(player, bits) {
       if (player) return;
+      this.tiltKeys = bits >> 8;
       // GB order: A B Select Start (low nibble), Right Left Up Down (high nibble)
       const k = (bits & 15) | ((bits & 0x80) ? 0x10 : 0) | ((bits & 0x40) ? 0x20 : 0) | ((bits & 0x10) ? 0x40 : 0) | ((bits & 0x20) ? 0x80 : 0);
       if (k & ~this.keys) this.if |= 0x10; // joypad interrupt on a new press
       this.keys = k;
     }
+    // Tilt carts (MBC7) read the right stick, or the tilt keys
+    setAnalog(player, x, y, rx, ry) { if (!player) { this.stick.x = rx; this.stick.y = ry; } }
     runFrame() {
       this.frameDone = false;
+      const k = this.tiltKeys;
+      this.tilt.x = Math.max(-1, Math.min(1, this.stick.x + ((k & 8) ? 1 : 0) - ((k & 4) ? 1 : 0)));
+      this.tilt.y = Math.max(-1, Math.min(1, this.stick.y + ((k & 2) ? 1 : 0) - ((k & 1) ? 1 : 0)));
       let guard = 0;
       while (!this.frameDone && guard++ < 300000) {
         if (this.locked) { this.idle(); continue; }
         this.step();
       }
+      this.cart.frame();
     }
+    // 0..1: how hard the cartridge's rumble motor ran this frame
+    get rumble() { return this.cart.rumbleLevel; }
+    get usesRightStick() { return this.cart.kind === "MBC7"; }
+    // extra controls shown for this game only (tilt keys for MBC7 carts)
+    get buttons() { return this.cart.kind === "MBC7" ? GB.info.buttons.concat(["Tilt Up", "Tilt Down", "Tilt Left", "Tilt Right"]) : null; }
     takeAudio() { const a = this.apu.out.slice(0, this.apu.outLen); this.apu.outLen = 0; return a; }
     getSRAM() { return this.cart.sram(); }
     saveState() {
       const regs = {};
       for (const k of ["a", "f", "b", "c", "d", "e", "h", "l", "sp", "pc", "ime", "eiDelay", "halted", "haltBug", "stopped", "div", "tima", "tma", "tac",
         "timaReload", "timaJustLoaded", "ly", "lyReg", "lyCmp", "m3end", "firstLine", "oamLock", "vramLock", "oamWLock", "vramWLock", "lycFlag", "serialBits", "lineDot", "mode", "statLine", "winLine", "double", "key1", "hdmaSrc", "hdmaDst", "hdmaLen", "hdmaActive", "vbank", "wbank",
-        "bcps", "ocps", "ie", "if", "joyp", "cycles", "locked", "lcdOffDots",
+        "bcps", "ocps", "ie", "if", "joyp", "cycles", "clock", "locked", "lcdOffDots",
         "dmaActive", "dmaDelay", "dmaIdx", "dmaBase", "dmaReq", "dmaByte"]) regs[k] = this[k];
       return { v: 1, regs, vram: this.vram, wram: this.wram, oam: this.oam, hram: this.hram, io: this.io, bgPal: this.bgPal, obPal: this.obPal,
         cart: this.cart.saveState(), apu: this.apu.saveState() };
