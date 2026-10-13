@@ -147,64 +147,53 @@ func (m *Machine) joybus(ch int, tx, rx []byte, rxi int) {
 	notPresent()
 }
 
+// pakCRC is the check byte the Controller Pak sends with each 32-byte block:
+// a CRC-8 with polynomial x^8+x^7+x^2+1 (0x85), starting from zero.
 func pakCRC(data []byte) byte {
-	crc := byte(0)
-	for i := 0; i <= len(data); i++ {
-		for b := 7; b >= 0; b-- {
-			x := byte(0)
-			if crc&0x80 != 0 {
-				x = 0x85
-			}
+	var crc byte
+	for _, d := range data {
+		crc ^= d
+		for k := 0; k < 8; k++ {
+			top := crc & 0x80
 			crc <<= 1
-			if i < len(data) && data[i]&(1<<uint(b)) != 0 {
-				crc |= 1
+			if top != 0 {
+				crc ^= 0x85
 			}
-			crc ^= x
 		}
 	}
 	return crc
 }
 
-// cicChallenge answers the CIC-NUS-6105 challenge stored in PIF RAM 0x30-0x3E
-// (30 nibbles), as the security chip does.
+// The CIC-NUS-6105 answers a challenge of 30 nibbles one nibble at a time.
+// Each answer nibble is key + 5*challenge (mod 16). That nibble then picks
+// the key for the next step from one of two rows of sixteen, and also says
+// which row the next step reads. The rows are packed four bits per entry,
+// entry n at bits 4n; the switch masks have bit n set when answer n moves to
+// (or stays on) the second row.
+const (
+	cicKeyRow0   = 0x9636f8fc1e5e7a74
+	cicKeyRow1   = 0x9c36589c1e5e7a14
+	cicNextRow0  = 0x496d // used while on the first row
+	cicNextRow1  = 0x036f // used while on the second row
+	cicFirstKey  = 0xb
+	cicNibbleLen = 30
+)
+
+// cicChallenge answers the challenge the game left in PIF RAM 0x30-0x3E.
 func (m *Machine) cicChallenge() {
-	var ch, resp [30]byte
-	for i := 0; i < 15; i++ {
-		ch[i*2] = m.pif[0x30+i] >> 4
-		ch[i*2+1] = m.pif[0x30+i] & 15
-	}
-	lut0 := [16]byte{0x4, 0x7, 0xA, 0x7, 0xE, 0x5, 0xE, 0x1, 0xC, 0xF, 0x8, 0xF, 0x6, 0x3, 0x6, 0x9}
-	lut1 := [16]byte{0x4, 0x1, 0xA, 0x7, 0xE, 0x5, 0xE, 0x1, 0xC, 0x9, 0x8, 0x5, 0x6, 0x3, 0xC, 0x9}
-	key := byte(0xb)
-	useLut1 := false
-	for i := 0; i < 30; i++ {
-		r := (key + 5*ch[i]) & 15
-		resp[i] = r
-		if useLut1 {
-			key = lut1[r]
-		} else {
-			key = lut0[r]
+	key := byte(cicFirstKey)
+	row := 0
+	for i := 0; i < cicNibbleLen; i++ {
+		at, shift := 0x30+i/2, uint(4-4*(i&1)) // high nibble first
+		q := m.pif[at] >> shift & 15
+		a := (key + 5*q) & 15
+		m.pif[at] = m.pif[at]&^(15<<shift) | a<<shift
+		keys, next := uint64(cicKeyRow0), cicNextRow0
+		if row == 1 {
+			keys, next = cicKeyRow1, cicNextRow1
 		}
-		sgn := (r >> 3) & 1
-		mag := r
-		if sgn == 1 {
-			mag = ^r
-		}
-		mag &= 7
-		mod := byte(1) - sgn
-		if mag%3 == 1 {
-			mod = sgn
-		}
-		if useLut1 && (r == 0x1 || r == 0x9) {
-			mod = 1
-		}
-		if useLut1 && (r == 0xb || r == 0xe) {
-			mod = 0
-		}
-		useLut1 = mod == 1
-	}
-	for i := 0; i < 15; i++ {
-		m.pif[0x30+i] = resp[i*2]<<4 | resp[i*2+1]
+		key = byte(keys >> (4 * a) & 15)
+		row = next >> a & 1
 	}
 }
 
