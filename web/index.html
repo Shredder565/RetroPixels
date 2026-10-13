@@ -1,0 +1,1679 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RetroPixels</title>
+<style>
+  :root {
+    --bg: #0e0f13;
+    --panel: #171920;
+    --panel-2: #1f222b;
+    --line: #2c303b;
+    --text: #e8e9ee;
+    --muted: #8b90a0;
+    --accent: #107c10;      /* Xbox green */
+    --accent-2: #3dd13d;
+    --warn: #e0a73a;
+    --danger: #e5484d;
+    --a: #3dd13d; --b: #e5484d; --x: #3b82f6; --y: #f5c542;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: center; justify-content: space-between;
+    gap: 16px; padding: 16px 24px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: .5px; }
+  h1 span { color: var(--accent-2); }
+  .pad-status { display: flex; align-items: center; gap: 10px; font-size: 14px;
+    background: var(--panel); border: 1px solid var(--line); padding: 6px 12px; border-radius: 999px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #555; flex: none; }
+  .dot.on { background: var(--accent-2); box-shadow: 0 0 8px var(--accent-2); }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
+
+  /* Launcher */
+  #launcher { display: grid; gap: 20px; }
+  .systems { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .sw-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 10px 0; }
+  .sw-emu { flex: 1; min-width: 200px; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 12px; font-size: 14px; overflow-wrap: anywhere; }
+  .btn.red { background: var(--accent); }
+  .btn.red:hover { background: #138a13; }
+  .sw-setup { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .sw-select, #swSearch, #rgSearch { background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 14px; }
+  #swSearch, #rgSearch { flex: 1; min-width: 180px; }
+  .sw-check { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; cursor: pointer; }
+  .sw-tools { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 16px; }
+  .sw-now { display: flex; align-items: center; gap: 12px; background: #15241a; border: 1px solid var(--accent);
+    border-radius: 12px; padding: 12px 14px; margin-bottom: 14px; }
+  .sw-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px;
+    max-height: 62vh; overflow-y: auto; padding: 4px; }
+  .sw-tile { text-align: left; background: var(--panel-2); border: 2px solid var(--line); border-radius: 12px;
+    padding: 0; overflow: hidden; cursor: pointer; color: var(--text); font: inherit; display: flex; flex-direction: column; }
+  .sw-tile:hover, .sw-tile:focus-visible { border-color: #ff5a5f; outline: none; transform: translateY(-2px); }
+  .sw-tile:focus-visible { box-shadow: 0 0 0 3px #ff5a5f55; }
+  .sw-tile[disabled] { opacity: .5; cursor: default; transform: none; }
+  .sw-art { aspect-ratio: 1; display: grid; place-items: center; font-size: 34px; font-weight: 800;
+    letter-spacing: 1px; color: #fff; text-shadow: 0 2px 8px #0006; }
+  .sw-info { padding: 8px 10px 10px; display: grid; gap: 4px; }
+  .sw-info b { font-size: 13px; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical; overflow: hidden; min-height: 2.6em; }
+  .sw-tags { display: flex; gap: 4px; flex-wrap: wrap; }
+  .sw-tag { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: #0e0f13; color: var(--muted); }
+  @media (max-width: 860px) { .sw-setup { grid-template-columns: 1fr; } }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 6px; margin-bottom: 20px; border-bottom: 1px solid var(--line); }
+  .tabs button { background: none; border: 0; border-bottom: 3px solid transparent; color: var(--muted);
+    font: inherit; font-weight: 600; padding: 10px 16px; cursor: pointer; margin-bottom: -1px; }
+  .tabs button:hover { color: var(--text); }
+  .tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent-2); }
+
+  /* Side-nav sections (GameCube / Wii, Recordings) */
+  .sw-layout { display: grid; grid-template-columns: 190px 1fr; gap: 20px; align-items: start; }
+  .sw-nav { display: grid; gap: 4px; position: sticky; top: 12px; }
+  .sw-nav button { text-align: left; background: none; border: 1px solid transparent; color: var(--muted);
+    font: inherit; padding: 9px 12px; border-radius: 10px; cursor: pointer; }
+  .sw-nav button:hover { background: var(--panel); color: var(--text); }
+  .sw-nav button[aria-current="page"] { background: var(--panel); border-color: #5a2a2d; color: var(--text); font-weight: 600; }
+  .sw-main { min-width: 0; }
+  .sw-sec { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
+  .sw-h { font-size: 18px; margin: 0 0 6px; }
+  .sw-intro { margin: 0 0 14px; font-size: 14px; }
+  .sw-locked { background: #2a2312; border: 1px solid var(--warn); border-radius: 12px; padding: 10px 14px;
+    margin-bottom: 14px; font-size: 14px; }
+  .sw-star { position: absolute; top: 6px; right: 8px; font-size: 18px; color: #ffd54a; text-shadow: 0 1px 4px #0008; }
+  .sw-tile { position: relative; }
+
+  .rg-list { display: grid; gap: 8px; }
+  .rg-item { background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px; }
+  .rg-head { display: grid; grid-template-columns: 44px 1fr auto; gap: 12px; align-items: center; padding: 10px 12px;
+    cursor: pointer; width: 100%; background: none; border: 0; color: var(--text); font: inherit; text-align: left; }
+  .rg-head .sw-art { width: 44px; border-radius: 8px; font-size: 15px; }
+  .rg-head b { display: block; }
+  .rg-meta { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+  .rg-body { border-top: 1px solid var(--line); padding: 12px 14px 14px; display: grid; gap: 14px; }
+  .rg-body h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin: 0 0 6px; }
+  .rg-btns { display: flex; gap: 8px; flex-wrap: wrap; }
+  .rg-backups { display: grid; gap: 6px; margin-top: 8px; }
+  .rg-backup { display: flex; gap: 10px; align-items: center; font-size: 13px; background: var(--panel);
+    border-radius: 8px; padding: 6px 10px; }
+  .rg-backup span { flex: 1; }
+
+  .toggle { display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 14px; }
+  .toggle input { appearance: none; width: 38px; height: 22px; border-radius: 999px; background: #3a3f4c;
+    position: relative; cursor: pointer; flex: none; transition: .15s; margin: 0; }
+  .toggle input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px;
+    border-radius: 50%; background: #fff; transition: .15s; }
+  .toggle input:checked { background: var(--accent); }
+  .toggle input:checked::after { left: 19px; }
+  .toggle input:disabled { opacity: .5; cursor: default; }
+
+  .rs-group { margin-bottom: 18px; }
+  .rs-group h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin: 0 0 8px; }
+  .rs-row { display: grid; grid-template-columns: 1fr minmax(200px, 280px); gap: 16px; align-items: center;
+    padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .rs-row:last-child { border-bottom: 0; }
+  .rs-row label b { font-weight: 500; display: block; }
+  .rs-row small { color: var(--muted); font-size: 12px; }
+  .rs-row.changed label b::after { content: " •"; color: #ff5a5f; }
+  .rs-row select { width: 100%; }
+  .rs-range { display: flex; gap: 10px; align-items: center; }
+  .rs-range input { flex: 1; accent-color: var(--accent); }
+  .rs-range output { min-width: 42px; text-align: right; font-variant-numeric: tabular-nums; }
+  .rs-bar { position: sticky; bottom: 12px; display: flex; gap: 10px; align-items: center; justify-content: flex-end;
+    background: #13201a; border: 1px solid var(--accent); border-radius: 12px; padding: 10px 14px; margin-top: 12px; }
+  .rs-bar span { flex: 1; font-size: 14px; }
+
+  .rc-map { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
+  .rc-map div { background: var(--panel-2); border-radius: 8px; padding: 6px 10px; font-size: 13px;
+    display: flex; justify-content: space-between; gap: 8px; }
+  .rc-map b { color: #ff8a8e; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .seg button { background: none; border: 0; color: var(--muted); font: inherit; font-size: 13px; padding: 7px 12px; cursor: pointer; }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+  .seg button:disabled { cursor: default; }
+
+  .sys-checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; margin-bottom: 18px; }
+  .sys-check { background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+  .sys-check .big { font-size: 20px; font-weight: 700; }
+  .sys-check small { overflow-wrap: anywhere; }
+  .rec-badge { display: inline-flex; align-items: center; gap: 6px; font-weight: 700; color: #ff5a5f;
+    font-variant-numeric: tabular-nums; background: #3a1316; border-radius: 999px; padding: 4px 10px; font-size: 13px; }
+  .rec-list { display: grid; gap: 6px; }
+  .rec-item { display: flex; gap: 10px; align-items: center; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 10px; padding: 8px 12px; font-size: 14px; }
+  .rec-item span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rec-note { border-radius: 10px; padding: 10px 12px; font-size: 14px; margin-bottom: 12px; }
+  .rec-note.err { background: #2a1517; border: 1px solid var(--danger); }
+  .rec-note.ok { background: #13241a; border: 1px solid var(--accent); }
+  .ok { color: var(--accent-2); } .bad { color: var(--danger); }
+
+  .tabs button[data-tab="gc"][aria-selected="true"] { border-bottom-color: #7b6cff; }
+  .tabs button[data-tab="wii"][aria-selected="true"] { border-bottom-color: #2b8cc4; }
+  .gc-layout { display: grid; grid-template-columns: 1fr 330px; gap: 20px; align-items: start; }
+  .gc-side { display: grid; gap: 16px; }
+  .gc-side .rs-row { grid-template-columns: 1fr; gap: 6px; padding: 8px 0; }
+  .gc-btn { background: #6a5acd; } .gc-btn:hover { background: #5a4abd; }
+  #gcTab .sw-tile:hover, #gcTab .sw-tile:focus-visible { border-color: #9b8cff; }
+  #gcTab .seg button[aria-pressed="true"] { background: #6a5acd; }
+  #gcTab[data-platform="wii"] .seg button[aria-pressed="true"], #gcTab[data-platform="wii"] .toggle input:checked { background: #2b8cc4; }
+  #gcTab[data-platform="wii"] .sw-tile:hover, #gcTab[data-platform="wii"] .sw-tile:focus-visible { border-color: #5fc3ff; }
+  #gcTab .toggle input:checked { background: #6a5acd; }
+  .plat { position: absolute; top: 8px; left: 8px; font-size: 10px; font-weight: 700; letter-spacing: .5px;
+    padding: 2px 7px; border-radius: 999px; background: #000a; color: #fff; }
+  .plat.GameCube { background: #4b3fa8; } .plat.Wii { background: #2b8cc4; } .plat.WiiWare { background: #1f7a6d; }
+  #gcSearch { flex: 1; min-width: 180px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 14px; }
+  #swNow { margin-bottom: 14px; }
+  /* GameCube / Wii game docked inside this window: the game fills everything below this bar. */
+  body.dol-embedded #swNow { position: fixed; top: 0; left: 0; right: 0; height: 48px; box-sizing: border-box;
+    z-index: 1000; margin: 0; border-radius: 0; border-width: 0 0 1px; padding: 6px 14px; }
+  body.dol-embedded { overflow: hidden; }
+  @media (max-width: 1000px) { .gc-layout { grid-template-columns: 1fr; } }
+  @media (max-width: 860px) {
+    .sw-layout { grid-template-columns: 1fr; }
+    .sw-nav { position: static; grid-auto-flow: column; overflow-x: auto; }
+    .sw-nav button { white-space: nowrap; }
+    .rs-row { grid-template-columns: 1fr; gap: 6px; }
+  }
+  .sys { background: var(--panel); border: 2px solid var(--line); border-radius: 12px;
+    padding: 14px; cursor: pointer; text-align: left; color: var(--text); font: inherit; }
+  .sys:hover { border-color: #444a58; }
+  .sys[aria-pressed="true"] { border-color: var(--accent-2); background: #15241a; }
+  .sys strong { display: block; font-size: 16px; }
+  .sys small { color: var(--muted); }
+  #drop { border: 2px dashed var(--line); border-radius: 14px; padding: 40px 20px;
+    text-align: center; background: var(--panel); transition: .15s; }
+  #drop.over { border-color: var(--accent-2); background: #15241a; }
+  #drop p { margin: 6px 0; }
+  .btn { background: var(--accent); color: #fff; border: 0; padding: 10px 18px;
+    border-radius: 8px; font: inherit; font-weight: 600; cursor: pointer; }
+  .btn:hover { background: #138a13; }
+  .btn.ghost { background: transparent; border: 1px solid var(--line); color: var(--text); }
+  .btn.ghost:hover { background: var(--panel-2); }
+  .btn.sm { padding: 6px 10px; font-size: 13px; }
+  .btn:disabled { opacity: .4; cursor: default; }
+  .muted { color: var(--muted); }
+
+  .grid2 { display: grid; grid-template-columns: 1.1fr 1fr; gap: 20px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
+  .card h2 { font-size: 15px; margin: 0 0 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  td, th { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; }
+  th { color: var(--muted); font-weight: 500; }
+  .key { display: inline-block; min-width: 26px; padding: 1px 7px; border-radius: 6px;
+    background: var(--panel-2); border: 1px solid var(--line); font-weight: 600; text-align: center; }
+  .k-a { color: var(--a); } .k-b { color: var(--b); } .k-x { color: var(--x); } .k-y { color: var(--y); }
+  svg .lit { fill: var(--accent-2) !important; }
+
+  /* Player */
+  #playerWrap { display: none; }
+  #playerBar { display: flex; justify-content: space-between; align-items: center; gap: 12px;
+    margin-bottom: 12px; flex-wrap: wrap; }
+  #game { width: 100%; aspect-ratio: 4 / 3; max-height: 72vh; background: #000;
+    border-radius: 12px; overflow: hidden; }
+  #game.gba { aspect-ratio: 3 / 2; }
+
+  /* Save states */
+  #states { margin-top: 16px; }
+  .states-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .slots { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .slot { background: var(--panel-2); border: 2px solid var(--line); border-radius: 12px; padding: 10px;
+    display: flex; flex-direction: column; gap: 8px; }
+  .slot.active { border-color: var(--accent-2); }
+  .slot .thumb { aspect-ratio: 4 / 3; background: #0a0b0e; border-radius: 8px; overflow: hidden;
+    display: grid; place-items: center; color: var(--muted); font-size: 13px; }
+  .slot .thumb img { width: 100%; height: 100%; object-fit: contain; image-rendering: pixelated; }
+  .slot .meta { display: flex; justify-content: space-between; font-size: 13px; }
+  .slot .meta b { font-weight: 600; }
+  .slot .row { display: flex; gap: 6px; }
+  .slot .row .btn { flex: 1; }
+  .slot .row2 { display: flex; gap: 6px; justify-content: space-between; }
+  .linkbtn { background: none; border: 0; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; padding: 2px 0; }
+  .linkbtn:hover { color: var(--text); text-decoration: underline; }
+  .linkbtn.danger:hover { color: var(--danger); }
+
+  #recBtn.recording { background: var(--danger); border-color: var(--danger); color: #fff; }
+  .rec-timer { display: inline-flex; align-items: center; gap: 8px; font-weight: 600;
+    font-variant-numeric: tabular-nums; color: var(--danger); }
+  .rec-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--danger); animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity: .2; } }
+
+  #toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(20px);
+    background: #10140f; border: 1px solid var(--accent); color: var(--text); padding: 10px 18px;
+    border-radius: 10px; opacity: 0; transition: .2s; pointer-events: none; z-index: 9999; font-weight: 600; }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #toast.err { border-color: var(--danger); }
+
+  @media (max-width: 860px) {
+    .systems { grid-template-columns: repeat(2, 1fr); }
+    .slots { grid-template-columns: repeat(2, 1fr); }
+    .grid2 { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>RETRO<span>PIXELS</span></h1>
+  <div class="pad-status" title="Press any button on the controller if it isn't detected">
+    <span class="dot" id="padDot"></span>
+    <span id="padName">No controller — press any button on your Xbox controller</span>
+  </div>
+</header>
+
+<main>
+  <nav class="tabs" id="tabs" role="tablist">
+    <button role="tab" data-tab="classic" aria-selected="true">Classic consoles</button>
+    <button role="tab" data-tab="gc" aria-selected="false"><span style="color:#9b8cff">●</span> GameCube</button>
+    <button role="tab" data-tab="wii" aria-selected="false"><span style="color:#5fc3ff">●</span> Wii</button>
+    <button role="tab" data-tab="recordings" aria-selected="false">🎬 Recordings</button>
+  </nav>
+  <div id="swNow" class="sw-now" hidden>
+        <span class="rec-dot" style="background:#ff5a5f"></span>
+        <div style="flex:1"><b id="swNowName"></b><br><small class="muted" id="swNowHint">Playing in <span id="swNowEmu"></span> · close the game window to come back here</small></div>
+        <span class="rec-badge" id="swRecBadge" hidden><span class="rec-dot"></span> REC <span id="swRecTime">0:00</span></span>
+    <button class="btn ghost sm" id="swRecToggle" hidden>● Record</button>
+    <span class="muted" id="swNowTime" style="font-variant-numeric:tabular-nums"></span>
+    <button class="btn ghost sm" id="swStopGame" hidden>■ Stop game</button>
+      </div>
+  <!-- ===================== Launcher ===================== -->
+  <section id="launcher">
+    <div class="systems" role="group" aria-label="System">
+      <button class="sys" data-core="nes" aria-pressed="false">
+        <strong>NES</strong><small>.nes .fds .unf</small>
+      </button>
+      <button class="sys" data-core="snes" aria-pressed="false">
+        <strong>Super Nintendo</strong><small>.sfc .smc .fig .swc</small>
+      </button>
+      <button class="sys" data-core="gb" aria-pressed="false">
+        <strong>Game Boy / Color</strong><small>.gb .gbc</small>
+      </button>
+      <button class="sys" data-core="gba" aria-pressed="false">
+        <strong>Game Boy Advance</strong><small>.gba</small>
+      </button>
+      <button class="sys" data-core="n64" aria-pressed="false">
+        <strong>Nintendo 64</strong><small>.z64 .n64 .v64</small>
+      </button>
+      <button class="sys" data-core="segaMD" aria-pressed="false">
+        <strong>Sega Genesis</strong><small>.md .gen .smd .bin</small>
+      </button>
+      <button class="sys" data-core="atari2600" aria-pressed="false">
+        <strong>Atari 2600</strong><small>.a26 .bin</small>
+      </button>
+      <button class="sys" data-core="atari7800" aria-pressed="false">
+        <strong>Atari 7800</strong><small>.a78 .bin</small>
+      </button>
+    </div>
+
+
+    <div id="drop">
+      <p style="font-size:18px;font-weight:600">Drop a game file here</p>
+      <p class="muted">The system is picked automatically from the file extension. Zipped games work too. For .bin files (used by Genesis and both Ataris) the system is guessed — click it above first if it's guessed wrong.</p>
+      <p style="margin-top:16px">
+        <button class="btn" id="pickBtn">Choose game file…</button>
+        <input type="file" id="fileInput" hidden
+               accept=".nes,.fds,.unf,.unif,.sfc,.smc,.fig,.swc,.gb,.gbc,.gba,.agb,.z64,.n64,.v64,.md,.gen,.smd,.bin,.a26,.a78,.zip,.7z">
+      </p>
+      <p class="muted" id="msg"></p>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <h2>Xbox controller — live</h2>
+        <svg viewBox="0 0 400 250" width="100%" aria-label="Xbox controller diagram">
+          <path d="M70 60 Q200 30 330 60 Q385 75 392 160 Q398 230 350 235 Q320 238 290 190 L110 190 Q80 238 50 235 Q2 230 8 160 Q15 75 70 60Z"
+                fill="#262a34" stroke="#3a3f4c" stroke-width="2"/>
+          <rect id="b4"  x="62"  y="38" width="70" height="14" rx="7" fill="#3a3f4c"/>
+          <rect id="b5"  x="268" y="38" width="70" height="14" rx="7" fill="#3a3f4c"/>
+          <rect id="b6"  x="78"  y="10" width="40" height="22" rx="8" fill="#3a3f4c"/>
+          <rect id="b7"  x="282" y="10" width="40" height="22" rx="8" fill="#3a3f4c"/>
+          <text x="97" y="49" font-size="10" fill="#cfd2da" text-anchor="middle">LB</text>
+          <text x="303" y="49" font-size="10" fill="#cfd2da" text-anchor="middle">RB</text>
+          <text x="98" y="25" font-size="10" fill="#cfd2da" text-anchor="middle">LT</text>
+          <text x="302" y="25" font-size="10" fill="#cfd2da" text-anchor="middle">RT</text>
+          <circle cx="100" cy="100" r="26" fill="#1b1e25"/>
+          <circle id="b10" cx="100" cy="100" r="17" fill="#3a3f4c"/>
+          <rect id="b12" x="142" y="128" width="16" height="18" rx="3" fill="#3a3f4c"/>
+          <rect id="b13" x="142" y="164" width="16" height="18" rx="3" fill="#3a3f4c"/>
+          <rect id="b14" x="122" y="146" width="20" height="16" rx="3" fill="#3a3f4c"/>
+          <rect id="b15" x="158" y="146" width="20" height="16" rx="3" fill="#3a3f4c"/>
+          <rect x="142" y="146" width="16" height="18" fill="#3a3f4c"/>
+          <circle cx="252" cy="155" r="26" fill="#1b1e25"/>
+          <circle id="b11" cx="252" cy="155" r="17" fill="#3a3f4c"/>
+          <circle id="b8" cx="172" cy="100" r="8" fill="#3a3f4c"/>
+          <circle id="b9" cx="228" cy="100" r="8" fill="#3a3f4c"/>
+          <circle id="b16" cx="200" cy="72" r="12" fill="#3a3f4c"/>
+          <text x="172" y="122" font-size="9" fill="#8b90a0" text-anchor="middle">View</text>
+          <text x="228" y="122" font-size="9" fill="#8b90a0" text-anchor="middle">Menu</text>
+          <circle id="b0" cx="300" cy="124" r="13" fill="#3a3f4c"/>
+          <circle id="b1" cx="326" cy="99"  r="13" fill="#3a3f4c"/>
+          <circle id="b2" cx="274" cy="99"  r="13" fill="#3a3f4c"/>
+          <circle id="b3" cx="300" cy="74"  r="13" fill="#3a3f4c"/>
+          <text x="300" y="128" font-size="12" font-weight="700" fill="#3dd13d" text-anchor="middle">A</text>
+          <text x="326" y="103" font-size="12" font-weight="700" fill="#e5484d" text-anchor="middle">B</text>
+          <text x="274" y="103" font-size="12" font-weight="700" fill="#3b82f6" text-anchor="middle">X</text>
+          <text x="300" y="78"  font-size="12" font-weight="700" fill="#f5c542" text-anchor="middle">Y</text>
+        </svg>
+        <p class="muted" style="margin:8px 0 0;font-size:13px">Buttons light up when pressed, so you can confirm the controller is working before you start a game.</p>
+      </div>
+
+      <div class="card">
+        <h2>Default button layout</h2>
+        <table>
+          <thead><tr><th>Xbox</th><th>NES / GB / GBA</th><th>SNES</th><th>Keyboard</th></tr></thead>
+          <tbody>
+            <tr><td><span class="key k-a">A</span></td><td>B</td><td>B</td><td><span class="key">Z</span></td></tr>
+            <tr><td><span class="key k-b">B</span></td><td>A</td><td>A</td><td><span class="key">X</span></td></tr>
+            <tr><td><span class="key k-x">X</span></td><td>—</td><td>Y</td><td><span class="key">A</span></td></tr>
+            <tr><td><span class="key k-y">Y</span></td><td>—</td><td>X</td><td><span class="key">S</span></td></tr>
+            <tr><td><span class="key">LB</span> / <span class="key">RB</span></td><td>L / R (GBA)</td><td>L / R</td><td><span class="key">Q</span> / <span class="key">W</span></td></tr>
+            <tr><td><span class="key">View</span></td><td>Select</td><td>Select</td><td><span class="key">Shift</span></td></tr>
+            <tr><td><span class="key">Menu</span></td><td>Start</td><td>Start</td><td><span class="key">Enter</span></td></tr>
+            <tr><td>D-pad</td><td>D-pad</td><td>D-pad</td><td>Arrows</td></tr>
+          </tbody>
+        </table>
+        <h2 style="margin-top:18px">Nintendo 64, Sega &amp; Atari</h2>
+        <table>
+          <tbody>
+            <tr><td>Nintendo 64</td><td><span class="key k-a">A</span> = A &nbsp;·&nbsp; <span class="key k-x">X</span> = B &nbsp;·&nbsp; <span class="key">LT</span> = Z &nbsp;·&nbsp; <span class="key">LB</span>/<span class="key">RB</span> = L/R &nbsp;·&nbsp; left stick = analog stick &nbsp;·&nbsp; right stick = C buttons &nbsp;·&nbsp; <span class="key">Menu</span> = Start</td></tr>
+            <tr><td>Genesis</td><td><span class="key k-x">X</span> <span class="key k-a">A</span> <span class="key k-b">B</span> = A B C &nbsp;·&nbsp; <span class="key">LB</span> <span class="key k-y">Y</span> <span class="key">RB</span> = X Y Z &nbsp;·&nbsp; <span class="key">View</span> = Mode</td></tr>
+            <tr><td>Atari 2600</td><td><span class="key k-a">A</span> = Fire &nbsp;·&nbsp; <span class="key">Menu</span> = Reset switch &nbsp;·&nbsp; <span class="key">View</span> = Select switch &nbsp;·&nbsp; <span class="key">LB</span>/<span class="key">RB</span> = difficulty switches &nbsp;·&nbsp; <span class="key k-y">Y</span> = Color/B&amp;W &nbsp;·&nbsp; paddle games: left stick</td></tr>
+            <tr><td>Atari 7800</td><td><span class="key k-a">A</span> / <span class="key k-b">B</span> = fire buttons &nbsp;·&nbsp; <span class="key">Menu</span> = Pause &nbsp;·&nbsp; <span class="key">View</span> = Select &nbsp;·&nbsp; <span class="key k-y">Y</span> = Reset</td></tr>
+          </tbody>
+        </table>
+        <h2 style="margin-top:18px">Save state &amp; recording shortcuts</h2>
+        <table>
+          <tbody>
+            <tr><td>Click right stick <span class="key">R3</span></td><td>Save to current slot</td><td><span class="key">F2</span></td></tr>
+            <tr><td>Click left stick <span class="key">L3</span></td><td>Load current slot</td><td><span class="key">F4</span></td></tr>
+            <tr><td>Right stick ← / →</td><td>Change slot</td><td><span class="key">F3</span></td></tr>
+            <tr><td>Right stick ↓ (hold 1 sec)</td><td>Start / stop recording</td><td><span class="key">F9</span></td></tr>
+            <tr><td colspan="3" class="muted" style="font-size:13px">On Nintendo 64 the right stick is the C buttons, so use <span class="key">View</span> + D-pad ← / → to change slot and <span class="key">View</span> + D-pad ↓ to start/stop recording.</td></tr>
+          </tbody>
+        </table>
+        <p class="muted" style="margin:10px 0 0;font-size:13px">
+          The layout follows button <em>position</em>, like the original pads: Xbox A (bottom) is the bottom Nintendo button, Xbox B (right) is the right one.
+          Remap anytime: <b>🎮 Controls</b> in the game's bar (NES, Game Boy, Atari) or the gamepad icon in the emulator's menu (other systems).
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== Recordings tab ===================== -->
+  <section id="recTab" hidden>
+    <section class="sw-sec">
+      <h2 class="sw-h">Recordings</h2>
+      <p class="muted sw-intro">RetroPixels records your GameCube and Wii games as .mp4 videos — just the game picture (black bars cropped off) and just the game's sound.
+        Classic-console games are recorded with the <b>● Record</b> button above the game instead (or by holding the right stick down), and save to your Downloads folder.</p>
+      <div id="recBody"></div>
+    </section>
+  </section>
+
+  <!-- ===================== GameCube & Wii tab ===================== -->
+  <section id="gcTab" hidden>
+    <div id="gcBrowserOnly" class="sw-sec" hidden>
+      <p style="margin:0">GameCube and Wii games play in <strong>Dolphin</strong> through the RetroPixels desktop app (RetroPixels.exe).</p>
+    </div>
+    <div id="gcDesktop" hidden>
+      <div class="sw-locked" id="gcLocked" hidden><b>Dolphin is open.</b> Settings changes are paused until you close it.</div>
+      <div class="gc-layout">
+        <section class="sw-sec gc-lib">
+          <h2 class="sw-h" id="gcTitle">GameCube library</h2>
+          <div class="sw-setup">
+            <div class="sw-emu" id="gcEmu">Looking for Dolphin…</div>
+            <div class="sw-emu" id="gcFolders">Looking for games…</div>
+          </div>
+          <div class="sw-row" style="margin-top:6px">
+            <button class="btn ghost sm" id="gcChooseExe">Change Dolphin…</button>
+            <button class="btn ghost sm" id="gcAddFolder">Add games folder…</button>
+            <button class="btn ghost sm" id="gcRescan" title="Search again near your other games">Find games again</button>
+            <label class="sw-check" title="Games play inside this window instead of a separate Dolphin window"><input type="checkbox" id="gcEmbed"> Play inside RetroPixels</label>
+            <label class="sw-check"><input type="checkbox" id="gcFull"> Start games fullscreen</label>
+            <label class="sw-check"><input type="checkbox" id="gcAutoRec"> Record games automatically</label>
+          </div>
+          <div id="gcFFNote"></div>
+          <div class="sw-tools">
+            <input type="search" id="gcSearch" placeholder="Search games…" autocomplete="off">
+            <div class="seg" id="gcFilter">
+              <button data-f="all" aria-pressed="true">All</button><button data-f="Wii" aria-pressed="false">Wii discs</button><button data-f="WiiWare" aria-pressed="false">WiiWare</button>
+            </div>
+            <select id="gcSort" class="sw-select"><option value="az">A – Z</option><option value="played">Recently played</option><option value="added">Recently added</option></select>
+            <span class="muted" id="gcCount" style="font-size:13px"></span>
+          </div>
+          <p class="muted" id="gcMsg" style="font-size:14px;margin:6px 0"></p>
+          <div class="sw-grid" id="gcGrid"></div>
+          <p class="muted" style="font-size:13px;margin:12px 0 0">Controller: D-pad or left stick to move, <span class="key k-a">A</span> to play. Save states are in Dolphin (Shift+F1 to save, F1 to load).</p>
+        </section>
+        <aside class="gc-side">
+          <section class="sw-sec">
+            <h2 class="sw-h" style="font-size:16px">Xbox controller</h2>
+            <div id="gcPads"></div>
+          </section>
+          <section class="sw-sec">
+            <h2 class="sw-h" style="font-size:16px">Dolphin settings</h2>
+            <div id="gcSettings"></div>
+            <div class="rs-bar" id="gcBar" hidden><span id="gcChanged"></span><button class="btn ghost sm" id="gcDiscard">Discard</button><button class="btn sm gc-btn" id="gcSave">Save</button></div>
+          </section>
+          <section class="sw-sec">
+            <div class="rg-btns">
+              <button class="btn ghost sm" id="gcOpenDolphin">Open Dolphin</button>
+              <button class="btn ghost sm" id="gcOpenConfig">Open Dolphin settings folder</button>
+            </div>
+            <p class="muted" style="font-size:12px;margin:8px 0 0">Use Dolphin itself for memory cards, cheats and per-game settings.</p>
+          </section>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== Player ===================== -->
+  <section id="playerWrap">
+    <div id="playerBar">
+      <div><strong id="nowPlaying"></strong> <span class="muted" id="nowSystem"></span></div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <span id="recTimer" class="rec-timer" hidden><span class="rec-dot"></span><span id="recTime">0:00</span></span>
+        <button class="btn ghost" id="recBtn" title="Record gameplay to an .mp4 file (F9)">● Record</button>
+        <button class="btn ghost" id="fsBtn">Fullscreen</button>
+        <button class="btn ghost" id="backBtn">Load another game</button>
+      </div>
+    </div>
+    <div id="game"></div>
+
+    <section id="states" class="card">
+      <div class="states-head">
+        <h2 style="margin:0">Save states</h2>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn ghost sm" id="undoLoadBtn" disabled title="Go back to where you were before the last load">Undo last load</button>
+          <button class="btn ghost sm" id="importBtn">Import state file…</button>
+          <input type="file" id="importInput" hidden accept=".state">
+        </div>
+      </div>
+      <div class="slots" id="slots"></div>
+      <p class="muted" style="font-size:13px;margin:12px 0 0">
+        Save states are kept in this browser, separately for each game. Controller: click the right stick to save, click the left stick to load, flick the right stick left/right to change slot.
+        In-game battery saves still work as normal.
+      </p>
+      <div id="sramTools" class="rg-btns" style="margin-top:10px" hidden>
+        <button class="btn ghost sm" id="sramImport" title="Use a .sav or .srm file from another emulator">Import battery save…</button>
+        <button class="btn ghost sm" id="sramExport">Download battery save</button>
+        <input type="file" id="sramInput" hidden accept=".sav,.srm,.sram,.bin">
+      </div>
+    </section>
+  </section>
+</main>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script>
+/*__RETRO_DESKTOP__*/
+(() => {
+  "use strict";
+
+  // ---------- Systems ----------
+  const SYSTEMS = {
+    nes:  { label: "NES",              exts: ["nes", "fds", "unf", "unif"] },
+    snes: { label: "Super Nintendo",   exts: ["sfc", "smc", "fig", "swc"] },
+    gb:   { label: "Game Boy / Color", exts: ["gb", "gbc"] },
+    gba:  { label: "Game Boy Advance", exts: ["gba", "agb"] },
+    n64:       { label: "Nintendo 64",  exts: ["z64", "n64", "v64"] },
+    segaMD:    { label: "Sega Genesis", exts: ["md", "gen", "smd"] },
+    atari2600: { label: "Atari 2600",   exts: ["a26"] },
+    atari7800: { label: "Atari 7800",   exts: ["a78"] },
+  };
+  // .bin and .zip are shared by several systems, so those use the system the person clicked.
+  const coreForExt = ext => Object.keys(SYSTEMS).find(c => SYSTEMS[c].exts.includes(ext)) || null;
+
+  // ---------- Audio tap for recording ----------
+  // The emulator plays sound through Web Audio. Every time something is connected to a
+  // speaker output, we also connect it to a capture node so recordings include game audio.
+  // This must be installed before the emulator creates its AudioContext.
+  const audioTaps = [];
+  const origConnect = AudioNode.prototype.connect;
+  AudioNode.prototype.connect = function (dest, ...rest) {
+    const result = origConnect.call(this, dest, ...rest);
+    try {
+      if (dest instanceof AudioDestinationNode) {
+        const ctx = dest.context;
+        let tap = audioTaps.find(t => t.ctx === ctx);
+        if (!tap) {
+          tap = { ctx, node: ctx.createMediaStreamDestination() };
+          audioTaps.push(tap);
+        }
+        // A node can point at its pre-volume source so in-game volume/mute don't reach recordings.
+        origConnect.call(this._rpRecordFrom || this, tap.node);
+      }
+    } catch (e) { /* never break the emulator's audio */ }
+    return result;
+  };
+
+  let selectedCore = null;
+  const sysButtons = [...document.querySelectorAll(".sys")];
+  const selectCore = core => {
+    selectedCore = core;
+    sysButtons.forEach(b => b.setAttribute("aria-pressed", String(b.dataset.core === core)));
+  };
+  sysButtons.forEach(b => b.addEventListener("click", () => {
+    selectCore(b.dataset.core);
+  }));
+
+  // ---------- Desktop app ----------
+  const DESKTOP = window.RETRO_DESKTOP || null;
+
+  const api = async (path, body) => {
+    const res = await fetch(path, {
+      method: body === undefined ? "GET" : "POST",
+      headers: { "X-Retro-Token": DESKTOP.token, "Content-Type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) throw new Error(data.error || `Request failed (${res.status})`);
+    return data;
+  };
+
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  // What's running (Dolphin) and the recorder's state, from the desktop app.
+  let appStatus = null;
+  function renderStatus(status) {
+    appStatus = status;
+    const now = document.getElementById("swNow");
+    now.hidden = !status.running;
+    const embedded = !!(status.running && status.running.embedded);
+    document.body.classList.toggle("dol-embedded", embedded);
+    document.getElementById("swStopGame").hidden = !embedded;
+    if (status.running) {
+      document.getElementById("swNowName").textContent = status.running.name;
+      const emu = esc(status.running.emu || "Dolphin");
+      document.getElementById("swNowHint").innerHTML = embedded
+        ? `${emu} · click the game to use the keyboard · Stop game to come back here`
+        : `Playing in ${emu} · close the game window to come back here`;
+      now.dataset.started = status.running.started;
+      dolSeenRunning = true;
+    } else if (dolSeenRunning) { // the game just ended
+      dolSeenRunning = false;
+      if (dolWentFullscreen && document.fullscreenElement) document.exitFullscreen().catch(() => {});
+      dolWentFullscreen = false;
+    }
+    document.querySelectorAll("#gcGrid .sw-tile").forEach(t => { t.disabled = !!status.running; });
+    renderRecBanner(status.rec, !!status.running);
+    return status;
+  }
+
+  // Fullscreen for a game docked in this window = this window goes fullscreen.
+  let dolWentFullscreen = false, dolSeenRunning = false;
+  const DOL_BAR_PX = 48; // height of the game bar above a docked game (see body.dol-embedded #swNow)
+  const sendEmbedArea = () => DESKTOP && api("/api/dol/embed", { top: DOL_BAR_PX, dpr: window.devicePixelRatio || 1 }).catch(() => {});
+  window.addEventListener("resize", () => { if (document.body.classList.contains("dol-embedded")) sendEmbedArea(); });
+  document.getElementById("swStopGame").addEventListener("click", async () => {
+    try {
+      await api("/api/dol/action", { action: "stop-game" });
+      toast("Stopping the game…");
+    } catch (e) { toast(e.message, true); }
+  });
+
+  let recActiveSince = null, lastRecMsg = null, lastRecErr = null;
+  let ffNoteShown = null;
+  function renderRecBanner(rec, gameOn) {
+    if (!rec) return;
+    // One-time ffmpeg download prompt in the GameCube / Wii library.
+    const needFF = rec.auto && !rec.ffmpeg;
+    const ffBusy = rec.install && ["downloading", "verifying", "installing"].includes(rec.install.state);
+    const key = needFF ? (ffBusy ? "busy" : rec.install && rec.install.state) : "none";
+    if (key !== ffNoteShown || ffBusy) {
+      ffNoteShown = key;
+      const note = document.getElementById("gcFFNote");
+      note.innerHTML = needFF ? ffmpegPanel(rec.install) : "";
+      if (needFF && !ffBusy) wireFFmpegPanel(note, () => api("/api/status").then(renderStatus).catch(() => {}));
+    }
+    document.getElementById("gcAutoRec").checked = !!rec.auto;
+    const badge = document.getElementById("swRecBadge"), btn = document.getElementById("swRecToggle");
+    badge.hidden = !rec.active;
+    btn.hidden = !gameOn || !rec.ffmpeg;
+    btn.textContent = rec.active ? "■ Stop recording" : "● Record";
+    recActiveSince = rec.active ? Date.parse(rec.active.started) : null;
+    if (lastRecMsg !== null && rec.message && rec.message !== lastRecMsg) { toast(rec.message); }
+    if (lastRecErr !== null && rec.error && rec.error !== lastRecErr) { toast(rec.error, true); }
+    lastRecMsg = rec.message || ""; lastRecErr = rec.error || "";
+  }
+  setInterval(() => {
+    if (recActiveSince == null) return;
+    const s = Math.max(0, Math.floor((Date.now() - recActiveSince) / 1000));
+    document.getElementById("swRecTime").textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  }, 500);
+
+  // Each game gets a steady color from its name.
+  const tileColor = name => {
+    let h = 0;
+    for (const c of name) h = (h * 31 + c.charCodeAt(0)) % 360;
+    return `linear-gradient(140deg, hsl(${h} 70% 42%), hsl(${(h + 40) % 360} 75% 28%))`;
+  };
+  const initials = name => name.replace(/[^\p{L}\p{N} ]/gu, "").split(" ").filter(Boolean)
+    .filter(w => !/^(the|of|and|a)$/i.test(w)).slice(0, 2).map(w => w[0]).join("").toUpperCase() || "?";
+  const fmtSize = b => b >= 1e9 ? (b / 1e9).toFixed(1) + " GB" : b >= 1e6 ? Math.round(b / 1e6) + " MB" : b > 0 ? Math.max(1, Math.round(b / 1e3)) + " KB" : "0";
+
+  // Keep the "now playing" bar up to date while a desktop tab is open.
+  let wasRunning = false;
+  setInterval(async () => {
+    if (!DESKTOP || (gcTab.hidden && recTab.hidden)) return;
+    try {
+      const st = await api("/api/status");
+      const isRunning = !!st.running;
+      renderStatus(st);
+      if (wasRunning && !isRunning) { toast("Welcome back"); if (!gcTab.hidden) loadGC(); if (!recTab.hidden) loadRecordings(); }
+      if (!gcTab.hidden && isRunning !== wasRunning) { setGCLocked(isRunning && st.running.kind === "dolphin"); loadGCSettings(); }
+      wasRunning = isRunning;
+    } catch (e) { /* ignore */ }
+  }, 2500);
+  setInterval(() => {
+    const now = document.getElementById("swNow");
+    if (now.hidden || !now.dataset.started) return;
+    const s = Math.max(0, Math.floor((Date.now() - Date.parse(now.dataset.started)) / 1000));
+    const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60;
+    document.getElementById("swNowTime").textContent = (h ? h + ":" + String(m).padStart(2, "0") : m) + ":" + String(s % 60).padStart(2, "0");
+  }, 1000);
+
+  // Controller navigation of the GameCube / Wii library.
+  function gridPadNav(dir) {
+    const tiles = [...document.querySelectorAll(".sw-tile")].filter(t => t.offsetParent !== null && !t.disabled);
+    if (!tiles.length) return;
+    const cur = tiles.indexOf(document.activeElement);
+    if (cur < 0) { tiles[0].focus(); return; }
+    const cols = tiles.filter(t => t.offsetTop === tiles[0].offsetTop).length || 1;
+    let next = cur;
+    if (dir === "left") next = cur - 1;
+    if (dir === "right") next = cur + 1;
+    if (dir === "up") next = cur - cols;
+    if (dir === "down") next = cur + cols;
+    next = Math.max(0, Math.min(tiles.length - 1, next));
+    tiles[next].focus();
+    tiles[next].scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+  window.__swPad = { nav: gridPadNav, active: () => DESKTOP && !gameKey && !(appStatus && appStatus.running) && !gcTab.hidden };
+
+  // ---------- Tabs ----------
+  const tabsEl = document.getElementById("tabs");
+  const launcherEl = document.getElementById("launcher");
+  const gcTab = document.getElementById("gcTab");
+  const recTab = document.getElementById("recTab");
+  const store = {
+    get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } },
+    set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* ignore */ } },
+  };
+  tabsEl.querySelector('[data-tab="recordings"]').hidden = !DESKTOP;
+
+  function showTab(tab) {
+    if (!["classic", "gc", "wii", "recordings"].includes(tab) || (tab === "recordings" && !DESKTOP)) tab = "classic";
+    tabsEl.querySelectorAll("button").forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === tab)));
+    launcherEl.hidden = tab !== "classic";
+    gcTab.hidden = tab !== "gc" && tab !== "wii";
+    recTab.hidden = tab !== "recordings";
+    if (tab === "gc" || tab === "wii") setGCPlatform(tab);
+    document.getElementById("gcBrowserOnly").hidden = !!DESKTOP;
+    document.getElementById("gcDesktop").hidden = !DESKTOP;
+    if ((tab === "gc" || tab === "wii") && DESKTOP) loadGC();
+    if (tab === "recordings") loadRecordings();
+    store.set("retro.tab", tab);
+  }
+  tabsEl.addEventListener("click", e => { const b = e.target.closest("button"); if (b) showTab(b.dataset.tab); });
+
+  const swAct = async (fn, okText) => {
+    try { const r = await fn(); if (okText) toast(typeof okText === "function" ? okText(r) : okText); return r; }
+    catch (e) { toast(e.message, true); return null; }
+  };
+
+  // ---------- Recordings ----------
+  // ffmpeg does the video encoding; it's a one-time download.
+  function ffmpegPanel(inst) {
+    inst = inst || { state: "idle" };
+    const busy = ["downloading", "verifying", "installing"].includes(inst.state);
+    const pct = inst.total > 0 ? Math.min(100, Math.round(inst.got / inst.total * 100)) : 0;
+    const label = { downloading: `Downloading… ${pct}% (${fmtSize(inst.got)}${inst.total > 0 ? " of " + fmtSize(inst.total) : ""})`,
+      verifying: "Checking the download…", installing: "Installing…" }[inst.state] || "";
+    return `<div class="rec-note ${inst.state === "error" ? "err" : ""}" style="${inst.state === "error" ? "" : "background:#2a2312;border:1px solid var(--warn)"}">
+      <b>Recording needs ffmpeg</b> — a free video encoder (about 190 MB, one-time download from GitHub, checked against its published checksum).
+      ${inst.state === "error" ? `<br><span class="bad">${esc(inst.error)}</span>` : ""}
+      <div style="margin-top:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        ${busy ? `<div style="flex:1;min-width:200px;height:8px;background:#0e0f13;border-radius:99px;overflow:hidden"><div style="width:${pct}%;height:100%;background:var(--accent)"></div></div><span style="font-size:13px">${label}</span>`
+               : `<button class="btn red sm" data-ffdl>${inst.state === "error" ? "Try again" : "Download ffmpeg"}</button>`}
+      </div></div>`;
+  }
+  let ffPoll = null;
+  function wireFFmpegPanel(el, reload) {
+    const b = el.querySelector("[data-ffdl]");
+    if (b) b.addEventListener("click", async () => { await swAct(() => api("/api/rec/ffmpeg-install", {})); reload(); });
+    clearInterval(ffPoll);
+    ffPoll = setInterval(async () => {
+      try {
+        const r = await api("/api/rec/ffmpeg-install");
+        const busy = ["downloading", "verifying", "installing"].includes(r.install.state);
+        if (r.ffmpeg || !busy) {
+          clearInterval(ffPoll);
+          if (r.ffmpeg && r.install.state === "done") { toast("ffmpeg installed — recording is ready"); reload(); }
+          else if (!busy && r.install.state === "error") reload();
+          return;
+        }
+        const box = el.querySelector(".rec-note");
+        if (box) box.outerHTML = ffmpegPanel(r.install);
+      } catch (e) { clearInterval(ffPoll); }
+    }, 1000);
+  }
+
+  async function loadRecordings() {
+    const el = document.getElementById("recBody");
+    let r;
+    try { r = await api("/api/rec/status"); } catch (e) { el.innerHTML = `<p class="bad">${esc(e.message)}</p>`; return; }
+    const st = r.status;
+    const a = st.active;
+    el.innerHTML = `
+      ${st.ffmpeg ? "" : ffmpegPanel(st.install)}
+      ${st.error ? `<div class="rec-note err">${esc(st.error)}</div>` : ""}
+      ${a ? `<div class="rec-note ok"><span class="rec-badge"><span class="rec-dot"></span> REC</span>
+          &nbsp;<b>${esc(a.game)}</b> · ${esc(a.size)} · sound: ${a.audio === "game" ? "game only" : a.audio === "system" ? "whole PC (game-only capture wasn't available)" : "none"} · ${esc(a.encoder.replace("h264_", "").toUpperCase())} encoder</div>` : ""}
+      <div class="rs-group">
+        <div class="rs-row"><label><b>Record GameCube &amp; Wii games automatically</b><small>Starts when the game appears and stops when it ends. You can also start or stop from the bar at the top while playing.</small></label>
+          <label class="toggle"><input type="checkbox" id="recAuto" ${st.auto ? "checked" : ""}> ${st.auto ? "On" : "Off"}</label></div>
+        <div class="rs-row"><label><b>Frame rate</b></label>
+          <select class="sw-select" id="recFps"><option value="60" ${st.fps === 60 ? "selected" : ""}>60 FPS (smooth)</option><option value="30" ${st.fps === 30 ? "selected" : ""}>30 FPS (smaller files)</option></select></div>
+        <div class="rs-row"><label><b>Quality</b></label>
+          <select class="sw-select" id="recQ">
+            <option value="high" ${st.quality === "high" ? "selected" : ""}>High (big files)</option>
+            <option value="balanced" ${st.quality === "balanced" ? "selected" : ""}>Balanced</option>
+            <option value="small" ${st.quality === "small" ? "selected" : ""}>Smaller files</option>
+          </select></div>
+        <div class="rs-row"><label><b>Save to</b><small>${esc(st.dir)}</small></label>
+          <div class="rg-btns" style="justify-content:flex-end"><button class="btn ghost sm" id="recChoose">Change…</button><button class="btn ghost sm" id="recOpen">Open folder</button></div></div>
+      </div>
+      <div class="rs-group"><h3>Recent recordings</h3>
+        <div class="rec-list">${r.recordings.length ? r.recordings.map(f => `
+          <div class="rec-item"><span title="${esc(f.name)}">🎬 ${esc(f.name.replace(/\.mp4$/i, ""))}</span>
+            <small class="muted">${fmtSize(f.size)}</small><button class="btn ghost sm" data-play="${esc(f.name)}">Play</button></div>`).join("")
+          : '<p class="muted" style="margin:0;font-size:14px">No recordings yet.</p>'}</div>
+      </div>
+      <p class="muted" style="font-size:13px;margin:0">Fullscreen games are cropped to exactly the game picture. In a window, the whole Dolphin window is recorded.
+        Only Dolphin's sound is captured, so Discord and other apps stay out of your videos.</p>`;
+    const set = body => swAct(() => api("/api/rec/settings", body), "Recording settings saved").then(() => loadRecordings());
+    wireFFmpegPanel(el, loadRecordings);
+    el.querySelector("#recAuto").addEventListener("change", e => set({ auto: e.target.checked }));
+    el.querySelector("#recFps").addEventListener("change", e => set({ fps: +e.target.value }));
+    el.querySelector("#recQ").addEventListener("change", e => set({ quality: e.target.value }));
+    el.querySelector("#recOpen").addEventListener("click", () => swAct(() => api("/api/rec/control", { action: "open-folder" })));
+    el.querySelector("#recChoose").addEventListener("click", async () => { if (await swAct(() => api("/api/rec/control", { action: "choose-folder" }))) loadRecordings(); });
+    el.querySelectorAll("[data-play]").forEach(b => b.addEventListener("click", () => swAct(() => api("/api/rec/open", { name: b.dataset.play }))));
+  }
+
+  // ---------- GameCube & Wii (Dolphin) ----------
+  let gcGames = [], gcStatus = null, gcFilter = "all", gcSettings = [], gcChanges = {}, gcLocked = false;
+  let gcPlatform = "gc"; // which tab is showing: "gc" or "wii"
+  function setGCPlatform(p) {
+    if (gcPlatform !== p) {
+      gcPlatform = p;
+      gcFilter = "all";
+      document.querySelectorAll("#gcFilter button").forEach(x => x.setAttribute("aria-pressed", String(x.dataset.f === "all")));
+      document.getElementById("gcSearch").value = "";
+    }
+    gcTab.dataset.platform = p;
+    document.getElementById("gcTitle").textContent = p === "wii" ? "Wii library" : "GameCube library";
+    document.getElementById("gcFilter").hidden = p !== "wii";
+    if (gcStatus) renderGCGrid();
+  }
+  const onThisTab = g => gcPlatform === "wii" ? (g.platform === "Wii" || g.platform === "WiiWare") : g.platform === "GameCube";
+  const gcMsg = document.getElementById("gcMsg");
+
+  async function loadGC() {
+    try {
+      const r = await api("/api/dol/library");
+      gcGames = r.games || []; gcStatus = r.status;
+      renderGCSetup(); renderGCGrid();
+    } catch (e) { gcMsg.textContent = "Couldn't load your GameCube & Wii games: " + e.message; }
+    loadGCSettings();
+  }
+
+  function renderGCSetup() {
+    const st = gcStatus;
+    document.getElementById("gcEmu").innerHTML = st.exe
+      ? `<span class="muted">Emulator</span><br><b>Dolphin</b> <small class="muted">${esc(st.version || "")}</small><br><small class="muted">${esc(st.exe)}</small>`
+      : '<span class="muted">Emulator</span><br><b style="color:var(--warn)">Dolphin not found</b><br><small class="muted">Click "Change Dolphin…" to pick Dolphin.exe</small>';
+    const f = st.folders || [];
+    const el = document.getElementById("gcFolders");
+    el.innerHTML = `<span class="muted">Games folders</span>${f.length ? f.map((d, i) =>
+      `<div style="display:flex;gap:8px;align-items:center;margin-top:4px"><small style="flex:1;overflow-wrap:anywhere">${esc(d)}</small><button class="linkbtn danger" data-rm="${i}">Remove</button></div>`).join("")
+      : '<br><b style="color:var(--warn)">None yet</b>'}`;
+    el.querySelectorAll("[data-rm]").forEach(b => b.addEventListener("click", () => gcAction({ action: "remove-folder", folder: f[+b.dataset.rm] })));
+    document.getElementById("gcFull").checked = !!st.fullscreen;
+    document.getElementById("gcEmbed").checked = !!st.embed;
+  }
+
+  function renderGCGrid() {
+    const q = document.getElementById("gcSearch").value.trim().toLowerCase();
+    const sort = document.getElementById("gcSort").value;
+    const t = d => (d && !d.startsWith("0001") ? Date.parse(d) : 0);
+    const mine = gcGames.filter(onThisTab);
+    let list = mine.filter(g => (gcFilter === "all" || g.platform === gcFilter) && (!q || g.name.toLowerCase().includes(q) || g.file.toLowerCase().includes(q)));
+    if (sort === "played") list = list.slice().sort((a, b) => t(b.played) - t(a.played) || a.name.localeCompare(b.name));
+    if (sort === "added") list = list.slice().sort((a, b) => t(b.added) - t(a.added));
+    const counts = { GameCube: 0, Wii: 0, WiiWare: 0 };
+    gcGames.forEach(g => { counts[g.platform] = (counts[g.platform] || 0) + 1; });
+    document.getElementById("gcCount").textContent = gcPlatform === "wii"
+      ? `${counts.Wii} Wii · ${counts.WiiWare} WiiWare` : `${counts.GameCube} GameCube games`;
+    const grid = document.getElementById("gcGrid");
+    grid.innerHTML = "";
+    if (!mine.length) {
+      const what = gcPlatform === "wii" ? "Wii" : "GameCube";
+      grid.innerHTML = `<p class="muted" style="grid-column:1/-1">${(gcStatus.folders || []).length
+        ? `No ${what} games found in your games folders. Use "Add games folder…" if they're somewhere else.` : `Add the folder with your ${what} games.`}</p>`;
+      return;
+    }
+    const playing = !!(appStatus && appStatus.running);
+    list.forEach(g => {
+      const b = document.createElement("button");
+      b.className = "sw-tile";
+      b.title = g.file;
+      b.disabled = playing;
+      b.innerHTML = `<span class="plat ${esc(g.platform)}">${g.platform === "GameCube" ? "GC" : esc(g.platform.toUpperCase())}</span>
+        <div class="sw-art" style="background:${tileColor(g.name)}">${esc(initials(g.name))}</div>
+        <div class="sw-info"><b>${esc(g.name)}</b>
+          <div class="sw-tags">${g.id ? `<span class="sw-tag">${esc(g.id)}</span>` : ""}<span class="sw-tag">${fmtSize(g.size)}</span></div>
+          ${t(g.played) ? `<small class="muted" style="font-size:11px">Played ${fmtTime(g.played)}</small>` : ""}
+        </div>`;
+      b.addEventListener("click", async () => {
+        gcMsg.style.color = ""; gcMsg.textContent = "";
+        if (gcStatus && gcStatus.embed) {
+          // Must happen right in the click, or the browser refuses fullscreen.
+          if (gcStatus.fullscreen && !document.fullscreenElement) {
+            document.documentElement.requestFullscreen().then(() => { dolWentFullscreen = true; }).catch(() => {});
+          }
+          sendEmbedArea();
+        }
+        try {
+          await api("/api/dol/play", { path: g.path });
+          toast(`Starting ${g.name}…`);
+          setTimeout(() => api("/api/status").then(renderStatus).then(renderGCGrid).catch(() => {}), 800);
+        } catch (e) {
+          gcMsg.style.color = "var(--danger)"; gcMsg.textContent = e.message;
+          if (dolWentFullscreen && document.fullscreenElement) { document.exitFullscreen().catch(() => {}); dolWentFullscreen = false; }
+        }
+      });
+      grid.appendChild(b);
+    });
+  }
+
+  async function gcAction(body, ok) {
+    try {
+      const r = await api("/api/dol/action", body);
+      if (r.games) { gcGames = r.games; gcStatus = r.status; renderGCSetup(); renderGCGrid(); }
+      if (ok) toast(ok);
+      return r;
+    } catch (e) { toast(e.message, true); return null; }
+  }
+
+  function setGCLocked(v) {
+    if (gcLocked === !!v) return;
+    gcLocked = !!v;
+    document.getElementById("gcLocked").hidden = !gcLocked;
+    renderGCSettings();
+  }
+
+  async function loadGCSettings() {
+    try {
+      const r = await api("/api/dol/settings");
+      gcSettings = r.settings; gcChanges = {};
+      gcLocked = !!r.locked;
+      document.getElementById("gcLocked").hidden = !gcLocked;
+      renderGCSettings(); renderGCPads(r.pads);
+    } catch (e) { document.getElementById("gcSettings").innerHTML = `<p class="bad">${esc(e.message)}</p>`; }
+  }
+
+  function renderGCSettings() {
+    const el = document.getElementById("gcSettings");
+    el.innerHTML = "";
+    gcSettings.forEach(s => {
+      const val = s.key in gcChanges ? gcChanges[s.key] : s.value;
+      const row = document.createElement("div");
+      row.className = "rs-row" + (s.key in gcChanges ? " changed" : "");
+      const id = "gc_" + s.key, lock = gcLocked ? "disabled" : "";
+      const ctl = s.type === "bool"
+        ? `<label class="toggle"><input type="checkbox" id="${id}" ${val ? "checked" : ""} ${lock}> ${val ? "On" : "Off"}</label>`
+        : `<select class="sw-select" id="${id}" ${lock}>${s.options.map(o => `<option value="${esc(o.v)}" ${String(o.v) === String(val) ? "selected" : ""}>${esc(o.l)}</option>`).join("")}</select>`;
+      row.innerHTML = `<label for="${id}"><b>${esc(s.label)}</b>${s.help ? `<small>${esc(s.help)}</small>` : ""}</label>${ctl}`;
+      const input = row.querySelector("#" + id);
+      input.addEventListener("change", () => {
+        let v = s.type === "bool" ? input.checked : (s.options.find(o => String(o.v) === input.value) || {}).v;
+        if (String(v) === String(s.value)) delete gcChanges[s.key]; else gcChanges[s.key] = v;
+        renderGCSettings();
+      });
+      el.appendChild(row);
+    });
+    const n = Object.keys(gcChanges).length;
+    document.getElementById("gcBar").hidden = !n;
+    document.getElementById("gcChanged").textContent = `${n} unsaved change${n === 1 ? "" : "s"}`;
+  }
+
+  function renderGCPads(p) {
+    const label = { xbox: '<span class="ok">✓ Xbox controller</span>', custom: "Your own set-up", none: '<span style="color:var(--warn)">Not set up yet</span>' };
+    const el = document.getElementById("gcPads");
+    el.innerHTML = `
+      <div class="rs-row"><label><b>GameCube controller (port 1)</b></label><div>${label[p.gc]}</div></div>
+      <div class="rs-row"><label><b>Wii Remote + Nunchuk</b></label><div>${label[p.wii]}</div></div>
+      <details style="margin:8px 0;font-size:13px"><summary style="cursor:pointer">Button layout</summary>
+        <div class="rc-map" style="margin-top:8px;grid-template-columns:1fr 1fr">
+          <div><b>GC A</b><span>Xbox A</span></div><div><b>GC B</b><span>Xbox X</span></div>
+          <div><b>GC X</b><span>Xbox B</span></div><div><b>GC Y</b><span>Xbox Y</span></div>
+          <div><b>GC Z</b><span>RB</span></div><div><b>GC L / R</b><span>LT / RT</span></div>
+          <div><b>C-stick</b><span>Right stick</span></div><div><b>Start</b><span>Menu</span></div>
+          <div><b>Wii A / B</b><span>A / RT</span></div><div><b>Wii 1 / 2</b><span>X / Y</span></div>
+          <div><b>Pointer</b><span>Right stick</span></div><div><b>Shake</b><span>RB</span></div>
+          <div><b>Nunchuk C / Z</b><span>LB / LT</span></div><div><b>− / + / Home</b><span>View / Menu / R3</span></div>
+        </div></details>
+      <button class="btn ghost sm" id="gcPadSetup" ${gcLocked ? "disabled" : ""}>${p.gc === "xbox" && p.wii === "xbox" ? "Reset to Xbox layout" : "Set up Xbox controller"}</button>
+      <p class="muted" style="font-size:12px;margin:8px 0 0">Set up automatically the first time a game starts. Fine-tune in Dolphin → Controllers.</p>`;
+    el.querySelector("#gcPadSetup").addEventListener("click", async () => {
+      if (p.gc === "custom" || p.wii === "custom") {
+        if (!confirm("Replace your current Dolphin controller set-up with the Xbox layout? (Your old settings file is backed up.)")) return;
+      }
+      if (await gcAction({ action: "setup-pads" }, "Xbox controller set up in Dolphin")) loadGCSettings();
+    });
+  }
+
+  if (DESKTOP) {
+    document.getElementById("gcSearch").addEventListener("input", renderGCGrid);
+    document.getElementById("gcSort").addEventListener("change", renderGCGrid);
+    document.getElementById("gcFilter").addEventListener("click", e => {
+      const b = e.target.closest("button"); if (!b) return;
+      gcFilter = b.dataset.f;
+      document.querySelectorAll("#gcFilter button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+      renderGCGrid();
+    });
+    document.getElementById("gcChooseExe").addEventListener("click", () => gcAction({ action: "choose-exe" }));
+    document.getElementById("gcAddFolder").addEventListener("click", () => gcAction({ action: "add-folder" }));
+    document.getElementById("gcRescan").addEventListener("click", () => gcAction({ action: "rescan" }, "Searched for GameCube & Wii games"));
+    document.getElementById("gcFull").addEventListener("change", e => gcAction({ action: "fullscreen", on: e.target.checked }));
+    document.getElementById("gcEmbed").addEventListener("change", e => gcAction({ action: "embed", on: e.target.checked }));
+    document.getElementById("gcAutoRec").addEventListener("change", e =>
+      swAct(() => api("/api/rec/settings", { auto: e.target.checked }), e.target.checked ? "Games will be recorded automatically" : "Automatic recording off"));
+    document.getElementById("gcOpenDolphin").addEventListener("click", () => gcAction({ action: "open-dolphin" }, "Opening Dolphin…"));
+    document.getElementById("gcOpenConfig").addEventListener("click", () => gcAction({ action: "open-config" }));
+    document.getElementById("gcDiscard").addEventListener("click", () => { gcChanges = {}; renderGCSettings(); });
+    document.getElementById("gcSave").addEventListener("click", async () => {
+      try {
+        const r = await api("/api/dol/settings", { changes: gcChanges });
+        gcSettings = r.settings; gcChanges = {}; renderGCSettings(); toast("Dolphin settings saved");
+      } catch (e) { toast(e.message, true); }
+    });
+  }
+
+  // Start on the tab used last time.
+  setTimeout(() => showTab(store.get("retro.tab") || "classic"), 0);
+
+  if (DESKTOP) {
+    document.getElementById("swRecToggle").addEventListener("click", async () => {
+      const on = recActiveSince != null;
+      const r = await swAct(() => api("/api/rec/control", { action: on ? "stop" : "start" }), on ? "Stopping — saving the video…" : "Recording will start in a moment");
+      if (r) setTimeout(() => api("/api/status").then(renderStatus).catch(() => {}), 1500);
+    });
+
+    // Let the app know the window is still open, and when it closes.
+    const beat = () => fetch("/api/heartbeat", { headers: { "X-Retro-Token": DESKTOP.token } }).catch(() => {});
+    beat();
+    setInterval(beat, 5000);
+    window.addEventListener("pagehide", () => navigator.sendBeacon("/api/bye", DESKTOP.token));
+  }
+
+  // ---------- Toast ----------
+  const toastEl = document.getElementById("toast");
+  let toastTimer;
+  const toast = (text, isErr = false) => {
+    toastEl.textContent = text;
+    toastEl.classList.toggle("err", isErr);
+    toastEl.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove("show"), 1800);
+  };
+
+  // ---------- Xbox controller default mapping ----------
+  // Libretro ids: 0 B, 1 Y, 2 Select, 3 Start, 4-7 D-pad, 8 A, 9 X, 10 L, 11 R,
+  // 12 L2, 13 R2, 14 L3, 15 R3, 16-23 analog sticks.
+  // Browser "standard" gamepad ids (what Xbox controllers report):
+  // BUTTON_1 = Xbox A (bottom), BUTTON_2 = Xbox B (right), BUTTON_3 = Xbox X (left), BUTTON_4 = Xbox Y (top).
+  // Stick clicks and the right stick are left unmapped in the emulator: this page uses them for save states.
+  const xboxPad = {
+    0:  "BUTTON_1",              // Nintendo B  <- Xbox A
+    8:  "BUTTON_2",              // Nintendo A  <- Xbox B
+    1:  "BUTTON_3",              // SNES Y      <- Xbox X
+    9:  "BUTTON_4",              // SNES X      <- Xbox Y
+    2:  "SELECT",                // Select      <- View
+    3:  "START",                 // Start       <- Menu
+    4:  "DPAD_UP", 5: "DPAD_DOWN", 6: "DPAD_LEFT", 7: "DPAD_RIGHT",
+    10: "LEFT_TOP_SHOULDER",     // L  <- LB
+    11: "RIGHT_TOP_SHOULDER",    // R  <- RB
+    12: "LEFT_BOTTOM_SHOULDER",  // L2 <- LT
+    13: "RIGHT_BOTTOM_SHOULDER", // R2 <- RT
+    16: "LEFT_STICK_X:+1", 17: "LEFT_STICK_X:-1",
+    18: "LEFT_STICK_Y:+1", 19: "LEFT_STICK_Y:-1",
+  };
+  const keyboard = {
+    0: "z", 8: "x", 1: "a", 9: "s", 2: "shift", 3: "enter",
+    4: "up arrow", 5: "down arrow", 6: "left arrow", 7: "right arrow",
+    10: "q", 11: "w",
+  };
+  // Nintendo 64: the right stick drives the C buttons, and View (no N64 equivalent)
+  // becomes the modifier for this page's slot/recording shortcuts.
+  const n64Extra = {
+    2: "",
+    20: "RIGHT_STICK_X:+1", 21: "RIGHT_STICK_X:-1",
+    22: "RIGHT_STICK_Y:+1", 23: "RIGHT_STICK_Y:-1",
+  };
+  const n64Keys = { 2: "", 20: "l", 21: "j", 22: "k", 23: "i" }; // C buttons on IJKL
+  const buildControls = core => {
+    const pad = core === "n64" ? { ...xboxPad, ...n64Extra } : xboxPad;
+    const keys = core === "n64" ? { ...keyboard, ...n64Keys } : keyboard;
+    const controls = {};
+    for (let p = 0; p < 4; p++) {
+      controls[p] = {};
+      for (let i = 0; i <= 23; i++) {
+        controls[p][i] = { value: p === 0 ? (keys[i] || "") : "", value2: pad[i] || "" };
+      }
+    }
+    // Emulator's own hotkeys: keep fast-forward / slow-motion, hand save/load to this page.
+    Object.assign(controls[0], {
+      24: { value: "" }, 25: { value: "" }, 26: { value: "" },
+      27: { value: "add" }, 28: { value: "space" }, 29: { value: "subtract" },
+    });
+    return controls;
+  };
+
+  // ---------- Save-state storage (IndexedDB) ----------
+  const SLOT_COUNT = 4;
+  const dbPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open("retro-console", 1); // name kept from the first version so existing save states still load
+    req.onupgradeneeded = () => req.result.createObjectStore("states");
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  const dbOp = (mode, fn) => dbPromise.then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction("states", mode);
+    const r = fn(tx.objectStore("states"));
+    tx.oncomplete = () => resolve(r && r.result);
+    tx.onerror = () => reject(tx.error);
+  }));
+  const dbGet = key => dbOp("readonly", s => s.get(key));
+  const dbPut = (key, val) => dbOp("readwrite", s => s.put(val, key));
+  const dbDel = key => dbOp("readwrite", s => s.delete(key));
+
+  let gameKey = null;        // "core:gameName"
+  let currentSlot = 0;
+  let undoState = null;
+  const slotKey = i => `${gameKey}#${i}`;
+  const emu = () => window.EJS_emulator && window.EJS_emulator.gameManager;
+  let gameReady = false;
+
+  const bytesToDataUrl = (bytes, type) => new Promise(resolve => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(fr.result);
+    fr.readAsDataURL(new Blob([bytes], { type }));
+  });
+
+  async function takeThumbnail() {
+    // Ask the emulator core for a screenshot (works with WebGL canvases).
+    try {
+      const gm = emu();
+      if (gm && typeof gm.screenshot === "function") {
+        let shot = gm.screenshot();
+        if (shot && typeof shot.then === "function") shot = await shot;
+        if (shot instanceof Uint8Array && shot.length) return bytesToDataUrl(shot, "image/png");
+        if (shot instanceof Blob) return bytesToDataUrl(shot, "image/png");
+        if (typeof shot === "string" && shot.startsWith("data:")) return shot;
+      }
+    } catch (e) { /* fall through */ }
+    // Fallback: read the canvas directly.
+    try {
+      const c = document.querySelector("#game canvas");
+      if (c) {
+        const url = c.toDataURL("image/png");
+        if (url.length > 2000) return url;
+      }
+    } catch (e) { /* ignore */ }
+    return null;
+  }
+
+  function getStateBytes() {
+    const gm = emu();
+    if (!gm || !gameReady) throw new Error("Game isn't running yet");
+    const s = gm.getState();
+    if (!s || !s.length) throw new Error("Emulator returned an empty state");
+    return new Uint8Array(s);
+  }
+  function applyStateBytes(bytes) {
+    const gm = emu();
+    if (!gm || !gameReady) throw new Error("Game isn't running yet");
+    gm.loadState(bytes);
+  }
+
+  async function saveSlot(i) {
+    try {
+      const state = getStateBytes();
+      const thumb = await takeThumbnail();
+      await dbPut(slotKey(i), { state, thumb, time: Date.now() });
+      currentSlot = i;
+      toast(`Saved to slot ${i + 1}`);
+      renderSlots();
+    } catch (e) { toast("Couldn't save: " + e.message, true); }
+  }
+
+  async function loadSlot(i) {
+    try {
+      const rec = await dbGet(slotKey(i));
+      if (!rec) { toast(`Slot ${i + 1} is empty`, true); return; }
+      try { undoState = getStateBytes(); } catch (e) { undoState = null; }
+      applyStateBytes(rec.state);
+      currentSlot = i;
+      document.getElementById("undoLoadBtn").disabled = !undoState;
+      toast(`Loaded slot ${i + 1}`);
+      renderSlots();
+    } catch (e) { toast("Couldn't load: " + e.message, true); }
+  }
+
+  async function deleteSlot(i) {
+    if (!confirm(`Delete the save state in slot ${i + 1}?`)) return;
+    await dbDel(slotKey(i));
+    toast(`Slot ${i + 1} cleared`);
+    renderSlots();
+  }
+
+  async function exportSlot(i) {
+    const rec = await dbGet(slotKey(i));
+    if (!rec) return;
+    const name = (window.EJS_gameName || "game").replace(/[^\w\- ]+/g, "");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([rec.state], { type: "application/octet-stream" }));
+    a.download = `${name} - slot ${i + 1}.state`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }
+
+  const fmtTime = t => {
+    const d = new Date(t);
+    const same = d.toDateString() === new Date().toDateString();
+    return same ? d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+                : d.toLocaleDateString([], { month: "short", day: "numeric" }) + " " +
+                  d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  };
+
+  async function renderSlots() {
+    if (!gameKey) return;
+    const wrap = document.getElementById("slots");
+    const recs = await Promise.all([...Array(SLOT_COUNT)].map((_, i) => dbGet(slotKey(i)).catch(() => null)));
+    wrap.innerHTML = "";
+    recs.forEach((rec, i) => {
+      const el = document.createElement("div");
+      el.className = "slot" + (i === currentSlot ? " active" : "");
+      el.innerHTML = `
+        <div class="thumb">${rec && rec.thumb ? `<img alt="Slot ${i + 1} screenshot" src="${rec.thumb}">` : (rec ? "Saved" : "Empty")}</div>
+        <div class="meta"><b>Slot ${i + 1}</b><span class="muted">${rec ? fmtTime(rec.time) : ""}</span></div>
+        <div class="row">
+          <button class="btn sm" data-act="save">Save</button>
+          <button class="btn ghost sm" data-act="load" ${rec ? "" : "disabled"}>Load</button>
+        </div>
+        <div class="row2">
+          <button class="linkbtn" data-act="export" ${rec ? "" : "hidden"}>Download</button>
+          <button class="linkbtn danger" data-act="delete" ${rec ? "" : "hidden"}>Delete</button>
+        </div>`;
+      el.addEventListener("click", e => {
+        const act = e.target.dataset && e.target.dataset.act;
+        if (act === "save") saveSlot(i);
+        else if (act === "load") loadSlot(i);
+        else if (act === "export") exportSlot(i);
+        else if (act === "delete") deleteSlot(i);
+        else { currentSlot = i; renderSlots(); }
+      });
+      wrap.appendChild(el);
+    });
+  }
+
+  const changeSlot = dir => {
+    currentSlot = (currentSlot + dir + SLOT_COUNT) % SLOT_COUNT;
+    toast(`Slot ${currentSlot + 1} selected`);
+    renderSlots();
+  };
+
+  document.getElementById("undoLoadBtn").addEventListener("click", () => {
+    if (!undoState) return;
+    try {
+      applyStateBytes(undoState);
+      undoState = null;
+      document.getElementById("undoLoadBtn").disabled = true;
+      toast("Went back to before the last load");
+    } catch (e) { toast("Couldn't undo: " + e.message, true); }
+  });
+
+  const importInput = document.getElementById("importInput");
+  document.getElementById("importBtn").addEventListener("click", () => importInput.click());
+  importInput.addEventListener("change", async () => {
+    const f = importInput.files[0];
+    importInput.value = "";
+    if (!f) return;
+    try {
+      const bytes = new Uint8Array(await f.arrayBuffer());
+      try { undoState = getStateBytes(); } catch (e) { undoState = null; }
+      applyStateBytes(bytes);
+      document.getElementById("undoLoadBtn").disabled = !undoState;
+      toast("State file loaded — save it to a slot to keep it");
+    } catch (e) { toast("Couldn't load that file: " + e.message, true); }
+  });
+
+  // ---------- Gameplay recording (.mp4) ----------
+  const recBtn = document.getElementById("recBtn");
+  const recTimer = document.getElementById("recTimer");
+  const recTime = document.getElementById("recTime");
+  let recorder = null, recChunks = [], recStart = 0, recTick = null, recMime = "";
+
+  const pickMime = () => {
+    const mp4 = [
+      "video/mp4;codecs=avc1.640028,mp4a.40.2",
+      "video/mp4;codecs=avc1.4D401F,mp4a.40.2",
+      "video/mp4;codecs=avc1,mp4a",
+      "video/mp4",
+    ];
+    const webm = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
+    if (typeof MediaRecorder === "undefined") return null;
+    return mp4.find(t => MediaRecorder.isTypeSupported(t)) || webm.find(t => MediaRecorder.isTypeSupported(t)) || null;
+  };
+
+  const fileStamp = () => {
+    const d = new Date(), p = n => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
+  };
+
+  function startRecording() {
+    if (recorder) return;
+    const canvas = document.querySelector("#game canvas");
+    if (!canvas || !gameReady) { toast("Start a game before recording", true); return; }
+    recMime = pickMime();
+    if (!recMime) { toast("This browser can't record video — try Chrome or Edge", true); return; }
+
+    const stream = canvas.captureStream(60);
+    audioTaps.forEach(t => t.node.stream.getAudioTracks().forEach(tr => stream.addTrack(tr)));
+
+    try {
+      recorder = new MediaRecorder(stream, { mimeType: recMime, videoBitsPerSecond: 8_000_000, audioBitsPerSecond: 160_000 });
+    } catch (e) { toast("Couldn't start recording: " + e.message, true); recorder = null; return; }
+
+    recChunks = [];
+    recorder.ondataavailable = e => { if (e.data && e.data.size) recChunks.push(e.data); };
+    recorder.onstop = () => {
+      const isMp4 = recMime.startsWith("video/mp4");
+      const blob = new Blob(recChunks, { type: isMp4 ? "video/mp4" : "video/webm" });
+      const name = (window.EJS_gameName || "gameplay").replace(/[^\w\- ]+/g, "");
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `${name} - ${fileStamp()}.${isMp4 ? "mp4" : "webm"}`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+      toast(isMp4 ? "Recording saved (.mp4)" : "Recording saved as .webm — this browser can't make .mp4", !isMp4);
+      recorder = null;
+    };
+    recorder.start(1000);
+    recStart = Date.now();
+    recBtn.classList.add("recording");
+    recBtn.textContent = "■ Stop";
+    recTimer.hidden = false;
+    recTime.textContent = "0:00";
+    recTick = setInterval(() => {
+      const s = Math.floor((Date.now() - recStart) / 1000);
+      recTime.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+    }, 250);
+    toast(audioTaps.length ? "Recording…" : "Recording (no game audio detected yet)");
+  }
+
+  function stopRecording() {
+    if (!recorder) return;
+    clearInterval(recTick);
+    recBtn.classList.remove("recording");
+    recBtn.textContent = "● Record";
+    recTimer.hidden = true;
+    if (recorder.state !== "inactive") recorder.stop();
+  }
+
+  const toggleRecording = () => (recorder ? stopRecording() : startRecording());
+  recBtn.addEventListener("click", toggleRecording);
+  window.addEventListener("beforeunload", e => {
+    if (recorder) { e.preventDefault(); e.returnValue = ""; }
+  });
+
+  // Keyboard shortcuts
+  window.addEventListener("keydown", e => {
+    if (!gameKey) return;
+    if (e.key === "F9") { e.preventDefault(); toggleRecording(); }
+    else if (e.key === "F2") { e.preventDefault(); saveSlot(currentSlot); }
+    else if (e.key === "F4") { e.preventDefault(); loadSlot(currentSlot); }
+    else if (e.key === "F3") { e.preventDefault(); changeSlot(e.shiftKey ? -1 : 1); }
+  }, true);
+
+  // ---------- Controller: live view + save-state shortcuts ----------
+  const padDot = document.getElementById("padDot");
+  const padName = document.getElementById("padName");
+  const shapes = {};
+  for (let i = 0; i <= 16; i++) shapes[i] = document.getElementById("b" + i);
+
+  const prettyName = id => /xbox|045e|xinput/i.test(id)
+    ? "Xbox controller connected"
+    : "Controller connected: " + id.replace(/\(.*?\)/g, "").trim().slice(0, 40);
+  const firstPad = () => [...(navigator.getGamepads ? navigator.getGamepads() : [])].find(Boolean) || null;
+
+  const prev = { l3: false, r3: false, rsx: 0 };
+  const poll = () => {
+    const gp = firstPad();
+    if (gp) {
+      padDot.classList.add("on");
+      padName.textContent = prettyName(gp.id);
+      const ax = gp.axes || [];
+      const pressed = i => !!(gp.buttons[i] && (gp.buttons[i].pressed || gp.buttons[i].value > 0.5));
+
+      // Live diagram (launcher screen)
+      for (let i = 0; i <= 16; i++) {
+        const el = shapes[i];
+        if (!el) continue;
+        let on = pressed(i);
+        if (i === 12) on = on || ax[1] < -0.5;
+        if (i === 13) on = on || ax[1] > 0.5;
+        if (i === 14) on = on || ax[0] < -0.5;
+        if (i === 15) on = on || ax[0] > 0.5;
+        el.classList.toggle("lit", on);
+      }
+
+      // GameCube / Wii library navigation (desktop app)
+      if (window.__swPad && window.__swPad.active()) {
+        const dirs = {
+          up: pressed(12) || ax[1] < -0.6, down: pressed(13) || ax[1] > 0.6,
+          left: pressed(14) || ax[0] < -0.6, right: pressed(15) || ax[0] > 0.6,
+        };
+        const now = performance.now();
+        const held = Object.keys(dirs).find(d => dirs[d]);
+        if (held) {
+          if (held !== prev.navDir) { window.__swPad.nav(held); prev.navAt = now + 250; }
+          else if (now > prev.navAt) { window.__swPad.nav(held); prev.navAt = now + 110; }
+        }
+        prev.navDir = held || null;
+        const a = pressed(0);
+        if (a && !prev.navA && document.activeElement && document.activeElement.classList.contains("sw-tile")) {
+          document.activeElement.click();
+        }
+        prev.navA = a;
+      }
+
+      // Save-state shortcuts (in game)
+      if (gameKey && gameReady) {
+        const r3 = pressed(11), l3 = pressed(10);
+        if (r3 && !prev.r3) saveSlot(currentSlot);
+        if (l3 && !prev.l3) loadSlot(currentSlot);
+        prev.r3 = r3; prev.l3 = l3;
+        if (window.EJS_core === "n64") {
+          // N64: View + D-pad left/right = slot, View + D-pad down = record
+          const view = pressed(8);
+          const vl = view && pressed(14), vr = view && pressed(15), vd = view && pressed(13);
+          if (vl && !prev.vl) changeSlot(-1);
+          if (vr && !prev.vr) changeSlot(1);
+          if (vd && !prev.vd) toggleRecording();
+          prev.vl = vl; prev.vr = vr; prev.vd = vd;
+        } else {
+          const x = ax[2] || 0;
+          const dir = x > 0.7 ? 1 : x < -0.7 ? -1 : 0;
+          if (dir && dir !== prev.rsx) changeSlot(dir);
+          prev.rsx = dir;
+
+          // Hold right stick down for 1 second to start/stop recording
+          const down = (ax[3] || 0) > 0.7;
+          if (down) {
+            if (!prev.rsDownAt) prev.rsDownAt = performance.now();
+            else if (!prev.rsDownFired && performance.now() - prev.rsDownAt > 1000) {
+              prev.rsDownFired = true;
+              toggleRecording();
+            }
+          } else { prev.rsDownAt = 0; prev.rsDownFired = false; }
+        }
+      }
+    } else {
+      padDot.classList.remove("on");
+      padName.textContent = "No controller — press any button on your Xbox controller";
+    }
+    requestAnimationFrame(poll);
+  };
+  requestAnimationFrame(poll);
+
+  // ---------- File handling ----------
+  const drop = document.getElementById("drop");
+  const fileInput = document.getElementById("fileInput");
+  const msg = document.getElementById("msg");
+
+  document.getElementById("pickBtn").addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", () => fileInput.files[0] && startGame(fileInput.files[0]));
+  ["dragenter", "dragover"].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.add("over"); }));
+  ["dragleave", "drop"].forEach(t => drop.addEventListener(t, e => { e.preventDefault(); drop.classList.remove("over"); }));
+  drop.addEventListener("drop", e => { const f = e.dataTransfer.files[0]; if (f) startGame(f); });
+  window.addEventListener("dragover", e => e.preventDefault());
+  window.addEventListener("drop", e => {
+    e.preventDefault();
+    if (!e.target.closest || !e.target.closest("#drop")) { const f = e.dataTransfer.files[0]; if (f) startGame(f); }
+  });
+
+  // ---------- RetroPixels' own emulators ----------
+  // NES, SNES, Game Boy / Color, Game Boy Advance, Atari 2600 / 7800 and Genesis run on RetroPixels' own code
+  // (the files in emu/). Nintendo 64 still uses EmulatorJS until its replacement is finished.
+  const OWN = {
+    nes: ["emu/cpu6502.js", "emu/nes.js"],
+    gb: ["emu/gb.js"],
+    atari2600: ["emu/cpu6502.js", "emu/atari2600.js"],
+    atari7800: ["emu/cpu6502.js", "emu/atari2600.js", "emu/atari7800.js"],
+    segaMD: ["emu/m68k.js", "emu/z80.js", "emu/ym2612.js", "emu/genesis.js"],
+    gba: ["emu/arm7.js", "emu/gba.js"],
+    snes: ["emu/w65816.js", "emu/spc700.js", "emu/sdsp.js", "emu/snes.js"],
+  };
+  const loadedScripts = {};
+  const loadScript = src => loadedScripts[src] || (loadedScripts[src] = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = src; s.onload = resolve;
+    s.onerror = () => reject(new Error("Couldn't load RetroPixels' emulator (" + src + ")."));
+    document.body.appendChild(s);
+  }));
+
+  // Battery saves (the cartridge's own save memory) for RetroPixels' emulators.
+  const sramDb = new Promise((resolve, reject) => {
+    const r = indexedDB.open("retropixels-sram", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("sram");
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+  const sramOp = (mode, fn) => sramDb.then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction("sram", mode);
+    const r = fn(tx.objectStore("sram"));
+    tx.oncomplete = () => resolve(r && r.result);
+    tx.onerror = () => reject(tx.error);
+  }));
+
+  // A small .zip reader (stored and deflated files), so zipped games open directly.
+  async function readZip(u8) {
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    let eocd = -1;
+    for (let i = u8.length - 22; i >= Math.max(0, u8.length - 65557); i--) if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+    if (eocd < 0) throw new Error("That .zip file looks damaged.");
+    const count = dv.getUint16(eocd + 10, true);
+    let p = dv.getUint32(eocd + 16, true);
+    const entries = [];
+    for (let n = 0; n < count && p + 46 <= u8.length && dv.getUint32(p, true) === 0x02014b50; n++) {
+      const method = dv.getUint16(p + 10, true), csize = dv.getUint32(p + 20, true), size = dv.getUint32(p + 24, true);
+      const nlen = dv.getUint16(p + 28, true), xlen = dv.getUint16(p + 30, true), clen = dv.getUint16(p + 32, true);
+      const off = dv.getUint32(p + 42, true);
+      const name = new TextDecoder().decode(u8.subarray(p + 46, p + 46 + nlen));
+      p += 46 + nlen + xlen + clen;
+      if (!name.endsWith("/")) entries.push({ name, method, csize, size, off });
+    }
+    return {
+      entries,
+      async extract(e) {
+        const start = e.off + 30 + dv.getUint16(e.off + 26, true) + dv.getUint16(e.off + 28, true);
+        const data = u8.subarray(start, start + e.csize);
+        if (e.method === 0) return data.slice();
+        if (e.method !== 8) throw new Error("That .zip uses a kind of compression RetroPixels can't open. Unzip it first.");
+        const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+        return new Uint8Array(await new Response(stream).arrayBuffer());
+      },
+    };
+  }
+
+  // Which system a .bin file is for, when no system is picked.
+  function guessBin(u8) {
+    if (u8.length > 128 && String.fromCharCode(...u8.subarray(1, 10)) === "ATARI7800") return "atari7800";
+    if (u8.length > 0x104 && String.fromCharCode(...u8.subarray(0x100, 0x104)) === "SEGA") return "segaMD";
+    return u8.length <= 65536 ? "atari2600" : "segaMD";
+  }
+  const BIN_SYSTEMS = ["segaMD", "atari2600", "atari7800"];
+
+  let player = null, ownGame = null;
+  async function startOwn(core, rom, name) {
+    ownGame = { core, rom, name };
+    const gameEl = document.getElementById("game");
+    gameEl.innerHTML = '<p style="padding:24px" class="muted">Starting…</p>';
+    try {
+      for (const s of ["emu/host.js", ...OWN[core]]) await loadScript(s);
+      const sram = await sramOp("readonly", s => s.get(gameKey)).catch(() => null);
+      player = new window.RPPlayer({
+        container: gameEl, system: core, name, sram: sram || null,
+        onSram: data => sramOp("readwrite", s => s.put(data, gameKey)).catch(() => {}),
+      });
+      await player.start(rom);
+    } catch (e) {
+      gameEl.innerHTML = `<p style="padding:24px">${esc(e.message)}</p>`;
+      return;
+    }
+    // The save-state, thumbnail and recording code talks to this.
+    window.EJS_emulator = { gameManager: {
+      getState: () => player.saveState(),
+      loadState: b => player.loadState(b),
+      screenshot: () => player.screenshotPNG(),
+    } };
+    gameReady = true;
+    document.getElementById("sramTools").hidden = !player.core.getSRAM();
+    // Sound can only start after a click or key press in some browsers.
+    const wake = () => { const c = player.audio && player.audio.ctx; if (c && c.state === "suspended") c.resume().catch(() => {}); };
+    window.addEventListener("pointerdown", wake); window.addEventListener("keydown", wake);
+  }
+
+  // Import / export the battery save (e.g. a .srm or .sav from another emulator).
+  document.getElementById("sramExport").addEventListener("click", () => {
+    const s = player && player.core.getSRAM();
+    if (!s) return;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([s.slice()], { type: "application/octet-stream" }));
+    a.download = `${window.EJS_gameName || "game"}.sav`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  });
+  const sramInput = document.getElementById("sramInput");
+  document.getElementById("sramImport").addEventListener("click", () => sramInput.click());
+  sramInput.addEventListener("change", async () => {
+    const f = sramInput.files[0];
+    sramInput.value = "";
+    if (!f || !player) return;
+    if (!confirm("Replace this game's battery save with that file? The game will restart.")) return;
+    const data = new Uint8Array(await f.arrayBuffer());
+    await sramOp("readwrite", s => s.put(data, gameKey));
+    player.destroy();
+    toast("Battery save imported — game restarted");
+    startOwn(ownGame.core, ownGame.rom, ownGame.name);
+  });
+
+  function startEJS(core, file, name) {
+    window.EJS_player = "#game";
+    window.EJS_core = core;
+    window.EJS_gameName = name;
+    window.EJS_gameUrl = URL.createObjectURL(file);
+    window.EJS_pathtodata = "https://cdn.emulatorjs.org/stable/data/";
+    window.EJS_defaultControls = buildControls(core);
+    window.EJS_startOnLoaded = true;
+    window.EJS_color = "#107c10";
+    window.EJS_volume = 0.7;
+    window.EJS_onGameStart = () => { gameReady = true; };
+
+    const s = document.createElement("script");
+    s.src = "https://cdn.emulatorjs.org/stable/data/loader.js";
+    s.onerror = () => {
+      document.getElementById("game").innerHTML =
+        '<p style="padding:24px">Couldn\'t load the emulator engine. Check your internet connection and reload the page.</p>';
+    };
+    document.body.appendChild(s);
+
+    // Safety net in case the start callback isn't fired by this emulator version.
+    const readyCheck = setInterval(() => {
+      if (gameReady) return clearInterval(readyCheck);
+      const gm = emu();
+      if (gm && typeof gm.getState === "function") { gameReady = true; clearInterval(readyCheck); }
+    }, 1000);
+  }
+
+  let started = false;
+  async function startGame(file) {
+    if (started) return;
+    const fail = text => { msg.textContent = text; msg.style.color = "var(--warn)"; };
+    const ext = (file.name.split(".").pop() || "").toLowerCase();
+    if (["iso", "gcm", "ciso", "wbfs", "rvz", "wia", "gcz", "wad"].includes(ext)) {
+      if (DESKTOP) { showTab(["wbfs", "wad"].includes(ext) ? "wii" : "gc"); toast("Those games play from this tab — add their folder if they aren't listed"); return; }
+      return fail(`"${file.name}" looks like a GameCube or Wii game. Those need the RetroPixels desktop app.`);
+    }
+    let core = coreForExt(ext), rom = null;
+    try {
+      if (ext === "zip") {
+        // Look inside to find the system.
+        const z = await readZip(new Uint8Array(await file.arrayBuffer()));
+        const inner = z.entries.map(e => ({ e, x: (e.name.split(".").pop() || "").toLowerCase() }))
+          .filter(i => coreForExt(i.x) || i.x === "bin").sort((a, b) => b.e.size - a.e.size)[0];
+        if (inner) {
+          core = coreForExt(inner.x);
+          if (!core || OWN[core]) {
+            rom = await z.extract(inner.e);
+            if (!core) core = BIN_SYSTEMS.includes(selectedCore) ? selectedCore : guessBin(rom);
+          }
+          if (core && !OWN[core]) rom = null; // EmulatorJS opens the .zip itself
+        } else core = selectedCore;
+      } else if (ext === "bin") {
+        rom = new Uint8Array(await file.arrayBuffer());
+        core = BIN_SYSTEMS.includes(selectedCore) ? selectedCore : guessBin(rom);
+      }
+    } catch (e) { return fail(`Couldn't open "${file.name}": ${e.message}`); }
+    if (!core) core = selectedCore;
+    if (!core) return fail(`Couldn't tell which system "${file.name}" is for. Pick a system above, then load it again.`);
+    if (started) return;
+    started = true;
+    const name = file.name.replace(/\.[^.]+$/, "");
+    // RetroPixels' emulators keep their save states apart from the old EmulatorJS ones.
+    gameKey = OWN[core] ? `rp:${core}:${name}` : `${core}:${name}`;
+    window.EJS_gameName = name;
+
+    launcherEl.hidden = true;
+    recTab.hidden = true;
+    gcTab.hidden = true;
+    tabsEl.hidden = true;
+    document.getElementById("swNow").hidden = true;
+    document.getElementById("playerWrap").style.display = "block";
+    document.getElementById("nowPlaying").textContent = name;
+    document.getElementById("nowSystem").textContent = "· " + SYSTEMS[core].label;
+    document.getElementById("game").classList.toggle("gba", core === "gba");
+    renderSlots();
+
+    if (OWN[core]) startOwn(core, rom || new Uint8Array(await file.arrayBuffer()), name);
+    else startEJS(core, file, name);
+  }
+
+  document.getElementById("backBtn").addEventListener("click", () => {
+    if (recorder && !confirm("You're recording. Stop and discard the recording?")) return;
+    location.reload();
+  });
+  document.getElementById("fsBtn").addEventListener("click", () => {
+    const el = document.getElementById("game");
+    (el.requestFullscreen || el.webkitRequestFullscreen).call(el);
+  });
+})();
+</script>
+</body>
+</html>
