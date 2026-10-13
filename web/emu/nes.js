@@ -657,12 +657,14 @@
     constructor(nes) {
       this.nes = nes;
       this.vram = new Uint8Array(0x1000);
-      this.palRam = new Uint8Array(32);
+      // Palette RAM isn't cleared at power; these are the values a typical console wakes up with.
+      this.palRam = new Uint8Array([0x09, 0x01, 0x00, 0x01, 0x00, 0x02, 0x02, 0x0d, 0x08, 0x10, 0x08, 0x24, 0x00, 0x00, 0x04, 0x2c,
+        0x09, 0x01, 0x34, 0x03, 0x00, 0x04, 0x00, 0x14, 0x08, 0x3a, 0x00, 0x02, 0x00, 0x20, 0x2c, 0x08]);
       this.oam = new Uint8Array(256);
       this.screen = new Uint32Array(256 * 240);
       this.ctrl = 0; this.mask = 0; this.status = 0; this.oamAddr = 0;
       this.v = 0; this.t = 0; this.x = 0; this.w = 0; this.buffer = 0; this.openBus = 0;
-      this.line = 0; this.dot = 0; this.odd = false; this.frame = 0; this.nmiOut = false;
+      this.line = 0; this.dot = 0; this.odd = false; this.frame = 0; this.nmiOut = false; this.ticks = 0; this.nmiRise = -1;
       // background pipeline
       this.ntByte = 0; this.atByte = 0; this.ptLo = 0; this.ptHi = 0;
       this.bgLo = 0; this.bgHi = 0; this.atLo = 0; this.atHi = 0; this.atLatchLo = 0; this.atLatchHi = 0;
@@ -670,6 +672,7 @@
       this.spCount = 0; this.spX = new Uint8Array(8); this.spAttr = new Uint8Array(8);
       this.spLo = new Uint8Array(8); this.spHi = new Uint8Array(8); this.spZero = false;
       this.nextSp = new Uint8Array(32); this.nextCount = 0; this.nextZero = false;
+      this.spLoN = new Uint8Array(8); this.spHiN = new Uint8Array(8); this.ovfDot = -1;
       this.frameDone = false;
     }
     get rendering() { return (this.mask & 0x18) !== 0; }
@@ -680,6 +683,7 @@
       const m = this.nes.mapper;
       a &= 0x3fff;
       if (a < 0x2000) return m.ppuRead(a);
+      if (m.ppuAddr && this.fetch) m.ppuAddr(a); // chips watching PPU A12 see nametable fetches too
       if (a < 0x3f00) return m.ntRead ? m.ntRead(a & 0xfff) : this.vram[m.ntIndex(a)];
       return this.palRam[this.palIndex(a)];
     }
@@ -742,7 +746,9 @@
     }
     updateNmi() {
       const out = !!(this.ctrl & 0x80) && !!(this.status & 0x80);
-      if (out && !this.nmiOut) this.nes.cpu.nmiPending = true;
+      if (out && !this.nmiOut) { this.nes.cpu.nmiPending = true; this.nmiRise = this.ticks; }
+      // The CPU only sees the NMI line when it samples it: a pulse that ends before then is missed.
+      if (!out && this.nmiOut && this.nmiRise > this.nes.lastPoll) this.nes.cpu.nmiPending = false;
       // Turning NMIs off right as vblank starts cancels that NMI.
       if (!out && this.nmiOut && this.line === 241 && this.dot <= 3) this.nes.cpu.nmiPending = false;
       this.nmiOut = out;
@@ -768,7 +774,7 @@
           this.atByte = (at >> (((v >> 4) & 4) | (v & 2))) & 3;
           break;
         }
-        case 5: this.ptLo = this.read(((this.ctrl & 0x10) << 8) + this.ntByte * 16 + ((this.v >> 12) & 7)); break;
+        case 4: this.ptLo = this.read(((this.ctrl & 0x10) << 8) + this.ntByte * 16 + ((this.v >> 12) & 7)); break;
         case 7: this.ptHi = this.read(((this.ctrl & 0x10) << 8) + this.ntByte * 16 + ((this.v >> 12) & 7) + 8); break;
         case 0: this.incX(); break;
       }
@@ -783,19 +789,32 @@
       this.atLo = ((this.atLo << 1) | this.atLatchLo) & 0xff; this.atHi = ((this.atHi << 1) | this.atLatchHi) & 0xff;
     }
 
-    // Find sprites on the next line (done in one go at the end of the line).
+    // Find sprites for the next line. Done in one go when evaluation starts (dot 65), but the
+    // overflow flag is raised at the dot the hardware would find it, including the chip's bug:
+    // after 8 sprites it steps through OAM diagonally, so overflow detection is unreliable.
     evalSprites() {
-      const h = this.ctrl & 0x20 ? 16 : 8, next = this.line === 261 ? 0 : this.line + 1;
-      let n = 0; this.nextZero = false;
-      for (let i = 0; i < 64; i++) {
-        const y = this.oam[i * 4];
-        const row = next - y - 1;
-        if (row >= 0 && row < h) {
-          if (n < 8) { this.nextSp.set(this.oam.subarray(i * 4, i * 4 + 4), n * 4); if (i === 0) this.nextZero = true; n++; }
-          else { this.status |= 0x20; break; }
+      const h = this.ctrl & 0x20 ? 16 : 8, next = this.line + 1, oam = this.oam;
+      let n = 0, found = 0, dot = 65, m = 0;
+      this.nextZero = false; this.ovfDot = -1;
+      if (this.line < 240) {
+        while (n < 64 && dot < 256) {
+          if (found < 8) {
+            const row = next - oam[n * 4] - 1;
+            dot += 2;
+            if (row >= 0 && row < h) {
+              this.nextSp.set(oam.subarray(n * 4, n * 4 + 4), found * 4);
+              if (n === 0) this.nextZero = true;
+              found++; dot += 6;
+            }
+            n++;
+          } else {
+            const row = next - oam[n * 4 + m] - 1;
+            if (row >= 0 && row < h) { this.ovfDot = dot + 1; break; }
+            dot += 2; n++; m = (m + 1) & 3;
+          }
         }
       }
-      this.nextCount = n;
+      this.nextCount = found;
     }
     // Pattern fetches for the next line's sprites (dots 257-320; done per slot so
     // cartridge chips watching the PPU address bus see the right sequence).
@@ -823,12 +842,10 @@
         if (render) {
           if ((dot >= 2 && dot <= 257) || (dot >= 322 && dot <= 337)) this.shift();
           if ((dot >= 1 && dot <= 256) || (dot >= 321 && dot <= 336)) this.bgFetch();
+          if (dot === 65) this.evalSprites();
+          else if (dot === this.ovfDot && line < 240) this.status |= 0x20;
           if (dot === 256) this.incY();
-          else if (dot === 257) {
-            this.v = (this.v & ~0x41f) | (this.t & 0x41f);
-            this.evalSprites();
-            this.spLoN = this.spLoN || new Uint8Array(8); this.spHiN = this.spHiN || new Uint8Array(8);
-          }
+          else if (dot === 257) this.v = (this.v & ~0x41f) | (this.t & 0x41f);
           if (dot >= 257 && dot <= 320 && ((dot - 257) & 7) === 3) this.spriteFetch((dot - 257) >> 3);
           if (line === 261 && dot >= 280 && dot <= 304) this.v = (this.v & ~0x7be0) | (this.t & 0x7be0);
           if (dot === 337 || dot === 339) this.read(0x2000 | (this.v & 0xfff)); // garbage nametable fetches
@@ -853,7 +870,7 @@
       }
       // advance
       if (line === 261 && dot === 338) this.renderAtSkip = render;
-      this.dot++;
+      this.dot++; this.ticks++;
       if (line === 261 && this.dot === 340 && this.odd && this.renderAtSkip) this.dot = 341; // skipped dot on odd frames
       if (this.dot > 340) {
         this.dot = 0; this.line++;
@@ -889,10 +906,10 @@
     saveState() {
       const o = {};
       for (const k of ["ctrl", "mask", "status", "oamAddr", "v", "t", "x", "w", "buffer", "openBus", "line", "dot", "odd", "frame",
-        "nmiOut", "ntByte", "atByte", "ptLo", "ptHi", "bgLo", "bgHi", "atLo", "atHi", "atLatchLo", "atLatchHi", "spCount", "spZero",
-        "nextCount", "nextZero", "suppressNmi"]) o[k] = this[k];
+        "nmiOut", "ticks", "nmiRise", "ntByte", "atByte", "ptLo", "ptHi", "bgLo", "bgHi", "atLo", "atHi", "atLatchLo", "atLatchHi", "spCount", "spZero",
+        "nextCount", "nextZero", "suppressNmi", "ovfDot"]) o[k] = this[k];
       o.vram = this.vram; o.palRam = this.palRam; o.oam = this.oam; o.spX = this.spX; o.spAttr = this.spAttr;
-      o.spLo = this.spLo; o.spHi = this.spHi; o.nextSp = this.nextSp;
+      o.spLo = this.spLo; o.spHi = this.spHi; o.nextSp = this.nextSp; o.spLoN = this.spLoN; o.spHiN = this.spHiN;
       return o;
     }
     loadState(o) {
@@ -1006,13 +1023,12 @@
       }
     }
     restart() { this.addr = this.addr0; this.remain = this.len0; }
-    fill() {
-      if (this.buffer < 0 && this.remain > 0) {
-        this.buffer = this.apu.nes.peek(this.addr);
-        this.apu.nes.stall += 4; // the CPU pauses while the sample byte is fetched
-        this.addr = this.addr === 0xffff ? 0x8000 : this.addr + 1;
-        if (--this.remain === 0) { if (this.loop) this.restart(); else if (this.irqOn) this.irq = true; }
-      }
+    // Ask for the next sample byte: the machine pauses the CPU at its next read cycle to fetch it.
+    fill() { if (this.buffer < 0 && this.remain > 0) this.apu.nes.dmcReq = true; }
+    take(v) {
+      this.buffer = v;
+      this.addr = this.addr === 0xffff ? 0x8000 : this.addr + 1;
+      if (--this.remain === 0) { if (this.loop) this.restart(); else if (this.irqOn) this.irq = true; }
     }
     clockTimer() {
       if (this.timer > 0) { this.timer--; return; }
@@ -1055,11 +1071,20 @@
         this.dmc.irq = false;
         if (v & 16) { if (this.dmc.remain === 0) { this.dmc.restart(); this.dmc.fill(); } } else this.dmc.remain = 0;
       } else if (a === 0x4017) {
+        this.last4017 = v;
         this.frameMode = v >> 7; this.irqInhibit = !!(v & 0x40);
         if (this.irqInhibit) this.frameIrq = false;
         // The new mode takes effect 3 or 4 CPU cycles later, depending on alignment.
         this.frameReset = this.odd ? 5 : 4; // 3–4 cycle hardware delay, counted from the next tick
       }
+    }
+    // Power and the reset button: sound off, IRQ flags clear, and $4017 written again
+    // ($00 at power, the last value at reset).
+    reset(power) {
+      this.write(0x4015, 0); this.frameIrq = false; this.dmc.irq = false;
+      this.write(0x4017, power ? 0 : (this.last4017 || 0));
+      // At power the write lands a couple of cycles before the CPU starts its reset sequence.
+      if (power) { this.tick(); this.tick(); }
     }
     readStatus() {
       const v = (this.p1.len ? 1 : 0) | (this.p2.len ? 2 : 0) | (this.tri.len ? 4 : 0) | (this.noise.len ? 8 : 0) |
@@ -1109,12 +1134,13 @@
     saveState() {
       const pack = (o) => { const r = {}; for (const k in o) { const v = o[k]; if (typeof v !== "object" || v === null || ArrayBuffer.isView(v)) r[k] = v; else if (v instanceof Envelope) r[k] = Object.assign({}, v); } return r; };
       return { p1: pack(this.p1), p2: pack(this.p2), tri: pack(this.tri), noise: pack(this.noise), dmc: Object.assign({}, this.dmc, { apu: undefined }),
-        frameMode: this.frameMode, irqInhibit: this.irqInhibit, frameIrq: this.frameIrq, frameCycle: this.frameCycle, odd: this.odd, frameReset: this.frameReset };
+        frameMode: this.frameMode, irqInhibit: this.irqInhibit, frameIrq: this.frameIrq, frameCycle: this.frameCycle, odd: this.odd, frameReset: this.frameReset,
+        last4017: this.last4017 || 0 };
     }
     loadState(o) {
       for (const ch of ["p1", "p2", "tri", "noise"]) for (const k in o[ch]) { if (k === "env") Object.assign(this[ch].env, o[ch].env); else this[ch][k] = o[ch][k]; }
       for (const k in o.dmc) if (k !== "apu" && o.dmc[k] !== undefined) this.dmc[k] = o.dmc[k];
-      Object.assign(this, { frameMode: o.frameMode, irqInhibit: o.irqInhibit, frameIrq: o.frameIrq, frameCycle: o.frameCycle, odd: o.odd, frameReset: o.frameReset || 0 });
+      Object.assign(this, { frameMode: o.frameMode, irqInhibit: o.irqInhibit, frameIrq: o.frameIrq, frameCycle: o.frameCycle, odd: o.odd, frameReset: o.frameReset || 0, last4017: o.last4017 || 0 });
     }
   }
 
@@ -1140,11 +1166,12 @@
       this.ppu.vram = cart.vram;
       this.apu = new APU(this, opts.sampleRate || 48000);
       this.pads = [0, 0]; this.padShift = [0, 0]; this.strobe = 0;
-      this.stall = 0; this.dmaPage = -1;
+      this.stall = 0; this.dmaPage = -1; this.lastPoll = 0;
       this.openBus = 0;
       const self = this;
+      this.dmcReq = false;
       this.cpu = new global.RPCPU6502({
-        read(a) { self.clock(); const v = self.cpuRead(a); self.openBus = v; return v; },
+        read(a) { if (self.dmcReq) self.dmcDma(a); self.clock(); const v = self.cpuRead(a); self.openBus = v; return v; },
         write(a, v) { self.clock(); self.openBus = v; self.cpuWrite(a, v); },
       }, { decimal: false, machinePolls: true });
       this.width = 256; this.height = 240; this.fps = FPS;
@@ -1154,13 +1181,14 @@
       }
       this.apu.ext = this.mapper.audio || null; // expansion sound on the cartridge
       this.cpu.s = 0; // the stack pointer powers up at 0; the reset sequence moves it to $FD
+      this.apu.reset(true);
       this.cpu.reset();
     }
     // Advance everything by one CPU cycle.
     clock() {
       const p = this.ppu;
       // The CPU samples its interrupt lines one PPU dot into each cycle.
-      p.tick(); this.cpu.poll(); p.tick(); p.tick();
+      p.tick(); this.cpu.poll(); this.lastPoll = p.ticks; p.tick(); p.tick();
       this.apu.tick();
       this.mapper.cpuClock();
       this.cpu.irqLine = this.apu.irq || this.mapper.irq;
@@ -1196,12 +1224,31 @@
       if (a < 0x4018) { this.apu.write(a, v); return; }
       this.mapper.cpuWrite(a, v);
     }
+    // Sample fetch for the DMC: the CPU is halted on a read cycle and keeps repeating that read
+    // (which matters for $2007 and the controller ports), then the sample byte is fetched.
+    dmcDma(a) {
+      this.dmcReq = false;
+      const d = this.apu.dmc;
+      if (d.buffer >= 0 || d.remain <= 0) return;
+      const pad = a === 0x4016 || a === 0x4017;
+      const stalls = this.apu.odd ? 3 : 2; // halt, dummy, and an alignment cycle when needed
+      for (let i = 0; i < stalls; i++) {
+        this.clock(); this.cpu.cycles++;
+        if (!pad || i === 0) this.openBus = this.cpuRead(a); // the controller sees one long read
+      }
+      this.clock(); this.cpu.cycles++;
+      d.take(this.peek(d.addr));
+    }
     // Sprite DMA: the CPU stops while 256 bytes are copied to the PPU.
     doDma() {
       const page = this.dmaPage << 8; this.dmaPage = -1;
       this.clock(); this.cpu.cycles++;
       if (this.cpu.cycles & 1) { this.clock(); this.cpu.cycles++; }
       for (let i = 0; i < 256; i++) {
+        if (this.dmcReq) { // a sample fetch slips in between, costing two cycles
+          this.dmcReq = false; const d = this.apu.dmc;
+          if (d.buffer < 0 && d.remain > 0) { this.clock(); this.cpu.cycles++; d.take(this.peek(d.addr)); this.clock(); this.cpu.cycles++; }
+        }
         this.clock(); this.cpu.cycles++; const v = this.cpuRead(page | i);
         this.clock(); this.cpu.cycles++; this.ppu.cpuWrite(4, v);
       }
@@ -1222,15 +1269,15 @@
     }
     get screen() { return this.ppu.screen; }
     takeAudio() { const a = this.apu.out.slice(0, this.apu.outLen); this.apu.outLen = 0; return a; }
-    reset() { if (this.mapper.reset) this.mapper.reset(); this.cpu.reset(); this.apu.write(0x4015, 0); }
+    reset() { if (this.mapper.reset) this.mapper.reset(); this.apu.reset(false); this.cpu.reset(); }
     getSRAM() { return this.battery ? (this.mapper.batteryData ? this.mapper.batteryData() : this.mapper.prgRam) : null; }
     saveState() {
       return { v: 1, cpu: this.cpu.saveState(), ram: this.ram, ppu: this.ppu.saveState(), apu: this.apu.saveState(),
-        mapper: this.mapper.saveState(), strobe: this.strobe, padShift: this.padShift.slice() };
+        mapper: this.mapper.saveState(), strobe: this.strobe, padShift: this.padShift.slice(), dmcReq: this.dmcReq };
     }
     loadState(s) {
       this.cpu.loadState(s.cpu); this.ram.set(s.ram); this.ppu.loadState(s.ppu); this.apu.loadState(s.apu);
-      this.mapper.loadState(s.mapper); this.strobe = s.strobe; this.padShift = s.padShift.slice();
+      this.mapper.loadState(s.mapper); this.strobe = s.strobe; this.padShift = s.padShift.slice(); this.dmcReq = !!s.dmcReq;
     }
   }
   NES.info = { system: "nes", name: "NES", width: 256, height: 240, aspect: 4 / 3, fps: FPS, players: 2,
