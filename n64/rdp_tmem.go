@@ -25,6 +25,7 @@ const (
 	tkCI4
 	tkPal8 // 8-bit index through the palette
 	tkPal4
+	tkPal16 // 16/32-bit tile with TLUT on: the upper byte is the index
 )
 
 // rdpTileX is a tile descriptor turned into what the sampler needs.
@@ -78,6 +79,9 @@ func (t *rdpTile) prepare(x *rdpTileX, tlut bool) {
 		}
 	default:
 		x.kind = tkRGBA32
+	}
+	if tlut && t.Size >= 2 {
+		x.kind = tkPal16
 	}
 	x.base = t.Tmem * 8
 	x.stride = t.Line * 8
@@ -187,6 +191,8 @@ func (d *RDP) texelAt(x *rdpTileX, s, t int32, tlutIA bool, out *[4]int32) {
 	case tkPal8:
 		i := uint32(tm[((row+uint32(s))^odd)&0x7ff])
 		d.palette(i, tlutIA, out)
+	case tkPal16:
+		d.palette(uint32(tm[((row+uint32(s)*2)^odd)&0x7fe]), tlutIA, out)
 	case tkPal4:
 		v := uint32(tm[((row+uint32(s)>>1)^odd)&0x7ff])
 		if s&1 == 0 {

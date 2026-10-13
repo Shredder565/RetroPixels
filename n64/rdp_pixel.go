@@ -663,9 +663,11 @@ func (d *RDP) drawSpan(y, x0, x1 int32, at *[atN]int32) {
 			switch p.bpp {
 			case 2:
 				ca &^= 1
-				c := uint32(rd[ca])<<8 | uint32(rd[ca+1])
-				rgba16(c, &p.mem)
-				memCvg = (p.mem[3] >> 5) & 7
+				// 5-bit channels come back with their low 3 bits clear
+				c := int32(rd[ca])<<8 | int32(rd[ca+1])
+				p.mem[0], p.mem[1], p.mem[2] = c>>8&0xf8, c>>3&0xf8, c<<2&0xf8
+				memCvg = -(c & 1) & 7
+				p.mem[3] = memCvg << 5
 			case 4:
 				ca &^= 3
 				p.mem[0], p.mem[1], p.mem[2], p.mem[3] = int32(rd[ca]), int32(rd[ca+1]), int32(rd[ca+2]), int32(rd[ca+3])
