@@ -17,13 +17,21 @@
   // ===================================================================
   // VDP (mode 4)
   // ===================================================================
-  // TMS9918 colours (RGB), each channel rounded to the nearest of 0/85/170/255.
-  const TMS_RGB = [0x000000, 0x000000, 0x21c842, 0x5edc78, 0x5455ed, 0x7d76fc, 0xd4524d, 0x42ebf5,
-    0xfc5554, 0xff7978, 0xd4c154, 0xe6ce80, 0x21b03b, 0xc95bba, 0xcccccc, 0xffffff];
-  const TMS_PAL = new Uint32Array(TMS_RGB.map((v) => {
-    const q = (c) => Math.round(c / 85) * 85;
-    return (0xff000000 | (q(v & 255) << 16) | (q((v >> 8) & 255) << 8) | q(v >> 16)) >>> 0;
-  }));
+  // The TMS9918's 16 colours, as RetroPixels shows them with this VDP's own
+  // 6-bit colours (--bbggrr, 2 bits per channel). Several of the original's
+  // neighbouring shades end up on the same colour.
+  const TMS_COLOURS = [
+    0x00, 0x00, // transparent, black
+    0x18, 0x1d, // medium green, light green
+    0x35, 0x35, // dark blue, light blue
+    0x16, 0x3d, // dark red, cyan
+    0x17, 0x17, // medium red, light red
+    0x1a, 0x2b, // dark yellow, light yellow
+    0x18, 0x26, // dark green, magenta
+    0x2a, 0x3f, // grey, white
+  ];
+  const TMS_PAL = new Uint32Array(TMS_COLOURS.map((c) =>
+    (0xff000000 | (((c >> 4) & 3) * 85 << 16) | (((c >> 2) & 3) * 85 << 8) | ((c & 3) * 85)) >>> 0));
 
   class VDP {
     constructor(sms) {
