@@ -1459,7 +1459,7 @@
     gba: ["emu/arm7.js", "emu/gba_gpio.js", "emu/gba.js"],
     snes: ["emu/w65816.js", "emu/spc700.js", "emu/sdsp.js", "emu/snes_sa1.js", "emu/snes_superfx.js", "emu/snes.js", "emu/snes_chips.js", "emu/snes_necdsp.js", "emu/snes_dsp.js", "emu/snes_cx4.js", "emu/snes_sdd1.js", "emu/snes_spc7110.js", "emu/snes_misc.js", "emu/arm7.js", "emu/snes_st018.js"],
     n64: ["emu/n64.js"],
-    arcade: ["emu/z80.js", "emu/i8080.js", "emu/arcade.js", "emu/arcade_invaders.js"],
+    arcade: ["emu/z80.js", "emu/i8080.js", "emu/mcs48.js", "emu/arcade.js", "emu/arcade_invaders.js", "emu/arcade_dkong.js"],
   };
   const loadedScripts = {};
   const loadScript = src => loadedScripts[src] || (loadedScripts[src] = new Promise((resolve, reject) => {
