@@ -16,23 +16,42 @@
 (function (global) {
   const Kit = global.RPSNESChipKit;
 
-  // Probability estimator states: [generator (code length), next on MPS, next on LPS]
-  const EVOLUTION = [
-    [0, 25, 25], [0, 2, 1], [0, 3, 1], [0, 4, 2], [0, 5, 3], [1, 6, 4], [1, 7, 5], [1, 8, 6], [1, 9, 7], [2, 10, 8], [2, 11, 9], [2, 12, 10], [2, 13, 11],
-    [3, 14, 12], [3, 15, 13], [3, 16, 14], [3, 17, 15], [4, 18, 16], [4, 19, 17], [5, 20, 18], [5, 21, 19], [6, 22, 20], [6, 23, 21], [7, 24, 22], [7, 24, 23],
-    [0, 26, 1], [1, 27, 2], [2, 28, 4], [3, 29, 8], [4, 30, 12], [5, 31, 16], [6, 32, 18], [7, 24, 22],
-  ];
+  // Probability estimator: 33 states, each naming the run-length generator it
+  // uses (0-7, longer runs for more predictable bits) and the state that follows
+  // a run of the likely bit (MPS) or a less likely bit (LPS).
+  //   state 0         start: always moves to 25
+  //   states 25-32    warm-up, one per generator; an LPS drops into the main chain
+  //   states 1-24     main chain: generators 0-3 four states each, 4-7 two each;
+  //                   an MPS run moves one state up, an LPS one state down
+  // Each entry: [generator, next after MPS, next after LPS].
+  const EVOLUTION = (() => {
+    const t = [[0, 25, 25]];
+    const perGen = [4, 4, 4, 4, 2, 2, 2, 2];
+    perGen.forEach((n, g) => { for (let i = 0; i < n; i++) t.push([g]); });
+    for (let st = 1; st <= 24; st++) t[st].push(Math.min(24, st + 1), Math.max(1, st - 1));
+    const warmDrop = [1, 2, 4, 8, 12, 16, 18, 22];
+    for (let g = 0; g < 8; g++) t.push([g, g === 7 ? 24 : 26 + g, warmDrop[g]]);
+    return t;
+  })();
+  // Neighbour bits that pick the context, per header context mode (bits 4-5):
+  // [mask of bits 5+ of the plane's history, mask of its lowest bits]
+  const NEIGHBOURS = [[0x0e, 1], [0x0c, 1], [0x06, 1], [0x0c, 3]];
 
   class Decompressor {
     // read(addr) gives a ROM byte by SNES address
-    constructor(read) { this.readByte = read; this.mps = new Uint8Array(32); this.state = new Uint8Array(32); this.runMPS = new Int32Array(8); this.runLPS = new Uint8Array(8); this.prev = new Uint16Array(8); }
+    constructor(read) {
+      this.readByte = read;
+      this.mps = new Uint8Array(32); this.state = new Uint8Array(32);   // per context
+      this.runMPS = new Int32Array(8); this.runLPS = new Uint8Array(8); // per run-length generator
+      this.prev = new Uint16Array(8);                                   // bits seen so far, per bitplane
+    }
     start(addr) {
       this.addr = addr;
       const head = this.readByte(addr);
       this.planes = head & 0xc0; this.ctxBits = head & 0x30;
       this.cur = head; this.bitPos = 4; // the stream starts after the 4 header bits
       this.mps.fill(0); this.state.fill(0); this.runMPS.fill(0); this.runLPS.fill(0); this.prev.fill(0);
-      this.bitNum = 0; this.plane = 7;
+      this.bitNum = 0; this.plane = 0;
       this.held = -1; // second byte of a bitplane pair waiting to go out
     }
     inBit() {
@@ -40,60 +59,65 @@
       if (++this.bitPos === 8) { this.bitPos = 0; this.addr = (this.addr + 1) & 0xffffff; this.cur = this.readByte(this.addr); }
       return b;
     }
-    // one bit from run-length generator n (codes: "0" = 2^n MPS; "1"+n bits = run then an LPS)
+    // Next bit from run-length generator n. Its code words: "0" means 2^n likely
+    // bits; "1" and n more bits (lowest first) give a shorter run of likely bits
+    // ended by one unlikely bit. Sets endOfRun when this bit finished a code word.
     genBit(n) {
-      if (!this.runMPS[n] && !this.runLPS[n]) {
-        if (!this.inBit()) this.runMPS[n] = 1 << n;
+      const M = this.runMPS, L = this.runLPS;
+      if (M[n] === 0 && L[n] === 0) {
+        if (this.inBit() === 0) M[n] = 1 << n;
         else {
-          let v = 0;
-          for (let i = 0; i < n; i++) v |= this.inBit() << i; // bits arrive in reverse order
-          this.runMPS[n] = ~v & ((1 << n) - 1);
-          this.runLPS[n] = 1;
+          let len = 0;
+          for (let i = 0; i < n; i++) len |= this.inBit() << i;
+          M[n] = (len ^ ((1 << n) - 1)); L[n] = 1;
         }
       }
-      let bit;
-      if (this.runMPS[n]) { bit = 0; this.runMPS[n]--; } else { bit = 1; this.runLPS[n] = 0; }
-      this.endOfRun = !this.runMPS[n] && !this.runLPS[n];
+      const bit = M[n] ? 0 : 1;
+      if (bit) L[n] = 0; else M[n]--;
+      this.endOfRun = M[n] === 0 && L[n] === 0;
       return bit;
     }
+    // Next bit in context ctx: the generator says "likely" (0) or "unlikely" (1);
+    // the context's state only moves when a code word ends.
     probBit(ctx) {
-      const st = this.state[ctx], mps = this.mps[ctx];
-      const bit = this.genBit(EVOLUTION[st][0]);
+      const st = this.state[ctx], mps = this.mps[ctx], e = EVOLUTION[st];
+      const lps = this.genBit(e[0]);
       if (this.endOfRun) {
-        if (bit) { if (st < 2) this.mps[ctx] ^= 1; this.state[ctx] = EVOLUTION[st][2]; }
-        else this.state[ctx] = EVOLUTION[st][1];
+        this.state[ctx] = lps ? e[2] : e[1];
+        if (lps && st < 2) this.mps[ctx] = mps ^ 1; // in the first states an unlikely bit swaps which bit is likely
       }
-      return bit ^ mps;
+      return lps ^ mps;
+    }
+    // Bitplane that bit number n belongs to, per header mode (bits 6-7): 2bpp
+    // alternates two planes; 4bpp and 8bpp alternate a pair of planes and move to
+    // the next pair every 128 bits; Mode 7 cycles all eight.
+    planeOf(n) {
+      switch (this.planes) {
+        case 0x00: return 6 | (n & 1);
+        case 0x40: return ((n >> 6) & 6) | (n & 1);
+        case 0x80: return 4 | ((n >> 6) & 2) | (n & 1);
+        default: return n & 7;
+      }
     }
     modelBit() {
-      switch (this.planes) {
-        case 0x00: this.plane ^= 1; break;
-        case 0x40: this.plane ^= 1; if (!(this.bitNum & 0x7f)) this.plane = (this.plane + 2) & 7; break;
-        case 0x80: this.plane ^= 1; if (!(this.bitNum & 0x7f)) this.plane ^= 2; break;
-        default: this.plane = this.bitNum & 7;
-      }
-      const h = this.prev[this.plane];
-      let ctx = (this.plane & 1) << 4;
-      switch (this.ctxBits) {
-        case 0x00: ctx |= ((h & 0x1c0) >> 5) | (h & 1); break;
-        case 0x10: ctx |= ((h & 0x180) >> 5) | (h & 1); break;
-        case 0x20: ctx |= ((h & 0x0c0) >> 5) | (h & 1); break;
-        default: ctx |= ((h & 0x180) >> 5) | (h & 3);
-      }
+      const plane = this.plane = this.planeOf(this.bitNum);
+      const h = this.prev[plane], nb = NEIGHBOURS[this.ctxBits >> 4];
+      const ctx = ((plane & 1) << 4) | ((h >> 5) & nb[0]) | (h & nb[1]);
       const bit = this.probBit(ctx);
-      this.prev[this.plane] = (h << 1) | bit;
+      this.prev[plane] = (h << 1) | bit;
       this.bitNum++;
       return bit;
     }
     next() {
       if (this.planes === 0xc0) { // Mode 7: 8 bits of one pixel, low bit first
         let v = 0;
-        for (let m = 1; m < 0x100; m <<= 1) if (this.modelBit()) v |= m;
+        for (let k = 0; k < 8; k++) v |= this.modelBit() << k;
         return v;
       }
       if (this.held >= 0) { const v = this.held; this.held = -1; return v; }
+      // two bitplane bytes, their bits interleaved, highest first
       let a = 0, b = 0;
-      for (let m = 0x80; m; m >>= 1) { if (this.modelBit()) a |= m; if (this.modelBit()) b |= m; }
+      for (let k = 7; k >= 0; k--) { a |= this.modelBit() << k; b |= this.modelBit() << k; }
       this.held = b;
       return a;
     }
