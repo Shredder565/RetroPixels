@@ -216,6 +216,9 @@
   #game { width: 100%; aspect-ratio: 4 / 3; max-height: 72vh; background: #000;
     border-radius: 12px; overflow: hidden; }
   #game.gba { aspect-ratio: 3 / 2; }
+  .dip-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px 16px; margin-top: 12px; }
+  .dip { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 14px; }
+  .dip select { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 3px 6px; font: inherit; }
 
   /* Save states */
   #states { margin-top: 16px; }
@@ -309,6 +312,9 @@
       <button class="sys" data-core="atari7800" aria-pressed="false">
         <strong>Atari 7800</strong><small>.a78 .bin</small>
       </button>
+      <button class="sys" data-core="arcade" aria-pressed="false" title="Classic arcade games. Load the game's .zip ROM set (keep it zipped).">
+        <strong>Arcade</strong><small>.zip ROM sets</small>
+      </button>
     </div>
 
 
@@ -320,6 +326,7 @@
         <input type="file" id="fileInput" hidden
                accept=".nes,.fds,.unf,.unif,.sfc,.smc,.fig,.swc,.gb,.gbc,.gba,.agb,.z64,.n64,.v64,.md,.gen,.smd,.sms,.bin,.a26,.a78,.zip">
       </p>
+      <p class="muted" id="sysHint" hidden>Classic arcade games. Load the game's .zip ROM set (keep it zipped).</p>
       <p class="muted" id="msg"></p>
     </div>
 
@@ -486,6 +493,12 @@
     </div>
     <div id="game"></div>
 
+    <details id="arcadeSettings" class="card" style="margin-top:16px" hidden>
+      <summary style="cursor:pointer;font-weight:600">Machine settings (DIP switches)</summary>
+      <div class="dip-list"></div>
+      <p class="muted" style="font-size:13px;margin:10px 0 0">These are the switches on the game's circuit board. Most games read them when they start, so press ↺ Restart after changing one. They're kept for this game.</p>
+    </details>
+
     <section id="states" class="card">
       <div class="states-head">
         <h2 style="margin:0">Save states</h2>
@@ -527,6 +540,7 @@
     sms:       { label: "Master System", exts: ["sms"] },
     atari2600: { label: "Atari 2600",   exts: ["a26"] },
     atari7800: { label: "Atari 7800",   exts: ["a78"] },
+    arcade:    { label: "Arcade",       exts: [] },
   };
   // .bin and .zip are shared by several systems, so those use the system the person clicked.
   const coreForExt = ext => Object.keys(SYSTEMS).find(c => SYSTEMS[c].exts.includes(ext)) || null;
@@ -559,6 +573,7 @@
   const selectCore = core => {
     selectedCore = core;
     sysButtons.forEach(b => b.setAttribute("aria-pressed", String(b.dataset.core === core)));
+    document.getElementById("sysHint").hidden = core !== "arcade";
   };
   sysButtons.forEach(b => b.addEventListener("click", () => {
     selectCore(b.dataset.core);
@@ -1459,6 +1474,7 @@
     gba: ["emu/arm7.js", "emu/gba_gpio.js", "emu/gba.js"],
     snes: ["emu/w65816.js", "emu/spc700.js", "emu/sdsp.js", "emu/snes_sa1.js", "emu/snes_superfx.js", "emu/snes.js", "emu/snes_chips.js", "emu/snes_necdsp.js", "emu/snes_dsp.js", "emu/snes_cx4.js", "emu/snes_sdd1.js", "emu/snes_spc7110.js", "emu/snes_misc.js", "emu/arm7.js", "emu/snes_st018.js"],
     n64: ["emu/n64.js"],
+    arcade: ["emu/z80.js", "emu/arcade.js", "emu/arcade_pacman.js", "emu/arcade_galaxian.js"],
   };
   const loadedScripts = {};
   const loadScript = src => loadedScripts[src] || (loadedScripts[src] = new Promise((resolve, reject) => {
@@ -1533,15 +1549,16 @@
   const BIN_SYSTEMS = ["segaMD", "sms", "atari2600", "atari7800"];
 
   let player = null, ownGame = null;
-  async function startOwn(core, rom, name) {
-    ownGame = { core, rom, name };
+  // coreOpts: extra things a core needs (the arcade core gets the zip's files and the machine's settings)
+  async function startOwn(core, rom, name, coreOpts) {
+    ownGame = { core, rom, name, coreOpts };
     const gameEl = document.getElementById("game");
     gameEl.innerHTML = '<p style="padding:24px" class="muted">Starting…</p>';
     try {
       for (const s of ["emu/host.js", ...OWN[core]]) await loadScript(s);
       const sram = await sramOp("readonly", s => s.get(gameKey)).catch(() => null);
       player = new window.RPPlayer({
-        container: gameEl, system: core, name, sram: sram || null, firmware: await storedFirmware(),
+        container: gameEl, system: core, name, sram: sram || null, firmware: await storedFirmware(), coreOpts,
         onSram: data => sramOp("readwrite", s => s.put(data, gameKey)).catch(() => {}),
       });
       await player.start(rom);
@@ -1559,6 +1576,7 @@
     };
     gameReady = true;
     document.getElementById("sramTools").hidden = !player.core.getSRAM();
+    if (core === "arcade") showArcadeSettings(player.core);
     // Sound can only start after a click or key press in some browsers.
     const wake = () => { const c = player.audio && player.audio.ctx; if (c && c.state === "suspended") c.resume().catch(() => {}); };
     window.addEventListener("pointerdown", wake); window.addEventListener("keydown", wake);
@@ -1586,7 +1604,7 @@
       try { await ownDbOp("firmware", "readwrite", s => s.put(data, need.chip)); }
       catch (x) { toast("Couldn't keep the chip program: " + x.message, true); }
       toast(`${need.chip} program saved — starting the game`);
-      startOwn(ownGame.core, ownGame.rom, ownGame.name);
+      startOwn(ownGame.core, ownGame.rom, ownGame.name, ownGame.coreOpts);
     });
   }
 
@@ -1611,8 +1629,38 @@
     await sramOp("readwrite", s => s.put(data, gameKey));
     player.destroy();
     toast("Battery save imported — game restarted");
-    startOwn(ownGame.core, ownGame.rom, ownGame.name);
+    startOwn(ownGame.core, ownGame.rom, ownGame.name, ownGame.coreOpts);
   });
+
+  // ---------- Arcade ----------
+  // The machine's DIP switches (coins, lives...), kept per game in this browser.
+  const dipKey = id => "rp.dips." + id;
+  function storedDips(id) { try { return JSON.parse(localStorage.getItem(dipKey(id)) || "{}") || {}; } catch (e) { return {}; } }
+  function showArcadeSettings(core) {
+    document.getElementById("nowPlaying").textContent = core.gameTitle;
+    const box = document.getElementById("arcadeSettings"), list = core.dips || [];
+    box.hidden = !list.length;
+    if (!list.length) return;
+    box.querySelector(".dip-list").innerHTML = list.map(d => `<label class="dip"><span>${esc(d.label)}</span>
+      <select data-dip="${esc(d.id)}">${d.options.map((o, i) => `<option value="${i}"${o.value === d.value ? " selected" : ""}>${esc(o.label)}</option>`).join("")}</select></label>`).join("");
+    box.querySelectorAll("select").forEach(sel => sel.addEventListener("change", () => {
+      const d = list.find(x => x.id === sel.dataset.dip), v = d.options[+sel.value].value;
+      core.setDip(d.id, v);
+      const saved = storedDips(core.gameId); saved[d.id] = v;
+      try { localStorage.setItem(dipKey(core.gameId), JSON.stringify(saved)); } catch (e) { /* not kept */ }
+      toast("Setting changed — press ↺ Restart in the game if it doesn't take effect");
+    }));
+  }
+  // Is this zip an arcade ROM set? Looks at the file names and sizes only, then reads the files.
+  async function arcadeSet(z, zipName) {
+    for (const s of OWN.arcade) await loadScript(s);
+    const sizes = new Map(z.entries.map(e => [e.name, { length: e.size }]));
+    const hit = window.RPArcade.identify(sizes, zipName);
+    if (!hit) return null;
+    const files = new Map();
+    for (const e of z.entries) if (e.size <= 4 * 1024 * 1024) files.set(e.name, await z.extract(e));
+    return { files, zipName, dips: storedDips(hit.game.id) };
+  }
 
   let started = false;
   async function startGame(file) {
@@ -1624,14 +1672,20 @@
       return fail(`"${file.name}" looks like a GameCube or Wii game. Those need the RetroPixels desktop app.`);
     }
     if (ext === "7z") return fail(`RetroPixels can't open .7z files. Unzip "${file.name}" first (or zip it as .zip).`);
-    let core = coreForExt(ext), rom = null;
+    let core = coreForExt(ext), rom = null, coreOpts = null;
     try {
       if (ext === "zip") {
         // Look inside to find the system.
         const z = await readZip(new Uint8Array(await file.arrayBuffer()));
         const inner = z.entries.map(e => ({ e, x: (e.name.split(".").pop() || "").toLowerCase() }))
           .filter(i => coreForExt(i.x) || i.x === "bin").sort((a, b) => b.e.size - a.e.size)[0];
-        if (inner) {
+        // Arcade ROM sets: chip files with no console extension (some use .bin), or the Arcade system picked.
+        const consoleFile = z.entries.some(e => coreForExt((e.name.split(".").pop() || "").toLowerCase()));
+        if (selectedCore === "arcade" || !consoleFile) coreOpts = await arcadeSet(z, file.name);
+        if (coreOpts) core = "arcade";
+        else if (selectedCore === "arcade") {
+          return fail(`"${file.name}" isn't an arcade game RetroPixels knows yet. The games it can play are: ${window.RPArcade.supportedText()}. Load the game's .zip ROM set (keep it zipped), named like the set (for example pacman.zip).`);
+        } else if (inner) {
           core = coreForExt(inner.x);
           rom = await z.extract(inner.e);
           if (!core) core = BIN_SYSTEMS.includes(selectedCore) ? selectedCore : guessBin(rom);
@@ -1642,7 +1696,8 @@
       }
     } catch (e) { return fail(`Couldn't open "${file.name}": ${e.message}`); }
     if (!core) core = selectedCore;
-    if (!core) return fail(`Couldn't tell which system "${file.name}" is for. Pick a system above, then load it again.`);
+    if (!core) return fail(`Couldn't tell which system "${file.name}" is for. Pick a system above, then load it again.` +
+      (ext === "zip" && window.RPArcade ? ` If it's an arcade game: the ones RetroPixels can play are ${window.RPArcade.supportedText()}.` : ""));
     if (started) return;
     started = true;
     const name = file.name.replace(/\.[^.]+$/, "");
@@ -1661,7 +1716,7 @@
     document.getElementById("game").classList.toggle("gba", core === "gba");
     renderSlots();
 
-    startOwn(core, rom || new Uint8Array(await file.arrayBuffer()), name);
+    startOwn(core, rom || new Uint8Array(await file.arrayBuffer()), name, coreOpts);
   }
 
   document.getElementById("backBtn").addEventListener("click", () => {
