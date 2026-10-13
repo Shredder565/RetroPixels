@@ -101,8 +101,10 @@ func New(romIn []byte) (*Machine, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &Machine{rom: rom, rdram: make([]byte, rdramSize), CPUSpeed: 1, idleSkip: true}
+	ram := new([rdramSize + 8]byte)
+	m := &Machine{rom: rom, rdram: ram[:rdramSize], CPUSpeed: 1, idleSkip: true}
 	m.CPU.m = m
+	m.CPU.ram = ram
 	m.RSP.m = m
 	m.RDP.m = m
 	m.Save = newSaves(rom)

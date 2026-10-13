@@ -3,6 +3,7 @@
 package n64
 
 import (
+	"encoding/binary"
 	"math/bits"
 )
 
@@ -63,6 +64,7 @@ type tlbEntry struct {
 // CPU is the VR4300.
 type CPU struct {
 	m      *Machine
+	ram    *[rdramSize + 8]byte // RDRAM (with slack so 8-byte accesses never run off the end)
 	gpr    [32]uint64
 	hi, lo uint64
 	pc     uint64 // address of the next instruction to execute
@@ -80,14 +82,27 @@ type CPU struct {
 	countBase  uint64 // cycles at which Count was 0
 	compareAt  uint64 // cycle at which Count reaches Compare
 	irqPending bool
-	// fast address lookup for instruction fetches
-	fetchPage  uint64
-	fetchPhys  uint32
-	fetchValid bool
+	// instruction fetch: the 4 KB page of memory the PC is in
+	fetchBase uint64
+	fetchMem  []byte
+	// recently used TLB translations, by virtual 4 KB page
+	tlbCache [256]tlbCacheEntry
+	tlbDirty bool // the last TLB lookup hit a writable page
 }
 
+type tlbCacheEntry struct {
+	page  uint64 // virtual page + 1 (0 = empty)
+	phys  uint32
+	write bool // the page may be written
+}
+
+// ioCycles is what an uncached read of an RCP register or the cartridge
+// costs the CPU.
+const ioCycles = 20
+
 func (c *CPU) reset() {
-	*c = CPU{m: c.m}
+	*c = CPU{m: c.m, ram: c.ram}
+	c.fetchBase = 1
 	c.cop0[c0Status] = 0x34000000
 	c.cop0[c0Config] = 0x7006e463
 	c.cop0[c0PRId] = 0x00000b22
@@ -106,11 +121,16 @@ func sx32(v uint32) uint64 { return uint64(int64(int32(v))) }
 
 // translate returns the physical address for vaddr. On failure it raises the
 // exception and returns ok = false.
-func (c *CPU) translate(vaddr uint64, write bool) (uint32, bool) {
-	v := uint32(vaddr)
-	if v&0xc0000000 == 0x80000000 && uint64(int64(int32(v))) == vaddr {
-		return v & 0x1fffffff, true
+func (c *CPU) translate(vaddr uint64, write bool) (p uint32, ok bool) {
+	if vaddr+0x80000000 >= 0x40000000 { // not KSEG0 / KSEG1
+		return c.translateSlow(vaddr, write)
 	}
+	return uint32(vaddr) & 0x1fffffff, true
+}
+
+//go:noinline
+func (c *CPU) translateSlow(vaddr uint64, write bool) (uint32, bool) {
+	v := uint32(vaddr)
 	if uint64(int64(int32(v))) != vaddr {
 		// 64-bit address: only XKPHYS-style direct ranges are handled
 		if vaddr>>62 == 2 {
@@ -119,7 +139,22 @@ func (c *CPU) translate(vaddr uint64, write bool) (uint32, bool) {
 		c.addressError(vaddr, write)
 		return 0, false
 	}
-	return c.tlbLookup(vaddr, write)
+	e := &c.tlbCache[(vaddr>>12)&255]
+	if e.page == vaddr>>12+1 && (e.write || !write) {
+		return e.phys | v&0xfff, true
+	}
+	p, ok := c.tlbLookup(vaddr, write)
+	if ok {
+		*e = tlbCacheEntry{vaddr>>12 + 1, p &^ 0xfff, c.tlbDirty}
+	}
+	return p, ok
+}
+
+// flushTLBCache forgets cached translations (after the TLB or ASID changes).
+func (c *CPU) flushTLBCache() {
+	c.tlbCache = [256]tlbCacheEntry{}
+	c.fetchBase = 1
+	c.fetchMem = nil
 }
 
 func (c *CPU) tlbLookup(vaddr uint64, write bool) (uint32, bool) {
@@ -151,6 +186,7 @@ func (c *CPU) tlbLookup(vaddr uint64, write bool) (uint32, bool) {
 		}
 		pfn := (lo >> 6) & 0xfffff
 		off := v & (mask >> 1)
+		c.tlbDirty = lo&4 != 0
 		return uint32(pfn<<12) | uint32(off), true
 	}
 	c.tlbException(vaddr, write, true)
@@ -214,7 +250,6 @@ func (c *CPU) exception(code uint32, vec uint64) {
 	c.pc = base + vec
 	c.next = c.pc + 4
 	c.nDelay = false
-	c.fetchValid = false
 }
 
 func (c *CPU) copUnusable(n uint32) {
@@ -227,13 +262,109 @@ func (c *CPU) copUnusable(n uint32) {
 // memory access
 // ---------------------------------------------------------------------
 
+// Physical reads and writes. RDRAM is accessed directly; everything else goes
+// through the machine's memory map and costs extra time.
+
+func (c *CPU) rd8(p uint32) uint8 {
+	if p < rdramSize {
+		return c.ram[p]
+	}
+	return c.rdIO8(p)
+}
+
+func (c *CPU) rd16(p uint32) uint16 {
+	if p < rdramSize {
+		return binary.BigEndian.Uint16(c.ram[p : p+2])
+	}
+	return c.rdIO16(p)
+}
+
+func (c *CPU) rd32(p uint32) uint32 {
+	if p < rdramSize {
+		return binary.BigEndian.Uint32(c.ram[p : p+4])
+	}
+	return c.rdIO32(p)
+}
+
+func (c *CPU) rd64(p uint32) uint64 {
+	if p < rdramSize {
+		return binary.BigEndian.Uint64(c.ram[p : p+8])
+	}
+	return c.rdIO64(p)
+}
+
+//go:noinline
+func (c *CPU) rdIO8(p uint32) uint8 {
+	c.Cycles += ioCycles
+	return c.m.read8(p)
+}
+
+//go:noinline
+func (c *CPU) rdIO16(p uint32) uint16 {
+	c.Cycles += ioCycles
+	return c.m.read16(p)
+}
+
+//go:noinline
+func (c *CPU) rdIO32(p uint32) uint32 {
+	c.Cycles += ioCycles
+	return c.m.read32(p)
+}
+
+//go:noinline
+func (c *CPU) rdIO64(p uint32) uint64 {
+	c.Cycles += ioCycles
+	return uint64(c.m.read32(p))<<32 | uint64(c.m.read32(p+4))
+}
+
+func (c *CPU) wr8(p uint32, v uint8) {
+	if p < rdramSize {
+		c.ram[p] = v
+		return
+	}
+	c.m.write8(p, v)
+}
+
+func (c *CPU) wr16(p uint32, v uint16) {
+	if p < rdramSize {
+		binary.BigEndian.PutUint16(c.ram[p:p+2], v)
+		return
+	}
+	c.m.write16(p, v)
+}
+
+func (c *CPU) wr32(p uint32, v uint32) {
+	if p < rdramSize {
+		binary.BigEndian.PutUint32(c.ram[p:p+4], v)
+		return
+	}
+	c.m.write32(p, v, 0xffffffff)
+}
+
+func (c *CPU) wr64(p uint32, v uint64) {
+	if p < rdramSize {
+		binary.BigEndian.PutUint64(c.ram[p:p+8], v)
+		return
+	}
+	c.wrIO64(p, v)
+}
+
+//go:noinline
+func (c *CPU) wrIO64(p uint32, v uint64) {
+	c.m.write32(p, uint32(v>>32), 0xffffffff)
+	c.m.write32(p+4, uint32(v), 0xffffffff)
+}
+
+// Virtual loads and stores; ok = false means an exception was raised.
+
 func (c *CPU) load8(vaddr uint64) (uint8, bool) {
 	p, ok := c.translate(vaddr, false)
 	if !ok {
 		return 0, false
 	}
-	return c.m.read8(p), true
+	return c.rd8(p), true
 }
+
 func (c *CPU) load16(vaddr uint64) (uint16, bool) {
 	if vaddr&1 != 0 {
 		c.addressError(vaddr, false)
@@ -243,8 +374,9 @@ func (c *CPU) load16(vaddr uint64) (uint16, bool) {
 	if !ok {
 		return 0, false
 	}
-	return c.m.read16(p), true
+	return c.rd16(p), true
 }
+
 func (c *CPU) load32(vaddr uint64) (uint32, bool) {
 	if vaddr&3 != 0 {
 		c.addressError(vaddr, false)
@@ -254,8 +386,9 @@ func (c *CPU) load32(vaddr uint64) (uint32, bool) {
 	if !ok {
 		return 0, false
 	}
-	return c.m.read32(p), true
+	return c.rd32(p), true
 }
+
 func (c *CPU) load64(vaddr uint64) (uint64, bool) {
 	if vaddr&7 != 0 {
 		c.addressError(vaddr, false)
@@ -265,16 +398,18 @@ func (c *CPU) load64(vaddr uint64) (uint64, bool) {
 	if !ok {
 		return 0, false
 	}
-	return uint64(c.m.read32(p))<<32 | uint64(c.m.read32(p+4)), true
+	return c.rd64(p), true
 }
+
 func (c *CPU) store8(vaddr uint64, v uint8) bool {
 	p, ok := c.translate(vaddr, true)
 	if !ok {
 		return false
 	}
-	c.m.write8(p, v)
+	c.wr8(p, v)
 	return true
 }
+
 func (c *CPU) store16(vaddr uint64, v uint16) bool {
 	if vaddr&1 != 0 {
 		c.addressError(vaddr, true)
@@ -284,9 +419,10 @@ func (c *CPU) store16(vaddr uint64, v uint16) bool {
 	if !ok {
 		return false
 	}
-	c.m.write16(p, v)
+	c.wr16(p, v)
 	return true
 }
+
 func (c *CPU) store32(vaddr uint64, v uint32) bool {
 	if vaddr&3 != 0 {
 		c.addressError(vaddr, true)
@@ -296,9 +432,10 @@ func (c *CPU) store32(vaddr uint64, v uint32) bool {
 	if !ok {
 		return false
 	}
-	c.m.write32(p, v, 0xffffffff)
+	c.wr32(p, v)
 	return true
 }
+
 func (c *CPU) store64(vaddr uint64, v uint64) bool {
 	if vaddr&7 != 0 {
 		c.addressError(vaddr, true)
@@ -308,8 +445,7 @@ func (c *CPU) store64(vaddr uint64, v uint64) bool {
 	if !ok {
 		return false
 	}
-	c.m.write32(p, uint32(v>>32), 0xffffffff)
-	c.m.write32(p+4, uint32(v), 0xffffffff)
+	c.wr64(p, v)
 	return true
 }
 
@@ -354,32 +490,86 @@ func (c *CPU) checkInterrupts() bool {
 // running
 // ---------------------------------------------------------------------
 
+// fetch reads the instruction at pc, remembering which memory page it is in
+// so the next fetches from that page are quick. ok = false means the fetch
+// raised an exception.
+func (c *CPU) fetch(pc uint64) (uint32, bool) {
+	if off := pc - c.fetchBase; off < 0x1000 {
+		return binary.BigEndian.Uint32(c.fetchMem[off:]), true
+	}
+	c.curPC = pc
+	c.delay = c.nDelay
+	if pc&3 != 0 {
+		c.addressError(pc, false)
+		return 0, false
+	}
+	p, ok := c.translate(pc, false)
+	if !ok {
+		return 0, false
+	}
+	base := p &^ 0xfff
+	switch {
+	case base < rdramSize:
+		c.fetchMem = c.m.rdram[base : base+0x1000]
+	case base == 0x04000000 || base == 0x04001000: // DMEM / IMEM
+		c.fetchMem = c.m.spmem[base&0x1000 : base&0x1000+0x1000]
+	default:
+		c.fetchBase = 1
+		c.Cycles += ioCycles
+		return c.m.read32(p), true
+	}
+	c.fetchBase = pc &^ 0xfff
+	return binary.BigEndian.Uint32(c.fetchMem[pc&0xfff:]), true
+}
+
 // Step runs one instruction.
 func (c *CPU) Step() {
 	pc := c.pc
+	op, ok := c.fetch(pc)
+	if !ok {
+		return
+	}
 	c.curPC = pc
 	c.delay = c.nDelay
 	c.nDelay = false
-	var instr uint32
-	page := pc &^ 0xfff
-	if c.fetchValid && page == c.fetchPage {
-		instr = c.m.read32(c.fetchPhys | uint32(pc&0xfff))
-	} else {
-		if pc&3 != 0 {
-			c.addressError(pc, false)
-			return
-		}
-		p, ok := c.translate(pc, false)
-		if !ok {
-			return
-		}
-		c.fetchPage, c.fetchPhys, c.fetchValid = page, p&^0xfff, true
-		instr = c.m.read32(p)
-	}
 	c.pc = c.next
 	c.next += 4
-	c.exec(instr)
+	c.exec(op)
 	c.gpr[0] = 0
+}
+
+// run executes instructions until the cycle counter reaches limit or the
+// machine asks the CPU to stop early.
+func (c *CPU) run(limit uint64) {
+	m := c.m
+	for c.Cycles < limit {
+		if c.irqPending {
+			c.irqPending = false
+			c.checkInterrupts()
+		}
+		pc := c.pc
+		var op uint32
+		if off := pc - c.fetchBase; off < 0x1000 {
+			op = binary.BigEndian.Uint32(c.fetchMem[off:])
+		} else {
+			var ok bool
+			if op, ok = c.fetch(pc); !ok {
+				c.Cycles++
+				continue
+			}
+		}
+		c.curPC = pc
+		c.delay = c.nDelay
+		c.nDelay = false
+		c.pc = c.next
+		c.next += 4
+		c.exec(op)
+		c.gpr[0] = 0
+		c.Cycles++
+		if m.stop {
+			return
+		}
+	}
 }
 
 func (c *CPU) branch(cond bool, target uint64) {
@@ -388,7 +578,7 @@ func (c *CPU) branch(cond bool, target uint64) {
 		c.next = target
 		// "wait here" loop with an empty delay slot: skip ahead to the next event
 		if target == c.curPC && c.m.idleSkip {
-			if p, ok := c.translate(c.curPC+4, false); ok && c.m.read32(p) == 0 {
+			if p, ok := c.translate(c.curPC+4, false); ok && p < rdramSize && c.rd32(p) == 0 {
 				c.m.idle = true
 				c.m.stop = true
 			}
@@ -493,112 +683,196 @@ func (c *CPU) exec(op uint32) {
 		g[rt] = g[rs] + imm
 	case 0x1a: // LDL
 		addr := g[rs] + imm
-		p, ok := c.translate(addr&^7, false)
+		p, ok := c.translate(addr, false)
 		if !ok {
 			return
 		}
-		mem := uint64(c.m.read32(p))<<32 | uint64(c.m.read32(p+4))
+		mem := c.rd64(p &^ 7)
 		sh := (addr & 7) * 8
 		g[rt] = (g[rt] & ((1 << sh) - 1)) | (mem << sh)
 	case 0x1b: // LDR
 		addr := g[rs] + imm
-		p, ok := c.translate(addr&^7, false)
+		p, ok := c.translate(addr, false)
 		if !ok {
 			return
 		}
-		mem := uint64(c.m.read32(p))<<32 | uint64(c.m.read32(p+4))
+		mem := c.rd64(p &^ 7)
 		sh := (7 - addr&7) * 8
 		mask := uint64(0xffffffffffffffff) >> sh
 		g[rt] = (g[rt] &^ mask) | (mem >> sh)
-	case 0x20:
-		if v, ok := c.load8(g[rs] + imm); ok {
-			g[rt] = uint64(int64(int8(v)))
+	case 0x20: // LB
+		addr := g[rs] + imm
+		p := uint32(addr) & 0x1fffffff
+		if addr+0x80000000 >= 0x40000000 {
+			var ok bool
+			if p, ok = c.translateSlow(addr, false); !ok {
+				return
+			}
 		}
-	case 0x21:
-		if v, ok := c.load16(g[rs] + imm); ok {
-			g[rt] = uint64(int64(int16(v)))
+		g[rt] = uint64(int64(int8(c.rd8(p))))
+	case 0x21: // LH
+		addr := g[rs] + imm
+		if addr&1 != 0 {
+			c.addressError(addr, false)
+			return
 		}
+		p := uint32(addr) & 0x1fffffff
+		if addr+0x80000000 >= 0x40000000 {
+			var ok bool
+			if p, ok = c.translateSlow(addr, false); !ok {
+				return
+			}
+		}
+		g[rt] = uint64(int64(int16(c.rd16(p))))
 	case 0x22: // LWL
 		addr := g[rs] + imm
-		p, ok := c.translate(addr&^3, false)
+		p, ok := c.translate(addr, false)
 		if !ok {
 			return
 		}
-		mem := c.m.read32(p)
+		mem := c.rd32(p &^ 3)
 		sh := uint32(addr&3) * 8
 		r := (uint32(g[rt]) & ((1 << sh) - 1)) | (mem << sh)
 		g[rt] = sx32(r)
-	case 0x23:
-		if v, ok := c.load32(g[rs] + imm); ok {
-			g[rt] = sx32(v)
+	case 0x23: // LW
+		addr := g[rs] + imm
+		if addr&3 != 0 {
+			c.addressError(addr, false)
+			return
 		}
-	case 0x24:
-		if v, ok := c.load8(g[rs] + imm); ok {
-			g[rt] = uint64(v)
+		p := uint32(addr) & 0x1fffffff
+		if addr+0x80000000 >= 0x40000000 {
+			var ok bool
+			if p, ok = c.translateSlow(addr, false); !ok {
+				return
+			}
 		}
-	case 0x25:
-		if v, ok := c.load16(g[rs] + imm); ok {
-			g[rt] = uint64(v)
+		g[rt] = sx32(c.rd32(p))
+	case 0x24: // LBU
+		addr := g[rs] + imm
+		p := uint32(addr) & 0x1fffffff
+		if addr+0x80000000 >= 0x40000000 {
+			var ok bool
+			if p, ok = c.translateSlow(addr, false); !ok {
+				return
+			}
 		}
+		g[rt] = uint64(c.rd8(p))
+	case 0x25: // LHU
+		addr := g[rs] + imm
+		if addr&1 != 0 {
+			c.addressError(addr, false)
+			return
+		}
+		p := uint32(addr) & 0x1fffffff
+		if addr+0x80000000 >= 0x40000000 {
+			var ok bool
+			if p, ok = c.translateSlow(addr, false); !ok {
+				return
+			}
+		}
+		g[rt] = uint64(c.rd16(p))
 	case 0x26: // LWR
 		addr := g[rs] + imm
-		p, ok := c.translate(addr&^3, false)
+		p, ok := c.translate(addr, false)
 		if !ok {
 			return
 		}
-		mem := c.m.read32(p)
+		mem := c.rd32(p &^ 3)
 		sh := (3 - uint32(addr&3)) * 8
 		mask := uint32(0xffffffff) >> sh
 		r := (uint32(g[rt]) &^ mask) | (mem >> sh)
 		g[rt] = sx32(r)
-	case 0x27:
-		if v, ok := c.load32(g[rs] + imm); ok {
-			g[rt] = uint64(v)
+	case 0x27: // LWU
+		addr := g[rs] + imm
+		if addr&3 != 0 {
+			c.addressError(addr, false)
+			return
 		}
-	case 0x28:
-		c.store8(g[rs]+imm, uint8(g[rt]))
-	case 0x29:
-		c.store16(g[rs]+imm, uint16(g[rt]))
+		p := uint32(addr) & 0x1fffffff
+		if addr+0x80000000 >= 0x40000000 {
+			var ok bool
+			if p, ok = c.translateSlow(addr, false); !ok {
+				return
+			}
+		}
+		g[rt] = uint64(c.rd32(p))
+	case 0x28: // SB
+		addr := g[rs] + imm
+		p := uint32(addr) & 0x1fffffff
+		if addr+0x80000000 >= 0x40000000 {
+			var ok bool
+			if p, ok = c.translateSlow(addr, true); !ok {
+				return
+			}
+		}
+		c.wr8(p, uint8(g[rt]))
+	case 0x29: // SH
+		addr := g[rs] + imm
+		if addr&1 != 0 {
+			c.addressError(addr, true)
+			return
+		}
+		p := uint32(addr) & 0x1fffffff
+		if addr+0x80000000 >= 0x40000000 {
+			var ok bool
+			if p, ok = c.translateSlow(addr, true); !ok {
+				return
+			}
+		}
+		c.wr16(p, uint16(g[rt]))
 	case 0x2a: // SWL
 		addr := g[rs] + imm
-		p, ok := c.translate(addr&^3, true)
+		p, ok := c.translate(addr, true)
 		if !ok {
 			return
 		}
 		sh := uint32(addr&3) * 8
-		c.m.write32(p, uint32(g[rt])>>sh, 0xffffffff>>sh)
-	case 0x2b:
-		c.store32(g[rs]+imm, uint32(g[rt]))
+		c.m.write32(p&^3, uint32(g[rt])>>sh, 0xffffffff>>sh)
+	case 0x2b: // SW
+		addr := g[rs] + imm
+		if addr&3 != 0 {
+			c.addressError(addr, true)
+			return
+		}
+		p := uint32(addr) & 0x1fffffff
+		if addr+0x80000000 >= 0x40000000 {
+			var ok bool
+			if p, ok = c.translateSlow(addr, true); !ok {
+				return
+			}
+		}
+		c.wr32(p, uint32(g[rt]))
 	case 0x2c: // SDL
 		addr := g[rs] + imm
-		p, ok := c.translate(addr&^7, true)
+		p, ok := c.translate(addr, true)
 		if !ok {
 			return
 		}
 		sh := (addr & 7) * 8
 		v := g[rt] >> sh
 		mask := uint64(0xffffffffffffffff) >> sh
-		c.m.write32(p, uint32(v>>32), uint32(mask>>32))
-		c.m.write32(p+4, uint32(v), uint32(mask))
+		c.m.write32(p&^7, uint32(v>>32), uint32(mask>>32))
+		c.m.write32(p&^7+4, uint32(v), uint32(mask))
 	case 0x2d: // SDR
 		addr := g[rs] + imm
-		p, ok := c.translate(addr&^7, true)
+		p, ok := c.translate(addr, true)
 		if !ok {
 			return
 		}
 		sh := (7 - addr&7) * 8
 		v := g[rt] << sh
 		mask := uint64(0xffffffffffffffff) << sh
-		c.m.write32(p, uint32(v>>32), uint32(mask>>32))
-		c.m.write32(p+4, uint32(v), uint32(mask))
+		c.m.write32(p&^7, uint32(v>>32), uint32(mask>>32))
+		c.m.write32(p&^7+4, uint32(v), uint32(mask))
 	case 0x2e: // SWR
 		addr := g[rs] + imm
-		p, ok := c.translate(addr&^3, true)
+		p, ok := c.translate(addr, true)
 		if !ok {
 			return
 		}
 		sh := (3 - uint32(addr&3)) * 8
-		c.m.write32(p, uint32(g[rt])<<sh, 0xffffffff<<sh)
+		c.m.write32(p&^3, uint32(g[rt])<<sh, 0xffffffff<<sh)
 	case 0x2f: // CACHE
 	case 0x30: // LL
 		addr := g[rs] + imm
@@ -613,9 +887,19 @@ func (c *CPU) exec(op uint32) {
 			c.copUnusable(1)
 			return
 		}
-		if v, ok := c.load32(g[rs] + imm); ok {
-			c.setFPR32(rt, v)
+		addr := g[rs] + imm
+		if addr&3 != 0 {
+			c.addressError(addr, false)
+			return
 		}
+		p := uint32(addr) & 0x1fffffff
+		if addr+0x80000000 >= 0x40000000 {
+			var ok bool
+			if p, ok = c.translateSlow(addr, false); !ok {
+				return
+			}
+		}
+		c.setFPR32(rt, c.rd32(p))
 	case 0x34: // LLD
 		addr := g[rs] + imm
 		if v, ok := c.load64(addr); ok {
@@ -629,13 +913,33 @@ func (c *CPU) exec(op uint32) {
 			c.copUnusable(1)
 			return
 		}
-		if v, ok := c.load64(g[rs] + imm); ok {
-			c.setFPR64(rt, v)
+		addr := g[rs] + imm
+		if addr&7 != 0 {
+			c.addressError(addr, false)
+			return
 		}
-	case 0x37:
-		if v, ok := c.load64(g[rs] + imm); ok {
-			g[rt] = v
+		p := uint32(addr) & 0x1fffffff
+		if addr+0x80000000 >= 0x40000000 {
+			var ok bool
+			if p, ok = c.translateSlow(addr, false); !ok {
+				return
+			}
 		}
+		c.setFPR64(rt, c.rd64(p))
+	case 0x37: // LD
+		addr := g[rs] + imm
+		if addr&7 != 0 {
+			c.addressError(addr, false)
+			return
+		}
+		p := uint32(addr) & 0x1fffffff
+		if addr+0x80000000 >= 0x40000000 {
+			var ok bool
+			if p, ok = c.translateSlow(addr, false); !ok {
+				return
+			}
+		}
+		g[rt] = c.rd64(p)
 	case 0x38: // SC
 		if c.llbit {
 			if c.store32(g[rs]+imm, uint32(g[rt])) {
@@ -649,7 +953,19 @@ func (c *CPU) exec(op uint32) {
 			c.copUnusable(1)
 			return
 		}
-		c.store32(g[rs]+imm, c.getFPR32(rt))
+		addr := g[rs] + imm
+		if addr&3 != 0 {
+			c.addressError(addr, true)
+			return
+		}
+		p := uint32(addr) & 0x1fffffff
+		if addr+0x80000000 >= 0x40000000 {
+			var ok bool
+			if p, ok = c.translateSlow(addr, true); !ok {
+				return
+			}
+		}
+		c.wr32(p, c.getFPR32(rt))
 	case 0x3c: // SCD
 		if c.llbit {
 			if c.store64(g[rs]+imm, g[rt]) {
@@ -663,9 +979,33 @@ func (c *CPU) exec(op uint32) {
 			c.copUnusable(1)
 			return
 		}
-		c.store64(g[rs]+imm, c.getFPR64(rt))
-	case 0x3f:
-		c.store64(g[rs]+imm, g[rt])
+		addr := g[rs] + imm
+		if addr&7 != 0 {
+			c.addressError(addr, true)
+			return
+		}
+		p := uint32(addr) & 0x1fffffff
+		if addr+0x80000000 >= 0x40000000 {
+			var ok bool
+			if p, ok = c.translateSlow(addr, true); !ok {
+				return
+			}
+		}
+		c.wr64(p, c.getFPR64(rt))
+	case 0x3f: // SD
+		addr := g[rs] + imm
+		if addr&7 != 0 {
+			c.addressError(addr, true)
+			return
+		}
+		p := uint32(addr) & 0x1fffffff
+		if addr+0x80000000 >= 0x40000000 {
+			var ok bool
+			if p, ok = c.translateSlow(addr, true); !ok {
+				return
+			}
+		}
+		c.wr64(p, g[rt])
 	default:
 		c.exception(excRI, 0x180)
 	}
@@ -1001,6 +1341,9 @@ func (c *CPU) writeCop0(r uint32, v uint64) {
 		c.cop0[r] = (c.cop0[r] & 0x80000000) | (v & 0x3f)
 	case c0Random, c0PRId, c0BadVAddr:
 	case c0EntryHi:
+		if (c.cop0[r]^v)&0xff != 0 {
+			c.flushTLBCache() // new address space
+		}
 		c.cop0[r] = v & 0xc00000ffffffe0ff
 	case c0EntryLo0, c0EntryLo1:
 		c.cop0[r] = v & 0x3fffffff
@@ -1064,7 +1407,6 @@ func (c *CPU) cop0op(op uint32) {
 			}
 			c.next = c.pc + 4
 			c.llbit = false
-			c.fetchValid = false
 		}
 	}
 }
@@ -1076,7 +1418,7 @@ func (c *CPU) writeTLB(i int) {
 		lo0:  c.cop0[c0EntryLo0],
 		lo1:  c.cop0[c0EntryLo1],
 	}
-	c.fetchValid = false
+	c.flushTLBCache()
 }
 
 // PC returns the address of the next instruction (for debugging).

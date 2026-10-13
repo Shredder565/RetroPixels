@@ -54,17 +54,7 @@ func (m *Machine) runCycles(n uint64) {
 		// looks again.
 		m.runRSP(limit)
 		m.stop = false
-		for c.Cycles < limit {
-			if c.irqPending {
-				c.irqPending = false
-				c.checkInterrupts()
-			}
-			c.Step()
-			c.Cycles++
-			if m.stop {
-				break
-			}
-		}
+		c.run(limit)
 		if m.idle {
 			// waiting in a loop for an interrupt: skip ahead
 			m.idle = false

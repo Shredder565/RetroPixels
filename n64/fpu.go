@@ -195,13 +195,28 @@ func (c *CPU) fix32(x float64, finiteIn bool) (float32, uint32) {
 	return r, cause
 }
 
-func finite(v ...float64) bool {
-	for _, x := range v {
-		if math.IsInf(x, 0) || x != x {
-			return false
+func finite(a, b float64) bool {
+	return math.Float64bits(a)>>52&0x7ff != 0x7ff && math.Float64bits(b)>>52&0x7ff != 0x7ff
+}
+
+// adjust64 applies a directed rounding mode to a normal result r whose exact
+// value differs from it with the sign of err.
+func adjust64(r, err float64, mode uint32) float64 {
+	switch mode {
+	case 1:
+		if (err < 0) != (r < 0) {
+			return math.Nextafter(r, 0)
+		}
+	case 2:
+		if err > 0 {
+			return math.Nextafter(r, math.Inf(1))
+		}
+	case 3:
+		if err < 0 {
+			return math.Nextafter(r, math.Inf(-1))
 		}
 	}
-	return true
+	return r
 }
 
 // arith32 runs a single-precision operation.
@@ -228,7 +243,18 @@ func (c *CPU) arith32(fn uint32, fs, ft, fd uint32) {
 	case 4:
 		x = math.Sqrt(a)
 	}
-	r, cs := c.fix32(x, (finite(a, b) || fn == 4 && finite(a)) && cause&fcrZ == 0)
+	if e := math.Float32bits(float32(x)) >> 23 & 0xff; e != 0 && e != 0xff && c.fcr31&3 == 0 {
+		// the common case: a normal result in round-to-nearest
+		r := float32(x)
+		if x != float64(r) {
+			cause |= fcrI
+		}
+		if cause == 0 || c.fpEnd(cause) {
+			c.setFPR32(fd, math.Float32bits(r))
+		}
+		return
+	}
+	r, cs := c.fix32(x, (finite(a, b) || fn == 4 && finite(a, 0)) && cause&fcrZ == 0)
 	if r != r && (a != a || (fn < 4 && b != b)) {
 		cs &^= fcrV // a quiet NaN operand gives a NaN without complaint
 	}
@@ -252,21 +278,17 @@ func (c *CPU) arith64(fn uint32, fs, ft, fd uint32) {
 			b = -b
 		}
 		r = a + b
-		if !math.IsInf(r, 0) {
-			bv := r - a
-			err = (a - (r - bv)) + (b - bv)
-		}
+		bv := r - a
+		err = (a - (r - bv)) + (b - bv)
 	case 2:
 		r = a * b
-		if !math.IsInf(r, 0) {
-			err = math.FMA(a, b, -r)
-		}
+		err = math.FMA(a, b, -r)
 	case 3:
 		if b == 0 && a == a && a != 0 && !math.IsInf(a, 0) {
 			cause |= fcrZ
 		}
 		r = a / b
-		if finite(r) && b != 0 && r != 0 {
+		if b != 0 && r != 0 {
 			err = math.FMA(-r, b, a)
 			if b < 0 {
 				err = -err
@@ -274,11 +296,22 @@ func (c *CPU) arith64(fn uint32, fs, ft, fd uint32) {
 		}
 	case 4:
 		r = math.Sqrt(a)
-		if finite(r) {
-			err = math.FMA(-r, r, a)
-		}
+		err = math.FMA(-r, r, a)
 	}
-	r, cs := c.fix64(r, err, (finite(a, b) || fn == 4 && finite(a)) && cause&fcrZ == 0)
+	if e := math.Float64bits(r) >> 52 & 0x7ff; e != 0 && e != 0x7ff {
+		// the common case: a normal result
+		if err != 0 {
+			cause |= fcrI
+			if mode := c.fcr31 & 3; mode != 0 {
+				r = adjust64(r, err, mode)
+			}
+		}
+		if cause == 0 || c.fpEnd(cause) {
+			c.setFPR64(fd, math.Float64bits(r))
+		}
+		return
+	}
+	r, cs := c.fix64(r, err, (finite(a, b) || fn == 4 && finite(a, 0)) && cause&fcrZ == 0)
 	if math.IsNaN(r) && (a != a || (fn < 4 && b != b)) {
 		cs &^= fcrV
 	}
@@ -429,7 +462,7 @@ func (c *CPU) cop1op(op uint32) {
 			c.cvtInt(fn, a, fd)
 		case 0x20:
 			c.fpBegin()
-			r, cause := c.fix32(a, finite(a))
+			r, cause := c.fix32(a, finite(a, 0))
 			if a != a {
 				cause = c.nanCause64(c.getFPR64(fs))
 			}
@@ -472,7 +505,7 @@ func (c *CPU) cop1op(op uint32) {
 			}
 		case 0x21:
 			r := float64(v)
-			err := float64(v-int64(r)) // exact unless r is out of int64 range
+			err := float64(v - int64(r)) // exact unless r is out of int64 range
 			if r >= 0x1p63 {
 				err = -1
 			}

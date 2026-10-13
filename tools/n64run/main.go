@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"image/png"
 	"os"
+	"runtime/pprof"
 	"time"
 
 	"retropixels/n64"
@@ -17,7 +18,16 @@ func main() {
 	frames := flag.Int("frames", 60, "frames to run")
 	every := flag.Int("every", 0, "save a picture every N frames")
 	out := flag.String("out", "frame", "output prefix")
+	prof := flag.String("cpuprofile", "", "write a CPU profile here")
 	flag.Parse()
+	if *prof != "" {
+		f, err := os.Create(*prof)
+		if err != nil {
+			panic(err)
+		}
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+	}
 	rom, err := os.ReadFile(flag.Arg(0))
 	if err != nil {
 		panic(err)
