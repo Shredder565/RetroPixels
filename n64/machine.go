@@ -459,7 +459,7 @@ func (m *Machine) piWrite(r uint32, v uint32) {
 		if cart >= 0x08000000 && cart < 0x10000000 && dram+n <= rdramSize {
 			m.Save.dmaWrite(cart, m.rdram[dram:dram+n])
 		}
-		m.piDone(n)
+		m.piDone(cart, n)
 	case 3: // cart -> RDRAM
 		n := (v & 0xffffff) + 1
 		dram, cart := m.pi[0], m.pi[1]
@@ -476,7 +476,7 @@ func (m *Machine) piWrite(r uint32, v uint32) {
 		}
 		m.pi[0] = (dram + n + 7) &^ 7
 		m.pi[1] = (cart + n + 1) &^ 1
-		m.piDone(n)
+		m.piDone(cart, n)
 	case 4:
 		if v&2 != 0 {
 			m.clear(intPI)
@@ -511,8 +511,21 @@ func (m *Machine) piCopy(dram, cart, n uint32) {
 	}
 }
 
-func (m *Machine) piDone(n uint32) {
-	dur := uint64(n)*9/4 + 100
+// piDone marks the PI busy for as long as moving n bytes over the cartridge
+// bus takes with the domain's timing settings, then interrupts.
+func (m *Machine) piDone(cart, n uint32) {
+	// domain 2 (SRAM / FlashRAM, 64DD registers) has its own timing registers
+	r := uint32(5)
+	if (cart >= 0x05000000 && cart < 0x06000000) || (cart >= 0x08000000 && cart < 0x10000000) {
+		r = 9
+	}
+	lat, pwd, pgs, rls := uint64(m.pi[r]&0xff), uint64(m.pi[r+1]&0xff), uint64(m.pi[r+2]&15), uint64(m.pi[r+3]&3)
+	page := uint64(4) << pgs // bytes per page
+	pages := (uint64(n) + page - 1) / page
+	// each page costs the latency, then every 16-bit word a pulse and a
+	// release, in RCP clocks (2/3 of the CPU clock)
+	rcp := pages*(lat+1) + (uint64(n)+1)/2*(pwd+1+rls+1)
+	dur := rcp*3/2 + 50
 	m.piBusyUntil = m.CPU.Cycles + dur
 	m.schedule(m.piBusyUntil, evPI)
 }

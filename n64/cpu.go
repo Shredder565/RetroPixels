@@ -1330,13 +1330,11 @@ func (c *CPU) writeCop0(r uint32, v uint64) {
 		c.cop0[c0Cause] &^= 1 << 15
 		c.updateCompare()
 	case c0Status:
-		old := c.cop0[r]
 		c.cop0[r] = v & 0xff57ffff
-		if (old^v)&statusFR != 0 {
-			// register view changes; nothing to convert
-		}
+		c.irqPending = true // interrupts may have just been enabled
 	case c0Cause:
 		c.cop0[r] = (c.cop0[r] &^ 0x300) | (v & 0x300)
+		c.irqPending = true // software interrupts
 	case c0Index:
 		c.cop0[r] = (c.cop0[r] & 0x80000000) | (v & 0x3f)
 	case c0Random, c0PRId, c0BadVAddr:
@@ -1407,6 +1405,7 @@ func (c *CPU) cop0op(op uint32) {
 			}
 			c.next = c.pc + 4
 			c.llbit = false
+			c.irqPending = true
 		}
 	}
 }

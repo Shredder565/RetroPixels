@@ -182,7 +182,9 @@ func (m *Machine) spDMA(v uint32, toSP bool) {
 		ma = (ma + length) & 0xff8
 		da = (da + length) & 0xfffff8
 	}
-	sp.curMem = mem | ma
+	// the address counter carries into the DMEM/IMEM bit when it runs off
+	// the end of a 4 KB bank
+	sp.curMem = (sp.memAddr&0x1ff8 + count*length) & 0x1fff
 	sp.curDram = da
 	sp.length = skip<<20 | 0xff8
 }
