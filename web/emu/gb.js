@@ -131,45 +131,70 @@
   // Sound
   // ===================================================================
   const DUTY = [0x01, 0x81, 0x87, 0x7e];
+  const NOISE_DIV = [8, 16, 32, 48, 64, 80, 96, 112];
+  const READ_OR = [0x80, 0x3f, 0x00, 0xff, 0xbf, 0xff, 0x3f, 0x00, 0xff, 0xbf, 0x7f, 0xff, 0x9f, 0xff, 0xbf, 0xff, 0xff, 0x00, 0x00, 0xbf, 0x00, 0x00, 0x70];
   class APU {
-    constructor(sampleRate) {
+    constructor(sampleRate, gb) {
+      this.gb = gb; // for the model (Game Boy or Color), which changes a few details
       this.sampleRate = sampleRate;
       this.regs = new Uint8Array(0x30);
       this.wave = new Uint8Array(16);
       this.on = true;
       this.ch = [0, 1, 2, 3].map(() => ({ on: false, dac: false, len: 0, lenOn: false, vol: 0, envDir: 0, envPeriod: 0, envTimer: 0,
-        freq: 0, timer: 0, pos: 0, duty: 0, lfsr: 0x7fff, sweepPeriod: 0, sweepTimer: 0, sweepShift: 0, sweepNeg: false, sweepOn: false, shadow: 0, out: 0 }));
-      this.seqStep = 0; this.seqTimer = 8192;
+        freq: 0, timer: 0, pos: 0, duty: 0, lfsr: 0x7fff, sweepPeriod: 0, sweepTimer: 0, sweepShift: 0, sweepNeg: false, sweepOn: false,
+        shadow: 0, negUsed: false, sample: 0, fetched: 0 }));
+      this.seqStep = 0; // the next frame-sequencer step (0-7), clocked by the divider
       this.acc = 0; this.step = 4194304 / sampleRate; this.sumL = 0; this.sumR = 0; this.n = 0;
       this.hpL = 0; this.hpR = 0; this.prevL = 0; this.prevR = 0;
       this.out = new Float32Array(8192); this.outLen = 0;
+      this.now = 0; // T-cycles since start, for wave RAM access timing
+    }
+    get cgb() { return this.gb ? this.gb.cgb : false; }
+    // While channel 3 plays, the CPU sees wave RAM only through the byte the channel is reading:
+    // always on the Color, and on the original only in the same moment the channel reads it.
+    waveIndex() {
+      const c = this.ch[2];
+      if (!c.on) return -1;
+      if (this.cgb || this.now - c.fetched < 2) return c.pos >> 1;
+      return -2;
     }
     read(a) {
+      if (a >= 0xff30) { const i = this.waveIndex(); return i === -1 ? this.wave[a - 0xff30] : i === -2 ? 0xff : this.wave[i]; }
       const r = a - 0xff10;
-      if (a >= 0xff30) return this.wave[a - 0xff30];
-      const OR = [0x80, 0x3f, 0x00, 0xff, 0xbf, 0xff, 0x3f, 0x00, 0xff, 0xbf, 0x7f, 0xff, 0x9f, 0xff, 0xbf, 0xff, 0xff, 0x00, 0x00, 0xbf, 0x00, 0x00, 0x70,
-        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
       if (a === 0xff26) return 0x70 | (this.on ? 0x80 : 0) | this.ch.reduce((m, c, i) => m | (c.on ? 1 << i : 0), 0);
-      return this.regs[r] | OR[r];
+      if (r >= READ_OR.length) return 0xff;
+      return this.regs[r] | READ_OR[r];
     }
     write(a, v) {
-      if (a >= 0xff30) { this.wave[a - 0xff30] = v; return; }
+      if (a >= 0xff30) { const i = this.waveIndex(); if (i === -1) this.wave[a - 0xff30] = v; else if (i >= 0) this.wave[i] = v; return; }
       const r = a - 0xff10;
-      if (!this.on && a !== 0xff26 && !(a >= 0xff11 && (r % 5 === 1)) ) { if (a !== 0xff20) return; }
       if (a === 0xff26) {
         const on = !!(v & 0x80);
-        if (!on && this.on) { for (let i = 0; i < 0x16; i++) this.regs[i] = 0; this.ch.forEach(c => { c.on = false; c.dac = false; }); }
-        if (on && !this.on) this.seqStep = 0;
+        if (!on && this.on) this.powerOff();
+        if (on && !this.on) { this.seqStep = 0; for (const c of this.ch) { c.pos = 0; c.sample = 0; } }
         this.on = on; return;
       }
-      if (!this.on) return;
+      if (r >= 0x17) return;
+      if (!this.on) {
+        // powered off: only the original Game Boy still accepts the length counters
+        if (!this.cgb && (r === 1 || r === 6 || r === 11 || r === 16)) {
+          const ch = (r / 5) | 0, c = this.ch[ch];
+          if (ch === 2) c.len = 256 - v; else c.len = 64 - (v & 0x3f);
+        }
+        return;
+      }
       this.regs[r] = v;
       const ch = (r / 5) | 0, sub = r % 5;
       if (ch > 3) return;
       const c = this.ch[ch];
       switch (sub) {
         case 0:
-          if (ch === 0) { c.sweepPeriod = (v >> 4) & 7; c.sweepNeg = !!(v & 8); c.sweepShift = v & 7; }
+          if (ch === 0) {
+            c.sweepPeriod = (v >> 4) & 7; c.sweepShift = v & 7;
+            const neg = !!(v & 8);
+            if (c.sweepNeg && !neg && c.negUsed) c.on = false; // leaving subtract mode after using it
+            c.sweepNeg = neg;
+          }
           if (ch === 2) { c.dac = !!(v & 0x80); if (!c.dac) c.on = false; }
           break;
         case 1:
@@ -179,31 +204,55 @@
           if (ch !== 2) { c.dac = (v & 0xf8) !== 0; if (!c.dac) c.on = false; }
           break;
         case 3: if (ch !== 3) c.freq = (c.freq & 0x700) | v; break;
-        case 4:
+        case 4: {
           if (ch !== 3) c.freq = (c.freq & 0xff) | ((v & 7) << 8);
-          c.lenOn = !!(v & 0x40);
-          if (v & 0x80) this.trigger(ch);
+          const wasOn = c.lenOn, nowOn = !!(v & 0x40);
+          c.lenOn = nowOn;
+          // Turning the length counter on in the first half of a length period clocks it once.
+          const extra = (this.seqStep & 1) === 1;
+          if (extra && nowOn && !wasOn && c.len > 0) { if (--c.len === 0 && !(v & 0x80)) c.on = false; }
+          if (v & 0x80) this.trigger(ch, extra && nowOn);
           break;
+        }
       }
     }
-    trigger(i) {
+    powerOff() {
+      for (let i = 0; i < 0x16; i++) this.regs[i] = 0;
+      for (const c of this.ch) {
+        Object.assign(c, { on: false, dac: false, lenOn: false, vol: 0, envDir: 0, envPeriod: 0, freq: 0, duty: 0,
+          sweepPeriod: 0, sweepShift: 0, sweepNeg: false, sweepOn: false });
+        if (this.cgb) c.len = 0; // the original keeps its length counters
+      }
+    }
+    trigger(i, extraClock) {
       const c = this.ch[i], R = this.regs, base = i * 5;
+      // DMG: restarting channel 3 just as it reads wave RAM scrambles the first bytes
+      if (i === 2 && c.on && !this.cgb && c.timer <= 2) {
+        const next = ((c.pos + 1) & 31) >> 1;
+        if (next < 4) this.wave[0] = this.wave[next];
+        else { const b = next & ~3; for (let k = 0; k < 4; k++) this.wave[k] = this.wave[b + k]; }
+      }
       c.on = c.dac;
-      if (!c.len) c.len = i === 2 ? 256 : 64;
-      if (i === 2) { c.timer = (2048 - c.freq) * 2; c.pos = 0; }
+      if (!c.len) { c.len = i === 2 ? 256 : 64; if (extraClock) c.len--; }
+      if (i === 2) { c.timer = (2048 - c.freq) * 2 + 6; c.pos = 0; }
       else if (i === 3) {
         const v = R[base + 3];
-        const div = [8, 16, 32, 48, 64, 80, 96, 112][v & 7];
-        c.timer = div << (v >> 4); c.lfsr = 0x7fff;
-      } else c.timer = (2048 - c.freq) * 4;
+        c.timer = NOISE_DIV[v & 7] << (v >> 4); c.lfsr = 0x7fff;
+      } else c.timer = (2048 - c.freq) * 4 + (c.timer & 3);
       if (i !== 2) { const e = R[base + 2]; c.vol = e >> 4; c.envDir = e & 8 ? 1 : -1; c.envPeriod = e & 7; c.envTimer = c.envPeriod || 8; }
       if (i === 0) {
-        c.shadow = c.freq; c.sweepTimer = c.sweepPeriod || 8; c.sweepOn = !!(c.sweepPeriod || c.sweepShift);
+        c.shadow = c.freq; c.sweepTimer = c.sweepPeriod || 8; c.sweepOn = !!(c.sweepPeriod || c.sweepShift); c.negUsed = false;
         if (c.sweepShift && this.sweepCalc(c) > 2047) c.on = false;
       }
     }
-    sweepCalc(c) { const d = c.shadow >> c.sweepShift; return c.sweepNeg ? c.shadow - d : c.shadow + d; }
+    sweepCalc(c) {
+      const d = c.shadow >> c.sweepShift;
+      if (c.sweepNeg) { c.negUsed = true; return c.shadow - d; }
+      return c.shadow + d;
+    }
+    // frame sequencer: 512 Hz, from the divider
     clockSeq() {
+      if (!this.on) return;
       const s = this.seqStep;
       if ((s & 1) === 0) for (const c of this.ch) if (c.lenOn && c.len > 0 && --c.len === 0) c.on = false;
       if (s === 2 || s === 6) {
@@ -225,17 +274,20 @@
     }
     // advance n T-cycles (4.19 MHz)
     tick(n) {
+      const t0 = this.now;
+      this.now += n;
       if (!this.on) { this.mix(n, 0, 0); return; }
-      this.seqTimer -= n;
-      while (this.seqTimer <= 0) { this.seqTimer += 8192; this.clockSeq(); }
       for (let i = 0; i < 4; i++) {
         const c = this.ch[i];
         c.timer -= n;
         while (c.timer <= 0) {
-          if (i === 2) { c.timer += (2048 - c.freq) * 2; c.pos = (c.pos + 1) & 31; }
-          else if (i === 3) {
+          if (i === 2) {
+            const at = this.now + c.timer; // when this read happened
+            c.timer += (2048 - c.freq) * 2; c.pos = (c.pos + 1) & 31;
+            const b = this.wave[c.pos >> 1]; c.sample = c.pos & 1 ? b & 15 : b >> 4; c.fetched = at > t0 ? at : t0;
+          } else if (i === 3) {
             const v = this.regs[3 * 5 + 3];
-            c.timer += [8, 16, 32, 48, 64, 80, 96, 112][v & 7] << (v >> 4);
+            c.timer += NOISE_DIV[v & 7] << (v >> 4);
             const x = (c.lfsr ^ (c.lfsr >> 1)) & 1;
             c.lfsr = (c.lfsr >> 1) | (x << 14);
             if (v & 8) c.lfsr = (c.lfsr & ~0x40) | (x << 6);
@@ -243,19 +295,17 @@
         }
       }
       // channel outputs (0..15) -> DAC (-1..1)
-      const o = [0, 0, 0, 0];
       const c0 = this.ch[0], c1 = this.ch[1], c2 = this.ch[2], c3 = this.ch[3];
-      if (c0.on) o[0] = (DUTY[c0.duty] >> (7 - c0.pos)) & 1 ? c0.vol : 0;
-      if (c1.on) o[1] = (DUTY[c1.duty] >> (7 - c1.pos)) & 1 ? c1.vol : 0;
-      if (c2.on) {
-        const b = this.wave[c2.pos >> 1], s = c2.pos & 1 ? b & 15 : b >> 4, vc = (this.regs[2 * 5 + 2] >> 5) & 3;
-        o[2] = vc ? s >> (vc - 1) : 0;
-      }
-      if (c3.on) o[3] = c3.lfsr & 1 ? 0 : c3.vol;
+      const o0 = c0.on && (DUTY[c0.duty] >> (7 - c0.pos)) & 1 ? c0.vol : 0;
+      const o1 = c1.on && (DUTY[c1.duty] >> (7 - c1.pos)) & 1 ? c1.vol : 0;
+      let o2 = 0;
+      if (c2.on) { const vc = (this.regs[2 * 5 + 2] >> 5) & 3; o2 = vc ? c2.sample >> (vc - 1) : 0; }
+      const o3 = c3.on && !(c3.lfsr & 1) ? c3.vol : 0;
       const pan = this.regs[0x15], vol = this.regs[0x14];
       let L = 0, R = 0;
+      const os = [o0, o1, o2, o3];
       for (let i = 0; i < 4; i++) {
-        const dac = this.ch[i].dac ? o[i] / 7.5 - 1 : 0;
+        const dac = this.ch[i].dac ? os[i] / 7.5 - 1 : 0;
         if (pan & (0x10 << i)) L += dac;
         if (pan & (1 << i)) R += dac;
       }
@@ -273,8 +323,8 @@
         if (this.outLen < this.out.length - 1) { this.out[this.outLen++] = this.hpL * 0.6; this.out[this.outLen++] = this.hpR * 0.6; }
       }
     }
-    saveState() { return { regs: this.regs, wave: this.wave, on: this.on, ch: this.ch.map(c => Object.assign({}, c)), seqStep: this.seqStep, seqTimer: this.seqTimer }; }
-    loadState(o) { this.regs.set(o.regs); this.wave.set(o.wave); this.on = o.on; o.ch.forEach((c, i) => Object.assign(this.ch[i], c)); this.seqStep = o.seqStep; this.seqTimer = o.seqTimer; }
+    saveState() { return { regs: this.regs, wave: this.wave, on: this.on, ch: this.ch.map(c => Object.assign({}, c)), seqStep: this.seqStep, now: this.now }; }
+    loadState(o) { this.regs.set(o.regs); this.wave.set(o.wave); this.on = o.on; o.ch.forEach((c, i) => Object.assign(this.ch[i], c)); this.seqStep = o.seqStep; this.now = o.now || 0; }
   }
 
   // ===================================================================
@@ -302,7 +352,7 @@
       this.oam = new Uint8Array(0xa0); this.hram = new Uint8Array(0x7f); this.io = new Uint8Array(0x80);
       this.bgPal = new Uint8Array(64); this.obPal = new Uint8Array(64); this.bcps = 0; this.ocps = 0;
       this.ie = 0; this.if = 0xe1;
-      this.apu = new APU(opts.sampleRate || 48000);
+      this.apu = new APU(opts.sampleRate || 48000, this);
       this.screen = new Uint32Array(160 * 144);
       this.width = 160; this.height = 144; this.fps = FPS;
       this.keys = 0; // bit set = pressed: A B Select Start Right Left Up Down (GB order)
@@ -331,7 +381,8 @@
       const apuInit = [[0xff10, 0x80], [0xff11, 0xbf], [0xff12, 0xf3], [0xff14, 0xbf], [0xff16, 0x3f], [0xff17, 0x00], [0xff19, 0xbf],
         [0xff1a, 0x7f], [0xff1b, 0xff], [0xff1c, 0x9f], [0xff1e, 0xbf], [0xff20, 0xff], [0xff21, 0x00], [0xff22, 0x00], [0xff23, 0xbf],
         [0xff24, 0x77], [0xff25, 0xf3]];
-      for (const [a, v] of apuInit) if ((a & 0xf) % 5 !== 4 || a === 0xff24) this.apu.write(a, v); else this.apu.regs[a - 0xff10] = v;
+      this.apu.powerOff(); this.apu.on = true; this.apu.seqStep = 0;
+      for (const [a, v] of apuInit) { const r = a - 0xff10; if (r % 5 === 4 && r < 0x14) this.apu.regs[r] = v; else this.apu.write(a, v); } // no triggers
       this.apu.ch[0].on = true; this.apu.ch[0].vol = 0; // the start-up chime's channel is left on, silent
       if (this.cgb) for (let i = 0; i < 64; i++) this.bgPal[i] = 0xff;
     }
@@ -357,12 +408,15 @@
       const old = this.div;
       this.div = (this.div + 4) & 0xffff;
       this.timerEdge(old, this.div);
+      this.apuEdge(old, this.div);
       // serial port with its own clock: one bit per falling edge of a divider bit (8192 Hz, or 262144 Hz on Color)
       if (this.serialBits) {
         const bit = this.cgb && (this.io[2] & 2) ? 3 : 8;
         if (((old >> bit) & 1) && !((this.div >> bit) & 1) && --this.serialBits === 0) { this.io[1] = 0xff; this.io[2] &= 0x7f; this.if |= 8; }
       }
     }
+    // the sound frame sequencer steps on falling edges of divider bit 12 (bit 13 at double speed)
+    apuEdge(old, now) { const b = this.double ? 13 : 12; if (((old >> b) & 1) && !((now >> b) & 1)) this.apu.clockSeq(); }
     timerBit() { return [9, 3, 5, 7][this.tac & 3]; }
     timerEdge(old, now) {
       if (!(this.tac & 4)) return;
@@ -471,7 +525,7 @@
           this.io[2] = v;
           if ((v & 0x81) === 0x81) { this.serialOut += String.fromCharCode(this.io[1]); this.serialBits = 8; } else this.serialBits = 0;
           return;
-        case 0x04: { const old = this.div; this.div = 0; this.timerEdge(old, 0); return; }
+        case 0x04: { const old = this.div; this.div = 0; this.timerEdge(old, 0); this.apuEdge(old, 0); return; }
         case 0x05: if (!this.timaJustLoaded) { this.tima = v; this.timaReload = 0; } return; // a write in the 0 cycle cancels the reload
         case 0x06: this.tma = v; if (this.timaJustLoaded) this.tima = v; return;
         case 0x07: {
