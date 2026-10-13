@@ -50,6 +50,9 @@ Playing classic games
   but can't be aimed yet.
 
 GameCube & Wii (Dolphin)
+- No Dolphin yet? Click "Download Dolphin" in the GameCube tab: RetroPixels
+  downloads the latest official version from dolphin-emu.org into a "Dolphin"
+  folder next to RetroPixels.exe, and uses it from then on.
 - The "GameCube" and "Wii" tabs (the Wii tab includes WiiWare) find Dolphin
   and your games automatically (it reads each disc, so PC and PS2 .iso files are skipped).
 - Click a game (or D-pad + A) to play it. It plays right inside the RetroPixels
@@ -101,8 +104,11 @@ Credits & licences
   are not part of RetroPixels:
   * ffmpeg (GPL): video encoding for recordings; downloaded on request from
     github.com/BtbN/FFmpeg-Builds. Its licence is saved next to it.
-  * Dolphin (GPL-2.0+): your own install, launched by RetroPixels and shown
-    inside its window.
+  * Dolphin (GPL-2.0+): your own install, or the official release RetroPixels
+    downloads for you from dolphin-emu.org (unchanged; a note with its licence
+    and where to get its source is saved in its folder).
+    Launched by RetroPixels and shown inside its window. Dolphin's source code:
+    https://github.com/dolphin-emu/dolphin
 - Nintendo, GameCube, Wii, Xbox, Sega, Genesis and Atari are trademarks of
   their owners, named only to describe what the program works with.
   RetroPixels isn't connected with or endorsed by any of them.

@@ -40,3 +40,5 @@ func openFolder(p string) error {
 	fmt.Println("OPEN", p)
 	return nil
 }
+
+func systemUnpack7z(archive, dest string) error { return fmt.Errorf("no system 7z unpacker") }

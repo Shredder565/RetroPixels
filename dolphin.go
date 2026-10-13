@@ -871,7 +871,7 @@ func dolStatus() map[string]any {
 	fs := cfg.DolphinFullscreen == nil || *cfg.DolphinFullscreen
 	embed := dolphinEmbedOn()
 	cfgMu.Unlock()
-	return map[string]any{"exe": exe, "version": version, "folders": dolphinFolders(), "fullscreen": fs, "embed": embed}
+	return map[string]any{"exe": exe, "version": version, "folders": dolphinFolders(), "fullscreen": fs, "embed": embed, "install": dolInstallStatus()}
 }
 
 func registerDolphinRoutes(mux *http.ServeMux) {

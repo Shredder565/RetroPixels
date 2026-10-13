@@ -434,6 +434,7 @@
             <label class="sw-check"><input type="checkbox" id="gcFull"> Start games fullscreen</label>
             <label class="sw-check"><input type="checkbox" id="gcAutoRec"> Record games automatically</label>
           </div>
+          <div id="gcDolNote"></div>
           <div id="gcFFNote"></div>
           <div class="sw-tools">
             <input type="search" id="gcSearch" placeholder="Search games…" autocomplete="off">
@@ -831,11 +832,43 @@
     loadGCSettings();
   }
 
+  // One-click download of the official Dolphin when it isn't installed.
+  let dolPoll = null;
+  function renderDolInstall(inst) {
+    const el = document.getElementById("gcDolNote");
+    if (!inst) { el.innerHTML = ""; clearInterval(dolPoll); dolPoll = null; return; }
+    const busy = ["finding", "downloading", "installing"].includes(inst.state);
+    const pct = inst.total > 0 ? Math.min(100, Math.round(inst.got / inst.total * 100)) : 0;
+    const label = { finding: "Finding the latest version…",
+      downloading: `Downloading Dolphin ${esc(inst.version || "")}… ${pct}% (${fmtSize(inst.got)}${inst.total > 0 ? " of " + fmtSize(inst.total) : ""})`,
+      installing: "Unpacking…" }[inst.state] || "";
+    el.innerHTML = `<div class="rec-note ${inst.state === "error" ? "err" : ""}" style="${inst.state === "error" ? "" : "background:#1d1a33;border:1px solid #7b6cff"}">
+      <b>GameCube and Wii games need Dolphin</b>, a free emulator. RetroPixels can download the latest official version from dolphin-emu.org (a one-time download) into a "Dolphin" folder next to RetroPixels. Games still play inside this window.
+      ${inst.state === "error" ? `<br><span class="bad">${esc(inst.error)}</span>` : ""}
+      <div style="margin-top:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        ${busy ? `<div style="flex:1;min-width:200px;height:8px;background:#0e0f13;border-radius:99px;overflow:hidden"><div style="width:${pct}%;height:100%;background:#7b6cff"></div></div><span style="font-size:13px">${label}</span>`
+               : `<button class="btn sm gc-btn" data-doldl>${inst.state === "error" ? "Try again" : "Download Dolphin"}</button>`}
+      </div></div>`;
+    const b = el.querySelector("[data-doldl]");
+    if (b) b.addEventListener("click", async () => {
+      try { const r = await api("/api/dol/install", {}); renderDolInstall(r.install); } catch (e) { toast(e.message, true); }
+    });
+    if (busy && !dolPoll) dolPoll = setInterval(async () => {
+      try {
+        const r = await api("/api/dol/install");
+        if (r.exe) { clearInterval(dolPoll); dolPoll = null; toast("Dolphin is installed — pick a game to play"); loadGC(); return; }
+        renderDolInstall(r.install);
+        if (!["finding", "downloading", "installing"].includes(r.install.state)) { clearInterval(dolPoll); dolPoll = null; }
+      } catch (e) { /* keep trying */ }
+    }, 700);
+  }
+
   function renderGCSetup() {
     const st = gcStatus;
     document.getElementById("gcEmu").innerHTML = st.exe
       ? `<span class="muted">Emulator</span><br><b>Dolphin</b> <small class="muted">${esc(st.version || "")}</small><br><small class="muted">${esc(st.exe)}</small>`
-      : '<span class="muted">Emulator</span><br><b style="color:var(--warn)">Dolphin not found</b><br><small class="muted">Click "Change Dolphin…" to pick Dolphin.exe</small>';
+      : '<span class="muted">Emulator</span><br><b style="color:var(--warn)">Dolphin not found</b><br><small class="muted">Download it below, or click "Change Dolphin…" to pick your own Dolphin.exe</small>';
+    renderDolInstall(st.exe ? null : st.install);
     const f = st.folders || [];
     const el = document.getElementById("gcFolders");
     el.innerHTML = `<span class="muted">Games folders</span>${f.length ? f.map((d, i) =>
