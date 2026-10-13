@@ -859,8 +859,9 @@
       this.cart.frame();
     }
     // 0..1: how hard the cartridge's rumble motor ran this frame
-    get rumble() { return this.cart.rumbleLevel; }
+    get rumble() { return this.cart.hasRumble ? this.cart.rumbleLevel : undefined; }
     get usesRightStick() { return this.cart.kind === "MBC7"; }
+    get controlsNote() { return this.usesRightStick ? "Tilt the game with the right stick, or with the tilt keys (I J K L to start with). Clicking the sticks (L3/R3) is used for save states." : null; }
     // extra controls shown for this game only (tilt keys for MBC7 carts)
     get buttons() { return this.cart.kind === "MBC7" ? GB.info.buttons.concat(["Tilt Up", "Tilt Down", "Tilt Left", "Tilt Right"]) : null; }
     takeAudio() { const a = this.apu.out.slice(0, this.apu.outLen); this.apu.outLen = 0; return a; }

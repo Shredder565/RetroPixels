@@ -1400,7 +1400,7 @@
           if (vr && !prev.vr) changeSlot(1);
           if (vd && !prev.vd) toggleRecording();
           prev.vl = vl; prev.vr = vr; prev.vd = vd;
-        } else {
+        } else if (!(player && player.core && player.core.usesRightStick)) { // tilt / motion games use the right stick themselves
           const x = ax[2] || 0;
           const dir = x > 0.7 ? 1 : x < -0.7 ? -1 : 0;
           if (dir && dir !== prev.rsx) changeSlot(dir);

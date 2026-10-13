@@ -55,10 +55,13 @@
   // L3 / R3 and the right stick are kept free for RetroPixels' save-state shortcuts.
   const PAD_NAMES = ["A", "B", "X", "Y", "LB", "RB", "LT", "RT", "View", "Menu", "L3", "R3", "D-pad ↑", "D-pad ↓", "D-pad ←", "D-pad →"];
   const DIRS = [["Up", 12, 1, -1], ["Down", 13, 1, 1], ["Left", 14, 0, -1], ["Right", 15, 0, 1]];
+  // keys for games with motion / light sensors (only listed for those games; the right stick works too)
+  const TILT_KEYS = { "Tilt Up": { pad: [], keys: ["i"] }, "Tilt Down": { pad: [], keys: ["k"] }, "Tilt Left": { pad: [], keys: ["j"] }, "Tilt Right": { pad: [], keys: ["l"] } };
   const DEFAULT_MAPS = {
     // Nintendo-style systems: Xbox A (bottom) = B, Xbox B (right) = A, like the original pads.
     nes: { A: { pad: [1], keys: ["x"] }, B: { pad: [0], keys: ["z"] }, Select: { pad: [8], keys: ["shift"] }, Start: { pad: [9], keys: ["enter"] } },
-    gb: { A: { pad: [1], keys: ["x"] }, B: { pad: [0], keys: ["z"] }, Select: { pad: [8], keys: ["shift"] }, Start: { pad: [9], keys: ["enter"] } },
+    gb: { A: { pad: [1], keys: ["x"] }, B: { pad: [0], keys: ["z"] }, Select: { pad: [8], keys: ["shift"] }, Start: { pad: [9], keys: ["enter"] },
+      ...TILT_KEYS },
     atari2600: { Fire: { pad: [0, 1], keys: ["z", "x", " "] }, Reset: { pad: [9], keys: ["enter"] }, Select: { pad: [8], keys: ["shift"] },
       "Left difficulty": { pad: [4], keys: ["1"], toggle: true }, "Right difficulty": { pad: [5], keys: ["2"], toggle: true },
       "Color / B&W": { pad: [3], keys: ["3"], toggle: true } },
@@ -70,7 +73,9 @@
       X: { pad: [4], keys: ["q"] }, Y: { pad: [3], keys: ["w"] }, Z: { pad: [5], keys: ["e"] },
       Start: { pad: [9], keys: ["enter"] }, Mode: { pad: [8], keys: ["shift"] } },
     gba: { A: { pad: [1], keys: ["x"] }, B: { pad: [0], keys: ["z"] }, L: { pad: [4], keys: ["q"] }, R: { pad: [5], keys: ["w"] },
-      Select: { pad: [8], keys: ["shift"] }, Start: { pad: [9], keys: ["enter"] } },
+      Select: { pad: [8], keys: ["shift"] }, Start: { pad: [9], keys: ["enter"] },
+      ...TILT_KEYS, "Turn Left": { pad: [], keys: ["j"] }, "Turn Right": { pad: [], keys: ["l"] },
+      "More Sun": { pad: [], keys: ["i"] }, "Less Sun": { pad: [], keys: ["k"] } },
     // SNES: same button positions as the Xbox pad's diamond (Xbox B = A, A = B, Y = X, X = Y)
     snes: { A: { pad: [1], keys: ["x"] }, B: { pad: [0], keys: ["z"] }, X: { pad: [3], keys: ["s"] }, Y: { pad: [2], keys: ["a"] },
       L: { pad: [4], keys: ["q"] }, R: { pad: [5], keys: ["w"] }, Select: { pad: [8], keys: ["shift"] }, Start: { pad: [9], keys: ["enter"] } },
@@ -205,6 +210,8 @@
       this.core = new this.Core(rom, { sampleRate: this.audio.rate || 48000, sram: this.opts.sram || null, name: this.opts.name });
       // Cores that run elsewhere (Nintendo 64 runs inside RetroPixels.exe) say when they're ready.
       if (this.core.ready) await this.core.ready;
+      // Some games bring extra controls (tilt or light sensor keys) — the core lists them.
+      if (this.core.buttons) this.info = Object.assign({}, this.info, { buttons: this.core.buttons });
       this.lastSram = this.sramSnapshot();
       this.resize();
       this.frameTime = 1000 / this.core.fps;
@@ -288,7 +295,7 @@
     setPaused(p) {
       this.paused = p; this.root.classList.toggle("rp-is-paused", p);
       this.root.querySelector('[data-a="pause"]').textContent = p ? "▶ Play" : "⏸ Pause";
-      if (p) this.audio.clear();
+      if (p) { this.audio.clear(); if (this.core && this.core.rumble !== undefined) this.rumble(0); }
     }
 
     flash(text) {
@@ -359,6 +366,24 @@
         if (!fast || i === 0) this.audio.push(a, !!this.info.stereo);
       }
       if (frames) this.draw();
+      if (this.core.rumble !== undefined) this.rumble(fast ? 0 : this.core.rumble);
+    }
+
+    // Cartridges with a rumble motor shake the controller (where the browser allows it).
+    rumble(level) {
+      const gp = [...(navigator.getGamepads ? navigator.getGamepads() : [])].find(Boolean);
+      const act = gp && gp.vibrationActuator;
+      if (!act || !act.playEffect) return;
+      const now = performance.now();
+      if (level > 0.02) {
+        if (now - (this.rumbleAt || 0) > 80 || Math.abs(level - (this.rumbleLevel || 0)) > 0.25) {
+          act.playEffect("dual-rumble", { duration: 120, strongMagnitude: Math.min(1, level), weakMagnitude: Math.min(1, level * 0.6) }).catch(() => {});
+          this.rumbleAt = now; this.rumbleLevel = level;
+        }
+      } else if (this.rumbleLevel) {
+        this.rumbleLevel = 0;
+        if (act.reset) act.reset().catch(() => {}); else act.playEffect("dual-rumble", { duration: 0, strongMagnitude: 0, weakMagnitude: 0 }).catch(() => {});
+      }
     }
 
     fail(e) {
@@ -431,7 +456,7 @@
             return `<tr><td>${n}</td><td>${(m.pad || []).map(b => PAD_NAMES[b]).join(", ") || "—"}</td><td>${(m.keys || []).map(k => k === " " ? "Space" : k.replace("arrow", "")).join(", ") || "—"}</td>
               <td><button data-set="${n}">Change</button></td></tr>`;
           }).join("")}</table>
-          <p style="color:#8b90a0;font-size:12px;margin:10px 0">Click Change, then press a controller button or a key. Esc cancels. ${this.info.analogStick
+          <p style="color:#8b90a0;font-size:12px;margin:10px 0">Click Change, then press a controller button or a key. Esc cancels. ${this.core && this.core.controlsNote ? this.core.controlsNote : this.info.analogStick
             ? "The left stick is the analog stick and the right stick works the C buttons. Clicking the sticks (L3/R3) is used for save states."
             : "The left stick always moves too. Clicking the sticks (L3/R3) and the right stick are used for save states."}</p>
           <div style="display:flex;gap:8px;justify-content:flex-end"><button data-reset>Reset to default</button><button data-close>Done</button></div></div>`;
@@ -472,6 +497,7 @@
 
     destroy() {
       this.destroyed = true;
+      if (this.core && this.core.rumble !== undefined) this.rumble(0);
       this.checkSram();
       clearInterval(this.sramTimer);
       window.removeEventListener("keydown", this.onKey);
