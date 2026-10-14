@@ -641,6 +641,16 @@ func autoRecord(game, emuExe string, pid int, done <-chan struct{}, opt recOpts)
 		if userStopped || !(autoRecordOn() || manualWanted()) {
 			continue
 		}
+		// No ffmpeg yet: fetch it now and start recording as soon as it's ready,
+		// instead of skipping this game.
+		if findFFmpeg() == "" {
+			if st := ffStatus()["state"]; st == "idle" || st == "" {
+				startFFmpegInstall()
+			}
+			if st := ffStatus()["state"]; st != "error" && st != "done" {
+				continue // downloading: try again on a later tick
+			}
+		}
 		// Wait until the window has settled (going fullscreen takes a moment).
 		if !win.Client.same(lastRect) || stableSince.IsZero() {
 			lastRect = win.Client

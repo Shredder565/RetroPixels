@@ -1,7 +1,13 @@
-RetroPixels 2.5.1
+RetroPixels 2.5.2
 Released 2026-10-14
 
-What's new in 2.5.1
+What's new in 2.5.2
+- GameCube / Wii recording: black bars are now always trimmed from the
+  finished video (before, only with Aspect ratio on "Auto"). If ffmpeg isn't
+  installed, the first game you start downloads it and recording starts
+  when it's ready, instead of not recording.
+
+2.5.1
 - GameCube / Wii: a volume slider and mute button in the bar above the game
   while it plays, and under "Sound" in the GameCube / Wii settings. Windows
   remembers Dolphin's volume, so it may also apply if you open Dolphin by

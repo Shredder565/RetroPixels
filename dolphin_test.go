@@ -160,7 +160,7 @@ func TestDolphinIniAndPads(t *testing.T) {
 	if !strings.Contains(string(d), "GFXBackend = D3D12") {
 		t.Error("backend not saved")
 	}
-	if o := dolphinAspect(); o.Aspect != 4.0/3 || o.PostCrop {
+	if o := dolphinAspect(); o.Aspect != 4.0/3 || !o.PostCrop {
 		t.Errorf("aspect %+v", o)
 	}
 	if err := saveDolSettings(map[string]any{"res": float64(7)}); err == nil {

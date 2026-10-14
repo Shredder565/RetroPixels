@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.5.1 (the number also shows next to the RetroPixels name in the app).
+Version 2.5.2 (the number also shows next to the RetroPixels name in the app).
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
 Sega Genesis, Sega Master System, Atari 2600, Atari 7800, classic arcade
@@ -146,12 +146,14 @@ GameCube & Wii (Dolphin)
 - Dolphin's main graphics settings are on the right of both tabs (they're shared).
 
 Recording games
-- GameCube and Wii games are recorded automatically as .mp4 (turn it off in
-  the Recordings tab, or untick "Record games automatically").
+- GameCube and Wii games are recorded automatically as .mp4 from the moment
+  the game appears (turn it off in the Recordings tab, or untick "Record
+  games automatically"). If ffmpeg isn't there yet, it's downloaded the first
+  time a game starts and recording begins as soon as it's ready.
 - Only the game is recorded: in fullscreen the black bars are cropped off, and
-  only Dolphin's own sound is captured (not Discord, music, etc.). With Aspect
-  ratio on "Auto", a 4:3 game's black side bars are trimmed off right after
-  the recording ends.
+  only Dolphin's own sound is captured (not Discord, music, etc.). Any black
+  bars left around the picture are trimmed off right after the recording
+  ends, whatever the Aspect ratio setting.
 - While playing, the bar at the top shows REC and a Stop / Record button.
 - Videos are saved to Videos\RetroPixels. If something goes wrong, details
   are in Videos\RetroPixels\logs\last-recording.log.

@@ -770,13 +770,15 @@ func dolphinRunning() bool {
 func dolphinAspect() recOpts {
 	f := readIni(dolphinIni("GFX.ini"))
 	v, _ := f.Get("Settings", "AspectRatio")
+	// Bars left in the video are always trimmed afterwards, whatever the setting:
+	// a game can draw a different shape than the setting suggests.
 	switch v {
 	case "1":
-		return recOpts{Aspect: 16.0 / 9}
+		return recOpts{Aspect: 16.0 / 9, PostCrop: true}
 	case "2":
-		return recOpts{Aspect: 4.0 / 3}
+		return recOpts{Aspect: 4.0 / 3, PostCrop: true}
 	case "3":
-		return recOpts{Aspect: 0}
+		return recOpts{Aspect: 0, PostCrop: true}
 	}
 	// Auto: games are 4:3 or 16:9. Record up to 16:9, then trim what's left.
 	return recOpts{Aspect: 16.0 / 9, PostCrop: true}
