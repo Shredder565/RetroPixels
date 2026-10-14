@@ -241,12 +241,15 @@
       return (p & 0x200) ? -v : v;
     }
 
-    // the noise generator replaces channel 8's C2 operator when it is switched on
+    // the noise generator replaces channel 8's C2 operator when it is switched on. Its level is not
+    // taken through the log/exponent tables like a tone's: the 10-bit attenuation (envelope + TL + AM)
+    // is used directly, inverted, so the noise fades in a straight line and is quieter than a full tone
+    // (at no attenuation a square of +-2046, against a tone's +-8188)
     noiseOut(am) {
       let a = this.att[31] + (this.tl[31] << 3);
       if (this.amOn[31]) a += am;
       if (a >= 0x3ff) return 0;
-      const v = YM2151.level(a);
+      const v = (0x3ff - a) << 1;
       return this.noiseBit ? v : -v;
     }
 
@@ -312,11 +315,13 @@
           case 6: o = this.opOut(C1 + ch, m1 >> 1, am) + this.opOut(M2 + ch, 0, am) + c2(0); break;
           default: o = m1 + this.opOut(C1 + ch, 0, am) + this.opOut(M2 + ch, 0, am) + c2(0);
         }
-        if (o > 8191) o = 8191; else if (o < -8192) o = -8192;
+        // (a channel's carriers add up without being cut off at one operator's range; only the
+        // final sum is held to 16 bits)
         if (this.panL[ch]) L += o;
         if (this.panR[ch]) R += o;
       }
-      this.out[0] = L; this.out[1] = R;
+      this.out[0] = L > 32767 ? 32767 : L < -32768 ? -32768 : L;
+      this.out[1] = R > 32767 ? 32767 : R < -32768 ? -32768 : R;
       for (let s = 0; s < 32; s++) this.phase[s] = (this.phase[s] + this.inc[s]) & 0xfffff;
       this.timers();
     }
