@@ -415,9 +415,11 @@
         // (an ADPCM sample that wanders away from the centre) fade out instead of clicking at the end
         const u = this.updV || 0;
         this.updDC = u - this.updPrev + DC_KEEP * this.updDC; this.updPrev = u;
-        // mixing levels measured against the real board's balance (music, effects, speech, title song)
-        let v = fm * 0.765 + (this.kL || 0) * 0.29 + this.updDC * 0.315 + title * 0.395;
-        if (v > 1) v = 1; else if (v < -1) v = -1;
+        // the balance of music, effects, speech and title song measured against the real board (with
+        // some headroom left, so the loudest music doesn't clip)
+        let v = fm * 0.62 + (this.kL || 0) * 0.235 + this.updDC * 0.255 + title * 0.32;
+        // the loudest moments (several FM channels in step) are rounded off gently instead of clipping
+        if (v > 0.75) v = 0.75 + 0.2 * Math.tanh((v - 0.75) * 5); else if (v < -0.75) v = -0.75 - 0.2 * Math.tanh((-v - 0.75) * 5);
         this.out.add(v);
       }
     }
