@@ -1,0 +1,31 @@
+name: Bug report
+description: Something doesn't work or looks or sounds wrong in a game
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: RetroPixels version
+      description: Shown next to the RetroPixels name in the app.
+      placeholder: "2.7.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: system
+    attributes:
+      label: System
+      options: [NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64, Genesis, Master System, Atari 2600, Atari 7800, Arcade, GameCube, Wii, The app itself]
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game
+      description: Name and region. Please don't attach game files.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens, and what you expected
+      description: Where in the game it happens helps a lot. Screenshots or a short recording are welcome.
+    validations:
+      required: true

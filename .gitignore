@@ -1,0 +1,34 @@
+# Build output
+/RetroPixels.exe
+/dist/
+*.exe
+*.zip
+
+# Never commit games, BIOS or firmware
+*.nes
+*.sfc
+*.smc
+*.gb
+*.gbc
+*.gba
+*.z64
+*.n64
+*.v64
+*.md
+!README.md
+!CHANGELOG.md
+!/.github/**/*.md
+*.sms
+*.a26
+*.a78
+*.rom
+*.nv
+*.iso
+*.rvz
+*.wbfs
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

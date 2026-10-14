@@ -1,0 +1,75 @@
+# Changelog
+
+All notable changes to RetroPixels. Newest first.
+
+## [2.7.0] - 2026-10-14
+
+- Arcade: TMNT, Turtles in Time (TMNT2) and The Simpsons were each played start to finish in MAME and in RetroPixels and compared frame by frame and sound by sound. The picture now matches MAME pixel for pixel in almost every frame checked, and the sound balance matches. RetroPixels' code is still all its own: MAME was only watched and listened to.
+- New: 4-player arcade games (and Nintendo 64 and Genesis, which have four controller ports) have a "Player 1" button above the game. Click it to choose which player (1 to 4) your keyboard and first controller play as. The choice is remembered for each game.
+- TMNT: a stray dark mark on the title screen is gone; flip-screen mode now flips the sprites too; drum and effect volumes were swapped between the two sample channels; speech is no longer cut off by the next line; music noise (cymbals, hits) was far too loud; loud chords no longer distort; the music is no longer too quiet next to effects and speech.
+- Turtles in Time: the picture is the board's real 304 pixels wide and the backgrounds line up; sprites overlap in the right order (the turtle in the intro circle is no longer hidden); zoomed sprites such as the "Evening News" letters are exact; shadows only darken the background, at the right strength; the news-scene fade and the prehistoric night darkening work, with bright light beams; Krang's legs and other big sprites use the right pieces; sampled sounds and voices were too quiet next to the music.
+- The Simpsons: sprites were 16 pixels too high; big sprites (the jewellery store door) had wrong pieces; enemies blinked or showed where they shouldn't; shadows (cage bars, bosses, Krusty) were wrong and the title and score screens were darkened by mistake; sprites line up during the final boss's screen shake; sampled sounds were too quiet next to the music.
+- Music chip (all three games): noise level and fade fixed, and loud notes no longer distort.
+- New CHANGELOG.txt lists the changes in every version.
+
+## [2.6.2] - 2026-10-14
+
+- TMNT: fire no longer shows in front of the doors in the burning building. Sprites now stack in the right order, hidden duplicate sprites (like an extra turtle in the demo) are gone, the backgrounds sit 6 pixels further right where they belong, and shadows are a little lighter. The picture now matches the arcade board's own layering chip.
+
+## [2.6.1] - 2026-10-14
+
+- Recording on every system now captures only the game picture. NES, SNES, Game Boy, GBA, N64, Genesis, Master System, Atari and arcade recordings no longer include black bars, buttons, messages or the rest of the window, and are saved at a sharp, even size. (GameCube / Wii already recorded only the game since 2.6.0.)
+- TMNT: the game's own ROM self-test now passes, speech sounds cleaner, and the service buttons work for players 2 to 4.
+- The Simpsons: sprites were drawn too far to the right of the backgrounds (character select, intro, bonus stage); they now line up. Ground shadows draw as full ovals instead of thin slivers.
+
+## [2.6.0] - 2026-10-14
+
+- Arcade: TMNT, Turtles in Time (TMNT2) and The Simpsons now boot and play with correct graphics and sound. Fixed: TMNT's graphics and sprite layout, sound effects and speech; TMNT2's chip list, settings memory, interrupts and sprites; The Simpsons' processor and settings memory. Sets without their .nv file set themselves up on first start.
+- GameCube / Wii recording rebuilt: Dolphin now saves the game's own frames and sound while you play, and RetroPixels turns them into an .mp4 when the game ends. The video is smooth and shows only the game: no mouse cursor, no other windows, no black bars. "Saving recording…" shows while it's made. With automatic recording off, the Record button records the next game.
+
+## [2.5.2] - 2026-10-14
+
+- GameCube / Wii recording: black bars are now always trimmed from the finished video (before, only with Aspect ratio on "Auto"). If ffmpeg isn't installed, the first game you start downloads it and recording starts when it's ready, instead of not recording.
+
+## [2.5.1] - 2026-10-14
+
+- GameCube / Wii: a volume slider and mute button in the bar above the game while it plays, and under "Sound" in the GameCube / Wii settings. Windows remembers Dolphin's volume, so it may also apply if you open Dolphin by itself.
+- Arcade: ROM sets are recognised even when the zip has a different name (for example "Teenage Mutant Ninja Turtles (World).zip" or "tmnt (1).zip"), by the chip files inside. If a zip still isn't recognised, the message now lists the files inside it.
+
+## [2.5.0] - 2026-10-14
+
+- Arcade: Konami's Teenage Mutant Ninja Turtles, Turtles in Time (TMNT2) and The Simpsons, with up to four players. New from-scratch chips: Konami-2 processor, YM2151, K052109, K051960, K007232, uPD7759, K053260, K053245 / K053247, K053251 and the 93C46 EEPROM.
+- Arcade sets whose chip files are named differently are matched by size.
+- GameCube / Wii: "Add games folder…" now opens the folder picker in front of RetroPixels (it could open hidden), looks deeper inside the folder, and says how many games it found.
+
+## [2.4.0] - 2026-10-14
+
+- New Arcade system, written from scratch: Puck Man / Pac-Man, Galaxian, Space Invaders and Donkey Kong. Load the game's .zip ROM set. Includes RetroPixels' own Intel 8080 and 8035 processors, and a "Machine settings" panel for each game's DIP switches.
+
+## [2.3.0] - 2026-10-13
+
+- Super Nintendo: DSP-3, DSP-4, ST010, ST011 and ST018 games now play. These chips need their built-in program, which RetroPixels can't include: the first time, it asks you to choose your own dump of it (dsp3.rom, dsp4.rom, st010.rom, st011.rom or st018.rom) and remembers it.
+- Originality check: every file was reviewed and the parts that followed other emulators too closely were rewritten in RetroPixels' own way (DSP-1, Cx4, S-DD1 and SPC7110 chips, SNES sound filter, 68000 divide timing, Atari 2600 cartridge detection and DPC music, Game Boy Color colours, Genesis and Master System colours, GBA BIOS ArcTan, N64 6105 boot check and Controller Pak checksum, the 7-Zip ARM64 filter).
+- Things you may notice: Konami VRC7 games (Lagrange Point) use RetroPixels' own instrument sounds; Game Boy Color colours look slightly different; DSP-1 games (Pilotwings, Super Mario Kart) compute 3D maths slightly differently from the real chip.
+
+## [2.2.0] - 2026-10-13
+
+- Super Nintendo: games with cartridge chips now play: Super FX (Star Fox, Yoshi's Island), SA-1 (Super Mario RPG, Kirby Super Star), DSP-1 (Super Mario Kart, Pilotwings), DSP-2, Cx4 (Mega Man X2 / X3), S-DD1 (Star Ocean), SPC7110, OBC1 and S-RTC.
+- NES: about 120 cartridge types (up from 18) and the Famicom sound chips (VRC6, VRC7, Namco 163, Sunsoft 5B, MMC5); many accuracy fixes.
+- Game Boy / Color: more cartridge chips (MBC6, MBC7 tilt, HuC3, TAMA5, rumble and others) and accuracy fixes (passes the blargg, mooneye and acid2 tests).
+- Game Boy Advance: sensor cartridges (Boktai sun sensor, WarioWare: Twisted! gyro, Yoshi Topsy-Turvy tilt, rumble) and BIOS call fixes.
+- Genesis: EEPROM saves, Realtec mapper, J-Cart 4-player games, automatic 3-button pad mode.
+- New: Sega Master System / Mark III.
+- Atari 2600: nearly every bank-switching scheme, DPC+ and the Supercharger. Atari 7800: more cartridge types and POKEY sound.
+- The version number shows in the app.
+
+## [2.1.0] - 2026-10-13
+
+- Nintendo 64 runs on RetroPixels' own emulator inside RetroPixels.exe (EmulatorJS removed; no internet needed).
+- "Download Dolphin" button in the GameCube tab.
+- GameCube / Wii games play inside the RetroPixels window; Stop game closes Dolphin completely.
+
+## Before 2.1.0 - 2026-10-13
+
+- RetroConsole became RetroPixels. Settings, save states, recordings and save backups move over from RetroConsole automatically the first time it starts.
+- Recordings follow the game's own volume.

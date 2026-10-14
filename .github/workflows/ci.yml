@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Check emulator scripts
+        run: for f in web/emu/*.js; do node --check "$f"; done
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build Windows executable
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: go build -trimpath -ldflags "-s -w -H windowsgui" -o RetroPixels.exe .
+
+      - name: Package
+        id: pkg
+        run: |
+          version=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' main.go)
+          dir="RetroPixels-$version"
+          mkdir -p "dist/$dir"
+          cp RetroPixels.exe README.txt VERSION.txt CHANGELOG.txt "dist/$dir/"
+          (cd dist && zip -qr "$dir.zip" "$dir")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "zip=dist/$dir.zip" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RetroPixels-${{ steps.pkg.outputs.version }}
+          path: ${{ steps.pkg.outputs.zip }}
+
+      - name: Check tag matches app version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: test "${GITHUB_REF_NAME#v}" = "${{ steps.pkg.outputs.version }}"
