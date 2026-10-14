@@ -13,7 +13,9 @@
 //     list in sprite RAM is copied into the sprite chip, skipping sprites that are off,
 //     and a little later the processor gets its FIRQ (when the board allows it); the IRQ
 //     comes at the vertical blank when the K052109 allows it;
-//   - a 93C46 EEPROM for settings and high scores (set up from the game's service menu);
+//   - a serial EEPROM (128 bytes) for settings and high scores; the game reads its data
+//     line on bit 4 of 1f81 and its ready line on bit 5. A set without the .nv file starts
+//     with the test switch held, so the game writes its own factory settings;
 //   - a Z80 at 3.58 MHz with banked program ROM, a YM2151 and a K053260; reading 1fc4
 //     interrupts it, and it arms its own NMI by writing fa00.
 // The 4-player set reads four controllers; the 2-player sets read two.
@@ -78,11 +80,13 @@
           t.color = self.layerBase[t.layer] + ((c & 0xc0) >> 6);
         },
       });
+      this.k052109.dx = [0, -6, -6];   // the scrolling layers sit 6 pixels right of the fixed layer on this board
       this.k053247 = new global.RPK053245({
         type: "053247", rom: spriteRom, layout: "packed", dx: -59, dy: -23,
         spriteCallback: (t) => {
           t.pri = (t.attr & 0x0f80) >> 6;
           t.color = self.spriteBase + (t.attr & 0x1f);
+          t.shadow = !!(t.attr & 0x0c00);   // either shadow bit: the sprite's pen 15 is a see-through shadow
         },
       });
       this.k053251 = new global.RPK053251();
@@ -90,7 +94,7 @@
       this.ym = new global.RPYM2151({ clock: YM_HZ });
       let nv = opts.sram && opts.sram.length >= 128 ? opts.sram : null;
       if (!nv) { const f = game.files.find((x) => x.role === "eeprom"); const d = f && RPArcade.findFile(f, files); if (d && d.length >= 128) nv = d; }
-      this.eeprom = new global.RPEeprom93C46(nv);
+      this.eeprom = new global.RPEeprom93C46(nv, { wordBits: 8, addrBits: 9, write11: true });   // 128 bytes, see eeprom93c46.js
 
       this.cpu = new global.RPKonami2({
         read: (a) => self.read(a), write: (a, v) => self.write(a, v),
@@ -124,6 +128,10 @@
       this.z80.reset(); this.z80.irq = false;
       this.sndBank = 0; this.nmiAt = -1;
       this.cyc = 0; this.zCyc = 0; this.ymFrac = 0;
+      // A blank EEPROM (a set without its .nv file) fails the game's start-up check. An operator
+      // fixes that by holding the test switch while switching on: the game's test mode then writes
+      // its own factory settings. Do the same for the first couple of seconds.
+      this.testHold = this.eeprom.bytes.every((v) => v === 0xff) ? 120 : 0;
       this.resampler.clear();
     }
 
@@ -146,9 +154,10 @@
       return ~v & 0xff;
     }
     testByte() {
-      // bit 0 EEPROM data, bit 1 EEPROM ready, bit 2 test switch (low = on: Service + Start on the 1st controller)
+      // bit 0 test switch (low = on: Service + Start on the 1st controller), bit 4 EEPROM data,
+      // bit 5 EEPROM ready (writes finish at once here); the other bits read high
       const i = this.inputs[0] || {};
-      return 0xf8 | this.eeprom.read() | 2 | (i.Service && i["Start (1P)"] ? 0 : 4);
+      return 0xce | (this.eeprom.read() << 4) | 0x20 | ((i.Service && i["Start (1P)"]) || this.testHold > 0 ? 0 : 1);
     }
 
     // ---- main processor memory ----
@@ -275,6 +284,7 @@
 
     runFrame() {
       const cpu = this.cpu;
+      if (this.testHold > 0) this.testHold--;
       for (let line = 0; line < LINES; line++) {
         if (line === TOP + H) {
           this.vblank = true;
@@ -302,15 +312,16 @@
         k052109: this.k052109.saveState(), k053247: this.k053247.getState(), k053251: this.k053251.getState(),
         k053260: this.k053260.getState(), ym: this.ym.saveState(), eeprom: this.eeprom.getState(),
         m: [this.bank, this.videoBank, this.firqEnabled ? 1 : 0, this.eepromOut, this.ctrl, this.firqAt, this.vblank ? 1 : 0,
-          this.sndBank, this.nmiAt, this.cyc, this.zCyc, this.ymFrac, this.z80.irq ? 1 : 0] };
+          this.sndBank, this.nmiAt, this.cyc, this.zCyc, this.ymFrac, this.z80.irq ? 1 : 0, this.testHold] };
     }
     loadState(s) {
       this.cpu.setState(s.cpu); this.z80.setState(s.z80);
       this.ram.set(s.ram); this.palRam.set(s.palRam); this.sprRam.set(s.sprRam); this.sndRam.set(s.sndRam);
-      this.k052109.loadState(s.k052109); this.k053247.setState(s.k053247); this.k053251.setState(s.k053251);
+      this.k052109.loadState(s.k052109); this.k052109.dx = [0, -6, -6]; this.k053247.setState(s.k053247); this.k053251.setState(s.k053251);
       this.k053260.setState(s.k053260); this.ym.loadState(s.ym); this.eeprom.setState(s.eeprom);
       let fe, vb, zi;
-      [this.bank, this.videoBank, fe, this.eepromOut, this.ctrl, this.firqAt, vb, this.sndBank, this.nmiAt, this.cyc, this.zCyc, this.ymFrac, zi] = s.m;
+      [this.bank, this.videoBank, fe, this.eepromOut, this.ctrl, this.firqAt, vb, this.sndBank, this.nmiAt, this.cyc, this.zCyc, this.ymFrac, zi, this.testHold] = s.m;
+      this.testHold = this.testHold | 0;
       this.firqEnabled = !!fe; this.vblank = !!vb; this.z80.irq = !!zi;
       this.k052109.rmrd = !!(this.ctrl & 0x08);
       for (let i = 0; i < 2048; i++) this.updateColour(i);

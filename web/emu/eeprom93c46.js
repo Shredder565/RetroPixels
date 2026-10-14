@@ -14,8 +14,15 @@
 //     once here, so data out reads 1 ("ready") when chip select comes back.
 //   - chip select low ends the command.
 //
+// The same 1 Kbit part can also be wired as 128 bytes (the "x8" organisation): then
+// each word is 8 bits and the address has 7 bits. Some Konami boards (The Simpsons)
+// use a part whose commands carry 9 address bits in that mode (the top two are
+// ignored) and whose opcode 11 is WRITE (it has no separate erase: a write replaces
+// the byte); pass { wordBits: 8, addrBits: 9, write11: true } for those.
+//
 // Interface:
-//   const e = new RPEeprom93C46(initialBytes?)   initialBytes: 128 bytes (big-endian words), e.g. from getSRAM
+//   const e = new RPEeprom93C46(initialBytes?, opts?)   initialBytes: 128 bytes (big-endian words), e.g. from getSRAM
+//                           opts: { wordBits: 16 | 8, addrBits, write11 } (default 16-bit words, 6 address bits)
 //   e.write(cs, clk, di)    set the three input lines (booleans / 0-1)
 //   e.read() -> 0 / 1       the data-out line
 //   e.bytes -> Uint8Array(128)   the contents (big-endian words) for getSRAM
@@ -25,7 +32,12 @@
 
 (function (global) {
   class RPEeprom93C46 {
-    constructor(initial) {
+    constructor(initial, opts) {
+      opts = opts || {};
+      this.wordBits = opts.wordBits === 8 ? 8 : 16;
+      this.words = this.wordBits === 8 ? 128 : 64;
+      this.addrBits = opts.addrBits || (this.wordBits === 8 ? 7 : 6);
+      this.write11 = !!opts.write11;
       this.bytes = new Uint8Array(128).fill(0xff);
       if (initial && initial.length) this.bytes.set(initial.subarray ? initial.subarray(0, 128) : initial.slice(0, 128));
       this.cs = 0; this.clk = 0; this.di = 0; this.dout = 1;
@@ -36,10 +48,16 @@
       this.dirty = false;
     }
 
-    word(a) { return (this.bytes[a * 2] << 8) | this.bytes[a * 2 + 1]; }
+    word(a) {
+      a &= this.words - 1;
+      return this.wordBits === 8 ? this.bytes[a] : (this.bytes[a * 2] << 8) | this.bytes[a * 2 + 1];
+    }
     setWord(a, v) {
+      a &= this.words - 1;
+      v &= this.wordBits === 8 ? 0xff : 0xffff;
       if (this.word(a) !== v) this.dirty = true;
-      this.bytes[a * 2] = v >> 8; this.bytes[a * 2 + 1] = v & 0xff;
+      if (this.wordBits === 8) this.bytes[a] = v;
+      else { this.bytes[a * 2] = v >> 8; this.bytes[a * 2 + 1] = v & 0xff; }
     }
 
     write(cs, clk, di) {
@@ -62,16 +80,16 @@
           return;
         case 1: // opcode + address
           this.shift = (this.shift << 1) | di; this.bits++;
-          if (this.bits === 8) this.command(this.shift >> 6, this.shift & 0x3f);
+          if (this.bits === 2 + this.addrBits) this.command(this.shift >> this.addrBits, this.shift & ((1 << this.addrBits) - 1));
           return;
         case 2: // reading: next bit out
-          if (this.outBits === 0) { this.addr = (this.addr + 1) & 63; this.out = this.word(this.addr); this.outBits = 16; }
-          this.dout = (this.out >> 15) & 1; this.out = (this.out << 1) & 0xffff; this.outBits--;
+          if (this.outBits === 0) { this.addr = (this.addr + 1) & (this.words - 1); this.out = this.word(this.addr); this.outBits = this.wordBits; }
+          this.dout = (this.out >> (this.wordBits - 1)) & 1; this.out = (this.out << 1) & ((1 << this.wordBits) - 1); this.outBits--;
           return;
         case 3: // gathering 16 data bits
           this.shift = ((this.shift << 1) | di) & 0xffff; this.bits++;
-          if (this.bits === 16) {
-            if (this.writeAll) { for (let a = 0; a < 64; a++) this.setWord(a, this.shift); }
+          if (this.bits === this.wordBits) {
+            if (this.writeAll) { for (let a = 0; a < this.words; a++) this.setWord(a, this.shift); }
             else this.setWord(this.addr, this.shift);
             this.state = 4; this.dout = 1;
           }
@@ -81,24 +99,31 @@
     }
 
     command(op, a) {
+      const top = a >> (this.addrBits - 2);   // the 00-opcode commands are picked by the address's top two bits
+      a &= this.words - 1;
       this.addr = a;
       switch (op) {
         case 2: // READ
-          this.state = 2; this.dout = 0; this.out = this.word(a); this.outBits = 16;
+          this.state = 2; this.dout = 0; this.out = this.word(a); this.outBits = this.wordBits;
           return;
         case 1: // WRITE
           if (!this.enabled) { this.state = 4; return; }
           this.state = 3; this.bits = 0; this.shift = 0; this.writeAll = false;
           return;
-        case 3: // ERASE
+        case 3: // ERASE (or WRITE on parts where opcode 11 writes)
+          if (this.write11) {
+            if (!this.enabled) { this.state = 4; return; }
+            this.state = 3; this.bits = 0; this.shift = 0; this.writeAll = false;
+            return;
+          }
           if (this.enabled) this.setWord(a, 0xffff);
           this.state = 4; this.dout = 1;
           return;
         default:
-          switch (a >> 4) {
+          switch (top) {
             case 0: this.enabled = false; break;                                   // EWDS
             case 1: if (this.enabled) { this.state = 3; this.bits = 0; this.shift = 0; this.writeAll = true; return; } break; // WRAL
-            case 2: if (this.enabled) for (let i = 0; i < 64; i++) this.setWord(i, 0xffff); break; // ERAL
+            case 2: if (this.enabled) for (let i = 0; i < this.words; i++) this.setWord(i, 0xffff); break; // ERAL
             case 3: this.enabled = true; break;                                    // EWEN
           }
           this.state = 4; this.dout = 1;

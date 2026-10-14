@@ -22,7 +22,8 @@
 //   0rrr i ttt  register r (2 X, 3 Y, 5 U, 6 S, 7 PC), i = indirect, ttt:
 //       0 ,R+   1 ,R++   2 ,-R   3 ,--R   4 n8,R   5 n16,R   6 ,R
 //   1rrr i ttt  with ttt 0 A,R   1 B,R   7 D,R   (signed accumulator offsets)
-// TFR/EXG register numbers: 0 A, 1 B, 2 X, 3 Y, 4 S, 5 U (others read 0xff).
+// TFR/EXG register numbers: 0 A, 1 B, 2 X, 3 Y, 4 S, 5 U (others read 0xff). Unlike the
+// 6809, TFR copies the register in the postbyte's LOW nibble into the one in its high nibble.
 //
 // Interface:
 //   const cpu = new RPKonami2({ read(a), write(a, v), setLines(v) });
@@ -338,7 +339,7 @@
         case 0x3d: this.cc |= this.imm8(); break;   // ORCC
         case 0x3e: { const p = this.imm8(), r1 = p >> 4, r2 = p & 15, v1 = this.regGet(r1), v2 = this.regGet(r2);
           this.regSet(r1, v2); this.regSet(r2, v1); break; }   // EXG
-        case 0x3f: { const p = this.imm8(); this.regSet(p & 15, this.regGet(p >> 4)); break; } // TFR
+        case 0x3f: { const p = this.imm8(); this.regSet(p >> 4, this.regGet(p & 15)); break; } // TFR: low nibble is the source, high the destination
         case 0x54: case 0x55: this.d = this.add16(this.d, this.op16(op & 1)); break;  // ADDD
         case 0x56: case 0x57: this.d = this.sub16(this.d, this.op16(op & 1)); break;  // SUBD
         case 0x58: { const a = this.ea(); this.logic16(this.d); this.wr16(a, this.d); break; }  // STD
