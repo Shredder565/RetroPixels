@@ -5,10 +5,10 @@
 </p>
 
 <p align="center">
-  <a href="../../releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/@@REPO@@?label=release&sort=semver"></a>
+  <a href="../../releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/Shredder565/RetroPixels?label=release&sort=semver"></a>
   <img alt="Platform: Windows 10/11 x64" src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011%20x64-0078d4">
   <img alt="Go 1.24" src="https://img.shields.io/badge/go-1.24-00add8">
-  <a href="../../actions/workflows/ci.yml"><img alt="Build" src="https://github.com/@@REPO@@/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="../../actions/workflows/ci.yml"><img alt="Build" src="https://github.com/Shredder565/RetroPixels/actions/workflows/ci.yml/badge.svg"></a>
 </p>
 
 <p align="center">
@@ -16,6 +16,7 @@
   <a href="#features">Features</a> ·
   <a href="#supported-systems">Systems</a> ·
   <a href="#building-from-source">Build</a> ·
+  <a href="#support-development">Donate</a> ·
   <a href="CHANGELOG.md">Changelog</a>
 </p>
 
@@ -89,8 +90,8 @@ uses it to draw its window). For recording, RetroPixels downloads ffmpeg the fir
 RetroPixels is a Go program with an embedded web front end; no C toolchain is required.
 
 ```sh
-git clone https://github.com/@@REPO@@.git
-cd @@NAME@@
+git clone https://github.com/Shredder565/RetroPixels.git
+cd RetroPixels
 go test ./...
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
   go build -trimpath -ldflags "-s -w -H windowsgui" -o RetroPixels.exe .
@@ -108,6 +109,18 @@ Requires Go 1.24 or newer. Pushing a tag such as `v2.7.0` builds the release zip
 | `n64/` | Nintendo 64 emulator (CPU, RSP, RDP), run natively |
 | `sevenzip/` | `.7z` extractor (LZMA, LZMA2, BCJ, BCJ2) |
 | `docs/` | Project website (GitHub Pages) |
+
+## Support development
+
+RetroPixels is free to download and built by one developer. If you enjoy it, a donation helps fund
+new systems, more arcade boards, accuracy work and code signing (so Windows stops warning about the
+download).
+
+<p>
+  <a href="https://github.com/sponsors/Shredder565"><img alt="Sponsor on GitHub" src="https://img.shields.io/badge/Sponsor-%E2%9D%A4-db61a2?logo=githubsponsors&logoColor=white&style=for-the-badge"></a>
+</p>
+
+You can also use the **Sponsor** button at the top of this repository. Thank you!
 
 ## Changelog
 
