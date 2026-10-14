@@ -4,7 +4,7 @@
 //     and 2 KB of palette RAM (1024 colours of 15 bits);
 //   - the K052109 tilemap chip (k052109.js: a fixed layer and two scrolling layers) and
 //     the K051960 / K051937 sprite chips (k051960.js); this board's ROMs keep every sprite as
-//     one whole picture (see spriteStart) and all graphics as packed 4-bit pixels (decodePacked);
+//     one whole picture, laid out as the g7 PROM says (see spriteCells), and all graphics as packed 4-bit pixels (decodePacked);
 //   - a Z80 sound processor at 3.58 MHz (RPZ80) with a YM2151 FM chip (ym2151.js), a
 //     K007232 PCM chip (k007232.js) for drums and effects, a uPD7759 speech chip
 //     (upd7759.js) and the title song, a recording kept in its own 512 KB ROM and played
@@ -56,32 +56,45 @@
 
   // Sprite ROM layout. The K051960 numbers a sprite's 16x16 cells in Konami's zig-zag order inside
   // blocks of 64 codes (an 8 x 8 sheet of cells: code bits 0, 2, 4 step across, bits 1, 3, 5 step
-  // down). This board's ROMs don't hold cells, though: each sprite is one whole picture, stored
-  // row after row (2 words of 8 pixels per cell across), and the pictures of a block follow each
-  // other in code order. So a sprite W x H cells big at code c starts at word
-  //   (c's block) * 2048 + n * W * H * 32
-  // where n is c's code bits 0-5 with the bits that step through the sprite's own cells taken out
-  // (the remaining bits pushed together, lowest first). The real board gets there through its
-  // address wiring and the PROM at g7; RetroPixels works it out from the sprite's size instead,
-  // which gives whole, correct pictures for every sprite the game draws (checked on a real set).
-  // That PROM (963a30.g7) is still part of the set, but nothing reads it.
+  // down). This board's ROMs don't hold cells, though: they hold whole pictures, stored row after
+  // row (2 words of 8 pixels per cell across), the pictures of a block one after the other. The
+  // PROM at g7 (256 x 4 bits, one entry per block of 64 codes) gives the picture size the block is
+  // stored in (0 1x1, 1 1x2, 2 2x1, 3 2x2, 4 2x4, 5 4x2, 6 4x4, 7 8x8 cells across x down: the
+  // K051960's size numbers with the wide and tall ones swapped round),
+  // and the board's address wiring follows it: in a block of W x H pictures, the code bits that step
+  // through a picture's own cells pick the cell inside the picture, and the other code bits (pushed
+  // together, lowest first) pick the picture. So cell c of a block sits at word
+  //   (c's block) * 2048 + picture * W * H * 32 + (cell row * 16) * 2W + cell column * 2.
+  // RetroPixels sorts the ROMs into plain 16x16 cells this way once (spriteCells), so a sprite of any
+  // size, even one that doesn't match its block's pictures, shows what the board shows.
   const SPR_W = [1, 2, 1, 2, 4, 2, 4, 8], SPR_H = [1, 1, 2, 2, 2, 4, 4, 8];
-  const SPRITE_START = (() => {
-    const t = new Int32Array(8 * 64);
-    for (let size = 0; size < 8; size++) {
-      const nx = Math.log2(SPR_W[size]), ny = Math.log2(SPR_H[size]);
-      for (let c = 0; c < 64; c++) {
-        let n = 0, k = 0;
-        for (let b = 0; b < 6; b++) {
-          const own = (b & 1) ? (b >> 1) < ny : (b >> 1) < nx;
-          if (!own) n |= ((c >> b) & 1) << k++;
-        }
-        t[size * 64 + c] = n * SPR_W[size] * SPR_H[size] * 32;
+  // where cell (code & 63) of a block stored as `size` pictures starts, and its column/row in the picture
+  function cellPlace(size, c) {
+    const nx = Math.log2(SPR_W[size]), ny = Math.log2(SPR_H[size]);
+    let n = 0, k = 0, cx = 0, cy = 0;
+    for (let b = 0; b < 6; b++) {
+      const bit = (c >> b) & 1, i = b >> 1;
+      if (b & 1) { if (i < ny) { cy |= bit << i; continue; } }
+      else if (i < nx) { cx |= bit << i; continue; }
+      n |= bit << k++;
+    }
+    return { start: n * SPR_W[size] * SPR_H[size] * 32, cx, cy };
+  }
+  const PROM_SIZE = [0, 2, 1, 3, 5, 4, 6, 7];
+  function spriteCells(packed, prom) {
+    const cells = packed.length >> 8, out = new Uint8Array(cells * 256);
+    for (let c = 0; c < cells; c++) {
+      const size = PROM_SIZE[prom[(c >> 6) & 255] & 7], p = cellPlace(size, c & 63), row = 2 * SPR_W[size];
+      const base = (c >> 6) * 2048 + p.start;
+      for (let y = 0; y < 16; y++) {
+        const w = base + (p.cy * 16 + y) * row + p.cx * 2;
+        out.set(packed.subarray(w * 8, w * 8 + 16), c * 256 + y * 16);
       }
     }
-    return t;
-  })();
-  function spriteStart(code, size) { return (code & ~63) * 32 + SPRITE_START[size * 64 + (code & 63)]; }
+    return out;
+  }
+  // Without the PROM (an incomplete set), each sprite is taken to be stored at its own size.
+  function spriteStart(code, size) { return (code & ~63) * 32 + cellPlace(size, code & 63).start; }
 
   // This board stores its graphics packed: each 32-bit ROM word is a row of 8 pixels of 4 bits,
   // the leftmost in the high half of the last byte, the next in its low half, and so on back to
@@ -188,10 +201,15 @@
       // the scrolling layers sit 6 pixels further left in the chip's map than the fixed layer
       // (measured against the real game's picture: walls and floors line up with the sprites this way)
       this.k052109.dx[1] = this.k052109.dx[2] = -6;
+      const g7 = get("prom_g7"), sprPacked = decodePacked(spr);
+      const haveG7 = g7.length >= 256 && g7.some((v) => v !== 0);
       this.k051960 = new global.RPK051960({
-        rom: spr, decode: decodePacked, spriteStart,
-        // ROM reading: the chip's address bit 22 (reg 3 bit 6) is wired to the second pair of ROMs
+        rom: spr, decode: () => sprPacked,
+        pens: haveG7 ? spriteCells(sprPacked, g7) : undefined, spriteStart: haveG7 ? undefined : spriteStart,
+        // ROM reading: the chip's address bit 22 (reg 3 bit 6) is wired to the second pair of ROMs;
+        // the CPU sees a word in the chips' planar form
         readbackAddr: (w) => (w & 0x3ffff) | (((w >> 22) & 1) << 18),
+        romByte: (w, n) => planarByte(sprPacked, w, n),
         spriteCallback: (t) => {
           // attribute bit 4 -> code bit 13; bits 0-3 = colour; bit 7 = pen 15 is a shadow
           // (it darkens what's under it instead of being drawn)
@@ -201,7 +219,9 @@
         },
       });
       this.k007232 = new global.RPK007232({ clock: Z80_HZ, rom: get("pcm"),
-        onPort: (v) => { this.k007232.setVolume(0, (v & 15) * 0x11, (v & 15) * 0x11); this.k007232.setVolume(1, (v >> 4) * 0x11, (v >> 4) * 0x11); } });
+        // the port drives two 4-bit volume latches: the high nibble sets channel A, the low nibble channel B
+        // (a linear scale, 15 = full)
+        onPort: (v) => { this.k007232.setVolume(0, (v >> 4) * 0x11, (v >> 4) * 0x11); this.k007232.setVolume(1, (v & 15) * 0x11, (v & 15) * 0x11); } });
       this.upd = new global.RPUPD7759({ clock: UPD_HZ, rom: get("speech") });
       this.ym = new global.RPYM2151({ clock: Z80_HZ });
       this.out = new RPArcade.Resampler(Z80_HZ / 64, this.sampleRate);
@@ -395,8 +415,11 @@
         // (an ADPCM sample that wanders away from the centre) fade out instead of clicking at the end
         const u = this.updV || 0;
         this.updDC = u - this.updPrev + DC_KEEP * this.updDC; this.updPrev = u;
-        let v = fm * 0.45 + (this.kL || 0) * 0.25 + this.updDC * 0.3 + title * 0.35;
-        if (v > 1) v = 1; else if (v < -1) v = -1;
+        // the balance of music, effects, speech and title song measured against the real board (with
+        // some headroom left, so the loudest music doesn't clip)
+        let v = fm * 0.62 + (this.kL || 0) * 0.235 + this.updDC * 0.255 + title * 0.32;
+        // the loudest moments (several FM channels in step) are rounded off gently instead of clipping
+        if (v > 0.75) v = 0.75 + 0.2 * Math.tanh((v - 0.75) * 5); else if (v < -0.75) v = -0.75 - 0.2 * Math.tanh((-v - 0.75) * 5);
         this.out.add(v);
       }
     }
@@ -494,7 +517,7 @@
     { name: "963a28.h27", size: 0x80000, role: "tiles_a" }, { name: "963a29.k27", size: 0x80000, role: "tiles_b" },
     { name: "963a17.h4", size: 0x80000, role: "sprites_a" }, { name: "963a15.k4", size: 0x80000, role: "sprites_b" },
     { name: "963a18.h6", size: 0x80000, role: "sprites_c" }, { name: "963a16.k6", size: 0x80000, role: "sprites_d" },
-    { name: "963a30.g7", size: 0x100, role: "prom_g7" }, { name: "963a31.g19", size: 0x100, role: "prom_mixer" }, // g19 mixes the layers (see draw)
+    { name: "963a30.g7", size: 0x100, role: "prom_g7" }, // g7: how each block of sprite pictures is stored { name: "963a31.g19", size: 0x100, role: "prom_mixer" }, // g19 mixes the layers (see draw)
     { name: "963a26.c13", size: 0x20000, role: "pcm" }, { name: "963a27.d18", size: 0x20000, role: "speech" },
     { name: "963a25.d5", size: 0x80000, role: "title" },
   ];
@@ -517,6 +540,7 @@
   ];
   // helpers for RetroPixels' own tests (building fake sets)
   TMNTBoard.spriteStart = spriteStart;
+  TMNTBoard.spriteCells = spriteCells;
   TMNTBoard.priorityTable = priorityTable;
 
   RPArcade.boards.push(TMNTBoard);

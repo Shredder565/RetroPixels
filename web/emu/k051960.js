@@ -32,8 +32,12 @@
 //                     row after row (rather than in 16x16 cells): spriteStart(code, size) -> the ROM
 //                     word (4 bytes, 8 pixels) where the sprite's top row starts; a sprite W cells
 //                     across then has 2 * W words a row. code is the board's code (after spriteCallback).
+//     pens            optional: the pixels ready-made (one byte per pixel, 256 per 16x16 code, rows of 16)
+//                     for boards that sort their ROMs into cells themselves; rom/decode are then only
+//                     used for ROM reading (see romByte)
 //     readbackAddr    optional (word) -> word: the board's wiring of the chip's ROM address lines,
 //                     applied to the readback address (reg 3 : reg 2 : latched low byte)
+//     romByte         optional (word, n) -> byte n (0-3) of ROM word as the CPU reads it back
 //     spriteCallback  t => { ... } with t = { code, color (byte 3), pri: 0, shadow: false };
 //                     the board's wiring sets t.code, t.color (pens become color * 16 + pen),
 //                     t.pri (copied to the priority buffer) and t.shadow (pen 15 marks shadow)
@@ -41,7 +45,7 @@
 //   k.read(off) / k.write(off, v) the sprite list, off 0..0x3ff
 //   k.readReg(r) / k.writeReg(r, v)   K051937 registers 0-7: reg 0 bit 5 = ROM readback on
 //                     (reads of 4-7 then return the 4 bytes of the ROM word whose address is reg 3 :
-//                     reg 2 : the last sprite-list address read, bits 2-9); reg 1 bit 0 = flip
+//                     reg 2 : the last sprite-list address read, bits 2-9); reg 0 bit 3 = flip
 //                     screen; reading reg 0 returns a bit 0 that changes each read (drawing status)
 //   k.dx, k.dy        board-specific offsets added to every sprite's position
 //   k.render(out, w, h, opts)  draws the sprites into out (Uint16Array w*h, color * 16 + pen, 0 untouched
@@ -63,8 +67,9 @@
       this.ram = new Uint8Array(0x400);
       this.regs = new Uint8Array(8);
       this.spriteStart = opts.spriteStart || null;
-      this.pens = opts.decode ? opts.decode(this.rom) : K051960.decode(this.rom);
+      this.pens = opts.pens || (opts.decode ? opts.decode(this.rom) : K051960.decode(this.rom));
       this.readbackAddr = opts.readbackAddr || null;
+      this.romByte = opts.romByte || null;
       this.packed = !!(opts.decode && opts.spriteStart); // pens kept 8 to a ROM word, in ROM order
       this.codes = this.pens.length >> 8;
       this.dx = 0; this.dy = 0;
@@ -97,13 +102,14 @@
       return this.ram[off & 0x3ff];
     }
     write(off, v) { this.ram[off & 0x3ff] = v & 0xff; }
-    get flipScreen() { return !!(this.regs[1] & 1); }
+    get flipScreen() { return !!(this.regs[0] & 8); }
     readReg(r) {
       r &= 7;
       if (r === 0) { this.toggle ^= 1; return this.toggle; }
       if (r >= 4 && (this.regs[0] & 0x20)) {
         let w = (this.regs[3] << 16) | (this.regs[2] << 8) | this.romLow;
         if (this.readbackAddr) w = this.readbackAddr(w);
+        if (this.romByte) return this.romByte(w, r & 3);
         if (this.packed) {
           // a packed board: the chip still shows the word in its planar form (byte n = bit n of the 8 pixels)
           const at = (w * 8) % this.pens.length, n = r & 3;
