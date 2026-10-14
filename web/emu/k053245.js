@@ -51,6 +51,14 @@
 //                             spriteCallback(t), dx, dy })
 //     t = { attr, color, pri, shadow, code }: set t.color / t.pri (/ t.shadow / t.code)
 //     dx, dy: the board's fixed offsets from sprite coordinates to its picture (pixels)
+//     codeCounters: multi-tile sprites step the code's own column / row bits (see counterCode)
+//                   instead of adding the offsets above (the K053247 on The Simpsons)
+//     subtractOffsetX: the X offset register moves sprites left as it grows (The Simpsons' boss
+//       screen shake, seen in MAME), instead of right.
+//     zoomStep: zoomed sprites are sampled in steps of zoom / 64 source pixels and their size is
+//               cut to whole pixels (The Simpsons)
+//     t.shadow may be a number (a shadow type, 1-3), which goes into the shadow output as is;
+//     on the K053247 a shadow pixel over a sprite drawn earlier keeps that sprite's priority
 //   k.ram                    the sprite list the CPU writes (Uint8Array, big-endian words)
 //   k.buffer                 the copy that gets drawn (K053245: after a write to register 6;
 //                            K053247 boards copy into it themselves)
@@ -100,6 +108,9 @@
       this.rom = opts.rom || new Uint8Array(128);
       this.spriteCallback = opts.spriteCallback || null;
       this.dx = opts.dx || 0; this.dy = opts.dy || 0;
+      this.codeCounters = !!opts.codeCounters;
+      this.zoomStep = !!opts.zoomStep;
+      this.offXSign = opts.subtractOffsetX ? -1 : 1;
       this.pens = RPK053245.decode(this.rom, opts.layout || (this.type === "053247" ? "packed" : "planar"));
       this.tiles = this.pens.length >> 8;
       this.t = { attr: 0, color: 0, pri: 0, shadow: false, code: 0 };
@@ -132,6 +143,15 @@
       return pens;
     }
 
+    // Tile of column tx, row ty of a multi-tile sprite when the chip counts in the code's own bits
+    // (opts.codeCounters): the code's bits 0, 2, 4 are a 3-bit column counter and bits 1, 3, 5 a
+    // 3-bit row counter, each stepped on its own (wrapping within its 3 bits), so a sprite whose
+    // code doesn't start on its size's boundary still takes the right tiles.
+    static counterCode(code, tx, ty) {
+      let x = (code & 1) | ((code >> 1) & 2) | ((code >> 2) & 4), y = ((code >> 1) & 1) | ((code >> 2) & 2) | ((code >> 3) & 4);
+      x = (x + tx) & 7; y = (y + ty) & 7;
+      return (code & ~0x3f) | (x & 1) | ((x & 2) << 1) | ((x & 4) << 2) | ((y & 1) << 1) | ((y & 2) << 2) | ((y & 4) << 3);
+    }
     reset() { this.ram.fill(0); this.buffer.fill(0); this.regs.fill(0); }
     readWord(i) { i = (i % (this.count * 8)) * 2; return (this.ram[i] << 8) | this.ram[i + 1]; }
     writeWord(i, v) { i = (i % (this.count * 8)) * 2; this.ram[i] = (v >> 8) & 0xff; this.ram[i + 1] = v & 0xff; }
@@ -189,8 +209,9 @@
         ord = [];
         for (let k = 0; k < 128; k++) if (slot[k] >= 0) ord.push(slot[k]);
       }
+      const counters = this.codeCounters;
       const flipScreenX = this.flipX, flipScreenY = this.flipY;
-      const offX = this.offsetX, offY = this.offsetY;
+      const offX = this.offXSign * this.offsetX, offY = this.offsetY;
       for (const i of ord) {
         const o = i * 16;
         const w0 = (b[o] << 8) | b[o + 1];
@@ -212,7 +233,10 @@
         const sx = 64 / (zx || 0.5), sy = 64 / (zy || 0.5);
         if (zx > 0x2000 || zy > 0x2000) continue;
         const fullW = tw * 16, fullH = th * 16;
-        const dw = Math.round(fullW * sx), dh = Math.round(fullH * sy);
+        // opts.zoomStep: the chip steps through the sprite zoom / 64 source pixels a screen pixel
+        // (starting an eighth of a step in) and the sprite's size is cut to whole pixels
+        const zs = this.zoomStep && zx && zy;
+        const dw = zs ? Math.floor(fullW * 64 / zx) : Math.round(fullW * sx), dh = zs ? Math.floor(fullH * 64 / zy) : Math.round(fullH * sy);
         if (dw <= 0 || dh <= 0) continue;
         // centre position on the picture; Y counts upwards in sprite space
         let cx = ((x + offX + 1024 + 512) & 0x3ff) - 512;
@@ -222,7 +246,7 @@
         if (!is247) {
           const ax = axisMap(tw, zx || 0.5, cx, this.mapX, this.mapXf), ay = axisMap(th, zy || 0.5, cy, this.mapY, this.mapYf);
           left = ax.start; dw2 = ax.len; mapX = this.mapX; top = ay.start; dh2 = ay.len; mapY = this.mapY;
-        } else { left = Math.round(cx - dw / 2); top = Math.round(cy - dh / 2); }
+        } else { left = zs ? cx - (dw >> 1) : Math.round(cx - dw / 2); top = zs ? cy - (dh >> 1) : Math.round(cy - dh / 2); }
         if (flipScreenX) { left = w - left - dw2; flipX = !flipX; }
         if (flipScreenY) { top = h - top - dh2; flipY = !flipY; }
         if (left >= w || top >= h || left + dw2 <= 0 || top + dh2 <= 0) continue;
@@ -241,7 +265,7 @@
             if (flipY) { tile = th - 1 - tile; pf = !pf; }
             ty = tile; fy = pf ? this.mapYf[sj] : m & 15;
           } else {
-            let v = Math.floor((py - top) * fullH / dh);
+            let v = zs ? Math.min(fullH - 1, ((py - top) * zy + 12) >> 6) : Math.floor((py - top) * fullH / dh);
             if (flipY) v = fullH - 1 - v;
             if (mirrorY && v * 2 < fullH) v = fullH - 1 - v;
             ty = v >> 4; fy = v & 15;
@@ -256,20 +280,22 @@
               if (mirrorX && tile * 2 >= tw) { tile = tw - 1 - tile; pf = !pf; }
               tx = tile; fx = pf ? this.mapXf[sj] : m & 15;
             } else {
-              let u = Math.floor((px - left) * fullW / dw);
+              let u = zs ? Math.min(fullW - 1, ((px - left) * zx + 12) >> 6) : Math.floor((px - left) * fullW / dw);
               if (flipX) u = fullW - 1 - u;
               if (mirrorX && u * 2 < fullW) u = fullW - 1 - u;
               tx = u >> 4; fx = u & 15;
             }
-            const tile = (is247 ? baseCode + XOFF[tx] + YOFF[ty]
+            const tile = (is247 ? (counters ? RPK053245.counterCode(baseCode, tx, ty) : baseCode + XOFF[tx] + YOFF[ty])
               : (baseCode & ~0x3f) | XOFF[(tcx + tx) & 7] | YOFF[(tcy + ty) & 7]) % tiles;
             const pen = pens[tile * 256 + fy * 16 + fx];
             if (!pen) continue;
             const at = row + px;
             if (shadow && pen === 15) {
               // K053245: the shadow is kept apart from the sprite pixels (outShadow = its priority + 1);
-              // it darkens what's behind but never another sprite
-              if (is247) { outShadow[at] = 1; outPri[at] = pri; } else outShadow[at] = pri + 1;
+              // it darkens what's behind but never another sprite. K053247: a shadow over a sprite
+              // drawn earlier keeps that sprite's pixel and priority
+              if (is247) { outShadow[at] = shadow === true ? 1 : shadow; if (!(outPens[at] & 15)) outPri[at] = pri; }
+              else outShadow[at] = pri + 1;
               continue;
             }
             outPens[at] = color | pen; outPri[at] = pri;

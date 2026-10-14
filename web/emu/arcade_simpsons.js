@@ -10,9 +10,10 @@
 //     Two bits of the EEPROM port choose what shows at 0000 and 2000.
 //   - a K052109 tilemap chip, K053247 / K053246 sprites and a K053251 mixer;
 //   - sprite "DMA": at the start of the vertical blank (when the K053246 allows it) the
-//     list in sprite RAM is copied into the sprite chip, skipping sprites that are off,
-//     and a little later the processor gets its FIRQ (when the board allows it); the IRQ
-//     comes at the vertical blank when the K052109 allows it;
+//     list in sprite RAM is copied into the sprite chip, skipping sprites that are off or
+//     whose drawing-order byte is 0, and a little later the processor gets its FIRQ (when
+//     the board allows it); the IRQ comes at the vertical blank when the K052109 allows it.
+//     The picture is made as the blank ends (with the scrolling the game set during it);
 //   - a serial EEPROM (128 bytes) for settings and high scores; the game reads its data
 //     line on bit 4 of 1f81 and its ready line on bit 5. A set without the .nv file starts
 //     with the test switch held, so the game writes its own factory settings;
@@ -33,6 +34,9 @@
   const W = 288, H = 224, TOP = 16, LEFT = 112;
   const NMI_DELAY = 179;                // Z80 cycles from arming the sound NMI to the NMI (50 us)
   const FIRQ_DELAY = 256;               // main cycles from the sprite copy to its FIRQ
+  const PCM_GAIN = 1.6;                 // K053260 level against the YM2151 (MAME's mix is ~4 dB more PCM-heavy)
+  const SHADE = new Uint8Array(256);    // a shadow leaves 60% of each colour component
+  for (let i = 0; i < 256; i++) SHADE[i] = Math.floor(i * 0.6);
 
   // Gather files into one region: each file's bytes go `width` at a time, every `stride` bytes.
   function interleave(game, files, role, width, stride) {
@@ -82,14 +86,14 @@
       });
       this.k052109.dx = [0, -6, -6];   // the scrolling layers sit 6 pixels right of the fixed layer on this board
       this.k053247 = new global.RPK053245({
-        // dx: with the X offset the game writes (0x15), sprites land on the backgrounds the way the game
+        // dx: with the X offset the game writes (0x15) subtracted, sprites land on the backgrounds the way the game
         // draws them: the character-select portraits centred in their frames, the robbers leaving the
         // jewellers' door, the bonus-stage ranking labels over their score panels
-        type: "053247", rom: spriteRom, layout: "packed", dx: -101, dy: -23,
+        type: "053247", rom: spriteRom, layout: "packed", dx: -59, dy: -39, codeCounters: true, zoomStep: true, subtractOffsetX: true,
         spriteCallback: (t) => {
           t.pri = (t.attr & 0x0f80) >> 6;
           t.color = self.spriteBase + (t.attr & 0x1f);
-          t.shadow = !!(t.attr & 0x0c00);   // either shadow bit: the sprite's pen 15 is a see-through shadow
+          t.shadow = (t.attr >> 10) & 3;   // shadow type (0 = none): the sprite's pen 15 is a see-through shadow
         },
       });
       this.k053251 = new global.RPK053251();
@@ -225,7 +229,9 @@
       let o = 0;
       for (let i = 0; i < 256; i++) {
         const s = i * 16;
-        if (src[s] & 0x80) { dst.set(src.subarray(s, s + 16), o); o += 16; }
+        // a sprite whose drawing-order byte is 0 isn't copied (the game parks sprites that way,
+        // e.g. a knocked-down enemy blinking out)
+        if ((src[s] & 0x80) && src[s + 1]) { dst.set(src.subarray(s, s + 16), o); o += 16; }
       }
       for (; o < 256 * 16; o += 16) dst.fill(0, o, o + 16);
     }
@@ -260,7 +266,7 @@
       this.k053260.mix(pcm, 0, n, YM_HZ / 64);
       for (let i = 0; i < n; i++) {
         this.ym.tick();
-        this.resampler.add((this.ym.out[0] + this.ym.out[1]) / 65536 + pcm[i]);
+        this.resampler.add((this.ym.out[0] + this.ym.out[1]) / 65536 + pcm[i] * PCM_GAIN);
       }
     }
 
@@ -272,16 +278,35 @@
       for (let l = 0; l < 3; l++) { this.layerPens[l].fill(0); this.k052109.render(l, this.layerPens[l], W, H, { x0: LEFT, y0: TOP }); }
       this.sprPens.fill(0); this.sprPri.fill(0); this.sprShadow.fill(0);
       this.k053247.render(this.sprPens, this.sprPri, this.sprShadow, W, H);
-      k51.mix(this.mixPens, this.mixShade, n, [
-        { ci: 1, pens: this.sprPens, pri: this.sprPri, shadow: this.sprShadow },
-        { ci: 4, pens: this.layerPens[2], pri: k51.priority(4) },
-        { ci: 3, pens: this.layerPens[1], pri: k51.priority(3) },
-        { ci: 2, pens: this.layerPens[0], pri: k51.priority(2) },
-      ], k51.paletteBase(0) * 16);
+      this.mix();
       const pal = this.palette, scr = this.screen, pens = this.mixPens, shade = this.mixShade;
       for (let i = 0; i < n; i++) {
         const c = pal[pens[i] & 2047];
-        scr[i] = shade[i] ? (0xff000000 | (((c & 0xfefefe) >>> 1) + ((c & 0xf8f8f8) >>> 3))) >>> 0 : c; // shadow: about 60%
+        scr[i] = shade[i] ? (0xff000000 | (SHADE[(c >>> 16) & 255] << 16) | (SHADE[(c >>> 8) & 255] << 8) | SHADE[c & 255]) >>> 0 : c;
+      }
+    }
+
+    // The K053251's choice for every pixel: the input with the lowest priority value whose pen
+    // isn't see-through (pen 0), else the background colour; ties go to the sprite. Sprite pixels
+    // bring their own priority. A sprite's shadow (its pen 15 when the sprite is a shadow type)
+    // leaves any sprite under it alone and darkens the layer or background that wins there, when
+    // that one's priority is no better than the shadow type's priority (registers 6-8 for types 1-3).
+    mix() {
+      const k51 = this.k053251, n = W * H;
+      const sp = this.sprPens, spri = this.sprPri, ssh = this.sprShadow;
+      const l0 = this.layerPens[0], l1 = this.layerPens[1], l2 = this.layerPens[2];
+      const p2 = k51.priority(2), p3 = k51.priority(3), p4 = k51.priority(4);
+      const bg = k51.paletteBase(0) * 16, out = this.mixPens, shade = this.mixShade, regs = k51.regs;
+      for (let i = 0; i < n; i++) {
+        let best = 255, pen = bg, spr = false;
+        const s = sp[i];
+        if (s & 15) { best = spri[i]; pen = s; spr = true; }
+        let v = l2[i]; if ((v & 15) && p4 < best) { best = p4; pen = v; spr = false; }
+        v = l1[i]; if ((v & 15) && p3 < best) { best = p3; pen = v; spr = false; }
+        v = l0[i]; if ((v & 15) && p2 < best) { best = p2; pen = v; spr = false; }
+        out[i] = pen;
+        const sh = ssh[i];
+        shade[i] = sh && !spr && (regs[5 + sh] & 0x3f) <= best ? 1 : 0;
       }
     }
 
@@ -291,10 +316,15 @@
       for (let line = 0; line < LINES; line++) {
         if (line === TOP + H) {
           this.vblank = true;
-          this.drawFrame();
+          // the sprite list is copied as the blank starts
           if (this.k053247.dmaEnabled) { this.spriteDma(); this.firqAt = this.cyc + FIRQ_DELAY; }
           if (this.k052109.irqEnabled) cpu.irq = true;
-        } else if (line === TOP) this.vblank = false;
+        } else if (line === TOP) {
+          // the picture is made as the blank ends, so scrolling and colours the game sets
+          // during the blank show at once (the sprites are the list copied at its start)
+          this.vblank = false;
+          this.drawFrame();
+        }
         const end = (line + 1) * LINE_CYC;
         while (this.cyc < end) {
           if (this.firqAt >= 0 && this.cyc >= this.firqAt) { this.firqAt = -1; if (this.firqEnabled) cpu.firq = true; }
