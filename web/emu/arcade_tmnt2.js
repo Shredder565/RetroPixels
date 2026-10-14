@@ -25,8 +25,15 @@
   const LINE_CYC = 1024;                // 384 pixels at 6 MHz = 64 us a line
   const LINES = 264;
   const FPS = CPU_HZ / (LINE_CYC * LINES);
-  const W = 320, H = 224, TOP = 16, LEFT = 96; // the K052109's map pixels 96..415, lines 16..239
-  const NMI_DELAY = 400;                // Z80 cycles from arming the sound NMI to the NMI (50 us)
+  const W = 304, H = 224, TOP = 16, LEFT = 104; // the K052109's map pixels 104..407, lines 16..239 (the monitor's picture)
+  const NMI_DELAY = 400;
+  // brightness tables: LUT[shadow ? 8 + dim : dim][v] (shadow 60%, each dim step 5% less; the two multiply)
+  const LUT = [];
+  for (let k = 0; k < 16; k++) {
+    const t = new Uint8Array(256), num = (k & 8 ? 3 : 5) * (20 - (k & 7)), den = 100;
+    for (let v = 0; v < 256; v++) t[v] = Math.floor(v * num / den);
+    LUT.push(t);
+  }
 
   // Gather files into one region: each file's bytes go `width` at a time, every `stride` bytes.
   function interleave(game, files, role, width, stride) {
@@ -149,12 +156,13 @@
         },
       });
       this.k053245 = new global.RPK053245({
-        type: "053245", rom: spriteRom, layout: "planar", dx: -3, dy: -23,
+        type: "053245", rom: spriteRom, layout: "planar", dx: -11, dy: -23,
         spriteCallback: (t) => {
           t.pri = 0x20 | ((t.attr & 0x60) >> 2);
           t.color = self.spriteBase + (t.attr & 0x1f);
         },
       });
+      this.k052109.dx = [0, -6, -6];   // the scrolling layers sit 6 pixels right of the fixed layer on this board
       this.k053251 = new global.RPK053251();
       this.k053260 = new global.RPK053260(pcm, YM_HZ);
       this.ym = new global.RPYM2151({ clock: YM_HZ });
@@ -393,15 +401,25 @@
       this.sprPens.fill(0); this.sprPri.fill(0); this.sprShadow.fill(0);
       this.k053245.render(this.sprPens, this.sprPri, this.sprShadow, W, H);
       k51.mix(this.mixPens, this.mixShade, n, [
-        { ci: 1, pens: this.sprPens, pri: this.sprPri, shadow: this.sprShadow },
+        { ci: 1, pens: this.sprPens, pri: this.sprPri, shadow: this.sprShadow, shadowPri: true },
         { ci: 3, pens: this.layerPens[2], pri: k51.priority(3) },
         { ci: 4, pens: this.layerPens[1], pri: k51.priority(4) },
         { ci: 2, pens: this.layerPens[0], pri: k51.priority(2) },
       ], k51.paletteBase(0) * 16);
+      // Shadows show the colour at 60%. The board can also dim the whole picture in eight steps
+      // (5% each, register 1c0300 bits 4-6) while the mixer's shadows are switched on (K053251
+      // register 5 neither 0 nor 0x3e); colours 32-39, the fixed layer's text, keep their brightness.
+      const r5 = k51.read(5), d = (r5 && r5 !== 0x3e) ? (this.ctrl300 >> 4) & 7 : 0;
       const pal = this.palette, scr = this.screen, pens = this.mixPens, shade = this.mixShade;
       for (let i = 0; i < n; i++) {
-        const c = pal[pens[i] & 2047];
-        scr[i] = shade[i] ? (0xff000000 | (((c & 0xfefefe) >>> 1) + ((c & 0xf8f8f8) >>> 3))) >>> 0 : c; // shadow: about 60%
+        const pen = pens[i] & 2047;
+        let c = pal[pen];
+        const k = (shade[i] ? 8 : 0) | ((pen < 512 || pen >= 640) ? d : 0);
+        if (k) {
+          const T = LUT[k];
+          c = (0xff000000 | (T[(c >> 16) & 255] << 16) | (T[(c >> 8) & 255] << 8) | T[c & 255]) >>> 0;
+        }
+        scr[i] = c;
       }
     }
 
@@ -435,7 +453,7 @@
     loadState(s) {
       this.cpu.loadState(s.cpu); this.z80.setState(s.z80);
       this.ram.set(s.ram); this.palRam.set(s.palRam); this.sprRam.set(s.sprRam); this.ioRam.set(s.ioRam); this.prot.set(s.prot); this.sndRam.set(s.sndRam);
-      this.k052109.loadState(s.k052109); this.k053245.setState(s.k053245); this.k053251.setState(s.k053251);
+      this.k052109.loadState(s.k052109); this.k052109.dx = [0, -6, -6]; this.k053245.setState(s.k053245); this.k053251.setState(s.k053251);
       this.k053260.setState(s.k053260); this.ym.loadState(s.ym); this.eeprom.setState(s.eeprom);
       let vb, zi;
       [this.eepromOut, this.ctrl300, vb, this.nmiAt, this.zCyc, this.ymFrac, this.cyc, zi, this.dmaBusy, this.setupFrames] = s.m;

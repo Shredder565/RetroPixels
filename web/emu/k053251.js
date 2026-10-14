@@ -25,7 +25,9 @@
 //   m.shadowPriority                    register 5's value
 //   m.mix(out, shade, n, layers, bgPen)
 //       layers: [{ ci, pens: Uint16Array (0 or pen & 15 == 0: see-through), pri: number or Uint8Array,
-//                  shadow: optional Uint8Array (1 = shadow pixel, pens ignored) }]
+//                  shadow: optional Uint8Array (1 = shadow pixel, pens ignored),
+//                  shadowPri: true when shadow holds the shadow's own priority + 1 and the pens stay
+//                  valid underneath (K053245: a pixel this input wins is never darkened) }]
 //       For each of the n pixels writes the winning pen to out (Uint16Array; bgPen when every input
 //       is see-through) and 1 to shade (Uint8Array) when a shadow covers it. Ties go to the
 //       earlier entry of layers.
@@ -55,18 +57,22 @@
       const L = layers.length;
       const pens = layers.map((l) => l.pens), fixed = layers.map((l) => (typeof l.pri === "number" ? l.pri : -1));
       const pris = layers.map((l) => (typeof l.pri === "number" ? null : l.pri)), shadows = layers.map((l) => l.shadow || null);
+      const apart = layers.map((l) => !!l.shadowPri);
       for (let i = 0; i < n; i++) {
-        let best = 255, pen = bgPen, sh = 255;
+        let best = 255, pen = bgPen, sh = 255, from = -1;
         for (let k = 0; k < L; k++) {
           const p = fixed[k] >= 0 ? fixed[k] : pris[k][i];
           const s = shadows[k];
-          if (s && s[i]) { if (p < sh) sh = p; continue; }
+          if (s && s[i]) {
+            if (!apart[k]) { if (p < sh) sh = p; continue; }
+            if (s[i] - 1 < sh) sh = s[i] - 1;
+          }
           const v = pens[k][i];
           if (!(v & 15)) continue;
-          if (p < best) { best = p; pen = v; }
+          if (p < best) { best = p; pen = v; from = k; }
         }
         out[i] = pen;
-        shade[i] = sh <= best ? 1 : 0;
+        shade[i] = sh <= best && !(from >= 0 && apart[from]) ? 1 : 0;
       }
     }
 

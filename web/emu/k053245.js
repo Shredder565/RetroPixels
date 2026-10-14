@@ -6,7 +6,9 @@
 // K053245, 256 on the K053247:
 //   word 0  bit 15 sprite on; bit 14 keep aspect (the X zoom follows the Y zoom);
 //           bit 13 flip Y; bit 12 flip X; bits 10-11 height and bits 8-9 width
-//           (1, 2, 4 or 8 tiles of 16x16); bits 0-7 drawing order (lower = in front)
+//           (1, 2, 4 or 8 tiles of 16x16); bits 0-7 drawing order. K053247: lower = in front.
+//           K053245: bits 0-6 are a slot number, higher slots in front; one sprite per slot (a later
+//           sprite asking for a taken slot isn't drawn)
 //   word 1  tile number (multi-tile sprites take their tiles in Konami's interleaved order:
 //           columns add 0, 1, 4, 5, 16, 17, 20, 21 and rows add 0, 2, 8, 10, 32, 34, 40, 42)
 //   word 2  Y of the sprite's centre (10 bits, upwards); word 3 X of the centre (10 bits)
@@ -14,14 +16,18 @@
 //   word 6  attributes. K053245: bits 0-4 colour, 5-6 priority, 7 shadow, 8 mirror X,
 //           9 mirror Y. K053247: bits 0-11 colour / priority as the board wires them,
 //           12 shadow, 14 mirror X, 15 mirror Y.
-//           "Mirror" draws the second half of the sprite as a reflection of the first (K053245,
-//           whole tiles). The K053247 mirrors pixel by pixel about the sprite's centre: the top
+//           "Mirror" on the K053245 works on whole tiles: mirror X draws the right half as the left
+//           half reflected (after the sprite's own flip), mirror Y the top half as the bottom half
+//           reflected (before the flip). The K053247 mirrors pixel by pixel about the sprite's centre: the top
 //           (left) half shows the bottom (right) half reflected, so a half-drawn shape such as a
 //           shadow under a character's feet comes out whole.
 //   word 7  unused
 // The board's sprite callback turns the attribute word into a colour (palette entry =
 // colour * 16 + pen) and a priority value for the K053251 mixer, and can change the shadow flag.
-// Shadow sprites turn their pen 15 into a shadow; pen 0 is always see-through.
+// Shadow sprites turn their pen 15 into a shadow; pen 0 is always see-through. On the K053245 a
+// shadow only darkens the backgrounds, never another sprite's pixels: render() keeps it apart
+// (outShadow = the shadow's priority + 1, the sprite pixels stay) for the mixer's shadowPri mode.
+// Zoom (K053245): each 16-pixel tile column / row gets its own rounded width; see axisMap.
 //
 // Graphics: 16x16 tiles of 4 bits a pixel, 128 bytes each, in one of two layouts:
 //   "planar" (K053245 boards): four 32-byte quarters (top left, top right, bottom left,
@@ -61,6 +67,26 @@
   const XOFF = [0, 1, 4, 5, 16, 17, 20, 21];
   const YOFF = [0, 2, 8, 10, 32, 34, 40, 42];
 
+  // K053245 zoom along one axis: n tiles of 16 pixels at zoom z (0x40 = normal size, bigger is
+  // smaller) centred on screen pixel c. Each tile column (row) gets its own on-screen width,
+  // rounded from where it starts and ends, and is sampled in 16.16 steps. Fills map (screen
+  // pixel -> tile * 16 + pixel) and mapF (the pixel when that tile is drawn flipped) and returns
+  // the first screen pixel and the length.
+  function axisMap(n, z, c, map, mapF) {
+    const scale = 64 / z, start = c - Math.trunc(n * 16 * scale / 2);
+    let len = 0;
+    for (let k = 0; k < n; k++) {
+      const a = Math.round(k * 16 * scale), b = Math.round((k + 1) * 16 * scale), zw = b - a;
+      const dx = Math.floor(16 * 65536 / zw);
+      for (let j = 0; j < zw && a + j < map.length; j++) {
+        map[a + j] = k * 16 + ((j * dx) >> 16);
+        mapF[a + j] = ((zw - 1 - j) * dx) >> 16;
+      }
+      len = Math.min(b, map.length);
+    }
+    return { start, len };
+  }
+
   class RPK053245 {
     constructor(opts) {
       opts = opts || {};
@@ -76,6 +102,8 @@
       this.tiles = this.pens.length >> 8;
       this.t = { attr: 0, color: 0, pri: 0, shadow: false, code: 0 };
       this.order = new Uint16Array(this.count);
+      this.slot = new Int16Array(128);
+      this.mapX = new Int16Array(16384); this.mapY = new Int16Array(16384); this.mapXf = new Int16Array(16384); this.mapYf = new Int16Array(16384);
     }
 
     static decode(rom, layout) {
@@ -144,11 +172,21 @@
       const b = this.buffer, count = this.count, t = this.t, cb = this.spriteCallback;
       const pens = this.pens, tiles = this.tiles, is247 = this.type === "053247";
       const pixMirror = is247;   // the K053247 mirrors pixel by pixel about the sprite's centre
-      // drawing order: the highest order value first, so lower values end up in front
-      let n = 0;
-      for (let i = 0; i < count; i++) if (b[i * 16] & 0x80) this.order[n++] = i;
-      const ord = Array.from(this.order.subarray(0, n));
-      ord.sort((p, q) => (b[q * 16 + 1] - b[p * 16 + 1]) || (q - p));
+      let ord;
+      if (is247) {
+        // drawing order: the highest order value first, so lower values end up in front
+        let n = 0;
+        for (let i = 0; i < count; i++) if (b[i * 16] & 0x80) this.order[n++] = i;
+        ord = Array.from(this.order.subarray(0, n));
+        ord.sort((p, q) => (b[q * 16 + 1] - b[p * 16 + 1]) || (q - p));
+      } else {
+        // K053245: the order value's low 7 bits are a slot; slot 0 is drawn first (furthest back)
+        // and each slot holds one sprite (the first in the list that asks for it)
+        const slot = this.slot; slot.fill(-1);
+        for (let i = 0; i < count; i++) if ((b[i * 16] & 0x80) && slot[b[i * 16 + 1] & 0x7f] < 0) slot[b[i * 16 + 1] & 0x7f] = i;
+        ord = [];
+        for (let k = 0; k < 128; k++) if (slot[k] >= 0) ord.push(slot[k]);
+      }
       const flipScreenX = this.flipX, flipScreenY = this.flipY;
       const offX = this.offsetX, offY = this.offsetY;
       for (const i of ord) {
@@ -178,31 +216,57 @@
         let cx = ((x + offX + 1024 + 512) & 0x3ff) - 512;
         let cy = ((-(y + offY) + 1024 + 512) & 0x3ff) - 512;
         cx += this.dx; cy += this.dy;
-        let left = Math.round(cx - dw / 2), top = Math.round(cy - dh / 2);
-        if (flipScreenX) { left = w - left - dw; flipX = !flipX; }
-        if (flipScreenY) { top = h - top - dh; flipY = !flipY; }
-        if (left >= w || top >= h || left + dw <= 0 || top + dh <= 0) continue;
+        let left, top, mapX = null, mapY = null, dw2 = dw, dh2 = dh;
+        if (!is247) {
+          const ax = axisMap(tw, zx || 0.5, cx, this.mapX, this.mapXf), ay = axisMap(th, zy || 0.5, cy, this.mapY, this.mapYf);
+          left = ax.start; dw2 = ax.len; mapX = this.mapX; top = ay.start; dh2 = ay.len; mapY = this.mapY;
+        } else { left = Math.round(cx - dw / 2); top = Math.round(cy - dh / 2); }
+        if (flipScreenX) { left = w - left - dw2; flipX = !flipX; }
+        if (flipScreenY) { top = h - top - dh2; flipY = !flipY; }
+        if (left >= w || top >= h || left + dw2 <= 0 || top + dh2 <= 0) continue;
         const color = (t.color << 4) & 0xfff0, pri = t.pri, shadow = t.shadow, baseCode = t.code;
-        const x0 = Math.max(0, left), x1 = Math.min(w, left + dw), y0 = Math.max(0, top), y1 = Math.min(h, top + dh);
+        const x0 = Math.max(0, left), x1 = Math.min(w, left + dw2), y0 = Math.max(0, top), y1 = Math.min(h, top + dh2);
         for (let py = y0; py < y1; py++) {
-          let v = Math.floor((py - top) * fullH / dh);
-          if (flipY) v = fullH - 1 - v;
-          if (pixMirror && mirrorY && v * 2 < fullH) v = fullH - 1 - v;
-          let ty = v >> 4, fy = v & 15;
-          if (!pixMirror && mirrorY && ty * 2 >= th) { ty = th - 1 - ty; fy = 15 - fy; }
+          let ty, fy;
+          if (mapY) {
+            const sj = flipScreenY ? dh2 - 1 - (py - top) : py - top, m = mapY[sj];
+            let tile = m >> 4, pf = false;
+            if (mirrorY && tile * 2 < th) { tile = th - 1 - tile; pf = true; }
+            if (flipY) { tile = th - 1 - tile; pf = !pf; }
+            ty = tile; fy = pf ? this.mapYf[sj] : m & 15;
+          } else {
+            let v = Math.floor((py - top) * fullH / dh);
+            if (flipY) v = fullH - 1 - v;
+            if (mirrorY && v * 2 < fullH) v = fullH - 1 - v;
+            ty = v >> 4; fy = v & 15;
+          }
           const row = py * w;
           for (let px = x0; px < x1; px++) {
-            let u = Math.floor((px - left) * fullW / dw);
-            if (flipX) u = fullW - 1 - u;
-            if (pixMirror && mirrorX && u * 2 < fullW) u = fullW - 1 - u;
-            let tx = u >> 4, fx = u & 15;
-            if (!pixMirror && mirrorX && tx * 2 >= tw) { tx = tw - 1 - tx; fx = 15 - fx; }
+            let tx, fx;
+            if (mapX) {
+              const sj = flipScreenX ? dw2 - 1 - (px - left) : px - left, m = mapX[sj];
+              let tile = m >> 4, pf = false;
+              if (flipX) { tile = tw - 1 - tile; pf = true; }
+              if (mirrorX && tile * 2 >= tw) { tile = tw - 1 - tile; pf = !pf; }
+              tx = tile; fx = pf ? this.mapXf[sj] : m & 15;
+            } else {
+              let u = Math.floor((px - left) * fullW / dw);
+              if (flipX) u = fullW - 1 - u;
+              if (mirrorX && u * 2 < fullW) u = fullW - 1 - u;
+              tx = u >> 4; fx = u & 15;
+            }
             const tile = (baseCode + XOFF[tx] + YOFF[ty]) % tiles;
             const pen = pens[tile * 256 + fy * 16 + fx];
             if (!pen) continue;
             const at = row + px;
-            if (shadow && pen === 15) { outShadow[at] = 1; outPri[at] = pri; continue; }
-            outPens[at] = color | pen; outPri[at] = pri; outShadow[at] = 0;
+            if (shadow && pen === 15) {
+              // K053245: the shadow is kept apart from the sprite pixels (outShadow = its priority + 1);
+              // it darkens what's behind but never another sprite
+              if (is247) { outShadow[at] = 1; outPri[at] = pri; } else outShadow[at] = pri + 1;
+              continue;
+            }
+            outPens[at] = color | pen; outPri[at] = pri;
+            if (is247) outShadow[at] = 0;
           }
         }
       }
