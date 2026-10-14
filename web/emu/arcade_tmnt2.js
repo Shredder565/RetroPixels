@@ -415,12 +415,17 @@
       // bits 4-6 give steps 0-7 and a low bit 4 at 1c0200 adds 8 more (the night of the
       // prehistoric stage). Colours 32-39, the fixed layer's text, keep their brightness.
       const r5 = k51.read(5);
-      const d = (r5 && r5 !== 0x3e) ? ((this.ctrl300 >> 4) & 7) + (this.eepromOut & 0x10 ? 0 : 8) : 0;
+      const on = r5 && r5 !== 0x3e, night = on && !(this.eepromOut & 0x10);
+      const d = on ? ((this.ctrl300 >> 4) & 7) + (night ? 8 : 0) : 0;
+      // at night a shadow sprite lights its pixels up instead: they lose the 8 night steps and
+      // aren't shadowed (the prehistoric stage's beams of light)
+      const ds = night ? d - 8 : 16 | d;
       const pal = this.palette, scr = this.screen, pens = this.mixPens, shade = this.mixShade;
       for (let i = 0; i < n; i++) {
         const pen = pens[i] & 2047;
         let c = pal[pen];
-        const k = (shade[i] ? 16 : 0) | ((pen < 512 || pen >= 640) ? d : 0);
+        const text = pen >= 512 && pen < 640;
+        const k = shade[i] ? (text ? (night ? 0 : 16) : ds) : text ? 0 : d;
         if (k) {
           const T = LUT[k];
           c = (0xff000000 | (T[(c >> 16) & 255] << 16) | (T[(c >> 8) & 255] << 8) | T[c & 255]) >>> 0;
