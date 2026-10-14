@@ -2,7 +2,7 @@
 // behaviour of the Zilog Z80 (including the undocumented flag bits 3/5, MEMPTR
 // and the Q latch used by SCF/CCF). Used as the Genesis sound CPU.
 //
-//   const z = new RPZ80({read(a), write(a,v), in(port), out(port,v), vector()})
+//   const z = new RPZ80({read(a), write(a,v), in(port), out(port,v), vector(), ack()})
 //   z.step() -> T-states used;  z.irq = true/false (level);  z.nmi()
 (function (global) {
   'use strict';
@@ -384,6 +384,7 @@
       if (self.irq && iff1 && !eiBlock) {
         halted = false;
         iff1 = iff2 = 0;
+        if (bus.ack) bus.ack(); // optional: tells the board the interrupt was taken (boards that hold the line until then)
         rv = (rv & 0x80) | ((rv + 1) & 0x7f);
         push(pc); q = 0;
         if (im === 2) {

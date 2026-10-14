@@ -70,7 +70,9 @@
         write: (a, v) => self.write(a, v),
         in: () => 0xff,
         out: (port, v) => { if ((port & 0xff) === 0) self.vector = v; },
-        vector: () => { self.irqLine = false; self.cpu.irq = false; return self.vector; },
+        // the vertical-blank interrupt stays on until the processor takes it
+        ack: () => { self.irqLine = false; self.cpu.irq = false; },
+        vector: () => self.vector,
       });
       this.reset();
     }
@@ -265,7 +267,6 @@
           // the watchdog restarts the board if the game stops checking in
           if (++this.watchdog >= 16) { this.reset(); return; }
         }
-        if (line === 0 && this.irqLine) { this.irqLine = false; cpu.irq = false; } // interrupt modes 0/1 never acknowledge through the vector
         const end = this.cycles + LINE_CYC;
         while (this.cycles < end) this.cycles += cpu.step();
         for (let s = 0; s < SAMPLES_PER_LINE; s++) this.soundSample();
