@@ -146,19 +146,28 @@ GameCube & Wii (Dolphin)
 - Dolphin's main graphics settings are on the right of both tabs (they're shared).
 
 Recording games
-- GameCube and Wii games are recorded automatically as .mp4 from the moment
-  the game appears (turn it off in the Recordings tab, or untick "Record
-  games automatically"). If ffmpeg isn't there yet, it's downloaded the first
-  time a game starts and recording begins as soon as it's ready.
-- Only the game is recorded: in fullscreen the black bars are cropped off, and
-  only Dolphin's own sound is captured (not Discord, music, etc.). Any black
-  bars left around the picture are trimmed off right after the recording
-  ends, whatever the Aspect ratio setting.
-- While playing, the bar at the top shows REC and a Stop / Record button.
+- GameCube and Wii games are recorded automatically as .mp4, from the start
+  of the game to the end (turn it off in the Recordings tab, or untick
+  "Record games automatically").
+- Dolphin itself saves the game's picture and sound while you play, and
+  RetroPixels makes the .mp4 from them when the game ends. So the video shows
+  only the game - no mouse pointer, no other windows, no black bars - with
+  only the game's sound (not Discord, music, etc.), and it plays back smoothly
+  even if the game slowed down for a moment.
+- Making the video takes a little while after a long game; "Saving the
+  recording..." shows meanwhile. Keep RetroPixels open until it's done.
+  Dolphin's raw files (in its Dump folder) are big - about 15 GB an hour -
+  and are deleted once the .mp4 is saved, so keep some free disk space.
+- Stop recording in the bar at the top stops the video at that point; Record
+  starts a new video from then on. Dolphin can only start saving a game as it
+  starts, so with automatic recording off the button says "Record next game".
+- While recording, the bar at the top shows REC.
 - Videos are saved to Videos\RetroPixels. If something goes wrong, details
-  are in Videos\RetroPixels\logs\last-recording.log.
+  are in Videos\RetroPixels\logs\last-recording.log. Recording needs
+  Dolphin 5.0 or newer.
 - The first time, RetroPixels asks to download ffmpeg (a free video encoder,
-  about 190 MB, from github.com/BtbN/FFmpeg-Builds). Click "Download ffmpeg";
+  about 190 MB, from github.com/BtbN/FFmpeg-Builds). Click "Download ffmpeg"
+  (if you don't, it's downloaded when a recorded game ends);
   it's checked against its published checksum and saved in an "ffmpeg" folder
   next to RetroPixels.exe. It uses your NVIDIA / AMD / Intel graphics card for
   encoding when it can. ffmpeg is GPL-licensed; its licence is saved with it.

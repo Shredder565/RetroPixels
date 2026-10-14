@@ -5,7 +5,6 @@ package main
 import (
 	"encoding/hex"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -160,37 +159,7 @@ func TestDolphinIniAndPads(t *testing.T) {
 	if !strings.Contains(string(d), "GFXBackend = D3D12") {
 		t.Error("backend not saved")
 	}
-	if o := dolphinAspect(); o.Aspect != 4.0/3 || !o.PostCrop {
-		t.Errorf("aspect %+v", o)
-	}
 	if err := saveDolSettings(map[string]any{"res": float64(7)}); err == nil {
 		t.Error("accepted an invalid resolution")
-	}
-}
-
-// A 4:3 game recorded inside a 16:9 frame gets its black side bars trimmed.
-func TestTrimBlackBars(t *testing.T) {
-	ff := os.Getenv("RETRO_FFMPEG")
-	if ff == "" {
-		t.Skip("set RETRO_FFMPEG")
-	}
-	f := filepath.Join(t.TempDir(), "game.mp4")
-	err := exec.Command(ff, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=960x720:rate=30:d=4",
-		"-vf", "pad=1280:720:160:0:black,format=yuv420p", "-c:v", "libx264", "-g", "15", f).Run()
-	if err != nil {
-		t.Fatal(err)
-	}
-	trimBlackBars(f, "libx264")
-	out, _ := exec.Command(ff, "-hide_banner", "-i", f).CombinedOutput()
-	if !strings.Contains(string(out), "960x720") {
-		t.Fatalf("not trimmed:\n%s", out)
-	}
-	g := filepath.Join(t.TempDir(), "full.mp4")
-	exec.Command(ff, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30:d=2", "-pix_fmt", "yuv420p", "-c:v", "libx264", g).Run()
-	st1, _ := os.Stat(g)
-	trimBlackBars(g, "libx264")
-	st2, _ := os.Stat(g)
-	if st1.ModTime() != st2.ModTime() {
-		t.Error("touched a video with no bars")
 	}
 }

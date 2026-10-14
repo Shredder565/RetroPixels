@@ -102,9 +102,10 @@ func saveConfigLocked() error {
 
 // ---------------- launching emulators ----------------
 
-// startEmulator runs an emulator for one game, tracks it, and records it.
-// onStart (optional) runs alongside it, e.g. to dock its window into ours.
-func startEmulator(emu string, args []string, game, name, kind, label string, opt recOpts, onStart func(pid int, exited <-chan struct{})) error {
+// startEmulator runs an emulator for one game and tracks it. rec (optional)
+// is the game's recording; onStart (optional) runs alongside it, e.g. to dock
+// its window into ours.
+func startEmulator(emu string, args []string, game, name, kind, label string, rec *recSession, onStart func(pid int, exited <-chan struct{})) error {
 	runMu.Lock()
 	if running != nil {
 		cur := running.Name
@@ -119,6 +120,9 @@ func startEmulator(emu string, args []string, game, name, kind, label string, op
 	}
 	running = &runningGame{Name: name, Path: game, Started: time.Now(), Emu: label, Kind: kind}
 	runMu.Unlock()
+	if rec != nil {
+		startRecSession(rec, args)
+	}
 	exited := make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
@@ -130,7 +134,9 @@ func startEmulator(emu string, args []string, game, name, kind, label string, op
 	if onStart != nil {
 		go onStart(cmd.Process.Pid, exited)
 	}
-	go autoRecord(name, emu, cmd.Process.Pid, exited, opt)
+	if rec != nil {
+		go rec.follow(exited)
+	}
 	return nil
 }
 
