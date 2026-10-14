@@ -1,7 +1,37 @@
-RetroPixels 2.6.2
+RetroPixels 2.7.0
 Released 2026-10-14
 
-What's new in 2.6.2
+What's new in 2.7.0
+- Arcade: TMNT, Turtles in Time (TMNT2) and The Simpsons were each played
+  start to finish in MAME and in RetroPixels and compared frame by frame and
+  sound by sound. The picture now matches MAME pixel for pixel in almost
+  every frame checked, and the sound balance matches. RetroPixels' code is
+  still all its own: MAME was only watched and listened to.
+- New: games for 3 or 4 players have a "Player 1" button above the game.
+  Click it to choose which player (1 to 4) your keyboard and first
+  controller play as. The choice is remembered for each game.
+- TMNT: a stray dark mark on the title screen is gone; flip-screen mode now
+  flips the sprites too; drum and effect volumes were swapped between the
+  two sample channels; speech is no longer cut off by the next line; music
+  noise (cymbals, hits) was far too loud; loud chords no longer distort; the
+  music is no longer too quiet next to effects and speech.
+- Turtles in Time: the picture is the board's real 304 pixels wide and the
+  backgrounds line up; sprites overlap in the right order (the turtle in the
+  intro circle is no longer hidden); zoomed sprites such as the "Evening
+  News" letters are exact; shadows only darken the background, at the right
+  strength; the news-scene fade and the prehistoric night darkening work,
+  with bright light beams; Krang's legs and other big sprites use the right
+  pieces; sampled sounds and voices were too quiet next to the music.
+- The Simpsons: sprites were 16 pixels too high; big sprites (the jewellery
+  store door) had wrong pieces; enemies blinked or showed where they
+  shouldn't; shadows (cage bars, bosses, Krusty) were wrong and the title
+  and score screens were darkened by mistake; sprites line up during the
+  final boss's screen shake; sampled sounds were too quiet next to the music.
+- Music chip (all three games): noise level and fade fixed, and loud notes
+  no longer distort.
+- New CHANGELOG.txt lists the changes in every version.
+
+2.6.2
 - TMNT: fire no longer shows in front of the doors in the burning
   building. Sprites now stack in the right order, hidden duplicate sprites
   (like an extra turtle in the demo) are gone, the backgrounds sit 6 pixels
