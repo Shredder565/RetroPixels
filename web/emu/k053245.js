@@ -14,7 +14,10 @@
 //   word 6  attributes. K053245: bits 0-4 colour, 5-6 priority, 7 shadow, 8 mirror X,
 //           9 mirror Y. K053247: bits 0-11 colour / priority as the board wires them,
 //           12 shadow, 14 mirror X, 15 mirror Y.
-//           "Mirror" draws the second half of the sprite as a reflection of the first.
+//           "Mirror" draws the second half of the sprite as a reflection of the first (K053245,
+//           whole tiles). The K053247 mirrors pixel by pixel about the sprite's centre: the top
+//           (left) half shows the bottom (right) half reflected, so a half-drawn shape such as a
+//           shadow under a character's feet comes out whole.
 //   word 7  unused
 // The board's sprite callback turns the attribute word into a colour (palette entry =
 // colour * 16 + pen) and a priority value for the K053251 mixer, and can change the shadow flag.
@@ -140,6 +143,7 @@
     render(outPens, outPri, outShadow, w, h) {
       const b = this.buffer, count = this.count, t = this.t, cb = this.spriteCallback;
       const pens = this.pens, tiles = this.tiles, is247 = this.type === "053247";
+      const pixMirror = is247;   // the K053247 mirrors pixel by pixel about the sprite's centre
       // drawing order: the highest order value first, so lower values end up in front
       let n = 0;
       for (let i = 0; i < count; i++) if (b[i * 16] & 0x80) this.order[n++] = i;
@@ -183,14 +187,16 @@
         for (let py = y0; py < y1; py++) {
           let v = Math.floor((py - top) * fullH / dh);
           if (flipY) v = fullH - 1 - v;
+          if (pixMirror && mirrorY && v * 2 < fullH) v = fullH - 1 - v;
           let ty = v >> 4, fy = v & 15;
-          if (mirrorY && ty * 2 >= th) { ty = th - 1 - ty; fy = 15 - fy; }
+          if (!pixMirror && mirrorY && ty * 2 >= th) { ty = th - 1 - ty; fy = 15 - fy; }
           const row = py * w;
           for (let px = x0; px < x1; px++) {
             let u = Math.floor((px - left) * fullW / dw);
             if (flipX) u = fullW - 1 - u;
+            if (pixMirror && mirrorX && u * 2 < fullW) u = fullW - 1 - u;
             let tx = u >> 4, fx = u & 15;
-            if (mirrorX && tx * 2 >= tw) { tx = tw - 1 - tx; fx = 15 - fx; }
+            if (!pixMirror && mirrorX && tx * 2 >= tw) { tx = tw - 1 - tx; fx = 15 - fx; }
             const tile = (baseCode + XOFF[tx] + YOFF[ty]) % tiles;
             const pen = pens[tile * 256 + fy * 16 + fx];
             if (!pen) continue;
