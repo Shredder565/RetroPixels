@@ -172,8 +172,10 @@ Recording games
   it's checked against its published checksum and saved in an "ffmpeg" folder
   next to RetroPixels.exe. It uses your NVIDIA / AMD / Intel graphics card for
   encoding when it can. ffmpeg is GPL-licensed; its licence is saved with it.
-- Classic-console games: press ● Record above the game (or hold the right
-  stick down for a second). Those videos go to your Downloads folder.
+- Classic-console and arcade games: press ● Record above the game (or hold
+  the right stick down for a second). The video holds only the game's
+  picture at its own shape (no black bars, buttons or messages) and only the
+  game's sound. Those videos go to your Downloads folder.
 
 Where things are kept
 - Save states and battery saves: inside RetroPixels's own browser profile

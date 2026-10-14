@@ -424,6 +424,32 @@
       c.fillStyle = "#000"; c.fillRect(0, 0, cw, ch);
       c.imageSmoothingEnabled = false;
       c.drawImage(this.off, 0, 0, w, h, dx, dy, dw, dh);
+      if (this.recCanvas) this.drawRec();
+    }
+
+    // ---- recording ----
+    // A separate canvas holding only the game picture (no bars, no buttons or
+    // messages), at the game's own shape, for the page's video recorder.
+    recordingCanvas() {
+      if (!this.core) return null;
+      if (!this.recCanvas) {
+        const w = this.core.width, h = this.core.height, aspect = this.info.aspect || w / h;
+        const scale = Math.max(1, Math.round(720 / h));
+        const rh = (h * scale) & ~1, rw = Math.round(rh * aspect) & ~1;
+        this.recCanvas = document.createElement("canvas");
+        this.recCanvas.width = rw; this.recCanvas.height = rh;
+        this.recCtx = this.recCanvas.getContext("2d");
+        this.drawRec();
+      }
+      return this.recCanvas;
+    }
+    stopRecordingCanvas() { this.recCanvas = null; this.recCtx = null; }
+    drawRec() {
+      if (!this.off) return;
+      const c = this.recCtx, rw = this.recCanvas.width, rh = this.recCanvas.height;
+      c.imageSmoothingEnabled = false;
+      // If the game changes resolution mid-recording, it still fills the same video size.
+      c.drawImage(this.off, 0, 0, this.off.width, this.off.height, 0, 0, rw, rh);
     }
 
     // ---- saves ----

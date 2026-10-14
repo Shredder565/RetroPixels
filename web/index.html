@@ -1371,7 +1371,9 @@
 
   function startRecording() {
     if (recorder) return;
-    const canvas = document.querySelector("#game canvas");
+    // Record only the game's picture: the player keeps a canvas with just the
+    // game at its own shape (no black bars, buttons or messages).
+    const canvas = player && player.recordingCanvas ? player.recordingCanvas() : null;
     if (!canvas || !gameReady) { toast("Start a game before recording", true); return; }
     recMime = pickMime();
     if (!recMime) { toast("This browser can't record video — try Chrome or Edge", true); return; }
@@ -1386,6 +1388,7 @@
     recChunks = [];
     recorder.ondataavailable = e => { if (e.data && e.data.size) recChunks.push(e.data); };
     recorder.onstop = () => {
+      if (player && player.stopRecordingCanvas) player.stopRecordingCanvas();
       const isMp4 = recMime.startsWith("video/mp4");
       const blob = new Blob(recChunks, { type: isMp4 ? "video/mp4" : "video/webm" });
       const name = gameName;
