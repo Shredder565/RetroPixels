@@ -1,7 +1,14 @@
-RetroPixels 2.6.1
+RetroPixels 2.6.2
 Released 2026-10-14
 
-What's new in 2.6.1
+What's new in 2.6.2
+- TMNT: fire no longer shows in front of the doors in the burning
+  building. Sprites now stack in the right order, hidden duplicate sprites
+  (like an extra turtle in the demo) are gone, the backgrounds sit 6 pixels
+  further right where they belong, and shadows are a little lighter. The
+  picture now matches the arcade board's own layering chip.
+
+2.6.1
 - Recording on every system now captures only the game picture. NES, SNES,
   Game Boy, GBA, N64, Genesis, Master System, Atari and arcade recordings
   no longer include black bars, buttons, messages or the rest of the
