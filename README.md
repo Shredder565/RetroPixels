@@ -97,7 +97,7 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
   go build -trimpath -ldflags "-s -w -H windowsgui" -o RetroPixels.exe .
 ```
 
-Requires Go 1.24 or newer. Pushing a tag such as `v2.7.0` builds the program in GitHub Actions and publishes the release with the .exe, the zip and the source code.
+Requires Go 1.24 or newer. When the version in `main.go` changes on `main` (or a tag such as `v2.7.0` is pushed), GitHub Actions builds the program and publishes the release with the .exe, the zip and the source code.
 
 ### Project layout
 
