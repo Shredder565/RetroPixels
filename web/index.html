@@ -454,6 +454,7 @@
           </div>
           <div id="gcDolNote"></div>
           <div id="gcFFNote"></div>
+          <div id="gcRecNote"></div>
           <div class="sw-tools">
             <input type="search" id="gcSearch" placeholder="Search games…" autocomplete="off">
             <div class="seg" id="gcFilter">
@@ -687,8 +688,12 @@
     });
   });
 
-  let recActiveSince = null, lastRecMsg = null, lastRecErr = null;
+  let recActiveSince = null, lastRecMsg = null, lastRecErr = null, lastRec = null;
   let ffNoteShown = null;
+  // "Saving recording…" while the video is made after a game ends.
+  const savingText = sv => sv.step === "ffmpeg"
+    ? `Saving the recording of <b>${esc(sv.game)}</b> — downloading ffmpeg first…`
+    : `Saving the recording of <b>${esc(sv.game)}</b>… ${sv.percent || 0}%`;
   function renderRecBanner(rec, gameOn) {
     if (!rec) return;
     // One-time ffmpeg download prompt in the GameCube / Wii library.
@@ -703,10 +708,19 @@
     }
     document.getElementById("gcAutoRec").checked = !!rec.auto;
     const badge = document.getElementById("swRecBadge"), btn = document.getElementById("swRecToggle");
+    lastRec = rec;
     badge.hidden = !rec.active;
-    btn.hidden = !gameOn || !rec.ffmpeg;
-    btn.textContent = rec.active ? "■ Stop recording" : "● Record";
+    btn.hidden = !gameOn;
+    // Dolphin can only record a game from its start, so without recording on
+    // when the game started, the button is for the next game.
+    btn.textContent = rec.active ? "■ Stop recording" : rec.dumping ? "● Record" : rec.next ? "✓ Next game will be recorded" : "● Record next game";
+    btn.title = rec.active ? "Stop recording. The video is saved when the game ends"
+      : rec.dumping ? "Record from now on (saved as a separate video)"
+      : rec.next ? "Click to cancel" : "Dolphin can only record from the start of a game, so this records the next game you start";
     recActiveSince = rec.active ? Date.parse(rec.active.started) : null;
+    const sn = document.getElementById("gcRecNote");
+    const snHTML = rec.saving ? `<div class="rec-note" style="background:#2a2312;border:1px solid var(--warn)">${savingText(rec.saving)}</div>` : "";
+    if (sn.innerHTML !== snHTML) sn.innerHTML = snHTML;
     if (lastRecMsg !== null && rec.message && rec.message !== lastRecMsg) { toast(rec.message); }
     if (lastRecErr !== null && rec.error && rec.error !== lastRecErr) { toast(rec.error, true); }
     lastRecMsg = rec.message || ""; lastRecErr = rec.error || "";
@@ -728,7 +742,7 @@
   const fmtSize = b => b >= 1e9 ? (b / 1e9).toFixed(1) + " GB" : b >= 1e6 ? Math.round(b / 1e6) + " MB" : b > 0 ? Math.max(1, Math.round(b / 1e3)) + " KB" : "0";
 
   // Keep the "now playing" bar up to date while a desktop tab is open.
-  let wasRunning = false;
+  let wasRunning = false, wasSaving = false;
   setInterval(async () => {
     if (!DESKTOP || (gcTab.hidden && recTab.hidden)) return;
     try {
@@ -736,6 +750,8 @@
       const isRunning = !!st.running;
       renderStatus(st);
       if (wasRunning && !isRunning) { toast("Welcome back"); if (!gcTab.hidden) loadGC(); if (!recTab.hidden) loadRecordings(); }
+      else if (!recTab.hidden && (wasSaving || (st.rec && st.rec.saving))) loadRecordings(); // progress, then the new video
+      wasSaving = !!(st.rec && st.rec.saving);
       if (!gcTab.hidden && isRunning !== wasRunning) { setGCLocked(isRunning && st.running.kind === "dolphin"); loadGCSettings(); }
       wasRunning = isRunning;
     } catch (e) { /* ignore */ }
@@ -844,9 +860,11 @@
       ${st.ffmpeg ? "" : ffmpegPanel(st.install)}
       ${st.error ? `<div class="rec-note err">${esc(st.error)}</div>` : ""}
       ${a ? `<div class="rec-note ok"><span class="rec-badge"><span class="rec-dot"></span> REC</span>
-          &nbsp;<b>${esc(a.game)}</b> · ${esc(a.size)} · sound: ${a.audio === "game" ? "game only" : a.audio === "system" ? "whole PC (game-only capture wasn't available)" : "none"} · ${esc(a.encoder.replace("h264_", "").toUpperCase())} encoder</div>` : ""}
+          &nbsp;<b>${esc(a.game)}</b> · the video is saved when the game ends</div>` : ""}
+      ${st.saving ? `<div class="rec-note" style="background:#2a2312;border:1px solid var(--warn)">${savingText(st.saving)}${st.queued ? ` (${st.queued} more waiting)` : ""}</div>` : ""}
+      ${st.next && !st.dumping ? `<div class="rec-note ok">Your next GameCube or Wii game will be recorded.</div>` : ""}
       <div class="rs-group">
-        <div class="rs-row"><label><b>Record GameCube &amp; Wii games automatically</b><small>Starts when the game appears and stops when it ends. You can also start or stop from the bar at the top while playing.</small></label>
+        <div class="rs-row"><label><b>Record GameCube &amp; Wii games automatically</b><small>Records each game from start to finish. Stop recording from the bar at the top while playing. When this is off, use "Record next game" there.</small></label>
           <label class="toggle"><input type="checkbox" id="recAuto" ${st.auto ? "checked" : ""}> ${st.auto ? "On" : "Off"}</label></div>
         <div class="rs-row"><label><b>Frame rate</b></label>
           <select class="sw-select" id="recFps"><option value="60" ${st.fps === 60 ? "selected" : ""}>60 FPS (smooth)</option><option value="30" ${st.fps === 30 ? "selected" : ""}>30 FPS (smaller files)</option></select></div>
@@ -865,8 +883,9 @@
             <small class="muted">${fmtSize(f.size)}</small><button class="btn ghost sm" data-play="${esc(f.name)}">Play</button></div>`).join("")
           : '<p class="muted" style="margin:0;font-size:14px">No recordings yet.</p>'}</div>
       </div>
-      <p class="muted" style="font-size:13px;margin:0">Fullscreen games are cropped to exactly the game picture. In a window, the whole Dolphin window is recorded.
-        Only Dolphin's sound is captured, so Discord and other apps stay out of your videos.</p>`;
+      <p class="muted" style="font-size:13px;margin:0">Dolphin saves the game's own picture and sound while you play, so videos show only the game —
+        no mouse pointer, other windows or black bars, and no Discord or other apps' sound — and play back smoothly even if the game slowed down.
+        The video is made when the game ends (it takes a little while for long games).</p>`;
     const set = body => swAct(() => api("/api/rec/settings", body), "Recording settings saved").then(() => loadRecordings());
     wireFFmpegPanel(el, loadRecordings);
     el.querySelector("#recAuto").addEventListener("change", e => set({ auto: e.target.checked }));
@@ -1122,9 +1141,10 @@
 
   if (DESKTOP) {
     document.getElementById("swRecToggle").addEventListener("click", async () => {
-      const on = recActiveSince != null;
-      const r = await swAct(() => api("/api/rec/control", { action: on ? "stop" : "start" }), on ? "Stopping — saving the video…" : "Recording will start in a moment");
-      if (r) setTimeout(() => api("/api/status").then(renderStatus).catch(() => {}), 1500);
+      const on = recActiveSince != null || !!(lastRec && !lastRec.dumping && lastRec.next);
+      const r = await swAct(() => api("/api/rec/control", { action: on ? "stop" : "start" }));
+      if (r && r.note) toast(r.note);
+      if (r) { renderRecBanner(r.status, true); setTimeout(() => api("/api/status").then(renderStatus).catch(() => {}), 1500); }
     });
 
     // Let the app know the window is still open, and when it closes.

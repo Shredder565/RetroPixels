@@ -1,11 +1,12 @@
 package main
 
-// Automatic gameplay recording for games played in Dolphin.
+// Gameplay recording for games played in Dolphin.
 //
-// When a game starts, RetroPixels finds the emulator's game window,
-// works out the part of the screen the game actually draws into (cropping the
-// black bars a fullscreen game leaves on a monitor with a different shape),
-// captures only the emulator's own sound, and has ffmpeg write an .mp4.
+// Dolphin itself saves the game's picture and sound while the game runs (its
+// "frame dump" and "audio dump"). That's only the game - no mouse pointer, no
+// other windows, no black bars - and it follows the game's own clock, so the
+// video is smooth however busy the PC is. When the game ends, RetroPixels
+// turns those raw files into one .mp4 with ffmpeg and deletes them.
 
 import (
 	"errors"
@@ -24,76 +25,7 @@ import (
 	"time"
 )
 
-type rect struct{ L, T, R, B int }
-
-func (r rect) W() int { return r.R - r.L }
-func (r rect) H() int { return r.B - r.T }
-func (r rect) intersect(o rect) rect {
-	x := rect{max(r.L, o.L), max(r.T, o.T), min(r.R, o.R), min(r.B, o.B)}
-	if x.R < x.L {
-		x.R = x.L
-	}
-	if x.B < x.T {
-		x.B = x.T
-	}
-	return x
-}
-func near(a, b int) bool { return a-b <= 2 && b-a <= 2 }
-func (r rect) same(o rect) bool {
-	return near(r.L, o.L) && near(r.T, o.T) && near(r.R, o.R) && near(r.B, o.B)
-}
-
-// gameWindow describes the emulator window on screen.
-type gameWindow struct {
-	Handle   uintptr
-	Title    string
-	Client   rect // window's drawing area, in screen pixels
-	Output   rect // the monitor it's on (DXGI desktop coordinates)
-	Adapter  int  // DXGI adapter index of that monitor
-	OutIndex int  // DXGI output index on that adapter
-	Embedded bool // docked inside the RetroPixels window
-}
-
-func (g gameWindow) Fullscreen() bool { return g.Client.same(g.Output) }
-
-type crop struct{ X, Y, W, H int } // relative to the monitor
-
-// gameCrop returns the part of the monitor the game draws into. In fullscreen
-// (and when docked inside RetroPixels, where the game fills the window too)
-// the emulator letterboxes the game to its aspect ratio, so the black bars
-// are cut off by fitting that ratio into the window.
-func gameCrop(win gameWindow, aspect float64) (crop, error) {
-	area := win.Client.intersect(win.Output)
-	if area.W() < 64 || area.H() < 64 {
-		return crop{}, errors.New("the game window is too small or off screen")
-	}
-	x, y, w, h := float64(area.L), float64(area.T), float64(area.W()), float64(area.H())
-	if aspect > 0 && (win.Fullscreen() || win.Embedded) {
-		if w/h > aspect { // wider than the game: bars left and right
-			nw := h * aspect
-			x += (w - nw) / 2
-			w = nw
-		} else if w/h < aspect { // taller than the game: bars top and bottom
-			nh := w / aspect
-			y += (h - nh) / 2
-			h = nh
-		}
-	}
-	c := crop{X: int(math.Round(x)) - win.Output.L, Y: int(math.Round(y)) - win.Output.T, W: int(w) &^ 1, H: int(h) &^ 1}
-	if c.X < 0 {
-		c.X = 0
-	}
-	if c.Y < 0 {
-		c.Y = 0
-	}
-	if c.X+c.W > win.Output.W() {
-		c.W = (win.Output.W() - c.X) &^ 1
-	}
-	if c.Y+c.H > win.Output.H() {
-		c.H = (win.Output.H() - c.Y) &^ 1
-	}
-	return c, nil
-}
+type crop struct{ X, Y, W, H int }
 
 // ---------------- settings ----------------
 
@@ -136,6 +68,8 @@ func recordingsDir() string {
 	return filepath.Join(home, "Videos", "RetroPixels")
 }
 
+func recLogPath() string { return filepath.Join(recordingsDir(), "logs", "last-recording.log") }
+
 // ---------------- ffmpeg ----------------
 
 func findFFmpeg() string {
@@ -163,12 +97,6 @@ func findFFmpeg() string {
 	return ""
 }
 
-type audioFormat struct {
-	Sample string // ffmpeg raw format: s16le / f32le
-	Rate   int
-	Ch     int
-}
-
 var encoderOrder = []string{"h264_nvenc", "h264_amf", "h264_qsv", "libx264"}
 
 func encoderArgs(enc, quality string) []string {
@@ -193,37 +121,6 @@ func encoderArgs(enc, quality string) []string {
 		return []string{"-c:v", "h264_qsv", "-preset", "medium", "-global_quality", v}
 	}
 	return []string{"-c:v", "libx264", "-preset", "veryfast", "-crf", v}
-}
-
-// videoSource is the ffmpeg filter that grabs the screen. Tests swap it out.
-var videoSource = func(win gameWindow, c crop, fps int) string {
-	return fmt.Sprintf("ddagrab=output_idx=%d:framerate=%d:draw_mouse=0:offset_x=%d:offset_y=%d:video_size=%dx%d,hwdownload,format=bgra",
-		win.OutIndex, fps, c.X, c.Y, c.W, c.H)
-}
-
-func ffmpegArgs(enc string, win gameWindow, c crop, fps int, quality string, a *audioFormat, audioPath, out string) []string {
-	args := []string{"-hide_banner", "-loglevel", "warning", "-nostats", "-progress", "pipe:1", "-stats_period", "0.5", "-y"}
-	if win.Adapter > 0 {
-		args = append(args, "-init_hw_device", fmt.Sprintf("d3d11va=dd:%d", win.Adapter), "-filter_hw_device", "dd")
-	}
-	if a != nil {
-		args = append(args, "-thread_queue_size", "4096", "-probesize", "32", "-analyzeduration", "0",
-			"-f", a.Sample, "-ar", fmt.Sprint(a.Rate), "-ac", fmt.Sprint(a.Ch), "-i", audioPath)
-	}
-	graph := videoSource(win, c, fps)
-	switch enc {
-	case "libx264":
-		graph += ",format=yuv420p"
-	case "h264_qsv":
-		graph += ",format=nv12"
-	}
-	args = append(args, "-filter_complex", graph+"[v]", "-map", "[v]")
-	args = append(args, encoderArgs(enc, quality)...)
-	args = append(args, "-g", fmt.Sprint(fps*2))
-	if a != nil {
-		args = append(args, "-map", "0:a", "-c:a", "aac", "-b:a", "192k", "-af", "aresample=async=1000")
-	}
-	return append(args, "-movflags", "+faststart", out)
 }
 
 var (
@@ -265,41 +162,202 @@ func runWithTimeout(cmd *exec.Cmd, d time.Duration) error {
 	}
 }
 
-// ---------------- audio ----------------
+// ---------------- what Dolphin is asked to save ----------------
 
-// audioCapture streams raw PCM from the emulator (or the whole PC as a fallback).
-type audioCapture interface {
-	Format() audioFormat
-	Source() string // "game" or "system"
-	Run(write func([]byte), stop <-chan struct{}) error
+// dumpBitrate: Dolphin's raw video is only an in-between file, so it gets a
+// high bitrate; RetroPixels makes the final, smaller .mp4 from it.
+func dumpBitrate(quality string) int {
+	switch quality {
+	case "high":
+		return 50000
+	case "small":
+		return 25000
+	}
+	return 35000
 }
 
-// ---------------- recording session ----------------
+// dolphinRecordArgs: Dolphin settings for one run (-C doesn't change its
+// saved settings) that make it save the game's picture and sound.
+//
+// The picture is saved as MPEG-4 in an .avi at a high bitrate: that's
+// Dolphin's own default and is quick to encode, so it doesn't slow the game
+// (a lossless codec would make files many times bigger, or cost more CPU).
+// It's saved at the size the game is shown on screen, which is exactly the
+// game picture without the black bars around it.
+func dolphinRecordArgs(quality string) []string {
+	kv := []string{
+		"Dolphin.Movie.DumpFrames=True",
+		"Dolphin.Movie.DumpFramesSilent=True", // never stop to ask about overwriting a file
+		"Dolphin.DSP.DumpAudio=True",
+		"Dolphin.DSP.DumpAudioSilent=True",
+		"Graphics.Settings.DumpFormat=avi",
+		"Graphics.Settings.DumpCodec=mpeg4",
+		"Graphics.Settings.DumpEncoder=",
+		"Graphics.Settings.UseFFV1=False",
+		"Graphics.Settings.DumpFramesAsImages=False",
+		"Graphics.Settings.DumpPath=", // a fixed file name would overwrite itself when the picture size changes
+		"Graphics.Settings.InternalResolutionFrameDumps=False",
+		fmt.Sprintf("Graphics.Settings.BitrateKbps=%d", dumpBitrate(quality)),
+	}
+	var args []string
+	for _, s := range kv {
+		args = append(args, "-C", s)
+	}
+	return args
+}
+
+// ---------------- Dolphin's dump files ----------------
+
+type dumpFiles struct {
+	Video []string // Dump\Frames\*.avi, in order (a new file starts when the picture size changes)
+	DSP   []string // Dump\Audio\*dspdump*.wav: the game's sound
+	DTK   []string // Dump\Audio\*dtkdump*.wav: music streamed from the disc (GameCube)
+}
+
+func (d dumpFiles) all() []string {
+	return append(append(append([]string{}, d.Video...), d.DSP...), d.DTK...)
+}
+
+func (d dumpFiles) remove() {
+	for _, f := range d.all() {
+		os.Remove(f)
+	}
+}
+
+// findDumps lists the dump files Dolphin wrote since a game started.
+func findDumps(dir string, since time.Time) dumpFiles {
+	pick := func(sub string, ok func(name string) bool) []string {
+		type file struct {
+			path string
+			t    time.Time
+		}
+		var list []file
+		entries, _ := os.ReadDir(filepath.Join(dir, sub))
+		for _, e := range entries {
+			name := strings.ToLower(e.Name())
+			if e.IsDir() || !ok(name) {
+				continue
+			}
+			p := filepath.Join(dir, sub, e.Name())
+			st, err := os.Stat(p)
+			if err != nil || st.ModTime().Before(since.Add(-2*time.Second)) {
+				continue // from an earlier game
+			}
+			list = append(list, file{p, st.ModTime()})
+		}
+		// Oldest first: a file is finished before the next one starts.
+		sort.SliceStable(list, func(i, j int) bool {
+			if !list[i].t.Equal(list[j].t) {
+				return list[i].t.Before(list[j].t)
+			}
+			return list[i].path < list[j].path
+		})
+		var out []string
+		for _, f := range list {
+			out = append(out, f.path)
+		}
+		return out
+	}
+	return dumpFiles{
+		Video: pick("Frames", func(n string) bool { return strings.HasSuffix(n, ".avi") }),
+		DSP:   pick("Audio", func(n string) bool { return strings.HasSuffix(n, ".wav") && strings.Contains(n, "dspdump") }),
+		DTK:   pick("Audio", func(n string) bool { return strings.HasSuffix(n, ".wav") && strings.Contains(n, "dtkdump") }),
+	}
+}
+
+// wavSeconds: how much sound a .wav holds, worked out from its real size
+// (the header's own length is only filled in when Dolphin closes the file).
+func wavSeconds(path string) float64 {
+	f, err := os.Open(path) // opening it reads the size as it is now, even while Dolphin writes
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	size, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return 0
+	}
+	f.Seek(0, io.SeekStart)
+	hdr := make([]byte, 512)
+	n, _ := io.ReadFull(f, hdr)
+	hdr = hdr[:n]
+	if len(hdr) < 12 || string(hdr[0:4]) != "RIFF" || string(hdr[8:12]) != "WAVE" {
+		return 0
+	}
+	le16 := func(b []byte) int { return int(b[0]) | int(b[1])<<8 }
+	le32 := func(b []byte) int { return le16(b) | le16(b[2:])<<16 }
+	bytesPerSec := 0
+	for off := 12; off+8 <= len(hdr); {
+		id, sz := string(hdr[off:off+4]), le32(hdr[off+4:])
+		body := off + 8
+		switch id {
+		case "fmt ":
+			if body+16 <= len(hdr) {
+				bytesPerSec = le32(hdr[body+8:])
+			}
+		case "data":
+			if bytesPerSec <= 0 {
+				return 0
+			}
+			return float64(size-int64(body)) / float64(bytesPerSec)
+		}
+		off = body + sz + sz&1
+	}
+	return 0
+}
+
+func wavTotal(files []string) float64 {
+	t := 0.0
+	for _, f := range files {
+		t += wavSeconds(f)
+	}
+	return t
+}
+
+// ---------------- one game's recording ----------------
+
+// mark is a moment in the game: how much sound Dolphin had saved by then
+// (which follows the game's own clock) and the time on the PC's clock.
+type mark struct {
+	Audio float64 // seconds of game sound saved so far, -1 if unknown
+	Wall  time.Time
+	Edge  bool // the very start (From) or end (To) of the game
+}
+
+// clip is one stretch to keep: the whole game, or the part between pressing
+// Record and Stop.
+type clip struct {
+	From, To mark
+	Open     bool // still recording
+}
 
 type recSession struct {
 	Game     string
-	File     string
-	Started  time.Time
-	Encoder  string
-	Audio    string
-	Crop     crop
-	Monitor  string
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	stopOnce sync.Once
-	audOnce  sync.Once
-	stopAud  chan struct{}
-	exited   chan struct{}
+	Launched time.Time
+	Ended    time.Time
+	dumpDir  string
+
+	mu         sync.Mutex
+	clips      []clip
+	firstVideo time.Time // when Dolphin's first video file appeared
+	warned     bool
 }
 
 var (
-	recMu       sync.Mutex
-	recCur      *recSession
-	recLastErr  string
-	recLastMsg  string
-	recTrimming string                 // file being tidied up after recording
-	recManual   = make(chan string, 4) // "start" / "stop" while a game runs
+	recMu      sync.Mutex
+	recCur     *recSession // the game being played, when Dolphin saves it
+	recLastErr string
+	recLastMsg string
+	recSaving  *saveState
+	recQueued  int
+	saveMu     sync.Mutex // one recording is saved at a time
 )
+
+type saveState struct {
+	Game    string
+	Step    string // "ffmpeg" (waiting for it), "saving"
+	Percent int
+}
 
 func safeFile(s string) string {
 	s = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1f™®]+`).ReplaceAllString(s, "")
@@ -319,357 +377,619 @@ func setRecError(msg string) {
 	recMu.Unlock()
 }
 
-// startRecording begins capturing the given window. It tries the PC's video
-// encoders in order (NVIDIA, AMD, Intel, then software).
-func startRecording(game string, pid int, win gameWindow, aspect float64) (*recSession, error) {
-	ff := findFFmpeg()
-	if ff == "" {
-		return nil, errors.New("Recording needs ffmpeg. Go to the Recordings tab and click Download ffmpeg")
-	}
-	c, err := gameCrop(win, aspect)
-	if err != nil {
-		return nil, err
-	}
-	dir := recordingsDir()
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, err
-	}
-	out := filepath.Join(dir, safeFile(game)+" "+time.Now().Format("2006-01-02 15-04-05")+".mp4")
-	fps, quality := recFPS(), recQuality()
+// newRecSession: a game about to start with Dolphin saving it.
+func newRecSession(game, dumpDir string) *recSession {
+	now := time.Now()
+	return &recSession{Game: game, Launched: now, dumpDir: dumpDir,
+		clips: []clip{{From: mark{Audio: 0, Wall: now, Edge: true}, Open: true}}}
+}
 
-	logPath := filepath.Join(dir, "logs", "last-recording.log")
-	os.MkdirAll(filepath.Dir(logPath), 0o755)
-	logf, _ := os.Create(logPath)
-	logLine := func(f string, a ...any) {
-		if logf != nil {
-			fmt.Fprintf(logf, f+"\n", a...)
+// markNow: where the game is up to right now.
+func (s *recSession) markNow() mark {
+	m := mark{Audio: -1, Wall: time.Now()}
+	d := findDumps(s.dumpDir, s.Launched)
+	// Same choice of sound as when the video is made. If it can't be read
+	// right now, the PC's clock is used instead.
+	if a := wavTotal(d.DSP); a > 0 {
+		m.Audio = a
+	} else if a := wavTotal(d.DTK); a > 0 && len(d.DSP) == 0 {
+		m.Audio = a
+	}
+	return m
+}
+
+// stop ends the current clip. The game is still saved by Dolphin until it
+// ends (that can't be switched off from outside), so the rest is cut off
+// when the video is made.
+func (s *recSession) stop() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := len(s.clips)
+	if n == 0 || !s.clips[n-1].Open {
+		return false
+	}
+	s.clips[n-1].To = s.markNow()
+	s.clips[n-1].Open = false
+	return true
+}
+
+// resume starts a new clip from now; it becomes a separate video.
+func (s *recSession) resume() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n := len(s.clips); n > 0 && s.clips[n-1].Open {
+		return
+	}
+	s.clips = append(s.clips, clip{From: s.markNow(), Open: true})
+}
+
+// recording: whether a clip is open, and since when.
+func (s *recSession) recording() (bool, time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := len(s.clips)
+	if n == 0 || !s.clips[n-1].Open {
+		return false, time.Time{}
+	}
+	c := s.clips[n-1]
+	if c.From.Edge {
+		if !s.firstVideo.IsZero() {
+			return true, s.firstVideo
+		}
+		return true, s.Launched
+	}
+	return true, c.From.Wall
+}
+
+func (s *recSession) logf(f string, a ...any) {
+	p := recLogPath()
+	os.MkdirAll(filepath.Dir(p), 0o755)
+	if lf, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644); err == nil {
+		fmt.Fprintf(lf, f+"\n", a...)
+		lf.Close()
+	}
+}
+
+// startRecSession is called as the game starts.
+func startRecSession(s *recSession, args []string) {
+	os.MkdirAll(filepath.Dir(recLogPath()), 0o755)
+	os.WriteFile(recLogPath(), []byte(fmt.Sprintf("=== %s  %s\nDolphin saves the game to %s\nDolphin %s\n",
+		s.Launched.Format(time.RFC3339), s.Game, s.dumpDir, strings.Join(args, " "))), 0o644)
+	recMu.Lock()
+	recCur, recLastErr, recLastMsg = s, "", ""
+	recMu.Unlock()
+}
+
+var recNoVideoAfter = 45 * time.Second
+
+// follow watches one game while it runs; when it ends, the video is made.
+func (s *recSession) follow(done <-chan struct{}) {
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-done:
+			s.mu.Lock()
+			s.Ended = time.Now()
+			if n := len(s.clips); n > 0 && s.clips[n-1].Open {
+				s.clips[n-1].To = mark{Audio: -1, Wall: s.Ended, Edge: true}
+				s.clips[n-1].Open = false
+			}
+			s.mu.Unlock()
+			recMu.Lock()
+			if recCur == s {
+				recCur = nil
+			}
+			recMu.Unlock()
+			s.finish()
+			return
+		case <-tick.C:
+		}
+		s.mu.Lock()
+		waiting := s.firstVideo.IsZero()
+		s.mu.Unlock()
+		if !waiting {
+			continue
+		}
+		if d := findDumps(s.dumpDir, s.Launched); len(d.Video) > 0 {
+			s.mu.Lock()
+			s.firstVideo = time.Now()
+			warned := s.warned
+			s.mu.Unlock()
+			s.logf("Dolphin started saving the picture: %s", filepath.Base(d.Video[0]))
+			if warned {
+				setRecError("")
+			}
+		} else if time.Since(s.Launched) > recNoVideoAfter {
+			s.mu.Lock()
+			first := !s.warned
+			s.warned = true
+			s.mu.Unlock()
+			if first {
+				s.logf("No video from Dolphin yet in %s", filepath.Join(s.dumpDir, "Frames"))
+				setRecError("Dolphin hasn't started saving the game's picture, so this game may not be recorded. " +
+					"An up-to-date Dolphin (5.0 or newer) is needed. Details are in " + recLogPath())
+			}
 		}
 	}
+}
 
+// ---------------- making the video ----------------
+
+// clipRange turns a clip into start and end times in the video. Dolphin's
+// sound starts a moment before its first picture, and both end together when
+// the game closes, so the sound is lined up with the video by their lengths.
+func clipRange(c clip, videoLen, audioLen float64, firstVideo time.Time) (from, to float64) {
+	off := 0.0 // sound time = video time + off
+	if audioLen > 0 {
+		off = audioLen - videoLen
+	}
+	at := func(m mark, end bool) float64 {
+		switch {
+		case m.Edge && end:
+			return videoLen
+		case m.Edge:
+			return 0
+		case audioLen > 0 && m.Audio >= 0:
+			return m.Audio - off
+		case !firstVideo.IsZero():
+			return m.Wall.Sub(firstVideo).Seconds()
+		}
+		return 0
+	}
+	clamp := func(v float64) float64 { return math.Max(0, math.Min(videoLen, v)) }
+	return clamp(at(c.From, false)), clamp(at(c.To, true))
+}
+
+type vidSeg struct {
+	Path string
+	Dur  float64
+	W, H int
+	FPS  float64
+	Crop *crop // black bars to cut off, if any
+}
+
+type finalJob struct {
+	Video          []vidSeg
+	DSP, DTK       []string
+	DSPLen, DTKLen float64
+	From, To       float64 // part of the video to keep, in seconds
+	FPS            float64
+	Out            string
+}
+
+func ffNum(v float64) string { return strconv.FormatFloat(v, 'f', 3, 64) }
+
+// finalSize: every part of the video is scaled to the biggest one (Dolphin
+// starts a new file when the picture size changes, e.g. the window is resized).
+func finalSize(segs []vidSeg) (int, int) {
+	w, h := 0, 0
+	for _, s := range segs {
+		sw, sh := s.W, s.H
+		if s.Crop != nil {
+			sw, sh = s.Crop.W, s.Crop.H
+		}
+		if sw*sh > w*h {
+			w, h = sw, sh
+		}
+	}
+	return w &^ 1, h &^ 1
+}
+
+// finalArgs builds the ffmpeg command that joins Dolphin's files into the .mp4.
+func finalArgs(j finalJob, enc, quality string) []string {
+	args := []string{"-hide_banner", "-loglevel", "warning", "-nostats", "-progress", "pipe:1", "-y"}
+	for _, v := range j.Video {
+		args = append(args, "-i", v.Path)
+	}
+	for _, a := range append(append([]string{}, j.DSP...), j.DTK...) {
+		args = append(args, "-ignore_length", "1", "-i", a) // the header may not have its final length
+	}
+	W, H := finalSize(j.Video)
+	var g []string
+	labels := ""
+	videoLen := 0.0
+	for i, v := range j.Video {
+		f := ""
+		if v.Crop != nil {
+			f = fmt.Sprintf("crop=%d:%d:%d:%d,", v.Crop.W, v.Crop.H, v.Crop.X, v.Crop.Y)
+		}
+		if v.W != W || v.H != H || v.Crop != nil {
+			// A part of a different shape fills the frame (a little is cut off
+			// rather than stretching it or adding bars).
+			f += fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,", W, H, W, H)
+		}
+		g = append(g, fmt.Sprintf("[%d:v]%ssetsar=1[v%d]", i, f, i))
+		labels += fmt.Sprintf("[v%d]", i)
+		videoLen += v.Dur
+	}
+	if len(j.Video) > 1 {
+		labels += fmt.Sprintf("concat=n=%d:v=1:a=0,", len(j.Video))
+	}
+	pix := "yuv420p"
+	if enc == "h264_qsv" {
+		pix = "nv12"
+	}
+	dur := j.To - j.From
+	g = append(g, fmt.Sprintf("%sfps=%s,trim=start=%s:end=%s,setpts=PTS-STARTPTS,format=%s[v]",
+		labels, ffNum(j.FPS), ffNum(j.From), ffNum(j.To), pix))
+
+	// Sound: both kinds started together, so both get the same shift.
+	clock := j.DSPLen
+	if clock <= 0 {
+		clock = j.DTKLen
+	}
+	off := clock - videoLen
+	in := len(j.Video)
+	var mix []string
+	group := func(files []string, name string) {
+		if len(files) == 0 {
+			return
+		}
+		ls := ""
+		for k := range files {
+			g = append(g, fmt.Sprintf("[%d:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[%s%d]", in, name, k))
+			ls += fmt.Sprintf("[%s%d]", name, k)
+			in++
+		}
+		var f []string
+		if len(files) > 1 {
+			f = append(f, fmt.Sprintf("concat=n=%d:v=0:a=1", len(files)))
+		}
+		skip := 0.0
+		if off < 0 { // sound shorter than the video: silence first
+			f = append(f, fmt.Sprintf("adelay=%d:all=1", int(math.Round(-off*1000))))
+		} else {
+			skip = off
+		}
+		f = append(f, fmt.Sprintf("atrim=start=%s:end=%s,asetpts=PTS-STARTPTS", ffNum(j.From+skip), ffNum(j.To+skip)))
+		g = append(g, ls+strings.Join(f, ",")+"["+name+"]")
+		mix = append(mix, "["+name+"]")
+	}
+	if j.DSPLen > 0 {
+		group(j.DSP, "dsp")
+	} else {
+		in += len(j.DSP)
+	}
+	if j.DTKLen > 0 {
+		group(j.DTK, "dtk")
+	}
+	pad := fmt.Sprintf("apad=whole_dur=%s,atrim=end=%s[a]", ffNum(dur), ffNum(dur))
+	switch len(mix) {
+	case 1:
+		g = append(g, mix[0]+pad)
+	case 2:
+		g = append(g, mix[0]+mix[1]+"amix=inputs=2:duration=longest:normalize=0,"+pad)
+	}
+	args = append(args, "-filter_complex", strings.Join(g, ";"), "-map", "[v]")
+	if len(mix) > 0 {
+		args = append(args, "-map", "[a]")
+	}
+	args = append(args, encoderArgs(enc, quality)...)
+	args = append(args, "-g", fmt.Sprint(int(math.Round(j.FPS*2))))
+	if len(mix) > 0 {
+		args = append(args, "-c:a", "aac", "-b:a", "192k")
+	}
+	return append(args, "-movflags", "+faststart", j.Out)
+}
+
+var (
+	reCrop   = regexp.MustCompile(`crop=(\d+):(\d+):(\d+):(\d+)`)
+	reVidHdr = regexp.MustCompile(`Stream #[^\n]*Video: [^\n]*?, (\d{2,5})x(\d{2,5})[^\n]*`)
+	reFPS    = regexp.MustCompile(`, ([\d.]+) (?:fps|tbr)`)
+	reOutUS  = regexp.MustCompile(`out_time_us=(\d+)`)
+)
+
+// parseBars reads ffmpeg's cropdetect output: the area the game actually drew
+// into. Only real bars count (at least 2% of the picture), never something odd.
+func parseBars(out string, fw, fh int) *crop {
+	all := reCrop.FindAllStringSubmatch(out, -1)
+	if len(all) == 0 || fw <= 0 || fh <= 0 {
+		return nil
+	}
+	atoi := func(x string) int { n, _ := strconv.Atoi(x); return n }
+	last := all[len(all)-1]
+	w, h, x, y := atoi(last[1])&^1, atoi(last[2])&^1, atoi(last[3])&^1, atoi(last[4])&^1
+	l, r, t, b := x, fw-w-x, y, fh-h-y
+	if w < fw/3 || h < fh/3 || l < 0 || r < 0 || t < 0 || b < 0 || (l+r < fw/50 && t+b < fh/50) {
+		return nil
+	}
+	return &crop{X: x, Y: y, W: w, H: h}
+}
+
+// probeSegment reads one of Dolphin's video files: length, size, frame rate
+// and any black bars the game itself draws around the picture.
+func probeSegment(ff, path string) (vidSeg, error) {
+	v := vidSeg{Path: path}
+	// Length: copying the stream to nowhere reads to the end quickly, and
+	// works even if Dolphin couldn't finish the file.
+	cmd := lowPriority(hiddenCommand(ff, "-hide_banner", "-nostats", "-progress", "pipe:1", "-i", path,
+		"-map", "0:v:0", "-c", "copy", "-f", "null", "-"))
+	out, err := cmd.Output()
+	if m := reOutUS.FindAllStringSubmatch(string(out), -1); len(m) > 0 {
+		us, _ := strconv.ParseInt(m[len(m)-1][1], 10, 64)
+		v.Dur = float64(us) / 1e6
+	}
+	// Size, frame rate and bars (looking at key frames from the first 15 minutes).
+	cmd = lowPriority(hiddenCommand(ff, "-hide_banner", "-skip_frame", "nokey", "-t", "900", "-i", path,
+		"-map", "0:v:0", "-vf", "cropdetect=limit=24:round=2:reset=0", "-an", "-f", "null", "-"))
+	info, _ := cmd.CombinedOutput()
+	s := string(info)
+	if m := reVidHdr.FindStringSubmatch(s); m != nil {
+		v.W, _ = strconv.Atoi(m[1])
+		v.H, _ = strconv.Atoi(m[2])
+		if f := reFPS.FindStringSubmatch(m[0]); f != nil {
+			v.FPS, _ = strconv.ParseFloat(f[1], 64)
+		}
+	}
+	if v.W == 0 || v.H == 0 {
+		if err == nil {
+			err = errors.New("ffmpeg couldn't read it")
+		}
+		return v, fmt.Errorf("%s: %v", filepath.Base(path), err)
+	}
+	v.Crop = parseBars(s, v.W, v.H)
+	return v, nil
+}
+
+// outputFPS: Dolphin saves the picture at the console's refresh rate (about
+// 60 or 50 a second). The 30 FPS setting keeps every other frame.
+func outputFPS(src float64, want int) float64 {
+	if src < 20 || src > 125 {
+		src = 60
+	}
+	if want == 30 && src > 40 {
+		return src / 2
+	}
+	return src
+}
+
+func diskFull(msg string) bool {
+	m := strings.ToLower(msg)
+	return strings.Contains(m, "no space left") || strings.Contains(m, "not enough space") || strings.Contains(m, "disk full") ||
+		strings.Contains(m, "disk is full")
+}
+
+var errDiskFull = errors.New("disk full")
+
+// tail keeps the end of ffmpeg's messages.
+type tail struct{ b []byte }
+
+func (t *tail) Write(p []byte) (int, error) {
+	t.b = append(t.b, p...)
+	if len(t.b) > 8192 {
+		t.b = t.b[len(t.b)-8192:]
+	}
+	return len(p), nil
+}
+
+// encodeClip makes one .mp4, trying the PC's video encoders in order
+// (NVIDIA, AMD, Intel, then software).
+func encodeClip(ff string, j finalJob, quality string, logf func(string, ...any), progress func(sec float64)) error {
 	lastErr := errors.New("no video encoder worked on this PC")
 	for _, enc := range encoderOrder {
 		if !encoderWorks(ff, enc) {
-			logLine("encoder %s not available", enc)
+			logf("encoder %s not available", enc)
 			continue
 		}
-		s, err := tryRecording(ff, enc, game, pid, win, c, fps, quality, out, logf, logLine)
+		args := finalArgs(j, enc, quality)
+		logf("ffmpeg %s", strings.Join(args, " "))
+		cmd := lowPriority(hiddenCommand(ff, args...))
+		errs := &tail{}
+		cmd.Stderr = errs
+		stdout, err := cmd.StdoutPipe()
 		if err != nil {
-			lastErr = fmt.Errorf("%v (details in %s)", err, logPath)
-			logLine("%s failed: %v", enc, err)
-			continue
+			return err
 		}
-		recMu.Lock()
-		recCur, recLastErr, recLastMsg = s, "", ""
-		recMu.Unlock()
-		return s, nil
-	}
-	os.Remove(out)
-	return nil, lastErr
-}
-
-func tryRecording(ff, enc, game string, pid int, win gameWindow, c crop, fps int, quality, out string,
-	logf io.Writer, logLine func(string, ...any)) (*recSession, error) {
-	// Game sound (or the whole PC's sound if that isn't possible).
-	var ac audioCapture
-	if a, err := openProcessAudio(pid); err == nil {
-		ac = a
-	} else {
-		logLine("game-only audio unavailable: %v", err)
-		if a, err := openSystemAudio(); err == nil {
-			ac = a
-		} else {
-			logLine("PC audio unavailable: %v", err)
+		if err := cmd.Start(); err != nil {
+			return err
 		}
-	}
-	var af *audioFormat
-	var ap *audioPipe
-	if ac != nil {
-		f := ac.Format()
-		var err error
-		if ap, err = newAudioPipe(); err != nil {
-			logLine("audio pipe: %v", err)
-			ac = nil
-		} else {
-			af = &f
-		}
-	}
-	audioPath := ""
-	if ap != nil {
-		audioPath = ap.Path
-	}
-
-	args := ffmpegArgs(enc, win, c, fps, quality, af, audioPath, out)
-	logLine("\n=== %s  %s  crop=%+v\nffmpeg %s", time.Now().Format(time.RFC3339), enc, c, strings.Join(args, " "))
-	cmd := hiddenCommand(ff, args...)
-	if logf != nil {
-		cmd.Stderr = logf
-	}
-	progress, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, err
-	}
-	if err := cmd.Start(); err != nil {
-		if ap != nil {
-			ap.Close()
-		}
-		return nil, err
-	}
-	s := &recSession{Game: game, File: out, Started: time.Now(), Encoder: enc, Crop: c, cmd: cmd, stdin: stdin,
-		stopAud: make(chan struct{}), exited: make(chan struct{}), Audio: "none",
-		Monitor: fmt.Sprintf("%dx%d", win.Output.W(), win.Output.H())}
-	go func() { cmd.Wait(); close(s.exited) }()
-
-	// ffmpeg reports progress on stdout; the first encoded frame means video is flowing.
-	videoReady := make(chan struct{})
-	var readyFrames int // frames already encoded when video was first reported
-	go func() {
 		buf := make([]byte, 4096)
-		var line []byte
-		ready := false
 		for {
-			n, err := progress.Read(buf)
-			for _, ch := range buf[:n] {
-				if ch != '\n' {
-					line = append(line, ch)
-					continue
-				}
-				l := strings.TrimSpace(string(line))
-				line = line[:0]
-				if !ready && strings.HasPrefix(l, "frame=") && l != "frame=0" {
-					ready = true
-					fmt.Sscan(strings.TrimPrefix(l, "frame="), &readyFrames)
-					close(videoReady)
-				}
+			n, rerr := stdout.Read(buf)
+			if m := reOutUS.FindAllSubmatch(buf[:n], -1); len(m) > 0 {
+				us, _ := strconv.ParseInt(string(m[len(m)-1][1]), 10, 64)
+				progress(float64(us) / 1e6)
 			}
-			if err != nil {
-				return
+			if rerr != nil {
+				break
 			}
 		}
-	}()
-
-	if ap != nil {
-		s.Audio = ac.Source()
-		data := make(chan []byte, 1024)
-		go func() {
-			w, err := ap.Open() // waits for ffmpeg to open the pipe
-			if err != nil {
-				logLine("audio pipe open: %v", err)
-				for range data {
-				}
-				return
-			}
-			defer w.Close()
-			// A sliver of silence lets ffmpeg identify the stream. Sound captured
-			// while ffmpeg is still starting is dropped so it lines up with the video.
-			f := ac.Format()
-			bytesPer := map[string]int{"s16le": 2, "s24le": 3, "s32le": 4, "f32le": 4}[f.Sample] * f.Ch
-			packet := make([]byte, 1024*bytesPer) // ffmpeg reads raw sound 1024 samples at a time
-			w.Write(packet)
-			w.Write(packet)
-			sent := 2048 // samples of silence written so far
-			startedAt := time.Now()
-			lastTopUp := startedAt
-			live := false
-			for b := range data {
-				if !live {
-					select {
-					case <-videoReady:
-						live = true
-					default:
-						// Still starting: a small top-up now and then so ffmpeg never waits on us.
-						if time.Since(startedAt) > 800*time.Millisecond && time.Since(lastTopUp) > 400*time.Millisecond {
-							w.Write(packet)
-							sent += 1024
-							lastTopUp = time.Now()
-						}
-						continue
-					}
-					// Line the sound up with the video: by now ffmpeg has encoded
-					// readyFrames frames (plus a few still inside the encoder).
-					lag := 4
-					if enc == "libx264" {
-						lag = 12
-					}
-					target := (readyFrames + lag) * f.Rate / fps
-					if pad := target - sent; pad > 0 {
-						w.Write(make([]byte, pad*bytesPer))
-					} else if drop := -pad * bytesPer; drop > 0 {
-						if drop >= len(b) {
-							continue
-						}
-						b = b[drop:]
-					}
-				}
-				if _, err := w.Write(b); err != nil {
-					for range data {
-					}
-					return
-				}
-			}
-		}()
-		go func() {
-			err := ac.Run(func(b []byte) {
-				select {
-				case data <- b:
-				default: // ffmpeg fell behind; drop rather than stall the capture
-				}
-			}, s.stopAud)
-			close(data)
-			if err != nil {
-				logLine("audio: %v", err)
-			}
-		}()
+		err = cmd.Wait()
+		logf("%s", strings.TrimSpace(string(errs.b)))
+		if st, serr := os.Stat(j.Out); err == nil && serr == nil && st.Size() > 0 {
+			return nil
+		}
+		os.Remove(j.Out)
+		if diskFull(string(errs.b)) {
+			return errDiskFull
+		}
+		if err == nil {
+			err = errors.New("ffmpeg made an empty file")
+		}
+		lastErr = fmt.Errorf("%s: %v", enc, err)
+		logf("%v", lastErr)
 	}
-
-	// Wait for video to start. If ffmpeg gives up, the caller tries the next encoder.
-	select {
-	case <-videoReady:
-		return s, nil
-	case <-s.exited:
-	case <-time.After(15 * time.Second):
-		cmd.Process.Kill()
-		<-s.exited
-	}
-	s.audOnce.Do(func() { close(s.stopAud) })
-	if ap != nil {
-		ap.Close()
-	}
-	os.Remove(out)
-	return nil, fmt.Errorf("%s didn't start", enc)
+	return lastErr
 }
 
-// stop ends the recording: "q" tells ffmpeg to finish writing the file.
-func (s *recSession) stop() {
-	s.stopOnce.Do(func() {
-		io.WriteString(s.stdin, "q")
-		time.AfterFunc(5*time.Second, func() { s.stdin.Close() })
-	})
-	select {
-	case <-s.exited:
-	case <-time.After(20 * time.Second):
-		s.cmd.Process.Kill()
-		<-s.exited
+var ffWaitPoll = 2 * time.Second
+
+// waitForFFmpeg: ffmpeg is needed to make the video. If it isn't there yet
+// it's downloaded now, and the recording waits for it.
+func waitForFFmpeg(setStep func(string)) string {
+	asked, told := false, false
+	for {
+		if ff := findFFmpeg(); ff != "" {
+			return ff
+		}
+		setStep("ffmpeg")
+		st, _ := ffStatus()["state"].(string)
+		switch st {
+		case "downloading", "verifying", "installing":
+		case "error":
+			if !told {
+				told = true
+				setRecError("ffmpeg couldn't be downloaded, so your recording is waiting to be saved. " +
+					"Go to the Recordings tab and click Download ffmpeg to try again (keep RetroPixels open).")
+			}
+		default:
+			if !asked {
+				asked = true
+				startFFmpegInstall()
+			}
+		}
+		time.Sleep(ffWaitPoll)
 	}
-	s.audOnce.Do(func() { close(s.stopAud) })
+}
+
+func setSaving(f func(*saveState)) {
 	recMu.Lock()
-	if recCur == s {
-		recCur = nil
-	}
-	if st, err := os.Stat(s.File); err == nil && st.Size() > 0 {
-		recLastMsg = "Saved " + filepath.Base(s.File)
-	} else {
-		recLastErr = "The recording didn't save. Details are in " + filepath.Join(recordingsDir(), "logs", "last-recording.log")
+	if recSaving != nil {
+		f(recSaving)
 	}
 	recMu.Unlock()
 }
 
-// gameShowing: the emulator's game window is up. (Dolphin is started in a mode
-// where its only window is the game itself.)
-func gameShowing(emuExe string, w gameWindow) bool { return w.Handle != 0 || w.Client.W() > 0 }
-
-// recOpts: Aspect is the game's picture shape (<0 = 16:9, 0 = fill the
-// window); PostCrop trims any black bars left in the finished video.
-type recOpts struct {
-	Aspect   float64
-	PostCrop bool
+// uniqueOut: "<game> <date time>.mp4", with a number added if that's taken.
+func uniqueOut(dir, game string, t time.Time) string {
+	base := filepath.Join(dir, safeFile(game)+" "+t.Format("2006-01-02 15-04-05"))
+	out := base + ".mp4"
+	for n := 2; ; n++ {
+		if _, err := os.Stat(out); err != nil {
+			return out
+		}
+		out = fmt.Sprintf("%s (%d).mp4", base, n)
+	}
 }
 
-// autoRecord follows one emulator run: records while a game is on screen and
-// stops when it ends. done closes when the emulator exits.
-func autoRecord(game, emuExe string, pid int, done <-chan struct{}, opt recOpts) {
-	aspect := opt.Aspect
-	if aspect < 0 {
-		aspect = 16.0 / 9
+// finish makes the .mp4 (one per clip) from Dolphin's files once the game
+// has ended, then deletes those files.
+func (s *recSession) finish() {
+	recMu.Lock()
+	recQueued++
+	recMu.Unlock()
+	saveMu.Lock()
+	defer saveMu.Unlock()
+	recMu.Lock()
+	recQueued--
+	recSaving = &saveState{Game: s.Game, Step: "saving"}
+	recMu.Unlock()
+	defer func() { recMu.Lock(); recSaving = nil; recMu.Unlock() }()
+
+	d := findDumps(s.dumpDir, s.Launched)
+	s.logf("\n=== game ended after %s\nvideo: %v\nsound: %v %v", s.Ended.Sub(s.Launched).Round(time.Second), d.Video, d.DSP, d.DTK)
+	if len(d.Video) == 0 {
+		d.remove()
+		if s.Ended.Sub(s.Launched) > 20*time.Second {
+			setRecError("Dolphin didn't save the game's picture, so nothing was recorded. " +
+				"An up-to-date Dolphin (5.0 or newer) is needed. Details are in " + recLogPath())
+		}
+		return
 	}
-	var cur *recSession
-	var lastRect rect
-	stableSince := time.Time{}
-	userStopped := false
-	tick := time.NewTicker(500 * time.Millisecond)
-	defer tick.Stop()
-	finish := func() {
-		if cur != nil {
-			cur.stop()
-			if opt.PostCrop {
-				go trimBlackBars(cur.File, cur.Encoder)
-			}
-			cur = nil
-		}
+	defer d.remove() // the raw files are huge
+
+	s.mu.Lock()
+	clips := append([]clip{}, s.clips...)
+	firstVideo := s.firstVideo
+	s.mu.Unlock()
+	if firstVideo.IsZero() {
+		firstVideo = s.Launched
 	}
-	defer finish()
-	for {
-		select {
-		case <-done:
-			return
-		case m := <-recManual:
-			switch m {
-			case "stop":
-				finish()
-				userStopped = true
-			case "start":
-				userStopped = false
-				stableSince = time.Time{}
-			}
-		case <-tick.C:
-		}
-		win, ok := findGameWindow(pid)
-		showing := ok && gameShowing(emuExe, win)
-		if cur != nil {
-			if !showing {
-				finish()
-			} else {
-				select {
-				case <-cur.exited: // ffmpeg stopped by itself
-					cur.stop()
-					cur = nil
-					setRecError("Recording stopped unexpectedly. Details are in " + filepath.Join(recordingsDir(), "logs", "last-recording.log"))
-					userStopped = true
-				default:
-				}
-			}
+
+	ff := waitForFFmpeg(func(step string) { setSaving(func(st *saveState) { st.Step = step }) })
+	setSaving(func(st *saveState) { st.Step = "saving" })
+
+	var segs []vidSeg
+	videoLen := 0.0
+	for _, f := range d.Video {
+		v, err := probeSegment(ff, f)
+		if err != nil || v.Dur < 0.05 {
+			s.logf("skipping %s: %v (%.2fs)", filepath.Base(f), err, v.Dur)
 			continue
 		}
-		if !showing {
-			stableSince = time.Time{}
-			userStopped = false // next game in this session records again
+		s.logf("%s: %.2fs %dx%d %.3f fps bars=%v", filepath.Base(f), v.Dur, v.W, v.H, v.FPS, v.Crop)
+		segs = append(segs, v)
+		videoLen += v.Dur
+	}
+	if len(segs) == 0 {
+		setRecError("Dolphin's video for this game couldn't be read, so it wasn't saved. Details are in " + recLogPath())
+		return
+	}
+	j := finalJob{Video: segs, DSP: d.DSP, DTK: d.DTK, DSPLen: wavTotal(d.DSP), DTKLen: wavTotal(d.DTK),
+		FPS: outputFPS(segs[0].FPS, recFPS())}
+	audioLen := j.DSPLen
+	if audioLen <= 0 {
+		audioLen = j.DTKLen
+	}
+	s.logf("video %.2fs, sound %.2fs (disc music %.2fs)", videoLen, j.DSPLen, j.DTKLen)
+
+	dir := recordingsDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		setRecError("Couldn't make the recordings folder: " + err.Error())
+		return
+	}
+	quality := recQuality()
+	type part struct {
+		from, to float64
+		wall     time.Time
+	}
+	var parts []part
+	total := 0.0
+	for _, c := range clips {
+		from, to := clipRange(c, videoLen, audioLen, firstVideo)
+		if to-from < 1 {
+			s.logf("skipping a clip under a second long (%.2f-%.2f)", from, to)
 			continue
 		}
-		if userStopped || !(autoRecordOn() || manualWanted()) {
-			continue
+		w := c.From.Wall
+		if c.From.Edge {
+			w = firstVideo
 		}
-		// No ffmpeg yet: fetch it now and start recording as soon as it's ready,
-		// instead of skipping this game.
-		if findFFmpeg() == "" {
-			if st := ffStatus()["state"]; st == "idle" || st == "" {
-				startFFmpegInstall()
-			}
-			if st := ffStatus()["state"]; st != "error" && st != "done" {
-				continue // downloading: try again on a later tick
-			}
+		parts = append(parts, part{from, to, w})
+		total += to - from
+	}
+	var saved []string
+	failMsg := ""
+	done := 0.0
+	for _, p := range parts {
+		out := uniqueOut(dir, s.Game, p.wall)
+		j.From, j.To = p.from, p.to
+		j.Out = strings.TrimSuffix(out, ".mp4") + ".saving.mp4"
+		s.logf("making %s from %.2fs to %.2fs", filepath.Base(out), p.from, p.to)
+		err := encodeClip(ff, j, quality, s.logf, func(sec float64) {
+			pc := int(100 * (done + math.Min(sec, p.to-p.from)) / total)
+			setSaving(func(st *saveState) { st.Percent = pc })
+		})
+		done += p.to - p.from
+		if err == errDiskFull {
+			failMsg = "Your disk is full, so the recording couldn't be saved. Free up some space (or choose another folder in the Recordings tab) and try again."
+			break
 		}
-		// Wait until the window has settled (going fullscreen takes a moment).
-		if !win.Client.same(lastRect) || stableSince.IsZero() {
-			lastRect = win.Client
-			stableSince = time.Now()
-			continue
-		}
-		if time.Since(stableSince) < 1500*time.Millisecond {
-			continue
-		}
-		s, err := startRecording(game, pid, win, aspect)
-		clearManualWanted()
 		if err != nil {
-			setRecError(err.Error())
-			userStopped = true
+			failMsg = "The recording couldn't be saved. Details are in " + recLogPath()
+			s.logf("failed: %v", err)
 			continue
 		}
-		cur = s
+		if err := os.Rename(j.Out, out); err != nil {
+			os.Remove(j.Out)
+			failMsg = "The recording couldn't be saved: " + err.Error()
+			continue
+		}
+		saved = append(saved, filepath.Base(out))
+		s.logf("saved %s", out)
 	}
+	recMu.Lock()
+	if failMsg != "" {
+		recLastErr = failMsg
+	}
+	if len(saved) > 0 {
+		recLastMsg = "Saved " + strings.Join(saved, ", ")
+	}
+	recMu.Unlock()
 }
+
+// ---------------- recording the next game ----------------
 
 var (
 	manualMu   sync.Mutex
@@ -680,28 +1000,34 @@ func manualWanted() bool     { manualMu.Lock(); defer manualMu.Unlock(); return 
 func clearManualWanted()     { manualMu.Lock(); manualFlag = false; manualMu.Unlock() }
 func setManualWanted(v bool) { manualMu.Lock(); manualFlag = v; manualMu.Unlock() }
 
+// recordingWanted: whether the game about to start should be recorded.
+func recordingWanted() bool { return autoRecordOn() || manualWanted() }
+
 // ---------------- status & routes ----------------
 
 func recStatus() map[string]any {
 	recMu.Lock()
 	defer recMu.Unlock()
 	st := map[string]any{
-		"auto":     autoRecordOn(),
-		"fps":      recFPS(),
-		"quality":  recQuality(),
-		"dir":      recordingsDir(),
-		"ffmpeg":   findFFmpeg() != "",
-		"install":  ffStatus(),
-		"error":    recLastErr,
-		"message":  recLastMsg,
-		"trimming": recTrimming,
+		"auto":    autoRecordOn(),
+		"fps":     recFPS(),
+		"quality": recQuality(),
+		"dir":     recordingsDir(),
+		"ffmpeg":  findFFmpeg() != "",
+		"install": ffStatus(),
+		"error":   recLastErr,
+		"message": recLastMsg,
+		"next":    manualWanted(),
+		"dumping": recCur != nil,
+		"queued":  recQueued,
 	}
 	if recCur != nil {
-		st["active"] = map[string]any{
-			"game": recCur.Game, "file": filepath.Base(recCur.File), "started": recCur.Started,
-			"encoder": recCur.Encoder, "audio": recCur.Audio,
-			"size": fmt.Sprintf("%dx%d", recCur.Crop.W, recCur.Crop.H), "monitor": recCur.Monitor,
+		if on, since := recCur.recording(); on {
+			st["active"] = map[string]any{"game": recCur.Game, "started": since}
 		}
+	}
+	if recSaving != nil {
+		st["saving"] = map[string]any{"game": recSaving.Game, "step": recSaving.Step, "percent": recSaving.Percent}
 	}
 	return st
 }
@@ -709,14 +1035,8 @@ func recStatus() map[string]any {
 func listRecordings() []map[string]any {
 	entries, _ := os.ReadDir(recordingsDir())
 	out := []map[string]any{}
-	recMu.Lock()
-	active := ""
-	if recCur != nil {
-		active = filepath.Base(recCur.File)
-	}
-	recMu.Unlock()
 	for _, e := range entries {
-		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".mp4") || e.Name() == active || strings.Contains(e.Name(), ".trimming.") {
+		if e.IsDir() || !strings.EqualFold(filepath.Ext(e.Name()), ".mp4") || strings.Contains(e.Name(), ".saving.") || strings.Contains(e.Name(), ".trimming.") {
 			continue
 		}
 		if info, err := e.Info(); err == nil {
@@ -728,6 +1048,41 @@ func listRecordings() []map[string]any {
 		out = out[:20]
 	}
 	return out
+}
+
+// recControl handles Record / Stop while a game is running. It returns a
+// short note to show the player.
+func recControl(action string) (string, error) {
+	runMu.Lock()
+	gameOn := running != nil
+	runMu.Unlock()
+	recMu.Lock()
+	s := recCur
+	recMu.Unlock()
+	switch action {
+	case "start":
+		setRecError("")
+		if s != nil {
+			s.resume()
+			return "Recording", nil
+		}
+		// Dolphin can only be told to save a game as it starts.
+		setManualWanted(true)
+		if gameOn {
+			return "Recording will start when you start your next game (Dolphin can only record from the start of a game)", nil
+		}
+		return "Your next game will be recorded", nil
+	case "stop":
+		if s != nil && s.stop() {
+			return "Recording stopped. The video is saved when the game ends", nil
+		}
+		if manualWanted() {
+			setManualWanted(false)
+			return "Your next game won't be recorded", nil
+		}
+		return "", nil
+	}
+	return "", errors.New("unknown action")
 }
 
 func registerRecorderRoutes(mux *http.ServeMux) {
@@ -765,20 +1120,14 @@ func registerRecorderRoutes(mux *http.ServeMux) {
 		if !readBody(w, r, &b) {
 			return
 		}
-		runMu.Lock()
-		gameOn := running != nil
-		runMu.Unlock()
+		note := ""
 		switch b.Action {
-		case "start":
-			if !gameOn {
-				fail(w, errors.New("start a GameCube or Wii game first"))
+		case "start", "stop":
+			var err error
+			if note, err = recControl(b.Action); err != nil {
+				fail(w, err)
 				return
 			}
-			setRecError("")
-			setManualWanted(true)
-			recManual <- "start"
-		case "stop":
-			recManual <- "stop"
 		case "open-folder":
 			os.MkdirAll(recordingsDir(), 0o755)
 			if err := openFolder(recordingsDir()); err != nil {
@@ -801,8 +1150,7 @@ func registerRecorderRoutes(mux *http.ServeMux) {
 			fail(w, errors.New("unknown action"))
 			return
 		}
-		time.Sleep(150 * time.Millisecond)
-		writeJSON(w, 200, map[string]any{"status": recStatus()})
+		writeJSON(w, 200, map[string]any{"status": recStatus(), "note": note})
 	}))
 	mux.HandleFunc("/api/rec/open", guard(func(w http.ResponseWriter, r *http.Request) {
 		var b struct {
@@ -822,73 +1170,3 @@ func registerRecorderRoutes(mux *http.ServeMux) {
 		writeJSON(w, 200, map[string]any{"ok": true})
 	}))
 }
-
-var reCrop = regexp.MustCompile(`crop=(\d+):(\d+):(\d+):(\d+)`)
-var reSize = regexp.MustCompile(`Video: h264[^\n]*?, (\d+)x(\d+)`)
-
-// trimBlackBars finds the area the game actually drew into across the whole
-// video and, if there are black bars, re-encodes the video without them.
-func trimBlackBars(file, enc string) {
-	ff := findFFmpeg()
-	if ff == "" {
-		return
-	}
-	out, err := hiddenCommand(ff, "-hide_banner", "-skip_frame", "nokey", "-i", file,
-		"-vf", "cropdetect=limit=24:round=2:reset=0", "-an", "-f", "null", "-").CombinedOutput()
-	if err != nil {
-		return
-	}
-	s := string(out)
-	sz := reSize.FindStringSubmatch(s)
-	all := reCrop.FindAllStringSubmatch(s, -1)
-	if sz == nil || len(all) == 0 {
-		return
-	}
-	atoi := func(x string) int { n, _ := strconv.Atoi(x); return n }
-	fw, fh := atoi(sz[1]), atoi(sz[2])
-	last := all[len(all)-1]
-	w, h, x, y := atoi(last[1])&^1, atoi(last[2])&^1, atoi(last[3])&^1, atoi(last[4])&^1
-	l, r, t, b := x, fw-w-x, y, fh-h-y
-	// Only trim real bars (at least 2% of the picture), never something odd.
-	if w < fw/3 || h < fh/3 || l < 0 || r < 0 || t < 0 || b < 0 || (l+r < fw/50 && t+b < fh/50) {
-		return
-	}
-	recMu.Lock()
-	recTrimming = filepath.Base(file)
-	recMu.Unlock()
-	defer func() { recMu.Lock(); recTrimming = ""; recMu.Unlock() }()
-
-	tmp := strings.TrimSuffix(file, filepath.Ext(file)) + ".trimming.mp4"
-	vf := fmt.Sprintf("crop=%d:%d:%d:%d", w, h, x, y)
-	if enc == "" || !encoderWorks(ff, enc) {
-		enc = "libx264"
-	}
-	if enc == "libx264" || enc == "h264_qsv" {
-		vf += ",format=" + map[string]string{"libx264": "yuv420p", "h264_qsv": "nv12"}[enc]
-	}
-	args := []string{"-hide_banner", "-loglevel", "error", "-y", "-i", file, "-map", "0", "-vf", vf}
-	args = append(args, encoderArgs(enc, "high")...)
-	args = append(args, "-c:a", "copy", "-movflags", "+faststart", tmp)
-	if err := hiddenCommand(ff, args...).Run(); err != nil {
-		os.Remove(tmp)
-		return
-	}
-	if st, err := os.Stat(tmp); err != nil || st.Size() == 0 {
-		os.Remove(tmp)
-		return
-	}
-	if err := os.Rename(tmp, file); err != nil {
-		os.Remove(tmp)
-	}
-}
-
-// audioPipe carries raw sound to ffmpeg (a named pipe on Windows, a FIFO elsewhere).
-type audioPipe struct {
-	Path    string
-	openFn  func() (io.WriteCloser, error)
-	closeFn func()
-	once    sync.Once
-}
-
-func (a *audioPipe) Open() (io.WriteCloser, error) { return a.openFn() }
-func (a *audioPipe) Close()                        { a.once.Do(a.closeFn) }

@@ -766,22 +766,13 @@ func dolphinRunning() bool {
 	return r || processRunning("Dolphin.exe")
 }
 
-// dolphinAspect: the shape Dolphin draws at, and whether to trim bars afterwards.
-func dolphinAspect() recOpts {
-	f := readIni(dolphinIni("GFX.ini"))
-	v, _ := f.Get("Settings", "AspectRatio")
-	// Bars left in the video are always trimmed afterwards, whatever the setting:
-	// a game can draw a different shape than the setting suggests.
-	switch v {
-	case "1":
-		return recOpts{Aspect: 16.0 / 9, PostCrop: true}
-	case "2":
-		return recOpts{Aspect: 4.0 / 3, PostCrop: true}
-	case "3":
-		return recOpts{Aspect: 0, PostCrop: true}
+// dolphinDumpDir: where Dolphin saves frame and audio dumps (its "Dump"
+// folder, unless a different one is chosen in Dolphin's Paths settings).
+func dolphinDumpDir() string {
+	if p, ok := readIni(dolphinIni("Dolphin.ini")).Get("General", "DumpPath"); ok && strings.TrimSpace(p) != "" {
+		return filepath.Clean(strings.TrimSpace(p))
 	}
-	// Auto: games are 4:3 or 16:9. Record up to 16:9, then trim what's left.
-	return recOpts{Aspect: 16.0 / 9, PostCrop: true}
+	return filepath.Join(dolphinUserDir(), "Dump")
 }
 
 // ---------------- launching ----------------
@@ -831,9 +822,17 @@ func launchDolphinGame(path string) error {
 	} else if fs {
 		args = append(args, "-C", "Dolphin.Display.Fullscreen=True")
 	}
-	if err := startEmulator(exe, args, path, g.Name, "dolphin", "Dolphin", dolphinAspect(), onStart); err != nil {
+	// Recording: Dolphin saves the game's own picture and sound, and
+	// RetroPixels makes the video from them when the game ends.
+	var rec *recSession
+	if recordingWanted() {
+		rec = newRecSession(g.Name, dolphinDumpDir())
+		args = append(args, dolphinRecordArgs(recQuality())...)
+	}
+	if err := startEmulator(exe, args, path, g.Name, "dolphin", "Dolphin", rec, onStart); err != nil {
 		return err
 	}
+	clearManualWanted()
 	cfgMu.Lock()
 	defer cfgMu.Unlock()
 	list := []recentGame{{Path: path, Name: g.Name, LastPlayed: time.Now()}}
