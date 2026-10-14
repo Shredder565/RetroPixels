@@ -34,6 +34,7 @@
   const W = 288, H = 224, TOP = 16, LEFT = 112;
   const NMI_DELAY = 179;                // Z80 cycles from arming the sound NMI to the NMI (50 us)
   const FIRQ_DELAY = 256;               // main cycles from the sprite copy to its FIRQ
+  const PCM_GAIN = 1.6;                 // K053260 level against the YM2151 (MAME's mix is ~4 dB more PCM-heavy)
   const SHADE = new Uint8Array(256);    // a shadow leaves 60% of each colour component
   for (let i = 0; i < 256; i++) SHADE[i] = Math.floor(i * 0.6);
 
@@ -265,7 +266,7 @@
       this.k053260.mix(pcm, 0, n, YM_HZ / 64);
       for (let i = 0; i < n; i++) {
         this.ym.tick();
-        this.resampler.add((this.ym.out[0] + this.ym.out[1]) / 65536 + pcm[i]);
+        this.resampler.add((this.ym.out[0] + this.ym.out[1]) / 65536 + pcm[i] * PCM_GAIN);
       }
     }
 
