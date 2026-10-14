@@ -3,11 +3,12 @@
 //
 // The K051960 holds 128 sprites of 8 bytes each and draws them (with the K051937 doing
 // the pixels). Sprites are made of 16x16 cells (1x1 up to 8x8 cells), can be flipped and
-// shrunk, and are sorted by a 7-bit priority. A sprite's cells use codes in Konami's
+// shrunk, and are ordered by a 7-bit priority (a higher value is drawn in front; one sprite
+// per value, see render). A sprite's cells use codes in Konami's
 // zig-zag order: one step right adds 1, 4, 16 (for cell 1, 2, 4), one step down 2, 8, 32.
 //
 // Sprite bytes:
-//   0  bit 7 active, bits 0-6 priority (lower values are drawn on top)
+//   0  bit 7 active, bits 0-6 priority (higher values are drawn on top)
 //   1  bits 5-7 size, bits 0-4 code bits 8-12
 //   2  code bits 0-7
 //   3  attribute (colour etc.; meaning is up to the board, see spriteCallback)
@@ -120,12 +121,15 @@
       opts = opts || {};
       const x0 = opts.x0 || 0, y0 = opts.y0 || 0, priBuf = opts.pri || null, shBuf = opts.shadow || null;
       const ram = this.ram, pens = this.pens, t = this.t, cb = this.spriteCallback, codes = this.codes;
-      // sort: lower priority value on top, so draw higher values first; equal values: lower index on top
-      let n = 0;
-      for (let i = 0; i < 128; i++) if (ram[i * 8] & 0x80) this.order[n++] = i;
-      const ord = Array.from(this.order.subarray(0, n));
-      ord.sort((a, b) => ((ram[b * 8] & 0x7f) - (ram[a * 8] & 0x7f)) || (b - a));
-      for (const i of ord) {
+      // The priority value works as a drawing slot: the chip draws slot 0 first and slot 127 last
+      // (so a higher value is in front), and each slot holds one sprite - when several active
+      // sprites share a value, only the last one in the list is drawn.
+      const slot = this.order;
+      slot.fill(-1);
+      for (let i = 0; i < 128; i++) if (ram[i * 8] & 0x80) slot[ram[i * 8] & 0x7f] = i;
+      for (let p = 0; p < 128; p++) {
+        const i = slot[p];
+        if (i < 0) continue;
         const o = i * 8;
         const size = ram[o + 1] >> 5;
         t.code = ram[o + 2] | ((ram[o + 1] & 0x1f) << 8);

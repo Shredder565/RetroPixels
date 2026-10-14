@@ -62,9 +62,9 @@
   //   (c's block) * 2048 + n * W * H * 32
   // where n is c's code bits 0-5 with the bits that step through the sprite's own cells taken out
   // (the remaining bits pushed together, lowest first). The real board gets there through its
-  // address wiring and the PROM at g19; RetroPixels works it out from the sprite's size instead,
+  // address wiring and the PROM at g7; RetroPixels works it out from the sprite's size instead,
   // which gives whole, correct pictures for every sprite the game draws (checked on a real set).
-  // The PROM file is still part of the set, but nothing reads it.
+  // That PROM (963a30.g7) is still part of the set, but nothing reads it.
   const SPR_W = [1, 2, 1, 2, 4, 2, 4, 8], SPR_H = [1, 1, 2, 2, 2, 4, 4, 8];
   const SPRITE_START = (() => {
     const t = new Int32Array(8 * 64);
@@ -115,6 +115,27 @@
     return out;
   }
 
+  // The layer-mixing PROM (see draw): the set's own chip when it's there, otherwise the same
+  // choices worked out by rule (fixed layer in front, then layer A or the sprites as the latch
+  // says, layer B at the back; shadows darken everything but the fixed layer and a layer A in front).
+  function priorityTable(prom) {
+    const t = new Uint8Array(256);
+    const ok = prom.length >= 256 && prom.some((v) => (v & 15) !== 0);
+    for (let i = 0; i < 256; i++) {
+      if (ok) { t[i] = prom[i] & 7; continue; }
+      const aOn = i & 1, bOn = i & 2, sOn = i & 4, fOn = i & 8, sh = i & 16, aFront = i & 64;
+      let sel;
+      if (fOn) sel = 3;
+      else if (aOn && (aFront || !sOn)) sel = 0;
+      else if (sOn) sel = 2;
+      else if (bOn) sel = 1;
+      else sel = 0;
+      const dark = sh && sel !== 3 && !(sel === 0 && aOn && aFront) && (aOn || bOn || sOn);
+      t[i] = sel | (dark ? 0 : 4);
+    }
+    return t;
+  }
+
   class TMNTBoard {
     constructor(game, files, opts) {
       opts = opts || {};
@@ -132,6 +153,7 @@
       spr.set(wordPair(get("sprites_a"), get("sprites_b")), 0);
       spr.set(wordPair(get("sprites_c"), get("sprites_d")), 0x100000);
       this.title = decodeTitle(get("title"));
+      this.prioProm = priorityTable(get("prom_mixer"));
 
       this.ram = new Uint8Array(0x4000);
       this.palRam = new Uint8Array(0x800);
@@ -163,6 +185,9 @@
           return planarByte(k.pens, row, off & 3);
         },
       });
+      // the scrolling layers sit 6 pixels further left in the chip's map than the fixed layer
+      // (measured against the real game's picture: walls and floors line up with the sprites this way)
+      this.k052109.dx[1] = this.k052109.dx[2] = -6;
       this.k051960 = new global.RPK051960({
         rom: spr, decode: decodePacked, spriteStart,
         // ROM reading: the chip's address bit 22 (reg 3 bit 6) is wired to the second pair of ROMs
@@ -307,7 +332,7 @@
       const r = c & 31, g = (c >> 5) & 31, b = (c >> 10) & 31;
       const R = (r << 3) | (r >> 2), G = (g << 3) | (g >> 2), B = (b << 3) | (b >> 2);
       this.palette[n] = RPArcade.rgb(R, G, B);
-      this.shade[n] = RPArcade.rgb(R * 0.6, G * 0.6, B * 0.6);
+      this.shade[n] = RPArcade.rgb(R * 0.75, G * 0.75, B * 0.75); // a shadow keeps 3/4 of the brightness
     }
 
     // ---- Z80 memory ----
@@ -395,28 +420,35 @@
     takeAudio() { return this.out.take(); }
 
     // ---- picture ----
+    // How the layers are mixed: the priority PROM at g19 (256 x 4 bits) is looked up for every
+    // pixel. Its address is
+    //   bit 0  layer A pixel is not see-through     bit 1  layer B (always on: B is the backdrop,
+    //   bit 2  sprite pixel is not see-through              its pen 0 shows where nothing else is drawn)
+    //   bit 3  fixed layer pixel is not see-through  bit 4  a sprite's shadow is on this pixel
+    //   bit 6  priority latch bit 2 (layer A in front of the sprites); bits 5 and 7 make no difference
+    // and its output bits 0-1 pick what is shown (0 layer A, 1 layer B, 2 sprites, 3 fixed layer),
+    // bit 2 low darkens it (shadow). So the fixed layer is always in front and never shadowed,
+    // layer B is always at the back, the latch puts layer A in front of or behind the sprites,
+    // and a shadow doesn't reach layer A while it is in front. (Worked out from the PROM's
+    // contents and checked pixel by pixel against the real game's picture.)
     draw() {
       const k = this.k052109, s = this.k051960, pal = this.palette, scr = this.screen;
       const opt = { x0: MAP_X0, y0: MAP_Y0 };
-      this.bufB.fill(0); this.bufA.fill(0); this.bufF.fill(0); this.bufS.fill(0); this.bufSh.fill(0);
+      this.bufA.fill(0); this.bufF.fill(0); this.bufS.fill(0); this.bufSh.fill(0);
       k.render(2, this.bufB, W, H, { x0: MAP_X0, y0: MAP_Y0, opaque: true });
       k.render(1, this.bufA, W, H, opt);
       k.render(0, this.bufF, W, H, opt);
       s.render(this.bufS, W, H, { x0: MAP_X0, y0: MAP_Y0, shadow: this.bufSh });
-      // order: layer B, then sprites and layer A (which one is in front set by the priority latch), then the fixed layer
-      const spritesBehindA = ((this.priority >> 2) & 1) === 1;
+      const prom = this.prioProm, latch = (this.priority & 4) << 4;
       // (the K052109 flips its own layers; the sprites are turned round here when their chip's flip is on)
-      // A sprite's shadow darkens the layers under the sprites (not layer A when that is in front).
       const B = this.bufB, A = this.bufA, F = this.bufF, S = this.bufS, Sh = this.bufSh, shade = this.shade;
       const last = s.flipScreen ? W * H - 1 : -1;
       for (let i = 0; i < W * H; i++) {
-        let c = B[i];
         const j = last >= 0 ? last - i : i, sp = S[j];
-        let dark = Sh[j];
-        if (spritesBehindA) { if (sp) c = sp; if (A[i] & 15) { c = A[i]; dark = 0; } }
-        else { if (A[i] & 15) c = A[i]; if (sp) c = sp; }
-        if (F[i] & 15) { c = F[i]; dark = 0; }
-        scr[i] = dark ? shade[c & 1023] : pal[c & 1023];
+        const a = A[i], f = F[i];
+        const o = prom[((a & 15) ? 1 : 0) | 2 | ((sp & 15) ? 4 : 0) | ((f & 15) ? 8 : 0) | (Sh[j] << 4) | latch];
+        const sel = o & 3, c = sel === 0 ? a : sel === 1 ? B[i] : sel === 2 ? sp : f;
+        scr[i] = (o & 4) ? pal[c & 1023] : shade[c & 1023];
       }
     }
 
@@ -462,7 +494,7 @@
     { name: "963a28.h27", size: 0x80000, role: "tiles_a" }, { name: "963a29.k27", size: 0x80000, role: "tiles_b" },
     { name: "963a17.h4", size: 0x80000, role: "sprites_a" }, { name: "963a15.k4", size: 0x80000, role: "sprites_b" },
     { name: "963a18.h6", size: 0x80000, role: "sprites_c" }, { name: "963a16.k6", size: 0x80000, role: "sprites_d" },
-    { name: "963a30.g7", size: 0x100, role: "prom_priority" }, { name: "963a31.g19", size: 0x100, role: "prom_sprites" },
+    { name: "963a30.g7", size: 0x100, role: "prom_g7" }, { name: "963a31.g19", size: 0x100, role: "prom_mixer" }, // g19 mixes the layers (see draw)
     { name: "963a26.c13", size: 0x20000, role: "pcm" }, { name: "963a27.d18", size: 0x20000, role: "speech" },
     { name: "963a25.d5", size: 0x80000, role: "title" },
   ];
@@ -485,6 +517,7 @@
   ];
   // helpers for RetroPixels' own tests (building fake sets)
   TMNTBoard.spriteStart = spriteStart;
+  TMNTBoard.priorityTable = priorityTable;
 
   RPArcade.boards.push(TMNTBoard);
 })(typeof window !== "undefined" ? window : globalThis);
