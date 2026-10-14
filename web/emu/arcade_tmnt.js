@@ -3,8 +3,8 @@
 //   - a Motorola 68000 at 8 MHz (RPM68K) with 384 KB of program ROM, 16 KB of work RAM
 //     and 2 KB of palette RAM (1024 colours of 15 bits);
 //   - the K052109 tilemap chip (k052109.js: a fixed layer and two scrolling layers) and
-//     the K051960 / K051937 sprite chips (k051960.js); the sprite ROMs' address lines are
-//     rearranged on this board by a PROM (see unscrambleSprites);
+//     the K051960 / K051937 sprite chips (k051960.js); this board's ROMs keep every sprite as
+//     one whole picture (see spriteStart) and all graphics as packed 4-bit pixels (decodePacked);
 //   - a Z80 sound processor at 3.58 MHz (RPZ80) with a YM2151 FM chip (ym2151.js), a
 //     K007232 PCM chip (k007232.js) for drums and effects, a uPD7759 speech chip
 //     (upd7759.js) and the title song, a recording kept in its own 512 KB ROM and played
@@ -53,42 +53,45 @@
     return out;
   }
 
-  // Sprite ROM address wiring. The K051960 asks for 32-bit word L = code * 32 + bottom * 16 +
-  // right * 8 + row. On this board each block of 64 codes holds sprites of one size class, given
-  // by the PROM at g19 (indexed by the code's top 8 bits); the ROMs store such a sprite's pixel
-  // rows one after another across its whole width, so the address lines are reordered:
-  // lowest first the right-half bit, then the cell-across bits, then the row bits, then the rest.
-  // Size classes 0-7 cover 1, 1, 2, 2, 4, 4, 8, 8 cells across; the odd classes put the
-  // cell-down bits ahead of the remaining code bits. (RetroPixels' reading of the board; not
-  // yet checked against a real set.)
-  const CLASS_W = [0, 0, 1, 1, 2, 2, 3, 3]; // log2 of cells across
-  function spritePermutation(cls) {
-    // source bits of L, listed from the physical address's bit 0 upward (11 bits: rows, halves, 6 code bits)
-    const CA = (i) => i;                    // L bit i
-    const xbits = [5, 7, 9], ybits = [6, 8, 10];
-    const order = [CA(3)];
-    const nx = CLASS_W[cls];
-    for (let i = 0; i < nx; i++) order.push(xbits[i]);
-    order.push(0, 1, 2, 4);
-    const rest = [5, 6, 7, 8, 9, 10].filter((b) => !order.includes(b));
-    if (cls & 1) rest.sort((a, b) => (ybits.includes(b) ? 1 : 0) - (ybits.includes(a) ? 1 : 0) || a - b);
-    return order.concat(rest);
-  }
-  const PERMS = [0, 1, 2, 3, 4, 5, 6, 7].map(spritePermutation);
-  // physical word address of logical word address L
-  function spritePhys(L, prom) {
-    const cls = prom.length ? prom[(L >> 11) & 0xff] & 7 : 0, perm = PERMS[cls];
-    let P = L & ~0x7ff;
-    for (let i = 0; i < 11; i++) P |= ((L >> perm[i]) & 1) << i;
-    return P;
-  }
-  function unscrambleSprites(rom, prom) {
-    const out = new Uint8Array(rom.length), words = rom.length >> 2;
-    for (let L = 0; L < words; L++) {
-      const P = spritePhys(L, prom) % words;
-      out[L * 4] = rom[P * 4]; out[L * 4 + 1] = rom[P * 4 + 1]; out[L * 4 + 2] = rom[P * 4 + 2]; out[L * 4 + 3] = rom[P * 4 + 3];
+  // Sprite ROM layout. The K051960 numbers a sprite's 16x16 cells in Konami's zig-zag order inside
+  // blocks of 64 codes (an 8 x 8 sheet of cells: code bits 0, 2, 4 step across, bits 1, 3, 5 step
+  // down). This board's ROMs don't hold cells, though: each sprite is one whole picture, stored
+  // row after row (2 words of 8 pixels per cell across), and the pictures of a block follow each
+  // other in code order. So a sprite W x H cells big at code c starts at word
+  //   (c's block) * 2048 + n * W * H * 32
+  // where n is c's code bits 0-5 with the bits that step through the sprite's own cells taken out
+  // (the remaining bits pushed together, lowest first). The real board gets there through its
+  // address wiring and the PROM at g19; RetroPixels works it out from the sprite's size instead,
+  // which gives whole, correct pictures for every sprite the game draws (checked on a real set).
+  // The PROM file is still part of the set, but nothing reads it.
+  const SPR_W = [1, 2, 1, 2, 4, 2, 4, 8], SPR_H = [1, 1, 2, 2, 2, 4, 4, 8];
+  const SPRITE_START = (() => {
+    const t = new Int32Array(8 * 64);
+    for (let size = 0; size < 8; size++) {
+      const nx = Math.log2(SPR_W[size]), ny = Math.log2(SPR_H[size]);
+      for (let c = 0; c < 64; c++) {
+        let n = 0, k = 0;
+        for (let b = 0; b < 6; b++) {
+          const own = (b & 1) ? (b >> 1) < ny : (b >> 1) < nx;
+          if (!own) n |= ((c >> b) & 1) << k++;
+        }
+        t[size * 64 + c] = n * SPR_W[size] * SPR_H[size] * 32;
+      }
     }
-    return out;
+    return t;
+  })();
+  function spriteStart(code, size) { return (code & ~63) * 32 + SPRITE_START[size * 64 + (code & 63)]; }
+
+  // This board stores its graphics packed: each 32-bit ROM word is a row of 8 pixels of 4 bits,
+  // the leftmost in the high half of the last byte, the next in its low half, and so on back to
+  // the rightmost in the low half of the first byte (the font only reads right this way).
+  function decodePacked(rom) {
+    const n = rom.length >> 2, pens = new Uint8Array(n * 8);
+    for (let w = 0; w < n; w++) for (let k = 0; k < 4; k++) {
+      const v = rom[w * 4 + 3 - k];
+      pens[w * 8 + k * 2] = v >> 4; pens[w * 8 + k * 2 + 1] = v & 15;
+    }
+    return pens;
   }
 
   // Title song: 16-bit words (low byte first), a 3-bit exponent over a 10-bit value.
@@ -118,7 +121,6 @@
       const spr = new Uint8Array(0x200000);
       spr.set(wordPair(get("sprites_a"), get("sprites_b")), 0);
       spr.set(wordPair(get("sprites_c"), get("sprites_d")), 0x100000);
-      const prom = get("prom_sprites");
       this.title = decodeTitle(get("title"));
 
       this.ram = new Uint8Array(0x4000);
@@ -128,11 +130,12 @@
       this.screen = new Uint32Array(W * H);
       this.width = W; this.height = H;
       this.bufB = new Uint16Array(W * H); this.bufA = new Uint16Array(W * H); this.bufF = new Uint16Array(W * H);
-      this.bufS = new Uint16Array(W * H);
+      this.bufS = new Uint16Array(W * H); this.bufSh = new Uint8Array(W * H);
+      this.shade = new Uint32Array(1024);
       this.inputs = [{}, {}, {}, {}];
 
       this.k052109 = new global.RPK052109({
-        rom: tiles,
+        rom: tiles, decode: decodePacked,
         tileCallback: (t) => {
           // board wiring: attribute bits 0-1 -> code bits 8-9, bit 4 -> code bit 10, bank bits -> 11-14;
           // attribute bits 5-7 pick one of 8 colours from the layer's colour base
@@ -143,10 +146,12 @@
         },
       });
       this.k051960 = new global.RPK051960({
-        rom: unscrambleSprites(spr, prom),
+        rom: spr, decode: decodePacked, spriteStart,
         spriteCallback: (t) => {
-          // attribute bit 4 -> code bit 13; bits 0-3 = colour
+          // attribute bit 4 -> code bit 13; bits 0-3 = colour; bit 7 = pen 15 is a shadow
+          // (it darkens what's under it instead of being drawn)
           t.code |= (t.color & 0x10) << 9;
+          t.shadow = !!(t.color & 0x80);
           t.color = SPRITE_COLORBASE + (t.color & 0x0f);
         },
       });
@@ -171,7 +176,7 @@
     }
 
     reset() {
-      this.ram.fill(0); this.palRam.fill(0); this.palette.fill(0xff000000); this.zram.fill(0);
+      this.ram.fill(0); this.palRam.fill(0); this.palette.fill(0xff000000); this.shade.fill(0xff000000); this.zram.fill(0);
       this.k052109.reset(); this.k051960.reset(); this.k007232.reset(); this.upd.reset(); this.ym.reset();
       this.ctrl = 0; this.priority = 0; this.soundLatch = 0; this.sres = 0;
       this.titlePos = -1; this.titleAcc = 0; this.updAcc = 0; this.mixClk = 0; this.zcyc = 0;
@@ -188,8 +193,10 @@
     playerByte(p) {
       const i = this.inputs[p] || {}, p1 = this.inputs[0] || {};
       const start = i["Start (1P)"] || (p === 1 && p1["Start (2P)"]);
+      // The 4-player cabinet has no start buttons: a player joins by pressing attack, so Start
+      // presses attack as well (and the bit 7 line, for the 2-player versions).
       return ~((i.Left ? 1 : 0) | (i.Right ? 2 : 0) | (i.Up ? 4 : 0) | (i.Down ? 8 : 0) |
-        (i["Button 1"] ? 0x10 : 0) | (i["Button 2"] ? 0x20 : 0) | (start ? 0x80 : 0)) & 0xff;
+        (i["Button 1"] || start ? 0x10 : 0) | (i["Button 2"] ? 0x20 : 0) | (start ? 0x80 : 0)) & 0xff;
     }
     coinByte() {
       const p = this.inputs, p1 = p[0] || {};
@@ -277,7 +284,9 @@
       this.palRam[i] = v;
       const n = i >> 1, c = (this.palRam[n * 2] << 8) | this.palRam[n * 2 + 1];
       const r = c & 31, g = (c >> 5) & 31, b = (c >> 10) & 31;
-      this.palette[n] = RPArcade.rgb((r << 3) | (r >> 2), (g << 3) | (g >> 2), (b << 3) | (b >> 2));
+      const R = (r << 3) | (r >> 2), G = (g << 3) | (g >> 2), B = (b << 3) | (b >> 2);
+      this.palette[n] = RPArcade.rgb(R, G, B);
+      this.shade[n] = RPArcade.rgb(R * 0.6, G * 0.6, B * 0.6);
     }
 
     // ---- Z80 memory ----
@@ -364,22 +373,25 @@
     draw() {
       const k = this.k052109, s = this.k051960, pal = this.palette, scr = this.screen;
       const opt = { x0: MAP_X0, y0: MAP_Y0 };
-      this.bufB.fill(0); this.bufA.fill(0); this.bufF.fill(0); this.bufS.fill(0);
+      this.bufB.fill(0); this.bufA.fill(0); this.bufF.fill(0); this.bufS.fill(0); this.bufSh.fill(0);
       k.render(2, this.bufB, W, H, { x0: MAP_X0, y0: MAP_Y0, opaque: true });
       k.render(1, this.bufA, W, H, opt);
       k.render(0, this.bufF, W, H, opt);
-      s.render(this.bufS, W, H, { x0: MAP_X0, y0: MAP_Y0 });
+      s.render(this.bufS, W, H, { x0: MAP_X0, y0: MAP_Y0, shadow: this.bufSh });
       // order: layer B, then sprites and layer A (which one is in front set by the priority latch), then the fixed layer
       const spritesBehindA = ((this.priority >> 2) & 1) === 1;
       // (the K052109 flips its own layers; the sprites are turned round here when their chip's flip is on)
-      const B = this.bufB, A = this.bufA, F = this.bufF, S = this.bufS, last = s.flipScreen ? W * H - 1 : -1;
+      // A sprite's shadow darkens the layers under the sprites (not layer A when that is in front).
+      const B = this.bufB, A = this.bufA, F = this.bufF, S = this.bufS, Sh = this.bufSh, shade = this.shade;
+      const last = s.flipScreen ? W * H - 1 : -1;
       for (let i = 0; i < W * H; i++) {
         let c = B[i];
-        const sp = last >= 0 ? S[last - i] : S[i];
-        if (spritesBehindA) { if (sp) c = sp; if (A[i] & 15) c = A[i]; }
+        const j = last >= 0 ? last - i : i, sp = S[j];
+        let dark = Sh[j];
+        if (spritesBehindA) { if (sp) c = sp; if (A[i] & 15) { c = A[i]; dark = 0; } }
         else { if (A[i] & 15) c = A[i]; if (sp) c = sp; }
-        if (F[i] & 15) c = F[i];
-        scr[i] = pal[c & 1023];
+        if (F[i] & 15) { c = F[i]; dark = 0; }
+        scr[i] = dark ? shade[c & 1023] : pal[c & 1023];
       }
     }
 
@@ -446,7 +458,7 @@
     version("tmnt2pj", "Teenage Mutant Ninja Turtles (Japan, 2 players)", "1", { parent: "tmnt", players: 2 }),
   ];
   // helpers for RetroPixels' own tests (building fake sets)
-  TMNTBoard.spritePhys = spritePhys;
+  TMNTBoard.spriteStart = spriteStart;
 
   RPArcade.boards.push(TMNTBoard);
 })(typeof window !== "undefined" ? window : globalThis);

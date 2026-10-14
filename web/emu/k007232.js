@@ -3,9 +3,10 @@
 // (TMNT, Contra, Gradius II...).
 //
 // Each channel plays 7-bit unsigned samples from the sample ROM, starting at a 17-bit
-// address, at a pitch set by a 12-bit counter, until it meets a byte with bit 7 set (the
-// end mark), where it stops or starts over if its loop bit is on. The chip has no volume
-// of its own: boards wire its "external port" register to volume latches (setVolume).
+// address, at a pitch set by a 12-bit counter (a byte lasts (4096 - pitch) * 4 input clocks),
+// until it meets a byte with bit 7 set (the end mark), where it stops or starts over if its
+// loop bit is on. The chip has no volume of its own: boards wire its "external port" register
+// to volume latches (setVolume).
 //
 // ===========================================================================
 // INTERFACE
@@ -14,7 +15,7 @@
 //       rom      the sample ROM (Uint8Array); k.bank[0] / k.bank[1] are added to each
 //                channel's address for boards with bigger ROMs (byte offsets, default 0)
 //       onPort   called when register 12 (the external port) is written
-//   k.rate                 native rate = clock / 128 (one counter step per tick)
+//   k.rate                 native rate = clock / 128 (32 counter steps per tick)
 //   k.write(reg, v)        reg 0-13:
 //                           0,1 / 6,7   pitch: low 8 bits, then bits 8-11 in the low nibble
 //                           2,3,4 / 8,9,10  start address bits 0-7, 8-15, 16 (bit 0)
@@ -73,10 +74,14 @@
       let L = 0, R = 0;
       for (let ch = 0; ch < 2; ch++) {
         if (!this.on[ch]) continue;
-        // the counter climbs from the pitch value to 0x1000; each overflow moves to the next byte
-        if (++this.cnt[ch] >= 0x1000) {
-          this.cnt[ch] = this.pitch(ch);
+        // the counter climbs from the pitch value to 0x1000, one step every 4 input clocks (32 per
+        // native tick); each overflow starts it again from the pitch value and moves to the next byte
+        this.cnt[ch] += 32;
+        const span = 0x1000 - this.pitch(ch);
+        while (this.cnt[ch] >= 0x1000) {
+          this.cnt[ch] -= span;
           this.addr[ch] = (this.addr[ch] + 1) & 0x1ffff;
+          if (this.sampleAt(ch) & 0x80) break;
         }
         let s = this.sampleAt(ch);
         if (s & 0x80) {

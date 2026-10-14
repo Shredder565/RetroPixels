@@ -1,7 +1,8 @@
 // RetroPixels — NEC uPD7759 ADPCM speech chip, "master" (stand-alone) mode. Original code,
 // written from the chip's documented behaviour: the chip reads its own sample ROM, which
 // starts with a header (last sample number, then the 5A A5 69 55 signature) and a table
-// of where each sample starts (16-bit, in 2-byte steps). A sample is a list of commands:
+// of where each sample starts (16-bit, in 2-byte steps). A sample is one byte the chip skips,
+// then a list of commands:
 //   0x00          end of the sample
 //   0x01-0x3f     silence, (n) x 1024 clocks; the ADPCM state starts over
 //   0x40-0x7f     256 ADPCM nibbles (128 bytes) follow, each lasting (n & 0x3f) + 1 steps
@@ -25,11 +26,14 @@
 "use strict";
 
 (function (global) {
-  // Step sizes: 16 states growing geometrically; magnitudes 0-7 scale them.
-  const MAG = [0, 0.5, 1, 1.5, 2, 3, 4, 6.5];
+  // Step sizes: 16 states growing geometrically (about 22% a state); magnitudes 0-7 scale them.
+  // RetroPixels' own fit: the shape and growth were chosen so that real speech ROMs decode
+  // without drifting away from the centre (in state 0, magnitudes 0 and 1 change nothing, so a
+  // run of small nibbles is silence).
+  const MAG = [0, 0.45, 1.4, 2, 3, 4, 5.6, 8.4];
   const STEP = new Int16Array(16 * 16);
   for (let s = 0; s < 16; s++) {
-    const base = 1.5 * Math.pow(44 / 1.5, s / 15);
+    const base = Math.pow(1.225, s);
     for (let n = 0; n < 16; n++) {
       const d = Math.round(base * MAG[n & 7]);
       STEP[s * 16 + n] = (n & 8) ? -d : d;
@@ -67,7 +71,8 @@
       const last = this.rd(0);
       if (n > last) return;
       const at = 5 + n * 2;
-      this.pos = ((this.rd(at) << 8) | this.rd(at + 1)) * 2;
+      // the first byte at a sample's start is not a command: the chip skips it (real ROMs keep 0 there)
+      this.pos = ((this.rd(at) << 8) | this.rd(at + 1)) * 2 + 1;
       this.sample = 0; this.step = 0; this.repeat = 0;
       this.state = CMD; this.wait = 0;
     }
