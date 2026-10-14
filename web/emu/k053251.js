@@ -60,11 +60,12 @@
       const pris = layers.map((l) => (typeof l.pri === "number" ? null : l.pri)), shadows = layers.map((l) => l.shadow || null);
       const apart = layers.map((l) => !!l.shadowPri), anyApart = apart.some((x) => x);
       for (let i = 0; i < n; i++) {
-        let best = 255, pen = bgPen, sh = 255, from = -1;
+        let best = 255, pen = bgPen, sh = 255, from = -1, hasSh = false;
         for (let k = 0; k < L; k++) {
           const p = fixed[k] >= 0 ? fixed[k] : pris[k][i];
           const s = shadows[k];
           if (s && s[i]) {
+            hasSh = true;
             if (!apart[k]) { if (p < sh) sh = p; continue; }
             if (s[i] - 1 < sh) sh = s[i] - 1;
           }
@@ -73,8 +74,9 @@
           if (p < best) { best = p; pen = v; from = k; }
         }
         out[i] = pen;
-        // shadowPri boards: a shadow never darkens a sprite pixel, nor the backdrop (nothing opaque)
-        shade[i] = sh <= best && !(anyApart && (from < 0 || apart[from])) ? 1 : 0;
+        // only where a shadow is; shadowPri boards: a shadow never darkens a sprite pixel, nor the
+        // backdrop (nothing opaque)
+        shade[i] = hasSh && sh <= best && !(anyApart && (from < 0 || apart[from])) ? 1 : 0;
       }
     }
 
