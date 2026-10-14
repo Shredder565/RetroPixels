@@ -172,6 +172,13 @@
   body.dol-embedded #swNow { position: fixed; top: 0; left: 0; right: 0; height: 48px; box-sizing: border-box;
     z-index: 1000; margin: 0; border-radius: 0; border-width: 0 0 1px; padding: 6px 14px; }
   body.dol-embedded { overflow: hidden; }
+  .vol-ctl { display: inline-flex; align-items: center; gap: 6px; }
+  .vol-ctl input[type=range] { width: 110px; accent-color: var(--accent); }
+  #gcTab .vol-ctl input[type=range] { flex: 1; width: auto; accent-color: #6a5acd; }
+  #gcTab[data-platform="wii"] .vol-ctl input[type=range] { accent-color: #2b8cc4; }
+  .vol-ctl output { min-width: 38px; font-size: 13px; text-align: right; font-variant-numeric: tabular-nums; }
+  .vol-mute { background: none; border: 0; padding: 2px 4px; font-size: 17px; line-height: 1; cursor: pointer; border-radius: 6px; color: var(--text); }
+  .vol-mute:hover, .vol-mute:focus-visible { background: #ffffff1a; outline: none; }
   @media (max-width: 1000px) { .gc-layout { grid-template-columns: 1fr; } }
   @media (max-width: 860px) {
     .sw-layout { grid-template-columns: 1fr; }
@@ -279,6 +286,7 @@
         <div style="flex:1"><b id="swNowName"></b><br><small class="muted" id="swNowHint">Playing in <span id="swNowEmu"></span> · close the game window to come back here</small></div>
         <span class="rec-badge" id="swRecBadge" hidden><span class="rec-dot"></span> REC <span id="swRecTime">0:00</span></span>
     <button class="btn ghost sm" id="swRecToggle" hidden>● Record</button>
+    <span class="vol-ctl" id="swVol" hidden><button class="vol-mute" data-volmute title="Mute" aria-label="Mute">🔊</button><input type="range" min="0" max="100" step="1" value="100" data-volrange aria-label="Game volume"><output data-volout>100%</output></span>
     <span class="muted" id="swNowTime" style="font-variant-numeric:tabular-nums"></span>
     <button class="btn ghost sm" id="swStopGame" hidden>■ Stop game</button>
       </div>
@@ -464,6 +472,11 @@
             <div id="gcPads"></div>
           </section>
           <section class="sw-sec">
+            <h2 class="sw-h" style="font-size:16px">Sound</h2>
+            <div class="rs-row"><label for="gcVolRange"><b>Game volume</b><small>Changes right away, even while a game plays. Only the game gets quieter, not the rest of your PC.</small></label>
+              <span class="vol-ctl" id="gcVol"><button class="vol-mute" data-volmute title="Mute" aria-label="Mute">🔊</button><input type="range" min="0" max="100" step="1" value="100" id="gcVolRange" data-volrange><output data-volout>100%</output></span></div>
+          </section>
+          <section class="sw-sec">
             <h2 class="sw-h" style="font-size:16px">Dolphin settings</h2>
             <div id="gcSettings"></div>
             <div class="rs-bar" id="gcBar" hidden><span id="gcChanged"></span><button class="btn ghost sm" id="gcDiscard">Discard</button><button class="btn sm gc-btn" id="gcSave">Save</button></div>
@@ -605,6 +618,10 @@
     const embedded = !!(status.running && status.running.embedded);
     document.body.classList.toggle("dol-embedded", embedded);
     document.getElementById("swStopGame").hidden = !embedded;
+    const dolOn = !!(status.running && status.running.kind === "dolphin");
+    const volBar = document.getElementById("swVol");
+    if (dolOn && volBar.hidden) loadDolVolume();
+    volBar.hidden = !dolOn;
     if (status.running) {
       document.getElementById("swNowName").textContent = status.running.name;
       const emu = esc(status.running.emu || "Dolphin");
@@ -633,6 +650,41 @@
       await api("/api/dol/action", { action: "stop-game" });
       toast("Stopping the game…");
     } catch (e) { toast(e.message, true); }
+  });
+
+  // GameCube / Wii volume: the same setting in the game bar and the Sound section.
+  let dolVol = { volume: 100, muted: false }, volTimer = null, volSending = false;
+  function renderDolVolume() {
+    document.querySelectorAll("#swVol, #gcVol").forEach(el => {
+      const r = el.querySelector("[data-volrange]"), m = el.querySelector("[data-volmute]");
+      r.value = dolVol.volume;
+      el.querySelector("[data-volout]").textContent = dolVol.muted ? "Muted" : dolVol.volume + "%";
+      m.textContent = dolVol.muted || dolVol.volume === 0 ? "🔇" : dolVol.volume < 50 ? "🔉" : "🔊";
+      m.title = dolVol.muted ? "Unmute" : "Mute";
+      m.setAttribute("aria-label", m.title);
+      m.setAttribute("aria-pressed", String(dolVol.muted));
+    });
+  }
+  const gotDolVolume = v => { if (v && typeof v.volume === "number" && !volTimer && !volSending) { dolVol = { volume: v.volume, muted: !!v.muted }; renderDolVolume(); } };
+  const loadDolVolume = () => DESKTOP && api("/api/dol/volume").then(gotDolVolume).catch(() => {});
+  async function sendDolVolume() {
+    volTimer = null; volSending = true;
+    try { await api("/api/dol/volume", dolVol); } catch (e) { toast(e.message, true); }
+    volSending = false;
+  }
+  document.querySelectorAll("#swVol, #gcVol").forEach(el => {
+    const r = el.querySelector("[data-volrange]");
+    r.addEventListener("input", () => {
+      dolVol = { volume: +r.value, muted: false };
+      renderDolVolume();
+      if (!volTimer) volTimer = setTimeout(sendDolVolume, 120); // while dragging: a few updates a second
+    });
+    el.querySelector("[data-volmute]").addEventListener("click", () => {
+      dolVol = { volume: dolVol.volume, muted: !dolVol.muted };
+      if (!dolVol.muted && dolVol.volume === 0) dolVol.volume = 50;
+      renderDolVolume();
+      clearTimeout(volTimer); sendDolVolume();
+    });
   });
 
   let recActiveSince = null, lastRecMsg = null, lastRecErr = null;
@@ -897,6 +949,7 @@
     el.querySelectorAll("[data-rm]").forEach(b => b.addEventListener("click", () => gcAction({ action: "remove-folder", folder: f[+b.dataset.rm] })));
     document.getElementById("gcFull").checked = !!st.fullscreen;
     document.getElementById("gcEmbed").checked = !!st.embed;
+    gotDolVolume(st);
   }
 
   function renderGCGrid() {

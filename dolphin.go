@@ -807,8 +807,10 @@ func launchDolphinGame(path string) error {
 	fs := cfg.DolphinFullscreen == nil || *cfg.DolphinFullscreen
 	embed := dolphinEmbedOn()
 	cfgMu.Unlock()
-	args := []string{"-b", "-e", path}
-	var onStart func(int, <-chan struct{})
+	// Dolphin's own volume stays at full: the volume setting here turns its
+	// sound down in the Windows volume mixer instead, so the two don't stack.
+	args := []string{"-b", "-e", path, "-C", "Dolphin.DSP.Volume=100"}
+	onStart := followDolphinVolume
 	if embed {
 		// Its game screen gets docked into the RetroPixels window, so it must
 		// be a plain separate window (not fullscreen, not inside Dolphin's own
@@ -820,7 +822,10 @@ func launchDolphinGame(path string) error {
 			"-C", "Dolphin.Interface.ConfirmStop=False",
 			"-C", "Dolphin.Interface.PauseOnFocusLost=False",
 			"-C", "Dolphin.Input.BackgroundInput=True")
-		onStart = embedDolphin
+		onStart = func(pid int, exited <-chan struct{}) {
+			go followDolphinVolume(pid, exited)
+			embedDolphin(pid, exited)
+		}
 	} else if fs {
 		args = append(args, "-C", "Dolphin.Display.Fullscreen=True")
 	}
@@ -881,7 +886,9 @@ func dolStatus() map[string]any {
 	fs := cfg.DolphinFullscreen == nil || *cfg.DolphinFullscreen
 	embed := dolphinEmbedOn()
 	cfgMu.Unlock()
-	return map[string]any{"exe": exe, "version": version, "folders": dolphinFolders(), "fullscreen": fs, "embed": embed, "install": dolInstallStatus()}
+	vol, muted := dolphinVolume()
+	return map[string]any{"exe": exe, "version": version, "folders": dolphinFolders(), "fullscreen": fs, "embed": embed,
+		"volume": vol, "muted": muted, "install": dolInstallStatus()}
 }
 
 func registerDolphinRoutes(mux *http.ServeMux) {
@@ -917,6 +924,7 @@ func registerDolphinRoutes(mux *http.ServeMux) {
 		setEmbedTop(int(b.Top*b.DPR + 0.5))
 		writeJSON(w, 200, map[string]any{"ok": true})
 	}))
+	registerDolphinVolumeRoute(mux)
 	mux.HandleFunc("/api/dol/settings", guard(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			var b struct {

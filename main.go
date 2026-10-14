@@ -65,6 +65,8 @@ type config struct {
 	DolphinFullscreen *bool        `json:"dolphinFullscreen,omitempty"`
 	DolphinEmbed      *bool        `json:"dolphinEmbed,omitempty"` // play inside the RetroPixels window
 	DolphinDetected   bool         `json:"dolphinDetected,omitempty"`
+	DolphinVolume     *int         `json:"dolphinVolume,omitempty"` // 0–100, unset = 100
+	DolphinMuted      bool         `json:"dolphinMuted,omitempty"`
 }
 
 var (
