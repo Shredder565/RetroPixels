@@ -17,7 +17,7 @@
 //   const u = new RPUPD7759({ clock: 640000, rom })
 //   u.rate                 native rate = clock / 4
 //   u.port(v)              the 8-bit data port (sample number)
-//   u.start(line)          the ST pin: a 0 -> 1 change starts the sample in the port
+//   u.start(line)          the ST pin: a 0 -> 1 change starts the sample in the port (ignored while busy)
 //   u.resetLine(line)      the RESET pin (0 = held in reset: silent and idle)
 //   u.busy()               true while a sample plays (the BUSY pin is low then)
 //   u.tick()               one native step; u.out = output, -1..1
@@ -62,7 +62,8 @@
     resetLine(v) { this.rst = v ? 1 : 0; if (!this.rst) { this.state = IDLE; this.sample = 0; this.out = 0; } }
     start(v) {
       v = v ? 1 : 0;
-      if (v && !this.st && this.rst) this.begin(this.data);
+      // a start while a sample is still playing is ignored (the chip only listens while it isn't busy)
+      if (v && !this.st && this.rst && this.state === IDLE) this.begin(this.data);
       this.st = v;
     }
     busy() { return this.state !== IDLE; }
