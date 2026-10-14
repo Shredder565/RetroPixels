@@ -43,6 +43,8 @@
 //   k.readRom(off)     the ROM byte shown at offset off while rmrd is on: register 0x1e00 picks an
 //                      8 KB-row window (8192 rows of 4 bytes), off & 0x1fff the row and off >> 13 the
 //                      byte of the row (RetroPixels' reading, used only by games' ROM tests)
+//   opts.romRead       optional (off, chip) -> byte: a board whose wiring shows the ROMs differently
+//                      while rmrd is on (see arcade_tmnt.js) passes its own reading instead of readRom
 //   k.irqEnabled / k.firqEnabled / k.nmiEnabled / k.flipScreen   (from the registers)
 //   k.dx[3], k.dy[3]   board-specific scroll offsets for layers 0..2 (pixels, default 0)
 //   k.render(layer, out, w, h, opts)
@@ -67,6 +69,7 @@
       this.tileCount = this.pens.length >> 6;
       this.dx = [0, 0, 0]; this.dy = [0, 0, 0];
       this.rmrd = false;
+      this.romRead = opts.romRead || null;
       // per-layer tile cache filled at render time
       this.tCode = new Int32Array(2048); this.tColor = new Uint16Array(2048);
       this.tFlags = new Uint8Array(2048); this.tPri = new Uint8Array(2048);
@@ -99,7 +102,7 @@
     read(off) {
       off &= 0x7fff;
       if (off >= 0x6000) return 0;
-      if (this.rmrd) return this.readRom(off);
+      if (this.rmrd) return this.romRead ? this.romRead(off, this) : this.readRom(off);
       return this.ram[off];
     }
     write(off, v) {

@@ -34,6 +34,7 @@
   const FPS = CPU_HZ / (LINE_CYC * LINES);       // about 59.19
   const Z80_LINE = Z80_HZ / (FPS * LINES);
   const W = 304, H = 224, MAP_X0 = 104, MAP_Y0 = 16, VBLANK_LINE = 240;
+  const DC_KEEP = 1 - 2 * Math.PI * 20 / (Z80_HZ / 64);   // 20 Hz coupling filter at the mixing rate
   const TILE_COLORBASE = [0, 32, 40], SPRITE_COLORBASE = 16;
 
   // ---- the board's ROM wiring ----
@@ -94,6 +95,15 @@
     return pens;
   }
 
+  // One byte of a packed row as the video chips show it to the CPU: bit n of each of the row's
+  // 8 pixels, the leftmost pixel in bit 7.
+  function planarByte(pens, row, n) {
+    const at = (row * 8) % pens.length;
+    let v = 0;
+    for (let x = 0; x < 8; x++) v |= ((pens[at + x] >> n) & 1) << (7 - x);
+    return v;
+  }
+
   // Title song: 16-bit words (low byte first), a 3-bit exponent over a 10-bit value.
   function decodeTitle(rom) {
     const n = rom.length >> 1, out = new Float32Array(n);
@@ -144,9 +154,19 @@
           t.color = TILE_COLORBASE[t.layer] + ((c & 0xe0) >> 5);
           t.flipX = false;
         },
+        // ROM reading (the self-test's mask ROM check): the chip's address bits 0-1 pick the byte of
+        // a row and bits 2-12 the row; register 0x1e00 adds row bits 11-15 and the top two bits of
+        // bank register 0 (code bits 13-14 on this board) row bits 16-17. The CPU sees the row in
+        // the chips' own planar form (byte n = bit n of the 8 pixels), not as the packed ROM bytes.
+        romRead: (off, k) => {
+          const row = ((k.bankReg(0) >> 2) << 16) | (k.ram[0x1e00] << 11) | ((off >> 2) & 0x7ff);
+          return planarByte(k.pens, row, off & 3);
+        },
       });
       this.k051960 = new global.RPK051960({
         rom: spr, decode: decodePacked, spriteStart,
+        // ROM reading: the chip's address bit 22 (reg 3 bit 6) is wired to the second pair of ROMs
+        readbackAddr: (w) => (w & 0x3ffff) | (((w >> 22) & 1) << 18),
         spriteCallback: (t) => {
           // attribute bit 4 -> code bit 13; bits 0-3 = colour; bit 7 = pen 15 is a shadow
           // (it darkens what's under it instead of being drawn)
@@ -179,7 +199,7 @@
       this.ram.fill(0); this.palRam.fill(0); this.palette.fill(0xff000000); this.shade.fill(0xff000000); this.zram.fill(0);
       this.k052109.reset(); this.k051960.reset(); this.k007232.reset(); this.upd.reset(); this.ym.reset();
       this.ctrl = 0; this.priority = 0; this.soundLatch = 0; this.sres = 0;
-      this.titlePos = -1; this.titleAcc = 0; this.updAcc = 0; this.mixClk = 0; this.zcyc = 0;
+      this.titlePos = -1; this.titleAcc = 0; this.updAcc = 0; this.mixClk = 0; this.zcyc = 0; this.updDC = 0; this.updPrev = 0; this.updV = 0; this.kL = 0;
       this.line = 0; this.frame = 0;
       this.cpu.cycles = 0; this.cpu.setIRQ(0); this.cpu.reset(); this.cpu.cycles = 0;
       this.z80.reset(); this.z80.irq = false;
@@ -205,7 +225,8 @@
       if ((p[1] && p[1].Coin) || p1["Coin 2"]) v |= 2;
       if (p[2] && p[2].Coin) v |= 4;
       if (p[3] && p[3].Coin) v |= 8;
-      if (p1.Service) v |= 0x10;
+      // a service button for each player's coin slot (credits without a coin)
+      for (let n = 0; n < 4; n++) if (p[n] && p[n].Service) v |= 0x10 << n;
       return ~v & 0xff;
     }
     dsw(n) {
@@ -345,7 +366,11 @@
           if (this.titlePos >= this.title.length) this.titlePos = -1;
         }
         const fm = (ym.out[0] + ym.out[1]) / 2 / 16384;
-        let v = fm * 0.45 + (this.kL || 0) * 0.25 + (this.updV || 0) * 0.3 + title * 0.35;
+        // the speech chip reaches the amplifier through a coupling capacitor: its slow offsets
+        // (an ADPCM sample that wanders away from the centre) fade out instead of clicking at the end
+        const u = this.updV || 0;
+        this.updDC = u - this.updPrev + DC_KEEP * this.updDC; this.updPrev = u;
+        let v = fm * 0.45 + (this.kL || 0) * 0.25 + this.updDC * 0.3 + title * 0.35;
         if (v > 1) v = 1; else if (v < -1) v = -1;
         this.out.add(v);
       }
@@ -398,13 +423,14 @@
     saveState() {
       return { v: 1, cpu: this.cpu.saveState(), z80: this.z80.getState(), ram: this.ram.slice(), palRam: this.palRam.slice(), zram: this.zram.slice(),
         k052109: this.k052109.saveState(), k051960: this.k051960.saveState(), k007232: this.k007232.saveState(), upd: this.upd.saveState(), ym: this.ym.saveState(),
-        m: [this.ctrl, this.priority, this.soundLatch, this.sres, this.titlePos, this.titleAcc, this.updAcc, this.mixClk, this.zcyc, this.frame] };
+        m: [this.ctrl, this.priority, this.soundLatch, this.sres, this.titlePos, this.titleAcc, this.updAcc, this.mixClk, this.zcyc, this.frame, this.updDC, this.updPrev] };
     }
     loadState(s) {
       this.cpu.loadState(s.cpu); this.z80.setState(s.z80);
       this.ram.set(s.ram); this.palRam.set(s.palRam); this.zram.set(s.zram);
       this.k052109.loadState(s.k052109); this.k051960.loadState(s.k051960); this.k007232.loadState(s.k007232); this.upd.loadState(s.upd); this.ym.loadState(s.ym);
       [this.ctrl, this.priority, this.soundLatch, this.sres, this.titlePos, this.titleAcc, this.updAcc, this.mixClk, this.zcyc, this.frame] = s.m;
+      this.updDC = s.m[10] || 0; this.updPrev = s.m[11] || 0;
       this.k052109.rmrd = !!(this.ctrl & 0x80);
       for (let i = 0; i < 0x800; i += 2) this.palWrite(i, this.palRam[i]);
       this.out.clear();
