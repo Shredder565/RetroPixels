@@ -370,6 +370,8 @@
   SimpsonsBoard.rotate = 0;
   SimpsonsBoard.fps = FPS;
   SimpsonsBoard.players = 4;
+  // who each player's controls play as on the 4-player cabinet (for the page's player picker)
+  SimpsonsBoard.characters = ["Marge", "Homer", "Bart", "Lisa"];
   SimpsonsBoard.buttons = ["Up", "Down", "Left", "Right", "Button 1", "Button 2", "Coin", "Start (1P)", "Start (2P)", "Service"];
   SimpsonsBoard.dips = [];
 

@@ -29,6 +29,9 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: Program icon and version details
+        run: sh tools/make-winres.sh
+
       - name: Build Windows executable
         env:
           GOOS: windows

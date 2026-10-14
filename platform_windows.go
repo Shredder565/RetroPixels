@@ -78,6 +78,7 @@ func openAppWindow(url string, wait bool) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("couldn't open the %s window: %v", appName, err)
 	}
+	setAppWindowIcon()
 	if !wait {
 		go cmd.Wait()
 		return nil

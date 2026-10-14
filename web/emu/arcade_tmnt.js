@@ -500,6 +500,8 @@
   TMNTBoard.rotate = 0;
   TMNTBoard.fps = FPS;
   TMNTBoard.players = 4;
+  // who each player's controls play as on the 4-player cabinet (for the page's player picker)
+  TMNTBoard.characters = ["Leonardo", "Michelangelo", "Donatello", "Raphael"];
   TMNTBoard.buttons = ["Up", "Down", "Left", "Right", "Button 1", "Button 2", "Coin", "Start (1P)", "Start (2P)", "Coin 2", "Service"];
   TMNTBoard.dips = [
     { id: "coinage", label: "Coins", default: 0xff, options: [{ label: "1 coin, 1 credit", value: 0xff }, { label: "1 coin, 2 credits", value: 0xee },

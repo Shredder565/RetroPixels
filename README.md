@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/images/icon.png" alt="" width="96" height="96"></p>
+
 <h1 align="center">RetroPixels</h1>
 
 <p align="center">
@@ -38,7 +40,8 @@ RetroPixels window.
   system is detected from the file.
 - **Xbox controllers work out of the box**, with per-system button remapping, rumble and analog
   sticks where the game uses them. Up to four players.
-- **Player picker** for 4-player games: choose whether your controller plays as player 1, 2, 3 or 4.
+- **Choose your player** in 4-player arcade games: play as Leonardo, Michelangelo, Donatello or Raphael,
+  or Marge, Homer, Bart or Lisa, from buttons above the game.
 - **Recording that captures only the game.** Videos contain just the game picture and sound, with
   no window borders, cursor, black bars or other apps.
 - **Saves handled for you.** Battery saves are kept automatically; save states with undo; import
@@ -97,7 +100,8 @@ GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
   go build -trimpath -ldflags "-s -w -H windowsgui" -o RetroPixels.exe .
 ```
 
-Requires Go 1.24 or newer. When the version in `main.go` changes on `main` (or a tag such as `v2.7.0` is pushed), GitHub Actions builds the program and publishes the release with the .exe, the zip and the source code.
+Requires Go 1.24 or newer. The program icon and file details come from `rsrc_windows_amd64.syso`;
+after changing `winres/icon.ico` or the version, run `sh tools/make-winres.sh`. When the version in `main.go` changes on `main` (or a tag such as `v2.7.0` is pushed), GitHub Actions builds the program and publishes the release with the .exe, the zip and the source code.
 
 ### Project layout
 

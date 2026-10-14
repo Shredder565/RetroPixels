@@ -87,6 +87,7 @@
 //   new RPCores.arcade(zipBytes, { files, zipName, dips, sampleRate, sram })
 //       core.dips -> [{ id, label, options, default, value }]; core.setDip(id, value)
 //       core.gameId / core.gameTitle / core.players (host.js reads players from the core)
+//       core.characters (optional: who players 1-4 play as, for the page's player picker)
 "use strict";
 
 (function (global) {
@@ -346,6 +347,8 @@
       this.controlsNote = "Put a coin in with Coin (View button, or 5 on the keyboard), then press Start (Menu button, or 1). " +
         "The left stick moves too. Clicking the sticks (L3/R3) and the right stick are used for save states.";
       this.players = Math.max(1, Math.min(4, game.players || Board.players || 2));
+      // names for the player picker (4-player cabinets whose players are fixed characters)
+      this.characters = this.players >= 3 ? (game.characters || Board.characters || null) : null;
       this.inputs = [];
       for (let p = 0; p < Math.max(2, this.players); p++) this.inputs.push({});
       for (const p of this.inputs) for (const b of this.buttons) p[b] = false;

@@ -4,6 +4,16 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.7.1  (2026-10-14)
+-------------------------------
+- RetroPixels has its own icon: the warrior picture now shows on the
+  desktop, in Explorer, on the taskbar and on the window.
+- 4-player arcade games (TMNT, Turtles in Time, The Simpsons) show "Choose
+  your player" buttons above the game: 1 Leonardo, 2 Michelangelo,
+  3 Donatello, 4 Raphael, or 1 Marge, 2 Homer, 3 Bart, 4 Lisa. Your keyboard
+  and first controller play as the one you pick; it's remembered per game.
+- The program's Properties in Windows show its name and version.
+
 RetroPixels 2.7.0  (2026-10-14)
 -------------------------------
 - Arcade: TMNT, Turtles in Time (TMNT2) and The Simpsons were each played

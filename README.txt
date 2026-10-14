@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.7.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.7.1 (the number also shows next to the RetroPixels name in the app).
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
 Sega Genesis, Sega Master System, Atari 2600, Atari 7800, classic arcade
@@ -106,11 +106,12 @@ What each system supports
   no DIP switches: hold Service + Start on the first controller to open the
   game's own test menu. In TMNT (4-player cabinet) a player joins by pressing
   Attack; Start does the same.
-  Arcade games for 3 or 4 players (and Nintendo 64 and Genesis, which have
-  four controller ports) have a "👤 Player 1" button above the game: click
-  it to choose which player (1 to 4) your keyboard and first controller play
-  as, for example to be Raphael. Other controllers move round with it. The
-  choice is remembered for each game.
+  4-player arcade games show "Choose your player" buttons above the game
+  (1 Leonardo, 2 Michelangelo, 3 Donatello, 4 Raphael; or 1 Marge, 2 Homer,
+  3 Bart, 4 Lisa): click one to play as that character with your keyboard
+  and first controller. Other controllers move round with it. The choice is
+  remembered for each game. Nintendo 64 and Genesis games have the same
+  choice as a "👤 Player 1" button in the bar under the game.
 
 Playing classic games
 - Drop a game file on the window or click "Choose game file…". Zipped games

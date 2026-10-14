@@ -508,6 +508,8 @@
   TMNT2Board.rotate = 0;
   TMNT2Board.fps = FPS;
   TMNT2Board.players = 4;
+  // who each player's controls play as on the 4-player cabinet (for the page's player picker)
+  TMNT2Board.characters = ["Leonardo", "Michelangelo", "Donatello", "Raphael"];
   TMNT2Board.buttons = ["Up", "Down", "Left", "Right", "Button 1", "Button 2", "Coin", "Start (1P)", "Start (2P)", "Service"];
   TMNT2Board.dips = [];
 

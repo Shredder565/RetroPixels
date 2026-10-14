@@ -229,7 +229,8 @@
       // first controller play as (the other controllers move round with it).
       this.seat = 0;
       if ((this.info.players || 1) >= 3) {
-        this.root.querySelector('[data-a="seat"]').hidden = false;
+        // (the page can show its own 1-4 picker instead of this button)
+        this.root.querySelector('[data-a="seat"]').hidden = this.opts.seatInBar === false;
         let saved = 0;
         try { saved = parseInt(localStorage.getItem(this.seatKey()), 10) || 0; } catch (e) { /* no storage */ }
         this.setSeat(saved, true);
@@ -333,7 +334,11 @@
       this.seat = n >= 0 && n < players ? n : 0;
       this.root.querySelector('[data-a="seat"]').textContent = "👤 Player " + (this.seat + 1);
       try { localStorage.setItem(this.seatKey(), String(this.seat)); } catch (e) { /* no storage */ }
-      if (!quiet) this.flash("You are player " + (this.seat + 1));
+      if (!quiet) {
+        const who = this.core && this.core.characters ? this.core.characters[this.seat] : null;
+        this.flash("You are player " + (this.seat + 1) + (who ? " (" + who + ")" : ""));
+      }
+      if (this.opts.onSeat) this.opts.onSeat(this.seat);
     }
 
     // ---- input ----

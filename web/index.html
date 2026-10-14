@@ -4,6 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RetroPixels</title>
+<link rel="icon" href="favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="256x256" href="icon-256.png">
+<link rel="apple-touch-icon" href="icon-256.png">
 <style>
   :root {
     --bg: #0e0f13;
@@ -220,6 +223,19 @@
   #playerWrap { display: none; }
   #playerBar { display: flex; justify-content: space-between; align-items: center; gap: 12px;
     margin-bottom: 12px; flex-wrap: wrap; }
+  /* 4-player arcade games: which player (character) you control */
+  #seatRow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: -2px 0 12px; }
+  #seatRow[hidden] { display: none; }
+  #seatRow .seat-label { color: var(--muted); font-size: 13px; font-weight: 600; letter-spacing: .02em; }
+  #seatRow .seat-group { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; flex-wrap: wrap; }
+  #seatRow .seat-btn { background: transparent; color: var(--text); border: 0; border-left: 1px solid var(--line);
+    padding: 8px 14px; font: inherit; font-size: 14px; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; }
+  #seatRow .seat-btn:first-child { border-left: 0; }
+  #seatRow .seat-btn:hover { background: var(--panel-2); }
+  #seatRow .seat-btn .num { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 6px;
+    background: var(--panel-2); font-weight: 700; font-size: 13px; }
+  #seatRow .seat-btn[aria-pressed="true"] { background: var(--accent); color: #fff; }
+  #seatRow .seat-btn[aria-pressed="true"] .num { background: rgba(255,255,255,.22); }
   #game { width: 100%; aspect-ratio: 4 / 3; max-height: 72vh; background: #000;
     border-radius: 12px; overflow: hidden; }
   #game.gba { aspect-ratio: 3 / 2; }
@@ -504,6 +520,10 @@
         <button class="btn ghost" id="fsBtn">Fullscreen</button>
         <button class="btn ghost" id="backBtn">Load another game</button>
       </div>
+    </div>
+    <div id="seatRow" role="group" aria-label="Choose your player" hidden>
+      <span class="seat-label">Choose your player</span>
+      <div class="seat-group"></div>
     </div>
     <div id="game"></div>
 
@@ -1635,6 +1655,7 @@
   // coreOpts: extra things a core needs (the arcade core gets the zip's files and the machine's settings)
   async function startOwn(core, rom, name, coreOpts) {
     ownGame = { core, rom, name, coreOpts };
+    document.getElementById("seatRow").hidden = true;
     const gameEl = document.getElementById("game");
     gameEl.innerHTML = '<p style="padding:24px" class="muted">Starting…</p>';
     try {
@@ -1643,6 +1664,8 @@
       player = new window.RPPlayer({
         container: gameEl, system: core, name, sram: sram || null, firmware: await storedFirmware(), coreOpts,
         onSram: data => sramOp("readwrite", s => s.put(data, gameKey)).catch(() => {}),
+        // 4-player arcade games get the 1-4 picker above the game instead of a button in the game's bar
+        seatInBar: core !== "arcade", onSeat: n => markSeat(n),
       });
       await player.start(rom);
     } catch (e) {
@@ -1658,6 +1681,7 @@
       screenshot: () => player.screenshotPNG(),
     };
     gameReady = true;
+    showSeatPicker();
     document.getElementById("sramTools").hidden = !player.core.getSRAM();
     if (core === "arcade") showArcadeSettings(player.core);
     // Sound can only start after a click or key press in some browsers.
@@ -1713,6 +1737,28 @@
     player.destroy();
     toast("Battery save imported — game restarted");
     startOwn(ownGame.core, ownGame.rom, ownGame.name, ownGame.coreOpts);
+  });
+
+  // ---------- Player picker (4-player arcade games) ----------
+  function showSeatPicker() {
+    const row = document.getElementById("seatRow"), group = row.querySelector(".seat-group");
+    const players = player && player.info ? player.info.players || 1 : 1;
+    if (!player || ownGame.core !== "arcade" || players < 3) { row.hidden = true; group.innerHTML = ""; return; }
+    const names = (player.core && player.core.characters) || [];
+    group.innerHTML = Array.from({ length: players }, (_, i) =>
+      `<button type="button" class="seat-btn" data-seat="${i}" aria-pressed="false" title="Play as player ${i + 1}${names[i] ? " (" + esc(names[i]) + ")" : ""}">` +
+      `<span class="num">${i + 1}</span>${names[i] ? `<span>${esc(names[i])}</span>` : ""}</button>`).join("");
+    row.hidden = false;
+    markSeat(player.seat || 0);
+  }
+  function markSeat(n) {
+    document.querySelectorAll("#seatRow .seat-btn").forEach(b => b.setAttribute("aria-pressed", String(+b.dataset.seat === n)));
+  }
+  document.querySelector("#seatRow .seat-group").addEventListener("click", e => {
+    const b = e.target.closest(".seat-btn");
+    if (!b || !player) return;
+    player.setSeat(+b.dataset.seat);
+    if (player.root) player.root.focus();
   });
 
   // ---------- Arcade ----------

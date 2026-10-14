@@ -2,6 +2,12 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.7.1] - 2026-10-14
+
+- RetroPixels has its own icon: the warrior picture now shows on the desktop, in Explorer, on the taskbar and on the window.
+- 4-player arcade games (TMNT, Turtles in Time, The Simpsons) show "Choose your player" buttons above the game: 1 Leonardo, 2 Michelangelo, 3 Donatello, 4 Raphael, or 1 Marge, 2 Homer, 3 Bart, 4 Lisa. Your keyboard and first controller play as the one you pick; it's remembered per game.
+- The program's Properties in Windows show its name and version.
+
 ## [2.7.0] - 2026-10-14
 
 - Arcade: TMNT, Turtles in Time (TMNT2) and The Simpsons were each played start to finish in MAME and in RetroPixels and compared frame by frame and sound by sound. The picture now matches MAME pixel for pixel in almost every frame checked, and the sound balance matches. RetroPixels' code is still all its own: MAME was only watched and listened to.
