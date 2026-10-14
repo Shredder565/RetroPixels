@@ -1,7 +1,17 @@
-RetroPixels 2.4.0
+RetroPixels 2.5.0
 Released 2026-10-14
 
-What's new in 2.4.0
+What's new in 2.5.0
+- Arcade: Konami's Teenage Mutant Ninja Turtles, Turtles in Time (TMNT2) and
+  The Simpsons, with up to four players. New from-scratch chips: Konami-2
+  processor, YM2151, K052109, K051960, K007232, uPD7759, K053260, K053245 /
+  K053247, K053251 and the 93C46 EEPROM.
+- Arcade sets whose chip files are named differently are matched by size.
+- GameCube / Wii: "Add games folder…" now opens the folder picker in front of
+  RetroPixels (it could open hidden), looks deeper inside the folder, and says
+  how many games it found.
+
+2.4.0
 - New Arcade system, written from scratch: Puck Man / Pac-Man, Galaxian,
   Space Invaders and Donkey Kong. Load the game's .zip ROM set. Includes
   RetroPixels' own Intel 8080 and 8035 processors, and a "Machine settings"

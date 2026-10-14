@@ -412,7 +412,7 @@
     version("tmnt22pu", "Teenage Mutant Ninja Turtles - Turtles in Time (2 players, US)", "uda", 2, "tmnt22pu.nv"),
     version("tmht22pe", "Teenage Mutant Hero Turtles - Turtles in Time (2 players, Europe)", "eba", 2, "tmht22pe.nv"),
     version("tmht24pe", "Teenage Mutant Hero Turtles - Turtles in Time (4 players, Europe)", "eaa", 4, "tmht24pe.nv"),
-    version("tmnt2pj", "Teenage Mutant Ninja Turtles 2 (2 players, Japan)", "jba", 2, "tmnt2pj.nv"),
+    version("tmnt22pj", "Teenage Mutant Ninja Turtles 2 (2 players, Japan)", "jba", 2, "tmnt22pj.nv"),
     version("tmnt24pj", "Teenage Mutant Ninja Turtles 2 (4 players, Japan)", "jaa", 4, "tmnt24pj.nv"),
   ];
   TMNT2Board.scalePart = scalePart;

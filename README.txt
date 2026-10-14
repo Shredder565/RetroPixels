@@ -8,11 +8,12 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.4.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.5.0 (the number also shows next to the RetroPixels name in the app).
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
 Sega Genesis, Sega Master System, Atari 2600, Atari 7800, classic arcade
-games (Pac-Man, Galaxian, Space Invaders, Donkey Kong), plus GameCube and
+games (Pac-Man, Galaxian, Space Invaders, Donkey Kong, TMNT, TMNT: Turtles in
+Time, The Simpsons), plus GameCube and
 Wii through Dolphin.
 Your Xbox controller works automatically.
 
@@ -89,6 +90,21 @@ What each system supports
   Restart after changing one. A set with missing chip files gets a list of
   what's missing; a "split" clone set needs a full (non-merged) set instead.
   RetroPixels includes no game ROMs; use sets you own.
+- Arcade, Konami (new in 2.5.0), up to four players, one per controller:
+  * Teenage Mutant Ninja Turtles (tmnt.zip; also tmntu, tmntua, tmht, tmntj,
+    tmht2p, tmnt2pj).
+  * Teenage Mutant Ninja Turtles - Turtles in Time (tmnt2.zip; also tmnt2a,
+    tmnt22pu, tmht22pe, tmht24pe, tmnt22pj, tmnt24pj).
+  * The Simpsons (simpsons.zip; also simpsons4pe, simpsons2p, simpsons2pa,
+    simpsons2pj).
+  These run on RetroPixels' own 68000, Konami-2 and Z80 processors and its own
+  versions of Konami's graphics and sound chips (YM2151, K007232, uPD7759,
+  K053260...). If your set names its chip files differently, keep the zip
+  named after the game (for example tmnt.zip) and RetroPixels matches the
+  chips by name and size. Turtles in Time and The Simpsons keep their settings
+  and high scores in the board's EEPROM (saved like a battery save) and have
+  no DIP switches: hold Service + Start on the first controller to open the
+  game's own test menu.
 
 Playing classic games
 - Drop a game file on the window or click "Choose game file…". Zipped games
@@ -159,7 +175,7 @@ Credits & licences
   the program, its screens, and its NES, Super Nintendo, Game Boy / Game Boy
   Color, Game Boy Advance, Nintendo 64, Sega Genesis, Atari 2600, Atari
   7800 and arcade emulators - including the 6502, 65C816, SPC700, Game Boy,
-  ARM7TDMI, 68000, Z80, Intel 8080, 8035 and N64 (VR4300 and RSP) processors, the graphics and sound
+  ARM7TDMI, 68000, Z80, Intel 8080, 8035, Konami-2 and N64 (VR4300 and RSP) processors, the graphics and sound
   chips (S-DSP, YM2612, PSG...), the cartridge hardware, and replacements
   for the Game Boy Advance BIOS, the SNES sound start-up program and the N64
   boot program, so no Nintendo or Sega code is used. It uses only Go's
