@@ -43,6 +43,12 @@
 //                             spriteCallback(t), dx, dy })
 //     t = { attr, color, pri, shadow, code }: set t.color / t.pri (/ t.shadow / t.code)
 //     dx, dy: the board's fixed offsets from sprite coordinates to its picture (pixels)
+//     codeCounters: multi-tile sprites step the code's own column / row bits (see counterCode)
+//                   instead of adding the offsets above (the K053247 on The Simpsons)
+//     zoomStep: zoomed sprites are sampled in steps of zoom / 64 source pixels and their size is
+//               cut to whole pixels (The Simpsons)
+//     t.shadow may be a number (a shadow type, 1-3), which goes into the shadow output as is;
+//     on the K053247 a shadow pixel over a sprite drawn earlier keeps that sprite's priority
 //   k.ram                    the sprite list the CPU writes (Uint8Array, big-endian words)
 //   k.buffer                 the copy that gets drawn (K053245: after a write to register 6;
 //                            K053247 boards copy into it themselves)
@@ -72,6 +78,8 @@
       this.rom = opts.rom || new Uint8Array(128);
       this.spriteCallback = opts.spriteCallback || null;
       this.dx = opts.dx || 0; this.dy = opts.dy || 0;
+      this.codeCounters = !!opts.codeCounters;
+      this.zoomStep = !!opts.zoomStep;
       this.pens = RPK053245.decode(this.rom, opts.layout || (this.type === "053247" ? "packed" : "planar"));
       this.tiles = this.pens.length >> 8;
       this.t = { attr: 0, color: 0, pri: 0, shadow: false, code: 0 };
@@ -102,6 +110,15 @@
       return pens;
     }
 
+    // Tile of column tx, row ty of a multi-tile sprite when the chip counts in the code's own bits
+    // (opts.codeCounters): the code's bits 0, 2, 4 are a 3-bit column counter and bits 1, 3, 5 a
+    // 3-bit row counter, each stepped on its own (wrapping within its 3 bits), so a sprite whose
+    // code doesn't start on its size's boundary still takes the right tiles.
+    static counterCode(code, tx, ty) {
+      let x = (code & 1) | ((code >> 1) & 2) | ((code >> 2) & 4), y = ((code >> 1) & 1) | ((code >> 2) & 2) | ((code >> 3) & 4);
+      x = (x + tx) & 7; y = (y + ty) & 7;
+      return (code & ~0x3f) | (x & 1) | ((x & 2) << 1) | ((x & 4) << 2) | ((y & 1) << 1) | ((y & 2) << 2) | ((y & 4) << 3);
+    }
     reset() { this.ram.fill(0); this.buffer.fill(0); this.regs.fill(0); }
     readWord(i) { i = (i % (this.count * 8)) * 2; return (this.ram[i] << 8) | this.ram[i + 1]; }
     writeWord(i, v) { i = (i % (this.count * 8)) * 2; this.ram[i] = (v >> 8) & 0xff; this.ram[i + 1] = v & 0xff; }
@@ -144,6 +161,7 @@
       const b = this.buffer, count = this.count, t = this.t, cb = this.spriteCallback;
       const pens = this.pens, tiles = this.tiles, is247 = this.type === "053247";
       const pixMirror = is247;   // the K053247 mirrors pixel by pixel about the sprite's centre
+      const counters = this.codeCounters;
       // drawing order: the highest order value first, so lower values end up in front
       let n = 0;
       for (let i = 0; i < count; i++) if (b[i * 16] & 0x80) this.order[n++] = i;
@@ -172,36 +190,44 @@
         const sx = 64 / (zx || 0.5), sy = 64 / (zy || 0.5);
         if (zx > 0x2000 || zy > 0x2000) continue;
         const fullW = tw * 16, fullH = th * 16;
-        const dw = Math.round(fullW * sx), dh = Math.round(fullH * sy);
+        // opts.zoomStep: the chip steps through the sprite zoom / 64 source pixels a screen pixel
+        // (starting an eighth of a step in) and the sprite's size is cut to whole pixels
+        const zs = this.zoomStep && zx && zy;
+        const dw = zs ? Math.floor(fullW * 64 / zx) : Math.round(fullW * sx), dh = zs ? Math.floor(fullH * 64 / zy) : Math.round(fullH * sy);
         if (dw <= 0 || dh <= 0) continue;
         // centre position on the picture; Y counts upwards in sprite space
         let cx = ((x + offX + 1024 + 512) & 0x3ff) - 512;
         let cy = ((-(y + offY) + 1024 + 512) & 0x3ff) - 512;
         cx += this.dx; cy += this.dy;
-        let left = Math.round(cx - dw / 2), top = Math.round(cy - dh / 2);
+        let left = zs ? cx - (dw >> 1) : Math.round(cx - dw / 2), top = zs ? cy - (dh >> 1) : Math.round(cy - dh / 2);
         if (flipScreenX) { left = w - left - dw; flipX = !flipX; }
         if (flipScreenY) { top = h - top - dh; flipY = !flipY; }
         if (left >= w || top >= h || left + dw <= 0 || top + dh <= 0) continue;
         const color = (t.color << 4) & 0xfff0, pri = t.pri, shadow = t.shadow, baseCode = t.code;
         const x0 = Math.max(0, left), x1 = Math.min(w, left + dw), y0 = Math.max(0, top), y1 = Math.min(h, top + dh);
         for (let py = y0; py < y1; py++) {
-          let v = Math.floor((py - top) * fullH / dh);
+          let v = zs ? Math.min(fullH - 1, ((py - top) * zy + 12) >> 6) : Math.floor((py - top) * fullH / dh);
           if (flipY) v = fullH - 1 - v;
           if (pixMirror && mirrorY && v * 2 < fullH) v = fullH - 1 - v;
           let ty = v >> 4, fy = v & 15;
           if (!pixMirror && mirrorY && ty * 2 >= th) { ty = th - 1 - ty; fy = 15 - fy; }
           const row = py * w;
           for (let px = x0; px < x1; px++) {
-            let u = Math.floor((px - left) * fullW / dw);
+            let u = zs ? Math.min(fullW - 1, ((px - left) * zx + 12) >> 6) : Math.floor((px - left) * fullW / dw);
             if (flipX) u = fullW - 1 - u;
             if (pixMirror && mirrorX && u * 2 < fullW) u = fullW - 1 - u;
             let tx = u >> 4, fx = u & 15;
             if (!pixMirror && mirrorX && tx * 2 >= tw) { tx = tw - 1 - tx; fx = 15 - fx; }
-            const tile = (baseCode + XOFF[tx] + YOFF[ty]) % tiles;
+            const tile = (counters ? RPK053245.counterCode(baseCode, tx, ty) : baseCode + XOFF[tx] + YOFF[ty]) % tiles;
             const pen = pens[tile * 256 + fy * 16 + fx];
             if (!pen) continue;
             const at = row + px;
-            if (shadow && pen === 15) { outShadow[at] = 1; outPri[at] = pri; continue; }
+            if (shadow && pen === 15) {
+              // K053247: a shadow over a sprite drawn earlier keeps that sprite's pixel and priority
+              outShadow[at] = shadow === true ? 1 : shadow;
+              if (!is247 || !(outPens[at] & 15)) outPri[at] = pri;
+              continue;
+            }
             outPens[at] = color | pen; outPri[at] = pri; outShadow[at] = 0;
           }
         }
