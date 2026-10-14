@@ -7,7 +7,8 @@ What's new in 2.7.0
   sound by sound. The picture now matches MAME pixel for pixel in almost
   every frame checked, and the sound balance matches. RetroPixels' code is
   still all its own: MAME was only watched and listened to.
-- New: games for 3 or 4 players have a "Player 1" button above the game.
+- New: 4-player arcade games (and Nintendo 64 and Genesis, which have four
+  controller ports) have a "Player 1" button above the game.
   Click it to choose which player (1 to 4) your keyboard and first
   controller play as. The choice is remembered for each game.
 - TMNT: a stray dark mark on the title screen is gone; flip-screen mode now
