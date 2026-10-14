@@ -28,7 +28,7 @@
 //            16-bit word whose four nibbles, from the top one down, are four pixels.
 //
 // Control chip registers:
-//   K053244 (16): 0-1 X offset, 2-3 Y offset (low, high), 5 bit 0 flip X, bit 1 flip Y,
+//   K053244 (16): 0-1 X offset, 2-3 Y offset (high byte first), 5 bit 0 flip X, bit 1 flip Y,
 //            bit 4 lets the CPU read the sprite ROMs; 6 (written) copies the sprite list into the
 //            chip's own buffer, which is what gets drawn; 8-10 ROM read address; 12-15 read: ROM bytes.
 //   K053246 (8): 0-1 X offset, 2-3 Y offset (high, low), 4, 6, 7 ROM read address, 5 bit 0 flip X,
@@ -108,11 +108,11 @@
     get flipY() { return !!(this.regs[5] & 2); }
     get dmaEnabled() { return !!(this.regs[5] & 0x10); }
     get offsetX() {
-      const v = this.type === "053247" ? (this.regs[0] << 8) | this.regs[1] : (this.regs[1] << 8) | this.regs[0];
+      const v = (this.regs[0] << 8) | this.regs[1];
       return ((v & 0x3ff) << 22) >> 22;
     }
     get offsetY() {
-      const v = this.type === "053247" ? (this.regs[2] << 8) | this.regs[3] : (this.regs[3] << 8) | this.regs[2];
+      const v = (this.regs[2] << 8) | this.regs[3];
       return ((v & 0x3ff) << 22) >> 22;
     }
 

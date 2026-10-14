@@ -1,10 +1,10 @@
 // RetroPixels — Konami TMNT2 board: Teenage Mutant Ninja Turtles - Turtles in Time
 // (1991). Original code, written from the documented behaviour of the board:
-//   - a 68000 at 16 MHz (RPM68K) with 1 MB of program ROM, 16 KB of work RAM and
+//   - a 68000 at 16 MHz (RPM68K) with 512 KB of program ROM, 16 KB of work RAM and
 //     palette RAM of 2048 colours (xBBBBBGGGGGRRRRR);
 //   - a K052109 tilemap chip (fixed layer + two scrolling layers), K053245 / K053244
 //     sprites (zoomed, sorted, with shadows) and a K053251 mixing them by priority;
-//   - a 93C46 serial EEPROM holding the settings and high scores (the game's own
+//   - a byte-wide serial EEPROM (128 bytes) holding the settings and high scores (the game's own
 //     service menu sets it up: there are no DIP switches);
 //   - a Z80 at 8 MHz with a YM2151 FM chip and a K053260 PCM chip; the main
 //     processor talks to it through the K053260's ports and nudges it with an interrupt;
@@ -43,17 +43,88 @@
   }
   RPArcade.interleave = RPArcade.interleave || interleave;
 
+  // The board's serial EEPROM: 128 cells of 8 bits. Same three lines as the 93C46 the other
+  // Konami boards use (chip select, clock, data in; one data out), but byte-wide, and the game
+  // clocks 9 address bits after the start bit and 2-bit opcode (the top two only matter for the
+  // 00 commands; the cell is the low 7). Opcodes, as the game uses them:
+  //   10 READ: data out goes 0 (dummy), then each rising clock puts out the next bit, D7 first;
+  //   11 WRITE: 8 data bits follow (the cell is erased and written in one go);
+  //   01 WRITE as well (the usual 93Cxx code), and with 00 the top address bits pick
+  //   EWDS (00), WRAL (01), ERAL (10), EWEN (11). Writes finish at once (always "ready").
+  class ByteEeprom {
+    constructor(initial) {
+      this.bytes = new Uint8Array(128).fill(0xff);
+      if (initial && initial.length) this.bytes.set(initial.subarray ? initial.subarray(0, 128) : initial.slice(0, 128));
+      this.cs = 0; this.clk = 0; this.dout = 1;
+      this.state = 0; this.shift = 0; this.bits = 0; this.addr = 0; this.out = 0; this.enabled = false; this.all = false;
+    }
+    read() { return this.dout; }
+    write(cs, clk, di) {
+      cs = cs ? 1 : 0; clk = clk ? 1 : 0; di = di ? 1 : 0;
+      if (!cs) {
+        if (this.cs && this.state === 3 && this.bits === 0 && this.erasing) this.store(0xff); // a WRITE cut short erases
+        this.cs = 0; this.clk = clk; this.state = 0; this.dout = 1; return;
+      }
+      if (!this.cs) { this.state = 0; this.dout = 1; }
+      const rising = clk && !this.clk;
+      this.cs = 1; this.clk = clk;
+      if (!rising) return;
+      switch (this.state) {
+        case 0: if (di) { this.state = 1; this.shift = 0; this.bits = 0; } return;
+        case 1:
+          this.shift = (this.shift << 1) | di;
+          if (++this.bits === 11) this.command(this.shift >> 9, this.shift & 0x1ff);
+          return;
+        case 2:
+          this.dout = (this.out >> 7) & 1; this.out = (this.out << 1) & 0xff;
+          if (++this.bits === 8) { this.bits = 0; this.addr = (this.addr + 1) & 0x7f; this.out = this.bytes[this.addr]; }
+          return;
+        case 3:
+          this.shift = ((this.shift << 1) | di) & 0xff;
+          if (++this.bits === 8) { this.store(this.shift); this.state = 4; this.dout = 1; }
+          return;
+        default: return;
+      }
+    }
+    store(v) {
+      if (!this.enabled) return;
+      if (this.all) this.bytes.fill(v); else this.bytes[this.addr] = v;
+    }
+    command(op, a) {
+      this.addr = a & 0x7f; this.all = false; this.erasing = false;
+      if (op === 2) { this.state = 2; this.dout = 0; this.out = this.bytes[this.addr]; this.bits = 0; return; }
+      if (op === 1 || op === 3) { this.state = 3; this.shift = 0; this.bits = 0; this.erasing = op === 3; return; }
+      switch (a >> 7) {
+        case 0: this.enabled = false; break;
+        case 1: this.state = 3; this.shift = 0; this.bits = 0; this.all = true; return;
+        case 2: if (this.enabled) this.bytes.fill(0xff); break;
+        case 3: this.enabled = true; break;
+      }
+      this.state = 4; this.dout = 1;
+    }
+    getState() {
+      return { bytes: this.bytes.slice(), r: [this.cs, this.clk, this.dout, this.state, this.shift, this.bits, this.addr, this.out,
+        this.enabled ? 1 : 0, this.all ? 1 : 0, this.erasing ? 1 : 0] };
+    }
+    setState(o) {
+      this.bytes.set(o.bytes);
+      let en, all, er;
+      [this.cs, this.clk, this.dout, this.state, this.shift, this.bits, this.addr, this.out, en, all, er] = o.r;
+      this.enabled = !!en; this.all = !!all; this.erasing = !!er;
+    }
+  }
+
   class TMNT2Board {
     constructor(game, files, opts) {
       opts = opts || {};
       this.game = game;
       this.sampleRate = opts.sampleRate || 48000;
       this.players = game.players || 4;
-      this.rom = new Uint8Array(0x100000).fill(0xff);
+      this.rom = new Uint8Array(0x100000).fill(0xff); // 512 KB fitted; the rest reads as unused
       this.rom.set(interleave(game, files, "cpu", 1, 2).subarray(0, 0x100000));
       this.sndRom = RPArcade.region(game, files, "sound", 0x10000);
       const tileRom = interleave(game, files, "tiles", 2, 4);
-      const spriteRom = interleave(game, files, "sprites", 2, 4);
+      const spriteRom = unscrambleSprites(interleave(game, files, "sprites", 2, 4));
       const pcm = RPArcade.region(game, files, "pcm", 0x200000);
 
       this.ram = new Uint8Array(0x4000);       // 104000-107fff
@@ -89,7 +160,7 @@
       this.ym = new global.RPYM2151({ clock: YM_HZ });
       let nv = opts.sram && opts.sram.length >= 128 ? opts.sram : null;
       if (!nv) { const f = game.files.find((x) => x.role === "eeprom"); const d = f && RPArcade.findFile(f, files); if (d && d.length >= 128) nv = d; }
-      this.eeprom = new global.RPEeprom93C46(nv);
+      this.eeprom = new ByteEeprom(nv);
 
       this.cpu = new global.RPM68K({
         read8: (a) => self.read8(a), read16: (a) => self.read16(a),
@@ -119,7 +190,11 @@
       this.k052109.reset(); this.k053245.reset(); this.k053251.reset();
       this.ym.reset();
       this.k053260 = new global.RPK053260(this.k053260.rom, YM_HZ);
-      this.eepromOut = 0; this.ctrl300 = 0; this.vblank = false;
+      this.eepromOut = 0; this.ctrl300 = 0; this.vblank = false; this.dmaBusy = 0;
+      // A blank EEPROM (a set without its .nv file): the game only writes its factory settings when
+      // it's switched on with the test switch held, so hold it for the first second, as an operator
+      // setting up a new board would (the game then carries on to its attract mode by itself).
+      this.setupFrames = this.eeprom.bytes.every((x) => x === 0xff) ? 60 : 0;
       this.cpu.setIRQ(0); this.cpu.reset();
       this.z80.reset(); this.z80.irq = false;
       this.nmiAt = -1;          // Z80 cycle when the armed NMI fires (-1 none)
@@ -148,9 +223,11 @@
       return ~v & 0xff;
     }
     eepromByte() {
-      // bit 0 EEPROM data, bit 1 EEPROM ready, bit 2 test switch (low = on), bit 3 vertical blank
-      const test = this.inputs[0] && this.inputs[0].Service && this.inputs[0]["Start (1P)"];
-      return 0xf0 | this.eeprom.read() | 2 | (test ? 0 : 4) | (this.vblank ? 8 : 0);
+      // bit 0 EEPROM data, bit 1 EEPROM ready, bit 2 the sprite chip still copying its list (the
+      // game waits for it before moving the sprites' offsets), bit 3 vertical blank, bit 5 low
+      // = hardest difficulty (a factory jumper; left high), bit 7 test switch (low = on)
+      const test = (this.inputs[0] && this.inputs[0].Service && this.inputs[0]["Start (1P)"]) || this.setupFrames > 0;
+      return 0x70 | this.eeprom.read() | 2 | (this.dmaBusy > 0 ? 4 : 0) | (this.vblank ? 8 : 0) | (test ? 0 : 0x80);
     }
 
     // ---- 68000 memory ----
@@ -211,7 +288,11 @@
         this.k052109.rmrd = !!(v & 0x08);
         return;
       }
-      if (a >= 0x5a0000 && a < 0x5a0020) { this.k053245.regWrite(((a & 0x1c) >> 1) | (a & 1), v); return; }
+      if (a >= 0x5a0000 && a < 0x5a0020) {
+        const r = ((a & 0x1c) >> 1) | (a & 1);
+        if (r === 6) this.dmaBusy = 2; // the copy takes about a line
+        this.k053245.regWrite(r, v); return;
+      }
       if (a >= 0x5c0600 && a < 0x5c0604) { if (a & 1) this.k053260.mainWrite((a >> 1) & 1, v); return; }
       if (a === 0x5c0604 || a === 0x5c0605) { this.z80.irq = true; return; } // sound interrupt
       if (a >= 0x5c0700 && a < 0x5c0720) { if (a & 1) this.k053251.write((a >> 1) & 15, v); return; }
@@ -330,13 +411,15 @@
         if (line === TOP + H) {
           this.vblank = true;
           this.drawFrame();
-          if (this.k052109.irqEnabled) cpu.setIRQ(5);
+          if (this.k052109.irqEnabled) cpu.setIRQ(4); // vertical blank: level 4
         } else if (line === TOP) this.vblank = false;
         const end = (line + 1) * LINE_CYC;
         while (this.cyc < end) this.cyc += cpu.step();
+        if (this.dmaBusy > 0) this.dmaBusy--;
         this.runSound(LINE_CYC * Z80_HZ / CPU_HZ);
       }
       this.cyc -= LINES * LINE_CYC;
+      if (this.setupFrames > 0) this.setupFrames--;
     }
 
     takeAudio() { return this.resampler.take(); }
@@ -347,7 +430,7 @@
         sprRam: this.sprRam.slice(), ioRam: this.ioRam.slice(), prot: this.prot.slice(), sndRam: this.sndRam.slice(),
         k052109: this.k052109.saveState(), k053245: this.k053245.getState(), k053251: this.k053251.getState(),
         k053260: this.k053260.getState(), ym: this.ym.saveState(), eeprom: this.eeprom.getState(),
-        m: [this.eepromOut, this.ctrl300, this.vblank ? 1 : 0, this.nmiAt, this.zCyc, this.ymFrac, this.cyc, this.z80.irq ? 1 : 0] };
+        m: [this.eepromOut, this.ctrl300, this.vblank ? 1 : 0, this.nmiAt, this.zCyc, this.ymFrac, this.cyc, this.z80.irq ? 1 : 0, this.dmaBusy, this.setupFrames] };
     }
     loadState(s) {
       this.cpu.loadState(s.cpu); this.z80.setState(s.z80);
@@ -355,13 +438,28 @@
       this.k052109.loadState(s.k052109); this.k053245.setState(s.k053245); this.k053251.setState(s.k053251);
       this.k053260.setState(s.k053260); this.ym.loadState(s.ym); this.eeprom.setState(s.eeprom);
       let vb, zi;
-      [this.eepromOut, this.ctrl300, vb, this.nmiAt, this.zCyc, this.ymFrac, this.cyc, zi] = s.m;
+      [this.eepromOut, this.ctrl300, vb, this.nmiAt, this.zCyc, this.ymFrac, this.cyc, zi, this.dmaBusy, this.setupFrames] = s.m;
+      this.dmaBusy = this.dmaBusy || 0; this.setupFrames = this.setupFrames || 0;
       this.vblank = !!vb; this.z80.irq = !!zi;
       this.k052109.rmrd = !!(this.ctrl300 & 0x08);
       for (let i = 0; i < 2048; i++) this.updateColour(i);
       this.resampler.clear();
       this.drawFrame();
     }
+  }
+
+  // The sprite ROMs hold each block of 64 tiles row by row (8 tiles across, then the next row),
+  // but the K053245 numbers the tiles of a block in Konami's interleaved order (code bits 0, 2, 4
+  // step across, bits 1, 3, 5 step down): the board wires the ROM address lines so the two meet.
+  // Reorder the tiles once into the chip's numbering.
+  function unscrambleSprites(rom) {
+    const out = new Uint8Array(rom.length), n = rom.length >> 7;
+    for (let c = 0; c < n; c++) {
+      const x = (c & 1) | ((c >> 1) & 2) | ((c >> 2) & 4), y = ((c >> 1) & 1) | ((c >> 2) & 2) | ((c >> 3) & 4);
+      const r = (c & ~0x3f) | x | (y << 3);
+      out.set(rom.subarray(r << 7, (r + 1) << 7), c << 7);
+    }
+    return out;
   }
 
   // How far a part sits from its object's centre once the object is zoomed. The helper chip's
@@ -384,17 +482,16 @@
   TMNT2Board.buttons = ["Up", "Down", "Left", "Right", "Button 1", "Button 2", "Coin", "Start (1P)", "Start (2P)", "Service"];
   TMNT2Board.dips = [];
 
-  // The chips every version shares; only the two main program ROMs differ.
+  // The chips every version shares; only the four main program ROMs differ (their names carry
+  // the version's region letters).
   const SHARED = [
-    { name: "063a04.10e", size: 0x20000, role: "cpu", base: 0x40000, lane: 0 },
-    { name: "063a05.10g", size: 0x20000, role: "cpu", base: 0x40000, lane: 1 },
     { name: "063b01.2f", size: 0x10000, role: "sound" },
-    { name: "063a12.k16", size: 0x80000, role: "tiles", lane: 0 },
-    { name: "063a11.k12", size: 0x80000, role: "tiles", lane: 2 },
-    { name: "063a09.l1", size: 0x200000, role: "sprites", lane: 0 },
-    { name: "063a07.h1", size: 0x200000, role: "sprites", lane: 2 },
-    { name: "063a10.l3", size: 0x80000, role: "sprites", base: 0x400000, lane: 0 },
-    { name: "063a08.h3", size: 0x80000, role: "sprites", base: 0x400000, lane: 2 },
+    { name: "063b12.16k", size: 0x80000, role: "tiles", lane: 0 },
+    { name: "063b11.12k", size: 0x80000, role: "tiles", lane: 2 },
+    { name: "063b09.7l", size: 0x100000, role: "sprites", lane: 0 },
+    { name: "063b07.3l", size: 0x100000, role: "sprites", lane: 2 },
+    { name: "063b10.7k", size: 0x80000, role: "sprites", base: 0x200000, lane: 0 },
+    { name: "063b08.3k", size: 0x80000, role: "sprites", base: 0x200000, lane: 2 },
     { name: "063b06.1d", size: 0x200000, role: "pcm" },
   ];
   const version = (id, title, code, players, nv) => ({
@@ -402,6 +499,8 @@
     files: [
       { name: `063${code}02.8e`, size: 0x20000, role: "cpu", base: 0, lane: 0 },
       { name: `063${code}03.8g`, size: 0x20000, role: "cpu", base: 0, lane: 1 },
+      { name: `063${code}04.10e`, size: 0x20000, role: "cpu", base: 0x40000, lane: 0 },
+      { name: `063${code}05.10g`, size: 0x20000, role: "cpu", base: 0x40000, lane: 1 },
       ...SHARED,
       { name: nv, size: 0x80, role: "eeprom", optional: true },
     ],
