@@ -45,7 +45,7 @@
 //   k.read(off) / k.write(off, v) the sprite list, off 0..0x3ff
 //   k.readReg(r) / k.writeReg(r, v)   K051937 registers 0-7: reg 0 bit 5 = ROM readback on
 //                     (reads of 4-7 then return the 4 bytes of the ROM word whose address is reg 3 :
-//                     reg 2 : the last sprite-list address read, bits 2-9); reg 1 bit 0 = flip
+//                     reg 2 : the last sprite-list address read, bits 2-9); reg 0 bit 3 = flip
 //                     screen; reading reg 0 returns a bit 0 that changes each read (drawing status)
 //   k.dx, k.dy        board-specific offsets added to every sprite's position
 //   k.render(out, w, h, opts)  draws the sprites into out (Uint16Array w*h, color * 16 + pen, 0 untouched
@@ -102,7 +102,7 @@
       return this.ram[off & 0x3ff];
     }
     write(off, v) { this.ram[off & 0x3ff] = v & 0xff; }
-    get flipScreen() { return !!(this.regs[1] & 1); }
+    get flipScreen() { return !!(this.regs[0] & 8); }
     readReg(r) {
       r &= 7;
       if (r === 0) { this.toggle ^= 1; return this.toggle; }
