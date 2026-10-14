@@ -31,13 +31,16 @@
 //                     row after row (rather than in 16x16 cells): spriteStart(code, size) -> the ROM
 //                     word (4 bytes, 8 pixels) where the sprite's top row starts; a sprite W cells
 //                     across then has 2 * W words a row. code is the board's code (after spriteCallback).
+//     readbackAddr    optional (word) -> word: the board's wiring of the chip's ROM address lines,
+//                     applied to the readback address (reg 3 : reg 2 : latched low byte)
 //     spriteCallback  t => { ... } with t = { code, color (byte 3), pri: 0, shadow: false };
 //                     the board's wiring sets t.code, t.color (pens become color * 16 + pen),
 //                     t.pri (copied to the priority buffer) and t.shadow (pen 15 marks shadow)
 //   k.ram                         Uint8Array(0x400): the sprite list (the board maps it for its CPU)
 //   k.read(off) / k.write(off, v) the sprite list, off 0..0x3ff
 //   k.readReg(r) / k.writeReg(r, v)   K051937 registers 0-7: reg 0 bit 5 = ROM readback on
-//                     (reads of 4-7 then return ROM bytes at the address in regs 2-4); reg 1 bit 0 = flip
+//                     (reads of 4-7 then return the 4 bytes of the ROM word whose address is reg 3 :
+//                     reg 2 : the last sprite-list address read, bits 2-9); reg 1 bit 0 = flip
 //                     screen; reading reg 0 returns a bit 0 that changes each read (drawing status)
 //   k.dx, k.dy        board-specific offsets added to every sprite's position
 //   k.render(out, w, h, opts)  draws the sprites into out (Uint16Array w*h, color * 16 + pen, 0 untouched
@@ -60,11 +63,13 @@
       this.regs = new Uint8Array(8);
       this.spriteStart = opts.spriteStart || null;
       this.pens = opts.decode ? opts.decode(this.rom) : K051960.decode(this.rom);
+      this.readbackAddr = opts.readbackAddr || null;
+      this.packed = !!(opts.decode && opts.spriteStart); // pens kept 8 to a ROM word, in ROM order
       this.codes = this.pens.length >> 8;
       this.dx = 0; this.dy = 0;
       this.t = { code: 0, color: 0, pri: 0, shadow: false };
       this.order = new Int32Array(128);
-      this.toggle = 0;
+      this.toggle = 0; this.romLow = 0;
     }
 
     // 16x16 cells: four 8x8 blocks of 32 bytes; row byte n = colour bit n, leftmost pixel in bit 7
@@ -84,16 +89,28 @@
       return pens;
     }
 
-    reset() { this.ram.fill(0); this.regs.fill(0); this.toggle = 0; }
-    read(off) { return this.ram[off & 0x3ff]; }
+    reset() { this.ram.fill(0); this.regs.fill(0); this.toggle = 0; this.romLow = 0; }
+    read(off) {
+      // with ROM reading on, a sprite-list read also latches the low byte of the ROM address (A2-A9)
+      if (this.regs[0] & 0x20) this.romLow = (off >> 2) & 0xff;
+      return this.ram[off & 0x3ff];
+    }
     write(off, v) { this.ram[off & 0x3ff] = v & 0xff; }
     get flipScreen() { return !!(this.regs[1] & 1); }
     readReg(r) {
       r &= 7;
       if (r === 0) { this.toggle ^= 1; return this.toggle; }
       if (r >= 4 && (this.regs[0] & 0x20)) {
-        const a = (this.regs[2] | (this.regs[3] << 8) | (this.regs[4] << 16)) * 4 + (r & 3);
-        return this.rom.length ? this.rom[a % this.rom.length] : 0;
+        let w = (this.regs[3] << 16) | (this.regs[2] << 8) | this.romLow;
+        if (this.readbackAddr) w = this.readbackAddr(w);
+        if (this.packed) {
+          // a packed board: the chip still shows the word in its planar form (byte n = bit n of the 8 pixels)
+          const at = (w * 8) % this.pens.length, n = r & 3;
+          let v = 0;
+          for (let x = 0; x < 8; x++) v |= ((this.pens[at + x] >> n) & 1) << (7 - x);
+          return v;
+        }
+        return this.rom.length ? this.rom[(w * 4 + (r & 3)) % this.rom.length] : 0;
       }
       return 0;
     }
@@ -151,8 +168,8 @@
       }
     }
 
-    saveState() { return { ram: this.ram.slice(), regs: this.regs.slice(), toggle: this.toggle }; }
-    loadState(o) { this.ram.set(o.ram); this.regs.set(o.regs); this.toggle = o.toggle || 0; }
+    saveState() { return { ram: this.ram.slice(), regs: this.regs.slice(), toggle: this.toggle, romLow: this.romLow }; }
+    loadState(o) { this.ram.set(o.ram); this.regs.set(o.regs); this.toggle = o.toggle || 0; this.romLow = o.romLow || 0; }
   }
 
   global.RPK051960 = K051960;
