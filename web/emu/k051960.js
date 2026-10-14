@@ -21,10 +21,16 @@
 // ===========================================================================
 // INTERFACE
 // ===========================================================================
-//   const k = new RPK051960({ rom, spriteCallback })
+//   const k = new RPK051960({ rom, spriteCallback, decode, spriteStart })
 //     rom             the sprite ROMs as one Uint8Array, 128 bytes per 16x16 code: four 8x8
 //                     blocks (top-left, top-right, bottom-left, bottom-right), each 4 bytes a row
 //                     where byte n holds bit n of the pixels' colour numbers (leftmost pixel in bit 7)
+//     decode          optional: decode(rom) -> Uint8Array of one byte per pixel, 8 pixels per 32-bit
+//                     ROM word, for boards whose ROMs hold their pixels differently
+//     spriteStart     optional, for boards whose ROMs keep each whole sprite as one picture stored
+//                     row after row (rather than in 16x16 cells): spriteStart(code, size) -> the ROM
+//                     word (4 bytes, 8 pixels) where the sprite's top row starts; a sprite W cells
+//                     across then has 2 * W words a row. code is the board's code (after spriteCallback).
 //     spriteCallback  t => { ... } with t = { code, color (byte 3), pri: 0, shadow: false };
 //                     the board's wiring sets t.code, t.color (pens become color * 16 + pen),
 //                     t.pri (copied to the priority buffer) and t.shadow (pen 15 marks shadow)
@@ -37,7 +43,7 @@
 //   k.render(out, w, h, opts)  draws the sprites into out (Uint16Array w*h, color * 16 + pen, 0 untouched
 //                     where no sprite). opts: x0, y0 = sprite-space position of the window's
 //                     top-left; pri (Uint8Array w*h) receives t.pri; shadow (Uint8Array w*h) is set to 1
-//                     where a shadow pen lands.
+//                     where a shadow pen lands (and cleared again where a sprite drawn later covers it).
 //   k.saveState() / k.loadState(o)
 "use strict";
 
@@ -52,7 +58,8 @@
       this.spriteCallback = opts.spriteCallback || null;
       this.ram = new Uint8Array(0x400);
       this.regs = new Uint8Array(8);
-      this.pens = K051960.decode(this.rom);
+      this.spriteStart = opts.spriteStart || null;
+      this.pens = opts.decode ? opts.decode(this.rom) : K051960.decode(this.rom);
       this.codes = this.pens.length >> 8;
       this.dx = 0; this.dy = 0;
       this.t = { code: 0, color: 0, pri: 0, shadow: false };
@@ -114,23 +121,31 @@
         const cw = WIDTH[size], ch = HEIGHT[size];
         const sw = Math.max(1, Math.round(16 * cw * (128 - zx) / 128)), shh = Math.max(1, Math.round(16 * ch * (128 - zy) / 128));
         const left = ((xr + this.dx - x0) % 512 + 512) % 512, top = ((256 - yr + this.dy - y0) % 512 + 512) % 512;
+        // whole-picture ROM layout: pixel (x, y) of the sprite sits at word start + y * rowWords + x / 8
+        const rowWords = 2 * cw, npens = pens.length;
+        const start = this.spriteStart ? this.spriteStart(code, size) : -1;
         for (let py = 0; py < shh; py++) {
           let sy = top + py; if (sy >= 512) sy -= 512;
           if (sy >= h) continue;
           let srcY = Math.floor(py * 16 * ch / shh); if (flipY) srcY = 16 * ch - 1 - srcY;
-          const cy = srcY >> 4, ry = srcY & 15;
+          const cy = srcY >> 4, ry = srcY & 15, rowAt = start >= 0 ? (start + srcY * rowWords) * 8 : 0;
           for (let px = 0; px < sw; px++) {
             let sx = left + px; if (sx >= 512) sx -= 512;
             if (sx >= w) continue;
             let srcX = Math.floor(px * 16 * cw / sw); if (flipX) srcX = 16 * cw - 1 - srcX;
-            const cx = srcX >> 4, rx = srcX & 15;
-            const c = (code + XOFF[cx] + YOFF[cy]) % codes;
-            const pen = pens[c * 256 + ry * 16 + rx];
+            let pen;
+            if (start >= 0) pen = pens[(rowAt + srcX) % npens];
+            else {
+              const cx = srcX >> 4, rx = srcX & 15;
+              const c = (code + XOFF[cx] + YOFF[cy]) % codes;
+              pen = pens[c * 256 + ry * 16 + rx];
+            }
             if (!pen) continue;
             const at = sy * w + sx;
             if (shadow && pen === 15) { if (shBuf) shBuf[at] = 1; continue; }
             out[at] = color | pen;
             if (priBuf) priBuf[at] = pri;
+            if (shBuf) shBuf[at] = 0; // a sprite drawn over a shadow hides it
           }
         }
       }
