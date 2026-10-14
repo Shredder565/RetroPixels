@@ -1,7 +1,19 @@
-RetroPixels 2.5.2
+RetroPixels 2.6.0
 Released 2026-10-14
 
-What's new in 2.5.2
+What's new in 2.6.0
+- Arcade: TMNT, Turtles in Time (TMNT2) and The Simpsons now boot and play
+  with correct graphics and sound. Fixed: TMNT's graphics and sprite layout,
+  sound effects and speech; TMNT2's chip list, settings memory, interrupts
+  and sprites; The Simpsons' processor and settings memory. Sets without
+  their .nv file set themselves up on first start.
+- GameCube / Wii recording rebuilt: Dolphin now saves the game's own frames
+  and sound while you play, and RetroPixels turns them into an .mp4 when the
+  game ends. The video is smooth and shows only the game: no mouse cursor, no
+  other windows, no black bars. "Saving recording…" shows while it's made.
+  With automatic recording off, the Record button records the next game.
+
+2.5.2
 - GameCube / Wii recording: black bars are now always trimmed from the
   finished video (before, only with Aspect ratio on "Auto"). If ffmpeg isn't
   installed, the first game you start downloads it and recording starts
