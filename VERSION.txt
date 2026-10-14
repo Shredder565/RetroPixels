@@ -1,7 +1,19 @@
-RetroPixels 2.6.0
+RetroPixels 2.6.1
 Released 2026-10-14
 
-What's new in 2.6.0
+What's new in 2.6.1
+- Recording on every system now captures only the game picture. NES, SNES,
+  Game Boy, GBA, N64, Genesis, Master System, Atari and arcade recordings
+  no longer include black bars, buttons, messages or the rest of the
+  window, and are saved at a sharp, even size. (GameCube / Wii already
+  recorded only the game since 2.6.0.)
+- TMNT: the game's own ROM self-test now passes, speech sounds cleaner,
+  and the service buttons work for players 2 to 4.
+- The Simpsons: sprites were drawn too far to the right of the backgrounds
+  (character select, intro, bonus stage); they now line up. Ground shadows
+  draw as full ovals instead of thin slivers.
+
+2.6.0
 - Arcade: TMNT, Turtles in Time (TMNT2) and The Simpsons now boot and play
   with correct graphics and sound. Fixed: TMNT's graphics and sprite layout,
   sound effects and speech; TMNT2's chip list, settings memory, interrupts
