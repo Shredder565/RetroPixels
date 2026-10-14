@@ -1,7 +1,13 @@
-RetroPixels 2.3.0
-Released 2026-10-13
+RetroPixels 2.4.0
+Released 2026-10-14
 
-What's new in 2.3.0
+What's new in 2.4.0
+- New Arcade system, written from scratch: Puck Man / Pac-Man, Galaxian,
+  Space Invaders and Donkey Kong. Load the game's .zip ROM set. Includes
+  RetroPixels' own Intel 8080 and 8035 processors, and a "Machine settings"
+  panel for each game's DIP switches.
+
+2.3.0
 - Super Nintendo: DSP-3, DSP-4, ST010, ST011 and ST018 games now play. These
   chips need their built-in program, which RetroPixels can't include: the
   first time, it asks you to choose your own dump of it (dsp3.rom, dsp4.rom,

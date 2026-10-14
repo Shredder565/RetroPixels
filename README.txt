@@ -8,10 +8,11 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.2.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.4.0 (the number also shows next to the RetroPixels name in the app).
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
-Sega Genesis, Sega Master System, Atari 2600, Atari 7800, plus GameCube and
+Sega Genesis, Sega Master System, Atari 2600, Atari 7800, classic arcade
+games (Pac-Man, Galaxian, Space Invaders, Donkey Kong), plus GameCube and
 Wii through Dolphin.
 Your Xbox controller works automatically.
 
@@ -70,6 +71,24 @@ What each system supports
   CDF / CDFJ and 4A50 cartridges aren't supported yet.
 - Atari 7800: .a78 headers (v3 and v4), SuperGame with extra RAM, Absolute,
   Activision, banksets and POKEY sound.
+- Arcade (new in 2.4.0): RetroPixels' own emulation of four classic arcade
+  boards. Pick Arcade (or just drop the file) and load the game's .zip ROM
+  set, kept zipped and named like the set:
+  * Puck Man / Pac-Man (puckman.zip, pacman.zip), with its wavetable sound.
+  * Galaxian (galaxian.zip, galmidw.zip).
+  * Space Invaders (invaders.zip), on RetroPixels' own Intel 8080 processor,
+    with the cabinet's coloured screen strips (can be switched off).
+  * Donkey Kong (dkong.zip), whose sound program runs on RetroPixels' own
+    8035 sound processor.
+  Some sounds on the real machines come from analogue circuits (Galaxian's
+  sounds, Space Invaders' shots and marching beat, Donkey Kong's walk, jump
+  and stomp); RetroPixels makes its own versions of those. Vertical games are
+  shown upright. Coin = View button or 5, Start = Menu button or 1 (2 for two
+  players), Fire / Jump = A or Z. The machine's DIP switches (coins, lives,
+  bonus, difficulty) are under "Machine settings" below the game; press
+  Restart after changing one. A set with missing chip files gets a list of
+  what's missing; a "split" clone set needs a full (non-merged) set instead.
+  RetroPixels includes no game ROMs; use sets you own.
 
 Playing classic games
 - Drop a game file on the window or click "Choose game file…". Zipped games
@@ -138,9 +157,9 @@ Where things are kept
 Credits & licences
 - RetroPixels' own code was written for this project and uses no copied code:
   the program, its screens, and its NES, Super Nintendo, Game Boy / Game Boy
-  Color, Game Boy Advance, Nintendo 64, Sega Genesis, Atari 2600 and Atari
-  7800 emulators - including the 6502, 65C816, SPC700, Game Boy, ARM7TDMI,
-  68000, Z80 and N64 (VR4300 and RSP) processors, the graphics and sound
+  Color, Game Boy Advance, Nintendo 64, Sega Genesis, Atari 2600, Atari
+  7800 and arcade emulators - including the 6502, 65C816, SPC700, Game Boy,
+  ARM7TDMI, 68000, Z80, Intel 8080, 8035 and N64 (VR4300 and RSP) processors, the graphics and sound
   chips (S-DSP, YM2612, PSG...), the cartridge hardware, and replacements
   for the Game Boy Advance BIOS, the SNES sound start-up program and the N64
   boot program, so no Nintendo or Sega code is used. It uses only Go's
