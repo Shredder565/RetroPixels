@@ -1744,7 +1744,7 @@
         if (selectedCore === "arcade" || !consoleFile) coreOpts = await arcadeSet(z, file.name);
         if (coreOpts) core = "arcade";
         else if (selectedCore === "arcade") {
-          return fail(`"${file.name}" isn't an arcade game RetroPixels knows yet. The games it can play are: ${window.RPArcade.supportedText()}. Load the game's .zip ROM set (keep it zipped), named like the set (for example pacman.zip).`);
+          return fail(`"${file.name}" isn't an arcade game RetroPixels knows yet. The games it can play are: ${window.RPArcade.supportedText()}. Load the game's .zip ROM set (keep it zipped), named like the set (for example pacman.zip). This zip holds: ${z.entries.slice(0, 30).map(e => `${e.name} (${e.size.toLocaleString()} bytes)`).join(", ") || "nothing"}${z.entries.length > 30 ? ", …" : ""}.`);
         } else if (inner) {
           core = coreForExt(inner.x);
           rom = await z.extract(inner.e);

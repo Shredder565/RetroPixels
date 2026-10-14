@@ -211,8 +211,28 @@
       }
       return best;
     };
-    if (zip) { const named = games.filter((g) => g.game.id === zip); if (named.length) return pick(named, false); }
-    return pick(games, true);
+    // "tmnt (1).zip", "tmnt-2.zip": downloads often get a copy number added to the name
+    const ids = zip ? [zip, zip.replace(/\s*[\(\[]\d+[\)\]]$/, "").replace(/[-_ ]\d$/, "").trim()] : [];
+    for (const id of ids) { const named = games.filter((g) => g.game.id === id); if (named.length) return pick(named, false); }
+    const full = pick(games, true);
+    if (full) return full;
+    // The zip has some other name ("Teenage Mutant Ninja Turtles (World).zip"): take the game
+    // that most of its files belong to, by name, or, for games marked loose, by size.
+    let best = null, bestScore = 0;
+    for (const g of games) {
+      const need = g.game.files.filter((f) => !f.optional);
+      if (!need.length) continue;
+      const byName = check(g.game, files).found / need.length;
+      let bySize = 0;
+      if (g.game.loose) {
+        const have = [...files.values()].map((d) => d.length);
+        for (const f of need) { const i = have.indexOf(f.size); if (i >= 0) { have.splice(i, 1); bySize++; } }
+        bySize /= need.length;
+      }
+      const score = Math.max(byName >= 0.3 ? byName : 0, bySize >= 0.8 ? bySize : 0);
+      if (score > bestScore) { best = g; bestScore = score; }
+    }
+    return best;
   };
 
   RPArcade.supportedText = function () {
