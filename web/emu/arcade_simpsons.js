@@ -86,10 +86,10 @@
       });
       this.k052109.dx = [0, -6, -6];   // the scrolling layers sit 6 pixels right of the fixed layer on this board
       this.k053247 = new global.RPK053245({
-        // dx: with the X offset the game writes (0x15), sprites land on the backgrounds the way the game
+        // dx: with the X offset the game writes (0x15) subtracted, sprites land on the backgrounds the way the game
         // draws them: the character-select portraits centred in their frames, the robbers leaving the
         // jewellers' door, the bonus-stage ranking labels over their score panels
-        type: "053247", rom: spriteRom, layout: "packed", dx: -101, dy: -39, codeCounters: true, zoomStep: true,
+        type: "053247", rom: spriteRom, layout: "packed", dx: -59, dy: -39, codeCounters: true, zoomStep: true, subtractOffsetX: true,
         spriteCallback: (t) => {
           t.pri = (t.attr & 0x0f80) >> 6;
           t.color = self.spriteBase + (t.attr & 0x1f);

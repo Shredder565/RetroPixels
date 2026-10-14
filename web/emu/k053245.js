@@ -45,6 +45,8 @@
 //     dx, dy: the board's fixed offsets from sprite coordinates to its picture (pixels)
 //     codeCounters: multi-tile sprites step the code's own column / row bits (see counterCode)
 //                   instead of adding the offsets above (the K053247 on The Simpsons)
+//     subtractOffsetX: the X offset register moves sprites left as it grows (The Simpsons' boss
+//       screen shake, seen in MAME), instead of right.
 //     zoomStep: zoomed sprites are sampled in steps of zoom / 64 source pixels and their size is
 //               cut to whole pixels (The Simpsons)
 //     t.shadow may be a number (a shadow type, 1-3), which goes into the shadow output as is;
@@ -80,6 +82,7 @@
       this.dx = opts.dx || 0; this.dy = opts.dy || 0;
       this.codeCounters = !!opts.codeCounters;
       this.zoomStep = !!opts.zoomStep;
+      this.offXSign = opts.subtractOffsetX ? -1 : 1;
       this.pens = RPK053245.decode(this.rom, opts.layout || (this.type === "053247" ? "packed" : "planar"));
       this.tiles = this.pens.length >> 8;
       this.t = { attr: 0, color: 0, pri: 0, shadow: false, code: 0 };
@@ -168,7 +171,7 @@
       const ord = Array.from(this.order.subarray(0, n));
       ord.sort((p, q) => (b[q * 16 + 1] - b[p * 16 + 1]) || (q - p));
       const flipScreenX = this.flipX, flipScreenY = this.flipY;
-      const offX = this.offsetX, offY = this.offsetY;
+      const offX = this.offXSign * this.offsetX, offY = this.offsetY;
       for (const i of ord) {
         const o = i * 16;
         const w0 = (b[o] << 8) | b[o + 1];
