@@ -10,7 +10,9 @@
 //           K053245: bits 0-6 are a slot number, higher slots in front; one sprite per slot (a later
 //           sprite asking for a taken slot isn't drawn)
 //   word 1  tile number (multi-tile sprites take their tiles in Konami's interleaved order:
-//           columns add 0, 1, 4, 5, 16, 17, 20, 21 and rows add 0, 2, 8, 10, 32, 34, 40, 42)
+//           columns add 0, 1, 4, 5, 16, 17, 20, 21 and rows add 0, 2, 8, 10, 32, 34, 40, 42;
+//           K053245: the low 6 bits are a column field (bits 0, 2, 4) and a row field (bits 1, 3, 5)
+//           that count on their own and wrap at 8, so a sprite may start at any tile of an 8x8 block)
 //   word 2  Y of the sprite's centre (10 bits, upwards); word 3 X of the centre (10 bits)
 //   word 4  Y zoom, word 5 X zoom: 0x40 is normal size, smaller is bigger (size = 0x40 / zoom)
 //   word 6  attributes. K053245: bits 0-4 colour, 5-6 priority, 7 shadow, 8 mirror X,
@@ -225,6 +227,10 @@
         if (flipScreenY) { top = h - top - dh2; flipY = !flipY; }
         if (left >= w || top >= h || left + dw2 <= 0 || top + dh2 <= 0) continue;
         const color = (t.color << 4) & 0xfff0, pri = t.pri, shadow = t.shadow, baseCode = t.code;
+        // K053245: the tile number's low 6 bits hold a 3-bit column (bits 0, 2, 4) and a 3-bit row
+        // (bits 1, 3, 5); a multi-tile sprite adds to each field on its own, wrapping within 8
+        const tcx = (baseCode & 1) | ((baseCode >> 1) & 2) | ((baseCode >> 2) & 4);
+        const tcy = ((baseCode >> 1) & 1) | ((baseCode >> 2) & 2) | ((baseCode >> 3) & 4);
         const x0 = Math.max(0, left), x1 = Math.min(w, left + dw2), y0 = Math.max(0, top), y1 = Math.min(h, top + dh2);
         for (let py = y0; py < y1; py++) {
           let ty, fy;
@@ -255,7 +261,8 @@
               if (mirrorX && u * 2 < fullW) u = fullW - 1 - u;
               tx = u >> 4; fx = u & 15;
             }
-            const tile = (baseCode + XOFF[tx] + YOFF[ty]) % tiles;
+            const tile = (is247 ? baseCode + XOFF[tx] + YOFF[ty]
+              : (baseCode & ~0x3f) | XOFF[(tcx + tx) & 7] | YOFF[(tcy + ty) & 7]) % tiles;
             const pen = pens[tile * 256 + fy * 16 + fx];
             if (!pen) continue;
             const at = row + px;
