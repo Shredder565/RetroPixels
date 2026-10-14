@@ -36,9 +36,20 @@
 //                files: [{ name: "pacman.6e", size: 4096, role: "cpu", offset: 0,
 //                          alt: ["other-name.6e"] (optional other names for the same chip),
 //                          optional: true (optional: the board can run without it) }, ...],
-//                rotate / width / height / fps / dips / buttons (optional per-game overrides) }]
+//                rotate / width / height / fps / dips / buttons / players (optional per-game overrides),
+//                loose: true (optional: see "Tolerant matching" below) }]
 //             Files are found by NAME (case doesn't matter, folders are ignored) and
 //             checked by SIZE. Write these lists yourself; no checksum databases.
+//   players   optional (default 2): how many controllers the board reads, up to 4. Boards
+//             with 3 or 4 get them in setInput (below); the player's 3rd / 4th gamepads drive them.
+//
+// Tolerant matching (game.loose): ROM sets from different eras name the same chips
+// differently. For a game with loose: true, when the zip is named after the game (its id)
+// but some files aren't found by name, RPArcade.looseFiles() fills the gaps: first by the
+// closest file name of the right size (shared parts such as "a28" or "h27"), then by size
+// alone, pairing the game's remaining entries (in list order) with the zip's remaining files
+// of that size (in name order). If that still fails, the error lists what was expected and
+// what the zip holds.
 //
 // Instance (new MyBoard(game, files, opts)):
 //   game      the entry from `games` that was picked
@@ -53,9 +64,10 @@
 //   screen    Uint32Array(width * height), filled by runFrame(); pixels as
 //             RPArcade.rgb(r, g, b) makes them (0xAABBGGRR, like every RetroPixels core).
 //   runFrame()        run one video frame and draw it into `screen`
-//   setInput(p1, p2)  p1 / p2: { buttonName: true/false } for the first and second
-//                     controller (p2 is all false with one controller). Upright cabinets
-//                     where the players take turns usually only read p1.
+//   setInput(p1, p2, p3, p4)  { buttonName: true/false } for each controller (all false when
+//                     that controller isn't there). p3 / p4 are only passed to boards whose
+//                     players is 3 or 4. Upright cabinets where the players take turns usually
+//                     only read p1.
 //   takeAudio()       mono Float32Array of the samples made since the last call, at
 //                     opts.sampleRate (RPArcade.Resampler helps with this)
 //   reset()           the board's reset (the player's Restart button)
@@ -74,7 +86,7 @@
 //   RPArcade.supportedText() -> "Pac-Man (pacman.zip), Galaxian (galaxian.zip), ..."
 //   new RPCores.arcade(zipBytes, { files, zipName, dips, sampleRate, sram })
 //       core.dips -> [{ id, label, options, default, value }]; core.setDip(id, value)
-//       core.gameId / core.gameTitle
+//       core.gameId / core.gameTitle / core.players (host.js reads players from the core)
 "use strict";
 
 (function (global) {
@@ -121,6 +133,49 @@
     return { missing, wrongSize, found, ok: !missing.length && !wrongSize.length };
   }
   RPArcade.check = check;
+
+  // Tolerant matching for games marked loose (see the header): returns a new Map where every
+  // listed entry that could be paired is under its listed name, or null if nothing changed.
+  const nameParts = (n) => {
+    const out = new Set();
+    for (const t of String(n).toLowerCase().split(/[^a-z0-9]+/)) {
+      if (!t) continue;
+      out.add(t);
+      const m = t.match(/[a-z]+[0-9]+$/); if (m) out.add(m[0]);       // "963a28" -> "a28"
+      if (t.length > 3) out.add(t.slice(-3));
+    }
+    return out;
+  };
+  RPArcade.looseFiles = function (game, files) {
+    files = files instanceof Map ? files : normFiles(files);
+    const out = new Map(files), used = new Set(), todo = [];
+    for (const f of game.files) {
+      let hit = null;
+      for (const n of [f.name, ...(f.alt || [])]) { const d = files.get(n.toLowerCase()); if (d && d.length === f.size) { hit = n.toLowerCase(); break; } }
+      if (hit) used.add(hit); else todo.push(f);
+    }
+    if (!todo.length) return null;
+    const free = () => [...files.keys()].filter((k) => !used.has(k)).sort();
+    // 1) closest name of the right size
+    for (const f of todo.slice()) {
+      const want = nameParts(f.name);
+      let best = null, bestScore = 0, tie = false;
+      for (const k of free()) {
+        if (files.get(k).length !== f.size) continue;
+        let score = 0; for (const p of nameParts(k)) if (want.has(p)) score++;
+        if (score > bestScore) { best = k; bestScore = score; tie = false; } else if (score === bestScore) tie = true;
+      }
+      if (best && !tie) { out.set(f.name.toLowerCase(), files.get(best)); used.add(best); todo.splice(todo.indexOf(f), 1); }
+    }
+    // 2) by size and order
+    const sizes = new Set(todo.map((f) => f.size));
+    for (const size of sizes) {
+      const want = todo.filter((f) => f.size === size), have = free().filter((k) => files.get(k).length === size);
+      if (have.length < want.length) continue;
+      want.forEach((f, i) => { out.set(f.name.toLowerCase(), files.get(have[i])); used.add(have[i]); });
+    }
+    return out;
+  };
 
   // All files of one role, placed at their offsets (in list order when no offset is given).
   RPArcade.region = function (game, files, role, size) {
@@ -176,6 +231,10 @@
       c.wrongSize.map((w) => `${w.name} (${w.actual.toLocaleString()} bytes, should be ${w.size.toLocaleString()})`).join(", ") + ".");
     if (game.parent && c.missing.length) parts.push(`${game.title} is a version of the game in ${game.parent}.zip, so some of its chips may be in that set: use a full (non-merged) ROM set, or add the missing files into ${zip}.`);
     else parts.push(c.missing.length ? "Use a complete ROM set for this game." : "The set may be a different version of the game, or damaged.");
+    if (game.loose) {
+      parts.push(`RetroPixels expected: ${game.files.filter((f) => !f.optional).map((f) => `${f.name} (${f.size.toLocaleString()} bytes)`).join(", ")}.`);
+      parts.push(`The zip holds: ${[...files].map(([k, v]) => `${k} (${v.length.toLocaleString()} bytes)`).join(", ") || "nothing"}.`);
+    }
     return new Error(parts.join(" "));
   }
 
@@ -238,7 +297,9 @@
       const hit = RPArcade.identify(files, zipName);
       if (!hit) throw new Error(`RetroPixels doesn't know this arcade game yet. The games it can play are: ${RPArcade.supportedText()}. Load the game's .zip ROM set (keep it zipped).`);
       const { Board, game } = hit;
-      if (!check(game, files).ok) throw setError(game, files, zipName);
+      let useFiles = files;
+      if (!check(game, files).ok && game.loose) { const lf = RPArcade.looseFiles(game, files); if (lf && check(game, lf).ok) useFiles = lf; }
+      if (!check(game, useFiles).ok) throw setError(game, files, zipName);
       this.Board = Board; this.game = game;
       this.gameId = game.id; this.gameTitle = game.title;
 
@@ -252,7 +313,7 @@
       }
       this.dipList = dipList;
 
-      this.board = new Board(game, files, { sampleRate: opts.sampleRate || 48000, dips: this.dipValues, sram: opts.sram || null });
+      this.board = new Board(game, useFiles, { sampleRate: opts.sampleRate || 48000, dips: this.dipValues, sram: opts.sram || null });
       this.bw = game.width || Board.width; this.bh = game.height || Board.height;
       this.rot = ((game.rotate !== undefined ? game.rotate : Board.rotate) || 0) % 360;
       const side = this.rot === 90 || this.rot === 270;
@@ -264,7 +325,9 @@
       this.screen = this.rot ? new Uint32Array(this.width * this.height) : this.board.screen;
       this.controlsNote = "Put a coin in with Coin (View button, or 5 on the keyboard), then press Start (Menu button, or 1). " +
         "The left stick moves too. Clicking the sticks (L3/R3) and the right stick are used for save states.";
-      this.inputs = [{}, {}];
+      this.players = Math.max(1, Math.min(4, game.players || Board.players || 2));
+      this.inputs = [];
+      for (let p = 0; p < Math.max(2, this.players); p++) this.inputs.push({});
       for (const p of this.inputs) for (const b of this.buttons) p[b] = false;
       this.updateScreen();
     }
@@ -284,10 +347,10 @@
     runFrame() { this.board.runFrame(); this.updateScreen(); }
     takeAudio() { return this.board.takeAudio ? this.board.takeAudio() : new Float32Array(0); }
     setInput(p, bits) {
-      if (p > 1) return;
+      if (p >= this.inputs.length) return;
       const st = this.inputs[p];
       this.buttons.forEach((b, i) => { st[b] = !!(bits & (1 << i)); });
-      this.board.setInput(this.inputs[0], this.inputs[1]);
+      this.board.setInput(...this.inputs);
     }
     reset() { this.board.reset(); }
     getSRAM() { return this.board.getSRAM ? this.board.getSRAM() : null; }

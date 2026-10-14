@@ -223,6 +223,8 @@
       if (this.core.buttons) this.info = Object.assign({}, this.info, { buttons: this.core.buttons });
       // ...and some pick the screen's shape per game (arcade games on an upright monitor)
       if (this.core.aspect) this.info = Object.assign({}, this.info, { aspect: this.core.aspect });
+      // ...and how many controllers it reads (arcade games for 3 or 4 players)
+      if (this.core.players > (this.info.players || 1)) this.info = Object.assign({}, this.info, { players: this.core.players });
       this.lastSram = this.sramSnapshot();
       this.resize();
       this.frameTime = 1000 / this.core.fps;
