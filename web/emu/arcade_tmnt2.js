@@ -27,11 +27,12 @@
   const FPS = CPU_HZ / (LINE_CYC * LINES);
   const W = 304, H = 224, TOP = 16, LEFT = 104; // the K052109's map pixels 104..407, lines 16..239 (the monitor's picture)
   const NMI_DELAY = 400;
-  // brightness tables: LUT[shadow ? 8 + dim : dim][v] (shadow 60%, each dim step 5% less; the two multiply)
+  // brightness tables: LUT[(shadow ? 16 : 0) + dim][v]: a shadow is 60%, each dim step 5% less,
+  // and the two multiply
   const LUT = [];
-  for (let k = 0; k < 16; k++) {
-    const t = new Uint8Array(256), num = (k & 8 ? 3 : 5) * (20 - (k & 7)), den = 100;
-    for (let v = 0; v < 256; v++) t[v] = Math.floor(v * num / den);
+  for (let k = 0; k < 32; k++) {
+    const t = new Uint8Array(256), num = (k & 16 ? 3 : 5) * (20 - (k & 15));
+    for (let v = 0; v < 256; v++) t[v] = Math.floor(v * num / 100);
     LUT.push(t);
   }
 
@@ -198,7 +199,7 @@
       this.k052109.reset(); this.k053245.reset(); this.k053251.reset();
       this.ym.reset();
       this.k053260 = new global.RPK053260(this.k053260.rom, YM_HZ);
-      this.eepromOut = 0; this.ctrl300 = 0; this.vblank = false; this.dmaBusy = 0;
+      this.eepromOut = 0x10; this.ctrl300 = 0; this.vblank = false; this.dmaBusy = 0;
       // A blank EEPROM (a set without its .nv file): the game only writes its factory settings when
       // it's switched on with the test switch held, so hold it for the first second, as an operator
       // setting up a new board would (the game then carries on to its attract mode by itself).
@@ -286,7 +287,7 @@
         this.protWrite(i, (a & 1) ? (this.prot[i] & 0xff00) | v : (this.prot[i] & 0xff) | (v << 8), !(a & 1), !!(a & 1));
         return;
       }
-      if (a === 0x1c0201) { // EEPROM lines: bit 0 data, bit 1 chip select, bit 2 clock
+      if (a === 0x1c0201) { // EEPROM lines: bit 0 data, bit 1 chip select, bit 2 clock; bit 4 low = darker (see drawFrame)
         this.eepromOut = v;
         this.eeprom.write(v & 2, v & 4, v & 1);
         return;
@@ -406,15 +407,17 @@
         { ci: 4, pens: this.layerPens[1], pri: k51.priority(4) },
         { ci: 2, pens: this.layerPens[0], pri: k51.priority(2) },
       ], k51.paletteBase(0) * 16);
-      // Shadows show the colour at 60%. The board can also dim the whole picture in eight steps
-      // (5% each, register 1c0300 bits 4-6) while the mixer's shadows are switched on (K053251
-      // register 5 neither 0 nor 0x3e); colours 32-39, the fixed layer's text, keep their brightness.
-      const r5 = k51.read(5), d = (r5 && r5 !== 0x3e) ? (this.ctrl300 >> 4) & 7 : 0;
+      // Shadows show the colour at 60%. The board can also dim the picture in 5% steps while the
+      // mixer's shadows are switched on (K053251 register 5 neither 0 nor 0x3e): register 1c0300
+      // bits 4-6 give steps 0-7 and a low bit 4 at 1c0200 adds 8 more (the night of the
+      // prehistoric stage). Colours 32-39, the fixed layer's text, keep their brightness.
+      const r5 = k51.read(5);
+      const d = (r5 && r5 !== 0x3e) ? ((this.ctrl300 >> 4) & 7) + (this.eepromOut & 0x10 ? 0 : 8) : 0;
       const pal = this.palette, scr = this.screen, pens = this.mixPens, shade = this.mixShade;
       for (let i = 0; i < n; i++) {
         const pen = pens[i] & 2047;
         let c = pal[pen];
-        const k = (shade[i] ? 8 : 0) | ((pen < 512 || pen >= 640) ? d : 0);
+        const k = (shade[i] ? 16 : 0) | ((pen < 512 || pen >= 640) ? d : 0);
         if (k) {
           const T = LUT[k];
           c = (0xff000000 | (T[(c >> 16) & 255] << 16) | (T[(c >> 8) & 255] << 8) | T[c & 255]) >>> 0;
