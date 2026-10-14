@@ -225,6 +225,15 @@
       if (this.core.aspect) this.info = Object.assign({}, this.info, { aspect: this.core.aspect });
       // ...and how many controllers it reads (arcade games for 3 or 4 players)
       if (this.core.players > (this.info.players || 1)) this.info = Object.assign({}, this.info, { players: this.core.players });
+      // Games for 3 or 4 players get a button that picks which player the keyboard and
+      // first controller play as (the other controllers move round with it).
+      this.seat = 0;
+      if ((this.info.players || 1) >= 3) {
+        this.root.querySelector('[data-a="seat"]').hidden = false;
+        let saved = 0;
+        try { saved = parseInt(localStorage.getItem(this.seatKey()), 10) || 0; } catch (e) { /* no storage */ }
+        this.setSeat(saved, true);
+      }
       this.lastSram = this.sramSnapshot();
       this.resize();
       this.frameTime = 1000 / this.core.fps;
@@ -249,6 +258,7 @@
           <span>🔊</span><input type="range" min="0" max="1" step="0.05" data-a="vol" aria-label="Volume">
           <button data-a="mute" title="Mute (M)">Mute</button>
           <span class="rp-sp"></span>
+          <button data-a="seat" title="Which player you control (games for 3 or 4 players)" hidden>👤 Player 1</button>
           <button data-a="controls" title="Change buttons">🎮 Controls</button>
           <button data-a="shot" title="Save a screenshot">📷</button>
         </div>`;
@@ -269,6 +279,7 @@
         if (a === "fast") { this.fast = !this.fast; b.setAttribute("aria-pressed", String(this.fast)); }
         if (a === "mute") { this.audio.muted = !this.audio.muted; this.audio.applyVolume(); b.textContent = this.audio.muted ? "Unmute" : "Mute"; }
         if (a === "controls") this.showControls();
+        if (a === "seat") this.setSeat((this.seat + 1) % (this.info.players || 1));
         if (a === "shot") this.downloadScreenshot();
         root.focus();
       });
@@ -316,6 +327,15 @@
       clearTimeout(this.msgT); this.msgT = setTimeout(() => this.msgEl.classList.remove("on"), 1500);
     }
 
+    seatKey() { return "rp.seat." + (this.core && this.core.gameId || this.system); }
+    setSeat(n, quiet) {
+      const players = this.info.players || 1;
+      this.seat = n >= 0 && n < players ? n : 0;
+      this.root.querySelector('[data-a="seat"]').textContent = "👤 Player " + (this.seat + 1);
+      try { localStorage.setItem(this.seatKey(), String(this.seat)); } catch (e) { /* no storage */ }
+      if (!quiet) this.flash("You are player " + (this.seat + 1));
+    }
+
     // ---- input ----
     readInput() {
       const names = this.info.buttons;
@@ -345,11 +365,13 @@
           }
           if (on) bits |= 1 << i;
         });
-        this.core.setInput(p, bits);
+        // controller p plays as player p + seat (going round), so the keyboard can be any player
+        const who = (p + (this.seat || 0)) % players;
+        this.core.setInput(who, bits);
         // analog sticks for cores that use them (Atari paddles: left X; N64: both sticks)
         if (this.core.setAnalog) {
           const ax = gp ? gp.axes : [];
-          this.core.setAnalog(p, ax[0] || 0, ax[1] || 0, ax[2] || 0, ax[3] || 0);
+          this.core.setAnalog(who, ax[0] || 0, ax[1] || 0, ax[2] || 0, ax[3] || 0);
         }
       }
     }
