@@ -1040,7 +1040,14 @@
       renderGCGrid();
     });
     document.getElementById("gcChooseExe").addEventListener("click", () => gcAction({ action: "choose-exe" }));
-    document.getElementById("gcAddFolder").addEventListener("click", () => gcAction({ action: "add-folder" }));
+    document.getElementById("gcAddFolder").addEventListener("click", async () => {
+      toast("Choose the folder in the window that just opened");
+      const before = (gcStatus && gcStatus.folders || []).length;
+      const r = await gcAction({ action: "add-folder" });
+      if (!r || (r.status.folders || []).length === before) return;
+      const n = (r.games || []).length;
+      toast(n ? `Folder added: ${n} game${n === 1 ? "" : "s"} in your library` : "Folder added, but no GameCube or Wii games were found in it");
+    });
     document.getElementById("gcRescan").addEventListener("click", () => gcAction({ action: "rescan" }, "Searched for GameCube & Wii games"));
     document.getElementById("gcFull").addEventListener("change", e => gcAction({ action: "fullscreen", on: e.target.checked }));
     document.getElementById("gcEmbed").addEventListener("change", e => gcAction({ action: "embed", on: e.target.checked }));

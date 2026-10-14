@@ -292,6 +292,16 @@ func guessDolphinFolders() []string {
 	return out
 }
 
+func containsFold(list []string, p string) bool {
+	lp := strings.ToLower(filepath.Clean(p))
+	for _, r := range list {
+		if strings.ToLower(filepath.Clean(r)) == lp {
+			return true
+		}
+	}
+	return false
+}
+
 func isUnder(p string, roots []string) bool {
 	lp := strings.ToLower(filepath.Clean(p))
 	for _, r := range roots {
@@ -437,7 +447,7 @@ func dolphinLibrary() []dolGame {
 	var out []dolGame
 	seen := map[string]bool{}
 	for _, dir := range dolphinFolders() {
-		walkLimited(dir, 2, func(p string, d fs.DirEntry) bool {
+		walkLimited(dir, 4, func(p string, d fs.DirEntry) bool {
 			if d.IsDir() || !discExts[strings.ToLower(filepath.Ext(p))] || seen[strings.ToLower(p)] {
 				return true
 			}
@@ -951,7 +961,9 @@ func registerDolphinRoutes(mux *http.ServeMux) {
 			d, err = pickFolder("Add a folder with GameCube or Wii games", "")
 			if err == nil && d != "" {
 				cfgMu.Lock()
-				if !isUnder(d, cfg.DolphinFolders) {
+				// Add it unless it's already listed; a folder inside a listed one is
+				// still added, because the library only looks a few levels deep.
+				if !containsFold(cfg.DolphinFolders, d) {
 					cfg.DolphinFolders = append(cfg.DolphinFolders, d)
 				}
 				_ = saveConfigLocked()

@@ -94,7 +94,11 @@ func pickFile(title, filter, startDir string) (string, error) {
 	script := `
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Windows.Forms
-$owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false }
+# A tiny invisible always-on-top owner, so the dialog opens in front of the
+# RetroPixels window (and gets a taskbar button) instead of hiding behind it.
+$owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $true; Text = ` + q(title) + `; FormBorderStyle = 'None'; StartPosition = 'CenterScreen'; Width = 1; Height = 1; Opacity = 0 }
+$owner.Show()
+$owner.Activate()
 $d = New-Object System.Windows.Forms.OpenFileDialog
 $d.Title = ` + q(title) + `
 $d.Filter = ` + q(filter) + `
@@ -113,7 +117,11 @@ func pickFolder(title, startDir string) (string, error) {
 	script := `
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Windows.Forms
-$owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false }
+# A tiny invisible always-on-top owner, so the dialog opens in front of the
+# RetroPixels window (and gets a taskbar button) instead of hiding behind it.
+$owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $true; Text = ` + q(title) + `; FormBorderStyle = 'None'; StartPosition = 'CenterScreen'; Width = 1; Height = 1; Opacity = 0 }
+$owner.Show()
+$owner.Activate()
 $d = New-Object System.Windows.Forms.FolderBrowserDialog
 $d.Description = ` + q(title) + `
 $start = ` + q(startDir) + `
@@ -135,7 +143,9 @@ func runPowerShell(script string) (string, error) {
 
 	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-STA",
 		"-ExecutionPolicy", "Bypass", "-EncodedCommand", enc)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
+	// No HideWindow here: it hides the first window PowerShell shows, which is
+	// the dialog itself. CREATE_NO_WINDOW alone keeps the console out of sight.
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createNoWindow}
 	out, err := cmd.Output()
 	if err != nil {
 		var ee *exec.ExitError
