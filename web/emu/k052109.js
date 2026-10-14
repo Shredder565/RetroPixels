@@ -39,7 +39,10 @@
 //         0x1e00 ROM test bank (for reading the ROMs back); 0x1e80 bit 0 flip screen,
 //                bit 1 lets attribute bit 0 flip tiles sideways, bit 2 lets attribute bit 1 flip them upside down
 //   k.rmrd             set by the board while its "ROM read" line is on: read() then returns ROM bytes
-//   k.readRom(off)     the ROM byte the chip would show at offset off while rmrd is on
+//                      for every offset (the RAM is hidden meanwhile)
+//   k.readRom(off)     the ROM byte shown at offset off while rmrd is on: register 0x1e00 picks an
+//                      8 KB-row window (8192 rows of 4 bytes), off & 0x1fff the row and off >> 13 the
+//                      byte of the row (RetroPixels' reading, used only by games' ROM tests)
 //   k.irqEnabled / k.firqEnabled / k.nmiEnabled / k.flipScreen   (from the registers)
 //   k.dx[3], k.dy[3]   board-specific scroll offsets for layers 0..2 (pixels, default 0)
 //   k.render(layer, out, w, h, opts)
@@ -96,17 +99,17 @@
     read(off) {
       off &= 0x7fff;
       if (off >= 0x6000) return 0;
-      if (this.rmrd && off >= 0x4000) return this.readRom(off);
+      if (this.rmrd) return this.readRom(off);
       return this.ram[off];
     }
     write(off, v) {
       off &= 0x7fff;
       if (off < 0x6000) this.ram[off] = v & 0xff;
     }
-    // ROM test: the bank register 0x1e00 picks which 8 KB of the tile ROMs shows
+    // ROM test: the bank register 0x1e00 picks which window of the tile ROMs shows
     readRom(off) {
       const len = this.rom.length;
-      return len ? this.rom[(((this.ram[0x1e00] << 13) | (off & 0x1fff)) >>> 0) % len] : 0xff;
+      return len ? this.rom[((((this.ram[0x1e00] << 13) | (off & 0x1fff)) * 4 + ((off >> 13) & 3)) >>> 0) % len] : 0xff;
     }
 
     // Look up every tile of one layer through the board's wiring.
