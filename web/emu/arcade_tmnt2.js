@@ -22,6 +22,7 @@
   const CPU_HZ = 16000000;
   const Z80_HZ = 8000000;
   const YM_HZ = 3579545;
+  const PCM_GAIN = 1.5;                 // K053260 level against the YM2151 on this board (see runSound)
   const LINE_CYC = 1024;                // 384 pixels at 6 MHz = 64 us a line
   const LINES = 264;
   const FPS = CPU_HZ / (LINE_CYC * LINES);
@@ -381,7 +382,9 @@
         if (this.nmiAt >= 0 && this.zCyc >= this.nmiAt) { this.nmiAt = -1; this.z80.nmi(); }
         this.zCyc += this.z80.step();
       }
-      // audio for this stretch of time at the YM2151's own rate
+      // audio for this stretch of time at the YM2151's own rate. PCM_GAIN: on this board the
+      // K053260 plays about 1.5x as loud against the YM2151 as the chip's default level (measured
+      // against MAME's output over the first 20 minutes of play, with each chip on its own)
       this.ymFrac += cycles * (YM_HZ / 64) / Z80_HZ;
       let n = Math.floor(this.ymFrac); this.ymFrac -= n;
       if (n > this.pcmBuf.length) this.pcmBuf = new Float32Array(n * 2);
@@ -389,7 +392,7 @@
       this.k053260.mix(pcm, 0, n, YM_HZ / 64);
       for (let i = 0; i < n; i++) {
         this.ym.tick();
-        this.resampler.add((this.ym.out[0] + this.ym.out[1]) / 65536 + pcm[i]);
+        this.resampler.add((this.ym.out[0] + this.ym.out[1]) / 65536 + pcm[i] * PCM_GAIN);
       }
     }
 
