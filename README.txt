@@ -106,6 +106,10 @@ What each system supports
   no DIP switches: hold Service + Start on the first controller to open the
   game's own test menu. In TMNT (4-player cabinet) a player joins by pressing
   Attack; Start does the same.
+  Games for 3 or 4 players have a "👤 Player 1" button above the game: click
+  it to choose which player (1 to 4) your keyboard and first controller play
+  as, for example to be Raphael. Other controllers move round with it. The
+  choice is remembered for each game.
 
 Playing classic games
 - Drop a game file on the window or click "Choose game file…". Zipped games
