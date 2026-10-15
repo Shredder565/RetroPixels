@@ -56,6 +56,7 @@ type session struct {
 
 	keysMu sync.Mutex
 	keys   map[string]bool
+	taps   map[string]bool // pressed since the last frame (a quick tap still counts once)
 	cmap   ControlMap
 
 	// game thread only
@@ -96,7 +97,7 @@ func newSession(g *loadedGame, h host, snd soundOut, cmap ControlMap) (*session,
 		return nil, err
 	}
 	s := &session{game: g, core: c, info: c.Info(), host: h, snd: snd, cmds: make(chan func(), 64), done: make(chan struct{}),
-		keys: map[string]bool{}, cmap: cmap, input: newInputState()}
+		keys: map[string]bool{}, taps: map[string]bool{}, cmap: cmap, input: newInputState()}
 	s.fps = c.FPS()
 	s.pacer = newPacer(s.fps)
 	s.aspect = pictureAspect(s.info.Aspect, g.System, c.Width(), c.Height())
@@ -169,6 +170,7 @@ func (s *session) setKey(k string, down bool) {
 	s.keysMu.Lock()
 	if down {
 		s.keys[k] = true
+		s.taps[k] = true
 	} else {
 		delete(s.keys, k)
 	}
@@ -178,6 +180,7 @@ func (s *session) setKey(k string, down bool) {
 func (s *session) clearKeys() {
 	s.keysMu.Lock()
 	s.keys = map[string]bool{}
+	s.taps = map[string]bool{}
 	s.keysMu.Unlock()
 	s.holdFast.Store(false)
 }
@@ -363,6 +366,16 @@ func (s *session) readInput() {
 	}
 	s.keysMu.Lock()
 	keys := s.keys
+	if len(s.taps) > 0 {
+		keys = make(map[string]bool, len(s.keys)+len(s.taps))
+		for k := range s.keys {
+			keys[k] = true
+		}
+		for k := range s.taps {
+			keys[k] = true
+		}
+		s.taps = map[string]bool{}
+	}
 	cmap := s.cmap
 	for p := 0; p < players; p++ {
 		var pad *PadState

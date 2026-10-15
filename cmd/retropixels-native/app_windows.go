@@ -610,11 +610,13 @@ func (a *app) resizeToScale() {
 	if style&0x01000000 != 0 { // maximised: leave it
 		return
 	}
-	h := 240
-	if a.sess != nil {
-		h = a.sess.core.Height()
+	a.frameMu.Lock()
+	h, aspect := a.fh, a.aspect // the picture last shown (the game's thread owns the core)
+	a.frameMu.Unlock()
+	if h <= 0 {
+		h = 240
 	}
-	bw, bh := baseSize(h, a.aspect)
+	bw, bh := baseSize(h, aspect)
 	w, hh := bw*a.settings.Scale, bh*a.settings.Scale
 	for pass := 0; pass < 2; pass++ {
 		wr, cr := windowRect(a.hwnd), clientRect(a.hwnd)
@@ -907,8 +909,8 @@ func (a *app) openPath(path string) {
 	a.settings.addRecent(path)
 	a.settings.LastFolder = filepath.Dir(path)
 	saveSettings(a.settings)
+	s.present() // the first picture, and its size for the window
 	a.resizeToScale()
-	s.present()
 	s.start()
 	a.updateTitle()
 }

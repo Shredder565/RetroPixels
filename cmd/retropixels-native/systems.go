@@ -77,7 +77,7 @@ func availableLabels() string {
 	sort.Strings(l)
 	switch len(l) {
 	case 0:
-		return "no systems"
+		return "no" // a build without the cores: "plays no games"
 	case 1:
 		return l[0]
 	}

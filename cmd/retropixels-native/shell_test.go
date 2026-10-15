@@ -479,9 +479,9 @@ func TestSessionRunsAndSaves(t *testing.T) {
 		t.Fatalf("%.3f s of sound queued", q)
 	}
 
-	// press A (the battery save counts presses) and check the save is written
+	// tap A (the battery save counts presses): even a tap shorter than a
+	// frame counts; the save is written at the end
 	s.setKey("x", true)
-	time.Sleep(100 * time.Millisecond)
 	s.setKey("x", false)
 	time.Sleep(100 * time.Millisecond)
 

@@ -98,7 +98,7 @@ func startRecorder(ff, enc, dir, game string, w, h int, aspect, fps float64, rat
 	r.videoPath = strings.TrimSuffix(r.out, ".mp4") + ".video.part"
 	r.audioPath = strings.TrimSuffix(r.out, ".mp4") + ".audio.part"
 	ow, oh := recordSize(h, aspect)
-	r.cmd = ffmpeg.Hidden(ff, recVideoArgs(w, h, fps, ow, oh, enc, r.videoPath)...)
+	r.cmd = ffmpeg.LowPriority(ffmpeg.Hidden(ff, recVideoArgs(w, h, fps, ow, oh, enc, r.videoPath)...))
 	r.cmd.Stderr = r.log
 	var err error
 	if r.stdin, err = r.cmd.StdinPipe(); err != nil {
@@ -217,7 +217,7 @@ func (r *recorder) stop() (string, error) {
 	if r.samples == 0 {
 		audio = ""
 	}
-	mux := ffmpeg.Hidden(r.ff, recMuxArgs(r.videoPath, audio, r.out)...)
+	mux := ffmpeg.LowPriority(ffmpeg.Hidden(r.ff, recMuxArgs(r.videoPath, audio, r.out)...))
 	log := &tailBuf{}
 	mux.Stderr = log
 	if err := ffmpeg.RunTimeout(mux, 30*time.Minute); err != nil {
