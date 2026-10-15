@@ -85,6 +85,8 @@ type session struct {
 	failed    error
 	quit      bool
 	guard     soundGuard
+	// an Archipelago client's LOCK holds the game still until then (archipelago.go)
+	apHoldUntil time.Time
 
 	// RETRO_NATIVE_STATS=<file>: frames per second and queued sound, every 2 s (for testing)
 	stats      *os.File
@@ -241,7 +243,7 @@ func (s *session) loop() {
 		dt := now.Sub(last).Seconds()
 		last = now
 		wait := 16 * time.Millisecond
-		if s.paused.Load() || s.modal.Load() || s.failed != nil {
+		if s.paused.Load() || s.modal.Load() || s.failed != nil || s.apHeld(now) {
 			s.pacer.reset()
 			if now.Sub(lastPoll) > 15*time.Millisecond && !s.modal.Load() && s.failed == nil {
 				lastPoll = now

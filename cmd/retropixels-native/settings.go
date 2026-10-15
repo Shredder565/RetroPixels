@@ -27,6 +27,7 @@ type Settings struct {
 	Seats map[string]int `json:"arcadeSeats,omitempty"`
 
 	uiSettings // rumble, recording quality and folder (ui_settings.go)
+	apSettings // Archipelago: the original ROM for each game's patches (archipelago.go)
 	// GameCube / Wii through Dolphin (dolphin_settings.go)
 	Dolphin DolphinSettings `json:"dolphin"`
 }

@@ -226,7 +226,7 @@ func TestSystemDetection(t *testing.T) {
 		{write("game.sfc", make([]byte, 1024)), "", "Super Nintendo games are coming in a later test build"},
 		{write("sonic.bin", append(append(make([]byte, 0x100), "SEGA"...), make([]byte, 70000)...)), "segaMD", ""},
 		{write("zelda.iso", []byte{1}), "", "GameCube and Wii games are coming"},
-		{write("seed.apsm", []byte{1}), "", "Archipelago patch files are coming"},
+		{write("seed.apsm", []byte{1}), "", "Archipelago patch file"},
 		{write("notes.txt", []byte{1}), "", "couldn't tell which system"},
 		{write("Zipped.zip", zipOf(t, map[string][]byte{"readme.txt": {1}, "Game (USA).nes": nesROM})), "nes", ""},
 		{write("ZippedBin.zip", zipOf(t, map[string][]byte{"game.bin": a26})), "atari2600", ""},
