@@ -25,6 +25,8 @@ type Settings struct {
 	Dips map[string]map[string]int `json:"arcadeDips,omitempty"`
 	// the player picked in arcade games for 3 or 4 players, by game (the zip's name)
 	Seats map[string]int `json:"arcadeSeats,omitempty"`
+	// GameCube / Wii through Dolphin (dolphin_settings.go)
+	Dolphin DolphinSettings `json:"dolphin"`
 }
 
 const maxRecent = 10
