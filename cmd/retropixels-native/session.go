@@ -44,6 +44,11 @@ type session struct {
 	snd    soundOut
 	host   host
 
+	// games with extra controls (Game Boy tilt cartridges): the core reads
+	// the right stick itself, and has a note for the Controls window
+	rightStick bool
+	note       string
+
 	cmds chan func()
 	done chan struct{}
 
@@ -99,6 +104,12 @@ func newSession(g *loadedGame, h host, snd soundOut, cmap ControlMap) (*session,
 	s := &session{game: g, core: c, info: c.Info(), host: h, snd: snd, cmds: make(chan func(), 64), done: make(chan struct{}),
 		keys: map[string]bool{}, taps: map[string]bool{}, cmap: cmap, input: newInputState()}
 	s.fps = c.FPS()
+	if r, ok := c.(interface{ UsesRightStick() bool }); ok {
+		s.rightStick = r.UsesRightStick()
+	}
+	if n, ok := c.(interface{ ControlsNote() string }); ok {
+		s.note = n.ControlsNote()
+	}
 	s.pacer = newPacer(s.fps)
 	s.aspect = pictureAspect(s.info.Aspect, g.System, c.Width(), c.Height())
 	s.volume.Store(math.Float32bits(0.8))
@@ -425,7 +436,7 @@ func (s *session) padHotkeys(p PadState) {
 	if p.Buttons[padL3] && !s.prevPad.Buttons[padL3] {
 		s.host.event("pad-load", "")
 	}
-	if p.Axes[3] > 0.7 {
+	if p.Axes[3] > 0.7 && !s.rightStick { // (tilt games use the right stick themselves)
 		if s.rsDownAt.IsZero() {
 			s.rsDownAt = time.Now()
 		} else if !s.rsFired && time.Since(s.rsDownAt) > time.Second {

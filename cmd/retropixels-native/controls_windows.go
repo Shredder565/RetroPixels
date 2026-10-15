@@ -147,6 +147,9 @@ func (d *controlsDialog) build() {
 	note := "Click Change, then press a controller button or a key. Esc cancels. " +
 		"The left stick moves too. Clicking the sticks (L3 / R3) loads and saves states; " +
 		"hold the right stick down for a second to start or stop recording."
+	if s := d.a.sess; s != nil && s.game.System == d.sys && s.note != "" {
+		note = "Click Change, then press a controller button or a key. Esc cancels. " + s.note
+	}
 	add(d.child("STATIC", note, ssNoPrefix, 16, y+6, 514, 60, 0))
 	y += 72
 	add(d.child("BUTTON", "Reset to default", bsPushButton|wsTabStop, 300, y, 130, 28, idReset))
