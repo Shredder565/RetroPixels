@@ -117,7 +117,7 @@ func newSNES(rom []byte, opts core.Options, now func() float64) (*SNES, error) {
 			s.coproc = c
 		}
 	}
-	if chip != "" && (chip != "SA-1" && chip != "Super FX" || chipsStub) {
+	if chip != "" && chip != "SA-1" && chip != "Super FX" {
 		return nil, errUnsupported(chip)
 	}
 	s.chipName = chip
