@@ -4,6 +4,16 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.12.0  (2026-10-15)
+--------------------------------
+- RetroPixels Native test build 4: RetroPixels-Native.exe now plays the
+  arcade games too: Pac-Man / Puck Man, Galaxian, Space Invaders, Donkey
+  Kong, Teenage Mutant Ninja Turtles, TMNT: Turtles in Time and The Simpsons.
+  They give the same picture and sound as RetroPixels.exe on every frame
+  compared (15,000 frames each for the three Konami games). Game > Player
+  picks your turtle or Simpson in the 4-player games, and Game > Machine
+  settings changes the DIP switches.
+
 RetroPixels 2.11.0  (2026-10-15)
 --------------------------------
 - RetroPixels Native test build 3: RetroPixels-Native.exe now also plays

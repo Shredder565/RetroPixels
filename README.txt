@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.11.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.12.0 (the number also shows next to the RetroPixels name in the app).
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
 Sega Genesis, Sega Master System, Atari 2600, Atari 7800, classic arcade
@@ -220,13 +220,19 @@ RetroPixels-Native.exe is a new version of RetroPixels being rebuilt without
 a web browser inside, so OBS Studio's Window Capture works with any capture
 method (or use Display Capture). This test build plays NES, Atari 2600,
 Master System, Game Boy / Game Boy Color, Atari 7800, Sega Genesis / Mega
-Drive, Game Boy Advance and Nintendo 64 games; Super Nintendo, the arcade
-games and GameCube / Wii will follow in later test builds.
+Drive, Game Boy Advance and Nintendo 64 games, and the arcade games (Pac-Man,
+Galaxian, Space Invaders, Donkey Kong, TMNT, TMNT: Turtles in Time and The
+Simpsons); Super Nintendo and GameCube / Wii will follow in later test builds.
 Keep using RetroPixels.exe for them. The two programs keep separate settings
 and saves, so trying the test build changes nothing in RetroPixels.exe.
 - Starting a game: drag the game file onto the window, or File > Open game...
   (Ctrl+O). .nes, .a26, .sms, .gb, .gbc, .a78, .md, .gen, .smd, .gba, .agb,
   .z64, .n64, .v64 and .bin files work, also inside .zip and .7z files.
+  Arcade games: open the game's .zip ROM set and keep it zipped (a .7z works
+  too); the game is found from the names of the files inside, so the zip can
+  have any name. If chip files are missing or the wrong size, it says which;
+  clone sets need a full (non-merged) set. Upright-cabinet games are shown
+  upright.
   File > Recent games lists the last ten.
 - Keys (the same as in RetroPixels.exe): arrow keys move. NES: X = A, Z = B,
   Enter = Start, Shift = Select. Atari 2600: Z, X or Space = Fire, Enter =
@@ -269,6 +275,19 @@ and saves, so trying the test build changes nothing in RetroPixels.exe.
   RetroPixels.exe (plain .eep / .sra / .fla / .mpk files work too); save
   states made in RetroPixels.exe load here. No Rumble Pak (as in
   RetroPixels.exe).
+- Arcade keys: Coin = 5 or C (controller: View), Start = 1 or Enter
+  (controller: Menu), Start 2P = 2, Coin 2 = 6, Service = 9, Button 1 /
+  Attack = Z (controller A), Button 2 / Jump = X (B), Button 3 = A (X),
+  Button 4 = S (Y); arrows or the left stick move.
+- Arcade Player menu: in TMNT, Turtles in Time and The Simpsons, Game > Player
+  picks who you play: Player 1 (Leonardo) to Player 4 (Raphael), or Marge,
+  Homer, Bart and Lisa. The keyboard and first controller play as that player
+  and the other controllers move round with it. It is remembered per game.
+- Arcade machine settings: Game > Machine settings changes the board's DIP
+  switches (coins, lives, difficulty and so on). They are kept per game; press
+  Reset (Ctrl+R) after changing one. Turtles in Time and The Simpsons keep
+  their settings and high scores in the board's EEPROM, saved like a battery
+  save.
 - Not in the test build yet (as in RetroPixels.exe, or still to come): Game
   Gear, the Atari 7800's SOUPER cartridges, YM2151 sound and high-score
   cartridge saves.

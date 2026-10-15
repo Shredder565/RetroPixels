@@ -2,6 +2,10 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.12.0] - 2026-10-15
+
+- RetroPixels Native test build 4: RetroPixels-Native.exe now plays the arcade games too: Pac-Man / Puck Man, Galaxian, Space Invaders, Donkey Kong, Teenage Mutant Ninja Turtles, TMNT: Turtles in Time and The Simpsons. They give the same picture and sound as RetroPixels.exe on every frame compared (15,000 frames each for the three Konami games). Game > Player picks your turtle or Simpson in the 4-player games, and Game > Machine settings changes the DIP switches.
+
 ## [2.11.0] - 2026-10-15
 
 - RetroPixels Native test build 3: RetroPixels-Native.exe now also plays Sega Genesis / Mega Drive, Game Boy Advance and Nintendo 64 games. Genesis and Game Boy Advance give the same picture and sound as RetroPixels.exe on every frame compared, with battery saves, 6-button pads, J-Cart, and the Game Boy Advance clock, sunlight, gyro, tilt and rumble cartridges. Nintendo 64 uses the same emulator as RetroPixels.exe, with the same controls, battery saves and save states.
