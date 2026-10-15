@@ -2,6 +2,10 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.10.0] - 2026-10-15
+
+- RetroPixels Native test build 2: RetroPixels-Native.exe now also plays Master System, Game Boy / Game Boy Color and Atari 7800 games, alongside NES and Atari 2600. Each new system gives the same picture and sound as RetroPixels.exe on every frame compared (hundreds of test programs and homebrew games), with battery saves (including Game Boy clocks), save states, rumble and Game Boy tilt cartridges.
+
 ## [2.9.0] - 2026-10-15
 
 - New: RetroPixels-Native.exe, the first test build of RetroPixels rebuilt as a native Windows program with no web browser inside, so OBS Studio's Window Capture records it with any capture method. It plays NES and Atari 2600 games, with the same emulation as RetroPixels.exe (checked frame by frame and sample by sample against it), Xbox controllers, save states, battery saves and game-only recording. The other systems follow in later test builds; RetroPixels.exe is unchanged and still plays everything.

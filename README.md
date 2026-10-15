@@ -120,7 +120,7 @@ for BizHawk) and never connects to the Archipelago server itself.
 
 RetroPixels is being rebuilt as a native Windows program, with no web browser inside, so OBS Studio's
 Window Capture records it with any capture method. Each release includes the current test build as
-`RetroPixels-Native.exe`, next to `RetroPixels.exe`. It plays **NES** and **Atari 2600** games so far,
+`RetroPixels-Native.exe`, next to `RetroPixels.exe`. It plays **NES**, **Atari 2600**, **Master System**, **Game Boy / Color** and **Atari 7800** games so far,
 using Go ports of the same emulators, checked frame by frame and sample by sample against them. More
 systems follow in later test builds; until then, `RetroPixels.exe` plays everything.
 

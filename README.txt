@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.9.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.10.0 (the number also shows next to the RetroPixels name in the app).
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
 Sega Genesis, Sega Master System, Atari 2600, Atari 7800, classic arcade
@@ -218,17 +218,23 @@ Recording games
 RetroPixels Native (test build)
 RetroPixels-Native.exe is a new version of RetroPixels being rebuilt without
 a web browser inside, so OBS Studio's Window Capture works with any capture
-method (or use Display Capture). This first test build plays
-NES and Atari 2600 games; the other systems will follow in later test builds.
+method (or use Display Capture). This test build plays NES, Atari 2600,
+Master System, Game Boy / Game Boy Color and Atari 7800 games; the other
+systems will follow in later test builds.
 Keep using RetroPixels.exe for them. The two programs keep separate settings
 and saves, so trying the test build changes nothing in RetroPixels.exe.
 - Starting a game: drag the game file onto the window, or File > Open game...
-  (Ctrl+O). .nes, .a26 and .bin files work, also inside .zip and .7z files.
+  (Ctrl+O). .nes, .a26, .sms, .gb, .gbc, .a78 and .bin files work, also
+  inside .zip and .7z files.
   File > Recent games lists the last ten.
 - Keys (the same as in RetroPixels.exe): arrow keys move. NES: X = A, Z = B,
   Enter = Start, Shift = Select. Atari 2600: Z, X or Space = Fire, Enter =
   Reset, Shift = Select, 1 / 2 = left / right difficulty switch, 3 = Colour /
-  B&W switch. Change them in Options > Controls... (one set per system).
+  B&W switch. Master System: Z = button 1, X = button 2, Enter = Pause,
+  R = console Reset. Game Boy / Color: X = A, Z = B, Enter = Start, Shift =
+  Select. Atari 7800: Z = button 1, X = button 2 (one-button games take
+  either), Enter = Pause, Shift = Select, R = Reset, 1 / 2 = difficulty
+  switches. Change them in Options > Controls... (one set per system).
 - Xbox controllers work automatically, up to four (one per player). Xbox A /
   B are the NES's B / A, as on the original pad; the left stick moves too.
   Atari paddle games: turn the paddle with the left stick, or tick Options >
@@ -237,6 +243,12 @@ and saves, so trying the test build changes nothing in RetroPixels.exe.
 - P pauses, M mutes, hold Tab to fast-forward, Ctrl+R resets, F11 or
   Alt+Enter switches fullscreen (Esc leaves it). Window size (1x to 5x),
   volume and smooth or sharp pixels are in the Options menu.
+- Game Boy: games with a clock keep counting real time between sessions;
+  rumble cartridges shake the Xbox controller; tilt cartridges (Kirby Tilt 'n'
+  Tumble, Command Master) tilt with the right stick or the I J K L keys.
+- Not in the test build yet (as in RetroPixels.exe, or still to come): Game
+  Gear, the Atari 7800's SOUPER cartridges, YM2151 sound and high-score
+  cartridge saves.
 - Save states: F2 saves, F4 loads (one save state per game); Ctrl+Z undoes the
   last load. On the controller: click the right stick to save, the left stick
   to load. Battery saves (games that save by themselves) are kept as you play.
