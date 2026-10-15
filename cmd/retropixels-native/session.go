@@ -48,6 +48,9 @@ type session struct {
 	// the right stick itself, and has a note for the Controls window
 	rightStick bool
 	note       string
+	// cores that read the left stick themselves (the N64's analog stick):
+	// it doesn't work their D-pad
+	analogStick bool
 
 	cmds chan func()
 	done chan struct{}
@@ -106,6 +109,9 @@ func newSession(g *loadedGame, h host, snd soundOut, cmap ControlMap) (*session,
 	s.fps = c.FPS()
 	if r, ok := c.(interface{ UsesRightStick() bool }); ok {
 		s.rightStick = r.UsesRightStick()
+	}
+	if a, ok := c.(interface{ AnalogStick() bool }); ok {
+		s.analogStick = a.AnalogStick()
 	}
 	if n, ok := c.(interface{ ControlsNote() string }); ok {
 		s.note = n.ControlsNote()
@@ -388,12 +394,16 @@ func (s *session) readInput() {
 		s.taps = map[string]bool{}
 	}
 	cmap := s.cmap
+	// (the N64 sees controllers plugged in and out)
+	if pc, ok := s.core.(interface{ SetConnected(n int) }); ok {
+		pc.SetConnected(len(conn))
+	}
 	for p := 0; p < players; p++ {
 		var pad *PadState
 		if p < len(conn) {
 			pad = conn[p]
 		}
-		bits := s.input.bits(p, s.info.Buttons, cmap, keys, pad, false)
+		bits := s.input.bits(p, s.info.Buttons, cmap, keys, pad, s.analogStick)
 		if p == 0 && s.mousePaddle.Load() && s.mouseFire.Load() {
 			bits |= s.buttonBit("Fire")
 		}
@@ -428,8 +438,15 @@ func (s *session) buttonBit(name string) uint32 {
 
 // padHotkeys: click the right stick to save, the left stick to load, hold
 // the right stick down for a second to start or stop recording (as in the
-// web version).
+// web version). The N64 uses its right stick for the C buttons, so there
+// View + D-pad down starts or stops recording instead (as in the web version).
 func (s *session) padHotkeys(p PadState) {
+	if s.game.System == "n64" {
+		vd := p.Buttons[padView] && p.Buttons[padDown]
+		if vd && !(s.prevPad.Buttons[padView] && s.prevPad.Buttons[padDown]) {
+			s.host.event("pad-record", "")
+		}
+	}
 	if p.Buttons[padR3] && !s.prevPad.Buttons[padR3] {
 		s.host.event("pad-save", "")
 	}

@@ -58,6 +58,10 @@ var systemButtons = map[string][]string{
 	"fake":      testButtons,
 }
 
+// systemNotes: the Controls window's note for systems whose controls work
+// differently (set by the files that bring the cores).
+var systemNotes = map[string]string{}
+
 var arrowKeys = map[string]string{"Up": "arrowup", "Down": "arrowdown", "Left": "arrowleft", "Right": "arrowright"}
 
 // dirs: the D-pad buttons, their controller button and the stick axis/direction (DIRS in host.js).

@@ -149,6 +149,8 @@ func (d *controlsDialog) build() {
 		"hold the right stick down for a second to start or stop recording."
 	if s := d.a.sess; s != nil && s.game.System == d.sys && s.note != "" {
 		note = "Click Change, then press a controller button or a key. Esc cancels. " + s.note
+	} else if n := systemNotes[d.sys]; n != "" {
+		note = "Click Change, then press a controller button or a key. Esc cancels. " + n
 	}
 	add(d.child("STATIC", note, ssNoPrefix, 16, y+6, 514, 60, 0))
 	y += 72
