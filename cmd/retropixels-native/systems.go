@@ -273,7 +273,7 @@ func openGame(path string) (*loadedGame, error) {
 
 	g.System = systemForExt(ext)
 	if g.System == "" && ext == "bin" {
-		g.System = guessBin(g.ROM)
+		g.System = systemForBin(g.ROM)
 	}
 	if g.System == "" {
 		return nil, fmt.Errorf("couldn't tell which system %q is for.\n\nThis test build plays %s games (%s).",

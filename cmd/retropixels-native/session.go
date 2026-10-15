@@ -79,6 +79,7 @@ type session struct {
 	prevPad   PadState
 	rsDownAt  time.Time
 	rsFired   bool
+	rsxDir    int // the right stick pushed left (-1) or right (1): changes the save state slot
 	rumbleLvl float32
 	rumbleAt  time.Time
 	failed    error
@@ -438,16 +439,39 @@ func (s *session) buttonBit(name string) uint32 {
 	return 0
 }
 
-// padHotkeys: click the right stick to save, the left stick to load, hold
-// the right stick down for a second to start or stop recording (as in the
-// web version). The N64 uses its right stick for the C buttons, so there
-// View + D-pad down starts or stops recording instead (as in the web version).
+// padHotkeys: click the right stick to save, the left stick to load, flick
+// it left or right to change the save state slot, hold it down for a second
+// to start or stop recording (as in the web version). The N64 uses its right
+// stick for the C buttons, so there View + D-pad left / right changes the
+// slot and View + D-pad down starts or stops recording instead (as in the
+// web version).
 func (s *session) padHotkeys(p PadState) {
 	if s.game.System == "n64" {
 		vd := p.Buttons[padView] && p.Buttons[padDown]
 		if vd && !(s.prevPad.Buttons[padView] && s.prevPad.Buttons[padDown]) {
 			s.host.event("pad-record", "")
 		}
+		// View + D-pad left / right: the save state slot
+		for _, d := range [2]struct {
+			b   int
+			dir string
+		}{{padLeft, "-1"}, {padRight, "+1"}} {
+			if p.Buttons[padView] && p.Buttons[d.b] && !(s.prevPad.Buttons[padView] && s.prevPad.Buttons[d.b]) {
+				s.host.event("pad-slot", d.dir)
+			}
+		}
+	} else if !s.rightStick {
+		// flick the right stick left / right: the save state slot
+		dir := 0
+		if p.Axes[2] > 0.7 {
+			dir = 1
+		} else if p.Axes[2] < -0.7 {
+			dir = -1
+		}
+		if dir != 0 && dir != s.rsxDir {
+			s.host.event("pad-slot", fmt.Sprintf("%+d", dir))
+		}
+		s.rsxDir = dir
 	}
 	if p.Buttons[padR3] && !s.prevPad.Buttons[padR3] {
 		s.host.event("pad-save", "")
@@ -513,43 +537,10 @@ func (s *session) reset() {
 	})
 }
 
-func (s *session) saveState() error {
-	return s.call(func() error {
-		if s.failed != nil {
-			return errors.New("the game has stopped")
-		}
-		st, err := s.core.SaveState()
-		if err != nil {
-			return err
-		}
-		if len(st) == 0 {
-			return errors.New("the emulator returned an empty state")
-		}
-		return writeFileAtomic(statePath(s.game.System, s.game.Name), encodeState(s.game.System, st))
-	})
-}
+// saveState / loadState: slot 1 (ui_saves.go has the slots).
+func (s *session) saveState() error { return s.saveSlot(0) }
 
-func (s *session) loadState() error {
-	return s.call(func() error {
-		file, err := os.ReadFile(statePath(s.game.System, s.game.Name))
-		if os.IsNotExist(err) {
-			return errors.New("there's no save state for this game yet (Game > Save state, or F2)")
-		}
-		if err != nil {
-			return err
-		}
-		st, err := decodeState(s.game.System, file)
-		if err != nil {
-			return err
-		}
-		before, _ := s.core.SaveState()
-		if err := s.applyState(st); err != nil {
-			return err
-		}
-		s.undo = before
-		return nil
-	})
-}
+func (s *session) loadState() error { return s.loadSlot(0) }
 
 func (s *session) undoLoad() error {
 	return s.call(func() error {
@@ -586,12 +577,17 @@ func (s *session) applyState(st []byte) (err error) {
 }
 
 func (s *session) startRecording(ff, enc string) error {
+	return s.startRecordingTo(ff, enc, "balanced", recordingsDir())
+}
+
+// startRecordingTo: with the quality and folder picked in the Record menu.
+func (s *session) startRecordingTo(ff, enc, quality, dir string) error {
 	return s.call(func() error {
 		if s.rec != nil {
 			return nil
 		}
 		w, h := s.core.Width(), s.core.Height()
-		r, err := startRecorder(ff, enc, recordingsDir(), s.game.Name, w, h, s.aspect, s.fps, sampleRate)
+		r, err := startRecorder(ff, enc, quality, dir, s.game.Name, w, h, s.aspect, s.fps, sampleRate)
 		if err != nil {
 			return err
 		}

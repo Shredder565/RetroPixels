@@ -70,12 +70,12 @@ type recorder struct {
 }
 
 // recVideoArgs: ffmpeg's options for the picture part.
-func recVideoArgs(w, h int, fps float64, outW, outH int, enc, out string) []string {
+func recVideoArgs(w, h int, fps float64, outW, outH int, enc, quality, out string) []string {
 	args := []string{"-hide_banner", "-loglevel", "error", "-y",
 		"-f", "rawvideo", "-pix_fmt", "bgr0", "-s", fmt.Sprintf("%dx%d", w, h),
 		"-framerate", strconv.FormatFloat(fps, 'f', 6, 64), "-i", "pipe:0",
 		"-vf", fmt.Sprintf("scale=%d:%d:flags=neighbor,setsar=1", outW, outH)}
-	args = append(args, ffmpeg.EncoderArgs(enc, "balanced")...)
+	args = append(args, ffmpeg.EncoderArgs(enc, quality)...)
 	return append(args, "-pix_fmt", "yuv420p", "-f", "matroska", out)
 }
 
@@ -88,7 +88,8 @@ func recMuxArgs(video, audio, out string) []string {
 	return append(args, "-c:v", "copy", "-movflags", "+faststart", out)
 }
 
-func startRecorder(ff, enc, dir, game string, w, h int, aspect, fps float64, rate int) (*recorder, error) {
+// quality: "high", "balanced" or "small" (Record > Quality).
+func startRecorder(ff, enc, quality, dir, game string, w, h int, aspect, fps float64, rate int) (*recorder, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("couldn't make the recordings folder: %v", err)
 	}
@@ -98,7 +99,7 @@ func startRecorder(ff, enc, dir, game string, w, h int, aspect, fps float64, rat
 	r.videoPath = strings.TrimSuffix(r.out, ".mp4") + ".video.part"
 	r.audioPath = strings.TrimSuffix(r.out, ".mp4") + ".audio.part"
 	ow, oh := recordSize(h, aspect)
-	r.cmd = ffmpeg.LowPriority(ffmpeg.Hidden(ff, recVideoArgs(w, h, fps, ow, oh, enc, r.videoPath)...))
+	r.cmd = ffmpeg.LowPriority(ffmpeg.Hidden(ff, recVideoArgs(w, h, fps, ow, oh, enc, quality, r.videoPath)...))
 	r.cmd.Stderr = r.log
 	var err error
 	if r.stdin, err = r.cmd.StdinPipe(); err != nil {

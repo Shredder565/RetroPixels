@@ -609,7 +609,7 @@ func TestRecording(t *testing.T) {
 	}
 	dir := t.TempDir()
 	c, _ := newTestCore([]byte{1}, core.Options{SampleRate: sampleRate})
-	r, err := startRecorder(ff, "libx264", dir, "Test: game", 256, 240, 4.0/3, 60.0988, sampleRate)
+	r, err := startRecorder(ff, "libx264", "balanced", dir, "Test: game", 256, 240, 4.0/3, 60.0988, sampleRate)
 	if err != nil {
 		t.Fatal(err)
 	}

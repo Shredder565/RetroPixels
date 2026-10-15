@@ -99,6 +99,8 @@ type app struct {
 
 	controls      *controlsDialog
 	mouseTracking bool
+
+	ui *uiState // the start screen, save state slots and the rest (ui_*_windows.go)
 }
 
 var theApp *app
@@ -112,7 +114,7 @@ func runApp() {
 			f.Close()
 		}
 	}
-	a := &app{settings: loadSettings(), xin: newXInput(), encoders: map[string]string{}}
+	a := &app{settings: loadSettings(), xin: newXInput(), encoders: map[string]string{}, ui: newUIState()}
 	theApp = a
 	a.smooth = a.settings.Smooth
 	a.hinst = call(pGetModuleHandleW, 0)
@@ -151,6 +153,7 @@ func runApp() {
 		return
 	}
 	a.makeFonts()
+	a.initUI()
 	a.aspect = 4.0 / 3
 	a.resizeToScale()
 	call(pDragAcceptFiles, a.hwnd, 1)
@@ -211,6 +214,7 @@ func (a *app) buildMenu() {
 	appendMenu(a.fileMenu, mfString, cmdOpen, "&Open game…\tCtrl+O")
 	appendMenu(a.fileMenu, mfPopup, a.recentMenu, "&Recent games")
 	appendMenu(a.fileMenu, mfString, cmdCloseGame, "&Close game")
+	a.uiFileMenu()
 	appendMenu(a.fileMenu, mfSeparator, 0, "")
 	appendMenu(a.fileMenu, mfString, cmdExit, "E&xit\tAlt+F4")
 	appendMenu(a.menu, mfPopup, a.fileMenu, "&File")
@@ -223,6 +227,7 @@ func (a *app) buildMenu() {
 	appendMenu(a.gameMenu, mfString, cmdSaveState, "&Save state\tF2")
 	appendMenu(a.gameMenu, mfString, cmdLoadState, "&Load state\tF4")
 	appendMenu(a.gameMenu, mfString, cmdUndoLoad, "&Undo load\tCtrl+Z")
+	a.uiGameMenu()
 	a.addDipMenu()
 	a.addSeatMenu()
 	appendMenu(a.menu, mfPopup, a.gameMenu, "&Game")
@@ -247,14 +252,17 @@ func (a *app) buildMenu() {
 	appendMenu(a.optMenu, mfString, cmdSmooth, "Smoot&h pixels")
 	appendMenu(a.optMenu, mfSeparator, 0, "")
 	appendMenu(a.optMenu, mfString, cmdMousePaddle, "Mouse turns the &paddle (Atari 2600)")
+	a.uiOptionsMenu()
 	appendMenu(a.menu, mfPopup, a.optMenu, "&Options")
 
 	a.recMenu = call(pCreatePopupMenu)
 	appendMenu(a.recMenu, mfString, cmdRecord, "&Start recording\tF9")
 	appendMenu(a.recMenu, mfString, cmdRecFolder, "&Open recordings folder")
+	a.uiRecordMenu()
 	appendMenu(a.menu, mfPopup, a.recMenu, "&Record")
 
 	help := call(pCreatePopupMenu)
+	a.uiHelpMenu(help)
 	appendMenu(help, mfString, cmdAbout, "&About RetroPixels Native")
 	appendMenu(a.menu, mfPopup, help, "&Help")
 }
@@ -290,6 +298,7 @@ func (a *app) updateMenus() {
 		renameItem(a.menu, cmdRecord, "&Start recording\tF9")
 	}
 	enableItem(a.menu, cmdRecord, on || a.recOn)
+	a.uiUpdateMenus()
 }
 
 func (a *app) fillRecent() {
@@ -349,6 +358,7 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		if wp == a.dipMenu {
 			a.fillDips()
 		}
+		a.uiPopup(wp)
 		a.updateMenus()
 		return 0
 	case wmDropFiles:
@@ -357,7 +367,7 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		call(pDragFinish, wp)
 		if n > 0 {
 			call(pSetForegroundWindow, hwnd)
-			a.openPath(syscall.UTF16ToString(buf[:n]))
+			a.uiDrop(syscall.UTF16ToString(buf[:n]))
 		}
 		return 0
 	case wmKeyDown, wmSysKeyDown:
@@ -377,24 +387,37 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 			a.sess.clearKeys()
 		}
 	case wmSetCursor:
+		if a.sess == nil && lp&0xffff == 1 && a.homeCursor() {
+			return 1
+		}
 		if a.fullscreen && lp&0xffff == 1 { // over the picture in fullscreen: no pointer
 			call(pSetCursor, 0)
 			return 1
 		}
 	case wmMouseMove:
+		if a.sess == nil {
+			a.homeMouseMove(loword(lp), hiword(lp))
+		}
 		a.mouseMove(loword(lp), hiword(lp))
 	case wmMouseLeave:
 		a.mouseTracking = false
+		a.homeMouseLeave()
 		if a.sess != nil {
 			a.sess.mouseX.Store(math.Float32bits(float32(math.NaN())))
 		}
 	case wmLButtonDown, wmLButtonUp:
+		if a.sess == nil && uint32(m) == wmLButtonDown {
+			a.homeClick(loword(lp), hiword(lp))
+		}
 		if a.sess != nil && a.settings.MousePaddle {
 			a.sess.mouseFire.Store(uint32(m) == wmLButtonDown)
 		}
 	case wmTimer:
 		if wp == timerTitle {
 			a.updateTitle()
+			return 0
+		}
+		if a.uiTimer(wp) {
 			return 0
 		}
 	case wmAppEvent:
@@ -449,6 +472,9 @@ func (a *app) keyDown(m uint32, vk int, lp uintptr) bool {
 	}
 	if vk == vkF10 {
 		return false // the menu key
+	}
+	if a.uiKeyDown(vk, repeat) {
+		return true
 	}
 	if !repeat {
 		switch vk {
@@ -586,28 +612,8 @@ func (a *app) drawLocked(hdc uintptr) {
 		uintptr(unsafe.Pointer(&a.frame[0])), uintptr(unsafe.Pointer(&a.bmi)), dibRGBColors, srcCopy)
 }
 
-func (a *app) drawIdle(hdc uintptr) {
-	cr := clientRect(a.hwnd)
-	call(pFillRect, hdc, uintptr(unsafe.Pointer(&cr)), call(pGetStockObject, blackBrush))
-	call(pSetBkMode, hdc, transparent)
-	dpi := int32(a.dpi())
-	top := cr
-	top.Bottom = cr.Bottom/2 - 10*dpi/96
-	top.Top = top.Bottom - 40*dpi/96
-	old := call(pSelectObject, hdc, a.bigFont)
-	call(pSetTextColor, hdc, 0x3dd13d) // RetroPixels green (#3dd13d)
-	t := u16("RETROPIXELS NATIVE")
-	call(pDrawTextW, hdc, uintptr(unsafe.Pointer(t)), ^uintptr(0), uintptr(unsafe.Pointer(&top)), dtCenter|dtVCenter|0x20|dtNoPrefix)
-	call(pSelectObject, hdc, a.font)
-	call(pSetTextColor, hdc, 0xa09088)
-	body := cr
-	body.Top = cr.Bottom / 2
-	body.Left += 16 * dpi / 96
-	body.Right -= 16 * dpi / 96
-	text := "Drop a game file here, or choose File > Open game… (Ctrl+O)\n\nThis test build plays " + availableLabels() + " games.\nVersion " + version
-	call(pDrawTextW, hdc, uintptr(unsafe.Pointer(u16(text))), ^uintptr(0), uintptr(unsafe.Pointer(&body)), dtCenter|dtWordBreak|dtNoPrefix)
-	call(pSelectObject, hdc, old)
-}
+// drawIdle: the start screen (ui_home_windows.go).
+func (a *app) drawIdle(hdc uintptr) { a.drawHome(hdc) }
 
 // ---------------- window size and fullscreen ----------------
 
@@ -759,6 +765,8 @@ func (a *app) handleEvents() {
 			a.ffDownload = ""
 			a.updateTitle()
 			messageBox(a.hwnd, "ffmpeg couldn't be downloaded: "+e.detail, "RetroPixels Native", mbIconError)
+		default:
+			a.uiEvent(e.name, e.detail)
 		}
 	}
 }
@@ -767,7 +775,11 @@ func (a *app) handleEvents() {
 
 func (a *app) pads() [4]PadState { return a.xin.read() }
 
-func (a *app) rumble(pad int, strong, weak float32) { a.xin.rumble(pad, strong, weak) }
+func (a *app) rumble(pad int, strong, weak float32) {
+	if !a.settings.RumbleOff {
+		a.xin.rumble(pad, strong, weak)
+	}
+}
 
 // ---------------- commands ----------------
 
@@ -782,6 +794,7 @@ func (a *app) command(id int) {
 		call(pPostMessageW, a.hwnd, wmClose, 0, 0)
 	case id == cmdCloseGame:
 		a.closeGame()
+		a.uiBackHome()
 	case id >= cmdRecent0 && id < cmdRecent0+maxRecent:
 		if i := id - cmdRecent0; i < len(a.settings.Recent) {
 			a.openPath(a.settings.Recent[i])
@@ -804,17 +817,9 @@ func (a *app) command(id int) {
 		s.fast.Store(!s.fast.Load())
 		a.updateTitle()
 	case id == cmdSaveState && s != nil:
-		if err := s.saveState(); err != nil {
-			messageBox(a.hwnd, "Couldn't save the state: "+err.Error(), "RetroPixels Native", mbIconWarning)
-		} else {
-			a.showMessage("State saved")
-		}
+		a.saveToSlot()
 	case id == cmdLoadState && s != nil:
-		if err := s.loadState(); err != nil {
-			messageBox(a.hwnd, "Couldn't load the state: "+err.Error(), "RetroPixels Native", mbIconWarning)
-		} else {
-			a.showMessage("State loaded (Ctrl+Z undoes it)")
-		}
+		a.loadFromSlot()
 	case id == cmdUndoLoad && s != nil:
 		if err := s.undoLoad(); err != nil {
 			a.showMessage("Nothing to undo")
@@ -863,7 +868,7 @@ func (a *app) command(id int) {
 	case id == cmdRecord:
 		a.toggleRecording()
 	case id == cmdRecFolder:
-		d := recordingsDir()
+		d := a.settings.recDir()
 		os.MkdirAll(d, 0o755)
 		shellOpen(d)
 	case id >= cmdSeat0 && id < cmdSeat0+4:
@@ -876,8 +881,10 @@ func (a *app) command(id int) {
 			"(Window Capture or Game Capture).\n\n"+
 			"Plays "+availableLabels()+" games with RetroPixels' own emulators. "+
 			"For the other systems, keep using RetroPixels.exe for now.\n\n"+
-			"Settings and saves: "+appDir()+"\nRecordings: "+recordingsDir(),
+			"Settings and saves: "+appDir()+"\nRecordings: "+a.settings.recDir()+"\nScreenshots: "+screenshotsDir(),
 			"About RetroPixels Native", mbIconInfo)
+	default:
+		a.uiCommand(id)
 	}
 }
 
@@ -936,6 +943,7 @@ func (a *app) closeGame() {
 	if s == nil {
 		return
 	}
+	a.uiCloseGame()
 	a.sess = nil
 	rec := s.stop()
 	if rec != nil {
@@ -1016,7 +1024,7 @@ func (a *app) toggleRecording() {
 		}
 		return
 	}
-	if err := s.startRecording(ff, a.encoder(ff)); err != nil {
+	if err := s.startRecordingTo(ff, a.encoder(ff), a.settings.recQuality(), a.settings.recDir()); err != nil {
 		messageBox(a.hwnd, "Couldn't start recording: "+err.Error(), "RetroPixels Native", mbIconWarning)
 		return
 	}
