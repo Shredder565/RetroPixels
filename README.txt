@@ -215,6 +215,44 @@ Recording games
   picture at its own shape (no black bars, buttons or messages) and only the
   game's sound. Those videos go to your Downloads folder.
 
+RetroPixels Native (test build)
+RetroPixels-Native.exe is a new version of RetroPixels being rebuilt without
+a web browser inside, so OBS Studio can capture it with any capture method
+(Window Capture, Game Capture or Display Capture). This first test build plays
+NES and Atari 2600 games; the other systems will follow in later test builds.
+Keep using RetroPixels.exe for them. The two programs keep separate settings
+and saves, so trying the test build changes nothing in RetroPixels.exe.
+- Starting a game: drag the game file onto the window, or File > Open game...
+  (Ctrl+O). .nes, .a26 and .bin files work, also inside .zip and .7z files.
+  File > Recent games lists the last ten.
+- Keys (the same as in RetroPixels.exe): arrow keys move. NES: X = A, Z = B,
+  Enter = Start, Shift = Select. Atari 2600: Z, X or Space = Fire, Enter =
+  Reset, Shift = Select, 1 / 2 = left / right difficulty switch, 3 = Colour /
+  B&W switch. Change them in Options > Controls... (one set per system).
+- Xbox controllers work automatically, up to four (one per player). Xbox A /
+  B are the NES's B / A, as on the original pad; the left stick moves too.
+  Atari paddle games: turn the paddle with the left stick, or tick Options >
+  "Mouse turns the paddle" and move the mouse across the picture (the left
+  mouse button is Fire).
+- P pauses, M mutes, hold Tab to fast-forward, Ctrl+R resets, F11 or
+  Alt+Enter switches fullscreen (Esc leaves it). Window size (1x to 5x),
+  volume and smooth or sharp pixels are in the Options menu.
+- Save states: F2 saves, F4 loads (one save state per game); Ctrl+Z undoes the
+  last load. On the controller: click the right stick to save, the left stick
+  to load. Battery saves (games that save by themselves) are kept as you play.
+- Recording: F9 (or Record > Start recording, or hold the right stick down for
+  a second) starts and stops it. The video is only the game's picture and
+  sound - no window, menus or mouse pointer - saved as .mp4 in
+  Videos\RetroPixels (Record > Open recordings folder). It uses the same
+  ffmpeg as RetroPixels.exe; if there isn't one yet, it offers to download it.
+- OBS Studio: add a Window Capture (or Game Capture) of RetroPixels Native.
+  Its title also shows the game, so set Window Match Priority to "Match
+  title, otherwise find window of same executable". Messages like "State
+  saved" show in the title bar only, never on the picture.
+- Kept in %APPDATA%\RetroPixels Native: settings.json, and saves\<system>\
+  with each game's battery save (.sav) and save state (.state).
+- The version shows in the title bar and in Help > About.
+
 Where things are kept
 - Save states and battery saves: inside RetroPixels's own browser profile
                  (%LOCALAPPDATA%\RetroPixels\BrowserProfile)
