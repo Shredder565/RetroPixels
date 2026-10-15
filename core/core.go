@@ -47,7 +47,7 @@ type Core interface {
 }
 
 // Analog is implemented by cores with analog controls (Atari paddles, N64
-// sticks). v is -1..1 for sticks, 0..1 for paddles, as in the web cores.
+// sticks). v is -1..1, as the web cores take it (the 2600 reads axis 0).
 type Analog interface {
 	SetAnalog(player, axis int, v float32)
 }
