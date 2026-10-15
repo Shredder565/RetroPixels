@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.8.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.9.0 (the number also shows next to the RetroPixels name in the app).
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
 Sega Genesis, Sega Master System, Atari 2600, Atari 7800, classic arcade
@@ -217,8 +217,8 @@ Recording games
 
 RetroPixels Native (test build)
 RetroPixels-Native.exe is a new version of RetroPixels being rebuilt without
-a web browser inside, so OBS Studio can capture it with any capture method
-(Window Capture, Game Capture or Display Capture). This first test build plays
+a web browser inside, so OBS Studio's Window Capture works with any capture
+method (or use Display Capture). This first test build plays
 NES and Atari 2600 games; the other systems will follow in later test builds.
 Keep using RetroPixels.exe for them. The two programs keep separate settings
 and saves, so trying the test build changes nothing in RetroPixels.exe.
@@ -245,7 +245,8 @@ and saves, so trying the test build changes nothing in RetroPixels.exe.
   sound - no window, menus or mouse pointer - saved as .mp4 in
   Videos\RetroPixels (Record > Open recordings folder). It uses the same
   ffmpeg as RetroPixels.exe; if there isn't one yet, it offers to download it.
-- OBS Studio: add a Window Capture (or Game Capture) of RetroPixels Native.
+- OBS Studio: add a Window Capture of RetroPixels Native (Game Capture is for
+  3D games and doesn't apply here).
   Its title also shows the game, so set Window Match Priority to "Match
   title, otherwise find window of same executable". Messages like "State
   saved" show in the title bar only, never on the picture.

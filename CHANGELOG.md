@@ -2,6 +2,10 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.9.0] - 2026-10-15
+
+- New: RetroPixels-Native.exe, the first test build of RetroPixels rebuilt as a native Windows program with no web browser inside, so OBS Studio's Window Capture records it with any capture method. It plays NES and Atari 2600 games, with the same emulation as RetroPixels.exe (checked frame by frame and sample by sample against it), Xbox controllers, save states, battery saves and game-only recording. The other systems follow in later test builds; RetroPixels.exe is unchanged and still plays everything.
+
 ## [2.8.0] - 2026-10-15
 
 - New: Archipelago (archipelago.gg) multiworld randomizers. Open an Archipelago patch file (.apsm, .aplttp, .apred, .apemerald and others) like a game; RetroPixels asks once for the original ROM, checks it, keeps it for that game and makes the randomized game, with its own saves. Patched ROMs made with the Archipelago Launcher open too.

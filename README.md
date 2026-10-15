@@ -116,6 +116,14 @@ own connector script (for example The Legend of Zelda, Link's Awakening DX, Ocar
 supported. RetroPixels only listens on this computer (127.0.0.1: port 23074 for SNI, 43055–43059
 for BizHawk) and never connects to the Archipelago server itself.
 
+## RetroPixels Native (test build)
+
+RetroPixels is being rebuilt as a native Windows program, with no web browser inside, so OBS Studio's
+Window Capture records it with any capture method. Each release includes the current test build as
+`RetroPixels-Native.exe`, next to `RetroPixels.exe`. It plays **NES** and **Atari 2600** games so far,
+using Go ports of the same emulators, checked frame by frame and sample by sample against them. More
+systems follow in later test builds; until then, `RetroPixels.exe` plays everything.
+
 ## Building from source
 
 RetroPixels is a Go program with an embedded web front end; no C toolchain is required.
@@ -139,6 +147,7 @@ after changing `winres/icon.ico` or the version, run `sh tools/make-winres.sh`. 
 | `web/index.html` | The app's interface |
 | `web/emu/` | The emulators: CPUs (6502, 65C816, Z80, 68000, ARM, Konami-2, 8080…), video and sound chips, arcade boards |
 | `n64/` | Nintendo 64 emulator (CPU, RSP, RDP), run natively |
+| `cmd/retropixels-native/`, `core/`, `cores/` | RetroPixels Native: the Win32 app and the native emulators |
 | `sevenzip/` | `.7z` extractor (LZMA, LZMA2, BCJ, BCJ2) |
 | `docs/` | Project website (GitHub Pages) |
 
