@@ -506,6 +506,13 @@ func (r *ppu) renderBG(k, bpp, y int, hires bool, buf *[512]uint32, opt bool) {
 	if tall != 0 {
 		mapHpx = 64 * th
 	}
+	thS, twS := 3, 3 // (th and tw as shifts)
+	if th == 16 {
+		thS = 4
+	}
+	if tw == 16 {
+		twS = 4
+	}
 	lastCell, attr := -1, 0
 	var pix [16]uint8
 	tileW := 8
@@ -519,14 +526,20 @@ func (r *ppu) renderBG(k, bpp, y int, hires bool, buf *[512]uint32, opt bool) {
 	case 4:
 		palMul = 16
 	}
+	// mosaic blocks: x is the block's first pixel (sx - sx % step)
+	step := mos
+	if hires {
+		step = mos * 2
+	}
+	blockX, inBlock := 0, 0
 	for sx := 0; sx < W; sx++ {
+		if inBlock == step {
+			inBlock, blockX = 0, sx
+		}
+		inBlock++
 		x := sx
 		if mos > 1 {
-			if hires {
-				x = sx - sx%(mos*2)
-			} else {
-				x = sx - sx%mos
-			}
+			x = blockX
 		}
 		hofs, vofs := hofsBase, vofsBase
 		if opt {
@@ -549,13 +562,8 @@ func (r *ppu) renderBG(k, bpp, y int, hires bool, buf *[512]uint32, opt bool) {
 		}
 		px := (hx + x) & (mapWpx - 1)
 		py := (vofs + ly) & (mapHpx - 1)
-		cy := py / th
-		var tx int
-		if hires {
-			tx = px >> 4
-		} else {
-			tx = px / tw
-		}
+		cy := py >> thS
+		tx := px >> twS // (16-pixel cells in hires)
 		cellKey := tx<<8 | cy | vofs<<20
 		if cellKey != lastCell {
 			lastCell = cellKey
@@ -573,7 +581,7 @@ func (r *ppu) renderBG(k, bpp, y int, hires bool, buf *[512]uint32, opt bool) {
 			}
 			attr = int(vram[ma&0x7fff])
 			vf, hf := attr&0x8000 != 0, attr&0x4000 != 0
-			row := py % th
+			row := py & (th - 1)
 			if vf {
 				row = th - 1 - row
 			}

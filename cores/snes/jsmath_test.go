@@ -44,6 +44,10 @@ func TestJSMath(t *testing.T) {
 		in = append(in, rec{4, y, 0})
 		in = append(in, rec{5, float64(rng.Intn(65536) - 32768), float64(rng.Intn(65536) - 32768)})
 		in = append(in, rec{6, float64(rng.Intn(20000)-10000) / 4, 0})
+		if x := rng.Intn(65536) - 32768; x != 0 {
+			in = append(in, rec{7, float64(rng.Intn(65536)-32768) / float64(x), 0})
+		}
+		in = append(in, rec{7, (rng.Float64()*2 - 1) * math.Ldexp(1, rng.Intn(60)-30), 0})
 	}
 	for f := 0; f < 256; f++ {
 		tt := float64(f) / 256
@@ -67,7 +71,7 @@ func TestJSMath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	names := []string{"sin", "cos", "tan", "exp", "log2", "hypot", "round"}
+	names := []string{"sin", "cos", "tan", "exp", "log2", "hypot", "round", "atan"}
 	fns := []func(a, b float64) float64{
 		func(a, _ float64) float64 { return jsSin(a) },
 		func(a, _ float64) float64 { return jsCos(a) },
@@ -76,6 +80,7 @@ func TestJSMath(t *testing.T) {
 		func(a, _ float64) float64 { return jsLog2(a) },
 		jsHypot,
 		func(a, _ float64) float64 { return jsRound(a) },
+		func(a, _ float64) float64 { return jsAtan(a) },
 	}
 	bad := map[string]int{}
 	for i, r := range in {

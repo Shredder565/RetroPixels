@@ -1,6 +1,7 @@
 package snes
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math/rand"
 )
@@ -812,5 +813,782 @@ func sortInts(v []int) {
 		for k := i; k > 0 && v[k] < v[k-1]; k-- {
 			v[k], v[k-1] = v[k-1], v[k]
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Cx4: the SNES fills the chip's RAM (by hand and with the chip's copy unit),
+// sets random parameters, starts every function on every page, and shows the
+// RAM on screen by DMA; the random code blocks poke the chip too.
+
+func cx4Fuzz(f *fuzzGen) {
+	rng := f.rng
+	base := f.snesCtx.target
+	f.snesCtx.target = func() int {
+		if rng.Intn(10) == 0 {
+			return 0x6000 + rng.Intn(0x2000)
+		}
+		return base()
+	}
+	mirror := func(addr int) int {
+		b := rng.Intn(0x40)
+		if rng.Intn(3) == 0 {
+			b = 0
+		}
+		return (b|0x80*rng.Intn(2))<<16 | addr
+	}
+	put := func(addr, v int) {
+		switch rng.Intn(8) {
+		case 0:
+			a := f.code
+			a.ldaA(vPad).op8(0x49, v&0xff)
+		case 1:
+			f.code.ldaA(vFrame).op8(0x49, v&0xff)
+		default:
+			f.code.lda8(v & 0xff)
+		}
+		f.code.op24(0x8f, mirror(addr))
+	}
+	put16 := func(addr, v int) { put(addr, v); put(addr+1, v>>8) }
+	put24 := func(addr, v int) { put16(addr, v); put(addr+2, v>>16) }
+	dataPtr := func() int { return f.dataAddr(rng.Intn(6)) + rng.Intn(0x7f00) }
+	anyPtr := func() int {
+		switch rng.Intn(6) {
+		case 0:
+			return 0x7e0000 + rng.Intn(0x20000)
+		case 1:
+			return mirror(0x6000 + rng.Intn(0x2000))
+		case 2:
+			return rng.Intn(0x1000000)
+		}
+		return dataPtr()
+	}
+	val16 := func() int {
+		switch rng.Intn(6) {
+		case 0:
+			return []int{0, 1, 0xffff, 0x7fff, 0x8000, 0x100, 0x1000, 0x80, 0x180}[rng.Intn(9)]
+		case 1, 2:
+			return rng.Intn(0x200) - 0x100
+		}
+		return rng.Intn(0x10000)
+	}
+	params := func() {
+		for r := 0x7f80; r < 0x7f96; r++ {
+			if rng.Intn(2) == 0 {
+				put(r, val16())
+			}
+		}
+	}
+	call := func() {
+		page, fn := 0, 0
+		switch rng.Intn(4) {
+		case 0, 1:
+			page = []int{0x00, 0x03, 0x05, 0x07, 0x08, 0x0b, 0x0c, 0x0e}[rng.Intn(8)]
+		case 2:
+			page = rng.Intn(0x10)
+			fn = []int{0x01, 0x05, 0x0d, 0x10, 0x13, 0x15, 0x1f, 0x22, 0x25, 0x2d, 0x40, 0x54, 0x5c, 0x89}[rng.Intn(14)]
+		default:
+			page, fn = rng.Intn(256), rng.Intn(256)
+			if rng.Intn(2) == 0 {
+				page, fn = 0x0e, rng.Intn(0x10)*4
+			}
+		}
+		params()
+		switch {
+		case fn == 0 && (page == 0x03 || page == 0x07):
+			if rng.Intn(2) == 0 {
+				put16(0x7f80, []int{0, 128, 256, 384, rng.Intn(0x200)}[rng.Intn(5)])
+			}
+			put(0x7f89, rng.Intn(256))
+			put(0x7f8c, rng.Intn(256))
+			if rng.Intn(2) == 0 {
+				put16(0x7f8f, 0x800+rng.Intn(0x1800))
+				put16(0x7f92, 0x800+rng.Intn(0x1800))
+			}
+		case fn == 0 && page == 0x0b:
+			put(0x7f89, rng.Intn(256))
+			put(0x7f8c, rng.Intn(256))
+		case fn == 0 && page == 0x00:
+			put(0x6620, rng.Intn(48))
+			put(0x6626, rng.Intn(140))
+			for k := 0; k < 4; k++ { // object piece lists in ROM data
+				put24(0x6227+16*rng.Intn(48), dataPtr())
+			}
+		case fn == 0 && page == 0x05:
+			put16(0x7f80, rng.Intn(0x220))
+			put16(0x6b00, rng.Intn(0x700))
+		case (fn == 0 && page == 0x08) || fn == 0x01:
+			p := anyPtr()
+			put24(0x7f80, p)
+			put(0x6295, rng.Intn(64))
+			put(0x7f90, rng.Intn(0x40))
+		}
+		put(0x7f4d, page)
+		put(0x7f4f, fn)
+	}
+	copyUnit := func() {
+		put24(0x7f40, anyPtr())
+		n := rng.Intn(0x800)
+		if rng.Intn(8) == 0 {
+			n = rng.Intn(0x10000)
+		}
+		put16(0x7f43, n)
+		dst := 0x6000 + rng.Intn(0x2000)
+		if rng.Intn(8) == 0 {
+			dst = rng.Intn(0x10000)
+		}
+		put16(0x7f45, dst)
+		put(0x7f47, rng.Intn(256))
+	}
+	f.extraInit = func(a *asm816) {
+		for i := 0; i < 4; i++ {
+			copyUnit()
+		}
+	}
+	f.extraNMI = func(a *asm816) {
+		// show a quarter of the chip's RAM in VRAM (and some in CGRAM)
+		a.set(0x2115, 0x80)
+		a.ldaA(vPad + 1).sta(0x2116).ldaA(vFrame).sta(0x2117)
+		a.set(0x4310, 0x01).set(0x4311, 0x18)
+		a.rep(0x20).ldaA(vFrame).op16(0x29, 3).db(0x0a, 0x0a, 0x0a).db(0xeb).op16(0x09, 0x6000).sta(0x4312) // (frame&3)<<11 | $6000
+		a.lda16(0x800).sta(0x4315).sep(0x20)
+		a.set(0x4314, rng.Intn(0x40)|0x80*rng.Intn(2))
+		a.set(0x420b, 0x02)
+		a.ldaA(vFrame).sta(0x2121)
+		a.set(0x4310, 0x02).set(0x4311, 0x22)
+		a.rep(0x20).lda16(0x7f80 - rng.Intn(0x40)).sta(0x4312).lda16(0x80).sta(0x4315).sep(0x20)
+		a.set(0x420b, 0x02)
+		// two of the routines below, chosen by the frame number
+		a.rep(0x30).ldaA(vFrame).op16(0x29, 0x3e).db(0xaa).sep(0x30)
+		a.abs(0xfc, "cx4tab")
+		a.rep(0x30).ldaA(vFrame).db(0x4a, 0x4a, 0x4a).op16(0x49, rng.Intn(0x40)).op16(0x29, 0x3e).db(0xaa).sep(0x30)
+		a.abs(0xfc, "cx4tab")
+	}
+	f.extraCode = func(a *asm816) {
+		for r := 0; r < 32; r++ {
+			a.label(fmt.Sprintf("cx4r%d", r))
+			a.sep(0x30)
+			for i := 0; i < 1+rng.Intn(4); i++ {
+				switch rng.Intn(6) {
+				case 0:
+					copyUnit()
+				case 1:
+					for k := 0; k < 4+rng.Intn(12); k++ {
+						put(0x6000+rng.Intn(0xc00), rng.Intn(256))
+					}
+				case 2:
+					a.op24(0xaf, mirror(0x7f80+rng.Intn(0x30))).sta(0x2122)
+					a.op24(0xaf, mirror(0x7f5e)).sta(0x2122)
+				default:
+					call()
+				}
+			}
+			a.db(0x60) // RTS
+		}
+		a.label("cx4tab")
+		for r := 0; r < 32; r++ {
+			a.wordOf(fmt.Sprintf("cx4r%d", r))
+		}
+	}
+}
+
+// routines: n subroutines made by gen (8-bit A and index registers), called
+// from the NMI two at a time, chosen by the frame number.
+func routines(f *fuzzGen, prefix string, n int, gen func(a *asm816)) (call func(a *asm816), code func(a *asm816)) {
+	rng := f.rng
+	tab := prefix + "tab"
+	call = func(a *asm816) {
+		a.rep(0x30).ldaA(vFrame).op16(0x29, 0x3e).db(0xaa).sep(0x30)
+		a.abs(0xfc, tab)
+		a.rep(0x30).ldaA(vFrame).db(0x4a, 0x4a, 0x4a).op16(0x49, rng.Intn(0x40)).op16(0x29, 0x3e).db(0xaa).sep(0x30)
+		a.abs(0xfc, tab)
+	}
+	code = func(a *asm816) {
+		for r := 0; r < 32; r++ {
+			a.label(fmt.Sprintf("%s%d", prefix, r))
+			a.sep(0x30)
+			gen(a)
+			a.db(0x60) // RTS
+		}
+		a.label(tab)
+		for r := 0; r < 32; r++ {
+			a.wordOf(fmt.Sprintf("%s%d", prefix, r))
+		}
+	}
+	return
+}
+
+// valueTo: write v (or v mixed with the pad or frame counter) to a long address.
+func valueTo(f *fuzzGen, a *asm816, addr, v int) {
+	switch f.rng.Intn(8) {
+	case 0:
+		a.ldaA(vPad).op8(0x49, v&0xff)
+	case 1:
+		a.ldaA(vFrame).op8(0x49, v&0xff)
+	default:
+		a.lda8(v & 0xff)
+	}
+	a.op24(0x8f, addr)
+}
+
+// ---------------------------------------------------------------------------
+// S-DD1: random ROM data is a valid compressed stream, so the SNES just picks
+// ROM pieces for banks $C0-$FF, arms DMA channels and copies from anywhere to
+// VRAM, CGRAM and WRAM, sometimes several channels in one go.
+
+func sdd1Fuzz(f *fuzzGen) {
+	rng := f.rng
+	base := f.snesCtx.target
+	f.snesCtx.target = func() int {
+		if rng.Intn(10) == 0 {
+			return 0x4800 + rng.Intn(8)
+		}
+		return base()
+	}
+	regBank := func() int { return rng.Intn(0x40) | 0x80*rng.Intn(2) }
+	src := func() int {
+		switch rng.Intn(5) {
+		case 0, 1:
+			return (0xc0+rng.Intn(0x40))<<16 | rng.Intn(0x10000)
+		case 2:
+			return f.dataAddr(rng.Intn(8)) + rng.Intn(0x8000)
+		case 3:
+			return (rng.Intn(0x40)|0x80*rng.Intn(2))<<16 | 0x8000 + rng.Intn(0x8000)
+		}
+		return rng.Intn(0x1000000)
+	}
+	gen := func(a *asm816) {
+		for i := 0; i < 1+rng.Intn(3); i++ {
+			if rng.Intn(3) == 0 {
+				for r := 4; r < 8; r++ {
+					if rng.Intn(2) == 0 {
+						valueTo(f, a, regBank()<<16|0x4800+r, rng.Intn(16))
+					}
+				}
+			}
+			chans := 1 << rng.Intn(8)
+			if rng.Intn(4) == 0 {
+				chans |= rng.Intn(256)
+			}
+			enable := chans
+			if rng.Intn(5) == 0 {
+				enable = rng.Intn(256)
+			}
+			arm := chans
+			if rng.Intn(5) == 0 {
+				arm = rng.Intn(256)
+			}
+			valueTo(f, a, regBank()<<16|0x4800, enable)
+			a.op24(0x8f, regBank()<<16|0x4801)
+			valueTo(f, a, regBank()<<16|0x4801, arm)
+			a.set(0x2115, 0x80).set(0x2116, rng.Intn(256)).set(0x2117, rng.Intn(256))
+			a.set(0x2181, rng.Intn(256)).set(0x2182, rng.Intn(256)).set(0x2183, 1)
+			for ch := 0; ch < 8; ch++ {
+				if chans&(1<<ch) == 0 {
+					continue
+				}
+				o := 0x4300 + ch*16
+				mode := []int{1, 0, 0, 1, 0x80, 9, 0x10}[rng.Intn(7)]
+				bbad := []int{0x18, 0x18, 0x80, 0x22, 0x04}[rng.Intn(5)]
+				if mode&1 != 0 {
+					bbad = 0x18
+				}
+				if mode&0x80 != 0 {
+					bbad = 0x80
+				}
+				s := src()
+				a.set(o, mode).set(o+1, bbad)
+				a.rep(0x20).lda16(s & 0xffff).sta(o + 2).lda16(1 + rng.Intn(0x600)).sta(o + 5).sep(0x20)
+				a.set(o+4, s>>16)
+			}
+			a.set(0x420b, chans)
+			if rng.Intn(3) == 0 {
+				for r := 0; r < 8; r++ {
+					a.op24(0xaf, regBank()<<16|0x4800+r).sta(0x2122)
+				}
+			}
+		}
+	}
+	calls, code := routines(f, "sdd1r", 32, gen)
+	f.extraNMI = calls
+	f.extraCode = code
+}
+
+// ---------------------------------------------------------------------------
+// SPC7110: a table of compressed streams (random data, any mode) in the data
+// ROM; the SNES starts the decompressor and reads it by hand and by DMA from
+// bank $50, drives the data port in all its modes, the multiply / divide
+// unit, the data ROM windows, battery RAM enable and the clock chip.
+
+func spc7110Fuzz(f *fuzzGen) {
+	rng := f.rng
+	rtc := f.spec.chip == 0xf9
+	base := f.snesCtx.target
+	f.snesCtx.target = func() int {
+		if rng.Intn(12) == 0 {
+			return 0x4800 + rng.Intn(0x50)
+		}
+		return base()
+	}
+	dataSize := f.spec.romSize - 0x100000
+	f.romPost = func() {
+		// stream table at data ROM $000000: mode, 24-bit address (big-endian)
+		for i := 0; i < 256; i++ {
+			e := f.rom[0x100000+4*i:]
+			e[0] = byte([]int{0, 1, 2, 0, 1, 2, rng.Intn(256)}[rng.Intn(7)])
+			a := rng.Intn(dataSize)
+			if rng.Intn(8) == 0 {
+				a = rng.Intn(0x1000000)
+			}
+			e[1], e[2], e[3] = byte(a>>16), byte(a>>8), byte(a)
+		}
+	}
+	regBank := func() int { return rng.Intn(0x40) | 0x80*rng.Intn(2) }
+	reg := func(r int) int { return regBank()<<16 | 0x4800 + r }
+	toCG := func(a *asm816, addr int) { a.op24(0xaf, addr).sta(0x2122) }
+	gen := func(a *asm816) {
+		for i := 0; i < 1+rng.Intn(4); i++ {
+			switch rng.Intn(8) {
+			case 0, 1: // decompress
+				t := 0
+				if rng.Intn(6) == 0 {
+					t = rng.Intn(0x1000000)
+				}
+				valueTo(f, a, reg(1), t)
+				valueTo(f, a, reg(2), t>>8)
+				valueTo(f, a, reg(3), t>>16)
+				valueTo(f, a, reg(4), rng.Intn(256))
+				skip := rng.Intn(4)
+				if rng.Intn(6) == 0 {
+					skip = rng.Intn(0x400)
+				}
+				valueTo(f, a, reg(5), skip)
+				valueTo(f, a, reg(6), skip>>8)
+				valueTo(f, a, reg(9), rng.Intn(256))
+				valueTo(f, a, reg(10), rng.Intn(4))
+				toCG(a, reg(0x0c))
+				toCG(a, reg(0x0c))
+				if rng.Intn(2) == 0 {
+					for k := 0; k < 1+rng.Intn(24); k++ {
+						toCG(a, reg(0))
+					}
+				} else {
+					a.set(0x2115, 0x80).set(0x2116, rng.Intn(256)).set(0x2117, rng.Intn(256))
+					src := (0x50|0x80*rng.Intn(2))<<16 | rng.Intn(0x10000)
+					a.set(0x4310, 1).set(0x4311, 0x18)
+					a.rep(0x20).lda16(src & 0xffff).sta(0x4312).lda16(1 + rng.Intn(0x800)).sta(0x4315).sep(0x20)
+					a.set(0x4314, src>>16).set(0x420b, 2)
+				}
+				toCG(a, reg(9))
+				toCG(a, reg(10))
+			case 2, 3: // data port
+				for r := 0x11; r <= 0x18; r++ {
+					if rng.Intn(3) != 0 {
+						valueTo(f, a, reg(r), rng.Intn(256))
+					}
+				}
+				if rng.Intn(3) == 0 {
+					valueTo(f, a, reg(0x18), rng.Intn(256))
+					valueTo(f, a, reg(0x14), rng.Intn(256))
+					valueTo(f, a, reg(0x15), rng.Intn(256))
+				}
+				for k := 0; k < 1+rng.Intn(12); k++ {
+					toCG(a, reg([]int{0x10, 0x10, 0x1a, 0x11, 0x12, 0x13, 0x14, 0x15}[rng.Intn(8)]))
+				}
+			case 4: // multiply / divide
+				for r := 0x20; r <= 0x27; r++ {
+					if r != 0x25 && r != 0x27 {
+						valueTo(f, a, reg(r), rng.Intn(256))
+					}
+				}
+				valueTo(f, a, reg(0x2e), rng.Intn(256))
+				r := []int{0x25, 0x27}[rng.Intn(2)]
+				if rng.Intn(2) == 0 {
+					valueTo(f, a, reg(r^2), rng.Intn(256))
+				}
+				valueTo(f, a, reg(r), rng.Intn(256))
+				for r := 0x28; r <= 0x2f; r++ {
+					toCG(a, reg(r))
+				}
+			case 5: // data ROM windows, battery RAM switch
+				for r := 0x31; r <= 0x33; r++ {
+					if rng.Intn(2) == 0 {
+						valueTo(f, a, reg(r), rng.Intn(16))
+					}
+				}
+				if rng.Intn(3) == 0 {
+					valueTo(f, a, reg(0x30), []int{0x80, 0, rng.Intn(256)}[rng.Intn(3)])
+				}
+				for k := 0; k < 4; k++ {
+					toCG(a, (0xd0+rng.Intn(0x30))<<16|rng.Intn(0x10000))
+				}
+				toCG(a, regBank()<<16|0x6000+rng.Intn(0x2000))
+			case 6: // clock
+				valueTo(f, a, reg(0x40), 1)
+				valueTo(f, a, reg(0x41), []int{3, 0x0c, 0x0c, rng.Intn(16)}[rng.Intn(4)])
+				valueTo(f, a, reg(0x41), rng.Intn(16))
+				for k := 0; k < rng.Intn(16); k++ {
+					if rng.Intn(2) == 0 {
+						toCG(a, reg(0x41))
+					} else {
+						valueTo(f, a, reg(0x41), rng.Intn(16))
+					}
+				}
+				toCG(a, reg(0x42))
+				if rng.Intn(4) != 0 {
+					valueTo(f, a, reg(0x40), 0)
+				}
+			default: // any register
+				r := rng.Intn(0x50)
+				if rng.Intn(2) == 0 {
+					valueTo(f, a, reg(r), rng.Intn(256))
+				}
+				toCG(a, reg(r))
+			}
+		}
+	}
+	_ = rtc
+	f.extraInit = func(a *asm816) { a.lda8(0x80).op24(0x8f, 0x004830) }
+	calls, code := routines(f, "spcr", 32, gen)
+	f.extraNMI = calls
+	f.extraCode = code
+}
+
+// ---------------------------------------------------------------------------
+// OBC1: the sprite window at $7FF0-$7FF6 (both tables, every index), plain
+// RAM reads and writes, and the sprite tables shown by DMA into OAM.
+
+func obc1Fuzz(f *fuzzGen) {
+	rng := f.rng
+	base := f.snesCtx.target
+	f.snesCtx.target = func() int {
+		if rng.Intn(10) == 0 {
+			if rng.Intn(2) == 0 {
+				return 0x7ff0 + rng.Intn(16)
+			}
+			return 0x6000 + rng.Intn(0x2000)
+		}
+		return base()
+	}
+	at := func(off int) int { return (rng.Intn(0x40)|0x80*rng.Intn(2))<<16 | off }
+	gen := func(a *asm816) {
+		for i := 0; i < 1+rng.Intn(6); i++ {
+			switch rng.Intn(5) {
+			case 0:
+				valueTo(f, a, at(0x7ff5), rng.Intn(256))
+				valueTo(f, a, at(0x7ff6), rng.Intn(256))
+			case 1:
+				for k := 0; k < 1+rng.Intn(5); k++ {
+					valueTo(f, a, at(0x7ff0+rng.Intn(5)), rng.Intn(256))
+				}
+			case 2:
+				for k := 0; k < 1+rng.Intn(5); k++ {
+					a.op24(0xaf, at(0x7ff0+rng.Intn(7))).sta(0x2122)
+				}
+			case 3:
+				valueTo(f, a, at(0x6000+rng.Intn(0x2000)), rng.Intn(256))
+				a.op24(0xaf, at(0x6000+rng.Intn(0x2000))).sta(0x2122)
+			default: // a sprite table into OAM
+				src := at(0x7800 + 0x400*rng.Intn(2))
+				a.stz(0x2102).stz(0x2103)
+				a.set(0x4310, 0).set(0x4311, 0x04)
+				a.rep(0x20).lda16(src & 0xffff).sta(0x4312).lda16(0x220).sta(0x4315).sep(0x20)
+				a.set(0x4314, src>>16).set(0x420b, 2)
+			}
+		}
+	}
+	calls, code := routines(f, "obcr", 32, gen)
+	f.extraNMI = calls
+	f.extraCode = code
+}
+
+// ---------------------------------------------------------------------------
+// S-RTC: reading the time, setting it (sensible and silly digits), the reset
+// command and stray commands, through $2800 / $2801.
+
+func srtcFuzz(f *fuzzGen) {
+	rng := f.rng
+	base := f.snesCtx.target
+	f.snesCtx.target = func() int {
+		if rng.Intn(12) == 0 {
+			return 0x2800 + rng.Intn(2)
+		}
+		return base()
+	}
+	at := func(off int) int { return (rng.Intn(0x40)|0x80*rng.Intn(2))<<16 | off }
+	put := func(a *asm816, v int) { valueTo(f, a, at(0x2801), v) }
+	gen := func(a *asm816) {
+		for i := 0; i < 1+rng.Intn(3); i++ {
+			switch rng.Intn(6) {
+			case 0, 1: // read
+				put(a, 0x0d)
+				for k := 0; k < 1+rng.Intn(16); k++ {
+					a.op24(0xaf, at(0x2800)).sta(0x2122)
+				}
+			case 2: // set the time
+				put(a, 0x0e)
+				put(a, 0x00)
+				max := []int{10, 6, 10, 6, 10, 3, 10, 4, 13, 10, 10, 11}
+				for k := 0; k < 12-rng.Intn(3); k++ {
+					if rng.Intn(6) == 0 {
+						put(a, rng.Intn(16))
+					} else {
+						put(a, rng.Intn(max[k]))
+					}
+				}
+				if rng.Intn(2) == 0 {
+					put(a, 0x0d)
+					a.op24(0xaf, at(0x2800)).sta(0x2122)
+				}
+			case 3:
+				put(a, 0x0e)
+				put(a, []int{0x04, 0x04, rng.Intn(16)}[rng.Intn(3)])
+			default:
+				put(a, rng.Intn(256))
+				a.op24(0xaf, at(0x2800+rng.Intn(2))).sta(0x2122)
+			}
+		}
+	}
+	calls, code := routines(f, "srtcr", 32, gen)
+	f.extraNMI = calls
+	f.extraCode = code
+}
+
+// ---------------------------------------------------------------------------
+// ST018: my own ARM program (no Seta code): random arithmetic, loads and
+// stores to RAM, data ROM, program ROM and anywhere, the ports to the SNES,
+// waiting loops on the status port (so the skip-ahead runs), bounded polls,
+// stack pushes and pops, forward branches, and software interrupts.
+
+// armImm encodes v as an ARM rotated immediate (ok false if it can't be).
+func armImm(v uint32) (uint32, bool) {
+	for rot := uint32(0); rot < 16; rot++ {
+		x := v<<(2*rot) | v>>(32-2*rot)
+		if rot == 0 {
+			x = v
+		}
+		if x < 256 {
+			return rot<<8 | x, true
+		}
+	}
+	return 0, false
+}
+
+func armRandomFirmware(rng *rand.Rand) []byte {
+	const al = 0xe0000000
+	dp := func(op, s, rn, rd, op2 uint32) uint32 { return al | op<<21 | s<<20 | rn<<16 | rd<<12 | op2 }
+	imm := func(v uint32) uint32 {
+		e, ok := armImm(v)
+		if !ok {
+			panic("imm")
+		}
+		return 1<<25 | e
+	}
+	lo := func() uint32 { return uint32(rng.Intn(9)) }   // r0-r8
+	src := func() uint32 { return uint32(rng.Intn(10)) } // r0-r9
+	ldst := func(load, byteOp bool, rn, rd, off uint32) uint32 {
+		w := uint32(al | 1<<26 | 1<<24 | 1<<23 | rn<<16 | rd<<12 | off&0xfff)
+		if load {
+			w |= 1 << 20
+		}
+		if byteOp {
+			w |= 1 << 22
+		}
+		return w
+	}
+	const rPort, rRAM, rData, rSP = 10, 11, 12, 13
+	var units [][]uint32
+	unit := func() []uint32 {
+		switch k := rng.Intn(100); {
+		case k < 30: // data processing
+			op := uint32(rng.Intn(16))
+			var op2 uint32
+			switch rng.Intn(3) {
+			case 0:
+				op2 = 1<<25 | uint32(rng.Intn(4096))
+			case 1:
+				op2 = uint32(rng.Intn(32))<<7 | uint32(rng.Intn(4))<<5 | src()
+			default:
+				op2 = src()<<8 | uint32(rng.Intn(4))<<5 | 1<<4 | src()
+			}
+			s := uint32(rng.Intn(2))
+			if op >= 8 && op <= 11 {
+				s = 1 // compare / test
+			}
+			w := dp(op, s, src(), lo(), op2)
+			if rng.Intn(5) == 0 {
+				w = w&0x0fffffff | uint32(rng.Intn(15))<<28
+			}
+			return []uint32{w}
+		case k < 36: // multiplies
+			if rng.Intn(2) == 0 {
+				return []uint32{al | uint32(rng.Intn(4))<<20 | lo()<<16 | src()<<12 | src()<<8 | 9<<4 | src()}
+			}
+			hi, l := lo(), lo()
+			for l == hi {
+				l = lo()
+			}
+			return []uint32{al | 1<<23 | uint32(rng.Intn(8))<<20 | hi<<16 | l<<12 | src()<<8 | 9<<4 | src()}
+		case k < 52: // loads and stores
+			load := rng.Intn(3) != 0
+			switch rng.Intn(6) {
+			case 0, 1, 2:
+				return []uint32{ldst(load, rng.Intn(3) == 0, rRAM, lo(), uint32(rng.Intn(4096)))}
+			case 3:
+				return []uint32{ldst(true, rng.Intn(3) == 0, rData, lo(), uint32(rng.Intn(4096)))}
+			case 4:
+				return []uint32{ldst(true, rng.Intn(3) == 0, 15, lo(), uint32(rng.Intn(4096)))}
+			default: // anywhere (base register value), with writeback now and then
+				w := ldst(load, rng.Intn(3) == 0, lo(), lo(), uint32(rng.Intn(4096)))
+				if rng.Intn(3) == 0 {
+					w |= 1 << 21
+				}
+				return []uint32{w}
+			}
+		case k < 58: // halfwords and signed loads from RAM
+			off := uint32(rng.Intn(256))
+			sh := uint32(1 + rng.Intn(3))
+			l := uint32(1)
+			if sh == 1 && rng.Intn(2) == 0 {
+				l = 0
+			}
+			return []uint32{al | 1<<24 | 1<<23 | 1<<22 | l<<20 | rRAM<<16 | lo()<<12 | (off>>4)<<8 | 1<<7 | sh<<5 | 1<<4 | off&15}
+		case k < 66: // ports: receive, send, signal, status
+			switch rng.Intn(4) {
+			case 0:
+				return []uint32{ldst(true, true, rPort, lo(), 0x10)}
+			case 1:
+				return []uint32{ldst(false, true, rPort, lo(), 0x00)}
+			case 2:
+				return []uint32{ldst(false, true, rPort, lo(), 0x10)}
+			}
+			return []uint32{ldst(true, true, rPort, lo(), 0x20)}
+		case k < 69: // wait on the status port: for a byte, or for the SNES to take ours
+			cond, bit := uint32(0x0), uint32(8) // beq: until a byte is waiting
+			if rng.Intn(2) == 0 {
+				cond, bit = 0x1, 1 // bne: until the SNES read our byte
+			}
+			b := cond<<28 | 0x0a000000 | 0xfffffc
+			return []uint32{ldst(true, true, rPort, 9, 0x20), dp(8, 1, 9, 0, imm(bit)), b}
+		case k < 76: // a bounded poll (registers change: no skip-ahead)
+			n := uint32(1 + rng.Intn(200))
+			return []uint32{dp(13, 0, 0, 9, imm(n)), ldst(true, true, rPort, 8, 0x20), dp(8, 1, 8, 0, imm(8)),
+				0x1a000001,             // bne +1 (out)
+				dp(2, 1, 9, 9, imm(1)), // subs r9, r9, #1
+				0x1a000000 | 0xfffffa}  // bne back to the ldrb
+		case k < 82: // push and pop
+			list := uint32(1 + rng.Intn(0x1ff))
+			return []uint32{al | 0x09200000 | rSP<<16 | list, dp(uint32(rng.Intn(2)*2+2), 0, lo(), lo(), imm(uint32(rng.Intn(256)))), al | 0x08b00000 | rSP<<16 | list}
+		case k < 84:
+			return []uint32{al | 0x0f000000 | uint32(rng.Intn(1<<24))} // SWI
+		case k < 85:
+			return []uint32{al | 0x06000010 | uint32(rng.Intn(1<<20))<<5&0x1ffffe0} // undefined
+		}
+		// two ports in a row: echo a byte back with something added
+		return []uint32{ldst(true, true, rPort, 0, 0x10), dp(4, 0, 0, 0, imm(uint32(rng.Intn(256)))), ldst(false, true, rPort, 0, 0x00)}
+	}
+	for i := 0; i < 400+rng.Intn(400); i++ {
+		units = append(units, unit())
+	}
+	var code []uint32
+	code = append(code,
+		dp(13, 0, 0, rPort, imm(0x40000000)),
+		dp(13, 0, 0, rRAM, imm(0xe0000000)),
+		dp(13, 0, 0, rData, imm(0xa0000000)),
+		dp(4, 0, rRAM, rSP, imm(0x3f00)),
+	)
+	loop := len(code)
+	for i, u := range units {
+		if rng.Intn(12) == 0 { // jump over the next few units
+			n := 0
+			for j := i; j < min(len(units), i+1+rng.Intn(3)); j++ {
+				n += len(units[j])
+			}
+			cond := uint32(rng.Intn(15))
+			code = append(code, cond<<28|0x0a000000|uint32(n-1)&0xffffff)
+		}
+		code = append(code, u...)
+	}
+	back := loop - (len(code) + 2)
+	code = append(code, al|0x0a000000|uint32(back)&0xffffff)
+	fw := make([]byte, st018FW)
+	rng.Read(fw)
+	prog := make([]uint32, st018Prog/4)
+	prog[0] = al | 0x0a000000 | (0x100/4 - 2) // reset: b 0x100
+	for v := 1; v < 8; v++ {
+		prog[v] = 0xe1b0f00e // movs pc, lr
+	}
+	prog[6], prog[7] = 0xe25ef004, 0xe25ef004 // subs pc, lr, #4
+	copy(prog[0x40:], code)
+	for i := 0x40 + len(code); i < len(prog); i++ {
+		prog[i] = binary.LittleEndian.Uint32(fw[i*4:])
+	}
+	for i, w := range prog {
+		binary.LittleEndian.PutUint32(fw[i*4:], w)
+	}
+	return fw
+}
+
+func st018Fuzz(how string) func(f *fuzzGen) {
+	return func(f *fuzzGen) {
+		rng := f.rng
+		fw := armRandomFirmware(rng)
+		switch how {
+		case "file":
+			f.firmware = map[string][]byte{"ST018": fw}
+		case "append":
+			f.appendFW = fw
+		case "short":
+			f.firmware = map[string][]byte{"ST018": fw[:len(fw)-1-rng.Intn(4096)]}
+			f.maxFrames = 2
+		case "none":
+			f.maxFrames = 2
+		}
+		base := f.snesCtx.target
+		f.snesCtx.target = func() int {
+			if rng.Intn(12) == 0 {
+				return 0x3800 + rng.Intn(6)
+			}
+			return base()
+		}
+		at := func(off int) int { return (rng.Intn(0x40)|0x80*rng.Intn(2))<<16 | off }
+		gen := func(a *asm816) {
+			for i := 0; i < 1+rng.Intn(6); i++ {
+				switch rng.Intn(8) {
+				case 0, 1:
+					valueTo(f, a, at(0x3802), rng.Intn(256))
+				case 2, 3:
+					a.op24(0xaf, at(0x3800)).sta(0x2122)
+				case 4:
+					a.op24(0xaf, at([]int{0x3802, 0x3804, 0x3801, 0x3803}[rng.Intn(4)])).sta(0x2122)
+				case 5: // wait (a while) for a byte from the ARM, or for it to take ours
+					l := fmt.Sprintf("stw%d", len(a.buf))
+					d := fmt.Sprintf("std%d", len(a.buf))
+					mask, op := 0x01, 0xd0 // BNE out when a byte is waiting
+					if rng.Intn(2) == 0 {
+						mask, op = 0x08, 0xf0 // BEQ out when ours was taken
+					}
+					a.ldx8(1 + rng.Intn(255))
+					a.label(l).op24(0xaf, at(0x3804)).op8(0x29, mask).br(op, d).db(0xca).br(0xd0, l)
+					a.label(d)
+					a.op24(0xaf, at(0x3800)).sta(0x2122)
+				case 6:
+					if rng.Intn(4) == 0 { // hold the ARM (reset) and let it go
+						valueTo(f, a, at(0x3804), 1)
+						if rng.Intn(4) != 0 {
+							valueTo(f, a, at(0x3804), 0)
+						}
+					} else {
+						valueTo(f, a, at(0x3804), rng.Intn(256)&^1)
+					}
+				default:
+					valueTo(f, a, at(0x3802), rng.Intn(256))
+					a.op24(0xaf, at(0x3800)).sta(0x2122)
+				}
+			}
+		}
+		calls, code := routines(f, "str", 32, gen)
+		f.extraNMI = calls
+		f.extraCode = code
 	}
 }

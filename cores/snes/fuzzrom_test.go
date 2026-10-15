@@ -965,6 +965,21 @@ var fuzzVariants = []fuzzSpec{
 	{name: "dsp1-lle", mapping: mapLo, chip: 0x03, title: "RP DSP1 FUZZ", extra: necFuzz("DSP-1", "file")},
 	{name: "dsp2-hle", mapping: mapLo, chip: 0x05, title: "DUNGEON MASTER RP", sramK: 3, extra: necFuzz("DSP-2", "hle")},
 	{name: "dsp2-lle", mapping: mapLo, chip: 0x03, title: "DUNGEON MASTER RP", extra: necFuzz("DSP-2", "append")},
+	{name: "cx4", mapping: mapLo, chip: 0xf3, title: "RP CX4 FUZZ", extra: cx4Fuzz},
+	{name: "cx4-sram", mapping: mapLo, chip: 0xf3, sramK: 3, title: "RP CX4 FUZZ", extra: cx4Fuzz},
+	{name: "sdd1", mapping: mapLo, chip: 0x43, mapMode: 0x32, romSize: 0x400000, title: "RP SDD1 FUZZ", extra: sdd1Fuzz},
+	{name: "sdd1-sram", mapping: mapLo, chip: 0x45, mapMode: 0x32, romSize: 0x300000, sramK: 3, title: "RP SDD1 FUZZ", extra: sdd1Fuzz},
+	{name: "spc7110", mapping: mapHi, chip: 0xf5, mapMode: 0x3a, romSize: 0x300000, sramK: 3, title: "RP SPC7110 FUZZ", extra: spc7110Fuzz},
+	{name: "spc7110-rtc", mapping: mapHi, chip: 0xf9, mapMode: 0x3a, romSize: 0x280000, sramK: 3, title: "RP SPC7110 FUZZ", extra: spc7110Fuzz},
+	{name: "spc7110-rtc-nosram", mapping: mapHi, chip: 0xf9, mapMode: 0x3a, romSize: 0x180000, title: "RP SPC7110 FUZZ", extra: spc7110Fuzz},
+	{name: "obc1", mapping: mapLo, chip: 0x25, sramK: 3, title: "RP OBC1 FUZZ", extra: obc1Fuzz},
+	{name: "obc1-own", mapping: mapLo, chip: 0x25, sramK: 1, title: "RP OBC1 FUZZ", extra: obc1Fuzz},
+	{name: "srtc", mapping: mapHi, chip: 0x55, sramK: 3, title: "RP SRTC FUZZ", extra: srtcFuzz},
+	{name: "srtc-nosram", mapping: mapHi, chip: 0x55, title: "RP SRTC FUZZ", extra: srtcFuzz},
+	{name: "st018", mapping: mapLo, chip: 0xf5, title: "RP ST018 FUZZ", extra: st018Fuzz("file")},
+	{name: "st018-append", mapping: mapLo, chip: 0xf5, sramK: 3, fast: true, title: "RP ST018 FUZZ", extra: st018Fuzz("append")},
+	{name: "st018-short", mapping: mapLo, chip: 0xf5, title: "RP ST018 FUZZ", extra: st018Fuzz("short")},
+	{name: "st018-none", mapping: mapLo, chip: 0xf5, title: "RP ST018 FUZZ", extra: st018Fuzz("none")},
 }
 
 // TestCompareFuzzJS builds the test ROMs above and compares them like

@@ -3,7 +3,7 @@
 const fs = require("fs");
 const inp = fs.readFileSync(process.argv[2]);
 const n = inp.length / 24, out = Buffer.alloc(n * 8);
-const F = [Math.sin, Math.cos, Math.tan, Math.exp, Math.log2, (a, b) => Math.hypot(a, b), Math.round];
+const F = [Math.sin, Math.cos, Math.tan, Math.exp, Math.log2, (a, b) => Math.hypot(a, b), Math.round, Math.atan];
 for (let i = 0; i < n; i++) {
   const op = inp.readDoubleLE(i * 24), a = inp.readDoubleLE(i * 24 + 8), b = inp.readDoubleLE(i * 24 + 16);
   out.writeDoubleLE(F[op](a, b), i * 8);
