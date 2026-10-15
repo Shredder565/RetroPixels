@@ -224,7 +224,7 @@ func TestSystemDetection(t *testing.T) {
 		{write("Pitfall.a26", a26), "atari2600", ""},
 		{write("Combat.bin", a26), "atari2600", ""},
 		{write("game.sfc", make([]byte, 1024)), "", "Super Nintendo games are coming in a later test build"},
-		{write("sonic.bin", append(append(make([]byte, 0x100), "SEGA"...), make([]byte, 70000)...)), "", "Sega Genesis games are coming"},
+		{write("sonic.bin", append(append(make([]byte, 0x100), "SEGA"...), make([]byte, 70000)...)), "segaMD", ""},
 		{write("zelda.iso", []byte{1}), "", "GameCube and Wii games are coming"},
 		{write("seed.apsm", []byte{1}), "", "Archipelago patch files are coming"},
 		{write("notes.txt", []byte{1}), "", "couldn't tell which system"},
