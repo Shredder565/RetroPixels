@@ -10,6 +10,11 @@ type Options struct {
 	SampleRate int    // sound output rate in Hz; cores make samples at this rate
 	SRAM       []byte // battery save to restore, or nil
 	Name       string // the game's file name, for cores that pick behaviour from it
+	// Firmware: chip programs the player supplied, by chip name ("DSP-3",
+	// "ST018", ...), for cartridges with such chips (opts.firmware in the web
+	// player). A core that needs one it wasn't given returns an error naming
+	// it (snes.FirmwareError).
+	Firmware map[string][]byte
 }
 
 // Info describes a system's controls and picture.
