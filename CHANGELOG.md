@@ -2,6 +2,10 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.11.0] - 2026-10-15
+
+- RetroPixels Native test build 3: RetroPixels-Native.exe now also plays Sega Genesis / Mega Drive, Game Boy Advance and Nintendo 64 games. Genesis and Game Boy Advance give the same picture and sound as RetroPixels.exe on every frame compared, with battery saves, 6-button pads, J-Cart, and the Game Boy Advance clock, sunlight, gyro, tilt and rumble cartridges. Nintendo 64 uses the same emulator as RetroPixels.exe, with the same controls, battery saves and save states.
+
 ## [2.10.0] - 2026-10-15
 
 - RetroPixels Native test build 2: RetroPixels-Native.exe now also plays Master System, Game Boy / Game Boy Color and Atari 7800 games, alongside NES and Atari 2600. Each new system gives the same picture and sound as RetroPixels.exe on every frame compared (hundreds of test programs and homebrew games), with battery saves (including Game Boy clocks), save states, rumble and Game Boy tilt cartridges.

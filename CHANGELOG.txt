@@ -4,6 +4,16 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.11.0  (2026-10-15)
+--------------------------------
+- RetroPixels Native test build 3: RetroPixels-Native.exe now also plays
+  Sega Genesis / Mega Drive, Game Boy Advance and Nintendo 64 games. Genesis
+  and Game Boy Advance give the same picture and sound as RetroPixels.exe on
+  every frame compared, with battery saves, 6-button pads, J-Cart, and the
+  Game Boy Advance clock, sunlight, gyro, tilt and rumble cartridges.
+  Nintendo 64 uses the same emulator as RetroPixels.exe, with the same
+  controls, battery saves and save states.
+
 RetroPixels 2.10.0  (2026-10-15)
 --------------------------------
 - RetroPixels Native test build 2: RetroPixels-Native.exe now also plays

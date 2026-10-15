@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.10.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.11.0 (the number also shows next to the RetroPixels name in the app).
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
 Sega Genesis, Sega Master System, Atari 2600, Atari 7800, classic arcade
@@ -219,13 +219,14 @@ RetroPixels Native (test build)
 RetroPixels-Native.exe is a new version of RetroPixels being rebuilt without
 a web browser inside, so OBS Studio's Window Capture works with any capture
 method (or use Display Capture). This test build plays NES, Atari 2600,
-Master System, Game Boy / Game Boy Color and Atari 7800 games; the other
-systems will follow in later test builds.
+Master System, Game Boy / Game Boy Color, Atari 7800, Sega Genesis / Mega
+Drive, Game Boy Advance and Nintendo 64 games; Super Nintendo, the arcade
+games and GameCube / Wii will follow in later test builds.
 Keep using RetroPixels.exe for them. The two programs keep separate settings
 and saves, so trying the test build changes nothing in RetroPixels.exe.
 - Starting a game: drag the game file onto the window, or File > Open game...
-  (Ctrl+O). .nes, .a26, .sms, .gb, .gbc, .a78 and .bin files work, also
-  inside .zip and .7z files.
+  (Ctrl+O). .nes, .a26, .sms, .gb, .gbc, .a78, .md, .gen, .smd, .gba, .agb,
+  .z64, .n64, .v64 and .bin files work, also inside .zip and .7z files.
   File > Recent games lists the last ten.
 - Keys (the same as in RetroPixels.exe): arrow keys move. NES: X = A, Z = B,
   Enter = Start, Shift = Select. Atari 2600: Z, X or Space = Fire, Enter =
@@ -234,7 +235,12 @@ and saves, so trying the test build changes nothing in RetroPixels.exe.
   R = console Reset. Game Boy / Color: X = A, Z = B, Enter = Start, Shift =
   Select. Atari 7800: Z = button 1, X = button 2 (one-button games take
   either), Enter = Pause, Shift = Select, R = Reset, 1 / 2 = difficulty
-  switches. Change them in Options > Controls... (one set per system).
+  switches. Genesis: A = A, S = B, D = C, Q / W / E = X / Y / Z, Enter =
+  Start, Shift = Mode. Game Boy Advance: X = A, Z = B, Q / W = L / R, Enter =
+  Start, Shift = Select. Nintendo 64: X = A, Z = B, A = Z, Enter = Start,
+  Q / W = L / R, arrow keys = analog stick (pushed all the way), T F G H =
+  D-pad, I J K L = C buttons. Change them in Options > Controls... (one set
+  per system).
 - Xbox controllers work automatically, up to four (one per player). Xbox A /
   B are the NES's B / A, as on the original pad; the left stick moves too.
   Atari paddle games: turn the paddle with the left stick, or tick Options >
@@ -246,6 +252,23 @@ and saves, so trying the test build changes nothing in RetroPixels.exe.
 - Game Boy: games with a clock keep counting real time between sessions;
   rumble cartridges shake the Xbox controller; tilt cartridges (Kirby Tilt 'n'
   Tumble, Command Master) tilt with the right stick or the I J K L keys.
+- Genesis: pads are 6-button; if an older game misbehaves, hold Mode while it
+  starts to use a 3-button pad (known games switch automatically). J-Cart
+  games: controllers 3 and 4 play as players 3 and 4. European games run at
+  50 fps, as on the console. Virtua Racing isn't supported (as in
+  RetroPixels.exe). Genesis save states don't carry over from RetroPixels.exe.
+- Game Boy Advance: no BIOS file is needed. Games with a clock read your
+  computer's clock. Boktai (sunlight): I / K or the right stick set the sun.
+  WarioWare: Twisted! (gyro): right stick or J / L, and it rumbles. Yoshi
+  Topsy-Turvy and Koro Koro Puzzle (tilt): right stick or I J K L. Drill Dozer
+  rumbles.
+- Nintendo 64: on an Xbox controller A = A, X = B, LT = Z, LB / RB = L / R,
+  left stick = analog stick, right stick = C buttons; up to 4 controllers.
+  Because the right stick is the C buttons, recording from the controller is
+  View + D-pad down. Battery saves use the same .sav format as
+  RetroPixels.exe (plain .eep / .sra / .fla / .mpk files work too); save
+  states made in RetroPixels.exe load here. No Rumble Pak (as in
+  RetroPixels.exe).
 - Not in the test build yet (as in RetroPixels.exe, or still to come): Game
   Gear, the Atari 7800's SOUPER cartridges, YM2151 sound and high-score
   cartridge saves.
