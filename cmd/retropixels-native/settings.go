@@ -21,6 +21,8 @@ type Settings struct {
 	Recent      []string              `json:"recentGames"`
 	LastFolder  string                `json:"lastFolder,omitempty"`
 	Maps        map[string]ControlMap `json:"controls,omitempty"` // per system, only the changed buttons
+	// arcade machine settings (DIP switches) the player changed, by game (the zip's name)
+	Dips map[string]map[string]int `json:"arcadeDips,omitempty"`
 }
 
 const maxRecent = 10

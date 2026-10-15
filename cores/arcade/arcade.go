@@ -1161,10 +1161,11 @@ func (c *Core) Players() int { return c.players }
 func (c *Core) Characters() []string { return c.chars }
 
 // ControlsNote is the Controls window's note.
-func (c *Core) ControlsNote() string {
-	return "Put a coin in with Coin (View button, or 5 on the keyboard), then press Start (Menu button, or 1). " +
-		"The left stick moves too. Clicking the sticks (L3/R3) and the right stick are used for save states."
-}
+func (c *Core) ControlsNote() string { return ControlsNote }
+
+// ControlsNote is the Controls window's note for arcade games (controlsNote in arcade.js).
+const ControlsNote = "Put a coin in with Coin (View button, or 5 on the keyboard), then press Start (Menu button, or 1). " +
+	"The left stick moves too. Clicking the sticks (L3/R3) and the right stick are used for save states."
 
 // DipSetting is a machine setting with its current value.
 type DipSetting struct {

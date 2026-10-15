@@ -230,8 +230,9 @@ func TestSystemDetection(t *testing.T) {
 		{write("notes.txt", []byte{1}), "", "couldn't tell which system"},
 		{write("Zipped.zip", zipOf(t, map[string][]byte{"readme.txt": {1}, "Game (USA).nes": nesROM})), "nes", ""},
 		{write("ZippedBin.zip", zipOf(t, map[string][]byte{"game.bin": a26})), "atari2600", ""},
-		{write("pacman.zip", zipOf(t, map[string][]byte{"pacman.6e": {1}, "pacman.6f": {1}, "pacman.6h": {1}, "82s123.7f": {1}})), "", "Arcade games are coming"},
-		{write("Empty.zip", zipOf(t, map[string][]byte{"readme.txt": {1}})), "", "Arcade games are coming"},
+		// arcade sets are recognised by their files' names (the core says what's missing)
+		{write("pacman.zip", zipOf(t, map[string][]byte{"pacman.6e": {1}, "pacman.6f": {1}, "pacman.6h": {1}, "82s123.7f": {1}})), "arcade", ""},
+		{write("Empty.zip", zipOf(t, map[string][]byte{"readme.txt": {1}})), "", "isn't an arcade game RetroPixels knows yet"},
 	}
 	for _, c := range cases {
 		g, err := openGame(c.path)

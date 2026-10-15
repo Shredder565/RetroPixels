@@ -129,10 +129,23 @@ const maxROM = 64 << 20 // no stage-1 game comes close; stops a stray huge file
 // loadedGame is a game file opened and recognised.
 type loadedGame struct {
 	System string
-	ROM    []byte
+	ROM    []byte // an arcade game's is its ROM set as a .zip
 	Name   string // for saves and recordings: the file's name without extension
 	Path   string
+	Dips   map[string]int // arcade machine settings the player chose
 }
+
+// arcadeHooks: what the archive code asks the arcade core (cores_arcade.go
+// fills them in; nil in builds without it).
+type arcadeHooks struct {
+	identify  func(names []string, sizes []int, zipName string) bool // RPArcade.identify
+	supported func() string                                          // RPArcade.supportedText
+}
+
+var arcadeSets arcadeHooks
+
+// arcadeMaxFile: bigger files in an arcade set aren't read (as the web page).
+const arcadeMaxFile = 4 << 20
 
 // archiveEntry is one file inside a .zip or .7z.
 type archiveEntry struct {
@@ -200,8 +213,46 @@ func openGame(path string) (*loadedGame, error) {
 		return nil, fmt.Errorf("couldn't open %q: %v", name, err)
 	}
 	if ext == "zip" || ext == "7z" {
+		// No console file inside: the web page asks its arcade code first.
+		if arcadeSets.identify != nil && !hasConsoleFile(entries) {
+			var names []string
+			var sizes []int
+			for _, e := range entries {
+				names = append(names, e.name)
+				sizes = append(sizes, int(e.size))
+			}
+			if arcadeSets.identify(names, sizes, name) {
+				g.System = "arcade"
+				if ext == "zip" {
+					g.ROM, err = os.ReadFile(path)
+				} else {
+					g.ROM, err = rezip(entries)
+				}
+				if err != nil {
+					return nil, fmt.Errorf("couldn't unpack %q: %v", name, err)
+				}
+				return g, nil
+			}
+		}
 		e, arcade := pickEntry(entries)
 		if arcade {
+			if arcadeSets.identify != nil {
+				var held []string
+				for i, x := range entries {
+					if i == 30 {
+						held = append(held, "…")
+						break
+					}
+					held = append(held, fmt.Sprintf("%s (%s bytes)", x.name, commaNum(x.size)))
+				}
+				h := strings.Join(held, ", ")
+				if h == "" {
+					h = "nothing"
+				}
+				return nil, fmt.Errorf("%q isn't an arcade game RetroPixels knows yet. The games it can play are: %s. "+
+					"Load the game's .zip ROM set (keep it zipped), named like the set (for example pacman.zip). This zip holds: %s.",
+					name, arcadeSets.supported(), h)
+			}
 			return nil, errNotYet{"Arcade games are"}
 		}
 		if e == nil {
@@ -232,6 +283,49 @@ func openGame(path string) (*loadedGame, error) {
 		return nil, errNotYet{systemByID(g.System).Label + " games are"}
 	}
 	return g, nil
+}
+
+func hasConsoleFile(entries []archiveEntry) bool {
+	for _, e := range entries {
+		if systemForExt(extOf(e.name)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// rezip packs an archive's files (up to 4 MB each, as the web page reads
+// them) into a .zip for the arcade core.
+func rezip(entries []archiveEntry) ([]byte, error) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, e := range entries {
+		if e.size > arcadeMaxFile {
+			continue
+		}
+		data, err := e.read()
+		if err != nil {
+			return nil, err
+		}
+		w, err := zw.CreateHeader(&zip.FileHeader{Name: e.name, Method: zip.Store})
+		if err != nil {
+			return nil, err
+		}
+		w.Write(data)
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// commaNum writes 4096 as "4,096".
+func commaNum(n int64) string {
+	s := fmt.Sprint(n)
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
 }
 
 func availableExts() []string {

@@ -1,7 +1,11 @@
 package arcade
 
 import (
+	"archive/zip"
+	"bytes"
 	"math"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -74,5 +78,25 @@ func BenchmarkFrame(b *testing.B) {
 				c.TakeAudio()
 			}
 		})
+	}
+}
+
+// TestDumpSets writes the generated sets as .zip files into $RP_ARCADE_DUMP
+// (for trying them in the app).
+func TestDumpSets(t *testing.T) {
+	dir := os.Getenv("RP_ARCADE_DUMP")
+	if dir == "" {
+		t.Skip("RP_ARCADE_DUMP not set")
+	}
+	os.MkdirAll(dir, 0o755)
+	for _, ts := range allTestSets() {
+		var buf bytes.Buffer
+		zw := zip.NewWriter(&buf)
+		for _, n := range ts.order {
+			w, _ := zw.Create(n)
+			w.Write(ts.files[n])
+		}
+		zw.Close()
+		os.WriteFile(filepath.Join(dir, ts.name+"_"+ts.zipName), buf.Bytes(), 0o644)
 	}
 }

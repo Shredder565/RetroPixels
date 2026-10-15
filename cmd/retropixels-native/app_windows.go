@@ -59,6 +59,7 @@ type app struct {
 	volMenu     uintptr
 	sizeMenu    uintptr
 	recMenu     uintptr
+	dipMenu     uintptr
 	font        uintptr
 	bigFont     uintptr
 
@@ -221,6 +222,7 @@ func (a *app) buildMenu() {
 	appendMenu(a.gameMenu, mfString, cmdSaveState, "&Save state\tF2")
 	appendMenu(a.gameMenu, mfString, cmdLoadState, "&Load state\tF4")
 	appendMenu(a.gameMenu, mfString, cmdUndoLoad, "&Undo load\tCtrl+Z")
+	a.addDipMenu()
 	appendMenu(a.menu, mfPopup, a.gameMenu, "&Game")
 
 	a.optMenu = call(pCreatePopupMenu)
@@ -338,6 +340,9 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 	case wmInitMenuPopup:
 		if wp == a.recentMenu {
 			a.fillRecent()
+		}
+		if wp == a.dipMenu {
+			a.fillDips()
 		}
 		a.updateMenus()
 		return 0
@@ -856,6 +861,8 @@ func (a *app) command(id int) {
 		d := recordingsDir()
 		os.MkdirAll(d, 0o755)
 		shellOpen(d)
+	case id >= cmdDip0 && id < cmdDipEnd:
+		a.dipCommand(id)
 	case id == cmdAbout:
 		messageBox(a.hwnd, "RetroPixels Native "+version+"\n\n"+
 			"A test build of RetroPixels without a web browser inside, so OBS Studio can capture it "+
@@ -894,6 +901,7 @@ func (a *app) openPath(path string) {
 		return
 	}
 	a.closeGame()
+	g.Dips = a.settings.Dips[g.Name]
 	s, err := newSession(g, a, a.snd, a.settings.controlMap(g.System))
 	if err != nil {
 		messageBox(a.hwnd, fmt.Sprintf("Couldn't start %q: %v", filepath.Base(path), err), "RetroPixels Native", mbIconWarning)
