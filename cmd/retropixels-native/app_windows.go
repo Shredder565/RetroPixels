@@ -102,6 +102,7 @@ type app struct {
 
 	ui  *uiState // the start screen, save state slots and the rest (ui_*_windows.go)
 	dol dolState // GameCube / Wii (dolphin_windows.go)
+	ap  apState  // Archipelago (archipelago_windows.go)
 }
 
 var theApp *app
@@ -162,6 +163,7 @@ func runApp() {
 	call(pUpdateWindow, a.hwnd)
 	call(pSetTimer, a.hwnd, timerTitle, 250, 0)
 	a.dolStartup()
+	a.apStartup()
 
 	// Find the best video encoder in the background, so recording starts at once.
 	go func() {
@@ -235,6 +237,7 @@ func (a *app) buildMenu() {
 	a.uiGameMenu()
 	a.addDipMenu()
 	a.addSeatMenu()
+	a.apGameMenu()
 	appendMenu(a.menu, mfPopup, a.gameMenu, "&Game")
 	a.addDolphinMenu()
 
@@ -269,6 +272,7 @@ func (a *app) buildMenu() {
 
 	help := call(pCreatePopupMenu)
 	a.uiHelpMenu(help)
+	a.apHelpMenu(help)
 	appendMenu(help, mfString, cmdAbout, "&About RetroPixels Native")
 	appendMenu(a.menu, mfPopup, help, "&Help")
 }
@@ -306,6 +310,7 @@ func (a *app) updateMenus() {
 	enableItem(a.menu, cmdRecord, on || a.recOn)
 	a.uiUpdateMenus()
 	a.dolUpdateMenus()
+	a.apUpdateMenus()
 }
 
 func (a *app) fillRecent() {
@@ -717,6 +722,7 @@ func (a *app) updateTitle() {
 				t += fmt.Sprintf(" - ● REC %d:%02d", d/60, d%60)
 			}
 		}
+		t += a.apTitle()
 	}
 	t += a.dolTitle()
 	if a.recSaving > 0 {
@@ -782,6 +788,7 @@ func (a *app) handleEvents() {
 		default:
 			a.uiEvent(e.name, e.detail)
 			a.dolEvent(e.name, e.detail)
+			a.apEvent(e.name, e.detail)
 		}
 	}
 }
@@ -892,6 +899,8 @@ func (a *app) command(id int) {
 		a.dipCommand(id)
 	case id >= cmdDolFirst && id <= cmdDolLast:
 		a.dolCommand(id)
+	case id == cmdAPStatus || id == cmdAPHelp:
+		a.apCommand(id)
 	case id == cmdAbout:
 		messageBox(a.hwnd, "RetroPixels Native "+version+"\n\n"+
 			"A test build of RetroPixels without a web browser inside, so OBS Studio can capture it "+
@@ -925,6 +934,9 @@ func (a *app) openPath(path string) {
 	if a.dolOpenPath(path) {
 		return
 	}
+	if a.apOpenPath(path) {
+		return
+	}
 	g, err := openGame(path)
 	if err != nil {
 		icon := uint32(mbIconWarning)
@@ -934,6 +946,11 @@ func (a *app) openPath(path string) {
 		messageBox(a.hwnd, err.Error(), "RetroPixels Native", icon)
 		return
 	}
+	a.startGame(g, path)
+}
+
+// startGame plays a game opened from path.
+func (a *app) startGame(g *loadedGame, path string) {
 	a.closeGame()
 	g.Dips = a.settings.Dips[g.Name]
 	s, err := newSession(g, a, a.snd, a.settings.controlMap(g.System))
@@ -985,6 +1002,7 @@ func (a *app) openPath(path string) {
 	s.present() // the first picture, and its size for the window
 	a.resizeToScale()
 	s.start()
+	a.apGameStarted(s)
 	a.updateTitle()
 }
 
@@ -994,6 +1012,7 @@ func (a *app) closeGame() {
 		return
 	}
 	a.uiCloseGame()
+	a.apGameClosed()
 	a.sess = nil
 	rec := s.stop()
 	if rec != nil {
@@ -1010,6 +1029,7 @@ func (a *app) closeGame() {
 
 func (a *app) openDialog() string {
 	exts := append(availableExts(), dolphinExts()...)
+	exts = append(exts, ".ap*") // Archipelago patch files
 	pat := "*" + strings.Join(exts, ";*")
 	filter := "Games (" + strings.Join(exts, " ") + ")\x00" + pat + "\x00All files\x00*.*\x00\x00"
 	return a.fileDialog("Open game", filter, a.settings.LastFolder)

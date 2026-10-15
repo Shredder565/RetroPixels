@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 	"unsafe"
+
+	"retropixels/internal/apatch"
 )
 
 // colours (COLORREF is 0x00BBGGRR): the web page's palette
@@ -286,6 +288,9 @@ func dashedBorder(dc uintptr, r winRect, dash, gap, w int32, color uint32) {
 // ("NES", "Arcade or zipped game"...).
 func recentLabel(path string) string {
 	x := extOf(path)
+	if apatch.IsPatchName(path) {
+		return "Archipelago"
+	}
 	if id := systemForExt(x); id != "" {
 		return systemByID(id).Label
 	}

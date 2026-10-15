@@ -38,7 +38,7 @@ func startFakePage(t *testing.T, addr string, game apGame, domains map[string][]
 	go p.serve(t)
 	// wait until RetroPixels has the game
 	for i := 0; i < 200; i++ {
-		if _, g := ap.current(); g != nil && g.Hash == game.Hash {
+		if g, _ := ap.Current(); g != nil && g.Hash == game.Hash {
 			return p
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -136,7 +136,7 @@ func apTestServer(t *testing.T) (string, func()) {
 
 func waitNoGame(t *testing.T) {
 	for i := 0; i < 200; i++ {
-		if _, g := ap.current(); g == nil {
+		if g, _ := ap.Current(); g == nil {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -181,7 +181,7 @@ func TestAPBizHawkProtocol(t *testing.T) {
 
 	a, b := net.Pipe()
 	defer a.Close()
-	go ap.serveBizHawk(b)
+	go ap.ServeBizHawk(b)
 	_ = a.SetDeadline(time.Now().Add(10 * time.Second))
 	rw := bufio.NewReadWriter(bufio.NewReader(a), bufio.NewWriter(a))
 
@@ -238,9 +238,7 @@ func TestAPBizHawkProtocol(t *testing.T) {
 	}
 
 	// the indicator hears about the client
-	ap.mu.Lock()
-	st := ap.statusLocked()
-	ap.mu.Unlock()
+	st := ap.Status()
 	if len(st.Clients) != 1 || st.Clients[0] != "BizHawk Client" {
 		t.Fatalf("status: %+v", st)
 	}
@@ -293,7 +291,7 @@ func (s sniTest) read(addr, size int) []byte {
 func TestAPSNIProtocol(t *testing.T) {
 	addr, done := apTestServer(t)
 	defer done()
-	sniSrv := httptest.NewServer(http.HandlerFunc(ap.serveSNIHTTP))
+	sniSrv := httptest.NewServer(http.HandlerFunc(ap.ServeSNIHTTP))
 	defer sniSrv.Close()
 	sniAddr := strings.TrimPrefix(sniSrv.URL, "http://")
 
@@ -357,96 +355,8 @@ func TestAPSNIProtocol(t *testing.T) {
 	if got := s.read(0xF5F000, 3); !bytes.Equal(got, []byte{7, 8, 9}) || !bytes.Equal(wram[0xf000:0xf003], []byte{7, 8, 9}) {
 		t.Fatalf("WRAM write: %x", got)
 	}
-	ap.mu.Lock()
-	st := ap.statusLocked()
-	ap.mu.Unlock()
+	st := ap.Status()
 	if len(st.Clients) != 1 || st.Clients[0] != "SNI Client" {
 		t.Fatalf("status: %+v", st)
-	}
-}
-
-func TestSNISplit(t *testing.T) {
-	ops := sniSplit(0xF6FFFE, 4)
-	if len(ops) != 2 || ops[0].D != "WRAM" || ops[0].A != 0x1fffe || ops[0].N != 2 || ops[1].D != "VRAM" || ops[1].A != 0 || ops[1].N != 2 {
-		t.Fatalf("WRAM/VRAM: %+v", ops)
-	}
-	ops = sniSplit(0xEFFFFF, 3) // SRAM's last byte, then a gap
-	if len(ops) != 2 || ops[0].D != "CARTRAM" || ops[1].D != "" || ops[1].N != 2 {
-		t.Fatalf("SRAM/gap: %+v", ops)
-	}
-	ops = sniSplit(0xF90100, 0x200) // colours then sprites
-	if len(ops) != 2 || ops[0].D != "CGRAM" || ops[0].A != 0x100 || ops[1].D != "OAM" || ops[1].A != 0 {
-		t.Fatalf("CGRAM/OAM: %+v", ops)
-	}
-}
-
-// The listeners are on the loopback address only, and the BizHawk one only
-// while a game is running.
-func TestAPListenersLoopbackOnly(t *testing.T) {
-	free := func() int {
-		ln, err := net.Listen("tcp4", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
-		}
-		p := ln.Addr().(*net.TCPAddr).Port
-		ln.Close()
-		return p
-	}
-	h := newAPHub(free(), free())
-	h.start()
-	waitFor := func(what string, f func() bool) {
-		for i := 0; i < 300; i++ {
-			if f() {
-				return
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-		t.Fatal(what)
-	}
-	waitFor("SNI listener", func() bool { h.mu.Lock(); defer h.mu.Unlock(); return h.sniOK })
-	h.mu.Lock()
-	bh := h.bizhawkPort
-	h.mu.Unlock()
-	if bh != 0 {
-		t.Fatal("BizHawk port open with no game")
-	}
-	h.mu.Lock()
-	h.game = &apGame{Core: "gb", System: "GB"}
-	h.mu.Unlock()
-	h.poke()
-	waitFor("BizHawk listener", func() bool { h.mu.Lock(); defer h.mu.Unlock(); return h.bizhawkPort != 0 })
-	h.mu.Lock()
-	bh = h.bizhawkPort
-	h.mu.Unlock()
-	if bh != h.bizhawkBase {
-		t.Fatalf("BizHawk port %d, want %d", bh, h.bizhawkBase)
-	}
-	for _, port := range []int{bh, h.sniPort} {
-		c, err := net.DialTimeout("tcp4", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
-		if err != nil {
-			t.Fatalf("port %d not reachable on loopback: %v", port, err)
-		}
-		c.Close()
-		// not on the computer's other addresses
-		addrs, _ := net.InterfaceAddrs()
-		for _, a := range addrs {
-			ipn, ok := a.(*net.IPNet)
-			if !ok || ipn.IP.IsLoopback() || ipn.IP.To4() == nil {
-				continue
-			}
-			if c, err := net.DialTimeout("tcp4", fmt.Sprintf("%s:%d", ipn.IP, port), 300*time.Millisecond); err == nil {
-				c.Close()
-				t.Fatalf("port %d answers on %s", port, ipn.IP)
-			}
-		}
-	}
-	// the game goes: the BizHawk port closes a few seconds later
-	h.mu.Lock()
-	h.game = nil
-	h.mu.Unlock()
-	h.poke()
-	waitFor("BizHawk listener closing", func() bool { h.mu.Lock(); defer h.mu.Unlock(); return h.bizhawkPort == 0 })
-	if !loopback(fmt.Sprintf("127.0.0.1:%d", h.sniPort)) || loopback(fmt.Sprintf("0.0.0.0:%d", h.sniPort)) {
-		t.Fatal("loopback()")
 	}
 }

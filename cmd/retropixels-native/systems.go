@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"retropixels/core"
+	"retropixels/internal/apatch"
 	"retropixels/sevenzip"
 )
 
@@ -133,6 +134,7 @@ type loadedGame struct {
 	Name   string // for saves and recordings: the file's name without extension
 	Path   string
 	Dips   map[string]int // arcade machine settings the player chose
+	AP     *apatch.Patch  // the Archipelago patch the game was made from (archipelago.go), or nil
 	// chip programs chosen for this game but not yet kept (see firmwareFor)
 	Firmware map[string][]byte
 }
@@ -188,8 +190,8 @@ func openGame(path string) (*loadedGame, error) {
 	case "iso", "gcm", "ciso", "wbfs", "rvz", "wia", "gcz", "wad":
 		return nil, errNotYet{"GameCube and Wii games are"}
 	}
-	if strings.HasPrefix(ext, "ap") && len(ext) > 2 && systemForExt(ext) == "" {
-		return nil, errNotYet{"Archipelago patch files are"}
+	if apatch.IsPatchName(name) {
+		return nil, errAPPatchFile // the window makes the game (openAPPatch)
 	}
 	st, err := os.Stat(path)
 	if err != nil {
