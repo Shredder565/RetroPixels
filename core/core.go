@@ -45,3 +45,15 @@ type Core interface {
 	// SRAM is the battery save, or nil when the cartridge has none.
 	SRAM() []byte
 }
+
+// Analog is implemented by cores with analog controls (Atari paddles, N64
+// sticks). v is -1..1 for sticks, 0..1 for paddles, as in the web cores.
+type Analog interface {
+	SetAnalog(player, axis int, v float32)
+}
+
+// Rumbler is implemented by cores whose cartridges can shake the controller;
+// Rumble returns 0 (off) to 1 (full).
+type Rumbler interface {
+	Rumble() float32
+}
