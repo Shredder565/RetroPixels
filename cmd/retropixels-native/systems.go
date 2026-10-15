@@ -132,6 +132,8 @@ type loadedGame struct {
 	ROM    []byte
 	Name   string // for saves and recordings: the file's name without extension
 	Path   string
+	// chip programs chosen for this game but not yet kept (see firmwareFor)
+	Firmware map[string][]byte
 }
 
 // archiveEntry is one file inside a .zip or .7z.

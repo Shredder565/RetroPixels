@@ -144,6 +144,39 @@ func safeName(s string) string {
 	return s
 }
 
+// firmwareDir: firmware\<chip>, the cartridge chip programs the player
+// supplied (the Super Nintendo's DSP-3, DSP-4, ST010, ST011 and ST018 games
+// need one), each asked for once.
+func firmwareDir() string { return filepath.Join(appDir(), "firmware") }
+
+// loadFirmware reads every kept chip program, by chip name.
+func loadFirmware() map[string][]byte {
+	m := map[string][]byte{}
+	es, _ := os.ReadDir(firmwareDir())
+	for _, e := range es {
+		if e.IsDir() {
+			continue
+		}
+		if b, err := os.ReadFile(filepath.Join(firmwareDir(), e.Name())); err == nil && len(b) > 0 {
+			m[e.Name()] = b
+		}
+	}
+	return m
+}
+
+// saveFirmware keeps a chip program the player chose.
+func saveFirmware(chip string, b []byte) error {
+	if err := os.MkdirAll(firmwareDir(), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(firmwareDir(), safeName(chip)), b, 0o644)
+}
+
+// needsFirmware tells whether a core refused a game for want of a chip
+// program (set by the cores that ask for one): the chip's name, the usual
+// file name and the message to show.
+var needsFirmware = func(err error) (chip, file, msg string, ok bool) { return }
+
 func savesDir(sys string) string { return filepath.Join(appDir(), "saves", sys) }
 
 // sramPath: saves\<system>\<game>.sav

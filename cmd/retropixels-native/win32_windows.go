@@ -159,10 +159,12 @@ const (
 	mbOK          = 0x0
 	mbOKCancel    = 0x1
 	mbYesNo       = 0x4
+	mbOkCancel    = 0x1
 	mbIconError   = 0x10
 	mbIconWarning = 0x30
 	mbIconInfo    = 0x40
 	idYes         = 6
+	idOk          = 1
 	idOK          = 1
 
 	swpNoZOrder      = 0x0004
