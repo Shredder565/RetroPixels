@@ -1,7 +1,5 @@
 package snes
 
-import "math"
-
 // The Sony S-DSP sound generator: a port of web/emu/sdsp.js. One call to
 // sample() makes one 32 kHz stereo sample.
 
@@ -21,12 +19,13 @@ func init() {
 		dspOffset[r] = [3]int{0, 1040, 536}[k]
 	}
 	// 4-tap interpolation weights (a smooth bell-shaped kernel)
+	sigma := 0.62 // (a variable: 2*0.62*0.62 is worked out at run time, in doubles, as JavaScript does)
 	for f := 0; f < 256; f++ {
 		t := float64(f) / 256
 		d := [4]float64{1 + t, t, 1 - t, 2 - t}
 		var w [4]float64
 		for k := range d {
-			w[k] = jsExp(-(d[k] * d[k]) / (2 * 0.62 * 0.62))
+			w[k] = jsExp(-(d[k] * d[k]) / (2 * sigma * sigma))
 		}
 		sum := w[0] + w[1] + w[2] + w[3]
 		acc := 0
@@ -37,8 +36,6 @@ func init() {
 		dspKern[f*4+1] += 2048 - acc
 	}
 }
-
-func jsRound(x float64) float64 { return math.Floor(x + 0.5) }
 
 func clamp16(v int) int {
 	if v > 32767 {

@@ -158,8 +158,11 @@ type fuzzGen struct {
 	nmitimen  int
 	ctx       *blockCtx
 	snesCtx   blockCtx
-	sramAt    int    // battery RAM CPU address when not the usual one
-	romPost   func() // changes to the ROM before the header is made
+	sramAt    int               // battery RAM CPU address when not the usual one
+	romPost   func()            // changes to the ROM before the header is made
+	firmware  map[string][]byte // chip programs to hand the cores
+	appendFW  []byte            // a chip program appended to the ROM
+	maxFrames int               // (for ROMs both cores refuse)
 }
 
 // cpuToROM maps a CPU address in banks $00/$80 $8000-$FFFF or $C0-$FF to the ROM offset.
@@ -194,7 +197,9 @@ func (f *fuzzGen) randBytes(n int) []byte {
 	return b
 }
 
-func buildFuzzSNES(spec fuzzSpec) []byte {
+func buildFuzzSNES(spec fuzzSpec) []byte { rom, _ := buildFuzz(spec); return rom }
+
+func buildFuzz(spec fuzzSpec) ([]byte, *fuzzGen) {
 	f := &fuzzGen{spec: spec, rng: rand.New(rand.NewSource(spec.seed)), data: map[string]int{}}
 	f.snesCtx = blockCtx{
 		dps:       []int{0x0000, 0x0100, 0x0200, 0x0800, 0x1000, 0x1c00, 0x2100, 0x4300, 0x0080},
@@ -237,10 +242,11 @@ func buildFuzzSNES(spec fuzzSpec) []byte {
 		f.romPost()
 	}
 	f.header(a)
+	f.rom = append(f.rom, f.appendFW...)
 	if spec.copier {
 		f.rom = append(make([]byte, 0x200), f.rom...)
 	}
-	return f.rom
+	return f.rom, f
 }
 
 func (f *fuzzGen) header(a *asm816) {
@@ -946,6 +952,19 @@ var fuzzVariants = []fuzzSpec{
 	{name: "gsu2-battery", mapping: mapLo, chip: 0x15, sramK: 5, extra: gsuFuzz},
 	{name: "gsu2-2mb-battery64", mapping: mapLo, chip: 0x1a, sramK: 6, romSize: 0x200000, extra: gsuFuzz},
 	{name: "gsu2-fast", mapping: mapLo, chip: 0x14, fast: true, extra: gsuFuzz},
+	{name: "dsp3", mapping: mapLo, chip: 0x03, title: "SD RP GX FUZZ", extra: necFuzz("DSP-3", "file")},
+	{name: "dsp3-append", mapping: mapLo, chip: 0x05, title: "SD RP GX FUZZ", extra: necFuzz("DSP-3", "append")},
+	{name: "dsp3-none", mapping: mapLo, chip: 0x03, title: "SD RP GX FUZZ", extra: necFuzz("DSP-3", "none")},
+	{name: "dsp4-be", mapping: mapLo, chip: 0x03, title: "TOP GEAR 3000 RP", extra: necFuzz("DSP-4", "be")},
+	{name: "st010", mapping: mapLo, chip: 0xf6, sramK: 2, title: "F1 ROC RP FUZZ", extra: necFuzz("ST010", "file")},
+	{name: "st011", mapping: mapLo, chip: 0xf6, title: "RP SHOGI FUZZ", extra: necFuzz("ST011", "be")},
+	{name: "st011-short", mapping: mapLo, chip: 0xf6, title: "RP SHOGI FUZZ", extra: necFuzz("ST011", "short")},
+	{name: "dsp1-hle", mapping: mapLo, chip: 0x03, title: "RP DSP1 FUZZ", extra: necFuzz("DSP-1", "hle")},
+	{name: "dsp1-hle-2mb", mapping: mapLo, chip: 0x05, title: "RP DSP1 FUZZ", romSize: 0x200000, sramK: 1, extra: necFuzz("DSP-1", "hle")},
+	{name: "dsp1-hle-hirom", mapping: mapHi, chip: 0x05, title: "RP DSP1 FUZZ", sramK: 1, extra: necFuzz("DSP-1", "hle")},
+	{name: "dsp1-lle", mapping: mapLo, chip: 0x03, title: "RP DSP1 FUZZ", extra: necFuzz("DSP-1", "file")},
+	{name: "dsp2-hle", mapping: mapLo, chip: 0x05, title: "DUNGEON MASTER RP", sramK: 3, extra: necFuzz("DSP-2", "hle")},
+	{name: "dsp2-lle", mapping: mapLo, chip: 0x03, title: "DUNGEON MASTER RP", extra: necFuzz("DSP-2", "append")},
 }
 
 // TestCompareFuzzJS builds the test ROMs above and compares them like
@@ -974,12 +993,26 @@ func TestCompareFuzzJS(t *testing.T) {
 			v.seed = int64(seed)*1000 + int64(i)
 			v.name = fmt.Sprintf("%s-%d", v.name, seed)
 			path := filepath.Join(dir, "fuzz-"+v.name+".sfc")
-			if err := os.WriteFile(path, buildFuzzSNES(v), 0o644); err != nil {
+			rom, f := buildFuzz(v)
+			if err := os.WriteFile(path, rom, 0o644); err != nil {
 				t.Fatal(err)
+			}
+			e := listEntry{path: path, frames: frames}
+			if f.maxFrames != 0 {
+				e.frames = min(frames, f.maxFrames)
+			}
+			if f.firmware != nil {
+				e.fw = filepath.Join(dir, "fw-"+v.name)
+				os.MkdirAll(e.fw, 0o755)
+				for chip, b := range f.firmware {
+					if err := os.WriteFile(filepath.Join(e.fw, chip), b, 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
 			t.Run(v.name, func(t *testing.T) {
 				t.Parallel()
-				compareROM(t, node, listEntry{path: path, frames: frames})
+				compareROM(t, node, e)
 			})
 		}
 	}

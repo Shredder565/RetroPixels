@@ -553,3 +553,264 @@ func gsuUnit(rng *rand.Rand, g *asm816, name string, top bool) {
 		g.db(0x01)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// NEC uPD77C25 / uPD96050 (DSP-3, DSP-4, ST010, ST011, and DSP-1 / DSP-2 with
+// a supplied program): random firmware (RetroPixels' own, made here) and an
+// SNES side that reads and writes DR, SR and the ST01x data RAM every frame,
+// showing what it reads in the palette and scroll registers.
+
+// necRandomFirmware: a random program and data ROM in the dump layout.
+func necRandomFirmware(rng *rand.Rand, m *necModel, bigEndian bool) []byte {
+	var codes []int
+	for c := 0x080; c <= 0x0be; c += 2 {
+		codes = append(codes, c)
+	}
+	codes = append(codes, 0x0b1, 0x0b3, 0x100, 0x140)
+	prog := make([]int, m.prog)
+	for i := range prog {
+		switch k := rng.Intn(100); {
+		case k < 55: // OP
+			prog[i] = rng.Intn(1 << 22)
+		case k < 65: // RT
+			prog[i] = 1<<22 | rng.Intn(1<<22)
+		case k < 80: // LD
+			prog[i] = 3<<22 | rng.Intn(1<<22)
+		default: // JP
+			c := codes[rng.Intn(len(codes))]
+			t := rng.Intn(m.prog)
+			if k < 85 { // a nearby target
+				t = (i + rng.Intn(64) - 16) & (m.prog - 1)
+			}
+			if k < 87 { // wait for the SNES
+				c, t = 0x0bc+2*rng.Intn(2), i
+			}
+			w := 2<<22 | c<<13
+			if m.big {
+				w |= (t&0x7ff)<<2 | (t>>11)&3
+			} else {
+				w |= (t & 0x7ff) << 2
+			}
+			prog[i] = w
+		}
+	}
+	b := make([]byte, 0, m.fwSize())
+	for _, w := range prog {
+		if bigEndian {
+			b = append(b, byte(w>>16), byte(w>>8), byte(w))
+		} else {
+			b = append(b, byte(w), byte(w>>8), byte(w>>16))
+		}
+	}
+	for i := 0; i < m.data; i++ {
+		b = append(b, byte(rng.Intn(256)), byte(rng.Intn(256)))
+	}
+	return b
+}
+
+// necFuzz makes the extension for one chip; how: "file", "be" (byte-swapped
+// file), "append" (program appended to the ROM), "none", "short".
+func necFuzz(chip, how string) func(f *fuzzGen) {
+	return func(f *fuzzGen) {
+		rng := f.rng
+		spec := necFiles[chip]
+		var fw []byte
+		if how != "hle" {
+			fw = necRandomFirmware(rng, spec.model, how == "be")
+		}
+		switch how {
+		case "file", "be":
+			f.firmware = map[string][]byte{chip: fw}
+		case "short":
+			f.firmware = map[string][]byte{chip: fw[:len(fw)-1-rng.Intn(100)]}
+			f.maxFrames = 2
+		case "append":
+			f.appendFW = fw
+		case "none":
+			f.maxFrames = 2
+		}
+		st := chip == "ST010" || chip == "ST011"
+		var drAddr, srAddr, ramAddr func() int
+		if st {
+			f.sramAt = 0x680000
+			drAddr = func() int { return (0x60+rng.Intn(8)+0x80*rng.Intn(2))<<16 | rng.Intn(0x800)<<1 }
+			srAddr = func() int { return drAddr() | 1 }
+			ramAddr = func() int { return (0x68+rng.Intn(8)+0x80*rng.Intn(2))<<16 | rng.Intn(0x1000) }
+		} else {
+			// where DR and SR are (snes_necdsp.js, snes_dsp.js)
+			b0, b1, dr0, dr1, sr0, sr1 := 0x20, 0x3f, 0x8000, 0xbfff, 0xc000, 0xffff
+			switch {
+			case chip == "DSP-4":
+				b0 = 0x30
+			case chip == "DSP-1" && f.spec.mapping != mapLo:
+				b0, b1, dr0, dr1, sr0, sr1 = 0x00, 0x1f, 0x6000, 0x6fff, 0x7000, 0x7fff
+			case chip == "DSP-1" && f.spec.romSize > 0x100000:
+				b0, b1, dr0, dr1, sr0, sr1 = 0x60, 0x6f, 0x0000, 0x3fff, 0x4000, 0x7fff
+			}
+			bank := func() int { return b0 + rng.Intn(b1-b0+1) + 0x80*rng.Intn(2) }
+			drAddr = func() int { return bank()<<16 | (dr0 + rng.Intn(dr1-dr0+1)) }
+			srAddr = func() int { return bank()<<16 | (sr0 + rng.Intn(sr1-sr0+1)) }
+		}
+		if how == "hle" {
+			f.extraNMI = func(a *asm816) { dspHLECommands(f, a, chip, drAddr, srAddr) }
+			return
+		}
+		f.extraNMI = func(a *asm816) {
+			for i := 0; i < 8+rng.Intn(24); i++ {
+				k := rng.Intn(6)
+				if !st && k >= 4 {
+					k = rng.Intn(4)
+				}
+				switch k {
+				case 0: // SR
+					a.op24(0xaf, srAddr()).sta([]int{0x2122, 0x210d, 0x210e, 0x2111}[rng.Intn(4)])
+				case 1: // DR
+					a.op24(0xaf, drAddr()).sta([]int{0x2122, 0x210f, 0x2110, 0x2112}[rng.Intn(4)])
+				case 2: // write DR
+					switch rng.Intn(3) {
+					case 0:
+						a.lda8(rng.Intn(256))
+					case 1:
+						a.ldaA(vPad)
+					default:
+						a.ldaA(vFrame)
+					}
+					a.op24(0x8f, drAddr())
+				case 3: // wait (a while) for the chip to ask
+					l := fmt.Sprintf("necw%d", len(a.buf))
+					d := fmt.Sprintf("necd%d", len(a.buf))
+					a.ldx8(1 + rng.Intn(255))
+					a.label(l).op24(0xaf, srAddr()).br(0x30, d).db(0xca).br(0xd0, l)
+					a.label(d)
+				case 4: // data RAM
+					a.op24(0xaf, ramAddr()).sta(0x2122)
+				default:
+					a.ldaA(vPad).op8(0x49, rng.Intn(256)).op24(0x8f, ramAddr())
+				}
+			}
+		}
+	}
+}
+
+// dsp1ParamCount: parameter words of each DSP-1 command (snes_dsp.js).
+var dsp1ParamCount = map[int]int{
+	0x00: 2, 0x20: 2, 0x10: 2, 0x30: 2, 0x04: 2, 0x24: 2, 0x08: 3, 0x18: 4, 0x38: 4, 0x28: 3, 0x0c: 3, 0x2c: 3,
+	0x1c: 6, 0x3c: 6, 0x01: 4, 0x05: 4, 0x31: 4, 0x35: 4, 0x11: 4, 0x15: 4, 0x21: 4, 0x25: 4,
+	0x0d: 3, 0x09: 3, 0x39: 3, 0x3d: 3, 0x19: 3, 0x1d: 3, 0x29: 3, 0x2d: 3, 0x03: 3, 0x33: 3, 0x13: 3, 0x23: 3,
+	0x0b: 3, 0x3b: 3, 0x1b: 3, 0x2b: 3, 0x14: 6, 0x34: 6, 0x02: 7, 0x12: 7, 0x22: 7, 0x32: 7,
+	0x0a: 1, 0x1a: 1, 0x2a: 1, 0x3a: 1, 0x06: 3, 0x16: 3, 0x26: 3, 0x36: 3, 0x0e: 2, 0x1e: 2, 0x2e: 2, 0x3e: 2,
+	0x07: 1, 0x0f: 1, 0x17: 1, 0x27: 1, 0x37: 1, 0x2f: 1, 0x1f: 1, 0x3f: 1,
+}
+
+// dspHLECommands: DSP-1 / DSP-2 commands with random parameters, the results
+// read back into the palette and scroll registers.
+func dspHLECommands(f *fuzzGen, a *asm816, chip string, drAddr, srAddr func() int) {
+	rng := f.rng
+	var cmds []int
+	for c := range dsp1ParamCount {
+		cmds = append(cmds, c)
+	}
+	sortInts(cmds)
+	word := func() int {
+		switch rng.Intn(8) {
+		case 0:
+			return []int{0, 1, 0xffff, 0x7fff, 0x8000, 0x4000, 0xc000, 0x38c0}[rng.Intn(8)]
+		case 1, 2:
+			return rng.Intn(0x200) - 0x100
+		case 3:
+			return rng.Intn(0x4000) - 0x2000
+		}
+		return rng.Intn(0x10000)
+	}
+	put := func(v int) {
+		switch rng.Intn(8) {
+		case 0:
+			a.ldaA(vPad).op8(0x49, v&0xff)
+		case 1:
+			a.ldaA(vFrame).op8(0x49, v&0xff)
+		default:
+			a.lda8(v & 0xff)
+		}
+		a.op24(0x8f, drAddr())
+	}
+	read := func(n int) {
+		for i := 0; i < n; i++ {
+			a.op24(0xaf, drAddr()).sta([]int{0x2122, 0x210d, 0x210f, 0x2111, 0x2113, 0x2122}[rng.Intn(6)])
+		}
+	}
+	for i := 0; i < 4+rng.Intn(8); i++ {
+		if rng.Intn(6) == 0 {
+			a.op24(0xaf, srAddr()).sta(0x2122)
+		}
+		if chip == "DSP-2" {
+			cmd := []int{0x01, 0x03, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0d, 0x0f, rng.Intn(256)}[rng.Intn(10)]
+			put(cmd)
+			nOut := 4
+			switch cmd {
+			case 0x01:
+				for k := 0; k < 32; k++ {
+					put(rng.Intn(256))
+				}
+				nOut = 32
+			case 0x03:
+				put(rng.Intn(256))
+				nOut = 0
+			case 0x05:
+				n := rng.Intn(9)
+				put(n)
+				for k := 0; k < 2*n; k++ {
+					put(rng.Intn(256))
+				}
+				nOut = n
+			case 0x06:
+				n := rng.Intn(9)
+				put(n)
+				for k := 0; k < n; k++ {
+					put(rng.Intn(256))
+				}
+				nOut = n
+			case 0x07, 0x08, 0x09:
+				for k := 0; k < 4; k++ {
+					put(rng.Intn(256))
+				}
+			case 0x0d:
+				outW, inW := rng.Intn(20), rng.Intn(20)
+				put(outW)
+				put(inW)
+				for k := 0; k < (inW+1)>>1; k++ {
+					put(rng.Intn(256))
+				}
+				nOut = (outW + 1) >> 1
+			}
+			read(nOut + rng.Intn(3) - 1)
+			continue
+		}
+		cmd := cmds[rng.Intn(len(cmds))]
+		if rng.Intn(10) == 0 {
+			cmd = rng.Intn(256)
+		}
+		put(cmd)
+		n := dsp1ParamCount[cmd]
+		if rng.Intn(10) == 0 {
+			n = rng.Intn(8) // too few or too many
+		}
+		for k := 0; k < n; k++ {
+			w := word()
+			put(w)
+			put(w >> 8)
+		}
+		nOut := 2 * (1 + rng.Intn(4))
+		if cmd&0x0f == 0x0a {
+			nOut = 8 * (1 + rng.Intn(4)) // raster lines follow one another
+		}
+		read(nOut)
+	}
+}
+
+func sortInts(v []int) {
+	for i := 1; i < len(v); i++ {
+		for k := i; k > 0 && v[k] < v[k-1]; k-- {
+			v[k], v[k-1] = v[k-1], v[k]
+		}
+	}
+}
