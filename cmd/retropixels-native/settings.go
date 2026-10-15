@@ -27,6 +27,8 @@ type Settings struct {
 	Seats map[string]int `json:"arcadeSeats,omitempty"`
 
 	uiSettings // rumble, recording quality and folder (ui_settings.go)
+	// GameCube / Wii through Dolphin (dolphin_settings.go)
+	Dolphin DolphinSettings `json:"dolphin"`
 }
 
 const maxRecent = 10

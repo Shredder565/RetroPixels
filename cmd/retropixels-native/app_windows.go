@@ -100,7 +100,8 @@ type app struct {
 	controls      *controlsDialog
 	mouseTracking bool
 
-	ui *uiState // the start screen, save state slots and the rest (ui_*_windows.go)
+	ui  *uiState // the start screen, save state slots and the rest (ui_*_windows.go)
+	dol dolState // GameCube / Wii (dolphin_windows.go)
 }
 
 var theApp *app
@@ -160,6 +161,7 @@ func runApp() {
 	call(pShowWindow, a.hwnd, swShow)
 	call(pUpdateWindow, a.hwnd)
 	call(pSetTimer, a.hwnd, timerTitle, 250, 0)
+	a.dolStartup()
 
 	// Find the best video encoder in the background, so recording starts at once.
 	go func() {
@@ -179,6 +181,9 @@ func runApp() {
 			break
 		}
 		if a.controls != nil && a.controls.capturing(&m) {
+			continue
+		}
+		if a.dolDialogMessage(&m) {
 			continue
 		}
 		call(pTranslateMessage, uintptr(unsafe.Pointer(&m)))
@@ -231,6 +236,7 @@ func (a *app) buildMenu() {
 	a.addDipMenu()
 	a.addSeatMenu()
 	appendMenu(a.menu, mfPopup, a.gameMenu, "&Game")
+	a.addDolphinMenu()
 
 	a.optMenu = call(pCreatePopupMenu)
 	appendMenu(a.optMenu, mfString, cmdControls, "&Controls…")
@@ -299,6 +305,7 @@ func (a *app) updateMenus() {
 	}
 	enableItem(a.menu, cmdRecord, on || a.recOn)
 	a.uiUpdateMenus()
+	a.dolUpdateMenus()
 }
 
 func (a *app) fillRecent() {
@@ -340,6 +347,7 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		return 0
 	case wmSize:
 		call(pInvalidateRect, hwnd, 0, 0)
+		a.dolResize()
 		return 0
 	case wmGetMinMaxInfo:
 		mm := *(**minMaxInfo)(unsafe.Pointer(&lp)) // lp is a pointer Windows gave us
@@ -428,6 +436,9 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		call(pSetWindowPos, hwnd, 0, uintptr(r.Left), uintptr(r.Top), uintptr(r.Right-r.Left), uintptr(r.Bottom-r.Top), swpNoZOrder|swpNoActivate)
 		return 0
 	case wmClose:
+		if a.dolBeforeClose() {
+			return 0
+		}
 		a.closeGame()
 		saveSettings(a.settings)
 		call(pDestroyWindow, hwnd)
@@ -574,7 +585,9 @@ func (a *app) paint(hdc uintptr) {
 	a.frameMu.Lock()
 	defer a.frameMu.Unlock()
 	if a.frame == nil {
-		a.drawIdle(hdc)
+		if !a.dolPaint(hdc) {
+			a.drawIdle(hdc)
+		}
 		return
 	}
 	a.drawLocked(hdc)
@@ -705,6 +718,7 @@ func (a *app) updateTitle() {
 			}
 		}
 	}
+	t += a.dolTitle()
 	if a.recSaving > 0 {
 		t += " - Saving the recording…"
 	}
@@ -767,6 +781,7 @@ func (a *app) handleEvents() {
 			messageBox(a.hwnd, "ffmpeg couldn't be downloaded: "+e.detail, "RetroPixels Native", mbIconError)
 		default:
 			a.uiEvent(e.name, e.detail)
+			a.dolEvent(e.name, e.detail)
 		}
 	}
 }
@@ -875,6 +890,8 @@ func (a *app) command(id int) {
 		a.pickSeat(id - cmdSeat0)
 	case id >= cmdDip0 && id < cmdDipEnd:
 		a.dipCommand(id)
+	case id >= cmdDolFirst && id <= cmdDolLast:
+		a.dolCommand(id)
 	case id == cmdAbout:
 		messageBox(a.hwnd, "RetroPixels Native "+version+"\n\n"+
 			"A test build of RetroPixels without a web browser inside, so OBS Studio can capture it "+
@@ -905,6 +922,9 @@ func (a *app) volume() float32 {
 // ---------------- games ----------------
 
 func (a *app) openPath(path string) {
+	if a.dolOpenPath(path) {
+		return
+	}
 	g, err := openGame(path)
 	if err != nil {
 		icon := uint32(mbIconWarning)
@@ -960,7 +980,7 @@ func (a *app) closeGame() {
 
 func (a *app) openDialog() string {
 	buf := make([]uint16, 32768)
-	exts := availableExts()
+	exts := append(availableExts(), dolphinExts()...)
 	pat := "*" + strings.Join(exts, ";*")
 	filter := "Games (" + strings.Join(exts, " ") + ")\x00" + pat + "\x00All files\x00*.*\x00\x00"
 	o := openFileName{
@@ -999,6 +1019,9 @@ func (a *app) encoder(ff string) string {
 }
 
 func (a *app) toggleRecording() {
+	if a.dolToggleRecording() {
+		return
+	}
 	s := a.sess
 	if a.recOn {
 		a.recOn = false
