@@ -129,6 +129,7 @@ type ppu struct {
 	nextCount               int
 	nextZero                bool
 	spLoN, spHiN            [8]int
+	lineSp                  [256]uint16 // the current line's sprite pixels (see buildLineSprites)
 	ovfDot                  int
 	frameDone               bool
 }
@@ -489,6 +490,7 @@ func (p *ppu) tick() {
 					p.spLo[i] = p.spLoN[i]
 					p.spHi[i] = p.spHiN[i]
 				}
+				p.buildLineSprites()
 			}
 		}
 		p.fetch = 0
@@ -549,22 +551,14 @@ func (p *ppu) pixel(x, y int) {
 		color = pal
 	}
 	if mask&0x10 != 0 && (x >= 8 || mask&4 != 0) {
-		for i := 0; i < p.spCount; i++ {
-			off := x - p.spX[i]
-			if off < 0 || off > 7 {
-				continue
-			}
-			sp := (p.spLo[i]>>(7-off))&1 | ((p.spHi[i]>>(7-off))&1)<<1
-			if sp == 0 {
-				continue
-			}
-			if i == 0 && p.spZero && bg != 0 && x != 255 {
+		if e := p.lineSp[x]; e != 0 {
+			sp, attr := int(e&3), int(e>>2)&0xff
+			if e&lineSpSlot0 != 0 && p.spZero && bg != 0 && x != 255 {
 				p.status |= 0x40
 			}
-			if bg == 0 || p.spAttr[i]&0x20 == 0 {
-				color = 0x10 | (p.spAttr[i]&3)<<2 | sp
+			if bg == 0 || attr&0x20 == 0 {
+				color = 0x10 | (attr&3)<<2 | sp
 			}
-			break
 		}
 	}
 	c := int(p.palRam[palIndex(0x3f00|color)])
@@ -572,6 +566,32 @@ func (p *ppu) pixel(x, y int) {
 		c &= 0x30 // greyscale
 	}
 	p.screen[y*256+x] = palette[((mask>>5)&7)*64+c]
+}
+
+const lineSpSlot0 = 1 << 10
+
+// buildLineSprites works out, for each x of the coming line, the first
+// sprite (in OAM order) with a non-transparent pixel there: what pixel()
+// would otherwise find by scanning the sprites at every dot.
+func (p *ppu) buildLineSprites() {
+	p.lineSp = [256]uint16{}
+	for i := p.spCount - 1; i >= 0; i-- { // lower slots win, so they go last
+		for off := 0; off < 8; off++ {
+			x := p.spX[i] + off
+			if x > 255 {
+				break
+			}
+			sp := (p.spLo[i]>>(7-off))&1 | ((p.spHi[i]>>(7-off))&1)<<1
+			if sp == 0 {
+				continue
+			}
+			e := uint16(sp) | uint16(p.spAttr[i]&0xff)<<2
+			if i == 0 {
+				e |= lineSpSlot0
+			}
+			p.lineSp[x] = e
+		}
+	}
 }
 
 func (p *ppu) state(s *sio) {
@@ -590,4 +610,7 @@ func (p *ppu) state(s *sio) {
 	s.IntSlice(p.spHi[:])
 	s.IntSlice(p.spLoN[:])
 	s.IntSlice(p.spHiN[:])
+	if !s.save {
+		p.buildLineSprites()
+	}
 }
