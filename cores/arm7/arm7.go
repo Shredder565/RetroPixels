@@ -430,3 +430,36 @@ func (c *CPU) condPass(cond uint32) bool {
 	}
 	return false
 }
+
+// SwitchMode changes the processor mode, swapping in that mode's banked
+// registers (as the GBA's start-up code and BIOS calls do).
+func (c *CPU) SwitchMode(m uint32) { c.switchMode(m) }
+
+// State is everything about the processor that a save state needs.
+type State struct {
+	R                    [16]uint32
+	Bank13, Bank14, SPSR [6]uint32
+	FIQ, USR             [5]uint32
+	CPSR, PC             uint32
+	Cycles               int64
+	Halted, IRQLine      bool
+	Pipe                 [2]uint32
+}
+
+// SaveState returns the processor's state.
+func (c *CPU) SaveState() State {
+	return State{R: c.R, Bank13: c.bank13, Bank14: c.bank14, SPSR: c.spsrBank, FIQ: c.fiqR, USR: c.usrR,
+		CPSR: c.CPSR(), PC: c.PC, Cycles: c.Cycles, Halted: c.Halted, IRQLine: c.IRQLine, Pipe: [2]uint32{c.pipe0, c.pipe1}}
+}
+
+// LoadState restores a state from SaveState (the registers are taken as they
+// are, without switching banks).
+func (c *CPU) LoadState(s State) {
+	c.R, c.bank13, c.bank14, c.spsrBank, c.fiqR, c.usrR = s.R, s.Bank13, s.Bank14, s.SPSR, s.FIQ, s.USR
+	v := s.CPSR
+	c.N, c.Z, c.C, c.V = v>>31&1, v>>30&1, v>>29&1, v>>28&1
+	c.I, c.F, c.T = v>>7&1, v>>6&1, v>>5&1
+	c.Mode = v & 0x1f
+	c.PC, c.Cycles, c.Halted, c.IRQLine = s.PC, s.Cycles, s.Halted, s.IRQLine
+	c.pipe0, c.pipe1 = s.Pipe[0], s.Pipe[1]
+}
