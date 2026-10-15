@@ -85,7 +85,7 @@ jobs:
             echo
             echo "- **RetroPixels-$v.zip**: the app (RetroPixels.exe and the RetroPixels-Native.exe test build, with README, VERSION and CHANGELOG). Unzip and run \`RetroPixels.exe\`."
             echo "- **RetroPixels.exe**: the program on its own."
-            echo "- **RetroPixels-Native.exe**: test build of the native version (no Chromium; every system except Super Nintendo so far)."
+            echo "- **RetroPixels-Native.exe**: test build of the native version (no Chromium; every system, plus Archipelago)."
             echo "- **RetroPixels-source-$v.zip**: the full source code."
             echo
             echo "Windows 10 / 11, 64-bit. The program isn't code-signed yet, so SmartScreen may say \"Windows protected your PC\": click **More info**, then **Run anyway**. No games, BIOS or firmware are included."

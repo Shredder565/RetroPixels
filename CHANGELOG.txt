@@ -4,6 +4,18 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.14.0  (2026-10-15)
+--------------------------------
+- RetroPixels Native test build 6: Super Nintendo, with every cartridge chip
+  RetroPixels.exe supports (SA-1, Super FX, DSP-1 to DSP-4, ST010, ST011,
+  ST018, Cx4, S-DD1, SPC7110, OBC1, S-RTC), matching RetroPixels.exe on every
+  frame compared. Chip programs you supply are asked for once and kept.
+  RetroPixels Native now plays every system RetroPixels.exe plays.
+- Archipelago in RetroPixels Native: open patch files, and connect the SNI
+  Client (Super Nintendo) or the BizHawk Client (Game Boy / Color, Game Boy
+  Advance, NES, Nintendo 64) directly, as in RetroPixels.exe. Tested with
+  Archipelago's real server and clients.
+
 RetroPixels 2.13.0  (2026-10-15)
 --------------------------------
 - RetroPixels Native test build 5: GameCube and Wii games through Dolphin,

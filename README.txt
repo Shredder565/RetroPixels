@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.13.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.14.0 (the number also shows next to the RetroPixels name in the app).
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
 Sega Genesis, Sega Master System, Atari 2600, Atari 7800, classic arcade
@@ -218,16 +218,15 @@ Recording games
 RetroPixels Native (test build)
 RetroPixels-Native.exe is a new version of RetroPixels being rebuilt without
 a web browser inside, so OBS Studio's Window Capture works with any capture
-method (or use Display Capture). This test build plays NES, Atari 2600,
+method (or use Display Capture). This test build plays Super Nintendo, NES, Atari 2600,
 Master System, Game Boy / Game Boy Color, Atari 7800, Sega Genesis / Mega
 Drive, Game Boy Advance and Nintendo 64 games, and the arcade games (Pac-Man,
 Galaxian, Space Invaders, Donkey Kong, TMNT, TMNT: Turtles in Time and The
-Simpsons), and GameCube / Wii games through Dolphin; Super Nintendo will
-follow in a later test build.
-Keep using RetroPixels.exe for Super Nintendo for now. The two programs keep separate settings
+Simpsons), and GameCube / Wii games through Dolphin: every system
+RetroPixels.exe plays. The two programs keep separate settings
 and saves, so trying the test build changes nothing in RetroPixels.exe.
 - Starting a game: drag the game file onto the window, or File > Open game...
-  (Ctrl+O). .nes, .a26, .sms, .gb, .gbc, .a78, .md, .gen, .smd, .gba, .agb,
+  (Ctrl+O). .sfc, .smc, .nes, .a26, .sms, .gb, .gbc, .a78, .md, .gen, .smd, .gba, .agb,
   .z64, .n64, .v64 and .bin files work, also inside .zip and .7z files.
   Arcade games: open the game's .zip ROM set and keep it zipped (a .7z works
   too); the game is found from the names of the files inside, so the zip can
@@ -289,6 +288,27 @@ and saves, so trying the test build changes nothing in RetroPixels.exe.
   Reset (Ctrl+R) after changing one. Turtles in Time and The Simpsons keep
   their settings and high scores in the board's EEPROM, saved like a battery
   save.
+- Super Nintendo keys: X = A, Z = B, S = X, A = Y, Q / W = L / R, Enter =
+  Start, Shift = Select; on an Xbox controller the buttons sit where the
+  Super Nintendo pad has them (Xbox B = A, A = B, Y = X, X = Y, LB / RB =
+  L / R). Every cartridge chip RetroPixels.exe supports works (SA-1, Super
+  FX, DSP-1 to DSP-4, ST010, ST011, ST018, Cx4, S-DD1, SPC7110, OBC1, S-RTC).
+  DSP-3, DSP-4, ST010, ST011 and ST018 games need your own dump of the chip's
+  program (dsp3.rom, dsp4.rom, st010.rom, st011.rom, st018.rom); the first
+  time, RetroPixels Native asks for the file and keeps it in
+  %APPDATA%\RetroPixels Native\firmware. DSP-1 and DSP-2 games work without
+  it.
+- Archipelago: open your patch file (.apsm, .aplttp, .apred, .apemerald and
+  others) with File > Open game or drop it on the window. The first time,
+  RetroPixels Native asks for the original ROM named in that game's
+  Archipelago setup guide, checks it, and remembers it. Patched games keep
+  their own saves. While the game runs, start the SNI Client (Super Nintendo)
+  or the BizHawk Client (Game Boy / Color, Game Boy Advance, NES, Nintendo
+  64) from the Archipelago Launcher; it finds RetroPixels Native by itself
+  on this computer (127.0.0.1, port 23074 for SNI, 43055-43059 for BizHawk).
+  SNI, QUsb2Snes and BizHawk aren't needed. The title bar and Game >
+  Archipelago show whether the client is connected; Help > Archipelago walks
+  through the steps.
 - Not in the test build yet (as in RetroPixels.exe, or still to come): Game
   Gear, the Atari 7800's SOUPER cartridges, YM2151 sound and high-score
   cartridge saves.
