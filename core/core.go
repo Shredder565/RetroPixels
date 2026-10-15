@@ -10,6 +10,9 @@ type Options struct {
 	SampleRate int    // sound output rate in Hz; cores make samples at this rate
 	SRAM       []byte // battery save to restore, or nil
 	Name       string // the game's file name, for cores that pick behaviour from it
+	// Dips: arcade machine settings (DIP switches) the player chose, by id;
+	// settings not in it (or not valid) take the game's defaults.
+	Dips map[string]int
 }
 
 // Info describes a system's controls and picture.
