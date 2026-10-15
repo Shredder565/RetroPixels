@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.12.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.13.0 (the number also shows next to the RetroPixels name in the app).
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
 Sega Genesis, Sega Master System, Atari 2600, Atari 7800, classic arcade
@@ -222,8 +222,9 @@ method (or use Display Capture). This test build plays NES, Atari 2600,
 Master System, Game Boy / Game Boy Color, Atari 7800, Sega Genesis / Mega
 Drive, Game Boy Advance and Nintendo 64 games, and the arcade games (Pac-Man,
 Galaxian, Space Invaders, Donkey Kong, TMNT, TMNT: Turtles in Time and The
-Simpsons); Super Nintendo and GameCube / Wii will follow in later test builds.
-Keep using RetroPixels.exe for them. The two programs keep separate settings
+Simpsons), and GameCube / Wii games through Dolphin; Super Nintendo will
+follow in a later test build.
+Keep using RetroPixels.exe for Super Nintendo for now. The two programs keep separate settings
 and saves, so trying the test build changes nothing in RetroPixels.exe.
 - Starting a game: drag the game file onto the window, or File > Open game...
   (Ctrl+O). .nes, .a26, .sms, .gb, .gbc, .a78, .md, .gen, .smd, .gba, .agb,
@@ -291,9 +292,43 @@ and saves, so trying the test build changes nothing in RetroPixels.exe.
 - Not in the test build yet (as in RetroPixels.exe, or still to come): Game
   Gear, the Atari 7800's SOUPER cartridges, YM2151 sound and high-score
   cartridge saves.
-- Save states: F2 saves, F4 loads (one save state per game); Ctrl+Z undoes the
-  last load. On the controller: click the right stick to save, the left stick
-  to load. Battery saves (games that save by themselves) are kept as you play.
+- Start screen: with no game running, the window shows a drop target, an
+  Open game button, your recent games (click one, or use the arrow keys and
+  Enter, or the controller's D-pad and A), and a controller check that lights
+  up the buttons you press.
+- Save states: four slots per game. F2 saves to the chosen slot, F4 loads it,
+  F3 / Shift+F3 picks the next / previous slot (Game > State slot shows
+  them with their times); Ctrl+Z undoes the last load. Game > Save states
+  (F6) shows all four with a picture of each, and exports, deletes or
+  imports state files. Controller: click the right stick to save, the left
+  stick to load, flick the right stick left or right to change slot (Nintendo
+  64: View + D-pad left / right). Save states from earlier test builds are
+  slot 1.
+- Battery saves: Game > Battery save imports a .sav / .srm from another
+  emulator (or one exported from RetroPixels.exe with "Download battery
+  save"); the game restarts, and the old one is kept as a .bak file. Export
+  saves the game's battery save as a .sav. Dropping a .sav or .state file on
+  a running game imports it.
+- Screenshots: F12 (Game > Screenshot) saves only the game's picture to
+  Pictures\RetroPixels.
+- .bin files: File > "Open .bin files as" picks the system instead of
+  guessing.
+- Options > Controller rumble turns rumble off. Record > Quality, Change
+  recordings folder and Recent recordings work as in RetroPixels.exe's
+  Recordings tab. Help > Keys and shortcuts (F1) lists every key.
+- GameCube and Wii (through Dolphin): .iso .gcm .rvz .wbfs .ciso .gcz .wia
+  and WiiWare .wad. It uses the Dolphin RetroPixels.exe already found or
+  downloaded; if there is none, choose GameCube / Wii > Download the latest
+  Dolphin (from dolphin-emu.org), or Change Dolphin... to pick a Dolphin.exe.
+  GameCube / Wii > Library lists the games in your games folders (search,
+  filter, sort; double-click, Enter or controller A plays). Games inside a
+  .zip or .7z must be unpacked first. The game plays inside the RetroPixels
+  Native window, so OBS can capture it. F11 or Alt+Enter: fullscreen; Esc:
+  leave fullscreen; F9: start or stop recording; Alt+F4: stop the game. Games
+  are recorded automatically (turn it off in the GameCube / Wii menu); the
+  mp4 is saved when the game ends. The menu also has Game volume, Dolphin
+  settings (close Dolphin first), Set up Xbox controller and Controller
+  layout. Save states are Dolphin's: Shift+F1 saves, F1 loads.
 - Recording: F9 (or Record > Start recording, or hold the right stick down for
   a second) starts and stops it. The video is only the game's picture and
   sound - no window, menus or mouse pointer - saved as .mp4 in
@@ -305,7 +340,8 @@ and saves, so trying the test build changes nothing in RetroPixels.exe.
   title, otherwise find window of same executable". Messages like "State
   saved" show in the title bar only, never on the picture.
 - Kept in %APPDATA%\RetroPixels Native: settings.json, and saves\<system>\
-  with each game's battery save (.sav) and save state (.state).
+  with each game's battery save (.sav) and save states (.state, slots 2-4 as
+  .slotN.state) with a .png picture of each.
 - The version shows in the title bar and in Help > About.
 
 Where things are kept

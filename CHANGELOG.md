@@ -2,6 +2,11 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.13.0] - 2026-10-15
+
+- RetroPixels Native test build 5: GameCube and Wii games through Dolphin, shown inside the RetroPixels Native window (so OBS captures them), with the library, Dolphin download, game volume, Dolphin settings, Xbox controller setup and automatic recording, using the Dolphin RetroPixels.exe already has.
+- RetroPixels Native now has a start screen with your recent games and a controller check, four save-state slots with pictures (F3 picks the slot, F6 shows them all), importing and exporting battery saves and save states, screenshots of just the game (F12), recording quality and folder choices, recent recordings, a rumble switch, "Open .bin files as" and a keys-and-shortcuts list (F1).
+
 ## [2.12.0] - 2026-10-15
 
 - RetroPixels Native test build 4: RetroPixels-Native.exe now plays the arcade games too: Pac-Man / Puck Man, Galaxian, Space Invaders, Donkey Kong, Teenage Mutant Ninja Turtles, TMNT: Turtles in Time and The Simpsons. They give the same picture and sound as RetroPixels.exe on every frame compared (15,000 frames each for the three Konami games). Game > Player picks your turtle or Simpson in the 4-player games, and Game > Machine settings changes the DIP switches.
