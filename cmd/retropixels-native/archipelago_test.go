@@ -352,3 +352,47 @@ func (s *snesStub) MemoryDomains() []string                        { return s.me
 func (s *snesStub) MemorySize(d string) int                        { return s.mem.MemorySize(d) }
 func (s *snesStub) ReadMemory(d string, a uint32, b []byte) error  { return s.mem.ReadMemory(d, a, b) }
 func (s *snesStub) WriteMemory(d string, a uint32, b []byte) error { return s.mem.WriteMemory(d, a, b) }
+
+// With the real Super Nintendo core: a SNES patch makes the game, and the
+// SNI Client's reads and writes reach its memory.
+func TestAPSNESRealCore(t *testing.T) {
+	if coreMakers["snes"] == nil {
+		t.Skip("no Super Nintendo core in this build")
+	}
+	t.Setenv("RETRO_NATIVE_DIR", t.TempDir())
+	dir := t.TempDir()
+	path := filepath.Join(dir, "AP_test_P1_Tester.aprptest")
+	os.WriteFile(path, apTestData(t, "AP_test_P1_Tester.aprptest"), 0o644)
+	p, err := readAPPatchFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := apMakeGame(p, path, apTestData(t, "procedure_base.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := newSession(g, &fakeHost{}, &fakeCard{}, loadMap("snes", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.start()
+	defer s.stop()
+	game := apGameFor(g, s.core)
+	if game == nil || game.System != "SNES" || game.Title != "RetroPixels Test" {
+		t.Fatalf("game: %+v", game)
+	}
+	hub := apbridge.NewHub(0, 0)
+	hub.SetGame(game, &apTarget{s: s})
+	res, err := hub.Run(apbridge.SNISplit(0x100, 16)) // what the patch wrote into the ROM
+	if err != nil || string(res[0].V) != "RETROPIXELS TEST" {
+		t.Fatalf("ROM read: %+v %v", res, err)
+	}
+	ops := apbridge.SNISplit(0xF51F00, 4)
+	ops[0].T, ops[0].V = "write", []byte{1, 2, 3, 4}
+	if _, err := hub.Run(ops); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := hub.Run(apbridge.SNISplit(0xF51F00, 4)); err != nil || !bytes.Equal(res[0].V, []byte{1, 2, 3, 4}) {
+		t.Fatalf("WRAM: %+v %v", res, err)
+	}
+}
