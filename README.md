@@ -49,6 +49,8 @@ RetroPixels window.
 - **Cartridge hardware** emulated in software: SNES Super FX, SA-1, DSP-1/2, Cx4, S-DD1, SPC7110;
   about 120 NES mappers and the Famicom sound chips; Game Boy MBC1–7, HuC1/3, TAMA5; GBA sensor
   carts; Atari 2600 bank-switching including DPC+ and the Supercharger.
+- **Archipelago multiworld randomizers.** Open an Archipelago patch file and play; the Archipelago
+  SNI Client and BizHawk Client connect to RetroPixels directly.
 - **GameCube and Wii** through Dolphin, downloaded from inside the app, with a library, volume
   control and automatic recording.
 
@@ -87,6 +89,32 @@ uses it to draw its window). For recording, RetroPixels downloads ffmpeg the fir
 <p align="center">
   <img src="docs/images/home.png" alt="The RetroPixels home screen" width="820">
 </p>
+
+## Archipelago
+
+RetroPixels works with [Archipelago](https://archipelago.gg) multiworld randomizers. It takes the
+place of both the emulator and the connector: the SNI Client and the BizHawk Client from the
+Archipelago Launcher talk to RetroPixels directly, so you don't need SNI, BizHawk or a Lua script.
+
+1. Open your patch file (for example `AP_..._P1_Name.apsm`, `.aplttp`, `.apred`, `.apemerald`) like
+   any game: drop it on the window or click **Choose game file…**.
+2. The first time, RetroPixels asks for the original ROM the game's Archipelago setup guide names
+   (a zipped ROM works too). It checks it is the right one and keeps it, so the next patch for that
+   game opens straight away. The patched game gets its own saves, separate from the unpatched game.
+3. In the Archipelago Launcher start the **SNI Client** (Super Nintendo games) or the **BizHawk
+   Client** (Game Boy / Color, Game Boy Advance, NES, Nintendo 64), and connect it to the server
+   (for example `/connect archipelago.gg:38281`).
+4. Play. The **Archipelago** button in the bar under the game shows whether the client is
+   connected; click it for these steps.
+
+Already patched the ROM with the Archipelago Launcher? Open the patched ROM instead; that works the
+same way. Patches whose games need extra Python steps to build the ROM (Kirby's Dream Land 3,
+Castlevania 64, Castlevania: Circle of the Moon, EarthBound, Mario & Luigi: Superstar Saga,
+Link's Awakening DX, SMZ3, Gauntlet Legends) can't be applied inside RetroPixels: RetroPixels says
+so and you make the ROM with the Launcher's **Open Patch**, then open that ROM. Games that use their
+own connector script (for example The Legend of Zelda, Link's Awakening DX, Ocarina of Time) aren't
+supported. RetroPixels only listens on this computer (127.0.0.1: port 23074 for SNI, 43055–43059
+for BizHawk) and never connects to the Archipelago server itself.
 
 ## Building from source
 

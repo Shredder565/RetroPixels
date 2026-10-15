@@ -301,6 +301,8 @@ func (s *n64Session) run(rom, save []byte) {
 			}
 		case n64StateReq:
 			c.reply <- s.state(c.load)
+		case n64APReq:
+			c.reply <- s.apOps(c.ops)
 		}
 	}
 }

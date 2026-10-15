@@ -387,6 +387,8 @@
       requestAnimationFrame(this.loop);
       const dt = Math.min(100, now - this.last); this.last = now;
       if (this.paused || this.modalOpen) return;
+      // An Archipelago client can hold the game still for a moment while it reads and writes.
+      if (this.holdUntil && now < this.holdUntil) return;
       this.readInput();
       const fast = this.fast || this.holdFast;
       let frames = 0;

@@ -136,6 +136,38 @@ Playing classic games
 - Atari 7800 light-gun games (Alien Brigade, Barnyard Blaster, Sentinel) start,
   but can't be aimed yet.
 
+Archipelago (multiworld randomizers, new)
+- RetroPixels works with Archipelago (archipelago.gg). It takes the place of
+  the emulator and its connector: the SNI Client and the BizHawk Client from
+  the Archipelago Launcher talk to RetroPixels directly, so you don't need
+  SNI, BizHawk or a Lua script.
+- 1. Open your patch file (for example AP_..._P1_Name.apsm, .aplttp, .apred,
+     .apemerald) like any game: drop it on the window or click "Choose game
+     file...".
+  2. The first time, RetroPixels asks for the original ROM that the game's
+     Archipelago setup guide names (a zipped ROM works too). It checks that
+     it's the right one and keeps it, so the next patch for that game opens
+     straight away. The patched game has its own saves, separate from the
+     game without the patch.
+  3. In the Archipelago Launcher start the "SNI Client" (Super Nintendo
+     games) or the "BizHawk Client" (Game Boy / Color, Game Boy Advance, NES,
+     Nintendo 64) and connect it to the server (for example
+     /connect archipelago.gg:38281).
+  4. Play. The "Archipelago" button in the bar under the game shows whether
+     the client is connected; click it to see these steps.
+- Already made the ROM with the Archipelago Launcher? Open the patched ROM
+  instead; that works too.
+- Some games need extra steps from Archipelago's own code to build their ROM
+  (Kirby's Dream Land 3, Castlevania 64, Castlevania: Circle of the Moon,
+  EarthBound, Mario & Luigi: Superstar Saga, Link's Awakening DX, SMZ3,
+  Gauntlet Legends). RetroPixels tells you when a patch is one of them: make
+  the ROM with "Open Patch" in the Archipelago Launcher, then open that ROM.
+  Games that use their own connector script (The Legend of Zelda, Link's
+  Awakening DX, Ocarina of Time...) aren't supported.
+- RetroPixels only answers clients on this computer (127.0.0.1: port 23074
+  for SNI, 43055-43059 for BizHawk) and never connects to the Archipelago
+  server itself.
+
 GameCube & Wii (Dolphin)
 - No Dolphin yet? Click "Download Dolphin" in the GameCube tab: RetroPixels
   downloads the latest official version from dolphin-emu.org into a "Dolphin"

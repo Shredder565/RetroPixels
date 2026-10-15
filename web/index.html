@@ -236,6 +236,18 @@
     background: var(--panel-2); font-weight: 700; font-size: 13px; }
   #seatRow .seat-btn[aria-pressed="true"] { background: var(--accent); color: #fff; }
   #seatRow .seat-btn[aria-pressed="true"] .num { background: rgba(255,255,255,.22); }
+  /* Archipelago: is a client connected to this game? */
+  .ap-badge { display: inline-flex; align-items: center; gap: 7px; background: var(--panel); border: 1px solid var(--line);
+    color: var(--text); border-radius: 999px; padding: 5px 12px; font: inherit; font-size: 13px; cursor: pointer; }
+  .ap-badge:hover { background: var(--panel-2); }
+  .ap-badge .ap-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+  .ap-badge.on { border-color: var(--accent); }
+  .ap-badge.on .ap-dot { background: var(--accent-2); box-shadow: 0 0 6px var(--accent-2); }
+  .ap-badge.wait .ap-dot { background: var(--warn); }
+  .ap-badge.busy { border-color: var(--danger); }
+  .ap-badge.busy .ap-dot { background: var(--danger); }
+  #apHelp p { margin: 8px 0 0; font-size: 14px; }
+  #apHelp ol { margin: 8px 0 0; padding-left: 20px; font-size: 14px; }
   #game { width: 100%; aspect-ratio: 4 / 3; max-height: 72vh; background: #000;
     border-radius: 12px; overflow: hidden; }
   #game.gba { aspect-ratio: 3 / 2; }
@@ -344,11 +356,12 @@
 
     <div id="drop">
       <p style="font-size:18px;font-weight:600">Drop a game file here</p>
-      <p class="muted">The system is picked automatically from the file extension. Zipped games work too. For .bin files (used by Genesis and both Ataris) the system is guessed — click it above first if it's guessed wrong.</p>
+      <p class="muted">The system is picked automatically from the file extension. Zipped games work too. For .bin files (used by Genesis and both Ataris) the system is guessed — click it above first if it's guessed wrong.
+        Archipelago patch files (.apsm, .aplttp, .apred, .apemerald…) open here too.</p>
       <p style="margin-top:16px">
         <button class="btn" id="pickBtn">Choose game file…</button>
         <input type="file" id="fileInput" hidden
-               accept=".nes,.fds,.unf,.unif,.sfc,.smc,.fig,.swc,.gb,.gbc,.gba,.agb,.z64,.n64,.v64,.md,.gen,.smd,.sms,.bin,.a26,.a78,.zip">
+               accept=".nes,.fds,.unf,.unif,.sfc,.smc,.fig,.swc,.gb,.gbc,.gba,.agb,.z64,.n64,.v64,.md,.gen,.smd,.sms,.bin,.a26,.a78,.zip,.aplttp,.apsm,.apsmz3,.apsmw,.apkdl3,.apyi,.apeb,.apl2ac,.apsoe,.apdkc3,.apred,.apblue,.apsml2,.apemerald,.apmlss,.apygo06,.apbn3,.apcvcotm,.apmm2,.apmm3,.apff1,.aptloz,.apcv64">
       </p>
       <p class="muted" id="sysHint" hidden>Classic arcade games. Load the game's .zip ROM set (keep it zipped).</p>
       <p class="muted" id="msg"></p>
@@ -515,6 +528,8 @@
     <div id="playerBar">
       <div><strong id="nowPlaying"></strong> <span class="muted" id="nowSystem"></span></div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button type="button" id="apBadge" class="ap-badge" hidden aria-controls="apHelp" title="Archipelago multiworld: click for how to connect">
+          <span class="ap-dot"></span><span id="apText">Archipelago</span></button>
         <span id="recTimer" class="rec-timer" hidden><span class="rec-dot"></span><span id="recTime">0:00</span></span>
         <button class="btn ghost" id="recBtn" title="Record gameplay to an .mp4 file (F9)">● Record</button>
         <button class="btn ghost" id="fsBtn">Fullscreen</button>
@@ -526,6 +541,19 @@
       <div class="seat-group"></div>
     </div>
     <div id="game"></div>
+
+    <details id="apHelp" class="card" style="margin-top:16px" hidden>
+      <summary style="cursor:pointer;font-weight:600">Archipelago</summary>
+      <p id="apWho" class="muted" hidden></p>
+      <ol>
+        <li>Open the <strong>Archipelago Launcher</strong> and start the <strong id="apClient">BizHawk Client</strong>.
+          It finds RetroPixels by itself — you don't need <span id="apNotNeeded">BizHawk or its Lua script</span>.</li>
+        <li>In the client, connect to the multiworld server (for example <code>/connect archipelago.gg:38281</code>) and enter your player name if it asks.</li>
+        <li>Keep playing here. Items you find are sent, and items from others arrive in the game.</li>
+      </ol>
+      <p id="apProblem" class="bad" hidden></p>
+      <p class="muted" style="font-size:13px">RetroPixels answers the client only on this computer (127.0.0.1). Its save files and save states for this game are kept apart from the same game without the patch.</p>
+    </details>
 
     <details id="arcadeSettings" class="card" style="margin-top:16px" hidden>
       <summary style="cursor:pointer;font-weight:600">Machine settings (DIP switches)</summary>
@@ -1590,8 +1618,8 @@
   // Battery saves (the cartridge's own save memory) for RetroPixels' emulators, and
   // chip programs the player supplied for cartridges that need one ("firmware", keyed by chip name).
   const sramDb = new Promise((resolve, reject) => {
-    const r = indexedDB.open("retropixels-sram", 2);
-    r.onupgradeneeded = () => { for (const n of ["sram", "firmware"]) if (!r.result.objectStoreNames.contains(n)) r.result.createObjectStore(n); };
+    const r = indexedDB.open("retropixels-sram", 3);
+    r.onupgradeneeded = () => { for (const n of ["sram", "firmware", "apbase"]) if (!r.result.objectStoreNames.contains(n)) r.result.createObjectStore(n); };
     r.onsuccess = () => resolve(r.result);
     r.onerror = () => reject(r.error);
   });
@@ -1681,6 +1709,7 @@
       screenshot: () => player.screenshotPNG(),
     };
     gameReady = true;
+    startArchipelago(core, rom, name);
     showSeatPicker();
     document.getElementById("sramTools").hidden = !player.core.getSRAM();
     if (core === "arcade") showArcadeSettings(player.core);
@@ -1801,6 +1830,7 @@
       return fail(`"${file.name}" looks like a GameCube or Wii game. Those need the RetroPixels desktop app.`);
     }
     if (ext === "7z") return fail(`RetroPixels can't open .7z files. Unzip "${file.name}" first (or zip it as .zip).`);
+    if (/^ap[a-z0-9]+$/.test(ext)) return openAPPatch(file);
     let core = coreForExt(ext), rom = null, coreOpts = null;
     try {
       if (ext === "zip") {
@@ -1828,10 +1858,17 @@
     if (!core) return fail(`Couldn't tell which system "${file.name}" is for. Pick a system above, then load it again.` +
       (ext === "zip" && window.RPArcade ? ` If it's an arcade game: the ones RetroPixels can play are ${window.RPArcade.supportedText()}.` : ""));
     if (started) return;
+    beginGame(core, rom || new Uint8Array(await file.arrayBuffer()), file.name.replace(/\.[^.]+$/, ""), coreOpts, null);
+  }
+
+  // Shows the player and starts the game. ap: the Archipelago patch it was made from, if any.
+  function beginGame(core, rom, name, coreOpts, ap) {
+    if (started) return;
     started = true;
-    const name = file.name.replace(/\.[^.]+$/, "");
+    apPatchInfo = ap;
     // "rp:" keeps these save states apart from ones made by the engine RetroPixels used before.
-    gameKey = `rp:${core}:${name}`;
+    // Games made from an Archipelago patch keep theirs apart from the unpatched game ("ap:").
+    gameKey = ap ? `rp:${core}:ap:${name}` : `rp:${core}:${name}`;
     gameName = name.replace(/[^\w\- ]+/g, "") || "game";
 
     launcherEl.hidden = true;
@@ -1845,8 +1882,126 @@
     document.getElementById("game").classList.toggle("gba", core === "gba");
     renderSlots();
 
-    startOwn(core, rom || new Uint8Array(await file.arrayBuffer()), name, coreOpts);
+    startOwn(core, rom, name, coreOpts);
   }
+
+  // ---------- Archipelago ----------
+  // A patch file (.apsm, .apred...) is made into the game here: RetroPixels.exe reads it, asks for the
+  // original ROM it needs (kept per game for next time), and applies it. While a game runs, Archipelago's
+  // own clients (SNI Client, BizHawk Client) connect to RetroPixels.exe, which asks emu/archipelago.js
+  // to read and write the game's memory.
+  let apPatchInfo = null, apBridge = null;
+  const apBaseKey = info => `${info.game}|${info.patchEnding}`;
+  const apOp = (mode, fn) => ownDbOp("apbase", mode, fn);
+
+  async function apPost(path, body) {
+    const res = await fetch(path, { method: "POST", headers: { "X-Retro-Token": DESKTOP.token, "Content-Type": "application/octet-stream" }, body });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      const e = new Error(data.error || `Request failed (${res.status})`); e.code = data.code; throw e;
+    }
+    return res;
+  }
+
+  async function openAPPatch(file) {
+    const fail = text => { msg.textContent = text; msg.style.color = "var(--warn)"; };
+    if (!DESKTOP) return fail(`"${file.name}" is an Archipelago patch. Those open in the RetroPixels desktop app.`);
+    const patch = new Uint8Array(await file.arrayBuffer());
+    let info;
+    try { info = await (await apPost("/api/ap/inspect?name=" + encodeURIComponent(file.name), patch)).json(); }
+    catch (e) { return fail(`Couldn't open "${file.name}": ${e.message}`); }
+    const game = info.game || "this game";
+    if (info.unsupported || !OWN[info.system]) {
+      return fail(`RetroPixels can't make the ${game} ROM from "${file.name}" by itself (${info.unsupported || "its console isn't one RetroPixels plays"}). ` +
+        `Open the patch with the Archipelago Launcher ("Open Patch"), which makes the ROM, then open that ROM here — the Archipelago connection works the same way.`);
+    }
+    const name = file.name.replace(/\.[^.]+$/, "");
+    const make = async base => {
+      const head = new Uint8Array(4); new DataView(head.buffer).setUint32(0, patch.length, true);
+      const res = await apPost("/api/ap/patch?name=" + encodeURIComponent(file.name), new Blob([head, patch, base]));
+      return new Uint8Array(await res.arrayBuffer());
+    };
+    const go = rom => beginGame(info.system, rom, name, null, info);
+    // the original ROM kept from last time
+    const kept = await apOp("readonly", s => s.get(apBaseKey(info))).catch(() => null);
+    if (kept) {
+      try { return go(await make(new Uint8Array(kept))); }
+      catch (e) {
+        if (e.code !== "wrongBase") return fail(`Couldn't make the game from "${file.name}": ${e.message}`);
+        await apOp("readwrite", s => s.delete(apBaseKey(info))).catch(() => {});
+      }
+    }
+    // ask for it
+    msg.style.color = "";
+    msg.innerHTML = `<strong>${esc(file.name)}</strong> is an Archipelago patch for <strong>${esc(game)}</strong>` +
+      (info.playerName ? ` (player ${esc(info.playerName)})` : "") + `. Choose your ${esc(game)} ROM — the original one Archipelago's setup guide for this game asks for. ` +
+      `RetroPixels keeps it for this game's next patch.<br><button class="btn sm" id="apBasePick" style="margin-top:8px">Choose ${esc(game)} ROM…</button>` +
+      `<input type="file" id="apBaseInput" hidden> <span id="apBaseMsg"></span>`;
+    const input = document.getElementById("apBaseInput");
+    document.getElementById("apBasePick").addEventListener("click", () => input.click());
+    input.addEventListener("change", async () => {
+      const f = input.files[0];
+      input.value = "";
+      if (!f) return;
+      const out = document.getElementById("apBaseMsg");
+      out.textContent = "Making the game…"; out.className = "muted";
+      let base = new Uint8Array(await f.arrayBuffer());
+      try {
+        if (/\.zip$/i.test(f.name)) { // a zipped ROM: use the biggest file inside
+          const z = await readZip(base), e = z.entries.slice().sort((a, b) => b.size - a.size)[0];
+          if (e) base = await z.extract(e);
+        }
+        const rom = await make(base);
+        await apOp("readwrite", s => s.put(base, apBaseKey(info))).catch(() => {});
+        msg.textContent = "";
+        go(rom);
+      } catch (e) { out.textContent = e.message; out.className = "bad"; }
+    });
+  }
+
+  async function startArchipelago(core, rom, name) {
+    if (!DESKTOP) return;
+    try {
+      await loadScript("emu/archipelago.js");
+      if (!window.RPArchipelago.supports(core) || !player) return;
+      // (the game can restart with a new player, e.g. after importing a battery save)
+      if (apBridge) apBridge.close();
+      else window.addEventListener("pagehide", () => apBridge && apBridge.close());
+      apBridge = window.RPArchipelago.attach(player, { rom, title: apPatchInfo ? apPatchInfo.game : name, onStatus: renderAP });
+    } catch (e) { console.warn("Archipelago:", e); }
+  }
+
+  function renderAP(st) {
+    const core = ownGame && ownGame.core, client = window.RPArchipelago.clientFor(core) || "BizHawk Client";
+    const connected = st.clients || [];
+    const badge = document.getElementById("apBadge"), help = document.getElementById("apHelp");
+    // Shown for games made from a patch, ROMs named the way Archipelago names them, and whenever a client connects.
+    const show = !!apPatchInfo || connected.length > 0 || /^AP[_-]/i.test(ownGame ? ownGame.name : "");
+    badge.hidden = help.hidden = !show;
+    if (!show) return;
+    const portProblem = client === "SNI Client" ? st.sniErr : st.bizhawkErr;
+    let text, cls;
+    if (connected.length) { text = `Archipelago: ${connected.join(" + ")} connected`; cls = "on"; }
+    else if (portProblem) { text = "Archipelago: can't connect"; cls = "busy"; }
+    else { text = `Archipelago: waiting for the ${client}`; cls = "wait"; }
+    document.getElementById("apText").textContent = text;
+    badge.className = "ap-badge " + cls;
+    document.getElementById("apClient").textContent = client;
+    document.getElementById("apNotNeeded").textContent = client === "SNI Client" ? "SNI" : "BizHawk or its Lua script";
+    const prob = document.getElementById("apProblem");
+    prob.hidden = !portProblem;
+    prob.textContent = portProblem ? `RetroPixels can't take the ${client}'s address: ${portProblem}. Close that program and RetroPixels takes the address within a few seconds.` : "";
+    const who = document.getElementById("apWho");
+    if (apPatchInfo) {
+      who.hidden = false;
+      who.textContent = `${apPatchInfo.game}${apPatchInfo.playerName ? " · player " + apPatchInfo.playerName : ""}${apPatchInfo.server ? " · server " + apPatchInfo.server : ""}`;
+    } else who.hidden = true;
+  }
+  document.getElementById("apBadge").addEventListener("click", () => {
+    const help = document.getElementById("apHelp");
+    help.open = !help.open;
+    if (help.open) help.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  });
 
   document.getElementById("backBtn").addEventListener("click", () => {
     if (recorder && !confirm("You're recording. Stop and discard the recording?")) return;

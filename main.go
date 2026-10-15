@@ -229,6 +229,7 @@ func newMux() *http.ServeMux {
 	registerDolphinInstallRoutes(mux)
 	registerLifetimeRoutes(mux)
 	registerN64Routes(mux)
+	registerAPRoutes(mux)
 	return mux
 }
 
@@ -271,6 +272,8 @@ func main() {
 			log.Println(err)
 		}
 	}()
+	// Archipelago's clients find RetroPixels here (loopback only); see archipelago.go.
+	ap.start()
 
 	// Opens the window and blocks until it closes. Then the app exits.
 	if err := openAppWindow(url, true); err != nil {

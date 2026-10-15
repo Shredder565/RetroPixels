@@ -2,6 +2,11 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [Unreleased]
+
+- New: Archipelago (archipelago.gg) multiworld randomizers. Open an Archipelago patch file (.apsm, .aplttp, .apred, .apemerald and others) like a game; RetroPixels asks once for the original ROM, checks it, keeps it for that game and makes the randomized game, with its own saves. Patched ROMs made with the Archipelago Launcher open too.
+- The Archipelago SNI Client (Super Nintendo) and BizHawk Client (Game Boy / Color, Game Boy Advance, NES, Nintendo 64) connect to RetroPixels directly; SNI, BizHawk and Lua scripts aren't needed. An "Archipelago" button under the game shows whether the client is connected and how to connect it. RetroPixels only answers programs on this computer.
+
 ## [2.7.1] - 2026-10-14
 
 - RetroPixels has its own icon: the warrior picture now shows on the desktop, in Explorer, on the taskbar and on the window.
