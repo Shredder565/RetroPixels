@@ -133,6 +133,8 @@ type loadedGame struct {
 	Name   string // for saves and recordings: the file's name without extension
 	Path   string
 	Dips   map[string]int // arcade machine settings the player chose
+	// chip programs chosen for this game but not yet kept (see firmwareFor)
+	Firmware map[string][]byte
 }
 
 // arcadeHooks: what the archive code asks the arcade core (cores_arcade.go

@@ -102,7 +102,11 @@ func newSession(g *loadedGame, h host, snd soundOut, cmap ControlMap) (*session,
 	if b, err := os.ReadFile(sramPath(g.System, g.Name)); err == nil && len(b) > 0 {
 		sram = b
 	}
-	c, err := safeNew(mk, g.ROM, core.Options{SampleRate: sampleRate, SRAM: sram, Name: g.Name, Dips: g.Dips})
+	fw := loadFirmware()
+	for chip, b := range g.Firmware {
+		fw[chip] = b
+	}
+	c, err := safeNew(mk, g.ROM, core.Options{SampleRate: sampleRate, SRAM: sram, Name: g.Name, Dips: g.Dips, Firmware: fw})
 	if err != nil {
 		return nil, err
 	}

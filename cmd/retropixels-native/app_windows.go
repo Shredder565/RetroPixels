@@ -937,6 +937,36 @@ func (a *app) openPath(path string) {
 	a.closeGame()
 	g.Dips = a.settings.Dips[g.Name]
 	s, err := newSession(g, a, a.snd, a.settings.controlMap(g.System))
+	// a cartridge chip whose program the player supplies: ask for the file
+	// (once: it is kept in the firmware folder when the game accepts it)
+	for err != nil {
+		chip, file, msg, ok := needsFirmware(err)
+		if !ok {
+			break
+		}
+		if messageBox(a.hwnd, msg, "RetroPixels Native", mbOkCancel|mbIconInfo) != idOk {
+			return
+		}
+		p := a.fileDialog("Choose the "+chip+" chip's program ("+file+")",
+			"Chip programs (*.rom *.bin)\x00*.rom;*.bin\x00All files\x00*.*\x00\x00", a.settings.LastFolder)
+		if p == "" {
+			return
+		}
+		b, rerr := os.ReadFile(p)
+		if rerr != nil {
+			messageBox(a.hwnd, rerr.Error(), "RetroPixels Native", mbIconWarning)
+			continue
+		}
+		if g.Firmware == nil {
+			g.Firmware = map[string][]byte{}
+		}
+		g.Firmware[chip] = b
+		if s, err = newSession(g, a, a.snd, a.settings.controlMap(g.System)); err == nil {
+			if werr := saveFirmware(chip, b); werr != nil {
+				messageBox(a.hwnd, "The chip program works, but couldn't be kept for next time: "+werr.Error(), "RetroPixels Native", mbIconWarning)
+			}
+		}
+	}
 	if err != nil {
 		messageBox(a.hwnd, fmt.Sprintf("Couldn't start %q: %v", filepath.Base(path), err), "RetroPixels Native", mbIconWarning)
 		return
@@ -979,20 +1009,25 @@ func (a *app) closeGame() {
 }
 
 func (a *app) openDialog() string {
-	buf := make([]uint16, 32768)
 	exts := append(availableExts(), dolphinExts()...)
 	pat := "*" + strings.Join(exts, ";*")
 	filter := "Games (" + strings.Join(exts, " ") + ")\x00" + pat + "\x00All files\x00*.*\x00\x00"
+	return a.fileDialog("Open game", filter, a.settings.LastFolder)
+}
+
+// fileDialog: the Open dialog; "" when cancelled.
+func (a *app) fileDialog(title, filter, dir string) string {
+	buf := make([]uint16, 32768)
 	o := openFileName{
 		Owner:   a.hwnd,
 		Filter:  u16z(filter),
 		File:    &buf[0],
 		MaxFile: uint32(len(buf)),
-		Title:   u16("Open game"),
+		Title:   u16(title),
 		Flags:   ofnFileMustExist | ofnPathMustExist | ofnHideReadOnly | ofnExplorer | ofnNoChangeDir,
 	}
-	if a.settings.LastFolder != "" {
-		o.InitialDir = u16(a.settings.LastFolder)
+	if dir != "" {
+		o.InitialDir = u16(dir)
 	}
 	o.StructSize = uint32(unsafe.Sizeof(o))
 	if call(pGetOpenFileNameW, uintptr(unsafe.Pointer(&o))) == 0 {
