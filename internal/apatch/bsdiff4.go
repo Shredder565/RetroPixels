@@ -1,4 +1,4 @@
-package main
+package apatch
 
 // A decoder for "BSDIFF40" patches (the format Archipelago's patch files use
 // for their .bsdiff4 parts), written for RetroPixels.
@@ -53,8 +53,8 @@ func readBz2(b []byte, limit int64) ([]byte, error) {
 	return out, nil
 }
 
-// bsdiff4Patch applies a BSDIFF40 patch to old and returns the new file.
-func bsdiff4Patch(old, patch []byte) ([]byte, error) {
+// BSDiff4 applies a BSDIFF40 patch to old and returns the new file.
+func BSDiff4(old, patch []byte) ([]byte, error) {
 	if len(patch) < 32 || string(patch[:8]) != "BSDIFF40" {
 		return nil, errors.New("that isn't a bsdiff4 patch")
 	}

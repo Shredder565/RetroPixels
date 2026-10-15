@@ -114,7 +114,7 @@ func TestWebSocketEcho(t *testing.T) {
 			if err != nil {
 				return
 			}
-			_ = ws.write(op, msg)
+			_ = ws.Write(op, msg)
 		}
 	}))
 	defer srv.Close()
