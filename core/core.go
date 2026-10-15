@@ -5,6 +5,11 @@
 // same way, frame for frame, so the native app plays exactly like the web one.
 package core
 
+import (
+	"errors"
+	"fmt"
+)
+
 // Options are what the shell hands a core when it opens a game.
 type Options struct {
 	SampleRate int    // sound output rate in Hz; cores make samples at this rate
@@ -59,4 +64,120 @@ type Analog interface {
 // Rumble returns 0 (off) to 1 (full).
 type Rumbler interface {
 	Rumble() float32
+}
+
+// Memory is implemented by cores whose memory Archipelago's clients
+// (archipelago.gg) can read and write; RetroPixels Native serves them through
+// internal/apbridge. Domains are named the way BizHawk's cores name them, as
+// web/emu/archipelago.js names them for the web player, because that's what
+// the BizHawk Client's game handlers ask for:
+//
+//	gb      ROM, WRAM, VRAM, OAM, HRAM, System Bus; CartRAM when the cartridge has RAM
+//	gba     ROM, EWRAM, IWRAM, BIOS, PALRAM, VRAM, OAM, SRAM, System Bus
+//	nes     RAM, PRG ROM, WRAM, CIRAM (nametables), OAM, PALRAM, System Bus,
+//	        CHR VROM or CHR VRAM; Battery RAM (= WRAM) for battery cartridges
+//	n64     RDRAM, ROM, System Bus
+//	segaMD  68K RAM, Z80 RAM, MD CART, SRAM, M68K BUS
+//	sms     Main RAM, ROM, Cart (Volatile) RAM
+//	snes    CARTROM, CARTRAM, WRAM, VRAM, CGRAM, OAM, APURAM, System Bus;
+//	        SA1 IRAM for SA-1 cartridges (the SNI Client's usb2snes address
+//	        space is mapped onto CARTROM, CARTRAM, WRAM, VRAM, APURAM, CGRAM
+//	        and OAM: internal/apbridge's SNIRegions)
+//
+// The shell calls these only on the game's thread, between frames, and only
+// for addr..addr+len-1 inside the domain (MemorySize); they must not change
+// how the game runs (no side effects of reading a hardware register).
+type Memory interface {
+	MemoryDomains() []string
+	MemorySize(domain string) int
+	ReadMemory(domain string, addr uint32, buf []byte) error
+	WriteMemory(domain string, addr uint32, data []byte) error
+}
+
+// Domain is one memory domain, for cores that implement Memory with Domains.
+type Domain struct {
+	Name string
+	Mem  []byte // plain memory, or nil when Peek is used
+	Size int    // the domain's size when Peek is used, or to use only the start of Mem
+	// byte by byte (System Bus views); Poke nil = writes are dropped
+	Peek func(addr uint32) byte
+	Poke func(addr uint32, v byte)
+	// Wrote, when set, is called after a write (to mark a save as changed)
+	Wrote func()
+}
+
+func (d *Domain) size() int {
+	if d.Peek != nil {
+		return d.Size
+	}
+	if d.Size > 0 && d.Size < len(d.Mem) {
+		return d.Size
+	}
+	return len(d.Mem)
+}
+
+// Domains implements Memory over a list of domains.
+type Domains []Domain
+
+func (ds Domains) find(name string, addr uint32, n int) (*Domain, error) {
+	for i := range ds {
+		if d := &ds[i]; d.Name == name {
+			if int64(addr)+int64(n) > int64(d.size()) {
+				return nil, errors.New("address out of range for " + name)
+			}
+			return d, nil
+		}
+	}
+	return nil, fmt.Errorf("no memory domain named %q", name)
+}
+
+func (ds Domains) MemoryDomains() []string {
+	out := make([]string, len(ds))
+	for i := range ds {
+		out[i] = ds[i].Name
+	}
+	return out
+}
+
+func (ds Domains) MemorySize(name string) int {
+	for i := range ds {
+		if ds[i].Name == name {
+			return ds[i].size()
+		}
+	}
+	return 0
+}
+
+func (ds Domains) ReadMemory(name string, addr uint32, buf []byte) error {
+	d, err := ds.find(name, addr, len(buf))
+	if err != nil {
+		return err
+	}
+	if d.Peek == nil {
+		copy(buf, d.Mem[addr:])
+		return nil
+	}
+	for i := range buf {
+		buf[i] = d.Peek(addr + uint32(i))
+	}
+	return nil
+}
+
+func (ds Domains) WriteMemory(name string, addr uint32, data []byte) error {
+	d, err := ds.find(name, addr, len(data))
+	if err != nil {
+		return err
+	}
+	switch {
+	case d.Peek == nil:
+		copy(d.Mem[addr:], data)
+	case d.Poke != nil:
+		for i, v := range data {
+			d.Poke(addr+uint32(i), v)
+		}
+	}
+	if d.Wrote != nil {
+		d.Wrote()
+	}
+	return nil
 }

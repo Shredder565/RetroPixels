@@ -37,19 +37,28 @@ func (m *Machine) busArea(a uint32) ([]byte, int) {
 	return nil, 0
 }
 
-func (m *Machine) domain(domain string) ([]byte, error) {
+func (m *Machine) domain(domain string, addr uint32, n int) ([]byte, error) {
+	var mem []byte
 	switch domain {
 	case "RDRAM":
-		return m.rdram, nil
+		mem = m.rdram
 	case "ROM":
-		return m.rom, nil
+		mem = m.rom
+	default:
+		return nil, fmt.Errorf("no memory domain named %q", domain)
 	}
-	return nil, fmt.Errorf("no memory domain named %q", domain)
+	if int64(addr)+int64(n) > int64(len(mem)) {
+		return nil, fmt.Errorf("address out of range for %s", domain)
+	}
+	return mem, nil
 }
 
-// ReadMemory copies len(buf) bytes from addr in a domain.
+// ReadMemory copies len(buf) bytes from addr in a domain (all inside it).
 func (m *Machine) ReadMemory(domain string, addr uint32, buf []byte) error {
 	if domain == "System Bus" {
+		if int64(addr)+int64(len(buf)) > 1<<32 {
+			return fmt.Errorf("address out of range for %s", domain)
+		}
 		for i := range buf {
 			mem, off := m.busArea(addr + uint32(i))
 			if off < len(mem) {
@@ -60,12 +69,9 @@ func (m *Machine) ReadMemory(domain string, addr uint32, buf []byte) error {
 		}
 		return nil
 	}
-	mem, err := m.domain(domain)
+	mem, err := m.domain(domain, addr, len(buf))
 	if err != nil {
 		return err
-	}
-	if int(addr) >= len(mem) {
-		return nil
 	}
 	copy(buf, mem[addr:])
 	return nil
@@ -75,6 +81,9 @@ func (m *Machine) ReadMemory(domain string, addr uint32, buf []byte) error {
 // and the cartridge ROM; elsewhere they're dropped).
 func (m *Machine) WriteMemory(domain string, addr uint32, data []byte) error {
 	if domain == "System Bus" {
+		if int64(addr)+int64(len(data)) > 1<<32 {
+			return fmt.Errorf("address out of range for %s", domain)
+		}
 		for i, v := range data {
 			mem, off := m.busArea(addr + uint32(i))
 			if off < len(mem) {
@@ -83,12 +92,9 @@ func (m *Machine) WriteMemory(domain string, addr uint32, data []byte) error {
 		}
 		return nil
 	}
-	mem, err := m.domain(domain)
+	mem, err := m.domain(domain, addr, len(data))
 	if err != nil {
 		return err
-	}
-	if int(addr) >= len(mem) {
-		return nil
 	}
 	copy(mem[addr:], data)
 	return nil
