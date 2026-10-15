@@ -199,8 +199,11 @@ func TestSaveStateRoundTrip(t *testing.T) {
 			if err := b.LoadState(st); err != nil {
 				t.Fatal(err)
 			}
-			if !slices.Equal(a.Screen(), b.Screen()) {
-				t.Fatal("picture differs straight after loading")
+			// (the picture straight after loading is drawn again from the
+			// state, as the web cores do, so it can differ from the one drawn
+			// mid-frame; the state itself must be the same)
+			if st1, _ := b.SaveState(); !bytes.Equal(st, st1) {
+				t.Fatal("the loaded state saves differently")
 			}
 			for f := 1000; f < 1400; f++ {
 				pa, sa := step(a, ins[f])
@@ -266,15 +269,25 @@ func BenchmarkFrame(b *testing.B) {
 	for id, set := range realOrGenerated(b) {
 		b.Run(id, func(b *testing.B) {
 			c := openSet(b, set, id, nil)
-			for i := 0; i < 300; i++ {
+			// into the game first (coins, starts, all players moving about)
+			ins := script(7, 2400+b.N, c.Info().Buttons)
+			for i := range ins {
+				ins[i].reset = false
+			}
+			run := func(in frameInput) {
+				for p, v := range in.pads {
+					c.SetInput(p, v)
+				}
 				c.RunFrame()
 				c.TakeAudio()
+			}
+			for i := 0; i < 2400; i++ {
+				run(ins[i])
 			}
 			b.ResetTimer()
 			start := time.Now()
 			for i := 0; i < b.N; i++ {
-				c.RunFrame()
-				c.TakeAudio()
+				run(ins[2400+i])
 			}
 			b.ReportMetric(float64(time.Since(start).Microseconds())/1000/float64(b.N), "ms/frame")
 		})

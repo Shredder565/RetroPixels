@@ -60,6 +60,7 @@ type app struct {
 	sizeMenu    uintptr
 	recMenu     uintptr
 	dipMenu     uintptr
+	seatMenu    uintptr
 	font        uintptr
 	bigFont     uintptr
 
@@ -223,6 +224,7 @@ func (a *app) buildMenu() {
 	appendMenu(a.gameMenu, mfString, cmdLoadState, "&Load state\tF4")
 	appendMenu(a.gameMenu, mfString, cmdUndoLoad, "&Undo load\tCtrl+Z")
 	a.addDipMenu()
+	a.addSeatMenu()
 	appendMenu(a.menu, mfPopup, a.gameMenu, "&Game")
 
 	a.optMenu = call(pCreatePopupMenu)
@@ -340,6 +342,9 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 	case wmInitMenuPopup:
 		if wp == a.recentMenu {
 			a.fillRecent()
+		}
+		if wp == a.seatMenu {
+			a.fillSeats()
 		}
 		if wp == a.dipMenu {
 			a.fillDips()
@@ -861,6 +866,8 @@ func (a *app) command(id int) {
 		d := recordingsDir()
 		os.MkdirAll(d, 0o755)
 		shellOpen(d)
+	case id >= cmdSeat0 && id < cmdSeat0+4:
+		a.pickSeat(id - cmdSeat0)
 	case id >= cmdDip0 && id < cmdDipEnd:
 		a.dipCommand(id)
 	case id == cmdAbout:
@@ -914,6 +921,7 @@ func (a *app) openPath(path string) {
 	a.frame = nil
 	a.frameMu.Unlock()
 	a.sess = s
+	a.restoreSeat(s)
 	a.settings.addRecent(path)
 	a.settings.LastFolder = filepath.Dir(path)
 	saveSettings(a.settings)

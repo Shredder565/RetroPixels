@@ -61,6 +61,7 @@ type session struct {
 	mouseX                        atomic.Uint32 // float32 bits, -1..1, or NaN when not over the picture
 	mousePaddle                   atomic.Bool
 	mouseFire                     atomic.Bool
+	seat                          atomic.Int32 // the player the keyboard and first controller play as (seat.go)
 
 	keysMu sync.Mutex
 	keys   map[string]bool
@@ -407,7 +408,8 @@ func (s *session) readInput() {
 		if p == 0 && s.mousePaddle.Load() && s.mouseFire.Load() {
 			bits |= s.buttonBit("Fire")
 		}
-		s.core.SetInput(p, bits)
+		who := s.seatOf(p, players)
+		s.core.SetInput(who, bits)
 		if an, ok := s.core.(core.Analog); ok {
 			var ax [4]float32
 			if pad != nil {
@@ -419,7 +421,7 @@ func (s *session) readInput() {
 				}
 			}
 			for i, v := range ax {
-				an.SetAnalog(p, i, v)
+				an.SetAnalog(who, i, v)
 			}
 		}
 	}
