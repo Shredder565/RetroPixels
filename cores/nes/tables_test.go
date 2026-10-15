@@ -27,8 +27,8 @@ func TestTablesMatchJS(t *testing.T) {
 		t.Fatal(err)
 	}
 	var js struct {
-		Palette                                      []uint32
-		Vol5b, Ksl, Sin, DbToAmp, Decay, Attack      []string
+		Palette                                 []uint32
+		Vol5b, Ksl, Sin, DbToAmp, Decay, Attack []string
 	}
 	if err := json.Unmarshal(out, &js); err != nil {
 		t.Fatal(err)
