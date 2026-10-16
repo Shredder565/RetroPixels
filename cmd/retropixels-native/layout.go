@@ -51,4 +51,6 @@ func recordSize(h int, aspect float64) (int, int) {
 
 // scaleTo resizes a picture (nearest neighbour) so a recording keeps one size
 // when the game changes resolution.
-func scaleTo(dst []uint32, dw, dh int, src []uint32, sw, sh int) { games.ScaleTo(dst, dw, dh, src, sw, sh) }
+func scaleTo(dst []uint32, dw, dh int, src []uint32, sw, sh int) {
+	games.ScaleTo(dst, dw, dh, src, sw, sh)
+}
