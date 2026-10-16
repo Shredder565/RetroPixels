@@ -428,4 +428,5 @@ func (s *game) reset() {
 		}
 	}()
 	s.core.Reset()
+	s.failed = nil // (a game that stopped gets another go)
 }
