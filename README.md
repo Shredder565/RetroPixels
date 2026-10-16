@@ -53,9 +53,10 @@ RetroPixels window.
   SNI Client and BizHawk Client connect to RetroPixels directly.
 - **GameCube and Wii** through Dolphin, downloaded from inside the app, with a library, volume
   control and automatic recording.
-- **Any arcade game in any version of MAME.** Add as many MAME versions as you like (your own
-  `mame.exe`, found on your PC, or any official release downloaded from inside the app), pick the
-  version each game plays in, and play it inside the RetroPixels window.
+- **Any arcade game in any version of MAME, with MAME built in.** The download comes with the MAME
+  team's official Windows release of MAME, unchanged. Add as many other MAME versions as you like
+  (your own `mame.exe`, found on your PC, or any official release downloaded from inside the app).
+  RetroPixels checks which version plays each game, and plays it inside the RetroPixels window.
 
 ## Supported systems
 
@@ -72,7 +73,7 @@ RetroPixels window.
 | Atari 7800 | `.a78` `.bin` | SuperGame, POKEY, banksets |
 | Arcade | `.zip` ROM sets | Pac-Man, Galaxian, Space Invaders, Donkey Kong, TMNT, TMNT: Turtles in Time, The Simpsons |
 | GameCube / Wii | `.iso` `.gcm` `.rvz` `.wbfs` `.ciso` `.gcz` `.wia` `.wad` | Through Dolphin |
-| Arcade (MAME) | `.zip` `.7z` ROM sets | Through MAME, any version: choose the version per game |
+| Arcade (MAME) | `.zip` `.7z` ROM sets | Through MAME: built in, or any other version, chosen per game |
 
 ¹ DSP-3, DSP-4, ST010, ST011 and ST018 run a program stored inside the chip. RetroPixels asks for
 your own dump of it the first time and remembers it.
@@ -126,6 +127,14 @@ RetroPixels' own arcade emulators play the games in the table above. Every other
 in [MAME](https://www.mamedev.org), and in **any version of MAME**: ROM sets have to match the MAME
 version they were made for, so RetroPixels lets each game use its own.
 
+**MAME is built in.** The `RetroPixels-<version>.zip` download has a `MAME` folder with the MAME
+team's own official Windows release of MAME, unchanged: the release build downloads it from
+[MAME's GitHub releases](https://github.com/mamedev/mame/releases), checks it against the SHA-256
+checksum GitHub lists for it, and packs it as it is (`tools/bundlemame`). Nothing in MAME is rebuilt,
+patched or rewritten. Its source code for that exact release is attached to each RetroPixels release
+(`MAME-<version>-source.tar.gz`). It shows as **MAME 0.xxx (built in)** and is the default when you
+have no other MAME. Put your ROM sets in `MAME\roms`, or add your own ROM folder.
+
 1. Open the **Arcade (MAME)** tab (in RetroPixels Native: the **Arcade (MAME)** menu > Library).
 2. Add MAME: **Add MAME…** for a `mame.exe` you have (any version), **Find MAME on this PC**, or
    pick a version under **Download a MAME version**. Downloads are the MAME team's official Windows
@@ -137,6 +146,11 @@ version they were made for, so RetroPixels lets each game use its own.
    The game plays inside the RetroPixels window; **Stop game** brings you back. If a game doesn't
    start, RetroPixels shows MAME's reason (for example missing ROM files) so you can try another
    version.
+5. RetroPixels asks each of your MAME versions which games it plays (MAME's own `-verifyroms`, once
+   per game and version) and shows it next to each game: **Plays in MAME 0.xxx**, or **Won't start**
+   with the versions that do play it. A game its default version can't play starts in one that can,
+   unless you picked a version for it. Old ROM sets often lack chips newer MAME versions need: those
+   play in an older MAME version, or with an up-to-date set.
 
 MAME keeps its own settings, saves and save states in its folder; RetroPixels doesn't change them.
 

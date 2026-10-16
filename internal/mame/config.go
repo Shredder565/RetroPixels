@@ -23,12 +23,16 @@ type Install struct {
 	Exe     string    `json:"exe"`
 	Version string    `json:"version"` // "0.270", "" when it couldn't be read
 	Added   time.Time `json:"added,omitempty"`
+	BuiltIn bool      `json:"builtIn,omitempty"` // came in the RetroPixels download
 }
 
 // Label names an install for people: "MAME 0.270".
 func (i Install) Label() string {
 	if i.Version == "" {
 		return "MAME (" + filepath.Base(filepath.Dir(i.Exe)) + ")"
+	}
+	if i.BuiltIn {
+		return "MAME " + i.Version + " (built in)"
 	}
 	return "MAME " + i.Version
 }
@@ -44,6 +48,9 @@ type Config struct {
 	Played   map[string]time.Time `json:"played,omitempty"` // by lower-cased short name
 	Embed    *bool                `json:"playInWindow,omitempty"`
 	Detected bool                 `json:"detected,omitempty"` // looked for MAME on this PC once
+	// the built-in MAMEs (and their ROM folder) listed already, so
+	// removing one sticks
+	BuiltInSeen []string `json:"builtInSeen,omitempty"`
 }
 
 // EmbedOn: games play inside the RetroPixels window (the default).
@@ -197,8 +204,14 @@ func ConfigPath() string {
 
 var fileMu sync.Mutex
 
-// Load reads the settings (empty when there are none yet).
+// Load reads the settings (empty when there are none yet), listing a MAME
+// that came with the download first if it's new.
 func Load() Config {
+	useBuiltIn()
+	return loadLocked()
+}
+
+func loadLocked() Config {
 	fileMu.Lock()
 	defer fileMu.Unlock()
 	return load()

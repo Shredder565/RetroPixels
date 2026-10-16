@@ -4,6 +4,22 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.17.0  (2026-10-16)
+--------------------------------
+- MAME now comes with RetroPixels. The RetroPixels-2.17.0.zip download has
+  the MAME team's own official Windows release of MAME inside, in its MAME
+  folder, unchanged: downloaded from MAME's GitHub, checked against the
+  SHA-256 checksum GitHub lists for it, and not rebuilt or patched. Its
+  source code is attached to the release. Put your ROM sets in MAME\roms
+  (or add your own ROM folder) and play: nothing else to download. Both
+  apps list it as "MAME 0.xxx (built in)" and use it as the default when
+  you have no other MAME. Your other MAME versions still work alongside it.
+- RetroPixels now checks each game in every MAME version you have (with
+  MAME's own -verifyroms, once per game and version) and shows whether it
+  plays: "Plays in MAME 0.xxx", or "Won't start" and the versions it does
+  play in. A game whose default version can't play it starts in a version
+  that can, unless you chose one for it.
+
 RetroPixels 2.16.0  (2026-10-16)
 --------------------------------
 - New: RetroPixels for Android. Each release now includes

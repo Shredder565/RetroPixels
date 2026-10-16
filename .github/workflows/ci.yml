@@ -46,6 +46,20 @@ jobs:
           go build -trimpath -ldflags "-s -w -H windowsgui" -o RetroPixels.exe .
           go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=$version" -o RetroPixels-Native.exe ./cmd/retropixels-native
 
+      # MAME comes in the download: the MAME team's official Windows release,
+      # unchanged, checked against GitHub's SHA-256 for it, with its source code
+      # going in the release.
+      - name: Built-in MAME
+        id: mame
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' main.go)
+          go run ./tools/bundlemame -dir "dist/RetroPixels-$version/MAME" -source dist/mame-source.tar.gz
+          v=$(sed -n 's/^version=//p' "$GITHUB_OUTPUT" | tail -n 1)
+          mv dist/mame-source.tar.gz "dist/MAME-$v-source.tar.gz"
+          ls -la "dist/RetroPixels-$version/MAME"/*/ | head -n 30
+
       - name: Package
         id: pkg
         run: |
@@ -87,10 +101,11 @@ jobs:
           {
             echo "## Download"
             echo
-            echo "- **RetroPixels-$v.zip**: the app (RetroPixels.exe and the RetroPixels-Native.exe test build, with README, VERSION and CHANGELOG). Unzip and run \`RetroPixels.exe\`."
+            echo "- **RetroPixels-$v.zip**: the app (RetroPixels.exe and the RetroPixels-Native.exe test build, with README, VERSION and CHANGELOG), with MAME ${{ steps.mame.outputs.version }} built in for arcade games. Unzip and run \`RetroPixels.exe\`."
             echo "- **RetroPixels.exe**: the program on its own."
             echo "- **RetroPixels-Native.exe**: test build of the native version (no Chromium; every system, plus Archipelago)."
             echo "- **RetroPixels-source-$v.zip**: the full source code."
+            echo "- **MAME-${{ steps.mame.outputs.version }}-source.tar.gz**: the source code of the built-in MAME. It's the MAME team's official release ${{ steps.mame.outputs.tag }}, unchanged (https://github.com/mamedev/mame/releases/tag/${{ steps.mame.outputs.tag }}, SHA-256 ${{ steps.mame.outputs.sha256 }}), licensed under the GPL, version 2 or later."
             echo "- **RetroPixels-$v.apk**: RetroPixels for Android (Android 7 or newer; open it on the phone to install)."
             echo "- **RetroPixels-Android-Studio-$v.zip**: the Android app as an Android Studio project, with its emulator engine prebuilt."
             echo
@@ -104,7 +119,7 @@ jobs:
           } > dist/notes.md
           git archive --format=zip --prefix="RetroPixels-source-$v/" -o "dist/RetroPixels-source-$v.zip" HEAD
           cp RetroPixels.exe RetroPixels-Native.exe dist/
-          (cd dist && sha256sum RetroPixels-*.zip RetroPixels.exe RetroPixels-Native.exe > SHA256SUMS.txt)
+          (cd dist && sha256sum RetroPixels-*.zip RetroPixels.exe RetroPixels-Native.exe MAME-*-source.tar.gz > SHA256SUMS.txt)
 
       - name: Publish release
         if: steps.rel.outputs.publish == 'true'
@@ -120,6 +135,7 @@ jobs:
             dist/RetroPixels.exe
             dist/RetroPixels-Native.exe
             dist/RetroPixels-source-${{ steps.pkg.outputs.version }}.zip
+            dist/MAME-${{ steps.mame.outputs.version }}-source.tar.gz
             dist/SHA256SUMS.txt
 
   # RetroPixels for Android: the APK and the Android Studio project zip.

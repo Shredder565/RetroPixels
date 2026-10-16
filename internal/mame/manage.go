@@ -68,9 +68,10 @@ type Launch struct {
 }
 
 // Plan works out which MAME plays a ROM set and its command line. exe
-// overrides the game's own pick ("" = the game's pick or the default).
+// overrides the game's own pick ("" = the game's pick, else the default
+// unless it's known not to play the set and another version is: see Best).
 func Plan(c Config, path, exe string, o LaunchOptions) (Launch, error) {
-	in, ok := c.For(ShortName(path))
+	in, ok := c.Best(Game{Short: ShortName(path), Path: path})
 	if exe != "" {
 		in, ok = c.Find(exe)
 	}

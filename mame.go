@@ -23,6 +23,7 @@ var (
 	mameLoading bool
 	mameAgain   bool // the folders changed while a scan was running
 	mameFinding bool // looking for MAME on this PC
+	mameCheck   bool // asking each MAME which games it plays
 	mameInst    *mame.Progress
 	mameRels    []mame.Release
 	mameRelsAt  time.Time
@@ -50,7 +51,11 @@ func mameReload() {
 				mameMu.Unlock()
 				continue
 			}
-			mameGames, mameLoaded, mameLoading = games, true, false
+			mameGames, mameLoaded, mameLoading, mameCheck = games, true, false, true
+			mameMu.Unlock()
+			mame.CheckGames(c, games)
+			mameMu.Lock()
+			mameCheck = false
 			mameMu.Unlock()
 			return
 		}
@@ -98,15 +103,26 @@ func mameStatus() map[string]any {
 		"gameVersion": games, "install": inst, "finding": mameFinding, "detected": c.Detected, "problem": mameProblem}
 }
 
+// mameRow is one game in the library, with the MAME it starts in and
+// whether that version is known to play it.
+type mameRow struct {
+	mame.Game
+	Plays mame.GameStatus `json:"plays"`
+	Note  string          `json:"note"`
+}
+
 func mameLibraryPayload() map[string]any {
 	st := mameStatus()
 	mameMu.Lock()
-	games, loaded, loading := mameGames, mameLoaded, mameLoading
+	games, loaded, loading, checking := mameGames, mameLoaded, mameLoading, mameCheck
 	mameMu.Unlock()
-	if games == nil {
-		games = []mame.Game{}
+	c := mame.Load()
+	rows := make([]mameRow, 0, len(games))
+	for _, g := range games {
+		s := c.Status(g)
+		rows = append(rows, mameRow{Game: g, Plays: s, Note: s.Text()})
 	}
-	return map[string]any{"games": games, "loaded": loaded, "loading": loading, "status": st}
+	return map[string]any{"games": rows, "loaded": loaded, "loading": loading, "checking": checking, "status": st}
 }
 
 // launchMameGame starts a ROM set in its MAME (exe overrides the game's own
