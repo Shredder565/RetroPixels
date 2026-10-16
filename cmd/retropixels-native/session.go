@@ -219,7 +219,7 @@ func (s *session) setControlMap(m ControlMap) {
 func (s *session) usesKey(k string) bool {
 	s.keysMu.Lock()
 	defer s.keysMu.Unlock()
-	return s.cmap.usesKey(k)
+	return s.cmap.UsesKey(k)
 }
 
 func (s *session) loop() {

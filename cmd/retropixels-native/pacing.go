@@ -1,6 +1,10 @@
 package main
 
-import "math"
+import (
+	"math"
+
+	"retropixels/internal/games"
+)
 
 // pacer decides how many frames to run, like Player.loop in host.js: frames
 // follow the clock, and run a little early or late to keep the sound queue
@@ -73,32 +77,5 @@ func (p *pacer) reset() { p.acc = 0 }
 // toPCM converts a core's float samples (mono or interleaved stereo) to
 // 16-bit stereo for the sound card, at volume 0..1, clipping.
 func toPCM(dst []int16, src []float32, stereo bool, volume float32) []int16 {
-	dst = dst[:0]
-	conv := func(v float32) int16 {
-		v *= volume * 32767
-		if v > 32767 {
-			return 32767
-		}
-		if v < -32768 {
-			return -32768
-		}
-		if v != v { // NaN
-			return 0
-		}
-		return int16(v)
-	}
-	if stereo {
-		for _, v := range src {
-			dst = append(dst, conv(v))
-		}
-		if len(dst)%2 == 1 {
-			dst = append(dst, dst[len(dst)-1])
-		}
-		return dst
-	}
-	for _, v := range src {
-		s := conv(v)
-		dst = append(dst, s, s)
-	}
-	return dst
+	return games.ToPCM(dst, src, stereo, volume)
 }

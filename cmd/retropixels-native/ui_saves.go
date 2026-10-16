@@ -18,22 +18,19 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"retropixels/internal/games"
 )
 
 // slotCount: four slots, as the web page.
-const slotCount = 4
+const slotCount = games.SlotCount
 
 // slotPath: slot 1 is the game's .state file (the one earlier test builds
 // kept, so old save states are slot 1); slots 2-4 are "<game>.slot2.state"...
-func slotPath(sys, game string, slot int) string {
-	if slot <= 0 {
-		return statePath(sys, game)
-	}
-	return filepath.Join(savesDir(sys), safeName(game)+fmt.Sprintf(".slot%d.state", slot+1))
-}
+func slotPath(sys, game string, slot int) string { return store().SlotPath(sys, game, slot) }
 
 // slotThumbPath: the slot's picture, next to it.
-func slotThumbPath(sys, game string, slot int) string { return slotPath(sys, game, slot) + ".png" }
+func slotThumbPath(sys, game string, slot int) string { return store().SlotThumbPath(sys, game, slot) }
 
 // slotInfo: what the slot holds.
 type slotInfo struct {
@@ -173,17 +170,10 @@ func (s *session) hasSRAM() bool {
 // ---- files ----
 
 // deleteSlot removes a slot's state and picture.
-func deleteSlot(sys, game string, slot int) error {
-	err := os.Remove(slotPath(sys, game, slot))
-	os.Remove(slotThumbPath(sys, game, slot))
-	if os.IsNotExist(err) {
-		return nil
-	}
-	return err
-}
+func deleteSlot(sys, game string, slot int) error { return store().DeleteSlot(sys, game, slot) }
 
 // maxSRAMImport: no game's battery save comes close (N64 Controller Paks: 128 KB).
-const maxSRAMImport = 8 << 20
+const maxSRAMImport = games.MaxSRAMImport
 
 // sramFileExts: files that are battery saves when dropped on a running game.
 var sramFileExts = map[string]bool{"sav": true, "srm": true, "sram": true, "eep": true, "sra": true, "fla": true, "mpk": true}
@@ -191,50 +181,18 @@ var sramFileExts = map[string]bool{"sav": true, "srm": true, "sram": true, "eep"
 // importSRAM puts a battery save from another emulator in place of the
 // game's (the old one is kept as .sav.bak). The game must be closed first,
 // so it doesn't write its own back.
-func importSRAM(sys, game string, data []byte) error {
-	if len(data) == 0 {
-		return errors.New("that file is empty")
-	}
-	if len(data) > maxSRAMImport {
-		return errors.New("that file is too big to be a battery save")
-	}
-	p := sramPath(sys, game)
-	if old, err := os.ReadFile(p); err == nil && len(old) > 0 {
-		if err := writeFileAtomic(p+".bak", old); err != nil {
-			return fmt.Errorf("couldn't keep a copy of the old battery save: %v", err)
-		}
-	}
-	return writeFileAtomic(p, data)
-}
+func importSRAM(sys, game string, data []byte) error { return store().ImportSRAM(sys, game, data) }
 
 // ---- pictures ----
 
 const thumbHeight = 120 // the Save states window's pictures
 
 // toRGBA: a picture from the emulator (0x00RRGGBB) as an image.
-func toRGBA(pix []uint32, w, h int) *image.RGBA {
-	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	for i, p := range pix[:w*h] {
-		o := i * 4
-		img.Pix[o], img.Pix[o+1], img.Pix[o+2], img.Pix[o+3] = byte(p>>16), byte(p>>8), byte(p), 255
-	}
-	return img
-}
+func toRGBA(pix []uint32, w, h int) *image.RGBA { return games.ToRGBA(pix, w, h) }
 
 // thumbPNG: the picture at its proper shape, outH lines high (nearest neighbour).
 func thumbPNG(pix []uint32, w, h int, aspect float64, outH int) ([]byte, error) {
-	if w <= 0 || h <= 0 || len(pix) < w*h {
-		return nil, errors.New("no picture")
-	}
-	ow := int(float64(outH)*aspect + 0.5)
-	if ow < 1 {
-		ow = 1
-	}
-	dst := make([]uint32, ow*outH)
-	scaleTo(dst, ow, outH, pix, w, h)
-	var buf bytes.Buffer
-	err := png.Encode(&buf, toRGBA(dst, ow, outH))
-	return buf.Bytes(), err
+	return games.ThumbPNG(pix, w, h, aspect, outH)
 }
 
 // readThumb: a slot's picture as 0x00RRGGBB pixels (for drawing), or nil.

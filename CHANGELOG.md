@@ -2,6 +2,11 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.16.0] - 2026-10-16
+
+- New: RetroPixels for Android. Each release now includes RetroPixels-2.16.0.apk, which plays the same systems as RetroPixels Native (NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64, Genesis, Master System, Atari 2600, Atari 7800 and the arcade games) with on-screen touch controls, Bluetooth and USB controllers, four save-state slots, battery save import and export, and the SNES chip and Archipelago patch prompts. Not yet tried on a real phone.
+- Also included: RetroPixels-Android-Studio-2.16.0.zip, the Android app as an Android Studio project with its emulator engine already built, so File > Open and Build APK is all it needs. The full source has it in the android folder.
+
 ## [2.15.0] - 2026-10-16
 
 - New: arcade games in MAME, any version of it. The new Arcade (MAME) tab in RetroPixels.exe (and the Arcade (MAME) menu in RetroPixels Native) lets you add as many MAME versions as you like: point it at a mame.exe you already have, let it find the ones on your PC, or download any official Windows release of MAME (from the MAME team's GitHub releases, checked against GitHub's checksum), each into its own folder so versions sit side by side.

@@ -148,6 +148,10 @@ Window Capture records it with any capture method. Each release includes the cur
 using Go ports of the same emulators, checked frame by frame and sample by sample against them. More
 systems follow in later test builds; until then, `RetroPixels.exe` plays everything.
 
+## RetroPixels for Android
+
+Each release includes **RetroPixels-<version>.apk** for Android 7 or newer, playing the same systems as RetroPixels Native with touch controls and controller support, and **RetroPixels-Android-Studio-<version>.zip**, an Android Studio project with the emulator engine prebuilt (File > Open the `android` folder, then Build APK). The source is in [`android/`](android/); the Go emulators run as a small engine program inside the app (`cmd/retropixels-android`), so no NDK is needed. Not yet tested on a real phone.
+
 ## Building from source
 
 RetroPixels is a Go program with an embedded web front end; no C toolchain is required.

@@ -1,0 +1,16 @@
+# Android Studio and Gradle
+.gradle/
+.idea/
+.kotlin/
+build/
+app/build/
+local.properties
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+# the engine programs (built from the Go sources by the buildEngine task;
+# the RetroPixels-Android-Studio zip has them prebuilt)
+app/src/main/jniLibs/
+# written into the project zip (main.go's appVersion is used when the sources are here)
+version.properties

@@ -4,7 +4,10 @@ package n64
 // names them, for Archipelago's BizHawk Client (internal/apbridge reads and
 // writes through these, between frames).
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // MemoryDomains: "RDRAM", "ROM" and "System Bus".
 func (m *Machine) MemoryDomains() []string { return []string{"RDRAM", "ROM", "System Bus"} }
@@ -18,10 +21,15 @@ func (m *Machine) MemorySize(domain string) int {
 	case "ROM":
 		return len(m.rom)
 	case "System Bus":
-		return 1 << 32
+		if systemBusSize > uint64(math.MaxInt) { // (32-bit builds: as much as an int holds)
+			return math.MaxInt
+		}
+		return int(systemBusSize)
 	}
 	return 0
 }
+
+var systemBusSize uint64 = 1 << 32
 
 // busArea: the memory behind a System Bus address (KSEG0 / KSEG1 views of
 // RDRAM, and the cartridge at 0x10000000), and the offset in it; nil when

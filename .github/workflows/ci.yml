@@ -5,6 +5,7 @@ on:
     branches: [main]
     tags: ["v*"]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -12,6 +13,9 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pkg.outputs.version }}
+      publish: ${{ steps.rel.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
 
@@ -87,6 +91,8 @@ jobs:
             echo "- **RetroPixels.exe**: the program on its own."
             echo "- **RetroPixels-Native.exe**: test build of the native version (no Chromium; every system, plus Archipelago)."
             echo "- **RetroPixels-source-$v.zip**: the full source code."
+            echo "- **RetroPixels-$v.apk**: RetroPixels for Android (Android 7 or newer; open it on the phone to install)."
+            echo "- **RetroPixels-Android-Studio-$v.zip**: the Android app as an Android Studio project, with its emulator engine prebuilt."
             echo
             echo "Windows 10 / 11, 64-bit. The program isn't code-signed yet, so SmartScreen may say \"Windows protected your PC\": click **More info**, then **Run anyway**. No games, BIOS or firmware are included."
             echo
@@ -115,3 +121,76 @@ jobs:
             dist/RetroPixels-Native.exe
             dist/RetroPixels-source-${{ steps.pkg.outputs.version }}.zip
             dist/SHA256SUMS.txt
+
+  # RetroPixels for Android: the APK and the Android Studio project zip.
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # the armeabi-v7a and x86 engines are 32-bit programs
+      - name: Engine tests, 32-bit
+        env:
+          GOARCH: "386"
+          CGO_ENABLED: "0"
+        run: go test ./cmd/retropixels-android/ ./internal/...
+
+      - name: Engine for this computer, for the app's Java tests
+        env:
+          CGO_ENABLED: "0"
+        run: go build -o "$RUNNER_TEMP/rpengine" ./cmd/retropixels-android
+
+      - name: Java tests
+        working-directory: android
+        env:
+          RP_ENGINE: ${{ runner.temp }}/rpengine
+        run: ./gradlew --no-daemon testReleaseUnitTest
+
+      # buildEngine (before preBuild) builds the engine for the four Android CPUs with Go
+      - name: Build the APK
+        working-directory: android
+        run: ./gradlew --no-daemon assembleRelease
+
+      - name: Package
+        id: pkg
+        run: |
+          version=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' main.go)
+          mkdir -p android-dist
+          cp android/app/build/outputs/apk/release/app-release.apk "android-dist/RetroPixels-$version.apk"
+          sh android/tools/make-studio-zip.sh android-dist
+          aapt=$(ls "$ANDROID_HOME"/build-tools/*/aapt 2>/dev/null | tail -n 1)
+          [ -z "$aapt" ] || "$aapt" dump badging "android-dist/RetroPixels-$version.apk" | grep -E "^(package|sdkVersion|targetSdkVersion|native-code)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RetroPixels-Android-${{ steps.pkg.outputs.version }}
+          path: android-dist/
+
+  # Adds the Android files to the release the build job just published.
+  android-release:
+    needs: [build, android]
+    if: needs.build.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: RetroPixels-Android-${{ needs.build.outputs.version }}
+          path: android-dist
+
+      - name: Add to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.build.outputs.version }}
+          files: |
+            android-dist/RetroPixels-${{ needs.build.outputs.version }}.apk
+            android-dist/RetroPixels-Android-Studio-${{ needs.build.outputs.version }}.zip
