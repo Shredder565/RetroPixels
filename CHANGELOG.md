@@ -2,6 +2,12 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.15.0] - 2026-10-16
+
+- New: arcade games in MAME, any version of it. The new Arcade (MAME) tab in RetroPixels.exe (and the Arcade (MAME) menu in RetroPixels Native) lets you add as many MAME versions as you like: point it at a mame.exe you already have, let it find the ones on your PC, or download any official Windows release of MAME (from the MAME team's GitHub releases, checked against GitHub's checksum), each into its own folder so versions sit side by side.
+- Pick a default MAME, and pick a different version for any game: ROM sets have to match the MAME version they were made for, so an old set can keep playing in the old MAME it needs. Add your ROM folders and the library lists your games by their full names; the game plays inside the RetroPixels window (or in MAME's own window if you untick "Play inside RetroPixels"), with Stop game to come back.
+- When a game doesn't start (missing or mismatched ROM files, a version that doesn't have the game), RetroPixels shows MAME's reason and suggests trying another version. In RetroPixels Native, a zipped arcade game its own emulators don't have is offered to MAME.
+
 ## [2.14.0] - 2026-10-15
 
 - RetroPixels Native test build 6: Super Nintendo, with every cartridge chip RetroPixels.exe supports (SA-1, Super FX, DSP-1 to DSP-4, ST010, ST011, ST018, Cx4, S-DD1, SPC7110, OBC1, S-RTC), matching RetroPixels.exe on every frame compared. Chip programs you supply are asked for once and kept. RetroPixels Native now plays every system RetroPixels.exe plays.

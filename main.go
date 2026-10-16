@@ -2,7 +2,8 @@
 //
 // It serves the embedded page (and RetroPixels' own emulators) on a fixed local
 // port, so save states stored by the page stay put between runs, opens it in a
-// chromeless Edge/Chrome app window, and launches Dolphin for GameCube and Wii.
+// chromeless Edge/Chrome app window, and launches Dolphin for GameCube and Wii
+// and MAME (any version of it) for arcade games.
 package main
 
 import (
@@ -34,7 +35,7 @@ const (
 	port    = 47821
 	appName = "RetroPixels"
 	// appVersion is shown in the app and goes in the download's name and VERSION.txt.
-	appVersion = "2.14.0"
+	appVersion = "2.15.0"
 )
 
 var (
@@ -106,30 +107,40 @@ func saveConfigLocked() error {
 // is the game's recording; onStart (optional) runs alongside it, e.g. to dock
 // its window into ours.
 func startEmulator(emu string, args []string, game, name, kind, label string, rec *recSession, onStart func(pid int, exited <-chan struct{})) error {
+	cmd := exec.Command(emu, args...)
+	cmd.Dir = filepath.Dir(emu) // portable emulators keep their data next to the .exe
+	return startProcess(cmd, game, name, kind, label, rec, onStart, nil)
+}
+
+// startProcess is startEmulator for a command that's already made. onExit
+// (optional) gets how the emulator ended, once it has.
+func startProcess(cmd *exec.Cmd, game, name, kind, label string, rec *recSession, onStart func(pid int, exited <-chan struct{}), onExit func(err error, ran time.Duration)) error {
 	runMu.Lock()
 	if running != nil {
 		cur := running.Name
 		runMu.Unlock()
 		return fmt.Errorf("%s is still running. Close it first, then start another game", cur)
 	}
-	cmd := exec.Command(emu, args...)
-	cmd.Dir = filepath.Dir(emu) // portable emulators keep their data next to the .exe
 	if err := cmd.Start(); err != nil {
 		runMu.Unlock()
 		return fmt.Errorf("couldn't start the emulator: %w", err)
 	}
-	running = &runningGame{Name: name, Path: game, Started: time.Now(), Emu: label, Kind: kind}
+	started := time.Now()
+	running = &runningGame{Name: name, Path: game, Started: started, Emu: label, Kind: kind}
 	runMu.Unlock()
 	if rec != nil {
-		startRecSession(rec, args)
+		startRecSession(rec, cmd.Args[1:])
 	}
 	exited := make(chan struct{})
 	go func() {
-		_ = cmd.Wait()
+		err := cmd.Wait()
 		close(exited)
 		runMu.Lock()
 		running = nil
 		runMu.Unlock()
+		if onExit != nil {
+			onExit(err, time.Since(started))
+		}
 	}()
 	if onStart != nil {
 		go onStart(cmd.Process.Pid, exited)
@@ -227,6 +238,7 @@ func newMux() *http.ServeMux {
 	registerFFmpegRoutes(mux)
 	registerDolphinRoutes(mux)
 	registerDolphinInstallRoutes(mux)
+	registerMameRoutes(mux)
 	registerLifetimeRoutes(mux)
 	registerN64Routes(mux)
 	registerAPRoutes(mux)

@@ -4,6 +4,24 @@ RetroPixels change log
 Every version of RetroPixels, newest first. The version you have shows next
 to the RetroPixels name in the app and in VERSION.txt.
 
+RetroPixels 2.15.0  (2026-10-16)
+--------------------------------
+- New: arcade games in MAME, any version of it. The Arcade (MAME) tab in
+  RetroPixels.exe (and the Arcade (MAME) menu in RetroPixels Native) lets you
+  add as many MAME versions as you like: choose a mame.exe you already have,
+  let RetroPixels find the ones on your PC, or download any official Windows
+  release of MAME (from the MAME team's GitHub releases, checked against
+  GitHub's checksum), each into its own folder so versions sit side by side.
+- Pick a default MAME, and a different version for any game: ROM sets have
+  to match the MAME version they were made for, so an old set can keep
+  playing in the old MAME it needs. Add your ROM folders and the library
+  lists your games by their full names. Games play inside the RetroPixels
+  window (or in MAME's own window), with Stop game to come back.
+- When a game doesn't start (missing or mismatched ROM files, or a version
+  that doesn't have the game), RetroPixels shows MAME's reason and suggests
+  another version. In RetroPixels Native, a zipped arcade game its own
+  emulators don't have is offered to MAME.
+
 RetroPixels 2.14.0  (2026-10-15)
 --------------------------------
 - RetroPixels Native test build 6: Super Nintendo, with every cartridge chip

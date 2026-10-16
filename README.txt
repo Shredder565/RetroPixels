@@ -8,13 +8,13 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.14.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.15.0 (the number also shows next to the RetroPixels name in the app).
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
 Sega Genesis, Sega Master System, Atari 2600, Atari 7800, classic arcade
 games (Pac-Man, Galaxian, Space Invaders, Donkey Kong, TMNT, TMNT: Turtles in
 Time, The Simpsons), plus GameCube and
-Wii through Dolphin.
+Wii through Dolphin, and any other arcade game in MAME (any version of it).
 Your Xbox controller works automatically.
 
 First run
@@ -184,6 +184,32 @@ GameCube & Wii (Dolphin)
   settings are never replaced unless you click "Reset to Xbox layout".
 - Dolphin's main graphics settings are on the right of both tabs (they're shared).
 
+Arcade games in MAME (any version)
+- RetroPixels' own arcade emulators play the games listed above. Every other
+  arcade game plays in MAME, in whichever MAME version you choose: ROM sets
+  have to match the MAME version they were made for, so each game can use
+  its own.
+- Open the "Arcade (MAME)" tab. Add MAME: "Add MAME..." for a mame.exe you
+  have (any version), "Find MAME on this PC", or pick a version under
+  "Download a MAME version". Downloads are the MAME team's official Windows
+  releases from github.com/mamedev/mame (checked against GitHub's checksum),
+  each unpacked into its own "MAME 0.xxx" folder next to RetroPixels.exe, so
+  versions never replace each other. Add as many as you like; "Make default"
+  picks the one games use unless you choose another.
+- "Add ROM folder..." with your ROM sets (tmnt.zip, sf2.zip...). The library
+  lists them by their full names. Next to each game, choose the MAME version
+  it plays in, then Play. "Open a game file..." plays a set from anywhere.
+- The game plays inside the RetroPixels window; "Stop game" in the bar at
+  the top brings you back. Untick "Play inside RetroPixels" to use MAME's own
+  window (and MAME's own settings, such as fullscreen).
+- If a game doesn't start, the tab shows MAME's reason (for example missing
+  ROM files) so you can try another version for it.
+- MAME's keys: 5 coin, 1 start, arrows, Ctrl / Alt / Space buttons, Tab MAME's
+  menu, P pause, Shift+F7 / F7 save / load state, Esc quit. Xbox controllers
+  work too. Each MAME keeps its own settings and saves in its folder.
+- The MAME list is kept in %APPDATA%\RetroPixels\mame.json and shared with
+  RetroPixels Native.
+
 Recording games
 - GameCube and Wii games are recorded automatically as .mp4, from the start
   of the game to the end (turn it off in the Recordings tab, or untick
@@ -349,6 +375,14 @@ and saves, so trying the test build changes nothing in RetroPixels.exe.
   mp4 is saved when the game ends. The menu also has Game volume, Dolphin
   settings (close Dolphin first), Set up Xbox controller and Controller
   layout. Save states are Dolphin's: Shift+F1 saves, F1 loads.
+- Arcade games in MAME (any version): Arcade (MAME) > Library and MAME
+  versions lists your MAME versions (Add MAME..., Find on this PC, or
+  Download an official version), your ROM folders and your games, with the
+  version each game plays in ("Play this game in"). It shares its list with
+  RetroPixels.exe. Games play inside this window, so OBS captures them;
+  F11 / Alt+Enter: fullscreen, Esc: leave fullscreen, Arcade (MAME) > Stop
+  game to come back. A zipped arcade game RetroPixels' own emulators don't
+  have is offered to MAME when you open it.
 - Recording: F9 (or Record > Start recording, or hold the right stick down for
   a second) starts and stops it. The video is only the game's picture and
   sound - no window, menus or mouse pointer - saved as .mp4 in
@@ -367,7 +401,7 @@ and saves, so trying the test build changes nothing in RetroPixels.exe.
 Where things are kept
 - Save states and battery saves: inside RetroPixels's own browser profile
                  (%LOCALAPPDATA%\RetroPixels\BrowserProfile)
-- Settings:      %APPDATA%\RetroPixels\config.json
+- Settings:      %APPDATA%\RetroPixels\config.json (MAME: mame.json)
 - Recordings:    Videos\RetroPixels (GameCube / Wii), Downloads (classic)
 
 
@@ -395,6 +429,11 @@ Credits & licences
     and where to get its source is saved in its folder).
     Launched by RetroPixels and shown inside its window. Dolphin's source code:
     https://github.com/dolphin-emu/dolphin
+  * MAME (GPL-2.0+, by the MAME team): your own installs, or official releases
+    RetroPixels downloads for you from github.com/mamedev/mame (unchanged; a
+    note with its licence and where to get its source is saved in its
+    folder). Launched by RetroPixels and shown inside its window. MAME's
+    source code: https://github.com/mamedev/mame
 - Nintendo, GameCube, Wii, Xbox, Sega, Genesis and Atari are trademarks of
   their owners, named only to describe what the program works with.
   RetroPixels isn't connected with or endorsed by any of them.
