@@ -37,7 +37,7 @@ type sa1 struct {
 	dcnt, cdma, sda, dda, dtc int
 	bbf                       int
 	mcnt, ma, mb              int
-	mr                        int // 40-bit sum, signed
+	mr                        int64 // 40-bit sum, signed (int64: 32-bit builds too)
 	of                        int
 	vbd, vda, vbit            int
 	sfrIrq, sfrDma            bool
@@ -388,7 +388,7 @@ func (c *sa1) ioRead(off int, fromSnes bool) int {
 		if u < 0 {
 			u += two40
 		}
-		return u >> ((off - 0x2306) * 8) & 0xff
+		return int(u >> ((off - 0x2306) * 8) & 0xff)
 	case 0x230b:
 		if c.of != 0 {
 			return 0x80
@@ -651,7 +651,7 @@ func (c *sa1) arith() {
 	a := s16(c.ma)
 	if c.mcnt&2 != 0 {
 		b := s16(c.mb)
-		s := c.mr + a*b
+		s := c.mr + int64(a)*int64(b)
 		if s >= two39 || s < -two39 {
 			c.of = 1
 			if s >= two39 {
@@ -669,10 +669,10 @@ func (c *sa1) arith() {
 			q = floorDiv(a, b)
 			r = a - q*b
 		}
-		c.mr = q&0xffff + (r&0xffff)*65536
+		c.mr = int64(q&0xffff) + int64(r&0xffff)*65536
 		c.ma, c.mb = 0, 0
 	} else {
-		c.mr = a * s16(c.mb)
+		c.mr = int64(a) * int64(s16(c.mb))
 		c.mb = 0
 	}
 }
@@ -884,8 +884,9 @@ func (c *sa1) state(s *sio) {
 	s.IntSlice(c.mmc[:])
 	s.Ints(&c.clock, &c.mdr, &c.ccnt, &c.sie, &c.crv, &c.cnv, &c.civ, &c.bmaps, &c.sbwe, &c.bwpa, &c.siwp,
 		&c.scnt, &c.cie, &c.snv, &c.siv, &c.tmc, &c.hcnt, &c.vcnt, &c.bmap, &c.cbwe, &c.ciwp,
-		&c.dcnt, &c.cdma, &c.sda, &c.dda, &c.dtc, &c.bbf, &c.mcnt, &c.ma, &c.mb, &c.mr, &c.of,
-		&c.vbd, &c.vda, &c.vbit)
+		&c.dcnt, &c.cdma, &c.sda, &c.dda, &c.dtc, &c.bbf, &c.mcnt, &c.ma, &c.mb)
+	s.I64(&c.mr) // (the same 8 bytes as an int)
+	s.Ints(&c.of, &c.vbd, &c.vda, &c.vbit)
 	s.Bools(&c.sfrIrq, &c.sfrDma, &c.cfrIrq, &c.cfrTimer, &c.cfrDma, &c.cfrNmi, &c.cc1)
 	s.Ints(&c.cc2Line, &c.timerBase, &c.hLatch, &c.vLatch)
 	s.Bool(&c.running)
