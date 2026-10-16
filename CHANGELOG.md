@@ -2,6 +2,11 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.17.0] - 2026-10-16
+
+- MAME now comes with RetroPixels. The RetroPixels-2.17.0.zip download has the MAME team's own official Windows release of MAME inside, in its MAME folder, unchanged: it is downloaded from MAME's GitHub, checked against the SHA-256 checksum GitHub lists for it, and not rebuilt or patched. Its source code is attached to the release. Unzip, put your ROM sets in MAME\roms (or add your own ROM folder) and play: there's nothing else to download. Both RetroPixels.exe and RetroPixels Native list it as "MAME 0.xxx (built in)" and use it as the default when you have no other MAME. Your other MAME versions still work alongside it.
+- RetroPixels now checks each game in every MAME version you have (with MAME's own -verifyroms, once per game and version) and shows whether it plays: "Plays in MAME 0.xxx", or "Won't start" and the versions it does play in. A game whose default version can't play it starts in a version that can, unless you chose one for it.
+
 ## [2.16.0] - 2026-10-16
 
 - New: RetroPixels for Android. Each release now includes RetroPixels-2.16.0.apk, which plays the same systems as RetroPixels Native (NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64, Genesis, Master System, Atari 2600, Atari 7800 and the arcade games) with on-screen touch controls, Bluetooth and USB controllers, four save-state slots, battery save import and export, and the SNES chip and Archipelago patch prompts. Not yet tried on a real phone.

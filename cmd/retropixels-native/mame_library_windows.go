@@ -161,7 +161,7 @@ func (l *mameLibrary) build() {
 	l.columns(lv, []struct {
 		name string
 		w    int
-	}{{"Game", 380}, {"Set", 90}, {"Plays in", 150}, {"Last played", 110}})
+	}{{"Game", 300}, {"Set", 80}, {"Plays in", 300}, {"Last played", 110}})
 	l.child("STATIC", "Double-click a game, or press Enter (or A on the controller), to play it. "+
 		"ROM sets must match the MAME version they were made for: if a game doesn't start, pick another version for it below.", ssNoPrefix, 0, idMameHint)
 	l.child("STATIC", "Play this game in:", ssNoPrefix, 0, idMameWithL)
@@ -356,7 +356,7 @@ func (l *mameLibrary) fillFolders() {
 func (l *mameLibrary) fill() {
 	a := l.a
 	a.mame.mu.Lock()
-	games, loaded, loading := a.mame.games, a.mame.loaded, a.mame.loading
+	games, loaded, loading, checking := a.mame.games, a.mame.loaded, a.mame.loading, a.mame.checking
 	a.mame.mu.Unlock()
 	c := mame.Load()
 	query := windowString(l.ctl[idMameSearch])
@@ -374,10 +374,21 @@ func (l *mameLibrary) fill() {
 		it := lvItem{Mask: 1, Item: int32(i), Text: u16(g.Name)}
 		call(pSendMessageW, lv, lvmInsertItemW, 0, uintptr(unsafe.Pointer(&it)))
 		ver := "—"
-		if in, ok := c.For(g.Short); ok {
-			ver = in.Label()
-			if _, own := c.Games[g.Short]; !own {
-				ver += " (default)"
+		if st := c.Status(g); st.Label != "" {
+			ver = st.Label
+			if def, _ := c.DefaultInstall(); strings.EqualFold(def.Exe, st.Exe) {
+				if _, own := c.Games[g.Short]; !own {
+					ver += " (default)"
+				}
+			}
+			switch st.Result {
+			case mame.Good:
+				ver = "✓ " + ver
+			case mame.Bad:
+				ver = "✗ " + ver + ": won't start"
+				if len(st.PlaysIn) > 0 {
+					ver += "; plays in " + strings.Join(st.PlaysIn, ", ")
+				}
 			}
 		}
 		for col, text := range []string{g.Short, ver, fmtPlayed(g.Played, now)} {
@@ -409,6 +420,8 @@ func (l *mameLibrary) fill() {
 		t = fmt.Sprintf("%d games", len(games))
 		if loading {
 			t += " (looking again…)"
+		} else if checking {
+			t += " (checking which MAME version plays each one…)"
 		}
 	}
 	l.setText(idMameCount, t)

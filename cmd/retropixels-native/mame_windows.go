@@ -63,6 +63,7 @@ type mameState struct {
 	loading  bool
 	again    bool
 	finding  bool
+	checking bool // asking each MAME which games it plays
 	install  *mame.Progress
 	rels     []mame.Release
 	relsErr  string
@@ -161,7 +162,12 @@ func (a *app) mameReload() {
 				a.mame.mu.Unlock()
 				continue
 			}
-			a.mame.games, a.mame.loaded, a.mame.loading = games, true, false
+			a.mame.games, a.mame.loaded, a.mame.loading, a.mame.checking = games, true, false, true
+			a.mame.mu.Unlock()
+			a.event("mame-lib", "")
+			mame.CheckGames(c, games)
+			a.mame.mu.Lock()
+			a.mame.checking = false
 			a.mame.mu.Unlock()
 			a.event("mame-lib", "")
 			return

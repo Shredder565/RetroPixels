@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.16.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.17.0 (the number also shows next to the RetroPixels name in the app).
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
 Sega Genesis, Sega Master System, Atari 2600, Atari 7800, classic arcade
@@ -189,6 +189,13 @@ Arcade games in MAME (any version)
   arcade game plays in MAME, in whichever MAME version you choose: ROM sets
   have to match the MAME version they were made for, so each game can use
   its own.
+- MAME is built in: the RetroPixels download has a MAME folder with the MAME
+  team's own official Windows release of MAME, unchanged (downloaded from
+  github.com/mamedev/mame, checked against GitHub's SHA-256 checksum, not
+  rebuilt or patched; its source code is attached to the RetroPixels
+  release). It shows as "MAME 0.xxx (built in)" and is the default when you
+  have no other MAME. Put your ROM sets in the MAME\roms folder, or add your
+  own ROM folder.
 - Open the "Arcade (MAME)" tab. Add MAME: "Add MAME..." for a mame.exe you
   have (any version), "Find MAME on this PC", or pick a version under
   "Download a MAME version". Downloads are the MAME team's official Windows
@@ -204,6 +211,12 @@ Arcade games in MAME (any version)
   window (and MAME's own settings, such as fullscreen).
 - If a game doesn't start, the tab shows MAME's reason (for example missing
   ROM files) so you can try another version for it.
+- RetroPixels asks each MAME version you have which games it plays (MAME's
+  own -verifyroms, once per game) and shows "Plays in MAME 0.xxx", or
+  "Won't start" and the versions that do play it. A game its default version
+  can't play starts in one that can, unless you chose a version for it. Old
+  ROM sets often lack chips newer MAME versions need: those play in an older
+  MAME version, or with an up-to-date set.
 - MAME's keys: 5 coin, 1 start, arrows, Ctrl / Alt / Space buttons, Tab MAME's
   menu, P pause, Shift+F7 / F7 save / load state, Esc quit. Xbox controllers
   work too. Each MAME keeps its own settings and saves in its folder.
@@ -475,10 +488,12 @@ Credits & licences
     and where to get its source is saved in its folder).
     Launched by RetroPixels and shown inside its window. Dolphin's source code:
     https://github.com/dolphin-emu/dolphin
-  * MAME (GPL-2.0+, by the MAME team): your own installs, or official releases
-    RetroPixels downloads for you from github.com/mamedev/mame (unchanged; a
-    note with its licence and where to get its source is saved in its
-    folder). Launched by RetroPixels and shown inside its window. MAME's
+  * MAME (GPL-2.0+, by the MAME team): the official release that comes in the
+    MAME folder, your own installs, or official releases RetroPixels
+    downloads for you from github.com/mamedev/mame (all unchanged; a note
+    with its licence and where to get its source is saved in its folder, and
+    the built-in version's source code is attached to each RetroPixels
+    release). Launched by RetroPixels and shown inside its window. MAME's
     source code: https://github.com/mamedev/mame
 - Nintendo, GameCube, Wii, Xbox, Sega, Genesis and Atari are trademarks of
   their owners, named only to describe what the program works with.

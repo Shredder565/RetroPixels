@@ -167,6 +167,7 @@
   .mame-name { flex: 1; min-width: 0; }
   .mame-name b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mame-name small { color: var(--muted); font-size: 12px; }
+  .mame-name .mame-check { display: block; } .mame-check.ok { color: #46a758; } .mame-check.no { color: #e5484d; }
   .mame-row .sw-select { max-width: 190px; }
   .mame-ver { display: grid; gap: 4px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
   .mame-ver:last-child { border-bottom: 0; }
@@ -549,7 +550,7 @@
       <div class="gc-layout">
         <section class="sw-sec gc-lib">
           <h2 class="sw-h">Arcade games in MAME</h2>
-          <p class="muted sw-intro" style="margin-top:0">Play any arcade game in any version of MAME. A ROM set has to match the MAME version it was made for,
+          <p class="muted sw-intro" style="margin-top:0">Play any arcade game in any version of MAME. MAME comes with RetroPixels (the MAME team's official release, unchanged), and you can add other versions. A ROM set has to match the MAME version it was made for,
             so each game can use its own version: pick it next to the game. RetroPixels' own arcade emulators stay in the Classic consoles tab.</p>
           <div class="sw-row">
             <button class="btn sm mame-btn" id="mameOpenFile">Open a game file…</button>
@@ -1048,7 +1049,7 @@
       else if (afterGame === "ended") toast("Welcome back");
     }
     // keep checking while something runs in the background
-    const busy = r.loading || r.status.finding || mameBusy(r.status.install);
+    const busy = r.loading || r.checking || r.status.finding || mameBusy(r.status.install);
     if (busy && !mamePoll) mamePoll = setInterval(async () => {
       if (mameTab.hidden) return;
       try { gotMame(await api("/api/mame/library")); } catch (e) { /* keep trying */ }
@@ -1111,7 +1112,8 @@
     const t = d => (d && !d.startsWith("0001") ? Date.parse(d) : 0);
     let list = r.games.filter(g => !q || g.name.toLowerCase().includes(q) || g.short.includes(q));
     if (sort === "played") list = list.slice().sort((a, b) => t(b.played) - t(a.played) || a.name.localeCompare(b.name));
-    document.getElementById("mameCount").textContent = r.loading ? "Looking through your ROM folders…" : `${r.games.length} games`;
+    document.getElementById("mameCount").textContent = r.loading ? "Looking through your ROM folders…"
+      : `${r.games.length} games${r.checking ? " · checking which MAME version plays each one…" : ""}`;
     const el = document.getElementById("mameList");
     if (!r.games.length) {
       el.innerHTML = `<p class="muted" style="margin:0">${r.loading || !r.loaded ? "Looking for games…"
@@ -1126,7 +1128,8 @@
       const row = document.createElement("div");
       row.className = "mame-row";
       row.innerHTML = `<div class="mame-name" title="${esc(g.path)}"><b>${esc(g.name)}</b>
-          <small>${esc(g.short)} · ${fmtSize(g.size)}${t(g.played) ? ` · played ${fmtTime(g.played)}` : ""}</small></div>
+          <small>${esc(g.short)} · ${fmtSize(g.size)}${t(g.played) ? ` · played ${fmtTime(g.played)}` : ""}</small>
+          ${g.note ? `<small class="mame-check ${g.plays.result === "good" ? "ok" : "no"}">${g.plays.result === "good" ? "✓" : "✗"} ${esc(g.note)}</small>` : ""}</div>
         <select class="sw-select" data-ver aria-label="MAME version for ${esc(g.name)}" ${(st.installs || []).length ? "" : "disabled"}>${mameVersionOptions(own[g.short] || "")}</select>
         <button class="btn sm mame-btn" data-play ${playing ? "disabled" : ""}>Play</button>`;
       row.querySelector("[data-ver]").addEventListener("change", e => mameAction({ action: "set-game", short: g.short, exe: e.target.value },
