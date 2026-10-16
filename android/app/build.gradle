@@ -1,0 +1,191 @@
+// RetroPixels for Android: the app (Java, Android's own classes only, no
+// libraries) and the emulator engine, a Go program built for each Android CPU
+// and packed as src/main/jniLibs/<abi>/librpengine.so (see buildEngine).
+
+plugins {
+    id 'com.android.application'
+}
+
+// ---- the version: appVersion in ../main.go (the RetroPixels sources), else version.properties ----
+
+def repoRoot = rootProject.file('..')
+
+def readVersion = {
+    def mainGo = new File(repoRoot, 'main.go')
+    if (mainGo.isFile()) {
+        def m = mainGo.getText('UTF-8') =~ /appVersion\s*=\s*"([^"]+)"/
+        if (m.find()) {
+            return m.group(1)
+        }
+    }
+    def vp = rootProject.file('version.properties')
+    if (vp.isFile()) {
+        def p = new Properties()
+        vp.withInputStream { p.load(it) }
+        if (p.getProperty('version')) {
+            return p.getProperty('version').trim()
+        }
+    }
+    return '0.0.0'
+}
+
+def appVersion = readVersion()
+
+// 2.16.0 -> 21600
+def versionCodeOf = { String v ->
+    def m = v =~ /^(\d+)\.(\d+)\.(\d+)/
+    m.find() ? m.group(1).toInteger() * 10000 + m.group(2).toInteger() * 100 + m.group(3).toInteger() : 1
+}
+
+android {
+    namespace 'io.github.shredder565.retropixels'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'io.github.shredder565.retropixels'
+        minSdk 24
+        targetSdk 36
+        versionCode versionCodeOf(appVersion)
+        versionName appVersion
+    }
+
+    // One fixed key signs every build, debug and release, so an APK built in
+    // Android Studio, by CI or for the next update installs over the last
+    // one and keeps the saves. It is public on purpose (its passwords are
+    // here): it proves nothing about who built an APK, and is only there so
+    // updates install over each other.
+    signingConfigs {
+        retropixelsPublic {
+            storeFile file('retropixels-public.keystore')
+            storePassword 'retropixels'
+            keyAlias 'retropixels'
+            keyPassword 'retropixels'
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.retropixelsPublic
+        }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.retropixelsPublic
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    packaging {
+        jniLibs {
+            // the engine is run as a program, so it must be unpacked on install
+            useLegacyPackaging = true
+            // Go programs, already stripped: nothing for the NDK's strip to do
+            keepDebugSymbols += ['**/librpengine.so']
+        }
+    }
+
+    lint {
+        // the app is built against Android 6's classes as a check, and calls
+        // newer ones only behind version checks
+        abortOnError false
+    }
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+}
+
+// ---- the engine ----
+
+def engineAbis = [
+    [abi: 'arm64-v8a', goos: 'android', goarch: 'arm64', goarm: ''],
+    [abi: 'armeabi-v7a', goos: 'linux', goarch: 'arm', goarm: '7'], // static Linux programs run on Android too
+    [abi: 'x86_64', goos: 'linux', goarch: 'amd64', goarm: '', align: ' -R 0x4000'], // 16 KB pages
+    [abi: 'x86', goos: 'linux', goarch: '386', goarm: ''],
+]
+
+// Go: -Pretropixels.go=/path/to/go, $GOROOT/bin, the PATH, or the usual places
+def findGo = {
+    def windows = System.getProperty('os.name').toLowerCase().contains('windows')
+    def exe = windows ? 'go.exe' : 'go'
+    def dirs = []
+    def given = project.findProperty('retropixels.go')
+    if (given) {
+        def f = new File(given.toString())
+        if (f.isFile()) {
+            return f.absolutePath
+        }
+        dirs << f
+    }
+    if (System.getenv('GOROOT')) {
+        dirs << new File(System.getenv('GOROOT'), 'bin')
+    }
+    (System.getenv('PATH') ?: '').split(File.pathSeparator).each { if (it) dirs << new File(it) }
+    def home = System.getProperty('user.home')
+    ['/usr/local/go/bin', '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', 'C:\\Program Files\\Go\\bin', 'C:\\Go\\bin',
+     home + '/go/bin', home + '/sdk/go/bin', home + '/.local/go/bin'].each { dirs << new File(it) }
+    for (d in dirs) {
+        def f = new File(d, exe)
+        if (f.isFile() && f.canExecute()) {
+            return f.absolutePath
+        }
+    }
+    return null
+}
+
+def jniLibsDir = file('src/main/jniLibs')
+
+tasks.register('buildEngine') {
+    group = 'build'
+    description = 'Builds the emulator engine (librpengine.so) for each Android CPU with Go, or checks the prebuilt ones are there.'
+    outputs.upToDateWhen { false } // Go's own build cache makes an unchanged engine quick
+    def goPath = findGo()
+    def src = new File(repoRoot, 'cmd/retropixels-android/main.go')
+    def root = repoRoot
+    def ver = appVersion
+    doLast {
+        if (goPath != null && src.isFile()) {
+            engineAbis.each { a ->
+                def dst = new File(jniLibsDir, "${a.abi}/librpengine.so")
+                dst.parentFile.mkdirs()
+                def pb = new ProcessBuilder(goPath, 'build', '-trimpath', '-ldflags', "-s -w${a.align ?: ''} -X main.version=${ver}",
+                        '-o', dst.absolutePath, './cmd/retropixels-android')
+                pb.directory(root)
+                pb.redirectErrorStream(true)
+                def env = pb.environment()
+                env.put('CGO_ENABLED', '0')
+                env.put('GOOS', a.goos)
+                env.put('GOARCH', a.goarch)
+                if (a.goarm) {
+                    env.put('GOARM', a.goarm)
+                } else {
+                    env.remove('GOARM')
+                }
+                def p = pb.start()
+                def text = p.inputStream.getText('UTF-8')
+                if (p.waitFor() != 0) {
+                    throw new GradleException("Building the RetroPixels engine for ${a.abi} with ${goPath} failed:\n${text}")
+                }
+            }
+            logger.lifecycle("RetroPixels engine ${ver} built with ${goPath} for ${engineAbis.collect { it.abi }.join(', ')}")
+        } else {
+            def missing = engineAbis.findAll { !new File(jniLibsDir, "${it.abi}/librpengine.so").isFile() }.collect { it.abi }
+            if (!missing.isEmpty()) {
+                throw new GradleException("The RetroPixels emulator engine isn't in app/src/main/jniLibs for ${missing.join(', ')}, " +
+                        "and it can't be built here: " +
+                        (src.isFile() ? "Go wasn't found (install Go from go.dev, or pass -Pretropixels.go=/path/to/go)." :
+                                "the Go sources (../cmd/retropixels-android) aren't next to this project.") +
+                        " The RetroPixels-Android-Studio zip from the releases has the engine prebuilt.")
+            }
+            logger.lifecycle('Using the prebuilt RetroPixels engine in app/src/main/jniLibs ' +
+                    (src.isFile() ? '(Go not found)' : '(no Go sources here)'))
+        }
+    }
+}
+
+tasks.matching { it.name == 'preBuild' }.configureEach {
+    dependsOn 'buildEngine'
+}

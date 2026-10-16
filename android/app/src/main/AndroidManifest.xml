@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- RetroPixels for Android. The emulators run in librpengine.so, a program
+     the app starts (see EngineProcess.java); it's packed with the native
+     libraries and unpacked on install (the build sets useLegacyPackaging),
+     the one place an app may run programs from. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature android:name="android.hardware.gamepad" android:required="false" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:isGame="true"
+        android:theme="@android:style/Theme.Material.NoActionBar">
+
+        <activity
+            android:name=".StartActivity"
+            android:exported="true"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- game files opened from other apps (file managers, downloads) -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="application/octet-stream" />
+                <data android:mimeType="application/zip" />
+                <data android:mimeType="application/x-zip-compressed" />
+                <data android:mimeType="application/x-7z-compressed" />
+                <data android:mimeType="application/x-nes-rom" />
+                <data android:mimeType="application/x-snes-rom" />
+                <data android:mimeType="application/x-gameboy-rom" />
+                <data android:mimeType="application/x-gameboy-color-rom" />
+                <data android:mimeType="application/x-gba-rom" />
+                <data android:mimeType="application/x-n64-rom" />
+                <data android:mimeType="application/x-genesis-rom" />
+                <data android:mimeType="application/x-sms-rom" />
+                <data android:mimeType="application/x-atari-2600-rom" />
+                <data android:mimeType="application/x-atari-7800-rom" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/*" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".GameActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode"
+            android:theme="@android:style/Theme.Material.NoActionBar.Fullscreen" />
+
+        <activity android:name=".SettingsActivity" android:exported="false" android:label="Settings" />
+        <activity android:name=".RemapActivity" android:exported="false" android:label="Controls" />
+        <activity android:name=".HelpActivity" android:exported="false" android:label="Help" />
+    </application>
+</manifest>
