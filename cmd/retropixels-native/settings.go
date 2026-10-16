@@ -3,12 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
+
+	"retropixels/internal/games"
 )
 
 // Settings is %APPDATA%\RetroPixels Native\settings.json.
@@ -134,119 +134,44 @@ func (s *Settings) setControlMap(sys string, m ControlMap) {
 
 // ---------------- saves ----------------
 
-var unsafeName = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1f]+`)
+// Where saves are kept, and how: internal/games's Store (shared with the
+// Android app's engine), in %APPDATA%\RetroPixels Native.
+
+func store() games.Store { return games.Store{Dir: appDir()} }
 
 // safeName makes a game's name usable as a Windows file name.
-func safeName(s string) string {
-	s = unsafeName.ReplaceAllString(s, "")
-	s = strings.TrimSpace(strings.TrimRight(s, ". "))
-	switch strings.ToUpper(strings.SplitN(s, ".", 2)[0]) {
-	case "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "LPT1", "LPT2", "LPT3":
-		s = "_" + s
-	}
-	if s == "" {
-		return "game"
-	}
-	if r := []rune(s); len(r) > 120 {
-		s = string(r[:120])
-	}
-	return s
-}
+func safeName(s string) string { return games.SafeName(s) }
 
 // firmwareDir: firmware\<chip>, the cartridge chip programs the player
 // supplied (the Super Nintendo's DSP-3, DSP-4, ST010, ST011 and ST018 games
 // need one), each asked for once.
-func firmwareDir() string { return filepath.Join(appDir(), "firmware") }
+func firmwareDir() string { return store().FirmwareDir() }
 
 // loadFirmware reads every kept chip program, by chip name.
-func loadFirmware() map[string][]byte {
-	m := map[string][]byte{}
-	es, _ := os.ReadDir(firmwareDir())
-	for _, e := range es {
-		if e.IsDir() {
-			continue
-		}
-		if b, err := os.ReadFile(filepath.Join(firmwareDir(), e.Name())); err == nil && len(b) > 0 {
-			m[e.Name()] = b
-		}
-	}
-	return m
-}
+func loadFirmware() map[string][]byte { return store().LoadFirmware() }
 
 // saveFirmware keeps a chip program the player chose.
-func saveFirmware(chip string, b []byte) error {
-	if err := os.MkdirAll(firmwareDir(), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(firmwareDir(), safeName(chip)), b, 0o644)
-}
+func saveFirmware(chip string, b []byte) error { return store().SaveFirmware(chip, b) }
 
 // needsFirmware tells whether a core refused a game for want of a chip
-// program (set by the cores that ask for one): the chip's name, the usual
-// file name and the message to show.
-var needsFirmware = func(err error) (chip, file, msg string, ok bool) { return }
+// program: the chip's name, the usual file name and the message to show.
+func needsFirmware(err error) (chip, file, msg string, ok bool) { return games.NeedsFirmware(err) }
 
-func savesDir(sys string) string { return filepath.Join(appDir(), "saves", sys) }
+func savesDir(sys string) string { return store().SavesDir(sys) }
 
 // sramPath: saves\<system>\<game>.sav
-func sramPath(sys, game string) string {
-	return filepath.Join(savesDir(sys), safeName(game)+".sav")
-}
+func sramPath(sys, game string) string { return store().SRAMPath(sys, game) }
 
 // statePath: saves\<system>\<game>.state
-func statePath(sys, game string) string {
-	return filepath.Join(savesDir(sys), safeName(game)+".state")
-}
+func statePath(sys, game string) string { return store().StatePath(sys, game) }
 
 // Save-state files: "RPN1", the system's id length and id, then the core's state.
-var stateMagic = []byte("RPN1")
+var stateMagic = games.StateMagic
 
-func encodeState(sys string, data []byte) []byte {
-	out := make([]byte, 0, len(data)+len(sys)+5)
-	out = append(out, stateMagic...)
-	out = append(out, byte(len(sys)))
-	out = append(out, sys...)
-	return append(out, data...)
-}
+func encodeState(sys string, data []byte) []byte { return games.EncodeState(sys, data) }
 
-func decodeState(sys string, file []byte) ([]byte, error) {
-	if len(file) < 5 || !bytes.Equal(file[:4], stateMagic) {
-		return nil, errors.New("that isn't a RetroPixels Native save state")
-	}
-	n := int(file[4])
-	if len(file) < 5+n {
-		return nil, errors.New("that save state is damaged")
-	}
-	if string(file[5:5+n]) != sys {
-		return nil, errors.New("that save state is for a different system")
-	}
-	return file[5+n:], nil
-}
+func decodeState(sys string, file []byte) ([]byte, error) { return games.DecodeState(sys, file) }
 
 // writeFileAtomic writes to a temporary file then renames it into place, so
 // a crash never leaves half a save.
-func writeFileAtomic(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	f, err := os.Create(tmp)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, path)
-}
+func writeFileAtomic(path string, data []byte) error { return games.WriteFileAtomic(path, data) }
