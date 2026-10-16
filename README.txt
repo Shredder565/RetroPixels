@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.15.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.16.0 (the number also shows next to the RetroPixels name in the app).
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
 Sega Genesis, Sega Master System, Atari 2600, Atari 7800, classic arcade
@@ -397,6 +397,52 @@ and saves, so trying the test build changes nothing in RetroPixels.exe.
   with each game's battery save (.sav) and save states (.state, slots 2-4 as
   .slotN.state) with a .png picture of each.
 - The version shows in the title bar and in Help > About.
+
+RetroPixels for Android
+RetroPixels for Android (Android 7 or newer) plays the same systems as
+RetroPixels Native: NES, Super Nintendo, Game Boy / Color, Game Boy Advance,
+Nintendo 64, Genesis, Master System, Atari 2600, Atari 7800 and the arcade
+games. It uses the same emulators, written for RetroPixels. It's new and
+hasn't been tried on a real phone yet, so tell us how it runs.
+- Installing: download RetroPixels-<version>.apk from the release onto the
+  phone and open it. Android asks once to allow installing apps from your
+  browser or file manager; allow it, then Install. Every RetroPixels APK is
+  signed with the same public key, so a newer one installs over the old one
+  and keeps your saves. (The key is public on purpose: it only lets updates
+  install over each other and doesn't prove who built an APK.) Uninstalling
+  removes the saves, so export battery saves you want to keep first
+  (menu > Battery save > Export).
+- Playing: tap Open game and pick a game file (.nes .sfc .smc .gb .gbc .gba
+  .z64 .n64 .v64 .md .gen .smd .sms .a26 .a78 .bin, also inside .zip and
+  .7z), or open or share a game file with RetroPixels from another app.
+  Arcade games: open the game's .zip ROM set, kept zipped. Recently played
+  games are listed on the start screen. Super Nintendo games with DSP-3,
+  DSP-4, ST010, ST011 or ST018 chips ask once for your dump of the chip's
+  program; none are included. Archipelago patch files open too, asking once
+  for the original ROM.
+- Controls: on-screen buttons for each system (D-pad left, buttons right,
+  the menu button at the top). They hide while a controller is used.
+  Bluetooth and USB controllers work right away, up to four players, with
+  the same button layout as RetroPixels Native on an Xbox controller;
+  keyboards use Native's keys (arrows, X / Z, Enter, Shift; 5 = Coin and
+  1 = Start in arcade games). Change them in Settings > Controls.
+- Back, Esc or the controller's Home / Mode button opens the menu: pause,
+  fast-forward, four save-state slots and Undo last load, reset, volume,
+  machine settings (DIP switches), player, battery save export / import,
+  sharp or smooth pixels, quit. Clicking the right stick saves a state, the
+  left stick loads it; hold Tab on a keyboard to fast-forward. The game
+  pauses and saves when you leave the app.
+- Not in the Android app: GameCube and Wii (Dolphin has its own Android
+  app), MAME, video recording (Android's screen recorder works) and
+  Archipelago server connections (use RetroPixels Native on a computer for
+  those). Nintendo 64 may be slow on older phones.
+- Building it yourself: download RetroPixels-Android-Studio-<version>.zip,
+  unzip it, and in Android Studio choose File > Open and pick its "android"
+  folder. Then Build > Build App Bundle(s) / APK(s) > Build APK(s), or Run
+  with a phone connected. The emulator engine is already built in the zip;
+  if Go (go.dev) is installed, the build rebuilds it from the Go sources
+  included. From the full source code, open the android folder the same
+  way; Go is needed then, because the engine is built during the build.
 
 Where things are kept
 - Save states and battery saves: inside RetroPixels's own browser profile
