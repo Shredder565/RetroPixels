@@ -53,6 +53,9 @@ RetroPixels window.
   SNI Client and BizHawk Client connect to RetroPixels directly.
 - **GameCube and Wii** through Dolphin, downloaded from inside the app, with a library, volume
   control and automatic recording.
+- **Any arcade game in any version of MAME.** Add as many MAME versions as you like (your own
+  `mame.exe`, found on your PC, or any official release downloaded from inside the app), pick the
+  version each game plays in, and play it inside the RetroPixels window.
 
 ## Supported systems
 
@@ -69,6 +72,7 @@ RetroPixels window.
 | Atari 7800 | `.a78` `.bin` | SuperGame, POKEY, banksets |
 | Arcade | `.zip` ROM sets | Pac-Man, Galaxian, Space Invaders, Donkey Kong, TMNT, TMNT: Turtles in Time, The Simpsons |
 | GameCube / Wii | `.iso` `.gcm` `.rvz` `.wbfs` `.ciso` `.gcz` `.wia` `.wad` | Through Dolphin |
+| Arcade (MAME) | `.zip` `.7z` ROM sets | Through MAME, any version: choose the version per game |
 
 ¹ DSP-3, DSP-4, ST010, ST011 and ST018 run a program stored inside the chip. RetroPixels asks for
 your own dump of it the first time and remembers it.
@@ -116,6 +120,26 @@ own connector script (for example The Legend of Zelda, Link's Awakening DX, Ocar
 supported. RetroPixels only listens on this computer (127.0.0.1: port 23074 for SNI, 43055–43059
 for BizHawk) and never connects to the Archipelago server itself.
 
+## Arcade games in MAME
+
+RetroPixels' own arcade emulators play the games in the table above. Every other arcade game plays
+in [MAME](https://www.mamedev.org), and in **any version of MAME**: ROM sets have to match the MAME
+version they were made for, so RetroPixels lets each game use its own.
+
+1. Open the **Arcade (MAME)** tab (in RetroPixels Native: the **Arcade (MAME)** menu > Library).
+2. Add MAME: **Add MAME…** for a `mame.exe` you have (any version), **Find MAME on this PC**, or
+   pick a version under **Download a MAME version**. Downloads are the MAME team's official Windows
+   releases from [github.com/mamedev/mame](https://github.com/mamedev/mame/releases), checked
+   against the checksum GitHub lists, each unpacked into its own `MAME 0.xxx` folder next to
+   RetroPixels, so versions never replace each other. Add as many as you like.
+3. **Add ROM folder…** with your ROM sets (`tmnt.zip`, `sf2.zip`…). The library lists them by name.
+4. Next to each game, choose the MAME version it plays in (or leave it on the default), then **Play**.
+   The game plays inside the RetroPixels window; **Stop game** brings you back. If a game doesn't
+   start, RetroPixels shows MAME's reason (for example missing ROM files) so you can try another
+   version.
+
+MAME keeps its own settings, saves and save states in its folder; RetroPixels doesn't change them.
+
 ## RetroPixels Native (test build)
 
 RetroPixels is being rebuilt as a native Windows program, with no web browser inside, so OBS Studio's
@@ -143,7 +167,8 @@ after changing `winres/icon.ico` or the version, run `sh tools/make-winres.sh`. 
 
 | Path | What it is |
 | --- | --- |
-| `main.go`, `*.go` | Windows app: app window, Dolphin integration, recording, settings |
+| `main.go`, `*.go` | Windows app: app window, Dolphin and MAME integration, recording, settings |
+| `internal/mame/` | MAME versions, official downloads, ROM library and launching, shared by both apps |
 | `web/index.html` | The app's interface |
 | `web/emu/` | The emulators: CPUs (6502, 65C816, Z80, 68000, ARM, Konami-2, 8080…), video and sound chips, arcade boards |
 | `n64/` | Nintendo 64 emulator (CPU, RSP, RDP), run natively |
@@ -172,7 +197,7 @@ See [CHANGELOG.md](CHANGELOG.md) for every release.
 RetroPixels contains no copyrighted game code, BIOS or firmware. Its emulators are written from
 scratch. Game and system names are trademarks of their respective owners and are used only to
 describe compatibility. RetroPixels is not affiliated with or endorsed by Nintendo, Sega, Atari,
-Konami, Namco, Microsoft or the Dolphin project.
+Konami, Namco, Microsoft, the Dolphin project or the MAME team.
 
 Screenshot: *Shattering Jaws*, a Genesis homebrew game by Mun (2016).
 

@@ -156,6 +156,22 @@
 
   .tabs button[data-tab="gc"][aria-selected="true"] { border-bottom-color: #7b6cff; }
   .tabs button[data-tab="wii"][aria-selected="true"] { border-bottom-color: #2b8cc4; }
+  .tabs button[data-tab="mame"][aria-selected="true"] { border-bottom-color: #e5484d; }
+  .btn.mame-btn { background: #c4373c; } .btn.mame-btn:hover { background: #a92f33; }
+  #mameSearch { flex: 1; min-width: 180px; background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 10px; font: inherit; font-size: 14px; }
+  .mame-list { display: grid; gap: 6px; }
+  .mame-row { display: flex; gap: 10px; align-items: center; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 10px; padding: 8px 12px; font-size: 14px; }
+  .mame-row:focus-within { border-color: #e5484d; }
+  .mame-name { flex: 1; min-width: 0; }
+  .mame-name b { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mame-name small { color: var(--muted); font-size: 12px; }
+  .mame-row .sw-select { max-width: 190px; }
+  .mame-ver { display: grid; gap: 4px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+  .mame-ver:last-child { border-bottom: 0; }
+  .mame-ver small { overflow-wrap: anywhere; }
+  .mame-ver .mame-def { color: var(--accent-2); font-size: 12px; font-weight: 600; }
   .gc-layout { display: grid; grid-template-columns: 1fr 330px; gap: 20px; align-items: start; }
   .gc-side { display: grid; gap: 16px; }
   .gc-side .rs-row { grid-template-columns: 1fr; gap: 6px; padding: 8px 0; }
@@ -307,6 +323,7 @@
     <button role="tab" data-tab="classic" aria-selected="true">Classic consoles</button>
     <button role="tab" data-tab="gc" aria-selected="false"><span style="color:#9b8cff">●</span> GameCube</button>
     <button role="tab" data-tab="wii" aria-selected="false"><span style="color:#5fc3ff">●</span> Wii</button>
+    <button role="tab" data-tab="mame" aria-selected="false"><span style="color:#ff6b6f">●</span> Arcade (MAME)</button>
     <button role="tab" data-tab="recordings" aria-selected="false">🎬 Recordings</button>
   </nav>
   <div id="swNow" class="sw-now" hidden>
@@ -523,6 +540,61 @@
     </div>
   </section>
 
+  <!-- ===================== Arcade (MAME) tab ===================== -->
+  <section id="mameTab" hidden>
+    <div id="mameBrowserOnly" class="sw-sec" hidden>
+      <p style="margin:0">Arcade games play in <strong>MAME</strong>, any version of it, through the RetroPixels desktop app (RetroPixels.exe).</p>
+    </div>
+    <div id="mameDesktop" hidden>
+      <div class="gc-layout">
+        <section class="sw-sec gc-lib">
+          <h2 class="sw-h">Arcade games in MAME</h2>
+          <p class="muted sw-intro" style="margin-top:0">Play any arcade game in any version of MAME. A ROM set has to match the MAME version it was made for,
+            so each game can use its own version: pick it next to the game. RetroPixels' own arcade emulators stay in the Classic consoles tab.</p>
+          <div class="sw-row">
+            <button class="btn sm mame-btn" id="mameOpenFile">Open a game file…</button>
+            <button class="btn ghost sm" id="mameAddFolder">Add ROM folder…</button>
+            <button class="btn ghost sm" id="mameRescan" title="Look through the ROM folders again">Look again</button>
+            <label class="sw-check" title="Games play inside this window instead of MAME's own window"><input type="checkbox" id="mameEmbed"> Play inside RetroPixels</label>
+          </div>
+          <div class="sw-setup" style="margin-top:8px"><div class="sw-emu" id="mameFolders">Looking for games…</div></div>
+          <div id="mameNote"></div>
+          <div class="sw-tools">
+            <input type="search" id="mameSearch" placeholder="Search games…" autocomplete="off">
+            <select id="mameSort" class="sw-select"><option value="az">A – Z</option><option value="played">Recently played</option></select>
+            <span class="muted" id="mameCount" style="font-size:13px"></span>
+          </div>
+          <p class="muted" id="mameMsg" style="font-size:14px;margin:6px 0"></p>
+          <div class="mame-list" id="mameList"></div>
+        </section>
+        <aside class="gc-side">
+          <section class="sw-sec">
+            <h2 class="sw-h" style="font-size:16px">MAME versions</h2>
+            <div id="mameVersions"></div>
+            <div class="rg-btns" style="margin-top:8px">
+              <button class="btn ghost sm" id="mameAddExe">Add MAME…</button>
+              <button class="btn ghost sm" id="mameFind" title="Look for MAME in the usual places on this PC">Find MAME on this PC</button>
+            </div>
+          </section>
+          <section class="sw-sec">
+            <h2 class="sw-h" style="font-size:16px">Download a MAME version</h2>
+            <p class="muted" style="font-size:12px;margin:0 0 8px">Any official Windows release from the MAME team (github.com/mamedev/mame). Each version gets its own folder next to RetroPixels, so they don't replace each other.</p>
+            <div class="sw-row"><select id="mameRelSel" class="sw-select" style="flex:1"><option value="">Loading the list…</option></select>
+              <button class="btn sm mame-btn" id="mameDl">Download</button></div>
+            <div id="mameDlNote" style="margin-top:8px"></div>
+          </section>
+          <section class="sw-sec">
+            <h2 class="sw-h" style="font-size:16px">Playing</h2>
+            <p class="muted" style="font-size:13px;margin:0">Click the game to give it the keyboard. MAME's keys: <span class="key">5</span> coin, <span class="key">1</span> start,
+              arrows to move, <span class="key">Ctrl</span> <span class="key">Alt</span> <span class="key">Space</span> buttons, <span class="key">Tab</span> MAME's menu,
+              <span class="key">P</span> pause, <span class="key">Shift</span>+<span class="key">F7</span> / <span class="key">F7</span> save / load state, <span class="key">Esc</span> quit.
+              Xbox controllers work too. Each MAME keeps its own settings and saves in its folder.</p>
+          </section>
+        </aside>
+      </div>
+    </div>
+  </section>
+
   <!-- ===================== Player ===================== -->
   <section id="playerWrap">
     <div id="playerBar">
@@ -684,8 +756,8 @@
       if (dolWentFullscreen && document.fullscreenElement) document.exitFullscreen().catch(() => {});
       dolWentFullscreen = false;
     }
-    document.querySelectorAll("#gcGrid .sw-tile").forEach(t => { t.disabled = !!status.running; });
-    renderRecBanner(status.rec, !!status.running);
+    document.querySelectorAll("#gcGrid .sw-tile, #mameList [data-play], #mameOpenFile").forEach(t => { t.disabled = !!status.running; });
+    renderRecBanner(status.rec, !!status.running && status.running.kind !== "mame"); // recording is for GameCube / Wii
     return status;
   }
 
@@ -792,12 +864,15 @@
   // Keep the "now playing" bar up to date while a desktop tab is open.
   let wasRunning = false, wasSaving = false;
   setInterval(async () => {
-    if (!DESKTOP || (gcTab.hidden && recTab.hidden)) return;
+    if (!DESKTOP || (gcTab.hidden && recTab.hidden && mameTab.hidden)) return;
     try {
       const st = await api("/api/status");
       const isRunning = !!st.running;
       renderStatus(st);
-      if (wasRunning && !isRunning) { toast("Welcome back"); if (!gcTab.hidden) loadGC(); if (!recTab.hidden) loadRecordings(); }
+      if (wasRunning && !isRunning) {
+        if (!mameTab.hidden) loadMame("ended"); else toast("Welcome back");
+        if (!gcTab.hidden) loadGC(); if (!recTab.hidden) loadRecordings();
+      }
       else if (!recTab.hidden && (wasSaving || (st.rec && st.rec.saving))) loadRecordings(); // progress, then the new video
       wasSaving = !!(st.rec && st.rec.saving);
       if (!gcTab.hidden && isRunning !== wasRunning) { setGCLocked(isRunning && st.running.kind === "dolphin"); loadGCSettings(); }
@@ -835,6 +910,7 @@
   const launcherEl = document.getElementById("launcher");
   const gcTab = document.getElementById("gcTab");
   const recTab = document.getElementById("recTab");
+  const mameTab = document.getElementById("mameTab");
   const store = {
     get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } },
     set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) { /* ignore */ } },
@@ -842,11 +918,15 @@
   tabsEl.querySelector('[data-tab="recordings"]').hidden = !DESKTOP;
 
   function showTab(tab) {
-    if (!["classic", "gc", "wii", "recordings"].includes(tab) || (tab === "recordings" && !DESKTOP)) tab = "classic";
+    if (!["classic", "gc", "wii", "mame", "recordings"].includes(tab) || (tab === "recordings" && !DESKTOP)) tab = "classic";
     tabsEl.querySelectorAll("button").forEach(b => b.setAttribute("aria-selected", String(b.dataset.tab === tab)));
     launcherEl.hidden = tab !== "classic";
     gcTab.hidden = tab !== "gc" && tab !== "wii";
     recTab.hidden = tab !== "recordings";
+    mameTab.hidden = tab !== "mame";
+    document.getElementById("mameBrowserOnly").hidden = !!DESKTOP;
+    document.getElementById("mameDesktop").hidden = !DESKTOP;
+    if (tab === "mame" && DESKTOP) loadMame();
     if (tab === "gc" || tab === "wii") setGCPlatform(tab);
     document.getElementById("gcBrowserOnly").hidden = !!DESKTOP;
     document.getElementById("gcDesktop").hidden = !DESKTOP;
@@ -943,6 +1023,194 @@
     el.querySelector("#recChoose").addEventListener("click", async () => { if (await swAct(() => api("/api/rec/control", { action: "choose-folder" }))) loadRecordings(); });
     el.querySelectorAll("[data-play]").forEach(b => b.addEventListener("click", () => swAct(() => api("/api/rec/open", { name: b.dataset.play }))));
   }
+
+  // ---------- Arcade games in MAME (any version) ----------
+  let mameData = null, mameRels = null, mameRelsErr = "", mamePoll = null, mameProblemAt = null;
+  const mameMsg = document.getElementById("mameMsg");
+  const mameBusy = inst => !!inst && ["finding", "downloading", "installing"].includes(inst.state);
+
+  async function loadMame(afterGame) {
+    try {
+      gotMame(await api("/api/mame/library"), afterGame);
+    } catch (e) { mameMsg.textContent = "Couldn't load your arcade games: " + e.message; }
+    if (!mameRels) loadMameReleases();
+  }
+
+  function gotMame(r, afterGame) {
+    const prevProblem = mameProblemAt;
+    mameData = r;
+    renderMameVersions(); renderMameFolders(); renderMameList(); renderMameDl();
+    const p = r.status.problem;
+    mameProblemAt = p ? p.at : null;
+    // afterGame: "ended" (a game just closed) or "check" (soon after starting one)
+    if (afterGame) {
+      if (p && p.at !== prevProblem) toast(`${p.game} didn't start in ${p.version}`, true);
+      else if (afterGame === "ended") toast("Welcome back");
+    }
+    // keep checking while something runs in the background
+    const busy = r.loading || r.status.finding || mameBusy(r.status.install);
+    if (busy && !mamePoll) mamePoll = setInterval(async () => {
+      if (mameTab.hidden) return;
+      try { gotMame(await api("/api/mame/library")); } catch (e) { /* keep trying */ }
+    }, 1000);
+    if (!busy && mamePoll) { clearInterval(mamePoll); mamePoll = null; }
+  }
+
+  async function loadMameReleases(refresh) {
+    try {
+      mameRels = (await api("/api/mame/releases" + (refresh ? "?refresh=1" : ""))).releases || [];
+      mameRelsErr = "";
+    } catch (e) { mameRels = null; mameRelsErr = e.message; }
+    renderMameDl();
+  }
+
+  function renderMameVersions() {
+    const st = mameData.status, el = document.getElementById("mameVersions");
+    const list = st.installs || [];
+    el.innerHTML = list.length ? list.map((v, i) => `<div class="mame-ver">
+        <div><b>${esc(v.label)}</b> ${v.default ? '<span class="mame-def">· default</span>' : ""}${v.missing ? ' <b style="color:var(--warn)">· not found</b>' : ""}</div>
+        <small class="muted">${esc(v.exe)}</small>
+        <div class="rg-btns">${v.default ? "" : `<button class="linkbtn" data-def="${i}">Make default</button>`}
+          <button class="linkbtn" data-open="${i}">Open folder</button>
+          <button class="linkbtn danger" data-rmv="${i}">Remove</button></div></div>`).join("")
+      : `<p class="muted" style="font-size:13px;margin:0">${st.finding ? "Looking for MAME on this PC…"
+          : 'No MAME yet. Download a version below, or click "Add MAME…" to choose a mame.exe you already have. You can add as many versions as you like.'}</p>`;
+    el.querySelectorAll("[data-def]").forEach(b => b.addEventListener("click", () => mameAction({ action: "set-default", exe: list[+b.dataset.def].exe }, "Default MAME changed")));
+    el.querySelectorAll("[data-open]").forEach(b => b.addEventListener("click", () => mameAction({ action: "open-folder", exe: list[+b.dataset.open].exe })));
+    el.querySelectorAll("[data-rmv]").forEach(b => b.addEventListener("click", () => {
+      if (confirm(`Remove ${list[+b.dataset.rmv].label} from RetroPixels? Its files stay where they are.`))
+        mameAction({ action: "remove-exe", exe: list[+b.dataset.rmv].exe });
+    }));
+    document.getElementById("mameEmbed").checked = !!st.embed;
+    document.getElementById("mameFind").disabled = !!st.finding;
+  }
+
+  function renderMameFolders() {
+    const f = mameData.status.folders || [];
+    const el = document.getElementById("mameFolders");
+    el.innerHTML = `<span class="muted">ROM folders</span>${f.length ? f.map((d, i) =>
+      `<div style="display:flex;gap:8px;align-items:center;margin-top:4px"><small style="flex:1;overflow-wrap:anywhere">${esc(d)}</small><button class="linkbtn danger" data-rmf="${i}">Remove</button></div>`).join("")
+      : '<br><b style="color:var(--warn)">None yet</b> <small class="muted">· add the folder with your MAME ROM sets (.zip files such as tmnt.zip)</small>'}`;
+    el.querySelectorAll("[data-rmf]").forEach(b => b.addEventListener("click", () => mameAction({ action: "remove-folder", folder: f[+b.dataset.rmf] })));
+    const p = mameData.status.problem;
+    document.getElementById("mameNote").innerHTML = p
+      ? `<div class="rec-note err" style="margin-top:10px"><b>${esc(p.game)} didn't start in ${esc(p.version)}.</b><br>${esc(p.text)}</div>` : "";
+  }
+
+  function mameVersionOptions(selected) {
+    const st = mameData.status, list = st.installs || [];
+    const def = list.find(v => v.default);
+    return `<option value="">Default${def ? ` (${esc(def.label)})` : ""}</option>` +
+      list.map(v => `<option value="${esc(v.exe)}" ${v.exe === selected ? "selected" : ""}>${esc(v.label)}</option>`).join("");
+  }
+
+  function renderMameList() {
+    const r = mameData, st = r.status;
+    const q = document.getElementById("mameSearch").value.trim().toLowerCase();
+    const sort = document.getElementById("mameSort").value;
+    const t = d => (d && !d.startsWith("0001") ? Date.parse(d) : 0);
+    let list = r.games.filter(g => !q || g.name.toLowerCase().includes(q) || g.short.includes(q));
+    if (sort === "played") list = list.slice().sort((a, b) => t(b.played) - t(a.played) || a.name.localeCompare(b.name));
+    document.getElementById("mameCount").textContent = r.loading ? "Looking through your ROM folders…" : `${r.games.length} games`;
+    const el = document.getElementById("mameList");
+    if (!r.games.length) {
+      el.innerHTML = `<p class="muted" style="margin:0">${r.loading || !r.loaded ? "Looking for games…"
+        : (st.folders || []).length ? 'No arcade games found in your ROM folders. Use "Add ROM folder…" if they\'re somewhere else, or "Open a game file…".'
+        : 'Add the folder with your MAME ROM sets, or use "Open a game file…".'}</p>`;
+      return;
+    }
+    const playing = !!(appStatus && appStatus.running);
+    const own = st.gameVersion || {};
+    el.innerHTML = "";
+    list.slice(0, 600).forEach(g => {
+      const row = document.createElement("div");
+      row.className = "mame-row";
+      row.innerHTML = `<div class="mame-name" title="${esc(g.path)}"><b>${esc(g.name)}</b>
+          <small>${esc(g.short)} · ${fmtSize(g.size)}${t(g.played) ? ` · played ${fmtTime(g.played)}` : ""}</small></div>
+        <select class="sw-select" data-ver aria-label="MAME version for ${esc(g.name)}" ${(st.installs || []).length ? "" : "disabled"}>${mameVersionOptions(own[g.short] || "")}</select>
+        <button class="btn sm mame-btn" data-play ${playing ? "disabled" : ""}>Play</button>`;
+      row.querySelector("[data-ver]").addEventListener("change", e => mameAction({ action: "set-game", short: g.short, exe: e.target.value },
+        e.target.value ? `${g.name} will play in ${e.target.selectedOptions[0].textContent}` : `${g.name} will play in the default MAME`));
+      row.querySelector("[data-play]").addEventListener("click", () => playMame(g));
+      el.appendChild(row);
+    });
+    if (list.length > 600) el.insertAdjacentHTML("beforeend", `<p class="muted" style="font-size:13px">${list.length - 600} more: search to find them.</p>`);
+  }
+
+  async function playMame(g) {
+    mameMsg.style.color = ""; mameMsg.textContent = "";
+    if (mameData && mameData.status.embed) sendEmbedArea();
+    try {
+      await api("/api/mame/play", { path: g.path });
+      toast(`Starting ${g.name}…`);
+      mameStarted();
+    } catch (e) { mameMsg.style.color = "var(--danger)"; mameMsg.textContent = e.message; }
+  }
+
+  // A game that can't run (missing ROM files, a version that doesn't have it) closes MAME
+  // within a moment: look again shortly after starting, so the reason shows.
+  function mameStarted() {
+    setTimeout(() => api("/api/status").then(renderStatus).catch(() => {}), 800);
+    setTimeout(() => { if (!(appStatus && appStatus.running)) loadMame("check"); }, 3500);
+  }
+
+  function renderMameDl() {
+    if (!mameData) return;
+    const inst = mameData.status.install;
+    const have = new Set((mameData.status.installs || []).map(v => v.version));
+    const sel = document.getElementById("mameRelSel"), btn = document.getElementById("mameDl");
+    if (mameRels && sel.dataset.filled !== String(mameRels.length) + [...have].join()) {
+      const keep = sel.value;
+      sel.innerHTML = mameRels.map(r => `<option value="${esc(r.version)}">MAME ${esc(r.version)}${have.has(r.version) ? " (have it)" : ""}${r.published && !r.published.startsWith("0001") ? " · " + new Date(r.published).getFullYear() : ""}</option>`).join("");
+      if (keep && mameRels.some(r => r.version === keep)) sel.value = keep;
+      sel.dataset.filled = String(mameRels.length) + [...have].join();
+    } else if (!mameRels) {
+      sel.innerHTML = `<option value="">${mameRelsErr ? "Couldn't load the list" : "Loading the list…"}</option>`;
+      delete sel.dataset.filled;
+    }
+    const busy = mameBusy(inst);
+    btn.disabled = busy || !mameRels;
+    const note = document.getElementById("mameDlNote");
+    if (busy) {
+      const pct = inst.total > 0 ? Math.min(100, Math.round(inst.got / inst.total * 100)) : 0;
+      const label = inst.state === "installing" ? `Unpacking MAME ${esc(inst.version)}…`
+        : `Downloading MAME ${esc(inst.version)}… ${pct}% (${fmtSize(inst.got)}${inst.total > 0 ? " of " + fmtSize(inst.total) : ""})`;
+      note.innerHTML = `<div style="height:8px;background:#0e0f13;border-radius:99px;overflow:hidden"><div style="width:${pct}%;height:100%;background:#e5484d"></div></div><small>${label}</small>`;
+    } else if (inst && inst.state === "error") {
+      note.innerHTML = `<small class="bad">MAME ${esc(inst.version)} couldn't be downloaded: ${esc(inst.error)}</small>`;
+    } else if (inst && inst.state === "done") {
+      note.innerHTML = `<small class="ok">MAME ${esc(inst.version)} is ready.</small>`;
+    } else if (mameRelsErr) {
+      note.innerHTML = `<small class="bad">${esc(mameRelsErr)}</small> <button class="linkbtn" id="mameRelRetry">Try again</button>`;
+      document.getElementById("mameRelRetry").addEventListener("click", () => loadMameReleases(true));
+    } else note.innerHTML = "";
+  }
+
+  async function mameAction(body, ok) {
+    try {
+      const r = await api("/api/mame/action", body);
+      gotMame(r);
+      if (ok) toast(ok);
+      return r;
+    } catch (e) { toast(e.message, true); if (body.action === "set-game") renderMameList(); return null; }
+  }
+
+  document.getElementById("mameSearch").addEventListener("input", () => mameData && renderMameList());
+  document.getElementById("mameSort").addEventListener("change", () => mameData && renderMameList());
+  document.getElementById("mameAddExe").addEventListener("click", () => mameAction({ action: "add-exe" }));
+  document.getElementById("mameFind").addEventListener("click", () => mameAction({ action: "find" }, "Looking for MAME on this PC…"));
+  document.getElementById("mameAddFolder").addEventListener("click", () => mameAction({ action: "add-folder" }));
+  document.getElementById("mameRescan").addEventListener("click", () => mameAction({ action: "rescan" }));
+  document.getElementById("mameEmbed").addEventListener("change", e => mameAction({ action: "embed", on: e.target.checked }));
+  document.getElementById("mameOpenFile").addEventListener("click", async () => {
+    if (mameData && mameData.status.embed) sendEmbedArea();
+    if (await mameAction({ action: "open-file" })) mameStarted();
+  });
+  document.getElementById("mameDl").addEventListener("click", async () => {
+    const v = document.getElementById("mameRelSel").value;
+    if (!v) return;
+    try { gotMame(await api("/api/mame/install", { version: v })); } catch (e) { toast(e.message, true); }
+  });
 
   // ---------- GameCube & Wii (Dolphin) ----------
   let gcGames = [], gcStatus = null, gcFilter = "all", gcSettings = [], gcChanges = {}, gcLocked = false;
@@ -1874,6 +2142,7 @@
     launcherEl.hidden = true;
     recTab.hidden = true;
     gcTab.hidden = true;
+    mameTab.hidden = true;
     tabsEl.hidden = true;
     document.getElementById("swNow").hidden = true;
     document.getElementById("playerWrap").style.display = "block";

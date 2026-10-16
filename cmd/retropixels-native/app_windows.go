@@ -100,9 +100,10 @@ type app struct {
 	controls      *controlsDialog
 	mouseTracking bool
 
-	ui  *uiState // the start screen, save state slots and the rest (ui_*_windows.go)
-	dol dolState // GameCube / Wii (dolphin_windows.go)
-	ap  apState  // Archipelago (archipelago_windows.go)
+	ui   *uiState  // the start screen, save state slots and the rest (ui_*_windows.go)
+	dol  dolState  // GameCube / Wii (dolphin_windows.go)
+	mame mameState // arcade games in MAME (mame_windows.go)
+	ap   apState   // Archipelago (archipelago_windows.go)
 }
 
 var theApp *app
@@ -185,7 +186,7 @@ func runApp() {
 		if a.controls != nil && a.controls.capturing(&m) {
 			continue
 		}
-		if a.dolDialogMessage(&m) {
+		if a.dolDialogMessage(&m) || a.mameDialogMessage(&m) {
 			continue
 		}
 		call(pTranslateMessage, uintptr(unsafe.Pointer(&m)))
@@ -240,6 +241,7 @@ func (a *app) buildMenu() {
 	a.apGameMenu()
 	appendMenu(a.menu, mfPopup, a.gameMenu, "&Game")
 	a.addDolphinMenu()
+	a.addMameMenu()
 
 	a.optMenu = call(pCreatePopupMenu)
 	appendMenu(a.optMenu, mfString, cmdControls, "&Controls…")
@@ -310,6 +312,7 @@ func (a *app) updateMenus() {
 	enableItem(a.menu, cmdRecord, on || a.recOn)
 	a.uiUpdateMenus()
 	a.dolUpdateMenus()
+	a.mameUpdateMenus()
 	a.apUpdateMenus()
 }
 
@@ -353,6 +356,7 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 	case wmSize:
 		call(pInvalidateRect, hwnd, 0, 0)
 		a.dolResize()
+		a.mameResize()
 		return 0
 	case wmGetMinMaxInfo:
 		mm := *(**minMaxInfo)(unsafe.Pointer(&lp)) // lp is a pointer Windows gave us
@@ -441,7 +445,7 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		call(pSetWindowPos, hwnd, 0, uintptr(r.Left), uintptr(r.Top), uintptr(r.Right-r.Left), uintptr(r.Bottom-r.Top), swpNoZOrder|swpNoActivate)
 		return 0
 	case wmClose:
-		if a.dolBeforeClose() {
+		if a.mameBeforeClose() || a.dolBeforeClose() {
 			return 0
 		}
 		a.closeGame()
@@ -590,7 +594,7 @@ func (a *app) paint(hdc uintptr) {
 	a.frameMu.Lock()
 	defer a.frameMu.Unlock()
 	if a.frame == nil {
-		if !a.dolPaint(hdc) {
+		if !a.mamePaint(hdc) && !a.dolPaint(hdc) {
 			a.drawIdle(hdc)
 		}
 		return
@@ -725,6 +729,7 @@ func (a *app) updateTitle() {
 		t += a.apTitle()
 	}
 	t += a.dolTitle()
+	t += a.mameTitle()
 	if a.recSaving > 0 {
 		t += " - Saving the recording…"
 	}
@@ -788,6 +793,7 @@ func (a *app) handleEvents() {
 		default:
 			a.uiEvent(e.name, e.detail)
 			a.dolEvent(e.name, e.detail)
+			a.mameEvent(e.name, e.detail)
 			a.apEvent(e.name, e.detail)
 		}
 	}
@@ -899,6 +905,8 @@ func (a *app) command(id int) {
 		a.dipCommand(id)
 	case id >= cmdDolFirst && id <= cmdDolLast:
 		a.dolCommand(id)
+	case id >= cmdMameFirst && id <= cmdMameLast:
+		a.mameCommand(id)
 	case id == cmdAPStatus || id == cmdAPHelp:
 		a.apCommand(id)
 	case id == cmdAbout:
@@ -931,6 +939,9 @@ func (a *app) volume() float32 {
 // ---------------- games ----------------
 
 func (a *app) openPath(path string) {
+	if a.mameOpenPath(path) {
+		return
+	}
 	if a.dolOpenPath(path) {
 		return
 	}
@@ -938,6 +949,9 @@ func (a *app) openPath(path string) {
 		return
 	}
 	g, err := openGame(path)
+	if err != nil && a.mameOfferArcade(path, err) {
+		return // an arcade game RetroPixels' own emulators don't have: MAME can play it
+	}
 	if err != nil {
 		icon := uint32(mbIconWarning)
 		if _, ok := err.(errNotYet); ok {
@@ -1075,6 +1089,10 @@ func (a *app) encoder(ff string) string {
 
 func (a *app) toggleRecording() {
 	if a.dolToggleRecording() {
+		return
+	}
+	if a.mame.run != nil {
+		a.showMessage("MAME games aren't recorded by RetroPixels: capture this window with OBS, or use MAME's own recording")
 		return
 	}
 	s := a.sess

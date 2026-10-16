@@ -339,6 +339,9 @@ func (a *app) dolOpenPath(path string) bool {
 
 // dolPlay starts a game (stopping the one in Dolphin first, if asked).
 func (a *app) dolPlay(g dolphin.Game) {
+	if a.mameBusy() {
+		return
+	}
 	if r := a.dol.run; r != nil {
 		if strings.EqualFold(r.game.Path, g.Path) {
 			call(pSetForegroundWindow, a.hwnd)

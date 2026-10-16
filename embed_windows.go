@@ -330,7 +330,7 @@ func embedDolphin(pid int, exited <-chan struct{}) {
 		embedHWND = h
 		embedMu.Unlock()
 		runMu.Lock()
-		if running != nil && running.Kind == "dolphin" {
+		if running != nil { // Dolphin or MAME: one game runs at a time
 			running.Embedded = true
 		}
 		runMu.Unlock()

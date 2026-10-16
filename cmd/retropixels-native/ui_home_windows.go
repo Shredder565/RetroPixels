@@ -151,7 +151,7 @@ func (a *app) drawHome(hdc uintptr) {
 	y += hh + s(16)
 
 	// the footer (controller check and what this build plays), from the bottom
-	plays := "This test build plays " + availableLabels() + " games." + strings.ReplaceAll(dolIdleNote(), "\n", " ") + " Press F1 for the keys and shortcuts."
+	plays := "This test build plays " + availableLabels() + " games." + strings.ReplaceAll(dolIdleNote()+mameIdleNote(), "\n", " ") + " Press F1 for the keys and shortcuts."
 	playsH := textHeight(dc, u.small, plays, x1-x0)
 	chipH := s(24)
 	chipsW := s(84)
