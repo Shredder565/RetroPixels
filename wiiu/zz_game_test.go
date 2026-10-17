@@ -169,6 +169,7 @@ func TestLocalGame(t *testing.T) {
 			mem.Read32(ta+surfFormat), mem.Read32(ta+surfTile), img, size, nz)
 	}
 	t.Logf("audio: %d samples, peak %.3f", audioN, peak)
+	t.Logf("missing: %v", m.Missing())
 	t.Logf("exited %v code %d err %v draws %d shader err %q\n%s", m.Exited, int32(m.ExitCode), m.Err, m.gpu.Draws, m.gpu.ShaderErr, m.ThreadsSummary())
 	if len(log) > 400 {
 		log = log[len(log)-400:]

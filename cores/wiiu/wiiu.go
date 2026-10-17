@@ -115,7 +115,14 @@ func (c *WiiU) ControlsNote() string {
 	if c.m == nil {
 		return ControlsNote
 	}
-	return ControlsNote + " Drawing with " + c.m.Renderer() + "."
+	note := ControlsNote + " Drawing with " + c.m.Renderer() + "."
+	if miss := c.m.Missing(); len(miss) > 0 {
+		if len(miss) > 12 {
+			miss = append(miss[:12:12], "...")
+		}
+		note += " Not in RetroPixels yet (this game called them): " + strings.Join(miss, ", ") + "."
+	}
+	return note
 }
 
 func (c *WiiU) Rumble() float32 {
@@ -214,6 +221,12 @@ func (c *WiiU) takePicture() {
 		msg = fmt.Sprintf("The program ended (exit code %d).", int32(c.m.ExitCode))
 	}
 	if msg != "" {
+		if miss := c.m.Missing(); len(miss) > 0 {
+			if len(miss) > 8 {
+				miss = append(miss[:8:8], "...")
+			}
+			msg += " It used things RetroPixels doesn't have yet: " + strings.Join(miss, ", ") + "."
+		}
 		machine.DrawText(c.screen[:w*h], w, h, machine.WrapText(msg, w/12-4))
 	}
 }
