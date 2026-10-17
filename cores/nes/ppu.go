@@ -105,6 +105,8 @@ type ppu struct {
 	palRam [32]byte
 	oam    [256]byte
 	screen []uint32
+	pal    *[512]uint32 // the colours (the console's palette unless an arcade board has its own)
+	noSkip bool         // never skip the odd frames' dot (the arcade RGB PPUs)
 
 	ctrl, mask, status, oamAddr int
 	v, t, x, w, buffer, openBus int
@@ -135,7 +137,7 @@ type ppu struct {
 }
 
 func newPPU(n *NES) *ppu {
-	p := &ppu{nes: n, screen: make([]uint32, 256*240), nmiRise: -1, ovfDot: -1}
+	p := &ppu{nes: n, screen: make([]uint32, 256*240), nmiRise: -1, ovfDot: -1, pal: &palette}
 	// Palette RAM isn't cleared at power; these are the values a typical console wakes up with.
 	p.palRam = [32]byte{0x09, 0x01, 0x00, 0x01, 0x00, 0x02, 0x02, 0x0d, 0x08, 0x10, 0x08, 0x24, 0x00, 0x00, 0x04, 0x2c,
 		0x09, 0x01, 0x34, 0x03, 0x00, 0x04, 0x00, 0x14, 0x08, 0x3a, 0x00, 0x02, 0x00, 0x20, 0x2c, 0x08}
@@ -521,7 +523,7 @@ func (p *ppu) tick() {
 	}
 	p.dot++
 	p.ticks++
-	if line == 261 && p.dot == 340 && p.odd && p.renderAtSkip {
+	if line == 261 && p.dot == 340 && p.odd && p.renderAtSkip && !p.noSkip {
 		p.dot = 341 // skipped dot on odd frames
 	}
 	if p.dot > 340 {
@@ -565,7 +567,7 @@ func (p *ppu) pixel(x, y int) {
 	if mask&1 != 0 {
 		c &= 0x30 // greyscale
 	}
-	p.screen[y*256+x] = palette[((mask>>5)&7)*64+c]
+	p.screen[y*256+x] = p.pal[((mask>>5)&7)*64+c]
 }
 
 const lineSpSlot0 = 1 << 10
