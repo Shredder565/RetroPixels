@@ -61,8 +61,8 @@ func TestHostIndices(t *testing.T) {
 			t.Errorf("prim %#x: got %v, want %v", c.prim, got, c.want)
 		}
 	}
-	if _, _, ok := hostIndices(0x11, []uint32{0, 1, 2}, false); ok {
-		t.Error("rectangles drawn")
+	if _, got, _ := hostIndices(0x11, []uint32{0, 1, 2, 3, ^uint32(0), 5}, true); fmtU32(got) != fmtU32([]uint32{0, 1, 2}) {
+		t.Errorf("rectangles: got %v", got)
 	}
 }
 

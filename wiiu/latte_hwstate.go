@@ -432,9 +432,8 @@ func b2i32(b bool) int32 {
 
 // hostIndices turns a draw's vertex list (ids, after the index offset;
 // restart entries are ^0) into a list of the primitives Direct3D draws:
-// point, line or triangle lists. ok is false for primitives the host can't
-// draw (rectangles, whose fourth corner comes from the transformed
-// positions).
+// point, line or triangle lists. Rectangles come out as their three
+// corners, for dxRectGS. ok is false for primitives the host can't draw.
 func hostIndices(prim uint32, ids []uint32, provokingLast bool) (topo uint32, out []uint32, ok bool) {
 	// Direct3D's provoking vertex is the first: rotate the last one there
 	// (keeping the winding)
@@ -499,6 +498,15 @@ func hostIndices(prim uint32, ids []uint32, provokingLast bool) (topo uint32, ou
 				}
 			}
 			k++
+		}
+	case 0x11:
+		// rectangles: three corners each, as they are (a geometry shader
+		// adds the fourth)
+		for i := 0; i+2 < n; i += 3 {
+			a, b, c := ids[i], ids[i+1], ids[i+2]
+			if a != ^uint32(0) && b != ^uint32(0) && c != ^uint32(0) {
+				out = append(out, a, b, c)
+			}
 		}
 	case 0x13:
 		for i := 0; i+3 < n; i += 4 {
