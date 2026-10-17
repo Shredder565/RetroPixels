@@ -70,6 +70,7 @@ type Machine struct {
 	screen *OSScreen
 	gx2    *GX2
 	gpu    *Latte
+	audio  *AX
 	pad    *GamePad
 	procui *ProcUI
 
