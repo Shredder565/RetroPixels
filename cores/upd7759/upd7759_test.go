@@ -134,3 +134,53 @@ func TestSlaveResetAndState(t *testing.T) {
 		t.Error("a write during RESET started a sample")
 	}
 }
+
+// TestMeasured: the measured behaviour's step sizes, 9-bit range and
+// silence length, and the old behaviour left as it was.
+func TestMeasured(t *testing.T) {
+	rom := []byte{0, 0x5a, 0xa5, 0x69, 0x55, 0x00, 0x04, 0, 0, 0x02, 0x40}
+	for i := 0; i < 128; i++ {
+		rom = append(rom, 0x77) // the largest positive step, again and again
+	}
+	rom = append(rom, 0x00)
+	play := func(measured bool) (first int, outs []float64) {
+		u := New(0, rom)
+		if measured {
+			u.Measured()
+		}
+		u.Port(0)
+		u.Start(true)
+		u.Start(false)
+		last := 0.0
+		for i := 0; i < 200000 && (i < 10 || u.Busy()); i++ {
+			u.Clocks(4)
+			if u.Out != last {
+				if outs == nil {
+					first = i
+				}
+				outs = append(outs, u.Out)
+				last = u.Out
+			}
+		}
+		return
+	}
+	f0, old := play(false)
+	f1, got := play(true)
+	if f1-f0 != 256 {
+		t.Errorf("the silence block lasts %d steps more than before, want 256", f1-f0)
+	}
+	// nibble 7 at step levels 0, 3, 6, 9, 12, 15: 10, 19, 33, 64, 117, 214
+	want := []float64{10, 29, 62, 126, 243, 255}
+	for i, w := range want {
+		if i >= len(got) || got[i]*256 != w {
+			t.Fatalf("measured outputs %v, want %v first", got, want)
+		}
+	}
+	top := 0.0
+	for _, v := range old {
+		top = max(top, v)
+	}
+	if old[0]*128 != 8 || top*128 != 127 {
+		t.Errorf("old behaviour changed: first %v, top %v", old[0]*128, top*128)
+	}
+}

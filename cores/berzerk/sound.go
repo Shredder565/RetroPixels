@@ -31,11 +31,12 @@ type sound struct {
 	out1  bool     // timer 1's output last tick
 	extB  bool     // the clock pins last tick
 	frac  float64  // E-clock ticks owed (in CPU cycles, scaled)
+	sp    *speech  // the speech chip, mixed in
 	rs    *arcade.Resampler
 }
 
-func newSound(rate int) *sound {
-	s := &sound{rs: arcade.NewResampler(eClock, float64(rate))}
+func newSound(rate int, sp *speech) *sound {
+	s := &sound{rs: arcade.NewResampler(eClock, float64(rate)), sp: sp}
 	s.reset()
 	return s
 }
@@ -102,7 +103,7 @@ func (s *sound) tick() {
 			out += int(s.vol[t])
 		}
 	}
-	s.rs.Add(float64(out) * chanGain)
+	s.rs.Add(float64(out)*chanGain + s.sp.tick())
 }
 
 func (s *sound) save(w *arcade.StateW) {

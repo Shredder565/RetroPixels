@@ -28,12 +28,12 @@ const (
 	// mix: one output sample per YM2151 sample (clock / 64), counted in
 	// 20 MHz ticks: a Z80 cycle is 4 ticks, a YM2151 sample 320.
 	ymTicks = 64 * 5
-	// the YM2151's and the uPD7759's levels in the mono mix: the balance
-	// measured against MAME playing the same commands on the same sound
-	// program (the voice about 5 times the music's RMS), at MAME's overall
-	// level
-	fmGain  = 0.178
-	updGain = 0.289
+	// the YM2151's and the uPD7759's levels in the mono mix, fitted to
+	// MAME's output for the same game run (each part's waveform matches
+	// MAME's to 93-99%); the YM2151 comes out with its sign the other way
+	// round from the chip's own output
+	fmGain  = -0.178
+	updGain = 0.476
 )
 
 var (
@@ -94,6 +94,7 @@ func newSound(rom, pcm []byte, bank func(v uint8) int, sampleRate int) *sound {
 	s := &sound{rom: rom, pcm: pcm, bank: bank, rate: sampleRate}
 	s.ym = ym2151.New(ymHz)
 	s.upd = upd7759.NewSlave(updHz)
+	s.upd.Measured()
 	s.upd.OnDRQ = func(on bool) {
 		if on {
 			s.z80.NMI()

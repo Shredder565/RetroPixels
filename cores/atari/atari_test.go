@@ -289,7 +289,7 @@ func TestAstdeluxGenerated(t *testing.T) {
 	}
 	lit := 0
 	for _, p := range c.Screen() {
-		if p&0xff > 0x40 {
+		if p>>8&0xff > 0x10 { // green: full intensity is drawn at about MAME's level
 			lit++
 		}
 	}

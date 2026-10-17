@@ -41,9 +41,9 @@ func init() {
 				{Name: "5d-3", Alt: []string{"berzerk_rc31_5d.rom3.5d"}, Size: 0x800, Role: "cpu", Offset: 0x2000},
 				{Name: "6d-4", Alt: []string{"berzerk_rc31_6d.rom4.6d"}, Size: 0x800, Role: "cpu", Offset: 0x2800},
 				{Name: "5c-5", Alt: []string{"berzerk_rc31_5c.rom5.5c", "berzerk_rc31a_5c.rom5.5c"}, Size: 0x800, Role: "cpu", Offset: 0x3000},
-				// the speech chip's ROMs (not used: see speech.go)
-				{Name: "berzerk_r_vo_1c.1c", Alt: []string{"1c"}, Size: 0x800, Role: "speech", Offset: 0x0000, Optional: true},
-				{Name: "berzerk_r_vo_2c.2c", Alt: []string{"2c"}, Size: 0x800, Role: "speech", Offset: 0x0800, Optional: true},
+				// the speech chip's ROMs: the robots talk when the set has them (see speech.go)
+				{Name: "berzerk_r_vo_1c.1c", Alt: []string{"1c", "r_vo_1c.1c", "vo_1c.1c", "voice_1c.1c", "1c.bin", "berzerk_r_vo_1c.bin"}, Size: 0x800, Role: "speech", Offset: 0x0000, Optional: true},
+				{Name: "berzerk_r_vo_2c.2c", Alt: []string{"2c", "r_vo_2c.2c", "vo_2c.2c", "voice_2c.2c", "2c.bin", "berzerk_r_vo_2c.bin"}, Size: 0x800, Role: "speech", Offset: 0x0800, Optional: true},
 			}},
 		},
 		New: newBoard,
