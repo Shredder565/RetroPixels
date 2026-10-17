@@ -8,3 +8,5 @@ package wiiu
 func jitCall(entry uintptr, a *jitArgs) uint64
 
 const jitSupported = true
+
+func cpuHasFMA() bool

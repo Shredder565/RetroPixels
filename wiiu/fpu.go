@@ -44,6 +44,52 @@ func fmas(a, c, b float64) float64 {
 	return float64(f)
 }
 
+// NaN results as the PowerPC makes them: an operand that is a NaN comes
+// out (made quiet), taking frA, then frB, then frC; a NaN the operation
+// itself makes is the default 7FF8000000000000. (The host's would differ.)
+func nanQ(v float64) float64 { return math.Float64frombits(math.Float64bits(v) | 1<<51) }
+
+var defaultNaN = math.Float64frombits(0x7ff8000000000000)
+
+func pick1(r, a float64) float64 {
+	if r == r {
+		return r
+	}
+	if a != a {
+		return nanQ(a)
+	}
+	return defaultNaN
+}
+
+func pick2(r, a, b float64) float64 {
+	if r == r {
+		return r
+	}
+	if a != a {
+		return nanQ(a)
+	}
+	if b != b {
+		return nanQ(b)
+	}
+	return defaultNaN
+}
+
+func pick3(r, a, b, c float64) float64 {
+	if r == r {
+		return r
+	}
+	if a != a {
+		return nanQ(a)
+	}
+	if b != b {
+		return nanQ(b)
+	}
+	if c != c {
+		return nanQ(c)
+	}
+	return defaultNaN
+}
+
 // round a double to single precision
 func rs(v float64) float64 { return float64(float32(v)) }
 
@@ -121,25 +167,25 @@ func (c *CPU) exec59(inst uint32) {
 	fa, fb, fc := c.FPR[a], c.FPR[b], c.FPR[cc]
 	switch inst >> 1 & 31 {
 	case 18:
-		c.setFPRSingle(d, fa/fb)
+		c.setFPRSingle(d, pick2(fa/fb, fa, fb))
 	case 20:
-		c.setFPRSingle(d, fa-fb)
+		c.setFPRSingle(d, pick2(fa-fb, fa, fb))
 	case 21:
-		c.setFPRSingle(d, fa+fb)
+		c.setFPRSingle(d, pick2(fa+fb, fa, fb))
 	case 22:
-		c.setFPRSingle(d, math.Sqrt(fb))
+		c.setFPRSingle(d, pick1(math.Sqrt(fb), fb))
 	case 24: // fres
-		c.setFPRSingle(d, 1/fb)
+		c.setFPRSingle(d, pick1(1/fb, fb))
 	case 25:
-		c.setFPRSingle(d, fa*force25(fc))
+		c.setFPRSingle(d, pick2(fa*force25(fc), fa, fc))
 	case 28:
-		c.setFPRSingle(d, fmas(fa, force25(fc), -fb))
+		c.setFPRSingle(d, pick3(fmas(fa, force25(fc), -fb), fa, fb, fc))
 	case 29:
-		c.setFPRSingle(d, fmas(fa, force25(fc), fb))
+		c.setFPRSingle(d, pick3(fmas(fa, force25(fc), fb), fa, fb, fc))
 	case 30:
-		c.setFPRSingle(d, -fmas(fa, force25(fc), -fb))
+		c.setFPRSingle(d, -pick3(fmas(fa, force25(fc), -fb), fa, fb, fc))
 	case 31:
-		c.setFPRSingle(d, -fmas(fa, force25(fc), fb))
+		c.setFPRSingle(d, -pick3(fmas(fa, force25(fc), fb), fa, fb, fc))
 	default:
 		c.fail(inst, "unknown instruction")
 		return
@@ -157,16 +203,16 @@ func (c *CPU) exec63(inst uint32) {
 	fa, fb, fc := c.FPR[a], c.FPR[b], c.FPR[cc]
 	switch inst >> 1 & 31 {
 	case 18:
-		c.FPR[d] = fa / fb
+		c.FPR[d] = pick2(fa/fb, fa, fb)
 		goto done
 	case 20:
-		c.FPR[d] = fa - fb
+		c.FPR[d] = pick2(fa-fb, fa, fb)
 		goto done
 	case 21:
-		c.FPR[d] = fa + fb
+		c.FPR[d] = pick2(fa+fb, fa, fb)
 		goto done
 	case 22:
-		c.FPR[d] = math.Sqrt(fb)
+		c.FPR[d] = pick1(math.Sqrt(fb), fb)
 		goto done
 	case 23: // fsel
 		if fa >= 0 {
@@ -176,22 +222,22 @@ func (c *CPU) exec63(inst uint32) {
 		}
 		goto done
 	case 25:
-		c.FPR[d] = fa * fc
+		c.FPR[d] = pick2(fa*fc, fa, fc)
 		goto done
 	case 26: // frsqrte
-		c.FPR[d] = 1 / math.Sqrt(fb)
+		c.FPR[d] = pick1(1/math.Sqrt(fb), fb)
 		goto done
 	case 28:
-		c.FPR[d] = math.FMA(fa, fc, -fb)
+		c.FPR[d] = pick3(math.FMA(fa, fc, -fb), fa, fb, fc)
 		goto done
 	case 29:
-		c.FPR[d] = math.FMA(fa, fc, fb)
+		c.FPR[d] = pick3(math.FMA(fa, fc, fb), fa, fb, fc)
 		goto done
 	case 30:
-		c.FPR[d] = -math.FMA(fa, fc, -fb)
+		c.FPR[d] = -pick3(math.FMA(fa, fc, -fb), fa, fb, fc)
 		goto done
 	case 31:
-		c.FPR[d] = -math.FMA(fa, fc, fb)
+		c.FPR[d] = -pick3(math.FMA(fa, fc, fb), fa, fb, fc)
 		goto done
 	}
 	switch inst >> 1 & 0x3ff {
@@ -443,14 +489,14 @@ func (c *CPU) execPS(inst uint32) {
 	}
 	switch inst >> 1 & 31 {
 	case 10: // ps_sum0
-		set(a0+b1, c1)
+		set(pick2(a0+b1, a0, b1), c1)
 		goto done
 	case 11: // ps_sum1
-		set(c0, a0+b1)
+		set(c0, pick2(a0+b1, a0, b1))
 		goto done
 	case 12: // ps_muls0
 		s := force25(c0)
-		set(a0*s, a1*s)
+		set(pick2(a0*s, a0, s), pick2(a1*s, a1, s))
 		goto done
 	case 13: // ps_muls1
 		s := force25(c1)
@@ -458,20 +504,20 @@ func (c *CPU) execPS(inst uint32) {
 		goto done
 	case 14: // ps_madds0
 		s := force25(c0)
-		set(fmas(a0, s, b0), fmas(a1, s, b1))
+		set(pick3(fmas(a0, s, b0), a0, b0, s), pick3(fmas(a1, s, b1), a1, b1, s))
 		goto done
 	case 15: // ps_madds1
 		s := force25(c1)
 		set(fmas(a0, s, b0), fmas(a1, s, b1))
 		goto done
 	case 18: // ps_div
-		set(a0/b0, a1/b1)
+		set(pick2(a0/b0, a0, b0), pick2(a1/b1, a1, b1))
 		goto done
 	case 20: // ps_sub
-		set(a0-b0, a1-b1)
+		set(pick2(a0-b0, a0, b0), pick2(a1-b1, a1, b1))
 		goto done
 	case 21: // ps_add
-		set(a0+b0, a1+b1)
+		set(pick2(a0+b0, a0, b0), pick2(a1+b1, a1, b1))
 		goto done
 	case 23: // ps_sel
 		r0, r1 := b0, b1
@@ -484,25 +530,25 @@ func (c *CPU) execPS(inst uint32) {
 		c.FPR[d], c.PS1[d] = r0, r1
 		goto done
 	case 24: // ps_res
-		set(1/b0, 1/b1)
+		set(pick1(1/b0, b0), pick1(1/b1, b1))
 		goto done
 	case 25: // ps_mul
-		set(a0*force25(c0), a1*force25(c1))
+		set(pick2(a0*force25(c0), a0, c0), pick2(a1*force25(c1), a1, c1))
 		goto done
 	case 26: // ps_rsqrte
-		c.FPR[d], c.PS1[d] = rs(1/math.Sqrt(b0)), rs(1/math.Sqrt(b1))
+		c.FPR[d], c.PS1[d] = rs(pick1(1/math.Sqrt(b0), b0)), rs(pick1(1/math.Sqrt(b1), b1))
 		goto done
 	case 28: // ps_msub
-		set(fmas(a0, force25(c0), -b0), fmas(a1, force25(c1), -b1))
+		set(pick3(fmas(a0, force25(c0), -b0), a0, b0, c0), pick3(fmas(a1, force25(c1), -b1), a1, b1, c1))
 		goto done
 	case 29: // ps_madd
-		set(fmas(a0, force25(c0), b0), fmas(a1, force25(c1), b1))
+		set(pick3(fmas(a0, force25(c0), b0), a0, b0, c0), pick3(fmas(a1, force25(c1), b1), a1, b1, c1))
 		goto done
 	case 30: // ps_nmsub
-		set(-fmas(a0, force25(c0), -b0), -fmas(a1, force25(c1), -b1))
+		set(-pick3(fmas(a0, force25(c0), -b0), a0, b0, c0), -pick3(fmas(a1, force25(c1), -b1), a1, b1, c1))
 		goto done
 	case 31: // ps_nmadd
-		set(-fmas(a0, force25(c0), b0), -fmas(a1, force25(c1), b1))
+		set(-pick3(fmas(a0, force25(c0), b0), a0, b0, c0), -pick3(fmas(a1, force25(c1), b1), a1, b1, c1))
 		goto done
 	}
 	switch inst >> 1 & 0x3ff {

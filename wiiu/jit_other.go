@@ -9,3 +9,5 @@ func jitCall(entry uintptr, a *jitArgs) uint64 { panic("no recompiler here") }
 func jitAlloc(size int) []byte { return nil }
 
 func jitFree(b []byte) {}
+
+func cpuHasFMA() bool { return false }
