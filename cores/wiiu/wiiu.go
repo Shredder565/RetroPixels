@@ -38,7 +38,7 @@ const (
 // ControlsNote is shown in the Controls window.
 const ControlsNote = "Left stick and right stick = the GamePad's sticks. " +
 	"TV / GamePad switches which screen you see. Wii U homebrew (.rpx) runs now. For a game, open the .rpx in its code folder, " +
-	"or the title.tmd of an encrypted title (with your console's common key in a keys.txt next to it or next to RetroPixels)."
+	"a .wua, or the title.tmd of an encrypted title (with your console's common key in a keys.txt next to it or next to RetroPixels)."
 
 // WiiU is one running program.
 type WiiU struct {
@@ -223,7 +223,13 @@ func (c *WiiU) TakeAudio() []float32 {
 // title's folders, and its saves come back from sram.
 func (c *WiiU) start(sram []byte) (*machine.Machine, error) {
 	files := machine.TitleFolders(c.path)
-	if c.isNUS() {
+	if c.path != "" && strings.EqualFold(filepath.Ext(c.path), ".wua") {
+		rpx, name, f, err := machine.TitleFromWUA(c.path)
+		if err != nil {
+			return nil, err
+		}
+		c.rpx, c.name, files = rpx, name, f
+	} else if c.isNUS() {
 		// an encrypted title: its title.tmd was opened
 		var keyDirs []string
 		if exe, err := os.Executable(); err == nil {

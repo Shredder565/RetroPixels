@@ -535,7 +535,16 @@ func TitleFromNUS(dir string, keyDirs ...string) (rpx []byte, name string, files
 			files.TitleID = id
 		}
 	}
-	name = ""
+	rpx, name, err = titleProgram(files)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	return rpx, name, files, nil
+}
+
+// titleProgram reads a title's program: the .rpx its cos.xml names (or the
+// only one in its code folder).
+func titleProgram(files *FileSystem) (rpx []byte, name string, err error) {
 	if b, err := files.ReadCode("cos.xml"); err == nil {
 		s := string(b)
 		if i := strings.Index(s, "<argstr"); i >= 0 {
@@ -557,10 +566,10 @@ func TitleFromNUS(dir string, keyDirs ...string) (rpx []byte, name string, files
 		}
 	}
 	if name == "" {
-		return nil, "", nil, errors.New("the title has no program (.rpx) in its code folder")
+		return nil, "", errors.New("the title has no program (.rpx) in its code folder")
 	}
 	if rpx, err = files.ReadCode(name); err != nil {
-		return nil, "", nil, fmt.Errorf("reading %s: %v", name, err)
+		return nil, "", fmt.Errorf("reading %s: %v", name, err)
 	}
-	return rpx, name, files, nil
+	return rpx, name, nil
 }
