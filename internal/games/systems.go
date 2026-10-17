@@ -39,7 +39,7 @@ var Systems = []System{
 	{"gb", "Game Boy / Color", []string{"gb", "gbc"}, 0},
 	{"gba", "Game Boy Advance", []string{"gba", "agb"}, 0},
 	{"n64", "Nintendo 64", []string{"z64", "n64", "v64"}, 4.0 / 3},
-	{"wiiu", "Wii U", []string{"rpx"}, 16.0 / 9},
+	{"wiiu", "Wii U", []string{"rpx", "tmd"}, 16.0 / 9},
 	{"segaMD", "Sega Genesis", []string{"md", "gen", "smd"}, 4.0 / 3},
 	{"sms", "Master System", []string{"sms"}, 4.0 / 3},
 	{"atari2600", "Atari 2600", []string{"a26"}, 4.0 / 3},
