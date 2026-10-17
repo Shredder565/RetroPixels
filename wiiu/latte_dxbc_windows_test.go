@@ -65,7 +65,7 @@ func (r *dxVSRun) d3d(t *testing.T) [][]uint32 {
 	n := len(r.in)
 	cfg := &dxConfig{read32: r.read32, fsAddr: r.fs, nParams: r.nOut, testPoints: n, testGPRs: r.nGPR,
 		texInfo:  func(uint32) dxTexKey { return dxTexKey{} },
-		vbufInfo: func(uint32) dxFetchKey { return dxFetchKey{} }}
+		vbufInfo: r.vbufInfo}
 	p, err := translateDX(cfg, r.vs)
 	if err != nil {
 		t.Fatal("translate:", err)
@@ -100,10 +100,33 @@ func (r *dxVSRun) d3d(t *testing.T) [][]uint32 {
 		t.Fatal(err)
 	}
 	defer iv.Release()
+	sysw := r.sys
+	vb := 0
 	for slot, s := range p.srv {
-		if s.vbuf && s.id == dxTestBuf {
-			c.VSSetShaderResources(uint32(slot), iv)
+		if !s.vbuf {
+			continue
 		}
+		size := uint32(4 * len(words))
+		if s.id == dxTestBuf {
+			c.VSSetShaderResources(uint32(slot), iv)
+		} else if b := r.vbufs[s.id]; b != nil {
+			size = uint32(len(b.data))
+			raw := append(append([]byte{}, b.data...), make([]byte, 16)...)
+			raw = raw[:len(raw)&^3]
+			buf, err := d.CreateBuffer(&d3d.BufferDesc{ByteWidth: uint32(len(raw)), BindFlags: d3d.BindShaderResource}, raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer buf.Release()
+			v, err := d.CreateBufferSRV(buf, d3d.FormatR32Uint, 0, uint32(len(raw)/4))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer v.Release()
+			c.VSSetShaderResources(uint32(slot), v)
+		}
+		sysw[(dxSysBufSize+vb/4)*4+vb%4] = size
+		vb++
 	}
 	mkCB := func(w []uint32) d3d.Resource {
 		b, err := d.CreateBuffer(&d3d.BufferDesc{ByteWidth: uint32(4 * len(w)), BindFlags: d3d.BindConstantBuffer}, u32bytes(w))
@@ -112,7 +135,7 @@ func (r *dxVSRun) d3d(t *testing.T) [][]uint32 {
 		}
 		return b
 	}
-	sys, cf := mkCB(r.sys[:]), mkCB(r.cfile[:])
+	sys, cf := mkCB(sysw[:]), mkCB(r.cfile[:])
 	defer sys.Release()
 	defer cf.Release()
 	c.VSSetConstantBuffers(0, sys, cf)
@@ -609,4 +632,67 @@ func TestDXOpTable(t *testing.T) {
 			t.Errorf("op %+v: %d more", vr, bad-6)
 		}
 	}
+}
+
+// TestDXVtxFetch fetches every vertex format, in every number format and
+// endian swap, from strides and offsets aligned or not, and compares with
+// the interpreter. The last vertex is past the buffer's end.
+func TestDXVtxFetch(t *testing.T) {
+	dxDevice(t)
+	rng := rand.New(rand.NewSource(3))
+	n := 0
+	for f := uint32(0); f < 64; f++ {
+		nb := fmtBytes(f)
+		if fmtDescs[f].nc == 0 || nb == 0 || f == fmtGB_GR {
+			continue
+		}
+		for nf := uint32(0); nf < 3; nf++ {
+			for _, signed := range []bool{false, true} {
+				endian := uint32(rng.Intn(3))
+				stride := nb + uint32(rng.Intn(5))
+				offset := uint32(rng.Intn(4))
+				if rng.Intn(2) == 0 {
+					stride, offset = (stride+3)&^3, 0
+				}
+				const verts = 8
+				data := make([]byte, stride*(verts-1)+offset+nb-1) // the last vertex is short
+				rng.Read(data)
+				// some take the format from the resource, and some add the
+				// base vertex
+				spec := vtxSpec{buffer: 0, srcGPR: 0, dstGPR: 1, dstSel: [4]uint32{0, 1, 2, 3},
+					format: f, numFormat: nf, signed: signed, offset: offset, endian: endian, fetchType: 2}
+				word2 := stride << 8
+				if rng.Intn(3) == 0 {
+					spec.useConst = true
+					spec.format, spec.numFormat, spec.signed, spec.endian = 0, 0, false, 0
+					word2 |= f<<20 | nf<<26 | b2u(signed)<<28 | endian<<30
+				}
+				base := uint32(0)
+				if rng.Intn(3) == 0 {
+					spec.fetchType, base = 0, 2
+				}
+				vs := &shaderAsm{}
+				vs.VTX(spec)
+				vs.Export(false, 1, 60, 1, 1, [4]uint32{0, 1, 2, 3})
+				vs.Export(true, 2, 0, 1, 1, [4]uint32{0, 1, 2, 3})
+				vs.End()
+				r := dxSimpleRunAny(vs, 0, 2)
+				r.in = make([][]uint32, verts)
+				r.vbufs = map[uint32]*dxVBuf{0: {base: 0x20000000, data: data, stride: stride, word2: word2}}
+				r.setBase(base, 0)
+				got, want := r.d3d(t), r.interp(t)
+				for v := range want {
+					for k := 4; k < 8; k++ {
+						if !dxClose(got[v][k], want[v][k], 1e-6) {
+							t.Errorf("format %#x num %d signed %v endian %d stride %d offset %d vertex %d.%c: got %08x (%v), want %08x (%v)",
+								f, nf, signed, endian, stride, offset, v, "xyzw"[k%4], got[v][k], u2f(got[v][k]), want[v][k], u2f(want[v][k]))
+							break
+						}
+					}
+				}
+				n++
+			}
+		}
+	}
+	t.Logf("%d fetches", n)
 }

@@ -291,7 +291,7 @@ func convertIn(v uint32, n uint8, k numKind, c int) uint32 {
 		}
 		return f2u(f)
 	case kSnorm:
-		f := float32(sext()) / float32(uint64(1)<<(n-1)-1)
+		f := float32(sext()) / float32(max(uint64(1)<<(n-1)-1, 1)) // 1-bit: 0 or -1
 		if f < -1 {
 			f = -1
 		}
