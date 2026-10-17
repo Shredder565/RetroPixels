@@ -238,6 +238,10 @@ func (g *Latte) decodeLevel(t *texDesc, lvl uint32) *texLevel {
 					continue
 				}
 				i := (z*lh+ey)*lw + ex
+				if use8 && f == fmt8_8_8_8 { // the bytes are the 8-bit values
+					l.rgba8[i] = uint32(buf[0]) | uint32(buf[1])<<8 | uint32(buf[2])<<16 | uint32(buf[3])<<24
+					continue
+				}
 				if use8 {
 					v := decodeElem(f, kind, buf[:eb])
 					l.rgba8[i] = q8(v[0]) | q8(v[1])<<8 | q8(v[2])<<16 | q8(v[3])<<24

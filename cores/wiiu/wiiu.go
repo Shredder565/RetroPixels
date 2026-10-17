@@ -111,7 +111,12 @@ func (c *WiiU) AnalogStick() bool { return true }
 // UsesRightStick: the right stick is the GamePad's.
 func (c *WiiU) UsesRightStick() bool { return true }
 
-func (c *WiiU) ControlsNote() string { return ControlsNote }
+func (c *WiiU) ControlsNote() string {
+	if c.m == nil {
+		return ControlsNote
+	}
+	return ControlsNote + " Drawing with " + c.m.Renderer() + "."
+}
 
 func (c *WiiU) Rumble() float32 {
 	if c.m.Rumble() {

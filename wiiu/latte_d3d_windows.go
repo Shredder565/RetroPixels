@@ -26,6 +26,8 @@ type d3dBackend struct {
 	c d3d.Context
 
 	surfs   []*hostSurf
+	scanBuf []uint32  // scanPixels' result, reused
+	scanOf  *hostSurf // the surface scanBuf holds
 	texs    map[hostTexKey]*hostTex
 	bufs    map[[2]uint32]*hostBuf // vertex buffers and constant banks by (base, size)
 	shaders map[shaderKey][]*hostShader
@@ -149,6 +151,7 @@ type hostSurf struct {
 	staging d3d.Resource
 	view    d3d.View // render target or depth stencil view
 	dirty   bool     // the host has drawn into it since it was written back
+	scanned bool     // scanBuf holds it as it is now
 }
 
 func (s *hostSurf) release() {
@@ -271,9 +274,18 @@ func (b *d3dBackend) store(s *hostSurf) {
 	} else {
 		pb := hostPixelBytes(s.hostFmt)
 		n := fmtBytes(s.format)
+		// 8-bit RGBA is the same bytes on both sides
+		raw := s.format&0x3f == fmt8_8_8_8 && (s.hostFmt == d3d.FormatRGBA8Unorm && s.kind == kUnorm ||
+			s.hostFmt == d3d.FormatRGBA8UnormSRGB && s.kind == kSrgb)
 		for y := uint32(0); y < s.h; y++ {
 			s.lay.rowAddrs(0, y, s.slice, addrs)
 			row := data[y*m.RowPitch:]
+			if raw {
+				for x, a := range addrs {
+					g.mem.WriteBytes(a, row[x*4:x*4+4])
+				}
+				continue
+			}
 			for x, a := range addrs {
 				v := hostDecode(s.hostFmt, row[x*pb:])
 				encodeElem(s.format, s.kind, v, buf[:n])
@@ -283,6 +295,56 @@ func (b *d3dBackend) store(s *hostSurf) {
 	}
 	b.c.Unmap(s.staging, 0)
 	s.dirty = false
+}
+
+func (b *d3dBackend) scanPixels(cb *cbDesc) ([]uint32, uint32, uint32, bool) {
+	for _, s := range b.surfs {
+		if !s.same(false, &cb.lay, cb.format, cb.kind, cb.slice) {
+			continue
+		}
+		if !s.dirty {
+			return nil, 0, 0, false
+		}
+		if s.scanned && b.scanOf == s {
+			return b.scanBuf[:s.w*s.h], s.w, s.h, true
+		}
+		b.c.CopyResource(s.staging, s.tex)
+		m, err := b.c.Map(s.staging, 0, d3d.MapRead)
+		if err != nil {
+			return nil, 0, 0, false
+		}
+		data := m.Bytes(int(m.RowPitch) * int(s.h))
+		n := int(s.w * s.h)
+		if cap(b.scanBuf) < n {
+			b.scanBuf = make([]uint32, n)
+		}
+		px := b.scanBuf[:n]
+		pb := hostPixelBytes(s.hostFmt)
+		direct := s.hostFmt == d3d.FormatRGBA8Unorm || s.hostFmt == d3d.FormatRGBA8UnormSRGB
+		for y := uint32(0); y < s.h; y++ {
+			row := data[y*m.RowPitch:]
+			out := px[y*s.w : (y+1)*s.w]
+			for x := range out {
+				if direct {
+					p := row[x*4 : x*4+4]
+					out[x] = uint32(p[0])<<24 | uint32(p[1])<<16 | uint32(p[2])<<8 | uint32(p[3])
+					continue
+				}
+				v := hostDecode(s.hostFmt, row[x*pb:])
+				if s.kind == kSrgb {
+					for c := 0; c < 3; c++ {
+						v[c] = f2u(linearToSRGB(u2f(v[c])))
+					}
+				}
+				q := func(c int) uint32 { return uint32(clamp01(u2f(v[c]))*255 + 0.5) }
+				out[x] = q(0)<<24 | q(1)<<16 | q(2)<<8 | q(3)
+			}
+		}
+		b.c.Unmap(s.staging, 0)
+		s.scanned, b.scanOf = true, s
+		return px, s.w, s.h, true
+	}
+	return nil, 0, 0, false
 }
 
 func (b *d3dBackend) flush(lo, hi uint32) {
@@ -326,7 +388,7 @@ func (b *d3dBackend) clearColor(cb *cbDesc, c [4]float32) bool {
 		if s.same(false, &cb.lay, cb.format, cb.kind, cb.slice) {
 			b.dropTextures(s.lo, s.hi)
 			b.c.ClearRenderTargetView(s.view, c)
-			s.dirty = true
+			s.dirty, s.scanned = true, false
 			return true
 		}
 	}
@@ -338,7 +400,7 @@ func (b *d3dBackend) clearDepth(db *dbDesc, z float32, stencil, flags uint32) bo
 		if s.same(true, &db.lay, db.format, 0, db.slice) {
 			b.dropTextures(s.lo, s.hi)
 			b.c.ClearDepthStencilView(s.view, flags&3, z, uint8(stencil))
-			s.dirty = true
+			s.dirty, s.scanned = true, false
 			return true
 		}
 	}
@@ -991,7 +1053,7 @@ func (b *d3dBackend) draw(st *drawState, prim uint32, ids []uint32, insts uint32
 	c.DrawIndexedInstanced(uint32(len(idx)), insts, uint32(b.ibAt/4), 0, 0)
 	// what was drawn is newer on the host; textures made from it are old
 	for _, s := range drawn {
-		s.dirty = true
+		s.dirty, s.scanned = true, false
 		b.dropTextures(s.lo, s.hi)
 	}
 	return true

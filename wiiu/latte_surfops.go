@@ -266,7 +266,16 @@ func (g *Latte) copyToScan(cb cbDesc, w, h, target uint32) {
 	if sb.Addr == 0 || !cb.ok || w == 0 || h == 0 {
 		return
 	}
-	g.hwFlush(surfRange(&cb.lay, cb.slice))
+	// the picture straight from the host GPU, when it drew it
+	var host []uint32
+	var hostW, hostH uint32
+	if g.hw != nil {
+		var ok bool
+		if host, hostW, hostH, ok = g.hw.scanPixels(&cb); !ok {
+			host = nil
+			g.hw.flush(surfRange(&cb.lay, cb.slice))
+		}
+	}
 	frame := sb.W * sb.H * 4
 	dst := sb.Addr + sb.Back*frame
 	row := make([]byte, sb.W*4)
@@ -277,6 +286,16 @@ func (g *Latte) copyToScan(cb cbDesc, w, h, target uint32) {
 	f := cb.format & 0x3f
 	for y := uint32(0); y < sb.H; y++ {
 		sy := y * h / sb.H
+		if sy != lastSY && host != nil {
+			lastSY = sy
+			for x := range srcRow {
+				if uint32(x) < hostW && sy < hostH {
+					srcRow[x] = host[sy*hostW+uint32(x)]
+				} else {
+					srcRow[x] = 0
+				}
+			}
+		}
 		if sy != lastSY {
 			lastSY = sy
 			cb.lay.rowAddrs(0, sy, cb.slice, addrs)

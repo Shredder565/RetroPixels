@@ -22,6 +22,10 @@ type hwRenderer interface {
 	// report whether it did.
 	clearColor(cb *cbDesc, c [4]float32) bool
 	clearDepth(db *dbDesc, z float32, stencil, flags uint32) bool
+	// scanPixels reads a colour surface the host holds and has drawn
+	// into, as 8-bit RGBA (0xRRGGBBAA, row by row), for putting on the
+	// screen without writing it back. False when guest memory has it.
+	scanPixels(cb *cbDesc) (px []uint32, w, h uint32, ok bool)
 	close()
 }
 

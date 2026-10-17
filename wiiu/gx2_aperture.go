@@ -26,7 +26,7 @@ func init() {
 		buf := m.heaps.allocSystem(m, size, 0x100)
 		// what's there already shows through
 		ap := &aperture{buf: buf, lay: lay, w: w, h: h, slice: slice, endian: endian}
-		ap.each(m, func(lin, tiled uint32) { m.Mem.WriteBytes(lin, ap.swap(m.readN(tiled, bpp))) })
+		ap.copy(m, false)
 		if m.apertures == nil {
 			m.apertures = map[uint32]*aperture{}
 		}
@@ -53,14 +53,7 @@ func init() {
 			return
 		}
 		delete(m.apertures, arg(cpu, 0))
-		bpp := ap.lay.BPP / 8
-		lo, hi := ^uint32(0), uint32(0)
-		ap.each(m, func(lin, tiled uint32) {
-			b := make([]byte, bpp)
-			m.Mem.ReadBytes(lin, b)
-			m.Mem.WriteBytes(tiled, ap.swap(b))
-			lo, hi = min(lo, tiled), max(hi, tiled+bpp)
-		})
+		lo, hi := ap.copy(m, true)
 		m.heaps.get(m.heaps.System).expFree(ap.buf)
 		if hi > lo {
 			m.gpuWritten(lo, hi-lo)
@@ -68,18 +61,37 @@ func init() {
 	})
 }
 
-// each visits every element: its address in the window and in the surface.
-func (ap *aperture) each(m *Machine, f func(lin, tiled uint32)) {
+// copy moves the surface into the window (or, back, the window into the
+// surface), a row at a time, and returns the range of surface written.
+func (ap *aperture) copy(m *Machine, back bool) (lo, hi uint32) {
 	bpp := ap.lay.BPP / 8
+	lo = ^uint32(0)
+	row := make([]byte, ap.w*bpp)
+	all := m.apertureAddrs(ap)
 	for y := uint32(0); y < ap.h; y++ {
-		for x := uint32(0); x < ap.w; x++ {
-			f(ap.buf+(y*ap.lay.Pitch+x)*bpp, ap.lay.addr(x, y, ap.slice))
+		lin := ap.buf + y*ap.lay.Pitch*bpp
+		addrs := all[y*ap.w : (y+1)*ap.w]
+		if back {
+			m.Mem.ReadBytes(lin, row)
+			ap.swap(row, bpp)
+			for x, a := range addrs {
+				m.Mem.WriteBytes(a, row[uint32(x)*bpp:uint32(x+1)*bpp])
+				lo, hi = min(lo, a), max(hi, a+bpp)
+			}
+		} else {
+			for x, a := range addrs {
+				m.Mem.ReadBytes(a, row[uint32(x)*bpp:uint32(x+1)*bpp])
+			}
+			ap.swap(row, bpp)
+			m.Mem.WriteBytes(lin, row)
 		}
 	}
+	return lo, hi
 }
 
-// swap applies the window's byte swapping (it's its own inverse).
-func (ap *aperture) swap(b []byte) []byte {
+// swap applies the window's byte swapping to elements of bpp bytes (it's
+// its own inverse).
+func (ap *aperture) swap(b []byte, bpp uint32) {
 	unit := 0
 	switch ap.endian {
 	case 1:
@@ -87,7 +99,7 @@ func (ap *aperture) swap(b []byte) []byte {
 	case 2:
 		unit = 4
 	case 3: // the format's own
-		switch len(b) {
+		switch bpp {
 		case 2:
 			unit = 2
 		case 4, 8, 16:
@@ -95,18 +107,33 @@ func (ap *aperture) swap(b []byte) []byte {
 		}
 	}
 	if unit == 0 {
-		return b
+		return
 	}
 	for i := 0; i+unit <= len(b); i += unit {
 		for j := 0; j < unit/2; j++ {
 			b[i+j], b[i+unit-1-j] = b[i+unit-1-j], b[i+j]
 		}
 	}
-	return b
 }
 
-func (m *Machine) readN(a, n uint32) []byte {
-	b := make([]byte, n)
-	m.Mem.ReadBytes(a, b)
-	return b
+// apertureKey names the element addresses of one surface level and slice.
+type apertureKey struct {
+	lay         surfLayout
+	slice, w, h uint32
+}
+
+// apertureAddrs returns where each element of the aperture's surface is,
+// row by row. Programs usually open the same surface every frame, so the
+// last answer is kept.
+func (m *Machine) apertureAddrs(ap *aperture) []uint32 {
+	k := apertureKey{ap.lay, ap.slice, ap.w, ap.h}
+	if m.apAddrs != nil && m.apAddrsKey == k {
+		return m.apAddrs
+	}
+	a := make([]uint32, ap.w*ap.h)
+	for y := uint32(0); y < ap.h; y++ {
+		ap.lay.rowAddrs(0, y, ap.slice, a[y*ap.w:(y+1)*ap.w])
+	}
+	m.apAddrs, m.apAddrsKey = a, k
+	return a
 }
