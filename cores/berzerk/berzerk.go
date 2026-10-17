@@ -11,7 +11,7 @@
 // pixels: that's how the game draws and moves its sprites. Interrupts:
 // eight NMIs a frame, every 32 lines, and an IM 2 interrupt at lines 128
 // and 256. 1 KB of battery-backed RAM keeps the high scores. Sound is a
-// 6840 timer (see sound.go) plus an S14001A speech chip.
+// 6840 timer (see sound.go) plus an S14001A speech chip (speech.go).
 //
 // The hardware details were worked out from the game's own code and by
 // watching MAME run it as a black box (memory, ports, interrupt times and
@@ -46,7 +46,7 @@ type board struct {
 
 	cpu    *z80.CPU
 	snd    *sound
-	speech speech
+	speech *speech
 	dips   map[string]int
 	p1, p2 arcade.Pad
 	screen []uint32
@@ -94,7 +94,15 @@ func newBoard(g *arcade.Game, files arcade.Files, opts arcade.Opts) (arcade.Boar
 		copy(b.nvram[:], opts.SRAM)
 	}
 	b.p1, b.p2 = arcade.Pad{}, arcade.Pad{}
-	b.snd = newSound(opts.SampleRate)
+	var vo []byte // the speech ROMs, if the set has them
+	for i := range g.Files {
+		if g.Files[i].Role == "speech" && arcade.FindFile(&g.Files[i], files) != nil {
+			vo = arcade.Region(g, files, "speech", 0x1000)
+			break
+		}
+	}
+	b.speech = newSpeech(vo)
+	b.snd = newSound(opts.SampleRate, b.speech)
 	b.cpu = z80.New(bus{b})
 	b.Reset()
 	return b, nil

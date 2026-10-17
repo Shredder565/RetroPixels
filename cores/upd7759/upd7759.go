@@ -34,6 +34,17 @@ type UPD7759 struct {
 	AccN  int
 	Out   float64 // the current output, -1..1
 
+	// the step table, the sample's range, the output's scale and how many
+	// units of 256 steps a silence block adds to its count: see Measured
+	steps      *[256]int
+	lo, hi     int
+	scale      float64
+	silenceAdd int
+	// slave mode: steps from taking a byte to asking for the next, from the
+	// sample number to asking for the first byte, and the pause after a
+	// block of nibbles
+	drqGap, startGap, blockGap int
+
 	st, rst, data, state, pos, left, period, wait int
 	sample, step, nib, repeat, repeatPos, clk     int
 
@@ -57,7 +68,7 @@ func New(clock float64, rom []byte) *UPD7759 {
 	if rom == nil {
 		rom = make([]byte, 16)
 	}
-	u := &UPD7759{clock: clock, rom: rom}
+	u := &UPD7759{clock: clock, rom: rom, steps: &stepTable, lo: -128, hi: 127, scale: 1.0 / 128, drqGap: slaveGap, startGap: slaveGap}
 	u.Reset()
 	return u
 }
@@ -67,6 +78,19 @@ func NewSlave(clock float64) *UPD7759 {
 	u := New(clock, nil)
 	u.slave = true
 	return u
+}
+
+// Measured switches the chip to its behaviour as measured with MAME used as
+// a black box (the chip's state and the time of every byte the sound CPU fed
+// it during Altered Beast): the step table in chipSteps with a 9-bit sample
+// range (Out stays -1..1), silence blocks one unit (256 steps) longer than
+// their count, and in slave mode DRQ 8 steps after a byte (16 after the
+// sample number) and a 6-step pause after each block of nibbles. Without it
+// the chip keeps the behaviour it has always had, which the web version
+// shares.
+func (u *UPD7759) Measured() {
+	u.steps, u.lo, u.hi, u.scale, u.silenceAdd = &chipSteps, -256, 255, 1.0/256, 1
+	u.drqGap, u.startGap, u.blockGap = 8, 16, 6
 }
 
 // Clock is the chip's input clock in Hz.
@@ -87,7 +111,8 @@ func (u *UPD7759) rd(a int) int { return int(u.rom[a%len(u.rom)]) }
 // for the next one; the CPU's NMI handler must finish in between.
 const slaveGap = 4
 
-// ask raises DRQ once slaveGap steps have passed since the last byte.
+// ask raises DRQ once the gap (slaveGap, or drqGap after Measured) has
+// passed since the last byte.
 func (u *UPD7759) ask() { u.want = true }
 
 func (u *UPD7759) setDRQ(on bool) {
@@ -117,12 +142,12 @@ func (u *UPD7759) Port(v uint8) {
 		// the first byte is the sample number; then the five header bytes
 		u.state, u.skip, u.have, u.wait = stCmd, 5, false, 0
 		u.sample, u.step, u.inByte = 0, 0, false
-		u.gap = slaveGap
+		u.gap = u.startGap
 		u.ask()
 		return
 	}
 	u.have = true
-	u.gap = slaveGap
+	u.gap = u.drqGap
 	u.setDRQ(false)
 }
 
@@ -170,7 +195,7 @@ func (u *UPD7759) header(c int) {
 		return
 	}
 	if c < 0x40 {
-		u.state, u.wait, u.sample, u.step = stSilence, c*256, 0, 0
+		u.state, u.wait, u.sample, u.step = stSilence, (c+u.silenceAdd)*256, 0, 0
 		return
 	}
 	if c < 0xc0 {
@@ -207,11 +232,11 @@ func (u *UPD7759) endBlock() {
 
 // decode plays one nibble.
 func (u *UPD7759) decode(n int) {
-	s := u.sample + stepTable[u.step*16+n]
-	if s > 127 {
-		s = 127
-	} else if s < -128 {
-		s = -128
+	s := u.sample + u.steps[u.step*16+n]
+	if s > u.hi {
+		s = u.hi
+	} else if s < u.lo {
+		s = u.lo
 	}
 	u.sample = s
 	u.step += adjust[n]
@@ -235,7 +260,7 @@ func (u *UPD7759) Tick() {
 	}
 	if u.wait > 0 {
 		u.wait--
-		u.Out = float64(u.sample) / 128
+		u.Out = float64(u.sample) * u.scale
 		return
 	}
 	switch u.state {
@@ -260,7 +285,7 @@ func (u *UPD7759) Tick() {
 			u.endBlock()
 		}
 	}
-	u.Out = float64(u.sample) / 128
+	u.Out = float64(u.sample) * u.scale
 }
 
 // take returns the byte the CPU wrote, or false (and asks for one) if none.
@@ -278,7 +303,7 @@ func (u *UPD7759) tickSlave() {
 		u.Out = 0
 		return
 	}
-	u.Out = float64(u.sample) / 128
+	u.Out = float64(u.sample) * u.scale
 	if u.gap > 0 {
 		u.gap--
 	}
@@ -332,12 +357,13 @@ func (u *UPD7759) tickSlave() {
 		if u.left <= 0 {
 			u.inByte = false
 			u.state = stCmd
+			u.wait += u.blockGap
 		}
 		if !u.inByte {
 			u.ask()
 		}
 	}
-	u.Out = float64(u.sample) / 128
+	u.Out = float64(u.sample) * u.scale
 }
 
 // Clocks runs n input clocks, summing into Acc / AccN.

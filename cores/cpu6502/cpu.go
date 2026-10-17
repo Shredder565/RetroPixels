@@ -27,6 +27,13 @@ type Bus interface {
 	Write(addr uint16, v uint8)
 }
 
+// OpcodeBus is implemented by buses that see opcode fetches differently
+// from other reads (processors with scrambled opcodes, such as Data East's
+// DECO 222): ReadOp is called for each opcode fetch instead of Read.
+type OpcodeBus interface {
+	ReadOp(addr uint16) uint8
+}
+
 // Options select chip variants.
 type Options struct {
 	// Decimal: whether the D flag enables decimal arithmetic (off on the NES).
@@ -55,6 +62,7 @@ type CPU struct {
 	decimal, machinePolls bool
 	atBoundary            bool
 	bus                   Bus
+	opBus                 OpcodeBus // nil unless the bus has ReadOp
 
 	prevIrq, prevNmi bool // interrupt polling happens before the last cycle
 	pollNmi, pollIrq bool
@@ -65,12 +73,14 @@ type CPU struct {
 
 // New makes a CPU on bus. Call Reset before the first Step.
 func New(bus Bus, opts Options) *CPU {
-	return &CPU{bus: bus, decimal: opts.Decimal, machinePolls: opts.MachinePolls, atBoundary: opts.PollAtBoundary,
+	c := &CPU{bus: bus, decimal: opts.Decimal, machinePolls: opts.MachinePolls, atBoundary: opts.PollAtBoundary,
 		S: 0xfd, P: FlagI | FlagU}
+	c.opBus, _ = bus.(OpcodeBus)
+	return c
 }
 
 // SetBus replaces the bus (for machines that are rebuilt around a CPU).
-func (c *CPU) SetBus(b Bus) { c.bus = b }
+func (c *CPU) SetBus(b Bus) { c.bus = b; c.opBus, _ = b.(OpcodeBus) }
 
 // Poll notes the interrupt lines as they are now. Before each cycle (or when
 // the machine calls it, with MachinePolls), the state seen at the end of the
@@ -174,7 +184,17 @@ func (c *CPU) Step() int {
 	}
 	c.branchPolled = false
 	startI := c.P & FlagI
-	op := c.fetch()
+	var op uint8
+	if c.opBus != nil {
+		if !c.machinePolls {
+			c.Poll()
+		}
+		c.Cycles++
+		op = c.opBus.ReadOp(c.PC)
+		c.PC++
+	} else {
+		op = c.fetch()
+	}
 	c.exec(op)
 	if c.branchPolled {
 		c.pollNmi, c.pollIrq = c.branchNmi, c.branchIrq

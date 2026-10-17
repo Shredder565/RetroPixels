@@ -28,9 +28,9 @@ func newVecRaster(w, h int, dvgX0, dvgY0, dvgW, dvgH float32) *vecRaster {
 	for i := range r.tone {
 		v := float64(i) / 256 // light 0..4
 		l := 1 - math.Exp(-1.6*v)
-		// a slightly blue white, going white when saturated
-		rr := l * (0.86 + 0.14*l)
-		gg := l * (0.92 + 0.08*l)
+		// the cabinet's blue-green screen tint, as MAME shows it
+		rr := l * 0.53
+		gg := l
 		bb := l
 		r.tone[i] = uint32(rr*255)<<16 | uint32(gg*255)<<8 | uint32(bb*255)
 	}
@@ -64,7 +64,10 @@ func (r *vecRaster) draw(lines []dvgLine) {
 	for _, l := range lines {
 		x0, y0 := (l.x0-r.x0)*r.sx, float32(r.h)-(l.y0-r.y0)*r.sy
 		x1, y1 := (l.x1-r.x0)*r.sx, float32(r.h)-(l.y1-r.y0)*r.sy
+		// the beam's brightness for the DVG's intensity: dim levels dimmer than
+		// a straight line would make them, as on MAME's screen
 		z := float32(l.z) / 15
+		z *= z * 0.56
 		dx, dy := x1-x0, y1-y0
 		n := int(math.Sqrt(float64(dx*dx+dy*dy))*2) + 1
 		if n == 1 { // a dot: the beam stays, so it's brighter

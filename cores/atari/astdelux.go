@@ -76,9 +76,10 @@ func newAstdelux(g *arcade.Game, files arcade.Files, opts arcade.Opts) (arcade.B
 	}
 	b.snd = newPOKEY()
 	b.cpu = cpu6502.New(adBus{b}, cpu6502.Options{Decimal: true})
-	// the playfield is the DVG's x 0-1023 and y 128-895, and the scores and the
-	// copyright line reach a little past it: show x -21 to 1045, y 116 to 916 (4:3)
-	b.ras = newVecRaster(adW, adH, -21, 116, 1066, 800)
+	// the part of the DVG's space MAME shows: x -10 to 1034, y 118 to 906
+	// (the playfield is x 0-1023, y 128-895; the scores and the copyright
+	// line reach a little past it)
+	b.ras = newVecRaster(adW, adH, -10, 118, 1044, 788)
 	b.res = arcade.NewResampler(adRate, float64(opts.SampleRate))
 	b.pads = []arcade.Pad{{}, {}}
 	b.Reset()
@@ -90,6 +91,8 @@ func (b *astdelux) Reset() {
 	mem := b.er.mem
 	b.er = earom{mem: mem}
 	*b.snd = *newPOKEY()
+	// RANDOM as MAME reads it: up to date at each access and every 1/50 s
+	b.snd.SyncEvery, b.snd.SyncBase = [2]int64{adCPUHz / 50}, b.cpu.Cycles
 	b.out, b.dc = pokeyOut{}, 0
 	b.boom, b.thr = explosion{}, thrust{}
 	b.cpu.NMIPending = false
@@ -193,7 +196,7 @@ func (b *astdelux) write(a int, v uint8) {
 	case a >= 0x4000 && a < 0x4800:
 		b.vram[a-0x4000] = v
 	case a >= 0x2c00 && a < 0x2c10:
-		b.snd.Write(a, v)
+		b.snd.WriteAt(a, v, b.cpu.Cycles)
 		switch {
 		case a&15 == 11: // POTGO
 			b.potRead = true
@@ -407,7 +410,7 @@ func init() {
 		{Name: "036433.03", Alt: []string{"036433-03.j1"}, Size: 0x800, Role: "cpu", Offset: 0x1800},
 		{Name: "036800.02", Alt: []string{"036800-02.r2"}, Size: 0x800, Role: "vector", Offset: 0x0000},
 		{Name: "036799.01", Alt: []string{"036799-01.np2"}, Size: 0x800, Role: "vector", Offset: 0x0800},
-		// the DVG's state machine: the DVG is emulated from its documented behaviour
+		// the DVG's state machine: not read, the DVG is emulated from its documented behaviour
 		{Name: "034602-01.c8", Size: 0x100, Role: "prom", Offset: 0, Optional: true},
 	}
 	arcade.Register(&arcade.BoardDef{

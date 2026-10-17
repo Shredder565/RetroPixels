@@ -2,6 +2,14 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.19.0] - 2026-10-17
+
+- Eleven more arcade games, each first played in MAME at fast speed and then checked against it frame by frame and sound by sound: Double Dragon, Double Dragon II: The Revenge, Double Dragon 3: The Rosetta Stone, Galaga, Dig Dug, Donkey Kong Jr., Donkey Kong 3, The Real Ghostbusters and Dragon Blaze are new, and Donkey Kong and Galaxian were rechecked. The pictures match MAME pixel for pixel in nearly every frame compared, with the same pitch and loudness within a few percent. RetroPixels' code is its own: MAME was only watched and listened to.
+- New processors and chips, written from scratch: the Motorola 6809 and Hitachi HD6309, the HD63701, the Hitachi SH-2, the Yamaha YM3812 (OPL2) and YMF278B (OPL4), the OKI MSM5205, and Namco's Galaga and Dig Dug boards with their wavetable sound. Donkey Kong 3 uses RetroPixels' NES sound chip.
+- Galaga, Dig Dug and The Real Ghostbusters don't need their boards' custom chips, which most sets don't include: RetroPixels plays their part from what each game expects. Dragon Blaze makes its own settings chip when the set has none.
+- Donkey Kong and Galaxian: colours and sound effects now match MAME more closely, in RetroPixels.exe, RetroPixels Native and Android.
+- Fixes for 2.18.0's games: Berzerk's robots now talk when your set has the two speech chip files (RetroPixels' own speech chip; without the files the game plays silently as before). Altered Beast's voices and music now match MAME's sound. Asteroids Deluxe was checked against MAME's picture and its screen now has the arcade monitor's tint and brightness.
+
 ## [2.18.0] - 2026-10-17
 
 - Nine more arcade games on RetroPixels' own emulation: 1941: Counter Attack, 1942, 1943: The Battle of Midway, 1943 Kai, Altered Beast, Asteroids Deluxe, Berzerk, Centipede and Vs. Castlevania. Each was first played in MAME at fast speed, then RetroPixels was checked against it frame by frame and sound by sound: the picture matches MAME pixel for pixel in the frames compared (1941, 1942, 1943, 1943 Kai, Altered Beast, Berzerk, Vs. Castlevania, Centipede), with the same pitch and similar loudness. RetroPixels' code is its own: MAME was only watched and listened to.
