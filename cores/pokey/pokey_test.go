@@ -59,3 +59,42 @@ func TestRandomAndPots(t *testing.T) {
 		t.Error("ALLPOT")
 	}
 }
+
+func TestMAMESync(t *testing.T) {
+	window := func(t int64) uint8 { // the generator t clocks after leaving reset
+		var v uint8
+		for i := int64(0); i < 8; i++ {
+			v |= p17[(t+1+i)%131071] << i
+		}
+		return v
+	}
+	p := New()
+	p.HoldOnReset = true
+	p.SyncEvery = [2]int64{1000, 0}
+	p.WriteAt(15, 0, 50)
+	p.WriteAt(15, 3, 100) // leaves reset at 100
+	// reads give the generator as of the last sync point: the last access
+	// (or a multiple of 1000 clocks, if later)
+	if v := p.Read(10, 300); v != window(0) {
+		t.Errorf("first read %02x, want %02x", v, window(0))
+	}
+	if v := p.Read(10, 350); v != window(200) {
+		t.Errorf("second read %02x, want %02x", v, window(200))
+	}
+	if v := p.Read(10, 1200); v != window(900) {
+		t.Errorf("after a tick %02x, want %02x", v, window(900))
+	}
+	p.Sync(1300)
+	if v := p.Read(10, 1400); v != window(1200) {
+		t.Errorf("after Sync %02x, want %02x", v, window(1200))
+	}
+	q := New()
+	q.HoldOnReset = true
+	if _, err := q.LoadState(p.AppendState(nil)); err != nil {
+		t.Fatal(err)
+	}
+	q.SyncEvery = p.SyncEvery
+	if x, y := p.Read(10, 1500), q.Read(10, 1500); x != y {
+		t.Errorf("after loading %02x, want %02x", y, x)
+	}
+}

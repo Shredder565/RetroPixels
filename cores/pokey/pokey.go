@@ -50,6 +50,18 @@ type Chip struct {
 	HoldOnReset bool
 	skctl       uint8
 	held        uint8 // what RANDOM reads while held
+	rel         int64 // the clock the chip last left reset (WriteAt)
+
+	// SyncEvery[0] > 0 makes RANDOM read the way MAME's POKEY does, so a
+	// game that draws a random screen at power-on draws MAME's: the
+	// generator's value as of the last sync point, not as of the read. Sync
+	// points are every access through Read or WriteAt, every Sync call, and
+	// every SyncEvery[0] and SyncEvery[1] (if set) clocks counted from
+	// SyncBase: the moments MAME brings the chip up to date (the real chip's
+	// generator is read as it runs). The 7800 core leaves it off.
+	SyncEvery [2]int64
+	SyncBase  int64
+	lastSync  int64
 }
 
 // New makes a chip.
@@ -80,9 +92,27 @@ func (p *Chip) Write(r int, v uint8) {
 	}
 }
 
+// WriteAt is Write at clock now: it records the moment the chip leaves
+// reset (HoldOnReset) and is a sync point (SyncEvery).
+func (p *Chip) WriteAt(r int, v uint8, now int64) {
+	if r&15 == 15 && p.HoldOnReset && p.skctl&3 == 0 && v&3 != 0 {
+		p.rel = now
+	}
+	p.Write(r, v)
+	p.Sync(now)
+}
+
+// Sync marks a sync point at clock now (see SyncEvery).
+func (p *Chip) Sync(now int64) {
+	if p.SyncEvery[0] > 0 && now > p.lastSync {
+		p.lastSync = now
+	}
+}
+
 // Read reads register r: the pots, ALLPOT and RANDOM. now is the chip's
 // clocks since power-on (the random generator runs all the time).
 func (p *Chip) Read(r int, now int64) uint8 {
+	defer p.Sync(now)
 	switch r &= 15; {
 	case r <= 8:
 		return p.Pot[r]
@@ -91,12 +121,25 @@ func (p *Chip) Read(r int, now int64) uint8 {
 			return p.held
 		}
 		t := now
+		if p.SyncEvery[0] > 0 {
+			t = p.lastSync
+			for _, e := range p.SyncEvery {
+				if e > 0 {
+					t = max(t, now-(now-p.SyncBase)%e)
+				}
+			}
+		}
+		if p.HoldOnReset { // the generators restart from all ones
+			t -= p.rel - 1
+		}
 		var v uint8
 		if p.audctl&0x80 != 0 {
+			t = (t%511 + 511) % 511
 			for i := int64(0); i < 8; i++ {
 				v |= p9[(t+i)%511] << i
 			}
 		} else {
+			t = (t%131071 + 131071) % 131071
 			for i := int64(0); i < 8; i++ {
 				v |= p17[(t+i)%131071] << i
 			}
@@ -269,6 +312,9 @@ func (p *Chip) AppendState(b []byte) []byte {
 	b = binary.LittleEndian.AppendUint64(b, uint64(int64(p.base)))
 	if p.HoldOnReset {
 		b = append(b, p.skctl, p.held)
+		b = binary.LittleEndian.AppendUint64(b, uint64(p.rel))
+		b = binary.LittleEndian.AppendUint64(b, uint64(p.lastSync))
+		b = binary.LittleEndian.AppendUint64(b, uint64(p.SyncBase))
 	}
 	return b
 }
@@ -311,6 +357,9 @@ func (p *Chip) LoadState(b []byte) ([]byte, error) {
 		} else {
 			n.skctl, n.held, b = b[0], b[1], b[2:]
 		}
+		n.rel = i64()
+		n.lastSync = i64()
+		n.SyncBase = i64()
 	}
 	if bad {
 		return b, ErrBadState
