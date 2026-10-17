@@ -186,7 +186,9 @@ func (c *WiiU) RunFrame() {
 			panic(r)
 		}
 	}()
+	c.log.begin(c.m.Frame)
 	c.m.RunFrame()
+	c.log.end()
 	c.log.frame(c.m)
 	if (c.m.Exited || c.m.Err != nil) && !c.ended {
 		c.ended = true

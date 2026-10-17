@@ -111,8 +111,23 @@ func init() {
 		m.Mem.Write64(arg(cpu, 3), 512<<20)
 		return fsOK
 	})
+	// (title ID, file name, out, out size): the path of a file in a system
+	// data title, such as the Mii parts. Those titles aren't here, so the
+	// file won't open, but the program gets a proper path to try.
 	reg(s, "SAVEGetSharedDataTitlePath", func(m *Machine, cpu *CPU, t *Thread) {
-		ret(cpu, fsNotFound)
+		id := arg64(cpu, 0)
+		p := fmt.Sprintf("/vol/storage_mlc01/sys/title/%08x/%08x/content/%s", uint32(id>>32), uint32(id),
+			m.Mem.String(arg(cpu, 2), 256))
+		out, size := arg(cpu, 3), arg(cpu, 4)
+		if out == 0 || size == 0 {
+			ret(cpu, fsNotFound)
+			return
+		}
+		if uint32(len(p)) >= size {
+			p = p[:size-1]
+		}
+		m.Mem.WriteBytes(out, append([]byte(p), 0))
+		ret(cpu, fsOK)
 	})
 
 	// nn_act: one account, signed in
