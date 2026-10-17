@@ -7,82 +7,6 @@ import (
 	"unsafe"
 )
 
-// DXGI formats
-const (
-	FormatUnknown          = 0
-	FormatRGBA32Float      = 2
-	FormatRGBA32Uint       = 3
-	FormatRGBA32Sint       = 4
-	FormatRGBA16Float      = 10
-	FormatRGBA16Unorm      = 11
-	FormatRG32Float        = 16
-	FormatR32G8X24Typeless = 19
-	FormatD32FloatS8X24    = 20
-	FormatRGB10A2Unorm     = 24
-	FormatRGBA8Unorm       = 28
-	FormatRGBA8UnormSRGB   = 29
-	FormatRGBA8Uint        = 30
-	FormatRG16Float        = 34
-	FormatR32Typeless      = 39
-	FormatD32Float         = 40
-	FormatR32Float         = 41
-	FormatR32Uint          = 42
-	FormatR24G8Typeless    = 44
-	FormatD24UnormS8Uint   = 45
-	FormatR24UnormX8       = 46
-	FormatR16Float         = 54
-	FormatR16Typeless      = 53
-	FormatD16Unorm         = 55
-	FormatR16Unorm         = 56
-	FormatR8Unorm          = 61
-	FormatR32FloatX8X24    = 21
-)
-
-// usage, bind and CPU access flags
-const (
-	UsageDefault = 0
-	UsageDynamic = 2
-	UsageStaging = 3
-
-	BindVertexBuffer   = 0x1
-	BindIndexBuffer    = 0x2
-	BindConstantBuffer = 0x4
-	BindShaderResource = 0x8
-	BindRenderTarget   = 0x20
-	BindDepthStencil   = 0x40
-
-	CPURead  = 0x20000
-	CPUWrite = 0x10000
-
-	MiscBufferAllowRaw = 0x20
-
-	MapRead         = 1
-	MapWriteDiscard = 4
-
-	ClearDepth   = 1
-	ClearStencil = 2
-)
-
-// primitive topologies
-const (
-	TopologyPointList     = 1
-	TopologyLineList      = 2
-	TopologyLineStrip     = 3
-	TopologyTriangleList  = 4
-	TopologyTriangleStrip = 5
-)
-
-type Texture2DDesc struct {
-	Width, Height, MipLevels, ArraySize uint32
-	Format                              uint32
-	SampleCount, SampleQuality          uint32
-	Usage, BindFlags, CPUAccess, Misc   uint32
-}
-
-type BufferDesc struct {
-	ByteWidth, Usage, BindFlags, CPUAccess, Misc, StructureStride uint32
-}
-
 type subresourceData struct {
 	sys        uintptr
 	pitch      uint32
@@ -94,10 +18,6 @@ type Mapped struct {
 	RowPitch   uint32
 	DepthPitch uint32
 }
-
-type Viewport struct{ X, Y, W, H, MinZ, MaxZ float32 }
-
-type Rect struct{ Left, Top, Right, Bottom int32 }
 
 // Device is an ID3D11Device with its immediate context.
 type Device struct {
@@ -172,7 +92,7 @@ func (d *Device) CreateBuffer(desc *BufferDesc, data []byte) (Resource, error) {
 type srvTex2D struct {
 	Format, Dim       uint32
 	MostDetailed, Mip uint32
-	_                 [2]uint32
+	rest              [2]uint32 // arrays: first slice, slices
 }
 type srvRaw struct {
 	Format, Dim               uint32
@@ -194,6 +114,18 @@ type dsvTex2D struct {
 func (d *Device) CreateSRV(t Resource, format, mips uint32) (View, error) {
 	var v View
 	desc := srvTex2D{Format: format, Dim: 4, Mip: mips} // TEXTURE2D
+	r := d.call(7, t.p, uintptr(unsafe.Pointer(&desc)), uintptr(unsafe.Pointer(&v.p)))
+	return v, hr(r, "CreateShaderResourceView")
+}
+
+// CreateTexSRV makes a shader resource view of a whole texture: dim is
+// the view's dimension (D3D11_SRV_DIMENSION: 4 2D, 5 2D array, 9 cube).
+func (d *Device) CreateTexSRV(t Resource, format, dim, mips, slices uint32) (View, error) {
+	var v View
+	desc := srvTex2D{Format: format, Dim: dim, Mip: mips}
+	if dim == 5 {
+		desc.rest = [2]uint32{0, slices}
+	}
 	r := d.call(7, t.p, uintptr(unsafe.Pointer(&desc)), uintptr(unsafe.Pointer(&v.p)))
 	return v, hr(r, "CreateShaderResourceView")
 }
@@ -232,37 +164,10 @@ func (d *Device) CreatePixelShader(code []byte) (Object, error) {
 	return o, hr(r, "CreatePixelShader")
 }
 
-// BlendTarget is D3D11_RENDER_TARGET_BLEND_DESC.
-type BlendTarget struct {
-	Enable                      int32
-	Src, Dst, Op                uint32
-	SrcAlpha, DstAlpha, OpAlpha uint32
-	WriteMask                   uint8
-	_                           [3]byte
-}
-
-type BlendDesc struct {
-	AlphaToCoverage, Independent int32
-	Target                       [8]BlendTarget
-}
-
 func (d *Device) CreateBlendState(desc *BlendDesc) (Object, error) {
 	var o Object
 	r := d.call(20, uintptr(unsafe.Pointer(desc)), uintptr(unsafe.Pointer(&o.p)))
 	return o, hr(r, "CreateBlendState")
-}
-
-type StencilOps struct{ Fail, DepthFail, Pass, Func uint32 }
-
-type DepthStencilDesc struct {
-	DepthEnable    int32
-	DepthWriteMask uint32
-	DepthFunc      uint32
-	StencilEnable  int32
-	ReadMask       uint8
-	WriteMask      uint8
-	_              [2]byte
-	Front, Back    StencilOps
 }
 
 func (d *Device) CreateDepthStencilState(desc *DepthStencilDesc) (Object, error) {
@@ -271,30 +176,10 @@ func (d *Device) CreateDepthStencilState(desc *DepthStencilDesc) (Object, error)
 	return o, hr(r, "CreateDepthStencilState")
 }
 
-type RasterizerDesc struct {
-	Fill, Cull            uint32
-	FrontCCW              int32
-	DepthBias             int32
-	DepthBiasClamp        float32
-	SlopeScaledDepthBias  float32
-	DepthClip             int32
-	Scissor, MSAA, AALine int32
-}
-
 func (d *Device) CreateRasterizerState(desc *RasterizerDesc) (Object, error) {
 	var o Object
 	r := d.call(22, uintptr(unsafe.Pointer(desc)), uintptr(unsafe.Pointer(&o.p)))
 	return o, hr(r, "CreateRasterizerState")
-}
-
-type SamplerDesc struct {
-	Filter                uint32
-	AddressU, AddressV, W uint32
-	MipLODBias            float32
-	MaxAnisotropy         uint32
-	Compare               uint32
-	Border                [4]float32
-	MinLOD, MaxLOD        float32
 }
 
 func (d *Device) CreateSamplerState(desc *SamplerDesc) (Object, error) {
@@ -366,7 +251,6 @@ func (c Context) RSSetScissorRects(r ...Rect) {
 }
 
 // Box is a D3D11_BOX.
-type Box struct{ Left, Top, Front, Right, Bottom, Back uint32 }
 
 func (c Context) CopySubresourceRegion(dst Resource, dsub, x, y, z uint32, src Resource, ssub uint32, box *Box) {
 	c.call(46, dst.p, uintptr(dsub), uintptr(x), uintptr(y), uintptr(z), src.p, uintptr(ssub), uintptr(unsafe.Pointer(box)))

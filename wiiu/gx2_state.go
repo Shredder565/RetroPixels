@@ -799,9 +799,18 @@ func init() {
 		addr, size := arg(cpu, 1), arg(cpu, 2)
 		if size == 0xffffffff || addr == 0 && size == 0 {
 			m.gpu.tex.clear()
+			if m.gpu.hw != nil && arg(cpu, 0)&0x40 != 0 {
+				m.gpu.hw.flushAll()
+				m.gpu.hw.invalidate(0, ^uint32(0))
+			}
 			return
 		}
 		m.gpu.tex.invalidate(addr, addr+size)
+		if arg(cpu, 0)&0x40 != 0 { // GX2_INVALIDATE_MODE_CPU
+			// the CPU may read what the GPU drew, or have written new data
+			m.gpu.hwFlush(addr, addr+size)
+			m.gpu.hwInvalidate(addr, addr+size)
+		}
 	})
 
 	// ---- display lists ----

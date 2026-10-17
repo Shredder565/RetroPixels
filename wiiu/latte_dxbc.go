@@ -82,7 +82,7 @@ type dxFetchKey struct {
 
 // dxPSIn says where a pixel shader input GPR comes from.
 type dxPSIn struct {
-	reg      int // the vertex shader output register, or -1 for def
+	reg      int // the input register (1 + the vertex shader parameter), or -1 for def
 	def      [4]uint32
 	flat     bool
 	linear   bool // no perspective correction

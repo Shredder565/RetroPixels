@@ -590,6 +590,23 @@ func (g *Latte) draw(count uint32, index func(uint32) uint32) {
 	if st.vs == 0 || (st.ps == 0 && st.clip>>22&1 == 0) {
 		return
 	}
+	if g.hw != nil {
+		if g.hwDraw(st, count, index) {
+			return
+		}
+		// the software renderer reads and writes guest memory
+		g.hw.flushAll()
+		defer func() {
+			for t := 0; t < 8; t++ {
+				if st.cbOn[t] {
+					g.hw.invalidate(surfRange(&st.cbs[t].lay, st.cbs[t].slice))
+				}
+			}
+			if st.db.ok {
+				g.hw.invalidate(surfRange(&st.db.lay, st.db.slice))
+			}
+		}()
+	}
 	prim := g.reg(regVGT_PRIMITIVE_TYPE)
 	restartOn := g.reg(regVGT_MULTI_PRIM_IB_RESET_EN)&1 != 0
 	restart := g.reg(regVGT_MULTI_PRIM_IB_RESET_INDX)
