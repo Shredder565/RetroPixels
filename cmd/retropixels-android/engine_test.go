@@ -220,7 +220,7 @@ func pcmBytes(p []int16) []byte {
 func TestEngineProtocol(t *testing.T) {
 	c := startEngine(t)
 	sys := c.must(map[string]any{"cmd": "systems"})
-	if n := len(sys["systems"].([]any)); n != 10 {
+	if n := len(sys["systems"].([]any)); n != 11 {
 		t.Fatalf("%d systems: %v", n, sys["systems"])
 	}
 	if !strings.Contains(sys["labels"].(string), "Nintendo 64") {

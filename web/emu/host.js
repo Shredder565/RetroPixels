@@ -89,6 +89,17 @@
       "C-Up": { pad: [], keys: ["i"] }, "C-Down": { pad: [], keys: ["k"] }, "C-Left": { pad: [], keys: ["j"] }, "C-Right": { pad: [], keys: ["l"] },
       "Stick Up": { pad: [], keys: ["arrowup"] }, "Stick Down": { pad: [], keys: ["arrowdown"] },
       "Stick Left": { pad: [], keys: ["arrowleft"] }, "Stick Right": { pad: [], keys: ["arrowright"] } },
+    // Wii U: the GamePad's diamond (Xbox B = A, A = B, Y = X, X = Y), LB / RB = L / R, LT / RT = ZL / ZR,
+    // Menu / View = Plus / Minus. Both sticks are the GamePad's; on the keyboard the arrows move the left
+    // stick. (L3 / R3 stay the save-state shortcuts, so the stick clicks are on C / V.)
+    wiiu: { A: { pad: [1], keys: ["x"] }, B: { pad: [0], keys: ["z"] }, X: { pad: [3], keys: ["s"] }, Y: { pad: [2], keys: ["a"] },
+      L: { pad: [4], keys: ["q"] }, R: { pad: [5], keys: ["w"] }, ZL: { pad: [6], keys: ["1"] }, ZR: { pad: [7], keys: ["2"] },
+      Plus: { pad: [9], keys: ["enter"] }, Minus: { pad: [8], keys: ["shift"] }, Home: { pad: [], keys: ["h"] },
+      Up: { pad: [], keys: ["i"] }, Down: { pad: [], keys: ["k"] }, Left: { pad: [], keys: ["j"] }, Right: { pad: [], keys: ["l"] },
+      "L Stick Click": { pad: [], keys: ["c"] }, "R Stick Click": { pad: [], keys: ["v"] },
+      "Stick Up": { pad: [], keys: ["arrowup"] }, "Stick Down": { pad: [], keys: ["arrowdown"] },
+      "Stick Left": { pad: [], keys: ["arrowleft"] }, "Stick Right": { pad: [], keys: ["arrowright"] },
+      "TV / GamePad": { pad: [], keys: ["g"] } },
     // Arcade: Coin = View / 5, Start = Menu / 1 (the keys arcade players know), first button = Xbox A.
     arcade: { Coin: { pad: [8], keys: ["5", "c"] }, "Coin 2": { pad: [], keys: ["6"] }, "Start (1P)": { pad: [9], keys: ["1", "enter"] },
       "Start (2P)": { pad: [], keys: ["2"] }, Fire: { pad: [0], keys: ["z"] }, Jump: { pad: [0], keys: ["z"] },

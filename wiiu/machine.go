@@ -1,0 +1,467 @@
+// Package wiiu is RetroPixels' Wii U emulator, written from scratch.
+//
+// The Wii U runs programs on Cafe OS. Rather than running Nintendo's
+// operating system (which RetroPixels doesn't have and doesn't need), the
+// emulator runs the program's own PowerPC code (cpu.go, fpu.go) and gives it
+// RetroPixels' own versions of the system libraries it calls (coreinit,
+// vpad, gx2 and the rest: hle.go and the files named after each library).
+// This is the approach Cemu and decaf-emu take too.
+//
+// What runs today: homebrew programs (.rpx) that draw with OSScreen, read the
+// GamePad and use threads, memory heaps and the other core OS services. The
+// GPU (GX2 / Latte) is the next big piece.
+package wiiu
+
+import (
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+)
+
+const (
+	CoreHz        = 1243125000                   // Espresso clock
+	BusHz         = 248625000                    // bus clock
+	TimerHz       = BusHz / 4                    // the time base (OSGetTime ticks per second)
+	FPS           = 59.94                        // TV refresh
+	TicksPerFrame = uint64(TimerHz * 100 / 5994) // time base ticks per frame
+
+	sliceLen = 2000 // instructions a core runs before the next core's turn
+)
+
+// Machine is a Wii U running one program.
+type Machine struct {
+	Mem   *Memory
+	CPU   [3]*CPU
+	Files *FileSystem
+
+	Modules []*Module
+
+	// library entry points
+	hle      []hleEntry
+	hleIndex map[string]uint32
+	dataAddr map[string]uint32
+	warned   map[string]bool
+	sysNext  uint32
+
+	// threads
+	threads      map[uint32]*Thread
+	threadList   []*Thread
+	current      [3]*Thread
+	running      *Thread // the thread whose instructions are running now
+	mainThread   *Thread
+	defaultTh    [3]*Thread
+	nextThreadID uint32
+	runSeq       uint64
+	mutexes      map[uint32]bool
+	alarms       []*Alarm
+	alarmTh      [3]*Thread
+	alarmQueue   [3][]Callback
+	alarmContext uint32
+
+	// time
+	tb       uint64 // time base at the start of the current slice
+	frameEnd uint64
+	Frame    uint64 // frames run
+	Budget   int    // instructions each core may run per frame
+	ranBase  [3]uint64
+
+	heaps  *Heaps
+	screen *OSScreen
+	gx2    *GX2
+	pad    *GamePad
+	procui *ProcUI
+
+	argv    uint32
+	dataEnd uint32 // end of the loaded modules' data (the heaps start after)
+
+	Exited   bool
+	ExitCode uint32
+	Err      error
+
+	jumped bool // a library call set PC itself
+	fs     *fsState
+
+	bootTime    uint64
+	rumbleUntil uint64
+	startStep   int
+	homeMenu    bool
+	intsOff     [3]bool
+	dynHandles  map[uint32]string
+	dynAlloc    uint32
+	dynFree     uint32
+	perThread   map[string]uint32
+
+	// Log gets the program's console output (OSReport) and RetroPixels'
+	// notes about it.
+	Log func(string)
+	// Trace, when set, gets every library call.
+	Trace func(string)
+
+	logBuf []string
+}
+
+// New loads a program (.rpx) and gets it ready to run. files is the title's
+// file system (nil for a program on its own).
+func New(rpx []byte, name string, files *FileSystem) (*Machine, error) {
+	m := newMachine(files)
+	if err := m.load(rpx, name); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+func newMachine(files *FileSystem) *Machine {
+	m := &Machine{
+		Mem:      NewMemory(),
+		Files:    files,
+		hleIndex: map[string]uint32{},
+		dataAddr: map[string]uint32{},
+		warned:   map[string]bool{},
+		threads:  map[uint32]*Thread{},
+		mutexes:  map[uint32]bool{},
+		sysNext:  SystemBase + 0x200000,
+		Budget:   4000000,
+	}
+	if m.Files == nil {
+		m.Files = NewFileSystem()
+	}
+	m.Mem.Fault = func(addr uint32, write bool) {
+		c := m.runningCPU()
+		pc := uint32(0)
+		if c != nil {
+			pc = c.PC - 4
+		}
+		what := "read from"
+		if write {
+			what = "write to"
+		}
+		err := fmt.Errorf("the program tried to %s %08X, which isn't memory (at %08X%s)", what, addr, pc, m.where(pc))
+		if m.Err == nil {
+			m.Err = err
+		}
+		if c != nil {
+			c.Stop()
+		}
+	}
+	for i := range m.CPU {
+		c := &CPU{Mem: m.Mem, Core: i, Context: &Context{}}
+		c.HLE = m.callHLE
+		cc := c
+		c.TB = func() uint64 { return m.tbOf(cc) }
+		m.CPU[i] = c
+	}
+	m.heaps = newHeaps()
+	m.screen = newOSScreen()
+	m.gx2 = newGX2()
+	m.pad = &GamePad{}
+	m.procui = &ProcUI{}
+	m.initSystemData()
+	return m
+}
+
+func (m *Machine) where(pc uint32) string {
+	if s := m.symbolize(pc); s != "" {
+		return ", in " + s
+	}
+	return ""
+}
+
+func (m *Machine) runningCPU() *CPU {
+	for _, c := range m.CPU {
+		if m.current[c.Core] != nil && m.current[c.Core] == m.running {
+			return c
+		}
+	}
+	return nil
+}
+
+// tbOf is the time base as core c sees it now.
+func (m *Machine) tbOf(c *CPU) uint64 {
+	n := c.Ran - m.ranBase[c.Core]
+	return m.tb + n*TicksPerFrame/uint64(m.Budget)
+}
+
+// Time is the time base now.
+func (m *Machine) Time() uint64 {
+	if c := m.runningCPU(); c != nil {
+		return m.tbOf(c)
+	}
+	return m.tb
+}
+
+func (m *Machine) logf(format string, a ...interface{}) {
+	s := fmt.Sprintf(format, a...)
+	if m.Log != nil {
+		m.Log(s)
+	}
+	m.logBuf = append(m.logBuf, s)
+	if len(m.logBuf) > 200 {
+		m.logBuf = m.logBuf[len(m.logBuf)-200:]
+	}
+}
+
+// RecentLog is the last lines of the program's log.
+func (m *Machine) RecentLog() []string { return append([]string(nil), m.logBuf...) }
+
+func (m *Machine) mainModule() *Module {
+	if len(m.Modules) == 0 {
+		return nil
+	}
+	return m.Modules[0]
+}
+
+func (m *Machine) moduleNamed(name string) *Module {
+	name = libName(name)
+	for _, mod := range m.Modules {
+		if libName(mod.Name) == name {
+			return mod
+		}
+	}
+	return nil
+}
+
+// trampolines for calls that are too far for a direct branch
+func (m *Machine) tramp(target uint32) uint32 {
+	a := m.sysAlloc(16, 16)
+	m.Mem.Write32(a, 0x3d800000|(target>>16))      // lis r12, hi
+	m.Mem.Write32(a+4, 0x618c0000|(target&0xffff)) // ori r12, r12, lo
+	m.Mem.Write32(a+8, 0x7d8903a6)                 // mtctr r12
+	m.Mem.Write32(a+12, 0x4e800420)                // bctr
+	return a
+}
+
+func (m *Machine) load(rpx []byte, name string) error {
+	if err := ParseRPL(rpx); err != nil {
+		return fmt.Errorf("that doesn't look like a Wii U program (%v)", err)
+	}
+	mod, err := m.loadModule(rpx, name, false)
+	if err != nil {
+		return err
+	}
+	_ = mod
+	m.startMain()
+	return nil
+}
+
+// loadModule loads an RPX or RPL. RPLs go after what's already loaded.
+func (m *Machine) loadModule(b []byte, name string, relocate bool) (*Module, error) {
+	plan := LoadPlan{}
+	if relocate {
+		plan.Relocate = true
+		textEnd, dataEnd := uint32(CodeBase), uint32(DataBase)
+		loadEnd := uint32(LoaderBase)
+		for _, mod := range m.Modules {
+			textEnd = max(textEnd, mod.TextHi)
+			dataEnd = max(dataEnd, mod.DataHi)
+		}
+		loadEnd += uint32(len(m.Modules)) * 0x100000
+		plan.TextAt = (textEnd + 0xfff) &^ 0xfff
+		plan.DataAt = (dataEnd + 0xfff) &^ 0xfff
+		plan.LoadAt = loadEnd
+	}
+	mod, err := LoadRPL(m.Mem, b, name, plan, m, m.tramp)
+	if err != nil {
+		if m.Err != nil {
+			return nil, m.Err
+		}
+		return nil, err
+	}
+	m.Modules = append(m.Modules, mod)
+	mod.TLSIndex = uint32(len(m.Modules))
+	if mod.DataHi > m.dataEnd {
+		m.dataEnd = mod.DataHi
+	}
+	if m.Err != nil {
+		return nil, m.Err
+	}
+	return mod, nil
+}
+
+// startMain makes the heaps and the main thread.
+func (m *Machine) startMain() {
+	main := m.mainModule()
+	m.heaps.setup(m)
+
+	// the default threads of the three cores; the program runs on core 1's
+	stack := main.Info.StackSize
+	if stack < 0x10000 {
+		stack = 0x10000
+	}
+	for core := 0; core < 3; core++ {
+		addr := m.sysAlloc(osThreadSize, 64)
+		size := uint32(0x10000)
+		if core == 1 {
+			size = stack
+		}
+		st := m.heaps.allocSystem(m, size, 64) + size
+		t := m.newThread(addr, 0, 0, 0, st, size, 16, 1<<core)
+		t.Attr = 1 << core
+		m.defaultTh[core] = t
+		t.State = thDormant
+		t.Suspend = 0
+		if core == 1 {
+			// argv: the program's name
+			argv := m.sysAlloc(16, 8)
+			arg0 := m.sysAlloc(uint32(len(main.Name)+1), 8)
+			m.Mem.WriteString(arg0, main.Name)
+			m.Mem.Write32(argv, arg0)
+			m.argv = argv
+			// __RPStartup runs the libraries' entry points, then main's
+			t.Ctx.PC = m.thunk("coreinit", "__RPStartup")
+			t.State = thReady
+			m.mainThread = t
+			m.Mem.Write32(addr+osThreadName, m.cstrAlloc("{SYS Thread Default Core 1}"))
+		}
+		m.syncThread(t)
+	}
+	m.frameEnd = TicksPerFrame
+}
+
+func (m *Machine) cstrAlloc(s string) uint32 {
+	a := m.sysAlloc(uint32(len(s)+1), 4)
+	m.Mem.WriteString(a, s)
+	return a
+}
+
+// exitProgram ends the program (exit, or the main thread returning).
+func (m *Machine) exitProgram(code uint32) {
+	if !m.Exited {
+		m.logf("the program ended (exit code %d)", int32(code))
+	}
+	m.Exited = true
+	m.ExitCode = code
+	for _, c := range m.CPU {
+		c.Stop()
+	}
+}
+
+// RunFrame runs the program for one TV frame.
+func (m *Machine) RunFrame() {
+	if m.Exited || m.Err != nil {
+		return
+	}
+	m.pad.sample()
+	for m.tb < m.frameEnd && !m.Exited && m.Err == nil {
+		m.wakeTimers()
+		ran := false
+		for core := 0; core < 3; core++ {
+			if m.runCore(core) {
+				ran = true
+			}
+			if m.Exited || m.Err != nil {
+				break
+			}
+		}
+		if ran {
+			m.tb += sliceLen * TicksPerFrame / uint64(m.Budget)
+		} else {
+			// every core is idle: skip to the next timer or the frame's end
+			next := m.nextTimer()
+			if next == 0 || next > m.frameEnd {
+				next = m.frameEnd
+			}
+			if next <= m.tb {
+				next = m.tb + 1
+			}
+			m.tb = next
+		}
+	}
+	if m.tb >= m.frameEnd {
+		m.vsync()
+	}
+}
+
+// runCore runs one slice on a core; false when it had nothing to run.
+func (m *Machine) runCore(core int) bool {
+	c := m.CPU[core]
+	t := m.current[core]
+	if t == nil || t.State != thReady {
+		t = m.pick(core)
+		m.setCurrent(core, t)
+	} else if n := m.pick(core); n != nil && n.Priority <= t.Priority {
+		// a higher-priority thread, or one of the same priority's turn
+		if n.Priority < t.Priority || n.LastRun < t.LastRun {
+			t = n
+			m.setCurrent(core, t)
+		}
+	}
+	m.ranBase[core] = c.Ran
+	if t == nil {
+		return false
+	}
+	m.running = t
+	t.Core = core
+	left := sliceLen
+	for left > 0 && !m.Exited && m.Err == nil {
+		before := c.Ran
+		c.Run(left)
+		left -= int(c.Ran - before)
+		if c.Err != nil {
+			m.Err = m.crashReport(c, t)
+			break
+		}
+		if t.blocked || t.State != thReady || m.current[core] != t {
+			t.blocked = false
+			m.syncThread(t)
+			// another thread can use the rest of the slice
+			n := m.pick(core)
+			m.setCurrent(core, n)
+			if n == nil {
+				break
+			}
+			t = n
+			m.running = t
+			t.Core = core
+		}
+	}
+	m.runSeq++
+	t.LastRun = m.runSeq
+	m.running = nil
+	return true
+}
+
+func (m *Machine) setCurrent(core int, t *Thread) {
+	prev := m.current[core]
+	if prev != nil && prev != t {
+		prev.Ctx.ResValid = false
+	}
+	m.current[core] = t
+	c := m.CPU[core]
+	if t != nil {
+		c.Context = &t.Ctx
+		t.Ctx.ResValid = false
+	} else {
+		c.Context = &Context{}
+	}
+}
+
+func (m *Machine) crashReport(c *CPU, t *Thread) error {
+	var b strings.Builder
+	b.WriteString(c.Err.Error())
+	if s := m.symbolize(c.Err.(*CPUError).PC); s != "" {
+		b.WriteString(" in " + s)
+	}
+	fmt.Fprintf(&b, "\nLR %08X%s", c.LR, m.where(c.LR))
+	return errors.New(b.String())
+}
+
+// vsync ends a frame: the next frame starts, and threads waiting for it go on.
+func (m *Machine) vsync() {
+	m.Frame++
+	m.frameEnd += TicksPerFrame
+	m.gx2.vsync(m)
+	m.wake(keyVsync)
+}
+
+// ThreadsSummary describes the threads, for debugging.
+func (m *Machine) ThreadsSummary() string {
+	var b strings.Builder
+	ts := append([]*Thread(nil), m.threadList...)
+	sort.Slice(ts, func(i, j int) bool { return ts[i].ID < ts[j].ID })
+	for _, t := range ts {
+		fmt.Fprintf(&b, "thread %d %q state %d prio %d pc %08X%s wait %x\n", t.ID, m.Mem.String(t.Name, 64),
+			t.State, t.Priority, t.Ctx.PC, m.where(t.Ctx.PC), t.WaitKey)
+	}
+	return b.String()
+}
