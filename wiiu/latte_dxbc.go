@@ -152,6 +152,7 @@ type dxTr struct {
 	// static state
 	loops   []dxLoopState
 	group   int // group counter (PV/PS buffers)
+	vec4At  int // group+1 whose DOT4/MAX4 result is in scratch 5
 	pvSet   [2][4]bool
 	psSet   [2]bool
 	calls   int
@@ -1547,6 +1548,15 @@ func (t *dxTr) scaleMuladd(m uint32, dst, res d3d.Opnd) {
 }
 
 func (t *dxTr) vec4(inst uint32, unit int, dst, res d3d.Opnd, a, b *[4]d3d.Opnd) {
+	if inst != 0x52 {
+		// every slot of a DOT4 or MAX4 gets the same result: work it out once
+		if t.vec4At == t.group+1 {
+			t.ins(d3d.OpMov, dst, sx(5))
+			return
+		}
+		t.vec4At = t.group + 1
+		defer t.ins(d3d.OpMov, sxw(5), res)
+	}
 	switch inst {
 	case 0x50, 0x51: // DOT4, DOT4_IEEE: summed in order
 		for c := 0; c < 4; c++ {
