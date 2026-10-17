@@ -73,6 +73,7 @@ type AX struct {
 	frames   uint64 // AX frames mixed
 	start    uint64 // the time base when the first frame was due
 	out      []float32
+	mix      map[uint32]*mixChannel // MIX library settings, by voice
 	// the time of the next frame
 	next uint64
 }

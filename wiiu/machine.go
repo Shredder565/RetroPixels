@@ -87,17 +87,23 @@ type Machine struct {
 	jumped bool // a library call set PC itself
 	fs     *fsState
 
-	bootTime    uint64
-	rumbleUntil uint64
-	initQueue   []*Module // loaded modules whose entry point hasn't run yet
-	dynReturn   map[*Thread]uint32
-	loading     map[string]bool // title libraries being loaded
-	homeMenu    bool
-	intsOff     [3]bool
-	dynHandles  map[uint32]string
-	dynAlloc    uint32
-	dynFree     uint32
-	perThread   map[string]uint32
+	bootTime           uint64
+	rumbleUntil        uint64
+	initQueue          []*Module // loaded modules whose entry point hasn't run yet
+	dynReturn          map[*Thread]uint32
+	loading            map[string]bool // title libraries being loaded
+	homeMenu           bool
+	intsOff            [3]bool
+	dynHandles         map[uint32]string
+	dynAlloc           uint32
+	fontAddr, fontSize uint32 // the system font, once a program asks
+	fontTried          bool
+	apertures          map[uint32]*aperture // open tiling apertures by handle
+	nextAperture       uint32
+	zstreams           map[uint32]*zInflate   // zlib inflate streams by z_stream address
+	conts              map[uint32][]guestCont // by thread: what HLE functions do after calls into the program
+	dynFree            uint32
+	perThread          map[string]uint32
 
 	// Log gets the program's console output (OSReport) and RetroPixels'
 	// notes about it.

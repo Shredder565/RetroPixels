@@ -22,9 +22,10 @@ const (
 
 	heapHeader = 0x40
 
-	tagExp  = 0x45585048 // "EXPH"
-	tagFrm  = 0x46524d48 // "FRMH"
-	tagUnit = 0x554e5448 // "UNTH"
+	tagExp   = 0x45585048 // "EXPH"
+	tagFrm   = 0x46524d48 // "FRMH"
+	tagUnit  = 0x554e5448 // "UNTH"
+	tagBlock = 0x424c4b48 // "BLKH"
 
 	systemHeapSize = 0x01000000
 )
@@ -47,6 +48,11 @@ type Heap struct {
 	// frame heap
 	Head, Tail uint32
 	States     []frmState
+
+	// block heap (an expanded heap whose bookkeeping slots the program
+	// supplies): how many slots it gave
+	Block    bool
+	Tracking uint32
 
 	// unit heap
 	Unit     uint32
@@ -335,4 +341,39 @@ func (hp *Heap) frmLargest(align uint32) uint32 {
 		return 0
 	}
 	return hp.Tail - a
+}
+
+// createBlock makes a block heap over [start, end) whose handle is the
+// program's MEMBlockHeap at handle.
+func (h *Heaps) createBlock(m *Machine, handle, start, end, tracking, flags uint32) uint32 {
+	hp := &Heap{Kind: tagExp, Block: true, Start: handle, Lo: start, Hi: end, Flags: flags, Tracking: tracking,
+		Used: map[uint32]span{}, Size: map[uint32]uint32{}}
+	if end > start {
+		hp.Free = []span{{start, end - start}}
+	}
+	h.ByHandle[handle] = hp
+	m.Mem.Write32(handle, tagBlock)
+	return handle
+}
+
+// trackingLeft: bookkeeping slots a block heap has free (one per used or
+// free span).
+func (hp *Heap) trackingLeft() uint32 {
+	n := uint32(len(hp.Used) + len(hp.Free))
+	if n >= hp.Tracking {
+		return 0
+	}
+	return hp.Tracking - n
+}
+
+// expAllocAt takes exactly [a, a+size) if it's free.
+func (hp *Heap) expAllocAt(a, size uint32) uint32 {
+	size = (size + 3) &^ 3
+	for i, f := range hp.Free {
+		if a >= f.Addr && a+size <= f.Addr+f.Size {
+			hp.take(i, a, size)
+			return a
+		}
+	}
+	return 0
 }

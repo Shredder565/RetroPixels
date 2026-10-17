@@ -13,6 +13,8 @@ import "math"
 // GX2 is the graphics state.
 type GX2 struct {
 	Init bool
+	// GX2R's allocator (the program's functions; 0 = the default heap)
+	rAlloc, rFree uint32
 	// scan buffers of the TV (0) and GamePad (1)
 	Scan        [2]scanBuf
 	Swaps       uint32
@@ -394,7 +396,8 @@ func init() {
 		"GX2SetShaderMode", "GX2SetShaderModeEx2", "GX2SetStreamOutBuffer", "GX2SetStreamOutEnable",
 		"GX2SetStreamOutContext", "GX2SaveStreamOutContext", "GX2SetTessellation", "GX2SetMaxTessellationLevel",
 		"GX2SetMinTessellationLevel", "GX2SetGeometryShaderInputRingBuffer", "GX2SetGeometryShaderOutputRingBuffer",
-		"GX2SetVertexUniformBlockTimeStamp", "GX2SetSpecialState", "GX2SetupCompatibilityContextState"} {
+		"GX2SetVertexUniformBlockTimeStamp", "GX2SetSpecialState", "GX2SetupCompatibilityContextState",
+		"GX2InitDepthBufferHiZEnable"} {
 		reg(x, n, func(m *Machine, cpu *CPU, t *Thread) {})
 	}
 	reg(x, "GX2CalcGeometryShaderInputRingBufferSize", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0x10000) })

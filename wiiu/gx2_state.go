@@ -529,12 +529,21 @@ func init() {
 		b.set(regVGT_INSTANCE_STEP_RATE_0, mem.Read32(fs+0x18), mem.Read32(fs+0x1c))
 		m.emit(b)
 	})
+	// shaderProgram is a shader's code: its own pointer, or, for a shader
+	// loaded through GX2R, the buffer in its GX2RBuffer (flags, element
+	// size, element count, buffer).
+	shaderProgram := func(mem *Memory, sh, progOff, rbufOff uint32) uint32 {
+		if p := mem.Read32(sh + progOff); p != 0 {
+			return p
+		}
+		return mem.Read32(sh + rbufOff + 12)
+	}
 	reg(x, "GX2SetVertexShader", func(m *Machine, cpu *CPU, t *Thread) {
 		vs := arg(cpu, 0)
 		mem := m.Mem
 		r := func(i uint32) uint32 { return mem.Read32(vs + i*4) }
 		b := &pm4{}
-		prog := mem.Read32(vs + 0xd4)
+		prog := shaderProgram(mem, vs, 0xd4, 0x124)
 		b.set(regSQ_PGM_START_VS, prog>>8)
 		b.set(regSQ_PGM_RESOURCES_VS, r(0))
 		b.set(regSPI_VS_OUT_CONFIG, r(2))
@@ -568,7 +577,7 @@ func init() {
 		mem := m.Mem
 		r := func(i uint32) uint32 { return mem.Read32(ps + i*4) }
 		b := &pm4{}
-		b.set(regSQ_PGM_START_PS, mem.Read32(ps+0xa8)>>8)
+		b.set(regSQ_PGM_START_PS, shaderProgram(mem, ps, 0xa8, 0xd8)>>8)
 		b.set(regSQ_PGM_RESOURCES_PS, r(0), r(1))
 		b.set(regSPI_PS_IN_CONTROL_0, r(2), r(3))
 		in := make([]uint32, 32)
