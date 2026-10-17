@@ -80,7 +80,7 @@ func (t *trackball) roll(d int) {
 	t.frac += speed
 	n := t.frac >> 2
 	t.frac &= 3
-	t.pos += n * d
+	t.pos = (t.pos + n*d) & 15
 	if d < 0 {
 		t.dir = 0x80
 	} else {
@@ -244,10 +244,9 @@ func (b *centiped) RunFrame() {
 		}
 		return 0
 	}
-	// The trackball's counters, as the upright screen sees them: across is
-	// Left/Right, and its other axis counts down going up.
+	// The trackball's counters, as the upright screen sees them: one counts
+	// up going left, the other up going down.
 	dx, dy := dir("Right", "Left"), dir("Up", "Down")
-	b.frameCyc = b.cpu.Cycles
 	for line := 0; line < cnLines; line++ {
 		if line&63 == 48 {
 			b.cpu.IRQLine = true
@@ -263,6 +262,7 @@ func (b *centiped) RunFrame() {
 			b.sound(n)
 		}
 	}
+	b.frameCyc += cnFrameCyc
 	b.watchdog++
 	if b.watchdog > 16 { // the game stopped: the watchdog resets it
 		b.watchdog = 0
@@ -376,6 +376,7 @@ func (b *centiped) SaveState() ([]byte, error) {
 	b.er.save(w)
 	w.B = b.snd.AppendState(w.B)
 	w.F64(b.out.lp)
+	w.Int(int(b.cpu.Cycles - b.frameCyc))
 	w.Int(b.sndCyc)
 	w.Int(b.watchdog)
 	for _, t := range b.ball {
@@ -411,6 +412,7 @@ func (b *centiped) LoadState(st []byte) error {
 		r.B = rest
 	}
 	n.out.lp = r.F64()
+	into := int64(r.Int())
 	n.sndCyc = r.Int()
 	n.watchdog = r.Int()
 	for i := range n.ball {
@@ -431,7 +433,7 @@ func (b *centiped) LoadState(st []byte) error {
 	*b.res = res
 	n.cpu, n.snd, n.res = b.cpu, b.snd, b.res
 	*b = n
-	b.frameCyc = b.cpu.Cycles
+	b.frameCyc = b.cpu.Cycles - into
 	b.draw()
 	return nil
 }

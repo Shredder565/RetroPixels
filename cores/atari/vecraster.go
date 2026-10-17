@@ -13,6 +13,7 @@ type vecRaster struct {
 	acc    []float32
 	glow   []float32
 	tmp    []float32
+	col    []float32 // running sums down the glow's columns
 	pix    []uint32
 	tone   [1024]uint32 // the picture's colour for an amount of light
 }
@@ -22,6 +23,7 @@ func newVecRaster(w, h int, dvgX0, dvgY0, dvgW, dvgH float32) *vecRaster {
 	r.acc = make([]float32, w*h)
 	r.glow = make([]float32, w*h)
 	r.tmp = make([]float32, w*h)
+	r.col = make([]float32, w/2)
 	r.pix = make([]uint32, w*h)
 	for i := range r.tone {
 		v := float64(i) / 256 // light 0..4
@@ -66,9 +68,10 @@ func (r *vecRaster) draw(lines []dvgLine) {
 		dx, dy := x1-x0, y1-y0
 		n := int(math.Sqrt(float64(dx*dx+dy*dy))*2) + 1
 		if n == 1 { // a dot: the beam stays, so it's brighter
-			r.splat(x0, y0, z*3)
-			r.splat(x0+0.6, y0, z*0.8)
-			r.splat(x0, y0+0.6, z*0.8)
+			r.splat(x0, y0, z*3.5)
+			for _, d := range [4][2]float32{{-0.7, 0}, {0.7, 0}, {0, -0.7}, {0, 0.7}} {
+				r.splat(x0+d[0], y0+d[1], z*0.6)
+			}
 			continue
 		}
 		if n > 4096 {
@@ -80,41 +83,89 @@ func (r *vecRaster) draw(lines []dvgLine) {
 			r.splat(x0+dx*t, y0+dy*t, v)
 		}
 	}
-	r.blur()
-	for i, a := range r.acc {
-		v := a + r.glow[i]*0.7
-		k := int(v * 256)
-		if k > 1023 {
-			k = 1023
+	r.makeGlow()
+	w2 := r.w / 2
+	for y := 0; y < r.h; y++ {
+		// the glow is at half size: take it between its pixels
+		gy := float32(y)*0.5 - 0.25
+		y0 := max(int(gy), 0)
+		y1 := min(y0+1, r.h/2-1)
+		fy := max(gy-float32(y0), 0)
+		row := r.acc[y*r.w : (y+1)*r.w]
+		out := r.pix[y*r.w : (y+1)*r.w]
+		g0, g1 := r.glow[y0*w2:(y0+1)*w2], r.glow[y1*w2:(y1+1)*w2]
+		for x, a := range row {
+			gx := x >> 1
+			gx1 := min(gx+1, w2-1)
+			if a+(g0[gx]+g0[gx1]+g1[gx]+g1[gx1])*0.6 < 1.0/256 { // dark: most of the screen
+				out[x] = r.tone[0]
+				continue
+			}
+			fx := float32(x&1) * 0.5
+			g := (g0[gx]*(1-fx)+g0[gx1]*fx)*(1-fy) + (g1[gx]*(1-fx)+g1[gx1]*fx)*fy
+			k := int((a + g*0.6) * 256)
+			if k > 1023 {
+				k = 1023
+			}
+			out[x] = r.tone[k]
 		}
-		r.pix[i] = r.tone[k]
 	}
 }
 
-// blur makes glow from acc: a box blur 5 pixels across, twice (near a
-// Gaussian), one direction at a time.
-func (r *vecRaster) blur() {
-	w, h := r.w, r.h
-	pass := func(src, dst []float32, step, n, lines, stride int) {
-		for l := 0; l < lines; l++ {
-			base := l * stride
-			var sum float32
-			for k := 0; k < 2 && k < n; k++ {
-				sum += src[base+k*step]
-			}
-			for i := 0; i < n; i++ {
-				if i+2 < n {
-					sum += src[base+(i+2)*step]
+// makeGlow: acc at half size, blurred (a box 5 pixels across, twice each
+// way: near a Gaussian), into glow.
+func (r *vecRaster) makeGlow() {
+	w2, h2 := r.w/2, r.h/2
+	g, t := r.glow[:w2*h2], r.tmp[:w2*h2]
+	for y := 0; y < h2; y++ {
+		a, b := r.acc[2*y*r.w:], r.acc[(2*y+1)*r.w:]
+		for x := 0; x < w2; x++ {
+			g[y*w2+x] = (a[2*x] + a[2*x+1] + b[2*x] + b[2*x+1]) * 0.25
+		}
+	}
+	across := func(src, dst []float32) {
+		for y := 0; y < h2; y++ {
+			s, d := src[y*w2:(y+1)*w2], dst[y*w2:(y+1)*w2]
+			sum := s[0] + s[1]
+			for x := range d {
+				if x+2 < w2 {
+					sum += s[x+2]
 				}
-				if i-3 >= 0 {
-					sum -= src[base+(i-3)*step]
+				if x >= 3 {
+					sum -= s[x-3]
 				}
-				dst[base+i*step] = sum * 0.2
+				d[x] = sum * 0.2
 			}
 		}
 	}
-	pass(r.acc, r.tmp, 1, w, h, w)
-	pass(r.tmp, r.glow, w, h, w, 1)
-	pass(r.glow, r.tmp, 1, w, h, w)
-	pass(r.tmp, r.glow, w, h, w, 1)
+	// down the columns, a row at a time (kind to the cache)
+	down := func(src, dst []float32) {
+		sum := r.col
+		copy(sum, src[:w2])
+		for x := range sum {
+			sum[x] += src[w2+x]
+		}
+		for y := 0; y < h2; y++ {
+			if y+2 < h2 {
+				add := src[(y+2)*w2 : (y+3)*w2]
+				for x := range sum {
+					sum[x] += add[x]
+				}
+			}
+			if y >= 3 {
+				sub := src[(y-3)*w2 : (y-2)*w2]
+				for x := range sum {
+					sum[x] -= sub[x]
+				}
+			}
+			d := dst[y*w2 : (y+1)*w2]
+			for x := range d {
+				d[x] = sum[x] * 0.2
+			}
+		}
+	}
+	across(g, t)
+	across(t, g)
+	down(g, t)
+	down(t, g)
 }

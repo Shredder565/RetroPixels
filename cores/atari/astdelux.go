@@ -262,7 +262,6 @@ func (b *astdelux) SetInput(p []arcade.Pad) { b.pads = p }
 func (b *astdelux) Screen() []uint32 { return b.ras.pix }
 
 func (b *astdelux) RunFrame() {
-	b.frameCyc = b.cpu.Cycles
 	for i := 1; i <= 4; i++ {
 		end := b.frameCyc + int64(i*adNMICyc)
 		for b.cpu.Cycles < end {
@@ -271,6 +270,7 @@ func (b *astdelux) RunFrame() {
 		b.cpu.NMIPending = true
 	}
 	b.ras.draw(b.lines)
+	b.frameCyc += adFrameCyc
 	b.watchdog++
 	if b.watchdog > 16 { // the game stopped: the watchdog resets it
 		b.watchdog = 0
@@ -304,6 +304,7 @@ func (b *astdelux) SaveState() ([]byte, error) {
 	w.Int(int(b.busyTill - b.cpu.Cycles)) // how long the DVG still draws
 	w.Bool(b.potRead)
 	w.F64(b.out.lp)
+	w.Int(int(b.cpu.Cycles - b.frameCyc))
 	w.Int(b.sndCyc)
 	w.Int(b.watchdog)
 	b.res.AppendState(w)
@@ -338,6 +339,7 @@ func (b *astdelux) LoadState(st []byte) error {
 	busy := int64(r.Int())
 	n.potRead = r.Bool()
 	n.out.lp = r.F64()
+	into := int64(r.Int())
 	n.sndCyc = r.Int()
 	n.watchdog = r.Int()
 	res.LoadState(r)
@@ -350,7 +352,7 @@ func (b *astdelux) LoadState(st []byte) error {
 	n.cpu, n.snd, n.res, n.ras, n.lines = b.cpu, b.snd, b.res, b.ras, b.lines
 	*b = n
 	b.busyTill = b.cpu.Cycles + busy
-	b.frameCyc = b.cpu.Cycles
+	b.frameCyc = b.cpu.Cycles - into
 	// redraw the picture from the vector list in the state
 	b.runDVG()
 	b.busyTill = b.cpu.Cycles + busy
