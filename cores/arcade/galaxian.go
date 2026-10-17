@@ -28,26 +28,44 @@ const (
 
 var gxFPS = float64(gxCPUHz) / (gxLineCyc * gxLines)
 
-type gxStar struct{ x, colour, group int }
+// The starfield: a 17-bit shift register stepping twice a pixel, 512 steps a
+// line, without stopping from frame to frame (so the field drifts one half
+// pixel a frame). A star shows where its output has been 0 for 8 steps and
+// then 1; the 6 bits before those give the star's colour. Stars on every
+// other 8-pixel stretch show, alternating line by line. (Worked out from how
+// the board's stars look.)
+const (
+	gxStarPeriod = 1<<17 - 1
+	gxStarT0     = 79139 // where the register is at the first line of the first frame
+)
 
-// gxStars: RetroPixels' own starfield, by line.
-var gxStars = func() [256][]gxStar {
-	var out [256][]gxStar
-	r := 0x1d872
-	for y := 0; y < 256; y++ {
-		for x := 0; x < 512; x++ {
-			bit := ((r >> 16) ^ (r >> 4)) & 1
-			r = ((r << 1) | bit) & 0x1ffff
-			v := r
-			if v&0x1fe00 == 0x1fe00 && v&0x3f != 0 {
-				out[y] = append(out[y], gxStar{x, v & 0x3f, (v >> 6) & 3})
-			}
-		}
+// gxStarAt: each step's star colour (0 = none).
+var gxStarAt = func() []uint8 {
+	bits := make([]uint8, gxStarPeriod)
+	r := 1
+	for t := range bits {
+		bits[t] = uint8(r & 1)
+		r = r>>1 | ((r^r>>12)&1)<<16
 	}
-	return out
+	at := make([]uint8, gxStarPeriod)
+	for t := range at {
+		ok := bits[(t+8)%gxStarPeriod] == 1
+		for j := 0; j < 8 && ok; j++ {
+			ok = bits[(t+j)%gxStarPeriod] == 0
+		}
+		if !ok {
+			continue
+		}
+		c := 0
+		for k := 0; k < 6; k++ {
+			c |= int(bits[(t-1-k+gxStarPeriod)%gxStarPeriod]) << k
+		}
+		at[t] = uint8(c)
+	}
+	return at
 }()
 
-var gxStarLevels = [4]int{0x00, 0x97, 0xd7, 0xff}
+var gxStarLevels = [4]int{0x00, 0xc2, 0xd6, 0xff}
 
 type gxSound struct {
 	tone            float64
@@ -95,7 +113,7 @@ func newGalaxian(g *Game, files Files, opts Opts) (Board, error) {
 	prom := Region(g, files, "colour", 32)
 	b.decodeGraphics(gfx)
 	for i := range b.pens {
-		b.pens[i] = promColour(prom[i])
+		b.pens[i] = gxColour(prom[i])
 	}
 	for i := range b.starPens {
 		b.starPens[i] = RGB(gxStarLevels[i&3], gxStarLevels[(i>>2)&3], gxStarLevels[i>>4])
@@ -114,6 +132,13 @@ func (b *galaxian) Reset() {
 	b.l60, b.l68, b.l70 = [8]uint8{}, [8]uint8{}, [8]uint8{}
 	b.pitch, b.cycles, b.frame = 0xff, 0, 0
 	b.snd = gxSound{noise: 1}
+}
+
+// gxColour: one PROM colour, 3 bits each of red and green and 2 of blue,
+// through the board's resistors (the levels measured).
+func gxColour(c uint8) uint32 {
+	bit := func(n uint) int { return int(c>>n) & 1 }
+	return RGB(0x1d*bit(0)+0x3e*bit(1)+0x85*bit(2), 0x1d*bit(3)+0x3e*bit(4)+0x85*bit(5), 0x45*bit(6)+0x94*bit(7))
 }
 
 // two ROMs: the first gives each pixel's high bit, the second its low bit
@@ -223,14 +248,14 @@ func (b *galaxian) drawLine(y int) {
 		}
 	}
 	if b.l70[4] != 0 {
-		scroll, f := b.frame&511, b.frame
-		for _, s := range gxStars[y] {
-			if ((f>>5)+s.group)&2 != 0 {
-				continue
+		line := y - gxFirst
+		t := ((gxStarT0-b.frame+line*512)%gxStarPeriod + gxStarPeriod) % gxStarPeriod
+		for h := 0; h < 512; h++ {
+			if c := gxStarAt[t]; c != 0 && (line^(h>>4))&1 != 0 && !used[h>>1] {
+				scr[row+(h>>1)] = b.starPens[c]
 			}
-			x := (s.x + scroll) & 511
-			if x < gxW && !used[x] {
-				scr[row+x] = b.starPens[s.colour]
+			if t++; t == gxStarPeriod {
+				t = 0
 			}
 		}
 	}

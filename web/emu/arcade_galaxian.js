@@ -25,26 +25,32 @@
   const W = 256, H = LAST - FIRST;
 
   // ===================================================================
-  // Starfield (RetroPixels' own pattern): a fixed field of coloured stars that
-  // drifts down the screen and twinkles in four groups.
+  // The starfield: a 17-bit shift register stepping twice a pixel, 512 steps a
+  // line, without stopping from frame to frame (so the field drifts one half
+  // pixel a frame). A star shows where its output has been 0 for 8 steps and
+  // then 1; the 6 bits before those give the star's colour. Stars on every
+  // other 8-pixel stretch show, alternating line by line. (Worked out from how
+  // the board's stars look.)
   // ===================================================================
+  const STAR_PERIOD = 131071, STAR_T0 = 79139; // where the register is at the first line of the first frame
+  let starAt = null; // each step's star colour (0 = none)
   function makeStars() {
-    const stars = [];
-    let r = 0x1d872;
-    const next = () => { // 17-bit shift register
-      const bit = ((r >> 16) ^ (r >> 4)) & 1;
-      r = ((r << 1) | bit) & 0x1ffff;
-      return r;
-    };
-    for (let y = 0; y < 256; y++) {
-      for (let x = 0; x < 512; x++) {
-        const v = next();
-        if ((v & 0x1fe00) === 0x1fe00 && (v & 0x3f)) stars.push({ x, y, colour: v & 0x3f, group: (v >> 6) & 3 });
-      }
+    if (starAt) return starAt;
+    const bits = new Uint8Array(STAR_PERIOD);
+    let r = 1;
+    for (let t = 0; t < STAR_PERIOD; t++) { bits[t] = r & 1; r = (r >> 1) | (((r ^ (r >> 12)) & 1) << 16); }
+    starAt = new Uint8Array(STAR_PERIOD);
+    for (let t = 0; t < STAR_PERIOD; t++) {
+      let ok = bits[(t + 8) % STAR_PERIOD] === 1;
+      for (let j = 0; j < 8 && ok; j++) ok = bits[(t + j) % STAR_PERIOD] === 0;
+      if (!ok) continue;
+      let c = 0;
+      for (let k = 0; k < 6; k++) c |= bits[(t - 1 - k + STAR_PERIOD) % STAR_PERIOD] << k;
+      starAt[t] = c;
     }
-    return stars;
+    return starAt;
   }
-  const STAR_LEVELS = [0x00, 0x97, 0xd7, 0xff];
+  const STAR_LEVELS = [0x00, 0xc2, 0xd6, 0xff];
 
   class GalaxianBoard {
     constructor(game, files, opts) {
@@ -55,18 +61,16 @@
       const gfx = RPArcade.region(game, files, "gfx", 0x1000);
       this.prom = RPArcade.region(game, files, "colour", 32);
       this.decodeGraphics(gfx);
+      // 3 bits each of red and green and 2 of blue, through the board's resistors (the levels measured)
       this.pens = new Uint32Array(32);
       for (let i = 0; i < 32; i++) {
         const c = this.prom[i], bit = (n) => (c >> n) & 1;
-        this.pens[i] = RPArcade.rgb(0x21 * bit(0) + 0x47 * bit(1) + 0x97 * bit(2),
-          0x21 * bit(3) + 0x47 * bit(4) + 0x97 * bit(5), 0x51 * bit(6) + 0xae * bit(7));
+        this.pens[i] = RPArcade.rgb(0x1d * bit(0) + 0x3e * bit(1) + 0x85 * bit(2),
+          0x1d * bit(3) + 0x3e * bit(4) + 0x85 * bit(5), 0x45 * bit(6) + 0x94 * bit(7));
       }
-      this.starList = makeStars();
+      this.starAt = makeStars();
       this.starPens = new Uint32Array(64);
       for (let i = 0; i < 64; i++) this.starPens[i] = RPArcade.rgb(STAR_LEVELS[i & 3], STAR_LEVELS[(i >> 2) & 3], STAR_LEVELS[i >> 4]);
-      // stars indexed by line for drawing
-      this.starsByLine = Array.from({ length: 256 }, () => []);
-      for (const s of this.starList) this.starsByLine[s.y].push(s);
 
       this.ram = new Uint8Array(0x400);
       this.vram = new Uint8Array(0x400);
@@ -151,13 +155,12 @@
       }
       // stars, where nothing else is drawn
       if (this.latch7000[4]) {
-        const sl = this.starsByLine[y], scroll = this.frame & 511, f = this.frame;
-        for (let i = 0; i < sl.length; i++) {
-          const s = sl[i];
-          // two groups blink at a time, changing a few times a second
-          if (((f >> 5) + s.group) & 2) continue;
-          const x = (s.x + scroll) & 511;
-          if (x < W && !used[x]) scr[row + x] = this.starPens[s.colour];
+        const line = y - FIRST, at = this.starAt;
+        let t = (((STAR_T0 - this.frame + line * 512) % STAR_PERIOD) + STAR_PERIOD) % STAR_PERIOD;
+        for (let h = 0; h < 512; h++) {
+          const c = at[t];
+          if (c && ((line ^ (h >> 4)) & 1) && !used[h >> 1]) scr[row + (h >> 1)] = this.starPens[c];
+          if (++t === STAR_PERIOD) t = 0;
         }
       }
     }
