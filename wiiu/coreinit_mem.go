@@ -186,6 +186,95 @@ func init() {
 		ret(cpu, size)
 	})
 
+	// block heaps: the program hands over a MEMBlockHeap, the range and
+	// bookkeeping slots (0x14 bytes each)
+	const blockSlot = 0x14
+	reg(c, "MEMInitBlockHeap", func(m *Machine, cpu *CPU, t *Thread) {
+		h, start, end := arg(cpu, 0), arg(cpu, 1), arg(cpu, 2)
+		if h == 0 || end <= start {
+			ret(cpu, 0)
+			return
+		}
+		ret(cpu, m.heaps.createBlock(m, h, start, end, arg(cpu, 4)/blockSlot, arg(cpu, 5)))
+	})
+	reg(c, "MEMDestroyBlockHeap", func(m *Machine, cpu *CPU, t *Thread) {
+		m.heaps.destroy(m, arg(cpu, 0))
+		ret(cpu, arg(cpu, 0))
+	})
+	block := func(m *Machine, h uint32) *Heap {
+		if hp := m.heaps.get(h); hp != nil && hp.Block {
+			return hp
+		}
+		return nil
+	}
+	reg(c, "MEMAddBlockHeapTracking", func(m *Machine, cpu *CPU, t *Thread) {
+		hp := block(m, arg(cpu, 0))
+		if hp == nil {
+			ret(cpu, 0xffffffff)
+			return
+		}
+		hp.Tracking += arg(cpu, 2) / blockSlot
+		ret(cpu, 0)
+	})
+	reg(c, "MEMGetTrackingLeftInBlockHeap", func(m *Machine, cpu *CPU, t *Thread) {
+		if hp := block(m, arg(cpu, 0)); hp != nil {
+			ret(cpu, hp.trackingLeft())
+			return
+		}
+		ret(cpu, 0)
+	})
+	reg(c, "MEMAllocFromBlockHeapEx", func(m *Machine, cpu *CPU, t *Thread) {
+		hp := block(m, arg(cpu, 0))
+		if hp == nil || hp.trackingLeft() == 0 {
+			ret(cpu, 0)
+			return
+		}
+		ret(cpu, m.heapAlloc(hp, arg(cpu, 1), int32(arg(cpu, 2))))
+	})
+	reg(c, "MEMAllocFromBlockHeapAt", func(m *Machine, cpu *CPU, t *Thread) {
+		hp := block(m, arg(cpu, 0))
+		if hp == nil || hp.trackingLeft() == 0 {
+			ret(cpu, 0)
+			return
+		}
+		a := hp.expAllocAt(arg(cpu, 1), arg(cpu, 2))
+		if a != 0 && hp.Flags&1 != 0 {
+			m.Mem.Fill(a, 0, arg(cpu, 2))
+		}
+		ret(cpu, a)
+	})
+	reg(c, "MEMFreeToBlockHeap", func(m *Machine, cpu *CPU, t *Thread) {
+		if hp := block(m, arg(cpu, 0)); hp != nil {
+			hp.expFree(arg(cpu, 1))
+		}
+	})
+	reg(c, "MEMGetAllocatableSizeForBlockHeapEx", func(m *Machine, cpu *CPU, t *Thread) {
+		hp := block(m, arg(cpu, 0))
+		if hp == nil || hp.trackingLeft() == 0 {
+			ret(cpu, 0)
+			return
+		}
+		al := int32(arg(cpu, 1))
+		if al < 0 {
+			al = -al
+		}
+		ret(cpu, hp.expLargest(uint32(max(al, 4))))
+	})
+	reg(c, "MEMGetTotalFreeSizeForBlockHeap", func(m *Machine, cpu *CPU, t *Thread) {
+		if hp := block(m, arg(cpu, 0)); hp != nil {
+			ret(cpu, hp.expTotalFree())
+			return
+		}
+		ret(cpu, 0)
+	})
+	reg(c, "MEMGetSizeForMBlockBlockHeap", func(m *Machine, cpu *CPU, t *Thread) {
+		if hp := block(m, arg(cpu, 0)); hp != nil {
+			ret(cpu, hp.Size[arg(cpu, 1)])
+			return
+		}
+		ret(cpu, 0)
+	})
+
 	// unit heaps
 	reg(c, "MEMCreateUnitHeapEx", func(m *Machine, cpu *CPU, t *Thread) {
 		ret(cpu, m.heaps.createUnit(m, arg(cpu, 0), arg(cpu, 1), arg(cpu, 2), arg(cpu, 3), arg(cpu, 4)))

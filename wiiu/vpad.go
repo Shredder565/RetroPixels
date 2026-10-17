@@ -141,7 +141,7 @@ func init() {
 		"WPADEnableWiiRemote", "WPADSetAutoSleepTime", "KPADSetConnectCallback", "WPADSetConnectCallback",
 		"KPADEnableDPD", "KPADDisableDPD", "WPADControlMotor", "WPADDisconnect", "KPADSetMaxControllers",
 		"WPADSetPowerSaveMode", "KPADSetBtnRepeat", "KPADSetPosParam", "KPADSetHoriParam", "KPADSetDistParam",
-		"KPADSetAccParam", "WPADSetDataFormat", "WPADEnableMotor", "KPADEnableMpls", "KPADDisableMpls", "KPADResetMpls"} {
+		"KPADSetAccParam", "WPADSetDataFormat", "WPADEnableMotor", "KPADEnableMpls", "KPADDisableMpls", "KPADResetMpls", "WPADRegisterAllocator", "KPADSetMplsWorkarea", "WPADSetSamplingCallback"} {
 		reg(p, n, func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) })
 	}
 	reg(p, "WPADProbe", func(m *Machine, cpu *CPU, t *Thread) {

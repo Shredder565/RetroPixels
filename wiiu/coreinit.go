@@ -184,7 +184,6 @@ func init() {
 		m.Mem.Write32(arg(cpu, 1), m.argv)
 		ret(cpu, 1)
 	})
-	reg(c, "OSGetSharedData", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) })
 	reg(c, "OSGetMemBound", func(m *Machine, cpu *CPU, t *Thread) {
 		var a, n uint32
 		switch arg(cpu, 0) {
