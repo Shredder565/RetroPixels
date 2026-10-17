@@ -125,7 +125,7 @@
   }
   WiiU.prototype.usesRightStick = true; // the right stick is the GamePad's, not the save-state shortcuts
   WiiU.prototype.controlsNote = "Left stick and right stick = the GamePad's sticks. TV / GamePad switches which screen you see. " +
-    "Wii U homebrew (.rpx) runs now; games come in later versions.";
+    "Wii U homebrew (.rpx) runs here. Games run in the RetroPixels app: open the .rpx in the game's code folder.";
 
   WiiU.info = {
     system: "wiiu", name: "Wii U", width: 1280, height: 720, aspect: 16 / 9, fps: 59.94, stereo: true, players: 1,

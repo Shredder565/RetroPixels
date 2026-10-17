@@ -34,13 +34,14 @@ const (
 
 // ControlsNote is shown in the Controls window.
 const ControlsNote = "Left stick and right stick = the GamePad's sticks. " +
-	"TV / GamePad switches which screen you see. Wii U homebrew (.rpx) runs now; games come in later versions."
+	"TV / GamePad switches which screen you see. Wii U homebrew (.rpx) runs now. For a game, open the .rpx in its code folder."
 
 // WiiU is one running program.
 type WiiU struct {
 	m    *machine.Machine
 	rpx  []byte
 	name string
+	path string
 	rate int
 
 	buttons uint32
@@ -61,11 +62,12 @@ func New(rpx []byte, opts core.Options) (core.Core, error) {
 	if name == "" {
 		name = "game.rpx"
 	}
-	m, err := machine.New(rpx, name, nil)
+	c := &WiiU{rpx: rpx, name: name, path: opts.Path, rate: opts.SampleRate}
+	m, err := c.start(opts.SRAM)
 	if err != nil {
 		return nil, err
 	}
-	c := &WiiU{m: m, rpx: rpx, name: name, rate: opts.SampleRate}
+	c.m = m
 	if c.rate <= 0 {
 		c.rate = 48000
 	}
@@ -198,9 +200,24 @@ func (c *WiiU) TakeAudio() []float32 {
 	return a
 }
 
-// Reset starts the program again.
+// start makes the machine: a program in a title's code folder gets the
+// title's folders, and its saves come back from sram.
+func (c *WiiU) start(sram []byte) (*machine.Machine, error) {
+	files := machine.TitleFolders(c.path)
+	if files == nil {
+		files = machine.NewFileSystem()
+	}
+	if len(sram) > 0 {
+		if err := files.LoadSaveData(sram); err != nil {
+			return nil, err
+		}
+	}
+	return machine.New(c.rpx, c.name, files)
+}
+
+// Reset starts the program again (with the saves it made).
 func (c *WiiU) Reset() {
-	if m, err := machine.New(c.rpx, c.name, nil); err == nil {
+	if m, err := c.start(c.SRAM()); err == nil {
 		c.m = m
 	}
 }
@@ -213,4 +230,5 @@ func (c *WiiU) LoadState([]byte) error {
 	return errors.New("save states aren't available for the Wii U yet")
 }
 
-func (c *WiiU) SRAM() []byte { return nil }
+// SRAM: the program's save files.
+func (c *WiiU) SRAM() []byte { return c.m.Files.SaveData() }

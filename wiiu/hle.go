@@ -130,6 +130,27 @@ func (m *Machine) Import(lib, name string, data bool) (uint32, error) {
 		}
 		return 0, fmt.Errorf("%s has no %s", lib, name)
 	}
+	// one of the title's own libraries
+	if hleFuncs[lib] == nil && hleData[lib] == nil && !knownLibs[lib] {
+		if m.loading[lib] {
+			return 0, fmt.Errorf("%s imports itself in a loop", lib)
+		}
+		if m.loading == nil {
+			m.loading = map[string]bool{}
+		}
+		m.loading[lib] = true
+		mod, err := m.titleLibrary(lib)
+		delete(m.loading, lib)
+		if err != nil {
+			return 0, err
+		}
+		if mod != nil {
+			if a, ok := mod.Exports[name]; ok {
+				return a, nil
+			}
+			return 0, fmt.Errorf("%s has no %s", lib, name)
+		}
+	}
 	if data {
 		return m.dataExport(lib, name), nil
 	}
