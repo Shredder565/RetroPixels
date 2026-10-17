@@ -20,3 +20,22 @@ TEXT ·jitCall(SB), NOSPLIT, $16-24
 	MOVQ R9, 24(SI)
 	MOVQ AX, ret+16(FP)
 	RET
+
+// func cpuHasFMA() bool: FMA3 and AVX, with the OS saving the AVX registers
+TEXT ·cpuHasFMA(SB), NOSPLIT, $0-1
+	MOVL $1, AX
+	XORL CX, CX
+	CPUID
+	ANDL $0x18001000, CX
+	CMPL CX, $0x18001000
+	JNE no
+	XORL CX, CX
+	XGETBV
+	ANDL $6, AX
+	CMPL AX, $6
+	JNE no
+	MOVB $1, ret+0(FP)
+	RET
+no:
+	MOVB $0, ret+0(FP)
+	RET

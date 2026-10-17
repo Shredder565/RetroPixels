@@ -46,6 +46,7 @@ var (
 	offFPR   = int32(unsafe.Offsetof(Context{}.FPR))
 	offPS1   = int32(unsafe.Offsetof(Context{}.PS1))
 	offFPSCR = int32(unsafe.Offsetof(Context{}.FPSCR))
+	offGQR   = int32(unsafe.Offsetof(Context{}.GQR))
 )
 
 func gpr(r uint32) int32 { return offGPR + int32(r)*4 }
@@ -64,7 +65,7 @@ type JIT struct {
 	table  [numPages]uintptr    // what the code reads
 	hostMn [numPages]uintptr    // guest page -> host address
 
-	Blocks, Flushes int // counters for tests and tuning
+	Blocks, Flushes, Translated int // counters for tests and tuning
 }
 
 // jitArgs is what jitCall loads into the fixed registers.
@@ -286,6 +287,7 @@ func (b *jitBlock) build() {
 		a.ret()
 		return
 	}
+	b.j.Translated += b.n
 	n := uint32(b.n)
 	a.b[lenAt], a.b[lenAt+1], a.b[lenAt+2], a.b[lenAt+3] = byte(n), byte(n>>8), byte(n>>16), byte(n>>24)
 	// out of line: the budget exit and the slow paths
@@ -593,6 +595,8 @@ func (b *jitBlock) inst(inst, pc uint32) (ok, ends bool) {
 		b.cr0()
 	case 31:
 		return b.inst31(inst, pc)
+	case 4, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 59, 60, 61, 63:
+		return b.fpInst(inst), false
 	case 32, 33, 34, 35, 40, 41, 42, 43: // lwz(u), lbz(u), lhz(u), lha(u)
 		update := op&1 != 0
 		if update && (ra == 0 || ra == rd) {
@@ -1073,6 +1077,17 @@ func (b *jitBlock) inst31(inst, pc uint32) (ok, ends bool) {
 		if update {
 			a.movStore(rBX, gpr(ra), r10)
 		}
+	case 535, 567, 599, 631, 663, 695, 727, 759, 983: // lfsx ... stfiwx
+		update := xo&32 != 0 && xo != 983
+		load := xo < 663
+		kind := 0
+		switch xo {
+		case 599, 631, 727, 759:
+			kind = 1
+		case 983:
+			kind = 2
+		}
+		return b.fpMem(load, kind, rd, ra, update, func() { b.eaX(ra, rb) }), false
 	case 1014: // dcbz
 		b.eaX(ra, rb)
 		a.aluRI(aluAnd, rCX, ^uint32(31))

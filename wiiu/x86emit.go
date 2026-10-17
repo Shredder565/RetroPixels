@@ -407,3 +407,71 @@ func (a *x86) sseRR(prefix byte, op byte, dst, src int) {
 	a.byte1(0x0f, op)
 	a.modRR(dst, src)
 }
+
+// SSE helpers on xmm0..xmm7 (no REX needed for those)
+
+// scalar double ops: F2 0F op
+const (
+	sseSqrt = 0x51
+	sseAdd  = 0x58
+	sseMul  = 0x59
+	sseCvt  = 0x5a // cvtsd2ss (F2) / cvtss2sd (F3)
+	sseSub  = 0x5c
+	sseDiv  = 0x5e
+)
+
+func (a *x86) movsdLoad(x, base int, disp int32)      { a.sseRM(0xf2, 0x10, x, base, disp) }
+func (a *x86) movsdStore(base int, disp int32, x int) { a.sseRM(0xf2, 0x11, x, base, disp) }
+func (a *x86) sd(op byte, dst, src int)               { a.sseRR(0xf2, op, dst, src) }
+func (a *x86) cvtsd2ss(x int)                         { a.sseRR(0xf2, sseCvt, x, x) }
+func (a *x86) cvtss2sd(x int)                         { a.sseRR(0xf3, sseCvt, x, x) }
+func (a *x86) movapd(dst, src int)                    { a.sseRR(0x66, 0x28, dst, src) }
+func (a *x86) xorpd(dst, src int)                     { a.sseRR(0x66, 0x57, dst, src) }
+func (a *x86) ucomisd(x, y int)                       { a.sseRR(0x66, 0x2e, x, y) }
+func (a *x86) cvttsd2si(dst, x int)                   { a.sseRR(0xf2, 0x2c, dst, x) }
+
+// movq / movd between xmm and general registers
+func (a *x86) movqToX(x, r int) {
+	a.byte1(0x66)
+	a.rex(true, x, 0, r)
+	a.byte1(0x0f, 0x6e)
+	a.modRR(x, r)
+}
+func (a *x86) movqFromX(r, x int) {
+	a.byte1(0x66)
+	a.rex(true, x, 0, r)
+	a.byte1(0x0f, 0x7e)
+	a.modRR(x, r)
+}
+func (a *x86) movdToX(x, r int) {
+	a.byte1(0x66)
+	a.rex(false, x, 0, r)
+	a.byte1(0x0f, 0x6e)
+	a.modRR(x, r)
+}
+func (a *x86) movdFromX(r, x int) {
+	a.byte1(0x66)
+	a.rex(false, x, 0, r)
+	a.byte1(0x0f, 0x7e)
+	a.modRR(x, r)
+}
+
+// vfmadd231sd dst, x, y: dst = x*y + dst (FMA3; xmm0..xmm7)
+func (a *x86) vfmadd231sd(dst, x, y int) {
+	a.byte1(0xc4, 0xe2, 0x80|byte(^x&15)<<3|1, 0xb9)
+	a.modRR(dst, y)
+}
+
+// 64-bit general register helpers
+func (a *x86) movRR64(dst, src int) { a.opRR(true, []byte{0x89}, src, dst) }
+func (a *x86) aluRR64(op, dst, src int) {
+	a.opRR(true, []byte{byte(op<<3 | 1)}, src, dst)
+}
+func (a *x86) bswap64(r int) {
+	a.rex(true, 0, 0, r)
+	a.byte1(0x0f, 0xc8+byte(r&7))
+}
+func (a *x86) movLoad64Disp(dst, base int, disp int32) { a.opRM(true, []byte{0x8b}, dst, base, disp) }
+func (a *x86) movStore64(base int, disp int32, src int) {
+	a.opRM(true, []byte{0x89}, src, base, disp)
+}
