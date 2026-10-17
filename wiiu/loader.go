@@ -77,6 +77,32 @@ type Module struct {
 	TLSAddr  uint32 // the TLS template
 	TLSSize  uint32
 	TLSIndex uint32
+
+	// room after the code for trampolines: far calls to imports go
+	// through one (a branch reaches only 32 MB)
+	trampNext, trampEnd uint32
+	tramps              map[uint32]uint32 // by target
+}
+
+// tramp returns a trampoline to target in the module's own room, or 0.
+func (mod *Module) tramp(mem *Memory, target uint32) uint32 {
+	if a, ok := mod.tramps[target]; ok {
+		return a
+	}
+	if mod.trampNext+16 > mod.trampEnd {
+		return 0
+	}
+	a := mod.trampNext
+	mod.trampNext += 16
+	mem.Write32(a, 0x3d800000|(target>>16))      // lis r12, hi
+	mem.Write32(a+4, 0x618c0000|(target&0xffff)) // ori r12, r12, lo
+	mem.Write32(a+8, 0x7d8903a6)                 // mtctr r12
+	mem.Write32(a+12, 0x4e800420)                // bctr
+	if mod.tramps == nil {
+		mod.tramps = map[uint32]uint32{}
+	}
+	mod.tramps[target] = a
+	return a
 }
 
 // Symbol is a named address in a module.
@@ -286,6 +312,23 @@ func LoadRPL(mem *Memory, b []byte, name string, plan LoadPlan, imp Importer, tr
 	}
 	if mod.TextLo == ^uint32(0) {
 		mod.TextLo, mod.TextHi = 0, 0
+	} else {
+		// room for a trampoline per imported function, after the code
+		n := uint32(0)
+		for _, s := range secs {
+			if s.typ != shtSymtab || s.data == nil {
+				continue
+			}
+			for o := 0; o+16 <= len(s.data); o += 16 {
+				if x := int(be16(s.data[o+14:])); x > 0 && x < len(secs) && secs[x].typ == shtImports && secs[x].flags&shfExec != 0 {
+					n++
+				}
+			}
+		}
+		mod.trampNext = (mod.TextHi + 15) &^ 15
+		mod.trampEnd = mod.trampNext + n*16
+		mem.Fill(mod.trampNext, 0, n*16)
+		mod.TextHi = mod.trampEnd
 	}
 	if mod.DataLo == ^uint32(0) {
 		mod.DataLo, mod.DataHi = 0, 0
@@ -456,10 +499,13 @@ func relocate(mem *Memory, mod *Module, typ, P, S, A uint32, tramp func(uint32) 
 	case 10: // REL24
 		d := int64(int32(v - P))
 		if d < -0x2000000 || d >= 0x2000000 {
-			if tramp == nil {
+			if tramp == nil && mod.trampEnd == 0 {
 				return fmt.Errorf("branch from %08X to %08X is out of range", P, v)
 			}
-			t := tramp(v)
+			t := mod.tramp(mem, v)
+			if (t == 0 || int64(int32(t-P)) < -0x2000000 || int64(int32(t-P)) >= 0x2000000) && tramp != nil {
+				t = tramp(v)
+			}
 			d = int64(int32(t - P))
 			if d < -0x2000000 || d >= 0x2000000 {
 				return fmt.Errorf("branch from %08X to %08X is out of range", P, v)

@@ -138,3 +138,11 @@ func TestDemo(t *testing.T) {
 		t.Fatalf("didn't end:\n%s", log.String())
 	}
 }
+
+// A program whose code is too far from the libraries for a direct branch.
+func TestFarCalls(t *testing.T) {
+	m, log := runRPX(t, buildRPX(t, true, "farcall.c"), 10)
+	if !strings.Contains(log, "far call works") || !m.Exited || m.ExitCode != 5 {
+		t.Fatalf("exited %v code %d err %v log:\n%s", m.Exited, m.ExitCode, m.Err, log)
+	}
+}
