@@ -18,6 +18,23 @@ type dxVSRun struct {
 	nOut  int        // outputs: position, then parameters 0..nOut-2
 	sys   [dxSysSize * 4]uint32
 	cfile [256 * 4]uint32
+	vbufs map[uint32]*dxVBuf // vertex buffers by fetch buffer id
+	regs  map[uint32]uint32  // more registers for the interpreter
+}
+
+// dxVBuf is a vertex buffer: raw guest bytes at base.
+type dxVBuf struct {
+	base   uint32
+	data   []byte
+	stride uint32
+	word2  uint32 // resource word 2 (stride and format fields)
+}
+
+func (r *dxVSRun) vbufInfo(id uint32) dxFetchKey {
+	if b := r.vbufs[id]; b != nil {
+		return dxFetchKey{stride: b.stride, word2: b.word2}
+	}
+	return dxFetchKey{}
 }
 
 func (r *dxVSRun) read32(a uint32) uint32 { return r.mem[a] }
@@ -251,6 +268,16 @@ func (r *dxVSRun) interp(t *testing.T) [][]uint32 {
 	for a, w := range r.mem {
 		g.mem.Write32(a, bswap32(w))
 	}
+	for id, b := range r.vbufs {
+		g.mem.WriteBytes(b.base, b.data)
+		a := regSQ_FETCH_RESOURCE + (stageResBase[stageVS]+id)*28
+		g.setReg(a, b.base)
+		g.setReg(a+4, uint32(len(b.data))-1)
+		g.setReg(a+8, b.word2)
+	}
+	for a, v := range r.regs {
+		g.setReg(a, v)
+	}
 	e := &stageEnv{g: g, stage: stageVS, fsAddr: r.fs}
 	out := make([][]uint32, len(r.in))
 	for base := 0; base < len(r.in); base += nl {
@@ -282,4 +309,15 @@ func (r *dxVSRun) interp(t *testing.T) [][]uint32 {
 		}
 	}
 	return out
+}
+
+// setBase sets the base vertex and start instance on both sides.
+func (r *dxVSRun) setBase(baseVtx, startInst uint32) {
+	if r.regs == nil {
+		r.regs = map[uint32]uint32{}
+	}
+	r.regs[regSQ_VTX_BASE_VTX_LOC] = baseVtx
+	r.regs[regSQ_VTX_START_INST_LOC] = startInst
+	r.sys[dxSysDraw*4+1] = baseVtx
+	r.sys[dxSysDraw*4+2] = startInst
 }

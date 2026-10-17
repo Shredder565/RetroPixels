@@ -357,7 +357,7 @@ func (t *dxTr) convertIn(dst, v d3d.Opnd, n uint32, k numKind, c int) {
 	case kSnorm:
 		sext()
 		t.ins(d3d.OpItof, dst, v)
-		t.ins(d3d.OpDiv, dst, v, dxF(float32(uint64(1)<<(n-1)-1)))
+		t.ins(d3d.OpDiv, dst, v, dxF(float32(max(uint64(1)<<(n-1)-1, 1)))) // 1-bit: 0 or -1
 		t.ins(d3d.OpMax, dst, v, dxF(-1))
 	case kUscaled:
 		t.ins(d3d.OpUtof, dst, v)
