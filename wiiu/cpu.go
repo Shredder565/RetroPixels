@@ -32,6 +32,7 @@ type Context struct {
 	GQR   [8]uint32
 
 	ResAddr  uint32 // lwarx reservation
+	ResVal   uint32 // the word lwarx read: stwcx. fails if another core changed it since
 	ResValid bool
 }
 
@@ -699,7 +700,7 @@ func (c *CPU) exec31(inst uint32) {
 	case 20: // lwarx
 		ea := c.eaX(inst)
 		c.GPR[rd] = m.Read32(ea)
-		c.ResAddr, c.ResValid = ea, true
+		c.ResAddr, c.ResVal, c.ResValid = ea, c.GPR[rd], true
 	case 23: // lwzx
 		c.GPR[rd] = m.Read32(c.eaX(inst))
 	case 24: // slw
@@ -762,7 +763,9 @@ func (c *CPU) exec31(inst uint32) {
 	case 146: // mtmsr
 	case 150: // stwcx.
 		ea := c.eaX(inst)
-		ok := c.ResValid && c.ResAddr == ea
+		// The cores take turns here, so another core's store between this
+		// core's lwarx and stwcx. shows as a changed word.
+		ok := c.ResValid && c.ResAddr == ea && m.Read32(ea) == c.ResVal
 		c.ResValid = false
 		f := uint32(0)
 		if ok {

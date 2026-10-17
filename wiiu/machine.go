@@ -20,6 +20,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync/atomic"
 )
 
 const (
@@ -102,6 +103,10 @@ type Machine struct {
 	missing            []string             // functions called that aren't here yet
 	vmNext             uint32               // the next free virtual address (coreinit_vm.go)
 	vmMaps             map[uint32]uint32    // mapped virtual pages: their physical address
+	lcache             [3]lockedCache       // each core's locked cache
+	flockWord          uint32               // the C library's file lock (stubs_more.go)
+	hleCalls           []uint32             // how often each library call was made (for the log)
+	hleLast            uint32               // the latest library call (for the log)
 	apertures          map[uint32]*aperture // open tiling apertures by handle
 	apAddrs            []uint32             // the last aperture surface's element addresses
 	apAddrsKey         apertureKey
@@ -532,6 +537,7 @@ func (m *Machine) ThreadsSummary() string {
 	for _, t := range ts {
 		fmt.Fprintf(&b, "thread %d %q state %d prio %d pc %08X%s wait %x\n", t.ID, m.Mem.String(t.Name, 64),
 			t.State, t.Priority, t.Ctx.PC, m.where(t.Ctx.PC), t.WaitKey)
+		fmt.Fprintf(&b, "    called from %08X%s%s\n", t.Ctx.LR, m.where(t.Ctx.LR), m.backtrace(t.Ctx.GPR[1]))
 	}
 	return b.String()
 }
@@ -539,4 +545,68 @@ func (m *Machine) ThreadsSummary() string {
 // Stats is a one-line summary of how the program is getting on, for logs.
 func (m *Machine) Stats() string {
 	return fmt.Sprintf("frame %d, pictures shown %d, draws %d, renderer %s", m.Frame, m.gx2.Flips, m.gpu.Draws, m.Renderer())
+}
+
+// backtrace follows a thread's stack frames (the back chain at each
+// frame's start, the caller's return address 4 bytes into the next).
+func (m *Machine) backtrace(sp uint32) string {
+	var b strings.Builder
+	for i := 0; i < 6; i++ {
+		if sp == 0 || sp&3 != 0 || !m.Mem.Mapped(sp) {
+			break
+		}
+		next := m.Mem.Read32(sp)
+		if next <= sp || !m.Mem.Mapped(next) {
+			break
+		}
+		lr := m.Mem.Read32(next + 4)
+		fmt.Fprintf(&b, "\n      < %08X%s", lr, m.where(lr))
+		sp = next
+	}
+	return b.String()
+}
+
+// BusyCalls lists the library calls made most since the last time it was
+// asked, for the log: a program stuck in a loop shows what it's waiting on.
+func (m *Machine) BusyCalls() string {
+	type nc struct {
+		n    uint32
+		name string
+	}
+	var l []nc
+	for i, n := range m.hleCalls {
+		if n > 0 {
+			l = append(l, nc{n, m.hle[i].lib + "." + m.hle[i].name})
+			m.hleCalls[i] = 0
+		}
+	}
+	sort.Slice(l, func(i, j int) bool { return l[i].n > l[j].n })
+	if len(l) > 15 {
+		l = l[:15]
+	}
+	parts := make([]string, len(l))
+	for i, x := range l {
+		parts[i] = fmt.Sprintf("%s x%d", x.name, x.n)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// LastCall is the latest library call made. It may be read while the
+// machine runs (for a watchdog), so it's only a hint.
+func (m *Machine) LastCall() string {
+	n := atomic.LoadUint32(&m.hleLast)
+	if int(n) >= len(m.hle) {
+		return "?"
+	}
+	return m.hle[n].lib + "." + m.hle[n].name
+}
+
+// CorePCs is where each core last stopped, as a hint for a watchdog (it may
+// be read while the machine runs).
+func (m *Machine) CorePCs() string {
+	var b strings.Builder
+	for i, c := range m.CPU {
+		fmt.Fprintf(&b, " core %d pc %08X lr %08X", i, c.PC, c.LR)
+	}
+	return b.String()
 }

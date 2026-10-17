@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	machine "retropixels/wiiu"
@@ -21,8 +23,15 @@ const (
 )
 
 type gameLog struct {
-	f *os.File
-	n int
+	mu sync.Mutex
+	f  *os.File
+	n  int
+
+	// the watchdog: notes a frame that never finishes (a hang)
+	frameStart atomic.Int64 // when the running frame started (unix ns), 0 between frames
+	frameNo    atomic.Int64
+	stop       chan struct{}
+	m          atomic.Pointer[machine.Machine]
 }
 
 // openLog starts a new log next to RetroPixels (or in the temp folder when
@@ -36,7 +45,8 @@ func openLog(path string) *gameLog {
 	for _, d := range dirs {
 		f, err := os.Create(filepath.Join(d, logName))
 		if err == nil {
-			l := &gameLog{f: f}
+			l := &gameLog{f: f, stop: make(chan struct{})}
+			go l.watch()
 			l.printf("RetroPixels Wii U log, %s", time.Now().Format("2006-01-02 15:04:05"))
 			if path != "" {
 				size := int64(-1)
@@ -52,7 +62,12 @@ func openLog(path string) *gameLog {
 }
 
 func (l *gameLog) printf(format string, a ...any) {
-	if l == nil || l.n > logLimit {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.n > logLimit {
 		return
 	}
 	s := fmt.Sprintf(format, a...) + "\r\n"
@@ -72,6 +87,7 @@ func (l *gameLog) attach(m *machine.Machine) {
 	for _, s := range m.RecentLog() {
 		l.printf("%s", s)
 	}
+	l.m.Store(m)
 	m.Log = func(s string) { l.printf("%s", s) }
 	l.printf("drawing with %s", m.Renderer())
 }
@@ -83,14 +99,69 @@ func (l *gameLog) frame(m *machine.Machine) {
 	}
 	if m.Frame%logEvery == 0 {
 		l.printf("[%s]", m.Stats())
-		if m.Frame%(logEvery*4) == 0 {
-			l.printf("%s", m.ThreadsSummary())
+		l.printf("busiest calls: %s", m.BusyCalls())
+	}
+	if m.Frame == 120 || m.Frame%(logEvery*2) == 0 {
+		l.printf("%s", m.ThreadsSummary())
+	}
+}
+
+// begin and end bracket each frame, for the watchdog.
+func (l *gameLog) begin(frame uint64) {
+	if l != nil {
+		l.frameNo.Store(int64(frame))
+		l.frameStart.Store(time.Now().UnixNano())
+	}
+}
+
+func (l *gameLog) end() {
+	if l != nil {
+		l.frameStart.Store(0)
+	}
+}
+
+// watch writes a line when a frame has run for a long time: the program,
+// or RetroPixels, is stuck inside it.
+func (l *gameLog) watch() {
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	var said int64 = -1
+	next := 5 * time.Second
+	for {
+		select {
+		case <-l.stop:
+			return
+		case <-tick.C:
 		}
+		start := l.frameStart.Load()
+		if start == 0 {
+			continue
+		}
+		frame := l.frameNo.Load()
+		if frame != said {
+			said, next = frame, 5*time.Second
+		}
+		took := time.Since(time.Unix(0, start))
+		if took < next {
+			continue
+		}
+		next *= 3
+		last := "?"
+		if m := l.m.Load(); m != nil {
+			func() {
+				defer func() { recover() }()
+				last = m.LastCall() + ";" + m.CorePCs()
+			}()
+		}
+		l.printf("frame %d has been running for %.0f s (stuck?); the latest library call was %s", frame, took.Seconds(), last)
 	}
 }
 
 func (l *gameLog) close() {
 	if l != nil {
+		close(l.stop)
+		l.mu.Lock()
 		l.f.Close()
+		l.mu.Unlock()
 	}
 }

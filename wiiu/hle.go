@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 )
 
 type hleFunc func(m *Machine, c *CPU, t *Thread)
@@ -99,7 +100,9 @@ func unimplemented(lib, name string) hleFunc {
 			m.missing = append(m.missing, name)
 			m.logf("not yet in RetroPixels: %s (called from %08X)", key, c.LR)
 		}
-		c.GPR[3] = 0
+		if !strings.HasPrefix(name, "__ct__") {
+			c.GPR[3] = 0 // (a constructor hands back the object it made, already in r3)
+		}
 	}
 }
 
@@ -170,6 +173,11 @@ func (m *Machine) callHLE(c *CPU, n uint32) {
 	}
 	e := &m.hle[n]
 	t := m.current[c.Core]
+	if int(n) >= len(m.hleCalls) {
+		m.hleCalls = append(m.hleCalls, make([]uint32, len(m.hle)-len(m.hleCalls))...)
+	}
+	m.hleCalls[n]++
+	atomic.StoreUint32(&m.hleLast, n)
 	if m.Trace != nil {
 		m.Trace(fmt.Sprintf("[%d] %s.%s(%08X %08X %08X %08X) from %08X", c.Core, e.lib, e.name,
 			c.GPR[3], c.GPR[4], c.GPR[5], c.GPR[6], c.LR))
