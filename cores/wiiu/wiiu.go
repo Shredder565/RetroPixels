@@ -54,6 +54,8 @@ type WiiU struct {
 	w, h   int
 	audio  []float32
 	frac   float64
+	lastL  float32
+	lastR  float32
 }
 
 // New starts a program (.rpx).
@@ -157,13 +159,26 @@ func (c *WiiU) RunFrame() {
 	c.m.SetGamePad(c.pad())
 	c.m.RunFrame()
 	c.takePicture()
-	// silence, at the frame's share of the sample rate, so the sound card
-	// keeps the pace
-	c.frac += float64(c.rate) / machine.FPS
-	n := int(c.frac)
-	c.frac -= float64(n)
-	for i := 0; i < n; i++ {
-		c.audio = append(c.audio, 0, 0)
+	c.takeSound()
+}
+
+// takeSound converts the machine's 48 kHz sound to the output rate.
+func (c *WiiU) takeSound() {
+	in := c.m.TakeAudio()
+	if c.rate == 48000 {
+		c.audio = append(c.audio, in...)
+		return
+	}
+	step := 48000 / float64(c.rate)
+	for i := 0; i+1 < len(in); i += 2 {
+		l, r := in[i], in[i+1]
+		for c.frac < 1 {
+			t := float32(c.frac)
+			c.audio = append(c.audio, c.lastL+(l-c.lastL)*t, c.lastR+(r-c.lastR)*t)
+			c.frac += step
+		}
+		c.frac--
+		c.lastL, c.lastR = l, r
 	}
 }
 

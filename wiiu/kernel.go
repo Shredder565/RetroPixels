@@ -304,6 +304,7 @@ func (m *Machine) wakeTimers() {
 		}
 	}
 	m.runAlarms()
+	m.audioTick()
 }
 
 // nextTimer is the earliest time a sleeping thread or alarm wakes (0 = none).
@@ -315,6 +316,9 @@ func (m *Machine) nextTimer() uint64 {
 		}
 	}
 	if a := m.nextAlarm(); a != 0 && (next == 0 || a < next) {
+		next = a
+	}
+	if a := m.nextAudio(); a != 0 && (next == 0 || a < next) {
 		next = a
 	}
 	return next
