@@ -18,6 +18,7 @@ import (
 //	WIIU_TRACEFILE=f    write the whole trace to f
 //	WIIU_TEX=addr       describe the texture at addr (and save tex.png)
 //	WIIU_DUMP=a:n,...   print n bytes of memory at a
+//	WIIU_HOSTGPU=1      draw with the host GPU (Direct3D on Windows)
 //	WIIU_WAV=f          the sound as raw 48 kHz 16-bit stereo
 //
 // After frame 2000 it presses + and A now and then, to get past menus.
@@ -38,6 +39,10 @@ func TestLocalGame(t *testing.T) {
 	m, err := New(rpx, name, files)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if os.Getenv("WIIU_HOSTGPU") != "" {
+		t.Logf("host GPU: %v", m.UseHostGPU())
+		defer m.Close()
 	}
 	var log []string
 	m.Log = func(s string) { log = append(log, s) }
