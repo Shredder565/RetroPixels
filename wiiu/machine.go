@@ -533,3 +533,8 @@ func (m *Machine) ThreadsSummary() string {
 	}
 	return b.String()
 }
+
+// Stats is a one-line summary of how the program is getting on, for logs.
+func (m *Machine) Stats() string {
+	return fmt.Sprintf("frame %d, pictures shown %d, draws %d, renderer %s", m.Frame, m.gx2.Flips, m.gpu.Draws, m.Renderer())
+}

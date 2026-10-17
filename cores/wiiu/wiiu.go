@@ -60,6 +60,9 @@ type WiiU struct {
 	frac   float64
 	lastL  float32
 	lastR  float32
+
+	log   *gameLog
+	ended bool // the end (or crash) is in the log
 }
 
 // New starts a program (.rpx).
@@ -69,11 +72,15 @@ func New(rpx []byte, opts core.Options) (core.Core, error) {
 		name = "game.rpx"
 	}
 	c := &WiiU{rpx: rpx, name: name, path: opts.Path, rate: opts.SampleRate}
+	c.log = openLog(opts.Path)
 	m, err := c.start(opts.SRAM)
 	if err != nil {
+		c.log.printf("couldn't start the game: %v", err)
+		c.log.close()
 		return nil, err
 	}
 	c.m = m
+	c.log.attach(m)
 	if c.rate <= 0 {
 		c.rate = 48000
 	}
@@ -173,7 +180,21 @@ func (c *WiiU) RunFrame() {
 	}
 	c.prev = c.buttons
 	c.m.SetGamePad(c.pad())
+	defer func() {
+		if r := recover(); r != nil {
+			c.log.printf("RetroPixels crashed: %v\r\n%s\r\n%s", r, c.m.Stats(), c.m.ThreadsSummary())
+			panic(r)
+		}
+	}()
 	c.m.RunFrame()
+	c.log.frame(c.m)
+	if (c.m.Exited || c.m.Err != nil) && !c.ended {
+		c.ended = true
+		if c.m.Err != nil {
+			c.log.printf("the program stopped: %v", c.m.Err)
+		}
+		c.log.printf("[%s]\r\n%s", c.m.Stats(), c.m.ThreadsSummary())
+	}
 	c.takePicture()
 	c.takeSound()
 }
@@ -285,6 +306,9 @@ func (c *WiiU) Reset() {
 	if m, err := c.start(c.SRAM()); err == nil {
 		c.m.Close()
 		c.m = m
+		c.ended = false
+		c.log.printf("reset")
+		c.log.attach(m)
 	}
 }
 
@@ -297,7 +321,10 @@ func (c *WiiU) LoadState([]byte) error {
 }
 
 // Close lets go of the host GPU.
-func (c *WiiU) Close() { c.m.Close() }
+func (c *WiiU) Close() {
+	c.m.Close()
+	c.log.close()
+}
 
 // SRAM: the program's save files.
 func (c *WiiU) SRAM() []byte { return c.m.Files.SaveData() }
