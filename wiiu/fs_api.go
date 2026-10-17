@@ -8,6 +8,7 @@ package wiiu
 // its callback run by the system.
 
 import (
+	"io"
 	"io/fs"
 	"path"
 	"strings"
@@ -44,6 +45,36 @@ type openFile struct {
 	Pos   uint32
 	Write bool
 	Dirty bool
+	// a file opened only for reading is read from src as the program asks
+	// (Data is unused): game files can be gigabytes
+	src    io.ReaderAt
+	srcLen int64
+	closer io.Closer
+}
+
+func (f *openFile) size() uint32 {
+	if f.src != nil {
+		return uint32(min(f.srcLen, 1<<32-1))
+	}
+	return uint32(len(f.Data))
+}
+
+// own reads the whole file into Data (to change it).
+func (f *openFile) own() {
+	if f.src == nil {
+		return
+	}
+	b := make([]byte, f.size())
+	f.src.ReadAt(b, 0)
+	f.Data, f.src = b, nil
+	f.release()
+}
+
+func (f *openFile) release() {
+	if f.closer != nil {
+		f.closer.Close()
+		f.closer = nil
+	}
 }
 
 type openDir struct {
@@ -85,22 +116,25 @@ func (m *Machine) fsOpen(p, mode string) (uint32, uint32) {
 	f := &openFile{Path: p}
 	switch {
 	case strings.HasPrefix(mode, "r"):
-		b, err := m.Files.ReadFile(p)
+		if _, dir, err := m.Files.Stat(p); err == nil && dir {
+			return 0, fsNotFile
+		}
+		src, n, closer, err := m.Files.OpenRead(p)
 		if err != nil {
-			if _, dir, err2 := m.Files.Stat(p); err2 == nil && dir {
-				return 0, fsNotFile
-			}
 			return 0, fsNotFound
 		}
-		f.Data = append([]byte(nil), b...)
+		f.src, f.srcLen, f.closer = src, n, closer
 		f.Write = strings.Contains(mode, "+")
+		if f.Write {
+			f.own()
+		}
 	case strings.HasPrefix(mode, "w"):
 		f.Write, f.Dirty = true, true
 	case strings.HasPrefix(mode, "a"):
 		if b, err := m.Files.ReadFile(p); err == nil {
 			f.Data = append([]byte(nil), b...)
 		}
-		f.Pos = uint32(len(f.Data))
+		f.Pos = f.size()
 		f.Write = true
 	default:
 		return 0, fsAccessError
@@ -118,6 +152,7 @@ func (m *Machine) fsClose(h uint32) uint32 {
 		return fsNotFound
 	}
 	delete(s.Files, h)
+	f.release()
 	if f.Dirty {
 		if err := m.Files.WriteFile(f.Path, f.Data); err != nil {
 			return fsAccessError
@@ -134,11 +169,21 @@ func (m *Machine) fsRead(h, buf, n uint32, pos int64) (uint32, uint32) {
 	if pos >= 0 {
 		f.Pos = uint32(pos)
 	}
-	if f.Pos >= uint32(len(f.Data)) {
+	if f.Pos >= f.size() {
 		return 0, fsOK
 	}
-	k := min(n, uint32(len(f.Data))-f.Pos)
-	m.Mem.WriteBytes(buf, f.Data[f.Pos:f.Pos+k])
+	k := min(n, f.size()-f.Pos)
+	if f.src != nil {
+		b := make([]byte, k)
+		got, err := f.src.ReadAt(b, int64(f.Pos))
+		if got < int(k) && err != nil && err != io.EOF {
+			return 0, fsMediaError
+		}
+		k = uint32(got)
+		m.Mem.WriteBytes(buf, b[:k])
+	} else {
+		m.Mem.WriteBytes(buf, f.Data[f.Pos:f.Pos+k])
+	}
 	f.Pos += k
 	return k, fsOK
 }
@@ -154,9 +199,10 @@ func (m *Machine) fsWrite(h, buf, n uint32, pos int64) (uint32, uint32) {
 	if pos >= 0 {
 		f.Pos = uint32(pos)
 	}
+	f.own()
 	end := f.Pos + n
-	if end > uint32(len(f.Data)) {
-		f.Data = append(f.Data, make([]byte, end-uint32(len(f.Data)))...)
+	if end > f.size() {
+		f.Data = append(f.Data, make([]byte, end-f.size())...)
 	}
 	m.Mem.ReadBytes(buf, f.Data[f.Pos:end])
 	f.Pos = end
@@ -447,7 +493,7 @@ func init() {
 		if f == nil {
 			return fsNotFound
 		}
-		if f.Pos >= uint32(len(f.Data)) {
+		if f.Pos >= f.size() {
 			return fsEnd
 		}
 		return fsOK
@@ -457,7 +503,7 @@ func init() {
 		if f == nil {
 			return fsNotFound
 		}
-		m.writeStat(arg(cpu, 3), int64(len(f.Data)), false)
+		m.writeStat(arg(cpu, 3), int64(f.size()), false)
 		return fsOK
 	})
 	both("FSGetStat", 4, func(m *Machine, cpu *CPU) uint32 { return m.fsStat(str(m, cpu, 2), arg(cpu, 3)) })
@@ -466,7 +512,8 @@ func init() {
 		if f == nil {
 			return fsNotFound
 		}
-		if f.Pos < uint32(len(f.Data)) {
+		f.own()
+		if f.Pos < f.size() {
 			f.Data = f.Data[:f.Pos]
 			f.Dirty = true
 		}
@@ -612,7 +659,7 @@ func init() {
 			ret(cpu, fsaNotFound)
 			return
 		}
-		m.writeStat(arg(cpu, 2), int64(len(f.Data)), false)
+		m.writeStat(arg(cpu, 2), int64(f.size()), false)
 		ret(cpu, 0)
 	})
 	reg(c, "FSASetPosFile", func(m *Machine, cpu *CPU, t *Thread) {
@@ -639,7 +686,7 @@ func init() {
 			ret(cpu, fsaNotFound)
 			return
 		}
-		if f.Pos >= uint32(len(f.Data)) {
+		if f.Pos >= f.size() {
 			ret(cpu, fsaEndOfFile)
 			return
 		}
@@ -651,7 +698,8 @@ func init() {
 			ret(cpu, fsaNotFound)
 			return
 		}
-		if f.Pos < uint32(len(f.Data)) {
+		f.own()
+		if f.Pos < f.size() {
 			f.Data, f.Dirty = f.Data[:f.Pos], true
 		}
 		ret(cpu, 0)

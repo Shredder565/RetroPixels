@@ -429,11 +429,10 @@ func (f *nusFS) Open(name string) (fs.File, error) {
 	if n.dir {
 		return &nusDir{n: n}, nil
 	}
-	b, err := f.ReadFile(name)
-	if err != nil {
-		return nil, err
+	if n.content >= len(f.readers) || f.readers[n.content] == nil {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: errors.New("its content is missing")}
 	}
-	return &nusFile{n: n, Reader: bytes.NewReader(b)}, nil
+	return &nusFile{n: n, r: f.readers[n.content]}, nil
 }
 
 type nusInfo struct{ n *nusNode }
@@ -457,13 +456,40 @@ func (i nusInfo) Sys() any                   { return nil }
 func (i nusInfo) Type() fs.FileMode          { return i.Mode().Type() }
 func (i nusInfo) Info() (fs.FileInfo, error) { return i, nil }
 
+// nusFile decrypts as it's read.
 type nusFile struct {
-	n *nusNode
-	*bytes.Reader
+	n   *nusNode
+	r   *nusReader
+	pos int64
 }
 
 func (f *nusFile) Stat() (fs.FileInfo, error) { return nusInfo{f.n}, nil }
 func (f *nusFile) Close() error               { return nil }
+
+func (f *nusFile) ReadAt(p []byte, off int64) (int, error) {
+	if off >= f.n.size {
+		return 0, io.EOF
+	}
+	k := int(min(int64(len(p)), f.n.size-off))
+	b, err := f.r.readData(f.n.off+off, k)
+	if err != nil {
+		return 0, err
+	}
+	copy(p, b)
+	if k < len(p) {
+		return k, io.EOF
+	}
+	return k, nil
+}
+
+func (f *nusFile) Read(p []byte) (int, error) {
+	n, err := f.ReadAt(p, f.pos)
+	f.pos += int64(n)
+	if err == io.EOF && n > 0 {
+		err = nil
+	}
+	return n, err
+}
 
 type nusDir struct {
 	n    *nusNode

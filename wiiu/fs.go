@@ -8,7 +8,9 @@ package wiiu
 // /vol/content/..., and homebrew reads the SD card as /vol/external01/....
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -109,6 +111,43 @@ func (f *FileSystem) ReadFile(p string) ([]byte, error) {
 		return nil, fs.ErrNotExist
 	}
 	return readFS(m, rel)
+}
+
+// OpenRead opens a file at a Wii U path for reading as it's needed: its
+// reader, size, and what to close when done (nil for nothing).
+func (f *FileSystem) OpenRead(p string) (io.ReaderAt, int64, io.Closer, error) {
+	p = cleanPath(p)
+	if b, ok := f.written[p]; ok {
+		return bytes.NewReader(b), int64(len(b)), nil, nil
+	}
+	m, rel, ok := f.resolve(p)
+	if !ok {
+		return nil, 0, nil, fs.ErrNotExist
+	}
+	h, err := m.Open(rel)
+	if err != nil {
+		real := findFold(m, rel)
+		if real == "" {
+			return nil, 0, nil, err
+		}
+		if h, err = m.Open(real); err != nil {
+			return nil, 0, nil, err
+		}
+	}
+	st, err := h.Stat()
+	if err != nil || st.IsDir() {
+		h.Close()
+		return nil, 0, nil, fs.ErrNotExist
+	}
+	if ra, ok := h.(io.ReaderAt); ok {
+		return ra, st.Size(), h, nil
+	}
+	b, err := io.ReadAll(h)
+	h.Close()
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	return bytes.NewReader(b), int64(len(b)), nil, nil
 }
 
 // readFS reads a file, matching its name without regard to case (Wii U
