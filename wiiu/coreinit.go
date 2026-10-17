@@ -33,12 +33,7 @@ func init() {
 
 	// startup: the RPLs' entry points, then the program's
 	reg(c, "__RPStartup", func(m *Machine, cpu *CPU, t *Thread) {
-		for m.startStep < len(m.Modules)-1 {
-			mod := m.Modules[1+m.startStep]
-			m.startStep++
-			if mod.Entry == 0 {
-				continue
-			}
+		if mod := m.nextInit(); mod != nil {
 			cpu.GPR[3] = m.moduleHandle(mod.Name)
 			cpu.GPR[4] = 1 // loading
 			cpu.LR = m.thunk("coreinit", "__RPStartup")
@@ -380,6 +375,29 @@ func init() {
 			return
 		}
 		ret(cpu, 0)
+		// libraries loaded now run their entry points before the call returns
+		if len(m.initQueue) > 0 && t != nil {
+			if m.dynReturn == nil {
+				m.dynReturn = map[*Thread]uint32{}
+			}
+			m.dynReturn[t] = cpu.LR
+			cpu.PC = m.thunk("coreinit", "__RPDynLoadInit")
+			m.jumped = true
+		}
+	})
+	reg(c, "__RPDynLoadInit", func(m *Machine, cpu *CPU, t *Thread) {
+		if mod := m.nextInit(); mod != nil {
+			cpu.GPR[3] = m.moduleHandle(mod.Name)
+			cpu.GPR[4] = 1 // loading
+			cpu.LR = m.thunk("coreinit", "__RPDynLoadInit")
+			cpu.PC = mod.Entry
+			m.jumped = true
+			return
+		}
+		ret(cpu, 0)
+		cpu.PC = m.dynReturn[t]
+		delete(m.dynReturn, t)
+		m.jumped = true
 	})
 	reg(c, "OSDynLoad_AcquireContainingModule", func(m *Machine, cpu *CPU, t *Thread) {
 		addr := arg(cpu, 0)
@@ -603,11 +621,10 @@ func (m *Machine) acquireModule(name string) (uint32, uint32) {
 		return m.moduleHandle(lib), 0
 	}
 	// one of the title's own RPLs, loaded now
-	if b, err := m.Files.ReadCode(lib + ".rpl"); err == nil {
-		if _, err := m.loadModule(b, lib+".rpl", true); err != nil {
-			m.logf("couldn't load %s.rpl: %v", lib, err)
-			return 0, 0xbad10001
-		}
+	if mod, err := m.titleLibrary(lib); err != nil {
+		m.logf("%v", err)
+		return 0, 0xbad10001
+	} else if mod != nil {
 		return m.moduleHandle(lib), 0
 	}
 	m.logf("the program asked for the library %s, which RetroPixels doesn't have", name)

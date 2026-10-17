@@ -31,6 +31,24 @@ var ppcFlags = []string{"--target=powerpc-unknown-eabi", "-mcpu=750", "-O2", "-f
 // buildRPX compiles C files (in testdata/progs) into an RPX.
 func buildRPX(t testing.TB, compress bool, files ...string) []byte {
 	t.Helper()
+	return buildModule(t, buildOpts{compress: compress}, files...)
+}
+
+// buildOpts: what buildModule makes.
+type buildOpts struct {
+	compress bool
+	// imports beyond the SDK's, as lines of imports.txt ("lib func data:var")
+	imports []string
+	// an RPL (no crt0; the entry point is rpl_entry) exporting these
+	// functions and (with "data:") variables
+	rpl     bool
+	exports []string
+}
+
+// buildModule compiles C files (in testdata/progs) into an RPX or RPL.
+func buildModule(t testing.TB, o buildOpts, files ...string) []byte {
+	t.Helper()
+	compress := o.compress
 	if !haveTools() {
 		t.Skip("clang and ld.lld are needed to build the test programs")
 	}
@@ -45,7 +63,7 @@ func buildRPX(t testing.TB, compress bool, files ...string) []byte {
 	}
 	libs := map[string][]string{}
 	var order []string
-	for _, line := range strings.Split(string(imports), "\n") {
+	for _, line := range append(strings.Split(string(imports), "\n"), o.imports...) {
 		f := strings.Fields(line)
 		if len(f) < 2 {
 			continue
@@ -56,7 +74,11 @@ func buildRPX(t testing.TB, compress bool, files ...string) []byte {
 		libs[f[0]] = append(libs[f[0]], f[1:]...)
 	}
 	var asm, script strings.Builder
-	script.WriteString("ENTRY(_start)\nSECTIONS {\n  . = 0x01FF0000;\n")
+	entry := "_start"
+	if o.rpl {
+		entry = "rpl_entry"
+	}
+	fmt.Fprintf(&script, "ENTRY(%s)\nSECTIONS {\n  . = 0x01FF0000;\n", entry)
 	sort.Strings(order)
 	for _, lib := range order {
 		var funcs, data []string
@@ -88,13 +110,37 @@ func buildRPX(t testing.TB, compress bool, files ...string) []byte {
 			fmt.Fprintf(&script, "  %s : { KEEP(*(%s)) }\n", sec, sec)
 		}
 	}
+	var exp strings.Builder // the exports, after the data
+	if o.rpl {
+		exp.WriteString("  . = 0xC0000000;\n")
+		for _, kind := range []string{"f", "d"} {
+			var list []string
+			for _, n := range o.exports {
+				if strings.HasPrefix(n, "data:") == (kind == "d") {
+					list = append(list, strings.TrimPrefix(n, "data:"))
+				}
+			}
+			if len(list) == 0 {
+				continue
+			}
+			sec := "." + kind + "exports"
+			fmt.Fprintf(&asm, ".section %s, \"a\", @progbits\n.align 3\n%s_start:\n.long %d\n.long 0\n", sec, kind, len(list))
+			for i, n := range list {
+				fmt.Fprintf(&asm, ".long %s\n.long %s_name%d - %s_start\n", n, kind, i, kind)
+			}
+			for i, n := range list {
+				fmt.Fprintf(&asm, "%s_name%d: .asciz \"%s\"\n", kind, i, n)
+			}
+			fmt.Fprintf(&exp, "  %s : { KEEP(*(%s)) }\n", sec, sec)
+		}
+	}
 	script.WriteString(`  . = 0x02000000;
   .text : { *(.text .text.*) }
   . = 0x10000000;
   .rodata : { *(.rodata .rodata.* .sdata2 .sdata2.* .sbss2 .sbss2.*) }
   .data : { *(.data .data.* .sdata .sdata.*) }
   .bss : { *(.bss .bss.* .sbss .sbss.* COMMON) }
-  /DISCARD/ : { *(.comment) *(.note*) *(.eh_frame*) *(.gnu.attributes) }
+` + exp.String() + `  /DISCARD/ : { *(.comment) *(.note*) *(.eh_frame*) *(.gnu.attributes) }
 }
 `)
 	write := func(name, s string) string {
@@ -117,7 +163,9 @@ func buildRPX(t testing.TB, compress bool, files ...string) []byte {
 		objs = append(objs, obj)
 	}
 	compile(stubs)
-	compile(filepath.Join(sdk, "crt0.c"))
+	if !o.rpl {
+		compile(filepath.Join(sdk, "crt0.c"))
+	}
 	compile(filepath.Join(sdk, "libgcc.c"))
 	for _, f := range files {
 		compile(filepath.Join(progs, f))

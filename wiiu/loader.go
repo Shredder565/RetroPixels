@@ -100,6 +100,10 @@ type LoadPlan struct {
 	TextAt   uint32
 	DataAt   uint32
 	LoadAt   uint32
+	// Placed, when set, is told about the module once its sections are in
+	// memory and its exports known, before its imports are resolved (which
+	// can load other modules, and they must go after this one).
+	Placed func(mod *Module)
 }
 
 func be32(b []byte) uint32 { return binary.BigEndian.Uint32(b) }
@@ -308,6 +312,23 @@ func LoadRPL(mem *Memory, b []byte, name string, plan LoadPlan, imp Importer, tr
 		}
 	}
 
+	// exports
+	for _, s := range secs {
+		if s.typ != shtExports || len(s.data) < 8 {
+			continue
+		}
+		n := be32(s.data)
+		for k := uint32(0); k < n && 8+k*8+8 <= uint32(len(s.data)); k++ {
+			e := s.data[8+k*8:]
+			addr, noff := be32(e), be32(e[4:])&0x7fffffff
+			mod.Exports[cstr(s.data, noff)] = moved(addr)
+		}
+	}
+
+	if plan.Placed != nil {
+		plan.Placed(mod)
+	}
+
 	// imports
 	for _, s := range secs {
 		if s.typ != shtImports {
@@ -360,7 +381,9 @@ func LoadRPL(mem *Memory, b []byte, name string, plan LoadPlan, imp Importer, tr
 			case y.shndx == shnAbs || int(y.shndx) >= len(secs):
 			default:
 				ts := secs[y.shndx]
-				if ts.typ == shtImports {
+				if ts.typ == shtImports && y.name == "" {
+					v = 0 // the section's own symbol
+				} else if ts.typ == shtImports {
 					a, err := imp.Import(ts.importLib, y.name, ts.importData)
 					if err != nil {
 						importErrs = append(importErrs, err.Error())
@@ -381,19 +404,6 @@ func LoadRPL(mem *Memory, b []byte, name string, plan LoadPlan, imp Importer, tr
 		return nil, errors.New(strings.Join(importErrs, "; "))
 	}
 	sort.Slice(mod.Symbols, func(i, j int) bool { return mod.Symbols[i].Addr < mod.Symbols[j].Addr })
-
-	// exports
-	for _, s := range secs {
-		if s.typ != shtExports || len(s.data) < 8 {
-			continue
-		}
-		n := be32(s.data)
-		for k := uint32(0); k < n && 8+k*8+8 <= uint32(len(s.data)); k++ {
-			e := s.data[8+k*8:]
-			addr, noff := be32(e), be32(e[4:])&0x7fffffff
-			mod.Exports[cstr(s.data, noff)] = moved(addr)
-		}
-	}
 
 	// relocations
 	for _, s := range secs {

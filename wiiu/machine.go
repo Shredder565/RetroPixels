@@ -85,7 +85,9 @@ type Machine struct {
 
 	bootTime    uint64
 	rumbleUntil uint64
-	startStep   int
+	initQueue   []*Module // loaded modules whose entry point hasn't run yet
+	dynReturn   map[*Thread]uint32
+	loading     map[string]bool // title libraries being loaded
 	homeMenu    bool
 	intsOff     [3]bool
 	dynHandles  map[uint32]string
@@ -246,7 +248,8 @@ func (m *Machine) load(rpx []byte, name string) error {
 	return nil
 }
 
-// loadModule loads an RPX or RPL. RPLs go after what's already loaded.
+// loadModule loads an RPX or RPL. RPLs go after what's already loaded
+// (including modules still loading, whose imports load this one).
 func (m *Machine) loadModule(b []byte, name string, relocate bool) (*Module, error) {
 	plan := LoadPlan{}
 	if relocate {
@@ -262,15 +265,33 @@ func (m *Machine) loadModule(b []byte, name string, relocate bool) (*Module, err
 		plan.DataAt = (dataEnd + 0xfff) &^ 0xfff
 		plan.LoadAt = loadEnd
 	}
+	var placed *Module
+	plan.Placed = func(mod *Module) {
+		placed = mod
+		m.Modules = append(m.Modules, mod)
+		mod.TLSIndex = uint32(len(m.Modules))
+	}
 	mod, err := LoadRPL(m.Mem, b, name, plan, m, m.tramp)
 	if err != nil {
+		if placed != nil {
+			for i, x := range m.Modules {
+				if x == placed {
+					m.Modules = append(m.Modules[:i], m.Modules[i+1:]...)
+					break
+				}
+			}
+		}
 		if m.Err != nil {
 			return nil, m.Err
 		}
 		return nil, err
 	}
-	m.Modules = append(m.Modules, mod)
-	mod.TLSIndex = uint32(len(m.Modules))
+	if placed == nil { // (a loader without the callback)
+		m.Modules = append(m.Modules, mod)
+		mod.TLSIndex = uint32(len(m.Modules))
+	}
+	// entry points run dependencies first: the order loads finish in
+	m.initQueue = append(m.initQueue, mod)
 	if mod.DataHi > m.dataEnd {
 		m.dataEnd = mod.DataHi
 	}
@@ -278,6 +299,33 @@ func (m *Machine) loadModule(b []byte, name string, relocate bool) (*Module, err
 		return nil, m.Err
 	}
 	return mod, nil
+}
+
+// titleLibrary loads one of the title's own RPLs from its code folder, if
+// it has it (nil if not).
+func (m *Machine) titleLibrary(lib string) (*Module, error) {
+	b, err := m.Files.ReadCode(lib + ".rpl")
+	if err != nil {
+		return nil, nil
+	}
+	mod, err := m.loadModule(b, lib+".rpl", true)
+	if err != nil {
+		return nil, fmt.Errorf("couldn't load %s.rpl: %v", lib, err)
+	}
+	return mod, nil
+}
+
+// nextInit takes the next module whose entry point should run (not the
+// main program's).
+func (m *Machine) nextInit() *Module {
+	for len(m.initQueue) > 0 {
+		mod := m.initQueue[0]
+		m.initQueue = m.initQueue[1:]
+		if mod != m.mainModule() && mod.Entry != 0 {
+			return mod
+		}
+	}
+	return nil
 }
 
 // startMain makes the heaps and the main thread.

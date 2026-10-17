@@ -108,7 +108,7 @@ func newSession(g *loadedGame, h host, snd soundOut, cmap ControlMap) (*session,
 	for chip, b := range g.Firmware {
 		fw[chip] = b
 	}
-	c, err := safeNew(mk, g.ROM, core.Options{SampleRate: sampleRate, SRAM: sram, Name: g.Name, Dips: g.Dips, Firmware: fw})
+	c, err := safeNew(mk, g.ROM, core.Options{SampleRate: sampleRate, SRAM: sram, Name: g.Name, Path: g.Path, Dips: g.Dips, Firmware: fw})
 	if err != nil {
 		return nil, err
 	}
