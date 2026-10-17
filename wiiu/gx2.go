@@ -49,28 +49,6 @@ func tvModeDims(mode uint32) (uint32, uint32) {
 	return 1280, 720
 }
 
-// surface formats: bits per element (blocks for compressed formats)
-func formatBits(f uint32) uint32 {
-	switch f & 0x3f {
-	case 0x01, 0x02:
-		return 8
-	case 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c:
-		return 16
-	case 0x1c, 0x1d, 0x1e, 0x1f, 0x31, 0x34:
-		return 64
-	case 0x20:
-		return 96
-	case 0x21, 0x22, 0x23, 0x32, 0x33, 0x35:
-		return 128
-	}
-	return 32
-}
-
-func formatCompressed(f uint32) bool {
-	b := f & 0x3f
-	return b >= 0x31 && b <= 0x35
-}
-
 // GX2Surface fields
 const (
 	surfDim     = 0x00
