@@ -175,9 +175,9 @@ func (a *x86) opRR(w bool, op []byte, reg, rm int) {
 }
 
 // 32-bit moves
-func (a *x86) movLoad(dst, base int, disp int32)  { a.opRM(false, []byte{0x8b}, dst, base, disp) }
+func (a *x86) movLoad(dst, base int, disp int32)      { a.opRM(false, []byte{0x8b}, dst, base, disp) }
 func (a *x86) movStore(base int, disp int32, src int) { a.opRM(false, []byte{0x89}, src, base, disp) }
-func (a *x86) movRR(dst, src int)                 { a.opRR(false, []byte{0x89}, src, dst) }
+func (a *x86) movRR(dst, src int)                     { a.opRR(false, []byte{0x89}, src, dst) }
 func (a *x86) movRI(dst int, v uint32) {
 	if v == 0 {
 		a.aluRR(aluXor, dst, dst)
@@ -227,8 +227,12 @@ func (a *x86) load32Idx(dst, base, index int) { a.opRMI(false, []byte{0x8b}, dst
 func (a *x86) store32Idx(base, index, src int) {
 	a.opRMI(false, []byte{0x89}, src, base, index, 1, 0)
 }
-func (a *x86) load8Idx(dst, base, index int)  { a.opRMI(false, []byte{0x0f, 0xb6}, dst, base, index, 1, 0) }
-func (a *x86) load16Idx(dst, base, index int) { a.opRMI(false, []byte{0x0f, 0xb7}, dst, base, index, 1, 0) }
+func (a *x86) load8Idx(dst, base, index int) {
+	a.opRMI(false, []byte{0x0f, 0xb6}, dst, base, index, 1, 0)
+}
+func (a *x86) load16Idx(dst, base, index int) {
+	a.opRMI(false, []byte{0x0f, 0xb7}, dst, base, index, 1, 0)
+}
 func (a *x86) store16Idx(base, index, src int) {
 	a.byte1(0x66)
 	a.opRMI(false, []byte{0x89}, src, base, index, 1, 0)
