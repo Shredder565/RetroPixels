@@ -13,7 +13,10 @@ import "retropixels/cores/arcade"
 //
 // Video registers (0c0000, words): foreground x and y scroll, background
 // x and y scroll, then 0c000b bit 0 the screen flip and 0c000c bit 0 the
-// background tile bank. 100000 bits 5-6 set which layer is in front.
+// background tile bank. 100000 bits 5-6 set the layer order: 0 and 2 (most
+// stages) background, foreground, sprites; 3 (Egypt) foreground at the
+// back, then the background, then sprites; 1 (only while the game boots,
+// on a black screen) background, sprites, foreground: a guess.
 //
 // Sprites (180000): 16 bytes each, only the low byte of each word used:
 //
@@ -47,7 +50,6 @@ type video struct {
 	pal    [0x300]uint32
 	screen []uint32
 	line   [ScreenW]uint16 // a line's colour numbers being built
-	opaque [ScreenW]bool
 }
 
 // decode turns four bit planes into 16x16 tiles: each tile is 32 bytes of
@@ -113,7 +115,6 @@ func (v *video) drawBG(y int) {
 		t := (e&0xfff | bank) % v.nTiles
 		p := v.tiles[t*256+(ty&15)*16+tx&15]
 		v.line[x] = uint16(512 + (e>>12)*16 + int(p))
-		v.opaque[x] = p != 0
 	}
 }
 
@@ -166,6 +167,13 @@ func (v *video) render() {
 			v.drawFGTop(y)
 		}
 	}
+	if v.regs[11]&1 != 0 {
+		// flipped screen: the picture turned round
+		s := v.screen
+		for i, j := 0, len(s)-1; i < j; i, j = i+1, j-1 {
+			s[i], s[j] = s[j], s[i]
+		}
+	}
 }
 
 // drawBGOver draws the background's coloured pixels over a line.
@@ -198,11 +206,9 @@ func (v *video) drawFGTop(y int) {
 	}
 }
 
-// Sprite placement (found by comparing with MAME).
-var (
-	sprX0 = 0
-	sprY0 = 0xe8
-)
+// sprY0: a sprite's y register is how far its bottom tile is above this
+// line of the picture (found by comparing with MAME).
+const sprY0 = 0xe8
 
 // drawSprites draws the latched sprite list, the first sprite at the back.
 func (v *video) drawSprites() {
@@ -218,14 +224,13 @@ func (v *video) drawSprites() {
 		code := int(s[5]) | int(s[7])<<8
 		col := int(s[9]) & 15
 		fx, fy := attr&0x10 != 0, attr&0x08 != 0
-		x := sx - sprX0
 		y := sprY0 - sy
-		for k := 0; k < n; k++ {
+		for k := 0; k < n; k++ { // the column goes up from its first tile
 			c := code + k
 			if fy {
 				c = code + n - 1 - k
 			}
-			v.drawTile(c, col, x, y-k*16, fx, fy)
+			v.drawTile(c, col, sx, y-k*16, fx, fy)
 		}
 	}
 }
@@ -233,8 +238,8 @@ func (v *video) drawSprites() {
 func (v *video) drawTile(code, col, x0, y0 int, fx, fy bool) {
 	t := v.sprites[(code%v.nSpr)*256:]
 	for py := 0; py < 16; py++ {
-		y := y0 + py
-		if y < 0 || y >= ScreenH {
+		y := (y0 + py) & 511 // positions wrap at 512
+		if y >= ScreenH {
 			continue
 		}
 		ty := py

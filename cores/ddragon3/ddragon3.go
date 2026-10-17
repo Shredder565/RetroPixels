@@ -19,8 +19,9 @@
 // second). The 68000 gets interrupt 6 when vblank starts (line 248) and
 // interrupt 5 every 16 lines; it says it has taken each by writing to
 // 100004 or 100006. A frame here runs from the start of one vblank to the
-// next (the first one after a reset from line 0), so the picture is drawn
-// at the end of RunFrame.
+// next, so the picture is drawn at the end of RunFrame; the board powers on
+// at the start of a vblank, as MAME's does (the game's boot then lines up
+// with MAME's cycle for cycle).
 package ddragon3
 
 import (
@@ -51,10 +52,10 @@ type board struct {
 	dips map[string]int
 	pads []arcade.Pad
 
-	rom    []byte // 68000 program
-	zrom   []byte // Z80 program
-	okiRom []byte // both 256 KB sample banks
-	okiWin [0x40000]byte
+	rom    []byte        // 68000 program
+	zrom   []byte        // Z80 program
+	okiRom []byte        // both 256 KB sample banks
+	okiWin [0x40000]byte // the bank the MSM6295 sees
 	wram   [0x4000]uint8
 	zram   [0x800]uint8
 	vid    *video
@@ -329,6 +330,21 @@ func (b *board) write(a uint32, v, mask uint16) {
 			b.setIRQ()
 		}
 	}
+}
+
+// Ack: the interrupts are autovectored, and the 68000 reads an autovector
+// in step with its E clock (a tenth of its own): at least 6 more cycles,
+// and the handler starts on a set phase of that clock (both measured
+// against MAME, which then runs the game's frames cycle for cycle alike).
+// A frame is a whole number of E clocks, so the cycle count from the
+// frame's start gives the phase.
+func (m mainBus) Ack(level int) int {
+	c := m.b.cpu.Cycles + 6
+	for ((c+20)%10+10)%10 != 5 { // 20: the cycles until the handler's first instruction
+		c++
+	}
+	m.b.cpu.Cycles = c
+	return -1
 }
 
 func (b *board) setIRQ() {

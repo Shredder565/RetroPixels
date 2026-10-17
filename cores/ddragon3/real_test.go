@@ -134,6 +134,9 @@ func TestRealSound(t *testing.T) {
 		presses = []press{{"Coin", coin + 1, 6}, {"Start (1P)", coin + 101, 6}}
 	}
 	var audio []float32
+	if p := os.Getenv("DD3_SCHED"); p != "" {
+		presses = schedPresses(t, p)
+	}
 	run(t, c, n, presses, "", 0, &audio)
 	if err := writeWAV(path, audio, 48000); err != nil {
 		t.Fatal(err)

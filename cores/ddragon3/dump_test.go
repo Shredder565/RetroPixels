@@ -145,6 +145,30 @@ func TestDumpPictures(t *testing.T) {
 	t.Logf("%d of %d pixels differ (%.4f%%)", bad, total, 100*float64(bad)/float64(max(total, 1)))
 }
 
+// schedPresses reads a play schedule shared with the MAME run: lines of
+// "frame mask" (bits: right, left, up, down, buttons 1-3, coin, start). MAME
+// sets the inputs when frame N ends, so they count from our frame N+1.
+func schedPresses(t *testing.T, path string) []press {
+	d, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := []string{"Right", "Left", "Up", "Down", "Button 1", "Button 2", "Button 3", "Coin", "Start (1P)"}
+	var out []press
+	for _, l := range strings.Split(string(d), "\n") {
+		var f, m int
+		if _, err := fmt.Sscanf(l, "%d %d", &f, &m); err != nil {
+			continue
+		}
+		for i, n := range names {
+			if m>>i&1 != 0 {
+				out = append(out, press{n, f + 1, 1})
+			}
+		}
+	}
+	return out
+}
+
 // TestColdBootVsMAME plays the attract mode from power on and compares our
 // pictures with MAME's at the dumps' frames (DD3_INPUT=coin presses a coin
 // at frame 600 and start at 700, as the matching MAME run did).
@@ -165,6 +189,9 @@ func TestColdBootVsMAME(t *testing.T) {
 	if os.Getenv("DD3_INPUT") == "coin" {
 		presses = []press{{"Coin", 601, 6}, {"Start (1P)", 701, 6}}
 	}
+	if p := os.Getenv("DD3_SCHED"); p != "" {
+		presses = schedPresses(t, p)
+	}
 	out := os.Getenv("DD3_OUT")
 	off, _ := strconv.Atoi(os.Getenv("DD3_OFFSET")) // compare our frame f with MAME's f+off
 	k, total, bad, exact := 0, 0, 0, 0
@@ -172,6 +199,24 @@ func TestColdBootVsMAME(t *testing.T) {
 		c.SetInput(0, buttonBits(c, presses, f))
 		c.RunFrame()
 		c.TakeAudio()
+		if os.Getenv("DD3_RAM") != "" {
+			// work RAM is dumped at the same moment our frame ends
+			b := c.Board().(*board)
+			for _, x := range dumps {
+				if x.frame == f {
+					n, first := 0, -1
+					for i := range b.wram {
+						if b.wram[i] != x.wram[i] {
+							n++
+							if first < 0 {
+								first = i
+							}
+						}
+					}
+					t.Logf("frame %5d: %d work RAM bytes differ (first at %x) coin timer %02x%02x mame %02x%02x", f, n, first, b.wram[0x32], b.wram[0x33], x.wram[0x32], x.wram[0x33])
+				}
+			}
+		}
 		for k < len(dumps) && dumps[k].frame-off <= f {
 			x := dumps[k]
 			k++
