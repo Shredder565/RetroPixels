@@ -20,6 +20,7 @@ const (
 	OpBreak     = 2
 	OpBreakc    = 3
 	OpContinue  = 7
+	OpCut       = 9
 	OpContinuec = 8
 	OpDerivRtx  = 11
 	OpDerivRty  = 12
@@ -29,6 +30,7 @@ const (
 	OpDp3       = 16
 	OpDp4       = 17
 	OpElse      = 18
+	OpEmit      = 19
 	OpEndif     = 21
 	OpEndloop   = 22
 	OpEq        = 24
@@ -92,6 +94,9 @@ const (
 	opDclResource     = 88
 	opDclConstBuffer  = 89
 	opDclSampler      = 90
+	opDclGSOutTopo    = 92
+	opDclGSInPrim     = 93
+	opDclMaxOutVerts  = 94
 	opDclInput        = 95
 	opDclInputSgv     = 96
 	opDclInputSiv     = 97
@@ -210,6 +215,7 @@ func reg(typ uint32, i ...uint32) Opnd {
 
 func R(i int) Opnd          { return reg(typeTemp, uint32(i)) }
 func In(i int) Opnd         { return reg(typeInput, uint32(i)) }
+func InV(v, i int) Opnd     { return reg(typeInput, uint32(v), uint32(i)) } // a geometry shader's input: vertex v, register i
 func Out(i int) Opnd        { return reg(typeOutput, uint32(i)) }
 func CB(slot, i int) Opnd   { return reg(typeCB, uint32(slot), uint32(i)) }
 func X(arr, i int) Opnd     { return reg(typeIndexable, uint32(arr), uint32(i)) }
@@ -336,11 +342,12 @@ type Sig struct {
 
 // Shader builds one program.
 type Shader struct {
-	Pixel   bool
-	In, Out []Sig
-	decl    []uint32
-	body    []uint32
-	temps   int
+	Pixel    bool
+	Geometry bool
+	In, Out  []Sig
+	decl     []uint32
+	body     []uint32
+	temps    int
 }
 
 // Ins emits an instruction: a destination (if any) and sources. Scalar
@@ -446,6 +453,22 @@ func (s *Shader) DclOutputDepth() {
 	s.decl = instr(s.decl, opDclOutput, nil, OutDepth())
 }
 
+// DclGSInputTriangles and the rest declare what a geometry shader takes
+// (triangles, as v[3][r]) and gives (a triangle strip of up to n vertices).
+func (s *Shader) DclGSTriangles(n int) {
+	s.decl = append(s.decl, opDclGSInPrim|3<<11|1<<24, opDclGSOutTopo|5<<11|1<<24, opDclMaxOutVerts|2<<24, uint32(n))
+}
+
+// DclGSInput declares input register r of all three vertices (with a
+// system value, when sv isn't SVNone).
+func (s *Shader) DclGSInput(r int, mask, sv uint32) {
+	if sv == SVNone {
+		s.decl = instr(s.decl, opDclInput, nil, InV(3, r).Mask(mask))
+		return
+	}
+	s.decl = instr(s.decl, opDclInputSiv, nil, InV(3, r).Mask(mask), Opnd{raw: true, value: []uint32{sv}})
+}
+
 // DclCB declares constant buffer slot with size vec4s; dynamic allows
 // register-indexed reads.
 func (s *Shader) DclCB(slot, size int, dynamic bool) {
@@ -479,7 +502,10 @@ func (s *Shader) DclIndexable(arr, size int) {
 // Bytes builds the finished, signed container.
 func (s *Shader) Bytes() []byte {
 	prog := []uint32{0x50, 0}
-	if !s.Pixel {
+	switch {
+	case s.Geometry:
+		prog[0] |= 2 << 16
+	case !s.Pixel:
 		prog[0] |= 1 << 16
 	}
 	prog = append(prog, s.decl...)

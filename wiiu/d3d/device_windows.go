@@ -76,6 +76,18 @@ func (d *Device) CreateTexture2D(desc *Texture2DDesc, data []byte, pitch uint32)
 	return t, hr(r, "CreateTexture2D")
 }
 
+func (d *Device) CreateTexture1D(desc *Texture1DDesc) (Resource, error) {
+	var t Resource
+	r := d.call(4, uintptr(unsafe.Pointer(desc)), 0, uintptr(unsafe.Pointer(&t.p)))
+	return t, hr(r, "CreateTexture1D")
+}
+
+func (d *Device) CreateTexture3D(desc *Texture3DDesc) (Resource, error) {
+	var t Resource
+	r := d.call(6, uintptr(unsafe.Pointer(desc)), 0, uintptr(unsafe.Pointer(&t.p)))
+	return t, hr(r, "CreateTexture3D")
+}
+
 func (d *Device) CreateBuffer(desc *BufferDesc, data []byte) (Resource, error) {
 	var b Resource
 	var init uintptr
@@ -119,11 +131,12 @@ func (d *Device) CreateSRV(t Resource, format, mips uint32) (View, error) {
 }
 
 // CreateTexSRV makes a shader resource view of a whole texture: dim is
-// the view's dimension (D3D11_SRV_DIMENSION: 4 2D, 5 2D array, 9 cube).
+// the view's dimension (D3D11_SRV_DIMENSION: 2 1D, 3 1D array, 4 2D, 5 2D
+// array, 8 3D, 9 cube).
 func (d *Device) CreateTexSRV(t Resource, format, dim, mips, slices uint32) (View, error) {
 	var v View
 	desc := srvTex2D{Format: format, Dim: dim, Mip: mips}
-	if dim == 5 {
+	if dim == 3 || dim == 5 { // 1D and 2D arrays
 		desc.rest = [2]uint32{0, slices}
 	}
 	r := d.call(7, t.p, uintptr(unsafe.Pointer(&desc)), uintptr(unsafe.Pointer(&v.p)))
@@ -156,6 +169,12 @@ func (d *Device) CreateVertexShader(code []byte) (Object, error) {
 	var o Object
 	r := d.call(12, uintptr(unsafe.Pointer(&code[0])), uintptr(len(code)), 0, uintptr(unsafe.Pointer(&o.p)))
 	return o, hr(r, "CreateVertexShader")
+}
+
+func (d *Device) CreateGeometryShader(code []byte) (Object, error) {
+	var o Object
+	r := d.call(13, uintptr(unsafe.Pointer(&code[0])), uintptr(len(code)), 0, uintptr(unsafe.Pointer(&o.p)))
+	return o, hr(r, "CreateGeometryShader")
 }
 
 func (d *Device) CreatePixelShader(code []byte) (Object, error) {
@@ -224,6 +243,7 @@ func (c Context) DrawIndexedInstanced(n, inst, first uint32, base int32, firstIn
 func (c Context) DrawInstanced(n, inst, first, firstInst uint32) {
 	c.call(21, uintptr(n), uintptr(inst), uintptr(first), uintptr(firstInst))
 }
+func (c Context) GSSetShader(s Object)            { c.call(23, s.p, 0, 0) }
 func (c Context) IASetPrimitiveTopology(t uint32) { c.call(24, uintptr(t)) }
 func (c Context) VSSetShaderResources(slot uint32, views ...View) {
 	c.call(25, uintptr(slot), uintptr(len(views)), uintptr(unsafe.Pointer(&views[0])))

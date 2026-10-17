@@ -28,6 +28,7 @@ type d3dBackend struct {
 	bufs    map[[2]uint32]*hostBuf // vertex buffers and constant banks by (base, size)
 	shaders map[shaderKey][]*hostShader
 	states  map[string]d3d.Object
+	rectGSs map[int]d3d.Object // rectangle geometry shaders by parameter count
 
 	sysCB, fileCB [2]d3d.Resource // per stage (VS, PS)
 	ib            d3d.Resource
@@ -43,7 +44,7 @@ func newD3DBackend(g *Latte, warp bool) (*d3dBackend, error) {
 		return nil, err
 	}
 	b := &d3dBackend{g: g, d: d, c: d.Ctx, texs: map[hostTexKey]*hostTex{}, bufs: map[[2]uint32]*hostBuf{},
-		shaders: map[shaderKey][]*hostShader{}, states: map[string]d3d.Object{}, seed: maphash.MakeSeed()}
+		shaders: map[shaderKey][]*hostShader{}, states: map[string]d3d.Object{}, rectGSs: map[int]d3d.Object{}, seed: maphash.MakeSeed()}
 	for i := 0; i < 2; i++ {
 		if b.sysCB[i], err = b.dynBuffer(dxSysSize*16, d3d.BindConstantBuffer); err != nil {
 			return nil, err
@@ -87,6 +88,9 @@ func (b *d3dBackend) close() {
 		}
 	}
 	for _, o := range b.states {
+		o.Release()
+	}
+	for _, o := range b.rectGSs {
 		o.Release()
 	}
 	for i := 0; i < 2; i++ {
@@ -356,7 +360,7 @@ func (b *d3dBackend) texture(t *texDesc) (*hostTex, error) {
 		return h, nil
 	}
 	switch t.dim {
-	case 1, 3, 5, 7:
+	case 0, 1, 2, 3, 4, 5, 7:
 	default:
 		return nil, fmt.Errorf("texture dimension %d", t.dim)
 	}
@@ -366,7 +370,6 @@ func (b *d3dBackend) texture(t *texDesc) (*hostTex, error) {
 		levels = 1
 	}
 	levels = min(levels, 14)
-	l0 := g.texLevel(t, t.baseLevel)
 	// the memory the levels came from: render targets there go back first
 	var decoded []*texLevel
 	for i := uint32(0); i < levels; i++ {
@@ -378,7 +381,7 @@ func (b *d3dBackend) texture(t *texDesc) (*hostTex, error) {
 	for i := range decoded {
 		decoded[i] = g.texLevel(t, t.baseLevel+uint32(i))
 	}
-	l0 = decoded[0]
+	l0 := decoded[0]
 	intFmt := t.kind == kUint || t.kind == kSint
 	one := fmtDescs[t.format&0x3f].nc == 1 && !intFmt && l0.rgba8 == nil
 	format := uint32(d3d.FormatRGBA32Float)
@@ -397,51 +400,79 @@ func (b *d3dBackend) texture(t *texDesc) (*hostTex, error) {
 		format, pb = d3d.FormatR32Float, 4
 	}
 	slices := l0.d
-	if t.dim == 3 {
+	switch t.dim {
+	case 3:
 		slices = 6 * max(l0.d/6, 1)
+	case 0, 1:
+		slices = 1
 	}
-	desc := &d3d.Texture2DDesc{Width: l0.w, Height: l0.h, MipLevels: levels, ArraySize: slices, Format: format,
-		SampleCount: 1, BindFlags: d3d.BindShaderResource}
-	if t.dim == 3 {
-		desc.Misc = 4 // TEXTURECUBE
+	var tex d3d.Resource
+	var err error
+	dim := uint32(4) // the view's: TEXTURE2D
+	switch t.dim {
+	case 0, 4:
+		dim = 2 + b2u(t.dim == 4) // TEXTURE1D(ARRAY)
+		tex, err = b.d.CreateTexture1D(&d3d.Texture1DDesc{Width: l0.w, MipLevels: levels, ArraySize: slices,
+			Format: format, BindFlags: d3d.BindShaderResource})
+	case 2:
+		dim = 8 // TEXTURE3D
+		tex, err = b.d.CreateTexture3D(&d3d.Texture3DDesc{Width: l0.w, Height: l0.h, Depth: l0.d, MipLevels: levels,
+			Format: format, BindFlags: d3d.BindShaderResource})
+	default:
+		desc := &d3d.Texture2DDesc{Width: l0.w, Height: l0.h, MipLevels: levels, ArraySize: slices, Format: format,
+			SampleCount: 1, BindFlags: d3d.BindShaderResource}
+		switch t.dim {
+		case 3:
+			desc.Misc = 4 // TEXTURECUBE
+			dim = 9
+		case 5, 7:
+			dim = 5
+		}
+		tex, err = b.d.CreateTexture2D(desc, nil, 0)
 	}
-	tex, err := b.d.CreateTexture2D(desc, nil, 0)
 	if err != nil {
 		return nil, err
 	}
 	h := &hostTex{lo: ^uint32(0), tex: tex}
+	// pack gives n texels of a level from texel off on
+	pack := func(l *texLevel, off, n int) []byte {
+		data := make([]byte, n*pb)
+		for p := 0; p < n; p++ {
+			o := data[p*pb:]
+			switch {
+			case l.rgba8 != nil:
+				binary.LittleEndian.PutUint32(o, l.rgba8[off+p])
+			case pb == 4:
+				binary.LittleEndian.PutUint32(o, l.vals[(off+p)*4])
+			default:
+				for c := 0; c < 4; c++ {
+					binary.LittleEndian.PutUint32(o[4*c:], l.vals[(off+p)*4+c])
+				}
+			}
+		}
+		return data
+	}
 	for i, l := range decoded {
 		h.lo, h.hi = min(h.lo, l.lo), max(h.hi, l.hi)
 		w, hh := max(l0.w>>i, 1), max(l0.h>>i, 1)
+		if t.dim == 0 || t.dim == 4 {
+			hh = 1
+		}
 		if l.w != w || l.h != hh {
 			continue
 		}
-		data := make([]byte, int(w*hh)*pb)
-		for z := uint32(0); z < min(l.d, slices); z++ {
-			n := int(w * hh)
-			off := int(z) * n
-			for p := 0; p < n; p++ {
-				o := data[p*pb:]
-				switch {
-				case l.rgba8 != nil:
-					binary.LittleEndian.PutUint32(o, l.rgba8[off+p])
-				case pb == 4:
-					binary.LittleEndian.PutUint32(o, l.vals[(off+p)*4])
-				default:
-					for c := 0; c < 4; c++ {
-						binary.LittleEndian.PutUint32(o[4*c:], l.vals[(off+p)*4+c])
-					}
-				}
+		n := int(w * hh)
+		if t.dim == 2 {
+			// a 3D level: every slice at once
+			if l.d != max(l0.d>>i, 1) {
+				continue
 			}
-			b.c.UpdateSubresource(tex, uint32(i)+z*levels, data, w*uint32(pb), 0)
+			b.c.UpdateSubresource(tex, uint32(i), pack(l, 0, n*int(l.d)), w*uint32(pb), uint32(n*pb))
+			continue
 		}
-	}
-	dim := uint32(4) // TEXTURE2D
-	switch t.dim {
-	case 3:
-		dim = 9
-	case 5, 7:
-		dim = 5
+		for z := uint32(0); z < min(l.d, slices); z++ {
+			b.c.UpdateSubresource(tex, uint32(i)+z*levels, pack(l, int(z)*n, n), w*uint32(pb), 0)
+		}
 	}
 	h.srv, err = b.d.CreateTexSRV(tex, format, dim, levels, slices)
 	if err != nil {
@@ -475,6 +506,10 @@ const smallBuf = 64 << 10
 func (b *d3dBackend) buffer(base, size uint32, cb bool) (*hostBuf, error) {
 	size = (size + 15) &^ 15
 	key := [2]uint32{base, size | b2u(cb)}
+	v := b.bufs[key]
+	if v != nil && size > smallBuf {
+		return v, nil
+	}
 	data := make([]byte, size)
 	b.g.mem.ReadBytes(base, data)
 	if cb {
@@ -483,9 +518,8 @@ func (b *d3dBackend) buffer(base, size uint32, cb bool) (*hostBuf, error) {
 			data[i], data[i+1], data[i+2], data[i+3] = data[i+3], data[i+2], data[i+1], data[i]
 		}
 	}
-	v := b.bufs[key]
 	if v != nil {
-		if size > smallBuf || v.hash == maphash.Bytes(b.seed, data) {
+		if v.hash == maphash.Bytes(b.seed, data) {
 			return v, nil
 		}
 		v.release()
@@ -628,6 +662,16 @@ func (b *d3dBackend) draw(st *drawState, prim uint32, ids []uint32, insts uint32
 		return b.fallback("primitive type %#x", prim)
 	}
 	rs, cullAll := hostRaster(st, g)
+	var gs d3d.Object
+	if prim == 0x11 {
+		// rectangles aren't culled; a geometry shader adds the fourth
+		// corner
+		rs.Cull, cullAll = d3d.CullNone, false
+		var err error
+		if gs, err = b.rectGS(int(st.nVSParam)); err != nil {
+			return b.fallback("rectangles: %v", err)
+		}
+	}
 	if cullAll && topo == d3d.TopologyTriangleList || len(idx) == 0 {
 		return true
 	}
@@ -803,6 +847,9 @@ func (b *d3dBackend) draw(st *drawState, prim uint32, ids []uint32, insts uint32
 		return false
 	}
 	c.VSSetShader(vs.obj)
+	if !gs.Nil() {
+		c.GSSetShader(gs)
+	}
 	if ps != nil {
 		if !bind(stagePS, ps.prog, true) {
 			return false
@@ -854,6 +901,19 @@ func (b *d3dBackend) draw(st *drawState, prim uint32, ids []uint32, insts uint32
 		b.dropTextures(s.lo, s.hi)
 	}
 	return true
+}
+
+// rectGS gives the rectangle geometry shader for n parameters.
+func (b *d3dBackend) rectGS(n int) (d3d.Object, error) {
+	if o, ok := b.rectGSs[n]; ok {
+		return o, nil
+	}
+	o, err := b.d.CreateGeometryShader(dxRectGS(n))
+	if err != nil {
+		return d3d.Object{}, err
+	}
+	b.rectGSs[n] = o
+	return o, nil
 }
 
 // dxDumpShaders prints every translated shader (for debugging).

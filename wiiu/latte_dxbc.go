@@ -1896,3 +1896,36 @@ func (t *dxTr) negNaN(dst, a, res d3d.Opnd) {
 	t.ins(d3d.OpLt, sxw(6), a, dxF(0))
 	t.ins(d3d.OpMovc, dst, sx(6), dxU(0x7fc00000), res)
 }
+
+// dxRectGS is the geometry shader for rectangle lists: each triangle a, b,
+// c of vertex shader outputs (the position and n parameters) becomes the
+// strip a, b, c, d with d = b + c - a, every output worked out the same
+// way, as the GPU does it.
+func dxRectGS(n int) []byte {
+	s := &d3d.Shader{Geometry: true}
+	s.In = dxVSOutSig(n)
+	s.Out = dxVSOutSig(n)
+	s.DclGSTriangles(4)
+	s.DclGSInput(0, 15, d3d.SVPosition)
+	for r := 1; r <= n; r++ {
+		s.DclGSInput(r, 15, d3d.SVNone)
+	}
+	s.DclOutputSV(0, 15, d3d.SVPosition)
+	for r := 1; r <= n; r++ {
+		s.DclOutput(r, 15)
+	}
+	for v := 0; v < 3; v++ {
+		for r := 0; r <= n; r++ {
+			s.Ins(d3d.OpMov, d3d.Out(r).Mask(15), d3d.InV(v, r))
+		}
+		s.Ins(d3d.OpEmit)
+	}
+	for r := 0; r <= n; r++ {
+		s.Ins(d3d.OpAdd, d3d.R(0).Mask(15), d3d.InV(1, r), d3d.InV(2, r))
+		s.Ins(d3d.OpAdd, d3d.Out(r).Mask(15), d3d.R(0), d3d.InV(0, r).Neg())
+	}
+	s.Ins(d3d.OpEmit)
+	s.Ins(d3d.OpRet)
+	s.Temps(1)
+	return s.Bytes()
+}

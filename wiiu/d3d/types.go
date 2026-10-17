@@ -82,6 +82,18 @@ type Texture2DDesc struct {
 	Usage, BindFlags, CPUAccess, Misc   uint32
 }
 
+type Texture1DDesc struct {
+	Width, MipLevels, ArraySize       uint32
+	Format                            uint32
+	Usage, BindFlags, CPUAccess, Misc uint32
+}
+
+type Texture3DDesc struct {
+	Width, Height, Depth, MipLevels   uint32
+	Format                            uint32
+	Usage, BindFlags, CPUAccess, Misc uint32
+}
+
 type BufferDesc struct {
 	ByteWidth, Usage, BindFlags, CPUAccess, Misc, StructureStride uint32
 }
