@@ -104,7 +104,8 @@ func (x dkSndBus) OutP(p int, v uint8) {
 }
 
 // Port 2 reads back its own latch, except bit 5: sound latch output 3
-// (inverted), and on Junior bit 4: output 6 (inverted).
+// (inverted), and on Junior bit 4: output 6 (inverted) and bit 6: bit 3 of the
+// sound command (inverted).
 func (x dkSndBus) InP(p int) uint8 {
 	b := x.b
 	switch p {
@@ -113,7 +114,7 @@ func (x dkSndBus) InP(p int) uint8 {
 	case 2:
 		v := b.snd.Port(2)&^0x20 | bit(b.latch259&0x08 == 0, 0x20)
 		if b.jr {
-			v = v&^0x10 | bit(b.latch259&0x40 == 0, 0x10)
+			v = v&^0x50 | bit(b.latch259&0x40 == 0, 0x10) | bit(b.soundLatch&0x08 == 0, 0x40)
 		}
 		return uint8(v)
 	}
@@ -237,7 +238,7 @@ func (b *dkong) Reset() {
 	b.dma, b.dmaFlip, b.dmaMode = [8]uint16{}, 0, 0
 	b.cyc, b.sndCyc, b.sndAcc, b.sndAccN, b.samplePos = 0, 0, 0, 0, 0
 	b.env = 1
-	b.filt = dkFilter(b.sampleRate)
+	b.filt = dkFilter(b.sampleRate, b.jr)
 	// effect times off (-1), phases 0
 	b.fx = [12]float64{-1, -1, 0, -1, 0, -1, 0, 125, 0, 0, 0, 0}
 	b.noise = 1
@@ -299,6 +300,9 @@ func (b *dkong) write(a int, v uint8) {
 		b.dmaWrite(a&0xf, int(v))
 	case a == 0x7c00:
 		b.soundLatch = int(^v & 0x0f)
+		if b.jr {
+			b.soundLatch = int(v & 0x0f)
+		}
 	case a == 0x7c80:
 		if b.jr {
 			b.gfxBank = int(v & 1)
@@ -455,9 +459,13 @@ func dkPole2(fc, q, rate float64) dkBiquad {
 	return dkBiquad{b0: k2 * n, b1: 2 * k2 * n, b2: k2 * n, a1: 2 * (k2 - 1) * n, a2: (1 - k/q + k2) * n}
 }
 
-// dkFilter: the DAC's output stage, measured: a band-pass with its peak
-// around 150 Hz that falls away steeply above 1 kHz.
-func dkFilter(rate float64) [5]dkBiquad {
+// dkFilter: the DAC's output stage, measured. Donkey Kong's is a band-pass
+// with its peak around 150 Hz that falls away steeply above 1 kHz; Junior's
+// is flat from about 40 Hz to 1.5 kHz.
+func dkFilter(rate float64, jr bool) [5]dkBiquad {
+	if jr {
+		return [5]dkBiquad{dkPole1(34.4, rate, true), dkPole1(2090, rate, false), dkPole1(4469, rate, false), dkPole2(1941, 0.714, rate), {b0: 0.4156}}
+	}
 	return [5]dkBiquad{dkPole1(88, rate, true), dkPole1(272, rate, false), dkPole1(831, rate, false), dkPole2(1837, 0.81, rate), {b0: -2.96}}
 }
 
@@ -588,10 +596,10 @@ func (b *dkong) jrEffects(dt float64) float64 {
 		if F[2] != 0 {
 			f := 320 * math.Exp(-t/0.064)
 			F[1] = frac(F[1] + f*dt)
-			s += 0.1 * a * (math.Sin(tau*F[1]) + 0.25*math.Sin(2*tau*F[1]))
+			s += 0.12 * a * (math.Sin(tau*F[1]) + 0.25*math.Sin(2*tau*F[1]))
 		} else {
-			F[1] += (b.rand()*2 - 1 - F[1]) * 0.5
-			s += 0.1 * a * F[1]
+			F[1] += (b.rand()*2 - 1 - F[1]) * 0.3
+			s += 0.09 * a * F[1]
 		}
 		F[0] = t + dt
 		if t > 0.08 {
@@ -600,9 +608,9 @@ func (b *dkong) jrEffects(dt float64) float64 {
 	}
 	// jump: a wobbling tone around 600 Hz that dies away, then a quiet tail
 	if t := F[3]; t >= 0 {
-		a := 0.085 * math.Exp(-t/0.175)
+		a := 0.24 * math.Exp(-t/0.155)
 		if t > 0.265 {
-			a = 0.025 * math.Exp(-(t-0.265)/0.3)
+			a = 0.028 * math.Exp(-math.Max(0, t-0.5)/0.15)
 		}
 		f := 600 * (1 + 0.1*math.Sin(tau*t/0.045))
 		F[4] = frac(F[4] + f*dt)
@@ -615,13 +623,13 @@ func (b *dkong) jrEffects(dt float64) float64 {
 	}
 	// fall: a low noisy crash
 	if t := F[5]; t >= 0 {
-		a := 0.7 * math.Exp(-t/0.1)
+		a := 0.45 * math.Exp(-t/0.1)
 		if t > 0.22 {
 			a += 0.1 * math.Exp(-(t-0.22)/0.12)
 		}
-		F[6] += (b.rand()*2 - 1 - F[6]) * 0.06
-		F[8] += (F[6] - F[8]) * 0.06
-		s += a * F[8] * 6
+		F[6] += (b.rand()*2 - 1 - F[6]) * 0.045
+		F[8] += (F[6] - F[8]) * 0.045
+		s += a * F[8] * 8
 		F[5] = t + dt
 		if t > 0.8 {
 			F[5] = -1
