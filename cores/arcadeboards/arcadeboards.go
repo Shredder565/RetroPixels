@@ -5,6 +5,7 @@
 package arcadeboards
 
 import (
+	_ "retropixels/cores/atari"   // Atari Centipede, Asteroids Deluxe
 	_ "retropixels/cores/berzerk" // Stern Berzerk
 	_ "retropixels/cores/capcom"  // Capcom 1942, 1943, 1943 Kai
 	_ "retropixels/cores/cps1"    // Capcom CP System: 1941
