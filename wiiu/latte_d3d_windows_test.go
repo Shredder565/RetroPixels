@@ -67,3 +67,21 @@ func TestD3DFrames(t *testing.T) {
 		})
 	}
 }
+
+// TestUseHostGPU: a machine picks up the Direct3D backend, and the
+// software switch keeps it off.
+func TestUseHostGPU(t *testing.T) {
+	m := newMachine(nil)
+	if !m.UseHostGPU() {
+		t.Skip("no Direct3D device here")
+	}
+	m.Close()
+	if m.gpu.hw != nil {
+		t.Fatal("Close kept the backend")
+	}
+	t.Setenv("RETROPIXELS_WIIU_GPU", "software")
+	m2 := newMachine(nil)
+	if m2.UseHostGPU() {
+		t.Fatal("RETROPIXELS_WIIU_GPU=software still used the host GPU")
+	}
+}

@@ -227,12 +227,18 @@ func (c *WiiU) start(sram []byte) (*machine.Machine, error) {
 			return nil, err
 		}
 	}
-	return machine.New(c.rpx, c.name, files)
+	m, err := machine.New(c.rpx, c.name, files)
+	if err != nil {
+		return nil, err
+	}
+	m.UseHostGPU()
+	return m, nil
 }
 
 // Reset starts the program again (with the saves it made).
 func (c *WiiU) Reset() {
 	if m, err := c.start(c.SRAM()); err == nil {
+		c.m.Close()
 		c.m = m
 	}
 }
@@ -244,6 +250,9 @@ func (c *WiiU) SaveState() ([]byte, error) {
 func (c *WiiU) LoadState([]byte) error {
 	return errors.New("save states aren't available for the Wii U yet")
 }
+
+// Close lets go of the host GPU.
+func (c *WiiU) Close() { c.m.Close() }
 
 // SRAM: the program's save files.
 func (c *WiiU) SRAM() []byte { return c.m.Files.SaveData() }
