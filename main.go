@@ -241,6 +241,7 @@ func newMux() *http.ServeMux {
 	registerMameRoutes(mux)
 	registerLifetimeRoutes(mux)
 	registerN64Routes(mux)
+	registerArcadeRoutes(mux)
 	registerAPRoutes(mux)
 	return mux
 }
