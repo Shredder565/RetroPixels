@@ -192,6 +192,7 @@ type Latte struct {
 	ibDepth      int
 
 	tex texCache
+	hw  hwRenderer // a host GPU backend, or nil
 
 	// counters
 	Draws, Prims, Pixels uint64

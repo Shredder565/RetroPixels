@@ -183,6 +183,13 @@ func (g *Latte) clearColor(cb cbDesc, c [4]float32) {
 	if !cb.ok {
 		return
 	}
+	g.tex.invalidate(surfRange(&cb.lay, cb.slice))
+	if g.hw != nil {
+		if g.hw.clearColor(&cb, c) {
+			return
+		}
+		g.hw.invalidate(surfRange(&cb.lay, cb.slice))
+	}
 	px := make([]byte, fmtBytes(cb.format))
 	v := [4]uint32{f2u(c[0]), f2u(c[1]), f2u(c[2]), f2u(c[3])}
 	if cb.kind == kUint || cb.kind == kSint {
@@ -199,6 +206,14 @@ func (g *Latte) clearColor(cb cbDesc, c [4]float32) {
 func (g *Latte) clearDepth(db dbDesc, z float32, stencil, flags uint32) {
 	if !db.ok || flags&3 == 0 {
 		return
+	}
+	g.tex.invalidate(surfRange(&db.lay, db.slice))
+	if g.hw != nil {
+		if g.hw.clearDepth(&db, z, stencil, flags) {
+			return
+		}
+		g.hw.flush(surfRange(&db.lay, db.slice)) // a partial clear keeps the rest
+		g.hw.invalidate(surfRange(&db.lay, db.slice))
 	}
 	wz, ws := flags&1 != 0, flags&2 != 0 && db.hasStencil()
 	full := wz && (ws || !db.hasStencil())
@@ -251,6 +266,7 @@ func (g *Latte) copyToScan(cb cbDesc, w, h, target uint32) {
 	if sb.Addr == 0 || !cb.ok || w == 0 || h == 0 {
 		return
 	}
+	g.hwFlush(surfRange(&cb.lay, cb.slice))
 	frame := sb.W * sb.H * 4
 	dst := sb.Addr + sb.Back*frame
 	row := make([]byte, sb.W*4)
@@ -334,6 +350,9 @@ func (g *Latte) copySurface(src, dst packedSurf) {
 	if src.lay.Base == 0 || dst.lay.Base == 0 {
 		return
 	}
+	g.hwFlush(surfRange(&src.lay, src.slice))
+	g.hwFlush(surfRange(&dst.lay, dst.slice)) // the parts not copied stay
+	defer g.hwInvalidate(surfRange(&dst.lay, dst.slice))
 	w := min(src.width, dst.width)
 	h := min(src.height, dst.height)
 	sb := src.lay.BPP / 8
