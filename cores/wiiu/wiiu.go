@@ -10,6 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"retropixels/core"
 	machine "retropixels/wiiu"
@@ -34,7 +37,8 @@ const (
 
 // ControlsNote is shown in the Controls window.
 const ControlsNote = "Left stick and right stick = the GamePad's sticks. " +
-	"TV / GamePad switches which screen you see. Wii U homebrew (.rpx) runs now. For a game, open the .rpx in its code folder."
+	"TV / GamePad switches which screen you see. Wii U homebrew (.rpx) runs now. For a game, open the .rpx in its code folder, " +
+	"or the title.tmd of an encrypted title (with your console's common key in a keys.txt next to it or next to RetroPixels)."
 
 // WiiU is one running program.
 type WiiU struct {
@@ -219,6 +223,18 @@ func (c *WiiU) TakeAudio() []float32 {
 // title's folders, and its saves come back from sram.
 func (c *WiiU) start(sram []byte) (*machine.Machine, error) {
 	files := machine.TitleFolders(c.path)
+	if c.isNUS() {
+		// an encrypted title: its title.tmd was opened
+		var keyDirs []string
+		if exe, err := os.Executable(); err == nil {
+			keyDirs = append(keyDirs, filepath.Dir(exe))
+		}
+		rpx, name, f, err := machine.TitleFromNUS(filepath.Dir(c.path), keyDirs...)
+		if err != nil {
+			return nil, err
+		}
+		c.rpx, c.name, files = rpx, name, f
+	}
 	if files == nil {
 		files = machine.NewFileSystem()
 	}
@@ -233,6 +249,11 @@ func (c *WiiU) start(sram []byte) (*machine.Machine, error) {
 	}
 	m.UseHostGPU()
 	return m, nil
+}
+
+// isNUS: the file opened is an encrypted title's title.tmd.
+func (c *WiiU) isNUS() bool {
+	return c.path != "" && strings.EqualFold(filepath.Ext(c.path), ".tmd")
 }
 
 // Reset starts the program again (with the saves it made).
