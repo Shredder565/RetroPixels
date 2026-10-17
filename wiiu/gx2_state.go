@@ -707,88 +707,12 @@ func init() {
 	})
 
 	// ---- fixed-function state ----
-	reg(x, "GX2SetViewport", func(m *Machine, cpu *CPU, t *Thread) {
-		x0, y0, w, h, n, f := argF32(cpu, 0), argF32(cpu, 1), argF32(cpu, 2), argF32(cpu, 3), argF32(cpu, 4), argF32(cpu, 5)
-		b := &pm4{}
-		b.set(regPA_CL_VPORT_XSCALE_0, f2u(w/2), f2u(x0+w/2), f2u(-h/2), f2u(y0+h/2), f2u((f-n)/2), f2u((f+n)/2))
-		b.set(regPA_SC_VPORT_ZMIN_0, f2u(min(n, f)), f2u(max(n, f)))
-		m.emit(b)
-	})
-	reg(x, "GX2SetViewportReg", func(m *Machine, cpu *CPU, t *Thread) {})
-	reg(x, "GX2SetScissor", func(m *Machine, cpu *CPU, t *Thread) {
-		x0, y0, w, h := arg(cpu, 0), arg(cpu, 1), arg(cpu, 2), arg(cpu, 3)
-		m.setRegs(regPA_SC_GENERIC_SCISSOR_TL, x0&0x7fff|(y0&0x7fff)<<16|1<<31, (x0+w)&0x7fff|((y0+h)&0x7fff)<<16)
-	})
-	reg(x, "GX2SetColorControl", func(m *Machine, cpu *CPU, t *Thread) {
-		rop, mask, multi, write := arg(cpu, 0), arg(cpu, 1), arg(cpu, 2), arg(cpu, 3)
-		if write == 0 {
-			rop = 0xaa // leave the target as it is
-		}
-		m.setRegs(regCB_COLOR_CONTROL, b2u(multi != 0)<<1|1<<7|(mask&0xff)<<8|(rop&0xff)<<16)
-	})
-	reg(x, "GX2SetBlendControl", func(m *Machine, cpu *CPU, t *Thread) {
-		target := arg(cpu, 0)
-		if target > 7 {
-			return
-		}
-		v := arg(cpu, 1)&0x1f | (arg(cpu, 3)&7)<<5 | (arg(cpu, 2)&0x1f)<<8 |
-			(arg(cpu, 5)&0x1f)<<16 | (arg(cpu, 7)&7)<<21 | (arg(cpu, 6)&0x1f)<<24 | b2u(arg(cpu, 4) != 0)<<29
-		m.setRegs(regCB_BLEND0_CONTROL+target*4, v)
-	})
-	reg(x, "GX2SetBlendConstantColor", func(m *Machine, cpu *CPU, t *Thread) {
-		m.setRegs(regCB_BLEND_RED, f2u(argF32(cpu, 0)), f2u(argF32(cpu, 1)), f2u(argF32(cpu, 2)), f2u(argF32(cpu, 3)))
-	})
-	reg(x, "GX2SetDepthStencilControl", func(m *Machine, cpu *CPU, t *Thread) {
-		a := func(i int) uint32 { return stackArg(m, cpu, i) }
-		v := b2u(a(3) != 0) | b2u(a(0) != 0)<<1 | b2u(a(1) != 0)<<2 | (a(2)&7)<<4 | b2u(a(4) != 0)<<7 |
-			(a(5)&7)<<8 | (a(8)&7)<<11 | (a(6)&7)<<14 | (a(7)&7)<<17 |
-			(a(9)&7)<<20 | (a(12)&7)<<23 | (a(10)&7)<<26 | (a(11)&7)<<29
-		m.setRegs(regDB_DEPTH_CONTROL, v)
-	})
-	reg(x, "GX2SetDepthOnlyControl", func(m *Machine, cpu *CPU, t *Thread) {
-		m.setRegs(regDB_DEPTH_CONTROL, b2u(arg(cpu, 0) != 0)<<1|b2u(arg(cpu, 1) != 0)<<2|(arg(cpu, 2)&7)<<4)
-	})
-	reg(x, "GX2SetStencilMask", func(m *Machine, cpu *CPU, t *Thread) {
-		f := arg(cpu, 2)&0xff | (arg(cpu, 0)&0xff)<<8 | (arg(cpu, 1)&0xff)<<16
-		bk := arg(cpu, 5)&0xff | (arg(cpu, 3)&0xff)<<8 | (arg(cpu, 4)&0xff)<<16
-		m.setRegs(regDB_STENCILREFMASK, f, bk)
-	})
-	reg(x, "GX2SetPolygonControl", func(m *Machine, cpu *CPU, t *Thread) {
-		v := (arg(cpu, 1) & 1) | (arg(cpu, 2)&1)<<1 | (arg(cpu, 0)&1)<<2 | (arg(cpu, 3)&1)<<3 |
-			(arg(cpu, 4)&7)<<5 | (arg(cpu, 5)&7)<<8 | (arg(cpu, 6)&1)<<11 | (arg(cpu, 7)&1)<<12 | (stackArg(m, cpu, 8)&1)<<13
-		m.setRegs(regPA_SU_SC_MODE_CNTL, v)
-	})
-	reg(x, "GX2SetCullOnlyControl", func(m *Machine, cpu *CPU, t *Thread) {
-		m.setRegBits(regPA_SU_SC_MODE_CNTL, 7, (arg(cpu, 1)&1)|(arg(cpu, 2)&1)<<1|(arg(cpu, 0)&1)<<2)
-	})
-	reg(x, "GX2SetPolygonOffset", func(m *Machine, cpu *CPU, t *Thread) {
-		m.setRegs(regPA_SU_POLY_OFFSET_FRONT_SCALE, f2u(argF32(cpu, 1)*16), f2u(argF32(cpu, 0)), f2u(argF32(cpu, 3)*16), f2u(argF32(cpu, 2)))
-		m.setRegs(regPA_SU_POLY_OFFSET_CLAMP, f2u(argF32(cpu, 4)))
-	})
-	reg(x, "GX2SetAlphaTest", func(m *Machine, cpu *CPU, t *Thread) {
-		m.setRegs(regSX_ALPHA_TEST_CONTROL, arg(cpu, 1)&7|b2u(arg(cpu, 0) != 0)<<3)
-		m.setRegs(regSX_ALPHA_REF, f2u(argF32(cpu, 0)))
-	})
-	reg(x, "GX2SetAlphaToMask", func(m *Machine, cpu *CPU, t *Thread) {})
-	reg(x, "GX2SetTargetChannelMasks", func(m *Machine, cpu *CPU, t *Thread) {
-		var v uint32
-		for i := 0; i < 8; i++ {
-			v |= (arg(cpu, i) & 15) << (4 * i)
-		}
-		m.setRegs(regCB_TARGET_MASK, v)
-	})
 	reg(x, "GX2SetPrimitiveRestartIndex", func(m *Machine, cpu *CPU, t *Thread) {
 		m.setRegs(regVGT_MULTI_PRIM_IB_RESET_INDX, arg(cpu, 0))
 		m.setRegs(regVGT_MULTI_PRIM_IB_RESET_EN, 1)
 	})
 	reg(x, "GX2SetLineWidth", func(m *Machine, cpu *CPU, t *Thread) {
 		m.setRegs(regPA_SU_LINE_CNTL, uint32(argF32(cpu, 0)*8)&0xffff)
-	})
-	reg(x, "GX2SetPointSize", func(m *Machine, cpu *CPU, t *Thread) {
-		m.setRegs(regPA_SU_POINT_SIZE, uint32(argF32(cpu, 1)*8)&0xffff|(uint32(argF32(cpu, 0)*8)&0xffff)<<16)
-	})
-	reg(x, "GX2SetPointLimits", func(m *Machine, cpu *CPU, t *Thread) {
-		m.setRegs(regPA_SU_POINT_MINMAX, uint32(argF32(cpu, 0)*8)&0xffff|(uint32(argF32(cpu, 1)*8)&0xffff)<<16)
 	})
 	reg(x, "GX2SetRasterizerClipControl", func(m *Machine, cpu *CPU, t *Thread) {
 		ras, zclip := arg(cpu, 0) != 0, arg(cpu, 1) != 0
