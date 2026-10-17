@@ -849,6 +849,7 @@ func (s *shaderRun) aluGroup(group []aluOp, lit *[4]uint32) {
 					case 3:
 						f /= 2
 					}
+					f = ftz(f)
 					if clamp {
 						if f > 1 {
 							f = 1
@@ -951,7 +952,7 @@ func mulLegacy(a, b float32) float32 {
 func (s *shaderRun) op3(inst uint32, in *[3]lanes) lanes {
 	var out lanes
 	for l := 0; l < nl; l++ {
-		a, b, c := u2f(in[0][l]), u2f(in[1][l]), u2f(in[2][l])
+		a, b, c := ftz(u2f(in[0][l])), ftz(u2f(in[1][l])), ftz(u2f(in[2][l]))
 		var r float32
 		switch inst {
 		case 0x0c, 0x0d, 0x0e, 0x0f: // MUL_LIT (and variants)
@@ -979,24 +980,27 @@ func (s *shaderRun) op3(inst uint32, in *[3]lanes) lanes {
 			case 0x17:
 				r /= 2
 			}
-		case 0x18: // CNDE
+		case 0x18: // CNDE (a select: the bits move unchanged)
 			if a == 0 {
-				r = b
+				out[l] = in[1][l]
 			} else {
-				r = c
+				out[l] = in[2][l]
 			}
-		case 0x19: // CNDGT
+			continue
+		case 0x19: // CNDGT (a select: the bits move unchanged)
 			if a > 0 {
-				r = b
+				out[l] = in[1][l]
 			} else {
-				r = c
+				out[l] = in[2][l]
 			}
-		case 0x1a: // CNDGE
+			continue
+		case 0x1a: // CNDGE (a select: the bits move unchanged)
 			if a >= 0 {
-				r = b
+				out[l] = in[1][l]
 			} else {
-				r = c
+				out[l] = in[2][l]
 			}
+			continue
 		case 0x1c: // CNDE_INT
 			if in[0][l] == 0 {
 				out[l] = in[1][l]
@@ -1021,36 +1025,69 @@ func (s *shaderRun) op3(inst uint32, in *[3]lanes) lanes {
 		default:
 			s.Err = "unknown ALU OP3 instruction " + hex32(inst)
 		}
-		out[l] = f2u(r)
+		out[l] = fout(r)
 	}
 	return out
+}
+
+// floatOp2 reports whether an OP2 instruction takes float sources and
+// whether it gives a float result (both flush denormals).
+func floatOp2(i uint32) (in, out bool) {
+	switch {
+	case i <= 0x17 || i >= 0x20 && i <= 0x2f || i >= 0x61 && i <= 0x6b || i == 0x6e || i == 0x6f || i == 0x79:
+		in = true
+	}
+	out = in && !(i >= 0x0c && i <= 0x0f) && i != 0x6b && i != 0x79
+	return
+}
+
+// ftz flushes denormals to zero, as the GPU's float instructions do.
+// noFlush turns denormal flushing off, and nanFlip gives NaN results the
+// other sign (tests compare with hosts that do these).
+var noFlush, nanFlip bool
+
+// fout is a float result: flushed, and with nanFlip its sign toggled if NaN.
+func fout(f float32) uint32 {
+	r := f2u(ftz(f))
+	if nanFlip && r&0x7fffffff > 0x7f800000 {
+		r ^= 0x80000000
+	}
+	return r
+}
+
+func ftz(f float32) float32 {
+	if b := f2u(f); b&0x7f800000 == 0 && !noFlush {
+		return u2f(b & 0x80000000)
+	}
+	return f
 }
 
 func (s *shaderRun) vec4(inst uint32, unit int, a, b *[4]lanes) lanes {
 	var out lanes
 	for l := 0; l < nl; l++ {
+		f := func(v *[4]lanes, c int) float32 { return ftz(u2f(v[c][l])) }
 		switch inst {
 		case 0x50: // DOT4
 			var sum float32
 			for c := 0; c < 4; c++ {
-				sum += mulLegacy(u2f(a[c][l]), u2f(b[c][l]))
+				sum += mulLegacy(f(a, c), f(b, c))
 			}
-			out[l] = f2u(sum)
+			out[l] = fout(sum)
 		case 0x51: // DOT4_IEEE
 			var sum float32
 			for c := 0; c < 4; c++ {
-				sum += u2f(a[c][l]) * u2f(b[c][l])
+				sum += f(a, c) * f(b, c)
 			}
-			out[l] = f2u(sum)
+			out[l] = fout(sum)
 		case 0x53: // MAX4
-			m := u2f(a[0][l])
+			m := f(a, 0)
 			for c := 1; c < 4; c++ {
-				m = max(m, u2f(a[c][l]))
+				m = fmax(m, f(a, c))
 			}
 			out[l] = f2u(m)
 		case 0x52: // CUBE: src0 = (z, z, x, y), src1 = (y, x, z, z) by convention
-			x, y, z := u2f(a[2][l]), u2f(a[3][l]), u2f(a[0][l])
-			out[l] = f2u(cubeResult(x, y, z, unit))
+			x, y, z := f(a, 2), f(a, 3), f(a, 0)
+			out[l] = f2u(ftz(cubeResult(x, y, z, unit)))
 		}
 	}
 	return out
@@ -1125,9 +1162,14 @@ func (s *shaderRun) op2(op aluOp, in *[3]lanes, mask laneMask) (out lanes, pred 
 	ue = op.w1>>2&1 != 0
 	up = op.w1>>3&1 != 0
 	predOp := false
+	// float instructions flush denormals (moves keep the bits)
+	flushIn, flushOut := floatOp2(op.inst)
 	for l := 0; l < nl; l++ {
 		x, y := in[0][l], in[1][l]
 		a, b := u2f(x), u2f(y)
+		if flushIn {
+			a, b = ftz(a), ftz(b)
+		}
 		ia, ib := int32(x), int32(y)
 		var r uint32
 		var p bool
@@ -1359,9 +1401,9 @@ func (s *shaderRun) op2(op aluOp, in *[3]lanes, mask laneMask) (out lanes, pred 
 		case 0x6d: // UINT_TO_FLT
 			r = f2u(float32(x))
 		case 0x6e: // SIN: on R700 the input is in turns (-0.5..0.5)
-			r = f2u(float32(math.Sin(2 * math.Pi * float64(a))))
+			r = f2u(float32(math.Sin(2 * math.Pi * float64(turns(a)))))
 		case 0x6f: // COS
-			r = f2u(float32(math.Cos(2 * math.Pi * float64(a))))
+			r = f2u(float32(math.Cos(2 * math.Pi * float64(turns(a)))))
 		case 0x70:
 			r = uint32(ia >> (y & 31))
 		case 0x71:
@@ -1389,6 +1431,9 @@ func (s *shaderRun) op2(op aluOp, in *[3]lanes, mask laneMask) (out lanes, pred 
 			r = floatToUint(a)
 		default:
 			s.Err = "unknown ALU OP2 instruction " + hex32(op.inst)
+		}
+		if flushOut {
+			r = fout(u2f(r))
 		}
 		out[l] = r
 		pred[l] = p
@@ -1424,3 +1469,6 @@ func fmin(a, b float32) float32 {
 	}
 	return b
 }
+
+// turns reduces an angle in turns to -0.5..0.5.
+func turns(a float32) float32 { return a - float32(math.RoundToEven(float64(a))) }
