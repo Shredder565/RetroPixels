@@ -100,6 +100,8 @@ type Machine struct {
 	fontTried          bool
 	gpuNote            string               // why there's no host GPU
 	missing            []string             // functions called that aren't here yet
+	vmNext             uint32               // the next free virtual address (coreinit_vm.go)
+	vmMaps             map[uint32]uint32    // mapped virtual pages: their physical address
 	apertures          map[uint32]*aperture // open tiling apertures by handle
 	apAddrs            []uint32             // the last aperture surface's element addresses
 	apAddrsKey         apertureKey

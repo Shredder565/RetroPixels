@@ -146,3 +146,16 @@ func TestFarCalls(t *testing.T) {
 		t.Fatalf("exited %v code %d err %v log:\n%s", m.Exited, m.ExitCode, m.Err, log)
 	}
 }
+
+func TestVirtualMemoryAndDMA(t *testing.T) {
+	rpx := buildModule(t, buildOpts{imports: []string{
+		"coreinit OSGetMapVirtAddrRange OSAllocVirtAddr OSMapMemory OSQueryVirtAddr OSEffectiveToPhysical",
+		"dmae DMAECopyMem DMAEFillMem DMAEWaitDone"}}, "vmtest.c")
+	_, log := runRPX(t, rpx, 10)
+	for _, want := range []string{"vm: range a0000000+20000000 va a0000000 map 1 seen 12345678 back cafe query 1",
+		"dmae: 44332211 88776655 abcd abcd"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("want %q in:\n%s", want, log)
+		}
+	}
+}
