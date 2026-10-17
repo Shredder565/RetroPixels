@@ -28,14 +28,41 @@ const (
 	// mix: one output sample per YM2151 sample (clock / 64), counted in
 	// 20 MHz ticks: a Z80 cycle is 4 ticks, a YM2151 sample 320.
 	ymTicks = 64 * 5
-	// the YM2151's and the uPD7759's levels in the mono mix (the board's
-	// mixing resistors as MAME has them: 0.43 per YM channel, 0.48 for the
-	// uPD7759, whose full scale is half of the YM's), scaled to leave headroom
-	fmGain  = 0.43 * 0.62
-	updGain = 0.48 * 0.5 * 0.62
+	// the YM2151's and the uPD7759's levels in the mono mix: the balance
+	// measured against MAME playing the same commands on the same sound
+	// program (the voice about 5 times the music's RMS), at 1.4 times MAME's
+	// overall level
+	fmGain  = 0.24
+	updGain = 0.39
 )
 
-var updPerSample = float64(updHz) / (float64(ymHz) / 64)
+var (
+	updPerSample = float64(updHz) / (float64(ymHz) / 64)
+	mixRate      = float64(ymHz) / 64
+	// the output filters (as measured on MAME's output): the uPD7759 through
+	// a 4-pole low-pass at 3 kHz, then everything through one pole at 2.6 kHz
+	updLP = [2]biquadCoef{lowpass(3000, 0.5412, mixRate), lowpass(3000, 1.3066, mixRate)}
+	mixLP = 1 - math.Exp(-2*math.Pi*2600/mixRate)
+)
+
+// biquadCoef is a second-order low-pass section (normalised, a0 = 1).
+type biquadCoef struct{ b0, b1, b2, a1, a2 float64 }
+
+func lowpass(fc, q, fs float64) biquadCoef {
+	w := 2 * math.Pi * fc / fs
+	alpha := math.Sin(w) / (2 * q)
+	c := math.Cos(w)
+	a0 := 1 + alpha
+	return biquadCoef{(1 - c) / 2 / a0, (1 - c) / a0, (1 - c) / 2 / a0, -2 * c / a0, (1 - alpha) / a0}
+}
+
+// biquad runs one section; z is its two state values.
+func biquad(k *biquadCoef, z *[2]float64, x float64) float64 {
+	y := k.b0*x + z[0]
+	z[0] = k.b1*x - k.a1*y + z[1]
+	z[1] = k.b2*x - k.a2*y
+	return y
+}
 
 type sound struct {
 	z80  *z80.CPU
@@ -46,6 +73,7 @@ type sound struct {
 	bank func(v uint8) int
 	ram  [0x800]uint8
 	out  *arcade.Resampler
+	rate int // the output sample rate
 
 	latch  uint8
 	ctrl   uint8 // last port 0x40 write
@@ -56,12 +84,14 @@ type sound struct {
 	dcPrev float64
 	dcOut  float64
 	zcyc   float64
+	lpz    [2][2]float64 // the uPD7759 filter's state
+	lpOut  float64       // the output filter's
 }
 
 type soundBus struct{ s *sound }
 
 func newSound(rom, pcm []byte, bank func(v uint8) int, sampleRate int) *sound {
-	s := &sound{rom: rom, pcm: pcm, bank: bank}
+	s := &sound{rom: rom, pcm: pcm, bank: bank, rate: sampleRate}
 	s.ym = ym2151.New(ymHz)
 	s.upd = upd7759.NewSlave(updHz)
 	s.upd.OnDRQ = func(on bool) {
@@ -70,7 +100,7 @@ func newSound(rom, pcm []byte, bank func(v uint8) int, sampleRate int) *sound {
 		}
 	}
 	s.z80 = z80.New(soundBus{s})
-	s.out = arcade.NewResampler(float64(ymHz)/64, float64(sampleRate))
+	s.out = arcade.NewResampler(mixRate, float64(sampleRate))
 	return s
 }
 
@@ -83,7 +113,8 @@ func (s *sound) reset() {
 	s.latch, s.ctrl, s.window = 0, 0, 0
 	s.upd.ResetLine(false)
 	s.mixClk, s.updAcc, s.updV, s.dcPrev, s.dcOut, s.zcyc = 0, 0, 0, 0, 0, 0
-	s.out.Clear()
+	s.lpz, s.lpOut = [2][2]float64{}, 0
+	s.out = arcade.NewResampler(mixRate, float64(s.rate))
 }
 
 // command is the 68000 writing the latch.
@@ -174,7 +205,10 @@ func (s *sound) clocks(c int) {
 		// the uPD7759's output is AC coupled
 		s.dcOut = s.updV - s.dcPrev + 0.9995*s.dcOut
 		s.dcPrev = s.updV
-		v := float64(s.ym.Out[0]+s.ym.Out[1])/32768*fmGain + s.dcOut*updGain
+		u := biquad(&updLP[1], &s.lpz[1], biquad(&updLP[0], &s.lpz[0], s.dcOut))
+		v := float64(s.ym.Out[0]+s.ym.Out[1])/32768*fmGain + u*updGain
+		s.lpOut += mixLP * (v - s.lpOut)
+		v = s.lpOut
 		if v > 0.8 {
 			v = 0.8 + 0.2*math.Tanh((v-0.8)*5)
 		} else if v < -0.8 {
@@ -193,7 +227,7 @@ func (s *sound) appendState(w *arcade.StateW) {
 	w.U8(s.ctrl)
 	w.Int(s.window)
 	w.Int(s.mixClk)
-	w.F64s([]float64{s.updAcc, s.updV, s.dcPrev, s.dcOut, s.zcyc})
+	w.F64s([]float64{s.updAcc, s.updV, s.dcPrev, s.dcOut, s.zcyc, s.lpz[0][0], s.lpz[0][1], s.lpz[1][0], s.lpz[1][1], s.lpOut})
 	s.out.AppendState(w)
 }
 
@@ -211,9 +245,10 @@ func (s *sound) loadState(r *arcade.StateR) error {
 	s.ctrl = r.U8()
 	s.window = r.Int()
 	s.mixClk = r.Int()
-	f := make([]float64, 5)
+	f := make([]float64, 10)
 	r.F64s(f)
 	s.updAcc, s.updV, s.dcPrev, s.dcOut, s.zcyc = f[0], f[1], f[2], f[3], f[4]
+	s.lpz, s.lpOut = [2][2]float64{{f[5], f[6]}, {f[7], f[8]}}, f[9]
 	s.out.LoadState(r)
 	return r.Err
 }

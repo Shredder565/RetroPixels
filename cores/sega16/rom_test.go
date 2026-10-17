@@ -7,6 +7,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"retropixels/core"
@@ -56,14 +57,20 @@ func TestAltbeastBoots(t *testing.T) {
 	pads := []arcade.Pad{{}, {}}
 	b.SetInput(pads)
 	var audio []float32
-	frames := 1800
+	frames, every := 1800, 60
+	if n, err := strconv.Atoi(os.Getenv("SEGA16_FRAMES")); err == nil {
+		frames = n
+	}
+	if n, err := strconv.Atoi(os.Getenv("SEGA16_EVERY")); err == nil {
+		every = n
+	}
 	idle := os.Getenv("SEGA16_IDLE") != ""
 	for f := 1; f <= frames; f++ {
 		pads[0]["Coin"] = !idle && f%900 >= 120 && f%900 < 126
 		pads[0]["Start (1P)"] = !idle && f%900 >= 200 && f%900 < 206
 		b.RunFrame()
 		audio = append(audio, b.TakeAudio()...)
-		if out != "" && f%60 == 0 {
+		if out != "" && f%every == 0 {
 			savePNG(t, filepath.Join(out, "f"+pad5(f)+".png"), b.Screen(), scrW, scrH)
 		}
 	}

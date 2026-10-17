@@ -45,6 +45,8 @@ type UPD7759 struct {
 	skip   int  // header bytes still to drop before the first block
 	cur    int  // the byte whose nibbles are being played
 	inByte bool // cur holds a byte whose low nibble is still to play
+	want   bool // a byte is wanted (DRQ goes up when gap runs out)
+	gap    int
 }
 
 // New makes the chip in stand-alone mode with its sample ROM (clock 0 = 640 kHz).
@@ -75,11 +77,18 @@ func (u *UPD7759) Reset() {
 	u.state, u.pos, u.left, u.period, u.wait = stIdle, 0, 0, 1, 0
 	u.sample, u.step, u.nib, u.repeat, u.repeatPos = 0, 0, 0, 0, 0
 	u.Out, u.clk = 0, 0
-	u.have, u.skip, u.cur, u.inByte = false, 0, 0, false
+	u.have, u.skip, u.cur, u.inByte, u.want, u.gap = false, 0, 0, false, false, 0
 	u.setDRQ(false)
 }
 
 func (u *UPD7759) rd(a int) int { return int(u.rom[a%len(u.rom)]) }
+
+// slaveGap: the chip's steps (clock / 4) between taking a byte and asking
+// for the next one; the CPU's NMI handler must finish in between.
+const slaveGap = 4
+
+// ask raises DRQ once slaveGap steps have passed since the last byte.
+func (u *UPD7759) ask() { u.want = true }
 
 func (u *UPD7759) setDRQ(on bool) {
 	if on != u.drq {
@@ -108,10 +117,12 @@ func (u *UPD7759) Port(v uint8) {
 		// the first byte is the sample number; then the five header bytes
 		u.state, u.skip, u.have, u.wait = stCmd, 5, false, 0
 		u.sample, u.step, u.inByte = 0, 0, false
-		u.setDRQ(true)
+		u.gap = slaveGap
+		u.ask()
 		return
 	}
 	u.have = true
+	u.gap = slaveGap
 	u.setDRQ(false)
 }
 
@@ -123,7 +134,7 @@ func (u *UPD7759) ResetLine(v bool) {
 	}
 	if u.rst == 0 {
 		u.state, u.sample, u.Out = stIdle, 0, 0
-		u.have, u.inByte = false, false
+		u.have, u.inByte, u.want = false, false, false
 		u.setDRQ(false)
 	}
 }
@@ -258,7 +269,7 @@ func (u *UPD7759) take() (int, bool) {
 		u.have = false
 		return u.data, true
 	}
-	u.setDRQ(true)
+	u.ask()
 	return 0, false
 }
 
@@ -268,6 +279,13 @@ func (u *UPD7759) tickSlave() {
 		return
 	}
 	u.Out = float64(u.sample) / 128
+	if u.gap > 0 {
+		u.gap--
+	}
+	if u.want && !u.have && u.gap == 0 {
+		u.want = false
+		u.setDRQ(true)
+	}
 	if u.wait > 0 {
 		u.wait--
 		return
@@ -280,12 +298,12 @@ func (u *UPD7759) tickSlave() {
 		}
 		if u.skip > 0 {
 			u.skip--
-			u.setDRQ(true)
+			u.ask()
 			return
 		}
 		u.header(c)
 		if u.state != stIdle {
-			u.setDRQ(true)
+			u.ask()
 		}
 	case stSilence:
 		u.state = stCmd
@@ -296,7 +314,7 @@ func (u *UPD7759) tickSlave() {
 				return
 			}
 			u.left = c + 1
-			u.setDRQ(true)
+			u.ask()
 			return
 		}
 		if !u.inByte {
@@ -316,7 +334,7 @@ func (u *UPD7759) tickSlave() {
 			u.state = stCmd
 		}
 		if !u.inByte {
-			u.setDRQ(true)
+			u.ask()
 		}
 	}
 	u.Out = float64(u.sample) / 128
@@ -352,6 +370,8 @@ func (u *UPD7759) AppendState(w *arcade.StateW) {
 		w.Int(u.skip)
 		w.Int(u.cur)
 		w.Bool(u.inByte)
+		w.Bool(u.want)
+		w.Int(u.gap)
 	}
 }
 
@@ -370,5 +390,7 @@ func (u *UPD7759) LoadState(r *arcade.StateR) {
 		u.skip = r.Int()
 		u.cur = r.Int()
 		u.inByte = r.Bool()
+		u.want = r.Bool()
+		u.gap = r.Int()
 	}
 }

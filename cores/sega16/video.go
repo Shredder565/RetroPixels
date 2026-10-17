@@ -16,9 +16,16 @@ import "retropixels/cores/arcade"
 // a text word is p------c ccnnnnnn nnn (priority, colour 0-7, tile 0-511).
 // Text RAM also holds the layers' registers:
 //
-//	0xe80/0xe82  page select, foreground / background (4 bits per quadrant)
-//	0xe90/0xe92  vertical scroll (bit 15: per-column scroll from 0xf00)
-//	0xe98/0xe9a  horizontal scroll (bit 15: per-row scroll from 0xf80)
+//	0xe80/0xe82  page select, foreground / background: 4 bits per quadrant,
+//	             top left in the low bits, then top right, bottom left, bottom right
+//	0xe90/0xe92  vertical scroll (bit 15: per-column scroll from the table)
+//	0xe98/0xe9a  horizontal scroll (bit 15: per-row scroll from the table)
+//	0xf00/0xf40  column scroll tables (foreground / background), 16 pixels each
+//	0xf80/0xfc0  row scroll tables (foreground / background), 8 lines each
+//
+// The layers show virtual x = screen x + 192 - horizontal scroll, and y =
+// screen y + vertical scroll; the screen's 320 columns start at 192 of the
+// board's line counter (hence the text's 24 hidden columns).
 //
 // Sprites are drawn into a line of their own first (a later entry covers an
 // earlier one), then mixed with the tile layers by priority. From back to
@@ -144,7 +151,7 @@ func (v *video) layerLine(layer, y int, pix []uint16) {
 	hs := t[0x74c+layer]
 	if hs&0x8000 != 0 {
 		// per-row horizontal scroll: one value per 8 lines
-		hs = t[0x7c0+((y>>3)&31)*2+layer]
+		hs = t[0x7c0+layer*32+(y>>3)&31]
 	}
 	colScroll := vs&0x8000 != 0
 	levels := &fgLevel
@@ -154,7 +161,7 @@ func (v *video) layerLine(layer, y int, pix []uint16) {
 	for x := 0; x < scrW; x++ {
 		vsx := vs
 		if colScroll {
-			vsx = t[0x780+((x>>4)&31)*2+layer]
+			vsx = t[0x780+layer*32+((x+184)>>4)&31]
 		}
 		vy := (y + int(vsx)) & 511
 		vx := (x + 0xc0 - int(hs)) & 1023
@@ -176,7 +183,7 @@ func (v *video) layerLine(layer, y int, pix []uint16) {
 
 // quadNibble: which 4 bits of the page register pick each quadrant
 // (top left, top right, bottom left, bottom right).
-var quadNibble = [4]uint{2, 3, 0, 1}
+var quadNibble = [4]uint{0, 1, 2, 3}
 
 // textLine draws the text layer's line y.
 func (v *video) textLine(y int, pix []uint16) {
@@ -247,7 +254,7 @@ func (v *video) drawSprites() {
 // transparent.
 func (v *video) spriteLine(rom []uint16, y, x, a int, flip bool, hz int, color uint16, pri uint8) {
 	line := y * scrW
-	hacc := 32
+	hacc := 4 * hz
 	for n := 0; n < 128 && x < scrW; n++ {
 		w := rom[a&0xffff]
 		if flip {
@@ -258,11 +265,9 @@ func (v *video) spriteLine(rom []uint16, y, x, a int, flip bool, hz int, color u
 		}
 		for k := 12; k >= 0; k -= 4 {
 			p := (w >> uint(k)) & 15
-			if hz != 0 {
-				if hacc += hz; hacc >= 64 {
-					hacc -= 64
-					continue
-				}
+			// horizontal zoom drops a pixel each time the accumulator carries
+			if hacc = hacc&0x3f + hz; hacc >= 0x40 {
+				continue
 			}
 			if p != 0 && p != 15 && x >= 0 && x < scrW {
 				v.sprPix[line+x] = color | p
