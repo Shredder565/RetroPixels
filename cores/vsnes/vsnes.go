@@ -147,10 +147,22 @@ func (b *board) SetInput(p []arcade.Pad) {
 	b.n.SetInput(1, in4017)
 }
 
-func (b *board) RunFrame()            { b.n.RunFrame() }
-func (b *board) Screen() []uint32     { return b.n.Screen() }
-func (b *board) TakeAudio() []float32 { return b.n.TakeAudio() }
-func (b *board) Reset()               { b.n.Reset() }
+func (b *board) RunFrame()        { b.n.RunFrame() }
+func (b *board) Screen() []uint32 { return b.n.Screen() }
+
+// TakeAudio: the NES core's sound at the Vs. cabinet's level (measured
+// against MAME, the console level is about 2.1 times louder).
+func (b *board) TakeAudio() []float32 {
+	a := b.n.TakeAudio()
+	for i := range a {
+		a[i] *= vsLevel
+	}
+	return a
+}
+
+const vsLevel = 0.48
+
+func (b *board) Reset() { b.n.Reset() }
 
 const stateVer = 1
 
