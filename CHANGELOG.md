@@ -2,6 +2,14 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.18.0] - 2026-10-17
+
+- Nine more arcade games on RetroPixels' own emulation: 1941: Counter Attack, 1942, 1943: The Battle of Midway, 1943 Kai, Altered Beast, Asteroids Deluxe, Berzerk, Centipede and Vs. Castlevania. Each was first played in MAME at fast speed, then RetroPixels was checked against it frame by frame and sound by sound: the picture matches MAME pixel for pixel in the frames compared (1941, 1942, 1943, 1943 Kai, Altered Beast, Berzerk, Vs. Castlevania, Centipede), with the same pitch and similar loudness. RetroPixels' code is its own: MAME was only watched and listened to.
+- New boards and chips, written from scratch: Capcom CP System (1941) with the OKI MSM6295; Capcom's 1942 and 1943 boards with the AY-3-8910 and YM2203; Sega System 16B (Altered Beast) with its memory mapper; Atari's Centipede board and the Asteroids Deluxe vector generator, drawn as smooth lines; Stern's Berzerk with its bitmap and sound timers; Nintendo's Vs. System on RetroPixels' NES emulator.
+- 1943 and 1943 Kai don't need the board's protection chip: RetroPixels answers the game's questions from the table in the game's own program. Centipede, Asteroids Deluxe and Berzerk keep their high scores like a battery save. Centipede's trackball moves with the stick or arrow keys.
+- Your ROM sets can use the older file names or MAME's current ones. Altered Beast works with the set that has the unencrypted sound program (11671). Berzerk's speech isn't emulated yet (it needs the two speech chip files, which most older sets don't have), so the robots are silent. Asteroids Deluxe's explosion and thrust sounds are RetroPixels' own recreation.
+- RetroPixels.exe runs these new boards inside the program, like the Nintendo 64, so they play in the desktop app. RetroPixels Native and RetroPixels for Android play them too.
+
 ## [2.17.0] - 2026-10-16
 
 - MAME now comes with RetroPixels. The RetroPixels-2.17.0.zip download has the MAME team's own official Windows release of MAME inside, in its MAME folder, unchanged: it is downloaded from MAME's GitHub, checked against the SHA-256 checksum GitHub lists for it, and not rebuilt or patched. Its source code is attached to the release. Unzip, put your ROM sets in MAME\roms (or add your own ROM folder) and play: there's nothing else to download. Both RetroPixels.exe and RetroPixels Native list it as "MAME 0.xxx (built in)" and use it as the default when you have no other MAME. Your other MAME versions still work alongside it.
