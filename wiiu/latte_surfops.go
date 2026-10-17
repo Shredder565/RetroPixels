@@ -3,7 +3,10 @@ package wiiu
 // Latte surface operations: colour and depth buffers as the registers
 // describe them, and the clears and copies GX2 asks for.
 
-import "math"
+import (
+	"encoding/binary"
+	"math"
+)
 
 // cbDesc is a colour buffer, from its CB_COLOR* registers.
 type cbDesc struct {
@@ -283,6 +286,10 @@ func (g *Latte) copyToScan(cb cbDesc, w, h, target uint32) {
 	addrs := make([]uint32, w)
 	buf := make([]byte, 16)
 	lastSY := ^uint32(0)
+	xs := make([]uint32, sb.W) // the source column of each scan column
+	for x := range xs {
+		xs[x] = uint32(x) * w / sb.W
+	}
 	f := cb.format & 0x3f
 	for y := uint32(0); y < sb.H; y++ {
 		sy := y * h / sb.H
@@ -314,11 +321,16 @@ func (g *Latte) copyToScan(cb cbDesc, w, h, target uint32) {
 				srcRow[x] = q(0)<<24 | q(1)<<16 | q(2)<<8 | q(3)
 			}
 		}
-		for x := uint32(0); x < sb.W; x++ {
-			v := srcRow[x*w/sb.W]
-			row[x*4], row[x*4+1], row[x*4+2], row[x*4+3] = byte(v>>24), byte(v>>16), byte(v>>8), byte(v)
+		out := m.Mem.Slice(dst+y*sb.W*4, len(row))
+		if out == nil {
+			out = row
 		}
-		m.Mem.WriteBytes(dst+y*sb.W*4, row)
+		for x, sx := range xs {
+			binary.BigEndian.PutUint32(out[x*4:], srcRow[sx])
+		}
+		if &out[0] == &row[0] {
+			m.Mem.WriteBytes(dst+y*sb.W*4, row)
+		}
 	}
 }
 
