@@ -211,6 +211,11 @@ type noise struct {
 	env                       envelope
 	enabled, mode             bool
 	len, period, timer, shift int
+	// everyCycle: the timer counts CPU cycles, so a period from the table
+	// (which is in CPU cycles) lasts that long. The console core counts it
+	// every other cycle, as web/emu/nes.js does; only the stand-alone APU
+	// (APU.SetRaw) sets this.
+	everyCycle bool
 }
 
 func (n *noise) write(r, v int) {
@@ -233,6 +238,9 @@ func (n *noise) write(r, v int) {
 func (n *noise) clockTimer() {
 	if n.timer == 0 {
 		n.timer = n.period
+		if n.everyCycle {
+			n.timer--
+		}
 		sh := 1
 		if n.mode {
 			sh = 6
@@ -368,6 +376,7 @@ type apu struct {
 	hp, hpPrev, lp       float64
 	out                  []float32
 	ext                  extAudio
+	raw                  bool // no console output filtering (the APU on its own)
 }
 
 func newAPU(n *NES, sampleRate int) *apu {
@@ -501,6 +510,11 @@ func (a *apu) tick() {
 	if a.odd {
 		a.p1.clockTimer()
 		a.p2.clockTimer()
+		if !a.noise.everyCycle {
+			a.noise.clockTimer()
+		}
+	}
+	if a.noise.everyCycle {
 		a.noise.clockTimer()
 	}
 	a.dmc.clockTimer()
@@ -562,6 +576,12 @@ func (a *apu) tick() {
 		a.acc -= a.step
 		x := a.sum / float64(a.n)
 		a.sum, a.n = 0, 0
+		if a.raw { // the chip's own output, for boards with their own output stage
+			if len(a.out) < cap(a.out) {
+				a.out = append(a.out, float32(x))
+			}
+			return
+		}
 		// ~37 Hz high-pass (removes DC like the console's output capacitor) and gentle low-pass
 		a.hp = 0.9952 * (a.hp + x - a.hpPrev)
 		a.hpPrev = x

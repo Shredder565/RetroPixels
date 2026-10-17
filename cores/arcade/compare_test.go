@@ -250,6 +250,7 @@ func allTestSets() []*testSet {
 	sets = append(sets, galaxianSet(0, 31, false, "galaxian.zip"), galaxianSet(1, 32, false, "galmidw.zip"), galaxianSet(0, 33, true, "galaxian.zip"))
 	sets = append(sets, invadersSet(41, false, "invaders.zip"), invadersSet(42, true, "Space Invaders.zip"))
 	sets = append(sets, dkongSet(51, false, "dkong.zip"), dkongSet(52, true, "dkong.zip"))
+	sets = append(sets, dkongjrSet(53, false), dkongjrSet(54, true))
 	// zips made by other tools: other file orders, files in folders
 	s := galaxianSet(0, 34, false, "galaxian-2.zip")
 	s.shuffle(&rng{5})

@@ -414,7 +414,16 @@ func invadersSet(seed uint64, chaos bool, zip string) *testSet {
 	return t
 }
 
-func dkongProgram(seed uint64) []byte {
+func dkongProgram(seed uint64) []byte { return dkongProgramN(seed, false) }
+
+// dkongProgramN: Junior's version (jr) also switches the tile bank and fills
+// 24 KB.
+func dkongProgramN(seed uint64, jr bool) []byte {
+	pokes := []poke{{0x6900, 0x1ff, 6}, {0x7400, 0x3ff, 4}, {0x7000, 0x3ff, 2}, {0x7c00, 0, 1}, {0x7d00, 7, 2}, {0x7d80, 7, 1}}
+	size := 0x4000
+	if jr {
+		pokes, size = append(pokes, poke{0x7c80, 0, 1}), 0x6000
+	}
 	return exerciser(exSpec{
 		z80: true, sp: 0x6c00,
 		irqStub: func(a *asm) {
@@ -428,7 +437,7 @@ func dkongProgram(seed uint64) []byte {
 			a.mvi(1)
 			a.sta(0x7d84)
 		},
-		pokes: []poke{{0x6900, 0x1ff, 6}, {0x7400, 0x3ff, 4}, {0x7000, 0x3ff, 2}, {0x7c00, 0, 1}, {0x7d00, 7, 2}, {0x7d80, 7, 1}},
+		pokes: pokes,
 		ins:   [][2]int{{0x7c00, 0x7500}, {0x7c80, 0x7501}, {0x7d00, 0x7502}, {0x7d80, 0x7503}},
 		every: func(a *asm) {
 			// the DMA copies the sprite list from 6900 to 7000
@@ -445,7 +454,7 @@ func dkongProgram(seed uint64) []byte {
 			a.sta(0x7d85)
 			a.sta(0x7d84) // NMI on
 		},
-	}, 0x4000, seed)
+	}, size, seed)
 }
 
 // dkSoundProgram: the 8035 reads the tune latch and the tune data and plays
@@ -487,6 +496,31 @@ func dkongSet(seed uint64, chaos bool, zip string) *testSet {
 		t.name += "-chaos"
 	}
 	splitInto(t, g, "cpu", prog, nil)
+	splitInto(t, g, "sound", snd, nil)
+	fillRest(t, g, r, nil)
+	return t
+}
+
+// dkongjrSet: Junior's set; the program is scrambled into the ROMs' 2 KB parts
+// the way the board puts them back together.
+func dkongjrSet(seed uint64, chaos bool) *testSet {
+	r := &rng{seed | 1}
+	g := gameByID("dkongjr", 0)
+	t := &testSet{name: "dkongjr", zipName: "dkongjr.zip", frames: 3000}
+	prog := dkongProgramN(seed, true)
+	snd := make([]byte, 0x1000)
+	copy(snd, dkSoundProgram())
+	copy(snd[0x800:], r.bytes(0x800))
+	if chaos {
+		prog = r.bytes(0x6000)
+		copy(snd, r.bytes(0x1000))
+		t.name += "-chaos"
+	}
+	parts := make([]byte, 0x6000)
+	for i, at := range dkJrROM {
+		copy(parts[i*0x800:(i+1)*0x800], prog[at:])
+	}
+	splitInto(t, g, "cpu", parts, nil)
 	splitInto(t, g, "sound", snd, nil)
 	fillRest(t, g, r, nil)
 	return t
