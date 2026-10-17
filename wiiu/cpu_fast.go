@@ -30,6 +30,9 @@ func (m *Memory) InvalidateCode(addr, n uint32) {
 	}
 	for p := first; p <= last; p++ {
 		m.code[p] = nil
+		if m.jit != nil {
+			m.jit.invalidate(p)
+		}
 	}
 }
 
@@ -243,6 +246,9 @@ func fAddis(c *CPU, inst uint32) { c.GPR[inst>>21&31] = c.GPR[inst>>16&31] + ins
 func fBc(c *CPU, inst uint32) {
 	bo, bi := inst>>21&31, inst>>16&31
 	ctx := c.Context
+	if inst&1 != 0 {
+		ctx.LR = ctx.PC
+	}
 	if bo&4 == 0 {
 		ctx.CTR--
 		if (ctx.CTR != 0) == (bo&2 != 0) {
@@ -251,9 +257,6 @@ func fBc(c *CPU, inst uint32) {
 	}
 	if bo&0x10 == 0 && (ctx.CR>>(31-bi)&1 != 0) != (bo&8 != 0) {
 		return
-	}
-	if inst&1 != 0 {
-		ctx.LR = ctx.PC
 	}
 	bd := uint32(int32(int16(inst & 0xfffc)))
 	if inst&2 != 0 {

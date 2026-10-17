@@ -15,6 +15,7 @@ package wiiu
 import (
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 )
@@ -129,6 +130,9 @@ func newMachine(files *FileSystem) *Machine {
 	}
 	if m.Files == nil {
 		m.Files = NewFileSystem()
+	}
+	if jitSupported && os.Getenv("RETROPIXELS_WIIU_JIT") != "0" {
+		m.Mem.jit = newJIT(m.Mem)
 	}
 	m.Mem.Fault = func(addr uint32, write bool) {
 		c := m.runningCPU()
