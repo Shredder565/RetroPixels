@@ -80,7 +80,8 @@ type board struct {
 	p      [2]arcade.Pad
 	screen []uint32
 	out    *arcade.Resampler
-	t      int // cycle of the frame the sound has reached
+	rate   float64 // output sample rate
+	t      int     // cycle of the frame the sound has reached
 }
 
 type cpuBus struct {
@@ -119,7 +120,7 @@ func newBoard(k kind) func(g *arcade.Game, files arcade.Files, opts arcade.Opts)
 		if rate <= 0 {
 			rate = 48000
 		}
-		b.out = arcade.NewResampler(wsgHz, float64(rate))
+		b.rate = float64(rate)
 		b.n54.init(wsgHz)
 		b.p = [2]arcade.Pad{{}, {}}
 		for i := range b.cpu {
@@ -158,6 +159,7 @@ func (b *board) Reset() {
 	b.eaAddr, b.eaData, b.eaCtl = 0, 0, 0
 	b.vid.reset()
 	b.t = 0
+	b.out = arcade.NewResampler(wsgHz, b.rate)
 }
 
 // ---------------------------------------------------------------- the bus
@@ -353,7 +355,14 @@ func (b *board) RunFrame() {
 			b.cpu[2].NMI() // picture lines 64 and 192
 		}
 		end := (line + 1) * lineCyc
-		for t := line*lineCyc + slice; t <= end; t += slice {
+		step := slice
+		if line == 0 {
+			// the main processor answers the interrupt first (Galaga
+			// reads the sub processor's frame counter there before the
+			// sub processor moves it on)
+			step = lineCyc
+		}
+		for t := line*lineCyc + step; t <= end; t += step {
 			b.run(t)
 		}
 	}
@@ -363,8 +372,8 @@ func (b *board) RunFrame() {
 	}
 	b.io.nextNMI -= frameCyc
 	b.t = 0
-	b.vid.render(b)
 	b.vid.endFrame(b)
+	b.vid.render(b)
 	// the watchdog restarts the board when the game stops checking in
 	b.wdog++
 	if b.wdog > 8 {

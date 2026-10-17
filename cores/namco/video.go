@@ -29,7 +29,6 @@ type video struct {
 	bgPen                [256]uint32
 	starPal              [64]uint32
 	stars                starfield
-	opaque               []bool // pixels already covered this frame
 	charRom, sprRom      []uint8
 	lookupChr, lookupSpr []uint8
 }
@@ -92,7 +91,7 @@ func decodeSprites(rom []uint8) []uint8 {
 }
 
 func newVideo(k kind, g *arcade.Game, files arcade.Files) (*video, error) {
-	v := &video{kind: k, opaque: make([]bool, scrW*scrH)}
+	v := &video{kind: k}
 	pal := arcade.Region(g, files, "palette", 32)
 	for i := range v.palette {
 		v.palette[i] = promColour(pal[i])
@@ -142,7 +141,7 @@ func decodeChars1bpp(rom []uint8) []uint8 {
 	for t := 0; t < n; t++ {
 		for y := 0; y < 8; y++ {
 			for x := 0; x < 8; x++ {
-				out[t*64+y*8+x] = rom[t*8+y] >> (7 - x) & 1
+				out[t*64+y*8+x] = rom[t*8+y] >> x & 1
 			}
 		}
 	}
@@ -152,43 +151,49 @@ func decodeChars1bpp(rom []uint8) []uint8 {
 func (v *video) reset() { v.stars.reset() }
 
 func (v *video) render(b *board) {
-	for i := range v.opaque {
-		v.opaque[i] = false
-	}
 	scr := b.screen
+	flip := b.vlat[7] != 0
 	switch v.kind {
 	case galaga:
 		for i := range scr {
 			scr[i] = 0
 		}
-		v.drawStars(b)
-		v.drawSprites(b, 0)
-		v.drawCharsGalaga(b)
+		v.drawStars(b)         // (the stars aren't turned with the picture)
+		v.drawSprites(b, flip) // Galaga's characters go over the sprites
+		v.drawCharsGalaga(b, flip)
 	case digdug:
 		v.drawBG(b)
-		v.drawSprites(b, 0)
 		v.drawCharsDigdug(b)
-	}
-	if b.vlat[7] != 0 {
-		// flipped (cocktail): the whole picture turned around
-		for i, j := 0, len(scr)-1; i < j; i, j = i+1, j-1 {
-			scr[i], scr[j] = scr[j], scr[i]
+		if flip {
+			turn(scr)
 		}
+		v.drawSprites(b, flip)
 	}
 }
 
+// turn turns a picture upside down (flipped screen, for cocktail tables).
+func turn(scr []uint32) {
+	for i, j := 0, len(scr)-1; i < j; i, j = i+1, j-1 {
+		scr[i], scr[j] = scr[j], scr[i]
+	}
+}
+
+// endFrame: what changes from one frame to the next by itself.
 func (v *video) endFrame(b *board) {
 	if v.kind == galaga {
 		v.stars.step(b)
 	}
 }
 
-func (v *video) drawCharsGalaga(b *board) {
+// drawCharsGalaga: 128 characters (bit 7 of the code makes no difference:
+// the self-test's screens of random codes match MAME only that way), the
+// colour's low 6 bits; pen 15 of the lookup is see-through.
+func (v *video) drawCharsGalaga(b *board, flip bool) {
 	scr := b.screen
 	for tr := 0; tr < 28; tr++ {
 		for tc := 0; tc < 36; tc++ {
 			o := tileOffset(tc, tr)
-			t := int(b.vram[o]) * 64
+			t := int(b.vram[o]&0x7f) * 64
 			col := int(b.vram[0x400+o]&0x3f) << 2
 			for y := 0; y < 8; y++ {
 				d := (tr*8+y)*scrW + tc*8
@@ -196,7 +201,11 @@ func (v *video) drawCharsGalaga(b *board) {
 				for x := 0; x < 8; x++ {
 					p := col | int(row[x])
 					if !v.charClear[p] {
-						scr[d+x] = v.charPen[p]
+						if flip {
+							scr[len(scr)-1-d-x] = v.charPen[p]
+						} else {
+							scr[d+x] = v.charPen[p]
+						}
 					}
 				}
 			}
@@ -204,10 +213,10 @@ func (v *video) drawCharsGalaga(b *board) {
 	}
 }
 
-func (v *video) drawSprites(b *board, _ int) {
+func (v *video) drawSprites(b *board, flip bool) {
 	scr := b.screen
 	r1, r2, r3 := b.ram[0][0x380:], b.ram[1][0x380:], b.ram[2][0x380:]
-	for n := 0; n < 64; n++ {
+	for n := 0; n < 64; n++ { // later sprites on top
 		o := n * 2
 		code := int(r1[o])
 		col := int(r1[o+1]&0x3f) << 2
@@ -220,10 +229,25 @@ func (v *video) drawSprites(b *board, _ int) {
 		w, h := 1+int(attr>>2&1), 1+int(attr>>3&1)
 		if v.kind == galaga {
 			code &= 0x7f
+		} else {
+			// Dig Dug: bit 7 of the code makes a 32x32 sprite of four
+			// pictures in a row; the column has no top bit and wraps, one
+			// pixel further on than Galaga's
+			sx = (int(r2[o+1]) - 39) & 0xff
+			w, h = 1, 1
+			if code&0x80 != 0 {
+				w, h = 2, 2
+				code = code&0xc0 | (code&0x3f)<<2
+			}
 		}
 		sy -= 16 * (h - 1)
 		sy = (sy & 0xff) - 32
 		fx, fy := attr&1 != 0, attr&2 != 0
+		if flip {
+			// flipped, each sprite's picture turns where it is (the game
+			// moves them itself)
+			fx, fy = !fx, !fy
+		}
 		for j := 0; j < h; j++ {
 			for i := 0; i < w; i++ {
 				ci, cj := i, j
@@ -271,13 +295,38 @@ func (v *video) drawSprite(scr []uint32, code, col, sx, sy int, fx, fy bool) {
 	}
 }
 
+// drawBG: Dig Dug's playfield, one of four maps in the playfield ROM
+// ($A000/$A001), its colours from bank $A004/$A005 of the lookup PROM;
+// $A003 turns it off.
 func (v *video) drawBG(b *board) {
 	scr := b.screen
-	for i := range scr {
-		scr[i] = 0
+	if b.vlat[3] != 0 {
+		for i := range scr {
+			scr[i] = v.palette[0]
+		}
+		return
+	}
+	pf := int(b.vlat[0]|b.vlat[1]<<1) << 10
+	bank := int(b.vlat[4]|b.vlat[5]<<1) << 4
+	for tr := 0; tr < 28; tr++ {
+		for tc := 0; tc < 36; tc++ {
+			code := int(v.bgMap[pf|tileOffset(tc, tr)])
+			col := (code>>4 | bank) << 2
+			t := code * 64
+			for y := 0; y < 8; y++ {
+				d := (tr*8+y)*scrW + tc*8
+				row := v.bgTiles[t+y*8 : t+y*8+8]
+				for x := 0; x < 8; x++ {
+					scr[d+x] = v.bgPen[col|int(row[x])]
+				}
+			}
+		}
 	}
 }
 
+// drawCharsDigdug: one bit a pixel; set pixels take colour
+// ((code>>4)&14)|((code>>3)&2) of the palette's first half (black ones cut
+// the tunnels), clear pixels show the playfield.
 func (v *video) drawCharsDigdug(b *board) {
 	scr := b.screen
 	for tr := 0; tr < 28; tr++ {
@@ -285,13 +334,13 @@ func (v *video) drawCharsDigdug(b *board) {
 			o := tileOffset(tc, tr)
 			code := int(b.vram[o])
 			t := (code & 0x7f) * 64
-			col := code >> 4 & 0x0e
+			pen := v.palette[code>>4&0x0e|code>>3&2]
 			for y := 0; y < 8; y++ {
 				d := (tr*8+y)*scrW + tc*8
 				row := v.chars[t+y*8 : t+y*8+8]
 				for x := 0; x < 8; x++ {
 					if row[x] != 0 {
-						scr[d+x] = v.palette[col|1]
+						scr[d+x] = pen
 					}
 				}
 			}

@@ -90,7 +90,7 @@ func galagaCommon(chars, spr0, spr1 arcade.File) []arcade.File {
 		f("1c.bin", 256, "sprlut", 0, "prom-3.1c"),
 		optional(f("1d.bin", 256, "wave", 0, "prom-1.1d")),
 		optional(f("5c.bin", 256, "timing", 0, "prom-2.5c")), // not used
-		optional(f("51xx.bin", 1024, "mcu", 0)),                // simulated (custom.go)
+		optional(f("51xx.bin", 1024, "mcu", 0)),              // simulated (custom.go)
 		optional(f("54xx.bin", 1024, "mcu", 0x400)),
 	}
 }
@@ -109,7 +109,9 @@ func digdugCommon(cpu3, chars arcade.File, bg ...arcade.File) []arcade.File {
 	)
 }
 
-func list(a []arcade.File, b ...arcade.File) []arcade.File { return append(append([]arcade.File(nil), b...), a...) }
+func list(a []arcade.File, b ...arcade.File) []arcade.File {
+	return append(append([]arcade.File(nil), b...), a...)
+}
 
 func init() {
 	galagaGfx := galagaCommon(f("07m_g08.bin", k4, "chars", 0, "gg1-9.4l", "gg1_9.4l", "2600j.bin"),

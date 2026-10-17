@@ -5,9 +5,11 @@ package namco
 
 import (
 	"fmt"
+	"hash/fnv"
 	"image"
 	"image/color"
 	"image/png"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -153,14 +155,24 @@ func TestRefRender(t *testing.T) {
 			for i := 0; i < 3; i++ {
 				copy(b.ram[i][:], d[0x800+i*0x800:0xc00+i*0x800])
 			}
-			copy(b.vlat[:], d[0x2000:0x2008])
-			b.vid.render(b)
-			got := upright(b)
+			for i := range b.vlat {
+				b.vlat[i] = d[0x2000+i] & 1
+			}
+			if os.Getenv("RP_FLIP") != "" {
+				b.vlat[7] = 1 // MAME's run forced the flip latch
+			}
 			want, w, h, err := readPix(strings.TrimSuffix(bin, ".bin") + ".png")
 			if err != nil || w != scrH || h != scrW {
 				t.Logf("%s: no picture", bin)
 				continue
 			}
+			if b.kind == galaga {
+				raw := make([]uint32, scrW*scrH)
+				arcade.RotateInto(want, scrH, scrW, 270, raw)
+				b.vid.stars.scroll = alignStars(b, raw)
+			}
+			b.vid.render(b)
+			got := upright(b)
 			diff := 0
 			side := make([]uint32, w*3*h)
 			for y := 0; y < h; y++ {
@@ -225,7 +237,7 @@ func TestRefSprites(t *testing.T) {
 						b.ram[1][0x380+m*2] = 0
 					}
 				}
-				b.vid.drawSprites(b, 0)
+				b.vid.drawSprites(b, false)
 				for i := 0; i < 3; i++ {
 					copy(b.ram[i][0x380:], saved[i][:])
 				}
@@ -275,4 +287,90 @@ func refSets() [][2]string {
 		return out
 	}
 	return [][2]string{{"galaga", "galagao"}, {"digdug", "digdug1"}}
+}
+
+// alignStars finds where MAME's starfield sequence starts in a picture
+// (MAME's pixels in the board's orientation).
+func alignStars(b *board, raw []uint32) int {
+	var starAt []int
+	for n, s := range starSeq {
+		if s&0xf429 == 0xf000 {
+			starAt = append(starAt, n)
+		}
+	}
+	on := b.vlat[5]
+	b.vlat[5] = 0
+	b.vid.render(b)
+	b.vlat[5] = on
+	scr := b.screen
+	best, bestN, tries := 0, -1, 0
+	for y := 0; y < scrH; y++ {
+		for x := 16; x < 272; x++ {
+			if raw[y*scrW+x] == 0 || scr[y*scrW+x] != 0 {
+				continue
+			}
+			for _, n := range starAt {
+				o := ((n-(x-16)-256*y)%starPeriod + starPeriod) % starPeriod
+				m := 0
+				for _, k := range starAt {
+					i := ((k-o)%starPeriod + starPeriod) % starPeriod
+					xx, yy := i%256+16, i/256
+					if yy < scrH && raw[yy*scrW+xx] != 0 {
+						m++
+					}
+				}
+				if m > bestN {
+					best, bestN = o, m
+				}
+			}
+			if tries++; tries == 12 {
+				return best
+			}
+		}
+	}
+	return best
+}
+
+// TestRealStateAndReset: with the user's sets, a saved state plays on the
+// same after loading, and Reset starts the game over.
+func TestRealStateAndReset(t *testing.T) {
+	for _, set := range []string{"galaga", "digdug"} {
+		c := openReal(t, set)
+		b := c.Board().(*board)
+		mp := mamePlay{s: 1}
+		play := func(n int) uint64 {
+			h := fnv.New64a()
+			for i := 0; i < n; i++ {
+				b.SetInput([]arcade.Pad{mp.next(), {}})
+				c.RunFrame()
+				for _, p := range c.Screen() {
+					h.Write([]byte{byte(p), byte(p >> 8), byte(p >> 16)})
+				}
+				for _, v := range c.TakeAudio() {
+					h.Write([]byte{byte(math.Float32bits(v)), byte(math.Float32bits(v) >> 16)})
+				}
+			}
+			return h.Sum64()
+		}
+		first := play(300)
+		play(1000)
+		s, err := c.SaveState()
+		if err != nil {
+			t.Fatal(err)
+		}
+		mp0 := mp
+		h1 := play(600)
+		if err := c.LoadState(s); err != nil {
+			t.Fatal(err)
+		}
+		mp = mp0
+		if h2 := play(600); h1 != h2 {
+			t.Errorf("%s: a loaded state plays differently", set)
+		}
+		c.Reset()
+		mp = mamePlay{s: 1}
+		if h := play(300); h != first {
+			t.Errorf("%s: Reset doesn't start over", set)
+		}
+	}
 }

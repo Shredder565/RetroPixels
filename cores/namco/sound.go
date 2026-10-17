@@ -108,9 +108,9 @@ func (s *wsg) sample() float64 {
 	return float64(mix) * wsgGain
 }
 
-// wsgGain: one voice at full volume swings about ±0.3, as loud as MAME's
+// wsgGain: one voice at full volume swings about ±0.18, as loud as MAME's
 // recording of the boards.
-const wsgGain = 1.0 / 400
+const wsgGain = 1.0 / 668
 
 func (s *wsg) save(w *arcade.StateW) {
 	w.Bytes(s.reg[:])
