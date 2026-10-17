@@ -5,6 +5,11 @@ package wiiu
 // on its way through. Here the window is a linear buffer, tiled into the
 // surface when the program lets go of it (GX2FreeTilingAperture).
 
+import (
+	"encoding/binary"
+	"math/bits"
+)
+
 type aperture struct {
 	buf         uint32
 	lay         surfLayout
@@ -66,8 +71,11 @@ func init() {
 func (ap *aperture) copy(m *Machine, back bool) (lo, hi uint32) {
 	bpp := ap.lay.BPP / 8
 	lo = ^uint32(0)
-	row := make([]byte, ap.w*bpp)
 	all := m.apertureAddrs(ap)
+	if bpp == 4 {
+		return ap.copy32(m, back, all)
+	}
+	row := make([]byte, ap.w*bpp)
 	for y := uint32(0); y < ap.h; y++ {
 		lin := ap.buf + y*ap.lay.Pitch*bpp
 		addrs := all[y*ap.w : (y+1)*ap.w]
@@ -136,4 +144,42 @@ func (m *Machine) apertureAddrs(ap *aperture) []uint32 {
 	}
 	m.apAddrs, m.apAddrsKey = a, k
 	return a
+}
+
+// copy32 is copy for 4-byte elements, a word at a time.
+func (ap *aperture) copy32(m *Machine, back bool, all []uint32) (lo, hi uint32) {
+	swap := func(v uint32) uint32 { return v }
+	switch ap.endian {
+	case 1:
+		swap = func(v uint32) uint32 { return v>>8&0x00ff00ff | v<<8&0xff00ff00 }
+	case 2, 3:
+		swap = bits.ReverseBytes32
+	}
+	mem := m.Mem
+	lo = ^uint32(0)
+	for y := uint32(0); y < ap.h; y++ {
+		lin := ap.buf + y*ap.lay.Pitch*4
+		addrs := all[y*ap.w : (y+1)*ap.w]
+		row := mem.Slice(lin, len(addrs)*4)
+		for x, a := range addrs {
+			if back {
+				var v uint32
+				if row != nil {
+					v = binary.BigEndian.Uint32(row[x*4:])
+				} else {
+					v = mem.Read32(lin + uint32(x)*4)
+				}
+				mem.Write32(a, swap(v))
+				lo, hi = min(lo, a), max(hi, a+4)
+				continue
+			}
+			v := swap(mem.Read32(a))
+			if row != nil {
+				binary.BigEndian.PutUint32(row[x*4:], v)
+			} else {
+				mem.Write32(lin+uint32(x)*4, v)
+			}
+		}
+	}
+	return lo, hi
 }

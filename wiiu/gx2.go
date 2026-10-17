@@ -212,13 +212,20 @@ func (m *Machine) scanShow(i int) {
 	frame := sb.W * sb.H * 4
 	src := sb.Addr + sb.Front*frame
 	row := make([]byte, sb.W*4)
+	xs := make([]uint32, dw) // the scan buffer column of each screen column
+	for x := range xs {
+		xs[x] = uint32(x) * sb.W / dw * 4
+	}
 	for y := uint32(0); y < dh; y++ {
 		sy := y * sb.H / dh
-		m.Mem.ReadBytes(src+sy*sb.W*4, row)
+		r := m.Mem.Slice(src+sy*sb.W*4, len(row))
+		if r == nil {
+			m.Mem.ReadBytes(src+sy*sb.W*4, row)
+			r = row
+		}
 		d := dst[y*dw : y*dw+dw]
-		for x := uint32(0); x < dw; x++ {
-			sx := x * sb.W / dw
-			d[x] = uint32(row[sx*4])<<16 | uint32(row[sx*4+1])<<8 | uint32(row[sx*4+2])
+		for x, o := range xs {
+			d[x] = uint32(r[o])<<16 | uint32(r[o+1])<<8 | uint32(r[o+2])
 		}
 	}
 	if i == 0 {
