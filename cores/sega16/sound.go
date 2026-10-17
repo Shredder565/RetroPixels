@@ -30,8 +30,8 @@ const (
 	ymTicks = 64 * 5
 	// the YM2151's and the uPD7759's levels in the mono mix: the balance
 	// measured against MAME playing the same commands on the same sound
-	// program (the voice about 5 times the music's RMS), at 1.4 times MAME's
-	// overall level
+	// program (the voice about 5 times the music's RMS), at MAME's overall
+	// level
 	fmGain  = 0.178
 	updGain = 0.289
 )
