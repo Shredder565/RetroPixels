@@ -381,6 +381,14 @@ func init() {
 	ts := func(m *Machine, cpu *CPU, t *Thread) { ret64(cpu, m.bootTime+m.Time()) }
 	reg(x, "GX2GetRetiredTimeStamp", ts)
 	reg(x, "GX2GetLastSubmittedTimeStamp", ts)
+	// (u64 *out): the GPU's clock when it reaches this point
+	sample := func(m *Machine, cpu *CPU, t *Thread) {
+		if p := arg(cpu, 0); p != 0 {
+			m.Mem.Write64(p, m.bootTime+m.Time())
+		}
+	}
+	reg(x, "GX2SampleTopGPUCycle", sample)
+	reg(x, "GX2SampleBottomGPUCycle", sample)
 	reg(x, "GX2GetLastFrame", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) })
 	reg(x, "GX2GetLastFrameGamma", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) })
 	reg(x, "GX2GetMainCoreId", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 1) })

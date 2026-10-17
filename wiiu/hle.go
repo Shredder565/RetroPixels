@@ -87,11 +87,16 @@ func (m *Machine) thunk(lib, name string) uint32 {
 // HasFunc reports whether RetroPixels has its own version of lib.name.
 func HasFunc(lib, name string) bool { return hleFuncs[libName(lib)][name] != nil }
 
+// Missing lists the library functions the program called that RetroPixels
+// doesn't have yet, in the order they were first called.
+func (m *Machine) Missing() []string { return m.missing }
+
 func unimplemented(lib, name string) hleFunc {
 	return func(m *Machine, c *CPU, t *Thread) {
 		key := lib + "." + name
 		if !m.warned[key] {
 			m.warned[key] = true
+			m.missing = append(m.missing, name)
 			m.logf("not yet in RetroPixels: %s (called from %08X)", key, c.LR)
 		}
 		c.GPR[3] = 0

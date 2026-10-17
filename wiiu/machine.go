@@ -99,6 +99,7 @@ type Machine struct {
 	fontAddr, fontSize uint32 // the system font, once a program asks
 	fontTried          bool
 	gpuNote            string               // why there's no host GPU
+	missing            []string             // functions called that aren't here yet
 	apertures          map[uint32]*aperture // open tiling apertures by handle
 	apAddrs            []uint32             // the last aperture surface's element addresses
 	apAddrsKey         apertureKey
