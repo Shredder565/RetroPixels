@@ -4,9 +4,12 @@ package technos
 
 import (
 	"encoding/binary"
+	"hash/fnv"
 	"image"
 	"image/color"
 	"image/png"
+	"maps"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -75,7 +78,7 @@ func writeWAV(path string, s []float32, rate int) error {
 // TestRealBoot runs a set for RP_FRAMES frames (default 600) and writes a
 // picture every 100 frames to RP_OUT (development runs).
 func TestRealBoot(t *testing.T) {
-	for _, set := range []string{"ddragon"} {
+	for _, set := range []string{"ddragon", "ddragon2"} {
 		c := openReal(t, set)
 		frames := 600
 		if v, err := strconv.Atoi(os.Getenv("RP_FRAMES")); err == nil {
@@ -92,6 +95,61 @@ func TestRealBoot(t *testing.T) {
 		}
 		if out != "" {
 			writeWAV(out+"/"+set+".wav", audio, 48000)
+		}
+	}
+}
+
+// TestRealPlay plays each set through coin, start and play (the MAME
+// reference script's inputs), checks the sound comes alive, that a saved
+// state replays identically and that a reset starts over.
+func TestRealPlay(t *testing.T) {
+	for _, set := range []string{"ddragon", "ddragon2"} {
+		c := openReal(t, set)
+		idx := map[string]int{}
+		for i, x := range c.Info().Buttons {
+			idx[x] = i
+		}
+		p := newLuaPlayer(1)
+		hash := func(from, to int) (uint64, float64) {
+			h := fnv.New64a()
+			sum, n := 0.0, 0
+			for f := from; f <= to; f++ {
+				c.SetInput(0, p.inputs(f, idx))
+				c.RunFrame()
+				for _, px := range c.Screen() {
+					h.Write([]byte{byte(px), byte(px >> 8), byte(px >> 16)})
+				}
+				for _, v := range c.TakeAudio() {
+					sum += float64(v) * float64(v)
+					n++
+				}
+			}
+			return h.Sum64(), math.Sqrt(sum / float64(max(n, 1)))
+		}
+		boot, _ := hash(1, 300)
+		hash(301, 600)
+		s, err := c.SaveState()
+		if err != nil {
+			t.Fatal(err)
+		}
+		saved := *p
+		saved.held = maps.Clone(p.held)
+		h1, rms := hash(601, 900)
+		if rms < 0.005 {
+			t.Errorf("%s: quiet while playing (rms %.4f)", set, rms)
+		}
+		if err := c.LoadState(s); err != nil {
+			t.Fatal(err)
+		}
+		*p = saved
+		p.held = maps.Clone(saved.held)
+		if h2, _ := hash(601, 900); h2 != h1 {
+			t.Errorf("%s: a loaded state plays differently", set)
+		}
+		c.Reset()
+		*p = *newLuaPlayer(1)
+		if h, _ := hash(1, 300); h != boot {
+			t.Errorf("%s: reset doesn't start over", set)
 		}
 	}
 }

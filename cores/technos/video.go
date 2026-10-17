@@ -111,8 +111,10 @@ type video struct {
 	scrollY      int
 	flip         bool
 	sprBase      int  // where the sprite list starts in spr
+	sprCount     int  // how many five-byte entries the list has
 	dd2Sprites   bool // Double Dragon II's sprite code / colour bits
 	raw          [256 * 256]uint16
+	rowLo, rowHi int // the raw rows being drawn
 	screen       []uint32
 	pal          [384]uint32
 }
@@ -126,6 +128,7 @@ func newVideo(chars, tiles, sprites []byte) *video {
 	v.nSpr = len(sprites) / 128
 	v.sprites = tileLayout(len(sprites)/2).decode(sprites, v.nSpr)
 	v.screen = make([]uint32, scrW*scrH)
+	v.sprCount = 64
 	return v
 }
 
@@ -135,16 +138,30 @@ func (v *video) colour(i int) uint32 {
 	return arcade.RGB((lo&15)*17, (lo>>4)*17, (hi&15)*17)
 }
 
-// render draws the frame: background, sprites, characters.
-func (v *video) render() {
+// render draws the whole frame.
+func (v *video) render() { v.renderRows(0, scrH) }
+
+// renderRows draws screen rows y0..y1-1 from the video RAM as it is now
+// (the boards draw each row as the beam reaches it, so changes made while
+// the picture is being drawn show from the next row on): background,
+// sprites, characters.
+func (v *video) renderRows(y0, y1 int) {
+	if y0 >= y1 {
+		return
+	}
 	for i := range v.pal {
 		v.pal[i] = v.colour(i)
 	}
+	lo, hi := y0, y1
+	if v.flip {
+		lo, hi = scrH-y1, scrH-y0
+	}
+	v.rowLo, v.rowHi = lo, hi
 	raw := &v.raw
 	// background: 32x32 tiles in four 16x16 quarters; two bytes a tile:
 	// attribute (bits 0-2 code bits 8-10, 3-5 colour, 6 flip x, 7 flip y),
 	// then code
-	for y := 0; y < scrH; y++ {
+	for y := lo; y < hi; y++ {
 		by := (y + firstLine + v.scrollY) & 511
 		row := by >> 4
 		for x := 0; x < scrW; x++ {
@@ -166,6 +183,9 @@ func (v *video) render() {
 	v.drawSprites()
 	// characters: 32x32; attribute (bits 0-2 code bits 8-10, 5-7 colour), code
 	for ty := 0; ty < 32; ty++ {
+		if ty*8+8-firstLine <= lo || ty*8-firstLine >= hi {
+			continue
+		}
 		for tx := 0; tx < 32; tx++ {
 			o := 2 * (ty<<5 | tx)
 			attr := int(v.fg[o])
@@ -174,7 +194,7 @@ func (v *video) render() {
 			t := v.chars[code<<6:]
 			for y := 0; y < 8; y++ {
 				sy := ty*8 + y - firstLine
-				if sy < 0 || sy >= scrH {
+				if sy < lo || sy >= hi {
 					continue
 				}
 				d := sy<<8 | tx*8
@@ -186,7 +206,7 @@ func (v *video) render() {
 			}
 		}
 	}
-	for y := 0; y < scrH; y++ {
+	for y := y0; y < y1; y++ {
 		for x := 0; x < scrW; x++ {
 			sx, sy := x, y
 			if v.flip {
@@ -206,7 +226,7 @@ const sprX, sprY, sprWideBit, sprTallBit, sprStepX, sprStepY = 240, 232, 0x20, 0
 // y bit 8), code high bits and colour, code, x.
 func (v *video) drawSprites() {
 	s := v.spr[v.sprBase:]
-	for i := 0; i < 64; i++ {
+	for i := 0; i < v.sprCount; i++ {
 		e := s[i*5 : i*5+5]
 		attr := int(e[1])
 		if attr&0x80 == 0 {
@@ -258,7 +278,7 @@ func (v *video) sprite(code, colr, sx, sy int, fx, fy bool) {
 	t := v.sprites[(code%v.nSpr)<<8:]
 	for y := 0; y < 16; y++ {
 		yy := (sy + y) & 511
-		if yy >= scrH {
+		if yy < v.rowLo || yy >= v.rowHi {
 			continue
 		}
 		ty := y

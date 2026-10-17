@@ -1,7 +1,6 @@
 package technos
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -72,8 +71,13 @@ func TestPlayRun(t *testing.T) {
 	c := openReal(t, set)
 	if v := os.Getenv("RP_GAINS"); v != "" {
 		a, b, _ := strings.Cut(v, ",")
-		ddFMGain, _ = strconv.ParseFloat(a, 64)
-		ddPCMGain, _ = strconv.ParseFloat(b, 64)
+		fm, _ := strconv.ParseFloat(a, 64)
+		pcm, _ := strconv.ParseFloat(b, 64)
+		if set == "ddragon2" {
+			dd2FMGain, dd2PCMGain = fm, pcm
+		} else {
+			ddFMGain, ddPCMGain = fm, pcm
+		}
 	}
 	idx := map[string]int{}
 	for i, b := range c.Info().Buttons {
@@ -90,26 +94,4 @@ func TestPlayRun(t *testing.T) {
 		}
 	}
 	writeWAV(filepath.Join(out, set+".wav"), audio, 48000)
-}
-
-// TestTrace2 (RP_TRACE2=frames) prints Double Dragon II's board events with
-// the frame and line, in the format of the MAME Lua log.
-func TestTrace2(t *testing.T) {
-	n, _ := strconv.Atoi(os.Getenv("RP_TRACE2"))
-	if n == 0 {
-		t.Skip()
-	}
-	c := openReal(t, "ddragon2")
-	b := c.Board().(*ddragon2)
-	f := 0
-	b.trace = func(ev string, v uint8) { fmt.Printf("%d %3d %s %02x\n", f, b.line, ev, v) }
-	idx := map[string]int{}
-	for i, x := range c.Info().Buttons {
-		idx[x] = i
-	}
-	p := newLuaPlayer(1)
-	for f = 1; f <= n; f++ {
-		c.SetInput(0, p.inputs(f, idx))
-		c.RunFrame()
-	}
 }

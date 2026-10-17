@@ -377,17 +377,27 @@ func (b *ddragon) TakeAudio() []float32    { return b.out.Take() }
 
 // RunFrame runs from the start of the vertical blank (where the last frame
 // was drawn) to the next one, and draws the frame.
+func (b *ddragon) syncVid() {
+	b.vid.scrollX = int(b.scrollX) | int(b.ctrl&1)<<8
+	b.vid.scrollY = int(b.scrollY) | int(b.ctrl&2)<<7
+	b.vid.flip = b.ctrl&4 == 0
+}
+
+// RunFrame runs from the start of the vertical blank to the next, drawing
+// each row as its line ends (the game changes the video RAM while the
+// picture is being drawn).
 func (b *ddragon) RunFrame() {
 	for {
+		row := b.line
 		b.runLine()
+		if row < scrH {
+			b.syncVid()
+			b.vid.renderRows(row, row+1)
+		}
 		if b.line == vblankLine {
 			break
 		}
 	}
-	b.vid.scrollX = int(b.scrollX) | int(b.ctrl&1)<<8
-	b.vid.scrollY = int(b.scrollY) | int(b.ctrl&2)<<7
-	b.vid.flip = b.ctrl&4 == 0
-	b.vid.render()
 	b.frame++
 }
 
@@ -396,10 +406,7 @@ func (b *ddragon) runLine() {
 	if line == vblankLine {
 		b.main.NMI()
 	}
-	if line&15 == 0 && (line < 256 || line == 264) {
-		b.firq = true
-	}
-	if line == 264 {
+	if line&15 == 0 && line > 0 && line <= vblankLine || line == 264 { // lines 16, 32 .. 240 and 264
 		b.firq = true
 	}
 	b.main.FIRQ, b.main.IRQ = b.firq, b.irq

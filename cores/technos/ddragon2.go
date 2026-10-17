@@ -65,7 +65,6 @@ type ddragon2 struct {
 	pads                       []arcade.Pad
 	line                       int
 	frame                      int64
-	trace                      func(ev string, v uint8) // tests: board events
 }
 
 type dd2MainBus struct{ b *ddragon2 }
@@ -91,9 +90,6 @@ func (x dd2SubBus) Write(a uint16, v uint8) {
 		x.b.shared[a-0xc000] = v
 	case a == 0xe000:
 		x.b.irq = true
-		if x.b.trace != nil {
-			x.b.trace("subE000", v)
-		}
 	}
 }
 
@@ -143,6 +139,7 @@ func newDDragon2(g *arcade.Game, files arcade.Files, opts arcade.Opts) (arcade.B
 	b.vid = newVideo(arcade.Region(g, files, "chars", 0x10000), arcade.Region(g, files, "tiles", 0x40000),
 		arcade.Region(g, files, "sprites", 0xc0000))
 	b.vid.dd2Sprites = true
+	b.vid.sprCount = len(b.sprRAM) / 5 // Double Dragon II uses the whole sprite RAM
 	b.vid.fg, b.vid.bg, b.vid.spr = b.fgRAM[:], b.bgRAM[:], b.sprRAM[:]
 	b.vid.palLo, b.vid.palHi = b.palRAM[:0x200], b.palRAM[0x200:]
 	b.main = m6809.New(dd2MainBus{b}, m6809.HD6309)
@@ -182,7 +179,10 @@ func (b *ddragon2) read(a uint16) uint8 {
 		return b.ram[a]
 	case a < 0x2000:
 		return b.fgRAM[a-0x1800]
-	case a < 0x2200:
+	case a < 0x2200: // the sub CPU's RAM: only reachable while the sub CPU is halted
+		if !b.subHalt {
+			return 0xff
+		}
 		return b.shared[a-0x2000]
 	case a >= 0x2800 && a < 0x3000:
 		return b.sprRAM[a-0x2800]
@@ -208,7 +208,9 @@ func (b *ddragon2) write(a uint16, v uint8) {
 	case a < 0x2000:
 		b.fgRAM[a-0x1800] = v
 	case a < 0x2200:
-		b.shared[a-0x2000] = v
+		if b.subHalt {
+			b.shared[a-0x2000] = v
+		}
 	case a >= 0x2800 && a < 0x3000:
 		b.sprRAM[a-0x2800] = v
 	case a >= 0x3000 && a < 0x3800:
@@ -231,9 +233,6 @@ func (b *ddragon2) write(a uint16, v uint8) {
 		b.snd.NMI()
 	case a == 0x380f:
 		b.sub.NMI()
-		if b.trace != nil {
-			b.trace("380f", v)
-		}
 	}
 }
 
@@ -295,17 +294,27 @@ func (b *ddragon2) SetInput(p []arcade.Pad) { b.pads = p }
 func (b *ddragon2) Screen() []uint32        { return b.vid.screen }
 func (b *ddragon2) TakeAudio() []float32    { return b.out.Take() }
 
+func (b *ddragon2) syncVid() {
+	b.vid.scrollX = int(b.scrollX) | int(b.ctrl&1)<<8
+	b.vid.scrollY = int(b.scrollY) | int(b.ctrl&2)<<7
+	b.vid.flip = b.ctrl&4 == 0
+}
+
+// RunFrame runs from the start of the vertical blank to the next, drawing
+// each row as its line ends (the games change the video RAM while the
+// picture is being drawn).
 func (b *ddragon2) RunFrame() {
 	for {
+		row := b.line
 		b.runLine()
+		if row < scrH {
+			b.syncVid()
+			b.vid.renderRows(row, row+1)
+		}
 		if b.line == vblankLine {
 			break
 		}
 	}
-	b.vid.scrollX = int(b.scrollX) | int(b.ctrl&1)<<8
-	b.vid.scrollY = int(b.scrollY) | int(b.ctrl&2)<<7
-	b.vid.flip = b.ctrl&4 == 0
-	b.vid.render()
 	b.frame++
 }
 
@@ -315,7 +324,7 @@ func (b *ddragon2) runLine() {
 	if line == vblankLine {
 		b.main.NMI()
 	}
-	if line&15 == 0 && (line < 256 || line == 264) {
+	if line&15 == 0 && line > 0 && line <= vblankLine || line == 264 { // lines 16, 32 .. 240 and 264
 		b.firq = true
 	}
 	b.sndFrac += dd2SndHz / lineHz
@@ -364,7 +373,7 @@ func (b *ddragon2) runLine() {
 	b.line = (line + 1) % lines
 }
 
-var dd2FMGain, dd2PCMGain = 1.2, 0.5
+var dd2FMGain, dd2PCMGain = 1.2, 0.41
 
 func (b *ddragon2) SaveState() ([]byte, error) {
 	w := &arcade.StateW{}
