@@ -85,15 +85,14 @@ func (c *CPU) Run(n int) {
 	m := c.Mem
 	for i := 0; i < n; i++ {
 		pc := c.PC
-		var inst uint32
-		if p := m.pages[pc>>pageBits]; p != nil {
-			o := pc & pageMask
-			inst = uint32(p[o])<<24 | uint32(p[o+1])<<16 | uint32(p[o+2])<<8 | uint32(p[o+3])
+		var d *decoded
+		if cp := m.code[pc>>pageBits]; cp != nil && cp[pc&pageMask>>2].fn != nil {
+			d = &cp[pc&pageMask>>2]
 		} else {
-			inst = m.Read32(pc)
+			d = c.decodeAt(pc)
 		}
 		c.PC = pc + 4
-		c.exec(inst)
+		d.fn(c, d.inst)
 		if c.stop {
 			c.Ran += uint64(i + 1)
 			return
@@ -929,6 +928,7 @@ func (c *CPU) exec31(inst uint32) {
 			c.setCR0(r)
 		}
 	case 982: // icbi
+		m.InvalidateCode(c.eaX(inst)&^31, 32)
 	case 1014: // dcbz
 		ea := c.eaX(inst) &^ 31
 		m.Fill(ea, 0, 32)

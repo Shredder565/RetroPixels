@@ -47,6 +47,7 @@ type region struct {
 // Memory is the address space.
 type Memory struct {
 	pages   [numPages][]byte
+	code    [numPages]*codePage // decoded instructions (cpu_fast.go)
 	regions []region
 	// Fault, when set, is called for an access outside any region; reads
 	// then give 0 and writes are dropped.

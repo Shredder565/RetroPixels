@@ -80,6 +80,7 @@ func (m *Machine) thunk(lib, name string) uint32 {
 	m.hleIndex[key] = i
 	m.Mem.Write32(addr, 0x04000000|i)
 	m.Mem.Write32(addr+4, 0x4e800020) // blr (for disassemblers)
+	m.Mem.InvalidateCode(addr, 8)
 	return addr
 }
 
