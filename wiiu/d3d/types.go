@@ -57,10 +57,11 @@ const (
 
 	MiscBufferAllowRaw = 0x20
 
-	MapRead         = 1
-	MapWrite        = 2
-	MapReadWrite    = 3
-	MapWriteDiscard = 4
+	MapRead             = 1
+	MapWrite            = 2
+	MapReadWrite        = 3
+	MapWriteDiscard     = 4
+	MapWriteNoOverwrite = 5
 
 	ClearDepth   = 1
 	ClearStencil = 2

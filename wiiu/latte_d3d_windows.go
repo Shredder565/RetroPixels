@@ -10,9 +10,11 @@ package wiiu
 // them, and kept until the memory is invalidated.
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"hash/maphash"
+	"slices"
 	"unsafe"
 
 	"retropixels/wiiu/d3d"
@@ -33,8 +35,37 @@ type d3dBackend struct {
 	sysCB, fileCB [2]d3d.Resource // per stage (VS, PS)
 	ib            d3d.Resource
 	ibSize        int
+	ibOff, ibAt   int      // the ring's end, and where the last list starts
+	ibLast        []uint32 // the last index list uploaded
 	seed          maphash.Seed
 	err           string // why the last draw fell back
+	bound         d3dBound
+}
+
+// d3dBound is what's bound on the context, so draws only change what
+// differs (every call costs).
+type d3dBound struct {
+	vs, gs, ps         uintptr
+	blend, depth, rast uintptr
+	factor             [4]float32
+	ref                uint32
+	vp                 d3d.Viewport
+	sc                 d3d.Rect
+	rtvs               []uintptr
+	dsv                uintptr
+	topo               uint32
+	ib                 uintptr
+	cbs, srvs, samps   [2][]uintptr // per stage (VS, PS)
+	sys, file          [2][]byte    // the system and constant-file blocks last uploaded
+}
+
+// ptrs gives the objects' pointers.
+func ptrs[T interface{ Ptr() uintptr }](objs []T) []uintptr {
+	out := make([]uintptr, len(objs))
+	for i, o := range objs {
+		out[i] = o.Ptr()
+	}
+	return out
 }
 
 // newD3DBackend makes the backend on a new device (WARP if warp is set).
@@ -746,7 +777,7 @@ func (b *d3dBackend) draw(st *drawState, prim uint32, ids []uint32, insts uint32
 		return true
 	}
 	c := b.c
-	c.ClearState()
+	bd := &b.bound
 	// resources
 	bind := func(stage int, p *dxProgram, ps bool) bool {
 		var views []d3d.View
@@ -805,12 +836,18 @@ func (b *d3dBackend) draw(st *drawState, prim uint32, ids []uint32, insts uint32
 		for _, w := range sys {
 			raw = binary.LittleEndian.AppendUint32(raw, w)
 		}
-		b.upload(b.sysCB[si], raw)
-		raw = raw[:0]
+		if !bytes.Equal(raw, bd.sys[si]) {
+			b.upload(b.sysCB[si], raw)
+			bd.sys[si] = raw
+		}
+		raw = make([]byte, 0, 256*16)
 		for i := uint32(0); i < 256*4; i++ {
 			raw = binary.LittleEndian.AppendUint32(raw, e.cfile(i/4, i%4))
 		}
-		b.upload(b.fileCB[si], raw)
+		if !bytes.Equal(raw, bd.file[si]) {
+			b.upload(b.fileCB[si], raw)
+			bd.file[si] = raw
+		}
 		cbs := []d3d.Resource{b.sysCB[si], b.fileCB[si]}
 		for _, bank := range p.banks {
 			base := g.reg(kcacheRegs[stage]+bank*4) << 8
@@ -824,45 +861,66 @@ func (b *d3dBackend) draw(st *drawState, prim uint32, ids []uint32, insts uint32
 			}
 			cbs = append(cbs, v.buf)
 		}
-		if ps {
-			c.PSSetConstantBuffers(0, cbs...)
-			if len(views) > 0 {
+		// (slots past what this shader uses can keep what they had)
+		if p := ptrs(cbs); !prefixOf(p, bd.cbs[si]) {
+			if ps {
+				c.PSSetConstantBuffers(0, cbs...)
+			} else {
+				c.VSSetConstantBuffers(0, cbs...)
+			}
+			bd.cbs[si] = p
+		}
+		if p := ptrs(views); len(p) > 0 && !prefixOf(p, bd.srvs[si]) {
+			if ps {
 				c.PSSetShaderResources(0, views...)
-			}
-			if len(samps) > 0 {
-				c.PSSetSamplers(0, samps...)
-			}
-		} else {
-			c.VSSetConstantBuffers(0, cbs...)
-			if len(views) > 0 {
+			} else {
 				c.VSSetShaderResources(0, views...)
 			}
-			if len(samps) > 0 {
+			bd.srvs[si] = p
+		}
+		if p := ptrs(samps); len(p) > 0 && !prefixOf(p, bd.samps[si]) {
+			if ps {
+				c.PSSetSamplers(0, samps...)
+			} else {
 				c.VSSetSamplers(0, samps...)
 			}
+			bd.samps[si] = p
 		}
 		return true
 	}
 	if !bind(stageVS, vs.prog, false) {
 		return false
 	}
-	c.VSSetShader(vs.obj)
-	if !gs.Nil() {
+	if bd.vs != vs.obj.Ptr() {
+		c.VSSetShader(vs.obj)
+		bd.vs = vs.obj.Ptr()
+	}
+	if bd.gs != gs.Ptr() {
 		c.GSSetShader(gs)
+		bd.gs = gs.Ptr()
 	}
 	if ps != nil {
 		if !bind(stagePS, ps.prog, true) {
 			return false
 		}
-		c.PSSetShader(ps.obj)
+		if bd.ps != ps.obj.Ptr() {
+			c.PSSetShader(ps.obj)
+			bd.ps = ps.obj.Ptr()
+		}
+	} else if bd.ps != 0 {
+		c.PSSetShader(d3d.Object{})
+		bd.ps = 0
 	}
 	// state
-	bd, factor := hostBlend(st)
-	bo, err := b.state('b', unsafe.Pointer(&bd), unsafe.Sizeof(bd))
+	bld, factor := hostBlend(st)
+	bo, err := b.state('b', unsafe.Pointer(&bld), unsafe.Sizeof(bld))
 	if err != nil {
 		return b.fallback("blend: %v", err)
 	}
-	c.OMSetBlendState(bo, factor, 0xffffffff)
+	if bd.blend != bo.Ptr() || bd.factor != factor {
+		c.OMSetBlendState(bo, factor, 0xffffffff)
+		bd.blend, bd.factor = bo.Ptr(), factor
+	}
 	dd, ref := hostDepthStencil(st)
 	if dsv.Nil() {
 		dd, ref = hostDepthStencil(&drawState{})
@@ -871,30 +929,66 @@ func (b *d3dBackend) draw(st *drawState, prim uint32, ids []uint32, insts uint32
 	if err != nil {
 		return b.fallback("depth: %v", err)
 	}
-	c.OMSetDepthStencilState(do, ref)
+	if bd.depth != do.Ptr() || bd.ref != ref {
+		c.OMSetDepthStencilState(do, ref)
+		bd.depth, bd.ref = do.Ptr(), ref
+	}
 	ro, err := b.state('r', unsafe.Pointer(&rs), unsafe.Sizeof(rs))
 	if err != nil {
 		return b.fallback("rasterizer: %v", err)
 	}
-	c.RSSetState(ro)
-	c.RSSetViewports(d3d.Viewport{W: float32(tw), H: float32(th), MinZ: 0, MaxZ: 1})
+	if bd.rast != ro.Ptr() {
+		c.RSSetState(ro)
+		bd.rast = ro.Ptr()
+	}
+	if vp := (d3d.Viewport{W: float32(tw), H: float32(th), MinZ: 0, MaxZ: 1}); vp != bd.vp {
+		c.RSSetViewports(vp)
+		bd.vp = vp
+	}
 	sc := st.sc
-	c.RSSetScissorRects(d3d.Rect{Left: sc[0], Top: sc[1], Right: min(sc[2], int32(tw)), Bottom: min(sc[3], int32(th))})
-	c.OMSetRenderTargets(rtvs, dsv)
-	// indices
+	if r := (d3d.Rect{Left: sc[0], Top: sc[1], Right: min(sc[2], int32(tw)), Bottom: min(sc[3], int32(th))}); r != bd.sc {
+		c.RSSetScissorRects(r)
+		bd.sc = r
+	}
+	if p := ptrs(rtvs); !slices.Equal(p, bd.rtvs) || dsv.Ptr() != bd.dsv {
+		c.OMSetRenderTargets(rtvs, dsv)
+		bd.rtvs, bd.dsv = p, dsv.Ptr()
+	}
+	// indices: appended to a ring buffer (the same list as last time is
+	// used again)
 	need := len(idx) * 4
 	if need > b.ibSize {
 		b.ib.Release()
-		b.ibSize = max(need, 64<<10)
+		b.ibSize = max(need, 1<<20)
 		if b.ib, err = b.dynBuffer(b.ibSize, d3d.BindIndexBuffer); err != nil {
 			b.ibSize = 0
 			return b.fallback("index buffer: %v", err)
 		}
+		b.ibLast, b.ibOff, b.ibAt = nil, 0, 0
 	}
-	b.upload(b.ib, unsafe.Slice((*byte)(unsafe.Pointer(&idx[0])), need))
-	c.IASetIndexBuffer(b.ib, d3d.FormatR32Uint, 0)
-	c.IASetPrimitiveTopology(topo)
-	c.DrawIndexedInstanced(uint32(len(idx)), insts, 0, 0, 0)
+	if !slices.Equal(idx, b.ibLast) {
+		mode := uint32(d3d.MapWriteNoOverwrite)
+		if b.ibOff+need > b.ibSize || b.ibLast == nil {
+			mode, b.ibOff = d3d.MapWriteDiscard, 0
+		}
+		m, err := c.Map(b.ib, 0, mode)
+		if err != nil {
+			return b.fallback("index buffer: %v", err)
+		}
+		copy(m.Bytes(b.ibOff + need)[b.ibOff:], unsafe.Slice((*byte)(unsafe.Pointer(&idx[0])), need))
+		c.Unmap(b.ib, 0)
+		b.ibLast, b.ibAt = append(b.ibLast[:0], idx...), b.ibOff
+		b.ibOff += need
+	}
+	if bd.ib != b.ib.Ptr() {
+		c.IASetIndexBuffer(b.ib, d3d.FormatR32Uint, 0)
+		bd.ib = b.ib.Ptr()
+	}
+	if bd.topo != topo {
+		c.IASetPrimitiveTopology(topo)
+		bd.topo = topo
+	}
+	c.DrawIndexedInstanced(uint32(len(idx)), insts, uint32(b.ibAt/4), 0, 0)
 	// what was drawn is newer on the host; textures made from it are old
 	for _, s := range drawn {
 		s.dirty = true
@@ -902,6 +996,9 @@ func (b *d3dBackend) draw(st *drawState, prim uint32, ids []uint32, insts uint32
 	}
 	return true
 }
+
+// prefixOf reports whether a is the start of b.
+func prefixOf(a, b []uintptr) bool { return len(a) <= len(b) && slices.Equal(a, b[:len(a)]) }
 
 // rectGS gives the rectangle geometry shader for n parameters.
 func (b *d3dBackend) rectGS(n int) (d3d.Object, error) {
