@@ -90,3 +90,49 @@ func TestDumpCompare(t *testing.T) {
 		}
 	}
 }
+
+// renderDump2 draws a Double Dragon II memory dump (0000-3fff, then 3808-380a).
+func renderDump2(b *ddragon2, d []byte) []uint32 {
+	copy(b.palRAM[:], d[0x3c00:0x4000])
+	copy(b.fgRAM[:], d[0x1800:0x2000])
+	copy(b.sprRAM[:], d[0x2800:0x3000])
+	copy(b.bgRAM[:], d[0x3000:0x3800])
+	ctrl, sx, sy := d[0x4000], d[0x4001], d[0x4002]
+	b.vid.scrollX = int(sx) | int(ctrl&1)<<8
+	b.vid.scrollY = int(sy) | int(ctrl&2)<<7
+	b.vid.flip = ctrl&4 == 0
+	b.vid.render()
+	return b.vid.screen
+}
+
+func TestDumpCompare2(t *testing.T) {
+	files, _ := filepath.Glob(filepath.Join(dumpDir(), "dd2_*.bin"))
+	if len(files) == 0 {
+		t.Skip("no MAME dumps")
+	}
+	sort.Strings(files)
+	c := openReal(t, "ddragon2")
+	b := c.Board().(*ddragon2)
+	out := os.Getenv("RP_OUT")
+	for _, f := range files {
+		d, err := os.ReadFile(f)
+		if err != nil || len(d) < 0x4003 {
+			continue
+		}
+		want, w, h, err := readPNG(f[:len(f)-4] + ".png")
+		if err != nil || w != scrW || h != scrH {
+			continue
+		}
+		got := renderDump2(b, d)
+		diff := 0
+		for i := range got {
+			if got[i] != want[i] {
+				diff++
+			}
+		}
+		t.Logf("%s: %d pixels differ", filepath.Base(f), diff)
+		if out != "" {
+			writePix(t, got, scrW, scrH, filepath.Join(out, fmt.Sprintf("dump-%s.png", filepath.Base(f[:len(f)-4]))))
+		}
+	}
+}

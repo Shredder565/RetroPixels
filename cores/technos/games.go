@@ -76,6 +76,19 @@ var dipsDDragon = []arcade.Dip{
 	{ID: "lives", Label: "Lives", Default: 3, Options: []arcade.DipOption{opt("2", 3), opt("3", 2), opt("4", 1), opt("Infinite", 0)}},
 }
 
+// Double Dragon II's switches.
+var dipsDDragon2 = []arcade.Dip{
+	{ID: "coina", Label: "Coin A", Default: 7, Options: coins},
+	{ID: "coinb", Label: "Coin B", Default: 7, Options: coins},
+	{ID: "cabinet", Label: "Cabinet", Default: 1, Options: cabinet},
+	{ID: "flip", Label: "Flip screen", Default: 1, Options: offOn},
+	{ID: "difficulty", Label: "Difficulty", Default: 2, Options: []arcade.DipOption{opt("Easy", 1), opt("Medium", 3), opt("Hard", 2), opt("Hardest", 0)}},
+	{ID: "demosound", Label: "Demo sounds", Default: 1, Options: []arcade.DipOption{opt("Off", 0), opt("On", 1)}},
+	{ID: "kick", Label: "Hurricane kick", Default: 0, Options: []arcade.DipOption{opt("Easy", 0), opt("Normal", 1)}},
+	{ID: "timer", Label: "Timer", Default: 1, Options: []arcade.DipOption{opt("Very fast", 0), opt("Fast", 1), opt("Normal", 3), opt("Slow", 2)}},
+	{ID: "lives", Label: "Lives", Default: 2, Options: []arcade.DipOption{opt("1", 3), opt("2", 2), opt("3", 1), opt("4", 0)}},
+}
+
 var buttons = []string{"Up", "Down", "Left", "Right", "Button 1", "Button 2", "Button 3", "Coin", "Coin 2", "Start (1P)", "Start (2P)", "Service"}
 
 func init() {
@@ -86,5 +99,13 @@ func init() {
 			{ID: "ddragon", Title: "Double Dragon (Japan)", Year: 1987, Maker: "Technos Japan", Files: filesDDragon},
 		},
 		New: newDDragon,
+	})
+	arcade.Register(&arcade.BoardDef{
+		ID: "ddragon2", Title: "Technos Double Dragon II", Width: scrW, Height: scrH, FPS: fps,
+		Buttons: buttons, Dips: dipsDDragon2,
+		Games: []arcade.Game{
+			{ID: "ddragon2", Title: "Double Dragon II: The Revenge (World)", Year: 1988, Maker: "Technos Japan", Files: filesDDragon2},
+		},
+		New: newDDragon2,
 	})
 }
