@@ -1352,6 +1352,14 @@ func (t *dxTr) aluGroup(group []aluOp, lit *[4]uint32) bool {
 			zero |= 1 << c
 		}
 	}
+	if !newPS {
+		// PS keeps its value through groups without a trans instruction
+		prev := (t.group + 1) & 1
+		if t.psSet[prev] {
+			t.ins(d3d.OpMov, dxW(ps, 0), dxRC(dxPS0+prev, 0))
+		}
+		newPS = t.psSet[prev]
+	}
 	t.pvSet[cur] = newSet
 	t.psSet[cur] = newPS
 	_ = zero
@@ -1776,10 +1784,12 @@ func (t *dxTr) op2(op aluOp, dst, res d3d.Opnd, in [3]d3d.Opnd) int {
 		t.ins(d3d.OpExp, dst, a)
 	case 0x62: // LOG_CLAMPED
 		t.ins(d3d.OpLog, dst, a)
+		t.negNaN(dst, a, res)
 		t.ins(d3d.OpEq, sxw(6), a, dxF(0))
 		t.ins(d3d.OpMovc, dst, sx(6), dxF(-math.MaxFloat32), res)
 	case 0x63:
 		t.ins(d3d.OpLog, dst, a)
+		t.negNaN(dst, a, res)
 	case 0x64, 0x65, 0x66: // RECIP_CLAMPED, RECIP_FF, RECIP_IEEE
 		t.ins(d3d.OpDiv, dst, one, a)
 		if i != 0x66 {
@@ -1787,7 +1797,8 @@ func (t *dxTr) op2(op aluOp, dst, res d3d.Opnd, in [3]d3d.Opnd) int {
 			z := dxU(0)
 			if i == 0x64 {
 				// copysign(FLT_MAX, a)
-				t.ins(d3d.OpAnd, sxw(7), a, dxU(0x80000000))
+				t.ins(d3d.OpMov, sxw(7), a) // a's modifiers are float ones
+				t.ins(d3d.OpAnd, sxw(7), sx(7), dxU(0x80000000))
 				t.ins(d3d.OpOr, sxw(7), sx(7), dxU(f2u(math.MaxFloat32)))
 				z = sx(7)
 			}
@@ -1803,16 +1814,25 @@ func (t *dxTr) op2(op aluOp, dst, res d3d.Opnd, in [3]d3d.Opnd) int {
 		t.ins(d3d.OpMovc, dst, sx(6), z, res)
 	case 0x69:
 		t.ins(d3d.OpRsq, dst, a)
+		t.negNaN(dst, a, res)
+		// -0 (and negative denormals, which flush to it) give -inf
+		t.ins(d3d.OpMov, sxw(6), a) // a's modifiers are float ones
+		t.ins(d3d.OpIadd, sxw(6), sx(6), dxU(0x80000000))
+		t.ins(d3d.OpUlt, sxw(6), sx(6), dxU(0x800000))
+		t.ins(d3d.OpMovc, dst, sx(6), dxU(0xff800000), res)
 	case 0x6a:
 		t.ins(d3d.OpSqrt, dst, a)
+		t.negNaN(dst, a, res)
 	case 0x6b:
 		t.ins(d3d.OpFtoi, dst, a)
 	case 0x6c:
 		t.ins(d3d.OpItof, dst, a)
 	case 0x6d:
 		t.ins(d3d.OpUtof, dst, a)
-	case 0x6e, 0x6f: // SIN, COS of turns
-		t.ins(d3d.OpMul, sxw(6), a, dxF(2*math.Pi))
+	case 0x6e, 0x6f: // SIN, COS of turns, reduced to -0.5..0.5 first
+		t.ins(d3d.OpRoundNe, sxw(6), a)
+		t.ins(d3d.OpAdd, sxw(6), a, sx(6).Neg())
+		t.ins(d3d.OpMul, sxw(6), sx(6), dxF(2*math.Pi))
 		if i == 0x6e {
 			t.ins(d3d.OpSincos, dst, d3d.Null(), sx(6))
 		} else {
@@ -1858,4 +1878,11 @@ func (t *dxTr) op2(op aluOp, dst, res d3d.Opnd, in [3]d3d.Opnd) int {
 		t.fail("unknown ALU OP2 instruction %#x", op.inst)
 	}
 	return 0
+}
+
+// negNaN makes dst NaN where a is below zero (log and square roots of
+// negatives aren't NaN on every host).
+func (t *dxTr) negNaN(dst, a, res d3d.Opnd) {
+	t.ins(d3d.OpLt, sxw(6), a, dxF(0))
+	t.ins(d3d.OpMovc, dst, sx(6), dxU(0x7fc00000), res)
 }
