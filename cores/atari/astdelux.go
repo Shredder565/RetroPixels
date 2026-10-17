@@ -1,6 +1,8 @@
 package atari
 
 import (
+	"math"
+
 	"retropixels/cores/arcade"
 	"retropixels/cores/cpu6502"
 	"retropixels/cores/pokey"
@@ -43,6 +45,7 @@ type astdelux struct {
 	er    earom
 	snd   *pokey.Chip
 	out   pokeyOut
+	dc    float64 // the mix's average (taken out: its DC)
 	boom  explosion
 	thr   thrust
 
@@ -87,7 +90,7 @@ func (b *astdelux) Reset() {
 	mem := b.er.mem
 	b.er = earom{mem: mem}
 	*b.snd = *newPOKEY()
-	b.out = pokeyOut{}
+	b.out, b.dc = pokeyOut{}, 0
 	b.boom, b.thr = explosion{}, thrust{}
 	b.cpu.NMIPending = false
 	b.cpu.Reset()
@@ -278,12 +281,33 @@ func (b *astdelux) RunFrame() {
 	}
 }
 
+// The mix: gains matching MAME's levels (DC removed), and a 10 Hz high pass.
+const (
+	adPokeyGain  = 2.3
+	adThrustGain = 1.8
+)
+
+var adDCCut = 1 - math.Exp(-2*math.Pi*10/adRate)
+
+// softLimit leaves the mix alone up to 0.7 and bends anything louder
+// smoothly towards 1, so loud moments never clip.
+func softLimit(v float64) float64 {
+	if a := math.Abs(v); a > 0.7 {
+		return math.Copysign(0.7+0.3*math.Tanh((a-0.7)/0.3), v)
+	}
+	return v
+}
+
 func (b *astdelux) sound(n int) {
 	b.sndCyc += n
 	for b.sndCyc >= adSampleN {
 		b.sndCyc -= adSampleN
-		v := b.out.next(b.snd.Run(adSampleN)) + b.boom.next() + b.thr.next()
-		b.res.Add(v)
+		// the board's amplifier: the POKEY and thrust as loud as MAME has
+		// them, the steady part of the mix taken out (it would only eat
+		// into the headroom)
+		v := adPokeyGain*b.out.next(b.snd.Run(adSampleN)) + b.boom.next() + adThrustGain*b.thr.next()
+		b.dc += (v - b.dc) * adDCCut
+		b.res.Add(softLimit(v - b.dc))
 	}
 }
 
@@ -304,6 +328,7 @@ func (b *astdelux) SaveState() ([]byte, error) {
 	w.Int(int(b.busyTill - b.cpu.Cycles)) // how long the DVG still draws
 	w.Bool(b.potRead)
 	w.F64(b.out.lp)
+	w.F64(b.dc)
 	w.Int(int(b.cpu.Cycles - b.frameCyc))
 	w.Int(b.sndCyc)
 	w.Int(b.watchdog)
@@ -339,6 +364,7 @@ func (b *astdelux) LoadState(st []byte) error {
 	busy := int64(r.Int())
 	n.potRead = r.Bool()
 	n.out.lp = r.F64()
+	n.dc = r.F64()
 	into := int64(r.Int())
 	n.sndCyc = r.Int()
 	n.watchdog = r.Int()
