@@ -283,4 +283,3 @@ func (r *dxVSRun) interp(t *testing.T) [][]uint32 {
 	}
 	return out
 }
-
