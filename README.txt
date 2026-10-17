@@ -29,8 +29,10 @@ First run
   page), so N64 games need the desktop app.
 - Wii U (new in 2.20.0) also runs inside RetroPixels.exe, on RetroPixels' own
   Wii U emulator. It plays homebrew programs (.rpx) that draw with the
-  Wii U's simple screens (OSScreen); Wii U games don't play yet (they need
-  the graphics chip, which comes later). Try "RetroPixels Wii U demo.rpx"
+  Wii U's simple screens (OSScreen) or its 3D graphics (GX2). On Windows the
+  3D graphics are drawn on your graphics card (Direct3D 11); set
+  RETROPIXELS_WIIU_GPU=software to draw them on the processor instead.
+  Commercial Wii U games don't play yet. Try "RetroPixels Wii U demo.rpx"
   from the download. No Nintendo keys, firmware or games are needed.
 
 What each system supports

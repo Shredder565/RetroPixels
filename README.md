@@ -67,7 +67,7 @@ RetroPixels window.
 | Game Boy / Color | `.gb` `.gbc` | MBC1–7, HuC1/3, MMM01, TAMA5, real-time clock |
 | Game Boy Advance | `.gba` | Solar, gyro, tilt and rumble cartridges |
 | Nintendo 64 | `.z64` `.n64` `.v64` | Runs natively inside `RetroPixels.exe` |
-| Wii U | `.rpx` homebrew | New, RetroPixels' own emulator: OSScreen homebrew on the TV and GamePad; games come later |
+| Wii U | `.rpx` homebrew | New, RetroPixels' own emulator: OSScreen and GX2 (3D) homebrew on the TV and GamePad, drawn on the graphics card with Direct3D 11 on Windows; commercial games come later |
 | Sega Genesis / Mega Drive | `.md` `.gen` `.smd` `.bin` | EEPROM saves, J-Cart, Realtec, SSF2 |
 | Sega Master System | `.sms` | |
 | Atari 2600 | `.a26` `.bin` | Nearly all bank-switching schemes, paddles |

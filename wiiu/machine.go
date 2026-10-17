@@ -7,9 +7,11 @@
 // vpad, gx2 and the rest: hle.go and the files named after each library).
 // This is the approach Cemu and decaf-emu take too.
 //
-// What runs today: homebrew programs (.rpx) that draw with OSScreen, read the
-// GamePad and use threads, memory heaps and the other core OS services. The
-// GPU (GX2 / Latte) is the next big piece.
+// What runs today: homebrew programs (.rpx) that draw with OSScreen or GX2,
+// read the GamePad and use threads, memory heaps and the other core OS
+// services. The GPU (Latte) has a software renderer (latte_*.go) and, on
+// Windows, a Direct3D 11 backend that translates its shaders
+// (latte_dxbc*.go, latte_d3d_windows.go).
 package wiiu
 
 import (
