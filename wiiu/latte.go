@@ -451,6 +451,15 @@ func (g *Latte) loadContext(addr uint32) {
 	}
 }
 
+// setupContext makes addr the current context state without loading it
+// (GX2SetupContextState fills it with defaults next).
+func (g *Latte) setupContext(addr uint32) {
+	if g.ctxState != 0 {
+		g.saveContext(g.ctxState)
+	}
+	g.ctxState = addr
+}
+
 func (g *Latte) switchContext(addr uint32) {
 	if g.ctxState != 0 {
 		g.saveContext(g.ctxState)

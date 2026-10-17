@@ -69,6 +69,7 @@ type Machine struct {
 	heaps  *Heaps
 	screen *OSScreen
 	gx2    *GX2
+	gpu    *Latte
 	pad    *GamePad
 	procui *ProcUI
 
@@ -154,6 +155,7 @@ func newMachine(files *FileSystem) *Machine {
 	m.heaps = newHeaps()
 	m.screen = newOSScreen()
 	m.gx2 = newGX2()
+	m.gpu = newLatte(m)
 	m.pad = &GamePad{}
 	m.procui = &ProcUI{}
 	m.initSystemData()

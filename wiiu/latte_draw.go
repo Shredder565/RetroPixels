@@ -384,6 +384,7 @@ type drawState struct {
 	blend       [8]uint32
 	blendConst  [4]float32
 	multiWrite  bool
+	rop         uint32
 	db          dbDesc
 	dbCtl       uint32
 	stRef       [2]uint32
@@ -442,6 +443,7 @@ func (g *Latte) drawState() *drawState {
 	st.maxX, st.maxY = 1<<14, 1<<14
 	cc := g.reg(regCB_COLOR_CONTROL)
 	st.multiWrite = cc>>1&1 != 0
+	st.rop = cc >> 16 & 0xff
 	tmask := g.reg(regCB_TARGET_MASK)
 	smask := g.reg(regCB_SHADER_MASK)
 	perMRT := cc>>7&1 != 0
@@ -1160,7 +1162,7 @@ func (g *Latte) shadeQuad(q *quad) {
 		}
 	}
 	for t := 0; t < 8; t++ {
-		if !st.cbOn[t] {
+		if !st.cbOn[t] || st.rop == 0xaa {
 			continue
 		}
 		src := t
