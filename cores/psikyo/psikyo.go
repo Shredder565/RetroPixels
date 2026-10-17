@@ -54,6 +54,7 @@ type board struct {
 	out  *arcade.Resampler
 	irq  bool  // vblank interrupt pending
 	ymfT int64 // CPU cycle of the next YMF278B sample
+	base int64 // CPU cycles run before this frame
 }
 
 type bus struct{ b *board }
@@ -181,6 +182,7 @@ func (b *board) Reset() {
 	b.ymf.Reset()
 	b.irq = false
 	b.ymfT = 0
+	b.base = 0
 	b.cpu.SetIRL(0)
 	b.cpu.Cycles = 0
 	b.cpu.Reset()
@@ -237,7 +239,7 @@ func (b *board) inputs() uint32 {
 // jp4: the long at 03000004.
 func (b *board) jp4() uint32 {
 	v := uint32(b.dips["region"]&3) << 24
-	if b.ee.do {
+	if b.ee.dataOut(b.now()) {
 		v |= 0x10 << 24
 	}
 	return v
@@ -291,7 +293,7 @@ func (m bus) Write8(a uint32, v uint8) {
 	b := m.b
 	switch {
 	case a == 0x03000004:
-		b.ee.write(v&0x80 != 0, v&0x40 != 0, v&0x20 != 0)
+		b.ee.write(v&0x80 != 0, v&0x40 != 0, v&0x20 != 0, b.now())
 	case a >= 0x03100000 && a < 0x03100008:
 		b.ymf.Write(int(a&7), v)
 	case a >= 0x04050000 && a < 0x04050200:
@@ -320,7 +322,11 @@ func (b *board) RunFrame() {
 	}
 	b.cpu.Cycles -= frameCyc
 	b.ymfT -= frameCyc
+	b.base += frameCyc
 }
+
+// now is the time in CPU cycles since power on.
+func (b *board) now() int64 { return b.base + b.cpu.Cycles }
 
 // runSound makes the YMF278B's samples up to CPU cycle t (the chip runs
 // off the CPU's clock, a sample every 768 cycles).
@@ -328,9 +334,13 @@ func (b *board) runSound(t int64) {
 	for b.ymfT <= t {
 		b.ymfT += 768
 		l, r := b.ymf.Sample()
-		b.out.Add(float64(l+r) / 65536)
+		b.out.Add(float64(l+r) * mixLevel)
 	}
 }
+
+// mixLevel scales the chip's left+right sum to the output (±1): a voice
+// at full volume plays at about half scale.
+const mixLevel = 0.4965 / 65536
 
 func (b *board) Screen() []uint32     { return b.vid.screen }
 func (b *board) TakeAudio() []float32 { return b.out.Take() }

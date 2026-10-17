@@ -143,7 +143,7 @@ func (v *video) render() {
 	v.layers = v.layers[:0]
 	for l := 0; l < 4; l++ {
 		bits := r7 >> (12 - 4*l)
-		if bits&8 == 0 || devMask&(1<<l) == 0 {
+		if bits&8 == 0 {
 			continue
 		}
 		bank := int(r6>>(24-8*l)) & 0xff
@@ -165,13 +165,20 @@ func (v *video) render() {
 		sc := v.sprCol[row : row+ScreenW]
 		sp := v.sprPri[row : row+ScreenW]
 		sa := v.sprA[row : row+ScreenW]
+		// the sprite priorities on this line
+		used := 0
+		for _, p := range sp {
+			used |= 1 << p
+		}
 		for pri := 0; pri < 16; pri++ {
-			for x, p := range sp {
-				if int(p) == pri+1 {
-					if a := int(sa[x]); a < 256 {
-						line[x] = blend(line[x], sc[x], a)
-					} else {
-						line[x] = sc[x]
+			if used&(2<<pri) != 0 {
+				for x, p := range sp {
+					if int(p) == pri+1 {
+						if a := int(sa[x]); a < 256 {
+							line[x] = blend(line[x], sc[x], a)
+						} else {
+							line[x] = sc[x]
+						}
 					}
 				}
 			}
@@ -261,8 +268,6 @@ func (v *video) drawLayerLine(l *layerInfo, y int, line []uint32) {
 		x += n
 	}
 }
-
-var devMask = -1
 
 // drawSprites draws the listed sprites into the sprite buffer.
 func (v *video) drawSprites() {

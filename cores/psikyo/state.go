@@ -2,7 +2,7 @@ package psikyo
 
 import "retropixels/cores/arcade"
 
-const stateMagic = "PSKY\x01"
+const stateMagic = "PSKY\x02"
 
 func (b *board) SaveState() ([]byte, error) {
 	w := &arcade.StateW{}
@@ -12,12 +12,14 @@ func (b *board) SaveState() ([]byte, error) {
 	v := b.vid
 	w.Bytes(b.ram)
 	w.Bytes(v.spr[:])
+	w.Bytes(v.sprBuf[:])
 	w.Bytes(v.pal[:0x5000])
 	w.Bytes(v.zoom[:])
 	w.Bytes(v.regs[:])
 	b.ee.save(w)
 	w.Bool(b.irq)
 	w.Int(int(b.ymfT))
+	w.Int(int(b.base))
 	b.out.AppendState(w)
 	return w.B, nil
 }
@@ -36,12 +38,14 @@ func (b *board) LoadState(data []byte) (err error) {
 	v := b.vid
 	r.Bytes(b.ram)
 	r.Bytes(v.spr[:])
+	r.Bytes(v.sprBuf[:])
 	r.Bytes(v.pal[:0x5000])
 	r.Bytes(v.zoom[:])
 	r.Bytes(v.regs[:])
 	b.ee.load(r)
 	b.irq = r.Bool()
 	b.ymfT = int64(r.Int())
+	b.base = int64(r.Int())
 	b.out.LoadState(r)
 	if err := r.Done(); err != nil {
 		return err
@@ -53,18 +57,19 @@ func (b *board) LoadState(data []byte) (err error) {
 
 func (e *eeprom) save(w *arcade.StateW) {
 	w.Bytes(e.mem[:])
-	for _, x := range []bool{e.cs, e.clk, e.di, e.do, e.writeOK} {
+	for _, x := range []bool{e.cs, e.clk, e.di, e.do, e.writeOK, e.program} {
 		w.Bool(x)
 	}
-	w.Ints([]int{e.state, e.bits, int(e.sr), e.op, e.addr, int(e.out), e.outBits})
+	w.Ints([]int{e.state, e.bits, int(e.sr), e.op, e.addr, int(e.out), e.outBits, int(e.busyUntil)})
 }
 
 func (e *eeprom) load(r *arcade.StateR) {
 	r.Bytes(e.mem[:])
-	for _, x := range []*bool{&e.cs, &e.clk, &e.di, &e.do, &e.writeOK} {
+	for _, x := range []*bool{&e.cs, &e.clk, &e.di, &e.do, &e.writeOK, &e.program} {
 		*x = r.Bool()
 	}
-	n := make([]int, 7)
+	n := make([]int, 8)
 	r.Ints(n)
 	e.state, e.bits, e.sr, e.op, e.addr, e.out, e.outBits = n[0], n[1], uint32(n[2]), n[3], n[4], uint8(n[5]), n[6]
+	e.busyUntil = int64(n[7])
 }

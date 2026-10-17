@@ -84,8 +84,8 @@ type CPU struct {
 	pages [0x2000]page
 
 	// DelaySlotPC selects what PC-relative instructions in a delay slot
-	// use as "PC": false = the slot's own address + 4 (as every other
-	// instruction), true = the branch target + 2.
+	// use as "PC": false = the branch's address + 4 (the slot's own
+	// address + 2), true = the branch target + 2.
 	DelaySlotPC bool
 
 	irl       int    // external interrupt level
