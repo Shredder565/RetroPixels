@@ -8,9 +8,10 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.19.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.20.0 (the number also shows next to the RetroPixels name in the app).
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
+Wii U (homebrew, new in 2.20.0),
 Sega Genesis, Sega Master System, Atari 2600, Atari 7800, classic arcade
 games (Pac-Man, Galaxian, Space Invaders, Donkey Kong, TMNT, TMNT: Turtles in
 Time, The Simpsons, 1941, 1942, 1943, 1943 Kai, Altered Beast, Asteroids
@@ -26,6 +27,11 @@ First run
   into the program, so they work offline. No BIOS files are needed.
 - Nintendo 64 runs inside RetroPixels.exe itself (it's too heavy for the
   page), so N64 games need the desktop app.
+- Wii U (new in 2.20.0) also runs inside RetroPixels.exe, on RetroPixels' own
+  Wii U emulator. It plays homebrew programs (.rpx) that draw with the
+  Wii U's simple screens (OSScreen); Wii U games don't play yet (they need
+  the graphics chip, which comes later). Try "RetroPixels Wii U demo.rpx"
+  from the download. No Nintendo keys, firmware or games are needed.
 
 What each system supports
 - NES: about 120 cartridge types (mappers), covering nearly all licensed
@@ -166,6 +172,12 @@ Playing classic games
   On the keyboard: arrows = stick, X / Z = A / B, A = Z, IJKL = C buttons,
   TFGH = D-pad. Since the right stick is busy, change save slot with View +
   D-pad left / right and start or stop recording with View + D-pad down.
+- Wii U: Xbox B / A / Y / X = the GamePad's A / B / X / Y, LB / RB = L / R,
+  LT / RT = ZL / ZR, Menu / View = Plus / Minus, both sticks are the
+  GamePad's (clicking them still saves and loads states, so the stick clicks
+  are C / V on the keyboard). Keyboard: X Z S A, Q W, 1 2, Enter / Shift,
+  H = Home, arrows = left stick, I J K L = D-pad. G switches the picture
+  between the TV and the GamePad's screen. No save states for the Wii U yet.
 - Atari 7800 light-gun games (Alien Brigade, Barnyard Blaster, Sentinel) start,
   but can't be aimed yet.
 

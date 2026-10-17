@@ -18,6 +18,7 @@ import (
 	"retropixels/cores/nes"
 	"retropixels/cores/sms"
 	"retropixels/cores/snes"
+	"retropixels/cores/wiiu"
 	. "retropixels/internal/games"
 )
 
@@ -83,6 +84,24 @@ func init() {
 	}
 	SystemButtons["n64"] = n64.Buttons
 	SystemNotes["n64"] = n64.ControlsNote
+
+	// The Wii U: the same button positions as the GamePad's diamond (Xbox B =
+	// A, A = B, Y = X, X = Y), LB / RB = L / R, LT / RT = ZL / ZR, Menu / View
+	// = Plus / Minus. Both sticks are the GamePad's; on the keyboard the
+	// arrows move the left stick.
+	Makers["wiiu"] = wiiu.New
+	DefaultMaps["wiiu"] = ControlMap{
+		"A": B([]int{PadB}, "x"), "B": B([]int{PadA}, "z"), "X": B([]int{PadY}, "s"), "Y": B([]int{PadX}, "a"),
+		"L": B([]int{PadLB}, "q"), "R": B([]int{PadRB}, "w"), "ZL": B([]int{PadLT}, "1"), "ZR": B([]int{PadRT}, "2"),
+		"Plus": B([]int{PadMenu}, "enter"), "Minus": B([]int{PadView}, "shift"), "Home": B([]int{}, "h"),
+		"Up": B([]int{}, "i"), "Down": B([]int{}, "k"), "Left": B([]int{}, "j"), "Right": B([]int{}, "l"),
+		"L Stick Click": B([]int{}, "c"), "R Stick Click": B([]int{}, "v"), // (L3 / R3 load and save states)
+		"Stick Up": B([]int{}, "arrowup"), "Stick Down": B([]int{}, "arrowdown"),
+		"Stick Left": B([]int{}, "arrowleft"), "Stick Right": B([]int{}, "arrowright"),
+		"TV / GamePad": B([]int{}, "g"),
+	}
+	SystemButtons["wiiu"] = wiiu.Buttons
+	SystemNotes["wiiu"] = wiiu.ControlsNote
 
 	// The Super Nintendo: the same button positions as the Xbox pad's diamond
 	// (Xbox B = A, A = B, Y = X, X = Y), LB / RB = L / R.

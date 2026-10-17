@@ -35,7 +35,7 @@ const (
 	port    = 47821
 	appName = "RetroPixels"
 	// appVersion is shown in the app and goes in the download's name and VERSION.txt.
-	appVersion = "2.19.0"
+	appVersion = "2.20.0"
 )
 
 var (
@@ -241,6 +241,7 @@ func newMux() *http.ServeMux {
 	registerMameRoutes(mux)
 	registerLifetimeRoutes(mux)
 	registerN64Routes(mux)
+	registerWiiURoutes(mux)
 	registerArcadeRoutes(mux)
 	registerAPRoutes(mux)
 	return mux

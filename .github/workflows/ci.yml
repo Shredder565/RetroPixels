@@ -67,6 +67,7 @@ jobs:
           dir="RetroPixels-$version"
           mkdir -p "dist/$dir"
           cp RetroPixels.exe RetroPixels-Native.exe README.txt VERSION.txt CHANGELOG.txt "dist/$dir/"
+          cp wiiu/testdata/demo.rpx "dist/$dir/RetroPixels Wii U demo.rpx"
           (cd dist && zip -qr "$dir.zip" "$dir")
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "zip=dist/$dir.zip" >> "$GITHUB_OUTPUT"
@@ -101,7 +102,7 @@ jobs:
           {
             echo "## Download"
             echo
-            echo "- **RetroPixels-$v.zip**: the app (RetroPixels.exe and the RetroPixels-Native.exe test build, with README, VERSION and CHANGELOG), with MAME ${{ steps.mame.outputs.version }} built in for arcade games. Unzip and run \`RetroPixels.exe\`."
+            echo "- **RetroPixels-$v.zip**: the app (RetroPixels.exe and the RetroPixels-Native.exe test build, with README, VERSION, CHANGELOG and a Wii U demo program), with MAME ${{ steps.mame.outputs.version }} built in for arcade games. Unzip and run \`RetroPixels.exe\`."
             echo "- **RetroPixels.exe**: the program on its own."
             echo "- **RetroPixels-Native.exe**: test build of the native version (no Chromium; every system, plus Archipelago)."
             echo "- **RetroPixels-source-$v.zip**: the full source code."
