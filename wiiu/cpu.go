@@ -81,6 +81,10 @@ func (c *CPU) fail(inst uint32, msg string) {
 
 // Run runs up to n instructions; it returns early when stopped.
 func (c *CPU) Run(n int) {
+	if c.Mem.jit != nil {
+		c.Mem.jit.run(c, n)
+		return
+	}
 	c.stop = false
 	m := c.Mem
 	for i := 0; i < n; i++ {
@@ -279,12 +283,13 @@ func (c *CPU) exec(inst uint32) {
 		} else {
 			c.GPR[rd] = c.GPR[ra] + uimm<<16
 		}
-	case 16: // bc
+	case 16: // bc (LR is set whether or not it branches)
 		bd := uint32(int32(int16(inst & 0xfffc)))
-		if c.cond(rd, ra, true) {
-			if inst&1 != 0 {
-				c.LR = c.PC
-			}
+		taken := c.cond(rd, ra, true)
+		if inst&1 != 0 {
+			c.LR = c.PC
+		}
+		if taken {
 			if inst&2 != 0 {
 				c.PC = bd
 			} else {
@@ -429,10 +434,11 @@ func (c *CPU) exec19(inst uint32) {
 		c.setCRField(bt>>2, f)
 	case 16: // bclr
 		target := c.LR &^ 3
-		if c.cond(bt, ba, true) {
-			if inst&1 != 0 {
-				c.LR = c.PC
-			}
+		taken := c.cond(bt, ba, true)
+		if inst&1 != 0 {
+			c.LR = c.PC
+		}
+		if taken {
 			c.PC = target
 		}
 	case 33: // crnor
@@ -455,11 +461,13 @@ func (c *CPU) exec19(inst uint32) {
 	case 449: // cror
 		c.setCRBit(bt, c.crBit(ba) || c.crBit(bb))
 	case 528: // bcctr
-		if c.cond(bt, ba, false) {
-			if inst&1 != 0 {
-				c.LR = c.PC
-			}
-			c.PC = c.CTR &^ 3
+		target := c.CTR &^ 3
+		taken := c.cond(bt, ba, false)
+		if inst&1 != 0 {
+			c.LR = c.PC
+		}
+		if taken {
+			c.PC = target
 		}
 	default:
 		c.fail(inst, "unknown instruction")

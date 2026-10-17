@@ -48,6 +48,7 @@ type region struct {
 type Memory struct {
 	pages   [numPages][]byte
 	code    [numPages]*codePage // decoded instructions (cpu_fast.go)
+	jit     *JIT                // the recompiler, if it's on
 	regions []region
 	// Fault, when set, is called for an access outside any region; reads
 	// then give 0 and writes are dropped.
@@ -93,6 +94,9 @@ func (m *Memory) page(addr uint32) []byte {
 	}
 	p = make([]byte, pageSize)
 	m.pages[addr>>pageBits] = p
+	if m.jit != nil {
+		m.jit.pageAdded(addr>>pageBits, p)
+	}
 	return p
 }
 
