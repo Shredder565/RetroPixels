@@ -8,12 +8,13 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.17.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.18.0 (the number also shows next to the RetroPixels name in the app).
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
 Sega Genesis, Sega Master System, Atari 2600, Atari 7800, classic arcade
 games (Pac-Man, Galaxian, Space Invaders, Donkey Kong, TMNT, TMNT: Turtles in
-Time, The Simpsons), plus GameCube and
+Time, The Simpsons, 1941, 1942, 1943, 1943 Kai, Altered Beast, Asteroids
+Deluxe, Berzerk, Centipede, Vs. Castlevania), plus GameCube and
 Wii through Dolphin, and any other arcade game in MAME (any version of it).
 Your Xbox controller works automatically.
 
@@ -112,6 +113,24 @@ What each system supports
   and first controller. Other controllers move round with it. The choice is
   remembered for each game. Nintendo 64 and Genesis games have the same
   choice as a "👤 Player 1" button in the bar under the game.
+- Arcade, more boards (new in 2.18.0), each on RetroPixels' own emulation:
+  * 1941: Counter Attack (1941.zip; Capcom CP System, with RetroPixels' own
+    OKI MSM6295 sound chip).
+  * 1942 (1942.zip, Revision A), 1943: The Battle of Midway (1943.zip, US)
+    and 1943 Kai (1943kai.zip), with RetroPixels' own AY-3-8910 and YM2203
+    sound chips. 1943's protection chip isn't needed: RetroPixels answers
+    the game's questions from the table in the game's own program.
+  * Altered Beast (altbeast.zip; Sega System 16B).
+  * Centipede (centiped.zip; trackball on the stick or arrow keys, faster
+    the longer you hold it) and Asteroids Deluxe (astdelux.zip; vector
+    screen drawn smoothly, explosion and thrust sounds made by RetroPixels).
+    Both keep their high scores like a battery save.
+  * Berzerk (berzerk.zip; high scores kept). Its speech isn't emulated
+    yet, so the robots don't talk.
+  * Vs. Castlevania (cstlevna.zip; Nintendo's Vs. System arcade version).
+  Each zip can use the older file names or MAME's current ones. In
+  RetroPixels.exe these new boards run inside the program itself, like the
+  Nintendo 64, so they need the desktop app.
 
 Playing classic games
 - Drop a game file on the window or click "Choose game file…". Zipped games
@@ -260,8 +279,9 @@ a web browser inside, so OBS Studio's Window Capture works with any capture
 method (or use Display Capture). This test build plays Super Nintendo, NES, Atari 2600,
 Master System, Game Boy / Game Boy Color, Atari 7800, Sega Genesis / Mega
 Drive, Game Boy Advance and Nintendo 64 games, and the arcade games (Pac-Man,
-Galaxian, Space Invaders, Donkey Kong, TMNT, TMNT: Turtles in Time and The
-Simpsons), and GameCube / Wii games through Dolphin: every system
+Galaxian, Space Invaders, Donkey Kong, TMNT, TMNT: Turtles in Time, The
+Simpsons, 1941, 1942, 1943, 1943 Kai, Altered Beast, Asteroids Deluxe,
+Berzerk, Centipede and Vs. Castlevania), and GameCube / Wii games through Dolphin: every system
 RetroPixels.exe plays. The two programs keep separate settings
 and saves, so trying the test build changes nothing in RetroPixels.exe.
 - Starting a game: drag the game file onto the window, or File > Open game...

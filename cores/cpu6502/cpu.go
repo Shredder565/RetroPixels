@@ -35,6 +35,11 @@ type Options struct {
 	// Poll at the right point within each cycle (the NES does); otherwise the
 	// CPU samples them at the start of every cycle.
 	MachinePolls bool
+	// PollAtBoundary: interrupts are sampled between instructions, from the
+	// lines as they are when an instruction ends, as MAME's 6502 does (for
+	// boards checked cycle for cycle against MAME); otherwise before each
+	// instruction's last cycle, as the chip does.
+	PollAtBoundary bool
 }
 
 // CPU is one 6502.
@@ -48,6 +53,7 @@ type CPU struct {
 	Jammed     bool
 
 	decimal, machinePolls bool
+	atBoundary            bool
 	bus                   Bus
 
 	prevIrq, prevNmi bool // interrupt polling happens before the last cycle
@@ -59,7 +65,8 @@ type CPU struct {
 
 // New makes a CPU on bus. Call Reset before the first Step.
 func New(bus Bus, opts Options) *CPU {
-	return &CPU{bus: bus, decimal: opts.Decimal, machinePolls: opts.MachinePolls, S: 0xfd, P: FlagI | FlagU}
+	return &CPU{bus: bus, decimal: opts.Decimal, machinePolls: opts.MachinePolls, atBoundary: opts.PollAtBoundary,
+		S: 0xfd, P: FlagI | FlagU}
 }
 
 // SetBus replaces the bus (for machines that are rebuilt around a CPU).
@@ -166,6 +173,7 @@ func (c *CPU) Step() int {
 		return int(c.Cycles - start)
 	}
 	c.branchPolled = false
+	startI := c.P & FlagI
 	op := c.fetch()
 	c.exec(op)
 	if c.branchPolled {
@@ -173,6 +181,14 @@ func (c *CPU) Step() int {
 	}
 	if op == 0x00 { // like any interrupt, BRK's handler runs one instruction first
 		c.prevNmi, c.prevIrq = false, false
+	} else if c.atBoundary {
+		// I as it was before the instruction (CLI, SEI and PLP act an
+		// instruction late), except after RTI
+		i := startI
+		if op == 0x40 {
+			i = c.P & FlagI
+		}
+		c.prevNmi, c.prevIrq = c.NMIPending, c.IRQLine && i == 0
 	} else {
 		c.prevNmi, c.prevIrq = c.pollNmi, c.pollIrq
 	}

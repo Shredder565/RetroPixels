@@ -334,7 +334,9 @@
       }
       this.dipList = dipList;
 
-      this.board = new Board(game, useFiles, { sampleRate: opts.sampleRate || 48000, dips: this.dipValues, sram: opts.sram || null });
+      this.board = new Board(game, useFiles, { sampleRate: opts.sampleRate || 48000, dips: this.dipValues, sram: opts.sram || null, zipName });
+      // boards that run inside RetroPixels.exe (arcade_remote.js) say when they're ready
+      if (this.board.ready) this.ready = this.board.ready;
       this.bw = game.width || Board.width; this.bh = game.height || Board.height;
       this.rot = ((game.rotate !== undefined ? game.rotate : Board.rotate) || 0) % 360;
       const side = this.rot === 90 || this.rot === 270;
@@ -376,6 +378,7 @@
       this.board.setInput(...this.inputs);
     }
     reset() { this.board.reset(); }
+    close() { if (this.board.close) this.board.close(); }
     getSRAM() { return this.board.getSRAM ? this.board.getSRAM() : null; }
     saveState() { return { v: 1, game: this.game.id, board: this.board.saveState() }; }
     loadState(s) {

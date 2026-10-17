@@ -49,6 +49,7 @@ type NES struct {
 	dmcReq         bool
 	battery        bool
 	romCRC         uint32
+	hooks          *ArcadeHooks // an arcade board's additions, or nil
 }
 
 // New opens a game (.nes / .unf data).
@@ -165,6 +166,9 @@ func (n *NES) cpuRead(a int) int {
 		} else {
 			bit = n.padShift[i] & 1
 			n.padShift[i] = n.padShift[i]>>1 | 0x80
+		}
+		if n.hooks != nil && n.hooks.Port != nil {
+			return n.hooks.Port(a, bit) & 0xff
 		}
 		return n.openBus&0xe0 | bit
 	case a < 0x4020:

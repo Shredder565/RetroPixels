@@ -7,6 +7,7 @@ import (
 	"errors"
 
 	"retropixels/cores/arcade"
+	_ "retropixels/cores/arcadeboards" // the Go-only arcade boards (1941, 1942, 1943, Altered Beast, ...)
 	"retropixels/cores/atari2600"
 	"retropixels/cores/atari7800"
 	"retropixels/cores/gb"
