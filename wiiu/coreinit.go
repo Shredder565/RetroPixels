@@ -234,10 +234,11 @@ func init() {
 
 	// cache and barriers (memory is always coherent here)
 	for _, n := range []string{"DCFlushRange", "DCFlushRangeNoSync", "DCStoreRange", "DCStoreRangeNoSync",
-		"DCInvalidateRange", "DCTouchRange", "ICInvalidateRange", "OSMemoryBarrier", "OSCoherencyBarrier",
+		"DCInvalidateRange", "DCTouchRange", "OSMemoryBarrier", "OSCoherencyBarrier",
 		"OSEnforceInorderIO", "DCFlushAll", "DCInvalidateAll"} {
 		reg(c, n, func(m *Machine, cpu *CPU, t *Thread) {})
 	}
+	reg(c, "ICInvalidateRange", func(m *Machine, cpu *CPU, t *Thread) { m.Mem.InvalidateCode(arg(cpu, 0), arg(cpu, 1)) })
 	reg(c, "DCZeroRange", func(m *Machine, cpu *CPU, t *Thread) {
 		a, n := arg(cpu, 0), arg(cpu, 1)
 		start := a &^ 31

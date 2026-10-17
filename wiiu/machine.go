@@ -291,6 +291,7 @@ func (m *Machine) loadModule(b []byte, name string, relocate bool) (*Module, err
 		m.Modules = append(m.Modules, mod)
 		mod.TLSIndex = uint32(len(m.Modules))
 	}
+	m.Mem.InvalidateCode(mod.TextLo, mod.TextHi-mod.TextLo)
 	// entry points run dependencies first: the order loads finish in
 	m.initQueue = append(m.initQueue, mod)
 	if mod.DataHi > m.dataEnd {
