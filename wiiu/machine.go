@@ -98,7 +98,10 @@ type Machine struct {
 	dynAlloc           uint32
 	fontAddr, fontSize uint32 // the system font, once a program asks
 	fontTried          bool
+	gpuNote            string               // why there's no host GPU
 	apertures          map[uint32]*aperture // open tiling apertures by handle
+	apAddrs            []uint32             // the last aperture surface's element addresses
+	apAddrsKey         apertureKey
 	nextAperture       uint32
 	zstreams           map[uint32]*zInflate   // zlib inflate streams by z_stream address
 	conts              map[uint32][]guestCont // by thread: what HLE functions do after calls into the program
