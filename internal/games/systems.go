@@ -251,7 +251,8 @@ func Open(path string, o OpenOptions) (*Game, error) {
 	if err != nil {
 		return nil, err
 	}
-	if st.Size() > MaxROM && ext != "zip" && ext != "7z" {
+	// a Wii U archive can be many gigabytes: it's read as the game asks
+	if st.Size() > MaxROM && ext != "zip" && ext != "7z" && ext != "wua" {
 		return nil, fmt.Errorf("%q is too big to be a game for %s", name, ThisBuild)
 	}
 
