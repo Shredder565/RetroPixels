@@ -67,6 +67,7 @@ RetroPixels window.
 | Game Boy / Color | `.gb` `.gbc` | MBC1–7, HuC1/3, MMM01, TAMA5, real-time clock |
 | Game Boy Advance | `.gba` | Solar, gyro, tilt and rumble cartridges |
 | Nintendo 64 | `.z64` `.n64` `.v64` | Runs natively inside `RetroPixels.exe` |
+| Wii U | `.rpx` homebrew | New, RetroPixels' own emulator: OSScreen homebrew on the TV and GamePad; games come later |
 | Sega Genesis / Mega Drive | `.md` `.gen` `.smd` `.bin` | EEPROM saves, J-Cart, Realtec, SSF2 |
 | Sega Master System | `.sms` | |
 | Atari 2600 | `.a26` `.bin` | Nearly all bank-switching schemes, paddles |
@@ -158,7 +159,7 @@ MAME keeps its own settings, saves and save states in its folder; RetroPixels do
 
 RetroPixels is being rebuilt as a native Windows program, with no web browser inside, so OBS Studio's
 Window Capture records it with any capture method. Each release includes the current test build as
-`RetroPixels-Native.exe`, next to `RetroPixels.exe`. It plays **every system RetroPixels.exe plays**: **Super Nintendo**, **NES**, **Atari 2600**, **Master System**, **Game Boy / Color**, **Atari 7800**, **Genesis**, **Game Boy Advance**, **Nintendo 64**, **arcade** and **GameCube / Wii** (through Dolphin) games so far, with a start screen, four save-state slots and screenshots,
+`RetroPixels-Native.exe`, next to `RetroPixels.exe`. It plays **every system RetroPixels.exe plays**: **Super Nintendo**, **NES**, **Atari 2600**, **Master System**, **Game Boy / Color**, **Atari 7800**, **Genesis**, **Game Boy Advance**, **Nintendo 64**, **Wii U** (homebrew), **arcade** and **GameCube / Wii** (through Dolphin) games so far, with a start screen, four save-state slots and screenshots,
 using Go ports of the same emulators, checked frame by frame and sample by sample against them. More
 systems follow in later test builds; until then, `RetroPixels.exe` plays everything.
 
@@ -190,6 +191,7 @@ after changing `winres/icon.ico` or the version, run `sh tools/make-winres.sh`. 
 | `web/index.html` | The app's interface |
 | `web/emu/` | The emulators: CPUs (6502, 65C816, Z80, 68000, ARM, Konami-2, 8080…), video and sound chips, arcade boards |
 | `n64/` | Nintendo 64 emulator (CPU, RSP, RDP), run natively |
+| `wiiu/` | Wii U emulator (PowerPC 750CL, RPX loader, system libraries), run natively |
 | `cmd/retropixels-native/`, `core/`, `cores/` | RetroPixels Native: the Win32 app and the native emulators |
 | `sevenzip/` | `.7z` extractor (LZMA, LZMA2, BCJ, BCJ2) |
 | `docs/` | Project website (GitHub Pages) |

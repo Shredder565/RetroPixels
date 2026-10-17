@@ -2,6 +2,14 @@
 
 All notable changes to RetroPixels. Newest first.
 
+## [2.20.0] - 2026-10-17
+
+- New: the Wii U, on RetroPixels' own Wii U emulator, written from scratch in Go (Cemu's design was the guide, none of its code is used). This first version plays Wii U homebrew programs (.rpx) that draw with the OS's own screens (OSScreen), on the TV and the GamePad, in RetroPixels.exe and RetroPixels Native. Games don't play yet: they need the Wii U's graphics chip, which comes in a later version.
+- Inside: a PowerPC 750CL ("Espresso") processor with its paired-single maths, checked against the same test program built for a real CPU; the .rpx / .rpl program loader; and RetroPixels' own versions of the Wii U's system libraries: threads on three cores, locks, timers, memory heaps, files (the SD card is /vol/external01), the GamePad's buttons and sticks, and the app lifecycle.
+- Controls: Xbox B / A / Y / X = the GamePad's A / B / X / Y (the same spots), LB / RB = L / R, LT / RT = ZL / ZR, Menu / View = Plus / Minus, both sticks are the GamePad's. On the keyboard: X Z S A, Q W, 1 2, Enter / Shift, H = Home, arrows = left stick, I J K L = D-pad, G switches between the TV and the GamePad's screen. Change them under Controls.
+- The download has "RetroPixels Wii U demo.rpx", a small homebrew program made for RetroPixels, to try it with. No Nintendo keys, firmware or games are included or needed.
+- Not yet: Wii U games (graphics, sound, disc and eShop formats), and save states for the Wii U. RetroPixels for Android can open .rpx files too, but that hasn't been tried on a phone.
+
 ## [2.19.0] - 2026-10-17
 
 - Eleven more arcade games, each first played in MAME at fast speed and then checked against it frame by frame and sound by sound: Double Dragon, Double Dragon II: The Revenge, Double Dragon 3: The Rosetta Stone, Galaga, Dig Dug, Donkey Kong Jr., Donkey Kong 3, The Real Ghostbusters and Dragon Blaze are new, and Donkey Kong and Galaxian were rechecked. The pictures match MAME pixel for pixel in nearly every frame compared, with the same pitch and loudness within a few percent. RetroPixels' code is its own: MAME was only watched and listened to.

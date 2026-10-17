@@ -98,3 +98,43 @@ func TestOSScreen(t *testing.T) {
 		savePNG(t, os.Getenv("WIIU_DUMP")+"/screen.png", m.screen.TV, TVWidth, TVHeight)
 	}
 }
+
+// The demo that comes in the download: it draws the sticks and the held
+// buttons, and ends on Plus + Minus. With WIIU_DEMO set, the test writes the
+// .rpx there (how testdata/demo.rpx is made).
+func TestDemo(t *testing.T) {
+	rpx := buildRPX(t, true, "demo.c")
+	if out := os.Getenv("WIIU_DEMO"); out != "" {
+		if err := os.WriteFile(out, rpx, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := New(rpx, "demo.rpx", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var log strings.Builder
+	m.Log = func(s string) { log.WriteString(s + "\n") }
+	m.SetGamePad(PadState{Buttons: BtnA | BtnL, LX: 1, LY: 1})
+	for i := 0; i < 20; i++ {
+		m.RunFrame()
+	}
+	if m.Err != nil || m.Exited {
+		t.Fatalf("%v %v\n%s", m.Err, m.Exited, log.String())
+	}
+	if dump := os.Getenv("WIIU_DUMP"); dump != "" {
+		savePNG(t, filepath.Join(dump, "demo-tv.png"), m.screen.TV, TVWidth, TVHeight)
+		savePNG(t, filepath.Join(dump, "demo-gamepad.png"), m.screen.DRC, DRCWidth, DRCHeight)
+	}
+	// the left stick's dot is at the top right of its box
+	if m.screen.TV[(170+6)*TVWidth+40+114] != 0x40e060 {
+		t.Error("left stick")
+	}
+	m.SetGamePad(PadState{Buttons: BtnPlus | BtnMinus})
+	for i := 0; i < 10 && !m.Exited; i++ {
+		m.RunFrame()
+	}
+	if !m.Exited || !strings.Contains(log.String(), "demo ended") {
+		t.Fatalf("didn't end:\n%s", log.String())
+	}
+}
