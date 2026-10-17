@@ -5,5 +5,6 @@
 package arcadeboards
 
 import (
-	_ "retropixels/cores/cps1" // Capcom CP System: 1941
+	_ "retropixels/cores/capcom" // Capcom 1942, 1943, 1943 Kai
+	_ "retropixels/cores/cps1"   // Capcom CP System: 1941
 )
