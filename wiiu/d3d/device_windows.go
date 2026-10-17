@@ -383,3 +383,9 @@ func (c Context) ClearDepthStencilView(v View, flags uint32, depth float32, sten
 }
 func (c Context) ClearState() { c.call(110) }
 func (c Context) Flush()      { c.call(111) }
+
+// Bytes gives n bytes of mapped memory.
+func (m Mapped) Bytes(n int) []byte { return unsafe.Slice((*byte)(ptr(m.Data)), n) }
+
+// Words gives n 32-bit words of mapped memory.
+func (m Mapped) Words(n int) []uint32 { return unsafe.Slice((*uint32)(ptr(m.Data)), n) }

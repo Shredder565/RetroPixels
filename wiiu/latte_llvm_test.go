@@ -341,3 +341,18 @@ func TestShaderLLVM(t *testing.T) {
 		})
 	}
 }
+
+// TestDumpR700 saves the compiled test shaders for the Direct3D tests,
+// which run where llc can't (DUMP_R700=1 to write them).
+func TestDumpR700(t *testing.T) {
+	if os.Getenv("DUMP_R700") == "" {
+		t.Skip("set DUMP_R700=1 to write testdata/r700")
+	}
+	os.MkdirAll("testdata/r700", 0o755)
+	for _, c := range shaderCases {
+		code := compileR700(t, shaderIR(c.body))
+		if err := os.WriteFile("testdata/r700/"+c.name+".bin", code, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}

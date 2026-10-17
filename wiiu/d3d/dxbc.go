@@ -10,6 +10,7 @@ package d3d
 import (
 	"encoding/binary"
 	"math"
+	"math/bits"
 )
 
 // opcodes
@@ -342,9 +343,28 @@ type Shader struct {
 	temps   int
 }
 
-// Ins emits an instruction: a destination (if any) and sources.
+// Ins emits an instruction: a destination (if any) and sources. Scalar
+// immediates are widened when the destination has several components.
 func (s *Shader) Ins(op uint32, ops ...Opnd) {
+	if len(ops) > 1 && ops[0].n == 4 && ops[0].mode == 0 && bits.OnesCount32(ops[0].comp) > 1 && !scalarArgs(op&0x7ff) {
+		ops = append([]Opnd(nil), ops...)
+		for i := 1; i < len(ops); i++ {
+			if ops[i].typ == typeImm32 && ops[i].n == 1 {
+				v := ops[i].value[0]
+				ops[i] = imm([]uint32{v, v, v, v})
+			}
+		}
+	}
 	s.body = instr(s.body, op, nil, ops...)
+}
+
+// scalarArgs: instructions with scalar operands after their vectors.
+func scalarArgs(op uint32) bool {
+	switch op {
+	case OpSample, OpSampleB, OpSampleC, OpSampleCLz, OpSampleL, OpSampleD, OpLd, OpResinfo, OpLod, OpGather4:
+		return true
+	}
+	return false
 }
 
 // InsTok emits an instruction with extra tokens before its operands (as
@@ -373,6 +393,16 @@ func (s *Shader) InsOffset(op uint32, u, v, w int32, ops ...Opnd) {
 	s.body = instr(s.body, op, []uint32{ext}, ops...)
 }
 
+// TakeBody removes and returns the instructions emitted so far.
+func (s *Shader) TakeBody() []uint32 {
+	b := s.body
+	s.body = nil
+	return b
+}
+
+// AppendBody adds instructions (from TakeBody).
+func (s *Shader) AppendBody(b []uint32) { s.body = append(s.body, b...) }
+
 // Temps sets how many temporary registers the program uses.
 func (s *Shader) Temps(n int) {
 	if n > s.temps {
@@ -398,6 +428,10 @@ func (s *Shader) DclInputPSSV(r int, mask, interp, sv uint32) {
 		op = opDclInputPsSgv
 	}
 	s.decl = instr(s.decl, op|interp<<11, nil, In(r).Mask(mask), Opnd{raw: true, value: []uint32{sv}})
+}
+
+func (s *Shader) DclInputPSSGV(r int, mask, sv uint32) {
+	s.decl = instr(s.decl, opDclInputPsSgv, nil, In(r).Mask(mask), Opnd{raw: true, value: []uint32{sv}})
 }
 
 func (s *Shader) DclOutput(r int, mask uint32) {
