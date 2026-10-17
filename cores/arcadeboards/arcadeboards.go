@@ -3,3 +3,7 @@
 // WebSocket host (arcadehost.go); RetroPixels Native and Android get them
 // through internal/games/allcores.
 package arcadeboards
+
+import (
+	_ "retropixels/cores/cps1" // Capcom CP System: 1941
+)
