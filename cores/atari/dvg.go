@@ -21,7 +21,8 @@ import "math"
 //
 // The board's state-machine PROM (034602-01) only sequences these steps, so
 // this is written from the instructions' documented behaviour and the PROM
-// isn't needed.
+// isn't needed. Its pictures were checked line by line against MAME's run on
+// the same vector RAM.
 
 // dvgLine is one line the beam draws (in DVG units), or a dot when its ends
 // are the same.
