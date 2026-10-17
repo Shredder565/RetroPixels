@@ -32,8 +32,8 @@ const (
 	// measured against MAME playing the same commands on the same sound
 	// program (the voice about 5 times the music's RMS), at 1.4 times MAME's
 	// overall level
-	fmGain  = 0.24
-	updGain = 0.39
+	fmGain  = 0.178
+	updGain = 0.289
 )
 
 var (
