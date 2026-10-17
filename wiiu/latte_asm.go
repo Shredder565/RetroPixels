@@ -44,8 +44,8 @@ func gprSrc(r, ch uint32) aluSrcSpec { return aluSrcSpec{sel: r, ch: ch} }
 func cfileSrc(i, ch uint32) aluSrcSpec {
 	return aluSrcSpec{sel: srcCfile + i, ch: ch}
 }
-func litSrc(ch uint32) aluSrcSpec { return aluSrcSpec{sel: srcLiteral, ch: ch} }
-func specialSrc(sel uint32) aluSrcSpec { return aluSrcSpec{sel: sel} }
+func litSrc(ch uint32) aluSrcSpec       { return aluSrcSpec{sel: srcLiteral, ch: ch} }
+func specialSrc(sel uint32) aluSrcSpec  { return aluSrcSpec{sel: sel} }
 func (s aluSrcSpec) negate() aluSrcSpec { s.neg = !s.neg; return s }
 
 // aluInst is one slot of an ALU group.

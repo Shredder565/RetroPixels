@@ -136,7 +136,7 @@ func setField(b []byte, shift, n uint8, val uint32) {
 	}
 	v = v&^(mask<<s) | (uint64(val)&mask)<<s
 	for i := 0; i < 5 && o+i < len(b); i++ {
-		if (8*i) < int(s)+int(n) {
+		if (8 * i) < int(s)+int(n) {
 			b[o+i] = byte(v >> (8 * i))
 		}
 	}

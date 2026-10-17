@@ -73,7 +73,9 @@ func (g *Latte) db() dbDesc {
 	return dbFromRegs(g.reg(regDB_DEPTH_BASE), g.reg(regDB_DEPTH_SIZE), g.reg(regDB_DEPTH_INFO), g.reg(regDB_DEPTH_VIEW))
 }
 
-func (d *dbDesc) hasStencil() bool { return d.format == 2 || d.format == 3 || d.format == 5 || d.format == 7 }
+func (d *dbDesc) hasStencil() bool {
+	return d.format == 2 || d.format == 3 || d.format == 5 || d.format == 7
+}
 
 // readDepth gives the depth (0..1) and stencil at an element's address.
 func (g *Latte) readDepth(d *dbDesc, a uint32) (float32, uint8) {
