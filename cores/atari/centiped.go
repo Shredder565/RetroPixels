@@ -42,6 +42,7 @@ type centiped struct {
 	ram    [0x400]uint8 // $0000-$03FF
 	vram   [0x400]uint8 // $0400-$07FF: playfield, then the sprites at $07C0
 	palram [16]uint8
+	pens   []uint8  // the picture's pens (0-15), before colouring
 	latch  [8]uint8 // $1C00-$1C07: coin counters, LEDs, flip
 	er     earom
 	snd    *pokey.Chip
@@ -49,6 +50,8 @@ type centiped struct {
 
 	cpu      *cpu6502.CPU
 	frameCyc int64 // the CPU's cycle count at the start of this frame
+	irqAt    int64 // the cycle the next interrupt is raised on
+	dx, dy   int   // this frame's trackball rolls (-1, 0, 1)
 	sndCyc   int   // CPU cycles not yet given to the POKEY
 	watchdog int   // frames since the game last fed the watchdog
 
@@ -103,8 +106,9 @@ func newCentiped(g *arcade.Game, files arcade.Files, opts arcade.Opts) (arcade.B
 		copy(b.er.mem[:], opts.SRAM)
 	}
 	b.snd = newPOKEY()
-	b.cpu = cpu6502.New(cnBus{b}, cpu6502.Options{Decimal: true})
+	b.cpu = cpu6502.New(cnBus{b}, cpu6502.Options{Decimal: true, PollAtBoundary: true})
 	b.screen = make([]uint32, cnW*cnH)
+	b.pens = make([]uint8, cnW*cnH)
 	b.res = arcade.NewResampler(cnCPUHz/cnSampleN, float64(opts.SampleRate))
 	b.pads = []arcade.Pad{{}, {}}
 	b.Reset()
@@ -139,17 +143,43 @@ func (b *centiped) Reset() {
 	b.ram, b.vram, b.palram, b.latch = [0x400]uint8{}, [0x400]uint8{}, [16]uint8{}, [8]uint8{}
 	mem := b.er.mem
 	b.er = earom{mem: mem}
+	start := b.cpu.Cycles
 	*b.snd = *newPOKEY()
+	// RANDOM as MAME reads it: up to date at each access, IRQ acknowledge,
+	// 16 lines and 1/50 second (Centipede draws its mushroom fields from it).
+	b.snd.SyncEvery, b.snd.SyncBase = [2]int64{cnFrameCyc / 16, cnCPUHz / 50}, start
 	b.out = pokeyOut{}
 	b.cpu.IRQLine = false
 	b.cpu.Reset()
-	b.frameCyc = b.cpu.Cycles
+	// The frame (and the first interrupt) starts at power-on. A bus access
+	// that brings the cycle count to n here is MAME's cycle n from power-on
+	// (its reset sequence takes a cycle more, its count starts a cycle
+	// later), so the timing matches MAME's cycle for cycle.
+	b.frameCyc, b.irqAt = start, start
 	b.sndCyc, b.watchdog = 0, 0
-	b.ball = [2]trackball{}
+	// at power-on the across counter reads $F, direction bit set, and the
+	// other 0 (as in MAME)
+	b.ball = [2]trackball{{pos: 15, dir: 0x80}, {}}
 	b.res.Clear()
 }
 
+// clock raises the interrupt on its cycle (every 64 lines from the start
+// of the vertical blank) and rolls the trackball; every bus access (so every
+// cycle) calls it, so the CPU sees the line as it would on the board.
+func (b *centiped) clock() {
+	// The interrupt is taken at the first instruction boundary at or after
+	// its cycle (the CPU samples at boundaries, as in MAME); the next
+	// instruction's fetch is a cycle on.
+	if b.cpu.Cycles >= b.irqAt-1 {
+		b.irqAt += cnFrameCyc / 4
+		b.cpu.IRQLine = true
+		b.ball[0].roll(b.dx)
+		b.ball[1].roll(b.dy)
+	}
+}
+
 func (b *centiped) read(a int) uint8 {
+	b.clock()
 	a &= 0x3fff
 	switch {
 	case a < 0x400:
@@ -173,6 +203,7 @@ func (b *centiped) read(a int) uint8 {
 }
 
 func (b *centiped) write(a int, v uint8) {
+	b.clock()
 	a &= 0x3fff
 	switch {
 	case a < 0x400:
@@ -180,7 +211,7 @@ func (b *centiped) write(a int, v uint8) {
 	case a < 0x800:
 		b.vram[a-0x400] = v
 	case a >= 0x1000 && a < 0x1010:
-		b.snd.Write(a, v)
+		b.snd.WriteAt(a, v, b.cpu.Cycles)
 	case a >= 0x1400 && a < 0x1410:
 		b.palram[a&15] = v
 	case a >= 0x1600 && a < 0x1640:
@@ -189,6 +220,7 @@ func (b *centiped) write(a int, v uint8) {
 		b.er.control(v)
 	case a == 0x1800:
 		b.cpu.IRQLine = false
+		b.snd.Sync(b.cpu.Cycles)
 	case a >= 0x1c00 && a < 0x1c08:
 		b.latch[a&7] = v >> 7
 	case a == 0x2000:
@@ -198,7 +230,7 @@ func (b *centiped) write(a int, v uint8) {
 
 // line is the beam's line now (0-255; 240 on is the vertical blank).
 func (b *centiped) line() int {
-	return int((b.cpu.Cycles - b.frameCyc) * cnLines / cnFrameCyc)
+	return int(((b.cpu.Cycles-b.frameCyc)*cnLines/cnFrameCyc + cnVblank) % cnLines)
 }
 
 func (b *centiped) readInput(n int) uint8 {
@@ -246,23 +278,16 @@ func (b *centiped) RunFrame() {
 	}
 	// The trackball's counters, as the upright screen sees them: one counts
 	// up going left, the other up going down.
-	dx, dy := dir("Right", "Left"), dir("Up", "Down")
-	for line := 0; line < cnLines; line++ {
-		if line&63 == 48 {
-			b.cpu.IRQLine = true
-			b.ball[0].roll(dx)
-			b.ball[1].roll(dy)
-		}
-		if line == cnVblank {
-			b.draw()
-		}
-		end := b.frameCyc + int64(line+1)*cnFrameCyc/cnLines
-		for b.cpu.Cycles < end {
-			n := b.cpu.Step()
-			b.sound(n)
-		}
+	b.dx, b.dy = dir("Right", "Left"), dir("Up", "Down")
+	// A frame here runs from the start of the vertical blank (line 240, where
+	// power-on falls, as in MAME) to the next, and shows the picture drawn.
+	end := b.frameCyc + cnFrameCyc
+	for b.cpu.Cycles < end {
+		n := b.cpu.Step()
+		b.sound(n)
 	}
-	b.frameCyc += cnFrameCyc
+	b.draw()
+	b.frameCyc = end
 	b.watchdog++
 	if b.watchdog > 16 { // the game stopped: the watchdog resets it
 		b.watchdog = 0
@@ -280,8 +305,8 @@ func (b *centiped) sound(n int) {
 
 func (b *centiped) TakeAudio() []float32 { return b.res.Take() }
 
-// colour: a colour register. The bits are low for on: 0 red, 1 green,
-// 2 blue; bit 3 low dims the blue.
+// cnColour: a colour register. The bits are low for on: 0 red, 1 green,
+// 2 blue; bit 3 low dims the blue, or the green.
 func cnColour(v uint8) uint32 {
 	var r, g, bl int
 	if v&1 == 0 {
@@ -292,8 +317,15 @@ func cnColour(v uint8) uint32 {
 	}
 	if v&4 == 0 {
 		bl = 0xff
-		if v&8 == 0 {
+	}
+	// bit 3 low dims the blue, or the green when there is no blue (as MAME
+	// shows them); red alone isn't dimmed
+	if v&8 == 0 {
+		switch {
+		case bl != 0:
 			bl = 0xc0
+		case g != 0:
+			g = 0xc0
 		}
 	}
 	return arcade.RGB(r, g, bl)
@@ -302,14 +334,17 @@ func cnColour(v uint8) uint32 {
 // draw renders the whole picture: the playfield, then the sprites on top.
 func (b *centiped) draw() {
 	var pens [16]uint32
-	for i := range pens {
-		pens[i] = cnColour(b.palram[i])
+	for i, v := range b.palram {
+		pens[i] = cnColour(v)
 	}
-	b.render(pens)
+	b.render(b.pens)
+	for i, p := range b.pens {
+		b.screen[i] = pens[p]
+	}
 }
 
-func (b *centiped) render(pens [16]uint32) {
-	s := b.screen
+// render draws the playfield and sprites into s as pens (0-15).
+func (b *centiped) render(s []uint8) {
 	for row := 0; row < 30; row++ {
 		for col := 0; col < 32; col++ {
 			code := int(b.vram[row*32+col])
@@ -325,7 +360,7 @@ func (b *centiped) render(pens [16]uint32) {
 				o := (row*8+y)*cnW + col*8
 				src := t[(y^fy)*8:]
 				for x := 0; x < 8; x++ {
-					s[o+x] = pens[4+src[x^fx]]
+					s[o+x] = 4 + src[x^fx]
 				}
 			}
 		}
@@ -355,7 +390,7 @@ func (b *centiped) render(pens [16]uint32) {
 					break
 				}
 				if c := src[x^fx]; c != 0 {
-					s[py*cnW+px] = pens[12+(colr>>(2*(c-1)))&3]
+					s[py*cnW+px] = uint8(12 + (colr>>(2*(c-1)))&3)
 				}
 			}
 		}
@@ -377,6 +412,7 @@ func (b *centiped) SaveState() ([]byte, error) {
 	w.B = b.snd.AppendState(w.B)
 	w.F64(b.out.lp)
 	w.Int(int(b.cpu.Cycles - b.frameCyc))
+	w.Int(int(b.irqAt - b.frameCyc))
 	w.Int(b.sndCyc)
 	w.Int(b.watchdog)
 	for _, t := range b.ball {
@@ -413,6 +449,7 @@ func (b *centiped) LoadState(st []byte) error {
 	}
 	n.out.lp = r.F64()
 	into := int64(r.Int())
+	irq := int64(r.Int())
 	n.sndCyc = r.Int()
 	n.watchdog = r.Int()
 	for i := range n.ball {
@@ -434,6 +471,7 @@ func (b *centiped) LoadState(st []byte) error {
 	n.cpu, n.snd, n.res = b.cpu, b.snd, b.res
 	*b = n
 	b.frameCyc = b.cpu.Cycles - into
+	b.irqAt = b.frameCyc + irq
 	b.draw()
 	return nil
 }
