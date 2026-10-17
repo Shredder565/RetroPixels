@@ -8,7 +8,7 @@ backups move over to RetroPixels automatically the first time it starts.
 Put RetroPixels.exe in the same folder as the old RetroConsole.exe so it can
 reuse the "ffmpeg" folder there (otherwise it will offer to download it again).
 
-Version 2.18.0 (the number also shows next to the RetroPixels name in the app).
+Version 2.19.0 (the number also shows next to the RetroPixels name in the app).
 
 Systems: NES, Super Nintendo, Game Boy / Color, Game Boy Advance, Nintendo 64,
 Sega Genesis, Sega Master System, Atari 2600, Atari 7800, classic arcade
@@ -125,12 +125,26 @@ What each system supports
     the longer you hold it) and Asteroids Deluxe (astdelux.zip; vector
     screen drawn smoothly, explosion and thrust sounds made by RetroPixels).
     Both keep their high scores like a battery save.
-  * Berzerk (berzerk.zip; high scores kept). Its speech isn't emulated
-    yet, so the robots don't talk.
+  * Berzerk (berzerk.zip; high scores kept). The robots talk when the zip
+    has the two speech chip files (1c and 2c, any common name); many older
+    sets don't, and then the game plays without speech.
   * Vs. Castlevania (cstlevna.zip; Nintendo's Vs. System arcade version).
   Each zip can use the older file names or MAME's current ones. In
   RetroPixels.exe these new boards run inside the program itself, like the
   Nintendo 64, so they need the desktop app.
+- Arcade, new in 2.19.0, each on RetroPixels' own emulation:
+  * Donkey Kong Jr. (dkongjr.zip) on the Donkey Kong board, and Donkey Kong 3
+    (dkong3.zip), with its two NES sound processors.
+  * Galaga (galaga.zip) and Dig Dug (digdug.zip). Namco's custom input and
+    sound-effect chips aren't needed: RetroPixels plays their part.
+  * Double Dragon (ddragon.zip), Double Dragon II: The Revenge (ddragon2.zip)
+    and Double Dragon 3: The Rosetta Stone (ddragon3.zip; up to 3 players:
+    set the Players DIP switch to 3).
+  * The Real Ghostbusters (ghostb.zip). The board's protection chip isn't
+    needed.
+  * Dragon Blaze (dragnblz.zip). Without the settings chip file RetroPixels
+    makes a fresh one: the first start shows "EEP-ROM NG" for a moment while
+    the game writes its default settings, then it plays.
 
 Playing classic games
 - Drop a game file on the window or click "Choose game file…". Zipped games
