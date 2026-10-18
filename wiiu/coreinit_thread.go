@@ -923,7 +923,7 @@ func (m *Machine) alarmThread(core int) {
 		return
 	}
 	addr := m.sysAlloc(osThreadSize, 64)
-	stack := m.heaps.allocSystem(m, 0x8000, 64) + 0x8000
+	stack := m.allocSystem(0x8000, 64) + 0x8000
 	t := m.newThread(addr, m.thunk("coreinit", "__RPAlarmLoop"), 0, 0, stack, 0x8000, 0, 1<<core)
 	t.Priority = -1 // above every program thread, like an interrupt
 	t.Saved = t.Ctx.GPR[1]

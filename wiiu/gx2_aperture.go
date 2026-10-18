@@ -28,7 +28,7 @@ func init() {
 			ret(cpu, 0)
 			return
 		}
-		buf := m.heaps.allocSystem(m, size, 0x100)
+		buf := m.allocSystem(size, 0x100)
 		// what's there already shows through
 		ap := &aperture{buf: buf, lay: lay, w: w, h: h, slice: slice, endian: endian}
 		ap.copy(m, false)
@@ -59,7 +59,7 @@ func init() {
 		}
 		delete(m.apertures, arg(cpu, 0))
 		lo, hi := ap.copy(m, true)
-		m.heaps.get(m.heaps.System).expFree(ap.buf)
+		m.freeSystem(ap.buf)
 		if hi > lo {
 			m.gpuWritten(lo, hi-lo)
 		}

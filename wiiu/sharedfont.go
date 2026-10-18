@@ -45,7 +45,7 @@ func init() {
 		if m.fontAddr == 0 && !m.fontTried {
 			m.fontTried = true
 			if b := findSharedFont(); b != nil {
-				a := m.heaps.allocSystem(m, uint32(len(b)), 0x100)
+				a := m.allocSystem(uint32(len(b)), 0x100)
 				m.Mem.WriteBytes(a, b)
 				m.fontAddr, m.fontSize = a, uint32(len(b))
 			} else {
