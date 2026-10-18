@@ -214,9 +214,9 @@ func (m *Machine) fsWrite(h, buf, n uint32, pos int64) (uint32, uint32) {
 func (m *Machine) writeStat(a uint32, size int64, dir bool) {
 	mem := m.Mem
 	mem.Fill(a, 0, 0x64)
-	flags := uint32(0x0c000000) // quota, regular
+	flags := uint32(0x01000000) // a file
 	if dir {
-		flags = 0x80000000 | 0x0c000000
+		flags = 0x80000000
 	}
 	mem.Write32(a+0x00, flags)
 	mem.Write32(a+0x04, 0x666) // read / write for everyone
@@ -251,7 +251,7 @@ func (m *Machine) fsOpenDir(p string) (uint32, uint32) {
 	return h, fsOK
 }
 
-// fsReadDir fills an FSDirectoryEntry (FSStat + 256-byte name)
+// fsReadDir fills an FSDirectoryEntry (FSStat + 128-byte name)
 func (m *Machine) fsReadDir(h, out uint32) uint32 {
 	d := m.fsInit().Dirs[h]
 	if d == nil {
@@ -263,11 +263,12 @@ func (m *Machine) fsReadDir(h, out uint32) uint32 {
 	e := d.Entries[d.Next]
 	d.Next++
 	m.writeStat(out, e.Size, e.Dir)
+	// FSDirectoryEntry is 0xE4 bytes: the name gets 128 of them
 	name := e.Name
-	if len(name) > 255 {
-		name = name[:255]
+	if len(name) > 127 {
+		name = name[:127]
 	}
-	m.Mem.Fill(out+0x64, 0, 256)
+	m.Mem.Fill(out+0x64, 0, 128)
 	m.Mem.WriteString(out+0x64, name)
 	return fsOK
 }
