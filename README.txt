@@ -527,6 +527,12 @@ Credits & licences
   and measured hardware values are still facts others have published too.
   The DSP-3, DSP-4, ST010, ST011 and ST018 chip programs are never included;
   you supply your own.
+- The Wii U emulator is the exception: some of its files are Go rewrites of
+  code from Cemu (https://github.com/cemu-project/Cemu), the Wii U emulator,
+  used under the Mozilla Public License 2.0. Those files stay under that
+  licence (a copy is in wiiu/LICENSE-MPL-2.0.txt), say so at the top, and
+  name the Cemu files they come from. Their source is part of the RetroPixels
+  source attached to each release. Thanks to the Cemu team.
 - It works together with separate programs that keep their own licences and
   are not part of RetroPixels:
   * ffmpeg (GPL): video encoding for recordings; downloaded on request from

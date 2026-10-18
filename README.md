@@ -215,9 +215,12 @@ See [CHANGELOG.md](CHANGELOG.md) for every release.
 ## Legal
 
 RetroPixels contains no copyrighted game code, BIOS or firmware. Its emulators are written from
-scratch. Game and system names are trademarks of their respective owners and are used only to
+scratch, except for parts of the Wii U emulator: some files in `wiiu/` are Go rewrites of code from
+[Cemu](https://github.com/cemu-project/Cemu). Those files are under the Mozilla Public License 2.0
+(see `wiiu/LICENSE-MPL-2.0.txt`), say so at the top, and name the Cemu files they come from.
+Thanks to the Cemu team. Game and system names are trademarks of their respective owners and are used only to
 describe compatibility. RetroPixels is not affiliated with or endorsed by Nintendo, Sega, Atari,
-Konami, Namco, Microsoft, the Dolphin project or the MAME team.
+Konami, Namco, Microsoft, the Dolphin project, the Cemu project or the MAME team.
 
 Screenshot: *Shattering Jaws*, a Genesis homebrew game by Mun (2016).
 
