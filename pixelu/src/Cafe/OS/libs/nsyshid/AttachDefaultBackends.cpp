@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "nsyshid.h"
 #include "Backend.h"
 #include "BackendEmulated.h"
@@ -7,25 +8,20 @@
 
 namespace nsyshid::backend
 {
+	template<typename T>
+	static void TryAttach()
+	{
+		auto backend = std::make_shared<T>();
+		if (backend->IsInitialisedOk())
+			AttachBackend(backend);
+	}
+
 	void AttachDefaultBackends()
 	{
-	#ifdef HAS_LIBUSB
-		// add libusb backend
-		{
-			auto backendLibusb = std::make_shared<backend::libusb::BackendLibusb>();
-			if (backendLibusb->IsInitialisedOk())
-			{
-				AttachBackend(backendLibusb);
-			}
-		}
-	#endif
-	   // add emulated backend
-		{
-			auto backendEmulated = std::make_shared<backend::emulated::BackendEmulated>();
-			if (backendEmulated->IsInitialisedOk())
-			{
-				AttachBackend(backendEmulated);
-			}
-		}
+		// real devices first, so the emulated backend can see which portals are connected
+#ifdef HAS_LIBUSB
+		TryAttach<libusb::BackendLibusb>();
+#endif
+		TryAttach<emulated::BackendEmulated>();
 	}
 } // namespace nsyshid::backend

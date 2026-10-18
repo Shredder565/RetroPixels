@@ -1,57 +1,57 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Whitelist.h"
 
 namespace nsyshid
 {
 	Whitelist& Whitelist::GetInstance()
 	{
-		static Whitelist whitelist;
-		return whitelist;
+		static Whitelist instance;
+		return instance;
 	}
 
 	Whitelist::Whitelist()
+		: m_entries{
+			  {0x0E6F, 0x0241}, // LEGO Dimensions toy pad
+			  {0x1430, 0x0150}, // Skylanders portal
+			  {0x1430, 0x1F17}, // Skylanders portal (Xbox 360)
+			  {0x0E6F, 0x0129}, // Disney Infinity base
+			  {0x0E6F, 0x200A}, // Kamen Rider ride gate
+		  }
 	{
-		// add known devices
-		{
-			// lego dimensions portal
-			m_devices.emplace_back(0x0e6f, 0x0241);
-			// skylanders portal
-			m_devices.emplace_back(0x1430, 0x0150);
-			// skylanders 360 portal
-			m_devices.emplace_back(0x1430, 0x1F17);
-			// disney infinity base
-			m_devices.emplace_back(0x0e6f, 0x0129);
-			// kamen rider ride gate
-			m_devices.emplace_back(0x0e6f, 0x200A);
-		}
 	}
 
 	bool Whitelist::IsDeviceWhitelisted(uint16 vendorId, uint16 productId)
 	{
-		auto it = std::find(m_devices.begin(), m_devices.end(),
-							std::tuple<uint16, uint16>(vendorId, productId));
-		return it != m_devices.end();
+		std::unique_lock _l(m_lock);
+		for (const auto& [vid, pid] : m_entries)
+			if (vid == vendorId && pid == productId)
+				return true;
+		return false;
 	}
 
 	void Whitelist::AddDevice(uint16 vendorId, uint16 productId)
 	{
-		if (!IsDeviceWhitelisted(vendorId, productId))
-		{
-			m_devices.emplace_back(vendorId, productId);
-		}
+		if (IsDeviceWhitelisted(vendorId, productId))
+			return;
+		std::unique_lock _l(m_lock);
+		m_entries.emplace_back(vendorId, productId);
 	}
 
 	void Whitelist::RemoveDevice(uint16 vendorId, uint16 productId)
 	{
-		m_devices.remove(std::tuple<uint16, uint16>(vendorId, productId));
+		std::unique_lock _l(m_lock);
+		m_entries.remove(std::make_tuple(vendorId, productId));
 	}
 
 	std::list<std::tuple<uint16, uint16>> Whitelist::GetDevices()
 	{
-		return m_devices;
+		std::unique_lock _l(m_lock);
+		return m_entries;
 	}
 
 	void Whitelist::RemoveAllDevices()
 	{
-		m_devices.clear();
+		std::unique_lock _l(m_lock);
+		m_entries.clear();
 	}
 } // namespace nsyshid

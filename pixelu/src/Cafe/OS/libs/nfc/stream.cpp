@@ -1,201 +1,65 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+#include "Common/precompiled.h"
 #include "stream.h"
 
-#include <algorithm>
-
-Stream::Stream(std::endian endianness)
- : mError(ERROR_OK), mEndianness(endianness)
+namespace nfc
 {
-}
-
-Stream::~Stream()
-{
-}
-
-Stream::Error Stream::GetError() const
-{
-	return mError;
-}
-
-void Stream::SetEndianness(std::endian endianness)
-{
-	mEndianness = endianness;
-}
-
-std::endian Stream::GetEndianness() const
-{
-	return mEndianness;
-}
-
-Stream& Stream::operator>>(bool& val)
-{
-	uint8 i;
-	*this >> i;
-	val = !!i;
-
-	return *this;
-}
-
-Stream& Stream::operator>>(float& val)
-{
-	uint32 i;
-	*this >> i;
-	val = std::bit_cast<float>(i);
-
-	return *this;
-}
-
-Stream& Stream::operator>>(double& val)
-{
-	uint64 i;
-	*this >> i;
-	val = std::bit_cast<double>(i);
-
-	return *this;
-}
-
-Stream& Stream::operator<<(bool val)
-{
-	uint8 i = val;
-	*this >> i;
-
-	return *this;
-}
-
-Stream& Stream::operator<<(float val)
-{
-	uint32 i = std::bit_cast<uint32>(val);
-	*this >> i;
-
-	return *this;
-}
-
-Stream& Stream::operator<<(double val)
-{
-	uint64 i = std::bit_cast<uint64>(val);
-	*this >> i;
-
-	return *this;
-}
-
-void Stream::SetError(Error error)
-{
-	mError = error;
-}
-
-bool Stream::NeedsSwap()
-{
-	return mEndianness != std::endian::native;
-}
-
-VectorStream::VectorStream(std::vector<std::byte>& vector, std::endian endianness)
- : Stream(endianness), mVector(vector), mPosition(0)
-{
-}
-
-VectorStream::~VectorStream()
-{
-}
-
-std::size_t VectorStream::Read(const std::span<std::byte>& data)
-{
-	if (data.size() > GetRemaining())
+	bool ByteReader::Take(size_t n)
 	{
-		SetError(ERROR_READ_FAILED);
-		std::fill(data.begin(), data.end(), std::byte(0));
-		return 0;
+		if (m_failed || n > Left())
+		{
+			m_failed = true;
+			m_pos = m_bytes.size();
+			return false;
+		}
+		return true;
 	}
 
-	std::copy_n(mVector.get().begin() + mPosition, data.size(), data.begin());
-	mPosition += data.size();
-	return data.size();
-}
-
-std::size_t VectorStream::Write(const std::span<const std::byte>& data)
-{
-	// Resize vector if not enough bytes remain
-	if (mPosition + data.size() > mVector.get().size())
+	uint8 ByteReader::U8()
 	{
-		mVector.get().resize(mPosition + data.size());
+		if (!Take(1))
+			return 0;
+		return m_bytes[m_pos++];
 	}
 
-	std::copy(data.begin(), data.end(), mVector.get().begin() + mPosition);
-	mPosition += data.size();
-	return data.size();
-}
-
-bool VectorStream::SetPosition(std::size_t position)
-{
-	if (position >= mVector.get().size())
+	uint16 ByteReader::U16()
 	{
-		return false;
+		if (!Take(2))
+			return 0;
+		uint16 v = (uint16)((m_bytes[m_pos] << 8) | m_bytes[m_pos + 1]);
+		m_pos += 2;
+		return v;
 	}
 
-	mPosition = position;
-	return true;
-}
-
-std::size_t VectorStream::GetPosition() const
-{
-	return mPosition;
-}
-
-std::size_t VectorStream::GetRemaining() const
-{
-	return mVector.get().size() - mPosition;
-}
-
-SpanStream::SpanStream(std::span<const std::byte> span, std::endian endianness)
- : Stream(endianness), mSpan(std::move(span)), mPosition(0)
-{
-}
-
-SpanStream::~SpanStream()
-{
-}
-
-std::size_t SpanStream::Read(const std::span<std::byte>& data)
-{
-	if (data.size() > GetRemaining())
+	uint32 ByteReader::U32()
 	{
-		SetError(ERROR_READ_FAILED);
-		std::fill(data.begin(), data.end(), std::byte(0));
-		return 0;
+		if (!Take(4))
+			return 0;
+		uint32 v = 0;
+		for (int i = 0; i < 4; i++)
+			v = (v << 8) | m_bytes[m_pos + i];
+		m_pos += 4;
+		return v;
 	}
 
-	std::copy_n(mSpan.begin() + mPosition, data.size(), data.begin());
-	mPosition += data.size();
-	return data.size();
-}
-
-std::size_t SpanStream::Write(const std::span<const std::byte>& data)
-{
-	// Cannot write to const span
-	SetError(ERROR_WRITE_FAILED);
-	return 0;
-}
-
-bool SpanStream::SetPosition(std::size_t position)
-{
-	if (position >= mSpan.size())
+	void ByteReader::Bytes(size_t n, std::vector<uint8>& out)
 	{
-		return false;
+		out.clear();
+		if (!Take(n))
+			return;
+		out.assign(m_bytes.begin() + m_pos, m_bytes.begin() + m_pos + n);
+		m_pos += n;
 	}
 
-	mPosition = position;
-	return true;
-}
-
-std::size_t SpanStream::GetPosition() const
-{
-	return mPosition;
-}
-
-std::size_t SpanStream::GetRemaining() const
-{
-	if (mPosition > mSpan.size())
+	void ByteWriter::U16(uint16 v)
 	{
-		return 0;
+		m_out.push_back((uint8)(v >> 8));
+		m_out.push_back((uint8)v);
 	}
 
-	return mSpan.size() - mPosition;
+	void ByteWriter::U32(uint32 v)
+	{
+		for (int shift = 24; shift >= 0; shift -= 8)
+			m_out.push_back((uint8)(v >> shift));
+	}
 }

@@ -34,6 +34,7 @@ THIRD_PARTY = (
     "Common/unix/date.h",
     "Common/unix/fast_float.h",
     "Common/GLInclude/",
+    "Cafe/OS/libs/nsyshid/g721/",
 )
 
 

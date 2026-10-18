@@ -54,12 +54,12 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 6819 | 2.0% |
-| Cemu, untouched | 272448 | 81.3% |
+| Original (RetroPixels) | 16818 | 5.1% |
+| Cemu, untouched | 256757 | 77.7% |
 | Cemu, with PixelU changes | 15320 | 4.6% |
 | PixelU-added files (MPL-2.0 header) | 1940 | 0.6% |
-| Third-party | 38766 | 11.6% |
-| **All** | **335293** | 100% |
+| Third-party | 39404 | 11.9% |
+| **All** | **330239** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -110,21 +110,21 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/OS/libs/gx2 | 7994 | 0 | Cemu |
 | Cafe/OS/libs/h264_avc | 3097 | 0 | Cemu |
 | Cafe/OS/libs/mic | 397 | 397 | original |
-| Cafe/OS/libs/nfc | 2020 | 0 | Cemu |
-| Cafe/OS/libs/nlibcurl | 1708 | 0 | Cemu |
+| Cafe/OS/libs/nfc | 1081 | 1081 | original |
+| Cafe/OS/libs/nlibcurl | 1243 | 1243 | original |
 | Cafe/OS/libs/nlibnss | 65 | 65 | original |
 | Cafe/OS/libs/nn_ac | 313 | 313 | original |
 | Cafe/OS/libs/nn_acp | 304 | 304 | original |
 | Cafe/OS/libs/nn_act | 568 | 568 | original |
 | Cafe/OS/libs/nn_aoc | 182 | 182 | original |
-| Cafe/OS/libs/nn_boss | 1360 | 0 | Cemu |
+| Cafe/OS/libs/nn_boss | 1145 | 1145 | original |
 | Cafe/OS/libs/nn_ccr | 50 | 50 | original |
 | Cafe/OS/libs/nn_cmpt | 67 | 67 | original |
 | Cafe/OS/libs/nn_ec | 49 | 49 | original |
 | Cafe/OS/libs/nn_fp | 736 | 736 | original |
 | Cafe/OS/libs/nn_idbe | 158 | 158 | original |
 | Cafe/OS/libs/nn_ndm | 119 | 119 | original |
-| Cafe/OS/libs/nn_nfp | 1354 | 0 | Cemu |
+| Cafe/OS/libs/nn_nfp | 850 | 850 | original |
 | Cafe/OS/libs/nn_nim | 241 | 241 | original |
 | Cafe/OS/libs/nn_olv | 4486 | 0 | Cemu |
 | Cafe/OS/libs/nn_pdm | 66 | 66 | original |
@@ -133,9 +133,9 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/OS/libs/nn_spm | 126 | 126 | original |
 | Cafe/OS/libs/nn_temp | 65 | 65 | original |
 | Cafe/OS/libs/nn_uds | 64 | 64 | original |
-| Cafe/OS/libs/nsyshid | 6921 | 0 | Cemu |
+| Cafe/OS/libs/nsyshid | 4944 | 4306 | mixed (87% original), 638 lines third-party |
 | Cafe/OS/libs/nsyskbd | 84 | 84 | original |
-| Cafe/OS/libs/nsysnet | 2328 | 0 | Cemu |
+| Cafe/OS/libs/nsysnet | 1374 | 1374 | original |
 | Cafe/OS/libs/ntag | 623 | 623 | original |
 | Cafe/OS/libs/padscore | 1109 | 0 | Cemu |
 | Cafe/OS/libs/proc_ui | 970 | 0 | Cemu |
@@ -215,3 +215,16 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
   game memory), the mic test tone runs at the real sample rate, a failing host
   microphone no longer quits the emulator, ntag opens /dev/ccr_nfc once
   instead of on every tag operation.
+- Batch 3: HLE libraries `nfc`, `nn_nfp` (amiibo), `nn_boss`, `nlibcurl`,
+  `nsysnet` and `nsyshid` (including the Skylanders, Infinity and Dimensions
+  portals and the libusb backend) rewritten as original code. Exports, guest
+  struct layouts and the portal API the GUI uses are unchanged. The bundled
+  G.721 codec in `nsyshid/g721/` is counted as third-party. `nn_olv` (Miiverse,
+  about 4.5k lines of mirrored guest class layouts) is left for a later batch.
+  Fixes: curl `CONTENT_TYPE` getinfo queried the wrong field,
+  `curl_multi_info_read` returned the wrong handle and a little-endian count,
+  easy handles no longer default to stdin/stdout when the game sets no
+  read/write callback, the Dimensions password generator no longer reads past
+  its buffer, the Infinity/Dimensions configuration descriptors are no longer
+  corrupt, portal queues are locked, and libusb devices claim their interfaces
+  once instead of on every transfer.

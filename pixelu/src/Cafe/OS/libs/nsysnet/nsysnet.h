@@ -1,3 +1,6 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// nsysnet: the Wii U socket library (BSD-style sockets, DNS) and NSSL, the
+// SSL context library nlibcurl uses for HTTPS.
 #pragma once
 #include <set>
 #include <vector>
@@ -11,40 +14,35 @@
 #define closesocket close
 #endif
 
-typedef signed int WUSOCKET;
-
-WUSOCKET nsysnet_createVirtualSocketFromExistingSocket(SOCKET existingSocket);
-void nsysnet_notifyCloseSharedSocket(SOCKET existingSocket);
-
-struct wu_fd_set
-{
-	uint32be mask;
-};
-
-void _translateFDSet(fd_set* hostSet, struct wu_fd_set* fdset, sint32 nfds);
-void _translateFDSetRev(struct wu_fd_set* fdset, fd_set* hostSet, sint32 nfds);
-
-sint32 nsysnet_getVirtualSocketHandleFromHostHandle(SOCKET s);
-
 namespace nsysnet
 {
-
-#define NSSL_OK (0)
-#define NSSL_INVALID_CTX (0xFFD7FFFF)
-
-	struct NSSLInternalState_t
+	// a guest fd_set: bit n stands for socket handle n
+	struct GuestFdSet
 	{
-		bool destroyed;
-		uint32 sslVersion;
-		uint32 clientPKI;
-		std::set<uint32> serverPKIs;
-		std::vector<std::vector<uint8>> serverCustomPKIs;
+		uint32be mask;
 	};
 
-	NSSLInternalState_t* GetNSSLContext(sint32 index);
+	void FdSetClear(GuestFdSet* set);
+	void FdSetAdd(GuestFdSet* set, sint32 handle);
 
-	void wuResetFD(struct wu_fd_set* fdset);
-	void wuSetFD(struct wu_fd_set* fdset, sint32 fd);
+	// host sockets opened by our nlibcurl get guest handles so that games can
+	// select() on them (curl_multi_fdset)
+	sint32 GuestHandleOfHostSocket(SOCKET s);  // -1 if none
+	sint32 AdoptHostSocket(SOCKET s);          // new handle, -1 if the table is full
+	void ForgetHostSocket(SOCKET s);           // drop the handle, the socket is closed by its owner
+
+	// an NSSL context: which certificates an HTTPS connection trusts and presents
+	struct NsslContext
+	{
+		bool destroyed = false;
+		uint32 sslVersion = 0;
+		uint32 clientCertId = 0;              // 0 = none
+		std::set<uint32> serverCertIds;       // console-internal CA certificates
+		std::vector<std::vector<uint8>> serverCertsExternal; // CA certificates supplied by the game
+	};
+
+	// nullptr for unknown handles; destroyed contexts are still returned
+	const NsslContext* GetNsslContext(uint32 handle);
 
 	COSModule* GetModule();
 }

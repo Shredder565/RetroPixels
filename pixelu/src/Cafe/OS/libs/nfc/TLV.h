@@ -1,37 +1,29 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// TLV blocks of an NFC Forum tag data area (type, length, value).
 #pragma once
 
-#include <cstdint>
 #include <span>
 #include <vector>
 
-class TLV
+namespace nfc::tlv
 {
-public:
-	enum Tag
+	constexpr uint8 kNull = 0x00;       // padding, no length
+	constexpr uint8 kLockControl = 0x01;
+	constexpr uint8 kMemoryControl = 0x02;
+	constexpr uint8 kNdef = 0x03;
+	constexpr uint8 kProprietary = 0xFD;
+	constexpr uint8 kTerminator = 0xFE; // end of the list, no length
+
+	struct Entry
 	{
-		TAG_NULL        = 0x00,
-		TAG_LOCK_CTRL   = 0x01,
-		TAG_MEM_CTRL    = 0x02,
-		TAG_NDEF        = 0x03,
-		TAG_PROPRIETARY = 0xFD,
-		TAG_TERMINATOR  = 0xFE,
+		uint8 type = kNull;
+		std::vector<uint8> value;
 	};
 
-public:
-	TLV();
-	TLV(Tag tag, std::vector<std::byte> value);
-	virtual ~TLV();
+	// Splits a data area into its TLVs (NULL padding is skipped, parsing stops
+	// after the terminator). Returns false if a length runs past the end.
+	bool Parse(std::span<const uint8> area, std::vector<Entry>& entries);
 
-	static std::vector<TLV> FromBytes(const std::span<std::byte>& data);
-	std::vector<std::byte> ToBytes() const;
-
-	Tag GetTag() const;
-	const std::vector<std::byte>& GetValue() const;
-
-	void SetTag(Tag tag);
-	void SetValue(const std::span<const std::byte>& value);
-
-private:
-	Tag mTag;
-	std::vector<std::byte> mValue;
-};
+	// Serialises one TLV (1-byte length, or 0xFF + 16-bit length from 0xFF up).
+	void Append(const Entry& entry, std::vector<uint8>& out);
+}

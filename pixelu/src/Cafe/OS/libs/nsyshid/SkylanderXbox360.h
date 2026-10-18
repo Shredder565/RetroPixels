@@ -1,6 +1,11 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Presents a Skylanders portal made for the Xbox 360 (connected through
+// libusb) to the game as a Wii U portal. The Xbox portal frames every report
+// with a two-byte header and takes speaker audio as G.721 ADPCM.
 #pragma once
 
 #include "nsyshid.h"
+#include "BackendEmulated.h"
 #ifdef HAS_LIBUSB
 #include "BackendLibusb.h"
 #include "g721/g721.h"
@@ -8,43 +13,26 @@
 
 namespace nsyshid
 {
-	#ifdef HAS_LIBUSB
-	class SkylanderXbox360PortalLibusb final : public Device {
-	  public:
-		SkylanderXbox360PortalLibusb(std::shared_ptr<Device> usbPortal);
-		~SkylanderXbox360PortalLibusb() = default;
+	constexpr uint8 XBOX_DATA_HEADER[] = {0x0B, 0x14};
+	constexpr uint8 XBOX_AUDIO_DATA_HEADER[] = {0x0B, 0x17};
+
+#ifdef HAS_LIBUSB
+	class SkylanderXbox360PortalLibusb final : public EmulatedHidDevice
+	{
+	public:
+		explicit SkylanderXbox360PortalLibusb(std::shared_ptr<backend::libusb::DeviceLibusb> usbPortal);
 
 		bool Open() override;
-
 		void Close() override;
-
 		bool IsOpened() override;
 
-		ReadResult Read(ReadMessage* message) override;
+		Status Read(uint8* buffer, uint32 length, sint32& bytesRead) override;
+		Status Write(uint8* data, uint32 length, sint32& bytesWritten) override;
+		bool SetReport(uint8 reportType, uint8 reportId, uint8* data, uint32 length) override;
 
-		WriteResult Write(WriteMessage* message) override;
-
-		bool GetDescriptor(uint8 descType,
-			uint8 descIndex,
-			uint16 lang,
-			uint8* output,
-			uint32 outputMaxLength) override;
-
-		bool SetIdle(uint8 ifIndex,
-			uint8 reportId,
-			uint8 duration) override;
-
-		bool SetProtocol(uint8 ifIndex, uint8 protocol) override;
-
-		bool SetReport(ReportMessage* message) override;
-		
-	  private:
-		std::shared_ptr<backend::libusb::DeviceLibusb> m_usbPortal;
-		bool m_IsOpened;
-		struct g72x_state m_state;
+	private:
+		std::shared_ptr<backend::libusb::DeviceLibusb> m_portal;
+		g72x_state m_encoder{};
 	};
-	#endif
-
-	constexpr uint8 XBOX_DATA_HEADER[] = { 0x0B, 0x14 };
-	constexpr uint8 XBOX_AUDIO_DATA_HEADER[] = { 0x0B, 0x17 };
+#endif
 } // namespace nsyshid

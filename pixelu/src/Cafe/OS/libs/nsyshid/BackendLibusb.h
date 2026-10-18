@@ -1,3 +1,6 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Pass-through of real USB HID devices with libusb.
+#pragma once
 #include "nsyshid.h"
 
 #if BOOST_OS_BSD
@@ -7,143 +10,75 @@
 #endif
 #include "Backend.h"
 
+#include <atomic>
+#include <set>
+#include <shared_mutex>
+#include <thread>
+
 namespace nsyshid::backend::libusb
 {
-	enum : uint8
+	class BackendLibusb : public nsyshid::Backend
 	{
-		HID_CLASS_GET_REPORT   = 0x01,
-		HID_CLASS_GET_IDLE     = 0x02,
-		HID_CLASS_GET_PROTOCOL = 0x03,
-		HID_CLASS_SET_REPORT   = 0x09,
-		HID_CLASS_SET_IDLE     = 0x0A,
-		HID_CLASS_SET_PROTOCOL = 0x0B
-	};
-
-	class BackendLibusb : public nsyshid::Backend {
-	  public:
+	public:
 		BackendLibusb();
-
-		~BackendLibusb();
+		~BackendLibusb() override;
 
 		bool IsInitialisedOk() override;
 
-	  protected:
+	protected:
 		void AttachVisibleDevices() override;
 
-	  private:
-		libusb_context* m_ctx;
-		int m_initReturnCode;
-		bool m_callbackRegistered;
-		libusb_hotplug_callback_handle m_hotplugCallbackHandle;
-		std::thread m_hotplugThread;
-		std::atomic<bool> m_hotplugThreadStop;
+	private:
+		static int LIBUSB_CALL OnHotplugEvent(libusb_context* ctx, libusb_device* dev, libusb_hotplug_event event, void* user);
+		void DeviceArrived(libusb_device* dev);
+		void DeviceLeft(libusb_device* dev);
+		std::shared_ptr<Device> CreateDevice(libusb_device* dev);
 
-		// called by libusb
-		static int HotplugCallback(libusb_context* ctx, libusb_device* dev,
-								   libusb_hotplug_event event, void* user_data);
-
-		int OnHotplug(libusb_device* dev, libusb_hotplug_event event);
-
-		std::shared_ptr<Device> CheckAndCreateDevice(libusb_device* dev);
-
-		std::shared_ptr<Device> FindLibusbDevice(libusb_device* dev);
-
-		bool FindDefaultDeviceEndpoints(libusb_device* dev,
-										bool& endpointInFound, uint8& endpointIn, uint16& endpointInMaxPacketSize,
-										bool& endpointOutFound, uint8& endpointOut, uint16& endpointOutMaxPacketSize);
+		libusb_context* m_ctx = nullptr;
+		int m_initResult = 0;
+		bool m_hotplugRegistered = false;
+		libusb_hotplug_callback_handle m_hotplugHandle = 0;
+		std::thread m_eventThread;
+		std::atomic<bool> m_stopEvents{false};
 	};
 
-	template<typename T>
-	using UniquePtr = std::unique_ptr<T, void (*)(T*)>;
-
-	using ConfigDescriptor = UniquePtr<libusb_config_descriptor>;
-
-	class DeviceLibusb : public nsyshid::Device {
-	  public:
-		DeviceLibusb(libusb_context* ctx,
-					 uint16 vendorId,
-					 uint16 productId,
-					 uint8 interfaceIndex,
-					 uint8 interfaceSubClass,
-					 uint8 protocol,
-					 uint8 libusbBusNumber,
-					 uint8 libusbDeviceAddress,
-					 std::vector<ConfigDescriptor> configs);
-
+	class DeviceLibusb : public nsyshid::Device
+	{
+	public:
+		DeviceLibusb(libusb_context* ctx, uint16 vendorId, uint16 productId, uint8 busNumber, uint8 deviceAddress,
+					 std::vector<uint8> interfacesPerConfig, uint8 endpointIn, uint8 endpointOut);
 		~DeviceLibusb() override;
 
+		bool IsAt(uint16 vendorId, uint16 productId, uint8 busNumber, uint8 deviceAddress) const;
+
 		bool Open() override;
-
 		void Close() override;
-
 		bool IsOpened() override;
 
-		ReadResult Read(ReadMessage* message) override;
+		Status Read(uint8* buffer, uint32 length, sint32& bytesRead) override;
+		Status Write(uint8* data, uint32 length, sint32& bytesWritten) override;
 
-		WriteResult Write(WriteMessage* message) override;
-
-		bool GetDescriptor(uint8 descType,
-						   uint8 descIndex,
-						   uint16 lang,
-						   uint8* output,
-						   uint32 outputMaxLength) override;
-
-		bool SetIdle(uint8 ifIndex,
-					 uint8 reportId,
-					 uint8 duration) override;
-
+		bool GetDescriptor(uint8 descType, uint8 descIndex, uint16 lang, uint8* output, uint32 outputMaxLength) override;
+		bool SetIdle(uint8 ifIndex, uint8 reportId, uint8 duration) override;
 		bool SetProtocol(uint8 ifIndex, uint8 protocol) override;
+		bool SetReport(uint8 reportType, uint8 reportId, uint8* data, uint32 length) override;
 
-		int ClaimAllInterfaces(uint8 config_num);
-		int ReleaseAllInterfaces(uint8 config_num);
-		int ReleaseAllInterfacesForCurrentConfig();
-
-		bool SetReport(ReportMessage* message) override;
-
-		uint8 m_libusbBusNumber;
-		uint8 m_libusbDeviceAddress;
-		bool m_libusbHasEndpointIn;
-		uint8 m_libusbEndpointIn;
-		bool m_libusbHasEndpointOut;
-		uint8 m_libusbEndpointOut;
-
-	  private:
-		void CloseDevice();
+	private:
+		bool ClaimInterfaces(size_t configIndex);
+		void ReleaseInterfaces();
+		bool BuildConfigDescriptor(uint8* output, uint32 outputMaxLength);
 
 		libusb_context* m_ctx;
-		std::mutex m_handleMutex;
-		std::atomic<sint32> m_handleInUseCounter;
-		std::condition_variable m_handleInUseCounterDecremented;
-		libusb_device_handle* m_libusbHandle;
-		std::vector<ConfigDescriptor> m_config_descriptors;
+		uint8 m_bus;
+		uint8 m_address;
+		std::vector<uint8> m_interfacesPerConfig;
+		uint8 m_endpointIn;
+		uint8 m_endpointOut;
 
-		class HandleLock {
-		  public:
-			HandleLock() = delete;
-
-			HandleLock(libusb_device_handle** handle,
-					   std::mutex& handleMutex,
-					   std::atomic<sint32>& handleInUseCounter,
-					   std::condition_variable& handleInUseCounterDecremented,
-					   DeviceLibusb& device);
-
-			~HandleLock();
-
-			HandleLock(const HandleLock&) = delete;
-
-			HandleLock& operator=(const HandleLock&) = delete;
-
-			bool IsValid();
-
-			libusb_device_handle* GetHandle();
-
-		  private:
-			libusb_device_handle* m_handle;
-			std::mutex& m_handleMutex;
-			std::atomic<sint32>& m_handleInUseCounter;
-			std::condition_variable& m_handleInUseCounterDecremented;
-		};
-
-		std::unique_ptr<HandleLock> AquireHandleLock();
+		// transfers hold the lock shared, Open/Close hold it exclusively
+		std::shared_mutex m_handleLock;
+		libusb_device_handle* m_handle = nullptr;
+		std::atomic<bool> m_closing{false};
+		std::set<int> m_claimed;
 	};
 } // namespace nsyshid::backend::libusb

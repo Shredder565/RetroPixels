@@ -1,88 +1,38 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// NDEF messages (NFC Data Exchange Format): a list of records, each with a
+// type name format, a type, an optional id and a payload.
 #pragma once
 
 #include <span>
 #include <vector>
-#include <optional>
 
-#include "stream.h"
-
-namespace ndef
+namespace nfc::ndef
 {
+	// type name formats
+	constexpr uint8 kTnfEmpty = 0;
+	constexpr uint8 kTnfWellKnown = 1;
+	constexpr uint8 kTnfMedia = 2;
+	constexpr uint8 kTnfUri = 3;
+	constexpr uint8 kTnfExternal = 4;
+	constexpr uint8 kTnfUnknown = 5; // the Wii U keeps its tag payload in a record of this format
+	constexpr uint8 kTnfUnchanged = 6;
 
-	class Record
+	struct Record
 	{
-	public:
-		enum HeaderFlag
-		{
-			NDEF_IL         = 0x08,
-			NDEF_SR         = 0x10,
-			NDEF_CF         = 0x20,
-			NDEF_ME         = 0x40,
-			NDEF_MB         = 0x80,
-			NDEF_TNF_MASK   = 0x07,
-		};
-
-		enum TypeNameFormat
-		{
-			NDEF_TNF_EMPTY      = 0,
-			NDEF_TNF_WKT        = 1,
-			NDEF_TNF_MEDIA      = 2,
-			NDEF_TNF_URI        = 3,
-			NDEF_TNF_EXT        = 4,
-			NDEF_TNF_UNKNOWN    = 5,
-			NDEF_TNF_UNCHANGED  = 6,
-			NDEF_TNF_RESERVED   = 7,
-		};
-
-	public:
-		Record();
-		virtual ~Record();
-
-		static std::optional<Record> FromStream(Stream& stream);
-		std::vector<std::byte> ToBytes(uint8 flags = 0) const;
-
-		TypeNameFormat GetTNF() const;
-		const std::vector<std::byte>& GetID() const;
-		const std::vector<std::byte>& GetType() const;
-		const std::vector<std::byte>& GetPayload() const;
-
-		void SetTNF(TypeNameFormat tnf);
-		void SetID(const std::span<const std::byte>& id);
-		void SetType(const std::span<const std::byte>& type);
-		void SetPayload(const std::span<const std::byte>& payload);
-
-		bool IsLast() const;
-		bool IsShort() const;
-
-	private:
-		uint8 mFlags;
-		TypeNameFormat mTNF;
-		std::vector<std::byte> mID;
-		std::vector<std::byte> mType;
-		std::vector<std::byte> mPayload;
+		uint8 tnf = kTnfEmpty;
+		std::vector<uint8> type;
+		std::vector<uint8> id;
+		std::vector<uint8> payload;
 	};
 
-	class Message
-	{
-	public:
-		Message();
-		virtual ~Message();
+	// Parses a whole message. Fails if no record could be read or the last
+	// record read does not carry the message-end flag.
+	bool ParseMessage(std::span<const uint8> bytes, std::vector<Record>& records);
 
-		static std::optional<Message> FromBytes(const std::span<const std::byte>& data);
-		std::vector<std::byte> ToBytes() const;
+	// Serialises records as one message (first gets MB, last gets ME; short
+	// record form for payloads under 255 bytes).
+	std::vector<uint8> BuildMessage(const std::vector<Record>& records);
 
-		Record& operator[](int i) { return mRecords[i]; }
-		const Record& operator[](int i) const { return mRecords[i]; }
-
-		void append(const Record& r);
-
-		auto begin() { return mRecords.begin(); }
-		auto end() { return mRecords.end(); }
-		auto begin() const { return mRecords.begin(); }
-		auto end() const { return mRecords.end(); }
-
-	private:
-		std::vector<Record> mRecords;
-	};
-
-} // namespace ndef
+	// first record with the given type name format, or nullptr
+	const Record* FindByTnf(const std::vector<Record>& records, uint8 tnf);
+}

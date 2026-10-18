@@ -1,139 +1,55 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+#include "Common/precompiled.h"
 #include "TLV.h"
 #include "stream.h"
 
-#include <cassert>
-
-TLV::TLV()
+namespace nfc::tlv
 {
-}
-
-TLV::TLV(Tag tag, std::vector<std::byte> value)
- : mTag(tag), mValue(std::move(value))
-{
-}
-
-TLV::~TLV()
-{
-}
-
-std::vector<TLV> TLV::FromBytes(const std::span<std::byte>& data)
-{
-	bool hasTerminator = false;
-	std::vector<TLV> tlvs;
-	SpanStream stream(data, std::endian::big);
-
-	while (stream.GetRemaining() > 0 && !hasTerminator)
+	bool Parse(std::span<const uint8> area, std::vector<Entry>& entries)
 	{
-		// Read the tag
-		uint8 byte;
-		stream >> byte;
-		Tag tag = static_cast<Tag>(byte);
-
-		switch (tag)
+		entries.clear();
+		ByteReader in(area);
+		while (in.Left() > 0)
 		{
-			case TLV::TAG_NULL:
-				// Don't need to do anything for NULL tags
-				break;
-			
-			case TLV::TAG_TERMINATOR:
-				tlvs.emplace_back(tag, std::vector<std::byte>{});
-				hasTerminator = true;
-				break;
-
-			default:
+			Entry e;
+			e.type = in.U8();
+			if (e.type == kNull)
+				continue;
+			if (e.type == kTerminator)
 			{
-				// Read the length
-				uint16 length;
-				stream >> byte;
-				length = byte;
-
-				// If the length is 0xff, 2 bytes with length follow
-				if (length == 0xff) {
-					stream >> length;
-				}
-
-				std::vector<std::byte> value;
-				value.resize(length);
-				stream.Read(value);
-
-				tlvs.emplace_back(tag, value);
+				entries.push_back(std::move(e));
 				break;
 			}
+			uint32 len = in.U8();
+			if (len == 0xFF)
+				len = in.U16();
+			in.Bytes(len, e.value);
+			if (!in.Ok())
+			{
+				cemuLog_log(LogType::Force, "nfc: TLV list runs past the end of the tag data area");
+				entries.clear();
+				return false;
+			}
+			entries.push_back(std::move(e));
 		}
-
-		if (stream.GetError() != Stream::ERROR_OK)
-		{
-			cemuLog_log(LogType::Force, "Error: TLV parsing read past end of stream");
-			// Clear tlvs to prevent further havoc while parsing ndef data
-			tlvs.clear();
-			break;
-		}
+		// a missing terminator is accepted (NTAG-style tags often have none)
+		return true;
 	}
 
-	// This seems to be okay, at least NTAGs don't add a terminator tag
-	// if (!hasTerminator)
-	// {
-	//     cemuLog_log(LogType::Force, "Warning: TLV parsing reached end of stream without terminator tag");
-	// }
-
-	return tlvs;
-}
-
-std::vector<std::byte> TLV::ToBytes() const
-{
-	std::vector<std::byte> bytes;
-	VectorStream stream(bytes, std::endian::big);
-
-	// Write tag
-	stream << uint8(mTag);
-
-	switch (mTag)
+	void Append(const Entry& entry, std::vector<uint8>& out)
 	{
-		case TLV::TAG_NULL:
-		case TLV::TAG_TERMINATOR:
-			// Nothing to do here
-			break;
-
-		default:
+		ByteWriter w(out);
+		w.U8(entry.type);
+		if (entry.type == kNull || entry.type == kTerminator)
+			return;
+		cemu_assert(entry.value.size() <= 0xFFFF);
+		if (entry.value.size() < 0xFF)
+			w.U8((uint8)entry.value.size());
+		else
 		{
-			// Write length (decide if as a 8-bit or 16-bit value)
-			if (mValue.size() >= 0xff)
-			{
-				stream << uint8(0xff);
-				stream << uint16(mValue.size());
-			}
-			else
-			{
-				stream << uint8(mValue.size());
-			}
-
-			// Write value
-			stream.Write(mValue);
+			w.U8(0xFF);
+			w.U16((uint16)entry.value.size());
 		}
+		w.Bytes(entry.value);
 	}
-
-	return bytes;
-}
-
-TLV::Tag TLV::GetTag() const
-{
-	return mTag;
-}
-
-const std::vector<std::byte>& TLV::GetValue() const
-{
-	return mValue;
-}
-
-void TLV::SetTag(Tag tag)
-{
-	mTag = tag;
-}
-
-void TLV::SetValue(const std::span<const std::byte>& value)
-{
-	// Can only write max 16-bit lengths into TLV
-	cemu_assert(value.size() < 0x10000);
-
-	mValue.assign(value.begin(), value.end());
 }

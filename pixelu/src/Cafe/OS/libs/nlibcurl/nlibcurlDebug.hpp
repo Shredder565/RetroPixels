@@ -1,138 +1,123 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Optional dumping of the HTTP traffic games send through nlibcurl
+// (enabled with ActiveSettings::DumpLibcurlRequestsEnabled()).
+//
+// Layout on disk, relative to the working directory:
+//   dump/curl/session<id>/request<NNNN>_param.txt          options set for the request
+//   dump/curl/session<id>/request<NNNN>_responseHeaders.txt
+//   dump/curl/session<id>/request<NNNN>_responseRaw.bin    response body
+#pragma once
+#include <atomic>
+#include <ctime>
+#include <memory>
+#include "Common/FileStream.h"
+#include "config/ActiveSettings.h"
 
-uint32 _curlDebugSessionId = 0;
-
-// begin a new request if one is not already active
-void curlDebug_markActiveRequest(CURL_t* curl)
+namespace nlibcurl
 {
-	if (!ActiveSettings::DumpLibcurlRequestsEnabled())
-		return;
+	class RequestDump
+	{
+	public:
+		~RequestDump() { Close(); }
 
-	if (curl->debug.activeRequestIndex != 0)
-		return; // already tracking request
+		// options are being collected for a new request; opens the parameter file
+		void BeginIfIdle()
+		{
+			if (!ActiveSettings::DumpLibcurlRequestsEnabled() || m_pendingIndex != 0)
+				return;
+			m_pendingIndex = s_nextIndex.fetch_add(1);
+			m_param.reset(FileStream::createFile2(PathFor(m_pendingIndex, "param.txt")));
+			if (m_param)
+			{
+				std::time_t now = std::time(nullptr);
+				std::tm local{};
+#if BOOST_OS_WINDOWS
+				localtime_s(&local, &now);
+#else
+				localtime_r(&now, &local);
+#endif
+				m_param->writeStringFmt("Request %u %04d-%02d-%02d %02d:%02d:%02d\r\n", m_pendingIndex,
+					local.tm_year + 1900, local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min, local.tm_sec);
+			}
+		}
 
-	if (_curlDebugSessionId == 0)
-	{
-		_curlDebugSessionId = (uint32)std::chrono::seconds(std::time(NULL)).count();
-		if (_curlDebugSessionId == 0)
-			_curlDebugSessionId = 1;
-		wchar_t filePath[256];
-		swprintf(filePath, sizeof(filePath), L"dump//curl//session%u", _curlDebugSessionId);
-		fs::create_directories(fs::path(filePath));
-	}
+		// the request is being sent; responses now belong to it
+		void Submit()
+		{
+			m_responseIndex = m_pendingIndex;
+			m_pendingIndex = 0;
+			m_param.reset();
+			m_headers.reset();
+			m_body.reset();
+		}
 
-	static uint32 _nextRequestIndex = 1;
-	curl->debug.activeRequestIndex = _nextRequestIndex;
-	_nextRequestIndex++;
+		void LogOption(const char* name, const char* value)
+		{
+			BeginIfIdle();
+			if (m_param)
+				m_param->writeStringFmt("SetOpt %s: %s\r\n", name, value ? value : "NULL");
+		}
 
-	wchar_t filePath[256];
-	swprintf(filePath, sizeof(filePath) / sizeof(wchar_t), L"dump//curl//session%u//request%04d_param.txt", _curlDebugSessionId, (sint32)curl->debug.activeRequestIndex);
-	curl->debug.file_requestParam = FileStream::createFile(filePath);
-	auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-	if (curl->debug.file_requestParam)
-	{
-		auto t = std::localtime(&now);
-		curl->debug.file_requestParam->writeStringFmt("Request %d %d-%d-%d %d:%02d:%02d\r\n", (sint32)curl->debug.activeRequestIndex, t->tm_year+1900, t->tm_mon, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
-	}
-}
+		void LogOption(const char* name, uint32 guestAddress)
+		{
+			BeginIfIdle();
+			if (m_param)
+				m_param->writeStringFmt("SetOpt %s: 0x%08x\r\n", name, guestAddress);
+		}
 
-void curlDebug_notifySubmitRequest(CURL_t* curl)
-{
-	// start new response
-	curl->debug.responseRequestIndex = curl->debug.activeRequestIndex;
-	if (curl->debug.file_responseRaw)
-	{
-		delete curl->debug.file_responseRaw;
-		curl->debug.file_responseRaw = nullptr;
-	}
-	if (curl->debug.file_responseHeaders)
-	{
-		delete curl->debug.file_responseHeaders;
-		curl->debug.file_responseHeaders = nullptr;
-	}
-	curl->debug.hasDumpedResultInfo = false;
-	// end current request
-	curl->debug.activeRequestIndex = 0;
-	if (curl->debug.file_requestParam)
-	{
-		delete curl->debug.file_requestParam;
-		curl->debug.file_requestParam = nullptr;
-	}
-}
+		void ResponseHeader(const void* data, size_t length)
+		{
+			Append(m_headers, "responseHeaders.txt", data, length);
+		}
 
-void curlDebug_logEasySetOptStr(CURL_t* curl, const char* optName, const char* optValue)
-{
-	curlDebug_markActiveRequest(curl);
-	if (curl->debug.file_requestParam)
-	{
-		curl->debug.file_requestParam->writeStringFmt("SetOpt %s: ", optName, optValue ? optValue : "NULL");
-		if(optValue)
-			curl->debug.file_requestParam->writeString(optValue);
-		else
-			curl->debug.file_requestParam->writeString("NULL");
-		curl->debug.file_requestParam->writeString("\r\n");
-	}
-}
+		void ResponseBody(const void* data, size_t length)
+		{
+			Append(m_body, "responseRaw.bin", data, length);
+		}
 
-void curlDebug_logEasySetOptPtr(CURL_t* curl, const char* optName, uint32 ppcPtr)
-{
-	curlDebug_markActiveRequest(curl);
-	if (curl->debug.file_requestParam)
-	{
-		curl->debug.file_requestParam->writeStringFmt("SetOpt %s: 0x%08x\r\n", optName, ppcPtr);
-	}
-}
+		void Close()
+		{
+			m_param.reset();
+			m_headers.reset();
+			m_body.reset();
+		}
 
-void curlDebug_resultWrite(CURL_t* curl, char* ptr, size_t size, size_t nmemb)
-{
-	if (!ActiveSettings::DumpLibcurlRequestsEnabled())
-		return;
-	if (curl->debug.responseRequestIndex == 0)
-		return;
-	if (curl->debug.file_responseRaw == nullptr)
-	{
-		wchar_t filePath[256];
-		swprintf(filePath, sizeof(filePath) / sizeof(wchar_t), L"dump//curl//session%u//request%04d_responseRaw.bin", _curlDebugSessionId, (sint32)curl->debug.responseRequestIndex);
-		curl->debug.file_responseRaw = FileStream::createFile(filePath);
-	}
-	if (curl->debug.file_responseRaw)
-	{
-		curl->debug.file_responseRaw->writeData(ptr, size*nmemb);
-	}
-}
+	private:
+		void Append(std::unique_ptr<FileStream>& file, const char* suffix, const void* data, size_t length)
+		{
+			if (!ActiveSettings::DumpLibcurlRequestsEnabled() || m_responseIndex == 0)
+				return;
+			if (!file)
+				file.reset(FileStream::createFile2(PathFor(m_responseIndex, suffix)));
+			if (file)
+				file->writeData(data, (sint32)length);
+		}
 
-void curlDebug_headerWrite(CURL_t* curl, char* ptr, size_t size, size_t nmemb)
-{
-	if (!ActiveSettings::DumpLibcurlRequestsEnabled())
-		return;
-	if (curl->debug.responseRequestIndex == 0)
-		return;
-	if (curl->debug.file_responseHeaders == nullptr)
-	{
-		wchar_t filePath[256];
-		swprintf(filePath, sizeof(filePath) / sizeof(wchar_t), L"dump//curl//session%u//request%04d_responseHeaders.txt", _curlDebugSessionId, (sint32)curl->debug.responseRequestIndex);
-		curl->debug.file_responseHeaders = FileStream::createFile(filePath);
-	}
-	if (curl->debug.file_responseHeaders)
-	{
-		curl->debug.file_responseHeaders->writeData(ptr, size*nmemb);
-	}
-}
+		static fs::path SessionDir()
+		{
+			static const fs::path dir = []() {
+				uint32 id = (uint32)std::time(nullptr);
+				if (id == 0)
+					id = 1;
+				fs::path p = fs::path("dump") / "curl" / fmt::format("session{}", id);
+				std::error_code ec;
+				fs::create_directories(p, ec);
+				return p;
+			}();
+			return dir;
+		}
 
-void curlDebug_cleanup(CURL_t* curl)
-{
-	if (curl->debug.file_requestParam)
-	{
-		delete curl->debug.file_requestParam;
-		curl->debug.file_requestParam = nullptr;
-	}
-	if (curl->debug.file_responseRaw)
-	{
-		delete curl->debug.file_responseRaw;
-		curl->debug.file_responseRaw = nullptr;
-	}
-	if (curl->debug.file_responseHeaders)
-	{
-		delete curl->debug.file_responseHeaders;
-		curl->debug.file_responseHeaders = nullptr;
-	}
+		static fs::path PathFor(uint32 index, const char* suffix)
+		{
+			return SessionDir() / fmt::format("request{:04}_{}", index, suffix);
+		}
+
+		inline static std::atomic<uint32> s_nextIndex{1};
+
+		uint32 m_pendingIndex{0};
+		uint32 m_responseIndex{0};
+		std::unique_ptr<FileStream> m_param;
+		std::unique_ptr<FileStream> m_headers;
+		std::unique_ptr<FileStream> m_body;
+	};
 }

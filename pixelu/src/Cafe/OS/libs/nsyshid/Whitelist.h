@@ -1,32 +1,31 @@
-#ifndef CEMU_NSYSHID_WHITELIST_H
-#define CEMU_NSYSHID_WHITELIST_H
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// USB devices (vendor id, product id) that may be passed through to games.
+#pragma once
+
+#include <list>
+#include <mutex>
+#include <tuple>
 
 namespace nsyshid
 {
-	class Whitelist {
-	  public:
+	class Whitelist
+	{
+	public:
 		static Whitelist& GetInstance();
 
 		Whitelist(const Whitelist&) = delete;
-
 		Whitelist& operator=(const Whitelist&) = delete;
 
 		bool IsDeviceWhitelisted(uint16 vendorId, uint16 productId);
-
 		void AddDevice(uint16 vendorId, uint16 productId);
-
 		void RemoveDevice(uint16 vendorId, uint16 productId);
-
 		std::list<std::tuple<uint16, uint16>> GetDevices();
-
 		void RemoveAllDevices();
 
-	  private:
+	private:
 		Whitelist();
 
-		// vendorId, productId
-		std::list<std::tuple<uint16, uint16>> m_devices;
+		std::mutex m_lock;
+		std::list<std::tuple<uint16, uint16>> m_entries;
 	};
 } // namespace nsyshid
-
-#endif // CEMU_NSYSHID_WHITELIST_H

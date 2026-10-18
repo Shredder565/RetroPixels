@@ -1,28 +1,169 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// LEGO Dimensions toy pad protocol: the game writes 32-byte commands
+// (0x55, length, command, sequence, payload..., checksum) and reads 32-byte
+// replies (0x55, length, sequence, payload..., checksum). Tags placed on or
+// lifted from the pad are announced with 0x56 reports once the pad has been
+// woken through the challenge exchange. Challenge payloads are TEA
+// encrypted; tags are NTAG213 images of 45 four-byte pages.
 #include "Dimensions.h"
 
-#include "nsyshid.h"
-#include "Backend.h"
-
-#include "Common/FileStream.h"
-
-#include <array>
 #include <random>
 
 namespace nsyshid
 {
-	static constexpr std::array<uint8, 16> COMMAND_KEY = {0x55, 0xFE, 0xF6, 0xB0, 0x62, 0xBF, 0x0B, 0x41,
-														  0xC9, 0xB3, 0x7C, 0xB4, 0x97, 0x3E, 0x29, 0x7B};
-
-	static constexpr std::array<uint8, 17> CHAR_CONSTANT = {0xB7, 0xD5, 0xD7, 0xE6, 0xE7, 0xBA, 0x3C, 0xA8,
-															0xD8, 0x75, 0x47, 0x68, 0xCF, 0x23, 0xE9, 0xFE, 0xAA};
-
-	static constexpr std::array<uint8, 25> PWD_CONSTANT = {0x28, 0x63, 0x29, 0x20, 0x43, 0x6F, 0x70, 0x79,
-														   0x72, 0x69, 0x67, 0x68, 0x74, 0x20, 0x4C, 0x45,
-														   0x47, 0x4F, 0x20, 0x32, 0x30, 0x31, 0x34, 0xAA, 0xAA};
-
 	DimensionsUSB g_dimensionstoypad;
 
-	const std::map<const uint32, const char*> s_listMinis = {
+	// ---- protocol arithmetic
+	namespace dimensions
+	{
+		// TEA key of the command channel
+		constexpr uint8 kCommandKey[16] = {0x55, 0xFE, 0xF6, 0xB0, 0x62, 0xBF, 0x0B, 0x41,
+										   0xC9, 0xB3, 0x7C, 0xB4, 0x97, 0x3E, 0x29, 0x7B};
+		// appended to the UID when deriving a tag's key
+		constexpr uint8 kKeySalt[17] = {0xB7, 0xD5, 0xD7, 0xE6, 0xE7, 0xBA, 0x3C, 0xA8, 0xD8,
+										0x75, 0x47, 0x68, 0xCF, 0x23, 0xE9, 0xFE, 0xAA};
+		// appended to the UID when deriving a tag's password
+		constexpr char kPasswordSalt[] = "(c) Copyright LEGO 2014";
+
+		uint32 LE32(const uint8* p)
+		{
+			return (uint32)p[0] | ((uint32)p[1] << 8) | ((uint32)p[2] << 16) | ((uint32)p[3] << 24);
+		}
+
+		void PutLE32(uint8* p, uint32 v)
+		{
+			for (int i = 0; i < 4; i++)
+				p[i] = (uint8)(v >> (8 * i));
+		}
+
+		uint8 Checksum(const uint8* data, size_t count)
+		{
+			uint32 sum = 0;
+			for (size_t i = 0; i < count; i++)
+				sum += data[i];
+			return (uint8)sum;
+		}
+
+		// TEA, 32 cycles, block and key as little-endian words
+		std::array<uint8, 8> TeaEncrypt(const uint8* block, const uint8* key)
+		{
+			uint32 v0 = LE32(block), v1 = LE32(block + 4);
+			const uint32 k0 = LE32(key), k1 = LE32(key + 4), k2 = LE32(key + 8), k3 = LE32(key + 12);
+			uint32 sum = 0;
+			for (int i = 0; i < 32; i++)
+			{
+				sum += 0x9E3779B9;
+				v0 += ((v1 << 4) + k0) ^ (v1 + sum) ^ ((v1 >> 5) + k1);
+				v1 += ((v0 << 4) + k2) ^ (v0 + sum) ^ ((v0 >> 5) + k3);
+			}
+			std::array<uint8, 8> out;
+			PutLE32(out.data(), v0);
+			PutLE32(out.data() + 4, v1);
+			return out;
+		}
+
+		std::array<uint8, 8> TeaDecrypt(const uint8* block, const uint8* key)
+		{
+			uint32 v0 = LE32(block), v1 = LE32(block + 4);
+			const uint32 k0 = LE32(key), k1 = LE32(key + 4), k2 = LE32(key + 8), k3 = LE32(key + 12);
+			uint32 sum = 0x9E3779B9u * 32;
+			for (int i = 0; i < 32; i++)
+			{
+				v1 -= ((v0 << 4) + k2) ^ (v0 + sum) ^ ((v0 >> 5) + k3);
+				v0 -= ((v1 << 4) + k0) ^ (v1 + sum) ^ ((v1 >> 5) + k1);
+				sum -= 0x9E3779B9;
+			}
+			std::array<uint8, 8> out;
+			PutLE32(out.data(), v0);
+			PutLE32(out.data() + 4, v1);
+			return out;
+		}
+
+		// generator in the style of Jenkins' small fast PRNG (rotations 21, 19, 6)
+		uint32 RngNext(uint32& a, uint32& b, uint32& c, uint32& d)
+		{
+			const uint32 e = a - std::rotl(b, 21);
+			a = b ^ std::rotl(c, 19);
+			b = c + std::rotl(d, 6);
+			c = d + e;
+			d = e + a;
+			return d;
+		}
+
+		void RngSeed(uint32& a, uint32& b, uint32& c, uint32& d, uint32 seed)
+		{
+			a = 0xF1EA5EED;
+			b = c = d = seed;
+			for (int i = 0; i < 42; i++)
+				RngNext(a, b, c, d);
+		}
+
+		// folds `words` little-endian words of `data` into one value
+		uint32 Fold(const uint8* data, int words)
+		{
+			uint32 v = 0;
+			for (int i = 0; i < words; i++)
+				v = LE32(data + 4 * i) + std::rotr(v, 25) + std::rotr(v, 10) - v;
+			return v;
+		}
+
+		// the 7 UID bytes of a tag image (page 0 bytes 0-2, page 1)
+		std::array<uint8, 7> Uid(const uint8* tag)
+		{
+			return {tag[0], tag[1], tag[2], tag[4], tag[5], tag[6], tag[7]};
+		}
+
+		std::array<uint8, 16> TagKey(const uint8* tag)
+		{
+			const std::array<uint8, 7> uid = Uid(tag);
+			std::array<uint8, 16> key{};
+			for (int part = 0; part < 4; part++)
+			{
+				const int words = 3 + part;
+				uint8 buf[24];
+				memcpy(buf, uid.data(), 7);
+				memcpy(buf + 7, kKeySalt, sizeof(kKeySalt));
+				buf[words * 4 - 1] = 0xAA;
+				PutLE32(&key[part * 4], Fold(buf, words));
+			}
+			return key;
+		}
+
+		std::array<uint8, 4> TagPassword(const uint8* tag)
+		{
+			const std::array<uint8, 7> uid = Uid(tag);
+			uint8 buf[32];
+			memcpy(buf, uid.data(), 7);
+			memcpy(buf + 7, kPasswordSalt, sizeof(kPasswordSalt) - 1);
+			buf[30] = 0xAA;
+			buf[31] = 0xAA;
+			std::array<uint8, 4> pwd;
+			PutLE32(pwd.data(), Fold(buf, 8));
+			return pwd;
+		}
+
+		// characters store their id encrypted in pages 36-37; vehicles and
+		// gadgets store it in plain text in page 36
+		uint32 TagId(const uint8* tag)
+		{
+			const std::array<uint8, 16> key = TagKey(tag);
+			const std::array<uint8, 8> plain = TeaDecrypt(tag + 36 * 4, key.data());
+			const uint32 id = LE32(plain.data());
+			return id < 1000 ? id : LE32(tag + 36 * 4);
+		}
+	}
+	// ---- device
+
+	namespace
+	{
+		struct DimensionsName
+		{
+			uint32 id;
+			const char* name;
+		};
+
+		constexpr DimensionsName kMinifigNames[] = {
 		{0, "Blank Tag"},
 		{1, "Batman"},
 		{2, "Gandalf"},
@@ -109,9 +250,10 @@ namespace nsyshid
 		{83, "World 20 (unreleased)"},
 		{768, "Unknown 768"},
 		{769, "Supergirl Red Lantern"},
-		{770, "Unknown 770"}};
+		{770, "Unknown 770"},
+		};
 
-	const std::map<const uint32, const char*> s_listTokens = {
+		constexpr DimensionsName kTokenNames[] = {
 		{1000, "Police Car"},
 		{1001, "Aerial Squad Car"},
 		{1002, "Missile Striker"},
@@ -158,14 +300,14 @@ namespace nsyshid
 		{1043, "8-Legged Stalker"},
 		{1044, "Poison Slinger"},
 		{1045, "Homer's Car"},
-		{1047, "The SubmaHomer"},
 		{1046, "The Homercraft"},
+		{1047, "The SubmaHomer"},
 		{1048, "Taunt-o-Vision"},
-		{1050, "The MechaHomer"},
 		{1049, "Blast Cam"},
+		{1050, "The MechaHomer"},
 		{1051, "Velociraptor"},
-		{1053, "Venom Raptor"},
 		{1052, "Spike Attack Raptor"},
+		{1053, "Venom Raptor"},
 		{1054, "Gyrosphere"},
 		{1055, "Sonic Beam Gyrosphere"},
 		{1056, " Gyrosphere"},
@@ -292,8 +434,8 @@ namespace nsyshid
 		{1177, "Snail Dude Jake"},
 		{1178, "Hover Jake"},
 		{1179, "Lumpy Car"},
-		{1181, "Lumpy Land Whale"},
 		{1180, "Lumpy Truck"},
+		{1181, "Lumpy Land Whale"},
 		{1182, "Lunatic Amp"},
 		{1183, "Shadow Scorpion"},
 		{1184, "Heavy Metal Monster"},
@@ -319,8 +461,8 @@ namespace nsyshid
 		{1204, "Gadget-O-Matic"},
 		{1205, "Scarlet Scorpion"},
 		{1206, "Hogwarts Express"},
-		{1208, "Steam Warrior"},
 		{1207, "Soaring Steam Plane"},
+		{1208, "Steam Warrior"},
 		{1209, "Enchanted Car"},
 		{1210, "Shark Sub"},
 		{1211, "Monstrous Mouth"},
@@ -358,14 +500,14 @@ namespace nsyshid
 		{1243, "Giant Owl"},
 		{1244, "Fierce Falcon"},
 		{1245, "Saturn's Sandworm"},
-		{1247, "Haunted Vacuum"},
 		{1246, "Spooky Spider"},
+		{1247, "Haunted Vacuum"},
 		{1248, "PPG Smartphone"},
 		{1249, "PPG Hotline"},
 		{1250, "Powerpuff Mag-Net"},
-		{1253, "Mega Blast Bot"},
 		{1251, "Ka-Pow Cannon"},
 		{1252, "Slammin' Guitar"},
+		{1253, "Mega Blast Bot"},
 		{1254, "Octi"},
 		{1255, "Super Skunk"},
 		{1256, "Sonic Squid"},
@@ -377,374 +519,285 @@ namespace nsyshid
 		{1262, "Giant Hand"},
 		{1263, "Titan Robot"},
 		{1264, "T-Rocket"},
-		{1265, "Robot Retriever"}};
+		{1265, "Robot Retriever"},
+		};
+
+		std::map<const uint32, const char*> ToMap(std::span<const DimensionsName> names)
+		{
+			std::map<const uint32, const char*> list;
+			for (const DimensionsName& e : names)
+				list.emplace(e.id, e.name);
+			return list;
+		}
+	}
 
 	DimensionsToypadDevice::DimensionsToypadDevice()
-		: Device(0x0E6F, 0x0241, 1, 2, 0)
+		: EmulatedHidDevice(0x0E6F, 0x0241)
 	{
-		m_IsOpened = false;
 	}
 
-	bool DimensionsToypadDevice::Open()
+	Device::Status DimensionsToypadDevice::Read(uint8* buffer, uint32 length, sint32& bytesRead)
 	{
-		if (!IsOpened())
+		DimensionsUSB::Report r = g_dimensionstoypad.GetStatus();
+		memcpy(buffer, r.data(), std::min<size_t>(length, r.size()));
+		bytesRead = (sint32)length;
+		return Status::Ok;
+	}
+
+	Device::Status DimensionsToypadDevice::Write(uint8* data, uint32 length, sint32& bytesWritten)
+	{
+		if (length != 32)
+			return Status::Error;
+		g_dimensionstoypad.SendCommand(std::span<const uint8, 32>{data, 32});
+		bytesWritten = (sint32)length;
+		return Status::Ok;
+	}
+
+	// ---- toy pad state --------------------------------------------------------------
+
+	void DimensionsUSB::Rng::Seed(uint32 seed)
+	{
+		dimensions::RngSeed(a, b, c, d, seed);
+	}
+
+	uint32 DimensionsUSB::Rng::Next()
+	{
+		return dimensions::RngNext(a, b, c, d);
+	}
+
+	// blocks until a reply or (once awake) a tag event is available; replies first
+	DimensionsUSB::Report DimensionsUSB::GetStatus()
+	{
+		while (true)
 		{
-			m_IsOpened = true;
-		}
-		return true;
-	}
-
-	void DimensionsToypadDevice::Close()
-	{
-		if (IsOpened())
-		{
-			m_IsOpened = false;
-		}
-	}
-
-	bool DimensionsToypadDevice::IsOpened()
-	{
-		return m_IsOpened;
-	}
-
-	Device::ReadResult DimensionsToypadDevice::Read(ReadMessage* message)
-	{
-		memcpy(message->data, g_dimensionstoypad.GetStatus().data(), message->length);
-		message->bytesRead = message->length;
-		return Device::ReadResult::Success;
-	}
-
-	Device::WriteResult DimensionsToypadDevice::Write(WriteMessage* message)
-	{
-		if (message->length != 32)
-			return Device::WriteResult::Error;
-
-		g_dimensionstoypad.SendCommand(std::span<const uint8, 32>{message->data, 32});
-		message->bytesWritten = message->length;
-		return Device::WriteResult::Success;
-	}
-
-	bool DimensionsToypadDevice::GetDescriptor(uint8 descType,
-											   uint8 descIndex,
-											   uint16 lang,
-											   uint8* output,
-											   uint32 outputMaxLength)
-	{
-		uint8 configurationDescriptor[0x29];
-
-		uint8* currentWritePtr;
-
-		// configuration descriptor
-		currentWritePtr = configurationDescriptor + 0;
-		*(uint8*)(currentWritePtr + 0) = 9;			// bLength
-		*(uint8*)(currentWritePtr + 1) = 2;			// bDescriptorType
-		*(uint16be*)(currentWritePtr + 2) = 0x0029; // wTotalLength
-		*(uint8*)(currentWritePtr + 4) = 1;			// bNumInterfaces
-		*(uint8*)(currentWritePtr + 5) = 1;			// bConfigurationValue
-		*(uint8*)(currentWritePtr + 6) = 0;			// iConfiguration
-		*(uint8*)(currentWritePtr + 7) = 0x80;		// bmAttributes
-		*(uint8*)(currentWritePtr + 8) = 0xFA;		// MaxPower
-		currentWritePtr = currentWritePtr + 9;
-		// configuration descriptor
-		*(uint8*)(currentWritePtr + 0) = 9;	   // bLength
-		*(uint8*)(currentWritePtr + 1) = 0x04; // bDescriptorType
-		*(uint8*)(currentWritePtr + 2) = 0;	   // bInterfaceNumber
-		*(uint8*)(currentWritePtr + 3) = 0;	   // bAlternateSetting
-		*(uint8*)(currentWritePtr + 4) = 2;	   // bNumEndpoints
-		*(uint8*)(currentWritePtr + 5) = 3;	   // bInterfaceClass
-		*(uint8*)(currentWritePtr + 6) = 0;	   // bInterfaceSubClass
-		*(uint8*)(currentWritePtr + 7) = 0;	   // bInterfaceProtocol
-		*(uint8*)(currentWritePtr + 8) = 0;	   // iInterface
-		currentWritePtr = currentWritePtr + 9;
-		// configuration descriptor
-		*(uint8*)(currentWritePtr + 0) = 9;			// bLength
-		*(uint8*)(currentWritePtr + 1) = 0x21;		// bDescriptorType
-		*(uint16be*)(currentWritePtr + 2) = 0x0111; // bcdHID
-		*(uint8*)(currentWritePtr + 4) = 0x00;		// bCountryCode
-		*(uint8*)(currentWritePtr + 5) = 0x01;		// bNumDescriptors
-		*(uint8*)(currentWritePtr + 6) = 0x22;		// bDescriptorType
-		*(uint16be*)(currentWritePtr + 7) = 0x001D; // wDescriptorLength
-		currentWritePtr = currentWritePtr + 9;
-		// endpoint descriptor 1
-		*(uint8*)(currentWritePtr + 0) = 7;		  // bLength
-		*(uint8*)(currentWritePtr + 1) = 0x05;	  // bDescriptorType
-		*(uint8*)(currentWritePtr + 2) = 0x81;	  // bEndpointAddress
-		*(uint8*)(currentWritePtr + 3) = 0x03;	  // bmAttributes
-		*(uint16be*)(currentWritePtr + 4) = 0x40; // wMaxPacketSize
-		*(uint8*)(currentWritePtr + 6) = 0x01;	  // bInterval
-		currentWritePtr = currentWritePtr + 7;
-		// endpoint descriptor 2
-		*(uint8*)(currentWritePtr + 0) = 7;		  // bLength
-		*(uint8*)(currentWritePtr + 1) = 0x05;	  // bDescriptorType
-		*(uint8*)(currentWritePtr + 1) = 0x02;	  // bEndpointAddress
-		*(uint8*)(currentWritePtr + 2) = 0x03;	  // bmAttributes
-		*(uint16be*)(currentWritePtr + 3) = 0x40; // wMaxPacketSize
-		*(uint8*)(currentWritePtr + 5) = 0x01;	  // bInterval
-		currentWritePtr = currentWritePtr + 7;
-
-		cemu_assert_debug((currentWritePtr - configurationDescriptor) == 0x29);
-
-		memcpy(output, configurationDescriptor,
-			   std::min<uint32>(outputMaxLength, sizeof(configurationDescriptor)));
-		return true;
-	}
-
-	bool DimensionsToypadDevice::SetIdle(uint8 ifIndex,
-										 uint8 reportId,
-										 uint8 duration)
-	{
-		return true;
-	}
-
-	bool DimensionsToypadDevice::SetProtocol(uint8 ifIndex, uint8 protocol)
-	{
-		cemuLog_log(LogType::Force, "Toypad Protocol");
-		return true;
-	}
-
-	bool DimensionsToypadDevice::SetReport(ReportMessage* message)
-	{
-		cemuLog_log(LogType::Force, "Toypad Report");
-		return true;
-	}
-
-	std::array<uint8, 32> DimensionsUSB::GetStatus()
-	{
-		std::array<uint8, 32> response = {};
-
-		bool responded = false;
-		do
-		{
-			if (!m_queries.empty())
 			{
-				response = m_queries.front();
-				m_queries.pop();
-				responded = true;
+				std::unique_lock _l(m_lock);
+				std::queue<Report>* source = !m_replies.empty() ? &m_replies : (m_awake && !m_tagEvents.empty()) ? &m_tagEvents : nullptr;
+				if (source)
+				{
+					Report r = source->front();
+					source->pop();
+					return r;
+				}
 			}
-			else if (!m_figureAddedRemovedResponses.empty() && m_isAwake)
-			{
-				std::lock_guard lock(m_dimensionsMutex);
-				response = m_figureAddedRemovedResponses.front();
-				m_figureAddedRemovedResponses.pop();
-				responded = true;
-			}
-			else
-			{
-				std::this_thread::sleep_for(std::chrono::milliseconds(100));
-			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
 		}
-		while (responded == false);
-		return response;
 	}
 
 	void DimensionsUSB::SendCommand(std::span<const uint8, 32> buf)
 	{
 		const uint8 command = buf[2];
-		const uint8 sequence = buf[3];
+		const uint8 seq = buf[3];
+		const std::span<const uint8, 8> payload8{buf.data() + 4, 8};
 
-		std::array<uint8, 32> q_result{};
-
+		std::unique_lock _l(m_lock);
+		Report reply{};
 		switch (command)
 		{
-		case 0xB0: // Wake
-		{
-			// Consistent device response to the wake command
-			q_result = {0x55, 0x0e, 0x01, 0x28, 0x63, 0x29,
-						0x20, 0x4c, 0x45, 0x47, 0x4f, 0x20,
-						0x32, 0x30, 0x31, 0x34, 0x46};
+		case 0xB0: // wake: the pad identifies itself
+			reply = {0x55, 0x0E, 0x01, 0x28, 0x63, 0x29, 0x20, 0x4C, 0x45, 0x47, 0x4F, 0x20, 0x32, 0x30, 0x31, 0x34, 0x46};
 			break;
-		}
-		case 0xB1: // Seed
-		{
-			// Initialise a random number generator using the seed provided
-			g_dimensionstoypad.GenerateRandomNumber(std::span<const uint8, 8>{buf.begin() + 4, 8}, sequence, q_result);
+		case 0xB1:
+			Seed(payload8, seq, reply);
 			break;
-		}
-		case 0xB3: // Challenge
-		{
-			// Get the next number in the sequence based on the RNG from 0xB1 command
-			g_dimensionstoypad.GetChallengeResponse(std::span<const uint8, 8>{buf.begin() + 4, 8}, sequence, q_result);
+		case 0xB3:
+			Challenge(payload8, seq, reply);
 			break;
-		}
-		case 0xC0: // Color
-		case 0xC1: // Get Pad Color
-		case 0xC2: // Fade
-		case 0xC3: // Flash
-		case 0xC4: // Fade Random
-		case 0xC6: // Fade All
-		case 0xC7: // Flash All
-		case 0xC8: // Color All
-		{
-			// Send a blank response to acknowledge color has been sent to toypad
-			q_result = {0x55, 0x01, sequence};
-			q_result[3] = GenerateChecksum(q_result, 3);
+		case 0xC0: // lights: acknowledged only
+		case 0xC1:
+		case 0xC2:
+		case 0xC3:
+		case 0xC4:
+		case 0xC6:
+		case 0xC7:
+		case 0xC8:
+			reply[0] = 0x55;
+			reply[1] = 0x01;
+			reply[2] = seq;
+			reply[3] = dimensions::Checksum(reply.data(), 3);
 			break;
-		}
-		case 0xD2: // Read
-		{
-			// Read 4 pages from the figure at index (buf[4]), starting with page buf[5]
-			g_dimensionstoypad.QueryBlock(buf[4], buf[5], q_result, sequence);
+		case 0xD2:
+			ReadPages(buf[4], buf[5], seq, reply);
 			break;
-		}
-		case 0xD3: // Write
-		{
-			// Write 4 bytes to page buf[5] to the figure at index buf[4]
-			g_dimensionstoypad.WriteBlock(buf[4], buf[5], std::span<const uint8, 4>{buf.begin() + 6, 4}, q_result, sequence);
+		case 0xD3:
+			WritePage(buf[4], buf[5], std::span<const uint8, 4>{buf.data() + 6, 4}, seq, reply);
 			break;
-		}
-		case 0xD4: // Model
-		{
-			// Get the model id of the figure at index buf[4]
-			g_dimensionstoypad.GetModel(std::span<const uint8, 8>{buf.begin() + 4, 8}, sequence, q_result);
+		case 0xD4:
+			Model(payload8, seq, reply);
 			break;
-		}
-		case 0xD0: // Tag List
-		case 0xE1: // PWD
-		case 0xE5: // Active
-		case 0xFF: // LEDS Query
-		{
-			// Further investigation required
-			cemuLog_log(LogType::Force, "Unimplemented LD Function: {:x}", command);
+		case 0xD0: // tag list
+		case 0xE1: // password
+		case 0xE5: // active
+		case 0xFF: // light query
+			cemuLog_log(LogType::Force, "Dimensions toy pad: command 0x{:02x} not implemented", command);
 			break;
-		}
 		default:
-		{
-			cemuLog_log(LogType::Force, "Unknown LD Function: {:x}", command);
+			cemuLog_log(LogType::Force, "Dimensions toy pad: unknown command 0x{:02x}", command);
 			break;
 		}
-		}
-
-		m_queries.push(q_result);
+		m_replies.push(reply);
 	}
 
-	uint32 DimensionsUSB::LoadFigure(const std::array<uint8, 0x2D * 0x04>& buf, std::unique_ptr<FileStream> file, uint8 pad, uint8 index)
+	static void PutEncryptedReply(uint8 seq, const std::array<uint8, 8>& plain, DimensionsUSB::Report& reply)
 	{
-		std::lock_guard lock(m_dimensionsMutex);
+		const std::array<uint8, 8> enc = dimensions::TeaEncrypt(plain.data(), dimensions::kCommandKey);
+		reply[0] = 0x55;
+		reply[1] = 0x09;
+		reply[2] = seq;
+		memcpy(&reply[3], enc.data(), 8);
+		reply[11] = dimensions::Checksum(reply.data(), 11);
+	}
 
-		const uint32 id = GetFigureId(buf);
+	// payload: seed (LE) and a confirmation word that is echoed back
+	void DimensionsUSB::Seed(std::span<const uint8, 8> payload, uint8 seq, Report& reply)
+	{
+		const std::array<uint8, 8> plain = dimensions::TeaDecrypt(payload.data(), dimensions::kCommandKey);
+		m_rng.Seed(dimensions::LE32(plain.data()));
+		PutEncryptedReply(seq, {plain[4], plain[5], plain[6], plain[7], 0, 0, 0, 0}, reply);
+	}
 
-		DimensionsMini& figure = GetFigureByIndex(index);
-		figure.dimFile = std::move(file);
-		figure.id = id;
-		figure.pad = pad;
-		figure.index = index + 1;
-		figure.data = buf;
-		// When a figure is added to the toypad, respond to the game with the pad they were added to, their index,
-		// the direction (0x00 in byte 6 for added) and their UID
-		std::array<uint8, 32> figureChangeResponse = {0x56, 0x0b, figure.pad, 0x00, figure.index, 0x00, buf[0], buf[1], buf[2], buf[4], buf[5], buf[6], buf[7]};
-		figureChangeResponse[13] = GenerateChecksum(figureChangeResponse, 13);
-		m_figureAddedRemovedResponses.push(figureChangeResponse);
+	// payload: confirmation word; answer: next random number (LE) and the confirmation
+	void DimensionsUSB::Challenge(std::span<const uint8, 8> payload, uint8 seq, Report& reply)
+	{
+		const std::array<uint8, 8> plain = dimensions::TeaDecrypt(payload.data(), dimensions::kCommandKey);
+		std::array<uint8, 8> answer{};
+		dimensions::PutLE32(answer.data(), m_rng.Next());
+		memcpy(&answer[4], plain.data(), 4);
+		PutEncryptedReply(seq, answer, reply);
+		m_awake = true;
+	}
 
+	// four pages starting at `page` of the tag at 1-based `index`
+	void DimensionsUSB::ReadPages(uint8 index, uint8 page, uint8 seq, Report& reply)
+	{
+		reply[0] = 0x55;
+		reply[1] = 0x12;
+		reply[2] = seq;
+		reply[3] = 0x00;
+		const uint8 slot = (uint8)(index - 1);
+		if (slot < m_tags.size())
+		{
+			const Tag& t = m_tags[slot];
+			if (t.Present() && 4 * page < (int)t.data.size() - 16)
+				memcpy(&reply[4], t.data.data() + 4 * page, 16);
+		}
+		reply[20] = dimensions::Checksum(reply.data(), 20);
+	}
+
+	void DimensionsUSB::WritePage(uint8 index, uint8 page, std::span<const uint8, 4> data, uint8 seq, Report& reply)
+	{
+		reply[0] = 0x55;
+		reply[1] = 0x02;
+		reply[2] = seq;
+		reply[3] = 0x00;
+		const uint8 slot = (uint8)(index - 1);
+		if (slot < m_tags.size())
+		{
+			Tag& t = m_tags[slot];
+			if (t.Present() && page < 0x2D)
+			{
+				if (page == 36) // the id page
+					t.id = dimensions::LE32(data.data());
+				memcpy(t.data.data() + page * 4, data.data(), 4);
+				t.Flush();
+			}
+		}
+		reply[4] = dimensions::Checksum(reply.data(), 4);
+	}
+
+	// payload: 1-based index and a confirmation word; answer: the tag's id and the confirmation
+	void DimensionsUSB::Model(std::span<const uint8, 8> payload, uint8 seq, Report& reply)
+	{
+		const std::array<uint8, 8> plain = dimensions::TeaDecrypt(payload.data(), dimensions::kCommandKey);
+		std::array<uint8, 8> answer{};
+		const uint8 slot = (uint8)(plain[0] - 1);
+		if (slot < m_tags.size())
+		{
+			dimensions::PutLE32(answer.data(), m_tags[slot].id);
+			memcpy(&answer[4], &plain[4], 4);
+		}
+		const std::array<uint8, 8> enc = dimensions::TeaEncrypt(answer.data(), dimensions::kCommandKey);
+		reply[0] = 0x55;
+		reply[1] = 0x0A;
+		reply[2] = seq;
+		reply[3] = 0x00;
+		memcpy(&reply[4], enc.data(), 8);
+		reply[12] = dimensions::Checksum(reply.data(), 12);
+	}
+
+	void DimensionsUSB::QueueTagEvent(const Tag& t, bool removed)
+	{
+		const std::array<uint8, 7> uid = dimensions::Uid(t.data.data());
+		Report r{0x56, 0x0B, t.pad, 0x00, t.index, (uint8)(removed ? 1 : 0)};
+		memcpy(&r[6], uid.data(), uid.size());
+		r[13] = dimensions::Checksum(r.data(), 13);
+		m_tagEvents.push(r);
+	}
+
+	uint32 DimensionsUSB::PlaceLocked(const TagData& buf, std::unique_ptr<FileStream> file, uint8 pad, uint8 index)
+	{
+		if (index >= m_tags.size())
+			return 0;
+		const uint32 id = dimensions::TagId(buf.data());
+		Tag& t = m_tags[index];
+		t.file = std::move(file);
+		t.data = buf;
+		t.id = id;
+		t.pad = pad;
+		t.index = index + 1;
+		QueueTagEvent(t, false);
 		return id;
+	}
+
+	// takes the tag off its slot; `announce` also tells the game and closes the file
+	bool DimensionsUSB::LiftLocked(uint8 index, bool announce)
+	{
+		if (index >= m_tags.size())
+			return false;
+		Tag& t = m_tags[index];
+		if (!t.Present())
+			return false;
+		if (announce)
+		{
+			QueueTagEvent(t, true);
+			t.Flush();
+			t.file.reset();
+		}
+		t.index = 255;
+		t.pad = 255;
+		t.id = 0;
+		return true;
+	}
+
+	uint32 DimensionsUSB::LoadFigure(const TagData& buf, std::unique_ptr<FileStream> file, uint8 pad, uint8 index)
+	{
+		std::unique_lock _l(m_lock);
+		return PlaceLocked(buf, std::move(file), pad, index);
 	}
 
 	bool DimensionsUSB::RemoveFigure(uint8 pad, uint8 index, bool fullRemove)
 	{
-		std::lock_guard lock(m_dimensionsMutex);
-
-		DimensionsMini& figure = GetFigureByIndex(index);
-		if (figure.index == 255)
-			return false;
-
-		// When a figure is removed from the toypad, respond to the game with the pad they were removed from, their index,
-		// the direction (0x01 in byte 6 for removed) and their UID
-		if (fullRemove)
-		{
-			std::array<uint8, 32> figureChangeResponse = {0x56, 0x0b, figure.pad, 0x00, figure.index, 0x01,
-														  figure.data[0], figure.data[1], figure.data[2],
-														  figure.data[4], figure.data[5], figure.data[6], figure.data[7]};
-			figureChangeResponse[13] = GenerateChecksum(figureChangeResponse, 13);
-			m_figureAddedRemovedResponses.push(figureChangeResponse);
-			figure.Save();
-			figure.dimFile.reset();
-		}
-
-		figure.index = 255;
-		figure.pad = 255;
-		figure.id = 0;
-
-		return true;
+		std::unique_lock _l(m_lock);
+		return LiftLocked(index, fullRemove);
 	}
 
+	// the user picked a tag up to move it: the game sees it leave
 	bool DimensionsUSB::TempRemove(uint8 index)
 	{
-		std::lock_guard lock(m_dimensionsMutex);
-
-		DimensionsMini& figure = GetFigureByIndex(index);
-		if (figure.index == 255)
+		std::unique_lock _l(m_lock);
+		if (index >= m_tags.size() || !m_tags[index].Present())
 			return false;
-
-		// Send a response to the game that the figure has been "Picked up" from existing slot,
-		// until either the movement is cancelled, or user chooses a space to move to
-		std::array<uint8, 32> figureChangeResponse = {0x56, 0x0b, figure.pad, 0x00, figure.index, 0x01,
-													  figure.data[0], figure.data[1], figure.data[2],
-													  figure.data[4], figure.data[5], figure.data[6], figure.data[7]};
-
-		figureChangeResponse[13] = GenerateChecksum(figureChangeResponse, 13);
-		m_figureAddedRemovedResponses.push(figureChangeResponse);
+		QueueTagEvent(m_tags[index], true);
 		return true;
 	}
 
+	// the move was cancelled: the tag comes back
 	bool DimensionsUSB::CancelRemove(uint8 index)
 	{
-		std::lock_guard lock(m_dimensionsMutex);
-
-		DimensionsMini& figure = GetFigureByIndex(index);
-		if (figure.index == 255)
+		std::unique_lock _l(m_lock);
+		if (index >= m_tags.size() || !m_tags[index].Present())
 			return false;
-
-		// Cancel the previous movement of the figure
-		std::array<uint8, 32> figureChangeResponse = {0x56, 0x0b, figure.pad, 0x00, figure.index, 0x00,
-													  figure.data[0], figure.data[1], figure.data[2],
-													  figure.data[4], figure.data[5], figure.data[6], figure.data[7]};
-
-		figureChangeResponse[13] = GenerateChecksum(figureChangeResponse, 13);
-		m_figureAddedRemovedResponses.push(figureChangeResponse);
-
-		return true;
-	}
-
-	bool DimensionsUSB::CreateFigure(fs::path pathName, uint32 id)
-	{
-		FileStream* dimFile(FileStream::createFile2(pathName));
-		if (!dimFile)
-			return false;
-
-		std::array<uint8, 0x2D * 0x04> fileData{};
-		RandomUID(fileData);
-		fileData[3] = id & 0xFF;
-
-		std::array<uint8, 7> uid = {fileData[0], fileData[1], fileData[2], fileData[4], fileData[5], fileData[6], fileData[7]};
-
-		// Only characters are created with their ID encrypted and stored in pages 36 and 37,
-		// as well as a password stored in page 43. Blank tags have their information populated
-		// by the game when it calls the write_block command.
-		if (id != 0)
-		{
-			const std::array<uint8, 16> figureKey = GenerateFigureKey(fileData);
-
-			std::array<uint8, 8> valueToEncrypt = {uint8(id & 0xFF), uint8((id >> 8) & 0xFF), uint8((id >> 16) & 0xFF), uint8((id >> 24) & 0xFF),
-												   uint8(id & 0xFF), uint8((id >> 8) & 0xFF), uint8((id >> 16) & 0xFF), uint8((id >> 24) & 0xFF)};
-
-			std::array<uint8, 8> encrypted = Encrypt(valueToEncrypt, figureKey);
-
-			std::memcpy(&fileData[36 * 4], &encrypted[0], 4);
-			std::memcpy(&fileData[37 * 4], &encrypted[4], 4);
-
-			std::memcpy(&fileData[43 * 4], PWDGenerate(fileData).data(), 4);
-		}
-		else
-		{
-			// Page 38 is used as verification for blank tags
-			fileData[(38 * 4) + 1] = 1;
-		}
-
-		if (fileData.size() != dimFile->writeData(fileData.data(), fileData.size()))
-		{
-			delete dimFile;
-			return false;
-		}
-		delete dimFile;
+		QueueTagEvent(m_tags[index], false);
 		return true;
 	}
 
@@ -752,419 +805,83 @@ namespace nsyshid
 	{
 		if (oldIndex == index)
 		{
-			// Don't bother removing and loading again, just send response to the game
+			// put back where it was picked up
 			CancelRemove(index);
 			return true;
 		}
-
-		// When moving figures between spaces on the toypad, remove any figure from the space they are moving to,
-		// then remove them from their current space, then load them to the space they are moving to
-		RemoveFigure(pad, index, true);
-
-		DimensionsMini& figure = GetFigureByIndex(oldIndex);
-		const std::array<uint8, 0x2D * 0x04> data = figure.data;
-		std::unique_ptr<FileStream> inFile = std::move(figure.dimFile);
-
-		RemoveFigure(oldPad, oldIndex, false);
-
-		LoadFigure(data, std::move(inFile), pad, index);
-
+		std::unique_lock _l(m_lock);
+		if (oldIndex >= m_tags.size() || index >= m_tags.size())
+			return false;
+		// whatever stands on the target slot is taken off first
+		LiftLocked(index, true);
+		Tag& from = m_tags[oldIndex];
+		const TagData data = from.data;
+		std::unique_ptr<FileStream> file = std::move(from.file);
+		LiftLocked(oldIndex, false);
+		PlaceLocked(data, std::move(file), pad, index);
 		return true;
 	}
 
-	void DimensionsUSB::GenerateRandomNumber(std::span<const uint8, 8> buf, uint8 sequence,
-											 std::array<uint8, 32>& replyBuf)
+	bool DimensionsUSB::CreateFigure(fs::path pathName, uint32 id)
 	{
-		// Decrypt payload into an 8 byte array
-		std::array<uint8, 8> value = Decrypt(buf, std::nullopt);
-		// Seed is the first 4 bytes (little endian) of the decrypted payload
-		uint32 seed = (uint32&)value[0];
-		// Confirmation is the second 4 bytes (big endian) of the decrypted payload
-		uint32 conf = (uint32be&)value[4];
-		// Initialize rng using the seed from decrypted payload
-		InitializeRNG(seed);
-		// Encrypt 8 bytes, first 4 bytes is the decrypted confirmation from payload, 2nd 4 bytes are blank
-		std::array<uint8, 8> valueToEncrypt = {value[4], value[5], value[6], value[7], 0, 0, 0, 0};
-		std::array<uint8, 8> encrypted = Encrypt(valueToEncrypt, std::nullopt);
-		replyBuf[0] = 0x55;
-		replyBuf[1] = 0x09;
-		replyBuf[2] = sequence;
-		// Copy encrypted value to response data
-		memcpy(&replyBuf[3], encrypted.data(), encrypted.size());
-		replyBuf[11] = GenerateChecksum(replyBuf, 11);
-	}
+		std::unique_ptr<FileStream> out(FileStream::createFile2(pathName));
+		if (!out)
+			return false;
 
-	void DimensionsUSB::GetChallengeResponse(std::span<const uint8, 8> buf, uint8 sequence,
-											 std::array<uint8, 32>& replyBuf)
-	{
-		// Decrypt payload into an 8 byte array
-		std::array<uint8, 8> value = Decrypt(buf, std::nullopt);
-		// Confirmation is the first 4 bytes of the decrypted payload
-		uint32 conf = (uint32be&)value[0];
-		// Generate next random number based on RNG
-		uint32 nextRandom = GetNext();
-		// Encrypt an 8 byte array, first 4 bytes are the next random number (little endian)
-		// followed by the confirmation from the decrypted payload
-		std::array<uint8, 8> valueToEncrypt = {uint8(nextRandom & 0xFF), uint8((nextRandom >> 8) & 0xFF),
-											   uint8((nextRandom >> 16) & 0xFF), uint8((nextRandom >> 24) & 0xFF),
-											   value[0], value[1], value[2], value[3]};
-		std::array<uint8, 8> encrypted = Encrypt(valueToEncrypt, std::nullopt);
-		replyBuf[0] = 0x55;
-		replyBuf[1] = 0x09;
-		replyBuf[2] = sequence;
-		// Copy encrypted value to response data
-		memcpy(&replyBuf[3], encrypted.data(), encrypted.size());
-		replyBuf[11] = GenerateChecksum(replyBuf, 11);
-
-		if (!m_isAwake)
-			m_isAwake = true;
-	}
-
-	void DimensionsUSB::InitializeRNG(uint32 seed)
-	{
-		m_randomA = 0xF1EA5EED;
-		m_randomB = seed;
-		m_randomC = seed;
-		m_randomD = seed;
-
-		for (int i = 0; i < 42; i++)
-		{
-			GetNext();
-		}
-	}
-
-	uint32 DimensionsUSB::GetNext()
-	{
-		uint32 e = m_randomA - std::rotl(m_randomB, 21);
-		m_randomA = m_randomB ^ std::rotl(m_randomC, 19);
-		m_randomB = m_randomC + std::rotl(m_randomD, 6);
-		m_randomC = m_randomD + e;
-		m_randomD = e + m_randomA;
-		return m_randomD;
-	}
-
-	std::array<uint8, 8> DimensionsUSB::Decrypt(std::span<const uint8, 8> buf, std::optional<std::array<uint8, 16>> key)
-	{
-		// Value to decrypt is separated in to two little endian 32 bit unsigned integers
-		uint32 dataOne = (uint32&)buf[0];
-		uint32 dataTwo = (uint32&)buf[4];
-
-		// Use the key as 4 32 bit little endian unsigned integers
-		uint32 keyOne;
-		uint32 keyTwo;
-		uint32 keyThree;
-		uint32 keyFour;
-
-		if (key)
-		{
-			keyOne = (uint32&)key.value()[0];
-			keyTwo = (uint32&)key.value()[4];
-			keyThree = (uint32&)key.value()[8];
-			keyFour = (uint32&)key.value()[12];
-		}
-		else
-		{
-			keyOne = (uint32&)COMMAND_KEY[0];
-			keyTwo = (uint32&)COMMAND_KEY[4];
-			keyThree = (uint32&)COMMAND_KEY[8];
-			keyFour = (uint32&)COMMAND_KEY[12];
-		}
-
-		uint32 sum = 0xC6EF3720;
-		uint32 delta = 0x9E3779B9;
-
-		for (int i = 0; i < 32; i++)
-		{
-			dataTwo -= (((dataOne << 4) + keyThree) ^ (dataOne + sum) ^ ((dataOne >> 5) + keyFour));
-			dataOne -= (((dataTwo << 4) + keyOne) ^ (dataTwo + sum) ^ ((dataTwo >> 5) + keyTwo));
-			sum -= delta;
-		}
-
-		cemu_assert(sum == 0);
-
-		std::array<uint8, 8> decrypted = {uint8(dataOne & 0xFF), uint8((dataOne >> 8) & 0xFF),
-										  uint8((dataOne >> 16) & 0xFF), uint8((dataOne >> 24) & 0xFF),
-										  uint8(dataTwo & 0xFF), uint8((dataTwo >> 8) & 0xFF),
-										  uint8((dataTwo >> 16) & 0xFF), uint8((dataTwo >> 24) & 0xFF)};
-		return decrypted;
-	}
-	std::array<uint8, 8> DimensionsUSB::Encrypt(std::span<const uint8, 8> buf, std::optional<std::array<uint8, 16>> key)
-	{
-		// Value to encrypt is separated in to two little endian 32 bit unsigned integers
-		uint32 dataOne = (uint32&)buf[0];
-		uint32 dataTwo = (uint32&)buf[4];
-
-		// Use the key as 4 32 bit little endian unsigned integers
-		uint32 keyOne;
-		uint32 keyTwo;
-		uint32 keyThree;
-		uint32 keyFour;
-
-		if (key)
-		{
-			keyOne = (uint32&)key.value()[0];
-			keyTwo = (uint32&)key.value()[4];
-			keyThree = (uint32&)key.value()[8];
-			keyFour = (uint32&)key.value()[12];
-		}
-		else
-		{
-			keyOne = (uint32&)COMMAND_KEY[0];
-			keyTwo = (uint32&)COMMAND_KEY[4];
-			keyThree = (uint32&)COMMAND_KEY[8];
-			keyFour = (uint32&)COMMAND_KEY[12];
-		}
-
-		uint32 sum = 0;
-		uint32 delta = 0x9E3779B9;
-
-		for (int i = 0; i < 32; i++)
-		{
-			sum += delta;
-			dataOne += (((dataTwo << 4) + keyOne) ^ (dataTwo + sum) ^ ((dataTwo >> 5) + keyTwo));
-			dataTwo += (((dataOne << 4) + keyThree) ^ (dataOne + sum) ^ ((dataOne >> 5) + keyFour));
-		}
-
-		cemu_assert(sum == 0xC6EF3720);
-
-		std::array<uint8, 8> encrypted = {uint8(dataOne & 0xFF), uint8((dataOne >> 8) & 0xFF),
-										  uint8((dataOne >> 16) & 0xFF), uint8((dataOne >> 24) & 0xFF),
-										  uint8(dataTwo & 0xFF), uint8((dataTwo >> 8) & 0xFF),
-										  uint8((dataTwo >> 16) & 0xFF), uint8((dataTwo >> 24) & 0xFF)};
-		return encrypted;
-	}
-
-	std::array<uint8, 16> DimensionsUSB::GenerateFigureKey(const std::array<uint8, 0x2D * 0x04>& buf)
-	{
-		std::array<uint8, 7> uid = {buf[0], buf[1], buf[2], buf[4], buf[5], buf[6], buf[7]};
-
-		uint32 scrambleA = Scramble(uid, 3);
-		uint32 scrambleB = Scramble(uid, 4);
-		uint32 scrambleC = Scramble(uid, 5);
-		uint32 scrambleD = Scramble(uid, 6);
-
-		return {uint8((scrambleA >> 24) & 0xFF), uint8((scrambleA >> 16) & 0xFF),
-				uint8((scrambleA >> 8) & 0xFF), uint8(scrambleA & 0xFF),
-				uint8((scrambleB >> 24) & 0xFF), uint8((scrambleB >> 16) & 0xFF),
-				uint8((scrambleB >> 8) & 0xFF), uint8(scrambleB & 0xFF),
-				uint8((scrambleC >> 24) & 0xFF), uint8((scrambleC >> 16) & 0xFF),
-				uint8((scrambleC >> 8) & 0xFF), uint8(scrambleC & 0xFF),
-				uint8((scrambleD >> 24) & 0xFF), uint8((scrambleD >> 16) & 0xFF),
-				uint8((scrambleD >> 8) & 0xFF), uint8(scrambleD & 0xFF)};
-	}
-
-	uint32 DimensionsUSB::Scramble(const std::array<uint8, 7>& uid, uint8 count)
-	{
-		std::vector<uint8> toScramble;
-		toScramble.reserve(uid.size() + CHAR_CONSTANT.size());
-		for (uint8 x : uid)
-		{
-			toScramble.push_back(x);
-		}
-		for (uint8 c : CHAR_CONSTANT)
-		{
-			toScramble.push_back(c);
-		}
-		toScramble[(count * 4) - 1] = 0xaa;
-
-		std::array<uint8, 4> randomized = DimensionsRandomize(toScramble, count);
-
-		return (uint32be&)randomized[0];
-	}
-
-	std::array<uint8, 4> DimensionsUSB::PWDGenerate(const std::array<uint8, 0x2D * 0x04>& buf)
-	{
-		std::array<uint8, 7> uid = {buf[0], buf[1], buf[2], buf[4], buf[5], buf[6], buf[7]};
-
-		std::vector<uint8> pwdCalc = {PWD_CONSTANT.begin(), PWD_CONSTANT.end() - 1};
-		for (uint8 i = 0; i < uid.size(); i++)
-		{
-			pwdCalc.insert(pwdCalc.begin() + i, uid[i]);
-		}
-
-		return DimensionsRandomize(pwdCalc, 8);
-	}
-
-	std::array<uint8, 4> DimensionsUSB::DimensionsRandomize(const std::vector<uint8> key, uint8 count)
-	{
-		uint32 scrambled = 0;
-		for (uint8 i = 0; i < count; i++)
-		{
-			const uint32 v4 = std::rotr(scrambled, 25);
-			const uint32 v5 = std::rotr(scrambled, 10);
-			const uint32 b = (uint32&)key[i * 4];
-			scrambled = b + v4 + v5 - scrambled;
-		}
-		return {uint8(scrambled & 0xFF), uint8(scrambled >> 8 & 0xFF), uint8(scrambled >> 16 & 0xFF), uint8(scrambled >> 24 & 0xFF)};
-	}
-
-	uint32 DimensionsUSB::GetFigureId(const std::array<uint8, 0x2D * 0x04>& buf)
-	{
-		const std::array<uint8, 16> figureKey = GenerateFigureKey(buf);
-
-		const std::span<const uint8, 8> modelNumber = std::span<const uint8, 8>{buf.begin() + (36 * 4), 8};
-
-		const std::array<uint8, 8> decrypted = Decrypt(modelNumber, figureKey);
-
-		const uint32 figNum = (uint32&)decrypted[0];
-		// Characters have their model number encrypted in page 36
-		if (figNum < 1000)
-		{
-			return figNum;
-		}
-		// Vehicles/Gadgets have their model number written as little endian in page 36
-		return (uint32&)modelNumber[0];
-	}
-
-	DimensionsUSB::DimensionsMini&
-	DimensionsUSB::GetFigureByIndex(uint8 index)
-	{
-		return m_figures[index];
-	}
-
-	void DimensionsUSB::QueryBlock(uint8 index, uint8 page,
-								   std::array<uint8, 32>& replyBuf,
-								   uint8 sequence)
-	{
-		std::lock_guard lock(m_dimensionsMutex);
-
-		replyBuf[0] = 0x55;
-		replyBuf[1] = 0x12;
-		replyBuf[2] = sequence;
-		replyBuf[3] = 0x00;
-
-		// Index from game begins at 1 rather than 0, so minus 1 here
-		if (const uint8 figureIndex = index - 1; figureIndex < 7)
-		{
-			const DimensionsMini& figure = GetFigureByIndex(figureIndex);
-
-			// Query 4 pages of 4 bytes from the figure, copy this to the response
-			if (figure.index != 255 && (4 * page) < ((0x2D * 4) - 16))
-			{
-				std::memcpy(&replyBuf[4], figure.data.data() + (4 * page), 16);
-			}
-		}
-		replyBuf[20] = GenerateChecksum(replyBuf, 20);
-	}
-
-	void DimensionsUSB::WriteBlock(uint8 index, uint8 page, std::span<const uint8, 4> toWriteBuf,
-								   std::array<uint8, 32>& replyBuf, uint8 sequence)
-	{
-		std::lock_guard lock(m_dimensionsMutex);
-
-		replyBuf[0] = 0x55;
-		replyBuf[1] = 0x02;
-		replyBuf[2] = sequence;
-		replyBuf[3] = 0x00;
-
-		// Index from game begins at 1 rather than 0, so minus 1 here
-		if (const uint8 figureIndex = index - 1; figureIndex < 7)
-		{
-			DimensionsMini& figure = GetFigureByIndex(figureIndex);
-
-			// Copy 4 bytes to the page on the figure requested by the game
-			if (figure.index != 255 && page < 0x2D)
-			{
-				// Id is written to page 36
-				if (page == 36)
-				{
-					figure.id = (uint32&)toWriteBuf[0];
-				}
-				std::memcpy(figure.data.data() + (page * 4), toWriteBuf.data(), 4);
-				figure.Save();
-			}
-		}
-		replyBuf[4] = GenerateChecksum(replyBuf, 4);
-	}
-
-	void DimensionsUSB::GetModel(std::span<const uint8, 8> buf, uint8 sequence,
-								 std::array<uint8, 32>& replyBuf)
-	{
-		// Decrypt payload to 8 byte array, byte 1 is the index, 4-7 are the confirmation
-		std::array<uint8, 8> value = Decrypt(buf, std::nullopt);
-		uint8 index = value[0];
-		uint32 conf = (uint32be&)value[4];
-		// Response is the figure's id (little endian) followed by the confirmation from payload
-		// Index from game begins at 1 rather than 0, so minus 1 here
-		std::array<uint8, 8> valueToEncrypt = {};
-		if (const uint8 figureIndex = index - 1; figureIndex < 7)
-		{
-			const DimensionsMini& figure = GetFigureByIndex(figureIndex);
-			valueToEncrypt = {uint8(figure.id & 0xFF), uint8((figure.id >> 8) & 0xFF),
-							  uint8((figure.id >> 16) & 0xFF), uint8((figure.id >> 24) & 0xFF),
-							  value[4], value[5], value[6], value[7]};
-		}
-		std::array<uint8, 8> encrypted = Encrypt(valueToEncrypt, std::nullopt);
-		replyBuf[0] = 0x55;
-		replyBuf[1] = 0x0a;
-		replyBuf[2] = sequence;
-		replyBuf[3] = 0x00;
-		memcpy(&replyBuf[4], encrypted.data(), encrypted.size());
-		replyBuf[12] = GenerateChecksum(replyBuf, 12);
-	}
-
-	void DimensionsUSB::RandomUID(std::array<uint8, 0x2D * 0x04>& uid_buffer)
-	{
-		uid_buffer[0] = 0x04;
-		uid_buffer[7] = 0x80;
-
+		TagData tag{};
+		// UID: manufacturer 0x04, random serial; byte 7 is fixed
 		std::random_device rd;
-		std::mt19937 mt(rd());
-		std::uniform_int_distribution<int> dist(0, 255);
+		std::uniform_int_distribution<int> byte(0, 255);
+		tag[0] = 0x04;
+		for (int i : {1, 2, 4, 5, 6})
+			tag[i] = (uint8)byte(rd);
+		tag[7] = 0x80;
+		tag[3] = (uint8)id;
 
-		uid_buffer[1] = dist(mt);
-		uid_buffer[2] = dist(mt);
-		uid_buffer[4] = dist(mt);
-		uid_buffer[5] = dist(mt);
-		uid_buffer[6] = dist(mt);
-	}
-
-	uint8 DimensionsUSB::GenerateChecksum(const std::array<uint8, 32>& data,
-										  int num_of_bytes) const
-	{
-		int checksum = 0;
-		for (int i = 0; i < num_of_bytes; i++)
+		if (id != 0)
 		{
-			checksum += data[i];
+			// characters: encrypted id twice in pages 36-37, password in page 43
+			const std::array<uint8, 16> key = dimensions::TagKey(tag.data());
+			std::array<uint8, 8> plain{};
+			dimensions::PutLE32(plain.data(), id);
+			dimensions::PutLE32(plain.data() + 4, id);
+			const std::array<uint8, 8> enc = dimensions::TeaEncrypt(plain.data(), key.data());
+			memcpy(&tag[36 * 4], enc.data(), 8);
+			const std::array<uint8, 4> pwd = dimensions::TagPassword(tag.data());
+			memcpy(&tag[43 * 4], pwd.data(), 4);
 		}
-		return (checksum & 0xFF);
-	}
-
-	void DimensionsUSB::DimensionsMini::Save()
-	{
-		if (!dimFile)
-			return;
-
-		dimFile->SetPosition(0);
-		dimFile->writeData(data.data(), data.size());
+		else
+		{
+			// blank tag: the game fills it in; page 38 marks it as blank
+			tag[38 * 4 + 1] = 1;
+		}
+		return out->writeData(tag.data(), (sint32)tag.size()) == (sint32)tag.size();
 	}
 
 	std::map<const uint32, const char*> DimensionsUSB::GetListMinifigs()
 	{
-		return s_listMinis;
+		return ToMap(kMinifigNames);
 	}
 
 	std::map<const uint32, const char*> DimensionsUSB::GetListTokens()
 	{
-		return s_listTokens;
+		return ToMap(kTokenNames);
 	}
 
 	std::string DimensionsUSB::FindFigure(uint32 figNum)
 	{
-		for (const auto& it : GetListMinifigs())
-		{
-			if (it.first == figNum)
-			{
-				return it.second;
-			}
-		}
-		for (const auto& it : GetListTokens())
-		{
-			if (it.first == figNum)
-			{
-				return it.second;
-			}
-		}
+		for (const auto& list : {std::span<const DimensionsName>(kMinifigNames), std::span<const DimensionsName>(kTokenNames)})
+			for (const DimensionsName& e : list)
+				if (e.id == figNum)
+					return e.name;
 		return fmt::format("Unknown ({})", figNum);
+	}
+
+	void DimensionsUSB::Tag::Flush()
+	{
+		if (!file)
+			return;
+		file->SetPosition(0);
+		file->writeData(data.data(), (sint32)data.size());
 	}
 } // namespace nsyshid

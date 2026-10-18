@@ -1,301 +1,112 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+#include "Common/precompiled.h"
 #include "TagV0.h"
-#include "TLV.h"
 
-#include <algorithm>
-
-namespace
+namespace nfc
 {
-
-constexpr std::size_t kTagSize = 512u;
-constexpr std::size_t kMaxBlockCount = kTagSize / sizeof(TagV0::Block);
-
-constexpr uint8 kLockbyteBlock0 = 0xe;
-constexpr uint8 kLockbytesStart0 = 0x0;
-constexpr uint8 kLockbytesEnd0 = 0x2;
-constexpr uint8 kLockbyteBlock1 = 0xf;
-constexpr uint8 kLockbytesStart1 = 0x2;
-constexpr uint8 kLockbytesEnd1 = 0x8;
-
-constexpr uint8 kNDEFMagicNumber = 0xe1;
-
-// These blocks are not part of the locked area
-constexpr bool IsBlockLockedOrReserved(uint8 blockIdx)
-{
-	// Block 0 is the UID
-	if (blockIdx == 0x0)
+	namespace
 	{
+		constexpr uint8 kCcMagic = 0xE1;     // NDEF magic number in the capability container
+		constexpr size_t kLockBlockLow = 0x0E;  // bytes 0..1: blocks 0x00..0x0F
+		constexpr size_t kLockBlockHigh = 0x0F; // bytes 2..7: blocks 0x10..0x3F
+	}
+
+	bool Type1Tag::IsReserved(size_t block)
+	{
+		return block == 0x00 || block == 0x0D || block == 0x0E || block == 0x0F;
+	}
+
+	bool Type1Tag::IsLocked(size_t block) const
+	{
+		return m_locked[block];
+	}
+
+	std::unique_ptr<Type1Tag> Type1Tag::Load(std::span<const uint8> image)
+	{
+		if (image.size() != kImageSize)
+		{
+			cemuLog_log(LogType::Force, "nfc: tag file must be {} bytes, got {}", kImageSize, image.size());
+			return nullptr;
+		}
+		auto tag = std::make_unique<Type1Tag>();
+		std::copy(image.begin(), image.end(), tag->m_image.begin());
+
+		// lock bits
+		const uint8* low = tag->m_image.data() + kLockBlockLow * kBlockSize;
+		const uint8* high = tag->m_image.data() + kLockBlockHigh * kBlockSize;
+		for (size_t block = 0; block < kBlockCount; block++)
+		{
+			const uint8 bits = block < 16 ? low[block / 8] : high[2 + (block - 16) / 8];
+			tag->m_locked[block] = (bits >> (block % 8)) & 1;
+		}
+
+		// split into locked area and data area
+		std::vector<uint8> dataArea;
+		for (size_t block = 0; block < kBlockCount; block++)
+		{
+			if (IsReserved(block))
+				continue;
+			const uint8* b = tag->m_image.data() + block * kBlockSize;
+			std::vector<uint8>& dst = tag->IsLocked(block) ? tag->m_lockedArea : dataArea;
+			dst.insert(dst.end(), b, b + kBlockSize);
+		}
+
+		// capability container
+		if (dataArea.size() < tag->m_cc.size())
+			return nullptr;
+		std::copy_n(dataArea.begin(), tag->m_cc.size(), tag->m_cc.begin());
+		if (tag->m_cc[0] != kCcMagic)
+		{
+			cemuLog_log(LogType::Force, "nfc: tag has no NDEF capability container");
+			return nullptr;
+		}
+		if ((tag->m_cc[1] >> 4) != 1)
+		{
+			cemuLog_log(LogType::Force, "nfc: unsupported tag mapping version {:#x}", tag->m_cc[1]);
+			return nullptr;
+		}
+		if ((tag->m_cc[2] + 1u) * 8u < kImageSize)
+		{
+			cemuLog_log(LogType::Force, "nfc: tag memory size in the capability container is too small");
+			return nullptr;
+		}
+
+		if (!tlv::Parse(std::span<const uint8>(dataArea).subspan(tag->m_cc.size()), tag->m_tlvs) || tag->m_tlvs.empty())
+		{
+			cemuLog_log(LogType::Force, "nfc: tag has no TLVs");
+			return nullptr;
+		}
+		auto it = std::find_if(tag->m_tlvs.begin(), tag->m_tlvs.end(), [](const tlv::Entry& e) { return e.type == tlv::kNdef; });
+		if (it == tag->m_tlvs.end())
+		{
+			cemuLog_log(LogType::Force, "nfc: tag has no NDEF TLV");
+			return nullptr;
+		}
+		tag->m_ndefIndex = (size_t)(it - tag->m_tlvs.begin());
+		return tag;
+	}
+
+	bool Type1Tag::Save(std::vector<uint8>& image) const
+	{
+		std::vector<uint8> dataArea(m_cc.begin(), m_cc.end());
+		for (const tlv::Entry& e : m_tlvs)
+			tlv::Append(e, dataArea);
+
+		image.assign(m_image.begin(), m_image.end());
+		size_t pos = 0;
+		for (size_t block = 0; block < kBlockCount; block++)
+		{
+			if (IsReserved(block) || IsLocked(block))
+				continue;
+			uint8* b = image.data() + block * kBlockSize;
+			for (size_t i = 0; i < kBlockSize; i++, pos++)
+				b[i] = pos < dataArea.size() ? dataArea[pos] : 0;
+		}
+		if (pos < dataArea.size())
+		{
+			cemuLog_log(LogType::Force, "nfc: NDEF message does not fit on the tag ({} of {} bytes)", dataArea.size(), pos);
+			return false;
+		}
 		return true;
 	}
-
-	// Block 0xd is reserved
-	if (blockIdx == 0xd)
-	{
-		return true;
-	}
-
-	// Block 0xe and 0xf contains lock / reserved bytes
-	if (blockIdx == 0xe || blockIdx == 0xf)
-	{
-		return true;
-	}
-
-	return false;
-}
-
-} // namespace
-
-TagV0::TagV0()
-{
-}
-
-TagV0::~TagV0()
-{
-}
-
-std::shared_ptr<TagV0> TagV0::FromBytes(const std::span<const std::byte>& data)
-{
-	// Version 0 tags need at least 512 bytes
-	if (data.size() != kTagSize)
-	{
-		cemuLog_log(LogType::Force, "Error: Version 0 tags should be {} bytes in size", kTagSize);
-		return {};
-	}
-
-	std::shared_ptr<TagV0> tag = std::make_shared<TagV0>();
-
-	// Parse the locked area before continuing
-	if (!tag->ParseLockedArea(data))
-	{
-		cemuLog_log(LogType::Force, "Error: Failed to parse locked area");
-		return {};
-	}
-
-	// Now that the locked area is known, parse the data area
-	std::vector<std::byte> dataArea;
-	if (!tag->ParseDataArea(data, dataArea))
-	{
-		cemuLog_log(LogType::Force, "Error: Failed to parse data area");
-		return {};
-	}
-
-	// The first few bytes in the dataArea make up the capability container
-	std::copy_n(dataArea.begin(), tag->mCapabilityContainer.size(), std::as_writable_bytes(std::span(tag->mCapabilityContainer)).begin());
-	if (!tag->ValidateCapabilityContainer())
-	{
-		cemuLog_log(LogType::Force, "Error: Failed to validate capability container");
-		return {};
-	}
-
-	// The rest of the dataArea contains the TLVs
-	tag->mTLVs = TLV::FromBytes(std::span(dataArea).subspan(tag->mCapabilityContainer.size()));
-	if (tag->mTLVs.empty())
-	{
-		cemuLog_log(LogType::Force, "Error: Tag contains no TLVs");
-		return {};
-	}
-
-	// Look for the NDEF tlv
-	tag->mNdefTlvIdx = static_cast<size_t>(-1);
-	for (std::size_t i = 0; i < tag->mTLVs.size(); i++)
-	{
-		if (tag->mTLVs[i].GetTag() == TLV::TAG_NDEF)
-		{
-			tag->mNdefTlvIdx = i;
-			break;
-		}
-	}
-
-	if (tag->mNdefTlvIdx == static_cast<size_t>(-1))
-	{
-		cemuLog_log(LogType::Force, "Error: Tag contains no NDEF TLV");
-		return {};
-	}
-
-	// Append locked data
-	for (const auto& [key, value] : tag->mLockedBlocks)
-	{
-		tag->mLockedArea.insert(tag->mLockedArea.end(), value.begin(), value.end());
-	}
-
-	return tag;
-}
-
-std::vector<std::byte> TagV0::ToBytes() const
-{
-	std::vector<std::byte> bytes(kTagSize);
-
-	// Insert locked or reserved blocks
-	for (const auto& [key, value] : mLockedOrReservedBlocks)
-	{
-		std::copy(value.begin(), value.end(), bytes.begin() + key * sizeof(Block));
-	}
-
-	// Insert locked area
-	auto lockedDataIterator = mLockedArea.begin();
-	for (const auto& [key, value] : mLockedBlocks)
-	{
-		std::copy_n(lockedDataIterator, sizeof(Block), bytes.begin() + key * sizeof(Block));
-		lockedDataIterator += sizeof(Block);
-	}
-
-	// Pack the dataArea into a linear buffer
-	std::vector<std::byte> dataArea;
-	const auto ccBytes = std::as_bytes(std::span(mCapabilityContainer));
-	dataArea.insert(dataArea.end(), ccBytes.begin(), ccBytes.end());
-	for (const TLV& tlv : mTLVs)
-	{
-		const auto tlvBytes = tlv.ToBytes();
-		dataArea.insert(dataArea.end(), tlvBytes.begin(), tlvBytes.end());
-	}
-
-	// Make sure the dataArea is block size aligned
-	dataArea.resize((dataArea.size() + (sizeof(Block)-1)) & ~(sizeof(Block)-1));
-
-	// The rest will be the data area
-	auto dataIterator = dataArea.begin();
-	for (uint8 currentBlock = 0; currentBlock < kMaxBlockCount; currentBlock++)
-	{
-		// All blocks which aren't locked make up the dataArea
-		if (!IsBlockLocked(currentBlock))
-		{
-			std::copy_n(dataIterator, sizeof(Block), bytes.begin() + currentBlock * sizeof(Block));
-			dataIterator += sizeof(Block);
-		}
-	}
-
-	return bytes;
-}
-
-const TagV0::Block& TagV0::GetUIDBlock() const
-{
-	return mLockedOrReservedBlocks.at(0);
-}
-
-const std::vector<std::byte>& TagV0::GetNDEFData() const
-{
-	return mTLVs[mNdefTlvIdx].GetValue();
-}
-
-const std::vector<std::byte>& TagV0::GetLockedArea() const
-{
-	return mLockedArea;
-}
-
-void TagV0::SetNDEFData(const std::span<const std::byte>& data)
-{
-	// Update the ndef value
-	mTLVs[mNdefTlvIdx].SetValue(data);
-}
-
-bool TagV0::ParseLockedArea(const std::span<const std::byte>& data)
-{
-	uint8 currentBlock = 0;
-
-	// Start by parsing the first set of lock bytes
-	for (uint8 i = kLockbytesStart0; i < kLockbytesEnd0; i++)
-	{
-		uint8 lockByte = uint8(data[kLockbyteBlock0 * sizeof(Block) + i]);
-
-		// Iterate over the individual bits in the lock byte
-		for (uint8 j = 0; j < 8; j++)
-		{
-			// Is block locked?
-			if (lockByte & (1u << j))
-			{
-				Block blk;
-				std::copy_n(data.begin() + currentBlock * sizeof(Block), sizeof(Block), blk.begin());
-
-				// The lock bytes themselves are not part of the locked area
-				if (!IsBlockLockedOrReserved(currentBlock))
-				{
-					mLockedBlocks.emplace(currentBlock, blk);
-				}
-				else
-				{
-					mLockedOrReservedBlocks.emplace(currentBlock, blk);
-				}
-			}
-
-			currentBlock++;
-		}
-	}
-
-	// Parse the second set of lock bytes
-	for (uint8 i = kLockbytesStart1; i < kLockbytesEnd1; i++) {
-		uint8 lockByte = uint8(data[kLockbyteBlock1 * sizeof(Block) + i]);
-
-		// Iterate over the individual bits in the lock byte
-		for (uint8 j = 0; j < 8; j++)
-		{
-			// Is block locked?
-			if (lockByte & (1u << j))
-			{
-				Block blk;
-				std::copy_n(data.begin() + currentBlock * sizeof(Block), sizeof(Block), blk.begin());
-
-				// The lock bytes themselves are not part of the locked area
-				if (!IsBlockLockedOrReserved(currentBlock))
-				{
-					mLockedBlocks.emplace(currentBlock, blk);
-				}
-				else
-				{
-					mLockedOrReservedBlocks.emplace(currentBlock, blk);
-				}
-			}
-
-			currentBlock++;
-		}
-	}
-
-	return true;
-}
-
-bool TagV0::IsBlockLocked(uint8 blockIdx) const
-{
-	return mLockedBlocks.contains(blockIdx) || IsBlockLockedOrReserved(blockIdx);
-}
-
-bool TagV0::ParseDataArea(const std::span<const std::byte>& data, std::vector<std::byte>& dataArea)
-{
-	for (uint8 currentBlock = 0; currentBlock < kMaxBlockCount; currentBlock++)
-	{
-		// All blocks which aren't locked make up the dataArea
-		if (!IsBlockLocked(currentBlock))
-		{
-			auto blockOffset = data.begin() + sizeof(Block) * currentBlock;
-			dataArea.insert(dataArea.end(), blockOffset, blockOffset + sizeof(Block));
-		}
-	}
-
-	return true;
-}
-
-bool TagV0::ValidateCapabilityContainer()
-{
-	// NDEF Magic Number
-	uint8 nmn = mCapabilityContainer[0];
-	if (nmn != kNDEFMagicNumber)
-	{
-		cemuLog_log(LogType::Force, "Error: CC: Invalid NDEF Magic Number");
-		return false;
-	}
-
-	// Version Number
-	uint8 vno = mCapabilityContainer[1];
-	if (vno >> 4 != 1)
-	{
-		cemuLog_log(LogType::Force, "Error: CC: Invalid Version Number");
-		return false;
-	}
-
-	// Tag memory size
-	uint8 tms = mCapabilityContainer[2];
-	if (8u * (tms + 1) < kTagSize)
-	{
-		cemuLog_log(LogType::Force, "Error: CC: Incomplete tag memory size");
-		return false;
-	}
-
-	return true;
 }
