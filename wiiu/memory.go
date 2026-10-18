@@ -30,6 +30,7 @@ const (
 	CodeBase   = 0x02000000
 	DataBase   = 0x10000000
 	MEM2End    = 0x50000000
+	mem2Phys   = 0x50000000 // MEM2's physical address
 	LoaderBase = 0xC0000000
 	LoaderSize = 0x10000000
 	FGBase     = 0xE0000000
@@ -90,6 +91,18 @@ func (m *Memory) page(addr uint32) []byte {
 		return p
 	}
 	if !m.Mapped(addr) {
+		// MEM2's physical addresses (0x50000000 up), which the GPU is given
+		// in the command streams some games write themselves: the same
+		// memory as MEM2 itself
+		if addr >= mem2Phys && addr < mem2Phys+(MEM2End-DataBase) {
+			if p = m.page(addr - mem2Phys + DataBase); p != nil {
+				m.pages[addr>>pageBits] = p
+				if m.jit != nil {
+					m.jit.pageAdded(addr>>pageBits, p)
+				}
+			}
+			return p
+		}
 		return nil
 	}
 	p = make([]byte, pageSize)
