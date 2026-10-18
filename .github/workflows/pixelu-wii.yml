@@ -108,7 +108,8 @@ jobs:
           # Sys, COPYING and Licenses are symlinks in the build folder: copy the real ones.
           Copy-Item -Recurse "$env:DOLPHIN_DIR/Data/Sys" "$out/Sys"
           Copy-Item "$env:DOLPHIN_DIR/COPYING" "$out/COPYING"
-          Copy-Item "$env:DOLPHIN_DIR/COPYING" "$out/license.txt"
+          # COPYING is Dolphin's licensing overview; license.txt is the full GPL text.
+          Copy-Item "$env:DOLPHIN_DIR/LICENSES/GPL-2.0-or-later.txt" "$out/license.txt"
           Copy-Item -Recurse "$env:DOLPHIN_DIR/LICENSES" "$out/Licenses"
           # Dolphin links the Visual C++ runtime as DLLs: ship them next to the
           # exe so it runs without the VC++ Redistributable being installed.
