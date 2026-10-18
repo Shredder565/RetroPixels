@@ -290,6 +290,11 @@ func (m *Machine) loadModule(b []byte, name string, relocate bool) (*Module, err
 		plan.TextAt = (textEnd + 0xfff) &^ 0xfff
 		plan.DataAt = (dataEnd + 0xfff) &^ 0xfff
 		plan.LoadAt = (loadEnd + 0xffff) &^ 0xffff
+		if m.heaps.defaultHeap != 0 {
+			// MEM2 belongs to the heaps by now: the data goes in the
+			// default heap, as the loader's default allocator would put it
+			plan.DataAlloc = func(size uint32) uint32 { return m.expAlloc(m.heaps.defaultHeap, size, 0x1000) }
+		}
 	}
 	var placed *Module
 	plan.Placed = func(mod *Module) {
@@ -319,7 +324,7 @@ func (m *Machine) loadModule(b []byte, name string, relocate bool) (*Module, err
 	m.Mem.InvalidateCode(mod.TextLo, mod.TextHi-mod.TextLo)
 	// entry points run dependencies first: the order loads finish in
 	m.initQueue = append(m.initQueue, mod)
-	if mod.DataHi > m.dataEnd {
+	if plan.DataAlloc == nil && mod.DataHi > m.dataEnd {
 		m.dataEnd = mod.DataHi
 	}
 	if m.Err != nil {
@@ -371,7 +376,7 @@ func (m *Machine) startMain() {
 		if core == 1 {
 			size = stack
 		}
-		st := m.heaps.allocSystem(m, size, 64) + size
+		st := m.allocSystem(size, 64) + size
 		t := m.newThread(addr, 0, 0, 0, st, size, 16, 1<<core)
 		t.Attr = 1 << core
 		m.defaultTh[core] = t

@@ -36,7 +36,7 @@ func init() {
 			})
 			return
 		}
-		then(m, cpu, t, m.heapAlloc(m.heaps.get(m.heaps.Base[arenaMEM2]), size, int32(align)))
+		m.callGuest(cpu, t, m.defaultHeapFunc("MEMAllocFromDefaultHeapEx"), []uint32{size, align}, then)
 	}
 	free := func(m *Machine, cpu *CPU, t *Thread, flags, p uint32, then func(m *Machine, cpu *CPU, t *Thread)) {
 		if p == 0 {
@@ -47,10 +47,7 @@ func init() {
 			m.callGuest(cpu, t, m.gx2.rFree, []uint32{flags, p}, func(m *Machine, cpu *CPU, t *Thread, _ uint32) { then(m, cpu, t) })
 			return
 		}
-		if hp := m.heaps.heapFor(p); hp != nil && hp.Kind == tagExp {
-			hp.expFree(p)
-		}
-		then(m, cpu, t)
+		m.callGuest(cpu, t, m.defaultHeapFunc("MEMFreeToDefaultHeap"), []uint32{p}, func(m *Machine, cpu *CPU, t *Thread, _ uint32) { then(m, cpu, t) })
 	}
 	bufSize := func(m *Machine, b uint32) uint32 {
 		return m.Mem.Read32(b+gx2rBufElem) * m.Mem.Read32(b+gx2rBufCount)

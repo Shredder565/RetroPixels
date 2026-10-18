@@ -171,3 +171,30 @@ func TestCoroutinesAndLockedCache(t *testing.T) {
 		}
 	}
 }
+
+// The heaps, with the values Cafe OS's (and Cemu's) heap code gives.
+func TestHeaps(t *testing.T) {
+	rpx := buildModule(t, buildOpts{exports: []string{"__preinit_user"}, imports: []string{
+		"coreinit MEMCreateExpHeapEx MEMResizeForMBlockExpHeap MEMGetAllocatableSizeForExpHeapEx MEMGetTotalFreeSizeForExpHeap",
+		"coreinit MEMGetSizeForMBlockExpHeap MEMVisitAllocatedForExpHeap MEMFindContainHeap MEMFindParentHeap",
+		"coreinit MEMCreateFrmHeapEx MEMRecordStateForFrmHeap MEMFreeByStateToFrmHeap MEMGetAllocatableSizeForFrmHeapEx",
+		"coreinit MEMCreateUnitHeapEx MEMAllocFromUnitHeap MEMFreeToUnitHeap MEMCountFreeBlockForUnitHeap MEMCalcHeapSizeForUnitHeap",
+		"coreinit MEMInitBlockHeap MEMAllocFromBlockHeapEx MEMFreeToBlockHeap MEMGetTrackingLeftInBlockHeap",
+		"coreinit MEMGetTotalFreeSizeForBlockHeap MEMGetAllocatableSizeForBlockHeapEx",
+		"coreinit OSGetMemBound OSGetForegroundBucket OSGetForegroundBucketFreeArea"}}, "memtest.c")
+	_, log := runRPX(t, rpx, 10)
+	for _, want := range []string{
+		"exp: ff98 ff98 ff80 | 68 ff00 fd70 180 20 | 80 c0 fd64 fd38 | 3 1e0 1 | fdb0 ff98",
+		"nested: 1 1 1",
+		"frm: fb4 f00 | 4c 1 80 fc0 e40 | 1 fa4 0 fb4",
+		"unit: 14 60 a0 12 60 3e4",
+		"block: 1 0 f00 2 e00 e00 | 3 f00",
+		"bounds: f4000000 2000000 50000000 e0000000 4000000 e0000000 2800000",
+		"base: f4000000 e0000000 1 1ffffb4 27fffb4",
+		"preinit: 1 f4000000 e0000000 1 0",
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("want %q in:\n%s", want, log)
+		}
+	}
+}

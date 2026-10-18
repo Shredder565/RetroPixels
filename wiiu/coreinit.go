@@ -3,7 +3,7 @@ package wiiu
 // coreinit: the core of Cafe OS that every program links with. This file has
 // startup and exit, the console, time, system information, atomics, the
 // dynamic loader and memory functions; coreinit_thread.go has threads and
-// synchronisation, and heaps.go the heaps behind the MEM* functions.
+// synchronisation, and mem_*.go the heaps behind the MEM* functions.
 
 import (
 	"math/bits"
@@ -31,8 +31,14 @@ func osTicksSince2000(t time.Time) uint64 {
 func init() {
 	c := "coreinit"
 
-	// startup: the RPLs' entry points, then the program's
+	// startup: the heaps (and __preinit_user), the RPLs' entry points, then
+	// the program's
 	reg(c, "__RPStartup", func(m *Machine, cpu *CPU, t *Thread) {
+		if !m.heaps.started {
+			cpu.LR = m.thunk("coreinit", "__RPStartup")
+			m.startHeaps(cpu, t)
+			return
+		}
 		if mod := m.nextInit(); mod != nil {
 			cpu.GPR[3] = m.moduleHandle(mod.Name)
 			cpu.GPR[4] = 1 // loading
@@ -184,33 +190,6 @@ func init() {
 		m.Mem.Write32(arg(cpu, 1), m.argv)
 		ret(cpu, 1)
 	})
-	reg(c, "OSGetMemBound", func(m *Machine, cpu *CPU, t *Thread) {
-		var a, n uint32
-		switch arg(cpu, 0) {
-		case 1:
-			a, n = MEM1Base, MEM1Size
-		case 2:
-			hp := m.heaps.get(m.heaps.Base[arenaMEM2])
-			a, n = hp.Start, hp.Hi-hp.Start
-		default:
-			ret(cpu, 0xffffffff)
-			return
-		}
-		m.Mem.Write32(arg(cpu, 1), a)
-		m.Mem.Write32(arg(cpu, 2), n)
-		ret(cpu, 0)
-	})
-	fg := func(m *Machine, cpu *CPU, t *Thread) {
-		if a := arg(cpu, 0); a != 0 {
-			m.Mem.Write32(a, FGBase)
-		}
-		if a := arg(cpu, 1); a != 0 {
-			m.Mem.Write32(a, FGSize)
-		}
-		ret(cpu, 1)
-	}
-	reg(c, "OSGetForegroundBucket", fg)
-	reg(c, "OSGetForegroundBucketFreeArea", fg)
 	reg(c, "OSEffectiveToPhysical", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, toPhysical(arg(cpu, 0))) })
 	reg(c, "OSPhysicalToEffectiveCached", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, toEffective(arg(cpu, 0))) })
 	reg(c, "OSPhysicalToEffectiveUncached", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, toEffective(arg(cpu, 0))) })
@@ -668,7 +647,7 @@ func (m *Machine) threadBlock(t *Thread, what string, size uint32) uint32 {
 	if a, ok := m.perThread[key]; ok {
 		return a
 	}
-	a := m.heaps.allocSystem(m, size, 16)
+	a := m.allocSystem(size, 16)
 	m.Mem.Fill(a, 0, size)
 	if m.perThread == nil {
 		m.perThread = map[string]uint32{}
@@ -693,7 +672,7 @@ func (m *Machine) tlsBlock(t *Thread, index uint32) uint32 {
 	if mod != nil && mod.TLSSize > 0 {
 		size = mod.TLSSize
 	}
-	a := m.heaps.allocSystem(m, size, 64)
+	a := m.allocSystem(size, 64)
 	m.Mem.Fill(a, 0, size)
 	if mod != nil && mod.TLSSize > 0 {
 		m.Mem.Move(a, mod.TLSAddr, mod.TLSSize)

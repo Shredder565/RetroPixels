@@ -8,9 +8,10 @@ package wiiu
 //
 //	0x01000000  system area: RetroPixels' library entry points and OS data
 //	0x02000000  the program's code (.text)
+//	0x0E000000  the system heap (OSAllocFromSystem, and RetroPixels' own use)
 //	0x10000000  the program's data, then MEM2 (the main heap, 1 GB in all)
 //	0xC0000000  the loader's area (import tables, file info)
-//	0xE0000000  the foreground bucket (40 MB, shared with the system menu)
+//	0xE0000000  the foreground bucket (64 MB, shared with the system menu)
 //	0xF4000000  MEM1 (32 MB of fast memory)
 
 import (
@@ -25,18 +26,20 @@ const (
 	pageMask = pageSize - 1
 	numPages = 1 << (32 - pageBits)
 
-	SystemBase = 0x01000000
-	SystemSize = 0x01000000
-	CodeBase   = 0x02000000
-	DataBase   = 0x10000000
-	MEM2End    = 0x50000000
-	mem2Phys   = 0x50000000 // MEM2's physical address
-	LoaderBase = 0xC0000000
-	LoaderSize = 0x10000000
-	FGBase     = 0xE0000000
-	FGSize     = 0x02800000
-	MEM1Base   = 0xF4000000
-	MEM1Size   = 0x02000000
+	SystemBase  = 0x01000000
+	SystemSize  = 0x01000000
+	CodeBase    = 0x02000000
+	SysHeapBase = 0x0E000000
+	SysHeapSize = 0x02000000
+	DataBase    = 0x10000000
+	MEM2End     = 0x50000000
+	mem2Phys    = 0x50000000 // MEM2's physical address
+	LoaderBase  = 0xC0000000
+	LoaderSize  = 0x10000000
+	FGBase      = 0xE0000000
+	FGSize      = 0x04000000
+	MEM1Base    = 0xF4000000
+	MEM1Size    = 0x02000000
 )
 
 // region is a range of addresses that may hold memory.
@@ -60,7 +63,8 @@ type Memory struct {
 func NewMemory() *Memory {
 	m := &Memory{}
 	m.Map(SystemBase, SystemSize, "system")
-	m.Map(CodeBase, DataBase-CodeBase, "code")
+	m.Map(CodeBase, SysHeapBase-CodeBase, "code")
+	m.Map(SysHeapBase, SysHeapSize, "system heap")
 	m.Map(DataBase, MEM2End-DataBase, "MEM2")
 	m.Map(LoaderBase, LoaderSize, "loader")
 	m.Map(FGBase, FGSize, "foreground")

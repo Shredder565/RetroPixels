@@ -127,6 +127,9 @@ type LoadPlan struct {
 	TextAt   uint32
 	DataAt   uint32
 	LoadAt   uint32
+	// DataAlloc, when set, gives the memory for the data instead of DataAt
+	// (0 if there's none).
+	DataAlloc func(size uint32) uint32
 	// Placed, when set, is told about the module once its sections are in
 	// memory and its exports known, before its imports are resolved (which
 	// can load other modules, and they must go after this one).
@@ -269,6 +272,17 @@ func LoadRPL(mem *Memory, b []byte, name string, plan LoadPlan, imp Importer, tr
 			dataBase = min(dataBase, s.addr)
 		default:
 			textBase = min(textBase, s.addr)
+		}
+	}
+	if plan.Relocate && plan.DataAlloc != nil && dataBase != ^uint32(0) {
+		var dataEnd uint32
+		for _, s := range secs {
+			if s.flags&shfAlloc != 0 && s.addr >= DataBase && s.addr < LoaderBase && s.typ != shtImports {
+				dataEnd = max(dataEnd, s.addr+s.size)
+			}
+		}
+		if plan.DataAt = plan.DataAlloc(dataEnd - dataBase); plan.DataAt == 0 {
+			return nil, fmt.Errorf("no memory for %s's data (%d KB)", name, (dataEnd-dataBase)>>10)
 		}
 	}
 	mod.TextLo, mod.DataLo = ^uint32(0), ^uint32(0)

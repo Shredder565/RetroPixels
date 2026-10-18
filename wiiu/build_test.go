@@ -39,8 +39,8 @@ type buildOpts struct {
 	compress bool
 	// imports beyond the SDK's, as lines of imports.txt ("lib func data:var")
 	imports []string
-	// an RPL (no crt0; the entry point is rpl_entry) exporting these
-	// functions and (with "data:") variables
+	// an RPL (no crt0; the entry point is rpl_entry); either kind can
+	// export functions and (with "data:") variables
 	rpl     bool
 	exports []string
 }
@@ -111,7 +111,7 @@ func buildModule(t testing.TB, o buildOpts, files ...string) []byte {
 		}
 	}
 	var exp strings.Builder // the exports, after the data
-	if o.rpl {
+	if o.rpl || len(o.exports) > 0 {
 		exp.WriteString("  . = 0xC0000000;\n")
 		for _, kind := range []string{"f", "d"} {
 			var list []string
