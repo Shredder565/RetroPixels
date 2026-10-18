@@ -1,6 +1,7 @@
 package dolphin
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"os"
 	"path/filepath"
@@ -338,5 +339,31 @@ func TestGameArgs(t *testing.T) {
 	}
 	if c := Command(`/opt/dolphin/Dolphin.exe`, "-b"); c.Dir != "/opt/dolphin" {
 		t.Errorf("runs in %q", c.Dir)
+	}
+}
+
+func TestWADAddOnByTitleID(t *testing.T) {
+	dir := t.TempDir()
+	mk := func(name string, upper uint32) string {
+		b := make([]byte, 0x400)
+		copy(b, []byte{0, 0, 0, 0x20, 'I', 's', 0, 0})
+		binary.BigEndian.PutUint32(b[64+0x18C:], upper)
+		copy(b[64+0x18C+4:], "WR9E")
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	game := mk("Mega Man 9.wad", 0x00010001)
+	addOn := mk("Mega Man 9 extra.wad", 0x00010005)
+	if IsDLC(game) {
+		t.Errorf("%s: a WiiWare game isn't add-on content", game)
+	}
+	if !IsDLC(addOn) {
+		t.Errorf("%s: title ID 00010005 is add-on content", addOn)
+	}
+	if _, ok := GameFor(game); !ok {
+		t.Errorf("the game should be recognised")
 	}
 }

@@ -309,6 +309,12 @@ func (a *app) dolOpenPath(path string) bool {
 		}
 		return false
 	}
+	if dolphin.IsDLC(path) {
+		messageBox(a.hwnd, fmt.Sprintf("%q is add-on content (DLC) for a WiiWare game, not a game you can start.\n\n"+
+			"To add it: GameCube / Wii > Open PixelU (Wii/GameCube), then in PixelU use Tools > Install WAD... and choose this file once. "+
+			"Then start the game itself.", filepath.Base(path)), "RetroPixels Native", mbIconInfo)
+		return true
+	}
 	g, ok := dolphin.GameFor(path)
 	if !ok {
 		if _, err := os.Stat(path); err != nil {

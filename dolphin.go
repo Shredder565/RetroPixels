@@ -36,6 +36,7 @@ type discInfo struct {
 	Platform string // "GameCube", "Wii", "WiiWare"
 	ID       string // e.g. GMSE01
 	Title    string // name stored on the disc
+	DLC      bool   // a WiiWare add-on (.wad) that can't be started by itself
 }
 
 var (
@@ -152,10 +153,14 @@ func wadInfo(f *os.File, path string) (discInfo, bool) {
 	tmdOff := align(0x20) + align(certSize) + align(tikSize)
 	tid := make([]byte, 8)
 	f.ReadAt(tid, tmdOff+0x18C)
+	// Title IDs 00010005-xxxxxxxx are add-on content (DLC) for a game: it can
+	// only be installed, not started. Some dumps are named "(DLC)" too.
+	dlc := binary.BigEndian.Uint32(tid[0:4]) == 0x00010005 ||
+		strings.Contains(strings.ToLower(filepath.Base(path)), "(dlc)")
 	id := strings.TrimRight(string(tid[4:8]), "\x00")
 	name := cleanGameName(filepath.Base(path))
 	name = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(name, "WAD"), "-"))
-	return discInfo{Platform: "WiiWare", ID: id, Title: name}, true
+	return discInfo{Platform: "WiiWare", ID: id, Title: name, DLC: dlc}, true
 }
 
 var discExts = map[string]bool{".iso": true, ".gcm": true, ".ciso": true, ".wbfs": true, ".rvz": true, ".wia": true, ".gcz": true, ".wad": true}
@@ -447,7 +452,7 @@ func dolphinLibrary() []dolGame {
 			}
 			seen[strings.ToLower(p)] = true
 			name := dolDisplayName(filepath.Base(p), di)
-			if strings.HasSuffix(strings.ToLower(name), "(dlc)") || strings.Contains(strings.ToLower(filepath.Base(p)), "(dlc)") {
+			if di.DLC || strings.HasSuffix(strings.ToLower(name), "(dlc)") {
 				return true // add-on content isn't playable by itself
 			}
 			out = append(out, dolGame{Name: name, File: filepath.Base(p), Path: p, Platform: di.Platform, ID: di.ID,
@@ -784,6 +789,12 @@ func dolphinDumpDir() string {
 
 // ---------------- launching ----------------
 
+// errDLC: a WiiWare add-on was opened. It can't be started by itself; it
+// goes into the engine's Wii system memory once, then the game finds it.
+var errDLC = errors.New("this .wad is add-on content (DLC) for a WiiWare game, not a game you can start. " +
+	"To add it: click Open PixelU (Wii/GameCube) on the GameCube / Wii tab, then in PixelU use Tools > Install WAD... and choose this file once. " +
+	"Then start the game itself from the list")
+
 func launchDolphinGame(path string) error {
 	exe := dolphinExe()
 	if exe == "" {
@@ -797,6 +808,11 @@ func launchDolphinGame(path string) error {
 		}
 	}
 	if g == nil {
+		if st, err := os.Stat(path); err == nil {
+			if di, ok := cachedIdentify(path, st); ok && di.DLC {
+				return errDLC
+			}
+		}
 		return errors.New("that game isn't in your GameCube / Wii games folders")
 	}
 	if dolphinRunning() {

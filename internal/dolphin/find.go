@@ -194,7 +194,7 @@ func Library(folders []string, played map[string]time.Time) []Game {
 			}
 			seen[strings.ToLower(p)] = true
 			name := DisplayName(filepath.Base(p), di)
-			if IsAddOn(filepath.Base(p), name) {
+			if di.DLC || IsAddOn(filepath.Base(p), name) {
 				return true
 			}
 			out = append(out, Game{Name: name, File: filepath.Base(p), Path: p, Platform: di.Platform, ID: di.ID,
@@ -204,6 +204,17 @@ func Library(folders []string, played map[string]time.Time) []Game {
 	}
 	sort.Slice(out, func(i, j int) bool { return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name) })
 	return out
+}
+
+// IsDLC tells whether path is a WiiWare add-on (.wad) that can only be
+// installed, not started.
+func IsDLC(path string) bool {
+	st, err := os.Stat(path)
+	if err != nil || st.IsDir() {
+		return false
+	}
+	di, ok := cachedIdentify(path, st)
+	return ok && (di.DLC || IsAddOn(filepath.Base(path), ""))
 }
 
 // GameFor identifies one game file (for a game opened directly, not from the library).
