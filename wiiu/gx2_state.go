@@ -1,9 +1,9 @@
 package wiiu
 
 // gx2 drawing: render targets, clears and copies, textures and samplers,
-// shaders, uniforms, vertex buffers, draws, the fixed-function state,
-// display lists and context states. Each call turns into the GPU register
-// writes and packets it stands for.
+// shaders, uniforms, vertex buffers, draws and the fixed-function state.
+// Each call turns into the GPU register writes and packets it stands for.
+// Display lists and context states are in gx2_command.go.
 
 import "math"
 
@@ -743,82 +743,6 @@ func init() {
 			// the CPU may read what the GPU drew, or have written new data
 			m.gpu.hwFlush(addr, addr+size)
 			m.gpu.hwInvalidate(addr, addr+size)
-		}
-	})
-
-	// ---- display lists ----
-	begin := func(m *Machine, cpu *CPU) {
-		g := m.gx2
-		g.dlActive, g.dlBuf, g.dlSize, g.dlPos, g.dlOverflow = true, arg(cpu, 0), arg(cpu, 1), 0, false
-	}
-	reg(x, "GX2BeginDisplayList", func(m *Machine, cpu *CPU, t *Thread) { begin(m, cpu) })
-	reg(x, "GX2BeginDisplayListEx", func(m *Machine, cpu *CPU, t *Thread) { begin(m, cpu) })
-	reg(x, "GX2EndDisplayList", func(m *Machine, cpu *CPU, t *Thread) {
-		g := m.gx2
-		if !g.dlActive {
-			ret(cpu, 0)
-			return
-		}
-		// pad to 32 bytes with filler, as the GPU fetches lists in blocks
-		for g.dlPos%32 != 0 && g.dlPos+4 <= g.dlSize {
-			m.Mem.Write32(g.dlBuf+g.dlPos, 0x80000000)
-			g.dlPos += 4
-		}
-		g.dlActive = false
-		ret(cpu, g.dlPos)
-	})
-	callDL := func(m *Machine, cpu *CPU) {
-		buf, size := arg(cpu, 0), arg(cpu, 1)
-		if m.gx2.dlActive {
-			m.packet(itINDIRECT_BUFFER_PR, buf, 0, size/4)
-			return
-		}
-		m.gpu.execMem(buf, size/4)
-	}
-	reg(x, "GX2CallDisplayList", func(m *Machine, cpu *CPU, t *Thread) { callDL(m, cpu) })
-	reg(x, "GX2DirectCallDisplayList", func(m *Machine, cpu *CPU, t *Thread) { callDL(m, cpu) })
-	reg(x, "GX2CopyDisplayList", func(m *Machine, cpu *CPU, t *Thread) {
-		buf, size := arg(cpu, 0), arg(cpu, 1)
-		if m.gx2.dlActive {
-			b := &pm4{}
-			for i := uint32(0); i < size/4; i++ {
-				b.w = append(b.w, m.Mem.Read32(buf+i*4))
-			}
-			m.emit(b)
-			return
-		}
-		m.gpu.execMem(buf, size/4)
-	})
-	reg(x, "GX2GetCurrentDisplayList", func(m *Machine, cpu *CPU, t *Thread) {
-		g := m.gx2
-		if p := arg(cpu, 0); p != 0 {
-			m.Mem.Write32(p, g.dlBuf)
-		}
-		if p := arg(cpu, 1); p != 0 {
-			m.Mem.Write32(p, g.dlSize)
-		}
-		retBool(cpu, g.dlActive)
-	})
-	reg(x, "GX2GetDisplayListWriteStatus", func(m *Machine, cpu *CPU, t *Thread) { retBool(cpu, m.gx2.dlActive) })
-
-	// ---- context states ----
-	reg(x, "GX2SetupContextStateEx", func(m *Machine, cpu *CPU, t *Thread) {
-		m.gpu.setupContext(arg(cpu, 0))
-		m.gx2DefaultState()
-	})
-	reg(x, "GX2SetupContextState", func(m *Machine, cpu *CPU, t *Thread) {
-		m.gpu.setupContext(arg(cpu, 0))
-		m.gx2DefaultState()
-	})
-	reg(x, "GX2SetContextState", func(m *Machine, cpu *CPU, t *Thread) {
-		m.packet(itHLE_CONTEXT_STATE, arg(cpu, 0))
-	})
-	reg(x, "GX2GetContextStateDisplayList", func(m *Machine, cpu *CPU, t *Thread) {
-		if p := arg(cpu, 1); p != 0 {
-			m.Mem.Write32(p, 0)
-		}
-		if p := arg(cpu, 2); p != 0 {
-			m.Mem.Write32(p, 0)
 		}
 	})
 }

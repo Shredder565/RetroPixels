@@ -28,12 +28,9 @@ type GX2 struct {
 	// (0 start of pipe, 1 end of pipe, 2 vsync, 3 flip, 4 display list overrun)
 	events [5][2]uint32
 
-	// display list being recorded
-	dlActive   bool
-	dlBuf      uint32
-	dlSize     uint32
-	dlPos      uint32
-	dlOverflow bool
+	// where each core's packets go (gx2_command.go)
+	cb       [3]gx2CmdBuf
+	mainCore int // the core GX2Init ran on
 }
 
 type scanBuf struct {
@@ -61,26 +58,6 @@ func tvModeDims(mode uint32) (uint32, uint32) {
 		return 1920, 1080
 	}
 	return 1280, 720
-}
-
-// emit sends PM4 packets to the GPU, or into the display list.
-func (m *Machine) emit(b *pm4) {
-	g := m.gx2
-	if !g.dlActive {
-		m.gpu.exec(b.w)
-		return
-	}
-	for _, w := range b.w {
-		if g.dlPos+4 > g.dlSize {
-			if !g.dlOverflow {
-				m.warnOnce("gx2: a display list ran out of room")
-			}
-			g.dlOverflow = true
-			return
-		}
-		m.Mem.Write32(g.dlBuf+g.dlPos, w)
-		g.dlPos += 4
-	}
 }
 
 func (m *Machine) warnOnce(s string) {
@@ -281,6 +258,7 @@ func init() {
 	x := "gx2"
 	reg(x, "GX2Init", func(m *Machine, cpu *CPU, t *Thread) {
 		m.gx2.Init = true
+		m.gx2.mainCore = cpu.Core
 		m.gx2DefaultState()
 	})
 	reg(x, "GX2Shutdown", func(m *Machine, cpu *CPU, t *Thread) { m.gx2.Init = false })
@@ -410,7 +388,6 @@ func init() {
 	reg(x, "GX2SampleBottomGPUCycle", sample)
 	reg(x, "GX2GetLastFrame", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) })
 	reg(x, "GX2GetLastFrameGamma", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) })
-	reg(x, "GX2GetMainCoreId", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 1) })
 	reg(x, "GX2GetGPUTimeout", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 10000) })
 	reg(x, "GX2GetMiscParam", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) })
 	reg(x, "GX2SetMiscParam", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 1) })
@@ -433,7 +410,7 @@ func init() {
 			m.Mem.Write32(p, e[1])
 		}
 	})
-	for _, n := range []string{"GX2Flush", "GX2SetDRCConnectCallback", "GX2SetGPUTimeout",
+	for _, n := range []string{"GX2SetDRCConnectCallback", "GX2SetGPUTimeout",
 		"GX2PrintGPUStatus", "GX2DebugTagUserString", "GX2NotifyMemAlloc", "GX2NotifyMemFree", "GX2Begin", "GX2End",
 		"GX2SetDRCConnectCallbackEx", "GX2SetTVBufferEx", "GX2SetAAMode", "GX2SetAAModeEx", "GX2SetAAMask",
 		"GX2ExpandDepthBuffer", "GX2ExpandAAColorBuffer", "GX2SetDepthBufferHiZEnable", "GX2SetShaderModeEx",
