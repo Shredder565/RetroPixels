@@ -52,6 +52,7 @@ func (m *Machine) coLoad(c *CPU, co uint32) {
 		c.PS1[14+i] = math.Float64frombits(mem.Read64(co + coPS + uint32(i)*8))
 	}
 	c.PC = mem.Read32(co + coNIA)
+	c.LR = c.PC
 	m.jumped = true
 }
 
@@ -78,12 +79,5 @@ func init() {
 		m.coLoad(cpu, co)
 		ret(cpu, v)
 	})
-	// (from, to): save here into from and go on in to; switching back to
-	// from returns from this call
-	reg(c, "OSSwitchCoroutine", func(m *Machine, cpu *CPU, t *Thread) {
-		from, to := arg(cpu, 0), arg(cpu, 1)
-		m.coSave(cpu, from, cpu.LR)
-		m.coLoad(cpu, to)
-		ret(cpu, 0)
-	})
+	// OSSwitchCoroutine is in coreinit_coroutine_cemu.go
 }

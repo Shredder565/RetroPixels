@@ -1,6 +1,8 @@
 #include "wiiu.h"
 // Virtual memory mapping and DMA copies.
 void OSGetMapVirtAddrRange(uint32_t *start, uint32_t *size);
+void OSGetAvailPhysAddrRange(uint32_t *start, uint32_t *size);
+uint64_t DMAESemaphore(uint64_t *sem, int op);
 uint32_t OSAllocVirtAddr(uint32_t va, uint32_t size, uint32_t align);
 int OSMapMemory(uint32_t va, uint32_t pa, uint32_t size, int perm);
 uint32_t OSQueryVirtAddr(uint32_t va);
@@ -21,6 +23,21 @@ int main(int argc, char **argv) {
 	alias[1] = 0xcafe;
 	OSReport("vm: range %x+%x va %x map %d seen %x back %x query %d\n", start, size, va, ok, seen, buf[1],
 		OSQueryVirtAddr(va + 8) == OSEffectiveToPhysical((uint32_t)buf) + 8);
+
+	// free physical memory, mapped twice: the same bytes in both places
+	uint32_t pstart = 0, psize = 0;
+	OSGetAvailPhysAddrRange(&pstart, &psize);
+	uint32_t va1 = OSAllocVirtAddr(0, 0x20000, 0x20000), va2 = OSAllocVirtAddr(0, 0x20000, 0x20000);
+	int ok1 = OSMapMemory(va1, pstart, 0x20000, 3), ok2 = OSMapMemory(va2, pstart, 0x20000, 3);
+	((volatile uint32_t *)va1)[5] = 0xbeef;
+	OSReport("vm: phys %d map %d %d shared %x\n", psize >= 0x20000, ok1, ok2, ((volatile uint32_t *)va2)[5]);
+
+	// 1 signals, 0 waits
+	uint64_t sem = 0;
+	DMAESemaphore(&sem, 1);
+	DMAESemaphore(&sem, 1);
+	DMAESemaphore(&sem, 0);
+	OSReport("dmae: sem %d\n", (int)sem);
 
 	uint32_t src[4] = {0x11223344, 0x55667788, 1, 2}, dst[4] = {0};
 	DMAEWaitDone(DMAECopyMem(dst, src, 2, 2));

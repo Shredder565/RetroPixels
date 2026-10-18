@@ -37,12 +37,13 @@ func init() {
 	reg(d, "DMAEWaitDone", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 1) })
 	reg(d, "DMAEGetRetiredTimeStamp", func(m *Machine, cpu *CPU, t *Thread) { ret64(cpu, now(m)) })
 	reg(d, "DMAEGetLastSubmittedTimeStamp", func(m *Machine, cpu *CPU, t *Thread) { ret64(cpu, now(m)) })
-	// (u64 *semaphore, op): 0 signals (adds one), 1 waits (takes one)
+	// (u64 *semaphore, op): 1 signals (adds one), 0 waits (takes one), as
+	// GX2SetSemaphore; kept big-endian like gx2_sync.go's
 	reg(d, "DMAESemaphore", func(m *Machine, cpu *CPU, t *Thread) {
 		p, op := arg(cpu, 0), arg(cpu, 1)
-		if p != 0 {
+		if p != 0 && op <= 1 {
 			v := m.Mem.Read64(p)
-			if op == 0 {
+			if op == 1 {
 				v++
 			} else if v > 0 {
 				v--

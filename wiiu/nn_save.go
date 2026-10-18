@@ -120,28 +120,13 @@ func init() {
 		id := arg64(cpu, 0)
 		p := fmt.Sprintf("/vol/storage_mlc01/usr/save/%08x/%08x/user/common/%s", uint32(id>>32), uint32(id),
 			m.Mem.String(arg(cpu, 2), 256))
-		if out, size := arg(cpu, 3), arg(cpu, 4); out != 0 && size > 0 {
-			if uint32(len(p)) >= size {
-				p = p[:size-1]
-			}
-			m.Mem.WriteBytes(out, append([]byte(p), 0))
-		}
-		ret(cpu, fsOK)
+		ret(cpu, m.savePathOut(p, arg(cpu, 3), arg(cpu, 4)))
 	})
 	reg(s, "SAVEGetSharedDataTitlePath", func(m *Machine, cpu *CPU, t *Thread) {
 		id := arg64(cpu, 0)
 		p := fmt.Sprintf("/vol/storage_mlc01/sys/title/%08x/%08x/content/%s", uint32(id>>32), uint32(id),
 			m.Mem.String(arg(cpu, 2), 256))
-		out, size := arg(cpu, 3), arg(cpu, 4)
-		if out == 0 || size == 0 {
-			ret(cpu, fsNotFound)
-			return
-		}
-		if uint32(len(p)) >= size {
-			p = p[:size-1]
-		}
-		m.Mem.WriteBytes(out, append([]byte(p), 0))
-		ret(cpu, fsOK)
+		ret(cpu, m.savePathOut(p, arg(cpu, 3), arg(cpu, 4)))
 	})
 
 	// nn_act: one account, signed in
@@ -183,4 +168,21 @@ func init() {
 		m.Mem.Write64(arg(cpu, 0), 0x1234567890abcdef)
 		ret(cpu, 0)
 	})
+}
+
+// savePathOut writes path to out like snprintf (cut short to fit size) and
+// fails, as Cemu does, when it didn't fit.
+func (m *Machine) savePathOut(path string, out, size uint32) uint32 {
+	if out == 0 || size == 0 {
+		return fsFatal
+	}
+	p := path
+	if uint32(len(p)) >= size {
+		p = p[:size-1]
+	}
+	m.Mem.WriteBytes(out, append([]byte(p), 0))
+	if len(p) < len(path) {
+		return fsFatal
+	}
+	return fsOK
 }

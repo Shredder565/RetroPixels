@@ -16,10 +16,13 @@ const mixMute = -904 // tenths of a dB: the quietest level, treated as off
 type mixChannel struct {
 	input, fader int32
 	pan, span    int32 // 0..127, 64 is the middle
-	drcInput     int32
+	drcFader     int32
 	drcPan       int32
 	drc          bool // set up for the GamePad too
 }
+
+// mixArg reads a 16-bit signed level from an argument register.
+func mixArg(v uint32) int32 { return int32(int16(v)) }
 
 // mixGain turns tenths of a decibel into a linear level.
 func mixGain(db int32) float64 {
@@ -61,7 +64,7 @@ func (m *Machine) mixApply(addr uint32, c *mixChannel) {
 	front := float64(max(0, min(127, c.span))) / 127
 	v.mix[0] = [6]float64{f * l * front, f * r * front, f * l * (1 - front), f * r * (1 - front), 0, 0}
 	if c.drc {
-		g := mixGain(c.drcInput)
+		g := mixGain(c.input) * mixGain(c.drcFader)
 		dl, dr := mixPan(c.drcPan)
 		v.mix[1] = [6]float64{g * dl, g * dr}
 	}
@@ -77,24 +80,40 @@ func init() {
 			reg(lib, n, ok)
 		}
 		reg(lib, "MIXGetSoundMode", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 1) }) // stereo
-		// (voice, mode, input, auxA, auxB, auxC, pan, span, fader)
+		// (voice, flags, input, aux1, aux2, aux3, pan, span, fader), levels are s16
 		reg(lib, "MIXInitChannel", func(m *Machine, cpu *CPU, t *Thread) {
 			a := m.ax()
 			c := a.mixCh(arg(cpu, 0))
-			c.input = int32(arg(cpu, 2))
-			c.pan = int32(arg(cpu, 6))
-			c.span = int32(arg(cpu, 7))
-			c.fader = int32(stackArg(m, cpu, 8))
+			c.input = mixArg(arg(cpu, 2))
+			c.pan = mixArg(arg(cpu, 6))
+			c.span = mixArg(arg(cpu, 7))
+			c.fader = mixArg(stackArg(m, cpu, 8))
 			m.mixApply(arg(cpu, 0), c)
 		})
-		// (voice, aux, input, pan)
+		// (voice, flags, aux, pan, fader): the GamePad uses the TV's input level
 		reg(lib, "MIXDRCInitChannel", func(m *Machine, cpu *CPU, t *Thread) {
 			c := m.ax().mixCh(arg(cpu, 0))
 			c.drc = true
-			c.drcInput = int32(arg(cpu, 2))
-			c.drcPan = int32(arg(cpu, 3))
+			c.drcPan = mixArg(arg(cpu, 3))
+			c.drcFader = mixArg(arg(cpu, 4))
 			m.mixApply(arg(cpu, 0), c)
 		})
+		// (voice, device, index, value)
+		device := func(name string, tv, drc func(c *mixChannel, v int32)) {
+			reg(lib, name, func(m *Machine, cpu *CPU, t *Thread) {
+				c := m.ax().mixCh(arg(cpu, 0))
+				v := mixArg(arg(cpu, 3))
+				switch {
+				case arg(cpu, 1) == 0:
+					tv(c, v)
+				case arg(cpu, 1) == 1 && arg(cpu, 2) == 0 && drc != nil:
+					drc(c, v)
+				}
+			})
+		}
+		device("MIXSetDeviceFader", func(c *mixChannel, v int32) { c.fader = v }, func(c *mixChannel, v int32) { c.drcFader = v })
+		device("MIXSetDevicePan", func(c *mixChannel, v int32) { c.pan = v }, func(c *mixChannel, v int32) { c.drcPan = v })
+		device("MIXSetDeviceSPan", func(c *mixChannel, v int32) { c.span = v }, nil)
 		reg(lib, "MIXReleaseChannel", func(m *Machine, cpu *CPU, t *Thread) {
 			if a := m.ax(); a.mix != nil {
 				delete(a.mix, arg(cpu, 0))
@@ -102,7 +121,7 @@ func init() {
 		})
 		set := func(name string, f func(c *mixChannel, v int32)) {
 			reg(lib, name, func(m *Machine, cpu *CPU, t *Thread) {
-				f(m.ax().mixCh(arg(cpu, 0)), int32(arg(cpu, 1)))
+				f(m.ax().mixCh(arg(cpu, 0)), mixArg(arg(cpu, 1)))
 			})
 		}
 		set("MIXSetInput", func(c *mixChannel, v int32) { c.input = v })
@@ -113,8 +132,8 @@ func init() {
 		set("MIXAdjustPan", func(c *mixChannel, v int32) { c.pan += v })
 		set("MIXSetSPan", func(c *mixChannel, v int32) { c.span = v })
 		set("MIXAdjustSPan", func(c *mixChannel, v int32) { c.span += v })
-		set("MIXDRCSetInput", func(c *mixChannel, v int32) { c.drcInput = v })
-		set("MIXDRCAdjustInput", func(c *mixChannel, v int32) { c.drcInput += v })
+		set("MIXDRCSetFader", func(c *mixChannel, v int32) { c.drcFader = v })
+		set("MIXDRCAdjustFader", func(c *mixChannel, v int32) { c.drcFader += v })
 		set("MIXDRCSetPan", func(c *mixChannel, v int32) { c.drcPan = v })
 		get := func(name string, f func(c *mixChannel) int32) {
 			reg(lib, name, func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, uint32(f(m.ax().mixCh(arg(cpu, 0))))) })
