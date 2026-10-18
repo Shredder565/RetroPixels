@@ -40,7 +40,7 @@ jobs:
 
       - name: Build RetroPixels
         run: |
-          v=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' main.go)-test.${{ github.run_number }}
+          v=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' main.go)-test${{ github.run_number }}
           echo "VER=$v" >> "$GITHUB_ENV"
           echo "DIR=dist/RetroPixels-$v" >> "$GITHUB_ENV"
           sh tools/make-winres.sh && sh tools/make-winres-native.sh
