@@ -94,7 +94,7 @@ type Machine struct {
 	dynReturn          map[*Thread]uint32
 	loading            map[string]bool // title libraries being loaded
 	homeMenu           bool
-	intsOff            [3]bool
+	resched            bool // a thread that should take the running thread's core is ready
 	dynHandles         map[uint32]string
 	dynAlloc           uint32
 	fontAddr, fontSize uint32 // the system font, once a program asks
@@ -377,11 +377,9 @@ func (m *Machine) startMain() {
 			size = stack
 		}
 		st := m.allocSystem(size, 64) + size
-		t := m.newThread(addr, 0, 0, 0, st, size, 16, 1<<core)
-		t.Attr = 1 << core
+		t := m.initThread(addr, 0, 0, 0, st, size, 16, 1<<core, threadApp)
+		m.activate(t)
 		m.defaultTh[core] = t
-		t.State = thDormant
-		t.Suspend = 0
 		if core == 1 {
 			// argv: the program's name
 			argv := m.sysAlloc(16, 8)
@@ -458,10 +456,10 @@ func (m *Machine) RunFrame() {
 func (m *Machine) runCore(core int) bool {
 	c := m.CPU[core]
 	t := m.current[core]
-	if t == nil || t.State != thReady {
+	if t == nil || !t.runnable(core) {
 		t = m.pick(core)
 		m.setCurrent(core, t)
-	} else if n := m.pick(core); n != nil && n.Priority <= t.Priority {
+	} else if n := m.pick(core); n != nil && n.Priority <= t.Priority && !t.IntsOff {
 		// a higher-priority thread, or one of the same priority's turn
 		if n.Priority < t.Priority || n.LastRun < t.LastRun {
 			t = n
@@ -483,7 +481,13 @@ func (m *Machine) runCore(core int) bool {
 			m.Err = m.crashReport(c, t)
 			break
 		}
-		if t.blocked || t.State != thReady || m.current[core] != t {
+		if t.blocked && t.IntsOff && t.runnable(core) && m.current[core] == t {
+			// spinning with interrupts off: keep the core, and let the
+			// other cores have their turns
+			t.blocked = false
+			break
+		}
+		if t.blocked || !t.runnable(core) || m.current[core] != t {
 			t.blocked = false
 			m.syncThread(t)
 			// another thread can use the rest of the slice
@@ -544,8 +548,9 @@ func (m *Machine) ThreadsSummary() string {
 	ts := append([]*Thread(nil), m.threadList...)
 	sort.Slice(ts, func(i, j int) bool { return ts[i].ID < ts[j].ID })
 	for _, t := range ts {
-		fmt.Fprintf(&b, "thread %d %q state %d prio %d pc %08X%s wait %x\n", t.ID, m.Mem.String(t.Name, 64),
-			t.State, t.Priority, t.Ctx.PC, m.where(t.Ctx.PC), t.WaitKey)
+		fmt.Fprintf(&b, "thread %d %q state %d suspend %d prio %d pc %08X%s wait %x\n", t.ID,
+			m.Mem.String(m.Mem.Read32(t.Addr+osThreadName), 64), t.State, t.Suspend, t.BasePrio-typePriorityBase(t.Type), t.Ctx.PC,
+			m.where(t.Ctx.PC), t.WaitKey)
 		fmt.Fprintf(&b, "    called from %08X%s%s\n", t.Ctx.LR, m.where(t.Ctx.LR), m.backtrace(t.Ctx.GPR[1]))
 	}
 	return b.String()
