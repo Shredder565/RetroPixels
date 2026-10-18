@@ -51,6 +51,38 @@ func TestThreads(t *testing.T) {
 	}
 }
 
+// TestSync: threads waiting on each other the way Cafe OS has them do.
+func TestSync(t *testing.T) {
+	rpx := buildModule(t, buildOpts{imports: []string{
+		"coreinit OSSuspendThread OSIsThreadSuspended OSIsThreadTerminated OSDetachThread OSSetThreadDeallocator",
+		"coreinit OSSetThreadCleanupCallback OSCreateThreadType OSGetThreadPriority OSExitThread OSDisableInterrupts",
+		"coreinit OSRestoreInterrupts OSInitSemaphore OSWaitSemaphore OSSignalSemaphore OSGetSemaphoreCount OSResetEvent",
+		"coreinit OSSignalEventAll OSWaitEventWithTimeout OSJamMessage OSPeekMessage OSInitSpinLock OSAcquireSpinLock",
+		"coreinit OSReleaseSpinLock OSInitThreadQueue OSSleepThread OSWakeupThread OSSetAlarmEx OSInitAlarmQueue",
+		"coreinit OSGetAlarmFromQueue OSGetSystemInfo OSInitRendezvous OSWaitRendezvous"}},
+		"synctest.c")
+	m, log := runRPX(t, rpx, 300)
+	for _, want := range []string{
+		"suspend 1 0 1 2 0 1 1 8 7 0",
+		"join 1 1 0 1 5 1 1 6 0 2",
+		"events 2 1 3 0 1 0 1",
+		"sem 0 1 3 0",
+		"mutex 20",
+		"mq 1234 4 0 1 1 9 2 0",
+		"prio 0 3 0 IA 31",
+		"spin 1",
+		"queue 7 run 1 1 5",
+		"alarm 1 0 1 1 0 0",
+		"rendezvous 0 2",
+		"sysinfo 248625000 1243125000 5 1",
+		"sync done",
+	} {
+		if !strings.Contains(log, want) {
+			t.Errorf("want %q in:\n%s\nthreads:\n%s", want, log, m.ThreadsSummary())
+		}
+	}
+}
+
 func TestOSScreen(t *testing.T) {
 	m, err := New(buildRPX(t, false, "screen.c"), "screen.rpx", nil)
 	if err != nil {

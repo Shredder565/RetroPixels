@@ -193,6 +193,7 @@ func (m *Machine) callHLE(c *CPU, n uint32) {
 	if t != nil {
 		t.blocked = false
 	}
+	m.resched = false
 	args := [4]uint32{c.GPR[3], c.GPR[4], c.GPR[5], c.GPR[6]}
 	e.fn(m, c, t)
 	m.noteCall(n, c, args)
@@ -200,6 +201,13 @@ func (m *Machine) callHLE(c *CPU, n uint32) {
 		c.PC -= 4 // run this call again when the thread wakes
 		c.Stop()
 		return
+	}
+	if t != nil {
+		t.doneWaiting()
+		if m.resched && m.current[c.Core] == t {
+			// a higher-priority thread for this core is ready: it runs now
+			m.preempt(c)
+		}
 	}
 	if m.jumped {
 		m.jumped = false

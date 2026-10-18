@@ -1,26 +1,15 @@
 package wiiu
 
 // coreinit: the core of Cafe OS that every program links with. This file has
-// startup and exit, the console, time, system information, atomics, the
-// dynamic loader and memory functions; coreinit_thread.go has threads and
-// synchronisation, and heaps.go the heaps behind the MEM* functions.
+// startup and exit, the console, time, atomics, the dynamic loader and memory
+// functions; coreinit_threads.go has threads, coreinit_sync.go
+// synchronisation, coreinit_alarm.go alarms, coreinit_sysinfo.go system
+// information and heaps.go the heaps behind the MEM* functions.
 
 import (
 	"math/bits"
 	"time"
 )
-
-// the OSSystemInfo the program reads clock speeds from
-var systemInfoAddr uint32
-
-func (m *Machine) initSystemData() {
-	systemInfoAddr = m.sysAlloc(0x20, 32)
-	mem := m.Mem
-	mem.Write32(systemInfoAddr+0, BusHz)
-	mem.Write32(systemInfoAddr+4, CoreHz)
-	mem.Write64(systemInfoAddr+8, 0) // base time
-	m.bootTime = osTicksSince2000(time.Now())
-}
 
 // osTicksSince2000: Cafe OS time counts timer ticks from 2000-01-01.
 func osTicksSince2000(t time.Time) uint64 {
@@ -50,10 +39,6 @@ func init() {
 		cpu.LR = m.thunk("coreinit", "exit")
 		cpu.PC = main.Entry
 		m.jumped = true
-	})
-	reg(c, "__RPThreadReturn", func(m *Machine, cpu *CPU, t *Thread) {
-		m.exitThread(t, cpu.GPR[3])
-		t.yield()
 	})
 	exit := func(m *Machine, cpu *CPU, t *Thread) {
 		m.exitProgram(arg(cpu, 0))
@@ -126,7 +111,6 @@ func init() {
 	reg(c, "OSGetSystemTime", func(m *Machine, cpu *CPU, t *Thread) { ret64(cpu, m.Time()) })
 	reg(c, "OSGetTick", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, uint32(m.bootTime+m.Time())) })
 	reg(c, "OSGetSystemTick", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, uint32(m.Time())) })
-	reg(c, "OSGetSystemInfo", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, systemInfoAddr) })
 	reg(c, "OSTicksToCalendarTime", func(m *Machine, cpu *CPU, t *Thread) {
 		ticks := int64(arg64(cpu, 0))
 		out := arg(cpu, 2)
@@ -218,18 +202,6 @@ func init() {
 	reg(c, "__OSValidateAddressSpaceRange", func(m *Machine, cpu *CPU, t *Thread) {
 		retBool(cpu, m.Mem.Mapped(arg(cpu, 1)) && m.Mem.Mapped(arg(cpu, 1)+arg(cpu, 2)-1))
 	})
-
-	// interrupts (nothing interrupts a library call here)
-	reg(c, "OSDisableInterrupts", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, b2u(!m.intsOff[cpu.Core])); m.intsOff[cpu.Core] = true })
-	reg(c, "OSEnableInterrupts", func(m *Machine, cpu *CPU, t *Thread) {
-		ret(cpu, b2u(!m.intsOff[cpu.Core]))
-		m.intsOff[cpu.Core] = false
-	})
-	reg(c, "OSRestoreInterrupts", func(m *Machine, cpu *CPU, t *Thread) {
-		ret(cpu, b2u(!m.intsOff[cpu.Core]))
-		m.intsOff[cpu.Core] = arg(cpu, 0) == 0
-	})
-	reg(c, "OSIsInterruptEnabled", func(m *Machine, cpu *CPU, t *Thread) { retBool(cpu, !m.intsOff[cpu.Core]) })
 
 	// cache and barriers (memory is always coherent here)
 	for _, n := range []string{"DCFlushRange", "DCFlushRangeNoSync", "DCStoreRange", "DCStoreRangeNoSync",
