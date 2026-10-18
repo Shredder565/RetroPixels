@@ -1,7 +1,5 @@
 package wiiu
 
-import "math"
-
 // More library calls games make at start-up that need little or no work
 // here: online services (offline), add-on content (none), sound effects
 // RetroPixels doesn't run, and small coreinit helpers.
@@ -35,13 +33,7 @@ func init() {
 		ret(cpu, m.flockWord)
 	})
 
-	// friends, accounts, Miiverse, online play: offline
-	set("nn_fp", zero, "Initialize__Q2_2nn2fpFv", "Finalize__Q2_2nn2fpFv",
-		"SetNotificationHandler__Q2_2nn2fpFUiPFQ3_2nn2fp16NotificationTypeUiPv_vPv",
-		"IsOnline__Q2_2nn2fpFv", "HasLoggedIn__Q2_2nn2fpFv", "LoginAsync__Q2_2nn2fpFPFQ2_2nn6ResultPv_vPv",
-		"GetFriendList__Q2_2nn2fpFPUiPUiUiUi", "UpdateGameMode__Q2_2nn2fpFPCQ3_2nn2fp8GameModePCw",
-		"UpdateGameModeDescription__Q2_2nn2fpFPCw", "IsPreferenceValid__Q2_2nn2fpFv")
-	set("nn_fp", one, "IsInitialized__Q2_2nn2fpFv")
+	// accounts, Miiverse, online play: offline (friends are in nn_fp.go)
 	set("nn_act", zero, "Cancel__Q2_2nn3actFv")
 	set("nsysnet", zero, "NSSLInit", "NSSLFinish")
 	set("nlibcurl", zero, "curl_global_init_mem", "curl_global_init", "curl_global_cleanup")
@@ -49,14 +41,22 @@ func init() {
 	// add-on content: none installed
 	a := "nn_aoc"
 	set(a, zero, "AOC_Initialize", "AOC_Finalize", "AOC_CloseTitle", "AOC_UnmountTitle")
-	reg(a, "AOC_CalculateWorkBufferSize", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0x200+arg(cpu, 0)*0x80) })
+	reg(a, "AOC_CalculateWorkBufferSize", func(m *Machine, cpu *CPU, t *Thread) {
+		ret(cpu, 0x80+min(arg(cpu, 0), 256)*0x61) // as Cemu
+	})
 	reg(a, "AOC_ListTitle", func(m *Machine, cpu *CPU, t *Thread) {
 		if p := arg(cpu, 0); p != 0 {
 			m.Mem.Write32(p, 0)
 		}
 		ret(cpu, 0)
 	})
-	reg(a, "AOC_GetPurchaseInfo", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0xfffffffd) })
+	// (u32 *bought, u64 title in r5:r6, u16 *ids, count, work, size): nothing bought
+	reg(a, "AOC_GetPurchaseInfo", func(m *Machine, cpu *CPU, t *Thread) {
+		if p, n := arg(cpu, 0), arg(cpu, 5); p != 0 {
+			m.Mem.Fill(p, 0, min(n, 0x10000)*4)
+		}
+		ret(cpu, 0)
+	})
 	reg(a, "AOC_OpenTitle", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0xfffffffd) })
 
 	// sound
@@ -94,17 +94,6 @@ func init() {
 	for _, s := range []string{"snd_core", "sndcore2"} {
 		set(s, zero, "AXRegisterExceedCallback", "AXSetDspLoadLimit", "AXGetDspLoadLimit", "AXSetAuxAReturnVolume",
 			"AXSetAuxBReturnVolume", "AXSetAuxCReturnVolume", "AXGetDspCycles", "AXGetMaxDspCycles")
-		// (cutoff, *a0, *b0): a one-pole low-pass filter's coefficients
-		reg(s, "AXComputeLpfCoefs", func(m *Machine, cpu *CPU, t *Thread) {
-			c := 2 - math.Cos(2*math.Pi*float64(arg(cpu, 0))/32000)
-			b := c - math.Sqrt(c*c-1)
-			if p := arg(cpu, 1); p != 0 {
-				m.Mem.Write16(p, uint16(int16((1-b)*32767)))
-			}
-			if p := arg(cpu, 2); p != 0 {
-				m.Mem.Write16(p, uint16(int16(b*32767)))
-			}
-		})
 	}
 	for _, s := range []string{"snd_user", "snduser2"} {
 		set(s, one, "AXFXMultiChReverbParametersPreset", "AXFXReverbHiParametersPreset", "AXFXReverbStdParametersPreset")
@@ -131,7 +120,15 @@ func init() {
 		"KBDSetAttachCallback", "KBDSetKeyCallback")
 	reg(k, "KBDGetChannelStatus", func(m *Machine, cpu *CPU, t *Thread) {
 		if p := arg(cpu, 1); p != 0 {
-			m.Mem.Write32(p, 0) // nothing attached
+			m.Mem.Write32(p, 1) // disconnected
+		}
+		ret(cpu, 0)
+	})
+	// (channel, KBDKeyState *): no key, 14 bytes
+	reg(k, "KBDGetKey", func(m *Machine, cpu *CPU, t *Thread) {
+		if ch, p := arg(cpu, 0), arg(cpu, 1); ch < 4 && p != 0 {
+			m.Mem.Fill(p, 0, 0xe)
+			m.Mem.Write8(p, uint8(ch))
 		}
 		ret(cpu, 0)
 	})

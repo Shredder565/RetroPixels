@@ -149,11 +149,11 @@ func TestFarCalls(t *testing.T) {
 
 func TestVirtualMemoryAndDMA(t *testing.T) {
 	rpx := buildModule(t, buildOpts{imports: []string{
-		"coreinit OSGetMapVirtAddrRange OSAllocVirtAddr OSMapMemory OSQueryVirtAddr OSEffectiveToPhysical",
-		"dmae DMAECopyMem DMAEFillMem DMAEWaitDone"}}, "vmtest.c")
+		"coreinit OSGetMapVirtAddrRange OSGetAvailPhysAddrRange OSAllocVirtAddr OSMapMemory OSQueryVirtAddr OSEffectiveToPhysical",
+		"dmae DMAECopyMem DMAEFillMem DMAEWaitDone DMAESemaphore"}}, "vmtest.c")
 	_, log := runRPX(t, rpx, 10)
 	for _, want := range []string{"vm: range a0000000+20000000 va a0000000 map 1 seen 12345678 back cafe query 1",
-		"dmae: 44332211 88776655 abcd abcd"} {
+		"dmae: 44332211 88776655 abcd abcd", "vm: phys 1 map 1 1 shared beef", "dmae: sem 1"} {
 		if !strings.Contains(log, want) {
 			t.Errorf("want %q in:\n%s", want, log)
 		}
@@ -165,7 +165,7 @@ func TestCoroutinesAndLockedCache(t *testing.T) {
 		"coreinit OSInitCoroutine OSSwitchCoroutine LCAlloc LCDealloc LCGetAllocatableSize LCEnableDMA LCLoadDMABlocks LCStoreDMABlocks"}},
 		"cotest.c")
 	_, log := runRPX(t, rpx, 10)
-	for _, want := range []string{"co: steps 33 local 7", "lc: 4000 3000 4000 100 16"} {
+	for _, want := range []string{"co: steps 33 local 7", "co: entry 1 1 r31 1", "lc: 4000 3000 4000 100 16"} {
 		if !strings.Contains(log, want) {
 			t.Errorf("want %q in:\n%s", want, log)
 		}

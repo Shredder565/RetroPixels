@@ -33,12 +33,13 @@ const (
 )
 
 type axVoice struct {
-	addr     uint32
-	used     bool
-	priority uint32
-	callback uint32
-	user     uint32
-	playing  bool
+	addr       uint32
+	used       bool
+	priority   uint32
+	callback   uint32
+	callbackEx uint32
+	user       uint32
+	playing    bool
 
 	format           uint16
 	loop             bool
@@ -68,7 +69,7 @@ type AX struct {
 	renderer int // 32000 or 48000
 	voices   [axVoices]axVoice
 	frameCB  uint32
-	appCB    uint32
+	appCBs   []uint32 // AXRegisterAppFrameCallback's
 	master   float64
 	frames   uint64 // AX frames mixed
 	start    uint64 // the time base when the first frame was due
@@ -96,14 +97,16 @@ func (m *Machine) audioTick() {
 		a.next = a.start + (a.frames+1)*axTicksPer1000F/1000
 		if a.inited {
 			m.queueCallback(1, a.frameCB)
-			m.queueCallback(1, a.appCB)
+			for _, fn := range a.appCBs {
+				m.queueCallback(1, fn)
+			}
 		}
 	}
 }
 
 // nextAudio is when the next AX frame needs the program (0 = never).
 func (m *Machine) nextAudio() uint64 {
-	if m.audio == nil || !m.audio.inited || m.audio.frameCB == 0 && m.audio.appCB == 0 {
+	if m.audio == nil || !m.audio.inited || m.audio.frameCB == 0 && len(m.audio.appCBs) == 0 {
 		return 0
 	}
 	return m.audio.next
@@ -156,6 +159,7 @@ func (m *Machine) axMix(a *AX) {
 		if !v.playing {
 			m.Mem.Write32(v.addr+axvState, 0)
 		}
+		m.Mem.Write32(v.addr+axvOffsets+12, v.cur)
 	}
 	for i, x := range buf {
 		buf[i] = float32(math.Max(-1, math.Min(1, float64(x))))
@@ -257,7 +261,7 @@ func axRegister(s string) {
 	reg(s, "AXIsInit", func(m *Machine, cpu *CPU, t *Thread) { retBool(cpu, m.ax().inited) })
 	reg(s, "AXQuit", func(m *Machine, cpu *CPU, t *Thread) {
 		a := m.ax()
-		a.inited, a.frameCB, a.appCB = false, 0, 0
+		a.inited, a.frameCB, a.appCBs = false, 0, nil
 		ret(cpu, 0)
 	})
 	reg(s, "AXGetInputSamplesPerSec", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, uint32(m.ax().renderer)) })
@@ -276,14 +280,6 @@ func axRegister(s string) {
 		old := a.frameCB
 		a.frameCB = arg(cpu, 0)
 		ret(cpu, old)
-	})
-	reg(s, "AXRegisterAppFrameCallback", func(m *Machine, cpu *CPU, t *Thread) {
-		m.ax().appCB = arg(cpu, 0)
-		ret(cpu, 0)
-	})
-	reg(s, "AXDeregisterAppFrameCallback", func(m *Machine, cpu *CPU, t *Thread) {
-		m.ax().appCB = 0
-		ret(cpu, 0)
 	})
 	for _, n := range []string{"AXVoiceBegin", "AXVoiceEnd", "AXUserBegin", "AXUserEnd", "AXSetVoiceType",
 		"AXSetVoiceLpf", "AXSetVoiceLpfCoefs", "AXSetVoiceBiquad", "AXSetVoiceBiquadCoefs", "AXSetVoiceRmtOn",
@@ -328,19 +324,6 @@ func axRegister(s string) {
 	})
 
 	// voices
-	reg(s, "AXAcquireVoice", func(m *Machine, cpu *CPU, t *Thread) {
-		m.axAcquire(cpu, arg(cpu, 0), arg(cpu, 1), arg(cpu, 2))
-	})
-	reg(s, "AXAcquireVoiceEx", func(m *Machine, cpu *CPU, t *Thread) {
-		m.axAcquire(cpu, arg(cpu, 0), arg(cpu, 1), arg(cpu, 2))
-	})
-	reg(s, "AXFreeVoice", func(m *Machine, cpu *CPU, t *Thread) {
-		if v := m.axVoiceAt(arg(cpu, 0)); v != nil {
-			v.used, v.playing = false, false
-			m.Mem.Write32(v.addr+axvState, 0)
-		}
-		ret(cpu, 0)
-	})
 	voice := func(name string, fn func(m *Machine, cpu *CPU, v *axVoice)) {
 		reg(s, name, func(m *Machine, cpu *CPU, t *Thread) {
 			v := m.axVoiceAt(arg(cpu, 0))
@@ -370,6 +353,7 @@ func axRegister(s string) {
 		v.loop = mem.Read16(p+2) != 0
 		v.loopOff, v.endOff, v.cur, v.data = mem.Read32(p+4), mem.Read32(p+8), mem.Read32(p+12), mem.Read32(p+16)
 		v.primed, v.frac, v.ended, v.tail = false, 0, false, 0
+		m.axSyncOffsets(v)
 	})
 	voice("AXGetVoiceOffsets", func(m *Machine, cpu *CPU, v *axVoice) {
 		p := arg(cpu, 1)
@@ -383,10 +367,11 @@ func axRegister(s string) {
 	})
 	voice("AXSetVoiceCurrentOffset", func(m *Machine, cpu *CPU, v *axVoice) {
 		v.cur, v.primed, v.ended, v.tail = arg(cpu, 1), false, false, 0
+		m.axSyncOffsets(v)
 	})
-	voice("AXSetVoiceEndOffset", func(m *Machine, cpu *CPU, v *axVoice) { v.endOff = arg(cpu, 1) })
-	voice("AXSetVoiceLoopOffset", func(m *Machine, cpu *CPU, v *axVoice) { v.loopOff = arg(cpu, 1) })
-	voice("AXSetVoiceLoop", func(m *Machine, cpu *CPU, v *axVoice) { v.loop = arg(cpu, 1)&0xffff != 0 })
+	voice("AXSetVoiceEndOffset", func(m *Machine, cpu *CPU, v *axVoice) { v.endOff = arg(cpu, 1); m.axSyncOffsets(v) })
+	voice("AXSetVoiceLoopOffset", func(m *Machine, cpu *CPU, v *axVoice) { v.loopOff = arg(cpu, 1); m.axSyncOffsets(v) })
+	voice("AXSetVoiceLoop", func(m *Machine, cpu *CPU, v *axVoice) { v.loop = arg(cpu, 1)&0xffff != 0; m.axSyncOffsets(v) })
 	voice("AXGetVoiceCurrentOffsetEx", func(m *Machine, cpu *CPU, v *axVoice) { ret(cpu, v.cur) })
 	voice("AXSetVoiceAdpcm", func(m *Machine, cpu *CPU, v *axVoice) {
 		// AXVoiceAdpcm: 16 coefficients, gain, predictor/scale, 2 history samples
@@ -412,7 +397,7 @@ func axRegister(s string) {
 		v.frac = float64(m.Mem.Read16(p+4)) / 65536
 	})
 	voice("AXSetVoiceSrcRatio", func(m *Machine, cpu *CPU, v *axVoice) {
-		v.ratio = math.Max(0, argF(cpu, 0))
+		v.ratio = axSrcRatio(argF(cpu, 0))
 	})
 	voice("AXSetVoiceVe", func(m *Machine, cpu *CPU, v *axVoice) {
 		p := arg(cpu, 1)
@@ -437,38 +422,4 @@ func axRegister(s string) {
 			v.mix[dev][ch] = float64(m.Mem.Read16(p+uint32(ch)*16)) / 0x8000
 		}
 	})
-}
-
-func (m *Machine) axAcquire(cpu *CPU, priority, callback, user uint32) {
-	a := m.ax()
-	var pick *axVoice
-	for i := range a.voices {
-		if !a.voices[i].used {
-			pick = &a.voices[i]
-			break
-		}
-	}
-	if pick == nil {
-		// take the lowest-priority voice below this one
-		for i := range a.voices {
-			v := &a.voices[i]
-			if v.priority < priority && (pick == nil || v.priority < pick.priority) {
-				pick = v
-			}
-		}
-		if pick == nil {
-			ret(cpu, 0)
-			return
-		}
-		if pick.callback != 0 {
-			m.queueCallback(1, pick.callback, pick.addr)
-		}
-	}
-	*pick = axVoice{addr: pick.addr, used: true, priority: priority, callback: callback, user: user, ratio: 1, volume: 1}
-	mem := m.Mem
-	mem.Write32(pick.addr+axvState, 0)
-	mem.Write32(pick.addr+axvPriority, priority)
-	mem.Write32(pick.addr+axvCallback, callback)
-	mem.Write32(pick.addr+axvUser, user)
-	ret(cpu, pick.addr)
 }

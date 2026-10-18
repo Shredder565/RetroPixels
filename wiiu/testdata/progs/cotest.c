@@ -1,7 +1,7 @@
 #include "wiiu.h"
 // Coroutines: two of them taking turns, and the locked cache.
 typedef struct { uint32_t w[0x180 / 4]; } __attribute__((aligned(8))) OSCoroutine;
-void OSInitCoroutine(OSCoroutine *co, void (*entry)(void), void *stack);
+void OSInitCoroutine(OSCoroutine *co, void (*entry)(OSCoroutine *, int), void *stack);
 void OSSwitchCoroutine(OSCoroutine *from, OSCoroutine *to);
 void *LCAlloc(uint32_t size);
 void LCDealloc(void *p);
@@ -13,8 +13,13 @@ void LCStoreDMABlocks(void *mem, const void *lc, uint32_t blocks);
 static OSCoroutine mainCo, workCo;
 static uint8_t stack[0x4000] __attribute__((aligned(16)));
 static volatile int steps;
+static OSCoroutine *entrySelf;
+static int entryArg;
 
-static void worker(void) {
+// OSSwitchCoroutine starts it with (to, 1)
+static void worker(OSCoroutine *self, int one) {
+	entrySelf = self;
+	entryArg = one;
 	for (;;) {
 		steps += 10;
 		OSSwitchCoroutine(&workCo, &mainCo);
@@ -29,6 +34,8 @@ int main(int argc, char **argv) {
 		OSSwitchCoroutine(&mainCo, &workCo);
 	}
 	OSReport("co: steps %d local %d\n", steps, local);
+	// mainCo's r31 field: where it switched to
+	OSReport("co: entry %d %d r31 %d\n", entrySelf == &workCo, entryArg, mainCo.w[(0x18 + 17 * 4) / 4] == (uint32_t)&workCo);
 
 	uint32_t before = LCGetAllocatableSize();
 	uint32_t *lc = LCAlloc(0x1000);

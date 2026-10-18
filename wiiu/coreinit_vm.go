@@ -9,7 +9,39 @@ const (
 	vmBase = 0xA0000000
 	vmSize = 0x20000000
 	vmPage = 0x20000 // the console maps in 128 KB steps
+
+	// physical memory with no other address, for OSMapMemory to use: past
+	// the physical addresses toEffective knows
+	vmPhysBase = 0x90000000
+	vmPhysSize = 0x10000000
 )
+
+// mapFresh backs [va, va+size) with the pages of physical memory at pa in
+// the free physical range, making the pages the first time.
+func (m *Machine) mapFresh(va, pa, size uint32) bool {
+	if va&pageMask != 0 || pa&pageMask != 0 {
+		return false
+	}
+	shared := map[uint32][]byte{} // by physical page, from earlier mappings
+	for v, p := range m.vmMaps {
+		if p >= pa && p-pa < size {
+			if pg := m.Mem.pages[v]; pg != nil {
+				shared[p] = pg
+			}
+		}
+	}
+	for o := uint32(0); o < size; o += pageSize {
+		pg := shared[pa+o]
+		if pg == nil {
+			pg = make([]byte, pageSize)
+		}
+		m.Mem.pages[(va+o)>>pageBits] = pg
+		if m.Mem.jit != nil {
+			m.Mem.jit.pageAdded((va+o)>>pageBits, pg)
+		}
+	}
+	return true
+}
 
 // Alias makes size bytes at addr the same memory as at src (both multiples
 // of the page size), making src's pages if they aren't there yet.
@@ -49,14 +81,13 @@ func init() {
 			m.Mem.Write32(p, vmSize)
 		}
 	})
-	// physical memory not in use: none here (programs map memory they
-	// allocated instead)
+	// physical memory not in use (Cemu reports a range too)
 	reg(c, "OSGetAvailPhysAddrRange", func(m *Machine, cpu *CPU, t *Thread) {
 		if p := arg(cpu, 0); p != 0 {
-			m.Mem.Write32(p, 0)
+			m.Mem.Write32(p, vmPhysBase)
 		}
 		if p := arg(cpu, 1); p != 0 {
-			m.Mem.Write32(p, 0)
+			m.Mem.Write32(p, vmPhysSize)
 		}
 	})
 	reg(c, "OSGetDataPhysAddrRange", func(m *Machine, cpu *CPU, t *Thread) {
@@ -89,7 +120,12 @@ func init() {
 			ret(cpu, 0)
 			return
 		}
-		ok := m.Mem.Alias(va, toEffective(pa), size)
+		var ok bool
+		if pa >= vmPhysBase && pa-vmPhysBase < vmPhysSize && size <= vmPhysBase+vmPhysSize-pa {
+			ok = m.mapFresh(va, pa, size)
+		} else {
+			ok = m.Mem.Alias(va, toEffective(pa), size)
+		}
 		if ok {
 			if m.vmMaps == nil {
 				m.vmMaps = map[uint32]uint32{}
