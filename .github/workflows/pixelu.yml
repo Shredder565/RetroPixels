@@ -1,0 +1,83 @@
+name: PixelU (Wii U) test build
+
+# Builds PixelU, the Wii U emulator in pixelu/ (forked from Cemu, MPL-2.0),
+# for Windows. The result is a workflow artifact only: no release is made.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/wiiu-emulator-urpcen]
+    paths:
+      - "pixelu/**"
+      - ".gitmodules"
+      - ".github/workflows/pixelu.yml"
+
+permissions:
+  contents: read
+
+env:
+  VCPKG_ROOT: "${{ github.workspace }}/pixelu/dependencies/vcpkg"
+  VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}/vcpkg-cache,readwrite"
+  VCPKG_FORCE_DOWNLOADED_BINARIES: true
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: "3.29.0"
+
+      - name: Restore vcpkg package cache
+        uses: actions/cache/restore@v4
+        with:
+          path: vcpkg-cache
+          key: vcpkg-win-${{ hashFiles('pixelu/vcpkg.json', 'pixelu/dependencies/vcpkg_overlay_ports*/**') }}-${{ github.run_id }}
+          restore-keys: vcpkg-win-${{ hashFiles('pixelu/vcpkg.json', 'pixelu/dependencies/vcpkg_overlay_ports*/**') }}-
+
+      - name: Bootstrap vcpkg
+        working-directory: pixelu
+        run: ./dependencies/vcpkg/bootstrap-vcpkg.bat
+
+      - name: Configure
+        working-directory: pixelu
+        run: |
+          mkdir -p build
+          cd build
+          cmake .. -DCMAKE_BUILD_TYPE=release -DVCPKG_INSTALL_OPTIONS="--clean-after-build"
+
+      - name: Save vcpkg package cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: vcpkg-cache
+          key: vcpkg-win-${{ hashFiles('pixelu/vcpkg.json', 'pixelu/dependencies/vcpkg_overlay_ports*/**') }}-${{ github.run_id }}
+
+      - name: Build
+        working-directory: pixelu/build
+        run: cmake --build . --config release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $out = "PixelU"
+          New-Item -ItemType Directory -Force $out, "$out/portable" | Out-Null
+          Copy-Item pixelu/bin/PixelU_release.exe "$out/PixelU.exe"
+          Copy-Item -Recurse pixelu/bin/resources "$out/resources"
+          Copy-Item -Recurse pixelu/bin/gameProfiles "$out/gameProfiles"
+          Copy-Item pixelu/LICENSE.txt "$out/LICENSE-MPL-2.0.txt"
+          "PixelU keeps its settings, keys and saves in this folder." | Out-File "$out/portable/README.txt"
+          $sha = git rev-parse --short HEAD
+          "PixelU test build (Wii U, based on Cemu; not a release)`r`nBuilt $(Get-Date -Format yyyy-MM-dd) from branch claude/wiiu-emulator-urpcen ($sha)`r`nSource: https://github.com/shredder565/retropixels/tree/claude/wiiu-emulator-urpcen/pixelu`r`nLicense: Mozilla Public License 2.0 (LICENSE-MPL-2.0.txt). Based on Cemu: https://github.com/cemu-project/Cemu" | Out-File "$out/VERSION.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PixelU-windows-x64
+          path: PixelU
+          retention-days: 14
