@@ -241,6 +241,7 @@ func (a *app) buildMenu() {
 	a.apGameMenu()
 	appendMenu(a.menu, mfPopup, a.gameMenu, "&Game")
 	a.addDolphinMenu()
+	a.addPixelUMenu()
 	a.addMameMenu()
 
 	a.optMenu = call(pCreatePopupMenu)
@@ -312,6 +313,7 @@ func (a *app) updateMenus() {
 	enableItem(a.menu, cmdRecord, on || a.recOn)
 	a.uiUpdateMenus()
 	a.dolUpdateMenus()
+	a.pixeluUpdateMenus()
 	a.mameUpdateMenus()
 	a.apUpdateMenus()
 }
@@ -905,6 +907,8 @@ func (a *app) command(id int) {
 		a.dipCommand(id)
 	case id >= cmdDolFirst && id <= cmdDolLast:
 		a.dolCommand(id)
+	case id >= cmdPixelUFirst && id <= cmdPixelULast:
+		a.pixeluCommand(id)
 	case id >= cmdMameFirst && id <= cmdMameLast:
 		a.mameCommand(id)
 	case id == cmdAPStatus || id == cmdAPHelp:
@@ -940,6 +944,9 @@ func (a *app) volume() float32 {
 
 func (a *app) openPath(path string) {
 	if a.mameOpenPath(path) {
+		return
+	}
+	if a.pixeluOpenPath(path) {
 		return
 	}
 	if a.dolOpenPath(path) {
