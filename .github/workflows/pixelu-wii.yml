@@ -17,6 +17,7 @@ on:
 
 permissions:
   contents: read
+  actions: write # to start the RetroPixels bundle once this build is done
 
 concurrency:
   group: pixelu-wii-${{ github.ref }}
@@ -165,3 +166,8 @@ jobs:
           name: PixelU-Wii-windows-x64
           path: package/
           retention-days: 14
+
+      - name: Make the RetroPixels download with this build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run bundle-test.yml -R "${{ github.repository }}" --ref "${{ github.ref_name }}"

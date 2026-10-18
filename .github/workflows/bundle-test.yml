@@ -1,0 +1,104 @@
+name: RetroPixels with PixelU (test build)
+
+# One download with everything: RetroPixels.exe and RetroPixels-Native.exe,
+# built from this commit, with PixelU inside (the Wii U engine and the
+# GameCube / Wii engine, from their latest successful builds on this branch)
+# and the built-in MAME. A workflow artifact only: no release is made.
+# It runs on each push, and again when a PixelU engine build finishes (those
+# workflows start it, since workflow_run only works from the default branch).
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/wiiu-emulator-urpcen]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: bundle-test
+  cancel-in-progress: true
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    env:
+      BRANCH: claude/wiiu-emulator-urpcen
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BRANCH }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build RetroPixels
+        run: |
+          v=$(sed -n 's/.*appVersion = "\(.*\)"/\1/p' main.go)-test.${{ github.run_number }}
+          echo "VER=$v" >> "$GITHUB_ENV"
+          echo "DIR=dist/RetroPixels-$v" >> "$GITHUB_ENV"
+          sh tools/make-winres.sh && sh tools/make-winres-native.sh
+          export GOOS=windows GOARCH=amd64 CGO_ENABLED=0
+          mkdir -p "dist/RetroPixels-$v"
+          go build -trimpath -ldflags "-s -w -H windowsgui" -o "dist/RetroPixels-$v/RetroPixels.exe" .
+          go build -trimpath -ldflags "-s -w -H windowsgui -X main.version=$v" -o "dist/RetroPixels-$v/RetroPixels-Native.exe" ./cmd/retropixels-native
+
+      # The newest successful builds of PixelU's two engines on this branch.
+      - name: PixelU (Wii U and GameCube / Wii engines)
+        run: |
+          get() { # workflow file, artifact name
+            id=$(gh run list -R "$GITHUB_REPOSITORY" --workflow "$1" --branch "$BRANCH" --status success -L 1 --json databaseId -q '.[0].databaseId')
+            [ -n "$id" ] || { echo "no successful run of $1"; exit 1; }
+            sha=$(gh run view -R "$GITHUB_REPOSITORY" "$id" --json headSha -q .headSha)
+            echo "$1: run $id ($sha)"
+            echo "$1 $id ${sha:0:7}" >> engines.txt
+            gh run download -R "$GITHUB_REPOSITORY" "$id" -n "$2" -D "eng/$2"
+          }
+          get pixelu.yml PixelU-windows-x64
+          get pixelu-wii.yml PixelU-Wii-windows-x64
+          mkdir -p "$DIR/PixelU"
+          cp -r eng/PixelU-windows-x64/PixelU/. "$DIR/PixelU/"
+          cp -r eng/PixelU-Wii-windows-x64/PixelU/wii "$DIR/PixelU/wii"
+          test -f "$DIR/PixelU/PixelU.exe" && test -f "$DIR/PixelU/wii/PixelU-Wii.exe"
+
+      - name: Built-in MAME
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: go run ./tools/bundlemame -dir "$DIR/MAME" -source dist/mame-source.tar.gz
+
+      - name: Package
+        run: |
+          cp README.txt CHANGELOG.txt "$DIR/"
+          cp pixelu/LICENSE.txt "$DIR/LICENSE-MPL-2.0.txt"
+          cp wiiu/testdata/demo.rpx "$DIR/RetroPixels Wii U demo.rpx"
+          {
+            echo "RetroPixels $VER (test build, not a release)"
+            echo "Built $(date -u +%F) from branch $BRANCH ($(git rev-parse --short HEAD))"
+            echo
+            echo "Everything plays inside RetroPixels. Its engines are in the folders next to it:"
+            echo "- PixelU\\PixelU.exe: Wii U (based on Cemu, Mozilla Public License 2.0, LICENSE-MPL-2.0.txt)"
+            echo "- PixelU\\wii\\PixelU-Wii.exe: GameCube and Wii (based on Dolphin, GPL-2.0-or-later, PixelU\\wii\\license.txt)"
+            echo "- MAME: arcade games (the MAME team's official release, GPL-2.0-or-later)"
+            echo "Engine builds used:"
+            sed 's/^/  /' engines.txt
+            echo
+            echo "Source: https://github.com/$GITHUB_REPOSITORY/tree/$BRANCH"
+            echo "PixelU-Wii is Dolphin 2609a (https://github.com/dolphin-emu/dolphin/tree/2609a) with the changes in pixelu/wii/patches of that source."
+            echo "No games, keys, BIOS or firmware are included."
+          } > "$DIR/VERSION.txt"
+          (cd dist && zip -qr "RetroPixels-$VER.zip" "RetroPixels-$VER")
+          ls -la dist
+          cat "$DIR/VERSION.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RetroPixels-${{ env.VER }}
+          path: dist/RetroPixels-${{ env.VER }}.zip
+          compression-level: 0
+          retention-days: 14
