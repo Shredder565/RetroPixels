@@ -42,6 +42,9 @@ public:
 	// PixelU: RetroPixels game recording (see Cafe/HW/Latte/Core/LatteRecorder.h)
 	static std::optional<fs::path> GetRPRecordPath() { return s_rp_record_path; }
 	static std::optional<fs::path> GetRPFFmpegPath() { return s_rp_ffmpeg_path; }
+	// PixelU: RetroPixels shows the game inside its own window (see gui/wxgui/RPEmbed.h)
+	static bool RPEmbedEnabled() { return s_rp_embed; }
+	static std::optional<uint64> GetRPParentWindow() { return s_rp_parent_window; }
 
 	static uint32 GetPPCRecLowerAddr() { return ppcRec_limitLowerAddr; };
 	static uint32 GetPPCRecUpperAddr() { return ppcRec_limitUpperAddr; };
@@ -71,6 +74,8 @@ private:
 
 	inline static std::optional<fs::path> s_rp_record_path{};
 	inline static std::optional<fs::path> s_rp_ffmpeg_path{};
+	inline static bool s_rp_embed = false;
+	inline static std::optional<uint64> s_rp_parent_window{};
 
 	// for recompiler debugging
 	inline static uint32 ppcRec_limitLowerAddr{};

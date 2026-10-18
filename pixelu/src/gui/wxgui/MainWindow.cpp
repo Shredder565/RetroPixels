@@ -17,6 +17,7 @@
 //wxgui + misc.
 #include "wxgui.h"
 #include "wxCemuConfig.h"
+#include "RPEmbed.h"
 #include "interface/WindowSystem.h"
 #include "wxHelper.h"
 #include "helpers/wxHelpers.h"
@@ -296,7 +297,7 @@ private:
 };
 
 MainWindow::MainWindow()
-	: wxFrame(nullptr, wxID_ANY, GetInitialWindowTitle(), wxDefaultPosition, wxSize(1280, 720), wxMINIMIZE_BOX | wxMAXIMIZE_BOX | wxSYSTEM_MENU | wxCAPTION | wxCLOSE_BOX | wxCLIP_CHILDREN | wxRESIZE_BORDER)
+	: wxFrame(nullptr, wxID_ANY, GetInitialWindowTitle(), wxDefaultPosition, wxSize(1280, 720), RPEmbed::FrameStyle(wxMINIMIZE_BOX | wxMAXIMIZE_BOX | wxSYSTEM_MENU | wxCAPTION | wxCLOSE_BOX | wxCLIP_CHILDREN | wxRESIZE_BORDER))
 {
 #ifdef __WXMAC__
 	// Not necessary to set wxApp::s_macExitMenuItemId as automatically handled
@@ -401,6 +402,8 @@ void MainWindow::CreateGameListAndStatusBar()
 {
     if(m_main_panel)
         return; // already displayed
+    if(RPEmbed::Enabled())
+        return; // PixelU: only the game picture
     m_main_panel = new wxPanel(this);
     auto* sizer = new wxBoxSizer(wxVERTICAL);
     // game list
@@ -433,6 +436,8 @@ void MainWindow::DestroyGameListAndStatusBar()
 
 wxString MainWindow::GetInitialWindowTitle()
 {
+	if (RPEmbed::Enabled())
+		return EMULATOR_NAME;
 	return BUILD_VERSION_WITH_NAME_STRING;
 }
 
@@ -1309,10 +1314,10 @@ void MainWindow::LoadSettings()
 	if(false && config.check_update) // PixelU: Cemu updater disabled
 		m_update_available = CemuUpdateWindow::IsUpdateAvailableAsync();
 
-	if (config.window_position != Vector2i{ -1,-1 })
+	if (config.window_position != Vector2i{ -1,-1 } && !RPEmbed::Enabled()) // PixelU: the host window decides where and how big
 		this->SetPosition({ config.window_position.x, config.window_position.y });
 
-	if (config.window_size.x > 0 && config.window_size.y > 0)
+	if (config.window_size.x > 0 && config.window_size.y > 0 && !RPEmbed::Enabled())
 	{
 		this->SetSize({ config.window_size.x, config.window_size.y });
 
@@ -1342,6 +1347,8 @@ void MainWindow::LoadSettings()
 
 void MainWindow::SaveSettings()
 {
+	if (RPEmbed::Enabled())
+		return; // PixelU: keep the window layout of normal (not embedded) use
 	auto lock = GetConfigHandle().Lock();
 	auto& config = GetWxGUIConfig();
 
@@ -1418,6 +1425,10 @@ void MainWindow::OnMouseLeft(wxMouseEvent& event)
 	instance.m_main_mouse.position = { physPos.x, physPos.y };
 	if (event.ButtonDown(wxMOUSE_BTN_LEFT))
 		instance.m_main_mouse.left_down_toggle = true;
+
+	// PixelU: docked into another window, a click is how the game gets the keyboard back
+	if (RPEmbed::Enabled() && event.ButtonDown() && m_render_canvas && !m_render_canvas->HasFocus())
+		m_render_canvas->SetFocus();
 
 	event.Skip();
 }
@@ -1752,6 +1763,8 @@ void MainWindow::OnMouseWheel(wxMouseEvent& event)
 
 void MainWindow::SetFullScreen(bool state)
 {
+	if (RPEmbed::Enabled())
+		return; // PixelU: the host window does fullscreen
 	// only update config entry if we dont't have launch parameters
 	if (!LaunchSettings::FullscreenEnabled().has_value())
 	{
@@ -1801,7 +1814,7 @@ void MainWindow::EndEmulation() // unfinished - memory leaks and crashes after r
 
 void MainWindow::SetMenuVisible(bool state)
 {
-	if (m_menu_visible == state)
+	if (m_menu_visible == state || RPEmbed::Enabled())
 		return;
 
 #if !BOOST_OS_MACOS // on macOS hiding the menu seems to cause issues (see #609)
@@ -2404,8 +2417,9 @@ void MainWindow::RecreateMenu()
 
 	m_menuBar->Append(helpMenu, _("&Help"));
 
-	SetMenuBar(m_menuBar);
-	m_menu_visible = true;
+	// PixelU: with --rp-embed the menu is built (other code uses its items) but never shown
+	SetMenuBar(RPEmbed::Enabled() ? nullptr : m_menuBar);
+	m_menu_visible = !RPEmbed::Enabled();
 
 	if (m_game_launched)
 	{
@@ -2513,5 +2527,7 @@ void MainWindow::OnRequestGameExit(wxCommandEvent& event)
 
 bool MainWindow::FullscreenEnabled() const
 {
+	if (RPEmbed::Enabled())
+		return false; // PixelU: -f is for the host window then
 	return LaunchSettings::FullscreenEnabled().value_or(GetWxGUIConfig().fullscreen);
 }

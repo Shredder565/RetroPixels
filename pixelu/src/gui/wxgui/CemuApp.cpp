@@ -11,6 +11,7 @@
 #include "config/ActiveSettings.h"
 #include "config/LaunchSettings.h"
 #include "wxgui/GettingStartedDialog.h"
+#include "wxgui/RPEmbed.h"
 #include "input/InputManager.h"
 #include "input/api/SDL/SDLControllerProvider.h"
 #include "wxgui/helpers/wxHelpers.h"
@@ -316,9 +317,12 @@ bool CemuApp::OnInit()
 
 	if (isFirstStart)
 	{
-		// show the getting started dialog
-		GettingStartedDialog dia(nullptr);
-		dia.ShowModal();
+		// show the getting started dialog (PixelU: not when RetroPixels shows the game in its window)
+		if (!RPEmbed::Enabled())
+		{
+			GettingStartedDialog dia(nullptr);
+			dia.ShowModal();
+		}
 		// make sure config is created. Gfx pack UI and input UI may create it earlier already, but we still want to update it
 		GetConfigHandle().Save();
 		// create mlc, on failure the user can quit here. So do this after the Getting Started dialog
@@ -372,6 +376,7 @@ bool CemuApp::OnInit()
 	Bind(wxEVT_ACTIVATE_APP, &CemuApp::ActivateApp, this);
 
 	m_mainFrame = new MainWindow();
+	RPEmbed::AttachToParent(m_mainFrame); // PixelU: --rp-parent
 
 	std::unique_lock lock(g_mutex);
 	g_window_info.app_active = true;
@@ -479,6 +484,12 @@ int CemuApp::FilterEvent(wxEvent& event)
 	{
 		const auto& activate_event = (wxActivateEvent&)event;
 		if(!activate_event.GetActive())
+			g_window_info.set_keystatesup();
+	}
+	else if(event.GetEventType() == wxEVT_KILL_FOCUS && RPEmbed::Enabled())
+	{
+		// PixelU: docked into another app's window there is no app deactivation when it loses the keyboard
+		if(((wxFocusEvent&)event).GetWindow() == nullptr)
 			g_window_info.set_keystatesup();
 	}
 

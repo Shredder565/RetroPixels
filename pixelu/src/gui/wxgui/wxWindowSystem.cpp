@@ -27,6 +27,7 @@
 #include "config/CemuConfig.h"
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Cafe/CafeSystem.h"
+#include "config/LaunchSettings.h"
 
 WindowSystem::WindowInfo g_window_info{};
 
@@ -56,8 +57,14 @@ void WindowSystem::Create()
 #endif
 }
 
-void WindowSystem::ShowErrorDialog(std::string_view message, std::string_view title, std::optional<WindowSystem::ErrorCategory> /*errorId*/)
+void WindowSystem::ShowErrorDialog(std::string_view message, std::string_view title, std::optional<WindowSystem::ErrorCategory> errorCategory)
 {
+	if (errorCategory == WindowSystem::ErrorCategory::GRAPHIC_PACKS && LaunchSettings::RPEmbedEnabled())
+	{
+		// PixelU: no extra window next to the docked game for this one, the game keeps running
+		cemuLog_log(LogType::Force, "{}", message);
+		return;
+	}
 	wxString caption;
 	if (title.empty())
 		caption = wxASCII_STR(wxMessageBoxCaptionStr);
@@ -73,6 +80,22 @@ WindowSystem::WindowInfo& WindowSystem::GetWindowInfo()
 
 void WindowSystem::UpdateWindowTitles(bool isIdle, bool isLoading, double fps)
 {
+	if (LaunchSettings::RPEmbedEnabled())
+	{
+		// PixelU: "PixelU - <game name>", nothing else (RetroPixels shows it)
+		std::string title = EMULATOR_NAME;
+		if (!isIdle)
+		{
+			const std::string name = CafeSystem::GetForegroundTitleName();
+			if (!name.empty())
+				title.append(" - ").append(name);
+		}
+		std::shared_lock lock(g_mutex);
+		if (g_mainFrame)
+			g_mainFrame->AsyncSetTitle(title);
+		return;
+	}
+
 	std::string windowText;
 	windowText = BUILD_VERSION_WITH_NAME_STRING;
 

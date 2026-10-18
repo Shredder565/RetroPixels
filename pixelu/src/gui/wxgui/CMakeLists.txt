@@ -96,6 +96,8 @@ add_library(CemuWxGui STATIC
   MemorySearcherTool.h
   PadViewFrame.cpp
   PadViewFrame.h
+  RPEmbed.cpp
+  RPEmbed.h
   TitleManager.cpp
   TitleManager.h
   wxCemuConfig.cpp

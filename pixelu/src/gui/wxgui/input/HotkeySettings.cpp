@@ -5,6 +5,7 @@
 #include "input/InputManager.h"
 #include "HotkeySettings.h"
 #include "MainWindow.h"
+#include "wxgui/RPEmbed.h"
 
 #include <wx/app.h>
 #include <wx/clipbrd.h>
@@ -210,6 +211,13 @@ void HotkeySettings::Init(MainWindow* mainWindowFrame)
 		 }},
 #endif
 	});
+
+	if (RPEmbed::Enabled())
+	{
+		// PixelU: the window belongs to RetroPixels then: hotkeys neither switch fullscreen nor quit the game
+		for (sHotkeyCfg* hotkey : {&s_cfgHotkeys.toggleFullscreen, &s_cfgHotkeys.toggleFullscreenAlt, &s_cfgHotkeys.exitFullscreen, &s_cfgHotkeys.exitApplication})
+			s_cfgHotkeyToFuncMap[hotkey] = [](void) {};
+	}
 
 	s_keyboardHotkeyToFuncMap.reserve(s_cfgHotkeyToFuncMap.size());
 	for (const auto& [cfgHotkey, func] : s_cfgHotkeyToFuncMap)

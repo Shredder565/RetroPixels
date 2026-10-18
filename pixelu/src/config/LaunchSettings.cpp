@@ -82,7 +82,9 @@ std::optional<int> LaunchSettings::HandleCommandline(const std::vector<std::wstr
 		("open-debugger", po::value<bool>()->implicit_value(true), "Open the PPC debugger window on startup")
 
 		("rp-record", po::wvalue<std::wstring>(), "RetroPixels: record the game's TV picture and audio into this folder (needs --rp-ffmpeg)")
-		("rp-ffmpeg", po::wvalue<std::wstring>(), "RetroPixels: full path of the ffmpeg executable used for recording");
+		("rp-ffmpeg", po::wvalue<std::wstring>(), "RetroPixels: full path of the ffmpeg executable used for recording")
+		("rp-embed", "RetroPixels: a window that shows only the game, for docking into another window; no menus, game list or optional dialogs")
+		("rp-parent", po::value<std::string>(), "RetroPixels: (Windows) show the game as a child of this window (HWND, decimal or 0x hex), filling it; implies --rp-embed");
 
 	po::options_description hidden{ "Hidden options" };
 	hidden.add_options()
@@ -185,6 +187,30 @@ std::optional<int> LaunchSettings::HandleCommandline(const std::vector<std::wstr
 			};
 			s_rp_record_path = getPathParam("rp-record");
 			s_rp_ffmpeg_path = getPathParam("rp-ffmpeg");
+		}
+
+		if (vm.count("rp-embed"))
+			s_rp_embed = true;
+		if (vm.count("rp-parent"))
+		{
+			std::string tmp = vm["rp-parent"].as<std::string>();
+			if (tmp.size() > 0 && tmp.front() == '=')
+				tmp.erase(tmp.begin() + 0);
+			try
+			{
+				const bool isHex = tmp.size() > 2 && tmp[0] == '0' && (tmp[1] == 'x' || tmp[1] == 'X');
+				size_t used = 0;
+				const uint64 hwnd = std::stoull(isHex ? tmp.substr(2) : tmp, &used, isHex ? 16 : 10);
+				if (hwnd != 0 && used == (isHex ? tmp.size() - 2 : tmp.size()))
+					s_rp_parent_window = hwnd;
+				else
+					std::cerr << "Invalid --rp-parent window handle\n";
+			}
+			catch (const std::exception&)
+			{
+				std::cerr << "Invalid --rp-parent window handle\n";
+			}
+			s_rp_embed = true;
 		}
 
 		if (vm.count("account"))
