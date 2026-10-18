@@ -1,5 +1,7 @@
 package wiiu
 
+import "math"
+
 // More library calls games make at start-up that need little or no work
 // here: online services (offline), add-on content (none), sound effects
 // RetroPixels doesn't run, and small coreinit helpers.
@@ -83,4 +85,64 @@ func init() {
 	// the error viewer
 	set("erreula", zero, "ErrEulaGetSelectButtonNumError__3RplFv", "ErrEulaJump__3RplFPCcUi",
 		"ErrEulaIsDecideSelectButtonError__3RplFv")
+
+	// no Wii Remote speaker here
+	m1 := func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0xffffffff) }
+	set("padscore", zero, "WPADGetSensorBarPosition", "WPADIsSpeakerEnabled", "WPADGetSpeakerVolume",
+		"WPADSetSpeakerVolume", "WPADCanSendStreamData")
+	set("padscore", m1, "WPADControlSpeaker", "WPADSendStreamData")
+	for _, s := range []string{"snd_core", "sndcore2"} {
+		set(s, zero, "AXRegisterExceedCallback", "AXSetDspLoadLimit", "AXGetDspLoadLimit", "AXSetAuxAReturnVolume",
+			"AXSetAuxBReturnVolume", "AXSetAuxCReturnVolume", "AXGetDspCycles", "AXGetMaxDspCycles")
+		// (cutoff, *a0, *b0): a one-pole low-pass filter's coefficients
+		reg(s, "AXComputeLpfCoefs", func(m *Machine, cpu *CPU, t *Thread) {
+			c := 2 - math.Cos(2*math.Pi*float64(arg(cpu, 0))/32000)
+			b := c - math.Sqrt(c*c-1)
+			if p := arg(cpu, 1); p != 0 {
+				m.Mem.Write16(p, uint16(int16((1-b)*32767)))
+			}
+			if p := arg(cpu, 2); p != 0 {
+				m.Mem.Write16(p, uint16(int16(b*32767)))
+			}
+		})
+	}
+	for _, s := range []string{"snd_user", "snduser2"} {
+		set(s, one, "AXFXMultiChReverbParametersPreset", "AXFXReverbHiParametersPreset", "AXFXReverbStdParametersPreset")
+	}
+	set("gx2", none, "GX2SetVerifyCallback", "GX2RSetDebugOptions", "GX2SetDebugMode", "GX2SetVerifyLevel")
+
+	set("padscore", none, "KPADReset")
+	set("nn_act", zero, "IsNetworkAccountEx__Q2_2nn3actFUc")
+	// the account's UUID: any fixed 16 bytes
+	uuid := func(m *Machine, cpu *CPU, t *Thread) {
+		if p := arg(cpu, 0); p != 0 {
+			m.Mem.WriteBytes(p, []byte("RetroPixelsWiiU1"))
+		}
+		ret(cpu, 0)
+	}
+	set("nn_act", uuid, "GetUuid__Q2_2nn3actFP7ACTUuid", "GetUuidEx__Q2_2nn3actFP7ACTUuidUc",
+		"GetUuidEx__Q2_2nn3actFP7ACTUuidUcUi")
+
+	set("padscore", zero, "KPADSetControlDpdCallback", "KPADSetControlMplsCallback", "KPADSetSamplingCallback",
+		"KPADSetConnectCallback", "WPADDisableBluetooth", "WPADEnableBluetooth")
+	// no USB keyboard
+	k := "nsyskbd"
+	set(k, zero, "KBDInit", "KBDInitRegionJP", "KBDInitRegionUS", "KBDInitRegionEU", "KBDSetCountry", "KBDTeardown",
+		"KBDSetAttachCallback", "KBDSetKeyCallback")
+	reg(k, "KBDGetChannelStatus", func(m *Machine, cpu *CPU, t *Thread) {
+		if p := arg(cpu, 1); p != 0 {
+			m.Mem.Write32(p, 0) // nothing attached
+		}
+		ret(cpu, 0)
+	})
+	set("vpad", zero, "VPADIsEnableGyroZeroPlay", "VPADIsEnableGyroZeroDrift", "VPADIsEnableGyroDirRevise",
+		"VPADIsEnableGyroAccRevise")
+	for _, s := range []string{"snd_core", "sndcore2"} {
+		reg(s, "AXGetDRCVSMode", func(m *Machine, cpu *CPU, t *Thread) {
+			if p := arg(cpu, 0); p != 0 {
+				m.Mem.Write32(p, 0)
+			}
+			ret(cpu, 0)
+		})
+	}
 }

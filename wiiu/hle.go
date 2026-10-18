@@ -118,7 +118,9 @@ func (m *Machine) dataExport(lib, name string) uint32 {
 		if hleFuncs[lib][name] != nil {
 			def = hleDataDef{4, func(m *Machine, a uint32) { m.Mem.Write32(a, m.thunk(lib, name)) }}
 		} else {
-			m.logf("not yet in RetroPixels: data %s", key)
+			if !isSectionSym(name) {
+				m.logf("not yet in RetroPixels: data %s", key)
+			}
 			def = hleDataDef{0x100, nil}
 		}
 	}
@@ -136,6 +138,9 @@ func (m *Machine) Import(lib, name string, data bool) (uint32, error) {
 	if mod := m.moduleNamed(lib); mod != nil {
 		if a, ok := mod.Exports[name]; ok {
 			return a, nil
+		}
+		if isSectionSym(name) {
+			return m.dataExport(lib, name), nil
 		}
 		return 0, fmt.Errorf("%s has no %s", lib, name)
 	}
@@ -156,6 +161,9 @@ func (m *Machine) Import(lib, name string, data bool) (uint32, error) {
 		if mod != nil {
 			if a, ok := mod.Exports[name]; ok {
 				return a, nil
+			}
+			if isSectionSym(name) {
+				return m.dataExport(lib, name), nil
 			}
 			return 0, fmt.Errorf("%s has no %s", lib, name)
 		}
@@ -185,7 +193,9 @@ func (m *Machine) callHLE(c *CPU, n uint32) {
 	if t != nil {
 		t.blocked = false
 	}
+	args := [4]uint32{c.GPR[3], c.GPR[4], c.GPR[5], c.GPR[6]}
 	e.fn(m, c, t)
+	m.noteCall(n, c, args)
 	if t != nil && t.blocked {
 		c.PC -= 4 // run this call again when the thread wakes
 		c.Stop()
@@ -472,4 +482,10 @@ func init() {
 		cpu.LR = c.lr
 		c.then(m, cpu, t, cpu.GPR[3])
 	})
+}
+
+// isSectionSym: a symbol naming an import section (.fimport_x, .dimport_x),
+// which RPLs refer to but nothing reads.
+func isSectionSym(name string) bool {
+	return strings.HasPrefix(name, ".fimport_") || strings.HasPrefix(name, ".dimport_")
 }

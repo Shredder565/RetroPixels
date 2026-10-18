@@ -279,25 +279,37 @@ func (g *Latte) copyToScan(cb cbDesc, w, h, target uint32) {
 			g.hw.flush(surfRange(&cb.lay, cb.slice))
 		}
 	}
+	// a size past the buffer's own is a mistake: keep to the buffer
+	w, h = min(w, cb.lay.Pitch), min(h, cb.lay.Height)
+	if w == 0 || h == 0 {
+		return
+	}
 	frame := sb.W * sb.H * 4
 	dst := sb.Addr + sb.Back*frame
 	row := make([]byte, sb.W*4)
 	srcRow := make([]uint32, w)
-	addrs := make([]uint32, w)
 	buf := make([]byte, 16)
 	lastSY := ^uint32(0)
 	xs := make([]uint32, sb.W) // the source column of each scan column
 	for x := range xs {
 		xs[x] = uint32(x) * w / sb.W
 	}
+	// only the source columns the scan buffer shows are read (a big buffer
+	// shrunk to fit costs no more than a small one)
+	cols := make([]uint32, 0, sb.W)
+	for x, sx := range xs {
+		if x == 0 || sx != xs[x-1] {
+			cols = append(cols, sx)
+		}
+	}
 	f := cb.format & 0x3f
 	for y := uint32(0); y < sb.H; y++ {
 		sy := y * h / sb.H
 		if sy != lastSY && host != nil {
 			lastSY = sy
-			for x := range srcRow {
-				if uint32(x) < hostW && sy < hostH {
-					srcRow[x] = host[sy*hostW+uint32(x)]
+			for _, x := range cols {
+				if x < hostW && sy < hostH {
+					srcRow[x] = host[sy*hostW+x]
 				} else {
 					srcRow[x] = 0
 				}
@@ -305,8 +317,8 @@ func (g *Latte) copyToScan(cb cbDesc, w, h, target uint32) {
 		}
 		if sy != lastSY {
 			lastSY = sy
-			cb.lay.rowAddrs(0, sy, cb.slice, addrs)
-			for x, a := range addrs {
+			for _, x := range cols {
+				a := cb.lay.addr(x, sy, cb.slice)
 				if f == fmt8_8_8_8 && cb.kind != kSnorm && cb.kind != kUint && cb.kind != kSint {
 					srcRow[x] = m.Mem.Read32(a) // bytes R, G, B, A
 					continue

@@ -74,6 +74,7 @@ type Module struct {
 	TextHi   uint32
 	DataLo   uint32
 	DataHi   uint32
+	LoadHi   uint32 // the end of its loader sections (at LoaderBase and up)
 	TLSAddr  uint32 // the TLS template
 	TLSSize  uint32
 	TLSIndex uint32
@@ -296,6 +297,7 @@ func LoadRPL(mem *Memory, b []byte, name string, plan LoadPlan, imp Importer, tr
 		end := s.newAddr + s.size
 		switch {
 		case s.addr >= LoaderBase:
+			mod.LoadHi = max(mod.LoadHi, end)
 		case s.addr >= DataBase:
 			mod.DataLo = min(mod.DataLo, s.newAddr)
 			mod.DataHi = max(mod.DataHi, end)

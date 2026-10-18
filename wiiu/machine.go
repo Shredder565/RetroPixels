@@ -107,6 +107,8 @@ type Machine struct {
 	flockWord          uint32               // the C library's file lock (stubs_more.go)
 	hleCalls           []uint32             // how often each library call was made (for the log)
 	hleLast            uint32               // the latest library call (for the log)
+	recent             [recentCalls]callRec // the last library calls (diag.go)
+	recentPos          int
 	apertures          map[uint32]*aperture // open tiling apertures by handle
 	apAddrs            []uint32             // the last aperture surface's element addresses
 	apAddrsKey         apertureKey
@@ -283,11 +285,11 @@ func (m *Machine) loadModule(b []byte, name string, relocate bool) (*Module, err
 		for _, mod := range m.Modules {
 			textEnd = max(textEnd, mod.TextHi)
 			dataEnd = max(dataEnd, mod.DataHi)
+			loadEnd = max(loadEnd, mod.LoadHi)
 		}
-		loadEnd += uint32(len(m.Modules)) * 0x100000
 		plan.TextAt = (textEnd + 0xfff) &^ 0xfff
 		plan.DataAt = (dataEnd + 0xfff) &^ 0xfff
-		plan.LoadAt = loadEnd
+		plan.LoadAt = (loadEnd + 0xffff) &^ 0xffff
 	}
 	var placed *Module
 	plan.Placed = func(mod *Module) {
@@ -518,6 +520,8 @@ func (m *Machine) crashReport(c *CPU, t *Thread) error {
 		b.WriteString(" in " + s)
 	}
 	fmt.Fprintf(&b, "\nLR %08X%s", c.LR, m.where(c.LR))
+	m.logf("crash details:\n%s\n%s\n%s\nthe last library calls:\n%s", registers(c.Context),
+		m.CodeAt(c.Err.(*CPUError).PC), m.CodeAt(c.LR), m.RecentCalls())
 	return errors.New(b.String())
 }
 

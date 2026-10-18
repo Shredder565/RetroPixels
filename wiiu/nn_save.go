@@ -114,6 +114,20 @@ func init() {
 	// (title ID, file name, out, out size): the path of a file in a system
 	// data title, such as the Mii parts. Those titles aren't here, so the
 	// file won't open, but the program gets a proper path to try.
+	// (title ID, file name, out, out size): a file in another title's
+	// shared save data, which isn't here either
+	reg(s, "SAVEGetSharedSaveDataPath", func(m *Machine, cpu *CPU, t *Thread) {
+		id := arg64(cpu, 0)
+		p := fmt.Sprintf("/vol/storage_mlc01/usr/save/%08x/%08x/user/common/%s", uint32(id>>32), uint32(id),
+			m.Mem.String(arg(cpu, 2), 256))
+		if out, size := arg(cpu, 3), arg(cpu, 4); out != 0 && size > 0 {
+			if uint32(len(p)) >= size {
+				p = p[:size-1]
+			}
+			m.Mem.WriteBytes(out, append([]byte(p), 0))
+		}
+		ret(cpu, fsOK)
+	})
 	reg(s, "SAVEGetSharedDataTitlePath", func(m *Machine, cpu *CPU, t *Thread) {
 		id := arg64(cpu, 0)
 		p := fmt.Sprintf("/vol/storage_mlc01/sys/title/%08x/%08x/content/%s", uint32(id>>32), uint32(id),

@@ -159,3 +159,15 @@ func TestVirtualMemoryAndDMA(t *testing.T) {
 		}
 	}
 }
+
+func TestCoroutinesAndLockedCache(t *testing.T) {
+	rpx := buildModule(t, buildOpts{imports: []string{
+		"coreinit OSInitCoroutine OSSwitchCoroutine LCAlloc LCDealloc LCGetAllocatableSize LCEnableDMA LCLoadDMABlocks LCStoreDMABlocks"}},
+		"cotest.c")
+	_, log := runRPX(t, rpx, 10)
+	for _, want := range []string{"co: steps 33 local 7", "lc: 4000 3000 4000 100 16"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("want %q in:\n%s", want, log)
+		}
+	}
+}

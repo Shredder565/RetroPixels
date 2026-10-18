@@ -196,6 +196,7 @@ func (c *WiiU) RunFrame() {
 			c.log.printf("the program stopped: %v", c.m.Err)
 		}
 		c.log.printf("[%s]\r\n%s", c.m.Stats(), c.m.ThreadsSummary())
+		c.log.printf("the last library calls:\r\n%s\r\n%s", c.m.RecentCalls(), c.m.StuckReport())
 	}
 	c.takePicture()
 	c.takeSound()

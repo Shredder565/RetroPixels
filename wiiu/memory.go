@@ -31,7 +31,7 @@ const (
 	DataBase   = 0x10000000
 	MEM2End    = 0x50000000
 	LoaderBase = 0xC0000000
-	LoaderSize = 0x04000000
+	LoaderSize = 0x10000000
 	FGBase     = 0xE0000000
 	FGSize     = 0x02800000
 	MEM1Base   = 0xF4000000

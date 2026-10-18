@@ -20,8 +20,13 @@ type GX2 struct {
 	Swaps       uint32
 	Flips       uint32
 	Vsyncs      uint64
+	lastFlip    uint64 // system time of the last flip and vsync
+	lastVsync   uint64
 	Interval    uint32
 	pendingSwap bool
+	// GX2SetEventCallback: function and data for each event type
+	// (0 start of pipe, 1 end of pipe, 2 vsync, 3 flip, 4 display list overrun)
+	events [5][2]uint32
 
 	// display list being recorded
 	dlActive   bool
@@ -237,13 +242,27 @@ func (m *Machine) scanShow(i int) {
 
 func (g *GX2) vsync(m *Machine) {
 	g.Vsyncs++
+	g.lastVsync = m.bootTime + m.Time()
+	m.gx2Event(2)
 	if g.pendingSwap {
 		g.pendingSwap = false
-		g.Flips++
+		// every swap asked for so far is on screen now (two in one frame
+		// show as one picture, but the counts must still meet)
+		g.Flips = g.Swaps
+		g.lastFlip = g.lastVsync
 		for i := range g.Scan {
 			m.scanShow(i)
 		}
 		m.wake(keyFlip)
+		m.gx2Event(3)
+	}
+}
+
+// gx2Event runs the program's callback for a GPU event, like the GPU's
+// interrupt does: on core 1, from the interrupt thread.
+func (m *Machine) gx2Event(kind int) {
+	if e := m.gx2.events[kind]; e[0] != 0 {
+		m.queueCallback(1, e[0], uint32(kind), e[1])
 	}
 }
 
@@ -345,10 +364,10 @@ func init() {
 			m.Mem.Write32(p, g.Flips)
 		}
 		if p := arg(cpu, 2); p != 0 {
-			m.Mem.Write64(p, m.bootTime+m.Time())
+			m.Mem.Write64(p, g.lastFlip)
 		}
 		if p := arg(cpu, 3); p != 0 {
-			m.Mem.Write64(p, m.bootTime+m.Time())
+			m.Mem.Write64(p, g.lastVsync)
 		}
 	})
 	reg(x, "GX2CalcSurfaceSizeAndAlignment", func(m *Machine, cpu *CPU, t *Thread) { m.calcSurface(arg(cpu, 0)) })
@@ -396,15 +415,25 @@ func init() {
 	reg(x, "GX2GetMiscParam", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 0) })
 	reg(x, "GX2SetMiscParam", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 1) })
 	reg(x, "GX2TempGetGPUVersion", func(m *Machine, cpu *CPU, t *Thread) { ret(cpu, 2) })
-	reg(x, "GX2GetEventCallback", func(m *Machine, cpu *CPU, t *Thread) {
-		if p := arg(cpu, 1); p != 0 {
-			m.Mem.Write32(p, 0)
-		}
-		if p := arg(cpu, 2); p != 0 {
-			m.Mem.Write32(p, 0)
+	// (type, function, data)
+	reg(x, "GX2SetEventCallback", func(m *Machine, cpu *CPU, t *Thread) {
+		if k := arg(cpu, 0); k < uint32(len(m.gx2.events)) {
+			m.gx2.events[k] = [2]uint32{arg(cpu, 1), arg(cpu, 2)}
 		}
 	})
-	for _, n := range []string{"GX2Flush", "GX2SetDRCConnectCallback", "GX2SetEventCallback", "GX2SetGPUTimeout",
+	reg(x, "GX2GetEventCallback", func(m *Machine, cpu *CPU, t *Thread) {
+		var e [2]uint32
+		if k := arg(cpu, 0); k < uint32(len(m.gx2.events)) {
+			e = m.gx2.events[k]
+		}
+		if p := arg(cpu, 1); p != 0 {
+			m.Mem.Write32(p, e[0])
+		}
+		if p := arg(cpu, 2); p != 0 {
+			m.Mem.Write32(p, e[1])
+		}
+	})
+	for _, n := range []string{"GX2Flush", "GX2SetDRCConnectCallback", "GX2SetGPUTimeout",
 		"GX2PrintGPUStatus", "GX2DebugTagUserString", "GX2NotifyMemAlloc", "GX2NotifyMemFree", "GX2Begin", "GX2End",
 		"GX2SetDRCConnectCallbackEx", "GX2SetTVBufferEx", "GX2SetAAMode", "GX2SetAAModeEx", "GX2SetAAMask",
 		"GX2ExpandDepthBuffer", "GX2ExpandAAColorBuffer", "GX2SetDepthBufferHiZEnable", "GX2SetShaderModeEx",

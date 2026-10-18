@@ -36,6 +36,32 @@ func init() {
 		if p := arg(cpu, 0); p != 0 {
 			m.Mem.Write64(p, arg64(cpu, 2))
 		}
+		if arg(cpu, 5) != 0 {
+			m.gx2Event(1) // the end-of-pipe interrupt
+		}
+	})
+	// (surface, level): one mip level's pitch in elements, and the bytes in one slice of it
+	mipLevel := func(m *Machine, cpu *CPU) (surfLevel, bool) {
+		s := m.readSurface(arg(cpu, 0))
+		info := s.info()
+		l := int(arg(cpu, 1))
+		if l >= len(info.Levels) {
+			return surfLevel{}, false
+		}
+		return info.Levels[l], true
+	}
+	reg(x, "GX2GetSurfaceMipPitch", func(m *Machine, cpu *CPU, t *Thread) {
+		l, _ := mipLevel(m, cpu)
+		ret(cpu, l.Pitch)
+	})
+	reg(x, "GX2GetSurfaceMipSliceSize", func(m *Machine, cpu *CPU, t *Thread) {
+		l, _ := mipLevel(m, cpu)
+		sf := m.readSurface(arg(cpu, 0))
+		slices := sf.d
+		if sf.dim == 2 { // 3D: the depth halves each level too
+			slices = max(1, sf.d>>arg(cpu, 1))
+		}
+		ret(cpu, l.Size/slices)
 	})
 	// the GPU's clock and the CPU's run at the same rate here
 	reg(x, "GX2GPUTimeToCPUTime", func(m *Machine, cpu *CPU, t *Thread) { ret64(cpu, arg64(cpu, 0)) })

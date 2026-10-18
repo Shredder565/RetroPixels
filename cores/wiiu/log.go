@@ -104,6 +104,11 @@ func (l *gameLog) frame(m *machine.Machine) {
 	if m.Frame == 120 || m.Frame%(logEvery*2) == 0 {
 		l.printf("%s", m.ThreadsSummary())
 	}
+	// nothing on screen yet: where each thread is waiting, with its code
+	if (m.Frame == 900 || m.Frame == 2400) && m.Pictures() < 2 {
+		l.printf("nothing shown yet; where the threads are:\r\n%s\r\nthe last library calls:\r\n%s",
+			m.StuckReport(), m.RecentCalls())
+	}
 }
 
 // begin and end bracket each frame, for the watchdog.
