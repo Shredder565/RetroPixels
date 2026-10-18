@@ -66,8 +66,9 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          $out = "PixelU"
-          New-Item -ItemType Directory -Force $out, "$out/portable" | Out-Null
+          # Windows paths ignore case, so "PixelU" would be the pixelu source folder.
+          $out = "package/PixelU"
+          New-Item -ItemType Directory -Force "$out/portable" | Out-Null
           Copy-Item pixelu/bin/PixelU_release.exe "$out/PixelU.exe"
           Copy-Item -Recurse pixelu/bin/resources "$out/resources"
           Copy-Item -Recurse pixelu/bin/gameProfiles "$out/gameProfiles"
@@ -79,12 +80,11 @@ jobs:
       - name: List package contents
         shell: pwsh
         run: |
-          Get-ChildItem -Recurse -File pixelu/bin | Sort-Object Length -Descending | Select-Object -First 15 FullName, Length | Format-Table -AutoSize | Out-String -Width 300
-          Get-ChildItem -Recurse -File PixelU | Sort-Object Length -Descending | Select-Object -First 15 FullName, Length | Format-Table -AutoSize | Out-String -Width 300
-          "Total: " + ((Get-ChildItem -Recurse -File PixelU | Measure-Object Length -Sum).Sum / 1MB) + " MB"
+          Get-ChildItem -Recurse -File package/PixelU | Sort-Object Length -Descending | Select-Object -First 15 FullName, Length | Format-Table -AutoSize | Out-String -Width 300
+          "Total: " + ((Get-ChildItem -Recurse -File package/PixelU | Measure-Object Length -Sum).Sum / 1MB) + " MB"
 
       - uses: actions/upload-artifact@v4
         with:
           name: PixelU-windows-x64
-          path: PixelU
+          path: package
           retention-days: 14
