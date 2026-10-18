@@ -12,6 +12,7 @@ type PixelUSettings struct {
 	Exe        string `json:"exe,omitempty"` // PixelU.exe chosen by the player ("" = found by itself)
 	Fullscreen *bool  `json:"fullscreen,omitempty"`
 	Embed      *bool  `json:"playInWindow,omitempty"`
+	OpenGL     bool   `json:"openGL,omitempty"` // Vulkan doesn't work on this PC: draw with OpenGL
 }
 
 func (p *PixelUSettings) fullscreen() bool { return boolOr(p.Fullscreen, true) }
@@ -22,7 +23,7 @@ func (p *PixelUSettings) embed() bool      { return boolOr(p.Embed, true) }
 // this window goes fullscreen instead.
 func (p *PixelUSettings) launchOptions() pixelu.LaunchOptions {
 	if p.embed() {
-		return pixelu.LaunchOptions{Embed: true}
+		return pixelu.LaunchOptions{Embed: true, OpenGL: p.OpenGL}
 	}
-	return pixelu.LaunchOptions{Fullscreen: p.fullscreen()}
+	return pixelu.LaunchOptions{Fullscreen: p.fullscreen(), OpenGL: p.OpenGL}
 }

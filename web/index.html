@@ -570,6 +570,7 @@
             <button class="btn ghost sm" id="wiiuAddFolder">Add games folder…</button>
             <label class="sw-check"><input type="checkbox" id="wiiuFull"> Start games fullscreen</label>
             <label class="sw-check" title="Wii U games play inside this window. Turn it off to play in PixelU's own window"><input type="checkbox" id="wiiuEmbed"> Play inside RetroPixels</label>
+            <label class="sw-check" title="Only for PCs where Vulkan doesn't work (an old graphics driver). OpenGL is slower"><input type="checkbox" id="wiiuGL"> Use OpenGL instead of Vulkan</label>
             <label class="sw-check" title="Saves just the game's TV screen and sound as a high-quality .mp4 in your Recordings folder"><input type="checkbox" id="wiiuRec"> Record games automatically (game screen only, high-quality .mp4)</label>
           </div>
           <div id="wiiuFFNote"></div>
@@ -785,7 +786,7 @@
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || data.error) throw new Error(data.error || `Request failed (${res.status})`);
+    if (!res.ok || data.error) { const err = new Error(data.error || `Request failed (${res.status})`); err.data = data; throw err; }
     return data;
   };
 
@@ -1547,6 +1548,7 @@
     el.querySelectorAll("[data-rm]").forEach(b => b.addEventListener("click", () => wiiuAction({ action: "remove-folder", folder: f[+b.dataset.rm] })));
     document.getElementById("wiiuFull").checked = !!st.fullscreen;
     document.getElementById("wiiuEmbed").checked = !!st.embed;
+    document.getElementById("wiiuGL").checked = !!st.opengl;
     document.getElementById("wiiuRec").checked = !!st.record;
     document.getElementById("wiiuOpenPixelU").disabled = !st.exe;
     document.getElementById("wiiuOpenFolder").disabled = !st.exe;
@@ -1588,8 +1590,16 @@
           }
           sendEmbedArea();
         }
+        const play = () => api("/api/pixelu/play", { path: g.path });
         try {
-          await api("/api/pixelu/play", { path: g.path });
+          await play().catch(async e => {
+            if (!(e.data && e.data.vulkan)) throw e;
+            // Vulkan doesn't work on this PC: offer OpenGL (slower, but it plays).
+            if (!confirm(`${e.message}\n\n${e.data.help}\n\nPlay Wii U games with OpenGL instead? (Slower, but it works. You can change this under Wii U settings.)`)) throw e;
+            await api("/api/pixelu/action", { action: "opengl", on: true });
+            document.getElementById("wiiuGL").checked = true;
+            return play();
+          });
           toast(`Starting ${g.name} in PixelU…`);
           setTimeout(() => api("/api/status").then(renderStatus).then(renderWiiUGrid).catch(() => {}), 800);
         } catch (e) {
@@ -1625,6 +1635,8 @@
     });
     document.getElementById("wiiuFull").addEventListener("change", e => wiiuAction({ action: "fullscreen", on: e.target.checked }));
     document.getElementById("wiiuEmbed").addEventListener("change", e => wiiuAction({ action: "embed", on: e.target.checked }));
+    document.getElementById("wiiuGL").addEventListener("change", e => wiiuAction({ action: "opengl", on: e.target.checked },
+      e.target.checked ? "Wii U games will use OpenGL" : "Wii U games will use Vulkan"));
     document.getElementById("wiiuRec").addEventListener("change", e => wiiuAction({ action: "record", on: e.target.checked },
       e.target.checked ? "Every game will be recorded (game screen only, high quality)" : "Automatic recording off for every game"));
     document.getElementById("wiiuOpenPixelU").addEventListener("click", () => wiiuAction({ action: "open-pixelu" }, "Opening PixelU…"));

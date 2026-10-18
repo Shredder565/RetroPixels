@@ -83,6 +83,7 @@ std::optional<int> LaunchSettings::HandleCommandline(const std::vector<std::wstr
 
 		("rp-record", po::wvalue<std::wstring>(), "RetroPixels: record the game's TV picture and audio into this folder (needs --rp-ffmpeg)")
 		("rp-ffmpeg", po::wvalue<std::wstring>(), "RetroPixels: full path of the ffmpeg executable used for recording")
+		("rp-opengl", "RetroPixels: draw with OpenGL instead of Vulkan for this run (Vulkan doesn't work on this PC)")
 		("rp-embed", "RetroPixels: a window that shows only the game, for docking into another window; no menus, game list or optional dialogs")
 		("rp-parent", po::value<std::string>(), "RetroPixels: (Windows) show the game as a child of this window (HWND, decimal or 0x hex), filling it; implies --rp-embed");
 
@@ -191,6 +192,8 @@ std::optional<int> LaunchSettings::HandleCommandline(const std::vector<std::wstr
 
 		if (vm.count("rp-embed"))
 			s_rp_embed = true;
+		if (vm.count("rp-opengl"))
+			s_rp_opengl = true;
 		if (vm.count("rp-parent"))
 		{
 			std::string tmp = vm["rp-parent"].as<std::string>();

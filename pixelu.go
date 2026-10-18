@@ -111,6 +111,14 @@ func launchPixelUGame(path string) error {
 		return errors.New("PixelU is already open. Close it first, then start the game here")
 	}
 	cfgMu.Lock()
+	useGL := cfg.PixelUOpenGL
+	cfgMu.Unlock()
+	if !useGL {
+		if err := pixelu.CheckVulkan(); err != nil {
+			return vulkanError{err}
+		}
+	}
+	cfgMu.Lock()
 	fs, embed, record := pixeluFullscreenOn(), pixeluEmbedOn(), pixeluRecordOn()
 	cfgMu.Unlock()
 	var rec *recSession
@@ -125,6 +133,7 @@ func launchPixelUGame(path string) error {
 	// goes fullscreen instead (as with Dolphin).
 	opts.Fullscreen = fs && !embed
 	opts.Embed = embed
+	opts.OpenGL = useGL
 	var onStart func(pid int, exited <-chan struct{})
 	if embed {
 		onStart = embedPixelU // docks PixelU's window over the page
@@ -171,7 +180,7 @@ func openPixelUUI() error {
 func pixeluStatus() map[string]any {
 	cfgMu.Lock()
 	st := map[string]any{"folders": append([]string{}, cfg.PixelUFolders...), "fullscreen": pixeluFullscreenOn(),
-		"embed": pixeluEmbedOn(), "record": pixeluRecordOn()}
+		"embed": pixeluEmbedOn(), "record": pixeluRecordOn(), "opengl": cfg.PixelUOpenGL}
 	cfgMu.Unlock()
 	st["exe"] = pixeluExe()
 	return st
@@ -189,6 +198,11 @@ func registerPixelURoutes(mux *http.ServeMux) {
 			return
 		}
 		if err := launchPixelUGame(b.Path); err != nil {
+			var ve vulkanError
+			if errors.As(err, &ve) { // the page offers to play with OpenGL instead
+				writeJSON(w, 200, map[string]any{"error": err.Error(), "vulkan": true, "help": pixelu.VulkanHelp})
+				return
+			}
 			fail(w, err)
 			return
 		}
@@ -256,6 +270,9 @@ func registerPixelURoutes(mux *http.ServeMux) {
 				writeJSON(w, 200, map[string]any{"ok": true, "gamepad": pad})
 				return
 			}
+		case "opengl": // play Wii U games with OpenGL (Vulkan doesn't work on this PC)
+			v := b.On
+			set(func() { cfg.PixelUOpenGL = v })
 		case "open-pixelu":
 			err = openPixelUUI()
 		case "open-folder":
@@ -273,4 +290,11 @@ func registerPixelURoutes(mux *http.ServeMux) {
 		}
 		writeJSON(w, 200, map[string]any{"ok": true, "games": pixeluLibrary(), "status": pixeluStatus()})
 	}))
+}
+
+// vulkanError: Wii U games can't start with Vulkan on this PC.
+type vulkanError struct{ err error }
+
+func (e vulkanError) Error() string {
+	return "Wii U games need Vulkan, which isn't working on this PC: " + e.err.Error() + "."
 }

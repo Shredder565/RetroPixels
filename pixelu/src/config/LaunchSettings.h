@@ -44,6 +44,8 @@ public:
 	static std::optional<fs::path> GetRPFFmpegPath() { return s_rp_ffmpeg_path; }
 	// PixelU: RetroPixels shows the game inside its own window (see gui/wxgui/RPEmbed.h)
 	static bool RPEmbedEnabled() { return s_rp_embed; }
+	// PixelU: --rp-opengl, RetroPixels found Vulkan not working on this PC
+	static bool RPForceOpenGL() { return s_rp_opengl; }
 	static std::optional<uint64> GetRPParentWindow() { return s_rp_parent_window; }
 
 	static uint32 GetPPCRecLowerAddr() { return ppcRec_limitLowerAddr; };
@@ -75,6 +77,7 @@ private:
 	inline static std::optional<fs::path> s_rp_record_path{};
 	inline static std::optional<fs::path> s_rp_ffmpeg_path{};
 	inline static bool s_rp_embed = false;
+	inline static bool s_rp_opengl = false;
 	inline static std::optional<uint64> s_rp_parent_window{};
 
 	// for recompiler debugging

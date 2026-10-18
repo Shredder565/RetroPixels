@@ -108,7 +108,11 @@ bool ActiveSettings::WaitForGX2DrawDoneEnabled()
 
 GraphicAPI ActiveSettings::GetGraphicsAPI()
 {
-	const GraphicAPI api = g_current_game_profile->GetGraphicsAPI().value_or(GetConfig().graphic_api);
+	GraphicAPI api = g_current_game_profile->GetGraphicsAPI().value_or(GetConfig().graphic_api);
+#ifdef ENABLE_OPENGL
+	if (LaunchSettings::RPForceOpenGL()) // PixelU: RetroPixels asked for OpenGL (Vulkan doesn't work here)
+		api = kOpenGL;
+#endif
 	std::optional<GraphicAPI> fallbackAPI;
 #ifdef ENABLE_VULKAN
 	if (g_vulkan_available)

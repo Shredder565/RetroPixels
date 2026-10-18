@@ -216,8 +216,18 @@ func (a *app) pixeluPlay(g pixelu.Game) {
 		messageBox(a.hwnd, "PixelU is already open. Close it first, then start the game here.", "RetroPixels Native", mbIconInfo)
 		return
 	}
-	a.closeGame()
 	p := &a.settings.PixelU
+	if !p.OpenGL {
+		if err := pixelu.CheckVulkan(); err != nil {
+			if messageBox(a.hwnd, "Wii U games need Vulkan, which isn't working on this PC: "+err.Error()+".\n\n"+pixelu.VulkanHelp+
+				"\n\nPlay Wii U games with OpenGL instead? (Slower, but it works.)", "RetroPixels Native", mbYesNo|mbIconWarning) != idYes {
+				return
+			}
+			p.OpenGL = true
+			saveSettings(a.settings)
+		}
+	}
+	a.closeGame()
 	opts := p.launchOptions()
 	// Recorded from the start: PixelU encodes with ffmpeg while the game runs.
 	var rec *extRec

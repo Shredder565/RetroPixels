@@ -264,6 +264,9 @@ type LaunchOptions struct {
 	// picture to RecordDir\Frames\pixelu_framedump<N>.mkv and its sound to
 	// RecordDir\Audio\pixelu_dspdump.wav, encoding with that ffmpeg.exe.
 	RecordDir, FFmpeg string
+	// OpenGL: draw with OpenGL instead of Vulkan (--rp-opengl), for PCs
+	// where Vulkan doesn't work (see CheckVulkan).
+	OpenGL bool
 }
 
 // GameArgs is PixelU's command line for one game. PixelU is Cemu renamed,
@@ -276,6 +279,9 @@ func GameArgs(path string, o LaunchOptions) []string {
 	}
 	if o.Embed {
 		args = append(args, "--rp-embed")
+	}
+	if o.OpenGL {
+		args = append(args, "--rp-opengl")
 	}
 	if o.RecordDir != "" && o.FFmpeg != "" {
 		args = append(args, "--rp-record", o.RecordDir, "--rp-ffmpeg", o.FFmpeg)
