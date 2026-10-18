@@ -339,6 +339,7 @@
     <button class="btn ghost sm" id="swRecToggle" hidden>● Record</button>
     <span class="vol-ctl" id="swVol" hidden><button class="vol-mute" data-volmute title="Mute" aria-label="Mute">🔊</button><input type="range" min="0" max="100" step="1" value="100" data-volrange aria-label="Game volume"><output data-volout>100%</output></span>
     <span class="muted" id="swNowTime" style="font-variant-numeric:tabular-nums"></span>
+    <button class="btn ghost sm" id="swPadScreen" hidden title="Show the Wii U GamePad's screen. Click or touch it to use the touch screen. (Ctrl+Tab in the game does the same.)" aria-pressed="false">📱 GamePad screen</button>
     <button class="btn ghost sm" id="swStopGame" hidden>■ Stop game</button>
       </div>
   <!-- ===================== Launcher ===================== -->
@@ -799,6 +800,10 @@
     const embedded = !!(status.running && status.running.embedded);
     document.body.classList.toggle("dol-embedded", embedded);
     document.getElementById("swStopGame").hidden = !embedded;
+    const padBtn = document.getElementById("swPadScreen");
+    const wiiuEmbedded = embedded && status.running.kind === "pixelu";
+    if (padBtn.hidden && wiiuEmbedded) setPadScreen(false); // each game starts on the TV picture
+    padBtn.hidden = !wiiuEmbedded;
     const dolOn = !!(status.running && status.running.kind === "dolphin");
     const volBar = document.getElementById("swVol");
     if (dolOn && volBar.hidden) loadDolVolume();
@@ -826,6 +831,20 @@
   const DOL_BAR_PX = 48; // height of the game bar above a docked game (see body.dol-embedded #swNow)
   const sendEmbedArea = () => DESKTOP && api("/api/dol/embed", { top: DOL_BAR_PX, dpr: window.devicePixelRatio || 1 }).catch(() => {});
   window.addEventListener("resize", () => { if (document.body.classList.contains("dol-embedded")) sendEmbedArea(); });
+  // Wii U: the docked game shows the TV picture or the GamePad's screen (touch it with the mouse or a finger).
+  function setPadScreen(on) {
+    const btn = document.getElementById("swPadScreen");
+    btn.setAttribute("aria-pressed", String(on));
+    btn.textContent = on ? "📺 TV screen" : "📱 GamePad screen";
+    btn.title = on ? "Back to the TV picture." : "Show the Wii U GamePad's screen. Click or touch it to use the touch screen. (Ctrl+Tab in the game does the same.)";
+  }
+  document.getElementById("swPadScreen").addEventListener("click", async () => {
+    try {
+      const r = await api("/api/pixelu/action", { action: "screen" });
+      setPadScreen(!!r.gamepad);
+      toast(r.gamepad ? "GamePad screen: click or touch it to use the touch screen" : "TV screen");
+    } catch (e) { toast(e.message, true); }
+  });
   document.getElementById("swStopGame").addEventListener("click", async () => {
     try {
       await api("/api/dol/action", { action: "stop-game" });

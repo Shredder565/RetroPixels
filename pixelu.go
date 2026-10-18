@@ -246,6 +246,12 @@ func registerPixelURoutes(mux *http.ServeMux) {
 		case "record":
 			v := b.On
 			set(func() { cfg.PixelURecord = &v })
+		case "screen": // the GamePad screen or the TV picture in the docked game
+			var pad bool
+			if pad, err = pixeluScreen(pixelu.ScreenSwitch); err == nil {
+				writeJSON(w, 200, map[string]any{"ok": true, "gamepad": pad})
+				return
+			}
 		case "open-pixelu":
 			err = openPixelUUI()
 		case "open-folder":

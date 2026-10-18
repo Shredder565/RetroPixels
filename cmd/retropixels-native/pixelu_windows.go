@@ -30,6 +30,7 @@ const (
 	cmdPixelUChangeExe  = 1903
 	cmdPixelUStop       = 1904
 	cmdPixelUEmbed      = 1905
+	cmdPixelUScreen     = 1906
 	cmdPixelUFirst      = 1900
 	cmdPixelULast       = 1919
 )
@@ -46,12 +47,14 @@ type pixeluRun struct {
 type pixeluState struct {
 	run         *pixeluRun
 	pendingOpen string // open this once the game has ended
+	gamepad     bool   // the docked game shows the GamePad's screen
 }
 
 func (a *app) addPixelUMenu() {
 	m := call(pCreatePopupMenu)
 	appendMenu(m, mfString, cmdPixelUOpenGame, "Open a Wii &U game…")
 	appendMenu(m, mfString, cmdPixelUStop, "&Stop game")
+	appendMenu(m, mfString, cmdPixelUScreen, "Show the &GamePad screen (touch it with the mouse or a finger)")
 	appendMenu(m, mfSeparator, 0, "")
 	appendMenu(m, mfString, cmdPixelUFullscreen, "Start games &fullscreen")
 	appendMenu(m, mfString, cmdPixelUEmbed, "Play inside this &window")
@@ -64,6 +67,8 @@ func (a *app) addPixelUMenu() {
 func (a *app) pixeluUpdateMenus() {
 	r := a.pu.run
 	enableItem(a.menu, cmdPixelUStop, r != nil)
+	enableItem(a.menu, cmdPixelUScreen, r != nil && r.child.Load() != 0)
+	checkItem(a.menu, cmdPixelUScreen, r != nil && a.pu.gamepad)
 	checkItem(a.menu, cmdPixelUFullscreen, a.settings.PixelU.fullscreen())
 	checkItem(a.menu, cmdPixelUEmbed, a.settings.PixelU.embed())
 	enableItem(a.menu, cmdPixelUOpenEmu, a.pixeluExe() != "" && r == nil)
@@ -80,6 +85,21 @@ func (a *app) pixeluCommand(id int) {
 		}
 	case cmdPixelUStop:
 		a.pixeluStop()
+	case cmdPixelUScreen:
+		if r := a.pu.run; r != nil {
+			pad, err := pixelu.SetScreen(r.child.Load(), pixelu.ScreenSwitch)
+			if err != nil {
+				messageBox(a.hwnd, err.Error(), "RetroPixels Native", mbIconWarning)
+				return
+			}
+			a.pu.gamepad = pad
+			if pad {
+				a.showMessage("GamePad screen: click or touch it to use the touch screen")
+			} else {
+				a.showMessage("TV screen")
+			}
+			a.pixeluUpdateMenus()
+		}
 	case cmdPixelUFullscreen:
 		v := !p.fullscreen()
 		p.Fullscreen = &v
@@ -237,6 +257,7 @@ func (a *app) pixeluEnded() {
 	if r == nil {
 		return
 	}
+	a.pu.gamepad = false
 	a.pu.run = nil
 	if a.dol.run == nil && a.mame.run == nil {
 		a.dolUnhook()

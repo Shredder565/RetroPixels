@@ -63,6 +63,7 @@
 #include "Cafe/OS/libs/swkbd/swkbd.h"
 
 #include "Cafe/HW/Latte/Renderer/Renderer.h" // For renderer API checks
+#include "Cafe/HW/Latte/Core/Latte.h" // PixelU: LatteGPUState.isDRCPrimary
 
 extern WindowSystem::WindowInfo g_window_info;
 extern std::shared_mutex g_mutex;
@@ -837,6 +838,23 @@ void MainWindow::TogglePadView()
 #endif
 WXLRESULT MainWindow::MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam)
 {
+	// PixelU: RetroPixels picks which screen this window shows (the TV picture or the GamePad's).
+	// wParam 0 = TV, 1 = GamePad, 2 = switch, anything else = only ask. Returns 1 while the GamePad
+	// screen is shown, else 0. With the GamePad screen shown, a click or touch on it is a touch on
+	// the GamePad's touch screen (as in Cemu).
+	static const UINT s_screenMessage = RegisterWindowMessageW(L"PixelU.Screen");
+	if (s_screenMessage && nMsg == s_screenMessage)
+	{
+		bool& drc = LatteGPUState.isDRCPrimary;
+		if (wParam == 0)
+			drc = false;
+		else if (wParam == 1)
+			drc = true;
+		else if (wParam == 2)
+			drc = !drc;
+		return drc ? 1 : 0;
+	}
+
 	if (nMsg == WM_DEVICECHANGE)
 	{
 		if (wParam == DBT_DEVNODES_CHANGED)

@@ -19,6 +19,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"retropixels/internal/pixelu"
 )
 
 var (
@@ -496,4 +498,18 @@ func shutdownDolphin(pid int, exited <-chan struct{}, wait time.Duration) {
 			_ = p.Kill()
 		}
 	}
+}
+
+// pixeluScreen picks what the docked PixelU game shows (pixelu.SetScreen).
+func pixeluScreen(mode int) (bool, error) {
+	embedMu.Lock()
+	h := embedHWND
+	embedMu.Unlock()
+	runMu.Lock()
+	isPixelU := running != nil && running.Kind == "pixelu"
+	runMu.Unlock()
+	if h == 0 || !isPixelU {
+		return false, errors.New("no Wii U game is playing inside RetroPixels")
+	}
+	return pixelu.SetScreen(h, mode)
 }
