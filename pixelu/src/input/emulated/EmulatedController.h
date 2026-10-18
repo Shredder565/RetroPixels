@@ -80,6 +80,8 @@ public:
 	void delete_mapping(uint64 mapping);
 	void clear_mappings();
 	void set_mapping(uint64 mapping, const std::shared_ptr<ControllerBase>& controller_base, uint64 button);
+	// PixelU: binds the mapping on this controller as well, keeping the bindings other controllers have for it
+	void add_mapping(uint64 mapping, const std::shared_ptr<ControllerBase>& controller_base, uint64 button);
 
 	virtual uint32 get_emulated_button_flag(uint32 mapping) const = 0;
 
@@ -118,6 +120,9 @@ protected:
 		uint64 button;
 	};
 	std::unordered_map<uint64, Mapping> m_mappings;
+	// PixelU: further bindings of a mapping, each on another controller than its m_mappings entry
+	// (e.g. the keyboard next to a gamepad). Saved and loaded with the profile like m_mappings.
+	std::vector<std::pair<uint64, Mapping>> m_extra_mappings;
 
 	bool m_homebutton_down = false;
 };

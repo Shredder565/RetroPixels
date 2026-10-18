@@ -9,6 +9,7 @@
 #include "config/NetworkSettings.h"
 #include "config/LaunchSettings.h"
 #include "input/InputManager.h"
+#include "input/DefaultControllerProfile.h"
 
 #include "Cafe/CafeSystem.h"
 #include "Cafe/TitleList/TitleList.h"
@@ -131,6 +132,7 @@ void CemuCommonInit()
 	// parallelize expensive init code
 	std::future<int> futureInitAudioAPI = std::async(std::launch::async, []{ IAudioAPI::InitializeStatic(); IAudioInputAPI::InitializeStatic(); return 0; });
 	std::future<int> futureInitGraphicPacks = std::async(std::launch::async, []{ GraphicPack2::LoadAll(); return 0; });
+	DefaultControllerProfile_CreateIfMissing(); // PixelU: a fresh PixelU gets a working player 1 profile
 	InputManager::instance().load();
 	futureInitAudioAPI.wait();
 	futureInitGraphicPacks.wait();

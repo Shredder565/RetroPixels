@@ -191,7 +191,7 @@ bool InputManager::load(size_t player_index, std::string_view filename)
 						const auto mapping = ConvertString<uint64>(mapping_node.child_value());
 						const auto button = ConvertString<uint64>(button_node.child_value());
 
-						emulated_controller->set_mapping(mapping, controller, button);
+						emulated_controller->add_mapping(mapping, controller, button); // PixelU: a mapping can be bound on several controllers
 					}
 				}
 			}
@@ -527,7 +527,7 @@ bool InputManager::save(size_t player_index, std::string_view filename)
 
 		// mappings for current controller
 		auto mappings_node = controller_node.append_child("mappings");
-		for (const auto& mapping : emulated_controller->m_mappings)
+		auto saveMapping = [&](const auto& mapping)
 		{
 			if (!mapping.second.controller.expired() && *controller == *mapping.second.controller.lock())
 			{
@@ -537,7 +537,11 @@ bool InputManager::save(size_t player_index, std::string_view filename)
 				entry_node.append_child("button").append_child(pugi::node_pcdata).set_value(
 					fmt::format("{}", mapping.second.button).c_str());
 			}
-		}
+		};
+		for (const auto& mapping : emulated_controller->m_mappings)
+			saveMapping(mapping);
+		for (const auto& mapping : emulated_controller->m_extra_mappings) // PixelU
+			saveMapping(mapping);
 	}
 	FileStream* fs = FileStream::createFile2(file_path);
 	if (!fs)

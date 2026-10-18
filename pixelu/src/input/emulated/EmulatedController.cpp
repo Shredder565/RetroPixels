@@ -252,6 +252,13 @@ void EmulatedController::remove_controller(const std::shared_ptr<ControllerBase>
 
 			++m;
 		}
+
+		// PixelU: also the extra bindings of this controller
+		std::erase_if(m_extra_mappings, [&controller](const auto& m)
+		{
+			const auto mc = m.second.controller.lock();
+			return !mc || *mc == *controller;
+		});
 	}
 }
 
@@ -264,15 +271,24 @@ void EmulatedController::clear_controllers()
 float EmulatedController::get_axis_value(uint64 mapping) const
 {
 	std::shared_lock lock(m_mutex);
+	float value = 0;
 	const auto it = m_mappings.find(mapping);
 	if (it != m_mappings.cend())
 	{
 		if (const auto controller = it->second.controller.lock()) {
-			return controller->get_axis_value(it->second.button);
+			value = controller->get_axis_value(it->second.button);
 		}
 	}
+	// PixelU: the strongest of all controllers bound to this mapping
+	for (const auto& [extraMapping, extra] : m_extra_mappings)
+	{
+		if (extraMapping != mapping)
+			continue;
+		if (const auto controller = extra.controller.lock())
+			value = std::max(value, controller->get_axis_value(extra.button));
+	}
 
-	return 0;
+	return value;
 }
 
 bool EmulatedController::is_mapping_down(uint64 mapping) const
@@ -282,7 +298,21 @@ bool EmulatedController::is_mapping_down(uint64 mapping) const
 	if (it != m_mappings.cend())
 	{
 		if (const auto controller = it->second.controller.lock())
-			return controller->get_state().buttons.GetButtonState(it->second.button);
+		{
+			if (controller->get_state().buttons.GetButtonState(it->second.button))
+				return true;
+		}
+	}
+	// PixelU: any other controller bound to this mapping
+	for (const auto& [extraMapping, extra] : m_extra_mappings)
+	{
+		if (extraMapping != mapping)
+			continue;
+		if (const auto controller = extra.controller.lock())
+		{
+			if (controller->get_state().buttons.GetButtonState(extra.button))
+				return true;
+		}
 	}
 	return false;
 }
@@ -320,12 +350,14 @@ void EmulatedController::delete_mapping(uint64 mapping)
 {
 	std::scoped_lock lock(m_mutex);
 	m_mappings.erase(mapping);
+	std::erase_if(m_extra_mappings, [mapping](const auto& m) { return m.first == mapping; });
 }
 
 void EmulatedController::clear_mappings()
 {
 	std::scoped_lock lock(m_mutex);
 	m_mappings.clear();
+	m_extra_mappings.clear();
 }
 
 void EmulatedController::set_mapping(uint64 mapping, const std::shared_ptr<ControllerBase>& controller,
@@ -333,6 +365,32 @@ void EmulatedController::set_mapping(uint64 mapping, const std::shared_ptr<Contr
 {
 	std::scoped_lock lock(m_mutex);
 	m_mappings[mapping] = { controller, button };
+	// one binding per mapping, as the input settings show it
+	std::erase_if(m_extra_mappings, [mapping](const auto& m) { return m.first == mapping; });
+}
+
+void EmulatedController::add_mapping(uint64 mapping, const std::shared_ptr<ControllerBase>& controller, uint64 button)
+{
+	std::scoped_lock lock(m_mutex);
+	const auto it = m_mappings.find(mapping);
+	const auto primary = it != m_mappings.end() ? it->second.controller.lock() : nullptr;
+	if (!primary || *primary == *controller)
+	{
+		m_mappings[mapping] = { controller, button };
+		return;
+	}
+	for (auto& [extraMapping, extra] : m_extra_mappings)
+	{
+		if (extraMapping != mapping)
+			continue;
+		const auto extraController = extra.controller.lock();
+		if (extraController && *extraController == *controller)
+		{
+			extra.button = button;
+			return;
+		}
+	}
+	m_extra_mappings.emplace_back(mapping, Mapping{ controller, button });
 }
 
 bool EmulatedController::operator==(const EmulatedController& o) const

@@ -3,6 +3,8 @@ add_library(CemuInput
 	InputManager.h
 	ControllerFactory.cpp
 	ControllerFactory.h
+	DefaultControllerProfile.cpp
+	DefaultControllerProfile.h
 	api/ControllerState.h
 	api/Controller.cpp
 	api/Controller.h
