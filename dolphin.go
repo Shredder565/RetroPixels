@@ -838,7 +838,14 @@ func launchDolphinGame(path string) error {
 		rec.Emu = wiiEngineLabel
 		args = append(args, dolphinRecordArgs(recQuality())...)
 	}
-	if err := startEmulator(exe, args, path, g.Name, "dolphin", "PixelU", rec, onStart); err != nil {
+	cmd := exec.Command(exe, args...)
+	cmd.Dir = filepath.Dir(exe) // portable: it keeps its data next to the .exe
+	if embed {
+		// PixelU-Wii then keeps its game screen off-screen until it's docked,
+		// so it never flashes up as a window of its own.
+		cmd.Env = append(os.Environ(), "PIXELU_EMBED=1")
+	}
+	if err := startProcess(cmd, path, g.Name, "dolphin", "PixelU", rec, onStart, nil); err != nil {
 		return err
 	}
 	clearManualWanted()

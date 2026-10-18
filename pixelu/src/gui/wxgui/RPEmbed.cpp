@@ -42,9 +42,24 @@ namespace
 	std::atomic<std::chrono::steady_clock::time_point::rep> s_dockDeadline{0};
 	std::atomic_bool s_onScreen{false}; // not docked in time, shown as a normal window
 
+	// docked: a child window inside RetroPixels' window, or (for the Vulkan picture, which a child
+	// window of RetroPixels' Edge/Chrome window can't show) a frameless window owned by it, kept over its page
+	bool OwnedByOtherProcess(HWND hwnd)
+	{
+		const HWND owner = GetWindow(hwnd, GW_OWNER);
+		DWORD ownerPid = 0;
+		return owner && GetWindowThreadProcessId(owner, &ownerPid) && ownerPid != GetCurrentProcessId();
+	}
+
 	bool IsChildWindow(HWND hwnd)
 	{
-		return (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CHILD) != 0 || GetAncestor(hwnd, GA_PARENT) != GetDesktopWindow();
+		return (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CHILD) != 0 || GetAncestor(hwnd, GA_PARENT) != GetDesktopWindow() ||
+			   OwnedByOtherProcess(hwnd);
+	}
+
+	HWND DockHost(HWND hwnd)
+	{
+		return OwnedByOtherProcess(hwnd) ? GetWindow(hwnd, GW_OWNER) : GetAncestor(hwnd, GA_PARENT);
 	}
 
 	bool DockDeadlinePassed()
@@ -209,7 +224,7 @@ void RPEmbed::BeforeShow(wxFrame* frame)
 		if (IsChildWindow(hwnd))
 		{
 			timer->Stop();
-			cemuLog_log(LogType::Force, "--rp-embed: docked into window {:#x}", (uintptr_t)GetAncestor(hwnd, GA_PARENT));
+			cemuLog_log(LogType::Force, "--rp-embed: docked into window {:#x}", (uintptr_t)DockHost(hwnd));
 			return;
 		}
 		if (DockDeadlinePassed())

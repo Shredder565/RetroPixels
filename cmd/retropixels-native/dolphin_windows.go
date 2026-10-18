@@ -373,6 +373,9 @@ func (a *app) dolPlay(g dolphin.Game) {
 	opts := dolphin.LaunchOptions{Embed: d.embed(), Fullscreen: d.fullscreen(), Record: record, Quality: dolQuality}
 	args := dolphin.GameArgs(g.Path, opts)
 	cmd := dolphin.Command(exe, args...)
+	if opts.Embed {
+		cmd.Env = append(os.Environ(), "PIXELU_EMBED=1") // its game screen stays off-screen until it's docked here
+	}
 	var rec *dolphin.Recording
 	if record {
 		rec = dolphin.NewRecording(g.Name, dolphin.DumpDir(user), filepath.Join(recordingsDir(), "logs", "last-recording.log"))
@@ -606,6 +609,15 @@ func (a *app) dolEvent(name, detail string) {
 			}
 		case "record":
 			a.toggleRecording()
+		case "stop":
+			switch {
+			case a.dol.run != nil:
+				a.dolStop()
+			case a.pu.run != nil:
+				a.pixeluStop()
+			case a.mame.run != nil:
+				a.mameStop()
+			}
 		case "close":
 			call(pPostMessageW, a.hwnd, wmClose, 0, 0)
 		}
@@ -736,7 +748,8 @@ func dolIdleNote() string {
 
 // While the docked game screen has the keyboard, this window's own keys
 // don't arrive here, so a keyboard hook takes F11 / Alt+Enter (fullscreen),
-// Esc (leave fullscreen), F9 (record) and Alt+F4 (close) while this window
+// Esc (leave fullscreen; when not fullscreen, stop the game), F9 (record)
+// and Alt+F4 (close) while this window
 // is in front.
 //
 // The hook lives on a thread of its own that does nothing but wait for
@@ -811,6 +824,8 @@ func dolKeyHook(code, wp, lp uintptr) uintptr {
 			act = "fullscreen"
 		case k.VkCode == vkEscape && dolKeys.full.Load():
 			act = "unfullscreen"
+		case k.VkCode == vkEscape:
+			act = "stop" // not fullscreen: Esc ends the game
 		case k.VkCode == vkF9:
 			act = "record"
 		case k.VkCode == vkF4 && alt: // the game screen would take it

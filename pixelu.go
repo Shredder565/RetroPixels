@@ -123,7 +123,7 @@ func launchPixelUGame(path string) error {
 	opts.Embed = embed
 	var onStart func(pid int, exited <-chan struct{})
 	if embed {
-		onStart = embedDolphin // docks PixelU's window the same way
+		onStart = embedPixelU // docks PixelU's window over the page
 	}
 	if err := startEmulator(exe, pixelu.GameArgs(path, opts), path, g.Name, "pixelu", "PixelU", rec, onStart); err != nil {
 		if rec != nil {
