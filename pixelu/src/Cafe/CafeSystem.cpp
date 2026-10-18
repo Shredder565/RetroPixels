@@ -22,6 +22,7 @@
 #include "Cafe/OS/libs/snd_core/ax.h"
 #include "Cafe/OS/RPL/rpl.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
+#include "Cafe/HW/Latte/Core/LatteRecorder.h"
 #include "Cafe/Filesystem/FST/FST.h"
 #include "Common/FileStream.h"
 #include "GamePatch.h"
@@ -921,6 +922,7 @@ namespace CafeSystem
 		// start system
 		sSystemRunning = true;
 		WindowSystem::NotifyGameLoaded();
+		LatteRecorder::Start();
 		std::thread t(_LaunchTitleThread);
 		t.detach();
 	}
@@ -1070,6 +1072,7 @@ namespace CafeSystem
 		Latte_Stop();
 		// reset Cafe OS userspace modules
 		snd_core::reset();
+		LatteRecorder::Stop();
 		coreinit::OSAlarm_Shutdown();
 		GX2::_GX2DriverReset();
 		nn::save::ResetToDefaultState();

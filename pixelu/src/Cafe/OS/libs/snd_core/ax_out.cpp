@@ -4,6 +4,7 @@
 #include "audio/IAudioAPI.h"
 //#include "ax.h"
 #include "config/CemuConfig.h"
+#include "Cafe/HW/Latte/Core/LatteRecorder.h"
 
 namespace snd_core
 {
@@ -170,6 +171,10 @@ namespace snd_core
 		{
 			cemu_assert(false);
 		}
+
+		// PixelU recorder: the TV mix exactly as it goes to the host device (before host volume)
+		if (LatteRecorder::IsRecording())
+			LatteRecorder::SubmitTVAudioBE(sampleData, AX_SAMPLES_PER_3MS_48KHZ, sampleCount / AX_SAMPLES_PER_3MS_48KHZ);
 
 		std::shared_lock lock(g_audioMutex);
 

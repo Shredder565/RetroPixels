@@ -118,6 +118,8 @@ add_library(CemuCafe
   HW/Latte/Core/LattePM4.h
   HW/Latte/Core/LatteQuery.cpp
   HW/Latte/Core/LatteQueryObject.h
+  HW/Latte/Core/LatteRecorder.cpp
+  HW/Latte/Core/LatteRecorder.h
   HW/Latte/Core/LatteRenderTarget.cpp
   HW/Latte/Core/LatteRingBuffer.cpp
   HW/Latte/Core/LatteRingBuffer.h
@@ -500,6 +502,7 @@ if (ENABLE_OPENGL)
     HW/Latte/Renderer/OpenGL/LatteTextureViewGL.cpp
     HW/Latte/Renderer/OpenGL/LatteTextureViewGL.h
     HW/Latte/Renderer/OpenGL/OpenGLQuery.cpp
+    HW/Latte/Renderer/OpenGL/OpenGLRecorderCapture.cpp
     HW/Latte/Renderer/OpenGL/OpenGLRendererCore.cpp
     HW/Latte/Renderer/OpenGL/OpenGLRenderer.cpp
     HW/Latte/Renderer/OpenGL/OpenGLRenderer.h
@@ -540,6 +543,7 @@ if (ENABLE_VULKAN)
     HW/Latte/Renderer/Vulkan/VulkanPipelineStableCache.cpp
     HW/Latte/Renderer/Vulkan/VulkanPipelineStableCache.h
     HW/Latte/Renderer/Vulkan/VulkanQuery.cpp
+    HW/Latte/Renderer/Vulkan/VulkanRecorderCapture.cpp
     HW/Latte/Renderer/Vulkan/VulkanRendererCore.cpp
     HW/Latte/Renderer/Vulkan/VulkanRenderer.cpp
     HW/Latte/Renderer/Vulkan/VulkanRenderer.h

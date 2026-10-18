@@ -8,6 +8,7 @@
 #include "Cafe/HW/Latte/Renderer/Vulkan/CachedFBOVk.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/VKRMemoryManager.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/SwapchainInfoVk.h"
+#include "Cafe/HW/Latte/Core/LatteRecorder.h"
 #include "util/math/vector2.h"
 #include "util/helpers/Semaphore.h"
 #include "util/containers/flat_hash_map.hpp"
@@ -205,6 +206,35 @@ public:
 	bool IsPadWindowActive() override;
 
 	void HandleScreenshotRequest(LatteTextureView* texView, bool padView) override;
+
+	// PixelU recorder (VulkanRecorderCapture.cpp)
+	void recorder_captureTVFrame(LatteTextureView* texView, sint64 frameSlot) override;
+	void recorder_pollFrames() override;
+private:
+	struct RecorderReadback
+	{
+		VkBuffer buffer = VK_NULL_HANDLE;
+		VkDeviceMemory memory = VK_NULL_HANDLE;
+		uint8* mappedPtr = nullptr;
+		size_t bufferSize = 0;
+		uint64 commandBufferId = 0;
+		bool pending = false;
+		sint64 frameSlot = 0;
+		uint32 width = 0;
+		uint32 height = 0;
+		LatteRecorder::ColorConversion colorConversion = LatteRecorder::ColorConversion::None;
+	};
+	std::array<RecorderReadback, 4> m_recorderReadbacks{};
+	VkImage m_recorderBlitImage = VK_NULL_HANDLE;
+	VkDeviceMemory m_recorderBlitImageMemory = VK_NULL_HANDLE;
+	VkFormat m_recorderBlitFormat = VK_FORMAT_UNDEFINED;
+	uint32 m_recorderBlitWidth = 0;
+	uint32 m_recorderBlitHeight = 0;
+	void recorder_waitForPendingReadbacks();
+	bool recorder_prepareBlitImage(VkFormat format, uint32 width, uint32 height);
+	bool recorder_prepareReadbackBuffer(RecorderReadback& readback, size_t size);
+	void recorder_releaseResources();
+public:
 
 	void QueryMemoryInfo();
 	void QueryAvailableFormats();

@@ -17,6 +17,7 @@
 #include "Cafe/OS/libs/erreula/erreula.h"
 #include "input/InputManager.h"
 #include "Cafe/OS/libs/swkbd/swkbd.h"
+#include "Cafe/HW/Latte/Core/LatteRecorder.h"
 
 uint32 prevScissorX = 0;
 uint32 prevScissorY = 0;
@@ -1007,6 +1008,10 @@ void LatteRenderTarget_itHLECopyColorBufferToScanBuffer(MPTR colorBufferPtr, uin
 	togglePressedLast = togglePressed;
 
 	bool showDRC = swkbd_hasKeyboardInputHook() == false && (isDRCPrimary ^ altScreenRequested);
+
+	// PixelU recorder: always the game's TV picture, independent of what the windows show and before any overlay
+	if ((renderTarget & RENDER_TARGET_TV) && LatteRecorder::IsRecording())
+		LatteRecorder::OnTVScanBufferCopy(texView);
 
 	if ((renderTarget & RENDER_TARGET_DRC) && g_renderer->IsPadWindowActive())
 		LatteRenderTarget_copyToBackbuffer(texView, true);

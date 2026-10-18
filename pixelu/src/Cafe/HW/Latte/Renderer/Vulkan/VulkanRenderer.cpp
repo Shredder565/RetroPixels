@@ -858,6 +858,7 @@ VulkanRenderer::~VulkanRenderer()
 	SubmitCommandBuffer();
 	WaitDeviceIdle();
 	WaitCommandBufferFinished(GetCurrentCommandBufferId());
+	recorder_releaseResources();
 	// shut down pipeline save thread
 	m_destructionRequested = true;
 	m_pipeline_cache_semaphore.notify();

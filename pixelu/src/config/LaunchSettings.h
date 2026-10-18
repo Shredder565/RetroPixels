@@ -39,6 +39,10 @@ public:
 
 	static std::optional<uint32> GetPersistentId() { return s_persistent_id; }
 
+	// PixelU: RetroPixels game recording (see Cafe/HW/Latte/Core/LatteRecorder.h)
+	static std::optional<fs::path> GetRPRecordPath() { return s_rp_record_path; }
+	static std::optional<fs::path> GetRPFFmpegPath() { return s_rp_ffmpeg_path; }
+
 	static uint32 GetPPCRecLowerAddr() { return ppcRec_limitLowerAddr; };
 	static uint32 GetPPCRecUpperAddr() { return ppcRec_limitUpperAddr; };
 
@@ -64,6 +68,9 @@ private:
 	inline static bool s_force_multicore_interpreter = false;
 	
 	inline static std::optional<uint32> s_persistent_id{};
+
+	inline static std::optional<fs::path> s_rp_record_path{};
+	inline static std::optional<fs::path> s_rp_ffmpeg_path{};
 
 	// for recompiler debugging
 	inline static uint32 ppcRec_limitLowerAddr{};

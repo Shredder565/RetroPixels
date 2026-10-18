@@ -3,6 +3,7 @@
 
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Cafe/HW/Latte/Renderer/RendererOuputShader.h"
+#include "Cafe/HW/Latte/Core/LatteRecorder.h"
 
 #define GPU_GL_MAX_NUM_ATTRIBUTE		(16) // Wii U GPU supports more than 16 but not all desktop GPUs do. Have to keep this at 16 until we find a better solution
 
@@ -57,6 +58,10 @@ public:
 	void DrawEmptyFrame(bool mainWindow) override;
 	void ClearColorbuffer(bool padView) override;
 	void HandleScreenshotRequest(LatteTextureView* texView, bool padView) override;
+
+	// PixelU recorder (OpenGLRecorderCapture.cpp)
+	void recorder_captureTVFrame(LatteTextureView* texView, sint64 frameSlot) override;
+	void recorder_pollFrames() override;
 
 	void DrawBackbufferQuad(LatteTextureView* texView, RendererOutputShader* shader, bool useLinearTexFilter, sint32 imageX, sint32 imageY, sint32 imageWidth, sint32 imageHeight, bool padView, bool clearBackground) override;
 
@@ -176,6 +181,19 @@ public:
 
 private:
 	void GetVendorInformation() override;
+
+	struct RecorderReadback
+	{
+		GLuint pixelBuffer = 0;
+		size_t bufferSize = 0;
+		GLsync fence = nullptr;
+		bool pending = false;
+		sint64 frameSlot = 0;
+		uint32 width = 0;
+		uint32 height = 0;
+		LatteRecorder::ColorConversion colorConversion = LatteRecorder::ColorConversion::None;
+	};
+	std::array<RecorderReadback, 4> m_recorderReadbacks{};
 
 	void texture_setActiveTextureUnit(sint32 index);
 

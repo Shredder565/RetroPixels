@@ -7,6 +7,7 @@
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanAPI.h"
 #endif
 #include "Cafe/HW/Latte/Core/LatteOverlay.h"
+#include "Cafe/HW/Latte/Core/LatteRecorder.h"
 #include "config/ActiveSettings.h"
 #include "config/LaunchSettings.h"
 #include "wxgui/GettingStartedDialog.h"
@@ -402,6 +403,7 @@ int CemuApp::OnExit()
 	wxApp::OnExit();
 	wxTheClipboard->Flush();
 	InputManager::instance().Shutdown();
+	LatteRecorder::Stop(); // PixelU: make sure the recording is finished, ExitProcess skips static destructors
 	int retValue = 0;
 	if (auto r = CafeSystem::GetForegroundTitleReturnStatus(); (LaunchSettings::GetLoadFile() || LaunchSettings::GetLoadTitleID()) && r)
 		retValue = *r;

@@ -74,6 +74,10 @@ public:
 
 	virtual void HandleScreenshotRequest(LatteTextureView* texView, bool padView){}
 
+	// PixelU recorder (see LatteRecorder.h): queue a non-blocking readback of the TV picture, finished readbacks are handed to LatteRecorder::SubmitVideoFrame
+	virtual void recorder_captureTVFrame(LatteTextureView* texView, sint64 frameSlot) {}
+	virtual void recorder_pollFrames() {}
+
 	virtual void DrawBackbufferQuad(LatteTextureView* texView, RendererOutputShader* shader, bool useLinearTexFilter,
 												sint32 imageX, sint32 imageY, sint32 imageWidth, sint32 imageHeight,
 												bool padView, bool clearBackground) = 0;
