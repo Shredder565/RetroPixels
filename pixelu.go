@@ -55,7 +55,11 @@ func pixeluRunning() bool {
 // Settings, with their defaults. Call with cfgMu held.
 func pixeluFullscreenOn() bool { return cfg.PixelUFullscreen == nil || *cfg.PixelUFullscreen }
 func pixeluEmbedOn() bool      { return cfg.PixelUEmbed == nil || *cfg.PixelUEmbed }
-func pixeluRecordOn() bool     { return cfg.PixelURecord != nil && *cfg.PixelURecord }
+
+// pixeluRecordOn: games are recorded automatically. One setting for every
+// system (cfg.AutoRecord, on unless turned off); the old Wii U-only
+// pixeluRecord switch isn't used any more. Call with cfgMu held.
+func pixeluRecordOn() bool { return cfg.AutoRecord == nil || *cfg.AutoRecord }
 
 // pixeluRecording sets up a recording of the game about to start: a folder
 // of its own for PixelU's raw files, and ffmpeg (PixelU encodes with it while
@@ -245,7 +249,7 @@ func registerPixelURoutes(mux *http.ServeMux) {
 			set(func() { cfg.PixelUEmbed = &v })
 		case "record":
 			v := b.On
-			set(func() { cfg.PixelURecord = &v })
+			set(func() { cfg.AutoRecord = &v }) // the one "record games automatically" setting
 		case "screen": // the GamePad screen or the TV picture in the docked game
 			var pad bool
 			if pad, err = pixeluScreen(pixelu.ScreenSwitch); err == nil {

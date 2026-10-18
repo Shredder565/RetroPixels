@@ -46,7 +46,7 @@ func setupFakePixelU(t *testing.T) (argsFile string, game string) {
 	}
 	cfgMu.Lock()
 	off := false // these tests check PixelU's own window; docking needs Windows
-	cfg = config{PixelUExe: exe, PixelUFolders: []string{games}, PixelUEmbed: &off}
+	cfg = config{PixelUExe: exe, PixelUFolders: []string{games}, PixelUEmbed: &off, AutoRecord: &off}
 	cfgMu.Unlock()
 	setManualWanted(false)
 	recMu.Lock()
@@ -122,7 +122,7 @@ func TestPixelURecordEndToEnd(t *testing.T) {
 	argsFile, game := setupFakePixelU(t)
 	cfgMu.Lock()
 	on := true
-	cfg.PixelURecord = &on
+	cfg.AutoRecord = &on
 	cfgMu.Unlock()
 	if err := launchPixelUGame(game); err != nil {
 		t.Fatal(err)
@@ -193,5 +193,23 @@ func TestPixelUEmbedDefaultsOn(t *testing.T) {
 	cfg = config{}
 	if !pixeluEmbedOn() {
 		t.Error("Wii U games should play inside RetroPixels unless turned off")
+	}
+}
+
+func TestPixelURecordsByDefault(t *testing.T) {
+	cfgMu.Lock()
+	saved := cfg
+	cfg = config{}
+	on := pixeluRecordOn()
+	off := false
+	cfg.AutoRecord = &off
+	turnedOff := pixeluRecordOn()
+	cfg = saved
+	cfgMu.Unlock()
+	if !on {
+		t.Error("Wii U games should be recorded unless recording is turned off")
+	}
+	if turnedOff {
+		t.Error("turning \"record games automatically\" off should stop Wii U recording")
 	}
 }

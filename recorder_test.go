@@ -515,3 +515,30 @@ func TestFinalSync(t *testing.T) {
 		}
 	}
 }
+
+func TestSaveUploadedRecording(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("RETRO_REC_DIR", dir)
+	cfgMu.Lock()
+	saved := cfg.RecordDir
+	cfg.RecordDir = ""
+	cfgMu.Unlock()
+	defer func() { cfgMu.Lock(); cfg.RecordDir = saved; cfgMu.Unlock() }()
+	p, err := saveUploadedRecording(`..\Mario: "World" - 2026.mp4`, strings.NewReader("video"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(p) != dir || filepath.Base(p) != `Mario_ _World_ - 2026.mp4` {
+		t.Errorf("saved as %q", p)
+	}
+	p2, err := saveUploadedRecording(`..\Mario: "World" - 2026.mp4`, strings.NewReader("video"))
+	if err != nil || filepath.Base(p2) != `Mario_ _World_ - 2026 (2).mp4` {
+		t.Errorf("second copy: %q %v", p2, err)
+	}
+	if _, err := saveUploadedRecording("x.exe", strings.NewReader("")); err == nil {
+		t.Error("an empty upload should fail")
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, "*.saving*")); len(left) != 0 {
+		t.Errorf("left behind: %v", left)
+	}
+}

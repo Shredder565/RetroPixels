@@ -570,7 +570,7 @@
             <button class="btn ghost sm" id="wiiuAddFolder">Add games folder…</button>
             <label class="sw-check"><input type="checkbox" id="wiiuFull"> Start games fullscreen</label>
             <label class="sw-check" title="Wii U games play inside this window. Turn it off to play in PixelU's own window"><input type="checkbox" id="wiiuEmbed"> Play inside RetroPixels</label>
-            <label class="sw-check" title="Saves just the game's TV screen and sound as a high-quality .mp4 in your Recordings folder"><input type="checkbox" id="wiiuRec"> Record games (game screen only, high-quality .mp4)</label>
+            <label class="sw-check" title="Saves just the game's TV screen and sound as a high-quality .mp4 in your Recordings folder"><input type="checkbox" id="wiiuRec"> Record games automatically (game screen only, high-quality .mp4)</label>
           </div>
           <div id="wiiuFFNote"></div>
           <div class="sw-tools">
@@ -1085,7 +1085,7 @@
       ${st.saving ? `<div class="rec-note" style="background:#2a2312;border:1px solid var(--warn)">${savingText(st.saving)}${st.queued ? ` (${st.queued} more waiting)` : ""}</div>` : ""}
       ${st.next && !st.dumping ? `<div class="rec-note ok">Your next GameCube or Wii game will be recorded.</div>` : ""}
       <div class="rs-group">
-        <div class="rs-row"><label><b>Record GameCube &amp; Wii games automatically</b><small>Records each game from start to finish. Stop recording from the bar at the top while playing. When this is off, use "Record next game" there.</small></label>
+        <div class="rs-row"><label><b>Record every game automatically</b><small>Every game, on every system, is recorded from start to finish (game screen and sound only). Stop recording from the bar at the top while playing. When this is off, use Record (F9) or "Record next game" there.</small></label>
           <label class="toggle"><input type="checkbox" id="recAuto" ${st.auto ? "checked" : ""}> ${st.auto ? "On" : "Off"}</label></div>
         <div class="rs-row"><label><b>Frame rate</b></label>
           <select class="sw-select" id="recFps"><option value="60" ${st.fps === 60 ? "selected" : ""}>60 FPS (smooth)</option><option value="30" ${st.fps === 30 ? "selected" : ""}>30 FPS (smaller files)</option></select></div>
@@ -1626,7 +1626,7 @@
     document.getElementById("wiiuFull").addEventListener("change", e => wiiuAction({ action: "fullscreen", on: e.target.checked }));
     document.getElementById("wiiuEmbed").addEventListener("change", e => wiiuAction({ action: "embed", on: e.target.checked }));
     document.getElementById("wiiuRec").addEventListener("change", e => wiiuAction({ action: "record", on: e.target.checked },
-      e.target.checked ? "Wii U games will be recorded (game screen only, high quality)" : "Wii U recording off"));
+      e.target.checked ? "Every game will be recorded (game screen only, high quality)" : "Automatic recording off for every game"));
     document.getElementById("wiiuOpenPixelU").addEventListener("click", () => wiiuAction({ action: "open-pixelu" }, "Opening PixelU…"));
     document.getElementById("wiiuOpenFolder").addEventListener("click", () => wiiuAction({ action: "open-folder" }));
   }
@@ -1864,36 +1864,55 @@
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
   };
 
-  function startRecording() {
+  // "Record games automatically" (one setting for every system, on unless turned off in Recordings).
+  const autoRecordOn = () => !!DESKTOP && (!lastRec || lastRec.auto !== false);
+  let recSaved = null; // resolves once the last recording is saved
+
+  function startRecording(auto) {
     if (recorder) return;
     // Record only the game's picture: the player keeps a canvas with just the
     // game at its own shape (no black bars, buttons or messages).
     const canvas = player && player.recordingCanvas ? player.recordingCanvas() : null;
-    if (!canvas || !gameReady) { toast("Start a game before recording", true); return; }
+    if (!canvas || !gameReady) { if (!auto) toast("Start a game before recording", true); return; }
     recMime = pickMime();
-    if (!recMime) { toast("This browser can't record video — try Chrome or Edge", true); return; }
+    if (!recMime) { if (!auto) toast("This browser can't record video — try Chrome or Edge", true); return; }
 
     const stream = canvas.captureStream(60);
     audioTaps.forEach(t => t.node.stream.getAudioTracks().forEach(tr => stream.addTrack(tr)));
 
     try {
-      recorder = new MediaRecorder(stream, { mimeType: recMime, videoBitsPerSecond: 8_000_000, audioBitsPerSecond: 160_000 });
+      recorder = new MediaRecorder(stream, { mimeType: recMime, videoBitsPerSecond: 12_000_000, audioBitsPerSecond: 192_000 });
     } catch (e) { toast("Couldn't start recording: " + e.message, true); recorder = null; return; }
 
     recChunks = [];
     recorder.ondataavailable = e => { if (e.data && e.data.size) recChunks.push(e.data); };
-    recorder.onstop = () => {
+    let doneSaving;
+    recSaved = new Promise(r => { doneSaving = r; });
+    recorder.onstop = async () => {
       if (player && player.stopRecordingCanvas) player.stopRecordingCanvas();
       const isMp4 = recMime.startsWith("video/mp4");
       const blob = new Blob(recChunks, { type: isMp4 ? "video/mp4" : "video/webm" });
-      const name = gameName;
+      const file = `${gameName} - ${fileStamp()}.${isMp4 ? "mp4" : "webm"}`;
+      recorder = null;
+      if (DESKTOP) {
+        // The desktop app keeps it in the recordings folder with the other recordings.
+        try {
+          const res = await fetch("/api/rec/upload?name=" + encodeURIComponent(file), {
+            method: "POST", headers: { "X-Retro-Token": DESKTOP.token, "Content-Type": "application/octet-stream" }, body: blob });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok || data.error) throw new Error(data.error || `couldn't save it (${res.status})`);
+          toast(`Recording saved: ${data.file}`);
+          doneSaving();
+          return;
+        } catch (e) { toast("Recording: " + e.message + " — downloading it instead", true); }
+      }
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
-      a.download = `${name} - ${fileStamp()}.${isMp4 ? "mp4" : "webm"}`;
+      a.download = file;
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 10000);
       toast(isMp4 ? "Recording saved (.mp4)" : "Recording saved as .webm — this browser can't make .mp4", !isMp4);
-      recorder = null;
+      doneSaving();
     };
     recorder.start(1000);
     recStart = Date.now();
@@ -1905,16 +1924,18 @@
       const s = Math.floor((Date.now() - recStart) / 1000);
       recTime.textContent = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
     }, 250);
-    toast(audioTaps.length ? "Recording…" : "Recording (no game audio detected yet)");
+    toast(auto ? "Recording this game (turn this off in Recordings)" : audioTaps.length ? "Recording…" : "Recording (no game audio detected yet)");
   }
 
   function stopRecording() {
-    if (!recorder) return;
+    if (!recorder) return Promise.resolve();
     clearInterval(recTick);
     recBtn.classList.remove("recording");
     recBtn.textContent = "● Record";
     recTimer.hidden = true;
+    const saved = recSaved || Promise.resolve();
     if (recorder.state !== "inactive") recorder.stop();
+    return saved;
   }
 
   const toggleRecording = () => (recorder ? stopRecording() : startRecording());
@@ -2157,6 +2178,7 @@
       screenshot: () => player.screenshotPNG(),
     };
     gameReady = true;
+    if (autoRecordOn()) setTimeout(() => { if (gameReady && !recorder) startRecording(true); }, 300);
     startArchipelago(core, rom, name);
     showSeatPicker();
     document.getElementById("sramTools").hidden = !player.core.getSRAM();
@@ -2211,6 +2233,7 @@
     if (!confirm("Replace this game's battery save with that file? The game will restart.")) return;
     const data = new Uint8Array(await f.arrayBuffer());
     await sramOp("readwrite", s => s.put(data, gameKey));
+    await stopRecording();
     player.destroy();
     toast("Battery save imported — game restarted");
     startOwn(ownGame.core, ownGame.rom, ownGame.name, ownGame.coreOpts);
@@ -2456,8 +2479,11 @@
     if (help.open) help.scrollIntoView({ behavior: "smooth", block: "nearest" });
   });
 
-  document.getElementById("backBtn").addEventListener("click", () => {
-    if (recorder && !confirm("You're recording. Stop and discard the recording?")) return;
+  document.getElementById("backBtn").addEventListener("click", async () => {
+    if (recorder) { // keep the recording: save it, then go back
+      toast("Saving the recording…");
+      await Promise.race([stopRecording(), new Promise(r => setTimeout(r, 60000))]);
+    }
     location.reload();
   });
   document.getElementById("fsBtn").addEventListener("click", () => {

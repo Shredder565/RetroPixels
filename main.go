@@ -77,7 +77,7 @@ type config struct {
 	PixelURecent     []recentGame `json:"pixeluRecent,omitempty"`
 	PixelUFullscreen *bool        `json:"pixeluFullscreen,omitempty"` // unset = on
 	PixelUEmbed      *bool        `json:"pixeluEmbed,omitempty"`      // unset = on
-	PixelURecord     *bool        `json:"pixeluRecord,omitempty"`     // unset = off
+	PixelURecord     *bool        `json:"pixeluRecord,omitempty"`     // old Wii U-only switch, no longer used (AutoRecord covers every game)
 }
 
 var (

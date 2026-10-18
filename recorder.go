@@ -1116,6 +1116,20 @@ func recControl(action string) (string, error) {
 }
 
 func registerRecorderRoutes(mux *http.ServeMux) {
+	// A recording made in the page (the built-in systems record their own
+	// picture there) is saved in the recordings folder, next to the others.
+	mux.HandleFunc("/api/rec/upload", guard(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			fail(w, errors.New("send the video with POST"))
+			return
+		}
+		p, err := saveUploadedRecording(r.URL.Query().Get("name"), http.MaxBytesReader(w, r.Body, 8<<30))
+		if err != nil {
+			fail(w, err)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ok": true, "file": filepath.Base(p), "dir": filepath.Dir(p)})
+	}))
 	mux.HandleFunc("/api/rec/status", guard(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"status": recStatus(), "recordings": listRecordings()})
 	}))
@@ -1199,4 +1213,52 @@ func registerRecorderRoutes(mux *http.ServeMux) {
 		}
 		writeJSON(w, 200, map[string]any{"ok": true})
 	}))
+}
+
+// saveUploadedRecording writes a video from the page into the recordings
+// folder as name (cleaned up; .mp4 or .webm), never over an existing file.
+func saveUploadedRecording(name string, body io.Reader) (string, error) {
+	ext := strings.ToLower(filepath.Ext(name))
+	if ext != ".mp4" && ext != ".webm" {
+		ext = ".mp4"
+	}
+	base := strings.TrimSuffix(filepath.Base(strings.ReplaceAll(name, "\\", "/")), filepath.Ext(name))
+	base = strings.Map(func(r rune) rune {
+		if r < 32 || strings.ContainsRune(`<>:"/\\|?*`, r) {
+			return '_'
+		}
+		return r
+	}, base)
+	base = strings.Trim(strings.TrimSpace(base), ".")
+	if base == "" {
+		base = "Recording " + time.Now().Format("2006-01-02 15-04-05")
+	}
+	dir := recordingsDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	p := filepath.Join(dir, base+ext)
+	for i := 2; ; i++ {
+		if _, err := os.Stat(p); os.IsNotExist(err) {
+			break
+		}
+		p = filepath.Join(dir, fmt.Sprintf("%s (%d)%s", base, i, ext))
+	}
+	tmp := p + ".saving" + ext
+	f, err := os.Create(tmp)
+	if err != nil {
+		return "", err
+	}
+	n, err := io.Copy(f, body)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil && n == 0 {
+		err = errors.New("the recording was empty")
+	}
+	if err != nil {
+		os.Remove(tmp)
+		return "", err
+	}
+	return p, os.Rename(tmp, p)
 }
