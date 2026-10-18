@@ -76,6 +76,13 @@ jobs:
           $sha = git rev-parse --short HEAD
           "PixelU test build (Wii U, based on Cemu; not a release)`r`nBuilt $(Get-Date -Format yyyy-MM-dd) from branch claude/wiiu-emulator-urpcen ($sha)`r`nSource: https://github.com/shredder565/retropixels/tree/claude/wiiu-emulator-urpcen/pixelu`r`nLicense: Mozilla Public License 2.0 (LICENSE-MPL-2.0.txt). Based on Cemu: https://github.com/cemu-project/Cemu" | Out-File "$out/VERSION.txt"
 
+      - name: List package contents
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse -File pixelu/bin | Sort-Object Length -Descending | Select-Object -First 15 FullName, Length | Format-Table -AutoSize | Out-String -Width 300
+          Get-ChildItem -Recurse -File PixelU | Sort-Object Length -Descending | Select-Object -First 15 FullName, Length | Format-Table -AutoSize | Out-String -Width 300
+          "Total: " + ((Get-ChildItem -Recurse -File PixelU | Measure-Object Length -Sum).Sum / 1MB) + " MB"
+
       - uses: actions/upload-artifact@v4
         with:
           name: PixelU-windows-x64
