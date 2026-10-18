@@ -343,7 +343,7 @@ MainWindow::MainWindow()
 		else
 		{
 			wxString errorMsg = fmt::format("Title ID {:016x} not found", load_title_id.value());
-			wxMessageBox(errorMsg, _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
+			RPEmbed::ShowMessage(errorMsg, _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
 
 		}
 	}
@@ -511,7 +511,7 @@ bool MainWindow::FileLoad(const fs::path launchPath, wxLaunchGameEvent::INITIATE
 		if (!CafeTitleList::FindBaseTitleId(launchTitle.GetAppTitleId(), baseTitleId))
 		{
 			wxString t = _("Unable to launch game because the base files were not found.");
-			wxMessageBox(t, _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
+			RPEmbed::ShowMessage(t, _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
 			return false;
 		}
 		CafeSystem::PREPARE_STATUS_CODE r = CafeSystem::PrepareForegroundTitle(baseTitleId);
@@ -524,14 +524,14 @@ bool MainWindow::FileLoad(const fs::path launchPath, wxLaunchGameEvent::INITIATE
 		{
 			wxString t = _("Unable to mount title.\nMake sure the configured game paths are still valid and refresh the game list.\n\nFile which failed to load:\n");
 			t.append(_pathToUtf8(launchPath));
-			wxMessageBox(t, _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
+			RPEmbed::ShowMessage(t, _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
 			return false;
 		}
 		else if (r != CafeSystem::PREPARE_STATUS_CODE::SUCCESS)
 		{
 			wxString t = _("Failed to launch game.");
 			t.append(_pathToUtf8(launchPath));
-			wxMessageBox(t, _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
+			RPEmbed::ShowMessage(t, _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
 			return false;
 		}
 	}
@@ -548,7 +548,7 @@ bool MainWindow::FileLoad(const fs::path launchPath, wxLaunchGameEvent::INITIATE
 				cemu_assert_debug(false); // todo
 				wxString t = _("Failed to launch executable. Path: ");
 				t.append(_pathToUtf8(launchPath));
-				wxMessageBox(t, _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
+				RPEmbed::ShowMessage(t, _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
 				return false;
 			}
 		}
@@ -556,7 +556,7 @@ bool MainWindow::FileLoad(const fs::path launchPath, wxLaunchGameEvent::INITIATE
 		{
 			wxString t = _("Unable to launch title.\nMake sure the configured game paths are still valid and refresh the game list.\n\nPath which failed to load:\n");
 			t.append(_pathToUtf8(launchPath));
-			wxMessageBox(t, _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
+			RPEmbed::ShowMessage(t, _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
 			return false;
 		}
 		else
@@ -573,7 +573,7 @@ bool MainWindow::FileLoad(const fs::path launchPath, wxLaunchGameEvent::INITIATE
 				t.append("\n\n");
 				t.append(_("Could not decrypt title because title.tik is missing."));
 			}
-			wxMessageBox(t, _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
+			RPEmbed::ShowMessage(t, _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
 			return false;
 		}
 	}
@@ -633,7 +633,8 @@ void MainWindow::OnLaunchFromFile(wxLaunchGameEvent& event)
 {
 	if (event.GetPath().empty())
 		return;
-	FileLoad(event.GetPath(), event.GetInitiatedBy());
+	if (!FileLoad(event.GetPath(), event.GetInitiatedBy()) && RPEmbed::Enabled())
+		Close(true); // PixelU: nothing else to show inside RetroPixels (the error was shown and logged)
 }
 
 void MainWindow::OnFileMenu(wxCommandEvent& event)
@@ -802,7 +803,7 @@ void MainWindow::OnFileExit(wxCommandEvent& event)
 void MainWindow::TogglePadView()
 {
 	const auto& config = GetWxGUIConfig();
-	if (config.pad_open)
+	if (config.pad_open && !RPEmbed::Enabled()) // PixelU: no GamePad window next to the docked game
 	{
 		if (m_padView)
 			return;

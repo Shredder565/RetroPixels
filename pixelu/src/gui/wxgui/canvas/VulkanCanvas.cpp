@@ -6,6 +6,7 @@
 #endif
 
 #include <wx/msgdlg.h>
+#include "wxgui/RPEmbed.h"
 #include <helpers/wxHelpers.h>
 
 VulkanCanvas::VulkanCanvas(wxWindow* parent, const wxSize& size, bool is_main_window)
@@ -41,8 +42,13 @@ VulkanCanvas::VulkanCanvas(wxWindow* parent, const wxSize& size, bool is_main_wi
 	{
 		cemuLog_log(LogType::Force, "Error when initializing Vulkan renderer: {}", ex.what());
 		auto msg = formatWxString(_("Error when initializing Vulkan renderer:\n{}"), ex.what());
-		wxMessageDialog dialog(this, msg, _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
-		dialog.ShowModal();
+		if (RPEmbed::Enabled())
+			RPEmbed::ShowMessage(msg, _("Error"), wxOK | wxCENTRE | wxICON_ERROR); // PixelU: inside RetroPixels
+		else
+		{
+			wxMessageDialog dialog(this, msg, _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
+			dialog.ShowModal();
+		}
 		_exit(0);
 	}
 

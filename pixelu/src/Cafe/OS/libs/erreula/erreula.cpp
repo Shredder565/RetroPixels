@@ -10,6 +10,8 @@
 #include "Cafe/OS/libs/coreinit/coreinit_Time.h"
 #include "Cafe/OS/libs/vpad/vpad.h"
 #include "OS/libs/coreinit/coreinit_DynLoad.h"
+#include "config/ActiveSettings.h"
+#include "config/LaunchSettings.h"
 
 namespace nn
 {
@@ -110,11 +112,13 @@ namespace erreula
 			m_resultCode = -1;
 			m_resultCodeForLeftButton = 0;
 			m_resultCodeForRightButton = 0;
+			m_autoAnswer = false;
 			SetState(ErrEulaState::Hidden);
 		}
 
-		void DoAppearError(AppearArg* arg)
+		void DoAppearError(AppearArg* arg, bool autoAnswer = false)
 		{
+			m_autoAnswer = autoAnswer;
 			m_buttonSelection = BUTTON_SELECTION::NONE;
 			m_resultCode = -1;
 			m_resultCodeForLeftButton = -1;
@@ -141,6 +145,9 @@ namespace erreula
 				if (elapsedTick > coreinit::EspressoTime::ConvertMsToTimerTicks(FADE_TIME))
 				{
 					SetState(m_state == ErrEulaState::Appearing ? ErrEulaState::Visible : ErrEulaState::Hidden);
+					// PixelU: answered for the user, OK is "pressed" as soon as the dialog could take a press
+					if (m_state == ErrEulaState::Visible && m_autoAnswer && m_buttonSelection == BUTTON_SELECTION::NONE)
+						SetButtonSelection(BUTTON_SELECTION::LEFT);
 				}
 			}
 		}
@@ -171,6 +178,12 @@ namespace erreula
 		ErrEulaState GetState() const
 		{
 			return m_state;
+		}
+
+		// PixelU: the current dialog is answered automatically and not drawn
+		bool IsAutoAnswered() const
+		{
+			return m_autoAnswer;
 		}
 
 		sint32 GetResultCode() const
@@ -213,6 +226,7 @@ namespace erreula
 
 		ErrEulaState m_state;
 		uint32 m_lastStateChange;
+		bool m_autoAnswer{false};
 
 		/* +0x30 */ betype<sint32> m_resultCode;
 		/* +0x239C */ betype<BUTTON_SELECTION> m_buttonSelection;
@@ -308,11 +322,34 @@ namespace erreula
 		osLib_returnFromFunction(hCPU, 0);
 	}
 
+	// PixelU: with --rp-embed and no online mode (no online account files), an error code dialog for an
+	// online error is answered with OK right away instead of stopping the game on a dialog that can't help:
+	// 102 Nintendo Network ID / account server, 103 internet connection, 115 Miiverse, 118 online play.
+	// Everything else is shown as usual, and without --rp-embed nothing changes.
+	bool ShouldAutoAnswer(const AppearArg& arg)
+	{
+		if (!LaunchSettings::RPEmbedEnabled())
+			return false;
+		if (arg.errorType != ErrorDialogType::Code && arg.errorType != ErrorDialogType::Text)
+			return false; // only dialogs with just an OK button
+		const uint32 errorCode = (uint32)arg.errorCode;
+		const uint32 family = errorCode / 10000;
+		if (family != 102 && family != 103 && family != 115 && family != 118)
+			return false;
+		return !ActiveSettings::IsOnlineEnabled();
+	}
+
 	void ErrEulaAppearError(AppearArg* arg)
 	{
 		g_errEula.currentDialog = *arg;
+		const bool autoAnswer = ShouldAutoAnswer(*arg);
+		if (autoAnswer)
+		{
+			const uint32 errorCode = (uint32)arg->errorCode;
+			cemuLog_log(LogType::Force, "ErrEula: Error-Code {:03}-{:04} (online, and online mode isn't available) answered with OK", errorCode / 10000, errorCode % 10000);
+		}
 		if(g_errEula.errEulaInstance)
-			g_errEula.errEulaInstance->DoAppearError(arg);
+			g_errEula.errEulaInstance->DoAppearError(arg, autoAnswer);
 	}
 
 	void ErrEulaDisappearError()
@@ -358,6 +395,8 @@ namespace erreula
 			return;
 		if(g_errEula.errEulaInstance->GetState() != ErrEulaState::Visible && g_errEula.errEulaInstance->GetState() != ErrEulaState::Appearing && g_errEula.errEulaInstance->GetState() != ErrEulaState::Disappearing)
 			return;
+		if(g_errEula.errEulaInstance->IsAutoAnswered())
+			return; // PixelU: answered for the user, never drawn
 		const AppearError& appearArg = g_errEula.currentDialog;
 		std::string text;
 		const uint32 errorCode = (uint32)appearArg.errorCode;

@@ -21,6 +21,7 @@
 #include "wxgui/wxgui.h"
 #include "wxgui/CemuApp.h"
 #include "wxgui/MainWindow.h"
+#include "wxgui/RPEmbed.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
 #include "config/ActiveSettings.h"
 #include "config/NetworkSettings.h"
@@ -70,7 +71,7 @@ void WindowSystem::ShowErrorDialog(std::string_view message, std::string_view ti
 		caption = wxASCII_STR(wxMessageBoxCaptionStr);
 	else
 		caption = wxString::FromUTF8(title);
-	wxMessageBox(wxString::FromUTF8(message), caption, wxOK | wxCENTRE | wxICON_ERROR);
+	RPEmbed::ShowMessage(wxString::FromUTF8(message), caption, wxOK | wxCENTRE | wxICON_ERROR); // PixelU: inside RetroPixels under --rp-embed
 }
 
 WindowSystem::WindowInfo& WindowSystem::GetWindowInfo()

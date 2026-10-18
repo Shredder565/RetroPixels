@@ -215,10 +215,10 @@ void CemuApp::InitializeNewMLCOrFail(fs::path mlc)
 	if(ActiveSettings::IsCommandLineMlcPath() || ActiveSettings::IsCustomMlcPath())
 	{
 		// tell user that the custom path is not writable
-		wxMessageBox(formatWxString(_("Cemu failed to write to the custom mlc directory.\nThe path is:\n{}"), wxHelper::FromPath(mlc)), _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
+		RPEmbed::ShowMessage(formatWxString(_("Cemu failed to write to the custom mlc directory.\nThe path is:\n{}"), wxHelper::FromPath(mlc)), _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
 		exit(0);
 	}
-	wxMessageBox(formatWxString(_("Cemu failed to write to the mlc directory.\nThe path is:\n{}"), wxHelper::FromPath(mlc)), _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
+	RPEmbed::ShowMessage(formatWxString(_("Cemu failed to write to the mlc directory.\nThe path is:\n{}"), wxHelper::FromPath(mlc)), _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
 	exit(0);
 }
 
@@ -233,12 +233,18 @@ void CemuApp::InitializeExistingMLCOrFail(fs::path mlc)
 		// if it's a command line path then just quit. Otherwise ask if user wants to reset the path
 		if(ActiveSettings::IsCommandLineMlcPath())
 		{
-			wxMessageBox(formatWxString(_("Cemu failed to write to the custom mlc directory.\nThe path is:\n{}"), wxHelper::FromPath(mlc)), _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
+			RPEmbed::ShowMessage(formatWxString(_("Cemu failed to write to the custom mlc directory.\nThe path is:\n{}"), wxHelper::FromPath(mlc)), _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
 			exit(0);
 		}
 		// ask user if they want to reset the path
 		const wxString message = formatWxString(_("Cemu failed to write to the custom mlc directory.\n\nThe path is:\n{}\n\nCemu cannot start without a valid mlc path. Do you want to reset the path? You can later change it again in the General Settings."),
 												_pathToUtf8(mlc));
+		if (RPEmbed::Enabled())
+		{
+			// PixelU: no question window by itself; open PixelU on its own to answer it
+			RPEmbed::ShowMessage(message, _("Error"), wxOK | wxICON_WARNING);
+			exit(0);
+		}
 		wxMessageDialog dialog(nullptr, message, _("Error"), wxCENTRE | wxYES_NO | wxICON_WARNING);
 		dialog.SetYesNoLabels(_("Reset path"), _("Exit"));
 		const auto dialogResult = dialog.ShowModal();
@@ -253,7 +259,7 @@ void CemuApp::InitializeExistingMLCOrFail(fs::path mlc)
 	else
 	{
 		// default path is not writeable. Just let the user know and quit. Unsure if it would be a good idea to ask the user to choose an alternative path instead
-		wxMessageBox(formatWxString(_("Cemu failed to write to the default mlc directory.\nThe path is:\n{}"), wxHelper::FromPath(mlc)), _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
+		RPEmbed::ShowMessage(formatWxString(_("Cemu failed to write to the default mlc directory.\nThe path is:\n{}"), wxHelper::FromPath(mlc)), _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
 		exit(0);
 	}
 }
@@ -268,6 +274,7 @@ bool CemuApp::OnInit()
 #if __WXGTK__
 	GTKSuppressDiagnostics(G_LOG_LEVEL_MASK & ~G_LOG_FLAG_FATAL);
 #endif
+	RPEmbed::RouteWxLog(); // PixelU: no wxWidgets log popups under --rp-embed
 	std::set<fs::path> failedWriteAccess;
 	DeterminePaths(failedWriteAccess);
 	// make sure default cemu directories exist
@@ -311,8 +318,8 @@ bool CemuApp::OnInit()
 
 	for (auto&& path : failedWriteAccess)
 	{
-		wxMessageBox(formatWxString(_("Cemu can't write to {}!"), wxHelper::FromPath(path)),
-					 _("Warning"), wxOK | wxCENTRE | wxICON_EXCLAMATION, nullptr);
+		RPEmbed::ShowMessage(formatWxString(_("Cemu can't write to {}!"), wxHelper::FromPath(path)),
+					 _("Warning"), wxOK | wxCENTRE | wxICON_EXCLAMATION);
 	}
 
 	if (isFirstStart)
@@ -384,6 +391,7 @@ bool CemuApp::OnInit()
 	HotkeySettings::Init(m_mainFrame);
 
 	SetTopWindow(m_mainFrame);
+	RPEmbed::BeforeShow(m_mainFrame); // PixelU: --rp-embed waits off-screen to be docked
 	m_mainFrame->Show();
 
 #if ( BOOST_OS_LINUX || BOOST_OS_BSD ) && HAS_WAYLAND
@@ -669,7 +677,7 @@ void CemuApp::CreateDefaultCemuFiles()
 			errorMsg << fmt::format("\n\n{}", GetSystemErrorMessage(lastError));
 #endif
 
-		wxMessageBox(errorMsg, _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
+		RPEmbed::ShowMessage(errorMsg, _("Error"), wxOK | wxCENTRE | wxICON_ERROR);
 		exit(0);
 	}
 }
