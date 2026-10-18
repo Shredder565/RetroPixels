@@ -74,7 +74,7 @@ type config struct {
 	PixelUFolders    []string     `json:"pixeluFolders,omitempty"`
 	PixelURecent     []recentGame `json:"pixeluRecent,omitempty"`
 	PixelUFullscreen *bool        `json:"pixeluFullscreen,omitempty"` // unset = on
-	PixelUEmbed      *bool        `json:"pixeluEmbed,omitempty"`      // unset = off
+	PixelUEmbed      *bool        `json:"pixeluEmbed,omitempty"`      // unset = on
 	PixelURecord     *bool        `json:"pixeluRecord,omitempty"`     // unset = off
 }
 

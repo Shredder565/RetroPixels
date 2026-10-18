@@ -45,7 +45,8 @@ func setupFakePixelU(t *testing.T) (argsFile string, game string) {
 		t.Setenv(k, v)
 	}
 	cfgMu.Lock()
-	cfg = config{PixelUExe: exe, PixelUFolders: []string{games}}
+	off := false // these tests check PixelU's own window; docking needs Windows
+	cfg = config{PixelUExe: exe, PixelUFolders: []string{games}, PixelUEmbed: &off}
 	cfgMu.Unlock()
 	setManualWanted(false)
 	recMu.Lock()
@@ -176,10 +177,21 @@ func TestPixelURecordNoFFmpeg(t *testing.T) {
 	}
 	waitIdle(t)
 	args, _ := os.ReadFile(argsFile)
-	if strings.Contains(string(args), "--rp-") {
+	if strings.Contains(string(args), "--rp-record") || strings.Contains(string(args), "--rp-ffmpeg") {
 		t.Errorf("asked to record without ffmpeg: %s", args)
 	}
 	if e, _ := recStatus()["error"].(string); !strings.Contains(e, "needs ffmpeg") {
 		t.Errorf("error: %q", e)
+	}
+}
+
+func TestPixelUEmbedDefaultsOn(t *testing.T) {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	old := cfg
+	defer func() { cfg = old }()
+	cfg = config{}
+	if !pixeluEmbedOn() {
+		t.Error("Wii U games should play inside RetroPixels unless turned off")
 	}
 }

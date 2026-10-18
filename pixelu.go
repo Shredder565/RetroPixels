@@ -54,7 +54,7 @@ func pixeluRunning() bool {
 
 // Settings, with their defaults. Call with cfgMu held.
 func pixeluFullscreenOn() bool { return cfg.PixelUFullscreen == nil || *cfg.PixelUFullscreen }
-func pixeluEmbedOn() bool      { return cfg.PixelUEmbed != nil && *cfg.PixelUEmbed }
+func pixeluEmbedOn() bool      { return cfg.PixelUEmbed == nil || *cfg.PixelUEmbed }
 func pixeluRecordOn() bool     { return cfg.PixelURecord != nil && *cfg.PixelURecord }
 
 // pixeluRecording sets up a recording of the game about to start: a folder
@@ -120,6 +120,7 @@ func launchPixelUGame(path string) error {
 	// Docked into this window, PixelU stays a plain window and this window
 	// goes fullscreen instead (as with Dolphin).
 	opts.Fullscreen = fs && !embed
+	opts.Embed = embed
 	var onStart func(pid int, exited <-chan struct{})
 	if embed {
 		onStart = embedDolphin // docks PixelU's window the same way

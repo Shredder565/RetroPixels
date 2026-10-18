@@ -256,6 +256,10 @@ type LaunchOptions struct {
 	// Fullscreen: PixelU's own fullscreen (-f). Leave it off when the game
 	// window is docked into RetroPixels: that window goes fullscreen instead.
 	Fullscreen bool
+	// Embed: PixelU shows only the game picture in a plain window, with no
+	// menus, game list or popups, and keeps playing without focus, so
+	// RetroPixels can dock it into its own window (--rp-embed).
+	Embed bool
 	// RecordDir and FFmpeg (both or neither): PixelU saves the game's TV
 	// picture to RecordDir\Frames\pixelu_framedump<N>.mkv and its sound to
 	// RecordDir\Audio\pixelu_dspdump.wav, encoding with that ffmpeg.exe.
@@ -269,6 +273,9 @@ func GameArgs(path string, o LaunchOptions) []string {
 	args := []string{"-g", path}
 	if o.Fullscreen {
 		args = append(args, "-f")
+	}
+	if o.Embed {
+		args = append(args, "--rp-embed")
 	}
 	if o.RecordDir != "" && o.FFmpeg != "" {
 		args = append(args, "--rp-record", o.RecordDir, "--rp-ffmpeg", o.FFmpeg)

@@ -146,6 +146,7 @@ func TestGameArgs(t *testing.T) {
 		{LaunchOptions{Fullscreen: true, RecordDir: `C:\rec\tmp`, FFmpeg: `C:\ff\ffmpeg.exe`},
 			[]string{"-g", g, "-f", "--rp-record", `C:\rec\tmp`, "--rp-ffmpeg", `C:\ff\ffmpeg.exe`}},
 		{LaunchOptions{RecordDir: `C:\rec\tmp`}, []string{"-g", g}}, // no ffmpeg: no recording
+		{LaunchOptions{Embed: true}, []string{"-g", g, "--rp-embed"}},
 	}
 	for _, c := range cases {
 		if got := GameArgs(g, c.o); !reflect.DeepEqual(got, c.want) {
