@@ -1,297 +1,186 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// AUX effect buses. Each output device has three aux buses (A, B, C) that a
+// title can attach an effect callback to (reverb, chorus, ...). The mixer
+// writes a bus's send signal into the "input" half of a double buffer; one
+// frame later the title's callback processes it in place and the mixer adds
+// the result ("output" half) back into the main mix. A bus with no callback
+// has no buffer and is skipped by the mixer.
+//
+// Buffer layout seen by the callback: one sint32be block per channel, the
+// channel blocks AXGetInputSamplesPerFrame() samples apart, so the mixer can
+// treat a bus as one contiguous run of channels * samples values.
 #include "Cafe/OS/libs/snd_core/ax.h"
 #include "Cafe/OS/libs/snd_core/ax_internal.h"
-#include "Cafe/HW/Espresso/PPCState.h"
+#include "Cafe/HW/Espresso/PPCCallback.h"
 
 namespace snd_core
 {
-	const int AX_AUX_FRAME_COUNT = 2;
-
-	// old (deprecated) style AUX callbacks
-	MPTR __AXOldAuxDRCCallbackFunc[AX_AUX_BUS_COUNT * 2];
-	MPTR __AXOldAuxDRCCallbackUserParam[AX_AUX_BUS_COUNT * 2];
-
-	MPTR __AXOldAuxTVCallbackFunc[AX_AUX_BUS_COUNT];
-	MPTR __AXOldAuxTVCallbackUserParam[AX_AUX_BUS_COUNT];
-
-	// new style AUX callbacks
-	MPTR __AXAuxDRCCallbackFunc[AX_AUX_BUS_COUNT * 2]; // 2 DRCs
-	MPTR __AXAuxDRCCallbackUserParam[AX_AUX_BUS_COUNT * 2];
-
-	MPTR __AXAuxTVCallbackFunc[AX_AUX_BUS_COUNT];
-	MPTR __AXAuxTVCallbackUserParam[AX_AUX_BUS_COUNT];
-
-	struct AUXTVBuffer
+	namespace
 	{
-		sint32be _buf[AX_AUX_FRAME_COUNT * AX_TV_CHANNEL_COUNT * AX_AUX_BUS_COUNT * AX_SAMPLES_MAX];
+		constexpr sint32 kDrcCount = 2;
+		constexpr sint32 kErrBadBus = -5;
+		constexpr uint16 kUnityReturnVolume = 0x8000;
 
-		sint32be* GetBuffer(uint32 auxBus, uint32 auxFrame, uint32 channel = 0)
+		template<sint32 TChannels>
+		struct BusFrames
 		{
-			const size_t samplesPerChannel = AXGetInputSamplesPerFrame();
-			const size_t samplesPerBus = AX_SAMPLES_PER_3MS_48KHZ * AX_TV_CHANNEL_COUNT;
-			const size_t samplesPerFrame = samplesPerBus * AX_AUX_BUS_COUNT;
-			return _buf + auxFrame * samplesPerFrame + auxBus * samplesPerBus + channel * samplesPerChannel;
+			// [frame half][bus][channel][sample]
+			sint32be samples[2][AX_AUX_BUS_COUNT][TChannels * AX_SAMPLES_MAX];
+
+			sint32be* Bus(uint32 half, uint32 bus) { return samples[half][bus]; }
+		};
+		using TvBusFrames = BusFrames<AX_TV_CHANNEL_COUNT>;
+		using DrcBusFrames = BusFrames<AX_DRC_CHANNEL_COUNT>;
+
+		struct Effect
+		{
+			MPTR func = MPTR_NULL;
+			MPTR context = MPTR_NULL;
+		};
+
+		struct AuxState
+		{
+			Effect tv[AX_AUX_BUS_COUNT];
+			Effect drc[kDrcCount][AX_AUX_BUS_COUNT];
+			uint32 inputHalf = 0; // the half the mixer is filling this frame
+		};
+		AuxState s_aux;
+
+		// guest-visible: the callback receives these
+		SysAllocator<TvBusFrames> s_tvFrames;
+		SysAllocator<DrcBusFrames, kDrcCount> s_drcFrames;
+		SysAllocator<MEMPTR<sint32be>, AX_TV_CHANNEL_COUNT> s_cbChannelPtrs;
+		SysAllocator<AXAUXCBCHANNELINFO> s_cbInfo;
+
+		uint32 ProcessedHalf()
+		{
+			return s_aux.inputHalf ^ 1u;
 		}
 
-		void ClearBuffer()
+		// the effect slot for a device/bus, or nullptr when there is none
+		Effect* FindEffect(sint32 device, sint32 deviceIndex, uint32 bus)
 		{
-			memset(_buf, 0, sizeof(_buf));
-		}
-	};
-
-	struct AUXDRCBuffer
-	{
-		sint32be _buf[AX_AUX_FRAME_COUNT * AX_DRC_CHANNEL_COUNT * AX_AUX_BUS_COUNT * AX_SAMPLES_MAX];
-
-		sint32be* GetBuffer(uint32 auxBus, uint32 auxFrame, uint32 channel = 0)
-		{
-			const size_t samplesPerChannel = AXGetInputSamplesPerFrame();
-			const size_t samplesPerBus = AX_SAMPLES_PER_3MS_48KHZ * AX_DRC_CHANNEL_COUNT;
-			const size_t samplesPerFrame = samplesPerBus * AX_AUX_BUS_COUNT;
-			return _buf + auxFrame * samplesPerFrame + auxBus * samplesPerBus + channel * samplesPerChannel;
-		}
-
-		void ClearBuffer()
-		{
-			memset(_buf, 0, sizeof(_buf));
-		}
-	};
-
-	SysAllocator<AUXTVBuffer>			__AXAuxTVBuffer;
-	SysAllocator<AUXDRCBuffer, 2>		__AXAuxDRCBuffer;
-
-	uint32 __AXCurrentAuxInputFrameIndex = 0;
-
-	uint32 AXAux_GetOutputFrameIndex()
-	{
-		return 1 - __AXCurrentAuxInputFrameIndex;
-	}
-
-	sint32be* AXAux_GetInputBuffer(sint32 device, sint32 deviceIndex, sint32 auxBus)
-	{
-		if (auxBus < 0 || auxBus >= AX_AUX_BUS_COUNT)
+			if (bus >= (uint32)AX_AUX_BUS_COUNT)
+				return nullptr;
+			if (device == AX_DEV_TV && deviceIndex == 0)
+				return &s_aux.tv[bus];
+			if (device == AX_DEV_DRC && deviceIndex >= 0 && deviceIndex < kDrcCount)
+				return &s_aux.drc[deviceIndex][bus];
 			return nullptr;
-		if (device == AX_DEV_TV)
-		{
-			cemu_assert_debug(deviceIndex == 0);
-			if (__AXOldAuxTVCallbackFunc[auxBus] == MPTR_NULL && __AXAuxTVCallbackFunc[auxBus] == MPTR_NULL)
-				return nullptr;
-			return __AXAuxTVBuffer->GetBuffer(auxBus, __AXCurrentAuxInputFrameIndex);
 		}
-		else if (device == AX_DEV_DRC)
-		{
-			cemu_assert_debug(deviceIndex >= 0 && deviceIndex <= 1);
-			if (__AXOldAuxDRCCallbackFunc[deviceIndex * AX_AUX_BUS_COUNT + auxBus] == MPTR_NULL && __AXAuxDRCCallbackFunc[deviceIndex * AX_AUX_BUS_COUNT + auxBus] == MPTR_NULL)
-				return nullptr;
-			return __AXAuxDRCBuffer[deviceIndex].GetBuffer(auxBus, __AXCurrentAuxInputFrameIndex);
-		}
-		else
-		{
-			cemu_assert_debug(false);
-		}
-		return nullptr;
-	}
 
-	sint32be* AXAux_GetOutputBuffer(sint32 device, sint32 deviceIndex, sint32 auxBus)
-	{
-		uint32 outputFrameIndex = AXAux_GetOutputFrameIndex();
+		sint32be* BusBuffer(sint32 device, sint32 deviceIndex, sint32 bus, uint32 half)
+		{
+			if (bus < 0)
+				return nullptr;
+			Effect* fx = FindEffect(device, deviceIndex, (uint32)bus);
+			if (!fx || fx->func == MPTR_NULL)
+				return nullptr;
+			if (device == AX_DEV_TV)
+				return s_tvFrames->Bus(half, bus);
+			return s_drcFrames[deviceIndex].Bus(half, bus);
+		}
 
-		if (device == AX_DEV_TV)
+		template<sint32 TChannels>
+		void RunEffect(const Effect& fx, sint32be* bus, uint32 samplesPerChannel)
 		{
-			cemu_assert_debug(deviceIndex == 0);
-			if (__AXOldAuxTVCallbackFunc[auxBus] == MPTR_NULL && __AXAuxTVCallbackFunc[auxBus] == MPTR_NULL)
-				return nullptr;
-			return __AXAuxTVBuffer->GetBuffer(auxBus, outputFrameIndex);
+			if (fx.func == MPTR_NULL)
+			{
+				// nothing will return from this bus; keep the half clean for reuse
+				memset(bus, 0, sizeof(sint32be) * TChannels * samplesPerChannel);
+				return;
+			}
+			for (sint32 ch = 0; ch < TChannels; ch++)
+				s_cbChannelPtrs[ch] = bus + ch * samplesPerChannel;
+			s_cbInfo->numChannels = TChannels;
+			s_cbInfo->numSamples = samplesPerChannel;
+			// void callback(sint32be** channels, void* context, AXAUXCBCHANNELINFO* info)
+			PPCCoreCallback(fx.func, s_cbChannelPtrs.GetMPTR(), fx.context, s_cbInfo.GetMPTR());
 		}
-		else if (device == AX_DEV_DRC)
-		{
-			cemu_assert_debug(deviceIndex >= 0 && deviceIndex <= 1);
-			if (__AXOldAuxDRCCallbackFunc[deviceIndex * AX_AUX_BUS_COUNT + auxBus] == MPTR_NULL && __AXAuxDRCCallbackFunc[deviceIndex * AX_AUX_BUS_COUNT + auxBus] == MPTR_NULL)
-				return nullptr;
-			return __AXAuxDRCBuffer[deviceIndex].GetBuffer(auxBus, outputFrameIndex);
-		}
-		else
-		{
-			cemu_assert_debug(false);
-		}
-		return nullptr;
 	}
 
 	void AXAux_Init()
 	{
-		__AXCurrentAuxInputFrameIndex = 0;
-		__AXAuxTVBuffer->ClearBuffer();
-		__AXAuxDRCBuffer[0].ClearBuffer();
-		__AXAuxDRCBuffer[1].ClearBuffer();
+		s_aux = AuxState{};
+		memset(s_tvFrames.GetPtr(), 0, sizeof(TvBusFrames));
+		memset(s_drcFrames.GetPtr(), 0, sizeof(DrcBusFrames) * kDrcCount);
+		for (auto& v : __AXTVAuxReturnVolume)
+			v = kUnityReturnVolume;
+	}
 
-		memset(__AXAuxTVCallbackFunc, 0, sizeof(__AXAuxTVCallbackFunc));
-		memset(__AXAuxTVCallbackUserParam, 0, sizeof(__AXAuxTVCallbackUserParam));
-		memset(__AXOldAuxTVCallbackFunc, 0, sizeof(__AXOldAuxTVCallbackFunc));
-		memset(__AXOldAuxTVCallbackUserParam, 0, sizeof(__AXOldAuxTVCallbackUserParam));
+	sint32be* AXAux_GetInputBuffer(sint32 device, sint32 deviceIndex, sint32 auxBus)
+	{
+		return BusBuffer(device, deviceIndex, auxBus, s_aux.inputHalf);
+	}
 
-		memset(__AXAuxDRCCallbackFunc, 0, sizeof(__AXAuxDRCCallbackFunc));
-		memset(__AXAuxDRCCallbackUserParam, 0, sizeof(__AXAuxDRCCallbackUserParam));
-		memset(__AXOldAuxDRCCallbackFunc, 0, sizeof(__AXOldAuxDRCCallbackFunc));
-		memset(__AXOldAuxDRCCallbackUserParam, 0, sizeof(__AXOldAuxDRCCallbackUserParam));
-		// init aux return volume
-		__AXTVAuxReturnVolume[0] = 0x8000;
-		__AXTVAuxReturnVolume[1] = 0x8000;
-		__AXTVAuxReturnVolume[2] = 0x8000;
+	sint32be* AXAux_GetOutputBuffer(sint32 device, sint32 deviceIndex, sint32 auxBus)
+	{
+		return BusBuffer(device, deviceIndex, auxBus, ProcessedHalf());
 	}
 
 	sint32 AXRegisterAuxCallback(sint32 device, sint32 deviceIndex, uint32 auxBusIndex, MPTR funcMPTR, MPTR userParam)
 	{
-		sint32 r = AXIsValidDevice(device, deviceIndex);
-		if (r != 0)
+		if (sint32 r = AXIsValidDevice(device, deviceIndex); r != 0)
 			return r;
-		if (auxBusIndex >= AX_AUX_BUS_COUNT)
-			return -5;
-		if (device == AX_DEV_TV)
+		if (auxBusIndex >= (uint32)AX_AUX_BUS_COUNT)
+			return kErrBadBus;
+		Effect* fx = FindEffect(device, deviceIndex, auxBusIndex);
+		if (!fx)
 		{
-			__AXAuxTVCallbackFunc[auxBusIndex] = funcMPTR;
-			__AXAuxTVCallbackUserParam[auxBusIndex] = userParam;
+			// Wii remote speakers have no aux buses here; accept and ignore
+			cemuLog_logDebug(LogType::Force, "AXRegisterAuxCallback: device {} has no aux buses", device);
+			return 0;
 		}
-		else if (device == AX_DEV_DRC)
-		{
-			__AXAuxDRCCallbackFunc[auxBusIndex + deviceIndex * 3] = funcMPTR;
-			__AXAuxDRCCallbackUserParam[auxBusIndex + deviceIndex * 3] = userParam;
-		}
-		else if (device == AX_DEV_RMT)
-		{
-			cemu_assert_debug(false);
-		}
+		fx->func = funcMPTR;
+		fx->context = userParam;
 		return 0;
 	}
 
 	sint32 AXGetAuxCallback(sint32 device, sint32 deviceIndex, uint32 auxBusIndex, MEMPTR<uint32be> funcPtrOut, MEMPTR<uint32be> contextPtrOut)
 	{
-		sint32 r = AXIsValidDevice(device, deviceIndex);
-		if (r != 0)
+		if (sint32 r = AXIsValidDevice(device, deviceIndex); r != 0)
 			return r;
-		if (auxBusIndex >= AX_AUX_BUS_COUNT)
-			return -5;
-		if (device == AX_DEV_TV)
-		{
-			*funcPtrOut = __AXAuxTVCallbackFunc[auxBusIndex];
-			*contextPtrOut = __AXAuxTVCallbackUserParam[auxBusIndex];
-		}
-		else if (device == AX_DEV_DRC)
-		{
-			*funcPtrOut = __AXAuxDRCCallbackFunc[auxBusIndex + deviceIndex * 3];
-			*contextPtrOut = __AXAuxDRCCallbackUserParam[auxBusIndex + deviceIndex * 3];
-		}
-		else if (device == AX_DEV_RMT)
-		{
-			cemu_assert_debug(false);
-			*funcPtrOut = MPTR_NULL;
-			*contextPtrOut = MPTR_NULL;
-		}
+		if (auxBusIndex >= (uint32)AX_AUX_BUS_COUNT)
+			return kErrBadBus;
+		const Effect* fx = FindEffect(device, deviceIndex, auxBusIndex);
+		*funcPtrOut = fx ? fx->func : MPTR_NULL;
+		*contextPtrOut = fx ? fx->context : MPTR_NULL;
 		return 0;
 	}
 
-	SysAllocator<MEMPTR<sint32be>, 6> __AXAuxCB_dataPtrs;
-	SysAllocator<AXAUXCBCHANNELINFO> __AXAuxCB_auxCBStruct;
-
+	// called by the mixer once per frame, before it fills the next input half
 	void AXAux_Process()
 	{
-		uint32 processedAuxFrameIndex = AXAux_GetOutputFrameIndex();
-		uint32 sampleCount = AXGetInputSamplesPerFrame();
-		// TV aux callbacks
-		uint32 tvChannelCount = AX_TV_CHANNEL_COUNT;
-		for (sint32 auxBusIndex = 0; auxBusIndex < AX_AUX_BUS_COUNT; auxBusIndex++)
+		const uint32 half = ProcessedHalf();
+		const uint32 samplesPerChannel = AXGetInputSamplesPerFrame();
+		for (sint32 bus = 0; bus < AX_AUX_BUS_COUNT; bus++)
+			RunEffect<AX_TV_CHANNEL_COUNT>(s_aux.tv[bus], s_tvFrames->Bus(half, bus), samplesPerChannel);
+		for (sint32 drc = 0; drc < kDrcCount; drc++)
 		{
-			MPTR auxCBFuncMPTR = MPTR_NULL;
-			auxCBFuncMPTR = __AXAuxTVCallbackFunc[auxBusIndex];
-			if (auxCBFuncMPTR == MPTR_NULL)
-				auxCBFuncMPTR = __AXOldAuxTVCallbackFunc[auxBusIndex];
-			if (auxCBFuncMPTR == MPTR_NULL)
-			{
-				void* auxOutput = __AXAuxTVBuffer->GetBuffer(auxBusIndex, processedAuxFrameIndex);
-				memset(auxOutput, 0, sampleCount * AX_TV_CHANNEL_COUNT * sizeof(sint32));
-				continue;
-			}
-			for (sint32 channelIndex = 0; channelIndex < AX_TV_CHANNEL_COUNT; channelIndex++)
-				__AXAuxCB_dataPtrs[channelIndex] = __AXAuxTVBuffer->GetBuffer(auxBusIndex, processedAuxFrameIndex, channelIndex);
-			// do callback
-			if (__AXAuxTVCallbackFunc[auxBusIndex] != MPTR_NULL)
-			{
-				// new style callback
-				AXAUXCBCHANNELINFO* cbStruct = __AXAuxCB_auxCBStruct.GetPtr();
-				cbStruct->numChannels = tvChannelCount;
-				cbStruct->numSamples = sampleCount;
-				PPCInterpreter_t* hCPU = PPCInterpreter_getCurrentInstance();
-				hCPU->gpr[3] = __AXAuxCB_dataPtrs.GetMPTR();
-				hCPU->gpr[4] = __AXAuxTVCallbackUserParam[auxBusIndex];
-				hCPU->gpr[5] = __AXAuxCB_auxCBStruct.GetMPTR();
-				PPCCore_executeCallbackInternal(auxCBFuncMPTR);
-			}
-			else
-			{
-				// old style callback
-				cemu_assert_debug(false); // todo
-			}
-		}
-		// DRC aux callbacks
-		for (sint32 drcIndex = 0; drcIndex < 2; drcIndex++)
-		{
-			uint32 drcChannelCount = AX_DRC_CHANNEL_COUNT;
-			for (sint32 auxBusIndex = 0; auxBusIndex < AX_AUX_BUS_COUNT; auxBusIndex++)
-			{
-				MPTR auxCBFuncMPTR = MPTR_NULL;
-				auxCBFuncMPTR = __AXAuxDRCCallbackFunc[auxBusIndex + drcIndex * 3];
-				if (auxCBFuncMPTR == MPTR_NULL)
-				{
-					auxCBFuncMPTR = __AXOldAuxDRCCallbackFunc[auxBusIndex + drcIndex * 3];
-				}
-				if (auxCBFuncMPTR == MPTR_NULL)
-				{
-					void* auxOutput = __AXAuxDRCBuffer[drcIndex].GetBuffer(auxBusIndex, processedAuxFrameIndex);
-					memset(auxOutput, 0, 96 * 4 * sizeof(sint32));
-					continue;
-				}
-				if (__AXAuxDRCCallbackFunc[auxBusIndex + drcIndex * 3] != MPTR_NULL)
-				{
-					// new style callback
-					for (sint32 channelIndex = 0; channelIndex < AX_DRC_CHANNEL_COUNT; channelIndex++)
-						__AXAuxCB_dataPtrs[channelIndex] = __AXAuxDRCBuffer[drcIndex].GetBuffer(auxBusIndex, processedAuxFrameIndex, channelIndex);
-					AXAUXCBCHANNELINFO* cbStruct = __AXAuxCB_auxCBStruct.GetPtr();
-					cbStruct->numChannels = drcChannelCount;
-					cbStruct->numSamples = sampleCount;
-					PPCInterpreter_t* hCPU = PPCInterpreter_getCurrentInstance();
-					hCPU->gpr[3] = __AXAuxCB_dataPtrs.GetMPTR();
-					hCPU->gpr[4] = __AXAuxDRCCallbackUserParam[auxBusIndex + drcIndex * 3];
-					hCPU->gpr[5] = __AXAuxCB_auxCBStruct.GetMPTR();
-					PPCCore_executeCallbackInternal(auxCBFuncMPTR);
-				}
-				else
-				{
-					// old style callback
-					cemu_assert_debug(false);
-				}
-			}
+			for (sint32 bus = 0; bus < AX_AUX_BUS_COUNT; bus++)
+				RunEffect<AX_DRC_CHANNEL_COUNT>(s_aux.drc[drc][bus], s_drcFrames[drc].Bus(half, bus), samplesPerChannel);
 		}
 	}
 
 	void AXAux_incrementBufferIndex()
 	{
-		__AXCurrentAuxInputFrameIndex = 1 - __AXCurrentAuxInputFrameIndex;
+		s_aux.inputHalf ^= 1u;
 	}
 
 	sint32 AXSetAuxReturnVolume(uint32 device, uint32 deviceIndex, uint32 auxBus, uint16 volume)
 	{
-		sint32 r = AXIsValidDevice(device, deviceIndex);
-		if (r)
+		if (sint32 r = AXIsValidDevice(device, deviceIndex); r != 0)
 			return r;
-		if (auxBus >= AX_AUX_BUS_COUNT)
-			return -5;
-		if( device == AX_DEV_TV )
-		{ 
-			__AXTVAuxReturnVolume[auxBus] = volume;
-		}
-		else
+		if (auxBus >= (uint32)AX_AUX_BUS_COUNT)
+			return kErrBadBus;
+		if (device != AX_DEV_TV)
 		{
-			cemuLog_logDebug(LogType::Force, "sndcore2.AXSetAuxReturnVolume() - unsupported device {}", device);
+			// only the TV mix applies a return volume
+			cemuLog_logDebug(LogType::Force, "AXSetAuxReturnVolume: device {} not supported", device);
+			return 0;
 		}
+		__AXTVAuxReturnVolume[auxBus] = volume;
 		return 0;
 	}
-
 }

@@ -1,825 +1,468 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Written from scratch.
+//
+// padscore serves the Wii Remote family of controllers: WPAD* is the raw
+// layer (one report per call, connection and extension callbacks), KPAD* the
+// processed layer (buttons with trigger/release edges, pointer, motion) that
+// most games read. Controllers come from the input manager's WPAD slots; the
+// emulated controller classes (input/emulated/WPADController) know how to
+// fill the guest structures, we only route the calls.
+//
+// Connection, extension and sampling callbacks are driven by a 5 ms alarm
+// that coreinit arms at boot through padscore::start().
+
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/HW/Espresso/PPCCallback.h"
 #include "Cafe/OS/libs/padscore/padscore.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Time.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Alarm.h"
-#include "Cafe/OS/libs/coreinit/coreinit_SystemInfo.h"
+#include "Cafe/OS/RPL/rpl.h"
 #include "WindowSystem.h"
 #include "input/InputManager.h"
 
-// KPAD
-
-enum class KPAD_ERROR : sint32
-{
-	NONE = 0,
-	NO_SAMPLE_DATA = -1,
-	NO_CONTROLLER = -2,
-	NOT_INITIALIZED = -5,
-};
-
-// WPAD (Wii Controller stuff)
-
-enum WPADRumble
-{
-	kStopRumble = 0,
-	kStartRumble = 1,
-};
-
-enum class WPADBatteryLevel : uint8
-{
-	FULL = 4,
-};
-
-enum class WPADLed : uint8
-{
-	CHAN0 = (1 << 0),
-	CHAN1 = (1 << 1),
-	CHAN2 = (1 << 2),
-	CHAN3 = (1 << 3),
-};
-
-namespace padscore 
-{
-	enum WPADState_t
-	{
-		kWPADStateMaster = 0,
-		kWPADStateShutdown,
-		kWPADStateInitializing,
-		kWPADStateAcquired,
-		kWPADStateReleased,
-	};
-	KPADUnifiedWpadStatus_t* g_kpad_ringbuffer = nullptr;
-	uint32 g_kpad_ringbuffer_length = 0;
-	bool g_wpad_callback_by_kpad = false;
-
-	WPADState_t g_wpad_state = kWPADStateMaster;
-
-	struct {
-		SysAllocator<coreinit::OSAlarm_t> alarm;
-		bool kpad_initialized = false;
-
-		struct WPADData
-		{
-			MEMPTR<void> extension_callback;
-			MEMPTR<void> connectCallback;
-			MEMPTR<void> sampling_callback;
-			MEMPTR<void> dpd_callback;
-			bool dpd_enabled = true;
-
-			bool disconnectCalled = false;
-
-			BtnRepeat btn_repeat{};
-		} controller_data[InputManager::kMaxWPADControllers] = {};
-
-		int max_controllers = kWPADMaxControllers; // max bt controllers?
-	} g_padscore;
-}
-
-
-#pragma region WPAD
-
-void padscoreExport_WPADGetStatus(PPCInterpreter_t* hCPU)
-{
-	cemuLog_log(LogType::InputAPI, "WPADGetStatus()");
-	uint32 status = 1;
-	osLib_returnFromFunction(hCPU, status);
-}
-
-void padscoreExport_WPADGetBatteryLevel(PPCInterpreter_t* hCPU)
-{
-	cemuLog_log(LogType::InputAPI, "WPADGetBatteryLevel()");
-	osLib_returnFromFunction(hCPU, (uint32)WPADBatteryLevel::FULL);
-}
-
-void padscoreExport_WPADProbe(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamU32(channel, 0);
-	ppcDefineParamPtr(type, uint32be, 1);
-
-	cemuLog_log(LogType::InputAPI, "WPADProbe({})", channel);
-
-	if(const auto controller = InputManager::instance().get_wpad_controller(channel))
-	{
-		if(type)
-			*type = controller->get_device_type();
-
-		osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
-	}
-	else
-	{
-		if(type)
-			*type = 253;
-
-		osLib_returnFromFunction(hCPU, WPAD_ERR_NO_CONTROLLER);
-	}
-}
-
-typedef struct
-{
-	uint32be dpd;
-	uint32be speaker;
-	uint32be attach;
-	uint32be lowBat;
-	uint32be nearempty;
-	betype<WPADBatteryLevel> batteryLevel;
-	betype<WPADLed> led;
-	uint8 protocol;
-	uint8 firmware;
-}WPADInfo_t;
-
-static_assert(sizeof(WPADInfo_t) == 0x18); // unsure
-
-void padscoreExport_WPADGetInfoAsync(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamU32(channel, 0);
-	ppcDefineParamStructPtr(wpadInfo, WPADInfo_t, 1);
-	ppcDefineParamMPTR(callbackFunc, 2);
-	cemuLog_log(LogType::InputAPI, "WPADGetInfoAsync({}, 0x{:08x}, 0x{:08x})", channel, memory_getVirtualOffsetFromPointer(wpadInfo), callbackFunc);
-
-	if (channel < InputManager::kMaxWPADControllers)
-	{
-		if (const auto controller = InputManager::instance().get_wpad_controller(channel))
-		{
-			wpadInfo->dpd = FALSE;
-			wpadInfo->speaker = FALSE;
-			wpadInfo->attach = FALSE;
-			wpadInfo->lowBat = FALSE;
-			wpadInfo->nearempty = FALSE;
-			wpadInfo->batteryLevel = WPADBatteryLevel::FULL;
-			wpadInfo->led = WPADLed::CHAN0;
-
-			if(callbackFunc != MPTR_NULL)
-				coreinitAsyncCallback_add(callbackFunc, 2, channel, (uint32)KPAD_ERROR::NONE);
-
-			osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
-			return;
-		}
-	}
-	else
-	{
-		debugBreakpoint();
-	}
-
-	if (callbackFunc != MPTR_NULL)
-		coreinitAsyncCallback_add(callbackFunc, 2, channel, (uint32)KPAD_ERROR::NO_CONTROLLER);
-
-	osLib_returnFromFunction(hCPU, WPAD_ERR_NO_CONTROLLER);
-}
-
-void padscoreExport_WPADRead(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamU32(channel, 0);
-	ppcDefineParamPtr(wpadStatus, WPADStatus_t, 1);
-	cemuLog_log(LogType::InputAPI, "WPADRead({}, {:x})", channel, memory_getVirtualOffsetFromPointer(wpadStatus));
-
-	if (channel < InputManager::kMaxWPADControllers)
-	{
-		if(const auto controller = InputManager::instance().get_wpad_controller(channel) )
-		{
-			controller->WPADRead(wpadStatus);
-		}
-	}
-	else
-	{
-		debugBreakpoint();
-	}
-	osLib_returnFromFunction(hCPU, WPAD_ERR_NO_CONTROLLER);
-}
-
-void padscoreExport_WPADSetDataFormat(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamU32(channel, 0);
-	ppcDefineParamU32(fmt, 1);
-	cemuLog_log(LogType::InputAPI, "WPADSetDataFormat({}, {})", channel, fmt);
-
-	if (channel < InputManager::kMaxWPADControllers)
-	{
-		if (const auto controller = InputManager::instance().get_wpad_controller(channel))
-			controller->set_data_format((WPADDataFormat)fmt);
-	}
-
-	osLib_returnFromFunction(hCPU, 0);
-}
-
-void padscoreExport_WPADGetDataFormat(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamU32(channel, 0);
-	cemuLog_log(LogType::InputAPI, "WPADGetDataFormat({})", channel);
-
-	sint32 dataFormat = kDataFormat_CORE;
-	if (channel < InputManager::kMaxWPADControllers)
-	{
-		if (const auto controller = InputManager::instance().get_wpad_controller(channel))
-			dataFormat = controller->get_data_format();
-	}
-	else
-	{
-		debugBreakpoint();
-	}
-
-	osLib_returnFromFunction(hCPU, dataFormat);
-}
-
-void padscoreExport_WPADGetInfo(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamU32(channel, 0);
-	ppcDefineParamStructPtr(wpadInfo, WPADInfo_t, 1);
-	cemuLog_log(LogType::InputAPI, "WPADGetInfo({}, 0x{:08x})", channel, memory_getVirtualOffsetFromPointer(wpadInfo));
-
-	if (channel < InputManager::kMaxWPADControllers)
-	{
-		if (const auto controller = InputManager::instance().get_wpad_controller(channel))
-		{
-			wpadInfo->dpd = FALSE;
-			wpadInfo->speaker = FALSE;
-			wpadInfo->attach = FALSE;
-			wpadInfo->lowBat = FALSE;
-			wpadInfo->nearempty = FALSE;
-			wpadInfo->batteryLevel = WPADBatteryLevel::FULL;
-			wpadInfo->led = WPADLed::CHAN0;
-
-			osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
-			return;
-		}
-	}
-	else
-	{
-		debugBreakpoint();
-	}
-
-	osLib_returnFromFunction(hCPU, WPAD_ERR_NO_CONTROLLER);
-}
-
-
-void padscoreExport_WPADIsMotorEnabled(PPCInterpreter_t* hCPU)
-{
-	cemuLog_log(LogType::InputAPI, "WPADIsMotorEnabled()");
-	osLib_returnFromFunction(hCPU, TRUE);
-}
-
-void padscoreExport_WPADControlMotor(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamU32(channel, 0);
-	ppcDefineParamU32(command, 1);
-	cemuLog_log(LogType::InputAPI, "WPADControlMotor({}, {})", channel, command);
-	
-	if (channel < InputManager::kMaxWPADControllers)
-	{
-		if (const auto controller = InputManager::instance().get_wpad_controller(channel))
-		{
-			if( command == kStartRumble )
-				controller->start_rumble();
-			else
-				controller->stop_rumble();
-		}
-	}
-	else
-	{
-		debugBreakpoint();
-	}
-
-	osLib_returnFromFunction(hCPU, 0);
-}
-#pragma endregion
-
-
-
-#pragma region KPAD
-void padscoreExport_KPADGetUnifiedWpadStatus(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamU32(channel, 0);
-	ppcDefineParamPtr(status, KPADUnifiedWpadStatus_t, 1);
-	ppcDefineParamU32(count, 2);
-
-	cemuLog_log(LogType::InputAPI, "KPADGetUnifiedWpadStatus({}, 0x{:08x}, 0x{:x})", channel, MEMPTR<void>(status).GetMPTR(), count);
-
-	if (channel < InputManager::kMaxWPADControllers)
-	{
-		memset(status, 0x00, sizeof(KPADUnifiedWpadStatus_t) * count);
-
-		if (const auto controller = InputManager::instance().get_wpad_controller(channel))
-		{
-			switch (controller->get_data_format())
-			{
-			case WPAD_FMT_CORE:
-			case WPAD_FMT_CORE_ACC:
-			case WPAD_FMT_CORE_ACC_DPD:
-			{
-				status->fmt = controller->get_data_format();
-				controller->WPADRead(&status->u.core);
-				break;
-			}
-			default:
-				debugBreakpoint();
-			}
-		}
-		else
-		{
-			status->u.core.err = WPAD_ERR_NO_CONTROLLER;
-		}
-	}
-	else
-	{
-		debugBreakpoint();
-	}
-
-	osLib_returnFromFunction(hCPU, 0);
-}
-
-void padscoreExport_KPADSetBtnRepeat(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamU32(channel, 0);
-	float delaySec = hCPU->fpr[1].fpr;
-	float pulseSec = hCPU->fpr[2].fpr;
-	cemuLog_log(LogType::InputAPI, "KPADSetBtnRepeat({}, {}, {})", channel, delaySec, pulseSec);
-
-	if (channel < InputManager::kMaxWPADControllers)
-	{
-		padscore::g_padscore.controller_data[channel].btn_repeat = { (int)delaySec, (int)pulseSec };
-	}
-
-	osLib_returnFromFunction(hCPU, 0);
-}
-
-void padscoreExport_KPADSetSamplingCallback(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamU32(channel, 0);
-	ppcDefineParamMPTR(callback, 1);
-
-	cemuLog_log(LogType::InputAPI, "KPADSetSamplingCallback({}, 0x{:x})", channel, callback);
-
-	if (channel >= InputManager::kMaxWPADControllers)
-	{
-		debugBreakpoint();
-		osLib_returnFromFunction(hCPU, MPTR_NULL);
-		return;
-	}
-
-	const auto old_callback = padscore::g_padscore.controller_data[channel].sampling_callback;
-	padscore::g_padscore.controller_data[channel].sampling_callback = callback;
-	osLib_returnFromFunction(hCPU, old_callback.GetMPTR());
-}
-
-void padscoreExport_WPADControlDpd(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamU32(channel, 0);
-	ppcDefineParamU32(command, 1);
-	ppcDefineParamMPTR(callback, 2);
-
-	cemuLog_log(LogType::InputAPI, "WPADControlDpd({}, {}, 0x{:x})", channel, command, callback);
-
-	if (channel < InputManager::kMaxWPADControllers)
-	{
-		if (const auto controller = InputManager::instance().get_wpad_controller(channel))
-		{
-			padscore::g_padscore.controller_data[channel].dpd_callback = callback;
-			if (callback)
-			{
-				coreinitAsyncCallback_add(callback, 2, channel, WPAD_ERR_NONE);
-			}
-
-			osLib_returnFromFunction(hCPU, WPAD_ERR_NONE);
-			return;
-		}
-	}
-
-	osLib_returnFromFunction(hCPU, WPAD_ERR_NO_CONTROLLER);
-}
-
-void padscoreExport_WPADSetExtensionCallback(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamU32(channel, 0);
-	ppcDefineParamMPTR(callback, 1);
-
-	cemuLog_log(LogType::InputAPI, "WPADSetExtensionCallback({}, 0x{:x})", channel, callback);
-
-	if (channel >= InputManager::kMaxWPADControllers)
-	{
-		debugBreakpoint();
-		osLib_returnFromFunction(hCPU, MPTR_NULL);
-		return;
-	}
-
-	const auto old_callback = padscore::g_padscore.controller_data[channel].extension_callback;
-	padscore::g_padscore.controller_data[channel].extension_callback = callback;
-	osLib_returnFromFunction(hCPU, old_callback.GetMPTR());
-}
-
-void padscoreExport_KPADSetConnectCallback(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamU32(channel, 0);
-	ppcDefineParamMPTR(callback, 1);
-
-	cemuLog_log(LogType::InputAPI, "KPADSetConnectCallback({}, 0x{:x})",channel, callback);
-
-	if (channel >= InputManager::kMaxWPADControllers)
-	{
-		debugBreakpoint();
-		osLib_returnFromFunction(hCPU, MPTR_NULL);
-		return;
-	}
-
-	const auto old_callback = padscore::g_padscore.controller_data[channel].connectCallback;
-	padscore::g_padscore.controller_data[channel].connectCallback = callback;
-	osLib_returnFromFunction(hCPU, old_callback.GetMPTR());
-}
-
-uint64 g_kpadLastRead[InputManager::kMaxWPADControllers] = {0};
-bool g_kpadIsInited = true;
-
-sint32 _KPADRead(uint32 channel, KPADStatus_t* samplingBufs, uint32 length, betype<KPAD_ERROR>* errResult)
-{
-
-	if (channel >= InputManager::kMaxWPADControllers)
-	{
-		debugBreakpoint();
-		return 0;
-	}
-	
-	if (g_kpadIsInited == false)
-	{
-		if (errResult)
-			*errResult = KPAD_ERROR::NOT_INITIALIZED;
-
-		return 0;
-	}
-
-	const auto controller = InputManager::instance().get_wpad_controller(channel);
-	if (!controller)
-	{
-		if (errResult)
-			*errResult = KPAD_ERROR::NO_CONTROLLER;
-
-		return 0;
-	}
-
-	// On console new input samples are only received every few ms and calling KPADRead(Ex) clears the internal queue regardless of length value
-	// thus calling KPADRead(Ex) again too soon on the same channel will result in no data being returned
-	// Games that depend on this: Affordable Space Adventures
-	uint64 currentTime = coreinit::OSGetTime();
-	uint64 timeDif = currentTime - g_kpadLastRead[channel];
-	if(length == 0 || timeDif < coreinit::EspressoTime::ConvertNsToTimerTicks(1000000))
-	{
-		if (errResult)
-			*errResult = KPAD_ERROR::NO_SAMPLE_DATA;
-		return 0;
-	}
-	g_kpadLastRead[channel] = currentTime;
-
-	memset(samplingBufs, 0x00, sizeof(KPADStatus_t));
-	samplingBufs->wpadErr = WPAD_ERR_NONE;
-	samplingBufs->data_format = controller->get_data_format();
-	samplingBufs->devType = controller->get_device_type();
-	if(!WindowSystem::InputConfigWindowHasFocus())
-	{
-		const auto btn_repeat = padscore::g_padscore.controller_data[channel].btn_repeat;
-		controller->KPADRead(*samplingBufs, btn_repeat);
-	}
-
-	if (errResult)
-		*errResult = KPAD_ERROR::NONE;
-
-	return 1;
-}
-
-void padscoreExport_KPADReadEx(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamU32(channel, 0);
-	ppcDefineParamPtr(kpadStatus, KPADStatus_t, 1);
-	ppcDefineParamU32(length, 2);
-	ppcDefineParamPtr(errResult, betype<KPAD_ERROR>, 3);
-	cemuLog_log(LogType::InputAPI, "KPADReadEx({}, 0x{:x})", channel, length);
-
-	sint32 samplesRead = _KPADRead(channel, kpadStatus, length, errResult);
-	osLib_returnFromFunction(hCPU, samplesRead);
-}
-
-void padscoreExport_KPADRead(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamU32(channel, 0);
-	ppcDefineParamPtr(kpadStatus, KPADStatus_t, 1);
-	ppcDefineParamU32(length, 2);
-	cemuLog_log(LogType::InputAPI, "KPADRead({}, 0x{:x})", channel, length);
-
-	sint32 samplesRead = _KPADRead(channel, kpadStatus, length, nullptr);
-	osLib_returnFromFunction(hCPU, samplesRead);
-}
-
-
-
-
-
-
-#pragma endregion
-
-
-
 namespace padscore
 {
-	void export_KPADEnableDPD(PPCInterpreter_t* hCPU)
+	namespace
 	{
-		ppcDefineParamS32(channel, 0);
-		cemuLog_log(LogType::InputAPI, "KPADEnableDPD({})", channel);
-		cemu_assert_debug(0 <= channel && channel < InputManager::kMaxWPADControllers);
+		constexpr uint32 kSlots = InputManager::kMaxWPADControllers;
 
-		if(const auto controller = InputManager::instance().get_wpad_controller(channel))
+		// KPADRead error codes
+		constexpr sint32 kKpadOk = 0;
+		constexpr sint32 kKpadNoSamples = -1;
+		constexpr sint32 kKpadNoController = -2;
+
+		constexpr uint32 kDevNotFound = 253;
+		constexpr uint8 kBatteryFull = 4;
+		constexpr uint8 kLedPlayer1 = 1;
+		constexpr uint32 kMplsWorkSize = 0x5FE0;
+		constexpr sint32 kGravityUnit = 99; // typical Wii Remote 1 g reading
+
+		struct Slot
 		{
-			if (controller->get_data_format() != kDataFormat_FREESTYLE && controller->get_data_format() != 0x1F)
-				g_padscore.controller_data[channel].dpd_enabled = true;
-		}
-		
+			MEMPTR<void> connectCb;   // void(chan, result)
+			MEMPTR<void> extensionCb; // void(chan, devType)
+			MEMPTR<void> samplingCb;  // void(chan)
+			MEMPTR<void> dpdCb;
+			bool dpdOn = true;
+			bool sentInitialDisconnect = false;
+			BtnRepeat repeat{};
+			uint64 lastKpadRead = 0;
+		};
 
-		osLib_returnFromFunction(hCPU, 0);
-	}
-
-	void export_KPADGetMplsWorkSize(PPCInterpreter_t* hCPU)
-	{
-		cemuLog_log(LogType::InputAPI, "KPADGetMplsWorkSize()");
-		osLib_returnFromFunction(hCPU, 0x5FE0);
-	}
-
-	void KPADInitEx(KPADUnifiedWpadStatus_t ring_buffer[], uint32 length)
-	{
-		if (g_padscore.kpad_initialized)
-			return;
-
-		for (uint32 i = 0; i < InputManager::kMaxWPADControllers; i++)
+		struct State
 		{
-			g_padscore.controller_data[i].dpd_enabled = true;
+			Slot slot[kSlots];
+			bool kpadInitialized = false;
+			MEMPTR<KPADUnifiedWpadStatus_t> ringBuffer;
+			uint32 ringLength = 0;
+			bool callbackByKpad = false;
+			uint32 maxControllers = kWPADMaxControllers;
+		};
+		State g;
 
+		SysAllocator<coreinit::OSAlarm_t> s_tickAlarm;
 
-		}
-
-		g_kpad_ringbuffer = ring_buffer;
-		g_kpad_ringbuffer_length = length;
-		g_padscore.kpad_initialized = true;
-	}
-
-	void export_KPADInit(PPCInterpreter_t* hCPU)
-	{
-		cemuLog_log(LogType::InputAPI, "KPADInit()");
-		KPADInitEx(nullptr, 0);
-		osLib_returnFromFunction(hCPU, 0);
-	}
-
-	void export_KPADInitEx(PPCInterpreter_t* hCPU)
-	{
-		ppcDefineParamMEMPTR(ring_buffer, KPADUnifiedWpadStatus_t, 0);
-		ppcDefineParamU32(length, 1);
-		cemuLog_log(LogType::InputAPI, "KPADInitEx(0x{:08x}, 0x{:x})", ring_buffer.GetMPTR(), length);
-		KPADInitEx(ring_buffer.GetPtr(), length);
-		osLib_returnFromFunction(hCPU, 0);
-	}
-
-	void WPADSetCallbackByKPAD(bool state)
-	{
-		g_wpad_callback_by_kpad = state;
-	}
-
-	void export_WPADSetCallbackByKPAD(PPCInterpreter_t* hCPU)
-	{
-		ppcDefineParamU32(state, 0);
-		cemuLog_log(LogType::InputAPI, "WPADSetCallbackByKPAD({})", state);
-		WPADSetCallbackByKPAD(state);
-		osLib_returnFromFunction(hCPU, 0);
-	}
-
-	void export_KPADGetMaxControllers(PPCInterpreter_t* hCPU)
-	{
-		cemuLog_log(LogType::InputAPI, "KPADGetMaxControllers()");
-		sint32 max_controllers = g_padscore.max_controllers;
-		osLib_returnFromFunction(hCPU, max_controllers);
-	}
-
-	bool WPADIsUsedCallbackByKPAD()
-	{
-		return g_wpad_callback_by_kpad == TRUE;
-	}
-
-	void* WPADSetSamplingCallback(sint32 channel, void* callback)
-	{
-		cemu_assert_debug(0 <= channel && channel < kKPADMaxControllers);
-
-		const auto result = g_padscore.controller_data[channel].sampling_callback;
-		g_padscore.controller_data[channel].sampling_callback = callback;
-		return result.GetPtr();
-	}
-
-	void export_KPADSetMaxControllers(PPCInterpreter_t* hCPU)
-	{
-		ppcDefineParamU32(new_max_count, 0);
-		cemuLog_log(LogType::InputAPI, "KPADSetMaxControllers({})", new_max_count);
-
-		if (new_max_count != kKPADMaxControllers && new_max_count != kWPADMaxControllers)
+		// WPADGetInfo result
+		struct WPADInfo_t
 		{
-			debugBreakpoint();
-			osLib_returnFromFunction(hCPU, -4);
-			return;
+			uint32be dpd;
+			uint32be speaker;
+			uint32be attach;
+			uint32be lowBat;
+			uint32be nearempty;
+			uint8 batteryLevel;
+			uint8 led;
+			uint8 protocol;
+			uint8 firmware;
+		};
+		static_assert(sizeof(WPADInfo_t) == 0x18);
+
+		std::shared_ptr<WPADController> Pad(uint32 chan)
+		{
+			return InputManager::instance().get_wpad_controller(chan);
 		}
 
-
-		const uint32 max_controllers = g_padscore.max_controllers;
-		if (max_controllers == new_max_count)
+		void FillInfo(WPADInfo_t* info)
 		{
-			osLib_returnFromFunction(hCPU, 0);
-			return;
+			info->dpd = 0;
+			info->speaker = 0;
+			info->attach = 0;
+			info->lowBat = 0;
+			info->nearempty = 0;
+			info->batteryLevel = kBatteryFull;
+			info->led = kLedPlayer1;
 		}
 
-		WPADSetCallbackByKPAD(FALSE);
-		for (sint32 i = 0; i < kKPADMaxControllers; i++)
+		MEMPTR<void> SwapCallback(MEMPTR<void> Slot::*which, uint32 chan, MEMPTR<void> cb)
 		{
-			//WPADSetSamplingCallback(i, 0); TODO
+			if (chan >= kSlots)
+				return nullptr;
+			MEMPTR<void> previous = g.slot[chan].*which;
+			g.slot[chan].*which = cb;
+			return previous;
 		}
 
-		g_padscore.max_controllers = new_max_count;
-		
-		WPADSetCallbackByKPAD(true);
-		osLib_returnFromFunction(hCPU, new_max_count);
+		void Notify(MEMPTR<void> cb, uint32 chan, sint32 value)
+		{
+			PPCCoreCallback(cb, chan, value);
+		}
+
+		// runs every 5 ms on the alarm thread
+		void Tick(coreinit::OSAlarm_t* alarm, void* context)
+		{
+			for (uint32 i = 0; i < kSlots; i++)
+			{
+				Slot& sl = g.slot[i];
+				if (!sl.connectCb)
+					continue;
+				if (!sl.sentInitialDisconnect)
+				{
+					// the first report after a callback is installed is always "not connected"
+					sl.sentInitialDisconnect = true;
+					Notify(sl.connectCb, i, WPAD_ERR_NO_CONTROLLER);
+					continue;
+				}
+				auto pad = Pad(i);
+				if (!pad)
+					continue;
+				// pressing HOME on the controller is reported as a reconnect so
+				// games show their controller check again
+				if (pad->m_status == WPADController::ConnectCallbackStatus::ReportDisconnect || pad->was_home_button_down())
+				{
+					pad->m_status = WPADController::ConnectCallbackStatus::ReportConnect;
+					Notify(sl.connectCb, i, WPAD_ERR_NO_CONTROLLER);
+				}
+				else if (pad->m_status == WPADController::ConnectCallbackStatus::ReportConnect)
+				{
+					pad->m_status = WPADController::ConnectCallbackStatus::None;
+					Notify(sl.connectCb, i, WPAD_ERR_NONE);
+				}
+			}
+
+			for (uint32 i = 0; i < kSlots; i++)
+			{
+				if (!g.slot[i].extensionCb)
+					continue;
+				auto pad = Pad(i);
+				if (pad && pad->m_extension_status == WPADController::ConnectCallbackStatus::ReportConnect)
+				{
+					pad->m_extension_status = WPADController::ConnectCallbackStatus::None;
+					Notify(g.slot[i].extensionCb, i, (sint32)pad->get_device_type());
+				}
+			}
+
+			for (uint32 i = 0; i < kSlots; i++)
+			{
+				if (g.slot[i].samplingCb && Pad(i))
+					PPCCoreCallback(g.slot[i].samplingCb, i);
+			}
+		}
 	}
 
-	void export_WPADInit()
+	// --- WPAD ----------------------------------------------------------------
+
+	sint32 WPADGetStatus()
 	{
-		if (g_wpad_state != kWPADStateShutdown)
-		{
-			if (g_wpad_state == kWPADStateInitializing || g_wpad_state == kWPADStateAcquired)
-				return;
-		}
-		g_wpad_state = kWPADStateInitializing;
+		return 1; // library is up
 	}
 
-
-	enum class WPADStatus : sint32
+	sint32 WPADGetBatteryLevel(uint32 chan)
 	{
-		Success = 0,
-		NoController = -1,
-		Busy = -2,
-	};
+		return kBatteryFull;
+	}
 
-	WPADStatus WPADIsMplsAttached(sint32 index, uint32be* attached, void* callback)
+	sint32 WPADProbe(uint32 chan, uint32be* devType)
 	{
-		if (index >= kKPADMaxControllers)
-			return WPADStatus::NoController;
+		auto pad = Pad(chan);
+		if (devType)
+			*devType = pad ? (uint32)pad->get_device_type() : kDevNotFound;
+		return pad ? WPAD_ERR_NONE : WPAD_ERR_NO_CONTROLLER;
+	}
 
-		const auto controller = InputManager::instance().get_wpad_controller(index);
-		*attached = controller && controller->is_mpls_attached();
+	sint32 WPADGetInfo(uint32 chan, WPADInfo_t* info)
+	{
+		if (chan >= kSlots || !Pad(chan))
+			return WPAD_ERR_NO_CONTROLLER;
+		FillInfo(info);
+		return WPAD_ERR_NONE;
+	}
 
+	sint32 WPADGetInfoAsync(uint32 chan, WPADInfo_t* info, MPTR callback)
+	{
+		const sint32 result = WPADGetInfo(chan, info);
+		if (callback != MPTR_NULL)
+			coreinitAsyncCallback_add(callback, 2, chan, (uint32)result);
+		return result;
+	}
+
+	sint32 WPADRead(uint32 chan, WPADStatus_t* status)
+	{
+		if (auto pad = Pad(chan))
+			pad->WPADRead(status);
+		return WPAD_ERR_NO_CONTROLLER; // WPADRead is void on the console; r3 is not used
+	}
+
+	sint32 WPADSetDataFormat(uint32 chan, uint32 format)
+	{
+		if (auto pad = Pad(chan))
+			pad->set_data_format((WPADDataFormat)format);
+		return 0;
+	}
+
+	sint32 WPADGetDataFormat(uint32 chan)
+	{
+		auto pad = Pad(chan);
+		return pad ? (sint32)pad->get_data_format() : (sint32)kDataFormat_CORE;
+	}
+
+	sint32 WPADIsMotorEnabled()
+	{
+		return 1;
+	}
+
+	sint32 WPADControlMotor(uint32 chan, uint32 command)
+	{
+		if (auto pad = Pad(chan))
+		{
+			if (command == 1)
+				pad->start_rumble();
+			else
+				pad->stop_rumble();
+		}
+		return 0;
+	}
+
+	sint32 WPADControlDpd(uint32 chan, uint32 command, MPTR callback)
+	{
+		if (chan >= kSlots || !Pad(chan))
+			return WPAD_ERR_NO_CONTROLLER;
+		g.slot[chan].dpdCb = MEMPTR<void>(callback);
+		if (callback != MPTR_NULL)
+			coreinitAsyncCallback_add(callback, 2, chan, WPAD_ERR_NONE);
+		return WPAD_ERR_NONE;
+	}
+
+	void* WPADSetExtensionCallback(uint32 chan, MEMPTR<void> callback)
+	{
+		return SwapCallback(&Slot::extensionCb, chan, callback).GetPtr();
+	}
+
+	void* KPADSetConnectCallback(uint32 chan, MEMPTR<void> callback)
+	{
+		return SwapCallback(&Slot::connectCb, chan, callback).GetPtr();
+	}
+
+	void* KPADSetSamplingCallback(uint32 chan, MEMPTR<void> callback)
+	{
+		return SwapCallback(&Slot::samplingCb, chan, callback).GetPtr();
+	}
+
+	sint32 WPADSetCallbackByKPAD(uint32 enable)
+	{
+		g.callbackByKpad = enable != 0;
+		return 0;
+	}
+
+	sint32 WPADIsMplsAttached(sint32 chan, uint32be* attached, MEMPTR<void> callback)
+	{
+		if (chan >= kKPADMaxControllers)
+			return WPAD_ERR_NO_CONTROLLER;
+		auto pad = Pad((uint32)chan);
+		*attached = (pad && pad->is_mpls_attached()) ? 1 : 0;
 		if (callback)
-			PPCCoreCallback(MEMPTR(callback), index, controller ? WPADStatus::Success : WPADStatus::NoController);
-
-		return WPADStatus::Success;
+			Notify(callback, (uint32)chan, pad ? WPAD_ERR_NONE : WPAD_ERR_NO_CONTROLLER);
+		return WPAD_ERR_NONE;
 	}
 
-	struct WPADAcc
+	struct WPADAccGravity
 	{
 		sint32be x;
 		sint32be y;
 		sint32be z;
 	};
-	void WPADGetAccGravityUnit(sint32 index, uint32 type, WPADAcc* acc)
+
+	void WPADGetAccGravityUnit(sint32 chan, uint32 type, WPADAccGravity* acc)
 	{
-		if (index >= kKPADMaxControllers)
+		if (chan >= kKPADMaxControllers)
 			return;
-
-		// default values for wiimote usually are around 99
-		acc->x = 99;
-		acc->y = 99;
-		acc->z = 99;
+		acc->x = kGravityUnit;
+		acc->y = kGravityUnit;
+		acc->z = kGravityUnit;
 	}
 
+	// --- KPAD ----------------------------------------------------------------
 
-#pragma endregion
-
-	void TickFunction(PPCInterpreter_t* hCPU)
+	sint32 KPADInitEx(KPADUnifiedWpadStatus_t* ringBuffer, uint32 length)
 	{
-		auto& instance = InputManager::instance();
-		// test for connected/disconnected controllers
-		for (auto i = 0; i < InputManager::kMaxWPADControllers; ++i)
-		{
-			if (g_padscore.controller_data[i].connectCallback) 
-			{
-				if(!g_padscore.controller_data[i].disconnectCalled)
-				{
-					g_padscore.controller_data[i].disconnectCalled = true;
-					cemuLog_log(LogType::InputAPI, "Calling WPADConnectCallback({}, {})", i, WPAD_ERR_NO_CONTROLLER);
-					PPCCoreCallback(g_padscore.controller_data[i].connectCallback, i, WPAD_ERR_NO_CONTROLLER);
-					continue;
-				}
-
-				if (const auto controller = instance.get_wpad_controller(i))
-				{
-					if (controller->m_status == WPADController::ConnectCallbackStatus::ReportDisconnect || controller->was_home_button_down()) // fixed!
-					{
-						controller->m_status = WPADController::ConnectCallbackStatus::ReportConnect;
-
-						cemuLog_log(LogType::InputAPI, "Calling WPADConnectCallback({}, {})", i, WPAD_ERR_NO_CONTROLLER);
-						PPCCoreCallback(g_padscore.controller_data[i].connectCallback, i, WPAD_ERR_NO_CONTROLLER);
-						
-					}
-					else if (controller->m_status == WPADController::ConnectCallbackStatus::ReportConnect) 
-					{
-						controller->m_status = WPADController::ConnectCallbackStatus::None;
-						cemuLog_log(LogType::InputAPI, "Calling WPADConnectCallback({}, {})", i, WPAD_ERR_NONE);
-						PPCCoreCallback(g_padscore.controller_data[i].connectCallback, i, WPAD_ERR_NONE);
-					}
-				}
-			}
-		}
-
-		// test for connected/disconnected extensions
-		for (auto i = 0; i < InputManager::kMaxWPADControllers; ++i)
-		{
-			if (g_padscore.controller_data[i].extension_callback) 
-			{
-				if (const auto controller = instance.get_wpad_controller(i))
-				{
-					if (controller->m_extension_status == WPADController::ConnectCallbackStatus::ReportConnect)
-					{
-						controller->m_extension_status = WPADController::ConnectCallbackStatus::None;
-						cemuLog_log(LogType::InputAPI, "Calling WPADextensionCallback({})", i);
-						PPCCoreCallback(g_padscore.controller_data[i].extension_callback, i, controller->get_device_type());
-					}
-				}
-			}
-		}
-
-		// call sampling callback
-		for (auto i = 0; i < InputManager::kMaxWPADControllers; ++i)
-		{
-			if (g_padscore.controller_data[i].sampling_callback)
-			{
-				if (const auto controller = instance.get_wpad_controller(i))
-				{
-					cemuLog_log(LogType::InputAPI, "Calling WPADsamplingCallback({})", i);
-					PPCCoreCallback(g_padscore.controller_data[i].sampling_callback, i);
-				}
-			}
-		}
-
-		osLib_returnFromFunction(hCPU, 0);
+		if (g.kpadInitialized)
+			return 0;
+		for (Slot& sl : g.slot)
+			sl.dpdOn = true;
+		g.ringBuffer = ringBuffer;
+		g.ringLength = length;
+		g.kpadInitialized = true;
+		return 0;
 	}
+
+	sint32 KPADInit()
+	{
+		return KPADInitEx(nullptr, 0);
+	}
+
+	sint32 KPADSetMaxControllers(uint32 count)
+	{
+		if (count != (uint32)kWPADMaxControllers && count != (uint32)kKPADMaxControllers)
+			return WPAD_ERR_INVALID;
+		if (count == g.maxControllers)
+			return 0;
+		g.maxControllers = count;
+		g.callbackByKpad = true;
+		return (sint32)count;
+	}
+
+	sint32 KPADGetMaxControllers()
+	{
+		return (sint32)g.maxControllers;
+	}
+
+	sint32 KPADEnableDPD(sint32 chan)
+	{
+		if (auto pad = Pad((uint32)chan))
+		{
+			auto format = pad->get_data_format();
+			if (format != kDataFormat_FREESTYLE && format != 0x1F)
+				g.slot[chan].dpdOn = true;
+		}
+		return 0;
+	}
+
+	uint32 KPADGetMplsWorkSize()
+	{
+		return kMplsWorkSize;
+	}
+
+	sint32 KPADSetBtnRepeat(uint32 chan, float delaySec, float pulseSec)
+	{
+		// stored as whole numbers, which is what the emulated controllers expect today
+		if (chan < kSlots)
+			g.slot[chan].repeat = {(sint32)delaySec, (sint32)pulseSec};
+		return 0;
+	}
+
+	// Fills one sample. Like the console, a read empties the queue, so reading
+	// again within 1 ms gives nothing (Affordable Space Adventures relies on it).
+	sint32 KPADReadEx(uint32 chan, KPADStatus_t* buffer, uint32 length, betype<sint32>* error)
+	{
+		auto setError = [&](sint32 e) { if (error) *error = e; };
+		if (chan >= kSlots)
+			return 0;
+		auto pad = Pad(chan);
+		if (!pad)
+		{
+			setError(kKpadNoController);
+			return 0;
+		}
+		Slot& sl = g.slot[chan];
+		const uint64 now = coreinit::OSGetTime();
+		if (length == 0 || now - sl.lastKpadRead < (uint64)coreinit::EspressoTime::ConvertNsToTimerTicks(1000000))
+		{
+			setError(kKpadNoSamples);
+			return 0;
+		}
+		sl.lastKpadRead = now;
+
+		memset((void*)buffer, 0, sizeof(KPADStatus_t));
+		buffer->wpadErr = WPAD_ERR_NONE;
+		buffer->data_format = (uint8)pad->get_data_format();
+		buffer->devType = (uint8)pad->get_device_type();
+		// keep the game from reacting to input meant for the controller settings window
+		if (!WindowSystem::InputConfigWindowHasFocus())
+			pad->KPADRead(*buffer, sl.repeat);
+		setError(kKpadOk);
+		return 1;
+	}
+
+	sint32 KPADRead(uint32 chan, KPADStatus_t* buffer, uint32 length)
+	{
+		return KPADReadEx(chan, buffer, length, nullptr);
+	}
+
+	sint32 KPADGetUnifiedWpadStatus(uint32 chan, KPADUnifiedWpadStatus_t* status, uint32 count)
+	{
+		if (chan >= kSlots)
+			return 0;
+		memset((void*)status, 0, sizeof(KPADUnifiedWpadStatus_t) * count);
+		if (count == 0)
+			return 0;
+		auto pad = Pad(chan);
+		if (!pad)
+		{
+			status->u.core.err = WPAD_ERR_NO_CONTROLLER;
+			return 0;
+		}
+		// the newest sample goes into the first entry; the format byte follows the
+		// union, so write it after the report
+		pad->WPADRead(&status->u.core);
+		status->fmt = (uint8)pad->get_data_format();
+		return 0;
+	}
+
+	// --- module ---------------------------------------------------------------
+
 	void start()
 	{
-		OSCreateAlarm(&g_padscore.alarm);
-		const uint64 start_tick = coreinit::OSGetTime();
-		const uint64 period_tick = coreinit::EspressoTime::GetTimerClock() / 200; // every 5ms
-		MPTR handler = PPCInterpreter_makeCallableExportDepr(TickFunction);
-		OSSetPeriodicAlarm(&g_padscore.alarm, start_tick, period_tick, handler);
+		// a new title starts: forget callbacks the previous one installed
+		g = State{};
+		coreinit::OSCreateAlarm(s_tickAlarm.GetPtr());
+		const uint64 period = coreinit::EspressoTime::GetTimerClock() / 200; // 5 ms
+		static const MPTR handler = makeCallableExport<&Tick>();
+		coreinit::OSSetPeriodicAlarm(s_tickAlarm.GetPtr(), coreinit::OSGetTime(), period, handler);
 	}
 
-	class : public COSModule
+	class PadscoreModule : public COSModule
 	{
-		public:
-		std::string_view GetName() override
-		{
-			return "padscore";
-		}
+	public:
+		std::string_view GetName() override { return "padscore"; }
 
 		void RPLMapped() override
 		{
+			cafeExportRegister("padscore", WPADGetStatus, LogType::InputAPI);
+			cafeExportRegister("padscore", WPADGetBatteryLevel, LogType::InputAPI);
+			cafeExportRegister("padscore", WPADProbe, LogType::InputAPI);
+			cafeExportRegister("padscore", WPADGetInfo, LogType::InputAPI);
+			cafeExportRegister("padscore", WPADGetInfoAsync, LogType::InputAPI);
+			cafeExportRegister("padscore", WPADRead, LogType::InputAPI);
+			cafeExportRegister("padscore", WPADSetDataFormat, LogType::InputAPI);
+			cafeExportRegister("padscore", WPADGetDataFormat, LogType::InputAPI);
+			cafeExportRegister("padscore", WPADIsMotorEnabled, LogType::InputAPI);
+			cafeExportRegister("padscore", WPADControlMotor, LogType::InputAPI);
+			cafeExportRegister("padscore", WPADControlDpd, LogType::InputAPI);
+			cafeExportRegister("padscore", WPADSetExtensionCallback, LogType::InputAPI);
+			cafeExportRegisterFunc(KPADSetConnectCallback, "padscore", "WPADSetConnectCallback", LogType::InputAPI);
+			cafeExportRegisterFunc(KPADSetSamplingCallback, "padscore", "WPADSetSamplingCallback", LogType::InputAPI);
+			cafeExportRegister("padscore", WPADSetCallbackByKPAD, LogType::InputAPI);
 			cafeExportRegister("padscore", WPADIsMplsAttached, LogType::InputAPI);
 			cafeExportRegister("padscore", WPADGetAccGravityUnit, LogType::InputAPI);
 
-			// wpad
-			//osLib_addFunction("padscore", "WPADInit", padscore::export_WPADInit);
+			cafeExportRegister("padscore", KPADInit, LogType::InputAPI);
+			cafeExportRegister("padscore", KPADInitEx, LogType::InputAPI);
+			cafeExportRegister("padscore", KPADSetMaxControllers, LogType::InputAPI);
+			cafeExportRegister("padscore", KPADGetMaxControllers, LogType::InputAPI);
+			cafeExportRegister("padscore", KPADEnableDPD, LogType::InputAPI);
+			cafeExportRegister("padscore", KPADGetMplsWorkSize, LogType::InputAPI);
+			cafeExportRegister("padscore", KPADSetConnectCallback, LogType::InputAPI);
+			cafeExportRegister("padscore", KPADSetSamplingCallback, LogType::InputAPI);
+			cafeExportRegister("padscore", KPADSetBtnRepeat, LogType::InputAPI);
+			cafeExportRegister("padscore", KPADRead, LogType::InputAPI);
+			cafeExportRegister("padscore", KPADReadEx, LogType::InputAPI);
+			cafeExportRegister("padscore", KPADGetUnifiedWpadStatus, LogType::InputAPI);
+		}
+	};
 
-			// kpad
-			osLib_addFunction("padscore", "KPADSetMaxControllers", padscore::export_KPADSetMaxControllers);
-			osLib_addFunction("padscore", "KPADGetMaxControllers", padscore::export_KPADGetMaxControllers);
-			osLib_addFunction("padscore", "KPADEnableDPD", padscore::export_KPADEnableDPD);
-			osLib_addFunction("padscore", "KPADGetMplsWorkSize", padscore::export_KPADGetMplsWorkSize);
-			osLib_addFunction("padscore", "KPADInit", padscore::export_KPADInit);
-			osLib_addFunction("padscore", "KPADInitEx", padscore::export_KPADInitEx);
-
-			osLib_addFunction("padscore", "KPADSetConnectCallback", padscoreExport_KPADSetConnectCallback);
-			osLib_addFunction("padscore", "KPADReadEx", padscoreExport_KPADReadEx);
-			osLib_addFunction("padscore", "KPADRead", padscoreExport_KPADRead);
-			osLib_addFunction("padscore", "KPADGetUnifiedWpadStatus", padscoreExport_KPADGetUnifiedWpadStatus);
-			osLib_addFunction("padscore", "KPADSetSamplingCallback", padscoreExport_KPADSetSamplingCallback);
-			osLib_addFunction("padscore", "KPADSetBtnRepeat", padscoreExport_KPADSetBtnRepeat);
-
-			osLib_addFunction("padscore", "WPADGetBatteryLevel", padscoreExport_WPADGetBatteryLevel);
-			osLib_addFunction("padscore", "WPADControlMotor", padscoreExport_WPADControlMotor);
-			osLib_addFunction("padscore", "WPADIsMotorEnabled", padscoreExport_WPADIsMotorEnabled);
-			osLib_addFunction("padscore", "WPADGetStatus", padscoreExport_WPADGetStatus);
-			osLib_addFunction("padscore", "WPADProbe", padscoreExport_WPADProbe);
-			osLib_addFunction("padscore", "WPADGetInfoAsync", padscoreExport_WPADGetInfoAsync);
-			osLib_addFunction("padscore", "WPADGetInfo", padscoreExport_WPADGetInfo);
-			osLib_addFunction("padscore", "WPADSetConnectCallback", padscoreExport_KPADSetConnectCallback);
-			osLib_addFunction("padscore", "WPADSetDataFormat", padscoreExport_WPADSetDataFormat);
-			osLib_addFunction("padscore", "WPADGetDataFormat", padscoreExport_WPADGetDataFormat);
-			osLib_addFunction("padscore", "WPADRead", padscoreExport_WPADRead);
-			osLib_addFunction("padscore", "WPADSetExtensionCallback", padscoreExport_WPADSetExtensionCallback);
-			osLib_addFunction("padscore", "WPADSetSamplingCallback", padscoreExport_KPADSetSamplingCallback);
-			osLib_addFunction("padscore", "WPADControlDpd", padscoreExport_WPADControlDpd);
-
-			osLib_addFunction("padscore", "WPADSetCallbackByKPAD", padscore::export_WPADSetCallbackByKPAD);
-		};
-
-	}s_COSCoreinitModule;
+	PadscoreModule s_padscoreModule;
 
 	COSModule* GetModule()
 	{
-		return &s_COSCoreinitModule;
+		return &s_padscoreModule;
 	}
-
 }

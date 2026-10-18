@@ -54,12 +54,12 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 16818 | 5.1% |
-| Cemu, untouched | 256757 | 77.7% |
-| Cemu, with PixelU changes | 15320 | 4.6% |
+| Original (RetroPixels) | 21029 | 6.4% |
+| Cemu, untouched | 250252 | 76.2% |
+| Cemu, with PixelU changes | 15633 | 4.8% |
 | PixelU-added files (MPL-2.0 header) | 1940 | 0.6% |
-| Third-party | 39404 | 11.9% |
-| **All** | **330239** | 100% |
+| Third-party | 39404 | 12.0% |
+| **All** | **328258** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -128,7 +128,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/OS/libs/nn_nim | 241 | 241 | original |
 | Cafe/OS/libs/nn_olv | 4486 | 0 | Cemu |
 | Cafe/OS/libs/nn_pdm | 66 | 66 | original |
-| Cafe/OS/libs/nn_save | 864 | 0 | Cemu |
+| Cafe/OS/libs/nn_save | 566 | 566 | original |
 | Cafe/OS/libs/nn_sl | 121 | 121 | original |
 | Cafe/OS/libs/nn_spm | 126 | 126 | original |
 | Cafe/OS/libs/nn_temp | 65 | 65 | original |
@@ -137,14 +137,14 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/OS/libs/nsyskbd | 84 | 84 | original |
 | Cafe/OS/libs/nsysnet | 1374 | 1374 | original |
 | Cafe/OS/libs/ntag | 623 | 623 | original |
-| Cafe/OS/libs/padscore | 1109 | 0 | Cemu |
-| Cafe/OS/libs/proc_ui | 970 | 0 | Cemu |
-| Cafe/OS/libs/snd_core | 5601 | 0 | Cemu + PixelU change |
-| Cafe/OS/libs/snd_user | 1476 | 0 | Cemu |
+| Cafe/OS/libs/padscore | 737 | 737 | original |
+| Cafe/OS/libs/proc_ui | 868 | 868 | original |
+| Cafe/OS/libs/snd_core | 5511 | 374 | mixed (7% original) |
+| Cafe/OS/libs/snd_user | 1030 | 1030 | original |
 | Cafe/OS/libs/swkbd | 613 | 613 | original |
 | Cafe/OS/libs/sysapp | 435 | 435 | original |
 | Cafe/OS/libs/TCL | 222 | 0 | Cemu |
-| Cafe/OS/libs/vpad | 1319 | 0 | Cemu |
+| Cafe/OS/libs/vpad | 636 | 636 | original |
 | Cafe/OS/libs/zlib125 | 306 | 306 | original |
 | Cafe/OS/RPL | 3366 | 0 | Cemu |
 | Cafe/TitleList | 2597 | 0 | Cemu |
@@ -158,7 +158,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cemu/PPCAssembler | 4106 | 0 | Cemu |
 | Cemu/Tools | 2017 | 0 | Cemu |
 | Common | 31891 | 0 | Cemu, 28314 lines third-party |
-| config | 3005 | 0 | Cemu + PixelU change |
+| config | 3015 | 0 | Cemu + PixelU change |
 | gui/interface | 126 | 0 | Cemu |
 | gui/wxgui (top level) | 14868 | 0 | Cemu + PixelU change |
 | gui/wxgui/canvas | 389 | 0 | Cemu + PixelU change |
@@ -228,3 +228,24 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
   its buffer, the Infinity/Dimensions configuration descriptors are no longer
   corrupt, portal queues are locked, and libusb devices claim their interfaces
   once instead of on every transfer.
+- Batch 4: HLE libraries `nn_save`, `proc_ui`, `padscore`, `vpad` and
+  `snd_user` (snd_user and snduser2) rewritten as original code (headers and
+  sources), plus `ax_aux.cpp` and `ax_multivoice.cpp` of `snd_core`. Exports,
+  guest struct layouts, save paths and the save folder layout are unchanged.
+  The GamePad touch conversion matches the old code for every raw value. The
+  rest of `snd_core` (voices, ADPCM/PCM decoding, resampling, mixing, the
+  output thread and the PixelU recorder hook in `ax_out.cpp`) is still Cemu's
+  code; it is the audio engine every game goes through and is left for a
+  batch of its own, together with `nn_olv`.
+  Fixes: MotionPlus data reached games byte-swapped (KPAD MotionPlus structs
+  are big endian now); KPADGetUnifiedWpadStatus reads every data format;
+  WPADGetInfoAsync reports a missing controller as -1; padscore, vpad and
+  snd_user drop the previous title's callbacks and state on each boot;
+  VPADSetTPCalibrationParam stores both offsets; vpad checks the channel
+  number everywhere; MIX DPL2 no longer silences front-left (it clears the unused
+  centre and LFE slots instead) and 6-channel aux sends route their LFE to their own bus; the
+  AXFX stub callbacks clear every channel; ProcUISetCallbackStackSize no longer
+  drops registered callbacks and callbacks of equal priority run in
+  registration order; nn_save application box 4 returns NOT_FOUND instead of
+  an uninitialised path; AXAcquireMultiVoice no longer leaks voices when it
+  runs out part way through.

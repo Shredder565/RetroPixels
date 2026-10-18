@@ -1,795 +1,504 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Written from scratch.
+//
+// nn_save gives a title access to its save data without it having to know
+// where that data lives. Every SAVE* call names an account slot (1..12, or
+// 0xFF for data shared by all accounts) and a path relative to that account's
+// save folder; we turn it into an absolute FS path and hand it to coreinit FS.
+//
+//   own title     /vol/save/<persistent id>/<path>   or /vol/save/common/<path>
+//   other titles  /vol/storage_mlc01/usr/save/<hi>/<lo>/user/<id or common>/<path>
+//
+// /vol/save itself is mapped to the running title's MLC save folder by
+// nn_acp (ACPMountSaveDir), so these paths decide where save files land on the
+// host. They must not change, or existing saves stop loading.
+//
+// The blocking variants issue the async request with our own completion
+// callback and sleep on an event until FS reports back.
+
 #include "Cafe/OS/common/OSCommon.h"
 #include "nn_save.h"
-
 #include "Cafe/OS/libs/nn_acp/nn_acp.h"
 #include "Cafe/OS/libs/nn_act/nn_act.h"
-
-#include <filesystem>
-#include <sstream>
-#include "config/ActiveSettings.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
 #include "Cafe/OS/libs/coreinit/coreinit_FS.h"
 #include "Cafe/CafeSystem.h"
 #include "Cafe/Filesystem/fsc.h"
+#include "config/ActiveSettings.h"
 
-#define SAVE_STATUS_OK ((FSStatus)FS_RESULT::SUCCESS)
-#define SAVE_MAX_PATH_SIZE (FSA_CMD_PATH_MAX_LENGTH)
-
-#define SAVE_ACCOUNT_ID_MIN (1)
-#define SAVE_ACCOUNT_ID_MAX (0xC)
-
-#define SAVE_UNIQUE_TO_TITLE_ID(_unique_) (((((uint64)_unique_ >> 24ULL) | 0x50000) << 32ULL) | ((_unique_ << 8) | 0x10000000))
-#define SAVE_UNIQUE_TO_TITLE_ID_VARIATION(_unique_,_variation_) (((((uint64)_unique_ >> 24ULL) | 0x50000 ) << 32) | ((_unique_ << 8) | 0x10000000 | _variation_))
-#define SAVE_UNIQUE_DEMO_TO_TITLE_ID(_unique_) (((((uint64)_unique_ >> 24ULL) | 0x50002) << 32ULL) | ((_unique_ << 8) | 0x10000000))
-#define SAVE_UNIQUE_DEMO_TO_TITLE_ID_VARIATION(_unique_,_variation_) (((((uint64)_unique_ >> 24ULL) | 0x50002 ) << 32ULL) | ((_unique_ << 8) | 0x10000000 | _variation_))
-
-namespace nn
+namespace nn::save
 {
-namespace save
-{
-	typedef FSStatus SAVEStatus;
+	using SAVEStatus = FSStatus;
+	using coreinit::FSClient_t;
+	using coreinit::FSCmdBlock_t;
 
-	typedef struct
+	namespace
 	{
-		bool initialized;
-		coreinit::OSMutex mutex;
-		coreinit::FSClient_t fsClient;
-		coreinit::FSCmdBlock_t fsCmdBlock;
-		uint32 persistentIdCache[0xC];
-	}nn_save_t;
+		constexpr SAVEStatus kOk = (SAVEStatus)FS_RESULT::SUCCESS;
+		constexpr SAVEStatus kNotFound = (SAVEStatus)FS_RESULT::NOT_FOUND;
+		constexpr SAVEStatus kFatal = (SAVEStatus)FS_RESULT::FATAL_ERROR;
+		constexpr SAVEStatus kNoPermission = (SAVEStatus)FS_RESULT::PERMISSION_ERROR;
 
-	SysAllocator<nn_save_t> g_nn_save;
+		constexpr uint8 kCommonSlot = 0xFF;
+		constexpr uint8 kSlotCount = 12; // account slots are numbered 1..12
+		constexpr size_t kPathMax = FSA_CMD_PATH_MAX_LENGTH;
+		constexpr uint32 kAppBoxMlc = 3;
 
-	uint32 GetPersistentIdFromLocalCache(uint8 accountSlot)
-	{
-		accountSlot--;
-		if (accountSlot >= 0xC)
-			return 0;
+		struct SaveLibState
+		{
+			bool ready;
+			coreinit::OSMutex lock;
+			FSClient_t fsClient;
+			FSCmdBlock_t fsCmd;
+			uint32 slotPersistentId[kSlotCount];
+		};
+		SysAllocator<SaveLibState> s_lib;
 
-		return g_nn_save->persistentIdCache[accountSlot];
-	}
+		// Lives in guest memory: FS writes the result through userContext.
+		struct BlockingWait
+		{
+			coreinit::OSEvent done;
+			betype<SAVEStatus> status;
+		};
 
-	void SetPersistentIdToLocalCache(uint8 accountSlot, uint32 persistentId)
-	{
-		accountSlot--;
-		if (accountSlot >= 0xC)
-			return;
+		void OnBlockingRequestDone(FSClient_t* client, FSCmdBlock_t* cmd, sint32 status, BlockingWait* wait)
+		{
+			wait->status = status;
+			coreinit::OSSignalEvent(&wait->done);
+		}
 
-		g_nn_save->persistentIdCache[accountSlot] = persistentId;
+		// Calls issue(asyncParams) and, if the request was queued, waits for it.
+		template<typename TIssue>
+		SAVEStatus RunBlocking(TIssue&& issue)
+		{
+			static const MPTR s_doneCallback = makeCallableExport<&OnBlockingRequestDone>();
+			StackAllocator<BlockingWait> wait;
+			StackAllocator<FSAsyncParams> params;
+			coreinit::OSInitEvent(&wait->done, coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_AUTO);
+			wait->status = kOk;
+			params->userCallback = MEMPTR<void>(s_doneCallback);
+			params->userContext = wait.GetPointer();
+			params->ioMsgQueue = nullptr;
+			SAVEStatus queued = issue(params.GetPointer());
+			if (queued != kOk)
+				return queued;
+			coreinit::OSWaitEvent(&wait->done);
+			return wait->status;
+		}
+
+		uint32 CachedPersistentId(uint8 slot)
+		{
+			if (slot < 1 || slot > kSlotCount)
+				return 0;
+			return s_lib->slotPersistentId[slot - 1];
+		}
+
+		// Formats into out (kPathMax bytes). False if the result would not fit.
+		template<typename... TArgs>
+		bool FormatPath(char* out, const char* fmt, TArgs... args)
+		{
+			int n = snprintf(out, kPathMax - 1, fmt, args...);
+			return n >= 0 && (size_t)n < kPathMax - 1;
+		}
+
+		bool OwnSavePath(uint32 persistentId, const char* rel, char* out)
+		{
+			const char* sub = rel ? rel : "";
+			if (persistentId == 0)
+				return FormatPath(out, "/vol/save/common/%s", sub);
+			return FormatPath(out, "/vol/save/%08x/%s", persistentId, sub);
+		}
+
+		FS_RESULT OtherTitleSavePath(uint32 persistentId, uint64 titleId, const char* rel, char* out)
+		{
+			uint32be box;
+			if (acp::ACPGetApplicationBox(&box, titleId) != acp::ACPStatus::SUCCESS)
+				return FS_RESULT::NOT_FOUND;
+			if ((uint32)box != kAppBoxMlc)
+			{
+				// titles on USB storage are never reported by our ACP
+				cemuLog_log(LogType::Save, "nn_save: title {:016x} is in application box {} which is not supported", titleId, (uint32)box);
+				return FS_RESULT::NOT_FOUND;
+			}
+			const char* sub = rel ? rel : "";
+			const uint32 hi = (uint32)(titleId >> 32), lo = (uint32)titleId;
+			bool fits = persistentId != 0
+				? FormatPath(out, "/vol/storage_mlc01/usr/save/%08x/%08x/user/%08x/%s", hi, lo, persistentId, sub)
+				: FormatPath(out, "/vol/storage_mlc01/usr/save/%08x/%08x/user/common/%s", hi, lo, sub);
+			return fits ? FS_RESULT::SUCCESS : FS_RESULT::FATAL_ERROR;
+		}
+
+		// Title id of another application from its unique id (bits 8..27 of the low word).
+		uint64 TitleFromUniqueId(uint32 uniqueId, uint8 variation, bool demo)
+		{
+			uint64 hi = 0x00050000u | (demo ? 0x2u : 0x0u) | (uniqueId >> 24);
+			uint32 lo = 0x10000000u | (uint32)(uniqueId << 8) | variation;
+			return (hi << 32) | lo;
+		}
+
+		// Resolves (slot, rel) for the running title under the library lock and
+		// passes the absolute path to issue(). Path errors never reach FS.
+		template<typename TIssue>
+		SAVEStatus WithOwnPath(uint8 slot, const char* rel, TIssue&& issue)
+		{
+			coreinit::OSLockMutex(&s_lib->lock);
+			SAVEStatus result;
+			uint32 persistentId;
+			char path[kPathMax];
+			if (!GetPersistentIdEx(slot, &persistentId))
+				result = kNotFound;
+			else if (!OwnSavePath(persistentId, rel, path))
+				result = kFatal;
+			else
+				result = issue(path, persistentId);
+			coreinit::OSUnlockMutex(&s_lib->lock);
+			return result;
+		}
+
+		template<typename TIssue>
+		SAVEStatus WithOtherTitlePath(uint64 titleId, uint8 slot, const char* rel, TIssue&& issue)
+		{
+			coreinit::OSLockMutex(&s_lib->lock);
+			SAVEStatus result = kFatal;
+			uint32 persistentId;
+			char path[kPathMax];
+			if (!GetPersistentIdEx(slot, &persistentId))
+				result = kNotFound;
+			else if (OtherTitleSavePath(persistentId, titleId, rel, path) == FS_RESULT::SUCCESS)
+				result = issue(path);
+			coreinit::OSUnlockMutex(&s_lib->lock);
+			return result;
+		}
+
+		void CreateTitleSaveFolders(uint64 titleId)
+		{
+			// the save folder lives under the base title id (update/DLC bits cleared)
+			const uint32 hi = (uint32)(titleId >> 32) & ~0xCu;
+			const uint32 lo = (uint32)titleId;
+			char path[256];
+			sint32 fscStatus;
+			snprintf(path, sizeof(path), "/vol/storage_mlc01/usr/save/%08x/", hi);
+			fsc_createDir(path, &fscStatus);
+			snprintf(path, sizeof(path), "/vol/storage_mlc01/usr/save/%08x/%08x/", hi, lo);
+			fsc_createDir(path, &fscStatus);
+			snprintf(path, sizeof(path), "/vol/storage_mlc01/usr/save/%08x/%08x/meta/", hi, lo);
+			fsc_createDir(path, &fscStatus);
+		}
 	}
 
 	bool GetPersistentIdEx(uint8 accountSlot, uint32* persistentId)
 	{
-		if (accountSlot == 0xFF)
+		if (accountSlot == kCommonSlot)
 		{
 			*persistentId = 0;
 			return true;
 		}
-
-		const uint32 result = GetPersistentIdFromLocalCache(accountSlot);
-		*persistentId = result;
-		return result != 0;
+		*persistentId = CachedPersistentId(accountSlot);
+		return *persistentId != 0;
 	}
 
-	bool GetCurrentTitleApplicationBox(nn::acp::ACPDeviceType* deviceType)
-	{
-		if (deviceType)
-		{
-			*deviceType = nn::acp::ACPDeviceType::InternalDeviceType;
-			return true;
-		}
-		return false;
-	}
-
-	void UpdateSaveTimeStamp(uint32 persistentId)
-	{
-		nn::acp::ACPDeviceType deviceType;
-		if (GetCurrentTitleApplicationBox(&deviceType))
-			ACPUpdateSaveTimeStamp(persistentId, CafeSystem::GetForegroundTitleId(), deviceType);
-	}
-
-	SAVEStatus ConvertACPToSaveStatus(acp::ACPStatus status)
-	{
-		cemu_assert_debug(status == 0); // todo
-		return 0;
-	}
-
-	bool GetAbsoluteFullPath(uint32 persistentId, const char* subDir, char* outPath)
-	{
-		int size;
-		if (persistentId != 0)
-		{
-			if (subDir)
-				size = snprintf(outPath, SAVE_MAX_PATH_SIZE - 1, "/vol/save/%08x/%s", persistentId, subDir);
-			else
-				size = snprintf(outPath, SAVE_MAX_PATH_SIZE - 1, "/vol/save/%08x/", persistentId);
-		}
-		else
-		{
-			if (subDir)
-				size = snprintf(outPath, SAVE_MAX_PATH_SIZE - 1, "/vol/save/common/%s", subDir);
-			else
-				size = snprintf(outPath, SAVE_MAX_PATH_SIZE - 1, "/vol/save/common/");
-		}
-
-		if (size < SAVE_MAX_PATH_SIZE - 1)
-			return true;
-		return false;
-	}
-
-	FS_RESULT GetAbsoluteFullPathOtherApplication(uint32 persistentId, uint64 titleId, const char* subDir, char* outPath)
-	{
-		uint32be applicationBox;
-		if(acp::ACPGetApplicationBox(&applicationBox, titleId) != acp::ACPStatus::SUCCESS)
-			return FS_RESULT::NOT_FOUND;
-
-		sint32 written = 0;
-		if(applicationBox == 3)	
-		{
-			if(persistentId != 0)
-			{
-				if (subDir)
-					written = snprintf(outPath, SAVE_MAX_PATH_SIZE - 1, "/vol/storage_mlc01/usr/save/%08x/%08x/user/%08x/%s",
-						GetTitleIdHigh(titleId), GetTitleIdLow(titleId), persistentId, subDir);
-				else
-					written = snprintf(outPath, SAVE_MAX_PATH_SIZE - 1, "/vol/storage_mlc01/usr/save/%08x/%08x/user/%08x/",
-						GetTitleIdHigh(titleId), GetTitleIdLow(titleId), persistentId);
-			}	
-			else
-			{
-				if (subDir)
-					written = snprintf(outPath, SAVE_MAX_PATH_SIZE - 1, "/vol/storage_mlc01/usr/save/%08x/%08x/user/common/%s",
-						GetTitleIdHigh(titleId), GetTitleIdLow(titleId), subDir);
-				else
-					written = snprintf(outPath, SAVE_MAX_PATH_SIZE - 1, "/vol/storage_mlc01/usr/save/%08x/%08x/user/common/",
-						GetTitleIdHigh(titleId), GetTitleIdLow(titleId));
-			}
-		}
-		else if(applicationBox == 4)
-		{
-			cemu_assert_unimplemented();
-		}
-		else 
-			return FS_RESULT::NOT_FOUND;
-
-		if (written < SAVE_MAX_PATH_SIZE - 1)
-			return FS_RESULT::SUCCESS;
-
-		cemu_assert_suspicious();
-		return FS_RESULT::FATAL_ERROR;
-	}
-
-	struct AsyncResultData
-	{
-		MEMPTR<coreinit::OSEvent> event;
-		betype<SAVEStatus> returnStatus;
-	};
-
-	void SaveAsyncFinishCallback(PPCInterpreter_t* hCPU);
-
-	struct AsyncToSyncWrapper : public FSAsyncParams
-	{
-		AsyncToSyncWrapper()
-		{
-			coreinit::OSInitEvent(&_event, coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_AUTO);
-			ioMsgQueue = nullptr;
-			userContext = &_result;
-			userCallback = RPLLoader_MakePPCCallable(SaveAsyncFinishCallback);
-			_result.returnStatus = 0;
-			_result.event = &_event;
-		}
-
-		~AsyncToSyncWrapper()
-		{
-
-		}
-
-		FSAsyncParams* GetAsyncParams()
-		{
-			return this;
-		}
-
-		SAVEStatus GetResult()
-		{
-			return _result.returnStatus;
-		}
-
-		void WaitForEvent()
-		{
-			coreinit::OSWaitEvent(&_event);
-		}
-	  private:
-		coreinit::OSEvent _event;
-		AsyncResultData _result;
-	};
-
-	void SaveAsyncFinishCallback(PPCInterpreter_t* hCPU)
-	{
-		ppcDefineParamMEMPTR(client, coreinit::FSClient_t, 0);
-		ppcDefineParamMEMPTR(block, coreinit::FSCmdBlock_t, 1);
-		ppcDefineParamU32(returnStatus, 2);
-		ppcDefineParamMEMPTR(userContext, void, 3);
-
-		MEMPTR<AsyncResultData> resultPtr{ userContext };
-		resultPtr->returnStatus = returnStatus;
-		coreinit::OSSignalEvent(resultPtr->event);
-
-		osLib_returnFromFunction(hCPU, 0);
-	}
-
-	SAVEStatus SAVEMountSaveDir()
-	{
-		acp::ACPStatus status = acp::ACPMountSaveDir();
-		return ConvertACPToSaveStatus(status);
-	}
-
-    SAVEStatus SAVEUnmountSaveDir()
-    {
-        return ConvertACPToSaveStatus(acp::ACPUnmountSaveDir());
-    }
-
+	// --- setup -------------------------------------------------------------
 
 	SAVEStatus SAVEInit()
 	{
+		if (s_lib->ready)
+			return kOk;
 		const uint64 titleId = CafeSystem::GetForegroundTitleId();
-
-		if (!g_nn_save->initialized)
-		{
-			OSInitMutexEx(&g_nn_save->mutex, nullptr);
-			act::Initialize();
-			coreinit::FSAddClientEx(&g_nn_save->fsClient, 0, 0);
-			coreinit::FSInitCmdBlock(&g_nn_save->fsCmdBlock);
-			for(uint8 accountId = SAVE_ACCOUNT_ID_MIN; accountId <= SAVE_ACCOUNT_ID_MAX; ++accountId)
-			{
-				uint32 persistentId = act::GetPersistentIdEx(accountId);
-				SetPersistentIdToLocalCache(accountId, persistentId);
-			}
-			
-			SAVEMountSaveDir();
-			g_nn_save->initialized = true;
-
-			uint32 high = GetTitleIdHigh(titleId) & (~0xC);
-			uint32 low = GetTitleIdLow(titleId);
-
-			sint32 fscStatus = FSC_STATUS_FILE_NOT_FOUND;
-			char path[256];
-			sprintf(path, "%susr/save/%08x/", "/vol/storage_mlc01/", high);
-			fsc_createDir(path, &fscStatus);
-			sprintf(path, "%susr/save/%08x/%08x/", "/vol/storage_mlc01/", high, low);
-			fsc_createDir(path, &fscStatus);
-			sprintf(path, "%susr/save/%08x/%08x/meta/", "/vol/storage_mlc01/", high, low);
-			fsc_createDir(path, &fscStatus);
-
-			iosu::acp::CreateSaveMetaFiles(ActiveSettings::GetPersistentId(), titleId);
-		}
-
-		return SAVE_STATUS_OK;
+		coreinit::OSInitMutexEx(&s_lib->lock, nullptr);
+		act::Initialize();
+		coreinit::FSAddClientEx(&s_lib->fsClient, 0, 0);
+		coreinit::FSInitCmdBlock(&s_lib->fsCmd);
+		for (uint8 slot = 1; slot <= kSlotCount; slot++)
+			s_lib->slotPersistentId[slot - 1] = act::GetPersistentIdEx(slot);
+		acp::ACPMountSaveDir();
+		s_lib->ready = true;
+		CreateTitleSaveFolders(titleId);
+		iosu::acp::CreateSaveMetaFiles(ActiveSettings::GetPersistentId(), titleId);
+		return kOk;
 	}
 
 	SAVEStatus SAVEInitSaveDir(uint8 accountSlot)
 	{
-		SAVEStatus result = (FSStatus)(FS_RESULT::FATAL_ERROR);
-		OSLockMutex(&g_nn_save->mutex);
-
+		coreinit::OSLockMutex(&s_lib->lock);
+		SAVEStatus result = kNotFound;
 		uint32 persistentId;
 		if (GetPersistentIdEx(accountSlot, &persistentId))
 		{
-			acp::ACPStatus status = nn::acp::ACPCreateSaveDir(persistentId, iosu::acp::ACPDeviceType::InternalDeviceType);
-			result = ConvertACPToSaveStatus(status);
+			acp::ACPStatus acpResult = acp::ACPCreateSaveDir(persistentId, iosu::acp::ACPDeviceType::InternalDeviceType);
+			if (acpResult != acp::ACPStatus::SUCCESS)
+				cemuLog_log(LogType::Save, "SAVEInitSaveDir: ACPCreateSaveDir failed for {:08x}", persistentId);
+			result = kOk; // like the console, a folder that already exists is not an error
 		}
-		else
-			result = (FSStatus)FS_RESULT::NOT_FOUND;
-
-		OSUnlockMutex(&g_nn_save->mutex);
+		coreinit::OSUnlockMutex(&s_lib->lock);
 		return result;
-	}
-
-	SAVEStatus SAVEOpenDirAsync(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint8 accountSlot, const char* path, FSDirHandlePtr hDir, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
-	{
-		SAVEStatus result = (FSStatus)(FS_RESULT::FATAL_ERROR);
-
-		OSLockMutex(&g_nn_save->mutex);
-
-		uint32 persistentId;
-		if (GetPersistentIdEx(accountSlot, &persistentId))
-		{
-			char fullPath[SAVE_MAX_PATH_SIZE];
-			if (GetAbsoluteFullPath(persistentId, path, fullPath))
-				result = coreinit::FSOpenDirAsync(client, block, fullPath, hDir, errHandling, (FSAsyncParams*)asyncParams);
-			
-		}
-		else
-			result = (FSStatus)FS_RESULT::NOT_FOUND;
-
-		OSUnlockMutex(&g_nn_save->mutex);
-
-		return result;
-	}
-
-	SAVEStatus SAVEOpenDir(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint8 accountSlot, const char* path, FSDirHandlePtr hDir, FS_ERROR_MASK errHandling)
-	{
-		StackAllocator<AsyncToSyncWrapper> asyncData;
-		SAVEStatus status = SAVEOpenDirAsync(client, block, accountSlot, path, hDir, errHandling, asyncData->GetAsyncParams());
-		if (status != (FSStatus)FS_RESULT::SUCCESS)
-			return status;
-		asyncData->WaitForEvent();
-		return asyncData->GetResult();
-	}
-
-	SAVEStatus SAVEOpenDirOtherApplicationAsync(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint64 titleId, uint8 accountSlot, const char* path, FSDirHandlePtr hDir, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
-	{
-		SAVEStatus result = (FSStatus)(FS_RESULT::FATAL_ERROR);
-
-		OSLockMutex(&g_nn_save->mutex);
-		uint32 persistentId;
-		if (GetPersistentIdEx(accountSlot, &persistentId))
-		{
-			char fullPath[SAVE_MAX_PATH_SIZE];
-			if (GetAbsoluteFullPathOtherApplication(persistentId, titleId, path, fullPath) == FS_RESULT::SUCCESS)
-				result = coreinit::FSOpenDirAsync(client, block, fullPath, hDir, errHandling, (FSAsyncParams*)asyncParams);
-		}
-		else
-			result = (FSStatus)FS_RESULT::NOT_FOUND;
-		OSUnlockMutex(&g_nn_save->mutex);
-
-		return result;
-	}
-
-	SAVEStatus SAVEOpenDirOtherApplication(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint64 titleId, uint8 accountSlot, const char* path, FSDirHandlePtr hDir, FS_ERROR_MASK errHandling)
-	{
-		StackAllocator<AsyncToSyncWrapper> asyncData;
-		SAVEStatus status = SAVEOpenDirOtherApplicationAsync(client, block, titleId, accountSlot, path, hDir, errHandling, asyncData->GetAsyncParams());
-		if (status != (FSStatus)FS_RESULT::SUCCESS)
-			return status;
-		asyncData->WaitForEvent();
-		return asyncData->GetResult();
-	}
-
-	SAVEStatus SAVEOpenDirOtherNormalApplicationAsync(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint32 uniqueId, uint8 accountSlot, const char* path, FSDirHandlePtr hDir, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
-	{
-		uint64 titleId = SAVE_UNIQUE_TO_TITLE_ID(uniqueId);
-		return SAVEOpenDirOtherApplicationAsync(client, block, titleId, accountSlot, path, hDir, errHandling, asyncParams);
-	}
-
-	SAVEStatus SAVEOpenDirOtherNormalApplication(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint32 uniqueId, uint8 accountSlot, const char* path, FSDirHandlePtr hDir, FS_ERROR_MASK errHandling)
-	{
-		uint64 titleId = SAVE_UNIQUE_TO_TITLE_ID(uniqueId);
-		return SAVEOpenDirOtherApplication(client, block, titleId, accountSlot, path, hDir, errHandling);
-	}
-
-	SAVEStatus SAVEOpenDirOtherNormalApplicationVariationAsync(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint32 uniqueId, uint8 variation, uint8 accountSlot, const char* path, FSDirHandlePtr hDir, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
-	{
-		uint64 titleId = SAVE_UNIQUE_TO_TITLE_ID_VARIATION(uniqueId, variation);
-		return SAVEOpenDirOtherApplicationAsync(client, block, titleId, accountSlot, path, hDir, errHandling, asyncParams);
-	}
-
-	SAVEStatus SAVEOpenDirOtherNormalApplicationVariation(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint32 uniqueId, uint8 variation, uint8 accountSlot, const char* path, FSDirHandlePtr hDir, FS_ERROR_MASK errHandling)
-	{
-		uint64 titleId = SAVE_UNIQUE_TO_TITLE_ID_VARIATION(uniqueId, variation);
-		return SAVEOpenDirOtherApplication(client, block, titleId, accountSlot, path, hDir, errHandling);
-	}
-
-	SAVEStatus SAVEOpenFileAsync(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint8 accountSlot, const char* path, const char* mode, FSFileHandlePtr outFileHandle, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
-	{
-		SAVEStatus result = (FSStatus)(FS_RESULT::FATAL_ERROR);
-
-		OSLockMutex(&g_nn_save->mutex);
-
-		uint32 persistentId;
-		if (GetPersistentIdEx(accountSlot, &persistentId))
-		{
-			char fullPath[SAVE_MAX_PATH_SIZE];
-			if (GetAbsoluteFullPath(persistentId, path, fullPath))
-				result = coreinit::FSOpenFileAsync(client, block, fullPath, (char*)mode, outFileHandle, errHandling, (FSAsyncParams*)asyncParams);
-		}
-		else
-			result = (FSStatus)FS_RESULT::NOT_FOUND;
-
-		OSUnlockMutex(&g_nn_save->mutex);
-
-		return result;
-	}
-
-	SAVEStatus SAVEOpenFileOtherApplicationAsync(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint64 titleId, uint8 accountSlot, const char* path, const char* mode, FSFileHandlePtr outFileHandle, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
-	{
-		if (strcmp(mode, "r") != 0)
-			return (SAVEStatus)(FS_RESULT::PERMISSION_ERROR);
-
-		SAVEStatus result = (FSStatus)(FS_RESULT::FATAL_ERROR);
-
-		OSLockMutex(&g_nn_save->mutex);
-
-		uint32 persistentId;
-		if (GetPersistentIdEx(accountSlot, &persistentId))
-		{
-			char fullPath[SAVE_MAX_PATH_SIZE];
-			if (GetAbsoluteFullPathOtherApplication(persistentId, titleId, path, fullPath) == FS_RESULT::SUCCESS)
-				result = coreinit::FSOpenFileAsync(client, block, fullPath, (char*)mode, outFileHandle, errHandling, (FSAsyncParams*)asyncParams);
-		}
-		else
-			result = (FSStatus)FS_RESULT::NOT_FOUND;
-
-		OSUnlockMutex(&g_nn_save->mutex);
-
-		return result;
-	}
-
-	SAVEStatus SAVEOpenFileOtherApplication(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint64 titleId, uint8 accountSlot, const char* path, const char* mode, FSFileHandlePtr outFileHandle, FS_ERROR_MASK errHandling)
-	{
-		StackAllocator<AsyncToSyncWrapper> asyncData;
-		SAVEStatus status = SAVEOpenFileOtherApplicationAsync(client, block, titleId, accountSlot, path, mode, outFileHandle, errHandling, asyncData->GetAsyncParams());
-		if (status != (FSStatus)FS_RESULT::SUCCESS)
-			return status;
-		asyncData->WaitForEvent();
-		return asyncData->GetResult();
-	}
-
-	SAVEStatus SAVEOpenFileOtherNormalApplicationAsync(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint32 uniqueId, uint8 accountSlot, const char* path, const char* mode, FSFileHandlePtr outFileHandle, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
-	{
-		uint64 titleId = SAVE_UNIQUE_TO_TITLE_ID(uniqueId);
-		return SAVEOpenFileOtherApplicationAsync(client, block, titleId, accountSlot, path, mode, outFileHandle, errHandling, asyncParams);
-	}
-
-	SAVEStatus SAVEOpenFileOtherNormalApplication(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint32 uniqueId, uint8 accountSlot, const char* path, const char* mode, FSFileHandlePtr outFileHandle, FS_ERROR_MASK errHandling)
-	{
-		uint64 titleId = SAVE_UNIQUE_TO_TITLE_ID(uniqueId);
-		return SAVEOpenFileOtherApplication(client, block, titleId, accountSlot, path, mode, outFileHandle, errHandling);
-	}
-
-	SAVEStatus SAVEOpenFileOtherNormalApplicationVariationAsync(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint32 uniqueId, uint8 variation, uint8 accountSlot, const char* path, const char* mode, FSFileHandlePtr outFileHandle, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
-	{
-		uint64 titleId = SAVE_UNIQUE_TO_TITLE_ID_VARIATION(uniqueId, variation);
-		return SAVEOpenFileOtherApplicationAsync(client, block, titleId, accountSlot, path, mode, outFileHandle, errHandling, asyncParams);
-	}
-
-	SAVEStatus SAVEOpenFileOtherNormalApplicationVariation(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint32 uniqueId, uint8 variation, uint8 accountSlot, const char* path, const char* mode, FSFileHandlePtr outFileHandle, FS_ERROR_MASK errHandling)
-	{
-		uint64 titleId = SAVE_UNIQUE_TO_TITLE_ID_VARIATION(uniqueId, variation);
-		return SAVEOpenFileOtherApplication(client, block, titleId, accountSlot, path, mode, outFileHandle, errHandling);
-	}
-
-	SAVEStatus SAVEGetStatAsync(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint8 accountSlot, const char* path, FSStat_t* stat, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
-	{
-		SAVEStatus result = (FSStatus)(FS_RESULT::FATAL_ERROR);
-
-		OSLockMutex(&g_nn_save->mutex);
-
-		uint32 persistentId;
-		if (GetPersistentIdEx(accountSlot, &persistentId))
-		{
-			char fullPath[SAVE_MAX_PATH_SIZE];
-			if (GetAbsoluteFullPath(persistentId, path, fullPath))
-				result = coreinit::__FSQueryInfoAsync(client, block, (uint8*)fullPath, FSA_QUERY_TYPE_STAT, stat, errHandling, (FSAsyncParams*)asyncParams); // FSGetStatAsync(...)
-		}
-		else
-			result = (FSStatus)FS_RESULT::NOT_FOUND;
-
-		OSUnlockMutex(&g_nn_save->mutex);
-
-		return result;
-	}
-
-	SAVEStatus SAVEGetStat(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint8 accountSlot, const char* path, FSStat_t* stat, FS_ERROR_MASK errHandling)
-	{
-		StackAllocator<AsyncToSyncWrapper> asyncData;
-		SAVEStatus status = SAVEGetStatAsync(client, block, accountSlot, path, stat, errHandling, asyncData->GetAsyncParams());
-		if (status != (FSStatus)FS_RESULT::SUCCESS)
-			return status;
-		asyncData->WaitForEvent();
-		return asyncData->GetResult();
-	}
-
-	SAVEStatus SAVEGetStatOtherApplicationAsync(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint64 titleId, uint8 accountSlot, const char* path, FSStat_t* stat, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
-	{
-		SAVEStatus result = (FSStatus)(FS_RESULT::FATAL_ERROR);
-
-		OSLockMutex(&g_nn_save->mutex);
-
-		uint32 persistentId;
-		if (GetPersistentIdEx(accountSlot, &persistentId))
-		{
-			char fullPath[SAVE_MAX_PATH_SIZE];
-			if (GetAbsoluteFullPathOtherApplication(persistentId, titleId, path, fullPath) == FS_RESULT::SUCCESS)
-				result = coreinit::__FSQueryInfoAsync(client, block, (uint8*)fullPath, FSA_QUERY_TYPE_STAT, stat, errHandling, (FSAsyncParams*)asyncParams); // FSGetStatAsync(...)
-		}
-		else
-			result = (FSStatus)FS_RESULT::NOT_FOUND;
-
-		OSUnlockMutex(&g_nn_save->mutex);
-
-		return result;
-	}
-
-	SAVEStatus SAVEGetStatOtherApplication(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint64 titleId, uint8 accountSlot, const char* path, FSStat_t* stat, FS_ERROR_MASK errHandling)
-	{
-		StackAllocator<AsyncToSyncWrapper> asyncData;
-		SAVEStatus status = SAVEGetStatOtherApplicationAsync(client, block, titleId, accountSlot, path, stat, errHandling, asyncData->GetAsyncParams());
-		if (status != (FSStatus)FS_RESULT::SUCCESS)
-			return status;
-		asyncData->WaitForEvent();
-		return asyncData->GetResult();
-	}
-
-	SAVEStatus SAVEGetStatOtherNormalApplicationAsync(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint32 uniqueId, uint8 accountSlot, const char* path, FSStat_t* stat, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
-	{
-		uint64 titleId = SAVE_UNIQUE_TO_TITLE_ID(uniqueId);
-		return SAVEGetStatOtherApplicationAsync(client, block, titleId, accountSlot, path, stat, errHandling, asyncParams);
-	}
-
-	SAVEStatus SAVEGetStatOtherNormalApplication(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint32 uniqueId, uint8 accountSlot, const char* path, FSStat_t* stat, FS_ERROR_MASK errHandling)
-	{
-		uint64 titleId = SAVE_UNIQUE_TO_TITLE_ID(uniqueId);
-		return SAVEGetStatOtherApplication(client, block, titleId, accountSlot, path, stat, errHandling);
-	}
-
-	SAVEStatus SAVEGetStatOtherDemoApplicationAsync(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint32 uniqueId, uint8 accountSlot, const char* path, FSStat_t* stat, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
-	{
-		uint64 titleId = SAVE_UNIQUE_DEMO_TO_TITLE_ID(uniqueId);
-		return SAVEGetStatOtherApplicationAsync(client, block, titleId, accountSlot, path, stat, errHandling, asyncParams);
-	}
-
-	SAVEStatus SAVEGetStatOtherNormalApplicationVariationAsync(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint32 uniqueId, uint8 variation, uint8 accountSlot, const char* path, FSStat_t* stat, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
-	{
-		uint64 titleId = SAVE_UNIQUE_TO_TITLE_ID_VARIATION(uniqueId, variation);
-		return SAVEGetStatOtherApplicationAsync(client, block, titleId, accountSlot, path, stat, errHandling, asyncParams);
-	}
-
-	SAVEStatus SAVEGetStatOtherDemoApplicationVariationAsync(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint32 uniqueId, uint8 variation, uint8 accountSlot, const char* path, FSStat_t* stat, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
-	{
-		uint64 titleId = SAVE_UNIQUE_DEMO_TO_TITLE_ID_VARIATION(uniqueId, variation);
-		return SAVEGetStatOtherApplicationAsync(client, block, titleId, accountSlot, path, stat, errHandling, asyncParams);
-	}
-
-	SAVEStatus SAVEGetStatOtherNormalApplicationVariation(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint32 uniqueId, uint8 variation, uint8 accountSlot, const char* path, FSStat_t* stat, FS_ERROR_MASK errHandling)
-	{
-		//peterBreak();
-
-		uint64 titleId = SAVE_UNIQUE_TO_TITLE_ID_VARIATION(uniqueId, variation);
-		return SAVEGetStatOtherApplication(client, block, titleId, accountSlot, path, stat, errHandling);
-	}
-
-	SAVEStatus SAVEGetFreeSpaceSizeAsync(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint8 accountSlot, FSLargeSize* freeSize, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
-	{
-		SAVEStatus result = (FSStatus)(FS_RESULT::FATAL_ERROR);
-
-		OSLockMutex(&g_nn_save->mutex);
-
-		uint32 persistentId;
-		if (GetPersistentIdEx(accountSlot, &persistentId))
-		{
-			char fullPath[SAVE_MAX_PATH_SIZE];
-			if (GetAbsoluteFullPath(persistentId, nullptr, fullPath))
-				result = coreinit::FSGetFreeSpaceSizeAsync(client, block, fullPath, freeSize, errHandling, (FSAsyncParams*)asyncParams);
-		}
-		else
-			result = (FSStatus)FS_RESULT::NOT_FOUND;
-
-		OSUnlockMutex(&g_nn_save->mutex);
-
-		return result;
-	}
-
-	SAVEStatus SAVEGetFreeSpaceSize(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint8 accountSlot, FSLargeSize* freeSize, FS_ERROR_MASK errHandling)
-	{
-		StackAllocator<AsyncToSyncWrapper> asyncData;
-		SAVEStatus status = SAVEGetFreeSpaceSizeAsync(client, block, accountSlot, freeSize, errHandling, asyncData->GetAsyncParams());
-		if (status != (FSStatus)FS_RESULT::SUCCESS)
-			return status;
-		asyncData->WaitForEvent();
-		return asyncData->GetResult();
-	}
-
-	SAVEStatus SAVERemoveAsync(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint8 accountSlot, const char* path, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
-	{
-		SAVEStatus result = (FSStatus)(FS_RESULT::FATAL_ERROR);
-
-		OSLockMutex(&g_nn_save->mutex);
-
-		uint32 persistentId;
-		if (GetPersistentIdEx(accountSlot, &persistentId))
-		{
-			char fullPath[SAVE_MAX_PATH_SIZE];
-			if (GetAbsoluteFullPath(persistentId, path, fullPath))
-				result = coreinit::FSRemoveAsync(client, block, (uint8*)fullPath, errHandling, (FSAsyncParams*)asyncParams);
-		}
-		else
-			result = (FSStatus)FS_RESULT::NOT_FOUND;
-
-		OSUnlockMutex(&g_nn_save->mutex);
-		return result;
-	}
-
-	SAVEStatus SAVERemove(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint8 accountSlot, const char* path, FS_ERROR_MASK errHandling)
-	{
-		StackAllocator<AsyncToSyncWrapper> asyncData;
-		SAVEStatus status = SAVERemoveAsync(client, block, accountSlot, path, errHandling, asyncData->GetAsyncParams());
-		if (status != (FSStatus)FS_RESULT::SUCCESS)
-			return status;
-		asyncData->WaitForEvent();
-		return asyncData->GetResult();
-	}
-
-	SAVEStatus SAVERenameAsync(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint8 accountSlot, const char* oldPath, const char* newPath, FS_ERROR_MASK errHandling, FSAsyncParams* asyncParams)
-	{
-		SAVEStatus result = (FSStatus)(FS_RESULT::FATAL_ERROR);
-		OSLockMutex(&g_nn_save->mutex);
-
-		uint32 persistentId;
-		if (GetPersistentIdEx(accountSlot, &persistentId))
-		{
-			char fullOldPath[SAVE_MAX_PATH_SIZE];
-			if (GetAbsoluteFullPath(persistentId, oldPath, fullOldPath))
-			{
-				char fullNewPath[SAVE_MAX_PATH_SIZE];
-				if (GetAbsoluteFullPath(persistentId, newPath, fullNewPath))
-					result = coreinit::FSRenameAsync(client, block, fullOldPath, fullNewPath, errHandling, asyncParams);
-			}
-		}
-		else
-			result = (FSStatus)FS_RESULT::NOT_FOUND;
-
-		OSUnlockMutex(&g_nn_save->mutex);
-		return result;
-	}
-
-	SAVEStatus SAVERename(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint8 accountSlot, const char* oldPath, const char* newPath, FS_ERROR_MASK errHandling)
-	{
-		StackAllocator<AsyncToSyncWrapper> asyncData;
-		SAVEStatus status = SAVERenameAsync(client, block, accountSlot, oldPath, newPath, errHandling, asyncData->GetAsyncParams());
-		if (status != (FSStatus)FS_RESULT::SUCCESS)
-			return status;
-		asyncData->WaitForEvent();
-		return asyncData->GetResult();
-	}
-
-	SAVEStatus SAVEMakeDirAsync(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint8 accountSlot, const char* path, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
-	{
-		SAVEStatus result = (FSStatus)(FS_RESULT::FATAL_ERROR);
-
-		OSLockMutex(&g_nn_save->mutex);
-
-		uint32 persistentId;
-		if (GetPersistentIdEx(accountSlot, &persistentId))
-		{
-			char fullPath[SAVE_MAX_PATH_SIZE];
-			if (GetAbsoluteFullPath(persistentId, path, fullPath))
-				result = coreinit::FSMakeDirAsync(client, block, fullPath, errHandling, (FSAsyncParams*)asyncParams);
-		}
-		else
-			result = (FSStatus)FS_RESULT::NOT_FOUND;
-
-		OSUnlockMutex(&g_nn_save->mutex);
-
-		return result;
-	}
-
-	SAVEStatus SAVEMakeDir(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint8 accountSlot, const char* path, FS_ERROR_MASK errHandling)
-	{
-		StackAllocator<AsyncToSyncWrapper> asyncData;
-		SAVEStatus status = SAVEMakeDirAsync(client, block, accountSlot, path, errHandling, asyncData->GetAsyncParams());
-		if (status != (FSStatus)FS_RESULT::SUCCESS)
-			return status;
-		asyncData->WaitForEvent();
-		return asyncData->GetResult();
-	}
-
-	SAVEStatus SAVEOpenFile(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint8 accountSlot, const char* path, const char* mode, FSFileHandlePtr outFileHandle, FS_ERROR_MASK errHandling)
-	{
-		StackAllocator<AsyncToSyncWrapper> asyncData;
-		SAVEStatus status = SAVEOpenFileAsync(client, block, accountSlot, path, mode, outFileHandle, errHandling, asyncData->GetAsyncParams());
-		if (status != (FSStatus)FS_RESULT::SUCCESS)
-			return status;
-		asyncData->WaitForEvent();
-		return asyncData->GetResult();
 	}
 
 	SAVEStatus SAVEGetSharedDataTitlePath(uint64 titleId, const char* dataFileName, char* output, sint32 outputLength)
 	{
-		SAVEStatus result = (FSStatus)(FS_RESULT::FATAL_ERROR);
-		sint32 written = snprintf(output, outputLength, "/vol/storage_mlc01/sys/title/%08x/%08x/content/%s", GetTitleIdHigh(titleId), GetTitleIdLow(titleId), dataFileName);
-		if (written >= 0 && written < outputLength)
-			result = (FSStatus)FS_RESULT::SUCCESS;
-		cemu_assert_debug(result != (FSStatus)(FS_RESULT::FATAL_ERROR));
-		return result;
+		int n = snprintf(output, outputLength, "/vol/storage_mlc01/sys/title/%08x/%08x/content/%s", (uint32)(titleId >> 32), (uint32)titleId, dataFileName);
+		return (n >= 0 && n < outputLength) ? kOk : kFatal;
 	}
 
 	SAVEStatus SAVEGetSharedSaveDataPath(uint64 titleId, const char* dataFileName, char* output, uint32 outputLength)
 	{
-		SAVEStatus result = (FSStatus)(FS_RESULT::FATAL_ERROR);
-		int written = snprintf(output, outputLength, "/vol/storage_mlc01/usr/save/%08x/%08x/user/common/%s", GetTitleIdHigh(titleId), GetTitleIdLow(titleId), dataFileName);
-		if (written >= 0 && written < (sint32)outputLength)
-			result = (FSStatus)FS_RESULT::SUCCESS;
-		cemu_assert_debug(result != (FSStatus)(FS_RESULT::FATAL_ERROR));
-		return result;
+		int n = snprintf(output, outputLength, "/vol/storage_mlc01/usr/save/%08x/%08x/user/common/%s", (uint32)(titleId >> 32), (uint32)titleId, dataFileName);
+		return (n >= 0 && (uint32)n < outputLength) ? kOk : kFatal;
 	}
 
-	SAVEStatus SAVEChangeDirAsync(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint8 accountSlot, const char* path, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
+	// --- own title: files and folders ---------------------------------------
+
+	SAVEStatus SAVEOpenFileAsync(FSClient_t* client, FSCmdBlock_t* block, uint8 accountSlot, const char* path, const char* mode, FSFileHandlePtr outFileHandle, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
 	{
-		SAVEStatus result = (FSStatus)(FS_RESULT::FATAL_ERROR);
-
-		OSLockMutex(&g_nn_save->mutex);
-		uint32 persistentId;
-		if (GetPersistentIdEx(accountSlot, &persistentId))
-		{
-			char fullPath[SAVE_MAX_PATH_SIZE];
-			if (GetAbsoluteFullPath(persistentId, path, fullPath))
-				result = coreinit::FSChangeDirAsync(client, block, fullPath, errHandling, (FSAsyncParams*)asyncParams);
-		}
-		else
-			result = (FSStatus)FS_RESULT::NOT_FOUND;
-		OSUnlockMutex(&g_nn_save->mutex);
-
-		return result;
+		return WithOwnPath(accountSlot, path, [&](char* full, uint32) {
+			return coreinit::FSOpenFileAsync(client, block, full, (char*)mode, outFileHandle, errHandling, (FSAsyncParams*)asyncParams);
+		});
 	}
 
-	SAVEStatus SAVEChangeDir(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint8 accountSlot, const char* path, FS_ERROR_MASK errHandling)
+	SAVEStatus SAVEOpenFile(FSClient_t* client, FSCmdBlock_t* block, uint8 accountSlot, const char* path, const char* mode, FSFileHandlePtr outFileHandle, FS_ERROR_MASK errHandling)
 	{
-		StackAllocator<AsyncToSyncWrapper> asyncData;
-		SAVEStatus status = SAVEChangeDirAsync(client, block, accountSlot, path, errHandling, asyncData->GetAsyncParams());
-		if (status != (FSStatus)FS_RESULT::SUCCESS)
-			return status;
-		asyncData->WaitForEvent();
-		return asyncData->GetResult();
+		return RunBlocking([&](FSAsyncParams* p) { return SAVEOpenFileAsync(client, block, accountSlot, path, mode, outFileHandle, errHandling, p); });
 	}
 
-	SAVEStatus SAVEFlushQuotaAsync(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint8 accountSlot, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
+	SAVEStatus SAVEOpenDirAsync(FSClient_t* client, FSCmdBlock_t* block, uint8 accountSlot, const char* path, FSDirHandlePtr hDir, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
 	{
-		SAVEStatus result = (FSStatus)(FS_RESULT::FATAL_ERROR);
-
-		OSLockMutex(&g_nn_save->mutex);
-		uint32 persistentId;
-		if (GetPersistentIdEx(accountSlot, &persistentId))
-		{
-			char fullPath[SAVE_MAX_PATH_SIZE];
-			if (GetAbsoluteFullPath(persistentId, nullptr, fullPath))
-			{
-				result = coreinit::FSFlushQuotaAsync(client, block, fullPath, errHandling, (FSAsyncParams*)asyncParams);
-				// if(OSGetUPID != 0xF)
-				UpdateSaveTimeStamp(persistentId);
-			}
-		}
-		else
-			result = (FSStatus)FS_RESULT::NOT_FOUND;
-		OSUnlockMutex(&g_nn_save->mutex);
-
-		return result;
+		return WithOwnPath(accountSlot, path, [&](char* full, uint32) {
+			return coreinit::FSOpenDirAsync(client, block, full, hDir, errHandling, (FSAsyncParams*)asyncParams);
+		});
 	}
 
-	SAVEStatus SAVEFlushQuota(coreinit::FSClient_t* client, coreinit::FSCmdBlock_t* block, uint8 accountSlot,  FS_ERROR_MASK errHandling)
+	SAVEStatus SAVEOpenDir(FSClient_t* client, FSCmdBlock_t* block, uint8 accountSlot, const char* path, FSDirHandlePtr hDir, FS_ERROR_MASK errHandling)
 	{
-		StackAllocator<AsyncToSyncWrapper> asyncData;
-		SAVEStatus status = SAVEFlushQuotaAsync(client, block, accountSlot, errHandling, asyncData->GetAsyncParams());
-		if (status != (FSStatus)FS_RESULT::SUCCESS)
-			return status;
-		asyncData->WaitForEvent();
-		return asyncData->GetResult();
+		return RunBlocking([&](FSAsyncParams* p) { return SAVEOpenDirAsync(client, block, accountSlot, path, hDir, errHandling, p); });
 	}
 
-    void ResetToDefaultState()
-    {
-        if(g_nn_save->initialized)
-        {
-            SAVEUnmountSaveDir();
-            g_nn_save->initialized = false;
-        }
-    }
-
-	class : public COSModule
+	SAVEStatus SAVEGetStatAsync(FSClient_t* client, FSCmdBlock_t* block, uint8 accountSlot, const char* path, FSStat_t* stat, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
 	{
-		public:
-		std::string_view GetName() override
-		{
-			return "nn_save";
-		}
+		return WithOwnPath(accountSlot, path, [&](char* full, uint32) {
+			return coreinit::__FSQueryInfoAsync(client, block, (uint8*)full, FSA_QUERY_TYPE_STAT, stat, errHandling, (FSAsyncParams*)asyncParams);
+		});
+	}
+
+	SAVEStatus SAVEGetStat(FSClient_t* client, FSCmdBlock_t* block, uint8 accountSlot, const char* path, FSStat_t* stat, FS_ERROR_MASK errHandling)
+	{
+		return RunBlocking([&](FSAsyncParams* p) { return SAVEGetStatAsync(client, block, accountSlot, path, stat, errHandling, p); });
+	}
+
+	SAVEStatus SAVEGetFreeSpaceSizeAsync(FSClient_t* client, FSCmdBlock_t* block, uint8 accountSlot, FSLargeSize* freeSize, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
+	{
+		return WithOwnPath(accountSlot, nullptr, [&](char* full, uint32) {
+			return coreinit::FSGetFreeSpaceSizeAsync(client, block, full, freeSize, errHandling, (FSAsyncParams*)asyncParams);
+		});
+	}
+
+	SAVEStatus SAVEGetFreeSpaceSize(FSClient_t* client, FSCmdBlock_t* block, uint8 accountSlot, FSLargeSize* freeSize, FS_ERROR_MASK errHandling)
+	{
+		return RunBlocking([&](FSAsyncParams* p) { return SAVEGetFreeSpaceSizeAsync(client, block, accountSlot, freeSize, errHandling, p); });
+	}
+
+	SAVEStatus SAVEMakeDirAsync(FSClient_t* client, FSCmdBlock_t* block, uint8 accountSlot, const char* path, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
+	{
+		return WithOwnPath(accountSlot, path, [&](char* full, uint32) {
+			return coreinit::FSMakeDirAsync(client, block, full, errHandling, (FSAsyncParams*)asyncParams);
+		});
+	}
+
+	SAVEStatus SAVEMakeDir(FSClient_t* client, FSCmdBlock_t* block, uint8 accountSlot, const char* path, FS_ERROR_MASK errHandling)
+	{
+		return RunBlocking([&](FSAsyncParams* p) { return SAVEMakeDirAsync(client, block, accountSlot, path, errHandling, p); });
+	}
+
+	SAVEStatus SAVERemoveAsync(FSClient_t* client, FSCmdBlock_t* block, uint8 accountSlot, const char* path, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
+	{
+		return WithOwnPath(accountSlot, path, [&](char* full, uint32) {
+			return coreinit::FSRemoveAsync(client, block, (uint8*)full, errHandling, (FSAsyncParams*)asyncParams);
+		});
+	}
+
+	SAVEStatus SAVERemove(FSClient_t* client, FSCmdBlock_t* block, uint8 accountSlot, const char* path, FS_ERROR_MASK errHandling)
+	{
+		return RunBlocking([&](FSAsyncParams* p) { return SAVERemoveAsync(client, block, accountSlot, path, errHandling, p); });
+	}
+
+	SAVEStatus SAVEChangeDirAsync(FSClient_t* client, FSCmdBlock_t* block, uint8 accountSlot, const char* path, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
+	{
+		return WithOwnPath(accountSlot, path, [&](char* full, uint32) {
+			return coreinit::FSChangeDirAsync(client, block, full, errHandling, (FSAsyncParams*)asyncParams);
+		});
+	}
+
+	SAVEStatus SAVEChangeDir(FSClient_t* client, FSCmdBlock_t* block, uint8 accountSlot, const char* path, FS_ERROR_MASK errHandling)
+	{
+		return RunBlocking([&](FSAsyncParams* p) { return SAVEChangeDirAsync(client, block, accountSlot, path, errHandling, p); });
+	}
+
+	SAVEStatus SAVERenameAsync(FSClient_t* client, FSCmdBlock_t* block, uint8 accountSlot, const char* oldPath, const char* newPath, FS_ERROR_MASK errHandling, FSAsyncParams* asyncParams)
+	{
+		return WithOwnPath(accountSlot, oldPath, [&](char* fullOld, uint32 persistentId) {
+			char fullNew[kPathMax];
+			if (!OwnSavePath(persistentId, newPath, fullNew))
+				return kFatal;
+			return (SAVEStatus)coreinit::FSRenameAsync(client, block, fullOld, fullNew, errHandling, asyncParams);
+		});
+	}
+
+	SAVEStatus SAVERename(FSClient_t* client, FSCmdBlock_t* block, uint8 accountSlot, const char* oldPath, const char* newPath, FS_ERROR_MASK errHandling)
+	{
+		return RunBlocking([&](FSAsyncParams* p) { return SAVERenameAsync(client, block, accountSlot, oldPath, newPath, errHandling, p); });
+	}
+
+	SAVEStatus SAVEFlushQuotaAsync(FSClient_t* client, FSCmdBlock_t* block, uint8 accountSlot, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
+	{
+		return WithOwnPath(accountSlot, nullptr, [&](char* full, uint32 persistentId) {
+			SAVEStatus r = coreinit::FSFlushQuotaAsync(client, block, full, errHandling, (FSAsyncParams*)asyncParams);
+			// committing the save is what the system menu shows as "last played/saved"
+			acp::ACPUpdateSaveTimeStamp(persistentId, CafeSystem::GetForegroundTitleId(), iosu::acp::ACPDeviceType::InternalDeviceType);
+			return r;
+		});
+	}
+
+	SAVEStatus SAVEFlushQuota(FSClient_t* client, FSCmdBlock_t* block, uint8 accountSlot, FS_ERROR_MASK errHandling)
+	{
+		return RunBlocking([&](FSAsyncParams* p) { return SAVEFlushQuotaAsync(client, block, accountSlot, errHandling, p); });
+	}
+
+	// --- other titles (read only) --------------------------------------------
+
+	SAVEStatus SAVEOpenFileOtherApplicationAsync(FSClient_t* client, FSCmdBlock_t* block, uint64 titleId, uint8 accountSlot, const char* path, const char* mode, FSFileHandlePtr outFileHandle, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
+	{
+		if (strcmp(mode, "r") != 0)
+			return kNoPermission;
+		return WithOtherTitlePath(titleId, accountSlot, path, [&](char* full) {
+			return coreinit::FSOpenFileAsync(client, block, full, (char*)mode, outFileHandle, errHandling, (FSAsyncParams*)asyncParams);
+		});
+	}
+
+	SAVEStatus SAVEOpenFileOtherApplication(FSClient_t* client, FSCmdBlock_t* block, uint64 titleId, uint8 accountSlot, const char* path, const char* mode, FSFileHandlePtr outFileHandle, FS_ERROR_MASK errHandling)
+	{
+		return RunBlocking([&](FSAsyncParams* p) { return SAVEOpenFileOtherApplicationAsync(client, block, titleId, accountSlot, path, mode, outFileHandle, errHandling, p); });
+	}
+
+	SAVEStatus SAVEOpenFileOtherNormalApplicationAsync(FSClient_t* client, FSCmdBlock_t* block, uint32 uniqueId, uint8 accountSlot, const char* path, const char* mode, FSFileHandlePtr outFileHandle, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
+	{
+		return SAVEOpenFileOtherApplicationAsync(client, block, TitleFromUniqueId(uniqueId, 0, false), accountSlot, path, mode, outFileHandle, errHandling, asyncParams);
+	}
+
+	SAVEStatus SAVEOpenFileOtherNormalApplication(FSClient_t* client, FSCmdBlock_t* block, uint32 uniqueId, uint8 accountSlot, const char* path, const char* mode, FSFileHandlePtr outFileHandle, FS_ERROR_MASK errHandling)
+	{
+		return SAVEOpenFileOtherApplication(client, block, TitleFromUniqueId(uniqueId, 0, false), accountSlot, path, mode, outFileHandle, errHandling);
+	}
+
+	SAVEStatus SAVEOpenFileOtherNormalApplicationVariationAsync(FSClient_t* client, FSCmdBlock_t* block, uint32 uniqueId, uint8 variation, uint8 accountSlot, const char* path, const char* mode, FSFileHandlePtr outFileHandle, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
+	{
+		return SAVEOpenFileOtherApplicationAsync(client, block, TitleFromUniqueId(uniqueId, variation, false), accountSlot, path, mode, outFileHandle, errHandling, asyncParams);
+	}
+
+	SAVEStatus SAVEOpenFileOtherNormalApplicationVariation(FSClient_t* client, FSCmdBlock_t* block, uint32 uniqueId, uint8 variation, uint8 accountSlot, const char* path, const char* mode, FSFileHandlePtr outFileHandle, FS_ERROR_MASK errHandling)
+	{
+		return SAVEOpenFileOtherApplication(client, block, TitleFromUniqueId(uniqueId, variation, false), accountSlot, path, mode, outFileHandle, errHandling);
+	}
+
+	SAVEStatus SAVEOpenDirOtherApplicationAsync(FSClient_t* client, FSCmdBlock_t* block, uint64 titleId, uint8 accountSlot, const char* path, FSDirHandlePtr hDir, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
+	{
+		return WithOtherTitlePath(titleId, accountSlot, path, [&](char* full) {
+			return coreinit::FSOpenDirAsync(client, block, full, hDir, errHandling, (FSAsyncParams*)asyncParams);
+		});
+	}
+
+	SAVEStatus SAVEOpenDirOtherApplication(FSClient_t* client, FSCmdBlock_t* block, uint64 titleId, uint8 accountSlot, const char* path, FSDirHandlePtr hDir, FS_ERROR_MASK errHandling)
+	{
+		return RunBlocking([&](FSAsyncParams* p) { return SAVEOpenDirOtherApplicationAsync(client, block, titleId, accountSlot, path, hDir, errHandling, p); });
+	}
+
+	SAVEStatus SAVEOpenDirOtherNormalApplicationAsync(FSClient_t* client, FSCmdBlock_t* block, uint32 uniqueId, uint8 accountSlot, const char* path, FSDirHandlePtr hDir, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
+	{
+		return SAVEOpenDirOtherApplicationAsync(client, block, TitleFromUniqueId(uniqueId, 0, false), accountSlot, path, hDir, errHandling, asyncParams);
+	}
+
+	SAVEStatus SAVEOpenDirOtherNormalApplication(FSClient_t* client, FSCmdBlock_t* block, uint32 uniqueId, uint8 accountSlot, const char* path, FSDirHandlePtr hDir, FS_ERROR_MASK errHandling)
+	{
+		return SAVEOpenDirOtherApplication(client, block, TitleFromUniqueId(uniqueId, 0, false), accountSlot, path, hDir, errHandling);
+	}
+
+	SAVEStatus SAVEOpenDirOtherNormalApplicationVariationAsync(FSClient_t* client, FSCmdBlock_t* block, uint32 uniqueId, uint8 variation, uint8 accountSlot, const char* path, FSDirHandlePtr hDir, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
+	{
+		return SAVEOpenDirOtherApplicationAsync(client, block, TitleFromUniqueId(uniqueId, variation, false), accountSlot, path, hDir, errHandling, asyncParams);
+	}
+
+	SAVEStatus SAVEOpenDirOtherNormalApplicationVariation(FSClient_t* client, FSCmdBlock_t* block, uint32 uniqueId, uint8 variation, uint8 accountSlot, const char* path, FSDirHandlePtr hDir, FS_ERROR_MASK errHandling)
+	{
+		return SAVEOpenDirOtherApplication(client, block, TitleFromUniqueId(uniqueId, variation, false), accountSlot, path, hDir, errHandling);
+	}
+
+	SAVEStatus SAVEGetStatOtherApplicationAsync(FSClient_t* client, FSCmdBlock_t* block, uint64 titleId, uint8 accountSlot, const char* path, FSStat_t* stat, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
+	{
+		return WithOtherTitlePath(titleId, accountSlot, path, [&](char* full) {
+			return coreinit::__FSQueryInfoAsync(client, block, (uint8*)full, FSA_QUERY_TYPE_STAT, stat, errHandling, (FSAsyncParams*)asyncParams);
+		});
+	}
+
+	SAVEStatus SAVEGetStatOtherApplication(FSClient_t* client, FSCmdBlock_t* block, uint64 titleId, uint8 accountSlot, const char* path, FSStat_t* stat, FS_ERROR_MASK errHandling)
+	{
+		return RunBlocking([&](FSAsyncParams* p) { return SAVEGetStatOtherApplicationAsync(client, block, titleId, accountSlot, path, stat, errHandling, p); });
+	}
+
+	SAVEStatus SAVEGetStatOtherNormalApplicationAsync(FSClient_t* client, FSCmdBlock_t* block, uint32 uniqueId, uint8 accountSlot, const char* path, FSStat_t* stat, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
+	{
+		return SAVEGetStatOtherApplicationAsync(client, block, TitleFromUniqueId(uniqueId, 0, false), accountSlot, path, stat, errHandling, asyncParams);
+	}
+
+	SAVEStatus SAVEGetStatOtherNormalApplication(FSClient_t* client, FSCmdBlock_t* block, uint32 uniqueId, uint8 accountSlot, const char* path, FSStat_t* stat, FS_ERROR_MASK errHandling)
+	{
+		return SAVEGetStatOtherApplication(client, block, TitleFromUniqueId(uniqueId, 0, false), accountSlot, path, stat, errHandling);
+	}
+
+	SAVEStatus SAVEGetStatOtherNormalApplicationVariationAsync(FSClient_t* client, FSCmdBlock_t* block, uint32 uniqueId, uint8 variation, uint8 accountSlot, const char* path, FSStat_t* stat, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
+	{
+		return SAVEGetStatOtherApplicationAsync(client, block, TitleFromUniqueId(uniqueId, variation, false), accountSlot, path, stat, errHandling, asyncParams);
+	}
+
+	SAVEStatus SAVEGetStatOtherNormalApplicationVariation(FSClient_t* client, FSCmdBlock_t* block, uint32 uniqueId, uint8 variation, uint8 accountSlot, const char* path, FSStat_t* stat, FS_ERROR_MASK errHandling)
+	{
+		return SAVEGetStatOtherApplication(client, block, TitleFromUniqueId(uniqueId, variation, false), accountSlot, path, stat, errHandling);
+	}
+
+	SAVEStatus SAVEGetStatOtherDemoApplicationAsync(FSClient_t* client, FSCmdBlock_t* block, uint32 uniqueId, uint8 accountSlot, const char* path, FSStat_t* stat, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
+	{
+		return SAVEGetStatOtherApplicationAsync(client, block, TitleFromUniqueId(uniqueId, 0, true), accountSlot, path, stat, errHandling, asyncParams);
+	}
+
+	SAVEStatus SAVEGetStatOtherDemoApplicationVariationAsync(FSClient_t* client, FSCmdBlock_t* block, uint32 uniqueId, uint8 variation, uint8 accountSlot, const char* path, FSStat_t* stat, FS_ERROR_MASK errHandling, const FSAsyncParams* asyncParams)
+	{
+		return SAVEGetStatOtherApplicationAsync(client, block, TitleFromUniqueId(uniqueId, variation, true), accountSlot, path, stat, errHandling, asyncParams);
+	}
+
+	// --- module ----------------------------------------------------------------
+
+	void ResetToDefaultState()
+	{
+		if (!s_lib->ready)
+			return;
+		acp::ACPUnmountSaveDir();
+		s_lib->ready = false;
+	}
+
+	class SaveModule : public COSModule
+	{
+	public:
+		std::string_view GetName() override { return "nn_save"; }
 
 		void RPLMapped() override
 		{
 			cafeExportRegister("nn_save", SAVEInit, LogType::Save);
 			cafeExportRegister("nn_save", SAVEInitSaveDir, LogType::Save);
-
 			cafeExportRegister("nn_save", SAVEGetSharedDataTitlePath, LogType::Save);
 			cafeExportRegister("nn_save", SAVEGetSharedSaveDataPath, LogType::Save);
 
+			cafeExportRegister("nn_save", SAVEOpenFile, LogType::Save);
+			cafeExportRegister("nn_save", SAVEOpenFileAsync, LogType::Save);
+			cafeExportRegister("nn_save", SAVEOpenDir, LogType::Save);
+			cafeExportRegister("nn_save", SAVEOpenDirAsync, LogType::Save);
+			cafeExportRegister("nn_save", SAVEGetStat, LogType::Save);
+			cafeExportRegister("nn_save", SAVEGetStatAsync, LogType::Save);
 			cafeExportRegister("nn_save", SAVEGetFreeSpaceSize, LogType::Save);
 			cafeExportRegister("nn_save", SAVEGetFreeSpaceSizeAsync, LogType::Save);
 			cafeExportRegister("nn_save", SAVEMakeDir, LogType::Save);
@@ -803,51 +512,39 @@ namespace save
 			cafeExportRegister("nn_save", SAVEFlushQuota, LogType::Save);
 			cafeExportRegister("nn_save", SAVEFlushQuotaAsync, LogType::Save);
 
-			cafeExportRegister("nn_save", SAVEGetStat, LogType::Save);
-			cafeExportRegister("nn_save", SAVEGetStatAsync, LogType::Save);
-			cafeExportRegister("nn_save", SAVEGetStatOtherApplication, LogType::Save);
-			cafeExportRegister("nn_save", SAVEGetStatOtherApplicationAsync, LogType::Save);
-			cafeExportRegister("nn_save", SAVEGetStatOtherNormalApplication, LogType::Save);
-			cafeExportRegister("nn_save", SAVEGetStatOtherNormalApplicationAsync, LogType::Save);
-			cafeExportRegister("nn_save", SAVEGetStatOtherNormalApplicationVariation, LogType::Save);
-			cafeExportRegister("nn_save", SAVEGetStatOtherNormalApplicationVariationAsync, LogType::Save);
-
-			cafeExportRegister("nn_save", SAVEOpenFile, LogType::Save);
-			cafeExportRegister("nn_save", SAVEOpenFileAsync, LogType::Save);
 			cafeExportRegister("nn_save", SAVEOpenFileOtherApplication, LogType::Save);
 			cafeExportRegister("nn_save", SAVEOpenFileOtherApplicationAsync, LogType::Save);
 			cafeExportRegister("nn_save", SAVEOpenFileOtherNormalApplication, LogType::Save);
 			cafeExportRegister("nn_save", SAVEOpenFileOtherNormalApplicationAsync, LogType::Save);
 			cafeExportRegister("nn_save", SAVEOpenFileOtherNormalApplicationVariation, LogType::Save);
 			cafeExportRegister("nn_save", SAVEOpenFileOtherNormalApplicationVariationAsync, LogType::Save);
-
-			cafeExportRegister("nn_save", SAVEOpenDir, LogType::Save);
-			cafeExportRegister("nn_save", SAVEOpenDirAsync, LogType::Save);
 			cafeExportRegister("nn_save", SAVEOpenDirOtherApplication, LogType::Save);
 			cafeExportRegister("nn_save", SAVEOpenDirOtherApplicationAsync, LogType::Save);
 			cafeExportRegister("nn_save", SAVEOpenDirOtherNormalApplication, LogType::Save);
-			cafeExportRegister("nn_save", SAVEOpenDirOtherNormalApplicationVariation, LogType::Save);
 			cafeExportRegister("nn_save", SAVEOpenDirOtherNormalApplicationAsync, LogType::Save);
+			cafeExportRegister("nn_save", SAVEOpenDirOtherNormalApplicationVariation, LogType::Save);
 			cafeExportRegister("nn_save", SAVEOpenDirOtherNormalApplicationVariationAsync, LogType::Save);
-		};
+			cafeExportRegister("nn_save", SAVEGetStatOtherApplication, LogType::Save);
+			cafeExportRegister("nn_save", SAVEGetStatOtherApplicationAsync, LogType::Save);
+			cafeExportRegister("nn_save", SAVEGetStatOtherNormalApplication, LogType::Save);
+			cafeExportRegister("nn_save", SAVEGetStatOtherNormalApplicationAsync, LogType::Save);
+			cafeExportRegister("nn_save", SAVEGetStatOtherNormalApplicationVariation, LogType::Save);
+			cafeExportRegister("nn_save", SAVEGetStatOtherNormalApplicationVariationAsync, LogType::Save);
+			cafeExportRegister("nn_save", SAVEGetStatOtherDemoApplicationAsync, LogType::Save);
+			cafeExportRegister("nn_save", SAVEGetStatOtherDemoApplicationVariationAsync, LogType::Save);
+		}
 
 		void rpl_entry(uint32 moduleHandle, coreinit::RplEntryReason reason) override
 		{
-			if (reason == coreinit::RplEntryReason::Loaded)
-			{
+			if (reason == coreinit::RplEntryReason::Loaded || reason == coreinit::RplEntryReason::Unloaded)
 				ResetToDefaultState();
-			}
-			else if (reason == coreinit::RplEntryReason::Unloaded)
-			{
-				ResetToDefaultState();
-			}
 		}
-	}s_COSnnSaveModule;
+	};
+
+	SaveModule s_saveModule;
 
 	COSModule* GetModule()
 	{
-		return &s_COSnnSaveModule;
+		return &s_saveModule;
 	}
-
-}
 }

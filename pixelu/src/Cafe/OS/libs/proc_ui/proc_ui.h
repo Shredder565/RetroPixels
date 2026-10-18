@@ -1,7 +1,12 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+#pragma once
 #include "Cafe/OS/RPL/COSModule.h"
 
+// proc_ui: helps a title follow the system's foreground/background/exit
+// messages and runs the title's callbacks for each transition.
 namespace proc_ui
 {
+	// value returned by ProcUIProcessMessages
 	enum class ProcUIStatus
 	{
 		Foreground = 0,
@@ -10,6 +15,7 @@ namespace proc_ui
 		Exit = 3
 	};
 
+	// callback kinds for ProcUIRegisterCallback(Core)
 	enum class ProcUICallbackId
 	{
 		AcquireForeground = 0,
