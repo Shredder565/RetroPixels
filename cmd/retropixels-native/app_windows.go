@@ -100,10 +100,11 @@ type app struct {
 	controls      *controlsDialog
 	mouseTracking bool
 
-	ui   *uiState  // the start screen, save state slots and the rest (ui_*_windows.go)
-	dol  dolState  // GameCube / Wii (dolphin_windows.go)
-	mame mameState // arcade games in MAME (mame_windows.go)
-	ap   apState   // Archipelago (archipelago_windows.go)
+	ui   *uiState    // the start screen, save state slots and the rest (ui_*_windows.go)
+	dol  dolState    // GameCube / Wii (dolphin_windows.go)
+	mame mameState   // arcade games in MAME (mame_windows.go)
+	pu   pixeluState // Wii U games in PixelU (pixelu_windows.go)
+	ap   apState     // Archipelago (archipelago_windows.go)
 }
 
 var theApp *app
@@ -357,8 +358,7 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		return 0
 	case wmSize:
 		call(pInvalidateRect, hwnd, 0, 0)
-		a.dolResize()
-		a.mameResize()
+		a.dockResize()
 		return 0
 	case wmGetMinMaxInfo:
 		mm := *(**minMaxInfo)(unsafe.Pointer(&lp)) // lp is a pointer Windows gave us
@@ -447,7 +447,7 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		call(pSetWindowPos, hwnd, 0, uintptr(r.Left), uintptr(r.Top), uintptr(r.Right-r.Left), uintptr(r.Bottom-r.Top), swpNoZOrder|swpNoActivate)
 		return 0
 	case wmClose:
-		if a.mameBeforeClose() || a.dolBeforeClose() {
+		if a.mameBeforeClose() || a.pixeluBeforeClose() || a.dolBeforeClose() {
 			return 0
 		}
 		a.closeGame()
@@ -596,7 +596,7 @@ func (a *app) paint(hdc uintptr) {
 	a.frameMu.Lock()
 	defer a.frameMu.Unlock()
 	if a.frame == nil {
-		if !a.mamePaint(hdc) && !a.dolPaint(hdc) {
+		if !a.mamePaint(hdc) && !a.pixeluPaint(hdc) && !a.dolPaint(hdc) {
 			a.drawIdle(hdc)
 		}
 		return
@@ -732,6 +732,7 @@ func (a *app) updateTitle() {
 	}
 	t += a.dolTitle()
 	t += a.mameTitle()
+	t += a.pixeluTitle()
 	if a.recSaving > 0 {
 		t += " - Saving the recording…"
 	}
@@ -796,6 +797,7 @@ func (a *app) handleEvents() {
 			a.uiEvent(e.name, e.detail)
 			a.dolEvent(e.name, e.detail)
 			a.mameEvent(e.name, e.detail)
+			a.pixeluEvent(e.name, e.detail)
 			a.apEvent(e.name, e.detail)
 		}
 	}
@@ -1095,7 +1097,7 @@ func (a *app) encoder(ff string) string {
 }
 
 func (a *app) toggleRecording() {
-	if a.dolToggleRecording() {
+	if a.dolToggleRecording() || a.pixeluToggleRecording() {
 		return
 	}
 	if a.mame.run != nil {

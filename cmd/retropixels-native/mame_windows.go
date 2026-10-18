@@ -13,12 +13,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
 
-	"retropixels/internal/dolphin"
 	"retropixels/internal/mame"
 )
 
@@ -38,16 +36,13 @@ const (
 
 // mameRun is one game playing in MAME.
 type mameRun struct {
+	extRun  // pid, exited, the docked window (dock_windows.go)
 	game    mame.Game
 	label   string // "MAME 0.270"
-	pid     int
-	exited  chan struct{}
 	out     *mame.Output
 	err     error // how MAME ended (set before exited closes)
 	started time.Time
 	embed   bool
-	child   atomic.Uintptr // MAME's window while it's docked here
-	stopAt  atomic.Int64   // when Stop game was asked (Unix ns)
 }
 
 // mameState is the app's MAME part.
@@ -393,6 +388,9 @@ func (a *app) mamePlay(g mame.Game, exe string) {
 		messageBox(a.hwnd, "A GameCube / Wii game is playing. Stop it first (GameCube / Wii > Stop game).", "RetroPixels Native", mbIconInfo)
 		return
 	}
+	if a.pixeluBusy() {
+		return
+	}
 	c := mame.Load()
 	if len(c.Installs) == 0 {
 		switch messageBox(a.hwnd, "Arcade games play in MAME, a free emulator, and no MAME is set up yet.\n\n"+
@@ -425,7 +423,7 @@ func (a *app) mamePlay(g mame.Game, exe string) {
 		messageBox(a.hwnd, "Couldn't start "+l.Install.Label()+": "+err.Error(), "RetroPixels Native", mbIconWarning)
 		return
 	}
-	r := &mameRun{game: g, label: l.Install.Label(), pid: cmd.Process.Pid, exited: make(chan struct{}), out: out,
+	r := &mameRun{extRun: newExtRun(cmd.Process.Pid), game: g, label: l.Install.Label(), out: out,
 		started: time.Now(), embed: embed}
 	a.mame.run = r
 	a.mame.problem = ""
@@ -435,7 +433,7 @@ func (a *app) mamePlay(g mame.Game, exe string) {
 		a.event("mame-exited", "")
 	}()
 	if embed {
-		go a.mameWatch(r)
+		go a.dockWatch(&r.extRun, 60*time.Second, "mame") // a big game's first start can take a while
 	}
 	mame.Update(func(c *mame.Config) { c.MarkPlayed(g.Short, time.Now()) })
 	a.mame.mu.Lock()
@@ -462,79 +460,8 @@ func (a *app) mameStop() {
 	if r == nil {
 		return
 	}
-	r.stopAt.Store(time.Now().UnixNano())
-	if c := r.child.Load(); c != 0 {
-		dolphin.Close(c)
-	} else {
-		go dolphin.Shutdown(r.pid, r.exited, 10*time.Second)
-	}
+	r.stop()
 	a.showMessage("Stopping the game…")
-}
-
-// mameWatch docks MAME's window into this window and keeps it there (as
-// dolWatch does for Dolphin).
-func (a *app) mameWatch(r *mameRun) {
-	host := a.hwnd
-	tick := time.NewTicker(100 * time.Millisecond)
-	defer tick.Stop()
-	deadline := time.Now().Add(60 * time.Second) // a big game's first start can take a while
-	var child uintptr
-	var lostAt time.Time
-	for {
-		select {
-		case <-r.exited:
-			return
-		case <-tick.C:
-		}
-		if child != 0 {
-			if dolphin.Docked(child, host) {
-				if at := r.stopAt.Load(); at != 0 && time.Since(time.Unix(0, at)) > 8*time.Second {
-					dolphin.Shutdown(r.pid, r.exited, 3*time.Second) // Stop game was asked but MAME didn't react
-					return
-				}
-				a.mamePlace(child, false)
-				continue
-			}
-			// MAME's window went away (it can make a new one, e.g. when its video settings change).
-			child, lostAt = 0, time.Now()
-			r.child.Store(0)
-		}
-		h := dolphin.GameWindow(r.pid)
-		if h == 0 {
-			if !lostAt.IsZero() && time.Since(lostAt) > 3*time.Second {
-				dolphin.Shutdown(r.pid, r.exited, 5*time.Second)
-				return
-			}
-			if lostAt.IsZero() && time.Now().After(deadline) {
-				a.event("mame-nodock", "")
-				return // never showed a window: leave MAME as it is
-			}
-			continue
-		}
-		dolphin.Dock(h, host)
-		a.mamePlace(h, true)
-		call(pSetForegroundWindow, host)
-		dolphin.Focus(h)
-		child, lostAt = h, time.Time{}
-		r.child.Store(h)
-		a.event("mame-docked", "")
-	}
-}
-
-func (a *app) mamePlace(child uintptr, force bool) {
-	cr := clientRect(a.hwnd)
-	if cr.Right > 0 && cr.Bottom > 0 {
-		dolphin.Place(child, a.hwnd, 0, 0, cr.Right, cr.Bottom, force)
-	}
-}
-
-// mameResize follows the window's size (WM_SIZE).
-func (a *app) mameResize() {
-	if r := a.mame.run; r != nil {
-		if c := r.child.Load(); c != 0 {
-			a.mamePlace(c, false)
-		}
-	}
 }
 
 // mameEnded tidies up after MAME has closed, and says why if the game
@@ -577,7 +504,7 @@ func (a *app) mameBeforeClose() bool {
 	if r == nil {
 		return false
 	}
-	if at := r.stopAt.Load(); at != 0 && time.Since(time.Unix(0, at)) > 15*time.Second {
+	if r.stoppingFor(15 * time.Second) {
 		return false // MAME isn't closing: don't hold the window hostage
 	}
 	a.dol.closeAfter = true // mameEnded closes the window

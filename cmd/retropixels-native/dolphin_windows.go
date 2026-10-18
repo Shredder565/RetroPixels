@@ -62,16 +62,13 @@ var (
 
 // dolRun is one game playing in Dolphin.
 type dolRun struct {
+	extRun   // pid, exited, the docked game screen (dock_windows.go)
 	game     dolphin.Game
 	exe      string
-	pid      int
-	exited   chan struct{}
 	rec      *dolphin.Recording // nil: not recorded
 	started  time.Time
 	embed    bool
-	child    atomic.Uintptr // Dolphin's game screen while it's docked here
-	stopAt   atomic.Int64   // when Stop game was asked (Unix ns)
-	wentFull bool           // this window went fullscreen for the game
+	wentFull bool // this window went fullscreen for the game
 	volKick  chan struct{}
 }
 
@@ -339,7 +336,7 @@ func (a *app) dolOpenPath(path string) bool {
 
 // dolPlay starts a game (stopping the one in Dolphin first, if asked).
 func (a *app) dolPlay(g dolphin.Game) {
-	if a.mameBusy() {
+	if a.mameBusy() || a.pixeluBusy() {
 		return
 	}
 	if r := a.dol.run; r != nil {
@@ -410,7 +407,7 @@ func (a *app) dolPlay(g dolphin.Game) {
 		messageBox(a.hwnd, "Couldn't start Dolphin: "+err.Error(), "RetroPixels Native", mbIconWarning)
 		return
 	}
-	r := &dolRun{game: g, exe: exe, pid: cmd.Process.Pid, exited: make(chan struct{}), rec: rec, started: time.Now(),
+	r := &dolRun{extRun: newExtRun(cmd.Process.Pid), game: g, exe: exe, rec: rec, started: time.Now(),
 		embed: opts.Embed, volKick: make(chan struct{}, 1)}
 	a.dol.run = r
 	a.dol.nextGame = false
@@ -436,7 +433,7 @@ func (a *app) dolPlay(g dolphin.Game) {
 			a.toggleFullscreen()
 			r.wentFull = true
 		}
-		go a.dolWatch(r)
+		go a.dockWatch(&r.extRun, 90*time.Second, "dol") // slow disc / shader compile on first boot
 	}
 	d.markPlayed(g.Path, time.Now())
 	a.settings.addRecent(g.Path)
@@ -456,83 +453,8 @@ func (a *app) dolStop() {
 	if r == nil {
 		return
 	}
-	r.stopAt.Store(time.Now().UnixNano())
-	if c := r.child.Load(); c != 0 {
-		dolphin.Close(c)
-	} else {
-		go dolphin.Shutdown(r.pid, r.exited, 10*time.Second)
-	}
+	r.stop()
 	a.showMessage("Stopping the game…")
-}
-
-// dolWatch docks Dolphin's game screen into this window and keeps it there,
-// and makes sure Dolphin closes completely once the game is stopped (as
-// RetroPixels.exe's embedDolphin).
-func (a *app) dolWatch(r *dolRun) {
-	host := a.hwnd
-	tick := time.NewTicker(100 * time.Millisecond)
-	defer tick.Stop()
-	deadline := time.Now().Add(90 * time.Second) // slow disc / shader compile on first boot
-	var child uintptr
-	var lostAt time.Time
-	for {
-		select {
-		case <-r.exited:
-			return
-		case <-tick.C:
-		}
-		if child != 0 {
-			if dolphin.Docked(child, host) {
-				if at := r.stopAt.Load(); at != 0 && time.Since(time.Unix(0, at)) > 8*time.Second {
-					dolphin.Shutdown(r.pid, r.exited, 3*time.Second) // Stop game was asked but Dolphin didn't react
-					return
-				}
-				a.dolPlace(child, false)
-				continue
-			}
-			// The game screen went away: the game was stopped, or Dolphin
-			// made a new one (e.g. it switched fullscreen), docked below.
-			child, lostAt = 0, time.Now()
-			r.child.Store(0)
-		}
-		h := dolphin.GameWindow(r.pid)
-		if h == 0 {
-			if !lostAt.IsZero() && time.Since(lostAt) > 3*time.Second {
-				// The game ended but Dolphin is still running in the background.
-				dolphin.Shutdown(r.pid, r.exited, 5*time.Second)
-				return
-			}
-			if lostAt.IsZero() && time.Now().After(deadline) {
-				a.event("dol-nodock", "")
-				return // never showed a game screen: leave Dolphin as it is
-			}
-			continue
-		}
-		dolphin.Dock(h, host)
-		a.dolPlace(h, true)
-		call(pSetForegroundWindow, host)
-		dolphin.Focus(h)
-		child, lostAt = h, time.Time{}
-		r.child.Store(h)
-		a.event("dol-docked", "")
-	}
-}
-
-// dolPlace fits the docked game screen to the window.
-func (a *app) dolPlace(child uintptr, force bool) {
-	cr := clientRect(a.hwnd)
-	if cr.Right > 0 && cr.Bottom > 0 {
-		dolphin.Place(child, a.hwnd, 0, 0, cr.Right, cr.Bottom, force)
-	}
-}
-
-// dolResize follows the window's size (WM_SIZE).
-func (a *app) dolResize() {
-	if r := a.dol.run; r != nil {
-		if c := r.child.Load(); c != 0 {
-			a.dolPlace(c, false)
-		}
-	}
 }
 
 // dolEnded tidies up after Dolphin has closed.
@@ -652,7 +574,7 @@ func (a *app) dolHoldWindow() bool {
 		if !a.dol.closeAfter {
 			a.dol.closeAfter = true
 			a.dolStop()
-		} else if at := a.dol.run.stopAt.Load(); at != 0 && time.Since(time.Unix(0, at)) > 15*time.Second {
+		} else if a.dol.run.stoppingFor(15 * time.Second) {
 			return false // Dolphin isn't closing: don't hold the window hostage
 		}
 		return true
