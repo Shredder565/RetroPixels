@@ -135,45 +135,16 @@ var stageResBase = [3]uint32{0, 160, 336}
 var stageSamplerBase = [3]uint32{0, 18, 36}
 var stageConstBase = [3]uint32{0, 256, 512}
 
-// PM4 type-3 opcodes
+// RetroPixels' own PM4 packets, for the parts of GX2 that are easier to do
+// directly than as draws (the real GX2 clears and copies with the GPU's
+// draw engine). The GPU leaves these opcodes free.
 const (
-	itNOP                = 0x10
-	itSET_PREDICATION    = 0x20
-	itCONTEXT_CONTROL    = 0x28
-	itINDEX_TYPE         = 0x2a
-	itDRAW_INDEX         = 0x2b
-	itDRAW_INDEX_AUTO    = 0x2d
-	itDRAW_INDEX_IMMD    = 0x2e
-	itNUM_INSTANCES      = 0x2f
-	itINDIRECT_BUFFER_PR = 0x32
-	itSTRMOUT_BUF_UPDATE = 0x34
-	itDRAW_INDEX_2       = 0x36
-	itWAIT_REG_MEM       = 0x3c
-	itMEM_WRITE          = 0x3d
-	itINDIRECT_BUFFER    = 0x3f
-	itSURFACE_SYNC       = 0x43
-	itME_INITIALIZE      = 0x44
-	itEVENT_WRITE        = 0x46
-	itEVENT_WRITE_EOP    = 0x47
-	itSET_CONFIG_REG     = 0x68
-	itSET_CONTEXT_REG    = 0x69
-	itSET_ALU_CONST      = 0x6a
-	itSET_BOOL_CONST     = 0x6b
-	itSET_LOOP_CONST     = 0x6c
-	itSET_RESOURCE       = 0x6d
-	itSET_SAMPLER        = 0x6e
-	itSET_CTL_CONST      = 0x6f
-
-	// RetroPixels' own packets, for the parts of GX2 that are easier to do
-	// directly than as draws (the real GX2 clears and copies with the GPU's
-	// draw engine)
-	itHLE_CLEAR_COLOR   = 0xe0 // CB base, size, info, view, r, g, b, a (float bits)
-	itHLE_CLEAR_DEPTH   = 0xe1 // DB base, size, info, view, depth, stencil, flags
-	itHLE_COPY_TO_SCAN  = 0xe2 // CB base, size, info, view, width, height, target
-	itHLE_COPY_SURFACE  = 0xe3 // two packed surfaces (see packSurf)
-	itHLE_CONTEXT_STATE = 0xe4 // address of a GX2ContextState (0 = none)
-	itHLE_DEPTH_TO_TEX  = 0xe5 // DB surface then texture surface (packSurf)
-	itHLE_TIMESTAMP     = 0xe6 // address: write the time there (64 bits)
+	itHLE_CLEAR_COLOR  = 0xe0 // CB base, size, info, view, r, g, b, a (float bits)
+	itHLE_CLEAR_DEPTH  = 0xe1 // DB base, size, info, view, depth, stencil, flags
+	itHLE_COPY_TO_SCAN = 0xe2 // CB base, size, info, view, width, height, target
+	itHLE_COPY_SURFACE = 0xe3 // two packed surfaces (see packSurf)
+	itHLE_DEPTH_TO_TEX = 0xe5 // DB surface then texture surface (packSurf)
+	itHLE_TIMESTAMP    = 0xe6 // address: write the time there (64 bits)
 )
 
 func pm4Type3(op uint32, n int) uint32 {
@@ -188,8 +159,13 @@ type Latte struct {
 
 	indexType    uint32 // VGT_DMA_INDEX_TYPE (from INDEX_TYPE)
 	numInstances uint32
-	ctxState     uint32 // the GX2ContextState that shadows the registers
 	ibDepth      int
+	predicate    bool // SET_PREDICATION: draws depend on a query
+
+	// CONTEXT_CONTROL, and for each register the memory a LOAD_* packet
+	// read it from (where SET_* writes go too while shadowing is on)
+	ctxControl [2]uint32
+	shadowAddr [(regTop - baseConfig) / 4]uint32
 
 	tex texCache
 	hw  hwRenderer // a host GPU backend, or nil
@@ -229,149 +205,9 @@ func (g *Latte) warn(f string, a ...any) {
 	}
 }
 
-// exec runs PM4 packets.
-func (g *Latte) exec(w []uint32) {
-	for len(w) > 0 {
-		h := w[0]
-		switch h >> 30 {
-		case 0: // type 0: register writes from a base
-			n := int(h>>16&0x3fff) + 1
-			base := (h & 0xffff) * 4
-			if n > len(w)-1 {
-				n = len(w) - 1
-			}
-			for i := 0; i < n; i++ {
-				g.setReg(base+uint32(i)*4, w[1+i])
-			}
-			w = w[1+n:]
-		case 1: // reserved
-			w = w[1:]
-		case 2: // filler
-			w = w[1:]
-		case 3:
-			n := int(h>>16&0x3fff) + 1
-			if n > len(w)-1 {
-				g.warn("truncated packet %08X", h)
-				return
-			}
-			g.packet(h>>8&0xff, w[1:1+n])
-			w = w[1+n:]
-		}
-	}
-}
-
-// execMem runs n words of PM4 stored (big-endian) at addr.
-func (g *Latte) execMem(addr, nwords uint32) {
-	if nwords > 1<<24 {
-		return
-	}
-	w := make([]uint32, nwords)
-	for i := range w {
-		w[i] = g.mem.Read32(addr + uint32(i)*4)
-	}
-	g.exec(w)
-}
-
-func (g *Latte) setRegs(base uint32, d []uint32) {
-	if len(d) == 0 {
-		return
-	}
-	a := base + d[0]*4
-	for i, v := range d[1:] {
-		g.setReg(a+uint32(i)*4, v)
-	}
-}
-
-func (g *Latte) packet(op uint32, d []uint32) {
+// hlePacket runs one of RetroPixels' own packets; false if op isn't one.
+func (g *Latte) hlePacket(op uint32, d []uint32) bool {
 	switch op {
-	case itNOP, itCONTEXT_CONTROL, itSURFACE_SYNC, itME_INITIALIZE, itSET_PREDICATION, itSTRMOUT_BUF_UPDATE, itWAIT_REG_MEM:
-	case itSET_CONFIG_REG:
-		g.setRegs(baseConfig, d)
-	case itSET_CONTEXT_REG:
-		g.setRegs(baseContext, d)
-	case itSET_ALU_CONST:
-		g.setRegs(baseALUConst, d)
-	case itSET_BOOL_CONST:
-		g.setRegs(baseBool, d)
-	case itSET_LOOP_CONST:
-		g.setRegs(baseLoop, d)
-	case itSET_RESOURCE:
-		g.setRegs(baseResource, d)
-	case itSET_SAMPLER:
-		g.setRegs(baseSampler, d)
-	case itSET_CTL_CONST:
-		g.setRegs(baseCtlConst, d)
-	case itINDEX_TYPE:
-		if len(d) > 0 {
-			g.indexType = d[0]
-		}
-	case itNUM_INSTANCES:
-		if len(d) > 0 {
-			g.numInstances = max(d[0], 1)
-		}
-	case itDRAW_INDEX_AUTO: // count, initiator
-		if len(d) >= 1 {
-			g.draw(d[0], func(i uint32) uint32 { return i })
-		}
-	case itDRAW_INDEX, itDRAW_INDEX_2:
-		// DRAW_INDEX: addr lo, addr hi, count, initiator
-		// DRAW_INDEX_2: max size, addr lo, addr hi, count, initiator
-		if op == itDRAW_INDEX_2 {
-			if len(d) < 4 {
-				return
-			}
-			d = d[1:]
-		}
-		if len(d) < 3 {
-			return
-		}
-		g.draw(d[2], g.indexFetcher(d[0]))
-	case itDRAW_INDEX_IMMD: // count, initiator, indices (packed in words)
-		if len(d) < 2 {
-			return
-		}
-		data := d[2:]
-		is32 := g.indexType&3 == 1
-		g.draw(d[0], func(i uint32) uint32 {
-			if is32 {
-				if int(i) < len(data) {
-					return data[i]
-				}
-				return 0
-			}
-			if int(i/2) < len(data) {
-				return data[i/2] >> (16 * (i & 1)) & 0xffff
-			}
-			return 0
-		})
-	case itINDIRECT_BUFFER, itINDIRECT_BUFFER_PR: // addr lo, addr hi, size in words
-		if len(d) >= 3 && g.ibDepth < 8 {
-			g.ibDepth++
-			g.execMem(d[0], d[2]&0xfffff)
-			g.ibDepth--
-		}
-	case itMEM_WRITE: // addr lo, addr hi/flags, data lo, data hi
-		if len(d) >= 3 {
-			g.mem.Write32(d[0]&^3, d[2])
-			if len(d) >= 4 && d[1]>>18&1 != 0 {
-				g.mem.Write32(d[0]&^3+4, d[3])
-			}
-		}
-	case itEVENT_WRITE, itEVENT_WRITE_EOP:
-		// EOP: event, addr lo, addr hi|data sel, data lo, data hi
-		if op == itEVENT_WRITE_EOP && len(d) >= 5 {
-			sel := d[2] >> 29 & 7
-			addr := d[1] &^ 3
-			switch sel {
-			case 1:
-				g.mem.Write32(addr, d[3])
-			case 2:
-				g.mem.Write32(addr, d[4])
-				g.mem.Write32(addr+4, d[3])
-			case 3:
-				g.mem.Write64(addr, g.m.bootTime+g.m.Time())
-			}
-		}
 	case itHLE_CLEAR_COLOR:
 		if len(d) >= 8 {
 			g.clearColor(cbFromRegs(d[0], d[1], d[2], d[3]), [4]float32{u2f(d[4]), u2f(d[5]), u2f(d[6]), u2f(d[7])})
@@ -384,91 +220,18 @@ func (g *Latte) packet(op uint32, d []uint32) {
 		if len(d) >= 7 {
 			g.copyToScan(cbFromRegs(d[0], d[1], d[2], d[3]), d[4], d[5], d[6])
 		}
-	case itHLE_COPY_SURFACE:
+	case itHLE_COPY_SURFACE, itHLE_DEPTH_TO_TEX:
 		if len(d) >= 2*packedSurfWords {
 			g.copySurface(unpackSurf(d), unpackSurf(d[packedSurfWords:]))
-		}
-	case itHLE_DEPTH_TO_TEX:
-		if len(d) >= 2*packedSurfWords {
-			g.copySurface(unpackSurf(d), unpackSurf(d[packedSurfWords:]))
-		}
-	case itHLE_CONTEXT_STATE:
-		if len(d) >= 1 {
-			g.switchContext(d[0])
 		}
 	case itHLE_TIMESTAMP:
-		if len(d) >= 1 && d[0] != 0 {
+		if len(d) >= 1 && d[0] != 0 && g.m != nil {
 			g.mem.Write64(d[0], g.m.bootTime+g.m.Time())
 		}
 	default:
-		g.warn("unhandled PM4 packet %02X", op)
+		return false
 	}
-}
-
-// ---- context states ----
-//
-// A GX2ContextState keeps a copy of the GPU's registers, so a program can
-// switch between sets of state. While one is current, register writes are
-// kept in it (as the GPU's shadowing does); here that's done by saving the
-// registers into it when switching away.
-
-type shadowRange struct{ base, n uint32 }
-
-var shadowRanges = []shadowRange{
-	{0x8900, 0xb0}, // config (primitive type, index type, ...)
-	{baseContext, 0x400},
-	{baseALUConst, 0x800},
-	{baseLoop, 0x60},
-	{baseResource, 0xd9e},
-	{baseSampler, 0xa2},
-	{baseCtlConst, 2},
-	{baseBool, 3},
-}
-
-// ShadowStateSize is how many bytes of a GX2ContextState the shadow uses.
-var ShadowStateSize = func() uint32 {
-	n := uint32(0)
-	for _, r := range shadowRanges {
-		n += r.n * 4
-	}
-	return n
-}()
-
-func (g *Latte) saveContext(addr uint32) {
-	for _, r := range shadowRanges {
-		for i := uint32(0); i < r.n; i++ {
-			g.mem.Write32(addr, g.reg(r.base+i*4))
-			addr += 4
-		}
-	}
-}
-
-func (g *Latte) loadContext(addr uint32) {
-	for _, r := range shadowRanges {
-		for i := uint32(0); i < r.n; i++ {
-			g.setReg(r.base+i*4, g.mem.Read32(addr))
-			addr += 4
-		}
-	}
-}
-
-// setupContext makes addr the current context state without loading it
-// (GX2SetupContextState fills it with defaults next).
-func (g *Latte) setupContext(addr uint32) {
-	if g.ctxState != 0 {
-		g.saveContext(g.ctxState)
-	}
-	g.ctxState = addr
-}
-
-func (g *Latte) switchContext(addr uint32) {
-	if g.ctxState != 0 {
-		g.saveContext(g.ctxState)
-	}
-	if addr != 0 {
-		g.loadContext(addr)
-	}
-	g.ctxState = addr
+	return true
 }
 
 // ---- reading GPU memory ----
