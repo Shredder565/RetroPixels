@@ -1,0 +1,22 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 5ea7f8e..1aed77f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -116,7 +116,7 @@ option(ENABLE_TESTS "Enables building the unit tests" ON)
+ option(ENABLE_VULKAN "Enables vulkan video backend" ON)
+ option(USE_DISCORD_PRESENCE "Enables Discord Rich Presence, show the current game on Discord" ON)
+ option(USE_MGBA "Enables GBA controllers emulation using libmgba" ON)
+-option(ENABLE_AUTOUPDATE "Enables support for automatic updates" ON)
++option(ENABLE_AUTOUPDATE "Enables support for automatic updates" OFF)
+ option(USE_RETRO_ACHIEVEMENTS "Enables integration with retroachievements.org" ON)
+ option(ENABLE_CCACHE "Enables CCache compiler cache" OFF)
+ 
+@@ -126,7 +126,7 @@ option(ENABLE_CCACHE "Enables CCache compiler cache" OFF)
+ #    launch).
+ #  * The Dolphin team relies on the data in order to understand the behavior
+ #    of our software in the wild.
+-option(ENABLE_ANALYTICS "Enables opt-in Analytics collection" ON)
++option(ENABLE_ANALYTICS "Enables opt-in Analytics collection" OFF)
+ 
+ option(ENCODE_FRAMEDUMPS "Encode framedumps in AVI format" ON)
+ 

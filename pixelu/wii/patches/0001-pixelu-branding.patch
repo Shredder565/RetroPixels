@@ -1,0 +1,89 @@
+diff --git a/Source/Core/Core/Core.cpp b/Source/Core/Core/Core.cpp
+index fc614fd..830e7f0 100644
+--- a/Source/Core/Core/Core.cpp
++++ b/Source/Core/Core/Core.cpp
+@@ -899,7 +899,8 @@ void UpdateTitle(Core::System& system)
+       "{} {} | {} | {}", system.GetPowerPC().GetCPUName(), system.IsDualCoreMode() ? "DC" : "SC",
+       g_video_backend->GetDisplayName(), Config::Get(Config::MAIN_DSP_HLE) ? "HLE" : "LLE");
+ 
+-  std::string message = fmt::format("{} | {}", Common::GetScmRevStr(), SSettings);
++  std::string message =
++      fmt::format("PixelU Wii (Dolphin {}) | {}", Common::GetScmDescStr(), SSettings);
+   if (Config::Get(Config::MAIN_SHOW_ACTIVE_TITLE))
+   {
+     const std::string& title = SConfig::GetInstance().GetTitleDescription();
+diff --git a/Source/Core/DolphinQt/AboutDialog.cpp b/Source/Core/DolphinQt/AboutDialog.cpp
+index 5261dec..0c73d73 100644
+--- a/Source/Core/DolphinQt/AboutDialog.cpp
++++ b/Source/Core/DolphinQt/AboutDialog.cpp
+@@ -17,7 +17,7 @@
+ 
+ AboutDialog::AboutDialog(QWidget* parent) : QDialog(parent)
+ {
+-  setWindowTitle(tr("About Dolphin"));
++  setWindowTitle(QStringLiteral("About PixelU Wii"));
+ 
+   QString branch_str = QString::fromStdString(Common::GetScmBranchStr());
+   const int commits_ahead = Common::GetScmCommitsAheadMaster();
+@@ -39,9 +39,15 @@ AboutDialog::AboutDialog(QWidget* parent) : QDialog(parent)
+ 
+   const QString text =
+       QStringLiteral(R"(
+-<p style='font-size:38pt; font-weight:400;'>Dolphin</p>
++<p style='font-size:38pt; font-weight:400;'>PixelU Wii</p>
+ 
+-<p style='font-size:18pt;'>%VERSION_STRING%</p>
++<p style='font-size:18pt;'>Based on Dolphin %VERSION_STRING%</p>
++
++<p>
++PixelU's GameCube and Wii engine is a lightly modified build of Dolphin,<br>
++made for RetroPixels. All credit for the emulation goes to the Dolphin Team.<br>
++Source and changes: <a href='https://github.com/shredder565/retropixels/tree/claude/wiiu-emulator-urpcen/pixelu/wii'>github.com/shredder565/retropixels (pixelu/wii)</a>
++</p>
+ 
+ <p style='font-size: small;'>
+ %BRANCH%<br>
+@@ -51,7 +57,7 @@ AboutDialog::AboutDialog(QWidget* parent) : QDialog(parent)
+ </p>
+ 
+ <p>
+-%CHECK_FOR_UPDATES%: <a href='https://dolphin-emu.org/download'>dolphin-emu.org/download</a>
++Dolphin: <a href='https://dolphin-emu.org/'>dolphin-emu.org</a>
+ </p>
+ 
+ <p>
+diff --git a/Source/Core/DolphinQt/MainWindow.cpp b/Source/Core/DolphinQt/MainWindow.cpp
+index 688ae6f..6da9f7f 100644
+--- a/Source/Core/DolphinQt/MainWindow.cpp
++++ b/Source/Core/DolphinQt/MainWindow.cpp
+@@ -217,7 +217,7 @@ MainWindow::MainWindow(Core::System& system, std::unique_ptr<BootParameters> boo
+                        const std::string& movie_path)
+     : QMainWindow(nullptr), m_system(system)
+ {
+-  setWindowTitle(QString::fromStdString(Common::GetScmRevStr()));
++  setWindowTitle(QStringLiteral("PixelU Wii (based on Dolphin %1)").arg(QString::fromStdString(Common::GetScmDescStr())));
+   setWindowIcon(Resources::GetAppIcon());
+   setUnifiedTitleAndToolBarOnMac(true);
+   setAcceptDrops(true);
+@@ -1301,7 +1301,7 @@ void MainWindow::HideRenderWidget(bool reinit, bool is_exit)
+     m_rendering_to_main = false;
+     m_stack->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+     disconnect(Host::GetInstance(), &Host::RequestTitle, this, &MainWindow::setWindowTitle);
+-    setWindowTitle(QString::fromStdString(Common::GetScmRevStr()));
++    setWindowTitle(QStringLiteral("PixelU Wii (based on Dolphin %1)").arg(QString::fromStdString(Common::GetScmDescStr())));
+   }
+ 
+   // The following code works around a driver bug that would lead to Dolphin crashing when changing
+diff --git a/Source/Core/DolphinQt/RenderWidget.cpp b/Source/Core/DolphinQt/RenderWidget.cpp
+index 49680b8..8c6b938 100644
+--- a/Source/Core/DolphinQt/RenderWidget.cpp
++++ b/Source/Core/DolphinQt/RenderWidget.cpp
+@@ -38,7 +38,7 @@
+ 
+ RenderWidget::RenderWidget(QWidget* parent) : QWidget(parent)
+ {
+-  setWindowTitle(QStringLiteral("Dolphin"));
++  setWindowTitle(QStringLiteral("PixelU Wii"));
+   setWindowIcon(Resources::GetAppIcon());
+   setWindowRole(QStringLiteral("renderer"));
+   setAcceptDrops(true);

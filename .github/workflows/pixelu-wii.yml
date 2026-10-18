@@ -1,0 +1,166 @@
+name: PixelU Wii (GameCube / Wii) test build
+
+# Builds PixelU's GameCube and Wii engine: Dolphin (GPL-2.0-or-later, the
+# submodule in pixelu/wii/dolphin) with the small changes in
+# pixelu/wii/patches. It is its own program (PixelU-Wii.exe), separate from
+# PixelU's Wii U part, and is packaged as the PixelU\wii\ folder.
+# The result is a workflow artifact only: no release is made.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [claude/wiiu-emulator-urpcen]
+    paths:
+      - "pixelu/wii/**"
+      - ".gitmodules"
+      - ".github/workflows/pixelu-wii.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pixelu-wii-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    # Dolphin 2609a builds with Visual Studio 2026 (its CMake presets use the
+    # "Visual Studio 18 2026" generator and the v145 toolset), which is on
+    # this image and not on windows-2022.
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 240
+    env:
+      DOLPHIN_TAG: "2609a"
+      DOLPHIN_DIR: "pixelu/wii/dolphin"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Fetch Dolphin and its Externals
+        shell: pwsh
+        run: |
+          # The submodule is marked "update = none" in .gitmodules so that
+          # other builds of this repo don't download Dolphin; --checkout overrides it.
+          git submodule update --init --checkout --depth 1 $env:DOLPHIN_DIR
+          if ($LASTEXITCODE) { exit 1 }
+          git -C $env:DOLPHIN_DIR fetch --depth 1 origin tag $env:DOLPHIN_TAG
+          git -C $env:DOLPHIN_DIR submodule update --init --recursive --depth 1 --jobs 8
+          if ($LASTEXITCODE) {
+            Write-Host "Shallow fetch of the Externals failed; fetching them in full"
+            git -C $env:DOLPHIN_DIR submodule update --init --recursive --jobs 8
+            if ($LASTEXITCODE) { exit 1 }
+          }
+          git -C $env:DOLPHIN_DIR log -1 --format="Dolphin at %H (%s)"
+
+      - name: Apply PixelU patches
+        shell: pwsh
+        run: |
+          $patches = Get-ChildItem pixelu/wii/patches/*.patch | Sort-Object Name
+          foreach ($p in $patches) {
+            Write-Host "Applying $($p.Name)"
+            git -C $env:DOLPHIN_DIR apply --whitespace=nowarn $p.FullName
+            if ($LASTEXITCODE) { exit 1 }
+          }
+          # Commit and tag them, so Dolphin's version string reads
+          # "2609a-pixelu" instead of "2609a-dirty".
+          git -C $env:DOLPHIN_DIR -c user.name="PixelU CI" -c user.email="ci@invalid" commit -q -a -m "PixelU patches"
+          git -C $env:DOLPHIN_DIR -c user.name="PixelU CI" -c user.email="ci@invalid" tag -a "$env:DOLPHIN_TAG-pixelu" -m "PixelU"
+          if ($LASTEXITCODE) { exit 1 }
+          git -C $env:DOLPHIN_DIR describe --always --long
+
+      - uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: "4.2.x"
+
+      - name: Configure
+        working-directory: pixelu/wii/dolphin
+        shell: pwsh
+        run: |
+          cmake --version
+          cmake --preset visualstudio-release-x64 `
+            -DUSE_SYSTEM_LIBS=OFF `
+            -DENABLE_AUTOUPDATE=OFF `
+            -DENABLE_ANALYTICS=OFF `
+            -DENABLE_TESTS=OFF
+          if ($LASTEXITCODE) { exit 1 }
+
+      - name: Build
+        working-directory: pixelu/wii/dolphin
+        shell: pwsh
+        run: |
+          cmake --build --preset visualstudio-build-release-x64 --target dolphin-emu --parallel
+          if ($LASTEXITCODE) { exit 1 }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $bin = "$env:DOLPHIN_DIR/build/release/x64/Binaries"
+          Get-ChildItem $bin | Format-Table Name, Length
+          # Windows paths ignore case: "package/PixelU" is not the pixelu source folder.
+          $out = "package/PixelU/wii"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          Copy-Item "$bin/PixelU-Wii.exe" $out
+          Copy-Item "$bin/*.dll" $out
+          Copy-Item "$bin/qt.conf" $out
+          Copy-Item -Recurse "$bin/QtPlugins" "$out/QtPlugins"
+          if (Test-Path "$bin/Languages") { Copy-Item -Recurse "$bin/Languages" "$out/Languages" }
+          # Sys, COPYING and Licenses are symlinks in the build folder: copy the real ones.
+          Copy-Item -Recurse "$env:DOLPHIN_DIR/Data/Sys" "$out/Sys"
+          Copy-Item "$env:DOLPHIN_DIR/COPYING" "$out/COPYING"
+          Copy-Item "$env:DOLPHIN_DIR/COPYING" "$out/license.txt"
+          Copy-Item -Recurse "$env:DOLPHIN_DIR/LICENSES" "$out/Licenses"
+          # Dolphin links the Visual C++ runtime as DLLs: ship them next to the
+          # exe so it runs without the VC++ Redistributable being installed.
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT" -Directory | Sort-Object FullName | Select-Object -Last 1
+          Write-Host "VC++ runtime from $($crt.FullName)"
+          Copy-Item "$($crt.FullName)\*.dll" $out
+          # portable.txt: settings, saves and caches stay in the User folder next to the exe.
+          "PixelU Wii keeps its settings, saves and caches in the User folder next to PixelU-Wii.exe." | Out-File -Encoding utf8 "$out/portable.txt"
+          $sha = git rev-parse --short HEAD
+          $dsha = git -C $env:DOLPHIN_DIR rev-parse --short "HEAD~1"
+          @(
+            "PixelU Wii test build (GameCube and Wii, based on Dolphin; not a release)"
+            "Built $(Get-Date -Format yyyy-MM-dd) from branch claude/wiiu-emulator-urpcen ($sha)"
+            "Dolphin $env:DOLPHIN_TAG ($dsha) with the patches in pixelu/wii/patches"
+            "Source: https://github.com/shredder565/retropixels/tree/claude/wiiu-emulator-urpcen/pixelu/wii"
+            "Dolphin: https://github.com/dolphin-emu/dolphin (Copyright Dolphin Emulator Project)"
+            "License: GNU General Public License, version 2 or later (COPYING); third-party licenses in Licenses\"
+            "No Nintendo keys, firmware, BIOS/IPL or games are included."
+          ) | Out-File -Encoding utf8 "$out/VERSION.txt"
+
+      - name: List package contents
+        shell: pwsh
+        run: |
+          $out = "package/PixelU/wii"
+          Get-ChildItem $out | Format-Table Mode, Length, Name
+          Get-ChildItem -Recurse $out/QtPlugins | Select-Object -ExpandProperty FullName
+          "Sys: $((Get-ChildItem -Recurse -File $out/Sys).Count) files"
+          $size = (Get-ChildItem -Recurse -File $out | Measure-Object Length -Sum).Sum / 1MB
+          "Package size: {0:N1} MB" -f $size
+          Get-Content "$out/VERSION.txt"
+          foreach ($f in "PixelU-Wii.exe", "Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll", "qt.conf", "portable.txt", "COPYING", "Sys/GC", "Sys/Wii", "QtPlugins/platforms/qwindows.dll") {
+            if (-not (Test-Path "$out/$f")) { Write-Error "missing $f"; exit 1 }
+          }
+
+      - name: Smoke test (exe starts and prints its version)
+        shell: pwsh
+        run: |
+          $out = (Resolve-Path "package/PixelU/wii").Path
+          $p = Start-Process -FilePath "$out\PixelU-Wii.exe" -ArgumentList "--version" -PassThru `
+                 -RedirectStandardOutput "$env:RUNNER_TEMP\ver.txt" -RedirectStandardError "$env:RUNNER_TEMP\err.txt"
+          if (-not $p.WaitForExit(60000)) { Stop-Process -Id $p.Id -Force; Write-Error "PixelU-Wii.exe --version did not exit"; exit 1 }
+          "exit code: $($p.ExitCode)"
+          Get-Content "$env:RUNNER_TEMP\ver.txt", "$env:RUNNER_TEMP\err.txt" -ErrorAction SilentlyContinue
+          # 0xC0000135 = a DLL is missing, 0xC000007B = a DLL is the wrong kind.
+          if ($p.ExitCode -lt 0 -or $p.ExitCode -gt 255) { Write-Error ("exe failed to start: 0x{0:X8}" -f $p.ExitCode); exit 1 }
+          # It must not have written its settings anywhere but next to itself.
+          if (Test-Path "$out\User") { "portable User folder created: OK" }
+          Remove-Item -Recurse -Force "$out\User" -ErrorAction SilentlyContinue
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PixelU-Wii-windows-x64
+          path: package/
+          retention-days: 14
