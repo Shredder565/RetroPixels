@@ -33,6 +33,7 @@ const (
 	cmdRecQ0       = 1460 // + index in recQualities
 	cmdRecDir      = 1470
 	cmdRecDirReset = 1471
+	cmdRecAuto     = 1472
 	cmdKeysHelp    = 1480
 	cmdReadme      = 1481
 	cmdRecRecent0  = 1500 // ..1509
@@ -132,6 +133,7 @@ func (a *app) uiRecordMenu() {
 		appendMenu(a.ui.qualMenu, mfString, uintptr(cmdRecQ0+i), q.label)
 	}
 	appendMenu(a.recMenu, mfPopup, a.ui.qualMenu, "&Quality")
+	appendMenu(a.recMenu, mfString, cmdRecAuto, "Record games &automatically (every system)")
 	appendMenu(a.recMenu, mfSeparator, 0, "")
 	appendMenu(a.recMenu, mfString, cmdShotFolder, "Open scr&eenshots folder")
 }
@@ -212,6 +214,7 @@ func (a *app) uiUpdateMenus() {
 	}
 	call(pCheckMenuRadioItem, a.menu, cmdRecQ0, uintptr(cmdRecQ0+len(recQualities)-1), uintptr(cmdRecQ0+qi), mfByCommand)
 	enableItem(a.menu, cmdRecDirReset, a.settings.RecDir != "")
+	checkItem(a.menu, cmdRecAuto, a.settings.autoRecord())
 	enableItem(a.menu, cmdReadme, readmePath() != "")
 }
 
@@ -516,6 +519,8 @@ func (a *app) uiCommand(id int) {
 			saveSettings(a.settings)
 			a.showMessage("Recordings go to " + d)
 		}
+	case id == cmdRecAuto:
+		a.toggleAutoRecord()
 	case id == cmdRecDirReset:
 		a.settings.RecDir = ""
 		saveSettings(a.settings)

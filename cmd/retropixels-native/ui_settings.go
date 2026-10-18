@@ -8,6 +8,23 @@ type uiSettings struct {
 	RumbleOff  bool   `json:"rumbleOff,omitempty"`     // Options > Controller rumble unticked
 	RecQuality string `json:"recordQuality,omitempty"` // "high", "balanced" (the default) or "small"
 	RecDir     string `json:"recordDir,omitempty"`     // Record > Change recordings folder; "" = Videos\RetroPixels
+	// Record > Record games automatically, for every system (unset: on).
+	AutoRecord *bool `json:"autoRecord,omitempty"`
+}
+
+// autoRecord: every game is recorded from its start.
+func (u uiSettings) autoRecord() bool { return boolOr(u.AutoRecord, true) }
+
+// migrateAutoRecord: automatic recording used to be a GameCube / Wii
+// setting only; turned off there, it starts off for every system.
+func (s *Settings) migrateAutoRecord() {
+	if s.Dolphin.AutoRecord != nil {
+		if s.AutoRecord == nil {
+			v := *s.Dolphin.AutoRecord
+			s.AutoRecord = &v
+		}
+		s.Dolphin.AutoRecord = nil
+	}
 }
 
 // recQualities: Record > Quality, as the Recordings tab of RetroPixels.exe.

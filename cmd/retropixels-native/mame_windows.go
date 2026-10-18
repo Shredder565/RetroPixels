@@ -5,11 +5,15 @@ package main
 // RetroPixels.exe), which one each game uses, and the game docked inside this
 // window (so OBS captures it), the same way as GameCube and Wii games.
 //
+// With Record > Record games automatically on, MAME saves the game as it
+// runs (-aviwrite) and the .mp4 is made when it ends (internal/mame/record.go).
+//
 // app_windows.go calls in through small hooks (mameOpenPath, mameCommand,
 // mameEvent, ...); the library window is in mame_library_windows.go.
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -43,6 +47,7 @@ type mameRun struct {
 	err     error // how MAME ended (set before exited closes)
 	started time.Time
 	embed   bool
+	rec     *extRec // nil: not recorded
 }
 
 // mameState is the app's MAME part.
@@ -418,19 +423,45 @@ func (a *app) mamePlay(g mame.Game, exe string) {
 		g.Name = l.Name
 	}
 	a.closeGame()
-	cmd, out := mame.Command(l.Install.Exe, l.Args...)
+	// Recorded from the start: MAME saves the picture and sound itself, and
+	// ffmpeg is only needed to make the .mp4 once the game ends.
+	var rec *extRec
+	args := l.Args
+	if a.settings.autoRecord() && a.recFFmpeg(false, false) {
+		base := filepath.Join(a.settings.recDir(), "temp")
+		os.MkdirAll(base, 0o755)
+		if dir, err := os.MkdirTemp(base, "MAME-"); err == nil {
+			if ra := mame.RecordArgs(dir, mame.OptionsOf(l.Install.Exe)); ra != nil {
+				args = append(append([]string(nil), args...), ra...)
+				rec = a.newExtRec(g.Name, dir)
+			} else {
+				os.Remove(dir)
+			}
+		}
+	}
+	cmd, out := mame.Command(l.Install.Exe, args...)
 	if err := cmd.Start(); err != nil {
+		if rec != nil {
+			a.extRecDropped(rec)
+		}
 		messageBox(a.hwnd, "Couldn't start "+l.Install.Label()+": "+err.Error(), "RetroPixels Native", mbIconWarning)
 		return
 	}
 	r := &mameRun{extRun: newExtRun(cmd.Process.Pid), game: g, label: l.Install.Label(), out: out,
-		started: time.Now(), embed: embed}
+		started: time.Now(), embed: embed, rec: rec}
 	a.mame.run = r
 	a.mame.problem = ""
+	mameExe := l.Install.Exe
 	go func() {
 		r.err = cmd.Wait()
 		close(r.exited)
 		a.event("mame-exited", "")
+		if rec != nil {
+			a.extSave(rec, func(ff string, progress func(int)) error {
+				mame.KeepSnapshots(rec.dir, mameExe) // F12 screenshots taken meanwhile
+				return mame.Convert(ff, rec.dir, rec.out, progress)
+			})
+		}
 	}()
 	if embed {
 		go a.dockWatch(&r.extRun, 60*time.Second, "mame") // a big game's first start can take a while
@@ -492,9 +523,22 @@ func (a *app) mameEnded() {
 				"\n\nPick another MAME version for it in Arcade (MAME) > Library.", "RetroPixels Native", mbIconWarning)
 		}
 	}
-	if a.dol.closeAfter {
-		call(pPostMessageW, a.hwnd, wmClose, 0, 0)
+	a.dolMaybeClose() // closes the window if that was asked (once recordings are saved)
+}
+
+// mameToggleRecording is F9 / Record while a MAME game plays: MAME is
+// told to record as a game starts.
+func (a *app) mameToggleRecording() bool {
+	r := a.mame.run
+	if r == nil {
+		return false
 	}
+	if r.rec != nil {
+		a.showMessage("Recording: the video is saved when the game ends")
+	} else {
+		a.showMessage("MAME games are recorded from their start: turn on Record > Record games automatically")
+	}
+	return true
 }
 
 // mameBeforeClose: closing the window while a MAME game plays stops the
@@ -581,6 +625,9 @@ func (a *app) mameTitle() string {
 		t += " - " + r.game.Name + " (" + r.label + ")"
 		if r.embed && r.child.Load() == 0 {
 			t += " - Starting in MAME…"
+		}
+		if r.rec != nil {
+			t += recTitle(r.rec.started)
 		}
 	}
 	a.mame.mu.Lock()

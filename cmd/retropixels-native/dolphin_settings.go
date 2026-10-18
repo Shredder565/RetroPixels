@@ -33,8 +33,8 @@ type DolphinSettings struct {
 	Played     map[string]time.Time `json:"played,omitempty"` // by lower-cased path
 	Fullscreen *bool                `json:"fullscreen,omitempty"`
 	Embed      *bool                `json:"playInWindow,omitempty"`
-	AutoRecord *bool                `json:"autoRecord,omitempty"`
-	Volume     *int                 `json:"volume,omitempty"` // 0..100
+	AutoRecord *bool                `json:"autoRecord,omitempty"` // old: now Settings.AutoRecord (read once, see migrateAutoRecord)
+	Volume     *int                 `json:"volume,omitempty"`     // 0..100
 	Muted      bool                 `json:"muted,omitempty"`
 	Detected   bool                 `json:"detected,omitempty"` // looked for Dolphin and games once
 	Filter     string               `json:"libraryFilter,omitempty"`
@@ -50,7 +50,6 @@ func boolOr(p *bool, def bool) bool {
 
 func (d *DolphinSettings) fullscreen() bool { return boolOr(d.Fullscreen, true) }
 func (d *DolphinSettings) embed() bool      { return boolOr(d.Embed, true) }
-func (d *DolphinSettings) autoRecord() bool { return boolOr(d.AutoRecord, true) }
 
 func (d *DolphinSettings) volume() int {
 	if d.Volume == nil || *d.Volume < 0 || *d.Volume > 100 {

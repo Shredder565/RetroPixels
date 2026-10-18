@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -96,6 +97,7 @@ type app struct {
 	encMu      sync.Mutex
 	encoders   map[string]string
 	ffDownload string // progress text while ffmpeg downloads
+	ffDeclined bool   // said No to downloading ffmpeg for automatic recording (asked once a run)
 
 	controls      *controlsDialog
 	mouseTracking bool
@@ -779,6 +781,9 @@ func (a *app) handleEvents() {
 		case "rec-done":
 			a.recSaving--
 			a.showMessage("Recording saved: " + filepath.Base(e.detail))
+		case "rec-dropped": // too short to keep
+			a.recSaving--
+			a.updateTitle()
 		case "rec-error":
 			a.recSaving--
 			a.updateTitle()
@@ -788,7 +793,12 @@ func (a *app) handleEvents() {
 			a.updateTitle()
 		case "ff-done":
 			a.ffDownload = ""
-			a.showMessage("ffmpeg is ready: press F9 to record")
+			if a.sess != nil && !a.recOn && a.settings.autoRecord() {
+				a.autoRecordBuiltIn()
+				a.showMessage("ffmpeg is ready: recording")
+			} else {
+				a.showMessage("ffmpeg is ready: press F9 to record")
+			}
 		case "ff-error":
 			a.ffDownload = ""
 			a.updateTitle()
@@ -1026,6 +1036,7 @@ func (a *app) startGame(g *loadedGame, path string) {
 	a.resizeToScale()
 	s.start()
 	a.apGameStarted(s)
+	a.autoRecordBuiltIn() // Record > Record games automatically
 	a.updateTitle()
 }
 
@@ -1097,11 +1108,7 @@ func (a *app) encoder(ff string) string {
 }
 
 func (a *app) toggleRecording() {
-	if a.dolToggleRecording() || a.pixeluToggleRecording() {
-		return
-	}
-	if a.mame.run != nil {
-		a.showMessage("MAME games aren't recorded by RetroPixels: capture this window with OBS, or use MAME's own recording")
+	if a.dolToggleRecording() || a.pixeluToggleRecording() || a.mameToggleRecording() {
 		return
 	}
 	s := a.sess
@@ -1147,7 +1154,9 @@ func (a *app) finishRecording(r *recorder) {
 	go func() {
 		defer a.recWG.Done()
 		path, err := r.stop()
-		if err != nil {
+		if errors.Is(err, errRecTooShort) {
+			a.event("rec-dropped", "")
+		} else if err != nil {
 			a.event("rec-error", err.Error())
 		} else {
 			a.event("rec-done", path)

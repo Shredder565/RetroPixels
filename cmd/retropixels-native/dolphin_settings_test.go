@@ -14,13 +14,13 @@ import (
 
 func TestDolphinSettingsDefaults(t *testing.T) {
 	var d DolphinSettings
-	if !d.fullscreen() || !d.embed() || !d.autoRecord() || d.volume() != 100 || d.Muted {
+	if !d.fullscreen() || !d.embed() || d.volume() != 100 || d.Muted {
 		t.Fatal("defaults differ from RetroPixels.exe's (fullscreen, in the window, recorded, 100%)")
 	}
 	off := false
-	d.Fullscreen, d.Embed, d.AutoRecord = &off, &off, &off
+	d.Fullscreen, d.Embed = &off, &off
 	d.setVolume(130)
-	if d.fullscreen() || d.embed() || d.autoRecord() || d.volume() != 100 {
+	if d.fullscreen() || d.embed() || d.volume() != 100 {
 		t.Fatal("switches")
 	}
 	d.setVolume(0)

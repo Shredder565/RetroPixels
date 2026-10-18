@@ -64,6 +64,8 @@ type recorder struct {
 	pcm        []int16
 	scaled     []uint32
 	log        *tailBuf
+	nframes    int64 // pictures recorded
+	minFrames  int64 // fewer than this: the recording isn't kept
 
 	mu  sync.Mutex
 	err error
@@ -175,6 +177,7 @@ func (r *recorder) frame(pix []uint32, w, h int) {
 		binary.LittleEndian.PutUint32(buf[i*4:], p)
 	}
 	r.frames <- buf
+	r.nframes++
 }
 
 // audio adds the frame's sound (as the core made it, before the volume).
@@ -210,6 +213,9 @@ func (r *recorder) stop() (string, error) {
 	defer os.Remove(r.audioPath)
 	if err := r.failed(); err != nil {
 		return "", err
+	}
+	if r.nframes == 0 || r.nframes < r.minFrames {
+		return "", errRecTooShort
 	}
 	if werr != nil {
 		return "", fmt.Errorf("ffmpeg couldn't make the video: %v %s", werr, r.log.String())
@@ -270,3 +276,7 @@ func (t *tailBuf) String() string {
 }
 
 var errNoFFmpeg = errors.New("ffmpeg isn't installed")
+
+// errRecTooShort: the game was closed before there was anything worth
+// keeping (no picture, or an automatic recording of a few seconds).
+var errRecTooShort = errors.New("the recording was too short to keep")

@@ -5,7 +5,8 @@ package main
 // RetroPixels, or in Downloads) and the same command line (internal/pixelu).
 // By default PixelU shows only the game picture (--rp-embed) and that
 // window is docked inside this one (dock_windows.go), as Dolphin's is.
-// (Recording Wii U games is RetroPixels.exe's for now.)
+// With Record > Record games automatically on, PixelU saves the game as it
+// runs (--rp-record) and the video is made when it ends (pixelu_record.go).
 //
 // app_windows.go calls in through pixeluOpenPath, pixeluCommand and the
 // other small hooks.
@@ -19,6 +20,7 @@ import (
 	"unsafe"
 
 	"retropixels/internal/dolphin"
+	"retropixels/internal/ffmpeg"
 	"retropixels/internal/pixelu"
 )
 
@@ -40,7 +42,8 @@ type pixeluRun struct {
 	extRun   // pid, exited, the docked game window (dock_windows.go)
 	game     pixelu.Game
 	embed    bool
-	wentFull bool // this window went fullscreen for the game
+	wentFull bool    // this window went fullscreen for the game
+	rec      *extRec // nil: not recorded
 }
 
 // pixeluState is the app's Wii U part (UI thread only).
@@ -216,17 +219,36 @@ func (a *app) pixeluPlay(g pixelu.Game) {
 	a.closeGame()
 	p := &a.settings.PixelU
 	opts := p.launchOptions()
+	// Recorded from the start: PixelU encodes with ffmpeg while the game runs.
+	var rec *extRec
+	if a.settings.autoRecord() && a.recFFmpeg(true, false) {
+		if dir, err := pixeluRecDir(filepath.Join(a.settings.recDir(), "temp")); err != nil {
+			a.showMessage("Not recording: " + err.Error())
+		} else {
+			opts.RecordDir, opts.FFmpeg = dir, ffmpeg.Find()
+			rec = a.newExtRec(g.Name, dir)
+		}
+	}
 	cmd := pixelu.Command(exe, pixelu.GameArgs(g.Path, opts)...)
 	if err := cmd.Start(); err != nil {
+		if rec != nil {
+			a.extRecDropped(rec)
+		}
 		messageBox(a.hwnd, "Couldn't start PixelU: "+err.Error(), "RetroPixels Native", mbIconWarning)
 		return
 	}
-	r := &pixeluRun{extRun: newExtRun(cmd.Process.Pid), game: g, embed: opts.Embed}
+	r := &pixeluRun{extRun: newExtRun(cmd.Process.Pid), game: g, embed: opts.Embed, rec: rec}
 	a.pu.run = r
 	go func() {
 		cmd.Wait()
 		close(r.exited)
 		a.event("pixelu-exited", "")
+		if rec != nil {
+			enc := a.encoder(opts.FFmpeg)
+			a.extSave(rec, func(ff string, progress func(int)) error {
+				return pixeluSave(ff, enc, rec.dir, rec.out, time.Since(rec.started).Seconds(), progress)
+			})
+		}
 	}()
 	if r.embed {
 		if p.fullscreen() && !a.fullscreen {
@@ -298,12 +320,18 @@ func (a *app) pixeluBeforeClose() bool {
 	return true
 }
 
-// pixeluToggleRecording is F9 / Record while a Wii U game plays.
+// pixeluToggleRecording is F9 / Record while a Wii U game plays: PixelU
+// can only be told to record as a game starts.
 func (a *app) pixeluToggleRecording() bool {
-	if a.pu.run == nil {
+	r := a.pu.run
+	if r == nil {
 		return false
 	}
-	a.showMessage("Wii U games aren't recorded by RetroPixels Native yet: capture this window with OBS, or use RetroPixels.exe")
+	if r.rec != nil {
+		a.showMessage("Recording: the video is saved when the game ends")
+	} else {
+		a.showMessage("Wii U games are recorded from their start: turn on Record > Record games automatically")
+	}
 	return true
 }
 
@@ -332,6 +360,9 @@ func (a *app) pixeluTitle() string {
 	t := " - " + r.game.Name + " (Wii U)"
 	if r.embed && r.child.Load() == 0 {
 		t += " - Starting in PixelU…"
+	}
+	if r.rec != nil {
+		t += recTitle(r.rec.started)
 	}
 	return t
 }

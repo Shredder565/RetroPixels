@@ -79,6 +79,7 @@ func (s *Settings) normalize() {
 	if len(s.Recent) > maxRecent {
 		s.Recent = s.Recent[:maxRecent]
 	}
+	s.migrateAutoRecord()
 }
 
 func saveSettings(s Settings) error {

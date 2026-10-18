@@ -30,7 +30,7 @@ import (
 const (
 	cmdDolLibrary    = 1300
 	cmdDolStop       = 1301
-	cmdDolAutoRec    = 1302
+	cmdDolAutoRec    = 1302 // now Record > Record games automatically (cmdRecAuto)
 	cmdDolFullscreen = 1303
 	cmdDolEmbed      = 1304
 	cmdDolSettings   = 1305
@@ -159,8 +159,7 @@ func (a *app) addDolphinMenu() {
 	appendMenu(a.dol.volMenu, mfSeparator, 0, "")
 	appendMenu(a.dol.volMenu, mfString, cmdDolMute, "&Mute")
 	appendMenu(m, mfPopup, a.dol.volMenu, "Game &volume")
-	appendMenu(m, mfString, cmdDolAutoRec, "&Record games automatically")
-	appendMenu(m, mfString, cmdDolRecNext, "Record the &next game")
+	appendMenu(m, mfString, cmdDolRecNext, "Record the &next game (when not recording automatically)")
 	appendMenu(m, mfString, cmdDolFullscreen, "Start games &fullscreen")
 	appendMenu(m, mfString, cmdDolEmbed, "Play inside this &window")
 	appendMenu(m, mfSeparator, 0, "")
@@ -193,9 +192,9 @@ func (a *app) dolUpdateMenus() {
 		}
 	}
 	enableItem(a.menu, cmdDolStop, r != nil)
-	checkItem(a.menu, cmdDolAutoRec, d.autoRecord())
-	enableItem(a.menu, cmdDolRecNext, !d.autoRecord())
-	checkItem(a.menu, cmdDolRecNext, !d.autoRecord() && a.dol.nextGame)
+	auto := a.settings.autoRecord()
+	enableItem(a.menu, cmdDolRecNext, !auto)
+	checkItem(a.menu, cmdDolRecNext, !auto && a.dol.nextGame)
 	checkItem(a.menu, cmdDolFullscreen, d.fullscreen())
 	checkItem(a.menu, cmdDolEmbed, d.embed())
 	call(pCheckMenuRadioItem, a.menu, cmdDolVolume0+1, cmdDolVolume0+10, uintptr(cmdDolVolume0+max(1, (d.volume()+5)/10)), mfByCommand)
@@ -214,14 +213,7 @@ func (a *app) dolCommand(id int) {
 	case id == cmdDolStop:
 		a.dolStop()
 	case id == cmdDolAutoRec:
-		v := !d.autoRecord()
-		d.AutoRecord = &v
-		saveSettings(a.settings)
-		if v {
-			a.showMessage("GameCube and Wii games will be recorded automatically")
-		} else {
-			a.showMessage("Automatic recording off")
-		}
+		a.toggleAutoRecord()
 	case id == cmdDolRecNext:
 		a.dol.nextGame = !a.dol.nextGame
 		a.updateTitle()
@@ -363,17 +355,13 @@ func (a *app) dolPlay(g dolphin.Game) {
 	d.importOld(exe)                       // the first time: the old Dolphin's settings and saves
 	_ = dolphin.SetupXboxPads(user, false) // only fills in controllers that aren't set up yet
 
-	record := d.autoRecord() || a.dol.nextGame
-	if record && ffmpeg.Find() == "" {
-		if a.ffDownload == "" {
-			if messageBox(a.hwnd, "Recording needs ffmpeg, a free video program (about 200 MB, from github.com/BtbN/FFmpeg-Builds; "+
-				"RetroPixels.exe uses the same one).\n\nDownload it now? (No: play without recording this time.)",
-				"RetroPixels Native", mbYesNo|mbIconInfo) == idYes {
-				a.downloadFFmpeg()
-			} else {
-				record = false
-			}
-		}
+	// Recorded from the start (the engine can't start later); ffmpeg is
+	// only needed to make the video once the game ends.
+	record := false
+	if a.dol.nextGame {
+		record = a.recFFmpeg(false, true)
+	} else if a.settings.autoRecord() {
+		record = a.recFFmpeg(false, false)
 	}
 	a.closeGame()
 	opts := dolphin.LaunchOptions{Embed: d.embed(), Fullscreen: d.fullscreen(), Record: record, Quality: dolQuality}
@@ -406,9 +394,10 @@ func (a *app) dolPlay(g dolphin.Game) {
 		a.dol.mu.Lock()
 		a.dol.pending++
 		a.dol.mu.Unlock()
+		dir := a.settings.recDir()
 		go func() {
 			rec.Follow(r.exited, func(m string) { a.event("dol-rec-warn", m) })
-			a.dolSave(rec)
+			a.dolSave(rec, dir)
 		}()
 	}
 	if r.embed {
@@ -491,7 +480,7 @@ func (a *app) dolToggleRecording() bool {
 }
 
 // dolSave makes the video once the game has ended (in the background).
-func (a *app) dolSave(rec *dolphin.Recording) {
+func (a *app) dolSave(rec *dolphin.Recording, dir string) {
 	dolSaveMu.Lock()
 	defer dolSaveMu.Unlock()
 	set := func(step string, pc int) {
@@ -501,7 +490,7 @@ func (a *app) dolSave(rec *dolphin.Recording) {
 		a.event("dol-progress", "")
 	}
 	set("saving", 0)
-	saved, err := rec.Save(dolphin.SaveOptions{Dir: recordingsDir(), Quality: dolQuality, FPS: dolFPS,
+	saved, err := rec.Save(dolphin.SaveOptions{Dir: dir, Quality: dolQuality, FPS: dolFPS,
 		FFmpeg: a.dolWaitFFmpeg, Progress: set})
 	a.dol.mu.Lock()
 	a.dol.saving = ""
@@ -584,7 +573,7 @@ func (a *app) dolHoldWindow() bool {
 }
 
 func (a *app) dolMaybeClose() {
-	if !a.dol.closeAfter || a.dol.run != nil {
+	if !a.dol.closeAfter || a.dol.run != nil || a.pu.run != nil || a.mame.run != nil {
 		return
 	}
 	if pending, _, _ := a.dolBusySaving(); pending == 0 {
@@ -633,6 +622,7 @@ func (a *app) dolEvent(name, detail string) {
 		a.updateTitle()
 	case "dol-progress":
 		a.updateTitle()
+		a.dolMaybeClose() // a recording with nothing to keep counts as done too
 	case "dol-saved":
 		a.showMessage("Recording saved: " + detail)
 		a.dolMaybeClose()
@@ -640,6 +630,12 @@ func (a *app) dolEvent(name, detail string) {
 		a.updateTitle()
 		if !a.dol.closeAfter {
 			messageBox(a.hwnd, "GameCube / Wii recording: "+detail, "RetroPixels Native", mbIconWarning)
+		}
+		a.dolMaybeClose()
+	case "ext-save-error": // a Wii U or MAME recording
+		a.updateTitle()
+		if !a.dol.closeAfter {
+			messageBox(a.hwnd, "The recording couldn't be saved: "+detail, "RetroPixels Native", mbIconWarning)
 		}
 		a.dolMaybeClose()
 	case "dol-need-ffmpeg":
