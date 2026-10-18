@@ -1,50 +1,55 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Written from scratch.
+//
+// nn_uds is the local wireless (UDS) library. Local wireless play is not
+// emulated. The one export games reach is the library's static initializer
+// for uds_Api.cpp, which the RPL runs on load and which returns the address
+// of the library's internal state block. We give it a small zeroed block in
+// emulated system memory, created once per loaded game.
+
 #include "Cafe/OS/common/OSCommon.h"
-
-typedef struct  
-{
-	uint32 reserved;
-}udsWorkspace_t;
-
-udsWorkspace_t* udsWorkspace = nullptr;
-
-void nnUdsExport___sti___11_uds_Api_cpp_f5d9abb2(PPCInterpreter_t* hCPU)
-{
-	debug_printf("__sti___11_uds_Api_cpp_f5d9abb2()\n");
-	if( udsWorkspace == NULL )
-		udsWorkspace = (udsWorkspace_t*)memory_getPointerFromVirtualOffset(coreinit_allocFromSysArea(32, 32));
-	osLib_returnFromFunction(hCPU, memory_getVirtualOffsetFromPointer(udsWorkspace));
-}
+#include "nn_uds.h"
 
 namespace nn::uds
 {
-	class : public COSModule
+	namespace
 	{
-		public:
-		std::string_view GetName() override
+		constexpr uint32 kStateBlockSize = 32;
+
+		MPTR g_stateBlock = MPTR_NULL;
+
+		MPTR ApiStaticInit()
 		{
-			return "nn_uds";
+			if (g_stateBlock == MPTR_NULL)
+			{
+				g_stateBlock = coreinit_allocFromSysArea(kStateBlockSize, 32);
+				memset(memory_getPointerFromVirtualOffset(g_stateBlock), 0, kStateBlockSize);
+			}
+			return g_stateBlock;
 		}
 
-		void RPLMapped() override
+		class UdsLibrary final : public COSModule
 		{
-			osLib_addFunction("nn_uds", "__sti___11_uds_Api_cpp_f5d9abb2", nnUdsExport___sti___11_uds_Api_cpp_f5d9abb2);
+		public:
+			std::string_view GetName() override { return "nn_uds"; }
+
+			void RPLMapped() override
+			{
+				cafeExportRegisterFunc(ApiStaticInit, "nn_uds", "__sti___11_uds_Api_cpp_f5d9abb2", LogType::Placeholder);
+			}
+
+			void rpl_entry(uint32 moduleHandle, coreinit::RplEntryReason reason) override
+			{
+				// system memory is recreated for every game, so forget the old block
+				g_stateBlock = MPTR_NULL;
+			}
 		};
 
-		void rpl_entry(uint32 moduleHandle, coreinit::RplEntryReason reason) override
-		{
-			if (reason == coreinit::RplEntryReason::Loaded)
-			{
-				udsWorkspace = nullptr;
-			}
-			else if (reason == coreinit::RplEntryReason::Unloaded)
-			{
-				udsWorkspace = nullptr;
-			}
-		}
-	}s_COSnnUdsModule;
+		UdsLibrary g_udsLibrary;
+	}
 
 	COSModule* GetModule()
 	{
-		return &s_COSnnUdsModule;
+		return &g_udsLibrary;
 	}
 }

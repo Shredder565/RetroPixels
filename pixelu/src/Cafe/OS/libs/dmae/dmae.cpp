@@ -1,145 +1,165 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Written from scratch.
+//
+// dmae drives the GPU's DMA engine. Games use it to copy or fill memory in
+// 32-bit words (optionally byte-swapping on the way) and to bump semaphores,
+// without spending CPU time. Every operation returns a 64-bit timestamp that
+// can later be passed to DMAEWaitDone().
+//
+// Here every operation runs immediately on the calling thread, so it is
+// already complete when the call returns: the returned timestamp is "now",
+// it becomes the retired timestamp straight away, and waiting always
+// succeeds.
+//
+// Copies tell the GPU buffer cache about the written range, the same way a
+// CPU data-cache flush would, so vertex/uniform data uploaded by DMA is seen
+// by the renderer.
+
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Time.h"
 #include "Cafe/HW/Latte/Core/LatteBufferCache.h"
-
-#define DMAE_ENDIAN_NONE	0
-#define DMAE_ENDIAN_16		1
-#define DMAE_ENDIAN_32		2
-#define DMAE_ENDIAN_64		3
-
-uint64 dmaeRetiredTimestamp = 0;
-
-uint64 dmae_getTimestamp()
-{
-	return coreinit::OSGetSystemTime();
-}
-
-void dmae_setRetiredTimestamp(uint64 timestamp)
-{
-	dmaeRetiredTimestamp = timestamp;
-}
-
-void dmaeExport_DMAECopyMem(PPCInterpreter_t* hCPU)
-{
-	if( hCPU->gpr[6] == DMAE_ENDIAN_NONE )
-	{
-		// don't change endianness
-		memcpy(memory_getPointerFromVirtualOffset(hCPU->gpr[3]), memory_getPointerFromVirtualOffset(hCPU->gpr[4]), hCPU->gpr[5]*4);
-	}
-	else if( hCPU->gpr[6] == DMAE_ENDIAN_32 )
-	{
-		// swap per uint32
-		uint32* srcBuffer = (uint32*)memory_getPointerFromVirtualOffset(hCPU->gpr[4]);
-		uint32* dstBuffer = (uint32*)memory_getPointerFromVirtualOffset(hCPU->gpr[3]);
-		for(uint32 i=0; i<hCPU->gpr[5]; i++)
-		{
-			dstBuffer[i] = _swapEndianU32(srcBuffer[i]);
-		}
-	}
-	else if( hCPU->gpr[6] == DMAE_ENDIAN_16 )
-	{
-		// swap per uint16
-		uint16* srcBuffer = (uint16*)memory_getPointerFromVirtualOffset(hCPU->gpr[4]);
-		uint16* dstBuffer = (uint16*)memory_getPointerFromVirtualOffset(hCPU->gpr[3]);
-		for(uint32 i=0; i<hCPU->gpr[5]*2; i++)
-		{
-			dstBuffer[i] = _swapEndianU16(srcBuffer[i]);
-		}
-	}
-	else
-	{
-		cemuLog_logDebug(LogType::Force, "DMAECopyMem(): Unsupported endian swap\n");
-	}
-	uint64 dmaeTimestamp = dmae_getTimestamp();
-	dmae_setRetiredTimestamp(dmaeTimestamp);
-	if(hCPU->gpr[5] > 0)
-		LatteBufferCache_notifyDCFlush(hCPU->gpr[3], hCPU->gpr[5]*4);
-	osLib_returnFromFunction64(hCPU, dmaeTimestamp);
-}
-
-void dmaeExport_DMAEFillMem(PPCInterpreter_t* hCPU)
-{
-	uint32* dstBuffer = (uint32*)memory_getPointerFromVirtualOffset(hCPU->gpr[3]);
-	uint32 value = hCPU->gpr[4];
-	uint32 numU32s = hCPU->gpr[5];	
-	value = _swapEndianU32(value);
-	for(uint32 i=0; i<numU32s; i++)
-	{
-		*dstBuffer = value;
-		dstBuffer++;
-	}
-	uint64 dmaeTimestamp = dmae_getTimestamp();
-	dmae_setRetiredTimestamp(dmaeTimestamp);
-	osLib_returnFromFunction64(hCPU, dmaeTimestamp);
-}
-
-void dmaeExport_DMAEWaitDone(PPCInterpreter_t* hCPU)
-{
-	//debug_printf("DMAEWaitDone(...)\n");
-	// parameter:
-	// r3/r4	uint64  		dmaeTimestamp
-	osLib_returnFromFunction(hCPU, 1);
-}
-
-void dmaeExport_DMAESemaphore(PPCInterpreter_t* hCPU)
-{
-	// parameter:
-	// r3	MPTR	addr
-	// r4	uint32	actionType
-
-	uint32 actionType = hCPU->gpr[4];
-
-	std::atomic<uint64le>* semaphore = _rawPtrToAtomic((uint64le*)memory_getPointerFromVirtualOffset(hCPU->gpr[3]));
-
-	if( actionType == 1 )
-	{
-		// Signal Semaphore
-		semaphore->fetch_add(1);
-	}
-	else if (actionType == 0) // wait
-	{
-		cemuLog_logDebug(LogType::Force, "DMAESemaphore: Unsupported wait operation");
-		semaphore->fetch_sub(1);
-	}
-	else
-	{
-		cemuLog_logDebug(LogType::Force, "DMAESemaphore unknown action type {}", actionType);
-		cemu_assert_debug(false);
-	}
-
-	uint64 dmaeTimestamp = dmae_getTimestamp();
-	dmae_setRetiredTimestamp(dmaeTimestamp);
-	osLib_returnFromFunction64(hCPU, dmaeTimestamp);
-}
-
-void dmaeExport_DMAEGetRetiredTimeStamp(PPCInterpreter_t* hCPU)
-{
-	debug_printf("DMAEGetRetiredTimeStamp()\n");
-	osLib_returnFromFunction64(hCPU, dmaeRetiredTimestamp);
-}
+#include "dmae.h"
 
 namespace dmae
 {
-	class : public COSModule
+	namespace
 	{
-		public:
-		std::string_view GetName() override
+		// byte-swap mode of DMAECopyMem
+		enum class SwapMode : uint32
 		{
-			return "dmae";
+			None = 0,
+			Swap16 = 1,
+			Swap32 = 2,
+			Swap64 = 3,
+		};
+
+		// action of DMAESemaphore
+		enum class SemaphoreAction : uint32
+		{
+			Wait = 0,
+			Signal = 1,
+		};
+
+		std::atomic<uint64> g_lastRetired{0};
+
+		uint64 CompleteNow()
+		{
+			const uint64 now = coreinit::OSGetSystemTime();
+			g_lastRetired.store(now);
+			return now;
 		}
 
-		void RPLMapped() override
+		uint64 CopyMem(MPTR dst, MPTR src, uint32 wordCount, SwapMode mode)
 		{
-			osLib_addFunction("dmae", "DMAECopyMem", dmaeExport_DMAECopyMem);
-			osLib_addFunction("dmae", "DMAEFillMem", dmaeExport_DMAEFillMem);
-			osLib_addFunction("dmae", "DMAEWaitDone", dmaeExport_DMAEWaitDone);
-			osLib_addFunction("dmae", "DMAESemaphore", dmaeExport_DMAESemaphore);
-			osLib_addFunction("dmae", "DMAEGetRetiredTimeStamp", dmaeExport_DMAEGetRetiredTimeStamp);
+			uint8* to = memory_getPointerFromVirtualOffset(dst);
+			const uint8* from = memory_getPointerFromVirtualOffset(src);
+			const size_t bytes = (size_t)wordCount * 4;
+			switch (mode)
+			{
+			case SwapMode::None:
+				memmove(to, from, bytes);
+				break;
+			case SwapMode::Swap16:
+				for (size_t off = 0; off < bytes; off += 2)
+				{
+					uint16 v;
+					memcpy(&v, from + off, 2);
+					v = _swapEndianU16(v);
+					memcpy(to + off, &v, 2);
+				}
+				break;
+			case SwapMode::Swap32:
+				for (size_t off = 0; off < bytes; off += 4)
+				{
+					uint32 v;
+					memcpy(&v, from + off, 4);
+					v = _swapEndianU32(v);
+					memcpy(to + off, &v, 4);
+				}
+				break;
+			case SwapMode::Swap64:
+				// counts are in 32-bit words; a trailing odd word cannot be
+				// swapped as a pair and is copied unchanged
+				for (size_t off = 0; off + 8 <= bytes; off += 8)
+				{
+					uint64 v;
+					memcpy(&v, from + off, 8);
+					v = _swapEndianU64(v);
+					memcpy(to + off, &v, 8);
+				}
+				if (bytes % 8)
+					memcpy(to + bytes - 4, from + bytes - 4, 4);
+				break;
+			default:
+				cemuLog_logDebug(LogType::Force, "DMAECopyMem: unknown swap mode {}", (uint32)mode);
+				break;
+			}
+			const uint64 ts = CompleteNow();
+			if (wordCount != 0)
+				LatteBufferCache_notifyDCFlush(dst, wordCount * 4);
+			return ts;
 		}
-	}s_COSDMAEModule;
+
+		uint64 FillMem(MPTR dst, uint32 value, uint32 wordCount)
+		{
+			uint32be* to = reinterpret_cast<uint32be*>(memory_getPointerFromVirtualOffset(dst));
+			// the fill pattern is the 32-bit value as the guest sees it
+			std::fill_n(to, wordCount, uint32be(value));
+			return CompleteNow();
+		}
+
+		uint32 WaitDone(uint64 timestamp)
+		{
+			return 1; // work is always finished already
+		}
+
+		uint64 Semaphore(MPTR semaphore, SemaphoreAction action)
+		{
+			// The counter is kept in host byte order, as PixelU always has;
+			// only DMA engine calls touch it.
+			auto* counter = _rawPtrToAtomic(reinterpret_cast<uint64le*>(memory_getPointerFromVirtualOffset(semaphore)));
+			switch (action)
+			{
+			case SemaphoreAction::Signal:
+				counter->fetch_add(1);
+				break;
+			case SemaphoreAction::Wait:
+				// a real engine would stall until the count is non-zero;
+				// we take it without waiting
+				counter->fetch_sub(1);
+				break;
+			default:
+				cemuLog_logDebug(LogType::Force, "DMAESemaphore: unknown action {}", (uint32)action);
+				break;
+			}
+			return CompleteNow();
+		}
+
+		uint64 GetRetiredTimeStamp()
+		{
+			return g_lastRetired.load();
+		}
+
+		class DmaeLibrary final : public COSModule
+		{
+		public:
+			std::string_view GetName() override { return "dmae"; }
+
+			void RPLMapped() override
+			{
+				cafeExportRegisterFunc(CopyMem, "dmae", "DMAECopyMem", LogType::Placeholder);
+				cafeExportRegisterFunc(FillMem, "dmae", "DMAEFillMem", LogType::Placeholder);
+				cafeExportRegisterFunc(WaitDone, "dmae", "DMAEWaitDone", LogType::Placeholder);
+				cafeExportRegisterFunc(Semaphore, "dmae", "DMAESemaphore", LogType::Placeholder);
+				cafeExportRegisterFunc(GetRetiredTimeStamp, "dmae", "DMAEGetRetiredTimeStamp", LogType::Placeholder);
+			}
+		};
+
+		DmaeLibrary g_dmaeLibrary;
+	}
 
 	COSModule* GetModule()
 	{
-		return &s_COSDMAEModule;
+		return &g_dmaeLibrary;
 	}
 }

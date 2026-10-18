@@ -1,282 +1,254 @@
-#include "Common/precompiled.h"
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Written from scratch.
+//
+// camera drives the GamePad's front camera. A game:
+//   1. CAMInit(instance, setupInfo, &err)  -> camera handle (> 0)
+//   2. CAMOpen(handle)                     -> start streaming
+//   3. CAMSubmitTargetSurface(handle, s)   -> queue buffers to fill
+//   4. receives "frame decoded" events on the handler from setupInfo
+//   5. CAMClose / CAMExit
+//
+// No real camera is attached. While a camera is open, each 1/60 s tick
+// returns one queued buffer to the game through its event handler, contents
+// unchanged, so the game sees a steady stream of (blank) frames and never
+// stalls waiting for one.
+
 #include "Cafe/OS/common/OSCommon.h"
-#include "camera.h"
 #include "Cafe/OS/RPL/rpl.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Alarm.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Time.h"
 #include "Cafe/HW/Espresso/PPCCallback.h"
+#include "camera.h"
 
 namespace camera
 {
-
-	struct CAMInitInfo_t
+	namespace
 	{
-		/* +0x00 */ uint32be ukn00;
-		/* +0x04 */ uint32be width;
-		/* +0x08 */ uint32be height;
-		
-		/* +0x0C */ uint32be workMemorySize;
-		/* +0x10 */ MEMPTR<void> workMemory;
+		constexpr sint32 kCamOk = 0;
+		constexpr sint32 kCamBadHandle = -8;
+		constexpr sint32 kWorkMemoryNeeded = 1024;
+		constexpr uint32 kEventFrameDecoded = 0;
 
-		/* +0x14 */ uint32be handlerFuncPtr;
-
-		/* +0x18 */ uint32be ukn18;
-		/* +0x1C */ uint32be fps;
-
-		/* +0x20 */ uint32be ukn20;
-	};
-
-	struct CAMTargetSurface 
-	{
-		/* +0x00 */ uint32be surfaceSize;
-		/* +0x04 */ MEMPTR<void> surfacePtr;
-		/* +0x08 */ uint32be ukn08;
-		/* +0x0C */ uint32be ukn0C;
-		/* +0x10 */ uint32be ukn10;
-		/* +0x14 */ uint32be ukn14;
-		/* +0x18 */ uint32be ukn18;
-		/* +0x1C */ uint32be ukn1C;
-	};
-
-	struct CAMCallbackParam 
-	{
-		// type 0 - frame decoded | field1 - imagePtr, field2 - imageSize, field3 - ukn (0)
-		// type 1 - ???
-
-
-		/* +0x0 */ uint32be type; // 0 -> Frame decoded
-		/* +0x4 */ uint32be field1;
-		/* +0x8 */ uint32be field2;
-		/* +0xC */ uint32be field3;
-	};
-
-
-	#define CAM_ERROR_SUCCESS			0
-	#define CAM_ERROR_INVALID_HANDLE		-8
-
-	std::vector<struct CameraInstance*> g_table_cameraHandles;
-	std::vector<struct CameraInstance*> g_activeCameraInstances;
-	std::recursive_mutex g_mutex_camera;
-	std::atomic_int g_cameraCounter{ 0 };
-	SysAllocator<coreinit::OSAlarm_t, 1> g_alarm_camera;
-	SysAllocator<CAMCallbackParam, 1> g_cameraHandlerParam;
-
-	CameraInstance* GetCameraInstanceByHandle(sint32 camHandle)
-	{
-		std::unique_lock<std::recursive_mutex> _lock(g_mutex_camera);
-		if (camHandle <= 0)
-			return nullptr;
-		camHandle -= 1;
-		if (camHandle >= g_table_cameraHandles.size())
-			return nullptr;
-		return g_table_cameraHandles[camHandle];
-	}
-
-	struct CameraInstance 
-	{
-		CameraInstance(uint32 frameWidth, uint32 frameHeight, MPTR handlerFunc) : width(frameWidth), height(frameHeight), handlerFunc(handlerFunc) { AcquireHandle(); };
-		~CameraInstance() { if (isOpen) { CloseCam(); } ReleaseHandle(); };
-
-		sint32 handle{ 0 };
-		uint32 width;
-		uint32 height;
-		bool isOpen{false};
-		std::queue<CAMTargetSurface> queue_targetSurfaces;
-		MPTR handlerFunc;
-
-		bool OpenCam()
+		// CAMSetupInfo (only the fields we read are named)
+		struct SetupInfo
 		{
-			if (isOpen)
-				return false;
-			isOpen = true;
-			g_activeCameraInstances.push_back(this);
-			return true;
-		}
+			uint32be streamType;   // +0x00
+			uint32be width;        // +0x04
+			uint32be height;       // +0x08
+			uint32be workMemSize;  // +0x0C
+			MEMPTR<void> workMem;  // +0x10
+			uint32be eventHandler; // +0x14
+			uint32be modeFlags;    // +0x18
+			uint32be fps;          // +0x1C
+			uint32be affinity;     // +0x20
+		};
+		static_assert(offsetof(SetupInfo, eventHandler) == 0x14);
 
-		bool CloseCam()
+		// CAMSurface: a buffer the game wants filled with a frame
+		struct Surface
 		{
-			if (!isOpen)
-				return false;
-			isOpen = false;
-			vectorRemoveByValue(g_activeCameraInstances, this);
-			return true;
-		}
+			uint32be size;         // +0x00
+			MEMPTR<void> buffer;   // +0x04
+			uint32be height;
+			uint32be width;
+			uint32be pitch;
+			uint32be alignment;
+			uint32be tileMode;
+			uint32be pixelFormat;
+		};
+		static_assert(sizeof(Surface) == 0x20);
 
-		void QueueTargetSurface(CAMTargetSurface* targetSurface)
+		// CAMEventData passed to the game's handler
+		struct EventData
 		{
-			std::unique_lock<std::recursive_mutex> _lock(g_mutex_camera);
-			cemu_assert_debug(queue_targetSurfaces.size() < 100); // check for sane queue length
-			queue_targetSurfaces.push(*targetSurface);
-		}
+			uint32be type;
+			uint32be buffer;
+			uint32be size;
+			uint32be extra;
+		};
+		static_assert(sizeof(EventData) == 0x10);
 
-	private:
-		void AcquireHandle()
+		struct Camera
 		{
-			std::unique_lock<std::recursive_mutex> _lock(g_mutex_camera);
-			for (uint32 i = 0; i < g_table_cameraHandles.size(); i++)
-			{
-				if (g_table_cameraHandles[i] == nullptr)
-				{
-					g_table_cameraHandles[i] = this;
-					this->handle = i + 1;
-					return;
-				}
-			}
-			this->handle = (sint32)(g_table_cameraHandles.size() + 1);
-			g_table_cameraHandles.push_back(this);
-		}
-
-		void ReleaseHandle()
-		{
-			for (uint32 i = 0; i < g_table_cameraHandles.size(); i++)
-			{
-				if (g_table_cameraHandles[i] == this)
-				{
-					g_table_cameraHandles[i] = nullptr;
-					return;
-				}
-			}
-			cemu_assert_debug(false);
-		}
-	};
-
-	sint32 CAMGetMemReq(void* ukn)
-	{
-		return 1 * 1024; // always return 1KB
-	}
-
-	sint32 CAMCheckMemSegmentation(void* base, uint32 size)
-	{
-		return CAM_ERROR_SUCCESS; // always return success
-	}
-
-	void ppcCAMUpdate60(PPCInterpreter_t* hCPU)
-	{
-		// update all open camera instances
-		size_t numCamInstances = g_activeCameraInstances.size();
-		//for (auto& itr : g_activeCameraInstances)
-		for(size_t i=0; i<numCamInstances; i++)
-		{
-			std::unique_lock<std::recursive_mutex> _lock(g_mutex_camera);
-			if (i >= g_activeCameraInstances.size())
-				break;
-			CameraInstance* camInstance = g_activeCameraInstances[i];
-			// todo - handle 30 / 60 FPS
-			if (camInstance->queue_targetSurfaces.empty())
-				continue;
-			auto& targetSurface = camInstance->queue_targetSurfaces.front();
-			g_cameraHandlerParam->type = 0;
-			g_cameraHandlerParam->field1 = targetSurface.surfacePtr.GetMPTR();
-			g_cameraHandlerParam->field2 = targetSurface.surfaceSize;
-			g_cameraHandlerParam->field3 = 0;
-			cemu_assert_debug(camInstance->handlerFunc != MPTR_NULL);
-			camInstance->queue_targetSurfaces.pop();
-			_lock.unlock();
-			PPCCoreCallback(camInstance->handlerFunc, g_cameraHandlerParam.GetPtr());
-		}
-		osLib_returnFromFunction(hCPU, 0);
-	}
-
-
-	sint32 CAMInit(uint32 cameraId, CAMInitInfo_t* camInitInfo, uint32be* error)
-	{
-		CameraInstance* camInstance = new CameraInstance(camInitInfo->width, camInitInfo->height, camInitInfo->handlerFuncPtr);
-		*error = 0; // Hunter's Trophy 2 will fail to boot if we don't set this
-		std::unique_lock<std::recursive_mutex> _lock(g_mutex_camera);
-		if (g_cameraCounter == 0)
-		{
-			coreinit::OSCreateAlarm(g_alarm_camera.GetPtr());
-			coreinit::OSSetPeriodicAlarm(g_alarm_camera.GetPtr(), coreinit::OSGetTime(), (uint64)ESPRESSO_TIMER_CLOCK / 60ull, RPLLoader_MakePPCCallable(ppcCAMUpdate60));
-		}
-		g_cameraCounter++;
-
-		return camInstance->handle;
-	}
-
-	sint32 CAMExit(sint32 camHandle)
-	{
-		CameraInstance* camInstance = GetCameraInstanceByHandle(camHandle);
-		if (!camInstance)
-			return CAM_ERROR_INVALID_HANDLE;
-		CAMClose(camHandle);
-		delete camInstance;
-
-		std::unique_lock<std::recursive_mutex> _lock(g_mutex_camera);
-		g_cameraCounter--;
-		if (g_cameraCounter == 0)
-			coreinit::OSCancelAlarm(g_alarm_camera.GetPtr());
-		return CAM_ERROR_SUCCESS;
-	}
-
-	sint32 CAMOpen(sint32 camHandle)
-	{
-		CameraInstance* camInstance = GetCameraInstanceByHandle(camHandle);
-		if (!camInstance)
-			return CAM_ERROR_INVALID_HANDLE;
-		camInstance->OpenCam();
-		return CAM_ERROR_SUCCESS;
-	}
-
-	sint32 CAMClose(sint32 camHandle)
-	{
-		CameraInstance* camInstance = GetCameraInstanceByHandle(camHandle);
-		if (!camInstance)
-			return CAM_ERROR_INVALID_HANDLE;
-		camInstance->CloseCam();
-		return CAM_ERROR_SUCCESS;
-	}
-
-	sint32 CAMSubmitTargetSurface(sint32 camHandle, CAMTargetSurface* targetSurface)
-	{
-		CameraInstance* camInstance = GetCameraInstanceByHandle(camHandle);
-		if (!camInstance)
-			return CAM_ERROR_INVALID_HANDLE;
-		
-		camInstance->QueueTargetSurface(targetSurface);
-
-		return CAM_ERROR_SUCCESS;
-	}
-
-	void reset()
-	{
-		g_cameraCounter = 0;
-	}
-
-	class : public COSModule
-	{
-		public:
-		std::string_view GetName() override
-		{
-			return "camera";
-		}
-
-		void RPLMapped() override
-		{
-			cafeExportRegister("camera", CAMGetMemReq, LogType::Placeholder);
-			cafeExportRegister("camera", CAMCheckMemSegmentation, LogType::Placeholder);
-			cafeExportRegister("camera", CAMInit, LogType::Placeholder);
-			cafeExportRegister("camera", CAMExit, LogType::Placeholder);
-			cafeExportRegister("camera", CAMOpen, LogType::Placeholder);
-			cafeExportRegister("camera", CAMClose, LogType::Placeholder);
-			cafeExportRegister("camera", CAMSubmitTargetSurface, LogType::Placeholder);
+			uint32 width = 0;
+			uint32 height = 0;
+			MPTR handler = MPTR_NULL;
+			bool streaming = false;
+			std::deque<Surface> pending;
 		};
 
-		void rpl_entry(uint32 moduleHandle, coreinit::RplEntryReason reason) override
+		std::mutex g_lock;
+		std::vector<std::unique_ptr<Camera>> g_cameras; // handle N lives in slot N-1
+		uint32 g_liveCameras = 0;
+
+		SysAllocator<coreinit::OSAlarm_t> g_tickAlarm;
+		SysAllocator<EventData> g_eventData;
+
+		// caller holds g_lock
+		Camera* Lookup(sint32 handle)
 		{
-			if (reason == coreinit::RplEntryReason::Loaded)
+			if (handle < 1 || (size_t)handle > g_cameras.size())
+				return nullptr;
+			return g_cameras[handle - 1].get();
+		}
+
+		// Alarm handler, runs on the emulated CPU 60 times per second.
+		void OnTick(void* alarm, void* context)
+		{
+			size_t slot = 0;
+			while (true)
 			{
-				reset();
-			}
-			else if (reason == coreinit::RplEntryReason::Unloaded)
-			{
-				// todo
+				MPTR handler = MPTR_NULL;
+				Surface frame;
+				{
+					std::lock_guard guard(g_lock);
+					// next open camera with a queued buffer
+					while (slot < g_cameras.size())
+					{
+						Camera* cam = g_cameras[slot].get();
+						slot++;
+						if (cam && cam->streaming && !cam->pending.empty())
+						{
+							frame = cam->pending.front();
+							cam->pending.pop_front();
+							handler = cam->handler;
+							break;
+						}
+					}
+				}
+				if (handler == MPTR_NULL)
+					break; // no more cameras with work this tick
+				g_eventData->type = kEventFrameDecoded;
+				g_eventData->buffer = frame.buffer.GetMPTR();
+				g_eventData->size = frame.size;
+				g_eventData->extra = 0;
+				PPCCoreCallback(handler, g_eventData.GetPtr());
 			}
 		}
-	}s_COScameraModule;
+
+		void StartTicking()
+		{
+			coreinit::OSCreateAlarm(g_tickAlarm.GetPtr());
+			coreinit::OSSetPeriodicAlarm(g_tickAlarm.GetPtr(), coreinit::OSGetTime(), (uint64)ESPRESSO_TIMER_CLOCK / 60ull, makeCallableExport<&OnTick>());
+		}
+
+		sint32 CAMGetMemReq(void* streamInfo)
+		{
+			return kWorkMemoryNeeded;
+		}
+
+		sint32 CAMCheckMemSegmentation(void* memory, uint32 size)
+		{
+			return kCamOk;
+		}
+
+		sint32 CAMInit(uint32 instance, SetupInfo* setup, uint32be* errorOut)
+		{
+			// Some games (Hunter's Trophy 2) refuse to start unless err is cleared.
+			*errorOut = 0;
+			auto cam = std::make_unique<Camera>();
+			cam->width = setup->width;
+			cam->height = setup->height;
+			cam->handler = setup->eventHandler;
+
+			bool firstCamera;
+			sint32 handle;
+			{
+				std::lock_guard guard(g_lock);
+				auto freeSlot = std::find(g_cameras.begin(), g_cameras.end(), nullptr);
+				if (freeSlot == g_cameras.end())
+					freeSlot = g_cameras.insert(g_cameras.end(), nullptr);
+				*freeSlot = std::move(cam);
+				handle = (sint32)(freeSlot - g_cameras.begin()) + 1;
+				firstCamera = (g_liveCameras == 0);
+				g_liveCameras++;
+			}
+			if (firstCamera)
+				StartTicking();
+			return handle;
+		}
+
+		sint32 CAMExit(sint32 handle)
+		{
+			bool lastCamera;
+			{
+				std::lock_guard guard(g_lock);
+				if (!Lookup(handle))
+					return kCamBadHandle;
+				g_cameras[handle - 1].reset();
+				g_liveCameras--;
+				lastCamera = (g_liveCameras == 0);
+			}
+			if (lastCamera)
+				coreinit::OSCancelAlarm(g_tickAlarm.GetPtr());
+			return kCamOk;
+		}
+
+		sint32 CAMSubmitTargetSurface(sint32 handle, Surface* surface)
+		{
+			std::lock_guard guard(g_lock);
+			Camera* cam = Lookup(handle);
+			if (!cam)
+				return kCamBadHandle;
+			cam->pending.push_back(*surface);
+			return kCamOk;
+		}
+
+		void ResetAll()
+		{
+			std::lock_guard guard(g_lock);
+			g_cameras.clear();
+			g_liveCameras = 0;
+		}
+
+		class CameraLibrary final : public COSModule
+		{
+		public:
+			std::string_view GetName() override { return "camera"; }
+
+			void RPLMapped() override
+			{
+				cafeExportRegisterFunc(CAMGetMemReq, "camera", "CAMGetMemReq", LogType::Placeholder);
+				cafeExportRegisterFunc(CAMCheckMemSegmentation, "camera", "CAMCheckMemSegmentation", LogType::Placeholder);
+				cafeExportRegisterFunc(CAMInit, "camera", "CAMInit", LogType::Placeholder);
+				cafeExportRegisterFunc(CAMExit, "camera", "CAMExit", LogType::Placeholder);
+				cafeExportRegisterFunc(camera::CAMOpen, "camera", "CAMOpen", LogType::Placeholder);
+				cafeExportRegisterFunc(camera::CAMClose, "camera", "CAMClose", LogType::Placeholder);
+				cafeExportRegisterFunc(CAMSubmitTargetSurface, "camera", "CAMSubmitTargetSurface", LogType::Placeholder);
+			}
+
+			void rpl_entry(uint32 moduleHandle, coreinit::RplEntryReason reason) override
+			{
+				if (reason == coreinit::RplEntryReason::Loaded)
+					ResetAll();
+			}
+		};
+
+		CameraLibrary g_cameraLibrary;
+	}
+
+	sint32 CAMOpen(sint32 handle)
+	{
+		std::lock_guard guard(g_lock);
+		Camera* cam = Lookup(handle);
+		if (!cam)
+			return kCamBadHandle;
+		cam->streaming = true;
+		return kCamOk;
+	}
+
+	sint32 CAMClose(sint32 handle)
+	{
+		std::lock_guard guard(g_lock);
+		Camera* cam = Lookup(handle);
+		if (!cam)
+			return kCamBadHandle;
+		cam->streaming = false;
+		return kCamOk;
+	}
 
 	COSModule* GetModule()
 	{
-		return &s_COScameraModule;
+		return &g_cameraLibrary;
 	}
 }
-

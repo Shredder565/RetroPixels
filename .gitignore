@@ -17,6 +17,7 @@
 *.md
 !README.md
 !CHANGELOG.md
+!/docs/*.md
 !/.github/**/*.md
 *.sms
 *.a26

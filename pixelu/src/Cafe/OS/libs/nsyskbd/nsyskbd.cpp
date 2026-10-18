@@ -1,77 +1,75 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Written from scratch.
+//
+// nsyskbd reads USB keyboards plugged into the console (four channels).
+// No keyboard is emulated: every channel reports "disconnected", and reading
+// a key gives an empty key event for that channel. Some Virtual Console
+// titles (MSX) poll these calls every frame.
+
 #include "Cafe/OS/common/OSCommon.h"
-#include "Cafe/OS/libs/nn_common.h"
+#include "nsyskbd.h"
 
 namespace nsyskbd
 {
-	bool IsValidChannel(uint32 channel)
+	namespace
 	{
-		return channel >= 0 && channel < 4;
-	}
+		constexpr uint32 kChannelCount = 4;
+		constexpr uint32 kStatusDisconnected = 1;
+		constexpr uint32 kResultOk = 0;
 
-	uint32 KBDGetChannelStatus(uint32 channel, uint32be* status)
-	{
-		static bool loggedError = false;
-		if (loggedError == false)
-		{
-			cemuLog_logDebug(LogType::Force, "KBDGetChannelStatus() placeholder");
-			loggedError = true;
-		}
-		*status = 1; // disconnected
-
-		return 0;
-	}
-
+		// Key event as the game sees it. Only the channel byte is meaningful
+		// for an empty event; the rest is cleared.
 #pragma pack(push, 1)
-	struct KeyState
-	{
-		uint8be channel;
-		uint8be ukn1;
-		uint8be _padding[2];
-		uint32be ukn4;
-		uint32be ukn8;
-		uint16be uknC;
-	};
+		struct KeyEvent
+		{
+			uint8be channel;
+			uint8be hidCode;
+			uint8be reserved[2];
+			uint32be keyState;
+			uint32be modifiers;
+			uint16be utf16Char;
+		};
 #pragma pack(pop)
-	static_assert(sizeof(KeyState) == 0xE); // actual size might be padded to 0x10?
+		static_assert(sizeof(KeyEvent) == 14);
 
-	uint32 KBDGetKey(uint32 channel, KeyState* keyState)
-	{
-		// used by MSX VC
-		if(!IsValidChannel(channel) || !keyState)
+		uint32 GetChannelStatus(uint32 channel, uint32be* statusOut)
 		{
-			cemuLog_log(LogType::APIErrors, "KBDGetKey(): Invalid parameter");
-			return 0;
+			*statusOut = kStatusDisconnected;
+			return kResultOk;
 		}
-		keyState->channel = channel;
-		keyState->ukn1 = 0;
-		keyState->ukn4 = 0;
-		keyState->ukn8 = 0;
-		keyState->uknC = 0;
-		return 0;
-	}
 
-	class : public COSModule
-	{
+		uint32 GetKey(uint32 channel, KeyEvent* eventOut)
+		{
+			if (channel >= kChannelCount || eventOut == nullptr)
+			{
+				cemuLog_log(LogType::APIErrors, "KBDGetKey(): bad channel {} or null event pointer", channel);
+				return kResultOk;
+			}
+			eventOut->channel = (uint8)channel;
+			eventOut->hidCode = 0;
+			eventOut->keyState = 0;
+			eventOut->modifiers = 0;
+			eventOut->utf16Char = 0;
+			return kResultOk;
+		}
+
+		class KeyboardLibrary final : public COSModule
+		{
 		public:
-		std::string_view GetName() override
-		{
-			return "nsyskbd";
-		}
+			std::string_view GetName() override { return "nsyskbd"; }
 
-		void RPLMapped() override
-		{
-			cafeExportRegister("nsyskbd", KBDGetChannelStatus, LogType::Placeholder);
-			cafeExportRegister("nsyskbd", KBDGetKey, LogType::Placeholder);
+			void RPLMapped() override
+			{
+				cafeExportRegisterFunc(GetChannelStatus, "nsyskbd", "KBDGetChannelStatus", LogType::Placeholder);
+				cafeExportRegisterFunc(GetKey, "nsyskbd", "KBDGetKey", LogType::Placeholder);
+			}
 		};
 
-		void RPLUnmapped() override
-		{
-
-		}
-	}s_COSnsyskbdModule;
+		KeyboardLibrary g_keyboardLibrary;
+	}
 
 	COSModule* GetModule()
 	{
-		return &s_COSnsyskbdModule;
+		return &g_keyboardLibrary;
 	}
 }

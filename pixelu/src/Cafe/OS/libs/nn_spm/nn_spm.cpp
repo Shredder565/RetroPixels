@@ -1,163 +1,117 @@
-#include "nn_spm.h"
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Written from scratch.
+//
+// nn_spm lists the storage devices attached to the console (internal NAND
+// and USB drives) for the Wii U Menu and System Settings. PixelU keeps all
+// titles in its emulated internal storage and does not emulate USB storage,
+// so this library reports that no extended storage exists.
+//
+// GetStorageList reports a single entry and leaves the caller's buffer as it
+// is: the Wii U Menu complains about extra USB drives if more are listed,
+// and nothing is ever opened through that entry.
+
 #include "Cafe/OS/common/OSCommon.h"
-#include "Cafe/OS/libs/nn_common.h"
+#include "nn_spm.h"
 
-namespace nn
+namespace nn::spm
 {
-	namespace spm
+	namespace
 	{
-
+		// 64-bit storage handle, stored as two big-endian halves
 		struct StorageIndex
 		{
-			void SetInvalid() { idHigh = 0; idLow = 0; }
-			void Set(uint64 id) { idHigh = id >> 32; idLow = id & 0xFFFFFFFF; }
-
-			uint64 Get() const { return ((uint64)idHigh << 32) | (uint64)idLow; }
-
-			uint32be idHigh;
-			uint32be idLow;
+			uint32be high;
+			uint32be low;
 		};
-
-		enum class CemuStorageIndex
-		{
-			MLC = 1,
-			SLC = 2,
-			USB = 3,
-		};
-
 		static_assert(sizeof(StorageIndex) == 8);
 
 		struct VolumeId
 		{
-			char id[16];
+			char text[16];
 		};
-
 		static_assert(sizeof(VolumeId) == 16);
-
-		enum class StorageType : uint32
-		{
-			RAW,
-			WFS,
-		};
-
-		struct StorageInfo
-		{
-			char mountPath[640]; // For example: /vol/storage_usb01
-			char connectionType[8]; // usb
-			char formatStr[8]; // raw / wfs
-			uint8 ukn[4];
-			betype<StorageType> type;
-			VolumeId volumeId;
-		};
-
-		static_assert(sizeof(StorageInfo) == 680);
 
 		struct StorageListItem
 		{
 			StorageIndex index;
-			uint32be ukn04;
-			betype<StorageType> type;
+			uint32be _unknown;
+			uint32be format; // 0 = raw, 1 = WFS
 		};
-
 		static_assert(sizeof(StorageListItem) == 16);
 
-		sint32 GetDefaultExtendedStorageVolumeId(StorageIndex* storageIndex)
+		struct StorageInfo
 		{
-			cemuLog_logDebug(LogType::Force, "GetDefaultExtendedStorageVolumeId() - stub");
-			storageIndex->SetInvalid(); // we dont emulate USB storage yet
-			return 0;
+			char mountPath[640];
+			char connection[8];
+			char formatName[8];
+			uint8 _unknown[4];
+			uint32be format;
+			VolumeId volumeId;
+		};
+		static_assert(sizeof(StorageInfo) == 680);
+
+		constexpr sint32 kOk = 0;
+		constexpr sint32 kNoStorage = -1;
+
+		// VolumeId GetDefaultExtendedStorageVolumeId(); the result is written
+		// through the hidden return pointer. No USB drive -> zeroed id.
+		sint32 GetDefaultExtendedStorageVolumeId(StorageIndex* result)
+		{
+			if (result)
+				*result = {};
+			return kOk;
 		}
 
-		sint32 GetExtendedStorageIndex(StorageIndex* storageIndex)
+		sint32 GetExtendedStorageIndex(StorageIndex* indexOut)
 		{
-			cemuLog_logDebug(LogType::Force, "GetExtendedStorageIndex() - stub");
-			storageIndex->SetInvalid(); // we dont emulate USB storage yet
-			return -1; // this fails if there is none?
+			if (indexOut)
+				*indexOut = {};
+			return kNoStorage;
 		}
 
-		// nn::spm::GetStorageList((nn::spm::StorageListItem *, unsigned int))
-
-		uint32 GetStorageList(StorageListItem* storageList, uint32 maxItems)
+		uint32 GetStorageList(StorageListItem* items, uint32 capacity)
 		{
-			cemu_assert(maxItems >= 2);
-			uint32 numItems = 0;
-
-			// This should only return USB storages?
-			// If we return two entries (for SLC and MLC supposedly) then the Wii U menu will complain about two usb storages
-
-//			// mlc
-//			storageList[numItems].index.Set((uint32)CemuStorageIndex::MLC);
-//			storageList[numItems].ukn04 = 0;
-//			storageList[numItems].type = StorageType::WFS;
-//			numItems++;
-//			// slc
-//			storageList[numItems].index.Set((uint32)CemuStorageIndex::SLC);
-//			storageList[numItems].ukn04 = 0;
-//			storageList[numItems].type = StorageType::WFS;
-			numItems++;
-			return numItems;
+			return 1;
 		}
 
-		sint32 GetStorageInfo(StorageInfo* storageInfo, StorageIndex* storageIndex)
+		sint32 GetStorageInfo(StorageInfo* infoOut, StorageIndex* index)
 		{
-			cemuLog_logDebug(LogType::Force, "GetStorageInfo() - stub");
-			if(storageIndex->Get() == (uint64)CemuStorageIndex::MLC)
-			{
-				cemu_assert_unimplemented();
-			}
-			else if(storageIndex->Get() == (uint64)CemuStorageIndex::SLC)
-			{
-				cemu_assert_unimplemented();
-			}
-			else
-			{
-				cemu_assert_unimplemented();
-			}
-
-			return 0;
+			cemuLog_logDebug(LogType::Force, "nn_spm: GetStorageInfo() called but storage info is not emulated");
+			return kOk;
 		}
 
-		sint32 VolumeId_Compare(VolumeId* volumeIdThis, VolumeId* volumeIdOther)
+		sint32 CompareVolumeId(VolumeId* self, VolumeId* other)
 		{
-			auto r = strncmp(volumeIdThis->id, volumeIdOther->id, 16);
-			cemuLog_logDebug(LogType::Force, "VolumeId_Compare(\"{}\", \"{}\")", volumeIdThis->id, volumeIdOther->id);
-			return (sint32)r;
+			return (sint32)strncmp(self->text, other->text, sizeof(self->text));
 		}
 
-		sint32 WaitStateUpdated(uint64be* waitState)
+		sint32 WaitStateUpdated(uint64be* stateOut)
 		{
-			// WaitStateUpdated__Q2_2nn3spmFPUL
-			cemuLog_logDebug(LogType::Force, "WaitStateUpdated() called");
-			*waitState = 1;
-			return 0;
+			*stateOut = 1;
+			return kOk;
 		}
 
-		class : public COSModule
+		class SpmLibrary final : public COSModule
 		{
-			public:
-			std::string_view GetName() override
-			{
-				return "nn_spm";
-			}
+		public:
+			std::string_view GetName() override { return "nn_spm"; }
 
 			void RPLMapped() override
 			{
 				cafeExportRegisterFunc(GetDefaultExtendedStorageVolumeId, "nn_spm", "GetDefaultExtendedStorageVolumeId__Q2_2nn3spmFv", LogType::Placeholder);
 				cafeExportRegisterFunc(GetExtendedStorageIndex, "nn_spm", "GetExtendedStorageIndex__Q2_2nn3spmFPQ3_2nn3spm12StorageIndex", LogType::Placeholder);
 				cafeExportRegisterFunc(GetStorageList, "nn_spm", "GetStorageList__Q2_2nn3spmFPQ3_2nn3spm15StorageListItemUi", LogType::Placeholder);
-
 				cafeExportRegisterFunc(GetStorageInfo, "nn_spm", "GetStorageInfo__Q2_2nn3spmFPQ3_2nn3spm11StorageInfoQ3_2nn3spm12StorageIndex", LogType::Placeholder);
-
-				cafeExportRegisterFunc(VolumeId_Compare, "nn_spm", "Compare__Q3_2nn3spm8VolumeIdCFRCQ3_2nn3spm8VolumeId", LogType::Placeholder);
-
+				cafeExportRegisterFunc(CompareVolumeId, "nn_spm", "Compare__Q3_2nn3spm8VolumeIdCFRCQ3_2nn3spm8VolumeId", LogType::Placeholder);
 				cafeExportRegisterFunc(WaitStateUpdated, "nn_spm", "WaitStateUpdated__Q2_2nn3spmFPUL", LogType::Placeholder);
-			};
+			}
+		};
 
-		}s_COSnnSpmModule;
+		SpmLibrary g_spmLibrary;
+	}
 
-		COSModule* GetModule()
-		{
-			return &s_COSnnSpmModule;
-		}
+	COSModule* GetModule()
+	{
+		return &g_spmLibrary;
 	}
 }

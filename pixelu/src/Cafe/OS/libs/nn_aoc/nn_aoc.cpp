@@ -1,176 +1,173 @@
-#include "config/ActiveSettings.h"
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Written from scratch.
+//
+// nn_aoc lets a game find and open its add-on content (DLC).
+//
+// When a game boots, PixelU mounts each installed DLC title of that game at
+// /vol/aoc<16 hex digit title id> (see CafeSystem.cpp). AOC_ListTitle reports
+// exactly those mounts, AOC_OpenTitle hands back the mount path, and
+// AOC_GetPurchaseInfo says which DLC items are owned. Ownership comes from the
+// DLC's ticket (title.tik) when one is installed; without a ticket every item
+// counts as owned, so installed DLC always works.
 
-#include "Cafe/OS/libs/nn_aoc/nn_aoc.h"
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/Filesystem/fsc.h"
 #include "Cafe/TitleList/TitleId.h"
-
 #include "Cemu/ncrypto/ncrypto.h"
 #include "Common/FileStream.h"
+#include "config/ActiveSettings.h"
+#include "nn_aoc.h"
 
-namespace nn
+namespace nn::aoc
 {
-	namespace aoc
+	namespace
 	{
-		struct AOCTitle
+		constexpr uint32 kAocOk = 0;
+		constexpr uint32 kMaxListed = 256;
+
+		// AOC_TitleListType, one entry per DLC title
+		struct AocTitle
 		{
 			uint64be titleId;
 			uint32be groupId;
-			uint16be titleVersion;
+			uint16be version;
 			char path[88];
-			uint8 padding[2];
+			uint8 _pad[2];
 		};
-		static_assert(sizeof(AOCTitle) == 0x68);
+		static_assert(sizeof(AocTitle) == 0x68);
 
-		enum class AOC_RESULT : uint32
-		{
-			ERROR_OK = 0,
-		};
+		std::vector<uint64> g_mountedAoc;
+		bool g_scanned = false;
 
-		uint32 AOC_CalculateWorkBufferSize(uint32 count)
+		std::string MountPathFor(uint64 titleId)
 		{
-			count = std::min(count, (uint32)256);
-			uint32 workBufferSize = 0x80 + count * 0x61;
-			return workBufferSize;
+			return fmt::format("/vol/aoc{:016x}", titleId);
 		}
 
-		struct AOCCacheEntry
+		// Looks at /vol once per game for directories named aoc<titleId>.
+		void ScanMountedAoc()
 		{
-			AOCCacheEntry(uint64 titleId) : aocTitleId(titleId) {};
-
-			uint64 aocTitleId;
-			std::string GetPath()
-			{
-				return fmt::format("/vol/aoc{:016x}", aocTitleId);
-			}
-		};
-
-		std::vector<AOCCacheEntry> sAocCache;
-		bool sAocCacheGenerated = false;
-
-		void generateAOCList()
-		{
-			if (sAocCacheGenerated)
+			if (g_scanned)
 				return;
-			sAocCacheGenerated = true;
+			g_scanned = true;
+			g_mountedAoc.clear();
 
-			sint32 fscStatus;
-			FSCVirtualFile* volDirIterator = fsc_openDirIterator("/vol", &fscStatus);
-			cemu_assert_debug(volDirIterator); // for valid titles /vol should always exist
-			if (volDirIterator)
+			sint32 status = 0;
+			FSCVirtualFile* dir = fsc_openDirIterator("/vol", &status);
+			if (!dir)
+				return;
+			constexpr std::string_view prefix = "aoc";
+			FSCDirEntry entry;
+			while (fsc_nextDir(dir, &entry))
 			{
-				FSCDirEntry dirEntry;
-				while (fsc_nextDir(volDirIterator, &dirEntry))
-				{
-					std::string_view dirName = dirEntry.GetPath();
-					if(!dirEntry.isDirectory)
-						continue;
-					// check for pattern: aoc<titleId>
-					if(dirName.size() != (3+16))
-						continue;
-					if(dirName[0] != 'a' ||
-						dirName[1] != 'o' ||
-						dirName[2] != 'c')
-						continue;
-					TitleId aocTitleId;
-					if( !TitleIdParser::ParseFromStr(dirName.substr(3), aocTitleId) )
-						continue;
-					// add to list of known AOC
-					sAocCache.emplace_back(aocTitleId);
-				}
-				fsc_close(volDirIterator);
+				if (!entry.isDirectory)
+					continue;
+				std::string_view name = entry.GetPath();
+				if (name.size() != prefix.size() + 16 || !name.starts_with(prefix))
+					continue;
+				TitleId id;
+				if (TitleIdParser::ParseFromStr(name.substr(prefix.size()), id))
+					g_mountedAoc.push_back(id);
 			}
+			fsc_close(dir);
 		}
 
-		AOC_RESULT AOC_ListTitle(uint32be* titleCountOut, AOCTitle* titleList, uint32 maxCount, void* workBuffer, uint32 workBufferSize)
+		uint32 CalculateWorkBufferSize(uint32 maxTitles)
 		{
-			generateAOCList();
-			for (uint32 i = 0; i < std::min(maxCount, (uint32)sAocCache.size()); i++)
-			{
-				titleList[i].titleId = sAocCache[i].aocTitleId;
-				titleList[i].groupId = 0; // todo
-				titleList[i].titleVersion = 0; // todo
-				strcpy(titleList[i].path, sAocCache[i].GetPath().c_str());
-			}
-			*titleCountOut = std::min(maxCount, (uint32)sAocCache.size());
-			return AOC_RESULT::ERROR_OK;
+			const uint32 n = std::min(maxTitles, kMaxListed);
+			return 0x80 + n * 0x61;
 		}
 
-		AOC_RESULT AOC_OpenTitle(char* pathOut, AOCTitle* aocTitleInfo, void* workBuffer, uint32 workBufferSize)
+		uint32 ListTitle(uint32be* countOut, AocTitle* titles, uint32 maxTitles, void* workBuffer, uint32 workBufferSize)
 		{
-			strcpy(pathOut, aocTitleInfo->path);
-			return AOC_RESULT::ERROR_OK;
+			ScanMountedAoc();
+			const uint32 count = std::min<uint32>(maxTitles, (uint32)g_mountedAoc.size());
+			for (uint32 i = 0; i < count; i++)
+			{
+				AocTitle& t = titles[i];
+				t.titleId = g_mountedAoc[i];
+				t.groupId = 0;
+				t.version = 0;
+				const std::string path = MountPathFor(g_mountedAoc[i]);
+				memset(t.path, 0, sizeof(t.path));
+				memcpy(t.path, path.data(), std::min(path.size(), sizeof(t.path) - 1));
+			}
+			*countOut = count;
+			return kAocOk;
 		}
 
-		AOC_RESULT AOC_CloseTitle(void* ukn)
+		uint32 OpenTitle(char* mountPathOut, AocTitle* title, void* workBuffer, uint32 workBufferSize)
 		{
-			return AOC_RESULT::ERROR_OK;
+			const size_t len = strnlen(title->path, sizeof(title->path));
+			memcpy(mountPathOut, title->path, len);
+			mountPathOut[len] = '\0';
+			return kAocOk;
 		}
 
-		AOC_RESULT AOC_GetPurchaseInfo(uint32be* purchaseBoolArrayOut, uint64 titleId, uint16be* entryIds, uint32 entryCount, void* workBuffer, uint32 workBufferSize)
+		uint32 CloseTitle(void* title)
 		{
-			// open ticket file
-			// on an actual Wii U they get stored to SLC but the download manager places these in the code folder currently
-			const auto ticketPath = ActiveSettings::GetMlcPath(L"usr/title/{:08x}/{:08x}/code/title.tik", (uint32)(titleId >> 32), (uint32)(titleId & 0xFFFFFFFF));
-			uint32 tikFileSize = 0;
-			std::unique_ptr<FileStream> fileStream(FileStream::openFile2(ticketPath));
-			std::vector<uint8> tikData;
-			if (fileStream)
-				fileStream->extract(tikData);
-			if (tikData.size() > 0)
-			{
-				NCrypto::ETicketParser eTicket;
-				if (eTicket.parse(tikData.data(), tikData.size()))
-				{
-					for (uint32 i = 0; i < entryCount; i++)
-					{
-						uint16 id = entryIds[i];
-						if (eTicket.CheckRight(id))
-							purchaseBoolArrayOut[i] = 1;
-						else
-							purchaseBoolArrayOut[i] = 0;
-					}
-					cemuLog_log(LogType::Force, "Using content rights from AOC title.tik");
-					return AOC_RESULT::ERROR_OK;
-				}
-				else
-				{
-					cemuLog_log(LogType::Force, "Unable to parse AOC title.tik");
-				}
-			}
-
-			// fallback: return true for all contentIds
-			for (uint32 i = 0; i < entryCount; i++)
-			{
-				uint16 id = entryIds[i];
-				purchaseBoolArrayOut[i] = 1;
-			}
-
-			return AOC_RESULT::ERROR_OK;
+			return kAocOk;
 		}
 
-		class : public COSModule
+		// Reads the installed DLC ticket of titleId, if there is one.
+		bool LoadTicket(uint64 titleId, NCrypto::ETicketParser& ticket)
 		{
-			public:
-			std::string_view GetName() override
+			// tickets of DLC installed through PixelU's downloader sit next to its code
+			const fs::path path = ActiveSettings::GetMlcPath("usr/title/{:08x}/{:08x}/code/title.tik", (uint32)(titleId >> 32), (uint32)titleId);
+			std::unique_ptr<FileStream> file(FileStream::openFile2(path));
+			if (!file)
+				return false;
+			std::vector<uint8> data;
+			file->extract(data);
+			if (data.empty())
+				return false;
+			if (!ticket.parse(data.data(), data.size()))
 			{
-				return "nn_aoc";
+				cemuLog_log(LogType::Force, "nn_aoc: could not parse DLC ticket {:016x}, treating all items as owned", titleId);
+				return false;
 			}
+			return true;
+		}
+
+		uint32 GetPurchaseInfo(uint32be* ownedOut, uint64 titleId, uint16be* itemIds, uint32 itemCount, void* workBuffer, uint32 workBufferSize)
+		{
+			NCrypto::ETicketParser ticket;
+			const bool haveTicket = LoadTicket(titleId, ticket);
+			if (haveTicket)
+				cemuLog_log(LogType::Force, "nn_aoc: DLC ownership taken from ticket of {:016x}", titleId);
+			for (uint32 i = 0; i < itemCount; i++)
+				ownedOut[i] = haveTicket ? (ticket.CheckRight((uint16)itemIds[i]) ? 1 : 0) : 1;
+			return kAocOk;
+		}
+
+		class AocLibrary final : public COSModule
+		{
+		public:
+			std::string_view GetName() override { return "nn_aoc"; }
 
 			void RPLMapped() override
 			{
-				cafeExportRegister("nn_aoc", AOC_CalculateWorkBufferSize, LogType::NN_AOC);
-				cafeExportRegister("nn_aoc", AOC_ListTitle, LogType::NN_AOC);
+				g_scanned = false;
+				g_mountedAoc.clear();
+				cafeExportRegisterFunc(CalculateWorkBufferSize, "nn_aoc", "AOC_CalculateWorkBufferSize", LogType::NN_AOC);
+				cafeExportRegisterFunc(ListTitle, "nn_aoc", "AOC_ListTitle", LogType::NN_AOC);
+				cafeExportRegisterFunc(OpenTitle, "nn_aoc", "AOC_OpenTitle", LogType::NN_AOC);
+				cafeExportRegisterFunc(CloseTitle, "nn_aoc", "AOC_CloseTitle", LogType::NN_AOC);
+				cafeExportRegisterFunc(GetPurchaseInfo, "nn_aoc", "AOC_GetPurchaseInfo", LogType::NN_AOC);
+			}
 
-				cafeExportRegister("nn_aoc", AOC_OpenTitle, LogType::NN_AOC);
-				cafeExportRegister("nn_aoc", AOC_CloseTitle, LogType::NN_AOC);
-				cafeExportRegister("nn_aoc", AOC_GetPurchaseInfo, LogType::NN_AOC);
-			};
-		}s_COSnnAocModule;
+			void RPLUnmapped() override
+			{
+				g_scanned = false;
+				g_mountedAoc.clear();
+			}
+		};
 
-		COSModule* GetModule()
-		{
-			return &s_COSnnAocModule;
-		}
+		AocLibrary g_aocLibrary;
+	}
+
+	COSModule* GetModule()
+	{
+		return &g_aocLibrary;
 	}
 }

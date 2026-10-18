@@ -1,42 +1,58 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Written from scratch.
+//
+// nn_cmpt prepares hand-over to Wii mode (vWii). Titles that use it ask for
+// two things: the parental-control settings to forward, and how large the
+// buffer for the hand-over data must be.
+//   CMPTAcctGetPcConf(conf)  -> three words of parental-control config;
+//                               all zero = no restrictions.
+//   CMPTGetDataSize(size)    -> required work buffer size, 0xC0000 bytes.
+
 #include "Cafe/OS/common/OSCommon.h"
 #include "nn_cmpt.h"
 
 namespace nn::cmpt
 {
-	uint32 CMPTAcctGetPcConf(uint32be* pcConf)
+	namespace
 	{
-		cemuLog_logDebug(LogType::Force, "CMPTAcctGetPcConf() - todo");
-		pcConf[0] = 0;
-		pcConf[1] = 0;
-		pcConf[2] = 0;
-		return 0;
-	}
+		constexpr uint32 kResultOk = 0;
+		constexpr uint32 kHandoverBufferSize = 0xC0000;
 
-	uint32 CMPTGetDataSize(uint32be* sizeOut)
-	{
-		*sizeOut = 0xC0000;
-		return 0;
-	}
-
-	class : public COSModule
-	{
-		public:
-		std::string_view GetName() override
+		struct ParentalConfig
 		{
-			return "nn_cmpt";
+			uint32be words[3];
+		};
+		static_assert(sizeof(ParentalConfig) == 12);
+
+		uint32 AcctGetPcConf(ParentalConfig* config)
+		{
+			*config = {};
+			return kResultOk;
 		}
 
-		void RPLMapped() override
+		uint32 GetDataSize(uint32be* sizeOut)
 		{
-			cafeExportRegister("nn_cmpt", CMPTAcctGetPcConf, LogType::Placeholder);
-			cafeExportRegister("nn_cmpt", CMPTGetDataSize, LogType::Placeholder);
+			*sizeOut = kHandoverBufferSize;
+			return kResultOk;
+		}
+
+		class CmptLibrary final : public COSModule
+		{
+		public:
+			std::string_view GetName() override { return "nn_cmpt"; }
+
+			void RPLMapped() override
+			{
+				cafeExportRegisterFunc(AcctGetPcConf, "nn_cmpt", "CMPTAcctGetPcConf", LogType::Placeholder);
+				cafeExportRegisterFunc(GetDataSize, "nn_cmpt", "CMPTGetDataSize", LogType::Placeholder);
+			}
 		};
 
-	}s_COSnnCmptModule;
+		CmptLibrary g_cmptLibrary;
+	}
 
 	COSModule* GetModule()
 	{
-		return &s_COSnnCmptModule;
+		return &g_cmptLibrary;
 	}
-
 }

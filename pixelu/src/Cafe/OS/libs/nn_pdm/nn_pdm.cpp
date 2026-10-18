@@ -1,58 +1,57 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Written from scratch.
+//
+// nn_pdm is the user-side face of the play-data manager: it lets titles
+// (mostly the Daily Log system app) read the per-account play diary. The
+// diary itself lives in the IOSU PDM service (Cafe/IOSU/PDM), so these
+// exports just forward to it. All calls return 0 (success).
+
 #include "Cafe/OS/common/OSCommon.h"
-#include "config/ActiveSettings.h"
-#include "Cafe/TitleList/TitleId.h"
-
 #include "Cafe/IOSU/PDM/iosu_pdm.h"
-
 #include "nn_pdm.h"
 
-namespace nn
+namespace nn::pdm
 {
-	namespace pdm
+	namespace
 	{
-		using PlayDiary = iosu::pdm::PlayDiaryEntry;
+		constexpr uint32 kResultOk = 0;
 
-		uint32 GetPlayDiaryMaxLength(uint32be* count)
+		uint32 PlayDiaryMaxLength(uint32be* lengthOut)
 		{
-			*count = iosu::pdm::NUM_PLAY_DIARY_ENTRIES_MAX;
-			return 0;
+			*lengthOut = (uint32)iosu::pdm::NUM_PLAY_DIARY_ENTRIES_MAX;
+			return kResultOk;
 		}
 
-		uint32 GetPlayStatsMaxLength(uint32be* count)
+		uint32 PlayStatsMaxLength(uint32be* lengthOut)
 		{
-			*count = iosu::pdm::NUM_PLAY_STATS_ENTRIES;
-			return 0;
+			*lengthOut = (uint32)iosu::pdm::NUM_PLAY_STATS_ENTRIES;
+			return kResultOk;
 		}
 
-		uint32 GetPlayDiary(uint32be* ukn1, PlayDiary* playDiary, uint32 accountSlot, uint32 maxNumEntries)
+		uint32 ReadPlayDiary(uint32be* entriesRead, iosu::pdm::PlayDiaryEntry* entries, uint32 accountSlot, uint32 capacity)
 		{
-			uint32 numReadEntries = iosu::pdm::GetDiaryEntries(accountSlot, playDiary, maxNumEntries);
-			*ukn1 = numReadEntries;
-			return 0;
+			*entriesRead = iosu::pdm::GetDiaryEntries((uint8)accountSlot, entries, capacity);
+			return kResultOk;
 		}
 
-		class : public COSModule
+		class PdmLibrary final : public COSModule
 		{
-			public:
-			std::string_view GetName() override
-			{
-				return "nn_pdm";
-			}
+		public:
+			std::string_view GetName() override { return "nn_pdm"; }
 
 			void RPLMapped() override
 			{
-				cafeExportRegisterFunc(GetPlayDiaryMaxLength, "nn_pdm", "GetPlayDiaryMaxLength__Q2_2nn3pdmFPi", LogType::NN_PDM);
-				cafeExportRegisterFunc(GetPlayStatsMaxLength, "nn_pdm", "GetPlayStatsMaxLength__Q2_2nn3pdmFPi", LogType::NN_PDM);
+				cafeExportRegisterFunc(PlayDiaryMaxLength, "nn_pdm", "GetPlayDiaryMaxLength__Q2_2nn3pdmFPi", LogType::NN_PDM);
+				cafeExportRegisterFunc(PlayStatsMaxLength, "nn_pdm", "GetPlayStatsMaxLength__Q2_2nn3pdmFPi", LogType::NN_PDM);
+				cafeExportRegisterFunc(ReadPlayDiary, "nn_pdm", "GetPlayDiary__Q2_2nn3pdmFPiPQ3_2nn3pdm9PlayDiaryiT3", LogType::NN_PDM);
+			}
+		};
 
-				cafeExportRegisterFunc(GetPlayDiary, "nn_pdm", "GetPlayDiary__Q2_2nn3pdmFPiPQ3_2nn3pdm9PlayDiaryiT3", LogType::NN_PDM);
-			};
+		PdmLibrary g_pdmLibrary;
+	}
 
-		}s_COSnnPdmModule;
-
-		COSModule* GetModule()
-		{
-			return &s_COSnnPdmModule;
-		}
-
+	COSModule* GetModule()
+	{
+		return &g_pdmLibrary;
 	}
 }

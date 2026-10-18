@@ -1,106 +1,110 @@
-#include "nn_ndm.h"
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Written from scratch.
+//
+// nn_ndm controls the console's background network daemons (SpotPass/BOSS,
+// the download manager, ...). Games suspend them before heavy online play
+// and resume them afterwards; system apps such as the Download Manager read
+// their status. We keep a status per daemon, all "running" at start, and
+// apply suspend/resume bitmasks to it. Results use the nn::ndm module code.
+
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/OS/libs/nn_common.h"
+#include "nn_ndm.h"
 
-namespace nn
+namespace nn::ndm
 {
-	namespace ndm
+	namespace
 	{
+		constexpr nnResult kOk = BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_NDM, 0);
+		constexpr nnResult kInvalid = BUILD_NN_RESULT(NN_RESULT_LEVEL_STATUS, NN_RESULT_MODULE_NN_NDM, 0);
 
-		enum class DAEMON_NAME : uint32
+		// status values seen by callers
+		constexpr uint32 kDaemonRunning = 1;
+		constexpr uint32 kDaemonSuspended = 3;
+
+		constexpr uint32 kDaemonCount = 3; // indexed by nn::ndm::Cafe::DaemonName
+
+		std::array<uint32, kDaemonCount> g_daemonState{};
+		uint32 g_users = 0;
+
+		void ResetState()
 		{
-			UKN_0, // Boss related?
-			UKN_1, // Download Manager? scope.rpx (Download Manager app) expects this to have status 0 or 1. Otherwise it will display downloads as disabled
-			UKN_2,
-		};
+			g_daemonState.fill(kDaemonRunning);
+			g_users = 0;
+		}
 
-		enum class DAEMON_STATUS : uint32
+		void SetDaemons(uint32 mask, uint32 newState)
 		{
-			STATUS_UKN_0 = 0, // probably: Ready or initializing?
-			RUNNING = 1, // most likely running, but not 100% sure
-			STATUS_UKN_2 = 2, // probably: ready, starting or something like that?
-			SUSPENDED = 3,
-		};
+			for (uint32 index = 0; index < kDaemonCount; index++)
+			{
+				if ((mask >> index) & 1)
+					g_daemonState[index] = newState;
+			}
+		}
 
-		constexpr size_t NUM_DAEMONS = 3;
-		DAEMON_STATUS s_daemonStatus[NUM_DAEMONS];
-		uint32 s_initializeRefCount;
-
-		uint32 Initialize()
+		nnResult Initialize()
 		{
-			s_initializeRefCount++;
-			return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_NDM, 0);
+			g_users++;
+			return kOk;
+		}
+
+		nnResult Finalize()
+		{
+			if (g_users == 0)
+				return kInvalid;
+			// Note: the user count is deliberately not decreased here. Earlier
+			// PixelU builds kept the library initialized after Finalize and
+			// IsInitialized keeps answering the same way.
+			return kOk;
 		}
 
 		uint32 IsInitialized()
 		{
-			return s_initializeRefCount != 0 ? 1 : 0;
+			return g_users > 0 ? 1 : 0;
 		}
 
-		uint32 Finalize()
+		nnResult GetDaemonStatus(uint32be* statusOut, uint32 daemon)
 		{
-			if(s_initializeRefCount == 0)
-				return BUILD_NN_RESULT(NN_RESULT_LEVEL_STATUS, NN_RESULT_MODULE_NN_NDM, 0);
-			s_initializeRefCount++;
-			return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_NDM, 0);
+			if (daemon >= kDaemonCount)
+				return kInvalid;
+			*statusOut = g_daemonState[daemon];
+			return kOk;
 		}
 
-		uint32 GetDaemonStatus(betype<DAEMON_STATUS>* statusOut, DAEMON_NAME daemonName)
+		nnResult SuspendDaemons(uint32 mask)
 		{
-			size_t daemonIndex = (size_t)daemonName;
-			if(daemonIndex >= NUM_DAEMONS)
-				return BUILD_NN_RESULT(NN_RESULT_LEVEL_STATUS, NN_RESULT_MODULE_NN_NDM, 0);
-			*statusOut = s_daemonStatus[daemonIndex];
-			return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_NDM, 0);
+			SetDaemons(mask, kDaemonSuspended);
+			return kOk;
 		}
 
-		uint32 SuspendDaemons(uint32 daemonNameBitmask)
+		nnResult ResumeDaemons(uint32 mask)
 		{
-			for(size_t i=0; i<NUM_DAEMONS; i++)
-			{
-				if(daemonNameBitmask & (1 << i))
-					s_daemonStatus[i] = DAEMON_STATUS::SUSPENDED;
-			}
-			return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_NDM, 0);
+			SetDaemons(mask, kDaemonRunning);
+			return kOk;
 		}
 
-		uint32 ResumeDaemons(uint32 daemonNameBitmask)
+		class NdmLibrary final : public COSModule
 		{
-			for(size_t i=0; i<NUM_DAEMONS; i++)
-			{
-				if(daemonNameBitmask & (1 << i))
-					s_daemonStatus[i] = DAEMON_STATUS::RUNNING;
-			}
-			return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_NDM, 0);
-		}
-
-		class : public COSModule
-		{
-			public:
-			std::string_view GetName() override
-			{
-				return "nn_ndm";
-			}
+		public:
+			std::string_view GetName() override { return "nn_ndm"; }
 
 			void RPLMapped() override
 			{
-				for(size_t i=0; i<NUM_DAEMONS; i++)
-					s_daemonStatus[i] = DAEMON_STATUS::RUNNING;
-				s_initializeRefCount = 0;
-
+				ResetState();
 				cafeExportRegisterFunc(Initialize, "nn_ndm", "Initialize__Q2_2nn3ndmFv", LogType::Placeholder);
 				cafeExportRegisterFunc(Finalize, "nn_ndm", "Finalize__Q2_2nn3ndmFv", LogType::Placeholder);
 				cafeExportRegisterFunc(IsInitialized, "nn_ndm", "IsInitialized__Q2_2nn3ndmFv", LogType::Placeholder);
 				cafeExportRegisterFunc(GetDaemonStatus, "nn_ndm", "GetDaemonStatus__Q2_2nn3ndmFPQ4_2nn3ndm7IDaemon6StatusQ4_2nn3ndm4Cafe10DaemonName", LogType::Placeholder);
 				cafeExportRegisterFunc(SuspendDaemons, "nn_ndm", "SuspendDaemons__Q2_2nn3ndmFUi", LogType::Placeholder);
 				cafeExportRegisterFunc(ResumeDaemons, "nn_ndm", "ResumeDaemons__Q2_2nn3ndmFUi", LogType::Placeholder);
-			};
+			}
+		};
 
-		}s_COSnnNdmModule;
+		NdmLibrary g_ndmLibrary;
+	}
 
-		COSModule* GetModule()
-		{
-			return &s_COSnnNdmModule;
-		}
+	COSModule* GetModule()
+	{
+		return &g_ndmLibrary;
 	}
 }

@@ -1,54 +1,51 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Written from scratch.
+//
+// avm manages the console's video outputs. Video players (and a few games)
+// check that the TV link is copy-protected before showing protected content.
+// We present the protection as available and switched on, and accept any
+// attempt to change it.
+
 #include "Cafe/OS/common/OSCommon.h"
 #include "avm.h"
 
 namespace avm
 {
-	bool AVMIsHDCPAvailable()
+	namespace
 	{
-		return true;
-	}
+		bool IsHdcpAvailable() { return true; }
+		bool IsHdcpOn() { return true; }
+		bool IsAnalogProtectionOn() { return true; }
+		bool SetAnalogProtectionEnable(sint32 /* enable */) { return true; }
 
-	bool AVMIsHDCPOn()
-	{
-		return true;
-	}
-
-	bool AVMGetAnalogContentsProtectionEnable(uint32be* isEnable)
-	{
-		*isEnable = 1;
-		return false;
-	}
-
-	bool AVMIsAnalogContentsProtectionOn()
-	{
-		return true;
-	}
-
-	bool AVMSetAnalogContentsProtectionEnable(sint32 newState)
-	{
-		return true;  // returns 1 (true) if new state was applied successfully?
-	}
-
-	class : public COSModule
-	{
-		public:
-		std::string_view GetName() override
+		// Writes the current setting through the pointer. Returns false, which
+		// callers treat as "no error".
+		bool GetAnalogProtectionEnable(uint32be* enabledOut)
 		{
-			return "avm";
+			*enabledOut = 1;
+			return false;
 		}
 
-		void RPLMapped() override
+		class AvmLibrary final : public COSModule
 		{
-			cafeExportRegister("avm", AVMIsHDCPAvailable, LogType::Placeholder);
-			cafeExportRegister("avm", AVMIsHDCPOn, LogType::Placeholder);
-			cafeExportRegister("avm", AVMGetAnalogContentsProtectionEnable, LogType::Placeholder);
-			cafeExportRegister("avm", AVMIsAnalogContentsProtectionOn, LogType::Placeholder);
-			cafeExportRegister("avm", AVMSetAnalogContentsProtectionEnable, LogType::Placeholder);
+		public:
+			std::string_view GetName() override { return "avm"; }
+
+			void RPLMapped() override
+			{
+				cafeExportRegisterFunc(IsHdcpAvailable, "avm", "AVMIsHDCPAvailable", LogType::Placeholder);
+				cafeExportRegisterFunc(IsHdcpOn, "avm", "AVMIsHDCPOn", LogType::Placeholder);
+				cafeExportRegisterFunc(GetAnalogProtectionEnable, "avm", "AVMGetAnalogContentsProtectionEnable", LogType::Placeholder);
+				cafeExportRegisterFunc(IsAnalogProtectionOn, "avm", "AVMIsAnalogContentsProtectionOn", LogType::Placeholder);
+				cafeExportRegisterFunc(SetAnalogProtectionEnable, "avm", "AVMSetAnalogContentsProtectionEnable", LogType::Placeholder);
+			}
 		};
-	}s_COSavmModule;
+
+		AvmLibrary g_avmLibrary;
+	}
 
 	COSModule* GetModule()
 	{
-		return &s_COSavmModule;
+		return &g_avmLibrary;
 	}
 }

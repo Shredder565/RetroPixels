@@ -1,52 +1,56 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Written from scratch.
+//
+// nlibnss exposes the console's device certificate and signing helpers to
+// network code. The emulated console has no device certificate to give out,
+// so exports report fixed sizes and do not write any certificate data:
+//   NSSExportDeviceCertChain(cert, &certLen, chain, &chainLen, ...)
+//       -> reports 0x100 bytes for both buffers, returns 0
+//   NSSSignatureGetSignatureLength()
+//       -> 0x1C (size of a signature blob)
+
 #include "Cafe/OS/common/OSCommon.h"
 #include "nlibnss.h"
 
 namespace nlibnss
 {
-	int NSSExportDeviceCertChain(uint8* uknPtr1, uint32be* uknLength1, uint8* uknPtr2, uint32be* uknLength2, uint32 uknR7, uint32 uknR8)
+	namespace
 	{
-		cemuLog_logDebug(LogType::Force, "NSSExportDeviceCertChain called but not implemented");
-		cemu_assert_debug(false);
+		constexpr uint32 kReportedCertSize = 0x100;
+		constexpr sint32 kSignatureLength = 0x1C;
 
-		// uknR3 = pointer (can be null, in which case only length is written)
-		// uknR4 = length
-		// uknR5 = pointer2
-		// uknR6 = length2
-		// uknR7 = some integer
-		// uknR8 = ???
-
-		*uknLength1 = 0x100;
-		*uknLength2 = 0x100;
-
-
-		return 0; // failed
-	}
-
-	int NSSSignatureGetSignatureLength()
-	{
-		// parameters are unknown
-		cemu_assert_debug(false);
-		return 0x1C; // signature length
-	}
-
-	class : public COSModule
-	{
-		public:
-		std::string_view GetName() override
+		sint32 ExportDeviceCertChain(uint8* certOut, uint32be* certSize, uint8* chainOut, uint32be* chainSize, uint32 arg4, uint32 arg5)
 		{
-			return "nlibnss";
+			cemuLog_logDebug(LogType::Force, "nlibnss: NSSExportDeviceCertChain is not available, no certificate returned");
+			if (certSize)
+				*certSize = kReportedCertSize;
+			if (chainSize)
+				*chainSize = kReportedCertSize;
+			return 0;
 		}
 
-		void RPLMapped() override
+		sint32 SignatureGetSignatureLength()
 		{
-			cafeExportRegister("nlibnss", NSSSignatureGetSignatureLength, LogType::Placeholder);
-			cafeExportRegister("nlibnss", NSSExportDeviceCertChain, LogType::Placeholder);
+			return kSignatureLength;
+		}
+
+		class NssLibrary final : public COSModule
+		{
+		public:
+			std::string_view GetName() override { return "nlibnss"; }
+
+			void RPLMapped() override
+			{
+				cafeExportRegisterFunc(SignatureGetSignatureLength, "nlibnss", "NSSSignatureGetSignatureLength", LogType::Placeholder);
+				cafeExportRegisterFunc(ExportDeviceCertChain, "nlibnss", "NSSExportDeviceCertChain", LogType::Placeholder);
+			}
 		};
 
-	}s_COSnlibnssModule;
+		NssLibrary g_nssLibrary;
+	}
 
 	COSModule* GetModule()
 	{
-		return &s_COSnlibnssModule;
+		return &g_nssLibrary;
 	}
 }

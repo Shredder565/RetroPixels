@@ -1,52 +1,44 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Written from scratch.
+//
+// drmapp runs background checks when a title starts: system update (NUP),
+// title patch, add-on content and ticket checks. A game polls the matching
+// *ChkIsFinished() call until it returns true. Nothing is checked here, so
+// every check reports that it is already finished.
+
 #include "Cafe/OS/common/OSCommon.h"
 #include "drmapp.h"
 
 namespace drmapp
 {
-	uint32 NupChkIsFinished(uint32 ukn)
+	namespace
 	{
-		cemuLog_logDebug(LogType::Force, "drmapp.NupChkIsFinished() - placeholder");
-		return 1;
-	}
+		constexpr uint32 kFinished = 1;
 
-	uint32 PatchChkIsFinished()
-	{
-		cemuLog_logDebug(LogType::Force, "drmapp.PatchChkIsFinished() - placeholder");
-		return 1;
-	}
+		uint32 SystemUpdateCheckDone(uint32 /* unused */) { return kFinished; }
+		uint32 PatchCheckDone() { return kFinished; }
+		uint32 AddOnContentCheckDone() { return kFinished; }
+		uint32 TicketCheckDone() { return kFinished; }
 
-	uint32 AocChkIsFinished()
-	{
-		cemuLog_logDebug(LogType::Force, "drmapp.AocChkIsFinished() - placeholder");
-		return 1;
-	}
-
-	uint32 TicketChkIsFinished()
-	{
-		cemuLog_logDebug(LogType::Force, "drmapp.TicketChkIsFinished__3RplFv() - placeholder");
-		return 1;
-	}
-
-	class : public COSModule
-	{
+		class DrmAppLibrary final : public COSModule
+		{
 		public:
-		std::string_view GetName() override
-		{
-			return "drmapp";
-		}
+			std::string_view GetName() override { return "drmapp"; }
 
-		void RPLMapped() override
-		{
-			cafeExportRegisterFunc(NupChkIsFinished, "drmapp", "NupChkIsFinished__3RplFv", LogType::Placeholder);
-			cafeExportRegisterFunc(PatchChkIsFinished, "drmapp", "PatchChkIsFinished__3RplFv", LogType::Placeholder);
-			cafeExportRegisterFunc(AocChkIsFinished, "drmapp", "AocChkIsFinished__3RplFv", LogType::Placeholder);
-			cafeExportRegisterFunc(TicketChkIsFinished, "drmapp", "TicketChkIsFinished__3RplFv", LogType::Placeholder);
-		}
-	}s_COSdrmappModule;
+			void RPLMapped() override
+			{
+				cafeExportRegisterFunc(SystemUpdateCheckDone, "drmapp", "NupChkIsFinished__3RplFv", LogType::Placeholder);
+				cafeExportRegisterFunc(PatchCheckDone, "drmapp", "PatchChkIsFinished__3RplFv", LogType::Placeholder);
+				cafeExportRegisterFunc(AddOnContentCheckDone, "drmapp", "AocChkIsFinished__3RplFv", LogType::Placeholder);
+				cafeExportRegisterFunc(TicketCheckDone, "drmapp", "TicketChkIsFinished__3RplFv", LogType::Placeholder);
+			}
+		};
+
+		DrmAppLibrary g_drmAppLibrary;
+	}
 
 	COSModule* GetModule()
 	{
-		return &s_COSdrmappModule;
+		return &g_drmAppLibrary;
 	}
-
-} // namespace drmapp
+}

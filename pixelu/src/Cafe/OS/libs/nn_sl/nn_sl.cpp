@@ -1,139 +1,112 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Written from scratch.
+//
+// nn_sl backs the Wii U Menu's quick-start list. Its interfaces are C++
+// objects with GHS-style vtables: each vtable slot is 8 bytes (two 16-bit
+// this-adjust offsets, then the function address), slot 0 is RTTI, slot 1
+// the destructor.
+//
+// Only the default WhiteListAccessor is offered: an object whose Get(out)
+// method returns an empty white list (no title types, no title ids).
+//
+// Note: like before, this module is compiled but not listed in
+// GetCOSModules() (Cafe/OS/RPL/COSModule.cpp), so it is currently inactive.
+
 #include "Cafe/OS/common/OSCommon.h"
-#include "Cafe/OS/libs/coreinit/coreinit_IOS.h"
-#include "Cafe/OS/libs/coreinit/coreinit_MEM.h"
-#include "config/ActiveSettings.h"
-#include "Cafe/CafeSystem.h"
+#include "Cafe/OS/RPL/rpl.h"
+#include "nn_sl.h"
 
-namespace nn
+namespace nn::sl
 {
-	typedef uint32 Result;
-	namespace sl
+	namespace
 	{
-		struct VTableEntry
+		struct GhsVTableSlot
 		{
-			uint16be offsetA{0};
-			uint16be offsetB{0};
-			MEMPTR<void> ptr;
+			uint16be thisAdjustA;
+			uint16be thisAdjustB;
+			uint32be function;
 		};
-		static_assert(sizeof(VTableEntry) == 8);
+		static_assert(sizeof(GhsVTableSlot) == 8);
 
-		constexpr uint32 SL_MEM_MAGIC = 0xCAFE4321;
-
-#define DTOR_WRAPPER(__TYPE) RPLLoader_MakePPCCallable([](PPCInterpreter_t* hCPU) { dtor(MEMPTR<__TYPE>(hCPU->gpr[3]), hCPU->gpr[4]); osLib_returnFromFunction(hCPU, 0); })
-
-		template<typename T>
-		MEMPTR<T> sl_new()
-		{
-			uint32 objSize = sizeof(T);
-			uint32be* basePtr = (uint32be*)coreinit::_weak_MEMAllocFromDefaultHeapEx(objSize + 8, 0x8);
-			basePtr[0] = SL_MEM_MAGIC;
-			basePtr[1] = objSize;
-			return (T*)(basePtr + 2);
-		}
-
-		void sl_delete(MEMPTR<void> mem)
-		{
-			if (!mem)
-				return;
-			uint32be* basePtr = (uint32be*)mem.GetPtr() - 2;
-			if (basePtr[0] != SL_MEM_MAGIC)
-			{
-				cemuLog_log(LogType::Force, "nn_sl: Detected memory corruption");
-				cemu_assert_suspicious();
-			}
-			coreinit::_weak_MEMFreeToDefaultHeap(basePtr);
-		}
-
-#pragma pack(1)
+#pragma pack(push, 1)
 		struct WhiteList
 		{
 			uint32be titleTypes[50];
-			uint32be titleTypesCount;
-			uint32be padding;
+			uint32be titleTypeCount;
+			uint32be _pad;
 			uint64be titleIds[50];
 			uint32be titleIdCount;
 		};
+#pragma pack(pop)
 		static_assert(sizeof(WhiteList) == 0x264);
-#pragma pack()
-		
-		struct WhiteListAccessor
+
+		struct WhiteListAccessorObject
 		{
-			MEMPTR<void> vTablePtr{}; // 0x00
-
-			struct VTable
-			{
-				VTableEntry rtti;
-				VTableEntry dtor;
-				VTableEntry get;
-			};
-			static inline SysAllocator<VTable> s_titleVTable;
-
-			static WhiteListAccessor* ctor(WhiteListAccessor* _this)
-			{
-				if (!_this)
-					_this = sl_new<WhiteListAccessor>();
-				*_this = {};
-				_this->vTablePtr = s_titleVTable;
-				return _this;
-			}
-
-			static void dtor(WhiteListAccessor* _this, uint32 options)
-			{
-				if (_this && (options & 1))
-					sl_delete(_this);
-			}
-
-			static void Get(WhiteListAccessor* _this, nn::sl::WhiteList* outWhiteList)
-			{
-				*outWhiteList = {};
-			}
-
-			static void InitVTable()
-			{
-				s_titleVTable->rtti.ptr = nullptr; // todo
-				s_titleVTable->dtor.ptr = DTOR_WRAPPER(WhiteListAccessor);
-				s_titleVTable->get.ptr = RPLLoader_MakePPCCallable([](PPCInterpreter_t* hCPU) { Get(MEMPTR<WhiteListAccessor>(hCPU->gpr[3]), MEMPTR<WhiteList>(hCPU->gpr[4])); osLib_returnFromFunction(hCPU, 0); });
-			}
+			uint32be vtable;
 		};
-		static_assert(sizeof(WhiteListAccessor) == 0x04);
+		static_assert(sizeof(WhiteListAccessorObject) == 4);
 
-		SysAllocator<WhiteListAccessor> s_defaultWhiteListAccessor;
-
-		WhiteListAccessor* GetDefaultWhiteListAccessor()
+		struct WhiteListAccessorVTable
 		{
-			return s_defaultWhiteListAccessor;
+			GhsVTableSlot rtti;
+			GhsVTableSlot destructor;
+			GhsVTableSlot get;
+		};
+
+		SysAllocator<WhiteListAccessorVTable> g_whiteListVTable;
+		SysAllocator<WhiteListAccessorObject> g_defaultWhiteListAccessor;
+
+		// virtual ~WhiteListAccessor(); bit 0 of flags = also free the memory.
+		// The only accessor that exists is the static default one, which is
+		// never freed, so there is nothing to do.
+		void WhiteListDestructor(WhiteListAccessorObject* self, uint32 flags)
+		{
 		}
 
-		class : public COSModule
+		// virtual Result Get(WhiteList* out);
+		uint32 WhiteListGet(WhiteListAccessorObject* self, WhiteList* out)
 		{
-			public:
-			std::string_view GetName() override
-			{
-				return "nn_sl";
-			}
+			if (out)
+				*out = WhiteList{};
+			return 0;
+		}
+
+		WhiteListAccessorObject* GetDefaultWhiteListAccessor()
+		{
+			return g_defaultWhiteListAccessor.GetPtr();
+		}
+
+		void BuildDefaultAccessor()
+		{
+			WhiteListAccessorVTable& vt = *g_whiteListVTable.GetPtr();
+			vt = {};
+			vt.destructor.function = makeCallableExport<&WhiteListDestructor>();
+			vt.get.function = makeCallableExport<&WhiteListGet>();
+			g_defaultWhiteListAccessor->vtable = g_whiteListVTable.GetMPTR();
+		}
+
+		class SlLibrary final : public COSModule
+		{
+		public:
+			std::string_view GetName() override { return "nn_sl"; }
 
 			void RPLMapped() override
 			{
-				cafeExportRegisterFunc(nn::sl::GetDefaultWhiteListAccessor, "nn_sl", "GetDefaultWhiteListAccessor__Q2_2nn2slFv", LogType::NN_SL);
-			};
+				cafeExportRegisterFunc(GetDefaultWhiteListAccessor, "nn_sl", "GetDefaultWhiteListAccessor__Q2_2nn2slFv", LogType::NN_SL);
+			}
 
 			void rpl_entry(uint32 moduleHandle, coreinit::RplEntryReason reason) override
 			{
 				if (reason == coreinit::RplEntryReason::Loaded)
-				{
-					nn::sl::WhiteListAccessor::InitVTable();
-					nn::sl::WhiteListAccessor::ctor(nn::sl::s_defaultWhiteListAccessor);
-				}
-				else if (reason == coreinit::RplEntryReason::Unloaded)
-				{
-					// nothing to clean up
-				}
+					BuildDefaultAccessor();
 			}
-		}s_COSnnSlModule;
+		};
 
-		COSModule* GetModule()
-		{
-			return &s_COSnnSlModule;
-		}
-	} // namespace sl
-} // namespace nn
+		SlLibrary g_slLibrary;
+	}
+
+	COSModule* GetModule()
+	{
+		return &g_slLibrary;
+	}
+}
