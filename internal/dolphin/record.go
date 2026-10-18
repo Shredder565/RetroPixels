@@ -297,8 +297,8 @@ func (r *Recording) Follow(done <-chan struct{}, warn func(string)) {
 			r.mu.Unlock()
 			if first {
 				r.logf("No video from Dolphin yet in %s", filepath.Join(r.DumpDir, "Frames"))
-				warn("Dolphin hasn't started saving the game's picture, so this game may not be recorded. " +
-					"An up-to-date Dolphin (5.0 or newer) is needed. Details are in " + r.Log)
+				warn("PixelU hasn't started saving the game's picture, so this game may not be recorded. " +
+					"An up-to-date PixelU folder (with wii\\PixelU-Wii.exe) is needed. Details are in " + r.Log)
 			}
 		}
 	}
@@ -677,8 +677,8 @@ func (r *Recording) Save(o SaveOptions) ([]string, error) {
 	if len(d.Video) == 0 {
 		d.Remove()
 		if r.Ended.Sub(r.Launched) > 20*time.Second {
-			return nil, errors.New("Dolphin didn't save the game's picture, so nothing was recorded. " +
-				"An up-to-date Dolphin (5.0 or newer) is needed. Details are in " + r.Log)
+			return nil, errors.New("PixelU didn't save the game's picture, so nothing was recorded. " +
+				"An up-to-date PixelU folder (with wii\\PixelU-Wii.exe) is needed. Details are in " + r.Log)
 		}
 		return nil, nil
 	}
@@ -712,7 +712,7 @@ func (r *Recording) Save(o SaveOptions) ([]string, error) {
 		videoLen += v.Dur
 	}
 	if len(segs) == 0 {
-		return nil, errors.New("Dolphin's video for this game couldn't be read, so it wasn't saved. Details are in " + r.Log)
+		return nil, errors.New("PixelU's video for this game couldn't be read, so it wasn't saved. Details are in " + r.Log)
 	}
 	j := finalJob{Video: segs, DSP: d.DSP, DTK: d.DTK, DSPLen: wavTotal(d.DSP), DTKLen: wavTotal(d.DTK),
 		FPS: outputFPS(segs[0].FPS, o.FPS)}

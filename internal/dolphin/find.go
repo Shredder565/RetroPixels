@@ -13,34 +13,9 @@ import (
 	"time"
 )
 
-// AppFolder is the folder name RetroPixels.exe uses in %LOCALAPPDATA%, so
-// both programs share one Dolphin download.
+// AppFolder is the folder name RetroPixels.exe uses in %APPDATA% (its
+// config.json).
 const AppFolder = "RetroPixels"
-
-// InstallDirs: where the one-click download puts Dolphin, as RetroPixels.exe
-// does: a "Dolphin" folder next to the program if it can write there,
-// otherwise %LOCALAPPDATA%\RetroPixels\Dolphin.
-func InstallDirs() []string {
-	var dirs []string
-	if exe, err := os.Executable(); err == nil {
-		dirs = append(dirs, filepath.Join(filepath.Dir(exe), "Dolphin"))
-	}
-	if la := os.Getenv("LOCALAPPDATA"); la != "" {
-		dirs = append(dirs, filepath.Join(la, AppFolder, "Dolphin"))
-	}
-	return dirs
-}
-
-// Installed returns Dolphin.exe in one of InstallDirs, or "".
-func Installed() string {
-	for _, d := range InstallDirs() {
-		p := filepath.Join(d, "Dolphin.exe")
-		if st, err := os.Stat(p); err == nil && !st.IsDir() {
-			return p
-		}
-	}
-	return ""
-}
 
 var skipDirs = map[string]bool{"windows": true, "$recycle.bin": true, "system volume information": true, "programdata": true,
 	"node_modules": true, ".git": true, "appdata": true, "steamapps": true, "shadercache": true, "cache": true}
@@ -69,52 +44,7 @@ func WalkLimited(root string, depth int, fn func(string, fs.DirEntry) bool) {
 	walk(root, 1)
 }
 
-// FindExe looks for Dolphin.exe where RetroPixels.exe looks: the download
-// folders, near the games folders and the program, in Program Files, and in
-// the top folders of each drive. It can take a while (run it in the background).
-func FindExe(gameFolders []string) string {
-	if p := Installed(); p != "" {
-		return p
-	}
-	var roots []string
-	for _, p := range gameFolders {
-		roots = append(roots, p, filepath.Dir(p))
-	}
-	if exe, err := os.Executable(); err == nil {
-		roots = append(roots, filepath.Dir(exe), filepath.Dir(filepath.Dir(exe)))
-	}
-	for _, env := range []string{"ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"} {
-		if d := os.Getenv(env); d != "" {
-			roots = append(roots, d)
-		}
-	}
-	for d := 'C'; d <= 'Z'; d++ {
-		roots = append(roots, string(d)+`:\`)
-	}
-	found := ""
-	for _, r := range roots {
-		if _, err := os.Stat(r); err != nil {
-			continue
-		}
-		depth := 4
-		if len(r) <= 3 && !strings.EqualFold(r, `C:\`) {
-			depth = 5 // game drives often nest emulators a level deeper
-		}
-		WalkLimited(r, depth, func(p string, d fs.DirEntry) bool {
-			if !d.IsDir() && strings.EqualFold(d.Name(), "Dolphin.exe") {
-				found = p
-				return false
-			}
-			return true
-		})
-		if found != "" {
-			return found
-		}
-	}
-	return ""
-}
-
-// GuessFolders finds folders holding GameCube / Wii games near Dolphin
+// GuessFolders finds folders holding GameCube / Wii games near an emulator
 // (people often keep emulators next to their games), widest first.
 func GuessFolders(exe string) []string {
 	var roots []string
@@ -183,7 +113,8 @@ func IsUnder(p string, roots []string) bool {
 	return false
 }
 
-// Version reads Dolphin's version from the build_info.txt next to it.
+// Version reads the engine's version from the build_info.txt next to it
+// (Dolphin builds have one).
 func Version(exe string) string {
 	if exe == "" {
 		return ""

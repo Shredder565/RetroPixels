@@ -175,7 +175,7 @@ func (a *app) pixeluPlay(g pixelu.Game) {
 		return
 	}
 	if r := a.dol.run; r != nil {
-		messageBox(a.hwnd, r.game.Name+" is playing in Dolphin. Stop it first (GameCube / Wii > Stop game).", "RetroPixels Native", mbIconInfo)
+		messageBox(a.hwnd, r.game.Name+" is playing in PixelU (Wii/GameCube). Stop it first (GameCube / Wii > Stop game).", "RetroPixels Native", mbIconInfo)
 		return
 	}
 	exe := a.pixeluExe()

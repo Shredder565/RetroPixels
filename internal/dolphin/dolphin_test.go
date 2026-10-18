@@ -58,19 +58,15 @@ func makeRoms(t *testing.T) string {
 		f.WriteAt([]byte{0}, 0x9000)
 		f.Close()
 	}
-	os.MkdirAll(filepath.Join(root, "Wii", "- Wii", "Dolphin-x64"), 0o755)
-	os.WriteFile(filepath.Join(root, "Wii", "- Wii", "Dolphin-x64", "Dolphin.exe"), []byte("stand-in"), 0o755)
+	os.MkdirAll(filepath.Join(root, "Wii", "- Wii", "wii"), 0o755)
+	os.WriteFile(filepath.Join(root, "Wii", "- Wii", "wii", "PixelU-Wii.exe"), []byte("stand-in"), 0o755)
 	return root
 }
 
 func TestLibrary(t *testing.T) {
 	root := makeRoms(t)
-	t.Setenv("LOCALAPPDATA", t.TempDir())
-	exe := FindExe([]string{filepath.Join(root, "Sonic Games")})
-	if !strings.HasSuffix(exe, filepath.Join("Dolphin-x64", "Dolphin.exe")) {
-		t.Fatalf("FindExe = %q", exe)
-	}
-	folders := GuessFolders(exe)
+	// Games folders are guessed from near the engine (people keep emulators next to their games).
+	folders := GuessFolders(filepath.Join(root, "Wii", "- Wii", "wii", "PixelU-Wii.exe"))
 	if len(folders) != 3 {
 		t.Fatalf("want 3 folders (Mario, Sonic, Wii), got %v", folders)
 	}
@@ -110,22 +106,71 @@ func TestLibrary(t *testing.T) {
 	}
 }
 
-// A Dolphin downloaded by RetroPixels.exe is found first, without a search.
-func TestInstalledFirst(t *testing.T) {
-	la := t.TempDir()
-	t.Setenv("LOCALAPPDATA", la)
-	if Installed() != "" {
-		t.Fatal("found a Dolphin that isn't there")
-	}
-	p := filepath.Join(la, "RetroPixels", "Dolphin", "Dolphin.exe")
+func TestVersion(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "wii", "PixelU-Wii.exe")
 	os.MkdirAll(filepath.Dir(p), 0o755)
 	os.WriteFile(p, []byte("x"), 0o644)
-	if Installed() != p || FindExe(nil) != p {
-		t.Fatalf("Installed = %q", Installed())
+	if v := Version(p); v != "" {
+		t.Fatalf("no build_info.txt: %q", v)
 	}
-	os.WriteFile(filepath.Join(filepath.Dir(p), "build_info.txt"), []byte("Some line\nVersion 2506\n"), 0o644)
-	if v := Version(p); v != "Version 2506" {
+	os.WriteFile(filepath.Join(filepath.Dir(p), "build_info.txt"), []byte("Some line\nVersion 2609a\n"), 0o644)
+	if v := Version(p); v != "Version 2609a" {
 		t.Fatalf("Version = %q", v)
+	}
+}
+
+// The engine is told by its own file name; Dolphin.exe isn't it.
+func TestIsProgram(t *testing.T) {
+	exe := `C:\Games\PixelU\wii\PixelU-Wii.exe`
+	for path, want := range map[string]bool{
+		`C:\Games\PixelU\wii\PixelU-Wii.exe`: true,
+		`D:\Other\pixelu-wii.EXE`:            true, // a second copy is the same program
+		"PixelU-Wii.exe":                     true,
+		"/home/me/PixelU/wii/PixelU-Wii.exe": true,
+		`C:\Dolphin\Dolphin.exe`:             false,
+		`C:\Games\PixelU\PixelU.exe`:         false,
+		"":                                   false,
+	} {
+		if got := IsProgram(path, exe); got != want {
+			t.Errorf("IsProgram(%q) = %v", path, got)
+		}
+	}
+	if IsProgram("PixelU-Wii.exe", "") || IsProgram(".", ".") {
+		t.Error("no engine: nothing matches")
+	}
+}
+
+// The old Dolphin's folder, for bringing its settings over to the engine.
+func TestLegacyUserDir(t *testing.T) {
+	t.Setenv("RETRO_OLD_DOLPHIN_USER", "")
+	home, ad := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("APPDATA", ad)
+	if got := LegacyUserDir(""); got != "" {
+		t.Fatalf("no old Dolphin: %q", got)
+	}
+	os.MkdirAll(filepath.Join(ad, "Dolphin Emulator"), 0o755)
+	if got := LegacyUserDir(""); got != filepath.Join(ad, "Dolphin Emulator") {
+		t.Errorf("AppData: %q", got)
+	}
+	docs := filepath.Join(home, "Documents", "Dolphin Emulator")
+	os.MkdirAll(docs, 0o755)
+	if got := LegacyUserDir(""); got != docs {
+		t.Errorf("Documents: %q", got)
+	}
+	old := filepath.Join(t.TempDir(), "Dolphin-x64", "Dolphin.exe")
+	os.MkdirAll(filepath.Join(filepath.Dir(old), "User"), 0o755)
+	if got := LegacyUserDir(old); got != docs {
+		t.Errorf("not portable: %q", got)
+	}
+	os.WriteFile(filepath.Join(filepath.Dir(old), "portable.txt"), nil, 0o644)
+	if got := LegacyUserDir(old); got != filepath.Join(filepath.Dir(old), "User") {
+		t.Errorf("portable: %q", got)
+	}
+	t.Setenv("RETRO_OLD_DOLPHIN_USER", "old")
+	if LegacyUserDir(old) != "old" {
+		t.Error("override")
 	}
 }
 

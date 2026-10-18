@@ -60,6 +60,8 @@ type config struct {
 	RecordQuality string `json:"recordQuality,omitempty"`
 	RecordDir     string `json:"recordDir,omitempty"`
 
+	// The Dolphin.exe used before PixelU's Wii / GameCube engine: no longer
+	// started, only read to find its old settings and games folders.
 	DolphinExe        string       `json:"dolphinExe,omitempty"`
 	DolphinFolders    []string     `json:"dolphinFolders,omitempty"`
 	DolphinRecent     []recentGame `json:"dolphinRecent,omitempty"`
@@ -245,7 +247,6 @@ func newMux() *http.ServeMux {
 	registerRecorderRoutes(mux)
 	registerFFmpegRoutes(mux)
 	registerDolphinRoutes(mux)
-	registerDolphinInstallRoutes(mux)
 	registerPixelURoutes(mux)
 	registerMameRoutes(mux)
 	registerLifetimeRoutes(mux)

@@ -11,8 +11,8 @@ import (
 
 // ---------------- Dolphin's own folders ----------------
 
-// UserDir is Dolphin's "User" folder: the portable one next to Dolphin.exe
-// (when portable.txt is there), else Documents\Dolphin Emulator, else
+// UserDir is the engine's "User" folder: the portable one next to its .exe
+// (when portable.txt is there, as for PixelU\wii\PixelU-Wii.exe), else Documents\Dolphin Emulator, else
 // %APPDATA%\Dolphin Emulator. RETRO_DOLPHIN_USER overrides it (tests).
 func UserDir(exe string) string {
 	if t := os.Getenv("RETRO_DOLPHIN_USER"); t != "" {
@@ -33,6 +33,37 @@ func UserDir(exe string) string {
 		return filepath.Join(ad, "Dolphin Emulator")
 	}
 	return docs
+}
+
+// LegacyUserDir is the user folder of the Dolphin the player used before
+// PixelU's Wii / GameCube engine, so their settings and saves can be
+// brought over: a portable Dolphin's User folder (oldExe with portable.txt
+// next to it), else Documents\Dolphin Emulator, else %APPDATA%\Dolphin
+// Emulator. "" when there is none. RETRO_OLD_DOLPHIN_USER overrides it
+// (tests).
+func LegacyUserDir(oldExe string) string {
+	if t := os.Getenv("RETRO_OLD_DOLPHIN_USER"); t != "" {
+		return t
+	}
+	isDir := func(p string) bool {
+		st, err := os.Stat(p)
+		return err == nil && st.IsDir()
+	}
+	if oldExe != "" {
+		dir := filepath.Dir(oldExe)
+		if _, err := os.Stat(filepath.Join(dir, "portable.txt")); err == nil && isDir(filepath.Join(dir, "User")) {
+			return filepath.Join(dir, "User")
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if docs := filepath.Join(home, "Documents", "Dolphin Emulator"); isDir(docs) {
+			return docs
+		}
+	}
+	if ad := os.Getenv("APPDATA"); ad != "" && isDir(filepath.Join(ad, "Dolphin Emulator")) {
+		return filepath.Join(ad, "Dolphin Emulator")
+	}
+	return ""
 }
 
 // ConfigFile: one of Dolphin's settings files (Dolphin.ini, GFX.ini, ...).

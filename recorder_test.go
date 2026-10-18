@@ -283,7 +283,7 @@ func probe(t *testing.T, ff, file string) (string, float64, bool) {
 	return size[1], float64(h*3600+m*60) + sec, strings.Contains(s, "Audio: aac")
 }
 
-// fakeDolphin is a stand-in Dolphin.exe: it notes its arguments and, when
+// fakeDolphin is a stand-in PixelU-Wii.exe (Dolphin renamed): it notes its arguments and, when
 // asked to dump, writes video and sound files the way Dolphin does - two
 // video files (the window was resized), the first with black bars the game
 // drew itself, game sound that starts half a second before the picture, and
@@ -308,14 +308,13 @@ func setupFakeDolphin(t *testing.T) (ff, argsFile string, launch func() error) {
 	user := t.TempDir()
 	recs := t.TempDir()
 	argsFile = filepath.Join(t.TempDir(), "args")
-	exe := filepath.Join(t.TempDir(), "Dolphin.exe")
-	os.WriteFile(exe, []byte(fakeDolphin), 0o755)
 	for k, v := range map[string]string{"RETRO_DOLPHIN_USER": user, "RETRO_REC_DIR": recs, "FAKE_ARGS": argsFile, "XDG_CONFIG_HOME": t.TempDir()} {
 		t.Setenv(k, v)
 	}
 	cfgMu.Lock()
-	cfg = config{DolphinExe: exe, DolphinFolders: []string{filepath.Join(root, "- Mario Games")}}
+	cfg = config{DolphinFolders: []string{filepath.Join(root, "- Mario Games")}}
 	cfgMu.Unlock()
+	fakeEngine(t, fakeDolphin)
 	setManualWanted(false)
 	recMu.Lock()
 	recLastErr, recLastMsg = "", ""
@@ -458,11 +457,7 @@ func TestRecordNextGame(t *testing.T) {
 // Dolphin that saves nothing: a clear message, no crash.
 func TestRecordNoDumps(t *testing.T) {
 	_, _, launch := setupFakeDolphin(t)
-	exe := filepath.Join(t.TempDir(), "Dolphin.exe")
-	os.WriteFile(exe, []byte("#!/bin/sh\nsleep 2\n"), 0o755)
-	cfgMu.Lock()
-	cfg.DolphinExe = exe
-	cfgMu.Unlock()
+	fakeEngine(t, "#!/bin/sh\nsleep 2\n")
 	old := recNoVideoAfter
 	recNoVideoAfter = time.Second
 	defer func() { recNoVideoAfter = old }()

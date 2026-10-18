@@ -1,10 +1,11 @@
 package main
 
-// GameCube and Wii games, played in Dolphin with its picture docked inside
-// the RetroPixels Native window (so OBS captures this window), as
-// RetroPixels.exe does: the same Dolphin (found, or downloaded from
-// dolphin-emu.org into the same folder), the same command line, controller
-// set-up, volume control and automatic recording.
+// GameCube and Wii games, played in PixelU's Wii / GameCube engine
+// (PixelU\wii\PixelU-Wii.exe, based on Dolphin, GPL-2.0+) with its picture
+// docked inside the RetroPixels Native window (so OBS captures this window),
+// as RetroPixels.exe does: the same engine (in the PixelU folder Wii U games
+// use), the same command line, controller set-up, volume control and
+// automatic recording. A separately installed Dolphin.exe isn't used.
 //
 // app_windows.go calls in through small hooks (dolOpenPath, dolCommand,
 // dolEvent, ...); everything else is here and in internal/dolphin.
@@ -36,10 +37,8 @@ const (
 	cmdDolPads       = 1306
 	cmdDolOpenEmu    = 1307
 	cmdDolOpenConfig = 1308
-	cmdDolChangeExe  = 1309
 	cmdDolVolume0    = 1310 // 1310 + percent/10: 1311..1320
 	cmdDolMute       = 1321
-	cmdDolDownload   = 1322
 	cmdDolRecNext    = 1323
 	cmdDolLayout     = 1324
 	cmdDolFirst      = 1300
@@ -60,7 +59,7 @@ var (
 	dolHookCB = syscall.NewCallback(dolKeyHook)
 )
 
-// dolRun is one game playing in Dolphin.
+// dolRun is one game playing in PixelU's Wii / GameCube engine.
 type dolRun struct {
 	extRun   // pid, exited, the docked game screen (dock_windows.go)
 	game     dolphin.Game
@@ -79,7 +78,6 @@ type dolState struct {
 	volMenu     uintptr
 	closeAfter  bool   // close the window once the game (and its recording) is done
 	pendingOpen string // open this once the game has ended
-	pendingPlay string // play this once Dolphin is downloaded
 	nextGame    bool   // record the next game (automatic recording off)
 	recWarn     string
 	ffAsks      int
@@ -92,7 +90,6 @@ type dolState struct {
 	saving     string     // the game whose recording is being saved
 	saveStep   string     // "ffmpeg" or "saving"
 	savePct    int
-	install    *dolphin.Progress
 	detecting  bool
 	found      *dolFound
 	libGames   []dolphin.Game
@@ -113,8 +110,8 @@ var dolSaveMu sync.Mutex // one recording is saved at a time
 
 // ---------------- start-up ----------------
 
-// dolStartup runs once the window exists: the first time, Dolphin and the
-// games folders are looked for in the background.
+// dolStartup runs once the window exists: the first time, the games folders
+// are looked for in the background.
 func (a *app) dolStartup() {
 	d := &a.settings.Dolphin
 	a.dol.vol.Store(int32(d.volume()))
@@ -134,8 +131,9 @@ func (a *app) dolDetect() {
 	a.dol.mu.Unlock()
 	have := a.settings.Dolphin
 	have.Folders = append([]string(nil), have.Folders...)
+	engine := a.dolExe()
 	go func() {
-		exe, folders, played := detectDolphin(have)
+		exe, folders, played := detectDolphin(have, engine)
 		a.dol.mu.Lock()
 		a.dol.detecting = false
 		a.dol.found = &dolFound{exe, folders, played}
@@ -149,6 +147,8 @@ func (a *app) dolDetect() {
 func (a *app) addDolphinMenu() {
 	m := call(pCreatePopupMenu)
 	a.dol.menu = m
+	appendMenu(m, mfString|mfGrayed, 0, "Games play in PixelU (Wii/GameCube engine based on Dolphin, GPL)")
+	appendMenu(m, mfSeparator, 0, "")
 	appendMenu(m, mfString, cmdDolLibrary, "&Library…")
 	appendMenu(m, mfString, cmdDolStop, "&Stop game")
 	appendMenu(m, mfSeparator, 0, "")
@@ -164,14 +164,12 @@ func (a *app) addDolphinMenu() {
 	appendMenu(m, mfString, cmdDolFullscreen, "Start games &fullscreen")
 	appendMenu(m, mfString, cmdDolEmbed, "Play inside this &window")
 	appendMenu(m, mfSeparator, 0, "")
-	appendMenu(m, mfString, cmdDolSettings, "&Dolphin settings…")
+	appendMenu(m, mfString, cmdDolSettings, "&PixelU settings…")
 	appendMenu(m, mfString, cmdDolPads, "Set up &Xbox controller")
 	appendMenu(m, mfString, cmdDolLayout, "&Controller layout")
 	appendMenu(m, mfSeparator, 0, "")
-	appendMenu(m, mfString, cmdDolOpenEmu, "&Open Dolphin")
-	appendMenu(m, mfString, cmdDolOpenConfig, "Open Dolphin's settings f&older")
-	appendMenu(m, mfString, cmdDolChangeExe, "C&hange Dolphin…")
-	appendMenu(m, mfString, cmdDolDownload, "Download the la&test Dolphin")
+	appendMenu(m, mfString, cmdDolOpenEmu, "&Open PixelU (Wii/GameCube)")
+	appendMenu(m, mfString, cmdDolOpenConfig, "Open PixelU's Wii/GameCube settings f&older")
 	appendMenu(a.menu, mfPopup, m, "GameCube / &Wii")
 }
 
@@ -202,18 +200,10 @@ func (a *app) dolUpdateMenus() {
 	checkItem(a.menu, cmdDolEmbed, d.embed())
 	call(pCheckMenuRadioItem, a.menu, cmdDolVolume0+1, cmdDolVolume0+10, uintptr(cmdDolVolume0+max(1, (d.volume()+5)/10)), mfByCommand)
 	checkItem(a.menu, cmdDolMute, d.Muted)
-	a.dol.mu.Lock()
-	inst := a.dol.install
-	a.dol.mu.Unlock()
-	if inst != nil {
-		renameItem(a.menu, cmdDolDownload, "Downloading Dolphin…")
-	} else {
-		renameItem(a.menu, cmdDolDownload, "Download the la&test Dolphin")
-	}
-	enableItem(a.menu, cmdDolDownload, inst == nil && r == nil)
-	has := d.exe() != ""
+	has := a.dolExe() != ""
 	enableItem(a.menu, cmdDolOpenEmu, has && r == nil)
-	enableItem(a.menu, cmdDolPads, r == nil)
+	enableItem(a.menu, cmdDolOpenConfig, has)
+	enableItem(a.menu, cmdDolPads, has && r == nil)
 }
 
 func (a *app) dolCommand(id int) {
@@ -268,13 +258,15 @@ func (a *app) dolCommand(id int) {
 	case id == cmdDolOpenEmu:
 		a.dolOpenEmulator()
 	case id == cmdDolOpenConfig:
-		p := filepath.Join(dolphin.UserDir(d.exe()), "Config")
+		exe := a.dolExe()
+		if exe == "" {
+			messageBox(a.hwnd, noEngine, "RetroPixels Native", mbIconInfo)
+			return
+		}
+		d.importOld(exe)
+		p := filepath.Join(dolphin.UserDir(exe), "Config")
 		os.MkdirAll(p, 0o755)
 		shellOpen(p)
-	case id == cmdDolChangeExe:
-		a.dolChooseExe()
-	case id == cmdDolDownload:
-		a.dolDownload("")
 	}
 }
 
@@ -296,13 +288,13 @@ func (a *app) dolVolumeNow() (int, bool) { return int(a.dol.vol.Load()), a.dol.m
 // ---------------- opening games ----------------
 
 // dolOpenPath handles a file opened or dropped: GameCube and Wii games start
-// in Dolphin. It returns false for files that are for the other systems.
+// in PixelU's Wii / GameCube engine. It returns false for files that are for the other systems.
 func (a *app) dolOpenPath(path string) bool {
 	if !dolphin.IsGameFile(path) {
 		ext := strings.ToLower(filepath.Ext(path))
 		if ext == ".zip" || ext == ".7z" {
 			if inner := discInArchive(path); inner != "" {
-				messageBox(a.hwnd, fmt.Sprintf("%q holds a GameCube or Wii game (%s).\n\nDolphin can't play games from inside a %s file. "+
+				messageBox(a.hwnd, fmt.Sprintf("%q holds a GameCube or Wii game (%s).\n\nPixelU can't play games from inside a %s file. "+
 					"Unpack it first, then open the %s file (or add its folder in GameCube / Wii > Library).",
 					filepath.Base(path), inner, ext, strings.ToLower(filepath.Ext(inner))), "RetroPixels Native", mbIconInfo)
 				return true
@@ -334,7 +326,7 @@ func (a *app) dolOpenPath(path string) bool {
 	return true
 }
 
-// dolPlay starts a game (stopping the one in Dolphin first, if asked).
+// dolPlay starts a game (stopping the one playing first, if asked).
 func (a *app) dolPlay(g dolphin.Game) {
 	if a.mameBusy() || a.pixeluBusy() {
 		return
@@ -351,36 +343,18 @@ func (a *app) dolPlay(g dolphin.Game) {
 		return
 	}
 	d := &a.settings.Dolphin
-	exe := d.exe()
+	exe := a.dolExe()
 	if exe == "" {
-		a.dol.mu.Lock()
-		busy := a.dol.install != nil
-		a.dol.mu.Unlock()
-		if busy {
-			a.dol.pendingPlay = g.Path
-			a.showMessage("Dolphin is downloading: the game starts when it's ready")
-			return
-		}
-		switch messageBox(a.hwnd, "GameCube and Wii games play in Dolphin, a free emulator, and it isn't set up yet.\n\n"+
-			"Yes: download the latest official Dolphin from dolphin-emu.org now (a one-time download) into a \"Dolphin\" folder "+
-			"next to RetroPixels, as RetroPixels.exe does. The game starts when it's ready, inside this window.\n"+
-			"No: choose a Dolphin.exe you already have.", "RetroPixels Native", 3 /* MB_YESNOCANCEL */ |mbIconInfo) {
-		case idYes:
-			a.dolDownload(g.Path)
-			return
-		case 7: // IDNO
-			if exe = a.dolChooseExe(); exe == "" {
-				return
-			}
-		default:
-			return
-		}
+		messageBox(a.hwnd, "GameCube and Wii games play in PixelU (Wii/GameCube engine based on Dolphin, GPL).\n\n"+noEngine,
+			"RetroPixels Native", mbIconInfo)
+		return
 	}
-	if dolphin.Running(filepath.Base(exe)) || dolphin.Running("Dolphin.exe") {
-		messageBox(a.hwnd, "Dolphin is already open. Close it first, then start the game here.", "RetroPixels Native", mbIconInfo)
+	if dolphin.Running(filepath.Base(exe)) {
+		messageBox(a.hwnd, "PixelU (Wii/GameCube) is already open. Close it first, then start the game here.", "RetroPixels Native", mbIconInfo)
 		return
 	}
 	user := dolphin.UserDir(exe)
+	d.importOld(exe)                       // the first time: the old Dolphin's settings and saves
 	_ = dolphin.SetupXboxPads(user, false) // only fills in controllers that aren't set up yet
 
 	record := d.autoRecord() || a.dol.nextGame
@@ -404,7 +378,7 @@ func (a *app) dolPlay(g dolphin.Game) {
 		rec = dolphin.NewRecording(g.Name, dolphin.DumpDir(user), filepath.Join(recordingsDir(), "logs", "last-recording.log"))
 	}
 	if err := cmd.Start(); err != nil {
-		messageBox(a.hwnd, "Couldn't start Dolphin: "+err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, "Couldn't start PixelU: "+err.Error(), "RetroPixels Native", mbIconWarning)
 		return
 	}
 	r := &dolRun{extRun: newExtRun(cmd.Process.Pid), game: g, exe: exe, rec: rec, started: time.Now(),
@@ -446,7 +420,7 @@ func (a *app) dolPlay(g dolphin.Game) {
 	a.updateTitle()
 }
 
-// dolStop ends the game the way Dolphin's own close button does (memory
+// dolStop ends the game the way the engine's own close button does (memory
 // cards are saved); if Dolphin doesn't react it's closed.
 func (a *app) dolStop() {
 	r := a.dol.run
@@ -457,7 +431,7 @@ func (a *app) dolStop() {
 	a.showMessage("Stopping the game…")
 }
 
-// dolEnded tidies up after Dolphin has closed.
+// dolEnded tidies up after the engine has closed.
 func (a *app) dolEnded() {
 	r := a.dol.run
 	if r == nil {
@@ -483,7 +457,7 @@ func (a *app) dolEnded() {
 // ---------------- recording ----------------
 
 // dolToggleRecording is F9 / Record while a GameCube or Wii game plays:
-// Dolphin can only be told to save a game as it starts, so without
+// the engine can only be told to save a game as it starts, so without
 // recording on when the game started it's for the next game.
 func (a *app) dolToggleRecording() bool {
 	r := a.dol.run
@@ -499,7 +473,7 @@ func (a *app) dolToggleRecording() bool {
 			a.showMessage("Recording (saved as a separate video)")
 		}
 	} else if a.dol.nextGame = !a.dol.nextGame; a.dol.nextGame {
-		a.showMessage("Your next game will be recorded (Dolphin can only record from the start of a game)")
+		a.showMessage("Your next game will be recorded (PixelU can only record from the start of a game)")
 	} else {
 		a.showMessage("Your next game won't be recorded")
 	}
@@ -575,7 +549,7 @@ func (a *app) dolHoldWindow() bool {
 			a.dol.closeAfter = true
 			a.dolStop()
 		} else if a.dol.run.stoppingFor(15 * time.Second) {
-			return false // Dolphin isn't closing: don't hold the window hostage
+			return false // PixelU isn't closing: don't hold the window hostage
 		}
 		return true
 	}
@@ -665,7 +639,7 @@ func (a *app) dolEvent(name, detail string) {
 		}
 		d := &a.settings.Dolphin
 		if d.Exe == "" && f.exe != "" {
-			d.Exe = f.exe
+			d.Exe = f.exe // the old Dolphin: only for bringing its settings over
 		}
 		if len(d.Folders) == 0 {
 			d.Folders = f.folders
@@ -681,44 +655,6 @@ func (a *app) dolEvent(name, detail string) {
 		d.Detected = true
 		saveSettings(a.settings)
 		a.dolReloadLibrary()
-	case "dol-install":
-		a.updateTitle()
-		if a.dol.lib != nil {
-			a.dol.lib.showStatus()
-		}
-	case "dol-installed":
-		a.dol.mu.Lock()
-		inst := a.dol.install
-		a.dol.install = nil
-		a.dol.mu.Unlock()
-		ver := ""
-		if inst != nil {
-			ver = " " + inst.Version
-		}
-		a.settings.Dolphin.Exe = detail
-		saveSettings(a.settings)
-		a.showMessage("Dolphin" + ver + " is installed")
-		if a.dol.lib != nil {
-			a.dol.lib.showStatus()
-		}
-		if len(a.settings.Dolphin.Folders) == 0 {
-			a.dolDetect()
-		}
-		if p := a.dol.pendingPlay; p != "" {
-			a.dol.pendingPlay = ""
-			a.openPath(p)
-		}
-	case "dol-install-error":
-		a.dol.mu.Lock()
-		a.dol.install = nil
-		a.dol.mu.Unlock()
-		a.dol.pendingPlay = ""
-		a.updateTitle()
-		if a.dol.lib != nil {
-			a.dol.lib.showStatus()
-		}
-		messageBox(a.hwnd, "Dolphin couldn't be downloaded: "+detail+"\n\nTry again from GameCube / Wii > Download the latest Dolphin, "+
-			"or choose a Dolphin.exe you have (Change Dolphin…).", "RetroPixels Native", mbIconWarning)
 	case "dol-lib":
 		if a.dol.lib != nil {
 			a.dol.lib.fill()
@@ -733,7 +669,7 @@ func (a *app) dolTitle() string {
 	if r := a.dol.run; r != nil {
 		t += " - " + r.game.Name + " (" + r.game.Platform + ")"
 		if r.embed && r.child.Load() == 0 {
-			t += " - Starting in Dolphin…"
+			t += " - Starting in PixelU…"
 		}
 		if r.rec != nil {
 			if on, since := r.rec.Active(); on {
@@ -744,11 +680,11 @@ func (a *app) dolTitle() string {
 			t += " - next game will be recorded"
 		}
 		if a.dol.recWarn != "" {
-			t += " - Not recording: Dolphin isn't saving the picture"
+			t += " - Not recording: PixelU isn't saving the picture"
 		}
 	}
 	a.dol.mu.Lock()
-	saving, step, pc, inst := a.dol.saving, a.dol.saveStep, a.dol.savePct, a.dol.install
+	saving, step, pc := a.dol.saving, a.dol.saveStep, a.dol.savePct
 	a.dol.mu.Unlock()
 	if saving != "" {
 		if step == "ffmpeg" {
@@ -757,31 +693,13 @@ func (a *app) dolTitle() string {
 			t += fmt.Sprintf(" - Saving the recording of %s… %d%%", saving, pc)
 		}
 	}
-	if inst != nil {
-		t += " - " + dolInstallText(*inst)
-	}
 	return t
-}
-
-func dolInstallText(p dolphin.Progress) string {
-	switch p.State {
-	case "finding":
-		return "Finding the latest Dolphin…"
-	case "downloading":
-		if p.Total > 0 {
-			return fmt.Sprintf("Downloading Dolphin %s… %d%% (%s of %s)", p.Version, p.Got*100/p.Total, fmtSize(p.Got), fmtSize(p.Total))
-		}
-		return fmt.Sprintf("Downloading Dolphin %s… %s", p.Version, fmtSize(p.Got))
-	case "installing":
-		return "Unpacking Dolphin…"
-	}
-	return ""
 }
 
 // ---------------- the picture area ----------------
 
 // dolPaint draws the window while a GameCube or Wii game is on (the game
-// itself is Dolphin's docked window on top). Holds frameMu.
+// itself is the engine's docked window on top). Holds frameMu.
 func (a *app) dolPaint(hdc uintptr) bool {
 	r := a.dol.run
 	if r == nil {
@@ -792,9 +710,9 @@ func (a *app) dolPaint(hdc uintptr) bool {
 	if r.child.Load() != 0 {
 		return true
 	}
-	text := "Starting " + r.game.Name + " in Dolphin…"
+	text := "Starting " + r.game.Name + " in PixelU…"
 	if !r.embed {
-		text = r.game.Name + " is playing in Dolphin's own window.\n\nClose the game there (or GameCube / Wii > Stop game) to come back."
+		text = r.game.Name + " is playing in PixelU's own window.\n\nClose the game there (or GameCube / Wii > Stop game) to come back."
 	}
 	call(pSetBkMode, hdc, transparent)
 	old := call(pSelectObject, hdc, a.font)
@@ -811,10 +729,10 @@ func (a *app) dolPaint(hdc uintptr) bool {
 
 // dolIdleNote: a line for the start screen.
 func dolIdleNote() string {
-	return "\nGameCube and Wii games (" + strings.Join(dolphinExts(), " ") + ") play through Dolphin: GameCube / Wii > Library."
+	return "\nGameCube and Wii games (" + strings.Join(dolphinExts(), " ") + ") play in PixelU (Wii/GameCube engine based on Dolphin, GPL): GameCube / Wii > Library."
 }
 
-// ---------------- keys while Dolphin has the keyboard ----------------
+// ---------------- keys while the engine has the keyboard ----------------
 
 // While the docked game screen has the keyboard, this window's own keys
 // don't arrive here, so a keyboard hook takes F11 / Alt+Enter (fullscreen),
@@ -911,101 +829,43 @@ func dolKeyHook(code, wp, lp uintptr) uintptr {
 	return call(dpCallNextHookEx, 0, code, wp, lp)
 }
 
-// ---------------- Dolphin itself ----------------
+// ---------------- the engine itself ----------------
 
-func (a *app) dolDownload(thenPlay string) {
-	if a.dol.run != nil || dolphin.Running("Dolphin.exe") {
-		messageBox(a.hwnd, "Close Dolphin first.", "RetroPixels Native", mbIconInfo)
-		return
-	}
-	a.dol.mu.Lock()
-	if a.dol.install != nil {
-		a.dol.mu.Unlock()
-		return
-	}
-	a.dol.install = &dolphin.Progress{State: "finding"}
-	a.dol.mu.Unlock()
-	a.dol.pendingPlay = thenPlay
-	a.updateTitle()
-	go func() {
-		in := dolphin.NewInstaller()
-		in.Progress = func(p dolphin.Progress) {
-			a.dol.mu.Lock()
-			if a.dol.install != nil {
-				*a.dol.install = p
-			}
-			a.dol.mu.Unlock()
-			a.event("dol-install", "")
-		}
-		exe, _, err := in.Run()
-		if err != nil {
-			a.event("dol-install-error", err.Error())
-			return
-		}
-		a.event("dol-installed", exe)
-	}()
-}
-
-// dolChooseExe asks for Dolphin.exe and returns it ("" = cancelled).
-func (a *app) dolChooseExe() string {
-	buf := make([]uint16, 32768)
-	o := openFileName{
-		Owner:   a.hwnd,
-		Filter:  u16z("Dolphin (Dolphin.exe)\x00Dolphin.exe\x00Programs (*.exe)\x00*.exe\x00\x00"),
-		File:    &buf[0],
-		MaxFile: uint32(len(buf)),
-		Title:   u16("Choose Dolphin.exe"),
-		Flags:   ofnFileMustExist | ofnPathMustExist | ofnHideReadOnly | ofnExplorer | ofnNoChangeDir,
-	}
-	if exe := a.settings.Dolphin.exe(); exe != "" {
-		o.InitialDir = u16(filepath.Dir(exe))
-	}
-	o.StructSize = uint32(unsafe.Sizeof(o))
-	if call(pGetOpenFileNameW, uintptr(unsafe.Pointer(&o))) == 0 {
-		return ""
-	}
-	p := syscall.UTF16ToString(buf)
-	if !strings.EqualFold(filepath.Ext(p), ".exe") {
-		messageBox(a.hwnd, "That isn't a program (.exe).", "RetroPixels Native", mbIconWarning)
-		return ""
-	}
-	a.settings.Dolphin.Exe = p
-	saveSettings(a.settings)
-	if a.dol.lib != nil {
-		a.dol.lib.showStatus()
-	}
-	if len(a.settings.Dolphin.Folders) == 0 {
-		a.dolDetect()
-	}
-	return p
-}
+// dolExe is PixelU's Wii / GameCube engine, or "".
+func (a *app) dolExe() string { return a.settings.Dolphin.exe(a.settings.PixelU.Exe) }
 
 func (a *app) dolOpenEmulator() {
-	exe := a.settings.Dolphin.exe()
+	exe := a.dolExe()
 	if exe == "" {
-		messageBox(a.hwnd, "Dolphin isn't set up yet: GameCube / Wii > Download the latest Dolphin, or Change Dolphin….", "RetroPixels Native", mbIconInfo)
+		messageBox(a.hwnd, noEngine, "RetroPixels Native", mbIconInfo)
 		return
 	}
-	if dolphin.Running("Dolphin.exe") {
-		messageBox(a.hwnd, "Dolphin is already open.", "RetroPixels Native", mbIconInfo)
+	if dolphin.Running(filepath.Base(exe)) {
+		messageBox(a.hwnd, "PixelU (Wii/GameCube) is already open.", "RetroPixels Native", mbIconInfo)
 		return
 	}
+	a.settings.Dolphin.importOld(exe)
 	_ = dolphin.SetupXboxPads(dolphin.UserDir(exe), false)
 	if err := dolphin.Command(exe).Start(); err != nil {
-		messageBox(a.hwnd, "Couldn't start Dolphin: "+err.Error(), "RetroPixels Native", mbIconWarning)
+		messageBox(a.hwnd, "Couldn't start PixelU: "+err.Error(), "RetroPixels Native", mbIconWarning)
 	}
 }
 
 func (a *app) dolSetupPads() {
-	exe := a.settings.Dolphin.exe()
-	user := dolphin.UserDir(exe)
-	if a.dol.run != nil || dolphin.Running("Dolphin.exe") {
-		messageBox(a.hwnd, "Close Dolphin first: it saves its own settings when it closes.", "RetroPixels Native", mbIconInfo)
+	exe := a.dolExe()
+	if exe == "" {
+		messageBox(a.hwnd, noEngine, "RetroPixels Native", mbIconInfo)
 		return
 	}
+	user := dolphin.UserDir(exe)
+	if a.dol.run != nil || dolphin.Running(filepath.Base(exe)) {
+		messageBox(a.hwnd, "Close PixelU (Wii/GameCube) first: it saves its own settings when it closes.", "RetroPixels Native", mbIconInfo)
+		return
+	}
+	a.settings.Dolphin.importOld(exe)
 	gc, wii := dolphin.PadState(user, "GCPadNew.ini", "GCPad1"), dolphin.PadState(user, "WiimoteNew.ini", "Wiimote1")
 	if gc == "custom" || wii == "custom" {
-		if messageBox(a.hwnd, "Replace your current Dolphin controller set-up with the Xbox layout? (Your old settings file is backed up.)",
+		if messageBox(a.hwnd, "Replace your current PixelU controller set-up with the Xbox layout? (Your old settings file is backed up.)",
 			"RetroPixels Native", mbYesNo|mbIconInfo) != idYes {
 			return
 		}
@@ -1014,17 +874,17 @@ func (a *app) dolSetupPads() {
 		messageBox(a.hwnd, "Couldn't set up the controller: "+err.Error(), "RetroPixels Native", mbIconWarning)
 		return
 	}
-	a.showMessage("Xbox controller set up in Dolphin")
+	a.showMessage("Xbox controller set up in PixelU")
 }
 
 func (a *app) dolShowLayout() {
-	user := dolphin.UserDir(a.settings.Dolphin.exe())
+	user := dolphin.UserDir(a.dolExe())
 	label := map[string]string{"xbox": "Xbox controller ✓", "custom": "your own set-up", "none": "not set up yet"}
 	messageBox(a.hwnd, "GameCube controller (port 1): "+label[dolphin.PadState(user, "GCPadNew.ini", "GCPad1")]+"\n"+
 		"Wii Remote + Nunchuk: "+label[dolphin.PadState(user, "WiimoteNew.ini", "Wiimote1")]+"\n\n"+
 		dolphin.PadLayout+"\n\n"+
-		"The controller is set up automatically the first time a game starts; fine-tune it in Dolphin > Controllers "+
-		"(GameCube / Wii > Open Dolphin). Save states are in Dolphin: Shift+F1 saves, F1 loads.",
+		"The controller is set up automatically the first time a game starts; fine-tune it in PixelU > Controllers "+
+		"(GameCube / Wii > Open PixelU). Save states are in PixelU: Shift+F1 saves, F1 loads.",
 		"Controller layout", mbIconInfo)
 }
 

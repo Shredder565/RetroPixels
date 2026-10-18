@@ -340,7 +340,7 @@ type recSession struct {
 	Launched time.Time
 	Ended    time.Time
 	dumpDir  string
-	Emu      string // "Dolphin" or "PixelU": named in messages
+	Emu      string // "PixelU (Wii/GameCube)" or "PixelU" (Wii U): named in messages
 	Quality  string // "" = the Recordings setting
 	NoCrop   bool   // keep every pixel: the emulator saves only the game's own picture, without bars
 	ownDir   bool   // dumpDir was made for this game alone: removed once the video is made
@@ -389,7 +389,7 @@ func setRecError(msg string) {
 // the other fields after).
 func newRecSession(game, dumpDir string) *recSession {
 	now := time.Now()
-	return &recSession{Game: game, Launched: now, dumpDir: dumpDir, Emu: "Dolphin",
+	return &recSession{Game: game, Launched: now, dumpDir: dumpDir, Emu: wiiEngineLabel,
 		clips: []clip{{From: mark{Audio: 0, Wall: now, Edge: true}, Open: true}}}
 }
 
@@ -528,7 +528,7 @@ func (s *recSession) upToDate() string {
 	if s.Emu == "PixelU" {
 		return "A PixelU build that can record (made with RetroPixels' recording support) is needed."
 	}
-	return "An up-to-date Dolphin (5.0 or newer) is needed."
+	return `The PixelU folder's Wii/GameCube engine (wii\PixelU-Wii.exe) should save it; try an up-to-date PixelU folder.`
 }
 
 // ---------------- making the video ----------------
@@ -1081,7 +1081,7 @@ func listRecordings() []map[string]any {
 func recControl(action string) (string, error) {
 	runMu.Lock()
 	gameOn := running != nil
-	emu := "Dolphin"
+	emu := "PixelU"
 	if gameOn && running.Emu != "" {
 		emu = running.Emu
 	}

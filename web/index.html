@@ -488,22 +488,21 @@
   <!-- ===================== GameCube & Wii tab ===================== -->
   <section id="gcTab" hidden>
     <div id="gcBrowserOnly" class="sw-sec" hidden>
-      <p style="margin:0">GameCube and Wii games play in <strong>Dolphin</strong> through the RetroPixels desktop app (RetroPixels.exe).</p>
+      <p style="margin:0">GameCube and Wii games play in <strong>PixelU</strong> (Wii/GameCube engine based on Dolphin, GPL) through the RetroPixels desktop app (RetroPixels.exe).</p>
     </div>
     <div id="gcDesktop" hidden>
-      <div class="sw-locked" id="gcLocked" hidden><b>Dolphin is open.</b> Settings changes are paused until you close it.</div>
+      <div class="sw-locked" id="gcLocked" hidden><b>PixelU (Wii/GameCube) is open.</b> Settings changes are paused until you close it.</div>
       <div class="gc-layout">
         <section class="sw-sec gc-lib">
           <h2 class="sw-h" id="gcTitle">GameCube library</h2>
           <div class="sw-setup">
-            <div class="sw-emu" id="gcEmu">Looking for Dolphin…</div>
+            <div class="sw-emu" id="gcEmu">Looking for PixelU…</div>
             <div class="sw-emu" id="gcFolders">Looking for games…</div>
           </div>
           <div class="sw-row" style="margin-top:6px">
-            <button class="btn ghost sm" id="gcChooseExe">Change Dolphin…</button>
             <button class="btn ghost sm" id="gcAddFolder">Add games folder…</button>
             <button class="btn ghost sm" id="gcRescan" title="Search again near your other games">Find games again</button>
-            <label class="sw-check" title="Games play inside this window instead of a separate Dolphin window"><input type="checkbox" id="gcEmbed"> Play inside RetroPixels</label>
+            <label class="sw-check" title="Games play inside this window instead of a separate PixelU window"><input type="checkbox" id="gcEmbed"> Play inside RetroPixels</label>
             <label class="sw-check"><input type="checkbox" id="gcFull"> Start games fullscreen</label>
             <label class="sw-check"><input type="checkbox" id="gcAutoRec"> Record games automatically</label>
           </div>
@@ -520,7 +519,7 @@
           </div>
           <p class="muted" id="gcMsg" style="font-size:14px;margin:6px 0"></p>
           <div class="sw-grid" id="gcGrid"></div>
-          <p class="muted" style="font-size:13px;margin:12px 0 0">Controller: D-pad or left stick to move, <span class="key k-a">A</span> to play. Save states are in Dolphin (Shift+F1 to save, F1 to load).</p>
+          <p class="muted" style="font-size:13px;margin:12px 0 0">Controller: D-pad or left stick to move, <span class="key k-a">A</span> to play. Save states are in PixelU (Shift+F1 to save, F1 to load).</p>
         </section>
         <aside class="gc-side">
           <section class="sw-sec">
@@ -533,16 +532,19 @@
               <span class="vol-ctl" id="gcVol"><button class="vol-mute" data-volmute title="Mute" aria-label="Mute">🔊</button><input type="range" min="0" max="100" step="1" value="100" id="gcVolRange" data-volrange><output data-volout>100%</output></span></div>
           </section>
           <section class="sw-sec">
-            <h2 class="sw-h" style="font-size:16px">Dolphin settings</h2>
+            <h2 class="sw-h" style="font-size:16px">PixelU settings</h2>
             <div id="gcSettings"></div>
             <div class="rs-bar" id="gcBar" hidden><span id="gcChanged"></span><button class="btn ghost sm" id="gcDiscard">Discard</button><button class="btn sm gc-btn" id="gcSave">Save</button></div>
           </section>
           <section class="sw-sec">
+            <h2 class="sw-h" style="font-size:16px">PixelU</h2>
+            <p class="muted" style="font-size:13px;margin:0 0 10px">GameCube and Wii games play in <b>PixelU</b> (Wii/GameCube engine based on <b>Dolphin</b>, GPL), RetroPixels' emulator. Dolphin is the open-source GameCube and Wii emulator (GPL-2.0+).
+              Your Dolphin controller settings, memory cards and Wii saves are copied over the first time a game starts (nothing is overwritten).</p>
             <div class="rg-btns">
-              <button class="btn ghost sm" id="gcOpenDolphin">Open Dolphin</button>
-              <button class="btn ghost sm" id="gcOpenConfig">Open Dolphin settings folder</button>
+              <button class="btn ghost sm" id="gcOpenDolphin">Open PixelU (Wii/GameCube)</button>
+              <button class="btn ghost sm" id="gcOpenConfig">Open its settings folder</button>
             </div>
-            <p class="muted" style="font-size:12px;margin:8px 0 0">Use Dolphin itself for memory cards, cheats and per-game settings.</p>
+            <p class="muted" style="font-size:12px;margin:8px 0 0">Use PixelU itself for memory cards, cheats and per-game settings.</p>
           </section>
         </aside>
       </div>
@@ -788,7 +790,7 @@
 
   const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-  // What's running (Dolphin) and the recorder's state, from the desktop app.
+  // What's running (PixelU or MAME) and the recorder's state, from the desktop app.
   let appStatus = null;
   function renderStatus(status) {
     appStatus = status;
@@ -803,7 +805,7 @@
     volBar.hidden = !dolOn;
     if (status.running) {
       document.getElementById("swNowName").textContent = status.running.name;
-      const emu = esc(status.running.emu || "Dolphin");
+      const emu = esc(status.running.emu || "PixelU");
       document.getElementById("swNowHint").innerHTML = embedded
         ? `${emu} · click the game to use the keyboard · Stop game to come back here`
         : `Playing in ${emu} · close the game window to come back here`;
@@ -898,7 +900,7 @@
     lastRec = rec;
     badge.hidden = !rec.active;
     btn.hidden = !gameOn;
-    // Dolphin can only record a game from its start, so without recording on
+    // PixelU can only record a game from its start, so without recording on
     // when the game started, the button is for the next game.
     btn.textContent = rec.active ? "■ Stop recording" : rec.dumping ? "● Record" : rec.next ? "✓ Next game will be recorded" : "● Record next game";
     btn.title = rec.active ? "Stop recording. The video is saved when the game ends"
@@ -1083,7 +1085,7 @@
             <small class="muted">${fmtSize(f.size)}</small><button class="btn ghost sm" data-play="${esc(f.name)}">Play</button></div>`).join("")
           : '<p class="muted" style="margin:0;font-size:14px">No recordings yet.</p>'}</div>
       </div>
-      <p class="muted" style="font-size:13px;margin:0">Dolphin saves the game's own picture and sound while you play, so videos show only the game —
+      <p class="muted" style="font-size:13px;margin:0">PixelU saves the game's own picture and sound while you play, so videos show only the game —
         no mouse pointer, other windows or black bars, and no Discord or other apps' sound — and play back smoothly even if the game slowed down.
         The video is made when the game ends (it takes a little while for long games).</p>`;
     const set = body => swAct(() => api("/api/rec/settings", body), "Recording settings saved").then(() => loadRecordings());
@@ -1286,7 +1288,7 @@
     try { gotMame(await api("/api/mame/install", { version: v })); } catch (e) { toast(e.message, true); }
   });
 
-  // ---------- GameCube & Wii (Dolphin) ----------
+  // ---------- GameCube & Wii (PixelU's Wii/GameCube engine, based on Dolphin) ----------
   let gcGames = [], gcStatus = null, gcFilter = "all", gcSettings = [], gcChanges = {}, gcLocked = false;
   let gcPlatform = "gc"; // which tab is showing: "gc" or "wii"
   function setGCPlatform(p) {
@@ -1313,43 +1315,15 @@
     loadGCSettings();
   }
 
-  // One-click download of the official Dolphin when it isn't installed.
-  let dolPoll = null;
-  function renderDolInstall(inst) {
-    const el = document.getElementById("gcDolNote");
-    if (!inst) { el.innerHTML = ""; clearInterval(dolPoll); dolPoll = null; return; }
-    const busy = ["finding", "downloading", "installing"].includes(inst.state);
-    const pct = inst.total > 0 ? Math.min(100, Math.round(inst.got / inst.total * 100)) : 0;
-    const label = { finding: "Finding the latest version…",
-      downloading: `Downloading Dolphin ${esc(inst.version || "")}… ${pct}% (${fmtSize(inst.got)}${inst.total > 0 ? " of " + fmtSize(inst.total) : ""})`,
-      installing: "Unpacking…" }[inst.state] || "";
-    el.innerHTML = `<div class="rec-note ${inst.state === "error" ? "err" : ""}" style="${inst.state === "error" ? "" : "background:#1d1a33;border:1px solid #7b6cff"}">
-      <b>GameCube and Wii games need Dolphin</b>, a free emulator. RetroPixels can download the latest official version from dolphin-emu.org (a one-time download) into a "Dolphin" folder next to RetroPixels. Games still play inside this window.
-      ${inst.state === "error" ? `<br><span class="bad">${esc(inst.error)}</span>` : ""}
-      <div style="margin-top:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-        ${busy ? `<div style="flex:1;min-width:200px;height:8px;background:#0e0f13;border-radius:99px;overflow:hidden"><div style="width:${pct}%;height:100%;background:#7b6cff"></div></div><span style="font-size:13px">${label}</span>`
-               : `<button class="btn sm gc-btn" data-doldl>${inst.state === "error" ? "Try again" : "Download Dolphin"}</button>`}
-      </div></div>`;
-    const b = el.querySelector("[data-doldl]");
-    if (b) b.addEventListener("click", async () => {
-      try { const r = await api("/api/dol/install", {}); renderDolInstall(r.install); } catch (e) { toast(e.message, true); }
-    });
-    if (busy && !dolPoll) dolPoll = setInterval(async () => {
-      try {
-        const r = await api("/api/dol/install");
-        if (r.exe) { clearInterval(dolPoll); dolPoll = null; toast("Dolphin is installed — pick a game to play"); loadGC(); return; }
-        renderDolInstall(r.install);
-        if (!["finding", "downloading", "installing"].includes(r.install.state)) { clearInterval(dolPoll); dolPoll = null; }
-      } catch (e) { /* keep trying */ }
-    }, 700);
-  }
-
   function renderGCSetup() {
     const st = gcStatus;
     document.getElementById("gcEmu").innerHTML = st.exe
-      ? `<span class="muted">Emulator</span><br><b>Dolphin</b> <small class="muted">${esc(st.version || "")}</small><br><small class="muted">${esc(st.exe)}</small>`
-      : '<span class="muted">Emulator</span><br><b style="color:var(--warn)">Dolphin not found</b><br><small class="muted">Download it below, or click "Change Dolphin…" to pick your own Dolphin.exe</small>';
-    renderDolInstall(st.exe ? null : st.install);
+      ? `<span class="muted">Emulator</span><br><b>PixelU</b> <small class="muted">Wii/GameCube engine, based on Dolphin${st.version ? " · " + esc(st.version) : ""}</small><br><small class="muted">${esc(st.exe)}</small>`
+      : '<span class="muted">Emulator</span><br><b style="color:var(--warn)">PixelU\'s Wii/GameCube engine wasn\'t found</b><br><small class="muted">Put the PixelU folder next to RetroPixels.exe (it has wii\\PixelU-Wii.exe inside), then come back to this tab</small>';
+    document.getElementById("gcDolNote").innerHTML = st.exe ? "" :
+      `<div class="rec-note err">PixelU's Wii/GameCube engine wasn't found. Put the PixelU folder next to RetroPixels.exe.</div>`;
+    document.getElementById("gcOpenDolphin").disabled = !st.exe;
+    document.getElementById("gcOpenConfig").disabled = !st.exe;
     const f = st.folders || [];
     const el = document.getElementById("gcFolders");
     el.innerHTML = `<span class="muted">Games folders</span>${f.length ? f.map((d, i) =>
@@ -1483,12 +1457,12 @@
           <div><b>Nunchuk C / Z</b><span>LB / LT</span></div><div><b>− / + / Home</b><span>View / Menu / R3</span></div>
         </div></details>
       <button class="btn ghost sm" id="gcPadSetup" ${gcLocked ? "disabled" : ""}>${p.gc === "xbox" && p.wii === "xbox" ? "Reset to Xbox layout" : "Set up Xbox controller"}</button>
-      <p class="muted" style="font-size:12px;margin:8px 0 0">Set up automatically the first time a game starts. Fine-tune in Dolphin → Controllers.</p>`;
+      <p class="muted" style="font-size:12px;margin:8px 0 0">Set up automatically the first time a game starts. Fine-tune in PixelU → Controllers.</p>`;
     el.querySelector("#gcPadSetup").addEventListener("click", async () => {
       if (p.gc === "custom" || p.wii === "custom") {
-        if (!confirm("Replace your current Dolphin controller set-up with the Xbox layout? (Your old settings file is backed up.)")) return;
+        if (!confirm("Replace your current PixelU controller set-up with the Xbox layout? (Your old settings file is backed up.)")) return;
       }
-      if (await gcAction({ action: "setup-pads" }, "Xbox controller set up in Dolphin")) loadGCSettings();
+      if (await gcAction({ action: "setup-pads" }, "Xbox controller set up in PixelU")) loadGCSettings();
     });
   }
 
@@ -1501,7 +1475,6 @@
       document.querySelectorAll("#gcFilter button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
       renderGCGrid();
     });
-    document.getElementById("gcChooseExe").addEventListener("click", () => gcAction({ action: "choose-exe" }));
     document.getElementById("gcAddFolder").addEventListener("click", async () => {
       toast("Choose the folder in the window that just opened");
       const before = (gcStatus && gcStatus.folders || []).length;
@@ -1515,13 +1488,13 @@
     document.getElementById("gcEmbed").addEventListener("change", e => gcAction({ action: "embed", on: e.target.checked }));
     document.getElementById("gcAutoRec").addEventListener("change", e =>
       swAct(() => api("/api/rec/settings", { auto: e.target.checked }), e.target.checked ? "Games will be recorded automatically" : "Automatic recording off"));
-    document.getElementById("gcOpenDolphin").addEventListener("click", () => gcAction({ action: "open-dolphin" }, "Opening Dolphin…"));
+    document.getElementById("gcOpenDolphin").addEventListener("click", () => gcAction({ action: "open-dolphin" }, "Opening PixelU…"));
     document.getElementById("gcOpenConfig").addEventListener("click", () => gcAction({ action: "open-config" }));
     document.getElementById("gcDiscard").addEventListener("click", () => { gcChanges = {}; renderGCSettings(); });
     document.getElementById("gcSave").addEventListener("click", async () => {
       try {
         const r = await api("/api/dol/settings", { changes: gcChanges });
-        gcSettings = r.settings; gcChanges = {}; renderGCSettings(); toast("Dolphin settings saved");
+        gcSettings = r.settings; gcChanges = {}; renderGCSettings(); toast("PixelU settings saved");
       } catch (e) { toast(e.message, true); }
     });
   }

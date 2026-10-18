@@ -9,7 +9,6 @@ import (
 	"math"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -219,7 +218,8 @@ func setSessionVolume(vol com, level float32, mute bool) bool {
 	return !failed(comCall(vol, vtSetMute, m, 0)) && ok
 }
 
-// isProgram tells whether process pid runs a program called exe (e.g. Dolphin.exe).
+// isProgram tells whether process pid runs a program called exe (e.g.
+// PixelU-Wii.exe): the engine's own file name, whatever it is.
 func isProgram(pid uint32, exe string, cache map[uint32]bool) bool {
 	if r, ok := cache[pid]; ok {
 		return r
@@ -230,8 +230,7 @@ func isProgram(pid uint32, exe string, cache map[uint32]bool) bool {
 		size := new(uint32)
 		*size = uint32(len(buf))
 		if ok, _, _ := pQueryFullProcessImageNameW.Call(uintptr(h), 0, uintptr(unsafe.Pointer(&buf[0])), ptr(size)); ok != 0 {
-			name := filepath.Base(syscall.UTF16ToString(buf[:*size]))
-			r = strings.EqualFold(name, exe) || strings.EqualFold(name, "Dolphin.exe")
+			r = IsProgram(syscall.UTF16ToString(buf[:*size]), exe)
 		}
 		syscall.CloseHandle(h)
 	}

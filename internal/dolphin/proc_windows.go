@@ -6,7 +6,7 @@ import (
 	"unsafe"
 )
 
-// Running tells whether a program (by file name, e.g. Dolphin.exe) is running.
+// Running tells whether a program (by file name, e.g. PixelU-Wii.exe) is running.
 func Running(image string) bool {
 	snap, err := syscall.CreateToolhelp32Snapshot(syscall.TH32CS_SNAPPROCESS, 0)
 	if err != nil {
