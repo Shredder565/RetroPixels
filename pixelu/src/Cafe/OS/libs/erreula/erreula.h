@@ -1,12 +1,12 @@
-﻿#pragma once
+﻿// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// erreula: the system error viewer.
+#pragma once
 #include "Cafe/OS/RPL/COSModule.h"
 
-namespace nn 
+namespace nn::erreula
 {
-	namespace erreula
-	{
-		void render(bool mainWindow);
+	// draws the dialog, if one is up; called by the renderer every frame
+	void render(bool mainWindow);
 
-		COSModule* GetModule();
-	}
+	COSModule* GetModule();
 }

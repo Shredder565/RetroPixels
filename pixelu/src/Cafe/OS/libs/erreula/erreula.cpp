@@ -1,587 +1,502 @@
-﻿#include "Cafe/OS/common/OSCommon.h"
-#include "erreula.h"
+﻿// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Written from scratch.
+//
+// erreula is the system's error viewer: a game asks it to show an error code
+// or a message with one or two buttons, keeps calling ErrEulaCalc every frame
+// and polls which button the user picked. PixelU draws the dialog with imgui
+// over the game picture (render(), called by the renderer every frame) and
+// mimics the fade in / fade out timing of the real viewer.
+//
+// Embedded mode (--rp-embed, RetroPixels): when online play isn't available,
+// error code dialogs about online services (codes 102-xxxx account server,
+// 103-xxxx internet connection, 115-xxxx Miiverse, 118-xxxx online play) are
+// answered with OK on the user's behalf and never drawn, so the game carries
+// on instead of stopping on a dialog that can't help. Nothing else changes.
+
+#include "Cafe/OS/common/OSCommon.h"
+#include "Cafe/OS/libs/coreinit/coreinit_FS.h"
+#include "Cafe/OS/libs/coreinit/coreinit_Time.h"
+#include "Cafe/OS/libs/coreinit/coreinit_DynLoad.h"
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
+#include "config/ActiveSettings.h"
+#include "config/LaunchSettings.h"
 #include "util/helpers/helpers.h"
+#include "erreula.h"
 
 #include <imgui.h>
 #include "imgui/imgui_extension.h"
 
-#include "Cafe/OS/libs/coreinit/coreinit_FS.h"
-#include "Cafe/OS/libs/coreinit/coreinit_Time.h"
-#include "Cafe/OS/libs/vpad/vpad.h"
-#include "OS/libs/coreinit/coreinit_DynLoad.h"
-#include "config/ActiveSettings.h"
-#include "config/LaunchSettings.h"
-
-namespace nn
+namespace nn::erreula
 {
-namespace erreula
-{
-
-	enum class ErrorDialogType : uint32
+	namespace
 	{
-		Code = 0,
-		Text = 1,
-		TextOneButton = 2,
-		TextTwoButton = 3
-	};
-
-	static const sint32 FADE_TIME = 80;
-
-	enum class ErrEulaState : uint32
-	{
-		Hidden = 0,
-		Appearing = 1,
-		Visible = 2,
-		Disappearing = 3
-	};
-
-	enum class ResultType : uint32
-	{
-		None = 0,
-		Finish = 1,
-		Next = 2,
-		Jump = 3,
-		Password = 4
-	};
-
-	struct AppearError
-	{
-		AppearError() = default;
-		AppearError(const AppearError& o)
+		// ErrEula::ErrorType
+		enum class DialogKind : uint32
 		{
-			errorType = o.errorType;
-			screenType = o.screenType;
-			controllerType = o.controllerType;
-			holdType = o.holdType;
-			errorCode = o.errorCode;
-			framerate = o.framerate;
-			text = o.text;
-			button1Text = o.button1Text;
-			button2Text = o.button2Text;
-			title = o.title;
-			drawCursor = o.drawCursor;
-		}
-
-		betype<ErrorDialogType> errorType;
-		uint32be screenType;
-		uint32be controllerType;
-		uint32be holdType;
-		uint32be errorCode;
-		uint32be framerate;
-		MEMPTR<uint16be> text;
-		MEMPTR<uint16be> button1Text;
-		MEMPTR<uint16be> button2Text;
-		MEMPTR<uint16be> title;
-		uint8 padding[3];
-		bool drawCursor{};
-	};
-
-	using AppearArg = AppearError;
-
-	static_assert(sizeof(AppearError) == 0x2C); // maybe larger
-
-	struct HomeNixSignArg_t
-	{
-		uint32be framerate;
-	};
-
-	static_assert(sizeof(HomeNixSignArg_t) == 0x4); // maybe larger
-
-	struct ControllerInfo_t
-	{
-		MEMPTR<VPADStatus_t> vpadStatus;
-		MEMPTR<KPADStatus_t> kpadStatus[4]; // or 7 now like KPAD_MAX_CONTROLLERS?
-	};
-
-	static_assert(sizeof(ControllerInfo_t) == 0x14); // maybe larger
-
-	class ErrEulaInstance
-	{
-	  public:
-		enum class BUTTON_SELECTION : uint32
-		{
-			NONE = 0xFFFFFFFF,
-			LEFT = 0,
-			RIGHT = 1,
+			Code = 0,          // error code, OK button
+			Text = 1,          // message, OK button
+			TextOneButton = 2, // message, one custom button
+			TextTwoButton = 3, // message, two custom buttons
 		};
 
-		void Init()
+		// ErrEula::State
+		enum class ViewerState : uint32
 		{
-			m_buttonSelection = BUTTON_SELECTION::NONE;
-			m_resultCode = -1;
-			m_resultCodeForLeftButton = 0;
-			m_resultCodeForRightButton = 0;
-			m_autoAnswer = false;
-			SetState(ErrEulaState::Hidden);
-		}
+			Hidden = 0,
+			Appearing = 1,
+			Visible = 2,
+			Disappearing = 3,
+		};
 
-		void DoAppearError(AppearArg* arg, bool autoAnswer = false)
+		// ErrEula::ResultType
+		enum class ResultKind : uint32
 		{
-			m_autoAnswer = autoAnswer;
-			m_buttonSelection = BUTTON_SELECTION::NONE;
-			m_resultCode = -1;
-			m_resultCodeForLeftButton = -1;
-			m_resultCodeForRightButton = -1;
-			// for standard dialog its 0 and 1?
-			m_resultCodeForLeftButton = 0;
-			m_resultCodeForRightButton = 1;
-			SetState(ErrEulaState::Appearing);
-		}
+			None = 0,
+			Finish = 1,
+			Next = 2,
+			Jump = 3,
+			Password = 4,
+		};
 
-		void DoDisappearError()
-		{
-			if(m_state != ErrEulaState::Visible)
-				return;
-			SetState(ErrEulaState::Disappearing);
-		}
+		constexpr uint64 kFadeMs = 80;
 
-		void DoCalc()
+		// ErrEula::AppearArg as the game passes it
+		struct AppearArg
 		{
-			// appearing and disappearing state will automatically advance after some time
-			if (m_state == ErrEulaState::Appearing || m_state == ErrEulaState::Disappearing)
+			betype<DialogKind> kind;
+			uint32be screenType;
+			uint32be controllerType;
+			uint32be holdType;
+			uint32be errorCode; // XXXYYYY, shown as XXX-YYYY
+			uint32be framerate;
+			MEMPTR<uint16be> text;
+			MEMPTR<uint16be> button1Text;
+			MEMPTR<uint16be> button2Text;
+			MEMPTR<uint16be> title;
+			uint8 pad[3];
+			bool drawCursor;
+		};
+		static_assert(sizeof(AppearArg) == 0x2C);
+
+		struct HomeNixSignArg
+		{
+			uint32be framerate;
+		};
+		static_assert(sizeof(HomeNixSignArg) == 4);
+
+		struct ControllerInfo
+		{
+			MEMPTR<void> vpad;
+			MEMPTR<void> kpad[4];
+		};
+		static_assert(sizeof(ControllerInfo) == 0x14);
+
+		enum class Button : sint32
+		{
+			None = -1,
+			Left = 0,
+			Right = 1,
+		};
+
+		// One error viewer, alive between ErrEulaCreate and ErrEulaDestroy.
+		class Viewer
+		{
+		public:
+			Viewer()
 			{
-				uint32 elapsedTick = coreinit::OSGetTime() - m_lastStateChange;
-				if (elapsedTick > coreinit::EspressoTime::ConvertMsToTimerTicks(FADE_TIME))
+				SetState(ViewerState::Hidden);
+			}
+
+			void Appear(bool answerForUser)
+			{
+				m_answerForUser = answerForUser;
+				m_chosen = Button::None;
+				m_result = -1;
+				m_resultLeft = 0;
+				m_resultRight = 1;
+				SetState(ViewerState::Appearing);
+			}
+
+			void Disappear()
+			{
+				if (m_state == ViewerState::Visible)
+					SetState(ViewerState::Disappearing);
+			}
+
+			// Fades finish on their own once kFadeMs have passed.
+			void Update()
+			{
+				if (!IsFading() || ElapsedTicks() <= FadeTicks())
+					return;
+				if (m_state == ViewerState::Appearing)
 				{
-					SetState(m_state == ErrEulaState::Appearing ? ErrEulaState::Visible : ErrEulaState::Hidden);
-					// PixelU: answered for the user, OK is "pressed" as soon as the dialog could take a press
-					if (m_state == ErrEulaState::Visible && m_autoAnswer && m_buttonSelection == BUTTON_SELECTION::NONE)
-						SetButtonSelection(BUTTON_SELECTION::LEFT);
+					SetState(ViewerState::Visible);
+					if (m_answerForUser && m_chosen == Button::None)
+						Choose(Button::Left); // OK
+				}
+				else
+				{
+					SetState(ViewerState::Hidden);
 				}
 			}
-		}
 
-		bool IsDecideSelectButtonError() const
-		{
-			return m_buttonSelection != BUTTON_SELECTION::NONE;
-		}
-
-		bool IsDecideSelectLeftButtonError() const
-		{
-			return m_buttonSelection != BUTTON_SELECTION::LEFT;
-		}
-
-		bool IsDecideSelectRightButtonError() const
-		{
-			return m_buttonSelection != BUTTON_SELECTION::RIGHT;
-		}
-
-		void SetButtonSelection(BUTTON_SELECTION selection)
-		{
-			cemu_assert_debug(m_buttonSelection == BUTTON_SELECTION::NONE);
-			m_buttonSelection = selection;
-			cemu_assert_debug(selection == BUTTON_SELECTION::LEFT || selection == BUTTON_SELECTION::RIGHT);
-			m_resultCode = selection == BUTTON_SELECTION::LEFT ? m_resultCodeForLeftButton : m_resultCodeForRightButton;
-		}
-
-		ErrEulaState GetState() const
-		{
-			return m_state;
-		}
-
-		// PixelU: the current dialog is answered automatically and not drawn
-		bool IsAutoAnswered() const
-		{
-			return m_autoAnswer;
-		}
-
-		sint32 GetResultCode() const
-		{
-			return m_resultCode;
-		}
-
-		ResultType GetResultType() const
-		{
-		  if(m_resultCode == -1)
-			  return ResultType::None;
-		  if(m_resultCode < 10)
-			  return ResultType::Finish;
-		  if(m_resultCode >= 9999)
-			  return ResultType::Next;
-		  if(m_resultCode == 40)
-			  return ResultType::Password;
-		  return ResultType::Jump;
-		}
-
-		float GetFadeTransparency() const
-		{
-			if(m_state == ErrEulaState::Appearing || m_state == ErrEulaState::Disappearing)
+			void Choose(Button button)
 			{
-				uint32 elapsedTick = coreinit::OSGetTime() - m_lastStateChange;
-				if(m_state == ErrEulaState::Appearing)
-					return std::min<float>(1.0f, (float)elapsedTick / (float)coreinit::EspressoTime::ConvertMsToTimerTicks(FADE_TIME));
-				else
-					return std::max<float>(0.0f, 1.0f - (float)elapsedTick / (float)coreinit::EspressoTime::ConvertMsToTimerTicks(FADE_TIME));
+				if (m_chosen != Button::None)
+					return;
+				m_chosen = button;
+				m_result = button == Button::Left ? m_resultLeft : m_resultRight;
 			}
-			return 1.0f;
-		}
 
-	  private:
-		void SetState(ErrEulaState state)
+			bool AnyChosen() const { return m_chosen != Button::None; }
+			// These two report "true" when the named button was NOT the one
+			// picked; that is what games have always seen from PixelU here.
+			bool LeftQuery() const { return m_chosen != Button::Left; }
+			bool RightQuery() const { return m_chosen != Button::Right; }
+
+			ViewerState State() const { return m_state; }
+			bool AnsweredForUser() const { return m_answerForUser; }
+			sint32 Result() const { return m_result; }
+
+			ResultKind ResultType() const
+			{
+				if (m_result == -1)
+					return ResultKind::None;
+				if (m_result < 10)
+					return ResultKind::Finish;
+				if (m_result >= 9999)
+					return ResultKind::Next;
+				if (m_result == 40)
+					return ResultKind::Password;
+				return ResultKind::Jump;
+			}
+
+			// 0..1 opacity while fading, 1 otherwise.
+			float Opacity() const
+			{
+				if (!IsFading())
+					return 1.0f;
+				const float t = (float)ElapsedTicks() / (float)FadeTicks();
+				return m_state == ViewerState::Appearing ? std::min(1.0f, t) : std::max(0.0f, 1.0f - t);
+			}
+
+		private:
+			bool IsFading() const
+			{
+				return m_state == ViewerState::Appearing || m_state == ViewerState::Disappearing;
+			}
+
+			static uint32 FadeTicks()
+			{
+				return (uint32)coreinit::EspressoTime::ConvertMsToTimerTicks(kFadeMs);
+			}
+
+			uint32 ElapsedTicks() const
+			{
+				return (uint32)coreinit::OSGetTime() - m_stateSince;
+			}
+
+			void SetState(ViewerState state)
+			{
+				m_state = state;
+				m_stateSince = (uint32)coreinit::OSGetTime();
+			}
+
+			ViewerState m_state = ViewerState::Hidden;
+			uint32 m_stateSince = 0;
+			bool m_answerForUser = false;
+			Button m_chosen = Button::None;
+			sint32 m_result = -1;
+			sint32 m_resultLeft = 0;
+			sint32 m_resultRight = 0;
+		};
+
+		struct Globals
 		{
-			m_state = state;
-			m_lastStateChange = coreinit::OSGetTime();
-		}
+			SysAllocator<coreinit::OSMutex> mutex;
+			uint32 region = 0;
+			uint32 language = 0;
+			MEMPTR<coreinit::FSClient_t> fsClient;
+			std::unique_ptr<Viewer> viewer;
+			AppearArg dialog{}; // the dialog being shown
+			bool homeNixSign = false;
+		};
+		Globals g_erreula;
 
-		ErrEulaState m_state;
-		uint32 m_lastStateChange;
-		bool m_autoAnswer{false};
-
-		/* +0x30 */ betype<sint32> m_resultCode;
-		/* +0x239C */ betype<BUTTON_SELECTION> m_buttonSelection;
-		/* +0x23A0 */ betype<sint32> m_resultCodeForLeftButton;
-		/* +0x23A4 */ betype<sint32> m_resultCodeForRightButton;
-	};
-
-	struct ErrEula_t
-	{
-		SysAllocator<coreinit::OSMutex> mutex;
-		uint32 regionType{0};
-		uint32 langType{0};
-		MEMPTR<coreinit::FSClient_t> fsClient;
-		std::unique_ptr<ErrEulaInstance> errEulaInstance;
-		AppearError currentDialog;
-		bool homeNixSignVisible{false};
-	} g_errEula = {};
-	
-	std::wstring GetText(uint16be* text)
-	{
-		std::wstringstream result;
-		while(*text != 0)
+		void ResetGlobals()
 		{
-			auto c = (uint16)*text;
-			result << static_cast<wchar_t>(c);
-			text++;
+			g_erreula.viewer.reset();
+			g_erreula.region = 0;
+			g_erreula.language = 0;
+			g_erreula.fsClient = nullptr;
+			g_erreula.dialog = AppearArg{};
+			g_erreula.homeNixSign = false;
 		}
 
-		return result.str();
-	}
-	
-
-	void ErrEulaCreate(void* workmem, uint32 regionType, uint32 langType, coreinit::FSClient_t* fsClient)
-	{
-		coreinit::OSLockMutex(&g_errEula.mutex);
-
-		g_errEula.regionType = regionType;
-		g_errEula.langType = langType;
-		g_errEula.fsClient = fsClient;
-		cemu_assert_debug(!g_errEula.errEulaInstance);
-		g_errEula.errEulaInstance = std::make_unique<ErrEulaInstance>();
-		g_errEula.errEulaInstance->Init();
-
-		coreinit::OSUnlockMutex(&g_errEula.mutex);
-	}
-
-	void ErrEulaDestroy()
-	{
-		g_errEula.errEulaInstance.reset();
-	}
-
-	// check if any dialog button was selected
-	bool IsDecideSelectButtonError()
-	{
-		if(!g_errEula.errEulaInstance)
-			return false;
-		return g_errEula.errEulaInstance->IsDecideSelectButtonError();
-	}
-
-	// check if left dialog button was selected
-	bool IsDecideSelectLeftButtonError()
-	{
-		if(!g_errEula.errEulaInstance)
-			return false;
-		return g_errEula.errEulaInstance->IsDecideSelectLeftButtonError();
-	}
-
-	// check if right dialog button was selected
-	bool IsDecideSelectRightButtonError()
-	{
-		if(!g_errEula.errEulaInstance)
-			return false;
-		return g_errEula.errEulaInstance->IsDecideSelectRightButtonError();
-	}
-
-	sint32 GetResultCode()
-	{
-		if(!g_errEula.errEulaInstance)
-			return -1;
-		return g_errEula.errEulaInstance->GetResultCode();
-	}
-
-	ResultType GetResultType()
-	{
-		if(!g_errEula.errEulaInstance)
-			return ResultType::None;
-		return g_errEula.errEulaInstance->GetResultType();
-	}
-
-	void export_AppearHomeNixSign(PPCInterpreter_t* hCPU)
-	{
-		g_errEula.homeNixSignVisible = TRUE;
-		osLib_returnFromFunction(hCPU, 0);
-	}
-
-	// PixelU: with --rp-embed and no online mode (no online account files), an error code dialog for an
-	// online error is answered with OK right away instead of stopping the game on a dialog that can't help:
-	// 102 Nintendo Network ID / account server, 103 internet connection, 115 Miiverse, 118 online play.
-	// Everything else is shown as usual, and without --rp-embed nothing changes.
-	bool ShouldAutoAnswer(const AppearArg& arg)
-	{
-		if (!LaunchSettings::RPEmbedEnabled())
-			return false;
-		if (arg.errorType != ErrorDialogType::Code && arg.errorType != ErrorDialogType::Text)
-			return false; // only dialogs with just an OK button
-		const uint32 errorCode = (uint32)arg.errorCode;
-		const uint32 family = errorCode / 10000;
-		if (family != 102 && family != 103 && family != 115 && family != 118)
-			return false;
-		return !ActiveSettings::IsOnlineEnabled();
-	}
-
-	void ErrEulaAppearError(AppearArg* arg)
-	{
-		g_errEula.currentDialog = *arg;
-		const bool autoAnswer = ShouldAutoAnswer(*arg);
-		if (autoAnswer)
+		std::string Utf8FromGame(const uint16be* text)
 		{
-			const uint32 errorCode = (uint32)arg->errorCode;
-			cemuLog_log(LogType::Force, "ErrEula: Error-Code {:03}-{:04} (online, and online mode isn't available) answered with OK", errorCode / 10000, errorCode % 10000);
+			std::wstring wide;
+			for (; *text != 0; text++)
+				wide.push_back((wchar_t)(uint16)*text);
+			return boost::nowide::narrow(wide);
 		}
-		if(g_errEula.errEulaInstance)
-			g_errEula.errEulaInstance->DoAppearError(arg, autoAnswer);
-	}
 
-	void ErrEulaDisappearError()
-	{
-		if(g_errEula.errEulaInstance)
-			g_errEula.errEulaInstance->DoDisappearError();
-	}
+		std::string GameTextOr(const MEMPTR<uint16be>& text, const char* fallback)
+		{
+			return text ? Utf8FromGame(text.GetPtr()) : std::string(fallback);
+		}
 
-	ErrEulaState ErrEulaGetStateErrorViewer()
-	{
-		if(!g_errEula.errEulaInstance)
-			return ErrEulaState::Hidden;
-		return g_errEula.errEulaInstance->GetState();
-	}
+		// Online-service error codes that are answered for the user in embedded
+		// mode when online play isn't available (see top of file).
+		bool AnswerForUser(const AppearArg& arg)
+		{
+			if (!LaunchSettings::RPEmbedEnabled())
+				return false;
+			const DialogKind kind = arg.kind;
+			if (kind != DialogKind::Code && kind != DialogKind::Text)
+				return false; // only plain OK dialogs
+			switch ((uint32)arg.errorCode / 10000)
+			{
+			case 102: // Nintendo Network ID / account server
+			case 103: // internet connection
+			case 115: // Miiverse
+			case 118: // online play
+				break;
+			default:
+				return false;
+			}
+			return !ActiveSettings::IsOnlineEnabled();
+		}
 
-	void export_ChangeLang(PPCInterpreter_t* hCPU)
-	{
-		ppcDefineParamU32(langType, 0);
-		g_errEula.langType = langType;
-		osLib_returnFromFunction(hCPU, 0);
-	}
+		// ---- exports -------------------------------------------------------------
 
-	void export_IsAppearHomeNixSign(PPCInterpreter_t* hCPU)
-	{
-		osLib_returnFromFunction(hCPU, g_errEula.homeNixSignVisible);
-	}
+		void ErrEulaCreate(void* workMemory, uint32 region, uint32 language, coreinit::FSClient_t* fsClient)
+		{
+			coreinit::OSLockMutex(&g_erreula.mutex);
+			g_erreula.region = region;
+			g_erreula.language = language;
+			g_erreula.fsClient = fsClient;
+			g_erreula.viewer = std::make_unique<Viewer>();
+			coreinit::OSUnlockMutex(&g_erreula.mutex);
+		}
 
-	void export_DisappearHomeNixSign(PPCInterpreter_t* hCPU)
-	{
-		g_errEula.homeNixSignVisible = FALSE;
-		osLib_returnFromFunction(hCPU, 0);
-	}
+		void ErrEulaDestroy()
+		{
+			g_erreula.viewer.reset();
+		}
 
-	void ErrEulaCalc(ControllerInfo_t* controllerInfo)
-	{
-		if(g_errEula.errEulaInstance)
-			g_errEula.errEulaInstance->DoCalc();
+		bool ErrEulaIsDecideSelectButtonError()
+		{
+			return g_erreula.viewer && g_erreula.viewer->AnyChosen();
+		}
+
+		bool ErrEulaIsDecideSelectLeftButtonError()
+		{
+			return g_erreula.viewer && g_erreula.viewer->LeftQuery();
+		}
+
+		bool ErrEulaIsDecideSelectRightButtonError()
+		{
+			return g_erreula.viewer && g_erreula.viewer->RightQuery();
+		}
+
+		sint32 ErrEulaGetResultCode()
+		{
+			return g_erreula.viewer ? g_erreula.viewer->Result() : -1;
+		}
+
+		ResultKind ErrEulaGetResultType()
+		{
+			return g_erreula.viewer ? g_erreula.viewer->ResultType() : ResultKind::None;
+		}
+
+		void ErrEulaAppearError(AppearArg* arg)
+		{
+			g_erreula.dialog = *arg;
+			const bool answer = AnswerForUser(*arg);
+			if (answer)
+			{
+				const uint32 code = arg->errorCode;
+				cemuLog_log(LogType::Force, "ErrEula: Error-Code {:03}-{:04} (online, and online mode isn't available) answered with OK", code / 10000, code % 10000);
+			}
+			if (g_erreula.viewer)
+				g_erreula.viewer->Appear(answer);
+		}
+
+		void ErrEulaDisappearError()
+		{
+			if (g_erreula.viewer)
+				g_erreula.viewer->Disappear();
+		}
+
+		ViewerState ErrEulaGetStateErrorViewer()
+		{
+			return g_erreula.viewer ? g_erreula.viewer->State() : ViewerState::Hidden;
+		}
+
+		void ErrEulaCalc(ControllerInfo* controllers)
+		{
+			if (g_erreula.viewer)
+				g_erreula.viewer->Update();
+		}
+
+		// The "HOME button not available" sign is only remembered, not drawn.
+		uint32 ErrEulaAppearHomeNixSign(HomeNixSignArg* arg)
+		{
+			g_erreula.homeNixSign = true;
+			return 0;
+		}
+
+		uint32 ErrEulaDisappearHomeNixSign()
+		{
+			g_erreula.homeNixSign = false;
+			return 0;
+		}
+
+		uint32 ErrEulaIsAppearHomeNixSign()
+		{
+			return g_erreula.homeNixSign ? 1 : 0;
+		}
+
+		uint32 ErrEulaChangeLang(uint32 language)
+		{
+			g_erreula.language = language;
+			return 0;
+		}
+
+		// ---- drawing -------------------------------------------------------------
+
+		float ButtonWidth(const std::string& label)
+		{
+			return std::max(100.0f, ImGui::CalcTextSize(label.c_str()).x + 10.0f);
+		}
+
+		// Draws the dialog body and returns the button the user clicked this frame.
+		Button DrawDialogBody(const AppearArg& dialog, std::string text)
+		{
+			const float centerX = ImGui::GetWindowSize().x / 2.0f;
+			const DialogKind kind = dialog.kind;
+			if (kind == DialogKind::Text || kind == DialogKind::TextOneButton || kind == DialogKind::TextTwoButton)
+				text += GameTextOr(dialog.text, "Unknown Error");
+			ImGui::TextUnformatted(text.c_str(), text.c_str() + text.size());
+			ImGui::Spacing();
+
+			if (kind == DialogKind::TextOneButton)
+			{
+				const std::string label = GameTextOr(dialog.button1Text, "Yes");
+				const float width = ButtonWidth(label);
+				ImGui::SetCursorPosX(centerX - width / 2.0f);
+				return ImGui::Button(label.c_str(), { width, 0 }) ? Button::Left : Button::None;
+			}
+			if (kind == DialogKind::TextTwoButton)
+			{
+				const std::string left = GameTextOr(dialog.button1Text, "Yes");
+				const std::string right = GameTextOr(dialog.button2Text, "No");
+				const float leftWidth = ButtonWidth(left);
+				const float rightWidth = ButtonWidth(right);
+				ImGui::SetCursorPosX(centerX - leftWidth / 2.0f - rightWidth / 2.0f - 10);
+				const bool leftClicked = ImGui::Button(left.c_str(), { leftWidth, 0 });
+				ImGui::SameLine();
+				const bool rightClicked = ImGui::Button(right.c_str(), { rightWidth, 0 });
+				// left wins if both register in one frame
+				return leftClicked ? Button::Left : (rightClicked ? Button::Right : Button::None);
+			}
+			// error code, plain text and unknown kinds: a single OK button
+			ImGui::SetCursorPosX(centerX - 50);
+			return ImGui::Button("OK", { 100, 0 }) ? Button::Left : Button::None;
+		}
 	}
 
 	void render(bool mainWindow)
 	{
-		if(!g_errEula.errEulaInstance)
+		Viewer* viewer = g_erreula.viewer.get();
+		if (!viewer || viewer->State() == ViewerState::Hidden)
 			return;
-		if(g_errEula.errEulaInstance->GetState() != ErrEulaState::Visible && g_errEula.errEulaInstance->GetState() != ErrEulaState::Appearing && g_errEula.errEulaInstance->GetState() != ErrEulaState::Disappearing)
-			return;
-		if(g_errEula.errEulaInstance->IsAutoAnswered())
-			return; // PixelU: answered for the user, never drawn
-		const AppearError& appearArg = g_errEula.currentDialog;
-		std::string text;
-		const uint32 errorCode = (uint32)appearArg.errorCode;
-		if (errorCode != 0)
-		{
-			const uint32 errorCodeHigh = errorCode / 10000;
-			const uint32 errorCodeLow = errorCode % 10000;
-			text = fmt::format("Error-Code: {:03}-{:04}\n", errorCodeHigh, errorCodeLow);
-		}
+		if (viewer->AnsweredForUser())
+			return; // answered in embedded mode, never shown
 
-		auto font = ImGui_GetFont(32.0f);
+		const AppearArg& dialog = g_erreula.dialog;
+		std::string text;
+		if (const uint32 code = dialog.errorCode; code != 0)
+			text = fmt::format("Error-Code: {:03}-{:04}\n", code / 10000, code % 10000);
+
+		ImFont* font = ImGui_GetFont(32.0f);
 		if (!font)
 			return;
 
-		const auto kPopupFlags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings;
-
-		auto& io = ImGui::GetIO();
-		ImVec2 position = { io.DisplaySize.x / 2.0f, io.DisplaySize.y / 2.0f };
-		ImVec2 pivot = { 0.5f, 0.5f };
-		ImGui::SetNextWindowPos(position, ImGuiCond_Always, pivot);
-		ImGui::SetNextWindowBgAlpha(0.9f);
+		const ImGuiWindowFlags flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar |
+			ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings;
+		const ImGuiIO& io = ImGui::GetIO();
+		ImGui::SetNextWindowPos({ io.DisplaySize.x / 2.0f, io.DisplaySize.y / 2.0f }, ImGuiCond_Always, { 0.5f, 0.5f });
 		ImGui::PushFont(font);
 
-		std::string title;
-		if (appearArg.title)
-			title = boost::nowide::narrow(GetText(appearArg.title.GetPtr()));
-		if (title.empty()) // ImGui doesn't allow empty titles, so set one if appearArg.title is not set or empty
+		// imgui needs a non-empty window title
+		std::string title = GameTextOr(dialog.title, "");
+		if (title.empty())
 			title = "ErrEula";
 
-		float fadeTransparency = 1.0f;
-		if (g_errEula.errEulaInstance->GetState() == ErrEulaState::Appearing || g_errEula.errEulaInstance->GetState() == ErrEulaState::Disappearing)
+		const float opacity = viewer->Opacity();
+		ImGuiStyle& style = ImGui::GetStyle();
+		const float savedAlpha = style.Alpha;
+		style.Alpha = opacity;
+		ImGui::SetNextWindowBgAlpha(0.9f * opacity);
+		if (ImGui::Begin(title.c_str(), nullptr, flags))
 		{
-			fadeTransparency = g_errEula.errEulaInstance->GetFadeTransparency();
-		}
-
-		float originalAlpha = ImGui::GetStyle().Alpha;
-		ImGui::GetStyle().Alpha = fadeTransparency;
-		ImGui::SetNextWindowBgAlpha(0.9f * fadeTransparency);
-		if (ImGui::Begin(title.c_str(), nullptr, kPopupFlags))
-		{
-			const float startx = ImGui::GetWindowSize().x / 2.0f;
-			bool hasLeftButtonPressed = false, hasRightButtonPressed = false;
-
-			switch (appearArg.errorType)
-			{
-			default:
-			{
-				// TODO layout based on error code
-				ImGui::TextUnformatted(text.c_str(), text.c_str() + text.size());
-				ImGui::Spacing();
-				ImGui::SetCursorPosX(startx - 50);
-				hasLeftButtonPressed = ImGui::Button("OK", {100, 0});
-				break;
-			}
-			case ErrorDialogType::Text:
-			{
-				std::string txtTmp = "Unknown Error";
-				if (appearArg.text)
-					txtTmp = boost::nowide::narrow(GetText(appearArg.text.GetPtr()));
-
-				text += txtTmp;
-				ImGui::TextUnformatted(text.c_str(), text.c_str() + text.size());
-				ImGui::Spacing();
-					
-				ImGui::SetCursorPosX(startx - 50);
-				hasLeftButtonPressed = ImGui::Button("OK", { 100, 0 });
-				break;
-			}
-			case ErrorDialogType::TextOneButton:
-			{
-				std::string txtTmp = "Unknown Error";
-				if (appearArg.text)
-					txtTmp = boost::nowide::narrow(GetText(appearArg.text.GetPtr()));
-
-				text += txtTmp;
-				ImGui::TextUnformatted(text.c_str(), text.c_str() + text.size());
-				ImGui::Spacing();
-
-				std::string button1 = "Yes";
-				if (appearArg.button1Text)
-					button1 = boost::nowide::narrow(GetText(appearArg.button1Text.GetPtr()));
-
-				float width = std::max(100.0f, ImGui::CalcTextSize(button1.c_str()).x + 10.0f);
-				ImGui::SetCursorPosX(startx - (width / 2.0f));
-				hasLeftButtonPressed = ImGui::Button(button1.c_str(), { width, 0 });
-				break;
-			}
-			case ErrorDialogType::TextTwoButton:
-			{
-				std::string txtTmp = "Unknown Error";
-				if (appearArg.text)
-					txtTmp = boost::nowide::narrow(GetText(appearArg.text.GetPtr()));
-
-				text += txtTmp;
-				ImGui::TextUnformatted(text.c_str(), text.c_str() + text.size());
-				ImGui::Spacing();
-
-				std::string button1 = "Yes";
-				if (appearArg.button1Text)
-					button1 = boost::nowide::narrow(GetText(appearArg.button1Text.GetPtr()));
-				std::string button2 = "No";
-				if (appearArg.button2Text)
-					button2 = boost::nowide::narrow(GetText(appearArg.button2Text.GetPtr()));
-
-				float width1 = std::max(100.0f, ImGui::CalcTextSize(button1.c_str()).x + 10.0f);
-				float width2 = std::max(100.0f, ImGui::CalcTextSize(button2.c_str()).x + 10.0f);
-				ImGui::SetCursorPosX(startx - (width1 / 2.0f) - (width2 / 2.0f) - 10);
-					
-				hasLeftButtonPressed = ImGui::Button(button1.c_str(), { width1, 0 });
-				ImGui::SameLine();
-					
-				hasRightButtonPressed = ImGui::Button(button2.c_str(), { width2, 0 });
-				break;
-			}
-			}
-			if (!g_errEula.errEulaInstance->IsDecideSelectButtonError())
-			{
-				if (hasLeftButtonPressed)
-					g_errEula.errEulaInstance->SetButtonSelection(ErrEulaInstance::BUTTON_SELECTION::LEFT);
-				if (hasRightButtonPressed)
-					g_errEula.errEulaInstance->SetButtonSelection(ErrEulaInstance::BUTTON_SELECTION::RIGHT);
-			}
+			const Button clicked = DrawDialogBody(dialog, std::move(text));
+			if (clicked != Button::None && !viewer->AnyChosen())
+				viewer->Choose(clicked);
 		}
 		ImGui::End();
 		ImGui::PopFont();
-		ImGui::GetStyle().Alpha = originalAlpha;
+		style.Alpha = savedAlpha;
 	}
 
-	class : public COSModule
+	namespace
 	{
+		class ErreulaLibrary final : public COSModule
+		{
 		public:
-		std::string_view GetName() override
-		{
-			return "erreula";
-		}
+			std::string_view GetName() override { return "erreula"; }
 
-		void RPLMapped() override
-		{
-			cafeExportRegisterFunc(ErrEulaCreate, "erreula", "ErrEulaCreate__3RplFPUcQ3_2nn7erreula10RegionTypeQ3_2nn7erreula8LangTypeP8FSClient", LogType::Placeholder);
-			cafeExportRegisterFunc(ErrEulaDestroy, "erreula", "ErrEulaDestroy__3RplFv", LogType::Placeholder);
-
-			cafeExportRegisterFunc(IsDecideSelectButtonError, "erreula", "ErrEulaIsDecideSelectButtonError__3RplFv", LogType::Placeholder);
-			cafeExportRegisterFunc(IsDecideSelectLeftButtonError, "erreula", "ErrEulaIsDecideSelectLeftButtonError__3RplFv", LogType::Placeholder);
-			cafeExportRegisterFunc(IsDecideSelectRightButtonError, "erreula", "ErrEulaIsDecideSelectRightButtonError__3RplFv", LogType::Placeholder);
-
-			cafeExportRegisterFunc(GetResultCode, "erreula", "ErrEulaGetResultCode__3RplFv", LogType::Placeholder);
-			cafeExportRegisterFunc(GetResultType, "erreula", "ErrEulaGetResultType__3RplFv", LogType::Placeholder);
-
-			cafeExportRegisterFunc(ErrEulaAppearError, "erreula", "ErrEulaAppearError__3RplFRCQ3_2nn7erreula9AppearArg", LogType::Placeholder);
-			cafeExportRegisterFunc(ErrEulaDisappearError, "erreula", "ErrEulaDisappearError__3RplFv", LogType::Placeholder);
-			cafeExportRegisterFunc(ErrEulaGetStateErrorViewer, "erreula", "ErrEulaGetStateErrorViewer__3RplFv", LogType::Placeholder);
-
-			cafeExportRegisterFunc(ErrEulaCalc, "erreula", "ErrEulaCalc__3RplFRCQ3_2nn7erreula14ControllerInfo", LogType::Placeholder);
-
-			osLib_addFunction("erreula", "ErrEulaAppearHomeNixSign__3RplFRCQ3_2nn7erreula14HomeNixSignArg", export_AppearHomeNixSign);
-			osLib_addFunction("erreula", "ErrEulaChangeLang__3RplFQ3_2nn7erreula8LangType", export_ChangeLang);
-			osLib_addFunction("erreula", "ErrEulaIsAppearHomeNixSign__3RplFv", export_IsAppearHomeNixSign);
-			osLib_addFunction("erreula", "ErrEulaDisappearHomeNixSign__3RplFv", export_DisappearHomeNixSign);
-		}
-
-		void rpl_entry(uint32 moduleHandle, coreinit::RplEntryReason reason) override
-		{
-			if (reason == coreinit::RplEntryReason::Loaded)
+			void RPLMapped() override
 			{
-				g_errEula.errEulaInstance.reset();
-				OSInitMutexEx(&g_errEula.mutex, nullptr);
+				constexpr auto lt = LogType::Placeholder;
+				cafeExportRegisterFunc(ErrEulaCreate, "erreula", "ErrEulaCreate__3RplFPUcQ3_2nn7erreula10RegionTypeQ3_2nn7erreula8LangTypeP8FSClient", lt);
+				cafeExportRegisterFunc(ErrEulaDestroy, "erreula", "ErrEulaDestroy__3RplFv", lt);
+				cafeExportRegisterFunc(ErrEulaIsDecideSelectButtonError, "erreula", "ErrEulaIsDecideSelectButtonError__3RplFv", lt);
+				cafeExportRegisterFunc(ErrEulaIsDecideSelectLeftButtonError, "erreula", "ErrEulaIsDecideSelectLeftButtonError__3RplFv", lt);
+				cafeExportRegisterFunc(ErrEulaIsDecideSelectRightButtonError, "erreula", "ErrEulaIsDecideSelectRightButtonError__3RplFv", lt);
+				cafeExportRegisterFunc(ErrEulaGetResultCode, "erreula", "ErrEulaGetResultCode__3RplFv", lt);
+				cafeExportRegisterFunc(ErrEulaGetResultType, "erreula", "ErrEulaGetResultType__3RplFv", lt);
+				cafeExportRegisterFunc(ErrEulaAppearError, "erreula", "ErrEulaAppearError__3RplFRCQ3_2nn7erreula9AppearArg", lt);
+				cafeExportRegisterFunc(ErrEulaDisappearError, "erreula", "ErrEulaDisappearError__3RplFv", lt);
+				cafeExportRegisterFunc(ErrEulaGetStateErrorViewer, "erreula", "ErrEulaGetStateErrorViewer__3RplFv", lt);
+				cafeExportRegisterFunc(ErrEulaCalc, "erreula", "ErrEulaCalc__3RplFRCQ3_2nn7erreula14ControllerInfo", lt);
+				cafeExportRegisterFunc(ErrEulaAppearHomeNixSign, "erreula", "ErrEulaAppearHomeNixSign__3RplFRCQ3_2nn7erreula14HomeNixSignArg", lt);
+				cafeExportRegisterFunc(ErrEulaChangeLang, "erreula", "ErrEulaChangeLang__3RplFQ3_2nn7erreula8LangType", lt);
+				cafeExportRegisterFunc(ErrEulaIsAppearHomeNixSign, "erreula", "ErrEulaIsAppearHomeNixSign__3RplFv", lt);
+				cafeExportRegisterFunc(ErrEulaDisappearHomeNixSign, "erreula", "ErrEulaDisappearHomeNixSign__3RplFv", lt);
 			}
-			else if (reason == coreinit::RplEntryReason::Unloaded)
+
+			void rpl_entry(uint32 moduleHandle, coreinit::RplEntryReason reason) override
 			{
-				g_errEula.errEulaInstance.reset();
-				// todo - refactor and clean up these variables to be part of errEulaInstance
-				g_errEula.regionType = 0;
-				g_errEula.langType = 0;
-				g_errEula.fsClient = nullptr;
-				g_errEula.currentDialog = {};
-				g_errEula.homeNixSignVisible = {};
-				g_errEula.currentDialog = {};
+				if (reason == coreinit::RplEntryReason::Loaded)
+				{
+					g_erreula.viewer.reset();
+					coreinit::OSInitMutexEx(&g_erreula.mutex, nullptr);
+				}
+				else if (reason == coreinit::RplEntryReason::Unloaded)
+				{
+					ResetGlobals();
+				}
 			}
-		}
-	}s_COSErreulaModule;
+		};
+
+		ErreulaLibrary g_erreulaLibrary;
+	}
 
 	COSModule* GetModule()
 	{
-		return &s_COSErreulaModule;
+		return &g_erreulaLibrary;
 	}
 }
-}
- 

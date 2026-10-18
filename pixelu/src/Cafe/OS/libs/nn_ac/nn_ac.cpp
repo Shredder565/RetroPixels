@@ -1,280 +1,226 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Written from scratch.
+//
+// nn_ac is the auto-connect library: it brings the console's network
+// connection up and tells games whether they are online. Under PixelU the
+// host PC is the network, so the connection is always "up" and the address
+// a game asks for is the host's own IPv4 address on its active adapter.
+// Games get both the C++ API (nn::ac::*) and the C wrappers (AC*).
+
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/OS/libs/nn_common.h"
-#include "nn_ac.h"
 #include "Common/socket.h"
+#include "nn_ac.h"
 
 #if BOOST_OS_WINDOWS
 #include <iphlpapi.h>
-#elif BOOST_OS_LINUX
+#elif BOOST_OS_LINUX || BOOST_OS_MACOS
 #include <ifaddrs.h>
 #include <net/if.h>
 #endif
 
-// AC lib (manages internet connection)
-
-enum class AC_STATUS : uint32
+namespace
 {
-	FAILED = (uint32)-1,
-	OK = 0,
-};
+	// nn::ac::Status
+	enum class ConnectStatus : uint32
+	{
+		Failed = 0xFFFFFFFF,
+		Ok = 0,
+	};
+	static_assert(sizeof(betype<ConnectStatus>) == 4);
 
-static_assert(TRUE == 1, "TRUE not 1");
+	constexpr nnResult AcSuccess()
+	{
+		return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_AC, 0);
+	}
 
-void _GetLocalIPAndSubnetMaskFallback(uint32& localIp, uint32& subnetMask)
-{
-	// default to some hardcoded values
-	localIp = (192 << 24) | (168 << 16) | (0 << 8) | (100 << 0);
-	subnetMask = (255 << 24) | (255 << 16) | (255 << 8) | (0 << 0);
-}
+	struct HostAddress
+	{
+		uint32 ip;   // host byte order
+		uint32 mask; // host byte order
+	};
+
+	// What a typical home network looks like, used when the host's address can't be read.
+	constexpr HostAddress kFallbackAddress{ 0xC0A80064 /* 192.168.0.100 */, 0xFFFFFF00 /* 255.255.255.0 */ };
 
 #if BOOST_OS_WINDOWS
-void _GetLocalIPAndSubnetMask(uint32& localIp, uint32& subnetMask)
-{
-	std::vector<IP_ADAPTER_ADDRESSES> buf_adapter_addresses;
-	buf_adapter_addresses.resize(32);
-	DWORD buf_size;
-	DWORD r;
-
-	for (uint32 i = 0; i < 6; i++) 
+	// First IPv4 address of an adapter that is up and has a default gateway.
+	std::optional<HostAddress> QueryHostAddress()
 	{
-		buf_size = (uint32)(buf_adapter_addresses.size() * sizeof(IP_ADAPTER_ADDRESSES));
-		r = GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER | GAA_FLAG_INCLUDE_GATEWAYS, nullptr, buf_adapter_addresses.data(), &buf_size);
-		if (r != ERROR_BUFFER_OVERFLOW)
-			break;
-		buf_adapter_addresses.resize(buf_adapter_addresses.size() * 2);
-	}
-	if (r != ERROR_SUCCESS)
-	{
-		cemuLog_log(LogType::Force, "Failed to acquire local IP and subnet mask");
-		_GetLocalIPAndSubnetMaskFallback(localIp, subnetMask);
-		return;
-	}
-	IP_ADAPTER_ADDRESSES* currentAddress = buf_adapter_addresses.data();
-	while (currentAddress)
-	{
-		if (currentAddress->OperStatus != IfOperStatusUp)
+		const ULONG flags = GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER | GAA_FLAG_INCLUDE_GATEWAYS;
+		std::vector<uint8> storage(16 * 1024);
+		ULONG size = (ULONG)storage.size();
+		ULONG status = ERROR_BUFFER_OVERFLOW;
+		for (int attempt = 0; attempt < 4 && status == ERROR_BUFFER_OVERFLOW; attempt++)
 		{
-			currentAddress = currentAddress->Next;
-			continue;
+			size = (ULONG)storage.size();
+			status = GetAdaptersAddresses(AF_INET, flags, nullptr, (IP_ADAPTER_ADDRESSES*)storage.data(), &size);
+			if (status == ERROR_BUFFER_OVERFLOW)
+				storage.resize(std::max<size_t>(size, storage.size() * 2));
 		}
-		if (!currentAddress->FirstUnicastAddress || !currentAddress->FirstUnicastAddress->Address.lpSockaddr)
+		if (status != ERROR_SUCCESS)
+			return std::nullopt;
+		for (auto* adapter = (IP_ADAPTER_ADDRESSES*)storage.data(); adapter; adapter = adapter->Next)
 		{
-			currentAddress = currentAddress->Next;
-			continue;
-		}
-		if (!currentAddress->FirstGatewayAddress)
-		{
-			currentAddress = currentAddress->Next;
-			continue;
-		}
-
-		SOCKADDR* sockAddr = currentAddress->FirstUnicastAddress->Address.lpSockaddr;
-		if (sockAddr->sa_family == AF_INET)
-		{
+			if (adapter->OperStatus != IfOperStatusUp || !adapter->FirstGatewayAddress)
+				continue;
+			auto* unicast = adapter->FirstUnicastAddress;
+			if (!unicast || !unicast->Address.lpSockaddr || unicast->Address.lpSockaddr->sa_family != AF_INET)
+				continue;
 			ULONG mask = 0;
-			if (ConvertLengthToIpv4Mask(currentAddress->FirstUnicastAddress->OnLinkPrefixLength, &mask) != NO_ERROR)
+			if (ConvertLengthToIpv4Mask(unicast->OnLinkPrefixLength, &mask) != NO_ERROR)
 				mask = 0;
-			sockaddr_in* inAddr = (sockaddr_in*)sockAddr;
-			localIp = _byteswap_ulong(inAddr->sin_addr.S_un.S_addr);
-			subnetMask = _byteswap_ulong(mask);
-			return;
+			const auto* in = (const sockaddr_in*)unicast->Address.lpSockaddr;
+			return HostAddress{ ntohl(in->sin_addr.s_addr), ntohl(mask) };
 		}
-		currentAddress = currentAddress->Next;
+		return std::nullopt;
 	}
-	cemuLog_logDebug(LogType::Force, "_GetLocalIPAndSubnetMask(): Failed to find network IP and subnet mask");
-	_GetLocalIPAndSubnetMaskFallback(localIp, subnetMask);
-}
-#elif BOOST_OS_LINUX
-void _GetLocalIPAndSubnetMask(uint32& localIp, uint32& subnetMask)
-{
-	struct ifaddrs *ifaddr;
-	if (getifaddrs(&ifaddr) == -1)
+#elif BOOST_OS_LINUX || BOOST_OS_MACOS
+	// First IPv4 address of a running, non-loopback, non-tunnel interface
+	// (container bridges are skipped too).
+	std::optional<HostAddress> QueryHostAddress()
 	{
-		cemuLog_log(LogType::Force, "Failed to acquire local IP and subnet mask");
-		_GetLocalIPAndSubnetMaskFallback(localIp, subnetMask);
+		ifaddrs* list = nullptr;
+		if (getifaddrs(&list) != 0)
+			return std::nullopt;
+		std::optional<HostAddress> found;
+		for (ifaddrs* it = list; it && !found; it = it->ifa_next)
+		{
+			if (!it->ifa_addr || it->ifa_addr->sa_family != AF_INET || !it->ifa_netmask)
+				continue;
+			const unsigned int flags = it->ifa_flags;
+			if ((flags & IFF_UP) == 0 || (flags & IFF_RUNNING) == 0)
+				continue;
+			if ((flags & (IFF_LOOPBACK | IFF_POINTOPOINT)) != 0)
+				continue;
+			const std::string_view name = it->ifa_name ? it->ifa_name : "";
+			if (name.starts_with("br-") || name.starts_with("docker"))
+				continue;
+			const auto* ip = (const sockaddr_in*)it->ifa_addr;
+			const auto* mask = (const sockaddr_in*)it->ifa_netmask;
+			found = HostAddress{ ntohl(ip->sin_addr.s_addr), ntohl(mask->sin_addr.s_addr) };
+		}
+		freeifaddrs(list);
+		return found;
 	}
-	stdx::scope_exit _ifa([&]{ freeifaddrs(ifaddr); });
-
-	for (const struct ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next)
-	{
-		if (ifa->ifa_addr == nullptr || ifa->ifa_addr->sa_family != AF_INET)
-			continue;
-
-		if (!(ifa->ifa_flags & IFF_UP) || !(ifa->ifa_flags & IFF_RUNNING))
-			continue;
-
-		if (ifa->ifa_flags & IFF_LOOPBACK || ifa->ifa_flags & IFF_POINTOPOINT)
-			continue;
-
-		if (boost::starts_with(ifa->ifa_name, "br-") || boost::starts_with(ifa->ifa_name, "docker"))
-			continue;
-
-		const auto* addr_in = reinterpret_cast<struct sockaddr_in*>(ifa->ifa_addr);
-		localIp = ntohl(addr_in->sin_addr.s_addr);
-		const auto* mask_in = reinterpret_cast<struct sockaddr_in*>(ifa->ifa_netmask);
-		subnetMask = ntohl(mask_in->sin_addr.s_addr);
-		return;
-	}
-	cemuLog_logDebug(LogType::Force, "_GetLocalIPAndSubnetMask(): Failed to find network IP and subnet mask");
-	_GetLocalIPAndSubnetMaskFallback(localIp, subnetMask);
-}
 #else
-void _GetLocalIPAndSubnetMask(uint32& localIp, uint32& subnetMask)
-{
-	cemuLog_logDebug(LogType::Force, "_GetLocalIPAndSubnetMask(): Not implemented");
-	_GetLocalIPAndSubnetMaskFallback(localIp, subnetMask);
-}
+	std::optional<HostAddress> QueryHostAddress()
+	{
+		return std::nullopt;
+	}
 #endif
 
-void nnAcExport_GetAssignedAddress(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "GetAssignedAddress() called");
-	ppcDefineParamU32BEPtr(ipAddrOut, 0);
-
-	uint32 localIp;
-	uint32 subnetMask;
-	_GetLocalIPAndSubnetMask(localIp, subnetMask);
-
-	*ipAddrOut = localIp;
-
-	const uint32 nnResultCode = BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_AC, 0);
-	osLib_returnFromFunction(hCPU, nnResultCode);
-}
-
-void nnAcExport_GetAssignedSubnet(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "GetAssignedSubnet() called");
-
-	ppcDefineParamU32BEPtr(subnetMaskOut, 0);
-
-	uint32 localIp;
-	uint32 subnetMask;
-	_GetLocalIPAndSubnetMask(localIp, subnetMask);
-
-	*subnetMaskOut = subnetMask;
-
-	const uint32 nnResultCode = BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_AC, 0);
-	osLib_returnFromFunction(hCPU, nnResultCode);
-}
-
-void nnAcExport_ACGetAssignedAddress(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamU32BEPtr(ipAddrOut, 0);
-
-	uint32 localIp;
-	uint32 subnetMask;
-	_GetLocalIPAndSubnetMask(localIp, subnetMask);
-	*ipAddrOut = localIp;
-
-	const uint32 nnResultCode = BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_AC, 0);
-	osLib_returnFromFunction(hCPU, nnResultCode);
-}
-
-void nnAcExport_IsSystemConnected(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamTypePtr(isConnectedOut, uint8, 0);
-	ppcDefineParamTypePtr(apTypeOut, uint32be, 1);
-
-	cemuLog_logDebug(LogType::Force, "nn_ac.IsSystemConnected() - placeholder");
-	*apTypeOut = 0; // ukn
-	*isConnectedOut = 1;
-
-	osLib_returnFromFunction(hCPU, 0);
-}
-
-void nnAcExport_IsConfigExisting(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "nn_ac.IsConfigExisting() - placeholder");
-
-	ppcDefineParamU32(configId, 0);
-	ppcDefineParamTypePtr(isConfigExisting, uint8, 1);
-	
-	*isConfigExisting = 0;
-
-	osLib_returnFromFunction(hCPU, 0);
+	HostAddress GetHostAddress()
+	{
+		if (auto address = QueryHostAddress())
+			return *address;
+		cemuLog_logDebug(LogType::Force, "nn_ac: no usable host network address, using {:08x}", kFallbackAddress.ip);
+		return kFallbackAddress;
+	}
 }
 
 namespace nn_ac
 {
 	nnResult Initialize()
 	{
-		return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_AC, 0);
+		return AcSuccess();
+	}
+
+	// Some games (Terraria) treat anything but a plain 0 as failure here.
+	uint32 Connect()
+	{
+		return 0;
 	}
 
 	nnResult ConnectAsync()
 	{
-		return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_AC, 0);
+		return AcSuccess();
+	}
+
+	nnResult GetConnectResult(uint32be* result)
+	{
+		if (result)
+			*result = AcSuccess();
+		return AcSuccess();
+	}
+
+	nnResult GetLastErrorCode(uint32be* code)
+	{
+		if (code)
+			*code = 0;
+		return AcSuccess();
+	}
+
+	nnResult GetConnectStatus(betype<ConnectStatus>* status)
+	{
+		if (status)
+			*status = ConnectStatus::Ok;
+		return AcSuccess();
+	}
+
+	nnResult GetStatus(betype<ConnectStatus>* status)
+	{
+		return GetConnectStatus(status);
 	}
 
 	nnResult IsApplicationConnected(uint8be* connected)
 	{
 		if (connected)
-			*connected = TRUE;
-		return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_AC, 0);
+			*connected = 1;
+		return AcSuccess();
 	}
 
-	uint32 Connect()
+	nnResult GetAssignedAddress(uint32be* address)
 	{
-		// Terraria expects this (or GetLastErrorCode) to return 0 on success
-		// investigate on the actual console
-		// maybe all success codes are always 0 and dont have any of the other fields set?
-		uint32 nnResultCode = 0;// BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_AC, 0); // Splatoon freezes if this function fails?
-		return nnResultCode;
+		*address = GetHostAddress().ip;
+		return AcSuccess();
 	}
 
-	nnResult GetConnectStatus(betype<AC_STATUS>* status)
+	nnResult GetAssignedSubnet(uint32be* mask)
 	{
-		if (status)
-			*status = AC_STATUS::OK;
-		return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_AC, 0);
+		*mask = GetHostAddress().mask;
+		return AcSuccess();
 	}
 
-	nnResult GetStatus(betype<AC_STATUS>* status)
+	uint32 IsSystemConnected(uint8* connected, uint32be* apType)
 	{
-		return GetConnectStatus(status);
+		*apType = 0;
+		*connected = 1;
+		return 0;
 	}
 
-	nnResult GetLastErrorCode(uint32be* errorCode)
+	// PixelU keeps no saved console network profiles.
+	uint32 IsConfigExisting(uint32 configId, uint8* exists)
 	{
-		if (errorCode)
-			*errorCode = 0;
-		return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_AC, 0);
+		*exists = 0;
+		return 0;
 	}
 
-	nnResult GetConnectResult(uint32be* connectResult)
-	{
-		const uint32 nnResultCode = BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_AC, 0);
-		if (connectResult)
-			*connectResult = nnResultCode;
-		return nnResultCode;
-	}
-
-	static_assert(sizeof(betype<AC_STATUS>) == 4);
-	static_assert(sizeof(betype<nnResult>) == 4);
+	// C wrappers
 
 	nnResult ACInitialize()
 	{
 		return Initialize();
 	}
 
-	bool ACIsSuccess(betype<nnResult>* r)
+	bool ACIsSuccess(betype<nnResult>* result)
 	{
-		return NN_RESULT_IS_SUCCESS(*r) ? 1 : 0;
+		return NN_RESULT_IS_SUCCESS(*result);
 	}
 
-	bool ACIsFailure(betype<nnResult>* r)
+	bool ACIsFailure(betype<nnResult>* result)
 	{
-		return NN_RESULT_IS_FAILURE(*r) ? 1 : 0;
+		return NN_RESULT_IS_FAILURE(*result);
 	}
 
-	nnResult ACGetConnectStatus(betype<AC_STATUS>* connectionStatus)
+	nnResult ACGetConnectStatus(betype<ConnectStatus>* status)
 	{
-		return GetConnectStatus(connectionStatus);
+		return GetConnectStatus(status);
 	}
 
-	nnResult ACGetStatus(betype<AC_STATUS>* connectionStatus)
+	nnResult ACGetStatus(betype<ConnectStatus>* status)
 	{
-		return GetStatus(connectionStatus);
+		return GetStatus(status);
 	}
 
 	nnResult ACConnectAsync()
@@ -282,28 +228,34 @@ namespace nn_ac
 		return ConnectAsync();
 	}
 
-	nnResult ACIsApplicationConnected(uint32be* connectedU32)
+	nnResult ACIsApplicationConnected(uint32be* connected)
 	{
-		uint8be connected = 0;
-		nnResult r = IsApplicationConnected(&connected);
-		*connectedU32 = connected; // convert to uint32
-		return r;
+		uint8be flag = 0;
+		const nnResult result = IsApplicationConnected(&flag);
+		*connected = (uint8)flag;
+		return result;
 	}
 
-	void load()
+	nnResult ACGetAssignedAddress(uint32be* address)
+	{
+		return GetAssignedAddress(address);
+	}
+
+	void RegisterExports()
 	{
 		cafeExportRegisterFunc(Initialize, "nn_ac", "Initialize__Q2_2nn2acFv", LogType::Placeholder);
-
 		cafeExportRegisterFunc(Connect, "nn_ac", "Connect__Q2_2nn2acFv", LogType::Placeholder);
 		cafeExportRegisterFunc(ConnectAsync, "nn_ac", "ConnectAsync__Q2_2nn2acFv", LogType::Placeholder);
-
 		cafeExportRegisterFunc(GetConnectResult, "nn_ac", "GetConnectResult__Q2_2nn2acFPQ2_2nn6Result", LogType::Placeholder);
 		cafeExportRegisterFunc(GetLastErrorCode, "nn_ac", "GetLastErrorCode__Q2_2nn2acFPUi", LogType::Placeholder);
 		cafeExportRegisterFunc(GetConnectStatus, "nn_ac", "GetConnectStatus__Q2_2nn2acFPQ3_2nn2ac6Status", LogType::Placeholder);
 		cafeExportRegisterFunc(GetStatus, "nn_ac", "GetStatus__Q2_2nn2acFPQ3_2nn2ac6Status", LogType::Placeholder);
 		cafeExportRegisterFunc(IsApplicationConnected, "nn_ac", "IsApplicationConnected__Q2_2nn2acFPb", LogType::Placeholder);
+		cafeExportRegisterFunc(GetAssignedAddress, "nn_ac", "GetAssignedAddress__Q2_2nn2acFPUl", LogType::Placeholder);
+		cafeExportRegisterFunc(GetAssignedSubnet, "nn_ac", "GetAssignedSubnet__Q2_2nn2acFPUl", LogType::Placeholder);
+		cafeExportRegisterFunc(IsSystemConnected, "nn_ac", "IsSystemConnected__Q2_2nn2acFPbPQ3_2nn2ac6ApType", LogType::Placeholder);
+		cafeExportRegisterFunc(IsConfigExisting, "nn_ac", "IsConfigExisting__Q2_2nn2acFQ3_2nn2ac11ConfigIdNumPb", LogType::Placeholder);
 
-		// AC also offers C-style wrappers
 		cafeExportRegister("nn_ac", ACInitialize, LogType::Placeholder);
 		cafeExportRegister("nn_ac", ACIsSuccess, LogType::Placeholder);
 		cafeExportRegister("nn_ac", ACIsFailure, LogType::Placeholder);
@@ -311,42 +263,34 @@ namespace nn_ac
 		cafeExportRegister("nn_ac", ACGetStatus, LogType::Placeholder);
 		cafeExportRegister("nn_ac", ACConnectAsync, LogType::Placeholder);
 		cafeExportRegister("nn_ac", ACIsApplicationConnected, LogType::Placeholder);
+		cafeExportRegister("nn_ac", ACGetAssignedAddress, LogType::Placeholder);
 	}
-
 }
 
 void nnAc_load()
 {
-
 }
 
 namespace nn::ac
 {
-	class : public COSModule
+	namespace
 	{
+		class AcLibrary final : public COSModule
+		{
 		public:
-		std::string_view GetName() override
-		{
-			return "nn_ac";
-		}
+			std::string_view GetName() override { return "nn_ac"; }
 
-		void RPLMapped() override
-		{
-			osLib_addFunction("nn_ac", "GetAssignedAddress__Q2_2nn2acFPUl", nnAcExport_GetAssignedAddress);
-			osLib_addFunction("nn_ac", "GetAssignedSubnet__Q2_2nn2acFPUl", nnAcExport_GetAssignedSubnet);
-
-			osLib_addFunction("nn_ac", "IsSystemConnected__Q2_2nn2acFPbPQ3_2nn2ac6ApType", nnAcExport_IsSystemConnected);
-
-			osLib_addFunction("nn_ac", "IsConfigExisting__Q2_2nn2acFQ3_2nn2ac11ConfigIdNumPb", nnAcExport_IsConfigExisting);
-
-			osLib_addFunction("nn_ac", "ACGetAssignedAddress", nnAcExport_ACGetAssignedAddress);
-
-			nn_ac::load();
+			void RPLMapped() override
+			{
+				nn_ac::RegisterExports();
+			}
 		};
-	}s_COSnnAcModule;
+
+		AcLibrary g_acLibrary;
+	}
 
 	COSModule* GetModule()
 	{
-		return &s_COSnnAcModule;
+		return &g_acLibrary;
 	}
 }

@@ -54,12 +54,12 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 1769 | 0.5% |
-| Cemu, untouched | 278333 | 82.7% |
-| Cemu, with PixelU changes | 15907 | 4.7% |
+| Original (RetroPixels) | 6819 | 2.0% |
+| Cemu, untouched | 272448 | 81.3% |
+| Cemu, with PixelU changes | 15320 | 4.6% |
 | PixelU-added files (MPL-2.0 header) | 1940 | 0.6% |
-| Third-party | 38766 | 11.5% |
-| **All** | **336715** | 100% |
+| Third-party | 38766 | 11.6% |
+| **All** | **335293** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -106,26 +106,26 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/OS/libs/coreinit | 19977 | 0 | Cemu |
 | Cafe/OS/libs/dmae | 174 | 174 | original |
 | Cafe/OS/libs/drmapp | 53 | 53 | original |
-| Cafe/OS/libs/erreula | 598 | 0 | Cemu + PixelU change |
+| Cafe/OS/libs/erreula | 514 | 514 | original |
 | Cafe/OS/libs/gx2 | 7994 | 0 | Cemu |
 | Cafe/OS/libs/h264_avc | 3097 | 0 | Cemu |
-| Cafe/OS/libs/mic | 493 | 0 | Cemu |
+| Cafe/OS/libs/mic | 397 | 397 | original |
 | Cafe/OS/libs/nfc | 2020 | 0 | Cemu |
 | Cafe/OS/libs/nlibcurl | 1708 | 0 | Cemu |
 | Cafe/OS/libs/nlibnss | 65 | 65 | original |
-| Cafe/OS/libs/nn_ac | 363 | 0 | Cemu |
-| Cafe/OS/libs/nn_acp | 407 | 0 | Cemu |
-| Cafe/OS/libs/nn_act | 813 | 0 | Cemu |
+| Cafe/OS/libs/nn_ac | 313 | 313 | original |
+| Cafe/OS/libs/nn_acp | 304 | 304 | original |
+| Cafe/OS/libs/nn_act | 568 | 568 | original |
 | Cafe/OS/libs/nn_aoc | 182 | 182 | original |
 | Cafe/OS/libs/nn_boss | 1360 | 0 | Cemu |
 | Cafe/OS/libs/nn_ccr | 50 | 50 | original |
 | Cafe/OS/libs/nn_cmpt | 67 | 67 | original |
 | Cafe/OS/libs/nn_ec | 49 | 49 | original |
-| Cafe/OS/libs/nn_fp | 847 | 0 | Cemu |
+| Cafe/OS/libs/nn_fp | 736 | 736 | original |
 | Cafe/OS/libs/nn_idbe | 158 | 158 | original |
 | Cafe/OS/libs/nn_ndm | 119 | 119 | original |
 | Cafe/OS/libs/nn_nfp | 1354 | 0 | Cemu |
-| Cafe/OS/libs/nn_nim | 326 | 0 | Cemu |
+| Cafe/OS/libs/nn_nim | 241 | 241 | original |
 | Cafe/OS/libs/nn_olv | 4486 | 0 | Cemu |
 | Cafe/OS/libs/nn_pdm | 66 | 66 | original |
 | Cafe/OS/libs/nn_save | 864 | 0 | Cemu |
@@ -136,16 +136,16 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/OS/libs/nsyshid | 6921 | 0 | Cemu |
 | Cafe/OS/libs/nsyskbd | 84 | 84 | original |
 | Cafe/OS/libs/nsysnet | 2328 | 0 | Cemu |
-| Cafe/OS/libs/ntag | 763 | 0 | Cemu |
+| Cafe/OS/libs/ntag | 623 | 623 | original |
 | Cafe/OS/libs/padscore | 1109 | 0 | Cemu |
 | Cafe/OS/libs/proc_ui | 970 | 0 | Cemu |
 | Cafe/OS/libs/snd_core | 5601 | 0 | Cemu + PixelU change |
 | Cafe/OS/libs/snd_user | 1476 | 0 | Cemu |
-| Cafe/OS/libs/swkbd | 730 | 0 | Cemu |
-| Cafe/OS/libs/sysapp | 721 | 0 | Cemu |
+| Cafe/OS/libs/swkbd | 613 | 613 | original |
+| Cafe/OS/libs/sysapp | 435 | 435 | original |
 | Cafe/OS/libs/TCL | 222 | 0 | Cemu |
 | Cafe/OS/libs/vpad | 1319 | 0 | Cemu |
-| Cafe/OS/libs/zlib125 | 411 | 0 | Cemu |
+| Cafe/OS/libs/zlib125 | 306 | 306 | original |
 | Cafe/OS/RPL | 3366 | 0 | Cemu |
 | Cafe/TitleList | 2597 | 0 | Cemu |
 | Cemu/DiscordPresence | 846 | 0 | Cemu |
@@ -207,3 +207,11 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
   `nn_sl`, `nn_spm`, `nn_temp`, `nn_uds`, `nsyskbd` rewritten as original code
   (headers and sources). `TCL` skipped: it is the GPU command ring every game
   draws through.
+- Batch 2: HLE libraries `erreula`, `mic`, `nn_ac`, `nn_acp`, `nn_act`,
+  `nn_fp`, `nn_nim`, `ntag`, `swkbd`, `sysapp`, `zlib125` rewritten as
+  original code (headers and sources). The erreula embedded-mode auto-answer
+  for online error codes (102/103/115/118) is kept. Small fixes: zlib125 keeps
+  each stream's zlib state in host memory (no more patching zlib internals in
+  game memory), the mic test tone runs at the real sample rate, a failing host
+  microphone no longer quits the emulator, ntag opens /dev/ccr_nfc once
+  instead of on every tag operation.

@@ -1,18 +1,20 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// nn_act: user accounts.
 #pragma once
 
 #include "Cafe/IOSU/legacy/iosu_act.h"
 #include "Cafe/OS/RPL/COSModule.h"
 
+// token text returned by AcquireIndependentServiceToken
 struct independentServiceToken_t
 {
 	/* +0x000 */ char token[0x201];
 };
-static_assert(sizeof(independentServiceToken_t) == 0x201); // todo - verify size
+static_assert(sizeof(independentServiceToken_t) == 0x201);
 
-namespace nn
+namespace nn::act
 {
-namespace act
-{
+	// used by other PixelU libraries (nn_save, nn_boss, nn_olv, coreinit MCP)
 	uint32 Initialize();
 
 	uint32 GetPersistentIdEx(uint8 slot);
@@ -25,13 +27,13 @@ namespace act
 
 	uint32 AcquireIndependentServiceToken(independentServiceToken_t* token, const char* clientId, uint32 cacheDurationInSeconds);
 
+	// the country is the top byte of a simple address id
 	static uint32 getCountryCodeFromSimpleAddress(uint32 simpleAddressId)
 	{
-		return (simpleAddressId>>24)&0xFF;
+		return (simpleAddressId >> 24) & 0xFF;
 	}
 
 	const uint8 ACT_SLOT_CURRENT = 0xFE;
 
 	COSModule* GetModule();
-}
 }

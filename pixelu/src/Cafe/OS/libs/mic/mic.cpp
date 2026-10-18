@@ -1,485 +1,385 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Written from scratch.
+//
+// mic is the GamePad microphone library. A game hands MICInit a ring buffer
+// of big-endian 16-bit PCM samples at 32 kHz; the system keeps writing into
+// it and the game reports how much it has read with MICSetDataConsumed.
+//
+// PixelU fills the ring buffer once per AX audio frame (3 ms, 96 samples)
+// from the host microphone chosen in the settings (cubeb). Without a host
+// microphone, holding the GamePad's "mic" button sends a loud test tone so
+// blow/shout prompts can still be passed; otherwise the buffer gets silence.
+// Only the first GamePad (DRC 0) has a microphone.
+
 #include "Cafe/OS/common/OSCommon.h"
 #include "input/InputManager.h"
 #include "audio/IAudioInputAPI.h"
 #include "config/CemuConfig.h"
+#include "mic.h"
 
-enum class MIC_RESULT
+namespace
 {
-	SUCCESS			=  0,
-	BAD_PARAM		= -2,
-	ALREADY_OPEN	= -5,
-	NOT_OPEN		= -6,
-	NOT_INITIALIZED	= -7,
-	NOT_CONNECTED	= -8
-};
+	constexpr sint32 kSampleRate = 32000;
+	constexpr sint32 kSamplesPerFrame = kSampleRate * 3 / 1000; // one AX frame
 
-#define MIC_SAMPLERATE				32000
+	// MIC error codes
+	constexpr sint32 kOk = 0;
+	constexpr sint32 kBadParam = -2;
+	constexpr sint32 kAlreadyOpen = -5;
+	constexpr sint32 kNotOpen = -6;
+	constexpr sint32 kNotInitialized = -7;
+	constexpr sint32 kNotConnected = -8;
+	constexpr sint32 kOverConsumed = -81;
 
-const int MIC_SAMPLES_PER_3MS_32KHZ = (96);  // 32000*3/1000
+	// MICStatus.flags
+	constexpr uint32 kFlagPcm16 = 1 << 0;
+	constexpr uint32 kFlagOpen = 1 << 1;
+	constexpr uint32 kFlagConnected = 1 << 2;
 
-enum class MIC_STATUS_FLAGS : uint32
-{
-	FORMAT_PCM16	= (1 << 0),
-	IS_OPEN			= (1 << 1),
-	IS_CONNECTED	= (1 << 2)
-};
-DEFINE_ENUM_FLAG_OPERATORS(MIC_STATUS_FLAGS);
-
-#define MIC_HANDLE_DRC0				0
-#define MIC_HANDLE_DRC1				1
-
-enum class MIC_STATEID
-{
-	SAMPLERATE			= 0,
-	GAIN_DB				= 1,
-	GAIN_MIN			= 2,
-	GAIN_MAX			= 3,
-	GAIN_STEP			= 4,
-	MUTE				= 5,
-	ECHO_CANCELLATION	= 7,
-	AUTO_SELECTION		= 8
-};
-
-struct  
-{
-	struct  
+	// MICGetState / MICSetState ids
+	enum : uint32
 	{
-		bool isInited;
-		bool isOpen;
-		// ringbuffer information
-		void* ringbufferSampleData;
-		uint32 ringbufferSize;
-		uint32 readIndex;
-		uint32 writeIndex;
-		// state
-		uint32 echoCancellation;
-		uint32 autoSelection;
-		uint32 gainDB;
-	}drc[2];
-}MICStatus = {0};
+		kStateSampleRate = 0,
+		kStateGainDb = 1,
+		kStateGainMin = 2,
+		kStateGainMax = 3,
+		kStateGainStep = 4,
+		kStateMute = 5,
+		kStateEchoCancellation = 7,
+		kStateAutoSelection = 8,
+	};
 
-typedef struct  
-{
-	uint32 size;
-	MPTR samples;
-}micRingbuffer_t;
-
-struct micStatus_t
-{
-	betype<MIC_STATUS_FLAGS> flags;
-	uint32be numSamplesAvailable;
-	uint32be readIndex;
-};
-
-static_assert(sizeof(micStatus_t) == 0xC);
-
-bool mic_isConnected(uint32 drcIndex)
-{
-	if( drcIndex != 0 )
-		return false;
-
-	return InputManager::instance().get_vpad_controller(drcIndex) != nullptr;
-}
-
-sint32 mic_availableSamples(uint32 drcIndex)
-{
-	return (MICStatus.drc[drcIndex].ringbufferSize+MICStatus.drc[drcIndex].writeIndex-MICStatus.drc[drcIndex].readIndex) % MICStatus.drc[drcIndex].ringbufferSize;
-}
-
-bool mic_isActive(uint32 drcIndex)
-{
-	return MICStatus.drc[drcIndex].isOpen;
-}
-
-void mic_feedSamples(uint32 drcIndex, sint16* sampleData, sint32 numSamples)
-{
-	uint16* sampleDataU16 = (uint16*)sampleData;
-	sint32 ringBufferSize = MICStatus.drc[0].ringbufferSize;
-	sint32 writeIndex = MICStatus.drc[0].writeIndex;
-	uint16* ringBufferBase = (uint16*)MICStatus.drc[0].ringbufferSampleData;
-	do
+	struct GameRingBuffer
 	{
-		ringBufferBase[writeIndex] = _swapEndianU16(*sampleDataU16);
-		sampleDataU16++;
-		writeIndex++;
-		writeIndex %= ringBufferSize;
-	}while( (--numSamples) > 0 );
-	MICStatus.drc[0].writeIndex = writeIndex;
-}
+		uint32be sampleCount;
+		MEMPTR<uint16be> samples;
+	};
+	static_assert(sizeof(GameRingBuffer) == 8);
 
-void micExport_MICInit(PPCInterpreter_t* hCPU)
-{
-	debug_printf("MICInit(%d,%d,0x%08x,0x%08x)\n", hCPU->gpr[3], hCPU->gpr[4], hCPU->gpr[5], hCPU->gpr[6]);
-	uint32 drcIndex = hCPU->gpr[3];
-	if( drcIndex > 1 || (drcIndex == 0 && mic_isConnected(drcIndex) == false) )
+	struct GameStatus
 	{
-		memory_writeU32(hCPU->gpr[6], (uint32)MIC_RESULT::NOT_CONNECTED);
-		osLib_returnFromFunction(hCPU, -1);
-		return;
+		uint32be flags;
+		uint32be available;
+		uint32be readPosition;
+	};
+	static_assert(sizeof(GameStatus) == 0xC);
+
+	struct Microphone
+	{
+		bool initialized = false;
+		bool open = false;
+		uint16be* ring = nullptr;
+		uint32 ringSize = 0; // in samples
+		uint32 readPos = 0;
+		uint32 writePos = 0;
+		uint32 echoCancellation = 0;
+		uint32 autoSelection = 0;
+		uint32 gainDb = 0; // signed 7.8 fixed point
+	};
+
+	Microphone g_mics[2];
+
+	bool HasGamePad(uint32 index)
+	{
+		return InputManager::instance().get_vpad_controller(index) != nullptr;
 	}
-	if( drcIndex != 0 )
-	{
-		// DRC1 microphone is not supported (only DRC0)
-		memory_writeU32(hCPU->gpr[6], (uint32)MIC_RESULT::NOT_CONNECTED);
-		osLib_returnFromFunction(hCPU, -1);
-		return;
-	}
-	if( MICStatus.drc[drcIndex].isInited )
-	{
-		memory_writeU32(hCPU->gpr[6], (uint32)MIC_RESULT::ALREADY_OPEN);
-		osLib_returnFromFunction(hCPU, -1);
-		return;
-	}
-	micRingbuffer_t* micRingbuffer = (micRingbuffer_t*)memory_getPointerFromVirtualOffset(hCPU->gpr[5]);
-	MICStatus.drc[drcIndex].ringbufferSampleData = memory_getPointerFromVirtualOffset(_swapEndianU32(micRingbuffer->samples));
-	MICStatus.drc[drcIndex].ringbufferSize = _swapEndianU32(micRingbuffer->size);
-	MICStatus.drc[drcIndex].readIndex = 0;
-	MICStatus.drc[drcIndex].writeIndex = 0;
-	MICStatus.drc[drcIndex].isInited = true;
-	// init default states
-	MICStatus.drc[drcIndex].echoCancellation = 1; // guessed
-	MICStatus.drc[drcIndex].autoSelection = 1; // guessed
-	// return status
-	memory_writeU32(hCPU->gpr[6], 0); // no error
-	osLib_returnFromFunction(hCPU, (drcIndex==0)?MIC_HANDLE_DRC0:MIC_HANDLE_DRC1); // success
 
-	auto& config = GetConfig();
-	const auto audio_api = IAudioInputAPI::Cubeb; // change this if more input apis get implemented
-
-	std::unique_lock lock(g_audioInputMutex);
-	if (!g_inputAudio)
+	// Only GamePad 0 has a usable microphone.
+	bool IsConnected(uint32 index)
 	{
-		IAudioInputAPI::DeviceDescriptionPtr device_description;
-		if (IAudioInputAPI::IsAudioInputAPIAvailable(audio_api))
+		return index == 0 && HasGamePad(0);
+	}
+
+	uint32 AvailableSamples(const Microphone& mic)
+	{
+		if (mic.ringSize == 0)
+			return 0;
+		return (mic.writePos + mic.ringSize - mic.readPos) % mic.ringSize;
+	}
+
+	// Handles are the GamePad index. Returns nullptr and sets the error for a
+	// bad or uninitialised handle.
+	Microphone* Lookup(uint32 handle, sint32& error)
+	{
+		if (handle > 1)
 		{
-			auto devices = IAudioInputAPI::GetDevices(audio_api);
-			const auto it = std::find_if(devices.begin(), devices.end(), [&config](const auto& d) {return d->GetIdentifier() == config.input_device; });
-			if (it != devices.end())
-				device_description = *it;
+			error = kBadParam;
+			return nullptr;
 		}
-
-		if (device_description)
+		if (!g_mics[handle].initialized)
 		{
-			try
+			error = kNotInitialized;
+			return nullptr;
+		}
+		return &g_mics[handle];
+	}
+
+	void PushSamples(Microphone& mic, const sint16* samples, sint32 count)
+	{
+		if (!mic.ring || mic.ringSize == 0)
+			return;
+		uint32 pos = mic.writePos;
+		for (sint32 i = 0; i < count; i++)
+		{
+			mic.ring[pos] = (uint16)samples[i];
+			pos = (pos + 1) % mic.ringSize;
+		}
+		mic.writePos = pos;
+	}
+
+	// Opens the host microphone picked in the settings, once.
+	void OpenHostMicrophone()
+	{
+		constexpr auto api = IAudioInputAPI::Cubeb;
+		const auto& config = GetConfig();
+		std::unique_lock lock(g_audioInputMutex);
+		if (g_inputAudio || !IAudioInputAPI::IsAudioInputAPIAvailable(api))
+			return;
+		IAudioInputAPI::DeviceDescriptionPtr chosen;
+		for (const auto& device : IAudioInputAPI::GetDevices(api))
+		{
+			if (device->GetIdentifier() == config.input_device)
 			{
-				g_inputAudio = IAudioInputAPI::CreateDevice(audio_api, device_description, MIC_SAMPLERATE, 1, MIC_SAMPLES_PER_3MS_32KHZ, 16);
-				g_inputAudio->SetVolume(config.input_volume);
-			}
-			catch (std::runtime_error& ex)
-			{
-				cemuLog_log(LogType::Force, "can't initialize audio input: {}", ex.what());
-				exit(0);
+				chosen = device;
+				break;
 			}
 		}
+		if (!chosen)
+			return;
+		try
+		{
+			g_inputAudio = IAudioInputAPI::CreateDevice(api, chosen, kSampleRate, 1, kSamplesPerFrame, 16);
+			g_inputAudio->SetVolume(config.input_volume);
+		}
+		catch (const std::runtime_error& e)
+		{
+			cemuLog_log(LogType::Force, "mic: could not open the host microphone: {}", e.what());
+			g_inputAudio.reset();
+		}
 	}
-}
 
-void micExport_MICOpen(PPCInterpreter_t* hCPU)
-{
-	debug_printf("MICOpen(%d)\n", hCPU->gpr[3]);
-	uint32 micHandle = hCPU->gpr[3];
-	if( micHandle != MIC_HANDLE_DRC0 && micHandle != MIC_HANDLE_DRC1 )
+	void SetHostMicrophoneRunning(bool running)
 	{
-		osLib_returnFromFunction(hCPU, (uint32)MIC_RESULT::BAD_PARAM);
-		return;
-	}
-	uint32 drcIndex = (micHandle==MIC_HANDLE_DRC0)?0:1;
-	if( MICStatus.drc[drcIndex].isInited == false )
-	{
-		osLib_returnFromFunction(hCPU, (uint32)MIC_RESULT::NOT_INITIALIZED);
-		return;
-	}
-	// check if already open
-	if( MICStatus.drc[drcIndex].isOpen )
-	{
-		osLib_returnFromFunction(hCPU, (uint32)MIC_RESULT::ALREADY_OPEN);
-		return;
-	}
-	// check if DRC is connected
-	bool hasDRCConnected = InputManager::instance().get_vpad_controller(drcIndex) != nullptr;
-	if( hasDRCConnected == false )
-	{
-		osLib_returnFromFunction(hCPU, (uint32)MIC_RESULT::NOT_CONNECTED);
-		return;
-	}
-	// success
-	MICStatus.drc[drcIndex].isOpen = true;
-	osLib_returnFromFunction(hCPU, (uint32)MIC_RESULT::SUCCESS);
-
-	std::shared_lock lock(g_audioInputMutex);
-	if(g_inputAudio)
-		g_inputAudio->Play();
-}
-
-void micExport_MICClose(PPCInterpreter_t* hCPU)
-{
-	// debug_printf("MICClose(%d)\n", hCPU->gpr[3]);
-	uint32 micHandle = hCPU->gpr[3];
-	if( micHandle != MIC_HANDLE_DRC0 && micHandle != MIC_HANDLE_DRC1 )
-	{
-		osLib_returnFromFunction(hCPU, (uint32)MIC_RESULT::BAD_PARAM);
-		return;
-	}
-	uint32 drcIndex = (micHandle==MIC_HANDLE_DRC0)?0:1;
-	if( MICStatus.drc[drcIndex].isInited == false )
-	{
-		osLib_returnFromFunction(hCPU, (uint32)MIC_RESULT::NOT_INITIALIZED);
-		return;
-	}
-	// check if already closed
-	if( MICStatus.drc[drcIndex].isOpen == false )
-	{
-		osLib_returnFromFunction(hCPU, (uint32)MIC_RESULT::ALREADY_OPEN);
-		return;
-	}
-	// success
-	MICStatus.drc[drcIndex].isOpen = false;
-	osLib_returnFromFunction(hCPU, (uint32)MIC_RESULT::SUCCESS);
-
-	std::shared_lock lock(g_audioInputMutex);
-	if (g_inputAudio)
-		g_inputAudio->Stop();
-}
-
-void micExport_MICGetStatus(PPCInterpreter_t* hCPU)
-{
-	debug_printf("MICGetStatus(%d,0x%08x)\n", hCPU->gpr[3], hCPU->gpr[4]);
-	uint32 micHandle = hCPU->gpr[3];
-	if( micHandle != MIC_HANDLE_DRC0 && micHandle != MIC_HANDLE_DRC1 )
-	{
-		osLib_returnFromFunction(hCPU, (uint32)MIC_RESULT::BAD_PARAM);
-		return;
-	}
-	uint32 drcIndex = (micHandle==MIC_HANDLE_DRC0)?0:1;
-	if( MICStatus.drc[drcIndex].isInited == false )
-	{
-		osLib_returnFromFunction(hCPU, (uint32)MIC_RESULT::NOT_INITIALIZED);
-		return;
-	}
-	micStatus_t* micStatus = (micStatus_t*)memory_getPointerFromVirtualOffset(hCPU->gpr[4]);
-	MIC_STATUS_FLAGS micFlags = MIC_STATUS_FLAGS::FORMAT_PCM16;
-	if( mic_isConnected(drcIndex) )
-		micFlags |= MIC_STATUS_FLAGS::IS_CONNECTED;
-	if( MICStatus.drc[drcIndex].isOpen )
-		micFlags |= MIC_STATUS_FLAGS::IS_OPEN;
-	micStatus->flags = micFlags;
-	micStatus->numSamplesAvailable = mic_availableSamples(drcIndex);
-	micStatus->readIndex = MICStatus.drc[drcIndex].readIndex;
-	osLib_returnFromFunction(hCPU, (uint32)MIC_RESULT::SUCCESS);
-}
-
-void micExport_MICGetState(PPCInterpreter_t* hCPU)
-{
-	// debug_printf("MICGetState(%d,%d,0x%08x)\n", hCPU->gpr[3], hCPU->gpr[4], hCPU->gpr[5]);
-	// parameters:
-	// r3	uint32		micHandle
-	// r4	uint32		stateId
-	// r5	uint32*		value
-	uint32 micHandle = hCPU->gpr[3];
-	if( micHandle != MIC_HANDLE_DRC0 && micHandle != MIC_HANDLE_DRC1 )
-	{
-		osLib_returnFromFunction(hCPU, (uint32)MIC_RESULT::BAD_PARAM);
-		return;
-	}
-	uint32 drcIndex = (micHandle==MIC_HANDLE_DRC0)?0:1;
-	if( MICStatus.drc[drcIndex].isInited == false )
-	{
-		osLib_returnFromFunction(hCPU, (uint32)MIC_RESULT::NOT_INITIALIZED);
-		return;
-	}
-	// get state
-	MIC_STATEID stateId = (MIC_STATEID)hCPU->gpr[4];
-	if (stateId == MIC_STATEID::SAMPLERATE)
-	{
-		memory_writeU32(hCPU->gpr[5], MIC_SAMPLERATE);
-	}
-	else if (stateId == MIC_STATEID::AUTO_SELECTION)
-	{
-		memory_writeU32(hCPU->gpr[5], MICStatus.drc[drcIndex].autoSelection);
-	}
-	else if (stateId == MIC_STATEID::GAIN_MIN)
-	{
-		// value guessed
-		memory_writeU32(hCPU->gpr[5], 0x0000); // S7.8
-	}
-	else if (stateId == MIC_STATEID::GAIN_MAX)
-	{
-		// value guessed
-		memory_writeU32(hCPU->gpr[5], 0x0200); // S7.8
-	}
-	else if (stateId == MIC_STATEID::GAIN_STEP)
-	{
-		// value guessed
-		memory_writeU32(hCPU->gpr[5], 0x0001); // S7.8
-	}
-	else if (stateId == MIC_STATEID::ECHO_CANCELLATION)
-	{
-		memory_writeU32(hCPU->gpr[5], MICStatus.drc[drcIndex].echoCancellation);
-	}
-	else if (stateId == MIC_STATEID::GAIN_DB)
-	{
-		// value guessed
-		memory_writeU32(hCPU->gpr[5], MICStatus.drc[drcIndex].gainDB); // S7.8
-	}
-	else
-		cemu_assert_unimplemented();
-	osLib_returnFromFunction(hCPU, (uint32)MIC_RESULT::SUCCESS);
-	return;
-}
-
-void micExport_MICSetState(PPCInterpreter_t* hCPU)
-{
-	uint32 micHandle = hCPU->gpr[3];
-	if( micHandle != MIC_HANDLE_DRC0 && micHandle != MIC_HANDLE_DRC1 )
-	{
-		osLib_returnFromFunction(hCPU, (uint32)MIC_RESULT::BAD_PARAM);
-		return;
-	}
-	uint32 drcIndex = (micHandle==MIC_HANDLE_DRC0)?0:1;
-	if( MICStatus.drc[drcIndex].isInited == false )
-	{
-		osLib_returnFromFunction(hCPU, (uint32)MIC_RESULT::NOT_INITIALIZED);
-		return;
-	}
-	// set state
-	MIC_STATEID stateId = (MIC_STATEID)hCPU->gpr[4];
-	uint32 newValue = hCPU->gpr[5];
-	if( stateId == MIC_STATEID::ECHO_CANCELLATION )
-	{
-		MICStatus.drc[drcIndex].echoCancellation = (newValue!=0)?1:0;
-	}
-	else if( stateId == MIC_STATEID::AUTO_SELECTION )
-	{
-		MICStatus.drc[drcIndex].autoSelection = (newValue!=0)?1:0;
-	}
-	else if( stateId == MIC_STATEID::GAIN_DB )
-	{
-		MICStatus.drc[drcIndex].gainDB = newValue;
-	}
-	else
-		assert_dbg();
-	osLib_returnFromFunction(hCPU, (uint32)MIC_RESULT::SUCCESS);
-	return;
-}
-
-void micExport_MICSetDataConsumed(PPCInterpreter_t* hCPU)
-{
-	// debug_printf("MICSetDataConsumed(%d,%d)\n", hCPU->gpr[3], hCPU->gpr[4]);
-	// parameters:
-	// r3	uint32		micHandle
-	// r4	uint32		numConsumedSamples
-	uint32 micHandle = hCPU->gpr[3];
-	if( micHandle != MIC_HANDLE_DRC0 && micHandle != MIC_HANDLE_DRC1 )
-	{
-		osLib_returnFromFunction(hCPU, (uint32)MIC_RESULT::BAD_PARAM);
-		return;
-	}
-	uint32 drcIndex = (micHandle==MIC_HANDLE_DRC0)?0:1;
-	if( MICStatus.drc[drcIndex].isInited == false )
-	{
-		osLib_returnFromFunction(hCPU, (uint32)MIC_RESULT::NOT_INITIALIZED);
-		return;
-	}
-	if( MICStatus.drc[drcIndex].isOpen == false )
-	{
-		osLib_returnFromFunction(hCPU, (uint32)MIC_RESULT::NOT_OPEN);
-		return;
-	}
-	sint32 numConsumedSamples = (sint32)hCPU->gpr[4];
-	//debug_printf("MIC consume samples 0x%04x\n", numConsumedSamples);
-	if( mic_availableSamples(drcIndex) < numConsumedSamples )
-	{
-		MICStatus.drc[drcIndex].readIndex = MICStatus.drc[drcIndex].writeIndex;
-		osLib_returnFromFunction(hCPU, -81);
-	}
-	else
-	{
-		MICStatus.drc[drcIndex].readIndex += numConsumedSamples;
-		MICStatus.drc[drcIndex].readIndex %= MICStatus.drc[drcIndex].ringbufferSize;
-		osLib_returnFromFunction(hCPU, 0);
-	}
-	return;
-}
-
-void mic_updateDevicePlayState(bool isPlaying)
-{
-	if (g_inputAudio)
-	{
-		if (isPlaying)
+		std::shared_lock lock(g_audioInputMutex);
+		if (!g_inputAudio)
+			return;
+		if (running)
 			g_inputAudio->Play();
 		else
 			g_inputAudio->Stop();
 	}
-}
 
-void mic_updateOnAXFrame()
-{
-	sint32 drcIndex = 0;
-	if( mic_isActive(0) == false ) 
+	sint32 MICInit(uint32 index, uint32 unused, GameRingBuffer* ringBuffer, uint32be* errorOut)
 	{
-		drcIndex = 1;
-		if (mic_isActive(1) == false) 
+		if (!IsConnected(index))
 		{
-			std::shared_lock lock(g_audioInputMutex);
-			mic_updateDevicePlayState(false);
-			return;
+			*errorOut = (uint32)kNotConnected;
+			return -1;
 		}
+		Microphone& mic = g_mics[index];
+		if (mic.initialized)
+		{
+			*errorOut = (uint32)kAlreadyOpen;
+			return -1;
+		}
+		mic = Microphone{};
+		mic.ring = ringBuffer->samples.GetPtr();
+		mic.ringSize = ringBuffer->sampleCount;
+		mic.echoCancellation = 1;
+		mic.autoSelection = 1;
+		mic.initialized = true;
+		*errorOut = (uint32)kOk;
+		OpenHostMicrophone();
+		return (sint32)index;
 	}
 
+	sint32 MICOpen(uint32 handle)
+	{
+		sint32 error = kOk;
+		Microphone* mic = Lookup(handle, error);
+		if (!mic)
+			return error;
+		if (mic->open)
+			return kAlreadyOpen;
+		if (!HasGamePad(handle))
+			return kNotConnected;
+		mic->open = true;
+		SetHostMicrophoneRunning(true);
+		return kOk;
+	}
+
+	sint32 MICClose(uint32 handle)
+	{
+		sint32 error = kOk;
+		Microphone* mic = Lookup(handle, error);
+		if (!mic)
+			return error;
+		if (!mic->open)
+			return kAlreadyOpen; // what the system returns for closing twice
+		mic->open = false;
+		SetHostMicrophoneRunning(false);
+		return kOk;
+	}
+
+	sint32 MICGetStatus(uint32 handle, GameStatus* status)
+	{
+		sint32 error = kOk;
+		Microphone* mic = Lookup(handle, error);
+		if (!mic)
+			return error;
+		uint32 flags = kFlagPcm16;
+		if (IsConnected(handle))
+			flags |= kFlagConnected;
+		if (mic->open)
+			flags |= kFlagOpen;
+		status->flags = flags;
+		status->available = AvailableSamples(*mic);
+		status->readPosition = mic->readPos;
+		return kOk;
+	}
+
+	sint32 MICGetState(uint32 handle, uint32 state, uint32be* value)
+	{
+		sint32 error = kOk;
+		Microphone* mic = Lookup(handle, error);
+		if (!mic)
+			return error;
+		switch (state)
+		{
+		case kStateSampleRate: *value = (uint32)kSampleRate; break;
+		case kStateGainDb: *value = mic->gainDb; break;
+		case kStateGainMin: *value = 0x0000; break; // 0 dB
+		case kStateGainMax: *value = 0x0200; break; // 2 dB
+		case kStateGainStep: *value = 0x0001; break;
+		case kStateEchoCancellation: *value = mic->echoCancellation; break;
+		case kStateAutoSelection: *value = mic->autoSelection; break;
+		default:
+			cemuLog_logDebug(LogType::Force, "MICGetState: state {} not handled", state);
+			break;
+		}
+		return kOk;
+	}
+
+	sint32 MICSetState(uint32 handle, uint32 state, uint32 value)
+	{
+		sint32 error = kOk;
+		Microphone* mic = Lookup(handle, error);
+		if (!mic)
+			return error;
+		switch (state)
+		{
+		case kStateGainDb: mic->gainDb = value; break;
+		case kStateEchoCancellation: mic->echoCancellation = value ? 1 : 0; break;
+		case kStateAutoSelection: mic->autoSelection = value ? 1 : 0; break;
+		default:
+			cemuLog_logDebug(LogType::Force, "MICSetState: state {} not handled", state);
+			break;
+		}
+		return kOk;
+	}
+
+	sint32 MICSetDataConsumed(uint32 handle, sint32 consumed)
+	{
+		sint32 error = kOk;
+		Microphone* mic = Lookup(handle, error);
+		if (!mic)
+			return error;
+		if (!mic->open)
+			return kNotOpen;
+		if ((sint32)AvailableSamples(*mic) < consumed)
+		{
+			mic->readPos = mic->writePos; // drop everything
+			return kOverConsumed;
+		}
+		if (mic->ringSize)
+			mic->readPos = (mic->readPos + (uint32)consumed) % mic->ringSize;
+		return kOk;
+	}
+
+	// A loud two-tone warble, recognisable as "someone is blowing".
+	void MakeTestTone(sint16* out, sint32 count)
+	{
+		static uint32 s_phase = 0;
+		for (sint32 i = 0; i < count; i++, s_phase++)
+		{
+			const double t = (double)s_phase / kSampleRate;
+			const double freq = 440.0 + 220.0 * std::sin(t * 6.0);
+			out[i] = (sint16)(std::sin(t * freq * 6.283185307179586) * 30000.0);
+		}
+	}
+}
+
+bool mic_isActive(uint32 drcIndex)
+{
+	return drcIndex < 2 && g_mics[drcIndex].open;
+}
+
+// Called by AX once per audio frame.
+void mic_updateOnAXFrame()
+{
+	sint32 active = -1;
+	if (mic_isActive(0))
+		active = 0;
+	else if (mic_isActive(1))
+		active = 1;
+
 	std::shared_lock lock(g_audioInputMutex);
-	mic_updateDevicePlayState(true);
+	if (active < 0)
+	{
+		if (g_inputAudio)
+			g_inputAudio->Stop();
+		return;
+	}
+
+	sint16 samples[kSamplesPerFrame];
 	if (g_inputAudio)
 	{
-		sint16 micSampleData[MIC_SAMPLES_PER_3MS_32KHZ];
-		g_inputAudio->ConsumeBlock(micSampleData);
-		mic_feedSamples(0, micSampleData, MIC_SAMPLES_PER_3MS_32KHZ);
+		g_inputAudio->Play();
+		g_inputAudio->ConsumeBlock(samples);
 	}
 	else
 	{
-		const sint32 micSampleCount = 32000 / 32;
-		sint16 micSampleData[micSampleCount];
-
-		auto controller = InputManager::instance().get_vpad_controller(drcIndex);
-		if( controller && controller->is_mic_active() )
-		{
-			for(sint32 i=0; i<micSampleCount; i++)
-			{
-				micSampleData[i] = (sint16)(sin((float)GetTickCount()*0.1f+sin((float)GetTickCount()*0.0001f)*100.0f)*30000.0f);
-			}
-		}
+		auto pad = InputManager::instance().get_vpad_controller(active);
+		if (pad && pad->is_mic_active())
+			MakeTestTone(samples, kSamplesPerFrame);
 		else
-		{
-			memset(micSampleData, 0x00, sizeof(micSampleData));
-		}
-		mic_feedSamples(0, micSampleData, micSampleCount);
+			memset(samples, 0, sizeof(samples));
 	}
+	PushSamples(g_mics[0], samples, kSamplesPerFrame);
 }
 
 namespace mic
 {
-	class : public COSModule
+	namespace
 	{
+		class MicLibrary final : public COSModule
+		{
 		public:
-		std::string_view GetName() override
-		{
-			return "mic";
-		}
+			std::string_view GetName() override { return "mic"; }
 
-		void RPLMapped() override
-		{
-			osLib_addFunction("mic", "MICInit", micExport_MICInit);
-			osLib_addFunction("mic", "MICOpen", micExport_MICOpen);
-			osLib_addFunction("mic", "MICClose", micExport_MICClose);
-			osLib_addFunction("mic", "MICGetStatus", micExport_MICGetStatus);
-			osLib_addFunction("mic", "MICGetState", micExport_MICGetState);
-			osLib_addFunction("mic", "MICSetState", micExport_MICSetState);
-			osLib_addFunction("mic", "MICSetDataConsumed", micExport_MICSetDataConsumed);
-		}
-	}s_COSmicModule;
+			void RPLMapped() override
+			{
+				cafeExportRegister("mic", MICInit, LogType::Placeholder);
+				cafeExportRegister("mic", MICOpen, LogType::Placeholder);
+				cafeExportRegister("mic", MICClose, LogType::Placeholder);
+				cafeExportRegister("mic", MICGetStatus, LogType::Placeholder);
+				cafeExportRegister("mic", MICGetState, LogType::Placeholder);
+				cafeExportRegister("mic", MICSetState, LogType::Placeholder);
+				cafeExportRegister("mic", MICSetDataConsumed, LogType::Placeholder);
+			}
+
+			void RPLUnmapped() override
+			{
+				g_mics[0] = Microphone{};
+				g_mics[1] = Microphone{};
+			}
+		};
+
+		MicLibrary g_micLibrary;
+	}
 
 	COSModule* GetModule()
 	{
-		return &s_COSmicModule;
+		return &g_micLibrary;
 	}
-
-};
+}

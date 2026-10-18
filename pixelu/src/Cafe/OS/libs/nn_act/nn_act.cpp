@@ -1,776 +1,529 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Written from scratch.
+//
+// nn_act is the account library: which user profile is active, its ids
+// (persistent id, principal id, NNID, uuid, ...), its Mii and the tokens
+// for online services. The accounts themselves are held by PixelU's
+// /dev/act service (iosu_act.cpp); each query here is one request to it.
+//
+// Slot numbers start at 1; 0xFE means "the account that is signed in".
+// PixelU always runs with exactly one signed-in account in slot 1.
+
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/OS/libs/coreinit/coreinit_IOS.h"
+#include "Cafe/OS/libs/nn_common.h"
 #include "Cafe/IOSU/legacy/iosu_act.h"
 #include "Cafe/IOSU/legacy/iosu_ioctl.h"
-#include "nn_act.h"
-#include "Cafe/OS/libs/nn_common.h"
 #include "Cafe/CafeSystem.h"
 #include "Common/CafeString.h"
+#include "nn_act.h"
 
-sint32 numAccounts = 1;
-
-#define actPrepareRequest() \
-StackAllocator<iosuActCemuRequest_t> _buf_actRequest; \
-StackAllocator<ioBufferVector_t> _buf_bufferVector; \
-iosuActCemuRequest_t* actRequest = _buf_actRequest.GetPointer(); \
-ioBufferVector_t* actBufferVector = _buf_bufferVector.GetPointer(); \
-memset(actRequest, 0, sizeof(iosuActCemuRequest_t)); \
-memset(actBufferVector, 0, sizeof(ioBufferVector_t)); \
-actBufferVector->buffer = (uint8*)actRequest;
-
-#define actPrepareRequest2() \
-StackAllocator<iosuActCemuRequest_t> _buf_actRequest; \
-iosuActCemuRequest_t* actRequest = _buf_actRequest.GetPointer(); \
-memset(actRequest, 0, sizeof(iosuActCemuRequest_t));
-
-uint32 getNNReturnCode(uint32 iosError, iosuActCemuRequest_t* actRequest)
+namespace
 {
-	if ((iosError & 0x80000000) != 0)
-		return iosError;
-	return actRequest->returnCode;
-}
+	constexpr uint8 kCurrentSlot = iosu::act::ACT_SLOT_CURRENT;
+	constexpr uint8 kFirstSlot = 1;
+	constexpr uint8 kSlotCount = 12;
+	constexpr uint32 kUuidSize = 16;
 
-uint32 _doCemuActRequest(iosuActCemuRequest_t* actRequest)
-{
-	StackAllocator<ioBufferVector_t> _buf_bufferVector;
-	ioBufferVector_t* actBufferVector = _buf_bufferVector.GetPointer();
-	memset(actBufferVector, 0, sizeof(ioBufferVector_t));
-	actBufferVector->buffer = (uint8*)actRequest;
+	// client id the eShop service token is requested with
+	constexpr const char* kEShopClientId = "71a6f5d6430ea0183e3917787d717c46";
 
-	uint32 ioctlResult = __depr__IOS_Ioctlv(IOS_DEVICE_ACT, IOSU_ACT_REQUEST_CEMU, 1, 1, actBufferVector);
-	return getNNReturnCode(ioctlResult, actRequest);
-}
-
-namespace nn
-{
-namespace act
-{
-		
-		uint32 GetPersistentIdEx(uint8 slot)
+	// One request to /dev/act. The request block must be in game memory.
+	class ActCall
+	{
+	public:
+		explicit ActCall(uint32 code, uint8 slot = kCurrentSlot)
 		{
-			actPrepareRequest();
-			actRequest->requestCode = IOSU_ARC_PERSISTENTID;
-			actRequest->accountSlot = slot;
-
-			__depr__IOS_Ioctlv(IOS_DEVICE_ACT, IOSU_ACT_REQUEST_CEMU, 1, 1, actBufferVector);
-
-			return actRequest->resultU32.u32;
+			memset(m_request.GetPointer(), 0, sizeof(iosuActCemuRequest_t));
+			memset(m_vector.GetPointer(), 0, sizeof(ioBufferVector_t));
+			m_request->requestCode = code;
+			m_request->accountSlot = slot;
+			m_vector->buffer = (uint8*)m_request.GetPointer();
 		}
 
-		uint32 GetMiiEx(void* miiData, uint8 slot)
+		iosuActCemuRequest_t* operator->() { return m_request.GetPointer(); }
+
+		void SetClientId(const char* text)
 		{
-			actPrepareRequest2();
-			actRequest->requestCode = IOSU_ARC_MIIDATA;
-			actRequest->accountSlot = slot;
-
-			uint32 result = _doCemuActRequest(actRequest);
-			memcpy(miiData, actRequest->resultBinary.binBuffer, MII_FFL_STORAGE_SIZE);
-
-			return result;
+			const size_t room = sizeof(m_request->clientId);
+			const size_t len = text ? strnlen(text, room - 1) : 0;
+			memcpy(m_request->clientId, text ? text : "", len);
+			m_request->clientId[len] = '\0';
 		}
 
-		uint32 GetUuidEx(uint8* uuid, uint8 slot, sint32 name)
+		// Returns the IOS error if the request couldn't be delivered, else the service's answer.
+		uint32 Send()
 		{
-			actPrepareRequest2();
-			actRequest->requestCode = IOSU_ARC_UUID;
-			actRequest->accountSlot = slot;
-			actRequest->uuidName = name;
-
-			uint32 result = _doCemuActRequest(actRequest);
-
-			memcpy(uuid, actRequest->resultBinary.binBuffer, 16);
-
-			return result;
+			const uint32 ios = (uint32)__depr__IOS_Ioctlv(IOS_DEVICE_ACT, IOSU_ACT_REQUEST_CEMU, 1, 1, m_vector.GetPointer());
+			if (ios & 0x80000000)
+				return ios;
+			return m_request->returnCode;
 		}
 
-		uint32 GetSimpleAddressIdEx(uint32be* simpleAddressId, uint8 slot)
+		uint32 U32() { return m_request->resultU32.u32; }
+		const char* Text() { return m_request->resultString.strBuffer; }
+		const uint8* Bytes() { return m_request->resultBinary.binBuffer; }
+
+	private:
+		StackAllocator<iosuActCemuRequest_t> m_request;
+		StackAllocator<ioBufferVector_t> m_vector;
+	};
+
+	// ACTNexAuthenticationResult
+	struct NexToken
+	{
+		/* +0x000 */ char token[0x201];
+		/* +0x201 */ uint8 pad201[3];
+		/* +0x204 */ char password[0x41];
+		/* +0x245 */ uint8 pad245[3];
+		/* +0x248 */ char host[0x10];
+		/* +0x258 */ uint16be port;
+		/* +0x25A */ uint16be pad25A;
+	};
+	static_assert(sizeof(NexToken) == 0x25C);
+
+	uint32 g_initCount = 0;
+	bool g_parentalCheckEnabled = false;
+
+	uint32 GetMiiEx(void* mii, uint8 slot)
+	{
+		ActCall call(IOSU_ARC_MIIDATA, slot);
+		const uint32 r = call.Send();
+		memcpy(mii, call.Bytes(), MII_FFL_STORAGE_SIZE);
+		return r;
+	}
+
+	uint32 GetAccountIdEx(char* accountId, uint8 slot)
+	{
+		ActCall call(IOSU_ARC_ACCOUNT_ID, slot);
+		const uint32 r = call.Send();
+		strcpy(accountId, call.Text());
+		return r;
+	}
+
+	uint32 GetPrincipalIdEx(uint32be* principalId, uint8 slot)
+	{
+		ActCall call(IOSU_ARC_PRINCIPALID, slot);
+		const uint32 r = call.Send();
+		*principalId = call.U32();
+		return r;
+	}
+
+	uint32 GetCountryEx(char* country, uint8 slot)
+	{
+		ActCall call(IOSU_ARC_COUNTRY, slot);
+		const uint32 r = call.Send();
+		strcpy(country, call.Text());
+		return r;
+	}
+
+	uint32 IsNetworkAccountEx(uint8 slot)
+	{
+		ActCall call(IOSU_ARC_ISNETWORKACCOUNT, slot);
+		call.Send();
+		return call.U32() != 0 ? 1 : 0;
+	}
+
+	// Copies the account's Mii name (up to 10 characters) plus a terminator.
+	void CopyMiiName(uint16be* out, uint8 slot)
+	{
+		StackAllocator<FFLData_t> mii;
+		GetMiiEx(mii.GetPointer(), slot);
+		uint32 len = 0;
+		while (len < MII_FFL_NAME_LENGTH && (uint16)mii->miiName[len] != 0)
 		{
-			actPrepareRequest2();
-			actRequest->requestCode = IOSU_ARC_SIMPLEADDRESS;
-			actRequest->accountSlot = slot;
-
-			uint32 result = _doCemuActRequest(actRequest);
-
-			*simpleAddressId = actRequest->resultU32.u32;
-
-			return result;
+			out[len] = (uint16)mii->miiName[len];
+			len++;
 		}
+		out[len] = 0;
+	}
 
-		uint32 GetTransferableIdEx(uint64* transferableId, uint32 unique, uint8 slot)
+	// ---- exports -------------------------------------------------------------
+
+	uint32 InitializeExport()
+	{
+		nn::act::Initialize();
+		return 0;
+	}
+
+	uint32 CreateConsoleAccount()
+	{
+		return 0;
+	}
+
+	uint32 GetNumOfAccounts()
+	{
+		return 1;
+	}
+
+	uint32 IsSlotOccupied(uint8 slot)
+	{
+		return nn::act::GetPersistentIdEx(slot) != 0 ? 1 : 0;
+	}
+
+	uint32 GetSlotNo()
+	{
+		return kFirstSlot;
+	}
+
+	// Slot of the account with this uuid, 0 if there is none.
+	uint32 GetSlotNoEx(uint8* uuid)
+	{
+		for (uint8 slot = kFirstSlot; slot < kSlotCount; slot++)
 		{
-			actPrepareRequest2();
-			actRequest->requestCode = IOSU_ARC_TRANSFERABLEID;
-			actRequest->accountSlot = slot;
-			actRequest->unique = unique;
-
-			uint32 result = _doCemuActRequest(actRequest);
-
-			*transferableId = _swapEndianU64(actRequest->resultU64.u64);
-
-			return result;
+			uint8 slotUuid[kUuidSize]{};
+			nn::act::GetUuidEx(slotUuid, slot);
+			if (memcmp(uuid, slotUuid, kUuidSize) == 0)
+				return slot;
 		}
+		return 0;
+	}
 
-		uint32 AcquireIndependentServiceToken(independentServiceToken_t* token, const char* clientId, uint32 cacheDurationInSeconds)
-		{
-			memset(token, 0, sizeof(independentServiceToken_t));
-			actPrepareRequest();
-			actRequest->accountSlot = iosu::act::ACT_SLOT_CURRENT;
-			actRequest->requestCode = IOSU_ARC_ACQUIREINDEPENDENTTOKEN;
-			actRequest->titleId = CafeSystem::GetForegroundTitleId();
-			actRequest->titleVersion = CafeSystem::GetForegroundTitleVersion();
-			actRequest->expiresIn = cacheDurationInSeconds;
-			strcpy(actRequest->clientId, clientId);
+	uint32 GetDefaultAccount()
+	{
+		return kFirstSlot;
+	}
 
-			uint32 resultCode = __depr__IOS_Ioctlv(IOS_DEVICE_ACT, IOSU_ACT_REQUEST_CEMU, 1, 1, actBufferVector);
+	uint32 IsNetworkAccount()
+	{
+		return IsNetworkAccountEx(kCurrentSlot);
+	}
 
-			memcpy(token, actRequest->resultBinary.binBuffer, sizeof(independentServiceToken_t));
-			return getNNReturnCode(resultCode, actRequest);
-		}
+	uint32 GetAccountId(char* accountId)
+	{
+		GetAccountIdEx(accountId, kCurrentSlot);
+		return 0;
+	}
 
-		sint64 GetUtcOffset()
-		{
-			return ((ppcCyclesSince2000 / ESPRESSO_CORE_CLOCK) - (ppcCyclesSince2000_UTC / ESPRESSO_CORE_CLOCK)) * 1'000'000;
-		}
+	uint32 GetAccountIdExExport(char* accountId, uint8 slot)
+	{
+		GetAccountIdEx(accountId, slot);
+		return 0;
+	}
 
-		sint32 GetUtcOffsetEx(sint64be* pOutOffset, uint8 slotNo)
-		{
+	uint32 GetSimpleAddressId()
+	{
+		StackAllocator<uint32be> id;
+		*id.GetPointer() = 0;
+		nn::act::GetSimpleAddressIdEx(id.GetPointer(), kCurrentSlot);
+		return *id.GetPointer();
+	}
 
-			if (!pOutOffset)
-				return 0xc0712c80;
+	uint32 GetSimpleAddressIdExExport(uint32be* id, uint8 slot)
+	{
+		nn::act::GetSimpleAddressIdEx(id, slot);
+		return 0;
+	}
 
-			*pOutOffset = GetUtcOffset();
+	uint32 GetPrincipalId()
+	{
+		uint32be pid = 0;
+		GetPrincipalIdEx(&pid, kCurrentSlot);
+		return pid;
+	}
+
+	uint32 GetPrincipalIdExExport(uint32be* pid, uint8 slot)
+	{
+		GetPrincipalIdEx(pid, slot);
+		return 0;
+	}
+
+	uint64 GetTransferableId(uint32 unique)
+	{
+		uint64 stored = 0; // big-endian bytes, as GetTransferableIdEx writes them
+		if (NN_RESULT_IS_FAILURE(nn::act::GetTransferableIdEx(&stored, unique, kCurrentSlot)))
 			return 0;
-		}
-
-		nnResult GetTimeZoneId(CafeString<65>* outTimezoneId)
-		{
-			// return a placeholder timezone id for now
-			// in the future we should emulated this correctly and read the timezone from the account via IOSU
-			outTimezoneId->assign("Europe/London");
-			return 0;
-		}
-
-		sint32 g_initializeCount = 0; // inc in Initialize and dec in Finalize
-		uint32 Initialize()
-		{
-			// usually uses a mutex which is initialized in -> global constructor keyed to'_17_act_shim_util_cpp
-			if (g_initializeCount == 0)
-			{
-				actPrepareRequest();
-				actRequest->requestCode = IOSU_ARC_INIT;
-
-				__depr__IOS_Ioctlv(IOS_DEVICE_ACT, IOSU_ACT_REQUEST_CEMU, 1, 1, actBufferVector);
-			}
-
-			g_initializeCount++;
-
-			return 0;
-		}
-
-		NN_ERROR_CODE GetErrorCode(betype<nnResult>* nnResult)
-		{
-			NN_ERROR_CODE errCode = NNResultToErrorCode(*nnResult, NN_RESULT_MODULE_NN_ACT);
-			return errCode;
-		}
+		return _swapEndianU64(stored);
 	}
-}
 
-
-void nnActExport_CreateConsoleAccount(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "CreateConsoleAccount(...)");
-	//numAccounts++;
-	osLib_returnFromFunction(hCPU, 0);
-}
-
-void nnActExport_GetNumOfAccounts(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "nn_act.GetNumOfAccounts()");
-	osLib_returnFromFunction(hCPU, numAccounts); // account count
-}
-
-void nnActExport_IsSlotOccupied(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "nn_act.IsSlotOccupied({})", hCPU->gpr[3]);
-	ppcDefineParamU8(slot, 0);
-	
-	osLib_returnFromFunction(hCPU, nn::act::GetPersistentIdEx(slot) != 0 ? 1 : 0);
-}
-
-uint32 GetAccountIdEx(char* accountId, uint8 slot)
-{
-	// returns zero for non-network accounts?
-	actPrepareRequest2();
-	actRequest->requestCode = IOSU_ARC_ACCOUNT_ID;
-	actRequest->accountSlot = slot;
-
-	uint32 result = _doCemuActRequest(actRequest);
-
-	strcpy(accountId, actRequest->resultString.strBuffer);
-
-	return result;
-}
-
-uint32 GetPrincipalIdEx(uint32be* principalId, uint8 slot)
-{
-	actPrepareRequest2();
-	actRequest->requestCode = IOSU_ARC_PRINCIPALID;
-	actRequest->accountSlot = slot;
-
-	uint32 result = _doCemuActRequest(actRequest);
-
-	*principalId = actRequest->resultU32.u32;
-
-	return result;
-}
-
-uint32 GetCountryEx(char* country, uint8 slot)
-{
-	actPrepareRequest2();
-	actRequest->requestCode = IOSU_ARC_COUNTRY;
-	actRequest->accountSlot = slot;
-
-	uint32 result = _doCemuActRequest(actRequest);
-
-	strcpy(country, actRequest->resultString.strBuffer);
-
-	return result;
-}
-
-uint32 IsNetworkAccount(uint8* isNetworkAccount, uint8 slot)
-{
-	actPrepareRequest2();
-	actRequest->requestCode = IOSU_ARC_ISNETWORKACCOUNT;
-	actRequest->accountSlot = slot;
-
-	uint32 result = _doCemuActRequest(actRequest);
-
-	*isNetworkAccount = (actRequest->resultU32.u32 != 0) ? 1 : 0;
-
-	return result;
-}
-
-void nnActExport_IsNetworkAccount(PPCInterpreter_t* hCPU)
-{
-	//cemuLog_logDebug(LogType::Force, "nn_act.IsNetworkAccount()");
-	uint8 isNetAcc = 0;
-	IsNetworkAccount(&isNetAcc, 0xFE);
-	osLib_returnFromFunction(hCPU, isNetAcc);
-}
-
-void nnActExport_IsNetworkAccountEx(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamU8(slot, 0);
-	cemuLog_logDebug(LogType::Force, "nn_act.IsNetworkAccountEx({})", slot);
-	uint8 isNetAcc = 0;
-	IsNetworkAccount(&isNetAcc, slot);
-	osLib_returnFromFunction(hCPU, isNetAcc);
-}
-
-void nnActExport_GetSimpleAddressId(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "nn_act.GetSimpleAddressId()");
-
-	uint32be simpleAddressId;
-	nn::act::GetSimpleAddressIdEx(&simpleAddressId, iosu::act::ACT_SLOT_CURRENT);
-
-	osLib_returnFromFunction(hCPU, (uint32)simpleAddressId);
-}
-
-void nnActExport_GetSimpleAddressIdEx(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "nn_act.GetSimpleAddressIdEx(0x{:08x}, {})", hCPU->gpr[3], hCPU->gpr[4] & 0xFF);
-
-	ppcDefineParamU32BEPtr(simpleAddressId, 0);
-	ppcDefineParamU8(slot, 1);
-
-	nn::act::GetSimpleAddressIdEx(simpleAddressId, slot);
-
-	osLib_returnFromFunction(hCPU, 0); // ResultSuccess
-}
-
-void nnActExport_GetPrincipalId(PPCInterpreter_t* hCPU)
-{
-	// return error for non-nnid accounts?
-	uint32be principalId;
-	GetPrincipalIdEx(&principalId, iosu::act::ACT_SLOT_CURRENT);
-	osLib_returnFromFunction(hCPU, (uint32)principalId);
-}
-
-void nnActExport_GetPrincipalIdEx(PPCInterpreter_t* hCPU)
-{
-	// return error for non-nnid accounts?
-	cemuLog_logDebug(LogType::Force, "nn_act.GetPrincipalIdEx(0x{:08x}, {})", hCPU->gpr[3], hCPU->gpr[4]&0xFF);
-	ppcDefineParamU32BEPtr(principalId, 0);
-	ppcDefineParamU8(slot, 1);
-	GetPrincipalIdEx(principalId, slot);
-	
-	osLib_returnFromFunction(hCPU, 0); // ResultSuccess
-}
-
-void nnActExport_GetTransferableId(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamU32(unique, 0);
-
-	cemuLog_logDebug(LogType::Force, "nn_act.GetTransferableId(0x{:08x})", hCPU->gpr[3]);
-
-	uint64 transferableId;
-	uint32 r = nn::act::GetTransferableIdEx(&transferableId, unique, iosu::act::ACT_SLOT_CURRENT);
-	if (NN_RESULT_IS_FAILURE(r))
+	uint32 GetTransferableIdExExport(uint64* id, uint32 unique, uint8 slot)
 	{
-		transferableId = 0;
+		nn::act::GetTransferableIdEx(id, unique, slot);
+		return 0;
 	}
 
-	osLib_returnFromFunction64(hCPU, _swapEndianU64(transferableId));
-}
-
-void nnActExport_GetTransferableIdEx(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamStructPtr(transferableId, uint64, 0);
-	ppcDefineParamU32(unique, 1);
-	ppcDefineParamU8(slot, 2);
-
-	cemuLog_logDebug(LogType::Force, "nn_act.GetTransferableIdEx(0x{:08x}, 0x{:08x}, {})", hCPU->gpr[3], hCPU->gpr[4], hCPU->gpr[5] & 0xFF);
-	
-	uint32 r = nn::act::GetTransferableIdEx(transferableId, unique, slot);
-
-	osLib_returnFromFunction(hCPU, 0); // ResultSuccess
-}
-
-void nnActExport_GetPersistentId(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "nn_act.GetPersistentId()");
-	uint32 persistentId = nn::act::GetPersistentIdEx(iosu::act::ACT_SLOT_CURRENT);
-	osLib_returnFromFunction(hCPU, persistentId);
-}
-
-void nnActExport_GetPersistentIdEx(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamU8(slot, 0);
-	cemuLog_logDebug(LogType::Force, "nn_act.GetPersistentIdEx({})", slot);
-
-	uint32 persistentId = nn::act::GetPersistentIdEx(slot);
-
-	osLib_returnFromFunction(hCPU, persistentId);
-}
-
-void nnActExport_GetCountry(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "nn_act.GetCountry(0x{:08x})", hCPU->gpr[3]);
-	ppcDefineParamStr(country, 0);
-	uint32 r = GetCountryEx(country, iosu::act::ACT_SLOT_CURRENT);
-	osLib_returnFromFunction(hCPU, r);
-}
-
-bool g_isParentalControlCheckEnabled = false;
-void nnActExport_EnableParentalControlCheck(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "nn_act.EnableParentalControlCheck({})", hCPU->gpr[3]);
-	ppcDefineParamU8(isEnabled, 0);
-	g_isParentalControlCheckEnabled = isEnabled != 0;
-	osLib_returnFromFunction(hCPU, 0);
-}
-
-void nnActExport_IsParentalControlCheckEnabled(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "nn_act.IsParentalControlCheckEnabled() -> {}", g_isParentalControlCheckEnabled);
-	osLib_returnFromFunction(hCPU, g_isParentalControlCheckEnabled);
-}
-
-void nnActExport_GetHostServerSettings(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "GetHostServerSettings() - stub");
-	ppcDefineParamStr(ukn, 1);
-	strcpy(ukn, "");
-	osLib_returnFromFunction(hCPU, 0x00000000);
-}
-
-void nnActExport_GetMii(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "nn_act.GetMii(...)");
-	ppcDefineParamUStr(miiData, 0);
-	uint32 r = nn::act::GetMiiEx(miiData, iosu::act::ACT_SLOT_CURRENT);
-	osLib_returnFromFunction(hCPU, r);
-}
-
-void nnActExport_GetMiiEx(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "nn_act.GetMiiEx(...)");
-	ppcDefineParamUStr(miiData, 0);
-	ppcDefineParamU8(slot, 1);
-	uint32 r = nn::act::GetMiiEx(miiData, slot);
-	osLib_returnFromFunction(hCPU, r);
-}
-
-void nnActExport_GetMiiImageEx(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "GetMiiImageEx unimplemented");
-
-	osLib_returnFromFunction(hCPU, 0);
-}
-
-void nnActExport_GetMiiName(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "GetMiiName(0x{:08x})", hCPU->gpr[3]);
-	ppcDefineParamWStrBE(miiName, 0);
-
-	StackAllocator<FFLData_t> miiData;
-
-	uint32 r = nn::act::GetMiiEx(&miiData, iosu::act::ACT_SLOT_CURRENT);
-	// extract name
-	sint32 miiNameLength = 0;
-	for (sint32 i = 0; i < MII_FFL_NAME_LENGTH; i++)
+	uint32 GetPersistentId()
 	{
-		miiName[i] = miiData->miiName[i];
-		if (miiData->miiName[i] == (const uint16be)'\0')
-			break;
-		miiNameLength = i+1;
+		return nn::act::GetPersistentIdEx(kCurrentSlot);
 	}
-	miiName[miiNameLength] = '\0';
 
-	osLib_returnFromFunction(hCPU, 0);
-}
-
-void nnActExport_GetMiiNameEx(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "GetMiiNameEx(0x{:08x}, {})", hCPU->gpr[3], hCPU->gpr[4] & 0xFF);
-	ppcDefineParamWStrBE(miiName, 0);
-	ppcDefineParamU8(slot, 1);
-
-	StackAllocator<FFLData_t> miiData;
-
-	uint32 r = nn::act::GetMiiEx(&miiData, slot);
-	// extract name
-	sint32 miiNameLength = 0;
-	for (sint32 i = 0; i < MII_FFL_NAME_LENGTH; i++)
+	uint32 GetPersistentIdExExport(uint8 slot)
 	{
-		miiName[i] = miiData->miiName[i];
-		if (miiData->miiName[i] == (const uint16be)'\0')
-			break;
-		miiNameLength = i + 1;
+		return nn::act::GetPersistentIdEx(slot);
 	}
-	miiName[miiNameLength] = '\0';
 
-	osLib_returnFromFunction(hCPU, 0);
-}
-
-typedef struct  
-{
-	uint32be ukn00;
-	uint32be ukn04; // transferable id high?
-	uint32be accountTransferableIdLow; //
-	uint32be ukn0C;
-	uint32be ukn10;
-	uint32be ukn14;
-	uint32be ukn18;
-	uint32be ukn1C;
-	uint32be ukn20;
-	uint32be ukn24;
-	uint32be ukn28;
-	uint32be ukn2C;
-	uint32be ukn30;
-	uint32be ukn34;
-	uint32be ukn38;
-	uint32be ukn3C;
-	uint32be ukn40;
-	uint32be ukn44;
-	uint32be ukn48;
-	uint32be ukn4C;
-	uint32be ukn50;
-	uint32be ukn54;
-	uint32be tlsModuleIndex;
-	uint32be ukn5C;
-}FFLStoreDataDepr_t;
-
-static_assert(sizeof(FFLStoreDataDepr_t) == 96);
-
-void nnActExport_UpdateMii(PPCInterpreter_t* hCPU)
-{
-	if (sizeof(FFLStoreDataDepr_t) != MII_FFL_STORAGE_SIZE)
-		assert_dbg();
-
-	ppcDefineParamU8(slot, 0);
-	ppcDefineParamStructPtr(fflStoreData, FFLStoreDataDepr_t, 1);
-	ppcDefineParamStructPtr(uknName, uint16, 2); // mii name
-	ppcDefineParamStructPtr(uknNameR6, uint8, 3);
-	ppcDefineParamStructPtr(uknNameR7, uint8, 4);
-	ppcDefineParamStructPtr(uknNameR8, uint8, 5);
-	ppcDefineParamStructPtr(uknNameR9, uint8, 6);
-	ppcDefineParamStructPtr(uknNameR10, uint8, 7);
-	ppcDefineParamStructPtr(uknNameSP4, uint8, 8);
-	
-	cemu_assert_unimplemented();
-
-	osLib_returnFromFunction(hCPU, 0);
-}
-
-void nnActExport_GetUuid(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "nn_act.GetUuid(0x{:08x})", hCPU->gpr[3]);
-	ppcDefineParamUStr(uuid, 0);
-	nn::act::GetUuidEx(uuid, iosu::act::ACT_SLOT_CURRENT);
-	osLib_returnFromFunction(hCPU, 0); // 0 -> result ok
-}
-
-void nnActExport_GetUuidEx(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "nn_act.GetUuidEx(0x{:08x},0x{:02x})", hCPU->gpr[3], hCPU->gpr[3]&0xFF);
-	ppcDefineParamUStr(uuid, 0);
-	ppcDefineParamU8(slot, 1);
-	nn::act::GetUuidEx(uuid, slot);
-	osLib_returnFromFunction(hCPU, 0); // 0 -> result ok
-}
-
-void nnActExport_GetUuidEx2(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "nn_act.GetUuidEx(0x{:08x},0x{:02x},0x{:08x})", hCPU->gpr[3], hCPU->gpr[4], hCPU->gpr[5]);
-	ppcDefineParamUStr(uuid, 0);
-	ppcDefineParamU8(slot, 1);
-	ppcDefineParamS32(name, 2);
-	nn::act::GetUuidEx(uuid, iosu::act::ACT_SLOT_CURRENT, name);
-	osLib_returnFromFunction(hCPU, 0); // 0 -> result ok
-}
-
-void nnActExport_GetAccountId(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "nn_act.GetAccountId(0x{:08x})", hCPU->gpr[3]);
-	ppcDefineParamUStr(accId, 0);
-	GetAccountIdEx((char*)accId, iosu::act::ACT_SLOT_CURRENT);
-	osLib_returnFromFunction(hCPU, 0);
-}
-
-void nnActExport_GetAccountIdEx(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "nn_act.GetAccountIdEx(0x{:08x}, 0x{:02x})", hCPU->gpr[3], hCPU->gpr[3] & 0xFF);
-	ppcDefineParamUStr(accId, 0);
-	ppcDefineParamU8(slot, 1);
-	GetAccountIdEx((char*)accId, slot);
-	osLib_returnFromFunction(hCPU, 0);
-}
-
-void nnActExport_GetParentalControlSlotNoEx(PPCInterpreter_t* hCPU)
-{
-	// GetParentalControlSlotNoEx(uint8* output, uint8 slot)
-	cemuLog_logDebug(LogType::Force, "nn_act.GetParentalControlSlotNoEx(0x{:08x}, 0x{:02x})", hCPU->gpr[3], hCPU->gpr[4]);
-	//memory_writeU8(hCPU->gpr[3], 0x01); // returned slot no (slot indices start at 1)
-	memory_writeU8(hCPU->gpr[3], 1); // 0 -> No parental control for slot?
-	//memory_writeU8(hCPU->gpr[3], 0); // 0 -> No parental control for slot?
-	osLib_returnFromFunction(hCPU, 0);
-}
-
-void nnActExport_GetDefaultAccount(PPCInterpreter_t* hCPU)
-{
-	// todo
-	cemuLog_logDebug(LogType::Force, "GetDefaultAccount(): Return 1?");
-	osLib_returnFromFunction(hCPU, 1);
-}
-
-void nnActExport_GetSlotNo(PPCInterpreter_t* hCPU)
-{
-	// id of active account
-	osLib_returnFromFunction(hCPU, 1); // 1 is the first slot (0 is invalid)
-}
-
-void nnActExport_GetSlotNoEx(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "nn_act.GetSlotNoEx(...)");
-	// get slot no by uuid
-	ppcDefineParamUStr(uuid, 0);
-
-	// get slot no for a specific uuid
-	for (uint8 i = 1; i < 12; i++)
+	uint32 GetCountry(char* country)
 	{
-		uint8 accUuid[16]{};
-		nn::act::GetUuidEx(accUuid, i);
-		if (memcmp(uuid, accUuid, 16) == 0)
-		{
-			osLib_returnFromFunction(hCPU, i);
-			return;
-		}
+		return GetCountryEx(country, kCurrentSlot);
 	}
 
-	cemu_assert_debug(false); // suspicious behavior?
+	// Accounts carry no time zone yet; report London.
+	nnResult GetTimeZoneId(CafeString<65>* zone)
+	{
+		zone->assign("Europe/London");
+		return 0;
+	}
 
-	osLib_returnFromFunction(hCPU, 0); // account not found
-}
+	uint32 EnableParentalControlCheck(uint8 enable)
+	{
+		g_parentalCheckEnabled = enable != 0;
+		return 0;
+	}
 
-void nnActExport_Initialize(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "nn_act.Initialize()");
+	uint32 IsParentalControlCheckEnabled()
+	{
+		return g_parentalCheckEnabled ? 1 : 0;
+	}
 
-	nn::act::Initialize();
+	// Parental controls belong to the account itself.
+	uint32 GetParentalControlSlotNoEx(uint8* slotOut, uint8 slot)
+	{
+		*slotOut = kFirstSlot;
+		return 0;
+	}
 
-	osLib_returnFromFunction(hCPU, 0);
-}
+	uint32 GetMii(void* mii)
+	{
+		return GetMiiEx(mii, kCurrentSlot);
+	}
 
-void nnActExport_HasNfsAccount(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "Called nn_act.HasNfsAccount");
-	osLib_returnFromFunction(hCPU, 1); // Nfs = Nintendo Friend System? (Splatoon tries to call nn_fp.RegisterAccount if we set this to false)
-}
+	uint32 GetMiiExExport(void* mii, uint8 slot)
+	{
+		return GetMiiEx(mii, slot);
+	}
 
-typedef struct  
-{
-	/* +0x000 */ char token[0x201]; // /nex_token/token
-	/* +0x201 */ uint8 padding201[3];
-	/* +0x204 */ char nexPassword[0x41]; // /nex_token/nex_password
-	/* +0x245 */ uint8 padding245[3];
-	/* +0x248 */ char host[0x10]; // /nex_token/host
-	/* +0x258 */ uint16be port; // /nex_token/port
-	/* +0x25A */ uint16be padding25A;
-}nexServiceToken_t;
+	uint32 GetMiiImageEx(uint32be* sizeOut, void* buffer, uint32 bufferSize, uint32 imageType, uint8 slot)
+	{
+		return 0; // Mii portraits are not rendered
+	}
 
-static_assert(sizeof(nexServiceToken_t) == 0x25C, "nexServiceToken_t has invalid size");
+	uint32 GetMiiName(uint16be* name)
+	{
+		CopyMiiName(name, kCurrentSlot);
+		return 0;
+	}
 
-void nnActExport_AcquireNexServiceToken(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamStructPtr(token, nexServiceToken_t, 0);
-	ppcDefineParamU32(serverId, 1);
-	memset(token, 0, sizeof(nexServiceToken_t));
-	actPrepareRequest();
-	actRequest->accountSlot = iosu::act::ACT_SLOT_CURRENT;
-	actRequest->requestCode = IOSU_ARC_ACQUIRENEXTOKEN;
-	actRequest->titleId = CafeSystem::GetForegroundTitleId();
-	actRequest->titleVersion = CafeSystem::GetForegroundTitleVersion();
-	actRequest->serverId = serverId;
+	uint32 GetMiiNameEx(uint16be* name, uint8 slot)
+	{
+		CopyMiiName(name, slot);
+		return 0;
+	}
 
-	uint32 resultCode = __depr__IOS_Ioctlv(IOS_DEVICE_ACT, IOSU_ACT_REQUEST_CEMU, 1, 1, actBufferVector);
+	uint32 UpdateMii(uint8 slot, FFLData_t* mii, uint16be* name)
+	{
+		cemuLog_log(LogType::Force, "nn_act: UpdateMii is not supported, the account's Mii stays as it is");
+		return 0;
+	}
 
-	memcpy(token, actRequest->resultBinary.binBuffer, sizeof(nexServiceToken_t));
+	uint32 GetUuid(uint8* uuid)
+	{
+		nn::act::GetUuidEx(uuid, kCurrentSlot);
+		return 0;
+	}
 
-	cemuLog_logDebug(LogType::Force, "Called nn_act.AcquireNexServiceToken");
-	osLib_returnFromFunction(hCPU, getNNReturnCode(resultCode, actRequest));
-}
+	uint32 GetUuidExExport(uint8* uuid, uint8 slot)
+	{
+		nn::act::GetUuidEx(uuid, slot);
+		return 0;
+	}
 
-void nnActExport_AcquireIndependentServiceToken(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamMEMPTR(token, independentServiceToken_t, 0);
-	ppcDefineParamMEMPTR(clientId, const char, 1);
-	uint32 result = nn::act::AcquireIndependentServiceToken(token.GetPtr(), clientId.GetPtr(), 0);
-	osLib_returnFromFunction(hCPU, result);
-}
+	uint32 GetUuidExNamed(uint8* uuid, uint8 slot, sint32 name)
+	{
+		nn::act::GetUuidEx(uuid, slot, name);
+		return 0;
+	}
 
-void nnActExport_AcquireIndependentServiceToken2(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamStructPtr(token, independentServiceToken_t, 0);
-	ppcDefineParamMEMPTR(clientId, const char, 1);
-	ppcDefineParamU32(cacheDurationInSeconds, 2); 
-	uint32 result = nn::act::AcquireIndependentServiceToken(token, clientId.GetPtr(), cacheDurationInSeconds);
-	osLib_returnFromFunction(hCPU, result);
-}
+	uint32 AcquireEcServiceToken(independentServiceToken_t* token)
+	{
+		return nn::act::AcquireIndependentServiceToken(token, kEShopClientId, 0);
+	}
 
-void nnActExport_AcquireEcServiceToken(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamMEMPTR(pEcServiceToken, independentServiceToken_t, 0);
-	uint32 result = nn::act::AcquireIndependentServiceToken(pEcServiceToken.GetPtr(), "71a6f5d6430ea0183e3917787d717c46", 0);
-	osLib_returnFromFunction(hCPU, result);
-}
+	uint32 AcquireNexServiceToken(NexToken* token, uint32 serverId)
+	{
+		memset(token, 0, sizeof(NexToken));
+		ActCall call(IOSU_ARC_ACQUIRENEXTOKEN);
+		call->titleId = CafeSystem::GetForegroundTitleId();
+		call->titleVersion = CafeSystem::GetForegroundTitleVersion();
+		call->serverId = serverId;
+		const uint32 r = call.Send();
+		memcpy(token, call.Bytes(), sizeof(NexToken));
+		return r;
+	}
 
-void nnActExport_AcquirePrincipalIdByAccountId(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamMEMPTR(principalId, uint32be, 0);
-	ppcDefineParamMEMPTR(nnid, char, 1);
-	ppcDefineParamU32(ukn, 2); // some option, can be 0 or 1 ?
-	cemuLog_logDebug(LogType::Force, "nn_act.AcquirePrincipalIdByAccountId(0x{:08x},\"{}\", {}) - last param unknown", principalId.GetMPTR(), nnid.GetPtr(), ukn);
-	actPrepareRequest2();
-	actRequest->requestCode = IOSU_ARC_ACQUIREPIDBYNNID;
-	strcpy(actRequest->clientId, nnid.GetPtr());
+	uint32 AcquireIndependentServiceTokenNoCache(independentServiceToken_t* token, const char* clientId)
+	{
+		return nn::act::AcquireIndependentServiceToken(token, clientId, 0);
+	}
 
-	uint32 result = _doCemuActRequest(actRequest);
+	uint32 AcquireIndependentServiceTokenCached(independentServiceToken_t* token, const char* clientId, uint32 cacheSeconds)
+	{
+		return nn::act::AcquireIndependentServiceToken(token, clientId, cacheSeconds);
+	}
 
-	*principalId.GetPtr() = actRequest->resultU32.u32;
+	uint32 AcquirePrincipalIdByAccountId(uint32be* pidOut, const char* accountId, uint32 option)
+	{
+		ActCall call(IOSU_ARC_ACQUIREPIDBYNNID, 0);
+		call.SetClientId(accountId);
+		const uint32 r = call.Send();
+		*pidOut = call.U32();
+		return r;
+	}
 
-	osLib_returnFromFunction(hCPU, result);
+	NN_ERROR_CODE GetErrorCode(betype<nnResult>* result)
+	{
+		return nn::NNResultToErrorCode(*result, NN_RESULT_MODULE_NN_ACT);
+	}
+
+	// Splatoon tries to register a friend account when this is false.
+	uint32 HasNfsAccount()
+	{
+		return 1;
+	}
+
+	uint32 GetHostServerSettings(char* first, char* second, uint8 slot)
+	{
+		second[0] = '\0';
+		return 0;
+	}
 }
 
 namespace nn::act
 {
-	class : public COSModule
+	uint32 Initialize()
 	{
-		public:
-		std::string_view GetName() override
+		if (g_initCount++ == 0)
 		{
-			return "nn_act";
+			ActCall call(IOSU_ARC_INIT);
+			call.Send();
 		}
+		return 0;
+	}
 
-		void RPLMapped() override
+	uint32 GetPersistentIdEx(uint8 slot)
+	{
+		ActCall call(IOSU_ARC_PERSISTENTID, slot);
+		call.Send();
+		return call.U32();
+	}
+
+	uint32 GetUuidEx(uint8* uuid, uint8 slot, sint32 name)
+	{
+		ActCall call(IOSU_ARC_UUID, slot);
+		call->uuidName = name;
+		const uint32 r = call.Send();
+		memcpy(uuid, call.Bytes(), kUuidSize);
+		return r;
+	}
+
+	uint32 GetSimpleAddressIdEx(uint32be* simpleAddressId, uint8 slot)
+	{
+		ActCall call(IOSU_ARC_SIMPLEADDRESS, slot);
+		const uint32 r = call.Send();
+		*simpleAddressId = call.U32();
+		return r;
+	}
+
+	// Writes the id as big-endian bytes, the way it sits in game memory.
+	uint32 GetTransferableIdEx(uint64* transferableId, uint32 unique, uint8 slot)
+	{
+		ActCall call(IOSU_ARC_TRANSFERABLEID, slot);
+		call->unique = unique;
+		const uint32 r = call.Send();
+		*transferableId = _swapEndianU64(call->resultU64.u64);
+		return r;
+	}
+
+	// Local time minus UTC, in microseconds.
+	sint64 GetUtcOffset()
+	{
+		const sint64 localSeconds = (sint64)(ppcCyclesSince2000 / ESPRESSO_CORE_CLOCK);
+		const sint64 utcSeconds = (sint64)(ppcCyclesSince2000_UTC / ESPRESSO_CORE_CLOCK);
+		return (localSeconds - utcSeconds) * 1'000'000;
+	}
+
+	sint32 GetUtcOffsetEx(sint64be* offsetOut, uint8 slot)
+	{
+		if (!offsetOut)
+			return (sint32)0xC0712C80;
+		*offsetOut = GetUtcOffset();
+		return 0;
+	}
+
+	uint32 AcquireIndependentServiceToken(independentServiceToken_t* token, const char* clientId, uint32 cacheDurationInSeconds)
+	{
+		memset(token, 0, sizeof(independentServiceToken_t));
+		ActCall call(IOSU_ARC_ACQUIREINDEPENDENTTOKEN);
+		call->titleId = CafeSystem::GetForegroundTitleId();
+		call->titleVersion = CafeSystem::GetForegroundTitleVersion();
+		call->expiresIn = cacheDurationInSeconds;
+		call.SetClientId(clientId);
+		const uint32 r = call.Send();
+		memcpy(token, call.Bytes(), sizeof(independentServiceToken_t));
+		return r;
+	}
+
+	namespace
+	{
+		class ActLibrary final : public COSModule
 		{
-			osLib_addFunction("nn_act", "Initialize__Q2_2nn3actFv", nnActExport_Initialize);
+		public:
+			std::string_view GetName() override { return "nn_act"; }
 
-			osLib_addFunction("nn_act", "CreateConsoleAccount__Q2_2nn3actFv", nnActExport_CreateConsoleAccount);
-
-			osLib_addFunction("nn_act", "GetNumOfAccounts__Q2_2nn3actFv", nnActExport_GetNumOfAccounts);
-			osLib_addFunction("nn_act", "IsSlotOccupied__Q2_2nn3actFUc", nnActExport_IsSlotOccupied);
-			osLib_addFunction("nn_act", "GetSlotNo__Q2_2nn3actFv", nnActExport_GetSlotNo);
-			osLib_addFunction("nn_act", "GetSlotNoEx__Q2_2nn3actFRC7ACTUuid", nnActExport_GetSlotNoEx);
-			osLib_addFunction("nn_act", "IsNetworkAccount__Q2_2nn3actFv", nnActExport_IsNetworkAccount);
-			osLib_addFunction("nn_act", "IsNetworkAccountEx__Q2_2nn3actFUc", nnActExport_IsNetworkAccountEx);
-			// account id
-			osLib_addFunction("nn_act", "GetAccountId__Q2_2nn3actFPc", nnActExport_GetAccountId);
-			osLib_addFunction("nn_act", "GetAccountIdEx__Q2_2nn3actFPcUc", nnActExport_GetAccountIdEx);
-			// simple address
-			osLib_addFunction("nn_act", "GetSimpleAddressId__Q2_2nn3actFv", nnActExport_GetSimpleAddressId);
-			osLib_addFunction("nn_act", "GetSimpleAddressIdEx__Q2_2nn3actFPUiUc", nnActExport_GetSimpleAddressIdEx);
-			// principal id
-			osLib_addFunction("nn_act", "GetPrincipalId__Q2_2nn3actFv", nnActExport_GetPrincipalId);
-			osLib_addFunction("nn_act", "GetPrincipalIdEx__Q2_2nn3actFPUiUc", nnActExport_GetPrincipalIdEx);
-			// transferable id
-			osLib_addFunction("nn_act", "GetTransferableId__Q2_2nn3actFUi", nnActExport_GetTransferableId);
-			osLib_addFunction("nn_act", "GetTransferableIdEx__Q2_2nn3actFPULUiUc", nnActExport_GetTransferableIdEx);
-			// persistent id
-			osLib_addFunction("nn_act", "GetPersistentId__Q2_2nn3actFv", nnActExport_GetPersistentId);
-			osLib_addFunction("nn_act", "GetPersistentIdEx__Q2_2nn3actFUc", nnActExport_GetPersistentIdEx);
-			// country
-			osLib_addFunction("nn_act", "GetCountry__Q2_2nn3actFPc", nnActExport_GetCountry);
-			// timezone
-			cafeExportRegisterFunc(nn::act::GetTimeZoneId, "nn_act", "GetTimeZoneId__Q2_2nn3actFPc", LogType::Placeholder);
-
-			// parental
-			osLib_addFunction("nn_act", "EnableParentalControlCheck__Q2_2nn3actFb", nnActExport_EnableParentalControlCheck);
-			osLib_addFunction("nn_act", "IsParentalControlCheckEnabled__Q2_2nn3actFv", nnActExport_IsParentalControlCheckEnabled);
-
-			osLib_addFunction("nn_act", "GetMii__Q2_2nn3actFP12FFLStoreData", nnActExport_GetMii);
-			osLib_addFunction("nn_act", "GetMiiEx__Q2_2nn3actFP12FFLStoreDataUc", nnActExport_GetMiiEx);
-			osLib_addFunction("nn_act", "GetMiiImageEx__Q2_2nn3actFPUiPvUi15ACTMiiImageTypeUc", nnActExport_GetMiiImageEx);
-			osLib_addFunction("nn_act", "GetMiiName__Q2_2nn3actFPw", nnActExport_GetMiiName);
-			osLib_addFunction("nn_act", "GetMiiNameEx__Q2_2nn3actFPwUc", nnActExport_GetMiiNameEx);
-
-			osLib_addFunction("nn_act", "UpdateMii__Q2_2nn3actFUcRC12FFLStoreDataPCwPCvUiT4T5T4T5T4T5T4T5T4T5T4T5T4T5T4T5", nnActExport_UpdateMii);
-
-			osLib_addFunction("nn_act", "GetUuid__Q2_2nn3actFP7ACTUuid", nnActExport_GetUuid);
-			osLib_addFunction("nn_act", "GetUuidEx__Q2_2nn3actFP7ACTUuidUc", nnActExport_GetUuidEx);
-			osLib_addFunction("nn_act", "GetUuidEx__Q2_2nn3actFP7ACTUuidUcUi", nnActExport_GetUuidEx2);
-
-			osLib_addFunction("nn_act", "GetParentalControlSlotNoEx__Q2_2nn3actFPUcUc", nnActExport_GetParentalControlSlotNoEx);
-
-			osLib_addFunction("nn_act", "GetDefaultAccount__Q2_2nn3actFv", nnActExport_GetDefaultAccount);
-
-			osLib_addFunction("nn_act", "AcquireEcServiceToken__Q2_2nn3actFPc", nnActExport_AcquireEcServiceToken);
-			osLib_addFunction("nn_act", "AcquireNexServiceToken__Q2_2nn3actFP26ACTNexAuthenticationResultUi", nnActExport_AcquireNexServiceToken);
-			osLib_addFunction("nn_act", "AcquireIndependentServiceToken__Q2_2nn3actFPcPCc", nnActExport_AcquireIndependentServiceToken);
-			osLib_addFunction("nn_act", "AcquireIndependentServiceToken__Q2_2nn3actFPcPCcUibT4", nnActExport_AcquireIndependentServiceToken2);
-			osLib_addFunction("nn_act", "AcquireIndependentServiceToken__Q2_2nn3actFPcPCcUi", nnActExport_AcquireIndependentServiceToken2);
-
-			osLib_addFunction("nn_act", "AcquirePrincipalIdByAccountId__Q2_2nn3actFPUiPA17_CcUi", nnActExport_AcquirePrincipalIdByAccountId);
-
-			cafeExportRegisterFunc(nn::act::GetErrorCode, "nn_act", "GetErrorCode__Q2_2nn3actFRCQ2_2nn6Result", LogType::Placeholder);
-
-			// placeholders / incomplete implementations
-			osLib_addFunction("nn_act", "HasNfsAccount__Q2_2nn3actFv", nnActExport_HasNfsAccount);
-			osLib_addFunction("nn_act", "GetHostServerSettings__Q2_2nn3actFPcT1Uc", nnActExport_GetHostServerSettings);
-			cafeExportRegisterFunc(nn::act::GetUtcOffset, "nn_act", "GetUtcOffset__Q2_2nn3actFv", LogType::Placeholder);
-			cafeExportRegisterFunc(nn::act::GetUtcOffsetEx, "nn_act", "GetUtcOffsetEx__Q2_2nn3actFPLUc", LogType::Placeholder);
-
+			void RPLMapped() override
+			{
+				constexpr auto lt = LogType::Placeholder;
+				cafeExportRegisterFunc(InitializeExport, "nn_act", "Initialize__Q2_2nn3actFv", lt);
+				cafeExportRegisterFunc(CreateConsoleAccount, "nn_act", "CreateConsoleAccount__Q2_2nn3actFv", lt);
+				cafeExportRegisterFunc(GetNumOfAccounts, "nn_act", "GetNumOfAccounts__Q2_2nn3actFv", lt);
+				cafeExportRegisterFunc(IsSlotOccupied, "nn_act", "IsSlotOccupied__Q2_2nn3actFUc", lt);
+				cafeExportRegisterFunc(GetSlotNo, "nn_act", "GetSlotNo__Q2_2nn3actFv", lt);
+				cafeExportRegisterFunc(GetSlotNoEx, "nn_act", "GetSlotNoEx__Q2_2nn3actFRC7ACTUuid", lt);
+				cafeExportRegisterFunc(IsNetworkAccount, "nn_act", "IsNetworkAccount__Q2_2nn3actFv", lt);
+				cafeExportRegisterFunc(IsNetworkAccountEx, "nn_act", "IsNetworkAccountEx__Q2_2nn3actFUc", lt);
+				cafeExportRegisterFunc(GetAccountId, "nn_act", "GetAccountId__Q2_2nn3actFPc", lt);
+				cafeExportRegisterFunc(GetAccountIdExExport, "nn_act", "GetAccountIdEx__Q2_2nn3actFPcUc", lt);
+				cafeExportRegisterFunc(GetSimpleAddressId, "nn_act", "GetSimpleAddressId__Q2_2nn3actFv", lt);
+				cafeExportRegisterFunc(GetSimpleAddressIdExExport, "nn_act", "GetSimpleAddressIdEx__Q2_2nn3actFPUiUc", lt);
+				cafeExportRegisterFunc(GetPrincipalId, "nn_act", "GetPrincipalId__Q2_2nn3actFv", lt);
+				cafeExportRegisterFunc(GetPrincipalIdExExport, "nn_act", "GetPrincipalIdEx__Q2_2nn3actFPUiUc", lt);
+				cafeExportRegisterFunc(GetTransferableId, "nn_act", "GetTransferableId__Q2_2nn3actFUi", lt);
+				cafeExportRegisterFunc(GetTransferableIdExExport, "nn_act", "GetTransferableIdEx__Q2_2nn3actFPULUiUc", lt);
+				cafeExportRegisterFunc(GetPersistentId, "nn_act", "GetPersistentId__Q2_2nn3actFv", lt);
+				cafeExportRegisterFunc(GetPersistentIdExExport, "nn_act", "GetPersistentIdEx__Q2_2nn3actFUc", lt);
+				cafeExportRegisterFunc(GetCountry, "nn_act", "GetCountry__Q2_2nn3actFPc", lt);
+				cafeExportRegisterFunc(GetTimeZoneId, "nn_act", "GetTimeZoneId__Q2_2nn3actFPc", lt);
+				cafeExportRegisterFunc(EnableParentalControlCheck, "nn_act", "EnableParentalControlCheck__Q2_2nn3actFb", lt);
+				cafeExportRegisterFunc(IsParentalControlCheckEnabled, "nn_act", "IsParentalControlCheckEnabled__Q2_2nn3actFv", lt);
+				cafeExportRegisterFunc(GetParentalControlSlotNoEx, "nn_act", "GetParentalControlSlotNoEx__Q2_2nn3actFPUcUc", lt);
+				cafeExportRegisterFunc(GetMii, "nn_act", "GetMii__Q2_2nn3actFP12FFLStoreData", lt);
+				cafeExportRegisterFunc(GetMiiExExport, "nn_act", "GetMiiEx__Q2_2nn3actFP12FFLStoreDataUc", lt);
+				cafeExportRegisterFunc(GetMiiImageEx, "nn_act", "GetMiiImageEx__Q2_2nn3actFPUiPvUi15ACTMiiImageTypeUc", lt);
+				cafeExportRegisterFunc(GetMiiName, "nn_act", "GetMiiName__Q2_2nn3actFPw", lt);
+				cafeExportRegisterFunc(GetMiiNameEx, "nn_act", "GetMiiNameEx__Q2_2nn3actFPwUc", lt);
+				cafeExportRegisterFunc(UpdateMii, "nn_act", "UpdateMii__Q2_2nn3actFUcRC12FFLStoreDataPCwPCvUiT4T5T4T5T4T5T4T5T4T5T4T5T4T5T4T5", lt);
+				cafeExportRegisterFunc(GetUuid, "nn_act", "GetUuid__Q2_2nn3actFP7ACTUuid", lt);
+				cafeExportRegisterFunc(GetUuidExExport, "nn_act", "GetUuidEx__Q2_2nn3actFP7ACTUuidUc", lt);
+				cafeExportRegisterFunc(GetUuidExNamed, "nn_act", "GetUuidEx__Q2_2nn3actFP7ACTUuidUcUi", lt);
+				cafeExportRegisterFunc(GetDefaultAccount, "nn_act", "GetDefaultAccount__Q2_2nn3actFv", lt);
+				cafeExportRegisterFunc(AcquireEcServiceToken, "nn_act", "AcquireEcServiceToken__Q2_2nn3actFPc", lt);
+				cafeExportRegisterFunc(AcquireNexServiceToken, "nn_act", "AcquireNexServiceToken__Q2_2nn3actFP26ACTNexAuthenticationResultUi", lt);
+				cafeExportRegisterFunc(AcquireIndependentServiceTokenNoCache, "nn_act", "AcquireIndependentServiceToken__Q2_2nn3actFPcPCc", lt);
+				cafeExportRegisterFunc(AcquireIndependentServiceTokenCached, "nn_act", "AcquireIndependentServiceToken__Q2_2nn3actFPcPCcUibT4", lt);
+				cafeExportRegisterFunc(AcquireIndependentServiceTokenCached, "nn_act", "AcquireIndependentServiceToken__Q2_2nn3actFPcPCcUi", lt);
+				cafeExportRegisterFunc(AcquirePrincipalIdByAccountId, "nn_act", "AcquirePrincipalIdByAccountId__Q2_2nn3actFPUiPA17_CcUi", lt);
+				cafeExportRegisterFunc(GetErrorCode, "nn_act", "GetErrorCode__Q2_2nn3actFRCQ2_2nn6Result", lt);
+				cafeExportRegisterFunc(HasNfsAccount, "nn_act", "HasNfsAccount__Q2_2nn3actFv", lt);
+				cafeExportRegisterFunc(GetHostServerSettings, "nn_act", "GetHostServerSettings__Q2_2nn3actFPcT1Uc", lt);
+				cafeExportRegisterFunc(GetUtcOffset, "nn_act", "GetUtcOffset__Q2_2nn3actFv", lt);
+				cafeExportRegisterFunc(GetUtcOffsetEx, "nn_act", "GetUtcOffsetEx__Q2_2nn3actFPLUc", lt);
+			}
 		};
 
-	}s_COSnnActModule;
+		ActLibrary g_actLibrary;
+	}
 
 	COSModule* GetModule()
 	{
-		return &s_COSnnActModule;
+		return &g_actLibrary;
 	}
 }
-
-
-
-
