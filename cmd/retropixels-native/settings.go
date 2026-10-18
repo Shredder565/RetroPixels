@@ -30,6 +30,8 @@ type Settings struct {
 	apSettings // Archipelago: the original ROM for each game's patches (archipelago.go)
 	// GameCube / Wii through Dolphin (dolphin_settings.go)
 	Dolphin DolphinSettings `json:"dolphin"`
+	// Wii U through PixelU (pixelu_settings.go)
+	PixelU PixelUSettings `json:"pixelu"`
 }
 
 const maxRecent = 10

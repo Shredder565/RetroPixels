@@ -2,8 +2,8 @@
 //
 // It serves the embedded page (and RetroPixels' own emulators) on a fixed local
 // port, so save states stored by the page stay put between runs, opens it in a
-// chromeless Edge/Chrome app window, and launches Dolphin for GameCube and Wii
-// and MAME (any version of it) for arcade games.
+// chromeless Edge/Chrome app window, and launches Dolphin for GameCube and Wii,
+// PixelU for Wii U and MAME (any version of it) for arcade games.
 package main
 
 import (
@@ -68,6 +68,14 @@ type config struct {
 	DolphinDetected   bool         `json:"dolphinDetected,omitempty"`
 	DolphinVolume     *int         `json:"dolphinVolume,omitempty"` // 0–100, unset = 100
 	DolphinMuted      bool         `json:"dolphinMuted,omitempty"`
+
+	// Wii U games through PixelU (pixelu.go)
+	PixelUExe        string       `json:"pixeluExe,omitempty"`
+	PixelUFolders    []string     `json:"pixeluFolders,omitempty"`
+	PixelURecent     []recentGame `json:"pixeluRecent,omitempty"`
+	PixelUFullscreen *bool        `json:"pixeluFullscreen,omitempty"` // unset = on
+	PixelUEmbed      *bool        `json:"pixeluEmbed,omitempty"`      // unset = off
+	PixelURecord     *bool        `json:"pixeluRecord,omitempty"`     // unset = off
 }
 
 var (
@@ -238,6 +246,7 @@ func newMux() *http.ServeMux {
 	registerFFmpegRoutes(mux)
 	registerDolphinRoutes(mux)
 	registerDolphinInstallRoutes(mux)
+	registerPixelURoutes(mux)
 	registerMameRoutes(mux)
 	registerLifetimeRoutes(mux)
 	registerN64Routes(mux)
