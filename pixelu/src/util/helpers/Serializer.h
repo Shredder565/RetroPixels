@@ -14,16 +14,7 @@ public:
 	template<typename T> T readLE();
 
 	// uint32 element count (big endian) followed by the raw elements
-	template<typename T>
-	std::vector<T> readPODVector()
-	{
-		const uint32 count = readBE<uint32>();
-		if (hasError())
-			return {};
-		std::vector<T> result(count);
-		readData(result.data(), result.size() * sizeof(T));
-		return result;
-	}
+	template<typename T> std::vector<T> readPODVector(); // defined below the specializations
 
 	// Next line up to '\n' or the end of the data, without the newline and
 	// without '\r' characters at either end. Sets the error flag (and returns
@@ -128,12 +119,7 @@ public:
 	// supported: uint32, uint64
 	template<typename T> void writeLE(const T& v);
 
-	template<typename T>
-	void writePODVector(const std::vector<T>& v)
-	{
-		writeBE<uint32>((uint32)v.size());
-		writeData(v.data(), v.size() * sizeof(T));
-	}
+	template<typename T> void writePODVector(const std::vector<T>& v); // defined below the specializations
 
 	// moves the written bytes into data and leaves the writer empty
 	void getResultAndReset(std::vector<uint8>& data)
@@ -169,6 +155,26 @@ template<> void MemStreamWriter::writeBE<uint64>(const uint64& v);
 template<> void MemStreamWriter::writeBE<std::string>(const std::string& v);
 template<> void MemStreamWriter::writeLE<uint32>(const uint32& v);
 template<> void MemStreamWriter::writeLE<uint64>(const uint64& v);
+
+// These use the specializations above, so they come after them (MSVC
+// rejects a specialization declared after a use inside the class).
+template<typename T>
+std::vector<T> MemStreamReader::readPODVector()
+{
+	const uint32 count = readBE<uint32>();
+	if (hasError())
+		return {};
+	std::vector<T> result(count);
+	readData(result.data(), result.size() * sizeof(T));
+	return result;
+}
+
+template<typename T>
+void MemStreamWriter::writePODVector(const std::vector<T>& v)
+{
+	writeBE<uint32>((uint32)v.size());
+	writeData(v.data(), v.size() * sizeof(T));
+}
 
 // Base for objects that convert themselves to and from a byte vector.
 class SerializerHelper
