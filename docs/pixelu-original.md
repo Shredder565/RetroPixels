@@ -54,12 +54,12 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 27360 | 8.4% |
-| Cemu, untouched | 241166 | 74.2% |
-| Cemu, with PixelU changes | 15096 | 4.6% |
+| Original (RetroPixels) | 33845 | 10.5% |
+| Cemu, untouched | 232950 | 72.1% |
+| Cemu, with PixelU changes | 15096 | 4.7% |
 | PixelU-added files (MPL-2.0 header) | 1940 | 0.6% |
-| Third-party | 39404 | 12.1% |
-| **All** | **324966** | 100% |
+| Third-party | 39404 | 12.2% |
+| **All** | **323235** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -107,7 +107,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/OS/libs/dmae | 174 | 174 | original |
 | Cafe/OS/libs/drmapp | 53 | 53 | original |
 | Cafe/OS/libs/erreula | 514 | 514 | original |
-| Cafe/OS/libs/gx2 | 7994 | 0 | Cemu |
+| Cafe/OS/libs/gx2 | 6269 | 6269 | original |
 | Cafe/OS/libs/h264_avc | 3097 | 0 | Cemu |
 | Cafe/OS/libs/mic | 397 | 397 | original |
 | Cafe/OS/libs/nfc | 1081 | 1081 | original |
@@ -143,7 +143,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/OS/libs/snd_user | 1030 | 1030 | original |
 | Cafe/OS/libs/swkbd | 613 | 613 | original |
 | Cafe/OS/libs/sysapp | 435 | 435 | original |
-| Cafe/OS/libs/TCL | 222 | 0 | Cemu |
+| Cafe/OS/libs/TCL | 216 | 216 | original |
 | Cafe/OS/libs/vpad | 636 | 636 | original |
 | Cafe/OS/libs/zlib125 | 306 | 306 | original |
 | Cafe/OS/RPL | 3366 | 0 | Cemu |
@@ -283,3 +283,31 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
   parse in the offline archive is skipped instead of looping forever; the
   offline archive keeps the requested community id; the "post app" stub
   thread returns properly.
+- Batch 6: `TCL` (the GPU command ring) and all of `gx2` rewritten as
+  original code (headers and sources): command buffers and display lists,
+  surfaces and addrlib wrappers, render state, textures and samplers,
+  shaders, draws, clears, queries, stream out, events and the vsync/flip
+  thread, GX2R resources, the allocator, context state, render targets, scan
+  buffers and swapping, surface copies, tiling apertures and the module
+  registration. Exports, argument layouts, return values, guest struct
+  layouts (static_asserts) and the export registration order are unchanged.
+  Every PM4 packet and register value is the same byte for byte, including
+  the HLE swap, scan-buffer copy and surface copy packets that PixelU's
+  GamePad screen toggle and the recorder read. Surface size, alignment and
+  tile mode results are unchanged. An old-vs-new harness (ASan/UBSan, 106
+  randomised actions over the whole GX2 API, random pools, display lists,
+  surfaces of every format/tile mode/dimension, apertures and software
+  copies) produces identical command streams, guest memory and return values
+  for every seed.
+  Fixes and defined behaviour: float-to-integer conversions for sampler LOD,
+  clear colours and point size are defined now and keep the x86 results,
+  except that a negative point size gives 0 instead of 0xFFFF; an unknown
+  vertex attribute format uses fetch format 0 instead of reading past the
+  format table; GX2DrawIndexedImmediateEx with an unknown index type is
+  ignored (it used an uninitialised count); GX2ClearDepthStencilEx with no
+  depth buffer is ignored instead of crashing; GX2CalcTVSize with an invalid
+  mode no longer reads past the resolution table; a tiling aperture on a mip
+  level beyond 13 no longer reads unrelated host memory for the level
+  address; overlapping 2D-tiled software copies use memmove; mip shifts of 32
+  or more wrap like the x86 shift. The disabled addrlib self-test and the
+  surface copy benchmark are removed (their hooks stay and do nothing).
