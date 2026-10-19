@@ -54,12 +54,12 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 103633 | 36.2% |
-| Cemu, untouched | 126344 | 44.2% |
-| Cemu, with PixelU changes | 14833 | 5.2% |
-| PixelU-added files (MPL-2.0 header) | 1940 | 0.7% |
-| Third-party | 39404 | 13.8% |
-| **All** | **286154** | 100% |
+| Original (RetroPixels) | 117740 | 42.1% |
+| Cemu, untouched | 108159 | 38.6% |
+| Cemu, with PixelU changes | 13733 | 4.9% |
+| PixelU-added files (MPL-2.0 header) | 929 | 0.3% |
+| Third-party | 39404 | 14.1% |
+| **All** | **279965** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -78,9 +78,9 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/HW/Espresso/Interpreter | 3252 | 3252 | original |
 | Cafe/HW/Espresso/Recompiler | 7818 | 7818 | original |
 | Cafe/HW/Latte/Common | 3130 | 3130 | original |
-| Cafe/HW/Latte/Core | 20296 | 0 | Cemu + PixelU change |
+| Cafe/HW/Latte/Core | 14100 | 14100 | original |
 | Cafe/HW/Latte/ISA | 2618 | 2618 | original |
-| Cafe/HW/Latte/LatteAddrLib | 1242 | 1242 | original |
+| Cafe/HW/Latte/LatteAddrLib | 1249 | 1249 | original |
 | Cafe/HW/Latte/LegacyShaderDecompiler | 11423 | 5976 | mixed (52% original) |
 | Cafe/HW/Latte/Renderer | 1236 | 0 | Cemu + PixelU change |
 | Cafe/HW/Latte/Renderer/Metal | 7309 | 0 | Cemu |
@@ -828,3 +828,166 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
   * The two leave stubs are identical code at different addresses; the
     address marks a jump table entry as visited or not.
   Log texts differ throughout.
+Batch 11 working notes (Cafe/HW/Latte/Core). The final log entry is at the end.
+
+Done:
+- LatteIndices.cpp: original. Harness: 2000 seeds, 402k lines identical
+  (renderer reserve/upload/release calls, output buffer hashes, max index,
+  host index type and count, cache hits/evictions, invalidation).
+  Kept: a 65535-vertex AUTO line loop still reserves 32 bit room while it
+  writes 16 bit indices; LE sources of rewritten modes are not converted;
+  the 8 slot cache with the first-slot-wins LRU tie rule.
+- FetchShader.cpp/.h: original. Harness: 5000 seeds, 983k lines identical
+  (all decoded fields, key, vk hash fragment, registry and address lookup
+  behaviour, frame-based revalidation).
+  Fixes: UnregisterInCache erases its own entry (old code asserted the entry
+  was missing and then erased end(), so destroying a registered fetch shader
+  crashed); fetches past the end of a bare (old cache layout) program and
+  VTX_TC clauses outside the program are ignored instead of reading past the
+  buffer; the buffer mask bit for invalid buffer ids uses (id & 31) instead
+  of an undefined shift (same value x86 produced).
+- LatteCommandProcessor.cpp, LattePM4.h: original. Harness with a logging
+  stub renderer: 11000 seeds, 845k lines identical (every renderer call,
+  register file hashes, draws incl. the draw-pass fast path, dirty masks,
+  waits, mem writes, events, HLE packets, indirect buffers, ring packets).
+  Fixes: register writes past the register file are dropped instead of
+  writing out of bounds; HLE_SPECIAL_STATE ids >= the state count are
+  ignored (old check let id 9 write past the array); DRAW_INDEX_IMMD copies
+  at most 0x4000 words; ring packets of 128+ words are no longer copied into
+  a 128 word stack buffer; the indirect buffer nesting depth is not capped.
+  Dropped: the never-taken SQ_VTX_SEMANTIC_CLEAR special case and the
+  LATTE_CP_LOGGING debug dump. Log texts differ.
+- LatteTiming.cpp/.h, LatteRingBuffer.cpp/.h: original, same timer
+  frequencies, same vsync/flip throttle title list, same allocator rule.
+  No harness (timer driven / 10 lines), reviewed by hand.
+- LatteTextureLoader.cpp/.h: original. Every decoder class kept (same names,
+  singletons, byte sizes, texel counts, quirks such as the 10:10:10:2 to
+  RGBA16 placeholders that only clear the first texel of each row, the
+  5:6:5 to RGBA8 "v<<3|v>>3" widening and the alpha<<3 dumps of 5:5:5:1).
+  Harness: 1500 seeds, 1.27M lines identical (LatteTextureLoader_begin
+  fields for random formats/dims/tile modes/mips/swizzles, GetInput
+  addresses, every decoder's decode() output incl. untouched bytes,
+  decodePixelToRGBA, raw BC1-5 block decoders, BC1_GetPixel, readback
+  writes into guest memory). The reference build used Cemu's original
+  AddrLibFastDecode.h so the decoders were compared against the real
+  original behaviour.
+  Fix (in LatteAddrLib/AddrLibFastDecode.h, rewritten in 6499dfb): the
+  LINEAR_ALIGNED untile path copied rows with memcpy, which skipped the
+  converting assignment of the swapped 5:5:5:1 element types, so linear
+  R5G5B5A1 textures were uploaded without their channel swap on the
+  swappedRB/swappedOpenGL paths. Such element types are now copied one by
+  one again (the harness shows the difference against the 8ffe2a1 header).
+  Other differences: the dump buffer is allocated after the decoder check
+  (no leak when no decoder exists) and sized exactly; readback log texts.
+- LatteBufferCache.cpp: original. The B+ tree interval tree is replaced by
+  a std::map of disjoint ranges (same query results and order). Same page
+  size, streamout signature pattern written to guest RAM, upload batching,
+  dirty interval rules, OOM eviction order and incremental cleanup order.
+  The page hash is a new function (only compared internally).
+  DC flush pages are queued in a vector and de-duplicated when processed
+  (invalidation is order independent). Harness: 2000 seeds, 4.8M lines
+  identical (every upload with data hash, copies, streamout copies,
+  returned offsets, heap stats, final guest memory hash).
+- LatteBufferData.cpp: original. Harness: 300 seeds, 336k lines identical
+  (vertex buffer bindings, uniform buffer binds, remapped uniform output,
+  cache calls, incremental draw rebinding). Dropped the unused
+  rectGenerate4thVertex template.
+- LatteTexture.cpp/.h, LatteTextureView.cpp/.h, LatteTextureCache.cpp,
+  LatteTextureLegacy.cpp, LatteTextureReadback.cpp, LatteTextureReadbackInfo.h,
+  LatteSurfaceCopy.cpp/.h: original. Same texture/view creation rules,
+  graphic pack rule handling, mip/slice overlap and data-dependency logic,
+  2MB occupancy cells with the same visit order, hash sampling (incl. the
+  AVX2 path), stale texture deletion and readback queue. The view lookup
+  cache is a map from address to registrations (same first match order).
+  Harness (stub renderer, fake graphic pack rules, serial ids, per-op state
+  hash, full state dumps): seeds 0-100, 60+1400, 100+1600 and 100+2000
+  identical (4.3M to 13.7M lines per run), ASan/UBSan clean.
+  Fixes: surface copy no longer uses the source texture after creating the
+  destination deleted it (it is looked up again, or the copy is skipped;
+  a LatteTextureDeleteGuard reports deletions); a failed destination
+  creation returns instead of dereferencing null; deleting a texture drops
+  all of its pending readbacks (old code only the first); the AVX2 hash
+  stores lanes to an array (clang rejected the out-of-range lane index).
+  GetDeleteableTextures and the texture info cache walk the global texture
+  list, so their order is deterministic (was unordered_set order). An
+  unreachable overlap branch that could loop forever was dropped.
+- LatteStreamoutGPU.cpp: original, same ring allocation, range clamp and
+  offset update. LatteQuery.cpp, LatteQueryObject.h: original.
+  Harness: 3000 seeds, 1.4M lines identical (renderer calls, guest result
+  words). Fix: a host query started at an EndOcclusionQuery was pushed to
+  the pending list early, so it was processed twice (double counted
+  samples, use after destroy, possible endless ForceFinishAll loop). Only
+  ended host queries are queued now. With overlapping guest queries the
+  old code hit that bug, so that mode was checked on the new code only
+  (clean).
+- LatteShader.cpp/.h: original. Same base/aux hash formulas (they name the
+  shader cache entries and graphic pack shaders), same program hash memo
+  quirks (the pixel hash adds the geometry sum from the previous hash; the
+  geometry hash uses the vertex shader that was active before the update),
+  same shader chains per base hash, same state cache (key, aux variants,
+  expiry sweep) and the same compile/cache-write order per stage.
+  LatteShaderCache.cpp/.h: original, entry format unchanged (version/stage
+  byte, BE hashes, register state, programs; same entry names and extra
+  versions), same load loop, compile queue depth, boot images and sound.
+  Harness (stub decompiler/renderer/FileCache, both APIs): 420 seeds, 6M
+  lines identical, cache stores written by old and new byte identical, and
+  each build loading the other's store gives identical results; damaged
+  entries are rejected and deleted the same way. ASan/UBSan clean.
+  Fixes: UnloadAll clears the active shader pointers (the next geometry
+  hash read the freed vertex shader); LatteShader_free also frees a pending
+  generated source; a stale state-cache key can no longer loop forever when
+  a shader is freed; the boot sound thread is joined on exit (a joinable
+  std::thread at static destruction terminates); the loading screen redraw
+  timer also advances when the TV ImGui frame could not start (old code
+  then swapped buffers after every entry); Windows memory delta is signed.
+  Dropped: the dead experimental LatteShader_CompileSeparableVertexShader2
+  (it was the only user of the Zir/Transcompiler headers in Core).
+- LatteGSCopyShaderParser.cpp, LatteShaderAssembly.h: original (ISA values
+  unchanged; seven macros nobody used were dropped). Harness: 200k random
+  copy programs, 1.84M lines identical. Fix: fetch clauses that point past
+  the program are no longer read out of bounds.
+- LatteSoftware.cpp/.h: original (unused CPU vertex interpreter, same
+  opcode subset and quirks). Harness: 20000 random programs, 100k lines
+  identical. Differences: unsupported attribute formats read as zero
+  instead of uninitialised stack; unsupported operands read 0 instead of
+  hitting assert_dbg; the CF loop stops at the program end.
+- LatteThread.cpp: original. Same start/stop handshake, init order, idle
+  frames until a title runs, graphic pack wait and size-optimization check,
+  reset registers, OSScreen flips (the four OSScreen buffer textures are
+  looked up in the same order) and teardown in LatteThread_Exit. Not
+  harness-tested (thread/renderer glue); syntax-checked with its callers.
+  Dropped globals nobody used (the OSScreen texture pointers, an unused
+  extern, the thread state copies).
+- LatteRenderTarget.cpp, LatteCachedFBO.h: original. Same FBO key (built
+  from the attachment pointers) and lookup view, same register decoding
+  (padded sizes, scissor size hint, swizzle bits), same masks, clears,
+  output shader choice, window image area, viewport/scissor math. The
+  TV/GamePad swap (isDRCPrimary, Tab / Ctrl+Tab / controller screen
+  button) and the recorder hook before the copyToBackbuffer calls are
+  kept as they were. Kept quirks: a depth buffer with a valid size but no
+  address keeps the previous depth attachment; NotifyTextureDeletion only
+  clears color attachments. Harness (stub texture cache/renderer, objects
+  in a fixed-address arena so the pointer-based FBO keys are compared
+  too): 5000 seeds, 1.39M lines identical; a deliberate one-line change
+  is caught. The controller screen button path was not covered (no
+  emulated controllers in the harness). prevScissor* and
+  hasValidFramebufferAttached are still exported.
+- LatteAsyncCommands.cpp/.h: original (variant queue under a mutex; the
+  wait now counts commands that are queued or running instead of reading
+  the queue without a lock). The forced readback still looks up the
+  texture with swizzle 0 as before.
+- LattePerformanceMonitor.cpp/.h: original, same fields and slot logic,
+  same overlay values (fps over the last two slots, draw calls per frame
+  over all slots). Dropped computed values nobody read (cycles per
+  second and leave counts); that also removes a possible integer division
+  by zero. Harness (fake tick counter): 2M frames, 869k lines identical.
+- LatteOverlay.cpp/.h: original. Same panels, order, stacking, texts,
+  timings (5s session info, 750ms battery blink, 2.5s compile counters)
+  and locking. The three g_compiling_pipelines* globals stay exported.
+  The per-core CPU loop is bounded by the vectors it reads.
+- Latte.h, LatteConst.h, LatteDraw.h, LatteIndices.h, LatteBufferCache.h:
+  original headers, same declarations, values and LatteGPUState_t field
+  order.
+- LatteRecorder.cpp/.h: these are PixelU's own code (commit 991eb0e), not
+  Cemu code. Only the MPL header was swapped for the original-code line;
+  the code is unchanged, so its behaviour and output stay identical.
