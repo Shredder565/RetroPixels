@@ -1,718 +1,723 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "DiscordRPCLite.h"
 
 #include <string_view>
 #include <optional>
 #include <chrono>
-
-#if defined(__cpp_lib_format)
-#include <format>
-namespace shim
-{
-	using std::format;
-}
-#else
-#include <fmt/format.h>
-namespace shim
-{
-	using fmt::format;
-}
-#endif
+#include <vector>
+#include <cstring>
+#include <cstdio>
+#include <cstdlib>
+#include <cerrno>
+#include <algorithm>
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #else
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/socket.h>
-#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 #endif
 
-enum RPCOpcode : uint32_t
+// Discord IPC: every message is a frame of  u32 opcode, u32 payload length
+// (both little endian)  followed by a UTF-8 JSON payload.
+namespace
 {
-	OpcodeHandshake = 0,
-	OpcodeFrame = 1,
-	OpcodeClose = 2,
-	OpcodePing = 3,
-	OpcodePong = 4,
-};
-
-static std::string EscapeJSONString(std::string_view value)
-{
-	std::string escaped;
-	escaped.reserve(value.size() + 16); // original string length plus some extra space for escaped characters
-	for (unsigned char c : value)
+	enum class FrameOp : uint32_t
 	{
-		switch (c)
-		{
-		case '"': escaped.append("\\\""); break;
-		case '\\': escaped.append("\\\\"); break;
-		case '\b': escaped.append("\\b"); break;
-		case '\f': escaped.append("\\f"); break;
-		case '\n': escaped.append("\\n"); break;
-		case '\r': escaped.append("\\r"); break;
-		case '\t': escaped.append("\\t"); break;
-		default:
-			if (c < 32)
-				escaped.append(shim::format("\\u{:04x}", c));
-			else
-				escaped.push_back(c);
-			break;
-		}
-	}
-	return escaped;
-}
+		Handshake = 0,
+		Frame = 1,
+		Close = 2,
+		Ping = 3,
+		Pong = 4,
+	};
 
+	constexpr uint32_t kMaxPayload = 8 * 1024 * 1024;
+	constexpr int64_t kPresenceInterval = 15000; // Discord rate-limits SET_ACTIVITY
+
+	int64_t NowMs()
+	{
+		return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+	}
+
+	int CurrentPid()
+	{
 #ifdef _WIN32
-class NamedPipeImpl
-{
-  public:
-	NamedPipeImpl()
-	{
-		m_readEvent = CreateEvent(nullptr, TRUE, FALSE, nullptr);
+		return (int)GetCurrentProcessId();
+#else
+		return (int)getpid();
+#endif
 	}
 
-	~NamedPipeImpl()
+	void AppendJsonString(std::string& out, std::string_view text)
 	{
-		CloseHandle(m_readEvent);
-		ClosePipe();
+		static const char hexDigits[] = "0123456789abcdef";
+		out.push_back('"');
+		for (const char ch : text)
+		{
+			const unsigned char u = (unsigned char)ch;
+			switch (u)
+			{
+			case '"': out += "\\\""; break;
+			case '\\': out += "\\\\"; break;
+			case '\b': out += "\\b"; break;
+			case '\f': out += "\\f"; break;
+			case '\n': out += "\\n"; break;
+			case '\r': out += "\\r"; break;
+			case '\t': out += "\\t"; break;
+			default:
+				if (u < 0x20)
+				{
+					out += "\\u00";
+					out.push_back(hexDigits[u >> 4]);
+					out.push_back(hexDigits[u & 15]);
+				}
+				else
+					out.push_back(ch);
+			}
+		}
+		out.push_back('"');
 	}
 
-	bool OpenPipe()
+	// builds a JSON object member by member
+	class JsonObject
 	{
-		std::string fullPipeName = R"(\\.\pipe\discord-ipc-0)";
-		m_handle = CreateFileA(fullPipeName.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
-		if (m_handle == INVALID_HANDLE_VALUE)
+	public:
+		JsonObject& Str(const char* key, std::string_view value)
+		{
+			Key(key);
+			AppendJsonString(m_text, value);
+			return *this;
+		}
+		JsonObject& Raw(const char* key, std::string_view rawValue)
+		{
+			Key(key);
+			m_text.append(rawValue);
+			return *this;
+		}
+		JsonObject& Num(const char* key, int64_t value)
+		{
+			return Raw(key, std::to_string(value));
+		}
+		bool Empty() const { return m_members == 0; }
+		std::string Finish() const { return "{" + m_text + "}"; }
+
+	private:
+		void Key(const char* key)
+		{
+			if (m_members++)
+				m_text.push_back(',');
+			AppendJsonString(m_text, key);
+			m_text.push_back(':');
+		}
+		std::string m_text;
+		int m_members = 0;
+	};
+
+	std::string BuildActivityCommand(const DiscordLiteRichPresence& p, uint64_t nonce)
+	{
+		JsonObject args;
+		args.Num("pid", CurrentPid());
+		if (!p.state.empty() || !p.details.empty())
+		{
+			JsonObject activity;
+			if (!p.state.empty())
+				activity.Str("state", p.state);
+			if (!p.details.empty())
+				activity.Str("details", p.details);
+			JsonObject times;
+			if (p.startTimestamp)
+				times.Num("start", p.startTimestamp);
+			if (p.endTimestamp)
+				times.Num("end", p.endTimestamp);
+			if (!times.Empty())
+				activity.Raw("timestamps", times.Finish());
+			JsonObject assets;
+			if (!p.largeImageKey.empty())
+				assets.Str("large_image", p.largeImageKey);
+			if (!p.largeImageText.empty())
+				assets.Str("large_text", p.largeImageText);
+			if (!p.smallImageKey.empty())
+				assets.Str("small_image", p.smallImageKey);
+			if (!p.smallImageText.empty())
+				assets.Str("small_text", p.smallImageText);
+			if (!assets.Empty())
+				activity.Raw("assets", assets.Finish());
+			const bool hasSize = p.partySize > 0 && p.partyMax > 0;
+			if (!p.partyId.empty() || hasSize)
+			{
+				JsonObject party;
+				if (!p.partyId.empty())
+					party.Str("id", p.partyId);
+				if (hasSize)
+					party.Raw("size", "[" + std::to_string(p.partySize) + "," + std::to_string(p.partyMax) + "]");
+				party.Num("privacy", p.partyPrivacy);
+				activity.Raw("party", party.Finish());
+			}
+			JsonObject secrets;
+			if (!p.matchSecret.empty())
+				secrets.Str("match", p.matchSecret);
+			if (!p.joinSecret.empty())
+				secrets.Str("join", p.joinSecret);
+			if (!p.spectateSecret.empty())
+				secrets.Str("spectate", p.spectateSecret);
+			if (!secrets.Empty())
+				activity.Raw("secrets", secrets.Finish());
+			args.Raw("activity", activity.Finish());
+		}
+		char nonceText[24];
+		snprintf(nonceText, sizeof(nonceText), "%016llx", (unsigned long long)nonce);
+		JsonObject cmd;
+		cmd.Str("cmd", "SET_ACTIVITY").Str("nonce", nonceText).Raw("args", args.Finish());
+		return cmd.Finish();
+	}
+
+	// Reads the string value of a top-level member of a JSON object. Nested
+	// values are skipped; non-string values yield nullopt.
+	class TopLevelReader
+	{
+	public:
+		explicit TopLevelReader(std::string_view text) : m_s(text) {}
+
+		std::optional<std::string> Find(std::string_view wantedKey)
+		{
+			m_i = 0;
+			Ws();
+			if (!Take('{'))
+				return std::nullopt;
+			while (true)
+			{
+				Ws();
+				std::string key;
+				if (!ReadString(key))
+					return std::nullopt;
+				Ws();
+				if (!Take(':'))
+					return std::nullopt;
+				Ws();
+				if (key == wantedKey)
+				{
+					std::string value;
+					if (ReadString(value))
+						return value;
+					return std::nullopt;
+				}
+				if (!SkipValue(0))
+					return std::nullopt;
+				Ws();
+				if (!Take(','))
+					return std::nullopt;
+			}
+		}
+
+	private:
+		void Ws()
+		{
+			while (m_i < m_s.size() && (m_s[m_i] == ' ' || m_s[m_i] == '\t' || m_s[m_i] == '\n' || m_s[m_i] == '\r'))
+				m_i++;
+		}
+		bool Take(char c)
+		{
+			if (m_i < m_s.size() && m_s[m_i] == c)
+			{
+				m_i++;
+				return true;
+			}
 			return false;
+		}
+		bool ReadString(std::string& out)
+		{
+			if (!Take('"'))
+				return false;
+			while (m_i < m_s.size())
+			{
+				const char c = m_s[m_i++];
+				if (c == '"')
+					return true;
+				if (c == '\\' && m_i < m_s.size())
+				{
+					const char e = m_s[m_i++];
+					switch (e)
+					{
+					case 'n': out.push_back('\n'); break;
+					case 't': out.push_back('\t'); break;
+					case 'r': out.push_back('\r'); break;
+					case 'b': out.push_back('\b'); break;
+					case 'f': out.push_back('\f'); break;
+					case 'u': m_i = (std::min)(m_s.size(), m_i + 4); out.push_back('?'); break;
+					default: out.push_back(e); break;
+					}
+					continue;
+				}
+				out.push_back(c);
+			}
+			return false;
+		}
+		bool SkipValue(int depth)
+		{
+			if (depth > 64 || m_i >= m_s.size())
+				return false;
+			const char c = m_s[m_i];
+			if (c == '"')
+			{
+				std::string ignored;
+				return ReadString(ignored);
+			}
+			if (c == '{' || c == '[')
+			{
+				const char close = c == '{' ? '}' : ']';
+				m_i++;
+				Ws();
+				if (Take(close))
+					return true;
+				while (true)
+				{
+					Ws();
+					if (c == '{')
+					{
+						std::string ignored;
+						if (!ReadString(ignored))
+							return false;
+						Ws();
+						if (!Take(':'))
+							return false;
+						Ws();
+					}
+					if (!SkipValue(depth + 1))
+						return false;
+					Ws();
+					if (Take(close))
+						return true;
+					if (!Take(','))
+						return false;
+				}
+			}
+			// number, true, false, null
+			const size_t start = m_i;
+			while (m_i < m_s.size() && m_s[m_i] != ',' && m_s[m_i] != '}' && m_s[m_i] != ']' && m_s[m_i] != ' ' && m_s[m_i] != '\n' && m_s[m_i] != '\r' && m_s[m_i] != '\t')
+				m_i++;
+			return m_i > start;
+		}
+
+		std::string_view m_s;
+		size_t m_i = 0;
+	};
+
+	bool EqualsIgnoreCase(std::string_view a, std::string_view b)
+	{
+		if (a.size() != b.size())
+			return false;
+		for (size_t i = 0; i < a.size(); i++)
+		{
+			char x = a[i], y = b[i];
+			if (x >= 'A' && x <= 'Z') x = (char)(x - 'A' + 'a');
+			if (y >= 'A' && y <= 'Z') y = (char)(y - 'A' + 'a');
+			if (x != y)
+				return false;
+		}
 		return true;
 	}
 
-	void ClosePipe()
+	// connection to the local Discord client
+	class IpcChannel
 	{
-		if (m_handle != INVALID_HANDLE_VALUE)
-		{
-			CloseHandle(m_handle);
-			m_handle = INVALID_HANDLE_VALUE;
-		}
-	}
-
-	bool IsOpen() const
-	{
-		return m_handle != INVALID_HANDLE_VALUE;
-	}
-
-	int Read(uint8_t* buffer, size_t maxSize, int timeoutMs)
-	{
-		if (m_handle == INVALID_HANDLE_VALUE || m_readEvent == nullptr)
-			return -1;
-		OVERLAPPED overlapped = {0};
-		overlapped.hEvent = m_readEvent;
-		ResetEvent(m_readEvent);
-		DWORD bytesRead = 0;
-		BOOL success = ReadFile(m_handle, buffer, static_cast<DWORD>(maxSize), nullptr, &overlapped);
-		if (!success && GetLastError() == ERROR_IO_PENDING)
-		{
-			DWORD waitResult = WaitForSingleObject(m_readEvent, timeoutMs);
-			if (waitResult == WAIT_TIMEOUT)
-			{
-				CancelIo(m_handle);
-				return 0;
-			}
-			else if (waitResult != WAIT_OBJECT_0) // error
-			{
-				ClosePipe();
-				return -1;
-			}
-			if (!GetOverlappedResult(m_handle, &overlapped, &bytesRead, FALSE))
-			{
-				ClosePipe();
-				return -1;
-			}
-		}
-		else if (!success)
-		{
-			ClosePipe();
-			return -1;
-		}
-		else
-		{
-			GetOverlappedResult(m_handle, &overlapped, &bytesRead, FALSE); // immediate completion
-		}
-		return static_cast<int>(bytesRead);
-	}
-
-	int Write(const uint8_t* buffer, size_t size)
-	{
-		if (m_handle == INVALID_HANDLE_VALUE)
-		{
-			return -1;
-		}
-		DWORD bytesWritten = 0;
-		if (!WriteFile(m_handle, buffer, static_cast<DWORD>(size), &bytesWritten, nullptr))
-		{
-			ClosePipe();
-			return -1;
-		}
-		return static_cast<int>(bytesWritten);
-	}
-
-  private:
-	HANDLE m_handle = INVALID_HANDLE_VALUE;
-	HANDLE m_readEvent;
-};
-
-#else
-
-class NamedPipeImpl // posix
-{
-  public:
-	NamedPipeImpl() {}
-	~NamedPipeImpl()
-	{
-		ClosePipe();
-	}
-
-	bool OpenPipe()
-	{
-		const char* tempPath = getenv("XDG_RUNTIME_DIR");
-		if (!tempPath)
-			tempPath = getenv("TMPDIR");
-		if (!tempPath)
-			tempPath = getenv("TMP");
-		if (!tempPath)
-			tempPath = getenv("TEMP");
-		if (!tempPath)
-			tempPath = "/tmp";
-		sockaddr_un pipeAddr{};
-		pipeAddr.sun_family = AF_UNIX;
-		m_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-		if (m_fd == -1)
-			return false;
-		fcntl(m_fd, F_SETFL, O_NONBLOCK);
-#ifdef SO_NOSIGPIPE
-		int optval = 1;
-		setsockopt(m_fd, SOL_SOCKET, SO_NOSIGPIPE, &optval, sizeof(optval));
-#endif
-		for (int pipeIndex = 0; pipeIndex < 10; pipeIndex++)
-		{
-			snprintf(pipeAddr.sun_path, sizeof(pipeAddr.sun_path), "%s/discord-ipc-%d", tempPath, pipeIndex);
-			int r = connect(m_fd, (const sockaddr*)&pipeAddr, sizeof(pipeAddr));
-			if (r == 0)
-				return true;
-		}
-		ClosePipe();
-		return false;
-	}
-
-	void ClosePipe()
-	{
-		if (m_fd != -1)
-		{
-			close(m_fd);
-			m_fd = -1;
-		}
-	}
-
-	bool IsOpen() const
-	{
-		return m_fd != -1;
-	}
-
-	int Read(uint8_t* buffer, size_t maxSize, int timeoutMs)
-	{
-		if (m_fd == -1)
-			return -1;
-		if (!buffer || maxSize == 0)
-			return -1;
-		struct pollfd pfd;
-		pfd.fd = m_fd;
-		pfd.events = POLLIN;
-		pfd.revents = 0;
-		int ret = poll(&pfd, 1, timeoutMs);
-		if (ret < 0)
-		{
-			ClosePipe();
-			return -1;
-		}
-		else if (ret == 0)
-		{
-			return 0;
-		}
-		else if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))
-		{
-			ClosePipe();
-			return -1;
-		}
-#ifdef MSG_NOSIGNAL
-		int MsgFlags = MSG_NOSIGNAL;
-#else
-		int MsgFlags = 0;
-#endif
-		int res = (int)recv(m_fd, buffer, maxSize, MsgFlags);
-		if (res <= 0)
-		{
-			ClosePipe();
-			return -1;
-		}
-		return res;
-	}
-
-	int Write(const uint8_t* buffer, size_t size)
-	{
-		if (m_fd == -1 || !buffer || size == 0)
-			return -1;
-#ifdef MSG_NOSIGNAL
-		int MsgFlags = MSG_NOSIGNAL;
-#else
-		int MsgFlags = 0;
-#endif
-		int sentBytes = send(m_fd, buffer, size, MsgFlags);
-		if (sentBytes == -1)
-		{
-			ClosePipe();
-			return -1;
-		}
-		return sentBytes;
-	}
-
-  private:
-	int m_fd = -1;
-};
-
-#endif
+	public:
+		~IpcChannel() { Disconnect(); }
 
 #ifdef _WIN32
-int GetProcessId()
-{
-	return (int)GetCurrentProcessId();
-}
+		bool Connect()
+		{
+			Disconnect();
+			for (int n = 0; n < 10; n++)
+			{
+				char name[64];
+				snprintf(name, sizeof(name), "\\\\.\\pipe\\discord-ipc-%d", n);
+				HANDLE h = CreateFileA(name, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+				if (h != INVALID_HANDLE_VALUE)
+				{
+					m_pipe = h;
+					m_event = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+					return true;
+				}
+			}
+			return false;
+		}
+
+		void Disconnect()
+		{
+			if (m_pipe != INVALID_HANDLE_VALUE)
+				CloseHandle(m_pipe);
+			if (m_event)
+				CloseHandle(m_event);
+			m_pipe = INVALID_HANDLE_VALUE;
+			m_event = nullptr;
+		}
+
+		bool Connected() const { return m_pipe != INVALID_HANDLE_VALUE; }
+
+		// >0 bytes read, 0 timeout, <0 connection lost
+		int Receive(uint8_t* dst, size_t len, int timeoutMs)
+		{
+			if (!Connected() || !m_event)
+				return -1;
+			OVERLAPPED ov{};
+			ov.hEvent = m_event;
+			ResetEvent(m_event);
+			DWORD got = 0;
+			if (!ReadFile(m_pipe, dst, (DWORD)len, nullptr, &ov))
+			{
+				if (GetLastError() != ERROR_IO_PENDING)
+				{
+					Disconnect();
+					return -1;
+				}
+				const DWORD w = WaitForSingleObject(m_event, (DWORD)timeoutMs);
+				if (w == WAIT_TIMEOUT)
+				{
+					CancelIo(m_pipe);
+					GetOverlappedResult(m_pipe, &ov, &got, TRUE); // wait for the cancellation
+					return got > 0 ? (int)got : 0;
+				}
+				if (w != WAIT_OBJECT_0)
+				{
+					Disconnect();
+					return -1;
+				}
+			}
+			if (!GetOverlappedResult(m_pipe, &ov, &got, FALSE))
+			{
+				Disconnect();
+				return -1;
+			}
+			return (int)got;
+		}
+
+		bool Send(const uint8_t* src, size_t len)
+		{
+			if (!Connected())
+				return false;
+			OVERLAPPED ov{};
+			HANDLE ev = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+			ov.hEvent = ev;
+			DWORD written = 0;
+			BOOL ok = WriteFile(m_pipe, src, (DWORD)len, nullptr, &ov);
+			if (!ok && GetLastError() == ERROR_IO_PENDING)
+				ok = GetOverlappedResult(m_pipe, &ov, &written, TRUE);
+			else if (ok)
+				ok = GetOverlappedResult(m_pipe, &ov, &written, TRUE);
+			if (ev)
+				CloseHandle(ev);
+			if (!ok)
+			{
+				Disconnect();
+				return false;
+			}
+			return true;
+		}
+
+	private:
+		HANDLE m_pipe = INVALID_HANDLE_VALUE;
+		HANDLE m_event = nullptr;
 #else
-int GetProcessId()
-{
-	return getpid();
-}
+		bool Connect()
+		{
+			Disconnect();
+			const char* dir = nullptr;
+			for (const char* var : { "XDG_RUNTIME_DIR", "TMPDIR", "TMP", "TEMP" })
+			{
+				dir = getenv(var);
+				if (dir)
+					break;
+			}
+			if (!dir)
+				dir = "/tmp";
+			for (int n = 0; n < 10; n++)
+			{
+				sockaddr_un addr{};
+				addr.sun_family = AF_UNIX;
+				snprintf(addr.sun_path, sizeof(addr.sun_path), "%s/discord-ipc-%d", dir, n);
+				const int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+				if (fd < 0)
+					return false;
+#ifdef SO_NOSIGPIPE
+				int one = 1;
+				setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#endif
+				if (connect(fd, (const sockaddr*)&addr, sizeof(addr)) == 0)
+				{
+					fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
+					m_fd = fd;
+					return true;
+				}
+				close(fd);
+			}
+			return false;
+		}
+
+		void Disconnect()
+		{
+			if (m_fd >= 0)
+				close(m_fd);
+			m_fd = -1;
+		}
+
+		bool Connected() const { return m_fd >= 0; }
+
+		int Receive(uint8_t* dst, size_t len, int timeoutMs)
+		{
+			if (!Connected() || len == 0)
+				return -1;
+			pollfd p{};
+			p.fd = m_fd;
+			p.events = POLLIN;
+			const int r = poll(&p, 1, timeoutMs);
+			if (r == 0)
+				return 0;
+			if (r < 0 || (p.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0)
+			{
+				Disconnect();
+				return -1;
+			}
+			const ssize_t got = recv(m_fd, dst, len, Flags());
+			if (got <= 0)
+			{
+				Disconnect();
+				return -1;
+			}
+			return (int)got;
+		}
+
+		bool Send(const uint8_t* src, size_t len)
+		{
+			size_t done = 0;
+			while (Connected() && done < len)
+			{
+				const ssize_t n = send(m_fd, src + done, len - done, Flags());
+				if (n < 0)
+				{
+					if (errno == EAGAIN || errno == EWOULDBLOCK)
+					{
+						pollfd p{};
+						p.fd = m_fd;
+						p.events = POLLOUT;
+						if (poll(&p, 1, 1000) > 0)
+							continue;
+					}
+					Disconnect();
+					return false;
+				}
+				done += (size_t)n;
+			}
+			return done == len;
+		}
+
+	private:
+		static int Flags()
+		{
+#ifdef MSG_NOSIGNAL
+			return MSG_NOSIGNAL;
+#else
+			return 0;
+#endif
+		}
+		int m_fd = -1;
 #endif
 
-class NamedPipe : public NamedPipeImpl
-{
-  public:
-	NamedPipe()
-		: NamedPipeImpl() {};
-
-	void SendJsonMsg(uint32_t opcode, std::string_view jsonText)
-	{
-		std::vector<uint8_t> buffer;
-		buffer.resize(8 + jsonText.size());
-		buffer[0] = (opcode >> 0) & 0xFF;
-		buffer[1] = (opcode >> 8) & 0xFF;
-		buffer[2] = (opcode >> 16) & 0xFF;
-		buffer[3] = (opcode >> 24) & 0xFF;
-		uint32_t length = static_cast<uint32_t>(jsonText.size());
-		buffer[4] = (length >> 0) & 0xFF;
-		buffer[5] = (length >> 8) & 0xFF;
-		buffer[6] = (length >> 16) & 0xFF;
-		buffer[7] = (length >> 24) & 0xFF;
-		std::copy(jsonText.begin(), jsonText.end(), buffer.begin() + 8);
-		Write(buffer.data(), buffer.size());
-	}
-
-	void SendPresenceUpdate(const DiscordLiteRichPresence& presence)
-	{
-		// note: According to older documentation SET_ACTIVITY has a rate limit of 15 seconds
-		std::string jsonPayload;
-		jsonPayload.append("{");
-		jsonPayload.append(R"("cmd": "SET_ACTIVITY")");
-		jsonPayload.append(shim::format(R"(,"nonce": "{}")", GetNonceStr()));
-		jsonPayload.append(R"(,"args": {)");
-		// args
-		std::string pidStr = shim::format("{}", GetProcessId());
-		jsonPayload.append(R"("pid": )").append(pidStr).append(R"(,)");
-		// args->activity
-		if (!presence.state.empty() || !presence.details.empty())
+	public:
+		bool SendFrame(FrameOp op, std::string_view payload)
 		{
-			jsonPayload.append(R"("activity": {)");
-			if (!presence.state.empty())
-				jsonPayload.append(shim::format(R"("state": "{}",)", EscapeJSONString(presence.state)));
-			if (!presence.details.empty())
-				jsonPayload.append(shim::format(R"("details": "{}",)", EscapeJSONString(presence.details)));
-			if (presence.startTimestamp || presence.endTimestamp)
+			std::vector<uint8_t> frame(8 + payload.size());
+			const uint32_t code = (uint32_t)op;
+			const uint32_t size = (uint32_t)payload.size();
+			for (int i = 0; i < 4; i++)
 			{
-				jsonPayload.append(R"("timestamps": {)");
-				if (presence.startTimestamp)
-					jsonPayload.append(shim::format(R"("start": {},)", presence.startTimestamp));
-				if (presence.endTimestamp)
-					jsonPayload.append(shim::format(R"("end": {},)", presence.endTimestamp));
-				if (jsonPayload.back() == ',')
-					jsonPayload.pop_back();
-				jsonPayload.append("},");
+				frame[i] = (uint8_t)(code >> (8 * i));
+				frame[4 + i] = (uint8_t)(size >> (8 * i));
 			}
-			if (!presence.largeImageKey.empty() || !presence.largeImageText.empty() || !presence.smallImageKey.empty() || !presence.smallImageText.empty())
-			{
-				jsonPayload.append(R"("assets": {)");
-				if (!presence.largeImageKey.empty())
-					jsonPayload.append(shim::format(R"("large_image": "{}",)", EscapeJSONString(presence.largeImageKey)));
-				if (!presence.largeImageText.empty())
-					jsonPayload.append(shim::format(R"("large_text": "{}",)", EscapeJSONString(presence.largeImageText)));
-				if (!presence.smallImageKey.empty())
-					jsonPayload.append(shim::format(R"("small_image": "{}",)", EscapeJSONString(presence.smallImageKey)));
-				if (!presence.smallImageText.empty())
-					jsonPayload.append(shim::format(R"("small_text": "{}",)", EscapeJSONString(presence.smallImageText)));
-				if (jsonPayload.back() == ',')
-					jsonPayload.pop_back();
-				jsonPayload.append("},");
-			}
-			// party
-			if (!presence.partyId.empty() || (presence.partySize > 0 && presence.partyMax > 0))
-			{
-				jsonPayload.append(R"("party": {)");
-				if (!presence.partyId.empty())
-					jsonPayload.append(shim::format(R"("id": "{}",)", EscapeJSONString(presence.partyId)));
-				if (presence.partySize > 0 && presence.partyMax > 0)
-					jsonPayload.append(shim::format(R"("size": [{}, {}],)", presence.partySize, presence.partyMax));
-				jsonPayload.append(R"("privacy": )").append(std::to_string(presence.partyPrivacy)).append(",");
-				jsonPayload.append("},");
-			}
-			// match secret
-			if (!presence.matchSecret.empty() || !presence.joinSecret.empty() || !presence.spectateSecret.empty())
-			{
-				jsonPayload.append(R"("secrets": {)");
-				if (!presence.matchSecret.empty())
-					jsonPayload.append(shim::format(R"("match": "{}",)", EscapeJSONString(presence.matchSecret)));
-				if (!presence.joinSecret.empty())
-					jsonPayload.append(shim::format(R"("join": "{}",)", EscapeJSONString(presence.joinSecret)));
-				if (!presence.spectateSecret.empty())
-					jsonPayload.append(shim::format(R"("spectate": "{}",)", EscapeJSONString(presence.spectateSecret)));
-				if (jsonPayload.back() == ',')
-					jsonPayload.pop_back();
-				jsonPayload.append("},");
-			}
-			if (jsonPayload.back() == ',')
-				jsonPayload.pop_back();
-			// end of args->activity
-			jsonPayload.append("}");
-		}
-		if (jsonPayload.back() == ',')
-			jsonPayload.pop_back();
-		jsonPayload.append("}}");
-		SendJsonMsg(OpcodeFrame, jsonPayload);
-	}
-
-  private:
-	std::string GetNonceStr()
-	{
-		std::string nonceStr = shim::format("{:016x}", nonce);
-		nonce++;
-		return nonceStr;
-	}
-	int64_t nonce = 1;
-};
-
-static std::optional<std::string> ParseJSONField(std::string_view json, std::string_view fieldPath)
-{
-	size_t pos = 0;
-	auto skipWhitespace = [&]() {
-		while (pos < json.size() && isspace(json[pos]))
-			++pos;
-	};
-	auto nextToken = [&]() -> std::string_view {
-		skipWhitespace();
-		if (pos >= json.size())
-			return "";
-		char c = json[pos];
-		if (c == '{' || c == '}' || c == '[' || c == ']' || c == ':' || c == ',')
-		{
-			return json.substr(pos++, 1);
-		}
-		if (c == '"')
-		{
-			size_t start = ++pos;
-			while (pos < json.size() && json[pos] != '"')
-				++pos;
-			auto tok = json.substr(start, pos > start ? pos - start : 0);
-			if (pos < json.size())
-				++pos;
-			return tok;
-		}
-		size_t start = pos;
-		while (pos < json.size() && !isspace(json[pos]) && json[pos] != ',' && json[pos] != '}' && json[pos] != ']')
-			++pos;
-		return json.substr(start, pos - start);
-	};
-	auto skipValue = [&]() {
-		skipWhitespace();
-		if (pos >= json.size())
-			return;
-		char c = json[pos];
-		if (c == '{')
-		{
-			int depth = 1;
-			++pos;
-			while (pos < json.size() && depth > 0)
-			{
-				auto tok = nextToken();
-				if (tok == "{")
-					++depth;
-				else if (tok == "}")
-					--depth;
-			}
-		}
-		else if (c == '[')
-		{
-			int depth = 1;
-			++pos;
-			while (pos < json.size() && depth > 0)
-			{
-				auto tok = nextToken();
-				if (tok == "[")
-					++depth;
-				else if (tok == "]")
-					--depth;
-			}
-		}
-		else
-		{
-			nextToken();
+			if (!payload.empty())
+				memcpy(frame.data() + 8, payload.data(), payload.size());
+			return Send(frame.data(), frame.size());
 		}
 	};
-	auto findField = [&](std::string_view key) {
-		while (true)
-		{
-			auto tok = nextToken();
-			if (tok == "}")
-				return false;
-			if (tok == "")
-				return false;
-			if (tok == key)
-			{
-				if (nextToken() == ":")
-					return true;
-				return false;
-			}
-			if (nextToken() != ":")
-				return false;
-			skipValue();
-			auto sep = nextToken();
-			if (sep == "}")
-				return false;
-			if (sep != ",")
-				return false;
-		}
-	};
-	// initial "{"
-	skipWhitespace();
-	if (nextToken() != "{")
-		return std::nullopt;
-	// traverse the path
-	size_t off = 0;
-	while (off <= fieldPath.size())
+
+	// collects one incoming frame across several partial reads
+	struct FrameAssembler
 	{
-		size_t sep = fieldPath.find('/', off);
-		if (sep == std::string_view::npos)
-			sep = fieldPath.size();
-		std::string_view seg = fieldPath.substr(off, sep - off);
-		if (!findField(seg))
-			return std::nullopt;
-		auto val = nextToken(); // after ":"
-		if (sep == fieldPath.size())
-			return std::string(val);
-		if (val == "{")
+		uint8_t header[8]{};
+		size_t have = 0; // bytes of header + payload received so far
+		std::vector<uint8_t> payload;
+
+		uint32_t Field(int i) const
 		{
-			// traverse object
+			return (uint32_t)header[i] | ((uint32_t)header[i + 1] << 8) | ((uint32_t)header[i + 2] << 16) | ((uint32_t)header[i + 3] << 24);
 		}
-		else if (val == "[")
-		{
-			// array
-			return std::nullopt;
-		}
-		else
-		{
-			return std::nullopt; // not object
-		}
-		off = sep + 1;
-	}
-	return std::nullopt;
+		uint32_t Opcode() const { return Field(0); }
+		uint32_t Length() const { return Field(4); }
+		void Reset() { have = 0; }
+	};
 }
 
 DiscordRPCLite::DiscordRPCLite(const char* applicationId)
 {
-	m_workerThread = std::thread(&DiscordRPCLite::WorkerThread, this, std::string(applicationId));
+	m_thread = std::thread(&DiscordRPCLite::Run, this, std::string(applicationId));
 }
 
 DiscordRPCLite::~DiscordRPCLite()
 {
-	m_shutdownSignal.store(true);
-	if (m_workerThread.joinable())
-		m_workerThread.join();
+	m_quit = true;
+	if (m_thread.joinable())
+		m_thread.join();
 }
 
-static bool CompareStringI(std::string_view a, std::string_view b)
+void DiscordRPCLite::UpdateRichPresence(const DiscordLiteRichPresence& presence)
 {
-	auto toLower = [](char c) -> char {
-		if (c >= 'A' && c <= 'Z')
-			return c + ('a' - 'A');
-		return c;
-	};
-	if (a.size() != b.size())
+	std::lock_guard guard(m_lock);
+	m_activity = presence;
+	m_pending = true;
+}
+
+void DiscordRPCLite::ClearRichPresence()
+{
+	std::lock_guard guard(m_lock);
+	m_activity = {};
+	m_pending = false;
+}
+
+bool DiscordRPCLite::TakePendingPresence(DiscordLiteRichPresence& out)
+{
+	std::lock_guard guard(m_lock);
+	if (!m_pending)
 		return false;
-	for (size_t i = 0; i < a.size(); i++)
-	{
-		if (toLower(a[i]) != toLower(b[i]))
-			return false;
-	}
+	out = m_activity;
+	m_pending = false;
 	return true;
 }
 
-static int64_t GetMs()
+void DiscordRPCLite::Run(std::string applicationId)
 {
-	auto now = std::chrono::system_clock::now();
-	auto duration = now.time_since_epoch();
-	return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
-}
-
-void DiscordRPCLite::WorkerThread(std::string applicationId)
-{
-	enum class ConnectionState
+	enum class Link
 	{
-		Disconnected,
-		ConnectingBeforeHandshake,
-		ConnectingAfterHandshake,
-		Connected
+		Offline,
+		HandshakeSent, // waiting for the READY dispatch
+		Ready,
 	};
-	ConnectionState connectionState = ConnectionState::Disconnected;
+	Link link = Link::Offline;
+	IpcChannel channel;
+	FrameAssembler incoming;
+	uint64_t nonce = 1;
+	int64_t lastAttempt = 0;
+	int failedAttempts = 0;
+	int64_t lastActivitySent = 0;
 
-	std::vector<uint8_t> recvBuffer;
-	uint8_t recvMsgHeader[8] = {0};
-	size_t recvSize = 0; // if < 8 then we are still receiving the header. If >= 8 then we are receiving the body
-	NamedPipe pipe;
-	auto SetDisconnected = [&]() {
-		pipe.ClosePipe();
-		connectionState = ConnectionState::Disconnected;
-		recvSize = 0;
-		m_richPresenceDirty = true; // set so we always send current rich presence after (re)connecting
+	auto dropConnection = [&]() {
+		channel.Disconnect();
+		link = Link::Offline;
+		incoming.Reset();
+		std::lock_guard guard(m_lock);
+		m_pending = true; // send the current activity again on the next connection
 	};
-	SetDisconnected(); // set initial state
-	int64_t lastConnectionAttempt = 0;
-	int32_t numFailedConnectionAttempts = 0; // increases every time we try to connect but fail, resets to 0 when we successfully connect and receive a READY event
-	int64_t lastRichPresenceUpdate = 0;
-	while (!m_shutdownSignal)
+
+	while (!m_quit)
 	{
-		if (connectionState == ConnectionState::Disconnected)
+		if (link == Link::Offline)
 		{
-			// wait at least one second before trying to reconnect
-			int64_t now = GetMs();
-			int64_t delayTime = 1000 + (numFailedConnectionAttempts * 500); // increase delay by 500ms for each failed connection attempt
-			if (delayTime >= 90000)
-				delayTime = 90000; // max delay of 90 seconds
-			if ((now - lastConnectionAttempt) < delayTime)
+			// back off: 1s, then 0.5s more per failed attempt, at most 90s
+			const int64_t wait = (std::min<int64_t>)(1000 + (int64_t)failedAttempts * 500, 90000);
+			const int64_t now = NowMs();
+			if (now - lastAttempt < wait)
 			{
 				std::this_thread::sleep_for(std::chrono::milliseconds(200));
 				continue;
 			}
-			lastConnectionAttempt = now;
-			numFailedConnectionAttempts++;
-			if (!pipe.OpenPipe())
+			lastAttempt = now;
+			failedAttempts++;
+			if (!channel.Connect())
 			{
 				std::this_thread::sleep_for(std::chrono::milliseconds(100));
 				continue;
 			}
-			connectionState = ConnectionState::ConnectingBeforeHandshake;
-			continue;
-		}
-		if (connectionState == ConnectionState::ConnectingBeforeHandshake)
-		{
-			std::string handshakeJson = shim::format(R"({{"v":1,"client_id":"{}"}})", applicationId);
-			pipe.SendJsonMsg(OpcodeHandshake, handshakeJson);
-			connectionState = ConnectionState::ConnectingAfterHandshake;
-		}
-		// check if we should send a presence update (rate limited to 1 per 15 seconds)
-		if (connectionState == ConnectionState::Connected && m_richPresenceDirty)
-		{
-			int64_t now = GetMs();
-			if ((now - lastRichPresenceUpdate) >= 15000)
+			std::string hello = "{\"v\":1,\"client_id\":";
+			AppendJsonString(hello, applicationId);
+			hello += "}";
+			if (!channel.SendFrame(FrameOp::Handshake, hello))
 			{
-				DiscordLiteRichPresence presence = {};
-				{
-					std::lock_guard lock(m_presenceMutex);
-					presence = m_presence;
-					m_richPresenceDirty = false;
-				}
-				pipe.SendPresenceUpdate(presence);
-				lastRichPresenceUpdate = now;
-			}
-		}
-		// continue receiving messages
-		if (recvSize < 8)
-		{
-			// receive header
-			int readSize = pipe.Read(recvMsgHeader + recvSize, 8 - recvSize, 200);
-			if (readSize < 0)
-			{
-				SetDisconnected();
+				dropConnection();
 				continue;
 			}
-			recvSize += readSize;
+			link = Link::HandshakeSent;
 		}
+
+		if (link == Link::Ready && NowMs() - lastActivitySent >= kPresenceInterval)
+		{
+			DiscordLiteRichPresence activity{};
+			if (TakePendingPresence(activity))
+			{
+				channel.SendFrame(FrameOp::Frame, BuildActivityCommand(activity, nonce++));
+				lastActivitySent = NowMs();
+			}
+		}
+
+		// read the next piece of the current frame
+		int got;
+		if (incoming.have < 8)
+			got = channel.Receive(incoming.header + incoming.have, 8 - incoming.have, 200);
 		else
 		{
-			// receive body
-			uint32_t opcode = (recvMsgHeader[0] << 0) | (recvMsgHeader[1] << 8) | (recvMsgHeader[2] << 16) | (recvMsgHeader[3] << 24);
-			uint32_t bodyLength = (recvMsgHeader[4] << 0) | (recvMsgHeader[5] << 8) | (recvMsgHeader[6] << 16) | (recvMsgHeader[7] << 24);
-			if (bodyLength >= 8 * 1024 * 1024)
+			const uint32_t length = incoming.Length();
+			if (length >= kMaxPayload)
 			{
-				SetDisconnected();
+				dropConnection();
 				continue;
 			}
-			if (recvBuffer.size() < bodyLength)
-				recvBuffer.resize(bodyLength);
-			int readSize = pipe.Read(recvBuffer.data() + (recvSize - 8), bodyLength - (recvSize - 8), 1000);
-			if (readSize < 0)
+			if (incoming.payload.size() < length)
+				incoming.payload.resize(length);
+			const size_t done = incoming.have - 8;
+			got = length > done ? channel.Receive(incoming.payload.data() + done, length - done, 1000) : 0;
+		}
+		if (got < 0)
+		{
+			dropConnection();
+			continue;
+		}
+		incoming.have += (size_t)got;
+		if (incoming.have < 8 || incoming.have != 8 + (size_t)incoming.Length())
+			continue;
+
+		// complete frame
+		const std::string_view body((const char*)incoming.payload.data(), incoming.Length());
+		const uint32_t op = incoming.Opcode();
+		incoming.Reset();
+		if (op == (uint32_t)FrameOp::Frame)
+		{
+			TopLevelReader reader(body);
+			const std::optional<std::string> cmd = reader.Find("cmd");
+			const std::optional<std::string> evt = reader.Find("evt");
+			if (link == Link::HandshakeSent && cmd && evt && EqualsIgnoreCase(*cmd, "DISPATCH") && EqualsIgnoreCase(*evt, "READY"))
 			{
-				SetDisconnected();
-				continue;
-			}
-			recvSize += readSize;
-			if (recvSize == bodyLength + 8)
-			{
-				std::string_view jsonText((const char*)recvBuffer.data(), bodyLength);
-				recvSize = 0;
-				// full message received
-				if (opcode == OpcodeFrame)
-				{
-					std::optional<std::string> cmd = ParseJSONField(jsonText, "cmd");
-					std::optional<std::string> evt = ParseJSONField(jsonText, "evt");
-					if (cmd && CompareStringI(*cmd, "DISPATCH"))
-					{
-						if (evt && CompareStringI(*evt, "READY"))
-						{
-							if (connectionState == ConnectionState::ConnectingAfterHandshake)
-							{
-								connectionState = ConnectionState::Connected;
-								numFailedConnectionAttempts = 0;
-							}
-						}
-					}
-				}
-				else if (opcode == OpcodePing)
-				{
-					pipe.SendJsonMsg(OpcodePong, jsonText);
-				}
-				else if (opcode == OpcodeClose)
-				{
-					SetDisconnected();
-				}
-				if (recvBuffer.size() > 2048)
-				{
-					recvBuffer.resize(2048);
-					recvBuffer.shrink_to_fit();
-				}
+				link = Link::Ready;
+				failedAttempts = 0;
 			}
 		}
+		else if (op == (uint32_t)FrameOp::Ping)
+			channel.SendFrame(FrameOp::Pong, body);
+		else if (op == (uint32_t)FrameOp::Close)
+			dropConnection();
+		if (incoming.payload.size() > 2048)
+		{
+			incoming.payload.resize(2048);
+			incoming.payload.shrink_to_fit();
+		}
 	}
-	// if we are still connected then explicitly clear presence just in case
-	if (pipe.IsOpen())
+
+	// leave no stale activity behind
+	if (channel.Connected())
 	{
-		pipe.SendPresenceUpdate({});
+		channel.SendFrame(FrameOp::Frame, BuildActivityCommand({}, nonce++));
 		std::this_thread::sleep_for(std::chrono::milliseconds(75));
 	}
 }

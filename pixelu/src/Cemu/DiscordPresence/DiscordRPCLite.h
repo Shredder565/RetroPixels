@@ -1,11 +1,14 @@
-/* Standalone client for Discord RPC for the sole purpose of updating rich presence */
-
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include <thread>
 #include <atomic>
 #include <string>
 #include <cstdint>
 #include <mutex>
+
+// Minimal client for Discord's local IPC socket, used only to publish a rich
+// presence activity. A background thread keeps (re)connecting to the running
+// Discord client and sends the latest activity, at most once per 15 seconds.
 
 struct DiscordLiteRichPresence
 {
@@ -29,31 +32,23 @@ struct DiscordLiteRichPresence
 
 class DiscordRPCLite
 {
-  public:
+public:
 	DiscordRPCLite(const char* applicationId);
 	~DiscordRPCLite();
 
-	void UpdateRichPresence(const DiscordLiteRichPresence& presence)
-	{
-		std::unique_lock _l(m_presenceMutex);
-		m_presence = presence;
-		m_richPresenceDirty = true;
-	}
+	// queued; the worker sends it once connected and allowed by the rate limit
+	void UpdateRichPresence(const DiscordLiteRichPresence& presence);
+	// forgets the queued activity without sending anything (the worker clears
+	// the activity on shutdown)
+	void ClearRichPresence();
 
-	void ClearRichPresence()
-	{
-		std::unique_lock _l(m_presenceMutex);
-		m_presence = {};
-		m_richPresenceDirty = false;
-	}
+private:
+	void Run(std::string applicationId);
+	bool TakePendingPresence(DiscordLiteRichPresence& out);
 
-  private:
-	void WorkerThread(std::string applicationId);
-
-	std::thread m_workerThread;
-	std::atomic_bool m_shutdownSignal{false};
-	// rich presence state
-	std::mutex m_presenceMutex;
-	std::atomic_bool m_richPresenceDirty{false};
-	DiscordLiteRichPresence m_presence;
+	std::thread m_thread;
+	std::atomic_bool m_quit{false};
+	std::mutex m_lock;
+	bool m_pending{true}; // activity not yet sent on the current connection
+	DiscordLiteRichPresence m_activity{};
 };
