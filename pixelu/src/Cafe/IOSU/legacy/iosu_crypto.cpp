@@ -305,6 +305,11 @@ void iosuCrypto_readSeepromData(void* output, sint32 wordIndex, sint32 size)
 	memcpy(output, g_seeprom + wordIndex * 2, size);
 }
 
+bool iosuCrypto_hasSeeprom()
+{
+	return g_hasSeeprom;
+}
+
 bool iosuCrypto_getDeviceId(uint32* deviceId)
 {
 	*deviceId = 0;

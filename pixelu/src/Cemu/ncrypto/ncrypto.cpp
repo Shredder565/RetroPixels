@@ -21,7 +21,7 @@ void iosuCrypto_readOtpData(void* output, sint32 wordIndex, sint32 size);
 
 void iosuCrypto_readSeepromData(void* output, sint32 wordIndex, sint32 size);
 
-extern bool hasSeepromMem; // remove later (migrate otp/seeprom loading & parsing to this class)
+bool iosuCrypto_hasSeeprom();
 extern bool hasOtpMem; // remove later
 
 namespace NCrypto
@@ -780,7 +780,7 @@ namespace NCrypto
 
 	bool SEEPROM_IsPresent()
 	{
-		return hasSeepromMem;
+		return iosuCrypto_hasSeeprom();
 	}
 
 	CafeConsoleRegion SEEPROM_GetRegion()
