@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cemu/PPCAssembler/ppcAssembler.h"
 #include "Cafe/HW/Espresso/PPCState.h"
 #include "Cafe/HW/Espresso/Interpreter/PPCInterpreterInternal.h"
@@ -5,3724 +6,1739 @@
 #include "util/helpers/helpers.h"
 
 #include <boost/container/small_vector.hpp>
-#include <boost/static_string/static_string.hpp>
+#include <charconv>
 
-struct ppcAssemblerStr_t
+/*
+ * Overview
+ *
+ * Every supported mnemonic has one row in kInstrTable. A row names the primary
+ * and extended opcode, fixed bits, an optional predicate on the instruction
+ * word and either a list of operand slots (Form::Generic) or one of the older
+ * hand written layouts (all other forms).
+ *
+ * Assembling looks the mnemonic up and fills in the operands. Disassembling
+ * scans all rows that match the word and keeps the one with the highest
+ * priority; on equal priority the row further down the table wins, so the row
+ * order is significant.
+ *
+ * Operand expressions go through ExpressionParser. When an expression is not
+ * constant (it refers to symbols resolved later) a relocation is recorded
+ * instead of an error.
+ */
+
+namespace
 {
-	ppcAssemblerStr_t(const char* start, const char* end) : str(start, end - start) {};
-	ppcAssemblerStr_t(const char* start, size_t len) : str(start, len) {};
+	/* ---------------------------------------------------------------- */
+	/* name table                                                       */
+	/* ---------------------------------------------------------------- */
 
-	std::string_view str;
-};
-
-struct PPCAssemblerContext
-{
-	PPCAssemblerInOut* ctx;
-	boost::container::small_vector<ppcAssemblerStr_t, 8> listOperandStr;
-	struct PPCInstructionDef* iDef;
-	uint32 opcode;
-};
-
-// table based assembler/disassembler
-
-#define operand0Bit	(1<<0)
-#define operand1Bit	(1<<1)
-#define operand2Bit	(1<<2)
-#define operand3Bit	(1<<3)
-#define operand4Bit	(1<<4)
-
-#define OPC_NONE			(0xFFFF)
-#define OPC_EXTENDED_BIT	(0x8000) // use extended sub opcode
-
-enum
-{
-	OP_FORM_UNUSED,
-	OP_FORM_XL_CR, // CRXOR, CRAND etc.
-	OP_FORM_OP3_A_CMP, 
-	OP_FORM_OP3_A_IMM, // rA, rS, rB is imm - has RC bit
-	OP_FORM_BRANCH_S16,
-	OP_FORM_BRANCH_S24,
-	OP_FORM_BRANCH_BCCLR, // conditional BLR
-	OP_FORM_OP2_D_HSIMM, // rD, signed imm shifted imm (high half)
-	OP_FORM_RLWINM,
-	OP_FORM_RLWINM_EXTENDED, // alternative mnemonics of rlwinm
-	OP_FORM_RLWNM,
-	OP_FORM_RLWNM_EXTENDED, // alternative mnemonics of rlwnm
-	OP_FORM_CMP_SIMM, // cr, rD, r
-	OP_FORM_NO_OPERAND,
-	// FP
-	OP_FORM_X_FP_CMP,
-
-	// new generic form with operand encoding stored in the table entry, everything above is deprecated
-	OP_FORM_DYNAMIC,
-};
-
-const char* ppcAssembler_getInstructionName(uint32 ppcAsmOp)
-{
-	switch (ppcAsmOp)
+	struct OpName
 	{
-	case PPCASM_OP_UKN: return "UKN";
+		PPCASM_OP op;
+		const char* name;
+	};
 
-	case PPCASM_OP_ADDI: return "ADDI";
-	case PPCASM_OP_SUBI: return "SUBI";
-	case PPCASM_OP_ADDIS: return "ADDIS";
-	case PPCASM_OP_ADDIC: return "ADDIC";
-	case PPCASM_OP_ADDIC_: return "ADDIC.";
+	constexpr OpName kOpNames[] =
+	{
+		{ PPCASM_OP_UKN, "UKN" },
+		// integer arithmetic
+		{ PPCASM_OP_ADDI, "ADDI" }, { PPCASM_OP_SUBI, "SUBI" }, { PPCASM_OP_ADDIS, "ADDIS" }, { PPCASM_OP_ADDIC, "ADDIC" }, { PPCASM_OP_ADDIC_, "ADDIC." },
+		{ PPCASM_OP_ADD, "ADD" }, { PPCASM_OP_ADD_, "ADD." }, { PPCASM_OP_SUBF, "SUBF" }, { PPCASM_OP_SUBF_, "SUBF." }, { PPCASM_OP_SUBFC, "SUBFC" }, { PPCASM_OP_SUBFC_, "SUBFC." },
+		{ PPCASM_OP_SUBFE, "SUBFE" }, { PPCASM_OP_SUBFE_, "SUBFE." }, { PPCASM_OP_SUBFIC, "SUBFIC" }, { PPCASM_OP_SUB, "SUB" }, { PPCASM_OP_SUB_, "SUB." },
+		{ PPCASM_OP_MULLI, "MULLI" }, { PPCASM_OP_MULLW, "MULLW" }, { PPCASM_OP_MULLW_, "MULLW." }, { PPCASM_OP_MULHW, "MULHW" }, { PPCASM_OP_MULHW_, "MULHW." },
+		{ PPCASM_OP_MULHWU, "MULHWU" }, { PPCASM_OP_MULHWU_, "MULHWU." }, { PPCASM_OP_DIVW, "DIVW" }, { PPCASM_OP_DIVW_, "DIVW." }, { PPCASM_OP_DIVWU, "DIVWU" }, { PPCASM_OP_DIVWU_, "DIVWU." },
+		// logic
+		{ PPCASM_OP_AND, "AND" }, { PPCASM_OP_AND_, "AND." }, { PPCASM_OP_ANDC, "ANDC" }, { PPCASM_OP_ANDC_, "ANDC." }, { PPCASM_OP_ANDI_, "ANDI." }, { PPCASM_OP_ANDIS_, "ANDIS." },
+		{ PPCASM_OP_OR, "OR" }, { PPCASM_OP_OR_, "OR." }, { PPCASM_OP_ORI, "ORI" }, { PPCASM_OP_ORIS, "ORIS" }, { PPCASM_OP_ORC, "ORC" }, { PPCASM_OP_XOR, "XOR" },
+		{ PPCASM_OP_NOR, "NOR" }, { PPCASM_OP_NOR_, "NOR." }, { PPCASM_OP_NOT, "NOT" }, { PPCASM_OP_NOT_, "NOT." }, { PPCASM_OP_NEG, "NEG" }, { PPCASM_OP_NEG_, "NEG." },
+		{ PPCASM_OP_XORI, "XORI" }, { PPCASM_OP_XORIS, "XORIS" },
+		// shifts and rotates
+		{ PPCASM_OP_SRAW, "SRAW" }, { PPCASM_OP_SRAW_, "SRAW." }, { PPCASM_OP_SRAWI, "SRAWI" }, { PPCASM_OP_SRAWI_, "SRAWI." }, { PPCASM_OP_SLW, "SLW" }, { PPCASM_OP_SLW_, "SLW." },
+		{ PPCASM_OP_SRW, "SRW" }, { PPCASM_OP_SRW_, "SRW." }, { PPCASM_OP_RLWINM, "RLWINM" }, { PPCASM_OP_RLWINM_, "RLWINM." }, { PPCASM_OP_RLWIMI, "RLWIMI" }, { PPCASM_OP_RLWIMI_, "RLWIMI." },
+		{ PPCASM_OP_EXTLWI, "EXTLWI" }, { PPCASM_OP_EXTLWI_, "EXTLWI." }, { PPCASM_OP_EXTRWI, "EXTRWI" }, { PPCASM_OP_EXTRWI_, "EXTRWI." },
+		{ PPCASM_OP_ROTLWI, "ROTLWI" }, { PPCASM_OP_ROTLWI_, "ROTLWI." }, { PPCASM_OP_ROTRWI, "ROTRWI" }, { PPCASM_OP_ROTRWI_, "ROTRWI." },
+		{ PPCASM_OP_SLWI, "SLWI" }, { PPCASM_OP_SLWI_, "SLWI." }, { PPCASM_OP_SRWI, "SRWI" }, { PPCASM_OP_SRWI_, "SRWI." },
+		{ PPCASM_OP_CLRLWI, "CLRLWI" }, { PPCASM_OP_CLRLWI_, "CLRLWI." }, { PPCASM_OP_CLRRWI, "CLRRWI" }, { PPCASM_OP_CLRRWI_, "CLRRWI." },
+		{ PPCASM_OP_RLWNM, "RLWNM" }, { PPCASM_OP_RLWNM_, "RLWNM." }, { PPCASM_OP_ROTLW, "ROTLW" }, { PPCASM_OP_ROTLW_, "ROTLW." },
+		// compare, moves
+		{ PPCASM_OP_CMPWI, "CMPWI" }, { PPCASM_OP_CMPLWI, "CMPLWI" }, { PPCASM_OP_CMPW, "CMPW" }, { PPCASM_OP_CMPLW, "CMPLW" },
+		{ PPCASM_OP_MR, "MR" }, { PPCASM_OP_MR_, "MR." },
+		{ PPCASM_OP_EXTSB, "EXTSB" }, { PPCASM_OP_EXTSH, "EXTSH" }, { PPCASM_OP_CNTLZW, "CNTLZW" }, { PPCASM_OP_EXTSB_, "EXTSB." }, { PPCASM_OP_EXTSH_, "EXTSH." }, { PPCASM_OP_CNTLZW_, "CNTLZW." },
+		{ PPCASM_OP_MFSPR, "MFSPR" }, { PPCASM_OP_MTSPR, "MTSPR" },
+		// integer load/store
+		{ PPCASM_OP_LMW, "LMW" }, { PPCASM_OP_LWZ, "LWZ" }, { PPCASM_OP_LWZU, "LWZU" }, { PPCASM_OP_LWZX, "LWZX" }, { PPCASM_OP_LWZUX, "LWZUX" },
+		{ PPCASM_OP_LHZ, "LHZ" }, { PPCASM_OP_LHZU, "LHZU" }, { PPCASM_OP_LHZX, "LHZX" }, { PPCASM_OP_LHZUX, "LHZUX" },
+		{ PPCASM_OP_LHA, "LHA" }, { PPCASM_OP_LHAU, "LHAU" }, { PPCASM_OP_LHAX, "LHAX" }, { PPCASM_OP_LHAUX, "LHAUX" },
+		{ PPCASM_OP_LBZ, "LBZ" }, { PPCASM_OP_LBZU, "LBZU" }, { PPCASM_OP_LBZX, "LBZX" }, { PPCASM_OP_LBZUX, "LBZUX" },
+		{ PPCASM_OP_STMW, "STMW" }, { PPCASM_OP_STW, "STW" }, { PPCASM_OP_STWU, "STWU" }, { PPCASM_OP_STWX, "STWX" }, { PPCASM_OP_STWUX, "STWUX" },
+		{ PPCASM_OP_STH, "STH" }, { PPCASM_OP_STHU, "STHU" }, { PPCASM_OP_STHX, "STHX" }, { PPCASM_OP_STHUX, "STHUX" },
+		{ PPCASM_OP_STB, "STB" }, { PPCASM_OP_STBU, "STBU" }, { PPCASM_OP_STBX, "STBX" }, { PPCASM_OP_STBUX, "STBUX" },
+		{ PPCASM_OP_STSWI, "STSWI" }, { PPCASM_OP_LWBRX, "LWBRX" }, { PPCASM_OP_LHBRX, "LHBRX" }, { PPCASM_OP_STWBRX, "STWBRX" }, { PPCASM_OP_STHBRX, "STHBRX" },
+		{ PPCASM_OP_LWARX, "LWARX" }, { PPCASM_OP_STWCX_, "STWCX." },
+		// branches
+		{ PPCASM_OP_B, "B" }, { PPCASM_OP_BL, "BL" }, { PPCASM_OP_BA, "BA" }, { PPCASM_OP_BLA, "BLA" },
+		{ PPCASM_OP_BC, "BC" }, { PPCASM_OP_BNE, "BNE" }, { PPCASM_OP_BEQ, "BEQ" }, { PPCASM_OP_BGE, "BGE" }, { PPCASM_OP_BGT, "BGT" }, { PPCASM_OP_BLT, "BLT" }, { PPCASM_OP_BLE, "BLE" },
+		{ PPCASM_OP_BDZ, "BDZ" }, { PPCASM_OP_BDNZ, "BDNZ" },
+		{ PPCASM_OP_BLR, "BLR" }, { PPCASM_OP_BLRL, "BLRL" }, { PPCASM_OP_BLTLR, "BLTLR" }, { PPCASM_OP_BLELR, "BLELR" }, { PPCASM_OP_BEQLR, "BEQLR" }, { PPCASM_OP_BGELR, "BGELR" },
+		{ PPCASM_OP_BGTLR, "BGTLR" }, { PPCASM_OP_BNELR, "BNELR" }, { PPCASM_OP_BDZLR, "BDZLR" }, { PPCASM_OP_BDNZLR, "BDNZLR" }, { PPCASM_OP_BDZLRL, "BDZLRL" }, { PPCASM_OP_BDNZLRL, "BDNZLRL" },
+		{ PPCASM_OP_BCTR, "BCTR" }, { PPCASM_OP_BCTRL, "BCTRL" },
+		// floating point load/store
+		{ PPCASM_OP_LFS, "LFS" }, { PPCASM_OP_LFSU, "LFSU" }, { PPCASM_OP_LFSX, "LFSX" }, { PPCASM_OP_LFSUX, "LFSUX" },
+		{ PPCASM_OP_LFD, "LFD" }, { PPCASM_OP_LFDU, "LFDU" }, { PPCASM_OP_LFDX, "LFDX" }, { PPCASM_OP_LFDUX, "LFDUX" },
+		{ PPCASM_OP_STFS, "STFS" }, { PPCASM_OP_STFSU, "STFSU" }, { PPCASM_OP_STFSX, "STFSX" }, { PPCASM_OP_STFSUX, "STFSUX" },
+		{ PPCASM_OP_STFD, "STFD" }, { PPCASM_OP_STFDU, "STFDU" }, { PPCASM_OP_STFDX, "STFDX" }, { PPCASM_OP_STFDUX, "STFDUX" },
+		{ PPCASM_OP_STFIWX, "STFIWX" },
+		// paired singles
+		{ PPCASM_OP_PS_MERGE00, "PS_MERGE00" }, { PPCASM_OP_PS_MERGE01, "PS_MERGE01" }, { PPCASM_OP_PS_MERGE10, "PS_MERGE10" }, { PPCASM_OP_PS_MERGE11, "PS_MERGE11" },
+		{ PPCASM_OP_PS_ADD, "PS_ADD" }, { PPCASM_OP_PS_SUB, "PS_SUB" }, { PPCASM_OP_PS_DIV, "PS_DIV" }, { PPCASM_OP_PS_MUL, "PS_MUL" },
+		{ PPCASM_OP_PS_MADD, "PS_MADD" }, { PPCASM_OP_PS_MSUB, "PS_MSUB" }, { PPCASM_OP_PS_NMADD, "PS_NMADD" }, { PPCASM_OP_PS_NMSUB, "PS_NMSUB" },
+		// floating point arithmetic
+		{ PPCASM_OP_FMR, "FMR" }, { PPCASM_OP_FABS, "FABS" }, { PPCASM_OP_FNEG, "FNEG" }, { PPCASM_OP_FRSP, "FRSP" }, { PPCASM_OP_FRSQRTE, "FRSQRTE" },
+		{ PPCASM_OP_FADD, "FADD" }, { PPCASM_OP_FADDS, "FADDS" }, { PPCASM_OP_FSUB, "FSUB" }, { PPCASM_OP_FSUBS, "FSUBS" },
+		{ PPCASM_OP_FMUL, "FMUL" }, { PPCASM_OP_FMULS, "FMULS" }, { PPCASM_OP_FDIV, "FDIV" }, { PPCASM_OP_FDIVS, "FDIVS" },
+		{ PPCASM_OP_FMADD, "FMADD" }, { PPCASM_OP_FMADDS, "FMADDS" }, { PPCASM_OP_FNMADD, "FNMADD" }, { PPCASM_OP_FNMADDS, "FNMADDS" },
+		{ PPCASM_OP_FMSUB, "FMSUB" }, { PPCASM_OP_FMSUBS, "FMSUBS" }, { PPCASM_OP_FNMSUB, "FNMSUB" }, { PPCASM_OP_FNMSUBS, "FNMSUBS" },
+		{ PPCASM_OP_FCTIWZ, "FCTIWZ" }, { PPCASM_OP_FCMPU, "FCMPU" }, { PPCASM_OP_FCMPO, "FCMPO" },
+		// misc
+		{ PPCASM_OP_ISYNC, "ISYNC" }, { PPCASM_OP_NOP, "NOP" }, { PPCASM_OP_LI, "LI" }, { PPCASM_OP_LIS, "LIS" },
+		{ PPCASM_OP_MFLR, "MFLR" }, { PPCASM_OP_MTLR, "MTLR" }, { PPCASM_OP_MFCTR, "MFCTR" }, { PPCASM_OP_MTCTR, "MTCTR" },
+		{ PPCASM_OP_MFCR, "MFCR" }, { PPCASM_OP_MTCRF, "MTCRF" }, { PPCASM_OP_MCRF, "MCRF" },
+		// condition register logic
+		{ PPCASM_OP_CROR, "CROR" }, { PPCASM_OP_CRNOR, "CRNOR" }, { PPCASM_OP_CRORC, "CRORC" }, { PPCASM_OP_CRXOR, "CRXOR" }, { PPCASM_OP_CREQV, "CREQV" },
+		{ PPCASM_OP_CRAND, "CRAND" }, { PPCASM_OP_CRNAND, "CRNAND" }, { PPCASM_OP_CRANDC, "CRANDC" },
+		{ PPCASM_OP_CRSET, "CRSET" }, { PPCASM_OP_CRCLR, "CRCLR" }, { PPCASM_OP_CRMOVE, "CRMOVE" }, { PPCASM_OP_CRNOT, "CRNOT" },
+	};
 
-	case PPCASM_OP_ADD: return "ADD";
-	case PPCASM_OP_ADD_: return "ADD.";
-	case PPCASM_OP_SUBF: return "SUBF";
-	case PPCASM_OP_SUBF_: return "SUBF.";
-	case PPCASM_OP_SUBFC: return "SUBFC";
-	case PPCASM_OP_SUBFC_: return "SUBFC.";
-	case PPCASM_OP_SUBFE: return "SUBFE";
-	case PPCASM_OP_SUBFE_: return "SUBFE.";
-	case PPCASM_OP_SUBFIC: return "SUBFIC";
+	/* ---------------------------------------------------------------- */
+	/* instruction word helpers                                         */
+	/* ---------------------------------------------------------------- */
 
-	case PPCASM_OP_SUB: return "SUB";
-	case PPCASM_OP_SUB_: return "SUB.";
+	inline uint32 Field5(uint32 word, uint32 lsb) { return (word >> lsb) & 0x1F; }
+	inline void PutField5(uint32& word, uint32 lsb, uint32 value) { word = (word & ~(0x1Fu << lsb)) | ((value & 0x1F) << lsb); }
 
-	case PPCASM_OP_MULLI: return "MULLI";
-	case PPCASM_OP_MULLW: return "MULLW";
-	case PPCASM_OP_MULLW_: return "MULLW.";
-	case PPCASM_OP_MULHW: return "MULHW";
-	case PPCASM_OP_MULHW_: return "MULHW.";
-	case PPCASM_OP_MULHWU: return "MULHWU";
-	case PPCASM_OP_MULHWU_: return "MULHWU.";
+	inline uint32 SignExtend16(uint32 v) { return (uint32)(sint32)(sint16)(uint16)v; }
 
-	case PPCASM_OP_DIVW: return "DIVW";
-	case PPCASM_OP_DIVW_: return "DIVW.";
-	case PPCASM_OP_DIVWU: return "DIVWU";
-	case PPCASM_OP_DIVWU_: return "DIVWU.";
-
-	case PPCASM_OP_AND:		return "AND";
-	case PPCASM_OP_AND_:	return "AND.";
-	case PPCASM_OP_ANDC:	return "ANDC";
-	case PPCASM_OP_ANDC_:	return "ANDC.";
-
-	case PPCASM_OP_ANDI_:	return "ANDI.";
-	case PPCASM_OP_ANDIS_:	return "ANDIS.";
-	case PPCASM_OP_OR:		return "OR";
-	case PPCASM_OP_OR_:		return "OR.";
-	case PPCASM_OP_ORI:		return "ORI";
-	case PPCASM_OP_ORIS:	return "ORIS";
-	case PPCASM_OP_ORC:		return "ORC";
-	case PPCASM_OP_XOR:		return "XOR";
-	case PPCASM_OP_NOR:		return "NOR";
-	case PPCASM_OP_NOR_:	return "NOR.";
-	case PPCASM_OP_NOT:		return "NOT";
-	case PPCASM_OP_NOT_:	return "NOT.";
-	case PPCASM_OP_NEG:		return "NEG";
-	case PPCASM_OP_NEG_:	return "NEG.";
-	case PPCASM_OP_XORI:	return "XORI";
-	case PPCASM_OP_XORIS:	return "XORIS";
-	case PPCASM_OP_SRAW:	return "SRAW";
-	case PPCASM_OP_SRAW_:	return "SRAW.";
-	case PPCASM_OP_SRAWI:	return "SRAWI";
-	case PPCASM_OP_SRAWI_:	return "SRAWI.";
-	case PPCASM_OP_SLW:		return "SLW";
-	case PPCASM_OP_SLW_:	return "SLW.";
-	case PPCASM_OP_SRW:		return "SRW";
-	case PPCASM_OP_SRW_:	return "SRW.";
-
-	case PPCASM_OP_RLWINM:	return "RLWINM";
-	case PPCASM_OP_RLWINM_:	return "RLWINM.";
-	case PPCASM_OP_RLWIMI:	return "RLWIMI";
-	case PPCASM_OP_RLWIMI_:	return "RLWIMI.";
-
-	case PPCASM_OP_EXTLWI: return "EXTLWI";
-	case PPCASM_OP_EXTLWI_: return "EXTLWI.";
-	case PPCASM_OP_EXTRWI: return "EXTRWI";
-	case PPCASM_OP_EXTRWI_: return "EXTRWI.";
-
-	case PPCASM_OP_ROTLWI: return "ROTLWI";
-	case PPCASM_OP_ROTLWI_: return "ROTLWI.";
-	case PPCASM_OP_ROTRWI: return "ROTRWI";
-	case PPCASM_OP_ROTRWI_: return "ROTRWI.";
-
-	case PPCASM_OP_SLWI: return "SLWI";
-	case PPCASM_OP_SLWI_: return "SLWI.";
-	case PPCASM_OP_SRWI: return "SRWI";
-	case PPCASM_OP_SRWI_: return "SRWI.";
-
-	case PPCASM_OP_CLRLWI: return "CLRLWI";
-	case PPCASM_OP_CLRLWI_: return "CLRLWI.";
-	case PPCASM_OP_CLRRWI: return "CLRRWI";
-	case PPCASM_OP_CLRRWI_: return "CLRRWI.";
-
-	case PPCASM_OP_RLWNM: return "RLWNM";
-	case PPCASM_OP_RLWNM_: return "RLWNM.";
-
-	case PPCASM_OP_ROTLW: return "ROTLW";
-	case PPCASM_OP_ROTLW_: return "ROTLW.";
-
-	case PPCASM_OP_CMPWI: return "CMPWI";
-	case PPCASM_OP_CMPLWI: return "CMPLWI";
-	case PPCASM_OP_CMPW: return "CMPW";
-	case PPCASM_OP_CMPLW: return "CMPLW";
-
-	case PPCASM_OP_MR: return "MR";
-	case PPCASM_OP_MR_: return "MR.";
-
-	case PPCASM_OP_EXTSB: return "EXTSB";
-	case PPCASM_OP_EXTSH: return "EXTSH";
-	case PPCASM_OP_CNTLZW: return "CNTLZW";
-	case PPCASM_OP_EXTSB_: return "EXTSB.";
-	case PPCASM_OP_EXTSH_: return "EXTSH.";
-	case PPCASM_OP_CNTLZW_: return "CNTLZW.";
-
-	case PPCASM_OP_MFSPR: return "MFSPR";
-	case PPCASM_OP_MTSPR: return "MTSPR";
-
-	case PPCASM_OP_LMW: return "LMW";
-	case PPCASM_OP_LWZ: return "LWZ";
-	case PPCASM_OP_LWZU: return "LWZU";
-	case PPCASM_OP_LWZX: return "LWZX";
-	case PPCASM_OP_LWZUX: return "LWZUX";
-	case PPCASM_OP_LHZ: return "LHZ";
-	case PPCASM_OP_LHZU: return "LHZU";
-	case PPCASM_OP_LHZX: return "LHZX";
-	case PPCASM_OP_LHZUX: return "LHZUX";
-	case PPCASM_OP_LHA: return "LHA";
-	case PPCASM_OP_LHAU: return "LHAU";
-	case PPCASM_OP_LHAX: return "LHAX";
-	case PPCASM_OP_LHAUX: return "LHAUX";
-	case PPCASM_OP_LBZ: return "LBZ";
-	case PPCASM_OP_LBZU: return "LBZU";
-	case PPCASM_OP_LBZX: return "LBZX";
-	case PPCASM_OP_LBZUX: return "LBZUX";
-	case PPCASM_OP_STMW: return "STMW";
-	case PPCASM_OP_STW: return "STW";
-	case PPCASM_OP_STWU: return "STWU";
-	case PPCASM_OP_STWX: return "STWX";
-	case PPCASM_OP_STWUX: return "STWUX";
-	case PPCASM_OP_STH: return "STH";
-	case PPCASM_OP_STHU: return "STHU";
-	case PPCASM_OP_STHX: return "STHX";
-	case PPCASM_OP_STHUX: return "STHUX";
-	case PPCASM_OP_STB: return "STB";
-	case PPCASM_OP_STBU: return "STBU";
-	case PPCASM_OP_STBX: return "STBX";
-	case PPCASM_OP_STBUX: return "STBUX";
-	case PPCASM_OP_STSWI: return "STSWI";
-	case PPCASM_OP_LWBRX: return "LWBRX";
-	case PPCASM_OP_LHBRX: return "LHBRX";
-	case PPCASM_OP_STWBRX: return "STWBRX";
-	case PPCASM_OP_STHBRX: return "STHBRX";
-
-	case PPCASM_OP_LWARX: return "LWARX";
-	case PPCASM_OP_STWCX_: return "STWCX.";
-
-	case PPCASM_OP_B: return "B";
-	case PPCASM_OP_BL: return "BL";
-	case PPCASM_OP_BA: return "BA";
-	case PPCASM_OP_BLA: return "BLA";
-		
-	case PPCASM_OP_BC: return "BC";
-	case PPCASM_OP_BNE: return "BNE";
-	case PPCASM_OP_BEQ: return "BEQ";
-	case PPCASM_OP_BGE: return "BGE";
-	case PPCASM_OP_BGT: return "BGT";
-	case PPCASM_OP_BLT: return "BLT";
-	case PPCASM_OP_BLE:	return "BLE";
-	case PPCASM_OP_BDZ: return "BDZ";
-	case PPCASM_OP_BDNZ: return "BDNZ";
-
-	case PPCASM_OP_BLR:   return "BLR";
-	case PPCASM_OP_BLRL:  return "BLRL";
-	case PPCASM_OP_BLTLR: return "BLTLR";
-	case PPCASM_OP_BLELR: return "BLELR";
-	case PPCASM_OP_BEQLR: return "BEQLR";
-	case PPCASM_OP_BGELR: return "BGELR";
-	case PPCASM_OP_BGTLR: return "BGTLR";
-	case PPCASM_OP_BNELR: return "BNELR";
-	case PPCASM_OP_BDZLR: return "BDZLR";
-	case PPCASM_OP_BDNZLR: return "BDNZLR";
-	case PPCASM_OP_BDZLRL: return "BDZLRL";
-	case PPCASM_OP_BDNZLRL: return "BDNZLRL";
-
-	case PPCASM_OP_BCTR: return "BCTR";
-	case PPCASM_OP_BCTRL: return "BCTRL";
-		
-	case PPCASM_OP_LFS:	return "LFS";
-	case PPCASM_OP_LFSU: return "LFSU";
-	case PPCASM_OP_LFSX: return "LFSX";
-	case PPCASM_OP_LFSUX: return "LFSUX";
-	case PPCASM_OP_LFD: return "LFD";
-	case PPCASM_OP_LFDU: return "LFDU";
-	case PPCASM_OP_LFDX: return "LFDX";
-	case PPCASM_OP_LFDUX: return "LFDUX";
-	case PPCASM_OP_STFS: return "STFS";
-	case PPCASM_OP_STFSU: return "STFSU";
-	case PPCASM_OP_STFSX: return "STFSX";
-	case PPCASM_OP_STFSUX: return "STFSUX";
-	case PPCASM_OP_STFD: return "STFD";
-	case PPCASM_OP_STFDU: return "STFDU";
-	case PPCASM_OP_STFDX: return "STFDX";
-	case PPCASM_OP_STFDUX: return "STFDUX";
-
-	case PPCASM_OP_STFIWX: return "STFIWX";
-
-	case PPCASM_OP_PS_MERGE00: return "PS_MERGE00";
-	case PPCASM_OP_PS_MERGE01: return "PS_MERGE01";
-	case PPCASM_OP_PS_MERGE10: return "PS_MERGE10";
-	case PPCASM_OP_PS_MERGE11: return "PS_MERGE11";
-	case PPCASM_OP_PS_ADD: return "PS_ADD";
-	case PPCASM_OP_PS_SUB: return "PS_SUB";
-	case PPCASM_OP_PS_DIV: return "PS_DIV";
-	case PPCASM_OP_PS_MUL: return "PS_MUL";
-	case PPCASM_OP_PS_MADD: return "PS_MADD";
-	case PPCASM_OP_PS_MSUB: return "PS_MSUB";
-	case PPCASM_OP_PS_NMADD: return "PS_NMADD";
-	case PPCASM_OP_PS_NMSUB: return "PS_NMSUB";
-
-	case PPCASM_OP_FMR: return "FMR";
-	case PPCASM_OP_FABS: return "FABS";
-	case PPCASM_OP_FNEG: return "FNEG";
-	case PPCASM_OP_FRSP: return "FRSP";
-	case PPCASM_OP_FRSQRTE: return "FRSQRTE";
-	case PPCASM_OP_FADD: return "FADD";
-	case PPCASM_OP_FADDS: return "FADDS";
-	case PPCASM_OP_FSUB: return "FSUB";
-	case PPCASM_OP_FSUBS: return "FSUBS";
-	case PPCASM_OP_FMUL: return "FMUL";
-	case PPCASM_OP_FMULS: return "FMULS";
-	case PPCASM_OP_FDIV: return "FDIV";
-	case PPCASM_OP_FDIVS: return "FDIVS";
-
-	case PPCASM_OP_FMADD: return "FMADD";
-	case PPCASM_OP_FMADDS: return "FMADDS";
-	case PPCASM_OP_FNMADD: return "FNMADD";
-	case PPCASM_OP_FNMADDS: return "FNMADDS";
-	case PPCASM_OP_FMSUB: return "FMSUB";
-	case PPCASM_OP_FMSUBS: return "FMSUBS";
-	case PPCASM_OP_FNMSUB: return "FNMSUB";
-	case PPCASM_OP_FNMSUBS: return "FNMSUBS";
-
-	case PPCASM_OP_FCTIWZ: return "FCTIWZ";
-
-	case PPCASM_OP_FCMPU: return "FCMPU";
-	case PPCASM_OP_FCMPO: return "FCMPO";
-
-	case PPCASM_OP_ISYNC: return "ISYNC";
-
-	case PPCASM_OP_NOP: return "NOP";
-	case PPCASM_OP_LI: return "LI";
-	case PPCASM_OP_LIS: return "LIS";
-
-	case PPCASM_OP_MFLR: return "MFLR";
-	case PPCASM_OP_MTLR: return "MTLR";
-	case PPCASM_OP_MFCTR: return "MFCTR";
-	case PPCASM_OP_MTCTR: return "MTCTR";
-	case PPCASM_OP_MFCR: return "MFCR";
-	case PPCASM_OP_MTCRF: return "MTCRF";
-	case PPCASM_OP_MCRF: return "MCRF";
-
-	case PPCASM_OP_CROR: return "CROR";
-	case PPCASM_OP_CRNOR: return "CRNOR";
-	case PPCASM_OP_CRORC: return "CRORC";
-	case PPCASM_OP_CRXOR: return "CRXOR";
-	case PPCASM_OP_CREQV: return "CREQV";
-	case PPCASM_OP_CRAND: return "CRAND";
-	case PPCASM_OP_CRNAND: return "CRNAND";
-	case PPCASM_OP_CRANDC: return "CRANDC";
-
-	case PPCASM_OP_CRSET: return "CRSET";
-	case PPCASM_OP_CRCLR: return "CRCLR";
-	case PPCASM_OP_CRMOVE: return "CRMOVE";
-	case PPCASM_OP_CRNOT: return "CRNOT";
-
-
-	default:
-		return "UNDEF";
+	// sign extend the low `bits` bits of v
+	inline uint32 SignExtendBits(uint32 v, uint32 bits)
+	{
+		const uint32 shift = 32 - bits;
+		return (uint32)((sint32)(v << shift) >> shift);
 	}
-	return "";
-}
 
-#define C_MASK_RC		(PPC_OPC_RC)
-#define C_MASK_LK		(PPC_OPC_LK)
-#define C_MASK_AA		(PPC_OPC_AA)
-#define C_MASK_OE		(1<<10)
-#define C_MASK_BO		(0x1F<<21)
-#define C_MASK_BO_COND	(0x1E<<21) // BO mask for true/false conditions. With hint bit excluded
-#define C_MASK_BI_CRBIT	(0x3<<16)
-#define C_MASK_BI_CRIDX	(0x7<<18)
+	// would `value` survive being stored into `bits` bits (signed or unsigned)?
+	bool FitsInBits(uint32 value, uint32 bits, bool asSigned)
+	{
+		const uint32 shift = 32 - bits;
+		if (asSigned)
+			return (uint32)((sint32)(value << shift) >> shift) == value;
+		return ((value << shift) >> shift) == value;
+	}
 
-#define C_BIT_RC		(PPC_OPC_RC)
-#define C_BIT_LK		(PPC_OPC_LK)
-#define C_BIT_AA		(PPC_OPC_AA)
-#define C_BIT_BO_FALSE	(0x4<<21)	// CR bit not set
-#define C_BIT_BO_TRUE	(0xC<<21)	// CR bit set
-#define C_BIT_BO_ALWAYS	(0x14<<21)
-#define C_BIT_BO_DNZ	(0x10<<21)
-#define C_BIT_BO_DZ		(0x12<<21)
+	// double -> integer truncation the way x86 cvttsd2si behaves (out of range and
+	// NaN produce the "integer indefinite" value instead of being undefined)
+	sint32 TruncToS32(double d)
+	{
+		if (!(d > -2147483649.0 && d < 2147483648.0))
+			return std::numeric_limits<sint32>::min();
+		return (sint32)d;
+	}
 
-#define C_BITS_BI_LT	(0x0<<16)	
-#define C_BITS_BI_GT	(0x1<<16)	
-#define C_BITS_BI_EQ	(0x2<<16)	
-#define C_BITS_BI_SO	(0x3<<16)	
+	sint64 TruncToS64(double d)
+	{
+		if (!(d >= -9223372036854775808.0 && d < 9223372036854775808.0))
+			return std::numeric_limits<sint64>::min();
+		return (sint64)d;
+	}
 
-void ppcAssembler_setError(PPCAssemblerInOut* ctx, std::string_view errorMsg);
+	// rotate field decoding (rlwinm family)
+	struct RotateFields
+	{
+		sint32 rS, rA, sh, mb, me;
+		explicit RotateFields(uint32 w) : rS((sint32)Field5(w, 21)), rA((sint32)Field5(w, 16)), sh((sint32)Field5(w, 11)), mb((sint32)Field5(w, 6)), me((sint32)Field5(w, 1)) {}
+	};
 
-bool ppcOp_extraCheck_extlwi(uint32 opcode)
-{
-	sint32 rS, rA, SH, MB, ME;
-	PPC_OPC_TEMPL_M(opcode, rS, rA, SH, MB, ME);
+	/* ---------------------------------------------------------------- */
+	/* table definitions                                                */
+	/* ---------------------------------------------------------------- */
 
-	return MB == 0;
-}
+	enum class Form : uint8
+	{
+		Generic,        // operand slots described in the row
+		CompareReg,     // [crN,] rA, rB
+		ShiftImm,       // rA, rS, SH (srawi)
+		CondBranch,     // bc BO, BI, target | bxx [crN,] target
+		Branch,         // b/bl/ba/bla target
+		CondReturn,     // bxxlr [crN]
+		CompareImm,     // [crN,] rA, simm
+		Bare,           // no operands
+		CompareFp,      // [crN,] fA, fB
+		Rotate,         // rA, rS, SH, MB, ME
+		RotateAlias,    // extlwi, extrwi, slwi, srwi, clrlwi, clrrwi
+		RotateReg,      // rA, rS, rB, MB, ME
+		RotateRegAlias, // rotlw
+		CrLogic,        // crbD, crbA, crbB
+	};
 
-bool ppcOp_extraCheck_extrwi(uint32 opcode)
-{
-	sint32 rS, rA, SH, MB, ME;
-	PPC_OPC_TEMPL_M(opcode, rS, rA, SH, MB, ME);
-	if (ME != 31)
+	// extra test on the instruction word that a row requires to match
+	enum class Rule : uint8 { Any, ExtLwi, ExtRwi, SlWi, SrWi, ClrLWi, ClrRWi, FullMask };
+
+	bool RuleHolds(Rule rule, uint32 word)
+	{
+		const RotateFields f(word);
+		switch (rule)
+		{
+		case Rule::Any: return true;
+		case Rule::ExtLwi: return f.mb == 0;
+		case Rule::ExtRwi:
+		{
+			if (f.me != 31)
+				return false;
+			const sint8 n = (sint8)(32 - f.mb);
+			return (sint8)(f.sh - n) >= 0;
+		}
+		case Rule::SlWi: return f.mb == 0 && f.sh == 31 - f.me;
+		case Rule::SrWi: return f.me == 31 && 32 - f.sh == f.mb;
+		case Rule::ClrLWi: return f.sh == 0 && f.me == 31;
+		case Rule::ClrRWi: return f.sh == 0 && f.mb == 0;
+		case Rule::FullMask: return f.mb == 0 && f.me == 31;
+		}
 		return false;
-	sint8 n = 32 - MB;
-	sint8 b = SH - n;
-	return b >= 0;
-}
-
-bool ppcOp_extraCheck_slwi(uint32 opcode)
-{
-	sint32 rS, rA, SH, MB, ME;
-	PPC_OPC_TEMPL_M(opcode, rS, rA, SH, MB, ME);
-	return MB == 0 && SH == (31 - ME);
-}
-
-bool ppcOp_extraCheck_srwi(uint32 opcode)
-{
-	sint32 rS, rA, SH, MB, ME;
-	PPC_OPC_TEMPL_M(opcode, rS, rA, SH, MB, ME);
-	return ME == 31 && (32 - SH) == MB;
-}
-
-bool ppcOp_extraCheck_clrlwi(uint32 opcode)
-{
-	sint32 rS, rA, SH, MB, ME;
-	PPC_OPC_TEMPL_M(opcode, rS, rA, SH, MB, ME);
-	return SH == 0 && ME == 31;
-}
-
-bool ppcOp_extraCheck_clrrwi(uint32 opcode)
-{
-	sint32 rS, rA, SH, MB, ME;
-	PPC_OPC_TEMPL_M(opcode, rS, rA, SH, MB, ME);
-	return SH == 0 && MB == 0;
-}
-
-bool ppcOp_extraCheck_rotlw(uint32 opcode)
-{
-	sint32 rS, rA, SH, MB, ME;
-	PPC_OPC_TEMPL_M(opcode, rS, rA, SH, MB, ME);
-	return MB == 0 && ME == 31;
-}
-
-#define FLG_DEFAULT	0
-#define FLG_SKIP_OP0 operand0Bit
-#define FLG_SKIP_OP1 operand1Bit
-#define FLG_SKIP_OP2 operand2Bit
-#define FLG_SKIP_OP3 operand3Bit
-#define FLG_SKIP_OP4 operand4Bit
-
-#define FLG_SWAP_OP0_OP1	(1<<6)	// todo - maybe this should be implemented as a fully configurable matrix of indices instead of predefined constants?
-#define FLG_SWAP_OP1_OP2	(1<<7)
-#define FLG_SWAP_OP2_OP3	(1<<8)
-
-#define FLG_UNSIGNED_IMM	(1<<10) // always consider immediate unsigned but still allow signed values when assembling
-
-class EncodedOperand_None
-{
-public:
-	EncodedOperand_None() {}
-
-	bool AssembleOperand(PPCAssemblerContext* assemblerCtx, PPCInstructionDef* iDef, uint32& opcode, size_t index)
-	{
-		if (index < assemblerCtx->listOperandStr.size() && !assemblerCtx->listOperandStr[index].str.empty())
-		{
-			ppcAssembler_setError(assemblerCtx->ctx, "Too many operands");
-			return false;
-		}
-		return true;
 	}
 
-	void DisassembleOperand(PPCDisassembledInstruction* disInstr, PPCInstructionDef* iDef, const uint32 opcode, size_t index)
+	// operand slot of a Generic row
+	enum class Slot : uint8 { Unused, Gpr, GprOrZero, Fpr, CrField, Spr, Imm, FromBase, Mem };
+
+	struct SlotDef
 	{
-
-	}
-};
-
-static int _parseRegIndex(std::string_view sv, const char* prefix)
-{
-	while (*prefix)
-	{
-		if (sv.empty())
-			return -1;
-		char c = sv[0];
-		if (c >= 'A' && c <= 'Z')
-			c -= ('A' - 'a');
-		if (c != *prefix)
-			return -1;
-		sv.remove_prefix(1);
-		prefix++;
-	}
-	int r = 0;
-	const std::from_chars_result result = std::from_chars(sv.data(), sv.data() + sv.size(), r);
-	if (result.ec == std::errc::invalid_argument || result.ec == std::errc::result_out_of_range)
-		return -1;
-	if (result.ptr != sv.data() + sv.size())
-		return -1;
-	return r;
-}
-
-template<bool TAllowEAZero = false> // if true, "r0" can be substituted with "0"
-class EncodedOperand_GPR
-{
-public:
-	EncodedOperand_GPR(uint8 bitPos) : m_bitPos(bitPos) {}
-
-	bool AssembleOperand(PPCAssemblerContext* assemblerCtx, PPCInstructionDef* iDef, uint32& opcode, size_t index)
-	{
-		if (index >= assemblerCtx->listOperandStr.size())
-		{
-			ppcAssembler_setError(assemblerCtx->ctx, "Missing operand");
-			return false;
-		}
-		auto operandStr = assemblerCtx->listOperandStr[index].str;
-		if constexpr (TAllowEAZero)
-		{
-			if (operandStr.size() == 1 && operandStr[0] == '0')
-			{
-				opcode &= ~((uint32)0x1F << m_bitPos);
-				opcode |= ((uint32)0 << m_bitPos);
-				return true;
-			}
-		}
-		sint32 regIndex = _parseRegIndex(operandStr, "r");
-		if (regIndex < 0 || regIndex >= 32)
-		{
-			ppcAssembler_setError(assemblerCtx->ctx, fmt::format("Operand \"{}\" is not a valid GPR (expected r0 - r31)", assemblerCtx->listOperandStr[index].str));
-			return false;
-		}
-		opcode &= ~((uint32)0x1F << m_bitPos);
-		opcode |= ((uint32)regIndex << m_bitPos);
-		return true;
-	}
-
-	void DisassembleOperand(PPCDisassembledInstruction* disInstr, PPCInstructionDef* iDef, const uint32 opcode, size_t index)
-	{
-		uint32 regIndex = (opcode >> m_bitPos) & 0x1F;
-		disInstr->operandMask |= (1 << index);
-		disInstr->operand[index].type = PPCASM_OPERAND_TYPE_GPR;
-		disInstr->operand[index].registerIndex = regIndex;
-	}
-private:
-	uint8 m_bitPos;
-};
-
-class EncodedOperand_FPR
-{
-public:
-	EncodedOperand_FPR(uint8 bitPos) : m_bitPos(bitPos) {}
-
-	bool AssembleOperand(PPCAssemblerContext* assemblerCtx, PPCInstructionDef* iDef, uint32& opcode, size_t index)
-	{
-		if (index >= assemblerCtx->listOperandStr.size())
-		{
-			ppcAssembler_setError(assemblerCtx->ctx, "Missing operand");
-			return false;
-		}
-		sint32 regIndex = _parseRegIndex(assemblerCtx->listOperandStr[index].str, "f");
-		if (regIndex < 0 || regIndex >= 32)
-		{
-			ppcAssembler_setError(assemblerCtx->ctx, fmt::format("Operand \"{}\" is not a valid FPR (expected f0 - f31)", assemblerCtx->listOperandStr[index].str));
-			return false;
-		}
-		opcode &= ~((uint32)0x1F << m_bitPos);
-		opcode |= ((uint32)regIndex << m_bitPos);
-		return true;
-	}
-
-	void DisassembleOperand(PPCDisassembledInstruction* disInstr, PPCInstructionDef* iDef, const uint32 opcode, size_t index)
-	{
-		uint32 regIndex = (opcode >> m_bitPos) & 0x1F;
-		disInstr->operandMask |= (1<<index);
-		disInstr->operand[index].type = PPCASM_OPERAND_TYPE_FPR;
-		disInstr->operand[index].registerIndex = regIndex;
-	}
-private:
-	uint8 m_bitPos;
-};
-
-class EncodedOperand_CR
-{
-public:
-	EncodedOperand_CR(uint8 bitPos) : m_bitPos(bitPos) {}
-
-	bool AssembleOperand(PPCAssemblerContext* assemblerCtx, PPCInstructionDef* iDef, uint32& opcode, size_t index)
-	{
-		if (index >= assemblerCtx->listOperandStr.size())
-		{
-			ppcAssembler_setError(assemblerCtx->ctx, "Missing operand");
-			return false;
-		}
-		sint32 crIndex = _parseRegIndex(assemblerCtx->listOperandStr[index].str, "cr");
-		if (crIndex < 0 || crIndex >= 8)
-		{
-			ppcAssembler_setError(assemblerCtx->ctx, fmt::format("Operand \"{}\" is not a valid CR field (expected cr0 - cr7)", assemblerCtx->listOperandStr[index].str));
-			return false;
-		}
-		opcode &= ~((uint32)0x1F << m_bitPos);
-		opcode |= ((uint32)(crIndex << 2) << m_bitPos);
-		return true;
-	}
-
-	void DisassembleOperand(PPCDisassembledInstruction* disInstr, PPCInstructionDef* iDef, const uint32 opcode, size_t index)
-	{
-		uint32 crField = (opcode >> m_bitPos) & 0x1F;
-		disInstr->operandMask |= (1 << index);
-		disInstr->operand[index].type = PPCASM_OPERAND_TYPE_CR;
-		disInstr->operand[index].registerIndex = crField >> 2;
-	}
-private:
-	uint8 m_bitPos;
-};
-
-class EncodedOperand_SPR
-{
-public:
-	EncodedOperand_SPR() {}
-
-	bool AssembleOperand(PPCAssemblerContext* assemblerCtx, PPCInstructionDef* iDef, uint32& opcode, size_t index)
-	{
-		if (index >= assemblerCtx->listOperandStr.size())
-		{
-			ppcAssembler_setError(assemblerCtx->ctx, "Missing operand");
-			return false;
-		}
-		sint32 regIndex = _parseRegIndex(assemblerCtx->listOperandStr[index].str, "spr");
-		if (regIndex < 0 || regIndex >= 1024)
-		{
-			ppcAssembler_setError(assemblerCtx->ctx, fmt::format("Operand \"{}\" is not a valid GPR (expected spr0 - spr1023)", assemblerCtx->listOperandStr[index].str));
-			return false;
-		}
-		sint32 sprLow = (regIndex) & 0x1F;
-		sint32 sprHigh = (regIndex>>5) & 0x1F;
-		opcode &= ~((uint32)0x1F << 16);
-		opcode |= ((uint32)sprLow << 16);
-		opcode &= ~((uint32)0x1F << 11);
-		opcode |= ((uint32)sprHigh << 11);
-		return true;
-	}
-
-	void DisassembleOperand(PPCDisassembledInstruction* disInstr, PPCInstructionDef* iDef, const uint32 opcode, size_t index)
-	{
-		uint32 sprLow = (opcode >> 16) & 0x1F;
-		uint32 sprHigh = (opcode >> 11) & 0x1F;
-		disInstr->operandMask |= (1 << index);
-		disInstr->operand[index].type = PPCASM_OPERAND_TYPE_SPR;
-		disInstr->operand[index].registerIndex = sprLow | (sprHigh << 5);
-	}
-};
-
-class EncodedOperand_MemLoc
-{
-public:
-	EncodedOperand_MemLoc()  {}
-
-	bool AssembleOperand(PPCAssemblerContext* assemblerCtx, PPCInstructionDef* iDef, uint32& opcode, size_t index)
-	{
-		if (index >= assemblerCtx->listOperandStr.size())
-		{
-			ppcAssembler_setError(assemblerCtx->ctx, "Missing operand");
-			return false;
-		}
-		std::basic_string_view<char> svOpText(assemblerCtx->listOperandStr[index].str);
-		// first we parse the memory register part at the end
-		auto startPtr = svOpText.data();
-		auto endPtr = startPtr + svOpText.size();
-		// trim whitespaces
-		while (endPtr > startPtr)
-		{
-			const char c = endPtr[-1];
-			if (c != ' ' && c != '\t')
-				break;
-			endPtr--;
-		}
-		if (endPtr == startPtr || endPtr[-1] != ')')
-		{
-			ppcAssembler_setError(assemblerCtx->ctx, fmt::format("\'{}\' does not end with valid memory register syntax. Memory operand must have the form offset(gpr). Example: 0x20(r3)", svOpText));
-			return false;
-		}
-		endPtr--;
-		// find parenthesis open
-		auto memoryRegEnd = endPtr;
-		const char* memoryRegBegin = nullptr;
-		while (endPtr > startPtr)
-		{
-			const char c = endPtr[-1];
-			if (c == '(')
-			{
-				memoryRegBegin = endPtr;
-				endPtr--; // move end pointer beyond the parenthesis
-				break;
-			}
-			endPtr--;
-		}
-		if (memoryRegBegin == nullptr)
-		{
-			ppcAssembler_setError(assemblerCtx->ctx, fmt::format("\'{}\' does not end with valid memory register syntax. Memory operand must have the form offset(gpr). Example: 0x20(r3)", svOpText));
-			return false;
-		}
-		std::string_view svExpressionPart(startPtr, endPtr - startPtr);
-		std::string_view svRegPart(memoryRegBegin, memoryRegEnd - memoryRegBegin);
-		sint32 memGpr = _parseRegIndex(svRegPart, "r");
-		if (memGpr < 0 || memGpr >= 32)
-		{
-			ppcAssembler_setError(assemblerCtx->ctx, fmt::format("Memory operand register \"{}\" is not a valid GPR (expected r0 - r31)", svRegPart));
-			return false;
-		}
-		opcode &= ~(0x1F << 16);
-		opcode |= (memGpr << 16);
-		// parse expression
-		ExpressionParser ep;
-		double immD = 0.0f;
-		try
-		{
-			if (ep.IsConstantExpression(svExpressionPart))
-			{
-				immD = ep.Evaluate(svExpressionPart);
-				sint32 imm = (sint32)immD;
-				if (imm < -32768 || imm > 32767)
-				{
-					std::string msg = fmt::format("\"{}\" evaluates to offset out of range (Valid range is -32768 to 32767)", svExpressionPart);
-					ppcAssembler_setError(assemblerCtx->ctx, msg);
-					return false;
-				}
-				opcode &= ~0xFFFF;
-				opcode |= ((uint32)imm & 0xFFFF);
-			}
-			else
-			{
-				assemblerCtx->ctx->list_relocs.emplace_back(PPCASM_RELOC::U32_MASKED_IMM, std::string(svExpressionPart), 0, 0, 16);
-				return true;
-			}
-		}
-		catch (std::exception* e)
-		{
-			std::string msg = fmt::format("\"{}\" could not be evaluated. Error: {}", svExpressionPart, e->what());
-			ppcAssembler_setError(assemblerCtx->ctx, msg);
-			return false;
-		}
-		return true;
-	}
-
-	void DisassembleOperand(PPCDisassembledInstruction* disInstr, PPCInstructionDef* iDef, const uint32 opcode, size_t index)
-	{
-		uint32 imm = (opcode & 0xFFFF);
-		if (imm & 0x8000)
-			imm |= 0xFFFF0000;
-		uint32 regIndex = (opcode >> 16) & 0x1F;
-		disInstr->operandMask |= (1 << index);
-		disInstr->operand[index].type = PPCASM_OPERAND_TYPE_MEM;
-		disInstr->operand[index].registerIndex = regIndex;
-		disInstr->operand[index].immS32 = (sint32)imm;
-		disInstr->operand[index].immWidth = 16;
-		disInstr->operand[index].isSignedImm = true;
-	}
-};
-
-bool _CanStoreInteger(uint32 value, uint32 numBits, bool isSigned)
-{
-	if (isSigned)
-	{
-		sint32 storedValue = (sint32)value;
-		storedValue <<= (32 - numBits);
-		storedValue >>= (32 - numBits);
-		return (uint32)storedValue == value;
-	}
-	// unsigned
-	uint32 storedValue = value;
-	storedValue <<= (32 - numBits);
-	storedValue >>= (32 - numBits);
-	return storedValue == value;
-}
-
-class EncodedOperand_IMM
-{
-public:
-	EncodedOperand_IMM(uint8 bitPos, uint8 bits, bool isSigned, bool negate = false, bool extendedRange = false) : m_bitPos(bitPos), m_bits(bits), m_isSigned(isSigned), m_negate(negate), m_extendedRange(extendedRange) {}
-
-	bool AssembleOperand(PPCAssemblerContext* assemblerCtx, PPCInstructionDef* iDef, uint32& opcode, size_t index)
-	{
-		if (index >= assemblerCtx->listOperandStr.size())
-		{
-			ppcAssembler_setError(assemblerCtx->ctx, "Missing operand");
-			return false;
-		}
-		// parse expression
-		std::string expressionString(assemblerCtx->listOperandStr[index].str);
-		if (m_negate)
-		{
-			expressionString.insert(0, "0-(");
-			expressionString.append(")");
-		}
-		ExpressionParser ep;
-		double immD = 0.0f;
-		try
-		{
-			if (ep.IsConstantExpression(expressionString))
-			{
-				immD = ep.Evaluate(expressionString);
-			}
-			else
-			{
-				assemblerCtx->ctx->list_relocs.emplace_back(PPCASM_RELOC::U32_MASKED_IMM, expressionString, 0, m_bitPos, m_bits);
-				return true;
-			}
-		}
-		catch (std::exception* e)
-		{
-			// check if expression is invalid or if it contains unknown constants
-			std::string msg = fmt::format("\"{}\" could not be evaluated. Error: {}", expressionString.c_str(), e->what());
-			ppcAssembler_setError(assemblerCtx->ctx, msg);
-			return false;
-		}
-		uint32 imm = (uint32)(sint32)immD;
-		bool canStore = _CanStoreInteger(imm, m_bits, m_isSigned);
-		if(!canStore && m_extendedRange) // always allow unsigned
-			canStore = _CanStoreInteger(imm, m_bits, false);
-		if (!canStore)
-		{
-			std::string msg = fmt::format("Value of operand \"{}\" is out of range", assemblerCtx->listOperandStr[index].str);
-			ppcAssembler_setError(assemblerCtx->ctx, msg);
-			return false;
-		}
-		uint32 mask = (1<<m_bits)-1;
-		imm &= mask;
-		opcode &= ~(mask << m_bitPos);
-		opcode |= (imm << m_bitPos);
-		return true;
-	}
-
-	void DisassembleOperand(PPCDisassembledInstruction* disInstr, PPCInstructionDef* iDef, const uint32 opcode, size_t index)
-	{
-		uint32 mask = (1 << m_bits) - 1;
-		uint32 immValue = (opcode >> m_bitPos) & mask;
-		if (m_isSigned)
-		{
-			sint32 tmpValue = (sint32)immValue;
-			tmpValue <<= (32 - m_bits);
-			tmpValue >>= (32 - m_bits);
-			immValue = (uint32)tmpValue;
-		}
-		disInstr->operandMask |= (1 << index);
-		disInstr->operand[index].type = PPCASM_OPERAND_TYPE_IMM;
-		disInstr->operand[index].immS32 = immValue;
-		disInstr->operand[index].immWidth = m_bits;
-		disInstr->operand[index].isSignedImm = m_isSigned;
-	}
-private:
-	uint8 m_bitPos;
-	uint8 m_bits;
-	bool m_isSigned;
-	bool m_negate;
-	bool m_extendedRange;
-};
-
-class EncodedOperand_U5Reverse
-{
-public:
-	EncodedOperand_U5Reverse(uint8 bitPos, uint8 base) : m_bitPos(bitPos), m_base(base) {}
-
-	bool AssembleOperand(PPCAssemblerContext* assemblerCtx, PPCInstructionDef* iDef, uint32& opcode, size_t index)
-	{
-		if (index >= assemblerCtx->listOperandStr.size())
-		{
-			ppcAssembler_setError(assemblerCtx->ctx, "Missing operand");
-			return false;
-		}
-		// parse expression
-		std::string expressionString(assemblerCtx->listOperandStr[index].str);
-		expressionString.insert(0, fmt::format("{}-(", m_base));
-		expressionString.append(")");
-		ExpressionParser ep;
-		double immD = 0.0f;
-		try
-		{
-			if (ep.IsConstantExpression(expressionString))
-			{
-				immD = ep.Evaluate(expressionString);
-			}
-			else
-			{
-				assemblerCtx->ctx->list_relocs.emplace_back(PPCASM_RELOC::U32_MASKED_IMM, expressionString, 0, m_bitPos, 5);
-				return true;
-			}
-		}
-		catch (std::exception* e)
-		{
-			// check if expression is invalid or if it contains unknown constants
-			std::string msg = fmt::format("\"{}\" could not be evaluated. Error: {}", expressionString.c_str(), e->what());
-			ppcAssembler_setError(assemblerCtx->ctx, msg);
-			return false;
-		}
-		uint32 imm = (uint32)(sint32)immD;
-		bool canStore = _CanStoreInteger(imm, 5, false);
-		if (!canStore)
-		{
-			std::string msg = fmt::format("Value of operand \"{}\" is out of range", assemblerCtx->listOperandStr[index].str);
-			ppcAssembler_setError(assemblerCtx->ctx, msg);
-			return false;
-		}
-		uint32 mask = (1 << 5) - 1;
-		imm &= mask;
-		opcode &= ~(mask << m_bitPos);
-		opcode |= (imm << m_bitPos);
-		return true;
-	}
-
-	void DisassembleOperand(PPCDisassembledInstruction* disInstr, PPCInstructionDef* iDef, const uint32 opcode, size_t index)
-	{
-		uint32 mask = (1 << 5) - 1;
-		uint32 immValue = (opcode >> m_bitPos) & mask;
-		immValue = m_base - immValue;
-		disInstr->operandMask |= (1 << index);
-		disInstr->operand[index].type = PPCASM_OPERAND_TYPE_IMM;
-		disInstr->operand[index].immS32 = immValue;
-		disInstr->operand[index].immWidth = 5;
-		disInstr->operand[index].isSignedImm = false;
-	}
-private:
-	uint8 m_bitPos;
-	uint8 m_base;
-};
-
-class EncodedConstraint_None
-{
-public:
-	EncodedConstraint_None() {}
-
-	void AssembleConstraint(PPCAssemblerContext* assemblerCtx, PPCInstructionDef* iDef, uint32& opcode)
-	{
-	}
-
-	bool DisassembleCheckConstraint(PPCDisassembledInstruction* disInstr, PPCInstructionDef* iDef, const uint32 opcode)
-	{
-		return true;
-	}
-};
-
-class EncodedConstraint_MirrorU5
-{
-public:
-	EncodedConstraint_MirrorU5(uint8 srcBitPos, uint8 dstBitPos) : m_srcBitPos(srcBitPos), m_dstBitPos(dstBitPos) {}
-
-	void AssembleConstraint(PPCAssemblerContext* assemblerCtx, PPCInstructionDef* iDef, uint32& opcode)
-	{
-		uint32 regIndex = (opcode >> m_srcBitPos) & 0x1F;
-		opcode &= ~((uint32)0x1F << m_dstBitPos);
-		opcode |= ((uint32)regIndex << m_dstBitPos);
-	}
-
-	bool DisassembleCheckConstraint(PPCDisassembledInstruction* disInstr, PPCInstructionDef* iDef, const uint32 opcode)
-	{
-		uint32 regSrc = (opcode >> m_srcBitPos) & 0x1F;
-		uint32 regDst = (opcode >> m_dstBitPos) & 0x1F;
-		return regSrc == regDst;
-	}
-
-private:
-	const uint8 m_srcBitPos, m_dstBitPos;
-};
-
-// same as _MirrorU5, but the destination must match invBase - src
-class EncodedConstraint_MirrorReverseU5
-{
-public:
-	EncodedConstraint_MirrorReverseU5(uint8 srcBitPos, uint8 dstBitPos, uint8 invBase) : m_srcBitPos(srcBitPos), m_dstBitPos(dstBitPos), m_invBase(invBase) {}
-
-	void AssembleConstraint(PPCAssemblerContext* assemblerCtx, PPCInstructionDef* iDef, uint32& opcode)
-	{
-		uint32 regIndex = (opcode >> m_srcBitPos) & 0x1F;
-		regIndex = m_invBase - regIndex;
-		opcode &= ~((uint32)0x1F << m_dstBitPos);
-		opcode |= ((uint32)regIndex << m_dstBitPos);
-	}
-
-	bool DisassembleCheckConstraint(PPCDisassembledInstruction* disInstr, PPCInstructionDef* iDef, const uint32 opcode)
-	{
-		uint32 regSrc = (opcode >> m_srcBitPos) & 0x1F;
-		uint32 regDst = (opcode >> m_dstBitPos) & 0x1F;
-		regSrc = m_invBase - regSrc;
-		if (regSrc >= 32)
-			return false;
-		return regSrc == regDst;
-	}
-
-private:
-	const uint8 m_srcBitPos, m_dstBitPos, m_invBase;
-};
-
-class EncodedConstraint_FixedU5
-{
-public:
-	EncodedConstraint_FixedU5(uint8 bitPos, uint8 expectedReg) : m_bitPos(bitPos), m_expectedReg(expectedReg) {}
-
-	void AssembleConstraint(PPCAssemblerContext* assemblerCtx, PPCInstructionDef* iDef, uint32& opcode)
-	{
-		uint32 regIndex = m_expectedReg;
-		opcode &= ~((uint32)0x1F << m_bitPos);
-		opcode |= ((uint32)regIndex << m_bitPos);
-	}
-
-	bool DisassembleCheckConstraint(PPCDisassembledInstruction* disInstr, PPCInstructionDef* iDef, const uint32 opcode)
-	{
-		uint32 reg = (opcode >> m_bitPos) & 0x1F;
-		return (uint8)reg == m_expectedReg;
-	}
-
-private:
-	const uint8 m_bitPos;
-	const uint8 m_expectedReg;
-};
-
-using EncodedConstraint_FixedRegister = EncodedConstraint_FixedU5;
-using EncodedConstraint_MirrorRegister = EncodedConstraint_MirrorU5;
-
-// checks bit value, but does not overwrite it on assemble
-class EncodedConstraint_CheckSignBit
-{
-public:
-	EncodedConstraint_CheckSignBit(uint8 bitPos, uint8 expectedValue) : m_bitPos(bitPos), m_expectedValue(expectedValue) {}
-
-	void AssembleConstraint(PPCAssemblerContext* assemblerCtx, PPCInstructionDef* iDef, uint32& opcode)
-	{
-		// dont overwrite the existing sign bit
-	}
-
-	bool DisassembleCheckConstraint(PPCDisassembledInstruction* disInstr, PPCInstructionDef* iDef, const uint32 opcode)
-	{
-		return ((opcode >> m_bitPos) & 1) == m_expectedValue;
-	}
-
-private:
-	const uint8 m_bitPos;
-	const uint8 m_expectedValue;
-};
-
-//class EncodedConstraint_ExpectBit
-//{
-//public:
-//	EncodedConstraint_ExpectBit(uint8 bitPos, bool val) : m_bitPos(bitPos), m_expectedValue(val ? 1 : 0) {}
-//
-//	void AssembleConstraint(PPCAssemblerContext* assemblerCtx, PPCInstructionDef* iDef, uint32& opcode)
-//	{
-//		if (m_expectedValue)
-//			opcode |= (1 << m_bitPos);
-//		else
-//			opcode &= ~(1 << m_bitPos);
-//	}
-//
-//	bool DisassembleCheckConstraint(PPCDisassembledInstruction* disInstr, PPCInstructionDef* iDef, const uint32 opcode)
-//	{
-//		return ((opcode >> m_bitPos) & 1) == m_expectedValue;
-//	}
-//
-//private:
-//	const uint8 m_bitPos;
-//	const uint8 m_expectedValue;
-//};
-
-class EncodedConstraint_FixedSPR
-{
-public:
-	EncodedConstraint_FixedSPR(uint16 sprIndex) : m_sprIndex(sprIndex) {}
-
-	void AssembleConstraint(PPCAssemblerContext* assemblerCtx, PPCInstructionDef* iDef, uint32& opcode)
-	{
-		sint32 sprLow = (m_sprIndex) & 0x1F;
-		sint32 sprHigh = (m_sprIndex >> 5) & 0x1F;
-		opcode &= ~((uint32)0x1F << 16);
-		opcode |= ((uint32)sprLow << 16);
-		opcode &= ~((uint32)0x1F << 11);
-		opcode |= ((uint32)sprHigh << 11);
-	}
-
-	bool DisassembleCheckConstraint(PPCDisassembledInstruction* disInstr, PPCInstructionDef* iDef, const uint32 opcode)
-	{
-		uint32 sprLow = (opcode >> 16) & 0x1F;
-		uint32 sprHigh = (opcode >> 11) & 0x1F;
-		uint32 sprIndex = sprLow | (sprHigh << 5);
-		return (uint16)sprIndex == m_sprIndex;
-	}
-
-private:
-	const uint16 m_sprIndex;
-};
-
-struct PPCInstructionDef
-{
-	uint16 ppcAsmOp; // instruction type identifier
-	uint8 priority;
-	uint16 opc0;
-	uint16 opc1;
-	uint16 opc2;
-	uint8 instructionForm; // encoding
-	uint16 flags;
-	uint32 maskBits;
-	uint32 compareBits;
-	bool(*extraCheck)(uint32 opcode); // used for unique criteria (e.g. SRWI checks SH/mask) -> Replaced by constraints
-
-	std::array<std::variant<EncodedOperand_None, EncodedOperand_GPR<false>, EncodedOperand_GPR<true>, EncodedOperand_FPR, EncodedOperand_CR, EncodedOperand_SPR, EncodedOperand_IMM, EncodedOperand_U5Reverse, EncodedOperand_MemLoc>, 4> encodedOperands{}; // note: The default constructor of std::variant will default-construct the first type (which we want to be EncodedOperand_None)
-	std::array<std::variant<EncodedConstraint_None, EncodedConstraint_MirrorRegister, EncodedConstraint_MirrorReverseU5, EncodedConstraint_FixedRegister, EncodedConstraint_FixedSPR, EncodedConstraint_CheckSignBit>, 3> constraints{};
-};
-
-PPCInstructionDef ppcInstructionTable[] =
-{
-	{PPCASM_OP_PS_MERGE00, 0, 4, 16, 16, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(11)}},
-	{PPCASM_OP_PS_MERGE01, 0, 4, 16, 17, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(11)}},
-	{PPCASM_OP_PS_MERGE10, 0, 4, 16, 18, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(11)}},
-	{PPCASM_OP_PS_MERGE11, 0, 4, 16, 19, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(11)}},
-
-	{PPCASM_OP_PS_DIV, 0, 4, 18, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(11)}},
-	{PPCASM_OP_PS_SUB, 0, 4, 20, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(11)}},
-	{PPCASM_OP_PS_ADD, 0, 4, 21, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(11)}},
-	{PPCASM_OP_PS_MUL, 0, 4, 25, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(6)}},
-
-	{PPCASM_OP_PS_MSUB, 0, 4, 28, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(6), EncodedOperand_FPR(11)}},
-	{PPCASM_OP_PS_MADD, 0, 4, 29, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(6), EncodedOperand_FPR(11)}},
-	{PPCASM_OP_PS_NMSUB, 0, 4, 30, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(6), EncodedOperand_FPR(11)}},
-	{PPCASM_OP_PS_NMADD, 0, 4, 31, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(6), EncodedOperand_FPR(11)}},
-
-	{PPCASM_OP_MULLI, 0, 7, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_IMM(0, 16, true)}},
-
-	{PPCASM_OP_SUBFIC, 0, 8, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_IMM(0, 16, true)} },
-
-	{PPCASM_OP_CMPLWI, 0, 10, OPC_NONE, OPC_NONE, OP_FORM_CMP_SIMM, FLG_DEFAULT, 0, 0, nullptr},
-	{PPCASM_OP_CMPWI, 0, 11, OPC_NONE, OPC_NONE, OP_FORM_CMP_SIMM, FLG_DEFAULT, 0, 0, nullptr},
-	{PPCASM_OP_ADDIC, 0, 12, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_IMM(0, 16, true)}},
-	{PPCASM_OP_ADDIC_, 0, 13, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_IMM(0, 16, true)}},
-	{PPCASM_OP_ADDI, 0, 14, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_IMM(0, 16, true)}},
-	{PPCASM_OP_SUBI, 1, 14, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_IMM(0, 16, true, true)}, {EncodedConstraint_CheckSignBit(15, 1)}}, // special form of ADDI for negative immediate
-	{PPCASM_OP_LI, 1, 14, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_IMM(0, 16, true, false, true)}, {EncodedConstraint_FixedRegister(16, 0)}},
-	{PPCASM_OP_ADDIS, 0, 15, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_IMM(0, 16, true, false, true)}},
-	{PPCASM_OP_LIS, 1, 15, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_IMM(0, 16, true, false, true)}, {EncodedConstraint_FixedRegister(16, 0)}},
-
-	{PPCASM_OP_BC, 0, 16, OPC_NONE, OPC_NONE, OP_FORM_BRANCH_S16, FLG_DEFAULT, 0, 0, nullptr},
-
-	{PPCASM_OP_BNE, 1, 16, OPC_NONE, OPC_NONE, OP_FORM_BRANCH_S16, FLG_DEFAULT, C_MASK_BO_COND | C_MASK_BI_CRBIT, C_BIT_BO_FALSE | C_BITS_BI_EQ, nullptr},
-	{PPCASM_OP_BEQ, 1, 16, OPC_NONE, OPC_NONE, OP_FORM_BRANCH_S16, FLG_DEFAULT, C_MASK_BO_COND | C_MASK_BI_CRBIT, C_BIT_BO_TRUE | C_BITS_BI_EQ, nullptr},
-	{PPCASM_OP_BGE, 1, 16, OPC_NONE, OPC_NONE, OP_FORM_BRANCH_S16, FLG_DEFAULT, C_MASK_BO_COND | C_MASK_BI_CRBIT, C_BIT_BO_FALSE | C_BITS_BI_LT, nullptr},
-	{PPCASM_OP_BGT, 1, 16, OPC_NONE, OPC_NONE, OP_FORM_BRANCH_S16, FLG_DEFAULT, C_MASK_BO_COND | C_MASK_BI_CRBIT, C_BIT_BO_TRUE | C_BITS_BI_GT, nullptr},
-	{PPCASM_OP_BLT, 1, 16, OPC_NONE, OPC_NONE, OP_FORM_BRANCH_S16, FLG_DEFAULT, C_MASK_BO_COND | C_MASK_BI_CRBIT, C_BIT_BO_TRUE | C_BITS_BI_LT, nullptr},
-	{PPCASM_OP_BLE, 1, 16, OPC_NONE, OPC_NONE, OP_FORM_BRANCH_S16, FLG_DEFAULT, C_MASK_BO_COND | C_MASK_BI_CRBIT, C_BIT_BO_FALSE | C_BITS_BI_GT, nullptr},
-
-	{PPCASM_OP_BDZ, 1, 16, OPC_NONE, OPC_NONE, OP_FORM_BRANCH_S16, FLG_DEFAULT, C_MASK_BO, C_BIT_BO_DZ, nullptr},
-	{PPCASM_OP_BDNZ, 1, 16, OPC_NONE, OPC_NONE, OP_FORM_BRANCH_S16, FLG_DEFAULT, C_MASK_BO, C_BIT_BO_DNZ, nullptr},
-
-	{PPCASM_OP_B, 0, 18, OPC_NONE, OPC_NONE, OP_FORM_BRANCH_S24, FLG_DEFAULT, C_MASK_LK | C_MASK_AA, 0, nullptr},
-	{PPCASM_OP_BL, 0, 18, OPC_NONE, OPC_NONE, OP_FORM_BRANCH_S24, FLG_DEFAULT, C_MASK_LK | C_MASK_AA, C_BIT_LK, nullptr},
-	{PPCASM_OP_BA, 0, 18, OPC_NONE, OPC_NONE, OP_FORM_BRANCH_S24, FLG_DEFAULT, C_MASK_LK | C_MASK_AA, C_BIT_AA, nullptr},
-	{PPCASM_OP_BLA, 0, 18, OPC_NONE, OPC_NONE, OP_FORM_BRANCH_S24, FLG_DEFAULT, C_MASK_LK | C_MASK_AA, C_BIT_LK|C_BIT_AA, nullptr},
-
-	{PPCASM_OP_BLR, 0, 19, 16, OPC_NONE, OP_FORM_NO_OPERAND, FLG_DEFAULT, C_MASK_BO | C_MASK_LK, C_BIT_BO_ALWAYS, nullptr},
-	{PPCASM_OP_BLRL, 0, 19, 16, OPC_NONE, OP_FORM_NO_OPERAND, FLG_DEFAULT, C_MASK_BO | C_MASK_LK, C_BIT_BO_ALWAYS | C_BIT_LK, nullptr},
-
-	{PPCASM_OP_BLTLR, 0, 19, 16, OPC_NONE, OP_FORM_BRANCH_BCCLR, FLG_DEFAULT, C_MASK_BO | C_MASK_BI_CRBIT | C_MASK_LK, C_BIT_BO_TRUE | C_BITS_BI_LT, nullptr}, // less
-	{PPCASM_OP_BGTLR, 0, 19, 16, OPC_NONE, OP_FORM_BRANCH_BCCLR, FLG_DEFAULT, C_MASK_BO | C_MASK_BI_CRBIT | C_MASK_LK, C_BIT_BO_TRUE | C_BITS_BI_GT, nullptr}, // greater
-	{PPCASM_OP_BEQLR, 0, 19, 16, OPC_NONE, OP_FORM_BRANCH_BCCLR, FLG_DEFAULT, C_MASK_BO | C_MASK_BI_CRBIT | C_MASK_LK, C_BIT_BO_TRUE | C_BITS_BI_EQ, nullptr}, // equal
-	{PPCASM_OP_BLELR, 0, 19, 16, OPC_NONE, OP_FORM_BRANCH_BCCLR, FLG_DEFAULT, C_MASK_BO | C_MASK_BI_CRBIT | C_MASK_LK, C_BIT_BO_FALSE | C_BITS_BI_GT, nullptr}, // less or equal (not greater)
-	{PPCASM_OP_BGELR, 0, 19, 16, OPC_NONE, OP_FORM_BRANCH_BCCLR, FLG_DEFAULT, C_MASK_BO | C_MASK_BI_CRBIT | C_MASK_LK, C_BIT_BO_FALSE | C_BITS_BI_LT, nullptr}, // greater or equal (not less)
-	{PPCASM_OP_BNELR, 0, 19, 16, OPC_NONE, OP_FORM_BRANCH_BCCLR, FLG_DEFAULT, C_MASK_BO | C_MASK_BI_CRBIT | C_MASK_LK, C_BIT_BO_FALSE | C_BITS_BI_EQ, nullptr}, // not equal
-	{PPCASM_OP_BDZLR, 0, 19, 16, OPC_NONE, OP_FORM_NO_OPERAND, FLG_DEFAULT, C_MASK_BO | C_MASK_LK, C_BIT_BO_DZ, nullptr}, // decrement CTR, branch to LR if CTR == 0
-	{PPCASM_OP_BDNZLR, 0, 19, 16, OPC_NONE, OP_FORM_NO_OPERAND, FLG_DEFAULT, C_MASK_BO | C_MASK_LK, C_BIT_BO_DNZ, nullptr}, // decrement CTR, branch to LR if CTR != 0
-	{PPCASM_OP_BDZLRL, 0, 19, 16, OPC_NONE, OP_FORM_NO_OPERAND, FLG_DEFAULT, C_MASK_BO | C_MASK_LK, C_BIT_BO_DZ | C_BIT_LK, nullptr}, // decrement CTR, branch to LR if CTR == 0 and set LR
-	{PPCASM_OP_BDNZLRL, 0, 19, 16, OPC_NONE, OP_FORM_NO_OPERAND, FLG_DEFAULT, C_MASK_BO | C_MASK_LK, C_BIT_BO_DNZ | C_BIT_LK, nullptr}, // decrement CTR, branch to LR if CTR != 0 and set LR
-
-	{PPCASM_OP_ISYNC, 0, 19, 150, OPC_NONE, OP_FORM_NO_OPERAND, FLG_DEFAULT, 0, 0, nullptr},
-
-	{PPCASM_OP_CRNOR, 0, 19, 33, OPC_NONE, OP_FORM_XL_CR, FLG_DEFAULT, 0, 0, nullptr},
-	{PPCASM_OP_CRANDC, 0, 19, 129, OPC_NONE, OP_FORM_XL_CR, FLG_DEFAULT, 0, 0, nullptr},
-	{PPCASM_OP_CRXOR, 0, 19, 193, OPC_NONE, OP_FORM_XL_CR, FLG_DEFAULT, 0, 0, nullptr},
-	{PPCASM_OP_CRNAND, 0, 19, 255, OPC_NONE, OP_FORM_XL_CR, FLG_DEFAULT, 0, 0, nullptr},
-	{PPCASM_OP_CRAND, 0, 19, 257, OPC_NONE, OP_FORM_XL_CR, FLG_DEFAULT, 0, 0, nullptr},
-	{PPCASM_OP_CREQV, 0, 19, 289, OPC_NONE, OP_FORM_XL_CR, FLG_DEFAULT, 0, 0, nullptr},
-	{PPCASM_OP_CRORC, 0, 19, 417, OPC_NONE, OP_FORM_XL_CR, FLG_DEFAULT, 0, 0, nullptr},
-	{PPCASM_OP_CROR, 0, 19, 449, OPC_NONE, OP_FORM_XL_CR, FLG_DEFAULT, 0, 0, nullptr},
-
-	{PPCASM_OP_BCTR, 0, 19, 528, OPC_NONE, OP_FORM_NO_OPERAND, FLG_DEFAULT, C_MASK_BO | C_MASK_LK, C_BIT_BO_ALWAYS, nullptr},
-	{PPCASM_OP_BCTRL, 0, 19, 528, OPC_NONE, OP_FORM_NO_OPERAND, FLG_DEFAULT, C_MASK_BO | C_MASK_LK, C_BIT_BO_ALWAYS | C_BIT_LK, nullptr},
-
-	{PPCASM_OP_RLWIMI, 0, 20, OPC_NONE, OPC_NONE, OP_FORM_RLWINM, FLG_DEFAULT, C_MASK_RC, 0, nullptr},
-	{PPCASM_OP_RLWIMI_, 0, 20, OPC_NONE, OPC_NONE, OP_FORM_RLWINM, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr},
-	{PPCASM_OP_RLWINM, 0, 21, OPC_NONE, OPC_NONE, OP_FORM_RLWINM, FLG_DEFAULT, C_MASK_RC, 0, nullptr},
-	{PPCASM_OP_RLWINM_, 0, 21, OPC_NONE, OPC_NONE, OP_FORM_RLWINM, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr},
-
-	{PPCASM_OP_ROTLWI, 2, 21, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_IMM(11, 5, false)}, {EncodedConstraint_FixedU5(6, 0), EncodedConstraint_FixedU5(1, 31)}},
-	{PPCASM_OP_ROTLWI_, 2, 21, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_IMM(11, 5, false)}, {EncodedConstraint_FixedU5(6, 0), EncodedConstraint_FixedU5(1, 31)}},
-
-	// rotrwi RA, RS, n -> rlwinm RA, RS, 32-n, 0, 31
-	// only assembler
-	{PPCASM_OP_ROTRWI, 0, 21, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_U5Reverse(11, 32)}, {EncodedConstraint_FixedU5(6, 0), EncodedConstraint_FixedU5(1, 31)}},
-	{PPCASM_OP_ROTRWI_, 0, 21, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_U5Reverse(11, 32)}, {EncodedConstraint_FixedU5(6, 0), EncodedConstraint_FixedU5(1, 31)}},
-
-	{PPCASM_OP_EXTLWI, 1, 21, OPC_NONE, OPC_NONE, OP_FORM_RLWINM_EXTENDED, FLG_DEFAULT, C_MASK_RC, 0, ppcOp_extraCheck_extlwi},
-	{PPCASM_OP_EXTLWI_, 1, 21, OPC_NONE, OPC_NONE, OP_FORM_RLWINM_EXTENDED, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, ppcOp_extraCheck_extlwi},
-	{PPCASM_OP_EXTRWI, 1, 21, OPC_NONE, OPC_NONE, OP_FORM_RLWINM_EXTENDED, FLG_DEFAULT, C_MASK_RC, 0, ppcOp_extraCheck_extrwi},
-	{PPCASM_OP_EXTRWI_, 1, 21, OPC_NONE, OPC_NONE, OP_FORM_RLWINM_EXTENDED, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, ppcOp_extraCheck_extrwi},
-
-	{PPCASM_OP_SLWI, 2, 21, OPC_NONE, OPC_NONE, OP_FORM_RLWINM_EXTENDED, FLG_DEFAULT, C_MASK_RC, 0, ppcOp_extraCheck_slwi},
-	{PPCASM_OP_SLWI_, 2, 21, OPC_NONE, OPC_NONE, OP_FORM_RLWINM_EXTENDED, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, ppcOp_extraCheck_slwi},
-	{PPCASM_OP_SRWI, 2, 21, OPC_NONE, OPC_NONE, OP_FORM_RLWINM_EXTENDED, FLG_DEFAULT, C_MASK_RC, 0, ppcOp_extraCheck_srwi},
-	{PPCASM_OP_SRWI_, 2, 21, OPC_NONE, OPC_NONE, OP_FORM_RLWINM_EXTENDED, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, ppcOp_extraCheck_srwi},
-
-	{PPCASM_OP_CLRLWI, 2, 21, OPC_NONE, OPC_NONE, OP_FORM_RLWINM_EXTENDED, FLG_DEFAULT, C_MASK_RC, 0, ppcOp_extraCheck_clrlwi},
-	{PPCASM_OP_CLRLWI_, 2, 21, OPC_NONE, OPC_NONE, OP_FORM_RLWINM_EXTENDED, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, ppcOp_extraCheck_clrlwi},
-	{PPCASM_OP_CLRRWI, 2, 21, OPC_NONE, OPC_NONE, OP_FORM_RLWINM_EXTENDED, FLG_DEFAULT, C_MASK_RC, 0, ppcOp_extraCheck_clrrwi},
-	{PPCASM_OP_CLRRWI_, 2, 21, OPC_NONE, OPC_NONE, OP_FORM_RLWINM_EXTENDED, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, ppcOp_extraCheck_clrrwi},
-
-	{PPCASM_OP_RLWNM, 0, 23, OPC_NONE, OPC_NONE, OP_FORM_RLWNM, FLG_DEFAULT, C_MASK_RC, 0, nullptr},
-	{PPCASM_OP_RLWNM_, 0, 23, OPC_NONE, OPC_NONE, OP_FORM_RLWNM, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr},
-
-	{PPCASM_OP_ROTLW, 0, 23, OPC_NONE, OPC_NONE, OP_FORM_RLWNM_EXTENDED, FLG_DEFAULT, C_MASK_RC, 0, ppcOp_extraCheck_rotlw},
-	{PPCASM_OP_ROTLW_, 0, 23, OPC_NONE, OPC_NONE, OP_FORM_RLWNM_EXTENDED, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, ppcOp_extraCheck_rotlw},
-
-
-	{PPCASM_OP_ORI, 0, 24, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_IMM(0, 16, false)}},
-	{PPCASM_OP_NOP, 1, 24, OPC_NONE, OPC_NONE, OP_FORM_NO_OPERAND, FLG_DEFAULT, 0x3FFFFFF, 0, nullptr}, // ORI r0, r0, 0 -> NOP
-	{PPCASM_OP_ORIS, 0, 25, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_IMM(0, 16, true, false, true)}},
-
-	{PPCASM_OP_XORI, 0, 26, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_IMM(0, 16, false)} },
-	{PPCASM_OP_XORIS, 0, 27, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_IMM(0, 16, true, false, true)} },
-
-	{PPCASM_OP_ANDI_, 0, 28, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_IMM(0, 16, false)} },
-	{PPCASM_OP_ANDIS_, 0, 29, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_IMM(0, 16, true, false, true)} },
-
-	// group 31
-	{PPCASM_OP_CMPW, 0, 31, 0, OPC_NONE, OP_FORM_OP3_A_CMP, FLG_DEFAULT, 0, 0, nullptr},
-
-	{PPCASM_OP_SUBFC, 1, 31, 8, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_SUBFC_, 1, 31, 8, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_GPR(11)} },
-
-	{PPCASM_OP_MULHWU, 0, 31, 11, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_MULHWU_, 0, 31, 11, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_GPR(11)} },
-
-	{PPCASM_OP_CMPLW, 0, 31, 32, OPC_NONE, OP_FORM_OP3_A_CMP, FLG_DEFAULT, 0, 0, nullptr},
-
-	{PPCASM_OP_SUBF, 1, 31, 40, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_SUBF_, 1, 31, 40, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_SUB, 0, 31, 40, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(11), EncodedOperand_GPR(16)} },
-	{PPCASM_OP_SUB_, 0, 31, 40, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(11), EncodedOperand_GPR(16)} },
-
-	{PPCASM_OP_MULHW, 0, 31, 75, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_MULHW_, 0, 31, 75, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_GPR(11)} },
-
-	{PPCASM_OP_NEG, 0, 31, 104, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC | C_MASK_OE, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16)}},
-	{PPCASM_OP_NEG_, 0, 31, 104, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC | C_MASK_OE, C_BIT_RC, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16)} },
-
-	{PPCASM_OP_NOR, 0, 31, 124, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_NOR_, 0, 31, 124, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_GPR(11)} },
-
-	// alias for NOR where rA == rB
-	{PPCASM_OP_NOT, 1, 31, 124, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(11)}, {EncodedConstraint_MirrorRegister(11, 21)}},
-	{PPCASM_OP_NOT_, 1, 31, 124, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(11)}, {EncodedConstraint_MirrorRegister(11, 21)} },
-
-	{PPCASM_OP_SUBFE, 1, 31, 136, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_SUBFE_, 1, 31, 136, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_GPR(11)} },
-
-	{PPCASM_OP_MULLW, 0, 31, 235, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_MULLW_, 0, 31, 235, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_GPR(11)} },
-
-	{PPCASM_OP_MFSPR, 0, 31, 339, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_SPR()} },
-	{PPCASM_OP_MTSPR, 0, 31, 467, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_SPR(), EncodedOperand_GPR(21)} },
-
-	{PPCASM_OP_MFLR, 0, 31, 339, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21)}, {EncodedConstraint_FixedSPR(8)}},
-	{PPCASM_OP_MTLR, 0, 31, 467, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21)}, {EncodedConstraint_FixedSPR(8)} },
-	{PPCASM_OP_MFCTR, 0, 31, 339, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21)}, {EncodedConstraint_FixedSPR(9)} },
-	{PPCASM_OP_MTCTR, 0, 31, 467, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21)}, {EncodedConstraint_FixedSPR(9)} },
-	{PPCASM_OP_MFCR,  0, 31, 19,  OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21)}},
-	{PPCASM_OP_MTCRF, 0, 31, 144, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_IMM(12, 8, false), EncodedOperand_GPR(21)}},
-	{PPCASM_OP_MCRF,  0, 19, 0,   OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_CR(21), EncodedOperand_CR(16)}},
-
-	{PPCASM_OP_ADD, 0, 31, 266, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_ADD_, 0, 31, 266, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_GPR(11)} },
-
-	{PPCASM_OP_SLW, 0, 31, 24, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_SLW_, 0, 31, 24, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_SRW, 0, 31, 536, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_SRW_, 0, 31, 536, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_SRAW, 0, 31, 792, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_SRAW_, 0, 31, 792, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_GPR(11)} },
-
-	{PPCASM_OP_AND, 0, 31, 28, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_AND_, 0, 31, 28, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_GPR(11)} },
-
-	{PPCASM_OP_ANDC, 0, 31, 60, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_ANDC_, 0, 31, 60, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_GPR(11)} },
-
-	{PPCASM_OP_XOR, 0, 31, 316, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_GPR(11)} },
-
-	{PPCASM_OP_ORC, 0, 31, 412, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_GPR(11)} }, // has RC?
-	{PPCASM_OP_OR, 0, 31, 444, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_OR_, 0, 31, 444, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_MR, 1, 31, 444, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(11)}, {EncodedConstraint_MirrorRegister(11, 21)} },
-	{PPCASM_OP_MR_, 1, 31, 444, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(11)}, {EncodedConstraint_MirrorRegister(11, 21)} },
-
-	{PPCASM_OP_DIVWU, 0, 31, 459, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_DIVWU_, 0, 31, 459, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_GPR(11)} },
-
-	{PPCASM_OP_DIVW, 0, 31, 491, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_DIVW_, 0, 31, 491, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_GPR(11)} },
-
-	{PPCASM_OP_SRAWI, 0, 31, 824, OPC_NONE, OP_FORM_OP3_A_IMM, FLG_DEFAULT, C_MASK_RC, 0, nullptr},
-	{PPCASM_OP_SRAWI_, 0, 31, 824, OPC_NONE, OP_FORM_OP3_A_IMM, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr},
-
-	{PPCASM_OP_CNTLZW, 0, 31, 26, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21)} },
-	{PPCASM_OP_EXTSB, 0, 31, 954, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21)} },
-	{PPCASM_OP_EXTSH, 0, 31, 922, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, 0, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21)} },
-
-	{PPCASM_OP_CNTLZW_, 0, 31, 26, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21)} },
-	{PPCASM_OP_EXTSB_, 0, 31, 954, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21)} },
-	{PPCASM_OP_EXTSH_, 0, 31, 922, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(16), EncodedOperand_GPR(21)} },
-
-	{PPCASM_OP_LWZX, 0, 31, 23, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_LWZUX, 0, 31, 55, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_LBZX, 0, 31, 87, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_LBZUX, 0, 31, 119, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_LHZX, 0, 31, 279, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_LHZUX, 0, 31, 311, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_LHAX, 0, 31, 343, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_LHAUX, 0, 31, 375, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_STWX, 0, 31, 151, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_STWUX, 0, 31, 183, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_STHX, 0, 31, 407, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_STHUX, 0, 31, 439, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_STBX, 0, 31, 215, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_STBUX, 0, 31, 247, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_LWBRX, 0, 31, 534, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_LHBRX, 0, 31, 790, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_STWBRX, 0, 31, 662, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_STHBRX, 0, 31, 918, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-
-	{PPCASM_OP_LFSX, 0, 31, 535, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_LFSUX, 0, 31, 567, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_STFSX, 0, 31, 663, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_STFSUX, 0, 31, 695, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-
-	{PPCASM_OP_STSWI, 0, 31, 725, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR(16), EncodedOperand_IMM(11, 5, false)} },
-
-	{PPCASM_OP_LWARX, 0, 31, 20, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_STWCX_, 0, 31, 150, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, C_MASK_RC, C_BIT_RC, nullptr, {EncodedOperand_GPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-
-	{PPCASM_OP_LFDX, 0, 31, 599, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_LFDUX, 0, 31, 631, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_STFDX, 0, 31, 727, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-	{PPCASM_OP_STFDUX, 0, 31, 759, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-
-	{PPCASM_OP_STFIWX, 0, 31, 983, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_GPR<true>(16), EncodedOperand_GPR(11)} },
-
-	// load/store
-	{PPCASM_OP_LWZ, 0, 32, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_MemLoc()} },
-	{PPCASM_OP_LWZU, 0, 33, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_MemLoc()} },
-	{PPCASM_OP_LBZ, 0, 34, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_MemLoc()} },
-	{PPCASM_OP_LBZU, 0, 35, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_MemLoc()} },
-	{PPCASM_OP_STW, 0, 36, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_MemLoc()} },
-	{PPCASM_OP_STWU, 0, 37, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_MemLoc()} },
-	{PPCASM_OP_STB, 0, 38, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_MemLoc()} },
-	{PPCASM_OP_STBU, 0, 39, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_MemLoc()} },
-	{PPCASM_OP_LHZ, 0, 40, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_MemLoc()} },
-	{PPCASM_OP_LHZU, 0, 41, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_MemLoc()} },
-	{PPCASM_OP_LHA, 0, 42, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_MemLoc()} },
-	{PPCASM_OP_LHAU, 0, 43, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_MemLoc()} },
-	{PPCASM_OP_STH, 0, 44, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_MemLoc()} },
-	{PPCASM_OP_STHU, 0, 45, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_MemLoc()} },
-	{PPCASM_OP_LMW, 0, 46, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_MemLoc()} },
-	{PPCASM_OP_STMW, 0, 47, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_GPR(21), EncodedOperand_MemLoc()} },
-	{PPCASM_OP_LFS, 0, 48, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_MemLoc()} },
-	{PPCASM_OP_LFSU, 0, 49, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_MemLoc()} },
-	{PPCASM_OP_LFD, 0, 50, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_MemLoc()} },
-	{PPCASM_OP_LFDU, 0, 51, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_MemLoc()} },
-	{PPCASM_OP_STFS, 0, 52, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_MemLoc()} },
-	{PPCASM_OP_STFSU, 0, 53, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_MemLoc()} },
-	{PPCASM_OP_STFD, 0, 54, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_MemLoc()} },
-	{PPCASM_OP_STFDU, 0, 55, OPC_NONE, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_MemLoc()} },
-
-	// FP
-	{PPCASM_OP_FDIVS, 0, 59, 18, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, { EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(11) } },
-	{PPCASM_OP_FSUBS, 0, 59, 20, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, { EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(11) } },
-	{PPCASM_OP_FADDS, 0, 59, 21, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, { EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(11) } },
-	{PPCASM_OP_FMULS, 0, 59, 25, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, { EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(6) } },
-	{PPCASM_OP_FMSUBS, 0, 59, 28, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, { EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(6), EncodedOperand_FPR(11) } },
-	{PPCASM_OP_FMADDS, 0, 59, 29, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, { EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(6), EncodedOperand_FPR(11) } },
-	{PPCASM_OP_FNMSUBS, 0, 59, 30, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, { EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(6), EncodedOperand_FPR(11) } },
-	{PPCASM_OP_FNMADDS, 0, 59, 31, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, { EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(6), EncodedOperand_FPR(11) } },
-
-	{PPCASM_OP_FCMPU, 0, 63, 0, OPC_NONE, OP_FORM_X_FP_CMP, FLG_DEFAULT, 0, 0, nullptr },
-	{PPCASM_OP_FCTIWZ, 0, 63, 15, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, {EncodedOperand_FPR(21), EncodedOperand_FPR(11)}},
-	{PPCASM_OP_FDIV, 0, 63, 18, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, { EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(11) } },
-	{PPCASM_OP_FSUB, 0, 63, 20, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, { EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(11) } },
-	{PPCASM_OP_FADD, 0, 63, 21, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, { EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(11) } },
-	{PPCASM_OP_FMUL, 0, 63, 25, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, { EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(6) } },
-	{PPCASM_OP_FRSQRTE, 0, 63, 26, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, { EncodedOperand_FPR(21), EncodedOperand_FPR(11) } },
-	{PPCASM_OP_FMSUB, 0, 63, 28, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, { EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(6), EncodedOperand_FPR(11) } },
-	{PPCASM_OP_FMADD, 0, 63, 29, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, { EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(6), EncodedOperand_FPR(11) } },
-	{PPCASM_OP_FNMSUB, 0, 63, 30, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, { EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(6), EncodedOperand_FPR(11) } },
-	{PPCASM_OP_FNMADD, 0, 63, 31, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, { EncodedOperand_FPR(21), EncodedOperand_FPR(16), EncodedOperand_FPR(6), EncodedOperand_FPR(11) } },
-	{PPCASM_OP_FRSP, 0, 63, 12, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, { EncodedOperand_FPR(21), EncodedOperand_FPR(11) } },
-
-	// 63 extended opcode
-	{PPCASM_OP_FCMPO, 0, 63, 32|OPC_EXTENDED_BIT, OPC_NONE, OP_FORM_X_FP_CMP, FLG_DEFAULT, 0, 0, nullptr },
-	{PPCASM_OP_FNEG, 0, 63, 40|OPC_EXTENDED_BIT, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, { EncodedOperand_FPR(21), EncodedOperand_FPR(11) } },
-	{PPCASM_OP_FMR, 0, 63, 72|OPC_EXTENDED_BIT, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, { EncodedOperand_FPR(21), EncodedOperand_FPR(11) } },
-	{PPCASM_OP_FABS, 0, 63, 264|OPC_EXTENDED_BIT, OPC_NONE, OP_FORM_DYNAMIC, FLG_DEFAULT, 0, 0, nullptr, { EncodedOperand_FPR(21), EncodedOperand_FPR(11) } },
-
-};
-
-#define opcMask_setBits(__index, __bitCount, __value) opcodeMask |= (((1<<__bitCount)-1)<<(31-__index)); opcodeBits |= ((__value)<<(31-__index));
-
-void ppcAssembler_buildOpcMask(PPCInstructionDef* iDef, uint32& maskOut, uint32& bitsOut)
-{
-	uint32 opc0 = iDef->opc0;
-	uint32 opc1 = iDef->opc1;
-	uint32 opc2 = iDef->opc2;
-
-	uint32 opcodeMask = 0x3F<<26;
-	uint32 opcodeBits = opc0<<26;
-
-	// handle groups
-	if (opc0 == 31)
-	{
-		// group 31
-		opcMask_setBits(30, 10, opc1);
-	}
-	else if (opc0 == 19)
-	{
-		// group 19
-		opcMask_setBits(30, 10, opc1);
-	}
-	else if (opc0 == 4)
-	{
-		// group 4 (paired single)
-		opcMask_setBits(30, 5, opc1);
-		//opc1 = PPC_getBits(opcode, 30, 5);
-		if (opc1 == 16)
-		{
-			// group 4->16 (ps_merge)
-			opcMask_setBits(25, 5, opc2);
-			//opc2 = PPC_getBits(opcode, 25, 5);
-		}
-	}
-	else if (opc0 == 59)
-	{
-		// group 59 (FP float)
-		opcMask_setBits(30, 5, opc1);
-		//opc1 = PPC_getBits(opcode, 30, 5);
-	}
-	else if (opc0 == 63)
-	{
-		// group 63 (FP double)
-		if ((opc1&OPC_EXTENDED_BIT) != 0)
-		{
-			opcMask_setBits(30, 10, (opc1&~OPC_EXTENDED_BIT));
-		}
-		else
-		{
-			opcMask_setBits(30, 5, opc1);
-		}
-	}
-	maskOut = opcodeMask;
-	bitsOut = opcodeBits;
-}
-
-// given an internal instruction operand index, return the text encoding index
-sint32 _getOpIndex(PPCInstructionDef* iDef, sint32 operandIndex)
-{
-	if ((operandIndex == 0 || operandIndex == 1) && (iDef->flags & FLG_SWAP_OP0_OP1) != 0)
-		operandIndex ^= 1;
-	if ((iDef->flags & FLG_SWAP_OP1_OP2) != 0)
-	{
-		if (operandIndex == 1) operandIndex = 2;
-		else if (operandIndex == 2) operandIndex = 1;
-	}
-	if ((iDef->flags & FLG_SWAP_OP2_OP3) != 0)
-	{
-		if (operandIndex == 2) operandIndex = 3;
-		else if (operandIndex == 3) operandIndex = 2;
-	}
-	return operandIndex;
-}
-
-// given an internal instruction operand index, return the operand index for the text encoding. Returns -1 when operand is not present
-// replaces _getOpIndex
-//sint32 _operandInternalToTextIndex(ppcInstructionDef_t* iDef, sint32 operandIndex)
-//{
-//	if ((operandIndex == 0 || operandIndex == 1) && (iDef->flags & FLG_SWAP_OP0_OP1) != 0)
-//		operandIndex ^= 1;
-//	if ((operandIndex == 2 || operandIndex == 3) && (iDef->flags & FLG_SWAP_OP2_OP3) != 0)
-//		operandIndex ^= 1;
-//	sint32 outputIndex = operandIndex;
-//	if ((iDef->flags & (1 << outputIndex)))
-//		return -1;
-//	for (sint32 i = 0; i < operandIndex; i++)
-//	{
-//		if ((iDef->flags & (1 << i)))
-//			outputIndex--;
-//	}
-//	return outputIndex;
-//}
-//
-//int _operandTextToInternalIndex(ppcInstructionDef_t* iDef, sint32 operandIndex)
-//{
-//	for (sint32 i = 0; i < 8; i++)
-//	{
-//		if (_operandInternalToTextIndex(iDef, i) == operandIndex)
-//			return i;
-//	}
-//	return -1;
-//}
-
-void _disasmOpGPR(PPCDisassembledInstruction* disInstr, PPCInstructionDef* iDef, uint32 operandIndex, sint32 regIndex)
-{
-	if ((iDef->flags & (FLG_SKIP_OP0 << operandIndex)) != 0)
-		return;
-	disInstr->operandMask |= (1 << operandIndex);
-	sint32 opIdx = _getOpIndex(iDef, operandIndex);
-	disInstr->operand[opIdx].type = PPCASM_OPERAND_TYPE_GPR;
-	disInstr->operand[opIdx].registerIndex = regIndex;
-}
-
-void ppcAssembler_disassemble(uint32 virtualAddress, uint32 opcode, PPCDisassembledInstruction* disInstr)
-{
-	auto makeOpCRBit = [&](size_t opIndex, uint8 regIndex)
-	{
-		disInstr->operandMask |= (1 << opIndex);
-		disInstr->operand[opIndex].type = PPCASM_OPERAND_TYPE_CR_BIT;
-		disInstr->operand[opIndex].registerIndex = regIndex;
+		Slot kind{ Slot::Unused };
+		uint8 lsb{};        // bit position of the field
+		uint8 width{};      // Imm: field width. FromBase: the base value
+		bool isSigned{};
+		bool negate{};      // Imm: operand is negated before encoding (subi)
+		bool allowUnsigned{}; // Imm: signed field that also takes unsigned values (li, lis, oris...)
 	};
 
-	auto makeOpFPR = [&](size_t opIndex, uint8 regIndex)
+	constexpr SlotDef Gpr(uint8 lsb) { return { Slot::Gpr, lsb }; }
+	constexpr SlotDef GprOr0(uint8 lsb) { return { Slot::GprOrZero, lsb }; }
+	constexpr SlotDef Fpr(uint8 lsb) { return { Slot::Fpr, lsb }; }
+	constexpr SlotDef CrField(uint8 lsb) { return { Slot::CrField, lsb }; }
+	constexpr SlotDef SprNum() { return { Slot::Spr }; }
+	constexpr SlotDef Mem() { return { Slot::Mem }; }
+	constexpr SlotDef UImm(uint8 lsb, uint8 width) { return { Slot::Imm, lsb, width, false }; }
+	constexpr SlotDef SImm(uint8 lsb, uint8 width) { return { Slot::Imm, lsb, width, true }; }
+	constexpr SlotDef SImmNeg(uint8 lsb, uint8 width) { return { Slot::Imm, lsb, width, true, true }; }
+	constexpr SlotDef SImmOrU(uint8 lsb, uint8 width) { return { Slot::Imm, lsb, width, true, false, true }; }
+	constexpr SlotDef FromBase(uint8 lsb, uint8 base) { return { Slot::FromBase, lsb, base }; }
+
+	// fixed relationship between instruction fields of a Generic row
+	enum class Tie : uint8 { None, SameField, FieldIs, SprIs, SignIs };
+
+	struct TieDef
 	{
-		disInstr->operandMask |= (1 << opIndex);
-		disInstr->operand[opIndex].type = PPCASM_OPERAND_TYPE_FPR;
-		disInstr->operand[opIndex].registerIndex = regIndex;
+		Tie kind{ Tie::None };
+		uint8 a{};   // SameField: source lsb. FieldIs/SignIs: lsb
+		uint16 b{};  // SameField: destination lsb. FieldIs/SignIs: value. SprIs: spr number
 	};
 
-	memset(disInstr, 0, sizeof(PPCDisassembledInstruction));
-	// find match in table
-	sint32 bestMatchIndex = -1;
-	uint8 bestMatchPriority = 0;
-	for (sint32 i = 0; i < sizeof(ppcInstructionTable) / sizeof(PPCInstructionDef); i++)
+	constexpr TieDef SameField(uint8 srcLsb, uint8 dstLsb) { return { Tie::SameField, srcLsb, dstLsb }; }
+	constexpr TieDef FieldIs(uint8 lsb, uint8 value) { return { Tie::FieldIs, lsb, value }; }
+	constexpr TieDef SprIs(uint16 spr) { return { Tie::SprIs, 0, spr }; }
+	constexpr TieDef SignIs(uint8 lsb, uint8 value) { return { Tie::SignIs, lsb, value }; }
+
+	// marks a 10 bit extended opcode in group 63 (default there is 5 bits)
+	constexpr sint32 X10(sint32 xo) { return xo | 0x10000; }
+
+	// fixed bit masks / values
+	constexpr uint32 kRc = 1u;            // record bit
+	constexpr uint32 kLk = 1u;            // link bit
+	constexpr uint32 kAa = 1u << 1;       // absolute address bit
+	constexpr uint32 kOe = 1u << 10;      // overflow enable
+	constexpr uint32 kBo = 0x1Fu << 21;   // whole BO field
+	constexpr uint32 kBoNoHint = 0x1Eu << 21; // BO without the hint bit
+	constexpr uint32 kBiCond = 0x3u << 16; // condition within the CR field
+	constexpr uint32 kIfClear = 0x04u << 21;
+	constexpr uint32 kIfSet = 0x0Cu << 21;
+	constexpr uint32 kAlways = 0x14u << 21;
+	constexpr uint32 kDecNz = 0x10u << 21;
+	constexpr uint32 kDecZ = 0x12u << 21;
+	constexpr uint32 kLt = 0u << 16;
+	constexpr uint32 kGt = 1u << 16;
+	constexpr uint32 kEq = 2u << 16;
+
+	struct InstrDef
 	{
-		PPCInstructionDef* iDef = ppcInstructionTable + i;
-		// check opcode
-		uint32 opcMask;
-		uint32 opcBits;
-		ppcAssembler_buildOpcMask(iDef, opcMask, opcBits);
-		if ((opcode&opcMask) != opcBits)
-			continue;		
-		// check bits
-		if((opcode&iDef->maskBits) != iDef->compareBits)
-			continue;
-		// check special condition
-		if(iDef->extraCheck && iDef->extraCheck(opcode) == false )
-			continue;
-		// check priority
-		if(iDef->priority < bestMatchPriority)
-			continue;
-		// check constraints
-		bool allConstraintsMatch = true;
-		for (auto& it : iDef->constraints)
+		PPCASM_OP op;
+		uint8 priority;
+		sint32 primary;  // bits 0..5
+		sint32 xo;       // extended opcode, -1 = none
+		sint32 xo2;      // second extended opcode (ps_merge), -1 = none
+		Form form;
+		uint32 fixedMask;
+		uint32 fixedBits;
+		Rule rule;
+		std::array<SlotDef, 4> slots;
+		std::array<TieDef, 3> ties;
+	};
+
+
+	const InstrDef kInstrTable[] =
+	{
+	{ PPCASM_OP_PS_MERGE00, 0, 4, 16, 16, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(11) }, {  } },
+	{ PPCASM_OP_PS_MERGE01, 0, 4, 16, 17, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(11) }, {  } },
+	{ PPCASM_OP_PS_MERGE10, 0, 4, 16, 18, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(11) }, {  } },
+	{ PPCASM_OP_PS_MERGE11, 0, 4, 16, 19, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(11) }, {  } },
+	{ PPCASM_OP_PS_DIV, 0, 4, 18, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(11) }, {  } },
+	{ PPCASM_OP_PS_SUB, 0, 4, 20, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(11) }, {  } },
+	{ PPCASM_OP_PS_ADD, 0, 4, 21, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(11) }, {  } },
+	{ PPCASM_OP_PS_MUL, 0, 4, 25, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(6) }, {  } },
+	{ PPCASM_OP_PS_MSUB, 0, 4, 28, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(6), Fpr(11) }, {  } },
+	{ PPCASM_OP_PS_MADD, 0, 4, 29, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(6), Fpr(11) }, {  } },
+	{ PPCASM_OP_PS_NMSUB, 0, 4, 30, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(6), Fpr(11) }, {  } },
+	{ PPCASM_OP_PS_NMADD, 0, 4, 31, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(6), Fpr(11) }, {  } },
+	{ PPCASM_OP_MULLI, 0, 7, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Gpr(16), SImm(0, 16) }, {  } },
+	{ PPCASM_OP_SUBFIC, 0, 8, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Gpr(16), SImm(0, 16) }, {  } },
+	{ PPCASM_OP_CMPLWI, 0, 10, -1, -1, Form::CompareImm, 0, 0, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_CMPWI, 0, 11, -1, -1, Form::CompareImm, 0, 0, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_ADDIC, 0, 12, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Gpr(16), SImm(0, 16) }, {  } },
+	{ PPCASM_OP_ADDIC_, 0, 13, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Gpr(16), SImm(0, 16) }, {  } },
+	{ PPCASM_OP_ADDI, 0, 14, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Gpr(16), SImm(0, 16) }, {  } },
+	{ PPCASM_OP_SUBI, 1, 14, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Gpr(16), SImmNeg(0, 16) }, { SignIs(15, 1) } },
+	{ PPCASM_OP_LI, 1, 14, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), SImmOrU(0, 16) }, { FieldIs(16, 0) } },
+	{ PPCASM_OP_ADDIS, 0, 15, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Gpr(16), SImmOrU(0, 16) }, {  } },
+	{ PPCASM_OP_LIS, 1, 15, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), SImmOrU(0, 16) }, { FieldIs(16, 0) } },
+	{ PPCASM_OP_BC, 0, 16, -1, -1, Form::CondBranch, 0, 0, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BNE, 1, 16, -1, -1, Form::CondBranch, kBoNoHint | kBiCond, kIfClear | kEq, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BEQ, 1, 16, -1, -1, Form::CondBranch, kBoNoHint | kBiCond, kIfSet | kEq, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BGE, 1, 16, -1, -1, Form::CondBranch, kBoNoHint | kBiCond, kIfClear | kLt, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BGT, 1, 16, -1, -1, Form::CondBranch, kBoNoHint | kBiCond, kIfSet | kGt, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BLT, 1, 16, -1, -1, Form::CondBranch, kBoNoHint | kBiCond, kIfSet | kLt, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BLE, 1, 16, -1, -1, Form::CondBranch, kBoNoHint | kBiCond, kIfClear | kGt, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BDZ, 1, 16, -1, -1, Form::CondBranch, kBo, kDecZ, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BDNZ, 1, 16, -1, -1, Form::CondBranch, kBo, kDecNz, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_B, 0, 18, -1, -1, Form::Branch, kLk | kAa, 0, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BL, 0, 18, -1, -1, Form::Branch, kLk | kAa, kLk, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BA, 0, 18, -1, -1, Form::Branch, kLk | kAa, kAa, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BLA, 0, 18, -1, -1, Form::Branch, kLk | kAa, kLk | kAa, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BLR, 0, 19, 16, -1, Form::Bare, kBo | kLk, kAlways, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BLRL, 0, 19, 16, -1, Form::Bare, kBo | kLk, kAlways | kLk, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BLTLR, 0, 19, 16, -1, Form::CondReturn, kBo | kBiCond | kLk, kIfSet | kLt, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BGTLR, 0, 19, 16, -1, Form::CondReturn, kBo | kBiCond | kLk, kIfSet | kGt, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BEQLR, 0, 19, 16, -1, Form::CondReturn, kBo | kBiCond | kLk, kIfSet | kEq, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BLELR, 0, 19, 16, -1, Form::CondReturn, kBo | kBiCond | kLk, kIfClear | kGt, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BGELR, 0, 19, 16, -1, Form::CondReturn, kBo | kBiCond | kLk, kIfClear | kLt, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BNELR, 0, 19, 16, -1, Form::CondReturn, kBo | kBiCond | kLk, kIfClear | kEq, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BDZLR, 0, 19, 16, -1, Form::Bare, kBo | kLk, kDecZ, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BDNZLR, 0, 19, 16, -1, Form::Bare, kBo | kLk, kDecNz, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BDZLRL, 0, 19, 16, -1, Form::Bare, kBo | kLk, kDecZ | kLk, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BDNZLRL, 0, 19, 16, -1, Form::Bare, kBo | kLk, kDecNz | kLk, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_ISYNC, 0, 19, 150, -1, Form::Bare, 0, 0, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_CRNOR, 0, 19, 33, -1, Form::CrLogic, 0, 0, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_CRANDC, 0, 19, 129, -1, Form::CrLogic, 0, 0, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_CRXOR, 0, 19, 193, -1, Form::CrLogic, 0, 0, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_CRNAND, 0, 19, 255, -1, Form::CrLogic, 0, 0, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_CRAND, 0, 19, 257, -1, Form::CrLogic, 0, 0, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_CREQV, 0, 19, 289, -1, Form::CrLogic, 0, 0, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_CRORC, 0, 19, 417, -1, Form::CrLogic, 0, 0, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_CROR, 0, 19, 449, -1, Form::CrLogic, 0, 0, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BCTR, 0, 19, 528, -1, Form::Bare, kBo | kLk, kAlways, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_BCTRL, 0, 19, 528, -1, Form::Bare, kBo | kLk, kAlways | kLk, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_RLWIMI, 0, 20, -1, -1, Form::Rotate, kRc, 0, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_RLWIMI_, 0, 20, -1, -1, Form::Rotate, kRc, kRc, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_RLWINM, 0, 21, -1, -1, Form::Rotate, kRc, 0, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_RLWINM_, 0, 21, -1, -1, Form::Rotate, kRc, kRc, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_ROTLWI, 2, 21, -1, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(16), Gpr(21), UImm(11, 5) }, { FieldIs(6, 0), FieldIs(1, 31) } },
+	{ PPCASM_OP_ROTLWI_, 2, 21, -1, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(16), Gpr(21), UImm(11, 5) }, { FieldIs(6, 0), FieldIs(1, 31) } },
+	{ PPCASM_OP_ROTRWI, 0, 21, -1, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(16), Gpr(21), FromBase(11, 32) }, { FieldIs(6, 0), FieldIs(1, 31) } },
+	{ PPCASM_OP_ROTRWI_, 0, 21, -1, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(16), Gpr(21), FromBase(11, 32) }, { FieldIs(6, 0), FieldIs(1, 31) } },
+	{ PPCASM_OP_EXTLWI, 1, 21, -1, -1, Form::RotateAlias, kRc, 0, Rule::ExtLwi, {  }, {  } },
+	{ PPCASM_OP_EXTLWI_, 1, 21, -1, -1, Form::RotateAlias, kRc, kRc, Rule::ExtLwi, {  }, {  } },
+	{ PPCASM_OP_EXTRWI, 1, 21, -1, -1, Form::RotateAlias, kRc, 0, Rule::ExtRwi, {  }, {  } },
+	{ PPCASM_OP_EXTRWI_, 1, 21, -1, -1, Form::RotateAlias, kRc, kRc, Rule::ExtRwi, {  }, {  } },
+	{ PPCASM_OP_SLWI, 2, 21, -1, -1, Form::RotateAlias, kRc, 0, Rule::SlWi, {  }, {  } },
+	{ PPCASM_OP_SLWI_, 2, 21, -1, -1, Form::RotateAlias, kRc, kRc, Rule::SlWi, {  }, {  } },
+	{ PPCASM_OP_SRWI, 2, 21, -1, -1, Form::RotateAlias, kRc, 0, Rule::SrWi, {  }, {  } },
+	{ PPCASM_OP_SRWI_, 2, 21, -1, -1, Form::RotateAlias, kRc, kRc, Rule::SrWi, {  }, {  } },
+	{ PPCASM_OP_CLRLWI, 2, 21, -1, -1, Form::RotateAlias, kRc, 0, Rule::ClrLWi, {  }, {  } },
+	{ PPCASM_OP_CLRLWI_, 2, 21, -1, -1, Form::RotateAlias, kRc, kRc, Rule::ClrLWi, {  }, {  } },
+	{ PPCASM_OP_CLRRWI, 2, 21, -1, -1, Form::RotateAlias, kRc, 0, Rule::ClrRWi, {  }, {  } },
+	{ PPCASM_OP_CLRRWI_, 2, 21, -1, -1, Form::RotateAlias, kRc, kRc, Rule::ClrRWi, {  }, {  } },
+	{ PPCASM_OP_RLWNM, 0, 23, -1, -1, Form::RotateReg, kRc, 0, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_RLWNM_, 0, 23, -1, -1, Form::RotateReg, kRc, kRc, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_ROTLW, 0, 23, -1, -1, Form::RotateRegAlias, kRc, 0, Rule::FullMask, {  }, {  } },
+	{ PPCASM_OP_ROTLW_, 0, 23, -1, -1, Form::RotateRegAlias, kRc, kRc, Rule::FullMask, {  }, {  } },
+	{ PPCASM_OP_ORI, 0, 24, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(16), Gpr(21), UImm(0, 16) }, {  } },
+	{ PPCASM_OP_NOP, 1, 24, -1, -1, Form::Bare, 0x3FFFFFF, 0, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_ORIS, 0, 25, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(16), Gpr(21), SImmOrU(0, 16) }, {  } },
+	{ PPCASM_OP_XORI, 0, 26, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(16), Gpr(21), UImm(0, 16) }, {  } },
+	{ PPCASM_OP_XORIS, 0, 27, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(16), Gpr(21), SImmOrU(0, 16) }, {  } },
+	{ PPCASM_OP_ANDI_, 0, 28, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(16), Gpr(21), UImm(0, 16) }, {  } },
+	{ PPCASM_OP_ANDIS_, 0, 29, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(16), Gpr(21), SImmOrU(0, 16) }, {  } },
+	{ PPCASM_OP_CMPW, 0, 31, 0, -1, Form::CompareReg, 0, 0, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_SUBFC, 1, 31, 8, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(21), Gpr(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_SUBFC_, 1, 31, 8, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(21), Gpr(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_MULHWU, 0, 31, 11, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(21), Gpr(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_MULHWU_, 0, 31, 11, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(21), Gpr(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_CMPLW, 0, 31, 32, -1, Form::CompareReg, 0, 0, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_SUBF, 1, 31, 40, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(21), Gpr(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_SUBF_, 1, 31, 40, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(21), Gpr(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_SUB, 0, 31, 40, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(21), Gpr(11), Gpr(16) }, {  } },
+	{ PPCASM_OP_SUB_, 0, 31, 40, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(21), Gpr(11), Gpr(16) }, {  } },
+	{ PPCASM_OP_MULHW, 0, 31, 75, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(21), Gpr(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_MULHW_, 0, 31, 75, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(21), Gpr(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_NEG, 0, 31, 104, -1, Form::Generic, kRc | kOe, 0, Rule::Any, { Gpr(21), Gpr(16) }, {  } },
+	{ PPCASM_OP_NEG_, 0, 31, 104, -1, Form::Generic, kRc | kOe, kRc, Rule::Any, { Gpr(21), Gpr(16) }, {  } },
+	{ PPCASM_OP_NOR, 0, 31, 124, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(16), Gpr(21), Gpr(11) }, {  } },
+	{ PPCASM_OP_NOR_, 0, 31, 124, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(16), Gpr(21), Gpr(11) }, {  } },
+	{ PPCASM_OP_NOT, 1, 31, 124, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(16), Gpr(11) }, { SameField(11, 21) } },
+	{ PPCASM_OP_NOT_, 1, 31, 124, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(16), Gpr(11) }, { SameField(11, 21) } },
+	{ PPCASM_OP_SUBFE, 1, 31, 136, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(21), Gpr(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_SUBFE_, 1, 31, 136, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(21), Gpr(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_MULLW, 0, 31, 235, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(21), Gpr(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_MULLW_, 0, 31, 235, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(21), Gpr(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_MFSPR, 0, 31, 339, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), SprNum() }, {  } },
+	{ PPCASM_OP_MTSPR, 0, 31, 467, -1, Form::Generic, 0, 0, Rule::Any, { SprNum(), Gpr(21) }, {  } },
+	{ PPCASM_OP_MFLR, 0, 31, 339, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21) }, { SprIs(8) } },
+	{ PPCASM_OP_MTLR, 0, 31, 467, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21) }, { SprIs(8) } },
+	{ PPCASM_OP_MFCTR, 0, 31, 339, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21) }, { SprIs(9) } },
+	{ PPCASM_OP_MTCTR, 0, 31, 467, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21) }, { SprIs(9) } },
+	{ PPCASM_OP_MFCR, 0, 31, 19, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21) }, {  } },
+	{ PPCASM_OP_MTCRF, 0, 31, 144, -1, Form::Generic, 0, 0, Rule::Any, { UImm(12, 8), Gpr(21) }, {  } },
+	{ PPCASM_OP_MCRF, 0, 19, 0, -1, Form::Generic, 0, 0, Rule::Any, { CrField(21), CrField(16) }, {  } },
+	{ PPCASM_OP_ADD, 0, 31, 266, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(21), Gpr(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_ADD_, 0, 31, 266, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(21), Gpr(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_SLW, 0, 31, 24, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(16), Gpr(21), Gpr(11) }, {  } },
+	{ PPCASM_OP_SLW_, 0, 31, 24, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(16), Gpr(21), Gpr(11) }, {  } },
+	{ PPCASM_OP_SRW, 0, 31, 536, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(16), Gpr(21), Gpr(11) }, {  } },
+	{ PPCASM_OP_SRW_, 0, 31, 536, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(16), Gpr(21), Gpr(11) }, {  } },
+	{ PPCASM_OP_SRAW, 0, 31, 792, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(16), Gpr(21), Gpr(11) }, {  } },
+	{ PPCASM_OP_SRAW_, 0, 31, 792, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(16), Gpr(21), Gpr(11) }, {  } },
+	{ PPCASM_OP_AND, 0, 31, 28, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(16), Gpr(21), Gpr(11) }, {  } },
+	{ PPCASM_OP_AND_, 0, 31, 28, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(16), Gpr(21), Gpr(11) }, {  } },
+	{ PPCASM_OP_ANDC, 0, 31, 60, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(16), Gpr(21), Gpr(11) }, {  } },
+	{ PPCASM_OP_ANDC_, 0, 31, 60, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(16), Gpr(21), Gpr(11) }, {  } },
+	{ PPCASM_OP_XOR, 0, 31, 316, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(16), Gpr(21), Gpr(11) }, {  } },
+	{ PPCASM_OP_ORC, 0, 31, 412, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(16), Gpr(21), Gpr(11) }, {  } },
+	{ PPCASM_OP_OR, 0, 31, 444, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(16), Gpr(21), Gpr(11) }, {  } },
+	{ PPCASM_OP_OR_, 0, 31, 444, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(16), Gpr(21), Gpr(11) }, {  } },
+	{ PPCASM_OP_MR, 1, 31, 444, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(16), Gpr(11) }, { SameField(11, 21) } },
+	{ PPCASM_OP_MR_, 1, 31, 444, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(16), Gpr(11) }, { SameField(11, 21) } },
+	{ PPCASM_OP_DIVWU, 0, 31, 459, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(21), Gpr(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_DIVWU_, 0, 31, 459, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(21), Gpr(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_DIVW, 0, 31, 491, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(21), Gpr(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_DIVW_, 0, 31, 491, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(21), Gpr(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_SRAWI, 0, 31, 824, -1, Form::ShiftImm, kRc, 0, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_SRAWI_, 0, 31, 824, -1, Form::ShiftImm, kRc, kRc, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_CNTLZW, 0, 31, 26, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(16), Gpr(21) }, {  } },
+	{ PPCASM_OP_EXTSB, 0, 31, 954, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(16), Gpr(21) }, {  } },
+	{ PPCASM_OP_EXTSH, 0, 31, 922, -1, Form::Generic, kRc, 0, Rule::Any, { Gpr(16), Gpr(21) }, {  } },
+	{ PPCASM_OP_CNTLZW_, 0, 31, 26, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(16), Gpr(21) }, {  } },
+	{ PPCASM_OP_EXTSB_, 0, 31, 954, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(16), Gpr(21) }, {  } },
+	{ PPCASM_OP_EXTSH_, 0, 31, 922, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(16), Gpr(21) }, {  } },
+	{ PPCASM_OP_LWZX, 0, 31, 23, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_LWZUX, 0, 31, 55, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_LBZX, 0, 31, 87, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_LBZUX, 0, 31, 119, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_LHZX, 0, 31, 279, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_LHZUX, 0, 31, 311, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_LHAX, 0, 31, 343, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_LHAUX, 0, 31, 375, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_STWX, 0, 31, 151, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_STWUX, 0, 31, 183, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_STHX, 0, 31, 407, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_STHUX, 0, 31, 439, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_STBX, 0, 31, 215, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_STBUX, 0, 31, 247, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_LWBRX, 0, 31, 534, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_LHBRX, 0, 31, 790, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_STWBRX, 0, 31, 662, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_STHBRX, 0, 31, 918, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_LFSX, 0, 31, 535, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_LFSUX, 0, 31, 567, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_STFSX, 0, 31, 663, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_STFSUX, 0, 31, 695, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_STSWI, 0, 31, 725, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Gpr(16), UImm(11, 5) }, {  } },
+	{ PPCASM_OP_LWARX, 0, 31, 20, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_STWCX_, 0, 31, 150, -1, Form::Generic, kRc, kRc, Rule::Any, { Gpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_LFDX, 0, 31, 599, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_LFDUX, 0, 31, 631, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_STFDX, 0, 31, 727, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_STFDUX, 0, 31, 759, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_STFIWX, 0, 31, 983, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), GprOr0(16), Gpr(11) }, {  } },
+	{ PPCASM_OP_LWZ, 0, 32, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Mem() }, {  } },
+	{ PPCASM_OP_LWZU, 0, 33, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Mem() }, {  } },
+	{ PPCASM_OP_LBZ, 0, 34, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Mem() }, {  } },
+	{ PPCASM_OP_LBZU, 0, 35, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Mem() }, {  } },
+	{ PPCASM_OP_STW, 0, 36, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Mem() }, {  } },
+	{ PPCASM_OP_STWU, 0, 37, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Mem() }, {  } },
+	{ PPCASM_OP_STB, 0, 38, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Mem() }, {  } },
+	{ PPCASM_OP_STBU, 0, 39, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Mem() }, {  } },
+	{ PPCASM_OP_LHZ, 0, 40, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Mem() }, {  } },
+	{ PPCASM_OP_LHZU, 0, 41, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Mem() }, {  } },
+	{ PPCASM_OP_LHA, 0, 42, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Mem() }, {  } },
+	{ PPCASM_OP_LHAU, 0, 43, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Mem() }, {  } },
+	{ PPCASM_OP_STH, 0, 44, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Mem() }, {  } },
+	{ PPCASM_OP_STHU, 0, 45, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Mem() }, {  } },
+	{ PPCASM_OP_LMW, 0, 46, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Mem() }, {  } },
+	{ PPCASM_OP_STMW, 0, 47, -1, -1, Form::Generic, 0, 0, Rule::Any, { Gpr(21), Mem() }, {  } },
+	{ PPCASM_OP_LFS, 0, 48, -1, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Mem() }, {  } },
+	{ PPCASM_OP_LFSU, 0, 49, -1, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Mem() }, {  } },
+	{ PPCASM_OP_LFD, 0, 50, -1, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Mem() }, {  } },
+	{ PPCASM_OP_LFDU, 0, 51, -1, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Mem() }, {  } },
+	{ PPCASM_OP_STFS, 0, 52, -1, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Mem() }, {  } },
+	{ PPCASM_OP_STFSU, 0, 53, -1, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Mem() }, {  } },
+	{ PPCASM_OP_STFD, 0, 54, -1, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Mem() }, {  } },
+	{ PPCASM_OP_STFDU, 0, 55, -1, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Mem() }, {  } },
+	{ PPCASM_OP_FDIVS, 0, 59, 18, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(11) }, {  } },
+	{ PPCASM_OP_FSUBS, 0, 59, 20, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(11) }, {  } },
+	{ PPCASM_OP_FADDS, 0, 59, 21, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(11) }, {  } },
+	{ PPCASM_OP_FMULS, 0, 59, 25, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(6) }, {  } },
+	{ PPCASM_OP_FMSUBS, 0, 59, 28, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(6), Fpr(11) }, {  } },
+	{ PPCASM_OP_FMADDS, 0, 59, 29, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(6), Fpr(11) }, {  } },
+	{ PPCASM_OP_FNMSUBS, 0, 59, 30, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(6), Fpr(11) }, {  } },
+	{ PPCASM_OP_FNMADDS, 0, 59, 31, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(6), Fpr(11) }, {  } },
+	{ PPCASM_OP_FCMPU, 0, 63, 0, -1, Form::CompareFp, 0, 0, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_FCTIWZ, 0, 63, 15, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(11) }, {  } },
+	{ PPCASM_OP_FDIV, 0, 63, 18, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(11) }, {  } },
+	{ PPCASM_OP_FSUB, 0, 63, 20, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(11) }, {  } },
+	{ PPCASM_OP_FADD, 0, 63, 21, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(11) }, {  } },
+	{ PPCASM_OP_FMUL, 0, 63, 25, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(6) }, {  } },
+	{ PPCASM_OP_FRSQRTE, 0, 63, 26, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(11) }, {  } },
+	{ PPCASM_OP_FMSUB, 0, 63, 28, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(6), Fpr(11) }, {  } },
+	{ PPCASM_OP_FMADD, 0, 63, 29, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(6), Fpr(11) }, {  } },
+	{ PPCASM_OP_FNMSUB, 0, 63, 30, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(6), Fpr(11) }, {  } },
+	{ PPCASM_OP_FNMADD, 0, 63, 31, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(16), Fpr(6), Fpr(11) }, {  } },
+	{ PPCASM_OP_FRSP, 0, 63, 12, -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(11) }, {  } },
+	{ PPCASM_OP_FCMPO, 0, 63, X10(32), -1, Form::CompareFp, 0, 0, Rule::Any, {  }, {  } },
+	{ PPCASM_OP_FNEG, 0, 63, X10(40), -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(11) }, {  } },
+	{ PPCASM_OP_FMR, 0, 63, X10(72), -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(11) }, {  } },
+	{ PPCASM_OP_FABS, 0, 63, X10(264), -1, Form::Generic, 0, 0, Rule::Any, { Fpr(21), Fpr(11) }, {  } },
+	};
+
+	constexpr size_t kInstrCount = sizeof(kInstrTable) / sizeof(kInstrTable[0]);
+
+	// opcode bits (primary + extended opcodes) a row requires
+	void PrimaryMatchBits(const InstrDef& d, uint32& mask, uint32& bits)
+	{
+		mask = 0x3Fu << 26;
+		bits = (uint32)d.primary << 26;
+		auto addXo = [&](uint32 width, uint32 lsb, uint32 value)
 		{
-			if (!std::visit([&](auto&& op) -> bool {
-				return op.DisassembleCheckConstraint(disInstr, iDef, opcode);
-				}, it))
+			mask |= ((1u << width) - 1) << lsb;
+			bits |= value << lsb;
+		};
+		switch (d.primary)
+		{
+		case 19:
+		case 31:
+			addXo(10, 1, (uint32)d.xo);
+			break;
+		case 4:
+			addXo(5, 1, (uint32)d.xo);
+			if (d.xo == 16)
+				addXo(5, 6, (uint32)d.xo2);
+			break;
+		case 59:
+			addXo(5, 1, (uint32)d.xo);
+			break;
+		case 63:
+			if (d.xo & 0x10000)
+				addXo(10, 1, (uint32)(d.xo & 0xFFFF));
+			else
+				addXo(5, 1, (uint32)d.xo);
+			break;
+		default:
+			break;
+		}
+	}
+
+	struct MatchBits
+	{
+		uint32 mask;
+		uint32 bits;
+	};
+
+	const std::array<MatchBits, kInstrCount>& GetMatchBits()
+	{
+		static const std::array<MatchBits, kInstrCount> s_bits = []()
+		{
+			std::array<MatchBits, kInstrCount> r{};
+			for (size_t i = 0; i < kInstrCount; i++)
+				PrimaryMatchBits(kInstrTable[i], r[i].mask, r[i].bits);
+			return r;
+		}();
+		return s_bits;
+	}
+
+	/* ---------------------------------------------------------------- */
+	/* disassembler                                                     */
+	/* ---------------------------------------------------------------- */
+
+	void ShowOperand(PPCDisassembledInstruction* out, size_t index, uint8 type)
+	{
+		out->operandMask |= (uint8)(1u << index);
+		out->operand[index].type = type;
+	}
+
+	void ShowRegister(PPCDisassembledInstruction* out, size_t index, uint8 type, uint32 reg)
+	{
+		ShowOperand(out, index, type);
+		out->operand[index].registerIndex = (uint16)reg;
+	}
+
+	void ShowImmediate(PPCDisassembledInstruction* out, size_t index, sint32 value, uint8 width, bool isSigned)
+	{
+		ShowOperand(out, index, PPCASM_OPERAND_TYPE_IMM);
+		out->operand[index].immS32 = value;
+		out->operand[index].immWidth = width;
+		out->operand[index].isSignedImm = isSigned;
+	}
+
+	// sets operand fields without touching operandMask (callers set the mask as a whole)
+	void SetRegister(PPCDisassembledInstruction* out, size_t index, uint8 type, uint32 reg)
+	{
+		out->operand[index].type = type;
+		out->operand[index].registerIndex = (uint16)reg;
+	}
+
+	void SetImmediate(PPCDisassembledInstruction* out, size_t index, sint32 value, uint8 width)
+	{
+		out->operand[index].type = PPCASM_OPERAND_TYPE_IMM;
+		out->operand[index].immS32 = value;
+		out->operand[index].immWidth = width;
+	}
+
+	void SetTarget(PPCDisassembledInstruction* out, size_t index, uint32 address)
+	{
+		out->operand[index].type = PPCASM_OPERAND_TYPE_CIMM;
+		out->operand[index].immU32 = address;
+	}
+
+	bool TieHolds(const TieDef& t, uint32 word)
+	{
+		switch (t.kind)
+		{
+		case Tie::None: return true;
+		case Tie::SameField: return Field5(word, t.a) == Field5(word, (uint32)t.b);
+		case Tie::FieldIs: return Field5(word, t.a) == (uint32)t.b;
+		case Tie::SprIs: return (uint16)(Field5(word, 16) | (Field5(word, 11) << 5)) == t.b;
+		case Tie::SignIs: return ((word >> t.a) & 1) == (uint32)t.b;
+		}
+		return false;
+	}
+
+	void DecodeSlot(PPCDisassembledInstruction* out, const SlotDef& s, uint32 word, size_t index)
+	{
+		switch (s.kind)
+		{
+		case Slot::Unused:
+			break;
+		case Slot::Gpr:
+		case Slot::GprOrZero:
+			ShowRegister(out, index, PPCASM_OPERAND_TYPE_GPR, Field5(word, s.lsb));
+			break;
+		case Slot::Fpr:
+			ShowRegister(out, index, PPCASM_OPERAND_TYPE_FPR, Field5(word, s.lsb));
+			break;
+		case Slot::CrField:
+			ShowRegister(out, index, PPCASM_OPERAND_TYPE_CR, Field5(word, s.lsb) >> 2);
+			break;
+		case Slot::Spr:
+			ShowRegister(out, index, PPCASM_OPERAND_TYPE_SPR, Field5(word, 16) | (Field5(word, 11) << 5));
+			break;
+		case Slot::Imm:
+		{
+			uint32 v = (word >> s.lsb) & ((1u << s.width) - 1);
+			if (s.isSigned)
+				v = SignExtendBits(v, s.width);
+			ShowImmediate(out, index, (sint32)v, s.width, s.isSigned);
+			break;
+		}
+		case Slot::FromBase:
+			ShowImmediate(out, index, (sint32)((uint32)s.width - Field5(word, s.lsb)), 5, false);
+			break;
+		case Slot::Mem:
+			ShowRegister(out, index, PPCASM_OPERAND_TYPE_MEM, Field5(word, 16));
+			out->operand[index].immS32 = (sint32)SignExtend16(word);
+			out->operand[index].immWidth = 16;
+			out->operand[index].isSignedImm = true;
+			break;
+		}
+	}
+
+	void DecodeFixedLayout(const InstrDef& d, uint32 address, uint32 word, PPCDisassembledInstruction* out)
+	{
+		const RotateFields rf(word);
+		switch (d.form)
+		{
+		case Form::Generic:
+			break;
+		case Form::CompareReg:
+		{
+			const uint32 crBits = Field5(word, 21);
+			out->operandMask = crBits != 0 ? 1 : 0;
+			SetRegister(out, 0, PPCASM_OPERAND_TYPE_CR, crBits >> 2);
+			if ((crBits & 3) != 0)
+				cemuLog_log(LogType::Force, "[PPC-Disassembler] Unexpected CR encoding for instruction 0x{0:08x}", word);
+			ShowRegister(out, 1, PPCASM_OPERAND_TYPE_GPR, Field5(word, 16));
+			ShowRegister(out, 2, PPCASM_OPERAND_TYPE_GPR, Field5(word, 11));
+			break;
+		}
+		case Form::ShiftImm:
+			out->operandMask = 0x7;
+			SetRegister(out, 0, PPCASM_OPERAND_TYPE_GPR, Field5(word, 16));
+			SetRegister(out, 1, PPCASM_OPERAND_TYPE_GPR, Field5(word, 21));
+			SetImmediate(out, 2, (sint32)Field5(word, 11), 5);
+			out->operand[2].isSignedImm = false;
+			break;
+		case Form::CondBranch:
+		{
+			const uint32 bo = Field5(word, 21);
+			const uint32 bi = Field5(word, 16);
+			uint32 target = SignExtend16(word & 0xFFFC);
+			if ((word & kAa) == 0)
+				target += address;
+			if (d.op == PPCASM_OP_BC)
 			{
-				allConstraintsMatch = false;
+				out->operandMask = 0x7;
+				out->operand[0].type = PPCASM_OPERAND_TYPE_CIMM;
+				out->operand[0].registerIndex = (uint16)bo;
+				SetRegister(out, 1, PPCASM_OPERAND_TYPE_CR_BIT, bi);
+				SetTarget(out, 2, target);
+			}
+			else if ((bi >> 2) != 0)
+			{
+				out->operandMask = 0x3;
+				SetRegister(out, 0, PPCASM_OPERAND_TYPE_CR, bi >> 2);
+				SetTarget(out, 1, target);
+			}
+			else
+			{
+				out->operandMask = 0x1;
+				SetTarget(out, 0, target);
+			}
+			out->branchHintBitSet = (bo & 1) != 0;
+			break;
+		}
+		case Form::Branch:
+		{
+			uint32 target = SignExtendBits(word, 26) & ~3u;
+			if ((word & kAa) == 0)
+				target += address;
+			out->operandMask = 0x1;
+			SetTarget(out, 0, target);
+			break;
+		}
+		case Form::CondReturn:
+		{
+			const uint32 crIndex = Field5(word, 16) / 4;
+			if (crIndex != 0)
+				ShowRegister(out, 0, PPCASM_OPERAND_TYPE_CR, crIndex);
+			break;
+		}
+		case Form::CompareImm:
+		{
+			const uint32 cr = Field5(word, 21) / 4;
+			out->operandMask = cr != 0 ? 0x7 : 0x6;
+			SetRegister(out, 0, PPCASM_OPERAND_TYPE_CR, cr);
+			SetRegister(out, 1, PPCASM_OPERAND_TYPE_GPR, Field5(word, 16));
+			SetImmediate(out, 2, (sint32)SignExtend16(word), 16);
+			out->operand[2].isSignedImm = true;
+			break;
+		}
+		case Form::Bare:
+			out->operandMask = 0;
+			break;
+		case Form::CompareFp:
+		{
+			const uint32 crBits = Field5(word, 21);
+			cemu_assert_debug((crBits % 4) == 0);
+			out->operandMask = 0x7;
+			SetRegister(out, 0, PPCASM_OPERAND_TYPE_CR, crBits / 4);
+			SetRegister(out, 1, PPCASM_OPERAND_TYPE_FPR, Field5(word, 16));
+			SetRegister(out, 2, PPCASM_OPERAND_TYPE_FPR, Field5(word, 11));
+			break;
+		}
+		case Form::Rotate:
+			out->operandMask = 0x1F;
+			SetRegister(out, 0, PPCASM_OPERAND_TYPE_GPR, (uint32)rf.rA);
+			SetRegister(out, 1, PPCASM_OPERAND_TYPE_GPR, (uint32)rf.rS);
+			SetImmediate(out, 2, rf.sh, 8);
+			SetImmediate(out, 3, rf.mb, 8);
+			SetImmediate(out, 4, rf.me, 8);
+			break;
+		case Form::RotateAlias:
+		{
+			SetRegister(out, 0, PPCASM_OPERAND_TYPE_GPR, (uint32)rf.rA);
+			SetRegister(out, 1, PPCASM_OPERAND_TYPE_GPR, (uint32)rf.rS);
+			switch (d.op)
+			{
+			case PPCASM_OP_EXTLWI:
+			case PPCASM_OP_EXTLWI_:
+				out->operandMask = 0xF;
+				SetImmediate(out, 2, rf.me + 1, 8);
+				SetImmediate(out, 3, rf.sh, 8);
+				break;
+			case PPCASM_OP_EXTRWI:
+			case PPCASM_OP_EXTRWI_:
+			{
+				const sint8 n = (sint8)(32 - rf.mb);
+				const sint8 b = (sint8)(rf.sh - n);
+				out->operandMask = 0xF;
+				SetImmediate(out, 2, n, 8);
+				SetImmediate(out, 3, b, 8);
 				break;
 			}
-		}
-		if (!allConstraintsMatch)
-			continue;
-		// select entry
-		bestMatchIndex = i;
-		bestMatchPriority = iDef->priority;
-	}
-	// if we have found an entry, parse operand data
-	if (bestMatchIndex >= 0)
-	{
-		PPCInstructionDef* iDef = ppcInstructionTable + bestMatchIndex;
-		// setup general instruction info
-		disInstr->ppcAsmCode = iDef->ppcAsmOp;
-		// parse operands
-		if (iDef->instructionForm == OP_FORM_DYNAMIC)
-		{
-			disInstr->operandMask = 0;
-			for (size_t i = 0; i < iDef->encodedOperands.size(); i++)
-			{
-				std::visit([&](auto&& op) {
-					op.DisassembleOperand(disInstr, iDef, opcode, i);
-					}, iDef->encodedOperands[i]);
-			}
-		}
-		else if (iDef->instructionForm == OP_FORM_OP3_A_CMP)
-		{
-			sint32 rS, rA, rB;
-			PPC_OPC_TEMPL_X(opcode, rS, rA, rB);
-			disInstr->operandMask = (rS!=0?operand0Bit:0);
-			disInstr->operand[0].type = PPCASM_OPERAND_TYPE_CR;
-			disInstr->operand[0].registerIndex = rS >> 2;
-			if((rS & 3) != 0)
-				cemuLog_log(LogType::Force, "[PPC-Disassembler] Unexpected CR encoding for instruction 0x{0:08x}", opcode);
-			_disasmOpGPR(disInstr, iDef, 1, rA);
-			_disasmOpGPR(disInstr, iDef, 2, rB);
-		}
-		else if (iDef->instructionForm == OP_FORM_OP3_A_IMM)
-		{
-			sint32 rS, rA, SH;
-			PPC_OPC_TEMPL_X(opcode, rS, rA, SH);
-			disInstr->operandMask = operand0Bit | operand1Bit | operand2Bit;
-			sint32 op0Idx = _getOpIndex(iDef, 0);
-			sint32 op1Idx = _getOpIndex(iDef, 1);
-			sint32 op2Idx = _getOpIndex(iDef, 2);
-			// operand 0
-			disInstr->operand[op0Idx].type = PPCASM_OPERAND_TYPE_GPR;
-			disInstr->operand[op0Idx].registerIndex = rA;
-			// operand 1
-			disInstr->operand[op1Idx].type = PPCASM_OPERAND_TYPE_GPR;
-			disInstr->operand[op1Idx].registerIndex = rS;
-			// operand 2
-			disInstr->operand[op2Idx].type = PPCASM_OPERAND_TYPE_IMM;
-			disInstr->operand[op2Idx].immS32 = SH;
-			disInstr->operand[op2Idx].immWidth = 5;
-			disInstr->operand[op2Idx].isSignedImm = false;
-		}
-		else if (iDef->instructionForm == OP_FORM_BRANCH_S16)
-		{
-			uint32 BO, BI, dest;
-			PPC_OPC_TEMPL_B(opcode, BO, BI, dest);
-			uint8 crIndex = BI >> 2;
-			if ((opcode & PPC_OPC_AA) == 0)
-				dest += virtualAddress;
-			if (iDef->ppcAsmOp == PPCASM_OP_BC)
-			{
-				// generic conditional branch of form <BO>, CR+LT/GT/EQ/SO, <dst>
-				disInstr->operandMask = operand0Bit | operand1Bit | operand2Bit;
-				// operand 0
-				disInstr->operand[0].type = PPCASM_OPERAND_TYPE_CIMM;
-				disInstr->operand[0].registerIndex = BO;
-				// operand 1
-				disInstr->operand[1].type = PPCASM_OPERAND_TYPE_CR_BIT;
-				disInstr->operand[1].registerIndex = BI;
-				// operand 2
-				disInstr->operand[2].type = PPCASM_OPERAND_TYPE_CIMM;
-				disInstr->operand[2].immU32 = dest;
-				// hint bit
-				disInstr->branchHintBitSet = (BO & 1) != 0;
-			}
-			else
-			{
-				if (crIndex != 0)
-				{
-					disInstr->operandMask = operand0Bit | operand1Bit;
-					// operand 0
-					disInstr->operand[0].type = PPCASM_OPERAND_TYPE_CR;
-					disInstr->operand[0].registerIndex = crIndex;
-					// operand 1
-					disInstr->operand[1].type = PPCASM_OPERAND_TYPE_CIMM;
-					disInstr->operand[1].immU32 = dest;
-				}
-				else
-				{
-					disInstr->operandMask = operand0Bit;
-					disInstr->operand[0].type = PPCASM_OPERAND_TYPE_CIMM;
-					disInstr->operand[0].immU32 = dest;
-				}
-				// hint bit
-				disInstr->branchHintBitSet = (BO & 1) != 0;
-			}
-		}
-		else if (iDef->instructionForm == OP_FORM_BRANCH_S24)
-		{
-			uint32 dest;
-			PPC_OPC_TEMPL_I(opcode, dest);
-			if ((opcode & PPC_OPC_AA) == 0)
-				dest += virtualAddress;
-			disInstr->operandMask = operand0Bit;
-			// operand 0
-			disInstr->operand[0].type = PPCASM_OPERAND_TYPE_CIMM;
-			disInstr->operand[0].immU32 = dest;
-		}
-		else if (iDef->instructionForm == OP_FORM_BRANCH_BCCLR)
-		{
-			uint32 BO, BI, BD;
-			PPC_OPC_TEMPL_XL(opcode, BO, BI, BD);
-			uint32 crIndex = BI/4;
-			if (crIndex != 0) // cr0 is implicit
-			{
-				disInstr->operandMask |= operand0Bit;
-				disInstr->operand[0].type = PPCASM_OPERAND_TYPE_CR;
-				disInstr->operand[0].registerIndex = crIndex;
-			}
-		}
-		else if (iDef->instructionForm == OP_FORM_OP2_D_HSIMM)
-		{
-			sint32 rD, rA;
-			uint32 imm;
-			PPC_OPC_TEMPL_D_SImm(opcode, rD, rA, imm);
-			disInstr->operandMask = operand0Bit | operand1Bit;
-			// operand 0
-			disInstr->operand[0].type = PPCASM_OPERAND_TYPE_GPR;
-			disInstr->operand[0].registerIndex = rD;
-			// operand 1
-			disInstr->operand[1].type = PPCASM_OPERAND_TYPE_IMM;
-			disInstr->operand[1].immS32 = imm & 0xFFFF;
-			disInstr->operand[1].immWidth = 16;
-			disInstr->operand[1].isSignedImm = true;
-		}
-		else if (iDef->instructionForm == OP_FORM_CMP_SIMM)
-		{
-			uint32 cr;
-			sint32 rA;
-			uint32 imm;
-			PPC_OPC_TEMPL_D_SImm(opcode, cr, rA, imm);
-			cr /= 4;
-			// rS is cr
-			disInstr->operandMask = operand1Bit | operand2Bit;
-			if (cr != 0)
-				disInstr->operandMask |= operand0Bit;
-			// operand 0
-			disInstr->operand[0].type = PPCASM_OPERAND_TYPE_CR;
-			disInstr->operand[0].registerIndex = cr;
-			// operand 1
-			disInstr->operand[1].type = PPCASM_OPERAND_TYPE_GPR;
-			disInstr->operand[1].registerIndex = rA;
-			// operand 2
-			disInstr->operand[2].type = PPCASM_OPERAND_TYPE_IMM;
-			disInstr->operand[2].immS32 = imm;
-			disInstr->operand[2].immWidth = 16;
-			disInstr->operand[2].isSignedImm = true;
-		}
-		else if (iDef->instructionForm == OP_FORM_NO_OPERAND)
-		{
-			disInstr->operandMask = 0;
-		}
-		else if (iDef->instructionForm == OP_FORM_X_FP_CMP)
-		{
-			sint32 rA, crIndex, rB;
-			PPC_OPC_TEMPL_X(opcode, crIndex, rA, rB);
-			cemu_assert_debug((crIndex % 4) == 0);
-			crIndex /= 4;
-			disInstr->operandMask = operand0Bit | operand1Bit | operand2Bit;
-			// operand 0
-			disInstr->operand[0].type = PPCASM_OPERAND_TYPE_CR;
-			disInstr->operand[0].registerIndex = crIndex;
-			// operand 1
-			disInstr->operand[1].type = PPCASM_OPERAND_TYPE_FPR;
-			disInstr->operand[1].registerIndex = rA;
-			// operand 2
-			disInstr->operand[2].type = PPCASM_OPERAND_TYPE_FPR;
-			disInstr->operand[2].registerIndex = rB;
-		}
-		else if (iDef->instructionForm == OP_FORM_RLWINM)
-		{
-			sint32 rS, rA, SH, MB, ME;
-			PPC_OPC_TEMPL_M(opcode, rS, rA, SH, MB, ME);
-			disInstr->operandMask = operand0Bit | operand1Bit | operand2Bit | operand3Bit | operand4Bit;
-			// operand 0
-			disInstr->operand[0].type = PPCASM_OPERAND_TYPE_GPR;
-			disInstr->operand[0].registerIndex = rA;
-			// operand 1
-			disInstr->operand[1].type = PPCASM_OPERAND_TYPE_GPR;
-			disInstr->operand[1].registerIndex = rS;
-			// operand 2
-			disInstr->operand[2].type = PPCASM_OPERAND_TYPE_IMM;
-			disInstr->operand[2].immS32 = SH;
-			disInstr->operand[2].immWidth = 8;
-			// operand 3
-			disInstr->operand[3].type = PPCASM_OPERAND_TYPE_IMM;
-			disInstr->operand[3].immS32 = MB;
-			disInstr->operand[3].immWidth = 8;
-			// operand 4
-			disInstr->operand[4].type = PPCASM_OPERAND_TYPE_IMM;
-			disInstr->operand[4].immS32 = ME;
-			disInstr->operand[4].immWidth = 8;
-		}
-		else if (iDef->instructionForm == OP_FORM_RLWINM_EXTENDED)
-		{
-			sint32 rS, rA, SH, MB, ME;
-			PPC_OPC_TEMPL_M(opcode, rS, rA, SH, MB, ME);
-
-			// operand 0
-			disInstr->operand[0].type = PPCASM_OPERAND_TYPE_GPR;
-			disInstr->operand[0].registerIndex = rA;
-			// operand 1
-			disInstr->operand[1].type = PPCASM_OPERAND_TYPE_GPR;
-			disInstr->operand[1].registerIndex = rS;
-
-			if (iDef->ppcAsmOp == PPCASM_OP_EXTLWI || iDef->ppcAsmOp == PPCASM_OP_EXTLWI_)
-			{
-				disInstr->operandMask = operand0Bit | operand1Bit | operand2Bit | operand3Bit;
-				// operand 2
-				disInstr->operand[2].type = PPCASM_OPERAND_TYPE_IMM;
-				disInstr->operand[2].immS32 = ME + 1;
-				disInstr->operand[2].immWidth = 8;
-				// operand 3
-				disInstr->operand[3].type = PPCASM_OPERAND_TYPE_IMM;
-				disInstr->operand[3].immS32 = SH;
-				disInstr->operand[3].immWidth = 8;
-			}		
-			else if (iDef->ppcAsmOp == PPCASM_OP_EXTRWI || iDef->ppcAsmOp == PPCASM_OP_EXTRWI_)
-			{
-				disInstr->operandMask = operand0Bit | operand1Bit | operand2Bit | operand3Bit;
-				sint8 n = 32 - MB;
-				sint8 b = SH - n;
-				// operand 2
-				disInstr->operand[2].type = PPCASM_OPERAND_TYPE_IMM;
-				disInstr->operand[2].immS32 = n;
-				disInstr->operand[2].immWidth = 8;
-				// operand 3
-				disInstr->operand[3].type = PPCASM_OPERAND_TYPE_IMM;
-				disInstr->operand[3].immS32 = b;
-				disInstr->operand[3].immWidth = 8;
-			}
-			else if (iDef->ppcAsmOp == PPCASM_OP_SLWI || iDef->ppcAsmOp == PPCASM_OP_SLWI_)
-			{
-				disInstr->operandMask = operand0Bit | operand1Bit | operand2Bit;
-				sint8 n = SH;
-				// operand 2
-				disInstr->operand[2].type = PPCASM_OPERAND_TYPE_IMM;
-				disInstr->operand[2].immS32 = n;
-				disInstr->operand[2].immWidth = 8;
-			}
-			else if (iDef->ppcAsmOp == PPCASM_OP_SRWI || iDef->ppcAsmOp == PPCASM_OP_SRWI_)
-			{
-				disInstr->operandMask = operand0Bit | operand1Bit | operand2Bit;
-				sint8 n = 32 - SH;
-				// operand 2
-				disInstr->operand[2].type = PPCASM_OPERAND_TYPE_IMM;
-				disInstr->operand[2].immS32 = n;
-				disInstr->operand[2].immWidth = 8;
-			}
-			else if (iDef->ppcAsmOp == PPCASM_OP_CLRLWI || iDef->ppcAsmOp == PPCASM_OP_CLRLWI_)
-			{
-				disInstr->operandMask = operand0Bit | operand1Bit | operand2Bit;
-				sint8 n = MB;
-				// operand 2
-				disInstr->operand[2].type = PPCASM_OPERAND_TYPE_IMM;
-				disInstr->operand[2].immS32 = n;
-				disInstr->operand[2].immWidth = 8;
-			}
-			else if (iDef->ppcAsmOp == PPCASM_OP_CLRRWI || iDef->ppcAsmOp == PPCASM_OP_CLRRWI_)
-			{
-				disInstr->operandMask = operand0Bit | operand1Bit | operand2Bit;
-				sint8 n = 31 - ME;
-				// operand 2
-				disInstr->operand[2].type = PPCASM_OPERAND_TYPE_IMM;
-				disInstr->operand[2].immS32 = n;
-				disInstr->operand[2].immWidth = 8;
-			}
-			else
-			{
+			case PPCASM_OP_SLWI:
+			case PPCASM_OP_SLWI_:
+				out->operandMask = 0x7;
+				SetImmediate(out, 2, (sint8)rf.sh, 8);
+				break;
+			case PPCASM_OP_SRWI:
+			case PPCASM_OP_SRWI_:
+				out->operandMask = 0x7;
+				SetImmediate(out, 2, (sint8)(32 - rf.sh), 8);
+				break;
+			case PPCASM_OP_CLRLWI:
+			case PPCASM_OP_CLRLWI_:
+				out->operandMask = 0x7;
+				SetImmediate(out, 2, (sint8)rf.mb, 8);
+				break;
+			case PPCASM_OP_CLRRWI:
+			case PPCASM_OP_CLRRWI_:
+				out->operandMask = 0x7;
+				SetImmediate(out, 2, (sint8)(31 - rf.me), 8);
+				break;
+			default:
 				cemu_assert_debug(false);
+				break;
 			}
+			break;
 		}
-		else if (iDef->instructionForm == OP_FORM_RLWNM)
-		{
-			sint32 rS, rA, rB, MB, ME;
-			PPC_OPC_TEMPL_M(opcode, rS, rA, rB, MB, ME);
-			disInstr->operandMask = operand0Bit | operand1Bit | operand2Bit | operand3Bit | operand4Bit;
-			// operand 0
-			disInstr->operand[0].type = PPCASM_OPERAND_TYPE_GPR;
-			disInstr->operand[0].registerIndex = rA;
-			// operand 1
-			disInstr->operand[1].type = PPCASM_OPERAND_TYPE_GPR;
-			disInstr->operand[1].registerIndex = rS;
-			// operand 2
-			disInstr->operand[2].type = PPCASM_OPERAND_TYPE_GPR;
-			disInstr->operand[2].registerIndex = rB;
-			// operand 3
-			disInstr->operand[3].type = PPCASM_OPERAND_TYPE_IMM;
-			disInstr->operand[3].immS32 = MB;
-			disInstr->operand[3].immWidth = 8;
-			// operand 4
-			disInstr->operand[4].type = PPCASM_OPERAND_TYPE_IMM;
-			disInstr->operand[4].immS32 = ME;
-			disInstr->operand[4].immWidth = 8;
+		case Form::RotateReg:
+			out->operandMask = 0x1F;
+			SetRegister(out, 0, PPCASM_OPERAND_TYPE_GPR, (uint32)rf.rA);
+			SetRegister(out, 1, PPCASM_OPERAND_TYPE_GPR, (uint32)rf.rS);
+			SetRegister(out, 2, PPCASM_OPERAND_TYPE_GPR, (uint32)rf.sh);
+			SetImmediate(out, 3, rf.mb, 8);
+			SetImmediate(out, 4, rf.me, 8);
+			break;
+		case Form::RotateRegAlias:
+			SetRegister(out, 0, PPCASM_OPERAND_TYPE_GPR, (uint32)rf.rA);
+			SetRegister(out, 1, PPCASM_OPERAND_TYPE_GPR, (uint32)rf.rS);
+			SetRegister(out, 2, PPCASM_OPERAND_TYPE_GPR, (uint32)rf.sh);
+			if (d.op == PPCASM_OP_ROTLW || d.op == PPCASM_OP_ROTLW_)
+				out->operandMask = 0x7;
+			break;
+		case Form::CrLogic:
+			ShowRegister(out, 0, PPCASM_OPERAND_TYPE_CR_BIT, Field5(word, 21));
+			ShowRegister(out, 1, PPCASM_OPERAND_TYPE_CR_BIT, Field5(word, 16));
+			ShowRegister(out, 2, PPCASM_OPERAND_TYPE_CR_BIT, Field5(word, 11));
+			break;
 		}
-		else if (iDef->instructionForm == OP_FORM_RLWNM_EXTENDED)
-		{
-			sint32 rS, rA, rB, MB, ME;
-			PPC_OPC_TEMPL_M(opcode, rS, rA, rB, MB, ME);
-			// operand 0
-			disInstr->operand[0].type = PPCASM_OPERAND_TYPE_GPR;
-			disInstr->operand[0].registerIndex = rA;
-			// operand 1
-			disInstr->operand[1].type = PPCASM_OPERAND_TYPE_GPR;
-			disInstr->operand[1].registerIndex = rS;
-			// operand 2
-			disInstr->operand[2].type = PPCASM_OPERAND_TYPE_GPR;
-			disInstr->operand[2].registerIndex = rB;
-
-			if (iDef->ppcAsmOp == PPCASM_OP_ROTLW || iDef->ppcAsmOp == PPCASM_OP_ROTLW_)
-			{
-				disInstr->operandMask = operand0Bit | operand1Bit | operand2Bit;
-				// no additional operands displayed
-			}
-		}
-		else if (iDef->instructionForm == OP_FORM_XL_CR)
-		{
-			PPC_OPC_TEMPL_X_CR();
-			// todo - detect and emit simplified mnemonics (e.g. CRSET)
-			makeOpCRBit(0, crD);
-			makeOpCRBit(1, crA);
-			makeOpCRBit(2, crB);
-		}
-		else
-		{
-			cemu_assert_debug(false);
-		}
-		disInstr->operandMask &= ~(iDef->flags & 0x1F);
 	}
-	else
+
+	/* ---------------------------------------------------------------- */
+	/* assembler: shared state and error helpers                         */
+	/* ---------------------------------------------------------------- */
+
+	struct AsmState
 	{
-		// no match
-		disInstr->ppcAsmCode = PPCASM_OP_UKN;
+		PPCAssemblerInOut* io;
+		boost::container::small_vector<std::string_view, 8> args;
+		const InstrDef* def{};
+		uint32 word{};
+	};
+
+	bool Fail(PPCAssemblerInOut* io, std::string_view message)
+	{
+		io->errorMsg = message;
+		return false;
 	}
-}
 
-void ppcAssembler_setError(PPCAssemblerInOut* ctx, char const* errorMsg)
-{
-	ctx->errorMsg = errorMsg;
-}
-
-void ppcAssembler_setError(PPCAssemblerInOut* ctx, std::string_view errorMsg)
-{
-	ctx->errorMsg = errorMsg;
-}
-
-char _assemblerErrorMessageDepr[1024];
-
-bool _ppcAssembler_getOperandTextIndex(PPCAssemblerContext& internalCtx, sint32 operandIndex, sint32& textIndex)
-{
-	// get swapped index
-	operandIndex = _getOpIndex(internalCtx.iDef, operandIndex);
-	// check if operand is optional
-	if ((internalCtx.iDef->flags&(1 << operandIndex)))
+	// nth operand text, or fail with "Missing operand"
+	bool RequireArg(AsmState& st, size_t index, std::string_view& text)
 	{
-		// operand not used
-		textIndex = -1;
+		if (index >= st.args.size())
+			return Fail(st.io, "Missing operand");
+		text = st.args[index];
 		return true;
 	}
-	// get operand text index
-	sint32 opTextIdx = 0;
-	for (sint32 i = 0; i < operandIndex; i++)
-	{
-		if ((internalCtx.iDef->flags&(1 << i)))
-			continue; // skip operand
-		opTextIdx++;
-	}
-	if (opTextIdx >= internalCtx.listOperandStr.size())
-	{
-		ppcAssembler_setError(internalCtx.ctx, "Missing operand");
-		return false;
-	}
-	textIndex = opTextIdx;
-	return true;
-}
 
-bool _ppcAssembler_parseRegister(std::string_view str, const char* prefix, sint32& regIndex)
-{
-	const char* startPtr = str.data();
-	const char* endPtr = str.data() + str.size();
-	// skip whitespaces
-	while (startPtr < endPtr)
+	void AddReloc(AsmState& st, PPCASM_RELOC type, std::string expression, uint32 byteOffset, uint8 bitOffset, uint8 bitCount)
 	{
-		if (*startPtr != ' ')
-			break;
-		startPtr++;
+		st.io->list_relocs.emplace_back(type, std::move(expression), byteOffset, bitOffset, bitCount);
 	}
-	// trim whitespaces at end
-	while (endPtr > startPtr)
-	{
-		if (endPtr[-1] != ' ')
-			break;
-		endPtr--;
-	}
-	// parse register name
-	if (startPtr + 2 > endPtr)
-		return false;
-	while (true)
-	{
-		if (startPtr >= endPtr)
-			return false;
-		if (*prefix == '\0')
-			break;
-		if (tolower(*prefix) != tolower(*startPtr))
-			return false;
-		prefix++;
-		startPtr++;
-	}
-	sint32 parsedIndex = 0;
-	while (startPtr < endPtr)
-	{
-		parsedIndex *= 10;
-		if (*startPtr < '0' || *startPtr > '9')
-			return false;
-		parsedIndex += (*startPtr - '0');
-		startPtr++;
-	}
-	if (parsedIndex >= 32)
-		return false;
-	regIndex = parsedIndex;
-	return true;
-}
 
-bool _ppcAssembler_processRegisterOperand(PPCAssemblerContext& internalCtx, sint32 operandIndex, sint32 bitIndex, const char* prefix, const sint32 registerCount)
-{
-	sint32 opTextIdx;
-	if (_ppcAssembler_getOperandTextIndex(internalCtx, operandIndex, opTextIdx) == false)
-		return false;
-	if (opTextIdx < 0)
-		return true; // skipped operand
-	// parse GPR
-	sint32 gprIndex;
-	if (_ppcAssembler_parseRegister(internalCtx.listOperandStr[opTextIdx].str, prefix, gprIndex) == false)
+	/* register names, strict form used by Generic rows: <prefix><decimal> with
+	   the prefix matched case-insensitively and nothing else around it */
+	int ParseRegisterStrict(std::string_view text, const char* prefix)
 	{
-		ppcAssembler_setError(internalCtx.ctx, fmt::format("\'{0}\' is not a valid register operand (must be {1}0 to {1}{2})", internalCtx.listOperandStr[opTextIdx].str, prefix, registerCount-1));
-		return false;
-	}
-	if (gprIndex < 0 || gprIndex >= registerCount)
-	{
-		ppcAssembler_setError(internalCtx.ctx, fmt::format("\'{0}\' is not a valid register operand (must be {1}0 to {1}{2})", internalCtx.listOperandStr[opTextIdx].str, prefix, registerCount - 1));
-		return false;
-	}
-	internalCtx.opcode |= (gprIndex << bitIndex);
-	return true;
-}
-
-bool _ppcAssembler_processGPROperand(PPCAssemblerContext& internalCtx, sint32 operandIndex, sint32 bitIndex)
-{
-	return _ppcAssembler_processRegisterOperand(internalCtx, operandIndex, bitIndex, "r", 32);
-}
-
-bool _ppcAssembler_processCROperand(PPCAssemblerContext& internalCtx, sint32 operandIndex, sint32 bitIndex, bool isEncodedAsBitIndex)
-{
-	return _ppcAssembler_processRegisterOperand(internalCtx, operandIndex, bitIndex + (isEncodedAsBitIndex?2:0), "cr", 8);
-}
-
-template<typename TExprResult>
-bool _ppcAssembler_evaluateConstantExpression(PPCAssemblerContext& internalCtx, TExpressionParser<TExprResult>& ep, std::string_view expr, TExprResult& result)
-{
-	if (!ep.IsValidExpression(expr))
-	{
-		ppcAssembler_setError(internalCtx.ctx, fmt::format("'{}' is not a valid expression", expr));
-		return false;
-	}
-	if (!ep.IsConstantExpression(expr))
-	{
-		ppcAssembler_setError(internalCtx.ctx, fmt::format("'{}' does not evaluate to a constant expression", expr));
-		return false;
-	}
-	try
-	{
-		result = ep.Evaluate(expr);
-	}
-	catch (std::exception* e)
-	{
-		ppcAssembler_setError(internalCtx.ctx, fmt::format("\'{0}\' could not be evaluated. Error: {1}", expr, e->what()));
-		return false;
-	}
-	return true;
-}
-
-bool _ppcAssembler_processBIOperand(PPCAssemblerContext& internalCtx, sint32 operandIndex, sint32 bitIndex)
-{
-	sint32 opTextIdx;
-	if (_ppcAssembler_getOperandTextIndex(internalCtx, operandIndex, opTextIdx) == false)
-		return false;
-	if (opTextIdx < 0)
-		return true; // skipped operand
-	// parse expression
-	// syntax examples:
-	// single condition bit of cr0: lt, gt, eq, so
-	// condition bit with cr index: 4*cr1+lt
-	TExpressionParser<sint32> ep;
-	ep.AddConstant("lt", 0);
-	ep.AddConstant("gt", 1);
-	ep.AddConstant("eq", 2);
-	ep.AddConstant("so", 3);
-	ep.AddConstant("cr0", 0);
-	ep.AddConstant("cr1", 1);
-	ep.AddConstant("cr2", 2);
-	ep.AddConstant("cr3", 3);
-	ep.AddConstant("cr4", 4);
-	ep.AddConstant("cr5", 5);
-	ep.AddConstant("cr6", 6);
-	ep.AddConstant("cr7", 7);
-	std::string_view expr = internalCtx.listOperandStr[opTextIdx].str;
-	sint32 bi = 0;
-	if (!_ppcAssembler_evaluateConstantExpression(internalCtx, ep, expr, bi))
-		return false;
-	if (bi < 0 || bi >= (8 * 4))
-	{
-		ppcAssembler_setError(internalCtx.ctx, fmt::format("CR bit operand \'{0}\' evaluated to {1} which is out of range", expr, bi));
-		return false;
-	}
-	internalCtx.opcode &= ~(0x1F << bitIndex);
-	internalCtx.opcode |= (bi << bitIndex);
-	return true;
-}
-
-bool _ppcAssembler_processFPROperand(PPCAssemblerContext& internalCtx, sint32 operandIndex, sint32 bitIndex)
-{
-	return _ppcAssembler_processRegisterOperand(internalCtx, operandIndex, bitIndex, "f", 32);
-}
-
-bool _ppcAssembler_processImmediateOperandS16(PPCAssemblerContext& internalCtx, sint32 operandIndex, sint32 bitIndex, bool isNegative = false)
-{
-	sint32 opTextIdx;
-	if (_ppcAssembler_getOperandTextIndex(internalCtx, operandIndex, opTextIdx) == false)
-		return false;
-	if (opTextIdx < 0)
-		return true; // skipped operand
-	// parse expression
-	std::string expressionString(internalCtx.listOperandStr[opTextIdx].str);
-
-	if (isNegative)
-	{
-		expressionString.insert(0, "0-(");
-		expressionString.append(")");
-	}
-	ExpressionParser ep;
-	double immD = 0.0f;
-	try
-	{
-		if (ep.IsConstantExpression(expressionString))
+		for (; *prefix; prefix++)
 		{
-			immD = ep.Evaluate(expressionString);
+			if (text.empty())
+				return -1;
+			char c = text.front();
+			if (c >= 'A' && c <= 'Z')
+				c = (char)(c - 'A' + 'a');
+			if (c != *prefix)
+				return -1;
+			text.remove_prefix(1);
 		}
-		else
+		int value = 0;
+		auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
+		if (ec != std::errc() || end != text.data() + text.size())
+			return -1;
+		return value;
+	}
+
+	/* register names, lenient form used by the fixed layouts: surrounding spaces
+	   are ignored, at least one digit is required and values wrap like a 32 bit
+	   accumulator */
+	bool ParseRegisterLenient(std::string_view text, const char* prefix, sint32& regOut)
+	{
+		size_t b = 0, e = text.size();
+		while (b < e && text[b] == ' ')
+			b++;
+		while (e > b && text[e - 1] == ' ')
+			e--;
+		if (e - b < 2)
+			return false;
+		for (; *prefix; prefix++, b++)
 		{
-			internalCtx.ctx->list_relocs.emplace_back(PPCASM_RELOC::U32_MASKED_IMM, expressionString, 0, bitIndex, 16);
+			if (b >= e)
+				return false;
+			if (tolower((unsigned char)*prefix) != tolower((unsigned char)text[b]))
+				return false;
+		}
+		if (b >= e)
+			return false;
+		uint32 acc = 0;
+		for (; b < e; b++)
+		{
+			const char c = text[b];
+			acc *= 10;
+			if (c < '0' || c > '9')
+				return false;
+			acc += (uint32)(c - '0');
+		}
+		if ((sint32)acc >= 32)
+			return false;
+		regOut = (sint32)acc;
+		return true;
+	}
+
+	/* ---------------------------------------------------------------- */
+	/* assembler: Generic row slots                                      */
+	/* ---------------------------------------------------------------- */
+
+	bool EncodeRegisterSlot(AsmState& st, std::string_view text, const char* prefix, int limit, uint32 lsb, uint32 shiftUp, const char* what)
+	{
+		const int reg = ParseRegisterStrict(text, prefix);
+		if (reg < 0 || reg >= limit)
+			return Fail(st.io, fmt::format("Operand \"{}\" is not a valid {}", text, what));
+		PutField5(st.word, lsb, (uint32)reg << shiftUp);
+		return true;
+	}
+
+	// evaluates an immediate; false + filled relocation when not constant
+	enum class ImmResult { Value, Relocated };
+
+	ImmResult EvaluateOrRelocate(AsmState& st, const std::string& expression, uint8 lsb, uint8 width, double& value)
+	{
+		ExpressionParser ep;
+		if (ep.IsConstantExpression(expression))
+		{
+			value = ep.Evaluate(expression);
+			return ImmResult::Value;
+		}
+		AddReloc(st, PPCASM_RELOC::U32_MASKED_IMM, expression, 0, lsb, width);
+		return ImmResult::Relocated;
+	}
+
+	bool EncodeImmediateSlot(AsmState& st, const SlotDef& s, std::string_view text)
+	{
+		std::string expression(text);
+		if (s.negate)
+			expression = "0-(" + expression + ")";
+		double d = 0.0;
+		if (EvaluateOrRelocate(st, expression, s.lsb, s.width, d) == ImmResult::Relocated)
+			return true;
+		const uint32 v = (uint32)TruncToS32(d);
+		const bool fits = FitsInBits(v, s.width, s.isSigned) || (s.allowUnsigned && FitsInBits(v, s.width, false));
+		if (!fits)
+			return Fail(st.io, fmt::format("Value of operand \"{}\" is out of range", text));
+		const uint32 mask = (1u << s.width) - 1;
+		st.word = (st.word & ~(mask << s.lsb)) | ((v & mask) << s.lsb);
+		return true;
+	}
+
+	bool EncodeFromBaseSlot(AsmState& st, const SlotDef& s, std::string_view text)
+	{
+		const std::string expression = fmt::format("{}-(", s.width) + std::string(text) + ")";
+		double d = 0.0;
+		if (EvaluateOrRelocate(st, expression, s.lsb, 5, d) == ImmResult::Relocated)
+			return true;
+		const uint32 v = (uint32)TruncToS32(d);
+		if (!FitsInBits(v, 5, false))
+			return Fail(st.io, fmt::format("Value of operand \"{}\" is out of range", text));
+		PutField5(st.word, s.lsb, v);
+		return true;
+	}
+
+	// displacement(rA)
+	bool EncodeMemorySlot(AsmState& st, std::string_view text)
+	{
+		auto syntaxError = [&]()
+		{
+			return Fail(st.io, fmt::format("\'{}\' does not end with valid memory register syntax. Memory operand must have the form offset(gpr). Example: 0x20(r3)", text));
+		};
+		size_t end = text.size();
+		while (end > 0 && (text[end - 1] == ' ' || text[end - 1] == '\t'))
+			end--;
+		if (end == 0 || text[end - 1] != ')')
+			return syntaxError();
+		const size_t close = end - 1;
+		const size_t open = text.find_last_of('(', close == 0 ? 0 : close - 1);
+		if (close == 0 || open == std::string_view::npos)
+			return syntaxError();
+		std::string_view displacement = text.substr(0, open);
+		std::string_view baseReg = text.substr(open + 1, close - open - 1);
+		const int reg = ParseRegisterStrict(baseReg, "r");
+		if (reg < 0 || reg >= 32)
+			return Fail(st.io, fmt::format("Memory operand register \"{}\" is not a valid GPR (expected r0 - r31)", baseReg));
+		PutField5(st.word, 16, (uint32)reg);
+
+		ExpressionParser ep;
+		if (!ep.IsConstantExpression(displacement))
+		{
+			AddReloc(st, PPCASM_RELOC::U32_MASKED_IMM, std::string(displacement), 0, 0, 16);
 			return true;
 		}
+		const sint32 offset = TruncToS32(ep.Evaluate(displacement));
+		if (offset < -32768 || offset > 32767)
+			return Fail(st.io, fmt::format("\"{}\" evaluates to offset out of range (Valid range is -32768 to 32767)", displacement));
+		st.word = (st.word & ~0xFFFFu) | ((uint32)offset & 0xFFFF);
+		return true;
 	}
-	catch (std::exception* e)
-	{
-		// check if expression is invalid or if it contains unknown constants
-		sprintf(_assemblerErrorMessageDepr, "\'%s\' could not be evaluated. Error: %s", expressionString.c_str(), e->what());
-		ppcAssembler_setError(internalCtx.ctx, _assemblerErrorMessageDepr);
-		return false;
-	}
-	uint32 imm = (uint32)(sint32)immD;
-	imm &= 0xFFFF;
-	internalCtx.opcode |= (imm << bitIndex);
-	return true;
-}
 
-bool _ppcAssembler_processImmediateOperandU5(PPCAssemblerContext& internalCtx, sint32 operandIndex, sint32 bitIndex)
-{
-	sint32 opTextIdx;
-	if (_ppcAssembler_getOperandTextIndex(internalCtx, operandIndex, opTextIdx) == false)
-		return false;
-	if (opTextIdx < 0)
-		return true; // skipped operand
-	// parse expression
-	ExpressionParser ep;
-	double immD = 0.0f;
-	try
+	bool EncodeSlot(AsmState& st, const SlotDef& s, size_t index)
 	{
-		immD = ep.Evaluate(internalCtx.listOperandStr[opTextIdx].str);
+		if (s.kind == Slot::Unused)
+		{
+			// a slot past the instruction's last operand must not be filled
+			if (index < st.args.size() && !st.args[index].empty())
+				return Fail(st.io, "Too many operands");
+			return true;
+		}
+		std::string_view text;
+		if (!RequireArg(st, index, text))
+			return false;
+		switch (s.kind)
+		{
+		case Slot::GprOrZero:
+			if (text == "0")
+			{
+				PutField5(st.word, s.lsb, 0);
+				return true;
+			}
+			[[fallthrough]];
+		case Slot::Gpr:
+			return EncodeRegisterSlot(st, text, "r", 32, s.lsb, 0, "GPR (expected r0 - r31)");
+		case Slot::Fpr:
+			return EncodeRegisterSlot(st, text, "f", 32, s.lsb, 0, "FPR (expected f0 - f31)");
+		case Slot::CrField:
+			return EncodeRegisterSlot(st, text, "cr", 8, s.lsb, 2, "CR field (expected cr0 - cr7)");
+		case Slot::Spr:
+		{
+			const int spr = ParseRegisterStrict(text, "spr");
+			if (spr < 0 || spr >= 1024)
+				return Fail(st.io, fmt::format("Operand \"{}\" is not a valid GPR (expected spr0 - spr1023)", text));
+			PutField5(st.word, 16, (uint32)spr & 0x1F);
+			PutField5(st.word, 11, ((uint32)spr >> 5) & 0x1F);
+			return true;
+		}
+		case Slot::Imm:
+			return EncodeImmediateSlot(st, s, text);
+		case Slot::FromBase:
+			return EncodeFromBaseSlot(st, s, text);
+		case Slot::Mem:
+			return EncodeMemorySlot(st, text);
+		case Slot::Unused:
+			break;
+		}
+		return true;
 	}
-	catch (std::exception*)
-	{
-		// check if expression is invalid or if it contains unknown constants
-		ppcAssembler_setError(internalCtx.ctx, fmt::format("\'{}\' is not a valid expression", internalCtx.listOperandStr[opTextIdx].str));
-		return false;
-	}
-	sint32 immS32 = (sint32)immD;
-	if (immS32 < 0 || immS32 >= 32)
-	{
-		ppcAssembler_setError(internalCtx.ctx, fmt::format("\'{}\' is not in range 0-31", internalCtx.listOperandStr[opTextIdx].str));
-		return false;
-	}
-	uint32 imm = (uint32)immS32;
-	imm &= 0x1F;
-	internalCtx.opcode |= (imm << bitIndex);
-	return true;
-}
 
-bool _ppcAssembler_processImmediateOperandU5Const(PPCAssemblerContext& internalCtx, sint32 operandIndex, sint8& value)
-{
-	sint32 opTextIdx;
-	if (_ppcAssembler_getOperandTextIndex(internalCtx, operandIndex, opTextIdx) == false)
-		return false;
-	if (opTextIdx < 0)
-		return true; // skipped operand
-	// parse expression
-	TExpressionParser<sint32> ep;
-	auto expr = internalCtx.listOperandStr[opTextIdx].str;
-	sint32 r;
-	if (!_ppcAssembler_evaluateConstantExpression(internalCtx, ep, expr, r))
-		return false;
-	if (r < 0 || r >= 32)
+	void ApplyTie(const TieDef& t, uint32& word)
 	{
-		ppcAssembler_setError(internalCtx.ctx, fmt::format("Expression '\'{0}\' which evaluates to {1} is not in range 0-31", expr, r));
-		return false;
+		switch (t.kind)
+		{
+		case Tie::None:
+		case Tie::SignIs: // only checked when disassembling
+			break;
+		case Tie::SameField:
+			PutField5(word, (uint32)t.b, Field5(word, t.a));
+			break;
+		case Tie::FieldIs:
+			PutField5(word, t.a, (uint32)t.b);
+			break;
+		case Tie::SprIs:
+			PutField5(word, 16, t.b & 0x1F);
+			PutField5(word, 11, (t.b >> 5) & 0x1F);
+			break;
+		}
 	}
-	value = (sint8)r;
-	return true;
-}
 
-bool _ppcAssembler_isConstantBranchTargetExpr(std::string& expressionString, sint32& relativeAddr)
-{
-	if (expressionString.length() > 0 && expressionString[0] == '.')
+	/* ---------------------------------------------------------------- */
+	/* assembler: fixed layout operands                                  */
+	/* ---------------------------------------------------------------- */
+
+	bool OrRegister(AsmState& st, size_t index, uint32 lsb, const char* prefix, sint32 count)
 	{
+		std::string_view text;
+		if (!RequireArg(st, index, text))
+			return false;
+		sint32 reg = 0;
+		if (!ParseRegisterLenient(text, prefix, reg) || reg < 0 || reg >= count)
+			return Fail(st.io, fmt::format("\'{0}\' is not a valid register operand (must be {1}0 to {1}{2})", text, prefix, count - 1));
+		st.word |= (uint32)reg << lsb;
+		return true;
+	}
+
+	bool OrGpr(AsmState& st, size_t index, uint32 lsb) { return OrRegister(st, index, lsb, "r", 32); }
+	bool OrFpr(AsmState& st, size_t index, uint32 lsb) { return OrRegister(st, index, lsb, "f", 32); }
+	// CR field operand; with asBitIndex the field number is placed as crN*4
+	bool OrCrField(AsmState& st, size_t index, uint32 lsb, bool asBitIndex) { return OrRegister(st, index, lsb + (asBitIndex ? 2 : 0), "cr", 8); }
+
+	// validity, constness, then evaluation (evaluation errors propagate as exceptions)
+	template<typename T>
+	bool EvaluateConstant(AsmState& st, TExpressionParser<T>& ep, std::string_view expression, T& result)
+	{
+		if (!ep.IsValidExpression(expression))
+			return Fail(st.io, fmt::format("'{}' is not a valid expression", expression));
+		if (!ep.IsConstantExpression(expression))
+			return Fail(st.io, fmt::format("'{}' does not evaluate to a constant expression", expression));
+		result = ep.Evaluate(expression);
+		return true;
+	}
+
+	// condition register bit: lt/gt/eq/so, optionally as 4*crN+cond
+	bool OrCrBit(AsmState& st, size_t index, uint32 lsb)
+	{
+		std::string_view text;
+		if (!RequireArg(st, index, text))
+			return false;
+		TExpressionParser<sint32> ep;
+		static constexpr const char* kCondNames[] = { "lt", "gt", "eq", "so" };
+		for (sint32 i = 0; i < 4; i++)
+			ep.AddConstant(kCondNames[i], i);
+		for (sint32 i = 0; i < 8; i++)
+			ep.AddConstant(fmt::format("cr{}", i), i);
+		sint32 bit = 0;
+		if (!EvaluateConstant(st, ep, text, bit))
+			return false;
+		if (bit < 0 || bit >= 32)
+			return Fail(st.io, fmt::format("CR bit operand \'{0}\' evaluated to {1} which is out of range", text, bit));
+		PutField5(st.word, lsb, (uint32)bit);
+		return true;
+	}
+
+	// 16 bit immediate, no range check, relocation when not constant
+	bool OrImm16(AsmState& st, size_t index, uint32 lsb)
+	{
+		std::string_view text;
+		if (!RequireArg(st, index, text))
+			return false;
+		double d = 0.0;
+		if (EvaluateOrRelocate(st, std::string(text), (uint8)lsb, 16, d) == ImmResult::Relocated)
+			return true;
+		st.word |= ((uint32)TruncToS32(d) & 0xFFFF) << lsb;
+		return true;
+	}
+
+	// 0..31 immediate that must evaluate right away
+	bool OrImm5(AsmState& st, size_t index, uint32 lsb)
+	{
+		std::string_view text;
+		if (!RequireArg(st, index, text))
+			return false;
 		ExpressionParser ep;
-		double branchDistance = 0.0f;
+		const sint32 v = TruncToS32(ep.Evaluate(text));
+		if (v < 0 || v >= 32)
+			return Fail(st.io, fmt::format("\'{}\' is not in range 0-31", text));
+		st.word |= ((uint32)v & 0x1F) << lsb;
+		return true;
+	}
+
+	bool ConstImm5(AsmState& st, size_t index, sint8& value)
+	{
+		std::string_view text;
+		if (!RequireArg(st, index, text))
+			return false;
+		TExpressionParser<sint32> ep;
+		sint32 v = 0;
+		if (!EvaluateConstant(st, ep, text, v))
+			return false;
+		if (v < 0 || v >= 32)
+			return Fail(st.io, fmt::format("Expression '\'{0}\' which evaluates to {1} is not in range 0-31", text, v));
+		value = (sint8)v;
+		return true;
+	}
+
+	// ".+offset" / ".-offset" relative targets resolve right away
+	bool RelativeTarget(const std::string& expression, sint32& distance)
+	{
+		if (expression.empty() || expression[0] != '.')
+			return false;
+		ExpressionParser ep;
 		try
 		{
-			branchDistance = ep.Evaluate(expressionString.substr(1).insert(0, "0"));
+			distance = TruncToS32(ep.Evaluate("0" + expression.substr(1)));
 		}
 		catch (std::exception&)
 		{
 			return false;
 		}
-		relativeAddr = (sint32)branchDistance;
 		return true;
 	}
-	return false;
-}
 
-bool _ppcAssembler_processBranchOperandS16(PPCAssemblerContext& internalCtx, sint32 operandIndex)
-{
-	sint32 opTextIdx;
-	if (_ppcAssembler_getOperandTextIndex(internalCtx, operandIndex, opTextIdx) == false)
-		return false;
-	if (opTextIdx < 0)
-		return true; // skipped operand
-	std::string expressionString(internalCtx.listOperandStr[opTextIdx].str);
-	sint32 relativeAddr;
-	if (_ppcAssembler_isConstantBranchTargetExpr(expressionString, relativeAddr))
+	bool OrBranchTarget(AsmState& st, size_t index, sint32 minValue, sint32 maxValue, uint32 fieldMask, PPCASM_RELOC relocType)
 	{
-		if (relativeAddr < -32768 || relativeAddr > 32767)
-		{
-			sprintf(_assemblerErrorMessageDepr, "Branch target out of range");
-			ppcAssembler_setError(internalCtx.ctx, _assemblerErrorMessageDepr);
+		std::string_view text;
+		if (!RequireArg(st, index, text))
 			return false;
-		}
-		if (relativeAddr&3)
+		std::string expression(text);
+		sint32 distance = 0;
+		if (!RelativeTarget(expression, distance))
 		{
-			sprintf(_assemblerErrorMessageDepr, "Branch target must be aligned to 4");
-			ppcAssembler_setError(internalCtx.ctx, _assemblerErrorMessageDepr);
-			return false;
+			AddReloc(st, relocType, expression, 0, 0, 0);
+			return true;
 		}
-		internalCtx.opcode |= (relativeAddr & 0xFFFC);
-		return true;
-	}			 
-	// create reloc
-	internalCtx.ctx->list_relocs.emplace_back(PPCASM_RELOC::BRANCH_S16, expressionString, 0, 0, 0);
-	return true;
-}
-
-bool _ppcAssembler_processBranchOperandS26(PPCAssemblerContext& internalCtx, sint32 operandIndex)
-{
-	sint32 opTextIdx;
-	if (_ppcAssembler_getOperandTextIndex(internalCtx, operandIndex, opTextIdx) == false)
-		return false;
-	if (opTextIdx < 0)
-		return true; // skipped operand
-	std::string expressionString(internalCtx.listOperandStr[opTextIdx].str);
-	sint32 relativeAddr;
-	if (_ppcAssembler_isConstantBranchTargetExpr(expressionString, relativeAddr))
-	{
-		if (relativeAddr < -33554432 || relativeAddr > 33554431)
-		{
-			ppcAssembler_setError(internalCtx.ctx, "Branch target out of range");
-			return false;
-		}
-		if (relativeAddr & 3)
-		{
-			ppcAssembler_setError(internalCtx.ctx, "Branch target must be aligned to 4");
-			return false;
-		}
-		internalCtx.opcode |= (relativeAddr & 0x3FFFFFC);
+		if (distance < minValue || distance > maxValue)
+			return Fail(st.io, "Branch target out of range");
+		if (distance & 3)
+			return Fail(st.io, "Branch target must be aligned to 4");
+		st.word |= (uint32)distance & fieldMask;
 		return true;
 	}
-	// create reloc
-	internalCtx.ctx->list_relocs.emplace_back(PPCASM_RELOC::BRANCH_S26, expressionString, 0, 0, 0);
-	return true;
-}
 
-void _ppcAssembler_setAlignment(PPCAssemblerContext& internalInfo, uint32 alignment)
-{
-	if (internalInfo.ctx->forceNoAlignment)
+	bool AssembleFixedLayout(AsmState& st, bool hasBranchHint)
 	{
-		internalInfo.ctx->alignmentRequirement = 1;
-		internalInfo.ctx->alignmentPaddingSize = 0;
-		internalInfo.ctx->virtualAddressAligned = internalInfo.ctx->virtualAddress;
-		return;
-	}
-	internalInfo.ctx->alignmentRequirement = alignment;
-	if (alignment == 0)
-	{
-		internalInfo.ctx->alignmentPaddingSize = 0;
-		internalInfo.ctx->virtualAddressAligned = internalInfo.ctx->virtualAddress;
-		return;
-	}
-	uint32 alignedVA = (internalInfo.ctx->virtualAddress + alignment - 1) & ~(alignment - 1);
-	internalInfo.ctx->alignmentPaddingSize = alignedVA - internalInfo.ctx->virtualAddress;
-	internalInfo.ctx->virtualAddressAligned = alignedVA;
-}
-
-enum class ASM_DATA_DIRECTIVE
-{
-	NONE,
-	FLOAT,
-	DOUBLE,
-	U32,
-	U16,
-	U8, // alias to .string
-};
-
-bool _ppcAssembler_emitDataDirective(PPCAssemblerContext& internalInfo, ASM_DATA_DIRECTIVE dataDirective)
-{
-	PPCASM_RELOC relocType;
-
-	switch (dataDirective)
-	{
-	case ASM_DATA_DIRECTIVE::FLOAT:
-		relocType = PPCASM_RELOC::FLOAT;
-		break;
-	case ASM_DATA_DIRECTIVE::DOUBLE:
-		relocType = PPCASM_RELOC::DOUBLE;
-		break;
-	case ASM_DATA_DIRECTIVE::U32:
-		relocType = PPCASM_RELOC::U32;
-		break;
-	case ASM_DATA_DIRECTIVE::U16:
-		relocType = PPCASM_RELOC::U16;
-		break;
-	case ASM_DATA_DIRECTIVE::U8:
-		relocType = PPCASM_RELOC::U8;
-		break;
-	default:
-		cemu_assert_debug(false);
-		return false;
-	}
-
-	uint32 elementSize = 0;
-	
-	if (relocType == PPCASM_RELOC::FLOAT)
-		elementSize = 4;
-	else if (relocType == PPCASM_RELOC::DOUBLE)
-		elementSize = 8;
-	else if (relocType == PPCASM_RELOC::U32)
-		elementSize = 4;
-	else if (relocType == PPCASM_RELOC::U16)
-		elementSize = 2;
-	else if (relocType == PPCASM_RELOC::U8)
-		elementSize = 1;
-	else
-		cemu_assert_debug(false);
-	
-	_ppcAssembler_setAlignment(internalInfo, elementSize);
-	size_t elementCount = internalInfo.listOperandStr.size();
-	internalInfo.ctx->outputData.reserve(elementSize * elementCount);
-	size_t writeIndex = 0;
-	for (size_t i = 0; i < elementCount; i++)
-	{
-		std::string_view expressionStr = internalInfo.listOperandStr[i].str;
-		// handle string constants
-		if (internalInfo.listOperandStr[i].str.size() >= 1 && expressionStr[0] == '"')
+		const InstrDef& d = *st.def;
+		const size_t argc = st.args.size();
+		switch (d.form)
 		{
-			if (dataDirective != ASM_DATA_DIRECTIVE::U8)
-			{
-				ppcAssembler_setError(internalInfo.ctx, "Strings constants are only allowed in .byte or .string data directives");
+		case Form::Bare:
+			return true;
+		case Form::CompareReg:
+			if (argc == 2)
+				return OrGpr(st, 0, 16) && OrGpr(st, 1, 11);
+			return OrCrField(st, 0, 21, true) && OrGpr(st, 1, 16) && OrGpr(st, 2, 11);
+		case Form::CompareImm:
+			if (argc == 2)
+				return OrGpr(st, 0, 16) && OrImm16(st, 1, 0);
+			return OrCrField(st, 0, 21, true) && OrGpr(st, 1, 16) && OrImm16(st, 2, 0);
+		case Form::CompareFp:
+			if (argc == 2)
+				return OrFpr(st, 0, 16) && OrFpr(st, 1, 11);
+			return OrCrField(st, 0, 21, true) && OrFpr(st, 1, 16) && OrFpr(st, 2, 11);
+		case Form::ShiftImm:
+			return OrGpr(st, 0, 16) && OrGpr(st, 1, 21) && OrImm5(st, 2, 11);
+		case Form::Rotate:
+			return OrGpr(st, 0, 16) && OrGpr(st, 1, 21) && OrImm5(st, 2, 11) && OrImm5(st, 3, 6) && OrImm5(st, 4, 1);
+		case Form::RotateReg:
+			return OrGpr(st, 0, 16) && OrGpr(st, 1, 21) && OrGpr(st, 2, 11) && OrImm5(st, 3, 6) && OrImm5(st, 4, 1);
+		case Form::RotateRegAlias:
+		{
+			if (!(OrGpr(st, 0, 16) && OrGpr(st, 1, 21) && OrGpr(st, 2, 11)))
 				return false;
-			}
-			if (expressionStr.size() < 2 || expressionStr[expressionStr.size()-1] != '"')
-			{
-				ppcAssembler_setError(internalInfo.ctx, "String constants must end with a quotation mark. Example: \"text\"");
+			if (d.op == PPCASM_OP_ROTLW || d.op == PPCASM_OP_ROTLW_)
+				st.word |= 31u << 1; // MB = 0, ME = 31
+			return true;
+		}
+		case Form::RotateAlias:
+		{
+			if (!(OrGpr(st, 0, 16) && OrGpr(st, 1, 21)))
 				return false;
-			}
-			expressionStr.remove_prefix(1);
-			expressionStr.remove_suffix(1);
-			// unescape C-style characters
-			std::vector<uint8> stringData;
-			stringData.reserve(expressionStr.size());
-			while (!expressionStr.empty())
+			// the derived SH/MB/ME are OR-ed in without masking, as uint8 values
+			uint8 sh = 0, mb = 0, me = 0;
+			sint8 n = 0, b = 0;
+			switch (d.op)
 			{
-				char c = expressionStr.front();
-				expressionStr.remove_prefix(1);
-				if (c != '\\')
-				{
-					stringData.push_back(c);
-					continue;
-				}
-				if (expressionStr.empty())
-					break;
-				c = expressionStr.front();
-				expressionStr.remove_prefix(1);
-				if (c >= 'A' && c <= 'Z')
-					c -= ('A' - 'a');
-				if (c == '\\')
-					stringData.push_back(c);
-				else if (c == 'n')
-					stringData.push_back('\n');
-				else if (c == 't')
-					stringData.push_back('\t');
-				else if (c == 'r')
-					stringData.push_back('\r');
-				else if (c == '\"')
-					stringData.push_back('\"');
-				else if (c == '\'')
-					stringData.push_back('\'');
-				else if (c == 'x')
-				{
-					uint32 value = 0;
-					bool hasDigits = false;
-					while (!expressionStr.empty())
-					{
-						char h = expressionStr.front();
-						uint32 digit;
-						if (h >= '0' && h <= '9')
-							digit = h - '0';
-						else if (h >= 'a' && h <= 'f')
-							digit = h - 'a' + 10;
-						else if (h >= 'A' && h <= 'F')
-							digit = h - 'A' + 10;
-						else
-							break;
-						hasDigits = true;
-						value = (value << 4) | digit;
-						expressionStr.remove_prefix(1);
-					}
-					if (hasDigits)
-						stringData.push_back((uint8)value);
-					else
-					{
-						ppcAssembler_setError(internalInfo.ctx, "String contains invalid hex escape sequence");
-						return false;
-					}
-					break;
-				}
-				else
-					stringData.push_back('\\'); // output as backward slash if unhandled
-			}
-			// write string bytes + null-termination character
-			internalInfo.ctx->outputData.insert(internalInfo.ctx->outputData.end(), stringData.data(), stringData.data() + stringData.size());
-			internalInfo.ctx->outputData.emplace_back(0);
-			writeIndex = internalInfo.ctx->outputData.size();
-			continue;
-		}
-		// numeric constants
-		internalInfo.ctx->outputData.resize(writeIndex + elementSize);
-		uint8* elementPtr = internalInfo.ctx->outputData.data() + writeIndex;
-		for (uint32 b = 0; b < elementSize; b++)
-		{
-			internalInfo.ctx->outputData[writeIndex] = 0;
-			writeIndex++;
-		}
-		ExpressionParser ep;
-		if (ep.IsConstantExpression(expressionStr))
-		{
-			double solution = ep.Evaluate(expressionStr);
-			switch (relocType)
-			{
-			case PPCASM_RELOC::U32:
-				*(uint32be*)elementPtr = (uint32)solution;
+			case PPCASM_OP_EXTLWI:
+			case PPCASM_OP_EXTLWI_:
+				if (!ConstImm5(st, 2, n) || !ConstImm5(st, 3, b))
+					return false;
+				sh = (uint8)b; mb = 0; me = (uint8)(n - 1);
 				break;
-			case PPCASM_RELOC::U16:
-				*(uint16be*)elementPtr = (uint16)solution;
+			case PPCASM_OP_EXTRWI:
+			case PPCASM_OP_EXTRWI_:
+				if (!ConstImm5(st, 2, n) || !ConstImm5(st, 3, b))
+					return false;
+				sh = (uint8)(b + n); mb = (uint8)(32 - n); me = 31;
 				break;
-			case PPCASM_RELOC::U8:
-				*(uint8be*)elementPtr = (uint8)solution;
+			case PPCASM_OP_SLWI:
+			case PPCASM_OP_SLWI_:
+				if (!ConstImm5(st, 2, n))
+					return false;
+				sh = (uint8)n; mb = 0; me = (uint8)(31 - n);
 				break;
-			case PPCASM_RELOC::DOUBLE:
-				*(float64be*)elementPtr = solution;
+			case PPCASM_OP_SRWI:
+			case PPCASM_OP_SRWI_:
+				if (!ConstImm5(st, 2, n))
+					return false;
+				sh = (uint8)(32 - n); mb = (uint8)n; me = 31;
 				break;
-			case PPCASM_RELOC::FLOAT:
-				*(float32be*)elementPtr = (float)solution;
+			case PPCASM_OP_CLRLWI:
+			case PPCASM_OP_CLRLWI_:
+				if (!ConstImm5(st, 2, n))
+					return false;
+				sh = 0; mb = (uint8)n; me = 31;
+				break;
+			case PPCASM_OP_CLRRWI:
+			case PPCASM_OP_CLRRWI_:
+				if (!ConstImm5(st, 2, n))
+					return false;
+				sh = 0; mb = 0; me = (uint8)(31 - n);
 				break;
 			default:
 				cemu_assert_debug(false);
+				break;
 			}
-
+			st.word |= ((uint32)sh << 11) | ((uint32)mb << 6) | ((uint32)me << 1);
+			return true;
 		}
-		else
-		{
-			// generate reloc if we cant resolve immediately
-			internalInfo.ctx->list_relocs.emplace_back(relocType, std::string(internalInfo.listOperandStr[i].str), (uint32)(elementPtr - internalInfo.ctx->outputData.data()), 0, 0);
+		case Form::CondBranch:
+			if (d.op == PPCASM_OP_BC)
+			{
+				// bc BO, BI, target
+				sint8 bo = 0;
+				if (!ConstImm5(st, 0, bo) || !OrCrBit(st, 1, 16) || !OrBranchTarget(st, 2, -32768, 32767, 0xFFFC, PPCASM_RELOC::BRANCH_S16))
+					return false;
+				st.word |= (uint32)(sint32)bo << 21;
+				return true;
+			}
+			if (argc == 2)
+			{
+				if (!OrCrField(st, 0, 16, true) || !OrBranchTarget(st, 1, -32768, 32767, 0xFFFC, PPCASM_RELOC::BRANCH_S16))
+					return false;
+			}
+			else if (!OrBranchTarget(st, 0, -32768, 32767, 0xFFFC, PPCASM_RELOC::BRANCH_S16))
+				return false;
+			// either suffix ('+' or '-') sets the hint bit
+			if (hasBranchHint)
+				st.word |= 1u << 21;
+			return true;
+		case Form::Branch:
+			return OrBranchTarget(st, 0, -33554432, 33554431, 0x3FFFFFC, PPCASM_RELOC::BRANCH_S26);
+		case Form::CondReturn:
+			if (argc >= 1)
+				return OrCrField(st, 0, 18, false);
+			return true;
+		case Form::CrLogic:
+			return OrCrBit(st, 0, 21) && OrCrBit(st, 1, 16) && OrCrBit(st, 2, 11);
+		case Form::Generic:
+			break;
 		}
+		cemu_assert_debug(false);
+		return false;
 	}
-	return true;
-}
 
-void _ppcAssembler_emitAlignDirective(PPCAssemblerContext& internalInfo, sint32 alignmentValue)
-{
-	_ppcAssembler_setAlignment(internalInfo, 1);
-	uint32 currentAddr = internalInfo.ctx->virtualAddress;
-	while ((currentAddr % (uint32)alignmentValue))
+	/* ---------------------------------------------------------------- */
+	/* assembler: alignment and data directives                          */
+	/* ---------------------------------------------------------------- */
+
+	void SetAlignment(PPCAssemblerInOut* io, uint32 alignment)
 	{
-		internalInfo.ctx->outputData.emplace_back(0);
-		currentAddr++;
+		if (io->forceNoAlignment)
+			alignment = 1;
+		io->alignmentRequirement = alignment;
+		const uint32 aligned = alignment == 0 ? io->virtualAddress : (io->virtualAddress + alignment - 1) & ~(alignment - 1);
+		io->alignmentPaddingSize = aligned - io->virtualAddress;
+		io->virtualAddressAligned = aligned;
+	}
+
+	struct DataKind
+	{
+		PPCASM_RELOC type;
+		uint32 size;
+	};
+
+	std::optional<DataKind> DataDirective(std::string_view name)
+	{
+		static const std::pair<const char*, DataKind> kDirectives[] =
+		{
+			{ ".FLOAT", { PPCASM_RELOC::FLOAT, 4 } },
+			{ ".DOUBLE", { PPCASM_RELOC::DOUBLE, 8 } },
+			{ ".INT", { PPCASM_RELOC::U32, 4 } }, { ".UINT", { PPCASM_RELOC::U32, 4 } }, { ".PTR", { PPCASM_RELOC::U32, 4 } }, { ".U32", { PPCASM_RELOC::U32, 4 } }, { ".LONG", { PPCASM_RELOC::U32, 4 } },
+			{ ".WORD", { PPCASM_RELOC::U16, 2 } }, { ".U16", { PPCASM_RELOC::U16, 2 } }, { ".SHORT", { PPCASM_RELOC::U16, 2 } },
+			{ ".BYTE", { PPCASM_RELOC::U8, 1 } }, { ".STRING", { PPCASM_RELOC::U8, 1 } }, { ".U8", { PPCASM_RELOC::U8, 1 } }, { ".CHAR", { PPCASM_RELOC::U8, 1 } },
+		};
+		for (auto& [n, k] : kDirectives)
+			if (name == n)
+				return k;
+		return std::nullopt;
+	}
+
+	// "text" literal with C style escapes. Returns false (error set) on bad input.
+	bool DecodeStringLiteral(PPCAssemblerInOut* io, std::string_view literal, std::vector<uint8>& bytes)
+	{
+		std::string_view s = literal.substr(1, literal.size() - 2);
+		size_t i = 0;
+		while (i < s.size())
+		{
+			const char c = s[i++];
+			if (c != '\\')
+			{
+				bytes.push_back((uint8)c);
+				continue;
+			}
+			if (i >= s.size())
+				break; // lone trailing backslash is dropped
+			char e = s[i++];
+			if (e >= 'A' && e <= 'Z')
+				e = (char)(e - 'A' + 'a');
+			switch (e)
+			{
+			case '\\': bytes.push_back('\\'); break;
+			case 'n': bytes.push_back('\n'); break;
+			case 't': bytes.push_back('\t'); break;
+			case 'r': bytes.push_back('\r'); break;
+			case '"': bytes.push_back('"'); break;
+			case '\'': bytes.push_back('\''); break;
+			case 'x':
+			{
+				uint32 value = 0;
+				size_t digits = 0;
+				while (i < s.size())
+				{
+					const char h = s[i];
+					uint32 v;
+					if (h >= '0' && h <= '9') v = (uint32)(h - '0');
+					else if (h >= 'a' && h <= 'f') v = (uint32)(h - 'a' + 10);
+					else if (h >= 'A' && h <= 'F') v = (uint32)(h - 'A' + 10);
+					else break;
+					value = (value << 4) | v;
+					digits++;
+					i++;
+				}
+				if (digits == 0)
+				{
+					io->errorMsg = "String contains invalid hex escape sequence";
+					return false;
+				}
+				bytes.push_back((uint8)value);
+				// a hex escape ends the literal: anything after it is ignored
+				return true;
+			}
+			default:
+				bytes.push_back('\\'); // unknown escape: keep the backslash, drop the letter
+				break;
+			}
+		}
+		return true;
+	}
+
+	bool EmitData(AsmState& st, std::string_view directiveName, const DataKind& kind)
+	{
+		PPCAssemblerInOut* io = st.io;
+		if (st.args.empty())
+			return Fail(io, fmt::format("Value expected after data directive {}", directiveName));
+		SetAlignment(io, kind.size);
+		io->outputData.reserve(kind.size * st.args.size());
+		for (std::string_view arg : st.args)
+		{
+			if (!arg.empty() && arg[0] == '"')
+			{
+				if (kind.type != PPCASM_RELOC::U8)
+					return Fail(io, "Strings constants are only allowed in .byte or .string data directives");
+				if (arg.size() < 2 || arg.back() != '"')
+					return Fail(io, "String constants must end with a quotation mark. Example: \"text\"");
+				std::vector<uint8> bytes;
+				if (!DecodeStringLiteral(io, arg, bytes))
+					return false;
+				io->outputData.insert(io->outputData.end(), bytes.begin(), bytes.end());
+				io->outputData.push_back(0);
+				continue;
+			}
+			const size_t offset = io->outputData.size();
+			io->outputData.resize(offset + kind.size, 0);
+			for (size_t i = 0; i < kind.size; i++)
+				io->outputData[offset + i] = 0;
+			ExpressionParser ep;
+			if (!ep.IsConstantExpression(arg))
+			{
+				AddReloc(st, kind.type, std::string(arg), (uint32)offset, 0, 0);
+				continue;
+			}
+			const double v = ep.Evaluate(arg);
+			uint8* dst = io->outputData.data() + offset;
+			switch (kind.type)
+			{
+			case PPCASM_RELOC::U32: *(uint32be*)dst = (uint32)TruncToS64(v); break;
+			case PPCASM_RELOC::U16: *(uint16be*)dst = (uint16)TruncToS32(v); break;
+			case PPCASM_RELOC::U8: *dst = (uint8)TruncToS32(v); break;
+			case PPCASM_RELOC::DOUBLE: *(float64be*)dst = v; break;
+			case PPCASM_RELOC::FLOAT: *(float32be*)dst = (float)v; break;
+			default: cemu_assert_debug(false); break;
+			}
+		}
+		return true;
+	}
+
+	bool EmitAlign(AsmState& st)
+	{
+		PPCAssemblerInOut* io = st.io;
+		if (st.args.size() != 1)
+			return Fail(io, ".align directive must have exactly one operand");
+		ExpressionParser ep;
+		if (!ep.IsConstantExpression(st.args[0]))
+			return Fail(io, fmt::format("Expression \'{}\' for .align directive is not a constant", st.args[0]));
+		const sint32 alignment = ep.Evaluate<sint32>(st.args[0]);
+		if (alignment <= 0 || alignment >= 256)
+			return Fail(io, fmt::format("Alignment value \'{}\' is not within the allowed range (1-256)", alignment));
+		SetAlignment(io, 1);
+		for (uint32 addr = io->virtualAddress; addr % (uint32)alignment != 0; addr++)
+			io->outputData.push_back(0);
+		return true;
+	}
+
+	/* ---------------------------------------------------------------- */
+	/* assembler: line splitting                                         */
+	/* ---------------------------------------------------------------- */
+
+	inline bool IsBlank(char c) { return c == ' ' || c == '\t'; }
+
+	// odd number of backslashes directly before pos (within the current operand)?
+	bool IsEscapedQuote(std::string_view s, size_t operandStart, size_t pos)
+	{
+		size_t n = 0;
+		while (pos > operandStart && s[pos - 1] == '\\')
+		{
+			n++;
+			pos--;
+		}
+		return (n & 1) != 0;
+	}
+
+	const InstrDef* FindByName(std::string_view upperName)
+	{
+		for (const InstrDef& d : kInstrTable)
+			if (upperName == ppcAssembler_getInstructionName(d.op))
+				return &d;
+		return nullptr;
 	}
 }
 
-void _ppcAssembler_translateAlias(boost::static_string<32>& instructionName)
+const char* ppcAssembler_getInstructionName(uint32 ppcAsmOp)
 {
-	if (instructionName.compare("BNL") == 0)
-		instructionName.assign("BGT");
-	if (instructionName.compare("BNG") == 0)
-		instructionName.assign("BLE");
+	for (const OpName& e : kOpNames)
+		if ((uint32)e.op == ppcAsmOp)
+			return e.name;
+	return "UNDEF";
+}
+
+void ppcAssembler_disassemble(uint32 virtualAddress, uint32 opcode, PPCDisassembledInstruction* disInstr)
+{
+	memset(disInstr, 0, sizeof(PPCDisassembledInstruction));
+	const auto& matchBits = GetMatchBits();
+	const InstrDef* best = nullptr;
+	for (size_t i = 0; i < kInstrCount; i++)
+	{
+		const InstrDef& d = kInstrTable[i];
+		if ((opcode & matchBits[i].mask) != matchBits[i].bits)
+			continue;
+		if ((opcode & d.fixedMask) != d.fixedBits)
+			continue;
+		if (!RuleHolds(d.rule, opcode))
+			continue;
+		if (best && d.priority < best->priority)
+			continue;
+		if (!std::all_of(d.ties.begin(), d.ties.end(), [&](const TieDef& t) { return TieHolds(t, opcode); }))
+			continue;
+		best = &d; // later rows win ties
+	}
+	if (!best)
+	{
+		disInstr->ppcAsmCode = PPCASM_OP_UKN;
+		return;
+	}
+	disInstr->ppcAsmCode = best->op;
+	if (best->form == Form::Generic)
+	{
+		for (size_t i = 0; i < best->slots.size(); i++)
+			DecodeSlot(disInstr, best->slots[i], opcode, i);
+	}
+	else
+		DecodeFixedLayout(*best, virtualAddress, opcode, disInstr);
 }
 
 bool ppcAssembler_assembleSingleInstruction(char const* text, PPCAssemblerInOut* ctx)
 {
-	PPCAssemblerContext internalInfo;
-	internalInfo.ctx = ctx;
-	// tokenize input
-	char const* currentPtr = text;
-	char const* startPtr = text;
-	char const* endPtr = startPtr+strlen(startPtr);
-	// cut off comments
-	for (const char* itrPtr = startPtr; itrPtr < endPtr; itrPtr++)
+	// comments start at '#', anywhere on the line
+	std::string_view line(text);
+	if (size_t hash = line.find('#'); hash != std::string_view::npos)
+		line = line.substr(0, hash);
+	while (!line.empty() && IsBlank(line.back()))
+		line.remove_suffix(1);
+	while (!line.empty() && IsBlank(line.front()))
+		line.remove_prefix(1);
+
+	// mnemonic, upper cased, at most 32 characters
+	size_t pos = 0;
+	std::string name;
+	while (pos < line.size() && !IsBlank(line[pos]))
 	{
-		if (*itrPtr == '#')
-		{
-			endPtr = itrPtr;
-			break;
-		}
+		if (name.size() >= 32)
+			return Fail(ctx, "Instruction name exceeds maximum allowed length");
+		name.push_back((char)toupper((unsigned char)line[pos]));
+		pos++;
 	}
-	// trim whitespaces at end and beginning
-	while (endPtr > currentPtr)
-	{
-		if (endPtr[-1] != ' ' && endPtr[-1] != '\t')
-			break;
-		endPtr--;
-	}
-	while (currentPtr < endPtr)
-	{
-		if (currentPtr[0] != ' ' && currentPtr[0] != '\t')
-			break;
-		currentPtr++;
-	}
-	// parse name of instruction
-	boost::static_string<32> instructionName;
-	while (*currentPtr != ' ' && *currentPtr != '\t' && currentPtr < endPtr)
-	{
-		if (instructionName.size() >= instructionName.capacity())
-		{
-			ppcAssembler_setError(ctx, "Instruction name exceeds maximum allowed length");
-			return false;
-		}
-		instructionName.push_back((char)toupper(*currentPtr));
-		currentPtr++;
-	}
-	if (instructionName.empty())
-	{
-		ppcAssembler_setError(ctx, "Instruction name is invalid");
-		return false;
-	}
-	// handle branch hint suffix
+	if (name.empty())
+		return Fail(ctx, "Instruction name is invalid");
+
+	// branch prediction suffix
 	bool hasBranchHint = false;
-	bool branchHintTaken = false; // '+' -> true, '-' -> false
-	if (instructionName.back() == '+')
+	if (name.back() == '+')
 	{
 		hasBranchHint = true;
-		branchHintTaken = true;
-		instructionName.pop_back();
+		name.pop_back();
 	}
-	if (instructionName.back() == '-')
+	if (!name.empty() && name.back() == '-')
 	{
 		hasBranchHint = true;
-		branchHintTaken = false;
-		instructionName.pop_back();
+		name.pop_back();
 	}
-	// handle instruction name aliases
-	_ppcAssembler_translateAlias(instructionName);
-	// parse operands
-	internalInfo.listOperandStr.clear();
+	if (name == "BNL")
+		name = "BGT";
+	else if (name == "BNG")
+		name = "BLE";
 
-	bool isInString = false;
-	auto isEscaped = [](const char* operandStartPtr, const char* ptr)
+	// operands: split at commas outside of string literals, trim blanks. The
+	// character right after the mnemonic (and after each comma) is skipped.
+	AsmState st;
+	st.io = ctx;
+	bool inString = false;
+	while (pos < line.size())
 	{
-		size_t backslashCount = 0;
-		while (ptr > operandStartPtr && ptr[-1] == '\\')
+		pos++;
+		const size_t start = pos;
+		while (pos < line.size())
 		{
-			backslashCount++;
-			ptr--;
-		}
-		return (backslashCount & 1) != 0;
-	};
-
-	while (currentPtr < endPtr)
-	{
-		currentPtr++;
-		startPtr = currentPtr;
-		// find end of operand
-		while (currentPtr < endPtr)
-		{
-			if (*currentPtr == '"' && !isEscaped(startPtr, currentPtr))
-				isInString=!isInString;
-
-			if (*currentPtr == ',' && !isInString)
+			if (line[pos] == '"' && !IsEscapedQuote(line, start, pos))
+				inString = !inString;
+			if (line[pos] == ',' && !inString)
 				break;
-			currentPtr++;
+			pos++;
 		}
-		// trim whitespaces at the beginning and end
-		const char* operandStartPtr = startPtr;
-		const char* operandEndPtr = currentPtr;
-		while (operandStartPtr < endPtr)
-		{
-			if (*operandStartPtr != ' ' && *operandStartPtr != '\t')
-				break;
-			operandStartPtr++;
-		}
-		while (operandEndPtr > operandStartPtr)
-		{
-			if (operandEndPtr[-1] != ' ' && operandEndPtr[-1] != '\t')
-				break;
-			operandEndPtr--;
-		}
-		internalInfo.listOperandStr.emplace_back(operandStartPtr, operandEndPtr);
+		size_t b = start, e = pos;
+		while (b < line.size() && IsBlank(line[b]))
+			b++;
+		while (e > b && IsBlank(line[e - 1]))
+			e--;
+		st.args.push_back(e > b ? line.substr(b, e - b) : std::string_view(line.data() + b, 0));
 	}
-	// check for data directives
-	ASM_DATA_DIRECTIVE dataDirective = ASM_DATA_DIRECTIVE::NONE;
-	if (instructionName.compare(".FLOAT") == 0)
-		dataDirective = ASM_DATA_DIRECTIVE::FLOAT;
-	else if (instructionName.compare(".DOUBLE") == 0)
-		dataDirective = ASM_DATA_DIRECTIVE::DOUBLE;
-	else if (instructionName.compare(".INT") == 0 || instructionName.compare(".UINT") == 0 || instructionName.compare(".PTR") == 0 || instructionName.compare(".U32") == 0 || instructionName.compare(".LONG") == 0)
-		dataDirective = ASM_DATA_DIRECTIVE::U32;
-	else if (instructionName.compare(".WORD") == 0 || instructionName.compare(".U16") == 0 || instructionName.compare(".SHORT") == 0)
-		dataDirective = ASM_DATA_DIRECTIVE::U16;
-	else if (instructionName.compare(".BYTE") == 0 || instructionName.compare(".STRING") == 0 || instructionName.compare(".U8") == 0 || instructionName.compare(".CHAR") == 0)
-		dataDirective = ASM_DATA_DIRECTIVE::U8;
 
-	if (dataDirective != ASM_DATA_DIRECTIVE::NONE)
+	if (auto data = DataDirective(name))
+		return EmitData(st, name, *data);
+	if (name == ".ALIGN")
+		return EmitAlign(st);
+
+	const InstrDef* def = FindByName(name);
+	if (!def)
+		return Fail(ctx, fmt::format("Instruction \'{}\' is unknown or not supported", name));
+	st.def = def;
+	SetAlignment(ctx, 4);
+
+	uint32 primaryMask, primaryBits;
+	PrimaryMatchBits(*def, primaryMask, primaryBits);
+	st.word = (primaryBits & primaryMask) | (def->fixedBits & def->fixedMask);
+
+	if (def->form == Form::Generic)
 	{
-		if (internalInfo.listOperandStr.size() < 1)
-		{
-			ppcAssembler_setError(ctx, fmt::format("Value expected after data directive {}", instructionName.c_str()));
-			return false;
-		}
-		return _ppcAssembler_emitDataDirective(internalInfo, dataDirective);
-	}
-	// handle .align directive
-	if (instructionName.compare(".ALIGN") == 0)
-	{
-		// handle align data directive
-		if (internalInfo.listOperandStr.size() != 1)
-		{
-			ppcAssembler_setError(ctx, ".align directive must have exactly one operand");
-			return false;
-		}
-		ExpressionParser ep;
-		try
-		{
-			if (ep.IsConstantExpression(internalInfo.listOperandStr[0].str))
-			{
-				sint32 alignmentValue = ep.Evaluate<sint32>(internalInfo.listOperandStr[0].str);
-				if (alignmentValue <= 0 || alignmentValue >= 256)
-				{
-					ppcAssembler_setError(ctx, fmt::format("Alignment value \'{}\' is not within the allowed range (1-256)", alignmentValue));
-					return false;
-				}
-				_ppcAssembler_emitAlignDirective(internalInfo, alignmentValue);
-				return true;
-			}
-			else
-			{
-				ppcAssembler_setError(ctx, fmt::format("Expression \'{}\' for .align directive is not a constant", internalInfo.listOperandStr[0].str));
+		for (size_t i = 0; i < def->slots.size(); i++)
+			if (!EncodeSlot(st, def->slots[i], i))
 				return false;
-			}
-		}
-		catch (std::exception* e)
-		{
-			ppcAssembler_setError(ctx, fmt::format("Expression \'{}\' for .align directive could not be evaluated. Error: {}", internalInfo.listOperandStr[0].str, e->what()));
-			return false;
-		}
+		for (const TieDef& t : def->ties)
+			ApplyTie(t, st.word);
 	}
-	// find match in instruction definition table
-	PPCInstructionDef* iDef = nullptr;
-	for (sint32 i = 0; i < sizeof(ppcInstructionTable) / sizeof(PPCInstructionDef); i++)
-	{
-		PPCInstructionDef* instr = ppcInstructionTable + i;
-		if (instructionName.compare(ppcAssembler_getInstructionName(instr->ppcAsmOp)) == 0)
-		{
-			iDef = instr;
-			internalInfo.iDef = iDef;
-			break;
-		}
-	}
-	if (iDef == nullptr)
-	{
-		ppcAssembler_setError(ctx, fmt::format("Instruction \'{}\' is unknown or not supported", instructionName.c_str()));
+	else if (!AssembleFixedLayout(st, hasBranchHint))
 		return false;
-	}
-	// build opcode
-	_ppcAssembler_setAlignment(internalInfo, 4);
-	uint32 opcMask;
-	uint32 opcBits;
-	ppcAssembler_buildOpcMask(iDef, opcMask, opcBits);
-	internalInfo.opcode = opcBits & opcMask;
-	internalInfo.opcode |= (iDef->compareBits&iDef->maskBits);
-	// handle operands
-	if (iDef->instructionForm == OP_FORM_DYNAMIC)
-	{
-		for (size_t i = 0; i < iDef->encodedOperands.size(); i++)
-		{
-			bool r = std::visit([&](auto&& op) -> bool {
-				return op.AssembleOperand(&internalInfo, iDef, internalInfo.opcode, i);
-				}, iDef->encodedOperands[i]);
-			if (!r)
-				return false;
-		}
-		for(auto& it : iDef->constraints)
-		{
-			std::visit([&](auto&& op) {
-				op.AssembleConstraint(&internalInfo, iDef, internalInfo.opcode);
-				}, it);
-		}
-	}
-	else if (iDef->instructionForm == OP_FORM_NO_OPERAND)
-	{
-		// do nothing
-	}
-	else if (iDef->instructionForm == OP_FORM_OP3_A_CMP)
-	{
-		if (internalInfo.listOperandStr.size() == 2)
-		{
-			// implicit cr0
-			if (_ppcAssembler_processGPROperand(internalInfo, 0, 16) == false)
-				return false;
-			if (_ppcAssembler_processGPROperand(internalInfo, 1, 11) == false)
-				return false;
-		}
-		else
-		{
-			if (_ppcAssembler_processCROperand(internalInfo, 0, 21, true) == false)
-				return false;
-			if (_ppcAssembler_processGPROperand(internalInfo, 1, 16) == false)
-				return false;
-			if (_ppcAssembler_processGPROperand(internalInfo, 2, 11) == false)
-				return false;
-		}
-	}
-	else if (iDef->instructionForm == OP_FORM_CMP_SIMM)
-	{
-		if (internalInfo.listOperandStr.size() == 2)
-		{
-			// implicit cr0
-			if (_ppcAssembler_processGPROperand(internalInfo, 0, 16) == false)
-				return false;
-			if (_ppcAssembler_processImmediateOperandS16(internalInfo, 1, 0) == false)
-				return false;
-		}
-		else
-		{
-			if (_ppcAssembler_processCROperand(internalInfo, 0, 21, true) == false)
-				return false;
-			if (_ppcAssembler_processGPROperand(internalInfo, 1, 16) == false)
-				return false;
-			if (_ppcAssembler_processImmediateOperandS16(internalInfo, 2, 0) == false)
-				return false;
-		}
-	}
-	else if (iDef->instructionForm == OP_FORM_OP3_A_IMM)
-	{
-		if (_ppcAssembler_processGPROperand(internalInfo, 0, 16) == false)
-			return false;
-		if (_ppcAssembler_processGPROperand(internalInfo, 1, 21) == false)
-			return false;
-		if (_ppcAssembler_processImmediateOperandU5(internalInfo, _getOpIndex(iDef, 2), 11) == false)
-			return false;
-	}
-	else if (iDef->instructionForm == OP_FORM_X_FP_CMP)
-	{
-		if (internalInfo.listOperandStr.size() == 2)
-		{
-			// implicit cr0
-			if (_ppcAssembler_processFPROperand(internalInfo, 0, 16) == false)
-				return false;
-			if (_ppcAssembler_processFPROperand(internalInfo, 1, 11) == false)
-				return false;
-		}
-		else
-		{
-			if (_ppcAssembler_processCROperand(internalInfo, 0, 21, true) == false)
-				return false;
-			if (_ppcAssembler_processFPROperand(internalInfo, 1, 16) == false)
-				return false;
-			if (_ppcAssembler_processFPROperand(internalInfo, 2, 11) == false)
-				return false;
-		}
-	}
-	else if (iDef->instructionForm == OP_FORM_RLWINM)
-	{
-		if (_ppcAssembler_processGPROperand(internalInfo, 0, 16) == false)
-			return false;
-		if (_ppcAssembler_processGPROperand(internalInfo, 1, 21) == false)
-			return false;
-		if (_ppcAssembler_processImmediateOperandU5(internalInfo, 2, 11) == false)
-			return false;
-		if (_ppcAssembler_processImmediateOperandU5(internalInfo, 3, 6) == false)
-			return false;
-		if (_ppcAssembler_processImmediateOperandU5(internalInfo, 4, 1) == false)
-			return false;
-	}
-	else if (iDef->instructionForm == OP_FORM_RLWINM_EXTENDED)
-	{
-		if (_ppcAssembler_processGPROperand(internalInfo, 0, 16) == false)
-			return false;
-		if (_ppcAssembler_processGPROperand(internalInfo, 1, 21) == false)
-			return false;
 
-		uint8 SH = 0;
-		uint8 MB = 0;
-		uint8 ME = 0;
-
-		if (internalInfo.iDef->ppcAsmOp == PPCASM_OP_EXTLWI || internalInfo.iDef->ppcAsmOp == PPCASM_OP_EXTLWI_)
-		{
-			sint8 n, b;
-			if (!_ppcAssembler_processImmediateOperandU5Const(internalInfo, 2, n))
-				return false;
-			if (!_ppcAssembler_processImmediateOperandU5Const(internalInfo, 3, b))
-				return false;
-
-			SH = b;
-			MB = 0;
-			ME = n - 1;
-		}
-		else if (internalInfo.iDef->ppcAsmOp == PPCASM_OP_EXTRWI || internalInfo.iDef->ppcAsmOp == PPCASM_OP_EXTRWI_)
-		{
-			sint8 n, b;
-			if (!_ppcAssembler_processImmediateOperandU5Const(internalInfo, 2, n))
-				return false;
-			if (!_ppcAssembler_processImmediateOperandU5Const(internalInfo, 3, b))
-				return false;
-
-			SH = b + n;
-			MB = 32 - n;
-			ME = 31;
-		}
-		else if (internalInfo.iDef->ppcAsmOp == PPCASM_OP_SLWI || internalInfo.iDef->ppcAsmOp == PPCASM_OP_SLWI_)
-		{
-			sint8 n;
-			if (!_ppcAssembler_processImmediateOperandU5Const(internalInfo, 2, n))
-				return false;
-
-			SH = n;
-			MB = 0;
-			ME = 31 - n;
-		}
-		else if (internalInfo.iDef->ppcAsmOp == PPCASM_OP_SRWI || internalInfo.iDef->ppcAsmOp == PPCASM_OP_SRWI_)
-		{
-			sint8 n;
-			if (!_ppcAssembler_processImmediateOperandU5Const(internalInfo, 2, n))
-				return false;
-			SH = 32 - n;
-			MB = n;
-			ME = 31;
-		}
-		else if (internalInfo.iDef->ppcAsmOp == PPCASM_OP_CLRLWI || internalInfo.iDef->ppcAsmOp == PPCASM_OP_CLRLWI_)
-		{
-			sint8 n;
-			if (!_ppcAssembler_processImmediateOperandU5Const(internalInfo, 2, n))
-				return false;
-			SH = 0;
-			MB = n;
-			ME = 31;
-		}
-		else if (internalInfo.iDef->ppcAsmOp == PPCASM_OP_CLRRWI || internalInfo.iDef->ppcAsmOp == PPCASM_OP_CLRRWI_)
-		{
-			sint8 n;
-			if (!_ppcAssembler_processImmediateOperandU5Const(internalInfo, 2, n))
-				return false;
-			SH = 0;
-			MB = 0;
-			ME = 31 - n;
-		}
-		else
-		{
-			cemu_assert_debug(false);
-		}
-
-		internalInfo.opcode |= (SH << 11);
-		internalInfo.opcode |= (MB << 6);
-		internalInfo.opcode |= (ME << 1);
-	}
-	else if (iDef->instructionForm == OP_FORM_RLWNM)
-	{
-		if (_ppcAssembler_processGPROperand(internalInfo, 0, 16) == false)
-			return false;
-		if (_ppcAssembler_processGPROperand(internalInfo, 1, 21) == false)
-			return false;
-		if (_ppcAssembler_processGPROperand(internalInfo, 2, 11) == false)
-			return false;
-		if (_ppcAssembler_processImmediateOperandU5(internalInfo, 3, 6) == false)
-			return false;
-		if (_ppcAssembler_processImmediateOperandU5(internalInfo, 4, 1) == false)
-			return false;
-	}
-	else if (iDef->instructionForm == OP_FORM_RLWNM_EXTENDED)
-	{
-		if (_ppcAssembler_processGPROperand(internalInfo, 0, 16) == false)
-			return false;
-		if (_ppcAssembler_processGPROperand(internalInfo, 1, 21) == false)
-			return false;
-		if (_ppcAssembler_processGPROperand(internalInfo, 2, 11) == false)
-			return false;
-		uint32 MB = 0, ME = 0;
-		if (internalInfo.iDef->ppcAsmOp == PPCASM_OP_ROTLW || internalInfo.iDef->ppcAsmOp == PPCASM_OP_ROTLW_)
-		{
-			MB = 0;
-			ME = 31;
-		}
-		internalInfo.opcode |= (MB << 6);
-		internalInfo.opcode |= (ME << 1);
-	}
-	else if (iDef->instructionForm == OP_FORM_BRANCH_S16)
-	{
-		if (iDef->ppcAsmOp == PPCASM_OP_BC)
-		{
-			// generic conditional branch
-			// BC <BO>, <BI>, <dst>
-			sint8 bo;
-			if (_ppcAssembler_processImmediateOperandU5Const(internalInfo, 0, bo) == false)
-				return false;
-			if (_ppcAssembler_processBIOperand(internalInfo, 1, 16) == false)
-				return false;
-			if (_ppcAssembler_processBranchOperandS16(internalInfo, 2) == false)
-				return false;
-			internalInfo.opcode |= (bo << 21);
-		}
-		else
-		{
-			// BLE, BGT etc.
-			if (internalInfo.listOperandStr.size() == 2)
-			{
-				// explicit CR
-				if (_ppcAssembler_processCROperand(internalInfo, 0, 16, true) == false)
-					return false;
-				if (_ppcAssembler_processBranchOperandS16(internalInfo, 1) == false)
-					return false;
-			}
-			else
-			{
-				if (_ppcAssembler_processBranchOperandS16(internalInfo, 0) == false)
-					return false;
-			}
-			if (hasBranchHint)
-				internalInfo.opcode |= (1 << 21);
-		}
-	}
-	else if (iDef->instructionForm == OP_FORM_BRANCH_S24)
-	{
-		if (_ppcAssembler_processBranchOperandS26(internalInfo, 0) == false)
-			return false;
-	}
-	else if (iDef->instructionForm == OP_FORM_BRANCH_BCCLR)
-	{
-		// check for implicit cr
-		sint32 crIndex = 0;
-		if (internalInfo.listOperandStr.size() >= 1)
-		{
-			if (_ppcAssembler_processCROperand(internalInfo, 0, 18, false) == false)
-				return false;
-		}
-	}
-	else if (iDef->instructionForm == OP_FORM_XL_CR)
-	{
-		if (_ppcAssembler_processBIOperand(internalInfo, 0, 21) == false)
-			return false;
-		if (_ppcAssembler_processBIOperand(internalInfo, 1, 16) == false)
-			return false;
-		if (_ppcAssembler_processBIOperand(internalInfo, 2, 11) == false)
-			return false;
-	}
-	else
-	{
-		cemu_assert_debug(false); // unsupported instruction form
-		return false;
-	}
 	ctx->outputData.resize(4);
-	ctx->outputData[0] = (uint8)((internalInfo.opcode >> 24) & 0xFF);
-	ctx->outputData[1] = (uint8)((internalInfo.opcode >> 16) & 0xFF);
-	ctx->outputData[2] = (uint8)((internalInfo.opcode >>  8) & 0xFF);
-	ctx->outputData[3] = (uint8)((internalInfo.opcode >>  0) & 0xFF);
+	ctx->outputData[0] = (uint8)(st.word >> 24);
+	ctx->outputData[1] = (uint8)(st.word >> 16);
+	ctx->outputData[2] = (uint8)(st.word >> 8);
+	ctx->outputData[3] = (uint8)st.word;
 	return true;
 }
 
-void _testAsm(uint32 expected, const char* iText)
+/* ---- self test (debug builds) ---- */
+
+namespace
 {
-	PPCAssemblerInOut ctx{};
-	ctx.virtualAddress = 0;
-	if (!ppcAssembler_assembleSingleInstruction(iText, &ctx))
+	[[maybe_unused]] void ExpectWord(const char* source, uint32 expected)
 	{
-		cemu_assert_debug(false);
-		return;
+		PPCAssemblerInOut io{};
+		const bool ok = ppcAssembler_assembleSingleInstruction(source, &io);
+		cemu_assert_debug(ok && io.outputData.size() == 4);
+		if (!ok || io.outputData.size() != 4)
+			return;
+		const uint32 word = ((uint32)io.outputData[0] << 24) | ((uint32)io.outputData[1] << 16) | ((uint32)io.outputData[2] << 8) | io.outputData[3];
+		cemu_assert_debug(word == expected);
+		PPCDisassembledInstruction dis{};
+		ppcAssembler_disassemble(0, word, &dis);
+		cemu_assert_debug(dis.ppcAsmCode != PPCASM_OP_UKN);
 	}
-	cemu_assert_debug(ctx.outputData.size() == 4);
-	uint32 opcode = 0;
-	opcode |= ((uint32)ctx.outputData[0] << 24);
-	opcode |= ((uint32)ctx.outputData[1] << 16);
-	opcode |= ((uint32)ctx.outputData[2] << 8);
-	opcode |= ((uint32)ctx.outputData[3] << 0);
-	cemu_assert_debug(expected == opcode);
 
-}
-
-void _testAsmFail(const char* iText)
-{
-	PPCAssemblerInOut ctx{};
-	ctx.virtualAddress = 0;
-	if (!ppcAssembler_assembleSingleInstruction(iText, &ctx))
-		return;
-	cemu_assert_debug(false); // should fail
-}
-
-void _testAsmArray(std::vector<uint8> expectedArray, const char* iText)
-{
-	PPCAssemblerInOut ctx{};
-	ctx.virtualAddress = 0;
-	if (!ppcAssembler_assembleSingleInstruction(iText, &ctx))
+	[[maybe_unused]] void ExpectError(const char* source)
 	{
-		cemu_assert_debug(false);
-		return;
+		PPCAssemblerInOut io{};
+		cemu_assert_debug(!ppcAssembler_assembleSingleInstruction(source, &io) && !io.errorMsg.empty());
 	}
-	cemu_assert_debug(ctx.outputData.size() == expectedArray.size());
-	for (size_t offset = 0; offset < expectedArray.size(); offset++)
+
+	[[maybe_unused]] void ExpectBytes(const char* source, std::initializer_list<uint8> expected)
 	{
-		cemu_assert_debug(ctx.outputData[offset] == expectedArray[offset]);
+		PPCAssemblerInOut io{};
+		const bool ok = ppcAssembler_assembleSingleInstruction(source, &io);
+		cemu_assert_debug(ok && std::equal(io.outputData.begin(), io.outputData.end(), expected.begin(), expected.end()));
 	}
-}
-
-void ppcAsmTestDisassembler()
-{
-	cemu_assert_debug(_CanStoreInteger(5, 10, false));
-	cemu_assert_debug(_CanStoreInteger(1023, 10, false));
-	cemu_assert_debug(!_CanStoreInteger(1024, 10, false));
-	cemu_assert_debug(_CanStoreInteger(511, 10, true));
-	cemu_assert_debug(!_CanStoreInteger(512, 10, true));
-	cemu_assert_debug(_CanStoreInteger(-511, 10, true));
-	cemu_assert_debug(_CanStoreInteger(-512, 10, true));
-	cemu_assert_debug(!_CanStoreInteger(-513, 10, true));
-
-	PPCDisassembledInstruction disasm;
-
-	auto disassemble = [&](uint32 opcode, PPCASM_OP ppcAsmCode)
-	{
-		disasm = { 0 };
-		ppcAssembler_disassemble(0x10000000, opcode, &disasm);
-		cemu_assert_debug(disasm.ppcAsmCode == ppcAsmCode);
-	};
-
-	auto checkOperandMask = [&](bool op0 = false, bool op1 = false, bool op2 = false, bool op3 = false)
-	{
-		bool hasOp0 = (disasm.operandMask & (1 << 0));
-		bool hasOp1 = (disasm.operandMask & (1 << 1));
-		bool hasOp2 = (disasm.operandMask & (1 << 2));
-		bool hasOp3 = (disasm.operandMask & (1 << 3));
-
-		cemu_assert_debug(hasOp0 == op0);
-		cemu_assert_debug(hasOp1 == op1);
-		cemu_assert_debug(hasOp2 == op2);
-		cemu_assert_debug(hasOp3 == op3);
-	};
-
-	auto checkOpCR = [&](size_t index, uint8 crIndex)
-	{
-		cemu_assert_debug(disasm.operand[index].type == PPCASM_OPERAND_TYPE_CR);
-		cemu_assert_debug(disasm.operand[index].registerIndex == crIndex);
-	};
-
-	auto checkOpCRBit = [&](size_t index, uint8 crIndex)
-	{
-		cemu_assert_debug(disasm.operand[index].type == PPCASM_OPERAND_TYPE_CR_BIT);
-		cemu_assert_debug(disasm.operand[index].registerIndex == crIndex);
-	};
-
-	auto checkOpFPR = [&](size_t index, uint8 fprIndex)
-	{
-		cemu_assert_debug(disasm.operand[index].type == PPCASM_OPERAND_TYPE_FPR);
-		cemu_assert_debug(disasm.operand[index].registerIndex == fprIndex);
-	};
-
-	auto checkOpGPR = [&](size_t index, uint8 gprIndex)
-	{
-		cemu_assert_debug(disasm.operand[index].type == PPCASM_OPERAND_TYPE_GPR);
-		cemu_assert_debug(disasm.operand[index].registerIndex == gprIndex);
-	};
-
-	auto checkOpImm = [&](size_t index, sint32 imm)
-	{
-		cemu_assert_debug(disasm.operand[index].type == PPCASM_OPERAND_TYPE_IMM);
-		cemu_assert_debug(disasm.operand[index].immS32 == imm);
-	};
-
-	auto checkOpBranchDst = [&](size_t index, sint32 relOffset)
-	{
-		cemu_assert_debug(disasm.operand[index].type == PPCASM_OPERAND_TYPE_CIMM);
-		cemu_assert_debug(disasm.operand[index].immU32 == 0x10000000 + relOffset);
-	};
-
-	auto checkBranchHint = [&](bool isSet)
-	{
-		cemu_assert_debug(disasm.branchHintBitSet == isSet);
-	};
-
-	// addi / subi
-	_testAsm(0x3863FFFF, "addi r3, r3, -1");
-	_testAsm(0x3863FFFF, "subi r3, r3, 1");
-	_testAsm(0x387E0134, "addi r3, r30, 0x134");
-	_testAsm(0x387E0134, "subi r3, r30, 0-0x134");
-	disassemble(0x387E0134, PPCASM_OP_ADDI);
-	checkOperandMask(true, true, true);
-	checkOpGPR(0, 3);
-	checkOpGPR(1, 30);
-	checkOpImm(2, 0x134);
-
-	// mulli
-	_testAsm(0x1D1E0005, "mulli r8, r30, 5");
-	disassemble(0x1D1E0005, PPCASM_OP_MULLI);
-	checkOperandMask(true, true, true);
-	checkOpGPR(0, 8);
-	checkOpGPR(1, 30);
-	checkOpImm(2, 5);
-
-	// mulli
-	_testAsm(0x1CFEFFF8, "mulli r7, r30, 0-(2 + 2 + 2 + 2)"); // -8
-	disassemble(0x1CFEFFF8, PPCASM_OP_MULLI);
-	checkOperandMask(true, true, true);
-	checkOpGPR(0, 7);
-	checkOpGPR(1, 30);
-	checkOpImm(2, -8);
-
-	// subfic
-	_testAsm(0x2304002F, "subfic r24, r4, 0x2F");
-	disassemble(0x2304002F, PPCASM_OP_SUBFIC);
-	checkOperandMask(true, true, true);
-	checkOpGPR(0, 24);
-	checkOpGPR(1, 4);
-	checkOpImm(2, 0x2F);
-
-	// fcmpu cr7, f1, f0
-	_testAsm(0xFF810000, "fcmpu cr7, f1, f0");
-	disassemble(0xFF810000, PPCASM_OP_FCMPU);
-	checkOperandMask(true, true, true);
-	checkOpCR(0, 7);
-	checkOpFPR(1, 1);
-	checkOpFPR(2, 0);
-
-	// fcmpu cr0, f1, f0
-	_testAsm(0xFC010000, "fcmpu cr0, f1, f0");
-	disassemble(0xFC010000, PPCASM_OP_FCMPU);
-	checkOperandMask(true, true, true);
-	checkOpCR(0, 0);
-	checkOpFPR(1, 1);
-	checkOpFPR(2, 0);
-
-	// cmpwi r9, -1
-	_testAsm(0x2C09FFFF, "cmpwi r9, -1");
-	disassemble(0x2C09FFFF, PPCASM_OP_CMPWI);
-	checkOperandMask(false, true, true);
-	checkOpGPR(1, 9);
-	checkOpImm(2, -1);
-	// cmpwi cr7, r9, 0
-	_testAsm(0x2F890000, "cmpwi cr7, r9, 0");
-	disassemble(0x2F890000, PPCASM_OP_CMPWI);
-	checkOperandMask(true, true, true);
-	checkOpCR(0, 7);
-	checkOpGPR(1, 9);
-	checkOpImm(2, 0);
-	// cmplwi r3, 0xF
-	_testAsm(0x2803000F, "cmplwi r3, 0xF");
-	disassemble(0x2803000F, PPCASM_OP_CMPLWI);
-	checkOperandMask(false, true, true);
-	checkOpGPR(1, 3);
-	checkOpImm(2, 0xF);
-	// cmpw cr7, r4, r10
-	_testAsm(0x7F845000, "cmpw cr7, r4, r10");
-	disassemble(0x7F845000, PPCASM_OP_CMPW);
-	checkOperandMask(true, true, true);
-	checkOpCR(0, 7);
-	checkOpGPR(1, 4);
-	checkOpGPR(2, 10);
-	// cmplw cr7, r31, r9
-	_testAsm(0x7F9F4840, "cmplw cr7, r31, r9");
-	disassemble(0x7F9F4840, PPCASM_OP_CMPLW);
-	checkOperandMask(true, true, true);
-	checkOpCR(0, 7);
-	checkOpGPR(1, 31);
-	checkOpGPR(2, 9);
-	// cmplw r24, r28
-	_testAsm(0x7C18E040, "cmplw r24, r28");
-	disassemble(0x7C18E040, PPCASM_OP_CMPLW);
-	checkOperandMask(false, true, true);
-	checkOpGPR(1, 24);
-	checkOpGPR(2, 28);
-
-	// b .+0x18
-	_testAsm(0x48000018, "b .+0x18");
-	// b 0x10000018
-	//_testAsm(0x48000018, "b 0x10000018");
-
-	// bgt cr7, .+0x40
-	_testAsm(0x419D0040, "bgt cr7, .+0x40");
-	disassemble(0x419D0040, PPCASM_OP_BGT);
-	checkOperandMask(true, true);
-	checkOpCR(0, 7);
-	checkOpBranchDst(1, 0x40);
-	checkBranchHint(false);
-	// bnl cr7, .+0x40 (alias to bgt)
-	_testAsm(0x419D0040, "bnl cr7, .+0x40");
-	// beq cr7, .+0x14
-	_testAsm(0x419E0014, "beq cr7, .+0x14");
-	disassemble(0x419E0014, PPCASM_OP_BEQ);
-	checkOperandMask(true, true);
-	checkOpCR(0, 7);
-	checkOpBranchDst(1, 0x14);
-	checkBranchHint(false);
-	// beq .-0x4C
-	_testAsm(0x4182FFB4, "beq .-0x4C");
-	disassemble(0x4182FFB4, PPCASM_OP_BEQ);
-	checkOperandMask(true);
-	checkOpBranchDst(0, -0x4C);
-	checkBranchHint(false);
-	// beq+ .+8
-	_testAsm(0x41A20008, "beq+ .+8");
-	disassemble(0x41A20008, PPCASM_OP_BEQ);
-	checkOperandMask(true, false);
-	checkOpBranchDst(0, +0x8);
-	checkBranchHint(true);
-
-	// cror
-	_testAsm(0x4F5DF382, "cror 4*cr6+eq, 4*cr7+gt, 4*cr7+eq");
-	_testAsm(0x4C411B82, "cror eq, gt, so");
-	disassemble(0x4F5DF382, PPCASM_OP_CROR);
-	checkOperandMask(true, true, true);
-	checkOpCRBit(0, 6 * 4 + 2);
-	checkOpCRBit(1, 7 * 4 + 1);
-	checkOpCRBit(2, 7 * 4 + 2);
-
-	// slw & srw
-	_testAsm(0x7D202030, "slw r0, r9, r4");
-	_testAsm(0x7D80FC31, "srw. r0, r12, r31");
-	disassemble(0x7D202030, PPCASM_OP_SLW);
-	checkOperandMask(true, true, true);
-	checkOpGPR(0, 0);
-	checkOpGPR(1, 9);
-	checkOpGPR(2, 4);
-
-	// FADD
-	_testAsm(0xFC29502A, "fadd f1, f9, f10");
-	disassemble(0xFC29502A, PPCASM_OP_FADD);
-	checkOperandMask(true, true, true);
-	checkOpFPR(0, 1);
-	checkOpFPR(1, 9);
-	checkOpFPR(2, 10);
-
-	// FSUB
-	_testAsm(0xFDAB4028, "fsub f13, f11, f8");
-	_testAsm(0xFD0D4828, "fsub f8, f13, f9");
-	disassemble(0xFD0D4828, PPCASM_OP_FSUB);
-	checkOperandMask(true, true, true);
-	checkOpFPR(0, 8);
-	checkOpFPR(1, 13);
-	checkOpFPR(2, 9);
-
-	// FMUL
-	_testAsm(0xFD4B0332, "fmul f10, f11, f12");
-	disassemble(0xFD4B0332, PPCASM_OP_FMUL);
-	checkOperandMask(true, true, true);
-	checkOpFPR(0, 10);
-	checkOpFPR(1, 11);
-	checkOpFPR(2, 12);
-
-	// FDIV
-	_testAsm(0xFD885824, "fdiv f12, f8, f11");
-	disassemble(0xFD885824, PPCASM_OP_FDIV);
-	checkOperandMask(true, true, true);
-	checkOpFPR(0, 12);
-	checkOpFPR(1, 8);
-	checkOpFPR(2, 11);
-
-	// FMADD
-	_testAsm(0xFC2A0A3A, "fmadd f1, f10, f8, f1");
-	_testAsm(0xFC0A0B7A, "fmadd f0, f10, f13, f1");
-	_testAsm(0xFFE0F33A, "fmadd f31, f0, f12, f30");
-	disassemble(0xFFE0F33A, PPCASM_OP_FMADD);
-	checkOperandMask(true, true, true, true);
-	checkOpFPR(0, 31);
-	checkOpFPR(1, 0);
-	checkOpFPR(2, 12);
-	checkOpFPR(3, 30);
-
-	// FNMADDS
-	_testAsm(0xED8A627E, "fnmadds f12, f10, f9, f12");
-	disassemble(0xED8A627E, PPCASM_OP_FNMADDS);
-	checkOperandMask(true, true, true, true);
-	checkOpFPR(0, 12);
-	checkOpFPR(1, 10);
-	checkOpFPR(2, 9);
-	checkOpFPR(3, 12);
-
-	// still missing test cases: FNMADD, FMADDS
-
-	// FMSUB
-	_testAsm(0xFC1C0338, "fmsub f0, f28, f12, f0");
-	_testAsm(0xFD204B38, "fmsub f9, f0, f12, f9");
-	disassemble(0xFD204B38, PPCASM_OP_FMSUB);
-	checkOperandMask(true, true, true, true);
-	checkOpFPR(0, 9);
-	checkOpFPR(1, 0);
-	checkOpFPR(2, 12);
-	checkOpFPR(3, 9);
-
-	// FNMSUB
-	_testAsm(0xFD7DCB3C, "fnmsub f11, f29, f12, f25");
-	disassemble(0xFD7DCB3C, PPCASM_OP_FNMSUB);
-	checkOperandMask(true, true, true, true);
-	checkOpFPR(0, 11);
-	checkOpFPR(1, 29);
-	checkOpFPR(2, 12);
-	checkOpFPR(3, 25);
-
-	// FMSUBS
-	_testAsm(0xEE3D5838, "fmsubs f17, f29, f0, f11");
-	_testAsm(0xEDB84AB8, "fmsubs f13, f24, f10, f9");
-	disassemble(0xEDB84AB8, PPCASM_OP_FMSUBS);
-	checkOperandMask(true, true, true, true);
-	checkOpFPR(0, 13);
-	checkOpFPR(1, 24);
-	checkOpFPR(2, 10);
-	checkOpFPR(3, 9);
-
-	// FNMSUBS
-	_testAsm(0xED4951BC, "fnmsubs f10, f9, f6, f10");
-	_testAsm(0xED253AFC, "fnmsubs f9, f5, f11, f7");
-	disassemble(0xED253AFC, PPCASM_OP_FNMSUBS);
-	checkOperandMask(true, true, true, true);
-	checkOpFPR(0, 9);
-	checkOpFPR(1, 5);
-	checkOpFPR(2, 11);
-	checkOpFPR(3, 7);
-
-	// FRSQRTE
-	_testAsm(0xFCE06034, "frsqrte f7, f12");
-	_testAsm(0xFCC06834, "frsqrte f6, f13");
-	disassemble(0xFCC06834, PPCASM_OP_FRSQRTE);
-	checkOperandMask(true, true);
-	checkOpFPR(0, 6);
-	checkOpFPR(1, 13);
-
-	// FRSP
-	_testAsm(0xFFA03018, "frsp f29, f6");
-	disassemble(0xFFA03018, PPCASM_OP_FRSP);
-	checkOperandMask(true, true);
-	checkOpFPR(0, 29);
-	checkOpFPR(1, 6);
-
-	// FNEG
-	_testAsm(0xFDA05850, "fneg f13, f11");
-	disassemble(0xFDA05850, PPCASM_OP_FNEG);
-	checkOperandMask(true, true);
-	checkOpFPR(0, 13);
-	checkOpFPR(1, 11);
-
-	// FMR
-	_testAsm(0xFCE06090, "fmr f7, f12");
-	disassemble(0xFCE06090, PPCASM_OP_FMR);
-	checkOperandMask(true, true);
-	checkOpFPR(0, 7);
-	checkOpFPR(1, 12);
-
-	// FABS
-	_testAsm(0xFC200A10, "fabs f1, f1");
-	disassemble(0xFC200A10, PPCASM_OP_FABS);
-	checkOperandMask(true, true);
-	checkOpFPR(0, 1);
-	checkOpFPR(1, 1);
-
-	// FCTIWZ
-	_testAsm(0xFD80401E, "fctiwz f12, f8");
-	disassemble(0xFD80401E, PPCASM_OP_FCTIWZ);
-	checkOperandMask(true, true);
-	checkOpFPR(0, 12);
-	checkOpFPR(1, 8);
-
-	// PS_MADD
-	_testAsm(0x1168637A, "ps_madd   f11, f8, f13, f12");
-	disassemble(0x1168637A, PPCASM_OP_PS_MADD);
-	checkOperandMask(true, true, true, true);
-	checkOpFPR(0, 11);
-	checkOpFPR(1, 8);
-	checkOpFPR(2, 13);
-	checkOpFPR(3, 12);
-
-	// PS_MSUB
-	_testAsm(0x11A55FF8, "ps_msub f13, f5, f31, f11");
-	disassemble(0x11A55FF8, PPCASM_OP_PS_MSUB);
-	checkOperandMask(true, true, true, true);
-	checkOpFPR(0, 13);
-	checkOpFPR(1, 5);
-	checkOpFPR(2, 31);
-	checkOpFPR(3, 11);
-
-	// PS_NMADD
-	_testAsm(0x118850FE, "ps_nmadd f12, f8, f3, f10");
-	disassemble(0x118850FE, PPCASM_OP_PS_NMADD);
-	checkOperandMask(true, true, true, true);
-	checkOpFPR(0, 12);
-	checkOpFPR(1, 8);
-	checkOpFPR(2, 3);
-	checkOpFPR(3, 10);
-
-	// PS_NMSUB
-	_testAsm(0x112832FC, "ps_nmsub f9, f8, f11, f6");
-	disassemble(0x112832FC, PPCASM_OP_PS_NMSUB);
-	checkOperandMask(true, true, true, true);
-	checkOpFPR(0, 9);
-	checkOpFPR(1, 8);
-	checkOpFPR(2, 11);
-	checkOpFPR(3, 6);
-
-	// PS_ADD
-	_testAsm(0x112A582A, "ps_add f9, f10, f11");
-	disassemble(0x112A582A, PPCASM_OP_PS_ADD);
-	checkOperandMask(true, true, true);
-	checkOpFPR(0, 9);
-	checkOpFPR(1, 10);
-	checkOpFPR(2, 11);
-
-	// PS_SUB
-	_testAsm(0x11663828, "ps_sub f11, f6, f7");
-	disassemble(0x11663828, PPCASM_OP_PS_SUB);
-	checkOperandMask(true, true, true);
-	checkOpFPR(0, 11);
-	checkOpFPR(1, 6);
-	checkOpFPR(2, 7);
-
-	// PS_MUL
-	_testAsm(0x11680332, "ps_mul f11, f8, f12");
-	disassemble(0x11680332, PPCASM_OP_PS_MUL);
-	checkOperandMask(true, true, true);
-	checkOpFPR(0, 11);
-	checkOpFPR(1, 8);
-	checkOpFPR(2, 12);
-
-	// PS_DIV
-	_testAsm(0x10A45824, "ps_div f5, f4, f11");
-	disassemble(0x10A45824, PPCASM_OP_PS_DIV);
-	checkOperandMask(true, true, true);
-	checkOpFPR(0, 5);
-	checkOpFPR(1, 4);
-	checkOpFPR(2, 11);
-
-	// PS_MERGE10
-	_testAsm(0x10CC6C20, "ps_merge00 f6, f12, f13");
-	disassemble(0x10CC6C20, PPCASM_OP_PS_MERGE00);
-	checkOperandMask(true, true, true);
-	checkOpFPR(0, 6);
-	checkOpFPR(1, 12);
-	checkOpFPR(2, 13);
-
-	// LWBRX
-	_testAsm(0x7C642C2C, "lwbrx r3, r4, r5");
-	_testAsm(0x7C604C2C, "lwbrx r3, 0, r9"); // rA = 0 form
-	disassemble(0x7C642C2C, PPCASM_OP_LWBRX);
-	checkOperandMask(true, true, true);
-	checkOpGPR(0, 3);
-	checkOpGPR(1, 4);
-	checkOpGPR(2, 5);
-
-	// LHBRX
-	_testAsm(0x7C642E2C, "lhbrx r3, r4, r5");
-	_testAsm(0x7C604E2C, "lhbrx r3, 0, r9"); // rA = 0 form
-	disassemble(0x7C642E2C, PPCASM_OP_LHBRX);
-	checkOperandMask(true, true, true);
-	checkOpGPR(0, 3);
-	checkOpGPR(1, 4);
-	checkOpGPR(2, 5);
-
-	// BDZLR (no operands)
-	_testAsm(0x4E400020, "bdzlr");
-	disassemble(0x4E400020, PPCASM_OP_BDZLR);
-	checkOperandMask(false, false, false);
-
-	// BDNZLR (no operands)
-	_testAsm(0x4E000020, "bdnzlr");
-	disassemble(0x4E000020, PPCASM_OP_BDNZLR);
-	checkOperandMask(false, false, false);
-
-	// BLR / BLRL. The LK bit must not be ignored, otherwise these two alias each other
-	_testAsm(0x4E800020, "blr");
-	disassemble(0x4E800020, PPCASM_OP_BLR);
-	checkOperandMask(false, false, false);
-	_testAsm(0x4E800021, "blrl");
-	disassemble(0x4E800021, PPCASM_OP_BLRL);
-	checkOperandMask(false, false, false);
-
-	// BDZLRL / BDNZLRL (same as BDZLR/BDNZLR but with LK set)
-	_testAsm(0x4E400021, "bdzlrl");
-	disassemble(0x4E400021, PPCASM_OP_BDZLRL);
-	checkOperandMask(false, false, false);
-	_testAsm(0x4E000021, "bdnzlrl");
-	disassemble(0x4E000021, PPCASM_OP_BDNZLRL);
-	checkOperandMask(false, false, false);
-
-	// random extra tests
-	_testAsm(0x419D0040, "bgt cr7, .+0x40");
-	_testAsm(0x50AB042E, "rlwimi r11, r5, 0,16,23");
-	_testAsm(0xFF810000, "fcmpu cr7, f1, f0");
-	_testAsm(0xFC010000, "fcmpu cr0, f1, f0");
-	_testAsm(0x7F845000, "cmpw cr7, r4, r10");
-	_testAsm(0x2C090000, "cmpwi r9, 0"); // implicit cr0
-	_testAsm(0x2C090000, "cmpwi cr0, r9, 0");
-	_testAsm(0x2F9E001F, "cmpwi cr7, r30, 0x1F");
-	_testAsm(0x7D573850, "subf r10, r23, r7");
-	_testAsm(0x7D573850, "sub r10, r7, r23"); // alias for subf
-	_testAsm(0x7D862851, "subf. r12, r6, r5");
-	_testAsm(0x7D7C1896, "mulhw r11, r28, r3");
-	_testAsm(0x7D436016, "mulhwu r10, r3, r12");
-	_testAsm(0x7FE318F8, "nor r3, r31, r3");
-	_testAsm(0x7D29F8F8, "nor r9, r9, r31");
-	_testAsm(0x7F26C8F8, "nor r6, r25, r25");
-	_testAsm(0x7F26C8F8, "not r6, r25"); // alias for nor where rA == rB
-	_testAsm(0x7FE4FB78, "mr r4, r31"); // alias for or where rA == rB
-	_testAsm(0x7C7EEAA6, "mfspr r3, spr958");
-	_testAsm(0x7C78E3A6, "mtspr spr920, r3");
-	_testAsm(0x7D6802A6, "mflr r11");
-	_testAsm(0x7E6902A6, "mfctr r19");
-	_testAsm(0x7D430034, "cntlzw r3, r10");
-	_testAsm(0x7C640774, "extsb r4, r3");
-	_testAsm(0x1C8A00B8, "mulli r4, r10, 0xB8");
-	_testAsm(0x1CFEFFF8, "mulli r7, r30, -8");
-	_testAsm(0x1CFE8000, "mulli r7, r30, -0x8000");
-	_testAsm(0x1CFE7FFF, "mulli r7, r30, 0x7FFF");
-	_testAsmFail("mulli r7, r30, -0x8001");
-	_testAsmFail("mulli r7, r30, 0x8000");
-	_testAsm(0x38E0FFFF, "li r7, 0xFFFF"); // li/lis allows both signed and unsigned 16-bit range
-	_testAsm(0x38E0FFFF, "li r7, -1");
-	_testAsm(0x38E08000, "li r7, -0x8000");
-	_testAsmFail("li r7, -0x8001");
-	_testAsmFail("li r7, 0xFFFF+1");
-
-	// test set 2
-	_testAsm(0x7c0903a6, "mtctr     r0");
-	_testAsm(0x7c6903a6, "mtctr     r3");
-	_testAsm(0x7d0903a6, "mtctr     r8");
-	_testAsm(0x7d2903a6, "mtctr     r9");
-	_testAsm(0x7c0803a6, "mtlr      r0");
-	_testAsm(0x7c6803a6, "mtlr      r3");
-	_testAsm(0x7c8803a6, "mtlr      r4");
-	_testAsm(0x7c065896, "mulhw     r0, r6, r11");
-	_testAsm(0x7ce85096, "mulhw     r7, r8, r10");
-	_testAsm(0x7d494096, "mulhw     r10, r9, r8");
-	_testAsm(0x7ca4c016, "mulhwu    r5, r4, r24");
-	_testAsm(0x7ce53016, "mulhwu    r7, r5, r6");
-	_testAsm(0x7d373816, "mulhwu    r9, r23, r7");
-	_testAsm(0x7d664816, "mulhwu    r11, r6, r9");
-	_testAsm(0x1d2ae09e, "mulli     r9, r10, -0x1F62");
-	_testAsm(0x1fe900ff, "mulli     r31, r9, 0xFF");
-	_testAsm(0x1ffefffe, "mulli     r31, r30, -2");
-	_testAsm(0x7e4531d6, "mullw     r18, r5, r6");
-	_testAsm(0x7fe429d6, "mullw     r31, r4, r5");
-	_testAsm(0x7d0951d7, "mullw.    r8, r9, r10");
-	_testAsm(0x7f0941d7, "mullw.    r24, r9, r8");
-	_testAsm(0x7c6600d0, "neg       r3, r6");
-	_testAsm(0x7df600d0, "neg       r15, r22");
-	_testAsm(0x7eeb00d0, "neg       r23, r11");
-	_testAsm(0x7ca428f8, "not       r4, r5");
-	_testAsm(0x7df578f8, "not       r21, r15");
-	_testAsm(0x7fe9f8f8, "not       r9, r31");
-	_testAsm(0x7fc83378, "or        r8, r30, r6");
-	_testAsm(0x7de6a379, "or.       r6, r15, r20");
-	_testAsm(0x7f29fb79, "or.       r9, r25, r31");
-	_testAsm(0x7ceafb38, "orc       r10, r7, r31");
-	_testAsm(0x7fbe4338, "orc       r30, r29, r8");
-	_testAsm(0x63a90001, "ori       r9, r29, 1");
-	_testAsm(0x63c3b46e, "ori       r3, r30, 0xB46E");
-	_testAsm(0x63e4ffff, "ori       r4, r31, 0xFFFF");
-	_testAsm(0x650a8000, "oris      r10, r8, 0x8000");
-	_testAsm(0x676c792e, "oris      r12, r27, 0x792E");
-	_testAsm(0x6788ffff, "oris      r8, r28, 0xFFFF");
-	_testAsm(0x67ea3fe0, "oris      r10, r31, 0x3FE0");
-	_testAsm(0x51231fb8, "rlwimi    r3, r9, 3,30,28");
-	_testAsm(0x5249fefe, "rlwimi    r9, r18, 31,27,31");
-	_testAsm(0x52513a20, "rlwimi    r17, r18, 7,8,16");
-	_testAsm(0x53494420, "rlwimi    r9, r26, 8,16,16");
-	_testAsm(0x53657269, "rlwimi.   r5, r27, 14,9,20");
-	_testAsm(0x546906f2, "rlwinm    r9, r3, 0,27,25");
-	_testAsm(0x55284ad6, "rlwinm    r8, r9, 9,11,11");
-	_testAsm(0x57c90428, "rlwinm    r9, r30, 0,16,20");
-	_testAsm(0x57e5d57a, "rlwinm    r5, r31, 26,21,29");
-	_testAsm(0x57ea34b0, "rlwinm    r10, r31, 6,18,24");
-	_testAsm(0x54e1bbb1, "rlwinm.   r1, r7, 23,14,24");
-	_testAsm(0x550707fb, "rlwinm.   r7, r8, 0,31,29");
-	_testAsm(0x552003f1, "rlwinm.   r0, r9, 0,15,24");
-	_testAsm(0x5527022f, "rlwinm.   r7, r9, 0,8,23");
-	_testAsm(0x55270777, "rlwinm.   r7, r9, 0,29,27");
-	_testAsm(0x552a0777, "rlwinm.   r10, r9, 0,29,27");
-	_testAsm(0x552a07b9, "rlwinm.   r10, r9, 0,30,28");
-	_testAsm(0x5d5f583e, "rotlw     r31, r10, r11");
-	_testAsm(0x5eea703e, "rotlw     r10, r23, r14");
-	_testAsm(0x5f0ab03e, "rotlw     r10, r24, r22");
-	_testAsm(0x541a783e, "rotlwi    r26, r0, 15");
-	_testAsm(0x5488383e, "rotlwi    r8, r4, 7");
-	_testAsm(0x5779683e, "rotlwi    r25, r27, 13");
-	_testAsm(0x54e4c83e, "rotrwi    r4, r7, 7");
-	_testAsm(0x7eeaf830, "slw       r10, r23, r31");
-	_testAsm(0x7f68c030, "slw       r8, r27, r24");
-	_testAsm(0x7fe8f030, "slw       r8, r31, r30");
-	_testAsm(0x7f484831, "slw.      r8, r26, r9");
-	_testAsm(0x7f844031, "slw.      r4, r28, r8");
-	_testAsm(0x57e42036, "slwi      r4, r31, 4");
-	_testAsm(0x57e42834, "slwi      r4, r31, 5");
-	_testAsm(0x57f37820, "slwi      r19, r31, 15");
-	_testAsm(0x5488083d, "slwi.     r8, r4, 1");
-	_testAsm(0x552a3033, "slwi.     r10, r9, 6");
-	_testAsm(0x5647083d, "slwi.     r7, r18, 1");
-	_testAsm(0x7c879e30, "sraw      r7, r4, r19");
-	_testAsm(0x7c891e30, "sraw      r9, r4, r3");
-	_testAsm(0x7fca4e30, "sraw      r10, r30, r9");
-	_testAsm(0x7d380e70, "srawi     r24, r9, 1");
-	_testAsm(0x7c79fe71, "srawi.    r25, r3, 0x1F");
-	_testAsm(0x7fb91e71, "srawi.    r25, r29, 3");
-	_testAsm(0x7cc33c30, "srw       r3, r6, r7");
-	_testAsm(0x7d09e430, "srw       r9, r8, r28");
-	_testAsm(0x7d3d4430, "srw       r29, r9, r8");
-	_testAsm(0x5403d97e, "srwi      r3, r0, 5");
-	_testAsm(0x57dc843e, "srwi      r28, r30, 16");
-	_testAsm(0x552a463f, "srwi.     r10, r9, 24");
-	_testAsm(0x5532c9ff, "srwi.     r18, r9, 7");
-	_testAsm(0x57f8f87f, "srwi.     r24, r31, 1");
-	_testAsm(0x9be80201, "stb       r31, 0x201(r8)");
-	_testAsm(0x9bfafffc, "stb       r31, -4(r26)");
-	_testAsm(0x9bfeffff, "stb       r31, -1(r30)");
-	_testAsm(0x9dc3ffff, "stbu      r14, -1(r3)");
-	_testAsm(0x9e55006f, "stbu      r18, 0x6F(r21)");
-	_testAsm(0x9fdc2008, "stbu      r30, 0x2008(r28)");
-	_testAsm(0x7ce521ee, "stbux     r7, r5, r4");
-	_testAsm(0x7d4919ee, "stbux     r10, r9, r3");
-	_testAsm(0x7f6919ee, "stbux     r27, r9, r3");
-	_testAsm(0x7c0531ae, "stbx      r0, r5, r6");
-	_testAsm(0x7d4941ae, "stbx      r10, r9, r8");
-	_testAsm(0x7fdfe9ae, "stbx      r30, r31, r29");
-	_testAsm(0xdb690038, "stfd      f27, 0x38(r9)");
-	_testAsm(0xdb890040, "stfd      f28, 0x40(r9)");
-	_testAsm(0xde230008, "stfdu     f17, 8(r3)");
-	_testAsm(0x7c1235ae, "stfdx     f0, r18, r6");
-	_testAsm(0x7c1f3dae, "stfdx     f0, r31, r7");
-	_testAsm(0x7c1f45ae, "stfdx     f0, r31, r8");
-	_testAsm(0x7c001fae, "stfiwx    f0, 0, r3");
-	_testAsm(0x7c3e4fae, "stfiwx    f1, r30, r9");
-	_testAsm(0x7fa04fae, "stfiwx    f29, 0, r9");
-	_testAsm(0xd008fffc, "stfs      f0, -4(r8)");
-	_testAsm(0xd3ff1604, "stfs      f31, 0x1604(r31)");
-	_testAsm(0xd41e001c, "stfsu     f0, 0x1C(r30)");
-	_testAsm(0x7d87356e, "stfsux    f12, r7, r6");
-	_testAsm(0x7c104d2e, "stfsx     f0, r16, r9");
-	_testAsm(0x7f5d452e, "stfsx     f26, r29, r8");
-	_testAsm(0xb3bf000e, "sth       r29, 0xE(r31)");
-	_testAsm(0xb3f8fffc, "sth       r31, -4(r24)");
-	_testAsm(0xb3fa0000, "sth       r31, 0(r26)");
-	_testAsm(0xb3fd0000, "sth       r31, 0(r29)");
-	_testAsm(0xb528105a, "sthu      r9, 0x105A(r8)");
-	_testAsm(0xb52afffe, "sthu      r9, -2(r10)");
-	_testAsm(0xb53f0002, "sthu      r9, 2(r31)");
-	_testAsm(0x7c69536e, "sthux     r3, r9, r10");
-	_testAsm(0x7c8a3b6e, "sthux     r4, r10, r7");
-	_testAsm(0x7c0ca32e, "sthx      r0, r12, r20");
-	_testAsm(0x7d242b2e, "sthx      r9, r4, r5");
-	_testAsm(0x7fe93b2e, "sthx      r31, r9, r7");
-	_testAsm(0xbdd0b4d0, "stmw      r14, -0x4B30(r16)");
-	_testAsm(0xbed182d1, "stmw      r22, -0x7D2F(r17)");
-	_testAsm(0x7cbb65aa, "stswi     r5, r27, 0xC");
-	_testAsm(0x7cbe05aa, "stswi     r5, r30, 0");
-	_testAsm(0x91348378, "stw       r9, -0x7C88(r20)");
-	_testAsm(0x93e9fddc, "stw       r31, -0x224(r9)");
-	_testAsm(0x93fe45c8, "stw       r31, 0x45C8(r30)");
-	_testAsm(0x7c604d2c, "stwbrx    r3, 0, r9");
-	_testAsm(0x7d20f52c, "stwbrx    r9, 0, r30");
-	_testAsm(0x7fa04d2c, "stwbrx    r29, 0, r9");
-	_testAsm(0x7d20512d, "stwcx.    r9, 0, r10");
-	_testAsm(0x94650208, "stwu      r3, 0x208(r5)");
-	_testAsm(0x953ffffc, "stwu      r9, -4(r31)");
-	_testAsm(0x97fe0208, "stwu      r31, 0x208(r30)");
-	_testAsm(0x7d21196e, "stwux     r9, r1, r3");
-	_testAsm(0x7d23516e, "stwux     r9, r3, r10");
-	_testAsm(0x7d41496e, "stwux     r10, r1, r9");
-	_testAsm(0x7cbc512e, "stwx      r5, r28, r10");
-	_testAsm(0x7d5ce92e, "stwx      r10, r28, r29");
-	_testAsm(0x7ffee92e, "stwx      r31, r30, r29");
-	_testAsm(0x7c1ec050, "subf      r0, r30, r24");
-	_testAsm(0x7fbee050, "subf      r29, r30, r28");
-	_testAsm(0x7fe91850, "subf      r31, r9, r3");
-	_testAsm(0x7c1e5851, "subf.     r0, r30, r11");
-	_testAsm(0x7fc42851, "subf.     r30, r4, r5");
-	_testAsm(0x7fc74851, "subf.     r30, r7, r9");
-	_testAsm(0x7cffd810, "subfc     r7, r31, r27");
-	_testAsm(0x7d053010, "subfc     r8, r5, r6");
-	_testAsm(0x7d093810, "subfc     r8, r9, r7");
-	_testAsm(0x7f884910, "subfe     r28, r8, r9");
-	_testAsm(0x7fe95110, "subfe     r31, r9, r10");
-	_testAsm(0x7fea4910, "subfe     r31, r10, r9");
-	_testAsm(0x20d0b2d1, "subfic    r6, r16, -0x4D2F");
-	_testAsm(0x2109fc02, "subfic    r8, r9, -0x3FE");
-	_testAsm(0x2144001f, "subfic    r10, r4, 0x1F");
-	_testAsm(0x7c04f278, "xor       r4, r0, r30");
-	_testAsm(0x7c08fa78, "xor       r8, r0, r31");
-	_testAsm(0x7c0b4a78, "xor       r11, r0, r9");
-	_testAsm(0x68640008, "xori      r4, r3, 8");
-	_testAsm(0x68652064, "xori      r5, r3, 0x2064");
-	_testAsm(0x692076c3, "xori      r0, r9, 0x76C3");
-	_testAsm(0x6c0a8000, "xoris     r10, r0, 0x8000");
-	_testAsm(0x6c68ffff, "xoris     r8, r3, 0xFFFF");
-	_testAsm(0x6c617267, "xoris     r1, r3, 0x7267");
-	_testAsm(0x6fe98000, "xoris     r9, r31, 0x8000");
-	_testAsm(0x6fe9f000, "xoris     r9, r31, 0xF000");
-	_testAsm(0x6fe9ff00, "xoris     r9, r31, 0xFF00");
-	_testAsm(0x6fe9ffff, "xoris     r9, r31, 0xFFFF");
-
-	// mfcr / mtcrf
-	_testAsm(0x7D800026, "mfcr r12");
-	disassemble(0x7D800026, PPCASM_OP_MFCR);
-	checkOperandMask(true);
-	checkOpGPR(0, 12);
-
-	_testAsm(0x7D808120, "mtcrf 8, r12");
-	disassemble(0x7D808120, PPCASM_OP_MTCRF);
-	checkOperandMask(true, true);
-	checkOpImm(0, 8);
-	checkOpGPR(1, 12);
-
-	_testAsm(0x4E1C0000, "mcrf cr4, cr7");
-	disassemble(0x4E1C0000, PPCASM_OP_MCRF);
-	checkOperandMask(true, true);
-	checkOpCR(0, 4);
-	checkOpCR(1, 7);
-
-	// data directives
-	_testAsmArray({ 0x00, 0x00, 0x00, 0x01 }, ".int 1");
-	_testAsmArray({ 0x00, 0x00, 0x00, 0x01, 0x11, 0x22, 0x33, 0x44 }, ".int 1, 0x11223344");
-	_testAsmArray({ 0x42, 0xf6, 0x00, 0x00 }, ".float 123.0");
-	_testAsmArray({ 0x7f }, ".byte 0x7f");
-	_testAsmArray({ 0x74, 0x65, 0x73, 0x74, 0x00 }, ".byte \"test\"");
-	_testAsmArray({ 0x41, 0x42, 0x43, 0x00, 0x74, 0x65, 0x73, 0x74, 0x00 }, ".byte \"ABC\", \"test\"");
-	_testAsmArray({ 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x22, 0x77, 0x6f, 0x72, 0x6c, 0x64, 0x00, 0x00 }, R"(.byte "hello\"world", 0)");
-	_testAsmArray({ 0x61, 0x5c, 0x00, 0x00 }, R"(.byte "a\\", 0)");
-	_testAsmArray({ 0x61, 0x5c, 0x22, 0x62, 0x00, 0x00 }, R"(.byte "a\\\"b", 0)");
-
 }
 
 void ppcAsmTest()
 {
 #ifdef CEMU_DEBUG_ASSERT
-	ppcAsmTestDisassembler();
+	// encodings below were taken from the PowerPC architecture manual examples
+	ExpectWord("li r3, 0", 0x38600000);
+	ExpectWord("li r3, -1", 0x3860FFFF);
+	ExpectWord("lis r4, 0x8000", 0x3C808000);
+	ExpectWord("addi r1, r1, 0x10", 0x38210010);
+	ExpectWord("subi r1, r1, 0x10", 0x3821FFF0);
+	ExpectWord("mr r31, r3", 0x7C7F1B78);
+	ExpectWord("nop", 0x60000000);
+	ExpectWord("blr", 0x4E800020);
+	ExpectWord("bctrl", 0x4E800421);
+	ExpectWord("mflr r0", 0x7C0802A6);
+	ExpectWord("mtctr r12", 0x7D8903A6);
+	ExpectWord("stwu r1, -0x20(r1)", 0x9421FFE0);
+	ExpectWord("lwz r3, 4(r31)", 0x807F0004);
+	ExpectWord("lfs f1, 0(r3)", 0xC0230000);
+	ExpectWord("cmpwi cr1, r3, 5", 0x2C830005);
+	ExpectWord("cmplw r3, r4", 0x7C032040);
+	ExpectWord("bne .+0x10", 0x40820010);
+	ExpectWord("b .-4", 0x4BFFFFFC);
+	ExpectWord("slwi r3, r4, 2", 0x5483103A);
+	ExpectWord("srwi r3, r4, 8", 0x5483C23E);
+	ExpectWord("rlwinm r3, r4, 0, 24, 31", 0x5483063E);
+	ExpectWord("fadds f1, f2, f3", 0xEC22182A);
+	ExpectWord("fmuls f1, f2, f3", 0xEC2200F2);
+	ExpectWord("crxor 4*cr1+eq, 4*cr1+eq, 4*cr1+eq", 0x4CC63182);
+	ExpectError("li r3, 0x10000");
+	ExpectError("addi r32, r1, 0");
+	ExpectError("lwz r3, 4");
+	ExpectError("frobnicate r1");
+	ExpectBytes(".int 0x12345678", { 0x12, 0x34, 0x56, 0x78 });
+	ExpectBytes(".short 1, 2", { 0x00, 0x01, 0x00, 0x02 });
+	ExpectBytes(".string \"hi\\n\"", { 'h', 'i', '\n', 0 });
 #endif
 }
