@@ -1,245 +1,209 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// Experimental low level mode: runs the Cafe OS kernel on three emulated
+// cores with the address translating interpreter, switching between the
+// cores round robin on a single host thread.
 
-struct PPCInterpreterLLEContext_t
+namespace
 {
-	uint8 padding[1024 * 128]; // reserved memory for stack (for recompiler mode)
-	PPCInterpreter_t cores[3];
-};
+	// SCR bits that release cores 1 and 2 from reset
+	constexpr uint32 kScrEnableCore1 = 0x00400000;
+	constexpr uint32 kScrEnableCore2 = 0x00200000;
 
-PPCInterpreterGlobal_t globalCPUState = { 0 };
+	// instructions per core before moving on to the next one
+	constexpr sint32 kCoreSliceInstructions = 10000;
 
-void PPCCoreLLE_initCore(PPCInterpreter_t* hCPU, uint32 coreIndex)
-{
-	hCPU->spr.UPIR = coreIndex;
-	hCPU->global = &globalCPUState;
-}
+	// secondary cores start at the system reset vector
+	constexpr uint32 kResetVector = 0xFFF00100;
 
-#define SCR_C2		(0x200000) // enable core 2
-#define SCR_C1		(0x400000) // enable core 1
+	// ---- boot information block ----
+	// The boot loader leaves this block at physical address 0x01FFF000 for
+	// the kernel (layout as expected by kernel 5.5.2).
 
-typedef struct  
-{
-	uint32be ukn000;
-	uint32be ukn004;
-	uint32be ukn008;
-	uint32be ukn00C;
-	uint32be ukn010;
-	uint32be ukn014;
-	uint32be busFreq;
-	uint32be ukn01C;
-	uint32be ukn020[4];
-	uint32be ukn030[4];
-	uint32be ukn040[4];
-	uint32be ukn050[4];
-	uint32be ukn060[4];
-	uint32be ukn070[4];
-	uint32be ukn080[4];
-	uint32be ukn090[4];
-	uint32be ukn0A0[4];
-	uint32be ukn0B0[4];
-	uint32be ukn0C0;
-	struct  
+	constexpr uint32 kBootInfoAddress = 0x01FFF000;
+
+	struct BootMemoryRegion
 	{
 		uint32be id;
 		uint32be baseAddress;
 		uint32be size;
-	}ramInfo[3];
-	uint32 ukn0E8;
-	uint32 ukn0EC;
-	uint32 ukn0F0[4];
-	uint32 ukn100[8];
-	uint32 ukn120[8];
-	uint32 ukn140[8];
-	uint32 ukn160[8];
-	uint32 ukn180[8];
-	uint32 ukn1A0[8];
-	uint32 ukn1C0[8];
-	uint32 ukn1E0[8];
-	uint32 ukn200[8];
-	uint32 ukn220[8];
-	uint32 ukn240[8];
-	uint32 ukn260[8];
-	uint32 ukn280[8];
-	uint32 ukn2A0[8];
-	uint32 ukn2C0[8];
-	uint32 ukn2E0[8];
-	uint32 ukn300[8];
-	uint32 ukn320[8];
-	uint32 ukn340[8];
-	uint32 ukn360[8];
-	uint32 ukn380[8];
-	uint32be ukn3A0;
-	uint32be ukn3A4;
-	uint32be ukn3A8;
-	uint32be ukn3AC;
-	uint32be ukn3B0;
-	uint32be smdpAreaPtr;
-	uint32be ukn3B8;
-	uint32be ukn3BC;
-	uint32 ukn3C0[8];
-	uint32 ukn3E0[8];
-	uint32 ukn400;
-	uint32 ukn404;
-	uint32 ukn408;
-}ppcBootParamBlock_t; // for kernel 5.5.2
+	};
 
-static_assert(offsetof(ppcBootParamBlock_t, ramInfo) == 0xC4, "");
-static_assert(offsetof(ppcBootParamBlock_t, busFreq) == 0x18, "");
-static_assert(offsetof(ppcBootParamBlock_t, smdpAreaPtr) == 0x3B4, "");
-static_assert(offsetof(ppcBootParamBlock_t, ukn400) == 0x400, "");
-
-void PPCCoreLLE_setupBootParamBlock()
-{
-	ppcBootParamBlock_t* bootParamBlock = (ppcBootParamBlock_t*)memory_getPointerFromPhysicalOffset(0x01FFF000);
-	memset(bootParamBlock, 0, sizeof(ppcBootParamBlock_t));
-
-	// setup RAM info
-	//PPCBaseAddress	0x8000000	0x00000000	0x28000000
-	//PPCSize			0x120000	0x2000000	0xA8000000
-
-	bootParamBlock->ukn004 = 0x40C;
-
-	bootParamBlock->busFreq = ESPRESSO_BUS_CLOCK;
-
-	bootParamBlock->ramInfo[0].id = 0;
-	bootParamBlock->ramInfo[0].baseAddress = 0x8000000;
-	bootParamBlock->ramInfo[0].size = 0x120000;
-	bootParamBlock->ramInfo[1].id = 1;
-	bootParamBlock->ramInfo[1].baseAddress = 0x00000000;
-	bootParamBlock->ramInfo[1].size = 0x2000000;
-	bootParamBlock->ramInfo[2].id = 2;
-	bootParamBlock->ramInfo[2].baseAddress = 0x28000000;
-	bootParamBlock->ramInfo[2].size = 0xA8000000;
-
-}
-typedef struct
-{
-	uint32be magic;
-	uint32be count;
-	uint32 _padding08[14];
-	/* +0x0040 */ uint32be commandsReadIndex; // written by IOSU
-	uint32 _padding44[15];
-	/* +0x0080 */ uint32be commandsWriteIndex;
-	uint32 _padding84[15];
-	/* +0x00C0 */ uint32be resultsReadIndex;
-	uint32 _paddingC4[15];
-	/* +0x0100 */ uint32be resultsWriteIndex; // written by IOSU
-	uint32 _padding104[15];
-	/* +0x0140 */ uint32be commandPtrs[0xC00];
-	/* +0x3140 */ uint32be resultPtrs[0xC00];
-}smdpArea_t;
-
-static_assert(offsetof(smdpArea_t, commandsReadIndex) == 0x0040, "");
-static_assert(offsetof(smdpArea_t, commandsWriteIndex) == 0x0080, "");
-static_assert(offsetof(smdpArea_t, resultsReadIndex) == 0x00C0, "");
-static_assert(offsetof(smdpArea_t, resultsWriteIndex) == 0x0100, "");
-static_assert(offsetof(smdpArea_t, resultPtrs) == 0x3140, "");
-
-typedef struct  
-{
-	uint32be type;
-	uint32be ukn04;
-	uint32be ukn08;
-	uint32be ukn0C;
-	uint32be ukn10;
-	uint32be ukn14;
-	uint32be ukn18;
-	uint32be ukn1C;
-	uint32be ukn20;
-	uint32be ukn24;
-	uint32be ukn28;
-	uint32be ukn2C;
-}smdpCommand_t;
-
-void smdpArea_pushResult(smdpArea_t* smdpArea, MPTR result)
-{
-	//smdpArea.
-	smdpArea->resultPtrs[(uint32)smdpArea->resultsWriteIndex] = result;
-	smdpArea->resultsWriteIndex = ((uint32)smdpArea->resultsWriteIndex + 1)%(uint32)smdpArea->count;
-}
-
-void smdpArea_processCommand(smdpArea_t* smdpArea, smdpCommand_t* cmd)
-{
-	if (cmd->type == 1)
+	struct BootInfoBlock
 	{
-		cmd->ukn08 = 1;
-		// cmd->ukn2C ?
-		cemuLog_logDebug(LogType::Force, "SMDP command received - todo");
-		smdpArea_pushResult(smdpArea, memory_getVirtualOffsetFromPointer(cmd));
+		uint32be _unk000;
+		uint32be blockSize;           // +0x004
+		uint32be _unk008[4];
+		uint32be busFrequency;        // +0x018
+		uint32be _unk01C[42];
+		BootMemoryRegion memory[3];   // +0x0C4
+		uint8 _unk0E8[0x3B4 - 0xE8];
+		uint32be smdpArea;            // +0x3B4, physical address of the IOSU mailbox
+		uint8 _unk3B8[0x40C - 0x3B8];
+	};
+
+	static_assert(offsetof(BootInfoBlock, blockSize) == 0x004);
+	static_assert(offsetof(BootInfoBlock, busFrequency) == 0x018);
+	static_assert(offsetof(BootInfoBlock, memory) == 0x0C4);
+	static_assert(offsetof(BootInfoBlock, smdpArea) == 0x3B4);
+	static_assert(sizeof(BootInfoBlock) == 0x40C);
+
+	BootInfoBlock* GetBootInfo()
+	{
+		return (BootInfoBlock*)memory_getPointerFromPhysicalOffset(kBootInfoAddress);
 	}
-	else
-	{
-		assert_dbg();
-	}
-}
 
-void smdpArea_thread()
-{
-	while (true)
+	void WriteBootInfo()
 	{
-		ppcBootParamBlock_t* bootParamBlock = (ppcBootParamBlock_t*)memory_getPointerFromPhysicalOffset(0x01FFF000);
-		if(bootParamBlock->smdpAreaPtr != MPTR_NULL)	
-		{ 
-			smdpArea_t* smdpArea = (smdpArea_t*)memory_getPointerFromPhysicalOffset(bootParamBlock->smdpAreaPtr);
-			if (smdpArea->magic == 'smdp')
+		BootInfoBlock* info = GetBootInfo();
+		memset(info, 0, sizeof(BootInfoBlock));
+		info->blockSize = (uint32)sizeof(BootInfoBlock);
+		info->busFrequency = ESPRESSO_BUS_CLOCK;
+		// memory regions as seen by the PowerPC: MEM0, MEM1 and MEM2
+		const uint32 regions[3][2] = {
+			{ 0x08000000, 0x00120000 },
+			{ 0x00000000, 0x02000000 },
+			{ 0x28000000, 0xA8000000 },
+		};
+		for (uint32 i = 0; i < 3; i++)
+		{
+			info->memory[i].id = i;
+			info->memory[i].baseAddress = regions[i][0];
+			info->memory[i].size = regions[i][1];
+		}
+	}
+
+	// ---- SMDP mailbox ----
+	// A ring of command pointers sent to IOSU and a ring of results sent back.
+	// Indices live in separate 64 byte blocks.
+
+	constexpr uint32 kSmdpMagic = 0x736D6470; // "smdp"
+	constexpr uint32 kSmdpRingSize = 0xC00;
+
+	struct SmdpMailbox
+	{
+		uint32be magic;
+		uint32be ringLength;
+		uint8 _pad008[0x38];
+		uint32be commandReadIndex;    // +0x040, advanced by IOSU (us)
+		uint8 _pad044[0x3C];
+		uint32be commandWriteIndex;   // +0x080
+		uint8 _pad084[0x3C];
+		uint32be resultReadIndex;     // +0x0C0
+		uint8 _pad0C4[0x3C];
+		uint32be resultWriteIndex;    // +0x100, advanced by IOSU (us)
+		uint8 _pad104[0x3C];
+		uint32be commands[kSmdpRingSize]; // +0x140
+		uint32be results[kSmdpRingSize];  // +0x3140
+	};
+
+	static_assert(offsetof(SmdpMailbox, commandReadIndex) == 0x040);
+	static_assert(offsetof(SmdpMailbox, commandWriteIndex) == 0x080);
+	static_assert(offsetof(SmdpMailbox, resultReadIndex) == 0x0C0);
+	static_assert(offsetof(SmdpMailbox, resultWriteIndex) == 0x100);
+	static_assert(offsetof(SmdpMailbox, commands) == 0x140);
+	static_assert(offsetof(SmdpMailbox, results) == 0x3140);
+
+	struct SmdpCommand
+	{
+		uint32be type;
+		uint32be _unk04;
+		uint32be status;
+		uint32be _unk0C[9];
+	};
+
+	void SmdpPostResult(SmdpMailbox* box, MPTR result)
+	{
+		uint32 index = box->resultWriteIndex;
+		box->results[index] = result;
+		box->resultWriteIndex = (index + 1) % (uint32)box->ringLength;
+	}
+
+	void SmdpHandleCommand(SmdpMailbox* box, SmdpCommand* cmd)
+	{
+		if (cmd->type != 1)
+		{
+			assert_dbg();
+			return;
+		}
+		// acknowledge without doing anything else
+		cmd->status = 1;
+		cemuLog_logDebug(LogType::Force, "SMDP: acknowledged command type 1 (not implemented)");
+		SmdpPostResult(box, memory_getVirtualOffsetFromPointer(cmd));
+	}
+
+	// stands in for the IOSU side of the mailbox, polling it periodically
+	void SmdpServiceThread()
+	{
+		for (;;)
+		{
+			uint32 boxAddress = GetBootInfo()->smdpArea;
+			if (boxAddress != MPTR_NULL)
 			{
-				uint32 cmdReadIndex = smdpArea->commandsReadIndex;
-				uint32 cmdWriteIndex = smdpArea->commandsWriteIndex;
-				if (cmdReadIndex != cmdWriteIndex)
+				SmdpMailbox* box = (SmdpMailbox*)memory_getPointerFromPhysicalOffset(boxAddress);
+				if (box->magic == kSmdpMagic)
 				{
-					// new command
-					smdpArea_processCommand(smdpArea, (smdpCommand_t*)memory_getPointerFromPhysicalOffset(smdpArea->commandPtrs[cmdReadIndex]));
-					// increment read counter
-					cmdReadIndex = (cmdReadIndex + 1) % (uint32)smdpArea->count;
-					smdpArea->commandsReadIndex = cmdReadIndex;
+					uint32 readIndex = box->commandReadIndex;
+					if (readIndex != (uint32)box->commandWriteIndex)
+					{
+						SmdpCommand* cmd = (SmdpCommand*)memory_getPointerFromPhysicalOffset(box->commands[readIndex]);
+						SmdpHandleCommand(box, cmd);
+						box->commandReadIndex = (readIndex + 1) % (uint32)box->ringLength;
+					}
 				}
 			}
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
 		}
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	}
+
+	// ---- cores ----
+
+	PPCInterpreterGlobal_t s_sharedCoreState{};
+
+	struct LLECoreBlock
+	{
+		uint8 recompilerScratch[128 * 1024]; // stack space below the contexts used by the recompiler
+		PPCInterpreter_t cores[3];
+	};
+
+	bool CoreReleased(uint32 coreIndex)
+	{
+		uint32 scr = s_sharedCoreState.sprGlobal.scr;
+		if (coreIndex == 1)
+			return (scr & kScrEnableCore1) != 0;
+		if (coreIndex == 2)
+			return (scr & kScrEnableCore2) != 0;
+		return true; // core 0 always runs
 	}
 }
 
 void PPCCoreLLE_startSingleCoreScheduler(uint32 entrypoint)
 {
-	PPCInterpreterLLEContext_t* cpuContext = (PPCInterpreterLLEContext_t*)malloc(sizeof(PPCInterpreterLLEContext_t));
-	memset(cpuContext, 0, sizeof(PPCInterpreterLLEContext_t));
+	LLECoreBlock* block = (LLECoreBlock*)malloc(sizeof(LLECoreBlock));
+	memset((void*)block, 0, sizeof(LLECoreBlock));
 
-	PPCCoreLLE_setupBootParamBlock();
+	WriteBootInfo();
 
-	PPCCoreLLE_initCore(cpuContext->cores + 0, 0);
-	PPCCoreLLE_initCore(cpuContext->cores + 1, 1);
-	PPCCoreLLE_initCore(cpuContext->cores + 2, 2);
-	
-	cpuContext->cores[0].instructionPointer = entrypoint;
-	cpuContext->cores[1].instructionPointer = 0xFFF00100;
-	cpuContext->cores[2].instructionPointer = 0xFFF00100;
-	// todo - calculate instruction pointer when core 1/2 is enabled (because entry point is determined by MSR exception vector bit)
-	std::thread(smdpArea_thread).detach();
+	for (uint32 i = 0; i < 3; i++)
+	{
+		block->cores[i].spr.UPIR = i;
+		block->cores[i].global = &s_sharedCoreState;
+		block->cores[i].instructionPointer = (i == 0) ? entrypoint : kResetVector;
+	}
 
-	while (true)
+	std::thread(SmdpServiceThread).detach();
+
+	for (;;)
 	{
 		for (uint32 coreIndex = 0; coreIndex < 3; coreIndex++)
 		{
-			PPCInterpreter_t* hCPU = cpuContext->cores+coreIndex;
-			PPCInterpreter_setCurrentInstance(hCPU);
-			if (coreIndex == 1)
-			{
-				// check SCR core 1 enable bit
-				if ((globalCPUState.sprGlobal.scr&SCR_C1) == 0)
-					continue;
-			}
-			else if (coreIndex == 2)
-			{
-				// check SCR core 2 enable bit
-				if ((globalCPUState.sprGlobal.scr&SCR_C2) == 0)
-					continue;
-			}
-
-			hCPU->remainingCycles = 10000;
-			while ((--hCPU->remainingCycles) >= 0)
-			{
-				PPCInterpreterFull_executeInstruction(hCPU);
-			};
+			PPCInterpreter_t* cpu = block->cores + coreIndex;
+			PPCInterpreter_setCurrentInstance(cpu);
+			if (!CoreReleased(coreIndex))
+				continue;
+			cpu->remainingCycles = kCoreSliceInstructions;
+			while (--cpu->remainingCycles >= 0)
+				PPCInterpreterFull_executeInstruction(cpu);
 		}
 	}
-	assert_dbg();
 }

@@ -1,3 +1,10 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// Guest clock derived from the host time stamp counter. The TSC rate is
+// measured once at start-up; afterwards every query converts the TSC delta
+// since the previous query into Espresso core cycles, carrying the division
+// remainder so no time is lost between calls.
+
 #include "Cafe/HW/Espresso/Const.h"
 #include "config/ActiveSettings.h"
 #include "util/helpers/fspinlock.h"
@@ -6,88 +13,68 @@
 
 #if defined(ARCH_X86_64)
 #include <immintrin.h>
-#pragma intrinsic(__rdtsc)
 #endif
 
-uint64 _rdtscLastMeasure = 0;
-uint64 _rdtscFrequency = 0;
-
-struct uint128_t
+namespace
 {
-	uint64 low;
-	uint64 high;
-};
+	// host TSC ticks per second, 0 until the measurement finished
+	std::atomic<uint64> s_tscFrequency{ 0 };
 
-static_assert(sizeof(uint128_t) == 16);
+	// state of the converter, protected by s_clockLock
+	FSpinlock s_clockLock;
+	uint64 s_lastTsc = 0;          // TSC value of the previous query
+	uint64 s_carryLow = 0;         // remainder of tsc * CORE_CLOCK / frequency
+	uint64 s_carryHigh = 0;
+	uint64 s_guestTicks = 0;       // returned clock value
 
-uint128_t _rdtscAcc{};
-
-uint64 muldiv64(uint64 a, uint64 b, uint64 d)
-{
-	uint64 diva = a / d;
-	uint64 moda = a % d;
-	uint64 divb = b / d;
-	uint64 modb = b % d;
-	return diva * b + moda * divb + moda * modb / d;
-}
-
-uint64 PPCTimer_estimateRDTSCFrequency()
-{
-    #if defined(ARCH_X86_64)
-	if (!g_CPUFeatures.x86.invariant_tsc)
-		cemuLog_log(LogType::Force, "Invariant TSC not supported");
-    #endif
-
-	_mm_mfence();
-	uint64 tscStart = __rdtsc();
-	unsigned int startTime = GetTickCount();
-	HRTick startTick = HighResolutionTimer::now().getTick();
-	// wait roughly 3 seconds
-	while (true)
+	// floor(a * b / d) without intermediate overflow (result must fit in 64 bits)
+	uint64 MulDiv(uint64 a, uint64 b, uint64 d)
 	{
-		if ((GetTickCount() - startTime) >= 3000)
-			break;
-		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		uint64 high;
+		uint64 low = _umul128(a, b, &high);
+		uint64 remainder;
+		return _udiv128(high, low, d, &remainder);
 	}
-	_mm_mfence();
-	HRTick stopTick = HighResolutionTimer::now().getTick();
-	uint64 tscEnd = __rdtsc();
-	// derive frequency approximation from measured time difference
-	uint64 tsc_diff = tscEnd - tscStart;
-	uint64 hrtFreq = 0;
-	uint64 hrtDiff = HighResolutionTimer::getTimeDiffEx(startTick, stopTick, hrtFreq);
-	uint64 tsc_freq = muldiv64(tsc_diff, hrtFreq, hrtDiff);
 
-	// uint64 freqMultiplier = tsc_freq / hrtFreq;
-	//cemuLog_log(LogType::Force, "RDTSC measurement test:");
-	//cemuLog_log(LogType::Force, "TSC-diff:   0x{:016x}", tsc_diff);
-	//cemuLog_log(LogType::Force, "TSC-freq:   0x{:016x}", tsc_freq);
-	//cemuLog_log(LogType::Force, "HPC-diff:   0x{:016x}", qpc_diff);
-	//cemuLog_log(LogType::Force, "HPC-freq:   0x{:016x}", (uint64)qpc_freq.QuadPart);
-	//cemuLog_log(LogType::Force, "Multiplier: 0x{:016x}", freqMultiplier);
+	// compares the TSC against the high resolution timer over ~3 seconds
+	uint64 MeasureTscFrequency()
+	{
+#if defined(ARCH_X86_64)
+		if (!g_CPUFeatures.x86.invariant_tsc)
+			cemuLog_log(LogType::Force, "Invariant TSC not supported");
+#endif
+		_mm_mfence();
+		const uint64 tscBegin = __rdtsc();
+		const HRTick hrBegin = HighResolutionTimer::now().getTick();
+		const auto wallBegin = std::chrono::steady_clock::now();
+		while (std::chrono::steady_clock::now() - wallBegin < std::chrono::seconds(3))
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		_mm_mfence();
+		const HRTick hrEnd = HighResolutionTimer::now().getTick();
+		const uint64 tscEnd = __rdtsc();
 
-	return tsc_freq;
-}
-
-int PPCTimer_initThread()
-{
-	_rdtscFrequency = PPCTimer_estimateRDTSCFrequency();
-	return 0;
+		uint64 hrFrequency = 0;
+		const uint64 hrElapsed = HighResolutionTimer::getTimeDiffEx(hrBegin, hrEnd, hrFrequency);
+		return MulDiv(tscEnd - tscBegin, hrFrequency, hrElapsed);
+	}
 }
 
 void PPCTimer_init()
 {
-	std::thread t(PPCTimer_initThread);
-	t.detach();
-	_rdtscLastMeasure = __rdtsc();
+	std::thread([]() { s_tscFrequency = MeasureTscFrequency(); }).detach();
+	s_lastTsc = __rdtsc();
 }
 
-uint64 _tickSummary = 0;
+void PPCTimer_waitForInit()
+{
+	while (s_tscFrequency.load() == 0)
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+}
 
 void PPCTimer_start()
 {
-	_rdtscLastMeasure = __rdtsc();
-	_tickSummary = 0;
+	s_lastTsc = __rdtsc();
+	s_guestTicks = 0;
 }
 
 uint64 PPCTimer_getRawTsc()
@@ -97,71 +84,47 @@ uint64 PPCTimer_getRawTsc()
 
 uint64 PPCTimer_microsecondsToTsc(uint64 us)
 {
-	return (us * _rdtscFrequency) / 1000000ULL;
+	return (us * s_tscFrequency.load()) / 1000000ULL;
 }
 
 uint64 PPCTimer_tscToMicroseconds(uint64 us)
 {
-	uint128_t r{};
-	r.low = _umul128(us, 1000000ULL, &r.high);
-
-	uint64 remainder;
-	const uint64 microseconds = _udiv128(r.high, r.low, _rdtscFrequency, &remainder);
-
-	return microseconds;
+	return MulDiv(us, 1000000ULL, s_tscFrequency.load());
 }
 
-bool PPCTimer_isReady()
-{
-	return _rdtscFrequency != 0;
-}
-
-void PPCTimer_waitForInit()
-{
-	while (!PPCTimer_isReady()) std::this_thread::sleep_for(std::chrono::milliseconds(10));
-}
-
-FSpinlock sTimerSpinlock;
-
-// thread safe
+// thread safe, monotonic
 uint64 PPCTimer_getFromRDTSC()
 {
-	sTimerSpinlock.lock();
+	s_clockLock.lock();
 	_mm_mfence();
-	uint64 rdtscCurrentMeasure = __rdtsc();
-	uint64 rdtscDif = rdtscCurrentMeasure - _rdtscLastMeasure;
-	// optimized max(rdtscDif, 0) without conditionals
-	rdtscDif = rdtscDif & ~(uint64)((sint64)rdtscDif >> 63);
+	const uint64 now = __rdtsc();
+	// a TSC that went backwards (core migration) counts as no time passed
+	uint64 delta = 0;
+	if ((sint64)(now - s_lastTsc) > 0)
+		delta = now - s_lastTsc;
+	if (now > s_lastTsc)
+		s_lastTsc = now;
 
-	uint128_t diff{};
-	diff.low = _umul128(rdtscDif, Espresso::CORE_CLOCK, &diff.high);
+	// carry += delta * CORE_CLOCK (128 bit)
+	uint64 productHigh;
+	uint64 productLow = _umul128(delta, Espresso::CORE_CLOCK, &productHigh);
+	uint64 sumLow = s_carryLow + productLow;
+	s_carryHigh += productHigh + (sumLow < productLow ? 1 : 0);
+	s_carryLow = sumLow;
 
-	if(rdtscCurrentMeasure > _rdtscLastMeasure)
-		_rdtscLastMeasure = rdtscCurrentMeasure; // only travel forward in time
-
-	uint8 c = 0;
-	#if BOOST_OS_WINDOWS
-	c = _addcarry_u64(c, _rdtscAcc.low, diff.low, &_rdtscAcc.low);
-	_addcarry_u64(c, _rdtscAcc.high, diff.high, &_rdtscAcc.high);
-	#else
-	// requires casting because of long / long long nonesense
-	c = _addcarry_u64(c, _rdtscAcc.low, diff.low, (unsigned long long*)&_rdtscAcc.low);
-	_addcarry_u64(c, _rdtscAcc.high, diff.high, (unsigned long long*)&_rdtscAcc.high);
-	#endif
-
+	// whole core cycles elapsed, keep the remainder for the next query
 	uint64 remainder;
-	uint64 elapsedTick = _udiv128(_rdtscAcc.high, _rdtscAcc.low, _rdtscFrequency, &remainder);
+	uint64 cycles = _udiv128(s_carryHigh, s_carryLow, s_tscFrequency.load(), &remainder);
+	s_carryLow = remainder;
+	s_carryHigh = 0;
 
-	_rdtscAcc.low = remainder;
-	_rdtscAcc.high = 0;
+	// the guest clock runs at 8x the core clock divided by the user's
+	// timer shift setting
+	cycles <<= 3;
+	cycles >>= ActiveSettings::GetTimerShiftFactor();
 
-	// timer scaling
-	elapsedTick <<= 3ull; // *8
-	uint8 timerShiftFactor = ActiveSettings::GetTimerShiftFactor();
-	elapsedTick >>= timerShiftFactor;
-
-	_tickSummary += elapsedTick;
-
-	sTimerSpinlock.unlock();
-	return _tickSummary;
+	s_guestTicks += cycles;
+	const uint64 result = s_guestTicks;
+	s_clockLock.unlock();
+	return result;
 }
