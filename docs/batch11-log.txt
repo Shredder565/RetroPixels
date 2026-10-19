@@ -1,0 +1,32 @@
+Batch 11 working notes (Cafe/HW/Latte/Core). The final log entry is at the end.
+
+Done:
+- LatteIndices.cpp: original. Harness: 2000 seeds, 402k lines identical
+  (renderer reserve/upload/release calls, output buffer hashes, max index,
+  host index type and count, cache hits/evictions, invalidation).
+  Kept: a 65535-vertex AUTO line loop still reserves 32 bit room while it
+  writes 16 bit indices; LE sources of rewritten modes are not converted;
+  the 8 slot cache with the first-slot-wins LRU tie rule.
+- FetchShader.cpp/.h: original. Harness: 5000 seeds, 983k lines identical
+  (all decoded fields, key, vk hash fragment, registry and address lookup
+  behaviour, frame-based revalidation).
+  Fixes: UnregisterInCache erases its own entry (old code asserted the entry
+  was missing and then erased end(), so destroying a registered fetch shader
+  crashed); fetches past the end of a bare (old cache layout) program and
+  VTX_TC clauses outside the program are ignored instead of reading past the
+  buffer; the buffer mask bit for invalid buffer ids uses (id & 31) instead
+  of an undefined shift (same value x86 produced).
+- LatteCommandProcessor.cpp, LattePM4.h: original. Harness with a logging
+  stub renderer: 11000 seeds, 845k lines identical (every renderer call,
+  register file hashes, draws incl. the draw-pass fast path, dirty masks,
+  waits, mem writes, events, HLE packets, indirect buffers, ring packets).
+  Fixes: register writes past the register file are dropped instead of
+  writing out of bounds; HLE_SPECIAL_STATE ids >= the state count are
+  ignored (old check let id 9 write past the array); DRAW_INDEX_IMMD copies
+  at most 0x4000 words; ring packets of 128+ words are no longer copied into
+  a 128 word stack buffer; the indirect buffer nesting depth is not capped.
+  Dropped: the never-taken SQ_VTX_SEMANTIC_CLEAR special case and the
+  LATTE_CP_LOGGING debug dump. Log texts differ.
+- LatteTiming.cpp/.h, LatteRingBuffer.cpp/.h: original, same timer
+  frequencies, same vsync/flip throttle title list, same allocator rule.
+  No harness (timer driven / 10 lines), reviewed by hand.

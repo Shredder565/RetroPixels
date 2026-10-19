@@ -1,4 +1,9 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
+
+// PM4 type 3 packet opcodes understood by the Latte command processor
+// (R6xx/R7xx numbering), plus the emulator-only packets that GX2 emits for
+// operations that are handled at a higher level.
 
 #define IT_SET_PREDICATION			0x20
 #define IT_DRAW_INDEX_2				0x27
@@ -14,12 +19,12 @@
 #define IT_MEM_WRITE				0x3D
 #define IT_SURFACE_SYNC				0x43
 #define IT_EVENT_WRITE				0x46
-#define IT_EVENT_WRITE_EOP			0x47	// end of pipe
+#define IT_EVENT_WRITE_EOP			0x47
 
 #define IT_LOAD_CONFIG_REG			0x60
 #define IT_LOAD_CONTEXT_REG			0x61
 #define IT_LOAD_ALU_CONST			0x62
-#define IT_LOAD_BOOL_CONST			0x63 // not used?
+#define IT_LOAD_BOOL_CONST			0x63
 #define IT_LOAD_LOOP_CONST			0x64
 #define IT_LOAD_RESOURCE			0x65
 #define IT_LOAD_SAMPLER				0x66
@@ -34,6 +39,7 @@
 #define IT_STRMOUT_BASE_UPDATE		0x72
 #define IT_SET_ALL_CONTEXTS			0x74
 
+// register index of the first register each SET_* / LOAD_* packet family addresses
 #define LATTE_REG_BASE_CONFIG		0x2000
 #define LATTE_REG_BASE_CONTEXT		0xA000
 #define LATTE_REG_BASE_ALU_CONST	0xC000
@@ -41,7 +47,7 @@
 #define LATTE_REG_BASE_RESOURCE		0xE000
 #define LATTE_REG_BASE_SAMPLER		0xF000
 
-// emulator only
+// emulator-only packets (opcodes unused by the hardware)
 #define IT_HLE_COPY_SURFACE_NEW					0xEE
 #define IT_HLE_SYNC_ASYNC_OPERATIONS			0xEF
 #define IT_HLE_REQUEST_SWAP_BUFFERS				0xF0
@@ -55,5 +61,7 @@
 #define IT_HLE_BEGIN_OCCLUSION_QUERY			0xFA
 #define IT_HLE_END_OCCLUSION_QUERY				0xFB
 
+// header of a type 3 packet with the given opcode and body length in dwords
 #define pm4HeaderType3(__itCode, __dataDWordCount) (0xC0000000|((uint32)(__itCode)<<8)|((uint32)((__dataDWordCount)-1)<<16))
+// a type 2 packet is a single dword of padding
 #define pm4HeaderType2Filler() (0x80000000)

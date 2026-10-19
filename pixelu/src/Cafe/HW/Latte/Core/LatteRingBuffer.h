@@ -1,5 +1,7 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
+// linear allocator over a fixed buffer that restarts at the beginning when full
 typedef struct
 {
 	uint8* data;
