@@ -1,226 +1,163 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/OS/RPL/rpl.h"
 #include "Cafe/OS/RPL/rpl_symbol_storage.h"
 
-struct rplSymbolLib_t
+namespace
 {
-	char* libName;
-	rplSymbolLib_t* next;
-};
-
-struct  
-{
-	rplSymbolLib_t* libs;
-	std::mutex m_symbolStorageMutex;
-	std::unordered_map<uint32, RPLStoredSymbol*> map_symbolByAddress;
-	// allocator for strings
-	char* strAllocatorBlock;
-	sint32 strAllocatorOffset;
-	std::vector<void*> list_strAllocatedBlocks;
-}rplSymbolStorage = { 0 };
-
-#define STR_ALLOC_BLOCK_SIZE	(128*1024) // allocate 128KB blocks at once
-
-char* rplSymbolStorage_allocDupString(const char* str)
-{
-	sint32 len = (sint32)strlen(str);
-	if (rplSymbolStorage.strAllocatorBlock == nullptr || (rplSymbolStorage.strAllocatorOffset + len + 1) >= STR_ALLOC_BLOCK_SIZE)
+	struct SymbolTable
 	{
-		// allocate new block
-		rplSymbolStorage.strAllocatorBlock = (char*)malloc(STR_ALLOC_BLOCK_SIZE);
-		rplSymbolStorage.strAllocatorOffset = 0;
-		rplSymbolStorage.list_strAllocatedBlocks.emplace_back(rplSymbolStorage.strAllocatorBlock);
-	}
-	cemu_assert_debug((rplSymbolStorage.strAllocatorOffset + len + 1) <= STR_ALLOC_BLOCK_SIZE);
-	char* allocatedStr = rplSymbolStorage.strAllocatorBlock + rplSymbolStorage.strAllocatorOffset;
-	rplSymbolStorage.strAllocatorOffset += len + 1;
-	strcpy(allocatedStr, str);
-	return allocatedStr;
-}
+		std::mutex lock;
+		std::unordered_map<uint32, RPLStoredSymbol*> byAddress;
+		std::deque<std::string> strings; // deque keeps element addresses stable
+		std::vector<const char*> libNames; // interned library names, matched case-insensitively
+	};
 
-char* rplSymbolStorage_storeLibname(const char* libName)
-{
-	if (rplSymbolStorage.libs == NULL)
+	SymbolTable& Table()
 	{
-		rplSymbolLib_t* libEntry = new rplSymbolLib_t();
-		libEntry->libName = rplSymbolStorage_allocDupString(libName);
-		libEntry->next = NULL;
-		rplSymbolStorage.libs = libEntry;
-		return libEntry->libName;
+		static SymbolTable s_table;
+		return s_table;
 	}
-	rplSymbolLib_t* libItr = rplSymbolStorage.libs;
-	while (libItr)
+
+	const char* KeepString(SymbolTable& t, const char* s)
 	{
-		if (boost::iequals(libItr->libName, libName))
-			return libItr->libName;
-		// next
-		libItr = libItr->next;
+		return t.strings.emplace_back(s).c_str();
 	}
-	// create new entry
-	rplSymbolLib_t* libEntry = new rplSymbolLib_t();
-	libEntry->libName = rplSymbolStorage_allocDupString(libName);
-	libEntry->next = rplSymbolStorage.libs;
-	rplSymbolStorage.libs = libEntry;
-	return libEntry->libName;
+
+	const char* KeepLibName(SymbolTable& t, const char* lib)
+	{
+		for (const char* known : t.libNames)
+		{
+			if (boost::iequals(known, lib))
+				return known;
+		}
+		const char* stored = KeepString(t, lib);
+		t.libNames.push_back(stored);
+		return stored;
+	}
+
+	void FreeChain(RPLStoredSymbol* s)
+	{
+		while (s)
+		{
+			RPLStoredSymbol* older = s->previous;
+			delete s;
+			s = older;
+		}
+	}
 }
 
 RPLStoredSymbol* rplSymbolStorage_store(const char* libName, const char* symbolName, MPTR address, uint32 type)
 {
-	std::unique_lock<std::mutex> lck(rplSymbolStorage.m_symbolStorageMutex);
-	char* libNameStorage = rplSymbolStorage_storeLibname(libName);
-	char* symbolNameStorage = rplSymbolStorage_allocDupString(symbolName);
-	RPLStoredSymbol* storedSymbol = new RPLStoredSymbol();
-	storedSymbol->address = address;
-	storedSymbol->libName = libNameStorage;
-	storedSymbol->symbolName = symbolNameStorage;
-	storedSymbol->flags = type;
-	storedSymbol->previous = nullptr;
-	auto it = rplSymbolStorage.map_symbolByAddress.find(address);
-	if (it != rplSymbolStorage.map_symbolByAddress.end())
-		storedSymbol->previous = it->second;
-	rplSymbolStorage.map_symbolByAddress[address] = storedSymbol;
-	return storedSymbol;
+	SymbolTable& t = Table();
+	std::lock_guard _l(t.lock);
+	auto* sym = new RPLStoredSymbol();
+	sym->address = address;
+	sym->libName = (void*)KeepLibName(t, libName);
+	sym->symbolName = (void*)KeepString(t, symbolName);
+	sym->flags = type;
+	RPLStoredSymbol*& head = t.byAddress[address];
+	sym->previous = head; // null for a new address
+	head = sym;
+	return sym;
 }
 
 RPLStoredSymbol* rplSymbolStorage_getByAddress(MPTR address)
 {
-	std::unique_lock<std::mutex> lck(rplSymbolStorage.m_symbolStorageMutex);
-	auto it = rplSymbolStorage.map_symbolByAddress.find(address);
-	if (it == rplSymbolStorage.map_symbolByAddress.end())
-		return nullptr;
-	return it->second;
+	SymbolTable& t = Table();
+	std::lock_guard _l(t.lock);
+	auto it = t.byAddress.find(address);
+	return it != t.byAddress.end() ? it->second : nullptr;
 }
 
 RPLStoredSymbol* rplSymbolStorage_getByClosestAddress(MPTR address)
 {
-    // highly inefficient but doesn't matter for now
-    std::unique_lock<std::mutex> lck(rplSymbolStorage.m_symbolStorageMutex);
-    for(uint32 i=0; i<4096; i++)
-    {
-		auto it = rplSymbolStorage.map_symbolByAddress.find(address);
-		RPLStoredSymbol* symbol = (it == rplSymbolStorage.map_symbolByAddress.end()) ? nullptr : it->second;
-        if(symbol)
-            return symbol;
-        address -= 4;
-    }
-    return nullptr;
+	SymbolTable& t = Table();
+	std::lock_guard _l(t.lock);
+	for (uint32 step = 0; step < 4096; step++, address -= 4)
+	{
+		auto it = t.byAddress.find(address);
+		if (it != t.byAddress.end())
+			return it->second;
+	}
+	return nullptr;
 }
 
 void rplSymbolStorage_remove(RPLStoredSymbol* storedSymbol)
 {
-	std::unique_lock<std::mutex> lck(rplSymbolStorage.m_symbolStorageMutex);
-	auto it = rplSymbolStorage.map_symbolByAddress.find(storedSymbol->address);
-	if (it != rplSymbolStorage.map_symbolByAddress.end())
+	SymbolTable& t = Table();
+	std::lock_guard _l(t.lock);
+	auto it = t.byAddress.find(storedSymbol->address);
+	if (it != t.byAddress.end())
 	{
-		if (it->second == storedSymbol)
-		{
-			if (storedSymbol->previous)
-				it->second = storedSymbol->previous;
-			else
-				rplSymbolStorage.map_symbolByAddress.erase(it);
-		}
-		else
-		{
-			RPLStoredSymbol* parentSymbol = it->second;
-			while (parentSymbol && parentSymbol->previous != storedSymbol)
-				parentSymbol = parentSymbol->previous;
-			if (parentSymbol)
-				parentSymbol->previous = storedSymbol->previous;
-		}
+		// unlink from the chain of its address
+		RPLStoredSymbol** link = &it->second;
+		while (*link && *link != storedSymbol)
+			link = &(*link)->previous;
+		if (*link)
+			*link = storedSymbol->previous;
+		if (!it->second)
+			t.byAddress.erase(it);
 	}
 	delete storedSymbol;
 }
 
-
 void rplSymbolStorage_removeRange(MPTR address, sint32 length, uint32 type)
 {
-	std::unique_lock<std::mutex> lck(rplSymbolStorage.m_symbolStorageMutex);
-	while (length > 0)
+	SymbolTable& t = Table();
+	std::lock_guard _l(t.lock);
+	for (; length > 0; address += 4, length -= 4)
 	{
-		auto it = rplSymbolStorage.map_symbolByAddress.find(address);
-		if (it != rplSymbolStorage.map_symbolByAddress.end())
+		auto it = t.byAddress.find(address);
+		if (it == t.byAddress.end())
+			continue;
+		RPLStoredSymbol** link = &it->second;
+		while (*link)
 		{
-			RPLStoredSymbol* current = it->second;
-			RPLStoredSymbol* newHead = current;
-			RPLStoredSymbol* previousKept = nullptr;
-			while (current)
+			RPLStoredSymbol* s = *link;
+			if ((s->flags & type) == type)
 			{
-				RPLStoredSymbol* next = current->previous;
-				if ((current->flags & type) == type)
-				{
-					if (previousKept)
-						previousKept->previous = next;
-					else
-						newHead = next;
-					delete current;
-				}
-				else
-				{
-					previousKept = current;
-				}
-				current = next;
+				*link = s->previous;
+				delete s;
 			}
-
-			if (newHead)
-				it->second = newHead;
 			else
-				rplSymbolStorage.map_symbolByAddress.erase(it);
+				link = &s->previous;
 		}
-		address += 4;
-		length -= 4;
+		if (!it->second)
+			t.byAddress.erase(it);
 	}
 }
 
 void rplSymbolStorage_createJumpProxySymbol(MPTR jumpAddress, MPTR destAddress)
 {
-	RPLStoredSymbol* destSymbol = rplSymbolStorage_getByAddress(destAddress);
-	if (destSymbol)
-		rplSymbolStorage_store((char*)destSymbol->libName, (char*)destSymbol->symbolName, jumpAddress);
+	RPLStoredSymbol* dest = rplSymbolStorage_getByAddress(destAddress);
+	if (dest)
+		rplSymbolStorage_store((const char*)dest->libName, (const char*)dest->symbolName, jumpAddress);
 }
 
 std::unordered_map<uint32, RPLStoredSymbol*>& rplSymbolStorage_lockSymbolMap()
 {
-	rplSymbolStorage.m_symbolStorageMutex.lock();
-	return rplSymbolStorage.map_symbolByAddress;
+	SymbolTable& t = Table();
+	t.lock.lock();
+	return t.byAddress;
 }
 
 void rplSymbolStorage_unlockSymbolMap()
 {
-	rplSymbolStorage.m_symbolStorageMutex.unlock();
+	Table().lock.unlock();
 }
 
 void rplSymbolStorage_init()
 {
-	cemu_assert_debug(rplSymbolStorage.map_symbolByAddress.empty());
-	cemu_assert_debug(rplSymbolStorage.strAllocatorBlock == nullptr);
+	cemu_assert_debug(Table().byAddress.empty());
 }
 
 void rplSymbolStorage_unloadAll()
 {
-	// free symbols
-	for (auto& it : rplSymbolStorage.map_symbolByAddress)
-	{
-		RPLStoredSymbol* symbol = it.second;
-		while (symbol)
-		{
-			RPLStoredSymbol* previous = symbol->previous;
-			delete symbol;
-			symbol = previous;
-		}
-	}
-	rplSymbolStorage.map_symbolByAddress.clear();
-	// free libs
-	rplSymbolLib_t* lib = rplSymbolStorage.libs;
-	while (lib)
-	{
-		rplSymbolLib_t* next = lib->next;
-		delete lib;
-		lib = next;
-	}
-	rplSymbolStorage.libs = nullptr;
-	// free strings
-	for (auto it : rplSymbolStorage.list_strAllocatedBlocks)
-		free(it);
-    rplSymbolStorage.list_strAllocatedBlocks.clear();
-	rplSymbolStorage.strAllocatorBlock = nullptr;
-	rplSymbolStorage.strAllocatorOffset = 0;
+	SymbolTable& t = Table();
+	std::lock_guard _l(t.lock);
+	for (auto& it : t.byAddress)
+		FreeChain(it.second);
+	t.byAddress.clear();
+	t.libNames.clear();
+	t.strings.clear();
 }
