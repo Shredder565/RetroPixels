@@ -1,355 +1,121 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Time.h"
 
+/* OS time
+ * The time base register counts timer ticks (core clock / 20). OSGetTime adds the offset of the
+ * emulated real time clock so that tick 0 is 2000-01-01 00:00:00 (a Saturday). Calendar
+ * conversion uses the proleptic Gregorian calendar with days counted from 0000-01-01. */
+
 namespace coreinit
 {
-	uint64 coreinit_GetMFTB()
+	namespace
 	{
-		// bus clock is 1/5th of core clock
-		// timer clock is 1/4th of bus clock
-		return PPCInterpreter_getMainCoreCycleCounter() / 20ULL;
+		constexpr uint64 TICKS_PER_SECOND = ESPRESSO_TIMER_CLOCK;
+		constexpr uint64 SECONDS_PER_DAY = 24 * 60 * 60;
+
+		// first day of each month for common and leap years
+		constexpr uint32 MONTH_START[2][12] =
+		{
+			{ 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 },
+			{ 0, 31, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335 },
+		};
+
+		constexpr bool IsLeap(uint32 year)
+		{
+			return (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+		}
+
+		// number of leap years in [0, year) (year 0 is a leap year)
+		constexpr uint32 LeapYearsBefore(uint32 year)
+		{
+			if (year == 0)
+				return 0;
+			return (year + 3) / 4 - (year - 1) / 100 + (year - 1) / 400;
+		}
+
+		constexpr uint64 DaysBeforeYear(uint32 year)
+		{
+			return (uint64)year * 365 + LeapYearsBefore(year);
+		}
+
+		constexpr uint64 DAYS_BEFORE_2000 = DaysBeforeYear(2000);
+		static_assert(DAYS_BEFORE_2000 == 730485);
+
+		uint64 ReadTimeBase()
+		{
+			return PPCInterpreter_getMainCoreCycleCounter() / 20ull;
+		}
 	}
 
 	uint64 OSGetSystemTime()
 	{
-		return coreinit_GetMFTB();
+		return ReadTimeBase();
 	}
 
 	uint64 OSGetTime()
 	{
-		return OSGetSystemTime() + ppcCyclesSince2000TimerClock;
+		return ReadTimeBase() + ppcCyclesSince2000TimerClock;
 	}
 
 	uint32 OSGetSystemTick()
 	{
-		return static_cast<uint32>(coreinit_GetMFTB());
+		return (uint32)ReadTimeBase();
 	}
 
 	uint32 OSGetTick()
 	{
-		uint64 osTime = OSGetTime();
-		return static_cast<uint32>(osTime);
+		return (uint32)OSGetTime();
 	}
 
-	uint32 getLeapDaysUntilYear(uint32 year)
+	// Inverse of OSTicksToCalendarTime. Fields are not validated; out-of-range values are
+	// folded in with plain integer arithmetic (a month above 11 wraps around).
+	uint64 OSCalendarTimeToTicks(OSCalendarTime_t* calendar)
 	{
-		if (year == 0)
-			return 0;
-		return (year + 3) / 4 - (year - 1) / 100 + (year - 1) / 400;
+		const uint32 year = (uint32)(sint32)calendar->year;
+		const uint32 month = (uint32)(sint32)calendar->month % 12;
+		const uint32 firstDayOfMonth = MONTH_START[IsLeap(year) ? 1 : 0][month];
+		const uint64 dayOfYear = (uint32)(firstDayOfMonth + (uint32)(sint32)calendar->dayOfMonth - 1);
+		const uint64 days = dayOfYear + (uint32)(year * 365) + LeapYearsBefore(year) - DAYS_BEFORE_2000;
+
+		auto widen = [](sint32 v) { return (uint64)(sint64)v; };
+		const uint64 seconds = days * SECONDS_PER_DAY + widen(calendar->hour) * 3600 + widen(calendar->minute) * 60 + widen(calendar->second);
+		const uint64 fraction = widen(calendar->millisecond) * TICKS_PER_SECOND / 1000 + widen(calendar->microsecond) * TICKS_PER_SECOND / 1000000;
+		return seconds * TICKS_PER_SECOND + fraction;
 	}
 
-	bool IsLeapYear(uint32 year)
+	void OSTicksToCalendarTime(uint64 ticks, OSCalendarTime_t* calendar)
 	{
-		if (((year & 3) == 0) && (year % 100) != 0)
-			return true;
-		if ((year % 400) == 0)
-			return true;
-		return false;
-	}
+		const uint64 seconds = ticks / TICKS_PER_SECOND;
+		const uint64 fraction = ticks % TICKS_PER_SECOND;
+		calendar->microsecond = (sint32)((fraction * 1000000 / TICKS_PER_SECOND) % 1000);
+		calendar->millisecond = (sint32)((fraction * 1000 / TICKS_PER_SECOND) % 1000);
 
-	uint32 dayToMonth[12] =
-	{
-		0,31,59,90,120,151,181,212,243,273,304,334
-	};
+		const uint64 daysSince2000 = seconds / SECONDS_PER_DAY;
+		calendar->dayOfWeek = (sint32)((daysSince2000 + 6) % 7); // 2000-01-01 was a Saturday
 
-	uint32 dayToMonthLeapYear[12] =
-	{
-		0,31,60,91,121,152,182,213,244,274,305,335
-	};
+		uint32 secondOfDay = (uint32)(seconds % SECONDS_PER_DAY);
+		calendar->second = (sint32)(secondOfDay % 60);
+		calendar->minute = (sint32)(secondOfDay / 60 % 60);
+		calendar->hour = (sint32)(secondOfDay / 3600);
 
-	uint32 getDayInYearByYearAndMonth(uint32 year, uint32 month)
-	{
-		// Project Zero Maiden of Black Water (JPN) gives us an invalid calendar object
-		month %= 12; // or return 0 if too big?
-		
-		if (IsLeapYear(year))
-			return dayToMonthLeapYear[month];
-		
-		return dayToMonth[month];
-	}
-
-
-	inline const uint64 DAY_BIAS_2000 = 0xB2575;
-
-	uint64 OSCalendarTimeToTicks(OSCalendarTime_t *calendar)
-	{
-		uint32 year = calendar->year;
-
-		uint32 leapDays = getLeapDaysUntilYear(year);
-		uint32 startDayOfCurrentMonth = getDayInYearByYearAndMonth(year, calendar->month);
-
-		uint64 dayInYear = (startDayOfCurrentMonth + calendar->dayOfMonth) - 1;
-		
-		uint64 dayCount = dayInYear + year * 365 + leapDays - DAY_BIAS_2000;
-
-		// convert date to seconds
-		uint64 tSeconds = 0;
-		tSeconds += (uint64)dayCount * 24 * 60 * 60;
-		tSeconds += (uint64)calendar->hour * 60 * 60;
-		tSeconds += (uint64)calendar->minute * 60;
-		tSeconds += (uint64)calendar->second;
-
-		uint64 tSubSecondTicks = 0;
-		tSubSecondTicks += (uint64)calendar->millisecond * ESPRESSO_TIMER_CLOCK / 1000;
-		tSubSecondTicks += (uint64)calendar->microsecond * ESPRESSO_TIMER_CLOCK / 1000000;
-
-		return tSeconds * ESPRESSO_TIMER_CLOCK + tSubSecondTicks;
-	}
-
-	void OSTicksToCalendarTime(uint64 ticks, OSCalendarTime_t* calenderStruct)
-	{
-		uint64 tSubSecondTicks = ticks % ESPRESSO_TIMER_CLOCK;
-		uint64 tSeconds = ticks / ESPRESSO_TIMER_CLOCK;
-
-		uint64 microsecond = tSubSecondTicks * 1000000ull / ESPRESSO_TIMER_CLOCK;
-		microsecond %= 1000ull;
-		calenderStruct->microsecond = (uint32)microsecond;
-
-		uint64 millisecond = tSubSecondTicks * 1000ull / ESPRESSO_TIMER_CLOCK;
-		millisecond %= 1000ull;
-		calenderStruct->millisecond = (uint32)millisecond;
-
-		uint64 dayOfWeek = (tSeconds/(24ull * 60 * 60) + 6ull) % 7ull;
-		uint64 secondOfDay = (tSeconds % (24ull * 60 * 60));
-
-		calenderStruct->dayOfWeek = (sint32)dayOfWeek;
-
-		uint64 daysSince0AD = tSeconds / (24ull * 60 * 60) + DAY_BIAS_2000;
-		uint32 year = (uint32)(daysSince0AD / 365ull);
-		uint64 yearStartDay = year * 365 + getLeapDaysUntilYear(year);
-		while (yearStartDay > daysSince0AD)
-		{
+		// estimate the year from the mean year length, then correct it
+		const uint64 day = daysSince2000 + DAYS_BEFORE_2000;
+		uint32 year = (uint32)(day * 400 / 146097);
+		while (DaysBeforeYear(year) > day)
 			year--;
-			if (IsLeapYear(year))
-				yearStartDay -= 366;
-			else
-				yearStartDay -= 365;
-		}
+		while (DaysBeforeYear(year + 1) <= day)
+			year++;
+		calendar->year = (sint32)year;
 
-		calenderStruct->year = year;
-
-		// calculate time of day
-		uint32 tempSecond = (uint32)secondOfDay;
-		calenderStruct->second = tempSecond % 60;
-		tempSecond /= 60;
-		calenderStruct->minute = tempSecond % 60;
-		tempSecond /= 60;
-		calenderStruct->hour = tempSecond % 24;
-		tempSecond /= 24;
-
-		// calculate month and day
-		uint32 dayInYear = (uint32)(daysSince0AD - yearStartDay);
-		uint32 dayOfYear = dayInYear; // dayInYear gets shifted below to index the non-leap month table, so keep a copy
-		bool isLeapYear = IsLeapYear(year);
-
-		uint32 month = 0; // 0-11
-		uint32 dayInMonth = 0;
-
-		if (isLeapYear && dayInYear < (31+29))
-		{
-			if (dayInYear < 31)
-			{
-				// January
-				month = 0;
-				dayInMonth = dayInYear;
-			}
-			else
-			{
-				// February
-				month = 1;
-				dayInMonth = dayInYear-31;
-			}
-		}
-		else
-		{
-			if (isLeapYear)
-				dayInYear--;
-
-			dayInMonth = dayInYear;
-			if (dayInYear >= 334)
-			{
-				// December
-				month = 11;
-				dayInMonth -= 334;
-			}
-			else if (dayInYear >= 304)
-			{
-				// November
-				month = 10;
-				dayInMonth -= 304;
-			}
-			else if (dayInYear >= 273)
-			{
-				// October
-				month = 9;
-				dayInMonth -= 273;
-			}
-			else if (dayInYear >= 243)
-			{
-				// September
-				month = 8;
-				dayInMonth -= 243;
-			}
-			else if (dayInYear >= 212)
-			{
-				// August
-				month = 7;
-				dayInMonth -= 212;
-			}
-			else if (dayInYear >= 181)
-			{
-				// July
-				month = 6;
-				dayInMonth -= 181;
-			}
-			else if (dayInYear >= 151)
-			{
-				// June
-				month = 5;
-				dayInMonth -= 151;
-			}
-			else if (dayInYear >= 120)
-			{
-				// May
-				month = 4;
-				dayInMonth -= 120;
-			}
-			else if (dayInYear >= 90)
-			{
-				// April
-				month = 3;
-				dayInMonth -= 90;
-			}
-			else if (dayInYear >= 59)
-			{
-				// March
-				month = 2;
-				dayInMonth -= 59;
-			}
-			else if (dayInYear >= 31)
-			{
-				// February
-				month = 1;
-				dayInMonth -= 31;
-			}
-			else
-			{
-				// January
-				month = 0;
-				dayInMonth -= 0;
-			}
-		}
-
-		calenderStruct->dayOfYear = dayOfYear;
-		calenderStruct->month = month;
-		calenderStruct->dayOfMonth = dayInMonth + 1;
-	}
-
-	uint32 getDaysInMonth(uint32 year, uint32 month)
-	{
-		switch (month)
-		{
-		case 0: // January
-			return 31;
-		case 1: // February
-			return IsLeapYear(year) ? 29 : 28;
-		case 2: // March
-			return 31;
-		case 3: // April
-			return 30;
-		case 4: // May
-			return 31;
-		case 5: // June
-			return 30;
-		case 6: // July
-			return 31;
-		case 7: // August
-			return 31;
-		case 8: // September
-			return 30;
-		case 9: // October
-			return 31;
-		case 10: // November
-			return 30;
-		case 11: // December
-			return 31;
-		default:
-			cemu_assert(false);
-		}
-		return 31;
-	}
-
-	void verifyDateMatch(OSCalendarTime_t* ct1, OSCalendarTime_t* ct2)
-	{
-		sint64 m1 = ct1->millisecond * 1000 + ct1->microsecond;
-		sint64 m2 = ct2->millisecond * 1000 + ct2->microsecond;
-		sint64 microDif = std::abs(m1 - m2);
-
-		if (ct1->year != ct2->year ||
-			ct1->month != ct2->month ||
-			ct1->dayOfMonth != ct2->dayOfMonth ||
-			ct1->hour != ct2->hour ||
-			ct1->minute != ct2->minute ||
-			ct1->second != ct2->second ||
-			microDif > 1ull)
-		{
-			debug_printf("Mismatch\n");
-			assert_dbg();
-		}
-	}
-
-	void timeTest()
-	{
-		sint32 iterCount = 0;
-
-		OSCalendarTime_t ct{};
-		ct.year = 2000;
-		ct.month = 1;
-		ct.dayOfMonth = 1;
-		ct.hour = 1;
-		ct.minute = 1;
-		ct.second = 1;
-		ct.millisecond = 123;
-		ct.microsecond = 321;
-
-		while (true)
-		{
-			iterCount++;
-
-
-			uint64 ticks = OSCalendarTimeToTicks(&ct);
-
-			// make sure converting it back results in the same date
-			OSCalendarTime_t ctTemp;
-			OSTicksToCalendarTime(ticks, &ctTemp);
-			verifyDateMatch(&ct, &ctTemp);
-
-			// add a day
-			ticks += 24ull * 60 * 60 * ESPRESSO_TIMER_CLOCK;
-
-			OSCalendarTime_t ctOutput;
-			OSTicksToCalendarTime(ticks, &ctOutput);
-
-			OSCalendarTime_t ctExpected;
-			ctExpected = ct;
-			// add a day manually
-			sint32 daysInMonth = getDaysInMonth(ctExpected.year, ctExpected.month);
-			ctExpected.dayOfMonth = ctExpected.dayOfMonth + 1;
-			if (ctExpected.dayOfMonth >= daysInMonth+1)
-			{
-				ctExpected.dayOfMonth = 1;
-				ctExpected.month = ctExpected.month + 1;
-				if (ctExpected.month > 11)
-				{
-					ctExpected.month = 0;
-					ctExpected.year = ctExpected.year + 1;
-				}
-			}
-
-			verifyDateMatch(&ctExpected, &ctOutput);
-
-			ct = ctOutput;
-		}
+		const uint32 dayOfYear = (uint32)(day - DaysBeforeYear(year));
+		const uint32* starts = MONTH_START[IsLeap(year) ? 1 : 0];
+		uint32 month = 11;
+		while (starts[month] > dayOfYear)
+			month--;
+		calendar->dayOfYear = (sint32)dayOfYear;
+		calendar->month = (sint32)month;
+		calendar->dayOfMonth = (sint32)(dayOfYear - starts[month] + 1);
 	}
 
 	void InitializeTimeAndCalendar()
@@ -361,7 +127,5 @@ namespace coreinit
 
 		cafeExportRegister("coreinit", OSTicksToCalendarTime, LogType::Placeholder);
 		cafeExportRegister("coreinit", OSCalendarTimeToTicks, LogType::Placeholder);
-
-		//timeTest();
 	}
 };
