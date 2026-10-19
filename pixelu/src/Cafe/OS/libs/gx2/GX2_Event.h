@@ -1,8 +1,9 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 namespace GX2
 {
-	void GX2Init_event();
+	void GX2Init_event(); // starts the guest thread that runs event callbacks
 	void GX2EventResetToDefaultState();
 
 	void GX2EventInit();
@@ -16,12 +17,11 @@ namespace GX2
 		TIMESTAMP_BOTTOM = 1,
 		VSYNC = 2,
 		FLIP = 3,
-		// 4 is buffer overrun?
+		// 4: presumably command buffer overrun
 	};
 	inline constexpr size_t GX2CallbackEventTypeCount = 5;
 
-	// notification callbacks for GPU
+	// called by the GPU emulation
 	void __GX2NotifyNewRetirementTimestamp(uint64 tsRetire);
 	void __GX2NotifyEvent(GX2CallbackEventType eventType);
-
 }

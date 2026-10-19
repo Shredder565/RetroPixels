@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/OS/common/OSCommon.h"
 #include "GX2_Command.h"
 #include "GX2_Event.h"
@@ -10,23 +11,80 @@
 #include "config/ActiveSettings.h"
 #include "util/helpers/ConcurrentQueue.h"
 
+// GPU fences, user timestamps, event callbacks and the vsync/flip waits.
+// Event callbacks are never run on the GPU thread: the GPU side queues the event and a
+// dedicated guest thread ("GX2 event callback") calls the registered guest function.
+
 namespace GX2
 {
+	namespace
+	{
+		struct CallbackSlot
+		{
+			MEMPTR<void> func;
+			MEMPTR<void> userData;
+		};
 
-	SysAllocator<coreinit::OSThreadQueue> g_vsyncThreadQueue;
-	SysAllocator<coreinit::OSThreadQueue> g_flipThreadQueue;
+		CallbackSlot s_callbacks[GX2CallbackEventTypeCount]{};
 
+		// threads blocked in GX2WaitForVsync / GX2WaitForFlip
+		SysAllocator<coreinit::OSThreadQueue> s_vsyncWaiters;
+		SysAllocator<coreinit::OSThreadQueue> s_flipWaiters;
+
+		// callback dispatch thread
+		bool s_dispatchThreadStarted{};
+		SysAllocator<OSThread_t> s_dispatchThread;
+		SysAllocator<uint8, 0x2000> s_dispatchThreadStack;
+		SysAllocator<char, 64> s_dispatchThreadName;
+		SysAllocator<coreinit::OSSemaphore> s_pendingEventsSem; // counts queued events
+		ConcurrentQueue<GX2CallbackEventType> s_pendingEvents;
+
+		bool IsValidEventType(GX2CallbackEventType t)
+		{
+			return (size_t)t < GX2CallbackEventTypeCount;
+		}
+
+		void WakeAll(coreinit::OSThreadQueue* queue)
+		{
+			__OSLockScheduler();
+			queue->wakeupEntireWaitQueue(false);
+			__OSUnlockScheduler();
+		}
+
+		void WaitOn(coreinit::OSThreadQueue* queue)
+		{
+			__OSLockScheduler();
+			queue->queueAndWait(coreinit::OSGetCurrentThread());
+			__OSUnlockScheduler();
+		}
+
+		// guest thread entry: run callbacks for queued events, forever
+		void DispatchThreadMain(PPCInterpreter_t* hCPU)
+		{
+			while (coreinit::OSWaitSemaphore(s_pendingEventsSem))
+			{
+				GX2CallbackEventType ev;
+				if (!s_pendingEvents.peek2(ev))
+					continue;
+				const CallbackSlot& slot = s_callbacks[(size_t)ev];
+				if (slot.func)
+					PPCCoreCallback(slot.func, (sint32)ev, slot.userData);
+			}
+			osLib_returnFromFunction(hCPU, 0);
+		}
+	}
+
+	// WAIT_REG_MEM on a 32-bit memory value: wait until (value & mask) <op> compareValue
 	void GX2SetGPUFence(uint32be* fencePtr, uint32 mask, uint32 compareOp, uint32 compareValue)
 	{
+		// GX2 compare op -> WAIT_REG_MEM function
+		static constexpr uint8 kWaitFunction[8] = { 0x7, 0x1, 0x3, 0x2, 0x6, 0x4, 0x5, 0x0 };
 		GX2ReserveCmdSpace(7);
-		uint8 compareOpTable[] = { 0x7,0x1,0x3,0x2,0x6,0x4,0x5,0x0 };
-		gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_WAIT_REG_MEM, 6));
-		gx2WriteGather_submitU32AsBE((uint32)(compareOpTable[compareOp & 7]) | 0x10); // compare operand + memory select (0x10)
-		gx2WriteGather_submitU32AsBE(memory_virtualToPhysical(memory_getVirtualOffsetFromPointer(fencePtr)) | 2); // physical address + type size flag(?)
-		gx2WriteGather_submitU32AsBE(0); // ukn, always set to 0
-		gx2WriteGather_submitU32AsBE(compareValue); // fence value
-		gx2WriteGather_submitU32AsBE(mask); // fence mask
-		gx2WriteGather_submitU32AsBE(0xA); // unknown purpose
+		gx2WriteGather_submit(pm4HeaderType3(IT_WAIT_REG_MEM, 6),
+			(uint32)kWaitFunction[compareOp & 7] | 0x10, // 0x10: poll memory instead of a register
+			memory_virtualToPhysical(memory_getVirtualOffsetFromPointer(fencePtr)) | 2,
+			0, compareValue, mask,
+			0xA); // poll interval
 	}
 
 	enum class GX2PipeEventType : uint32
@@ -39,213 +97,130 @@ namespace GX2
 	void GX2SubmitUserTimeStamp(uint64* timestampOut, uint64 value, GX2PipeEventType eventType, uint32 triggerInterrupt)
 	{
 		GX2ReserveCmdSpace(11);
+		const MPTR dst = memory_virtualToPhysical(memory_getVirtualOffsetFromPointer(timestampOut));
+		const uint32 lo = (uint32)value;
+		const uint32 hi = (uint32)(value >> 32);
+		const bool irq = triggerInterrupt != 0;
 
-		MPTR physTimestampAddr = memory_virtualToPhysical(memory_getVirtualOffsetFromPointer(timestampOut));
-		uint32 valHigh = (uint32)(value >> 32);
-		uint32 valLow = (uint32)(value & 0xffffffff);
+		// 64-bit memory write of the timestamp
+		auto writeValue = [&]() { gx2WriteGather_submit(pm4HeaderType3(IT_MEM_WRITE, 4), dst | 2, 0, lo, hi); };
+		// HLE packet: write the value at the bottom of the pipe, then run the TIMESTAMP_BOTTOM callback
+		auto writeValueWithCallback = [&]() { gx2WriteGather_submit(pm4HeaderType3(IT_HLE_BOTTOM_OF_PIPE_CB, 3), dst, lo, hi); };
+		// The two words after a MEM_WRITE that request the top/bottom interrupt are not a complete
+		// packet. They are kept exactly as before because the GPU side has always seen them like this.
+		auto interruptWords = [](uint32 eventId) { gx2WriteGather_submit(eventId, 0x40000000); };
 
-		if (eventType == GX2PipeEventType::TOP)
+		switch (eventType)
 		{
-			// write when on top of pipe
-			gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_MEM_WRITE, 4));
-			gx2WriteGather_submitU32AsBE(physTimestampAddr | 0x2);
-			gx2WriteGather_submitU32AsBE(0); // 0x40000 -> 32bit write, 0x0 -> 64bit write?
-			gx2WriteGather_submitU32AsBE(valLow); // low
-			gx2WriteGather_submitU32AsBE(valHigh); // high
-			if (triggerInterrupt != 0)
+		case GX2PipeEventType::TOP:
+			writeValue();
+			if (irq)
+				interruptWords(0x304A);
+			break;
+		case GX2PipeEventType::BOTTOM_AFTER_FLUSH:
+			writeValue();
+			if (irq)
 			{
-				// top callback
-				gx2WriteGather_submitU32AsBE(0x0000304A);
-				gx2WriteGather_submitU32AsBE(0x40000000);
+				interruptWords(0x304B);
+				writeValueWithCallback();
 			}
-		}
-		else if (eventType == GX2PipeEventType::BOTTOM_AFTER_FLUSH)
-		{
-			// write when on bottom of pipe
-			gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_MEM_WRITE, 4));
-			gx2WriteGather_submitU32AsBE(physTimestampAddr | 0x2);
-			gx2WriteGather_submitU32AsBE(0); // 0x40000 -> 32bit write, 0x0 -> 64bit write?
-			gx2WriteGather_submitU32AsBE(valLow); // low
-			gx2WriteGather_submitU32AsBE(valHigh); // high
-			// trigger CB
-			if (triggerInterrupt != 0)
-			{
-				// bottom callback
-				// todo -> Fix this
-				gx2WriteGather_submitU32AsBE(0x0000304B); // hax -> This event is handled differently and uses a different packet?
-				gx2WriteGather_submitU32AsBE(0x40000000);
-				// trigger bottom of pipe callback
-				// used by Mario & Sonic Rio
-				gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_HLE_BOTTOM_OF_PIPE_CB, 3));
-				gx2WriteGather_submitU32AsBE(physTimestampAddr);
-				gx2WriteGather_submitU32AsBE(valLow); // low
-				gx2WriteGather_submitU32AsBE(valHigh); // high
-			}
-		}
-		else if (eventType == GX2PipeEventType::BOTTOM)
-		{
-			// fix this
-			// write timestamp when on bottom of pipe
-			if (triggerInterrupt != 0)
-			{
-				// write value and trigger CB
-				// todo: Use correct packet
-				gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_HLE_BOTTOM_OF_PIPE_CB, 3));
-				gx2WriteGather_submitU32AsBE(physTimestampAddr);
-				gx2WriteGather_submitU32AsBE(valLow); // low
-				gx2WriteGather_submitU32AsBE(valHigh); // high
-			}
+			break;
+		case GX2PipeEventType::BOTTOM:
+			if (irq)
+				writeValueWithCallback();
 			else
-			{
-				// write value but don't trigger CB
-				gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_MEM_WRITE, 4));
-				gx2WriteGather_submitU32AsBE(physTimestampAddr | 0x2);
-				gx2WriteGather_submitU32AsBE(0); // 0x40000 -> 32bit write, 0x0 -> 64bit write?
-				gx2WriteGather_submitU32AsBE(valLow); // low
-				gx2WriteGather_submitU32AsBE(valHigh); // high
-			}
-		}
-		else
-		{
+				writeValue();
+			break;
+		default:
 			cemu_assert_debug(false);
+			break;
 		}
 	}
 
-	struct GX2EventFunc
-	{
-		MEMPTR<void> callbackFuncPtr;
-		MEMPTR<void> userData;
-	}s_eventCallback[GX2CallbackEventTypeCount]{};
-
 	void GX2SetEventCallback(GX2CallbackEventType eventType, void* callbackFuncPtr, void* userData)
 	{
-		if ((size_t)eventType >= GX2CallbackEventTypeCount)
+		if (!IsValidEventType(eventType))
 		{
-			cemuLog_log(LogType::Force, "GX2SetEventCallback(): Unknown eventType");
+			cemuLog_log(LogType::Force, "GX2SetEventCallback(): invalid event type {}", (uint32)eventType);
 			return;
 		}
-		s_eventCallback[(size_t)eventType].callbackFuncPtr = callbackFuncPtr;
-		s_eventCallback[(size_t)eventType].userData = userData;
+		s_callbacks[(size_t)eventType].func = callbackFuncPtr;
+		s_callbacks[(size_t)eventType].userData = userData;
 	}
 
 	void GX2GetEventCallback(GX2CallbackEventType eventType, MEMPTR<void>* callbackFuncPtrOut, MEMPTR<void>* userDataOut)
 	{
-		if ((size_t)eventType >= GX2CallbackEventTypeCount)
+		if (!IsValidEventType(eventType))
 		{
-			cemuLog_log(LogType::Force, "GX2GetEventCallback(): Unknown eventType");
+			cemuLog_log(LogType::Force, "GX2GetEventCallback(): invalid event type {}", (uint32)eventType);
 			return;
 		}
+		const CallbackSlot& slot = s_callbacks[(size_t)eventType];
 		if (callbackFuncPtrOut)
-			*callbackFuncPtrOut = s_eventCallback[(size_t)eventType].callbackFuncPtr;
+			*callbackFuncPtrOut = slot.func;
 		if (userDataOut)
-			*userDataOut = s_eventCallback[(size_t)eventType].userData;
+			*userDataOut = slot.userData;
 	}
-
-	// event callback thread
-	bool s_callbackThreadLaunched{};
-	SysAllocator<OSThread_t> s_eventCallbackThread;
-	SysAllocator<uint8, 0x2000> s_eventCallbackThreadStack;
-	SysAllocator<char, 64> s_eventCallbackThreadName;
-	// event callback queue
-	struct GX2EventQueueEntry
-	{
-		GX2EventQueueEntry() {};
-		GX2EventQueueEntry(GX2CallbackEventType eventType) : eventType(eventType) {};
-		GX2CallbackEventType eventType{(GX2CallbackEventType)-1};
-	};
-
-	SysAllocator<coreinit::OSSemaphore> s_eventCbQueueSemaphore;
-	ConcurrentQueue<GX2EventQueueEntry> s_eventCbQueue;
 
 	void __GX2NotifyEvent(GX2CallbackEventType eventType)
 	{
-		if ((size_t)eventType >= GX2CallbackEventTypeCount)
+		if (!IsValidEventType(eventType))
 		{
 			cemu_assert_debug(false);
 			return;
 		}
-		if (s_eventCallback[(size_t)eventType].callbackFuncPtr)
+		if (s_callbacks[(size_t)eventType].func)
 		{
-			s_eventCbQueue.push(eventType);
-			coreinit::OSSignalSemaphore(s_eventCbQueueSemaphore);
+			s_pendingEvents.push(eventType);
+			coreinit::OSSignalSemaphore(s_pendingEventsSem);
 		}
-		// wake up threads that are waiting for VSYNC or FLIP event
 		if (eventType == GX2CallbackEventType::VSYNC)
-		{
-			__OSLockScheduler();
-			g_vsyncThreadQueue->wakeupEntireWaitQueue(false);
-			__OSUnlockScheduler();
-		}
+			WakeAll(s_vsyncWaiters.GetPtr());
 		else if (eventType == GX2CallbackEventType::FLIP)
-		{
-			__OSLockScheduler();
-			g_flipThreadQueue->wakeupEntireWaitQueue(false);
-			__OSUnlockScheduler();
-		}
-	}
-
-	void __GX2CallbackThread(PPCInterpreter_t* hCPU)
-	{
-		while (coreinit::OSWaitSemaphore(s_eventCbQueueSemaphore))
-		{
-			GX2EventQueueEntry entry;
-			if (!s_eventCbQueue.peek2(entry))
-				continue;
-			if(!s_eventCallback[(size_t)entry.eventType].callbackFuncPtr)
-				continue;
-			PPCCoreCallback(s_eventCallback[(size_t)entry.eventType].callbackFuncPtr, (sint32)entry.eventType, s_eventCallback[(size_t)entry.eventType].userData);
-		}
-		osLib_returnFromFunction(hCPU, 0);
+			WakeAll(s_flipWaiters.GetPtr());
 	}
 
 	void GX2WaitForVsync()
 	{
-		__OSLockScheduler();
-		g_vsyncThreadQueue.GetPtr()->queueAndWait(coreinit::OSGetCurrentThread());
-		__OSUnlockScheduler();
+		WaitOn(s_vsyncWaiters.GetPtr());
 	}
 
 	void GX2WaitForFlip()
 	{
-		if ((sint32)(_swapEndianU32(LatteGPUState.sharedArea->flipRequestCountBE) == _swapEndianU32(LatteGPUState.sharedArea->flipExecuteCountBE)))
-			return; // dont wait if no flip is requested
-		__OSLockScheduler();
-		g_flipThreadQueue.GetPtr()->queueAndWait(coreinit::OSGetCurrentThread());
-		__OSUnlockScheduler();
+		// nothing to wait for when every requested flip has already been executed
+		const uint32 requested = _swapEndianU32(LatteGPUState.sharedArea->flipRequestCountBE);
+		const uint32 executed = _swapEndianU32(LatteGPUState.sharedArea->flipExecuteCountBE);
+		if (requested == executed)
+			return;
+		WaitOn(s_flipWaiters.GetPtr());
 	}
 
 	bool GX2DrawDone()
 	{
-		// optional force full sync (texture readback and occlusion queries)
-		bool forceFullSync = false;
-		if (g_renderer && g_renderer->GetType() == RendererAPI::Vulkan)
-			forceFullSync = true;
-		if (forceFullSync || ActiveSettings::WaitForGX2DrawDoneEnabled())
+		// Vulkan always does a full sync here (needed for texture readback and occlusion queries),
+		// the other backends only when the option is enabled
+		const bool fullSync = (g_renderer && g_renderer->GetType() == RendererAPI::Vulkan) || ActiveSettings::WaitForGX2DrawDoneEnabled();
+		if (fullSync)
 		{
 			GX2ReserveCmdSpace(2);
-			// write PM4 command
-			gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_HLE_SYNC_ASYNC_OPERATIONS, 1));
-			gx2WriteGather_submitU32AsBE(0x00000000); // unused
+			gx2WriteGather_submit(pm4HeaderType3(IT_HLE_SYNC_ASYNC_OPERATIONS, 1), 0);
 		}
-		// flush pipeline
 		GX2Command_Flush(0x100, true);
-
-		uint64 ts = GX2GetLastSubmittedTimeStamp();
-		return GX2WaitTimeStamp(ts);
+		return GX2WaitTimeStamp(GX2GetLastSubmittedTimeStamp());
 	}
 
 	void GX2Init_event()
 	{
-		// clear queue
-
-		// launch event callback thread
-		if (s_callbackThreadLaunched)
+		if (s_dispatchThreadStarted)
 			return;
-		s_callbackThreadLaunched = true;
-		strcpy(s_eventCallbackThreadName.GetPtr(), "GX2 event callback");
-		coreinit::OSCreateThreadType(s_eventCallbackThread, PPCInterpreter_makeCallableExportDepr(__GX2CallbackThread), 0, nullptr, (uint8*)s_eventCallbackThreadStack.GetPtr() + s_eventCallbackThreadStack.GetByteSize(), (sint32)s_eventCallbackThreadStack.GetByteSize(), 16, OSThread_t::ATTR_DETACHED, OSThread_t::THREAD_TYPE::TYPE_IO);
-		coreinit::OSSetThreadName(s_eventCallbackThread, s_eventCallbackThreadName);
-		coreinit::OSResumeThread(s_eventCallbackThread);
+		s_dispatchThreadStarted = true;
+		strcpy(s_dispatchThreadName.GetPtr(), "GX2 event callback");
+		const sint32 stackSize = (sint32)s_dispatchThreadStack.GetByteSize();
+		uint8* stackTop = (uint8*)s_dispatchThreadStack.GetPtr() + stackSize;
+		coreinit::OSCreateThreadType(s_dispatchThread, PPCInterpreter_makeCallableExportDepr(DispatchThreadMain), 0, nullptr,
+			stackTop, stackSize, 16, OSThread_t::ATTR_DETACHED, OSThread_t::THREAD_TYPE::TYPE_IO);
+		coreinit::OSSetThreadName(s_dispatchThread, s_dispatchThreadName);
+		coreinit::OSResumeThread(s_dispatchThread);
 	}
 
 	void GX2EventInit()
@@ -260,19 +235,18 @@ namespace GX2
 		cafeExportRegister("gx2", GX2WaitForFlip, LogType::GX2);
 		cafeExportRegister("gx2", GX2DrawDone, LogType::GX2);
 
-		coreinit::OSInitThreadQueue(g_vsyncThreadQueue.GetPtr());
-		coreinit::OSInitThreadQueue(g_flipThreadQueue.GetPtr());
-
-		coreinit::OSInitSemaphore(s_eventCbQueueSemaphore, 0);
+		coreinit::OSInitThreadQueue(s_vsyncWaiters.GetPtr());
+		coreinit::OSInitThreadQueue(s_flipWaiters.GetPtr());
+		coreinit::OSInitSemaphore(s_pendingEventsSem, 0);
 	}
 
-    void GX2EventResetToDefaultState()
-    {
-        s_callbackThreadLaunched = false;
-        for(auto& it : s_eventCallback)
-        {
-            it.callbackFuncPtr = nullptr;
-            it.userData = nullptr;
-        }
-    }
+	void GX2EventResetToDefaultState()
+	{
+		s_dispatchThreadStarted = false;
+		for (CallbackSlot& slot : s_callbacks)
+		{
+			slot.func = nullptr;
+			slot.userData = nullptr;
+		}
+	}
 }

@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "GX2.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
@@ -10,170 +11,118 @@
 #include "GX2_Command.h"
 #include "GX2_Draw.h"
 
+// Draw calls. Every draw first programs the per draw state (base vertex, primitive type,
+// index type, instance count) and then issues the draw packet. The draw initiator word has
+// bit 0 set in the packet header (shader type "vertex").
+
 namespace GX2
 {
+	using namespace Latte;
+
+	static constexpr uint32 kDrawInitiatorBit = 0x00000001;
+	static constexpr uint32 kVertexBufferSlot0 = 0x8C0; // first vertex fetch resource, 7 words per slot
+
+	static uint32 _HostToPhysical(void* p)
+	{
+		return memory_virtualToPhysical(memory_getVirtualOffsetFromPointer(p));
+	}
+
+	// SET_CTL_CONST: index 0 = base vertex, index 1 = base instance (3 words)
+	static void _EmitCtlConst(uint32 index, uint32 value)
+	{
+		gx2WriteGather_submit(pm4HeaderType3(IT_SET_CTL_CONST, 2), index, value);
+	}
+
+	// primitive type, index type and instance count (7 words)
+	static void _EmitDrawSetup(GX2PrimitiveMode2 primitiveMode, uint32 indexType, uint32 numInstances)
+	{
+		gx2WriteGather_submit(
+			pm4HeaderType3(IT_SET_CONFIG_REG, 2), REGADDR::VGT_PRIMITIVE_TYPE - 0x2000, (uint32)primitiveMode,
+			pm4HeaderType3(IT_INDEX_TYPE, 1), indexType,
+			pm4HeaderType3(IT_NUM_INSTANCES, 1), numInstances);
+	}
+
+	// DRAW_INDEX_2: max index (unbounded), index buffer address (low/high), count, initiator (6 words)
+	static void _EmitDrawIndex2(void* indexData, uint32 count)
+	{
+		gx2WriteGather_submit(pm4HeaderType3(IT_DRAW_INDEX_2, 5) | kDrawInitiatorBit,
+			0xFFFFFFFFu, _HostToPhysical(indexData), 0, count, 0);
+	}
+
 	void GX2SetAttribBuffer(uint32 bufferIndex, uint32 sizeInBytes, uint32 stride, void* data)
 	{
 		GX2ReserveCmdSpace(9);
-		MPTR physicalAddress = memory_virtualToPhysical(memory_getVirtualOffsetFromPointer(data));
-		// write PM4 command
-		gx2WriteGather_submit(
-			pm4HeaderType3(IT_SET_RESOURCE, 8),
-			0x8C0 + bufferIndex * 7,
-			physicalAddress,
-			sizeInBytes - 1, // size
-			(stride & 0xFFFF) << 11, // stride
-			0, // ukn
-			0, // ukn
-			0, // ukn
-			0xC0000000); // ukn
+		gx2WriteGather_submit(pm4HeaderType3(IT_SET_RESOURCE, 8),
+			kVertexBufferSlot0 + bufferIndex * 7,
+			_HostToPhysical(data),
+			sizeInBytes - 1,
+			(stride & 0xFFFF) << 11, // stride field of SQ_VTX_CONSTANT_WORD2
+			0, 0, 0,
+			0xC0000000); // resource type: vertex buffer
 	}
 
 	void GX2DrawIndexedEx(GX2PrimitiveMode2 primitiveMode, uint32 count, GX2IndexType indexType, void* indexData, uint32 baseVertex, uint32 numInstances)
 	{
-		GX2ReserveCmdSpace(3 + 3 + 2 + 2 + 6);
-		gx2WriteGather_submit(
-			// IT_SET_CTL_CONST
-			pm4HeaderType3(IT_SET_CTL_CONST, 2), 0,
-			baseVertex,
-			// IT_SET_CONFIG_REG
-			pm4HeaderType3(IT_SET_CONFIG_REG, 2), Latte::REGADDR::VGT_PRIMITIVE_TYPE - 0x2000,
-			(uint32)primitiveMode,
-			// IT_INDEX_TYPE
-			pm4HeaderType3(IT_INDEX_TYPE, 1),
-			(uint32)indexType,
-			// IT_NUM_INSTANCES
-			pm4HeaderType3(IT_NUM_INSTANCES, 1),
-			numInstances,
-			// IT_DRAW_INDEX_2
-			pm4HeaderType3(IT_DRAW_INDEX_2, 5) | 0x00000001,
-			-1,
-			memory_virtualToPhysical(memory_getVirtualOffsetFromPointer(indexData)),
-			0,
-			count,
-			0);
+		GX2ReserveCmdSpace(16);
+		_EmitCtlConst(0, baseVertex);
+		_EmitDrawSetup(primitiveMode, (uint32)indexType, numInstances);
+		_EmitDrawIndex2(indexData, count);
 	}
 
 	void GX2DrawIndexedEx2(GX2PrimitiveMode2 primitiveMode, uint32 count, GX2IndexType indexType, void* indexData, uint32 baseVertex, uint32 numInstances, uint32 baseInstance)
 	{
-		GX2ReserveCmdSpace(3 + 3 + 3 + 2 + 2 + 6 + 3);
-		gx2WriteGather_submit(
-			// IT_SET_CTL_CONST
-			pm4HeaderType3(IT_SET_CTL_CONST, 2), 0,
-			baseVertex,
-			// set base instance
-			pm4HeaderType3(IT_SET_CTL_CONST, 2), 1,
-			baseInstance,
-			// IT_SET_CONFIG_REG
-			pm4HeaderType3(IT_SET_CONFIG_REG, 2), Latte::REGADDR::VGT_PRIMITIVE_TYPE - 0x2000,
-			(uint32)primitiveMode,
-			// IT_INDEX_TYPE
-			pm4HeaderType3(IT_INDEX_TYPE, 1),
-			(uint32)indexType,
-			// IT_NUM_INSTANCES
-			pm4HeaderType3(IT_NUM_INSTANCES, 1),
-			numInstances,
-			// IT_DRAW_INDEX_2
-			pm4HeaderType3(IT_DRAW_INDEX_2, 5) | 0x00000001,
-			-1,
-			memory_virtualToPhysical(memory_getVirtualOffsetFromPointer(indexData)),
-			0,
-			count,
-			0,
-			// reset base instance
-			pm4HeaderType3(IT_SET_CTL_CONST, 2), 1,
-			0 // baseInstance
-		);
+		GX2ReserveCmdSpace(22);
+		_EmitCtlConst(0, baseVertex);
+		_EmitCtlConst(1, baseInstance);
+		_EmitDrawSetup(primitiveMode, (uint32)indexType, numInstances);
+		_EmitDrawIndex2(indexData, count);
+		_EmitCtlConst(1, 0); // later draws expect base instance 0
 	}
 
 	void GX2DrawEx(GX2PrimitiveMode2 primitiveMode, uint32 count, uint32 baseVertex, uint32 numInstances)
 	{
-		GX2ReserveCmdSpace(3 + 3 + 2 + 2 + 6);
-		gx2WriteGather_submit(
-			// IT_SET_CTL_CONST
-			pm4HeaderType3(IT_SET_CTL_CONST, 2), 0,
-			baseVertex,
-			// IT_SET_CONFIG_REG
-			pm4HeaderType3(IT_SET_CONFIG_REG, 2), Latte::REGADDR::VGT_PRIMITIVE_TYPE - 0x2000,
-			(uint32)primitiveMode,
-			// IT_INDEX_TYPE
-			pm4HeaderType3(IT_INDEX_TYPE, 1),
-			(uint32)GX2IndexType::U32_BE,
-			// IT_NUM_INSTANCES
-			pm4HeaderType3(IT_NUM_INSTANCES, 1),
-			numInstances,
-			// IT_DRAW_INDEX_2
-			pm4HeaderType3(IT_DRAW_INDEX_AUTO, 2) | 0x00000001,
-			count,
-			0 // DRAW_INITIATOR
-		);
+		GX2ReserveCmdSpace(16);
+		_EmitCtlConst(0, baseVertex);
+		_EmitDrawSetup(primitiveMode, (uint32)GX2IndexType::U32_BE, numInstances);
+		gx2WriteGather_submit(pm4HeaderType3(IT_DRAW_INDEX_AUTO, 2) | kDrawInitiatorBit, count, 0);
 	}
 
 	void GX2DrawIndexedImmediateEx(GX2PrimitiveMode2 primitiveMode, uint32 count, GX2IndexType indexType, void* indexData, uint32 baseVertex, uint32 numInstances)
 	{
-		uint32* indexDataU32 = (uint32*)indexData;
-		uint32 numIndexU32s;
-		bool use32BitIndices = false;
-		if (indexType == GX2IndexType::U16_BE || indexType == GX2IndexType::U16_LE)
-		{
-			// 16bit indices
-			numIndexU32s = (count + 1) / 2;
-		}
-		else if (indexType == GX2IndexType::U32_BE || indexType == GX2IndexType::U32_LE)
-		{
-			// 32bit indices
-			numIndexU32s = count;
-			use32BitIndices = true;
-		}
+		bool wideIndices;
+		if (indexType == GX2IndexType::U32_BE || indexType == GX2IndexType::U32_LE)
+			wideIndices = true;
+		else if (indexType == GX2IndexType::U16_BE || indexType == GX2IndexType::U16_LE)
+			wideIndices = false;
 		else
 		{
-			cemu_assert_unimplemented();
+			// the index data size would be undefined; nothing sensible can be drawn
+			cemuLog_log(LogType::APIErrors, "GX2DrawIndexedImmediateEx(): unsupported index type {}", (uint32)indexType);
+			return;
 		}
-
-		GX2ReserveCmdSpace(3 + 3 + 3 + 2 + 2 + 6 + 3 + numIndexU32s);
-
-		if (numIndexU32s > 0x4000 - 2)
+		// indices are embedded into the packet, packed into dwords
+		const uint32 dataWords = wideIndices ? count : (count + 1) / 2;
+		GX2ReserveCmdSpace(22 + dataWords);
+		if (dataWords > 0x4000 - 2)
 		{
-			cemuLog_log(LogType::Force, "GX2DrawIndexedImmediateEx(): Draw exceeds maximum PM4 command size. Keep index size below 16KiB minus 8 byte");
+			cemuLog_log(LogType::Force, "GX2DrawIndexedImmediateEx(): index data too large for one PM4 packet (limit is 16KiB minus 8 bytes)");
 			return;
 		}
 
-		// set base vertex
-		gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_SET_CTL_CONST, 2));
-		gx2WriteGather_submitU32AsBE(0);
-		gx2WriteGather_submitU32AsBE(baseVertex);
-		// set primitive mode
-		gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_SET_CONFIG_REG, 2));
-		gx2WriteGather_submitU32AsBE(Latte::REGADDR::VGT_PRIMITIVE_TYPE - 0x2000);
-		gx2WriteGather_submitU32AsBE((uint32)primitiveMode);
-		// set index type
-		gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_INDEX_TYPE, 1));
-		gx2WriteGather_submitU32AsBE((uint32)indexType);
-		// set number of instances
-		gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_NUM_INSTANCES, 1));
-		gx2WriteGather_submitU32AsBE((uint32)numInstances);
-		// request indexed draw with indices embedded into command buffer
-		gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_DRAW_INDEX_IMMD, 2 + numIndexU32s) | 0x00000001);
-		gx2WriteGather_submitU32AsBE(count);
-		gx2WriteGather_submitU32AsBE(0); // ukn
-		if (use32BitIndices)
-		{
-			for (uint32 i = 0; i < numIndexU32s; i++)
-			{
-				gx2WriteGather_submitU32AsLE(indexDataU32[i]);
-			}
-		}
-		else
-		{
-			for (uint32 i = 0; i < numIndexU32s; i++)
-			{
-				uint32 indexPair = indexDataU32[i];
-				// swap index pair
-				indexPair = (indexPair >> 16) | (indexPair << 16);
-				gx2WriteGather_submitU32AsLE(indexPair);
-			}
-		}
+		_EmitCtlConst(0, baseVertex);
+		_EmitDrawSetup(primitiveMode, (uint32)indexType, numInstances);
+		gx2WriteGather_submit(pm4HeaderType3(IT_DRAW_INDEX_IMMD, 2 + dataWords) | kDrawInitiatorBit, count, 0);
 
+		// the guest words are copied unchanged, except that the two 16-bit indices of a dword trade places
+		const uint8* src = (const uint8*)indexData;
+		for (uint32 i = 0; i < dataWords; i++)
+		{
+			uint32 raw;
+			memcpy(&raw, src + i * 4, 4);
+			if (!wideIndices)
+				raw = (raw << 16) | (raw >> 16);
+			gx2WriteGather_submitU32AsLE(raw);
+		}
 	}
 
 	struct GX2DispatchComputeParam
@@ -185,33 +134,18 @@ namespace GX2
 
 	void GX2DispatchCompute(GX2DispatchComputeParam* dispatchParam)
 	{
-		GX2ReserveCmdSpace(9 + 10);
-
+		GX2ReserveCmdSpace(19);
+		// the dispatch dimensions are made available to the shader through a buffer resource
 		gx2WriteGather_submit(pm4HeaderType3(IT_SET_RESOURCE, 8),
-			(mmSQ_CS_DISPATCH_PARAMS - mmSQ_TEX_RESOURCE_WORD0),
+			mmSQ_CS_DISPATCH_PARAMS - mmSQ_TEX_RESOURCE_WORD0,
 			memory_virtualToPhysical(MEMPTR<GX2DispatchComputeParam>(dispatchParam).GetMPTR()),
-			0xF,
-			0x862000,
-			1,
-			0xABCD1234,
-			0xABCD1234,
-			0xC0000000);
-
-		// IT_EVENT_WRITE with RST_VTX_CNT?
-
-		// set primitive mode
-		gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_SET_CONFIG_REG, 2));
-		gx2WriteGather_submitU32AsBE(Latte::REGADDR::VGT_PRIMITIVE_TYPE - 0x2000);
-		gx2WriteGather_submitU32AsBE(1); // mode
-		// set number of instances
-		gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_NUM_INSTANCES, 1));
-		gx2WriteGather_submitU32AsBE(1); // numInstances
-
-		uint32 workCount = (uint32)dispatchParam->worksizeX * (uint32)dispatchParam->worksizeY * (uint32)dispatchParam->worksizeZ;
-
-		gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_DRAW_INDEX_AUTO, 2) | 0x00000001);
-		gx2WriteGather_submitU32AsBE(workCount);
-		gx2WriteGather_submitU32AsBE(0); // DRAW_INITIATOR (has source select for index generator + other unknown info)
+			0xF, 0x862000, 1, 0xABCD1234, 0xABCD1234, 0xC0000000);
+		// one point per work item, a single instance
+		gx2WriteGather_submit(
+			pm4HeaderType3(IT_SET_CONFIG_REG, 2), REGADDR::VGT_PRIMITIVE_TYPE - 0x2000, 1,
+			pm4HeaderType3(IT_NUM_INSTANCES, 1), 1);
+		const uint32 items = (uint32)dispatchParam->worksizeX * (uint32)dispatchParam->worksizeY * (uint32)dispatchParam->worksizeZ;
+		gx2WriteGather_submit(pm4HeaderType3(IT_DRAW_INDEX_AUTO, 2) | kDrawInitiatorBit, items, 0);
 	}
 
 	void GX2DrawInit()
@@ -223,5 +157,4 @@ namespace GX2
 		cafeExportRegister("gx2", GX2DrawIndexedImmediateEx, LogType::GX2);
 		cafeExportRegister("gx2", GX2DispatchCompute, LogType::GX2);
 	}
-
 }

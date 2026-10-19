@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "GX2.h"
@@ -5,141 +6,124 @@
 #include "Cafe/CafeSystem.h"
 #include "GX2_Query.h"
 
-#define LATTE_GC_NUM_RB							2
-#define _QUERY_REG_COUNT						8 // each reg/result is 64bits, little endian
+// Occlusion queries. A query object holds eight 64-bit little endian counters (one begin/end
+// pair per render backend, Latte has two backends). The GPU emulation fills them in when
+// it processes the HLE begin/end packets.
 
 namespace GX2
 {
+	static constexpr uint32 kRenderBackends = 2;
+	static constexpr uint32 kCounterCount = 8;
+	// CPU queries mark "result pending" with this tag in the dword pair after the per-backend counters
+	static constexpr uint32 kTagIndex = kRenderBackends * 4;
+
 	struct GX2Query
 	{
-		// 4*2 sets of uint64 results
-		uint32 reg[_QUERY_REG_COUNT * 2];
+		uint32 reg[kCounterCount * 2]; // raw counter memory
 	};
 
 	static_assert(sizeof(GX2Query) == 0x40);
 
-	void _BeginOcclusionQuery(GX2Query* queryInfo, bool isGPUQuery)
+	static uint64 _ReadCounter(const GX2Query* q, uint32 dwordIndex)
 	{
-		if (isGPUQuery)
+		uint64 v;
+		memcpy(&v, q->reg + dwordIndex, sizeof(v));
+		return v;
+	}
+
+	// Xenoblade Chronicles X decides object visibility from GPU query results and flickers if a
+	// result of 0 is still in place when it looks. For its title ids the end counter is preset
+	// to a large value instead of resetting the counters on the GPU.
+	static bool _IsPresetQueryTitle()
+	{
+		const uint64 titleId = CafeSystem::GetForegroundTitleId();
+		return titleId == 0x00050000101c4c00ULL || titleId == 0x00050000101c4d00ULL || titleId == 0x0005000010116100ULL;
+	}
+
+	static void _PrepareOcclusionQuery(GX2Query* query, bool gpuQuery)
+	{
+		if (!gpuQuery)
 		{
-			uint64 titleId = CafeSystem::GetForegroundTitleId();
-			if (titleId == 0x00050000101c4c00ULL || titleId == 0x00050000101c4d00 || titleId == 0x0005000010116100) // XCX EU, US, JPN
-			{
-				// in XCX queries are used to determine if certain objects are visible
-				// if we are not setting the result fast enough and the query still holds a value of 0 (which is the default for GPU queries)
-				// then XCX will not render affected objects, causing flicker
-				// note: This is a very old workaround. It may no longer be necessary since the introduction of full sync. Investigate
-				*(uint64*)(queryInfo->reg + 2) = 0x100000;
-			}
-			else
-			{
-				GX2ReserveCmdSpace(5 * _QUERY_REG_COUNT);
-				MPTR queryInfoPhys = memory_virtualToPhysical(memory_getVirtualOffsetFromPointer(queryInfo));
-				for (sint32 i = 0; i < _QUERY_REG_COUNT; i++)
-				{
-					gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_MEM_WRITE, 4));
-					gx2WriteGather_submitU32AsBE((queryInfoPhys + i * 8) | 0x2);
-					gx2WriteGather_submitU32AsBE(0x20000); // 0x20000 -> ?
-					uint32 v = 0;
-					if (i >= LATTE_GC_NUM_RB * 2)
-						v |= 0x80000000;
-					gx2WriteGather_submitU32AsBE(0);
-					gx2WriteGather_submitU32AsBE(v);
-				}
-			}
+			// CPU queries: clear the first counters and tag the query as pending
+			memset(query, 0, 0x10);
+			query->reg[kTagIndex + 0] = 0;
+			query->reg[kTagIndex + 1] = _swapEndianU32('OCPU');
+			return;
 		}
-		else
+		if (_IsPresetQueryTitle())
 		{
-			memset(queryInfo, 0, 0x10); // size maybe GPU7_GC_NUM_RB*2*4 ?
-			queryInfo->reg[LATTE_GC_NUM_RB * 4 + 0] = 0;
-			queryInfo->reg[LATTE_GC_NUM_RB * 4 + 1] = _swapEndianU32('OCPU');
+			const uint64 preset = 0x100000;
+			memcpy(query->reg + 2, &preset, sizeof(preset));
+			return;
 		}
-		// todo: Set mmDB_RENDER_CONTROL
+		// let the GPU reset all counters; counters of backends that don't exist get the "invalid" bit
+		GX2ReserveCmdSpace(5 * kCounterCount);
+		const MPTR queryPhys = memory_virtualToPhysical(memory_getVirtualOffsetFromPointer(query));
+		for (uint32 i = 0; i < kCounterCount; i++)
+		{
+			const uint32 high = i >= kRenderBackends * 2 ? 0x80000000 : 0;
+			gx2WriteGather_submit(pm4HeaderType3(IT_MEM_WRITE, 4), (queryPhys + i * 8) | 2, 0x20000, 0, high);
+		}
+	}
+
+	static bool _IsOcclusionQueryType(uint32 queryType)
+	{
+		return queryType == GX2_QUERY_TYPE_OCCLUSION_CPU || queryType == GX2_QUERY_TYPE_OCCLUSION_GPU;
 	}
 
 	void GX2QueryBegin(uint32 queryType, GX2Query* query)
 	{
-		if (queryType == GX2_QUERY_TYPE_OCCLUSION_CPU)
+		if (!_IsOcclusionQueryType(queryType))
 		{
-			_BeginOcclusionQuery(query, false);
-		}
-		else if (queryType == GX2_QUERY_TYPE_OCCLUSION_GPU)
-		{
-			_BeginOcclusionQuery(query, true);
-		}
-		else
-		{
-			debug_printf("GX2QueryBegin(): Unsupported type %d\n", queryType);
-			debugBreakpoint();
+			debug_printf("GX2QueryBegin(): query type %d is not supported\n", queryType);
 			return;
 		}
-		// HLE packet
+		_PrepareOcclusionQuery(query, queryType == GX2_QUERY_TYPE_OCCLUSION_GPU);
 		GX2ReserveCmdSpace(2);
-		gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_HLE_BEGIN_OCCLUSION_QUERY, 1));
-		gx2WriteGather_submitU32AsBE(MEMPTR<GX2Query>(query).GetMPTR());
+		gx2WriteGather_submit(pm4HeaderType3(IT_HLE_BEGIN_OCCLUSION_QUERY, 1), MEMPTR<GX2Query>(query).GetMPTR());
 	}
 
 	void GX2QueryEnd(uint32 queryType, GX2Query* query)
 	{
 		GX2ReserveCmdSpace(2);
-		if (queryType == GX2_QUERY_TYPE_OCCLUSION_CPU || queryType == GX2_QUERY_TYPE_OCCLUSION_GPU)
+		if (!_IsOcclusionQueryType(queryType))
 		{
-			// HLE packet
-			gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_HLE_END_OCCLUSION_QUERY, 1));
-			gx2WriteGather_submitU32AsBE(MEMPTR<GX2Query>(query).GetMPTR());
-		}
-		else
-		{
-			debug_printf("GX2QueryBegin(): Unsupported %d\n", queryType);
-			debugBreakpoint();
+			debug_printf("GX2QueryEnd(): query type %d is not supported\n", queryType);
 			return;
 		}
+		gx2WriteGather_submit(pm4HeaderType3(IT_HLE_END_OCCLUSION_QUERY, 1), MEMPTR<GX2Query>(query).GetMPTR());
 	}
 
 	uint32 GX2QueryGetOcclusionResult(GX2Query* query, uint64be* resultOut)
 	{
-		if (query->reg[LATTE_GC_NUM_RB * 4 + 1] == _swapEndianU32('OCPU') && query->reg[LATTE_GC_NUM_RB * 4 + 0] == 0)
-		{
-			// CPU query result not ready
+		// a CPU query that the GPU has not finished yet still carries the pending tag
+		if (query->reg[kTagIndex + 1] == _swapEndianU32('OCPU') && query->reg[kTagIndex + 0] == 0)
 			return GX2_FALSE;
-		}
-
-		uint64 startValue = *(uint64*)(query->reg + 0);
-		uint64 endValue = *(uint64*)(query->reg + 2);
-		if ((startValue & 0x8000000000000000ULL) || (endValue & 0x8000000000000000ULL))
-		{
+		const uint64 begin = _ReadCounter(query, 0);
+		const uint64 end = _ReadCounter(query, 2);
+		constexpr uint64 kInvalidBit = 0x8000000000000000ULL;
+		if ((begin | end) & kInvalidBit)
 			return GX2_FALSE;
-		}
-		*resultOut = endValue - startValue;
+		*resultOut = end - begin;
 		return GX2_TRUE;
 	}
 
 	void GX2QueryBeginConditionalRender(uint32 queryType, GX2Query* query, uint32 dontWaitBool, uint32 pixelsMustPassBool)
 	{
-		GX2ReserveCmdSpace(3);
-
-		uint32 flags = 0;
+		// SET_PREDICATION flags: bit 31 = draw if visible, bits 13-15 = predicate type, bit 19 = don't wait
+		uint32 flags = (queryType == GX2_QUERY_TYPE_OCCLUSION_GPU ? 1u : 2u) << 13;
 		if (pixelsMustPassBool)
-			flags |= (1<<31);
-		if (queryType == GX2_QUERY_TYPE_OCCLUSION_GPU)
-			flags |= (1 << 13);
-		else
-			flags |= (2 << 13);
-
-		flags |= ((dontWaitBool != 0) << 19);
-
-		gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_SET_PREDICATION, 2));
-		gx2WriteGather_submitU32AsBE(memory_virtualToPhysical(MEMPTR<GX2Query>(query).GetMPTR()));
-		gx2WriteGather_submitU32AsBE(flags);
+			flags |= 1u << 31;
+		if (dontWaitBool != 0)
+			flags |= 1u << 19;
+		GX2ReserveCmdSpace(3);
+		gx2WriteGather_submit(pm4HeaderType3(IT_SET_PREDICATION, 2), memory_virtualToPhysical(MEMPTR<GX2Query>(query).GetMPTR()), flags);
 	}
 
 	void GX2QueryEndConditionalRender()
 	{
 		GX2ReserveCmdSpace(3);
-
-		gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_SET_PREDICATION, 2));
-		gx2WriteGather_submitU32AsBE(MPTR_NULL);
-		gx2WriteGather_submitU32AsBE(0); // unknown / todo
+		gx2WriteGather_submit(pm4HeaderType3(IT_SET_PREDICATION, 2), MPTR_NULL, 0);
 	}
 
 	void GX2QueryInit()
