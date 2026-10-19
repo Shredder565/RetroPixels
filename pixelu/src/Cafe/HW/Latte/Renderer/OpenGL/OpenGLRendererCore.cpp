@@ -1,867 +1,713 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// OpenGL draw path: index cache, vertex attribute setup, RECT emulation, per-draw uniforms and the GL
+// sampler state that lives in the texture objects.
 #include "Common/GLInclude/GLInclude.h"
 
-#include "Cafe/HW/Latte/Core/LatteRingBuffer.h"
 #include "Cafe/HW/Latte/Core/LatteDraw.h"
 #include "Cafe/HW/Latte/Core/LattePerformanceMonitor.h"
 #include "Cafe/HW/Latte/Core/LatteShader.h"
-#include "Cafe/HW/Latte/Core/LatteSoftware.h"
 #include "Cafe/HW/Latte/Core/FetchShader.h"
+#include "Cafe/HW/Latte/Core/LatteBufferCache.h"
 
 #include "Cafe/HW/Latte/Renderer/OpenGL/OpenGLRenderer.h"
 #include "Cafe/HW/Latte/Renderer/OpenGL/LatteTextureGL.h"
 #include "Cafe/HW/Latte/Renderer/OpenGL/LatteTextureViewGL.h"
-#include "Cafe/HW/Latte/Renderer/OpenGL/CachedFBOGL.h"
 #include "Cafe/HW/Latte/Renderer/OpenGL/RendererShaderGL.h"
+#include "Cafe/HW/Latte/Renderer/RendererCore.h"
 
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "Cafe/OS/libs/gx2/GX2.h"
+#include "util/VirtualHeap/VirtualHeap.h"
 
-#include "Cafe/GameProfile/GameProfile.h"
-#include "HW/Latte/Renderer/RendererCore.h"
-#include "config/ActiveSettings.h"
+#include <list>
+#include <unordered_map>
 
+using IndexType = Latte::LATTE_VGT_DMA_INDEX_TYPE::E_INDEX_TYPE;
+using PrimType = Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE;
 
-using _INDEX_TYPE = Latte::LATTE_VGT_DMA_INDEX_TYPE::E_INDEX_TYPE;
-
+// GL primitive of the draw currently being issued
 GLenum sGLActiveDrawMode = 0;
 
+// set by LatteMRT when the current FBO has at least one usable attachment
 extern bool hasValidFramebufferAttached;
 
-#define INDEX_CACHE_ENTRIES		(8)
+// ---------------------------------------------------------------------------------------------------------------
+// Index cache
+//
+// GPU7 indices are big endian, GL wants them native. Converted index lists stay in one large element array buffer.
+// Entries are found by (address, count, restart index, primitive), revalidated with a cheap checksum and evicted
+// when they were not used for 30 frames or when the buffer is full (least recently used first).
+// ---------------------------------------------------------------------------------------------------------------
 
-typedef struct
+namespace
 {
-	MPTR prevIndexDataMPTR;
-	sint32 prevIndexType;
-	sint32 prevCount;
-	// index data
-	uint8* indexData;
-	uint8* indexData2;
-	uint32 indexBufferOffset;
-	sint32 indexDataSize; // current size
-	sint32 indexDataLimit; // maximum size
-	// info
-	uint32 maxIndex;
-	uint32 minIndex;
-}indexDataCacheEntry_t;
+	constexpr uint32 kIndexBufferSize = 18 * 1024 * 1024;
+	constexpr uint32 kIndexConversionScratchSize = 8 * 1024 * 1024;
+	constexpr uint32 kIndexEntryMaxAgeFrames = 30;
 
-struct
-{
-	indexDataCacheEntry_t indexCacheEntry[INDEX_CACHE_ENTRIES];
-	sint32 nextCacheEntryIndex;
-	// info about currently used index data
-	uint32 maxIndex;
-	uint32 minIndex;
-	uint8* indexData;
-	// buffer
-	GLuint glIndexCacheBuffer;
-	VirtualBufferHeap_t* indexBufferVirtualHeap;
-	uint8* mappedIndexBuffer;
-	LatteRingBuffer_t* indexRingBuffer;
-	uint8* tempIndexStorage;
-	// misc
-	bool initialized;
-	GLuint glActiveElementArrayBuffer;
-}indexState = { 0 };
-
-struct
-{
-	uint8* vboOutput;
-	uint32 vboStride;
-	Latte::E_HWFMT dataFormat;
-	uint8 nfa;
-	bool isSigned;
-}activeAttributePointer[LATTE_VS_ATTRIBUTE_LIMIT] = { 0 };
-
-void LatteDraw_resetAttributePointerCache()
-{
-	for (sint32 i = 0; i < LATTE_VS_ATTRIBUTE_LIMIT; i++)
+	struct IndexKey
 	{
-		activeAttributePointer[i].vboOutput = (uint8*)-1;
-		activeAttributePointer[i].vboStride = (uint32)-1;
-	}
+		MPTR address;
+		sint32 count;
+		uint32 restartIndex;
+		uint32 primitive;
+
+		bool operator==(const IndexKey& other) const
+		{
+			return address == other.address && count == other.count && restartIndex == other.restartIndex && primitive == other.primitive;
+		}
+	};
+
+	struct IndexKeyHasher
+	{
+		size_t operator()(const IndexKey& k) const
+		{
+			return (size_t)(((uint32)(k.address + k.count) ^ (k.address >> 16)) * 31u + k.primitive) ^ ((size_t)k.restartIndex << 7);
+		}
+	};
+
+	struct IndexEntry
+	{
+		IndexKey key;
+		IndexType type;
+		uint32 sourceBytes;
+		uint32 checksum;
+		uint32 lowest;
+		uint32 highest;
+		uint32 lastUsedFrame;
+		VirtualBufferHeapEntry_t* allocation;
+	};
+
+	// one cached index list as seen by the draw call
+	struct ActiveIndices
+	{
+		uint32 lowest = 0;
+		uint32 highest = 0;
+		const void* bufferOffset = nullptr; // offset into the element array buffer, as GL expects it
+	};
+
+	class GLIndexCache
+	{
+	public:
+		bool IsReady() const { return m_buffer != 0; }
+
+		void Create()
+		{
+			glGenBuffers(1, &m_buffer);
+			glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_buffer);
+			glBufferData(GL_ELEMENT_ARRAY_BUFFER, kIndexBufferSize, nullptr, GL_DYNAMIC_DRAW);
+			glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+			m_scratch.resize(kIndexConversionScratchSize);
+			m_heap = virtualBufferHeap_create(kIndexBufferSize);
+		}
+
+		GLuint Buffer() const { return m_buffer; }
+
+		void Prepare(MPTR address, IndexType type, sint32 count, uint32 primitive, ActiveIndices& out)
+		{
+			if (type == IndexType::AUTO)
+			{
+				// generated indices, the element array binding is left alone
+				out.lowest = 0;
+				out.highest = count - 1;
+				return;
+			}
+			OpenGLRenderer::SetArrayElementBuffer(m_buffer);
+			const IndexKey key{ address, count, LatteGPUState.contextNew.VGT_MULTI_PRIM_IB_RESET_INDX.get_RESTART_INDEX(), primitive };
+			auto found = m_lookup.find(key);
+			if (found != m_lookup.end())
+			{
+				IndexEntry& entry = *found->second;
+				// the draw keeps the index range from before a re-conversion (long-standing behaviour, kept as is)
+				Publish(entry, out);
+				entry.lastUsedFrame = LatteGPUState.frameCounter;
+				const uint32 checksum = Checksum(memory_getPointerFromPhysicalOffset(address), entry.sourceBytes);
+				if (checksum != entry.checksum)
+				{
+					cemuLog_logDebug(LogType::Force, "IndexData hash changed");
+					Convert(entry);
+					entry.checksum = checksum;
+				}
+				m_usage.splice(m_usage.end(), m_usage, found->second); // now most recently used
+				return;
+			}
+
+			const bool isShort = type == IndexType::U16_BE || type == IndexType::U16_LE;
+			const uint32 byteSize = (uint32)count * (isShort ? 2u : 4u);
+			VirtualBufferHeapEntry_t* allocation = virtualBufferHeap_allocate(m_heap, byteSize);
+			while (allocation == nullptr)
+			{
+				EvictOldest(10);
+				allocation = virtualBufferHeap_allocate(m_heap, byteSize);
+				if (allocation == nullptr && m_usage.empty())
+				{
+					cemuLog_log(LogType::Force, "Unable to allocate entry in index cache");
+					assert_dbg();
+				}
+			}
+			IndexEntry entry{};
+			entry.key = key;
+			entry.type = type;
+			entry.sourceBytes = byteSize;
+			entry.checksum = Checksum(memory_getPointerFromPhysicalOffset(address), byteSize);
+			entry.lastUsedFrame = LatteGPUState.frameCounter;
+			entry.allocation = allocation;
+			auto it = m_usage.insert(m_usage.end(), entry);
+			m_lookup.emplace(key, it);
+			Convert(*it);
+			Publish(*it, out);
+		}
+
+		void DropUnused(uint32 currentFrame)
+		{
+			while (!m_usage.empty() && (currentFrame - m_usage.front().lastUsedFrame) >= kIndexEntryMaxAgeFrames)
+				EvictOldest(1);
+		}
+
+	private:
+		static void Publish(const IndexEntry& entry, ActiveIndices& out)
+		{
+			out.lowest = entry.lowest;
+			out.highest = entry.highest;
+			out.bufferOffset = (const void*)(size_t)entry.allocation->startOffset;
+		}
+
+		void EvictOldest(sint32 count)
+		{
+			for (; count > 0 && !m_usage.empty(); count--)
+			{
+				IndexEntry& oldest = m_usage.front();
+				virtualBufferHeap_free(m_heap, oldest.allocation);
+				m_lookup.erase(oldest.key);
+				m_usage.pop_front();
+			}
+		}
+
+		static uint32 LoadU32(const uint8* p)
+		{
+			uint32 v;
+			memcpy(&v, p, sizeof(v));
+			return v;
+		}
+
+		// sums four words at the start and four at the (word aligned) end; short lists sum their bytes
+		static uint32 Checksum(const uint8* data, uint32 size)
+		{
+			uint32 sum = 0;
+			if (size < 16)
+			{
+				for (uint32 i = 0; i < size; i++)
+					sum += data[i];
+				return sum;
+			}
+			const uint8* tail = data + ((size - 16) & ~3u);
+			for (uint32 i = 0; i < 16; i += 4)
+				sum += LoadU32(data + i) + LoadU32(tail + i);
+			return sum;
+		}
+
+		// byte swaps the guest indices into scratch memory, records the index range and uploads the result
+		void Convert(IndexEntry& entry)
+		{
+			const uint32 count = (uint32)entry.key.count;
+			const uint32 restart = entry.key.restartIndex;
+			const uint8* src = memory_getPointerFromPhysicalOffset(entry.key.address);
+			cemu_assert_debug(count != 0);
+			if (entry.type == IndexType::U16_BE)
+			{
+				const uint16be* in = reinterpret_cast<const uint16be*>(src);
+				uint16* out = reinterpret_cast<uint16*>(m_scratch.data());
+				const bool hasRestart = restart <= 0xFFFF;
+				uint16 lo = 0xFFFF, hi = 0;
+				for (uint32 i = 0; i < count; i++)
+				{
+					const uint16 v = in[i];
+					out[i] = v;
+					if (hasRestart && v == (uint16)restart)
+						continue;
+					lo = std::min(lo, v);
+					hi = std::max(hi, v);
+				}
+				entry.lowest = lo;
+				entry.highest = hi;
+				glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, entry.allocation->startOffset, count * sizeof(uint16), m_scratch.data());
+				performanceMonitor.cycle[performanceMonitor.cycleIndex].indexDataUploaded += count * sizeof(uint16);
+			}
+			else if (entry.type == IndexType::U32_BE)
+			{
+				const uint32be* in = reinterpret_cast<const uint32be*>(src);
+				uint32* out = reinterpret_cast<uint32*>(m_scratch.data());
+				// the range starts out at the first index, even when that one is the restart marker
+				uint32 lo = in[0], hi = in[0];
+				for (uint32 i = 0; i < count; i++)
+				{
+					const uint32 v = in[i];
+					out[i] = v;
+					if (v == restart)
+						continue;
+					lo = std::min(lo, v);
+					hi = std::max(hi, v);
+				}
+				entry.lowest = lo;
+				entry.highest = hi;
+				glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, entry.allocation->startOffset, count * sizeof(uint32), m_scratch.data());
+				performanceMonitor.cycle[performanceMonitor.cycleIndex].indexDataUploaded += count * sizeof(uint32);
+			}
+			else
+			{
+				cemu_assert_debug(false); // little endian index lists are not expected from GX2
+			}
+		}
+
+		GLuint m_buffer = 0;
+		VirtualBufferHeap_t* m_heap = nullptr;
+		std::vector<uint8> m_scratch;
+		std::list<IndexEntry> m_usage; // front = least recently used
+		std::unordered_map<IndexKey, std::list<IndexEntry>::iterator, IndexKeyHasher> m_lookup;
+	};
+
+	GLIndexCache s_indexCache;
+	ActiveIndices s_drawIndices;
+	GLuint s_boundElementBuffer = 0;
 }
 
-void _setAttributeBufferPointerRaw(uint32 attributeShaderLoc, uint8* buffer, uint32 bufferSize, uint32 stride, LatteParsedFetchShaderAttribute* attrib, uint8* vboOutput, uint32 vboStride)
-{
-	Latte::E_HWFMT dataFormat = attrib->format;
-	bool isSigned = attrib->isSigned != 0;
-	uint8 nfa = attrib->nfa;
-	// don't call glVertexAttribIPointer if parameters have not changed
-	if (activeAttributePointer[attributeShaderLoc].vboOutput == vboOutput && activeAttributePointer[attributeShaderLoc].vboStride == vboStride && activeAttributePointer[attributeShaderLoc].dataFormat == dataFormat && activeAttributePointer[attributeShaderLoc].nfa == nfa && activeAttributePointer[attributeShaderLoc].isSigned == isSigned)
-	{
-		return;
-	}
-	activeAttributePointer[attributeShaderLoc].vboOutput = vboOutput;
-	activeAttributePointer[attributeShaderLoc].vboStride = vboStride;
-	activeAttributePointer[attributeShaderLoc].dataFormat = dataFormat;
-	activeAttributePointer[attributeShaderLoc].nfa = nfa;
-	activeAttributePointer[attributeShaderLoc].isSigned = isSigned;
-	// setup attribute pointer
-	if (dataFormat == Latte::E_HWFMT::HWFMT_32_32_32_32_FLOAT || dataFormat == Latte::E_HWFMT::HWFMT_32_32_32_32)
-	{
-		glVertexAttribIPointer(attributeShaderLoc, 4, GL_UNSIGNED_INT, vboStride, vboOutput);
-	}
-	else if (dataFormat == Latte::E_HWFMT::HWFMT_32_32_32_FLOAT || dataFormat == Latte::E_HWFMT::HWFMT_32_32_32)
-	{
-		glVertexAttribIPointer(attributeShaderLoc, 3, GL_UNSIGNED_INT, vboStride, vboOutput);
-	}
-	else if (dataFormat == Latte::E_HWFMT::HWFMT_32_32_FLOAT || dataFormat == Latte::E_HWFMT::HWFMT_32_32)
-	{
-		glVertexAttribIPointer(attributeShaderLoc, 2, GL_UNSIGNED_INT, vboStride, vboOutput);
-	}
-	else if (dataFormat == Latte::E_HWFMT::HWFMT_32_FLOAT || dataFormat == Latte::E_HWFMT::HWFMT_32)
-	{
-		glVertexAttribIPointer(attributeShaderLoc, 1, GL_UNSIGNED_INT, vboStride, vboOutput);
-	}
-	else if (dataFormat == Latte::E_HWFMT::HWFMT_8_8_8_8)
-	{
-		glVertexAttribIPointer(attributeShaderLoc, 4, GL_UNSIGNED_BYTE, vboStride, vboOutput);
-	}
-	else if (dataFormat == Latte::E_HWFMT::HWFMT_8_8)
-	{
-		// workaround for AMD (alignment must be 4 for 2xbyte)
-		if (((uint32)(size_t)vboOutput & 0x3) == 2 && LatteGPUState.glVendor == GLVENDOR_AMD)
-		{
-			glVertexAttribIPointer(attributeShaderLoc, 4, GL_UNSIGNED_BYTE, vboStride, vboOutput - 2);
-		}
-		else
-		{
-			glVertexAttribIPointer(attributeShaderLoc, 2, GL_UNSIGNED_BYTE, vboStride, vboOutput);
-		}
-	}
-	else if (dataFormat == Latte::E_HWFMT::HWFMT_8)
-	{
-		glVertexAttribIPointer(attributeShaderLoc, 1, GL_UNSIGNED_BYTE, vboStride, vboOutput);
-	}
-	else if (dataFormat == Latte::E_HWFMT::HWFMT_16_16_16_16_FLOAT || dataFormat == Latte::E_HWFMT::HWFMT_16_16_16_16)
-	{
-		glVertexAttribIPointer(attributeShaderLoc, 4, GL_UNSIGNED_SHORT, vboStride, vboOutput);
-	}
-	else if (dataFormat == Latte::E_HWFMT::HWFMT_16_16_FLOAT || dataFormat == Latte::E_HWFMT::HWFMT_16_16)
-	{
-		glVertexAttribIPointer(attributeShaderLoc, 2, GL_UNSIGNED_SHORT, vboStride, vboOutput);
-	}
-	else if (dataFormat == Latte::E_HWFMT::HWFMT_16_FLOAT || dataFormat == Latte::E_HWFMT::HWFMT_16)
-	{
-		glVertexAttribIPointer(attributeShaderLoc, 1, GL_UNSIGNED_SHORT, vboStride, vboOutput);
-	}
-	else if (dataFormat == Latte::E_HWFMT::HWFMT_2_10_10_10)
-	{
-		glVertexAttribIPointer(attributeShaderLoc, 1, GL_UNSIGNED_INT, vboStride, vboOutput);
-	}
-	else
-	{
-		debug_printf("_setAttributeBufferPointerRaw(): Unsupported format %d\n", dataFormat);
-		cemu_assert_unimplemented();
-	}
-}
-
-bool glAttributeArrayIsEnabled[GPU_GL_MAX_NUM_ATTRIBUTE] = { 0 };
-sint32 glAttributeArrayAluDivisor[GPU_GL_MAX_NUM_ATTRIBUTE] = { 0 };
-
-void OpenGLRenderer::SetAttributeArrayState(uint32 index, bool isEnabled, sint32 aluDivisor)
-{
-	cemu_assert_debug(index < GPU_GL_MAX_NUM_ATTRIBUTE);
-	catchOpenGLError();
-	if (glAttributeArrayIsEnabled[index] != isEnabled)
-	{
-		if (isEnabled)
-		{
-			// enable
-			glEnableVertexAttribArray(index);
-			glAttributeArrayIsEnabled[index] = true;
-		}
-		else
-		{
-			// disable
-			glDisableVertexAttribArray(index);
-			glAttributeArrayIsEnabled[index] = false;
-		}
-		catchOpenGLError();
-	}
-	// set divisor state
-	if (glAttributeArrayAluDivisor[index] != aluDivisor)
-	{
-		if (aluDivisor <= 0)
-			glVertexAttribDivisor(index, 0);
-		else
-			glVertexAttribDivisor(index, aluDivisor);
-		glAttributeArrayAluDivisor[index] = aluDivisor;
-		catchOpenGLError();
-	}
-}
-
-// Sets the currently active element array buffer and binds it
 void OpenGLRenderer::SetArrayElementBuffer(GLuint arrayElementBuffer)
 {
-	if (arrayElementBuffer == indexState.glActiveElementArrayBuffer)
+	if (s_boundElementBuffer == arrayElementBuffer)
 		return;
+	s_boundElementBuffer = arrayElementBuffer;
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, arrayElementBuffer);
-	indexState.glActiveElementArrayBuffer = arrayElementBuffer;
 }
-
-typedef struct
-{
-	MPTR physAddr;
-	sint32 count;
-	uint32 primitiveRestartIndex;
-	uint32 primitiveMode;
-}indexDataCacheKey_t;
-
-typedef struct _indexDataCacheEntry_t
-{
-	indexDataCacheKey_t key;
-	_indexDataCacheEntry_t* nextInBucket; // points to next element in same bucket
-	uint32 physSize;
-	uint32 hash;
-	_INDEX_TYPE indexType;
-	//sint32 indexType;
-	uint32 minIndex;
-	uint32 maxIndex;
-	uint32 lastAccessFrameCount;
-	VirtualBufferHeapEntry_t* heapEntry;
-	_indexDataCacheEntry_t* nextInMostRecentUsage; // points to element which was used more recently
-	_indexDataCacheEntry_t* prevInMostRecentUsage; // points to element which was used less recently
-}indexDataCacheEntry2_t;
-
-#define INDEX_DATA_CACHE_BUCKETS		(1783)
-
-indexDataCacheEntry2_t* indexDataCacheBucket[INDEX_DATA_CACHE_BUCKETS] = { 0 };
-indexDataCacheEntry2_t* indexDataCacheFirst = nullptr; // points to least recently used item
-indexDataCacheEntry2_t* indexDataCacheLast = nullptr; // points to most recently used item
-sint32 indexDataCacheEntryCount = 0;
-
-void _appendToUsageLinkedList(indexDataCacheEntry2_t* entry)
-{
-	if (indexDataCacheLast == nullptr)
-	{
-		indexDataCacheLast = entry;
-		indexDataCacheFirst = entry;
-		entry->nextInMostRecentUsage = nullptr;
-		entry->prevInMostRecentUsage = nullptr;
-	}
-	else
-	{
-		indexDataCacheLast->nextInMostRecentUsage = entry;
-		entry->prevInMostRecentUsage = indexDataCacheLast;
-		entry->nextInMostRecentUsage = nullptr;
-		indexDataCacheLast = entry;
-	}
-}
-
-void _removeFromUsageLinkedList(indexDataCacheEntry2_t* entry)
-{
-	if (entry->prevInMostRecentUsage)
-	{
-		entry->prevInMostRecentUsage->nextInMostRecentUsage = entry->nextInMostRecentUsage;
-	}
-	else
-		indexDataCacheFirst = entry->nextInMostRecentUsage;
-	if (entry->nextInMostRecentUsage)
-	{
-		entry->nextInMostRecentUsage->prevInMostRecentUsage = entry->prevInMostRecentUsage;
-	}
-	else
-		indexDataCacheLast = entry->prevInMostRecentUsage;
-	entry->prevInMostRecentUsage = nullptr;
-	entry->nextInMostRecentUsage = nullptr;
-}
-
-void _removeFromBucket(indexDataCacheEntry2_t* entry)
-{
-	uint32 indexDataBucketIdx = (uint32)((entry->key.physAddr + entry->key.count) ^ (entry->key.physAddr >> 16)) % INDEX_DATA_CACHE_BUCKETS;
-	if (indexDataCacheBucket[indexDataBucketIdx] == entry)
-	{
-		indexDataCacheBucket[indexDataBucketIdx] = entry->nextInBucket;
-		entry->nextInBucket = nullptr;
-		return;
-	}
-	indexDataCacheEntry2_t* cacheEntryItr = indexDataCacheBucket[indexDataBucketIdx];
-	while (cacheEntryItr)
-	{
-		if (cacheEntryItr->nextInBucket == entry)
-		{
-			cacheEntryItr->nextInBucket = entry->nextInBucket;
-			entry->nextInBucket = nullptr;
-			return;
-		}
-		// next
-		cacheEntryItr = cacheEntryItr->nextInBucket;
-	}
-}
-
-void _decodeAndUploadIndexData(indexDataCacheEntry2_t* cacheEntry)
-{
-	uint32 count = cacheEntry->key.count;
-	uint32 primitiveRestartIndex = cacheEntry->key.primitiveRestartIndex;
-	if (cacheEntry->indexType == _INDEX_TYPE::U16_BE)
-	{
-		// 16bit indices
-		uint16* indexInputU16 = (uint16*)memory_getPointerFromPhysicalOffset(cacheEntry->key.physAddr);
-		uint16* indexOutputU16 = (uint16*)indexState.tempIndexStorage;
-		cemu_assert_debug(count != 0);
-		uint16 indexMinU16 = 0xFFFF;
-		uint16 indexMaxU16 = 0;
-		if (primitiveRestartIndex < 0x10000)
-		{
-			// with primitive restart index
-			uint16 primitiveRestartIndexU16 = (uint16)primitiveRestartIndex;
-			for (uint32 i = 0; i < count; i++)
-			{
-				uint16 idxU16 = _swapEndianU16(*indexInputU16);
-				indexInputU16++;
-				if (primitiveRestartIndexU16 != idxU16)
-				{
-					indexMinU16 = std::min(indexMinU16, idxU16);
-					indexMaxU16 = std::max(indexMaxU16, idxU16);
-				}
-				*indexOutputU16 = idxU16;
-				indexOutputU16++;
-			}
-		}
-		else
-		{
-			// without primitive restart index
-			for (uint32 i = 0; i < count; i++)
-			{
-				uint16 idxU16 = _swapEndianU16(*indexInputU16);
-				indexInputU16++;
-				indexMinU16 = std::min(indexMinU16, idxU16);
-				indexMaxU16 = std::max(indexMaxU16, idxU16);
-				*indexOutputU16 = idxU16;
-				indexOutputU16++;
-			}
-		}
-		cacheEntry->minIndex = indexMinU16;
-		cacheEntry->maxIndex = indexMaxU16;
-		glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, cacheEntry->heapEntry->startOffset, count * sizeof(uint16), indexState.tempIndexStorage);
-		performanceMonitor.cycle[performanceMonitor.cycleIndex].indexDataUploaded += (count * sizeof(uint16));
-	}
-	else if(cacheEntry->indexType == _INDEX_TYPE::U32_BE)
-	{
-		// 32bit indices
-		uint32* indexInputU32 = (uint32*)memory_getPointerFromPhysicalOffset(cacheEntry->key.physAddr);
-		uint32* indexOutputU32 = (uint32*)indexState.tempIndexStorage;
-		cemu_assert_debug(count != 0);
-		uint32 indexMinU32 = _swapEndianU32(*indexInputU32);
-		uint32 indexMaxU32 = _swapEndianU32(*indexInputU32);
-		for (uint32 i = 0; i < count; i++)
-		{
-			uint32 idxU32 = _swapEndianU32(*indexInputU32);
-			indexInputU32++;
-			if (idxU32 != primitiveRestartIndex)
-			{
-				indexMinU32 = std::min(indexMinU32, idxU32);
-				indexMaxU32 = std::max(indexMaxU32, idxU32);
-			}
-			*indexOutputU32 = idxU32;
-			indexOutputU32++;
-		}
-		cacheEntry->minIndex = indexMinU32;
-		cacheEntry->maxIndex = indexMaxU32;
-		glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, cacheEntry->heapEntry->startOffset, count * sizeof(uint32), indexState.tempIndexStorage);
-		performanceMonitor.cycle[performanceMonitor.cycleIndex].indexDataUploaded += (count * sizeof(uint32));
-	}
-	else
-	{
-		cemu_assert_debug(false);
-	}
-}
-
 
 void LatteDraw_cleanupAfterFrame()
 {
 	if (g_renderer->GetType() != RendererAPI::OpenGL)
 		return;
-	// drop everything from cache that is older than 30 frames
-	uint32 frameCounter = LatteGPUState.frameCounter;
-	while (indexDataCacheFirst)
+	s_indexCache.DropUnused(LatteGPUState.frameCounter);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Vertex attributes
+// ---------------------------------------------------------------------------------------------------------------
+
+namespace
+{
+	// what was last passed to glVertexAttribIPointer for each attribute slot
+	struct AttribPointerState
 	{
-		indexDataCacheEntry2_t* entry = indexDataCacheFirst;
-		if ((frameCounter - entry->lastAccessFrameCount) < 30)
-			break;
-		// remove entry
-		virtualBufferHeap_free(indexState.indexBufferVirtualHeap, entry->heapEntry);
-		_removeFromUsageLinkedList(entry);
-		_removeFromBucket(entry);
-		free(entry);
+		uint8* offset;
+		uint32 stride;
+		Latte::E_HWFMT format;
+		uint8 nfa;
+		bool isSigned;
+	};
+	AttribPointerState s_attribPointers[LATTE_VS_ATTRIBUTE_LIMIT]{};
+
+	struct AttribArrayState
+	{
+		bool enabled = false;
+		sint32 divisor = 0;
+	};
+	AttribArrayState s_attribArrays[GPU_GL_MAX_NUM_ATTRIBUTE];
+
+	// vertex buffer offsets inside the buffer cache, set through buffer_bindVertexBuffers
+	uint32 s_vertexBufferOffsets[Latte::GPU_LIMITS::NUM_VERTEX_BUFFERS]{};
+
+	struct IntegerAttribLayout
+	{
+		GLint components;
+		GLenum type;
+	};
+
+	// all attributes are fetched as raw integers, the shader does the format conversion
+	bool GetIntegerAttribLayout(Latte::E_HWFMT format, IntegerAttribLayout& out)
+	{
+		using F = Latte::E_HWFMT;
+		switch (format)
+		{
+		case F::HWFMT_32_32_32_32_FLOAT: case F::HWFMT_32_32_32_32: out = { 4, GL_UNSIGNED_INT }; return true;
+		case F::HWFMT_32_32_32_FLOAT: case F::HWFMT_32_32_32: out = { 3, GL_UNSIGNED_INT }; return true;
+		case F::HWFMT_32_32_FLOAT: case F::HWFMT_32_32: out = { 2, GL_UNSIGNED_INT }; return true;
+		case F::HWFMT_32_FLOAT: case F::HWFMT_32: out = { 1, GL_UNSIGNED_INT }; return true;
+		case F::HWFMT_2_10_10_10: out = { 1, GL_UNSIGNED_INT }; return true;
+		case F::HWFMT_8_8_8_8: out = { 4, GL_UNSIGNED_BYTE }; return true;
+		case F::HWFMT_8_8: out = { 2, GL_UNSIGNED_BYTE }; return true;
+		case F::HWFMT_8: out = { 1, GL_UNSIGNED_BYTE }; return true;
+		case F::HWFMT_16_16_16_16_FLOAT: case F::HWFMT_16_16_16_16: out = { 4, GL_UNSIGNED_SHORT }; return true;
+		case F::HWFMT_16_16_FLOAT: case F::HWFMT_16_16: out = { 2, GL_UNSIGNED_SHORT }; return true;
+		case F::HWFMT_16_FLOAT: case F::HWFMT_16: out = { 1, GL_UNSIGNED_SHORT }; return true;
+		default: return false;
+		}
+	}
+
+	void ApplyAttribPointer(uint32 location, const LatteParsedFetchShaderAttribute& attrib, uint8* offset, uint32 stride)
+	{
+		AttribPointerState& cached = s_attribPointers[location];
+		const bool isSigned = attrib.isSigned != 0;
+		if (cached.offset == offset && cached.stride == stride && cached.format == attrib.format && cached.nfa == attrib.nfa && cached.isSigned == isSigned)
+			return;
+		cached = { offset, stride, attrib.format, attrib.nfa, isSigned };
+
+		IntegerAttribLayout layout;
+		if (!GetIntegerAttribLayout(attrib.format, layout))
+		{
+			debug_printf("ApplyAttribPointer(): Unsupported format %d\n", (int)attrib.format);
+			cemu_assert_unimplemented();
+			return;
+		}
+		// AMD drivers need two-byte attributes to be 4 byte aligned; fetch the surrounding word instead
+		if (attrib.format == Latte::E_HWFMT::HWFMT_8_8 && ((uint32)(size_t)offset & 3) == 2 && LatteGPUState.glVendor == GLVENDOR_AMD)
+		{
+			glVertexAttribIPointer(location, 4, GL_UNSIGNED_BYTE, stride, offset - 2);
+			return;
+		}
+		glVertexAttribIPointer(location, layout.components, layout.type, stride, offset);
 	}
 }
 
-void LatteDrawGL_removeLeastRecentlyUsedIndexCacheEntries(sint32 count)
+void LatteDraw_resetAttributePointerCache()
 {
-	while (indexDataCacheFirst && count > 0)
+	for (auto& p : s_attribPointers)
 	{
-		indexDataCacheEntry2_t* entry = indexDataCacheFirst;
-		// remove entry
-		virtualBufferHeap_free(indexState.indexBufferVirtualHeap, entry->heapEntry);
-		_removeFromUsageLinkedList(entry);
-		_removeFromBucket(entry);
-		free(entry);
-		count--;
+		p.offset = (uint8*)-1;
+		p.stride = (uint32)-1;
 	}
 }
 
-uint32 LatteDrawGL_calculateIndexDataHash(uint8* data, uint32 size)
+void OpenGLRenderer::SetAttributeArrayState(uint32 index, bool isEnabled, sint32 aluDivisor)
 {
-	uint32 h = 0;
-	if (size < 16)
+	cemu_assert_debug(index < GPU_GL_MAX_NUM_ATTRIBUTE);
+	catchOpenGLError();
+	AttribArrayState& state = s_attribArrays[index];
+	if (state.enabled != isEnabled)
 	{
-		// hash the bytes individually
-		while (size != 0)
-		{
-			h += (uint32)*data;
-			data++;
-			size--;
-		}
-		return h;
-	}
-	// first 16 bytes
-	h += *(uint32*)(data + 0);
-	h += *(uint32*)(data + 4);
-	h += *(uint32*)(data + 8);
-	h += *(uint32*)(data + 12);
-	// last 16 bytes
-	data = data + ((size - 16)&~3);
-	h += *(uint32*)(data + 0);
-	h += *(uint32*)(data + 4);
-	h += *(uint32*)(data + 8);
-	h += *(uint32*)(data + 12);
-	return h;
-}
-
-// index handling with cache
-// todo - Outdated cache implementation. Update OpenGL renderer to use the generic implementation that is also used by the Vulkan renderer
-void LatteDrawGL_prepareIndicesWithGPUCache(MPTR indexDataMPTR, _INDEX_TYPE indexType, sint32 count, sint32 primitiveMode)
-{
-	if (indexType == _INDEX_TYPE::AUTO)
-	{
-		indexState.minIndex = 0;
-		indexState.maxIndex = count - 1;
-		// since no indices are used we don't need to unbind the element array buffer
-		return; // automatic indices
-	}
-
-	OpenGLRenderer::SetArrayElementBuffer(indexState.glIndexCacheBuffer);
-	uint32 indexDataBucketIdx = (uint32)((indexDataMPTR + count) ^ (indexDataMPTR >> 16)) % INDEX_DATA_CACHE_BUCKETS;
-	// find matching entry
-	uint32 primitiveRestartIndex = LatteGPUState.contextNew.VGT_MULTI_PRIM_IB_RESET_INDX.get_RESTART_INDEX();
-	indexDataCacheEntry2_t* cacheEntryItr = indexDataCacheBucket[indexDataBucketIdx];
-	indexDataCacheKey_t compareKey;
-	compareKey.physAddr = indexDataMPTR;
-	compareKey.count = count;
-	compareKey.primitiveMode = primitiveMode;
-	compareKey.primitiveRestartIndex = primitiveRestartIndex;
-	while (cacheEntryItr)
-	{
-		if (memcmp(&(cacheEntryItr->key), &compareKey, sizeof(compareKey)) != 0)
-		{
-			// next
-			cacheEntryItr = cacheEntryItr->nextInBucket;
-			continue;
-		}
-		// entry found
-		indexState.minIndex = cacheEntryItr->minIndex;
-		indexState.maxIndex = cacheEntryItr->maxIndex;
-		indexState.indexData = (uint8*)(size_t)cacheEntryItr->heapEntry->startOffset;
-		cacheEntryItr->lastAccessFrameCount = LatteGPUState.frameCounter;
-		// check if the data changed
-		uint32 h = LatteDrawGL_calculateIndexDataHash(memory_getPointerFromPhysicalOffset(indexDataMPTR), cacheEntryItr->physSize);
-		if (cacheEntryItr->hash != h)
-		{
-			cemuLog_logDebug(LogType::Force, "IndexData hash changed");
-			_decodeAndUploadIndexData(cacheEntryItr);
-			cacheEntryItr->hash = h;
-		}
-		// move entry to the front
-		_removeFromUsageLinkedList(cacheEntryItr);
-		_appendToUsageLinkedList(cacheEntryItr);
-		return;
-	}
-	// calculate size of index data in cache
-	sint32 cacheIndexDataSize = 0;
-	if (indexType == _INDEX_TYPE::U16_BE || indexType == _INDEX_TYPE::U16_LE)
-		cacheIndexDataSize = count * sizeof(uint16);
-	else
-		cacheIndexDataSize = count * sizeof(uint32);
-	// no matching entry, create new one
-	VirtualBufferHeapEntry_t* heapEntry = virtualBufferHeap_allocate(indexState.indexBufferVirtualHeap, cacheIndexDataSize);
-	if (heapEntry == nullptr)
-	{
-		while (true)
-		{
-			LatteDrawGL_removeLeastRecentlyUsedIndexCacheEntries(10);
-			heapEntry = virtualBufferHeap_allocate(indexState.indexBufferVirtualHeap, cacheIndexDataSize);
-			if (heapEntry != nullptr)
-				break;
-			if (indexDataCacheFirst == nullptr)
-			{
-				cemuLog_log(LogType::Force, "Unable to allocate entry in index cache");
-				assert_dbg();
-			}
-		}
-	}
-	indexDataCacheEntry2_t* cacheEntry = (indexDataCacheEntry2_t*)malloc(sizeof(indexDataCacheEntry2_t));
-	memset(cacheEntry, 0, sizeof(indexDataCacheEntry2_t));
-	cacheEntry->key.physAddr = indexDataMPTR;
-	cacheEntry->physSize = (indexType == _INDEX_TYPE::U16_BE || indexType == _INDEX_TYPE::U16_LE) ? (count * sizeof(uint16)) : (count * sizeof(uint32));
-	cacheEntry->hash = LatteDrawGL_calculateIndexDataHash(memory_getPointerFromPhysicalOffset(indexDataMPTR), cacheEntry->physSize);
-	cacheEntry->key.count = count;
-	cacheEntry->key.primitiveRestartIndex = primitiveRestartIndex;
-	cacheEntry->indexType = indexType;
-	cacheEntry->key.primitiveMode = primitiveMode;
-	cacheEntry->heapEntry = heapEntry;
-	cacheEntry->lastAccessFrameCount = LatteGPUState.frameCounter;
-	// append entry in bucket list
-	cacheEntry->nextInBucket = indexDataCacheBucket[indexDataBucketIdx];
-	indexDataCacheBucket[indexDataBucketIdx] = cacheEntry;
-	// append as most recently used entry
-	_appendToUsageLinkedList(cacheEntry);
-	// decode and upload the data
-	_decodeAndUploadIndexData(cacheEntry);
-
-	indexDataCacheEntryCount++;
-	indexState.minIndex = cacheEntry->minIndex;
-	indexState.maxIndex = cacheEntry->maxIndex;
-	indexState.indexData = (uint8*)(size_t)cacheEntry->heapEntry->startOffset;
-}
-
-void LatteDrawGL_doDraw(_INDEX_TYPE indexType, uint32 baseVertex, uint32 baseInstance, uint32 instanceCount, uint32 count)
-{
-	if (indexType == _INDEX_TYPE::U16_BE)
-	{
-		// 16bit index, big endian
-		if (instanceCount > 1 || baseInstance != 0)
-		{
-			glDrawElementsInstancedBaseVertexBaseInstance(sGLActiveDrawMode, count, GL_UNSIGNED_SHORT, indexState.indexData, instanceCount, baseVertex, baseInstance);
-		}
+		if (isEnabled)
+			glEnableVertexAttribArray(index);
 		else
-		{
-			if (baseVertex != 0)
-				glDrawRangeElementsBaseVertex(sGLActiveDrawMode, indexState.minIndex, indexState.maxIndex, count, GL_UNSIGNED_SHORT, indexState.indexData, baseVertex);
-			else
-				glDrawRangeElements(sGLActiveDrawMode, indexState.minIndex, indexState.maxIndex, count, GL_UNSIGNED_SHORT, indexState.indexData);
-		}
+			glDisableVertexAttribArray(index);
+		state.enabled = isEnabled;
+		catchOpenGLError();
 	}
-	else if (indexType == _INDEX_TYPE::U32_BE)
+	if (state.divisor != aluDivisor)
 	{
-		// 32bit index, big endian
-		if (instanceCount > 1 || baseInstance != 0)
-		{
-			//debug_printf("Render instanced\n");
-			glDrawElementsInstancedBaseVertexBaseInstance(sGLActiveDrawMode, count, GL_UNSIGNED_INT, indexState.indexData, instanceCount, baseVertex, baseInstance);
-		}
-		else
-		{
-			glDrawRangeElementsBaseVertex(sGLActiveDrawMode, indexState.minIndex, indexState.maxIndex, count, GL_UNSIGNED_INT, indexState.indexData, baseVertex);
-		}
-	}
-	else if (indexType == _INDEX_TYPE::AUTO)
-	{
-		// render without index (automatic index generation)
-		cemu_assert_debug(baseInstance == 0);
-		if (instanceCount > 1)
-			glDrawArraysInstanced(sGLActiveDrawMode, baseVertex, count, instanceCount);
-		else
-		{
-			glDrawArrays(sGLActiveDrawMode, baseVertex, count);
-		}
-	}
-	else
-	{
-		cemu_assert_debug(false);
+		glVertexAttribDivisor(index, aluDivisor > 0 ? aluDivisor : 0);
+		state.divisor = aluDivisor;
+		catchOpenGLError();
 	}
 }
-
-uint32 _glVertexBufferOffset[Latte::GPU_LIMITS::NUM_VERTEX_BUFFERS] = { 0 };
 
 void OpenGLRenderer::buffer_bindVertexBuffers(std::span<BindBufferParam> bindings)
 {
-	for (const auto& binding : bindings)
-	{
-		_glVertexBufferOffset[binding.index] = binding.bindOffset;
-	}
+	for (const BindBufferParam& b : bindings)
+		s_vertexBufferOffsets[b.index] = b.bindOffset;
 }
 
 void OpenGLRenderer::buffer_bindUniformBuffer(LatteConst::ShaderType shaderType, uint32 bufferIndex, uint32 offset, uint32 size)
 {
-	switch (shaderType)
-	{
-	case LatteConst::ShaderType::Vertex:
-		bufferIndex += 0;
-		break;
-	case LatteConst::ShaderType::Pixel:
-		bufferIndex += 32;
-		break;
-	case LatteConst::ShaderType::Geometry:
-		bufferIndex += 64;
-		break;
-	}
-
+	// binding points: vertex 0-31, pixel 32-63, geometry 64-95
+	uint32 bindingPoint = bufferIndex;
+	if (shaderType == LatteConst::ShaderType::Pixel)
+		bindingPoint += 32;
+	else if (shaderType == LatteConst::ShaderType::Geometry)
+		bindingPoint += 64;
+	// GL does not accept empty ranges, an unset buffer gets 32 bytes of whatever is at the start of the cache
 	if (offset == 0 && size == 0)
-	{
-		// when binding NULL we just bind some arbitrary undefined data so the OpenGL driver is happy since a size of 0 is not allowed (should we bind a buffer filled with zeroes instead?)
-		glBindBufferRange(GL_UNIFORM_BUFFER, bufferIndex, glAttributeCacheAB, 0, 32);
-		return;
-	}
-	glBindBufferRange(GL_UNIFORM_BUFFER, bufferIndex, glAttributeCacheAB, offset, size);
-}
-
-void LatteDraw_resetAttributePointerCache();
-
-void _resetAttributes(LatteParsedFetchShaderBufferGroup* attribGroup, bool* attributeArrayUsed)
-{
-	for (sint32 i = 0; i < attribGroup->attribCount; i++)
-	{
-		LatteParsedFetchShaderAttribute* attrib = attribGroup->attrib + i;
-		sint32 attributeShaderLocation = attrib->semanticId; // we now bind to the semanticId instead
-		attributeArrayUsed[attributeShaderLocation] = false;
-	}
+		size = 32;
+	glBindBufferRange(GL_UNIFORM_BUFFER, bindingPoint, glAttributeCacheAB, offset, size);
 }
 
 void OpenGLRenderer::_setupVertexAttributes()
 {
-	LatteFetchShader* fetchShader = LatteSHRC_GetActiveFetchShader();
 	LatteDecompilerShader* vertexShader = LatteSHRC_GetActiveVertexShader();
-
 	catchOpenGLError();
-
-	// bind buffer
 	attributeStream_bindVertexCacheBuffer();
-
 	catchOpenGLError();
-	LatteFetchShader* parsedFetchShader = LatteSHRC_GetActiveFetchShader();
-	bool attributeArrayUsed[32] = { 0 }; // used to keep track of enabled vertex attributes for this shader
-	sint32 attributeDataIndex = 0;
-	uint32 vboDataOffset = 0;
 
-	for(auto& bufferGroup : parsedFetchShader->bufferGroups)
+	LatteFetchShader* fetchShader = LatteSHRC_GetActiveFetchShader();
+	bool slotUsed[32]{};
+	for (auto& group : fetchShader->bufferGroups)
 	{
-		uint32 bufferIndex = bufferGroup.attributeBufferIndex;
-		uint32 bufferBaseRegisterIndex = mmSQ_VTX_ATTRIBUTE_BLOCK_START + bufferIndex * 7;
-		MPTR bufferAddress = LatteGPUState.contextRegister[bufferBaseRegisterIndex + 0];
-		uint32 bufferSize = LatteGPUState.contextRegister[bufferBaseRegisterIndex + 1] + 1;
-		uint32 bufferStride = (LatteGPUState.contextRegister[bufferBaseRegisterIndex + 2] >> 11) & 0xFFFF;
-
+		const uint32 regBase = mmSQ_VTX_ATTRIBUTE_BLOCK_START + group.attributeBufferIndex * 7;
+		const MPTR bufferAddress = LatteGPUState.contextRegister[regBase + 0];
+		const uint32 bufferStride = (LatteGPUState.contextRegister[regBase + 2] >> 11) & 0xFFFF;
 		if (bufferAddress == MPTR_NULL)
 		{
-			_resetAttributes(&bufferGroup, attributeArrayUsed);
+			// no buffer bound: the group's attributes count as unused (indexed by semantic id)
+			for (sint32 i = 0; i < group.attribCount; i++)
+			{
+				const uint32 semantic = group.attrib[i].semanticId;
+				if (semantic < std::size(slotUsed))
+					slotUsed[semantic] = false;
+			}
 			continue;
 		}
-
-		vboDataOffset = _glVertexBufferOffset[bufferIndex];
-
-		for (sint32 i = 0; i < bufferGroup.attribCount; i++)
+		const uint32 groupOffset = s_vertexBufferOffsets[group.attributeBufferIndex];
+		for (sint32 i = 0; i < group.attribCount; i++)
 		{
-			LatteParsedFetchShaderAttribute* attrib = bufferGroup.attrib + i;
-			sint32 attributeShaderLocation = attrib->semanticId; // we now bind to the semanticId instead
-
-			attributeShaderLocation = vertexShader->resourceMapping.getAttribHostShaderIndex(attrib->semanticId);
-			if (attributeShaderLocation == -1)
-				continue; // attribute not used
-			if (attributeShaderLocation >= GPU_GL_MAX_NUM_ATTRIBUTE)
+			const LatteParsedFetchShaderAttribute& attrib = group.attrib[i];
+			const sint32 location = vertexShader->resourceMapping.getAttribHostShaderIndex(attrib.semanticId);
+			if (location < 0 || location >= GPU_GL_MAX_NUM_ATTRIBUTE)
 				continue;
-			if (attributeArrayUsed[attributeShaderLocation] == true)
-			{
+			if (slotUsed[location])
 				debug_printf("Fetch shader attribute is bound multiple times\n");
-			}
-
-			// get buffer
-			uint32 bufferIndex = attrib->attributeBufferIndex;
-			cemu_assert_debug(bufferIndex < 0x10);
-
-			cemu_assert_debug(attrib->fetchType == LatteConst::VERTEX_DATA || attrib->fetchType == LatteConst::INSTANCE_DATA); // unsupported fetch type
-
-			SetAttributeArrayState(attributeShaderLocation, true, (bufferStride == 0) ? 99999999 : attrib->aluDivisor);
-
-			uint8* bufferInput = memory_getPointerFromPhysicalOffset(bufferAddress) + attrib->offset;
-			uint32 bufferSizeInput = bufferSize - attrib->offset;
-
-			uint8* vboGLPtr;
-			vboGLPtr = (uint8*)(size_t)(vboDataOffset + attrib->offset);
-			_setAttributeBufferPointerRaw(attributeShaderLocation, NULL, 0, bufferStride, attrib, vboGLPtr, bufferStride);
-
-			attributeArrayUsed[attributeShaderLocation] = true;
-			attributeDataIndex++;
+			cemu_assert_debug(attrib.attributeBufferIndex < 0x10);
+			cemu_assert_debug(attrib.fetchType == LatteConst::VERTEX_DATA || attrib.fetchType == LatteConst::INSTANCE_DATA);
+			// a stride of 0 means every vertex reads the same element, which a huge divisor emulates
+			SetAttributeArrayState(location, true, bufferStride == 0 ? 99999999 : attrib.aluDivisor);
+			ApplyAttribPointer(location, attrib, (uint8*)(size_t)(groupOffset + attrib.offset), bufferStride);
+			slotUsed[location] = true;
 			catchOpenGLError();
 		}
 	}
 	for (uint32 i = 0; i < GPU_GL_MAX_NUM_ATTRIBUTE; i++)
 	{
-		if (attributeArrayUsed[i] == false && glAttributeArrayIsEnabled[i] == true)
+		if (!slotUsed[i] && s_attribArrays[i].enabled)
 			SetAttributeArrayState(i, false, -1);
 	}
 }
 
-std::map<uint64, RendererShaderGL*> g_mapGLRectEmulationGS;
+// ---------------------------------------------------------------------------------------------------------------
+// RECT primitives
+// ---------------------------------------------------------------------------------------------------------------
 
-RendererShaderGL* rectsEmulationGS_generateShaderGL(LatteDecompilerShader* vertexShader)
+namespace
 {
-	LatteShaderPSInputTable* psInputTable = LatteSHRC_GetPSInputTable();
+	std::unordered_map<uint64, RendererShaderGL*> s_rectGeometryShaders;
 
-	std::string gsSrc;
-	gsSrc.append("#version 450\r\n");
-
-	// layout
-	gsSrc.append("layout(triangles) in;\r\n");
-	gsSrc.append("layout(triangle_strip) out;\r\n");
-	gsSrc.append("layout(max_vertices = 4) out;\r\n");
-
-	// gl_PerVertex input
-
-	gsSrc.append("in gl_PerVertex {\r\n");
-	gsSrc.append("vec4 gl_Position;\r\n");
-	gsSrc.append("} gl_in[];\r\n");
-
-	// gl_PerVertex output
-
-	gsSrc.append("out gl_PerVertex {\r\n");
-	gsSrc.append("vec4 gl_Position;\r\n");
-	gsSrc.append("};\r\n");
-
-	// inputs & outputs
-	auto parameterMask = vertexShader->outputParameterMask;
-	for (sint32 f = 0; f < 2; f++)
+	void AppendRectInterface(std::string& src, LatteDecompilerShader* vertexShader, LatteShaderPSInputTable* psInputTable, bool outputs)
 	{
+		const uint32 mask = vertexShader->outputParameterMask;
 		for (uint32 i = 0; i < 32; i++)
 		{
-			if ((parameterMask & (1 << i)) == 0)
+			if ((mask & (1u << i)) == 0)
 				continue;
-			sint32 vsSemanticId = psInputTable->getVertexShaderOutParamSemanticId(LatteGPUState.contextRegister, i);
-			if (vsSemanticId < 0)
+			const sint32 semantic = psInputTable->getVertexShaderOutParamSemanticId(LatteGPUState.contextRegister, i);
+			if (semantic < 0)
 				continue;
-			auto psImport = psInputTable->getPSImportBySemanticId(vsSemanticId);
-			if (psImport == nullptr)
+			const auto* psImport = psInputTable->getPSImportBySemanticId(semantic);
+			if (!psImport)
 				continue;
-
-			gsSrc.append(fmt::format("layout(location = {}) ", psInputTable->getPSImportLocationBySemanticId(vsSemanticId)));
+			src += fmt::format("layout(location = {}) ", psInputTable->getPSImportLocationBySemanticId(semantic));
 			if (psImport->isFlat)
-				gsSrc.append("flat ");
+				src += "flat ";
 			if (psImport->isNoPerspective)
-				gsSrc.append("noperspective ");
-
-			if (f == 0)
-				gsSrc.append("in");
+				src += "noperspective ";
+			if (outputs)
+				src += fmt::format("out vec4 passParameterSem{}Out;\r\n", semantic);
 			else
-				gsSrc.append("out");
-
-			if (f == 0)
-				gsSrc.append(fmt::format(" vec4 passParameterSem{}In[];\r\n", vsSemanticId));
-			else
-				gsSrc.append(fmt::format(" vec4 passParameterSem{}Out;\r\n", vsSemanticId));
+				src += fmt::format("in vec4 passParameterSem{}In[];\r\n", semantic);
 		}
 	}
 
-	// gen function
-	gsSrc.append("vec4 gen4thVertexA(vec4 a, vec4 b, vec4 c)\r\n");
-	gsSrc.append("{\r\n");
-	gsSrc.append("return b - (c - a);\r\n");
-	gsSrc.append("}\r\n");
+	RendererShaderGL* BuildRectGeometryShader(LatteDecompilerShader* vertexShader, LatteShaderPSInputTable* psInputTable)
+	{
+		std::string src =
+			"#version 450\r\n"
+			"layout(triangles) in;\r\n"
+			"layout(triangle_strip) out;\r\n"
+			"layout(max_vertices = 4) out;\r\n"
+			"in gl_PerVertex {\r\n"
+			"vec4 gl_Position;\r\n"
+			"} gl_in[];\r\n"
+			"out gl_PerVertex {\r\n"
+			"vec4 gl_Position;\r\n"
+			"};\r\n";
+		AppendRectInterface(src, vertexShader, psInputTable, false);
+		AppendRectInterface(src, vertexShader, psInputTable, true);
+		// the fourth corner, for the three ways the input triangle can sit in the rectangle
+		src +=
+			"vec4 gen4thVertexA(vec4 a, vec4 b, vec4 c)\r\n{\r\nreturn b - (c - a);\r\n}\r\n"
+			"vec4 gen4thVertexB(vec4 a, vec4 b, vec4 c)\r\n{\r\nreturn c - (b - a);\r\n}\r\n"
+			"vec4 gen4thVertexC(vec4 a, vec4 b, vec4 c)\r\n{\r\nreturn c + (b - a);\r\n}\r\n"
+			"void main()\r\n{\r\n"
+			// the longest edge of the triangle is the rectangle's diagonal
+			"float dist0_1 = length(gl_in[1].gl_Position.xy - gl_in[0].gl_Position.xy);\r\n"
+			"float dist0_2 = length(gl_in[2].gl_Position.xy - gl_in[0].gl_Position.xy);\r\n"
+			"float dist1_2 = length(gl_in[2].gl_Position.xy - gl_in[1].gl_Position.xy);\r\n"
+			"if(dist0_1 > dist0_2 && dist0_1 > dist1_2)\r\n{\r\n";
+		rectsEmulationGS_outputVerticesCode(src, vertexShader, psInputTable, 2, 1, 0, 3, "A", LatteGPUState.contextNew);
+		src += "} else if ( dist0_2 > dist0_1 && dist0_2 > dist1_2 ) {\r\n";
+		rectsEmulationGS_outputVerticesCode(src, vertexShader, psInputTable, 1, 2, 0, 3, "B", LatteGPUState.contextNew);
+		src += "} else {\r\n";
+		rectsEmulationGS_outputVerticesCode(src, vertexShader, psInputTable, 0, 1, 2, 3, "C", LatteGPUState.contextNew);
+		src += "}\r\n}\r\n";
 
-	gsSrc.append("vec4 gen4thVertexB(vec4 a, vec4 b, vec4 c)\r\n");
-	gsSrc.append("{\r\n");
-	gsSrc.append("return c - (b - a);\r\n");
-	gsSrc.append("}\r\n");
+		auto* shader = new RendererShaderGL(RendererShader::ShaderType::kGeometry, 0, 0, false, false, src);
+		shader->PreponeCompilation(true);
+		return shader;
+	}
 
-	gsSrc.append("vec4 gen4thVertexC(vec4 a, vec4 b, vec4 c)\r\n");
-	gsSrc.append("{\r\n");
-	gsSrc.append("return c + (b - a);\r\n");
-	gsSrc.append("}\r\n");
+	RendererShaderGL* GetRectGeometryShader(LatteDecompilerShader* vertexShader)
+	{
+		LatteShaderPSInputTable* psInputTable = LatteSHRC_GetPSInputTable();
+		const uint64 key = vertexShader->baseHash + psInputTable->key;
+		RendererShaderGL*& slot = s_rectGeometryShaders[key];
+		if (!slot)
+			slot = BuildRectGeometryShader(vertexShader, psInputTable);
+		return slot;
+	}
 
-	// main
-	gsSrc.append("void main()\r\n");
-	gsSrc.append("{\r\n");
+	// false for primitive types the GL backend cannot draw (GL_POINTS is 0, so the mode itself cannot signal that)
+	bool ToGLPrimitive(PrimType mode, GLenum& glMode)
+	{
+		switch (mode)
+		{
+		case PrimType::POINTS: glMode = GL_POINTS; return true;
+		case PrimType::LINES: glMode = GL_LINES; return true;
+		case PrimType::LINE_STRIP: glMode = GL_LINE_STRIP; return true;
+		case PrimType::LINE_LOOP: glMode = GL_LINE_LOOP; return true;
+		case PrimType::TRIANGLES: glMode = GL_TRIANGLES; return true;
+		case PrimType::TRIANGLE_STRIP: glMode = GL_TRIANGLE_STRIP; return true;
+		case PrimType::TRIANGLE_FAN: glMode = GL_TRIANGLE_FAN; return true;
+		case PrimType::QUADS: glMode = GL_QUADS; return true;
+		case PrimType::QUAD_STRIP: glMode = GL_QUAD_STRIP; return true;
+		case PrimType::RECTS: glMode = GL_TRIANGLES; return true; // expanded by the geometry shader
+		default: return false;
+		}
+	}
 
-	// there are two possible winding orders that need different triangle generation:
-	// 0 1
-	// 2 3
-	// and
-	// 0 1
-	// 3 2
-	// all others are just symmetries of these cases
+	void IssueDraw(IndexType indexType, uint32 baseVertex, uint32 baseInstance, uint32 instanceCount, uint32 count)
+	{
+		const GLenum mode = sGLActiveDrawMode;
+		const bool instanced = instanceCount > 1 || baseInstance != 0;
+		switch (indexType)
+		{
+		case IndexType::U16_BE:
+			if (instanced)
+				glDrawElementsInstancedBaseVertexBaseInstance(mode, count, GL_UNSIGNED_SHORT, s_drawIndices.bufferOffset, instanceCount, baseVertex, baseInstance);
+			else if (baseVertex != 0)
+				glDrawRangeElementsBaseVertex(mode, s_drawIndices.lowest, s_drawIndices.highest, count, GL_UNSIGNED_SHORT, s_drawIndices.bufferOffset, baseVertex);
+			else
+				glDrawRangeElements(mode, s_drawIndices.lowest, s_drawIndices.highest, count, GL_UNSIGNED_SHORT, s_drawIndices.bufferOffset);
+			break;
+		case IndexType::U32_BE:
+			if (instanced)
+				glDrawElementsInstancedBaseVertexBaseInstance(mode, count, GL_UNSIGNED_INT, s_drawIndices.bufferOffset, instanceCount, baseVertex, baseInstance);
+			else
+				glDrawRangeElementsBaseVertex(mode, s_drawIndices.lowest, s_drawIndices.highest, count, GL_UNSIGNED_INT, s_drawIndices.bufferOffset, baseVertex);
+			break;
+		case IndexType::AUTO:
+			cemu_assert_debug(baseInstance == 0);
+			if (instanceCount > 1)
+				glDrawArraysInstanced(mode, baseVertex, count, instanceCount);
+			else
+				glDrawArrays(mode, baseVertex, count);
+			break;
+		default:
+			cemu_assert_debug(false);
+			break;
+		}
+	}
 
-	// we can determine the case by comparing the distance 0<->1 and 0<->2
+	// ---- per draw uniforms that are not part of the uniform buffers ----
 
-	gsSrc.append("float dist0_1 = length(gl_in[1].gl_Position.xy - gl_in[0].gl_Position.xy);\r\n");
-	gsSrc.append("float dist0_2 = length(gl_in[2].gl_Position.xy - gl_in[0].gl_Position.xy);\r\n");
-	gsSrc.append("float dist1_2 = length(gl_in[2].gl_Position.xy - gl_in[1].gl_Position.xy);\r\n");
+	float CurrentPointSizeUniform()
+	{
+		float size = (float)LatteGPUState.contextNew.PA_SU_POINT_SIZE.get_WIDTH() / 8.0f;
+		return size == 0.0f ? 1.0f / 8.0f : size;
+	}
 
-	// emit vertices
-	gsSrc.append("if(dist0_1 > dist0_2 && dist0_1 > dist1_2)\r\n");
-	gsSrc.append("{\r\n");
-	// p0 to p1 is diagonal
-	rectsEmulationGS_outputVerticesCode(gsSrc, vertexShader, psInputTable, 2, 1, 0, 3, "A", LatteGPUState.contextNew);
-	gsSrc.append("} else if ( dist0_2 > dist0_1 && dist0_2 > dist1_2 ) {\r\n");
-	// p0 to p2 is diagonal
-	rectsEmulationGS_outputVerticesCode(gsSrc, vertexShader, psInputTable, 1, 2, 0, 3, "B", LatteGPUState.contextNew);
-	gsSrc.append("} else {\r\n");
-	// p1 to p2 is diagonal
-	rectsEmulationGS_outputVerticesCode(gsSrc, vertexShader, psInputTable, 0, 1, 2, 3, "C", LatteGPUState.contextNew);
-	gsSrc.append("}\r\n");
+	void UpdateTexRescaleUniforms(LatteDecompilerShader* shader, LatteConst::ShaderType stage, GLuint program)
+	{
+		for (auto& entry : shader->uniform.list_ufTexRescale)
+		{
+			float* scale = LatteTexture_getEffectiveTextureScale(stage, entry.texUnit);
+			if (memcmp(entry.currentValue, scale, sizeof(float) * 2) == 0)
+				continue;
+			memcpy(entry.currentValue, scale, sizeof(float) * 2);
+			glProgramUniform2fv(program, entry.uniformLocation, 1, scale);
+		}
+	}
 
-	gsSrc.append("}\r\n");
+	void UpdateVertexStageUniforms(LatteDecompilerShader* vs)
+	{
+		const GLuint program = static_cast<RendererShaderGL*>(vs->shader)->GetProgram();
+		if (vs->uniform.loc_windowSpaceToClipSpaceTransform >= 0)
+		{
+			sint32 vpWidth, vpHeight;
+			LatteRenderTarget_GetCurrentVirtualViewportSize(&vpWidth, &vpHeight); // valid after LatteRenderTarget_updateViewport()
+			const float transform[2] = { 2.0f / (float)vpWidth, 2.0f / (float)vpHeight };
+			glProgramUniform2fv(program, vs->uniform.loc_windowSpaceToClipSpaceTransform, 1, transform);
+		}
+		UpdateTexRescaleUniforms(vs, LatteConst::ShaderType::Vertex, program);
+		if (vs->uniform.loc_pointSize >= 0)
+		{
+			const float pointSize = CurrentPointSizeUniform();
+			glProgramUniform1fv(program, vs->uniform.loc_pointSize, 1, &pointSize);
+		}
+	}
 
-	auto glShader = new RendererShaderGL(RendererShader::ShaderType::kGeometry, 0, 0, false, false, gsSrc);
-	glShader->PreponeCompilation(true);
+	void UpdateGeometryStageUniforms(LatteDecompilerShader* gs)
+	{
+		const GLuint program = static_cast<RendererShaderGL*>(gs->shader)->GetProgram();
+		UpdateTexRescaleUniforms(gs, LatteConst::ShaderType::Geometry, program);
+		if (gs->uniform.loc_pointSize >= 0)
+		{
+			const float pointSize = CurrentPointSizeUniform();
+			glProgramUniform1fv(program, gs->uniform.loc_pointSize, 1, &pointSize);
+		}
+	}
 
-	return glShader;
+	void UpdatePixelStageUniforms(LatteDecompilerShader* ps)
+	{
+		const GLuint program = static_cast<RendererShaderGL*>(ps->shader)->GetProgram();
+		if (ps->uniform.loc_alphaTestRef >= 0)
+		{
+			const float ref = LatteGPUState.contextNew.SX_ALPHA_REF.get_ALPHA_TEST_REF();
+			if (ps->uniform.ufCurrentValueAlphaTestRef != ref)
+			{
+				glProgramUniform1fv(program, ps->uniform.loc_alphaTestRef, 1, &ref);
+				ps->uniform.ufCurrentValueAlphaTestRef = ref;
+			}
+		}
+		if (ps->uniform.loc_fragCoordScale >= 0)
+		{
+			float scale[4];
+			LatteMRT::GetCurrentFragCoordScale(scale);
+			float* current = ps->uniform.ufCurrentValueFragCoordScale;
+			if (current[0] != scale[0] || current[1] != scale[1])
+			{
+				glProgramUniform2fv(program, ps->uniform.loc_fragCoordScale, 1, scale);
+				current[0] = scale[0];
+				current[1] = scale[1];
+			}
+		}
+		UpdateTexRescaleUniforms(ps, LatteConst::ShaderType::Pixel, program);
+	}
+
+	uint32 s_lastReadbackPollDrawcall = 0;
 }
 
-RendererShaderGL* rectsEmulationGS_getShaderGL(LatteDecompilerShader* vertexShader)
-{
-	LatteShaderPSInputTable* psInputTable = LatteSHRC_GetPSInputTable();
-
-	uint64 h = vertexShader->baseHash + psInputTable->key;
-
-	auto itr = g_mapGLRectEmulationGS.find(h);
-	if (itr != g_mapGLRectEmulationGS.end())
-		return (*itr).second;
-
-	auto glShader = rectsEmulationGS_generateShaderGL(vertexShader);
-
-	g_mapGLRectEmulationGS.emplace(h, glShader);
-	return glShader;
-}
-
-uint32 sPrevTextureReadbackDrawcallUpdate = 0;
+// ---------------------------------------------------------------------------------------------------------------
+// Draw calls
+// ---------------------------------------------------------------------------------------------------------------
 
 template<bool TIsMinimal, bool THasProfiling>
 void OpenGLRenderer::draw_genericDrawHandler(uint32 baseVertex, uint32 baseInstance, uint32 instanceCount, uint32 count, MPTR indexDataMPTR, Latte::LATTE_VGT_DMA_INDEX_TYPE::E_INDEX_TYPE indexType)
 {
 	ReleaseBufferCacheEntries();
-
 	catchOpenGLError();
-	void* indexData = indexDataMPTR != MPTR_NULL ? memory_getPointerFromPhysicalOffset(indexDataMPTR) : NULL;
-	auto primitiveMode = LatteGPUState.contextNew.VGT_PRIMITIVE_TYPE.get_PRIMITIVE_MODE();
-	// handle special state 8 (clear as depth)
-	if (LatteGPUState.contextNew.GetSpecialStateValues()[8] != 0)
+	auto& ctx = LatteGPUState.contextNew;
+	const PrimType primitiveMode = ctx.VGT_PRIMITIVE_TYPE.get_PRIMITIVE_MODE();
+
+	if (ctx.GetSpecialStateValues()[8] != 0)
 	{
 		LatteDraw_handleSpecialState8_clearAsDepth();
 		LatteGPUState.drawCallCounter++;
 		return;
 	}
 
-	// update shaders and uniforms
 	if constexpr (!TIsMinimal)
 	{
 		beginPerfMonProfiling(performanceMonitor.gpuTime_dcStageShaderAndUniformMgr);
 		LatteSHRC_UpdateActiveShaders();
-		LatteDecompilerShader* vs = (LatteDecompilerShader*)LatteSHRC_GetActiveVertexShader();
-		LatteDecompilerShader* gs = (LatteDecompilerShader*)LatteSHRC_GetActiveGeometryShader();
-		LatteDecompilerShader* ps = (LatteDecompilerShader*)LatteSHRC_GetActivePixelShader();
-		if (vs)
-			shader_bind(vs->shader);
-		else
-			shader_unbind(RendererShader::ShaderType::kVertex);
-		if (ps && LatteGPUState.contextRegister[mmVGT_STRMOUT_EN] == 0)
-			shader_bind(ps->shader);
-		else
-			shader_unbind(RendererShader::ShaderType::kFragment);
-		if (gs)
-			shader_bind(gs->shader);
-		else
-			shader_unbind(RendererShader::ShaderType::kGeometry);
+		LatteDecompilerShader* vs = LatteSHRC_GetActiveVertexShader();
+		LatteDecompilerShader* gs = LatteSHRC_GetActiveGeometryShader();
+		LatteDecompilerShader* ps = LatteSHRC_GetActivePixelShader();
+		vs ? shader_bind(vs->shader) : shader_unbind(RendererShader::ShaderType::kVertex);
+		// with streamout active nothing is rasterized by this pass
+		(ps && LatteGPUState.contextRegister[mmVGT_STRMOUT_EN] == 0) ? shader_bind(ps->shader) : shader_unbind(RendererShader::ShaderType::kFragment);
+		gs ? shader_bind(gs->shader) : shader_unbind(RendererShader::ShaderType::kGeometry);
 		endPerfMonProfiling(performanceMonitor.gpuTime_dcStageShaderAndUniformMgr);
 	}
 	if (LatteGPUState.activeShaderHasError)
@@ -869,57 +715,21 @@ void OpenGLRenderer::draw_genericDrawHandler(uint32 baseVertex, uint32 baseInsta
 		cemuLog_logDebugOnce(LogType::Force, "Skipped drawcall due to shader error\n");
 		return;
 	}
-	// check for blacklisted shaders
-	uint64 vsShaderHash = 0;
-	if (LatteSHRC_GetActiveVertexShader())
-		vsShaderHash = LatteSHRC_GetActiveVertexShader()->baseHash;
-	uint64 psShaderHash = 0;
-	if (LatteSHRC_GetActivePixelShader())
-		psShaderHash = LatteSHRC_GetActivePixelShader()->baseHash;
 
-	// setup streamout (if enabled)
-	bool rasterizerEnable = LatteGPUState.contextNew.PA_CL_CLIP_CNTL.get_DX_RASTERIZATION_KILL() == false;
-	if (!LatteGPUState.contextNew.PA_CL_VTE_CNTL.get_VPORT_X_OFFSET_ENA())
-		rasterizerEnable = true;
-
-	bool streamoutEnable = LatteGPUState.contextRegister[mmVGT_STRMOUT_EN] != 0;
-	if (streamoutEnable)
+	// rasterization kill only applies when the viewport transform is enabled
+	const bool rasterizerEnable = !ctx.PA_CL_CLIP_CNTL.get_DX_RASTERIZATION_KILL() || !ctx.PA_CL_VTE_CNTL.get_VPORT_X_OFFSET_ENA();
+	const bool streamoutEnable = LatteGPUState.contextRegister[mmVGT_STRMOUT_EN] != 0;
+	if (streamoutEnable && glBeginTransformFeedback == nullptr)
 	{
-		if (glBeginTransformFeedback == nullptr)
-		{
-			cemu_assert_debug(false);
-			return; // transform feedback not supported
-		}
-	}
-	// skip draw if output is not used
-	if (rasterizerEnable == false && streamoutEnable == false)
-	{
-		// rasterizer and streamout disabled
-		LatteGPUState.drawCallCounter++;
+		cemu_assert_debug(false);
 		return;
 	}
-	// get primitive
-	if (primitiveMode == Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::TRIANGLES)
-		sGLActiveDrawMode = GL_TRIANGLES;
-	else if (primitiveMode == Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::TRIANGLE_STRIP)
-		sGLActiveDrawMode = GL_TRIANGLE_STRIP;
-	else if (primitiveMode == Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::QUADS)
-		sGLActiveDrawMode = GL_QUADS;
-	else if (primitiveMode == Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::TRIANGLE_FAN)
-		sGLActiveDrawMode = GL_TRIANGLE_FAN;
-	else if (primitiveMode == Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::RECTS)
-		sGLActiveDrawMode = GL_TRIANGLES;
-	else if (primitiveMode == Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::POINTS)
-		sGLActiveDrawMode = GL_POINTS;
-	else if (primitiveMode == Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::LINES)
-		sGLActiveDrawMode = GL_LINES;
-	else if (primitiveMode == Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::LINE_STRIP)
-		sGLActiveDrawMode = GL_LINE_STRIP;
-	else if (primitiveMode == Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::LINE_LOOP)
-		sGLActiveDrawMode = GL_LINE_LOOP;
-	else if (primitiveMode == Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::QUAD_STRIP)
-		sGLActiveDrawMode = GL_QUAD_STRIP;
-	else
+	if (!rasterizerEnable && !streamoutEnable)
+	{
+		LatteGPUState.drawCallCounter++; // the draw has no visible effect
+		return;
+	}
+	if (!ToGLPrimitive(primitiveMode, sGLActiveDrawMode))
 	{
 		cemu_assert_debug(false); // unsupported primitive type
 		LatteGPUState.drawCallCounter++;
@@ -928,262 +738,144 @@ void OpenGLRenderer::draw_genericDrawHandler(uint32 baseVertex, uint32 baseInsta
 
 	if constexpr (!TIsMinimal)
 	{
-		// update render targets and textures
 		LatteGPUState.requiresTextureBarrier = false;
 		beginPerfMonProfiling(performanceMonitor.gpuTime_dcStageTextures);
-		while (true)
+		do
 		{
 			LatteGPUState.repeatTextureInitialization = false;
-			if (streamoutEnable == false)
+			if (!streamoutEnable)
 			{
-				// only handle rendertargets if streamout is inactive
-				if (LatteMRT::UpdateCurrentFBO() == false)
-					return; // no render target
-				if (hasValidFramebufferAttached == false)
+				// render targets only matter when something is rasterized
+				if (!LatteMRT::UpdateCurrentFBO())
+					return;
+				if (!hasValidFramebufferAttached)
 					return;
 			}
-			LatteTexture_updateTextures(); // caution: Do not call any functions that potentially modify texture bindings after this line
-			if (LatteGPUState.repeatTextureInitialization == false)
-				break;
-			catchOpenGLError();
-		}
+			LatteTexture_updateTextures(); // texture bindings must not change after this
+			if (LatteGPUState.repeatTextureInitialization)
+				catchOpenGLError();
+		} while (LatteGPUState.repeatTextureInitialization);
 		endPerfMonProfiling(performanceMonitor.gpuTime_dcStageTextures);
 
 		beginPerfMonProfiling(performanceMonitor.gpuTime_dcStageMRT);
 		LatteMRT::ApplyCurrentState();
 		endPerfMonProfiling(performanceMonitor.gpuTime_dcStageMRT);
 
-		// texture barrier for write-read patterns
+		// the draw samples a texture it also renders to
 		if (LatteGPUState.requiresTextureBarrier && glTextureBarrier)
-		{
 			glTextureBarrier();
-		}
-
 	}
-
 	catchOpenGLError();
-	// handle RECT primitive
-	if (primitiveMode == Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::RECTS)
-	{
-		RendererShaderGL* rectsEmulationShader = rectsEmulationGS_getShaderGL(LatteSHRC_GetActiveVertexShader());
-		shader_bind(rectsEmulationShader);
-	}
 
-	// prepare index cache
+	const bool isRects = primitiveMode == PrimType::RECTS;
+	if (isRects)
+		shader_bind(GetRectGeometryShader(LatteSHRC_GetActiveVertexShader()));
+
 	beginPerfMonProfiling(performanceMonitor.gpuTime_dcStageIndexMgr);
-	LatteDrawGL_prepareIndicesWithGPUCache(indexDataMPTR, indexType, count, (sint32)primitiveMode);
+	s_indexCache.Prepare(indexDataMPTR, indexType, (sint32)count, (uint32)primitiveMode, s_drawIndices);
 	endPerfMonProfiling(performanceMonitor.gpuTime_dcStageIndexMgr);
 
-	// synchronize vertex and uniform buffers
 	uint8 stageUniformModifiedMask = 0;
-	LatteBufferCache_Sync(indexState.maxIndex + baseVertex, baseInstance, instanceCount, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, stageUniformModifiedMask);
-
+	LatteBufferCache_Sync(s_drawIndices.highest + baseVertex, baseInstance, instanceCount, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, stageUniformModifiedMask);
 	_setupVertexAttributes();
 
-	// update renderstate
 	LatteRenderTarget_updateViewport();
 	LatteRenderTarget_updateScissorBox();
 	renderstate_updateBlendingAndColorControl();
 	catchOpenGLError();
-	// handle special state 5 (convert depth to color)
-	if (LatteGPUState.contextNew.GetSpecialStateValues()[5] != 0)
+
+	// special state 5: copy the depth buffer into colour buffer 0 instead of drawing
+	if (ctx.GetSpecialStateValues()[5] != 0)
 	{
 		debug_printf("GPU7 special state 5 used\n");
-		LatteTextureView* rt_color = LatteMRT::GetColorAttachment(0);
-		LatteTextureView* rt_depth = LatteMRT::GetDepthAttachment();
-		if (!rt_depth || !rt_color)
+		LatteTextureView* color = LatteMRT::GetColorAttachment(0);
+		LatteTextureView* depth = LatteMRT::GetDepthAttachment();
+		if (!color || !depth)
 		{
 			cemuLog_log(LogType::Force, "GPU7 special state 5 used but render target not setup correctly");
 			return;
 		}
-		surfaceCopy_copySurfaceWithFormatConversion(rt_depth->baseTexture, rt_depth->firstMip, rt_depth->firstSlice, rt_color->baseTexture, rt_color->firstMip, rt_color->firstSlice, rt_depth->baseTexture->width, rt_depth->baseTexture->height);
+		surfaceCopy_copySurfaceWithFormatConversion(depth->baseTexture, depth->firstMip, depth->firstSlice, color->baseTexture, color->firstMip, color->firstSlice, depth->baseTexture->width, depth->baseTexture->height);
 		LatteGPUState.drawCallCounter++;
 		return;
 	}
 
 	beginPerfMonProfiling(performanceMonitor.gpuTime_dcStageShaderAndUniformMgr);
-	// update uniform values
 	uniformData_update();
 	endPerfMonProfiling(performanceMonitor.gpuTime_dcStageShaderAndUniformMgr);
 	catchOpenGLError();
-	// upload special uniforms
+
 	LatteDecompilerShader* vertexShader = LatteSHRC_GetActiveVertexShader();
 	LatteDecompilerShader* pixelShader = LatteSHRC_GetActivePixelShader();
 	LatteDecompilerShader* geometryShader = LatteSHRC_GetActiveGeometryShader();
 	if (vertexShader)
-	{
-		auto vertexShaderGL = (RendererShaderGL*)vertexShader->shader;
-		if (vertexShader->uniform.loc_windowSpaceToClipSpaceTransform >= 0)
-		{
-			sint32 viewportWidth;
-			sint32 viewportHeight;
-			LatteRenderTarget_GetCurrentVirtualViewportSize(&viewportWidth, &viewportHeight); // always call after _updateViewport()
-			float t[2];
-			t[0] = 2.0f / (float)viewportWidth;
-			t[1] = 2.0f / (float)viewportHeight;
-			glProgramUniform2fv(vertexShaderGL->GetProgram(), vertexShader->uniform.loc_windowSpaceToClipSpaceTransform, 1, t);
-		}
-		// update uf_texRescaleFactors
-		for (auto& entry : vertexShader->uniform.list_ufTexRescale)
-		{
-			float* xyScale = LatteTexture_getEffectiveTextureScale(LatteConst::ShaderType::Vertex, entry.texUnit);
-			if (memcmp(entry.currentValue, xyScale, sizeof(float) * 2) == 0)
-				continue; // value unchanged
-			memcpy(entry.currentValue, xyScale, sizeof(float) * 2);
-			glProgramUniform2fv(vertexShaderGL->GetProgram(), entry.uniformLocation, 1, xyScale);
-		}
-		// update uf_pointSize
-		if (vertexShader->uniform.loc_pointSize >= 0)
-		{
-			float t[1];
-			float pointWidth = (float)LatteGPUState.contextNew.PA_SU_POINT_SIZE.get_WIDTH() / 8.0f;
-			if (pointWidth == 0.0f)
-				pointWidth = 1.0f / 8.0f; // minimum size
-			t[0] = pointWidth;
-			glProgramUniform1fv(vertexShaderGL->GetProgram(), vertexShader->uniform.loc_pointSize, 1, t);
-		}
-	}
+		UpdateVertexStageUniforms(vertexShader);
 	if (geometryShader)
-	{
-		auto geometryShaderGL = (RendererShaderGL*)geometryShader->shader;
-		// update uf_texRescaleFactors
-		for (auto& entry : geometryShader->uniform.list_ufTexRescale)
-		{
-			float* xyScale = LatteTexture_getEffectiveTextureScale(LatteConst::ShaderType::Geometry, entry.texUnit);
-			if (memcmp(entry.currentValue, xyScale, sizeof(float) * 2) == 0)
-				continue; // value unchanged
-			memcpy(entry.currentValue, xyScale, sizeof(float) * 2);
-			glProgramUniform2fv(geometryShaderGL->GetProgram(), entry.uniformLocation, 1, xyScale);
-		}
-		// update uf_pointSize
-		if (geometryShader->uniform.loc_pointSize >= 0)
-		{
-			float t[1];
-			float pointWidth = (float)LatteGPUState.contextNew.PA_SU_POINT_SIZE.get_WIDTH() / 8.0f;
-			if (pointWidth == 0.0f)
-				pointWidth = 1.0f / 8.0f; // minimum size
-			t[0] = pointWidth;
-			glProgramUniform1fv(geometryShaderGL->GetProgram(), geometryShader->uniform.loc_pointSize, 1, t);
-		}
-	}
+		UpdateGeometryStageUniforms(geometryShader);
 	if (pixelShader)
-	{
-		auto pixelShaderGL = (RendererShaderGL*)pixelShader->shader;
-		if (pixelShader->uniform.loc_alphaTestRef >= 0)
-		{
-			float t[1];
-			t[0] = LatteGPUState.contextNew.SX_ALPHA_REF.get_ALPHA_TEST_REF();
-			if (pixelShader->uniform.ufCurrentValueAlphaTestRef != t[0])
-			{
-				glProgramUniform1fv(pixelShaderGL->GetProgram(), pixelShader->uniform.loc_alphaTestRef, 1, t);
-				pixelShader->uniform.ufCurrentValueAlphaTestRef = t[0];
-			}
-		}
-		// update uf_fragCoordScale
-		if (pixelShader->uniform.loc_fragCoordScale >= 0)
-		{
-			float coordScale[4];
-			LatteMRT::GetCurrentFragCoordScale(coordScale);
-			if (pixelShader->uniform.ufCurrentValueFragCoordScale[0] != coordScale[0] || pixelShader->uniform.ufCurrentValueFragCoordScale[1] != coordScale[1])
-			{
-				glProgramUniform2fv(pixelShaderGL->GetProgram(), pixelShader->uniform.loc_fragCoordScale, 1, coordScale);
-				pixelShader->uniform.ufCurrentValueFragCoordScale[0] = coordScale[0];
-				pixelShader->uniform.ufCurrentValueFragCoordScale[1] = coordScale[1];
-			}
-		}
-		// update uf_texRescaleFactors
-		for (auto& entry : pixelShader->uniform.list_ufTexRescale)
-		{
-			float* xyScale = LatteTexture_getEffectiveTextureScale(LatteConst::ShaderType::Pixel, entry.texUnit);
-			if (memcmp(entry.currentValue, xyScale, sizeof(float) * 2) == 0)
-				continue; // value unchanged
-			memcpy(entry.currentValue, xyScale, sizeof(float) * 2);
-			glProgramUniform2fv(pixelShaderGL->GetProgram(), entry.uniformLocation, 1, xyScale);
-		}
-	}
+		UpdatePixelStageUniforms(pixelShader);
 	catchOpenGLError();
-	// prepare streamout
-	LatteStreamout_PrepareDrawcall(count, instanceCount);
 
-	if (streamoutEnable && rasterizerEnable)
-	{
-		if (primitiveMode == Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::QUADS)
-			sGLActiveDrawMode = GL_POINTS;
-	}
+	LatteStreamout_PrepareDrawcall(count, instanceCount);
+	if (streamoutEnable && rasterizerEnable && primitiveMode == PrimType::QUADS)
+		sGLActiveDrawMode = GL_POINTS;
 	catchOpenGLError();
-	// render
+
 	beginPerfMonProfiling(performanceMonitor.gpuTime_dcStageDrawcallAPI);
-	LatteDrawGL_doDraw(indexType, baseVertex, baseInstance, instanceCount, count);
+	IssueDraw(indexType, baseVertex, baseInstance, instanceCount, count);
 	endPerfMonProfiling(performanceMonitor.gpuTime_dcStageDrawcallAPI);
-	// post-drawcall logic
-	if(pixelShader)
+
+	if (pixelShader)
 		LatteRenderTarget_trackUpdates();
 	LatteStreamout_FinishDrawcall(false);
 	catchOpenGLError();
-
-	if (primitiveMode == Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::RECTS)
+	if (isRects)
 		shader_unbind(RendererShader::ShaderType::kGeometry);
-
 	LatteGPUState.drawCallCounter++;
+
 	if (streamoutEnable && rasterizerEnable)
 	{
-		// streamout and rasterizer enabled, repeat drawcall with streamout disabled
-		uint32 strmOutEnOrg = LatteGPUState.contextRegister[mmVGT_STRMOUT_EN];
+		// the streamout pass is done, draw again for the rasterizer
+		const uint32 savedStreamoutEnable = LatteGPUState.contextRegister[mmVGT_STRMOUT_EN];
 		LatteGPUState.contextRegister[mmVGT_STRMOUT_EN] = 0;
 		draw_genericDrawHandler<false, THasProfiling>(baseVertex, baseInstance, instanceCount, count, indexDataMPTR, indexType);
-		LatteGPUState.contextRegister[mmVGT_STRMOUT_EN] = strmOutEnOrg;
+		LatteGPUState.contextRegister[mmVGT_STRMOUT_EN] = savedStreamoutEnable;
 		return;
 	}
+
 	LatteTextureReadback_Update();
-	uint32 dcSinceLastReadbackCheck = LatteGPUState.drawCallCounter - sPrevTextureReadbackDrawcallUpdate;
-	if (dcSinceLastReadbackCheck >= 150)
+	if (LatteGPUState.drawCallCounter - s_lastReadbackPollDrawcall >= 150)
 	{
 		LatteTextureReadback_UpdateFinishedTransfers(false);
-		sPrevTextureReadbackDrawcallUpdate = LatteGPUState.drawCallCounter;
-	}	
+		s_lastReadbackPollDrawcall = LatteGPUState.drawCallCounter;
+	}
 	catchOpenGLError();
 }
 
+template void OpenGLRenderer::draw_genericDrawHandler<false, false>(uint32, uint32, uint32, uint32, MPTR, Latte::LATTE_VGT_DMA_INDEX_TYPE::E_INDEX_TYPE);
+template void OpenGLRenderer::draw_genericDrawHandler<true, false>(uint32, uint32, uint32, uint32, MPTR, Latte::LATTE_VGT_DMA_INDEX_TYPE::E_INDEX_TYPE);
+
 void OpenGLRenderer::draw_beginSequence()
 {
-	// no-op
 }
 
 void OpenGLRenderer::draw_execute(uint32 baseVertex, uint32 baseInstance, uint32 instanceCount, uint32 count, MPTR indexDataMPTR, Latte::LATTE_VGT_DMA_INDEX_TYPE::E_INDEX_TYPE indexType, const LatteDrawcallContext& drawcallContext)
 {
-	bool isMinimal = !drawcallContext.isFirst;
-    if (isMinimal)
-        draw_genericDrawHandler<true, false>(baseVertex, baseInstance, instanceCount, count, indexDataMPTR, indexType);
-    else
-        draw_genericDrawHandler<false, false>(baseVertex, baseInstance, instanceCount, count, indexDataMPTR, indexType);
+	// follow-up draws of a sequence keep the shaders, textures and render targets of the first one
+	if (drawcallContext.isFirst)
+		draw_genericDrawHandler<false, false>(baseVertex, baseInstance, instanceCount, count, indexDataMPTR, indexType);
+	else
+		draw_genericDrawHandler<true, false>(baseVertex, baseInstance, instanceCount, count, indexDataMPTR, indexType);
 }
 
 void OpenGLRenderer::draw_endSequence()
 {
-	// no-op
 }
-
-#define GPU7_INDEX_BUFFER_CACHE_SIZE_DEPR		(18*1024*1024) // 18MB
 
 void OpenGLRenderer::draw_init()
 {
-	if (indexState.initialized)
-		return;
-	indexState.initialized = true;
-	// create index buffer
-	glGenBuffers(1, &indexState.glIndexCacheBuffer);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, indexState.glIndexCacheBuffer);
-	glBufferData(GL_ELEMENT_ARRAY_BUFFER, GPU7_INDEX_BUFFER_CACHE_SIZE_DEPR, NULL, GL_DYNAMIC_DRAW);
-#if BOOST_OS_WINDOWS
-	indexState.mappedIndexBuffer = (uint8*)_aligned_malloc(GPU7_INDEX_BUFFER_CACHE_SIZE_DEPR, 256);
-#else
-	indexState.mappedIndexBuffer = (uint8*)aligned_alloc(256, GPU7_INDEX_BUFFER_CACHE_SIZE_DEPR);
-#endif
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
-	indexState.indexRingBuffer = LatteRingBuffer_create(indexState.mappedIndexBuffer, GPU7_INDEX_BUFFER_CACHE_SIZE_DEPR);
-	indexState.tempIndexStorage = (uint8*)malloc(1024 * 1024 * 8);
-	// create virtual heap for index buffer
-	indexState.indexBufferVirtualHeap = virtualBufferHeap_create(GPU7_INDEX_BUFFER_CACHE_SIZE_DEPR);
+	if (!s_indexCache.IsReady())
+		s_indexCache.Create();
 }
 
 void OpenGLRenderer::bufferCache_upload(uint8* buffer, sint32 size, uint32 bufferOffset)
@@ -1198,346 +890,262 @@ void OpenGLRenderer::bufferCache_copy(uint32 srcOffset, uint32 dstOffset, uint32
 	glCopyBufferSubData(GL_ARRAY_BUFFER, GL_ARRAY_BUFFER, srcOffset, dstOffset, size);
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Texture parameters (GL keeps sampler state in the texture object, one view per sampler configuration)
+// ---------------------------------------------------------------------------------------------------------------
 
-GLint glClampTable[] =
+namespace
 {
-	GL_REPEAT,
-	GL_MIRRORED_REPEAT,
-	GL_CLAMP_TO_EDGE,
-	GL_MIRROR_CLAMP_TO_EDGE,
-	GL_CLAMP_TO_EDGE,
-	GL_MIRROR_CLAMP_TO_BORDER_EXT,
-	GL_CLAMP_TO_BORDER,
-	GL_MIRROR_CLAMP_TO_BORDER_EXT
-};
-
-GLint glCompSelTable[8] =
-{
-	GL_RED,
-	GL_GREEN,
-	GL_BLUE,
-	GL_ALPHA,
-	GL_ZERO,
-	GL_ONE,
-	0,
-	0
-};
-
-GLint glDepthCompareTable[8] = {
-	GL_NEVER,
-	GL_LESS,
-	GL_EQUAL,
-	GL_LEQUAL,
-	GL_GREATER,
-	GL_NOTEQUAL,
-	GL_GEQUAL,
-	GL_ALWAYS
-};
-
-// Remaps component selection if the underlying OpenGL texture format would behave differently than it's GPU7 counterpart
-uint32 _correctTextureCompSelGL(Latte::E_GX2SURFFMT format, uint32 compSel)
-{
-	switch (format)
+	// SQ_TEX_CLAMP -> GL wrap mode
+	constexpr GLint kWrapModes[8] =
 	{
-	case Latte::E_GX2SURFFMT::R8_UNORM: // R8 is replicated on all channels (while OpenGL would return 1.0 for BGA instead)
-	case Latte::E_GX2SURFFMT::R8_SNORM: // probably the same as _UNORM, but needs testing
-		if (compSel >= 1 && compSel <= 3)
-			compSel = 0;
-		break;
-	case Latte::E_GX2SURFFMT::A1_B5_G5_R5_UNORM: // order of components is reversed (RGBA -> ABGR)
-		if (compSel >= 0 && compSel <= 3)
-			compSel = 3 - compSel;
-		break;
-	case Latte::E_GX2SURFFMT::BC4_UNORM:
-	case Latte::E_GX2SURFFMT::BC4_SNORM:
-		if (compSel >= 1 && compSel <= 3)
-			compSel = 0;
-		break;
-	case Latte::E_GX2SURFFMT::BC5_UNORM:
-	case Latte::E_GX2SURFFMT::BC5_SNORM:
-		// RG maps to RG
-		// B maps to ?
-		// A maps to G (guessed)
-		if (compSel == 3)
-			compSel = 1; // read Alpha as Green
-		break;
-	case Latte::E_GX2SURFFMT::A2_B10_G10_R10_UNORM:
-		// reverse components (Wii U: ABGR, OpenGL: RGBA)
-		// used in Resident Evil Revelations
-		if (compSel >= 0 && compSel <= 3)
-			compSel = 3 - compSel;
-		break;
-	case Latte::E_GX2SURFFMT::X24_G8_UINT:
-		// map everything to alpha?
-		if (compSel >= 0 && compSel <= 3)
-			compSel = 3;
-		break;
-	default:
-		break;
+		GL_REPEAT,                      // WRAP
+		GL_MIRRORED_REPEAT,             // MIRROR
+		GL_CLAMP_TO_EDGE,               // CLAMP_LAST_TEXEL
+		GL_MIRROR_CLAMP_TO_EDGE,        // MIRROR_ONCE_LAST_TEXEL
+		GL_CLAMP_TO_EDGE,               // CLAMP_HALF_BORDER
+		GL_MIRROR_CLAMP_TO_BORDER_EXT,  // MIRROR_ONCE_HALF_BORDER
+		GL_CLAMP_TO_BORDER,             // CLAMP_BORDER
+		GL_MIRROR_CLAMP_TO_BORDER_EXT,  // MIRROR_ONCE_BORDER
+	};
+
+	// SQ_SEL -> GL swizzle source
+	constexpr GLint kSwizzleSources[8] = { GL_RED, GL_GREEN, GL_BLUE, GL_ALPHA, GL_ZERO, GL_ONE, 0, 0 };
+
+	constexpr GLint kCompareFuncs[8] = { GL_NEVER, GL_LESS, GL_EQUAL, GL_LEQUAL, GL_GREATER, GL_NOTEQUAL, GL_GEQUAL, GL_ALWAYS };
+
+	// Some host formats return channels in a different place than GPU7 does; adjust the swizzle source for that
+	uint32 AdjustSwizzleForHostFormat(Latte::E_GX2SURFFMT format, uint32 sel)
+	{
+		using F = Latte::E_GX2SURFFMT;
+		const bool isColorChannel = sel <= 3;
+		switch (format)
+		{
+		case F::R8_UNORM:
+		case F::R8_SNORM:
+		case F::BC4_UNORM:
+		case F::BC4_SNORM:
+			// one channel formats replicate red, GL would give 0/1 for the others
+			return (sel >= 1 && sel <= 3) ? 0 : sel;
+		case F::A1_B5_G5_R5_UNORM:
+		case F::A2_B10_G10_R10_UNORM:
+			// stored as ABGR on GPU7, the host format is RGBA
+			return isColorChannel ? 3 - sel : sel;
+		case F::BC5_UNORM:
+		case F::BC5_SNORM:
+			return sel == 3 ? 1 : sel; // alpha reads green
+		case F::X24_G8_UINT:
+			return isColorChannel ? 3 : sel;
+		default:
+			return sel;
+		}
 	}
-	return compSel;
+
+	GLint ToGLMinFilter(Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0::E_XY_FILTER xy, Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0::E_Z_FILTER mip)
+	{
+		using XY = Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0::E_XY_FILTER;
+		using Z = Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0::E_Z_FILTER;
+		const bool nearest = xy == XY::POINT || xy == XY::ANISO_POINT;
+		if (mip == Z::NONE)
+			return nearest ? GL_NEAREST : GL_LINEAR;
+		if (mip == Z::POINT)
+			return nearest ? GL_NEAREST_MIPMAP_NEAREST : GL_LINEAR_MIPMAP_NEAREST;
+		return nearest ? GL_NEAREST_MIPMAP_LINEAR : GL_LINEAR_MIPMAP_LINEAR;
+	}
 }
 
-#define quickBindTexture() 		if( textureIsActive == false ) { texture_bindAndActivate(hostTextureView, hostTextureUnit); textureIsActive = true; }
-
-uint32 _getGLMinFilter(Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0::E_XY_FILTER filterMin, Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0::E_Z_FILTER filterMip)
-{
-	bool isMinPointFilter = (filterMin == Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0::E_XY_FILTER::POINT) || (filterMin == Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0::E_XY_FILTER::ANISO_POINT);
-
-	if (filterMip == Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0::E_Z_FILTER::NONE)
-	{
-		// no mip
-		return isMinPointFilter ? GL_NEAREST : GL_LINEAR;
-	}
-	else if (filterMip == Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0::E_Z_FILTER::POINT)
-	{
-		// nearest neighbor
-		return isMinPointFilter ? GL_NEAREST_MIPMAP_NEAREST : GL_LINEAR_MIPMAP_NEAREST;
-	}
-	// else -> filterMip == LINEAR
-	return isMinPointFilter ? GL_NEAREST_MIPMAP_LINEAR : GL_LINEAR_MIPMAP_LINEAR;
-}
-
-/*
-* Update channel swizzling and other texture settings for a texture unit
-* hostTextureView is the texture unit view used on the host side
-*/
 void OpenGLRenderer::renderstate_updateTextureSettingsGL(LatteDecompilerShader* shaderContext, LatteTextureView* _hostTextureView, uint32 hostTextureUnit, const Latte::LATTE_SQ_TEX_RESOURCE_WORD4_N texUnitWord4, uint32 texUnitIndex, bool isDepthSampler)
 {
-	auto hostTextureView = (LatteTextureViewGL*)_hostTextureView;
-
-	LatteTexture* baseTexture = hostTextureView->baseTexture;
-	// get texture register word 0
-	catchOpenGLError();
-	bool textureIsActive = false;
-
-	uint32 compSelR = (uint32)texUnitWord4.get_DST_SEL_X();
-	uint32 compSelG = (uint32)texUnitWord4.get_DST_SEL_Y();
-	uint32 compSelB = (uint32)texUnitWord4.get_DST_SEL_Z();
-	uint32 compSelA = (uint32)texUnitWord4.get_DST_SEL_W();
-	// on OpenGL some channels might be mapped differently
-	compSelR = _correctTextureCompSelGL(hostTextureView->format, compSelR);
-	compSelG = _correctTextureCompSelGL(hostTextureView->format, compSelG);
-	compSelB = _correctTextureCompSelGL(hostTextureView->format, compSelB);
-	compSelA = _correctTextureCompSelGL(hostTextureView->format, compSelA);
-	// update swizzle parameters
-	if (hostTextureView->swizzleR != compSelR)
-	{
-		quickBindTexture();
-		glTexParameteri(hostTextureView->glTexTarget, GL_TEXTURE_SWIZZLE_R, glCompSelTable[compSelR]);
-		hostTextureView->swizzleR = compSelR;
-	}
-	if (hostTextureView->swizzleG != compSelG)
-	{
-		quickBindTexture();
-		glTexParameteri(hostTextureView->glTexTarget, GL_TEXTURE_SWIZZLE_G, glCompSelTable[compSelG]);
-		hostTextureView->swizzleG = compSelG;
-	}
-	if (hostTextureView->swizzleB != compSelB)
-	{
-		quickBindTexture();
-		glTexParameteri(hostTextureView->glTexTarget, GL_TEXTURE_SWIZZLE_B, glCompSelTable[compSelB]);
-		hostTextureView->swizzleB = compSelB;
-	}
-	if (hostTextureView->swizzleA != compSelA)
-	{
-		quickBindTexture();
-		glTexParameteri(hostTextureView->glTexTarget, GL_TEXTURE_SWIZZLE_A, glCompSelTable[compSelA]);
-		hostTextureView->swizzleA = compSelA;
-	}
+	auto* view = static_cast<LatteTextureViewGL*>(_hostTextureView);
+	LatteTexture* baseTexture = view->baseTexture;
+	const GLenum target = view->glTexTarget;
 	catchOpenGLError();
 
-	uint32 stageSamplerIndex = shaderContext->textureUnitSamplerAssignment[texUnitIndex];
-	if (stageSamplerIndex != LATTE_DECOMPILER_SAMPLER_NONE)
+	// the texture is only bound once something actually has to change
+	bool isBound = false;
+	auto bindOnce = [&]()
 	{
-		uint32 samplerIndex = stageSamplerIndex;
-		samplerIndex += LatteDecompiler_getTextureSamplerBaseIndex(shaderContext->shaderType);
+		if (isBound)
+			return;
+		texture_bindAndActivate(view, hostTextureUnit);
+		isBound = true;
+	};
+	auto setInt = [&](GLenum pname, GLint value)
+	{
+		bindOnce();
+		glTexParameteri(target, pname, value);
+	};
+	auto setFloat = [&](GLenum pname, float value)
+	{
+		bindOnce();
+		glTexParameterf(target, pname, value);
+	};
 
-		const _LatteRegisterSetSampler* samplerWords = LatteGPUState.contextNew.SQ_TEX_SAMPLER + samplerIndex;
+	// swizzle
+	const uint32 sel[4] =
+	{
+		AdjustSwizzleForHostFormat(view->format, (uint32)texUnitWord4.get_DST_SEL_X()),
+		AdjustSwizzleForHostFormat(view->format, (uint32)texUnitWord4.get_DST_SEL_Y()),
+		AdjustSwizzleForHostFormat(view->format, (uint32)texUnitWord4.get_DST_SEL_Z()),
+		AdjustSwizzleForHostFormat(view->format, (uint32)texUnitWord4.get_DST_SEL_W()),
+	};
+	uint8* swizzleCache[4] = { &view->swizzleR, &view->swizzleG, &view->swizzleB, &view->swizzleA };
+	constexpr GLenum kSwizzleParams[4] = { GL_TEXTURE_SWIZZLE_R, GL_TEXTURE_SWIZZLE_G, GL_TEXTURE_SWIZZLE_B, GL_TEXTURE_SWIZZLE_A };
+	for (int c = 0; c < 4; c++)
+	{
+		if (*swizzleCache[c] == sel[c])
+			continue;
+		setInt(kSwizzleParams[c], kSwizzleSources[sel[c]]);
+		*swizzleCache[c] = (uint8)sel[c];
+	}
+	catchOpenGLError();
 
-		auto filterMag = samplerWords->WORD0.get_XY_MAG_FILTER();
-		auto filterMin = samplerWords->WORD0.get_XY_MIN_FILTER();
-		//auto filterZ = samplerWords->WORD0.get_Z_FILTER();
-		auto filterMip = samplerWords->WORD0.get_MIP_FILTER();
+	const uint32 stageSamplerIndex = shaderContext->textureUnitSamplerAssignment[texUnitIndex];
+	if (stageSamplerIndex == LATTE_DECOMPILER_SAMPLER_NONE)
+		return;
+	const _LatteRegisterSetSampler& sampler = LatteGPUState.contextNew.SQ_TEX_SAMPLER[stageSamplerIndex + LatteDecompiler_getTextureSamplerBaseIndex(shaderContext->shaderType)];
+	LatteSamplerState& cache = view->samplerState;
 
-		// get OpenGL constant for min filter
-		uint32 filterMinGL = _getGLMinFilter(filterMin, filterMip);
-		uint32 filterMagGL = (filterMag == Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0::E_XY_FILTER::POINT || filterMag == Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0::E_XY_FILTER::ANISO_POINT) ? GL_NEAREST : GL_LINEAR;
+	const uint32 minFilter = (uint32)ToGLMinFilter(sampler.WORD0.get_XY_MIN_FILTER(), sampler.WORD0.get_MIP_FILTER());
+	const auto magFilterReg = sampler.WORD0.get_XY_MAG_FILTER();
+	const uint32 magFilter = (magFilterReg == Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0::E_XY_FILTER::POINT || magFilterReg == Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0::E_XY_FILTER::ANISO_POINT) ? GL_NEAREST : GL_LINEAR;
+	catchOpenGLError();
 
-		// todo: z-filter is customizable for GPU7 but OpenGL doesn't offer the same functionality?
+	// wrap modes
+	const uint32 wrap[3] = { (uint32)sampler.WORD0.get_CLAMP_X(), (uint32)sampler.WORD0.get_CLAMP_Y(), (uint32)sampler.WORD0.get_CLAMP_Z() };
+	uint8* wrapCache[3] = { &cache.clampS, &cache.clampT, &cache.clampR };
+	constexpr GLenum kWrapParams[3] = { GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T, GL_TEXTURE_WRAP_R };
+	for (int c = 0; c < 3; c++)
+	{
+		if (*wrapCache[c] == wrap[c])
+			continue;
+		setInt(kWrapParams[c], kWrapModes[wrap[c]]);
+		*wrapCache[c] = (uint8)wrap[c];
+	}
+	catchOpenGLError();
 
-		LatteSamplerState* samplerState = &hostTextureView->samplerState;
-
-		catchOpenGLError();
-
-		uint32 clampX = (uint32)samplerWords->WORD0.get_CLAMP_X();
-		uint32 clampY = (uint32)samplerWords->WORD0.get_CLAMP_Y();
-		uint32 clampZ = (uint32)samplerWords->WORD0.get_CLAMP_Z();
-		if (samplerState->clampS != clampX)
-		{
-			quickBindTexture();
-			glTexParameteri(hostTextureView->glTexTarget, GL_TEXTURE_WRAP_S, glClampTable[clampX]);
-			samplerState->clampS = clampX;
-		}
-		if (samplerState->clampT != clampY)
-		{
-			quickBindTexture();
-			glTexParameteri(hostTextureView->glTexTarget, GL_TEXTURE_WRAP_T, glClampTable[clampY]);
-			samplerState->clampT = clampY;
-		}
-		if (samplerState->clampR != clampZ)
-		{
-			quickBindTexture();
-			glTexParameteri(hostTextureView->glTexTarget, GL_TEXTURE_WRAP_R, glClampTable[clampZ]);
-			samplerState->clampR = clampZ;
-		}
-		catchOpenGLError();
-
-		uint32 maxAniso = (uint32)samplerWords->WORD0.get_MAX_ANISO_RATIO();
-
-		if (baseTexture->overwriteInfo.anisotropicLevel >= 0)
-			maxAniso = baseTexture->overwriteInfo.anisotropicLevel;
-
-		if (samplerState->maxAniso != maxAniso)
-		{
-			quickBindTexture();
-			glTexParameterf(hostTextureView->glTexTarget, GL_TEXTURE_MAX_ANISOTROPY_EXT, (float)(1 << maxAniso));
-			samplerState->maxAniso = maxAniso;
-			catchOpenGLError();
-		}
-		if (samplerState->filterMin != filterMinGL)
-		{
-			quickBindTexture();
-			glTexParameteri(hostTextureView->glTexTarget, GL_TEXTURE_MIN_FILTER, filterMinGL);
-			samplerState->filterMin = filterMinGL;
-			catchOpenGLError();
-		}
-
-		if (samplerState->filterMag != filterMagGL)
-		{
-			quickBindTexture();
-			glTexParameteri(hostTextureView->glTexTarget, GL_TEXTURE_MAG_FILTER, filterMagGL);
-			samplerState->filterMag = filterMagGL;
-			catchOpenGLError();
-		}
-		if (samplerState->maxMipLevels != hostTextureView->numMip)
-		{
-			quickBindTexture();
-			glTexParameteri(hostTextureView->glTexTarget, GL_TEXTURE_MAX_LEVEL, std::max(hostTextureView->numMip, 1) - 1);
-			samplerState->maxMipLevels = hostTextureView->numMip;
-			catchOpenGLError();
-		}
-		// lod
-		uint32 iMinLOD = samplerWords->WORD1.get_MIN_LOD();
-		uint32 iMaxLOD = samplerWords->WORD1.get_MAX_LOD();
-		sint32 iLodBias = samplerWords->WORD1.get_LOD_BIAS();
-
-		// apply relative lod bias from graphic pack
-		if (baseTexture->overwriteInfo.hasRelativeLodBias)
-		{
-			iLodBias += baseTexture->overwriteInfo.relativeLodBias;
-		}
-		// apply absolute lod bias from graphic pack
-		if (baseTexture->overwriteInfo.hasLodBias)
-		{
-			iLodBias = baseTexture->overwriteInfo.lodBias;
-		}
-
-		if (samplerState->minLod != iMinLOD)
-		{
-			quickBindTexture();
-			glTexParameterf(hostTextureView->glTexTarget, GL_TEXTURE_MIN_LOD, (float)iMinLOD / 64.0f);
-			samplerState->minLod = iMinLOD;
-		}
-		if (samplerState->maxLod != iMaxLOD)
-		{
-			quickBindTexture();
-			glTexParameterf(hostTextureView->glTexTarget, GL_TEXTURE_MAX_LOD, (float)iMaxLOD / 64.0f);
-			samplerState->maxLod = iMaxLOD;
-		}
-		if (samplerState->lodBias != iLodBias)
-		{
-			quickBindTexture();
-			glTexParameterf(hostTextureView->glTexTarget, GL_TEXTURE_LOD_BIAS, (float)iLodBias / 64.0f);
-			samplerState->lodBias = iLodBias;
-		}
-		// depth compare
-		uint32 samplerDepthCompare = (uint32)samplerWords->WORD0.get_DEPTH_COMPARE_FUNCTION();
-		uint8 depthCompareMode = isDepthSampler ? 1 : 0;
-
-		if (samplerDepthCompare != samplerState->depthCompareFunc)
-		{
-			quickBindTexture();
-			glTexParameteri(hostTextureView->glTexTarget, GL_TEXTURE_COMPARE_FUNC, glDepthCompareTable[samplerDepthCompare]);
-			samplerState->depthCompareFunc = samplerDepthCompare;
-		}
-
-		if (depthCompareMode != samplerState->depthCompareMode)
-		{
-			quickBindTexture();
-			if (depthCompareMode != 0)
-				glTexParameteri(hostTextureView->glTexTarget, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
-			else
-				glTexParameteri(hostTextureView->glTexTarget, GL_TEXTURE_COMPARE_MODE, GL_NONE);
-			samplerState->depthCompareMode = depthCompareMode;
-		}
-
-		catchOpenGLError();
-		// border
-		auto borderType = samplerWords->WORD0.get_BORDER_COLOR_TYPE();
-		if (samplerState->borderType != (uint8)borderType || borderType == Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0::E_BORDER_COLOR_TYPE::REGISTER)
-		{
-			// todo: Should we use integer border color (glTexParameteriv) for integer texture formats?
-			GLfloat borderColor[4];
-			if (borderType == Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0::E_BORDER_COLOR_TYPE::TRANSPARENT_BLACK)
-			{
-				borderColor[0] = 0.0f;
-				borderColor[1] = 0.0f;
-				borderColor[2] = 0.0f;
-				borderColor[3] = 0.0f;
-			}
-			else if (borderType == Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0::E_BORDER_COLOR_TYPE::OPAQUE_BLACK)
-			{
-				borderColor[0] = 0.0f;
-				borderColor[1] = 0.0f;
-				borderColor[2] = 0.0f;
-				borderColor[3] = 1.0f;
-			}
-			else if (borderType == Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0::E_BORDER_COLOR_TYPE::OPAQUE_WHITE)
-			{
-				borderColor[0] = 1.0f;
-				borderColor[1] = 1.0f;
-				borderColor[2] = 1.0f;
-				borderColor[3] = 1.0f;
-			}
-			else
-			{
-				// border color from register
-				_LatteRegisterSetSamplerBorderColor* borderColorReg;
-				if (shaderContext->shaderType == LatteConst::ShaderType::Vertex || shaderContext->shaderType == LatteConst::ShaderType::Compute)
-					borderColorReg = LatteGPUState.contextNew.TD_VS_SAMPLER_BORDER_COLOR + stageSamplerIndex;
-				else if (shaderContext->shaderType == LatteConst::ShaderType::Pixel)
-					borderColorReg = LatteGPUState.contextNew.TD_PS_SAMPLER_BORDER_COLOR + stageSamplerIndex;
-				else // geometry
-					borderColorReg = LatteGPUState.contextNew.TD_GS_SAMPLER_BORDER_COLOR + stageSamplerIndex;
-
-				borderColor[0] = borderColorReg->red.get_channelValue();
-				borderColor[1] = borderColorReg->green.get_channelValue();
-				borderColor[2] = borderColorReg->blue.get_channelValue();
-				borderColor[3] = borderColorReg->alpha.get_channelValue();
-			}
-
-			if (samplerState->borderColor[0] != borderColor[0] || samplerState->borderColor[1] != borderColor[1] || samplerState->borderColor[2] != borderColor[2] || samplerState->borderColor[3] != borderColor[3])
-			{
-				quickBindTexture();
-				glTexParameterfv(hostTextureView->glTexTarget, GL_TEXTURE_BORDER_COLOR, borderColor);
-				samplerState->borderColor[0] = borderColor[0];
-				samplerState->borderColor[1] = borderColor[1];
-				samplerState->borderColor[2] = borderColor[2];
-				samplerState->borderColor[3] = borderColor[3];
-			}
-			samplerState->borderType = (uint8)borderType;
-		}
+	// anisotropy (graphic packs can override it), filters, mip range
+	uint32 anisoLog2 = (uint32)sampler.WORD0.get_MAX_ANISO_RATIO();
+	if (baseTexture->overwriteInfo.anisotropicLevel >= 0)
+		anisoLog2 = baseTexture->overwriteInfo.anisotropicLevel;
+	if (cache.maxAniso != anisoLog2)
+	{
+		setFloat(GL_TEXTURE_MAX_ANISOTROPY_EXT, (float)(1 << anisoLog2));
+		cache.maxAniso = (uint8)anisoLog2;
 		catchOpenGLError();
 	}
+	if (cache.filterMin != minFilter)
+	{
+		setInt(GL_TEXTURE_MIN_FILTER, minFilter);
+		cache.filterMin = minFilter;
+		catchOpenGLError();
+	}
+	if (cache.filterMag != magFilter)
+	{
+		setInt(GL_TEXTURE_MAG_FILTER, magFilter);
+		cache.filterMag = magFilter;
+		catchOpenGLError();
+	}
+	if (cache.maxMipLevels != view->numMip)
+	{
+		setInt(GL_TEXTURE_MAX_LEVEL, std::max(view->numMip, 1) - 1);
+		cache.maxMipLevels = (uint8)view->numMip;
+		catchOpenGLError();
+	}
+
+	// LOD in 1/64 steps; graphic packs can add to the bias or replace it
+	const uint32 minLod = sampler.WORD1.get_MIN_LOD();
+	const uint32 maxLod = sampler.WORD1.get_MAX_LOD();
+	sint32 lodBias = sampler.WORD1.get_LOD_BIAS();
+	if (baseTexture->overwriteInfo.hasRelativeLodBias)
+		lodBias += baseTexture->overwriteInfo.relativeLodBias;
+	if (baseTexture->overwriteInfo.hasLodBias)
+		lodBias = baseTexture->overwriteInfo.lodBias;
+	if (cache.minLod != minLod)
+	{
+		setFloat(GL_TEXTURE_MIN_LOD, (float)minLod / 64.0f);
+		cache.minLod = (uint16)minLod;
+	}
+	if (cache.maxLod != maxLod)
+	{
+		setFloat(GL_TEXTURE_MAX_LOD, (float)maxLod / 64.0f);
+		cache.maxLod = (uint16)maxLod;
+	}
+	if (cache.lodBias != lodBias)
+	{
+		setFloat(GL_TEXTURE_LOD_BIAS, (float)lodBias / 64.0f);
+		cache.lodBias = (sint16)lodBias;
+	}
+
+	// shadow sampling
+	const uint32 compareFunc = (uint32)sampler.WORD0.get_DEPTH_COMPARE_FUNCTION();
+	if (cache.depthCompareFunc != compareFunc)
+	{
+		setInt(GL_TEXTURE_COMPARE_FUNC, kCompareFuncs[compareFunc]);
+		cache.depthCompareFunc = (uint8)compareFunc;
+	}
+	const uint8 compareMode = isDepthSampler ? 1 : 0;
+	if (cache.depthCompareMode != compareMode)
+	{
+		setInt(GL_TEXTURE_COMPARE_MODE, compareMode ? GL_COMPARE_REF_TO_TEXTURE : GL_NONE);
+		cache.depthCompareMode = compareMode;
+	}
+	catchOpenGLError();
+
+	// border colour; register colours can change without the type changing, so they are always compared
+	using BorderType = Latte::LATTE_SQ_TEX_SAMPLER_WORD0_0::E_BORDER_COLOR_TYPE;
+	const BorderType borderType = sampler.WORD0.get_BORDER_COLOR_TYPE();
+	if (cache.borderType != (uint8)borderType || borderType == BorderType::REGISTER)
+	{
+		GLfloat color[4];
+		switch (borderType)
+		{
+		case BorderType::TRANSPARENT_BLACK:
+			color[0] = color[1] = color[2] = color[3] = 0.0f;
+			break;
+		case BorderType::OPAQUE_BLACK:
+			color[0] = color[1] = color[2] = 0.0f;
+			color[3] = 1.0f;
+			break;
+		case BorderType::OPAQUE_WHITE:
+			color[0] = color[1] = color[2] = color[3] = 1.0f;
+			break;
+		default:
+		{
+			auto& c = LatteGPUState.contextNew;
+			const _LatteRegisterSetSamplerBorderColor* reg;
+			switch (shaderContext->shaderType)
+			{
+			case LatteConst::ShaderType::Vertex:
+			case LatteConst::ShaderType::Compute:
+				reg = c.TD_VS_SAMPLER_BORDER_COLOR + stageSamplerIndex;
+				break;
+			case LatteConst::ShaderType::Pixel:
+				reg = c.TD_PS_SAMPLER_BORDER_COLOR + stageSamplerIndex;
+				break;
+			default:
+				reg = c.TD_GS_SAMPLER_BORDER_COLOR + stageSamplerIndex;
+				break;
+			}
+			color[0] = reg->red.get_channelValue();
+			color[1] = reg->green.get_channelValue();
+			color[2] = reg->blue.get_channelValue();
+			color[3] = reg->alpha.get_channelValue();
+			break;
+		}
+		}
+		// compared as floats on purpose: -0.0 matches 0.0
+		bool colorChanged = false;
+		for (int c = 0; c < 4; c++)
+			colorChanged |= cache.borderColor[c] != color[c];
+		if (colorChanged)
+		{
+			bindOnce();
+			glTexParameterfv(target, GL_TEXTURE_BORDER_COLOR, color);
+			for (int c = 0; c < 4; c++)
+				cache.borderColor[c] = color[c];
+		}
+		cache.borderType = (uint8)borderType;
+	}
+	catchOpenGLError();
 }

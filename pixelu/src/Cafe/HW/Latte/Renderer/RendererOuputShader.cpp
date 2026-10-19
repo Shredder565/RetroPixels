@@ -1,22 +1,117 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/HW/Latte/Renderer/RendererOuputShader.h"
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
 #include "config/ActiveSettings.h"
 
-const std::string RendererOutputShader::s_copy_shader_source =
-R"(
+RendererOutputShader* RendererOutputShader::s_copy_shader;
+RendererOutputShader* RendererOutputShader::s_copy_shader_ud;
+RendererOutputShader* RendererOutputShader::s_bicubic_shader;
+RendererOutputShader* RendererOutputShader::s_bicubic_shader_ud;
+RendererOutputShader* RendererOutputShader::s_hermit_shader;
+RendererOutputShader* RendererOutputShader::s_hermit_shader_ud;
+
+namespace
+{
+	// ---- GLSL filters (OpenGL and Vulkan), appended to the preamble ----
+
+	// plain copy, alpha forced to 1
+	const char* const kGlslCopy = R"(
 void outputShader()
 {
-	colorOut0 = vec4(texture(textureSrc, passUV).rgb,1.0);
+	colorOut0 = vec4(texture(textureSrc, passUV).rgb, 1.0);
 }
 )";
 
-const std::string RendererOutputShader::s_copy_shader_source_mtl =
-R"(#include <metal_stdlib>
+	// Cubic B-spline reconstruction. The 4x4 footprint is folded into 2x2 bilinear fetches: each pair of
+	// taps is replaced by one fetch placed between the two texels according to their weight ratio.
+	const char* const kGlslBicubic = R"(
+vec4 bsplineWeights(float t)
+{
+	float t2 = t * t;
+	float t3 = t2 * t;
+	float s = 1.0 - t;
+	return vec4(s * s * s, 3.0 * t3 - 6.0 * t2 + 4.0, -3.0 * t3 + 3.0 * t2 + 3.0 * t + 1.0, t3) / 6.0;
+}
+
+vec3 sampleBSpline(vec2 uv, vec2 texSize)
+{
+	vec2 pos = uv * texSize - 0.5;
+	vec2 cell = floor(pos);
+	vec2 t = pos - cell;
+	vec4 wx = bsplineWeights(t.x);
+	vec4 wy = bsplineWeights(t.y);
+	// combined weights of the left/right (top/bottom) texel pairs
+	vec2 gx = vec2(wx.x + wx.y, wx.z + wx.w);
+	vec2 gy = vec2(wy.x + wy.y, wy.z + wy.w);
+	// fetch positions in texel units: between texels (cell-1, cell) and (cell+1, cell+2)
+	vec2 px = cell.x + vec2(-0.5 + wx.y / gx.x, 1.5 + wx.w / gx.y);
+	vec2 py = cell.y + vec2(-0.5 + wy.y / gy.x, 1.5 + wy.w / gy.y);
+	vec2 invSize = 1.0 / texSize;
+	vec4 c00 = texture(textureSrc, vec2(px.x, py.x) * invSize);
+	vec4 c10 = texture(textureSrc, vec2(px.y, py.x) * invSize);
+	vec4 c01 = texture(textureSrc, vec2(px.x, py.y) * invSize);
+	vec4 c11 = texture(textureSrc, vec2(px.y, py.y) * invSize);
+	float fx = gx.x / (gx.x + gx.y);
+	float fy = gy.x / (gy.x + gy.y);
+	vec4 rowTop = c00 * fx + c10 * (1.0 - fx);
+	vec4 rowBottom = c01 * fx + c11 * (1.0 - fx);
+	return (rowTop * fy + rowBottom * (1.0 - fy)).rgb;
+}
+
+void outputShader()
+{
+	colorOut0 = vec4(sampleBSpline(passUV, textureSrcResolution), 1.0);
+}
+)";
+
+	// Catmull-Rom (cubic Hermite) reconstruction with 16 point-sampled taps
+	const char* const kGlslHermite = R"(
+vec4 catmullRomWeights(float t)
+{
+	float t2 = t * t;
+	float t3 = t2 * t;
+	return vec4(-t3 + 2.0 * t2 - t, 3.0 * t3 - 5.0 * t2 + 2.0, -3.0 * t3 + 4.0 * t2 + t, t3 - t2) * 0.5;
+}
+
+vec3 hermiteRow(vec2 base, float dy, vec2 texel, vec4 w)
+{
+	vec3 a = texture(textureSrc, base + vec2(-texel.x, dy)).rgb;
+	vec3 b = texture(textureSrc, base + vec2(0.0, dy)).rgb;
+	vec3 c = texture(textureSrc, base + vec2(texel.x, dy)).rgb;
+	vec3 d = texture(textureSrc, base + vec2(2.0 * texel.x, dy)).rgb;
+	return a * w.x + b * w.y + c * w.z + d * w.w;
+}
+
+vec3 sampleHermite(vec2 uv, vec2 texSize)
+{
+	vec2 texel = 1.0 / texSize;
+	vec2 pos = uv * texSize + 0.5;
+	vec2 t = fract(pos);
+	// centre of the second texel of the 4x4 block
+	vec2 base = floor(pos) / texSize - texel * 0.5;
+	vec4 wx = catmullRomWeights(t.x);
+	vec4 wy = catmullRomWeights(t.y);
+	vec3 r0 = hermiteRow(base, -texel.y, texel, wx);
+	vec3 r1 = hermiteRow(base, 0.0, texel, wx);
+	vec3 r2 = hermiteRow(base, texel.y, texel, wx);
+	vec3 r3 = hermiteRow(base, 2.0 * texel.y, texel, wx);
+	return r0 * wy.x + r1 * wy.y + r2 * wy.z + r3 * wy.w;
+}
+
+void outputShader()
+{
+	colorOut0 = vec4(sampleHermite(passUV, textureSrcResolution), 1.0);
+}
+)";
+
+	// ---- Metal filters (complete fragment functions, the Metal backend binds no parameter block) ----
+
+	const char* const kMslCopy = R"(#include <metal_stdlib>
 using namespace metal;
 
 struct VertexOut {
-    float2 uv;
+	float2 uv;
 };
 
 fragment float4 main0(VertexOut in [[stage_in]], texture2d<float> textureSrc [[texture(0)]], sampler samplr [[sampler(0)]]) {
@@ -24,448 +119,181 @@ fragment float4 main0(VertexOut in [[stage_in]], texture2d<float> textureSrc [[t
 }
 )";
 
-const std::string RendererOutputShader::s_bicubic_shader_source =
-R"(
-vec4 cubic(float x)
-{
-	float x2 = x * x;
-	float x3 = x2 * x;
-	vec4 w;
-	w.x = -x3 + 3 * x2 - 3 * x + 1;
-	w.y = 3 * x3 - 6 * x2 + 4;
-	w.z = -3 * x3 + 3 * x2 + 3 * x + 1;
-	w.w = x3;
-	return w / 6.0;
-}
-
-vec4 bcFilter(vec2 uv, vec4 texelSize)
-{
-	vec2 pixel = uv*texelSize.zw - 0.5;
-	vec2 pixelFrac = fract(pixel);
-	vec2 pixelInt = pixel - pixelFrac;
-
-	vec4 xcubic = cubic(pixelFrac.x);
-	vec4 ycubic = cubic(pixelFrac.y);
-
-	vec4 c = vec4(pixelInt.x - 0.5, pixelInt.x + 1.5, pixelInt.y - 0.5, pixelInt.y + 1.5);
-	vec4 s = vec4(xcubic.x + xcubic.y, xcubic.z + xcubic.w, ycubic.x + ycubic.y, ycubic.z + ycubic.w);
-	vec4 offset = c + vec4(xcubic.y, xcubic.w, ycubic.y, ycubic.w) / s;
-
-	vec4 sample0 = texture(textureSrc, vec2(offset.x, offset.z) * texelSize.xy);
-	vec4 sample1 = texture(textureSrc, vec2(offset.y, offset.z) * texelSize.xy);
-	vec4 sample2 = texture(textureSrc, vec2(offset.x, offset.w) * texelSize.xy);
-	vec4 sample3 = texture(textureSrc, vec2(offset.y, offset.w) * texelSize.xy);
-
-	float sx = s.x / (s.x + s.y);
-	float sy = s.z / (s.z + s.w);
-
-	return mix(
-		mix(sample3, sample2, sx),
-		mix(sample1, sample0, sx), sy);
-}
-
-void outputShader(){
-	vec4 texelSize = vec4( 1.0 / textureSrcResolution.xy, textureSrcResolution.xy);
-	colorOut0 = vec4(bcFilter(passUV, texelSize).rgb,1.0);
-}
-)";
-
-const std::string RendererOutputShader::s_bicubic_shader_source_mtl =
-R"(#include <metal_stdlib>
+	// note: works on texel coordinates without the half texel shift of the GLSL variant
+	const char* const kMslBicubic = R"(#include <metal_stdlib>
 using namespace metal;
 
-float4 cubic(float x) {
-	float x2 = x * x;
-	float x3 = x2 * x;
-	float4 w;
-	w.x = -x3 + 3 * x2 - 3 * x + 1;
-	w.y = 3 * x3 - 6 * x2 + 4;
-	w.z = -3 * x3 + 3 * x2 + 3 * x + 1;
-	w.w = x3;
-	return w / 6.0;
-}
-
-float4 bcFilter(texture2d<float> textureSrc, sampler samplr, float2 texcoord, float2 texscale) {
-	float fx = fract(texcoord.x);
-	float fy = fract(texcoord.y);
-	texcoord.x -= fx;
-	texcoord.y -= fy;
-
-	float4 xcubic = cubic(fx);
-	float4 ycubic = cubic(fy);
-
-	float4 c = float4(texcoord.x - 0.5, texcoord.x + 1.5, texcoord.y - 0.5, texcoord.y + 1.5);
-	float4 s = float4(xcubic.x + xcubic.y, xcubic.z + xcubic.w, ycubic.x + ycubic.y, ycubic.z + ycubic.w);
-	float4 offset = c + float4(xcubic.y, xcubic.w, ycubic.y, ycubic.w) / s;
-
-	float4 sample0 = textureSrc.sample(samplr, float2(offset.x, offset.z) * texscale);
-	float4 sample1 = textureSrc.sample(samplr, float2(offset.y, offset.z) * texscale);
-	float4 sample2 = textureSrc.sample(samplr, float2(offset.x, offset.w) * texscale);
-	float4 sample3 = textureSrc.sample(samplr, float2(offset.y, offset.w) * texscale);
-
-	float sx = s.x / (s.x + s.y);
-	float sy = s.z / (s.z + s.w);
-
-	return mix(
-		mix(sample3, sample2, sx),
-		mix(sample1, sample0, sx), sy);
+float4 bsplineWeights(float t) {
+	float t2 = t * t;
+	float t3 = t2 * t;
+	float s = 1.0 - t;
+	return float4(s * s * s, 3.0 * t3 - 6.0 * t2 + 4.0, -3.0 * t3 + 3.0 * t2 + 3.0 * t + 1.0, t3) / 6.0;
 }
 
 struct VertexOut {
-    float2 uv;
+	float2 uv;
 };
 
 fragment float4 main0(VertexOut in [[stage_in]], texture2d<float> textureSrc [[texture(0)]], sampler samplr [[sampler(0)]]) {
-    float2 textureSrcResolution = float2(textureSrc.get_width(), textureSrc.get_height());
-	return float4(bcFilter(textureSrc, samplr, in.uv * textureSrcResolution, float2(1.0, 1.0) / textureSrcResolution).rgb, 1.0);
+	float2 texSize = float2(textureSrc.get_width(), textureSrc.get_height());
+	float2 pos = in.uv * texSize;
+	float2 cell = floor(pos);
+	float2 t = pos - cell;
+	float4 wx = bsplineWeights(t.x);
+	float4 wy = bsplineWeights(t.y);
+	float2 gx = float2(wx.x + wx.y, wx.z + wx.w);
+	float2 gy = float2(wy.x + wy.y, wy.z + wy.w);
+	float2 px = cell.x + float2(-0.5 + wx.y / gx.x, 1.5 + wx.w / gx.y);
+	float2 py = cell.y + float2(-0.5 + wy.y / gy.x, 1.5 + wy.w / gy.y);
+	float2 invSize = float2(1.0, 1.0) / texSize;
+	float4 c00 = textureSrc.sample(samplr, float2(px.x, py.x) * invSize);
+	float4 c10 = textureSrc.sample(samplr, float2(px.y, py.x) * invSize);
+	float4 c01 = textureSrc.sample(samplr, float2(px.x, py.y) * invSize);
+	float4 c11 = textureSrc.sample(samplr, float2(px.y, py.y) * invSize);
+	float fx = gx.x / (gx.x + gx.y);
+	float fy = gy.x / (gy.x + gy.y);
+	float4 rowTop = c00 * fx + c10 * (1.0 - fx);
+	float4 rowBottom = c01 * fx + c11 * (1.0 - fx);
+	return float4((rowTop * fy + rowBottom * (1.0 - fy)).rgb, 1.0);
 }
 )";
 
-const std::string RendererOutputShader::s_hermite_shader_source =
-R"(
-// https://www.shadertoy.com/view/MllSzX
-
-vec3 CubicHermite (vec3 A, vec3 B, vec3 C, vec3 D, float t)
-{
-	float t2 = t*t;
-    float t3 = t*t*t;
-    vec3 a = -A/2.0 + (3.0*B)/2.0 - (3.0*C)/2.0 + D/2.0;
-    vec3 b = A - (5.0*B)/2.0 + 2.0*C - D / 2.0;
-    vec3 c = -A/2.0 + C/2.0;
-   	vec3 d = B;
-
-    return a*t3 + b*t2 + c*t + d;
-}
-
-
-vec3 BicubicHermiteTexture(vec2 uv, vec4 texelSize)
-{
-	vec2 pixel = uv*texelSize.zw + 0.5;
-	vec2 frac = fract(pixel);
-    pixel = floor(pixel) / texelSize.zw - vec2(texelSize.xy/2.0);
-
-	vec4 doubleSize = texelSize*2.0;
-
-	vec3 C00 = texture(textureSrc, pixel + vec2(-texelSize.x ,-texelSize.y)).rgb;
-    vec3 C10 = texture(textureSrc, pixel + vec2( 0.0        ,-texelSize.y)).rgb;
-    vec3 C20 = texture(textureSrc, pixel + vec2( texelSize.x ,-texelSize.y)).rgb;
-    vec3 C30 = texture(textureSrc, pixel + vec2( doubleSize.x,-texelSize.y)).rgb;
-
-    vec3 C01 = texture(textureSrc, pixel + vec2(-texelSize.x , 0.0)).rgb;
-    vec3 C11 = texture(textureSrc, pixel + vec2( 0.0        , 0.0)).rgb;
-    vec3 C21 = texture(textureSrc, pixel + vec2( texelSize.x , 0.0)).rgb;
-    vec3 C31 = texture(textureSrc, pixel + vec2( doubleSize.x, 0.0)).rgb;
-
-    vec3 C02 = texture(textureSrc, pixel + vec2(-texelSize.x , texelSize.y)).rgb;
-    vec3 C12 = texture(textureSrc, pixel + vec2( 0.0        , texelSize.y)).rgb;
-    vec3 C22 = texture(textureSrc, pixel + vec2( texelSize.x , texelSize.y)).rgb;
-    vec3 C32 = texture(textureSrc, pixel + vec2( doubleSize.x, texelSize.y)).rgb;
-
-    vec3 C03 = texture(textureSrc, pixel + vec2(-texelSize.x , doubleSize.y)).rgb;
-    vec3 C13 = texture(textureSrc, pixel + vec2( 0.0        , doubleSize.y)).rgb;
-    vec3 C23 = texture(textureSrc, pixel + vec2( texelSize.x , doubleSize.y)).rgb;
-    vec3 C33 = texture(textureSrc, pixel + vec2( doubleSize.x, doubleSize.y)).rgb;
-
-    vec3 CP0X = CubicHermite(C00, C10, C20, C30, frac.x);
-    vec3 CP1X = CubicHermite(C01, C11, C21, C31, frac.x);
-    vec3 CP2X = CubicHermite(C02, C12, C22, C32, frac.x);
-    vec3 CP3X = CubicHermite(C03, C13, C23, C33, frac.x);
-
-    return CubicHermite(CP0X, CP1X, CP2X, CP3X, frac.y);
-}
-
-void outputShader(){
-	vec4 texelSize = vec4( 1.0 / textureSrcResolution.xy, textureSrcResolution.xy);
-	colorOut0 = vec4(BicubicHermiteTexture(passUV, texelSize), 1.0);
-}
-)";
-
-const std::string RendererOutputShader::s_hermite_shader_source_mtl =
-R"(#include <metal_stdlib>
+	// note: the Metal backend passes the output resolution as texel size basis, and the third/fourth taps sit at
+	// texel*texel offsets; kept as the Metal backend has always rendered it
+	const char* const kMslHermite = R"(#include <metal_stdlib>
 using namespace metal;
 
-// https://www.shadertoy.com/view/MllSzX
-
-float3 CubicHermite(float3 A, float3 B, float3 C, float3 D, float t) {
-	float t2 = t*t;
-    float t3 = t*t*t;
-    float3 a = -A/2.0 + (3.0*B)/2.0 - (3.0*C)/2.0 + D/2.0;
-    float3 b = A - (5.0*B)/2.0 + 2.0*C - D / 2.0;
-    float3 c = -A/2.0 + C/2.0;
-   	float3 d = B;
-
-    return a*t3 + b*t2 + c*t + d;
+float4 catmullRomWeights(float t) {
+	float t2 = t * t;
+	float t3 = t2 * t;
+	return float4(-t3 + 2.0 * t2 - t, 3.0 * t3 - 5.0 * t2 + 2.0, -3.0 * t3 + 4.0 * t2 + t, t3 - t2) * 0.5;
 }
 
-
-float3 BicubicHermiteTexture(texture2d<float> textureSrc, sampler samplr, float2 uv, float4 texelSize) {
-	float2 pixel = uv*texelSize.zw + 0.5;
-	float2 frac = fract(pixel);
-    pixel = floor(pixel) / texelSize.zw - float2(texelSize.xy/2.0);
-
-	float4 doubleSize = texelSize*texelSize;
-
-	float3 C00 = textureSrc.sample(samplr, pixel + float2(-texelSize.x ,-texelSize.y)).rgb;
-    float3 C10 = textureSrc.sample(samplr, pixel + float2( 0.0        ,-texelSize.y)).rgb;
-    float3 C20 = textureSrc.sample(samplr, pixel + float2( texelSize.x ,-texelSize.y)).rgb;
-    float3 C30 = textureSrc.sample(samplr, pixel + float2( doubleSize.x,-texelSize.y)).rgb;
-
-    float3 C01 = textureSrc.sample(samplr, pixel + float2(-texelSize.x , 0.0)).rgb;
-    float3 C11 = textureSrc.sample(samplr, pixel + float2( 0.0        , 0.0)).rgb;
-    float3 C21 = textureSrc.sample(samplr, pixel + float2( texelSize.x , 0.0)).rgb;
-    float3 C31 = textureSrc.sample(samplr, pixel + float2( doubleSize.x, 0.0)).rgb;
-
-    float3 C02 = textureSrc.sample(samplr, pixel + float2(-texelSize.x , texelSize.y)).rgb;
-    float3 C12 = textureSrc.sample(samplr, pixel + float2( 0.0        , texelSize.y)).rgb;
-    float3 C22 = textureSrc.sample(samplr, pixel + float2( texelSize.x , texelSize.y)).rgb;
-    float3 C32 = textureSrc.sample(samplr, pixel + float2( doubleSize.x, texelSize.y)).rgb;
-
-    float3 C03 = textureSrc.sample(samplr, pixel + float2(-texelSize.x , doubleSize.y)).rgb;
-    float3 C13 = textureSrc.sample(samplr, pixel + float2( 0.0        , doubleSize.y)).rgb;
-    float3 C23 = textureSrc.sample(samplr, pixel + float2( texelSize.x , doubleSize.y)).rgb;
-    float3 C33 = textureSrc.sample(samplr, pixel + float2( doubleSize.x, doubleSize.y)).rgb;
-
-    float3 CP0X = CubicHermite(C00, C10, C20, C30, frac.x);
-    float3 CP1X = CubicHermite(C01, C11, C21, C31, frac.x);
-    float3 CP2X = CubicHermite(C02, C12, C22, C32, frac.x);
-    float3 CP3X = CubicHermite(C03, C13, C23, C33, frac.x);
-
-    return CubicHermite(CP0X, CP1X, CP2X, CP3X, frac.y);
+float3 hermiteRow(texture2d<float> tex, sampler s, float2 base, float dy, float2 texel, float farX, float4 w) {
+	float3 a = tex.sample(s, base + float2(-texel.x, dy)).rgb;
+	float3 b = tex.sample(s, base + float2(0.0, dy)).rgb;
+	float3 c = tex.sample(s, base + float2(texel.x, dy)).rgb;
+	float3 d = tex.sample(s, base + float2(farX, dy)).rgb;
+	return a * w.x + b * w.y + c * w.z + d * w.w;
 }
 
 struct VertexOut {
-    float4 position [[position]];
-    float2 uv;
+	float4 position [[position]];
+	float2 uv;
 };
 
 fragment float4 main0(VertexOut in [[stage_in]], texture2d<float> textureSrc [[texture(0)]], sampler samplr [[sampler(0)]], constant float2& outputResolution [[buffer(0)]]) {
-	float4 texelSize = float4(1.0 / outputResolution.xy, outputResolution.xy);
-	return float4(BicubicHermiteTexture(textureSrc, samplr, in.uv, texelSize), 1.0);
+	float2 texSize = outputResolution;
+	float2 texel = float2(1.0, 1.0) / texSize;
+	float2 far = texel * texel;
+	float2 pos = in.uv * texSize + 0.5;
+	float2 t = fract(pos);
+	float2 base = floor(pos) / texSize - texel * 0.5;
+	float4 wx = catmullRomWeights(t.x);
+	float4 wy = catmullRomWeights(t.y);
+	float3 r0 = hermiteRow(textureSrc, samplr, base, -texel.y, texel, far.x, wx);
+	float3 r1 = hermiteRow(textureSrc, samplr, base, 0.0, texel, far.x, wx);
+	float3 r2 = hermiteRow(textureSrc, samplr, base, texel.y, texel, far.x, wx);
+	float3 r3 = hermiteRow(textureSrc, samplr, base, far.y, texel, far.x, wx);
+	return float4(r0 * wy.x + r1 * wy.y + r2 * wy.z + r3 * wy.w, 1.0);
 }
 )";
 
-RendererOutputShader::RendererOutputShader(const std::string& vertex_source, const std::string& fragment_source)
-{
-    std::string finalFragmentSrc;
-	switch(g_renderer->GetType())
+	// The quad is drawn as two triangles (6 vertices, no vertex buffer). Corner order:
+	// (1,1) (-1,1) (-1,-1) (-1,-1) (1,-1) (1,1); UVs follow the position, flipped vertically when upside down.
+	std::string BuildQuadVertexShader(const char* versionLine, const char* outDecl, const char* vertexIdName, bool upsideDown)
 	{
-#ifdef ENABLE_METAL
-	case RendererAPI::Metal:
-		finalFragmentSrc = fragment_source;
-		break;
-#endif
-	default:
-		finalFragmentSrc = PrependFragmentPreamble(fragment_source);
-		break;
-	}
-
-	m_vertex_shader.reset(g_renderer->shader_create(RendererShader::ShaderType::kVertex, 0, 0, vertex_source, false, false));
-	m_fragment_shader.reset(g_renderer->shader_create(RendererShader::ShaderType::kFragment, 0, 0, finalFragmentSrc, false, false));
-
-	m_vertex_shader->PreponeCompilation(true);
-	m_fragment_shader->PreponeCompilation(true);
-
-	if (!m_vertex_shader->WaitForCompiled())
-		throw std::exception();
-
-	if(!m_fragment_shader->WaitForCompiled())
-		throw std::exception();
-
-}
-
-RendererOutputShader::OutputUniformVariables RendererOutputShader::FillUniformBlockBuffer(const LatteTextureView& texture_view, const Vector2i& output_res, const bool padView) const
+		std::string src;
+		src.reserve(640);
+		src += versionLine;
+		src += "\n";
+		src += outDecl;
+		src += R"(
+out gl_PerVertex
 {
-	OutputUniformVariables vars;
+	vec4 gl_Position;
+};
 
-	sint32 effectiveWidth, effectiveHeight;
-	texture_view.baseTexture->GetEffectiveSize(effectiveWidth, effectiveHeight, 0);
-	vars.textureSrcResolution = {(float)effectiveWidth, (float)effectiveHeight};
+const vec2 quadCorners[6] = vec2[6](vec2(1.0, 1.0), vec2(-1.0, 1.0), vec2(-1.0, -1.0), vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(1.0, 1.0));
 
-	vars.nativeResolution = {(float)texture_view.baseTexture->width, (float)texture_view.baseTexture->height};
-	vars.outputResolution = output_res;
-
-	vars.applySRGBEncoding = padView ? LatteGPUState.drcBufferUsesSRGB : LatteGPUState.tvBufferUsesSRGB;
-	vars.targetGamma = padView ? ActiveSettings::GetDRCGamma() : ActiveSettings::GetTVGamma();
-	vars.displayGamma = GetConfig().userDisplayGamma;
-
-	return vars;
+void main()
+{
+	vec2 corner = quadCorners[)";
+		src += vertexIdName;
+		src += R"(];
+	passUV = vec2(corner.x * 0.5 + 0.5, )";
+		src += upsideDown ? "0.5 - corner.y * 0.5" : "corner.y * 0.5 + 0.5";
+		src += R"();
+	gl_Position = vec4(corner, 0.0, 1.0);
 }
-
-RendererOutputShader* RendererOutputShader::s_copy_shader;
-RendererOutputShader* RendererOutputShader::s_copy_shader_ud;
-
-RendererOutputShader* RendererOutputShader::s_bicubic_shader;
-RendererOutputShader* RendererOutputShader::s_bicubic_shader_ud;
-
-RendererOutputShader* RendererOutputShader::s_hermit_shader;
-RendererOutputShader* RendererOutputShader::s_hermit_shader_ud;
+)";
+		return src;
+	}
+}
 
 std::string RendererOutputShader::GetOpenGlVertexSource(bool render_upside_down)
 {
-	// vertex shader
-	std::ostringstream vertex_source;
-		vertex_source <<
-			R"(#version 420
-layout(location = 0) smooth out vec2 passUV;
-
-out gl_PerVertex
-{
-   vec4 gl_Position;
-};
-
-void main(){
-	vec2 vPos;
-	vec2 vUV;
-	int vID = gl_VertexID;
-)";
-
-		if (render_upside_down)
-		{
-			vertex_source <<
-				R"(	if( vID == 0 ) { vPos = vec2(1.0,1.0); vUV = vec2(1.0,0.0); }
-	else if( vID == 1 ) { vPos = vec2(-1.0,1.0); vUV = vec2(0.0,0.0); }
-	else if( vID == 2 ) { vPos = vec2(-1.0,-1.0); vUV = vec2(0.0,1.0); }
-	else if( vID == 3 ) { vPos = vec2(-1.0,-1.0); vUV = vec2(0.0,1.0); }
-	else if( vID == 4 ) { vPos = vec2(1.0,-1.0); vUV = vec2(1.0,1.0); }
-	else if( vID == 5 ) { vPos = vec2(1.0,1.0); vUV = vec2(1.0,0.0); }
-	)";
-		}
-		else
-		{
-			vertex_source <<
-				R"(	if( vID == 0 ) { vPos = vec2(1.0,1.0); vUV = vec2(1.0,1.0); }
-	else if( vID == 1 ) { vPos = vec2(-1.0,1.0); vUV = vec2(0.0,1.0); }
-	else if( vID == 2 ) { vPos = vec2(-1.0,-1.0); vUV = vec2(0.0,0.0); }
-	else if( vID == 3 ) { vPos = vec2(-1.0,-1.0); vUV = vec2(0.0,0.0); }
-	else if( vID == 4 ) { vPos = vec2(1.0,-1.0); vUV = vec2(1.0,0.0); }
-	else if( vID == 5 ) { vPos = vec2(1.0,1.0); vUV = vec2(1.0,1.0); }
-	)";
-		}
-
-		vertex_source <<
-			R"(	passUV = vUV;
-	gl_Position = vec4(vPos, 0.0, 1.0);
-}
-)";
-		return vertex_source.str();
+	return BuildQuadVertexShader("#version 420", "layout(location = 0) smooth out vec2 passUV;", "gl_VertexID", render_upside_down);
 }
 
 std::string RendererOutputShader::GetVulkanVertexSource(bool render_upside_down)
 {
-	// vertex shader
-	std::ostringstream vertex_source;
-		vertex_source <<
-			R"(#version 450
-layout(location = 0) out vec2 passUV;
-
-out gl_PerVertex
-{
-   vec4 gl_Position;
-};
-
-void main(){
-	vec2 vPos;
-	vec2 vUV;
-	int vID = gl_VertexIndex;
-)";
-
-		if (render_upside_down)
-		{
-			vertex_source <<
-				R"(	if( vID == 0 ) { vPos = vec2(1.0,1.0); vUV = vec2(1.0,0.0); }
-	else if( vID == 1 ) { vPos = vec2(-1.0,1.0); vUV = vec2(0.0,0.0); }
-	else if( vID == 2 ) { vPos = vec2(-1.0,-1.0); vUV = vec2(0.0,1.0); }
-	else if( vID == 3 ) { vPos = vec2(-1.0,-1.0); vUV = vec2(0.0,1.0); }
-	else if( vID == 4 ) { vPos = vec2(1.0,-1.0); vUV = vec2(1.0,1.0); }
-	else if( vID == 5 ) { vPos = vec2(1.0,1.0); vUV = vec2(1.0,0.0); }
-	)";
-		}
-		else
-		{
-			vertex_source <<
-				R"(	if( vID == 0 ) { vPos = vec2(1.0,1.0); vUV = vec2(1.0,1.0); }
-	else if( vID == 1 ) { vPos = vec2(-1.0,1.0); vUV = vec2(0.0,1.0); }
-	else if( vID == 2 ) { vPos = vec2(-1.0,-1.0); vUV = vec2(0.0,0.0); }
-	else if( vID == 3 ) { vPos = vec2(-1.0,-1.0); vUV = vec2(0.0,0.0); }
-	else if( vID == 4 ) { vPos = vec2(1.0,-1.0); vUV = vec2(1.0,0.0); }
-	else if( vID == 5 ) { vPos = vec2(1.0,1.0); vUV = vec2(1.0,1.0); }
-	)";
-		}
-
-		vertex_source <<
-			R"(	passUV = vUV;
-	gl_Position = vec4(vPos, 0.0, 1.0);
-}
-)";
-		return vertex_source.str();
+	return BuildQuadVertexShader("#version 450", "layout(location = 0) out vec2 passUV;", "gl_VertexIndex", render_upside_down);
 }
 
 std::string RendererOutputShader::GetMetalVertexSource(bool render_upside_down)
 {
-	// vertex shader
-	std::ostringstream vertex_source;
-		vertex_source <<
-			R"(#include <metal_stdlib>
+	// one oversized triangle that covers the viewport
+	std::string src = R"(#include <metal_stdlib>
 using namespace metal;
 
 struct VertexOut {
-    float4 position [[position]];
-    float2 uv;
+	float4 position [[position]];
+	float2 uv;
 };
 
 vertex VertexOut main0(ushort vid [[vertex_id]]) {
+	const float2 corners[3] = { float2(-1.0, -3.0), float2(-1.0, 1.0), float2(3.0, 1.0) };
+	float2 pos = corners[vid];
 	VertexOut out;
-	float2 pos;
-	if (vid == 0) pos = float2(-1.0, -3.0);
-	else if (vid == 1) pos = float2(-1.0, 1.0);
-	else if (vid == 2) pos = float2(3.0, 1.0);
-	out.uv = pos * 0.5 + 0.5;
-	out.uv.y = 1.0 - out.uv.y;
+	out.uv = float2(pos.x * 0.5 + 0.5, 0.5 - pos.y * 0.5);
 )";
-
-		if (render_upside_down)
-		{
-			vertex_source <<
-				R"(	pos.y = -pos.y;
-	)";
-		}
-
-		vertex_source <<
-			R"(	out.position = float4(pos, 0.0, 1.0);
+	if (render_upside_down)
+		src += "\tpos.y = -pos.y;\n";
+	src += R"(	out.position = float4(pos, 0.0, 1.0);
 	return out;
 }
 )";
-		return vertex_source.str();
+	return src;
 }
 
+// Declarations shared by the built-in filters and graphic pack output shaders. The names (passUV, textureSrc,
+// colorOut0, the members of "parameters", sRGBEncode, outputShader) are what graphic packs are written against.
 std::string RendererOutputShader::PrependFragmentPreamble(const std::string& shaderSrc)
 {
-	return R"(#version 430
+	static const char* const kPreamble = R"(#version 430
 layout(location = 0) smooth in vec2 passUV;
 layout(binding = 0) uniform sampler2D textureSrc;
 layout(location = 0) out vec4 colorOut0;
 
 #ifdef VULKAN
-layout (binding = 1, std140)
+layout(binding = 1, std140)
 #else
-layout (binding = 0, std140)
+layout(binding = 0, std140)
 #endif
-uniform parameters {
-uniform vec2 textureSrcResolution;
-uniform vec2 nativeResolution;
-uniform vec2 outputResolution;
-uniform bool applySRGBEncoding;
-uniform float targetGamma;
-uniform float displayGamma;
+uniform parameters
+{
+	vec2 textureSrcResolution;
+	vec2 nativeResolution;
+	vec2 outputResolution;
+	bool applySRGBEncoding;
+	float targetGamma;
+	float displayGamma;
 };
 
 float sRGBEncode(float linear)
 {
-	if(linear <= 0.0031308)
-		return 12.92f * linear;
-	else
-		return 1.055f * pow(linear, 1.0f / 2.4f) - 0.055f;
-
+	return linear <= 0.0031308 ? 12.92 * linear : 1.055 * pow(linear, 1.0 / 2.4) - 0.055;
 }
 
 vec3 sRGBEncode(vec3 linear)
@@ -473,93 +301,105 @@ vec3 sRGBEncode(vec3 linear)
 	return vec3(sRGBEncode(linear.r), sRGBEncode(linear.g), sRGBEncode(linear.b));
 }
 
-// fwd. declaration
 void outputShader();
+
 void main()
 {
-	outputShader(); // sets colorOut0
-	if(applySRGBEncoding)
-		colorOut0 = vec4(sRGBEncode(colorOut0.rgb), 1.0f);
-
-	if (displayGamma > 0.0f)
-		colorOut0 = pow(colorOut0, vec4(targetGamma / displayGamma) );
+	outputShader();
+	if (applySRGBEncoding)
+		colorOut0 = vec4(sRGBEncode(colorOut0.rgb), 1.0);
+	if (displayGamma > 0.0)
+		colorOut0 = pow(colorOut0, vec4(targetGamma / displayGamma));
 	else
-		colorOut0 = vec4( sRGBEncode( pow(colorOut0.rgb, vec3(targetGamma)) ), 1.0f);
-
+		colorOut0 = vec4(sRGBEncode(pow(colorOut0.rgb, vec3(targetGamma))), 1.0);
 }
 
-)" + shaderSrc;
+)";
+	return kPreamble + shaderSrc;
 }
+
+RendererOutputShader::RendererOutputShader(const std::string& vertex_source, const std::string& fragment_source)
+{
+	// Metal shaders are complete programs, the GLSL ones get the shared declarations
+	bool usePreamble = true;
+#ifdef ENABLE_METAL
+	if (g_renderer->GetType() == RendererAPI::Metal)
+		usePreamble = false;
+#endif
+	const std::string fragmentCode = usePreamble ? PrependFragmentPreamble(fragment_source) : fragment_source;
+
+	m_vertex_shader.reset(g_renderer->shader_create(RendererShader::ShaderType::kVertex, 0, 0, vertex_source, false, false));
+	m_fragment_shader.reset(g_renderer->shader_create(RendererShader::ShaderType::kFragment, 0, 0, fragmentCode, false, false));
+	m_vertex_shader->PreponeCompilation(true);
+	m_fragment_shader->PreponeCompilation(true);
+	if (!m_vertex_shader->WaitForCompiled() || !m_fragment_shader->WaitForCompiled())
+		throw std::exception();
+}
+
+RendererOutputShader::OutputUniformVariables RendererOutputShader::FillUniformBlockBuffer(const LatteTextureView& texture_view, const Vector2i& output_res, const bool padView) const
+{
+	OutputUniformVariables vars;
+	sint32 scaledWidth, scaledHeight;
+	texture_view.baseTexture->GetEffectiveSize(scaledWidth, scaledHeight, 0);
+	vars.textureSrcResolution = Vector2f((float)scaledWidth, (float)scaledHeight);
+	vars.nativeResolution = Vector2f((float)texture_view.baseTexture->width, (float)texture_view.baseTexture->height);
+	vars.outputResolution = output_res;
+	if (padView)
+	{
+		vars.applySRGBEncoding = LatteGPUState.drcBufferUsesSRGB;
+		vars.targetGamma = ActiveSettings::GetDRCGamma();
+	}
+	else
+	{
+		vars.applySRGBEncoding = LatteGPUState.tvBufferUsesSRGB;
+		vars.targetGamma = ActiveSettings::GetTVGamma();
+	}
+	vars.displayGamma = GetConfig().userDisplayGamma;
+	return vars;
+}
+
 void RendererOutputShader::InitializeStatic()
 {
-	switch(g_renderer->GetType())
+	const char* copySrc = kGlslCopy;
+	const char* bicubicSrc = kGlslBicubic;
+	const char* hermiteSrc = kGlslHermite;
+	std::string vs, vsUpsideDown;
+	switch (g_renderer->GetType())
 	{
 #ifdef ENABLE_METAL
-    case RendererAPI::Metal:
-    {
-        std::string vertex_source = GetMetalVertexSource(false);
-        std::string vertex_source_ud = GetMetalVertexSource(true);
-
-       	s_copy_shader = new RendererOutputShader(vertex_source, s_copy_shader_source_mtl);
-       	s_copy_shader_ud = new RendererOutputShader(vertex_source_ud, s_copy_shader_source_mtl);
-
-       	s_bicubic_shader = new RendererOutputShader(vertex_source, s_bicubic_shader_source_mtl);
-       	s_bicubic_shader_ud = new RendererOutputShader(vertex_source_ud, s_bicubic_shader_source_mtl);
-
-       	s_hermit_shader = new RendererOutputShader(vertex_source, s_hermite_shader_source_mtl);
-       	s_hermit_shader_ud = new RendererOutputShader(vertex_source_ud, s_hermite_shader_source_mtl);
+	case RendererAPI::Metal:
+		vs = GetMetalVertexSource(false);
+		vsUpsideDown = GetMetalVertexSource(true);
+		copySrc = kMslCopy;
+		bicubicSrc = kMslBicubic;
+		hermiteSrc = kMslHermite;
 		break;
-    }
 #endif
 #ifdef ENABLE_OPENGL
-    case RendererAPI::OpenGL:
-    {
-    	std::string vertex_source, vertex_source_ud;
-    	// vertex shader
-		vertex_source = GetOpenGlVertexSource(false);
-		vertex_source_ud = GetOpenGlVertexSource(true);
-
-    	s_copy_shader = new RendererOutputShader(vertex_source, s_copy_shader_source);
-    	s_copy_shader_ud = new RendererOutputShader(vertex_source_ud, s_copy_shader_source);
-
-    	s_bicubic_shader = new RendererOutputShader(vertex_source, s_bicubic_shader_source);
-    	s_bicubic_shader_ud = new RendererOutputShader(vertex_source_ud, s_bicubic_shader_source);
-
-    	s_hermit_shader = new RendererOutputShader(vertex_source, s_hermite_shader_source);
-    	s_hermit_shader_ud = new RendererOutputShader(vertex_source_ud, s_hermite_shader_source);
+	case RendererAPI::OpenGL:
+		vs = GetOpenGlVertexSource(false);
+		vsUpsideDown = GetOpenGlVertexSource(true);
 		break;
-    }
 #endif
 #ifdef ENABLE_VULKAN
-    case RendererAPI::Vulkan:
-    {
-    	std::string vertex_source, vertex_source_ud;
-    	// vertex shader
-		vertex_source = GetVulkanVertexSource(false);
-		vertex_source_ud = GetVulkanVertexSource(true);
-			
-    	s_copy_shader = new RendererOutputShader(vertex_source, s_copy_shader_source);
-    	s_copy_shader_ud = new RendererOutputShader(vertex_source_ud, s_copy_shader_source);
-
-    	s_bicubic_shader = new RendererOutputShader(vertex_source, s_bicubic_shader_source);
-    	s_bicubic_shader_ud = new RendererOutputShader(vertex_source_ud, s_bicubic_shader_source);
-
-    	s_hermit_shader = new RendererOutputShader(vertex_source, s_hermite_shader_source);
-    	s_hermit_shader_ud = new RendererOutputShader(vertex_source_ud, s_hermite_shader_source);
+	case RendererAPI::Vulkan:
+		vs = GetVulkanVertexSource(false);
+		vsUpsideDown = GetVulkanVertexSource(true);
 		break;
-    }
 #endif
+	default:
+		return;
 	}
+	s_copy_shader = new RendererOutputShader(vs, copySrc);
+	s_copy_shader_ud = new RendererOutputShader(vsUpsideDown, copySrc);
+	s_bicubic_shader = new RendererOutputShader(vs, bicubicSrc);
+	s_bicubic_shader_ud = new RendererOutputShader(vsUpsideDown, bicubicSrc);
+	s_hermit_shader = new RendererOutputShader(vs, hermiteSrc);
+	s_hermit_shader_ud = new RendererOutputShader(vsUpsideDown, hermiteSrc);
 }
 
 void RendererOutputShader::ShutdownStatic()
 {
-	delete s_copy_shader;
-	delete s_copy_shader_ud;
-
-	delete s_bicubic_shader;
-	delete s_bicubic_shader_ud;
-
-	delete s_hermit_shader;
-	delete s_hermit_shader_ud;
+	for (RendererOutputShader* shader : {s_copy_shader, s_copy_shader_ud, s_bicubic_shader, s_bicubic_shader_ud, s_hermit_shader, s_hermit_shader_ud})
+		delete shader;
 }

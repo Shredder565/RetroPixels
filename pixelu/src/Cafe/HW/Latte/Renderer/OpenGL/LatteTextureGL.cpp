@@ -1,32 +1,201 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/HW/Latte/Renderer/OpenGL/LatteTextureGL.h"
 #include "Cafe/HW/Latte/Renderer/OpenGL/LatteTextureViewGL.h"
 #include "Cafe/HW/Latte/Renderer/OpenGL/OpenGLRenderer.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
-
 #include "config/LaunchSettings.h"
+
+using SurfFmt = Latte::E_GX2SURFFMT;
+
+namespace
+{
+	enum FormatFlags : uint8
+	{
+		kPlain = 0,
+		kCompressed = 1 << 0, // block compressed, uploaded with glCompressedTex*
+		kAlternative = 1 << 1, // the GL format is not a bit exact match
+	};
+
+	struct FormatMapping
+	{
+		SurfFmt format;
+		GLenum internalFormat;
+		GLint suppliedFormat;
+		GLint suppliedType;
+		uint8 flags;
+	};
+
+	// colour formats; BC4 and the S3TC fallback depend on runtime conditions and are handled in code
+	constexpr FormatMapping kColorFormats[] =
+	{
+		// 8 bit per channel
+		{ SurfFmt::R8_UNORM, GL_R8, GL_RED, GL_UNSIGNED_BYTE, kPlain },
+		{ SurfFmt::R8_SNORM, GL_R8_SNORM, GL_RED, GL_BYTE, kPlain },
+		{ SurfFmt::R8_UINT, GL_R8UI, GL_RED_INTEGER, GL_UNSIGNED_BYTE, kPlain },
+		{ SurfFmt::R8_G8_UNORM, GL_RG8, GL_RG, GL_UNSIGNED_BYTE, kPlain },
+		{ SurfFmt::R8_G8_SNORM, GL_RG8_SNORM, GL_RG, GL_BYTE, kPlain },
+		{ SurfFmt::R8_G8_B8_A8_UNORM, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, kPlain },
+		{ SurfFmt::R8_G8_B8_A8_SRGB, GL_SRGB8_ALPHA8, GL_RGBA, GL_UNSIGNED_BYTE, kPlain },
+		{ SurfFmt::R8_G8_B8_A8_SNORM, GL_RGBA8_SNORM, GL_RGBA, GL_BYTE, kPlain },
+		{ SurfFmt::R8_G8_B8_A8_UINT, GL_RGBA8UI, GL_RGBA_INTEGER, GL_UNSIGNED_BYTE, kPlain },
+		// 16 bit per channel
+		{ SurfFmt::R16_UNORM, GL_R16, GL_RED, GL_UNSIGNED_SHORT, kPlain },
+		{ SurfFmt::R16_SNORM, GL_R16_SNORM, GL_RED, GL_SHORT, kPlain },
+		{ SurfFmt::R16_FLOAT, GL_R16F, GL_RED, GL_HALF_FLOAT, kPlain },
+		{ SurfFmt::R16_UINT, GL_R16UI, GL_RED_INTEGER, GL_UNSIGNED_SHORT, kPlain },
+		{ SurfFmt::R16_G16_UNORM, GL_RG16, GL_RG, GL_UNSIGNED_SHORT, kPlain },
+		{ SurfFmt::R16_G16_FLOAT, GL_RG16F, GL_RG, GL_HALF_FLOAT, kPlain },
+		{ SurfFmt::R16_G16_B16_A16_UNORM, GL_RGBA16, GL_RGBA, GL_UNSIGNED_SHORT, kPlain },
+		{ SurfFmt::R16_G16_B16_A16_SNORM, GL_RGBA16_SNORM, GL_RGBA, GL_SHORT, kPlain },
+		{ SurfFmt::R16_G16_B16_A16_FLOAT, GL_RGBA16F, GL_RGBA, GL_HALF_FLOAT, kPlain },
+		{ SurfFmt::R16_G16_B16_A16_UINT, GL_RGBA16UI, GL_RGBA_INTEGER, GL_UNSIGNED_SHORT, kPlain },
+		// 32 bit per channel
+		{ SurfFmt::R32_FLOAT, GL_R32F, GL_RED, GL_FLOAT, kPlain },
+		{ SurfFmt::R32_UINT, GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, kPlain },
+		{ SurfFmt::R32_G32_FLOAT, GL_RG32F, GL_RG, GL_FLOAT, kPlain },
+		{ SurfFmt::R32_G32_UINT, GL_RG32UI, GL_RG_INTEGER, GL_UNSIGNED_INT, kPlain },
+		{ SurfFmt::R32_G32_B32_A32_FLOAT, GL_RGBA32F, GL_RGBA, GL_FLOAT, kPlain },
+		{ SurfFmt::R32_G32_B32_A32_UINT, GL_RGBA32UI, GL_RGBA_INTEGER, GL_UNSIGNED_INT, kPlain },
+		{ SurfFmt::R32_G32_B32_A32_SINT, GL_RGBA32I, GL_RGBA_INTEGER, GL_INT, kPlain },
+		// packed
+		{ SurfFmt::R4_G4_UNORM, GL_RGBA4, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, kAlternative },
+		{ SurfFmt::R4_G4_B4_A4_UNORM, GL_RGBA4, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4, kPlain },
+		{ SurfFmt::R5_G6_B5_UNORM, GL_RGB565, GL_RGB, GL_UNSIGNED_SHORT_5_6_5_REV, kPlain },
+		{ SurfFmt::R5_G5_B5_A1_UNORM, GL_RGB5_A1, GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, kPlain },
+		{ SurfFmt::A1_B5_G5_R5_UNORM, GL_RGB5_A1, GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1, kPlain },
+		{ SurfFmt::R10_G10_B10_A2_UNORM, GL_RGB10_A2, GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, kPlain },
+		{ SurfFmt::R10_G10_B10_A2_SRGB, GL_RGB10_A2, GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV, kPlain }, // no sRGB variant in GL
+		{ SurfFmt::A2_B10_G10_R10_UNORM, GL_RGB10_A2, GL_RGBA, GL_UNSIGNED_INT_10_10_10_2, kPlain },
+		{ SurfFmt::R10_G10_B10_A2_SNORM, GL_RGBA16_SNORM, GL_RGBA, GL_SHORT, kAlternative }, // GL has no signed 10:10:10:2
+		{ SurfFmt::R11_G11_B10_FLOAT, GL_R11F_G11F_B10F, GL_RGB, GL_UNSIGNED_INT_10F_11F_11F_REV, kPlain },
+		// depth-like colour formats
+		{ SurfFmt::R24_X8_UNORM, GL_R32F, GL_RED, GL_FLOAT, kAlternative }, // stored as float
+		{ SurfFmt::X24_G8_UINT, GL_RGBA8UI, GL_RGBA, GL_FLOAT, kAlternative }, // stencil in alpha, see the swizzle fix up
+		// block compressed (no supplied format)
+		{ SurfFmt::BC1_UNORM, GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, -1, -1, kCompressed },
+		{ SurfFmt::BC1_SRGB, GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT, -1, -1, kCompressed },
+		{ SurfFmt::BC2_UNORM, GL_COMPRESSED_RGBA_S3TC_DXT3_EXT, -1, -1, kCompressed },
+		{ SurfFmt::BC2_SRGB, GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT, -1, -1, kCompressed },
+		{ SurfFmt::BC3_UNORM, GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, -1, -1, kCompressed },
+		{ SurfFmt::BC3_SRGB, GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT, -1, -1, kCompressed },
+		{ SurfFmt::BC5_UNORM, GL_COMPRESSED_RG_RGTC2, -1, -1, kCompressed },
+		{ SurfFmt::BC5_SNORM, GL_COMPRESSED_SIGNED_RG_RGTC2, -1, -1, kCompressed },
+	};
+
+	constexpr FormatMapping kDepthFormats[] =
+	{
+		{ SurfFmt::D16_UNORM, GL_DEPTH_COMPONENT16, GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT, kPlain },
+		{ SurfFmt::D24_S8_UNORM, GL_DEPTH24_STENCIL8, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, kPlain },
+		{ SurfFmt::D24_S8_FLOAT, GL_DEPTH32F_STENCIL8, GL_DEPTH_STENCIL, GL_FLOAT_32_UNSIGNED_INT_24_8_REV, kAlternative },
+		{ SurfFmt::D32_FLOAT, GL_DEPTH_COMPONENT32F, GL_DEPTH_COMPONENT, GL_FLOAT, kPlain },
+		{ SurfFmt::D32_S8_FLOAT, GL_DEPTH32F_STENCIL8, GL_DEPTH_STENCIL, GL_FLOAT_32_UNSIGNED_INT_24_8_REV, kPlain },
+	};
+
+	template<size_t N>
+	const FormatMapping* FindMapping(const FormatMapping (&table)[N], SurfFmt format)
+	{
+		for (const FormatMapping& entry : table)
+		{
+			if (entry.format == format)
+				return &entry;
+		}
+		return nullptr;
+	}
+
+	void ApplyMapping(const FormatMapping& entry, LatteTextureGL::FormatInfoGL* out)
+	{
+		if (entry.flags & kCompressed)
+			out->setCompressed(entry.internalFormat, entry.suppliedFormat, entry.suppliedType);
+		else
+			out->setFormat(entry.internalFormat, entry.suppliedFormat, entry.suppliedType);
+		out->isUsingAlternativeFormat = (entry.flags & kAlternative) != 0;
+	}
+
+	bool UseGLDebugNames()
+	{
+#ifdef CEMU_DEBUG_ASSERT
+		return true;
+#else
+		return LaunchSettings::NSightModeEnabled();
+#endif
+	}
+}
+
+void LatteTextureGL::GetOpenGLFormatInfo(bool isDepth, Latte::E_GX2SURFFMT format, Latte::E_DIM dim, FormatInfoGL* formatInfoOut)
+{
+	formatInfoOut->isUsingAlternativeFormat = false;
+	if (isDepth)
+	{
+		if (const FormatMapping* entry = FindMapping(kDepthFormats, format))
+		{
+			ApplyMapping(*entry, formatInfoOut);
+			return;
+		}
+		cemuLog_log(LogType::Force, "OpenGL: Unsupported texture depth format 0x{:04x}", (uint32)format);
+		formatInfoOut->setFormat(GL_DEPTH_COMPONENT16, GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT);
+		formatInfoOut->markAsAlternativeFormat();
+		return;
+	}
+
+	// without S3TC support BC1-3 are decoded on the CPU to RGBA (float data), sRGB is then handled by the sampler
+	const Latte::E_HWFMT hwFormat = Latte::GetHWFormat(format);
+	if (hwFormat == Latte::E_HWFMT::HWFMT_BC1 || hwFormat == Latte::E_HWFMT::HWFMT_BC2 || hwFormat == Latte::E_HWFMT::HWFMT_BC3)
+	{
+		const bool srgb = HAS_FLAG(format, Latte::E_GX2SURFFMT::FMT_BIT_SRGB);
+		if (!OpenGLRenderer::GetInstance()->SupportsS3TC(srgb))
+		{
+			formatInfoOut->setFormat(srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8, GL_RGBA, GL_FLOAT);
+			formatInfoOut->markAsAlternativeFormat();
+			return;
+		}
+	}
+
+	// RGTC1 is limited to 2D textures, other dimensions use a decoded two channel float texture
+	if (format == SurfFmt::BC4_UNORM || format == SurfFmt::BC4_SNORM)
+	{
+		if (dim == Latte::E_DIM::DIM_2D || dim == Latte::E_DIM::DIM_2D_ARRAY)
+		{
+			formatInfoOut->setCompressed(format == SurfFmt::BC4_UNORM ? GL_COMPRESSED_RED_RGTC1 : GL_COMPRESSED_SIGNED_RED_RGTC1, -1, -1);
+			return;
+		}
+		formatInfoOut->setFormat(GL_RG16F, GL_RG, GL_FLOAT);
+		formatInfoOut->markAsAlternativeFormat();
+		return;
+	}
+
+	if (format == SurfFmt::R32_X8_FLOAT)
+	{
+		// only exists as a depth format in GL (Cars 3)
+		formatInfoOut->setFormat(GL_DEPTH32F_STENCIL8, GL_DEPTH_STENCIL, GL_FLOAT_32_UNSIGNED_INT_24_8_REV);
+		cemu_assert_debug(false);
+		return;
+	}
+
+	if (const FormatMapping* entry = FindMapping(kColorFormats, format))
+	{
+		ApplyMapping(*entry, formatInfoOut);
+		return;
+	}
+	cemuLog_log(LogType::Force, "OpenGL: Unsupported texture format 0x{:04x}", (uint32)format);
+	cemu_assert_unimplemented();
+	formatInfoOut->setFormat(0, 0, 0);
+}
 
 LatteTextureGL::LatteTextureGL(Latte::E_DIM dim, MPTR physAddress, MPTR physMipAddress, Latte::E_GX2SURFFMT format, uint32 width, uint32 height, uint32 depth, uint32 pitch, uint32 mipLevels, uint32 swizzle,
 	Latte::E_HWTILEMODE tileMode, bool isDepth)
 	: LatteTexture(dim, physAddress, physMipAddress, format, width, height, depth, pitch, mipLevels, swizzle, tileMode, isDepth)
 {
-	GenerateEmptyTextureFromGX2Dim(dim, this->glId_texture, this->glTexTarget, true);
-	// set format info
-	FormatInfoGL glFormatInfo;
-	GetOpenGLFormatInfo(isDepth, overwriteInfo.hasFormatOverwrite ? (Latte::E_GX2SURFFMT)overwriteInfo.format : format, dim, &glFormatInfo);
-	this->glInternalFormat = glFormatInfo.glInternalFormat;
-	this->isAlternativeFormat = glFormatInfo.isUsingAlternativeFormat;
-	// set debug name
-	bool useGLDebugNames = false;
-#ifdef CEMU_DEBUG_ASSERT
-	useGLDebugNames = true;
-#endif
-	if (LaunchSettings::NSightModeEnabled())
-		useGLDebugNames = true;
-	if (useGLDebugNames)
+	GenerateEmptyTextureFromGX2Dim(dim, glId_texture, glTexTarget, true);
+	// a format overwrite from a graphic pack replaces the storage format
+	const SurfFmt storageFormat = overwriteInfo.hasFormatOverwrite ? (SurfFmt)overwriteInfo.format : format;
+	FormatInfoGL info;
+	GetOpenGLFormatInfo(isDepth, storageFormat, dim, &info);
+	glInternalFormat = info.glInternalFormat;
+	isAlternativeFormat = info.isUsingAlternativeFormat;
+	if (UseGLDebugNames())
 	{
-		char textureDebugLabel[512];
-		sprintf(textureDebugLabel, "%08x_f%04x%s_p%04x_%dx%d", physAddress, (uint32)format, this->isDepth ? "_d" : "", pitch, width, height);
-		glObjectLabel(GL_TEXTURE, this->glId_texture, -1, textureDebugLabel);
+		const std::string label = fmt::format("{:08x}_f{:04x}{}_p{:04x}_{}x{}", physAddress, (uint32)format, this->isDepth ? "_d" : "", pitch, width, height);
+		glObjectLabel(GL_TEXTURE, glId_texture, -1, label.c_str());
 	}
 }
 
@@ -38,24 +207,20 @@ LatteTextureGL::~LatteTextureGL()
 
 void LatteTextureGL::GenerateEmptyTextureFromGX2Dim(Latte::E_DIM dim, GLuint& texId, GLint& texTarget, bool createForTargetType)
 {
-	if (dim == Latte::E_DIM::DIM_2D)
-		texTarget = GL_TEXTURE_2D;
-	else if (dim == Latte::E_DIM::DIM_1D)
-		texTarget = GL_TEXTURE_1D;
-	else if (dim == Latte::E_DIM::DIM_3D)
-		texTarget = GL_TEXTURE_3D;
-	else if (dim == Latte::E_DIM::DIM_2D_ARRAY)
-		texTarget = GL_TEXTURE_2D_ARRAY;
-	else if (dim == Latte::E_DIM::DIM_CUBEMAP)
-		texTarget = GL_TEXTURE_CUBE_MAP_ARRAY;
-	else if (dim == Latte::E_DIM::DIM_2D_MSAA)
-		texTarget = GL_TEXTURE_2D; // todo, GL_TEXTURE_2D_MULTISAMPLE ?
-	else
+	switch (dim)
 	{
+	case Latte::E_DIM::DIM_1D: texTarget = GL_TEXTURE_1D; break;
+	case Latte::E_DIM::DIM_2D: texTarget = GL_TEXTURE_2D; break;
+	case Latte::E_DIM::DIM_2D_MSAA: texTarget = GL_TEXTURE_2D; break; // multisampling is not emulated
+	case Latte::E_DIM::DIM_3D: texTarget = GL_TEXTURE_3D; break;
+	case Latte::E_DIM::DIM_2D_ARRAY: texTarget = GL_TEXTURE_2D_ARRAY; break;
+	case Latte::E_DIM::DIM_CUBEMAP: texTarget = GL_TEXTURE_CUBE_MAP_ARRAY; break; // cube maps are always arrays of faces
+	default:
 		cemu_assert_unimplemented();
+		break;
 	}
-	if(createForTargetType)
-		texId = glCreateTextureWrapper(texTarget); // initializes the texture to texTarget (equivalent to calling glGenTextures + glBindTexture)
+	if (createForTargetType)
+		texId = glCreateTextureWrapper(texTarget);
 	else
 		glGenTextures(1, &texId);
 }
@@ -65,455 +230,40 @@ LatteTextureView* LatteTextureGL::CreateView(Latte::E_DIM dim, Latte::E_GX2SURFF
 	return new LatteTextureViewGL(this, dim, format, firstMip, mipCount, firstSlice, sliceCount);
 }
 
-void LatteTextureGL::GetOpenGLFormatInfo(bool isDepth, Latte::E_GX2SURFFMT format, Latte::E_DIM dim, FormatInfoGL* formatInfoOut)
-{
-	formatInfoOut->isUsingAlternativeFormat = false;
-
-	if (isDepth)
-	{
-		if (format == Latte::E_GX2SURFFMT::D24_S8_UNORM)
-		{
-			formatInfoOut->setFormat(GL_DEPTH24_STENCIL8, GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8);
-			return;
-		}
-		else if (format == Latte::E_GX2SURFFMT::D24_S8_FLOAT)
-		{
-			formatInfoOut->setFormat(GL_DEPTH32F_STENCIL8, GL_DEPTH_STENCIL, GL_FLOAT_32_UNSIGNED_INT_24_8_REV);
-			formatInfoOut->markAsAlternativeFormat();
-			return;
-		}
-		else if (format == Latte::E_GX2SURFFMT::D32_S8_FLOAT)
-		{
-			formatInfoOut->setFormat(GL_DEPTH32F_STENCIL8, GL_DEPTH_STENCIL, GL_FLOAT_32_UNSIGNED_INT_24_8_REV);
-			return;
-		}
-		else if (format == Latte::E_GX2SURFFMT::D32_FLOAT)
-		{
-			formatInfoOut->setFormat(GL_DEPTH_COMPONENT32F, GL_DEPTH_COMPONENT, GL_FLOAT);
-			return;
-		}
-		else if (format == Latte::E_GX2SURFFMT::D16_UNORM)
-		{
-			formatInfoOut->setFormat(GL_DEPTH_COMPONENT16, GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT);
-			return;
-		}
-		// unsupported depth format
-		cemuLog_log(LogType::Force, "OpenGL: Unsupported texture depth format 0x{:04x}", (uint32)format);
-		// use placeholder format
-		formatInfoOut->setFormat(GL_DEPTH_COMPONENT16, GL_DEPTH_COMPONENT, GL_UNSIGNED_SHORT);
-		formatInfoOut->markAsAlternativeFormat();
-		return;
-	}
-
-	const auto hwFormat = Latte::GetHWFormat(format);
-	if (hwFormat == Latte::E_HWFMT::HWFMT_BC1 || hwFormat == Latte::E_HWFMT::HWFMT_BC2 || hwFormat == Latte::E_HWFMT::HWFMT_BC3)
-	{
-		const bool isSRGB = HAS_FLAG(format, Latte::E_GX2SURFFMT::FMT_BIT_SRGB);
-		if (!OpenGLRenderer::GetInstance()->SupportsS3TC(isSRGB))
-		{
-			// fall back to software decoding, with sRGB conversion handled by the texture sampler
-			formatInfoOut->setFormat(isSRGB ? GL_SRGB8_ALPHA8 : GL_RGBA8, GL_RGBA, GL_FLOAT);
-			formatInfoOut->markAsAlternativeFormat();
-			return;
-		}
-	}
-
-	bool glIsCompressed = false;
-	bool isUsingAlternativeFormat = false; // set to true if there is no bit-perfect matching OpenGL format
-	sint32 glInternalFormat;
-	sint32 glSuppliedFormat;
-	sint32 glSuppliedFormatType;
-	// get format information
-	if (format == Latte::E_GX2SURFFMT::R4_G4_UNORM)
-	{
-		formatInfoOut->setFormat(GL_RGBA4, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4);
-		formatInfoOut->markAsAlternativeFormat();
-		return;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R4_G4_B4_A4_UNORM)
-	{
-		formatInfoOut->setFormat(GL_RGBA4, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4);
-		return;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R16_G16_B16_A16_FLOAT)
-	{
-		formatInfoOut->setFormat(GL_RGBA16F, GL_RGBA, GL_HALF_FLOAT);
-		return;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R16_G16_FLOAT)
-	{
-		formatInfoOut->setFormat(GL_RG16F, GL_RG, GL_HALF_FLOAT);
-		return;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R16_SNORM)
-	{
-		formatInfoOut->setFormat(GL_R16_SNORM, GL_RED, GL_SHORT);
-		return;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R16_FLOAT)
-	{
-		formatInfoOut->setFormat(GL_R16F, GL_RED, GL_HALF_FLOAT);
-		return;
-	}
-	else if (format == Latte::E_GX2SURFFMT::BC1_UNORM ||
-		format == Latte::E_GX2SURFFMT::BC1_SRGB)
-	{
-		if (format == Latte::E_GX2SURFFMT::BC1_SRGB)
-			formatInfoOut->setCompressed(GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT, -1, -1);
-		else
-			formatInfoOut->setCompressed(GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, -1, -1);
-		return;
-	}
-	else if (format == Latte::E_GX2SURFFMT::BC2_UNORM || format == Latte::E_GX2SURFFMT::BC2_SRGB)
-	{
-		if (format == Latte::E_GX2SURFFMT::BC2_SRGB)
-			formatInfoOut->setCompressed(GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT3_EXT, -1, -1);
-		else
-			formatInfoOut->setCompressed(GL_COMPRESSED_RGBA_S3TC_DXT3_EXT, -1, -1);
-		return;
-	}
-	else if (format == Latte::E_GX2SURFFMT::BC3_UNORM || format == Latte::E_GX2SURFFMT::BC3_SRGB)
-	{
-		if (format == Latte::E_GX2SURFFMT::BC3_SRGB)
-			formatInfoOut->setCompressed(GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT, -1, -1);
-		else
-			formatInfoOut->setCompressed(GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, -1, -1);
-		return;
-	}
-	else if (format == Latte::E_GX2SURFFMT::BC4_UNORM || format == Latte::E_GX2SURFFMT::BC4_SNORM)
-	{
-		bool allowCompressed = true;
-		if (dim != Latte::E_DIM::DIM_2D && dim != Latte::E_DIM::DIM_2D_ARRAY)
-			allowCompressed = false; // RGTC1 does not support non-2D textures
-		if (allowCompressed)
-		{
-			if (format == Latte::E_GX2SURFFMT::BC4_UNORM)
-				formatInfoOut->setCompressed(GL_COMPRESSED_RED_RGTC1, -1, -1);
-			else
-				formatInfoOut->setCompressed(GL_COMPRESSED_SIGNED_RED_RGTC1, -1, -1);
-			return;
-		}
-		else
-		{
-			formatInfoOut->setFormat(GL_RG16F, GL_RG, GL_FLOAT);
-			formatInfoOut->markAsAlternativeFormat();
-			return;
-		}
-	}
-	else if (format == Latte::E_GX2SURFFMT::BC5_UNORM || format == Latte::E_GX2SURFFMT::BC5_SNORM)
-	{
-		if (format == Latte::E_GX2SURFFMT::BC5_SNORM)
-			formatInfoOut->setCompressed(GL_COMPRESSED_SIGNED_RG_RGTC2, -1, -1);
-		else
-			formatInfoOut->setCompressed(GL_COMPRESSED_RG_RGTC2, -1, -1);
-		return;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R32_FLOAT)
-	{
-		formatInfoOut->setFormat(GL_R32F, GL_RED, GL_FLOAT);
-		return;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R32_G32_FLOAT)
-	{
-		formatInfoOut->setFormat(GL_RG32F, GL_RG, GL_FLOAT);
-		return;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R32_G32_UINT)
-	{
-		formatInfoOut->setFormat(GL_RG32UI, GL_RG_INTEGER, GL_UNSIGNED_INT);
-		return;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R32_UINT)
-	{
-		formatInfoOut->setFormat(GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT);
-		return;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R16_UINT)
-	{
-		// used by VC DS (New Super Mario Bros)
-		formatInfoOut->setFormat(GL_R16UI, GL_RED_INTEGER, GL_UNSIGNED_SHORT);
-		return;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R8_UINT)
-	{
-		// used by VC DS (New Super Mario Bros)
-		formatInfoOut->setFormat(GL_R8UI, GL_RED_INTEGER, GL_UNSIGNED_BYTE);
-		return;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R32_G32_B32_A32_FLOAT)
-	{
-		formatInfoOut->setFormat(GL_RGBA32F, GL_RGBA, GL_FLOAT);
-		return;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R8_G8_B8_A8_UNORM || format == Latte::E_GX2SURFFMT::R8_G8_B8_A8_SRGB)
-	{
-		if (format == Latte::E_GX2SURFFMT::R8_G8_B8_A8_SRGB)
-			glInternalFormat = GL_SRGB8_ALPHA8;
-		else
-			glInternalFormat = GL_RGBA8;
-		// supplied format
-		glSuppliedFormat = GL_RGBA;
-		glSuppliedFormatType = GL_UNSIGNED_BYTE;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R8_G8_B8_A8_SNORM)
-	{
-		glInternalFormat = GL_RGBA8_SNORM;
-		// supplied format
-		glSuppliedFormat = GL_RGBA;
-		glSuppliedFormatType = GL_BYTE;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R8_UNORM)
-	{
-		glInternalFormat = GL_R8;
-		// supplied format
-		glSuppliedFormat = GL_RED;
-		glSuppliedFormatType = GL_UNSIGNED_BYTE;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R8_SNORM)
-	{
-		glInternalFormat = GL_R8_SNORM;
-		// supplied format
-		glSuppliedFormat = GL_RED;
-		glSuppliedFormatType = GL_BYTE;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R8_G8_UNORM)
-	{
-		glInternalFormat = GL_RG8;
-		// supplied format
-		glSuppliedFormat = GL_RG;
-		glSuppliedFormatType = GL_UNSIGNED_BYTE;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R8_G8_SNORM)
-	{
-		glInternalFormat = GL_RG8_SNORM;
-		// supplied format
-		glSuppliedFormat = GL_RG;
-		glSuppliedFormatType = GL_BYTE;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R16_UNORM)
-	{
-		glInternalFormat = GL_R16;
-		// supplied format
-		glSuppliedFormat = GL_RED;
-		glSuppliedFormatType = GL_UNSIGNED_SHORT;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R16_G16_B16_A16_UNORM)
-	{
-		glInternalFormat = GL_RGBA16;
-		// supplied format
-		glSuppliedFormat = GL_RGBA;
-		glSuppliedFormatType = GL_UNSIGNED_SHORT;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R16_G16_B16_A16_SNORM)
-	{
-		glInternalFormat = GL_RGBA16_SNORM;
-		// supplied format
-		glSuppliedFormat = GL_RGBA;
-		glSuppliedFormatType = GL_SHORT;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R16_G16_UNORM)
-	{
-		glInternalFormat = GL_RG16;
-		// supplied format
-		glSuppliedFormat = GL_RG;
-		glSuppliedFormatType = GL_UNSIGNED_SHORT;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R5_G6_B5_UNORM)
-	{
-		glInternalFormat = GL_RGB565;
-		// supplied format
-		glSuppliedFormat = GL_RGB;
-		glSuppliedFormatType = GL_UNSIGNED_SHORT_5_6_5_REV;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R5_G5_B5_A1_UNORM)
-	{
-		glInternalFormat = GL_RGB5_A1;
-		// supplied format
-		glSuppliedFormat = GL_RGBA;
-		glSuppliedFormatType = GL_UNSIGNED_SHORT_5_5_5_1;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::A1_B5_G5_R5_UNORM)
-	{
-		glInternalFormat = GL_RGB5_A1;
-		// supplied format
-		glSuppliedFormat = GL_RGBA;
-		glSuppliedFormatType = GL_UNSIGNED_SHORT_5_5_5_1;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R10_G10_B10_A2_UNORM)
-	{
-		glInternalFormat = GL_RGB10_A2;
-		// supplied format
-		glSuppliedFormat = GL_RGBA;
-		glSuppliedFormatType = GL_UNSIGNED_INT_2_10_10_10_REV;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R10_G10_B10_A2_SRGB) // used by Super Mario Maker
-	{
-		glInternalFormat = GL_RGB10_A2; // todo - how to handle SRGB for this format?
-		// supplied format
-		glSuppliedFormat = GL_RGBA;
-		glSuppliedFormatType = GL_UNSIGNED_INT_2_10_10_10_REV;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::A2_B10_G10_R10_UNORM)
-	{
-		glInternalFormat = GL_RGB10_A2;
-		// supplied format
-		glSuppliedFormat = GL_RGBA;
-		glSuppliedFormatType = GL_UNSIGNED_INT_10_10_10_2;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R10_G10_B10_A2_SNORM)
-	{
-		glInternalFormat = GL_RGBA16_SNORM; // OpenGL has no signed version of GL_RGB10_A2
-		isUsingAlternativeFormat = true;
-		// supplied format
-		glSuppliedFormat = GL_RGBA;
-		glSuppliedFormatType = GL_SHORT;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R11_G11_B10_FLOAT)
-	{
-		glInternalFormat = GL_R11F_G11F_B10F;
-		// supplied format
-		glSuppliedFormat = GL_RGB;
-		glSuppliedFormatType = GL_UNSIGNED_INT_10F_11F_11F_REV;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R32_G32_B32_A32_UINT)
-	{
-		glInternalFormat = GL_RGBA32UI;
-		// supplied format
-		glSuppliedFormat = GL_RGBA_INTEGER;
-		glSuppliedFormatType = GL_UNSIGNED_INT;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R32_G32_B32_A32_SINT)
-	{
-		glInternalFormat = GL_RGBA32I;
-		// supplied format
-		glSuppliedFormat = GL_RGBA_INTEGER;
-		glSuppliedFormatType = GL_INT;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R16_G16_B16_A16_UINT)
-	{
-		glInternalFormat = GL_RGBA16UI;
-		// supplied format
-		glSuppliedFormat = GL_RGBA_INTEGER;
-		glSuppliedFormatType = GL_UNSIGNED_SHORT;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R8_G8_B8_A8_UINT)
-	{
-		glInternalFormat = GL_RGBA8UI;
-		// supplied format
-		glSuppliedFormat = GL_RGBA_INTEGER;
-		glSuppliedFormatType = GL_UNSIGNED_BYTE;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R24_X8_UNORM)
-	{
-		// OpenGL has no color version of GL_DEPTH24_STENCIL8, therefore we use a 32-bit floating-point format instead
-		glInternalFormat = GL_R32F;
-		isUsingAlternativeFormat = true;
-		// supplied format
-		glSuppliedFormat = GL_RED;
-		glSuppliedFormatType = GL_FLOAT;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::X24_G8_UINT)
-	{
-		// OpenGL has no X24_G8 format, we use RGBA8UI instead and manually swizzle the channels
-		// this format is used in Resident Evil Revelations when scanning with the Genesis. It's also used in Cars 3: Driven to Win?
-
-		glInternalFormat = GL_RGBA8UI;
-		isUsingAlternativeFormat = true;
-		// supplied format
-		glSuppliedFormat = GL_RGBA;
-		glSuppliedFormatType = GL_FLOAT;
-		glIsCompressed = false;
-	}
-	else if (format == Latte::E_GX2SURFFMT::R32_X8_FLOAT)
-	{
-		// only available as depth format in OpenGL
-		// used by Cars 3: Driven to Win
-		// find a way to emulate this using a color format
-		glInternalFormat = GL_DEPTH32F_STENCIL8;
-		isUsingAlternativeFormat = false;
-		// supplied format
-		glSuppliedFormat = GL_DEPTH_STENCIL;
-		glSuppliedFormatType = GL_FLOAT_32_UNSIGNED_INT_24_8_REV;
-		glIsCompressed = false;
-		cemu_assert_debug(false);
-	}
-	else
-	{
-		cemuLog_log(LogType::Force, "OpenGL: Unsupported texture format 0x{:04x}", (uint32)format);
-		cemu_assert_unimplemented();
-	}
-	formatInfoOut->glInternalFormat = glInternalFormat;
-	formatInfoOut->glSuppliedFormat = glSuppliedFormat;
-	formatInfoOut->glSuppliedFormatType = glSuppliedFormatType;
-	formatInfoOut->glIsCompressed = glIsCompressed;
-	formatInfoOut->isUsingAlternativeFormat = isUsingAlternativeFormat;
-}
-
 void LatteTextureGL::AllocateOnHost()
 {
-	auto hostTexture = this;
-	cemu_assert_debug(hostTexture->isDataDefined == false);
-	sint32 effectiveBaseWidth = hostTexture->width;
-	sint32 effectiveBaseHeight = hostTexture->height;
-	sint32 effectiveBaseDepth = hostTexture->depth;
-	if (hostTexture->overwriteInfo.hasResolutionOverwrite)
+	cemu_assert_debug(!isDataDefined);
+	sint32 w = width, h = height, d = depth;
+	if (overwriteInfo.hasResolutionOverwrite)
 	{
-		effectiveBaseWidth = hostTexture->overwriteInfo.width;
-		effectiveBaseHeight = hostTexture->overwriteInfo.height;
-		effectiveBaseDepth = hostTexture->overwriteInfo.depth;
+		w = overwriteInfo.width;
+		h = overwriteInfo.height;
+		d = overwriteInfo.depth;
 	}
-	// calculate mip count
-	sint32 mipLevels = std::min(hostTexture->mipLevels, hostTexture->maxPossibleMipLevels);
-	mipLevels = std::max(mipLevels, 1);
-	// create immutable storage
-	if (hostTexture->dim == Latte::E_DIM::DIM_2D || hostTexture->dim == Latte::E_DIM::DIM_2D_MSAA)
+	const sint32 levels = std::max(1, std::min(mipLevels, maxPossibleMipLevels));
+	switch (dim)
 	{
-		cemu_assert_debug(effectiveBaseDepth == 1);
-		glTextureStorage2DWrapper(GL_TEXTURE_2D, hostTexture->glId_texture, mipLevels, hostTexture->glInternalFormat, effectiveBaseWidth, effectiveBaseHeight);
-	}
-	else if (hostTexture->dim == Latte::E_DIM::DIM_1D)
-	{
-		cemu_assert_debug(effectiveBaseHeight == 1);
-		cemu_assert_debug(effectiveBaseDepth == 1);
-		glTextureStorage1DWrapper(GL_TEXTURE_1D, hostTexture->glId_texture, mipLevels, hostTexture->glInternalFormat, effectiveBaseWidth);
-	}
-	else if (hostTexture->dim == Latte::E_DIM::DIM_2D_ARRAY || hostTexture->dim == Latte::E_DIM::DIM_2D_ARRAY_MSAA)
-	{
-		glTextureStorage3DWrapper(GL_TEXTURE_2D_ARRAY, hostTexture->glId_texture, mipLevels, hostTexture->glInternalFormat, effectiveBaseWidth, effectiveBaseHeight, std::max(1, effectiveBaseDepth));
-	}
-	else if (hostTexture->dim == Latte::E_DIM::DIM_3D)
-	{
-		glTextureStorage3DWrapper(GL_TEXTURE_3D, hostTexture->glId_texture, mipLevels, hostTexture->glInternalFormat, effectiveBaseWidth, effectiveBaseHeight, std::max(1, effectiveBaseDepth));
-	}
-	else if (hostTexture->dim == Latte::E_DIM::DIM_CUBEMAP)
-	{
-		glTextureStorage3DWrapper(GL_TEXTURE_CUBE_MAP_ARRAY, hostTexture->glId_texture, mipLevels, hostTexture->glInternalFormat, effectiveBaseWidth, effectiveBaseHeight, effectiveBaseDepth);
-	}
-	else
-	{
+	case Latte::E_DIM::DIM_1D:
+		cemu_assert_debug(h == 1 && d == 1);
+		glTextureStorage1DWrapper(GL_TEXTURE_1D, glId_texture, levels, glInternalFormat, w);
+		break;
+	case Latte::E_DIM::DIM_2D:
+	case Latte::E_DIM::DIM_2D_MSAA:
+		cemu_assert_debug(d == 1);
+		glTextureStorage2DWrapper(GL_TEXTURE_2D, glId_texture, levels, glInternalFormat, w, h);
+		break;
+	case Latte::E_DIM::DIM_2D_ARRAY:
+	case Latte::E_DIM::DIM_2D_ARRAY_MSAA:
+		glTextureStorage3DWrapper(GL_TEXTURE_2D_ARRAY, glId_texture, levels, glInternalFormat, w, h, std::max(1, d));
+		break;
+	case Latte::E_DIM::DIM_3D:
+		glTextureStorage3DWrapper(GL_TEXTURE_3D, glId_texture, levels, glInternalFormat, w, h, std::max(1, d));
+		break;
+	case Latte::E_DIM::DIM_CUBEMAP:
+		glTextureStorage3DWrapper(GL_TEXTURE_CUBE_MAP_ARRAY, glId_texture, levels, glInternalFormat, w, h, d);
+		break;
+	default:
 		cemu_assert_unimplemented();
+		break;
 	}
 }

@@ -1,13 +1,15 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include "Cafe/HW/Latte/Renderer/RendererShader.h"
 #include "Common/GLInclude/GLInclude.h"
 
+// One separable GL program per shader stage. Game shaders can be stored in and loaded from a per-title
+// program binary cache while the shader cache is being loaded.
 class RendererShaderGL : public RendererShader
 {
 public:
 	RendererShaderGL(ShaderType type, uint64 baseHash, uint64 auxHash, bool isGameShader, bool isGfxPackShader, const std::string& glslSource);
-
 	virtual ~RendererShaderGL();
 
 	void CleanupShaderObj();
@@ -19,28 +21,26 @@ public:
 	GLuint GetShaderObject() const { cemu_assert_debug(m_isCompiled); return m_shader_object; }
 
 	sint32 GetUniformLocation(const char* name);
-
 	void SetUniform1i(sint32 location, sint32 value);
 	void SetUniform1f(sint32 location, float value);
 	void SetUniform2fv(sint32 location, void* data, sint32 count);
 	void SetUniform4iv(sint32 location, void* data, sint32 count);
 
+	// program binary cache, opened while a title's shader cache is loaded
 	static void ShaderCacheLoading_begin(uint64 cacheTitleId);
 	static void ShaderCacheLoading_end();
-    static void ShaderCacheLoading_Close();
+	static void ShaderCacheLoading_Close();
 
 private:
-	GLuint m_program;
-	GLuint m_shader_object;
+	bool TryLoadFromBinaryCache();
+	void StoreInBinaryCache();
+	bool ReportCompileFailure();
 
-	bool loadBinary();
-	void storeBinary();
-
+	GLuint m_program = 0;
+	GLuint m_shader_object = 0;
 	std::string m_glslSource;
-
 	bool m_shader_attached{ false };
 	bool m_isCompiled{ false };
 
 	static class FileCache* s_programBinaryCache;
 };
-

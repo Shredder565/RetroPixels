@@ -1,76 +1,72 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/HW/Latte/Renderer/OpenGL/OpenGLRenderer.h"
 #include "Common/GLInclude/GLInclude.h"
 
+// occlusion query backed by a GL_SAMPLES_PASSED query object
 class LatteQueryObjectGL : public LatteQueryObject
 {
-	friend class OpenGLRenderer;
+public:
+	bool getResult(uint64& numSamplesPassed) override
+	{
+		catchOpenGLError();
+		GLint available = 0;
+		glGetQueryObjectiv(m_glQuery, GL_QUERY_RESULT_AVAILABLE, &available);
+		if (!available)
+			return false;
+		catchOpenGLError();
+		GLint64 samples = 0;
+		glGetQueryObjecti64v(m_glQuery, GL_QUERY_RESULT, &samples);
+		numSamplesPassed = (uint64)samples;
+		return true;
+	}
 
-	bool getResult(uint64& numSamplesPassed) override;
-	void begin() override;
-	void end() override;
+	void begin() override
+	{
+		catchOpenGLError();
+		glBeginQueryIndexed(GL_SAMPLES_PASSED, index, m_glQuery);
+		catchOpenGLError();
+	}
 
-private:
-	GLuint m_queryId{};
-	GLenum m_glTarget{};
+	void end() override
+	{
+		glEndQueryIndexed(GL_SAMPLES_PASSED, index);
+		catchOpenGLError();
+	}
+
+	void ResetForReuse()
+	{
+		queryEnded = false;
+		queryEventStart = 0;
+		queryEventEnd = 0;
+	}
+
+	GLuint m_glQuery{};
 };
 
 LatteQueryObject* OpenGLRenderer::occlusionQuery_create()
 {
+	// destroyed queries are recycled, oldest first
 	if (!list_queryCacheOcclusion.empty())
 	{
-		LatteQueryObjectGL* queryObject = list_queryCacheOcclusion.front();
-		list_queryCacheOcclusion.erase(list_queryCacheOcclusion.begin() + 0);
-		queryObject->m_glTarget = GL_SAMPLES_PASSED;
-		queryObject->queryEnded = false;
-		queryObject->queryEventStart = 0;
-		queryObject->queryEventEnd = 0;
-		return queryObject;
+		LatteQueryObjectGL* recycled = list_queryCacheOcclusion.front();
+		list_queryCacheOcclusion.erase(list_queryCacheOcclusion.begin());
+		recycled->ResetForReuse();
+		return recycled;
 	}
-	// no query object available in cache, create new query
-	LatteQueryObjectGL* queryObject = new LatteQueryObjectGL();
-	glGenQueries(1, &queryObject->m_queryId);
-	queryObject->m_glTarget = GL_SAMPLES_PASSED;
-	queryObject->queryEnded = false;
-	queryObject->index = 0;
-	queryObject->queryEventStart = 0;
-	queryObject->queryEventEnd = 0;
+	auto* query = new LatteQueryObjectGL();
+	glGenQueries(1, &query->m_glQuery);
+	query->index = 0;
+	query->ResetForReuse();
 	catchOpenGLError();
-	return queryObject;
+	return query;
 }
 
 void OpenGLRenderer::occlusionQuery_destroy(LatteQueryObject* queryObj)
 {
-	list_queryCacheOcclusion.emplace_back(static_cast<LatteQueryObjectGL*>(queryObj));
+	list_queryCacheOcclusion.push_back(static_cast<LatteQueryObjectGL*>(queryObj));
 }
 
 void OpenGLRenderer::occlusionQuery_flush()
 {
 	glFlush();
-}
-
-bool LatteQueryObjectGL::getResult(uint64& numSamplesPassed)
-{
-	GLint resultAvailable = 0;
-	catchOpenGLError();
-	glGetQueryObjectiv(this->m_queryId, GL_QUERY_RESULT_AVAILABLE, &resultAvailable);
-	if (resultAvailable == 0)
-		return false;
-	catchOpenGLError();
-	GLint64 queryResult = 0;
-	glGetQueryObjecti64v(this->m_queryId, GL_QUERY_RESULT, &queryResult);
-	numSamplesPassed = queryResult;
-	return true;
-}
-
-void LatteQueryObjectGL::begin()
-{
-	catchOpenGLError();
-	glBeginQueryIndexed(this->m_glTarget, this->index, this->m_queryId);
-	catchOpenGLError();
-}
-
-void LatteQueryObjectGL::end()
-{
-	glEndQueryIndexed(this->m_glTarget, this->index);
-	catchOpenGLError();
 }

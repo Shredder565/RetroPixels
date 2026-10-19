@@ -1,12 +1,13 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "Cafe/HW/Latte/Core/LatteTextureReadbackInfo.h"
 #include "Common/GLInclude/GLInclude.h"
 
+// GPU to CPU copy of one texture slice through a pixel pack buffer, completion is tracked with a fence
 class LatteTextureReadbackInfoGL : public LatteTextureReadbackInfo
 {
 public:
 	LatteTextureReadbackInfoGL(LatteTextureView* textureView);
-
 	~LatteTextureReadbackInfoGL();
 
 	void StartTransfer() override;
@@ -17,13 +18,10 @@ public:
 	void ReleaseData() override;
 
 private:
-	bool WaitForCompletion(GLuint64 timeout);
-	GLuint m_texFormatGL;
-	GLuint m_texDataTypeGL;
+	bool WaitForFence(GLuint64 timeoutNs);
 
-	// buffer
-	GLuint texImageBufferGL = 0;
-	// sync
-	GLsync imageCopyFinSync = nullptr;
+	GLenum m_packFormat = 0;
+	GLenum m_packType = 0;
+	GLuint m_packBuffer = 0;
+	GLsync m_fence = nullptr;
 };
-

@@ -1,7 +1,8 @@
-#include "RendererCore.h"
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+#include "Cafe/HW/Latte/Renderer/RendererCore.h"
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
-#include "HW/Latte/Core/LatteShader.h"
+#include "Cafe/HW/Latte/Core/LatteShader.h"
 #include "config/CemuConfig.h"
 
 #ifdef ENABLE_OPENGL
@@ -9,124 +10,98 @@
 #include "Cafe/HW/Latte/Renderer/OpenGL/LatteTextureViewGL.h"
 #endif
 
+// Special state 8 is set by GX2ClearDepthStencil-like sequences that clear a buffer through the depth path while a
+// colour buffer occupies the same memory. Every texture view that matches the depth buffer's memory gets cleared
+// to the colour stored in the first ALU constant.
 void LatteDraw_handleSpecialState8_clearAsDepth()
 {
 	if (LatteGPUState.contextNew.GetSpecialStateValues()[0] == 0)
-		cemuLog_logDebug(LogType::Force, "Special state 8 requires special state 0 but it is not set?");
-	// get depth buffer information
-	uint32 regDepthBuffer = LatteGPUState.contextRegister[mmDB_HTILE_DATA_BASE];
-	uint32 regDepthSize = LatteGPUState.contextRegister[mmDB_DEPTH_SIZE];
-	uint32 regDepthBufferInfo = LatteGPUState.contextRegister[mmDB_DEPTH_INFO];
-	// get format and tileMode from info reg
-	uint32 depthBufferTileMode = (regDepthBufferInfo >> 15) & 0xF;
+		cemuLog_logDebug(LogType::Force, "Special state 8 is used without special state 0");
 
-	MPTR depthBufferPhysMem = regDepthBuffer << 8;
-	uint32 depthBufferPitch = (((regDepthSize >> 0) & 0x3FF) + 1);
-	uint32 depthBufferHeight = ((((regDepthSize >> 10) & 0xFFFFF) + 1) / depthBufferPitch);
-	depthBufferPitch <<= 3;
-	depthBufferHeight <<= 3;
-	uint32 depthBufferWidth = depthBufferPitch;
+	const uint32* regs = LatteGPUState.contextRegister;
+	const uint32 htileBase = regs[mmDB_HTILE_DATA_BASE];
+	const uint32 depthSize = regs[mmDB_DEPTH_SIZE];
 
-	sint32 sliceIndex = 0; // todo
-	sint32 mipIndex = 0;
+	// DB_DEPTH_SIZE: PITCH_TILE_MAX (pitch/8 - 1) in bits 0-9, SLICE_TILE_MAX (pitch*height/64 - 1) in bits 10-29
+	const MPTR surfaceAddr = htileBase << 8;
+	const uint32 pitchInTiles = (depthSize & 0x3FF) + 1;
+	const uint32 heightInTiles = (((depthSize >> 10) & 0xFFFFF) + 1) / pitchInTiles;
+	const uint32 pitch = pitchInTiles * 8;
+	const uint32 height = heightInTiles * 8;
+	const uint32 width = pitch;
 
-	// clear all color buffers that match the format of the depth buffer
-	sint32 searchIndex = 0;
-	bool targetFound = false;
-	while (true)
+	const sint32 slice = 0;
+	const sint32 mip = 0;
+
+	// clear colour comes from the ALU constant registers (c0 of the pixel shader constant file)
+	const float* constColor = reinterpret_cast<const float*>(regs + 0xC000);
+	uint8 rgba[4];
+	for (int i = 0; i < 4; i++)
+		rgba[i] = (uint8)(constColor[i] * 255.0f);
+
+	sint32 searchCursor = 0;
+	for (LatteTextureView* view = LatteTC_LookupTextureByData(surfaceAddr, width, height, pitch, 0, 1, slice, 1, &searchCursor);
+		 view != nullptr;
+		 view = LatteTC_LookupTextureByData(surfaceAddr, width, height, pitch, 0, 1, slice, 1, &searchCursor))
 	{
-		LatteTextureView* view = LatteTC_LookupTextureByData(depthBufferPhysMem, depthBufferWidth, depthBufferHeight, depthBufferPitch, 0, 1, sliceIndex, 1, &searchIndex);
-		if (!view)
-		{
-			// should we clear in RAM instead?
-			break;
-		}
-		sint32 effectiveClearWidth = view->baseTexture->width;
-		sint32 effectiveClearHeight = view->baseTexture->height;
-		LatteTexture_scaleToEffectiveSize(view->baseTexture, &effectiveClearWidth, &effectiveClearHeight, 0);
+		LatteTexture* tex = view->baseTexture;
+		sint32 clearWidth = tex->width;
+		sint32 clearHeight = tex->height;
+		LatteTexture_scaleToEffectiveSize(tex, &clearWidth, &clearHeight, 0);
 
-		// hacky way to get clear color
-		float* regClearColor = (float*)(LatteGPUState.contextRegister + 0xC000 + 0); // REG_BASE_ALU_CONST
-
-		uint8 clearColor[4] = { 0 };
-		clearColor[0] = (uint8)(regClearColor[0] * 255.0f);
-		clearColor[1] = (uint8)(regClearColor[1] * 255.0f);
-		clearColor[2] = (uint8)(regClearColor[2] * 255.0f);
-		clearColor[3] = (uint8)(regClearColor[3] * 255.0f);
-
-		// todo - use fragment shader software emulation (evoke for one pixel) to determine clear color
-		// todo - dont clear entire slice, use effectiveClearWidth, effectiveClearHeight
-
-		switch (g_renderer->GetType())
-		{
 #ifdef ENABLE_OPENGL
-		case RendererAPI::OpenGL:
+		if (g_renderer->GetType() == RendererAPI::OpenGL)
 		{
-			//cemu_assert_debug(false); // implement g_renderer->texture_clearColorSlice properly for OpenGL renderer
 			if (glClearTexSubImage)
-				glClearTexSubImage(((LatteTextureViewGL*)view)->glTexId, mipIndex, 0, 0, 0, effectiveClearWidth, effectiveClearHeight, 1, GL_RGBA, GL_UNSIGNED_BYTE, clearColor);
-			break;
+				glClearTexSubImage(static_cast<LatteTextureViewGL*>(view)->glTexId, mip, 0, 0, 0, clearWidth, clearHeight, 1, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+			continue;
 		}
 #endif
-		default:
-		{
-			if (view->baseTexture->isDepth)
-				g_renderer->texture_clearDepthSlice(view->baseTexture, sliceIndex + view->firstSlice, mipIndex + view->firstMip, true, view->baseTexture->hasStencil, 0.0f, 0);
-			else
-				g_renderer->texture_clearColorSlice(view->baseTexture, sliceIndex + view->firstSlice, mipIndex + view->firstMip, clearColor[0], clearColor[1], clearColor[2], clearColor[3]);
-		}
-		}
+		// the other backends clear the whole slice; the colour is passed on as the raw 0-255 byte values
+		if (tex->isDepth)
+			g_renderer->texture_clearDepthSlice(tex, slice + view->firstSlice, mip + view->firstMip, true, tex->hasStencil, 0.0f, 0);
+		else
+			g_renderer->texture_clearColorSlice(tex, slice + view->firstSlice, mip + view->firstMip, rgba[0], rgba[1], rgba[2], rgba[3]);
 	}
 }
 
-/* rects emulation */
+// ---- RECT emulation geometry shader ----
 
-void rectsEmulationGS_outputSingleVertex(std::string& gsSrc, LatteDecompilerShader* vertexShader, LatteShaderPSInputTable* psInputTable, sint32 vIdx, const LatteContextRegister& latteRegister)
+// calls emit(semanticId) for every vertex shader output that the pixel shader reads
+template<typename TFunc>
+static void ForEachForwardedParameter(LatteDecompilerShader* vertexShader, LatteShaderPSInputTable* psInputTable, const LatteContextRegister& latteRegister, TFunc emit)
 {
-	auto parameterMask = vertexShader->outputParameterMask;
-	for (uint32 i = 0; i < 32; i++)
+	const uint32 outputMask = vertexShader->outputParameterMask;
+	for (sint32 index = 0; index < 32; index++)
 	{
-		if ((parameterMask & (1 << i)) == 0)
+		if ((outputMask & (1u << index)) == 0)
 			continue;
-		sint32 vsSemanticId = psInputTable->getVertexShaderOutParamSemanticId(latteRegister.GetRawView(), i);
-		if (vsSemanticId < 0)
+		const sint32 semanticId = psInputTable->getVertexShaderOutParamSemanticId(latteRegister.GetRawView(), index);
+		if (semanticId < 0 || !psInputTable->hasPSImportForSemanticId(semanticId))
 			continue;
-		// make sure PS has matching input
-		if (!psInputTable->hasPSImportForSemanticId(vsSemanticId))
-			continue;
-		gsSrc.append(fmt::format("passParameterSem{}Out = passParameterSem{}In[{}];\r\n", vsSemanticId, vsSemanticId, vIdx));
+		emit(semanticId);
 	}
-	gsSrc.append(fmt::format("gl_Position = gl_in[{}].gl_Position;\r\n", vIdx));
-	gsSrc.append("EmitVertex();\r\n");
-}
-
-void rectsEmulationGS_outputGeneratedVertex(std::string& gsSrc, LatteDecompilerShader* vertexShader, LatteShaderPSInputTable* psInputTable, const char* variant, const LatteContextRegister& latteRegister)
-{
-	auto parameterMask = vertexShader->outputParameterMask;
-	for (uint32 i = 0; i < 32; i++)
-	{
-		if ((parameterMask & (1 << i)) == 0)
-			continue;
-		sint32 vsSemanticId = psInputTable->getVertexShaderOutParamSemanticId(latteRegister.GetRawView(), i);
-		if (vsSemanticId < 0)
-			continue;
-		// make sure PS has matching input
-		if (!psInputTable->hasPSImportForSemanticId(vsSemanticId))
-			continue;
-		gsSrc.append(fmt::format("passParameterSem{}Out = gen4thVertex{}(passParameterSem{}In[0], passParameterSem{}In[1], passParameterSem{}In[2]);\r\n", vsSemanticId, variant, vsSemanticId, vsSemanticId, vsSemanticId));
-	}
-	gsSrc.append(fmt::format("gl_Position = gen4thVertex{}(gl_in[0].gl_Position, gl_in[1].gl_Position, gl_in[2].gl_Position);\r\n", variant));
-	gsSrc.append("EmitVertex();\r\n");
 }
 
 void rectsEmulationGS_outputVerticesCode(std::string& gsSrc, LatteDecompilerShader* vertexShader, LatteShaderPSInputTable* psInputTable, sint32 p0, sint32 p1, sint32 p2, sint32 p3, const char* variant, const LatteContextRegister& latteRegister)
 {
-	sint32 pList[4] = { p0, p1, p2, p3 };
-	for (sint32 i = 0; i < 4; i++)
+	for (sint32 vertex : {p0, p1, p2, p3})
 	{
-		if (pList[i] == 3)
-			rectsEmulationGS_outputGeneratedVertex(gsSrc, vertexShader, psInputTable, variant, latteRegister);
+		if (vertex == 3)
+		{
+			// synthesized corner
+			ForEachForwardedParameter(vertexShader, psInputTable, latteRegister, [&](sint32 sem) {
+				gsSrc.append(fmt::format("passParameterSem{0}Out = gen4thVertex{1}(passParameterSem{0}In[0], passParameterSem{0}In[1], passParameterSem{0}In[2]);\r\n", sem, variant));
+			});
+			gsSrc.append(fmt::format("gl_Position = gen4thVertex{}(gl_in[0].gl_Position, gl_in[1].gl_Position, gl_in[2].gl_Position);\r\n", variant));
+		}
 		else
-			rectsEmulationGS_outputSingleVertex(gsSrc, vertexShader, psInputTable, pList[i], latteRegister);
+		{
+			ForEachForwardedParameter(vertexShader, psInputTable, latteRegister, [&](sint32 sem) {
+				gsSrc.append(fmt::format("passParameterSem{0}Out = passParameterSem{0}In[{1}];\r\n", sem, vertex));
+			});
+			gsSrc.append(fmt::format("gl_Position = gl_in[{}].gl_Position;\r\n", vertex));
+		}
+		gsSrc.append("EmitVertex();\r\n");
 	}
 }

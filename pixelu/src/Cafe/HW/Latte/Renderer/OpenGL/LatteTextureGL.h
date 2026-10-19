@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include "Cafe/HW/Latte/Core/LatteTexture.h"
@@ -8,50 +9,47 @@ class LatteTextureGL : public LatteTexture
 public:
 	LatteTextureGL(Latte::E_DIM dim, MPTR physAddress, MPTR physMipAddress, Latte::E_GX2SURFFMT format, uint32 width, uint32 height, uint32 depth, uint32 pitch, uint32 mipLevels,
 		uint32 swizzle, Latte::E_HWTILEMODE tileMode, bool isDepth);
-
 	~LatteTextureGL();
 
 	void AllocateOnHost() override;
 
+	// creates a texture name for the GL target that corresponds to dim; with createForTargetType the name is
+	// also initialised to that target (DSA create), otherwise it is only generated (needed for glTextureView)
 	static void GenerateEmptyTextureFromGX2Dim(Latte::E_DIM dim, GLuint& texId, GLint& texTarget, bool createForTargetType);
 
-protected:
-	LatteTextureView* CreateView(Latte::E_DIM dim, Latte::E_GX2SURFFMT format, sint32 firstMip, sint32 mipCount, sint32 firstSlice, sint32 sliceCount) override;
-
-public:
+	// how a GX2 format is stored on the GL side and how pixel data is supplied for uploads
 	struct FormatInfoGL
 	{
 		sint32 glInternalFormat;
 		sint32 glSuppliedFormat;
 		sint32 glSuppliedFormatType;
 		bool glIsCompressed;
-		bool isUsingAlternativeFormat{};
+		bool isUsingAlternativeFormat{}; // no bit exact GL equivalent
 
-		void setFormat(sint32 glInternalFormat, sint32 glSuppliedFormat, sint32 glSuppliedFormatType)
+		void setFormat(sint32 internalFormat, sint32 suppliedFormat, sint32 suppliedFormatType)
 		{
-			this->glInternalFormat = glInternalFormat;
-			this->glSuppliedFormat = glSuppliedFormat;
-			this->glSuppliedFormatType = glSuppliedFormatType;
-			this->glIsCompressed = false;
+			glInternalFormat = internalFormat;
+			glSuppliedFormat = suppliedFormat;
+			glSuppliedFormatType = suppliedFormatType;
+			glIsCompressed = false;
 		}
 
-		void setCompressed(sint32 glInternalFormat, sint32 glSuppliedFormat, sint32 glSuppliedFormatType)
+		void setCompressed(sint32 internalFormat, sint32 suppliedFormat, sint32 suppliedFormatType)
 		{
-			setFormat(glInternalFormat, glSuppliedFormat, glSuppliedFormatType);
-			this->glIsCompressed = true;
+			setFormat(internalFormat, suppliedFormat, suppliedFormatType);
+			glIsCompressed = true;
 		}
 
-		void markAsAlternativeFormat()
-		{
-			this->isUsingAlternativeFormat = true;
-		}
+		void markAsAlternativeFormat() { isUsingAlternativeFormat = true; }
 	};
 
 	static void GetOpenGLFormatInfo(bool isDepth, Latte::E_GX2SURFFMT format, Latte::E_DIM dim, FormatInfoGL* formatInfoOut);
 
-	// OpenGL stuff
 	GLuint glId_texture;
-	GLint glTexTarget; // GL_TEXTURE_2D, GL_TEXTURE_3D, GL_TEXTURE_2D_ARRAY etc.
-	GLint glInternalFormat = 0; // internal format of OpenGL texture (0 if not initialized)
-	bool isAlternativeFormat{}; // if set to true, the OpenGL format is not a bit-perfect match for the GX2 format
+	GLint glTexTarget; // GL_TEXTURE_2D, GL_TEXTURE_2D_ARRAY, ...
+	GLint glInternalFormat = 0; // 0 while not set
+	bool isAlternativeFormat{};
+
+protected:
+	LatteTextureView* CreateView(Latte::E_DIM dim, Latte::E_GX2SURFFMT format, sint32 firstMip, sint32 mipCount, sint32 firstSlice, sint32 sliceCount) override;
 };

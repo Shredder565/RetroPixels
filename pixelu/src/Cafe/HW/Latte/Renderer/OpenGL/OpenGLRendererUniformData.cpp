@@ -1,77 +1,76 @@
-#include "RendererShaderGL.h"
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+#include "Cafe/HW/Latte/Renderer/OpenGL/RendererShaderGL.h"
 #include "Cafe/HW/Latte/Renderer/OpenGL/OpenGLRenderer.h"
 #include "Cafe/HW/Latte/Core/LatteShader.h"
 
-GLint _gl_remappedUniformData[4 * 256];
+namespace
+{
+	// staging for remapped uniforms, up to 256 vec4 entries
+	GLint s_remappedStaging[256 * 4];
+
+	// two rolling 64-bit hashes over the vec4 entries, used to skip uploads of unchanged data
+	void HashUniformEntries(const GLint* data, sint32 entryCount, uint64 hashOut[2])
+	{
+		uint64 lo = 0, hi = 0;
+		const uint64* p = reinterpret_cast<const uint64*>(data);
+		for (sint32 i = 0; i < entryCount; i++, p += 2)
+		{
+			lo = std::rotl<uint64>(lo ^ p[0], 11);
+			hi = std::rotl<uint64>(hi ^ p[1], 11);
+		}
+		hashOut[0] = lo;
+		hashOut[1] = hi;
+	}
+
+	struct StageUniformSource
+	{
+		LatteDecompilerShader* shader;
+		uint32 aluConstBase; // register offset of the stage's ALU constants, UINT32_MAX if it has none
+	};
+}
 
 void OpenGLRenderer::uniformData_update()
 {
-	// update uniforms
-	LatteDecompilerShader* shaderArray[3];
-	shaderArray[0] = LatteSHRC_GetActiveVertexShader();
-	shaderArray[1] = LatteSHRC_GetActivePixelShader();
-	shaderArray[2] = LatteSHRC_GetActiveGeometryShader();;
-
-	uint32 shaderBlockUniformRegisterOffset[3];
-	shaderBlockUniformRegisterOffset[0] = mmSQ_VTX_UNIFORM_BLOCK_START;
-	shaderBlockUniformRegisterOffset[1] = mmSQ_PS_UNIFORM_BLOCK_START;
-	shaderBlockUniformRegisterOffset[2] = mmSQ_GS_UNIFORM_BLOCK_START;
-
-	uint32 shaderALUConstOffset[3];
-	shaderALUConstOffset[0] = 0x400;
-	shaderALUConstOffset[1] = 0;
-	shaderALUConstOffset[2] = 0xFFFFFFFF; // GS has no uniform registers
-
-	for (sint32 s = 0; s < 3; s++)
+	const StageUniformSource stages[3] = {
+		{ LatteSHRC_GetActiveVertexShader(), 0x400 },
+		{ LatteSHRC_GetActivePixelShader(), 0 },
+		{ LatteSHRC_GetActiveGeometryShader(), 0xFFFFFFFF }, // the GS stage has no ALU constants
+	};
+	for (const StageUniformSource& stage : stages)
 	{
-		// update block uniforms
-		LatteDecompilerShader* shader = shaderArray[s];
+		LatteDecompilerShader* shader = stage.shader;
 		if (!shader)
 			continue;
-
-		auto hostShader = (RendererShaderGL*)shader->shader;
-
-		if (shader->uniformMode == LATTE_DECOMPILER_UNIFORM_MODE_REMAPPED)
+		auto* hostShader = static_cast<RendererShaderGL*>(shader->shader);
+		switch (shader->uniformMode)
 		{
-			auto& list_uniformMapping = shader->list_remappedUniformEntries;
-			cemu_assert_debug(list_uniformMapping.size() <= 256);
-			sint32 remappedArraySize = (sint32)list_uniformMapping.size();
-			LatteBufferCache_LoadRemappedUniforms(shader, (float*)(_gl_remappedUniformData), true, (1<<LATTE_NUM_MAX_UNIFORM_BUFFERS)-1);
-			// update values only when the hash changed
-			if (remappedArraySize > 0)
-			{
-				uint64 uniformDataHash[2] = { 0 };
-				uint64* remappedUniformData64 = (uint64*)_gl_remappedUniformData;
-				for (sint32 f = 0; f < remappedArraySize; f++)
-				{
-					uniformDataHash[0] ^= remappedUniformData64[0];
-					uniformDataHash[0] = std::rotl<uint64>(uniformDataHash[0], 11);
-					uniformDataHash[1] ^= remappedUniformData64[1];
-					uniformDataHash[1] = std::rotl<uint64>(uniformDataHash[1], 11);
-					remappedUniformData64 += 2;
-				}
-				if (shader->uniformDataHash64[0] != uniformDataHash[0] || shader->uniformDataHash64[1] != uniformDataHash[1])
-				{
-					shader->uniformDataHash64[0] = uniformDataHash[0];
-					shader->uniformDataHash64[1] = uniformDataHash[1];
-					hostShader->SetUniform4iv(shader->uniform.loc_remapped, _gl_remappedUniformData, remappedArraySize);
-				}
-			}
+		case LATTE_DECOMPILER_UNIFORM_MODE_REMAPPED:
+		{
+			const sint32 entryCount = (sint32)shader->list_remappedUniformEntries.size();
+			cemu_assert_debug(entryCount <= 256);
+			LatteBufferCache_LoadRemappedUniforms(shader, reinterpret_cast<float*>(s_remappedStaging), true, (1 << LATTE_NUM_MAX_UNIFORM_BUFFERS) - 1);
+			if (entryCount <= 0)
+				break;
+			uint64 hash[2];
+			HashUniformEntries(s_remappedStaging, entryCount, hash);
+			if (hash[0] == shader->uniformDataHash64[0] && hash[1] == shader->uniformDataHash64[1])
+				break;
+			shader->uniformDataHash64[0] = hash[0];
+			shader->uniformDataHash64[1] = hash[1];
+			hostShader->SetUniform4iv(shader->uniform.loc_remapped, s_remappedStaging, entryCount);
+			break;
 		}
-		else if (shader->uniformMode == LATTE_DECOMPILER_UNIFORM_MODE_FULL_CFILE)
+		case LATTE_DECOMPILER_UNIFORM_MODE_FULL_CFILE:
 		{
-			if (shaderALUConstOffset[s] == 0xFFFFFFFF)
+			if (stage.aluConstBase == 0xFFFFFFFF)
 				assert_dbg();
-			GLint* uniformRegData = (GLint*)(LatteGPUState.contextRegister + mmSQ_ALU_CONSTANT0_0 + shaderALUConstOffset[s]);
-			hostShader->SetUniform4iv(shader->uniform.loc_uniformRegister, uniformRegData, shader->uniform.count_uniformRegister);
+			GLint* constants = reinterpret_cast<GLint*>(LatteGPUState.contextRegister + mmSQ_ALU_CONSTANT0_0 + stage.aluConstBase);
+			hostShader->SetUniform4iv(shader->uniform.loc_uniformRegister, constants, shader->uniform.count_uniformRegister);
+			break;
 		}
-		else if (shader->uniformMode == LATTE_DECOMPILER_UNIFORM_MODE_FULL_CBANK)
-		{
-			// handled by _syncGPUUniformBuffers()
-		}
-		else if (shader->uniformMode == LATTE_DECOMPILER_UNIFORM_MODE_NONE)
-		{
-			// no uniforms used
+		default:
+			// FULL_CBANK goes through uniform buffers, NONE has nothing to upload
+			break;
 		}
 	}
 }
