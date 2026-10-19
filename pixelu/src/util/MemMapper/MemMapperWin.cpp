@@ -1,63 +1,60 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "util/MemMapper/MemMapper.h"
 
 #include <Windows.h>
 
 namespace MemMapper
 {
-	const size_t sPageSize{ []()
+	namespace
+	{
+		DWORD toProtect(PAGE_PERMISSION perm)
 		{
-		SYSTEM_INFO si;
-		GetSystemInfo(&si);
-		return (size_t)si.dwPageSize;
-	}()
-	};
+			const bool r = HAS_FLAG(perm, PAGE_PERMISSION::P_READ);
+			const bool w = HAS_FLAG(perm, PAGE_PERMISSION::P_WRITE);
+			const bool x = HAS_FLAG(perm, PAGE_PERMISSION::P_EXECUTE);
+			if (r && w && x)
+				return PAGE_EXECUTE_READWRITE;
+			if (r && w)
+				return PAGE_READWRITE;
+			if (r && !x)
+				return PAGE_READONLY;
+			cemu_assert_unimplemented(); // only R, RW and RWX are used
+			return PAGE_NOACCESS;
+		}
+	}
 
 	size_t GetPageSize()
 	{
-		return sPageSize;
-	}
-
-	DWORD GetPageProtection(PAGE_PERMISSION permissionFlags)
-	{
-		DWORD p = 0;
-		if (HAS_FLAG(permissionFlags, PAGE_PERMISSION::P_READ) && HAS_FLAG(permissionFlags, PAGE_PERMISSION::P_WRITE) && HAS_FLAG(permissionFlags, PAGE_PERMISSION::P_EXECUTE))
-			p = PAGE_EXECUTE_READWRITE;
-		else if (HAS_FLAG(permissionFlags, PAGE_PERMISSION::P_READ) && HAS_FLAG(permissionFlags, PAGE_PERMISSION::P_WRITE) && !HAS_FLAG(permissionFlags, PAGE_PERMISSION::P_EXECUTE))
-			p = PAGE_READWRITE;
-		else if (HAS_FLAG(permissionFlags, PAGE_PERMISSION::P_READ) && !HAS_FLAG(permissionFlags, PAGE_PERMISSION::P_WRITE) && !HAS_FLAG(permissionFlags, PAGE_PERMISSION::P_EXECUTE))
-			p = PAGE_READONLY;
-		else
-			cemu_assert_unimplemented();
-		return p;
+		static const size_t s_pageSize = []() {
+			SYSTEM_INFO info;
+			GetSystemInfo(&info);
+			return (size_t)info.dwPageSize;
+		}();
+		return s_pageSize;
 	}
 
 	void* ReserveMemory(void* baseAddr, size_t size, PAGE_PERMISSION permissionFlags)
 	{
-		void* r = VirtualAlloc(baseAddr, size, MEM_RESERVE, GetPageProtection(permissionFlags));
-		return r;
+		return VirtualAlloc(baseAddr, size, MEM_RESERVE, toProtect(permissionFlags));
 	}
 
 	void FreeReservation(void* baseAddr, size_t size)
 	{
-		VirtualFree(baseAddr, size, MEM_RELEASE);
+		(void)size; // MEM_RELEASE always frees the whole reservation and requires size 0
+		VirtualFree(baseAddr, 0, MEM_RELEASE);
 	}
 
 	void* AllocateMemory(void* baseAddr, size_t size, PAGE_PERMISSION permissionFlags, bool fromReservation)
 	{
-		void* r;
-		if(fromReservation)
-			r = VirtualAlloc(baseAddr, size, MEM_COMMIT, GetPageProtection(permissionFlags));
-		else
-			r = VirtualAlloc(baseAddr, size, MEM_RESERVE | MEM_COMMIT, GetPageProtection(permissionFlags));
-		return r;
+		const DWORD type = fromReservation ? MEM_COMMIT : (MEM_RESERVE | MEM_COMMIT);
+		return VirtualAlloc(baseAddr, size, type, toProtect(permissionFlags));
 	}
 
 	void FreeMemory(void* baseAddr, size_t size, bool fromReservation)
 	{
-		if(fromReservation)
+		if (fromReservation)
 			VirtualFree(baseAddr, size, MEM_DECOMMIT);
 		else
-			VirtualFree(baseAddr, size, MEM_RELEASE);
+			VirtualFree(baseAddr, 0, MEM_RELEASE);
 	}
-
 };

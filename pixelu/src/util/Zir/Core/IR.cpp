@@ -1,238 +1,149 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "util/Zir/Core/IR.h"
 #include "util/Zir/Core/ZpIRDebug.h"
 
-#include <cinttypes>
-
 namespace ZpIR
 {
-
-	const char* getOpcodeName(IR::OpCode opcode)
+	namespace
 	{
-		switch (opcode)
+		const char* opcodeText(IR::OpCode op)
 		{
-		case IR::OpCode::ADD:
-			return "ADD";
-		case IR::OpCode::MOV:
-			return "MOV";
-		case IR::OpCode::MUL:
-			return "MUL";
-		case IR::OpCode::DIV:
-			return "DIV";
-
-		case IR::OpCode::BITCAST:
-			return "BITCAST";
-		case IR::OpCode::SWAP_ENDIAN:
-			return "SWAP_ENDIAN";
-		case IR::OpCode::CONVERT_INT_TO_FLOAT:
-			return "CONV_I2F";
-		case IR::OpCode::CONVERT_FLOAT_TO_INT:
-			return "CONV_F2I";
-
-		case IR::OpCode::IMPORT_SINGLE:
-			return "IMPORT_S";
-		case IR::OpCode::EXPORT:
-			return "EXPORT";
-		case IR::OpCode::IMPORT:
-			return "IMPORT";
-		default:
-			cemu_assert_debug(false);
-			return "UKN";
+			switch (op)
+			{
+			case IR::OpCode::MOV: return "MOV";
+			case IR::OpCode::ADD: return "ADD";
+			case IR::OpCode::SUB: return "SUB";
+			case IR::OpCode::MUL: return "MUL";
+			case IR::OpCode::DIV: return "DIV";
+			case IR::OpCode::BITCAST: return "BITCAST";
+			case IR::OpCode::SWAP_ENDIAN: return "SWAP_ENDIAN";
+			case IR::OpCode::CONVERT_INT_TO_FLOAT: return "CONV_I2F";
+			case IR::OpCode::CONVERT_FLOAT_TO_INT: return "CONV_F2I";
+			case IR::OpCode::IMPORT_SINGLE: return "IMPORT_S";
+			case IR::OpCode::IMPORT: return "IMPORT";
+			case IR::OpCode::EXPORT: return "EXPORT";
+			default: return "UKN";
+			}
 		}
-		return "";
-	}
 
-	const char* getTypeName(DataType t)
-	{
-		switch (t)
+		// register name prefix by type
+		const char* regPrefix(DataType t)
 		{
-		case DataType::S64:
-			return "s64";
-		case DataType::U64:
-			return "u64";
-		case DataType::S32:
-			return "s32";
-		case DataType::U32:
-			return "u32";
-		case DataType::S16:
-			return "s16";
-		case DataType::U16:
-			return "u16";
-		case DataType::S8:
-			return "s8";
-		case DataType::U8:
-			return "u8";
-		case DataType::BOOL:
-			return "bool";
-		case DataType::POINTER:
-			return "ptr";
+			switch (t)
+			{
+			case DataType::U64: return "uq";
+			case DataType::U32: return "ud";
+			case DataType::U16: return "uw";
+			case DataType::U8: return "uc";
+			case DataType::S64: return "sq";
+			case DataType::S32: return "sd";
+			case DataType::S16: return "sw";
+			case DataType::S8: return "sc";
+			case DataType::F32: return "fv";
+			case DataType::POINTER: return "ptr";
+			default: return "r";
+			}
 		}
-		return "";
+
+		std::string constantText(const IRRegConstDef& c)
+		{
+			switch (c.type)
+			{
+			case DataType::POINTER: return fmt::format("ptr:{}", c.value_ptr);
+			case DataType::U64: return c.value_u64 >= 0x1000 ? fmt::format("u64:0x{:x}", c.value_u64) : fmt::format("u64:{}", c.value_u64);
+			case DataType::U32: return fmt::format("u32:{}", c.value_u32);
+			case DataType::S32: return fmt::format("s32:{}", c.value_s32);
+			case DataType::F32: return fmt::format("f32:{}", c.value_f32);
+			default: return "ukn_const_type";
+			}
+		}
 	}
 
 	std::string DebugPrinter::getRegisterName(ZpIRBasicBlock* block, IRReg r)
 	{
-		std::string s;
-
-		if ((uint16)r < 0x8000 && m_showPhysicalRegisters)
+		if (isConstVar(r))
 		{
-			auto& reg = block->m_regs[(uint16)r];
-			if (!reg.hasAssignedPhysicalRegister())
+			const IRRegConstDef* c = block->getConstant(r);
+			return c ? constantText(*c) : std::string("ukn_const");
+		}
+		const IRRegDef& def = block->m_regs[r];
+		if (m_showPhysicalRegisters)
+		{
+			if (!def.hasAssignedPhysicalRegister())
 				return "UNASSIGNED";
-			s = m_getPhysicalRegisterNameCustom(block, reg.physicalRegister);
-			return s;
+			if (m_physicalRegName)
+				return m_physicalRegName(block, def.physicalRegister);
+			return fmt::format("phys{}", def.physicalRegister);
 		}
-
-		if ((uint16)r < 0x8000 && m_getRegisterNameCustom)
-		{
-			return m_getRegisterNameCustom(block, r);
-		}
-
-		if ((uint16)r >= 0x8000)
-		{
-			auto& reg = block->m_consts[(uint16)r & 0x7FFF];
-			switch (reg.type)
-			{
-			case DataType::POINTER:
-				return fmt::format("ptr:{}", reg.value_ptr);
-			case DataType::U64:
-			{
-				if(reg.value_u64 >= 0x1000)
-					return fmt::format("u64:0x{0:x}", reg.value_u64);
-				return fmt::format("u64:{}", reg.value_u64);
-			}
-			case DataType::U32:
-				return fmt::format("u32:{}", reg.value_u32);
-			case DataType::S32:
-				return fmt::format("s32:{}", reg.value_u32);
-			case DataType::F32:
-				return fmt::format("f32:{}", reg.value_f32);
-			default:
-				break;
-			}
-			return "ukn_const_type";
-		}
-		else
-		{
-			auto& reg = block->m_regs[(uint16)r];
-			
-			const char* regLetter = "r";
-			switch (reg.type)
-			{
-			case DataType::U64:
-				regLetter = "uq"; // quad-word
-				break;
-			case DataType::U32:
-				regLetter = "ud"; // double-word
-				break;
-			case DataType::U16:
-				regLetter = "uw"; // word
-				break;
-			case DataType::U8:
-				regLetter = "uc"; // char
-				break;
-			case DataType::S64:
-				regLetter = "sq"; // signed quad-word
-				break;
-			case DataType::S32:
-				regLetter = "sd"; // signed double-word
-				break;
-			case DataType::S16:
-				regLetter = "sw"; // signed word
-				break;
-			case DataType::S8:
-				regLetter = "sc"; // signed char
-				break;
-			case DataType::F32:
-				regLetter = "fv"; // 32bit float
-				break;
-			case DataType::POINTER:
-				regLetter = "ptr";
-				break;
-			default:
-				assert_dbg();
-			}
-			if (reg.elementCount != 1)
-				assert_dbg();
-			s = fmt::format("{}{}", regLetter, (uint16)r);
-		}
-		return s;
+		if (m_virtualRegName)
+			return m_virtualRegName(block, r);
+		std::string name = fmt::format("{}{}", regPrefix(def.type), (uint32)r);
+		if (def.elementCount != 1)
+			name += fmt::format("x{}", def.elementCount);
+		return name;
 	}
 
 	std::string DebugPrinter::getInstructionHRF(ZpIRBasicBlock* block, IR::__InsBase* cmd)
 	{
-		if (auto ins = IR::InsRR::getIfForm(cmd))
+		std::string operands;
+		auto addOperand = [&](IRReg r) {
+			if (!operands.empty())
+				operands += ", ";
+			operands += getRegisterName(block, r);
+		};
+		if (auto rr = IR::InsRR::getIfForm(cmd))
 		{
-			return fmt::format("{:<10} {}, {}", getOpcodeName(cmd->opcode), getRegisterName(block, ins->rA), getRegisterName(block, ins->rB));
+			addOperand(rr->rA);
+			addOperand(rr->rB);
 		}
-		else if (auto ins = IR::InsRRR::getIfForm(cmd))
+		else if (auto rrr = IR::InsRRR::getIfForm(cmd))
 		{
-			return fmt::format("{:<10} {}, {}, {}", getOpcodeName(cmd->opcode), getRegisterName(block, ins->rA), getRegisterName(block, ins->rB), getRegisterName(block, ins->rC));
+			addOperand(rrr->rA);
+			addOperand(rrr->rB);
+			addOperand(rrr->rC);
 		}
-		else if (auto ins = IR::InsEXPORT::getIfForm(cmd))
+		else if (auto exp = IR::InsEXPORT::getIfForm(cmd))
 		{
-			if (ins->count == 4)
-				return fmt::format("{:<10} {}, {}, {}, {}, loc: {}", getOpcodeName(cmd->opcode), getRegisterName(block, ins->regArray[0]), getRegisterName(block, ins->regArray[1]), getRegisterName(block, ins->regArray[2]), getRegisterName(block, ins->regArray[3]), ins->exportSymbol);
-			else if (ins->count == 3)
-				return fmt::format("{:<10} {}, {}, {}, loc: {}", getOpcodeName(cmd->opcode), getRegisterName(block, ins->regArray[0]), getRegisterName(block, ins->regArray[1]), getRegisterName(block, ins->regArray[2]), ins->exportSymbol);
-			else if (ins->count == 2)
-				return fmt::format("{:<10} {}, {}, loc: {}", getOpcodeName(cmd->opcode), getRegisterName(block, ins->regArray[0]), getRegisterName(block, ins->regArray[1]), ins->exportSymbol);
-			else if (ins->count == 1)
-				return fmt::format("{:<10} {}, loc: {}", getOpcodeName(cmd->opcode), getRegisterName(block, ins->regArray[0]), ins->exportSymbol);
-			assert_dbg();
+			for (uint16 i = 0; i < exp->count; i++)
+				addOperand(exp->regArray[i]);
+			operands += fmt::format(", loc: {}", ShaderSubset::ShaderExportLocation(exp->exportSymbol).GetDebugName());
 		}
-		else if (auto ins = IR::InsIMPORT::getIfForm(cmd))
+		else if (auto imp = IR::InsIMPORT::getIfForm(cmd))
 		{
-			ShaderSubset::ShaderImportLocation importLocation = ins->importSymbol;
-			std::string locDebugName = importLocation.GetDebugName();
-
-			if (ins->count == 4)
-				return fmt::format("{:<10} {}, {}, {}, {}, loc: {}", getOpcodeName(cmd->opcode), getRegisterName(block, ins->regArray[0]), getRegisterName(block, ins->regArray[1]), getRegisterName(block, ins->regArray[2]), getRegisterName(block, ins->regArray[3]), locDebugName);
-			else if (ins->count == 3)
-				return fmt::format("{:<10} {}, {}, {}, loc: {}", getOpcodeName(cmd->opcode), getRegisterName(block, ins->regArray[0]), getRegisterName(block, ins->regArray[1]), getRegisterName(block, ins->regArray[2]), locDebugName);
-			else if (ins->count == 2)
-				return fmt::format("{:<10} {}, {}, loc: {}", getOpcodeName(cmd->opcode), getRegisterName(block, ins->regArray[0]), getRegisterName(block, ins->regArray[1]), locDebugName);
-			else if (ins->count == 1)
-				return fmt::format("{:<10} {}, loc: {}", getOpcodeName(cmd->opcode), getRegisterName(block, ins->regArray[0]), locDebugName);
-			assert_dbg();
+			for (uint16 i = 0; i < imp->count; i++)
+				addOperand(imp->regArray[i]);
+			operands += fmt::format(", loc: {}", ShaderSubset::ShaderImportLocation(imp->importSymbol).GetDebugName());
 		}
 		else
-			assert_dbg();
-		return "";
+		{
+			return "<unknown instruction form>";
+		}
+		return fmt::format("{:<10} {}", opcodeText(cmd->opcode), operands);
 	}
 
 	void DebugPrinter::debugPrintBlock(ZpIRBasicBlock* block)
 	{
-		// print name
-		printf("IRBasicBlock %" PRIxPTR "\n", (uintptr_t)block);
-		// print imports
-		printf("Imports:\n");
-		for(auto itr : block->m_imports)
-			printf("   reg: %s sym:0x%llx\n", getRegisterName(block, itr.reg).c_str(), itr.name);
-		// print exports
-		printf("Exports:\n");
-		for (auto itr : block->m_exports)
-			printf("   reg: %s sym:0x%llx\n", getRegisterName(block, itr.reg).c_str(), itr.name);
-		// print instructions
-		printf("Assembly:\n");
-		IR::__InsBase* instruction = block->m_instructionFirst;
-		size_t i = 0;
-		while(instruction)
-		{
-			std::string s = getInstructionHRF(block, instruction);
-			printf("%04x %s\n", (unsigned int)i, s.c_str());
-			i++;
-			instruction = instruction->next;
-		}
+		std::string out = fmt::format("IRBasicBlock {}\n", (const void*)block);
+		out += "Imports:\n";
+		for (auto& imp : block->m_imports)
+			out += fmt::format("   reg: {} sym:0x{:x}\n", getRegisterName(block, imp.reg), imp.name);
+		out += "Exports:\n";
+		for (auto& exp : block->m_exports)
+			out += fmt::format("   reg: {} sym:0x{:x}\n", getRegisterName(block, exp.reg), exp.name);
+		out += "Assembly:\n";
+		uint32 index = 0;
+		for (IR::__InsBase* ins = block->m_instructionFirst; ins; ins = ins->next)
+			out += fmt::format("{:04x} {}\n", index++, getInstructionHRF(block, ins));
+		fputs(out.c_str(), stdout);
 	}
 
 	void DebugPrinter::debugPrint(ZpIRFunction* irFunction)
 	{
-		printf("--- Print IR function assembly ---\n");
-		for (auto& itr : irFunction->m_basicBlocks)
+		fputs("--- Print IR function assembly ---\n", stdout);
+		for (ZpIRBasicBlock* block : irFunction->m_basicBlocks)
 		{
-			debugPrintBlock(itr);
-			printf("\n");
+			debugPrintBlock(block);
+			fputs("\n", stdout);
 		}
 	}
-
 }

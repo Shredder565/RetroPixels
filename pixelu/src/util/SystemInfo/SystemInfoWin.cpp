@@ -1,69 +1,57 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "util/SystemInfo/SystemInfo.h"
 
 #include <Psapi.h>
 #include <winternl.h>
 #pragma comment(lib, "ntdll.lib")
 
-uint64 QueryRamUsage()
+namespace
 {
-	PROCESS_MEMORY_COUNTERS pmc{};
-	pmc.cb = sizeof(pmc);
-	if (GetProcessMemoryInfo(GetCurrentProcess(), &pmc, sizeof(pmc)))
+	uint64 toU64(const FILETIME& ft)
 	{
-		return pmc.WorkingSetSize;
-	}
-	else
-	{
-		return 0;
+		return ((uint64)ft.dwHighDateTime << 32) | (uint64)ft.dwLowDateTime;
 	}
 }
 
-void QueryProcTime(uint64 &out_now, uint64 &out_user, uint64 &out_kernel)
+uint64 QueryRamUsage()
 {
-	FILETIME ftime, fkernel, fuser;
-	LARGE_INTEGER now, kernel, user;
-	GetSystemTimeAsFileTime(&ftime);
-	now.LowPart = ftime.dwLowDateTime;
-	now.HighPart = ftime.dwHighDateTime;
+	PROCESS_MEMORY_COUNTERS counters{};
+	counters.cb = sizeof(counters);
+	if (!GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters)))
+		return 0;
+	return counters.WorkingSetSize;
+}
 
-	if (GetProcessTimes(GetCurrentProcess(), &ftime, &ftime, &fkernel, &fuser))
+// all three values in 100ns units
+void QueryProcTime(uint64& out_now, uint64& out_user, uint64& out_kernel)
+{
+	FILETIME wall, creation, exitTime, kernel, user;
+	GetSystemTimeAsFileTime(&wall);
+	if (!GetProcessTimes(GetCurrentProcess(), &creation, &exitTime, &kernel, &user))
 	{
-		kernel.LowPart = fkernel.dwLowDateTime;
-		kernel.HighPart = fkernel.dwHighDateTime;
-
-		user.LowPart = fuser.dwLowDateTime;
-		user.HighPart = fuser.dwHighDateTime;
-
-		out_now = now.QuadPart;
-		out_user = user.QuadPart;
-		out_kernel = kernel.QuadPart;
+		out_now = out_user = out_kernel = 0;
+		return;
 	}
-	else
-	{
-		out_now = 0;
-		out_user = 0;
-		out_kernel = 0;
-	}
+	out_now = toU64(wall);
+	out_user = toU64(user);
+	out_kernel = toU64(kernel);
 }
 
 void QueryCoreTimes(uint32 count, std::vector<ProcessorTime>& out)
 {
-	std::vector<SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION> sppi(count);
-	if (NT_SUCCESS(NtQuerySystemInformation(SystemProcessorPerformanceInformation, sppi.data(), sizeof(SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION) * count, nullptr)))
+	for (auto& t : out)
+		t = {};
+	std::vector<SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION> perf(count);
+	const ULONG bytes = (ULONG)(perf.size() * sizeof(SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION));
+	if (!NT_SUCCESS(NtQuerySystemInformation(SystemProcessorPerformanceInformation, perf.data(), bytes, nullptr)))
+		return;
+	const size_t n = std::min<size_t>(perf.size(), out.size());
+	for (size_t i = 0; i < n; i++)
 	{
-		for (auto i = 0; i < out.size(); ++i)
-		{
-			out[i].idle = sppi[i].IdleTime.QuadPart;
-			out[i].kernel = sppi[i].KernelTime.QuadPart;
-			out[i].kernel -= out[i].idle;
-			out[i].user = sppi[i].UserTime.QuadPart;
-		}
-	}
-	else
-	{
-		for (auto i = 0; i < count; ++i)
-		{
-			out[i] = { };
-		}
+		// KernelTime includes the idle time
+		const uint64 idle = (uint64)perf[i].IdleTime.QuadPart;
+		out[i].idle = idle;
+		out[i].kernel = (uint64)perf[i].KernelTime.QuadPart - idle;
+		out[i].user = (uint64)perf[i].UserTime.QuadPart;
 	}
 }

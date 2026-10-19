@@ -1,34 +1,38 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+#pragma once
 
-// optimized and compact version of std::bitset with no error checking in release mode
-// uses a single uint32 to store the bitmask, thus allowing up to 32 bool values
-
+// Up to 32 flags packed into one uint32. Indices are only checked in debug builds.
 template<size_t N>
 class SmallBitset
 {
+	static_assert(N <= 32, "SmallBitset holds at most 32 bits");
+
 public:
 	SmallBitset() = default;
-	static_assert(N <= 32);
-	
+
 	bool test(size_t index) const
 	{
 		cemu_assert_debug(index < N);
-		return ((m_bits >> index) & 1) != 0;
-	}
-
-	void set(size_t index, bool val)
-	{
-		cemu_assert_debug(index < N);
-		m_bits &= ~(1u << index);
-		if (val)
-			m_bits |= (1u << index);
+		return (m_mask & bit(index)) != 0;
 	}
 
 	void set(size_t index)
 	{
 		cemu_assert_debug(index < N);
-		m_bits |= (1u << index);
+		m_mask |= bit(index);
+	}
+
+	void set(size_t index, bool val)
+	{
+		cemu_assert_debug(index < N);
+		if (val)
+			m_mask |= bit(index);
+		else
+			m_mask &= ~bit(index);
 	}
 
 private:
-	uint32 m_bits{};
+	static uint32 bit(size_t index) { return 1u << (uint32)index; }
+
+	uint32 m_mask{ 0 };
 };

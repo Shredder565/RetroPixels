@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include <vector>
@@ -5,41 +6,44 @@
 #include <string>
 #include <optional>
 
+// Reader for the INI dialect of graphic pack rules files:
+//  - [name] starts a section; '#' or ';' outside double quotes start a comment
+//  - name = value pairs; a value in double quotes has the quotes removed
+//  - option names are matched case-insensitively (ASCII)
+//  - a UTF-8 byte order mark is skipped; malformed lines are ignored
+// Line numbers count non-empty lines only.
+// Iterate with NextSection() and query the current section.
 class IniParser
 {
-private:
-	class IniSection
-	{
-	public:
-		IniSection(std::string_view sectionName, size_t lineNumber) : m_sectionName(sectionName), m_lineNumber(lineNumber) {}
-		std::string_view m_sectionName;
-		size_t m_lineNumber;
-		std::vector<std::pair<std::string_view, std::string_view>> m_optionPairs;
-	};
-
 public:
 	IniParser(std::span<char> iniContents, std::string_view name = {});
-	IniParser(std::span<unsigned char> iniContents, std::string_view name = {}) : IniParser(std::span<char>((char*)iniContents.data(), iniContents.size()), name) {};
+	IniParser(std::span<unsigned char> iniContents, std::string_view name = {}) : IniParser(std::span<char>((char*)iniContents.data(), iniContents.size()), name) {}
 
-	// section and option iterating
+	IniParser(const IniParser&) = delete;
+	IniParser& operator=(const IniParser&) = delete;
+
+	// advances to the next (on the first call: the first) section; false when there are no more
 	bool NextSection();
 	std::string_view GetCurrentSectionName();
 	size_t GetCurrentSectionLineNumber();
+	// value of the first option with this name in the current section
 	std::optional<std::string_view> FindOption(std::string_view optionName);
 	std::span<std::pair<std::string_view, std::string_view>> GetAllOptions();
 
 private:
-	// parsing
-	bool parse();
-	bool ReadNextLine(std::string_view& lineString);
-	void TrimWhitespaces(std::string_view& str);
-	void StartSection(std::string_view sectionName, size_t lineNumber);
-	void PrintWarning(int lineNumber, std::string_view msg, std::string_view lineView);
+	struct Section
+	{
+		std::string_view name;
+		size_t lineNumber;
+		std::vector<std::pair<std::string_view, std::string_view>> options;
+	};
 
-	std::vector<char> m_iniFileData;
+	void parseAll();
+	void parseLine(std::string_view line, size_t lineNumber);
+	Section* current();
+
+	std::vector<char> m_text; // views point into this
 	std::string m_name;
-	bool m_isValid{ false };
-	size_t m_parseOffset{ 0 };
-	std::vector<IniSection> m_sectionList;
-	size_t m_currentSectionIndex{std::numeric_limits<size_t>::max()};
+	std::vector<Section> m_sections;
+	size_t m_cursor{ 0 }; // 0 = before the first section, else index + 1
 };

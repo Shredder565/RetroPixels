@@ -1,100 +1,80 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
+// Bounds-checked reader over a byte buffer. A read past the end sets the
+// error flag, moves the cursor to the end and returns zero/empty values.
 class MemStreamReader
 {
 public:
-	MemStreamReader(const uint8* data, sint32 size) : m_data(data), m_size(size)
-	{
-		m_cursorPos = 0;
-	}
+	MemStreamReader(const uint8* data, sint32 size) : m_data(data), m_size(size), m_cursorPos(0) {}
 
+	// supported: uint8, uint16, uint32, uint64, std::string (uint32 length + bytes)
 	template<typename T> T readBE();
+	// supported: uint8, uint32, uint64
 	template<typename T> T readLE();
 
+	// uint32 element count (big endian) followed by the raw elements
 	template<typename T>
 	std::vector<T> readPODVector()
 	{
-		uint32 numElements = readBE<uint32>();
+		const uint32 count = readBE<uint32>();
 		if (hasError())
-		{
-			return std::vector<T>();
-		}
-		std::vector<T> v;
-		v.reserve(numElements);
-		v.resize(numElements);
-		readData(v.data(), v.size() * sizeof(T));
-		return v;
+			return {};
+		std::vector<T> result(count);
+		readData(result.data(), result.size() * sizeof(T));
+		return result;
 	}
 
-	// read string terminated by newline character (or end of stream)
-	// will also trim off any carriage return
+	// Next line up to '\n' or the end of the data, without the newline and
+	// without '\r' characters at either end. Sets the error flag (and returns
+	// an empty view) when already at the end.
 	std::string_view readLine()
 	{
-		size_t length = 0;
 		if (m_cursorPos >= m_size)
 		{
 			m_hasError = true;
-			return std::basic_string_view((const char*)nullptr, 0);
+			return std::string_view(nullptr, 0);
 		}
-		// end of line is determined by '\n'
-		const char* lineStrBegin = (const char*)(m_data + m_cursorPos);
-		const char* lineStrEnd = nullptr;
+		const char* lineBegin = (const char*)(m_data + m_cursorPos);
+		const char* lineEnd = nullptr;
 		while (m_cursorPos < m_size)
 		{
-			if (m_data[m_cursorPos] == '\n')
+			const uint8 c = m_data[m_cursorPos++];
+			if (c == '\n')
 			{
-				lineStrEnd = (const char*)(m_data + m_cursorPos);
-				m_cursorPos++; // skip the newline character
+				lineEnd = (const char*)(m_data + m_cursorPos - 1);
 				break;
 			}
-			m_cursorPos++;
 		}
-		if(lineStrEnd == nullptr)
-			lineStrEnd = (const char*)(m_data + m_cursorPos);
-		// truncate any '\r' at the beginning and end
-		while (lineStrBegin < lineStrEnd)
-		{
-			if (lineStrBegin[0] != '\r')
-				break;
-			lineStrBegin++;
-		}
-		while (lineStrEnd > lineStrBegin)
-		{
-			if (lineStrEnd[-1] != '\r')
-				break;
-			lineStrEnd--;
-		}
-		length = (lineStrEnd - lineStrBegin);
-		return std::basic_string_view((const char*)lineStrBegin, length);
+		if (!lineEnd)
+			lineEnd = (const char*)(m_data + m_cursorPos);
+		while (lineBegin < lineEnd && *lineBegin == '\r')
+			lineBegin++;
+		while (lineEnd > lineBegin && lineEnd[-1] == '\r')
+			lineEnd--;
+		return std::string_view(lineBegin, (size_t)(lineEnd - lineBegin));
 	}
 
 	bool readData(void* ptr, size_t size)
 	{
-		if (m_cursorPos + size > m_size)
-		{
-			m_cursorPos = m_size;
-			m_hasError = true;
+		if (!fits(size))
 			return false;
-		}
-		memcpy(ptr, m_data + m_cursorPos, size);
+		if (size != 0)
+			memcpy(ptr, m_data + m_cursorPos, size);
 		m_cursorPos += (sint32)size;
 		return true;
 	}
 
 	std::span<uint8> readDataNoCopy(size_t size)
 	{
-		if (m_cursorPos + size > m_size)
-		{
-			m_cursorPos = m_size;
-			m_hasError = true;
-			return std::span<uint8>();
-		}
-		auto r = std::span<uint8>((uint8*)m_data + m_cursorPos, size);
+		if (!fits(size))
+			return {};
+		std::span<uint8> view((uint8*)m_data + m_cursorPos, size);
 		m_cursorPos += (sint32)size;
-		return r;
+		return view;
 	}
 
-	// returns true if any of the reads was out of bounds
+	// true if any read so far went out of bounds
 	bool hasError() const
 	{
 		return m_hasError;
@@ -106,9 +86,12 @@ public:
 	}
 
 private:
-	bool reserveReadLength(size_t length)
+	template<typename T> T readRaw(bool bigEndian);
+
+	// checks that size more bytes are available, flags an error otherwise
+	bool fits(size_t size)
 	{
-		if (m_cursorPos + length > m_size)
+		if ((size_t)m_cursorPos + size > (size_t)m_size)
 		{
 			m_cursorPos = m_size;
 			m_hasError = true;
@@ -117,52 +100,42 @@ private:
 		return true;
 	}
 
-	void skipCRLF()
-	{
-		while (m_cursorPos < m_size)
-		{
-			if (m_data[m_cursorPos] != '\r' && m_data[m_cursorPos] != '\n')
-				break;
-			m_cursorPos++;
-		}
-	}
-
 	const uint8* m_data;
 	sint32 m_size;
 	sint32 m_cursorPos;
 	bool m_hasError{ false };
 };
 
+// Appends binary data to a growing byte vector.
 class MemStreamWriter
 {
 public:
 	MemStreamWriter(size_t reservedSize)
 	{
-		if (reservedSize > 0)
-			m_buffer.reserve(reservedSize);
-		else
-			m_buffer.reserve(128);
+		m_buffer.reserve(reservedSize > 0 ? reservedSize : 128);
 	}
 
 	void writeData(const void* ptr, size_t size)
 	{
-		m_buffer.resize(m_buffer.size() + size);
-		uint8* p = m_buffer.data() + m_buffer.size() - size;
-		memcpy(p, ptr, size);
+		const size_t start = m_buffer.size();
+		m_buffer.resize(start + size);
+		if (size)
+			memcpy(m_buffer.data() + start, ptr, size);
 	}
 
+	// supported: uint8, uint16, uint32, uint64, std::string
 	template<typename T> void writeBE(const T& v);
+	// supported: uint32, uint64
 	template<typename T> void writeLE(const T& v);
 
 	template<typename T>
 	void writePODVector(const std::vector<T>& v)
 	{
-		writeBE<uint32>(v.size());
+		writeBE<uint32>((uint32)v.size());
 		writeData(v.data(), v.size() * sizeof(T));
 	}
 
-	// get result buffer without copy
-	// resets internal state
+	// moves the written bytes into data and leaves the writer empty
 	void getResultAndReset(std::vector<uint8>& data)
 	{
 		std::swap(m_buffer, data);
@@ -175,26 +148,45 @@ public:
 	}
 
 private:
+	template<typename T> void writeRaw(T v, bool bigEndian);
+
 	std::vector<uint8> m_buffer;
 };
 
-class SerializerHelper 
+template<> uint8 MemStreamReader::readBE<uint8>();
+template<> uint16 MemStreamReader::readBE<uint16>();
+template<> uint32 MemStreamReader::readBE<uint32>();
+template<> uint64 MemStreamReader::readBE<uint64>();
+template<> std::string MemStreamReader::readBE<std::string>();
+template<> uint8 MemStreamReader::readLE<uint8>();
+template<> uint32 MemStreamReader::readLE<uint32>();
+template<> uint64 MemStreamReader::readLE<uint64>();
+
+template<> void MemStreamWriter::writeBE<uint8>(const uint8& v);
+template<> void MemStreamWriter::writeBE<uint16>(const uint16& v);
+template<> void MemStreamWriter::writeBE<uint32>(const uint32& v);
+template<> void MemStreamWriter::writeBE<uint64>(const uint64& v);
+template<> void MemStreamWriter::writeBE<std::string>(const std::string& v);
+template<> void MemStreamWriter::writeLE<uint32>(const uint32& v);
+template<> void MemStreamWriter::writeLE<uint64>(const uint64& v);
+
+// Base for objects that convert themselves to and from a byte vector.
+class SerializerHelper
 {
 public:
 	bool serialize(std::vector<uint8>& data)
 	{
-		MemStreamWriter streamWriter(0);
-		bool r = serializeImpl(streamWriter);
-		if (!r)
+		MemStreamWriter writer(0);
+		if (!serializeImpl(writer))
 			return false;
-		streamWriter.getResultAndReset(data);
+		writer.getResultAndReset(data);
 		return true;
 	}
 
 	bool deserialize(std::vector<uint8>& data)
 	{
-		MemStreamReader memStreamReader(data.data(), (sint32)data.size());
-		return deserializeImpl(memStreamReader);
+		MemStreamReader reader(data.data(), (sint32)data.size());
+		return deserializeImpl(reader);
 	}
 
 protected:

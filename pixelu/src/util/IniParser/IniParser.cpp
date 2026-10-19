@@ -1,263 +1,176 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "util/IniParser/IniParser.h"
+
+namespace
+{
+	bool isBlank(char c)
+	{
+		return c == ' ' || c == '\t';
+	}
+
+	std::string_view stripBlanks(std::string_view s)
+	{
+		while (!s.empty() && isBlank(s.front()))
+			s.remove_prefix(1);
+		while (!s.empty() && isBlank(s.back()))
+			s.remove_suffix(1);
+		return s;
+	}
+
+	// cuts the line at the first '#' or ';' that is not inside double quotes
+	std::string_view stripComment(std::string_view s)
+	{
+		bool quoted = false;
+		for (size_t i = 0; i < s.size(); i++)
+		{
+			if (s[i] == '"')
+				quoted = !quoted;
+			else if (!quoted && (s[i] == '#' || s[i] == ';'))
+				return s.substr(0, i);
+		}
+		return s;
+	}
+
+	// printable ASCII (code 128 is tolerated), no space and no brackets
+	bool isValidOptionName(std::string_view s)
+	{
+		for (char ch : s)
+		{
+			const uint8 c = (uint8)ch;
+			if (c == '[' || c == ']' || c == ' ' || c < 32 || c > 128)
+				return false;
+		}
+		return true;
+	}
+
+	char asciiLower(char c)
+	{
+		return (c >= 'A' && c <= 'Z') ? (char)(c + ('a' - 'A')) : c;
+	}
+
+	bool equalsIgnoreCase(std::string_view a, std::string_view b)
+	{
+		if (a.size() != b.size())
+			return false;
+		for (size_t i = 0; i < a.size(); i++)
+		{
+			if (asciiLower(a[i]) != asciiLower(b[i]))
+				return false;
+		}
+		return true;
+	}
+}
 
 IniParser::IniParser(std::span<char> iniContents, std::string_view name) : m_name(name)
 {
-	// we dont support utf8 but still skip the byte order mark in case the user saved the document with the wrong encoding
-	if (iniContents.size() >= 3 && (uint8)iniContents[0] == 0xEF && (uint8)iniContents[1] == 0xBB && (uint8)iniContents[2] == 0xBF)
+	static constexpr uint8 kUtf8Bom[3] = { 0xEF, 0xBB, 0xBF };
+	if (iniContents.size() >= 3 && memcmp(iniContents.data(), kUtf8Bom, 3) == 0)
 		iniContents = iniContents.subspan(3);
-
-	m_iniFileData.assign(iniContents.begin(), iniContents.end());
-	m_isValid = parse();
+	m_text.assign(iniContents.begin(), iniContents.end());
+	parseAll();
 }
 
-bool IniParser::ReadNextLine(std::string_view& lineString)
+void IniParser::parseAll()
 {
-	if (m_parseOffset >= m_iniFileData.size())
-		return false;
-	// skip \r and \n
-	for (; m_parseOffset < m_iniFileData.size(); m_parseOffset++)
+	const char* const begin = m_text.data();
+	const size_t size = m_text.size();
+	size_t pos = 0;
+	size_t lineNumber = 0;
+	while (pos < size)
 	{
-		char c = m_iniFileData[m_parseOffset];
-		if (c == '\r' || c == '\n')
+		if (m_text[pos] == '\r' || m_text[pos] == '\n')
+		{
+			pos++;
 			continue;
-		break;
-	}
-	if (m_parseOffset >= m_iniFileData.size())
-		return false;
-	size_t lineStart = m_parseOffset;
-	// parse until end of line/file
-	for (; m_parseOffset < m_iniFileData.size(); m_parseOffset++)
-	{
-		char c = m_iniFileData[m_parseOffset];
-		if (c == '\r' || c == '\n')
-			break;
-	}
-	size_t lineEnd = m_parseOffset;
-	lineString = { m_iniFileData.data() + lineStart, lineEnd - lineStart };
-	return true;
-}
-
-void IniParser::TrimWhitespaces(std::string_view& str)
-{
-	while (!str.empty())
-	{
-		char c = str[0];
-		if (c != ' ' && c != '\t')
-			break;
-		str.remove_prefix(1);
-	}
-	while (!str.empty())
-	{
-		char c = str.back();
-		if (c != ' ' && c != '\t')
-			break;
-		str.remove_suffix(1);
-	}
-}
-
-bool IniParser::parse()
-{
-	sint32 lineNumber = 0;
-	std::string_view lineView;
-	while (ReadNextLine(lineView))
-	{
+		}
+		const size_t start = pos;
+		while (pos < size && m_text[pos] != '\r' && m_text[pos] != '\n')
+			pos++;
 		lineNumber++;
-		// skip whitespaces
-		while (!lineView.empty())
-		{
-			char c = lineView[0];
-			if (c != ' ' && c != '\t')
-				break;
-			lineView.remove_prefix(1);
-		}
-		if (lineView.empty())
-			continue;
-		// cut off comments (starting with # or ;)
-		bool isInQuote = false;
-		for (size_t i = 0; i < lineView.size(); i++)
-		{
-			if (lineView[i] == '\"')
-				isInQuote = !isInQuote;
-			if ((lineView[i] == '#' || lineView[i] == ';') && !isInQuote)
-			{
-				lineView.remove_suffix(lineView.size() - i);
-				break;
-			}
-		}
-		if(lineView.empty())
-			continue;
-		// handle section headers
-		if (lineView[0] == '[')
-		{
-			isInQuote = false;
-			bool endsWithBracket = false;
-			for (size_t i = 1; i < lineView.size(); i++)
-			{
-				if (lineView[i] == '\"')
-					isInQuote = !isInQuote;
-				if (lineView[i] == ']')
-				{
-					lineView.remove_suffix(lineView.size() - i);
-					lineView.remove_prefix(1);
-					endsWithBracket = true;
-					break;
-				}
-			}
-			if (!endsWithBracket)
-				PrintWarning(lineNumber, "Section doesn't end with a ]", lineView);
-			StartSection(lineView, lineNumber);
-			continue;
-		}
-		// otherwise try to parse it as an option in the form name = value
-		// find and split at = character
-		std::string_view option_name;
-		std::string_view option_value;
-		bool invalidName = true;
-		for (size_t i = 0; i < lineView.size(); i++)
-		{
-			if (lineView[i] == '=')
-			{
-				option_name = lineView.substr(0, i);
-				option_value = lineView.substr(i+1);
-				invalidName = false;
-				break;
-			}
-
-		}
-		if (invalidName)
-		{
-			TrimWhitespaces(lineView);
-			if (!lineView.empty())
-				PrintWarning(lineNumber, "Not a valid section header or name-value pair", lineView);
-			continue;
-		}
-		// validate
-		TrimWhitespaces(option_name);
-		TrimWhitespaces(option_value);
-		if (option_name.empty())
-		{
-			PrintWarning(lineNumber, "Empty option name is not allowed", lineView);
-			continue;
-		}
-		bool invalidCharacter = false;
-		for (auto& _c : option_name)
-		{
-			uint8 c = (uint8)_c;
-			if (c == ']' || c == '[')
-			{
-				PrintWarning(lineNumber, "Option name may not contain [ or ]", lineView);
-				invalidCharacter = true;
-				break;
-			}
-			else if (c < 32 || c > 128 || c == ' ')
-			{
-				PrintWarning(lineNumber, "Option name may only contain ANSI characters and no spaces", lineView);
-				invalidCharacter = true;
-				break;
-			}
-		}
-		if(invalidCharacter)
-			continue;
-		// remove quotes from value
-		if (!option_value.empty() && option_value.front() == '\"')
-		{
-			option_value.remove_prefix(1);
-			if (option_value.size() >= 2 && option_value.back() == '\"')
-			{
-				option_value.remove_suffix(1);
-			}
-			else
-			{
-				PrintWarning(lineNumber, "Option value starts with a quote character \" but does not end with one", lineView);
-				continue;
-			}
-		}
-		if (m_sectionList.empty())
-		{
-			// no current section
-			PrintWarning(lineNumber, "Option defined without first defining a section", lineView);
-			continue;
-		}
-		// convert name to lower case
-		m_sectionList.back().m_optionPairs.emplace_back(option_name, option_value);
+		parseLine(std::string_view(begin + start, pos - start), lineNumber);
 	}
-	return true;
 }
 
-void IniParser::StartSection(std::string_view sectionName, size_t lineNumber)
+void IniParser::parseLine(std::string_view line, size_t lineNumber)
 {
-	m_sectionList.emplace_back(sectionName, lineNumber);
+	while (!line.empty() && isBlank(line.front()))
+		line.remove_prefix(1);
+	line = stripComment(line);
+	if (line.empty())
+		return;
+
+	if (line.front() == '[')
+	{
+		// without a closing bracket the whole text, '[' included, is the name
+		const size_t close = line.find(']', 1);
+		const std::string_view sectionName = (close == std::string_view::npos) ? line : line.substr(1, close - 1);
+		m_sections.push_back(Section{ sectionName, lineNumber, {} });
+		return;
+	}
+
+	const size_t eq = line.find('=');
+	if (eq == std::string_view::npos)
+		return; // neither a section nor an option
+	const std::string_view optName = stripBlanks(line.substr(0, eq));
+	std::string_view optValue = stripBlanks(line.substr(eq + 1));
+	if (optName.empty() || !isValidOptionName(optName))
+		return;
+	if (!optValue.empty() && optValue.front() == '"')
+	{
+		// needs a closing quote that is not the opening one and not directly after it
+		if (optValue.size() < 3 || optValue.back() != '"')
+			return;
+		optValue = optValue.substr(1, optValue.size() - 2);
+	}
+	if (m_sections.empty())
+		return; // options before the first section are ignored
+	m_sections.back().options.emplace_back(optName, optValue);
+}
+
+IniParser::Section* IniParser::current()
+{
+	if (m_cursor == 0 || m_cursor > m_sections.size())
+		return nullptr;
+	return &m_sections[m_cursor - 1];
 }
 
 bool IniParser::NextSection()
 {
-	if (m_currentSectionIndex == std::numeric_limits<size_t>::max())
-	{
-		m_currentSectionIndex = 0;
-		return m_currentSectionIndex < m_sectionList.size();
-	}
-	if (m_currentSectionIndex >= m_sectionList.size())
+	if (m_cursor != 0 && m_cursor > m_sections.size())
 		return false;
-	m_currentSectionIndex++;
-	return m_currentSectionIndex < m_sectionList.size();
+	m_cursor++;
+	return m_cursor <= m_sections.size();
 }
 
 std::string_view IniParser::GetCurrentSectionName()
 {
-	if (m_currentSectionIndex == std::numeric_limits<size_t>::max() || m_currentSectionIndex >= m_sectionList.size())
-		return "";
-	return m_sectionList[m_currentSectionIndex].m_sectionName;
+	Section* s = current();
+	return s ? s->name : std::string_view("");
 }
 
 size_t IniParser::GetCurrentSectionLineNumber()
 {
-	if (m_currentSectionIndex == std::numeric_limits<size_t>::max() || m_currentSectionIndex >= m_sectionList.size())
-		return 0;
-	return m_sectionList[m_currentSectionIndex].m_lineNumber;
+	Section* s = current();
+	return s ? s->lineNumber : 0;
 }
 
 std::optional<std::string_view> IniParser::FindOption(std::string_view optionName)
 {
-	if (m_currentSectionIndex == std::numeric_limits<size_t>::max() || m_currentSectionIndex >= m_sectionList.size())
+	Section* s = current();
+	if (!s)
 		return std::nullopt;
-	auto& optionPairsList = m_sectionList[m_currentSectionIndex].m_optionPairs;
-	for (auto& itr : optionPairsList)
+	for (auto& [key, value] : s->options)
 	{
-		auto& itrOptionName = itr.first;
-		// case insensitive ANSI string comparison
-		if(itrOptionName.size() != optionName.size())
-			continue;
-		bool isMatch = true;
-		for (size_t i = 0; i < itrOptionName.size(); i++)
-		{
-			char c0 = itrOptionName[i];
-			char c1 = optionName[i];
-			if (c0 >= 'A' && c0 <= 'Z')
-				c0 -= ('A' - 'a');
-			if (c1 >= 'A' && c1 <= 'Z')
-				c1 -= ('A' - 'a');
-			if (c0 != c1)
-			{
-				isMatch = false;
-				break;
-			}
-		}
-		if (!isMatch)
-			continue;
-		return itr.second;
+		if (equalsIgnoreCase(key, optionName))
+			return value;
 	}
 	return std::nullopt;
 }
 
 std::span<std::pair<std::string_view, std::string_view>> IniParser::GetAllOptions()
 {
-	if (m_currentSectionIndex == std::numeric_limits<size_t>::max() || m_currentSectionIndex >= m_sectionList.size())
+	Section* s = current();
+	if (!s)
 		return {};
-	return m_sectionList[m_currentSectionIndex].m_optionPairs;
-}
-
-void IniParser::PrintWarning(int lineNumber, std::string_view msg, std::string_view lineView)
-{
-	// INI logging is silenced
-	// cemuLog_log(LogType::Force, "File: {} Line {}: {}", m_name, lineNumber, msg);
+	return s->options;
 }

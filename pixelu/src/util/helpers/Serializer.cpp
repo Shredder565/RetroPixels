@@ -1,162 +1,61 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Serializer.h"
 
-template<>
-uint8 MemStreamReader::readBE()
+template<typename T>
+T MemStreamReader::readRaw(bool bigEndian)
 {
-	if (!reserveReadLength(sizeof(uint8)))
+	T v{};
+	if (!fits(sizeof(T)))
 		return 0;
-	uint8 v = m_data[m_cursorPos];
-	m_cursorPos += sizeof(uint8);
-	return v;
+	memcpy(&v, m_data + m_cursorPos, sizeof(T));
+	m_cursorPos += (sint32)sizeof(T);
+	return bigEndian ? _BE(v) : _LE(v);
 }
 
-template<>
-uint16 MemStreamReader::readBE()
-{
-	if (!reserveReadLength(sizeof(uint16)))
-		return 0;
-	const uint8* p = m_data + m_cursorPos;
-	uint16 v;
-	std::memcpy(&v, p, sizeof(v));
-	v = _BE(v);
-	m_cursorPos += sizeof(uint16);
-	return v;
-}
+template<> uint8 MemStreamReader::readBE<uint8>() { return readRaw<uint8>(true); }
+template<> uint16 MemStreamReader::readBE<uint16>() { return readRaw<uint16>(true); }
+template<> uint32 MemStreamReader::readBE<uint32>() { return readRaw<uint32>(true); }
+template<> uint64 MemStreamReader::readBE<uint64>() { return readRaw<uint64>(true); }
+
+template<> uint8 MemStreamReader::readLE<uint8>() { return readRaw<uint8>(false); }
+template<> uint32 MemStreamReader::readLE<uint32>() { return readRaw<uint32>(false); }
+template<> uint64 MemStreamReader::readLE<uint64>() { return readRaw<uint64>(false); }
 
 template<>
-uint32 MemStreamReader::readBE()
+std::string MemStreamReader::readBE<std::string>()
 {
-	if (!reserveReadLength(sizeof(uint32)))
-		return 0;
-	const uint8* p = m_data + m_cursorPos;
-	uint32 v;
-	std::memcpy(&v, p, sizeof(v));
-	v = _BE(v);
-	m_cursorPos += sizeof(uint32);
-	return v;
-}
-
-template<>
-uint64 MemStreamReader::readBE()
-{
-	if (!reserveReadLength(sizeof(uint64)))
-		return 0;
-	const uint8* p = m_data + m_cursorPos;
-	uint64 v;
-	std::memcpy(&v, p, sizeof(v));
-	v = _BE(v);
-	m_cursorPos += sizeof(uint64);
-	return v;
-}
-
-template<>
-std::string MemStreamReader::readBE()
-{
-	std::string s;
-	uint32 stringSize = readBE<uint32>();
+	const uint32 length = readBE<uint32>();
 	if (hasError())
-		return s;
-	if (stringSize >= (32 * 1024 * 1024))
+		return {};
+	constexpr uint32 kSanityLimit = 32 * 1024 * 1024;
+	if (length >= kSanityLimit)
 	{
-		// out of bounds read or suspiciously large string
 		m_hasError = true;
-		return std::string();
+		return {};
 	}
-	s.resize(stringSize);
-	readData(s.data(), stringSize);
+	std::string s(length, '\0');
+	readData(s.data(), length);
 	return s;
 }
 
-template<>
-uint8 MemStreamReader::readLE()
+template<typename T>
+void MemStreamWriter::writeRaw(T v, bool bigEndian)
 {
-	return readBE<uint8>();
+	const T stored = bigEndian ? _BE(v) : _LE(v);
+	writeData(&stored, sizeof(T));
 }
 
-template<>
-uint32 MemStreamReader::readLE()
-{
-	if (!reserveReadLength(sizeof(uint32)))
-		return 0;
-	const uint8* p = m_data + m_cursorPos;
-	uint32 v;
-	std::memcpy(&v, p, sizeof(v));
-	v = _LE(v);
-	m_cursorPos += sizeof(uint32);
-	return v;
-}
+template<> void MemStreamWriter::writeBE<uint8>(const uint8& v) { m_buffer.push_back(v); }
+template<> void MemStreamWriter::writeBE<uint16>(const uint16& v) { writeRaw<uint16>(v, true); }
+template<> void MemStreamWriter::writeBE<uint32>(const uint32& v) { writeRaw<uint32>(v, true); }
+template<> void MemStreamWriter::writeBE<uint64>(const uint64& v) { writeRaw<uint64>(v, true); }
 
-template<>
-uint64 MemStreamReader::readLE()
-{
-	if (!reserveReadLength(sizeof(uint64)))
-		return 0;
-	const uint8* p = m_data + m_cursorPos;
-	uint64 v;
-	std::memcpy(&v, p, sizeof(v));
-	v = _LE(v);
-	m_cursorPos += sizeof(uint64);
-	return v;
-}
-
-template<>
-void MemStreamWriter::writeBE<uint64>(const uint64& v)
-{
-	m_buffer.resize(m_buffer.size() + 8);
-	uint8* p = m_buffer.data() + m_buffer.size() - 8;
-	uint64 tmp = _BE(v);
-	std::memcpy(p, &tmp, sizeof(tmp));
-}
-
-template<>
-void MemStreamWriter::writeBE<uint32>(const uint32& v)
-{
-	m_buffer.resize(m_buffer.size() + 4);
-	uint8* p = m_buffer.data() + m_buffer.size() - 4;
-	uint32 tmp = _BE(v);
-	std::memcpy(p, &tmp, sizeof(tmp));
-}
-
-
-template<>
-void MemStreamWriter::writeBE<uint16>(const uint16& v)
-{
-	m_buffer.resize(m_buffer.size() + 2);
-	uint8* p = m_buffer.data() + m_buffer.size() - 2;
-	uint16 tmp = _BE(v);
-	std::memcpy(p, &tmp, sizeof(tmp));
-}
-
-
-template<>
-void MemStreamWriter::writeBE<uint8>(const uint8& v)
-{
-	m_buffer.emplace_back(v);
-}
-
+template<> void MemStreamWriter::writeLE<uint32>(const uint32& v) { writeRaw<uint32>(v, false); }
+template<> void MemStreamWriter::writeLE<uint64>(const uint64& v) { writeRaw<uint64>(v, false); }
 
 template<>
 void MemStreamWriter::writeBE<std::string>(const std::string& v)
 {
 	writeBE<uint32>((uint32)v.size());
 	writeData(v.data(), v.size());
-}
-
-template<>
-void MemStreamWriter::writeLE<uint64>(const uint64& v)
-{
-	m_buffer.resize(m_buffer.size() + 8);
-	uint8* p = m_buffer.data() + m_buffer.size() - 8;
-	uint64 tmp = _LE(v);
-	std::memcpy(p, &tmp, sizeof(tmp));
-}
-
-
-template<>
-void MemStreamWriter::writeLE<uint32>(const uint32& v)
-{
-	m_buffer.resize(m_buffer.size() + 4);
-	uint8* p = m_buffer.data() + m_buffer.size() - 4;
-	uint32 tmp = _LE(v);
-	std::memcpy(p, &tmp, sizeof(tmp));
 }

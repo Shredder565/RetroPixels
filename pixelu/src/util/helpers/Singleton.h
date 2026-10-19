@@ -1,6 +1,9 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
-template<typename TType>
+// Base for classes with exactly one, lazily created instance.
+// Derived classes befriend Singleton<Derived> when their constructor is private.
+template<typename TDerived>
 class Singleton
 {
 protected:
@@ -9,9 +12,9 @@ protected:
 	Singleton(Singleton&&) noexcept = delete;
 
 public:
-	static TType& instance() noexcept
+	static TDerived& instance() noexcept
 	{
-		static TType s_instance;
-		return s_instance;
+		static TDerived s_only;
+		return s_only;
 	}
 };

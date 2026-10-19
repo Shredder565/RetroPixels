@@ -1,128 +1,100 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
+#include <new>
+
+// Object pool that grows in batches and never returns memory to the system.
+// allocObj() constructs the object, freeObj() destroys it and keeps the slot.
 template<typename T>
 class MemoryPool
 {
-	static_assert(sizeof(T) >= sizeof(void*)); // object must be large enough to store a single pointer
+	static_assert(sizeof(T) >= sizeof(void*), "a free slot stores the link to the next free slot");
 
 public:
-	MemoryPool(int allocationGranularity)
-		: m_numObjectsAllocated(0)
-	{
-		m_allocationGranularity = allocationGranularity;
-		m_nextFreeObject = nullptr;
-	}
+	MemoryPool(int allocationGranularity) : m_batchSize(allocationGranularity) {}
 
-	template <typename... Ts>
-	T* allocObj(Ts&&... args)
+	template<typename... TArgs>
+	T* allocObj(TArgs&&... args)
 	{
-		if (m_nextFreeObject)
-		{
-			T* allocatedObj = m_nextFreeObject;
-			m_nextFreeObject = *(T**)allocatedObj;
-			new (allocatedObj) T(std::forward<Ts>(args)...);
-			return allocatedObj;
-		}
-		// enlarge pool
-		increasePoolSize();
-		T* allocatedObj = m_nextFreeObject;
-		m_nextFreeObject = *(T**)allocatedObj;
-		new (allocatedObj) T(std::forward<Ts>(args)...);
-		return allocatedObj;
+		if (!m_freeHead)
+			addBatch();
+		void* slot = m_freeHead;
+		m_freeHead = *static_cast<void**>(slot);
+		return new (slot) T(std::forward<TArgs>(args)...);
 	}
 
 	void freeObj(T* obj)
 	{
 		obj->~T();
-		pushElementOnFreeStack(obj);
+		releaseSlot(obj);
 	}
 
 private:
-	void pushElementOnFreeStack(T* obj)
+	void releaseSlot(void* slot)
 	{
-		*(T**)obj = m_nextFreeObject;
-		m_nextFreeObject = obj;
+		*static_cast<void**>(slot) = m_freeHead;
+		m_freeHead = slot;
 	}
 
-	void increasePoolSize()
+	void addBatch()
 	{
-		T* newElements = static_cast<T*>(::operator new(m_allocationGranularity * sizeof(T), std::nothrow));
-		m_numObjectsAllocated += m_allocationGranularity;
-		for (int i = 0; i < m_allocationGranularity; i++)
-		{
-			pushElementOnFreeStack(newElements);
-			newElements++;
-		}
+		T* batch = static_cast<T*>(::operator new(sizeof(T) * (size_t)m_batchSize, std::nothrow));
+		for (int i = 0; i < m_batchSize; i++)
+			releaseSlot(batch + i);
+		m_totalSlots += m_batchSize;
 	}
 
-private:
-	T* m_nextFreeObject;
-	int m_allocationGranularity;
-	int m_numObjectsAllocated;
+	void* m_freeHead{ nullptr };
+	int m_batchSize;
+	int m_totalSlots{ 0 };
 };
 
-// this memory pool calls the default constructor when the internal pool is allocated
-// no constructor/destructor will be called on acquire/release
+// Pool of objects that stay constructed. Each slot is default-constructed once
+// when the pool grows; acquireObj()/releaseObj() only hand slots out and take
+// them back, the caller resets state as needed.
 template<typename T>
 class MemoryPoolPermanentObjects
 {
-	struct internalObject_t
+	struct Slot
 	{
-		T v;
-		internalObject_t* next;
+		T value;
+		Slot* nextFree;
 	};
 
 public:
-	MemoryPoolPermanentObjects(int allocationGranularity)
-		: m_numObjectsAllocated(0)
-	{
-		m_allocationGranularity = allocationGranularity;
-		m_nextFreeObject = nullptr;
-	}
+	MemoryPoolPermanentObjects(int allocationGranularity) : m_batchSize(allocationGranularity) {}
 
-	template <typename... Ts>
-	T* acquireObj(Ts&&... args)
+	template<typename... TArgs>
+	T* acquireObj(TArgs&&... args)
 	{
-		if (m_nextFreeObject)
-		{
-			internalObject_t* allocatedObject = m_nextFreeObject;
-			m_nextFreeObject = allocatedObject->next;
-			return &allocatedObject->v;
-		}
-		// enlarge pool
-		increasePoolSize();
-		internalObject_t* allocatedObject = m_nextFreeObject;
-		m_nextFreeObject = allocatedObject->next;
-		return &allocatedObject->v;
+		if (!m_freeHead)
+			addBatch();
+		Slot* slot = m_freeHead;
+		m_freeHead = slot->nextFree;
+		return &slot->value;
 	}
 
 	void releaseObj(T* obj)
 	{
-		internalObject_t* internalObj = (internalObject_t*)((uint8*)obj - offsetof(internalObject_t, v));
-		pushElementOnFreeStack(internalObj);
+		Slot* slot = reinterpret_cast<Slot*>(reinterpret_cast<uint8*>(obj) - offsetof(Slot, value));
+		slot->nextFree = m_freeHead;
+		m_freeHead = slot;
 	}
 
 private:
-	void pushElementOnFreeStack(internalObject_t* obj)
+	void addBatch()
 	{
-		obj->next = m_nextFreeObject;
-		m_nextFreeObject = obj;
-	}
-
-	void increasePoolSize()
-	{
-		internalObject_t* newElements = static_cast<internalObject_t*>(::operator new(m_allocationGranularity * sizeof(internalObject_t), std::nothrow));
-		m_numObjectsAllocated += m_allocationGranularity;
-		for (int i = 0; i < m_allocationGranularity; i++)
+		Slot* batch = static_cast<Slot*>(::operator new(sizeof(Slot) * (size_t)m_batchSize, std::nothrow));
+		for (int i = 0; i < m_batchSize; i++)
 		{
-			new (&newElements->v) T();
-			pushElementOnFreeStack(newElements);
-			newElements++;
+			new (&batch[i].value) T();
+			batch[i].nextFree = m_freeHead;
+			m_freeHead = batch + i;
 		}
+		m_totalSlots += m_batchSize;
 	}
 
-private:
-	internalObject_t* m_nextFreeObject;
-	int m_allocationGranularity;
-	int m_numObjectsAllocated;
+	Slot* m_freeHead{ nullptr };
+	int m_batchSize;
+	int m_totalSlots{ 0 };
 };

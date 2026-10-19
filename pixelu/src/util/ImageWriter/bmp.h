@@ -1,127 +1,84 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+#pragma once
 #include "Common/FileStream.h"
+#include <vector>
 
-static void _bmp_write(FileStream* fs, sint32 width, sint32 height, uint32 bits, void* pixelData)
+// Minimal BMP writers for debugging dumps. The source rows are bytesPerRow
+// apart and are converted to a 24-bit bottom-up BMP.
+
+namespace bmp_detail
 {
-	BITMAPFILEHEADER bmp_fh;
-	BITMAPINFOHEADER bmp_ih;
-
-	bmp_fh.bfType = 0x4d42;
-	bmp_fh.bfSize = 0;
-	bmp_fh.bfReserved1 = 0;
-	bmp_fh.bfReserved2 = 0;
-	bmp_fh.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
-
-	bmp_ih.biSize = sizeof(bmp_ih);
-	bmp_ih.biWidth = width;
-	bmp_ih.biHeight = height;
-	bmp_ih.biPlanes = 1;
-	bmp_ih.biBitCount = bits;
-	bmp_ih.biCompression = 0;
-	bmp_ih.biSizeImage = 0;
-	bmp_ih.biXPelsPerMeter = 0;
-	bmp_ih.biYPelsPerMeter = 0;
-	bmp_ih.biClrUsed = 0;
-	bmp_ih.biClrImportant = 0;
-
-	sint32 rowPitch = (width * bits / 8);
-	rowPitch = (rowPitch + 3)&~3;
-
-	uint8 padding[4] = { 0 };
-	sint32 paddingLength = rowPitch - (width * bits / 8);
-
-	bmp_ih.biSize = sizeof(BITMAPINFOHEADER);
-	bmp_fh.bfSize = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + rowPitch * height;
-
-	fs->writeData(&bmp_fh, sizeof(BITMAPFILEHEADER));
-	fs->writeData(&bmp_ih, sizeof(BITMAPINFOHEADER));
-
-	if (bits == 24 || bits == 32)
+	inline void putLE(std::vector<uint8>& out, uint32 v, int bytes)
 	{
+		for (int i = 0; i < bytes; i++)
+			out.push_back((uint8)(v >> (8 * i)));
+	}
+
+	// rgb: width * height * 3 bytes, top row first
+	inline bool write24(const wchar_t* path, sint32 width, sint32 height, const std::vector<uint8>& rgb)
+	{
+		FileStream* file = FileStream::createFile(path);
+		if (!file)
+			return false;
+		const uint32 rowBytes = (uint32)width * 3;
+		const uint32 stride = (rowBytes + 3) & ~3u;
+		const uint32 headerSize = 14 + 40;
+		std::vector<uint8> out;
+		out.reserve(headerSize + stride * (uint32)height);
+		// file header
+		out.push_back('B');
+		out.push_back('M');
+		putLE(out, headerSize + stride * (uint32)height, 4);
+		putLE(out, 0, 4);
+		putLE(out, headerSize, 4);
+		// info header
+		putLE(out, 40, 4);
+		putLE(out, (uint32)width, 4);
+		putLE(out, (uint32)height, 4);
+		putLE(out, 1, 2);  // planes
+		putLE(out, 24, 2); // bits per pixel
+		for (int i = 0; i < 6; i++)
+			putLE(out, 0, 4); // no compression, default sizes and palette
+		for (sint32 y = height - 1; y >= 0; y--)
+		{
+			const uint8* row = rgb.data() + (size_t)y * rowBytes;
+			out.insert(out.end(), row, row + rowBytes);
+			out.resize(out.size() + (stride - rowBytes), 0);
+		}
+		file->writeData(out.data(), (sint32)out.size());
+		delete file;
+		return true;
+	}
+
+	// expands every source pixel of bytesPerPixel into three output bytes
+	template<typename TConvert>
+	inline bool store(const wchar_t* path, sint32 width, sint32 height, sint32 bytesPerRow, const void* pixelData, sint32 bytesPerPixel, TConvert convert)
+	{
+		std::vector<uint8> rgb((size_t)width * (size_t)height * 3);
+		const uint8* src = static_cast<const uint8*>(pixelData);
 		for (sint32 y = 0; y < height; y++)
 		{
-			void* rowInput = ((uint8*)pixelData) + rowPitch * (height - y - 1);
-			fs->writeData(rowInput, width*bits/8);
-			// write padding
-			if(paddingLength > 0)
-				fs->writeData(padding, paddingLength);
+			for (sint32 x = 0; x < width; x++)
+				convert(src + (size_t)y * bytesPerRow + (size_t)x * bytesPerPixel, rgb.data() + ((size_t)y * width + x) * 3);
 		}
-	}	
+		return write24(path, width, height, rgb);
+	}
 }
 
+// 8-bit gray
 static bool bmp_store8BitAs24(wchar_t* path, sint32 width, sint32 height, sint32 bytesPerRow, void* pixelData)
 {
-	FileStream* fs = FileStream::createFile(path);
-	if (fs == nullptr)
-		return false;
-
-	uint8* pixelI = (uint8*)pixelData;
-	uint8* pixelRGB = (uint8*)malloc(width * height * 3);
-	for (sint32 y = 0; y < height; y++)
-	{
-		sint32 srcIdx = y * bytesPerRow;
-		for (sint32 x = 0; x < width; x++)
-		{
-			sint32 dstIdx = x + y * width;
-			pixelRGB[dstIdx * 3 + 0] = pixelI[srcIdx];
-			pixelRGB[dstIdx * 3 + 1] = pixelI[srcIdx];
-			pixelRGB[dstIdx * 3 + 2] = pixelI[srcIdx];
-			srcIdx++;
-		}
-	}
-	_bmp_write(fs, width, height, 24, pixelRGB);
-	free(pixelRGB);
-	delete fs;
-	return true;
+	return bmp_detail::store(path, width, height, bytesPerRow, pixelData, 1, [](const uint8* s, uint8* d) { d[0] = d[1] = d[2] = s[0]; });
 }
 
+// two 8-bit channels, the third output channel is zero
 static bool bmp_store16BitAs24(wchar_t* path, sint32 width, sint32 height, sint32 bytesPerRow, void* pixelData)
 {
-	FileStream* fs = FileStream::createFile(path);
-	if (fs == nullptr)
-		return false;
-
-	uint8* pixelI = (uint8*)pixelData;
-	uint8* pixelRGB = (uint8*)malloc(width * height * 3);
-	for (sint32 y = 0; y < height; y++)
-	{
-		sint32 srcIdx = y * bytesPerRow;
-		for (sint32 x = 0; x < width; x++)
-		{
-			sint32 dstIdx = x + y * width;
-			pixelRGB[dstIdx * 3 + 0] = pixelI[srcIdx + 0];
-			pixelRGB[dstIdx * 3 + 1] = pixelI[srcIdx + 1];
-			pixelRGB[dstIdx * 3 + 2] = 0;
-			srcIdx += 2;
-		}
-	}
-	_bmp_write(fs, width, height, 24, pixelRGB);
-	free(pixelRGB);
-	delete fs;
-	return true;
+	return bmp_detail::store(path, width, height, bytesPerRow, pixelData, 2, [](const uint8* s, uint8* d) { d[0] = s[0]; d[1] = s[1]; d[2] = 0; });
 }
 
+// three 8-bit channels, copied as they are
 static bool bmp_store24BitAs24(wchar_t* path, sint32 width, sint32 height, sint32 bytesPerRow, void* pixelData)
 {
-	FileStream* fs = FileStream::createFile(path);
-	if (fs == nullptr)
-		return false;
-
-	uint8* pixelI = (uint8*)pixelData;
-	uint8* pixelRGB = (uint8*)malloc(width * height * 3);
-	for (sint32 y = 0; y < height; y++)
-	{
-		sint32 srcIdx = y * bytesPerRow;
-		for (sint32 x = 0; x < width; x++)
-		{
-			sint32 dstIdx = x + y * width;
-			pixelRGB[dstIdx * 3 + 0] = pixelI[srcIdx + 0];
-			pixelRGB[dstIdx * 3 + 1] = pixelI[srcIdx + 1];
-			pixelRGB[dstIdx * 3 + 2] = pixelI[srcIdx + 2];
-			srcIdx += 3;
-		}
-	}
-	_bmp_write(fs, width, height, 24, pixelRGB);
-	free(pixelRGB);
-	delete fs;
-	return true;
+	return bmp_detail::store(path, width, height, bytesPerRow, pixelData, 3, [](const uint8* s, uint8* d) { d[0] = s[0]; d[1] = s[1]; d[2] = s[2]; });
 }

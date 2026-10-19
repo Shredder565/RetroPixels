@@ -1,10 +1,12 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include <mutex>
 #include <condition_variable>
 #include <queue>
 
-template <typename T> 
+// FIFO shared between threads. pop() and peek() block until an item is there.
+template<typename T>
 class ConcurrentQueue
 {
 public:
@@ -12,94 +14,93 @@ public:
 	ConcurrentQueue(const ConcurrentQueue&) = delete;
 	ConcurrentQueue& operator=(const ConcurrentQueue&) = delete;
 
+	// returns the number of queued items after the push
 	size_t push(const T& item)
 	{
-		std::unique_lock<std::mutex> mlock(m_mutex);
-		m_queue.push(item);
-		const size_t result = m_queue.size();
-		mlock.unlock();
-		m_condVar.notify_one();
-		return result;
+		return emplaceAndNotify(item);
 	}
 
-	template<typename ... Args>
-	size_t push(Args&& ... args)
+	template<typename... TArgs>
+	size_t push(TArgs&&... args)
 	{
-		std::unique_lock<std::mutex> mlock(m_mutex);
-		m_queue.emplace(std::forward<Args>(args)...);
-		const size_t result = m_queue.size();
-		mlock.unlock();
-		m_condVar.notify_one();
-		return result;
+		return emplaceAndNotify(std::forward<TArgs>(args)...);
 	}
 
+	// waits for an item and returns a copy of it without removing it
 	T peek()
 	{
-		std::unique_lock<std::mutex> mlock(m_mutex);
-		while (m_queue.empty())
-		{
-			m_condVar.wait(mlock);
-		}
-
-		return m_queue.front();
+		std::unique_lock lock(m_lock);
+		waitNotEmpty(lock);
+		return m_items.front();
 	}
 
-	bool peek2(T& item)
+	// non-blocking: takes the front item if there is one
+	bool peek2(T& out)
 	{
-		std::unique_lock<std::mutex> mlock(m_mutex);
-		if (m_queue.empty())
+		std::lock_guard lock(m_lock);
+		if (m_items.empty())
 			return false;
-		item = m_queue.front();
-		m_queue.pop();
+		out = m_items.front();
+		m_items.pop();
 		return true;
 	}
 
 	T pop()
 	{
-		std::unique_lock<std::mutex> mlock(m_mutex);
-		while (m_queue.empty())
-		{
-			m_condVar.wait(mlock);
-		}
-
-		auto val = std::move(m_queue.front());
-		m_queue.pop();
-		return val;
+		std::unique_lock lock(m_lock);
+		waitNotEmpty(lock);
+		T front = std::move(m_items.front());
+		m_items.pop();
+		return front;
 	}
 
-	void pop(T& item)
+	void pop(T& out)
 	{
-		std::unique_lock<std::mutex> mlock(m_mutex);
-		while (m_queue.empty())
-		{
-			m_condVar.wait(mlock);
-		}
-
-		item = std::move(m_queue.front());
-		m_queue.pop();
+		std::unique_lock lock(m_lock);
+		waitNotEmpty(lock);
+		out = std::move(m_items.front());
+		m_items.pop();
 	}
 
 	void clear()
 	{
-		std::unique_lock<std::mutex> mlock(m_mutex);
-		while (!m_queue.empty())
-			m_queue.pop();
+		std::lock_guard lock(m_lock);
+		std::queue<T> empty;
+		m_items.swap(empty);
 	}
 
 	size_t size()
 	{
-		std::unique_lock<std::mutex> mlock(m_mutex);
-		return m_queue.size();
+		std::lock_guard lock(m_lock);
+		return m_items.size();
 	}
 
 	bool empty()
 	{
-		std::unique_lock<std::mutex> mlock(m_mutex);
-		return m_queue.empty();
+		std::lock_guard lock(m_lock);
+		return m_items.empty();
 	}
 
 private:
-	std::mutex m_mutex;
-	std::condition_variable m_condVar;
-	std::queue<T> m_queue;
+	template<typename... TArgs>
+	size_t emplaceAndNotify(TArgs&&... args)
+	{
+		size_t count;
+		{
+			std::lock_guard lock(m_lock);
+			m_items.emplace(std::forward<TArgs>(args)...);
+			count = m_items.size();
+		}
+		m_itemAdded.notify_one();
+		return count;
+	}
+
+	void waitNotEmpty(std::unique_lock<std::mutex>& lock)
+	{
+		m_itemAdded.wait(lock, [this] { return !m_items.empty(); });
+	}
+
+	std::mutex m_lock;
+	std::condition_variable m_itemAdded;
+	std::queue<T> m_items;
 };

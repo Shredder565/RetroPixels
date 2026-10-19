@@ -1,143 +1,125 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
+#include <functional>
+
+// Stores objects tagged with half-open address ranges [start, end) and finds
+// those overlapping a query range. Addresses are grouped into slots of
+// `granularity` bytes, hashed onto `count` buckets; each entry is listed in
+// every bucket its range touches. A per-query stamp keeps an entry that sits
+// in several visited buckets from being reported twice.
 template<typename _OBJ, typename _ADDR, size_t count, size_t granularity>
 class RangeStore
 {
 public:
-
-	typedef struct
+	struct rangeEntry_t
 	{
 		_ADDR start;
 		_ADDR end;
 		_OBJ data;
 		size_t lastIterationIndex;
-	}rangeEntry_t;
+	};
 
 	RangeStore() = default;
 
+	RangeStore(const RangeStore&) = delete;
+	RangeStore& operator=(const RangeStore&) = delete;
+
 	size_t getBucket(_ADDR addr)
 	{
-		size_t index = addr / granularity;
-		index %= count;
-		return index;
+		return (size_t)(addr / granularity) % count;
 	}
 
+	// first bucket and number of slots spanned (not capped at count)
 	void getBucketRange(_ADDR addrStart, _ADDR addrEnd, size_t& bucketFirst, size_t& bucketCount)
 	{
+		const _ADDR last = std::max(addrStart, (_ADDR)(addrEnd - 1));
 		bucketFirst = getBucket(addrStart);
-		size_t indexStart = addrStart / granularity;
-		size_t indexEnd = std::max(addrStart, addrEnd - 1) / granularity;
-		bucketCount = indexEnd - indexStart + 1;
+		bucketCount = (size_t)(last / granularity) - (size_t)(addrStart / granularity) + 1;
 	}
 
-	// end address should be supplied as start+size
+	// end is start + size; returns a handle for deleteRange
 	void* storeRange(_OBJ data, _ADDR start, _ADDR end)
 	{
-		size_t bucketFirst;
-		size_t bucketCount;
-		getBucketRange(start, end, bucketFirst, bucketCount);
-		bucketCount = std::min(bucketCount, count);
-
-		// create range
-		rangeEntry_t* rangeEntry = new rangeEntry_t();
-		rangeEntry->data = data;
-		rangeEntry->start = start;
-		rangeEntry->end = end;
-		rangeEntry->lastIterationIndex = currentIterationIndex;
-
-		// register range in every bucket it touches
-		size_t idx = bucketFirst;
-		for (size_t i = 0; i < bucketCount; i++)
-		{
-			rangeBuckets[idx].list_ranges.push_back(rangeEntry);
-			idx = (idx + 1) % count;
-		}
-
-		return rangeEntry;
+		rangeEntry_t* e = new rangeEntry_t{ start, end, data, m_stamp };
+		forEachBucket(start, end, [e](std::vector<rangeEntry_t*>& bucket) { bucket.push_back(e); });
+		return e;
 	}
 
 	void deleteRange(void* rangePtr)
 	{
-		rangeEntry_t* rangeEntry = (rangeEntry_t*)rangePtr;
-		// get bucket range
-		size_t bucketFirst;
-		size_t bucketCount;
-		getBucketRange(rangeEntry->start, rangeEntry->end, bucketFirst, bucketCount);
-		bucketCount = std::min(bucketCount, count);
-		// remove from buckets
-		size_t idx = bucketFirst;
-		for (size_t i = 0; i < bucketCount; i++)
-		{
-			rangeBuckets[idx].list_ranges.erase(std::remove(rangeBuckets[idx].list_ranges.begin(), rangeBuckets[idx].list_ranges.end(), rangeEntry), rangeBuckets[idx].list_ranges.end());
-			idx = (idx + 1) % count;
-		}
-		delete rangeEntry;
+		rangeEntry_t* e = static_cast<rangeEntry_t*>(rangePtr);
+		forEachBucket(e->start, e->end, [e](std::vector<rangeEntry_t*>& bucket) {
+			bucket.erase(std::remove(bucket.begin(), bucket.end(), e), bucket.end());
+		});
+		delete e;
 	}
 
-	void findRanges(_ADDR start, _ADDR end, std::function <void(_ADDR start, _ADDR end, _OBJ data)> f)
+	// calls f for every overlapping entry, in bucket order then insertion order
+	void findRanges(_ADDR start, _ADDR end, std::function<void(_ADDR start, _ADDR end, _OBJ data)> f)
 	{
-		currentIterationIndex++;
-		size_t bucketFirst;
-		size_t bucketCount;
-		getBucketRange(start, end, bucketFirst, bucketCount);
-		bucketCount = std::min(bucketCount, count);
-		size_t idx = bucketFirst;
-		for (size_t i = 0; i < bucketCount; i++)
-		{
-			for (auto r : rangeBuckets[idx].list_ranges)
+		m_stamp++;
+		forEachBucket(start, end, [&](std::vector<rangeEntry_t*>& bucket) {
+			for (rangeEntry_t* e : bucket)
 			{
-				if (start < r->end && end > r->start && r->lastIterationIndex != currentIterationIndex)
+				if (overlaps(e, start, end) && e->lastIterationIndex != m_stamp)
 				{
-					r->lastIterationIndex = currentIterationIndex;
-					f(r->start, r->end, r->data);
+					e->lastIterationIndex = m_stamp;
+					f(e->start, e->end, e->data);
 				}
 			}
-			idx = (idx + 1) % count;
-		}
+		});
 	}
 
+	// the first entry findRanges would report, if any
 	bool findFirstRange(_ADDR start, _ADDR end, _ADDR& rStart, _ADDR& rEnd, _OBJ& rData)
 	{
-		currentIterationIndex++;
-		size_t bucketFirst;
-		size_t bucketCount;
-		getBucketRange(start, end, bucketFirst, bucketCount);
-		bucketCount = std::min(bucketCount, count);
-		size_t idx = bucketFirst;
-		for (size_t i = 0; i < bucketCount; i++)
+		m_stamp++;
+		size_t first, n;
+		getBucketRange(start, end, first, n);
+		n = std::min(n, count);
+		for (size_t i = 0; i < n; i++)
 		{
-			for (auto r : rangeBuckets[idx].list_ranges)
+			for (rangeEntry_t* e : m_buckets[(first + i) % count])
 			{
-				if (start < r->end && end > r->start && r->lastIterationIndex != currentIterationIndex)
+				if (overlaps(e, start, end) && e->lastIterationIndex != m_stamp)
 				{
-					r->lastIterationIndex = currentIterationIndex;
-					rStart = r->start;
-					rEnd = r->end;
-					rData = r->data;
+					e->lastIterationIndex = m_stamp;
+					rStart = e->start;
+					rEnd = e->end;
+					rData = e->data;
 					return true;
 				}
 			}
-			idx = (idx + 1) % count;
 		}
 		return false;
 	}
 
-    void clear()
-    {
-        for(auto& bucket : rangeBuckets)
-        {
-            while(!bucket.list_ranges.empty())
-                deleteRange(bucket.list_ranges[0]);
-        }
-    }
+	void clear()
+	{
+		for (auto& bucket : m_buckets)
+		{
+			while (!bucket.empty())
+				deleteRange(bucket.front());
+		}
+	}
 
 private:
-	typedef struct
+	static bool overlaps(const rangeEntry_t* e, _ADDR start, _ADDR end)
 	{
-		std::vector<rangeEntry_t*> list_ranges;
-	}rangeBucket_t;
+		return start < e->end && end > e->start;
+	}
 
-	std::array<rangeBucket_t, count> rangeBuckets;
+	template<typename TFunc>
+	void forEachBucket(_ADDR start, _ADDR end, TFunc fn)
+	{
+		size_t first, n;
+		getBucketRange(start, end, first, n);
+		n = std::min(n, count);
+		for (size_t i = 0; i < n; i++)
+			fn(m_buckets[(first + i) % count]);
+	}
 
-	size_t currentIterationIndex;
+	std::array<std::vector<rangeEntry_t*>, count> m_buckets;
+	size_t m_stamp{ 0 };
 };

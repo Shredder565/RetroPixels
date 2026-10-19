@@ -1,108 +1,25 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "boost/nowide/convert.hpp"
 #include <charconv>
 
-// Definition for removed templates in Apple Clang 17
-#if defined(__apple_build_version__) && (__apple_build_version__ >= 17000000)
-namespace std {
-	template<>
-	struct char_traits<uint16be> {
-		using char_type = uint16be;
-		using int_type = int;
-		using off_type = streamoff;
-		using pos_type = streampos;
-		using state_type = mbstate_t;
-
-		static inline void constexpr assign(char_type& c1, const char_type& c2) noexcept {
-			c1 = c2;
-		}
-
-		static inline constexpr bool eq(char_type c1, char_type c2) noexcept {
-			return c1 == c2;
-		}
-
-		static inline constexpr bool lt(char_type c1, char_type c2) noexcept {
-			return c1 < c2;
-		}
-
-		static constexpr int compare(const char_type* s1, const char_type* s2, size_t n) {
-			for (; n; --n, ++s1, ++s2) {
-				if (lt(*s1, *s2)) return -1;
-				if (lt(*s2, *s1)) return 1;
-			}
-			return 0;
-		}
-
-		static constexpr size_t length(const char_type* s) {
-			size_t len = 0;
-			for (; !eq(*s, char_type(0)); ++s) ++len;
-			return len;
-		}
-
-		static constexpr const char_type* find(const char_type* s, size_t n, const char_type& a) {
-			for (; n; --n) {
-				if (eq(*s, a))
-					return s;
-				++s;
-			}
-			return nullptr;
-		}
-
-		static constexpr char_type* move(char_type* s1, const char_type* s2, size_t n) {
-			if (n == 0) return s1;
-			return static_cast<char_type*>(memmove(s1, s2, n * sizeof(char_type)));
-		}
-
-		static constexpr char_type* copy(char_type* s1, const char_type* s2, size_t n) {
-			if (n == 0) return s1;
-			return static_cast<char_type*>(memcpy(s1, s2, n * sizeof(char_type)));
-		}
-
-		static constexpr char_type* assign(char_type* s, size_t n, char_type a) {
-			char_type* r = s;
-			for (; n; --n, ++s)
-				assign(*s, a);
-			return r;
-		}
-
-		static inline constexpr char_type to_char_type(int_type c) noexcept {
-			return char_type(c);
-		}
-
-		static inline constexpr int_type to_int_type(char_type c) noexcept {
-			return int_type(c);
-		}
-
-		static inline constexpr bool eq_int_type(int_type c1, int_type c2) noexcept {
-			return c1 == c2;
-		}
-
-		static inline constexpr int_type eof() noexcept {
-			return static_cast<int_type>(EOF);
-		}
-
-		static inline constexpr int_type not_eof(int_type c) noexcept {
-			return eq_int_type(c, eof()) ? ~eof() : c;
-		}
-	};
-}
-#endif
-
-// todo - move the Cafe/PPC specific parts to CafeString.h eventually
 namespace StringHelpers
 {
-	// convert Wii U big-endian wchar_t string to utf8 string
+	// Wii U wide strings are UTF-16 big endian. The conversions go through the
+	// host wchar_t, like the rest of the code base (boost::nowide).
+
+	// big-endian UTF-16 to UTF-8, stops at a null character or after maxLength characters
 	static std::string ToUtf8(const uint16be* ptr, size_t maxLength)
 	{
-		std::wstringstream result;
-		while (*ptr != 0 && maxLength > 0)
+		std::wstring wide;
+		for (size_t i = 0; i < maxLength; i++)
 		{
-			auto c = (uint16)*ptr;
-			result << static_cast<wchar_t>(c);
-			ptr++;
-			maxLength--;
+			const uint16 c = ptr[i];
+			if (c == 0)
+				break;
+			wide.push_back((wchar_t)c);
 		}
-		return boost::nowide::narrow(result.str());
+		return boost::nowide::narrow(wide);
 	}
 
 	static std::string ToUtf8(std::span<uint16be> input)
@@ -110,106 +27,91 @@ namespace StringHelpers
 		return ToUtf8(input.data(), input.size());
 	}
 
-	// convert little-endian wide string to utf8 string
+	// host-order UTF-16 to UTF-8
 	static std::string ToUtf8FromLE(const uint16* ptr, size_t maxLength)
 	{
-		std::wstringstream result;
-		while (*ptr != 0 && maxLength > 0)
+		std::wstring wide;
+		for (size_t i = 0; i < maxLength; i++)
 		{
-			auto c = (uint16)*ptr;
-			result << static_cast<wchar_t>(c);
-			ptr++;
-			maxLength--;
+			if (ptr[i] == 0)
+				break;
+			wide.push_back((wchar_t)ptr[i]);
 		}
-		return boost::nowide::narrow(result.str());
+		return boost::nowide::narrow(wide);
 	}
 
-	// convert utf8 string to Wii U big-endian wchar_t string
+	// UTF-8 to big-endian UTF-16 (no terminator is added)
 	static std::vector<uint16be> FromUtf8(std::string_view str)
 	{
-		std::vector<uint16be> tmpStr;
-		std::wstring w = boost::nowide::widen(str.data(), str.size());
-		for (auto& c : w)
-			tmpStr.push_back((uint16)c);
-		return tmpStr;
+		const std::wstring wide = boost::nowide::widen(str.data(), str.size());
+		std::vector<uint16be> result;
+		result.reserve(wide.size());
+		for (wchar_t c : wide)
+			result.emplace_back((uint16)c);
+		return result;
+	}
+
+	namespace detail
+	{
+		// "0x"/"0X" selects hex, otherwise decimal. Parsing stops at the first
+		// character that does not belong to the number; an unparsable or
+		// out-of-range number gives defaultValue.
+		template<typename T>
+		T ParseIntegerPrefixed(std::string_view input, T defaultValue)
+		{
+			int base = 10;
+			if (input.size() >= 2 && input[0] == '0' && (input[1] == 'x' || input[1] == 'X'))
+			{
+				base = 16;
+				input.remove_prefix(2);
+			}
+			T value = defaultValue;
+			const auto res = std::from_chars(input.data(), input.data() + input.size(), value, base);
+			if (res.ec == std::errc::invalid_argument || res.ec == std::errc::result_out_of_range)
+				return defaultValue;
+			return value;
+		}
 	}
 
 	static sint32 ToInt(const std::string_view& input, sint32 defaultValue = 0)
 	{
-		sint32 value = defaultValue;
-		if (input.size() >= 2 && (input[0] == '0' && (input[1] == 'x' || input[1] == 'X')))
-		{
-			// hex number
-			const std::from_chars_result result = std::from_chars(input.data() + 2, input.data() + input.size(), value, 16);
-			if (result.ec == std::errc::invalid_argument || result.ec == std::errc::result_out_of_range)
-				return defaultValue;
-		}
-		else
-		{
-			// decimal value
-			const std::from_chars_result result = std::from_chars(input.data(), input.data() + input.size(), value);
-			if (result.ec == std::errc::invalid_argument || result.ec == std::errc::result_out_of_range)
-				return defaultValue;
-		}
-		return value;
+		return detail::ParseIntegerPrefixed<sint32>(input, defaultValue);
 	}
 
 	static sint64 ToInt64(const std::string_view& input, sint64 defaultValue = 0)
 	{
-		sint64 value = defaultValue;
-		if (input.size() >= 2 && (input[0] == '0' && (input[1] == 'x' || input[1] == 'X')))
-		{
-			// hex number
-			const std::from_chars_result result = std::from_chars(input.data() + 2, input.data() + input.size(), value, 16);
-			if (result.ec == std::errc::invalid_argument || result.ec == std::errc::result_out_of_range)
-				return defaultValue;
-		}
-		else
-		{
-			// decimal value
-			const std::from_chars_result result = std::from_chars(input.data(), input.data() + input.size(), value);
-			if (result.ec == std::errc::invalid_argument || result.ec == std::errc::result_out_of_range)
-				return defaultValue;
-		}
-		return value;
+		return detail::ParseIntegerPrefixed<sint64>(input, defaultValue);
 	}
 
+	// Parses pairs of hex digits into bytes until a non-hex character, the end
+	// of the input or maxOutputLength bytes. Returns the number of bytes written.
 	static size_t ParseHexString(std::string_view input, uint8* output, size_t maxOutputLength)
 	{
-		size_t parsedLen = 0;
-		for (size_t i = 0; i < input.size() - 1; i += 2)
+		auto nibble = [](char c) -> int {
+			if (c >= '0' && c <= '9')
+				return c - '0';
+			if (c >= 'a' && c <= 'f')
+				return c - 'a' + 10;
+			if (c >= 'A' && c <= 'F')
+				return c - 'A' + 10;
+			return -1;
+		};
+		size_t written = 0;
+		for (size_t i = 0; i + 1 < input.size() && written < maxOutputLength; i += 2)
 		{
-			if (maxOutputLength <= 0)
+			const int hi = nibble(input[i]);
+			if (hi < 0)
 				break;
-			uint8 b = 0;
-			uint8 c = input[i + 0];
-			// high nibble
-			if (c >= '0' && c <= '9')
-				b |= ((c - '0') << 4);
-			else if (c >= 'a' && c <= 'f')
-				b |= ((c - 'a' + 10) << 4);
-			else if (c >= 'A' && c <= 'F')
-				b |= ((c - 'A' + 10) << 4);
-			else
+			const int lo = nibble(input[i + 1]);
+			if (lo < 0)
 				break;
-			// low nibble
-			c = input[i + 1];
-			if (c >= '0' && c <= '9')
-				b |= (c - '0');
-			else if (c >= 'a' && c <= 'f')
-				b |= (c - 'a' + 10);
-			else if (c >= 'A' && c <= 'F')
-				b |= (c - 'A' + 10);
-			else
-				break;
-			*output = b;
-			output++;
-			maxOutputLength--;
-			parsedLen++;
+			output[written++] = (uint8)((hi << 4) | lo);
 		}
-		return parsedLen;
+		return written;
 	}
 
+	// Iterates the lines of a text. Lines end at '\n'; trailing '\r' characters
+	// are removed. A final '\n' does not start another (empty) line.
 	class StringLineIterator
 	{
 	public:
@@ -222,80 +124,69 @@ namespace StringHelpers
 			using pointer = const std::string_view*;
 			using reference = const std::string_view&;
 
-			Iterator(std::string_view str, sint32 pos) : m_str(str), m_pos(pos)
+			Iterator(std::string_view text, sint32 pos) : m_text(text), m_pos(pos)
 			{
-				update_line();
+				loadLine();
 			}
 
-			reference operator*() const
-			{
-				return m_line;
-			}
-
-			pointer operator->() const
-			{
-				return &m_line;
-			}
+			reference operator*() const { return m_line; }
+			pointer operator->() const { return &m_line; }
 
 			Iterator& operator++()
 			{
-				m_pos = m_nextPos;
-				update_line();
+				m_pos = m_next;
+				loadLine();
 				return *this;
 			}
 
-			friend bool operator==(const Iterator& lhs, const Iterator& rhs)
+			friend bool operator==(const Iterator& a, const Iterator& b)
 			{
-				return lhs.m_str.data() == rhs.m_str.data() && lhs.m_pos == rhs.m_pos;
+				return a.m_text.data() == b.m_text.data() && a.m_pos == b.m_pos;
 			}
 
-			friend bool operator!=(const Iterator& lhs, const Iterator& rhs)
+			friend bool operator!=(const Iterator& a, const Iterator& b)
 			{
-				return !(lhs == rhs);
+				return !(a == b);
 			}
 
 		private:
-			void update_line()
+			void loadLine()
 			{
-				if (m_pos >= m_str.size())
+				if (m_pos < 0 || (size_t)m_pos >= m_text.size())
 				{
-					m_pos = -1;
+					m_pos = -1; // end
+					m_next = -1;
 					m_line = {};
 					return;
 				}
-				auto pos = m_str.find('\n', m_pos);
-				m_nextPos = pos != std::string_view::npos ? pos : -1;
-				if(m_nextPos < 0)
-					m_line = m_str.substr(m_pos, std::string::npos);
+				const size_t newline = m_text.find('\n', (size_t)m_pos);
+				if (newline == std::string_view::npos)
+				{
+					m_line = m_text.substr((size_t)m_pos);
+					m_next = -1;
+				}
 				else
 				{
-					m_line = m_str.substr(m_pos, m_nextPos - m_pos);
-					++m_nextPos; // skip \n
+					m_line = m_text.substr((size_t)m_pos, newline - (size_t)m_pos);
+					m_next = (sint32)(newline + 1);
 				}
 				while (!m_line.empty() && m_line.back() == '\r')
 					m_line.remove_suffix(1);
 			}
 
-			std::string_view m_str;
+			std::string_view m_text;
 			sint32 m_pos;
-			sint32 m_nextPos;
+			sint32 m_next{ -1 };
 			std::string_view m_line;
 		};
 
-		StringLineIterator(std::string_view str) : m_str(str) {}
-		StringLineIterator(std::span<uint8> str) : m_str((const char*)str.data(), str.size()) {}
+		StringLineIterator(std::string_view text) : m_text(text) {}
+		StringLineIterator(std::span<uint8> text) : m_text((const char*)text.data(), text.size()) {}
 
-		Iterator begin() const
-		{
-			return Iterator{m_str, 0 };
-		}
-
-		Iterator end() const
-		{
-			return Iterator{m_str, -1 };
-		}
+		Iterator begin() const { return Iterator{ m_text, 0 }; }
+		Iterator end() const { return Iterator{ m_text, -1 }; }
 
 	private:
-		std::string_view m_str;
+		std::string_view m_text;
 	};
 };

@@ -1,100 +1,95 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
+// Spatial hash for half-open address ranges [begin, end). The address space
+// is cut into slots of TAddressGranularity bytes which map onto TBucketCount
+// buckets (wrapping around). A range is stored in every bucket it touches, at
+// most once per bucket.
 template<typename TData, typename TAddr, TAddr TAddressGranularity, int TBucketCount>
 class IntervalBucketContainer
 {
-	struct bucketEntry_t
-	{
-		TAddr rangeStart;
-		TAddr rangeEnd;
-		TData* data;
-		int bucketStartIndex;
-		bucketEntry_t(TAddr rangeStart, TAddr rangeEnd, TData* data, int bucketStartIndex) : rangeStart(rangeStart), rangeEnd(rangeEnd), data(data), bucketStartIndex(bucketStartIndex) {};
-	};
-	std::vector<bucketEntry_t> list_bucket[TBucketCount];
-
 public:
-
 	IntervalBucketContainer() = default;
 
-	// range is defined as inclusive rangeStart and exclusive rangeEnd
 	void addRange(TAddr rangeStart, TAddr rangeEnd, TData* data)
 	{
-		assert(rangeStart < rangeEnd);
-		int bucketStartIndex = (rangeStart / TAddressGranularity);
-		int bucketEndIndex = ((rangeEnd + TAddressGranularity - 1) / TAddressGranularity);
-		int bucketItrCount = bucketEndIndex - bucketStartIndex;
-		bucketStartIndex %= TBucketCount;
-		int bucketFirstIndex = bucketStartIndex;
-		bucketItrCount = std::min(bucketItrCount, TBucketCount);
-		assert(bucketItrCount != 0);
-		while (bucketItrCount--)
-		{
-			list_bucket[bucketStartIndex].emplace_back(rangeStart, rangeEnd, data, bucketFirstIndex);
-			bucketStartIndex = (bucketStartIndex + 1) % TBucketCount;
-		}
+		const Span s = spanOf(rangeStart, rangeEnd);
+		for (int i = 0; i < s.count; i++)
+			m_buckets[wrap(s.first + i)].push_back(Entry{ rangeStart, rangeEnd, data, s.first });
 	}
 
+	// removes the entry for data; the range must be the one it was added with
 	void removeRange(TAddr rangeStart, TAddr rangeEnd, TData* data)
 	{
-		assert(rangeStart < rangeEnd);
-		int bucketStartIndex = (rangeStart / TAddressGranularity);
-		int bucketEndIndex = ((rangeEnd + TAddressGranularity - 1) / TAddressGranularity);
-		int bucketItrCount = bucketEndIndex - bucketStartIndex;
-		bucketStartIndex %= TBucketCount;
-		bucketItrCount = std::min(bucketItrCount, TBucketCount);
-		assert(bucketItrCount != 0);
-		int eraseCountVerifier = bucketItrCount;
-		while (bucketItrCount--)
+		const Span s = spanOf(rangeStart, rangeEnd);
+		int removed = 0;
+		for (int i = 0; i < s.count; i++)
 		{
-			for (auto it = list_bucket[bucketStartIndex].begin(); it != list_bucket[bucketStartIndex].end(); it++)
-			{
-				if (it->data == data)
-				{
-					assert(it->rangeStart == rangeStart && it->rangeEnd == rangeEnd);
-					// erase
-					list_bucket[bucketStartIndex].erase(it);
-					eraseCountVerifier--;
-					break;
-				}
-			}
-			bucketStartIndex = (bucketStartIndex + 1) % TBucketCount;
+			auto& bucket = m_buckets[wrap(s.first + i)];
+			auto it = std::find_if(bucket.begin(), bucket.end(), [data](const Entry& e) { return e.data == data; });
+			if (it == bucket.end())
+				continue;
+			assert(it->begin == rangeStart && it->end == rangeEnd);
+			bucket.erase(it);
+			removed++;
 		}
-		assert(eraseCountVerifier == 0); // triggers if rangeStart/End doesn't match up with any registered range
+		assert(removed == s.count);
+		(void)removed;
 	}
 
+	// Calls cb(TData*) for each stored range overlapping [rangeStart, rangeEnd).
+	// Buckets are visited from the first touched one onwards and entries in
+	// insertion order. Beyond the first bucket, only entries whose home bucket
+	// is the visited one are reported, so each range is reported once.
 	template<typename TRangeCallback>
 	void lookupRanges(TAddr rangeStart, TAddr rangeEnd, TRangeCallback cb)
 	{
-		assert(rangeStart < rangeEnd);
-		int bucketStartIndex = (rangeStart / TAddressGranularity);
-		int bucketEndIndex = ((rangeEnd + TAddressGranularity - 1) / TAddressGranularity);
-		int bucketItrCount = bucketEndIndex - bucketStartIndex;
-		bucketStartIndex %= TBucketCount;
-		bucketItrCount = std::min(bucketItrCount, TBucketCount);
-		assert(bucketItrCount != 0);
-		// in first round we dont need to check if bucket was already visited
-		for (auto& itr : list_bucket[bucketStartIndex])
+		const Span s = spanOf(rangeStart, rangeEnd);
+		for (int i = 0; i < s.count; i++)
 		{
-			if (itr.rangeStart < rangeEnd && itr.rangeEnd > rangeStart)
+			const int b = wrap(s.first + i);
+			for (auto& e : m_buckets[b])
 			{
-				cb(itr.data);
+				if (e.begin >= rangeEnd || e.end <= rangeStart)
+					continue;
+				if (i != 0 && e.homeBucket != b)
+					continue;
+				cb(e.data);
 			}
-		}
-		bucketItrCount--;
-		bucketStartIndex = (bucketStartIndex + 1) % TBucketCount;
-		// for remaining buckets check if the range starts in the current bucket
-		while (bucketItrCount--)
-		{
-			for (auto& itr : list_bucket[bucketStartIndex])
-			{
-				if (itr.rangeStart < rangeEnd && itr.rangeEnd > rangeStart && itr.bucketStartIndex == bucketStartIndex)
-				{
-					cb(itr.data);
-				}
-			}
-			bucketStartIndex = (bucketStartIndex + 1) % TBucketCount;
 		}
 	}
 
+private:
+	struct Entry
+	{
+		TAddr begin;
+		TAddr end;
+		TData* data;
+		int homeBucket;
+	};
+
+	struct Span
+	{
+		int first; // already wrapped into [0, TBucketCount)
+		int count;
+	};
+
+	static int wrap(int index)
+	{
+		return index % TBucketCount;
+	}
+
+	static Span spanOf(TAddr rangeStart, TAddr rangeEnd)
+	{
+		assert(rangeStart < rangeEnd);
+		const int firstSlot = (int)(rangeStart / TAddressGranularity);
+		const int endSlot = (int)((rangeEnd + TAddressGranularity - 1) / TAddressGranularity);
+		Span s;
+		s.first = wrap(firstSlot);
+		s.count = std::min(endSlot - firstSlot, TBucketCount);
+		assert(s.count != 0);
+		return s;
+	}
+
+	std::vector<Entry> m_buckets[TBucketCount];
 };

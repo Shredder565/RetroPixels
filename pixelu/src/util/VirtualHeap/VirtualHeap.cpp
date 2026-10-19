@@ -1,160 +1,124 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "VirtualHeap.h"
+
+namespace
+{
+	constexpr uint32 kAllocGranularity = 256;
+	constexpr size_t kEntriesPerBatch = 16 * 1024;
+
+	uint32 roundUp(uint32 v, uint32 granularity)
+	{
+		return (v + granularity - 1) & ~(granularity - 1);
+	}
+
+	// adds a batch of entry records to the heap's recycle list
+	void addEntryBatch(VirtualBufferHeap_t* heap)
+	{
+		auto* batch = static_cast<VirtualBufferHeapEntry_t*>(malloc(sizeof(VirtualBufferHeapEntry_t) * kEntriesPerBatch));
+		if (!batch)
+			return;
+		for (size_t i = kEntriesPerBatch; i-- > 0;)
+		{
+			batch[i].next = heap->firstUnusedEntry;
+			heap->firstUnusedEntry = batch + i;
+		}
+	}
+
+	VirtualBufferHeapEntry_t* takeEntry(VirtualBufferHeap_t* heap)
+	{
+		if (!heap->firstUnusedEntry)
+		{
+			cemuLog_log(LogType::Force, "virtualBufferHeap: entry pool exhausted, growing it");
+			addEntryBatch(heap);
+			if (!heap->firstUnusedEntry)
+				return nullptr;
+		}
+		VirtualBufferHeapEntry_t* e = heap->firstUnusedEntry;
+		heap->firstUnusedEntry = e->next;
+		e->next = nullptr;
+		e->previous = nullptr;
+		return e;
+	}
+
+	void recycleEntry(VirtualBufferHeap_t* heap, VirtualBufferHeapEntry_t* e)
+	{
+		e->next = heap->firstUnusedEntry;
+		heap->firstUnusedEntry = e;
+	}
+}
 
 VirtualBufferHeap_t* virtualBufferHeap_create(uint32 virtualHeapSize, void* baseAddr)
 {
-	VirtualBufferHeap_t* bufferHeap = (VirtualBufferHeap_t*)malloc(sizeof(VirtualBufferHeap_t));
-	memset(bufferHeap, 0, sizeof(VirtualBufferHeap_t));
-	bufferHeap->firstEntry = nullptr;
-	virtualHeapSize = (virtualHeapSize + 31)&~31;
-	bufferHeap->virtualSize = virtualHeapSize;
-	bufferHeap->baseAddress = baseAddr;
-	bufferHeap->updateTrackIndex = 0;
-	// create pool of unused entries
-	sint32 unusedEntryPoolSize = 1024 * 16;
-	VirtualBufferHeapEntry_t* unusedEntryPool = (VirtualBufferHeapEntry_t*)malloc(sizeof(VirtualBufferHeapEntry_t)*unusedEntryPoolSize);
-	for (sint32 i = 0; i < unusedEntryPoolSize - 1; i++)
-	{
-		unusedEntryPool[i].next = unusedEntryPool + i + 1;
-	}
-	unusedEntryPool[unusedEntryPoolSize - 1].next = nullptr;
-	bufferHeap->firstUnusedEntry = unusedEntryPool + 0;
-	return bufferHeap;
+	auto* heap = static_cast<VirtualBufferHeap_t*>(calloc(1, sizeof(VirtualBufferHeap_t)));
+	heap->virtualSize = roundUp(virtualHeapSize, 32);
+	heap->baseAddress = baseAddr;
+	addEntryBatch(heap);
+	return heap;
 }
 
-VirtualBufferHeapEntry_t* virtualBufferHeap_createEntry(VirtualBufferHeap_t* bufferHeap)
-{
-	VirtualBufferHeapEntry_t* newEntry = bufferHeap->firstUnusedEntry;
-	if (newEntry == nullptr)
-	{
-		cemuLog_log(LogType::Force, "virtualBufferHeap_createEntry: Pool empty");
-		cemu_assert_suspicious();
-	}
-	bufferHeap->firstUnusedEntry = newEntry->next;
-	newEntry->previous = NULL;
-	newEntry->next = NULL;
-	return newEntry;
-}
-
-void virtualBufferHeap_releaseEntry(VirtualBufferHeap_t* bufferHeap, VirtualBufferHeapEntry_t* entry)
-{
-	bufferHeap->stats.allocatedMemory -= (entry->endOffset - entry->startOffset);
-	bufferHeap->stats.numActiveAllocs--;
-	entry->next = bufferHeap->firstUnusedEntry;
-	bufferHeap->firstUnusedEntry = entry;
-}
-
-// Allocate memory region from virtual heap. Always allocates memory at the lowest possible address
 VirtualBufferHeapEntry_t* virtualBufferHeap_allocate(VirtualBufferHeap_t* bufferHeap, uint32 size)
 {
-	// align size
-	size = (size + 255)&~255;
-	// iterate already allocated entries and try to find free space between them
-	VirtualBufferHeapEntry_t* entryItr = bufferHeap->firstEntry;
-	if (entryItr == NULL)
+	size = roundUp(size, kAllocGranularity);
+	// walk the sorted entries; candidate is the first offset after the previous entry
+	VirtualBufferHeapEntry_t* before = nullptr;
+	VirtualBufferHeapEntry_t* after = bufferHeap->firstEntry;
+	uint32 candidate = 0;
+	while (after && candidate + size > after->startOffset)
 	{
-		// entire heap is unallocated
-		VirtualBufferHeapEntry_t* newEntry = virtualBufferHeap_createEntry(bufferHeap);
-		newEntry->startOffset = 0;
-		newEntry->endOffset = size;
-		newEntry->previous = NULL;
-		newEntry->next = NULL;
-		bufferHeap->firstEntry = newEntry;
-		bufferHeap->stats.allocatedMemory += size;
-		bufferHeap->stats.numActiveAllocs++;
-		return newEntry;
+		candidate = roundUp(after->endOffset, kAllocGranularity);
+		before = after;
+		after = after->next;
 	}
+	if (candidate + size > bufferHeap->virtualSize)
+		return nullptr;
+	VirtualBufferHeapEntry_t* e = takeEntry(bufferHeap);
+	if (!e)
+		return nullptr;
+	e->startOffset = candidate;
+	e->endOffset = candidate + size;
+	e->previous = before;
+	e->next = after;
+	if (before)
+		before->next = e;
 	else
-	{
-		uint32 currentAllocationOffset = 0;
-		VirtualBufferHeapEntry_t* entryPrev = nullptr;
-		while (entryItr)
-		{
-			if ((currentAllocationOffset + size) > entryItr->startOffset)
-			{
-				// space occupied
-				currentAllocationOffset = entryItr->endOffset;
-				currentAllocationOffset = (currentAllocationOffset + 255)&~255;
-				// next
-				entryPrev = entryItr;
-				entryItr = entryItr->next;
-				continue;
-			}
-			else
-			{
-				if ((currentAllocationOffset + size) > bufferHeap->virtualSize)
-					return nullptr; // out of heap memory
-				// free space found
-				VirtualBufferHeapEntry_t* newEntry = virtualBufferHeap_createEntry(bufferHeap);
-				newEntry->startOffset = currentAllocationOffset;
-				newEntry->endOffset = currentAllocationOffset + size;
-				// insert between previous entry and entryItr
-				newEntry->previous = entryItr->previous;
-				newEntry->next = entryItr;
-				if (entryItr->previous)
-					entryItr->previous->next = newEntry;
-				else
-					bufferHeap->firstEntry = newEntry;
-				entryItr->previous = newEntry;
-				bufferHeap->stats.allocatedMemory += size;
-				bufferHeap->stats.numActiveAllocs++;
-				return newEntry;
-			}
-		}
-		// add after entryPrev
-		if ((currentAllocationOffset + size) > bufferHeap->virtualSize)
-			return NULL; // out of heap memory
-		VirtualBufferHeapEntry_t* newEntry = virtualBufferHeap_createEntry(bufferHeap);
-		newEntry->startOffset = currentAllocationOffset;
-		newEntry->endOffset = currentAllocationOffset + size;
-		// insert after previous entry
-		cemu_assert_debug(entryPrev);
-		cemu_assert_debug(entryPrev->next == nullptr);
-		newEntry->previous = entryPrev;
-		newEntry->next = entryPrev->next;
-		entryPrev->next = newEntry;
-		bufferHeap->stats.allocatedMemory += size;
-		bufferHeap->stats.numActiveAllocs++;
-		return newEntry;
-	}
-	return NULL;
+		bufferHeap->firstEntry = e;
+	if (after)
+		after->previous = e;
+	bufferHeap->stats.allocatedMemory += size;
+	bufferHeap->stats.numActiveAllocs++;
+	return e;
 }
 
 void virtualBufferHeap_free(VirtualBufferHeap_t* bufferHeap, VirtualBufferHeapEntry_t* entry)
 {
-	if (entry->previous == NULL)
-	{
-		// make the next entry the first one
-		if (entry->next)
-			entry->next->previous = NULL;
-		bufferHeap->firstEntry = entry->next;
-	}
-	else
+	if (entry->previous)
 		entry->previous->next = entry->next;
-
+	else
+		bufferHeap->firstEntry = entry->next;
 	if (entry->next)
 		entry->next->previous = entry->previous;
-	// release entry
-	virtualBufferHeap_releaseEntry(bufferHeap, entry);
+	bufferHeap->stats.allocatedMemory -= entry->endOffset - entry->startOffset;
+	bufferHeap->stats.numActiveAllocs--;
+	recycleEntry(bufferHeap, entry);
 }
 
 void* virtualBufferHeap_allocateAddr(VirtualBufferHeap_t* bufferHeap, uint32 size)
 {
-	VirtualBufferHeapEntry_t* heapEntry = virtualBufferHeap_allocate(bufferHeap, size);
-	return ((uint8*)bufferHeap->baseAddress + heapEntry->startOffset);
+	VirtualBufferHeapEntry_t* e = virtualBufferHeap_allocate(bufferHeap, size);
+	if (!e)
+		return nullptr;
+	return static_cast<uint8*>(bufferHeap->baseAddress) + e->startOffset;
 }
 
 void virtualBufferHeap_freeAddr(VirtualBufferHeap_t* bufferHeap, void* addr)
 {
-	auto entry = bufferHeap->firstEntry;
-	while(entry)
+	for (VirtualBufferHeapEntry_t* e = bufferHeap->firstEntry; e; e = e->next)
 	{
-		const auto entry_address = (uint8*)bufferHeap->baseAddress + entry->startOffset;
-		if(entry_address == (uint8*)addr)
+		if (static_cast<uint8*>(bufferHeap->baseAddress) + e->startOffset == static_cast<uint8*>(addr))
 		{
-			virtualBufferHeap_free(bufferHeap, entry);
+			virtualBufferHeap_free(bufferHeap, e);
 			return;
 		}
-		entry = entry->next;
 	}
 	cemu_assert_suspicious();
 }

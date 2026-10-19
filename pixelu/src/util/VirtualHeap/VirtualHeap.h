@@ -1,7 +1,10 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
-// virtual heap
+// Address-space allocator for a buffer of virtualSize bytes. Allocations are
+// rounded to 256 bytes and placed at the lowest free 256-byte aligned offset.
 
+// one allocation, [startOffset, endOffset); entries are kept sorted by offset
 struct VirtualBufferHeapEntry_t
 {
 	uint32 startOffset;
@@ -13,14 +16,11 @@ struct VirtualBufferHeapEntry_t
 struct VirtualBufferHeap_t
 {
 	uint32 virtualSize;
-	void* baseAddress; // base address for _allocateAddr and _freeAddr
-	VirtualBufferHeapEntry_t* firstEntry;
-	// unused entries
-	VirtualBufferHeapEntry_t* firstUnusedEntry;
-	// update tracking
+	void* baseAddress; // added to offsets by the *Addr functions
+	VirtualBufferHeapEntry_t* firstEntry; // lowest allocation
+	VirtualBufferHeapEntry_t* firstUnusedEntry; // recycled entry records
 	uint32 updateTrackIndex;
-	// stats
-	struct  
+	struct
 	{
 		uint32 numActiveAllocs;
 		uint32 allocatedMemory;
@@ -28,8 +28,10 @@ struct VirtualBufferHeap_t
 };
 
 VirtualBufferHeap_t* virtualBufferHeap_create(uint32 virtualHeapSize, void* baseAddr = nullptr);
+// nullptr if there is no free space for size bytes
 VirtualBufferHeapEntry_t* virtualBufferHeap_allocate(VirtualBufferHeap_t* bufferHeap, uint32 size);
 void virtualBufferHeap_free(VirtualBufferHeap_t* bufferHeap, VirtualBufferHeapEntry_t* entry);
 
+// same as above, but in terms of baseAddress + offset
 void* virtualBufferHeap_allocateAddr(VirtualBufferHeap_t* bufferHeap, uint32 size);
 void virtualBufferHeap_freeAddr(VirtualBufferHeap_t* bufferHeap, void* addr);

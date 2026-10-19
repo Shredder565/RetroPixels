@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "util/MemMapper/MemMapper.h"
 
 #include <unistd.h>
@@ -5,34 +6,40 @@
 
 namespace MemMapper
 {
-	const size_t sPageSize{ []()
+	namespace
+	{
+		int toProt(PAGE_PERMISSION perm)
 		{
-		return (size_t)getpagesize();
-	}()
-	};
+			const bool r = HAS_FLAG(perm, PAGE_PERMISSION::P_READ);
+			const bool w = HAS_FLAG(perm, PAGE_PERMISSION::P_WRITE);
+			const bool x = HAS_FLAG(perm, PAGE_PERMISSION::P_EXECUTE);
+			if (r && w && x)
+				return PROT_READ | PROT_WRITE | PROT_EXEC;
+			if (r && w)
+				return PROT_READ | PROT_WRITE;
+			if (r && !x)
+				return PROT_READ;
+			cemu_assert_unimplemented(); // only R, RW and RWX are used
+			return PROT_NONE;
+		}
+
+		void* mapAnonymous(void* addr, size_t size, int prot)
+		{
+			void* p = mmap(addr, size, prot, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+			return p == MAP_FAILED ? nullptr : p;
+		}
+	}
 
 	size_t GetPageSize()
 	{
-		return sPageSize;
-	}
-
-	int GetProt(PAGE_PERMISSION permissionFlags)
-	{
-		int  p = 0;
-		if (HAS_FLAG(permissionFlags, PAGE_PERMISSION::P_READ) && HAS_FLAG(permissionFlags, PAGE_PERMISSION::P_WRITE) && HAS_FLAG(permissionFlags, PAGE_PERMISSION::P_EXECUTE))
-			p = PROT_READ | PROT_WRITE | PROT_EXEC;
-		else if (HAS_FLAG(permissionFlags, PAGE_PERMISSION::P_READ) && HAS_FLAG(permissionFlags, PAGE_PERMISSION::P_WRITE) && !HAS_FLAG(permissionFlags, PAGE_PERMISSION::P_EXECUTE))
-			p = PROT_READ | PROT_WRITE;
-		else if (HAS_FLAG(permissionFlags, PAGE_PERMISSION::P_READ) && !HAS_FLAG(permissionFlags, PAGE_PERMISSION::P_WRITE) && !HAS_FLAG(permissionFlags, PAGE_PERMISSION::P_EXECUTE))
-			p = PROT_READ;
-		else
-			cemu_assert_unimplemented();
-		return p;
+		static const size_t s_pageSize = (size_t)sysconf(_SC_PAGESIZE);
+		return s_pageSize;
 	}
 
 	void* ReserveMemory(void* baseAddr, size_t size, PAGE_PERMISSION permissionFlags)
 	{
-		return mmap(baseAddr, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		(void)permissionFlags; // reserved pages are inaccessible until AllocateMemory
+		return mapAnonymous(baseAddr, size, PROT_NONE);
 	}
 
 	void FreeReservation(void* baseAddr, size_t size)
@@ -42,29 +49,21 @@ namespace MemMapper
 
 	void* AllocateMemory(void* baseAddr, size_t size, PAGE_PERMISSION permissionFlags, bool fromReservation)
 	{
-		void* r;
-		if(fromReservation)
-		{
-		    uint64 page_size = sysconf(_SC_PAGESIZE);
-		    void* page = baseAddr;
-		    if ( (uint64) baseAddr % page_size != 0 )
-		        page = (void*) ((uint64)baseAddr & ~(page_size - 1));
-			if( mprotect(page, size, GetProt(permissionFlags)) == 0 )
-                r = baseAddr;
-			else
-                r = nullptr;
-		}
-		else
-			r = mmap(baseAddr, size, GetProt(permissionFlags), MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-		return r;
+		if (!fromReservation)
+			return mapAnonymous(baseAddr, size, toProt(permissionFlags));
+		// mprotect wants a page-aligned start
+		const uintptr_t pageMask = (uintptr_t)GetPageSize() - 1;
+		void* pageStart = (void*)((uintptr_t)baseAddr & ~pageMask);
+		if (mprotect(pageStart, size, toProt(permissionFlags)) != 0)
+			return nullptr;
+		return baseAddr;
 	}
 
 	void FreeMemory(void* baseAddr, size_t size, bool fromReservation)
 	{
 		if (fromReservation)
-			mprotect(baseAddr, size, PROT_NONE);
+			mprotect(baseAddr, size, PROT_NONE); // back to reserved-only
 		else
 			munmap(baseAddr, size);
 	}
-
 };

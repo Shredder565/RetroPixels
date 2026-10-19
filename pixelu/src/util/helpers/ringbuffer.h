@@ -1,123 +1,101 @@
-﻿#pragma once
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+#pragma once
 
 #include <mutex>
 
+// Fixed-size ring buffer guarded by a mutex. One slot is always left unused
+// so that "read == write" means empty.
 template<typename T, uint32 elements, typename P = uint32>
 class RingBuffer
 {
 public:
-	RingBuffer();
+	RingBuffer() = default;
 
-	bool Push(const T& v);
-
-	T Pop()
-		requires (!std::is_array_v<T>)
+	// false (and nothing stored) when the buffer is full
+	bool Push(const T& v)
 	{
-		std::unique_lock<std::mutex> lock(m_mutex);
-		if (m_readPointer == m_writePointer)
+		std::lock_guard lock(m_lock);
+		if (step(m_write) == m_read)
 		{
-			return T();
+			debugBreakpoint();
+			return false;
 		}
-
-		const T& tmp = m_data[m_readPointer];
-		m_readPointer = (m_readPointer + 1) % elements;
-		return tmp;
+		m_data[m_write] = v;
+		m_write = step(m_write);
+		return true;
 	}
 
-	T& GetSlot();
-	T& GetSlotAndAdvance();
-	void Advance();
+	// default-constructed T when empty
+	T Pop() requires (!std::is_array_v<T>)
+	{
+		std::lock_guard lock(m_lock);
+		if (m_read == m_write)
+			return T();
+		T value = m_data[m_read];
+		m_read = step(m_read);
+		return value;
+	}
 
-	void Clear();
-	P GetReadPointer();
-	P GetWritePointer();
-	bool HasData();
+	// claims the next write slot (no full check)
+	T& GetSlot()
+	{
+		std::lock_guard lock(m_lock);
+		T& slot = m_data[m_write];
+		m_write = step(m_write);
+		return slot;
+	}
+
+	// claims the next write slot and drops the oldest entry
+	T& GetSlotAndAdvance()
+	{
+		std::lock_guard lock(m_lock);
+		T& slot = m_data[m_write];
+		m_write = step(m_write);
+		m_read = step(m_read);
+		return slot;
+	}
+
+	// drops the oldest entry, if any
+	void Advance()
+	{
+		std::lock_guard lock(m_lock);
+		if (m_read != m_write)
+			m_read = step(m_read);
+	}
+
+	void Clear()
+	{
+		std::lock_guard lock(m_lock);
+		m_read = 0;
+		m_write = 0;
+	}
+
+	P GetReadPointer()
+	{
+		std::lock_guard lock(m_lock);
+		return m_read;
+	}
+
+	P GetWritePointer()
+	{
+		std::lock_guard lock(m_lock);
+		return m_write;
+	}
+
+	bool HasData()
+	{
+		std::lock_guard lock(m_lock);
+		return m_read != m_write;
+	}
 
 private:
+	static P step(P index)
+	{
+		return (P)((index + 1) % elements);
+	}
+
 	T m_data[elements];
-	P m_readPointer;
-	P m_writePointer;
-	std::mutex m_mutex;
+	P m_read{ 0 };
+	P m_write{ 0 };
+	std::mutex m_lock;
 };
-
-template <typename T, uint32 elements, typename P>
-RingBuffer<T, elements, P>::RingBuffer()
-	: m_readPointer(0), m_writePointer(0)
-{
-	
-}
-
-template <typename T, uint32 elements, typename P>
-bool RingBuffer<T, elements, P>::Push(const T& v)
-{
-	std::unique_lock<std::mutex> lock(m_mutex);
-	if (m_readPointer == ((m_writePointer + 1) % elements))
-	{
-		debugBreakpoint(); // buffer is full
-		return false;
-	}
-
-	m_data[m_writePointer] = v;
-	m_writePointer = (m_writePointer + 1) % elements;
-	return true;
-}
-
-template <typename T, uint32 elements, typename P>
-T& RingBuffer<T, elements, P>::GetSlot()
-{
-	std::unique_lock<std::mutex> lock(m_mutex);
-	T& result = m_data[m_writePointer];
-	m_writePointer = (m_writePointer + 1) % elements;
-	return result;
-}
-
-template <typename T, uint32 elements, typename P>
-T& RingBuffer<T, elements, P>::GetSlotAndAdvance()
-{
-	std::unique_lock<std::mutex> lock(m_mutex);
-	T& result = m_data[m_writePointer];
-	m_writePointer = (m_writePointer + 1) % elements;
-	m_readPointer = (m_readPointer + 1) % elements;
-	return result;
-}
-
-template <typename T, uint32 elements, typename P>
-void RingBuffer<T, elements, P>::Advance()
-{
-	std::unique_lock<std::mutex> lock(m_mutex);
-	if (m_readPointer != m_writePointer)
-	{
-		m_readPointer = (m_readPointer + 1) % elements;
-	}
-}
-
-template <typename T, uint32 elements, typename P>
-void RingBuffer<T, elements, P>::Clear()
-{
-	std::unique_lock<std::mutex> lock(m_mutex);
-	m_readPointer = 0;
-	m_writePointer = 0;
-}
-
-template <typename T, uint32 elements, typename P>
-P RingBuffer<T, elements, P>::GetReadPointer()
-{
-	std::unique_lock<std::mutex> lock(m_mutex);
-	P tmp = m_readPointer;
-	return tmp;
-}
-
-template <typename T, uint32 elements, typename P>
-P RingBuffer<T, elements, P>::GetWritePointer()
-{
-	std::unique_lock<std::mutex> lock(m_mutex);
-	P tmp = m_writePointer;
-	return tmp;
-}
-
-template <typename T, uint32 elements, typename P>
-bool RingBuffer<T, elements, P>::HasData()
-{
-	std::unique_lock<std::mutex> lock(m_mutex);
-	return m_readPointer != m_writePointer;
-}

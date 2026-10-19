@@ -1,94 +1,88 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
-// staged lookup table suited for cases where the lookup index range can be very large (e.g. memory addresses)
-// performs 3 consecutive table lookups, where each table's width is defined by TBitsN
-// empty subtables consume no memory beyond the initial two default tables for TBitsY and TBitsZ
+// Sparse three-level radix table indexed by the low (TBitsX + TBitsY +
+// TBitsZ) bits of a 32-bit key. Unused branches all point at one shared
+// empty leaf / one shared empty middle table, so lookups need no null checks
+// and untouched keys read back as T{}.
 template<int TBitsX, int TBitsY, int TBitsZ, typename T>
 class LookupTableL3
 {
-	struct TableZ // z lookup
+	static constexpr uint32 kSizeX = 1u << TBitsX;
+	static constexpr uint32 kSizeY = 1u << TBitsY;
+	static constexpr uint32 kSizeZ = 1u << TBitsZ;
+
+	struct Leaf
 	{
-		T arr[1 << TBitsZ]{};
+		T values[kSizeZ]{};
 	};
 
-	struct TableY // y lookup
+	struct Middle
 	{
-		TableZ* arr[1 << TBitsY];
+		Leaf* leaves[kSizeY];
 	};
-
-	// by generating placeholder tables we can avoid conditionals in the lookup code since no null-pointer checking is necessary
-	TableY* m_placeholderTableY{};
-	TableZ* m_placeholderTableZ{};
-
 
 public:
 	LookupTableL3()
 	{
-		// init placeholder table Z
-		m_placeholderTableZ = GenerateNewTableZ();
-		// init placeholder table Y (all entries point to placeholder table Z)
-		m_placeholderTableY = GenerateNewTableY();
-		// init x table
-		for (auto& itr : m_tableXArr)
-			itr = m_placeholderTableY;
+		m_emptyLeaf = new Leaf();
+		m_emptyMiddle = newMiddle();
+		for (uint32 i = 0; i < kSizeX; i++)
+			m_top[i] = m_emptyMiddle;
 	}
 
 	~LookupTableL3()
 	{
-		delete m_placeholderTableY;
-		delete m_placeholderTableZ;
+		for (uint32 x = 0; x < kSizeX; x++)
+		{
+			Middle* m = m_top[x];
+			if (m == m_emptyMiddle)
+				continue;
+			for (uint32 y = 0; y < kSizeY; y++)
+			{
+				if (m->leaves[y] != m_emptyLeaf)
+					delete m->leaves[y];
+			}
+			delete m;
+		}
+		delete m_emptyMiddle;
+		delete m_emptyLeaf;
 	}
 
-	// lookup
-	// only the bottom most N bits bits are used of the offset
-	// N = TBitsX + TBitsY + TBitsZ
-	// if no match is found a default-constructed object is returned
-	T lookup(uint32 offset)
+	LookupTableL3(const LookupTableL3&) = delete;
+	LookupTableL3& operator=(const LookupTableL3&) = delete;
+
+	// value stored for key (only the low bits are used), T{} if none
+	T lookup(uint32 key)
 	{
-		uint32 indexX = (offset >> (TBitsZ + TBitsY)) & ((1u << TBitsX) - 1);
-		auto& a = m_tableXArr[indexX];
-		uint32 indexY = (offset >> TBitsZ) & ((1u << TBitsY) - 1);
-		auto& b = a->arr[indexY];
-		uint32 indexZ = offset & ((1u << TBitsZ) - 1);
-		return b->arr[indexZ];
+		return m_top[indexX(key)]->leaves[indexY(key)]->values[indexZ(key)];
 	}
 
-	void store(uint32 offset, T& t)
+	void store(uint32 key, const T& value)
 	{
-		uint32 indexZ = offset & ((1u << TBitsZ) - 1);
-		offset >>= TBitsZ;
-		uint32 indexY = offset & ((1u << TBitsY) - 1);
-		offset >>= TBitsY;
-		uint32 indexX = offset & ((1u << TBitsX) - 1);
-		if (m_tableXArr[indexX] == m_placeholderTableY)
-			m_tableXArr[indexX] = GenerateNewTableY();
-		TableY* lookupY = m_tableXArr[indexX];
-		if (lookupY->arr[indexY] == m_placeholderTableZ)
-			lookupY->arr[indexY] = GenerateNewTableZ();
-		TableZ* lookupZ = lookupY->arr[indexY];
-		lookupZ->arr[indexZ] = t;
+		Middle*& middle = m_top[indexX(key)];
+		if (middle == m_emptyMiddle)
+			middle = newMiddle();
+		Leaf*& leaf = middle->leaves[indexY(key)];
+		if (leaf == m_emptyLeaf)
+			leaf = new Leaf();
+		leaf->values[indexZ(key)] = value;
 	}
 
 private:
-	// generate a new Y lookup table which will initially contain only pointers to m_placeholderTableZ
-	TableY* GenerateNewTableY()
+	static uint32 indexX(uint32 key) { return (key >> (TBitsY + TBitsZ)) & (kSizeX - 1); }
+	static uint32 indexY(uint32 key) { return (key >> TBitsZ) & (kSizeY - 1); }
+	static uint32 indexZ(uint32 key) { return key & (kSizeZ - 1); }
+
+	Middle* newMiddle()
 	{
-		TableY* tableY = new TableY();
-		for (auto& itr : tableY->arr)
-			itr = m_placeholderTableZ;
-		tYCount++;
-		return tableY;
+		Middle* m = new Middle();
+		for (uint32 i = 0; i < kSizeY; i++)
+			m->leaves[i] = m_emptyLeaf;
+		return m;
 	}
 
-	// generate a new Z lookup table which will initially contain only default constructed T
-	TableZ* GenerateNewTableZ()
-	{
-		TableZ* tableZ = new TableZ();
-		tZCount++;
-		return tableZ;
-	}
-
-	TableY* m_tableXArr[1 << TBitsX]; // x lookup
-	int tYCount = 0;
-	int tZCount = 0;
+	Leaf* m_emptyLeaf{};
+	Middle* m_emptyMiddle{};
+	Middle* m_top[kSizeX];
 };

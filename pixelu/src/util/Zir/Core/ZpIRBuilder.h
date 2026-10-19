@@ -1,125 +1,103 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "util/Zir/Core/IR.h"
 
 namespace ZpIR
 {
-
-	// helper class for building a single basic block
+	// Appends instructions, registers and constants to one basic block.
 	class BasicBlockBuilder
 	{
 	public:
-		BasicBlockBuilder(ZpIRBasicBlock* basicBlock) : m_basicBlock(basicBlock) {};
+		BasicBlockBuilder(ZpIRBasicBlock* basicBlock) : m_block(basicBlock) {}
 
 		IRReg createReg(DataType type, uint8 elementCount = 1)
 		{
-			return m_basicBlock->createRegister(type, elementCount);
+			return m_block->createRegister(type, elementCount);
 		}
 
+		// also stores the new register in r
 		IRReg createReg(IRReg& r, DataType type, uint8 elementCount = 1)
 		{
-			r = m_basicBlock->createRegister(type, elementCount);
+			r = m_block->createRegister(type, elementCount);
 			return r;
 		}
 
-		// append a single instruction at the end
+		// not supported, use emit()
 		void append(IR::__InsBase* ins)
 		{
+			(void)ins;
 			assert_dbg();
-		}
-
-		void emit_EXPORT(LocationSymbolName exportSymbolName, IRReg r0)
-		{
-			m_basicBlock->appendInstruction(new IR::InsEXPORT(exportSymbolName, r0));
-		}
-
-		void emit_EXPORT(LocationSymbolName exportSymbolName, std::span<IRReg> regs)
-		{
-			m_basicBlock->appendInstruction(new IR::InsEXPORT(exportSymbolName, regs));
-		}
-
-		void emit_IMPORT(LocationSymbolName importSymbolName, IRReg r0)
-		{
-			m_basicBlock->appendInstruction(new IR::InsIMPORT(importSymbolName, r0));
-		}
-
-		// result is rA, operand is rB
-		// for some opcodes both can be operands
-		void emit_RR(IR::OpCode opcode, IRReg rA, IRReg rB)
-		{
-			m_basicBlock->appendInstruction(new IR::InsRR(opcode, rA, rB));
-		}
-
-		IRReg emit_RR(IR::OpCode opcode, DataType resultType, IRReg rB)
-		{
-			IRReg resultReg = m_basicBlock->createRegister(resultType);
-			emit_RR(opcode, resultReg, rB);
-			return resultReg;
-		}
-
-		// result is rA, operands are rB and rC
-		// for some opcodes all three can be operands
-		void emit_RRR(IR::OpCode opcode, IRReg rA, IRReg rB, IRReg rC)
-		{
-			m_basicBlock->appendInstruction(new IR::InsRRR(opcode, rA, rB, rC));
-		}
-
-		IRReg emit_RRR(IR::OpCode opcode, DataType resultType, IRReg rB, IRReg rC)
-		{
-			IRReg resultReg = m_basicBlock->createRegister(resultType);
-			m_basicBlock->appendInstruction(new IR::InsRRR(opcode, resultReg, rB, rC));
-			return resultReg;
 		}
 
 		void emit(IR::__InsBase* ins)
 		{
-			m_basicBlock->appendInstruction(ins);
+			m_block->appendInstruction(ins);
 		}
-		
-		// constant var creation
 
-		IRReg createConstU32(uint32 v)
+		void emit_EXPORT(LocationSymbolName exportSymbolName, IRReg r0)
 		{
-			return m_basicBlock->createConstantU32(v);
+			emit(new IR::InsEXPORT(exportSymbolName, r0));
 		}
 
-		IRReg createTypedConst(uint32 v, DataType type)
+		void emit_EXPORT(LocationSymbolName exportSymbolName, std::span<IRReg> regs)
 		{
-			return m_basicBlock->createTypedConstant(v, type);
+			emit(new IR::InsEXPORT(exportSymbolName, regs));
 		}
 
-		IRReg createConstS32(uint32 v)
+		void emit_IMPORT(LocationSymbolName importSymbolName, IRReg r0)
 		{
-			return m_basicBlock->createConstantS32(v);
+			emit(new IR::InsIMPORT(importSymbolName, r0));
 		}
 
-		IRReg createConstF32(f32 v)
+		// rA receives the result of op(rB)
+		void emit_RR(IR::OpCode opcode, IRReg rA, IRReg rB)
 		{
-			return m_basicBlock->createConstantF32(v);
+			emit(new IR::InsRR(opcode, rA, rB));
 		}
 
-		IRReg createConstPointer(void* v)
+		// creates the result register
+		IRReg emit_RR(IR::OpCode opcode, DataType resultType, IRReg rB)
 		{
-			return m_basicBlock->createConstantPointer(v);
+			const IRReg result = createReg(resultType);
+			emit_RR(opcode, result, rB);
+			return result;
 		}
 
-		// use templates to compact other types?
+		// rA receives the result of op(rB, rC)
+		void emit_RRR(IR::OpCode opcode, IRReg rA, IRReg rB, IRReg rC)
+		{
+			emit(new IR::InsRRR(opcode, rA, rB, rC));
+		}
+
+		IRReg emit_RRR(IR::OpCode opcode, DataType resultType, IRReg rB, IRReg rC)
+		{
+			const IRReg result = createReg(resultType);
+			emit_RRR(opcode, result, rB, rC);
+			return result;
+		}
+
+		IRReg createConstU32(uint32 v) { return m_block->createConstantU32(v); }
+		IRReg createTypedConst(uint32 v, DataType type) { return m_block->createTypedConstant(v, type); }
+		IRReg createConstS32(uint32 v) { return m_block->createConstantS32(v); }
+		IRReg createConstF32(f32 v) { return m_block->createConstantF32(v); }
+		IRReg createConstPointer(void* v) { return m_block->createConstantPointer(v); }
 
 		DataType getRegType(IRReg reg)
 		{
-			return m_basicBlock->getRegType(reg);
+			return m_block->getRegType(reg);
 		}
 
 		void addImport(IRReg reg, LocationSymbolName importSymbolName)
 		{
-			m_basicBlock->addImport(reg, importSymbolName);
+			m_block->addImport(reg, importSymbolName);
 		}
 
-
 	private:
-		ZpIRBasicBlock* m_basicBlock;
+		ZpIRBasicBlock* m_block;
 	};
 
-	// helper class for constructing multiple basic blocks with control flow
+	// Builds a function block by block. Blocks are named; branch targets refer
+	// to names and are resolved by finish().
 	class ZpIRBuilder
 	{
 	public:
@@ -127,6 +105,7 @@ namespace ZpIR
 
 		static const inline BlockBranchTarget INVALID_BLOCK_NAME = 0xFFFFFFFFFFFFFFFFull;
 
+		// per-block data kept in the block's work buffer until finish()
 		struct BasicBlockWorkbuffer
 		{
 			BlockBranchTarget name{ INVALID_BLOCK_NAME };
@@ -136,115 +115,83 @@ namespace ZpIR
 
 		void beginBlock(BlockBranchTarget name)
 		{
-			m_currentBasicBlock = new ZpIRBasicBlock();
-			BasicBlockWorkbuffer* wb = new BasicBlockWorkbuffer();
-			m_currentBasicBlock->setWorkbuffer(wb);
-			wb->name = name;
-			m_blocks.emplace_back(m_currentBasicBlock);
-			m_blocksByName.emplace(name, m_currentBasicBlock);
+			auto* block = new ZpIRBasicBlock();
+			auto* info = new BasicBlockWorkbuffer();
+			info->name = name;
+			block->setWorkbuffer(info);
+			m_current = block;
+			m_blocks.push_back(block);
+			m_blocksByName.emplace(name, block);
 		}
 
 		ZpIRBasicBlock* endBlock()
 		{
-			ZpIRBasicBlock* block = m_currentBasicBlock;
-			m_currentBasicBlock = nullptr;
-			BasicBlockWorkbuffer* wb = (BasicBlockWorkbuffer*)block->getWorkbuffer();
-			wb->targetBranchNotTaken = m_targetBranchNotTaken;
-			wb->targetBranchTaken = m_targetBranchTaken;
-			m_targetBranchNotTaken = INVALID_BLOCK_NAME;
-			m_targetBranchTaken = INVALID_BLOCK_NAME;
+			ZpIRBasicBlock* block = m_current;
+			auto* info = static_cast<BasicBlockWorkbuffer*>(block->getWorkbuffer());
+			info->targetBranchNotTaken = std::exchange(m_pendingNotTaken, INVALID_BLOCK_NAME);
+			info->targetBranchTaken = std::exchange(m_pendingTaken, INVALID_BLOCK_NAME);
+			m_current = nullptr;
 			return block;
 		}
 
+		// links the blocks and returns the function (all blocks in creation order)
 		ZpIRFunction* finish()
 		{
-			if (m_currentBasicBlock)
-				assert_dbg();
-			// create function
-			ZpIRFunction* func = new ZpIRFunction();
-			// link all blocks
-			// and also collect a list of entry and exit nodes
-			for (auto& itr : m_blocks)
+			if (m_current)
+				assert_dbg(); // endBlock() missing
+			auto* func = new ZpIRFunction();
+			for (ZpIRBasicBlock* block : m_blocks)
 			{
-				BasicBlockWorkbuffer* wb = (BasicBlockWorkbuffer*)itr->getWorkbuffer();
-				if (wb->targetBranchNotTaken != INVALID_BLOCK_NAME)
-				{
-					auto target = m_blocksByName.find(wb->targetBranchNotTaken);
-					if (target == m_blocksByName.end())
-					{
-						assert_dbg();
-					}
-					itr->m_branchNotTaken = target->second;
-				}
-				if (wb->targetBranchTaken != INVALID_BLOCK_NAME)
-				{
-					auto target = m_blocksByName.find(wb->targetBranchTaken);
-					if (target == m_blocksByName.end())
-					{
-						assert_dbg();
-					}
-					itr->m_branchTaken = target->second;
-				}
-				delete wb;
-				itr->setWorkbuffer(nullptr);
-				func->m_basicBlocks.emplace_back(itr);
-				// todo - track entry and exit blocks (set block flags for entry/exit during block gen)
+				auto* info = static_cast<BasicBlockWorkbuffer*>(block->getWorkbuffer());
+				block->m_branchNotTaken = resolve(info->targetBranchNotTaken);
+				block->m_branchTaken = resolve(info->targetBranchTaken);
+				block->setWorkbuffer(nullptr);
+				delete info;
+				func->m_basicBlocks.push_back(block);
 			}
 			return func;
 		}
 
-		IRReg createBlockRegister(DataType type, uint8 elementCount = 1)
-		{
-			return m_currentBasicBlock->createRegister(type, elementCount);
-		}
+		IRReg createBlockRegister(DataType type, uint8 elementCount = 1) { return m_current->createRegister(type, elementCount); }
+		IRReg createConstU32(uint32 v) { return m_current->createConstantU32(v); }
+		IRReg createConstPointer(void* v) { return m_current->createConstantPointer(v); }
+		IRReg createConstPointerV(size_t v) { return m_current->createConstantPointer((void*)v); }
 
-		IRReg createConstU32(uint32 v)
-		{
-			return m_currentBasicBlock->createConstantU32(v);
-		}
-
-		IRReg createConstPointer(void* v)
-		{
-			return m_currentBasicBlock->createConstantPointer(v);
-		}
-
-		IRReg createConstPointerV(size_t v)
-		{
-			return m_currentBasicBlock->createConstantPointer((void*)v);
-		}
-
-		void addImport(IRReg reg, LocationSymbolName importName)
-		{
-			m_currentBasicBlock->addImport(reg, importName);
-		}
-
-		void addExport(IRReg reg, LocationSymbolName importName)
-		{
-			m_currentBasicBlock->addExport(reg, importName);
-		}
+		void addImport(IRReg reg, LocationSymbolName importName) { m_current->addImport(reg, importName); }
+		void addExport(IRReg reg, LocationSymbolName importName) { m_current->addExport(reg, importName); }
 
 		void setBlockTargetBranchTaken(BlockBranchTarget target)
 		{
-			if (m_targetBranchTaken != INVALID_BLOCK_NAME)
+			if (m_pendingTaken != INVALID_BLOCK_NAME)
 				assert_dbg();
-			m_targetBranchTaken = target;
+			m_pendingTaken = target;
 		}
 
 		void setBlockTargetBranchNotTaken(BlockBranchTarget target)
 		{
-			if (m_targetBranchNotTaken != INVALID_BLOCK_NAME)
+			if (m_pendingNotTaken != INVALID_BLOCK_NAME)
 				assert_dbg();
-			m_targetBranchNotTaken = target;
+			m_pendingNotTaken = target;
 		}
 
 	private:
-		ZpIRBasicBlock* m_currentBasicBlock{};
+		ZpIRBasicBlock* resolve(BlockBranchTarget name)
+		{
+			if (name == INVALID_BLOCK_NAME)
+				return nullptr;
+			auto it = m_blocksByName.find(name);
+			if (it == m_blocksByName.end())
+			{
+				assert_dbg(); // branch to a block that was never created
+				return nullptr;
+			}
+			return it->second;
+		}
+
+		ZpIRBasicBlock* m_current{};
 		std::vector<ZpIRBasicBlock*> m_blocks;
 		std::unordered_map<BlockBranchTarget, ZpIRBasicBlock*> m_blocksByName;
-
-		BlockBranchTarget m_targetBranchNotTaken{ INVALID_BLOCK_NAME };
-		BlockBranchTarget m_targetBranchTaken{ INVALID_BLOCK_NAME };
-
+		BlockBranchTarget m_pendingNotTaken{ INVALID_BLOCK_NAME };
+		BlockBranchTarget m_pendingTaken{ INVALID_BLOCK_NAME };
 	};
-
 }

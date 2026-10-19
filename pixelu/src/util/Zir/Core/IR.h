@@ -1,54 +1,29 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include <optional>
+#include <initializer_list>
 
 using f32 = float;
 using f64 = double;
 
-inline void zpir_debug_assert(bool _cond) 
+// IR consistency check that is active in all builds
+inline void zpir_debug_assert(bool _cond)
 {
-	if(!_cond)
+	if (!_cond)
 		assert_dbg();
 }
 
+// ZpIR: a small SSA-style intermediate representation. A function is a set
+// of basic blocks; each block owns its virtual registers, its constants and
+// a singly linked list of instructions.
+//
+// An IRReg below 0x8000 names a virtual register of the block, from 0x8000
+// upwards it names constant (index - 0x8000) of the block.
 namespace ZpIR
 {
-	//enum class ZpIRCmdForm : uint8
-	//{
-	//	FORM_VOID, // no-op
-	//	FORM_ZERO, // opcode without operands
-	//	FORM_1OP, // op0
-	//	FORM_2OP, // op0, op1
-	//	FORM_3OP, // op0, op1, op2
-	//	FORM_4OP,  // op0, op1, op2, op3
-	//	// todo - memory read + memory store
-	//	FORM_MEM, // op0, opEA, offset, type
-	//	// todo - function calls
-
-	//};
-
-	//enum class ZpIROpcodeDepr : uint8
-	//{
-	//	OP_VOID,
-	//	// FORM_1OP
-	//	OP_CALL,
-	//	// FORM_2OP
-	//	OP_ASSIGN, // copy/assignment
-	//	OP_CAST_ZEROEXT, // cast type to another. If broadening then zero-extend (unsigned cast)
-	//	OP_CAST_SIGNEXT, // cast type to another. If broadening then sign-extend (signed cast)
-	//	// FORM_3OP
-	//	OP_ADD, // op0 = op1 + op2
-	//	OP_SUB, // op0 = op1 - op2
-	//	OP_MUL, // op0 = op1 * op2
-	//	OP_DIV, // op0 = op1 / op2
-	//	// memory
-	//	OP_MEM_READ,
-	//	OP_MEM_WRITE,
-	//};
-
 	enum class DataType : uint8
 	{
 		NONE = 0x00,
-		// integer
 		U8 = 1,
 		S8 = 2,
 		U16 = 3,
@@ -57,90 +32,74 @@ namespace ZpIR
 		S32 = 6,
 		U64 = 7,
 		S64 = 8,
-		// floating-point
-		F32 = 0x10 + 0,
-		F64 = 0x10 + 1,
-		// special
-		POINTER = 0x20, // dynamic width based on pointer width of target architecture
-		// boolean
-		BOOL = 0x30, // can hold false/true. Size depends on target architecture
+		F32 = 0x10,
+		F64 = 0x11,
+		POINTER = 0x20, // host pointer width
+		BOOL = 0x30,
 	};
 
 	typedef uint16 IRReg;
 	typedef uint64 LocationSymbolName;
 	typedef uint32 ZpIRPhysicalReg;
 
-	inline bool isRegVar(IRReg r) { return r < 0x8000; };
-	inline bool isConstVar(IRReg r) { return r >= 0x8000; };
-	inline uint16 getRegIndex(IRReg r) { return (uint16)r & 0x7FFF; };
+	inline constexpr uint16 kConstRegFlag = 0x8000;
+
+	inline bool isRegVar(IRReg r) { return r < kConstRegFlag; }
+	inline bool isConstVar(IRReg r) { return r >= kConstRegFlag; }
+	inline uint16 getRegIndex(IRReg r) { return (uint16)(r & (kConstRegFlag - 1)); }
 
 	namespace IR
 	{
 		enum class OpCode : uint8
 		{
-			UNDEF = 0, // undefined 
-			// basic opcodes
+			UNDEF = 0,
 			MOV,
-
-			// basic arithmetic opcodes
-			ADD, // addition
-			SUB, // subtraction
-			MUL, // multiplication
-			DIV, // division
-
+			// arithmetic
+			ADD,
+			SUB,
+			MUL,
+			DIV,
 			// conversion
-			BITCAST, // like MOV, but allows registers of different types. No value conversion happens, raw bit copy
-			SWAP_ENDIAN, // swap endianness
+			BITCAST, // reinterpret the bits as another type of the same size
+			SWAP_ENDIAN,
 			CONVERT_INT_TO_FLOAT,
 			CONVERT_FLOAT_TO_INT,
-
-			// misc
-			IMPORT_SINGLE, // import into a single IRReg. Depr: Make this like EXPORT where there is a 1-4 regs variant and one for more
-			IMPORT, // import from external/custom resource into 1-4 IRReg
-			
-			EXPORT, // export 1-4 registers to external/custom resource
-			// EXPORT_MANY // for when more than 4 registers are needed
-			
-
-
+			// external data
+			IMPORT_SINGLE, // legacy single-register import
+			IMPORT, // read 1-4 registers from an external location
+			EXPORT, // write 1-4 registers to an external location
 			// vector
-			EXTRACT_ELEMENT, // extract a scalar type from a vector type
-			// some notes: We need this for texture read instructions. Where the result is a vec4 (f32x4) and this is how we can extract individual registers from that
-			//             update -> We may also instead just let the texture sample instruction specify 4 output registers
+			EXTRACT_ELEMENT,
 		};
 
+		// operand layout of an instruction
 		enum class OpForm : uint8
 		{
 			NONE = 0,
-			RR = 1,
-			RRR = 2,
-			IMPORT_SINGLE = 3, // deprecated
+			RR = 1, // rA, rB
+			RRR = 2, // rA, rB, rC
+			IMPORT_SINGLE = 3,
 			IMPORT = 4,
 			EXPORT = 5,
 		};
 
-		// instruction base class
+		// common header of all instructions
 		class __InsBase
 		{
 		public:
-
 			OpCode opcode;
 			OpForm opform;
 			__InsBase* next;
+
 		protected:
-			__InsBase(OpCode opcode, OpForm opform) : opcode(opcode), opform(opform) { };
+			__InsBase(OpCode opcode, OpForm opform) : opcode(opcode), opform(opform), next(nullptr) {}
 		};
 
-		// adapted base class, instruction forms inherit from this
+		// adds form queries to the header: getIfForm() casts when the form matches
 		template<typename TInstr, OpForm TOpForm>
 		class __InsBaseWithForm : public __InsBase
 		{
 		public:
-
-			//OpCode opcode;
-			//OpForm opform;
-			//__InsBase* next;
-
 			static const OpForm getForm()
 			{
 				return TOpForm;
@@ -148,136 +107,96 @@ namespace ZpIR
 
 			static TInstr* getIfForm(__InsBase* instructionBase)
 			{
-				if (instructionBase->opform != TOpForm)
-					return nullptr;
-				return (TInstr*)instructionBase;
+				return instructionBase->opform == TOpForm ? static_cast<TInstr*>(instructionBase) : nullptr;
 			}
 
 		protected:
-			__InsBaseWithForm(OpCode opcode) : __InsBase(opcode, TOpForm) { };
+			__InsBaseWithForm(OpCode opcode) : __InsBase(opcode, TOpForm) {}
 		};
 
+		// rA = op(rB); some opcodes treat rA as an operand too
 		class InsRR : public __InsBaseWithForm<InsRR, OpForm::RR>
 		{
 		public:
-			InsRR(OpCode opcode, IRReg rA, IRReg rB) : __InsBaseWithForm(opcode), rA(rA), rB(rB) {};
+			InsRR(OpCode opcode, IRReg rA, IRReg rB) : __InsBaseWithForm(opcode), rA(rA), rB(rB) {}
 
 			IRReg rA;
 			IRReg rB;
 		};
 
+		// rA = op(rB, rC)
 		class InsRRR : public __InsBaseWithForm<InsRRR, OpForm::RRR>
 		{
 		public:
-			InsRRR(OpCode opcode, IRReg rA, IRReg rB, IRReg rC) : __InsBaseWithForm(opcode), rA(rA), rB(rB), rC(rC) {};
+			InsRRR(OpCode opcode, IRReg rA, IRReg rB, IRReg rC) : __InsBaseWithForm(opcode), rA(rA), rB(rB), rC(rC) {}
 
 			IRReg rA;
 			IRReg rB;
 			IRReg rC;
 		};
 
-		// should we support RRI format with 32bit signed integer as a way to avoid having to generate dozens of IR const regs for stuff like shift and other logical instructions with constant rhs?
-		// and if we do, should it be a 32bit signed integer or should the type match the instruction type?
-
-		class InsEXPORT : public __InsBaseWithForm<InsEXPORT, OpForm::EXPORT>
+		// shared storage of IMPORT / EXPORT: up to four registers
+		template<typename TInstr, OpForm TOpForm>
+		class InsRegisterList : public __InsBaseWithForm<TInstr, TOpForm>
 		{
 		public:
-			InsEXPORT(LocationSymbolName exportSymbol, IRReg r) : __InsBaseWithForm(OpCode::EXPORT), exportSymbol(exportSymbol)
-			{
-				regArray[0] = r;
-				count = 1;
-			};
+			uint16 count{ 0 };
+			IRReg regArray[4]{};
 
-			InsEXPORT(LocationSymbolName exportSymbol, IRReg r0, IRReg r1) : __InsBaseWithForm(OpCode::EXPORT), exportSymbol(exportSymbol)
+		protected:
+			InsRegisterList(OpCode opcode, std::initializer_list<IRReg> regs) : __InsBaseWithForm<TInstr, TOpForm>(opcode)
 			{
-				regArray[0] = r0; regArray[1] = r1;
-				count = 2;
-			};
+				for (IRReg r : regs)
+					regArray[count++] = r;
+			}
 
-			InsEXPORT(LocationSymbolName exportSymbol, IRReg r0, IRReg r1, IRReg r2) : __InsBaseWithForm(OpCode::EXPORT), exportSymbol(exportSymbol)
-			{
-				regArray[0] = r0; regArray[1] = r1; regArray[2] = r2;
-				count = 3;
-			};
-
-			InsEXPORT(LocationSymbolName exportSymbol, IRReg r0, IRReg r1, IRReg r2, IRReg r3) : __InsBaseWithForm(OpCode::EXPORT), exportSymbol(exportSymbol)
-			{
-				regArray[0] = r0;
-				regArray[1] = r1;
-				regArray[2] = r2;
-				regArray[3] = r3;
-				count = 4;
-			};
-
-			InsEXPORT(LocationSymbolName exportSymbol, std::span<IRReg> regs) : __InsBaseWithForm(OpCode::EXPORT), exportSymbol(exportSymbol)
+			InsRegisterList(OpCode opcode, std::span<IRReg> regs) : __InsBaseWithForm<TInstr, TOpForm>(opcode)
 			{
 				zpir_debug_assert(regs.size() <= 4);
-				for(size_t i=0; i<regs.size(); i++)
-					regArray[i] = regs[i];
-				count = (uint16)regs.size();
-			};
+				for (IRReg r : regs)
+					regArray[count++] = r;
+			}
+		};
 
-			uint16 count;
-			IRReg regArray[4]; // up to 4 registers
+		class InsEXPORT : public InsRegisterList<InsEXPORT, OpForm::EXPORT>
+		{
+		public:
+			InsEXPORT(LocationSymbolName exportSymbol, IRReg r0) : InsRegisterList(OpCode::EXPORT, { r0 }), exportSymbol(exportSymbol) {}
+			InsEXPORT(LocationSymbolName exportSymbol, IRReg r0, IRReg r1) : InsRegisterList(OpCode::EXPORT, { r0, r1 }), exportSymbol(exportSymbol) {}
+			InsEXPORT(LocationSymbolName exportSymbol, IRReg r0, IRReg r1, IRReg r2) : InsRegisterList(OpCode::EXPORT, { r0, r1, r2 }), exportSymbol(exportSymbol) {}
+			InsEXPORT(LocationSymbolName exportSymbol, IRReg r0, IRReg r1, IRReg r2, IRReg r3) : InsRegisterList(OpCode::EXPORT, { r0, r1, r2, r3 }), exportSymbol(exportSymbol) {}
+			InsEXPORT(LocationSymbolName exportSymbol, std::span<IRReg> regs) : InsRegisterList(OpCode::EXPORT, regs), exportSymbol(exportSymbol) {}
+
 			LocationSymbolName exportSymbol;
 		};
 
-		class InsIMPORT : public __InsBaseWithForm<InsIMPORT, OpForm::IMPORT>
+		class InsIMPORT : public InsRegisterList<InsIMPORT, OpForm::IMPORT>
 		{
 		public:
-			InsIMPORT(LocationSymbolName importSymbol, IRReg r) : __InsBaseWithForm(OpCode::IMPORT), importSymbol(importSymbol)
-			{
-				regArray[0] = r;
-				count = 1;
-			};
+			InsIMPORT(LocationSymbolName importSymbol, IRReg r0) : InsRegisterList(OpCode::IMPORT, { r0 }), importSymbol(importSymbol) {}
+			InsIMPORT(LocationSymbolName importSymbol, IRReg r0, IRReg r1) : InsRegisterList(OpCode::IMPORT, { r0, r1 }), importSymbol(importSymbol) {}
+			InsIMPORT(LocationSymbolName importSymbol, IRReg r0, IRReg r1, IRReg r2) : InsRegisterList(OpCode::IMPORT, { r0, r1, r2 }), importSymbol(importSymbol) {}
+			InsIMPORT(LocationSymbolName importSymbol, IRReg r0, IRReg r1, IRReg r2, IRReg r3) : InsRegisterList(OpCode::IMPORT, { r0, r1, r2, r3 }), importSymbol(importSymbol) {}
+			InsIMPORT(LocationSymbolName importSymbol, std::span<IRReg> regs) : InsRegisterList(OpCode::IMPORT, regs), importSymbol(importSymbol) {}
 
-			InsIMPORT(LocationSymbolName importSymbol, IRReg r0, IRReg r1) : __InsBaseWithForm(OpCode::IMPORT), importSymbol(importSymbol)
-			{
-				regArray[0] = r0; regArray[1] = r1;
-				count = 2;
-			};
-
-			InsIMPORT(LocationSymbolName importSymbol, IRReg r0, IRReg r1, IRReg r2) : __InsBaseWithForm(OpCode::IMPORT), importSymbol(importSymbol)
-			{
-				regArray[0] = r0; regArray[1] = r1; regArray[2] = r2;
-				count = 3;
-			};
-
-			InsIMPORT(LocationSymbolName importSymbol, IRReg r0, IRReg r1, IRReg r2, IRReg r3) : __InsBaseWithForm(OpCode::IMPORT), importSymbol(importSymbol)
-			{
-				regArray[0] = r0;
-				regArray[1] = r1;
-				regArray[2] = r2;
-				regArray[3] = r3;
-				count = 4;
-			};
-
-			InsIMPORT(LocationSymbolName importSymbol, std::span<IRReg> regs) : __InsBaseWithForm(OpCode::IMPORT), importSymbol(importSymbol)
-			{
-				zpir_debug_assert(regs.size() <= 4);
-				for (size_t i = 0; i < regs.size(); i++)
-					regArray[i] = regs[i];
-				count = (uint16)regs.size();
-			};
-
-			uint16 count;
-			IRReg regArray[4]; // up to 4 registers
 			LocationSymbolName importSymbol;
 		};
 	};
 
-	// IR register definition stored in basic block
-	struct IRRegDef 
+	// virtual register of a block
+	struct IRRegDef
 	{
-		IRRegDef(DataType type, uint8 elementCount) : type(type), elementCount(elementCount) {};
+		static constexpr ZpIRPhysicalReg kNoPhysicalRegister = std::numeric_limits<ZpIRPhysicalReg>::max();
+
+		IRRegDef(DataType type, uint8 elementCount) : type(type), elementCount(elementCount) {}
 
 		DataType type;
-		uint8 elementCount; // 1 = scalar
-		ZpIRPhysicalReg physicalRegister{ std::numeric_limits<ZpIRPhysicalReg>::max()};
-		// todo - information about spilling location? (it depends on the architecture so we should keep this out of the core IR)
+		uint8 elementCount; // 1 for scalars
+		ZpIRPhysicalReg physicalRegister{ kNoPhysicalRegister }; // set by a register allocation pass
+
 		bool hasAssignedPhysicalRegister() const
 		{
-			return physicalRegister != std::numeric_limits<ZpIRPhysicalReg>::max();
+			return physicalRegister != kNoPhysicalRegister;
 		}
 
 		void assignPhysicalRegister(ZpIRPhysicalReg physReg)
@@ -286,17 +205,17 @@ namespace ZpIR
 		}
 	};
 
-	// IR register constant definition stored in basic block
+	// constant of a block (scalar)
 	struct IRRegConstDef
 	{
-		IRRegConstDef() = default;
-		// todo - support for constants with more than one element?
+		IRRegConstDef() : value_u64(0) {}
 
-		IRRegConstDef& setU32(uint32 v) { value_u32 = v; type = DataType::U32; return *this; };
-		IRRegConstDef& setS32(sint32 v) { value_s32 = v; type = DataType::S32; return *this; };
-		IRRegConstDef& setF32(f32 v) { value_f32 = v; type = DataType::F32; return *this; };
-		IRRegConstDef& setPtr(void* v) { value_ptr = v; type = DataType::POINTER; return *this; };
-		IRRegConstDef& setRaw(uint32 v, DataType regType) { value_u32 = v; type = regType; return *this; };
+		IRRegConstDef& setU32(uint32 v) { value_u32 = v; type = DataType::U32; return *this; }
+		IRRegConstDef& setS32(sint32 v) { value_s32 = v; type = DataType::S32; return *this; }
+		IRRegConstDef& setF32(f32 v) { value_f32 = v; type = DataType::F32; return *this; }
+		IRRegConstDef& setPtr(void* v) { value_ptr = v; type = DataType::POINTER; return *this; }
+		// raw 32-bit pattern with an explicit type
+		IRRegConstDef& setRaw(uint32 v, DataType regType) { value_u32 = v; type = regType; return *this; }
 
 		DataType type{ DataType::NONE };
 		union
@@ -315,18 +234,18 @@ namespace ZpIR
 	{
 		friend class ZpIRBuilder;
 
+		// register that receives a value from a predecessor block
 		struct IRBBImport
 		{
-			IRBBImport(IRReg reg, LocationSymbolName name) : reg(reg), name(name) {};
-
+			IRBBImport(IRReg reg, LocationSymbolName name) : reg(reg), name(name) {}
 			IRReg reg;
 			LocationSymbolName name;
 		};
 
+		// register whose value is handed to successor blocks
 		struct IRBBExport
 		{
-			IRBBExport(IRReg reg, LocationSymbolName name) : reg(reg), name(name) {};
-
+			IRBBExport(IRReg reg, LocationSymbolName name) : reg(reg), name(name) {}
 			IRReg reg;
 			LocationSymbolName name;
 		};
@@ -337,72 +256,34 @@ namespace ZpIR
 		std::vector<IRRegConstDef> m_consts;
 		std::vector<IRBBImport> m_imports;
 		std::vector<IRBBExport> m_exports;
-		ZpIRBasicBlock* m_branchNotTaken{ nullptr }; // next block if branch not taken or no branch present
-		ZpIRBasicBlock* m_branchTaken{ nullptr }; // next block if branch is taken
+		ZpIRBasicBlock* m_branchNotTaken{ nullptr }; // fall-through successor
+		ZpIRBasicBlock* m_branchTaken{ nullptr };
 
-		void* m_workbuffer{}; // can be used as temporary storage for information
+		void* m_workbuffer{}; // scratch pointer for passes
 
 		void appendInstruction(IR::__InsBase* ins)
 		{
-			if (m_instructionFirst == nullptr)
-			{
-				m_instructionFirst = ins;
-				m_instructionLast = ins;
-				ins->next = nullptr;
-				return;
-			}
-			m_instructionLast->next = ins;
-			m_instructionLast = ins;
 			ins->next = nullptr;
+			if (m_instructionLast)
+				m_instructionLast->next = ins;
+			else
+				m_instructionFirst = ins;
+			m_instructionLast = ins;
 		}
 
 		IRReg createRegister(DataType type, uint8 elementCount = 1)
 		{
-			uint32 index = (uint32)m_regs.size();
-			cemu_assert_debug(index < 0x8000);
+			const size_t index = m_regs.size();
+			cemu_assert_debug(index < kConstRegFlag);
 			m_regs.emplace_back(type, elementCount);
 			return (IRReg)index;
 		}
 
-		IRReg createConstantU32(uint32 value)
-		{
-			uint32 index = (uint32)m_consts.size();
-			cemu_assert_debug(index < 0x8000);
-			m_consts.emplace_back().setU32(value);
-			return (IRReg)((uint16)index + 0x8000);
-		}
-
-		IRReg createTypedConstant(uint32 value, DataType type)
-		{
-			uint32 index = (uint32)m_consts.size();
-			cemu_assert_debug(index < 0x8000);
-			m_consts.emplace_back().setRaw(value, type);
-			return (IRReg)((uint16)index + 0x8000);
-		}
-
-		IRReg createConstantS32(uint32 value)
-		{
-			uint32 index = (uint32)m_consts.size();
-			cemu_assert_debug(index < 0x8000);
-			m_consts.emplace_back().setS32(value);
-			return (IRReg)((uint16)index + 0x8000);
-		}
-
-		IRReg createConstantF32(f32 value)
-		{
-			uint32 index = (uint32)m_consts.size();
-			cemu_assert_debug(index < 0x8000);
-			m_consts.emplace_back().setF32(value);
-			return (IRReg)((uint16)index + 0x8000);
-		}
-
-		IRReg createConstantPointer(void* value)
-		{
-			uint32 index = (uint32)m_consts.size();
-			cemu_assert_debug(index < 0x8000);
-			m_consts.emplace_back().setPtr(value);
-			return (IRReg)((uint16)index + 0x8000);
-		}
+		IRReg createConstantU32(uint32 value) { return pushConstant(IRRegConstDef().setU32(value)); }
+		IRReg createTypedConstant(uint32 value, DataType type) { return pushConstant(IRRegConstDef().setRaw(value, type)); }
+		IRReg createConstantS32(uint32 value) { return pushConstant(IRRegConstDef().setS32((sint32)value)); }
+		IRReg createConstantF32(f32 value) { return pushConstant(IRRegConstDef().setF32(value)); }
+		IRReg createConstantPointer(void* value) { return pushConstant(IRRegConstDef().setPtr(value)); }
 
 		void addImport(IRReg reg, LocationSymbolName importName)
 		{
@@ -414,13 +295,11 @@ namespace ZpIR
 			m_exports.emplace_back(reg, importName);
 		}
 
+		// only one pass may own the work buffer at a time
 		void setWorkbuffer(void* buffer)
 		{
-			if (buffer != nullptr)
-			{
-				if (m_workbuffer)
-					assert_dbg();
-			}
+			if (buffer && m_workbuffer)
+				assert_dbg();
 			m_workbuffer = buffer;
 		}
 
@@ -429,63 +308,68 @@ namespace ZpIR
 			return m_workbuffer;
 		}
 
-
 		DataType getRegType(IRReg reg)
 		{
-			uint32 index = (uint32)reg;
-			if (index >= 0x8000)
+			if (isConstVar(reg))
 			{
-				index -= 0x8000;
+				const uint16 index = getRegIndex(reg);
 				cemu_assert_debug(index < m_consts.size());
 				return m_consts[index].type;
 			}
-			return m_regs[index].type;
+			return m_regs[reg].type;
 		}
 
+		// constant definition, nullptr for virtual registers or unknown constants
 		IRRegConstDef* getConstant(IRReg reg)
 		{
-			uint32 index = (uint32)reg;
-			if (index < 0x8000)
+			if (!isConstVar(reg))
 				return nullptr;
-			index -= 0x8000;
+			const uint16 index = getRegIndex(reg);
 			if (index >= m_consts.size())
 				return nullptr;
-			return m_consts.data() + index;
+			return &m_consts[index];
 		}
 
+		// integer constant as signed 32-bit (U32 and small U64 constants only)
 		std::optional<sint32> getConstantS32(IRReg reg)
 		{
-			uint32 index = (uint32)reg;
-			if (index < 0x8000)
+			IRRegConstDef* c = getConstant(reg);
+			if (!c)
 				return std::nullopt;
-			index -= 0x8000;
-			if (index >= m_consts.size())
-				return std::nullopt;
-			if (m_consts[index].type == DataType::U32)
-				return (sint32)m_consts[index].value_u32;
-			else if (m_consts[index].type == DataType::POINTER)
-				assert_dbg();
-			else if (m_consts[index].type == DataType::U64)
+			switch (c->type)
 			{
-				if (m_consts[index].value_u64 >= 0x80000000ull)
+			case DataType::U32:
+				return (sint32)c->value_u32;
+			case DataType::U64:
+				if (c->value_u64 >= 0x80000000ull)
 					assert_dbg();
-				return (sint32)m_consts[index].value_u64;
-			}
-			else
+				return (sint32)c->value_u64;
+			default:
 				assert_dbg();
-			return std::nullopt;
+				return std::nullopt;
+			}
 		}
 
 		std::optional<uint64> getConstantU64(IRReg reg)
 		{
-			auto constReg = getConstant(reg);
-			if (!constReg)
+			IRRegConstDef* c = getConstant(reg);
+			if (!c)
 				return std::nullopt;
-			if (constReg->type == DataType::U64)
-				return constReg->value_u64;
-			else
+			if (c->type != DataType::U64)
+			{
 				assert_dbg();
-			return std::nullopt;
+				return std::nullopt;
+			}
+			return c->value_u64;
+		}
+
+	private:
+		IRReg pushConstant(const IRRegConstDef& c)
+		{
+			const size_t index = m_consts.size();
+			cemu_assert_debug(index < kConstRegFlag);
+			m_consts.push_back(c);
+			return (IRReg)(kConstRegFlag + (uint16)index);
 		}
 	};
 
@@ -495,15 +379,28 @@ namespace ZpIR
 		std::vector<ZpIRBasicBlock*> m_entryBlocks;
 		std::vector<ZpIRBasicBlock*> m_exitBlocks;
 
-		struct  
+		struct
 		{
-			bool registersAllocated{false};
+			bool registersAllocated{ false };
 		}state;
 	};
 
-	// helpers for shader code
+	// location names used by shader programs
 	namespace ShaderSubset
 	{
+		// Encoded as a LocationSymbolName: kind in bits 56-63, index A in bits 0-15,
+		// index B in bits 16-31.
+		namespace detail
+		{
+			inline LocationSymbolName packLocation(uint8 kind, uint16 a, uint16 b)
+			{
+				return ((uint64)kind << 56) | ((uint64)b << 16) | (uint64)a;
+			}
+
+			inline const char kChannelNames[4] = { 'x', 'y', 'z', 'w' };
+		}
+
+		// uniform register (index = register * 4 + channel) or vertex attribute channel
 		class ShaderImportLocation
 		{
 			enum LOC_TYPE : uint8
@@ -512,84 +409,58 @@ namespace ZpIR
 				LOC_TYPE_UNIFORM_BUFFER = 2,
 				LOC_TYPE_ATTRIBUTE = 3,
 			};
+
 		public:
 			ShaderImportLocation() = default;
-			ShaderImportLocation(LocationSymbolName loc) 
-			{
-				uint64 v = (uint64)loc;
-
-				m_locType = (LOC_TYPE)(v >> 56);
-				m_indexA = (uint16)(v >> 0);
-				m_indexB = (uint16)(v >> 16);
-			}
+			ShaderImportLocation(LocationSymbolName loc) : m_kind((LOC_TYPE)(loc >> 56)), m_a((uint16)loc), m_b((uint16)(loc >> 16)) {}
 
 			ShaderImportLocation& SetUniformRegister(uint16 index)
 			{
-				m_locType = LOC_TYPE_UNIFORM_REGISTER;
-				m_indexA = index;
-				m_indexB = 0;
-				return *this;
+				return set(LOC_TYPE_UNIFORM_REGISTER, index, 0);
 			}
 
 			ShaderImportLocation& SetVertexAttribute(uint16 attributeIndex, uint16 channelIndex)
 			{
-				m_locType = LOC_TYPE_ATTRIBUTE;
-				m_indexA = attributeIndex;
-				m_indexB = channelIndex;
-				return *this;
+				return set(LOC_TYPE_ATTRIBUTE, attributeIndex, channelIndex);
 			}
 
-			bool IsUniformRegister() const
-			{
-				return m_locType == LOC_TYPE_UNIFORM_REGISTER;
-			}
+			bool IsUniformRegister() const { return m_kind == LOC_TYPE_UNIFORM_REGISTER; }
+			bool IsVertexAttribute() const { return m_kind == LOC_TYPE_ATTRIBUTE; }
 
-			bool IsVertexAttribute() const
-			{
-				return m_locType == LOC_TYPE_ATTRIBUTE;
-			}
-
-			void GetUniformRegister(uint16& index)
-			{
-				index = m_indexA;
-			}
+			void GetUniformRegister(uint16& index) { index = m_a; }
 
 			void GetVertexAttribute(uint16& attributeIndex, uint16& channelIndex) const
 			{
-				attributeIndex = m_indexA;
-				channelIndex = m_indexB;
+				attributeIndex = m_a;
+				channelIndex = m_b;
 			}
 
-			operator LocationSymbolName() const 
-			{ 
-				uint64 v = 0;
-				v |= ((uint64)m_locType << 56);
-				v |= ((uint64)m_indexA << 0);
-				v |= ((uint64)m_indexB << 16);
-
-				return (LocationSymbolName)v;
-			}
+			operator LocationSymbolName() const { return detail::packLocation(m_kind, m_a, m_b); }
 
 			std::string GetDebugName()
 			{
-				const char elementTable[] = { 'x' , 'y', 'z', 'w' };
-
-				if (m_locType == LOC_TYPE_UNIFORM_REGISTER)
-					return fmt::format("UniformReg[{0}].{1}", m_indexA >> 2, elementTable[m_indexA & 3]);
-				if (m_locType == LOC_TYPE_ATTRIBUTE)
-					return fmt::format("VertexAttribute[{0}].{1}", m_indexA, elementTable[m_indexB]);
-
+				if (IsUniformRegister())
+					return fmt::format("UniformReg[{0}].{1}", m_a >> 2, detail::kChannelNames[m_a & 3]);
+				if (IsVertexAttribute())
+					return fmt::format("VertexAttribute[{0}].{1}", m_a, detail::kChannelNames[m_b & 3]);
 				return "Unknown";
 			}
 
 		private:
-			LOC_TYPE m_locType{};
-			uint16 m_indexA{};
-			uint16 m_indexB{};
-			//LocationSymbolName m_symbolName{};
-			static_assert(sizeof(LocationSymbolName) == 8);
+			ShaderImportLocation& set(LOC_TYPE kind, uint16 a, uint16 b)
+			{
+				m_kind = kind;
+				m_a = a;
+				m_b = b;
+				return *this;
+			}
+
+			LOC_TYPE m_kind{};
+			uint16 m_a{};
+			uint16 m_b{};
 		};
 
+		// vertex position or an output attribute (parameter)
 		class ShaderExportLocation
 		{
 			enum LOC_TYPE : uint8
@@ -597,76 +468,47 @@ namespace ZpIR
 				LOC_TYPE_POSITION = 1,
 				LOC_TYPE_OUTPUT = 2,
 			};
+
 		public:
 			ShaderExportLocation() = default;
-			ShaderExportLocation(LocationSymbolName loc)
-			{
-				uint64 v = (uint64)loc;
-
-				m_locType = (LOC_TYPE)(v >> 56);
-				m_indexA = (uint16)(v >> 0);
-				m_indexB = (uint16)(v >> 16);
-			}
+			ShaderExportLocation(LocationSymbolName loc) : m_kind((LOC_TYPE)(loc >> 56)), m_a((uint16)loc), m_b((uint16)(loc >> 16)) {}
 
 			ShaderExportLocation& SetPosition()
 			{
-				m_locType = LOC_TYPE_POSITION;
-				m_indexA = 0;
-				m_indexB = 0;
+				m_kind = LOC_TYPE_POSITION;
+				m_a = 0;
+				m_b = 0;
 				return *this;
 			}
 
-			ShaderExportLocation& SetOutputAttribute(uint16 attributeIndex) // todo - channel mask?
+			ShaderExportLocation& SetOutputAttribute(uint16 attributeIndex)
 			{
-				m_locType = LOC_TYPE_OUTPUT;
-				m_indexA = attributeIndex;
-				m_indexB = 0;
+				m_kind = LOC_TYPE_OUTPUT;
+				m_a = attributeIndex;
+				m_b = 0;
 				return *this;
 			}
 
-			bool IsPosition() const
-			{
-				return m_locType == LOC_TYPE_POSITION;
-			}
+			bool IsPosition() const { return m_kind == LOC_TYPE_POSITION; }
+			bool IsOutputAttribute() const { return m_kind == LOC_TYPE_OUTPUT; }
 
-			bool IsOutputAttribute() const
-			{
-				return m_locType == LOC_TYPE_OUTPUT;
-			}
+			void GetOutputAttribute(uint16& attributeIndex) const { attributeIndex = m_a; }
 
-			void GetOutputAttribute(uint16& attributeIndex) const
-			{
-				attributeIndex = m_indexA;
-			}
-
-			operator LocationSymbolName() const
-			{
-				uint64 v = 0;
-				v |= ((uint64)m_locType << 56);
-				v |= ((uint64)m_indexA << 0);
-				v |= ((uint64)m_indexB << 16);
-
-				return (LocationSymbolName)v;
-			}
+			operator LocationSymbolName() const { return detail::packLocation(m_kind, m_a, m_b); }
 
 			std::string GetDebugName()
 			{
-				const char elementTable[] = { 'x' , 'y', 'z', 'w' };
-
-				//if (m_locType == LOC_TYPE_UNIFORM_REGISTER)
-				//	return fmt::format("UniformReg[{0}].{1}", m_indexA >> 2, elementTable[m_indexA & 3]);
-				//if (m_locType == LOC_TYPE_ATTRIBUTE)
-				//	return fmt::format("VertexAttribute[{0}].{1}", m_indexA, elementTable[m_indexB]);
-
+				if (IsPosition())
+					return "Position";
+				if (IsOutputAttribute())
+					return fmt::format("Output[{}]", m_a);
 				return "Unknown";
 			}
 
 		private:
-			LOC_TYPE m_locType{};
-			uint16 m_indexA{};
-			uint16 m_indexB{};
-			static_assert(sizeof(LocationSymbolName) == 8);
+			LOC_TYPE m_kind{};
+			uint16 m_a{};
+			uint16 m_b{};
 		};
-
 	};
 }

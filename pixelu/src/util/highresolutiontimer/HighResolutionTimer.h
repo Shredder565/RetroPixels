@@ -1,89 +1,64 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 using HRTick = uint64;
 
+// Monotonic high resolution clock reading. Ticks count at getFrequency() per
+// second (nanoseconds on Linux, macOS and BSD; the performance counter on Windows).
 class HighResolutionTimer
 {
 public:
-	HighResolutionTimer()
-	{
-		m_timePoint = 0;
-	}
-
-	HRTick getTick() const
-	{
-		return m_timePoint;
-	}
-
-	uint64 getTickInSeconds() const
-	{
-		return m_timePoint / m_freq;
-	}
-
-	// return time difference in seconds, this is an utility function mainly intended for debugging/benchmarking purposes. Avoid using doubles for precise timing
-	static double getTimeDiff(HRTick startTime, HRTick endTime)
-	{
-		return (double)(endTime - startTime) / (double)m_freq;
-	}
-
-	// returns tick difference and frequency
-	static uint64 getTimeDiffEx(HRTick startTime, HRTick endTime, uint64& freq)
-	{
-		freq = m_freq;
-		return endTime - startTime;
-	}
+	HighResolutionTimer() : m_timePoint(0) {}
 
 	static HighResolutionTimer now();
 	static HRTick getFrequency();
 
-	static HRTick microsecondsToTicks(uint64 microseconds)
+	HRTick getTick() const { return m_timePoint; }
+	uint64 getTickInSeconds() const { return m_timePoint / getFrequency(); }
+
+	// elapsed seconds as double; meant for statistics and logging, not exact timing
+	static double getTimeDiff(HRTick startTime, HRTick endTime)
 	{
-		return microseconds * m_freq / 1000000;
+		return (double)(endTime - startTime) / (double)getFrequency();
 	}
 
-	static uint64 ticksToMicroseconds(HRTick ticks)
+	// elapsed ticks, plus the tick frequency in freq
+	static uint64 getTimeDiffEx(HRTick startTime, HRTick endTime, uint64& freq)
 	{
-		return ticks * 1000000 / m_freq;
+		freq = getFrequency();
+		return endTime - startTime;
 	}
+
+	static HRTick microsecondsToTicks(uint64 microseconds) { return microseconds * getFrequency() / 1000000; }
+	static uint64 ticksToMicroseconds(HRTick ticks) { return ticks * 1000000 / getFrequency(); }
 
 private:
-	HighResolutionTimer(uint64 timePoint) : m_timePoint(timePoint) {};
+	explicit HighResolutionTimer(uint64 timePoint) : m_timePoint(timePoint) {}
 
 	uint64 m_timePoint;
-	static uint64 m_freq;
 };
 
-// benchmark helper utility
-// measures time between Start() and Stop() call
+// stopwatch: time between Start() and Stop()
 class BenchmarkTimer
 {
 public:
-	void Start()
-	{
-		m_startTime = HighResolutionTimer::now().getTick();
-	}
-
-	void Stop()
-	{
-		m_stopTime = HighResolutionTimer::now().getTick();
-	}
+	void Start() { m_start = HighResolutionTimer::now().getTick(); }
+	void Stop() { m_stop = HighResolutionTimer::now().getTick(); }
 
 	double GetElapsedMilliseconds() const
 	{
-		cemu_assert_debug(m_startTime != 0 && m_stopTime != 0);
-		cemu_assert_debug(m_startTime <= m_stopTime);
-		uint64 tickDif = m_stopTime - m_startTime;
-		double freq = (double)HighResolutionTimer::now().getFrequency();
-		double elapsedMS = (double)tickDif * 1000.0 / freq;
-		return elapsedMS;
+		cemu_assert_debug(m_start != 0 && m_stop != 0);
+		cemu_assert_debug(m_start <= m_stop);
+		return (double)(m_stop - m_start) * 1000.0 / (double)HighResolutionTimer::getFrequency();
 	}
 
 private:
-	HRTick m_startTime{};
-	HRTick m_stopTime{};
+	HRTick m_start{};
+	HRTick m_stop{};
 };
 
-// Sums up CPU time within scope over 100 frames and prints average
+// Scoped timer for profiling: the time spent in all scopes with the same name
+// is summed up and FrameEnd() logs the per-frame average every 100 frames.
 class FrameBenchmarkHelper
 {
 public:
@@ -98,4 +73,3 @@ public:
 	struct Entry;
 	Entry* m_entry;
 };
-

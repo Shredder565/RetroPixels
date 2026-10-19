@@ -1,60 +1,38 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "util/Zir/Core/IR.h"
 #include "util/Zir/Core/ZpIRPasses.h"
 #include "util/helpers/StringBuf.h"
 
-class DualStringBuffer;
-
 namespace ZirEmitter
 {
+	// Writes a register-allocated (RegisterAllocatorForGLSL) single-block
+	// function as a GLSL main(). A register that is read at most once is not
+	// stored in a variable; its expression is substituted at the use instead.
 	class GLSL
 	{
 	public:
-		GLSL() {};
+		GLSL() {}
 
-		// emit function code and append to output string buffer
+		// appends the code to output
 		void Emit(ZpIR::ZpIRFunction* irFunction, StringBuf* output);
 
 	private:
-		void GenerateBasicBlockCode(ZpIR::ZpIRBasicBlock& basicBlock);
+		void emitBlock(ZpIR::ZpIRBasicBlock& block);
+		void emit(ZpIR::IR::InsRR* ins);
+		void emit(ZpIR::IR::InsRRR* ins);
+		void emit(ZpIR::IR::InsIMPORT* ins);
+		void emit(ZpIR::IR::InsEXPORT* ins);
 
-		void HandleInstruction(ZpIR::IR::InsRR* ins);
-		void HandleInstruction(ZpIR::IR::InsRRR* ins);
-		void HandleInstruction(ZpIR::IR::InsIMPORT* ins);
-		void HandleInstruction(ZpIR::IR::InsEXPORT* ins);
+		// text of an operand: constant literal, pending expression or variable name
+		std::string operand(ZpIR::IRReg r) const;
+		std::string variableName(ZpIR::IRReg r) const;
+		// makes expr the value of r, either as pending expression or as a declared variable
+		void define(ZpIR::IRReg r, std::string expr, bool allowInline = true);
 
-		void appendSourceString(DualStringBuffer* buf, ZpIR::IRReg irReg);
-		void getRegisterName(char buf[16], ZpIR::IRReg irReg);
-
-	private:
-		ZpIR::ZpIRFunction* m_irFunction{};
-		StringBuf* m_glslSource{};
-
-		struct 
-		{
-			ZpIR::ZpIRBasicBlock* currentBasicBlock{ nullptr };
-			std::vector<uint8> regReadTracking;
-			std::vector<DualStringBuffer*> regInlinedExpression;
-
-			bool CanInlineRegister(ZpIR::IRReg reg) const 
-			{
-				cemu_assert_debug(ZpIR::isRegVar(reg));
-				return regReadTracking[ZpIR::getRegIndex(reg)] <= 1;
-			};
-		}m_blockContext;
-
-		void AssignResult(ZpIR::IRReg irReg, DualStringBuffer* buf, bool forceNoInline = false);
-
-		// inlined expression cache
-		void SetRegInlinedExpression(ZpIR::IRReg irReg, DualStringBuffer* buf);
-		void ResetRegInlinedExpression(ZpIR::IRReg irReg);
-		DualStringBuffer* GetRegInlinedExpression(ZpIR::IRReg irReg);
-
-		// memory pool for StringBuffer
-		DualStringBuffer* GetStringBuffer();
-		void ReleaseStringBuffer(DualStringBuffer* buf);
-
-		std::vector<DualStringBuffer*> m_stringBufferCache;
+		StringBuf* m_out{};
+		ZpIR::ZpIRBasicBlock* m_block{};
+		std::vector<uint8> m_readCount;              // per register, saturating
+		std::vector<std::optional<std::string>> m_pending; // per register, inlined expression
 	};
-
 }

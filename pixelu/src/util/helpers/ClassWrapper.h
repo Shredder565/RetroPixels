@@ -1,52 +1,46 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include <mutex>
 #include <memory>
 
+// Process-wide instance that lives until exit.
 template<typename T>
 class SingletonClass
 {
 public:
 	static T* getInstance()
 	{
-		static T instance;
-		return &instance;
+		static T s_object;
+		return &s_object;
 	}
 
 protected:
 	SingletonClass() = default;
 };
 
+// Shared instance that exists while someone holds a reference to it. Once the
+// last shared_ptr is gone the object is destroyed and the next getInstance()
+// creates a new one.
 template<typename T>
 class SingletonRef
 {
 public:
-	/*static std::shared_ptr<T> getInstance() C++20 only
-	{
-		static std::atomic<std::weak_ptr<T>> s_instance;
-		std::shared_ptr<T> result;
-		s_instance.compare_exchange_weak(result, std::make_shared<T>());
-		return result;
-	}*/
-	
 	static std::shared_ptr<T> getInstance()
 	{
-		std::scoped_lock lock(s_mutex);
-		
-		auto result = s_instance.lock();
-		if(!result)
-		{
-			result = std::make_shared<T>();
-			s_instance = result;
-		}
-		
-		return result;
+		std::lock_guard guard(s_guard);
+		std::shared_ptr<T> live = s_weak.lock();
+		if (live)
+			return live;
+		live = std::make_shared<T>();
+		s_weak = live;
+		return live;
 	}
 
 protected:
 	SingletonRef() = default;
 
 private:
-	static inline std::weak_ptr<T> s_instance;
-	static inline std::mutex s_mutex;
+	static inline std::weak_ptr<T> s_weak;
+	static inline std::mutex s_guard;
 };

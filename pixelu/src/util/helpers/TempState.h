@@ -1,20 +1,21 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
-template<typename TCtor, typename TDtor>
+// Runs enter() now and leave() when the object goes out of scope.
+template<typename TEnter, typename TLeave>
 class TempState
 {
 public:
-	TempState(TCtor ctor, TDtor dtor)
-		: m_dtor(std::move(dtor))
+	TempState(TEnter enter, TLeave leave) : m_leave(std::move(leave))
 	{
-		ctor();
+		enter();
 	}
 
 	~TempState()
 	{
-		m_dtor();
+		m_leave();
 	}
 
 private:
-	TDtor m_dtor;
+	TLeave m_leave;
 };

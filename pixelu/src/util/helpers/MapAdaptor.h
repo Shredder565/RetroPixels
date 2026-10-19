@@ -1,35 +1,42 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
-// https://ideone.com/k0H8Ei
-
-#include <iostream>
 #include <map>
 #include <boost/iterator/transform_iterator.hpp>
 
-template <typename T, typename F>
+// A range over a container that hands out f(element) instead of the element.
+// Used to iterate only the keys or only the values of a map.
+template<typename TContainer, typename TFunc>
 struct map_adaptor
 {
-	map_adaptor(const T& t, const F& f) : _t(t), _f(f) {}
-	map_adaptor(map_adaptor& a) = delete;
-	map_adaptor(map_adaptor&& a) = default;
+	map_adaptor(const TContainer& container, const TFunc& func) : _t(container), _f(func) {}
+	map_adaptor(map_adaptor& other) = delete;
+	map_adaptor(map_adaptor&& other) = default;
 
 	[[nodiscard]] auto begin() { return boost::make_transform_iterator(_t.begin(), _f); }
 	[[nodiscard]] auto end() { return boost::make_transform_iterator(_t.end(), _f); }
-
 	[[nodiscard]] auto cbegin() const { return boost::make_transform_iterator(_t.cbegin(), _f); }
 	[[nodiscard]] auto cend() const { return boost::make_transform_iterator(_t.cend(), _f); }
 
 protected:
-	const T& _t;
-	F _f;
+	const TContainer& _t;
+	TFunc _f;
 };
 
+template<typename TContainer, typename TFunc>
+auto get_map_adaptor(const TContainer& container, const TFunc& func)
+{
+	return map_adaptor<TContainer, TFunc>(container, func);
+}
 
-template <typename T, typename F>
-auto get_map_adaptor(const T& t, const F& f) { return map_adaptor<T, F>(t, f); }
+template<typename TContainer>
+auto get_keys(const TContainer& container)
+{
+	return get_map_adaptor(container, [](const auto& kv) { return kv.first; });
+}
 
-template <typename T>
-auto get_keys(const T& t) { return get_map_adaptor(t, [](const auto& p) { return p.first; }); }
-
-template <typename T>
-auto get_values(const T& t) { return get_map_adaptor(t, [](const auto& p) { return p.second; }); }
+template<typename TContainer>
+auto get_values(const TContainer& container)
+{
+	return get_map_adaptor(container, [](const auto& kv) { return kv.second; });
+}

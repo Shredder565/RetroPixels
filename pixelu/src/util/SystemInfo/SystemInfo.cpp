@@ -1,21 +1,21 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "util/SystemInfo/SystemInfo.h"
 
 uint64 ProcessorTime::work()
 {
-	return user + kernel;
+	return kernel + user;
 }
 
 uint64 ProcessorTime::total()
 {
-	return idle + user + kernel;
+	return idle + kernel + user;
 }
 
-double ProcessorTime::Compare(ProcessorTime &last, ProcessorTime &now)
+double ProcessorTime::Compare(ProcessorTime& last, ProcessorTime& now)
 {
-	auto dwork = now.work() - last.work();
-	auto dtotal = now.total() - last.total();
-
-	return (double)dwork / dtotal;
+	const uint64 busy = now.work() - last.work();
+	const uint64 all = now.total() - last.total();
+	return (double)busy / (double)all;
 }
 
 uint32 GetProcessorCount()
@@ -23,12 +23,11 @@ uint32 GetProcessorCount()
 	return std::thread::hardware_concurrency();
 }
 
-void QueryProcTime(ProcessorTime &out)
+void QueryProcTime(ProcessorTime& out)
 {
-	uint64 now, user, kernel;
-	QueryProcTime(now, user, kernel);
-
-	out.idle = now - (user + kernel);
-	out.kernel = kernel;
+	uint64 wall, user, kernel;
+	QueryProcTime(wall, user, kernel);
 	out.user = user;
+	out.kernel = kernel;
+	out.idle = wall - (user + kernel);
 }

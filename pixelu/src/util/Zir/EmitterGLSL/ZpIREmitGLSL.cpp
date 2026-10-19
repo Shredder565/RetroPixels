@@ -1,312 +1,173 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "util/Zir/Core/IR.h"
 #include "util/Zir/Core/ZirUtility.h"
 #include "util/Zir/Core/ZpIRPasses.h"
 #include "util/Zir/EmitterGLSL/ZpIREmitGLSL.h"
-#include "util/Zir/Core/ZpIRScheduler.h"
-
-// string buffer helper class which keeps buffer space at the front and end, allow fast prepend and append
-class DualStringBuffer
-{
-	static constexpr size_t N = 1024;
-
-public:
-	DualStringBuffer() : m_offsetBegin(N / 2), m_offsetEnd(N / 2) { }
-
-	~DualStringBuffer() = default;
-
-	static_assert(sizeof(char) == sizeof(uint8));
-
-	void reset()
-	{
-		m_offsetBegin = N / 2;
-		m_offsetEnd = m_offsetBegin;
-	}
-
-	void append(std::string_view strView)
-	{
-		cemu_assert_debug((m_offsetEnd + strView.size()) <= N);
-		std::memcpy(m_strBuffer + m_offsetEnd, strView.data(), strView.size());
-		m_offsetEnd += (uint32)strView.size();
-	}
-
-	template <typename... Args>
-	void appendFmt(const char* format_str, Args... args)
-	{
-		char* buf = (char*)(m_strBuffer + m_offsetEnd);
-		char* r = fmt::format_to(buf, fmt::runtime(format_str), std::forward<Args>(args)...);
-		cemu_assert_debug(r <= (char*)(m_strBuffer + N));
-		m_offsetEnd += (uint32)(r - buf);
-	}
-
-	void prepend(std::string_view strView)
-	{
-		assert_dbg();
-	}
-
-	size_t size() const
-	{
-		return m_offsetEnd - m_offsetBegin;
-	}
-
-	operator std::string_view()
-	{
-		return std::basic_string_view<char>((char*)(m_strBuffer + m_offsetBegin), m_offsetEnd - m_offsetBegin);
-	}
-
-private:
-	//void resizeBuffer(uint32 spaceRequiredFront, uint32 spaceRequiredBack)
-	//{
-	//	uint32 newTotalSize = spaceRequiredFront + size() + spaceRequiredBack;
-	//	// round to next multiple of 32 and add extra buffer
-	//	newTotalSize = (newTotalSize + 31) & ~31;
-	//	newTotalSize += (newTotalSize / 4);
-	//	// 
-	//}
-
-	//uint8* m_bufferPtr{ nullptr };
-	//size_t m_bufferSize{ 0 };
-	//std::vector<uint8> m_buffer;
-	uint32 m_offsetBegin;
-	uint32 m_offsetEnd;
-
-	uint8 m_strBuffer[N];
-};
-
-
 
 namespace ZirEmitter
 {
-	static const char g_idx_to_element[] = { 'x' , 'y', 'z', 'w'};
+	using namespace ZpIR;
+	using RA = ZirPass::RegisterAllocatorForGLSL;
 
-	void GLSL::Emit(ZpIR::ZpIRFunction* irFunction, StringBuf* output)
+	namespace
 	{
-		m_irFunction = irFunction;
-		m_glslSource = output;
+		constexpr const char* kNewline = "\r\n";
+		constexpr char kChannel[4] = { 'x', 'y', 'z', 'w' };
+		// longer expressions are always stored in a variable
+		constexpr size_t kMaxInlineLength = 100;
 
-		cemu_assert_debug(m_irFunction->m_entryBlocks.size() == 1);
-
-		cemu_assert_debug(m_irFunction->m_basicBlocks.size() == 1); // other sizes are todo
-
-		m_glslSource->add("void main()\r\n{\r\n");
-		GenerateBasicBlockCode(*m_irFunction->m_entryBlocks[0]);
-		m_glslSource->add("}\r\n");
-	}
-
-	void GLSL::GenerateBasicBlockCode(ZpIR::ZpIRBasicBlock& basicBlock)
-	{
-		// init context		
-#ifdef CEMU_DEBUG_ASSERT
-		for (auto& itr : m_blockContext.regInlinedExpression)
+		const char* glslTypeName(DataType t)
 		{
-			cemu_assert_debug(itr == nullptr); // leaked buffer
-		}
-#endif
-		m_blockContext.regReadTracking.clear();
-		m_blockContext.regReadTracking.resize(basicBlock.m_regs.size());
-		m_blockContext.regInlinedExpression.resize(basicBlock.m_regs.size());
-
-		m_blockContext.currentBasicBlock = &basicBlock;
-
-		// we first do an analysis pass in which we determine the read count for each register
-		// every register which is only consumed once can be directly inlined instead of storing and referencing it via a variable
-		ZpIR::IR::__InsBase* instruction = basicBlock.m_instructionFirst;
-		while (instruction)
-		{
-			ZpIR::ZpIRCmdUtil::forEachAccessedReg(basicBlock, instruction,
-				[this](ZpIR::IRReg readReg)
+			switch (t)
 			{
-				if (readReg >= 0x8000)
-					assert_dbg();
-				// read access
-				auto& entry = m_blockContext.regReadTracking.at(readReg);
-				if (entry < 255)
-					entry++;
-			},
-				[](ZpIR::IRReg writtenReg)
-			{
-			});
-
-			instruction = instruction->next;
-		}
-
-		// emit GLSL for this block
-		instruction = basicBlock.m_instructionFirst;
-		while (instruction)
-		{
-			if (auto ins = ZpIR::IR::InsRR::getIfForm(instruction))
-				HandleInstruction(ins);
-			else if (auto ins = ZpIR::IR::InsRRR::getIfForm(instruction))
-				HandleInstruction(ins);
-			else if (auto ins = ZpIR::IR::InsIMPORT::getIfForm(instruction))
-				HandleInstruction(ins);
-			else if (auto ins = ZpIR::IR::InsEXPORT::getIfForm(instruction))
-				HandleInstruction(ins);
-			else
-			{
-				assert_dbg();
+			case DataType::F32: return "float ";
+			case DataType::S32: return "int ";
+			case DataType::U32: return "uint ";
+			default:
+				cemu_assert_debug(false);
+				return "";
 			}
+		}
 
-			instruction = instruction->next;
+		const char* bitcastFunction(DataType from, DataType to)
+		{
+			if (to == DataType::F32 && from == DataType::U32)
+				return "uintBitsToFloat(";
+			if (to == DataType::F32 && from == DataType::S32)
+				return "intBitsToFloat(";
+			if (from == DataType::F32 && to == DataType::U32)
+				return "floatBitsToUint(";
+			if (from == DataType::F32 && to == DataType::S32)
+				return "floatBitsToInt(";
+			assert_dbg();
+			return "";
 		}
 	}
 
-	void GLSL::HandleInstruction(ZpIR::IR::InsRR* ins)
+	void GLSL::Emit(ZpIRFunction* irFunction, StringBuf* output)
 	{
-		DualStringBuffer* expressionBuf = GetStringBuffer();
-		bool forceNoInline = false;
+		m_out = output;
+		cemu_assert_debug(irFunction->m_entryBlocks.size() == 1);
+		cemu_assert_debug(irFunction->m_basicBlocks.size() == 1); // multiple blocks are not supported yet
+		m_out->add("void main()");
+		m_out->add(kNewline);
+		m_out->add("{");
+		m_out->add(kNewline);
+		emitBlock(*irFunction->m_entryBlocks[0]);
+		m_out->add("}");
+		m_out->add(kNewline);
+	}
 
+	void GLSL::emitBlock(ZpIRBasicBlock& block)
+	{
+		m_block = &block;
+		m_readCount.assign(block.m_regs.size(), 0);
+		m_pending.clear();
+		m_pending.resize(block.m_regs.size());
+
+		// count reads so that single-use values can be substituted
+		for (IR::__InsBase* ins = block.m_instructionFirst; ins; ins = ins->next)
+		{
+			ZpIRCmdUtil::forEachAccessedReg(block, ins,
+				[this](IRReg r) {
+					uint8& n = m_readCount.at(r);
+					if (n != 0xFF)
+						n++;
+				},
+				[](IRReg) {});
+		}
+
+		for (IR::__InsBase* ins = block.m_instructionFirst; ins; ins = ins->next)
+		{
+			if (auto rr = IR::InsRR::getIfForm(ins))
+				emit(rr);
+			else if (auto rrr = IR::InsRRR::getIfForm(ins))
+				emit(rrr);
+			else if (auto imp = IR::InsIMPORT::getIfForm(ins))
+				emit(imp);
+			else if (auto exp = IR::InsEXPORT::getIfForm(ins))
+				emit(exp);
+			else
+				assert_dbg();
+		}
+	}
+
+	void GLSL::emit(IR::InsRR* ins)
+	{
+		const DataType srcType = m_block->getRegType(ins->rB);
+		const DataType dstType = m_block->getRegType(ins->rA);
+		const std::string src = operand(ins->rB);
+		std::string expr;
+		bool allowInline = true;
 		switch (ins->opcode)
 		{
-		case ZpIR::IR::OpCode::BITCAST:
-		{
-			auto srcType = m_blockContext.currentBasicBlock->getRegType(ins->rB);
-			auto dstType = m_blockContext.currentBasicBlock->getRegType(ins->rA);
-
-			if (srcType == ZpIR::DataType::U32 && dstType == ZpIR::DataType::F32)
-				expressionBuf->append("uintBitsToFloat(");
-			else if (srcType == ZpIR::DataType::S32 && dstType == ZpIR::DataType::F32)
-				expressionBuf->append("intBitsToFloat(");
-			else if (srcType == ZpIR::DataType::F32 && dstType == ZpIR::DataType::U32)
-				expressionBuf->append("floatBitsToUint(");
-			else if (srcType == ZpIR::DataType::F32 && dstType == ZpIR::DataType::S32)
-				expressionBuf->append("floatBitsToInt(");
-			else
-				assert_dbg();
-			appendSourceString(expressionBuf, ins->rB);
-			expressionBuf->append(")");
+		case IR::OpCode::MOV:
+			expr = src;
 			break;
-		}
-		case ZpIR::IR::OpCode::SWAP_ENDIAN:
-		{
-			auto srcType = m_blockContext.currentBasicBlock->getRegType(ins->rB);
-			auto dstType = m_blockContext.currentBasicBlock->getRegType(ins->rA);
+		case IR::OpCode::BITCAST:
+			expr = std::string(bitcastFunction(srcType, dstType)) + src + ")";
+			break;
+		case IR::OpCode::SWAP_ENDIAN:
 			cemu_assert_debug(srcType == dstType);
-
-			// todo - should we store expressionBuf in a temporary variable? We reference it multiple times and reducing complexity would be good
-			if (srcType == ZpIR::DataType::U32)
+			if (srcType != DataType::U32)
 			{
-				expressionBuf->append("(((");
-				appendSourceString(expressionBuf, ins->rB);
-				expressionBuf->append(")>>24)");
-
-				expressionBuf->append("|");
-
-				expressionBuf->append("(((");
-				appendSourceString(expressionBuf, ins->rB);
-				expressionBuf->append(")>>8)&0xFF00)");
-
-				expressionBuf->append("|");
-
-				expressionBuf->append("(((");
-				appendSourceString(expressionBuf, ins->rB);
-				expressionBuf->append(")<<8)&0xFF0000)");
-
-				expressionBuf->append("|");
-
-				expressionBuf->append("((");
-				appendSourceString(expressionBuf, ins->rB);
-				expressionBuf->append(")<<24))");
-
-				// (v>>24)|((v>>8)&0xFF00)|((v<<8)&0xFF0000)|((v<<24))
-			}
-			else
 				assert_dbg();
-			forceNoInline = true; // avoid inlining endian-swapping, since it would add too much complexity to expressions
+				break;
+			}
+			// the operand appears four times, so the result always gets its own variable
+			expr = fmt::format("((({0})>>24)|((({0})>>8)&0xFF00)|((({0})<<8)&0xFF0000)|(({0})<<24))", src);
+			allowInline = false;
 			break;
-		}
-		case ZpIR::IR::OpCode::MOV:
-			appendSourceString(expressionBuf, ins->rB);
+		case IR::OpCode::CONVERT_FLOAT_TO_INT:
+			cemu_assert_debug(srcType == DataType::F32);
+			expr = std::string(dstType == DataType::U32 ? "uint(" : "int(") + src + ")";
 			break;
-		case ZpIR::IR::OpCode::CONVERT_FLOAT_TO_INT:
-		{
-			auto srcType = m_blockContext.currentBasicBlock->getRegType(ins->rB);
-			auto dstType = m_blockContext.currentBasicBlock->getRegType(ins->rA);
-			cemu_assert_debug(srcType == ZpIR::DataType::F32);
-			cemu_assert_debug(dstType == ZpIR::DataType::S32 || dstType == ZpIR::DataType::U32);
-			if(dstType == ZpIR::DataType::U32)
-				expressionBuf->append("uint(");
-			else
-				expressionBuf->append("int(");
-			appendSourceString(expressionBuf, ins->rB);
-			expressionBuf->append(")");
+		case IR::OpCode::CONVERT_INT_TO_FLOAT:
+			cemu_assert_debug(srcType == DataType::S32 || srcType == DataType::U32);
+			cemu_assert_debug(dstType == DataType::F32);
+			expr = "float(" + src + ")";
 			break;
-		}
-		case ZpIR::IR::OpCode::CONVERT_INT_TO_FLOAT:
-		{
-			auto srcType = m_blockContext.currentBasicBlock->getRegType(ins->rB);
-			auto dstType = m_blockContext.currentBasicBlock->getRegType(ins->rA);
-			cemu_assert_debug(srcType == ZpIR::DataType::S32 || srcType == ZpIR::DataType::U32);
-			cemu_assert_debug(dstType == ZpIR::DataType::F32);
-			expressionBuf->append("float(");
-			appendSourceString(expressionBuf, ins->rB);
-			expressionBuf->append(")");
-			break;
-		}
 		default:
 			assert_dbg();
+			break;
 		}
-		AssignResult(ins->rA, expressionBuf, forceNoInline);
+		define(ins->rA, std::move(expr), allowInline);
 	}
 
-	void GLSL::HandleInstruction(ZpIR::IR::InsRRR* ins)
+	void GLSL::emit(IR::InsRRR* ins)
 	{
-		DualStringBuffer* expressionBuf = GetStringBuffer();
-
+		const char* op = nullptr;
 		switch (ins->opcode)
 		{
-		case ZpIR::IR::OpCode::ADD:
-		{
-			appendSourceString(expressionBuf, ins->rB);
-			expressionBuf->append(" + ");
-			appendSourceString(expressionBuf, ins->rC);
-			break;
-		}
-		case ZpIR::IR::OpCode::MUL:
-		{
-			appendSourceString(expressionBuf, ins->rB);
-			expressionBuf->append(" * ");
-			appendSourceString(expressionBuf, ins->rC);
-			break;
-		}
-		case ZpIR::IR::OpCode::DIV:
-		{
-			appendSourceString(expressionBuf, ins->rB);
-			expressionBuf->append(" / ");
-			appendSourceString(expressionBuf, ins->rC);
-			break;
-		}
+		case IR::OpCode::ADD: op = " + "; break;
+		case IR::OpCode::MUL: op = " * "; break;
+		case IR::OpCode::DIV: op = " / "; break;
 		default:
 			assert_dbg();
+			op = " ? ";
+			break;
 		}
-		AssignResult(ins->rA, expressionBuf);
+		define(ins->rA, operand(ins->rB) + op + operand(ins->rC));
 	}
 
-	void GLSL::HandleInstruction(ZpIR::IR::InsIMPORT* ins)
+	void GLSL::emit(IR::InsIMPORT* ins)
 	{
-		ZpIR::ShaderSubset::ShaderImportLocation loc(ins->importSymbol);
-		DualStringBuffer* buf = GetStringBuffer();
+		ShaderSubset::ShaderImportLocation loc(ins->importSymbol);
 		if (loc.IsUniformRegister())
 		{
 			uint16 index;
 			loc.GetUniformRegister(index);
-			// todo - this is complex. Solve via callback
-			buf->appendFmt("uf_remappedVS[{}].{}", index/4, g_idx_to_element[index&3]);
-			AssignResult(ins->regArray[0], buf);
+			define(ins->regArray[0], fmt::format("uf_remappedVS[{}].{}", index / 4, kChannel[index & 3]));
 		}
 		else if (loc.IsVertexAttribute())
 		{
-			uint16 attributeIndex;
-			uint16 channelIndex;
-			loc.GetVertexAttribute(attributeIndex, channelIndex);
-
+			uint16 attribute, channel;
+			loc.GetVertexAttribute(attribute, channel);
 			cemu_assert_debug(ins->count == 1);
-			cemu_assert_debug(ZpIR::isRegVar(ins->regArray[0]));
-			cemu_assert_debug(channelIndex < 4);
-			cemu_assert_debug(m_blockContext.currentBasicBlock->getRegType(ins->regArray[0]) == ZpIR::DataType::U32);
-
-			buf->appendFmt("attrDataSem{}.{}", attributeIndex, g_idx_to_element[channelIndex]);
-
-			AssignResult(ins->regArray[0], buf);
+			cemu_assert_debug(isRegVar(ins->regArray[0]));
+			cemu_assert_debug(channel < 4);
+			cemu_assert_debug(m_block->getRegType(ins->regArray[0]) == DataType::U32);
+			define(ins->regArray[0], fmt::format("attrDataSem{}.{}", attribute, kChannel[channel & 3]));
 		}
 		else
 		{
@@ -314,179 +175,92 @@ namespace ZirEmitter
 		}
 	}
 
-	void GLSL::HandleInstruction(ZpIR::IR::InsEXPORT* ins)
+	void GLSL::emit(IR::InsEXPORT* ins)
 	{
-		ZpIR::ShaderSubset::ShaderExportLocation loc(ins->exportSymbol);
-		DualStringBuffer* buf = GetStringBuffer();
+		ShaderSubset::ShaderExportLocation loc(ins->exportSymbol);
+		std::string line;
+		const char* close = nullptr;
 		if (loc.IsPosition())
 		{
-			// todo - support for output mask (e.g. xyzw, x_zw) ?
-			buf->append("SET_POSITION(vec4(");
-			cemu_assert_debug(ins->count == 4);
-			for (uint32 i = 0; i < ins->count; i++)
-			{
-				if(i > 0)
-					buf->append(", ");
-				appendSourceString(buf, ins->regArray[i]);
-			}
-			m_glslSource->add(*buf);
-			m_glslSource->add("));\r\n");
+			line = "SET_POSITION(vec4(";
+			close = "));";
 		}
 		else if (loc.IsOutputAttribute())
 		{
-			uint16 attributeIndex;
-			loc.GetOutputAttribute(attributeIndex);
-			buf->appendFmt("passParameterSem{} = vec4(", attributeIndex);
-			cemu_assert_debug(ins->count == 4);
-			for (uint32 i = 0; i < ins->count; i++)
-			{
-				if (i > 0)
-					buf->append(", ");
-				appendSourceString(buf, ins->regArray[i]);
-			}
-			m_glslSource->add(*buf);
-			m_glslSource->add(");\r\n");
+			uint16 attribute;
+			loc.GetOutputAttribute(attribute);
+			line = fmt::format("passParameterSem{} = vec4(", attribute);
+			close = ");";
 		}
 		else
 		{
 			assert_dbg();
+			return;
 		}
-		ReleaseStringBuffer(buf);
+		cemu_assert_debug(ins->count == 4);
+		for (uint16 i = 0; i < ins->count; i++)
+		{
+			if (i != 0)
+				line += ", ";
+			line += operand(ins->regArray[i]);
+		}
+		line += close;
+		line += kNewline;
+		m_out->add(line);
 	}
 
-	void GLSL::AssignResult(ZpIR::IRReg irReg, DualStringBuffer* buf, bool forceNoInline)
+	void GLSL::define(IRReg r, std::string expr, bool allowInline)
 	{
-		if (buf->size() > 100)
-			forceNoInline = true; // expression too long
-
-		if (m_blockContext.CanInlineRegister(irReg) && !forceNoInline)
+		cemu_assert_debug(isRegVar(r));
+		const uint16 index = getRegIndex(r);
+		if (allowInline && expr.size() <= kMaxInlineLength && m_readCount[index] <= 1)
 		{
-			SetRegInlinedExpression(irReg, buf);
+			m_pending[index] = std::move(expr);
+			return;
 		}
-		else
-		{
-			ZpIR::DataType regType = m_blockContext.currentBasicBlock->getRegType(irReg);
-			if (regType == ZpIR::DataType::F32)
-				m_glslSource->add("float ");
-			else if (regType == ZpIR::DataType::S32)
-				m_glslSource->add("int ");
-			else if (regType == ZpIR::DataType::U32)
-				m_glslSource->add("uint ");
-			else
-			{
-				cemu_assert_debug(false);
-			}
-
-			char regName[16];
-			getRegisterName(regName, irReg);
-			m_glslSource->add(regName);
-			m_glslSource->add(" = ");
-			m_glslSource->add(*buf);
-			m_glslSource->add(";\r\n");
-			ReleaseStringBuffer(buf);
-		}
+		m_out->add(glslTypeName(m_block->getRegType(r)));
+		m_out->add(variableName(r));
+		m_out->add(" = ");
+		m_out->add(expr);
+		m_out->add(";");
+		m_out->add(kNewline);
 	}
 
-	void GLSL::appendSourceString(DualStringBuffer* buf, ZpIR::IRReg irReg)
+	std::string GLSL::operand(IRReg r) const
 	{
-		if (ZpIR::isConstVar(irReg))
+		if (isConstVar(r))
 		{
-			ZpIR::IRRegConstDef* constDef = m_blockContext.currentBasicBlock->getConstant(irReg);
-			if (constDef->type == ZpIR::DataType::U32)
+			const IRRegConstDef* c = m_block->getConstant(r);
+			switch (c->type)
 			{
-				buf->appendFmt("{}", constDef->value_u32);
-				return;
+			case DataType::U32: return fmt::format("{}", c->value_u32);
+			case DataType::S32: return fmt::format("{}", c->value_s32);
+			case DataType::F32: return fmt::format("{}", c->value_f32);
+			default:
+				assert_dbg();
+				return {};
 			}
-			else if (constDef->type == ZpIR::DataType::S32)
-			{
-				buf->appendFmt("{}", constDef->value_s32);
-				return;
-			}
-			else if (constDef->type == ZpIR::DataType::F32)
-			{
-				buf->appendFmt("{}", constDef->value_f32);
-				return;
-			}
-			assert_dbg();
 		}
-		else
-		{
-			cemu_assert_debug(ZpIR::isRegVar(irReg));
-			uint16 regIndex = ZpIR::getRegIndex(irReg);
-			DualStringBuffer* expressionBuf = m_blockContext.regInlinedExpression[regIndex];
-			if (expressionBuf)
-			{
-				buf->append(*expressionBuf);
-				return;
-			}
-			char regName[16];
-			getRegisterName(regName, irReg);
-			buf->append(regName);
-		}
+		const auto& pending = m_pending[getRegIndex(r)];
+		if (pending)
+			return *pending;
+		return variableName(r);
 	}
 
-	void GLSL::getRegisterName(char buf[16], ZpIR::IRReg irReg)
+	std::string GLSL::variableName(IRReg r) const
 	{
-		auto& regData = m_blockContext.currentBasicBlock->m_regs[(uint16)irReg & 0x7FFF];
-		cemu_assert_debug(regData.hasAssignedPhysicalRegister());
-		ZpIR::ZpIRPhysicalReg physReg = regData.physicalRegister;
-
-		char typeChar;
-		if (ZirPass::RegisterAllocatorForGLSL::IsPhysRegTypeF32(physReg))
-			typeChar = 'f';
-		else if (ZirPass::RegisterAllocatorForGLSL::IsPhysRegTypeS32(physReg))
-			typeChar = 'i';
-		else if (ZirPass::RegisterAllocatorForGLSL::IsPhysRegTypeU32(physReg))
-			typeChar = 'u';
+		const IRRegDef& def = m_block->m_regs[getRegIndex(r)];
+		cemu_assert_debug(def.hasAssignedPhysicalRegister());
+		const ZpIRPhysicalReg phys = def.physicalRegister;
+		char suffix = 'x';
+		if (RA::IsPhysRegTypeF32(phys))
+			suffix = 'f';
+		else if (RA::IsPhysRegTypeS32(phys))
+			suffix = 'i';
+		else if (RA::IsPhysRegTypeU32(phys))
+			suffix = 'u';
 		else
-		{
-			typeChar = 'x';
 			cemu_assert_debug(false);
-		}
-
-		auto r = fmt::format_to(buf, "r{}{}", ZirPass::RegisterAllocatorForGLSL::GetPhysRegIndex(physReg), typeChar);
-		*r = '\0';
+		return fmt::format("r{}{}", RA::GetPhysRegIndex(phys), suffix);
 	}
-
-	void GLSL::SetRegInlinedExpression(ZpIR::IRReg irReg, DualStringBuffer* buf)
-	{
-		cemu_assert_debug(ZpIR::isRegVar(irReg));
-		uint16 dstIndex = (uint16)irReg;
-		if (m_blockContext.regInlinedExpression[dstIndex])
-			ReleaseStringBuffer(m_blockContext.regInlinedExpression[dstIndex]);
-		m_blockContext.regInlinedExpression[dstIndex] = buf;
-	}
-
-	void GLSL::ResetRegInlinedExpression(ZpIR::IRReg irReg)
-	{
-		cemu_assert_debug(ZpIR::isRegVar(irReg));
-		uint16 dstIndex = (uint16)irReg;
-		if (m_blockContext.regInlinedExpression[dstIndex])
-		{
-			ReleaseStringBuffer(m_blockContext.regInlinedExpression[dstIndex]);
-			m_blockContext.regInlinedExpression[dstIndex] = nullptr;
-		}
-	}
-
-	DualStringBuffer* GLSL::GetRegInlinedExpression(ZpIR::IRReg irReg)
-	{
-		cemu_assert_debug(ZpIR::isRegVar(irReg));
-		uint16 dstIndex = (uint16)irReg;
-		return m_blockContext.regInlinedExpression[dstIndex];
-	}
-
-	DualStringBuffer* GLSL::GetStringBuffer()
-	{
-		if (m_stringBufferCache.empty())
-			return new DualStringBuffer();
-		DualStringBuffer* buf = m_stringBufferCache.back();
-		m_stringBufferCache.pop_back();
-		buf->reset();
-		return buf;
-	}
-
-	void GLSL::ReleaseStringBuffer(DualStringBuffer* buf)
-	{
-		m_stringBufferCache.emplace_back(buf);
-	}
-};
+}

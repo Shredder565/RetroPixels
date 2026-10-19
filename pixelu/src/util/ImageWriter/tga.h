@@ -1,34 +1,39 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+#pragma once
 #include "Common/FileStream.h"
 #include <vector>
 
+// Writes an uncompressed 32-bit true-color TGA (top-left origin) from
+// tightly packed RGBA8 pixels. Returns false if the file can't be created.
 static bool tga_write_rgba(const fs::path& path, sint32 width, sint32 height, uint8* pixelData)
 {
-	FileStream* fs = FileStream::createFile2(path);
-	if (fs == nullptr)
+	FileStream* file = FileStream::createFile2(path);
+	if (!file)
 		return false;
 
-	uint8_t header[18] = {0,0,2,0,0,0,0,0,0,0,0,0, (uint8)(width % 256), (uint8)(width / 256), (uint8)(height % 256), (uint8)(height / 256), 32, 0x20};
-	fs->writeData(&header, sizeof(header));
+	uint8 header[18] = {};
+	header[2] = 2; // uncompressed true-color
+	header[12] = (uint8)(width & 0xFF);
+	header[13] = (uint8)((width >> 8) & 0xFF);
+	header[14] = (uint8)(height & 0xFF);
+	header[15] = (uint8)((height >> 8) & 0xFF);
+	header[16] = 32;   // bits per pixel
+	header[17] = 0x20; // origin at the top
+	file->writeData(header, sizeof(header));
 
-	std::vector<uint8> tempPixelData;
-	tempPixelData.resize(width * height * 4);
-
-	// write one row at a time
-	uint8* pOut = tempPixelData.data();
-	for (sint32 y = 0; y < height; y++)
+	// TGA stores BGRA
+	const size_t pixelCount = (size_t)width * (size_t)height;
+	std::vector<uint8> bgra(pixelCount * 4);
+	for (size_t i = 0; i < pixelCount; i++)
 	{
-		const uint8* rowIn = pixelData + y * width*4;
-		for (sint32 x = 0; x < width; x++)
-		{
-			pOut[0] = rowIn[2];
-			pOut[1] = rowIn[1];
-			pOut[2] = rowIn[0];
-			pOut[3] = rowIn[3];
-			pOut += 4;
-			rowIn += 4;
-		}
+		const uint8* src = pixelData + i * 4;
+		uint8* dst = bgra.data() + i * 4;
+		dst[0] = src[2];
+		dst[1] = src[1];
+		dst[2] = src[0];
+		dst[3] = src[3];
 	}
-	fs->writeData(tempPixelData.data(), width * height * 4);
-	delete fs;
+	file->writeData(bgra.data(), (sint32)bgra.size());
+	delete file;
 	return true;
 }
