@@ -1,7 +1,9 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 namespace coreinit
 {
+	// "copy data": arguments handed between titles, stored in the foreground bucket
 	void __OSClearCopyData();
 	uint32 __OSGetCopyDataSize();
 	uint8* __OSGetCopyDataPtr();

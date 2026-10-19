@@ -1,14 +1,16 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/OS/common/OSCommon.h"
 #include "coreinit_BSP.h"
 
+// Board support package queries
 namespace coreinit
 {
+	// The top byte is the hardware generation; values below 0x11 identify a Hollywood (Wii) board,
+	// so report the first Latte generation
 	bool bspGetHardwareVersion(uint32be* version)
 	{
-		uint8 highVersion = 0x11; // anything below 0x11 will be considered as Hollywood
-		// todo: Check version returned on console
-		uint32 tempVers = highVersion << 24;
-		*version = tempVers;
+		constexpr uint32 kLatteGeneration = 0x11;
+		*version = kLatteGeneration << 24;
 		return true;
 	}
 

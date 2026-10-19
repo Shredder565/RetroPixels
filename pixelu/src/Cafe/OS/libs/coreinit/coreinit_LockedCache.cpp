@@ -1,299 +1,224 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/OS/libs/coreinit/coreinit.h"
 #include "Cafe/HW/Latte/Core/LatteBufferCache.h"
 
-/*
-	Locked cache is mapped to the following memory regions:
-			offset		size
-	core0:	0xFFC00000	0x4000
-	core1:	0xFFC40000	0x4000
-	core2:	0xFFC80000	0x4000
-*/
-
-#define LC_LOCKED_CACHE_GRANULARITY		(0x200)	 // 512B
-#define LC_LOCKED_CACHE_SIZE			(0x4000) // 16KB
-
-#define LC_MASK_FREE			(0)
-#define LC_MASK_RESERVED		(1)
-#define LC_MASK_RESERVED_END	(2) // indicates end of reserved block
-
+// Locked cache (LC): each core has 16KB of L1 data cache that can be locked and used as fast
+// scratch memory, filled and flushed with DMA. Every core sees its own LC at a fixed address:
+//   core 0: 0xFFC00000, core 1: 0xFFC40000, core 2: 0xFFC80000
+// LCAlloc hands out pieces in 512 byte units. We track the units per core with one state byte each;
+// the last unit of an allocation is marked so LCDealloc knows where it ends. DMA is done instantly.
 namespace coreinit
 {
-	uint8   lcCacheMask[PPC_CORE_COUNT][(LC_LOCKED_CACHE_SIZE + LC_LOCKED_CACHE_GRANULARITY - 1) / LC_LOCKED_CACHE_GRANULARITY] = { 0 };
-	uint32  lcAllocatedBlocks[PPC_CORE_COUNT] = { 0 };
-
-	MPTR lcAddr[] =
+	namespace
 	{
-		0xFFC00000, // core 0
-		0xFFC40000, // core 1
-		0xFFC80000  // core 2
-	};
+		constexpr uint32 kLCSize = 0x4000;
+		constexpr uint32 kLCUnit = 0x200;
+		constexpr uint32 kLCUnits = kLCSize / kLCUnit;
+		constexpr uint32 kDMABlockSize = 32;
+		constexpr uint32 kDMAMaxBlocks = 128; // a block count of 0 means 128
 
-	void coreinitExport_LCGetMaxSize(PPCInterpreter_t* hCPU)
-	{
-		osLib_returnFromFunction(hCPU, LC_LOCKED_CACHE_SIZE);
-	}
-
-	void coreinitExport_LCAlloc(PPCInterpreter_t* hCPU)
-	{
-		//debug_printf("LCAlloc(0x%04x) Thread %08x Core %d", hCPU->gpr[3], coreinitThread_getCurrentThread(hCPU), PPCInterpreter_getCoreIndex(hCPU));
-		uint32 size = hCPU->gpr[3];
-		if (size == 0 || size > LC_LOCKED_CACHE_SIZE)
+		enum : uint8
 		{
-			debug_printf("LCAlloc: Invalid alloc size %d\n", size);
-			osLib_returnFromFunction(hCPU, MPTR_NULL);
-			return;
+			UNIT_FREE = 0,
+			UNIT_USED = 1,
+			UNIT_LAST = 2, // last unit of an allocation
+		};
+
+		constexpr MPTR kLCBase[PPC_CORE_COUNT] = { 0xFFC00000, 0xFFC40000, 0xFFC80000 };
+
+		uint8 s_units[PPC_CORE_COUNT][kLCUnits] = {};
+		uint32 s_usedUnits[PPC_CORE_COUNT] = {};
+		uint32 s_dmaEnableCount[PPC_CORE_COUNT] = {};
+		sint32 s_leakWarnings = 0;
+
+		uint32 CurrentCore(PPCInterpreter_t* hCPU)
+		{
+			return PPCInterpreter_getCoreIndex(hCPU);
 		}
-		if ((size % LC_LOCKED_CACHE_GRANULARITY) != 0)
+
+		bool RangeIsFree(const uint8* units, uint32 first, uint32 count)
 		{
-			debug_printf("LCAlloc: Unaligned alloc size 0x%04x\n", size);
-			size += (LC_LOCKED_CACHE_GRANULARITY - 1);
-			size &= ~(LC_LOCKED_CACHE_GRANULARITY - 1);
-		}
-		uint32 coreIndex = PPCInterpreter_getCoreIndex(hCPU);
-		uint8* cacheMask = lcCacheMask[coreIndex];
-		uint32 entryMaskLength = size / LC_LOCKED_CACHE_GRANULARITY;
-		for (uint32 i = 0; i <= (LC_LOCKED_CACHE_SIZE / LC_LOCKED_CACHE_GRANULARITY) - entryMaskLength; i++)
-		{
-			// check if range starting at i is free
-			bool rangeIsFree = true;
-			for (uint32 f = 0; f < entryMaskLength; f++)
+			for (uint32 i = 0; i < count; i++)
 			{
-				if (cacheMask[i + f] != LC_MASK_FREE)
-				{
-					rangeIsFree = false;
-					break;
-				}
+				if (units[first + i] != UNIT_FREE)
+					return false;
 			}
-			if (rangeIsFree)
+			return true;
+		}
+
+		void Export_LCGetMaxSize(PPCInterpreter_t* hCPU)
+		{
+			osLib_returnFromFunction(hCPU, kLCSize);
+		}
+
+		// LCAlloc(size): first fit, size is rounded up to whole units
+		void Export_LCAlloc(PPCInterpreter_t* hCPU)
+		{
+			uint32 size = hCPU->gpr[3];
+			if (size == 0 || size > kLCSize)
 			{
-				// found space for allocation
-				MPTR allocAddr = lcAddr[coreIndex] + i * LC_LOCKED_CACHE_GRANULARITY;
-				// mark range as allocated
-				for (uint32 f = 0; f < entryMaskLength - 1; f++)
-				{
-					cacheMask[i + f] = LC_MASK_RESERVED;
-				}
-				cacheMask[i + entryMaskLength - 1] = LC_MASK_RESERVED_END;
-				// update allocation counter
-				lcAllocatedBlocks[coreIndex] += entryMaskLength;
-				// return allocAddr
-				//debug_printf("LCAlloc result %08x Thread %08x Core %d", (uint32)allocAddr, coreinitThread_getCurrentThread(hCPU), PPCInterpreter_getCoreIndex(hCPU));
-				osLib_returnFromFunction(hCPU, allocAddr);
+				osLib_returnFromFunction(hCPU, MPTR_NULL);
 				return;
 			}
+			size = (size + kLCUnit - 1) & ~(kLCUnit - 1);
+			uint32 core = CurrentCore(hCPU);
+			uint8* units = s_units[core];
+			uint32 count = size / kLCUnit;
+			for (uint32 first = 0; first + count <= kLCUnits; first++)
+			{
+				if (!RangeIsFree(units, first, count))
+					continue;
+				memset(units + first, UNIT_USED, count - 1);
+				units[first + count - 1] = UNIT_LAST;
+				s_usedUnits[core] += count;
+				osLib_returnFromFunction(hCPU, kLCBase[core] + first * kLCUnit);
+				return;
+			}
+			osLib_returnFromFunction(hCPU, MPTR_NULL);
 		}
-		// not enough space left	
-		//debug_printf("LCAlloc failed Thread %08x Core %d", coreinitThread_getCurrentThread(hCPU), PPCInterpreter_getCoreIndex(hCPU));
-		osLib_returnFromFunction(hCPU, MPTR_NULL);
-	}
 
-
-	void coreinitExport_LCDealloc(PPCInterpreter_t* hCPU)
-	{
-		uint32 coreIndex = PPCInterpreter_getCoreIndex(hCPU);
-		uint8* cacheMask = lcCacheMask[coreIndex];
-		//printf("LCDealloc(0x%08x)\n", hCPU->gpr[3]);
-
-		MPTR deallocAddr = hCPU->gpr[3];
-		if (deallocAddr < lcAddr[coreIndex] || deallocAddr >= (lcAddr[coreIndex] + LC_LOCKED_CACHE_SIZE))
+		// LCDealloc(address): address must be the start of an allocation of the current core
+		void Export_LCDealloc(PPCInterpreter_t* hCPU)
 		{
-			// out of bounds
+			uint32 core = CurrentCore(hCPU);
+			uint8* units = s_units[core];
+			MPTR addr = hCPU->gpr[3];
+			if (addr < kLCBase[core] || addr >= kLCBase[core] + kLCSize)
+			{
 #ifdef CEMU_DEBUG_ASSERT
-			cemuLog_log(LogType::Force, "LCDealloc(): Out of bounds");
+				cemuLog_log(LogType::Force, "LCDealloc: {:08x} is not in this core's locked cache", addr);
 #endif
+				osLib_returnFromFunction(hCPU, 0);
+				return;
+			}
+			uint32 offset = addr - kLCBase[core];
+			if (offset % kLCUnit != 0)
+			{
+				osLib_returnFromFunction(hCPU, 0);
+				return;
+			}
+			uint32 unit = offset / kLCUnit;
+			// the unit before an allocation is either free or the last unit of another allocation
+			if (unit > 0 && units[unit - 1] == UNIT_USED)
+			{
+				osLib_returnFromFunction(hCPU, 0);
+				return;
+			}
+			for (; unit < kLCUnits; unit++)
+			{
+				uint8 state = units[unit];
+				if (state == UNIT_FREE)
+					break; // not an allocation (or a damaged one)
+				units[unit] = UNIT_FREE;
+				s_usedUnits[core]--;
+				if (state == UNIT_LAST)
+					break;
+			}
 			osLib_returnFromFunction(hCPU, 0);
-			return;
 		}
-		uint32 relativeOffset = (uint32)deallocAddr - lcAddr[coreIndex];
-		if ((relativeOffset % LC_LOCKED_CACHE_GRANULARITY) != 0)
+
+		void Export_LCGetUnallocated(PPCInterpreter_t* hCPU)
 		{
-			debug_printf("LCDealloc: Offset alignment is invalid (0x%08x / 0x%08x)\n", deallocAddr, relativeOffset);
-			osLib_returnFromFunction(hCPU, 0);
-			return;
+			uint32 core = CurrentCore(hCPU);
+			osLib_returnFromFunction(hCPU, kLCSize - s_usedUnits[core] * kLCUnit);
 		}
-		uint32 startIndex = relativeOffset / LC_LOCKED_CACHE_GRANULARITY;
-		// check this is really the beginning of an allocated block
-		if (startIndex > 0 && (cacheMask[startIndex - 1] != LC_MASK_RESERVED_END && cacheMask[startIndex - 1] != LC_MASK_FREE))
+
+		// largest size LCAlloc can currently succeed with
+		void Export_LCGetAllocatableSize(PPCInterpreter_t* hCPU)
 		{
-			debug_printf("LCDealloc: Offset is invalid (0x%08x / 0x%08x)\n", deallocAddr, relativeOffset);
-			osLib_returnFromFunction(hCPU, 0);
-			return;
+			const uint8* units = s_units[CurrentCore(hCPU)];
+			uint32 best = 0, run = 0;
+			for (uint32 i = 0; i < kLCUnits; i++)
+			{
+				run = units[i] == UNIT_FREE ? run + 1 : 0;
+				best = std::max(best, run);
+			}
+			osLib_returnFromFunction(hCPU, best * kLCUnit);
 		}
-		// free range by reseting mask in allocated region
-		for (uint32 i = startIndex; i < (LC_LOCKED_CACHE_SIZE / LC_LOCKED_CACHE_GRANULARITY); i++)
+
+		// DMA enable/disable nest per core
+		void Export_LCEnableDMA(PPCInterpreter_t* hCPU)
 		{
-			if (cacheMask[i] == LC_MASK_RESERVED_END)
-			{
-				// end of allocated block reached
-				cacheMask[i] = LC_MASK_FREE;
-				// update allocation counter
-				lcAllocatedBlocks[coreIndex]--;
-				break;
-			}
-			else if (cacheMask[i] == LC_MASK_FREE)
-			{
-				debug_printf("LCDealloc: Allocation mask error detected\n");
-				break;
-			}
-			cacheMask[i] = LC_MASK_FREE;
-			// update allocation counter
-			lcAllocatedBlocks[coreIndex]--;
+			s_dmaEnableCount[CurrentCore(hCPU)]++;
+			osLib_returnFromFunction(hCPU, 1);
 		}
-		osLib_returnFromFunction(hCPU, 0);
-	}
 
-	void coreinitExport_LCGetUnallocated(PPCInterpreter_t* hCPU)
-	{
-		uint32 unallocatedBytes = 0;
-		uint32 coreIndex = PPCInterpreter_getCoreIndex(hCPU);
-		unallocatedBytes = LC_LOCKED_CACHE_SIZE - (lcAllocatedBlocks[coreIndex] * LC_LOCKED_CACHE_GRANULARITY);
-		//debug_printf("LCGetUnallocated() Result: 0x%x\n", unallocatedBytes);
-		osLib_returnFromFunction(hCPU, unallocatedBytes);
-	}
-
-	void coreinitExport_LCGetAllocatableSize(PPCInterpreter_t* hCPU)
-	{
-		debug_printf("LCGetAllocatableSize()\n");
-		// no parameters, returns largest allocatable block size
-		// get core LC parameters
-		uint32 coreIndex = PPCInterpreter_getCoreIndex(hCPU);
-		uint8* cacheMask = lcCacheMask[coreIndex];
-		// scan for largest range of available blocks
-		uint32 largestFreeRange = 0;
-		uint32 currentRangeSize = 0;
-		for (uint32 i = 0; i < LC_LOCKED_CACHE_SIZE / LC_LOCKED_CACHE_GRANULARITY; i++)
+		void Export_LCDisableDMA(PPCInterpreter_t* hCPU)
 		{
-			if (cacheMask[i] == LC_MASK_FREE)
-			{
-				currentRangeSize++;
-			}
-			else
-			{
-				largestFreeRange = std::max(largestFreeRange, currentRangeSize);
-				currentRangeSize = 0;
-			}
-		}
-		largestFreeRange = std::max(largestFreeRange, currentRangeSize);
-		osLib_returnFromFunction(hCPU, largestFreeRange * LC_LOCKED_CACHE_GRANULARITY);
-	}
-
-	uint32 LCIsEnabled[PPC_CORE_COUNT] = { 0 };
-
-	void coreinitExport_LCEnableDMA(PPCInterpreter_t* hCPU)
-	{
-		//debug_printf("LCEnableDMA()\n");
-
-		LCIsEnabled[PPCInterpreter_getCoreIndex(hCPU)]++;
-		osLib_returnFromFunction(hCPU, 1);
-	}
-
-	sint32 _lcDisableErrorCounter = 0;
-
-	void coreinitExport_LCDisableDMA(PPCInterpreter_t* hCPU)
-	{
-		//debug_printf("LCDisableDMA()\n");
-#ifndef PUBLIC_RELASE
-		if (LCIsEnabled[PPCInterpreter_getCoreIndex(hCPU)] == 0)
-			assert_dbg();
-#endif
-		LCIsEnabled[PPCInterpreter_getCoreIndex(hCPU)]--;
+			uint32 core = CurrentCore(hCPU);
+			if (s_dmaEnableCount[core] == 0)
+				assert_dbg(); // unbalanced disable
+			s_dmaEnableCount[core]--;
 #ifdef CEMU_DEBUG_ASSERT
-		if (LCIsEnabled[PPCInterpreter_getCoreIndex(hCPU)] == 0)
-		{
-			uint32 coreIndex = PPCInterpreter_getCoreIndex(hCPU);
-			uint8* cacheMask = lcCacheMask[coreIndex];
-			for (uint32 i = 0; i <= (LC_LOCKED_CACHE_SIZE / LC_LOCKED_CACHE_GRANULARITY); i++)
+			if (s_dmaEnableCount[core] == 0 && s_usedUnits[core] != 0 && s_leakWarnings < 15)
 			{
-				if (cacheMask[i] != LC_MASK_FREE)
-				{
-					if (_lcDisableErrorCounter < 15)
-					{
-						cemuLog_log(LogType::Force, "LC disabled but there is still memory allocated");
-						_lcDisableErrorCounter++;
-					}
-				}
+				cemuLog_log(LogType::Force, "LCDisableDMA: locked cache of core {} still has allocations", core);
+				s_leakWarnings++;
 			}
-		}
 #endif
+			osLib_returnFromFunction(hCPU, 1);
+		}
 
-		osLib_returnFromFunction(hCPU, 1);
-	}
+		void Export_LCIsDMAEnabled(PPCInterpreter_t* hCPU)
+		{
+			osLib_returnFromFunction(hCPU, s_dmaEnableCount[CurrentCore(hCPU)] ? 1 : 0);
+		}
 
-	void coreinitExport_LCIsDMAEnabled(PPCInterpreter_t* hCPU)
-	{
-		osLib_returnFromFunction(hCPU, LCIsEnabled[PPCInterpreter_getCoreIndex(hCPU)] ? 1 : 0);
-	}
+		// on the console the LC can be taken by another process; here it is always ours
+		void Export_LCHardwareIsAvailable(PPCInterpreter_t* hCPU)
+		{
+			osLib_returnFromFunction(hCPU, 1);
+		}
 
-	void coreinitExport_LCHardwareIsAvailable(PPCInterpreter_t* hCPU)
-	{
-		// on the real HW, LC is shared between processes and not all processes can access it. In the emulator we don't care and always return true.
-		osLib_returnFromFunction(hCPU, 1);
-	}
+		uint32 DMABlockCount(uint32 requested)
+		{
+			return requested == 0 ? kDMAMaxBlocks : requested;
+		}
 
-	void coreinitExport_LCLoadDMABlocks(PPCInterpreter_t* hCPU)
-	{
-		//printf("LCLoadDMABlocks(0x%08x, 0x%08x, 0x%08x)\n", hCPU->gpr[3], hCPU->gpr[4], hCPU->gpr[5]);
-		uint32 numBlocks = hCPU->gpr[5];
-		if (numBlocks == 0)
-			numBlocks = 128;
-		uint32 transferSize = numBlocks * 32;
-		uint8* destPtr = memory_getPointerFromVirtualOffset(hCPU->gpr[3]);
-		uint8* srcPtr = memory_getPointerFromVirtualOffset(hCPU->gpr[4]);
-		// copy right away, we don't emulate the DMAQueue currently
-		memcpy(destPtr, srcPtr, transferSize);
+		// LCLoadDMABlocks(lcDest, memSrc, blockCount)
+		void Export_LCLoadDMABlocks(PPCInterpreter_t* hCPU)
+		{
+			uint32 bytes = DMABlockCount(hCPU->gpr[5]) * kDMABlockSize;
+			memcpy(memory_getPointerFromVirtualOffset(hCPU->gpr[3]), memory_getPointerFromVirtualOffset(hCPU->gpr[4]), bytes);
+			osLib_returnFromFunction(hCPU, 0);
+		}
 
-		osLib_returnFromFunction(hCPU, 0);
-	}
+		// LCStoreDMABlocks(memDest, lcSrc, blockCount)
+		void Export_LCStoreDMABlocks(PPCInterpreter_t* hCPU)
+		{
+			uint32 blocks = DMABlockCount(hCPU->gpr[5]);
+			memcpy_qwords(memory_getPointerFromVirtualOffset(hCPU->gpr[3]), memory_getPointerFromVirtualOffset(hCPU->gpr[4]), blocks * (kDMABlockSize / sizeof(uint64)));
+			// the GPU may have cached the destination
+			LatteBufferCache_notifyDCFlush(hCPU->gpr[3], blocks * kDMABlockSize);
+			osLib_returnFromFunction(hCPU, 0);
+		}
 
-	void coreinitExport_LCStoreDMABlocks(PPCInterpreter_t* hCPU)
-	{
-		//printf("LCStoreDMABlocks(0x%08x, 0x%08x, 0x%08x)\n", hCPU->gpr[3], hCPU->gpr[4], hCPU->gpr[5]);
-		uint32 numBlocks = hCPU->gpr[5];
-		if (numBlocks == 0)
-			numBlocks = 128;
-		//uint32 transferSize = numBlocks*32;
-		uint8* destPtr = memory_getPointerFromVirtualOffset(hCPU->gpr[3]);
-		uint8* srcPtr = memory_getPointerFromVirtualOffset(hCPU->gpr[4]);
-		// copy right away, we don't emulate the DMAQueue currently
-		memcpy_qwords(destPtr, srcPtr, numBlocks * (32 / sizeof(uint64)));
-
-		LatteBufferCache_notifyDCFlush(hCPU->gpr[3], numBlocks * 32);
-
-		osLib_returnFromFunction(hCPU, 0);
-	}
-
-	void coreinitExport_LCWaitDMAQueue(PPCInterpreter_t* hCPU)
-	{
-		//printf("LCWaitDMAQueue(%d)\n", hCPU->gpr[3]);
-		uint32 len = hCPU->gpr[3];
-		// todo: Implement (be aware DMA queue is per core)
-		osLib_returnFromFunction(hCPU, 0);
+		// transfers complete immediately, there is nothing to wait for
+		void Export_LCWaitDMAQueue(PPCInterpreter_t* hCPU)
+		{
+			osLib_returnFromFunction(hCPU, 0);
+		}
 	}
 
 	void InitializeLC()
 	{
-		for (sint32 f = 0; f < PPC_CORE_COUNT; f++)
-		{
-			memset(lcCacheMask[f], LC_MASK_FREE, (LC_LOCKED_CACHE_SIZE + LC_LOCKED_CACHE_GRANULARITY - 1) / LC_LOCKED_CACHE_GRANULARITY);
-		}
+		memset(s_units, UNIT_FREE, sizeof(s_units));
 
-		osLib_addFunction("coreinit", "LCGetMaxSize", coreinitExport_LCGetMaxSize);
+		osLib_addFunction("coreinit", "LCGetMaxSize", Export_LCGetMaxSize);
 
-		osLib_addFunction("coreinit", "LCAlloc", coreinitExport_LCAlloc);
-		osLib_addFunction("coreinit", "LCDealloc", coreinitExport_LCDealloc);
-		osLib_addFunction("coreinit", "LCGetUnallocated", coreinitExport_LCGetUnallocated);
-		osLib_addFunction("coreinit", "LCGetAllocatableSize", coreinitExport_LCGetAllocatableSize);
+		osLib_addFunction("coreinit", "LCAlloc", Export_LCAlloc);
+		osLib_addFunction("coreinit", "LCDealloc", Export_LCDealloc);
+		osLib_addFunction("coreinit", "LCGetUnallocated", Export_LCGetUnallocated);
+		osLib_addFunction("coreinit", "LCGetAllocatableSize", Export_LCGetAllocatableSize);
 
-		osLib_addFunction("coreinit", "LCEnableDMA", coreinitExport_LCEnableDMA);
-		osLib_addFunction("coreinit", "LCDisableDMA", coreinitExport_LCDisableDMA);
-		osLib_addFunction("coreinit", "LCIsDMAEnabled", coreinitExport_LCIsDMAEnabled);
-		osLib_addFunction("coreinit", "LCHardwareIsAvailable", coreinitExport_LCHardwareIsAvailable);
+		osLib_addFunction("coreinit", "LCEnableDMA", Export_LCEnableDMA);
+		osLib_addFunction("coreinit", "LCDisableDMA", Export_LCDisableDMA);
+		osLib_addFunction("coreinit", "LCIsDMAEnabled", Export_LCIsDMAEnabled);
+		osLib_addFunction("coreinit", "LCHardwareIsAvailable", Export_LCHardwareIsAvailable);
 
-		osLib_addFunction("coreinit", "LCLoadDMABlocks", coreinitExport_LCLoadDMABlocks);
-		osLib_addFunction("coreinit", "LCStoreDMABlocks", coreinitExport_LCStoreDMABlocks);
-		osLib_addFunction("coreinit", "LCWaitDMAQueue", coreinitExport_LCWaitDMAQueue);
-
+		osLib_addFunction("coreinit", "LCLoadDMABlocks", Export_LCLoadDMABlocks);
+		osLib_addFunction("coreinit", "LCStoreDMABlocks", Export_LCStoreDMABlocks);
+		osLib_addFunction("coreinit", "LCWaitDMAQueue", Export_LCWaitDMAQueue);
 	}
-
 }

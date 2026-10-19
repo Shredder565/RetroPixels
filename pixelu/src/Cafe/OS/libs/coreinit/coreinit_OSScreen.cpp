@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/OS/libs/gx2/GX2.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
@@ -5,64 +6,86 @@
 #include "Cafe/OS/libs/coreinit/coreinit_OSScreen_font.h"
 #include "Cafe/OS/libs/coreinit/coreinit_OSScreen.h"
 
+// Each screen is double buffered: the title hands over one buffer holding both images back to back
+// and draws into the one that is not shown. The GPU side (LatteGPUState.osScreen) shows the image
+// selected by the flip count. Pixels are 32 bit RGBA, stored big endian.
 namespace coreinit
 {
-
-	struct
+	namespace
 	{
-		sint32 x;
-		sint32 y;
-		sint32 pitch;
-	}screenSizes[2] =
-	{
-		{ 1280, 720, 1280}, // TV
-		{ 896, 480, 896 } // DRC (values might be incorrect)
-	};
-
-	void* currentScreenBasePtr[2] = { 0 };
-
-	void _OSScreen_Clear(uint32 screenIndex, uint32 color)
-	{
-		if (!currentScreenBasePtr[screenIndex])
-			return;
-
-		uint32* output = (uint32*)currentScreenBasePtr[screenIndex];
-		sint32 sizeInPixels = screenSizes[screenIndex].pitch * screenSizes[screenIndex].y;
-		color = _swapEndianU32(color);
-		for (sint32 i = 0; i < sizeInPixels; i++)
+		struct ScreenGeometry
 		{
-			*output = color;
-			output++;
+			sint32 width;
+			sint32 height;
+			sint32 pitch; // in pixels
+		};
+
+		constexpr ScreenGeometry kScreens[2] = {
+			{ 1280, 720, 1280 }, // TV
+			{ 896, 480, 896 },	 // gamepad (not verified on hardware)
+		};
+
+		// the image currently drawn to, per screen
+		uint8* s_drawTarget[2] = {};
+
+		uint32 ImageBytes(uint32 screen)
+		{
+			return kScreens[screen].pitch * kScreens[screen].height * 4;
+		}
+
+		void SelectDrawTarget(uint32 screen)
+		{
+			auto& state = LatteGPUState.osScreen.screen[screen];
+			uint32 image = (state.flipRequestCount & 1) != 0 ? ImageBytes(screen) : 0;
+			s_drawTarget[screen] = memory_getPointerFromPhysicalOffset(state.physPtr + image);
+		}
+
+		uint32* PixelAt(uint32 screen, sint32 x, sint32 y)
+		{
+			return (uint32*)(s_drawTarget[screen] + (x + y * kScreens[screen].pitch) * 4);
+		}
+
+		// The font covers the printable ASCII range starting at '!' (space has no glyph). Each glyph
+		// is 25 rows of 14 pixels, two bytes per row with the leftmost pixel in the top bit. Text
+		// is laid out on a grid of 16 x 24 pixel cells.
+		constexpr char kFirstGlyph = '!';
+		constexpr char kLastGlyph = '~';
+		constexpr sint32 kGlyphRows = 25;
+		constexpr sint32 kGlyphColumns = 14;
+		constexpr sint32 kGlyphBytes = kGlyphRows * 2;
+		constexpr sint32 kCellWidth = 16;
+		constexpr sint32 kCellHeight = 24;
+
+		void DrawGlyph(uint32 screen, sint32 px, sint32 py, sint32 glyphIndex)
+		{
+			const uint8* glyph = osscreenBitmapFont + glyphIndex * kGlyphBytes;
+			for (sint32 row = 0; row < kGlyphRows; row++)
+			{
+				uint32 bits = (glyph[row * 2] << 8) | glyph[row * 2 + 1];
+				for (sint32 col = 0; col < kGlyphColumns; col++)
+				{
+					if ((bits & (0x8000 >> col)) != 0)
+						*PixelAt(screen, px + col, py + row) = 0xFFFFFFFF;
+				}
+			}
 		}
 	}
 
 	void OSScreenInit()
 	{
-		// todo - init VI registers?
 	}
 
 	uint32 OSScreenGetBufferSizeEx(uint32 screenIndex)
 	{
 		cemu_assert(screenIndex < 2);
-		uint32 bufferSize = screenSizes[screenIndex].pitch * screenSizes[screenIndex].y * 4 * 2;
-		return bufferSize;
-	}
-
-	void _updateCurrentDrawScreen(sint32 screenIndex)
-	{
-		uint32 screenDataSize = screenSizes[screenIndex].pitch * screenSizes[screenIndex].y * 4;
-
-		if ((LatteGPUState.osScreen.screen[screenIndex].flipRequestCount & 1) != 0)
-			currentScreenBasePtr[screenIndex] = memory_getPointerFromPhysicalOffset(LatteGPUState.osScreen.screen[screenIndex].physPtr + screenDataSize);
-		else
-			currentScreenBasePtr[screenIndex] = memory_getPointerFromPhysicalOffset(LatteGPUState.osScreen.screen[screenIndex].physPtr);
+		return ImageBytes(screenIndex) * 2; // two images
 	}
 
 	void OSScreenSetBufferEx(uint32 screenIndex, uint32 buffer)
 	{
 		cemu_assert(screenIndex < 2);
 		LatteGPUState.osScreen.screen[screenIndex].physPtr = buffer;
-		_updateCurrentDrawScreen(screenIndex);
+		SelectDrawTarget(screenIndex);
 	}
 
 	void OSScreenEnableEx(uint32 screenIndex, uint32 isEnabled)
@@ -74,83 +97,49 @@ namespace coreinit
 	void OSScreenClearBufferEx(uint32 screenIndex, uint32 color)
 	{
 		cemu_assert(screenIndex < 2);
-		_OSScreen_Clear(screenIndex, color);
+		if (!s_drawTarget[screenIndex])
+			return;
+		uint32* pixels = (uint32*)s_drawTarget[screenIndex];
+		std::fill_n(pixels, kScreens[screenIndex].pitch * kScreens[screenIndex].height, _swapEndianU32(color));
 	}
 
 	void OSScreenFlipBuffersEx(uint32 screenIndex)
 	{
 		cemu_assert(screenIndex < 2);
 		LatteGPUState.osScreen.screen[screenIndex].flipRequestCount++;
-		_updateCurrentDrawScreen(screenIndex);
+		SelectDrawTarget(screenIndex);
 	}
 
 	void OSScreenPutPixelEx(uint32 screenIndex, sint32 x, sint32 y, uint32 color)
 	{
 		if (screenIndex >= 2)
 			return;
-		if (x >= 0 && x < screenSizes[screenIndex].x && y >= 0 && y < screenSizes[screenIndex].y)
-		{
-			*(uint32*)((uint8*)currentScreenBasePtr[screenIndex] + (x + y * screenSizes[screenIndex].pitch) * 4) = _swapEndianS32(color);
-		}
+		const ScreenGeometry& geometry = kScreens[screenIndex];
+		if (x < 0 || x >= geometry.width || y < 0 || y >= geometry.height)
+			return;
+		*PixelAt(screenIndex, x, y) = _swapEndianU32(color);
 	}
 
-	const char* osScreenCharset = "!\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
-
-	sint32 _getOSScreenFontCharIndex(char c)
-	{
-		const char* charset = osScreenCharset;
-		while (*charset)
-		{
-			if (*charset == c)
-			{
-				return (sint32)(charset - osScreenCharset);
-			}
-			charset++;
-		}
-		return -1;
-	}
-
+	// x and y are in text cells; '\n' starts a new line at the original column. Text is not clipped.
 	void OSScreenPutFontEx(uint32 screenIndex, sint32 x, sint32 y, const char* str)
 	{
-		// characters are:
-		// 16 x 32 (including the margin)
-		// with a margin of 4 x 8
-
 		if (y < 0)
-		{
-			debug_printf("OSScreenPutFontEx: y has invalid value\n");
 			return;
-		}
-
-		sint32 px = x * 16;
-		sint32 py = y * 24;
-		sint32 initialPx = px;
-
-		while (*str)
+		sint32 px = x * kCellWidth;
+		sint32 py = y * kCellHeight;
+		const sint32 lineStart = px;
+		for (; *str; str++)
 		{
-			sint32 charIndex = _getOSScreenFontCharIndex(*str);
-			if (*str == (uint8)'\n')
+			char c = *str;
+			if (c == '\n')
 			{
-				px = initialPx;
-				py += 24;
-				str++;
+				px = lineStart;
+				py += kCellHeight;
 				continue;
 			}
-			if (charIndex >= 0)
-			{
-				const uint8* charBitmap = osscreenBitmapFont + charIndex * 50;
-				for (sint32 fy = 0; fy < 25; fy++)
-				{
-					for (sint32 fx = 0; fx < 14; fx++)
-					{
-						if (((charBitmap[(fx / 8) + (fy) * 2] >> (7 - (fx & 7))) & 1) == 0)
-							continue;
-						*(uint32*)((uint8*)currentScreenBasePtr[screenIndex] + ((px + fx) + (py + fy) * screenSizes[screenIndex].pitch) * 4) = 0xFFFFFFFF;
-					}
-				}
-			}
-			px += 16;
-			str++;
+			if (c >= kFirstGlyph && c <= kLastGlyph)
+				DrawGlyph(screenIndex, px, py, c - kFirstGlyph);
+			px += kCellWidth;
 		}
 	}
 

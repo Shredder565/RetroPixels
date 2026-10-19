@@ -1,8 +1,11 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #define OSSCREEN_TV		(0)
 #define OSSCREEN_DRC	(1)
 
+// OSScreen: simple software framebuffers for the TV and the gamepad, used by homebrew and by
+// system tools that do not use GX2
 namespace coreinit
 {
 	void OSScreenInit();
