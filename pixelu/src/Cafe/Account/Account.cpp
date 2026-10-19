@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Account.h"
 #include "AccountError.h"
 #include "util/helpers/helpers.h"
@@ -5,261 +6,329 @@
 #include "config/ActiveSettings.h"
 #include "Cafe/IOSU/legacy/iosu_crypto.h"
 #include "Common/FileStream.h"
-#include <boost/random/uniform_int.hpp>
 
 #include <random>
 
-std::vector<Account> Account::s_account_list;
+// account.dat is a text file: a header line ("AccountInstance_20120705")
+// followed by Key=Value lines. Numbers are hexadecimal, binary blobs are hex
+// strings and the Mii name is 11 UTF-16 code units as 4-digit hex each.
+
+std::vector<Account> Account::s_accounts;
+
+namespace
+{
+	constexpr size_t kMaxAccounts = 12;
+	constexpr std::string_view kAccountFileHeader = "AccountInstance_20120705";
+	constexpr std::string_view kPersisIdHeader = "PersistentIdManager_20120607";
+	constexpr std::string_view kPersisIdHeadKey = "PersistentIdHead=";
+
+	fs::path PersisIdFilePath()
+	{
+		return ActiveSettings::GetMlcPath("usr/save/system/act/persisid.dat");
+	}
+
+	// Hex number with optional leading whitespace; anything unparsable is 0.
+	// (Whitespace-only text is handled here because ConvertString would read
+	// past the end of such a view.)
+	template<typename T>
+	T ParseHex(std::string_view text)
+	{
+		const size_t start = text.find_first_not_of("\t\n\v\f\r ");
+		if (start == std::string_view::npos)
+			return 0;
+		return ConvertString<T>(text.substr(start), 16);
+	}
+
+	// Decodes a string of 2*N hex digits into N bytes. Invalid digit pairs decode to 0.
+	template<size_t N>
+	void DecodeHexBytes(std::string_view hex, std::array<uint8, N>& out)
+	{
+		for (size_t i = 0; i < N; i++)
+			out[i] = ParseHex<uint8>(hex.substr(i * 2, 2));
+	}
+
+	template<size_t N>
+	std::string EncodeHexBytes(const std::array<uint8, N>& bytes)
+	{
+		std::string s;
+		s.reserve(N * 2);
+		for (uint8 b : bytes)
+			s.append(fmt::format("{:02x}", b));
+		return s;
+	}
+
+	// CRC-16/CCITT over the Mii data. A valid Mii block checksums to zero
+	// (its last two bytes hold the CRC of the preceding bytes).
+	uint16 MiiChecksum(const uint8* data, size_t size)
+	{
+		uint16 crc = 0;
+		for (size_t i = 0; i < size; i++)
+		{
+			for (int bit = 0; bit < 8; bit++)
+				crc = (crc & 0x8000) ? (uint16)((crc << 1) ^ 0x1021) : (uint16)(crc << 1);
+			crc ^= data[i];
+		}
+		return crc;
+	}
+
+	void PutLE16(uint8* p, uint16 v)
+	{
+		p[0] = (uint8)v;
+		p[1] = (uint8)(v >> 8);
+	}
+
+	void PutBE32(uint8* p, uint32 v)
+	{
+		p[0] = (uint8)(v >> 24);
+		p[1] = (uint8)(v >> 16);
+		p[2] = (uint8)(v >> 8);
+		p[3] = (uint8)v;
+	}
+}
 
 Account::Account(uint32 persistent_id)
-	: m_persistent_id(persistent_id) {}
-
-
-typedef struct
+	: m_persistentId(persistent_id)
 {
-	uint32be high;
-	uint32be low;
-}FFLDataID_t;
-
-typedef struct
-{
-	/* +0x00 */ uint32		uknFlags;
-	/* +0x04 */ FFLDataID_t miiId; // bytes 8 and 9 are part of the CRC? (miiId is based on account transferable id?)
-	/* +0x0C */ uint8		ukn0C[0xA];
-	/* +0x16 */ uint8		ukn16[2];
-	/* +0x18 */ uint16		ukn18;
-	/* +0x1A */ uint16le	miiName[10];
-	/* +0x2E */ uint16		ukn2E;
-	/* +0x30 */ uint8		ukn30[96 - 0x30];
-}FFLData_t;
-
-uint16 FFLCalculateCRC16(uint8* input, sint32 length)
-{
-	cemu_assert_debug((length % 8) == 0);
-	
-	uint16 crc = 0;
-	for (sint32 c = 0; c < length; c++)
-	{
-		for (sint32 f = 0; f < 8; f++)
-		{
-			if ((crc & 0x8000) != 0)
-			{
-				uint16 t = crc << 1;
-				crc = t ^ 0x1021;
-			}
-			else
-			{
-				crc <<= 1;
-			}
-		}
-		crc ^= (uint16)input[c];
-	}
-	return crc;
 }
 
 Account::Account(uint32 persistent_id, std::wstring_view mii_name)
-	: m_persistent_id(persistent_id)
+	: m_persistentId(persistent_id)
 {
 	if (mii_name.empty())
 		throw std::system_error(AccountErrc::InvalidMiiName);
-	
-	static std::random_device s_random_device;
-	static std::mt19937 s_mte(s_random_device());
 
-        // use boost library to escape static asserts in linux builds
-        boost::random::uniform_int_distribution<uint16> dist(std::numeric_limits<uint8>::min(), std::numeric_limits<uint8>::max());
-        
-        std::generate(m_uuid.begin(), m_uuid.end(), [&]() { return (uint8)dist(s_mte); });
+	static std::mt19937 s_rng{std::random_device{}()};
+	std::uniform_int_distribution<uint32> byteDist(0, 255);
+	for (uint8& b : m_uuid)
+		b = (uint8)byteDist(s_rng);
 
-	// 1000004 or 2000004 | lower uint32 from uuid from uuid
-	m_transferable_id_base = (0x2000004ULL << 32);
-	m_transferable_id_base |= ((uint64)m_uuid[12] << 24) | ((uint64)m_uuid[13] << 16) | ((uint64)m_uuid[14] << 8) | (uint64)m_uuid[15];
-	
+	// transferable id base: fixed upper half, lower half from the last four uuid bytes
+	m_transferableIdBase = (0x2000004ull << 32) | ((uint64)m_uuid[12] << 24) | ((uint64)m_uuid[13] << 16) | ((uint64)m_uuid[14] << 8) | (uint64)m_uuid[15];
+
 	SetMiiName(mii_name);
+	CreateDefaultMii();
 
-	// todo: generate mii data
-	// iosuAct_generateDefaultMii
-	// void* pMiiData = &_actAccountData[accountIndex].miiData;
-	uint8* fflByteDataBE = m_mii_data.data();
+	if (std::error_code ec = CheckValid())
+		throw std::system_error(ec);
+}
 
-	uint16* fflDataBE = (uint16*)m_mii_data.data();
-	// FFLCreateId is derived from the words at location: 0x7 - 0xb (5 words, so it's a 80 bit id)
-	for (sint32 i = 0; i < 96 / 2; i++)
-		fflDataBE[i] = _swapEndianU16(1);
+// Builds a placeholder Mii (FFL data, 16-bit words stored little endian) that
+// carries the account's name and a valid checksum.
+void Account::CreateDefaultMii()
+{
+	uint8* mii = m_miiData.data();
+	for (size_t offset = 0; offset < m_miiData.size(); offset += 2)
+		PutLE16(mii + offset, 0x0001);
+	PutLE16(mii + 0x02, 0x1001);
+	PutLE16(mii + 0x08, 0x0003); // Mii id, low part
+	PutLE16(mii + 0x0A, 0x3334);
+	PutLE16(mii + 0x3A, 0x0601);
 
-	*(uint16*)(fflByteDataBE + 0x3A) = _swapEndianU16(1 | (3 << 9));
-	*(uint16*)(fflByteDataBE + 0x2) = _swapEndianU16(1 | (1 << 12));
+	// name: 10 UTF-16LE code units at +0x1A
+	constexpr size_t kNameOffset = 0x1A;
+	constexpr size_t kNameChars = 10;
+	std::memset(mii + kNameOffset, 0, kNameChars * 2);
+	std::wstring_view name = GetMiiName();
+	for (size_t i = 0; i < name.size() && i < kNameChars; i++)
+		PutLE16(mii + kNameOffset + i * 2, (uint16)name[i]);
 
-	//*(uint32*)(fflByteDataBE + 4) = 0; // transferable id high ?
-	*(uint32*)(fflByteDataBE + 8) = _swapEndianU32(0x33333 + 0 + 1); // mii id low
-
-	// swap endian (apparently it's stored little-endian)
-	for (sint32 i = 0; i < 96 / 2; i++)
-		fflDataBE[i] = _swapEndianU16(fflDataBE[i]);
-
-	// set default name
-	FFLData_t* fflData = (FFLData_t*)m_mii_data.data();
-	const auto tmp_name = GetMiiName();
-	memset(fflData->miiName, 0, sizeof(fflData->miiName));
-	std::copy(tmp_name.begin(), tmp_name.end(), fflData->miiName);
-
-	// calculate checksum
-	uint32 crcCounter = 0;
-	while (FFLCalculateCRC16(m_mii_data.data(), 96) != 0)
-	{
-		*(uint32*)(fflDataBE + 2) = _swapEndianU32(crcCounter);
-		crcCounter++;
-	}
-
-	const auto error = CheckValid();
-	if (error)
-		throw std::system_error(error);
+	// search the 32-bit value at +4 (big endian) that makes the block checksum to zero
+	for (uint32 salt = 0; MiiChecksum(mii, m_miiData.size()) != 0; salt++)
+		PutBE32(mii + 4, salt);
 }
 
 Account::Account(std::wstring_view file_name)
 {
-	if (!fs::exists(file_name.data()))
-		throw std::runtime_error("given file doesn't exist");
-
-	std::unique_ptr<FileStream> file(FileStream::openFile2(file_name));
+	const fs::path path(file_name);
+	if (!fs::exists(path))
+		throw std::runtime_error("account file not found");
+	std::unique_ptr<FileStream> file(FileStream::openFile2(path));
 	if (!file)
-		throw std::runtime_error("can't open file");
-
+		throw std::runtime_error("account file could not be opened");
 	ParseFile(file.get());
-	const auto error = CheckValid();
-	if (error)
-		throw std::system_error(error);
+	if (std::error_code ec = CheckValid())
+		throw std::system_error(ec);
 }
 
 std::error_code Account::CheckValid() const
 {
-	if (m_persistent_id < kMinPersistendId)
+	if (m_persistentId < kMinPersistendId)
 		return AccountErrc::InvalidPersistentId;
-		
-	if (m_mii_name[0] == '\0')
+	if (m_miiName[0] == L'\0')
 		return AccountErrc::InvalidMiiName;
-	
-	if (m_mii_data == decltype(m_mii_data){})
+	if (std::all_of(m_miiData.begin(), m_miiData.end(), [](uint8 b) { return b == 0; }))
 		return AccountErrc::InvalidMiiData;
-
-	// todo: check for other needed properties
-
 	return AccountErrc::NoError;
 }
 
 std::error_code Account::Load()
 {
-	const auto persistent_id = m_persistent_id;
-	const fs::path path = GetFileName();
+	// the folder name decides the persistent id, not the PersistentId key
+	const uint32 folderId = m_persistentId;
 	try
 	{
-		std::unique_ptr<FileStream> file(FileStream::openFile2(path));
+		std::unique_ptr<FileStream> file(FileStream::openFile2(GetFileName()));
 		if (!file)
-			throw std::runtime_error("can't open file");
+			throw std::runtime_error("account file could not be opened");
 		ParseFile(file.get());
-		// fix persistent id if it's in the wrong folder
-		m_persistent_id = persistent_id;
-		return CheckValid();
-	}
-	catch (const std::system_error& ex)
-	{
-		return ex.code();
-	}
-	catch(const std::exception& ex)
-	{
-		cemuLog_log(LogType::Force, "handled error in Account::Load: {}", ex.what());
-		return AccountErrc::ParseError;
-	}
-}
-
-std::error_code Account::Save()
-{
-	fs::path path = ActiveSettings::GetMlcPath(fmt::format(L"usr/save/system/act/{:08x}", m_persistent_id));
-	if (!fs::exists(path))
-	{
-		std::error_code ec;
-		fs::create_directories(path, ec);
-		if (ec)
-			return ec;
-	}
-		
-	path /= "account.dat";
-
-	try
-	{
-		std::ofstream file;
-		file.exceptions(std::ios::badbit);
-		file.open(path);
-	
-		file << "AccountInstance_20120705" << std::endl;
-		file << fmt::format("PersistentId={:08x}", m_persistent_id) << std::endl;
-		file << fmt::format("TransferableIdBase={:x}", m_transferable_id_base) << std::endl;
-
-		file << fmt::format("Uuid=");
-		for (const auto& b : m_uuid)
-			file << fmt::format("{:02x}", b);
-		file << std::endl;
-
-		file << fmt::format("MiiData=");
-		for (const auto& b : m_mii_data)
-			file << fmt::format("{:02x}", b);
-		file << std::endl;
-		
-		file << fmt::format("MiiName=");
-		for (const auto& b : m_mii_name)
-			file << fmt::format("{:04x}", (uint16)b);
-		file << std::endl;
-		
-		file << fmt::format("AccountId={}", m_account_id) << std::endl;
-		file << fmt::format("BirthYear={:x}", m_birth_year) << std::endl;
-		file << fmt::format("BirthMonth={:x}", m_birth_month) << std::endl;
-		file << fmt::format("BirthDay={:x}", m_birth_day) << std::endl;
-		file << fmt::format("Gender={:x}", m_gender) << std::endl;
-		file << fmt::format("EmailAddress={}", m_email) << std::endl;
-		file << fmt::format("Country={:x}", m_country) << std::endl;
-		file << fmt::format("SimpleAddressId={:x}", m_simple_address_id) << std::endl;
-		file << fmt::format("PrincipalId={:x}", m_principal_id) << std::endl;
-		file << fmt::format("IsPasswordCacheEnabled={:x}", m_password_cache_enabled) << std::endl;
-
-		file << fmt::format("AccountPasswordCache=");
-		for (const auto& b : m_account_password_cache)
-			file << fmt::format("{:02x}", b);
-		file << std::endl;
-		
-		// write rest of stuff we got
-		for(const auto& [key, value] : m_storage)
-		{
-			file << fmt::format("{}={}", key, value) << std::endl;
-		}
-		
-		file.flush();
-		file.close();
+		m_persistentId = folderId;
 		return CheckValid();
 	}
 	catch (const std::system_error& e)
 	{
 		return e.code();
 	}
+	catch (const std::exception& e)
+	{
+		cemuLog_log(LogType::Force, "Account: loading account {:08x} failed: {}", folderId, e.what());
+		return AccountErrc::ParseError;
+	}
+}
+
+void Account::ParseFile(FileStream* file)
+{
+	std::vector<uint8> content(file->GetSize());
+	if (file->readData(content.data(), (uint32)content.size()) != content.size())
+		throw std::system_error(AccountErrc::ParseError);
+	for (std::string_view line : StringHelpers::StringLineIterator(content))
+	{
+		const size_t sep = line.find('=');
+		if (sep == std::string_view::npos)
+			continue; // header line or garbage
+		ApplyField(line.substr(0, sep), line.substr(sep + 1));
+	}
+}
+
+void Account::ApplyField(std::string_view key, std::string_view value)
+{
+	auto hex = [&]<typename T>(T& field) { field = ParseHex<T>(value); };
+
+	if (key == "PersistentId")
+		hex(m_persistentId);
+	else if (key == "TransferableIdBase")
+		hex(m_transferableIdBase);
+	else if (key == "Uuid")
+	{
+		if (value.size() != m_uuid.size() * 2)
+			throw std::system_error(AccountErrc::InvalidUuid);
+		DecodeHexBytes(value, m_uuid);
+	}
+	else if (key == "MiiData")
+	{
+		if (value.size() != m_miiData.size() * 2)
+			throw std::system_error(AccountErrc::InvalidMiiData);
+		DecodeHexBytes(value, m_miiData);
+	}
+	else if (key == "MiiName")
+	{
+		if (value.size() != m_miiName.size() * 4)
+			throw std::system_error(AccountErrc::InvalidMiiName);
+		for (size_t i = 0; i < m_miiName.size(); i++)
+			m_miiName[i] = (wchar_t)ParseHex<uint16>(value.substr(i * 4, 4));
+	}
+	else if (key == "AccountId")
+		m_accountId = value;
+	else if (key == "BirthYear")
+		hex(m_birthYear);
+	else if (key == "BirthMonth")
+		hex(m_birthMonth);
+	else if (key == "BirthDay")
+		hex(m_birthDay);
+	else if (key == "Gender")
+		hex(m_gender);
+	else if (key == "EmailAddress")
+		m_email = value;
+	else if (key == "Country")
+		hex(m_country);
+	else if (key == "SimpleAddressId")
+		hex(m_simpleAddressId);
+	else if (key == "TimeZoneId")
+		m_timeZoneId = value;
+	else if (key == "UtcOffset")
+		m_utcOffset = (sint64)ParseHex<uint64>(value);
+	else if (key == "PrincipalId")
+		hex(m_principalId);
+	else if (key == "IsPasswordCacheEnabled")
+		hex(m_passwordCacheEnabled);
+	else if (key == "AccountPasswordCache")
+	{
+		// The value has no length check of its own, but a value too short to
+		// hold the 32 bytes (fewer than 62 digits) makes the whole file invalid.
+		if (value.size() < m_passwordCache.size() * 2 - 2)
+			throw std::out_of_range("AccountPasswordCache is too short");
+		DecodeHexBytes(value, m_passwordCache);
+	}
+	else
+		m_otherFields[std::string(key)] = value;
+}
+
+std::error_code Account::Save()
+{
+	fs::path folder = ActiveSettings::GetMlcPath(fmt::format(L"usr/save/system/act/{:08x}", m_persistentId));
+	if (!fs::exists(folder))
+	{
+		std::error_code ec;
+		fs::create_directories(folder, ec);
+		if (ec)
+			return ec;
+	}
+
+	std::string text;
+	auto line = [&text](std::string_view s) {
+		text.append(s);
+		text.push_back('\n');
+	};
+	line(kAccountFileHeader);
+	line(fmt::format("PersistentId={:08x}", m_persistentId));
+	line(fmt::format("TransferableIdBase={:x}", m_transferableIdBase));
+	line("Uuid=" + EncodeHexBytes(m_uuid));
+	line("MiiData=" + EncodeHexBytes(m_miiData));
+	std::string name = "MiiName=";
+	for (wchar_t c : m_miiName)
+		name.append(fmt::format("{:04x}", (uint16)c));
+	line(name);
+	line(fmt::format("AccountId={}", m_accountId));
+	line(fmt::format("BirthYear={:x}", m_birthYear));
+	line(fmt::format("BirthMonth={:x}", m_birthMonth));
+	line(fmt::format("BirthDay={:x}", m_birthDay));
+	line(fmt::format("Gender={:x}", m_gender));
+	line(fmt::format("EmailAddress={}", m_email));
+	line(fmt::format("Country={:x}", m_country));
+	line(fmt::format("SimpleAddressId={:x}", m_simpleAddressId));
+	line(fmt::format("PrincipalId={:x}", m_principalId));
+	line(fmt::format("IsPasswordCacheEnabled={:x}", m_passwordCacheEnabled));
+	line("AccountPasswordCache=" + EncodeHexBytes(m_passwordCache));
+	// TimeZoneId and UtcOffset are not written (as before); other keys are kept
+	for (const auto& [key, value] : m_otherFields)
+		line(fmt::format("{}={}", key, value));
+
+	try
+	{
+		// text mode: line ends are native (CRLF on Windows)
+		std::ofstream out;
+		out.exceptions(std::ios::badbit);
+		out.open(folder / "account.dat");
+		out << text;
+		out.flush();
+		out.close();
+	}
+	catch (const std::system_error& e)
+	{
+		return e.code();
+	}
+	return CheckValid();
 }
 
 OnlineAccountError Account::GetOnlineAccountError() const
 {
-	if (m_account_id.empty())
+	if (m_accountId.empty())
 		return OnlineAccountError::kNoAccountId;
-
 	if (!IsPasswordCacheEnabled())
 		return OnlineAccountError::kNoPasswordCached;
-
-	if (m_account_password_cache == decltype(m_account_password_cache){})
+	if (std::all_of(m_passwordCache.begin(), m_passwordCache.end(), [](uint8 b) { return b == 0; }))
 		return OnlineAccountError::kPasswordCacheEmpty;
-
-	/*if (m_simple_address_id == 0) not really needed
-		return false;*/
-	
-	if (m_principal_id == 0)
+	if (m_principalId == 0)
 		return OnlineAccountError::kNoPrincipalId;
-	
-	// TODO
 	return OnlineAccountError::kNone;
 }
 
@@ -270,109 +339,105 @@ bool Account::IsValidOnlineAccount() const
 
 fs::path Account::GetFileName() const
 {
-	return GetFileName(m_persistent_id);
+	return GetFileName(m_persistentId);
+}
+
+fs::path Account::GetFileName(uint32 persistent_id)
+{
+	if (persistent_id < kMinPersistendId)
+		throw std::invalid_argument(fmt::format("invalid persistent id {:#x}", persistent_id));
+	return ActiveSettings::GetMlcPath(fmt::format("usr/save/system/act/{:08x}/account.dat", persistent_id));
 }
 
 std::wstring_view Account::GetMiiName() const
 {
-	const auto it = std::find(m_mii_name.cbegin(), m_mii_name.cend(), '\0');
-	if(it == m_mii_name.cend())
-		return { m_mii_name.data(), m_mii_name.size() - 1 };
-
-	const size_t count = std::distance(m_mii_name.cbegin(), it);
-	return { m_mii_name.data(),  count}; 
+	size_t length = 0;
+	while (length < m_miiName.size() - 1 && m_miiName[length] != L'\0')
+		length++;
+	return {m_miiName.data(), length};
 }
 
 std::string_view Account::GetStorageValue(std::string_view key) const
 {
-	const auto it = m_storage.find(key.data());
-	if (it == m_storage.cend())
+	auto it = m_otherFields.find(std::string(key));
+	if (it == m_otherFields.end())
 		return {};
-
 	return it->second;
 }
 
 void Account::SetMiiName(std::wstring_view name)
 {
-	m_mii_name = {};
-	std::copy(name.data(), name.data() + std::min(name.size(), m_mii_name.size() - 1), m_mii_name.begin());
+	m_miiName.fill(L'\0');
+	const size_t count = std::min(name.size(), m_miiName.size() - 1);
+	std::copy_n(name.begin(), count, m_miiName.begin());
 }
 
 const std::vector<Account>& Account::RefreshAccounts()
 {
-	std::vector<Account> result;
-	const fs::path path = ActiveSettings::GetMlcPath("usr/save/system/act");
-	if (fs::exists(path))
+	std::vector<Account> found;
+	const fs::path actFolder = ActiveSettings::GetMlcPath("usr/save/system/act");
+	if (fs::exists(actFolder))
 	{
-		for (const auto& it : fs::directory_iterator(path))
+		for (const fs::directory_entry& entry : fs::directory_iterator(actFolder))
 		{
-			if (!fs::is_directory(it))
+			if (!fs::is_directory(entry))
 				continue;
-
-			const auto file_name = it.path().filename().string();
-			if (file_name.size() != 8)
+			const std::string folderName = entry.path().filename().string();
+			if (folderName.size() != 8)
 				continue;
-
-			const auto persistent_id = ConvertString<uint32>(file_name, 16);
-			if (persistent_id < kMinPersistendId)
+			const uint32 id = ParseHex<uint32>(folderName);
+			if (id < kMinPersistendId)
 				continue;
-
-			Account account(persistent_id);
-			const auto error = account.Load();
-			if (!error)
-				result.emplace_back(account);
+			Account account(id);
+			if (!account.Load())
+				found.push_back(account);
 		}
 	}
-	
-	// we always force at least one account
-	if (result.empty())
+	if (found.empty())
 	{
-		result.emplace_back(kMinPersistendId, L"default");
-		result.begin()->Save();
+		// there is always at least one account
+		found.emplace_back(kMinPersistendId, L"default");
+		found.front().Save();
 	}
-
-	s_account_list = result;
+	s_accounts = std::move(found);
 	UpdatePersisidDat();
-	return s_account_list;
+	return s_accounts;
 }
 
 void Account::UpdatePersisidDat()
 {
-	const auto max_id = std::max(kMinPersistendId, GetNextPersistentId() - 1);
-	const auto file = ActiveSettings::GetMlcPath("usr/save/system/act/persisid.dat");
-	std::ofstream f(file);
-	if(f.is_open())
+	const uint32 head = std::max(kMinPersistendId, GetNextPersistentId() - 1);
+	std::ofstream out(PersisIdFilePath()); // text mode
+	if (!out.is_open())
 	{
-		f << "PersistentIdManager_20120607" << std::endl << "PersistentIdHead=" << std::hex << max_id << std::endl << std::endl;
-		f.flush();
-		f.close();
+		cemuLog_log(LogType::Force, "Account: could not write persisid.dat");
+		return;
 	}
-	else
-		cemuLog_log(LogType::Force, "Unable to save persisid.dat");
+	out << kPersisIdHeader << '\n' << kPersisIdHeadKey << fmt::format("{:x}", head) << "\n\n";
+	out.flush();
 }
 
 bool Account::HasFreeAccountSlots()
 {
-	return s_account_list.size() < 12;
+	return s_accounts.size() < kMaxAccounts;
 }
 
 const std::vector<Account>& Account::GetAccounts()
 {
-	if (!s_account_list.empty())
-		return s_account_list;
-
-	return RefreshAccounts();
+	if (s_accounts.empty())
+		return RefreshAccounts();
+	return s_accounts;
 }
 
 const Account& Account::GetAccount(uint32 persistent_id)
 {
-	for (const auto& account : GetAccounts())
+	const std::vector<Account>& accounts = GetAccounts();
+	for (const Account& account : accounts)
 	{
 		if (account.GetPersistentId() == persistent_id)
 			return account;
 	}
-
-	return *GetAccounts().begin();
+	return accounts.front();
 }
 
 const Account& Account::GetCurrentAccount()
@@ -382,204 +447,53 @@ const Account& Account::GetCurrentAccount()
 
 uint32 Account::GetNextPersistentId()
 {
-	uint32 result = kMinPersistendId;
-	const auto file = ActiveSettings::GetMlcPath("usr/save/system/act/persisid.dat");
-	if(fs::exists(file))
+	// persisid.dat stores the last id handed out
+	uint32 lastId = kMinPersistendId;
+	const fs::path persisId = PersisIdFilePath();
+	if (fs::exists(persisId))
 	{
-		std::ifstream f(file);
-		if(f.is_open())
+		std::ifstream in(persisId);
+		std::string line;
+		while (in.is_open() && std::getline(in, line))
 		{
-			std::string line;
-			while(std::getline(f, line))
+			if (line.starts_with(kPersisIdHeadKey))
 			{
-				if(boost::starts_with(line, "PersistentIdHead="))
-				{
-					result = ConvertString<uint32>(line.data() + sizeof("PersistentIdHead=") - 1, 16);
-					break;
-				}
+				lastId = ParseHex<uint32>(std::string_view(line).substr(kPersisIdHeadKey.size()));
+				break;
 			}
 		}
 	}
-	
-	// next id
-	++result;
-	
-	const auto it = std::max_element(s_account_list.cbegin(), s_account_list.cend(), [](const Account& acc1, const Account& acc2) {return acc1.GetPersistentId() < acc2.GetPersistentId(); });
-	if (it != s_account_list.cend())
-		return std::max(result, it->GetPersistentId() + 1);
-	else
-		return result;
-}
-
-fs::path Account::GetFileName(uint32 persistent_id)
-{
-	if (persistent_id < kMinPersistendId)
-		throw std::invalid_argument(fmt::format("persistent id {:#x} is invalid", persistent_id));
-	
-	return ActiveSettings::GetMlcPath(fmt::format("usr/save/system/act/{:08x}/account.dat", persistent_id));
+	uint32 next = lastId + 1;
+	for (const Account& account : s_accounts)
+		next = std::max(next, account.GetPersistentId() + 1);
+	return next;
 }
 
 OnlineValidator Account::ValidateOnlineFiles() const
 {
 	OnlineValidator result{};
-	
-	const auto otp = ActiveSettings::GetUserDataPath("otp.bin");
-	if (!fs::exists(otp))
-		result.otp = OnlineValidator::FileState::Missing;
-	else if (fs::file_size(otp) != 1024)
-		result.otp = OnlineValidator::FileState::Corrupted;
-	else
-		result.otp = OnlineValidator::FileState::Ok;
-	
-	const auto seeprom = ActiveSettings::GetUserDataPath("seeprom.bin");
-	if (!fs::exists(seeprom))
-		result.seeprom = OnlineValidator::FileState::Missing;
-	else if (fs::file_size(seeprom) != 512)
-		result.seeprom = OnlineValidator::FileState::Corrupted;
-	else
-		result.seeprom = OnlineValidator::FileState::Ok;
 
-	for(const auto& v : iosuCrypt_getCertificateKeys())
-	{
-		const auto p = ActiveSettings::GetMlcPath(L"sys/title/0005001b/10054000/content/{}", v);
-		if (!fs::exists(p) || !fs::is_regular_file(p))
-			result.missing_files.emplace_back(p.generic_wstring());
-	}
+	auto checkFile = [](const fs::path& path, uintmax_t expectedSize) {
+		if (!fs::exists(path))
+			return OnlineValidator::FileState::Missing;
+		return fs::file_size(path) == expectedSize ? OnlineValidator::FileState::Ok : OnlineValidator::FileState::Corrupted;
+	};
+	result.otp = checkFile(ActiveSettings::GetUserDataPath("otp.bin"), 1024);
+	result.seeprom = checkFile(ActiveSettings::GetUserDataPath("seeprom.bin"), 512);
 
-	for (const auto& v : iosuCrypt_getCertificateNames())
-	{
-		const auto p = ActiveSettings::GetMlcPath(L"sys/title/0005001b/10054000/content/{}", v);
-		if (!fs::exists(p) || !fs::is_regular_file(p))
-			result.missing_files.emplace_back(p.generic_wstring());
-	}
+	// certificates and keys of the system title 0005001b-10054000
+	auto requireContent = [&result](const std::vector<const wchar_t*>& names) {
+		for (const wchar_t* name : names)
+		{
+			fs::path path = ActiveSettings::GetMlcPath(L"sys/title/0005001b/10054000/content/{}", name);
+			if (!fs::exists(path) || !fs::is_regular_file(path))
+				result.missing_files.emplace_back(path.generic_wstring());
+		}
+	};
+	requireContent(iosuCrypt_getCertificateKeys());
+	requireContent(iosuCrypt_getCertificateNames());
 
 	result.valid_account = IsValidOnlineAccount();
 	result.account_error = GetOnlineAccountError();
-	
 	return result;
-}
-
-void Account::ParseFile(class FileStream* file)
-{
-	std::vector<uint8> buffer;
-	buffer.resize(file->GetSize());
-	if( file->readData(buffer.data(), buffer.size()) != buffer.size())
-		throw std::system_error(AccountErrc::ParseError);
-	for (const auto& s : StringHelpers::StringLineIterator(buffer))
-	{
-		std::string_view view = s;
-		const auto find = view.find('=');
-		if (find == std::string_view::npos)
-			continue;
-
-		const auto key = view.substr(0, find);
-		const auto value = view.substr(find + 1);
-		if (key == "PersistentId")
-			m_persistent_id = ConvertString<uint32>(value, 16);
-		else if (key == "TransferableIdBase")
-			m_transferable_id_base = ConvertString<uint64>(value, 16);
-		else if (key == "Uuid")
-		{
-			if (value.size() != m_uuid.size() * 2) // = 32
-				throw std::system_error(AccountErrc::InvalidUuid);
-			
-			for (size_t i = 0; i < m_uuid.size(); ++i)
-			{
-				m_uuid[i] = ConvertString<uint8>(value.substr(i * 2, 2), 16);
-			}
-		}
-		else if (key == "MiiData")
-		{
-			if (value.size() != m_mii_data.size() * 2) // = 192
-				throw std::system_error(AccountErrc::InvalidMiiData);
-			
-			for (size_t i = 0; i < m_mii_data.size(); ++i)
-			{
-				m_mii_data[i] = ConvertString<uint8>(value.substr(i * 2, 2), 16);
-			}
-		}
-		else if (key == "MiiName")
-		{
-			if(value.size() != m_mii_name.size() * 4) // = 44
-				throw std::system_error(AccountErrc::InvalidMiiName);
-			
-			for (size_t i = 0; i < m_mii_name.size(); ++i)
-			{
-				m_mii_name[i] = (wchar_t)ConvertString<uint16>(value.substr(i * 4, 4), 16);
-			}
-		}
-		else if (key == "AccountId")
-			m_account_id = value;
-		else if (key == "BirthYear")
-			m_birth_year = ConvertString<uint16>(value, 16);
-		else if (key == "BirthMonth")
-			m_birth_month = ConvertString<uint8>(value, 16);
-		else if (key == "BirthDay")
-			m_birth_day = ConvertString<uint8>(value, 16);
-		else if (key == "Gender")
-			m_gender = ConvertString<uint8>(value, 16);
-		else if (key == "EmailAddress")
-			m_email = value;
-		else if (key == "Country")
-			m_country = ConvertString<uint32>(value, 16);
-		else if (key == "SimpleAddressId")
-			m_simple_address_id = ConvertString<uint32>(value, 16);
-		else if (key == "TimeZoneId")
-			m_timezone_id = value;
-		else if (key == "UtcOffset")
-			m_utc_offset = ConvertString<uint64>(value, 16);
-		else if (key == "PrincipalId")
-			m_principal_id = ConvertString<uint32>(value, 16);
-		else if (key == "IsPasswordCacheEnabled")
-			m_password_cache_enabled = ConvertString<uint8>(value, 16);
-		else if (key == "AccountPasswordCache")
-		{
-			for (size_t i = 0; i < m_account_password_cache.size(); ++i)
-			{
-				m_account_password_cache[i] = ConvertString<uint8>(value.substr(i * 2, 2), 16);
-			}
-		}
-		else // store anything else not needed for now
-			m_storage[std::string(key)] = value;
-	}
-}
-
-#include"openssl/sha.h"
-
-void makePWHash(uint8* input, sint32 length, uint32 magic, uint8* output)
-{
-	uint8 buffer[64 + 8];
-	if (length > (sizeof(buffer) - 8))
-	{
-		cemu_assert_debug(false);
-		memset(output, 0, 32);
-		return;
-	}
-	buffer[4] = 0x02;
-	buffer[5] = 0x65;
-	buffer[6] = 0x43;
-	buffer[7] = 0x46;
-	buffer[0] = (magic >> 0) & 0xFF;
-	buffer[1] = (magic >> 8) & 0xFF;
-	buffer[2] = (magic >> 16) & 0xFF;
-	buffer[3] = (magic >> 24) & 0xFF;
-	memcpy(buffer + 8, input, length);
-	uint8 md[SHA256_DIGEST_LENGTH];
-	SHA256(buffer, 8 + length, md);
-	memcpy(output, md, SHA256_DIGEST_LENGTH);
-}
-
-void actPwTest()
-{
-	uint8 pwHash[32];
-
-	uint32 principalId = 0x12345678;
-
-	uint32 pid = 0x12345678;
-
-	makePWHash((uint8*)"pass123", 7, pid, pwHash); // calculates AccountPasswordCache
-
-	makePWHash(pwHash, 32, pid, pwHash); // calculates AccountPasswordHash
-
-	assert_dbg();
 }

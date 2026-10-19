@@ -1,7 +1,9 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include <system_error>
 
+// Errors reported while loading, creating or saving an account (account.dat)
 enum class AccountErrc
 {
 	NoError = 0,
@@ -11,50 +13,47 @@ enum class AccountErrc
 	InvalidMiiName,
 	InvalidMiiData,
 };
+
 namespace std
 {
-	template <> struct is_error_code_enum<AccountErrc> : true_type {};
+	template<>
+	struct is_error_code_enum<AccountErrc> : true_type
+	{
+	};
 }
+
 namespace detail
 {
-	// Define a custom error code category derived from std::error_category
-	class AccountErrc_category : public std::error_category
+	class AccountErrorCategory final : public std::error_category
 	{
-	public:
-		// Return a short descriptive name for the category
-		[[nodiscard]] const char* name() const noexcept override final { return "AccountError"; }
+	  public:
+		const char* name() const noexcept override { return "AccountError"; }
 
-		// Return what each enum means in text
-		[[nodiscard]] std::string message(int c) const override final
+		std::string message(int value) const override
 		{
-			switch (static_cast<AccountErrc>(c))
+			switch (static_cast<AccountErrc>(value))
 			{
-			case AccountErrc::NoError:
-				return "no error";
-			case AccountErrc::InvalidPersistentId:
-				return "invalid PersistentId";
-			case AccountErrc::InvalidMiiName:
-				return "invalid MiiName";
-			default:
-				return "unknown error";
+			case AccountErrc::NoError: return "no error";
+			case AccountErrc::ParseError: return "account file could not be parsed";
+			case AccountErrc::InvalidPersistentId: return "invalid persistent id";
+			case AccountErrc::InvalidUuid: return "invalid uuid";
+			case AccountErrc::InvalidMiiName: return "invalid mii name";
+			case AccountErrc::InvalidMiiData: return "invalid mii data";
 			}
+			return "unknown account error";
 		}
 
-		[[nodiscard]] std::error_condition default_error_condition(int c) const noexcept override final
+		std::error_condition default_error_condition(int value) const noexcept override
 		{
-			switch (static_cast<AccountErrc>(c))
-			{
-			case AccountErrc::InvalidPersistentId:
-				return make_error_condition(std::errc::invalid_argument);
-			default:
-				return std::error_condition(c, *this);
-			}
+			if (static_cast<AccountErrc>(value) == AccountErrc::InvalidPersistentId)
+				return std::make_error_condition(std::errc::invalid_argument);
+			return std::error_condition(value, *this);
 		}
 	};
 }
 
 inline std::error_code make_error_code(AccountErrc e)
 {
-	static detail::AccountErrc_category c;
-	return { static_cast<int>(e), c };
+	static const detail::AccountErrorCategory s_category;
+	return {static_cast<int>(e), s_category};
 }
