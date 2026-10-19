@@ -1,594 +1,491 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
-namespace LatteDecompiler
+// Declaration section of a generated GLSL shader: preprocessor setup, uniform
+// variables/blocks, samplers, vertex attributes and the inter-stage interface.
+// Included from LatteDecompilerEmitGLSL.cpp inside its anonymous namespace; all
+// functions here are members of GlslShaderWriter.
+
+// Packs the loose uniform variables one after another and records the byte
+// offset of each so the renderer can upload them.
+class UniformVarPacker
 {
-	void _emitUniformVariables(LatteDecompilerShaderContext* decompilerContext, RendererAPI rendererType, LatteDecompilerOutputUniformOffsets& uniformOffsets)
+public:
+	// round the cursor up to a multiple of alignment (power of two) and reserve size bytes
+	uint32 place(uint32 alignment, uint32 size)
 	{
-		LatteDecompilerShaderResourceMapping& resourceMapping = (rendererType == RendererAPI::Vulkan) ? decompilerContext->output->resourceMappingVK : decompilerContext->output->resourceMappingGL;
+		m_cursor = (m_cursor + (alignment - 1)) & ~(alignment - 1);
+		const uint32 at = m_cursor;
+		m_cursor += size;
+		return at;
+	}
 
-		if (rendererType == RendererAPI::Vulkan)
-		{
-			// for Vulkan uniform vars are in a uniform buffer
-			if (decompilerContext->hasUniformVarBlock)
-			{
-				cemu_assert_debug(resourceMapping.uniformVarsBufferBindingPoint >= 0);
-				decompilerContext->shaderSource->addFmt("layout(set = {}, binding = {}) uniform ufBlock" _CRLF "{{" _CRLF, (sint32)resourceMapping.setIndex, (sint32)resourceMapping.uniformVarsBufferBindingPoint);
-			}
-		}
+	uint32 end() const { return m_cursor; }
 
-		uint32 uniformCurrentOffset = 0;
-		auto shader = decompilerContext->shader;
-		auto shaderType = decompilerContext->shader->shaderType;
-		auto shaderSrc = decompilerContext->shaderSource;
-		if (decompilerContext->shader->uniformMode == LATTE_DECOMPILER_UNIFORM_MODE_REMAPPED)
-		{
-			// uniform registers or buffers are accessed statically with predictable offsets
-			// this allows us to remap the used entries into a more compact array
-			if (shaderType == LatteConst::ShaderType::Vertex)
-				shaderSrc->addFmt("uniform ivec4 uf_remappedVS[{}];" _CRLF, (sint32)shader->list_remappedUniformEntries.size());
-			else if (shaderType == LatteConst::ShaderType::Pixel)
-				shaderSrc->addFmt("uniform ivec4 uf_remappedPS[{}];" _CRLF, (sint32)shader->list_remappedUniformEntries.size());
-			else if (shaderType == LatteConst::ShaderType::Geometry)
-				shaderSrc->addFmt("uniform ivec4 uf_remappedGS[{}];" _CRLF, (sint32)shader->list_remappedUniformEntries.size());
-			else
-				debugBreakpoint();
-			uniformOffsets.offset_remapped = uniformCurrentOffset;
-			uniformCurrentOffset += 16 * shader->list_remappedUniformEntries.size();
-		}
-		else if (decompilerContext->shader->uniformMode == LATTE_DECOMPILER_UNIFORM_MODE_FULL_CFILE)
-		{
-			uint32 cfileSize = decompilerContext->analyzer.uniformRegisterAccessTracker.DetermineSize(decompilerContext->shaderBaseHash, 256);
-			// full or partial uniform register file has to be present
-			if (shaderType == LatteConst::ShaderType::Vertex)
-				shaderSrc->addFmt("uniform ivec4 uf_uniformRegisterVS[{}];" _CRLF, cfileSize);
-			else if (shaderType == LatteConst::ShaderType::Pixel)
-				shaderSrc->addFmt("uniform ivec4 uf_uniformRegisterPS[{}];" _CRLF, cfileSize);
-			else if (shaderType == LatteConst::ShaderType::Geometry)
-				shaderSrc->addFmt("uniform ivec4 uf_uniformRegisterGS[{}];" _CRLF, cfileSize);
-			uniformOffsets.offset_uniformRegister = uniformCurrentOffset;
-			uniformOffsets.count_uniformRegister = cfileSize;
-			uniformCurrentOffset += 16 * cfileSize;
-		}
-		// special uniforms
-		bool hasAnyViewportScaleDisabled =
-			!decompilerContext->contextRegistersNew->PA_CL_VTE_CNTL.get_VPORT_X_SCALE_ENA() ||
-			!decompilerContext->contextRegistersNew->PA_CL_VTE_CNTL.get_VPORT_Y_SCALE_ENA() ||
-			!decompilerContext->contextRegistersNew->PA_CL_VTE_CNTL.get_VPORT_Z_SCALE_ENA();
+private:
+	uint32 m_cursor{ 0 };
+};
 
-		if (decompilerContext->shaderType == LatteConst::ShaderType::Vertex && hasAnyViewportScaleDisabled)
-		{
-			// aka GX2 special state 0
-			uniformCurrentOffset = (uniformCurrentOffset + 7)&~7;
-			shaderSrc->add("uniform vec2 uf_windowSpaceToClipSpaceTransform;" _CRLF);
-			uniformOffsets.offset_windowSpaceToClipSpaceTransform = uniformCurrentOffset;
-			uniformCurrentOffset += 8;
-		}
-		bool alphaTestEnable = decompilerContext->contextRegistersNew->SX_ALPHA_TEST_CONTROL.get_ALPHA_TEST_ENABLE();
-		if (decompilerContext->shaderType == LatteConst::ShaderType::Pixel && alphaTestEnable)
-		{
-			uniformCurrentOffset = (uniformCurrentOffset + 3)&~3;
-			shaderSrc->add("uniform float uf_alphaTestRef;" _CRLF);
-			uniformOffsets.offset_alphaTestRef = uniformCurrentOffset;
-			uniformCurrentOffset += 4;
-		}
-		if (decompilerContext->analyzer.outputPointSize && decompilerContext->analyzer.writesPointSize == false)
-		{
-			if ((decompilerContext->shaderType == LatteConst::ShaderType::Vertex && !decompilerContext->options->usesGeometryShader) ||
-				decompilerContext->shaderType == LatteConst::ShaderType::Geometry)
-			{
-				uniformCurrentOffset = (uniformCurrentOffset + 3)&~3;
-				shaderSrc->add("uniform float uf_pointSize;" _CRLF);
-				uniformOffsets.offset_pointSize = uniformCurrentOffset;
-				uniformCurrentOffset += 4;
-			}
-		}
-		// define uf_fragCoordScale which holds the xy scale for render target resolution vs effective resolution
-		bool compatNeedFragCoordScalePadding = false; // 2026-06-15 - uf_fragCoordScale is only emitted when accessed now. To keep compatible with old shader replacements we insert padding if its not the last element
-		if (shader->shaderType == LatteConst::ShaderType::Pixel)
-		{
-			if (!decompilerContext->analyzer.hasFragCoordAccess)
-			{
-				// omit uf_fragCoordScale
-				compatNeedFragCoordScalePadding = true;
-			}
-			else if (rendererType == RendererAPI::OpenGL)
-			{
-				uniformCurrentOffset = (uniformCurrentOffset + 7)&~7;
-				shaderSrc->add("uniform vec2 uf_fragCoordScale;" _CRLF);
-				uniformOffsets.offset_fragCoordScale = uniformCurrentOffset;
-				uniformCurrentOffset += 8;
-			}
-			else
-			{
-				// in Vulkan uf_fragCoordScale stores the origin in zw
-				uniformCurrentOffset = (uniformCurrentOffset + 15)&~15;
-				shaderSrc->add("uniform vec4 uf_fragCoordScale;" _CRLF);
-				uniformOffsets.offset_fragCoordScale = uniformCurrentOffset;
-				uniformCurrentOffset += 16;
-			}
-		}
-		// provide scale factor for every texture that is accessed via texel coordinates (texelFetch)
-		for (sint32 t = 0; t < LATTE_NUM_MAX_TEX_UNITS; t++)
-		{
-			if (decompilerContext->analyzer.texUnitUsesTexelCoordinates.test(t) == false)
-				continue;
-			if (compatNeedFragCoordScalePadding)
-			{
-				if (rendererType == RendererAPI::OpenGL)
-				{
-					uniformCurrentOffset = (uniformCurrentOffset + 7)&~7;
-					shaderSrc->add("uniform vec2 uf_fragCoordScaleCompatPadding;" _CRLF); uniformCurrentOffset += 8;
-				}
-				else
-				{
-					uniformCurrentOffset = (uniformCurrentOffset + 15)&~15;
-					shaderSrc->add("uniform vec4 uf_fragCoordScaleCompatPadding;" _CRLF); uniformCurrentOffset += 16;
-				}
-				compatNeedFragCoordScalePadding = false;
-			}
-			uniformCurrentOffset = (uniformCurrentOffset + 7) & ~7;
-			shaderSrc->addFmt("uniform vec2 uf_tex{}Scale;" _CRLF, t);
-			uniformOffsets.offset_texScale[t] = uniformCurrentOffset;
-			uniformCurrentOffset += 8;
-		}
-		// define uf_verticesPerInstance + uf_streamoutBufferBaseX
-		if (decompilerContext->analyzer.useSSBOForStreamout &&
-			(shader->shaderType == LatteConst::ShaderType::Vertex && decompilerContext->options->usesGeometryShader == false) ||
-			(shader->shaderType == LatteConst::ShaderType::Geometry) )
-		{
-			// note - we dont need to handle compatNeedFragCoordScalePadding here because it's pixel shader only
-			shaderSrc->add("uniform int uf_verticesPerInstance;" _CRLF);
-			uniformOffsets.offset_verticesPerInstance = uniformCurrentOffset;
-			uniformCurrentOffset += 4;
-			for (uint32 i = 0; i < LATTE_NUM_STREAMOUT_BUFFER; i++)
-			{
-				if (decompilerContext->output->streamoutBufferWriteMask[i])
-				{
-					shaderSrc->addFmt("uniform int uf_streamoutBufferBase{};" _CRLF, i);
-					uniformOffsets.offset_streamoutBufferBase[i] = uniformCurrentOffset;
-					uniformCurrentOffset += 4;
-				}
-			}
-		}
+void GlslShaderWriter::emitDeclarations()
+{
+	const bool annotate = ActiveSettings::DumpShadersEnabled();
+	if (annotate)
+		out << "// start of shader inputs/outputs, predetermined by Cemu. Do not touch\r\n";
+	emitPreprocessorSetup();
+	out << "#ifdef VULKAN\r\n";
+	emitUniformVariables(RendererAPI::Vulkan, m_ctx->output->uniformOffsetsVK);
+	out << "#else\r\n";
+	emitUniformVariables(RendererAPI::OpenGL, m_ctx->output->uniformOffsetsGL);
+	out << "#endif\r\n";
+	emitUniformBlocks();
+	emitSamplers();
+	emitVertexAttributes();
+	emitStageInterface();
+	if (annotate)
+		out << "// end of shader inputs/outputs\r\n";
+}
 
-		uniformOffsets.offset_endOfBlock = uniformCurrentOffset;
-		if (rendererType == RendererAPI::Vulkan)
+void GlslShaderWriter::emitPreprocessorSetup()
+{
+	const LatteConst::ShaderType type = stage();
+	const bool vertexLike = type == LatteConst::ShaderType::Vertex || type == LatteConst::ShaderType::Geometry;
+	const bool pixelFragCoord = type == LatteConst::ShaderType::Pixel && facts().hasFragCoordAccess;
+	const bool withGS = m_ctx->options->usesGeometryShader;
+	const auto* regs = m_ctx->contextRegistersNew;
+
+	// the same source is compiled for both backends, which only differ in how
+	// resources get bound
+	out << "#ifdef VULKAN\r\n";
+	out << "#define ATTR_LAYOUT(__location) layout(location = __location)\r\n";
+	out << "#define UNIFORM_BUFFER_LAYOUT(__glLocation, __vkSet, __vkLocation) layout(set = __vkSet, binding = __vkLocation, std140)\r\n";
+	out << "#define TEXTURE_LAYOUT(__glLocation, __vkSet, __vkLocation) layout(set = __vkSet, binding = __vkLocation)\r\n";
+	if (vertexLike)
+	{
+		out << "#define gl_VertexID gl_VertexIndex\r\n";
+		out << "#define gl_InstanceID gl_InstanceIndex\r\n";
+		if (facts().hasStreamoutWrite)
+			out << "#define XFB_BLOCK_LAYOUT(__bufferIndex, __stride, __location) layout(location = __location, xfb_buffer = __bufferIndex, xfb_stride = __stride, xfb_offset = 0)\r\n";
+		// Vulkan clip space depth is [0,1]; remap from [-1,1] unless the game already uses that convention
+		if (regs->PA_CL_CLIP_CNTL.get_DX_CLIP_SPACE_DEF())
+			out << "#define SET_POSITION(_v) gl_Position = _v\r\n";
+		else
+			out << "#define SET_POSITION(_v) gl_Position = _v; gl_Position.z = (gl_Position.z + gl_Position.w) / 2.0\r\n";
+		if (withGS)
+			out << "#define V2G_LAYOUT layout(location = 0)\r\n";
+	}
+	else if (pixelFragCoord)
+	{
+		out << "#define GET_FRAGCOORD() vec4(gl_FragCoord.xy*uf_fragCoordScale.xy,gl_FragCoord.z, 1.0/gl_FragCoord.w)\r\n";
+	}
+	if (m_ctx->options->spirvInstrinsics.hasRoundingModeRTEFloat32)
+	{
+		// RoundingModeRTE (execution mode 4462) for 16/32/64-bit floats, from SPV_KHR_float_controls
+		out << "#extension GL_EXT_spirv_intrinsics: enable\r\n";
+		for (uint32 bits : { 16u, 32u, 64u })
+			out.format("spirv_execution_mode(capabilities = [4467], extensions = [\"SPV_KHR_float_controls\"], 4462, {});\r\n", bits);
+	}
+	out << "#else\r\n";
+	out << "#define ATTR_LAYOUT(__location) layout(location = __location)\r\n";
+	out << "#define UNIFORM_BUFFER_LAYOUT(__glLocation, __vkSet, __vkLocation) layout(binding = __glLocation, std140) \r\n";
+	out << "#define TEXTURE_LAYOUT(__glLocation, __vkSet, __vkLocation) layout(binding = __glLocation)\r\n";
+	if (vertexLike)
+	{
+		if (facts().hasStreamoutWrite)
+			out << "#define XFB_BLOCK_LAYOUT(__bufferIndex, __stride, __location) layout(xfb_buffer = __bufferIndex, xfb_stride = __stride)\r\n";
+		out << "#define SET_POSITION(_v) gl_Position = _v\r\n";
+		if (withGS)
+			out << "#define V2G_LAYOUT\r\n";
+	}
+	else if (pixelFragCoord)
+	{
+		out << "#define GET_FRAGCOORD() vec4(gl_FragCoord.xy*uf_fragCoordScale,gl_FragCoord.zw)\r\n";
+	}
+	out << "#endif\r\n";
+
+	if (type != LatteConst::ShaderType::Geometry)
+		return;
+
+	// The GS input topology is not part of the GS state; it follows the
+	// primitive mode of the draw that uses it.
+	using PrimMode = Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE;
+	const PrimMode drawMode = regs->VGT_PRIMITIVE_TYPE.get_PRIMITIVE_MODE();
+	std::string_view inputTopology;
+	switch (drawMode)
+	{
+	case PrimMode::POINTS: inputTopology = "points"; break;
+	case PrimMode::TRIANGLES: inputTopology = "triangles"; break;
+	case PrimMode::LINE_STRIP: inputTopology = "lines_adjacency"; break;
+	default:
+		debug_printf("drawPrimitiveMode %d\n", drawMode);
+		cemu_assert_debug(false);
+		break;
+	}
+	out << "layout(" << inputTopology << ") in;\r\n";
+
+	out << "layout (";
+	switch (m_ctx->contextRegisters[mmVGT_GS_OUT_PRIM_TYPE])
+	{
+	case 0: out << "points"; break;
+	case 1: out << "line_strip"; break;
+	case 2: out << "triangle_strip"; break;
+	default: cemu_assert_debug(false); break;
+	}
+	out.format(", max_vertices={}) out;\r\n", (sint32)maxGSOutputVertices(true));
+}
+
+void GlslShaderWriter::emitUniformVariables(RendererAPI api, LatteDecompilerOutputUniformOffsets& offsets)
+{
+	const bool vulkan = api == RendererAPI::Vulkan;
+	const LatteDecompilerShaderResourceMapping& binding = vulkan ? m_ctx->output->resourceMappingVK : m_ctx->output->resourceMappingGL;
+	const LatteConst::ShaderType type = m_shader->shaderType;
+	const std::string_view tag = stageTag(type);
+	const auto* regs = m_ctx->contextRegistersNew;
+	const bool wrapInBlock = vulkan && m_ctx->hasUniformVarBlock;
+
+	// Vulkan has no loose uniforms, they live in a uniform buffer instead
+	if (wrapInBlock)
+	{
+		cemu_assert_debug(binding.uniformVarsBufferBindingPoint >= 0);
+		out.format("layout(set = {}, binding = {}) uniform ufBlock\r\n{{\r\n", (sint32)binding.setIndex, (sint32)binding.uniformVarsBufferBindingPoint);
+	}
+
+	UniformVarPacker pack;
+	switch (m_shader->uniformMode)
+	{
+	case LATTE_DECOMPILER_UNIFORM_MODE_REMAPPED:
+	{
+		// only the statically addressed constants, compacted into one array
+		const uint32 entries = (uint32)m_shader->list_remappedUniformEntries.size();
+		out.format("uniform ivec4 uf_remapped{}[{}];\r\n", tag, (sint32)entries);
+		offsets.offset_remapped = pack.place(1, 16 * entries);
+		break;
+	}
+	case LATTE_DECOMPILER_UNIFORM_MODE_FULL_CFILE:
+	{
+		// (a prefix of) the whole constant register file
+		const uint32 regCount = facts().uniformRegisterAccessTracker.DetermineSize(m_ctx->shaderBaseHash, 256);
+		out.format("uniform ivec4 uf_uniformRegister{}[{}];\r\n", tag, regCount);
+		offsets.offset_uniformRegister = pack.place(1, 16 * regCount);
+		offsets.count_uniformRegister = regCount;
+		break;
+	}
+	default:
+		break;
+	}
+
+	// emulation state that the GPU applies in fixed function hardware
+	const bool viewportScalePartlyOff =
+		!regs->PA_CL_VTE_CNTL.get_VPORT_X_SCALE_ENA() ||
+		!regs->PA_CL_VTE_CNTL.get_VPORT_Y_SCALE_ENA() ||
+		!regs->PA_CL_VTE_CNTL.get_VPORT_Z_SCALE_ENA();
+	if (stage() == LatteConst::ShaderType::Vertex && viewportScalePartlyOff)
+	{
+		out << "uniform vec2 uf_windowSpaceToClipSpaceTransform;\r\n";
+		offsets.offset_windowSpaceToClipSpaceTransform = pack.place(8, 8);
+	}
+	if (stage() == LatteConst::ShaderType::Pixel && regs->SX_ALPHA_TEST_CONTROL.get_ALPHA_TEST_ENABLE())
+	{
+		out << "uniform float uf_alphaTestRef;\r\n";
+		offsets.offset_alphaTestRef = pack.place(4, 4);
+	}
+	if (facts().outputPointSize && !facts().writesPointSize)
+	{
+		const bool lastGeometryStage = (stage() == LatteConst::ShaderType::Vertex && !m_ctx->options->usesGeometryShader) || stage() == LatteConst::ShaderType::Geometry;
+		if (lastGeometryStage)
 		{
-			if (decompilerContext->hasUniformVarBlock)
-				shaderSrc->add("};" _CRLF); // end of push-constant block
+			out << "uniform float uf_pointSize;\r\n";
+			offsets.offset_pointSize = pack.place(4, 4);
 		}
 	}
 
-	void _emitUniformBuffers(LatteDecompilerShaderContext* decompilerContext)
+	// Render target vs. effective resolution scale. It is left out when
+	// unused, but its slot is kept (as padding) whenever something follows it
+	// so that the layout matches what existing shader replacements expect.
+	bool owesFragCoordSlot = false;
+	if (type == LatteConst::ShaderType::Pixel)
 	{
-		auto shaderSrc = decompilerContext->shaderSource;
-		// uniform buffer definition
-		if (decompilerContext->shader->uniformMode == LATTE_DECOMPILER_UNIFORM_MODE_FULL_CBANK)
+		if (!facts().hasFragCoordAccess)
+			owesFragCoordSlot = true;
+		else if (vulkan)
 		{
-			for (uint32 i = 0; i < LATTE_NUM_MAX_UNIFORM_BUFFERS; i++)
+			out << "uniform vec4 uf_fragCoordScale;\r\n"; // zw hold the origin
+			offsets.offset_fragCoordScale = pack.place(16, 16);
+		}
+		else
+		{
+			out << "uniform vec2 uf_fragCoordScale;\r\n";
+			offsets.offset_fragCoordScale = pack.place(8, 8);
+		}
+	}
+	// scale factors for textures read with texel coordinates
+	for (sint32 unit = 0; unit < LATTE_NUM_MAX_TEX_UNITS; unit++)
+	{
+		if (!facts().texUnitUsesTexelCoordinates.test(unit))
+			continue;
+		if (owesFragCoordSlot)
+		{
+			if (vulkan)
 			{
-				if (!decompilerContext->analyzer.uniformBufferAccessTracker[i].HasAccess())
+				out << "uniform vec4 uf_fragCoordScaleCompatPadding;\r\n";
+				pack.place(16, 16);
+			}
+			else
+			{
+				out << "uniform vec2 uf_fragCoordScaleCompatPadding;\r\n";
+				pack.place(8, 8);
+			}
+			owesFragCoordSlot = false;
+		}
+		out.format("uniform vec2 uf_tex{}Scale;\r\n", unit);
+		offsets.offset_texScale[unit] = pack.place(8, 8);
+	}
+
+	// Streamout through a storage buffer needs the vertex numbering and the
+	// buffer bases. Note: the condition groups as (A && B) || C, so a
+	// geometry shader always declares these.
+	const bool ssboStreamoutVS = facts().useSSBOForStreamout && type == LatteConst::ShaderType::Vertex && !m_ctx->options->usesGeometryShader;
+	if (ssboStreamoutVS || type == LatteConst::ShaderType::Geometry)
+	{
+		out << "uniform int uf_verticesPerInstance;\r\n";
+		offsets.offset_verticesPerInstance = pack.place(1, 4);
+		for (uint32 b = 0; b < LATTE_NUM_STREAMOUT_BUFFER; b++)
+		{
+			if (!m_ctx->output->streamoutBufferWriteMask[b])
+				continue;
+			out.format("uniform int uf_streamoutBufferBase{};\r\n", b);
+			offsets.offset_streamoutBufferBase[b] = pack.place(1, 4);
+		}
+	}
+
+	offsets.offset_endOfBlock = pack.end();
+	if (wrapInBlock)
+		out << "};\r\n";
+}
+
+void GlslShaderWriter::emitUniformBlocks()
+{
+	// the other uniform modes are declared with the uniform variables
+	if (m_shader->uniformMode != LATTE_DECOMPILER_UNIFORM_MODE_FULL_CBANK)
+		return;
+	const std::string_view tag = stageTag(m_shader->shaderType);
+	const auto& gl = m_ctx->output->resourceMappingGL;
+	const auto& vk = m_ctx->output->resourceMappingVK;
+	for (uint32 bank = 0; bank < LATTE_NUM_MAX_UNIFORM_BUFFERS; bank++)
+	{
+		auto& tracker = facts().uniformBufferAccessTracker[bank];
+		if (!tracker.HasAccess())
+			continue;
+		cemu_assert_debug(gl.uniformBuffersBindingPoint[bank] >= 0);
+		cemu_assert_debug(vk.uniformBuffersBindingPoint[bank] >= 0);
+		out.format("UNIFORM_BUFFER_LAYOUT({}, {}, {}) ", (sint32)gl.uniformBuffersBindingPoint[bank], (sint32)vk.setIndex, (sint32)vk.uniformBuffersBindingPoint[bank]);
+		out.format("uniform uniformBlock{}{}\r\n{{\r\n", tag, bank);
+		out.format("vec4 uf_block{}{}[{}];\r\n", tag, bank, tracker.DetermineSize(m_ctx->shaderBaseHash, LATTE_GLSL_DYNAMIC_UNIFORM_BLOCK_SIZE));
+		out << "};\r\n\r\n\r\n";
+	}
+}
+
+void GlslShaderWriter::emitSamplers()
+{
+	const auto& gl = m_ctx->output->resourceMappingGL;
+	const auto& vk = m_ctx->output->resourceMappingVK;
+	for (sint32 unit = 0; unit < LATTE_NUM_MAX_TEX_UNITS; unit++)
+	{
+		if (!m_ctx->output->textureUnitMask[unit])
+			continue;
+		out.format("TEXTURE_LAYOUT({}, {}, {}) ", (sint32)gl.textureUnitToBindingPoint[unit], (sint32)vk.setIndex, (sint32)vk.textureUnitToBindingPoint[unit]);
+		out << "uniform ";
+		const Latte::E_DIM dim = m_shader->textureUnitDim[unit];
+		std::string_view samplerType;
+		if (m_shader->textureIsIntegerFormat[unit])
+		{
+			if (dim == Latte::E_DIM::DIM_1D)
+				samplerType = "usampler1D";
+			else if (dim == Latte::E_DIM::DIM_2D || dim == Latte::E_DIM::DIM_2D_MSAA)
+				samplerType = "usampler2D";
+			else
+				cemu_assert_unimplemented();
+		}
+		else
+		{
+			switch (dim)
+			{
+			case Latte::E_DIM::DIM_1D: samplerType = "sampler1D"; break;
+			case Latte::E_DIM::DIM_2D:
+			case Latte::E_DIM::DIM_2D_MSAA: samplerType = "sampler2D"; break;
+			case Latte::E_DIM::DIM_2D_ARRAY: samplerType = "sampler2DArray"; break;
+			case Latte::E_DIM::DIM_CUBEMAP: samplerType = "samplerCubeArray"; break; // cube faces are addressed as layers
+			case Latte::E_DIM::DIM_3D: samplerType = "sampler3D"; break;
+			default: cemu_assert_unimplemented(); break;
+			}
+		}
+		out << samplerType;
+		if (m_shader->textureUsesDepthCompare[unit])
+			out << "Shadow";
+		out << " " << textureName(unit) << ";\r\n";
+	}
+}
+
+void GlslShaderWriter::emitVertexAttributes()
+{
+	if (m_shader->shaderType != LatteConst::ShaderType::Vertex)
+		return;
+	const auto& gl = m_ctx->output->resourceMappingGL;
+	const auto& vk = m_ctx->output->resourceMappingVK;
+	for (uint32 sem = 0; sem < LATTE_NUM_MAX_ATTRIBUTE_LOCATIONS; sem++)
+	{
+		if (!facts().inputAttributSemanticMask[sem])
+			continue;
+		cemu_assert_debug(vk.attributeMapping[sem] >= 0);
+		cemu_assert_debug(gl.attributeMapping[sem] == vk.attributeMapping[sem]);
+		// raw 32-bit words, decoded in main()
+		out.format("ATTR_LAYOUT({}) in uvec4 attrDataSem{};\r\n", (sint32)vk.attributeMapping[sem], sem);
+	}
+}
+
+// a varying shared with the pixel stage, qualified like the matching PS input
+static void writeVarying(GlslText& out, const LatteShaderPSInputTable::psImport_t& input, uint32 location, std::string_view direction, std::string_view name, sint32 nameIndex)
+{
+	out.format("layout(location = {}) ", location);
+	if (input.isFlat)
+		out << "flat ";
+	if (input.isNoPerspective)
+		out << "noperspective ";
+	out << direction;
+	out.format(" vec4 {}{};\r\n", name, nameIndex);
+}
+
+void GlslShaderWriter::emitVertexOutputs()
+{
+	// a VS export is only declared if the pixel shader consumes its semantic;
+	// the location is the index of that PS input
+	const LatteShaderPSInputTable* inputs = LatteSHRC_GetPSInputTable();
+	const uint32 exportMask = m_shader->outputParameterMask;
+	for (sint32 param = 0; param < 32; param++)
+	{
+		if (((exportMask >> param) & 1) == 0)
+			continue;
+		const uint32 sem = (uint32)_getVertexShaderOutParamSemanticId(m_ctx->contextRegisters, param);
+		if (sem > LATTE_ANALYZER_IMPORT_INDEX_PARAM_MAX)
+			continue;
+		for (sint32 slot = 0; slot < inputs->count; slot++)
+		{
+			if (inputs->import[slot].semanticId != sem)
+				continue;
+			writeVarying(out, inputs->import[slot], (uint32)slot, "out", "passParameterSem", (sint32)inputs->import[slot].semanticId);
+			break;
+		}
+	}
+}
+
+void GlslShaderWriter::emitPixelInputs()
+{
+	const LatteShaderPSInputTable* inputs = LatteSHRC_GetPSInputTable();
+	for (sint32 slot = 0; slot < inputs->count; slot++)
+	{
+		const auto& input = inputs->import[slot];
+		if (input.semanticId > LATTE_ANALYZER_IMPORT_INDEX_PARAM_MAX)
+			continue;
+		writeVarying(out, input, (uint32)slot, "in", "passParameterSem", (sint32)input.semanticId);
+	}
+}
+
+void GlslShaderWriter::emitStageInterface()
+{
+	const LatteConst::ShaderType type = stage();
+	const bool isVS = type == LatteConst::ShaderType::Vertex;
+	const bool isGS = type == LatteConst::ShaderType::Geometry;
+	const bool isPS = type == LatteConst::ShaderType::Pixel;
+	const bool withGS = m_ctx->options->usesGeometryShader;
+
+	// the stage that feeds the rasterizer redeclares the position block
+	if ((isVS && !withGS) || isGS)
+	{
+		out << "out gl_PerVertex\r\n{\r\n\tvec4 gl_Position;\r\n";
+		if (facts().outputPointSize)
+			out << "\tfloat gl_PointSize;\r\n";
+		out << "};\r\n";
+	}
+
+	if (!withGS)
+	{
+		if (isVS)
+			emitVertexOutputs();
+		else if (isPS)
+			emitPixelInputs();
+	}
+	else
+	{
+		// VS -> GS: the ring buffer items, passed as raw integer vectors
+		if (isVS || isGS)
+		{
+			out << "V2G_LAYOUT " << (isVS ? "out Vertex\r\n" : "in Vertex\r\n") << "{\r\n";
+			const uint32 ringParams = isVS ? m_shader->ringParameterCount : m_shader->ringParameterCountFromPrevStage;
+			for (uint32 p = 0; p < ringParams; p++)
+				out.format(" ivec4 passV2GParameter{};\r\n", p);
+			out << (isVS ? "}v2g;\r\n" : "}v2g[];\r\n");
+		}
+		// GS -> PS: named after the export parameter of the GS copy shader
+		if (isGS)
+		{
+			cemu_assert_debug(((m_ctx->contextRegisters[mmSQ_GSVS_RING_ITEMSIZE] & 0x7FFF) & 0xF) == 0);
+			const auto* copyShader = m_ctx->parsedGSCopyShader;
+			for (sint32 p = 0; p < copyShader->numParam; p++)
+			{
+				const auto& mapping = copyShader->paramMapping[p];
+				if (mapping.exportType != 2)
 					continue;
-
-				cemu_assert_debug(decompilerContext->output->resourceMappingGL.uniformBuffersBindingPoint[i] >= 0);
-				cemu_assert_debug(decompilerContext->output->resourceMappingVK.uniformBuffersBindingPoint[i] >= 0);
-
-				shaderSrc->addFmt("UNIFORM_BUFFER_LAYOUT({}, {}, {}) ", (sint32)decompilerContext->output->resourceMappingGL.uniformBuffersBindingPoint[i], (sint32)decompilerContext->output->resourceMappingVK.setIndex, (sint32)decompilerContext->output->resourceMappingVK.uniformBuffersBindingPoint[i]);
-
-				shaderSrc->addFmt("uniform {}{}" _CRLF, _getShaderUniformBlockInterfaceName(decompilerContext->shaderType), i);
-				shaderSrc->add("{" _CRLF);
-				shaderSrc->addFmt("vec4 {}{}[{}];" _CRLF, _getShaderUniformBlockVariableName(decompilerContext->shaderType), i, decompilerContext->analyzer.uniformBufferAccessTracker[i].DetermineSize(decompilerContext->shaderBaseHash, LATTE_GLSL_DYNAMIC_UNIFORM_BLOCK_SIZE));
-				shaderSrc->add("};" _CRLF _CRLF);
-				shaderSrc->add(_CRLF);
+				out.format("layout(location = {}) out vec4 passG2PParameter{};\r\n", mapping.exportParam & 0x7F, (sint32)mapping.exportParam);
 			}
 		}
-		else if (decompilerContext->shader->uniformMode == LATTE_DECOMPILER_UNIFORM_MODE_REMAPPED)
+		else if (isPS)
 		{
-			// already generated in _emitUniformVariables
-		}
-		else if (decompilerContext->shader->uniformMode == LATTE_DECOMPILER_UNIFORM_MODE_FULL_CFILE)
-		{
-			// already generated in _emitUniformVariables
-		}
-		else if (decompilerContext->shader->uniformMode == LATTE_DECOMPILER_UNIFORM_MODE_NONE)
-		{
-			// no uniforms used
-		}
-		else
-		{
-			cemu_assert_debug(false);
-		}
-	}
-
-	void _emitTextureDefinitions(LatteDecompilerShaderContext* shaderContext)
-	{
-		auto src = shaderContext->shaderSource;
-		// texture sampler definition
-		for (sint32 i = 0; i < LATTE_NUM_MAX_TEX_UNITS; i++)
-		{
-			if (!shaderContext->output->textureUnitMask[i])
-				continue;
-
-			src->addFmt("TEXTURE_LAYOUT({}, {}, {}) ", (sint32)shaderContext->output->resourceMappingGL.textureUnitToBindingPoint[i], (sint32)shaderContext->output->resourceMappingVK.setIndex, (sint32)shaderContext->output->resourceMappingVK.textureUnitToBindingPoint[i]);
-
-			src->add("uniform ");
-			if (shaderContext->shader->textureIsIntegerFormat[i])
+			const LatteShaderPSInputTable* inputs = LatteSHRC_GetPSInputTable();
+			for (sint32 slot = 0; slot < inputs->count; slot++)
 			{
-				// integer samplers
-				if (shaderContext->shader->textureUnitDim[i] == Latte::E_DIM::DIM_1D)
-					src->add("usampler1D");
-				else if (shaderContext->shader->textureUnitDim[i] == Latte::E_DIM::DIM_2D || shaderContext->shader->textureUnitDim[i] == Latte::E_DIM::DIM_2D_MSAA)
-					src->add("usampler2D");
-				else
-					cemu_assert_unimplemented();
-			}
-			else if (shaderContext->shader->textureUnitDim[i] == Latte::E_DIM::DIM_2D || shaderContext->shader->textureUnitDim[i] == Latte::E_DIM::DIM_2D_MSAA)
-				src->add("sampler2D");
-			else if (shaderContext->shader->textureUnitDim[i] == Latte::E_DIM::DIM_1D)
-				src->add("sampler1D");
-			else if (shaderContext->shader->textureUnitDim[i] == Latte::E_DIM::DIM_2D_ARRAY)
-				src->add("sampler2DArray");
-			else if (shaderContext->shader->textureUnitDim[i] == Latte::E_DIM::DIM_CUBEMAP)
-				src->add("samplerCubeArray");
-			else if (shaderContext->shader->textureUnitDim[i] == Latte::E_DIM::DIM_3D)
-				src->add("sampler3D");
-			else if (shaderContext->shader->textureUnitDim[i] == Latte::E_DIM::DIM_1D)
-			{
-				cemu_assert_unimplemented();
-				src->add("sampler2D");
-			}
-			else
-			{
-				cemu_assert_unimplemented();
-			}
-			if (shaderContext->shader->textureUsesDepthCompare[i])
-				src->add("Shadow"); // shadow sampler
-
-			src->addFmt(" {}{};", _getTextureUnitVariablePrefixName(shaderContext->shaderType), i);
-			
-			src->add(_CRLF);
-		}
-	}
-
-	void _emitAttributes(LatteDecompilerShaderContext* decompilerContext)
-	{
-		auto shaderSrc = decompilerContext->shaderSource;
-		if (decompilerContext->shader->shaderType == LatteConst::ShaderType::Vertex)
-		{
-			// attribute inputs
-			for (uint32 i = 0; i < LATTE_NUM_MAX_ATTRIBUTE_LOCATIONS; i++)
-			{
-				if (decompilerContext->analyzer.inputAttributSemanticMask[i])
-				{
-					cemu_assert_debug(decompilerContext->output->resourceMappingGL.attributeMapping[i] >= 0);
-					cemu_assert_debug(decompilerContext->output->resourceMappingVK.attributeMapping[i] >= 0);
-					cemu_assert_debug(decompilerContext->output->resourceMappingGL.attributeMapping[i] == decompilerContext->output->resourceMappingVK.attributeMapping[i]);
-
-					shaderSrc->addFmt("ATTR_LAYOUT({}) in uvec4 attrDataSem{};" _CRLF, (sint32)decompilerContext->output->resourceMappingVK.attributeMapping[i], i);
-				}
+				const auto& input = inputs->import[slot];
+				if (input.semanticId > LATTE_ANALYZER_IMPORT_INDEX_PARAM_MAX)
+					continue;
+				const uint32 location = input.semanticId & 0x7F;
+				writeVarying(out, input, location, "in", "passG2PParameter", (sint32)location);
 			}
 		}
 	}
 
-	void _emitHeaderMacros(LatteDecompilerShaderContext* decompilerContext)
+	if (isPS)
 	{
-		auto src = decompilerContext->shaderSource;
-		// OpenGL/Vulkan ifdefs
-		src->add("#ifdef VULKAN" _CRLF);
-		// Vulkan defines
-		src->add("#define ATTR_LAYOUT(__location) layout(location = __location)" _CRLF);
-		src->add("#define UNIFORM_BUFFER_LAYOUT(__glLocation, __vkSet, __vkLocation) layout(set = __vkSet, binding = __vkLocation, std140)" _CRLF);
-		src->add("#define TEXTURE_LAYOUT(__glLocation, __vkSet, __vkLocation) layout(set = __vkSet, binding = __vkLocation)" _CRLF);
-		if (decompilerContext->shaderType == LatteConst::ShaderType::Vertex || decompilerContext->shaderType == LatteConst::ShaderType::Geometry)
+		for (uint32 target = 0; target < LATTE_NUM_COLOR_TARGET; target++)
 		{
-			src->add("#define gl_VertexID gl_VertexIndex" _CRLF);
-			src->add("#define gl_InstanceID gl_InstanceIndex" _CRLF);
-			if (decompilerContext->analyzer.hasStreamoutWrite)
-				src->add("#define XFB_BLOCK_LAYOUT(__bufferIndex, __stride, __location) layout(location = __location, xfb_buffer = __bufferIndex, xfb_stride = __stride, xfb_offset = 0)" _CRLF);
-
-			if (decompilerContext->contextRegistersNew->PA_CL_CLIP_CNTL.get_DX_CLIP_SPACE_DEF())
-			{
-				src->add("#define SET_POSITION(_v) gl_Position = _v" _CRLF);
-			}
-			else
-			{
-				src->add("#define SET_POSITION(_v) gl_Position = _v; gl_Position.z = (gl_Position.z + gl_Position.w) / 2.0" _CRLF);
-			}
-
-			if (decompilerContext->shaderType == LatteConst::ShaderType::Vertex || decompilerContext->shaderType == LatteConst::ShaderType::Geometry)
-			{
-				if (decompilerContext->options->usesGeometryShader)
-					src->add("#define V2G_LAYOUT layout(location = 0)" _CRLF);
-			}
-		}
-		else if (decompilerContext->shaderType == LatteConst::ShaderType::Pixel && decompilerContext->analyzer.hasFragCoordAccess)
-		{
-			src->add("#define GET_FRAGCOORD() vec4(gl_FragCoord.xy*uf_fragCoordScale.xy,gl_FragCoord.z, 1.0/gl_FragCoord.w)" _CRLF);
-		}
-		if (decompilerContext->options->spirvInstrinsics.hasRoundingModeRTEFloat32)
-		{
-			src->add("#extension GL_EXT_spirv_intrinsics: enable" _CRLF);
-			src->add("spirv_execution_mode(capabilities = [4467], extensions = [\"SPV_KHR_float_controls\"], 4462, 16);" _CRLF);
-			src->add("spirv_execution_mode(capabilities = [4467], extensions = [\"SPV_KHR_float_controls\"], 4462, 32);" _CRLF);
-			src->add("spirv_execution_mode(capabilities = [4467], extensions = [\"SPV_KHR_float_controls\"], 4462, 64);" _CRLF);
-		}
-		src->add("#else" _CRLF);
-		// OpenGL defines
-		src->add("#define ATTR_LAYOUT(__location) layout(location = __location)" _CRLF);
-		src->add("#define UNIFORM_BUFFER_LAYOUT(__glLocation, __vkSet, __vkLocation) layout(binding = __glLocation, std140) " _CRLF);
-		src->add("#define TEXTURE_LAYOUT(__glLocation, __vkSet, __vkLocation) layout(binding = __glLocation)" _CRLF);
-		if (decompilerContext->shaderType == LatteConst::ShaderType::Vertex || decompilerContext->shaderType == LatteConst::ShaderType::Geometry)
-		{
-			if (decompilerContext->analyzer.hasStreamoutWrite)
-				src->add("#define XFB_BLOCK_LAYOUT(__bufferIndex, __stride, __location) layout(xfb_buffer = __bufferIndex, xfb_stride = __stride)" _CRLF);
-
-			src->add("#define SET_POSITION(_v) gl_Position = _v\r\n");
-			if (decompilerContext->options->usesGeometryShader)
-				src->add("#define V2G_LAYOUT" _CRLF);
-		}
-		else if (decompilerContext->shaderType == LatteConst::ShaderType::Pixel && decompilerContext->analyzer.hasFragCoordAccess)
-		{
-			src->add("#define GET_FRAGCOORD() vec4(gl_FragCoord.xy*uf_fragCoordScale,gl_FragCoord.zw)" _CRLF);
-		}
-		src->add("#endif" _CRLF);
-
-		// geometry shader input/output primitive info
-		if (decompilerContext->shaderType == LatteConst::ShaderType::Geometry)
-		{
-			auto drawPrimitiveMode = decompilerContext->contextRegistersNew->VGT_PRIMITIVE_TYPE.get_PRIMITIVE_MODE();
-			const char* gsInputPrimitive = "";
-			if (drawPrimitiveMode == Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::POINTS)
-				gsInputPrimitive = "points";
-			else if (drawPrimitiveMode == Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::TRIANGLES)
-				gsInputPrimitive = "triangles";
-			else if (drawPrimitiveMode == Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::LINE_STRIP)
-				gsInputPrimitive = "lines_adjacency";
-			else
-			{
-				debug_printf("drawPrimitiveMode %d\n", drawPrimitiveMode);
-				cemu_assert_debug(false);
-			}
-			// note: The input primitive type is not stored with the geometry shader object (and registers). Therefore we have to rely on whatever primitive mode was set for the draw call.
-			src->addFmt("layout({}) in;" _CRLF, gsInputPrimitive);
-
-			uint32 gsOutPrimType = decompilerContext->contextRegisters[mmVGT_GS_OUT_PRIM_TYPE];
-			uint32 bytesPerVertex = decompilerContext->contextRegisters[mmSQ_GS_VERT_ITEMSIZE] * 4;
-			
-			uint32 maxVerticesInGS = ((decompilerContext->contextRegisters[mmSQ_GSVS_RING_ITEMSIZE] & 0x7FFF) * 4) / bytesPerVertex;
-
-			if (!decompilerContext->analyzer.hasLoops && decompilerContext->analyzer.numEmitVertex < maxVerticesInGS)
-				maxVerticesInGS = decompilerContext->analyzer.numEmitVertex;
-
-			src->add("layout (");
-			if (gsOutPrimType == 0)
-				src->add("points");
-			else if (gsOutPrimType == 1)
-				src->add("line_strip");
-			else if (gsOutPrimType == 2)
-				src->add("triangle_strip");
-			else
-			{
-				cemu_assert_debug(false);
-			}
-			src->addFmt(", max_vertices={}) out;" _CRLF, (sint32)maxVerticesInGS);
+			if ((m_shader->pixelColorOutputMask >> target) & 1)
+				out.format("layout(location = {0}) out vec4 passPixelColor{0};\r\n", target);
 		}
 	}
 
-	void _emitVSExports(LatteDecompilerShaderContext* shaderContext)
+	// transform feedback
+	if ((isVS || isGS) && facts().hasStreamoutEnable)
 	{
-		auto* src = shaderContext->shaderSource;
-		LatteShaderPSInputTable* psInputTable = LatteSHRC_GetPSInputTable();
-		auto parameterMask = shaderContext->shader->outputParameterMask;
-		for (uint32 i = 0; i < 32; i++)
+		if (m_ctx->options->useTFViaSSBO)
 		{
-			if ((parameterMask&(1 << i)) == 0)
-				continue;
-			uint32 vsSemanticId = _getVertexShaderOutParamSemanticId(shaderContext->contextRegisters, i);
-			if (vsSemanticId > LATTE_ANALYZER_IMPORT_INDEX_PARAM_MAX)
-				continue;
-			// get import based on semanticId
-			sint32 psInputIndex = -1;
-			for (sint32 f = 0; f < psInputTable->count; f++)
+			if (facts().useSSBOForStreamout && facts().hasStreamoutWrite)
 			{
-				if (psInputTable->import[f].semanticId == vsSemanticId)
-				{
-					psInputIndex = f;
-					break;
-				}
-			}
-			if (psInputIndex == -1)
-				continue; // no ps input
-
-			src->addFmt("layout(location = {}) ", psInputIndex);
-			if (psInputTable->import[psInputIndex].isFlat)
-				src->add("flat ");
-			if (psInputTable->import[psInputIndex].isNoPerspective)
-				src->add("noperspective ");
-			src->add("out");
-			src->addFmt(" vec4 passParameterSem{};" _CRLF, psInputTable->import[psInputIndex].semanticId);
-		}
-	}
-
-	void _emitPSImports(LatteDecompilerShaderContext* shaderContext)
-	{
-		auto* src = shaderContext->shaderSource;
-		LatteShaderPSInputTable* psInputTable = LatteSHRC_GetPSInputTable();
-		for (sint32 i = 0; i < psInputTable->count; i++)
-		{
-			if (psInputTable->import[i].semanticId > LATTE_ANALYZER_IMPORT_INDEX_PARAM_MAX)
-				continue;
-			src->addFmt("layout(location = {}) ", i);
-			if (psInputTable->import[i].isFlat)
-				src->add("flat ");
-			if (psInputTable->import[i].isNoPerspective)
-				src->add("noperspective ");
-			src->add("in");
-			src->addFmt(" vec4 passParameterSem{};" _CRLF, psInputTable->import[i].semanticId);
-		}
-	}
-
-	void _emitMisc(LatteDecompilerShaderContext* decompilerContext)
-	{
-		auto src = decompilerContext->shaderSource;
-		// per-vertex output (VS or GS)
-		if ((decompilerContext->shaderType == LatteConst::ShaderType::Vertex && !decompilerContext->options->usesGeometryShader) ||
-			(decompilerContext->shaderType == LatteConst::ShaderType::Geometry))
-		{
-			src->add("out gl_PerVertex" _CRLF);
-			src->add("{" _CRLF);
-			src->add("	vec4 gl_Position;" _CRLF);
-			if (decompilerContext->analyzer.outputPointSize)
-				src->add("	float gl_PointSize;" _CRLF);
-			src->add("};" _CRLF);
-		}
-		// varyings (variables passed from vertex to pixel shader, only if geometry stage is disabled
-		if (decompilerContext->options->usesGeometryShader == false)
-		{
-			if (decompilerContext->shaderType == LatteConst::ShaderType::Vertex)
-			{
-				_emitVSExports(decompilerContext);
-			}
-			else if (decompilerContext->shaderType == LatteConst::ShaderType::Pixel)
-			{
-				_emitPSImports(decompilerContext);
+				auto& vk = m_ctx->output->resourceMappingVK;
+				out.format("layout(set = {}, binding = {}) buffer StreamoutBuffer\r\n", (sint32)vk.setIndex, vk.getTFStorageBufferBindingPoint());
+				out << "{\r\nint sb_buffer[];\r\n};\r\n";
 			}
 		}
 		else
 		{
-			if (decompilerContext->shaderType == LatteConst::ShaderType::Vertex || decompilerContext->shaderType == LatteConst::ShaderType::Geometry)
+			// glslang requires explicit locations on xfb outputs, so they are packed consecutively
+			uint32 nextLocation = 0;
+			for (uint32 b = 0; b < LATTE_NUM_STREAMOUT_BUFFER; b++)
 			{
-				// parameters shared between vertex shader and geometry shader
-				src->add("V2G_LAYOUT ");
-
-				if (decompilerContext->shaderType == LatteConst::ShaderType::Vertex)
-					src->add("out Vertex" _CRLF);
-				else if (decompilerContext->shaderType == LatteConst::ShaderType::Geometry)
-					src->add("in Vertex" _CRLF);
-				src->add("{" _CRLF);
-				uint32 ringParameterCountVS2GS = 0;
-				if (decompilerContext->shaderType == LatteConst::ShaderType::Vertex)
-				{
-					ringParameterCountVS2GS = decompilerContext->shader->ringParameterCount;
-				}
-				else
-				{
-					ringParameterCountVS2GS = decompilerContext->shader->ringParameterCountFromPrevStage;
-				}
-				for (uint32 f = 0; f < ringParameterCountVS2GS; f++)
-					src->addFmt(" ivec4 passV2GParameter{};" _CRLF, f);
-				if (decompilerContext->shaderType == LatteConst::ShaderType::Vertex)
-					src->add("}v2g;" _CRLF);
-				else if (decompilerContext->shaderType == LatteConst::ShaderType::Geometry)
-					src->add("}v2g[];" _CRLF);
-			}
-			if (decompilerContext->shaderType == LatteConst::ShaderType::Geometry)
-			{
-				// parameters shared between geometry and pixel shader
-				uint32 ringItemSize = decompilerContext->contextRegisters[mmSQ_GSVS_RING_ITEMSIZE] & 0x7FFF;
-				if ((ringItemSize & 0xF) != 0)
-					debugBreakpoint();
-				if (((decompilerContext->contextRegisters[mmSQ_GSVS_RING_ITEMSIZE] & 0x7FFF) & 0xF) != 0)
-					debugBreakpoint();
-
-				for (sint32 p = 0; p < decompilerContext->parsedGSCopyShader->numParam; p++)
-				{
-					if (decompilerContext->parsedGSCopyShader->paramMapping[p].exportType != 2)
-						continue;
-					src->addFmt("layout(location = {}) out vec4 passG2PParameter{};" _CRLF, decompilerContext->parsedGSCopyShader->paramMapping[p].exportParam & 0x7F, (sint32)decompilerContext->parsedGSCopyShader->paramMapping[p].exportParam);
-				}
-			}
-			else if (decompilerContext->shaderType == LatteConst::ShaderType::Pixel)
-			{
-				// pixel shader with geometry shader
-				LatteShaderPSInputTable* psInputTable = LatteSHRC_GetPSInputTable();
-				for (sint32 i = 0; i < psInputTable->count; i++)
-				{
-					if (psInputTable->import[i].semanticId > LATTE_ANALYZER_IMPORT_INDEX_PARAM_MAX)
-						continue;
-					uint32 location = psInputTable->import[i].semanticId & 0x7F; // todo - the range above 128 has special meaning?
-
-					src->addFmt("layout(location = {}) ", location);
-					if (psInputTable->import[i].isFlat)
-						src->add("flat ");
-					if (psInputTable->import[i].isNoPerspective)
-						src->add("noperspective ");
-					if (decompilerContext->shaderType == LatteConst::ShaderType::Vertex)
-						src->add("out");
-					else if (decompilerContext->shaderType == LatteConst::ShaderType::Pixel)
-						src->add("in");
-					else
-						debugBreakpoint();
-
-					src->addFmt(" vec4 passG2PParameter{};" _CRLF, (sint32)location);
-				}
+				if (!m_ctx->output->streamoutBufferWriteMask[b])
+					continue;
+				const uint32 stride = m_ctx->output->streamoutBufferStride[b];
+				out.format("XFB_BLOCK_LAYOUT({0}, {1}, {2}) out XfbBlock{0} \r\n{{\r\n", b, stride, nextLocation);
+				out.format("layout(xfb_buffer = {0}, xfb_offset = 0) int sb{0}[{1}];\r\n", b, stride / 4);
+				out << "};\r\n";
+				nextLocation += stride / 4;
 			}
 		}
-		// output defines
-		if (decompilerContext->shaderType == LatteConst::ShaderType::Pixel)
-		{
-			// generate pixel outputs for pixel shader
-			for (uint32 i = 0; i < LATTE_NUM_COLOR_TARGET; i++)
-			{
-				if ((decompilerContext->shader->pixelColorOutputMask&(1 << i)) != 0)
-				{
-					src->addFmt("layout(location = {}) out vec4 passPixelColor{};" _CRLF, i, i);
-				}
-			}
-		}
-		// streamout buffer (transform feedback)
-		if ((decompilerContext->shaderType == LatteConst::ShaderType::Vertex || decompilerContext->shaderType == LatteConst::ShaderType::Geometry) && decompilerContext->analyzer.hasStreamoutEnable)
-		{
-			if (decompilerContext->options->useTFViaSSBO)
-			{
-				if (decompilerContext->analyzer.useSSBOForStreamout && decompilerContext->analyzer.hasStreamoutWrite)
-				{
-					src->addFmt("layout(set = {}, binding = {}) buffer StreamoutBuffer" _CRLF, decompilerContext->output->resourceMappingVK.setIndex, decompilerContext->output->resourceMappingVK.getTFStorageBufferBindingPoint());
-					src->add("{" _CRLF);
-					src->add("int sb_buffer[];" _CRLF);
-					src->add("};" _CRLF);
-				}
-			}
-			else
-			{
-				sint32 locationOffset = 0; // glslang wants a location for xfb outputs
-				for (uint32 i = 0; i < LATTE_NUM_STREAMOUT_BUFFER; i++)
-				{
-					if (!decompilerContext->output->streamoutBufferWriteMask[i])
-						continue;
-					uint32 bufferStride = decompilerContext->output->streamoutBufferStride[i];
-					src->addFmt("XFB_BLOCK_LAYOUT({}, {}, {}) out XfbBlock{} " _CRLF, i, bufferStride, locationOffset, i);
-					src->add("{" _CRLF);
-					src->addFmt("layout(xfb_buffer = {}, xfb_offset = 0) int sb{}[{}];" _CRLF, i, i, decompilerContext->output->streamoutBufferStride[i] / 4);
-					src->add("};" _CRLF);
-					locationOffset += (decompilerContext->output->streamoutBufferStride[i] / 4);
-				}
-			}
-		}
-	}
-
-	void emitHeader(LatteDecompilerShaderContext* decompilerContext)
-	{
-		const bool dump_shaders_enabled = ActiveSettings::DumpShadersEnabled();
-		if(dump_shaders_enabled)
-			decompilerContext->shaderSource->add("// start of shader inputs/outputs, predetermined by Cemu. Do not touch" _CRLF);
-		// macros
-		_emitHeaderMacros(decompilerContext);
-		// uniform variables
-		decompilerContext->shaderSource->add("#ifdef VULKAN" _CRLF);
-		_emitUniformVariables(decompilerContext, RendererAPI::Vulkan, decompilerContext->output->uniformOffsetsVK);
-		decompilerContext->shaderSource->add("#else" _CRLF);
-		_emitUniformVariables(decompilerContext, RendererAPI::OpenGL, decompilerContext->output->uniformOffsetsGL);
-		decompilerContext->shaderSource->add("#endif" _CRLF);
-		// uniform buffers
-		_emitUniformBuffers(decompilerContext);
-		// textures
-		_emitTextureDefinitions(decompilerContext);
-		// attributes
-		_emitAttributes(decompilerContext);
-		// misc stuff
-		_emitMisc(decompilerContext);
-
-		if (dump_shaders_enabled)
-			decompilerContext->shaderSource->add("// end of shader inputs/outputs" _CRLF);
 	}
 }
