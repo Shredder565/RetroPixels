@@ -1,96 +1,143 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "WUHBReader.h"
+
+namespace
+{
+	uint32 LoadBE32(const uint8* p)
+	{
+		return ((uint32)p[0] << 24) | ((uint32)p[1] << 16) | ((uint32)p[2] << 8) | (uint32)p[3];
+	}
+
+	uint64 LoadBE64(const uint8* p)
+	{
+		return ((uint64)LoadBE32(p) << 32) | LoadBE32(p + 4);
+	}
+
+	constexpr size_t kDirEntryFixedSize = 6 * 4;
+	constexpr size_t kFileEntryFixedSize = 2 * 4 + 2 * 8 + 2 * 4;
+
+	template<typename TEntry>
+	TEntry EmptyEntry()
+	{
+		TEntry entry{};
+		entry.parent = ROMFS_ENTRY_EMPTY;
+		entry.listNext = ROMFS_ENTRY_EMPTY;
+		entry.hash = ROMFS_ENTRY_EMPTY;
+		entry.name_size = 0;
+		if constexpr (std::is_same_v<TEntry, romfs_direntry_t>)
+		{
+			entry.dirListHead = ROMFS_ENTRY_EMPTY;
+			entry.fileListHead = ROMFS_ENTRY_EMPTY;
+		}
+		else
+		{
+			entry.offset = 0;
+			entry.size = 0;
+		}
+		return entry;
+	}
+
+	void DecodeFixed(romfs_direntry_t& entry, const uint8* p)
+	{
+		entry.parent = LoadBE32(p + 0);
+		entry.listNext = LoadBE32(p + 4);
+		entry.dirListHead = LoadBE32(p + 8);
+		entry.fileListHead = LoadBE32(p + 12);
+		entry.hash = LoadBE32(p + 16);
+		entry.name_size = LoadBE32(p + 20);
+	}
+
+	void DecodeFixed(romfs_fentry_t& entry, const uint8* p)
+	{
+		entry.parent = LoadBE32(p + 0);
+		entry.listNext = LoadBE32(p + 4);
+		entry.offset = LoadBE64(p + 8);
+		entry.size = LoadBE64(p + 16);
+		entry.hash = LoadBE32(p + 24);
+		entry.name_size = LoadBE32(p + 28);
+	}
+}
+
 WUHBReader* WUHBReader::FromPath(const fs::path& path)
 {
-	FileStream* fileIn{FileStream::openFile2(path)};
-	if (!fileIn)
+	std::unique_ptr<FileStream> file(FileStream::openFile2(path));
+	if (!file)
 		return nullptr;
-
-	WUHBReader* ret = new WUHBReader(fileIn);
-	if (!ret->CheckMagicValue())
-	{
-		delete ret;
+	std::unique_ptr<WUHBReader> reader(new WUHBReader(std::move(file)));
+	if (!reader->ReadHeader())
 		return nullptr;
-	}
-
-	if (!ret->ReadHeader())
-	{
-		delete ret;
-		return nullptr;
-	}
-
-	return ret;
+	return reader.release();
 }
 
-static const romfs_direntry_t fallbackDirEntry{
-	.parent = ROMFS_ENTRY_EMPTY,
-	.listNext = ROMFS_ENTRY_EMPTY,
-	.dirListHead = ROMFS_ENTRY_EMPTY,
-	.fileListHead = ROMFS_ENTRY_EMPTY,
-	.hash = ROMFS_ENTRY_EMPTY,
-	.name_size = 0,
-	.name = ""
-};
-static const romfs_fentry_t fallbackFileEntry{
-	.parent = ROMFS_ENTRY_EMPTY,
-	.listNext = ROMFS_ENTRY_EMPTY,
-	.offset = 0,
-	.size = 0,
-	.hash = ROMFS_ENTRY_EMPTY,
-	.name_size = 0,
-	.name = ""
-};
-template<bool File>
-const WUHBReader::EntryType<File>& WUHBReader::GetFallback()
+bool WUHBReader::ReadHeader()
 {
-	if constexpr (File)
-		return fallbackFileEntry;
-	else
-		return fallbackDirEntry;
+	uint8 raw[sizeof(romfs_header_t)];
+	m_file->SetPosition(0);
+	const uint32 bytesRead = m_file->readData(raw, sizeof(raw));
+	if (bytesRead < 4 || std::memcmp(raw, "WUHB", 4) != 0)
+		return false;
+	if (bytesRead != sizeof(raw))
+	{
+		cemuLog_log(LogType::Force, "WUHB: header is truncated");
+		return false;
+	}
+	std::memcpy(&m_header.header_magic, raw, 4);
+	m_header.header_size = LoadBE32(raw + 4);
+	uint64be* tables[] = {&m_header.dir_hash_table_ofs, &m_header.dir_hash_table_size, &m_header.dir_table_ofs, &m_header.dir_table_size,
+						  &m_header.file_hash_table_ofs, &m_header.file_hash_table_size, &m_header.file_table_ofs, &m_header.file_table_size,
+						  &m_header.file_partition_ofs};
+	for (size_t i = 0; i < std::size(tables); i++)
+		*tables[i] = LoadBE64(raw + 8 + i * 8);
+	if (m_header.dir_hash_table_size < 4 || m_header.file_hash_table_size < 4)
+	{
+		cemuLog_log(LogType::Force, "WUHB: hash tables are too small");
+		return false;
+	}
+	return true;
 }
 
-template<bool File>
-WUHBReader::EntryType<File> WUHBReader::GetEntry(uint32 offset) const
+template<typename TEntry>
+TEntry WUHBReader::ReadEntry(uint32 offset, uint64 tableOffset, uint64 tableSize, size_t fixedSize) const
 {
-	auto fallback = GetFallback<File>();
-	if(offset == ROMFS_ENTRY_EMPTY)
-		return fallback;
-
-	const char* typeName = File ? "fentry" : "direntry";
-	EntryType<File> ret;
-	if (offset >= (File ? m_header.file_table_size : m_header.dir_table_size))
+	if (offset == ROMFS_ENTRY_EMPTY)
+		return EmptyEntry<TEntry>();
+	if (offset >= tableSize)
 	{
-		cemuLog_log(LogType::Force, "WUHB {} offset exceeds table size declared in header", typeName);
-		return fallback;
+		cemuLog_log(LogType::Force, "WUHB: entry offset 0x{:x} is outside its table", offset);
+		return EmptyEntry<TEntry>();
 	}
-
-	// read the entry
-	m_fileIn->SetPosition((File ? m_header.file_table_ofs : m_header.dir_table_ofs) + offset);
-	auto read = m_fileIn->readData(&ret, offsetof(EntryType<File>, name));
-	if (read != offsetof(EntryType<File>, name))
+	uint8 fixed[32];
+	m_file->SetPosition(tableOffset + offset);
+	if (m_file->readData(fixed, (uint32)fixedSize) != fixedSize)
 	{
-		cemuLog_log(LogType::Force, "failed to read WUHB {} at offset: {}", typeName, offset);
-		return fallback;
+		cemuLog_log(LogType::Force, "WUHB: cannot read the entry at 0x{:x}", offset);
+		return EmptyEntry<TEntry>();
 	}
-
-	// read the name
-	ret.name.resize(ret.name_size);
-	read = m_fileIn->readData(ret.name.data(), ret.name_size);
-	if (read != ret.name_size)
+	TEntry entry;
+	DecodeFixed(entry, fixed);
+	// a name longer than the whole table cannot be valid (and must not be allocated)
+	if (entry.name_size > tableSize)
 	{
-		cemuLog_log(LogType::Force, "failed to read WUHB {} name", typeName);
-		return fallback;
+		cemuLog_log(LogType::Force, "WUHB: entry name at 0x{:x} is too long", offset);
+		return EmptyEntry<TEntry>();
 	}
-
-	return ret;
+	entry.name.resize(entry.name_size);
+	if (m_file->readData(entry.name.data(), entry.name_size) != entry.name_size)
+	{
+		cemuLog_log(LogType::Force, "WUHB: cannot read the entry name at 0x{:x}", offset);
+		return EmptyEntry<TEntry>();
+	}
+	return entry;
 }
 
 romfs_direntry_t WUHBReader::GetDirEntry(uint32 offset) const
 {
-	return GetEntry<false>(offset);
+	return ReadEntry<romfs_direntry_t>(offset, m_header.dir_table_ofs, m_header.dir_table_size, kDirEntryFixedSize);
 }
+
 romfs_fentry_t WUHBReader::GetFileEntry(uint32 offset) const
 {
-	return GetEntry<true>(offset);
+	return ReadEntry<romfs_fentry_t>(offset, m_header.file_table_ofs, m_header.file_table_size, kFileEntryFixedSize);
 }
 
 uint64 WUHBReader::GetFileSize(uint32 entryOffset) const
@@ -100,135 +147,92 @@ uint64 WUHBReader::GetFileSize(uint32 entryOffset) const
 
 uint64 WUHBReader::ReadFromFile(uint32 entryOffset, uint64 fileOffset, uint64 length, void* buffer) const
 {
-	const auto fileEntry = GetFileEntry(entryOffset);
-	if (fileOffset >= fileEntry.size)
+	const romfs_fentry_t entry = GetFileEntry(entryOffset);
+	const uint64 fileSize = entry.size;
+	if (fileOffset >= fileSize)
 		return 0;
-	const uint64 readAmount = std::min(length, fileEntry.size - fileOffset);
-	const uint64 wuhbOffset = m_header.file_partition_ofs + fileEntry.offset + fileOffset;
-	m_fileIn->SetPosition(wuhbOffset);
-	return m_fileIn->readData(buffer, readAmount);
+	const uint64 toRead = std::min(length, fileSize - fileOffset);
+	m_file->SetPosition(m_header.file_partition_ofs + entry.offset + fileOffset);
+	return m_file->readData(buffer, (uint32)toRead);
 }
 
-uint32 WUHBReader::GetHashTableEntryOffset(uint32 hash, bool isFile) const
+// RomFS name hash: seeded with the parent's entry offset, case-insensitive
+uint32 WUHBReader::NameHash(uint32 parent, std::string_view name)
 {
-	const uint64 hash_table_size = (isFile ? m_header.file_hash_table_size : m_header.dir_hash_table_size);
-	const uint64 hash_table_ofs = (isFile ? m_header.file_hash_table_ofs : m_header.dir_hash_table_ofs);
-
-	const uint64 hash_table_entry_count = hash_table_size / sizeof(uint32);
-	const uint64 hash_table_entry_offset = hash_table_ofs + (hash % hash_table_entry_count) * sizeof(uint32);
-
-	m_fileIn->SetPosition(hash_table_entry_offset);
-	uint32 tableOffset;
-	if (!m_fileIn->readU32(tableOffset))
+	uint32 hash = parent ^ 123456789u;
+	for (char c : name)
 	{
-		cemuLog_log(LogType::Force, "failed to read WUHB hash table entry at file offset: {}", hash_table_entry_offset);
+		uint8 u = (uint8)c;
+		if (u >= 'a' && u <= 'z')
+			u = (uint8)(u - 'a' + 'A');
+		hash = std::rotr(hash, 5) ^ u;
+	}
+	return hash;
+}
+
+uint32 WUHBReader::BucketHead(uint32 hash, bool fileTable) const
+{
+	const uint64 tableOffset = fileTable ? m_header.file_hash_table_ofs : m_header.dir_hash_table_ofs;
+	const uint64 bucketCount = (fileTable ? m_header.file_hash_table_size : m_header.dir_hash_table_size) / 4;
+	const uint64 position = tableOffset + (hash % bucketCount) * 4;
+	uint8 raw[4];
+	m_file->SetPosition(position);
+	if (m_file->readData(raw, 4) != 4)
+	{
+		cemuLog_log(LogType::Force, "WUHB: cannot read the hash table at 0x{:x}", position);
 		return ROMFS_ENTRY_EMPTY;
 	}
-
-	return uint32be::from_bevalue(tableOffset);
+	return LoadBE32(raw);
 }
 
-template<bool T>
-bool WUHBReader::SearchHashList(uint32& entryOffset, const fs::path& targetName) const
+// The first entry of the bucket with this exact (case-sensitive) name. The
+// parent is only part of the hash, entries are not checked against it.
+uint32 WUHBReader::FindInBucket(uint32 parent, std::string_view name, bool fileTable) const
 {
-	for (;;)
+	uint32 offset = BucketHead(NameHash(parent, name), fileTable);
+	while (offset != ROMFS_ENTRY_EMPTY)
 	{
-		if (entryOffset == ROMFS_ENTRY_EMPTY)
-			return false;
-		auto entry = GetEntry<T>(entryOffset);
-
-		if (entry.name == targetName)
-			return true;
-		entryOffset = entry.hash;
+		std::string entryName;
+		uint32 next;
+		if (fileTable)
+		{
+			romfs_fentry_t entry = GetFileEntry(offset);
+			entryName = std::move(entry.name);
+			next = entry.hash;
+		}
+		else
+		{
+			romfs_direntry_t entry = GetDirEntry(offset);
+			entryName = std::move(entry.name);
+			next = entry.hash;
+		}
+		if (entryName == name)
+			return offset;
+		offset = next;
 	}
-	return false;
+	return ROMFS_ENTRY_EMPTY;
 }
 
+// Walks the path one folder at a time starting at the root folder (the
+// folder named ""). A trailing separator ends a folder lookup early; for a
+// file lookup only the last name is searched in the file table.
 uint32 WUHBReader::Lookup(const std::filesystem::path& path, bool isFile) const
 {
-	uint32 currentEntryOffset = 0;
-	auto look = [&](const fs::path& part, bool lookInFileHT) {
-		const auto partString = part.string();
-		currentEntryOffset = GetHashTableEntryOffset(CalcPathHash(currentEntryOffset, partString.c_str(), 0, partString.size()), lookInFileHT);
-		if (lookInFileHT)
-			return SearchHashList<true>(currentEntryOffset, part);
-		else
-			return SearchHashList<false>(currentEntryOffset, part);
-	};
-	// look for the root entry
-	if (!look("", false))
+	uint32 current = FindInBucket(0, "", false);
+	if (current == ROMFS_ENTRY_EMPTY)
 		return ROMFS_ENTRY_EMPTY;
-
-	auto it = path.begin();
-	while (it != path.end())
+	const std::vector<fs::path> parts(path.begin(), path.end());
+	for (size_t i = 0; i < parts.size(); i++)
 	{
-		fs::path part = *it;
-		++it;
-		// no need to recurse after trailing forward slash (e.g. directory/)
+		const fs::path& part = parts[i];
 		if (part.empty() && !isFile)
 			break;
-		// skip leading forward slash
-		if (part == "/")
+		if (part == fs::path("/"))
 			continue;
-
-		// if the lookup target is a file and this is the last iteration, look in the file hash table instead.
-		if (!look(part, it == path.end() && isFile))
+		const bool inFileTable = isFile && i + 1 == parts.size();
+		current = FindInBucket(current, part.string(), inFileTable);
+		if (current == ROMFS_ENTRY_EMPTY)
 			return ROMFS_ENTRY_EMPTY;
 	}
-	return currentEntryOffset;
-}
-bool WUHBReader::CheckMagicValue() const
-{
-	uint8 magic[4];
-	m_fileIn->SetPosition(0);
-	int read = m_fileIn->readData(magic, 4);
-	if (read != 4)
-	{
-		cemuLog_log(LogType::Force, "Failed to read WUHB magic numbers");
-		return false;
-	}
-	static_assert(sizeof(magic) == s_headerMagicValue.size());
-	return std::memcmp(&magic, s_headerMagicValue.data(), sizeof(magic)) == 0;
-}
-bool WUHBReader::ReadHeader()
-{
-	m_fileIn->SetPosition(0);
-	auto read = m_fileIn->readData(&m_header, sizeof(m_header));
-	auto readSuccess = read == sizeof(m_header);
-	if (!readSuccess)
-	{
-		cemuLog_log(LogType::Force, "Failed to read WUHB header");
-		return false;
-	}
-
-	if (m_header.dir_hash_table_size < sizeof(uint32) || m_header.file_hash_table_size < sizeof(uint32))
-	{
-		cemuLog_log(LogType::Force, "Invalid WUHB hash table size");
-		return false;
-	}
-
-	return true;
-}
-unsigned char WUHBReader::NormalizeChar(unsigned char c)
-{
-	if (c >= 'a' && c <= 'z')
-	{
-		return c + 'A' - 'a';
-	}
-	else
-	{
-		return c;
-	}
-}
-uint32 WUHBReader::CalcPathHash(uint32 parent, const char* path, uint32 start, size_t path_len)
-{
-	cemu_assert(path != nullptr || path_len == 0);
-	uint32 hash = parent ^ 123456789;
-	for (uint32 i = 0; i < path_len; i++)
-	{
-		hash = (hash >> 5) | (hash << 27);
-		hash ^= NormalizeChar(path[start + i]);
-	}
-
-	return hash;
+	return current;
 }

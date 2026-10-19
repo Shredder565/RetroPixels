@@ -1,109 +1,52 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
-#include <wchar.h>
 
 #include <boost/container/small_vector.hpp>
 
 #include "../fsc.h"
 
-// path parser and utility class for Wii U paths
-// optimized to be allocation-free for common path lengths
+// A Wii U style path split into its names. '/' and '\' both separate names,
+// repeated separators are collapsed, "." names are dropped (".." is kept as
+// a name, nothing is resolved). Names compare ASCII case-insensitively.
 class FSCPath
 {
-	struct PathNode
-	{
-		PathNode(uint16 offset, uint16 len) : offset(offset), len(len) {};
-
-		uint16 offset;
-		uint16 len;
-	};
-
-	boost::container::small_vector<PathNode, 8> m_nodes;
-	boost::container::small_vector<char, 64> m_names;
-	bool m_isAbsolute{};
-
-	inline bool isSlash(char c)
-	{
-		return c == '\\' || c == '/';
-	}
-
-	void appendNode(const char* name, uint16 nameLen)
-	{
-		if (m_names.size() > 0xFFFF)
-			return;
-		if (nameLen == 1 && *name == '.')
-			return;
-		m_nodes.emplace_back((uint16)m_names.size(), nameLen);
-		m_names.insert(m_names.end(), name, name + nameLen);
-	}
-
-public:
+  public:
 	FSCPath(std::string_view path)
 	{
-		if (path.empty())
-			return;
-		if (isSlash(path.front()))
+		size_t pos = 0;
+		while (pos < path.size() && IsSeparator(path[pos]))
+			pos++;
+		while (pos < path.size())
 		{
-			m_isAbsolute = true;
-			path.remove_prefix(1);
-			// skip any additional leading slashes
-			while (!path.empty() && isSlash(path.front()))
-				path.remove_prefix(1);
-		}
-		// parse nodes
-		size_t n = 0;
-		size_t nodeNameStartIndex = 0;
-		while (n < path.size())
-		{
-			if (isSlash(path[n]))
-			{
-				size_t nodeNameLen = n - nodeNameStartIndex;
-				if (nodeNameLen > 0xFFFF)
-					nodeNameLen = 0xFFFF; // truncate suspiciously long node names
-				cemu_assert_debug(nodeNameLen > 0);
-				appendNode(path.data() + nodeNameStartIndex, (uint16)nodeNameLen);
-				// skip any repeating slashes
-				while (n < path.size() && isSlash(path[n]))
-					n++;
-				nodeNameStartIndex = n;
-				continue;
-			}
-			n++;
-		}
-		if (nodeNameStartIndex < n)
-		{
-			size_t nodeNameLen = n - nodeNameStartIndex;
-			if (nodeNameLen > 0xFFFF)
-				nodeNameLen = 0xFFFF; // truncate suspiciously long node names
-			appendNode(path.data() + nodeNameStartIndex, (uint16)nodeNameLen);
+			size_t end = pos;
+			while (end < path.size() && !IsSeparator(path[end]))
+				end++;
+			AddName(path.substr(pos, end - pos));
+			pos = end;
+			while (pos < path.size() && IsSeparator(path[pos]))
+				pos++;
 		}
 	}
 
 	size_t GetNodeCount() const
 	{
-		return m_nodes.size();
+		return m_names.size();
 	}
 
 	std::string_view GetNodeName(size_t index) const
 	{
-		if (index < 0 || index >= m_nodes.size())
-			return std::basic_string_view<char>();
-		return std::basic_string_view<char>(m_names.data() + m_nodes[index].offset, m_nodes[index].len);
+		if (index >= m_names.size())
+			return {};
+		return std::string_view(m_chars.data() + m_names[index].first, m_names[index].second);
 	}
 
-	// returns true if the node names match according to FSA case-insensitivity rules
 	static bool MatchNodeName(std::string_view name1, std::string_view name2)
 	{
 		if (name1.size() != name2.size())
 			return false;
 		for (size_t i = 0; i < name1.size(); i++)
 		{
-			char c1 = name1[i];
-			char c2 = name2[i];
-			if (c1 >= 'A' && c1 <= 'Z')
-				c1 += ('a' - 'A');
-			if (c2 >= 'A' && c2 <= 'Z')
-				c2 += ('a' - 'A');
-			if (c1 != c2)
+			if (FoldCase(name1[i]) != FoldCase(name2[i]))
 				return false;
 		}
 		return true;
@@ -111,82 +54,67 @@ public:
 
 	bool MatchNodeName(sint32 index, std::string_view name) const
 	{
-		if (index < 0 || index >= (sint32)m_nodes.size())
+		if (index < 0 || (size_t)index >= m_names.size())
 			return false;
-		auto nodeName = GetNodeName(index);
-		return MatchNodeName(nodeName, name);
+		return MatchNodeName(GetNodeName((size_t)index), name);
 	}
+
+  private:
+	static constexpr size_t kMaxNameLength = 0xFFFF;
+	static constexpr size_t kMaxTotalLength = 0xFFFF; // further names are ignored once this much is stored
+
+	static bool IsSeparator(char c)
+	{
+		return c == '/' || c == '\\';
+	}
+
+	static char FoldCase(char c)
+	{
+		return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+	}
+
+	void AddName(std::string_view name)
+	{
+		if (m_chars.size() > kMaxTotalLength || name == ".")
+			return;
+		name = name.substr(0, kMaxNameLength);
+		m_names.emplace_back((uint32)m_chars.size(), (uint32)name.size());
+		m_chars.insert(m_chars.end(), name.begin(), name.end());
+	}
+
+	boost::container::small_vector<std::pair<uint32, uint32>, 8> m_names; // offset and length in m_chars
+	boost::container::small_vector<char, 64> m_chars;
 };
 
+// In-memory tree of files, each carrying a pointer to user data. Directories
+// are created implicitly by addFile. Entries keep the order they were added in.
 template<typename F>
 class FSAFileTree
 {
-  private:
-
-	enum NODETYPE : uint8
-	{
-		NODETYPE_DIRECTORY,
-		NODETYPE_FILE,
-	};
-
-	struct node_t
+	struct Node
 	{
 		std::string name;
-		std::vector<node_t*> subnodes;
-		size_t fileSize;
-		F* custom;
-		NODETYPE type;
+		bool isFile{false};
+		size_t fileSize{0};
+		F* custom{nullptr};
+		std::vector<std::unique_ptr<Node>> children;
+
+		Node* FindChild(std::string_view childName)
+		{
+			for (auto& child : children)
+			{
+				if (FSCPath::MatchNodeName(child->name, childName))
+					return child.get();
+			}
+			return nullptr;
+		}
 	};
 
-	node_t* getByNodePath(FSCPath& p, sint32 numNodes, bool createAsDirectories)
-	{
-		node_t* currentNode = &rootNode;
-		for (sint32 i = 0; i < numNodes; i++)
-		{
-			// find subnode by path
-			node_t* foundSubnode = getSubnode(currentNode, p.GetNodeName(i));
-			if (foundSubnode == nullptr)
-			{
-				// no subnode found -> create new directory node (if requested)
-				if (createAsDirectories == false)
-					return nullptr; // path not found
-				currentNode = newNode(currentNode, NODETYPE_DIRECTORY, p.GetNodeName(i));
-			}
-			else
-			{
-				currentNode = foundSubnode;
-			}
-		}
-		return currentNode;
-	}
-
-	node_t* getSubnode(node_t* parentNode, std::string_view name)
-	{
-		for (auto& sn : parentNode->subnodes)
-		{
-			if (FSCPath::MatchNodeName(sn->name, name))
-				return sn;
-		}
-		return nullptr;
-	}
-
-	node_t* newNode(node_t* parentNode, NODETYPE type, std::string_view name)
-	{
-		node_t* newNode = new node_t;
-		newNode->name.assign(name);
-		newNode->type = type;
-		newNode->custom = nullptr;
-		parentNode->subnodes.push_back(newNode);
-		return newNode;
-	}
-
+	// iterates a directory node; the tree must outlive it
 	class DirectoryIterator : public FSCVirtualFile
 	{
 	  public:
-		DirectoryIterator(node_t* node)
-			: m_node(node), m_subnodeIndex(0)
-		{
-		}
+		explicit DirectoryIterator(const Node* dir) : m_dir(dir) {}
 
 		sint32 fscGetType() override
 		{
@@ -195,177 +123,153 @@ class FSAFileTree
 
 		bool fscDirNext(FSCDirEntry* dirEntry) override
 		{
-			if (m_subnodeIndex >= m_node->subnodes.size())
+			if (m_next >= m_dir->children.size())
 				return false;
-
-			const node_t* subnode = m_node->subnodes[m_subnodeIndex];
-
-			strncpy(dirEntry->path, subnode->name.c_str(), sizeof(dirEntry->path) - 1);
-			dirEntry->path[sizeof(dirEntry->path) - 1] = '\0';
-			dirEntry->isDirectory = subnode->type == FSAFileTree::NODETYPE_DIRECTORY;
-			dirEntry->isFile = subnode->type == FSAFileTree::NODETYPE_FILE;
-			dirEntry->fileSize = subnode->type == FSAFileTree::NODETYPE_FILE ? subnode->fileSize : 0;
-
-			++m_subnodeIndex;
+			const Node& child = *m_dir->children[m_next++];
+			const size_t len = std::min(child.name.size(), sizeof(dirEntry->path) - 1);
+			std::memcpy(dirEntry->path, child.name.data(), len);
+			dirEntry->path[len] = '\0';
+			dirEntry->isFile = child.isFile;
+			dirEntry->isDirectory = !child.isFile;
+			dirEntry->fileSize = child.isFile ? (uint32)child.fileSize : 0;
 			return true;
 		}
 
 		bool fscRewindDir() override
 		{
-			m_subnodeIndex = 0;
+			m_next = 0;
 			return true;
 		}
 
 	  private:
-		node_t* m_node;
-		size_t m_subnodeIndex;
+		const Node* m_dir;
+		size_t m_next{0};
 	};
 
-public:
-	FSAFileTree()
+	// follows the first 'depth' names of the path, optionally creating missing directories
+	Node* Walk(const FSCPath& path, size_t depth, bool createMissing)
 	{
-		rootNode.type = NODETYPE_DIRECTORY;
+		Node* node = &m_root;
+		for (size_t i = 0; i < depth; i++)
+		{
+			Node* child = node->FindChild(path.GetNodeName(i));
+			if (!child)
+			{
+				if (!createMissing)
+					return nullptr;
+				auto created = std::make_unique<Node>();
+				created->name = path.GetNodeName(i);
+				child = created.get();
+				node->children.push_back(std::move(created));
+			}
+			node = child;
+		}
+		return node;
 	}
 
+  public:
+	FSAFileTree() = default;
+
+	// false if the path is empty or the name already exists in its directory
 	bool addFile(std::string_view path, size_t fileSize, F* custom)
 	{
-		FSCPath p(path);
+		const FSCPath p(path);
 		if (p.GetNodeCount() == 0)
 			return false;
-		node_t* directoryNode = getByNodePath(p, p.GetNodeCount() - 1, true);
-		// check if a node with same name already exists
-		if (getSubnode(directoryNode, p.GetNodeName(p.GetNodeCount() - 1)) != nullptr)
-			return false; // node already exists
-		// add file node
-		node_t* fileNode = newNode(directoryNode, NODETYPE_FILE, p.GetNodeName(p.GetNodeCount() - 1));
-		fileNode->fileSize = fileSize;
-		fileNode->custom = custom;
+		Node* dir = Walk(p, p.GetNodeCount() - 1, true);
+		const std::string_view name = p.GetNodeName(p.GetNodeCount() - 1);
+		if (dir->FindChild(name))
+			return false;
+		auto file = std::make_unique<Node>();
+		file->name = name;
+		file->isFile = true;
+		file->fileSize = fileSize;
+		file->custom = custom;
+		dir->children.push_back(std::move(file));
 		return true;
 	}
 
-	bool getFile(std::string_view path, F* &custom)
+	bool getFile(std::string_view path, F*& custom)
 	{
-		FSCPath p(path);
+		const FSCPath p(path);
 		if (p.GetNodeCount() == 0)
 			return false;
-		node_t* node = getByNodePath(p, p.GetNodeCount(), false);
-		if (node == nullptr)
-			return false;
-		if (node->type != NODETYPE_FILE)
+		Node* node = Walk(p, p.GetNodeCount(), false);
+		if (!node || !node->isFile)
 			return false;
 		custom = node->custom;
 		return true;
 	}
 
+	// the caller owns the returned iterator; the tree root itself cannot be opened
 	bool getDirectory(std::string_view path, FSCVirtualFile*& dirIterator)
 	{
-		FSCPath p(path);
+		const FSCPath p(path);
 		if (p.GetNodeCount() == 0)
 			return false;
-		node_t* node = getByNodePath(p, p.GetNodeCount(), false);
-		if (node == nullptr)
-			return false;
-		if (node->type != NODETYPE_DIRECTORY)
+		Node* node = Walk(p, p.GetNodeCount(), false);
+		if (!node || node->isFile)
 			return false;
 		dirIterator = new DirectoryIterator(node);
 		return true;
 	}
 
+	// removes a file node (not its user data)
 	bool removeFile(std::string_view path)
 	{
-		FSCPath p(path);
+		const FSCPath p(path);
 		if (p.GetNodeCount() == 0)
 			return false;
-		node_t* directoryNode = getByNodePath(p, p.GetNodeCount() - 1, false);
-		if (directoryNode == nullptr)
+		Node* dir = Walk(p, p.GetNodeCount() - 1, false);
+		if (!dir)
 			return false;
-		// find node
-		node_t* fileNode = getSubnode(directoryNode, p.GetNodeName(p.GetNodeCount() - 1));
-		if (fileNode == nullptr)
+		const std::string_view name = p.GetNodeName(p.GetNodeCount() - 1);
+		auto it = std::find_if(dir->children.begin(), dir->children.end(), [name](const std::unique_ptr<Node>& n) { return FSCPath::MatchNodeName(n->name, name); });
+		if (it == dir->children.end() || !(*it)->isFile)
 			return false;
-		if (fileNode->type != NODETYPE_FILE)
-			return false;
-		if (fileNode->subnodes.empty() == false)
-		{
-			// files shouldn't have subnodes
-			assert(false);
-		}
-		// remove node from parent
-		directoryNode->subnodes.erase(std::remove(directoryNode->subnodes.begin(), directoryNode->subnodes.end(), fileNode), directoryNode->subnodes.end());
-		// delete node
-		delete fileNode;
+		dir->children.erase(it);
 		return true;
 	}
 
+	// calls fn(name, isDirectory, custom) for every entry of a directory
 	template<typename TFunc>
 	bool listDirectory(std::string_view path, TFunc fn)
 	{
-		FSCPath p(path);
-		node_t* node = getByNodePath(p, p.GetNodeCount(), false);
-		if (node == nullptr)
+		const FSCPath p(path);
+		Node* node = Walk(p, p.GetNodeCount(), false);
+		if (!node || node->isFile)
 			return false;
-		if (node->type != NODETYPE_DIRECTORY)
-			return false;
-		for (auto& it : node->subnodes)
-		{
-			if (it->type == NODETYPE_DIRECTORY)
-			{
-				fn(it->name, true, it->custom);
-			}
-			else if (it->type == NODETYPE_FILE)
-			{
-				fn(it->name, false, it->custom);
-			}
-		}
+		for (auto& child : node->children)
+			fn(child->name, !child->isFile, child->custom);
 		return true;
 	}
 
-private:
-	node_t rootNode;
+  private:
+	Node m_root;
 };
 
-static void FSTPathUnitTest()
+// self check of the path parser, run by FSTVolumeTest()
+[[maybe_unused]] static void FSTPathUnitTest()
 {
-	// test 1
-	FSCPath p1("/vol/content");
-	cemu_assert_debug(p1.GetNodeCount() == 2);
-	cemu_assert_debug(p1.MatchNodeName(0, "tst") == false);
-	cemu_assert_debug(p1.MatchNodeName(0, "vol"));
-	cemu_assert_debug(p1.MatchNodeName(1, "CONTENT"));
-	// test 2
-	FSCPath p2("/vol/content/");
-	cemu_assert_debug(p2.GetNodeCount() == 2);
-	cemu_assert_debug(p2.MatchNodeName(0, "vol"));
-	cemu_assert_debug(p2.MatchNodeName(1, "content"));
-	// test 3
-	FSCPath p3("/vol//content/\\/");
-	cemu_assert_debug(p3.GetNodeCount() == 2);
-	cemu_assert_debug(p3.MatchNodeName(0, "vol"));
-	cemu_assert_debug(p3.MatchNodeName(1, "content"));
-	// test 4
-	FSCPath p4("vol/content/");
-	cemu_assert_debug(p4.GetNodeCount() == 2);
-	// test 5
-	FSCPath p5("/vol/content/test.bin");
-	cemu_assert_debug(p5.GetNodeCount() == 3);
-	cemu_assert_debug(p5.MatchNodeName(0, "vol"));
-	cemu_assert_debug(p5.MatchNodeName(1, "content"));
-	cemu_assert_debug(p5.MatchNodeName(2, "TEST.BIN"));
-	// test 6 - empty paths
-	FSCPath p6("");
-	cemu_assert_debug(p6.GetNodeCount() == 0);
-	p6 = FSCPath("/////////////");
-	cemu_assert_debug(p6.GetNodeCount() == 0);
-	// test 7 - periods in path
-	FSCPath p7("/vol/content/./..");
-	cemu_assert_debug(p7.GetNodeCount() == 3);
-	cemu_assert_debug(p7.MatchNodeName(0, "vol"));
-	cemu_assert_debug(p7.MatchNodeName(1, "content"));
-	cemu_assert_debug(p7.MatchNodeName(2, ".."));
+	struct Case
+	{
+		const char* path;
+		std::vector<const char*> names;
+	};
+	const Case cases[] = {
+		{"", {}},
+		{"////", {}},
+		{"/vol/content", {"vol", "content"}},
+		{"vol\\content\\", {"VOL", "Content"}},
+		{"//vol///content//\\", {"vol", "content"}},
+		{"/vol/./code/../app.xml", {"vol", "code", "..", "APP.XML"}},
+	};
+	for (const Case& c : cases)
+	{
+		FSCPath p(c.path);
+		cemu_assert_debug(p.GetNodeCount() == c.names.size());
+		for (size_t i = 0; i < c.names.size() && i < p.GetNodeCount(); i++)
+			cemu_assert_debug(p.MatchNodeName((sint32)i, c.names[i]));
+		cemu_assert_debug(!p.MatchNodeName((sint32)c.names.size(), "x"));
+	}
 }
-
-
-
-
-
-

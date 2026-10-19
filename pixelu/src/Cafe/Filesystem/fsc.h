@@ -1,65 +1,70 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
+
+// FSC: the emulator's virtual file system. Devices (host folders, disc images,
+// .wua/.wuhb archives, graphic pack redirections) are mounted at virtual
+// paths with a priority; lookups try the highest priority first and
+// directory listings merge every mounted layer.
 
 struct FSCVirtualFile;
 
+// node types
 #define FSC_TYPE_INVALID				(0)
 #define FSC_TYPE_FILE					(1)
 #define FSC_TYPE_DIRECTORY				(2)
 
-#define FSC_QUERY_SIZE					(1) // file size, 0 for directories
-#define FSC_QUERY_WRITEABLE				(2) // non-zero if file is writeable, else 0
+// ids for FSCVirtualFile::fscQueryValueU64
+#define FSC_QUERY_SIZE					(1) // file size (0 for directories)
+#define FSC_QUERY_WRITEABLE				(2) // non-zero for writable files
 
 enum class FSC_ACCESS_FLAG : uint8
 {
 	NONE = 0,
 
-	// file permissions
-	READ_PERMISSION = (1<<0),
-	WRITE_PERMISSION = (1<<1),
+	READ_PERMISSION = (1 << 0),
+	WRITE_PERMISSION = (1 << 1),
 
-	// file open mode (incompatible with OPEN_DIR flag)
-	FILE_ALLOW_CREATE = (1 << 2), // create file if it does not exist
-	FILE_ALWAYS_CREATE = (1 << 3), // overwrite any existing file
+	// how a file is opened (files only)
+	FILE_ALLOW_CREATE = (1 << 2),  // create the file when it does not exist
+	FILE_ALWAYS_CREATE = (1 << 3), // always start with an empty file
 
-	// which types can be opened
-	// invalid operation if neither is set
-	OPEN_DIR = (1 << 4), 
+	// what may be opened; at least one of these must be set
+	OPEN_DIR = (1 << 4),
 	OPEN_FILE = (1 << 5),
 
-	// Writing seeks to the end of the file if set
-	IS_APPEND = (1 << 6)
+	IS_APPEND = (1 << 6) // writes go to the end of the file
 };
 DEFINE_ENUM_FLAG_OPERATORS(FSC_ACCESS_FLAG);
 
+// status codes; there is no separate "not a file"/"not a directory" code,
+// callers open with one type flag at a time to tell them apart
 #define FSC_STATUS_UNDEFINED			(-1)
 #define FSC_STATUS_OK					(0)
 #define FSC_STATUS_INVALID_PATH			(1)
 #define FSC_STATUS_FILE_NOT_FOUND		(2)
 #define FSC_STATUS_ALREADY_EXISTS		(3)
-// note: Unlike the native Wii U filesystem, FSC does not provide separate error codes for NOT_A_FILE and NOT_A_DIRECTORY
-// to determine them manually, open with both modes (file and dir) and check the type
 
 #define FSC_MAX_DIR_NAME_LENGTH			(256)
-#define FSC_MAX_DEVICE_PATH_LENGTH		((std::max)(260,FSA_PATH_SIZE_MAX))	// max length for FSC device paths (should be at least equal or greater than supported by host filesystem)
+#define FSC_MAX_DEVICE_PATH_LENGTH		((std::max)(260,FSA_PATH_SIZE_MAX))
 
 struct FSCDirEntry
 {
-	char path[FSC_MAX_DIR_NAME_LENGTH];
-	// stats
+	char path[FSC_MAX_DIR_NAME_LENGTH]; // entry name (not a full path)
 	bool isDirectory;
 	bool isFile;
 	uint32 fileSize;
 
 	std::string_view GetPath()
 	{
-		size_t len = strnlen(path, FSC_MAX_DIR_NAME_LENGTH);
-		return std::basic_string_view<char>(path, len);
+		return std::string_view(path, strnlen(path, FSC_MAX_DIR_NAME_LENGTH));
 	}
 };
 
+// A mountable device. Paths passed in are relative to the device's target
+// path; ctx is the pointer given to fsc_mount.
 class fscDeviceC
 {
-public:
+  public:
 	virtual FSCVirtualFile* fscDeviceOpenByPath(std::string_view path, FSC_ACCESS_FLAG accessFlags, void* ctx, sint32* fscStatus)
 	{
 		cemu_assert_unimplemented();
@@ -83,27 +88,23 @@ public:
 		cemu_assert_unimplemented();
 		return false;
 	}
-
 };
 
-
+// An open file or directory. Devices override what they support.
 struct FSCVirtualFile
 {
+	// buffered directory listing, for implementations that collect entries up front
 	struct FSCDirIteratorState
 	{
 		sint32 index;
 		std::vector<FSCDirEntry> dirEntries;
 	};
 
-	FSCVirtualFile()
-	{
-
-	}
+	FSCVirtualFile() {}
 
 	virtual ~FSCVirtualFile()
 	{
-		if (dirIterator)
-			delete dirIterator;
+		delete dirIterator;
 	}
 
 	virtual sint32 fscGetType()
@@ -158,11 +159,12 @@ struct FSCVirtualFile
 		return false;
 	}
 
-	FSCDirIteratorState* dirIterator{};
+	FSCDirIteratorState* dirIterator{}; // owned, freed with the file
 
-	bool m_isAppend{ false };
+	bool m_isAppend{false}; // set by fsc_open from FSC_ACCESS_FLAG::IS_APPEND
 };
 
+// mount priorities, higher ones are searched first
 #define FSC_PRIORITY_BASE				(0)
 #define FSC_PRIORITY_AOC				(1)
 #define FSC_PRIORITY_PATCH				(2)
@@ -193,23 +195,24 @@ bool fsc_isWritable(FSCVirtualFile* fscFile);
 uint32 fsc_readFile(FSCVirtualFile* fscFile, void* buffer, uint32 size);
 uint32 fsc_writeFile(FSCVirtualFile* fscFile, void* buffer, uint32 size);
 
-uint8* fsc_extractFile(const char* path, uint32* fileSize, sint32 maxPriority = FSC_PRIORITY_MAX);
+// whole-file helpers
+uint8* fsc_extractFile(const char* path, uint32* fileSize, sint32 maxPriority = FSC_PRIORITY_MAX); // malloc'd buffer
 std::optional<std::vector<uint8>> fsc_extractFile(const char* path, sint32 maxPriority = FSC_PRIORITY_MAX);
 bool fsc_doesFileExist(const char* path, sint32 maxPriority = FSC_PRIORITY_MAX);
 bool fsc_doesDirectoryExist(const char* path, sint32 maxPriority = FSC_PRIORITY_MAX);
 
-// wud device
+// disc image / NUS content (FSTVolume)
 bool FSCDeviceWUD_Mount(std::string_view mountPath, std::string_view destinationBaseDir, class FSTVolume* mountedVolume, sint32 priority);
 
-// wua device
+// .wua archive
 bool FSCDeviceWUA_Mount(std::string_view mountPath, std::string_view destinationBaseDir, class ZArchiveReader* archive, sint32 priority);
 
-// wuhb device
+// .wuhb bundle
 bool FSCDeviceWUHB_Mount(std::string_view mountPath, std::string_view destinationBaseDir, class WUHBReader* wuhbReader, sint32 priority);
 
-// hostFS device
+// host folder
 bool FSCDeviceHostFS_Mount(std::string_view mountPath, std::string_view hostTargetPath, sint32 priority);
 
-// redirect device
+// single-file redirections (graphic pack content replacements)
 void fscDeviceRedirect_map();
 void fscDeviceRedirect_add(std::string_view virtualSourcePath, size_t fileSize, const fs::path& targetFilePath, sint32 priority);

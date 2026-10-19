@@ -1,128 +1,120 @@
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "wud.h"
 #include "Common/FileStream.h"
 
+// .wux layout (little endian):
+//   0x00 "WUX0"  0x04 magic 0x1099D02E  0x08 sector size  0x10 uncompressed size (u64)
+//   0x20 table with one u32 per sector of the image: index into the sector array
+//   the sector array follows, starting at the next multiple of the sector size
+struct wud_t
+{
+	std::unique_ptr<FileStream> file;
+	long long imageSize{0};
+	bool isWux{false};
+	uint32 sectorSize{0};
+	std::vector<uint32> sectorMap; // image sector -> stored sector
+	long long storedSectorsOffset{0};
+};
+
+namespace
+{
+	constexpr size_t kWuxHeaderSize = 0x20;
+	constexpr uint32 kWuxMagic0 = 0x30585557; // "WUX0"
+	constexpr uint32 kWuxMagic1 = 0x1099D02E;
+
+	uint32 LoadLE32(const uint8* p)
+	{
+		return (uint32)p[0] | ((uint32)p[1] << 8) | ((uint32)p[2] << 16) | ((uint32)p[3] << 24);
+	}
+
+	uint64 LoadLE64(const uint8* p)
+	{
+		return (uint64)LoadLE32(p) | ((uint64)LoadLE32(p + 4) << 32);
+	}
+
+	bool SetUpWux(wud_t& wud, const uint8* header, uint64 fileSize)
+	{
+		wud.isWux = true;
+		wud.sectorSize = LoadLE32(header + 0x08);
+		wud.imageSize = (long long)LoadLE64(header + 0x10);
+		if (wud.sectorSize < 0x100 || wud.sectorSize >= 0x10000000)
+			return false;
+		const uint64 sectorCount = ((uint64)wud.imageSize + wud.sectorSize - 1) / wud.sectorSize;
+		if (sectorCount > (fileSize - kWuxHeaderSize) / 4)
+			return false; // the sector table cannot be complete
+		wud.sectorMap.resize(sectorCount);
+		const uint64 tableEnd = kWuxHeaderSize + sectorCount * 4;
+		wud.storedSectorsOffset = (long long)((tableEnd + wud.sectorSize - 1) / wud.sectorSize * wud.sectorSize);
+		std::vector<uint8> table(sectorCount * 4);
+		wud.file->SetPosition(kWuxHeaderSize);
+		if (wud.file->readData(table.data(), (uint32)table.size()) != table.size())
+			return false;
+		for (size_t i = 0; i < sectorCount; i++)
+			wud.sectorMap[i] = LoadLE32(table.data() + i * 4);
+		return true;
+	}
+}
+
 wud_t* wud_open(const fs::path& path)
 {
-	FileStream* fs = FileStream::openFile2(path);
-	if( !fs )
+	auto wud = std::make_unique<wud_t>();
+	wud->file.reset(FileStream::openFile2(path));
+	if (!wud->file)
 		return nullptr;
-	// allocate wud struct
-	wud_t* wud = (wud_t*)malloc(sizeof(wud_t));
-	memset(wud, 0x00, sizeof(wud_t));
-	wud->fs = fs;
-	// get size of file
-	long long inputFileSize = wud->fs->GetSize();
-	// determine whether the WUD is compressed or not
-	wuxHeader_t wuxHeader = {0};
-	if( wud->fs->readData(&wuxHeader, sizeof(wuxHeader_t)) != sizeof(wuxHeader_t))
+	const uint64 fileSize = wud->file->GetSize();
+	uint8 header[kWuxHeaderSize];
+	if (wud->file->readData(header, sizeof(header)) != sizeof(header))
+		return nullptr; // too small for either format
+	if (LoadLE32(header) == kWuxMagic0 && LoadLE32(header + 4) == kWuxMagic1)
 	{
-		// file is too short to be either
-		wud_close(wud);
-		return nullptr;
-	}
-	if( wuxHeader.magic0 == WUX_MAGIC_0 && wuxHeader.magic1 == WUX_MAGIC_1 )
-	{
-		// this is a WUX file
-		wud->isCompressed = true;
-		wud->sectorSize = wuxHeader.sectorSize;
-		wud->uncompressedSize = wuxHeader.uncompressedSize;
-		// validate header values
-		if( wud->sectorSize < 0x100 || wud->sectorSize >= 0x10000000 )
-		{
-			wud_close(wud);
+		if (!SetUpWux(*wud, header, fileSize))
 			return nullptr;
-		}
-		// calculate offsets and sizes
-		wud->indexTableEntryCount = (unsigned int)((wud->uncompressedSize+(long long)(wud->sectorSize-1)) / (long long)wud->sectorSize);
-		wud->offsetIndexTable = sizeof(wuxHeader_t);
-		wud->offsetSectorArray = (wud->offsetIndexTable + (long long)wud->indexTableEntryCount*sizeof(unsigned int));
-		// align to SECTOR_SIZE
-		wud->offsetSectorArray = (wud->offsetSectorArray + (long long)(wud->sectorSize-1));
-		wud->offsetSectorArray = wud->offsetSectorArray - (wud->offsetSectorArray%(long long)wud->sectorSize);
-		// read index table
-		unsigned int indexTableSize = sizeof(unsigned int) * wud->indexTableEntryCount;
-		wud->indexTable = (unsigned int*)malloc(indexTableSize);
-		wud->fs->SetPosition(wud->offsetIndexTable);
-		if( wud->fs->readData(wud->indexTable, indexTableSize) != indexTableSize )
-		{
-			// could not read index table
-			wud_close(wud);
-			return nullptr;
-		}
 	}
 	else
-	{
-		// uncompressed file
-		wud->uncompressedSize = inputFileSize;
-	}
-	return wud;
+		wud->imageSize = (long long)fileSize;
+	return wud.release();
 }
 
 void wud_close(wud_t* wud)
 {
-	delete wud->fs;
-	if( wud->indexTable )
-		free(wud->indexTable);
-	free(wud);
+	delete wud;
 }
 
 bool wud_isWUXCompressed(wud_t* wud)
 {
-	return wud->isCompressed;
+	return wud->isWux;
 }
 
-/*
- * Read data from WUD file
- * Can read up to 4GB at once
- */
 unsigned int wud_readData(wud_t* wud, void* buffer, unsigned int length, long long offset)
 {
-	// make sure there is no out-of-bounds read
-	long long fileBytesLeft = wud->uncompressedSize - offset;
-	if( fileBytesLeft <= 0 )
+	if (offset >= wud->imageSize)
 		return 0;
-	if( fileBytesLeft < (long long)length )
-		length = (unsigned int)fileBytesLeft;
-	// read data
-	unsigned int readBytes = 0;
-	if( wud->isCompressed == false )
+	if ((long long)length > wud->imageSize - offset)
+		length = (unsigned int)(wud->imageSize - offset);
+	if (!wud->isWux)
 	{
-		// uncompressed read is straight forward
-		wud->fs->SetPosition(offset);
-		readBytes = (unsigned int)wud->fs->readData(buffer, length);
+		wud->file->SetPosition((uint64)offset);
+		return wud->file->readData(buffer, length);
 	}
-	else
+	// .wux: read sector by sector through the sector map
+	uint8* out = (uint8*)buffer;
+	unsigned int total = 0;
+	while (length > 0)
 	{
-		// compressed read must be handled on a per-sector level
-		while( length > 0 )
-		{
-			unsigned int sectorOffset = (unsigned int)(offset % (long long)wud->sectorSize);
-			unsigned int remainingSectorBytes = wud->sectorSize - sectorOffset;
-			unsigned int sectorIndex = (unsigned int)(offset / (long long)wud->sectorSize);
-			unsigned int bytesToRead = (remainingSectorBytes<length)?remainingSectorBytes:length; // read only up to the end of the current sector
-			// look up real sector index
-			sectorIndex = wud->indexTable[sectorIndex];
-			wud->fs->SetPosition(wud->offsetSectorArray + (long long)sectorIndex * (long long)wud->sectorSize + (long long)sectorOffset);
-			readBytes += (unsigned int)wud->fs->readData(buffer, bytesToRead);
-			// progress read offset, write pointer and decrease length
-			buffer = (void*)((char*)buffer + bytesToRead);
-			length -= bytesToRead;
-			offset += bytesToRead;
-
-		}
+		const uint64 imageSector = (uint64)offset / wud->sectorSize;
+		const uint32 inSector = (uint32)((uint64)offset % wud->sectorSize);
+		const uint32 chunk = std::min<uint32>(length, wud->sectorSize - inSector);
+		const long long stored = wud->storedSectorsOffset + (long long)wud->sectorMap[imageSector] * wud->sectorSize + inSector;
+		wud->file->SetPosition((uint64)stored);
+		total += wud->file->readData(out, chunk);
+		out += chunk;
+		offset += chunk;
+		length -= chunk;
 	}
-	return readBytes;
+	return total;
 }
 
-/*
- * Returns the size of the data
- * For .wud: Size of file
- * For .wux: Size of uncompressed data
- */
 long long wud_getWUDSize(wud_t* wud)
 {
-	return wud->uncompressedSize;
+	return wud->imageSize;
 }

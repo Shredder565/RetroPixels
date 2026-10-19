@@ -1,63 +1,62 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "util/helpers/helpers.h"
 #include "Cafe/Filesystem/fscDeviceHostFS.h"
 #include "FST/fstUtil.h"
 
-struct RedirectEntry
+// Graphic packs replace single game files by registering host files under
+// their virtual path. The whole table is mounted once at "/" with the
+// highest priority, so it overrides every other device.
+namespace
 {
-	RedirectEntry(const fs::path& dstPath, sint32 priority) : dstPath(dstPath), priority(priority) {}
-	fs::path dstPath;
-	sint32 priority;
-};
-
-FSAFileTree<RedirectEntry> redirectTree;
-
-void fscDeviceRedirect_add(std::string_view virtualSourcePath, size_t fileSize, const fs::path& targetFilePath, sint32 priority)
-{
-	// check if source already has a redirection
-	RedirectEntry* existingEntry;
-	if (redirectTree.getFile(virtualSourcePath, existingEntry))
+	struct Redirection
 	{
-		if (existingEntry->priority >= priority)
-			return; // dont replace entries with equal or higher priority
-		// unregister existing entry
-		redirectTree.removeFile(virtualSourcePath);
-		delete existingEntry;
+		fs::path hostFile;
+		sint32 priority;
+	};
+
+	FSAFileTree<Redirection> s_redirections;
+	bool s_mounted = false;
+
+	class RedirectDevice : public fscDeviceC
+	{
+	  public:
+		FSCVirtualFile* fscDeviceOpenByPath(std::string_view path, FSC_ACCESS_FLAG accessFlags, void* ctx, sint32* fscStatus) override
+		{
+			Redirection* redirection;
+			if (HAS_FLAG(accessFlags, FSC_ACCESS_FLAG::OPEN_FILE) && s_redirections.getFile(path, redirection))
+				return FSCVirtualFile_Host::OpenFile(redirection->hostFile, accessFlags, *fscStatus);
+			FSCVirtualFile* folder;
+			if (HAS_FLAG(accessFlags, FSC_ACCESS_FLAG::OPEN_DIR) && s_redirections.getDirectory(path, folder))
+				return folder;
+			return nullptr;
+		}
+	};
+
+	RedirectDevice& GetRedirectDevice()
+	{
+		static RedirectDevice s_device;
+		return s_device;
 	}
-	RedirectEntry* entry = new RedirectEntry(targetFilePath, priority);
-	redirectTree.addFile(virtualSourcePath, fileSize, entry);
 }
 
-class fscDeviceTypeRedirect : public fscDeviceC
+// an existing redirection of the same path is only replaced by a higher priority
+void fscDeviceRedirect_add(std::string_view virtualSourcePath, size_t fileSize, const fs::path& targetFilePath, sint32 priority)
 {
-	FSCVirtualFile* fscDeviceOpenByPath(std::string_view path, FSC_ACCESS_FLAG accessFlags, void* ctx, sint32* fscStatus) override
+	Redirection* existing;
+	if (s_redirections.getFile(virtualSourcePath, existing))
 	{
-		RedirectEntry* redirectionEntry;
-
-		if (HAS_FLAG(accessFlags, FSC_ACCESS_FLAG::OPEN_FILE) && redirectTree.getFile(path, redirectionEntry))
-			return FSCVirtualFile_Host::OpenFile(redirectionEntry->dstPath, accessFlags, *fscStatus);
-
-		FSCVirtualFile* dirIterator;
-
-		if (HAS_FLAG(accessFlags, FSC_ACCESS_FLAG::OPEN_DIR) && redirectTree.getDirectory(path, dirIterator))
-			return dirIterator;
-
-		return nullptr;
+		if (priority <= existing->priority)
+			return;
+		s_redirections.removeFile(virtualSourcePath);
+		delete existing;
 	}
-
-public:
-	static fscDeviceTypeRedirect& instance()
-	{
-		static fscDeviceTypeRedirect _instance;
-		return _instance;
-	}
-};
-
-bool _redirectMapped = false;
+	s_redirections.addFile(virtualSourcePath, fileSize, new Redirection{targetFilePath, priority});
+}
 
 void fscDeviceRedirect_map()
 {
-	if (_redirectMapped)
+	if (s_mounted)
 		return;
-	fsc_mount("/", "/", &fscDeviceTypeRedirect::instance(), nullptr, FSC_PRIORITY_REDIRECT);
-	_redirectMapped = true;
+	fsc_mount("/", "/", &GetRedirectDevice(), nullptr, FSC_PRIORITY_REDIRECT);
+	s_mounted = true;
 }
