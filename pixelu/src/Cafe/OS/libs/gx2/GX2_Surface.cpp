@@ -97,7 +97,7 @@ namespace GX2
 		// macro tiled surfaces start out swizzled down to level 13 (i.e. all levels)
 		_ClearSwizzleStopLevel(surface);
 		if (Latte::TM_IsMacroTiled(surface->tileMode))
-			surface->swizzle = surface->swizzle | (13 << 16);
+			surface->swizzle = surface->swizzle | (13u << 16);
 
 		// for the special 32 mode the "too small for macro tiles" test uses 4x the alignment for compressed formats
 		const uint32 smallShift = (special32 && Latte::IsCompressedFormat(surface->format)) ? 2 : 0;
