@@ -1,531 +1,434 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// Fixes for individual games. After the executable is linked the code area is
+// searched for known instruction sequences, and each match is patched in memory
+// or redirected to a host function.
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/OS/RPL/rpl.h"
 #include "Cafe/HW/Espresso/Interpreter/PPCInterpreterInternal.h"
 #include "CafeSystem.h"
-#include "config/ActiveSettings.h" // Selectively add some patches based on network settings.
+#include "config/ActiveSettings.h"
 
-void hleExport_breathOfTheWild_busyLoop(PPCInterpreter_t* hCPU)
+namespace
 {
-	uint32 queue7C = memory_readU32(hCPU->gpr[24] + 0x7C);
-	uint32 queue80b = memory_readU8(hCPU->gpr[24] + 0x80);
+	// ---------------------------------------------------------------- PowerPC encodings
 
-	if (!(queue80b == 0 || hCPU->gpr[22] != 0 || queue7C > 0))
+	constexpr uint32 kOpBlr = 0x4E800020;
+	constexpr uint32 kOpNop = 0x60000000;
+	constexpr uint32 kOpLiR3_0 = 0x38600000;
+	constexpr uint32 kOpLiR3_1 = 0x38600001;
+
+	// "bla target": absolute branch with link
+	uint32 AbsoluteCall(uint32 target)
 	{
-		PPCInterpreter_relinquishTimeslice();
+		return 0x48000000 | PPC_OPC_LK | PPC_OPC_AA | target;
 	}
 
-	hCPU->gpr[6] = hCPU->gpr[29];
-	hCPU->instructionPointer += 4;
-}
-
-void hleExport_breathOfTheWild_busyLoop2(PPCInterpreter_t* hCPU)
-{
-	uint32 queue7C = memory_readU32(hCPU->gpr[24] + 0x7C);
-	uint32 queue80b = memory_readU8(hCPU->gpr[24] + 0x80);
-
-	if (!(queue80b == 0 || hCPU->gpr[22] != 0 || queue7C > 0))
+	// instruction that enters the HLE function with the given registered index
+	uint32 HleInstruction(sint32 functionIndex)
 	{
-		PPCInterpreter_relinquishTimeslice();
+		return (1u << 26) | (uint32)functionIndex;
 	}
 
-	hCPU->gpr[12] = hCPU->gpr[29];
-	hCPU->instructionPointer += 4;
-}
+	// ---------------------------------------------------------------- signatures
 
-void hleExport_ffl_swapEndianFloatArray(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamStructPtr(valueArray, uint32, 0);
-	ppcDefineParamS32(valueCount, 1);
-	for (sint32 i = 0; i < valueCount; i++)
+	// A signature is a run of big-endian instruction words; a mask word of 0 marks
+	// words that differ between builds (usually branch offsets) and are ignored.
+	struct Signature
 	{
-		valueArray[i] = _swapEndianU32(valueArray[i]);
+		std::span<const uint32> words;
+		std::span<const uint32> masks; // empty: every bit must match
+	};
+
+	bool MatchesAt(const uint8* p, const Signature& sig)
+	{
+		for (size_t i = 0; i < sig.words.size(); i++)
+		{
+			const uint32 have = _swapEndianU32(*(const uint32*)(p + i * 4));
+			const uint32 mask = sig.masks.empty() ? 0xFFFFFFFF : sig.masks[i];
+			if ((have & mask) != (sig.words[i] & mask))
+				return false;
+		}
+		return true;
 	}
-	osLib_returnFromFunction(hCPU, 0);
-}
 
-typedef struct  
-{
-	std::atomic<uint32be> count;
-	uint32be ownerThreadId;
-	uint32 ukn08;
-}xcxCS_t;
-
-void hleExport_xcx_enterCriticalSection(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamStructPtr(xcxCS, xcxCS_t, 0);
-	uint32 threadId = MEMPTR<OSThread_t>(coreinit::OSGetCurrentThread()).GetMPTR();
-	cemu_assert_debug(xcxCS->ukn08 != 0);
-	cemu_assert_debug(threadId);
-	if (xcxCS->ownerThreadId == (uint32be)threadId)
+	// first 4-byte aligned match inside the loaded code, or 0
+	MPTR FindSignature(const Signature& sig)
 	{
-		xcxCS->count.store(xcxCS->count.load() + 1);
+		const uint32 length = (uint32)(sig.words.size() * 4);
+		const uint8* p = memory_getPointerFromVirtualOffset(MEMORY_CODEAREA_ADDR);
+		const uint8* end = memory_getPointerFromVirtualOffset(RPLLoader_GetMaxCodeOffset() - length);
+		const uint32 firstWord = _swapEndianU32(sig.words[0]);
+		const uint32 firstMask = _swapEndianU32(sig.masks.empty() ? 0xFFFFFFFF : sig.masks[0]);
+		for (; p < end; p += 4)
+		{
+			if (((*(const uint32*)p ^ firstWord) & firstMask) != 0)
+				continue;
+			if (MatchesAt(p, sig))
+				return memory_getVirtualOffsetFromPointer((void*)p);
+		}
+		return MPTR_NULL;
+	}
+
+	template<size_t N>
+	Signature Exact(const uint32 (&words)[N])
+	{
+		return {words, {}};
+	}
+
+	template<size_t N>
+	Signature Masked(const uint32 (&words)[N], const uint32 (&masks)[N])
+	{
+		return {words, masks};
+	}
+
+	constexpr uint32 F = 0xFFFFFFFF; // compare the whole word
+	constexpr uint32 OP = 0xFF000000; // compare only the primary opcode byte (branch offsets differ)
+
+	// Xenoblade Chronicles X: counter that lowers the framebuffer quality when the GPU seems hung
+	const uint32 sigXcxHangCounter[] = {0x3B390001, 0x28194E20, 0x40810044};
+	// Xenoblade Chronicles X: call to the "is this a reduction buffer" check
+	const uint32 sigXcxReduction[] = {0x80C9001C, 0x38A00001, 0x807E0080, 0x809E02EC, 0x80E90020, 0x48061ED1, 0x7E731B78};
+	const uint32 maskXcxReduction[] = {F, F, F, F, F, 0, F};
+	// Breath of the Wild: two spin loops on an atomic flag
+	const uint32 sigBotwSpin1[] = {0x80E60000, 0x2C070001, 0x4182FFF8, 0x7D003028, 0x2C080000, 0x4082FFF8, 0x7C00306C, 0x39000001, 0x7D00312D, 0x4082FFE8};
+	const uint32 sigBotwSpin2[] = {0x800C0000, 0x2C000001, 0x4182FFF8, 0x7CA06028, 0x2C050000, 0x4082FFF8, 0x7C00606C, 0x38800001, 0x7C80612D, 0x4082FFE8};
+	// FFL (Mii library): float array byte swap, two compiler schedules of the same function
+	const uint32 sigFflSwapA[] = {0x7C0802A6, 0x9421FFE8, 0x93C10010, 0x7C7E1B78, 0x93E10014, 0x93810008, 0x7C9F2378, 0x93A1000C, 0x9001001C, 0x3BA00000, 0x7C1DF840, 0x40800020, 0x57BC103A, 0x7C3EE42E};
+	const uint32 sigFflSwapB[] = {0x7C0802A6, 0x9421FFE8, 0x93E10014, 0x93A1000C, 0x7C9F2378, 0x93810008, 0x93C10010, 0x9001001C, 0x3BA00000, 0x7C1DF840, 0x7C7E1B78, 0x40800020, 0x57BC103A, 0x7C3EE42E};
+	// Monster Hunter 3 Ultimate: start-up race
+	const uint32 sigMh3uRace[] = {0x38210040, 0x38600000, 0x4E800020, 0x807BDB9C, 0x48116B81, 0x2C030000};
+	const uint32 maskMh3uRace[] = {F, F, F, F, OP, F};
+	// Super Smash Bros. for Wii U: soft lock after matches
+	const uint32 sigSmashSoftlock[] = {0x2C030000, 0x41820020, 0x3860000A, 0x4833B8AD, 0x7FA3EB78, 0x7FC4F378, 0x4BFFFF09, 0x2C030000};
+	const uint32 maskSmashSoftlock[] = {F, F, F, OP, F, F, OP, F};
+	// Paper Mario Color Splash: crash in the cutscene after the yellow paint star
+	const uint32 sigPmcsPaintStar[] = {0x9421FFB8, 0xBE610014, 0x7C0802A6, 0x7CB32B78, 0x9001004C, 0x7C9D2378, 0x833D000C, 0x813904A8, 0x5467103A, 0x7FC7482E, 0x831E00DC, 0x82F80008, 0x2C170000};
+	// Bayonetta 2: audio queue compare that loops forever after a stutter
+	const uint32 sigBayo2AudioQueue[] = {0x8003003C, 0x8143005C, 0x81830040, 0x5548B2BE, 0x3D40101D, 0x7D6C4214, 0x394A46F0, 0x7D8B0050};
+	const uint32 maskBayo2AudioQueue[] = {F, F, F, F, 0xFFFF0000, F, 0xFFFF0000, F};
+	// Super Mario 3D World: dynamic framebuffer scaling
+	const uint32 sigSm3dwDynamicRes[] = {0x9421FFB8, 0xBF21002C, 0x7C0802A6, 0x9001004C, 0x7C7E1B78, 0x817E07D8, 0x38800002, 0x386B0003};
+	// The Wind Waker HD: wait function holding a mutex it does not need
+	const uint32 sigTwwWait[] = {0x7C0802A6, 0x9421FFF0, 0x93E1000C, 0x7C7F1B78, 0x90010014, 0x807F02E0, 0x8183000C, 0x800C001C, 0x7C0903A6, 0x38A00000, 0x389F0368};
+	// Miiverse / eShop (wave.rpx): domain whitelist check
+	const uint32 sigWaveWhitelist[] = {0x89450000, 0x2C0A002E, 0x40820008, 0x4BFFFF5C};
+	// libopenssl.rpl: ssl_verify_cert_chain
+	const uint32 sigOpensslVerifyChain[] = {0x9421FF58, 0x93C100A0, 0x93E100A4, 0x7C9F2379, 0x7C7E1B78, 0x900100AC, 0x41820014, 0x7FE3FB78};
+
+	// Wind Waker HD: branch in the DSP channel shutdown, per region (RPX hash -> address)
+	struct TwwDspFix
+	{
+		uint32 rpxHash;
+		MPTR address;
+	};
+	const TwwDspFix kTwwDspFixes[] = {
+		{0xB1C033DD, 0x02813878}, // USA
+		{0xCDC68ACD, 0x02814138}, // EUR
+	};
+	constexpr uint32 kTwwDspBranchGe = 0x40800018; // bge +0x18
+	constexpr uint32 kTwwDspBranch = (18u << 26) | 0x18; // b +0x18
+
+	// indices of the registered HLE functions, -1 until GamePatch_scan() ran
+	sint32 s_hleBotwSpin1 = -1;
+	sint32 s_hleBotwSpin2 = -1;
+	sint32 s_hleFflSwap = -1;
+
+	bool s_mh3uFirstCall = true;
+
+	// ---------------------------------------------------------------- host replacements
+
+	// Breath of the Wild spin loops: yield while the lock is still held so other threads can run
+	void BotwSpinStep(PPCInterpreter_t* hCPU, uint32 targetGpr)
+	{
+		const uint32 object = hCPU->gpr[24];
+		const uint32 pending = memory_readU32(object + 0x7C);
+		const uint8 busy = memory_readU8(object + 0x80);
+		if (busy != 0 && hCPU->gpr[22] == 0 && pending == 0)
+			PPCInterpreter_relinquishTimeslice();
+		hCPU->gpr[targetGpr] = hCPU->gpr[29]; // the instruction the hook replaced
+		hCPU->instructionPointer += 4;
+	}
+
+	void HleBotwSpin1(PPCInterpreter_t* hCPU)
+	{
+		BotwSpinStep(hCPU, 6);
+	}
+
+	void HleBotwSpin2(PPCInterpreter_t* hCPU)
+	{
+		BotwSpinStep(hCPU, 12);
+	}
+
+	// FFL byte swaps floats through FPRs, which does not keep NaN payloads intact under the recompiler
+	void HleFflSwapFloats(PPCInterpreter_t* hCPU)
+	{
+		ppcDefineParamStructPtr(values, uint32, 0);
+		ppcDefineParamS32(count, 1);
+		for (sint32 i = 0; i < count; i++)
+			values[i] = _swapEndianU32(values[i]);
 		osLib_returnFromFunction(hCPU, 0);
-		return;
 	}
 
-	// quick check
-	uint32be newCount = xcxCS->count.load() + 1;
-	uint32be expectedCount = 0;
-	if(xcxCS->count.compare_exchange_strong(expectedCount, newCount))
+	// recursive lock used by Xenoblade Chronicles X (registered, currently not hooked)
+	struct XcxLock
 	{
-		xcxCS->ownerThreadId = threadId;
+		std::atomic<uint32be> depth;
+		uint32be owner;
+		uint32 unused08;
+	};
+
+	void HleXcxEnterLock(PPCInterpreter_t* hCPU)
+	{
+		ppcDefineParamStructPtr(lock, XcxLock, 0);
+		const uint32 self = MEMPTR<OSThread_t>(coreinit::OSGetCurrentThread()).GetMPTR();
+		if (lock->owner == (uint32be)self)
+		{
+			lock->depth.store(lock->depth.load() + 1);
+			osLib_returnFromFunction(hCPU, 0);
+			return;
+		}
+		auto tryTake = [&]() {
+			uint32be expected = 0;
+			if (!lock->depth.compare_exchange_strong(expected, (uint32be)1))
+				return false;
+			lock->owner = self;
+			return true;
+		};
+		while (!tryTake())
+		{
+			bool taken = false;
+			for (int spin = 0; spin < 50 && !taken; spin++)
+			{
+				_mm_pause();
+				taken = tryTake();
+			}
+			if (taken)
+				break;
+			PPCCore_switchToScheduler();
+		}
 		osLib_returnFromFunction(hCPU, 0);
-		return;
 	}
 
-	// spinloop for a bit to reduce the time we occupy the scheduler lock (via PPCCore_switchToScheduler)
-	while (true)
+	// Monster Hunter 3 Ultimate: the flag read here must come back 0 the first time
+	void HleMh3uRace(PPCInterpreter_t* hCPU)
 	{
-		for (sint32 i = 0; i < 50; i++)
+		uint8 result = memory_readU8(hCPU->gpr[3] + 0x3E5) ^ 1;
+		if (s_mh3uFirstCall)
 		{
-			if (xcxCS->count.compare_exchange_strong(expectedCount, newCount))
-			{
-				xcxCS->ownerThreadId = threadId;
-				osLib_returnFromFunction(hCPU, 0);
-				return;
-			}
-            _mm_pause();
+			s_mh3uFirstCall = false;
+			result = 0;
 		}
-		PPCCore_switchToScheduler();
-	}
-	osLib_returnFromFunction(hCPU, 0);
-}
-
-bool mh3u_raceConditionWorkaround = true;
-
-void hleExport_mh3u_raceConditionWorkaround(PPCInterpreter_t* hCPU) // new style HLE method, does not need entry in hle_load (but can only be reached via BL and not the usual HLE instruction)
-{
-	uint8 b = memory_readU8(hCPU->gpr[3] + 0x3E5);
-	b ^= 1;
-	if (mh3u_raceConditionWorkaround)
-	{
-		b = 0;
-		mh3u_raceConditionWorkaround = false;
-	}
-	osLib_returnFromFunction(hCPU, b);
-}
-
-void hleExport_pmcs_yellowPaintStarCrashWorkaround(PPCInterpreter_t* hCPU)
-{
-	hCPU->gpr[7] = hCPU->gpr[3] * 4;
-	MPTR parentLR = memory_readU32(hCPU->gpr[1] + 0x4C);
-	if (hCPU->gpr[3] >= 0x00800000)
-	{
-		hCPU->instructionPointer = parentLR;
-		hCPU->gpr[1] += 0x48;
-		hCPU->gpr[3] = 0;
-		return;
-	}
-	hCPU->instructionPointer = hCPU->spr.LR;
-}
-
-uint8 hleSignature_wwhd_0173B2A0[] = {0x8D,0x43,0x00,0x01,0x7C,0xC9,0x52,0x78,0x55,0x2C,0x15,0xBA,0x7C,0x0C,0x28,0x2E,0x54,0xC8,0xC2,0x3E,0x7D,0x06,0x02,0x78,0x42,0x00,0xFF,0xE8,0x7C,0xC3,0x30,0xF8};
-
-void hle_scan(uint8* data, sint32 dataLength, char* hleFunctionName)
-{
-	sint32 functionIndex = osLib_getFunctionIndex("hle", hleFunctionName);
-	if( functionIndex < 0 )
-	{
-		debug_printf("HLE function unknown\n");
-		return;
+		osLib_returnFromFunction(hCPU, result);
 	}
 
-	uint8* scanStart = memory_getPointerFromVirtualOffset(0x01000000);
-	uint8* scanEnd = scanStart + 0x0F000000 - dataLength;
-	uint8* scanCurrent = scanStart;
-	while( scanCurrent < scanEnd )
+	// Paper Mario Color Splash: an out of range index makes the caller return 0 instead of crashing
+	void HlePmcsPaintStar(PPCInterpreter_t* hCPU)
 	{
-		if( memcmp(scanCurrent, data, dataLength) == 0 )
+		const uint32 index = hCPU->gpr[3];
+		hCPU->gpr[7] = index * 4;
+		if (index >= 0x00800000)
 		{
-			uint32 offset = (uint32)(scanCurrent - scanStart) + 0x01000000;
-			debug_printf("HLE signature for '%s' found at 0x%08x\n", hleFunctionName, offset);
-			uint32 opcode = (1<<26)|(functionIndex+0x1000); // opcode for HLE: 0x1000 + FunctionIndex
-			memory_write<uint32>(offset, opcode);
-			break;
+			hCPU->instructionPointer = memory_readU32(hCPU->gpr[1] + 0x4C); // caller's saved LR
+			hCPU->gpr[1] += 0x48; // drop the caller's stack frame
+			hCPU->gpr[3] = 0;
+			return;
 		}
-		scanCurrent += 4;
+		hCPU->instructionPointer = hCPU->spr.LR;
 	}
-}
 
-MPTR hle_locate(uint8* data, sint32 dataLength)
-{
-	uint8* scanStart = memory_getPointerFromVirtualOffset(0x01000000);
-	uint8* scanEnd = scanStart + 0x0F000000 - dataLength;
-	uint8* scanCurrent = scanStart;
-	while( scanCurrent < scanEnd )
-	{
-		if( memcmp(scanCurrent, data, dataLength) == 0 )
-		{
-			return memory_getVirtualOffsetFromPointer(scanCurrent);
-		}
-		scanCurrent += 4;
-	}
-	return MPTR_NULL;
-}
+	// ---------------------------------------------------------------- patch steps
 
-bool compareMasked(uint8* mem, uint8* compare, uint8* mask, sint32 length)
-{
-	while( length )
+	void FixXcxHangCounter()
 	{
-		uint8 m = *mask;
-		if( (*mem&m) != (*compare&m) )
-			return false;
-		mem++;
-		compare++;
-		mask++;
-		length--;
-	}
-	return true;
-}
-
-MPTR hle_locate(uint8* data, uint8* mask, sint32 dataLength)
-{
-	uint8* scanStart = memory_getPointerFromVirtualOffset(MEMORY_CODEAREA_ADDR);
-	uint8* scanEnd = memory_getPointerFromVirtualOffset(RPLLoader_GetMaxCodeOffset() - dataLength);
-	uint8* scanCurrent = scanStart;
-	if( mask )
-	{
-		if (dataLength >= 4 && *(uint32*)mask == 0xFFFFFFFF)
-		{
-			// fast path
-			uint32 firstDword = *(uint32*)data;
-			while (scanCurrent < scanEnd)
-			{
-				if (*(uint32*)scanCurrent == firstDword && compareMasked(scanCurrent, data, mask, dataLength))
-				{
-					return memory_getVirtualOffsetFromPointer(scanCurrent);
-				}
-				scanCurrent += 4;
-			}
-		}
-		else
+		// the counter increment is replaced by the compare that follows it
+		if (MPTR at = FindSignature(Exact(sigXcxHangCounter)))
 		{
 #ifdef CEMU_DEBUG_ASSERT
-			if (mask[0] != 0xFF)
-				assert_dbg();
+			cemuLog_log(LogType::Force, "GamePatch: XCX hang counter at 0x{:08x}", at);
 #endif
-			uint8 firstByte = data[0];
-			while (scanCurrent < scanEnd)
-			{
-				if (scanCurrent[0] == firstByte && compareMasked(scanCurrent, data, mask, dataLength))
-				{
-					return memory_getVirtualOffsetFromPointer(scanCurrent);
-				}
-				scanCurrent += 4;
-			}
+			memory_writeU32(at, memory_readU32(at + 4));
 		}
 	}
-	else
+
+	void FixXcxReductionBuffer()
 	{
-		while( scanCurrent < scanEnd )
+		MPTR at = FindSignature(Masked(sigXcxReduction, maskXcxReduction));
+		if (!at)
+			return;
+#ifdef CEMU_DEBUG_ASSERT
+		cemuLog_log(LogType::Force, "GamePatch: XCX reduction buffer check at 0x{:08x}", at);
+#endif
+		// make the called check always answer "no"
+		const MPTR call = at + 0x14;
+		const MPTR check = call + (memory_readU32(call) & 0x3FFFFFC);
+		memory_writeU32(check, kOpLiR3_0);
+		memory_writeU32(check + 4, kOpBlr);
+	}
+
+	void HookBotwSpinLoops()
+	{
+		s_hleBotwSpin1 = osLib_getFunctionIndex("hle", "h000000001");
+		if (MPTR at = FindSignature(Exact(sigBotwSpin1)))
 		{
-			if( memcmp(scanCurrent, data, dataLength) == 0 )
-			{
-				return memory_getVirtualOffsetFromPointer(scanCurrent);
-			}
-			scanCurrent += 4;
+#ifdef CEMU_DEBUG_ASSERT
+			cemuLog_log(LogType::Force, "GamePatch: BotW spin loop 1 at 0x{:08x}", at);
+#endif
+			memory_writeU32(at - 4, HleInstruction(s_hleBotwSpin1));
+		}
+		s_hleBotwSpin2 = osLib_getFunctionIndex("hle", "h000000002");
+		if (MPTR at = FindSignature(Exact(sigBotwSpin2)))
+		{
+#ifdef CEMU_DEBUG_ASSERT
+			cemuLog_log(LogType::Force, "GamePatch: BotW spin loop 2 at 0x{:08x}", at);
+#endif
+			memory_writeU32(at - 4, HleInstruction(s_hleBotwSpin2));
 		}
 	}
-	return MPTR_NULL;
+
+	void HookFflSwap()
+	{
+		s_hleFflSwap = osLib_getFunctionIndex("hle", "h000000003");
+		const Signature variants[] = {Exact(sigFflSwapA), Exact(sigFflSwapB)};
+		for (size_t v = 0; v < std::size(variants); v++)
+		{
+			if (MPTR at = FindSignature(variants[v]))
+			{
+				cemuLog_logDebug(LogType::Force, "GamePatch: FFL float swap (variant {}) at 0x{:08x}", v + 1, at);
+				memory_writeU32(at, HleInstruction(s_hleFflSwap));
+				return;
+			}
+		}
+	}
+
+	void FixMh3uRace()
+	{
+		if (MPTR at = FindSignature(Masked(sigMh3uRace, maskMh3uRace)))
+		{
+			const MPTR call = at + 0x10;
+			cemuLog_log(LogType::Force, "GamePatch: MH3U race fix at 0x{:08x}", call);
+			memory_writeU32(call, AbsoluteCall(PPCInterpreter_makeCallableExportDepr(HleMh3uRace)));
+		}
+	}
+
+	void FixSmashSoftlock()
+	{
+		if (MPTR at = FindSignature(Masked(sigSmashSoftlock, maskSmashSoftlock)))
+		{
+			cemuLog_logDebug(LogType::Force, "GamePatch: Smash soft lock fix at 0x{:08x}", at);
+			memory_writeU32(at + 0x20, memory_readU32(at + 0x1C));
+		}
+	}
+
+	void FixPmcsPaintStar()
+	{
+		if (MPTR at = FindSignature(Exact(sigPmcsPaintStar)))
+		{
+			cemuLog_logDebug(LogType::Force, "GamePatch: Color Splash crash fix at 0x{:08x}", at);
+			memory_writeU32(at + 0x20, AbsoluteCall(PPCInterpreter_makeCallableExportDepr(HlePmcsPaintStar)));
+		}
+	}
+
+	void FixBayo2AudioQueue()
+	{
+		if (MPTR at = FindSignature(Masked(sigBayo2AudioQueue, maskBayo2AudioQueue)))
+		{
+			// unsigned compare (cmpl) becomes signed compare (cmp)
+			const MPTR compare = at + 0x34;
+			cemuLog_log(LogType::Force, "GamePatch: Bayonetta 2 audio queue fix at 0x{:08x}", compare);
+			memory_writeU32(compare, memory_readU32(compare) & ~(0x3FFu << 1));
+		}
+	}
+
+	void FixTwwDspChannel()
+	{
+		const uint32 hash = CafeSystem::GetRPXHashUpdated();
+		for (const TwwDspFix& fix : kTwwDspFixes)
+		{
+			if (fix.rpxHash != hash)
+				continue;
+			if (memory_readU32(fix.address) == kTwwDspBranchGe)
+			{
+				debug_printf("GamePatch: TWW DSP channel fix at 0x%08x\n", fix.address);
+				memory_writeU32(fix.address, kTwwDspBranch);
+			}
+			return;
+		}
+	}
+
+	void FixSm3dwDynamicRes()
+	{
+		if (MPTR at = FindSignature(Exact(sigSm3dwDynamicRes)))
+		{
+			cemuLog_log(LogType::Force, "GamePatch: SM3DW dynamic resolution disabled at 0x{:08x}", at);
+			memory_writeU32(at, kOpBlr);
+		}
+	}
+
+	void FixTwwWaitLock()
+	{
+		if (MPTR at = FindSignature(Exact(sigTwwWait)))
+		{
+			cemuLog_log(LogType::Force, "GamePatch: TWW wait lock removed at 0x{:08x}", at);
+			for (uint32 offset : {0x34u, 0x48u, 0x50u, 0x64u}) // mutex lock and unlock calls
+				memory_writeU32(at + offset, kOpNop);
+		}
+	}
+
+	void PatchBrowserForCustomServices()
+	{
+		const NetworkService service = ActiveSettings::GetNetworkService();
+		// let the Miiverse and eShop browsers open any domain
+		if (service != NetworkService::Nintendo && CafeSystem::GetForegroundTitleArgStr().ends_with("wave.rpx"))
+		{
+			if (MPTR at = FindSignature(Exact(sigWaveWhitelist)))
+			{
+				cemuLog_log(LogType::Force, "GamePatch: browser domain whitelist disabled at 0x{:08x}", at);
+				memory_writeU32(at, kOpLiR3_1);
+				memory_writeU32(at + 4, kOpBlr);
+			}
+		}
+		// accept the service's certificates in the browser's OpenSSL
+		if (IsNetworkServiceSSLDisabled(service) && RPLLoader_GetHandleByModuleName("libopenssl.rpl") != RPL_INVALID_HANDLE)
+		{
+			if (MPTR at = FindSignature(Exact(sigOpensslVerifyChain)))
+			{
+				cemuLog_log(LogType::Force, "GamePatch: OpenSSL certificate chain check disabled at 0x{:08x}", at);
+				memory_writeU32(at + 0x28, kOpNop);
+				memory_writeU32(at + 0x40, kOpLiR3_1);
+			}
+		}
+	}
 }
 
-uint8 xcx_gpuHangDetection_degradeFramebuffer[] = {0x3B,0x39,0x00,0x01,0x28,0x19,0x4E,0x20,0x40,0x81,0x00,0x44};
-
-uint8 xcx_framebufferReductionSignature[] = {0x80,0xC9,0x00,0x1C,0x38,0xA0,0x00,0x01,0x80,0x7E,0x00,0x80,0x80,0x9E,0x02,0xEC,0x80,0xE9,0x00,0x20,0x48,0x06,0x1E,0xD1,0x7E,0x73,0x1B,0x78};
-uint8 xcx_framebufferReductionMask[] =      {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00,0x00,0x00,0x00,0xFF,0xFF,0xFF,0xFF};
-
-uint8 botw_busyLoopSignature[] = {0x80,0xE6,0x00,0x00,0x2C,0x07,0x00,0x01,0x41,0x82,0xFF,0xF8,0x7D,0x00,0x30,0x28,0x2C,0x08,0x00,0x00,0x40,0x82,0xFF,0xF8,0x7C,0x00,0x30,0x6C,0x39,0x00,0x00,0x01,0x7D,0x00,0x31,0x2D,0x40,0x82,0xFF,0xE8 };
-uint8 botw_busyLoopMask[] =      {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF };
-
-uint8 botw_busyLoopSignature2[] = {0x80,0x0C,0x00,0x00,0x2C,0x00,0x00,0x01,0x41,0x82,0xFF,0xF8,0x7C,0xA0,0x60,0x28,0x2C,0x05,0x00,0x00,0x40,0x82,0xFF,0xF8,0x7C,0x00,0x60,0x6C,0x38,0x80,0x00,0x01,0x7C,0x80,0x61,0x2D,0x40,0x82,0xFF,0xE8};
-uint8 botw_busyLoopMask2[] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
-
-uint8 botw_crashFuncSignature[] = { 0x94,0x21,0xFF,0xD8,0x7C,0x08,0x02,0xA6,0xBF,0x41,0x00,0x10,0x7C,0xC7,0x33,0x78,0x7C,0xBE,0x2B,0x78,0x90,0x01,0x00,0x2C,0x7C,0x9D,0x23,0x78,0x38,0x00,0x00,0x00,0x7F,0xC6,0xF3,0x78,0x38,0x81,0x00,0x0C,0x90,0x01,0x00,0x0C,0x38,0xA1,0x00,0x08 };
-uint8 botw_crashFuncMask[] = { 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF };
-
-uint8 ffl_floatArrayEndianSwap[] = { 0x7C,0x08,0x02,0xA6,0x94,0x21,0xFF,0xE8,0x93,0xC1,0x00,0x10,0x7C,0x7E,0x1B,0x78,0x93,0xE1,0x00,0x14,0x93,0x81,0x00,0x08,0x7C,0x9F,0x23,0x78,0x93,0xA1,0x00,0x0C,0x90,0x01,0x00,0x1C,0x3B,0xA0,0x00,0x00,0x7C,0x1D,0xF8,0x40,0x40,0x80,0x00,0x20,0x57,0xBC,0x10,0x3A,0x7C,0x3E,0xE4,0x2E };
-
-// Alternative FFL endian swap signature (Mario Kart 8 and possibly other titles)
-// Same algorithm as above but with a different compiler-scheduled prologue ordering
-uint8 ffl_floatArrayEndianSwap_v2[] = { 0x7C,0x08,0x02,0xA6,0x94,0x21,0xFF,0xE8,0x93,0xE1,0x00,0x14,0x93,0xA1,0x00,0x0C,0x7C,0x9F,0x23,0x78,0x93,0x81,0x00,0x08,0x93,0xC1,0x00,0x10,0x90,0x01,0x00,0x1C,0x3B,0xA0,0x00,0x00,0x7C,0x1D,0xF8,0x40,0x7C,0x7E,0x1B,0x78,0x40,0x80,0x00,0x20,0x57,0xBC,0x10,0x3A,0x7C,0x3E,0xE4,0x2E };
-
-uint8 xcx_enterCriticalSectionSignature[] = { 0x94,0x21,0xFF,0xE0,0xBF,0x41,0x00,0x08,0x7C,0x08,0x02,0xA6,0x90,0x01,0x00,0x24,0x7C,0x7E,0x1B,0x78,0x80,0x1E,0x00,0x08,0x2C,0x00,0x00,0x00,0x41,0x82,0x00,0xC0,0x48,0x01,0xD7,0xA1,0x7C,0x7A,0x1B,0x79,0x41,0x82,0x00,0xB4,0x81,0x3E,0x00,0x04,0x7C,0x09,0xD0,0x40,0x40,0x82,0x00,0x2C,0x7D,0x20,0xF0,0x28,0x7C,0x00,0xF0,0x6C };
-uint8 xcx_enterCriticalSectionMask[] =      { 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00,0x00,0x00,0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF };
-
-uint8 smash4_softlockFixV0Signature[] = { 0x2C,0x03,0x00,0x00,0x41,0x82,0x00,0x20,0x38,0x60,0x00,0x0A,0x48,0x33,0xB8,0xAD,0x7F,0xA3,0xEB,0x78,0x7F,0xC4,0xF3,0x78,0x4B,0xFF,0xFF,0x09,0x2C,0x03,0x00,0x00 };
-uint8 smash4_softlockFixV0Mask[] =      { 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00,0x00,0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00,0x00,0x00,0xFF,0xFF,0xFF,0xFF };
-
-uint8 mh3u_raceConditionWorkaroundV0Signature[] = { 0x38,0x21,0x00,0x40,0x38,0x60,0x00,0x00,0x4E,0x80,0x00,0x20,0x80,0x7B,0xDB,0x9C,0x48,0x11,0x6B,0x81,0x2C,0x03,0x00,0x00 };
-uint8 mh3u_raceConditionWorkaroundV0Mask[] = { 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00,0x00,0x00,0xFF,0xFF,0xFF,0xFF };
-
-uint8 pmcs_yellowPaintStarCrashV0Signature[] = { 0x94,0x21,0xFF,0xB8,0xBE,0x61,0x00,0x14,0x7C,0x08,0x02,0xA6,0x7C,0xB3,0x2B,0x78,0x90,0x01,0x00,0x4C,0x7C,0x9D,0x23,0x78,0x83,0x3D,0x00,0x0C,0x81,0x39,0x04,0xA8,0x54,0x67,0x10,0x3A,0x7F,0xC7,0x48,0x2E,0x83,0x1E,0x00,0xDC,0x82,0xF8,0x00,0x08,0x2C,0x17,0x00,0x00 };
-//uint8 mh3u_raceConditionWorkaroundV0Mask[] = { 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00,0x00,0x00,0xFF,0xFF,0xFF,0xFF };
-
-uint8 bayo2_audioQueueFixSignature[] = { 0x80,0x03,0x00,0x3C,0x81,0x43,0x00,0x5C,0x81,0x83,0x00,0x40,0x55,0x48,0xB2,0xBE,0x3D,0x40,0x10,0x1D,0x7D,0x6C,0x42,0x14,0x39,0x4A,0x46,0xF0,0x7D,0x8B,0x00,0x50 };
-uint8 bayo2_audioQueueFixMask[] = { 0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00,0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00,0x00,0xFF,0xFF,0xFF,0xFF };
-
-uint8 sm3dw_dynFrameBufferResScale[] = { 0x94,0x21,0xFF,0xB8,0xBF,0x21,0x00,0x2C,0x7C,0x08,0x02,0xA6,0x90,0x01,0x00,0x4C,0x7C,0x7E,0x1B,0x78,0x81,0x7E,0x07,0xD8,0x38,0x80,0x00,0x02,0x38,0x6B,0x00,0x03 };
-
-uint8 tww_waitFunc[] = { 0x7C,0x08,0x02,0xA6,0x94,0x21,0xFF,0xF0,0x93,0xE1,0x00,0x0C,0x7C,0x7F,0x1B,0x78,0x90,0x01,0x00,0x14,0x80,0x7F,0x02,0xE0,0x81,0x83,0x00,0x0C,0x80,0x0C,0x00,0x1C,0x7C,0x09,0x03,0xA6,0x38,0xA0,0x00,0x00,0x38,0x9F,0x03,0x68 };
-
-static_assert(sizeof(xcx_enterCriticalSectionSignature) == sizeof(xcx_enterCriticalSectionMask), "xcx_enterCriticalSection signature and size mismatch");
-static_assert(sizeof(bayo2_audioQueueFixSignature) == sizeof(bayo2_audioQueueFixMask), "bayo2_audioQueueFix signature and size mismatch");
-
-uint8 cars3_avro_schema_incref[] = { 0x2C,0x03,0x00,0x00,0x94,0x21,0xFF,0xE8,0x41,0x82,0x00,0x40,0x39,0x03,0x00,0x08,0x39,0x41,0x00,0x08,0x91,0x01,0x00,0x08,0x7D,0x80,0x50,0x28,0x2C,0x0C,0xFF,0xFF,0x41,0x82,0x00,0x28,0x39,0x21,0x00,0x0C,0x38,0x0C,0x00,0x01,0x38,0xE0,0x00,0x01,0x91,0x01,0x00,0x0C,0x7C,0x00,0x49,0x2D };
-
-// For USA titles: 000500301001610a / 000500301001410a
-uint8 miiverse_eshop_url_match_whitelist_func[] = {
-	// For both titles, the code fully matches with the relative
-	// branch targets, even if the absolute targets are different.
-	0x89,0x45,0x00,0x00, // lbz r10, 0x0(r5)
-	0x2c,0x0a,0x00,0x2e, // cmpwi r10, 0x2e
-	0x40,0x82,0x00,0x08, // bne LAB_020ff3a8
-	0x4b,0xff,0xff,0x5c // b FUN_020ff300
-};
-uint8 wave_libopenssl_ssl_verify_cert_chain[] = { 0x94,0x21,0xff,0x58,0x93,0xc1,0x00,0xa0,0x93,0xe1,0x00,0xa4,0x7c,0x9f,0x23,0x79,0x7c,0x7e,0x1b,0x78,0x90,0x01,0x00,0xac,0x41,0x82,0x00,0x14,0x7f,0xe3,0xfb,0x78 }; // rpl function for the above applets
-
-sint32 hleIndex_h000000001 = -1;
-sint32 hleIndex_h000000002 = -1;
-sint32 hleIndex_h000000003 = -1;
-sint32 hleIndex_h000000004 = -1;
-
-/*
- * Returns true for all HLE functions that do not jump to LR
- * Used by recompiler to determine function code flow
- */
 bool GamePatch_IsNonReturnFunction(uint32 hleIndex)
 {
-	if (hleIndex == hleIndex_h000000001)
-		return true;
-	if (hleIndex == hleIndex_h000000002)
-		return true;
-	if (hleIndex == hleIndex_h000000003)
-		return false;
-	if (hleIndex == hleIndex_h000000004)
-		return false;
-	return false;
+	// the spin loop hooks continue after the hooked instruction instead of returning to LR
+	return hleIndex == (uint32)s_hleBotwSpin1 || hleIndex == (uint32)s_hleBotwSpin2;
 }
 
 void GamePatch_scan()
 {
-	MPTR hleAddr;
-	uint32 hleInstallStart = GetTickCount();
-
-	hleAddr = hle_locate(xcx_gpuHangDetection_degradeFramebuffer, NULL, sizeof(xcx_gpuHangDetection_degradeFramebuffer));
-	if( hleAddr )
-	{
-#ifdef CEMU_DEBUG_ASSERT
-		cemuLog_log(LogType::Force, "HLE: XCX GPU hang detection");
-#endif
-		// remove the ADDI r25, r25, 1 instruction
-		memory_writeU32(hleAddr, memory_readU32(hleAddr+4));
-	}
-
-	hleAddr = hle_locate(xcx_framebufferReductionSignature, xcx_framebufferReductionMask, sizeof(xcx_framebufferReductionSignature));
-	if( hleAddr )
-	{
-#ifdef CEMU_DEBUG_ASSERT
-		cemuLog_log(LogType::Force, "HLE: Prevent XCX rendertarget reduction");
-#endif
-		uint32 bl = memory_readU32(hleAddr+0x14);
-		uint32 func_isReductionBuffer = hleAddr + 0x14 + (bl&0x3FFFFFC);
-
-		// patch isReductionBuffer
-		memory_writeU32(func_isReductionBuffer, 0x38600000); // LI R3, 0
-		memory_writeU32(func_isReductionBuffer+4, 0x4E800020); // BLR
-
-	}
-
-	hleIndex_h000000001 = osLib_getFunctionIndex("hle", "h000000001");
-	hleAddr = hle_locate(botw_busyLoopSignature, botw_busyLoopMask, sizeof(botw_busyLoopSignature));
-	if (hleAddr)
-	{
-#ifdef CEMU_DEBUG_ASSERT
-		cemuLog_log(LogType::Force, "HLE: Patch BotW busy loop 1 at 0x{:08x}", hleAddr);
-#endif
-		sint32 functionIndex = hleIndex_h000000001;
-		uint32 opcode = (1 << 26) | (functionIndex); // opcode for HLE: 0x1000 + FunctionIndex
-		memory_write<uint32>(hleAddr - 4, opcode);
-	}
-	hleIndex_h000000002 = osLib_getFunctionIndex("hle", "h000000002");
-	hleAddr = hle_locate(botw_busyLoopSignature2, botw_busyLoopMask2, sizeof(botw_busyLoopSignature2));
-	if (hleAddr)
-	{
-#ifdef CEMU_DEBUG_ASSERT
-		cemuLog_log(LogType::Force, "HLE: Patch BotW busy loop 2 at 0x{:08x}", hleAddr);
-#endif
-		sint32 functionIndex = hleIndex_h000000002;
-		uint32 opcode = (1 << 26) | (functionIndex); // opcode for HLE: 0x1000 + FunctionIndex
-		memory_write<uint32>(hleAddr - 4, opcode);
-	}
-
-	// FFL library float array endian conversion
-	// original function needs invalid float values to remain intact between LFSX -> STFSX, which is not supported in recompiler mode
-	hleIndex_h000000003 = osLib_getFunctionIndex("hle", "h000000003");
-	hleAddr = hle_locate(ffl_floatArrayEndianSwap, NULL, sizeof(ffl_floatArrayEndianSwap));
-	if (hleAddr)
-	{
-		cemuLog_logDebug(LogType::Force, "HLE: Hook FFL float array endian swap function (v1) at 0x{:08x}", hleAddr);
-		sint32 functionIndex = hleIndex_h000000003;
-		uint32 opcode = (1 << 26) | (functionIndex); // opcode for HLE: 0x1000 + FunctionIndex
-		memory_write<uint32>(hleAddr, opcode);
-	}
-	else
-	{
-		// Try v2 signature (Mario Kart 8 and possibly other titles with reordered prologue)
-		hleAddr = hle_locate(ffl_floatArrayEndianSwap_v2, NULL, sizeof(ffl_floatArrayEndianSwap_v2));
-		if (hleAddr)
-		{
-			cemuLog_logDebug(LogType::Force, "HLE: Hook FFL float array endian swap function (v2) at 0x{:08x}", hleAddr);
-			sint32 functionIndex = hleIndex_h000000003;
-			uint32 opcode = (1 << 26) | (functionIndex); // opcode for HLE: 0x1000 + FunctionIndex
-			memory_write<uint32>(hleAddr, opcode);
-		}
-	}
-
-	// XCX freeze workaround
-	//hleAddr = hle_locate(xcx_enterCriticalSectionSignature, xcx_enterCriticalSectionMask, sizeof(xcx_enterCriticalSectionSignature));
-	//if (hleAddr)
-	//{
-	//	cemuLog_logDebug(LogType::Force, "HLE: Hook XCX enterCriticalSection function at 0x{:08x}", hleAddr);
-	//	hleIndex_h000000004 = osLib_getFunctionIndex("hle", "h000000004");
-	//	sint32 functionIndex = hleIndex_h000000004;
-	//	uint32 opcode = (1 << 26) | (functionIndex); // opcode for HLE: 0x1000 + FunctionIndex
-	//	memory_writeU32Direct(hleAddr, opcode);
-	//}
-
-	// MH3U race condition (tested for EU+US 1.2)
-	hleAddr = hle_locate(mh3u_raceConditionWorkaroundV0Signature, mh3u_raceConditionWorkaroundV0Mask, sizeof(mh3u_raceConditionWorkaroundV0Mask));
-	if (hleAddr)
-	{
-		uint32 patchAddr = hleAddr + 0x10;
-		cemuLog_log(LogType::Force, "HLE: Patch MH3U race condition candidate at 0x{:08x}", patchAddr);
-		uint32 funcAddr = PPCInterpreter_makeCallableExportDepr(hleExport_mh3u_raceConditionWorkaround);
-		// set absolute jump
-		uint32 opc = 0x48000000;
-		opc |= PPC_OPC_LK;
-		opc |= PPC_OPC_AA;
-		opc |= funcAddr;
-		memory_writeU32(patchAddr, opc);
-	}
-
-	// Super Smash Bros softlock fix
-	// fixes random softlocks that can occur after matches
-	hleAddr = hle_locate(smash4_softlockFixV0Signature, smash4_softlockFixV0Mask, sizeof(smash4_softlockFixV0Signature));
-	if (hleAddr)
-	{
-		cemuLog_logDebug(LogType::Force, "Smash softlock fix: 0x{:08x}", hleAddr);
-		memory_writeU32(hleAddr+0x20, memory_readU32(hleAddr+0x1C));
-	}
-
-	// Color Splash Yellow paint star crash workaround
-	// fixes the crash at the beginning of the dream sequence cutscene after collecting the yellow paint star
-	hleAddr = hle_locate(pmcs_yellowPaintStarCrashV0Signature, nullptr, sizeof(pmcs_yellowPaintStarCrashV0Signature));
-	if (hleAddr)
-	{
-		cemuLog_logDebug(LogType::Force, "Color Splash crash fix: 0x{:08x}", hleAddr);
-		uint32 funcAddr = PPCInterpreter_makeCallableExportDepr(hleExport_pmcs_yellowPaintStarCrashWorkaround);
-		// set absolute jump
-		uint32 opc = 0x48000000;
-		opc |= PPC_OPC_LK;
-		opc |= PPC_OPC_AA;
-		opc |= funcAddr;
-		memory_writeU32(hleAddr+0x20, opc);
-	}
-
-	// Bayonetta 2 sound queue patch (fixes audio starting to loop infinitely when there is stutter)
-	hleAddr = hle_locate(bayo2_audioQueueFixSignature, bayo2_audioQueueFixMask, sizeof(bayo2_audioQueueFixSignature));
-	if (hleAddr)
-	{
-		// replace CMPL with CMP
-		cemuLog_log(LogType::Force, "Patching Bayonetta 2 audio bug at: 0x{:08x}", hleAddr+0x34);
-		uint32 opc = memory_readU32(hleAddr + 0x34);
-		opc &= ~(0x3FF << 1); // turn CMPL to CMP
-		memory_writeU32(hleAddr + 0x34, opc);
-	}
-
-	if (CafeSystem::GetRPXHashUpdated() == 0xb1c033dd) // Wind Waker US
-	{
-		uint32 p = memory_readU32(0x02813878);
-		if (p == 0x40800018)
-		{
-			debug_printf("HLE: TWW US dsp kill channel patch\n");
-			uint32 li = 0x18;
-			uint32 opcode = (li & 0x3FFFFFC) | (18 << 26); // replace BGE with B instruction
-			memory_writeU32(0x02813878, opcode);
-		}
-	}
-	else if (CafeSystem::GetRPXHashUpdated() == 0xCDC68ACD) // Wind Waker EU
-	{
-		uint32 p = memory_readU32(0x2814138);
-		if (p == 0x40800018)
-		{
-			debug_printf("HLE: TWW EU dsp kill channel patch\n");
-			uint32 li = 0x18;
-			uint32 opcode = (li & 0x3FFFFFC) | (18 << 26); // replace BGE with B instruction
-			memory_writeU32(0x02814138, opcode);
-		}
-	}
-
-	// disable SM3DW dynamic resolution scaling (fixes level 1-5 spamming lots of texture creates when gradually resizing framebuffer)
-	hleAddr = hle_locate(sm3dw_dynFrameBufferResScale, nullptr, sizeof(sm3dw_dynFrameBufferResScale));
-	if (hleAddr)
-	{
-		cemuLog_log(LogType::Force, "Patching SM3DW dynamic resolution scaling at: 0x{:08x}", hleAddr);
-		memory_writeU32(hleAddr, 0x4E800020); // BLR
-	}
-
-	// remove unnecessary lock from a wait function in TWW
-	// this resolves a deadlock in singlecore mode
-	hleAddr = hle_locate(tww_waitFunc, nullptr, sizeof(tww_waitFunc));
-	if (hleAddr)
-	{
-		cemuLog_log(LogType::Force, "Patching TWW race conditon at: 0x{:08x}", hleAddr);
-		// NOP calls to Lock/Unlock mutex
-		memory_writeU32(hleAddr + 0x34, 0x60000000);
-		memory_writeU32(hleAddr + 0x48, 0x60000000);
-		memory_writeU32(hleAddr + 0x50, 0x60000000);
-		memory_writeU32(hleAddr + 0x64, 0x60000000);
-	}
-
-	// Patch function in Miiverse/eShop wave.rpx that matches
-	// a domain against another to validate its whitelist.
-	// This allows those browsers to load any domain.
-	const NetworkService service = ActiveSettings::GetNetworkService();
-	if (service != NetworkService::Nintendo // Only patch for custom services.
-		&& CafeSystem::GetForegroundTitleArgStr().ends_with("wave.rpx")
-		&& (hleAddr = hle_locate(miiverse_eshop_url_match_whitelist_func,
-			nullptr, sizeof(miiverse_eshop_url_match_whitelist_func))))
-	{
-		cemuLog_log(LogType::Force, "Patching Miiverse/eShop whitelist check at: 0x{:08x}", hleAddr);
-		// Always return 1. (Note that the matched pattern is not at the beginning but still works)
-		memory_writeU32(hleAddr, 0x38600001);
-		memory_writeU32(hleAddr + 0x4, 0x4e800020);
-		// Note that the same applies to Account Settings, but
-		// its version of this function differs a lot.
-		// Search: 88 0c ff ff 2c 00 00 2e (lbz r0,-0x1(r12); cmpwi r0,0x2e)
-	}
-
-	// Additionally patch out SSL checks for libopenssl.rpl, used by the browser.
-	if (IsNetworkServiceSSLDisabled(service)
-		&& RPLLoader_GetHandleByModuleName("libopenssl.rpl") != RPL_INVALID_HANDLE
-		&& (hleAddr = hle_locate(wave_libopenssl_ssl_verify_cert_chain,
-			nullptr, sizeof(wave_libopenssl_ssl_verify_cert_chain))))
-	{
-		cemuLog_log(LogType::Force, "Patching OpenSSL ssl_verify_cert_chain at: 0x{:08x}", hleAddr);
-		// Reference: https://github.com/PretendoNetwork/Meowth/blob/meowth/src/patcher/patches/webkit_applets.cpp
-		memory_writeU32(hleAddr + 0x28, 0x60000000);
-		memory_writeU32(hleAddr + 0x40, 0x38600001);
-	}
-
-	uint32 hleInstallEnd = GetTickCount();
-	cemuLog_log(LogType::Force, "HLE scan time: {}ms", hleInstallEnd-hleInstallStart);
+	const uint32 startTick = GetTickCount();
+	FixXcxHangCounter();
+	FixXcxReductionBuffer();
+	HookBotwSpinLoops();
+	HookFflSwap();
+	FixMh3uRace();
+	FixSmashSoftlock();
+	FixPmcsPaintStar();
+	FixBayo2AudioQueue();
+	FixTwwDspChannel();
+	FixSm3dwDynamicRes();
+	FixTwwWaitLock();
+	PatchBrowserForCustomServices();
+	cemuLog_log(LogType::Force, "GamePatch: scan took {}ms", GetTickCount() - startTick);
 }
 
-RunAtCemuBoot _loadGamePatchAPI([]()
+RunAtCemuBoot g_gamePatchHleRegistration([]()
 	{
-		osLib_addFunction("hle", "h000000001", hleExport_breathOfTheWild_busyLoop);
-		osLib_addFunction("hle", "h000000002", hleExport_breathOfTheWild_busyLoop2);
-		osLib_addFunction("hle", "h000000003", hleExport_ffl_swapEndianFloatArray);
-		osLib_addFunction("hle", "h000000004", hleExport_xcx_enterCriticalSection);
+		osLib_addFunction("hle", "h000000001", HleBotwSpin1);
+		osLib_addFunction("hle", "h000000002", HleBotwSpin2);
+		osLib_addFunction("hle", "h000000003", HleFflSwapFloats);
+		osLib_addFunction("hle", "h000000004", HleXcxEnterLock);
 	});
