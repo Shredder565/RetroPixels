@@ -1,70 +1,57 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+#pragma once
 
 #pragma pack(1)
 
+// title entry returned by the title list queries (big endian, guest layout)
 struct MCPTitleInfo
 {
-
-	/* +0x00 */ uint32be titleIdHigh; // app.xml
-	/* +0x04 */ uint32be titleIdLow;
-	/* +0x08 */ uint32be appGroup;
-	/* +0x0C */ char appPath[0x38]; // size guessed
-	/* +0x44 */ uint32be appType; // app.xml
-	/* +0x48 */ uint16be titleVersion; // app.xml
-	// everything below is uncertain
-	/* +0x4A */ uint64be osVersion; // app.xml
-	/* +0x52 */ uint32be sdkVersion; // app.xml
-	/* +0x56 */ uint8 deviceName[10];
-	/* +0x60 */ uint8 uknPadding; // possibly the index of the device?
-	//move this and the stuff below
+	uint32be titleIdHigh;
+	uint32be titleIdLow;
+	uint32be appGroup;
+	char appPath[0x38]; // size not confirmed
+	uint32be appType;
+	uint16be titleVersion;
+	// layout from here on is not confirmed
+	uint64be osVersion;
+	uint32be sdkVersion;
+	uint8 deviceName[10];
+	uint8 uknPadding;
 };
-
 static_assert(sizeof(MCPTitleInfo) == 0x61);
 
 #pragma pack()
 
-// custom dev/mcp protocol (Cemu only)
+// emulator specific request on /dev/mcp
 #define IOSU_MCP_REQUEST_CEMU (0xEE)
 
 typedef struct
 {
 	uint32 requestCode;
-	struct  
+	struct
 	{
 		MEMPTR<MCPTitleInfo> titleList;
 		uint32be titleCount;
 		uint32be titleListBufferSize;
 		uint64 titleId;
-		// filters
-		uint32be appType;
+		uint32be appType; // filter for IOSU_MCP_GET_TITLE_LIST_BY_APP_TYPE
 	}titleListRequest;
 
 	// output
-	uint32 returnCode; // ACP return value
+	uint32 returnCode;
 	union
 	{
-		//struct
-		//{
-		//	uint64 u64;
-		//}resultU64;
 		struct
 		{
 			uint32 u32;
 		}resultU32;
-		//struct
-		//{
-		//	char strBuffer[1024];
-		//}resultString;
-		//struct
-		//{
-		//	uint8 binBuffer[1024];
-		//}resultBinary;
 	};
 }iosuMcpCemuRequest_t;
 
-// MCP request Cemu subcodes
+// sub codes of IOSU_MCP_REQUEST_CEMU
 #define IOSU_MCP_GET_TITLE_LIST								0x01
 #define IOSU_MCP_GET_TITLE_LIST_BY_APP_TYPE					0x02
-#define IOSU_MCP_GET_TITLE_INFO								0x03	// get title list by titleId
+#define IOSU_MCP_GET_TITLE_INFO								0x03 // list filtered by title id
 #define IOSU_MCP_GET_TITLE_COUNT							0x04
 
 namespace iosu

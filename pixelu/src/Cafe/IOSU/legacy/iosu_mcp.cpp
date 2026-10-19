@@ -1,8 +1,11 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// /dev/mcp: title management. Title enumeration is answered from the
+// emulator's title list; the IPC device itself only manages client handles.
 #include "iosu_ioctl.h"
 #include "iosu_mcp.h"
 #include "Cafe/OS/libs/nn_common.h"
 #include "util/tinyxml2/tinyxml2.h"
-
 #include "config/CemuConfig.h"
 #include "Cafe/TitleList/GameInfo.h"
 #include "util/helpers/helpers.h"
@@ -15,257 +18,207 @@ using namespace iosu::kernel;
 
 namespace iosu
 {
-	struct
+	namespace
 	{
-		bool isInitialized;
-	}iosuMcp = { 0 };
+		std::recursive_mutex g_titleListLock;
+		bool g_storageMounted = false;
+		bool g_legacyThreadStarted = false;
 
-	std::recursive_mutex sTitleInfoMutex;
-
-	bool sHasAllTitlesMounted = false;
-
-	uint32 mcpBuildTitleList(MCPTitleInfo* titleList, uint32 maxTitlesToCopy, std::function<bool(const TitleInfo&)> filterFunc)
-	{
-		CafeTitleList::WaitForMandatoryScan();
-		std::set<TitleId> titleIdsVisited;
-		auto cafeTitleList = CafeTitleList::AcquireInternalList();
-
-		uint32 numTitlesCopied = 0;
-		for (auto& it : cafeTitleList)
+		void FillTitleInfo(MCPTitleInfo& out, const TitleInfo& title)
 		{
-			if (numTitlesCopied == maxTitlesToCopy)
-				break;
-			uint64 titleId = it->GetAppTitleId();
-			if (titleIdsVisited.find(titleId) != titleIdsVisited.end())
-				continue;
-			if (!filterFunc(*it))
-				continue;
-			titleIdsVisited.emplace(titleId);
-			if (titleList)
+			const uint64 titleId = title.GetAppTitleId();
+			out.titleIdHigh = (uint32)(titleId >> 32);
+			out.titleIdLow = (uint32)titleId;
+			out.titleVersion = title.GetAppTitleVersion();
+			out.appGroup = title.GetAppGroup();
+			out.appType = title.GetAppType();
+			strcpy(out.appPath, CafeSystem::GetMlcStoragePath(titleId).c_str());
+			strcpy((char*)out.deviceName, "mlc");
+			out.osVersion = 0; // not tracked
+			out.sdkVersion = title.GetAppSDKVersion();
+		}
+
+		// Walks the title list once and reports each title id at most once.
+		// 'out' may be null to only count. Returns the number of matching titles (up to 'limit').
+		uint32 CollectTitles(MCPTitleInfo* out, uint32 limit, const std::function<bool(const TitleInfo&)>& accept)
+		{
+			std::lock_guard lock(g_titleListLock);
+			CafeTitleList::WaitForMandatoryScan();
+			std::set<TitleId> seen;
+			uint32 count = 0;
+			for (TitleInfo* title : CafeTitleList::AcquireInternalList())
 			{
-				auto& titleOut = titleList[numTitlesCopied];
-				titleOut.titleIdHigh = (uint32)(titleId >> 32);
-				titleOut.titleIdLow = (uint32)(titleId & 0xFFFFFFFF);
-				titleOut.titleVersion = it->GetAppTitleVersion();
-				titleOut.appGroup = it->GetAppGroup();
-				titleOut.appType = it->GetAppType();
-
-				std::string titlePath = CafeSystem::GetMlcStoragePath(titleId);
-				strcpy(titleOut.appPath, titlePath.c_str());
-
-				strcpy((char*)titleOut.deviceName, "mlc");
-
-				titleOut.osVersion = 0; // todo
-				titleOut.sdkVersion = it->GetAppSDKVersion();
+				if (count == limit)
+					break;
+				const uint64 titleId = title->GetAppTitleId();
+				if (seen.count(titleId) || !accept(*title))
+					continue;
+				seen.insert(titleId);
+				if (out)
+					FillTitleInfo(out[count], *title);
+				count++;
 			}
-
-			numTitlesCopied++;
+			CafeTitleList::ReleaseInternalList();
+			// titles become reachable through the file system after the first listing
+			if (!g_storageMounted)
+			{
+				CafeSystem::MlcStorageMountAllTitles();
+				g_storageMounted = true;
+			}
+			return count;
 		}
-		CafeTitleList::ReleaseInternalList();
 
-		if (!sHasAllTitlesMounted)
+		uint32 EntriesThatFit(uint32 bufferSize)
 		{
-			CafeSystem::MlcStorageMountAllTitles();
-			sHasAllTitlesMounted = true;
+			return bufferSize / sizeof(MCPTitleInfo);
 		}
 
-		return numTitlesCopied;
+		void HandleEmulatorRequest(iosuMcpCemuRequest_t& req)
+		{
+			auto& list = req.titleListRequest;
+			MCPTitleInfo* out = list.titleList.GetPtr();
+			const uint32 limit = EntriesThatFit(list.titleListBufferSize);
+			switch (req.requestCode)
+			{
+			case IOSU_MCP_GET_TITLE_LIST:
+				list.titleCount = CollectTitles(out, limit, [](const TitleInfo&) { return true; });
+				req.returnCode = 0;
+				break;
+			case IOSU_MCP_GET_TITLE_LIST_BY_APP_TYPE:
+			{
+				const uint32 appType = list.appType;
+				list.titleCount = CollectTitles(out, limit, [appType](const TitleInfo& t) { return t.GetAppType() == appType; });
+				req.returnCode = 0;
+				break;
+			}
+			case IOSU_MCP_GET_TITLE_INFO:
+			{
+				const uint64 titleId = list.titleId;
+				list.titleCount = CollectTitles(out, limit, [titleId](const TitleInfo& t) { return t.GetAppTitleId() == titleId; });
+				req.returnCode = 0;
+				break;
+			}
+			case IOSU_MCP_GET_TITLE_COUNT:
+			{
+				const uint32 count = CollectTitles(nullptr, 0xFFFFFFFF, [](const TitleInfo&) { return true; });
+				req.returnCode = count;
+				list.titleCount = count;
+				break;
+			}
+			default:
+				cemu_assert(false);
+				break;
+			}
+		}
+
+		void LegacyRequestThread()
+		{
+			SetThreadName("iosuMcp_thread");
+			while (true)
+			{
+				ioQueueEntry_t* entry = iosuIoctl_getNextWithWait(IOS_DEVICE_MCP);
+				cemu_assert(entry->request == IOSU_MCP_REQUEST_CEMU);
+				HandleEmulatorRequest(*(iosuMcpCemuRequest_t*)entry->bufferVectors[0].buffer.GetPtr());
+				iosuIoctl_completeRequest(entry, 0);
+			}
+		}
 	}
 
 	sint32 mcpGetTitleList(MCPTitleInfo* titleList, uint32 titleListBufferSize, uint32be* titleCount)
 	{
-		std::unique_lock _lock(sTitleInfoMutex);
-		uint32 maxEntryCount = titleListBufferSize / sizeof(MCPTitleInfo);
-		*titleCount = mcpBuildTitleList(titleList, maxEntryCount, [](const TitleInfo& titleInfo) -> bool { return true; });
+		*titleCount = CollectTitles(titleList, EntriesThatFit(titleListBufferSize), [](const TitleInfo&) { return true; });
 		return 0;
 	}
 
 	sint32 mcpGetTitleCount()
 	{
-		std::unique_lock _lock(sTitleInfoMutex);
-		return mcpBuildTitleList(nullptr, 0xFFFFFFFF, [](const TitleInfo& titleInfo) -> bool { return true; });
+		return CollectTitles(nullptr, 0xFFFFFFFF, [](const TitleInfo&) { return true; });
 	}
 
-	sint32 mcpGetTitleListByAppType(MCPTitleInfo* titleList, uint32 titleListBufferSize, uint32be* titleCount, uint32 appType)
-	{
-		std::unique_lock _lock(sTitleInfoMutex);
-		uint32 maxEntryCount = titleListBufferSize / sizeof(MCPTitleInfo);
-		*titleCount = mcpBuildTitleList(titleList, maxEntryCount, [appType](const TitleInfo& titleInfo) -> bool { return titleInfo.GetAppType() == appType; });
-		return 0;
-	}
-
-	sint32 mcpGetTitleListByTitleId(MCPTitleInfo* titleList, uint32 titleListBufferSize, uint32be* titleCount, uint64 titleId)
-	{
-		std::unique_lock _lock(sTitleInfoMutex);
-		uint32 maxEntryCount = titleListBufferSize / sizeof(MCPTitleInfo);
-		*titleCount = mcpBuildTitleList(titleList, maxEntryCount, [titleId](const TitleInfo& titleInfo) -> bool { return titleInfo.GetAppTitleId() == titleId; });
-		return 0;
-	}
-
-	int iosuMcp_thread()
-	{
-		SetThreadName("iosuMcp_thread");
-		while (true)
-		{
-			uint32 returnValue = 0; // Ioctl return value
-			ioQueueEntry_t* ioQueueEntry = iosuIoctl_getNextWithWait(IOS_DEVICE_MCP);
-			if (ioQueueEntry->request == IOSU_MCP_REQUEST_CEMU)
-			{
-				iosuMcpCemuRequest_t* mcpCemuRequest = (iosuMcpCemuRequest_t*)ioQueueEntry->bufferVectors[0].buffer.GetPtr();
-				if (mcpCemuRequest->requestCode == IOSU_MCP_GET_TITLE_LIST)
-				{
-					uint32be titleCount = mcpCemuRequest->titleListRequest.titleCount;
-					mcpCemuRequest->returnCode = mcpGetTitleList(mcpCemuRequest->titleListRequest.titleList.GetPtr(), mcpCemuRequest->titleListRequest.titleListBufferSize, &titleCount);
-					mcpCemuRequest->titleListRequest.titleCount = titleCount;
-				}
-				else if (mcpCemuRequest->requestCode == IOSU_MCP_GET_TITLE_LIST_BY_APP_TYPE)
-				{
-					uint32be titleCount = mcpCemuRequest->titleListRequest.titleCount;
-					mcpCemuRequest->returnCode = mcpGetTitleListByAppType(mcpCemuRequest->titleListRequest.titleList.GetPtr(), mcpCemuRequest->titleListRequest.titleListBufferSize, &titleCount, mcpCemuRequest->titleListRequest.appType);
-					mcpCemuRequest->titleListRequest.titleCount = titleCount;
-				}
-				else if (mcpCemuRequest->requestCode == IOSU_MCP_GET_TITLE_INFO)
-				{
-					uint32be titleCount = mcpCemuRequest->titleListRequest.titleCount;
-					mcpCemuRequest->returnCode = mcpGetTitleListByTitleId(mcpCemuRequest->titleListRequest.titleList.GetPtr(), mcpCemuRequest->titleListRequest.titleListBufferSize, &titleCount, mcpCemuRequest->titleListRequest.titleId);
-					mcpCemuRequest->titleListRequest.titleCount = titleCount;
-				}
-				else if (mcpCemuRequest->requestCode == IOSU_MCP_GET_TITLE_COUNT)
-				{
-					uint32be titleCount = mcpGetTitleCount();
-					mcpCemuRequest->returnCode = titleCount;
-					mcpCemuRequest->titleListRequest.titleCount = titleCount;
-				}
-				else
-					assert_dbg();
-			}
-			else
-				assert_dbg();
-			iosuIoctl_completeRequest(ioQueueEntry, returnValue);
-		}
-		return 0;
-	}
-
-    // deprecated
 	void iosuMcp_init()
 	{
-		if (iosuMcp.isInitialized)
+		if (g_legacyThreadStarted)
 			return;
-		std::thread t(iosuMcp_thread);
-		t.detach();
-		iosuMcp.isInitialized = true;
+		std::thread(LegacyRequestThread).detach();
+		g_legacyThreadStarted = true;
 	}
 
 	namespace mcp
 	{
-		IOSMsgQueueId sMCPIoMsgQueue;
-		SysAllocator<iosu::kernel::IOSMessage, 352> _m_sMCPIoMsgQueueMsgBuffer;
-		std::thread sMCPIoThread;
-
-		struct MCPClient
+		namespace
 		{
-			std::string workingDirectory;
-			bool isAllocated{ false };
+			IOSMsgQueueId g_queue;
+			SysAllocator<iosu::kernel::IOSMessage, 352> g_queueStorage;
+			std::thread g_thread;
+			std::array<bool, 256> g_clientOpen{};
 
-			void AllocateAndInitialize()
+			void ServiceLoop()
 			{
-				isAllocated = true;
-				workingDirectory = std::string("/");
-			}
-
-			void ReleaseAndCleanup()
-			{
-				isAllocated = false;
-			}
-		};
-
-		std::array<MCPClient, 256> sMCPClientArray;
-
-		IOS_ERROR MCPAllocateClient(sint32& indexOut)
-		{
-			for (size_t i = 0; i < sMCPClientArray.size(); i++)
-			{
-				if (sMCPClientArray[i].isAllocated)
-					continue;
-				sMCPClientArray[i].AllocateAndInitialize();
-				indexOut = (sint32)i;
-				return IOS_ERROR_OK;
-			}
-			return IOS_ERROR::IOS_ERROR_MAXIMUM_REACHED;
-		}
-
-		void MCPIoThread()
-		{
-			SetThreadName("IOSU-MCP");
-			IOSMessage msg;
-			while (true)
-			{
-				IOS_ERROR r = IOS_ReceiveMessage(sMCPIoMsgQueue, &msg, 0);
-				cemu_assert(!IOS_ResultIsError(r));
-				if (msg == 0)
-					return; // shutdown signaled
-				IPCCommandBody* cmd = MEMPTR<IPCCommandBody>(msg).GetPtr();
-				uint32 clientHandle = (uint32)cmd->devHandle;
-				if (cmd->cmdId == IPCCommandId::IOS_OPEN)
+				SetThreadName("IOSU-MCP");
+				while (true)
 				{
-					sint32 clientIndex = 0;
-					r = MCPAllocateClient(clientIndex);
-					if (r != IOS_ERROR_OK)
+					IOSMessage msg;
+					const IOS_ERROR err = IOS_ReceiveMessage(g_queue, &msg, 0);
+					cemu_assert(!IOS_ResultIsError(err));
+					if (msg == 0)
+						return; // shutdown request
+					IPCCommandBody* cmd = MEMPTR<IPCCommandBody>(msg).GetPtr();
+					const uint32 handle = cmd->devHandle;
+					switch ((IPCCommandId)cmd->cmdId)
 					{
-						IOS_ResourceReply(cmd, r);
-						continue;
+					case IPCCommandId::IOS_OPEN:
+					{
+						IOS_ERROR reply = IOS_ERROR_MAXIMUM_REACHED;
+						for (size_t i = 0; i < g_clientOpen.size(); i++)
+						{
+							if (g_clientOpen[i])
+								continue;
+							g_clientOpen[i] = true;
+							reply = (IOS_ERROR)i;
+							break;
+						}
+						IOS_ResourceReply(cmd, reply);
+						break;
 					}
-					IOS_ResourceReply(cmd, (IOS_ERROR)clientIndex);
-					continue;
-				}
-				else if (cmd->cmdId == IPCCommandId::IOS_CLOSE)
-				{
-					cemu_assert(clientHandle < sMCPClientArray.size());
-					sMCPClientArray[clientHandle].ReleaseAndCleanup();
-					IOS_ResourceReply(cmd, IOS_ERROR_OK);
-					continue;
-				}
-				else if (cmd->cmdId == IPCCommandId::IOS_IOCTL)
-				{
-					cemu_assert(clientHandle < sMCPClientArray.size());
-					cemu_assert(sMCPClientArray[clientHandle].isAllocated);
-					IOS_ResourceReply(cmd, (IOS_ERROR)0x80000000);
-					continue;
-				}
-				else if (cmd->cmdId == IPCCommandId::IOS_IOCTLV)
-				{
-					cemu_assert_unimplemented();
-					//uint32 requestId = cmd->args[0];
-					//uint32 numIn = cmd->args[1];
-					//uint32 numOut = cmd->args[2];
-					//IPCIoctlVector* vec = MEMPTR<IPCIoctlVector>{ cmd->args[3] }.GetPtr();
-					IOS_ResourceReply(cmd, IOS_ERROR_INVALID);
-					continue;
-				}
-				else
-				{
-					cemuLog_log(LogType::Force, "/dev/mcp: Unsupported IPC cmdId");
-					cemu_assert_suspicious();
-					IOS_ResourceReply(cmd, IOS_ERROR_INVALID);
+					case IPCCommandId::IOS_CLOSE:
+						cemu_assert(handle < g_clientOpen.size());
+						g_clientOpen[handle] = false;
+						IOS_ResourceReply(cmd, IOS_ERROR_OK);
+						break;
+					case IPCCommandId::IOS_IOCTL:
+						// no ioctl requests are implemented
+						cemu_assert(handle < g_clientOpen.size());
+						cemu_assert(g_clientOpen[handle]);
+						IOS_ResourceReply(cmd, (IOS_ERROR)0x80000000);
+						break;
+					case IPCCommandId::IOS_IOCTLV:
+						cemu_assert_unimplemented();
+						IOS_ResourceReply(cmd, IOS_ERROR_INVALID);
+						break;
+					default:
+						cemuLog_log(LogType::Force, "/dev/mcp: Unsupported IPC cmdId");
+						cemu_assert_suspicious();
+						IOS_ResourceReply(cmd, IOS_ERROR_INVALID);
+						break;
+					}
 				}
 			}
 		}
 
 		void Init()
 		{
-			for (auto& it : sMCPClientArray)
-				it.ReleaseAndCleanup();
-			sMCPIoMsgQueue = (IOSMsgQueueId)IOS_CreateMessageQueue(_m_sMCPIoMsgQueueMsgBuffer.GetPtr(), _m_sMCPIoMsgQueueMsgBuffer.GetCount());
-			IOS_ERROR r = IOS_RegisterResourceManager("/dev/mcp", sMCPIoMsgQueue);
+			g_clientOpen.fill(false);
+			g_queue = IOS_CreateMessageQueue(g_queueStorage.GetPtr(), g_queueStorage.GetCount());
+			const IOS_ERROR err = IOS_RegisterResourceManager("/dev/mcp", g_queue);
 			IOS_DeviceAssociateId("/dev/mcp", 11);
-			cemu_assert(!IOS_ResultIsError(r));
-			sMCPIoThread = std::thread(MCPIoThread);
+			cemu_assert(!IOS_ResultIsError(err));
+			g_thread = std::thread(ServiceLoop);
 		}
 
 		void Shutdown()
 		{
-			IOS_SendMessage(sMCPIoMsgQueue, 0, 0);
-			sMCPIoThread.join();
+			IOS_SendMessage(g_queue, 0, 0);
+			g_thread.join();
 		}
 	};
 }

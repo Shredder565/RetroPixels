@@ -1,34 +1,30 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 struct OSThread_t;
 
+// one buffer of a queued request (layout as used by the PPC side)
 typedef struct _ioBufferVector_t
 {
-	// the meaning of these values might be arbitrary? (up to the /dev/* handler to process them)
-	//uint32 ukn00;
 	MEMPTR<uint8> buffer;
 	uint32be bufferSize;
 	uint32 ukn08;
-	//uint32 ukn0C;
 	MEMPTR<uint8> unknownBuffer;
 }ioBufferVector_t;
 
+// a request queued for a device thread
 typedef struct
 {
-	bool isIoctlv; // false -> ioctl, true -> ioctlv
+	bool isIoctlv; // false: ioctl, true: ioctlv
 	bool isAsync;
 	uint32 request;
 	uint32 countIn;
 	uint32 countOut;
 	MEMPTR<ioBufferVector_t> bufferVectors;
-	// info about submitter
-	OSThread_t* ppcThread;
-	//MPTR ppcThread;
-	// result
+	OSThread_t* ppcThread; // submitting thread, resumed on completion
 	bool isCompleted;
 	uint32 returnValue;
 }ioQueueEntry_t;
-
 
 #define IOS_PATH_SOCKET		"/dev/socket"
 #define IOS_PATH_ODM		"/dev/odm"
@@ -54,11 +50,10 @@ typedef struct
 
 void iosuIoctl_init();
 
-
-// for use by IOSU
+// device thread side
 ioQueueEntry_t* iosuIoctl_getNextWithWait(uint32 deviceIndex);
 ioQueueEntry_t* iosuIoctl_getNextWithTimeout(uint32 deviceIndex, sint32 ms);
 void iosuIoctl_completeRequest(ioQueueEntry_t* ioQueueEntry, uint32 returnValue);
 
-// for use by PPC
+// PPC side, blocks the calling guest thread until completion
 sint32 iosuIoctl_pushAndWait(uint32 ioctlHandle, ioQueueEntry_t* ioQueueEntry);
