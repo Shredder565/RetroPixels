@@ -1,69 +1,63 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "Common/precompiled.h"
 
 #include <string>
-#include <queue>
-#include <stack>
+#include <string_view>
+#include <vector>
 #include <unordered_map>
-#include <memory>
 #include <charconv>
+#include <cctype>
+#include <cmath>
+#include <stdexcept>
 
-#include "boost/functional/hash_fwd.hpp"
+#include <boost/functional/hash_fwd.hpp>
 #include <fmt/format.h>
 
 #ifdef __clang__
 #include "Common/unix/fast_float.h"
- #define _EP_FROM_CHARS_DBL(...) _convFastFloatResult(fast_float::from_chars(__VA_ARGS__))
-
-inline std::from_chars_result _convFastFloatResult(fast_float::from_chars_result r)
-{
-	std::from_chars_result nr;
-	nr.ptr = r.ptr;
-	nr.ec = r.ec;
-	return nr;
-}
-#else
- #define _EP_FROM_CHARS_DBL(...) std::from_chars(__VA_ARGS__)
 #endif
 
+// Arithmetic expression evaluator used by graphic packs (rules.txt values,
+// preset conditions, patch operands), the PPC assembler and the debugger.
+//
+// Grammar, as graphic packs expect it:
+//  - numbers: decimal ("12", "1.5", "2e3"), "0x" hex, and a leading 0 followed
+//    by a hex digit is hex too ("01C" = 0x1C) unless the rest of the
+//    expression contains a '.'; a '+'/'-' where an operand is expected is the
+//    number's sign
+//  - names: [A-Za-z_$][A-Za-z0-9_@.]*, looked up in the constant table, then
+//    through the constant callback; "name(" calls the function callback
+//  - binary operators (lowest to highest): == != < <= > >=, then + -, then
+//    * / %, then ^ (right associative); x/0 and x%0 give 0
+//  - one address suffix (@ha @hi @h @lo @l) anywhere applies to the final
+//    result; the same suffix may repeat, two different ones are an error
+// Values are computed in TType; literals are read as double first.
 template<class TType = double>
 class TExpressionParser
 {
-	// starting with Cemu 2.7 reloc modifiers (like @ha or @l) have been changed to match LLVM/GAS behavior
-	// they may only be used once in an expression and get applied to the final result of the expression, regardless of their location
-	// E.g. "var@ha + 0x20" was intepreted as ha(var) + 0x20 before, now it's interpreted as ha(var+0x20)
-	enum class RelocModifier
-	{
-		None = 0,
-		High, // @hi @h
-		HighArithmetic, // @ha
-		Low, // @lo @l
-	};
-
 public:
 	static_assert(std::is_arithmetic_v<TType>);
 	using ConstantCallback_t = TType(*)(std::string_view var_name);
 	using FunctionCallback_t = TType(*)(std::string_view var_name, TType parameter);
 
+	// 16-bit halves of a 32-bit address, as used by PPC lis/addi pairs
 	static TType ExpressionFuncHA(TType input)
 	{
-		uint32 addr = (uint32)input;
-		addr = (((addr >> 16) + ((addr & 0x8000) ? 1 : 0)) & 0xffff);
-		return (TType)addr;
+		const uint32 v = (uint32)input;
+		return (TType)(uint32)(((v + 0x8000u) >> 16) & 0xFFFFu);
 	}
 
 	static TType ExpressionFuncHI(TType input)
 	{
-		uint32 addr = (uint32)input;
-		addr = (addr >> 16) & 0xffff;
-		return (TType)addr;
+		const uint32 v = (uint32)input;
+		return (TType)(uint32)(v >> 16);
 	}
 
 	static TType ExpressionFuncLO(TType input)
 	{
-		uint32 addr = (uint32)input;
-		addr &= 0xffff;
-		return (TType)addr;
+		const uint32 v = (uint32)input;
+		return (TType)(uint32)(v & 0xFFFFu);
 	}
 
 	template<typename T>
@@ -75,368 +69,39 @@ public:
 
 	[[nodiscard]] TType Evaluate(std::string_view expression) const
 	{
-		std::queue<std::shared_ptr<TokenBase>> output;
-		std::stack<std::shared_ptr<TokenBase>> operators;
-		RelocModifier relocModifier = RelocModifier::None;
-
 		if (expression.empty())
+			throw std::runtime_error("empty expression is not allowed");
+		std::vector<Item> program;
+		AddrPart part = AddrPart::Whole;
+		Translate(expression, program, part);
+		std::vector<TType> values;
+		for (const Item& item : program)
+			Execute(item, values);
+		if (values.empty())
+			throw std::runtime_error("empty expression is not allowed");
+		TType& result = values.back();
+		switch (part)
 		{
-			throw std::runtime_error(fmt::format("empty expression is not allowed"));
+		case AddrPart::High: result = ExpressionFuncHI(result); break;
+		case AddrPart::HighAdjusted: result = ExpressionFuncHA(result); break;
+		case AddrPart::Low: result = ExpressionFuncLO(result); break;
+		default: break;
 		}
-
-		bool last_operator_token = true;
-
-		// tokenize and apply shunting-yard
-		for (size_t i = 0; i < expression.size(); )
-		{
-			const char c = expression[i];
-
-			// skip whitespaces
-			if (isblank(c))
-			{
-				++i;
-				continue;
-			}
-
-			// extract numbers
-			if (isdigit(c) || (last_operator_token && (c == '-' || c == '+')))
-			{
-				const std::string_view view(expression.data() + i, expression.size() - i);
-				size_t offset = 0;
-				auto converted = (TType)ConvertString(view, &offset);
-				output.emplace(std::make_shared<TokenNumber>(converted));
-				i += offset;
-				last_operator_token = false;
-				// check for relocation modifier suffix (e.g. 74@ha)
-				i += ParseRelocModifier(expression.substr(i), relocModifier, false); // can throw
-				continue;
-			}
-			// check for variables
-			if (isalpha(c) || c == '_' || c == '$')
-			{
-				size_t j;
-				for (j = i + 1; j < expression.size(); ++j)
-				{
-					const char v = expression[j];
-					if (!isalpha(v) && !isdigit(v) && v != '_' && v != '@' && v != '.')
-					{
-						break;
-					}
-				}
-
-				const size_t len = j - i;
-				std::string_view view = expression.substr(i, len);
-
-				// check for relocation modifier
-				if (auto suffixPos = view.find_last_of('@'); suffixPos != std::string::npos)
-				{
-					sint32 modifierLength = ParseRelocModifier(view.substr(suffixPos), relocModifier, true);
-					view.remove_suffix(modifierLength);
-				}
-				// check for function
-				if (m_function_callback)
-				{
-					// todo skip whitespaces
-					if (j < expression.size() && expression[j] == '(')
-					{
-						operators.emplace(std::make_shared<TokenUnaryOperator>(TokenUnaryOperator::kFunction, view));
-						operators.emplace(std::make_shared<TokenParenthese>());
-						i += len + 1;
-
-						last_operator_token = true;
-						continue;
-					}
-				}
-
-				TType value;
-				const auto it = m_constants.find(std::string{ view });
-				if (it == m_constants.cend())
-				{
-					if (m_constant_callback == nullptr)
-						throw std::runtime_error(fmt::format("unknown constant found \"{}\" in expression: {}", view, expression));
-
-					value = m_constant_callback(view);
-				}
-				else
-					value = it->second;
-
-				output.emplace(std::make_shared<TokenNumber>(value));
-				i += len;
-
-				last_operator_token = false;
-				continue;
-			}
-
-			// parenthese
-			if (c == '(')
-			{
-				operators.emplace(std::make_shared<TokenParenthese>());
-				++i;
-
-				last_operator_token = true;
-				continue;
-			}
-
-			if (c == ')')
-			{
-				bool match = false;
-				while (!operators.empty())
-				{
-					const auto op = std::dynamic_pointer_cast<TokenParenthese>(operators.top());
-					if (!op)
-					{
-						output.emplace(operators.top());
-						operators.pop();
-						continue;
-					}
-
-					operators.pop();
-					match = true;
-					break;
-				}
-
-				if (!match && operators.empty())
-				{
-					throw std::runtime_error(fmt::format("parentheses mismatch: {}", expression));
-				}
-
-				++i;
-				continue;
-			}
-
-			// supported operations
-			std::shared_ptr<TokenOperator> operator_token;
-			switch (c)
-			{
-			case '+':
-				operator_token = std::make_shared<TokenOperator>(TokenOperator::kAddition, 2);
-				break;
-			case '-':
-				operator_token = std::make_shared<TokenOperator>(TokenOperator::kSubtraction, 2);
-				break;
-			case '*':
-				operator_token = std::make_shared<TokenOperator>(TokenOperator::kMultiplication, 3);
-				break;
-			case '/':
-				operator_token = std::make_shared<TokenOperator>(TokenOperator::kDivision, 3);
-				break;
-			case '^':
-				operator_token = std::make_shared<TokenOperator>(TokenOperator::kPow, 4, true);
-				break;
-			case '%':
-				operator_token = std::make_shared<TokenOperator>(TokenOperator::kModulo, 3);
-				break;
-			case '=':
-				if ((i + 1) < expression.size() && expression[i + 1] == '=')
-				{
-					operator_token = std::make_shared<TokenOperator>(TokenOperator::kEqual, 1);
-					++i;
-				}
-				break;
-			case '!':
-				if ((i + 1) < expression.size() && expression[i + 1] == '=')
-				{
-					operator_token = std::make_shared<TokenOperator>(TokenOperator::kNotEqual, 1);
-					++i;
-				}
-				break;
-			case '<':
-				if ((i + 1) < expression.size() && expression[i + 1] == '=')
-				{
-					operator_token = std::make_shared<TokenOperator>(TokenOperator::kLessOrEqual, 1);
-					++i;
-				}
-				else
-				{
-					operator_token = std::make_shared<TokenOperator>(TokenOperator::kLessThan, 1);
-				}
-				break;
-			case '>':
-				if ((i + 1) < expression.size() && expression[i + 1] == '=')
-				{
-					operator_token = std::make_shared<TokenOperator>(TokenOperator::kGreaterOrEqual, 1);
-					++i;
-				}
-				else
-				{
-					operator_token = std::make_shared<TokenOperator>(TokenOperator::kGreaterThan, 1);
-				}
-				break;
-			}
-
-			if (!operator_token)
-				throw std::runtime_error(fmt::format("invalid operator found in expression: {}", expression));
-
-			while (!operators.empty())
-			{
-				const auto op = std::dynamic_pointer_cast<TokenOperator>(operators.top());
-				if (op && ((!operator_token->right_ass && operator_token->prec <= op->prec) || (operator_token->right_ass && operator_token->prec < op->prec)))
-				{
-					output.emplace(operators.top());
-					operators.pop();
-					continue;
-				}
-
-				break;
-			}
-
-			operators.emplace(operator_token);
-			++i;
-			last_operator_token = true;
-		}
-
-		while (!operators.empty())
-		{
-			const auto parenthese = std::dynamic_pointer_cast<TokenParenthese>(operators.top());
-			if (parenthese)
-			{
-				throw std::runtime_error(fmt::format("parentheses mismatch in expression: {}", expression));
-			}
-
-			output.push(operators.top());
-			operators.pop();
-		}
-
-		// evaluate tokens in output queue
-		std::stack<TType> evaluation;
-		while (!output.empty())
-		{
-			const auto number = std::dynamic_pointer_cast<TokenNumber>(output.front());
-			if (number)
-			{
-				evaluation.emplace(number->number);
-				output.pop();
-				continue;
-			}
-
-			if (const auto unop = std::dynamic_pointer_cast<TokenUnaryOperator>(output.front()))
-			{
-				if (evaluation.size() < 1)
-					throw std::runtime_error("not enough parameters for equation");
-
-				const auto parameter = evaluation.top();
-				evaluation.pop();
-
-				switch (unop->op)
-				{
-				case TokenUnaryOperator::kFunction:
-					evaluation.emplace(m_function_callback(unop->symbol, parameter));
-					break;
-				default:
-					throw std::runtime_error("unsupported operation constant");
-				}
-
-				output.pop();
-				continue;
-			}
-			else if (const auto op = std::dynamic_pointer_cast<TokenOperator>(output.front()))
-			{
-				if (evaluation.size() < 2)
-					throw std::runtime_error("not enough parameters for equation");
-
-				const auto rhs = evaluation.top();
-				evaluation.pop();
-
-				const auto lhs = evaluation.top();
-				evaluation.pop();
-
-				switch (op->op)
-				{
-				case TokenOperator::kAddition:
-					evaluation.emplace(lhs + rhs);
-					break;
-				case TokenOperator::kSubtraction:
-					evaluation.emplace(lhs - rhs);
-					break;
-				case TokenOperator::kMultiplication:
-					evaluation.emplace(lhs * rhs);
-					break;
-				case TokenOperator::kDivision:
-					if (rhs == 0.0) evaluation.emplace((TType)0.0);
-					else evaluation.emplace(lhs / rhs);
-					break;
-				case TokenOperator::kPow:
-					evaluation.emplace((TType)std::pow(lhs, rhs));
-					break;
-				case TokenOperator::kModulo:
-					if (std::round(rhs) == 0.0)
-						evaluation.emplace((TType)0.0);
-					else
-						evaluation.emplace((TType)((sint64)std::round(lhs) % (sint64)std::round(rhs)));
-					break;
-				case TokenOperator::kEqual:
-					if constexpr (std::is_floating_point_v<TType>)
-						evaluation.emplace((TType)(std::abs(lhs - rhs) <= 0.0000000001 ? 1 : 0));
-					else
-						evaluation.emplace(lhs == rhs ? 1 : 0);
-					break;
-				case TokenOperator::kNotEqual:
-					if constexpr (std::is_floating_point_v<TType>)
-						evaluation.emplace((TType)(std::abs(lhs - rhs) > 0.0000000001 ? 1 : 0));
-					else
-						evaluation.emplace(lhs != rhs ? 1 : 0);
-					break;
-				case TokenOperator::kLessThan:
-					evaluation.emplace((TType)(lhs < rhs ? 1 : 0));
-					break;
-				case TokenOperator::kLessOrEqual:
-					evaluation.emplace((TType)(lhs <= rhs ? 1 : 0));
-					break;
-				case TokenOperator::kGreaterThan:
-					evaluation.emplace((TType)(lhs > rhs ? 1 : 0));
-					break;
-				case TokenOperator::kGreaterOrEqual:
-					evaluation.emplace((TType)(lhs >= rhs ? 1 : 0));
-					break;
-				default:
-					throw std::runtime_error("unsupported operation constant");
-				}
-
-				output.pop();
-				continue;
-			}
-		}
-
-		if (relocModifier == RelocModifier::High)
-			evaluation.top() = ExpressionFuncHI(evaluation.top());
-		else if (relocModifier == RelocModifier::HighArithmetic)
-			evaluation.top() = ExpressionFuncHA(evaluation.top());
-		else if (relocModifier == RelocModifier::Low)
-			evaluation.top() = ExpressionFuncLO(evaluation.top());
-
-		return evaluation.top();
+		return result;
 	}
 
+	// syntax check: every name resolves to 1, no functions
 	[[nodiscard]] bool IsValidExpression(std::string_view expression) const
 	{
-		try
-		{
-			TExpressionParser<TType> ep;
-			ep.AddConstantCallback(
-				[](std::string_view sv) -> TType
-				{
-					return (TType)1;
-				});
-			static_cast<void>(ep.Evaluate(expression));
-			return true;
-		}
-		catch (...)
-		{
-			return false;
-		}
+		TExpressionParser<TType> probe;
+		probe.AddConstantCallback([](std::string_view) -> TType { return (TType)1; });
+		return probe.Succeeds(expression);
 	}
 
+	// can be evaluated with the constants and callbacks set on this parser
 	[[nodiscard]] bool IsConstantExpression(std::string_view expression) const
 	{
-		try
-		{
-			static_cast<void>(this->Evaluate(expression));
-			return true;
-		}
-		catch (...)
-		{
-			return false;
-		}
+		return Succeeds(expression);
 	}
 
 	void AddConstant(std::string_view name, TType value)
@@ -444,15 +109,15 @@ public:
 		m_constants[std::string(name)] = value;
 	}
 
-	// only adds constant if not added yet
+	// keeps an existing value
 	void TryAddConstant(std::string_view name, TType value)
 	{
-		m_constants.try_emplace(std::string{ name }, value);
+		m_constants.try_emplace(std::string(name), value);
 	}
 
 	void AddConstant(std::string_view name, std::string_view value)
 	{
-		AddConstant(name, ConvertString(value));
+		AddConstant(name, (TType)ReadLiteral(value, nullptr));
 	}
 
 	void AddConstantCallback(ConstantCallback_t callback)
@@ -464,205 +129,421 @@ public:
 	{
 		m_function_callback = callback;
 	}
+
 private:
+	enum class AddrPart
+	{
+		Whole,
+		High,         // @h, @hi
+		HighAdjusted, // @ha
+		Low,          // @l, @lo
+	};
+
+	enum class Op
+	{
+		Add, Sub, Mul, Div, Pow, Mod,
+		Eq, Ne, Lt, Le, Gt, Ge,
+	};
+
+	enum class ItemKind
+	{
+		Value,
+		Binary,
+		Call,
+		OpenParen, // only on the pending stack
+	};
+
+	struct Item
+	{
+		ItemKind kind;
+		TType value{};
+		Op op{};
+		int level = 0;
+		bool rightToLeft = false;
+		std::string_view name;
+	};
+
 	std::unordered_map<std::string, TType> m_constants;
 	ConstantCallback_t m_constant_callback = nullptr;
 	FunctionCallback_t m_function_callback = nullptr;
 
-	static bool _isNumberWithDecimalPoint(std::string_view str)
+	bool Succeeds(std::string_view expression) const
 	{
-		return str.find('.') != std::string_view::npos;
+		try
+		{
+			static_cast<void>(Evaluate(expression));
+		}
+		catch (...)
+		{
+			return false;
+		}
+		return true;
 	}
 
-	// update current relocation modifier for the expression
-	void SetRelocationModifier(RelocModifier& relocModifier, RelocModifier newModifier) const
+	static bool IsSpaceChar(char c) { return std::isblank((unsigned char)c) != 0; }
+	static bool IsDigitChar(char c) { return std::isdigit((unsigned char)c) != 0; }
+	static bool IsHexChar(char c) { return std::isxdigit((unsigned char)c) != 0; }
+	static bool IsLetterChar(char c) { return std::isalpha((unsigned char)c) != 0; }
+	static char Lower(char c) { return (char)std::tolower((unsigned char)c); }
+
+	static void SetAddrPart(AddrPart& current, AddrPart wanted)
 	{
-		if (relocModifier == newModifier)
+		if (current == wanted)
 			return;
-		// catch mismatching relocation modifiers (e.g. sym@ha + sym2@lo)
-		if (relocModifier != RelocModifier::None)
-			throw std::runtime_error(fmt::format("Mismatching relocation modifiers (suffix @..) in expression"));
-		relocModifier = newModifier;
+		if (current != AddrPart::Whole)
+			throw std::runtime_error("Mismatching relocation modifiers (suffix @..) in expression");
+		current = wanted;
 	}
 
-	// parse modifiers like @ha, @l. Throws on parse error (unless ignored). Returns length of parsed suffix including @ symbol
-	sint32 ParseRelocModifier(std::string_view str, RelocModifier& relocModifier, bool ignoreParseError) const
+	// Reads an @suffix at the start of text. Returns how many characters it
+	// covers (0 = none). An unknown suffix throws unless lenient is set.
+	static size_t ReadAddrSuffix(std::string_view text, AddrPart& current, bool lenient)
 	{
-		auto origStr = str;
-		if (str.empty() || str[0] != '@')
+		if (text.size() < 2 || text[0] != '@')
 			return 0;
-		// skip the @
-		str.remove_prefix(1);
-		if (str.empty())
-			return 0;
-		char c0 = std::tolower(str[0]);
-		// check for two character modifiers: lo, ha, hi
-		if (str.size() >= 2)
+		const char first = Lower(text[1]);
+		const char second = text.size() >= 3 ? Lower(text[2]) : '\0';
+		if (first == 'h' && second == 'a')
 		{
-			char c1 = std::tolower(str[1]);
-			if (c0 == 'h' && c1 == 'a')
-			{
-				SetRelocationModifier(relocModifier, RelocModifier::HighArithmetic);
-				return 3;
-			}
-			else if (c0 == 'h' && c1 == 'i')
-			{
-				SetRelocationModifier(relocModifier, RelocModifier::High);
-				return 3;
-			}
-			else if (c0 == 'l' && c1 == 'o')
-			{
-				SetRelocationModifier(relocModifier, RelocModifier::Low);
-				return 3;
-			}
+			SetAddrPart(current, AddrPart::HighAdjusted);
+			return 3;
 		}
-		// check for single character modifiers
-		if (c0 == 'h')
+		if (first == 'h' && second == 'i')
 		{
-			SetRelocationModifier(relocModifier, RelocModifier::High);
+			SetAddrPart(current, AddrPart::High);
+			return 3;
+		}
+		if (first == 'l' && second == 'o')
+		{
+			SetAddrPart(current, AddrPart::Low);
+			return 3;
+		}
+		if (first == 'h' || first == 'l')
+		{
+			SetAddrPart(current, first == 'h' ? AddrPart::High : AddrPart::Low);
 			return 2;
 		}
-		else if (c0 == 'l')
-		{
-			SetRelocationModifier(relocModifier, RelocModifier::Low);
-			return 2;
-		}
-		if (!ignoreParseError)
-			throw std::runtime_error(fmt::format("Unknown relocation modifier (only @lo, @hi, @ha, @l, @h are supported) at: {}", origStr));
+		if (!lenient)
+			throw std::runtime_error(fmt::format("Unknown relocation modifier (only @lo, @hi, @ha, @l, @h are supported) at: {}", text));
 		return 0;
 	}
 
-	double ConvertString(std::string_view str, size_t* index_after = nullptr) const
+	static std::from_chars_result ParseDouble(const char* first, const char* last, double& out)
 	{
-		const char* strInitial = str.data();
-		if (str.empty())
-			throw std::runtime_error("can't parse empty number");
-
-		double result;
-		std::from_chars_result chars_result;
-
-		const bool is_negative = str[0] == '-';
-		if (is_negative || str[0] == '+')
-			str = str.substr(1);
-
-		if (str.size() >= 3 && str[0] == '0' && tolower(str[1]) == 'x')
-		{
-			str = str.substr(2);
-			// find end of number
-			const auto end = std::find_if_not(str.cbegin(), str.cend(), isxdigit);
-
-			int64_t tmp;
-			chars_result = std::from_chars(str.data(), str.data() + std::distance(str.cbegin(), end), tmp, 16);
-			result = (double)tmp;
-		}
-		// a number prefixed with 0 and no decimal point is considered a hex number
-		else if (str.size() >= 2 && str[0] == '0' && isxdigit(str[1]) && !_isNumberWithDecimalPoint(str))
-		{
-			str = str.substr(1);
-			// find end of number
-			const auto end = std::find_if_not(str.cbegin(), str.cend(), isxdigit);
-
-			int64_t tmp;
-			chars_result = std::from_chars(str.data(), str.data() + std::distance(str.cbegin(), end), tmp, 16);
-			result = (double)tmp;
-		}
-		else
-		{
-			if (str[0] == '+')
-				str = str.substr(1);
-
-			bool has_point = false;
-			bool has_exponent = false;
-			const auto end = std::find_if_not(str.cbegin(), str.cend(),
-				[&has_point, &has_exponent](char c) -> bool
-				{
-					if (isdigit(c))
-						return true;
-
-					if (c == '.' && !has_point)
-					{
-						has_point = true;
-						return true;
-					}
-
-					if (tolower(c) == 'e' && !has_exponent)
-					{
-						has_exponent = true;
-						// TODO: after exponent might be + and - allowed?
-						return true;
-					}
-					return false;
-				});
-			chars_result = _EP_FROM_CHARS_DBL(str.data(), str.data() + std::distance(str.cbegin(), end), result);
-		}
-
-		if (chars_result.ec == std::errc())
-		{
-			if (index_after)
-				*index_after = chars_result.ptr - strInitial;
-
-			if (is_negative)
-				result *= -1.0;
-
-			return result;
-		}
-		else
-			throw std::runtime_error(fmt::format("can't parse number: {}", str));
+#ifdef __clang__
+		const fast_float::from_chars_result r = fast_float::from_chars(first, last, out);
+		std::from_chars_result conv;
+		conv.ptr = r.ptr;
+		conv.ec = r.ec;
+		return conv;
+#else
+		return std::from_chars(first, last, out);
+#endif
 	}
 
-	struct TokenBase
+	// Reads a numeric literal (with optional sign) from the start of text.
+	// *consumed receives the number of characters used.
+	static double ReadLiteral(std::string_view text, size_t* consumed)
 	{
-		virtual ~TokenBase() = default;
-	};
-
-	struct TokenUnaryOperator : TokenBase
-	{
-		enum Operator
+		if (text.empty())
+			throw std::runtime_error("can't parse empty number");
+		const char* const start = text.data();
+		std::string_view body = text;
+		bool negate = false;
+		if (body[0] == '-' || body[0] == '+')
 		{
-			kFunction,
-		};
+			negate = body[0] == '-';
+			body.remove_prefix(1);
+		}
 
-		TokenUnaryOperator(Operator op) : op(op) {}
-		TokenUnaryOperator(Operator op, std::string_view symbol) : op(op), symbol(symbol) {}
+		double value = 0.0;
+		std::from_chars_result res{};
+		size_t hexPrefix = 0;
+		if (body.size() >= 3 && body[0] == '0' && Lower(body[1]) == 'x')
+			hexPrefix = 2;
+		else if (body.size() >= 2 && body[0] == '0' && IsHexChar(body[1]) && body.find('.') == std::string_view::npos)
+			hexPrefix = 1;
 
-		Operator op;
-		std::string_view symbol;
-	};
-
-	struct TokenOperator : TokenBase
-	{
-		enum Operator
+		if (hexPrefix != 0)
 		{
-			kAddition,
-			kSubtraction,
-			kMultiplication,
-			kDivision,
-			kPow,
-			kModulo,
-			kEqual,
-			kNotEqual,
-			kLessThan,
-			kLessOrEqual,
-			kGreaterThan,
-			kGreaterOrEqual,
-		};
+			body.remove_prefix(hexPrefix);
+			size_t len = 0;
+			while (len < body.size() && IsHexChar(body[len]))
+				len++;
+			int64_t integer = 0;
+			res = std::from_chars(body.data(), body.data() + len, integer, 16);
+			value = (double)integer;
+		}
+		else
+		{
+			if (!body.empty() && body[0] == '+')
+				body.remove_prefix(1);
+			// digits with at most one '.' and at most one 'e' anywhere among them
+			size_t len = 0;
+			bool sawDot = false, sawExp = false;
+			for (; len < body.size(); len++)
+			{
+				const char c = body[len];
+				if (IsDigitChar(c))
+					continue;
+				if (c == '.' && !sawDot)
+				{
+					sawDot = true;
+					continue;
+				}
+				if (Lower(c) == 'e' && !sawExp)
+				{
+					sawExp = true;
+					continue;
+				}
+				break;
+			}
+			res = ParseDouble(body.data(), body.data() + len, value);
+		}
 
-		TokenOperator(Operator op, int prec, bool right_ass = false) : op(op), prec(prec), right_ass(right_ass) {}
-		Operator op;
-		int prec;
-		bool right_ass;
-	};
+		if (res.ec != std::errc())
+			throw std::runtime_error(fmt::format("can't parse number: {}", body));
+		if (consumed)
+			*consumed = (size_t)(res.ptr - start);
+		return negate ? value * -1.0 : value;
+	}
 
-	struct TokenParenthese : TokenBase {};
-
-	struct TokenNumber : TokenBase
+	static Item MakeBinary(Op op, int level, bool rightToLeft = false)
 	{
-		TokenNumber(TType number) : number(number) {}
-		TType number;
-	};
+		Item item{ ItemKind::Binary };
+		item.op = op;
+		item.level = level;
+		item.rightToLeft = rightToLeft;
+		return item;
+	}
+
+	TType LookupName(std::string_view name, std::string_view expression) const
+	{
+		if (auto it = m_constants.find(std::string(name)); it != m_constants.end())
+			return it->second;
+		if (!m_constant_callback)
+			throw std::runtime_error(fmt::format("unknown constant found \"{}\" in expression: {}", name, expression));
+		return m_constant_callback(name);
+	}
+
+	// Converts the text to postfix order (shunting-yard). A pending function
+	// call stays on the pending stack after its ')' and is only moved to the
+	// output by a later ')' or at the end, so it also takes in any binary
+	// operators that follow it on its level ("f(2)*3" calls f with 6).
+	void Translate(std::string_view expression, std::vector<Item>& program, AddrPart& part) const
+	{
+		std::vector<Item> pending;
+		bool wantOperand = true;
+		size_t pos = 0;
+		const size_t size = expression.size();
+		while (pos < size)
+		{
+			const char c = expression[pos];
+			if (IsSpaceChar(c))
+			{
+				pos++;
+				continue;
+			}
+
+			if (IsDigitChar(c) || (wantOperand && (c == '+' || c == '-')))
+			{
+				size_t used = 0;
+				const double literal = ReadLiteral(expression.substr(pos), &used);
+				Item item{ ItemKind::Value };
+				item.value = (TType)literal;
+				program.push_back(item);
+				pos += used;
+				wantOperand = false;
+				pos += ReadAddrSuffix(expression.substr(pos), part, false);
+				continue;
+			}
+
+			if (IsLetterChar(c) || c == '_' || c == '$')
+			{
+				size_t end = pos + 1;
+				while (end < size)
+				{
+					const char n = expression[end];
+					if (!IsLetterChar(n) && !IsDigitChar(n) && n != '_' && n != '@' && n != '.')
+						break;
+					end++;
+				}
+				const size_t wordLen = end - pos;
+				std::string_view name = expression.substr(pos, wordLen);
+				const size_t at = name.rfind('@');
+				if (at != std::string_view::npos)
+					name.remove_suffix(ReadAddrSuffix(name.substr(at), part, true));
+
+				if (m_function_callback && end < size && expression[end] == '(')
+				{
+					Item call{ ItemKind::Call };
+					call.name = name;
+					pending.push_back(call);
+					pending.push_back(Item{ ItemKind::OpenParen });
+					pos = end + 1;
+					wantOperand = true;
+					continue;
+				}
+
+				Item item{ ItemKind::Value };
+				item.value = LookupName(name, expression);
+				program.push_back(item);
+				pos = end;
+				wantOperand = false;
+				continue;
+			}
+
+			if (c == '(')
+			{
+				pending.push_back(Item{ ItemKind::OpenParen });
+				pos++;
+				wantOperand = true;
+				continue;
+			}
+
+			if (c == ')')
+			{
+				// note: does not change wantOperand
+				bool closed = false;
+				while (!pending.empty())
+				{
+					const Item top = pending.back();
+					pending.pop_back();
+					if (top.kind == ItemKind::OpenParen)
+					{
+						closed = true;
+						break;
+					}
+					program.push_back(top);
+				}
+				if (!closed)
+					throw std::runtime_error(fmt::format("parentheses mismatch: {}", expression));
+				pos++;
+				continue;
+			}
+
+			const char next = pos + 1 < size ? expression[pos + 1] : '\0';
+			Item binary{ ItemKind::Value };
+			bool known = true;
+			switch (c)
+			{
+			case '+': binary = MakeBinary(Op::Add, 2); break;
+			case '-': binary = MakeBinary(Op::Sub, 2); break;
+			case '*': binary = MakeBinary(Op::Mul, 3); break;
+			case '/': binary = MakeBinary(Op::Div, 3); break;
+			case '%': binary = MakeBinary(Op::Mod, 3); break;
+			case '^': binary = MakeBinary(Op::Pow, 4, true); break;
+			case '<':
+				binary = MakeBinary(next == '=' ? Op::Le : Op::Lt, 1);
+				pos += next == '=' ? 1 : 0;
+				break;
+			case '>':
+				binary = MakeBinary(next == '=' ? Op::Ge : Op::Gt, 1);
+				pos += next == '=' ? 1 : 0;
+				break;
+			case '=':
+			case '!':
+				known = next == '=';
+				if (known)
+				{
+					binary = MakeBinary(c == '=' ? Op::Eq : Op::Ne, 1);
+					pos++;
+				}
+				break;
+			default:
+				known = false;
+				break;
+			}
+			if (!known)
+				throw std::runtime_error(fmt::format("invalid operator found in expression: {}", expression));
+
+			while (!pending.empty() && pending.back().kind == ItemKind::Binary)
+			{
+				const int topLevel = pending.back().level;
+				const bool yields = binary.rightToLeft ? (binary.level < topLevel) : (binary.level <= topLevel);
+				if (!yields)
+					break;
+				program.push_back(pending.back());
+				pending.pop_back();
+			}
+			pending.push_back(binary);
+			pos++;
+			wantOperand = true;
+		}
+
+		while (!pending.empty())
+		{
+			if (pending.back().kind == ItemKind::OpenParen)
+				throw std::runtime_error(fmt::format("parentheses mismatch in expression: {}", expression));
+			program.push_back(pending.back());
+			pending.pop_back();
+		}
+	}
+
+	static bool NearlyEqual(TType a, TType b)
+	{
+		if constexpr (std::is_floating_point_v<TType>)
+			return std::abs(a - b) <= 0.0000000001;
+		else
+			return a == b;
+	}
+
+	static bool ClearlyDifferent(TType a, TType b)
+	{
+		if constexpr (std::is_floating_point_v<TType>)
+			return std::abs(a - b) > 0.0000000001;
+		else
+			return a != b;
+	}
+
+	static TType Combine(Op op, TType a, TType b)
+	{
+		switch (op)
+		{
+		case Op::Add: return a + b;
+		case Op::Sub: return a - b;
+		case Op::Mul: return a * b;
+		case Op::Div: return b == 0.0 ? (TType)0.0 : a / b;
+		case Op::Pow: return (TType)std::pow(a, b);
+		case Op::Mod:
+		{
+			if (std::round(b) == 0.0)
+				return (TType)0.0;
+			const sint64 dividend = (sint64)std::round(a);
+			const sint64 divisor = (sint64)std::round(b);
+			return (TType)(dividend % divisor);
+		}
+		case Op::Eq: return (TType)(NearlyEqual(a, b) ? 1 : 0);
+		case Op::Ne: return (TType)(ClearlyDifferent(a, b) ? 1 : 0);
+		case Op::Lt: return (TType)(a < b ? 1 : 0);
+		case Op::Le: return (TType)(a <= b ? 1 : 0);
+		case Op::Gt: return (TType)(a > b ? 1 : 0);
+		case Op::Ge: return (TType)(a >= b ? 1 : 0);
+		}
+		throw std::runtime_error("unsupported operation constant");
+	}
+
+	void Execute(const Item& item, std::vector<TType>& values) const
+	{
+		if (item.kind == ItemKind::Value)
+		{
+			values.push_back(item.value);
+			return;
+		}
+		const size_t needed = item.kind == ItemKind::Call ? 1 : 2;
+		if (values.size() < needed)
+			throw std::runtime_error("not enough parameters for equation");
+		if (item.kind == ItemKind::Call)
+		{
+			values.back() = m_function_callback(item.name, values.back());
+			return;
+		}
+		const TType b = values.back();
+		values.pop_back();
+		values.back() = Combine(item.op, values.back(), b);
+	}
 };
 
 class ExpressionParser : public TExpressionParser<double> {};
 
 void ExpressionParser_test();
-

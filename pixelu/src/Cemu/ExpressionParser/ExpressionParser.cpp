@@ -1,58 +1,51 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "ExpressionParser.h"
 
-template<typename T, typename TInternalType = double>
-T _testEvaluateToType(const char* expr)
+namespace
 {
-	TExpressionParser<TInternalType> ep;
-	T result = (T)ep.Evaluate(expr);
-	return result;
+	template<typename TResult, typename TCompute = double>
+	TResult EvalAs(const char* text)
+	{
+		TExpressionParser<TCompute> parser;
+		return (TResult)parser.Evaluate(text);
+	}
 }
 
+// self-check run from UnitTests() in debug builds
 void ExpressionParser_test()
 {
-	ExpressionParser ep;
-	cemu_assert_debug(_testEvaluateToType<sint64>("0x100005E0") == 0x100005E0);
-	cemu_assert_debug(_testEvaluateToType<uint64>("0x10+0x20+0x40") == 0x70);
-	cemu_assert_debug(_testEvaluateToType<sint64>("0+-3") == -3);
-	cemu_assert_debug(_testEvaluateToType<sint64>("0x0-3") == -3);
-	cemu_assert_debug(_testEvaluateToType<sint64>("01C+0x10") == 0x2C);
-	cemu_assert_debug(_testEvaluateToType<sint64>("+0x10") == 0x10);
-	cemu_assert_debug(_testEvaluateToType<sint64>("01C++0x10") == 0x2C);
-	cemu_assert_debug(_testEvaluateToType<sint64>("01C+(+0x10)") == 0x2C);
+	// literals and signs
+	cemu_assert_debug(EvalAs<sint64>("0x4A0") == 0x4A0);
+	cemu_assert_debug(EvalAs<sint64>("0x1+0x2+0x4") == 7);
+	cemu_assert_debug(EvalAs<sint64>("1+-6") == -5);
+	cemu_assert_debug(EvalAs<sint64>("0x10-0x11") == -1);
+	cemu_assert_debug(EvalAs<sint64>("0A+1") == 11);  // leading 0 means hex
+	cemu_assert_debug(EvalAs<sint64>("010+1.5") == 11); // ... unless a '.' follows somewhere
+	cemu_assert_debug(EvalAs<sint64>("+7") == 7);
+	cemu_assert_debug(EvalAs<sint64>("2*-3") == -6);
 
-	// arithmetic
-	cemu_assert_debug(_testEvaluateToType<sint64>("(62156250 / 1000) * 30") == 1864687); // truncated 1864687.5
+	// double vs integer arithmetic
+	cemu_assert_debug(EvalAs<sint64>("(7 / 2) * 4") == 14);
+	cemu_assert_debug(EvalAs<sint64, sint64>("(7 / 2) * 4") == 12);
+	cemu_assert_debug(EvalAs<sint64>("9 % 4") == 1);
+	cemu_assert_debug(EvalAs<sint64>("5 / 0") == 0);
+	cemu_assert_debug(EvalAs<sint64>("2 ^ 3 ^ 2") == 512);
 
-	// arithmetic with internal type sint64
-	cemu_assert_debug(_testEvaluateToType<sint64, sint64>("(62156250 / 1000) * 30") == 1864680);
+	// comparisons evaluate left to right
+	cemu_assert_debug(EvalAs<float>("3 >= 3") == 1.0f);
+	cemu_assert_debug(EvalAs<float>("2 < 1") == 0.0f);
+	cemu_assert_debug(EvalAs<float>("4 > 3 > 2") == 0.0f);
+	cemu_assert_debug(EvalAs<float>("4 > 3 > -1") == 1.0f);
+	cemu_assert_debug(EvalAs<float>("(1 != 2) == 1") == 1.0f);
 
-	// comparison operators
-	cemu_assert_debug(_testEvaluateToType<sint64>("5 > 3") == 0x1);
-	cemu_assert_debug(_testEvaluateToType<sint64>("5 < -10") == 0x0);
-	cemu_assert_debug(_testEvaluateToType<float>("5 > 3") == 1.0f);
-	cemu_assert_debug(_testEvaluateToType<float>("-5 > 3") == 0.0f);
-	cemu_assert_debug(_testEvaluateToType<float>("5 < 10") == 1.0f);
-	cemu_assert_debug(_testEvaluateToType<float>("5 <= 5") == 1.0f);
-	cemu_assert_debug(_testEvaluateToType<float>("5 <= 4.999") == 0.0f);
-	cemu_assert_debug(_testEvaluateToType<float>("5 <= (4+0.999)") == 0.0f);
-	cemu_assert_debug(_testEvaluateToType<float>("5 >= 3") == 1.0f);
-	cemu_assert_debug(_testEvaluateToType<float>("5 >= 10") == 0.0f);
-	cemu_assert_debug(_testEvaluateToType<float>("10 >= 5") == 1.0f);
-
-	// complex operations
-	cemu_assert_debug(_testEvaluateToType<float>("5 > 4 > 3 > 2") == 0.0f); // this should evaluate the operations from left to right, (5 > 4) -> 0.0, (0.0 > 4) -> 0.0, (0.0 > 3) -> 0.0, (0.0 > 2) -> 0.0
-	cemu_assert_debug(_testEvaluateToType<float>("5 > 4 > 3 > -2") == 1.0f); // this should evaluate the operations from left to right, (5 > 4) -> 0.0, (0.0 > 4) -> 0.0, (0.0 > 3) -> 0.0, (0.0 > -2) -> 1.0
-	cemu_assert_debug(_testEvaluateToType<float>("(5 == 5) > (5 == 6)") == 1.0f);
-
-	// reloc modifier behavior
-	ep = {};
-	ep.AddConstant("test", 5.0);
-	cemu_assert_debug(ep.IsValidExpression("test@ha") == true);
-	cemu_assert_debug(ep.IsValidExpression("test+15@lo") == true);
-	cemu_assert_debug(ep.IsValidExpression("test@ha + test@ha") == true); // technically not legal but we allow it for backwards compatibility (BotW extended memory pack relies on this)
-	cemu_assert_debug(ep.IsValidExpression("test@ha + test@lo") == false); // mixed modifier not allowed
-
-	cemu_assert_debug(ep.Evaluate("test+15@lo") == 20.0f);
-	cemu_assert_debug(ep.Evaluate("test+15@hi") == 0.0f);
-
+	// address suffixes apply to the whole result
+	ExpressionParser parser;
+	parser.AddConstant("base", 0x1234ABCD);
+	cemu_assert_debug(parser.Evaluate("base@ha") == 0x1235);
+	cemu_assert_debug(parser.Evaluate("base+0x10@l") == 0xABDD);
+	cemu_assert_debug(parser.Evaluate("base@h") == 0x1234);
+	cemu_assert_debug(parser.IsValidExpression("base@ha + base@ha"));
+	cemu_assert_debug(!parser.IsValidExpression("base@ha + base@lo"));
+	cemu_assert_debug(!parser.IsValidExpression("(1"));
+	cemu_assert_debug(!parser.IsConstantExpression("unknownName"));
 }
