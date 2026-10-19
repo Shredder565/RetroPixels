@@ -1,165 +1,157 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/OS/libs/TCL/TCL.h"
-
-#include "HW/Latte/Core/LattePM4.h"
-#include "OS/libs/coreinit/coreinit_Time.h"
+#include "Cafe/OS/libs/coreinit/coreinit_Time.h"
+#include "Cafe/HW/Latte/Core/LattePM4.h"
 
 namespace TCL
 {
-	SysAllocator<coreinit::OSEvent> s_updateRetirementEvent;
-	uint64 s_currentRetireMarker = 0;
+	// ---------------------------------------------------------------------------------
+	// Retire timestamps
+	//
+	// Every submission is followed by an end-of-pipe event that makes the GPU store a
+	// 64-bit counter into guest memory once it has finished everything before it. The
+	// counter value of the newest submission is handed back to GX2, which compares it
+	// against the stored value to find out whether the GPU has caught up.
+	// ---------------------------------------------------------------------------------
 
-	struct TCLStatePPC // mapped into PPC space
+	SysAllocator<uint64be> g_retiredStamp; // written by the GPU (EOP event)
+	SysAllocator<coreinit::OSEvent> g_retireEvent; // signalled whenever the GPU stores a new stamp
+	uint64 g_issuedStamp = 0; // stamp of the newest submission (CPU side only)
+
+	static uint64 LoadRetiredStamp()
 	{
-		uint64be gpuRetireMarker; // written by GPU
-	};
+		stdx::atomic_ref<uint64be> stamp(*g_retiredStamp.GetPtr());
+		return stamp.load();
+	}
 
-	SysAllocator<TCLStatePPC> s_tclStatePPC;
-
-	// called from GPU for timestamp EOP event
 	void TCLGPUNotifyNewRetirementTimestamp()
 	{
-		// gpuRetireMarker is updated via event eop command
 		__OSLockScheduler();
-		coreinit::OSSignalEventAllInternal(s_updateRetirementEvent.GetPtr());
+		coreinit::OSSignalEventAllInternal(g_retireEvent.GetPtr());
 		__OSUnlockScheduler();
 	}
 
 	int TCLTimestamp(TCLTimestampId id, uint64be* timestampOut)
 	{
-		if (id == TCLTimestampId::TIMESTAMP_LAST_BUFFER_RETIRED)
+		if (id != TCLTimestampId::TIMESTAMP_LAST_BUFFER_RETIRED)
 		{
-			MEMPTR<uint32> b;
-			// this is the timestamp of the last buffer that was retired by the GPU
-			stdx::atomic_ref<uint64be> retireTimestamp(s_tclStatePPC->gpuRetireMarker);
-			*timestampOut = retireTimestamp.load();
-			return 0;
-		}
-		else
-		{
-			cemuLog_log(LogType::Force, "TCLTimestamp(): Unsupported timestamp ID {}", (uint32)id);
+			cemuLog_log(LogType::Force, "TCLTimestamp(): unknown timestamp id {}", (uint32)id);
 			*timestampOut = 0;
 			return 0;
 		}
+		*timestampOut = LoadRetiredStamp();
+		return 0;
 	}
 
 	int TCLWaitTimestamp(TCLTimestampId id, uint64 waitTs, uint64 timeout)
 	{
-		if (id == TCLTimestampId::TIMESTAMP_LAST_BUFFER_RETIRED)
+		if (id != TCLTimestampId::TIMESTAMP_LAST_BUFFER_RETIRED)
 		{
-			while ( true )
-			{
-				stdx::atomic_ref<uint64be> retireTimestamp(s_tclStatePPC->gpuRetireMarker);
-				uint64 currentTimestamp = retireTimestamp.load();
-				if (currentTimestamp >= waitTs)
-					return 0;
-				coreinit::OSWaitEvent(s_updateRetirementEvent.GetPtr());
-			}
+			cemuLog_log(LogType::Force, "TCLWaitTimestamp(): unknown timestamp id {}", (uint32)id);
+			return 0;
 		}
-		else
-		{
-			cemuLog_log(LogType::Force, "TCLWaitTimestamp(): Unsupported timestamp ID {}", (uint32)id);
-		}
+		// the timeout is not enforced, the GPU always catches up eventually
+		while (LoadRetiredStamp() < waitTs)
+			coreinit::OSWaitEvent(g_retireEvent.GetPtr());
 		return 0;
 	}
 
-	static constexpr uint32 TCL_RING_BUFFER_SIZE = 4096; // in U32s
+	// ---------------------------------------------------------------------------------
+	// Ring buffer
+	//
+	// Single producer (the CPU thread submitting through TCLSubmitToRing) and a single
+	// consumer (the Latte command processor). One slot always stays unused so that
+	// "read == write" can only mean empty.
+	// ---------------------------------------------------------------------------------
 
-	std::atomic<uint32> tclRingBufferA[TCL_RING_BUFFER_SIZE];
-	std::atomic<uint32> tclRingBufferA_readIndex{0};
-	std::atomic<uint32> tclRingBufferA_writeIndex{0};
+	constexpr uint32 kRingWords = 4096; // power of two
+	constexpr uint32 kRingMask = kRingWords - 1;
 
-	// GPU code calls this to grab the next command word
+	std::atomic<uint32> g_ring[kRingWords];
+	std::atomic<uint32> g_ringRead{0}; // next word the GPU will read
+	std::atomic<uint32> g_ringWrite{0}; // next word the CPU will write
+
 	bool TCLGPUReadRBWord(uint32& cmdWord)
 	{
-		uint32 readIndex = tclRingBufferA_readIndex.load(std::memory_order::relaxed);
-		uint32 writeIndex = tclRingBufferA_writeIndex.load(std::memory_order::acquire);
-		if (readIndex == writeIndex)
-			return false;
-		cmdWord = tclRingBufferA[readIndex].load(std::memory_order::relaxed);
-		tclRingBufferA_readIndex.store((readIndex + 1) % TCL_RING_BUFFER_SIZE, std::memory_order::release);
+		const uint32 rd = g_ringRead.load(std::memory_order_relaxed);
+		if (rd == g_ringWrite.load(std::memory_order_acquire))
+			return false; // nothing queued
+		cmdWord = g_ring[rd].load(std::memory_order_relaxed);
+		g_ringRead.store((rd + 1) & kRingMask, std::memory_order_release);
 		return true;
 	}
 
-	void TCLWaitForRBSpace(uint32be numU32s)
+	static uint32 RingFreeWords()
 	{
-		uint32 writeIndex = tclRingBufferA_writeIndex.load(std::memory_order::relaxed);
-		while (true)
-		{
-			uint32 readIndex = tclRingBufferA_readIndex.load(std::memory_order::acquire);
-			uint32 distance = (readIndex + TCL_RING_BUFFER_SIZE - writeIndex) & (TCL_RING_BUFFER_SIZE - 1);
-			if (writeIndex == readIndex) // buffer completely empty
-				distance = TCL_RING_BUFFER_SIZE;
-			if (distance >= numU32s + 1) // assume distance minus one, because we are never allowed to completely wrap around
-				break;
-			coreinit::OSSleepTicks(coreinit::EspressoTime::ConvertNsToTimerTicks(500000)); // sleep 0.5ms
-		}
+		const uint32 wr = g_ringWrite.load(std::memory_order_relaxed);
+		const uint32 rd = g_ringRead.load(std::memory_order_acquire);
+		if (wr == rd)
+			return kRingWords;
+		return (rd - wr) & kRingMask;
 	}
 
-	// this function assumes that TCLWaitForRBSpace was called and that there is enough space
-	void TCLWriteCmd(uint32be* cmd, uint32 cmdLen)
+	static void RingWaitForSpace(uint32 wordCount)
 	{
-		uint32 writeIndex = tclRingBufferA_writeIndex.load(std::memory_order::relaxed);
-
-		while (cmdLen > 0)
-		{
-			tclRingBufferA[writeIndex].store(*cmd, std::memory_order::relaxed);
-			writeIndex++;
-			writeIndex &= (TCL_RING_BUFFER_SIZE - 1);
-			cmd++;
-			cmdLen--;
-		}
-
-		tclRingBufferA_writeIndex.store(writeIndex, std::memory_order::release);
+		// keep at least one slot free (see above)
+		while (RingFreeWords() < wordCount + 1)
+			coreinit::OSSleepTicks(coreinit::EspressoTime::ConvertNsToTimerTicks(500000)); // 0.5ms
 	}
 
-	#define EVENT_TYPE_TS		5
-
-	void TCLSubmitRetireMarker(bool triggerEventInterrupt)
+	// caller must have made sure the words fit
+	static void RingPush(const uint32be* words, uint32 wordCount)
 	{
-		s_currentRetireMarker++;
-		uint32be cmd[6];
-		cmd[0] = pm4HeaderType3(IT_EVENT_WRITE_EOP, 5);
-		cmd[1] = (4 | (EVENT_TYPE_TS << 8)); // event type (bits 8-15) and event index (bits 0-7).
-		cmd[2] = MEMPTR<void>(&s_tclStatePPC->gpuRetireMarker).GetMPTR(); // address lower 32bits + data sel bits
-		cmd[3] = 0x40000000; // select 64bit write, lower 16 bits are the upper bits of the address
-		if (triggerEventInterrupt)
-			cmd[3] |= 0x2000000; // trigger interrupt after value has been written
-		cmd[4] = (uint32)s_currentRetireMarker; // data lower 32 bits
-		cmd[5] = (uint32)(s_currentRetireMarker>>32); // data higher 32 bits
-		TCLWriteCmd(cmd, 6);
+		uint32 wr = g_ringWrite.load(std::memory_order_relaxed);
+		for (uint32 i = 0; i < wordCount; i++)
+		{
+			g_ring[wr].store((uint32)words[i], std::memory_order_relaxed);
+			wr = (wr + 1) & kRingMask;
+		}
+		g_ringWrite.store(wr, std::memory_order_release); // publish all words at once
+	}
+
+	constexpr uint32 kEopPacketWords = 6;
+
+	// end-of-pipe event that stores the next retire stamp (64-bit) into g_retiredStamp
+	static void RingPushRetireMarker(bool raiseInterrupt)
+	{
+		constexpr uint32 kEventTimestamp = 5; // EVENT_TYPE: cache flush and timestamp
+		constexpr uint32 kEventIndexEop = 4;
+		constexpr uint32 kDataSel64Bit = 2u << 29;
+		constexpr uint32 kIntSelOnWrite = 2u << 24;
+
+		g_issuedStamp++;
+		const MPTR stampAddr = MEMPTR<void>(g_retiredStamp.GetPtr()).GetMPTR();
+		uint32be packet[kEopPacketWords];
+		packet[0] = pm4HeaderType3(IT_EVENT_WRITE_EOP, 5);
+		packet[1] = kEventIndexEop | (kEventTimestamp << 8);
+		packet[2] = stampAddr; // low address bits
+		packet[3] = kDataSel64Bit | (raiseInterrupt ? kIntSelOnWrite : 0); // upper address bits are zero
+		packet[4] = (uint32)g_issuedStamp;
+		packet[5] = (uint32)(g_issuedStamp >> 32);
+		RingPush(packet, kEopPacketWords);
 	}
 
 	int TCLSubmitToRing(uint32be* cmd, uint32 cmdLen, betype<TCLSubmissionFlag>* controlFlags, uint64be* timestampValueOut)
 	{
-		TCLSubmissionFlag flags = *controlFlags;
-		cemu_assert_debug(timestampValueOut); // handle case where this is null
-
-		// make sure there is enough space to submit all commands at one
-		uint32 totalCommandLength = cmdLen;
-		totalCommandLength += 6; // space needed for TCLSubmitRetireMarker
-
-		TCLWaitForRBSpace(totalCommandLength);
-
-		// submit command buffer
-		TCLWriteCmd(cmd, cmdLen);
-
-		// create new marker timestamp and tell GPU to write it to our variable after its done processing the command
-		if ((HAS_FLAG(flags, TCLSubmissionFlag::USE_RETIRED_MARKER)))
+		const TCLSubmissionFlag flags = *controlFlags;
+		// the commands and the marker go in together so the GPU never sees half a submission
+		RingWaitForSpace(cmdLen + kEopPacketWords);
+		RingPush(cmd, cmdLen);
+		if (!HAS_FLAG(flags, TCLSubmissionFlag::USE_RETIRED_MARKER))
 		{
-			TCLSubmitRetireMarker(!HAS_FLAG(flags, TCLSubmissionFlag::NO_MARKER_INTERRUPT));
-			*timestampValueOut = s_currentRetireMarker; // incremented before each submit
+			cemuLog_logDebug(LogType::Force, "TCLSubmitToRing(): submission without retire marker is not supported");
+			return 0;
 		}
-		else
-		{
-			cemu_assert_unimplemented();
-		}
+		RingPushRetireMarker(!HAS_FLAG(flags, TCLSubmissionFlag::NO_MARKER_INTERRUPT));
+		if (timestampValueOut)
+			*timestampValueOut = g_issuedStamp;
 		return 0;
 	}
 
-	class : public COSModule
+	class TCLModule : public COSModule
 	{
-		public:
+	public:
 		std::string_view GetName() override
 		{
 			return "tcl";
@@ -170,26 +162,23 @@ namespace TCL
 			cafeExportRegister("TCL", TCLSubmitToRing, LogType::Placeholder);
 			cafeExportRegister("TCL", TCLTimestamp, LogType::Placeholder);
 			cafeExportRegister("TCL", TCLWaitTimestamp, LogType::Placeholder);
-		};
+		}
 
 		void rpl_entry(uint32 moduleHandle, coreinit::RplEntryReason reason) override
 		{
+			if (reason != coreinit::RplEntryReason::Loaded && reason != coreinit::RplEntryReason::Unloaded)
+				return;
+			g_issuedStamp = 0;
+			*g_retiredStamp.GetPtr() = 0;
 			if (reason == coreinit::RplEntryReason::Loaded)
-			{
-				s_currentRetireMarker = 0;
-				s_tclStatePPC->gpuRetireMarker = 0;
-				coreinit::OSInitEvent(s_updateRetirementEvent.GetPtr(), coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_AUTO);
-			}
-			else if (reason == coreinit::RplEntryReason::Unloaded)
-			{
-				s_currentRetireMarker = 0;
-				s_tclStatePPC->gpuRetireMarker = 0;
-			}
+				coreinit::OSInitEvent(g_retireEvent.GetPtr(), coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_AUTO);
 		}
-	}s_COStclModule;
+	};
+
+	TCLModule g_tclModule;
 
 	COSModule* GetModule()
 	{
-		return &s_COStclModule;
+		return &g_tclModule;
 	}
 }
