@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "util/helpers/fspinlock.h"
 
@@ -10,9 +11,13 @@ struct VulkanPipelineHash
 	uint64 h1;
 };
 
+// The transferable pipeline cache (shaderCache/transferable/<title>_vkpipeline.bin). Each entry holds
+// the shader hashes and the compacted GPU register state of one pipeline. At title start the entries
+// are compiled again on worker threads, during gameplay new pipelines are appended by a writer thread.
 class VulkanPipelineStableCache
 {
-	struct PipelineHash 
+	// (vertex shader base hash, pipeline state hash)
+	struct PipelineHash
 	{
 		PipelineHash(uint64 h0, uint64 h1) : h0(h0), h1(h1) {};
 
@@ -24,12 +29,12 @@ class VulkanPipelineStableCache
 			return h0 == r.h0 && h1 == r.h1;
 		}
 
-		struct HashFunc 
+		struct HashFunc
 		{
 			size_t operator()(const PipelineHash& v) const
 			{
 				static_assert(sizeof(uint64) == sizeof(size_t));
-				return v.h0 ^ v.h1;
+				return (size_t)(v.h0 ^ v.h1);
 			}
 		};
 	};
@@ -41,7 +46,7 @@ public:
 	bool UpdateLoading(uint32& pipelinesLoadedTotal, uint32& pipelinesMissingShaders);
 	void EndLoading();
 	void LoadPipelineFromCache(std::span<uint8> fileData);
-    void Close(); // called on title exit
+	void Close(); // called on title exit
 
 	bool HasPipelineCached(uint64 baseHash, uint64 pipelineStateHash);
 	void AddCurrentStateToCache(uint64 baseHash, uint64 pipelineStateHash);
@@ -54,13 +59,12 @@ private:
 	int CompilerThread();
 	void WorkerThread();
 
-	std::thread* m_pipelineCacheStoreThread;
+	std::thread* m_writerThread{};
 
-	std::unordered_set<PipelineHash, PipelineHash::HashFunc> m_pipelineIsCached;
-	FSpinlock m_pipelineIsCachedLock;
-	class FileCache* s_cache;
+	std::unordered_set<PipelineHash, PipelineHash::HashFunc> m_knownPipelines;
+	FSpinlock m_knownPipelinesLock;
+	class FileCache* m_file{};
 
-	std::atomic_uint32_t m_numCompilationThreads{ 0 };
-	ConcurrentQueue<std::vector<uint8>> m_compilationQueue;
-	std::atomic_uint32_t m_compilationCount;
+	std::atomic_uint32_t m_loaderThreadCount{ 0 };
+	ConcurrentQueue<std::vector<uint8>> m_loadQueue;
 };
