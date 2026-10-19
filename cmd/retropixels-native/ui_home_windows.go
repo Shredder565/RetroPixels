@@ -435,9 +435,11 @@ func (a *app) moveSel(d int) {
 
 // homeTick: the controller, 20 times a second while no game runs (the
 // controller check, and the D-pad and A to pick and start a recent game).
+// A game in an engine (GameCube / Wii, Wii U, arcade) counts as running too:
+// its buttons are the game's, not the home screen's.
 func (a *app) homeTick() {
 	u := a.ui
-	if a.sess != nil {
+	if a.sess != nil || a.engineRunning() {
 		u.homeActive = false
 		return
 	}
@@ -489,4 +491,9 @@ func (a *app) homeTick() {
 		return
 	}
 	u.padA = now.Buttons[padA]
+}
+
+// engineRunning: a game is playing in PixelU, PixelU-Wii or MAME.
+func (a *app) engineRunning() bool {
+	return a.dol.run != nil || a.pu.run != nil || a.mame.run != nil
 }
