@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Common/precompiled.h"
 #include "Cemu/ncrypto/ncrypto.h"
 #include "util/helpers/helpers.h"
@@ -12,322 +13,246 @@
 
 #include "util/crypto/aes128.h"
 
+// provided by the IOSU crypto module (OTP / SEEPROM dumps)
 void iosuCrypto_getDeviceCertificate(void* certOut, sint32 len);
 void iosuCrypto_getDeviceCertPrivateKey(void* privKeyOut, sint32 len);
 bool iosuCrypto_getDeviceId(uint32* deviceId);
 void iosuCrypto_getDeviceSerialString(char* serialString);
-
 void iosuCrypto_readOtpData(void* output, sint32 wordIndex, sint32 size);
-
 void iosuCrypto_readSeepromData(void* output, sint32 wordIndex, sint32 size);
-
 bool iosuCrypto_hasSeeprom();
-extern bool hasOtpMem; // remove later
+extern bool hasOtpMem;
 
 namespace NCrypto
 {
-	std::string base64Encode(const void* inputMem, size_t inputLen)
+	/* base64 (RFC 4648 alphabet, '=' padding) */
+
+	namespace
 	{
-		const uint8* input = (const uint8*)inputMem;
+		constexpr char kB64Alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-		static const char* base64_charset =
-			"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-			"abcdefghijklmnopqrstuvwxyz"
-			"0123456789+/";
-
-		std::string strBase64;
-		strBase64.resize((inputLen * 4) / 3 + 16);
-
-		int i = 0;
-		int j = 0;
-		unsigned char charArray_3[3];
-		unsigned char charArray_4[4];
-		sint32 outputLength = 0;
-		while (inputLen--)
+		// 6-bit value of a base64 character; 64 marks a character outside the alphabet
+		uint32 B64Value(char ch)
 		{
-			charArray_3[i++] = *(input++);
-			if (i == 3)
-			{
-				charArray_4[0] = (charArray_3[0] & 0xfc) >> 2;
-				charArray_4[1] = ((charArray_3[0] & 0x03) << 4) + ((charArray_3[1] & 0xf0) >> 4);
-				charArray_4[2] = ((charArray_3[1] & 0x0f) << 2) + ((charArray_3[2] & 0xc0) >> 6);
-				charArray_4[3] = charArray_3[2] & 0x3f;
-				for (i = 0; (i < 4); i++)
-				{
-					strBase64[outputLength] = base64_charset[charArray_4[i]];
-					outputLength++;
-				}
-				i = 0;
-			}
+			if (ch >= 'A' && ch <= 'Z') return (uint32)(ch - 'A');
+			if (ch >= 'a' && ch <= 'z') return (uint32)(ch - 'a' + 26);
+			if (ch >= '0' && ch <= '9') return (uint32)(ch - '0' + 52);
+			if (ch == '+') return 62;
+			if (ch == '/') return 63;
+			return 64;
 		}
-		if (i)
-		{
-			for (j = i; j < 3; j++)
-				charArray_3[j] = '\0';
-
-			charArray_4[0] = (charArray_3[0] & 0xfc) >> 2;
-			charArray_4[1] = ((charArray_3[0] & 0x03) << 4) + ((charArray_3[1] & 0xf0) >> 4);
-			charArray_4[2] = ((charArray_3[1] & 0x0f) << 2) + ((charArray_3[2] & 0xc0) >> 6);
-			charArray_4[3] = charArray_3[2] & 0x3f;
-
-			for (j = 0; j < (i + 1); j++)
-			{
-				strBase64[outputLength] = base64_charset[charArray_4[j]];
-				outputLength++;
-			}
-			while (i++ < 3)
-			{
-				strBase64[outputLength] = '=';
-				outputLength++;
-			}
-		}
-
-		cemu_assert(outputLength <= strBase64.size());
-		strBase64.resize(outputLength);
-		return strBase64;
 	}
 
+	std::string base64Encode(const void* inputMem, size_t inputLen)
+	{
+		const uint8* in = static_cast<const uint8*>(inputMem);
+		std::string out;
+		out.reserve((inputLen + 2) / 3 * 4);
+		size_t pos = 0;
+		for (; pos + 3 <= inputLen; pos += 3)
+		{
+			const uint32 group = ((uint32)in[pos] << 16) | ((uint32)in[pos + 1] << 8) | (uint32)in[pos + 2];
+			for (int shift = 18; shift >= 0; shift -= 6)
+				out.push_back(kB64Alphabet[(group >> shift) & 63]);
+		}
+		const size_t rest = inputLen - pos;
+		if (rest != 0)
+		{
+			uint32 group = (uint32)in[pos] << 16;
+			if (rest == 2)
+				group |= (uint32)in[pos + 1] << 8;
+			out.push_back(kB64Alphabet[(group >> 18) & 63]);
+			out.push_back(kB64Alphabet[(group >> 12) & 63]);
+			out.push_back(rest == 2 ? kB64Alphabet[(group >> 6) & 63] : '=');
+			out.push_back('=');
+		}
+		return out;
+	}
+
+	// Input must be a non-empty multiple of 4 characters (and longer than 3),
+	// otherwise the result is empty. '=' counts as zero bits wherever it occurs;
+	// only '=' in the last two places shortens the output.
 	std::vector<uint8> base64Decode(std::string_view inputStr)
 	{
-		static constexpr unsigned char kDecodingTable[] = {
-		  64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
-		  64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
-		  64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 62, 64, 64, 64, 63,
-		  52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 64, 64, 64, 64, 64, 64,
-		  64,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14,
-		  15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 64, 64, 64, 64, 64,
-		  64, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
-		  41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 64, 64, 64, 64, 64,
-		  64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
-		  64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
-		  64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
-		  64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
-		  64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
-		  64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
-		  64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64,
-		  64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64
-		};
-
-		size_t in_len = inputStr.size();
-		if (in_len <= 3 || (in_len & 3) != 0)
-			return std::vector<uint8>(); // invalid length
-
-		std::vector<uint8> output;
-
-		size_t out_len = in_len / 4 * 3;
-		if (inputStr[in_len - 1] == '=') out_len--;
-		if (inputStr[in_len - 2] == '=') out_len--;
-
-		output.resize(out_len);
-
-		for (size_t i = 0, j = 0; i < in_len;) 
+		const size_t len = inputStr.size();
+		if (len <= 3 || (len % 4) != 0)
+			return {};
+		size_t outLen = len / 4 * 3;
+		if (inputStr[len - 1] == '=')
+			outLen--;
+		if (inputStr[len - 2] == '=')
+			outLen--;
+		std::vector<uint8> out(outLen);
+		size_t w = 0;
+		for (size_t g = 0; g < len; g += 4)
 		{
-			uint32 a = inputStr[i] == '=' ? 0 & i++ : kDecodingTable[static_cast<uint8>(inputStr[i++])];
-			uint32 b = inputStr[i] == '=' ? 0 & i++ : kDecodingTable[static_cast<uint8>(inputStr[i++])];
-			uint32 c = inputStr[i] == '=' ? 0 & i++ : kDecodingTable[static_cast<uint8>(inputStr[i++])];
-			uint32 d = inputStr[i] == '=' ? 0 & i++ : kDecodingTable[static_cast<uint8>(inputStr[i++])];
-
-			uint32 triple = (a << 3 * 6) + (b << 2 * 6) + (c << 1 * 6) + (d << 0 * 6);
-
-			if (j < out_len) output[j++] = (triple >> 2 * 8) & 0xFF;
-			if (j < out_len) output[j++] = (triple >> 1 * 8) & 0xFF;
-			if (j < out_len) output[j++] = (triple >> 0 * 8) & 0xFF;
+			uint32 acc = 0;
+			for (size_t k = 0; k < 4; k++)
+			{
+				const char ch = inputStr[g + k];
+				acc = acc * 64 + (ch == '=' ? 0 : B64Value(ch));
+			}
+			for (int shift = 16; shift >= 0 && w < outLen; shift -= 8)
+				out[w++] = (uint8)(acc >> shift);
 		}
-
-		return output;
+		return out;
 	}
 
 	void base64Tests()
 	{
-		std::vector<uint8> random;
-		for (sint32 i = 0; i < 100; i++)
+		for (size_t n = 0; n < 100; n++)
 		{
-			random.resize(0 + i);
-			for (size_t x = 0; x < random.size(); x++)
-				random[x] = (uint8)(i * 21 + x * 133);
-
-			std::string b64 = base64Encode(random.data(), random.size());
-			std::vector<uint8> dec = base64Decode(b64);
-
-			cemu_assert(random == dec);
+			std::vector<uint8> bytes(n);
+			for (size_t i = 0; i < n; i++)
+				bytes[i] = (uint8)(n * 37 + i * 101);
+			cemu_assert(base64Decode(base64Encode(bytes.data(), bytes.size())) == bytes);
 		}
 	}
 
-	/* Hashing */
+	/* hashes */
 
 	void GenerateHashSHA1(const void* data, size_t len, CHash160& hashOut)
 	{
-		SHA1((const unsigned char*) data, len, hashOut.b);
+		SHA1(static_cast<const unsigned char*>(data), len, hashOut.b);
 	}
 
 	void GenerateHashSHA256(const void* data, size_t len, CHash256& hashOut)
 	{
-		SHA256((const unsigned char*) data, len, hashOut.b);
+		SHA256(static_cast<const unsigned char*>(data), len, hashOut.b);
 	}
 
-	/* Ticket */
-	struct ETicketFileHeaderWiiU
+	/* ticket (.tik) layout */
+
+	namespace
 	{
-		/*
-			Ticket version 0:
-				SHA1 hash
-			Ticket version 1:
-				SHA256 hash + has item rights
-		
-		*/
-
-		/* +0x000 */ uint32be signatureType;
-		/* +0x004 */ uint8 sig[0x100];
-		/* +0x104 */ uint8 _ukn104[0x180 - 0x104];
-
-		/* +0x180 */ ECCPubKey publicKey;
-		/* +0x1BC */ uint8 ticketFormatVersion;
-		/* +0x1BD */ uint8 _ukn1BD;
-		/* +0x1BE */ uint8 _ukn1BE;
-
-		/* +0x1BF */ uint8 encryptedTitleKey[16];
-		/* +0x1CF */ uint8 _ukn1CF; // probably padding
-
-		/* +0x1D0 */ uint32be ticketIdHigh;
-		/* +0x1D4 */ uint32be ticketIdLow;
-
-		/* +0x1D8 */ uint32be deviceId; // ticket personalized to this deviceId. Zero if not personalized
-
-		/* +0x1DC */ uint32be titleIdHigh;
-		/* +0x1E0 */ uint32be titleIdLow;
-		/* +0x1E4 */ uint16be ukn1E4;
-		/* +0x1E6 */ uint16be titleVersion; // also used as ticket version (for AOC content)?
-
-		/* +0x1E8 */ uint8 _ukn1E8[0x21C - 0x1E8];
-
-		/* +0x21C */ uint32be accountId;
-
-		/* V1 extension header starts at +0x2A4 */ 
-	};
-
-	struct ETicketFileHeaderExtV1
-	{
-		/* starts at +0x2A4 */
-		/* +0x000 */ uint16be headerVersion;
-		/* +0x002 */ uint16be headerSize;
-		/* +0x004 */ uint32be ukn008;
-		/* +0x008 */ uint32be sectionTableOffset;
-		/* +0x00C */ uint16be sectionTableNumEntries;
-		/* +0x00E */ uint16be sectionTableEntrySize;
-		/**/
-	};
-
-	struct ETicketFileHeaderExtV1SectionHeader
-	{
-		enum
+		struct TikHeader
 		{
-			SECTION_TYPE_CONTENT_RIGHTS = 3, // content rights
+			/* +0x000 */ uint32be signatureType;
+			/* +0x004 */ uint8 signature[0x100];
+			/* +0x104 */ uint8 _pad104[0x7C];
+			/* +0x180 */ ECCPubKey eccPublicKey;      // for personalized tickets
+			/* +0x1BC */ uint8 formatVersion;
+			/* +0x1BD */ uint8 _1BD[2];
+			/* +0x1BF */ uint8 titleKey[16];          // encrypted with the common key
+			/* +0x1CF */ uint8 _1CF;
+			/* +0x1D0 */ uint32be ticketIdHigh;
+			/* +0x1D4 */ uint32be ticketIdLow;
+			/* +0x1D8 */ uint32be consoleId;           // 0 = not personalized
+			/* +0x1DC */ uint32be titleIdHigh;
+			/* +0x1E0 */ uint32be titleIdLow;
+			/* +0x1E4 */ uint16be _1E4;
+			/* +0x1E6 */ uint16be titleVersion;
+			/* +0x1E8 */ uint8 _1E8[0x34];
+			/* +0x21C */ uint32be accountId;
 		};
+		static_assert(sizeof(TikHeader) == 0x220);
 
-		/* +0x00 */ uint32be sectionOffset;
-		/* +0x04 */ uint32be entryCount;
-		/* +0x08 */ uint32be entrySize;
-		/* +0x0C */ uint32be sectionSize;
-		/* +0x10 */ uint16be type;
-		/* +0x12 */ uint16be ukn00;
-	};
-
-	static_assert(sizeof(ETicketFileHeaderWiiU) == 0x220);
-
-	struct ETicketV1_ContentRights
-	{
-		uint32be baseIndex; // first index for bitmask?
-		uint8be rightBitmask[0x80];
-
-		uint32 GetRightsCount() const
+		// format 1 extension, at 0x2A4
+		constexpr size_t kTikExtOffset = 0x2A4;
+		struct TikExtHeader
 		{
-			return sizeof(rightBitmask) * 8;
-		}
+			uint16be version;
+			uint16be size;
+			uint32be _04;
+			uint32be sectionTableOffset; // relative to the extension
+			uint16be sectionCount;
+			uint16be sectionEntrySize;
+		};
+		static_assert(sizeof(TikExtHeader) == 0x10);
 
-		bool GetRight(uint32 index) const
+		struct TikExtSection
 		{
-			cemu_assert_debug(index < GetRightsCount());
-			if (index >= GetRightsCount())
-				return false;
-			return ((rightBitmask[(index/8)]>>(index & 7)) & 1) != 0;
-		}
-	};
+			uint32be offset; // relative to the extension
+			uint32be recordCount;
+			uint32be recordSize;
+			uint32be totalSize;
+			uint16be type;
+			uint16be _12;
+		};
+		static_assert(sizeof(TikExtSection) == 0x14);
+		constexpr uint16 kSectionContentRights = 3;
 
-	static_assert(sizeof(ETicketV1_ContentRights) == 0x84);
+		// one bit per content index, starting at firstIndex (bit n of byte n/8, LSB first)
+		struct TikContentRights
+		{
+			uint32be firstIndex;
+			uint8 bits[0x80];
+		};
+		static_assert(sizeof(TikContentRights) == 0x84);
+		constexpr uint32 kRightsPerRecord = 0x80 * 8;
+
+		// 128-bit Wii U common key used for ticket title keys
+		constexpr uint8 kWiiUCommonKey[16] = { 0xD7, 0xB0, 0x04, 0x02, 0x65, 0x9B, 0xA2, 0xAB, 0xD2, 0xCB, 0x0D, 0xB2, 0x7F, 0xA2, 0xB6, 0x56 };
+
+		void MakeIdIv(uint64 id, uint8 iv[16])
+		{
+			memset(iv, 0, 16);
+			for (int i = 0; i < 8; i++)
+				iv[i] = (uint8)(id >> (56 - 8 * i));
+		}
+	}
 
 	bool ETicketParser::parse(const uint8* data, size_t size)
 	{
-		auto readStruct = [&](uint32 offset, uint32 readSize) -> void*
-		{
-			if ((offset + readSize) > size)
+		// pointer to [offset, offset + len) or null if outside the buffer
+		auto at = [&](uint64 offset, uint64 len) -> const uint8* {
+			if (offset > size || len > size - offset)
 				return nullptr;
-			return (void*)((const uint8*)data + offset);
+			return data + offset;
 		};
 
-		if (size < sizeof(ETicketFileHeaderWiiU))
+		const TikHeader* tik = reinterpret_cast<const TikHeader*>(at(0, sizeof(TikHeader)));
+		if (!tik)
 			return false;
-		ETicketFileHeaderWiiU* header = (ETicketFileHeaderWiiU*)readStruct(0, sizeof(ETicketFileHeaderWiiU));
-		if (!header)
+		m_titleId = ((uint64)(uint32)tik->titleIdHigh << 32) | (uint32)tik->titleIdLow;
+		m_ticketId = ((uint64)(uint32)tik->ticketIdHigh << 32) | (uint32)tik->ticketIdLow;
+		m_ticketFormatVersion = tik->formatVersion;
+		m_titleVersion = tik->titleVersion;
+		const uint32 titleIdHigh = (uint32)(m_titleId >> 32);
+		if ((titleIdHigh >> 16) != 0x0005) // Wii U titles only
 			return false;
-		m_titleId = MakeU64(header->titleIdHigh, header->titleIdLow);
-		m_ticketId = MakeU64(header->ticketIdHigh, header->ticketIdLow);
-		m_ticketFormatVersion = header->ticketFormatVersion;
-		m_titleVersion = header->titleVersion;
-		uint32 titleIdHigh = (m_titleId >> 32);
-		if ((titleIdHigh >> 16) != 0x5)
-			return false; // title id should start with 0005... (Wii U platform id?)
+		m_deviceId = tik->consoleId;
+		m_isPersonalized = m_deviceId != 0;
+		m_publicKey = tik->eccPublicKey;
+		memcpy(m_encryptedTitleKey, tik->titleKey, sizeof(m_encryptedTitleKey));
 
-		m_isPersonalized = header->deviceId != 0;
-		m_deviceId = header->deviceId;
-		m_publicKey = header->publicKey;
-
-		std::memcpy(m_encryptedTitleKey, header->encryptedTitleKey, 16);
-
-		cemu_assert_debug(header->ukn1E4 == 0);
-
-		// read V1 extension
-		if (m_ticketFormatVersion >= 1)
+		// only DLC tickets (0005000C) carry content rights
+		if (m_ticketFormatVersion < 1 || titleIdHigh != 0x0005000C)
+			return true;
+		const TikExtHeader* ext = reinterpret_cast<const TikExtHeader*>(at(kTikExtOffset, sizeof(TikExtHeader)));
+		if (!ext)
+			return false;
+		const uint32 sectionCount = ext->sectionCount;
+		for (uint32 s = 0; s < sectionCount; s++)
 		{
-			if ((titleIdHigh) == 0x0005000c)
+			const uint64 sectionPos = kTikExtOffset + (uint64)(uint32)ext->sectionTableOffset + (uint64)s * (uint16)ext->sectionEntrySize;
+			const TikExtSection* section = reinterpret_cast<const TikExtSection*>(at(sectionPos, sizeof(TikExtSection)));
+			if (!section)
+				return false;
+			if (section->type != kSectionContentRights)
+				continue;
+			if (section->recordSize != sizeof(TikContentRights))
 			{
-				ETicketFileHeaderExtV1* extHeader = (ETicketFileHeaderExtV1*)readStruct(0x2A4, sizeof(ETicketFileHeaderExtV1)); //  (ETicketFileHeaderExtV1*)((uint8*)header + 0x2A4);
-				if (!extHeader)
+				cemuLog_log(LogType::Force, "ETicket: Failed to parse ticket with invalid rights size");
+				return false;
+			}
+			const uint32 recordCount = section->recordCount;
+			for (uint32 r = 0; r < recordCount; r++)
+			{
+				const uint64 recordPos = kTikExtOffset + (uint64)(uint32)section->offset + (uint64)r * sizeof(TikContentRights);
+				const TikContentRights* rights = reinterpret_cast<const TikContentRights*>(at(recordPos, sizeof(TikContentRights)));
+				if (!rights)
 					return false;
-				cemu_assert_debug(extHeader->sectionTableEntrySize == 0x14);
-				for (uint32 i = 0; i < extHeader->sectionTableNumEntries; i++)
+				const uint32 first = rights->firstIndex;
+				if (first > 0x1000)
 				{
-					ETicketFileHeaderExtV1SectionHeader* sectHeader = (ETicketFileHeaderExtV1SectionHeader*)readStruct(0x2A4 + extHeader->sectionTableOffset + i * extHeader->sectionTableEntrySize, sizeof(ETicketFileHeaderExtV1SectionHeader));
-					if (!sectHeader)
-						return false;
-					if (sectHeader->type == ETicketFileHeaderExtV1SectionHeader::SECTION_TYPE_CONTENT_RIGHTS)
-					{
-						if (sectHeader->entrySize != sizeof(ETicketV1_ContentRights))
-						{
-							cemuLog_log(LogType::Force, "ETicket: Failed to parse ticket with invalid rights size");
-							return false;
-						}
-						cemu_assert_debug(sectHeader->entryCount == 1);
-						for (uint32 r = 0; r < sectHeader->entryCount; r++)
-						{
-							ETicketV1_ContentRights* rights = (ETicketV1_ContentRights*)readStruct(0x2A4 + sectHeader->sectionOffset + r * sectHeader->entrySize, sizeof(ETicketV1_ContentRights));
-							cemu_assert_debug(rights->baseIndex == 0);
-							if (rights->baseIndex > 0x1000)
-							{
-								cemuLog_log(LogType::Force, "ETicket: Invalid content rights index ({})", (uint32)rights->baseIndex);
-								continue;
-							}
-							size_t maxRightsCount = rights->baseIndex + rights->GetRightsCount();
-							if (maxRightsCount > m_contentRights.size())
-								m_contentRights.resize(maxRightsCount);
-							for (uint32 x = 0; x < rights->GetRightsCount(); x++)
-								m_contentRights[x + rights->baseIndex] = rights->GetRight(x);
-						}
-					}
-					else
-					{
-						cemu_assert_debug(false);
-					}
+					cemuLog_log(LogType::Force, "ETicket: Invalid content rights index ({})", first);
+					continue;
 				}
+				if (m_contentRights.size() < first + kRightsPerRecord)
+					m_contentRights.resize(first + kRightsPerRecord);
+				for (uint32 bit = 0; bit < kRightsPerRecord; bit++)
+					m_contentRights[first + bit] = ((rights->bits[bit / 8] >> (bit % 8)) & 1) != 0;
 			}
 		}
 		return true;
@@ -335,168 +260,142 @@ namespace NCrypto
 
 	void ETicketParser::GetTitleKey(AesKey& key)
 	{
-		// the key is encrypted using the titleId as IV + 8 zero bytes
-		uint8 iv[16]{};
-		*(uint64be*)iv = m_titleId;
-
-		uint8 commonKey[16] = { 0xD7,0xB0,0x04,0x02,0x65,0x9B,0xA2,0xAB,0xD2,0xCB,0x0D,0xB2,0x7F,0xA2,0xB6,0x56 };
-
-		AES128_CBC_decrypt(key.b, m_encryptedTitleKey, 16, commonKey, iv);
+		uint8 iv[16];
+		MakeIdIv(m_titleId, iv);
+		AES128_CBC_decrypt(key.b, m_encryptedTitleKey, 16, kWiiUCommonKey, iv);
 	}
 
-	// personalized tickets have an extra layer of encryption for the title key
+	// A personalized title key is additionally encrypted with a key derived via
+	// ECDH between the console key and the ticket's public key (SHA-1 of the
+	// shared secret, first 16 bytes; IV = ticket id).
 	bool ETicketParser::Depersonalize(uint8* ticketData, size_t ticketSize, uint32 deviceId, const ECCPrivKey& devicePrivKey)
 	{
-		ETicketParser ticketParser;
-		if (!ticketParser.parse(ticketData, ticketSize))
+		ETicketParser tik;
+		if (!tik.parse(ticketData, ticketSize) || !tik.IsPersonalized())
 			return false;
-		if (!ticketParser.IsPersonalized())
-			return false;
-		if (ticketParser.m_deviceId != deviceId)
+		if (tik.m_deviceId != deviceId)
 		{
 			cemuLog_log(LogType::Force, "Personalized ticket does not match deviceId");
 			return false;
 		}
+		EC_KEY* ownKey = devicePrivKey.getPrivateKey();
+		EC_POINT* peer = tik.m_publicKey.getPublicKeyAsPoint();
+		uint8 secret[128]{};
+		const int secretLen = ECDH_compute_key(secret, sizeof(secret), peer, ownKey, nullptr);
+		EC_POINT_free(peer);
+		EC_KEY_free(ownKey);
+		cemu_assert(secretLen > 16);
 
-		// decrypt personalized titlekey
-		EC_KEY* ec_privKey = devicePrivKey.getPrivateKey();
-		EC_POINT* ec_publicKey = ticketParser.m_publicKey.getPublicKeyAsPoint();
+		CHash160 digest;
+		GenerateHashSHA1(secret, (size_t)secretLen, digest);
+		uint8 iv[16];
+		MakeIdIv(tik.m_ticketId, iv);
+		uint8 commonKeyEncrypted[16];
+		AES128_CBC_decrypt(commonKeyEncrypted, tik.m_encryptedTitleKey, 16, digest.b, iv);
 
-		uint8 sharedKey[128]{};
-		int sharedKeyLen = ECDH_compute_key(sharedKey, sizeof(sharedKey), ec_publicKey, ec_privKey, nullptr);
-		cemu_assert(sharedKeyLen > 16);
-		EC_KEY_free(ec_privKey);
-		EC_POINT_free(ec_publicKey);
-
-		NCrypto::CHash160 sharedKeySHA1;
-		NCrypto::GenerateHashSHA1(sharedKey, sharedKeyLen, sharedKeySHA1);
-
-		uint8 aesSharedKey[16]{};
-		std::memcpy(aesSharedKey, sharedKeySHA1.b, 16);
-
-		uint8 iv[16]{};
-		*(uint64be*)iv = ticketParser.m_ticketId;
-
-		uint8 ticketKey[16];
-		AES128_CBC_decrypt(ticketKey, ticketParser.m_encryptedTitleKey, 16, aesSharedKey, iv);
-
-		// store de-personalized key and remove personal data from ticket
-		ETicketFileHeaderWiiU* header = (ETicketFileHeaderWiiU*)ticketData;
-		std::memcpy(header->encryptedTitleKey, ticketKey, 16);
-		header->deviceId = 0;
+		TikHeader* header = reinterpret_cast<TikHeader*>(ticketData);
+		memcpy(header->titleKey, commonKeyEncrypted, 16);
+		header->consoleId = 0;
 		header->accountId = 0;
-
 		return true;
 	}
 
-	/* Title meta data */
+	/* title metadata (.tmd) layout */
 
-	struct TMDFileHeaderWiiU
+	namespace
 	{
-		/* +0x000 */ uint32be signatureType;
-
-		/* +0x004 */ uint8be sig[0x100];
-		/* +0x104 */ uint8be _padding104[0x140 - 0x104];
-		/* +0x140 */ uint8be _ukn140[0x40];
-
-		/* +0x180 */ uint8be tmdVersion;
-		/* +0x181 */ uint8be _ukn181;
-		/* +0x182 */ uint8be _ukn182;
-		/* +0x183 */ uint8be isVWii;
-		/* +0x184 */ uint32be iosTitleIdHigh;
-		/* +0x188 */ uint32be iosTitleIdLow;
-		/* +0x18C */ uint32be titleIdHigh;
-		/* +0x190 */ uint32be titleIdLow;
-		/* +0x194 */ uint32be titleType;
-		/* +0x198 */ uint16be group;
-		/* +0x19A */ uint16be _ukn19A;
-		/* +0x19C */ uint16be region;
-		/* +0x19E */ uint8be ratings[16];
-		/* +0x1AE */ uint8be _ukn1AE[12];
-		/* +0x1BA */ uint8be _ipcMask[12];
-		/* +0x1C6 */ uint8be _ukn1C6[18];
-		/* +0x1D8 */ uint32be accessRightsMask;
-		/* +0x1DC */ uint16be titleVersion;
-		/* +0x1DE */ uint16be numContent;
-		/* +0x1E0 */ uint32be _ukn1E0;
-		/* +0x1E4 */ uint8 uknHash[32]; // hash of array at 0x204
-
-		/* +0x204 */
-		struct 
+		struct TmdHeader
 		{
-			// pointer to cert data and cert hash?
-			uint16 ukn00; // index?
-			uint16 ukn02;
+			/* +0x000 */ uint32be signatureType;
+			/* +0x004 */ uint8 signature[0x100];
+			/* +0x104 */ uint8 _104[0x7C];
+			/* +0x180 */ uint8 version;
+			/* +0x181 */ uint8 _181[3];
+			/* +0x184 */ uint32be iosTitleIdHigh;
+			/* +0x188 */ uint32be iosTitleIdLow;
+			/* +0x18C */ uint32be titleIdHigh;
+			/* +0x190 */ uint32be titleIdLow;
+			/* +0x194 */ uint8 _194[0x48];
+			/* +0x1DC */ uint16be titleVersion;
+			/* +0x1DE */ uint16be contentCount;
+			/* +0x1E0 */ uint8 _1E0[0x24];
+			/* +0x204 */ uint8 contentInfoTable[64 * 36];
+		};
+		static_assert(sizeof(TmdHeader) == 0xB04);
+
+		struct TmdContent
+		{
+			uint32be id;
+			uint16be index;
+			uint16be type;
+			uint32be sizeHigh;
+			uint32be sizeLow;
 			uint8 hash[32];
-		}ContentInfo[64];
-	};
-
-	static_assert(sizeof(TMDFileHeaderWiiU) == 0x204 + 64*36);
-
-	struct TMDFileContentEntryWiiU
-	{
-		/* +0x00 */ uint32be contentId;
-		/* +0x04 */ uint16be index;
-		/* +0x06 */ uint16be type;
-		/* +0x08 */ uint32be sizeHigh;
-		/* +0x0C */ uint32be sizeLow;
-		/* +0x10 */ uint8 hashSHA256[32]; // only the first 20 bytes of the hash seem to be stored?
-	};
-
-	static_assert(sizeof(TMDFileContentEntryWiiU) == 0x30);
+		};
+		static_assert(sizeof(TmdContent) == 0x30);
+	}
 
 	bool TMDParser::parse(const uint8* data, size_t size)
 	{
-		if (size < sizeof(TMDFileHeaderWiiU))
+		if (size < sizeof(TmdHeader))
 		{
-			cemuLog_log(LogType::Force, "TMD size {} below minimum size of {}", size, sizeof(TMDFileHeaderWiiU));
+			cemuLog_log(LogType::Force, "TMD size {} below minimum size of {}", size, sizeof(TmdHeader));
 			return false;
 		}
-		TMDFileHeaderWiiU* header = (TMDFileHeaderWiiU*)data;
-		m_titleId = ((uint64)header->titleIdHigh << 32) | ((uint64)header->titleIdLow);
-		m_titleVersion = header->titleVersion;
-		size_t expectedSize = sizeof(TMDFileHeaderWiiU) + sizeof(TMDFileContentEntryWiiU) * header->numContent;
-		if (size < expectedSize)
+		const TmdHeader* tmd = reinterpret_cast<const TmdHeader*>(data);
+		m_titleId = ((uint64)(uint32)tmd->titleIdHigh << 32) | (uint32)tmd->titleIdLow;
+		m_titleVersion = tmd->titleVersion;
+		const uint16 count = tmd->contentCount;
+		const size_t needed = sizeof(TmdHeader) + sizeof(TmdContent) * count;
+		if (size < needed)
 		{
-			cemuLog_log(LogType::Force, "TMD size {} below expected size of {}. Content count: {}", size, expectedSize, (uint16)header->numContent);
+			cemuLog_log(LogType::Force, "TMD size {} below expected size of {}. Content count: {}", size, needed, count);
 			return false;
 		}
-
-		// parse content
-		TMDFileContentEntryWiiU* contentEntry = (TMDFileContentEntryWiiU*)(header + 1);
-		for (uint32 i = 0; i < header->numContent; i++)
+		const TmdContent* list = reinterpret_cast<const TmdContent*>(data + sizeof(TmdHeader));
+		for (uint16 i = 0; i < count; i++)
 		{
-			ContentEntry c{};
-			c.contentId = contentEntry->contentId;
-			c.index = contentEntry->index;
-			c.size = MakeU64(contentEntry->sizeHigh, contentEntry->sizeLow);
-			c.contentFlags = static_cast<TMDParser::TMDContentFlags>((uint16)contentEntry->type);
-			std::memcpy(c.hash32, contentEntry->hashSHA256, sizeof(c.hash32));
-			m_content.emplace_back(c);
-			contentEntry++;
+			ContentEntry e{};
+			e.contentId = list[i].id;
+			e.index = list[i].index;
+			e.contentFlags = (TMDContentFlags)(uint16)list[i].type;
+			e.size = ((uint64)(uint32)list[i].sizeHigh << 32) | (uint32)list[i].sizeLow;
+			memcpy(e.hash32, list[i].hash, sizeof(e.hash32));
+			m_content.push_back(e);
 		}
-
-		// todo - parse certificates
 		return true;
 	}
 
-	/* ECC PrivateKey helper functions */
+	/* ECC (sect233r1) */
+
+	namespace
+	{
+		constexpr int kCurve = NID_sect233r1;
+
+		BIGNUM* ToBignum(const uint8* bytes, size_t len)
+		{
+			return BN_bin2bn(bytes, (int)len, nullptr);
+		}
+
+		void FromBignum(const BIGNUM* bn, uint8* out, size_t len)
+		{
+			memset(out, 0, len);
+			BN_bn2binpad(bn, out, (int)len);
+		}
+	}
 
 	void ECCPrivKey::setPrivateKey(EC_KEY* key)
 	{
-		const BIGNUM* bnPrivKey = EC_KEY_get0_private_key(key);
-		memset(this->keyData, 0, sizeof(this->keyData));
-		BN_bn2binpad(bnPrivKey, this->keyData, sizeof(this->keyData));
+		FromBignum(EC_KEY_get0_private_key(key), keyData, sizeof(keyData));
 	}
 
 	EC_KEY* ECCPrivKey::getPrivateKey() const
 	{
-		BIGNUM* bn_privKey = BN_new();
-		BN_bin2bn(this->keyData, sizeof(this->keyData), bn_privKey);
-		EC_KEY* ec_privKey = EC_KEY_new_by_curve_name(NID_sect233r1);
-		EC_KEY_set_private_key(ec_privKey, bn_privKey);
-		BN_free(bn_privKey);
-		return ec_privKey;
+		EC_KEY* key = EC_KEY_new_by_curve_name(kCurve);
+		BIGNUM* d = ToBignum(keyData, sizeof(keyData));
+		EC_KEY_set_private_key(key, d);
+		BN_free(d);
+		return key;
 	}
 
 	ECCPrivKey ECCPrivKey::getDeviceCertPrivateKey()
@@ -506,107 +405,109 @@ namespace NCrypto
 		return key;
 	}
 
-	/* ECC PublicKey helper functions */
-
 	EC_KEY* ECCPubKey::getPublicKey()
 	{
-		BIGNUM* bn_x = BN_new();
-		BIGNUM* bn_y = BN_new();
-		BN_bin2bn(this->x, sizeof(this->x), bn_x);
-		BN_bin2bn(this->y, sizeof(this->y), bn_y);
-
-		EC_KEY* ec_pubKey = EC_KEY_new_by_curve_name(NID_sect233r1);
-		int r = EC_KEY_set_public_key_affine_coordinates(ec_pubKey, bn_x, bn_y);
-
-		BN_free(bn_x);
-		BN_free(bn_y);
-
-		return ec_pubKey;
+		EC_KEY* key = EC_KEY_new_by_curve_name(kCurve);
+		BIGNUM* bx = ToBignum(x, sizeof(x));
+		BIGNUM* by = ToBignum(y, sizeof(y));
+		EC_KEY_set_public_key_affine_coordinates(key, bx, by);
+		BN_free(by);
+		BN_free(bx);
+		return key;
 	}
 
 	EC_POINT* ECCPubKey::getPublicKeyAsPoint()
 	{
+		EC_GROUP* group = EC_GROUP_new_by_curve_name(kCurve);
+		EC_POINT* point = EC_POINT_new(group);
+		BIGNUM* bx = ToBignum(x, sizeof(x));
+		BIGNUM* by = ToBignum(y, sizeof(y));
 		BN_CTX* ctx = BN_CTX_new();
-		BIGNUM* bn_x = BN_new();
-		BIGNUM* bn_y = BN_new();
-		BN_bin2bn(this->x, sizeof(this->x), bn_x);
-		BN_bin2bn(this->y, sizeof(this->y), bn_y);
-		EC_GROUP* group = EC_GROUP_new_by_curve_name(NID_sect233r1);
-		EC_POINT* pubkey = EC_POINT_new(group);
-		EC_POINT_set_affine_coordinates(group, pubkey, bn_x, bn_y, ctx);
-		EC_GROUP_free(group);
+		EC_POINT_set_affine_coordinates(group, point, bx, by, ctx);
 		BN_CTX_free(ctx);
-		BN_free(bn_x);
-		BN_free(bn_y);
-		return pubkey;
+		BN_free(by);
+		BN_free(bx);
+		EC_GROUP_free(group);
+		return point;
 	}
 
 	ECCPubKey ECCPubKey::generateFromPrivateKey(ECCPrivKey& privKey)
 	{
-		BIGNUM* bn_privKey = BN_new();
-		BN_bin2bn(privKey.keyData, sizeof(privKey.keyData), bn_privKey);
-
-		// gen public key from private key
-		EC_GROUP* group = EC_GROUP_new_by_curve_name(NID_sect233r1);
-		EC_POINT* pubkey = EC_POINT_new(group);
-		EC_POINT_mul(group, pubkey, bn_privKey, NULL, NULL, NULL);
-		BIGNUM* bn_x = BN_new();
-		BIGNUM* bn_y = BN_new();
-		EC_POINT_get_affine_coordinates(group, pubkey, bn_x, bn_y, NULL);
-
-		// store public key
-		ECCPubKey genPubKey;
-		BN_bn2binpad(bn_x, genPubKey.x, sizeof(genPubKey.x));
-		BN_bn2binpad(bn_y, genPubKey.y, sizeof(genPubKey.y));
-	
-		// clean up and return
-		EC_POINT_free(pubkey);
-		BN_free(bn_y);
-		BN_free(bn_x);
-		BN_free(bn_privKey);
-
-		return genPubKey;
+		ECCPubKey result{};
+		EC_GROUP* group = EC_GROUP_new_by_curve_name(kCurve);
+		EC_POINT* q = EC_POINT_new(group);
+		BIGNUM* d = ToBignum(privKey.keyData, sizeof(privKey.keyData));
+		BIGNUM* qx = BN_new();
+		BIGNUM* qy = BN_new();
+		EC_POINT_mul(group, q, d, nullptr, nullptr, nullptr);
+		EC_POINT_get_affine_coordinates(group, q, qx, qy, nullptr);
+		FromBignum(qx, result.x, sizeof(result.x));
+		FromBignum(qy, result.y, sizeof(result.y));
+		BN_free(qy);
+		BN_free(qx);
+		BN_free(d);
+		EC_POINT_free(q);
+		EC_GROUP_free(group);
+		return result;
 	}
-
-	/* Signature helper functions */
 
 	ECDSA_SIG* ECCSig::getSignature()
 	{
-		BIGNUM* bn_r = BN_new();
-		BIGNUM* bn_s = BN_new();
-		BN_bin2bn(this->r, 30, bn_r);
-		BN_bin2bn(this->s, 30, bn_s);
-
-		ECDSA_SIG* ec_sig = ECDSA_SIG_new();
-		ECDSA_SIG_set0(ec_sig, bn_r, bn_s); // ownership of bn_r and bn_s transferred to SIG as well, do not free manually
-
-		return ec_sig;
+		ECDSA_SIG* sig = ECDSA_SIG_new();
+		ECDSA_SIG_set0(sig, ToBignum(r, sizeof(r)), ToBignum(s, sizeof(s))); // sig owns both
+		return sig;
 	}
 
 	void ECCSig::setSignature(ECDSA_SIG* sig)
 	{
-		const BIGNUM* sig_r = nullptr, * sig_s = nullptr;
-		ECDSA_SIG_get0(sig, &sig_r, &sig_s);
-
-		sint32 lenR = BN_num_bytes(sig_r);
-		sint32 lenS = BN_num_bytes(sig_s);
-		cemu_assert_debug(lenR <= 30);
-		cemu_assert_debug(lenS <= 30);
-
-		memset(this->r, 0, sizeof(this->r));
-		memset(this->s, 0, sizeof(this->s));
-		BN_bn2binpad(sig_r, this->r, 30);
-		BN_bn2binpad(sig_s, this->s, 30);
+		const BIGNUM* sr = nullptr;
+		const BIGNUM* ss = nullptr;
+		ECDSA_SIG_get0(sig, &sr, &ss);
+		cemu_assert_debug(BN_num_bytes(sr) <= 30 && BN_num_bytes(ss) <= 30);
+		FromBignum(sr, r, sizeof(r));
+		FromBignum(ss, s, sizeof(s));
 	}
 
-	/* Certificate */
+	/* certificates */
+
+	namespace
+	{
+		constexpr size_t kCertSignedOffset = 0x80; // 'issuer'
+		constexpr size_t kCertSignedSize = 0x100;
+
+		const uint8* SignedPart(const CertECC& cert)
+		{
+			return reinterpret_cast<const uint8*>(&cert) + kCertSignedOffset;
+		}
+
+		bool VerifyDigest(const uint8* digest, sint32 digestLen, ECCPubKey& pub, ECCSig& sig)
+		{
+			EC_KEY* key = pub.getPublicKey();
+			ECDSA_SIG* s = sig.getSignature();
+			const bool ok = ECDSA_do_verify(digest, digestLen, s, key) == 1;
+			ECDSA_SIG_free(s);
+			EC_KEY_free(key);
+			return ok;
+		}
+
+		ECCSig SignDigest(const uint8* digest, sint32 digestLen, const ECCPrivKey& priv)
+		{
+			EC_KEY* key = priv.getPrivateKey();
+			ECDSA_SIG* raw = ECDSA_do_sign(digest, digestLen, key);
+			EC_KEY_free(key);
+			ECCSig sig{};
+			sig.setSignature(raw);
+			ECDSA_SIG_free(raw);
+			return sig;
+		}
+	}
 
 	bool CertECC::decodeFromBase64(std::string_view input)
 	{
-		auto v = base64Decode(input);
-		if (v.size() != sizeof(CertECC))
+		const std::vector<uint8> raw = base64Decode(input);
+		if (raw.size() != sizeof(CertECC))
 			return false;
-		memcpy(this, v.data(), sizeof(CertECC));
+		memcpy(this, raw.data(), sizeof(CertECC));
 		return true;
 	}
 
@@ -617,165 +518,108 @@ namespace NCrypto
 
 	bool CertECC::verifySignatureViaPubKey(ECCPubKey& signerPubKey)
 	{
-		uint8 hash[SHA256_DIGEST_LENGTH];
-		SHA256((const unsigned char *) this->issuer, 0x100, hash);
-
-		EC_KEY* ecPubKey = signerPubKey.getPublicKey();
-		ECDSA_SIG* ecSig = this->signature.getSignature();
-
-		int r = ECDSA_do_verify(hash, sizeof(hash), ecSig, ecPubKey);
-
-		ECDSA_SIG_free(ecSig);
-		EC_KEY_free(ecPubKey);
-
-		return r == 1; // true if valid signature
+		CHash256 digest;
+		GenerateHashSHA256(SignedPart(*this), kCertSignedSize, digest);
+		return VerifyDigest(digest.b, sizeof(digest.b), signerPubKey, signature);
 	}
 
 	void CertECC::sign(ECCPrivKey& signerPrivKey)
 	{
-		uint8 hash[SHA256_DIGEST_LENGTH];
-		SHA256((const unsigned char *) this->issuer, 0x100, hash);
-
-		// generate signature
-		EC_KEY* ec_privKey = signerPrivKey.getPrivateKey();
-		ECDSA_SIG* sig = ECDSA_do_sign(hash, sizeof(hash), ec_privKey);
-		EC_KEY_free(ec_privKey);
-
-		// store signature
-		const BIGNUM* bn_r = nullptr, *bn_s = nullptr;
-		ECDSA_SIG_get0(sig, &bn_r, &bn_s);
-		BN_bn2binpad(bn_r, this->signature.r, sizeof(this->signature.r));
-		BN_bn2binpad(bn_s, this->signature.s, sizeof(this->signature.s));
-
-		ECDSA_SIG_free(sig);
+		CHash256 digest;
+		GenerateHashSHA256(SignedPart(*this), kCertSignedSize, digest);
+		signature = SignDigest(digest.b, sizeof(digest.b), signerPrivKey);
 	}
 
 	CertECC CertECC::GetDeviceCertificate()
 	{
-		CertECC deviceCert{};
-		iosuCrypto_getDeviceCertificate(&deviceCert, sizeof(CertECC));
-		return deviceCert;
+		CertECC cert{};
+		iosuCrypto_getDeviceCertificate(&cert, sizeof(CertECC));
+		return cert;
 	}
 
-	// generate a new public key + certificate from privateKey. Certificate is signed with the device key
 	CertECC CertECC::generateCertificate(uint32 signerTitleIdHigh, uint32 signerTitleIdLow, ECCPrivKey& privKeySigner, ECCPrivKey& privKeyIn, ECCPubKey& pubKeyOut)
 	{
-		CertECC deviceCert = GetDeviceCertificate();
-
-		CertECC newCert = deviceCert;
-
-		cemu_assert(newCert.signatureType == CertECC::SIGTYPE::ECC_SHA256);
-		// update date
-		newCert.date = 0;
-		// update issuer
-		strcat(newCert.issuer, "-");
-		strcat(newCert.issuer, newCert.ngName);
-
-		// update subject
-		memset(newCert.ngName, 0, sizeof(newCert.ngName));
-		sprintf(newCert.ngName, "AP%08x%08x", signerTitleIdHigh, signerTitleIdLow);
-
-		// calculate public key from input private key
-		newCert.publicKey = ECCPubKey::generateFromPrivateKey(privKeyIn);
-		pubKeyOut = newCert.publicKey;
-
-		// sign certificate
-		newCert.sign(privKeySigner);
-
-		return newCert;
+		CertECC cert = GetDeviceCertificate();
+		cemu_assert(cert.signatureType == SIGTYPE::ECC_SHA256);
+		cert.date = 0;
+		// the new issuer is the device cert's issuer and subject joined by '-'
+		// (appended in place after the existing text; later bytes stay as they are)
+		const size_t issuerLen = strnlen(cert.issuer, sizeof(cert.issuer));
+		const size_t subjectLen = strnlen(cert.ngName, sizeof(cert.ngName));
+		cemu_assert(issuerLen + 1 + subjectLen < sizeof(cert.issuer));
+		cert.issuer[issuerLen] = '-';
+		memcpy(cert.issuer + issuerLen + 1, cert.ngName, subjectLen);
+		cert.issuer[issuerLen + 1 + subjectLen] = '\0';
+		// subject: "AP" + app title id
+		const std::string subject = fmt::format("AP{:08x}{:08x}", signerTitleIdHigh, signerTitleIdLow);
+		memset(cert.ngName, 0, sizeof(cert.ngName));
+		memcpy(cert.ngName, subject.data(), subject.size());
+		cert.publicKey = ECCPubKey::generateFromPrivateKey(privKeyIn);
+		pubKeyOut = cert.publicKey;
+		cert.sign(privKeySigner);
+		return cert;
 	}
 
 	ECCSig signHash(uint32 signerTitleIdHigh, uint32 signerTitleIdLow, uint8* hash, sint32 hashLen, CertECC& certChainOut)
 	{
-		// generate key pair (we only care about the private key)
-		EC_KEY* ec_keyPair = EC_KEY_new_by_curve_name(NID_sect233r1);
-		EC_KEY_generate_key(ec_keyPair);
+		// fresh signing key
+		ECCPrivKey signingKey{};
+		{
+			EC_KEY* generated = EC_KEY_new_by_curve_name(kCurve);
+			EC_KEY_generate_key(generated);
+			signingKey.setPrivateKey(generated);
+			EC_KEY_free(generated);
+		}
+		ECCPubKey signingPub{};
+		ECCPrivKey deviceKey = ECCPrivKey::getDeviceCertPrivateKey();
+		certChainOut = CertECC::generateCertificate(signerTitleIdHigh, signerTitleIdLow, deviceKey, signingKey, signingPub);
 
-		ECCPrivKey privKey;
-		privKey.setPrivateKey(ec_keyPair);
-
-		EC_KEY_free(ec_keyPair);
-
-		// get public key and certificate
-		ECCPubKey pubKey;
-		ECCPrivKey signerPrivKey = ECCPrivKey::getDeviceCertPrivateKey();
-		certChainOut = CertECC::generateCertificate(signerTitleIdHigh, signerTitleIdLow, signerPrivKey, privKey, pubKey);
-		
-		// generate signature
 		cemu_assert_debug(hashLen == 32);
-		EC_KEY* ec_privKey = privKey.getPrivateKey();
-		ECDSA_SIG* sig = ECDSA_do_sign(hash, hashLen, ec_privKey);
-		EC_KEY_free(ec_privKey);
-
-		// verify
-		EC_KEY* ec_pubKey = pubKey.getPublicKey();
-		bool isValid = ECDSA_do_verify(hash, hashLen, sig, ec_pubKey) == 1;
-		EC_KEY_free(ec_pubKey);
-		cemu_assert(isValid);
-
-		// store signature
-		ECCSig eccSig;
-		const BIGNUM* bn_r = nullptr, * bn_s = nullptr;
-		ECDSA_SIG_get0(sig, &bn_r, &bn_s);
-		BN_bn2binpad(bn_r, eccSig.r, sizeof(eccSig.r));
-		BN_bn2binpad(bn_s, eccSig.s, sizeof(eccSig.s));
-
-		ECDSA_SIG_free(sig);
-
-		return eccSig;
+		ECCSig sig = SignDigest(hash, hashLen, signingKey);
+		cemu_assert(VerifyDigest(hash, hashLen, signingPub, sig));
+		return sig;
 	}
 
 	bool verifyHashSignature(uint8* hash, sint32 hashLen, ECCPubKey& certChainPubKey, ECCSig& sig)
 	{
-		EC_KEY* ec_pubKey = certChainPubKey.getPublicKey();
-
-		ECDSA_SIG* ecdsa_sig = sig.getSignature();
-
-		bool r = ECDSA_do_verify(hash, hashLen, ecdsa_sig, ec_pubKey) == 1;
-
-		EC_KEY_free(ec_pubKey);
-		ECDSA_SIG_free(ecdsa_sig);
-		return r;
+		return VerifyDigest(hash, hashLen, certChainPubKey, sig);
 	}
 
-	bool verifyCert(CertECC& cert, NCrypto::ECCPubKey& signerPubKey)
+	bool verifyCert(CertECC& cert, ECCPubKey& signerPubKey)
 	{
-		CertECC::SIGTYPE sigType = cert.signatureType;
-
-		if (sigType == CertECC::SIGTYPE::ECC_SHA256)
+		switch ((CertECC::SIGTYPE)cert.signatureType)
 		{
-			// used for Wii U certs
-			NCrypto::CHash256 hash;
-			NCrypto::GenerateHashSHA256(cert.issuer, 0x100, hash);
-			return NCrypto::verifyHashSignature(hash.b, 32, signerPubKey, cert.signature);
+		case CertECC::SIGTYPE::ECC_SHA256:
+		{
+			CHash256 digest;
+			GenerateHashSHA256(SignedPart(cert), kCertSignedSize, digest);
+			return VerifyDigest(digest.b, 32, signerPubKey, cert.signature);
 		}
-		else if (sigType == CertECC::SIGTYPE::ECC_SHA1)
+		case CertECC::SIGTYPE::ECC_SHA1:
 		{
-			// from Wii era
-			NCrypto::CHash160 hash;
-			NCrypto::GenerateHashSHA1(cert.issuer, 0x100, hash);
-			return NCrypto::verifyHashSignature(hash.b, 20, signerPubKey, cert.signature);
+			CHash160 digest;
+			GenerateHashSHA1(SignedPart(cert), kCertSignedSize, digest);
+			return VerifyDigest(digest.b, 20, signerPubKey, cert.signature);
 		}
-		else
-		{
+		default:
 			cemu_assert_unimplemented();
+			return false;
 		}
-		return false;
 	}
+
+	/* console identity */
 
 	uint32 GetDeviceId()
 	{
-		uint32 deviceId;
-		if (!iosuCrypto_getDeviceId(&deviceId))
-			return 0x11223344;
-		return deviceId;
+		uint32 id = 0;
+		return iosuCrypto_getDeviceId(&id) ? id : 0x11223344; // placeholder without an OTP dump
 	}
 
 	std::string GetSerial()
 	{
-		char serialBuffer[128]{};
-		iosuCrypto_getDeviceSerialString(serialBuffer);
-		return serialBuffer;
+		char serial[128]{};
+		iosuCrypto_getDeviceSerialString(serial);
+		return serial;
 	}
 
 	bool SEEPROM_IsPresent()
@@ -785,13 +629,12 @@ namespace NCrypto
 
 	CafeConsoleRegion SEEPROM_GetRegion()
 	{
-		uint8 seepromRegionU32[4] = {};
-		iosuCrypto_readSeepromData(seepromRegionU32, 0xA4, 4);
-		if (seepromRegionU32[3] == 0)
-		{
+		// the region is the low byte of the big endian word at SEEPROM word 0xA4
+		uint8 word[4]{};
+		iosuCrypto_readSeepromData(word, 0xA4, 4);
+		if (word[3] == 0)
 			cemuLog_log(LogType::Force, "SEEPROM region is invalid (0)");
-		}
-		return (CafeConsoleRegion)seepromRegionU32[3];
+		return (CafeConsoleRegion)word[3];
 	}
 
 	bool OTP_IsPresent()
@@ -806,177 +649,71 @@ namespace NCrypto
 
 	std::string GetRegionAsString(CafeConsoleRegion regionCode)
 	{
-		if (regionCode == CafeConsoleRegion::EUR)
-			return "EUR";
-		else if (regionCode == CafeConsoleRegion::USA)
-			return "USA";
-		else if (regionCode == CafeConsoleRegion::JPN)
-			return "JPN";
-		else if (regionCode == CafeConsoleRegion::CHN)
-			return "CHN";
-		else if (regionCode == CafeConsoleRegion::KOR)
-			return "KOR";
-		else if (regionCode == CafeConsoleRegion::TWN)
-			return "TWN";
+		switch (regionCode)
+		{
+		case CafeConsoleRegion::EUR: return "EUR";
+		case CafeConsoleRegion::USA: return "USA";
+		case CafeConsoleRegion::JPN: return "JPN";
+		case CafeConsoleRegion::CHN: return "CHN";
+		case CafeConsoleRegion::KOR: return "KOR";
+		case CafeConsoleRegion::TWN: return "TWN";
+		default: break;
+		}
 		cemuLog_log(LogType::Force, "Unknown region code 0x{:x}", (uint32)regionCode);
 		return "UKN";
 	}
 
-	const std::unordered_map<sint32, const char*> g_countryTable = {
-		{1,"JP"},
-		{8,"AI"},
-		{9,"AG"},
-		{10,"AR"},
-		{11,"AW"},
-		{12,"BS"},
-		{13,"BB"},
-		{14,"BZ"},
-		{15,"BO"},
-		{16,"BR"},
-		{17,"VG"},
-		{18,"CA"},
-		{19,"KY"},
-		{20,"CL"},
-		{21,"CO"},
-		{22,"CR"},
-		{23,"DM"},
-		{24,"DO"},
-		{25,"EC"},
-		{26,"SV"},
-		{27,"GF"},
-		{28,"GD"},
-		{29,"GP"},
-		{30,"GT"},
-		{31,"GY"},
-		{32,"HT"},
-		{33,"HN"},
-		{34,"JM"},
-		{35,"MQ"},
-		{36,"MX"},
-		{37,"MS"},
-		{38,"AN"},
-		{39,"NI"},
-		{40,"PA"},
-		{41,"PY"},
-		{42,"PE"},
-		{43,"KN"},
-		{44,"LC"},
-		{45,"VC"},
-		{46,"SR"},
-		{47,"TT"},
-		{48,"TC"},
-		{49,"US"},
-		{50,"UY"},
-		{51,"VI"},
-		{52,"VE"},
-		{64,"AL"},
-		{65,"AU"},
-		{66,"AT"},
-		{67,"BE"},
-		{68,"BA"},
-		{69,"BW"},
-		{70,"BG"},
-		{71,"HR"},
-		{72,"CY"},
-		{73,"CZ"},
-		{74,"DK"},
-		{75,"EE"},
-		{76,"FI"},
-		{77,"FR"},
-		{78,"DE"},
-		{79,"GR"},
-		{80,"HU"},
-		{81,"IS"},
-		{82,"IE"},
-		{83,"IT"},
-		{84,"LV"},
-		{85,"LS"},
-		{86,"LI"},
-		{87,"LT"},
-		{88,"LU"},
-		{89,"MK"},
-		{90,"MT"},
-		{91,"ME"},
-		{92,"MZ"},
-		{93,"NA"},
-		{94,"NL"},
-		{95,"NZ"},
-		{96,"NO"},
-		{97,"PL"},
-		{98,"PT"},
-		{99,"RO"},
-		{100,"RU"},
-		{101,"RS"},
-		{102,"SK"},
-		{103,"SI"},
-		{104,"ZA"},
-		{105,"ES"},
-		{106,"SZ"},
-		{107,"SE"},
-		{108,"CH"},
-		{109,"TR"},
-		{110,"GB"},
-		{111,"ZM"},
-		{112,"ZW"},
-		{113,"AZ"},
-		{114,"MR"},
-		{115,"ML"},
-		{116,"NE"},
-		{117,"TD"},
-		{118,"SD"},
-		{119,"ER"},
-		{120,"DJ"},
-		{121,"SO"},
-		{122,"AD"},
-		{123,"GI"},
-		{124,"GG"},
-		{125,"IM"},
-		{126,"JE"},
-		{127,"MC"},
-		{128,"TW"},
-		{136,"KR"},
-		{144,"HK"},
-		{145,"MO"},
-		{152,"ID"},
-		{153,"SG"},
-		{154,"TH"},
-		{155,"PH"},
-		{156,"MY"},
-		{160,"CN"},
-		{168,"AE"},
-		{170,"EG"},
-		{171,"OM"},
-		{172,"QA"},
-		{173,"KW"},
-		{174,"SA"},
-		{175,"SY"},
-		{176,"BH"},
-		{177,"JO"},
-		{184,"SM"},
-		{185,"VA"},
-		{186,"BM"},
-		{187,"IN"},
-		{192,"NG"},
-		{193,"AO"},
-		{194,"GH"}
-	};
+	namespace
+	{
+		// Wii U system country codes (index -> ISO 3166 alpha-2)
+		struct CountryCode
+		{
+			sint32 index;
+			const char* code;
+		};
+		constexpr CountryCode kCountries[] = {
+			{1, "JP"},
+			{8, "AI"}, {9, "AG"}, {10, "AR"}, {11, "AW"}, {12, "BS"}, {13, "BB"}, {14, "BZ"}, {15, "BO"}, {16, "BR"},
+			{17, "VG"}, {18, "CA"}, {19, "KY"}, {20, "CL"}, {21, "CO"}, {22, "CR"}, {23, "DM"}, {24, "DO"}, {25, "EC"},
+			{26, "SV"}, {27, "GF"}, {28, "GD"}, {29, "GP"}, {30, "GT"}, {31, "GY"}, {32, "HT"}, {33, "HN"}, {34, "JM"},
+			{35, "MQ"}, {36, "MX"}, {37, "MS"}, {38, "AN"}, {39, "NI"}, {40, "PA"}, {41, "PY"}, {42, "PE"}, {43, "KN"},
+			{44, "LC"}, {45, "VC"}, {46, "SR"}, {47, "TT"}, {48, "TC"}, {49, "US"}, {50, "UY"}, {51, "VI"}, {52, "VE"},
+			{64, "AL"}, {65, "AU"}, {66, "AT"}, {67, "BE"}, {68, "BA"}, {69, "BW"}, {70, "BG"}, {71, "HR"}, {72, "CY"},
+			{73, "CZ"}, {74, "DK"}, {75, "EE"}, {76, "FI"}, {77, "FR"}, {78, "DE"}, {79, "GR"}, {80, "HU"}, {81, "IS"},
+			{82, "IE"}, {83, "IT"}, {84, "LV"}, {85, "LS"}, {86, "LI"}, {87, "LT"}, {88, "LU"}, {89, "MK"}, {90, "MT"},
+			{91, "ME"}, {92, "MZ"}, {93, "NA"}, {94, "NL"}, {95, "NZ"}, {96, "NO"}, {97, "PL"}, {98, "PT"}, {99, "RO"},
+			{100, "RU"}, {101, "RS"}, {102, "SK"}, {103, "SI"}, {104, "ZA"}, {105, "ES"}, {106, "SZ"}, {107, "SE"},
+			{108, "CH"}, {109, "TR"}, {110, "GB"}, {111, "ZM"}, {112, "ZW"}, {113, "AZ"}, {114, "MR"}, {115, "ML"},
+			{116, "NE"}, {117, "TD"}, {118, "SD"}, {119, "ER"}, {120, "DJ"}, {121, "SO"}, {122, "AD"}, {123, "GI"},
+			{124, "GG"}, {125, "IM"}, {126, "JE"}, {127, "MC"},
+			{128, "TW"},
+			{136, "KR"},
+			{144, "HK"}, {145, "MO"},
+			{152, "ID"}, {153, "SG"}, {154, "TH"}, {155, "PH"}, {156, "MY"},
+			{160, "CN"},
+			{168, "AE"}, {170, "EG"}, {171, "OM"}, {172, "QA"}, {173, "KW"}, {174, "SA"}, {175, "SY"}, {176, "BH"}, {177, "JO"},
+			{184, "SM"}, {185, "VA"}, {186, "BM"}, {187, "IN"},
+			{192, "NG"}, {193, "AO"}, {194, "GH"},
+		};
+	}
 
 	const char* GetCountryAsString(sint32 index)
 	{
-		const auto it = g_countryTable.find(index);
-		if (it == g_countryTable.cend())
-			return "NN";
-		return it->second;
+		for (const CountryCode& c : kCountries)
+		{
+			if (c.index == index)
+				return c.code;
+		}
+		return "NN";
 	}
 
 	size_t GetCountryCount()
 	{
-		return g_countryTable.size();
+		return std::size(kCountries);
 	}
 
 	void unitTests()
 	{
 		base64Tests();
 	}
-
-};
+}
