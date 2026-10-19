@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "SwapchainInfoVk.h"
 
 #include "config/CemuConfig.h"
@@ -7,168 +8,177 @@
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanAPI.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h"
 
+namespace
+{
+	constexpr uint64 kAcquireTimeoutNs = 1'000'000'000;
+
+	// fills a vector through the usual Vulkan count-then-data query, throwing with the given text on failure
+	template<typename T, typename F>
+	std::vector<T> QueryList(F&& query, const char* apiName, const char* countError, const char* dataError)
+	{
+		std::vector<T> items;
+		uint32_t count = 0;
+		VkResult res = query(&count, (T*)nullptr);
+		if (res != VK_SUCCESS)
+		{
+			cemuLog_log(LogType::Force, "{} failed. Error {}", apiName, (sint32)res);
+			throw std::runtime_error(fmt::format("{}: {}", countError, res));
+		}
+		if (count == 0)
+			return items;
+		items.resize(count);
+		res = query(&count, items.data());
+		if (res != VK_SUCCESS)
+		{
+			cemuLog_log(LogType::Force, "{} failed. Error {}", apiName, (sint32)res);
+			throw std::runtime_error(fmt::format("{}: {}", dataError, res));
+		}
+		return items;
+	}
+}
+
 SwapchainInfoVk::SwapchainInfoVk(bool mainWindow, Vector2i size) : mainWindow(mainWindow), m_desiredExtent(size)
 {
-	auto& windowHandleInfo = mainWindow ? WindowSystem::GetWindowInfo().canvas_main : WindowSystem::GetWindowInfo().canvas_pad;
-	auto renderer = VulkanRenderer::GetInstance();
+	auto& windows = WindowSystem::GetWindowInfo();
+	VulkanRenderer* renderer = VulkanRenderer::GetInstance();
 	m_instance = renderer->GetVkInstance();
 	m_logicalDevice = renderer->GetLogicalDevice();
 	m_physicalDevice = renderer->GetPhysicalDevice();
-
-	m_surface = renderer->CreateFramebufferSurface(m_instance, windowHandleInfo);
+	m_surface = renderer->CreateFramebufferSurface(m_instance, mainWindow ? windows.canvas_main : windows.canvas_pad);
 }
-
 
 SwapchainInfoVk::~SwapchainInfoVk()
 {
 	Cleanup();
-	if(m_surface != VK_NULL_HANDLE)
+	if (m_surface != VK_NULL_HANDLE)
 		vkDestroySurfaceKHR(m_instance, m_surface, nullptr);
 }
 
 void SwapchainInfoVk::Create()
 {
-	const auto details = QuerySwapchainSupport(m_surface, m_physicalDevice);
-	m_surfaceFormat = ChooseSurfaceFormat(details.formats);
-	m_actualExtent = ChooseSwapExtent(details.capabilities);
+	const SwapchainSupportDetails support = QuerySwapchainSupport(m_surface, m_physicalDevice);
+	m_surfaceFormat = ChooseSurfaceFormat(support.formats);
+	m_actualExtent = ChooseSwapExtent(support.capabilities);
 
-	// use at least two swapchain images. fewer than that causes problems on some drivers
-	uint32_t image_count = std::max(2u, details.capabilities.minImageCount);
-	if(details.capabilities.maxImageCount > 0)
-		image_count = std::min(image_count, details.capabilities.maxImageCount);
-	if(image_count < 2)
+	// some drivers misbehave with a single image, so ask for two unless the surface caps the count lower
+	uint32_t imageCount = std::max<uint32_t>(support.capabilities.minImageCount, 2);
+	if (support.capabilities.maxImageCount != 0 && imageCount > support.capabilities.maxImageCount)
+		imageCount = support.capabilities.maxImageCount;
+	if (imageCount < 2)
 		cemuLog_log(LogType::Force, "Vulkan: Swapchain image count less than 2 may cause problems");
 
-	VkSwapchainCreateInfoKHR create_info = CreateSwapchainCreateInfo(m_surface, details, m_surfaceFormat, image_count, m_actualExtent);
-	create_info.oldSwapchain = nullptr;
-	create_info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-
-	VkResult result = vkCreateSwapchainKHR(m_logicalDevice, &create_info, nullptr, &m_swapchain);
-	if (result != VK_SUCCESS)
+	VkSwapchainCreateInfoKHR createInfo = CreateSwapchainCreateInfo(m_surface, support, m_surfaceFormat, imageCount, m_actualExtent);
+	createInfo.oldSwapchain = VK_NULL_HANDLE;
+	// images are also targets of transfer clears
+	createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+	if (vkCreateSwapchainKHR(m_logicalDevice, &createInfo, nullptr, &m_swapchain) != VK_SUCCESS)
 		UnrecoverableError("Error attempting to create a swapchain");
 
-	result = vkGetSwapchainImagesKHR(m_logicalDevice, m_swapchain, &image_count, nullptr);
-	if (result != VK_SUCCESS)
+	if (vkGetSwapchainImagesKHR(m_logicalDevice, m_swapchain, &imageCount, nullptr) != VK_SUCCESS)
 		UnrecoverableError("Error attempting to retrieve the count of swapchain images");
-
-
-	m_swapchainImages.resize(image_count);
-	result = vkGetSwapchainImagesKHR(m_logicalDevice, m_swapchain, &image_count, m_swapchainImages.data());
-	if (result != VK_SUCCESS)
+	m_swapchainImages.resize(imageCount);
+	if (vkGetSwapchainImagesKHR(m_logicalDevice, m_swapchain, &imageCount, m_swapchainImages.data()) != VK_SUCCESS)
 		UnrecoverableError("Error attempting to retrieve swapchain images");
-	// create default renderpass
-	VkAttachmentDescription colorAttachment = {};
-	colorAttachment.format = m_surfaceFormat.format;
-	colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-	colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-	colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-	colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-	colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
-	VkAttachmentReference colorAttachmentRef = {};
-	colorAttachmentRef.attachment = 0;
-	colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-	VkSubpassDescription subpass = {};
-	subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-	subpass.colorAttachmentCount = 1;
-	subpass.pColorAttachments = &colorAttachmentRef;
-
-	VkRenderPassCreateInfo renderPassInfo = {};
-	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-	renderPassInfo.attachmentCount = 1;
-	renderPassInfo.pAttachments = &colorAttachment;
-	renderPassInfo.subpassCount = 1;
-	renderPassInfo.pSubpasses = &subpass;
-	result = vkCreateRenderPass(m_logicalDevice, &renderPassInfo, nullptr, &m_swapchainRenderPass);
-	if (result != VK_SUCCESS)
-		UnrecoverableError("Failed to create renderpass for swapchain");
-
-	// create swapchain image views
-	m_swapchainImageViews.resize(m_swapchainImages.size());
-	for (sint32 i = 0; i < m_swapchainImages.size(); i++)
-	{
-		VkImageViewCreateInfo createInfo = {};
-		createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-		createInfo.image = m_swapchainImages[i];
-		createInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-		createInfo.format = m_surfaceFormat.format;
-		createInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
-		createInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
-		createInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
-		createInfo.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
-		createInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-		createInfo.subresourceRange.baseMipLevel = 0;
-		createInfo.subresourceRange.levelCount = 1;
-		createInfo.subresourceRange.baseArrayLayer = 0;
-		createInfo.subresourceRange.layerCount = 1;
-		result = vkCreateImageView(m_logicalDevice, &createInfo, nullptr, &m_swapchainImageViews[i]);
-		if (result != VK_SUCCESS)
-			UnrecoverableError("Failed to create imageviews for swapchain");
-	}
-
-	// create swapchain framebuffers
-	m_swapchainFramebuffers.resize(m_swapchainImages.size());
-	for (size_t i = 0; i < m_swapchainImages.size(); i++)
-	{
-		VkImageView attachments[1];
-		attachments[0] = m_swapchainImageViews[i];
-		// create framebuffer
-		VkFramebufferCreateInfo framebufferInfo = {};
-		framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-		framebufferInfo.renderPass = m_swapchainRenderPass;
-		framebufferInfo.attachmentCount = 1;
-		framebufferInfo.pAttachments = attachments;
-		framebufferInfo.width = m_actualExtent.width;
-		framebufferInfo.height = m_actualExtent.height;
-		framebufferInfo.layers = 1;
-		result = vkCreateFramebuffer(m_logicalDevice, &framebufferInfo, nullptr, &m_swapchainFramebuffers[i]);
-		if (result != VK_SUCCESS)
-			UnrecoverableError("Failed to create framebuffer for swapchain");
-	}
-
-	m_presentSemaphores.resize(m_swapchainImages.size());
-	// create present semaphores
-	VkSemaphoreCreateInfo info = {};
-	info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-	for (auto& semaphore : m_presentSemaphores){
-		if (vkCreateSemaphore(m_logicalDevice, &info, nullptr, &semaphore) != VK_SUCCESS)
-			UnrecoverableError("Failed to create semaphore for swapchain present");
-	}
-
-	m_acquireSemaphores.resize(m_swapchainImages.size());
-	// create acquire semaphores
-	info = {};
-	info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-	for (auto& semaphore : m_acquireSemaphores){
-		if (vkCreateSemaphore(m_logicalDevice, &info, nullptr, &semaphore) != VK_SUCCESS)
-			UnrecoverableError("Failed to create semaphore for swapchain acquire");
-	}
-
-	VkFenceCreateInfo fenceInfo = {};
-	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-	fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-	result = vkCreateFence(m_logicalDevice, &fenceInfo, nullptr, &m_imageAvailableFence);
-	if (result != VK_SUCCESS)
-		UnrecoverableError("Failed to create fence for swapchain");
+	CreateRenderPass();
+	CreateImageObjects();
+	CreateSyncObjects();
 
 	m_acquireIndex = 0;
 	hasDefinedSwapchainImage = false;
-
 	m_queueDepth = 0;
+}
+
+void SwapchainInfoVk::CreateRenderPass()
+{
+	// single colour attachment, previous contents are not needed and the image ends up ready for presentation
+	VkAttachmentDescription attachment{};
+	attachment.format = m_surfaceFormat.format;
+	attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+	attachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	attachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+	const VkAttachmentReference colorRef{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+	VkSubpassDescription subpass{};
+	subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+	subpass.colorAttachmentCount = 1;
+	subpass.pColorAttachments = &colorRef;
+
+	VkRenderPassCreateInfo info{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+	info.attachmentCount = 1;
+	info.pAttachments = &attachment;
+	info.subpassCount = 1;
+	info.pSubpasses = &subpass;
+	if (vkCreateRenderPass(m_logicalDevice, &info, nullptr, &m_swapchainRenderPass) != VK_SUCCESS)
+		UnrecoverableError("Failed to create renderpass for swapchain");
+}
+
+void SwapchainInfoVk::CreateImageObjects()
+{
+	const size_t count = m_swapchainImages.size();
+	m_swapchainImageViews.resize(count);
+	for (size_t i = 0; i < count; i++)
+	{
+		VkImageViewCreateInfo info{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+		info.image = m_swapchainImages[i];
+		info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		info.format = m_surfaceFormat.format;
+		info.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+		info.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+		if (vkCreateImageView(m_logicalDevice, &info, nullptr, &m_swapchainImageViews[i]) != VK_SUCCESS)
+			UnrecoverableError("Failed to create imageviews for swapchain");
+	}
+
+	m_swapchainFramebuffers.resize(count);
+	for (size_t i = 0; i < count; i++)
+	{
+		VkFramebufferCreateInfo info{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+		info.renderPass = m_swapchainRenderPass;
+		info.attachmentCount = 1;
+		info.pAttachments = &m_swapchainImageViews[i];
+		info.width = m_actualExtent.width;
+		info.height = m_actualExtent.height;
+		info.layers = 1;
+		if (vkCreateFramebuffer(m_logicalDevice, &info, nullptr, &m_swapchainFramebuffers[i]) != VK_SUCCESS)
+			UnrecoverableError("Failed to create framebuffer for swapchain");
+	}
+}
+
+void SwapchainInfoVk::CreateSyncObjects()
+{
+	const VkSemaphoreCreateInfo semaphoreInfo{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
+	m_presentSemaphores.resize(m_swapchainImages.size());
+	for (VkSemaphore& s : m_presentSemaphores)
+	{
+		if (vkCreateSemaphore(m_logicalDevice, &semaphoreInfo, nullptr, &s) != VK_SUCCESS)
+			UnrecoverableError("Failed to create semaphore for swapchain present");
+	}
+	m_acquireSemaphores.resize(m_swapchainImages.size());
+	for (VkSemaphore& s : m_acquireSemaphores)
+	{
+		if (vkCreateSemaphore(m_logicalDevice, &semaphoreInfo, nullptr, &s) != VK_SUCCESS)
+			UnrecoverableError("Failed to create semaphore for swapchain acquire");
+	}
+
+	VkFenceCreateInfo fenceInfo{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+	fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+	if (vkCreateFence(m_logicalDevice, &fenceInfo, nullptr, &m_imageAvailableFence) != VK_SUCCESS)
+		UnrecoverableError("Failed to create fence for swapchain");
 }
 
 void SwapchainInfoVk::Cleanup()
 {
 	m_swapchainImages.clear();
 
-	for (auto& sem: m_acquireSemaphores)
-		vkDestroySemaphore(m_logicalDevice, sem, nullptr);
+	for (VkSemaphore s : m_acquireSemaphores)
+		vkDestroySemaphore(m_logicalDevice, s, nullptr);
 	m_acquireSemaphores.clear();
-
-	for (auto& sem: m_presentSemaphores)
-		vkDestroySemaphore(m_logicalDevice, sem, nullptr);
+	for (VkSemaphore s : m_presentSemaphores)
+		vkDestroySemaphore(m_logicalDevice, s, nullptr);
 	m_presentSemaphores.clear();
 
 	if (m_swapchainRenderPass)
@@ -176,18 +186,16 @@ void SwapchainInfoVk::Cleanup()
 		vkDestroyRenderPass(m_logicalDevice, m_swapchainRenderPass, nullptr);
 		m_swapchainRenderPass = nullptr;
 	}
-
-	for (auto& imageView : m_swapchainImageViews)
-		vkDestroyImageView(m_logicalDevice, imageView, nullptr);
+	for (VkImageView v : m_swapchainImageViews)
+		vkDestroyImageView(m_logicalDevice, v, nullptr);
 	m_swapchainImageViews.clear();
-
-	for (auto& framebuffer : m_swapchainFramebuffers)
-		vkDestroyFramebuffer(m_logicalDevice, framebuffer, nullptr);
+	for (VkFramebuffer fb : m_swapchainFramebuffers)
+		vkDestroyFramebuffer(m_logicalDevice, fb, nullptr);
 	m_swapchainFramebuffers.clear();
-
 
 	if (m_imageAvailableFence)
 	{
+		// an acquire may still be in flight
 		WaitAvailableFence();
 		vkDestroyFence(m_logicalDevice, m_imageAvailableFence, nullptr);
 		m_imageAvailableFence = nullptr;
@@ -201,12 +209,12 @@ void SwapchainInfoVk::Cleanup()
 
 bool SwapchainInfoVk::IsValid() const
 {
-	return m_swapchain && !m_acquireSemaphores.empty();
+	return m_swapchain != VK_NULL_HANDLE && !m_acquireSemaphores.empty();
 }
 
 void SwapchainInfoVk::WaitAvailableFence()
 {
-	if(m_awaitableFence != VK_NULL_HANDLE)
+	if (m_awaitableFence != VK_NULL_HANDLE)
 		vkWaitForFences(m_logicalDevice, 1, &m_awaitableFence, VK_TRUE, UINT64_MAX);
 	m_awaitableFence = VK_NULL_HANDLE;
 }
@@ -218,36 +226,27 @@ void SwapchainInfoVk::ResetAvailableFence() const
 
 VkSemaphore SwapchainInfoVk::ConsumeAcquireSemaphore()
 {
-	VkSemaphore ret = m_currentSemaphore;
-	m_currentSemaphore = VK_NULL_HANDLE;
-	return ret;
+	return std::exchange(m_currentSemaphore, VK_NULL_HANDLE);
 }
 
 bool SwapchainInfoVk::AcquireImage()
 {
 	ResetAvailableFence();
-
-	VkSemaphore acquireSemaphore = m_acquireSemaphores[m_acquireIndex];
-	VkResult result = vkAcquireNextImageKHR(m_logicalDevice, m_swapchain, 1'000'000'000, acquireSemaphore, m_imageAvailableFence, &swapchainImageIndex);
-	if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR)
+	VkSemaphore semaphore = m_acquireSemaphores[m_acquireIndex];
+	const VkResult res = vkAcquireNextImageKHR(m_logicalDevice, m_swapchain, kAcquireTimeoutNs, semaphore, m_imageAvailableFence, &swapchainImageIndex);
+	// a suboptimal swapchain still delivered an image, but it should be rebuilt soon
+	if (res == VK_SUBOPTIMAL_KHR || res == VK_ERROR_OUT_OF_DATE_KHR)
 		m_shouldRecreate = true;
-	if (result == VK_TIMEOUT)
+	if (res == VK_TIMEOUT || res < 0)
 	{
-		swapchainImageIndex = -1;
+		swapchainImageIndex = (uint32)-1;
+		if (res < 0 && res != VK_ERROR_OUT_OF_DATE_KHR)
+			throw std::runtime_error(fmt::format("Failed to acquire next image: {}", res));
 		return false;
 	}
-
-	if (result < 0)
-	{
-		swapchainImageIndex = -1;
-		if (result != VK_ERROR_OUT_OF_DATE_KHR)
-			throw std::runtime_error(fmt::format("Failed to acquire next image: {}", result));
-		return false;
-	}
-	m_currentSemaphore = acquireSemaphore;
+	m_currentSemaphore = semaphore;
 	m_awaitableFence = m_imageAvailableFence;
-	m_acquireIndex = (m_acquireIndex + 1) % m_swapchainImages.size();
-
+	m_acquireIndex = (uint32)((m_acquireIndex + 1) % m_swapchainImages.size());
 	return true;
 }
 
@@ -258,145 +257,108 @@ void SwapchainInfoVk::UnrecoverableError(const char* errMsg)
 	throw std::runtime_error(errMsg);
 }
 
-
 SwapchainInfoVk::SwapchainSupportDetails SwapchainInfoVk::QuerySwapchainSupport(VkSurfaceKHR surface, const VkPhysicalDevice& device)
 {
-	SwapchainSupportDetails details;
-
-	VkResult result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &details.capabilities);
-	if (result != VK_SUCCESS)
+	SwapchainSupportDetails details{};
+	const VkResult res = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &details.capabilities);
+	if (res != VK_SUCCESS)
 	{
-		if (result != VK_ERROR_SURFACE_LOST_KHR)
-			cemuLog_log(LogType::Force, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed. Error {}", (sint32)result);
-		throw std::runtime_error(fmt::format("Unable to retrieve physical device surface capabilities: {}", result));
+		// a lost surface is expected while a window closes, so it is not logged
+		if (res != VK_ERROR_SURFACE_LOST_KHR)
+			cemuLog_log(LogType::Force, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed. Error {}", (sint32)res);
+		throw std::runtime_error(fmt::format("Unable to retrieve physical device surface capabilities: {}", res));
 	}
-
-	uint32_t formatCount = 0;
-	result = vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, nullptr);
-	if (result != VK_SUCCESS)
-	{
-		cemuLog_log(LogType::Force, "vkGetPhysicalDeviceSurfaceFormatsKHR failed. Error {}", (sint32)result);
-		throw std::runtime_error(fmt::format("Unable to retrieve the number of formats for a surface on a physical device: {}", result));
-	}
-
-	if (formatCount != 0)
-	{
-		details.formats.resize(formatCount);
-		result = vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, details.formats.data());
-		if (result != VK_SUCCESS)
-		{
-			cemuLog_log(LogType::Force, "vkGetPhysicalDeviceSurfaceFormatsKHR failed. Error {}", (sint32)result);
-			throw std::runtime_error(fmt::format("Unable to retrieve the formats for a surface on a physical device: {}", result));
-		}
-	}
-
-	uint32_t presentModeCount = 0;
-	result = vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, nullptr);
-	if (result != VK_SUCCESS)
-	{
-		cemuLog_log(LogType::Force, "vkGetPhysicalDeviceSurfacePresentModesKHR failed. Error {}", (sint32)result);
-		throw std::runtime_error(fmt::format("Unable to retrieve the count of present modes for a surface on a physical device: {}", result));
-	}
-
-	if (presentModeCount != 0)
-	{
-		details.presentModes.resize(presentModeCount);
-		result = vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, details.presentModes.data());
-		if (result != VK_SUCCESS)
-		{
-			cemuLog_log(LogType::Force, "vkGetPhysicalDeviceSurfacePresentModesKHR failed. Error {}", (sint32)result);
-			throw std::runtime_error(fmt::format("Unable to retrieve the present modes for a surface on a physical device: {}", result));
-		}
-	}
-
+	details.formats = QueryList<VkSurfaceFormatKHR>(
+		[&](uint32_t* count, VkSurfaceFormatKHR* out) { return vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, count, out); },
+		"vkGetPhysicalDeviceSurfaceFormatsKHR",
+		"Unable to retrieve the number of formats for a surface on a physical device",
+		"Unable to retrieve the formats for a surface on a physical device");
+	details.presentModes = QueryList<VkPresentModeKHR>(
+		[&](uint32_t* count, VkPresentModeKHR* out) { return vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, count, out); },
+		"vkGetPhysicalDeviceSurfacePresentModesKHR",
+		"Unable to retrieve the count of present modes for a surface on a physical device",
+		"Unable to retrieve the present modes for a surface on a physical device");
 	return details;
 }
 
 VkSurfaceFormatKHR SwapchainInfoVk::ChooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& formats) const
 {
-	if (formats.size() == 1 && formats[0].format == VK_FORMAT_UNDEFINED)
-		return{ VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR };
-
-	for (const auto& format : formats)
-	{
-		if (format.format == VK_FORMAT_B8G8R8A8_UNORM && format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
-			return format;
-	}
-
-	return formats[0];
+	constexpr VkSurfaceFormatKHR preferred{ VK_FORMAT_B8G8R8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR };
+	// a single UNDEFINED entry means the surface accepts any format
+	if (formats.size() == 1 && formats.front().format == VK_FORMAT_UNDEFINED)
+		return preferred;
+	auto it = std::find_if(formats.begin(), formats.end(), [&](const VkSurfaceFormatKHR& f) {
+		return f.format == preferred.format && f.colorSpace == preferred.colorSpace;
+	});
+	return it != formats.end() ? *it : formats.front();
 }
 
 VkExtent2D SwapchainInfoVk::ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities) const
 {
-	if (capabilities.currentExtent.width != std::numeric_limits<uint32>::max())
+	// the special value 0xFFFFFFFF lets the swapchain decide the size
+	if (capabilities.currentExtent.width != 0xFFFFFFFFu)
 		return capabilities.currentExtent;
-
-	VkExtent2D actualExtent = { (uint32)m_desiredExtent.x, (uint32)m_desiredExtent.y };
-	actualExtent.width = std::max(capabilities.minImageExtent.width, std::min(capabilities.maxImageExtent.width, actualExtent.width));
-	actualExtent.height = std::max(capabilities.minImageExtent.height, std::min(capabilities.maxImageExtent.height, actualExtent.height));
-	return actualExtent;
+	auto fit = [](uint32 want, uint32 lo, uint32 hi) { return std::max(lo, std::min(hi, want)); };
+	return VkExtent2D{
+		fit((uint32)m_desiredExtent.x, capabilities.minImageExtent.width, capabilities.maxImageExtent.width),
+		fit((uint32)m_desiredExtent.y, capabilities.minImageExtent.height, capabilities.maxImageExtent.height) };
 }
 
 VkPresentModeKHR SwapchainInfoVk::ChoosePresentMode(const std::vector<VkPresentModeKHR>& modes)
 {
+	auto supported = [&](VkPresentModeKHR m) { return std::find(modes.begin(), modes.end(), m) != modes.end(); };
 	m_maxQueued = 0;
-	const auto vsyncState = (VSync)GetConfig().vsync.GetValue();
-	if (vsyncState == VSync::MAILBOX)
+	switch ((VSync)GetConfig().vsync.GetValue())
 	{
-		if (std::find(modes.cbegin(), modes.cend(), VK_PRESENT_MODE_MAILBOX_KHR) != modes.cend())
+	case VSync::MAILBOX:
+		if (supported(VK_PRESENT_MODE_MAILBOX_KHR))
 			return VK_PRESENT_MODE_MAILBOX_KHR;
-
 		cemuLog_log(LogType::Force, "Vulkan: Can't find mailbox present mode");
-	}
-	else if (vsyncState == VSync::Immediate)
-	{
-		if (std::find(modes.cbegin(), modes.cend(), VK_PRESENT_MODE_IMMEDIATE_KHR) != modes.cend())
+		break;
+	case VSync::Immediate:
+		if (supported(VK_PRESENT_MODE_IMMEDIATE_KHR))
 			return VK_PRESENT_MODE_IMMEDIATE_KHR;
-
 		cemuLog_log(LogType::Force, "Vulkan: Can't find immediate present mode");
-	}
-	else if (vsyncState == VSync::SYNC_AND_LIMIT)
-	{
+		break;
+	case VSync::SYNC_AND_LIMIT:
+		// pacing comes from the host vblank thread, presentation itself stays FIFO without a queue limit
 		LatteTiming_EnableHostDrivenVSync();
-		// use immediate mode if available, other wise fall back to
-		//if (std::find(modes.cbegin(), modes.cend(), VK_PRESENT_MODE_IMMEDIATE_KHR) != modes.cend())
-		//	return VK_PRESENT_MODE_IMMEDIATE_KHR;
-		//else
-		//	cemuLog_log(LogType::Force, "Vulkan: Present mode 'immediate' not available. Vsync might not behave as intended");
 		return VK_PRESENT_MODE_FIFO_KHR;
+	default:
+		break;
 	}
-
+	// plain FIFO, also the fallback when the requested mode is missing: keep at most one frame queued
 	m_maxQueued = 1;
 	return VK_PRESENT_MODE_FIFO_KHR;
 }
 
 VkSwapchainCreateInfoKHR SwapchainInfoVk::CreateSwapchainCreateInfo(VkSurfaceKHR surface, const SwapchainSupportDetails& swapchainSupport, const VkSurfaceFormatKHR& surfaceFormat, uint32 imageCount, const VkExtent2D& extent)
 {
-	VkSwapchainCreateInfoKHR createInfo{};
-	createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-	createInfo.surface = surface;
-	createInfo.minImageCount = imageCount;
-	createInfo.imageFormat = surfaceFormat.format;
-	createInfo.imageExtent = extent;
-	createInfo.imageArrayLayers = 1;
-	createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+	VkSwapchainCreateInfoKHR info{ VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR };
+	info.surface = surface;
+	info.minImageCount = imageCount;
+	info.imageFormat = surfaceFormat.format;
+	info.imageExtent = extent;
+	info.imageArrayLayers = 1;
+	info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
-	const VulkanRenderer::QueueFamilyIndices indices = VulkanRenderer::GetInstance()->FindQueueFamilies(surface, m_physicalDevice);
-	m_swapchainQueueFamilyIndices = { (uint32)indices.graphicsFamily, (uint32)indices.presentFamily };
-	if (indices.graphicsFamily != indices.presentFamily)
+	const VulkanRenderer::QueueFamilyIndices families = VulkanRenderer::GetInstance()->FindQueueFamilies(surface, m_physicalDevice);
+	m_swapchainQueueFamilyIndices = { (uint32)families.graphicsFamily, (uint32)families.presentFamily };
+	if (families.graphicsFamily == families.presentFamily)
 	{
-		createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
-		createInfo.queueFamilyIndexCount = m_swapchainQueueFamilyIndices.size();
-		createInfo.pQueueFamilyIndices = m_swapchainQueueFamilyIndices.data();
+		info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
 	}
 	else
-		createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-	createInfo.preTransform = swapchainSupport.capabilities.currentTransform;
-	createInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-	createInfo.presentMode = ChoosePresentMode(swapchainSupport.presentModes);
-	createInfo.clipped = VK_TRUE;
-
-	cemuLog_logDebug(LogType::Force, "vulkan presentation mode: {}", createInfo.presentMode);
-	return createInfo;
+	{
+		// rendering and presentation happen on different queue families
+		info.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+		info.queueFamilyIndexCount = (uint32)m_swapchainQueueFamilyIndices.size();
+		info.pQueueFamilyIndices = m_swapchainQueueFamilyIndices.data();
+	}
+	info.preTransform = swapchainSupport.capabilities.currentTransform;
+	info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+	info.presentMode = ChoosePresentMode(swapchainSupport.presentModes);
+	info.clipped = VK_TRUE;
+	cemuLog_logDebug(LogType::Force, "vulkan presentation mode: {}", info.presentMode);
+	return info;
 }

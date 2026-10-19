@@ -1,250 +1,181 @@
-#ifndef _VULKAN_API_
-#define _VULKAN_API_
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+#pragma once
 
 #if BOOST_OS_WINDOWS
-#define VK_USE_PLATFORM_WIN32_KHR // todo - define in CMakeLists.txt
+#ifndef VK_USE_PLATFORM_WIN32_KHR
+#define VK_USE_PLATFORM_WIN32_KHR
+#endif
 #endif
 
 #include <vulkan/vulkan.h>
 
+// The renderer calls Vulkan through global function pointers named exactly like the API entry points
+// (the build defines VK_NO_PROTOTYPES). They are filled in three stages:
+//   InitializeGlobalVulkan    - opens the loader library and takes the few exports needed to create an instance
+//   InitializeInstanceVulkan  - resolves instance level functions with vkGetInstanceProcAddr
+//   InitializeDeviceVulkan    - resolves device level functions with vkGetDeviceProcAddr
 bool InitializeGlobalVulkan();
 bool InitializeInstanceVulkan(VkInstance instance);
 bool InitializeDeviceVulkan(VkDevice device);
 extern bool g_vulkan_available;
 
-#endif
+// Entry point tables. Each table takes one macro argument that is applied to every name in it.
 
-#ifdef VKFUNC_DEFINE_CUSTOM
-	#define VKFUNC(__FUNC__) VKFUNC_DEFINE_CUSTOM(__FUNC__)
-	#define VKFUNC_INSTANCE(__FUNC__) VKFUNC_DEFINE_CUSTOM(__FUNC__)
-	#define VKFUNC_DEVICE(__FUNC__) VKFUNC_DEFINE_CUSTOM(__FUNC__)
-#elif defined(VKFUNC_DEFINE)
-	#define VKFUNC(__FUNC__) NOEXPORT PFN_##__FUNC__ __FUNC__ = nullptr
-	#define VKFUNC_INSTANCE(__FUNC__) NOEXPORT PFN_##__FUNC__ __FUNC__ = nullptr
-	#define VKFUNC_DEVICE(__FUNC__) NOEXPORT PFN_##__FUNC__ __FUNC__ = nullptr
-#else
-	#if defined(VKFUNC_INIT)
-		#if BOOST_OS_WINDOWS
-		#define VKFUNC(__FUNC__) __FUNC__ = (PFN_##__FUNC__)GetProcAddress(hmodule, #__FUNC__)
-		#else
-		#define VKFUNC(__FUNC__) __FUNC__ = (PFN_##__FUNC__)dlsym(vulkan_so, #__FUNC__)
-		#endif
-		#define VKFUNC_INSTANCE(__FUNC__)
-		#define VKFUNC_DEVICE(__FUNC__)
-	#elif defined(VKFUNC_INSTANCE_INIT)
-		#define VKFUNC(__FUNC__) 
-		#define VKFUNC_INSTANCE(__FUNC__) __FUNC__ = (PFN_##__FUNC__)vkGetInstanceProcAddr(instance, #__FUNC__)
-		#define VKFUNC_DEVICE(__FUNC__)
-	#elif defined(VKFUNC_DEVICE_INIT)
-		#define VKFUNC(__FUNC__) 
-		#define VKFUNC_INSTANCE(__FUNC__)
-		#define VKFUNC_DEVICE(__FUNC__) __FUNC__ = (PFN_##__FUNC__)vkGetDeviceProcAddr(device, #__FUNC__)
-	#else
-		#define VKFUNC(__FUNC__) extern PFN_##__FUNC__ __FUNC__
-		#define VKFUNC_INSTANCE(__FUNC__) extern PFN_##__FUNC__ __FUNC__
-		#define VKFUNC_DEVICE(__FUNC__) extern PFN_##__FUNC__ __FUNC__
-	#endif
-#endif
+#define PIXELU_VK_LOADER_FUNCS(X) \
+	X(vkGetInstanceProcAddr) \
+	X(vkCreateInstance) \
+	X(vkGetDeviceProcAddr) \
+	X(vkEnumerateInstanceExtensionProperties) \
+	X(vkEnumerateDeviceExtensionProperties) \
+	X(vkEnumerateInstanceVersion)
 
+#define PIXELU_VK_INSTANCE_FUNCS_COMMON(X) \
+	X(vkDestroyInstance) \
+	X(vkEnumeratePhysicalDevices) \
+	X(vkCreateDevice) \
+	X(vkDestroyDevice) \
+	X(vkDeviceWaitIdle) \
+	X(vkCreateDebugReportCallbackEXT) \
+	X(vkGetPhysicalDeviceToolPropertiesEXT) \
+	X(vkSetDebugUtilsObjectNameEXT) \
+	X(vkGetPhysicalDeviceQueueFamilyProperties) \
+	X(vkGetPhysicalDeviceSurfaceSupportKHR) \
+	X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR) \
+	X(vkGetPhysicalDeviceSurfaceFormatsKHR) \
+	X(vkGetPhysicalDeviceSurfacePresentModesKHR) \
+	X(vkGetPhysicalDeviceMemoryProperties) \
+	X(vkGetPhysicalDeviceProperties) \
+	X(vkGetPhysicalDeviceProperties2) \
+	X(vkGetPhysicalDeviceFeatures2) \
+	X(vkGetPhysicalDeviceFormatProperties) \
+	X(vkDestroySurfaceKHR) \
+	X(vkQueuePresentKHR)
 
-
-// global functions
-VKFUNC(vkGetInstanceProcAddr);
-VKFUNC(vkCreateInstance);
-VKFUNC(vkGetDeviceProcAddr);
-VKFUNC(vkEnumerateInstanceExtensionProperties);
-VKFUNC(vkEnumerateDeviceExtensionProperties);
-VKFUNC(vkEnumerateInstanceVersion);
-
-// instance functions
-VKFUNC_INSTANCE(vkDestroyInstance);
-VKFUNC_INSTANCE(vkEnumeratePhysicalDevices);
-VKFUNC_INSTANCE(vkCreateDevice);
-VKFUNC_INSTANCE(vkDestroyDevice);
-VKFUNC_INSTANCE(vkDeviceWaitIdle);
-
-// device debug functions
-
-// instance debug functions
-VKFUNC_INSTANCE(vkCreateDebugReportCallbackEXT);
-
-VKFUNC_INSTANCE(vkGetPhysicalDeviceToolPropertiesEXT);
-VKFUNC_INSTANCE(vkSetDebugUtilsObjectNameEXT);
-
-//VKFUNC_INSTANCE(vkCreateDebugReportCallbackEXT);
-
-// getters
-VKFUNC_DEVICE(vkGetDeviceQueue);
-VKFUNC_INSTANCE(vkGetPhysicalDeviceQueueFamilyProperties);
-VKFUNC_INSTANCE(vkGetPhysicalDeviceSurfaceSupportKHR);
-VKFUNC_INSTANCE(vkGetPhysicalDeviceSurfaceCapabilitiesKHR);
-VKFUNC_INSTANCE(vkGetPhysicalDeviceSurfaceFormatsKHR);
-VKFUNC_INSTANCE(vkGetPhysicalDeviceSurfacePresentModesKHR);
-VKFUNC_INSTANCE(vkGetPhysicalDeviceMemoryProperties);
-VKFUNC_INSTANCE(vkGetPhysicalDeviceProperties);
-VKFUNC_INSTANCE(vkGetPhysicalDeviceProperties2);
-VKFUNC_INSTANCE(vkGetPhysicalDeviceFeatures2);
-VKFUNC_INSTANCE(vkGetPhysicalDeviceFormatProperties);
-
-// semaphore
-VKFUNC_DEVICE(vkCreateSemaphore);
-VKFUNC_DEVICE(vkDestroySemaphore);
-
-// imageview
-VKFUNC_DEVICE(vkCreateImageView);
-VKFUNC_DEVICE(vkDestroyImageView);
-
-// shader
-VKFUNC_DEVICE(vkCreateShaderModule);
-VKFUNC_DEVICE(vkDestroyShaderModule);
-
-// framebuffer
-VKFUNC_DEVICE(vkCreateFramebuffer);
-VKFUNC_DEVICE(vkDestroyFramebuffer);
-
-// renderpass
-VKFUNC_DEVICE(vkCreateRenderPass);
-VKFUNC_DEVICE(vkDestroyRenderPass);
-VKFUNC_DEVICE(vkCmdBeginRenderPass);
-VKFUNC_DEVICE(vkCmdEndRenderPass);
-
-// command buffers
-VKFUNC_DEVICE(vkCreateCommandPool);
-VKFUNC_DEVICE(vkDestroyCommandPool);
-VKFUNC_DEVICE(vkAllocateCommandBuffers);
-VKFUNC_DEVICE(vkFreeCommandBuffers);
-VKFUNC_DEVICE(vkBeginCommandBuffer);
-VKFUNC_DEVICE(vkResetCommandBuffer);
-VKFUNC_DEVICE(vkEndCommandBuffer);
-VKFUNC_DEVICE(vkQueueSubmit);
-
-// pipeline
-VKFUNC_DEVICE(vkCreatePipelineCache);
-VKFUNC_DEVICE(vkMergePipelineCaches);
-VKFUNC_DEVICE(vkGetPipelineCacheData);
-VKFUNC_DEVICE(vkDestroyPipelineCache);
-VKFUNC_DEVICE(vkCreatePipelineLayout);
-VKFUNC_DEVICE(vkDestroyPipelineLayout);
-VKFUNC_DEVICE(vkCreateGraphicsPipelines);
-VKFUNC_DEVICE(vkDestroyPipeline);
-VKFUNC_DEVICE(vkCmdBindPipeline);
-
-// swapchain
-#if BOOST_OS_LINUX || BOOST_OS_BSD
-VKFUNC_INSTANCE(vkCreateXlibSurfaceKHR);
-VKFUNC_INSTANCE(vkCreateXcbSurfaceKHR);
-#ifdef HAS_WAYLAND
-VKFUNC_INSTANCE(vkCreateWaylandSurfaceKHR);
-#endif
-#endif
-
+// window system surface creation differs per platform
 #if BOOST_OS_WINDOWS
-VKFUNC_INSTANCE(vkCreateWin32SurfaceKHR);
+#define PIXELU_VK_INSTANCE_FUNCS_SURFACE(X) X(vkCreateWin32SurfaceKHR)
+#elif BOOST_OS_MACOS
+#define PIXELU_VK_INSTANCE_FUNCS_SURFACE(X) X(vkCreateMetalSurfaceEXT)
+#elif (BOOST_OS_LINUX || BOOST_OS_BSD) && defined(HAS_WAYLAND)
+#define PIXELU_VK_INSTANCE_FUNCS_SURFACE(X) X(vkCreateXlibSurfaceKHR) X(vkCreateXcbSurfaceKHR) X(vkCreateWaylandSurfaceKHR)
+#elif BOOST_OS_LINUX || BOOST_OS_BSD
+#define PIXELU_VK_INSTANCE_FUNCS_SURFACE(X) X(vkCreateXlibSurfaceKHR) X(vkCreateXcbSurfaceKHR)
+#else
+#define PIXELU_VK_INSTANCE_FUNCS_SURFACE(X)
 #endif
 
-#if BOOST_OS_MACOS
-VKFUNC_INSTANCE(vkCreateMetalSurfaceEXT);
-#endif
+#define PIXELU_VK_INSTANCE_FUNCS(X) PIXELU_VK_INSTANCE_FUNCS_COMMON(X) PIXELU_VK_INSTANCE_FUNCS_SURFACE(X)
 
-VKFUNC_INSTANCE(vkDestroySurfaceKHR);
-VKFUNC_DEVICE(vkCreateSwapchainKHR);
-VKFUNC_DEVICE(vkDestroySwapchainKHR);
-VKFUNC_DEVICE(vkGetSwapchainImagesKHR);
-VKFUNC_DEVICE(vkAcquireNextImageKHR);
-VKFUNC_INSTANCE(vkQueuePresentKHR);
+#define PIXELU_VK_DEVICE_FUNCS(X) \
+	X(vkGetDeviceQueue) \
+	/* synchronisation objects */ \
+	X(vkCreateSemaphore) \
+	X(vkDestroySemaphore) \
+	X(vkCreateFence) \
+	X(vkWaitForFences) \
+	X(vkGetFenceStatus) \
+	X(vkResetFences) \
+	X(vkDestroyFence) \
+	X(vkCreateEvent) \
+	X(vkCmdSetEvent) \
+	X(vkCmdWaitEvents) \
+	X(vkGetEventStatus) \
+	X(vkDestroyEvent) \
+	/* views, shaders, framebuffers and render passes */ \
+	X(vkCreateImageView) \
+	X(vkDestroyImageView) \
+	X(vkCreateShaderModule) \
+	X(vkDestroyShaderModule) \
+	X(vkCreateFramebuffer) \
+	X(vkDestroyFramebuffer) \
+	X(vkCreateRenderPass) \
+	X(vkDestroyRenderPass) \
+	X(vkCmdBeginRenderPass) \
+	X(vkCmdEndRenderPass) \
+	/* command buffers and submission */ \
+	X(vkCreateCommandPool) \
+	X(vkDestroyCommandPool) \
+	X(vkAllocateCommandBuffers) \
+	X(vkFreeCommandBuffers) \
+	X(vkBeginCommandBuffer) \
+	X(vkResetCommandBuffer) \
+	X(vkEndCommandBuffer) \
+	X(vkQueueSubmit) \
+	/* pipelines */ \
+	X(vkCreatePipelineCache) \
+	X(vkMergePipelineCaches) \
+	X(vkGetPipelineCacheData) \
+	X(vkDestroyPipelineCache) \
+	X(vkCreatePipelineLayout) \
+	X(vkDestroyPipelineLayout) \
+	X(vkCreateGraphicsPipelines) \
+	X(vkDestroyPipeline) \
+	X(vkCmdBindPipeline) \
+	/* swapchain */ \
+	X(vkCreateSwapchainKHR) \
+	X(vkDestroySwapchainKHR) \
+	X(vkGetSwapchainImagesKHR) \
+	X(vkAcquireNextImageKHR) \
+	X(vkWaitForPresentKHR) \
+	/* recorded commands */ \
+	X(vkCmdDraw) \
+	X(vkCmdDrawIndexed) \
+	X(vkCmdCopyBufferToImage) \
+	X(vkCmdCopyImageToBuffer) \
+	X(vkCmdClearColorImage) \
+	X(vkCmdClearAttachments) \
+	X(vkCmdClearDepthStencilImage) \
+	X(vkCmdBindIndexBuffer) \
+	X(vkCmdBindVertexBuffers) \
+	X(vkCmdSetViewport) \
+	X(vkCmdSetScissor) \
+	X(vkCmdBindDescriptorSets) \
+	X(vkCmdPipelineBarrier) \
+	X(vkCmdPipelineBarrier2KHR) \
+	X(vkCmdCopyBuffer) \
+	X(vkCmdCopyImage) \
+	X(vkCmdBlitImage) \
+	X(vkCmdPushConstants) \
+	X(vkCmdSetBlendConstants) \
+	X(vkCmdSetDepthBias) \
+	X(vkCmdBeginRenderingKHR) \
+	X(vkCmdEndRenderingKHR) \
+	X(vkCmdSetAttachmentFeedbackLoopEnableEXT) \
+	/* queries */ \
+	X(vkCreateQueryPool) \
+	X(vkDestroyQueryPool) \
+	X(vkCmdResetQueryPool) \
+	X(vkCmdBeginQuery) \
+	X(vkCmdEndQuery) \
+	X(vkCmdCopyQueryPoolResults) \
+	/* memory, buffers and images */ \
+	X(vkAllocateMemory) \
+	X(vkFreeMemory) \
+	X(vkMapMemory) \
+	X(vkUnmapMemory) \
+	X(vkFlushMappedMemoryRanges) \
+	X(vkInvalidateMappedMemoryRanges) \
+	X(vkCreateBuffer) \
+	X(vkDestroyBuffer) \
+	X(vkBindBufferMemory) \
+	X(vkGetBufferMemoryRequirements) \
+	X(vkCreateImage) \
+	X(vkDestroyImage) \
+	X(vkGetImageMemoryRequirements) \
+	X(vkBindImageMemory) \
+	X(vkCreateSampler) \
+	X(vkDestroySampler) \
+	/* descriptors */ \
+	X(vkCreateDescriptorSetLayout) \
+	X(vkDestroyDescriptorSetLayout) \
+	X(vkCreateDescriptorPool) \
+	X(vkDestroyDescriptorPool) \
+	X(vkAllocateDescriptorSets) \
+	X(vkFreeDescriptorSets) \
+	X(vkUpdateDescriptorSets)
 
-// fences
-VKFUNC_DEVICE(vkCreateFence);
-VKFUNC_DEVICE(vkWaitForFences);
-VKFUNC_DEVICE(vkGetFenceStatus);
-VKFUNC_DEVICE(vkResetFences);
-VKFUNC_DEVICE(vkDestroyFence);
-
-// cmd
-VKFUNC_DEVICE(vkCmdDraw);
-VKFUNC_DEVICE(vkCmdCopyBufferToImage);
-VKFUNC_DEVICE(vkCmdCopyImageToBuffer);
-VKFUNC_DEVICE(vkCmdClearColorImage);
-VKFUNC_DEVICE(vkCmdClearAttachments);
-VKFUNC_DEVICE(vkCmdBindIndexBuffer);
-VKFUNC_DEVICE(vkCmdBindVertexBuffers);
-VKFUNC_DEVICE(vkCmdDrawIndexed);
-VKFUNC_DEVICE(vkCmdSetViewport);
-VKFUNC_DEVICE(vkCmdSetScissor);
-VKFUNC_DEVICE(vkCmdBindDescriptorSets);
-VKFUNC_DEVICE(vkCmdPipelineBarrier);
-VKFUNC_DEVICE(vkCmdClearDepthStencilImage);
-VKFUNC_DEVICE(vkCmdCopyBuffer);
-VKFUNC_DEVICE(vkCmdCopyImage);
-VKFUNC_DEVICE(vkCmdBlitImage);
-VKFUNC_DEVICE(vkCmdPushConstants);
-VKFUNC_DEVICE(vkCmdSetBlendConstants);
-VKFUNC_DEVICE(vkCmdSetDepthBias);
-
-// synchronization2
-
-VKFUNC_DEVICE(vkCmdPipelineBarrier2KHR);
-
-// khr_dynamic_rendering
-VKFUNC_DEVICE(vkCmdBeginRenderingKHR);
-VKFUNC_DEVICE(vkCmdEndRenderingKHR);
-
-// ext_attachment_feedback_loop_dynamic_state
-VKFUNC_DEVICE(vkCmdSetAttachmentFeedbackLoopEnableEXT);
-
-// khr_present_wait
-VKFUNC_DEVICE(vkWaitForPresentKHR);
-
-// query
-VKFUNC_DEVICE(vkCreateQueryPool);
-VKFUNC_DEVICE(vkDestroyQueryPool);
-VKFUNC_DEVICE(vkCmdResetQueryPool);
-VKFUNC_DEVICE(vkCmdBeginQuery);
-VKFUNC_DEVICE(vkCmdEndQuery);
-VKFUNC_DEVICE(vkCmdCopyQueryPoolResults);
-
-// event
-VKFUNC_DEVICE(vkCreateEvent);
-VKFUNC_DEVICE(vkCmdSetEvent);
-VKFUNC_DEVICE(vkCmdWaitEvents);
-VKFUNC_DEVICE(vkGetEventStatus);
-VKFUNC_DEVICE(vkDestroyEvent);
-
-// memory
-VKFUNC_DEVICE(vkAllocateMemory);
-VKFUNC_DEVICE(vkFreeMemory);
-VKFUNC_DEVICE(vkCreateBuffer);
-VKFUNC_DEVICE(vkDestroyBuffer);
-VKFUNC_DEVICE(vkBindBufferMemory);
-VKFUNC_DEVICE(vkMapMemory);
-VKFUNC_DEVICE(vkUnmapMemory);
-VKFUNC_DEVICE(vkGetBufferMemoryRequirements);
-VKFUNC_DEVICE(vkFlushMappedMemoryRanges);
-VKFUNC_DEVICE(vkInvalidateMappedMemoryRanges);
-
-// image
-VKFUNC_DEVICE(vkCreateImage);
-VKFUNC_DEVICE(vkDestroyImage);
-VKFUNC_DEVICE(vkGetImageMemoryRequirements);
-VKFUNC_DEVICE(vkBindImageMemory);
-
-VKFUNC_DEVICE(vkCreateSampler);
-VKFUNC_DEVICE(vkDestroySampler);
-
-VKFUNC_DEVICE(vkCreateDescriptorSetLayout);
-VKFUNC_DEVICE(vkAllocateDescriptorSets);
-VKFUNC_DEVICE(vkFreeDescriptorSets);
-VKFUNC_DEVICE(vkUpdateDescriptorSets);
-VKFUNC_DEVICE(vkCreateDescriptorPool);
-VKFUNC_DEVICE(vkDestroyDescriptorPool);
-VKFUNC_DEVICE(vkDestroyDescriptorSetLayout);
-
-#undef VKFUNC_INIT
-#undef VKFUNC_INSTANCE_INIT
-#undef VKFUNC_DEVICE_INIT
-#undef VKFUNC_DEFINE
-
-#undef VKFUNC
-#undef VKFUNC_INSTANCE
-#undef VKFUNC_DEVICE
-#undef VKFUNC_DEFINE_CUSTOM
+#define PIXELU_VK_DECLARE_POINTER(name) extern PFN_##name name;
+PIXELU_VK_LOADER_FUNCS(PIXELU_VK_DECLARE_POINTER)
+PIXELU_VK_INSTANCE_FUNCS(PIXELU_VK_DECLARE_POINTER)
+PIXELU_VK_DEVICE_FUNCS(PIXELU_VK_DECLARE_POINTER)
+#undef PIXELU_VK_DECLARE_POINTER

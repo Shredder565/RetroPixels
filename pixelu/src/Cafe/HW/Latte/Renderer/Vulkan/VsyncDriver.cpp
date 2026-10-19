@@ -1,215 +1,201 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+#include "Cafe/HW/Latte/Renderer/Vulkan/VsyncDriver.h"
+
 #if BOOST_OS_WINDOWS
 
 #include <Windows.h>
+#include <atomic>
+#include <mutex>
+#include <thread>
 
 #include "WindowSystem.h"
 
-typedef LONG NTSTATUS;
-
-typedef UINT32 D3DKMT_HANDLE;
-typedef UINT D3DDDI_VIDEO_PRESENT_SOURCE_ID;
-
-typedef struct _D3DKMT_OPENADAPTERFROMHDC
+namespace
 {
-	HDC                            hDc;
-	D3DKMT_HANDLE                  hAdapter;
-	LUID                           AdapterLuid;
-	D3DDDI_VIDEO_PRESENT_SOURCE_ID VidPnSourceId;
-}D3DKMT_OPENADAPTERFROMHDC;
+	// Kernel mode display thunks exported by gdi32 (declared here because the DDK headers are not available).
+	using KmtHandle = UINT32;
+	using KmtSourceId = UINT;
 
-typedef struct _D3DKMT_WAITFORVERTICALBLANKEVENT {
-	D3DKMT_HANDLE                  hAdapter;
-	D3DKMT_HANDLE                  hDevice;
-	D3DDDI_VIDEO_PRESENT_SOURCE_ID VidPnSourceId;
-} D3DKMT_WAITFORVERTICALBLANKEVENT;
-
-class DeviceVsyncHandler
-{
-public:
-	DeviceVsyncHandler(void(*cbVSync)()) : m_vsyncDriverVSyncCb(cbVSync)
+	struct KmtOpenAdapterFromHdc
 	{
-		m_shutdownThread = false;
-		if (!pfnD3DKMTOpenAdapterFromHdc)
+		HDC hDc;
+		KmtHandle hAdapter;
+		LUID AdapterLuid;
+		KmtSourceId VidPnSourceId;
+	};
+
+	struct KmtWaitForVBlank
+	{
+		KmtHandle hAdapter;
+		KmtHandle hDevice;
+		KmtSourceId VidPnSourceId;
+	};
+
+	using PfnOpenAdapterFromHdc = LONG(APIENTRY*)(KmtOpenAdapterFromHdc*);
+	using PfnWaitForVBlank = LONG(APIENTRY*)(const KmtWaitForVBlank*);
+
+	constexpr DWORD kRetryDelayMs = 1000 / 60;
+	constexpr int kFailuresBeforeReopen = 10;
+
+	class VBlankThread
+	{
+	public:
+		explicit VBlankThread(void (*callback)()) : m_callback(callback)
 		{
-			HMODULE hModuleGDI = LoadLibraryA("gdi32.dll");
-			*(void**)&pfnD3DKMTOpenAdapterFromHdc = GetProcAddress(hModuleGDI, "D3DKMTOpenAdapterFromHdc");
-			*(void**)&pfnD3DKMTWaitForVerticalBlankEvent = GetProcAddress(hModuleGDI, "D3DKMTWaitForVerticalBlankEvent");
+			HMODULE gdi = LoadLibraryA("gdi32.dll");
+			m_openAdapter = reinterpret_cast<PfnOpenAdapterFromHdc>(GetProcAddress(gdi, "D3DKMTOpenAdapterFromHdc"));
+			m_waitVBlank = reinterpret_cast<PfnWaitForVBlank>(GetProcAddress(gdi, "D3DKMTWaitForVerticalBlankEvent"));
+			m_thread = std::thread(&VBlankThread::Run, this);
 		}
-		m_thd = std::thread(&DeviceVsyncHandler::vsyncThread, this);
-	}
 
-	~DeviceVsyncHandler()
-	{
-		m_shutdownThread = true;
-		cemu_assert_debug(m_thd.joinable());
-		m_thd.join();
-	}
+		~VBlankThread()
+		{
+			m_stop = true;
+			if (m_thread.joinable())
+				m_thread.join();
+		}
 
-	void notifyWindowPosChanged()
-	{
-		m_checkMonitorChange = true;
-	}
+		void RequestMonitorCheck() { m_monitorCheckPending = true; }
 
-private:
-	bool HasMonitorChanged()
-	{
-		HWND hWnd = (HWND)WindowSystem::GetWindowInfo().canvas_main.surface;
-		if (hWnd == 0)
+	private:
+		static HWND MainWindow()
+		{
+			return (HWND)WindowSystem::GetWindowInfo().canvas_main.surface;
+		}
+
+		// device name of the monitor nearest to the main window, false if there is no window or no monitor info
+		static bool QueryMonitorDevice(MONITORINFOEXW& info)
+		{
+			HWND wnd = MainWindow();
+			if (!wnd)
+				return false;
+			info = {};
+			info.cbSize = sizeof(info);
+			return GetMonitorInfoW(MonitorFromWindow(wnd, MONITOR_DEFAULTTONEAREST), &info) != 0;
+		}
+
+		bool MonitorChanged()
+		{
+			MONITORINFOEXW info;
+			if (!QueryMonitorDevice(info))
+				return true;
+			return wcscmp(info.szDevice, m_monitorDevice) != 0;
+		}
+
+		// opens the adapter driving the main window's monitor, remembering that monitor on success
+		bool OpenAdapter()
+		{
+			if (!MainWindow())
+				return false;
+			m_monitorDevice[0] = L'\0';
+			m_monitorCheckPending = false;
+			m_adapter = 0;
+			m_source = 0;
+			MONITORINFOEXW info;
+			if (!QueryMonitorDevice(info))
+				return false;
+			HDC dc = CreateDCW(nullptr, info.szDevice, nullptr, nullptr);
+			if (!dc)
+				return false;
+			KmtOpenAdapterFromHdc request{};
+			request.hDc = dc;
+			const bool opened = m_openAdapter(&request) == 0;
+			DeleteDC(dc);
+			if (!opened)
+				return false;
+			m_adapter = request.hAdapter;
+			m_source = request.VidPnSourceId;
+			wcsncpy(m_monitorDevice, info.szDevice, kDeviceNameLength);
 			return true;
-		HMONITOR hMonitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
-
-		MONITORINFOEXW monitorInfo{};
-		monitorInfo.cbSize = sizeof(monitorInfo);
-		if (GetMonitorInfoW(hMonitor, &monitorInfo) == 0)
-			return true;
-
-		if (wcscmp(monitorInfo.szDevice, m_activeMonitorDevice) == 0)
-			return false;
-		
-		return true;
-	}
-
-	HRESULT GetAdapterHandleFromHwnd(D3DKMT_HANDLE* phAdapter, UINT* pOutput)
-	{
-		HWND hWnd = (HWND)WindowSystem::GetWindowInfo().canvas_main.surface;
-		if (hWnd == 0)
-			return E_FAIL;
-
-		wcsncpy(m_activeMonitorDevice, L"", 32); // reset remembered monitor device
-		m_checkMonitorChange = false;
-
-		D3DKMT_OPENADAPTERFROMHDC OpenAdapterData;
-
-		*phAdapter = 0;
-		*pOutput = 0;
-
-		HMONITOR hMonitor = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
-
-		MONITORINFOEXW monitorInfo{};
-		monitorInfo.cbSize = sizeof(monitorInfo);
-		if (GetMonitorInfoW(hMonitor, &monitorInfo) == 0)
-			return E_FAIL;
-
-
-		HDC hdc = CreateDCW(NULL, monitorInfo.szDevice, NULL, NULL);
-		if (hdc == NULL) {
-			return E_FAIL;
 		}
 
-		OpenAdapterData.hDc = hdc;
-		if (pfnD3DKMTOpenAdapterFromHdc(&OpenAdapterData) == 0)
+		// retries until an adapter is open, false when asked to stop meanwhile
+		bool ReopenAdapter()
 		{
-			DeleteDC(hdc);
-			*phAdapter = OpenAdapterData.hAdapter;
-			*pOutput = OpenAdapterData.VidPnSourceId;
-			// remember monitor device
-			wcsncpy(m_activeMonitorDevice, monitorInfo.szDevice, 32);
-			return S_OK;
-		}
-		DeleteDC(hdc);
-
-		return E_FAIL;
-	}
-
-	void vsyncThread()
-	{
-		D3DKMT_HANDLE hAdapter;
-		UINT hOutput;
-		GetAdapterHandleFromHwnd(&hAdapter, &hOutput);
-
-		int failCount = 0;
-		while (!m_shutdownThread)
-		{
-			D3DKMT_WAITFORVERTICALBLANKEVENT arg;
-			arg.hDevice = 0;
-			arg.hAdapter = hAdapter;
-			arg.VidPnSourceId = hOutput;
-			NTSTATUS r = pfnD3DKMTWaitForVerticalBlankEvent(&arg);
-			if (r != 0)
+			while (!OpenAdapter())
 			{
-				//cemuLog_log(LogType::Force, "Wait for VerticalBlank failed");
-				Sleep(1000 / 60);
-				failCount++;
-				if (failCount >= 10)
-				{
-					while (GetAdapterHandleFromHwnd(&hAdapter, &hOutput) != S_OK)
-					{
-						Sleep(1000 / 60);
-						if (m_shutdownThread)
-							return;
-					}
-					failCount = 0;
-				}
+				Sleep(kRetryDelayMs);
+				if (m_stop)
+					return false;
 			}
-			else
-				signalVsync();
-			if (m_checkMonitorChange)
+			return true;
+		}
+
+		void Run()
+		{
+			OpenAdapter();
+			int failures = 0;
+			while (!m_stop)
 			{
-				m_checkMonitorChange = false;
-				if (HasMonitorChanged())
+				KmtWaitForVBlank wait{};
+				wait.hAdapter = m_adapter;
+				wait.hDevice = 0;
+				wait.VidPnSourceId = m_source;
+				if (m_waitVBlank(&wait) == 0)
 				{
-					while (GetAdapterHandleFromHwnd(&hAdapter, &hOutput) != S_OK)
+					if (m_callback)
+						m_callback();
+				}
+				else
+				{
+					Sleep(kRetryDelayMs);
+					if (++failures >= kFailuresBeforeReopen)
 					{
-						Sleep(1000 / 60);
-						if (m_shutdownThread)
+						if (!ReopenAdapter())
 							return;
+						failures = 0;
 					}
+				}
+				if (m_monitorCheckPending)
+				{
+					m_monitorCheckPending = false;
+					if (MonitorChanged() && !ReopenAdapter())
+						return;
 				}
 			}
 		}
-	}
 
-	void signalVsync()
-	{
-		if(m_vsyncDriverVSyncCb)
-			m_vsyncDriverVSyncCb();
-	}
+		static constexpr size_t kDeviceNameLength = 32;
 
-	void setCallback(void(*cbVSync)())
-	{
-		m_vsyncDriverVSyncCb = cbVSync;
-	}
+		void (*m_callback)();
+		PfnOpenAdapterFromHdc m_openAdapter = nullptr;
+		PfnWaitForVBlank m_waitVBlank = nullptr;
+		std::thread m_thread;
+		std::atomic<bool> m_stop{ false };
+		std::atomic<bool> m_monitorCheckPending{ false };
+		KmtHandle m_adapter = 0;
+		KmtSourceId m_source = 0;
+		WCHAR m_monitorDevice[kDeviceNameLength]{};
+	};
 
-private:
-	NTSTATUS(__stdcall* pfnD3DKMTOpenAdapterFromHdc)(D3DKMT_OPENADAPTERFROMHDC* Arg1) = nullptr;
-	NTSTATUS(__stdcall* pfnD3DKMTWaitForVerticalBlankEvent)(const D3DKMT_WAITFORVERTICALBLANKEVENT* Arg1) = nullptr;
-
-	std::thread m_thd;
-	bool m_shutdownThread;
-	bool m_checkMonitorChange{};
-	WCHAR m_activeMonitorDevice[32];
-
-	void (*m_vsyncDriverVSyncCb)() = nullptr;
-};
-
-DeviceVsyncHandler* s_vsyncDriver = nullptr;
-
-std::mutex s_driverAccess;
+	std::mutex s_vblankMutex;
+	VBlankThread* s_vblankThread = nullptr;
+}
 
 void VsyncDriver_startThread(void(*cbVSync)())
 {
-	std::unique_lock<std::mutex> ul(s_driverAccess);
-	if (!s_vsyncDriver)
-		s_vsyncDriver = new DeviceVsyncHandler(cbVSync);
+	std::lock_guard<std::mutex> lock(s_vblankMutex);
+	if (!s_vblankThread)
+		s_vblankThread = new VBlankThread(cbVSync);
 }
 
 void VsyncDriver_notifyWindowPosChanged()
 {
-	std::unique_lock<std::mutex> ul(s_driverAccess);
-	if (s_vsyncDriver)
-		s_vsyncDriver->notifyWindowPosChanged();
+	std::lock_guard<std::mutex> lock(s_vblankMutex);
+	if (s_vblankThread)
+		s_vblankThread->RequestMonitorCheck();
 }
 
 #else
 
 void VsyncDriver_startThread(void(*cbVSync)())
 {
+	// display driven pacing is only implemented for Windows
 	cemu_assert_unimplemented();
 }
 
 void VsyncDriver_notifyWindowPosChanged()
 {
-
 }
 
 #endif
