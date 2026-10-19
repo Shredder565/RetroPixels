@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Misc.h"
 #include "Cafe/OS/libs/coreinit/coreinit_MessageQueue.h"
@@ -7,590 +8,483 @@
 #include "config/LaunchSettings.h"
 #include <pugixml.hpp>
 
+// coreinit formatted output (the printf family used by OSReport and __os_snprintf),
+// the developer console, process/title queries and title relaunch.
+
 namespace coreinit
 {
-	sint32 ppc_vcprintf_pad(char* strOut, sint32 maxLength, sint32 padLength, char padChar)
-	{
-		padLength = std::min<sint32>(padLength, maxLength);
-		sint32 paddedLength = padLength;
-		while ( padLength > 0)
-		{
-			*strOut = padChar;
-			strOut++;
-			padLength--;
-		}
-		return paddedLength;
-	}
+	/* formatted output */
 
-	// handler for %s
-	sint32 ppc_vcprintf_str(char* strOut, sint32 maxLength, MEMPTR<char> strPointer, std::optional<sint32> width, std::optional<sint32> precision)
+	namespace
 	{
-		if (maxLength <= 0)
-			return 0;
-		const char* stringData = "(null)";
-		if (strPointer)
-			stringData = strPointer.GetPtr();
-		else
+		// bounded output buffer: writes past the capacity are dropped
+		class FormatSink
 		{
-			if (precision.has_value() && *precision > 6)
-				precision = 6;
-		}
-		// get string length
-		sint32 stringLength = 0;
-		if (precision.has_value())
-		{
-			stringLength = *precision;
-			for (sint32 i=0; i<stringLength; i++)
+		public:
+			FormatSink(char* dst, sint32 capacity) : m_dst(dst), m_capacity(capacity) {}
+
+			sint32 Room() const { return m_capacity - m_used; }
+			sint32 Used() const { return m_used; }
+
+			void Put(char c)
 			{
-				if (stringData[i] == '\0')
+				if (Room() > 0)
+					m_dst[m_used++] = c;
+			}
+
+			void Repeat(char c, sint64 count)
+			{
+				sint32 n = (sint32)std::min<sint64>(count, Room());
+				for (sint32 i = 0; i < n; i++)
+					m_dst[m_used++] = c;
+			}
+
+			void Append(const char* src, sint32 count)
+			{
+				count = std::min(count, Room());
+				if (count <= 0)
+					return;
+				memcpy(m_dst + m_used, src, count);
+				m_used += count;
+			}
+
+		private:
+			char* m_dst;
+			sint32 m_capacity;
+			sint32 m_used{0};
+		};
+
+		// a parsed conversion. 'width' is signed: negative means left-aligned in |width| columns
+		struct FieldSpec
+		{
+			bool zeroFlag{false};
+			bool altFlag{false};
+			sint32 width{0};
+			std::optional<sint32> precision;
+		};
+
+		enum class ArgKind
+		{
+			Signed64,
+			Unsigned64,
+			Signed32,
+			Unsigned32,
+			Hex64,
+			Hex32,
+			Pointer,
+			String,
+			Char,
+			Double,
+		};
+
+		struct ConversionToken
+		{
+			const char* text;
+			ArgKind kind;
+			bool upper;
+		};
+
+		// recognised length modifier + conversion letter sequences. None is a prefix of another
+		constexpr ConversionToken s_conversionTokens[] =
+		{
+			{"lld", ArgKind::Signed64, false},
+			{"lli", ArgKind::Signed64, false},
+			{"llu", ArgKind::Unsigned64, false},
+			{"d", ArgKind::Signed32, false},
+			{"i", ArgKind::Signed32, false},
+			{"ld", ArgKind::Signed32, false},
+			{"li", ArgKind::Signed32, false},
+			{"u", ArgKind::Unsigned32, false},
+			{"lu", ArgKind::Unsigned32, false},
+			{"llx", ArgKind::Hex64, false},
+			{"llX", ArgKind::Hex64, true},
+			{"x", ArgKind::Hex32, false},
+			{"X", ArgKind::Hex32, true},
+			{"p", ArgKind::Pointer, false},
+			{"s", ArgKind::String, false},
+			{"c", ArgKind::Char, false},
+			{"f", ArgKind::Double, false},
+			{"g", ArgKind::Double, false},
+			{"G", ArgKind::Double, false},
+			{"lf", ArgKind::Double, false},
+		};
+
+		const ConversionToken* MatchConversion(const char* text)
+		{
+			for (const ConversionToken& token : s_conversionTokens)
+			{
+				size_t n = strlen(token.text);
+				if (strncmp(text, token.text, n) == 0)
+					return &token;
+			}
+			return nullptr;
+		}
+
+		uint32 TakeArg32(ppc_va_list* args)
+		{
+			return *(uint32be*)_ppc_va_arg(args, ppc_va_type::INT32);
+		}
+
+		uint64 TakeArg64(ppc_va_list* args)
+		{
+			return *(uint64be*)_ppc_va_arg(args, ppc_va_type::INT64);
+		}
+
+		double TakeArgDouble(ppc_va_list* args)
+		{
+			return *(betype<double>*)_ppc_va_arg(args, ppc_va_type::FLOAT_OR_DOUBLE);
+		}
+
+		// parses a run of decimal digits with 32-bit wrap-around
+		sint32 ReadDecimal(const char*& text)
+		{
+			uint32 v = 0;
+			while (*text >= '0' && *text <= '9')
+			{
+				v = v * 10 + (uint32)(*text - '0');
+				text++;
+			}
+			return (sint32)v;
+		}
+
+		void EmitInteger(FormatSink& out, bool negative, uint64 magnitude, bool hex, bool upper, const FieldSpec& spec)
+		{
+			if (out.Room() <= 0)
+				return;
+			// digits, least significant first
+			char digits[24];
+			sint32 digitCount = 0;
+			uint64 rest = magnitude;
+			const char* hexAlphabet = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+			do
+			{
+				if (hex)
 				{
-					stringLength = i;
-					break;
+					digits[digitCount++] = hexAlphabet[rest & 0xF];
+					rest >>= 4;
+				}
+				else
+				{
+					digits[digitCount++] = (char)('0' + rest % 10);
+					rest /= 10;
+				}
+			} while (rest != 0);
+			// an explicit precision of zero prints nothing for the value zero
+			if (spec.precision && *spec.precision == 0 && magnitude == 0)
+				digitCount = 0;
+			sint32 leadingZeroes = 0;
+			if (spec.precision && *spec.precision > digitCount)
+				leadingZeroes = *spec.precision - digitCount;
+			const bool wantsPrefix = hex && spec.altFlag && magnitude != 0;
+			// the field length includes "0x" only if two characters were available when the field started
+			sint64 fieldLength = (sint64)digitCount + leadingZeroes + (negative ? 1 : 0) + ((wantsPrefix && out.Room() >= 2) ? 2 : 0);
+			// the zero flag pads between the sign/prefix and the digits, and only without a precision
+			const bool zeroFill = spec.width > 0 && spec.zeroFlag && !spec.precision;
+
+			if (spec.width > 0 && !zeroFill)
+				out.Repeat(' ', (sint64)spec.width - fieldLength);
+			if (negative)
+				out.Put('-');
+			bool prefixWritten = false;
+			if (wantsPrefix && out.Room() >= 2)
+			{
+				out.Put('0');
+				out.Put(upper ? 'X' : 'x');
+				prefixWritten = true;
+			}
+			if (zeroFill)
+				out.Repeat('0', (sint64)spec.width - digitCount - (negative ? 1 : 0) - (prefixWritten ? 2 : 0));
+			else
+				out.Repeat('0', leadingZeroes);
+			for (sint32 i = digitCount - 1; i >= 0 && out.Room() > 0; i--)
+				out.Put(digits[i]);
+			if (spec.width < 0)
+				out.Repeat(' ', -(sint64)spec.width - fieldLength);
+		}
+
+		void EmitString(FormatSink& out, MPTR address, FieldSpec spec)
+		{
+			if (out.Room() <= 0)
+				return;
+			const char* text;
+			if (address != MPTR_NULL)
+				text = (const char*)memory_getPointerFromVirtualOffset(address);
+			else
+			{
+				text = "(null)";
+				if (spec.precision && *spec.precision > 6)
+					spec.precision = 6;
+			}
+			sint32 length = 0;
+			if (spec.precision)
+			{
+				sint32 limit = *spec.precision;
+				while (length < limit && text[length] != '\0')
+					length++;
+				if (limit < 0)
+				{
+					cemuLog_log(LogType::APIErrors, "ppc_vprintf: negative string precision");
+					length = 0;
 				}
 			}
-		}
-		else
-			stringLength = strlen(stringData);
-		if (stringLength < 0)
-		{
-			cemuLog_log(LogType::APIErrors, "ppc_vprintf: String length less than zero");
-			stringLength = 0;
-		}
-		sint32 outputLength = 0;
-		if (width.has_value() && width.value() > 0)
-		{
-			// left padding
-			sint32 paddedLength = *width;
-			paddedLength -= stringLength;
-			paddedLength = std::min<sint32>(paddedLength, maxLength);
-			if (paddedLength > 0)
-			{
-				ppc_vcprintf_pad(strOut, maxLength, paddedLength, ' ');
-				strOut += paddedLength;
-				maxLength -= paddedLength;
-				outputLength += paddedLength;
-			}
-		}
-		stringLength = std::min<sint32>(stringLength, maxLength);
-		cemu_assert(stringLength >= 0);
-		memcpy(strOut, stringData, stringLength);
-		outputLength += stringLength;
-		if (width.has_value() && width.value() < 0)
-		{
-			sint32 paddedLength = -*width;
-			paddedLength -= stringLength;
-			paddedLength = std::min<sint32>(paddedLength, maxLength - stringLength);
-			if (paddedLength > 0)
-			{
-				ppc_vcprintf_pad(strOut + stringLength, maxLength - stringLength, paddedLength, ' ');
-				outputLength += paddedLength;
-			}
-		}
-		return outputLength;
-	}
-
-	// handler for %c
-	sint32 ppc_vcprintf_char(char* strOut, sint32 maxLength, char character, std::optional<sint32> width, std::optional<sint32> precision)
-	{
-		if (maxLength <= 0)
-			return 0;
-		sint32 outputLength = 0;
-		if (width.has_value() && width.value() > 0)
-		{
-			// left padding
-			sint32 paddedLength = *width;
-			paddedLength -= 1;
-			paddedLength = std::min<sint32>(paddedLength, maxLength);
-			if (paddedLength > 0)
-			{
-				ppc_vcprintf_pad(strOut, maxLength, paddedLength, ' ');
-				strOut += paddedLength;
-				maxLength -= paddedLength;
-				outputLength += paddedLength;
-			}
-		}
-		if (maxLength > 0)
-		{
-			*strOut = character;
-			outputLength++;
-		}
-		if (width.has_value() && width.value() < 0)
-		{
-			sint32 paddedLength = -*width;
-			paddedLength -= 1;
-			paddedLength = std::min<sint32>(paddedLength, maxLength - 1);
-			if (paddedLength > 0)
-			{
-				ppc_vcprintf_pad(strOut + 1, maxLength - 1, paddedLength, ' ');
-				outputLength += paddedLength;
-			}
-		}
-		return outputLength;
-	}
-
-	char GetHexDigit(uint8 nibble, bool isUppercase)
-	{
-		if (nibble >= 10)
-		{
-			return isUppercase ? (nibble - 10 + 'A') : (nibble - 10 + 'a');
-		}
-		return nibble + '0';
-	}
-
-	// handler for integers
-	sint32 ppc_vcprintf_integer(char* strOut, sint32 maxLength, bool isNegative, uint64 absValue, bool isHex, bool uppercase, bool alternateForm, std::optional<sint32> width, std::optional<sint32> precision, char padChar)
-	{
-		if (maxLength <= 0)
-			return 0;
-
-		// convert to digits string
-		char digitBuf[64];
-		sint32 digitCount = 0;
-		uint64 tmpValue = absValue;
-		if (isHex)
-		{
-			do
-			{
-				digitBuf[digitCount++] = GetHexDigit(tmpValue&0xF, uppercase);
-				tmpValue >>= 4;
-			}
-			while (tmpValue != 0);
-		}
-		else
-		{
-			do
-			{
-				digitBuf[digitCount++] = (char)('0' + (tmpValue % 10));
-				tmpValue /= 10;
-			}
-			while (tmpValue != 0);
-		}
-
-		// handle "%.0d"
-		if (precision.has_value() && *precision == 0 && (!isNegative && absValue == 0))
-			digitCount = 0;
-
-		// precision adds leading zeroes for digits only
-		sint32 precisionZeroes = 0;
-		if (precision.has_value() && *precision > digitCount)
-			precisionZeroes = *precision - digitCount;
-
-		sint32 numberLength = digitCount + precisionZeroes;
-		if (isNegative)
-			numberLength++; // count the sign
-		if (isHex && alternateForm && maxLength >= 2 && absValue != 0)
-			numberLength += 2;
-
-		sint32 outputLength = 0;
-
-		// zero padding is a special case because its between the sign and the number
-		bool widthZeroPad = width.has_value() && *width > 0 && padChar == '0' && !precision.has_value();
-
-		// handle space padding left
-		if (width.has_value() && *width > 0 && !widthZeroPad)
-		{
-			sint32 paddedLength = *width - numberLength;
-			paddedLength = std::min<sint32>(paddedLength, maxLength);
-			if (paddedLength > 0)
-			{
-				ppc_vcprintf_pad(strOut, maxLength, paddedLength, ' ');
-				strOut += paddedLength;
-				maxLength -= paddedLength;
-				outputLength += paddedLength;
-			}
-		}
-
-		// sign
-		if (isNegative && maxLength > 0)
-		{
-			*strOut = '-';
-			strOut++;
-			maxLength--;
-			outputLength++;
-		}
-		// hex alternate form prefix (0x / 0X)
-		bool hasHexPrefix = false;
-		if (isHex && alternateForm && maxLength >= 2 && absValue != 0)
-		{
-			strOut[0] = '0';
-			if (uppercase)
-				strOut[1] = 'X';
 			else
-				strOut[1] = 'x';
-			strOut += 2;
-			maxLength -= 2;
-			outputLength += 2;
-			hasHexPrefix = true;
-		}
-		// output zero padding after sign
-		if (widthZeroPad)
-		{
-			sint32 paddedLength = *width - (digitCount + (isNegative ? 1 : 0));
-			if (hasHexPrefix)
-				paddedLength -= 2;
-			paddedLength = std::min<sint32>(paddedLength, maxLength);
-			if (paddedLength > 0)
-			{
-				ppc_vcprintf_pad(strOut, maxLength, paddedLength, '0');
-				strOut += paddedLength;
-				maxLength -= paddedLength;
-				outputLength += paddedLength;
-			}
-		}
-		else if (precisionZeroes > 0)
-		{
-			// precision zeroes
-			sint32 paddedLength = std::min<sint32>(precisionZeroes, maxLength);
-			if (paddedLength > 0)
-			{
-				ppc_vcprintf_pad(strOut, maxLength, paddedLength, '0');
-				strOut += paddedLength;
-				maxLength -= paddedLength;
-				outputLength += paddedLength;
-			}
+				length = (sint32)strlen(text);
+			if (spec.width > 0)
+				out.Repeat(' ', (sint64)spec.width - length);
+			sint32 shown = std::min(length, out.Room());
+			out.Append(text, shown);
+			if (spec.width < 0)
+				out.Repeat(' ', -(sint64)spec.width - shown);
 		}
 
-		// digits (the buffer is in reverse order)
-		sint32 writableDigits = std::min<sint32>(digitCount, maxLength);
-		for (sint32 i = 0; i < writableDigits; i++)
-			strOut[i] = digitBuf[digitCount - 1 - i];
-		strOut += writableDigits;
-		maxLength -= writableDigits;
-		outputLength += writableDigits;
-
-		// space padding right
-		if (width.has_value() && *width < 0)
+		void EmitChar(FormatSink& out, char c, const FieldSpec& spec)
 		{
-			sint32 paddedLength = (-*width) - numberLength;
-			paddedLength = std::min<sint32>(paddedLength, maxLength);
-			if (paddedLength > 0)
-			{
-				ppc_vcprintf_pad(strOut, maxLength, paddedLength, ' ');
-				outputLength += paddedLength;
-			}
+			if (out.Room() <= 0)
+				return;
+			if (spec.width > 0)
+				out.Repeat(' ', (sint64)spec.width - 1);
+			out.Put(c);
+			if (spec.width < 0)
+				out.Repeat(' ', -(sint64)spec.width - 1);
 		}
-		return outputLength;
-	}
 
-	// handler for signed decimal integers (64-bit core)
-	sint32 ppc_vcprintf_decimal64(char* strOut, sint32 maxLength, bool isNegative, uint64 absValue, std::optional<sint32> width, std::optional<sint32> precision, char padChar)
-	{
-		return ppc_vcprintf_integer(strOut, maxLength, isNegative, absValue, false, false, false, width, precision, padChar);
+		// floating point goes through the host printf with the guest's own flags. A '*' width or
+		// precision is replaced by the value already taken from the argument list
+		void EmitDouble(FormatSink& out, const char* specStart, const char* specEnd, const FieldSpec& spec, std::optional<sint32> starWidth, std::optional<sint32> starPrecision, double value)
+		{
+			std::string hostFormat;
+			for (const char* p = specStart; p < specEnd; p++)
+			{
+				if (*p == '*')
+				{
+					bool isPrecision = p > specStart && p[-1] == '.';
+					sint32 v = (isPrecision ? starPrecision : starWidth).value_or(0);
+					if (isPrecision && v < 0)
+						hostFormat.pop_back(); // a negative precision counts as none: drop the '.'
+					else
+						hostFormat.append(fmt::format("{}", v));
+					continue;
+				}
+				hostFormat.push_back(*p);
+			}
+			if (hostFormat.size() > 63)
+				hostFormat.resize(63);
+			char rendered[4096];
+			int n = snprintf(rendered, sizeof(rendered), hostFormat.c_str(), value);
+			if (n < 0)
+				return;
+			n = std::min<int>(n, (int)sizeof(rendered) - 1);
+			out.Append(rendered, n);
+		}
 	}
 
 	sint32 ppc_vprintf(const char* formatStr, char* strOut, sint32 maxLength, ppc_va_list* vargs)
 	{
 		if (maxLength <= 0)
 			return 0;
-		char tempStr[4096];
-		sint32 writeIndex = 0;
-		while (*formatStr)
+		FormatSink out(strOut, maxLength);
+		const char* f = formatStr;
+		while (*f != '\0')
 		{
-			char c = *formatStr;
-			if (c == '%')
+			if (*f != '%')
 			{
-				const char* formatStart = formatStr;
-				formatStr++;
-				if (*formatStr == '%')
-				{
-					// percent sign
-					if (writeIndex >= maxLength)
-						break;
-					strOut[writeIndex] = '%';
-					writeIndex++;
-					formatStr++;
-					continue;
-				}
-				// flags
-				char padChar = ' ';
-				bool alternateForm = false;
-				bool flag_leftJustify = false;
-				if (*formatStr == '-')
-				{
-					flag_leftJustify = true;
-					formatStr++;
-				}
-				if (*formatStr == '+')
-				{
-					formatStr++;
-				}
-				if (*formatStr == ' ')
-				{
-					formatStr++;
-				}
-				if (*formatStr == '#')
-				{
-					alternateForm = true;
-					formatStr++;
-				}
-				if (*formatStr == '0')
-				{
-					padChar = '0';
-					formatStr++;
-				}
-				// width
-				std::optional<sint32> width;
-				if (*formatStr == '*')
-				{
-					formatStr++;
-					width = *(sint32be*)_ppc_va_arg(vargs, ppc_va_type::INT32);
-					if (flag_leftJustify)
-						width = -abs(*width);
-				}
-				else
-				{
-					width = 0;
-					while (*formatStr >= '0' && *formatStr <= '9')
-					{
-						*width *= 10;
-						*width += (*formatStr - '0');
-						formatStr++;
-					}
-					if (flag_leftJustify)
-						width = -*width;
-				}
-				// precision
-				std::optional<sint32> precision;
-				if (*formatStr == '.')
-				{
-					formatStr++;
-					if (*formatStr == '*')
-					{
-						precision = *(sint32be*)_ppc_va_arg(vargs, ppc_va_type::INT32);
-						if (*precision < 0)
-							precision.reset();
-						formatStr++;
-					}
-					else
-					{
-						precision = 0;
-						while (*formatStr >= '0' && *formatStr <= '9')
-						{
-							*precision *= 10;
-							*precision += (*formatStr - '0');
-							formatStr++;
-						}
-					}
-				}
-				// length + specifier
-				char tempFormat[64];
-				if (strncmp(formatStr, "lld", 3) == 0 || strncmp(formatStr, "lli", 3) == 0)
-				{
-					// 64bit decimal (signed)
-					formatStr += 3;
-					sint64 v = *(sint64be*)_ppc_va_arg(vargs, ppc_va_type::INT64);
-					if (v >= 0)
-						writeIndex += ppc_vcprintf_decimal64(strOut + writeIndex, maxLength - writeIndex, false, (uint64)v, width, precision, padChar);
-					else
-						writeIndex += ppc_vcprintf_decimal64(strOut + writeIndex, maxLength - writeIndex, true, ~(uint64)v + 1, width, precision, padChar);
-				}
-				else if (strncmp(formatStr, "llu", 3) == 0)
-				{
-					// 64bit decimal (unsigned)
-					formatStr += 3;
-					uint64 v = *(uint64be*)_ppc_va_arg(vargs, ppc_va_type::INT64);
-					writeIndex += ppc_vcprintf_decimal64(strOut + writeIndex, maxLength - writeIndex, false, v, width, precision, padChar);
-				}
-				else if (*formatStr == 'd' || *formatStr == 'i' || strncmp(formatStr, "ld", 2) == 0 || strncmp(formatStr, "li", 2) == 0)
-				{
-					// 32bit decimal (signed)
-					if (formatStr[0] == 'l')
-						formatStr += 2;
-					else
-						formatStr++;
-					sint32 v = *(sint32be*)_ppc_va_arg(vargs, ppc_va_type::INT32);
-					writeIndex += ppc_vcprintf_decimal64(strOut + writeIndex, maxLength - writeIndex, v < 0, (uint64)abs((sint64)v), width, precision, padChar);
-				}
-				else if (*formatStr == 'u' || strncmp(formatStr, "lu", 2) == 0)
-				{
-					// 32bit decimal (unsigned)
-					if (formatStr[0] == 'l')
-						formatStr += 2;
-					else
-						formatStr++;
-					uint32 v = *(uint32be*)_ppc_va_arg(vargs, ppc_va_type::INT32);
-					writeIndex += ppc_vcprintf_decimal64(strOut + writeIndex, maxLength - writeIndex, false, (uint64)v, width, precision, padChar);
-				}
-				else if (strncmp(formatStr, "llx", 3) == 0 || strncmp(formatStr, "llX", 3) == 0)
-				{
-					// 64bit hexadecimal
-					bool isUppercase = formatStr[2] == 'X';
-					formatStr += 3;
-					uint64 v = *(uint64be*)_ppc_va_arg(vargs, ppc_va_type::INT64);
-					writeIndex += ppc_vcprintf_integer(strOut + writeIndex, maxLength - writeIndex, false, (uint64)v, true, isUppercase, alternateForm, width, precision, padChar);
-				}
-				else if (*formatStr == 'x' || *formatStr == 'X')
-				{
-					// 32bit hexadecimal
-					bool isUppercase = *formatStr == 'X';
-					formatStr++;
-					uint32 v = *(uint32be*)_ppc_va_arg(vargs, ppc_va_type::INT32);
-					writeIndex += ppc_vcprintf_integer(strOut + writeIndex, maxLength - writeIndex, false, (uint64)v, true, isUppercase, alternateForm, width, precision, padChar);
-				}
-				else if (*formatStr == 'p')
-				{
-					// pointer
-					formatStr++;
-					uint32 v = *(uint32be*)_ppc_va_arg(vargs, ppc_va_type::INT32);
-					if (!precision.has_value())
-						precision = 8;
-					writeIndex += ppc_vcprintf_integer(strOut + writeIndex, maxLength - writeIndex, false, (uint64)v, true, false, true, width, precision, padChar);
-				}
-				else if (*formatStr == 's')
-				{
-					// string
-					formatStr++;
-					MPTR strOffset = *(uint32be*)_ppc_va_arg(vargs, ppc_va_type::INT32);
-					writeIndex += ppc_vcprintf_str(strOut + writeIndex, maxLength - writeIndex, MEMPTR<char>(strOffset), width, precision);
-				}
-				else if (*formatStr == 'c')
-				{
-					// character
-					formatStr++;
-					char character = (char)(uint32)*(uint32be*)_ppc_va_arg(vargs, ppc_va_type::INT32);
-					writeIndex += ppc_vcprintf_char(strOut + writeIndex, maxLength - writeIndex, character, width, precision);
-				}
-				else if (*formatStr == 'f' || *formatStr == 'g' || *formatStr == 'G')
-				{
-					formatStr++;
-					strncpy(tempFormat, formatStart, std::min((std::ptrdiff_t)sizeof(tempFormat) - 1, formatStr - formatStart));
-					if ((formatStr - formatStart) < sizeof(tempFormat))
-						tempFormat[(formatStr - formatStart)] = '\0';
-					else
-						tempFormat[sizeof(tempFormat) - 1] = '\0';
-					sint32 tempLen = sprintf(tempStr, tempFormat, (double)*(betype<double>*)_ppc_va_arg(vargs, ppc_va_type::FLOAT_OR_DOUBLE));
-					for (sint32 i = 0; i < tempLen; i++)
-					{
-						if (writeIndex >= maxLength)
-							break;
-						strOut[writeIndex] = tempStr[i];
-						writeIndex++;
-					}
-				}
-				else if (formatStr[0] == 'l' && formatStr[1] == 'f')
-				{
-					// double
-					formatStr += 2;
-					strncpy(tempFormat, formatStart, std::min((std::ptrdiff_t)sizeof(tempFormat) - 1, formatStr - formatStart));
-					if ((formatStr - formatStart) < sizeof(tempFormat))
-						tempFormat[(formatStr - formatStart)] = '\0';
-					else
-						tempFormat[sizeof(tempFormat) - 1] = '\0';
-					sint32 tempLen = sprintf(tempStr, tempFormat, (double)*(betype<double>*)_ppc_va_arg(vargs, ppc_va_type::FLOAT_OR_DOUBLE));
-					for (sint32 i = 0; i < tempLen; i++)
-					{
-						if (writeIndex >= maxLength)
-							break;
-						strOut[writeIndex] = tempStr[i];
-						writeIndex++;
-					}
-				}
-				else
-				{
-					// unsupported / unknown specifier
-					cemu_assert_debug(false);
+				if (out.Room() <= 0)
 					break;
-				}
-				cemu_assert(writeIndex <= maxLength); // sanity check
+				out.Put(*f++);
+				continue;
+			}
+			const char* specStart = f;
+			f++;
+			if (*f == '%')
+			{
+				if (out.Room() <= 0)
+					break;
+				out.Put('%');
+				f++;
+				continue;
+			}
+			// flags are only recognised in this order; '+' and ' ' are accepted but have no effect on integers
+			FieldSpec spec;
+			bool leftAlign = false;
+			if (*f == '-') { leftAlign = true; f++; }
+			if (*f == '+') f++;
+			if (*f == ' ') f++;
+			if (*f == '#') { spec.altFlag = true; f++; }
+			if (*f == '0') { spec.zeroFlag = true; f++; }
+			// width
+			std::optional<sint32> starWidth;
+			if (*f == '*')
+			{
+				f++;
+				sint32 w = (sint32)TakeArg32(vargs);
+				starWidth = w;
+				if (leftAlign)
+					w = (sint32)(0u - (uint32)(w < 0 ? -(sint64)w : (sint64)w));
+				spec.width = w;
 			}
 			else
 			{
-				if (writeIndex >= maxLength)
-					break;
-				strOut[writeIndex] = c;
-				writeIndex++;
-				formatStr++;
+				sint32 w = ReadDecimal(f);
+				spec.width = leftAlign ? (sint32)(0u - (uint32)w) : w;
+			}
+			// precision
+			std::optional<sint32> starPrecision;
+			if (*f == '.')
+			{
+				f++;
+				if (*f == '*')
+				{
+					f++;
+					sint32 p = (sint32)TakeArg32(vargs);
+					starPrecision = p;
+					if (p >= 0)
+						spec.precision = p;
+				}
+				else
+					spec.precision = ReadDecimal(f);
+			}
+			const ConversionToken* token = MatchConversion(f);
+			if (!token)
+			{
+				cemu_assert_debug(false); // conversion not supported, the rest of the format is dropped
+				break;
+			}
+			f += strlen(token->text);
+			switch (token->kind)
+			{
+			case ArgKind::Signed64:
+			{
+				uint64 raw = TakeArg64(vargs);
+				bool negative = (sint64)raw < 0;
+				EmitInteger(out, negative, negative ? (0ull - raw) : raw, false, false, spec);
+				break;
+			}
+			case ArgKind::Unsigned64:
+				EmitInteger(out, false, TakeArg64(vargs), false, false, spec);
+				break;
+			case ArgKind::Signed32:
+			{
+				sint32 v = (sint32)TakeArg32(vargs);
+				EmitInteger(out, v < 0, (uint64)(v < 0 ? -(sint64)v : (sint64)v), false, false, spec);
+				break;
+			}
+			case ArgKind::Unsigned32:
+				EmitInteger(out, false, TakeArg32(vargs), false, false, spec);
+				break;
+			case ArgKind::Hex64:
+				EmitInteger(out, false, TakeArg64(vargs), true, token->upper, spec);
+				break;
+			case ArgKind::Hex32:
+				EmitInteger(out, false, TakeArg32(vargs), true, token->upper, spec);
+				break;
+			case ArgKind::Pointer:
+			{
+				// pointers print as 0x followed by at least eight lowercase hex digits
+				uint32 v = TakeArg32(vargs);
+				FieldSpec ptrSpec = spec;
+				ptrSpec.altFlag = true;
+				if (!ptrSpec.precision)
+					ptrSpec.precision = 8;
+				EmitInteger(out, false, v, true, false, ptrSpec);
+				break;
+			}
+			case ArgKind::String:
+				EmitString(out, TakeArg32(vargs), spec);
+				break;
+			case ArgKind::Char:
+				EmitChar(out, (char)TakeArg32(vargs), spec);
+				break;
+			case ArgKind::Double:
+			{
+				double v = TakeArgDouble(vargs);
+				EmitDouble(out, specStart, f, spec, starWidth, starPrecision, v);
+				break;
+			}
 			}
 		}
-		writeIndex = std::min<sint32>(writeIndex, maxLength-1);
-		strOut[writeIndex] = '\0';
-		return writeIndex;
+		// the result is always terminated; a full buffer loses its last character to the terminator
+		sint32 length = std::min(out.Used(), maxLength - 1);
+		strOut[length] = '\0';
+		return length;
 	}
-
-	/* coreinit logging and string format */
 
 	sint32 __os_snprintf(char* outputStr, sint32 maxLength, const char* formatStr)
 	{
 		ppc_define_va_list(3, 0);
-		sint32 r = ppc_vprintf(formatStr, outputStr, maxLength, &vargs);
-		return r;
+		return ppc_vprintf(formatStr, outputStr, maxLength, &vargs);
 	}
 
-	enum class CafeLogType
-	{
-		OSCONSOLE = 0,
-	};
+	/* developer console */
 
-	struct CafeLogBuffer
+	namespace
 	{
-		std::array<char, 270> lineBuffer;
-		size_t lineLength{};
-	};
-
-	CafeLogBuffer g_logBuffer_OSReport;
-
-	CafeLogBuffer& getLogBuffer(CafeLogType cafeLogType)
-	{
-		if (cafeLogType == CafeLogType::OSCONSOLE)
-			return g_logBuffer_OSReport;
-		// default to OSReport
-		return g_logBuffer_OSReport;
-	}
-
-	std::string_view getLogBufferName(CafeLogType cafeLogType)
-	{
-		if (cafeLogType == CafeLogType::OSCONSOLE)
-			return "OSConsole";
-		return "Unknown";
-	}
-
-	std::mutex sCafeConsoleMutex;
-	bool s_forwardConsoleLogs;
-	
-	void WriteCafeConsole(CafeLogType cafeLogType, const char* msg, sint32 len)
-	{
-		std::unique_lock _l(sCafeConsoleMutex);
-		CafeLogBuffer& logBuffer = getLogBuffer(cafeLogType);
-		// once a line is full or \n is written it will be posted to log
-		auto flushLine = [](CafeLogBuffer& cafeLogBuffer, std::string_view cafeLogName) -> void
+		// collects console output into lines; a line goes to the log on '\n' or when it is full
+		class ConsoleLineCollector
 		{
-			cemuLog_log(LogType::CoreinitLogging, "[{0}] {1}", cafeLogName, std::basic_string_view(cafeLogBuffer.lineBuffer.data(), cafeLogBuffer.lineLength));
-			cafeLogBuffer.lineLength = 0;
+		public:
+			explicit ConsoleLineCollector(std::string_view tag) : m_tag(tag) {}
+
+			void Feed(const char* data, sint32 length)
+			{
+				for (sint32 i = 0; i < length; i++)
+				{
+					char c = data[i];
+					if (c == '\r')
+						continue;
+					if (c == '\n')
+					{
+						Flush();
+						continue;
+					}
+					m_line[m_lineLength++] = c;
+					if (m_lineLength == m_line.size())
+						Flush();
+				}
+			}
+
+		private:
+			void Flush()
+			{
+				cemuLog_log(LogType::CoreinitLogging, "[{0}] {1}", m_tag, std::string_view(m_line.data(), m_lineLength));
+				m_lineLength = 0;
+			}
+
+			std::string_view m_tag;
+			std::array<char, 270> m_line;
+			size_t m_lineLength{0};
 		};
 
-		if (s_forwardConsoleLogs) {
-			if (cafeLogType == CafeLogType::OSCONSOLE) {
-				fwrite(msg, 1, len, stdout);
-				fflush(stdout);
-			} else {
-				fwrite(msg, 1, len, stderr);
-			}
-		}
-		while (len)
+		std::mutex s_consoleMutex;
+		ConsoleLineCollector s_osConsole("OSConsole");
+		bool s_echoConsoleToStdout = false;
+
+		void ConsoleOutput(const char* data, sint32 length)
 		{
-			char c = *msg;
-			msg++;
-			len--;
-			if (c == '\r')
-				continue;
-			if (c == '\n')
+			std::lock_guard<std::mutex> lock(s_consoleMutex);
+			if (s_echoConsoleToStdout)
 			{
-				// flush line immediately
-				flushLine(logBuffer, getLogBufferName(cafeLogType));
-				continue;
+				fwrite(data, 1, length, stdout);
+				fflush(stdout);
 			}
-			logBuffer.lineBuffer[logBuffer.lineLength] = c;
-			logBuffer.lineLength++;
-			if (logBuffer.lineLength >= logBuffer.lineBuffer.size())
-				flushLine(logBuffer, getLogBufferName(cafeLogType));
+			s_osConsole.Feed(data, length);
+		}
+
+		constexpr sint32 kReportBufferSize = 1024;
+
+		// formats with a host-side prefix in front of the guest's text
+		void ReportWithPrefix(const std::string& prefix, const char* format, ppc_va_list* vargs)
+		{
+			char buffer[kReportBufferSize];
+			sint32 prefixLength = (sint32)std::min<size_t>(prefix.size(), kReportBufferSize - 1);
+			memcpy(buffer, prefix.data(), prefixLength);
+			sint32 bodyLength = ppc_vprintf(format, buffer + prefixLength, kReportBufferSize - prefixLength, vargs);
+			ConsoleOutput(buffer, prefixLength + bodyLength);
 		}
 	}
 
 	void COSVReport(COSReportModule module, COSReportLevel level, const char* format, ppc_va_list* vargs)
 	{
-		char tmpBuffer[1024];
-		sint32 len = ppc_vprintf(format, tmpBuffer, sizeof(tmpBuffer), vargs);
-		WriteCafeConsole(CafeLogType::OSCONSOLE, tmpBuffer, len);
+		ReportWithPrefix("", format, vargs);
 	}
 
 	void OSReport(const char* format)
@@ -607,269 +501,199 @@ namespace coreinit
 	void COSWarn(int moduleId, const char* format)
 	{
 		ppc_define_va_list(2, 0);
-		char tmpBuffer[1024];
-		int prefixLen = sprintf(tmpBuffer, "[COSWarn-%d] ", moduleId);
-		sint32 len = ppc_vprintf(format, tmpBuffer + prefixLen, sizeof(tmpBuffer) - prefixLen, &vargs);
-		WriteCafeConsole(CafeLogType::OSCONSOLE, tmpBuffer, len + prefixLen);
+		ReportWithPrefix(fmt::format("[COSWarn-{}] ", moduleId), format, &vargs);
 	}
 
 	void OSLogPrintf(int ukn1, int ukn2, int ukn3, const char* format)
 	{
 		ppc_define_va_list(4, 0);
-		char tmpBuffer[1024];
-		int prefixLen = sprintf(tmpBuffer, "[OSLogPrintf-%d-%d-%d] ", ukn1, ukn2, ukn3);
-		sint32 len = ppc_vprintf(format, tmpBuffer + prefixLen, sizeof(tmpBuffer) - prefixLen, &vargs);
-		WriteCafeConsole(CafeLogType::OSCONSOLE, tmpBuffer, len + prefixLen);
+		ReportWithPrefix(fmt::format("[OSLogPrintf-{}-{}-{}] ", ukn1, ukn2, ukn3), format, &vargs);
 	}
 
 	void OSConsoleWrite(const char* strPtr, sint32 length)
 	{
-		if (length < 0)
-			return;
-		WriteCafeConsole(CafeLogType::OSCONSOLE, strPtr, length);
+		if (length >= 0)
+			ConsoleOutput(strPtr, length);
 	}
 
 	void OSFatal(const char* msg)
 	{
-		// print to log
-		ppc_define_va_list(1, 0);
-		COSVReport(COSReportModule::coreinit, COSReportLevel::Error, msg, &vargs);
-
-		// print to screen
+		{
+			ppc_define_va_list(1, 0);
+			COSVReport(COSReportModule::coreinit, COSReportLevel::Error, msg, &vargs);
+		}
+		// show the message on both screens with OSScreen and never return
 		OSScreenInit();
-		uint32 tvBufferSize = OSScreenGetBufferSizeEx(OSSCREEN_TV);
+		uint32 tvBytes = OSScreenGetBufferSizeEx(OSSCREEN_TV);
 		OSScreenSetBufferEx(OSSCREEN_TV, MEMORY_MEM1_AREA_ADDR);
-		OSScreenSetBufferEx(OSSCREEN_DRC, MEMORY_MEM1_AREA_ADDR + tvBufferSize);
+		OSScreenSetBufferEx(OSSCREEN_DRC, MEMORY_MEM1_AREA_ADDR + tvBytes);
 		OSScreenEnableEx(OSSCREEN_TV, 1);
 		OSScreenEnableEx(OSSCREEN_DRC, 1);
-
-		while ( true )
+		const uint32 screens[2] = { OSSCREEN_TV, OSSCREEN_DRC };
+		for (;;)
 		{
-			OSScreenClearBufferEx(OSSCREEN_TV, 0);
-			OSScreenClearBufferEx(OSSCREEN_DRC, 0);
-			OSScreenPutFontEx(OSSCREEN_TV, 0, 0, msg);
-			OSScreenPutFontEx(OSSCREEN_DRC, 0, 0, msg);
-			OSScreenFlipBuffersEx(OSSCREEN_TV);
-			OSScreenFlipBuffersEx(OSSCREEN_DRC);
+			for (uint32 screen : screens)
+			{
+				OSScreenClearBufferEx(screen, 0);
+				OSScreenPutFontEx(screen, 0, 0, msg);
+				OSScreenFlipBuffersEx(screen);
+			}
 			OSSleepTicks(ESPRESSO_TIMER_CLOCK / 30);
 		}
 	}
 
-	/* home button menu */
+	/* HOME button menu */
 
-	bool g_homeButtonMenuEnabled = false;
+	namespace
+	{
+		bool s_homeMenuAllowed = true;
+	}
 
 	bool OSIsHomeButtonMenuEnabled()
 	{
-		return g_homeButtonMenuEnabled;
+		return s_homeMenuAllowed;
 	}
 
 	bool OSEnableHomeButtonMenu(bool enable)
 	{
-		g_homeButtonMenuEnabled = enable;
+		s_homeMenuAllowed = enable;
 		return true;
+	}
+
+	/* process and title information */
+
+	namespace
+	{
+		constexpr uint32 kGameProcessId = 15;
+		uint64 s_runningTitleId = 0;
+		uint32 s_runningSdkVersion = 0;
 	}
 
 	uint32 OSGetPFID()
 	{
-		return 15; // hardcoded as game
+		return kGameProcessId;
 	}
 
 	uint32 OSGetUPID()
 	{
-		return OSGetPFID();
+		return kGameProcessId;
 	}
-
-	uint64 s_currentTitleId;
 
 	uint64 OSGetTitleID()
 	{
-		return s_currentTitleId;
+		return s_runningTitleId;
 	}
-
-	uint32 s_sdkVersion;
 
 	uint32 __OSGetProcessSDKVersion()
 	{
-		return s_sdkVersion;
+		return s_runningSdkVersion;
 	}
 
-	void OSLauncherThread(uint64 titleId)
-	{
-		CafeSystem::ShutdownTitle();
-		CafeSystem::PrepareForegroundTitle(titleId);
-		CafeSystem::RequestRecreateCanvas();
-		CafeSystem::LaunchForegroundTitle();
-	}
+	/* relaunching and exiting */
 
-	void OSShutdownThread(sint32 status)
+	namespace
 	{
-		CafeSystem::ShutdownTitle();
-		CafeSystem::NotifyPPCProcessExit(status);
-	}
+		constexpr uint32 kLaunchFailed = 0x80000000;
 
-	uint32 __LaunchByTitleId(uint64 titleId, uint32 argc, MEMPTR<char>* argv)
-	{
-		// prepare argument buffer
-		#if 0
-		char argumentBuffer[4096];
-		uint32 argumentBufferLength = 0;
-		char* argWriter = argumentBuffer;
-		for(uint32 i=0; i<argc; i++)
+		// The calling guest thread is destroyed when the title shuts down, so shutdown and relaunch run
+		// on a detached host thread while the caller suspends itself.
+		void RunDetachedAndSuspendCaller(std::function<void()> job)
 		{
-			const char* arg = argv[i];
-			uint32 argLength = strlen(arg);
-			if((argumentBufferLength + argLength + 1) >= sizeof(argumentBuffer))
-			{
-				// argument buffer full
-				cemuLog_logDebug(LogType::Force, "LaunchByTitleId: argument buffer full");
-				return 0x80000000;
-			}
-			memcpy(argWriter, arg, argLength);
-			argWriter[argLength] = '\0';
-			argWriter += argLength + 1;
-			argumentBufferLength += argLength + 1;
+			std::thread(std::move(job)).detach();
+			OSSuspendThread(OSGetCurrentThread());
 		}
-		#endif
-		// normally the above buffer is passed to the PPC kernel via syscall 0x2B and then
-		// the kernel forwards it to IOSU MCP when requesting a title launch
-		// but for now we HLE most of the launching code and can just set the argument array directly
-		std::vector<std::string> argArray;
-		for(uint32 i=0; i<argc; i++)
-			argArray.emplace_back(argv[i]);
-		CafeSystem::SetOverrideArgs(argArray);
-		// spawn launcher thread (this current thread will be destroyed during relaunch)
-		std::thread launcherThread(OSLauncherThread, titleId);
-		launcherThread.detach();
-		// suspend this thread
-		coreinit::OSSuspendThread(coreinit::OSGetCurrentThread());
-		return 0;
+
+		void RelaunchTitle(uint64 titleId, std::vector<std::string> args)
+		{
+			// arguments are handed to the next launch directly instead of going through the kernel and MCP
+			CafeSystem::SetOverrideArgs(args);
+			RunDetachedAndSuspendCaller([titleId]()
+			{
+				CafeSystem::ShutdownTitle();
+				CafeSystem::PrepareForegroundTitle(titleId);
+				CafeSystem::RequestRecreateCanvas();
+				CafeSystem::LaunchForegroundTitle();
+			});
+		}
+
+		enum class AppXmlResult
+		{
+			Found,
+			CannotOpen,
+			Malformed,
+		};
+
+		// reads <title_id> from a title's code/app.xml (0 if the element is missing or not a number)
+		AppXmlResult ReadTitleIdFromAppXml(const std::string& titlePath, uint64& titleId)
+		{
+			std::string xmlPath = titlePath + "/code/app.xml";
+			sint32 fscStatus;
+			FSCVirtualFile* file = fsc_open(xmlPath.c_str(), FSC_ACCESS_FLAG::OPEN_FILE | FSC_ACCESS_FLAG::READ_PERMISSION, &fscStatus);
+			if (!file)
+				return AppXmlResult::CannotOpen;
+			std::vector<uint8> xml(fsc_getFileSize(file));
+			fsc_readFile(file, xml.data(), (uint32)xml.size());
+			fsc_close(file);
+			pugi::xml_document doc;
+			if (!doc.load_buffer_inplace(xml.data(), xml.size()))
+				return AppXmlResult::Malformed;
+			const char* text = doc.child("app").child("title_id").child_value();
+			titleId = strtoull(text, nullptr, 16);
+			return AppXmlResult::Found;
+		}
 	}
 
 	uint32 OSLaunchTitleByPathl(const char* path, uint32 pathLength, uint32 argc)
 	{
-		char appXmlPath[1024];
-		cemu_assert_debug(argc == 0); // custom args not supported yet
-		if(pathLength >= (sizeof(appXmlPath) - 32))
+		cemu_assert_debug(argc == 0); // launch arguments are not passed on
+		if (pathLength >= 1024 - 32)
 		{
-			// path too long
 			cemuLog_logDebug(LogType::Force, "OSLaunchTitleByPathl: path too long");
-			return 0x80000000;
+			return kLaunchFailed;
 		}
-		// read app.xml to get the titleId
-		memcpy(appXmlPath, path, pathLength);
-		appXmlPath[pathLength] = '\0';
-		strcat(appXmlPath, "/code/app.xml");
-		sint32 status;
-		auto fscfile = fsc_open(appXmlPath, FSC_ACCESS_FLAG::OPEN_FILE | FSC_ACCESS_FLAG::READ_PERMISSION, &status);
-		if (!fscfile)
+		uint64 titleId = 0;
+		switch (ReadTitleIdFromAppXml(std::string(path, strnlen(path, pathLength)), titleId))
 		{
-			cemuLog_logDebug(LogType::Force, "OSLaunchTitleByPathl: failed to open target app.xml");
-			return 0x80000000;
+		case AppXmlResult::CannotOpen:
+			cemuLog_logDebug(LogType::Force, "OSLaunchTitleByPathl: cannot open the title's app.xml");
+			return kLaunchFailed;
+		case AppXmlResult::Malformed:
+			return 0; // nothing is launched, but this is not reported as an error
+		case AppXmlResult::Found:
+			break;
 		}
-		uint32 size = fsc_getFileSize(fscfile);
-		std::vector<uint8> tmpData(size);
-		fsc_readFile(fscfile, tmpData.data(), size);
-		fsc_close(fscfile);
-		// parse app.xml to get the titleId
-		pugi::xml_document app_doc;
-		if (!app_doc.load_buffer_inplace(tmpData.data(), tmpData.size()))
-			return false;
-		uint64 titleId = std::stoull(app_doc.child("app").child("title_id").child_value(), nullptr, 16);
-		if(titleId == 0)
+		if (titleId == 0)
 		{
-			cemuLog_logDebug(LogType::Force, "OSLaunchTitleByPathl: failed to parse titleId from app.xml");
-			return 0x80000000;
+			cemuLog_logDebug(LogType::Force, "OSLaunchTitleByPathl: no title id found");
+			return kLaunchFailed;
 		}
-		__LaunchByTitleId(titleId, 0, nullptr);
+		RelaunchTitle(titleId, {});
 		return 0;
 	}
 
 	uint32 OSRestartGame(uint32 argc, MEMPTR<char>* argv)
 	{
-		__LaunchByTitleId(CafeSystem::GetForegroundTitleId(), argc, argv);
-		return 0;
-	}
-
-	void OSReleaseForeground()
-	{
-		cemuLog_logDebug(LogType::Force, "OSReleaseForeground not implemented");
-	}
-
-	bool s_transitionToBackground = false;
-	bool s_transitionToForeground = false;
-
-	void StartBackgroundForegroundTransition()
-	{
-		s_transitionToBackground = true;
-		s_transitionToForeground = true;
-	}
-
-	// called at the beginning of OSReceiveMessage if the queue is the system message queue
-	void UpdateSystemMessageQueue()
-	{
-		if(!OSIsInterruptEnabled())
-			return;
-		cemu_assert_debug(!__OSHasSchedulerLock());
-		// normally syscall 0x2E is used to get the next message
-		// for now we just have some preliminary logic here to allow a fake transition to background & foreground
-		if(s_transitionToBackground)
-		{
-			// add transition to background message
-			OSMessage msg{};
-			msg.data0 = stdx::to_underlying(SysMessageId::MsgReleaseForeground);
-			msg.data1 = 0; // 1 -> System is shutting down 0 -> Begin transitioning to background
-			OSMessageQueue* systemMessageQueue = coreinit::OSGetSystemMessageQueue();
-			if(OSSendMessage(systemMessageQueue, &msg, 0))
-				s_transitionToBackground = false;
-			return;
-		}
-		if(s_transitionToForeground)
-		{
-			// add transition to foreground message
-			OSMessage msg{};
-			msg.data0 = stdx::to_underlying(SysMessageId::MsgAcquireForeground);
-			msg.data1 = 1; // ?
-			msg.data2 = 1; // ?
-			OSMessageQueue* systemMessageQueue = coreinit::OSGetSystemMessageQueue();
-			if(OSSendMessage(systemMessageQueue, &msg, 0))
-				s_transitionToForeground = false;
-			return;
-		}
-	}
-
-	// called when OSReceiveMessage returns a message from the system message queue
-	void HandleReceivedSystemMessage(OSMessage* msg)
-	{
-		cemu_assert_debug(!__OSHasSchedulerLock());
-		cemuLog_log(LogType::Force, "Receiving message: {:08x}", (uint32)msg->data0);
-	}
-
-	uint32 OSDriver_Register(uint32 moduleHandle, sint32 priority, OSDriverInterface* driverCallbacks, sint32 driverId, uint32be* outUkn1, uint32be* outUkn2, uint32be* outUkn3)
-	{
-		cemuLog_logDebug(LogType::Force, "OSDriver_Register stubbed");
-		return 0;
-	}
-
-	uint32 OSDriver_Deregister(uint32 moduleHandle, sint32 driverId)
-	{
-		cemuLog_logDebug(LogType::Force, "OSDriver_Deregister stubbed");
+		std::vector<std::string> args;
+		for (uint32 i = 0; i < argc; i++)
+			args.emplace_back(argv[i].GetPtr());
+		RelaunchTitle(CafeSystem::GetForegroundTitleId(), std::move(args));
 		return 0;
 	}
 
 	void __PPCExit(sint32 status)
 	{
-		// spawn shutdown thread (the current thread has to be destroyed as part of the shutdown process)
-		std::thread shutdownThread(OSShutdownThread, status);
-		shutdownThread.detach();
-		// suspend this thread
-		coreinit::OSSuspendThread(coreinit::OSGetCurrentThread());
+		RunDetachedAndSuspendCaller([status]()
+		{
+			CafeSystem::ShutdownTitle();
+			CafeSystem::NotifyPPCProcessExit(status);
+		});
 	}
 
 	void coreinit_exit(sint32 status)
 	{
-		cemuLog_log(LogType::Force, "The title terminated the process by calling coreinit.exit({})", (sint32)status);
-		DebugLogStackTrace(coreinit::OSGetCurrentThread(), coreinit::OSGetStackPointer());
+		cemuLog_log(LogType::Force, "The title terminated the process by calling coreinit.exit({})", status);
+		DebugLogStackTrace(OSGetCurrentThread(), OSGetStackPointer());
+		// run the guest's atexit handlers and stdio teardown before the process goes away
 		if (gCoreinitData->__atexit_cleanup)
 			PPCCoreCallback(gCoreinitData->__atexit_cleanup, status);
 		if (gCoreinitData->__stdio_cleanup)
@@ -877,13 +701,81 @@ namespace coreinit
 		__PPCExit(status);
 	}
 
+	/* foreground/background */
+
+	void OSReleaseForeground()
+	{
+		cemuLog_logDebug(LogType::Force, "OSReleaseForeground is not implemented");
+	}
+
+	namespace
+	{
+		// a requested background+foreground round trip, delivered one message at a time
+		bool s_pendingReleaseForeground = false;
+		bool s_pendingAcquireForeground = false;
+	}
+
+	void StartBackgroundForegroundTransition()
+	{
+		s_pendingReleaseForeground = true;
+		s_pendingAcquireForeground = true;
+	}
+
+	// hook at the start of OSReceiveMessage on the system message queue: injects pending transition messages
+	void UpdateSystemMessageQueue()
+	{
+		if (!OSIsInterruptEnabled())
+			return;
+		cemu_assert_debug(!__OSHasSchedulerLock());
+		OSMessage msg{};
+		bool* pending;
+		if (s_pendingReleaseForeground)
+		{
+			msg.data0 = stdx::to_underlying(SysMessageId::MsgReleaseForeground);
+			msg.data1 = 0; // 0 = moving to the background, 1 = system shutdown
+			pending = &s_pendingReleaseForeground;
+		}
+		else if (s_pendingAcquireForeground)
+		{
+			msg.data0 = stdx::to_underlying(SysMessageId::MsgAcquireForeground);
+			msg.data1 = 1;
+			msg.data2 = 1;
+			pending = &s_pendingAcquireForeground;
+		}
+		else
+			return;
+		if (OSSendMessage(OSGetSystemMessageQueue(), &msg, 0))
+			*pending = false;
+	}
+
+	// hook for messages OSReceiveMessage takes from the system message queue
+	void HandleReceivedSystemMessage(OSMessage* msg)
+	{
+		cemu_assert_debug(!__OSHasSchedulerLock());
+		cemuLog_log(LogType::Force, "Receiving message: {:08x}", (uint32)msg->data0);
+	}
+
+	/* drivers */
+
+	uint32 OSDriver_Register(uint32 moduleHandle, sint32 priority, OSDriverInterface* driverCallbacks, sint32 driverId, uint32be* outUkn1, uint32be* outUkn2, uint32be* outUkn3)
+	{
+		cemuLog_logDebug(LogType::Force, "OSDriver_Register: not implemented");
+		return 0;
+	}
+
+	uint32 OSDriver_Deregister(uint32 moduleHandle, sint32 driverId)
+	{
+		cemuLog_logDebug(LogType::Force, "OSDriver_Deregister: not implemented");
+		return 0;
+	}
+
 	void miscInit()
 	{
-		s_currentTitleId = CafeSystem::GetForegroundTitleId();
-		s_sdkVersion = CafeSystem::GetForegroundTitleSDKVersion();
-		s_forwardConsoleLogs = LaunchSettings::ForwardConsoleLogging();
-		s_transitionToBackground = false;
-		s_transitionToForeground = false;
+		s_runningTitleId = CafeSystem::GetForegroundTitleId();
+		s_runningSdkVersion = CafeSystem::GetForegroundTitleSDKVersion();
+		s_echoConsoleToStdout = LaunchSettings::ForwardConsoleLogging();
+		s_pendingReleaseForeground = false;
+		s_pendingAcquireForeground = false;
 
 		cafeExportRegister("coreinit", __os_snprintf, LogType::Placeholder);
 
@@ -900,8 +792,9 @@ namespace coreinit
 		cafeExportRegister("coreinit", OSGetTitleID, LogType::Placeholder);
 		cafeExportRegister("coreinit", __OSGetProcessSDKVersion, LogType::Placeholder);
 
-		g_homeButtonMenuEnabled = true; // enabled by default
-		// Disney Infinity 2.0 actually relies on home button menu being enabled by default. If it's false it will crash due to calling erreula->IsAppearHomeNixSign() before initializing erreula
+		// the HOME menu starts out allowed; some titles (Disney Infinity 2.0) query erreula state
+		// through it before setting erreula up and crash if it is off
+		s_homeMenuAllowed = true;
 		cafeExportRegister("coreinit", OSIsHomeButtonMenuEnabled, LogType::CoreinitThread);
 		cafeExportRegister("coreinit", OSEnableHomeButtonMenu, LogType::CoreinitThread);
 
@@ -916,5 +809,4 @@ namespace coreinit
 		cafeExportRegisterFunc(coreinit_exit, "coreinit", "exit", LogType::CoreinitThread);
 		cafeExportRegister("coreinit", __PPCExit, LogType::CoreinitThread);
 	}
-
-};
+}
