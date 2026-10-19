@@ -1,243 +1,181 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/HW/Latte/Core/Latte.h"
 #include "Cafe/HW/Latte/Core/LatteTexture.h"
 #include "Cafe/HW/Latte/Core/LatteTextureView.h"
-#include "LatteCachedFBO.h"
-#include "Cafe/GraphicPack/GraphicPack2.h"
+#include "Cafe/HW/Latte/Core/LatteCachedFBO.h"
 
 LatteTextureView::LatteTextureView(LatteTexture* texture, sint32 firstMip, sint32 mipCount, sint32 firstSlice, sint32 sliceCount, Latte::E_DIM dim, Latte::E_GX2SURFFMT format, bool registerView)
+	: baseTexture(texture), firstMip(firstMip), numMip(mipCount), firstSlice(firstSlice), numSlice(sliceCount), format(format), dim(dim)
 {
-	this->baseTexture = texture;
-	this->firstMip = firstMip;
-	this->numMip = mipCount;
-	this->firstSlice = firstSlice;
-	this->numSlice = sliceCount;
-	this->dim = dim;
-	this->format = format;
-	if (registerView)
-	{
-		texture->views.emplace_back(this);
-		LatteTextureViewLookupCache::Add(this);
-	}
+	if (!registerView)
+		return;
+	texture->views.emplace_back(this);
+	LatteTextureViewLookupCache::Add(this);
 }
 
 LatteTextureView::~LatteTextureView()
 {
-	// unregister view
 	LatteTextureViewLookupCache::RemoveAll(this);
-	// remove from texture
 	vectorRemoveByValue(baseTexture->views, this);
 	if (baseTexture->baseView == this)
 		baseTexture->baseView = nullptr;
-	// delete all associated FBOs
+	// FBOs that reference the view can no longer be used
 	while (!list_associatedFbo.empty())
-		LatteMRT::DeleteCachedFBO(list_associatedFbo[0]);
+		LatteMRT::DeleteCachedFBO(list_associatedFbo.front());
 }
 
 void LatteTextureView::CreateLookupForSubTexture(uint32 mipStart, uint32 sliceStart)
 {
-	cemu_assert_debug(mipStart != 0 || sliceStart != 0); // This function should never be called with both parameters zero. Every view creates a base lookup on construction
+	// the lookup through the texture's own address is created by the constructor
+	cemu_assert_debug(mipStart != 0 || sliceStart != 0);
 	LatteTextureViewLookupCache::Add(this, mipStart, sliceStart);
 }
 
-/* View lookup cache */
+// --- lookup cache ---------------------------------------------------------------
+// Every registration is stored under its guest address. All lookups compare the
+// address exactly, so a list per address holds every candidate; within a list
+// registrations keep their insertion order and the oldest match wins.
 
-struct LatteTexViewLookupDesc
+namespace
 {
-	LatteTexViewLookupDesc(LatteTextureView* view) : view(view)
+	struct ViewRegistration
 	{
-		this->physAddr = view->baseTexture->physAddress;
-		this->physMipAddr = view->baseTexture->physMipAddress;
-		this->width = view->baseTexture->width;
-		this->height = view->baseTexture->height;
-		this->pitch = view->baseTexture->pitch;
-		this->firstMip = view->firstMip;
-		this->numMip = view->numMip;
-		this->firstSlice = view->firstSlice;
-		this->numSlice = view->numSlice;
-		this->format = view->format;
-		this->dim = view->dim;
-		this->isDepth = view->baseTexture->isDepth;
+		sint32 width;
+		sint32 height;
+		sint32 pitch;
+		sint32 firstMip;
+		sint32 numMip;
+		sint32 firstSlice;
+		sint32 numSlice;
+		Latte::E_GX2SURFFMT format;
+		Latte::E_DIM dim;
+		bool isDepth;
+		LatteTextureView* view;
+	};
+
+	std::unordered_map<MPTR, std::vector<ViewRegistration>>& RegistrationsByAddress()
+	{
+		static std::unordered_map<MPTR, std::vector<ViewRegistration>> s_map;
+		return s_map;
 	}
 
-	void SetParametersForSubTexture(sint32 baseMip, sint32 baseSlice)
+	// calls match(registration) for the registrations at physAddr and returns the view of the first one accepted
+	template<typename TPredicate>
+	LatteTextureView* FindFirst(MPTR physAddr, TPredicate&& match)
 	{
-		cemu_assert_debug(baseMip >= 0);
-		cemu_assert_debug(baseSlice >= 0);
-		LatteTextureSliceMipInfo* sliceMipInfo = view->baseTexture->GetSliceMipArrayEntry(baseSlice, baseMip);
-		physAddr = sliceMipInfo->addrStart;
-		pitch = sliceMipInfo->pitch;
-		cemu_assert_debug(format == view->baseTexture->format); // if the format is different then width/height calculation might differ. This only affects the case where an integer format is mapped onto a compressed format or vice versa.
-		width = view->baseTexture->GetMipWidth(baseMip);
-		height = view->baseTexture->GetMipHeight(baseMip);
-		// adjust firstMip and firstSlice to be relative to base of subtexture
-		cemu_assert(firstMip >= baseMip);
-		cemu_assert(firstSlice >= baseSlice);
-		firstMip -= baseMip;
-		firstSlice -= baseSlice;
+		auto& map = RegistrationsByAddress();
+		auto it = map.find(physAddr);
+		if (it == map.end())
+			return nullptr;
+		for (const ViewRegistration& reg : it->second)
+		{
+			if (match(reg))
+				return reg.view;
+		}
+		return nullptr;
 	}
-
-	// key data for looking up views
-	MPTR physAddr;
-	MPTR physMipAddr;
-	sint32 width;
-	sint32 height;
-	sint32 pitch;
-	sint32 firstMip;
-	sint32 numMip;
-	sint32 firstSlice;
-	sint32 numSlice;
-	Latte::E_GX2SURFFMT format;
-	Latte::E_DIM dim;
-	bool isDepth;
-	// associated view
-	LatteTextureView* view;
-};
-
-struct LatteTexViewBucket
-{
-	std::vector<LatteTexViewLookupDesc> list;
-};
-
-#define TEXTURE_VIEW_BUCKETS	(1061)
-
-inline uint32 _getViewBucketKey(MPTR physAddress, uint32 width, uint32 height, uint32 pitch)
-{
-	return (physAddress + width * 7 + height * 11 + pitch * 13) % TEXTURE_VIEW_BUCKETS;
 }
-
-inline uint32 _getViewBucketKeyNoRes(MPTR physAddress, uint32 pitch)
-{
-	return (physAddress + pitch * 13) % TEXTURE_VIEW_BUCKETS;
-}
-
-LatteTexViewBucket texViewBucket[TEXTURE_VIEW_BUCKETS] = { };
-LatteTexViewBucket texViewBucket_nores[TEXTURE_VIEW_BUCKETS] = { };
 
 void LatteTextureViewLookupCache::Add(LatteTextureView* view, uint32 baseMip, uint32 baseSlice)
 {
-	LatteTexViewLookupDesc desc(view);
+	LatteTexture* tex = view->baseTexture;
+	MPTR physAddr = tex->physAddress;
+	ViewRegistration reg;
+	reg.width = tex->width;
+	reg.height = tex->height;
+	reg.pitch = tex->pitch;
+	reg.firstMip = view->firstMip;
+	reg.numMip = view->numMip;
+	reg.firstSlice = view->firstSlice;
+	reg.numSlice = view->numSlice;
+	reg.format = view->format;
+	reg.dim = view->dim;
+	reg.isDepth = tex->isDepth;
+	reg.view = view;
 	if (baseMip != 0 || baseSlice != 0)
-		desc.SetParametersForSubTexture(baseMip, baseSlice);
-	// generic bucket
-	uint32 key = _getViewBucketKey(desc.physAddr, desc.width, desc.height, desc.pitch);
-	texViewBucket[key].list.emplace_back(desc);
-	vectorAppendUnique(view->viewLookUpCacheKeys, key);
-	// resolution-independent bucket
-	key = _getViewBucketKeyNoRes(desc.physAddr, desc.pitch);
-	texViewBucket_nores[key].list.push_back(desc);
-	vectorAppendUnique(view->viewLookUpCacheKeysNoRes, key);
+	{
+		// register as if the subresource at (baseSlice, baseMip) were a texture of its own
+		const sint32 mip = (sint32)baseMip;
+		const sint32 slice = (sint32)baseSlice;
+		cemu_assert_debug(mip >= 0 && slice >= 0);
+		LatteTextureSliceMipInfo* sub = tex->GetSliceMipArrayEntry(slice, mip);
+		physAddr = sub->addrStart;
+		reg.pitch = sub->pitch;
+		// width/height are derived from the texture format; a view with another format would need its own calculation
+		cemu_assert_debug(reg.format == tex->format);
+		reg.width = tex->GetMipWidth(mip);
+		reg.height = tex->GetMipHeight(mip);
+		cemu_assert(reg.firstMip >= mip);
+		cemu_assert(reg.firstSlice >= slice);
+		reg.firstMip -= mip;
+		reg.firstSlice -= slice;
+	}
+	RegistrationsByAddress()[physAddr].push_back(reg);
+	vectorAppendUnique(view->lookupAddresses, physAddr);
 }
 
 void LatteTextureViewLookupCache::RemoveAll(LatteTextureView* view)
 {
-	for (auto& key : view->viewLookUpCacheKeys)
+	auto& map = RegistrationsByAddress();
+	for (MPTR addr : view->lookupAddresses)
 	{
-		auto& bucket = texViewBucket[key].list;
-		bucket.erase(std::remove_if(bucket.begin(), bucket.end(), [view](const LatteTexViewLookupDesc& v) {
-			return v.view == view; }), bucket.end());
+		auto it = map.find(addr);
+		if (it == map.end())
+			continue;
+		auto& list = it->second;
+		list.erase(std::remove_if(list.begin(), list.end(), [view](const ViewRegistration& r) { return r.view == view; }), list.end());
+		if (list.empty())
+			map.erase(it);
 	}
-	for (auto& key : view->viewLookUpCacheKeysNoRes)
-	{
-		auto& bucket = texViewBucket_nores[key].list;
-		bucket.erase(std::remove_if(bucket.begin(), bucket.end(), [view](const LatteTexViewLookupDesc& v) {
-			return v.view == view; }), bucket.end());
-	}
+	view->lookupAddresses.clear();
 }
 
 LatteTextureView* LatteTextureViewLookupCache::lookup(MPTR physAddr, sint32 width, sint32 height, sint32 depth, sint32 pitch, sint32 firstMip, sint32 numMip, sint32 firstSlice, sint32 numSlice, Latte::E_GX2SURFFMT format, Latte::E_DIM dim)
 {
-	// todo - add tileMode param to this and the other lookup functions?
-	uint32 key = _getViewBucketKey(physAddr, width, height, pitch);
-	key %= TEXTURE_VIEW_BUCKETS;
-	for (auto& it : texViewBucket[key].list)
-	{
-		if (it.format == format && it.dim == dim &&
-			it.width == width && it.height == height && it.pitch == pitch && it.physAddr == physAddr
-			&& it.firstMip == firstMip && it.numMip == numMip
-			&& it.firstSlice == firstSlice && it.numSlice == numSlice
-			)
-		{
-			return it.view;
-		}
-	}
-	return nullptr;
+	return FindFirst(physAddr, [&](const ViewRegistration& r) {
+		return r.width == width && r.height == height && r.pitch == pitch && r.format == format && r.dim == dim &&
+			r.firstMip == firstMip && r.numMip == numMip && r.firstSlice == firstSlice && r.numSlice == numSlice;
+	});
 }
 
 LatteTextureView* LatteTextureViewLookupCache::lookupWithColorOrDepthType(MPTR physAddr, sint32 width, sint32 height, sint32 depth, sint32 pitch, sint32 firstMip, sint32 numMip, sint32 firstSlice, sint32 numSlice, Latte::E_GX2SURFFMT format, Latte::E_DIM dim, bool isDepth)
 {
 	cemu_assert_debug(firstSlice == 0);
-	uint32 key = _getViewBucketKey(physAddr, width, height, pitch);
-	key %= TEXTURE_VIEW_BUCKETS;
-	for (auto& it : texViewBucket[key].list)
-	{
-		if (it.format == format && it.dim == dim && it.width == width && it.height == height && it.pitch == pitch && it.physAddr == physAddr
-			&& it.firstMip == firstMip && it.numMip == numMip
-			&& it.firstSlice == firstSlice && it.numSlice == numSlice &&
-			it.isDepth == isDepth
-			)
-		{
-			return it.view;
-		}
-	}
-	return nullptr;
+	return FindFirst(physAddr, [&](const ViewRegistration& r) {
+		return r.width == width && r.height == height && r.pitch == pitch && r.format == format && r.dim == dim &&
+			r.firstMip == firstMip && r.numMip == numMip && r.firstSlice == firstSlice && r.numSlice == numSlice && r.isDepth == isDepth;
+	});
 }
 
-// look up view with unspecified mipCount and sliceCount
 LatteTextureView* LatteTextureViewLookupCache::lookupSlice(MPTR physAddr, sint32 width, sint32 height, sint32 pitch, sint32 firstMip, sint32 firstSlice, Latte::E_GX2SURFFMT format)
 {
-	uint32 key = _getViewBucketKey(physAddr, width, height, pitch);
-	key %= TEXTURE_VIEW_BUCKETS;
-	for (auto& it : texViewBucket[key].list)
-	{
-		if (it.width == width && it.height == height && it.pitch == pitch && it.physAddr == physAddr && it.format == format)
-		{
-			if (firstSlice == it.firstSlice && firstMip == it.firstMip)
-				return it.view;
-		}
-	}
-	return nullptr;
+	return FindFirst(physAddr, [&](const ViewRegistration& r) {
+		return r.width == width && r.height == height && r.pitch == pitch && r.format == format && r.firstSlice == firstSlice && r.firstMip == firstMip;
+	});
 }
 
-// look up view with unspecified mipCount/sliceCount and only minimum width and height given
 LatteTextureView* LatteTextureViewLookupCache::lookupSliceMinSize(MPTR physAddr, sint32 minWidth, sint32 minHeight, sint32 pitch, sint32 firstMip, sint32 firstSlice, Latte::E_GX2SURFFMT format)
 {
-	uint32 key = _getViewBucketKeyNoRes(physAddr, pitch);
-	key %= TEXTURE_VIEW_BUCKETS;
-	for (auto& it : texViewBucket_nores[key].list)
-	{
-		if (it.width >= minWidth && it.height >= minHeight && it.pitch == pitch && it.physAddr == physAddr && it.format == format)
-		{
-			if (firstSlice == it.firstSlice && firstMip == it.firstMip)
-				return it.view;
-		}
-	}
-	return nullptr;
+	return FindFirst(physAddr, [&](const ViewRegistration& r) {
+		return r.width >= minWidth && r.height >= minHeight && r.pitch == pitch && r.format == format && r.firstSlice == firstSlice && r.firstMip == firstMip;
+	});
 }
 
-// similar to lookupSlice but also compares isDepth
 LatteTextureView* LatteTextureViewLookupCache::lookupSliceEx(MPTR physAddr, sint32 width, sint32 height, sint32 pitch, sint32 firstMip, sint32 firstSlice, Latte::E_GX2SURFFMT format, bool isDepth)
 {
 	cemu_assert_debug(firstMip == 0);
-	uint32 key = _getViewBucketKey(physAddr, width, height, pitch);
-	key %= TEXTURE_VIEW_BUCKETS;
-	for (auto& it : texViewBucket[key].list)
-	{
-		if (it.width == width && it.height == height && it.pitch == pitch && it.physAddr == physAddr && it.format == format && it.isDepth == isDepth)
-		{
-			if (firstSlice == it.firstSlice && firstMip == it.firstMip)
-				return it.view;
-		}
-	}
-	return nullptr;
+	return FindFirst(physAddr, [&](const ViewRegistration& r) {
+		return r.width == width && r.height == height && r.pitch == pitch && r.format == format && r.isDepth == isDepth && r.firstSlice == firstSlice && r.firstMip == firstMip;
+	});
 }
 
 std::unordered_set<LatteTextureView*> LatteTextureViewLookupCache::GetAllViews()
 {
-	std::unordered_set<LatteTextureView*> viewSet;
-	for (uint32 i = 0; i < TEXTURE_VIEW_BUCKETS; i++)
+	std::unordered_set<LatteTextureView*> result;
+	for (const auto& [addr, list] : RegistrationsByAddress())
 	{
-		for (auto& it : texViewBucket[i].list)
-			viewSet.emplace(it.view);
+		for (const ViewRegistration& reg : list)
+			result.emplace(reg.view);
 	}
-	return viewSet;
+	return result;
 }

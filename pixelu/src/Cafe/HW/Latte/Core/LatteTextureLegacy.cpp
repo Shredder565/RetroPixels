@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
 #include "Cafe/HW/Latte/Core/LatteShader.h"
@@ -10,340 +11,308 @@
 #include "Cafe/HW/Latte/Renderer/OpenGL/LatteTextureViewGL.h"
 #endif
 
-struct TexScaleXY
-{
-	float xy[2];
-};
+// Texture creation, reloading from guest memory and binding of the textures a draw samples.
 
-struct
-{
-	TexScaleXY perUnit[Latte::GPU_LIMITS::NUM_TEXTURES_PER_STAGE]; // stores actualResolution/effectiveResolution ratio for each texture
-}LatteTextureScale[static_cast<size_t>(LatteConst::ShaderType::TotalCount)] = { };
+// host size / guest size of the texture bound to each unit, read by shaders to rescale coordinates
+static float s_textureScale[static_cast<size_t>(LatteConst::ShaderType::TotalCount)][Latte::GPU_LIMITS::NUM_TEXTURES_PER_STAGE][2] = {};
 
 float* LatteTexture_getEffectiveTextureScale(LatteConst::ShaderType shaderType, sint32 texUnit)
 {
 	cemu_assert_debug(texUnit >= 0 && texUnit < Latte::GPU_LIMITS::NUM_TEXTURES_PER_STAGE);
-	return LatteTextureScale[static_cast<size_t>(shaderType)].perUnit[texUnit].xy;
+	return s_textureScale[static_cast<size_t>(shaderType)][texUnit];
 }
 
-void LatteTexture_setEffectiveTextureScale(LatteConst::ShaderType shaderType, sint32 texUnit, float u, float v)
+static void LatteTexture_setEffectiveTextureScale(LatteConst::ShaderType shaderType, sint32 texUnit, float u, float v)
 {
-	cemu_assert_debug(texUnit >= 0 && texUnit < Latte::GPU_LIMITS::NUM_TEXTURES_PER_STAGE);
-	float* t = LatteTextureScale[static_cast<size_t>(shaderType)].perUnit[texUnit].xy;
-	t[0] = u;
-	t[1] = v;
+	float* scale = LatteTexture_getEffectiveTextureScale(shaderType, texUnit);
+	scale[0] = u;
+	scale[1] = v;
 }
 
 void LatteTextureLoader_UpdateTextureSliceData(LatteTexture* tex, uint32 sliceIndex, uint32 mipIndex, MPTR physImagePtr, MPTR physMipPtr, Latte::E_DIM dim, uint32 width, uint32 height, uint32 depth, uint32 mipLevels, uint32 pitch, Latte::E_HWTILEMODE tileMode, uint32 swizzle, bool dumpTex);
 
+// number of slices uploaded per mip level
+static sint32 SlicesToLoad(LatteTexture* tex, sint32 mip)
+{
+	switch (tex->dim)
+	{
+	case Latte::E_DIM::DIM_2D_ARRAY:
+	case Latte::E_DIM::DIM_2D_ARRAY_MSAA:
+		return std::max(tex->depth, 1);
+	case Latte::E_DIM::DIM_CUBEMAP:
+		cemu_assert_debug((tex->depth % 6) == 0);
+		return (tex->depth / 6) * 6; // whole cube faces only
+	case Latte::E_DIM::DIM_3D:
+		return std::max(tex->depth >> mip, 1);
+	default:
+		return 1;
+	}
+}
+
+// uploads every subresource from guest memory
 void LatteTexture_ReloadData(LatteTexture* tex)
 {
 	tex->reloadCount++;
-	for(sint32 mip=0; mip<tex->mipLevels; mip++)
+	for (sint32 mip = 0; mip < tex->mipLevels; mip++)
 	{
-		if(tex->dim == Latte::E_DIM::DIM_2D_ARRAY ||
-			tex->dim == Latte::E_DIM::DIM_2D_ARRAY_MSAA )
-		{
-			sint32 numSlices = std::max(tex->depth, 1);
-			for(sint32 s=0; s<numSlices; s++)
-				LatteTextureLoader_UpdateTextureSliceData(tex, s, mip, tex->physAddress, tex->physMipAddress, tex->dim, tex->width, tex->height, tex->depth, tex->mipLevels, tex->pitch, tex->tileMode, tex->swizzle, true);
-		}
-		else if( tex->dim == Latte::E_DIM::DIM_CUBEMAP )
-		{
-			cemu_assert_debug((tex->depth % 6) == 0);
-			sint32 numFullCubeMaps = tex->depth/6; // number of cubemaps (if numFullCubeMaps is >1 then this texture is a cubemap array)
-			for(sint32 s=0; s<numFullCubeMaps*6; s++)
-				LatteTextureLoader_UpdateTextureSliceData(tex, s, mip, tex->physAddress, tex->physMipAddress, tex->dim, tex->width, tex->height, tex->depth, tex->mipLevels, tex->pitch, tex->tileMode, tex->swizzle, true);
-		}
-		else if( tex->dim == Latte::E_DIM::DIM_3D )
-		{
-			sint32 mipDepth = std::max(tex->depth>>mip, 1);
-			for(sint32 s=0; s<mipDepth; s++)
-			{
-				LatteTextureLoader_UpdateTextureSliceData(tex, s, mip, tex->physAddress, tex->physMipAddress, tex->dim, tex->width, tex->height, tex->depth, tex->mipLevels, tex->pitch, tex->tileMode, tex->swizzle, true);
-			}
-		}
-		else
-		{
-			// load slice 0
-			LatteTextureLoader_UpdateTextureSliceData(tex, 0, mip, tex->physAddress, tex->physMipAddress, tex->dim, tex->width, tex->height, tex->depth, tex->mipLevels, tex->pitch, tex->tileMode, tex->swizzle, true);
-		}
+		const sint32 slices = SlicesToLoad(tex, mip);
+		for (sint32 slice = 0; slice < slices; slice++)
+			LatteTextureLoader_UpdateTextureSliceData(tex, slice, mip, tex->physAddress, tex->physMipAddress, tex->dim, tex->width, tex->height, tex->depth, tex->mipLevels, tex->pitch, tex->tileMode, tex->swizzle, true);
 	}
 	tex->lastUpdateEventCounter = LatteTexture_getNextUpdateEventCounter();
 }
 
 LatteTextureView* LatteTexture_CreateTexture(Latte::E_DIM dim, MPTR physAddress, MPTR physMipAddress, Latte::E_GX2SURFFMT format, uint32 width, uint32 height, uint32 depth, uint32 pitch, uint32 mipLevels, uint32 swizzle, Latte::E_HWTILEMODE tileMode, bool isDepth)
 {
-	const auto tex = g_renderer->texture_createTextureEx(dim, physAddress, physMipAddress, format, width, height, depth, pitch, mipLevels, swizzle, tileMode, isDepth);
-
-	// init slice/mip info array
+	LatteTexture* tex = g_renderer->texture_createTextureEx(dim, physAddress, physMipAddress, format, width, height, depth, pitch, mipLevels, swizzle, tileMode, isDepth);
+	cemu_assert_debug(mipLevels != 0);
 	LatteTexture_InitSliceAndMipInfo(tex);
 	LatteTexture_RegisterTextureMemoryOccupancy(tex);
-	cemu_assert_debug(mipLevels != 0);
-
 	LatteTexture_ReloadData(tex);
 	LatteTC_MarkTextureStillInUse(tex);
 	LatteTC_RegisterTexture(tex);
-
-	// create initial view that maps to the whole texture
+	// the default view spans the whole texture
 	tex->baseView = tex->GetOrCreateView(0, tex->mipLevels, 0, tex->depth);
 	return tex->baseView;
 }
 
+// GX2 surface format from the data format and number format bits of a texture resource
 Latte::E_GX2SURFFMT LatteTexture_ReconstructGX2Format(const Latte::LATTE_SQ_TEX_RESOURCE_WORD1_N& texUnitWord1, const Latte::LATTE_SQ_TEX_RESOURCE_WORD4_N& texUnitWord4)
 {
-	Latte::E_GX2SURFFMT gx2Format = (Latte::E_GX2SURFFMT)texUnitWord1.get_DATA_FORMAT();
-	auto nfa = texUnitWord4.get_NUM_FORM_ALL();
-	if (nfa == Latte::LATTE_SQ_TEX_RESOURCE_WORD4_N::E_NUM_FORMAT_ALL::NUM_FORMAT_SCALED)
-		gx2Format |= Latte::E_GX2SURFFMT::FMT_BIT_FLOAT;
-	else if (nfa == Latte::LATTE_SQ_TEX_RESOURCE_WORD4_N::E_NUM_FORMAT_ALL::NUM_FORMAT_INT)
-		gx2Format |= Latte::E_GX2SURFFMT::FMT_BIT_INT;
-
-	if(texUnitWord4.get_FORCE_DEGAMMA())
-		gx2Format |= Latte::E_GX2SURFFMT::FMT_BIT_SRGB;
-
+	using NumFormat = Latte::LATTE_SQ_TEX_RESOURCE_WORD4_N::E_NUM_FORMAT_ALL;
+	Latte::E_GX2SURFFMT format = (Latte::E_GX2SURFFMT)texUnitWord1.get_DATA_FORMAT();
+	switch (texUnitWord4.get_NUM_FORM_ALL())
+	{
+	case NumFormat::NUM_FORMAT_SCALED:
+		format |= Latte::E_GX2SURFFMT::FMT_BIT_FLOAT;
+		break;
+	case NumFormat::NUM_FORMAT_INT:
+		format |= Latte::E_GX2SURFFMT::FMT_BIT_INT;
+		break;
+	default:
+		break;
+	}
+	if (texUnitWord4.get_FORCE_DEGAMMA())
+		format |= Latte::E_GX2SURFFMT::FMT_BIT_SRGB;
 	if (texUnitWord4.get_FORMAT_COMP_X() == Latte::LATTE_SQ_TEX_RESOURCE_WORD4_N::E_FORMAT_COMP::COMP_SIGNED)
-		gx2Format |= Latte::E_GX2SURFFMT::FMT_BIT_SIGNED;
-
-	return gx2Format;
+		format |= Latte::E_GX2SURFFMT::FMT_BIT_SIGNED;
+	return format;
 }
 
-void LatteTexture_updateTexturesForStage(LatteDecompilerShader* shaderContext, uint32 glBackendBaseTexUnit, _LatteRegisterSetTextureUnit* texRegBase)
+namespace
 {
-	for (sint32 z = 0; z < shaderContext->textureUnitListCount; z++)
+	// guest surface described by one texture resource (7 registers)
+	struct TextureResourceDesc
 	{
-		sint32 textureIndex = shaderContext->textureUnitList[z];
-		const auto& texRegister = texRegBase[textureIndex];
+		MPTR physAddr;
+		MPTR physMipAddr;
+		Latte::E_DIM dim;
+		uint32 width;
+		uint32 height;
+		uint32 depth;
+		uint32 pitch;
+		Latte::E_HWTILEMODE tileMode;
+		uint32 swizzle;
+		uint32 firstSlice;
+		uint32 numSlices;
+		uint32 firstMip;
+		uint32 numMips;
+		Latte::E_GX2SURFFMT format;
+	};
 
-		// get physical address of texture data
-		MPTR physAddr = (texRegister.word2.get_BASE_ADDRESS() << 8);
-		if (physAddr == MPTR_NULL)
-			continue; // invalid data
-		MPTR physMipAddr = (texRegister.word3.get_MIP_ADDRESS() << 8);
-
-		// word0
-		const auto word0 = texRegister.word0;
-		auto dim = word0.get_DIM();
-		uint32 pitch = (word0.get_PITCH() + 1) << 3;
-		uint32 width = word0.get_WIDTH() + 1;
-		auto tileMode = word0.get_TILE_MODE();
-		// word1
-		const auto word1 = texRegister.word1;
-		uint32 depth = word1.get_DEPTH();
-		if (dim == Latte::E_DIM::DIM_2D_ARRAY || dim == Latte::E_DIM::DIM_3D || dim == Latte::E_DIM::DIM_2D_ARRAY_MSAA || dim == Latte::E_DIM::DIM_1D_ARRAY)
+	TextureResourceDesc DecodeTextureResource(const _LatteRegisterSetTextureUnit& regs)
+	{
+		TextureResourceDesc d;
+		d.physAddr = regs.word2.get_BASE_ADDRESS() << 8;
+		d.physMipAddr = regs.word3.get_MIP_ADDRESS() << 8;
+		d.dim = regs.word0.get_DIM();
+		d.pitch = (regs.word0.get_PITCH() + 1) << 3;
+		d.width = regs.word0.get_WIDTH() + 1;
+		d.tileMode = regs.word0.get_TILE_MODE();
+		d.height = regs.word1.get_HEIGHT() + 1;
+		const uint32 depthField = regs.word1.get_DEPTH();
+		switch (d.dim)
 		{
-			depth = depth + 1;
+		case Latte::E_DIM::DIM_2D_ARRAY:
+		case Latte::E_DIM::DIM_3D:
+		case Latte::E_DIM::DIM_2D_ARRAY_MSAA:
+		case Latte::E_DIM::DIM_1D_ARRAY:
+			d.depth = depthField + 1;
+			break;
+		case Latte::E_DIM::DIM_CUBEMAP:
+			d.depth = 6 * (depthField + 1);
+			break;
+		default:
+			d.depth = std::max<uint32>(depthField, 1);
+			break;
 		}
-		else
+		if (d.dim == Latte::E_DIM::DIM_1D || d.dim == Latte::E_DIM::DIM_1D_ARRAY)
+			d.height = 1;
+		// the pitch register counts texels, compressed surfaces use blocks
+		if (Latte::IsCompressedFormat(regs.word1.get_DATA_FORMAT()))
+			d.pitch /= 4;
+		d.firstSlice = regs.word5.get_BASE_ARRAY();
+		d.numSlices = regs.word5.get_LAST_ARRAY() + 1 - d.firstSlice;
+		d.firstMip = regs.word4.get_BASE_LEVEL();
+		d.numMips = regs.word5.get_LAST_LEVEL() + 1 - d.firstMip;
+		cemu_assert_debug(d.numMips != 0);
+		d.format = LatteTexture_ReconstructGX2Format(regs.word1, regs.word4);
+		if (d.dim == Latte::E_DIM::DIM_2D_MSAA)
 		{
-			if (dim == Latte::E_DIM::DIM_CUBEMAP)
-				depth = 6 * (depth + 1);
-			if (depth == 0)
-				depth = 1;
+			// MSAA surfaces have a single level; the level fields may hold garbage (The
+			// Mysterious Cities of Gold sets two levels with an invalid mip pointer)
+			d.firstMip = 0;
+			d.numMips = 1;
 		}
-		uint32 height = word1.get_HEIGHT() + 1;
-		if (dim == Latte::E_DIM::DIM_1D || dim == Latte::E_DIM::DIM_1D_ARRAY)
-			height = 1;
-		if (Latte::IsCompressedFormat(word1.get_DATA_FORMAT()))
-			pitch /= 4;
-		// view slice
-		const auto word4 = texRegister.word4;
-		const auto word5 = texRegister.word5;
-
-		uint32 viewFirstSlice = word5.get_BASE_ARRAY();
-		uint32 viewNumSlices = word5.get_LAST_ARRAY() + 1 - viewFirstSlice;
-
-		uint32 viewFirstMip = word4.get_BASE_LEVEL();
-		uint32 viewNumMips = word5.get_LAST_LEVEL() + 1 - viewFirstMip;
-
-		cemu_assert_debug(viewNumMips != 0);
-
-		Latte::E_GX2SURFFMT format = LatteTexture_ReconstructGX2Format(word1, word4);
-
-		// todo - AA
-		if (dim == Latte::E_DIM::DIM_2D_MSAA)
+		// macro tiled surfaces keep their bank/pipe swizzle in address bits 8-10
+		d.swizzle = 0;
+		if (Latte::TM_IsMacroTiled(d.tileMode))
 		{
-			// MSAA only supports one mip level?
-			// without this we encounter a crash in The Mysterious Cities of Gold: Secret Paths due to it setting mip count to 2 and leaving mip pointer on an invalid uninitialized value
-			viewFirstMip = 0;
-			viewNumMips = 1;
+			d.swizzle = d.physAddr & 0x700;
+			d.physAddr &= ~0x700;
 		}
+		return d;
+	}
+}
 
-		// swizzle
-		uint32 swizzle = 0;
-		if (Latte::TM_IsMacroTiled(tileMode))
+// looks up or creates the texture of every unit the shader samples and binds it
+static void LatteTexture_updateTexturesForStage(LatteDecompilerShader* shaderContext, uint32 glBackendBaseTexUnit, _LatteRegisterSetTextureUnit* texRegBase)
+{
+	for (sint32 i = 0; i < shaderContext->textureUnitListCount; i++)
+	{
+		const sint32 unit = shaderContext->textureUnitList[i];
+		const TextureResourceDesc d = DecodeTextureResource(texRegBase[unit]);
+		if (d.physAddr == MPTR_NULL)
+			continue;
+		const bool isDepthSampler = shaderContext->textureUsesDepthCompare[unit];
+		LatteTextureView* view = isDepthSampler ?
+			LatteTextureViewLookupCache::lookupWithColorOrDepthType(d.physAddr, d.width, d.height, d.depth, d.pitch, d.firstMip, d.numMips, d.firstSlice, d.numSlices, d.format, d.dim, true) :
+			LatteTextureViewLookupCache::lookup(d.physAddr, d.width, d.height, d.depth, d.pitch, d.firstMip, d.numMips, d.firstSlice, d.numSlices, d.format, d.dim);
+		if (!view)
 		{
-			// extract swizzle bits from pointer if macro-tiled
-			swizzle = (physAddr & 0x700);
-			physAddr &= ~0x700;
-		}
-
-		bool isDepthSampler = shaderContext->textureUsesDepthCompare[textureIndex];
-		// look for already existing texture
-		LatteTextureView* textureView;
-		if (!isDepthSampler)
-			textureView = LatteTextureViewLookupCache::lookup(physAddr, width, height, depth, pitch, viewFirstMip, viewNumMips, viewFirstSlice, viewNumSlices, format, dim);
-		else
-			textureView = LatteTextureViewLookupCache::lookupWithColorOrDepthType(physAddr, width, height, depth, pitch, viewFirstMip, viewNumMips, viewFirstSlice, viewNumSlices, format, dim, true);
-		if (!textureView)
-		{
-			// view not found, create a new mapping which will also create a new texture if necessary
-			textureView = LatteTexture_CreateMapping(physAddr, physMipAddr, width, height, depth, pitch, tileMode, swizzle, viewFirstMip, viewNumMips, viewFirstSlice, viewNumSlices, format, dim, dim, isDepthSampler);
-			if (textureView == nullptr)
+			view = LatteTexture_CreateMapping(d.physAddr, d.physMipAddr, d.width, d.height, d.depth, d.pitch, d.tileMode, d.swizzle, d.firstMip, d.numMips, d.firstSlice, d.numSlices, d.format, d.dim, d.dim, isDepthSampler);
+			if (!view)
 				continue;
+			// the cache changed, previously bound textures may have been replaced
 			LatteGPUState.repeatTextureInitialization = true;
 		}
 
 #ifdef ENABLE_OPENGL
 		if (g_renderer->GetType() == RendererAPI::OpenGL)
 		{
-			// on OpenGL, texture views and sampler parameters are tied together (we are avoiding sampler objects due to driver bugs)
-			// in order to emulate different sampler parameters when a texture is bound multiple times we create extra views
+			// OpenGL keeps sampler state in the view, so a texture bound to several units
+			// in the same draw gets an extra view per binding
 			OpenGLRenderer* rendererGL = static_cast<OpenGLRenderer*>(g_renderer.get());
-
-			// if this texture is bound multiple times then use alternative views
-			if (textureView->lastTextureBindIndex == LatteGPUState.textureBindCounter)
+			if (view->lastTextureBindIndex == LatteGPUState.textureBindCounter)
 			{
-				LatteTextureViewGL* textureViewGL = (LatteTextureViewGL*)textureView;
-				// get next unused alternative texture view
-				while (true)
+				LatteTextureViewGL* viewGL = (LatteTextureViewGL*)view;
+				do
 				{
-					textureViewGL = textureViewGL->GetAlternativeView();
-					if (textureViewGL->lastTextureBindIndex != LatteGPUState.textureBindCounter)
-						break;
-				}
-				textureView = textureViewGL;
-		}
-			textureView->lastTextureBindIndex = LatteGPUState.textureBindCounter;
-			rendererGL->renderstate_updateTextureSettingsGL(shaderContext, textureView, textureIndex + glBackendBaseTexUnit, word4, textureIndex, isDepthSampler);
+					viewGL = viewGL->GetAlternativeView();
+				} while (viewGL->lastTextureBindIndex == LatteGPUState.textureBindCounter);
+				view = viewGL;
+			}
+			view->lastTextureBindIndex = LatteGPUState.textureBindCounter;
+			rendererGL->renderstate_updateTextureSettingsGL(shaderContext, view, unit + glBackendBaseTexUnit, texRegBase[unit].word4, unit, isDepthSampler);
 		}
 #endif
 
-		g_renderer->texture_setLatteTexture(textureView, textureIndex + glBackendBaseTexUnit);
-		// update if data changed
-		bool swizzleChanged = false;
-		if (textureView->baseTexture->swizzle != swizzle)
-		{
-			debug_printf("BaseSwizzle diff prev %08x new %08x rt %08x tm %d\n", textureView->baseTexture->swizzle, swizzle, textureView->baseTexture->lastRenderTargetSwizzle, textureView->baseTexture->tileMode);
-			if (swizzle == textureView->baseTexture->lastRenderTargetSwizzle)
-			{
-				// last render to texture updated the swizzle and we can assume the texture data is still valid
-				textureView->baseTexture->swizzle = textureView->baseTexture->lastRenderTargetSwizzle;
-			}
-			else
-			{
-				// reload texture
-				swizzleChanged = true;
-			}
-		}
-		else if ((viewFirstMip + viewNumMips) > 1 && (textureView->baseTexture->physMipAddress != physMipAddr))
-		{
-			debug_printf("MipPhys/Swizzle change diff prev %08x new %08x tm %d\n", textureView->baseTexture->physMipAddress, physMipAddr, textureView->baseTexture->tileMode);
-			swizzleChanged = true;
-			cemu_assert_debug(physMipAddr != MPTR_NULL);
-		}
-		// check for changes
-		if (LatteTC_HasTextureChanged(textureView->baseTexture) || swizzleChanged)
-		{
-			debug_printf("Reload texture 0x%08x res %dx%d memRange %08x-%08x SwizzleChange: %s\n", textureView->baseTexture->physAddress, textureView->baseTexture->width, textureView->baseTexture->height, textureView->baseTexture->texDataPtrLow, textureView->baseTexture->texDataPtrHigh, swizzleChanged ? "yes" : "no");
-			// update swizzle / changed mip address
-			if (swizzleChanged)
-			{
-				textureView->baseTexture->swizzle = swizzle;
-				if ((viewFirstMip + viewNumMips) > 1)
-				{
-					textureView->baseTexture->physMipAddress = physMipAddr;
-				}
-			}
-			debug_printf("Reload reason: Data-change when bound as texture (new hash 0x%08x)\n", textureView->baseTexture->texDataHash2);
-			LatteTexture_ReloadData(textureView->baseTexture);
-		}
-		LatteTexture* baseTexture = textureView->baseTexture;
-		if (baseTexture->reloadFromDynamicTextures)
-		{
-			LatteTexture_UpdateCacheFromDynamicTextures(baseTexture);
-			baseTexture->reloadFromDynamicTextures = false;
-		}
-		LatteTC_MarkTextureStillInUse(baseTexture);
+		g_renderer->texture_setLatteTexture(view, unit + glBackendBaseTexUnit);
 
-		// check if barrier is necessary
-		if ((sint32)(LatteGPUState.drawCallCounter - baseTexture->lastUnflushedRTDrawcallIndex) < 2)
+		LatteTexture* tex = view->baseTexture;
+		// A different swizzle or mip chain address means the guest moved the data. A
+		// swizzle change that matches the last render target swizzle came from rendering
+		// into the texture, whose contents are then still valid.
+		bool layoutChanged = false;
+		if (tex->swizzle != d.swizzle)
+		{
+			if (d.swizzle == tex->lastRenderTargetSwizzle)
+				tex->swizzle = tex->lastRenderTargetSwizzle;
+			else
+				layoutChanged = true;
+		}
+		else if ((d.firstMip + d.numMips) > 1 && tex->physMipAddress != d.physMipAddr)
+		{
+			cemu_assert_debug(d.physMipAddr != MPTR_NULL);
+			layoutChanged = true;
+		}
+		if (LatteTC_HasTextureChanged(tex) || layoutChanged)
+		{
+			if (layoutChanged)
+			{
+				tex->swizzle = d.swizzle;
+				if ((d.firstMip + d.numMips) > 1)
+					tex->physMipAddress = d.physMipAddr;
+			}
+			LatteTexture_ReloadData(tex);
+		}
+		if (tex->reloadFromDynamicTextures)
+		{
+			LatteTexture_UpdateCacheFromDynamicTextures(tex);
+			tex->reloadFromDynamicTextures = false;
+		}
+		LatteTC_MarkTextureStillInUse(tex);
+
+		// sampling a texture that one of the last draws rendered to needs a barrier
+		if ((sint32)(LatteGPUState.drawCallCounter - tex->lastUnflushedRTDrawcallIndex) < 2)
 		{
 			LatteGPUState.requiresTextureBarrier = true;
-			baseTexture->lastUnflushedRTDrawcallIndex = 0;
+			tex->lastUnflushedRTDrawcallIndex = 0;
 		}
-		// update scale
-		float texScaleU, texScaleV;
-		if (baseTexture->overwriteInfo.hasResolutionOverwrite == false)
+
+		float scaleU = 1.0f, scaleV = 1.0f;
+		if (tex->overwriteInfo.hasResolutionOverwrite)
 		{
-			texScaleU = 1.0f;
-			texScaleV = 1.0f;
+			scaleU = (float)tex->overwriteInfo.width / (float)tex->width;
+			scaleV = (float)tex->overwriteInfo.height / (float)tex->height;
 		}
-		else
-		{
-			texScaleU = (float)baseTexture->overwriteInfo.width / (float)baseTexture->width;
-			texScaleV = (float)baseTexture->overwriteInfo.height / (float)baseTexture->height;
-		}
-		LatteTexture_setEffectiveTextureScale(shaderContext->shaderType, textureIndex, texScaleU, texScaleV);
+		LatteTexture_setEffectiveTextureScale(shaderContext->shaderType, unit, scaleU, scaleV);
 	}
 }
 
-// initialize textures used by the current drawcall
-// Sets LatteGPUState.repeatTextureInitialization to true if a new texture mapping was created (indicating that this function must be called again)
-// also sets LatteGPUState.requiresTextureBarrier to true if texture barrier is required
+// Binds the textures of all active shader stages. Sets repeatTextureInitialization when
+// the cache changed in a way that requires another pass, and requiresTextureBarrier when
+// a texture is sampled right after being rendered to.
 void LatteTexture_updateTextures()
 {
 	LatteGPUState.textureBindCounter++;
-	// pixel shader
-	LatteDecompilerShader* pixelShader = LatteSHRC_GetActivePixelShader();
-	if (pixelShader)
-		LatteTexture_updateTexturesForStage(pixelShader, LATTE_CEMU_PS_TEX_UNIT_BASE, LatteGPUState.contextNew.SQ_TEX_START_PS);
-	// vertex shader
-	LatteDecompilerShader* vertexShader = LatteSHRC_GetActiveVertexShader();
-	cemu_assert_debug(vertexShader != nullptr);
-	LatteTexture_updateTexturesForStage(vertexShader, LATTE_CEMU_VS_TEX_UNIT_BASE, LatteGPUState.contextNew.SQ_TEX_START_VS);
-	// geometry shader
-	LatteDecompilerShader* geometryShader = LatteSHRC_GetActiveGeometryShader();
-	if (geometryShader)
-		LatteTexture_updateTexturesForStage(geometryShader, LATTE_CEMU_GS_TEX_UNIT_BASE, LatteGPUState.contextNew.SQ_TEX_START_GS);
+	if (LatteDecompilerShader* ps = LatteSHRC_GetActivePixelShader())
+		LatteTexture_updateTexturesForStage(ps, LATTE_CEMU_PS_TEX_UNIT_BASE, LatteGPUState.contextNew.SQ_TEX_START_PS);
+	LatteDecompilerShader* vs = LatteSHRC_GetActiveVertexShader();
+	cemu_assert_debug(vs != nullptr);
+	LatteTexture_updateTexturesForStage(vs, LATTE_CEMU_VS_TEX_UNIT_BASE, LatteGPUState.contextNew.SQ_TEX_START_VS);
+	if (LatteDecompilerShader* gs = LatteSHRC_GetActiveGeometryShader())
+		LatteTexture_updateTexturesForStage(gs, LATTE_CEMU_GS_TEX_UNIT_BASE, LatteGPUState.contextNew.SQ_TEX_START_GS);
 }
 
 sint32 LatteTexture_getEffectiveWidth(LatteTexture* texture)
 {
-	if (texture->overwriteInfo.hasResolutionOverwrite)
-		return texture->overwriteInfo.width;
-	return texture->width;
+	return texture->overwriteInfo.hasResolutionOverwrite ? texture->overwriteInfo.width : texture->width;
 }
 
-// returns true if the two textures have the same rescale factor
+// true if texture rules scale both textures by the same factor (within 5%)
 bool LatteTexture_doesEffectiveRescaleRatioMatch(LatteTexture* texture1, sint32 mipLevel1, LatteTexture* texture2, sint32 mipLevel2)
 {
-	double widthRatio1 = (double)LatteTexture_getEffectiveWidth(texture1) / (double)texture1->width;
-	double widthRatio2 = (double)LatteTexture_getEffectiveWidth(texture2) / (double)texture2->width;
-	// the difference between the factors must be less than 5%
-	double diff = widthRatio1 / widthRatio2;
-	if (abs(1.0 - diff) > 0.05)
-	{
-		return false;
-	}
-	return true;
+	const double scale1 = (double)LatteTexture_getEffectiveWidth(texture1) / (double)texture1->width;
+	const double scale2 = (double)LatteTexture_getEffectiveWidth(texture2) / (double)texture2->width;
+	return !(std::abs(1.0 - scale1 / scale2) > 0.05);
 }
 
+// converts guest texel coordinates of a mip level to host coordinates
 void LatteTexture_scaleToEffectiveSize(LatteTexture* texture, sint32* x, sint32* y, sint32 mipLevel)
 {
-	if( texture->overwriteInfo.hasResolutionOverwrite == false )
+	if (!texture->overwriteInfo.hasResolutionOverwrite)
 		return;
-	*x = *x * std::max(1,texture->overwriteInfo.width>>mipLevel) / std::max(1,texture->width>>mipLevel);
-	*y = *y * std::max(1,texture->overwriteInfo.height>>mipLevel) / std::max(1, texture->height>>mipLevel);
+	*x = *x * std::max(1, texture->overwriteInfo.width >> mipLevel) / std::max(1, texture->width >> mipLevel);
+	*y = *y * std::max(1, texture->overwriteInfo.height >> mipLevel) / std::max(1, texture->height >> mipLevel);
 }
 
-uint64 _textureUpdateEventCounter = 1;
+// stamps for ordering texture updates; starts at 1 so 0 means "never"
+static uint64 s_nextUpdateEvent = 1;
 
 uint64 LatteTexture_getNextUpdateEventCounter()
 {
-	uint64 counter = _textureUpdateEventCounter;
-	_textureUpdateEventCounter++;
-	return counter;
+	return s_nextUpdateEvent++;
 }
 
 void LatteTexture_init()

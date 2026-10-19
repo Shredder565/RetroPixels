@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
 #include "Cafe/HW/Latte/Core/LatteDraw.h"
@@ -5,206 +6,164 @@
 #include "Cafe/HW/Latte/Core/LatteQueryObject.h"
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 
-#define GPU7_QUERY_TYPE_OCCLUSION	(1)
+// GX2 occlusion queries. Guest queries can overlap, host queries cannot, so the time
+// between query begin/end commands is split into consecutive host queries. Every
+// begin/end gets an increasing event id; a host query adds its sample count to all
+// guest queries whose event range contains it. A guest query completes once every
+// host query up to its end event has delivered a result.
 
-uint64 queryEventCounter = 1;
-
-struct LatteGX2QueryInformation
+namespace
 {
-	MPTR queryMPTR;
-	uint64 queryEventStart;
-	uint64 queryEventEnd;
-	uint64 sampleSum;
-	bool queryEnded;
-};
+	struct GuestQuery
+	{
+		MPTR queryMPTR;
+		uint64 eventStart;
+		uint64 eventEnd;
+		uint64 samplesPassed;
+		bool ended;
+	};
 
-std::vector<LatteGX2QueryInformation*> list_activeGX2Queries2;
+	uint64 s_nextEventId = 1;
+	std::vector<GuestQuery> s_guestQueries; // in begin order
+	std::vector<LatteQueryObject*> s_hostQueriesPending; // ended, waiting for results, in end order
+	LatteQueryObject* s_activeHostQuery = nullptr;
+	uint64 s_lastCompletedEvent = 0;
+	sint32 s_beginsSinceUpdate = 0;
 
-std::vector<LatteQueryObject*> list_queriesInFlight;
+	uint64 NextEventId()
+	{
+		return s_nextEventId++;
+	}
 
-uint64 latestQueryFinishedEventId = 0;
+	void StartHostQuery(uint64 eventId)
+	{
+		LatteQueryObject* query = g_renderer->occlusionQuery_create();
+		query->queryEventStart = eventId;
+		query->begin();
+		s_activeHostQuery = query;
+	}
 
-LatteQueryObject* _currentlyActiveRendererQuery = {0};
+	void EndActiveHostQuery(uint64 eventId)
+	{
+		LatteQueryObject* query = s_activeHostQuery;
+		if (!query)
+			return;
+		cemu_assert_debug(!query->queryEnded);
+		query->queryEnded = true;
+		query->queryEventEnd = eventId;
+		query->end();
+		s_hostQueriesPending.emplace_back(query);
+		s_activeHostQuery = nullptr;
+	}
 
-uint64 LatteQuery_getNextEventId()
-{
-	uint64 ev = queryEventCounter;
-	queryEventCounter++;
-	return ev;
-}
-
-void LatteQuery_begin(LatteQueryObject* queryObject, uint64 eventId)
-{
-	queryObject->queryEventStart = eventId;
-	queryObject->begin();
-}
-
-void LatteQuery_end(LatteQueryObject* queryObject, uint64 eventId)
-{
-	cemu_assert_debug(!queryObject->queryEnded);
-	queryObject->queryEnded = true;
-	queryObject->queryEventEnd = eventId;
-	queryObject->end();
-}
-
-LatteQueryObject* LatteQuery_createSamplePassedQuery()
-{
-	return g_renderer->occlusionQuery_create();
-}
-
-void LatteQuery_finishGX2Query(LatteGX2QueryInformation* gx2Query)
-{
-	uint32* queryObjectData = (uint32*)memory_getPointerFromVirtualOffset(gx2Query->queryMPTR);
-	*(uint64*)(queryObjectData + 0) = 0;
-	*(uint64*)(queryObjectData + 2) = gx2Query->sampleSum;
-	*(uint64*)(queryObjectData + 4) = 0;
-	*(uint64*)(queryObjectData + 6) = 0;
-
-	*(uint64*)(queryObjectData + 8) = 0; // overwrites the 'OCPU' magic constant letting GX2QueryGetOcclusionResult know that the query is finished (for CPU queries)
+	// writes the result into the guest query object
+	void PublishGuestResult(const GuestQuery& q)
+	{
+		// the sample count is stored in host byte order, GX2QueryGetOcclusionResult reads it back the same way
+		uint64* words = (uint64*)memory_getPointerFromVirtualOffset(q.queryMPTR);
+		words[0] = 0;
+		words[1] = q.samplesPassed;
+		words[2] = 0;
+		words[3] = 0;
+		// clearing this word (the 'OCPU' marker of CPU queries) tells GX2QueryGetOcclusionResult that the result is ready
+		words[4] = 0;
+	}
 }
 
 void LatteQuery_UpdateFinishedQueries()
 {
 	g_renderer->occlusionQuery_updateState();
-	for(uint32 i=0; i<list_queriesInFlight.size(); i++)
+	// results arrive in order, stop at the first host query that has none yet
+	while (!s_hostQueriesPending.empty())
 	{
-		LatteQueryObject* queryObject = list_queriesInFlight[i];
-		cemu_assert_debug(queryObject->queryEnded);
-		if( queryObject->queryEnded == false )
-			continue;
-		// check if result is available
-		uint64 numSamplesPassed;
-		if (!queryObject->getResult(numSamplesPassed))
+		LatteQueryObject* query = s_hostQueriesPending.front();
+		cemu_assert_debug(query->queryEnded);
+		uint64 samples;
+		if (!query->getResult(samples))
 			break;
-
-		cemu_assert_debug(latestQueryFinishedEventId < queryObject->queryEventEnd);
-		latestQueryFinishedEventId = queryObject->queryEventEnd;
-
-		// add number of passed samples to all gx2 queries that were active at the time
-		for (auto& it : list_activeGX2Queries2)
+		cemu_assert_debug(s_lastCompletedEvent < query->queryEventEnd);
+		s_lastCompletedEvent = query->queryEventEnd;
+		for (GuestQuery& q : s_guestQueries)
 		{
-			if (queryObject->queryEventStart >= it->queryEventStart && queryObject->queryEventEnd <= it->queryEventEnd)
-				it->sampleSum += numSamplesPassed;
+			if (query->queryEventStart >= q.eventStart && query->queryEventEnd <= q.eventEnd)
+				q.samplesPassed += samples;
 		}
-
-		list_queriesInFlight.erase(list_queriesInFlight.begin() + i);
-		i--;
-		g_renderer->occlusionQuery_destroy(queryObject);
+		s_hostQueriesPending.erase(s_hostQueriesPending.begin());
+		g_renderer->occlusionQuery_destroy(query);
 	}
-	// check for finished GX2 queries
-	for (sint32 i = 0; i < list_activeGX2Queries2.size(); i++)
+	// complete guest queries whose whole range is covered
+	for (size_t i = 0; i < s_guestQueries.size();)
 	{
-		auto gx2Query = list_activeGX2Queries2[i];
-		if (gx2Query->queryEnded && latestQueryFinishedEventId >= gx2Query->queryEventEnd)
+		const GuestQuery& q = s_guestQueries[i];
+		if (q.ended && s_lastCompletedEvent >= q.eventEnd)
 		{
-			LatteQuery_finishGX2Query(gx2Query);
-			free(gx2Query);
-			list_activeGX2Queries2.erase(list_activeGX2Queries2.begin() + i);
-			i--;
+			PublishGuestResult(q);
+			s_guestQueries.erase(s_guestQueries.begin() + i);
+			continue;
 		}
+		i++;
 	}
 }
 
 void LatteQuery_UpdateFinishedQueriesForceFinishAll()
 {
-	cemu_assert_debug(_currentlyActiveRendererQuery == nullptr);
-	g_renderer->occlusionQuery_flush(); // guarantees that all query commands have been submitted and finished processing
-	while (true)
+	cemu_assert_debug(s_activeHostQuery == nullptr);
+	// after the flush every host query result becomes available
+	g_renderer->occlusionQuery_flush();
+	do
 	{
 		LatteQuery_UpdateFinishedQueries();
-		if (list_queriesInFlight.empty())
-			break;
-	}
-}
-
-sint32 checkQueriesCounter = 0;
-
-void LatteQuery_endActiveRendererQuery(uint64 currentEventId)
-{
-	if (_currentlyActiveRendererQuery != nullptr)
-	{
-		LatteQuery_end(_currentlyActiveRendererQuery, currentEventId);
-		list_queriesInFlight.emplace_back(_currentlyActiveRendererQuery);
-		_currentlyActiveRendererQuery = nullptr;
-	}
+	} while (!s_hostQueriesPending.empty());
 }
 
 void LatteQuery_BeginOcclusionQuery(MPTR queryMPTR)
 {
-	if (checkQueriesCounter < 7)
-	{
-		checkQueriesCounter++;
-	}
+	// poll for results every eighth begin
+	if (s_beginsSinceUpdate < 7)
+		s_beginsSinceUpdate++;
 	else
 	{
 		LatteQuery_UpdateFinishedQueries();
-		checkQueriesCounter = 0;
+		s_beginsSinceUpdate = 0;
 	}
-
-	for(auto& it : list_activeGX2Queries2)
+	for (const GuestQuery& q : s_guestQueries)
 	{
-		if (it->queryMPTR == queryMPTR)
+		if (q.queryMPTR == queryMPTR)
 		{
-			debug_printf("itHLEBeginOcclusionQuery: Query 0x%08x is already active\n", queryMPTR);
+			cemuLog_logDebug(LogType::Force, "GX2 occlusion query {:08x} begun while already active", queryMPTR);
 			return;
 		}
 	}
-	uint64 currentEventId = LatteQuery_getNextEventId();
-	// end any currently active query
-	LatteQuery_endActiveRendererQuery(currentEventId);
-	// create GX2 query binding
-	LatteGX2QueryInformation* queryBinding = (LatteGX2QueryInformation*)malloc(sizeof(LatteGX2QueryInformation));
-	memset(queryBinding, 0x00, sizeof(LatteGX2QueryInformation));
-	queryBinding->queryEventStart = currentEventId;
-	queryBinding->queryMPTR = queryMPTR;
-	list_activeGX2Queries2.emplace_back(queryBinding);
-	// start renderer query
-	LatteQueryObject* queryObject = LatteQuery_createSamplePassedQuery();
-	LatteQuery_begin(queryObject, currentEventId);
-	_currentlyActiveRendererQuery = queryObject;
+	const uint64 eventId = NextEventId();
+	EndActiveHostQuery(eventId);
+	s_guestQueries.push_back({ queryMPTR, eventId, 0, 0, false });
+	StartHostQuery(eventId);
 }
 
 void LatteQuery_EndOcclusionQuery(MPTR queryMPTR)
 {
 	if (queryMPTR == MPTR_NULL)
 		return;
-	uint64 currentEventId = LatteQuery_getNextEventId();
-	// mark query binding as ended
-	for(auto& it : list_activeGX2Queries2)
+	const uint64 eventId = NextEventId();
+	for (GuestQuery& q : s_guestQueries)
 	{
-		if (it->queryMPTR == queryMPTR)
+		if (q.queryMPTR == queryMPTR)
 		{
-			it->queryEventEnd = currentEventId;
-			it->queryEnded = true;
+			q.eventEnd = eventId;
+			q.ended = true;
 			break;
 		}
 	}
-	// end currently active renderer query
-	LatteQuery_endActiveRendererQuery(currentEventId);
-	// check if there are still active GX2 queries
-	bool hasActiveGX2Query = false;
-	for (auto& it : list_activeGX2Queries2)
-	{
-		if (!it->queryEnded)
-		{
-			hasActiveGX2Query = true;
-			break;
-		}
-	}
-	// start a new renderer query if there are still active GX2 queries
-	if (hasActiveGX2Query)
-	{
-		LatteQueryObject* queryObject = LatteQuery_createSamplePassedQuery();
-		LatteQuery_begin(queryObject, currentEventId);
-		list_queriesInFlight.emplace_back(queryObject);
-		_currentlyActiveRendererQuery = queryObject;
-		catchOpenGLError();
-	}
+	EndActiveHostQuery(eventId);
+	// guest queries that are still open need a new host query
+	const bool anyOpen = std::any_of(s_guestQueries.begin(), s_guestQueries.end(), [](const GuestQuery& q) { return !q.ended; });
+	if (anyOpen)
+		StartHostQuery(eventId);
 }
 
 void LatteQuery_CancelActiveGPU7Queries()
 {
-	cemu_assert_debug(_currentlyActiveRendererQuery == nullptr);
+	cemu_assert_debug(s_activeHostQuery == nullptr);
 }
 
 void LatteQuery_Init()

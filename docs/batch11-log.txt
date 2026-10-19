@@ -41,7 +41,7 @@ Done:
   writes into guest memory). The reference build used Cemu's original
   AddrLibFastDecode.h so the decoders were compared against the real
   original behaviour.
-  Fix (in LatteAddrLib/AddrLibFastDecode.h, batch 5 rewrite): the
+  Fix (in LatteAddrLib/AddrLibFastDecode.h, rewritten in 6499dfb): the
   LINEAR_ALIGNED untile path copied rows with memcpy, which skipped the
   converting assignment of the swapped 5:5:5:1 element types, so linear
   R5G5B5A1 textures were uploaded without their channel swap on the
@@ -62,3 +62,31 @@ Done:
   (vertex buffer bindings, uniform buffer binds, remapped uniform output,
   cache calls, incremental draw rebinding). Dropped the unused
   rectGenerate4thVertex template.
+- LatteTexture.cpp/.h, LatteTextureView.cpp/.h, LatteTextureCache.cpp,
+  LatteTextureLegacy.cpp, LatteTextureReadback.cpp, LatteTextureReadbackInfo.h,
+  LatteSurfaceCopy.cpp/.h: original. Same texture/view creation rules,
+  graphic pack rule handling, mip/slice overlap and data-dependency logic,
+  2MB occupancy cells with the same visit order, hash sampling (incl. the
+  AVX2 path), stale texture deletion and readback queue. The view lookup
+  cache is a map from address to registrations (same first match order).
+  Harness (stub renderer, fake graphic pack rules, serial ids, per-op state
+  hash, full state dumps): seeds 0-100, 60+1400, 100+1600 and 100+2000
+  identical (4.3M+ lines per run), ASan/UBSan clean.
+  Fixes: surface copy no longer uses the source texture after creating the
+  destination deleted it (it is looked up again, or the copy is skipped;
+  a LatteTextureDeleteGuard reports deletions); a failed destination
+  creation returns instead of dereferencing null; deleting a texture drops
+  all of its pending readbacks (old code only the first); the AVX2 hash
+  stores lanes to an array (clang rejected the out-of-range lane index).
+  GetDeleteableTextures and the texture info cache walk the global texture
+  list, so their order is deterministic (was unordered_set order). An
+  unreachable overlap branch that could loop forever was dropped.
+- LatteStreamoutGPU.cpp: original, same ring allocation, range clamp and
+  offset update. LatteQuery.cpp, LatteQueryObject.h: original.
+  Harness: 3000 seeds, 1.4M lines identical (renderer calls, guest result
+  words). Fix: a host query started at an EndOcclusionQuery was pushed to
+  the pending list early, so it was processed twice (double counted
+  samples, use after destroy, possible endless ForceFinishAll loop). Only
+  ended host queries are queued now. With overlapping guest queries the
+  old code hit that bug, so that mode was checked on the new code only
+  (clean).

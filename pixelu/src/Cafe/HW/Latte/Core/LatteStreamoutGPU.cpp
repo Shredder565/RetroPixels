@@ -1,168 +1,148 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/HW/Latte/Core/LatteConst.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
 #include "Cafe/HW/Latte/Core/LatteDraw.h"
 #include "Cafe/HW/Latte/Core/LatteShader.h"
-#include "Cafe/GameProfile/GameProfile.h"
 #include "Cafe/HW/Latte/LegacyShaderDecompiler/LatteDecompiler.h"
-
-#include "util/containers/IntervalBucketContainer.h"
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
-#include "Cafe/HW/Latte/Core/LatteRingBuffer.h"
 #include "Cafe/HW/Latte/Core/LatteBufferCache.h"
 
-struct
-{
-	sint32 currentRingbufferOffset;
-	VirtualBufferHeap_t* mainBufferHeap;
-}streamoutManager;
+// Stream out (transform feedback). The backend captures shader output into a host ring
+// buffer; after the draw the captured bytes are moved to the guest buffer range, either
+// straight into guest memory or into the buffer cache.
 
-sint32 LatteStreamout_GetRingBufferSize()
+namespace
 {
-	return 8 * 1024 * 1024; // 8MB
-}
+	constexpr sint32 kRingBufferSize = 8 * 1024 * 1024;
 
-sint32 LatteStreamout_allocateGPURingbufferMem(sint32 size)
-{
-	// pad size to 256 byte alignment
-	size = (size + 255)&~255;
-	// get next offset
-	if ((streamoutManager.currentRingbufferOffset + size) > LatteStreamout_GetRingBufferSize())
-	{
-		streamoutManager.currentRingbufferOffset = 0;
-	}
-	sint32 allocOffset = streamoutManager.currentRingbufferOffset;
-	streamoutManager.currentRingbufferOffset += size;
-	return allocOffset;
-}
-
-void LatteStreamout_InitCache()
-{
-	streamoutManager.currentRingbufferOffset = 0;
-	streamoutManager.mainBufferHeap = nullptr;
-}
-
-bool _transformFeedbackIsActive = false;
-struct
-{
-	uint32 vertexCount;
-	uint32 instanceCount;
-	uint32 streamoutWriteMask;
-	struct
+	struct StreamoutTarget
 	{
 		bool isActive;
 		sint32 ringBufferOffset;
 		uint32 rangeAddr;
-		uint32 rangeSize; // size of written streamout data, bounded by buffer size
-	}streamoutBufferWrite[LATTE_NUM_STREAMOUT_BUFFER];
-}activeStreamoutOperation;
+		uint32 rangeSize; // bytes written, limited to the space left in the guest buffer
+	};
 
-uint32 LatteStreamout_getNumberOfWrittenVertices()
-{
-	// todo: Currently we only handle GX2_POINTS
-	return activeStreamoutOperation.vertexCount * activeStreamoutOperation.instanceCount;
+	struct
+	{
+		sint32 ringWriteOffset;
+		bool drawActive;
+		uint32 writeMask;
+		uint32 vertexCount;
+		uint32 instanceCount;
+		StreamoutTarget targets[LATTE_NUM_STREAMOUT_BUFFER];
+	} s_streamout{};
+
+	// buffer register offsets, each buffer has its own group of four registers
+	uint32& StreamoutReg(uint32 baseReg, uint32 bufferIndex)
+	{
+		return LatteGPUState.contextRegister[baseReg + bufferIndex * 4];
+	}
+
+	// space in the ring buffer for one draw; wraps to the start when the end is reached
+	sint32 AllocateRingSpace(sint32 size)
+	{
+		size = (size + 255) & ~255;
+		if (s_streamout.ringWriteOffset + size > kRingBufferSize)
+			s_streamout.ringWriteOffset = 0;
+		const sint32 offset = s_streamout.ringWriteOffset;
+		s_streamout.ringWriteOffset += size;
+		return offset;
+	}
+
+	// bytes the draw emits into a buffer, capped at the buffer size
+	uint32 EmittedBytes(uint32 bufferIndex)
+	{
+		const uint32 stride = StreamoutReg(mmVGT_STRMOUT_VTX_STRIDE_0, bufferIndex) << 2;
+		const uint32 bufferSize = StreamoutReg(mmVGT_STRMOUT_BUFFER_SIZE_0, bufferIndex) << 2;
+		// every vertex is assumed to be emitted once (point lists)
+		const uint32 vertices = s_streamout.vertexCount * s_streamout.instanceCount;
+		return std::min(vertices * stride, bufferSize);
+	}
+
+	uint32 WriteMaskOf(LatteDecompilerShader* shader)
+	{
+		uint32 mask = 0;
+		for (sint32 i = 0; i < LATTE_NUM_STREAMOUT_BUFFER; i++)
+		{
+			if (shader->streamoutBufferWriteMask[i])
+				mask |= 1u << i;
+		}
+		return mask;
+	}
 }
 
-// returns the number of bytes that are written into the buffer by the current draw operation (ignoring buffer maximum size)
-uint32 LatteStreamout_getBufferWriteRangeSize(uint32 streamoutBufferIndex)
+sint32 LatteStreamout_GetRingBufferSize()
 {
-	uint32 bufferStride = LatteGPUState.contextRegister[mmVGT_STRMOUT_VTX_STRIDE_0 + streamoutBufferIndex * 4] << 2;
-	uint32 bufferSize = LatteGPUState.contextRegister[mmVGT_STRMOUT_BUFFER_SIZE_0 + streamoutBufferIndex * 4] << 2;
-	uint32 writeSize = LatteStreamout_getNumberOfWrittenVertices() * bufferStride;
-	if (bufferSize < writeSize)
-		writeSize = bufferSize;
-	return writeSize;
+	return kRingBufferSize;
+}
+
+void LatteStreamout_InitCache()
+{
+	s_streamout.ringWriteOffset = 0;
 }
 
 void LatteStreamout_PrepareDrawcall(uint32 count, uint32 instanceCount)
 {
 	if (LatteGPUState.contextRegister[mmVGT_STRMOUT_EN] == 0)
 	{
-		_transformFeedbackIsActive = false;
-		return; // streamout inactive
+		s_streamout.drawActive = false;
+		return;
 	}
-	// get active vertex shader
 	LatteDecompilerShader* vertexShader = LatteSHRC_GetActiveVertexShader();
-	// if a geometry shader is used calculate how many vertices it outputs
 	LatteDecompilerShader* geometryShader = LatteSHRC_GetActiveGeometryShader();
-	sint32 maxVerticesInGS = 1;
+	// with a geometry shader each input vertex can become up to ring item size / vertex size output vertices
+	sint32 verticesPerInput = 1;
 	if (geometryShader)
 	{
-		uint32 gsOutPrimType = LatteGPUState.contextRegister[mmVGT_GS_OUT_PRIM_TYPE];
-		uint32 bytesPerVertex = LatteGPUState.contextRegister[mmSQ_GS_VERT_ITEMSIZE] * 4;
-		maxVerticesInGS = ((LatteGPUState.contextRegister[mmSQ_GSVS_RING_ITEMSIZE] & 0x7FFF) * 4) / bytesPerVertex;
-		cemu_assert_debug(maxVerticesInGS > 0);
+		const uint32 vertexBytes = LatteGPUState.contextRegister[mmSQ_GS_VERT_ITEMSIZE] * 4;
+		verticesPerInput = ((LatteGPUState.contextRegister[mmSQ_GSVS_RING_ITEMSIZE] & 0x7FFF) * 4) / vertexBytes;
+		cemu_assert_debug(verticesPerInput > 0);
 	}
-	// setup active streamout operation struct
-	activeStreamoutOperation.vertexCount = count * maxVerticesInGS;
-	activeStreamoutOperation.instanceCount = instanceCount;
-	// get mask of all written streamout buffers
-	uint32 streamoutWriteMask = 0;
-	if (geometryShader)
-	{
-#ifdef CEMU_DEBUG_ASSERT
-		cemu_assert_debug(vertexShader->streamoutBufferWriteMask.any() == false);
-#endif
-		for (sint32 i = 0; i < LATTE_NUM_STREAMOUT_BUFFER; i++)
-			if (geometryShader->streamoutBufferWriteMask[i])
-				streamoutWriteMask |= (1 << i);
-	}
-	else
-	{
-		for (sint32 i = 0; i < LATTE_NUM_STREAMOUT_BUFFER; i++)
-			if (vertexShader->streamoutBufferWriteMask[i])
-				streamoutWriteMask |= (1 << i);
-	}
-	activeStreamoutOperation.streamoutWriteMask = streamoutWriteMask;
-	// bind streamout buffers
+	s_streamout.vertexCount = count * verticesPerInput;
+	s_streamout.instanceCount = instanceCount;
+	// the last stage before rasterization writes the stream out data
+	s_streamout.writeMask = WriteMaskOf(geometryShader ? geometryShader : vertexShader);
 	for (uint32 i = 0; i < LATTE_NUM_STREAMOUT_BUFFER; i++)
 	{
-		if ((streamoutWriteMask&(1 << i)) == 0)
-		{
-			activeStreamoutOperation.streamoutBufferWrite[i].isActive = false;
+		StreamoutTarget& target = s_streamout.targets[i];
+		target.isActive = (s_streamout.writeMask & (1u << i)) != 0;
+		if (!target.isActive)
 			continue;
-		}
-		uint32 bufferBaseMPTR = LatteGPUState.contextRegister[mmVGT_STRMOUT_BUFFER_BASE_0 + i * 4] << 8;
-		uint32 bufferSize = LatteGPUState.contextRegister[mmVGT_STRMOUT_BUFFER_SIZE_0 + i * 4] << 2;
-		uint32 bufferOffset = LatteGPUState.contextRegister[mmVGT_STRMOUT_BUFFER_OFFSET_0 + i * 4];
-		uint32 streamoutWriteSize = LatteStreamout_getBufferWriteRangeSize(i);
-		uint32 rangeAddr = bufferBaseMPTR + bufferOffset;
-		sint32 ringBufferOffset = LatteStreamout_allocateGPURingbufferMem(streamoutWriteSize); // allocate memory for the entire streamout write
-		// calculate write size after bounding it to the buffer
-		uint32 remainingBytesToWrite = bufferOffset > bufferSize ? 0 : (bufferSize - bufferOffset);
-		uint32 rangeSize = std::min(streamoutWriteSize, remainingBytesToWrite);
-
-		activeStreamoutOperation.streamoutBufferWrite[i].isActive = true;
-		activeStreamoutOperation.streamoutBufferWrite[i].ringBufferOffset = ringBufferOffset;
-		activeStreamoutOperation.streamoutBufferWrite[i].rangeAddr = rangeAddr;
-		activeStreamoutOperation.streamoutBufferWrite[i].rangeSize = rangeSize;
-
-		g_renderer->streamout_setupXfbBuffer(i, ringBufferOffset, rangeAddr, rangeSize);
+		const uint32 bufferAddr = StreamoutReg(mmVGT_STRMOUT_BUFFER_BASE_0, i) << 8;
+		const uint32 bufferSize = StreamoutReg(mmVGT_STRMOUT_BUFFER_SIZE_0, i) << 2;
+		const uint32 writeOffset = StreamoutReg(mmVGT_STRMOUT_BUFFER_OFFSET_0, i);
+		const uint32 emitted = EmittedBytes(i);
+		// the ring holds the full output, the guest range only what fits behind the write offset
+		target.ringBufferOffset = AllocateRingSpace(emitted);
+		target.rangeAddr = bufferAddr + writeOffset;
+		target.rangeSize = std::min(emitted, writeOffset > bufferSize ? 0 : bufferSize - writeOffset);
+		g_renderer->streamout_setupXfbBuffer(i, target.ringBufferOffset, target.rangeAddr, target.rangeSize);
 	}
 	g_renderer->streamout_begin();
-	_transformFeedbackIsActive = true;
+	s_streamout.drawActive = true;
 }
 
 void LatteStreamout_FinishDrawcall(bool useDirectMemoryMode)
 {
-	if (_transformFeedbackIsActive)
+	if (!s_streamout.drawActive)
+		return;
+	s_streamout.drawActive = false;
+	for (uint32 i = 0; i < LATTE_NUM_STREAMOUT_BUFFER; i++)
 	{
-		_transformFeedbackIsActive = false;
-		for (uint32 i = 0; i < LATTE_NUM_STREAMOUT_BUFFER; i++)
+		if ((s_streamout.writeMask & (1u << i)) == 0)
+			continue;
+		const StreamoutTarget& target = s_streamout.targets[i];
+		if (target.rangeSize > 0)
 		{
-			if ((activeStreamoutOperation.streamoutWriteMask&(1 << i)) == 0)
-				continue;
-			if (activeStreamoutOperation.streamoutBufferWrite[i].rangeSize > 0)
-			{
-				if(useDirectMemoryMode)
-					g_renderer->bufferCache_copyStreamoutToMainBuffer(activeStreamoutOperation.streamoutBufferWrite[i].ringBufferOffset, activeStreamoutOperation.streamoutBufferWrite[i].rangeAddr, activeStreamoutOperation.streamoutBufferWrite[i].rangeSize);
-				else
-					LatteBufferCache_copyStreamoutDataToCache(activeStreamoutOperation.streamoutBufferWrite[i].rangeAddr, activeStreamoutOperation.streamoutBufferWrite[i].rangeSize, activeStreamoutOperation.streamoutBufferWrite[i].ringBufferOffset);
-			}
-			// advance streamout offset
-			uint32 newOffset = LatteGPUState.contextRegister[mmVGT_STRMOUT_BUFFER_OFFSET_0 + i * 4] + activeStreamoutOperation.streamoutBufferWrite[i].rangeSize;
-			LatteGPUState.contextRegister[mmVGT_STRMOUT_BUFFER_OFFSET_0 + i * 4] = newOffset;
+			if (useDirectMemoryMode)
+				g_renderer->bufferCache_copyStreamoutToMainBuffer(target.ringBufferOffset, target.rangeAddr, target.rangeSize);
+			else
+				LatteBufferCache_copyStreamoutDataToCache(target.rangeAddr, target.rangeSize, target.ringBufferOffset);
 		}
-		g_renderer->streamout_rendererFinishDrawcall();
+		// the guest sees the buffer filled up to the new offset
+		StreamoutReg(mmVGT_STRMOUT_BUFFER_OFFSET_0, i) += target.rangeSize;
 	}
+	g_renderer->streamout_rendererFinishDrawcall();
 }
