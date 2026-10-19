@@ -71,7 +71,7 @@ Done:
   cache is a map from address to registrations (same first match order).
   Harness (stub renderer, fake graphic pack rules, serial ids, per-op state
   hash, full state dumps): seeds 0-100, 60+1400, 100+1600 and 100+2000
-  identical (4.3M+ lines per run), ASan/UBSan clean.
+  identical (4.3M to 13.7M lines per run), ASan/UBSan clean.
   Fixes: surface copy no longer uses the source texture after creating the
   destination deleted it (it is looked up again, or the copy is skipped;
   a LatteTextureDeleteGuard reports deletions); a failed destination
@@ -90,3 +90,34 @@ Done:
   ended host queries are queued now. With overlapping guest queries the
   old code hit that bug, so that mode was checked on the new code only
   (clean).
+- LatteShader.cpp/.h: original. Same base/aux hash formulas (they name the
+  shader cache entries and graphic pack shaders), same program hash memo
+  quirks (the pixel hash adds the geometry sum from the previous hash; the
+  geometry hash uses the vertex shader that was active before the update),
+  same shader chains per base hash, same state cache (key, aux variants,
+  expiry sweep) and the same compile/cache-write order per stage.
+  LatteShaderCache.cpp/.h: original, entry format unchanged (version/stage
+  byte, BE hashes, register state, programs; same entry names and extra
+  versions), same load loop, compile queue depth, boot images and sound.
+  Harness (stub decompiler/renderer/FileCache, both APIs): 420 seeds, 6M
+  lines identical, cache stores written by old and new byte identical, and
+  each build loading the other's store gives identical results; damaged
+  entries are rejected and deleted the same way. ASan/UBSan clean.
+  Fixes: UnloadAll clears the active shader pointers (the next geometry
+  hash read the freed vertex shader); LatteShader_free also frees a pending
+  generated source; a stale state-cache key can no longer loop forever when
+  a shader is freed; the boot sound thread is joined on exit (a joinable
+  std::thread at static destruction terminates); the loading screen redraw
+  timer also advances when the TV ImGui frame could not start (old code
+  then swapped buffers after every entry); Windows memory delta is signed.
+  Dropped: the dead experimental LatteShader_CompileSeparableVertexShader2
+  (it was the only user of the Zir/Transcompiler headers in Core).
+- LatteGSCopyShaderParser.cpp, LatteShaderAssembly.h: original (ISA values
+  unchanged; seven macros nobody used were dropped). Harness: 200k random
+  copy programs, 1.84M lines identical. Fix: fetch clauses that point past
+  the program are no longer read out of bounds.
+- LatteSoftware.cpp/.h: original (unused CPU vertex interpreter, same
+  opcode subset and quirks). Harness: 20000 random programs, 100k lines
+  identical. Differences: unsupported attribute formats read as zero
+  instead of uninitialised stack; unsupported operands read 0 instead of
+  hitting assert_dbg; the CF loop stops at the program end.

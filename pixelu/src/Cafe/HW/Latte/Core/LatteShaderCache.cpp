@@ -1,7 +1,9 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/CafeSystem.h"
 #include "Cafe/HW/Latte/Core/LatteConst.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
 #include "Cafe/HW/Latte/Core/LatteShader.h"
+#include "Cafe/HW/Latte/Core/LatteShaderCache.h"
 #include "Cafe/HW/Latte/LegacyShaderDecompiler/LatteDecompiler.h"
 #include "Cafe/HW/Latte/Core/FetchShader.h"
 #include "Cemu/FileCache/FileCache.h"
@@ -25,956 +27,782 @@
 #include "imgui/imgui_extension.h"
 
 #include "config/ActiveSettings.h"
+#include "config/CemuConfig.h"
 #include "Cafe/TitleList/GameInfo.h"
 
-#include "util/helpers/SystemException.h"
 #include "Cafe/HW/Latte/Common/RegisterSerializer.h"
 #include "Cafe/HW/Latte/Common/ShaderSerializer.h"
 #include "util/helpers/Serializer.h"
+#include "util/helpers/helpers.h"
 
 #include <audio/IAudioAPI.h>
 #include <util/bootSound/BootSoundReader.h>
 #include <thread>
+#include <deque>
 
 #if BOOST_OS_WINDOWS
 #include <psapi.h>
 #endif
 
-#define SHADER_CACHE_COMPILE_QUEUE_SIZE		(32)
+// Transferable shader cache: one file per title with every shader program the game used,
+// together with the register state it was translated under. On boot all entries are
+// translated again and handed to the backend, which has its own precompiled cache.
+//
+// Entry layout (big endian):
+//   u8   version (low nibble, always 1) | stage (high nibble: 0 vertex, 1 geometry, 2 pixel)
+//   u64  base hash
+//   u64  aux hash
+//   vertex:   u8 uses geometry shader, register state, fetch program, vertex program
+//   geometry: u16 vertex ring parameter count, register state, copy program, geometry program
+//   pixel:    u8 uses geometry shader, register state, pixel program
+// The entry name is (base hash with the stage in the top three bits, aux hash).
 
-struct
+namespace
 {
-	sint32 compiledShaderCount;
-	// number of loaded shaders
-	sint32 vertexShaderCount;
-	sint32 geometryShaderCount;
-	sint32 pixelShaderCount;
-}shaderCacheScreenStats;
+	enum : uint8
+	{
+		kEntryVertex = 0,
+		kEntryGeometry = 1,
+		kEntryPixel = 2,
+	};
+	constexpr uint8 kEntryVersion = 1;
+	// extra version of cache files written by 1.25.0 - 1.25.1b, still accepted when opening
+	constexpr uint32 kLegacyExtraVersion = 2;
+	constexpr size_t kMaxPendingCompiles = 32;
 
-struct
-{
-	ImTextureID textureTVId;
-	ImTextureID textureDRCId;
-	// shader loading
-	sint32 loadedShaderFiles;
-	sint32 shaderFileCount;
-	// pipeline loading
-	uint32 loadedPipelines;
-	sint32 pipelineFileCount;
-}g_shaderCacheLoaderState;
+	FileCache* s_cacheFile = nullptr;
 
-FileCache* s_shaderCacheGeneric = nullptr;	// contains hardware and version independent shader information
-
-#define SHADER_CACHE_GENERIC_EXTRA_VERSION		2 // changing this constant will invalidate all hardware-independent cache files
-
-#define SHADER_CACHE_TYPE_VERTEX				(0)
-#define SHADER_CACHE_TYPE_GEOMETRY				(1)
-#define SHADER_CACHE_TYPE_PIXEL					(2)
-
-bool LatteShaderCache_readSeparableShader(uint8* shaderInfoData, sint32 shaderInfoSize);
-void LatteShaderCache_LoadPipelineCache(uint64 cacheTitleId);
-bool LatteShaderCache_updatePipelineLoadingProgress();
-void LatteShaderCache_ShowProgress(const std::function <bool(void)>& loadUpdateFunc, bool isPipelines);
-
-struct
-{
+	// numbers shown on the loading screen
 	struct
 	{
-		LatteDecompilerShader* shader;
-	}entry[SHADER_CACHE_COMPILE_QUEUE_SIZE];
-	sint32 count;
-}shaderCompileQueue;
+		sint32 translated;
+		sint32 vertex;
+		sint32 geometry;
+		sint32 pixel;
+		sint32 shaderEntriesRead;
+		sint32 shaderEntryCount;
+		uint32 pipelinesLoaded;
+		sint32 pipelineCount;
+		ImTextureID tvBackground;
+		ImTextureID drcBackground;
+	} s_loading{};
 
-void LatteShaderCache_initCompileQueue()
-{
-	shaderCompileQueue.count = 0;
-}
+	// shaders whose backend compile was started but not waited for
+	std::deque<LatteDecompilerShader*> s_pendingCompiles;
 
-void LatteShaderCache_addToCompileQueue(LatteDecompilerShader* shader)
-{
-	cemu_assert(shaderCompileQueue.count < SHADER_CACHE_COMPILE_QUEUE_SIZE);
-	shaderCompileQueue.entry[shaderCompileQueue.count].shader = shader;
-	shaderCompileQueue.count++;
-}
-
-void LatteShaderCache_removeFromCompileQueue(sint32 index)
-{
-	for (sint32 i = index; i<shaderCompileQueue.count-1; i++)
-		shaderCompileQueue.entry[i].shader = shaderCompileQueue.entry[i + 1].shader;
-	shaderCompileQueue.count--;
-}
-
-/*
- * Process entries from compile queue until there are equal or less entries
- * left than specified by maxRemainingEntries
- */
-void LatteShaderCache_updateCompileQueue(sint32 maxRemainingEntries)
-{
-	while (true)
+	void QueueCompile(LatteDecompilerShader* shader)
 	{
-		if (shaderCompileQueue.count <= maxRemainingEntries)
+		cemu_assert(s_pendingCompiles.size() < kMaxPendingCompiles);
+		s_pendingCompiles.push_back(shader);
+	}
+
+	// waits for queued compiles until at most `keep` are left
+	void DrainCompiles(size_t keep)
+	{
+		while (s_pendingCompiles.size() > keep)
+		{
+			LatteDecompilerShader* shader = s_pendingCompiles.front();
+			if (shader)
+				LatteShader_FinishCompilation(shader);
+			s_pendingCompiles.pop_front();
+		}
+	}
+
+	uint64 EntryName(uint64 baseHash, uint8 stage)
+	{
+		constexpr uint64 kStageBits = 7ULL << 61;
+		return (baseHash & ~kStageBits) | ((uint64)stage << 61);
+	}
+
+	void BeginEntry(MemStreamWriter& out, uint8 stage, uint64 baseHash, uint64 auxHash)
+	{
+		out.writeBE<uint8>((uint8)(kEntryVersion | (stage << 4)));
+		out.writeBE<uint64>(baseHash);
+		out.writeBE<uint64>(auxHash);
+	}
+
+	void WriteRegisters(MemStreamWriter& out, uint32* contextRegisters)
+	{
+		Latte::GPUCompactedRegisterState compact;
+		Latte::StoreGPURegisterState(*(LatteContextRegister*)contextRegisters, compact);
+		Latte::SerializeRegisterState(compact, out);
+	}
+
+	void StoreEntry(MemStreamWriter& out, uint8 stage, uint64 baseHash, uint64 auxHash)
+	{
+		std::span<uint8> blob = out.getResult();
+		s_cacheFile->AddFileAsync({ EntryName(baseHash, stage), auxHash }, blob.data(), (sint32)blob.size());
+	}
+
+	bool ReadRegisters(MemStreamReader& in, LatteContextRegister& regs)
+	{
+		Latte::GPUCompactedRegisterState compact;
+		if (!Latte::DeserializeRegisterState(compact, in))
+			return false;
+		Latte::LoadGPURegisterState(regs, compact);
+		return !in.hasError();
+	}
+
+	bool ReadProgram(MemStreamReader& in, std::vector<uint8>& program)
+	{
+		return Latte::DeserializeShaderProgram(program, in) && !in.hasError();
+	}
+
+	// starts the backend compile of a shader read from the cache
+	void SubmitCachedShader(LatteDecompilerShader* shader)
+	{
+		switch (shader->shaderType)
+		{
+		case LatteConst::ShaderType::Vertex:
+			s_loading.vertex++;
 			break;
-		auto shader = shaderCompileQueue.entry[0].shader;
-		if (shader)
-			LatteShader_FinishCompilation(shader);
-		LatteShaderCache_removeFromCompileQueue(0);
-	}
-}
-
-typedef struct
-{
-	unsigned char imageTypeCode;
-	short int imageWidth;
-	short int imageHeight;
-	unsigned char bitCount;
-	std::vector<uint8> imageData;
-} TGAFILE;
-
-bool LoadTGAFile(const std::vector<uint8>& buffer, TGAFILE *tgaFile)
-{
-	if (buffer.size() <= 18)
-		return false;
-
-	tgaFile->imageTypeCode = buffer[2];
-	if (tgaFile->imageTypeCode != 2 && tgaFile->imageTypeCode != 3)
-		return false;
-
-	tgaFile->imageWidth = *(uint16*)(buffer.data() + 12);
-	tgaFile->imageHeight = *(uint16*)(buffer.data() + 14);
-	tgaFile->bitCount = buffer[16];
-
-	// Color mode -> 3 = BGR, 4 = BGRA.
-	const uint8 colorMode = tgaFile->bitCount / 8;
-	if (colorMode != 3)
-		return false;
-
-	const uint32 imageSize = tgaFile->imageWidth * tgaFile->imageHeight * colorMode;
-	if (imageSize + 18 >= buffer.size())
-		return false;
-
-	tgaFile->imageData.resize(imageSize);
-	std::copy(buffer.data() + 18, buffer.data() + 18 + imageSize, tgaFile->imageData.begin());
-	// Change from BGR to RGB so OpenGL can read the image data.
-	for (uint32 imageIdx = 0; imageIdx < imageSize; imageIdx += colorMode)
-	{
-		std::swap(tgaFile->imageData[imageIdx], tgaFile->imageData[imageIdx + 2]);
+		case LatteConst::ShaderType::Geometry:
+			s_loading.geometry++;
+			break;
+		case LatteConst::ShaderType::Pixel:
+			s_loading.pixel++;
+			break;
+		default:
+			break;
+		}
+		s_loading.translated++;
+		LatteShader_CreateRendererShader(shader, true);
+		if (shader->shader)
+			QueueCompile(shader);
 	}
 
-	return true;
-}
-
-class BootSoundPlayer
-{
-  public:
-	BootSoundPlayer() = default;
-	~BootSoundPlayer()
+	void FinishCachedShader(LatteDecompilerShader* shader, uint64 baseHash, uint64 auxHash, uint32 dumpType, std::vector<uint8>& program)
 	{
-		m_stopRequested = true;
+		LatteShader_DumpShader(baseHash, auxHash, shader);
+		LatteShader_DumpRawShader(baseHash, auxHash, dumpType, program.data(), (uint32)program.size());
+		SubmitCachedShader(shader);
+		LatteSHRC_RegisterShader(shader, baseHash, auxHash);
 	}
 
-	void StartSound()
+	bool LoadVertexEntry(MemStreamReader& in)
 	{
-		if (!m_bootSndPlayThread.joinable())
+		const uint64 baseHash = in.readBE<uint64>();
+		const uint64 auxHash = in.readBE<uint64>();
+		const bool usesGeometryShader = in.readBE<uint8>() != 0;
+		auto regs = std::make_unique<LatteContextRegister>();
+		std::vector<uint8> fetchProgram, vertexProgram;
+		if (!ReadRegisters(in, *regs) || !ReadProgram(in, fetchProgram) || !ReadProgram(in, vertexProgram) || !in.isEndOfStream())
+			return false;
+		uint32* rawRegs = regs->GetRawView();
+		// the pixel shader inputs decide which outputs the vertex shader has
+		LatteShader_UpdatePSInputs(rawRegs);
+		const LatteFetchShader::CacheHash fetchHash = LatteFetchShader::CalculateCacheHash((uint32*)fetchProgram.data(), (uint32)fetchProgram.size());
+		LatteFetchShader* fetchShader = LatteShaderRecompiler_createFetchShader(fetchHash, rawRegs, (uint32*)fetchProgram.data(), (uint32)fetchProgram.size());
+		LatteDecompilerOptions options;
+		LatteShader_GetDecompilerOptions(options, LatteConst::ShaderType::Vertex, usesGeometryShader);
+		LatteDecompilerOutput_t output{};
+		LatteDecompiler_DecompileVertexShader(baseHash, rawRegs, vertexProgram.data(), (uint32)vertexProgram.size(), fetchShader, options, &output);
+		LatteDecompilerShader* shader = LatteShader_CreateShaderFromDecompilerOutput(output, baseHash, false, auxHash, rawRegs);
+		FinishCachedShader(shader, baseHash, auxHash, SHADER_DUMP_TYPE_VERTEX, vertexProgram);
+		return true;
+	}
+
+	bool LoadGeometryEntry(MemStreamReader& in)
+	{
+		const uint64 baseHash = in.readBE<uint64>();
+		const uint64 auxHash = in.readBE<uint64>();
+		const uint32 vsRingParameterCount = in.readBE<uint16>();
+		auto regs = std::make_unique<LatteContextRegister>();
+		std::vector<uint8> copyProgram, geometryProgram;
+		if (!ReadRegisters(in, *regs) || !ReadProgram(in, copyProgram) || !ReadProgram(in, geometryProgram) || !in.isEndOfStream())
+			return false;
+		uint32* rawRegs = regs->GetRawView();
+		LatteShader_UpdatePSInputs(rawRegs);
+		LatteDecompilerOptions options;
+		LatteShader_GetDecompilerOptions(options, LatteConst::ShaderType::Geometry, true);
+		LatteDecompilerOutput_t output{};
+		LatteDecompiler_DecompileGeometryShader(baseHash, rawRegs, geometryProgram.data(), (uint32)geometryProgram.size(), copyProgram.data(), (uint32)copyProgram.size(), vsRingParameterCount, options, &output);
+		LatteDecompilerShader* shader = LatteShader_CreateShaderFromDecompilerOutput(output, baseHash, false, auxHash, rawRegs);
+		FinishCachedShader(shader, baseHash, auxHash, SHADER_DUMP_TYPE_GEOMETRY, geometryProgram);
+		return true;
+	}
+
+	bool LoadPixelEntry(MemStreamReader& in)
+	{
+		const uint64 baseHash = in.readBE<uint64>();
+		const uint64 auxHash = in.readBE<uint64>();
+		const bool usesGeometryShader = in.readBE<uint8>() != 0;
+		auto regs = std::make_unique<LatteContextRegister>();
+		std::vector<uint8> pixelProgram;
+		if (!ReadRegisters(in, *regs) || !ReadProgram(in, pixelProgram) || !in.isEndOfStream())
+			return false;
+		uint32* rawRegs = regs->GetRawView();
+		LatteShader_UpdatePSInputs(rawRegs);
+		LatteDecompilerOptions options;
+		LatteShader_GetDecompilerOptions(options, LatteConst::ShaderType::Pixel, usesGeometryShader);
+		LatteDecompilerOutput_t output{};
+		LatteDecompiler_DecompilePixelShader(baseHash, rawRegs, pixelProgram.data(), (uint32)pixelProgram.size(), options, &output);
+		LatteDecompilerShader* shader = LatteShader_CreateShaderFromDecompilerOutput(output, baseHash, false, auxHash, rawRegs);
+		FinishCachedShader(shader, baseHash, auxHash, SHADER_DUMP_TYPE_PIXEL, pixelProgram);
+		return true;
+	}
+
+	// false if the entry is damaged or of an unknown kind
+	bool LoadEntry(const uint8* data, size_t size)
+	{
+		if (size < 8)
+			return false;
+		MemStreamReader in(data, (sint32)size);
+		const uint8 header = in.readBE<uint8>();
+		if ((header & 0xF) != kEntryVersion)
+			return false;
+		switch ((header >> 4) & 0xF)
 		{
-			m_fadeOutRequested = false;
-			m_stopRequested = false;
-			m_bootSndPlayThread = std::thread{[this]() {
-				StreamBootSound();
-			}};
+		case kEntryVertex:
+			return LoadVertexEntry(in);
+		case kEntryGeometry:
+			return LoadGeometryEntry(in);
+		case kEntryPixel:
+			return LoadPixelEntry(in);
+		default:
+			return false;
 		}
 	}
 
-	void FadeOutSound()
+	// uncompressed 24 bit TGA (true color or grayscale type codes), converted to RGB rows
+	struct BootImage
 	{
-		m_fadeOutRequested = true;
+		sint16 width;
+		sint16 height;
+		std::vector<uint8> rgb;
+	};
+
+	bool DecodeBootImage(const std::vector<uint8>& file, BootImage& image)
+	{
+		constexpr size_t kHeaderSize = 18;
+		if (file.size() <= kHeaderSize)
+			return false;
+		const uint8 typeCode = file[2];
+		if (typeCode != 2 && typeCode != 3)
+			return false;
+		image.width = (sint16)(file[12] | (file[13] << 8));
+		image.height = (sint16)(file[14] | (file[15] << 8));
+		if (file[16] / 8 != 3)
+			return false;
+		const uint32 byteCount = (uint32)(image.width * image.height * 3);
+		if (byteCount + kHeaderSize >= file.size())
+			return false;
+		image.rgb.assign(file.begin() + kHeaderSize, file.begin() + kHeaderSize + byteCount);
+		for (uint32 i = 0; i < byteCount; i += 3)
+			std::swap(image.rgb[i], image.rgb[i + 2]);
+		return true;
 	}
 
-	void ApplyFadeOutEffect(std::span<sint16> samples, uint64& fadeOutSample, uint64 fadeOutDuration)
+	ImTextureID LoadBootImage(const char* fileName)
 	{
-		for (size_t i = 0; i < samples.size(); i += 2)
+		const std::string path = fmt::format("{}/meta/{}", CafeSystem::GetMlcStoragePath(CafeSystem::GetForegroundTitleId()), fileName);
+		sint32 status;
+		FSCVirtualFile* file = fsc_open(path.c_str(), FSC_ACCESS_FLAG::OPEN_FILE | FSC_ACCESS_FLAG::READ_PERMISSION, &status);
+		if (!file)
+			return nullptr;
+		ImTextureID texture = nullptr;
+		const uint32 size = fsc_getFileSize(file);
+		if (size > 0)
 		{
-			const float decibel = (float)fadeOutSample / fadeOutDuration * -60.0f;
-			const float volumeFactor = pow(10, decibel / 20);
-			samples[i] *= volumeFactor;
-			samples[i + 1] *= volumeFactor;
-			fadeOutSample++;
+			std::vector<uint8> data(size);
+			fsc_readFile(file, data.data(), size);
+			BootImage image;
+			if (DecodeBootImage(data, image))
+				texture = g_renderer->GenerateTexture(image.rgb, { image.width, image.height });
 		}
+		fsc_close(file);
+		return texture;
 	}
 
-	void StreamBootSound()
+	// plays the title's boot jingle while shaders load and fades it out afterwards
+	class BootJingle
 	{
-		SetThreadName("bootsnd");
-		constexpr sint32 sampleRate = 48'000;
-		constexpr sint32 bitsPerSample = 16;
-		constexpr sint32 samplesPerBlock = sampleRate / 10; // block is 1/10th of a second
-		constexpr sint32 nChannels = 2;
-		static_assert(bitsPerSample % 8 == 0, "bits per sample is not a multiple of 8");
-
-		AudioAPIPtr bootSndAudioDev;
-
-		try
+	public:
+		~BootJingle()
 		{
-			bootSndAudioDev = IAudioAPI::CreateDeviceFromConfig(IAudioAPI::AudioType::TV, sampleRate, nChannels, samplesPerBlock, bitsPerSample);
-			if(!bootSndAudioDev)
+			m_stop = true;
+			if (m_thread.joinable())
+				m_thread.join();
+		}
+
+		void Start()
+		{
+			if (m_thread.joinable())
 				return;
-		}
-		catch (const std::runtime_error& ex)
-		{
-			cemuLog_log(LogType::Force, "Failed to initialise audio device for bootup sound");
-			return;
-		}
-		bootSndAudioDev->SetAudioDelayOverride(4);
-		bootSndAudioDev->Play();
-
-		std::string sndPath = fmt::format("{}/meta/{}", CafeSystem::GetMlcStoragePath(CafeSystem::GetForegroundTitleId()), "bootSound.btsnd");
-		sint32 fscStatus = FSC_STATUS_UNDEFINED;
-
-		if(!fsc_doesFileExist(sndPath.c_str()))
-			return;
-
-		FSCVirtualFile* bootSndFileHandle = fsc_open(sndPath.c_str(), FSC_ACCESS_FLAG::OPEN_FILE | FSC_ACCESS_FLAG::READ_PERMISSION, &fscStatus);
-		if(!bootSndFileHandle)
-		{
-			cemuLog_log(LogType::Force, "failed to open bootSound.btsnd");
-			return;
+			m_fadeOut = false;
+			m_stop = false;
+			m_thread = std::thread([this] { Run(); });
 		}
 
-		constexpr sint32 audioBlockSize = samplesPerBlock * (bitsPerSample/8) * nChannels;
-		BootSoundReader bootSndFileReader(bootSndFileHandle, audioBlockSize);
-
-		uint64 fadeOutSample = 0; // track how far into the fadeout
-		constexpr uint64 fadeOutDuration = sampleRate * 2; // fadeout should last 2 seconds
-		while(fadeOutSample < fadeOutDuration && !m_stopRequested)
+		void FadeOut()
 		{
-			while (bootSndAudioDev->NeedAdditionalBlocks())
+			m_fadeOut = true;
+		}
+
+	private:
+		static constexpr sint32 kRate = 48000;
+		static constexpr sint32 kChannels = 2;
+		static constexpr sint32 kBits = 16;
+		static constexpr sint32 kFramesPerBlock = kRate / 10;
+		static constexpr uint64 kFadeFrames = kRate * 2;
+
+		// -60 dB at the end of the fade
+		void Attenuate(sint16* samples, size_t count, uint64& fadePos)
+		{
+			for (size_t i = 0; i + 1 < count; i += 2)
 			{
-				sint16* data = bootSndFileReader.getSamples();
-				if(data == nullptr)
-				{
-					// break outer loop
-					m_stopRequested = true;
-					break;
-				}
-				if(m_fadeOutRequested)
-					ApplyFadeOutEffect({data, samplesPerBlock * nChannels}, fadeOutSample, fadeOutDuration);
-
-				bootSndAudioDev->FeedBlock(data);
+				const float gain = std::pow(10.0f, ((float)fadePos / kFadeFrames * -60.0f) / 20.0f);
+				samples[i] = (sint16)(samples[i] * gain);
+				samples[i + 1] = (sint16)(samples[i + 1] * gain);
+				fadePos++;
 			}
-			// sleep for the duration of a single block
-			std::this_thread::sleep_for(std::chrono::milliseconds(samplesPerBlock / (sampleRate/ 1'000)));
 		}
 
-		if(bootSndFileHandle)
-			fsc_close(bootSndFileHandle);
-	}
+		void Run()
+		{
+			SetThreadName("bootsnd");
+			AudioAPIPtr device;
+			try
+			{
+				device = IAudioAPI::CreateDeviceFromConfig(IAudioAPI::AudioType::TV, kRate, kChannels, kFramesPerBlock, kBits);
+			}
+			catch (const std::runtime_error&)
+			{
+				cemuLog_log(LogType::Force, "Failed to initialise audio device for bootup sound");
+				return;
+			}
+			if (!device)
+				return;
+			device->SetAudioDelayOverride(4);
+			device->Play();
 
-  private:
-	std::thread m_bootSndPlayThread;
-	std::atomic_bool m_fadeOutRequested = false;
-	std::atomic_bool m_stopRequested = false;
-};
-static BootSoundPlayer g_bootSndPlayer;
+			const std::string path = fmt::format("{}/meta/bootSound.btsnd", CafeSystem::GetMlcStoragePath(CafeSystem::GetForegroundTitleId()));
+			if (!fsc_doesFileExist(path.c_str()))
+				return;
+			sint32 status = FSC_STATUS_UNDEFINED;
+			FSCVirtualFile* file = fsc_open(path.c_str(), FSC_ACCESS_FLAG::OPEN_FILE | FSC_ACCESS_FLAG::READ_PERMISSION, &status);
+			if (!file)
+			{
+				cemuLog_log(LogType::Force, "failed to open bootSound.btsnd");
+				return;
+			}
+			{
+				BootSoundReader reader(file, kFramesPerBlock * kChannels * (kBits / 8));
+				uint64 fadePos = 0;
+				while (fadePos < kFadeFrames && !m_stop)
+				{
+					while (device->NeedAdditionalBlocks())
+					{
+						sint16* block = reader.getSamples();
+						if (!block)
+						{
+							m_stop = true; // end of the file
+							break;
+						}
+						if (m_fadeOut)
+							Attenuate(block, kFramesPerBlock * kChannels, fadePos);
+						device->FeedBlock(block);
+					}
+					std::this_thread::sleep_for(std::chrono::milliseconds(1000 * kFramesPerBlock / kRate));
+				}
+			}
+			fsc_close(file);
+		}
 
-void LatteShaderCache_finish()
-{
-	switch (g_renderer->GetType())
+		std::thread m_thread;
+		std::atomic_bool m_fadeOut{ false };
+		std::atomic_bool m_stop{ false };
+	};
+	BootJingle s_bootJingle;
+
+	void NotifyBackendLoadingDone()
 	{
+		switch (g_renderer->GetType())
+		{
 #ifdef ENABLE_VULKAN
-	case RendererAPI::Vulkan:
-		RendererShaderVk::ShaderCacheLoading_end();
-		return;
+		case RendererAPI::Vulkan:
+			RendererShaderVk::ShaderCacheLoading_end();
+			break;
 #endif
 #ifdef ENABLE_OPENGL
-	case RendererAPI::OpenGL:
-		RendererShaderGL::ShaderCacheLoading_end();
-		return;
+		case RendererAPI::OpenGL:
+			RendererShaderGL::ShaderCacheLoading_end();
+			break;
 #endif
 #ifdef ENABLE_METAL
-	case RendererAPI::Metal:
-		RendererShaderMtl::ShaderCacheLoading_end();
-		return;
+		case RendererAPI::Metal:
+			RendererShaderMtl::ShaderCacheLoading_end();
+			break;
 #endif
+		default:
+			break;
+		}
+	}
+
+	// full screen image, scaled to fit and centered
+	void DrawBackground(ImTextureID texture, int width, int height)
+	{
+		constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
+			ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBringToFrontOnFocus;
+		const ImVec2 display = ImGui::GetIO().DisplaySize;
+		ImGui::SetNextWindowPos({ 0, 0 }, ImGuiCond_Always);
+		ImGui::SetNextWindowSize(display, ImGuiCond_Always);
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
+		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, { 0, 0 });
+		if (ImGui::Begin("Background texture", nullptr, kFlags) && texture)
+		{
+			// fit the width first, the height if the image would be too tall
+			float drawW = display.x;
+			float drawH = height * drawW / width;
+			if (drawH > display.y)
+			{
+				drawH = display.y;
+				drawW = width * drawH / height;
+			}
+			const float marginX = (display.x - drawW) / 2.0f;
+			const float marginY = (display.y - drawH) / 2.0f;
+			ImGui::GetWindowDrawList()->AddImage(texture, ImVec2(marginX, marginY), ImVec2(display.x - marginX, display.y - marginY), { 0, 1 }, { 1, 0 });
+		}
+		ImGui::End();
+		ImGui::PopStyleVar(2);
+	}
+
+	void DrawProgressScreen(bool pipelines, const Vector2f& window)
+	{
+		constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
+			ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_AlwaysAutoResize;
+		const ImU32 kBarColor = 0xFF888888;
+		DrawBackground(s_loading.tvBackground, 1280, 720);
+		ImFont* largeFont = ImGui_GetFont(window.y / 32.0f);
+		ImFont* smallFont = ImGui_GetFont(window.y / 48.0f);
+
+		const uint32 done = pipelines ? s_loading.pipelinesLoaded : (uint32)s_loading.shaderEntriesRead;
+		const sint32 total = pipelines ? s_loading.pipelineCount : s_loading.shaderEntryCount;
+		const float fraction = total > 0 ? (float)done / (float)total : 0.0f;
+		const char* caption = pipelines ? "Loading cached pipelines..." : (s_loading.translated >= 3 ? "Compiling cached shaders..." : "Loading cached shaders...");
+		const std::string counter = fmt::format("{}/{} ({}%)", done, total, (int)(fraction * 100));
+
+		ImGui::SetNextWindowPos({ window.x / 2.0f, window.y / 2.0f }, ImGuiCond_Always, { 0.5f, 0.5f });
+		ImGui::SetNextWindowSize({ ImGui::GetIO().DisplaySize.x * 0.5f, 0 }, ImGuiCond_Always);
+		ImGui::SetNextWindowBgAlpha(0.8f);
+		ImGui::PushStyleColor(ImGuiCol_PlotHistogram, kBarColor);
+		ImGui::PushStyleColor(ImGuiCol_WindowBg, 0);
+		ImGui::PushFont(largeFont);
+		if (ImGui::Begin("Shader progress", nullptr, kFlags))
+		{
+			const float center = ImGui::GetWindowSize().x / 2.0f;
+			ImGui::SetCursorPosX(center - ImGui::CalcTextSize(caption).x / 2);
+			ImGui::Text("%s", caption);
+			ImGui::ProgressBar(fraction, { -1, 0 }, "");
+			ImGui::SetCursorPosX(center - ImGui::CalcTextSize(counter.c_str()).x / 2);
+			ImGui::Text("%s", counter.c_str());
+		}
+		ImGui::End();
+		ImGui::PopFont();
+		ImGui::PopStyleColor(2);
+
+		if (pipelines)
+			return;
+		// per stage counters in the lower left corner
+		ImGui::SetNextWindowPos({ 10, window.y - 10 }, ImGuiCond_Always, { 0, 1 });
+		ImGui::SetNextWindowBgAlpha(0.8f);
+		ImGui::PushStyleColor(ImGuiCol_WindowBg, 0);
+		ImGui::PushFont(smallFont);
+		if (ImGui::Begin("Shader count", nullptr, kFlags))
+		{
+			const float column = smallFont->FallbackAdvanceX * 25.f;
+			const std::pair<const char*, sint32> rows[] = {
+				{ "Vertex shaders", s_loading.vertex },
+				{ "Pixel shaders", s_loading.pixel },
+				{ "Geometry shaders", s_loading.geometry },
+			};
+			for (const auto& row : rows)
+			{
+				ImGui::Text("%s", row.first);
+				ImGui::SameLine(column);
+				ImGui::Text("%d", row.second);
+			}
+		}
+		ImGui::End();
+		ImGui::PopStyleColor();
+		ImGui::PopFont();
+	}
+
+	// runs step() until it returns false, redrawing the loading screen at about 20 fps
+	void RunWithProgressScreen(const std::function<bool()>& step, bool pipelines)
+	{
+		auto lastRedraw = tick_cached();
+		while (!Latte_GetStopSignal() && step())
+		{
+			if (tick_cached() - lastRedraw < std::chrono::milliseconds(1000 / 20))
+				continue;
+			int w, h;
+			WindowSystem::GetWindowPhysSize(w, h);
+			const Vector2f window{ (float)w, (float)h };
+			// make sure both font sizes exist before the frame starts
+			ImGui_GetFont(window.y / 32.0f);
+			ImGui_GetFont(window.y / 48.0f);
+			g_renderer->BeginFrame(true);
+			if (g_renderer->ImguiBegin(true))
+			{
+				DrawProgressScreen(pipelines, window);
+				g_renderer->ImguiEnd();
+			}
+			g_renderer->BeginFrame(false);
+			if (g_renderer->ImguiBegin(false))
+			{
+				DrawBackground(s_loading.drcBackground, 854, 480);
+				g_renderer->ImguiEnd();
+			}
+			g_renderer->SwapBuffers(true, true);
+			lastRedraw = tick_cached();
+		}
+	}
+
+	bool StepPipelineLoading()
+	{
+		uint32 missingShaders = 0;
+		switch (g_renderer->GetType())
+		{
+#ifdef ENABLE_VULKAN
+		case RendererAPI::Vulkan:
+			return VulkanPipelineStableCache::GetInstance().UpdateLoading(s_loading.pipelinesLoaded, missingShaders);
+#endif
+#ifdef ENABLE_METAL
+		case RendererAPI::Metal:
+			return MetalPipelineCache::GetInstance().UpdateLoading(s_loading.pipelinesLoaded, missingShaders);
+#endif
+		default:
+			return false;
+		}
+	}
+
+	void LoadPipelines(uint64 titleId)
+	{
+		switch (g_renderer->GetType())
+		{
+#ifdef ENABLE_VULKAN
+		case RendererAPI::Vulkan:
+			s_loading.pipelineCount = VulkanPipelineStableCache::GetInstance().BeginLoading(titleId);
+			break;
+#endif
+#ifdef ENABLE_METAL
+		case RendererAPI::Metal:
+			s_loading.pipelineCount = MetalPipelineCache::GetInstance().BeginLoading(titleId);
+			break;
+#endif
+		default:
+			break;
+		}
+		s_loading.pipelinesLoaded = 0;
+		RunWithProgressScreen(StepPipelineLoading, true);
+		switch (g_renderer->GetType())
+		{
+#ifdef ENABLE_VULKAN
+		case RendererAPI::Vulkan:
+			VulkanPipelineStableCache::GetInstance().EndLoading();
+			break;
+#endif
+#ifdef ENABLE_METAL
+		case RendererAPI::Metal:
+			MetalPipelineCache::GetInstance().EndLoading();
+			break;
+#endif
+		default:
+			break;
+		}
+	}
+
+	// the title id is folded in so caches cannot be swapped between titles
+	uint32 TitleSalt(uint64 titleId)
+	{
+		return (uint32)(titleId >> 32) + (uint32)titleId * 3;
 	}
 }
 
 uint32 LatteShaderCache_getShaderCacheExtraVersion(uint64 titleId)
 {
-	// encode the titleId in the version to prevent users from swapping caches between titles
-	const uint32 cacheFileVersion = 1;
-	uint32 extraVersion = ((uint32)(titleId >> 32) + ((uint32)titleId) * 3) + cacheFileVersion + 0xe97af1ad;
-	return extraVersion;
+	constexpr uint32 kFormatRevision = 1;
+	return TitleSalt(titleId) + kFormatRevision + 0xe97af1ad;
 }
 
 uint32 LatteShaderCache_getPipelineCacheExtraVersion(uint64 titleId)
 {
-	const uint32 cacheFileVersion = 1;
-	uint32 extraVersion = ((uint32)(titleId >> 32) + ((uint32)titleId) * 3) + cacheFileVersion;
-	return extraVersion;
-}
-
-void LatteShaderCache_drawBackgroundImage(ImTextureID texture, int width, int height)
-{
-	// clear framebuffers and clean up
-	const auto kPopupFlags =
-			ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings |
-			ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_AlwaysAutoResize |
-			ImGuiWindowFlags_NoBringToFrontOnFocus;
-	auto& io = ImGui::GetIO();
-	ImGui::SetNextWindowPos({0, 0}, ImGuiCond_Always);
-	ImGui::SetNextWindowSize(io.DisplaySize, ImGuiCond_Always);
-	ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
-	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0, 0});
-	if (ImGui::Begin("Background texture", nullptr, kPopupFlags))
-	{
-		if (texture)
-		{
-			float imageDisplayWidth = io.DisplaySize.x;
-			float imageDisplayHeight = height * imageDisplayWidth / width;
-
-			float paddingLeftAndRight = 0.0f;
-			float paddingTopAndBottom = (io.DisplaySize.y - imageDisplayHeight) / 2.0f;
-			if (imageDisplayHeight > io.DisplaySize.y)
-			{
-				imageDisplayHeight = io.DisplaySize.y;
-				imageDisplayWidth = width * imageDisplayHeight / height;
-				paddingLeftAndRight = (io.DisplaySize.x - imageDisplayWidth) / 2.0f;
-				paddingTopAndBottom = 0.0f;
-			}
-
-			ImGui::GetWindowDrawList()->AddImage(texture, ImVec2(paddingLeftAndRight, paddingTopAndBottom),
-												 ImVec2(io.DisplaySize.x - paddingLeftAndRight,
-														io.DisplaySize.y - paddingTopAndBottom), {0, 1}, {1, 0});
-		}
-	}
-	ImGui::End();
-	ImGui::PopStyleVar(2);
+	constexpr uint32 kFormatRevision = 1;
+	return TitleSalt(titleId) + kFormatRevision;
 }
 
 void LatteShaderCache_Load()
 {
-	shaderCacheScreenStats.compiledShaderCount = 0;
-	shaderCacheScreenStats.vertexShaderCount = 0;
-	shaderCacheScreenStats.geometryShaderCount = 0;
-	shaderCacheScreenStats.pixelShaderCount = 0;
-
-	uint64 cacheTitleId = CafeSystem::GetForegroundTitleId();
-
-	const auto timeLoadStart = now_cached();
-	// remember current amount of committed memory
+	s_loading.translated = 0;
+	s_loading.vertex = 0;
+	s_loading.geometry = 0;
+	s_loading.pixel = 0;
+	const uint64 titleId = CafeSystem::GetForegroundTitleId();
+	const auto loadStart = now_cached();
 #if BOOST_OS_WINDOWS
-	PROCESS_MEMORY_COUNTERS pmc1;
-	GetProcessMemoryInfo(GetCurrentProcess(), &pmc1, sizeof(PROCESS_MEMORY_COUNTERS));
-	LONGLONG totalMem1 = pmc1.PagefileUsage;
+	PROCESS_MEMORY_COUNTERS memBefore;
+	GetProcessMemoryInfo(GetCurrentProcess(), &memBefore, sizeof(memBefore));
 #endif
-	// init shader parallel compile queue
-	LatteShaderCache_initCompileQueue();
-	// create directories
+	s_pendingCompiles.clear();
 	std::error_code ec;
 	fs::create_directories(ActiveSettings::GetCachePath("shaderCache/transferable"), ec);
 	fs::create_directories(ActiveSettings::GetCachePath("shaderCache/precompiled"), ec);
-	// initialize renderer specific caches
-	switch(g_renderer->GetType())
+	const RendererAPI api = g_renderer->GetType();
+	switch (api)
 	{
 #ifdef ENABLE_VULKAN
 	case RendererAPI::Vulkan:
-		RendererShaderVk::ShaderCacheLoading_begin(cacheTitleId);
+		RendererShaderVk::ShaderCacheLoading_begin(titleId);
 		break;
 #endif
 #ifdef ENABLE_OPENGL
 	case RendererAPI::OpenGL:
-		RendererShaderGL::ShaderCacheLoading_begin(cacheTitleId);
+		RendererShaderGL::ShaderCacheLoading_begin(titleId);
 		break;
 #endif
 #ifdef ENABLE_METAL
 	case RendererAPI::Metal:
-		RendererShaderMtl::ShaderCacheLoading_begin(cacheTitleId);
+		RendererShaderMtl::ShaderCacheLoading_begin(titleId);
 		break;
 #endif
-	}
-
-	// get cache file name
-	fs::path pathGeneric;
-	switch(g_renderer->GetType())
-	{
-	case RendererAPI::Metal:
-	    pathGeneric = ActiveSettings::GetCachePath("shaderCache/transferable/{:016x}_mtlshaders.bin", cacheTitleId);
-		break;
 	default:
-	    pathGeneric = ActiveSettings::GetCachePath("shaderCache/transferable/{:016x}_shaders.bin", cacheTitleId);
 		break;
 	}
 
-	// calculate extraVersion for transferable and precompiled shader cache
-	uint32 transferableExtraVersion = SHADER_CACHE_GENERIC_EXTRA_VERSION;
-    s_shaderCacheGeneric = FileCache::Open(pathGeneric, false, transferableExtraVersion); // legacy extra version (1.25.0 - 1.25.1b)
-	if(!s_shaderCacheGeneric)
-        s_shaderCacheGeneric = FileCache::Open(pathGeneric, true, LatteShaderCache_getShaderCacheExtraVersion(cacheTitleId));
-	if(!s_shaderCacheGeneric)
+	// Metal shaders are generated differently and get a file of their own
+	const fs::path cachePath = api == RendererAPI::Metal ? ActiveSettings::GetCachePath("shaderCache/transferable/{:016x}_mtlshaders.bin", titleId)
+		: ActiveSettings::GetCachePath("shaderCache/transferable/{:016x}_shaders.bin", titleId);
+	s_cacheFile = FileCache::Open(cachePath, false, kLegacyExtraVersion);
+	if (!s_cacheFile)
+		s_cacheFile = FileCache::Open(cachePath, true, LatteShaderCache_getShaderCacheExtraVersion(titleId));
+	if (!s_cacheFile)
 	{
-		// no shader cache available yet
-		cemuLog_log(LogType::Force, "Unable to open or create shader cache file \"{}\"", _pathToUtf8(pathGeneric));
-		LatteShaderCache_finish();
+		cemuLog_log(LogType::Force, "Unable to open or create shader cache file \"{}\"", _pathToUtf8(cachePath));
+		NotifyBackendLoadingDone();
 		return;
 	}
-	s_shaderCacheGeneric->UseCompression(false);
+	s_cacheFile->UseCompression(false);
+	s_loading.shaderEntryCount = s_cacheFile->GetFileCount();
+	s_loading.shaderEntriesRead = 0;
 
-	// load/compile cached shaders
-	sint32 entryCount = s_shaderCacheGeneric->GetMaximumFileIndex();
-	g_shaderCacheLoaderState.shaderFileCount = s_shaderCacheGeneric->GetFileCount();
-	g_shaderCacheLoaderState.loadedShaderFiles = 0;
+	s_loading.tvBackground = LoadBootImage("bootTvTex.tga");
+	s_loading.drcBackground = LoadBootImage("bootDRCTex.tga");
+	if (GetConfig().play_boot_sound)
+		s_bootJingle.Start();
 
-	// get game background loading image
-	auto loadBackgroundTexture = [](bool isTV, ImTextureID& out)
+	sint32 entriesLoaded = 0;
+	uint32 index = 0;
+	auto loadNext = [&]() -> bool
 	{
-		TGAFILE file{};
-		out = nullptr;
-
-		std::string fileName = isTV ? "bootTvTex.tga" : "bootDRCTex.tga";
-
-		std::string texPath = fmt::format("{}/meta/{}", CafeSystem::GetMlcStoragePath(CafeSystem::GetForegroundTitleId()), fileName);
-		sint32 status;
-		auto fscfile = fsc_open(texPath.c_str(), FSC_ACCESS_FLAG::OPEN_FILE | FSC_ACCESS_FLAG::READ_PERMISSION, &status);
-		if (fscfile)
-		{
-			uint32 size = fsc_getFileSize(fscfile);
-			if (size > 0)
-			{
-				std::vector<uint8> tmpData(size);
-				fsc_readFile(fscfile, tmpData.data(), size);
-				const bool backgroundLoaded = LoadTGAFile(tmpData, &file);
-
-				if (backgroundLoaded)
-					out = g_renderer->GenerateTexture(file.imageData, { file.imageWidth, file.imageHeight });
-			}
-
-			fsc_close(fscfile);
-		}
-	};
-
-	loadBackgroundTexture(true, g_shaderCacheLoaderState.textureTVId);
-	loadBackgroundTexture(false, g_shaderCacheLoaderState.textureDRCId);
-
-	if(GetConfig().play_boot_sound)
-		g_bootSndPlayer.StartSound();
-
-	sint32 numLoadedShaders = 0;
-	uint32 loadIndex = 0;
-
-	auto LoadShadersUpdate = [&]() -> bool
-	{
-		if (loadIndex >= (uint32)s_shaderCacheGeneric->GetMaximumFileIndex())
+		if (index >= (uint32)s_cacheFile->GetMaximumFileIndex())
 			return false;
-		LatteShaderCache_updateCompileQueue(SHADER_CACHE_COMPILE_QUEUE_SIZE - 2);
-		uint64 name1;
-		uint64 name2;
-		std::vector<uint8> fileData;
-		if (!s_shaderCacheGeneric->GetFileByIndex(loadIndex, &name1, &name2, fileData))
+		// keep a couple of free slots for the shaders of this entry
+		DrainCompiles(kMaxPendingCompiles - 2);
+		uint64 name1, name2;
+		std::vector<uint8> data;
+		const uint32 current = index++;
+		if (!s_cacheFile->GetFileByIndex(current, &name1, &name2, data))
+			return true; // empty slot
+		s_loading.shaderEntriesRead++;
+		if (!LoadEntry(data.data(), data.size()))
 		{
-			loadIndex++;
-			return true;
+			cemuLog_log(LogType::Force, "Shader cache entry {} invalid, deleting...", current);
+			s_cacheFile->DeleteFile({ name1, name2 });
 		}
-		g_shaderCacheLoaderState.loadedShaderFiles++;
-		if (LatteShaderCache_readSeparableShader(fileData.data(), fileData.size()) == false)
-		{
-			// something is wrong with the stored shader, remove entry from shader cache files
-			cemuLog_log(LogType::Force, "Shader cache entry {} invalid, deleting...", loadIndex);
-			s_shaderCacheGeneric->DeleteFile({name1, name2 });
-		}
-		numLoadedShaders++;
-		loadIndex++;
+		entriesLoaded++;
 		return true;
 	};
-
-	LatteShaderCache_ShowProgress(LoadShadersUpdate, false);
-
-	LatteShaderCache_updateCompileQueue(0);
-	// write load time and RAM usage to log file (in dev build)
+	RunWithProgressScreen(loadNext, false);
+	DrainCompiles(0);
 #if BOOST_OS_WINDOWS
-	const auto timeLoadEnd = now_cached();
-	const auto timeLoad = std::chrono::duration_cast<std::chrono::milliseconds>(timeLoadEnd - timeLoadStart).count();
-	PROCESS_MEMORY_COUNTERS pmc2;
-	GetProcessMemoryInfo(GetCurrentProcess(), &pmc2, sizeof(PROCESS_MEMORY_COUNTERS));
-	LONGLONG totalMem2 = pmc2.PagefileUsage;
-	LONGLONG memCommited = totalMem2 - totalMem1;
-	cemuLog_log(LogType::Force, "Shader cache loaded with {} shaders. Commited mem {}MB. Took {}ms", numLoadedShaders, (sint32)(memCommited/1024/1024), timeLoad);
+	PROCESS_MEMORY_COUNTERS memAfter;
+	GetProcessMemoryInfo(GetCurrentProcess(), &memAfter, sizeof(memAfter));
+	const auto loadMs = std::chrono::duration_cast<std::chrono::milliseconds>(now_cached() - loadStart).count();
+	cemuLog_log(LogType::Force, "Shader cache loaded with {} shaders. Commited mem {}MB. Took {}ms", entriesLoaded, (sint32)(((sint64)memAfter.PagefileUsage - (sint64)memBefore.PagefileUsage) / 1024 / 1024), loadMs);
+#else
+	(void)loadStart;
 #endif
-	LatteShaderCache_finish();
-	// if Vulkan or Metal then also load pipeline cache
+	NotifyBackendLoadingDone();
 #if defined(ENABLE_VULKAN) || defined(ENABLE_METAL)
-	if (g_renderer->GetType() == RendererAPI::Vulkan || g_renderer->GetType() == RendererAPI::Metal)
-        LatteShaderCache_LoadPipelineCache(cacheTitleId);
+	if (api == RendererAPI::Vulkan || api == RendererAPI::Metal)
+		LoadPipelines(titleId);
 #endif
 
-
+	// one last frame with only the background images, then release them
 	g_renderer->BeginFrame(true);
 	if (g_renderer->ImguiBegin(true))
 	{
-		LatteShaderCache_drawBackgroundImage(g_shaderCacheLoaderState.textureTVId, 1280, 720);
+		DrawBackground(s_loading.tvBackground, 1280, 720);
 		g_renderer->ImguiEnd();
 	}
 	g_renderer->BeginFrame(false);
 	if (g_renderer->ImguiBegin(false))
 	{
-		LatteShaderCache_drawBackgroundImage(g_shaderCacheLoaderState.textureDRCId, 854, 480);
+		DrawBackground(s_loading.drcBackground, 854, 480);
 		g_renderer->ImguiEnd();
 	}
-
 	g_renderer->SwapBuffers(true, true);
-
-	if (g_shaderCacheLoaderState.textureTVId)
-		g_renderer->DeleteTexture(g_shaderCacheLoaderState.textureTVId);
-	if (g_shaderCacheLoaderState.textureDRCId)
-		g_renderer->DeleteTexture(g_shaderCacheLoaderState.textureDRCId);
-
-	g_bootSndPlayer.FadeOutSound();
-
-	if(Latte_GetStopSignal())
+	if (s_loading.tvBackground)
+		g_renderer->DeleteTexture(s_loading.tvBackground);
+	if (s_loading.drcBackground)
+		g_renderer->DeleteTexture(s_loading.drcBackground);
+	s_loading.tvBackground = nullptr;
+	s_loading.drcBackground = nullptr;
+	s_bootJingle.FadeOut();
+	if (Latte_GetStopSignal())
 		LatteThread_Exit();
-}
-
-void LatteShaderCache_ShowProgress(const std::function <bool(void)>& loadUpdateFunc, bool isPipelines)
-{
-	const auto kPopupFlags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_AlwaysAutoResize;
-	const auto textColor = 0xFF888888;
-
-	auto lastFrameUpdate = tick_cached();
-
-	while (true)
-	{
-        if (Latte_GetStopSignal())
-            break; // thread stop requested, cancel shader loading
-		bool r = loadUpdateFunc();
-		if (!r)
-			break;
-
-		// in order to slightly speed up shader loading, we don't update the display if little time passed
-		// this also avoids delayed loading in case third party software caps the framerate at 30
-		if ((tick_cached() - lastFrameUpdate) < std::chrono::milliseconds(1000 / 20)) // -> aim for 20 FPS
-			continue;
-
-		int w, h;
-		WindowSystem::GetWindowPhysSize(w, h);
-		const Vector2f window_size{ (float)w,(float)h };
-
-		ImGui_GetFont(window_size.y / 32.0f); // = 24 by default
-		ImGui_GetFont(window_size.y / 48.0f); // = 16
-
-		g_renderer->BeginFrame(true);
-		if (g_renderer->ImguiBegin(true))
-		{
-			auto& io = ImGui::GetIO();
-
-			// render background texture
-			LatteShaderCache_drawBackgroundImage(g_shaderCacheLoaderState.textureTVId, 1280, 720);
-
-			const auto progress_font = ImGui_GetFont(window_size.y / 32.0f); // = 24 by default
-			const auto shader_count_font = ImGui_GetFont(window_size.y / 48.0f); // = 16
-
-			ImVec2 position = { window_size.x / 2.0f, window_size.y / 2.0f };
-			ImVec2 pivot = { 0.5f, 0.5f };
-			ImVec2 progress_size = { io.DisplaySize.x * 0.5f, 0 };
-			ImGui::SetNextWindowPos(position, ImGuiCond_Always, pivot);
-			ImGui::SetNextWindowSize(progress_size, ImGuiCond_Always);
-			ImGui::SetNextWindowBgAlpha(0.8f);
-			ImGui::PushStyleColor(ImGuiCol_PlotHistogram, textColor);
-			ImGui::PushStyleColor(ImGuiCol_WindowBg, 0);
-			ImGui::PushFont(progress_font);
-
-			std::string titleText = "Shader progress";
-
-			if (ImGui::Begin(titleText.c_str(), nullptr, kPopupFlags))
-			{
-				const float width = ImGui::GetWindowSize().x / 2.0f;
-
-				std::string text;
-				if (isPipelines)
-				{
-					text = "Loading cached pipelines...";
-				}
-				else
-				{
-					if (shaderCacheScreenStats.compiledShaderCount >= 3)
-						text = "Compiling cached shaders...";
-					else
-						text = "Loading cached shaders...";
-				}
-
-				ImGui::SetCursorPosX(width - ImGui::CalcTextSize(text.c_str()).x / 2);
-				ImGui::Text("%s", text.c_str());
-
-				float percentLoaded;
-				if(isPipelines)
-					percentLoaded = (float)g_shaderCacheLoaderState.loadedPipelines / (float)g_shaderCacheLoaderState.pipelineFileCount;
-				else
-					percentLoaded = (float)g_shaderCacheLoaderState.loadedShaderFiles / (float)g_shaderCacheLoaderState.shaderFileCount;
-				ImGui::ProgressBar(percentLoaded, { -1, 0 }, "");
-
-				if (isPipelines)
-					text = fmt::format("{}/{} ({}%)", g_shaderCacheLoaderState.loadedPipelines, g_shaderCacheLoaderState.pipelineFileCount, (int)(percentLoaded * 100));
-				else
-					text = fmt::format("{}/{} ({}%)", g_shaderCacheLoaderState.loadedShaderFiles, g_shaderCacheLoaderState.shaderFileCount, (int)(percentLoaded * 100));
-				ImGui::SetCursorPosX(width - ImGui::CalcTextSize(text.c_str()).x / 2);
-				ImGui::Text("%s", text.c_str());
-			}
-			ImGui::End();
-			ImGui::PopFont();
-			ImGui::PopStyleColor(2);
-
-			if (!isPipelines)
-			{
-				position = { 10, window_size.y - 10 };
-				pivot = { 0, 1 };
-				ImGui::SetNextWindowPos(position, ImGuiCond_Always, pivot);
-				ImGui::SetNextWindowBgAlpha(0.8f);
-				ImGui::PushStyleColor(ImGuiCol_WindowBg, 0);
-				ImGui::PushFont(shader_count_font);
-				if (ImGui::Begin("Shader count", nullptr, kPopupFlags))
-				{
-					const float offset = shader_count_font->FallbackAdvanceX * 25.f;
-					ImGui::Text("Vertex shaders");
-					ImGui::SameLine(offset);
-					ImGui::Text("%d", shaderCacheScreenStats.vertexShaderCount);
-
-					ImGui::Text("Pixel shaders");
-					ImGui::SameLine(offset);
-					ImGui::Text("%d", shaderCacheScreenStats.pixelShaderCount);
-
-					ImGui::Text("Geometry shaders");
-					ImGui::SameLine(offset);
-					ImGui::Text("%d", shaderCacheScreenStats.geometryShaderCount);
-				}
-				ImGui::End();
-				ImGui::PopStyleColor();
-				ImGui::PopFont();
-			}
-			g_renderer->ImguiEnd();
-			lastFrameUpdate = tick_cached();
-		}
-
-		g_renderer->BeginFrame(false);
-		if (g_renderer->ImguiBegin(false))
-		{
-			LatteShaderCache_drawBackgroundImage(g_shaderCacheLoaderState.textureDRCId, 854, 480);
-			g_renderer->ImguiEnd();
-		}
-
-		// finish frame
-		g_renderer->SwapBuffers(true, true);
-	}
-}
-
-void LatteShaderCache_LoadPipelineCache(uint64 cacheTitleId)
-{
-	switch(g_renderer->GetType())
-	{
-	#ifdef ENABLE_VULKAN
-	case RendererAPI::Vulkan:
-	    g_shaderCacheLoaderState.pipelineFileCount = VulkanPipelineStableCache::GetInstance().BeginLoading(cacheTitleId);
-	    break;
-	#endif
-#ifdef ENABLE_METAL
-	case RendererAPI::Metal:
-		g_shaderCacheLoaderState.pipelineFileCount = MetalPipelineCache::GetInstance().BeginLoading(cacheTitleId);
-		break;
-#endif
-	}
-
-	g_shaderCacheLoaderState.loadedPipelines = 0;
-	LatteShaderCache_ShowProgress(LatteShaderCache_updatePipelineLoadingProgress, true);
-
-	switch(g_renderer->GetType())
-	{
-#ifdef ENABLE_VULKAN
-	case RendererAPI::Vulkan:
-	    VulkanPipelineStableCache::GetInstance().EndLoading();
-	    break;
-#endif
-#ifdef ENABLE_METAL
-	case RendererAPI::Metal:
-		MetalPipelineCache::GetInstance().EndLoading();
-		break;
-#endif
-	}
-}
-
-bool LatteShaderCache_updatePipelineLoadingProgress()
-{
-	uint32 pipelinesMissingShaders = 0;
-	switch(g_renderer->GetType())
-	{
-#ifdef ENABLE_VULKAN
-	case RendererAPI::Vulkan:
-	    return VulkanPipelineStableCache::GetInstance().UpdateLoading(g_shaderCacheLoaderState.loadedPipelines, pipelinesMissingShaders);
-#endif
-#ifdef ENABLE_METAL
-	case RendererAPI::Metal:
-		return MetalPipelineCache::GetInstance().UpdateLoading(g_shaderCacheLoaderState.loadedPipelines, pipelinesMissingShaders);
-#endif
-	}
-
-	return false;
-}
-
-uint64 LatteShaderCache_getShaderNameInTransferableCache(uint64 baseHash, uint32 shaderType)
-{
-	baseHash &= ~(7ULL << 61ULL);
-	baseHash |= ((uint64)shaderType << 61ULL);
-	return baseHash;
 }
 
 void LatteShaderCache_writeSeparableVertexShader(uint64 shaderBaseHash, uint64 shaderAuxHash, uint8* fetchShader, uint32 fetchShaderSize, uint8* vertexShader, uint32 vertexShaderSize, uint32* contextRegisters, bool usesGeometryShader)
 {
-	if (!s_shaderCacheGeneric)
+	if (!s_cacheFile)
 		return;
-	MemStreamWriter streamWriter(128 * 1024);
-	// header
-	streamWriter.writeBE<uint8>(1 | (SHADER_CACHE_TYPE_VERTEX << 4)); // version and type (shared field)
-	streamWriter.writeBE<uint64>(shaderBaseHash);
-	streamWriter.writeBE<uint64>(shaderAuxHash);
-	streamWriter.writeBE<uint8>(usesGeometryShader ? 1 : 0);
-	// register state
-	Latte::GPUCompactedRegisterState compactRegState;
-	Latte::StoreGPURegisterState(*(LatteContextRegister*)contextRegisters, compactRegState);
-	Latte::SerializeRegisterState(compactRegState, streamWriter);
-	// fetch shader
-	Latte::SerializeShaderProgram(fetchShader, fetchShaderSize, streamWriter);
-	// vertex shader
-	Latte::SerializeShaderProgram(vertexShader, vertexShaderSize, streamWriter);
-	// write to cache
-	uint64 shaderCacheName = LatteShaderCache_getShaderNameInTransferableCache(shaderBaseHash, SHADER_CACHE_TYPE_VERTEX);
-	std::span<uint8> dataBlob = streamWriter.getResult();
-	s_shaderCacheGeneric->AddFileAsync({shaderCacheName, shaderAuxHash }, dataBlob.data(), dataBlob.size());
+	MemStreamWriter out(128 * 1024);
+	BeginEntry(out, kEntryVertex, shaderBaseHash, shaderAuxHash);
+	out.writeBE<uint8>(usesGeometryShader ? 1 : 0);
+	WriteRegisters(out, contextRegisters);
+	Latte::SerializeShaderProgram(fetchShader, fetchShaderSize, out);
+	Latte::SerializeShaderProgram(vertexShader, vertexShaderSize, out);
+	StoreEntry(out, kEntryVertex, shaderBaseHash, shaderAuxHash);
 }
 
 void LatteShaderCache_writeSeparableGeometryShader(uint64 shaderBaseHash, uint64 shaderAuxHash, uint8* geometryShader, uint32 geometryShaderSize, uint8* gsCopyShader, uint32 gsCopyShaderSize, uint32* contextRegisters, uint32* hleSpecialState, uint32 vsRingParameterCount)
 {
-	if (!s_shaderCacheGeneric)
+	if (!s_cacheFile)
 		return;
-	MemStreamWriter streamWriter(128 * 1024);
-	// header
-	streamWriter.writeBE<uint8>(1 | (SHADER_CACHE_TYPE_GEOMETRY << 4)); // version and type (shared field)
-	streamWriter.writeBE<uint64>(shaderBaseHash);
-	streamWriter.writeBE<uint64>(shaderAuxHash);
+	MemStreamWriter out(128 * 1024);
+	BeginEntry(out, kEntryGeometry, shaderBaseHash, shaderAuxHash);
 	cemu_assert_debug(vsRingParameterCount < 0x10000);
-	streamWriter.writeBE<uint16>(vsRingParameterCount);
-	// register state
-	Latte::GPUCompactedRegisterState compactRegState;
-	Latte::StoreGPURegisterState(*(LatteContextRegister*)contextRegisters, compactRegState);
-	Latte::SerializeRegisterState(compactRegState, streamWriter);
-	// geometry copy shader
-	Latte::SerializeShaderProgram(gsCopyShader, gsCopyShaderSize, streamWriter);
-	// geometry shader
-	Latte::SerializeShaderProgram(geometryShader, geometryShaderSize, streamWriter);
-	// write to cache
-	uint64 shaderCacheName = LatteShaderCache_getShaderNameInTransferableCache(shaderBaseHash, SHADER_CACHE_TYPE_GEOMETRY);
-	std::span<uint8> dataBlob = streamWriter.getResult();
-	s_shaderCacheGeneric->AddFileAsync({shaderCacheName, shaderAuxHash }, dataBlob.data(), dataBlob.size());
+	out.writeBE<uint16>((uint16)vsRingParameterCount);
+	WriteRegisters(out, contextRegisters);
+	Latte::SerializeShaderProgram(gsCopyShader, gsCopyShaderSize, out);
+	Latte::SerializeShaderProgram(geometryShader, geometryShaderSize, out);
+	StoreEntry(out, kEntryGeometry, shaderBaseHash, shaderAuxHash);
 }
 
 void LatteShaderCache_writeSeparablePixelShader(uint64 shaderBaseHash, uint64 shaderAuxHash, uint8* pixelShader, uint32 pixelShaderSize, uint32* contextRegisters, bool usesGeometryShader)
 {
-	if (!s_shaderCacheGeneric)
+	if (!s_cacheFile)
 		return;
-	MemStreamWriter streamWriter(128 * 1024);
-	streamWriter.writeBE<uint8>(1 | (SHADER_CACHE_TYPE_PIXEL << 4)); // version and type (shared field)
-	streamWriter.writeBE<uint64>(shaderBaseHash);
-	streamWriter.writeBE<uint64>(shaderAuxHash);
-	streamWriter.writeBE<uint8>(usesGeometryShader ? 1 : 0);
-	// register state
-	Latte::GPUCompactedRegisterState compactRegState;
-	Latte::StoreGPURegisterState(*(LatteContextRegister*)contextRegisters, compactRegState);
-	Latte::SerializeRegisterState(compactRegState, streamWriter);
-	// pixel shader
-	Latte::SerializeShaderProgram(pixelShader, pixelShaderSize, streamWriter);
-	// write to cache
-	uint64 shaderCacheName = LatteShaderCache_getShaderNameInTransferableCache(shaderBaseHash, SHADER_CACHE_TYPE_PIXEL);
-	std::span<uint8> dataBlob = streamWriter.getResult();
-	s_shaderCacheGeneric->AddFileAsync({shaderCacheName, shaderAuxHash }, dataBlob.data(), dataBlob.size());
-}
-
-void LatteShaderCache_loadOrCompileSeparableShader(LatteDecompilerShader* shader, uint64 shaderBaseHash, uint64 shaderAuxHash)
-{
-	RendererShader::ShaderType shaderType;
-	if (shader->shaderType == LatteConst::ShaderType::Vertex)
-	{
-		shaderType = RendererShader::ShaderType::kVertex;
-		shaderCacheScreenStats.vertexShaderCount++;
-	}
-	else if (shader->shaderType == LatteConst::ShaderType::Geometry)
-	{
-		shaderType = RendererShader::ShaderType::kGeometry;
-		shaderCacheScreenStats.geometryShaderCount++;
-	}
-	else if (shader->shaderType == LatteConst::ShaderType::Pixel)
-	{
-		shaderType = RendererShader::ShaderType::kFragment;
-		shaderCacheScreenStats.pixelShaderCount++;
-	}
-	// compile shader
-	shaderCacheScreenStats.compiledShaderCount++;
-	LatteShader_CreateRendererShader(shader, true);
-	if (shader->shader == nullptr)
-		return;
-	LatteShaderCache_addToCompileQueue(shader);
-}
-
-bool LatteShaderCache_readSeparableVertexShader(MemStreamReader& streamReader, uint8 version)
-{
-	auto lcr = std::make_unique<LatteContextRegister>();
-	if (version != 1)
-		return false;
-	uint64 shaderBaseHash = streamReader.readBE<uint64>();
-	uint64 shaderAuxHash = streamReader.readBE<uint64>();
-	bool usesGeometryShader = streamReader.readBE<uint8>() != 0;
-	// context registers
-	Latte::GPUCompactedRegisterState regState;
-	if (!Latte::DeserializeRegisterState(regState, streamReader))
-		return false;
-	Latte::LoadGPURegisterState(*lcr, regState);
-	if (streamReader.hasError())
-		return false;
-	// fetch shader
-	std::vector<uint8> fetchShaderData;
-	if (!Latte::DeserializeShaderProgram(fetchShaderData, streamReader))
-		return false;
-	if (streamReader.hasError())
-		return false;
-	// vertex shader
-	std::vector<uint8> vertexShaderData;
-	if (!Latte::DeserializeShaderProgram(vertexShaderData, streamReader))
-		return false;
-	if (streamReader.hasError() || !streamReader.isEndOfStream())
-		return false;
-	// update PS inputs (affects VS shader outputs)
-	LatteShader_UpdatePSInputs(lcr->GetRawView());
-	// get fetch shader
-	LatteFetchShader::CacheHash fsHash = LatteFetchShader::CalculateCacheHash((uint32*)fetchShaderData.data(), fetchShaderData.size());
-	LatteFetchShader* fetchShader = LatteShaderRecompiler_createFetchShader(fsHash, lcr->GetRawView(), (uint32*)fetchShaderData.data(), fetchShaderData.size());
-	// determine decompiler options
-	LatteDecompilerOptions options;
-	LatteShader_GetDecompilerOptions(options, LatteConst::ShaderType::Vertex, usesGeometryShader);
-	// decompile vertex shader
-	LatteDecompilerOutput_t decompilerOutput{};
-	LatteDecompiler_DecompileVertexShader(shaderBaseHash, lcr->GetRawView(), vertexShaderData.data(), vertexShaderData.size(), fetchShader, options, &decompilerOutput);
-	LatteDecompilerShader* vertexShader = LatteShader_CreateShaderFromDecompilerOutput(decompilerOutput, shaderBaseHash, false, shaderAuxHash, lcr->GetRawView());
-	// compile
-	LatteShader_DumpShader(shaderBaseHash, shaderAuxHash, vertexShader);
-	LatteShader_DumpRawShader(shaderBaseHash, shaderAuxHash, SHADER_DUMP_TYPE_VERTEX, vertexShaderData.data(), vertexShaderData.size());
-	LatteShaderCache_loadOrCompileSeparableShader(vertexShader, shaderBaseHash, shaderAuxHash);
-	LatteSHRC_RegisterShader(vertexShader, shaderBaseHash, shaderAuxHash);
-	return true;
-}
-
-bool LatteShaderCache_readSeparableGeometryShader(MemStreamReader& streamReader, uint8 version)
-{
-	if (version != 1)
-		return false;
-	auto lcr = std::make_unique<LatteContextRegister>();
-	uint64 shaderBaseHash = streamReader.readBE<uint64>();
-	uint64 shaderAuxHash = streamReader.readBE<uint64>();
-	uint32 vsRingParameterCount = streamReader.readBE<uint16>();
-	// context registers
-	Latte::GPUCompactedRegisterState regState;
-	if (!Latte::DeserializeRegisterState(regState, streamReader))
-		return false;
-	Latte::LoadGPURegisterState(*lcr, regState);
-	if (streamReader.hasError())
-		return false;
-	// geometry copy shader
-	std::vector<uint8> geometryCopyShaderData;
-	if (!Latte::DeserializeShaderProgram(geometryCopyShaderData, streamReader))
-		return false;
-	// geometry shader
-	std::vector<uint8> geometryShaderData;
-	if (!Latte::DeserializeShaderProgram(geometryShaderData, streamReader))
-		return false;
-	if (streamReader.hasError() || !streamReader.isEndOfStream())
-		return false;
-	// update PS inputs
-	LatteShader_UpdatePSInputs(lcr->GetRawView());
-	// determine decompiler options
-	LatteDecompilerOptions options;
-	LatteShader_GetDecompilerOptions(options, LatteConst::ShaderType::Geometry, true);
-	// decompile geometry shader
-	LatteDecompilerOutput_t decompilerOutput{};
-	LatteDecompiler_DecompileGeometryShader(shaderBaseHash, lcr->GetRawView(), geometryShaderData.data(), geometryShaderData.size(), geometryCopyShaderData.data(), geometryCopyShaderData.size(), vsRingParameterCount, options, &decompilerOutput);
-	LatteDecompilerShader* geometryShader = LatteShader_CreateShaderFromDecompilerOutput(decompilerOutput, shaderBaseHash, false, shaderAuxHash, lcr->GetRawView());
-	// compile
-	LatteShader_DumpShader(shaderBaseHash, shaderAuxHash, geometryShader);
-	LatteShader_DumpRawShader(shaderBaseHash, shaderAuxHash, SHADER_DUMP_TYPE_GEOMETRY, geometryShaderData.data(), geometryShaderData.size());
-	LatteShaderCache_loadOrCompileSeparableShader(geometryShader, shaderBaseHash, shaderAuxHash);
-	LatteSHRC_RegisterShader(geometryShader, shaderBaseHash, shaderAuxHash);
-	return true;
-}
-
-bool LatteShaderCache_readSeparablePixelShader(MemStreamReader& streamReader, uint8 version)
-{
-	if (version != 1)
-		return false;
-	auto lcr = std::make_unique<LatteContextRegister>();
-	uint64 shaderBaseHash = streamReader.readBE<uint64>();
-	uint64 shaderAuxHash = streamReader.readBE<uint64>();
-	bool usesGeometryShader = streamReader.readBE<uint8>() != 0;
-	// context registers
-	Latte::GPUCompactedRegisterState regState;
-	if (!Latte::DeserializeRegisterState(regState, streamReader))
-		return false;
-	Latte::LoadGPURegisterState(*lcr, regState);
-	if (streamReader.hasError())
-		return false;
-	// pixel shader
-	std::vector<uint8> pixelShaderData;
-	if (!Latte::DeserializeShaderProgram(pixelShaderData, streamReader))
-		return false;
-	if (streamReader.hasError() || !streamReader.isEndOfStream())
-		return false;
-	// update PS inputs
-	LatteShader_UpdatePSInputs(lcr->GetRawView());
-	// determine decompiler options
-	LatteDecompilerOptions options;
-	LatteShader_GetDecompilerOptions(options, LatteConst::ShaderType::Pixel, usesGeometryShader);
-	// decompile pixel shader
-	LatteDecompilerOutput_t decompilerOutput{};
-	LatteDecompiler_DecompilePixelShader(shaderBaseHash, lcr->GetRawView(), pixelShaderData.data(), pixelShaderData.size(), options, &decompilerOutput);
-	LatteDecompilerShader* pixelShader = LatteShader_CreateShaderFromDecompilerOutput(decompilerOutput, shaderBaseHash, false, shaderAuxHash, lcr->GetRawView());
-	// compile
-	LatteShader_DumpShader(shaderBaseHash, shaderAuxHash, pixelShader);
-	LatteShader_DumpRawShader(shaderBaseHash, shaderAuxHash, SHADER_DUMP_TYPE_PIXEL, pixelShaderData.data(), pixelShaderData.size());
-	LatteShaderCache_loadOrCompileSeparableShader(pixelShader, shaderBaseHash, shaderAuxHash);
-	LatteSHRC_RegisterShader(pixelShader, shaderBaseHash, shaderAuxHash);
-	return true;
-}
-
-// read shader info from shader cache
-bool LatteShaderCache_readSeparableShader(uint8* shaderInfoData, sint32 shaderInfoSize)
-{
-	if (shaderInfoSize < 8)
-		return false;
-	MemStreamReader streamReader(shaderInfoData, shaderInfoSize);
-	uint8 versionAndType = streamReader.readBE<uint8>();
-	uint8 version = versionAndType & 0xF;
-	uint8 type = (versionAndType >> 4) & 0xF;
-	if (type == SHADER_CACHE_TYPE_VERTEX)
-		return LatteShaderCache_readSeparableVertexShader(streamReader, version);
-	else if (type == SHADER_CACHE_TYPE_GEOMETRY)
-		return LatteShaderCache_readSeparableGeometryShader(streamReader, version);
-	else if (type == SHADER_CACHE_TYPE_PIXEL)
-		return LatteShaderCache_readSeparablePixelShader(streamReader, version);
-	return false;
+	MemStreamWriter out(128 * 1024);
+	BeginEntry(out, kEntryPixel, shaderBaseHash, shaderAuxHash);
+	out.writeBE<uint8>(usesGeometryShader ? 1 : 0);
+	WriteRegisters(out, contextRegisters);
+	Latte::SerializeShaderProgram(pixelShader, pixelShaderSize, out);
+	StoreEntry(out, kEntryPixel, shaderBaseHash, shaderAuxHash);
 }
 
 void LatteShaderCache_Close()
 {
-    if(s_shaderCacheGeneric)
-    {
-        delete s_shaderCacheGeneric;
-        s_shaderCacheGeneric = nullptr;
-    }
-	switch(g_renderer->GetType())
+	delete s_cacheFile;
+	s_cacheFile = nullptr;
+	switch (g_renderer->GetType())
 	{
 #ifdef ENABLE_VULKAN
 	case RendererAPI::Vulkan:
 		RendererShaderVk::ShaderCacheLoading_Close();
+		VulkanPipelineStableCache::GetInstance().Close();
 		break;
 #endif
 #ifdef ENABLE_OPENGL
@@ -985,22 +813,10 @@ void LatteShaderCache_Close()
 #ifdef ENABLE_METAL
 	case RendererAPI::Metal:
 		RendererShaderMtl::ShaderCacheLoading_Close();
+		MetalPipelineCache::GetInstance().Close();
 		break;
 #endif
-	}
-
-    // if Vulkan or Metal then also close pipeline cache
-	switch(g_renderer->GetType())
-	{
-#ifdef ENABLE_VULKAN
-	case RendererAPI::Vulkan:
-	    VulkanPipelineStableCache::GetInstance().Close();
+	default:
 		break;
-#endif
-#ifdef ENABLE_METAL
-	case RendererAPI::Metal:
-	    MetalPipelineCache::GetInstance().Close();
-		break;
-#endif
 	}
 }
