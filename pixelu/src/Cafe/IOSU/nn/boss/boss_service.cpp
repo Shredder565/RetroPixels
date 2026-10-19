@@ -1,3 +1,9 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// /dev/boss: SpotPass (BOSS) tasks and their downloaded data.
+//
+// On disk (mlc):
+//   usr/boss/<tid hi>/<tid lo>/user/common/<persistent id>/<dir>/fad.db   file list of a storage
+//   usr/boss/<tid hi>/<tid lo>/user/common/data/<dir>/<data id>          downloaded (decrypted) data
 #include "Cafe/OS/libs/nn_common.h"
 #include "util/helpers/helpers.h"
 
@@ -27,1406 +33,1142 @@ namespace iosu::boss
 {
 	using namespace ::nn::boss;
 
-	static constexpr nnResult RESULT_SUCCESS = 0x200080;
-	static constexpr nnResult RESULT_C0203880 = 0xC0203880;
-	static constexpr nnResult RESULT_NOTEXIST = 0xA021F900;
-
-	static constexpr nnResult RESULT_STORAGE_NOTEXIST = 0xA025AA00;
-	static constexpr nnResult RESULT_FADENTRY_NOTEXIST = 0xA021FB00;
-
-	template <typename ... TArgs>
-	void AppendHeaderParam(CurlRequestHelper& request, const char* fieldName, const char* format, TArgs&& ... args)
+	namespace
 	{
-		request.addHeaderField(fieldName, fmt::format(fmt::runtime(format), std::forward<TArgs>(args)...).c_str());
-	}
+		constexpr nnResult kSuccess = 0x200080;
+		constexpr nnResult kNoAccount = 0xC0203880;
+		constexpr nnResult kTaskNotFound = 0xA021F900;
+		constexpr nnResult kStorageNotFound = 0xA025AA00;
+		constexpr nnResult kEntryNotFound = 0xA021FB00;
 
-	class StorageDatabase // FAD
-	{
-		static constexpr uint32 FAD_ENTRY_MAX_COUNT = 512; // max entries in a single FAD file
+		constexpr nnResult kBossOk = BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_BOSS, 0);
+		constexpr nnResult kBossFatal = BUILD_NN_RESULT(NN_RESULT_LEVEL_FATAL, NN_RESULT_MODULE_NN_BOSS, 0);
 
-	public:
-		struct BossStorageFadEntry
+		fs::path StorageDir(uint64 titleId, uint32 persistentId, const char* directory)
 		{
-			CafeString<32> fileName; // 0x00
-			uint32be fileId; // 0x20
-			uint32 ukn24; // 0x24
-			uint32 flags; // 0x28
-			uint32 memo_2C; // 0x2C
-			uint64be entryCreationTimestamp;
-			// flags:
-			// 0x80000000		ReadFlag
-			// 0x40000000		DeleteProtectionFlag
-			// 0x20000000		New arrival flag?
-		};
-		static_assert(sizeof(BossStorageFadEntry) == 0x38);
-
-		struct BossStorageFadFile
-		{
-			uint8 _00[0x08];
-			BossStorageFadEntry entries[FAD_ENTRY_MAX_COUNT];
-		};
-		static_assert(sizeof(BossStorageFadFile) == 28680);
-
-		static bool CheckIfStorageExists(const DirectoryName& bossDirectory, uint64 titleId, uint32 persistentId)
-		{
-			fs::path fadPath = ActiveSettings::GetMlcPath("usr/boss/{:08x}/{:08x}/user/common/{:08x}/{}", GetTitleIdHigh(titleId), GetTitleIdLow(titleId), persistentId, bossDirectory.name2.c_str());
-			std::error_code ec;
-			return fs::exists(fadPath, ec);
+			return ActiveSettings::GetMlcPath("usr/boss/{:08x}/{:08x}/user/common/{:08x}/{}", GetTitleIdHigh(titleId), GetTitleIdLow(titleId), persistentId, directory);
 		}
 
-		nnResult Load(TaskId& taskId, uint64 titleId, uint32 persistentId)
+		fs::path DataFile(uint64 titleId, const char* directory, uint32 dataId, bool temporary = false)
 		{
-			// todo - if same FAD db already loaded then skip this
-			m_hasValidFadData = false;
-			memset(&m_fadData, 0, sizeof(m_fadData));
-			fs::path fadPath = ActiveSettings::GetMlcPath("usr/boss/{:08x}/{:08x}/user/common/{:08x}/{}", GetTitleIdHigh(titleId), GetTitleIdLow(titleId), persistentId, taskId.id.c_str());
-			std::error_code ec;
-			if (!fs::exists(fadPath, ec))
-				fs::create_directories(fadPath, ec);
-			fadPath /= "fad.db";
-			m_fadFilePath = fadPath;
-			FileStream* fs = FileStream::openFile2(fadPath);
-			if (!fs)
-				return RESULT_STORAGE_NOTEXIST;
-			fs->readData(&m_fadData, sizeof(m_fadData));
-			delete fs;
-			m_hasValidFadData = true; // the file may not exist yet, so consider it valid even if we cant open it
-			return RESULT_SUCCESS;
+			return ActiveSettings::GetMlcPath(temporary ? "usr/boss/{:08x}/{:08x}/user/common/data/{}/.{:08x}" : "usr/boss/{:08x}/{:08x}/user/common/data/{}/{:08x}",
+				GetTitleIdHigh(titleId), GetTitleIdLow(titleId), directory, dataId);
 		}
 
-		nnResult CreateNewStorage(TaskId& taskId, uint64 titleId, uint32 persistentId)
+		// ---- fad.db: list of the data files of one storage --------------------------------
+
+		class FileListDb
 		{
-			memset(&m_fadData, 0, sizeof(m_fadData));
-			fs::path fadPath = ActiveSettings::GetMlcPath("usr/boss/{:08x}/{:08x}/user/common/{:08x}/{}", GetTitleIdHigh(titleId), GetTitleIdLow(titleId), persistentId, taskId.id.c_str());
-			std::error_code ec;
-			if (!fs::exists(fadPath, ec))
-				fs::create_directories(fadPath, ec);
-			m_fadFilePath = fadPath / "fad.db";
-			FileStream* fs = FileStream::createFile2(m_fadFilePath);
-			if (fs)
+		public:
+			static constexpr uint32 kMaxEntries = 512;
+
+			struct Entry
 			{
-				fs->writeData(&m_fadData, sizeof(m_fadData));
-				delete fs;
-				m_hasValidFadData = true;
+				CafeString<32> fileName;
+				uint32be fileId; // 0 marks the end of the list
+				uint32 ukn24;
+				uint32 flags; // 0x80000000 read, 0x40000000 delete protected, 0x20000000 new arrival (guessed)
+				uint32 memo_2C;
+				uint64be entryCreationTimestamp;
+			};
+			static_assert(sizeof(Entry) == 0x38);
+
+			struct FileImage
+			{
+				uint8 header[8];
+				Entry entries[kMaxEntries];
+			};
+			static_assert(sizeof(FileImage) == 28680);
+
+			static bool StorageExists(const DirectoryName& directory, uint64 titleId, uint32 persistentId)
+			{
+				std::error_code ec;
+				return fs::exists(StorageDir(titleId, persistentId, directory.name2.c_str()), ec);
 			}
-			else
-			{
-				cemuLog_log(LogType::Force, "Failed to create FAD data file at {}", _pathToUtf8(m_fadFilePath));
-				return NN_RESULT_PLACEHOLDER_ERROR;
-			}
-			return RESULT_SUCCESS;
-		}
 
-		void Store()
-		{
-			if (!m_hasValidFadData)
-				return;
-			FileStream* fs = FileStream::createFile2(m_fadFilePath);
-			if (fs)
+			// loads the list of a storage; the storage directory is created when missing
+			nnResult Load(const TaskId& storage, uint64 titleId, uint32 persistentId)
 			{
-				fs->writeData(&m_fadData, sizeof(m_fadData));
-				delete fs;
+				m_loaded = false;
+				memset(&m_image, 0, sizeof(m_image));
+				fs::path dir = PrepareDir(storage, titleId, persistentId);
+				m_path = dir / "fad.db";
+				std::unique_ptr<FileStream> file(FileStream::openFile2(m_path));
+				if (!file)
+					return kStorageNotFound;
+				file->readData(&m_image, sizeof(m_image));
+				m_loaded = true;
+				return kSuccess;
 			}
-			else
-			{
-				cemuLog_log(LogType::Force, "Failed to store FAD data to {}", m_fadFilePath.string());
-			}
-		}
 
-		void Clear()
-		{
-			m_hasValidFadData = false;
-			memset(&m_fadData, 0, sizeof(m_fadData));
-		}
-
-		void DeleteEntryByFileName(CafeString<32> fileName)
-		{
-			cemu_assert_debug(m_hasValidFadData);
-			for (sint32 i = 0; i < FAD_ENTRY_MAX_COUNT; i++)
+			nnResult Create(const TaskId& storage, uint64 titleId, uint32 persistentId)
 			{
-				if (m_fadData.entries[i].fileName == fileName)
+				memset(&m_image, 0, sizeof(m_image));
+				m_path = PrepareDir(storage, titleId, persistentId) / "fad.db";
+				std::unique_ptr<FileStream> file(FileStream::createFile2(m_path));
+				if (!file)
 				{
-					// shift remaining entries
-					memmove(m_fadData.entries + i, m_fadData.entries + i + 1, (FAD_ENTRY_MAX_COUNT - i - 1) * sizeof(BossStorageFadEntry));
-					// reset last entry
-					memset(m_fadData.entries + FAD_ENTRY_MAX_COUNT - 1, 0, sizeof(BossStorageFadEntry));
+					cemuLog_log(LogType::Force, "BOSS: cannot create {}", _pathToUtf8(m_path));
+					return NN_RESULT_PLACEHOLDER_ERROR;
+				}
+				file->writeData(&m_image, sizeof(m_image));
+				m_loaded = true;
+				return kSuccess;
+			}
+
+			void Save()
+			{
+				if (!m_loaded)
+					return;
+				std::unique_ptr<FileStream> file(FileStream::createFile2(m_path));
+				if (file)
+					file->writeData(&m_image, sizeof(m_image));
+				else
+					cemuLog_log(LogType::Force, "BOSS: cannot write {}", _pathToUtf8(m_path));
+			}
+
+			void Reset()
+			{
+				m_loaded = false;
+				memset(&m_image, 0, sizeof(m_image));
+			}
+
+			// removes the first entry with that name and closes the gap (in memory only)
+			void Remove(const CafeString<32>& fileName)
+			{
+				cemu_assert_debug(m_loaded);
+				for (uint32 i = 0; i < kMaxEntries; i++)
+				{
+					if (!(m_image.entries[i].fileName == fileName))
+						continue;
+					std::copy(m_image.entries + i + 1, m_image.entries + kMaxEntries, m_image.entries + i);
+					memset(&m_image.entries[kMaxEntries - 1], 0, sizeof(Entry));
 					return;
 				}
 			}
-		}
 
-		nnResult AddEntry(CafeString<32> fileName, uint32 fileId)
-		{
-			if (!fileId)
+			nnResult Add(const CafeString<32>& fileName, uint32 fileId)
 			{
-				cemuLog_log(LogType::Force, "Cannot add BOSS file with fileId 0");
-				return false;
-			}
-			if (fileName.empty())
-				return false;
-			DeleteEntryByFileName(fileName);
-			cemu_assert_debug(m_hasValidFadData);
-			for (sint32 i=0; i<FAD_ENTRY_MAX_COUNT; i++)
-			{
-				if (m_fadData.entries[i].fileId == 0)
+				if (fileId == 0)
 				{
-					m_fadData.entries[i].fileName = fileName;
-					m_fadData.entries[i].fileId = fileId;
-					m_fadData.entries[i].memo_2C = 0;
-					m_fadData.entries[i].entryCreationTimestamp = 0;
-					m_fadData.entries[i].ukn24 = 0;
-					m_fadData.entries[i].flags = 0;
-					return 0x200080;
+					cemuLog_log(LogType::Force, "BOSS: data id 0 cannot be stored");
+					return 0;
 				}
-			}
-			cemuLog_log(LogType::Force, "FAD file {} is full", _pathToUtf8(m_fadFilePath));
-			return 0xA021FB00;
-		}
-
-		void GetDataList(std::vector<DataName>& dataList)
-		{
-			cemu_assert_debug(m_hasValidFadData);
-			dataList.clear();
-			for (sint32 i = 0; i < FAD_ENTRY_MAX_COUNT; i++)
-			{
-				if (m_fadData.entries[i].fileId == 0)
-					break; // end of list
-				DataName dataName;
-				dataName.name = m_fadData.entries[i].fileName;
-				dataList.push_back(dataName);
-			}
-		}
-
-		bool GetEntryByFilename(const DataName& fileName, BossStorageFadEntry& outEntry)
-		{
-			if (fileName.name.empty())
-				return false;
-			cemu_assert_debug(m_hasValidFadData);
-			for (sint32 i = 0; i < FAD_ENTRY_MAX_COUNT; i++)
-			{
-				if (m_fadData.entries[i].fileName == fileName.name)
+				if (fileName.empty())
+					return 0;
+				Remove(fileName);
+				cemu_assert_debug(m_loaded);
+				for (Entry& e : m_image.entries)
 				{
-					outEntry = m_fadData.entries[i];
+					if (e.fileId != 0)
+						continue;
+					e.fileName = fileName;
+					e.fileId = fileId;
+					e.ukn24 = 0;
+					e.flags = 0;
+					e.memo_2C = 0;
+					e.entryCreationTimestamp = 0;
+					return kSuccess;
+				}
+				cemuLog_log(LogType::Force, "BOSS: {} has no free entries", _pathToUtf8(m_path));
+				return kEntryNotFound;
+			}
+
+			std::vector<DataName> Names() const
+			{
+				cemu_assert_debug(m_loaded);
+				std::vector<DataName> names;
+				for (const Entry& e : m_image.entries)
+				{
+					if (e.fileId == 0)
+						break;
+					DataName n;
+					n.name = e.fileName;
+					names.push_back(n);
+				}
+				return names;
+			}
+
+			bool Find(const DataName& name, Entry& out) const
+			{
+				if (name.name.empty())
+					return false;
+				cemu_assert_debug(m_loaded);
+				for (const Entry& e : m_image.entries)
+				{
+					if (e.fileName == name.name)
+					{
+						out = e;
+						return true;
+					}
+					if (e.fileId == 0)
+						break;
+				}
+				return false;
+			}
+
+		private:
+			static fs::path PrepareDir(const TaskId& storage, uint64 titleId, uint32 persistentId)
+			{
+				fs::path dir = StorageDir(titleId, persistentId, storage.id.c_str());
+				std::error_code ec;
+				if (!fs::exists(dir, ec))
+					fs::create_directories(dir, ec);
+				return dir;
+			}
+
+			FileImage m_image;
+			bool m_loaded = false;
+			fs::path m_path;
+		};
+
+		FileListDb g_fileList;
+
+		// ---- the currently opened NsData file ---------------------------------------------
+
+		class OpenedNsData
+		{
+		public:
+			nnResult Open(const DirectoryName& directory, uint64 titleId, uint32 persistentId, const DataName& name)
+			{
+				m_open = false;
+				m_path.clear();
+				nnResult r = g_fileList.Load(TaskId(directory.name2.c_str()), titleId, persistentId);
+				if (NN_RESULT_IS_FAILURE(r))
+					return r;
+				FileListDb::Entry entry;
+				if (!g_fileList.Find(name, entry))
+					return kEntryNotFound;
+				m_path = DataFile(titleId, directory.name2.c_str(), entry.fileId);
+				m_directory = directory;
+				m_titleId = titleId;
+				m_persistentId = persistentId;
+				m_name = name;
+				m_open = true;
+				return kSuccess;
+			}
+
+			void Close()
+			{
+				m_open = false;
+			}
+
+			// deletes the data file; the list entry is only removed in memory, fad.db is not rewritten
+			nnResult Delete()
+			{
+				cemu_assert_debug(m_open);
+				std::error_code ec;
+				if (!fs::remove(m_path, ec))
+					cemuLog_log(LogType::Force, "BOSS: cannot delete {}", _pathToUtf8(m_path));
+				if (NN_RESULT_IS_SUCCESS(g_fileList.Load(TaskId(m_directory.name2.c_str()), m_titleId, m_persistentId)))
+					g_fileList.Remove(m_name.name);
+				m_open = false;
+				return kSuccess;
+			}
+
+			bool Exists() const
+			{
+				if (!m_open || m_path.empty())
+					return false;
+				std::error_code ec;
+				if (fs::exists(m_path, ec))
 					return true;
-				}
-				if (m_fadData.entries[i].fileId == 0)
-					break; // end of list
+				cemuLog_log(LogType::Force, "BOSS: {} is listed but missing on disk. Use \"Clear SpotPass cache\" in the debug menu to reset the cache", _pathToUtf8(m_path));
+				return false;
 			}
-			return false;
-		}
 
-	private:
-		BossStorageFadFile m_fadData;
-		bool m_hasValidFadData = false;
-		fs::path m_fadFilePath;
-	};
-	StorageDatabase m_fadDb;
-
-	class NsDataAccessor
-	{
-	public:
-		nnResult Open(const DirectoryName& bossDirectory, uint64 titleId, uint32 persistentId, DataName& fileName)
-		{
-			m_isValid = false;
-			m_nsDataPath.clear();
-			TaskId taskId(bossDirectory.name2.c_str());
-			nnResult r = m_fadDb.Load(taskId, titleId, persistentId);
-			if (NN_RESULT_IS_FAILURE(r))
-				return r;
-			if (!m_fadDb.GetEntryByFilename(fileName, m_fadEntry))
-				return RESULT_FADENTRY_NOTEXIST;
-			m_nsDataPath = BuildNsDataPath(bossDirectory, titleId, persistentId, m_fadEntry.fileId);
-			m_isValid = true;
-			m_bossDirectory = bossDirectory;
-			m_titleId = titleId;
-			m_persistentId = persistentId;
-			m_fileName = fileName;
-			return RESULT_SUCCESS;
-		}
-
-		void Close()
-		{
-			m_isValid = false;
-		}
-
-		nnResult Delete()
-		{
-			cemu_assert_debug(m_isValid); // only call this after successful Open()
-			std::error_code ec;
-			if (!fs::remove(m_nsDataPath, ec) )
-				cemuLog_log(LogType::Force, "Failed to delete BOSS file {}", _pathToUtf8(m_nsDataPath));
-			// remove from FAD
-			TaskId taskId(m_bossDirectory.name2.c_str());
-			nnResult r = m_fadDb.Load(taskId, m_titleId, m_persistentId);
-			if (NN_RESULT_IS_SUCCESS(r))
-				m_fadDb.DeleteEntryByFileName(m_fileName.name);
-			m_isValid = false;
-			return RESULT_SUCCESS;
-		}
-
-		bool Exists() const
-		{
-			if (!m_isValid)
-				return false;
-			// check if the file actually exists on the host filesystem
-			std::error_code ec;
-			if (m_nsDataPath.empty())
-				return false;
-			bool r = fs::exists(m_nsDataPath, ec);
-			if (!r)
-				cemuLog_log(LogType::Force, "BOSS: File exists in FAD cache but not on disk {}. To fix this reset the SpotPass cache. In the menu under debug select \"Clear SpotPass cache\"", _pathToUtf8(m_nsDataPath));
-			return r;
-		}
-
-		nnResult GetSize(uint32& fileSize) const
-		{
-			cemu_assert_debug(m_isValid); // only call this after successful Open()
-			if (!m_isValid)
-				return NN_RESULT_PLACEHOLDER_ERROR;
-			std::unique_ptr<FileStream> fs(FileStream::openFile2(m_nsDataPath));
-			if (!fs)
-				return NN_RESULT_PLACEHOLDER_ERROR;
-			fileSize = (uint32)fs->GetSize();
-			return RESULT_SUCCESS;
-		}
-
-		bool Read(void* buffer, uint32 size, uint32 offset, uint32& bytesRead)
-		{
-			if (!m_isValid)
-				return false;
-			std::unique_ptr<FileStream> fs(FileStream::openFile2(m_nsDataPath));
-			if (!fs)
-				return false;
-			fs->SetPosition(offset);
-			bytesRead = (uint32)fs->readData(buffer, size);
-			return true;
-		}
-
-	private:
-		fs::path BuildNsDataPath(const DirectoryName& bossDirectory, uint64 titleId, uint32 persistentId, uint32 dataId)
-		{
-			return ActiveSettings::GetMlcPath("usr/boss/{:08x}/{:08x}/user/common/data/{}/{:08x}", (uint32)(titleId >> 32), (uint32)(titleId & 0xFFFFFFFF), bossDirectory.name2.c_str(), dataId);
-		}
-
-		bool m_isValid{false};
-		StorageDatabase::BossStorageFadEntry m_fadEntry;
-		fs::path m_nsDataPath;
-		// if m_isValid is true, these hold the current file information:
-		DirectoryName m_bossDirectory;
-		uint64 m_titleId{};
-		uint32 m_persistentId{};
-		DataName m_fileName;
-	};
-
-	NsDataAccessor m_nsDataAccessor;
-
-	class RegisteredTask
-	{
-	public:
-		RegisteredTask(const TaskId& taskId, const TaskSettingCore& taskSettings)
-			: m_taskId(taskId), m_taskSettings(taskSettings)
-		{
-			m_persistentId = iosuAct_getAccountIdOfCurrentAccount();
-		}
-
-		nnResult Run()
-		{
-			std::unique_lock _l(m_mutex);
-			cemu_assert_debug(m_taskState == TaskState::Initial || m_taskState == TaskState::Done);
-			m_taskTurnState = TaskTurnState::Ready;
-			m_taskState = TaskState::Ready;
-			return RESULT_SUCCESS;
-		}
-
-		TaskState GetState()
-		{
-			std::unique_lock _l(m_mutex);
-			return m_taskState;
-		}
-
-		TaskTurnState GetTurnState()
-		{
-			std::unique_lock _l(m_mutex);
-			return m_taskTurnState;
-		}
-
-		sint32 GetHttpStatusCode() const
-		{
-			return m_httpStatusCode;
-		}
-
-		uint32 GetContentLength() const
-		{
-			return m_contentLength;
-		}
-
-		uint32 GetProcessedLength() const
-		{
-			return m_contentLength; // todo - unlike content length, this value is getting updated as the download happens. But for now we just return the content length
-		}
-
-		nnResult TaskDoRequest(CURL* curl)
-		{
-			std::unique_lock _l(m_mutex);
-			if (m_taskState != TaskState::Ready)
+			nnResult GetSize(uint32& size) const
 			{
-				cemuLog_log(LogType::Force, "Task {} is not ready to run, current state: {}", m_taskId.id.c_str(), static_cast<uint32>(m_taskState));
-				return BUILD_NN_RESULT(NN_RESULT_LEVEL_FATAL, NN_RESULT_MODULE_NN_BOSS, 0);
+				cemu_assert_debug(m_open);
+				if (!m_open)
+					return NN_RESULT_PLACEHOLDER_ERROR;
+				std::unique_ptr<FileStream> file(FileStream::openFile2(m_path));
+				if (!file)
+					return NN_RESULT_PLACEHOLDER_ERROR;
+				size = (uint32)file->GetSize();
+				return kSuccess;
 			}
-			m_taskState = TaskState::Running;
-			m_taskTurnState = TaskTurnState::Running;
-			m_contentLength = 0;
-			_l.unlock();
-			if (!ActiveSettings::IsOnlineEnabled())
+
+			bool Read(void* dst, uint32 size, uint32 offset, uint32& bytesRead) const
 			{
-				m_taskState = TaskState::Done;
-				m_taskTurnState = TaskTurnState::DoneError;
-				return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_BOSS, 0);
+				if (!m_open)
+					return false;
+				std::unique_ptr<FileStream> file(FileStream::openFile2(m_path));
+				if (!file)
+					return false;
+				file->SetPosition(offset);
+				bytesRead = (uint32)file->readData(dst, size);
+				return true;
 			}
-			uint64 titleId = CafeSystem::GetForegroundTitleId();
-			// construct request URL
-			std::string requestUrl;
-			if (!m_taskSettings.url.empty())
-				requestUrl.assign(m_taskSettings.url.c_str()); // custom url
-			else
-			{
-				switch (ActiveSettings::GetNetworkService())
-				{
-				case NetworkService::Pretendo:
-					requestUrl = PretendoURLs::BOSSURL;
-					break;
-				case NetworkService::Custom:
-					requestUrl = GetNetworkConfig().urls.BOSS.GetValue();
-					break;
-				case NetworkService::Nintendo:
-				default:
-					requestUrl = NintendoURLs::BOSSURL;
-					break;
-				}
-			}
-			char languageCode[8];
+
+		private:
+			bool m_open = false;
+			fs::path m_path;
+			DirectoryName m_directory;
+			uint64 m_titleId = 0;
+			uint32 m_persistentId = 0;
+			DataName m_name;
+		};
+
+		OpenedNsData g_nsData;
+
+		const char* ConsoleLanguageCode()
+		{
 			switch (GetConfig().console_language)
 			{
-			case CafeConsoleLanguage::JA:
-				strcpy(languageCode, "ja");
-				break;
-			case CafeConsoleLanguage::EN:
-				strcpy(languageCode, "en");
-				break;
-			case CafeConsoleLanguage::FR:
-				strcpy(languageCode, "fr");
-				break;
-			case CafeConsoleLanguage::DE:
-				strcpy(languageCode, "de");
-				break;
-			case CafeConsoleLanguage::IT:
-				strcpy(languageCode, "it");
-				break;
-			case CafeConsoleLanguage::ES:
-				strcpy(languageCode, "es");
-				break;
-			case CafeConsoleLanguage::ZH:
-				strcpy(languageCode, "zh");
-				break;
-			case CafeConsoleLanguage::KO:
-				strcpy(languageCode, "ko");
-				break;
-			case CafeConsoleLanguage::NL:
-				strcpy(languageCode, "nl");
-				break;
-			case CafeConsoleLanguage::PT:
-				strcpy(languageCode, "pt");
-				break;
-			case CafeConsoleLanguage::RU:
-				strcpy(languageCode, "ru");
-				break;
-			case CafeConsoleLanguage::TW:
-				strcpy(languageCode, "tw"); // usually zh-tw?
-				break;
-			default:
-				strcpy(languageCode, "en");
-				break;
+			case CafeConsoleLanguage::JA: return "ja";
+			case CafeConsoleLanguage::EN: return "en";
+			case CafeConsoleLanguage::FR: return "fr";
+			case CafeConsoleLanguage::DE: return "de";
+			case CafeConsoleLanguage::IT: return "it";
+			case CafeConsoleLanguage::ES: return "es";
+			case CafeConsoleLanguage::ZH: return "zh";
+			case CafeConsoleLanguage::KO: return "ko";
+			case CafeConsoleLanguage::NL: return "nl";
+			case CafeConsoleLanguage::PT: return "pt";
+			case CafeConsoleLanguage::RU: return "ru";
+			case CafeConsoleLanguage::TW: return "tw";
+			default: return "en";
 			}
-			const char* countryCode = NCrypto::GetCountryAsString(Account::GetCurrentAccount().GetCountry());
-			if (m_taskSettings.taskType == TaskType::NbdlDataListTaskSetting)
-			{
-				// use bossCode (and fileName?) as part of the URL
-				requestUrl.append(fmt::format(fmt::runtime("/{}/{}/{}?c={}&l={}"), "1", m_taskSettings.nbdl.bossCode.c_str(), m_taskId.id.c_str(), countryCode, languageCode));
-				cemu_assert_unimplemented();
-				cemuLog_logDebug(LogType::Force, "IOSU-BOSS: Unsupported task type: {}", static_cast<uint32>(m_taskSettings.taskType.value()));
-				_l.lock();
-				m_taskState = TaskState::Done;
-				m_taskTurnState = TaskTurnState::DoneError;
-				m_contentLength = 0;
-				m_httpStatusCode = 0;
-				return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_BOSS, 0);
-			}
-			else if (m_taskSettings.taskType == TaskType::NbdlTaskSetting)
-			{
-				// todo - language and country code come from the task settings
-				cemu_assert_debug(m_taskSettings.nbdl.fileName.empty()); // todo - changes the url
-				const char* apiVersion = "1";
-				requestUrl.append(fmt::format(fmt::runtime("/{}/{}/{}?c={}&l={}"), apiVersion, m_taskSettings.nbdl.bossCode.c_str(), m_taskId.id.c_str(), countryCode, languageCode));
-			}
-			else if (m_taskSettings.taskType == TaskType::PlayReportSetting)
-			{
-				cemuLog_logDebug(LogType::Force, "IOSU-BOSS: PlayReport tasks are not implemented yet");
-				_l.lock();
-				m_taskState = TaskState::Done;
-				m_taskTurnState = TaskTurnState::DoneError;
-				m_contentLength = 0;
-				m_httpStatusCode = 200;
-				return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_BOSS, 0);
-			}
-			else
-			{
-				cemuLog_logDebug(LogType::Force, "IOSU-BOSS: Unknown task type: {}", static_cast<uint32>(m_taskSettings.taskType.value()));
-				_l.lock();
-				m_taskState = TaskState::Done;
-				m_taskTurnState = TaskTurnState::DoneError;
-				m_contentLength = 0;
-				m_httpStatusCode = 0;
-				return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_BOSS, 0);
-			}
-
-			CurlRequestHelper request;
-			request.initate(ActiveSettings::GetNetworkService(), requestUrl, CurlRequestHelper::SERVER_SSL_CONTEXT::CUSTOM);
-			// add certs
-			SetupSSL(request);
-			// parameters
-			AppendHeaderParam(request, "X-BOSS-Digest:", ""); // todo - implement this
-			AppendHeaderParam(request, "X-Boss-UniqueId", "{:05x}", ((titleId >> 8) & 0xFFFFF));
-			AppendHeaderParam(request, "X-BOSS-TitleId", "{:016x}", titleId);
-			if (!m_taskSettings.serviceToken.empty())
-				AppendHeaderParam(request, "X-Nintendo-ServiceToken", "{}", m_taskSettings.serviceToken.c_str());
-
-			if (!request.submitRequest(false))
-			{
-				cemuLog_log(LogType::Force, fmt::format("Failed BOSS request"));
-				_l.lock();
-				m_taskState = TaskState::Done;
-				m_taskTurnState = TaskTurnState::DoneError;
-				return BUILD_NN_RESULT(NN_RESULT_LEVEL_FATAL, NN_RESULT_MODULE_NN_BOSS, 0);
-			}
-			sint32 httpStatusCode = request.GetHTTPStatusCode();
-			m_httpStatusCode = httpStatusCode;
-			m_contentLength = request.getReceivedData().size(); // note - for Nbdl tasks which length is returned?
-
-			{
-				if (httpStatusCode != 200)
-				{
-					cemuLog_logDebug(LogType::Force, "BOSS task_run: Received unexpected HTTP response code {}", httpStatusCode);
-					cemuLog_logDebug(LogType::Force, "URL: {}", requestUrl);
-				}
-				if (httpStatusCode == 404)
-				{
-					_l.lock();
-					m_taskState = TaskState::Done;
-					m_taskTurnState = TaskTurnState::DoneError;
-					cemuLog_logDebug(LogType::Force, "BOSS task_run: Received 404 Not Found for URL: {}", requestUrl);
-					return BUILD_NN_RESULT(NN_RESULT_LEVEL_FATAL, NN_RESULT_MODULE_NN_BOSS, 0);
-				}
-			}
-
-			// for Nbdl tasks get the list of files to download
-			if (m_taskSettings.taskType == TaskType::NbdlTaskSetting)
-			{
-				std::vector<NbdlQueuedFile> queuedFiles = ParseNbdlTasksheet(request.getReceivedData());
-				cemuLog_log(LogType::Force, "SpotPass - NbdlTask has {} files to download:", queuedFiles.size());
-				for (const auto& file : queuedFiles)
-				{
-					DownloadNbdlFile(file);
-				}
-			}
-
-			if (m_taskSettings.taskType == TaskType::RawDlTaskSetting_1 || m_taskSettings.taskType == TaskType::RawDlTaskSetting_3 || m_taskSettings.taskType == TaskType::RawDlTaskSetting_9)
-			{
-				cemu_assert_unimplemented();
-			}
-			{
-				_l.lock();
-				m_taskState = TaskState::Done;
-				m_taskTurnState = TaskTurnState::DoneSuccess;
-			}
-			return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_BOSS, 0);
 		}
 
-		std::recursive_mutex& GetMutex() { return m_mutex; }
-	private:
-		struct NbdlQueuedFile
-		{
-			NbdlQueuedFile(std::string_view url, std::string_view fileName, uint32 dataId, uint32 fileType, uint32 size)
-				: url(url), fileName(fileName), dataId(dataId), fileType(fileType), size(size)
-			{}
+		// ---- a registered task --------------------------------------------------------------
 
+		struct TasksheetFile
+		{
 			std::string url;
 			std::string fileName;
 			uint32 dataId;
-			uint32 fileType; // 0 = AppData, 1 = Message, 2 = Unknown
+			uint32 fileType; // 0 app data, 1 message
 			uint32 size;
 		};
 
-		std::vector<NbdlQueuedFile> ParseNbdlTasksheet(std::span<uint8> xmlContent)
+		class Task
 		{
-			pugi::xml_document doc;
-			pugi::xml_parse_result result = doc.load_buffer(xmlContent.data(), xmlContent.size());
-			if (!result)
-				return {};
-			std::vector<NbdlQueuedFile> fileList;
-			for (pugi::xml_node sheet = doc.child("TaskSheet"); sheet; sheet = sheet.next_sibling("TaskSheet"))
+		public:
+			Task(const TaskId& id, const TaskSettingCore& settings)
+				: m_id(id), m_settings(settings), m_persistentId(iosuAct_getAccountIdOfCurrentAccount())
 			{
-				pugi::xml_node serviceStatus = sheet.child("ServiceStatus");
-				if (strcmp(serviceStatus.child_value(), "close") == 0)
-				{
-					// service is closed, skip all files
-					cemuLog_log(LogType::Force, "BossNbdl: Service is closed, skipping all files in tasksheet");
-					continue;
-				}
-				else if (strcmp(serviceStatus.child_value(), "open") != 0)
-				{
-					cemuLog_log(LogType::Force, "BossNbdl: Unknown ServiceStatus value: {}", serviceStatus.child_value());
-				}
-				// read and verify titleId
-				pugi::xml_node nodeTitleId = sheet.child("TitleId");
-				if (nodeTitleId)
-				{
-					uint64 titleId;
-					TitleIdParser::ParseFromStr(nodeTitleId.child_value(), titleId);
-					if (titleId != CafeSystem::GetForegroundTitleId())
-						cemuLog_log(LogType::Force, "BossNbdl: TitleId in tasksheet ({:016x}) does not match foreground titleId ({:016x})", titleId, CafeSystem::GetForegroundTitleId());
-				}
-				else
-				{
-					cemuLog_log(LogType::Force, "BossNbdl: Missing TitleId field in tasksheet");
-				}
-				// read and verify taskId
-				pugi::xml_node nodeTaskId = sheet.child("TaskId");
-				if (nodeTaskId)
-				{
-					if (strcmp(nodeTaskId.child_value(), m_taskId.id.c_str()) != 0)
-						cemuLog_log(LogType::Force, "BossNbdl: TaskId in tasksheet ({}) does not match current taskId ({})", nodeTaskId.child_value(), m_taskId.id.c_str());
-				}
-				else
-				{
-					cemuLog_log(LogType::Force, "BossNbdl: Missing TaskId field in tasksheet");
-				}
+			}
 
-				// read files list
-				pugi::xml_node files = sheet.child("Files");
-				if (!files)
-					continue;
-				for (pugi::xml_node file = files.child("File"); file; file = file.next_sibling("File"))
+			nnResult Run()
+			{
+				std::lock_guard lock(m_mutex);
+				cemu_assert_debug(m_state == TaskState::Initial || m_state == TaskState::Done);
+				m_state = TaskState::Ready;
+				m_turnState = TaskTurnState::Ready;
+				return kSuccess;
+			}
+
+			TaskState GetState()
+			{
+				std::lock_guard lock(m_mutex);
+				return m_state;
+			}
+
+			TaskTurnState GetTurnState()
+			{
+				std::lock_guard lock(m_mutex);
+				return m_turnState;
+			}
+
+			sint32 GetHttpStatusCode() const { return m_httpStatus; }
+			uint32 GetContentLength() const { return m_contentLength; }
+			uint32 GetProcessedLength() const { return m_contentLength; } // progress is not tracked
+
+			// executes a task in Ready state (called from the daemon thread)
+			nnResult Execute()
+			{
 				{
-					pugi::xml_node fileName = file.child("Filename");
-					if (!fileName)
-						continue;
-					pugi::xml_node dataId = file.child("DataId");
-					if (!dataId)
-						continue;
-					pugi::xml_node url = file.child("Url");
-					if (!url)
-						continue;
-					pugi::xml_node size = file.child("Size");
-					if (!size)
-						continue;
-					pugi::xml_node type = file.child("Type");
-					if (!type)
-						continue;
-					uint32 fileType;
-					if (strcmp(type.child_value(), "AppData") == 0)
-						fileType = 0;
-					else if (strcmp(type.child_value(), "Message") == 0)
-						fileType = 1;
-					else
+					std::lock_guard lock(m_mutex);
+					if (m_state != TaskState::Ready)
 					{
-						cemuLog_log(LogType::Force, "BossNbdl: Unknown file Type value: {}", type.child_value());
-						fileType = 0;
+						cemuLog_log(LogType::Force, "BOSS: task {} cannot run in state {}", m_id.id.c_str(), (uint32)m_state);
+						return kBossFatal;
 					}
+					m_state = TaskState::Running;
+					m_turnState = TaskTurnState::Running;
+					m_contentLength = 0;
+				}
+				if (!ActiveSettings::IsOnlineEnabled())
+				{
+					Finish(false);
+					return kBossOk;
+				}
+				const uint64 titleId = CafeSystem::GetForegroundTitleId();
+				std::string url = BaseUrl();
+				const char* country = NCrypto::GetCountryAsString(Account::GetCurrentAccount().GetCountry());
+				const char* language = ConsoleLanguageCode();
+				switch (m_settings.taskType)
+				{
+				case TaskType::NbdlTaskSetting:
+					// the boss code and task id select the tasksheet
+					cemu_assert_debug(m_settings.nbdl.fileName.empty());
+					url.append(fmt::format("/1/{}/{}?c={}&l={}", m_settings.nbdl.bossCode.c_str(), m_id.id.c_str(), country, language));
+					break;
+				case TaskType::NbdlDataListTaskSetting:
+					url.append(fmt::format("/1/{}/{}?c={}&l={}", m_settings.nbdl.bossCode.c_str(), m_id.id.c_str(), country, language));
+					cemu_assert_unimplemented();
+					cemuLog_logDebug(LogType::Force, "BOSS: task type {} is not supported", (uint32)m_settings.taskType.value());
+					Finish(false, 0, 0);
+					return kBossOk;
+				case TaskType::PlayReportSetting:
+					cemuLog_logDebug(LogType::Force, "BOSS: play report tasks are not supported");
+					Finish(false, 0, 200);
+					return kBossOk;
+				default:
+					cemuLog_logDebug(LogType::Force, "BOSS: task type {} is not supported", (uint32)m_settings.taskType.value());
+					Finish(false, 0, 0);
+					return kBossOk;
+				}
 
-					if (!file.child("AutoDelete").empty())
-						cemuLog_log(LogType::Force, "BossNbdl: Field AutoDelete is set but not supported. Value: {}", file.child_value("AutoDelete"));
+				CurlRequestHelper request;
+				request.initate(ActiveSettings::GetNetworkService(), url, CurlRequestHelper::SERVER_SSL_CONTEXT::CUSTOM);
+				ConfigureCertificates(request);
+				request.addHeaderField("X-BOSS-Digest:", ""); // digest is not computed
+				request.addHeaderField("X-Boss-UniqueId", fmt::format("{:05x}", (titleId >> 8) & 0xFFFFF));
+				request.addHeaderField("X-BOSS-TitleId", fmt::format("{:016x}", titleId));
+				if (!m_settings.serviceToken.empty())
+					request.addHeaderField("X-Nintendo-ServiceToken", m_settings.serviceToken.c_str());
+				if (!request.submitRequest(false))
+				{
+					cemuLog_log(LogType::Force, "BOSS: request for task {} failed", m_id.id.c_str());
+					Finish(false);
+					return kBossFatal;
+				}
+				const sint32 status = request.GetHTTPStatusCode();
+				m_httpStatus = status;
+				m_contentLength = (uint32)request.getReceivedData().size();
+				if (status != 200)
+					cemuLog_logDebug(LogType::Force, "BOSS: HTTP {} for {}", status, url);
+				if (status == 404)
+				{
+					Finish(false);
+					return kBossFatal;
+				}
+				if (m_settings.taskType == TaskType::NbdlTaskSetting)
+				{
+					std::vector<TasksheetFile> files = ParseTasksheet(request.getReceivedData());
+					cemuLog_log(LogType::Force, "SpotPass: task {} lists {} file(s)", m_id.id.c_str(), files.size());
+					for (const TasksheetFile& f : files)
+						Download(f);
+				}
+				Finish(true);
+				return kBossOk;
+			}
 
-					// fields and categories which we dont handle yet:
-					// Attributes, Attribute1, Attribute2, Attribute3
-					// Notify, Conditions, SecInterval, LED, Played
+		private:
+			void Finish(bool success)
+			{
+				std::lock_guard lock(m_mutex);
+				m_state = TaskState::Done;
+				m_turnState = success ? TaskTurnState::DoneSuccess : TaskTurnState::DoneError;
+			}
 
-					fileList.emplace_back(
-						url.child_value(),
-						fileName.child_value(),
-						dataId.text().as_int(),
-						fileType,
-						size.text().as_int()
-					);
+			void Finish(bool success, uint32 contentLength, sint32 httpStatus)
+			{
+				std::lock_guard lock(m_mutex);
+				m_state = TaskState::Done;
+				m_turnState = success ? TaskTurnState::DoneSuccess : TaskTurnState::DoneError;
+				m_contentLength = contentLength;
+				m_httpStatus = httpStatus;
+			}
+
+			std::string BaseUrl() const
+			{
+				if (!m_settings.url.empty())
+					return m_settings.url.c_str();
+				switch (ActiveSettings::GetNetworkService())
+				{
+				case NetworkService::Pretendo: return PretendoURLs::BOSSURL;
+				case NetworkService::Custom: return GetNetworkConfig().urls.BOSS.GetValue();
+				case NetworkService::Nintendo:
+				default: return NintendoURLs::BOSSURL;
 				}
 			}
-			return fileList;
-		}
 
-		void SetupSSL(CurlRequestHelper& request)
-		{
-			request.ClearCaCertIds();
-			request.ClearClientCertIds();
-			for (sint32 i=0; i<3; i++)
+			void ConfigureCertificates(CurlRequestHelper& request) const
 			{
-				if (m_taskSettings.internalCaCert[i] != 0)
-					request.AddCaCertId(m_taskSettings.internalCaCert[i]);
-			}
-			request.AddCaCertId(105);
-			if (m_taskSettings.internalClientCert != 0)
-				request.AddCaCertId(m_taskSettings.internalClientCert);
-			else
-				request.AddCaCertId(3); // whats the default for each task type?
-			cemu_assert_debug(m_taskSettings.caCert[0].empty());
-			cemu_assert_debug(m_taskSettings.caCert[1].empty());
-			cemu_assert_debug(m_taskSettings.caCert[2].empty());
-			cemu_assert_debug(m_taskSettings.clientCertName.empty());
-		}
-
-		void DownloadNbdlFile(const NbdlQueuedFile& nbdlFile)
-		{
-			uint64 titleId = CafeSystem::GetForegroundTitleId(); // todo - use titleId from task settings?
-			fs::path dataFilePath = ActiveSettings::GetMlcPath("usr/boss/{:08x}/{:08x}/user/common/data/{}/{:08x}", (uint32)(titleId >> 32), (uint32)(titleId & 0xFFFFFFFF), m_taskId.id.c_str(), nbdlFile.dataId);
-
-			// if the file already exists locally, skip download
-			// but still add the entry to the FAD db
-			std::error_code ec;
-			if (fs::exists(dataFilePath))
-			{
-				cemuLog_log(LogType::Force, "\t- {} (DataId:{:08x} {}KB) (Skipping, already downloaded)", nbdlFile.fileName, nbdlFile.dataId, (nbdlFile.size+1023)/1024);
-				TrackDownloadedNbdlFile(nbdlFile);
-				return;
-			}
-			cemuLog_log(LogType::Force, "\t- {} (DataId:{:08x} {}KB)", nbdlFile.fileName, nbdlFile.dataId, (nbdlFile.size+1023)/1024);
-
-			CurlRequestHelper request;
-			request.initate(ActiveSettings::GetNetworkService(), nbdlFile.url, CurlRequestHelper::SERVER_SSL_CONTEXT::CUSTOM);
-			SetupSSL(request);
-
-			bool r = request.submitRequest();
-			if (!r)
-			{
-				cemuLog_log(LogType::Force, "Failed to download SpotPass nbdl file: {}", nbdlFile.fileName);
-				return;
-			}
-
-			// decrypt and store file
-			std::vector<uint8> receivedData = request.getReceivedData();
-			struct BossNbdlHeader
-			{
-				/* +0x00 */ uint32be magic;
-				/* +0x04 */	uint32be version; // guessed
-				/* +0x08 */	uint16be ukn08; // must always be 1
-				/* +0x0A */	uint16be ukn0A; // must always be 2
-				/* +0x0C */	uint8 nonce[0xC];
-				/* +0x18 */	uint32 padding18; // unused
-				/* +0x1C */	uint32 padding1C; // unused
-				/* +0x20 */
-				struct
+				request.ClearCaCertIds();
+				request.ClearClientCertIds();
+				for (uint8be cert : m_settings.internalCaCert)
 				{
-					uint8 uknHashData[0x20];
-				} encryptedHeader;
-			};
-			if (receivedData.size() < sizeof(BossNbdlHeader))
-			{
-				cemuLog_log(LogType::Force, "Received SpotPass nbdl file is too small: {} bytes", receivedData.size());
-				return;
-			}
-			BossNbdlHeader nbdlHeader;
-			memcpy(&nbdlHeader, receivedData.data(), sizeof(BossNbdlHeader));
-			if (nbdlHeader.magic != 'boss' || nbdlHeader.version != 0x20001 || nbdlHeader.ukn08 != 1 || nbdlHeader.ukn0A != 2)
-			{
-				cemuLog_log(LogType::Force, "Received SpotPass nbdl file has incorrect header");
-				return;
-			}
-			// file must be padded to 16 byte alignment for AES decryption (padding is cut off after decryption)
-			size_t originalFileSize = receivedData.size();
-			const uint32 paddedFileSize = (originalFileSize + 0xF) & (~0xF);
-			receivedData.resize(paddedFileSize);
-			// extra validation
-			if (originalFileSize != nbdlFile.size)
-			{
-				cemuLog_log(LogType::Force, "SpotPass nbdl file size mismatch, expected {} bytes but got {} bytes", nbdlFile.size, originalFileSize);
-				return;
-			}
-			if (nbdlFile.fileName.find("..") != std::string::npos)
-			{
-				cemuLog_log(LogType::Force, "SpotPass nbdl filename contains suspicious characters");
-				return;
-			}
-			// prepare nonce for AES128-CTR
-			uint8 aesNonce[0x10];
-			memset(aesNonce, 0, sizeof(aesNonce));
-			memcpy(aesNonce, nbdlHeader.nonce, 0xC);
-			aesNonce[0xF] = 1;
-			// decrypt
-			uint8 bossAesKey[16] = { 0x39,0x70,0x57,0x35,0x58,0x70,0x34,0x58,0x37,0x41,0x7a,0x30,0x71,0x5a,0x70,0x74 };
-			memset(aesNonce, 0, sizeof(aesNonce));
-			memcpy(aesNonce, nbdlHeader.nonce, 0xC);
-			aesNonce[0xF] = 1;
-			AES128CTR_transform(receivedData.data() + offsetof(BossNbdlHeader, encryptedHeader), receivedData.size() - sizeof(BossNbdlHeader::encryptedHeader), bossAesKey, aesNonce);
-			// get HMAC from header
-			uint8 fileHMAC[32];
-			memcpy(fileHMAC, &((BossNbdlHeader*)receivedData.data())->encryptedHeader.uknHashData, 32);
-			// write decrypted data to filesystem using a temporary path
-			fs::path tmpDataPath = ActiveSettings::GetMlcPath("usr/boss/{:08x}/{:08x}/user/common/data/{}/.{:08x}", (uint32)(titleId >> 32), (uint32)(titleId & 0xFFFFFFFF), m_taskId.id.c_str(), nbdlFile.dataId);
-			if (!fs::exists(tmpDataPath.parent_path()))
-				fs::create_directories(tmpDataPath.parent_path(), ec);
-			FileStream* fs = FileStream::createFile2(tmpDataPath);
-			if (fs)
-			{
-				fs->writeData(receivedData.data() + sizeof(BossNbdlHeader), originalFileSize - sizeof(BossNbdlHeader));
-				delete fs;
-			}
-			else
-			{
-				cemuLog_log(LogType::Force, "Failed to create temporary SpotPass nbdl file: {}", _pathToUtf8(tmpDataPath));
-				return;
-			}
-			// to make sure that the file actually stored correctly to disk we read it back and verify the hash
-			auto readbackFileData = FileStream::LoadIntoMemory(tmpDataPath);
-			uint8 hmacHash[32];
-			unsigned int hmacHashLen = 32;
-			HMAC(EVP_sha256(), "uyr5I8pu4ycq2pOT3D53Bp0n7jK8eyjLO5U20ocUNdN5muwUcC4By881UXECeM08", 64, readbackFileData->data(), originalFileSize - sizeof(BossNbdlHeader), hmacHash, &hmacHashLen);
-			if (memcmp(hmacHash, fileHMAC, 32) != 0)
-			{
-				// failed to verify hash
-				cemuLog_log(LogType::Force, "Failed to verify hash for SpotPass nbdl file: {}", _pathToUtf8(tmpDataPath));
-				fs::remove(tmpDataPath, ec);
-				return;
-			}
-			// rename temporary file to final path
-			fs::rename(tmpDataPath, dataFilePath, ec);
-			// update FAD entry
-			TrackDownloadedNbdlFile(nbdlFile);
-		}
-
-		void TrackDownloadedNbdlFile(const NbdlQueuedFile& nbdlFile)
-		{
-			uint64 titleId = CafeSystem::GetForegroundTitleId();
-			nnResult storageResult = m_fadDb.Load(m_taskId, titleId, m_persistentId);
-			if (storageResult == RESULT_STORAGE_NOTEXIST)
-				storageResult = m_fadDb.CreateNewStorage(m_taskId, titleId, m_persistentId);
-			if (NN_RESULT_IS_FAILURE(storageResult))
-			{
-				cemuLog_log(LogType::Force, "Failed to create FAD database for task {}: {:08x}", m_taskId.id.c_str(), storageResult);
-				return;
-			}
-			CafeString<32> filenameStr;
-			filenameStr.assign(nbdlFile.fileName);
-			m_fadDb.AddEntry(filenameStr, nbdlFile.dataId);
-			m_fadDb.Store();
-			// todo - DIDX and ref database
-		}
-
-		TaskId m_taskId;
-		uint32 m_persistentId;
-		TaskSettingCore m_taskSettings;
-		std::recursive_mutex m_mutex;
-		TaskState m_taskState{ TaskState::Initial };
-		TaskTurnState m_taskTurnState{ TaskTurnState::Ukn };
-		sint32 m_httpStatusCode{ 0 };
-		uint32 m_contentLength{ 0 }; // content length of the last request
-	};
-
-	class BossDaemon
-	{
-	public:
-		void Start()
-		{
-			if (m_threadRunning.exchange(true))
-				return;
-			m_bossDaemonThread = std::thread(&BossDaemon::BossDaemonThread, this);
-		}
-
-		void Stop()
-		{
-			if (!m_threadRunning.exchange(false))
-				return;
-			m_bossDaemonThread.join();
-		}
-
-		void RegisterTask(const TaskSettingCore& taskSetting)
-		{
-			std::unique_lock _l(m_taskMtx);
-			if (m_registeredTasks.find(taskSetting.taskId) != m_registeredTasks.end())
-			{
-				// task already registered. Return error?
-				cemuLog_logDebug(LogType::Force, "IOSU-Boss: Task {} is already registered", taskSetting.taskId.id.c_str());
-				return;
-			}
-			m_registeredTasks.try_emplace(taskSetting.taskId, std::make_shared<RegisteredTask>(taskSetting.taskId, taskSetting));
-		}
-
-		void UnregisterTask(uint32 persistentId, const TaskId& taskId)
-		{
-			std::unique_lock _l(m_taskMtx);
-			auto it = m_registeredTasks.find(taskId);
-			if (it != m_registeredTasks.end())
-			{
-				m_registeredTasks.erase(it);
-			}
-			else
-			{
-				// todo - return error
-			}
-		}
-
-		bool TaskIsRegistered(uint32 persistentId, const TaskId& taskId)
-		{
-			std::unique_lock _l(m_taskMtx);
-			return m_registeredTasks.find(taskId) != m_registeredTasks.end();
-		}
-
-		void TaskRun(uint32 persistentId, const TaskId& taskId)
-		{
-			// todo - there is an extra parameter for controlling background/foreground running?
-			std::shared_ptr<RegisteredTask> registeredTask = GetRegisteredTask2(persistentId, taskId);
-			if (registeredTask)
-			{
-				cemuLog_log(LogType::Force, "IOSU-Boss: Running task {}", taskId.id.c_str());
-				registeredTask->Run();
-			}
-			else
-			{
-				cemuLog_log(LogType::Force, "IOSU-Boss: Trying to run task {} which has not been registered", taskId.id.c_str());
-				// todo - return error -> 0xA021F900
-			}
-		}
-
-		void StartScheduleTask(uint32 persistentId, const TaskId& taskId, bool runImmediately)
-		{
-			if (runImmediately)
-			{
-				// proper implementation is still todo
-				// handling automatic scheduling and task state transitions is quite complex
-				// for now we only run the task once
-				std::shared_ptr<RegisteredTask> registeredTask = GetRegisteredTask2(persistentId, taskId);
-				if(!registeredTask)
-					return;
-				TaskState state = registeredTask->GetState();
-				if (state == TaskState::Stopped || state == TaskState::Initial)
-				{
-					registeredTask->Run();
+					if (cert != 0)
+						request.AddCaCertId(cert);
 				}
-				else
-				{
-					cemuLog_logDebug(LogType::Force, "StartScheduleTask(): No support for scheduling tasks that aren't in stopped state");
-				}
+				request.AddCaCertId(105);
+				// the client certificate is also added to the CA list; 3 is used when the task sets none
+				request.AddCaCertId(m_settings.internalClientCert != 0 ? (uint8)m_settings.internalClientCert : 3);
+				cemu_assert_debug(m_settings.caCert[0].empty() && m_settings.caCert[1].empty() && m_settings.caCert[2].empty());
+				cemu_assert_debug(m_settings.clientCertName.empty());
 			}
-			else
+
+			std::vector<TasksheetFile> ParseTasksheet(std::span<uint8> xml) const
 			{
-				cemuLog_logDebug(LogType::Force, "IOSU-Boss: Unsupported StartScheduling called for task {}", taskId.id.c_str());
-			}
-		}
-
-		void StopScheduleTask(uint32 persistentId, const TaskId& taskId)
-		{
-			// todo
-			// task scheduling is not yet implemented so this does nothing for now
-		}
-
-		std::shared_ptr<RegisteredTask> GetRegisteredTask2(const uint32 persistentId, const TaskId& taskId)
-		{
-			std::unique_lock _l(m_taskMtx);
-			auto it = m_registeredTasks.find(taskId); // todo - check persistentId as well (make it part of the key?)
-			if (it != m_registeredTasks.end())
-				return it->second;
-			return nullptr;
-		}
-
-	private:
-		void BossDaemonThread()
-		{
-			CURL* curl = curl_easy_init();
-			while ( m_threadRunning )
-			{
-				// check for tasks to run
+				std::vector<TasksheetFile> files;
+				pugi::xml_document doc;
+				if (!doc.load_buffer(xml.data(), xml.size()))
+					return files;
+				for (pugi::xml_node sheet = doc.child("TaskSheet"); sheet; sheet = sheet.next_sibling("TaskSheet"))
 				{
-					std::shared_ptr<RegisteredTask> task = GetNextRunableTask();
-					if (task)
+					const char* status = sheet.child("ServiceStatus").child_value();
+					if (strcmp(status, "close") == 0)
 					{
-						task->TaskDoRequest(curl);
+						cemuLog_log(LogType::Force, "SpotPass: service closed, tasksheet skipped");
+						continue;
+					}
+					if (strcmp(status, "open") != 0)
+						cemuLog_log(LogType::Force, "SpotPass: unknown ServiceStatus {}", status);
+					if (pugi::xml_node tid = sheet.child("TitleId"))
+					{
+						uint64 sheetTitleId;
+						TitleIdParser::ParseFromStr(tid.child_value(), sheetTitleId);
+						if (sheetTitleId != CafeSystem::GetForegroundTitleId())
+							cemuLog_log(LogType::Force, "SpotPass: tasksheet title {:016x} differs from the running title {:016x}", sheetTitleId, CafeSystem::GetForegroundTitleId());
+					}
+					else
+						cemuLog_log(LogType::Force, "SpotPass: tasksheet has no TitleId");
+					if (pugi::xml_node taskId = sheet.child("TaskId"))
+					{
+						if (strcmp(taskId.child_value(), m_id.id.c_str()) != 0)
+							cemuLog_log(LogType::Force, "SpotPass: tasksheet task {} differs from {}", taskId.child_value(), m_id.id.c_str());
+					}
+					else
+						cemuLog_log(LogType::Force, "SpotPass: tasksheet has no TaskId");
+					pugi::xml_node list = sheet.child("Files");
+					if (!list)
+						continue;
+					for (pugi::xml_node f = list.child("File"); f; f = f.next_sibling("File"))
+					{
+						pugi::xml_node name = f.child("Filename"), dataId = f.child("DataId"), fileUrl = f.child("Url"), size = f.child("Size"), type = f.child("Type");
+						if (!name || !dataId || !fileUrl || !size || !type)
+							continue;
+						uint32 fileType = 0;
+						if (strcmp(type.child_value(), "Message") == 0)
+							fileType = 1;
+						else if (strcmp(type.child_value(), "AppData") != 0)
+							cemuLog_log(LogType::Force, "SpotPass: unknown file type {}", type.child_value());
+						if (!f.child("AutoDelete").empty())
+							cemuLog_log(LogType::Force, "SpotPass: AutoDelete ({}) is ignored", f.child_value("AutoDelete"));
+						// Attributes, Notify, Conditions, SecInterval, LED and Played are ignored
+						files.push_back({ fileUrl.child_value(), name.child_value(), (uint32)dataId.text().as_int(), fileType, (uint32)size.text().as_int() });
+					}
+				}
+				return files;
+			}
+
+			// downloaded nbdl files: 0x20 byte plain header, then AES-128-CTR encrypted data
+			// starting with a 0x20 byte HMAC-SHA256 of the payload
+			struct NbdlHeader
+			{
+				uint32be magic; // 'boss'
+				uint32be version; // 0x20001
+				uint16be ukn08; // 1
+				uint16be ukn0A; // 2
+				uint8 nonce[0xC];
+				uint32 padding18;
+				uint32 padding1C;
+				uint8 payloadHmac[0x20]; // encrypted
+			};
+			static_assert(sizeof(NbdlHeader) == 0x40);
+
+			void Download(const TasksheetFile& f)
+			{
+				const uint64 titleId = CafeSystem::GetForegroundTitleId();
+				const fs::path target = DataFile(titleId, m_id.id.c_str(), f.dataId);
+				const uint32 sizeKb = (f.size + 1023) / 1024;
+				std::error_code ec;
+				if (fs::exists(target, ec))
+				{
+					// already downloaded earlier, only make sure it is listed
+					cemuLog_log(LogType::Force, "\t- {} (DataId:{:08x} {}KB) (Skipping, already downloaded)", f.fileName, f.dataId, sizeKb);
+					AddToFileList(f);
+					return;
+				}
+				cemuLog_log(LogType::Force, "\t- {} (DataId:{:08x} {}KB)", f.fileName, f.dataId, sizeKb);
+				CurlRequestHelper request;
+				request.initate(ActiveSettings::GetNetworkService(), f.url, CurlRequestHelper::SERVER_SSL_CONTEXT::CUSTOM);
+				ConfigureCertificates(request);
+				if (!request.submitRequest())
+				{
+					cemuLog_log(LogType::Force, "SpotPass: download of {} failed", f.fileName);
+					return;
+				}
+				std::vector<uint8> data = request.getReceivedData();
+				if (data.size() < sizeof(NbdlHeader))
+				{
+					cemuLog_log(LogType::Force, "SpotPass: {} is too small ({} bytes)", f.fileName, data.size());
+					return;
+				}
+				NbdlHeader header;
+				memcpy(&header, data.data(), sizeof(header));
+				if (header.magic != 'boss' || header.version != 0x20001 || header.ukn08 != 1 || header.ukn0A != 2)
+				{
+					cemuLog_log(LogType::Force, "SpotPass: {} has an invalid header", f.fileName);
+					return;
+				}
+				const size_t fileSize = data.size();
+				data.resize((fileSize + 0xF) & ~(size_t)0xF); // CTR is applied to whole blocks
+				if (fileSize != f.size)
+				{
+					cemuLog_log(LogType::Force, "SpotPass: {} has {} bytes, the tasksheet says {}", f.fileName, fileSize, f.size);
+					return;
+				}
+				if (f.fileName.find("..") != std::string::npos)
+				{
+					cemuLog_log(LogType::Force, "SpotPass: rejected file name {}", f.fileName);
+					return;
+				}
+				static const uint8 kNbdlKey[16] = { 0x39,0x70,0x57,0x35,0x58,0x70,0x34,0x58,0x37,0x41,0x7a,0x30,0x71,0x5a,0x70,0x74 };
+				uint8 counter[16] = {};
+				memcpy(counter, header.nonce, sizeof(header.nonce));
+				counter[15] = 1;
+				constexpr size_t kEncryptedStart = offsetof(NbdlHeader, payloadHmac);
+				AES128CTR_transform(data.data() + kEncryptedStart, data.size() - sizeof(NbdlHeader::payloadHmac), (uint8*)kNbdlKey, counter);
+				uint8 expectedHmac[32];
+				memcpy(expectedHmac, data.data() + kEncryptedStart, 32);
+				const size_t payloadSize = fileSize - sizeof(NbdlHeader);
+
+				// write to a temporary name, read back and verify before renaming
+				const fs::path temp = DataFile(titleId, m_id.id.c_str(), f.dataId, true);
+				if (!fs::exists(temp.parent_path(), ec))
+					fs::create_directories(temp.parent_path(), ec);
+				{
+					std::unique_ptr<FileStream> out(FileStream::createFile2(temp));
+					if (!out)
+					{
+						cemuLog_log(LogType::Force, "SpotPass: cannot create {}", _pathToUtf8(temp));
+						return;
+					}
+					out->writeData(data.data() + sizeof(NbdlHeader), payloadSize);
+				}
+				std::optional<std::vector<uint8>> written = FileStream::LoadIntoMemory(temp);
+				static const char kHmacKey[] = "uyr5I8pu4ycq2pOT3D53Bp0n7jK8eyjLO5U20ocUNdN5muwUcC4By881UXECeM08";
+				uint8 actualHmac[32];
+				unsigned int hmacLen = 32;
+				HMAC(EVP_sha256(), kHmacKey, 64, written->data(), payloadSize, actualHmac, &hmacLen);
+				if (memcmp(actualHmac, expectedHmac, 32) != 0)
+				{
+					cemuLog_log(LogType::Force, "SpotPass: hash mismatch for {}", _pathToUtf8(temp));
+					fs::remove(temp, ec);
+					return;
+				}
+				fs::rename(temp, target, ec);
+				AddToFileList(f);
+			}
+
+			void AddToFileList(const TasksheetFile& f)
+			{
+				const uint64 titleId = CafeSystem::GetForegroundTitleId();
+				nnResult r = g_fileList.Load(m_id, titleId, m_persistentId);
+				if (r == kStorageNotFound)
+					r = g_fileList.Create(m_id, titleId, m_persistentId);
+				if (NN_RESULT_IS_FAILURE(r))
+				{
+					cemuLog_log(LogType::Force, "SpotPass: no file list for task {}: {:08x}", m_id.id.c_str(), r);
+					return;
+				}
+				CafeString<32> name;
+				name.assign(f.fileName);
+				g_fileList.Add(name, f.dataId);
+				g_fileList.Save();
+			}
+
+			TaskId m_id;
+			TaskSettingCore m_settings;
+			uint32 m_persistentId;
+			std::recursive_mutex m_mutex;
+			TaskState m_state = TaskState::Initial;
+			TaskTurnState m_turnState = TaskTurnState::Ukn;
+			sint32 m_httpStatus = 0;
+			uint32 m_contentLength = 0;
+		};
+
+		// ---- task registry and the thread that runs tasks ---------------------------------
+
+		class TaskRunner
+		{
+		public:
+			void Start()
+			{
+				if (m_running.exchange(true))
+					return;
+				m_thread = std::thread(&TaskRunner::ThreadMain, this);
+			}
+
+			void Stop()
+			{
+				if (!m_running.exchange(false))
+					return;
+				m_thread.join();
+			}
+
+			// tasks are identified by their id only (the persistent id is not part of the key)
+			void Register(const TaskSettingCore& settings)
+			{
+				std::lock_guard lock(m_mutex);
+				if (m_tasks.count(settings.taskId))
+				{
+					cemuLog_logDebug(LogType::Force, "BOSS: task {} is already registered", settings.taskId.id.c_str());
+					return;
+				}
+				m_tasks.emplace(settings.taskId, std::make_shared<Task>(settings.taskId, settings));
+			}
+
+			void Unregister(const TaskId& id)
+			{
+				std::lock_guard lock(m_mutex);
+				m_tasks.erase(id);
+			}
+
+			bool IsRegistered(const TaskId& id)
+			{
+				std::lock_guard lock(m_mutex);
+				return m_tasks.count(id) != 0;
+			}
+
+			std::shared_ptr<Task> Find(const TaskId& id)
+			{
+				std::lock_guard lock(m_mutex);
+				auto it = m_tasks.find(id);
+				return it != m_tasks.end() ? it->second : nullptr;
+			}
+
+			void RunNow(const TaskId& id)
+			{
+				std::shared_ptr<Task> task = Find(id);
+				if (!task)
+				{
+					cemuLog_log(LogType::Force, "BOSS: run requested for unknown task {}", id.id.c_str());
+					return;
+				}
+				cemuLog_log(LogType::Force, "BOSS: running task {}", id.id.c_str());
+				task->Run();
+			}
+
+			// scheduling is not emulated: an immediate start runs a stopped or new task once
+			void StartScheduling(const TaskId& id, bool immediately)
+			{
+				if (!immediately)
+				{
+					cemuLog_logDebug(LogType::Force, "BOSS: deferred scheduling of task {} is not supported", id.id.c_str());
+					return;
+				}
+				std::shared_ptr<Task> task = Find(id);
+				if (!task)
+					return;
+				TaskState state = task->GetState();
+				if (state == TaskState::Stopped || state == TaskState::Initial)
+					task->Run();
+				else
+					cemuLog_logDebug(LogType::Force, "BOSS: task {} is not stopped, scheduling ignored", id.id.c_str());
+			}
+
+		private:
+			void ThreadMain()
+			{
+				CURL* curl = curl_easy_init();
+				while (m_running)
+				{
+					if (std::shared_ptr<Task> task = NextReady())
+					{
+						task->Execute();
 						cemu_assert_debug(task->GetState() != TaskState::Ready);
 					}
+					std::this_thread::sleep_for(std::chrono::milliseconds(100));
 				}
-				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+				curl_easy_cleanup(curl);
 			}
-			curl_easy_cleanup(curl);
-		}
 
-		std::shared_ptr<RegisteredTask> GetNextRunableTask()
-		{
-			std::unique_lock _l(m_taskMtx);
-			for (auto& task : m_registeredTasks)
+			std::shared_ptr<Task> NextReady()
 			{
-				if (task.second->GetState() == TaskState::Ready)
-					return task.second;
-			}
-			return nullptr;
-		}
-
-		std::thread m_bossDaemonThread;
-		std::atomic_bool m_threadRunning{ false };
-		// task list
-		std::mutex m_taskMtx;
-		std::map<TaskId, std::shared_ptr<RegisteredTask>> m_registeredTasks;
-	}s_bossDaemon;
-
-	class BossMainService : public iosu::nn::IPCService
-	{
-	public:
-		BossMainService() : iosu::nn::IPCService("/dev/boss") {}
-
-		nnResult ServiceCall(IPCServiceCall& serviceCall) override
-		{
-			if (serviceCall.GetServiceId() == 0)
-			{
-				switch (static_cast<BossCommandId>(serviceCall.GetCommandId()))
+				std::lock_guard lock(m_mutex);
+				for (auto& [id, task] : m_tasks)
 				{
-				case BossCommandId::TaskIsRegistered:
-					return HandleTaskIsRegistered(serviceCall);
+					if (task->GetState() == TaskState::Ready)
+						return task;
+				}
+				return nullptr;
+			}
+
+			std::thread m_thread;
+			std::atomic_bool m_running{ false };
+			std::mutex m_mutex;
+			std::map<TaskId, std::shared_ptr<Task>> m_tasks;
+		};
+
+		TaskRunner g_tasks;
+
+		// ---- /dev/boss ----------------------------------------------------------------------
+
+		class BossService : public iosu::nn::IPCService
+		{
+		public:
+			BossService() : iosu::nn::IPCService("/dev/boss") {}
+
+			nnResult ServiceCall(IPCServiceCall& call) override
+			{
+				if (call.GetServiceId() != 0)
+				{
+					cemu_assert_suspicious();
+					return kBossOk;
+				}
+				switch ((BossCommandId)call.GetCommandId())
+				{
+				case BossCommandId::TaskIsRegistered: return TaskIsRegistered(call);
 				case BossCommandId::TaskRegisterA:
-					return HandleTaskRegister(serviceCall, false);
-				case BossCommandId::TaskRegisterForImmediateRunA:
-					return HandleTaskRegister(serviceCall, true);
-				case BossCommandId::TaskUnregister:
-					return HandleTaskUnregister(serviceCall);
-				case BossCommandId::TaskRun:
-					return HandleTaskRun(serviceCall);
-				case BossCommandId::TaskStartScheduling:
-					return HandleTaskStartScheduling(serviceCall);
-				case BossCommandId::TaskStopScheduling:
-					return HandleTaskStopScheduling(serviceCall);
-				case BossCommandId::TaskWaitA:
-					return HandleTaskWait(serviceCall);
-				case BossCommandId::TaskGetTurnState:
-					return HandleTaskGetTurnState(serviceCall);
-				case BossCommandId::TaskGetHttpStatusCodeA:
-					return HandleTaskGetHttpStatusCodeA(serviceCall);
-				case BossCommandId::TaskGetContentLength:
-					return HandleTaskGetContentLength(serviceCall);
-				case BossCommandId::TaskGetProcessedLength:
-					return HandleTaskGetProcessedLength(serviceCall);
+				case BossCommandId::TaskRegisterForImmediateRunA: return TaskRegister(call);
+				case BossCommandId::TaskUnregister: return TaskUnregister(call);
+				case BossCommandId::TaskRun: return TaskRun(call);
+				case BossCommandId::TaskStartScheduling: return TaskStartScheduling(call);
+				case BossCommandId::TaskStopScheduling: return TaskStopScheduling(call);
+				case BossCommandId::TaskWaitA: return TaskWait(call);
+				case BossCommandId::TaskGetTurnState: return TaskGetTurnState(call);
+				case BossCommandId::TaskGetHttpStatusCodeA: return TaskGetHttpStatusCode(call);
+				case BossCommandId::TaskGetContentLength: return TaskGetLength(call, false);
+				case BossCommandId::TaskGetProcessedLength: return TaskGetLength(call, true);
 				case BossCommandId::UknA7:
-					return HandleUknA7(serviceCall);
+					cemuLog_logDebug(LogType::Force, "BOSS: command A5 ignored");
+					return kSuccess;
 				case BossCommandId::DeleteDataRelated:
-					return HandleDeleteDataRelated(serviceCall);
-				case BossCommandId::StorageExist:
-					return HandleStorageExist(serviceCall);
-				case BossCommandId::StorageGetDataList:
-					return HandleStorageGetDataList(serviceCall);
-				case BossCommandId::NsDataExist:
-					return HandleNsDataExist(serviceCall);
-				case BossCommandId::NsDataRead:
-					return HandleNsDataRead(serviceCall);
-				case BossCommandId::NsDataGetSize:
-					return HandleNsDataGetSize(serviceCall);
+					cemuLog_logDebug(LogType::Force, "BOSS: command A6 ignored");
+					return kSuccess;
+				case BossCommandId::StorageExist: return StorageExist(call);
+				case BossCommandId::StorageGetDataList: return StorageGetDataList(call);
+				case BossCommandId::NsDataExist: return NsDataExist(call);
+				case BossCommandId::NsDataRead: return NsDataRead(call);
+				case BossCommandId::NsDataGetSize: return NsDataGetSize(call);
 				case BossCommandId::NsDataDeleteFile:
-					return HandleNsDataDeleteFile(serviceCall, false);
-				case BossCommandId::NsDataDeleteFileWithHistory:
-					return HandleNsDataDeleteFile(serviceCall, true);
-				case BossCommandId::NsFinalize:
-					return HandleNsFinalize(serviceCall);
-				case BossCommandId::TitleSetNewArrivalFlag:
-					return HandleTitleSetNewArrivalFlag(serviceCall);
+				case BossCommandId::NsDataDeleteFileWithHistory: return NsDataDelete(call);
+				case BossCommandId::NsFinalize: return NsFinalize(call);
+				case BossCommandId::TitleSetNewArrivalFlag: return TitleSetNewArrivalFlag(call);
 				default:
-					cemuLog_log(LogType::Force, "Unsupported service call to /dev/boss");
+					cemuLog_log(LogType::Force, "BOSS: unsupported command {:x}", call.GetCommandId());
 					cemu_assert_unimplemented();
-					break;
+					return kBossOk;
 				}
 			}
-			else
+
+		private:
+			// 0 in a request means the current account; returns 0 when there is none
+			static uint32 ReadAccount(IPCServiceCall& call)
 			{
-				cemu_assert_suspicious();
+				uint32 id = call.ReadParameter<uint32be>();
+				if (id != 0)
+					return id;
+				uint32 current;
+				return iosu::act::GetPersistentId(iosu::act::ACT_SLOT_CURRENT, &current) ? current : 0;
 			}
-			return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_BOSS, 0);
-		}
 
-		// helper function to get proper persistentId
-		uint32 BossGetPersistentId(uint32 persistentId)
-		{
-			if (persistentId != 0)
-				return persistentId;
-			uint32 currentPersistentId;
-			bool r = iosu::act::GetPersistentId(iosu::act::ACT_SLOT_CURRENT, &currentPersistentId);;
-			if (!r)
-				return 0;
-			return currentPersistentId;
-		}
-
-		nnResult HandleTaskIsRegistered(IPCServiceCall& serviceCall)
-		{
-			uint32 persistentId = BossGetPersistentId(serviceCall.ReadParameter<uint32be>());
-			if (!persistentId)
-				return RESULT_C0203880;
-			TaskId taskId = serviceCall.ReadParameter<TaskId>();
-			bool isRegistered = s_bossDaemon.TaskIsRegistered(persistentId, taskId);
-			// write response
-			serviceCall.WriteResponse<uint8be>(isRegistered ? 1 : 0);
-			return RESULT_SUCCESS;
-		}
-
-		nnResult HandleTaskRegister(IPCServiceCall& serviceCall, bool forImmediateRun)
-		{
-			uint32 persistentId = BossGetPersistentId(serviceCall.ReadParameter<uint32be>());
-			if (!persistentId)
-				return RESULT_C0203880;
-			TaskId taskId = serviceCall.ReadParameter<TaskId>();
-			IPCServiceCall::UnalignedBuffer taskSettingsBuffer = serviceCall.ReadUnalignedInputBufferInfo();
-			TaskSettingCore taskSetting = taskSettingsBuffer.ReadType<TaskSettingCore>(); // bugged.. (but on the submission side)
-			if (taskSetting.persistentId == 0)
-				taskSetting.persistentId = persistentId;
-			taskSetting.taskId = taskId;
-			s_bossDaemon.RegisterTask(taskSetting);
-			return RESULT_SUCCESS;
-		}
-
-		nnResult HandleTaskUnregister(IPCServiceCall& serviceCall)
-		{
-			uint32 persistentId = BossGetPersistentId(serviceCall.ReadParameter<uint32be>());
-			if (!persistentId)
-				return RESULT_C0203880;
-			TaskId taskId = serviceCall.ReadParameter<TaskId>();
-			s_bossDaemon.UnregisterTask(persistentId, taskId);
-			return RESULT_SUCCESS;
-		}
-
-		nnResult HandleTaskRun(IPCServiceCall& serviceCall)
-		{
-			uint32 persistentId = BossGetPersistentId(serviceCall.ReadParameter<uint32be>());
-			if (!persistentId)
-				return RESULT_C0203880;
-			TaskId taskId = serviceCall.ReadParameter<TaskId>();
-			bool isForegroundRun = serviceCall.ReadParameter<uint8be>() != 0; // todo - handle this
-			s_bossDaemon.TaskRun(persistentId, taskId);
-			return RESULT_SUCCESS;
-		}
-
-		nnResult HandleTaskStartScheduling(IPCServiceCall& serviceCall)
-		{
-			uint32 persistentId = BossGetPersistentId(serviceCall.ReadParameter<uint32be>());
-			if (!persistentId)
-				return RESULT_C0203880;
-			TaskId taskId = serviceCall.ReadParameter<TaskId>();
-			uint8 startImmediately = serviceCall.ReadParameter<uint8be>();
-			s_bossDaemon.StartScheduleTask(persistentId, taskId, startImmediately != 0);
-			return RESULT_SUCCESS;
-		}
-
-		nnResult HandleTaskStopScheduling(IPCServiceCall& serviceCall)
-		{
-			uint32 persistentId = BossGetPersistentId(serviceCall.ReadParameter<uint32be>());
-			if (!persistentId)
-				return RESULT_C0203880;
-			TaskId taskId = serviceCall.ReadParameter<TaskId>();
-			s_bossDaemon.StopScheduleTask(persistentId, taskId);
-			return RESULT_SUCCESS;
-		}
-
-		nnResult HandleTaskWait(IPCServiceCall& serviceCall)
-		{
-			static_assert(sizeof(betype<TaskWaitState>) == 4);
-			uint32 persistentId = BossGetPersistentId(serviceCall.ReadParameter<uint32be>());
-			if (!persistentId)
-				return RESULT_C0203880;
-			TaskId taskId = serviceCall.ReadParameter<TaskId>();
-			TaskWaitState waitState = serviceCall.ReadParameter<betype<TaskWaitState>>();
-			uint32 timeout = serviceCall.ReadParameter<uint32be>();
-			std::chrono::steady_clock::time_point endTime;
-			if (timeout != 0)
-				endTime = std::chrono::steady_clock::now() + std::chrono::seconds(timeout);
-			std::shared_ptr<RegisteredTask> registeredTask = s_bossDaemon.GetRegisteredTask2(persistentId, taskId);
-			cemu_assert_debug(registeredTask != nullptr);
-			if (!registeredTask)
-				return RESULT_NOTEXIST;
-			while (true)
+			// most task commands start with (persistent id, task id)
+			static bool ReadTaskTarget(IPCServiceCall& call, TaskId& id)
 			{
-				// todo - make async
-				std::this_thread::sleep_for(std::chrono::milliseconds(100));
-				TaskState currentState = registeredTask->GetState();
-				// does the state match the wait state?
-				if (waitState == TaskWaitState::Done)
+				if (!ReadAccount(call))
+					return false;
+				id = call.ReadParameter<TaskId>();
+				return true;
+			}
+
+			nnResult TaskIsRegistered(IPCServiceCall& call)
+			{
+				TaskId id;
+				if (!ReadTaskTarget(call, id))
+					return kNoAccount;
+				call.WriteResponse<uint8be>(g_tasks.IsRegistered(id) ? 1 : 0);
+				return kSuccess;
+			}
+
+			nnResult TaskRegister(IPCServiceCall& call)
+			{
+				uint32 account = ReadAccount(call);
+				if (!account)
+					return kNoAccount;
+				TaskId id = call.ReadParameter<TaskId>();
+				TaskSettingCore settings = call.ReadUnalignedInputBufferInfo().ReadType<TaskSettingCore>();
+				if (settings.persistentId == 0)
+					settings.persistentId = account;
+				settings.taskId = id;
+				g_tasks.Register(settings);
+				return kSuccess;
+			}
+
+			nnResult TaskUnregister(IPCServiceCall& call)
+			{
+				TaskId id;
+				if (!ReadTaskTarget(call, id))
+					return kNoAccount;
+				g_tasks.Unregister(id);
+				return kSuccess;
+			}
+
+			nnResult TaskRun(IPCServiceCall& call)
+			{
+				TaskId id;
+				if (!ReadTaskTarget(call, id))
+					return kNoAccount;
+				call.ReadParameter<uint8be>(); // foreground run flag, not used
+				g_tasks.RunNow(id);
+				return kSuccess;
+			}
+
+			nnResult TaskStartScheduling(IPCServiceCall& call)
+			{
+				TaskId id;
+				if (!ReadTaskTarget(call, id))
+					return kNoAccount;
+				uint8 immediately = call.ReadParameter<uint8be>();
+				g_tasks.StartScheduling(id, immediately != 0);
+				return kSuccess;
+			}
+
+			nnResult TaskStopScheduling(IPCServiceCall& call)
+			{
+				TaskId id;
+				if (!ReadTaskTarget(call, id))
+					return kNoAccount;
+				return kSuccess; // nothing is scheduled
+			}
+
+			nnResult TaskWait(IPCServiceCall& call)
+			{
+				static_assert(sizeof(betype<TaskWaitState>) == 4);
+				TaskId id;
+				if (!ReadTaskTarget(call, id))
+					return kNoAccount;
+				TaskWaitState waitFor = call.ReadParameter<betype<TaskWaitState>>();
+				uint32 timeoutSeconds = call.ReadParameter<uint32be>();
+				const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeoutSeconds);
+				std::shared_ptr<Task> task = g_tasks.Find(id);
+				cemu_assert_debug(task != nullptr);
+				if (!task)
+					return kTaskNotFound;
+				// polls the task; the response byte is 1 when the state was reached, 0 on timeout
+				for (;;)
 				{
-					if (currentState == TaskState::Done)
+					std::this_thread::sleep_for(std::chrono::milliseconds(100));
+					if (waitFor != TaskWaitState::Done)
 					{
-						serviceCall.WriteResponse<uint8be>(1); // 0 -> timeout, 1 -> no timeout
-						return RESULT_SUCCESS;
+						cemuLog_log(LogType::Force, "BOSS: unknown wait state {}", (uint32)waitFor);
+						call.WriteResponse<uint8be>(0);
+						return kSuccess;
+					}
+					if (task->GetState() == TaskState::Done)
+					{
+						call.WriteResponse<uint8be>(1);
+						return kSuccess;
+					}
+					if (timeoutSeconds != 0 && std::chrono::steady_clock::now() >= deadline)
+					{
+						call.WriteResponse<uint8be>(0);
+						return kSuccess;
 					}
 				}
+			}
+
+			// the query commands reply with an execution counter (always 1) followed by the value
+			nnResult TaskGetTurnState(IPCServiceCall& call)
+			{
+				static_assert(sizeof(betype<TaskTurnState>) == 4);
+				TaskId id;
+				if (!ReadTaskTarget(call, id))
+					return kNoAccount;
+				std::shared_ptr<Task> task = g_tasks.Find(id);
+				call.WriteResponse<uint32be>(1);
+				call.WriteResponse<betype<TaskTurnState>>(task ? task->GetTurnState() : TaskTurnState::Ukn);
+				return task ? kSuccess : kTaskNotFound;
+			}
+
+			nnResult TaskGetHttpStatusCode(IPCServiceCall& call)
+			{
+				TaskId id;
+				if (!ReadTaskTarget(call, id))
+					return kNoAccount;
+				std::shared_ptr<Task> task = g_tasks.Find(id);
+				call.WriteResponse<sint32be>(1);
+				call.WriteResponse<sint32be>(task ? task->GetHttpStatusCode() : 0);
+				return task ? kSuccess : kTaskNotFound;
+			}
+
+			nnResult TaskGetLength(IPCServiceCall& call, bool processed)
+			{
+				TaskId id;
+				if (!ReadTaskTarget(call, id))
+					return kNoAccount;
+				std::shared_ptr<Task> task = g_tasks.Find(id);
+				uint32 length = task ? (processed ? task->GetProcessedLength() : task->GetContentLength()) : 0;
+				call.WriteResponse<uint32be>(1);
+				call.WriteResponse<uint64be>(length);
+				return task ? kSuccess : kTaskNotFound;
+			}
+
+			nnResult StorageExist(IPCServiceCall& call)
+			{
+				static_assert(sizeof(DirectoryName) == 8);
+				static_assert(sizeof(betype<StorageKind>) == 4);
+				uint32 account = ReadAccount(call);
+				DirectoryName directory = call.ReadParameter<DirectoryName>();
+				StorageKind kind = call.ReadParameter<betype<StorageKind>>();
+				if (!account)
+					return kNoAccount;
+				bool exists = true;
+				if (kind == StorageKind::StorageNbdl)
+					exists = FileListDb::StorageExists(directory, CafeSystem::GetForegroundTitleId(), account); // only the storage directory is checked
 				else
 				{
-					cemuLog_log(LogType::Force, "IOSU-Boss: Unknown task wait state {}", static_cast<uint32>(waitState));
-					serviceCall.WriteResponse<uint8be>(0);
-					return RESULT_SUCCESS;
+					cemuLog_logDebug(LogType::Force, "BOSS: storage kind {} not handled", (uint32)kind);
+					cemu_assert_unimplemented();
 				}
-				// check for timeout
-				if (timeout != 0 && std::chrono::steady_clock::now() >= endTime)
+				call.WriteResponse<uint8be>(exists ? 1 : 0);
+				return kSuccess;
+			}
+
+			nnResult StorageGetDataList(IPCServiceCall& call)
+			{
+				uint32 account = ReadAccount(call);
+				if (!account)
+					return kNoAccount;
+				DirectoryName directory = call.ReadParameter<DirectoryName>();
+				uint32 ukn = call.ReadParameter<uint32be>();
+				cemu_assert_debug(ukn == 0);
+				IPCServiceCall::UnalignedBuffer output = call.ReadUnalignedOutputBufferInfo();
+				uint32 start = call.ReadParameter<uint32be>();
+				cemu_assert_debug(start == 0); // offsets are not supported
+				nnResult r = g_fileList.Load(TaskId(directory.name2.c_str()), CafeSystem::GetForegroundTitleId(), account);
+				if (NN_RESULT_IS_FAILURE(r))
+					return r;
+				std::vector<DataName> names = g_fileList.Names();
+				names.resize(std::min(names.size(), output.GetSize() / sizeof(DataName)));
+				output.WriteData(names.data(), names.size() * sizeof(DataName));
+				call.WriteResponse<uint32be>((uint32)names.size());
+				call.WriteResponse<uint8be>(1);
+				return kSuccess;
+			}
+
+			// NsData commands start with (persistent id, directory, storage kind, file name)
+			struct NsDataTarget
+			{
+				uint32 account;
+				DirectoryName directory;
+				DataName name;
+			};
+
+			static bool ReadNsDataTarget(IPCServiceCall& call, NsDataTarget& t)
+			{
+				t.account = ReadAccount(call);
+				if (!t.account)
+					return false;
+				t.directory = call.ReadParameter<DirectoryName>();
+				call.ReadParameter<uint32be>(); // storage kind (unused)
+				t.name = call.ReadParameter<DataName>();
+				return true;
+			}
+
+			static nnResult OpenNsData(const NsDataTarget& t)
+			{
+				return g_nsData.Open(t.directory, CafeSystem::GetForegroundTitleId(), t.account, t.name);
+			}
+
+			nnResult NsDataExist(IPCServiceCall& call)
+			{
+				NsDataTarget t;
+				if (!ReadNsDataTarget(call, t))
+					return kNoAccount;
+				nnResult r = OpenNsData(t);
+				if (NN_RESULT_IS_FAILURE(r))
+					return r;
+				call.WriteResponse<uint8be>(g_nsData.Exists() ? 1 : 0);
+				return kSuccess;
+			}
+
+			nnResult NsDataRead(IPCServiceCall& call)
+			{
+				NsDataTarget t;
+				if (!ReadNsDataTarget(call, t))
+					return kNoAccount;
+				IPCServiceCall::UnalignedBuffer output = call.ReadUnalignedOutputBufferInfo();
+				uint64 offset = call.ReadParameter<uint64be>();
+				nnResult r = OpenNsData(t);
+				if (NN_RESULT_IS_FAILURE(r))
 				{
-					serviceCall.WriteResponse<uint8be>(0);
-					return RESULT_SUCCESS; // which error to return here?
+					call.WriteResponse<uint64be>(0);
+					return r;
 				}
+				// the whole output buffer is written, also past the end of the file
+				std::vector<uint8> buffer(output.GetSize());
+				uint32 bytesRead = 0;
+				g_nsData.Read(buffer.data(), (uint32)buffer.size(), (uint32)offset, bytesRead);
+				output.WriteData(buffer.data(), buffer.size());
+				call.WriteResponse<uint64be>(bytesRead);
+				return kSuccess;
 			}
-		}
 
-		nnResult HandleTaskGetTurnState(IPCServiceCall& serviceCall)
-		{
-			static_assert(sizeof(betype<TaskTurnState>) == 4);
-			uint32 persistentId = BossGetPersistentId(serviceCall.ReadParameter<uint32be>());
-			if (!persistentId)
-				return RESULT_C0203880;
-			TaskId taskId = serviceCall.ReadParameter<TaskId>();
-			std::shared_ptr<RegisteredTask> registeredTask = s_bossDaemon.GetRegisteredTask2(persistentId, taskId);
-			TaskTurnState turnState = registeredTask ? registeredTask->GetTurnState() : TaskTurnState::Ukn;
-			serviceCall.WriteResponse<uint32be>(1); // execution counter - todo
-			serviceCall.WriteResponse<betype<TaskTurnState>>(turnState);
-			if (!registeredTask)
-				return RESULT_NOTEXIST;
-			return RESULT_SUCCESS;
-		}
-
-		nnResult HandleTaskGetHttpStatusCodeA(IPCServiceCall& serviceCall)
-		{
-			uint32 persistentId = BossGetPersistentId(serviceCall.ReadParameter<uint32be>());
-			if (!persistentId)
-				return RESULT_C0203880;
-			TaskId taskId = serviceCall.ReadParameter<TaskId>();
-			std::shared_ptr<RegisteredTask> registeredTask = s_bossDaemon.GetRegisteredTask2(persistentId, taskId);
-			sint32 httpStatusCode = registeredTask ? registeredTask->GetHttpStatusCode() : 0;
-			serviceCall.WriteResponse<sint32be>(1); // execution counter - todo
-			serviceCall.WriteResponse<sint32be>(httpStatusCode);
-			if (!registeredTask)
-				return RESULT_NOTEXIST;
-			return RESULT_SUCCESS;
-		}
-
-		nnResult HandleTaskGetContentLength(IPCServiceCall& serviceCall)
-		{
-			uint32 persistentId = BossGetPersistentId(serviceCall.ReadParameter<uint32be>());
-			if (!persistentId)
-				return RESULT_C0203880;
-			TaskId taskId = serviceCall.ReadParameter<TaskId>();
-			std::shared_ptr<RegisteredTask> registeredTask = s_bossDaemon.GetRegisteredTask2(persistentId, taskId);
-			uint32 contentLength = registeredTask ? registeredTask->GetContentLength() : 0;
-			serviceCall.WriteResponse<uint32be>(1); // execution counter - todo
-			serviceCall.WriteResponse<uint64be>(contentLength);
-			if (!registeredTask)
-				return RESULT_NOTEXIST;
-			return RESULT_SUCCESS;
-		}
-
-		nnResult HandleTaskGetProcessedLength(IPCServiceCall& serviceCall)
-		{
-			uint32 persistentId = BossGetPersistentId(serviceCall.ReadParameter<uint32be>());
-			if (!persistentId)
-				return RESULT_C0203880;
-			TaskId taskId = serviceCall.ReadParameter<TaskId>();
-			std::shared_ptr<RegisteredTask> registeredTask = s_bossDaemon.GetRegisteredTask2(persistentId, taskId);
-			uint32 processedLength = registeredTask ? registeredTask->GetProcessedLength() : 0;
-			serviceCall.WriteResponse<uint32be>(1); // execution counter - todo
-			serviceCall.WriteResponse<uint64be>(processedLength); // this the actual length?
-			if (!registeredTask)
-				return RESULT_NOTEXIST;
-			return RESULT_SUCCESS;
-		}
-
-		/* Storage */
-
-		nnResult HandleStorageExist(IPCServiceCall& serviceCall)
-		{
-			static_assert(sizeof(DirectoryName) == 8);
-			static_assert(sizeof(betype<StorageKind>) == 4);
-			auto persistentId = BossGetPersistentId(serviceCall.ReadParameter<uint32be>());
-			DirectoryName directoryName = serviceCall.ReadParameter<DirectoryName>();
-			StorageKind storageKind = serviceCall.ReadParameter<betype<StorageKind>>();
-			if (!persistentId)
-				return RESULT_C0203880;
-			uint64 titleId = CafeSystem::GetForegroundTitleId();
-			// todo - investigate how IOSU handles this
-			bool storageExists = true;
-			if (storageKind == StorageKind::StorageNbdl)
+			nnResult NsDataGetSize(IPCServiceCall& call)
 			{
-				// but for now we only check if the fad.db file exists for nbdl
-				storageExists = m_fadDb.CheckIfStorageExists(directoryName, titleId, persistentId);
+				NsDataTarget t;
+				if (!ReadNsDataTarget(call, t))
+					return kNoAccount;
+				nnResult r = OpenNsData(t);
+				if (NN_RESULT_IS_FAILURE(r))
+					return r;
+				uint32 size = 0;
+				r = g_nsData.GetSize(size);
+				call.WriteResponse<uint64be>(size);
+				return r;
 			}
-			else
+
+			nnResult NsDataDelete(IPCServiceCall& call)
 			{
-				cemuLog_logDebug(LogType::Force, "IOSU-Boss: Unhandled storage kind {}", static_cast<uint32>(storageKind));
-				cemu_assert_unimplemented();
+				NsDataTarget t;
+				if (!ReadNsDataTarget(call, t))
+					return kNoAccount;
+				nnResult r = OpenNsData(t);
+				if (NN_RESULT_IS_FAILURE(r))
+					return r;
+				return g_nsData.Delete(); // the history variant is handled the same way
 			}
-			serviceCall.WriteResponse<uint8be>(storageExists ? 1 : 0);
-			return RESULT_SUCCESS;
-		}
 
-		nnResult HandleStorageGetDataList(IPCServiceCall& serviceCall)
-		{
-			auto persistentId = BossGetPersistentId(serviceCall.ReadParameter<uint32be>());
-			if (!persistentId)
-				return RESULT_C0203880;
-			DirectoryName directoryName = serviceCall.ReadParameter<DirectoryName>();
-			uint32 ukn = serviceCall.ReadParameter<uint32be>();
-			cemu_assert_debug(ukn == 0);
-			IPCServiceCall::UnalignedBuffer dataListOutputBuffer = serviceCall.ReadUnalignedOutputBufferInfo();
-			uint32 startOffset = serviceCall.ReadParameter<uint32be>(); // guessed
-			cemu_assert_debug(startOffset == 0); // todo - implement offset
-			size_t dataListSize = dataListOutputBuffer.GetSize() / sizeof(DataName);
-			std::vector<DataName> dataListTmp;
-			uint64 titleId = CafeSystem::GetForegroundTitleId();
-			// open FAD database
-			TaskId taskId(directoryName.name2.c_str());
-			nnResult r = m_fadDb.Load(taskId, titleId, persistentId);
-			if (NN_RESULT_IS_FAILURE(r))
-				return r;
-			m_fadDb.GetDataList(dataListTmp);
-			if (dataListTmp.size() > dataListSize)
-				dataListTmp.resize(dataListSize);
-			// write to output
-			dataListOutputBuffer.WriteData(dataListTmp.data(), dataListTmp.size() * sizeof(DataName));
-			serviceCall.WriteResponse<uint32be>((uint32)dataListTmp.size());
-			serviceCall.WriteResponse<uint8be>(1); // extra byte to indicate success or failure
-			return RESULT_SUCCESS;
-		}
-
-		/* NsData */
-
-		nnResult HandleNsDataExist(IPCServiceCall& serviceCall)
-		{
-			auto persistentId = BossGetPersistentId(serviceCall.ReadParameter<uint32be>());
-			if (!persistentId)
-				return RESULT_C0203880;
-			DirectoryName directoryName = serviceCall.ReadParameter<DirectoryName>();
-			uint32 ukn = serviceCall.ReadParameter<uint32be>(); // storage kind?
-			DataName fileName = serviceCall.ReadParameter<DataName>();
-			uint64 titleId = CafeSystem::GetForegroundTitleId();
-			nnResult r = m_nsDataAccessor.Open(directoryName, titleId, persistentId, fileName);
-			if (NN_RESULT_IS_FAILURE(r))
-				return r;
-			bool nsDataExists = m_nsDataAccessor.Exists();
-			serviceCall.WriteResponse<uint8be>(nsDataExists);
-			return RESULT_SUCCESS;
-		}
-
-		nnResult HandleNsDataRead(IPCServiceCall& serviceCall)
-		{
-			auto persistentId = BossGetPersistentId(serviceCall.ReadParameter<uint32be>());
-			if (!persistentId)
-				return RESULT_C0203880;
-			DirectoryName directoryName = serviceCall.ReadParameter<DirectoryName>();
-			uint32 ukn = serviceCall.ReadParameter<uint32be>(); // storage kind?
-			DataName fileName = serviceCall.ReadParameter<DataName>();
-			IPCServiceCall::UnalignedBuffer dataOutputBuffer = serviceCall.ReadUnalignedOutputBufferInfo();
-			uint64 readOffset = serviceCall.ReadParameter<uint64be>();
-			uint64 titleId = CafeSystem::GetForegroundTitleId();
-			nnResult r = m_nsDataAccessor.Open(directoryName, titleId, persistentId, fileName);
-			if (NN_RESULT_IS_FAILURE(r))
+			nnResult NsFinalize(IPCServiceCall& call)
 			{
-				serviceCall.WriteResponse<uint64be>(0); // should we still write the bytes read in case of failure?
-				return r;
+				NsDataTarget t;
+				if (!ReadNsDataTarget(call, t))
+					return kNoAccount;
+				g_nsData.Close();
+				return kSuccess;
 			}
-			uint32 bytesRead = 0;
-			std::vector<uint8> tmpBuffer;
-			tmpBuffer.resize(dataOutputBuffer.GetSize());
-			bool rRead = m_nsDataAccessor.Read(tmpBuffer.data(), tmpBuffer.size(), readOffset, bytesRead);
-			dataOutputBuffer.WriteData(tmpBuffer.data(), tmpBuffer.size());
-			serviceCall.WriteResponse<uint64be>(bytesRead);
-			// todo - handle rRead
-			return RESULT_SUCCESS;
-		}
 
-		nnResult HandleNsDataGetSize(IPCServiceCall& serviceCall)
+			nnResult TitleSetNewArrivalFlag(IPCServiceCall& call)
+			{
+				if (!ReadAccount(call))
+					return kNoAccount;
+				call.ReadParameter<uint8be>();
+				cemuLog_logDebug(LogType::Force, "BOSS: TitleSetNewArrivalFlag ignored");
+				return kSuccess;
+			}
+		};
+
+		BossService g_service;
+
+		// note: the task thread keeps running after TitleStop, as before
+		class BossModule : public ::IOSUModule
 		{
-			auto persistentId = BossGetPersistentId(serviceCall.ReadParameter<uint32be>());
-			if (!persistentId)
-				return RESULT_C0203880;
-			DirectoryName directoryName = serviceCall.ReadParameter<DirectoryName>();
-			uint32 ukn = serviceCall.ReadParameter<uint32be>(); // storage kind?
-			DataName fileName = serviceCall.ReadParameter<DataName>();
-			uint64 titleId = CafeSystem::GetForegroundTitleId();
-			nnResult r = m_nsDataAccessor.Open(directoryName, titleId, persistentId, fileName);
-			if (NN_RESULT_IS_FAILURE(r))
-				return r;
-			uint32 fileSize = 0;
-			r = m_nsDataAccessor.GetSize(fileSize);
-			serviceCall.WriteResponse<uint64be>(fileSize);
-			return r;
-		}
+			void TitleStart() override
+			{
+				g_service.Start();
+				g_tasks.Start();
+			}
+			void TitleStop() override
+			{
+				g_service.Stop();
+				g_fileList.Reset();
+				g_nsData.Close();
+			}
+		};
 
-		nnResult HandleNsDataDeleteFile(IPCServiceCall& serviceCall, bool withHistory)
-		{
-			auto persistentId = BossGetPersistentId(serviceCall.ReadParameter<uint32be>());
-			if (!persistentId)
-				return RESULT_C0203880;
-			DirectoryName directoryName = serviceCall.ReadParameter<DirectoryName>();
-			uint32 ukn = serviceCall.ReadParameter<uint32be>(); // storage kind?
-			DataName fileName = serviceCall.ReadParameter<DataName>();
-			uint64 titleId = CafeSystem::GetForegroundTitleId();
-			nnResult r = m_nsDataAccessor.Open(directoryName, titleId, persistentId, fileName);
-			if (NN_RESULT_IS_FAILURE(r))
-				return r;
-			// todo - handle withHistory
-			return m_nsDataAccessor.Delete();
-		}
-
-		nnResult HandleNsFinalize(IPCServiceCall& serviceCall)
-		{
-			auto persistentId = BossGetPersistentId(serviceCall.ReadParameter<uint32be>());
-			if (!persistentId)
-				return RESULT_C0203880;
-			DirectoryName directoryName = serviceCall.ReadParameter<DirectoryName>();
-			uint32 ukn = serviceCall.ReadParameter<uint32be>(); // storage kind?
-			DataName fileName = serviceCall.ReadParameter<DataName>();
-			m_nsDataAccessor.Close();
-			return RESULT_SUCCESS;
-		}
-
-		/* Title */
-
-		nnResult HandleTitleSetNewArrivalFlag(IPCServiceCall& serviceCall)
-		{
-			auto persistentId = BossGetPersistentId(serviceCall.ReadParameter<uint32be>());
-			if (!persistentId)
-				return RESULT_C0203880;
-			uint8 flagValue = serviceCall.ReadParameter<uint8be>();
-			cemuLog_logDebug(LogType::Force, "IOSU-Boss: Unhandled command TitleSetNewArrivalFlag");
-			return RESULT_SUCCESS;
-		}
-
-		/* stubbed opcodes */
-		nnResult HandleUknA7(IPCServiceCall& serviceCall)
-		{
-			cemuLog_logDebug(LogType::Force, "IOSU-Boss: Unhandled command A7");
-			// no response data
-			return RESULT_SUCCESS;
-		}
-
-		nnResult HandleDeleteDataRelated(IPCServiceCall& serviceCall)
-		{
-			cemuLog_logDebug(LogType::Force, "IOSU-Boss: Unhandled delete command");
-			// no response data
-			return RESULT_SUCCESS;
-		}
-
-
-	};
-
-	BossMainService s_bossService;
-
-	class : public ::IOSUModule
-	{
-		void TitleStart() override
-		{
-			s_bossService.Start();
-			s_bossDaemon.Start();
-		}
-		void TitleStop() override
-		{
-			s_bossService.Stop();
-			m_fadDb.Clear();
-			m_nsDataAccessor.Close();
-		}
-	}sIOSUModuleNNBOSS;
+		BossModule g_module;
+	}
 
 	IOSUModule* GetModule()
 	{
-		return static_cast<IOSUModule*>(&sIOSUModuleNNBOSS);
+		return &g_module;
 	}
 }
