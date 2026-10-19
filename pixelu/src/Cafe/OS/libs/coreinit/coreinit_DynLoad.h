@@ -1,39 +1,38 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
+// OSDynLoad: runtime loading of RPL modules, export lookup and the allocator
+// that the loader uses for guest-side module memory.
 namespace coreinit
 {
+	// Module description handed to notify callbacks and returned by OSDynLoad_GetRPLInfo.
 	struct OSDynLoad_NotifyData
 	{
-		MEMPTR<char> name;
+		/* +0x00 */ MEMPTR<char> name;
 
-		uint32be textAddr;
-		uint32be textOffset;
-		uint32be textSize;
+		/* +0x04 */ uint32be textAddr;
+		/* +0x08 */ uint32be textOffset;
+		/* +0x0C */ uint32be textSize;
 
-		uint32be dataAddr;
-		uint32be dataOffset;
-		uint32be dataSize;
+		/* +0x10 */ uint32be dataAddr;
+		/* +0x14 */ uint32be dataOffset;
+		/* +0x18 */ uint32be dataSize;
 
-		uint32be readAddr;
-		uint32be readOffset;
-		uint32be readSize;
+		/* +0x1C */ uint32be readAddr;
+		/* +0x20 */ uint32be readOffset;
+		/* +0x24 */ uint32be readSize;
 	};
+	static_assert(sizeof(OSDynLoad_NotifyData) == 0x28);
 
-	using OSDynLoadNotifyFunc = void (*)(uint32be* module, void *userContext, sint32 notifyReason, OSDynLoad_NotifyData *infos);
-
-	struct NotifyCallbackEntry
-	{
-		MEMPTR<OSDynLoadNotifyFunc> callback;
-		MEMPTR<void> userContext;
-
-		NotifyCallbackEntry(MEMPTR<OSDynLoadNotifyFunc> func, MEMPTR<void> context) : callback(func), userContext(context) {}
-	};
+	// guest callback: (module handle ptr, user context, reason 1=loaded/2=unloaded, info)
+	using OSDynLoadNotifyFunc = void (*)(uint32be* module, void* userContext, sint32 notifyReason, OSDynLoad_NotifyData* infos);
 
 	uint32 OSDynLoad_SetAllocator(MPTR allocFunc, MPTR freeFunc);
 	void OSDynLoad_SetTLSAllocator(MPTR allocFunc, MPTR freeFunc);
 	uint32 OSDynLoad_GetAllocator(betype<MPTR>* funcAlloc, betype<MPTR>* funcFree);
 	void OSDynLoad_GetTLSAllocator(betype<MPTR>* funcAlloc, betype<MPTR>* funcFree);
 
+	// allocate/free through the guest allocator set with OSDynLoad_SetAllocator
 	void* OSDynLoad_AllocatorAlloc(sint32 size, sint32 alignment);
 	void OSDynLoad_AllocatorFree(void* mem);
 

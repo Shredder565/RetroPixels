@@ -1,3 +1,10 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// Green Hills runtime support. Titles built with the GHS toolchain call into
+// coreinit for stream locking, a global runtime lock, errno storage, the C++
+// exception-handling globals and thread-local storage. Most of the per-thread
+// state lives in OSThread_t; the stdio stream table lives in a block of guest
+// memory whose fields are published as data exports.
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/OS/libs/coreinit/coreinit_GHS.h"
 #include "Cafe/OS/libs/coreinit/coreinit_MEM.h"
@@ -6,137 +13,148 @@
 
 namespace coreinit
 {
-	struct iobbuf
+	namespace
 	{
-		uint32be ukn00; // lock index?
-		uint32be ukn04; // ?
-		uint32be ukn08; // ?
-		uint32be flags; // permissions and channel
-	};
+		constexpr uint32 kMaxStreams = 100; // FOPEN_MAX of the runtime
 
-	#define GHS_FOPEN_MAX	100
+		// stream mode bits in GHSStream::mode
+		constexpr uint32 kStreamModeRead = 0x1;
+		constexpr uint32 kStreamModeWrite = 0x2;
+		constexpr uint32 StreamChannel(uint32 channel) { return channel << 18; }
 
-	struct GHSAccessibleData
-	{
-		iobbuf _iob[GHS_FOPEN_MAX];
-		MPTR _iob_lock[GHS_FOPEN_MAX];
-		uint16be __gh_FOPEN_MAX;
-		MEMPTR<void> ghs_environ;
-		uint32 ghs_Errno; // exposed as 'errno' data export
-	};
+		// One entry of the guest _iob table. Only the mode word is touched here.
+		struct GHSStream
+		{
+			uint32be opaque[3];
+			uint32be mode;
+		};
+		static_assert(sizeof(GHSStream) == 0x10);
 
-	SysAllocator<GHSAccessibleData> g_ghs_data;
+		// Guest-resident runtime block. _iob, __gh_FOPEN_MAX, environ and errno
+		// are exported as data symbols pointing into it.
+		struct GHSRuntimeBlock
+		{
+			GHSStream streams[kMaxStreams];        // _iob
+			uint32be streamLock[kMaxStreams];      // index into the lock pool for each stream
+			uint16be fopenMax;                     // __gh_FOPEN_MAX
+			MEMPTR<void> environPtr;               // environ
+			uint32 errnoValue;                     // errno (data export)
+		};
+		static_assert(offsetof(GHSRuntimeBlock, streamLock) == 0x640);
+		static_assert(offsetof(GHSRuntimeBlock, fopenMax) == 0x7D0);
+		static_assert(offsetof(GHSRuntimeBlock, environPtr) == 0x7D4);
+		static_assert(offsetof(GHSRuntimeBlock, errnoValue) == 0x7D8);
+		static_assert(sizeof(GHSRuntimeBlock) == 0x7DC);
 
-	struct ghs_flock
-	{
-		uint32be mutexIndex;
-	};
+		// order of these two allocations is fixed (system area layout)
+		SysAllocator<GHSRuntimeBlock> s_runtime;
+		SysAllocator<OSMutex, kMaxStreams> s_streamMutexPool;
 
-	void __ghs_flock_create(ghs_flock* flock);
-	ghs_flock* __ghs_flock_ptr(iobbuf* iob);
+		bool s_streamMutexInUse[kMaxStreams];
+		std::recursive_mutex s_poolGuard;     // protects s_streamMutexInUse
+		std::recursive_mutex s_runtimeLock;   // backs __ghsLock / __ghsUnlock
 
-	std::recursive_mutex g_ghsLock;
-	std::recursive_mutex g_ghsLockFlock;
+		OSMutex* StreamMutex(uint32 slot)
+		{
+			return s_streamMutexPool.GetPtr() + slot;
+		}
 
-	SysAllocator<coreinit::OSMutex, GHS_FOPEN_MAX> _flockMutexArray;
-	bool _flockMutexMask[GHS_FOPEN_MAX]; // if set, mutex in _flockMutexArray is reserved
+		// guest layout of the argument to __tls_get_addr
+		struct GHSTlsIndex
+		{
+			uint16be unused;
+			uint16be moduleIndex;
+			uint32be offset;
+		};
+		static_assert(sizeof(GHSTlsIndex) == 8);
 
-	#define IOB_FLAG_IN				(0x1)
-	#define IOB_FLAG_OUT			(0x2)
+		// one per TLS module in a thread's table
+		struct GHSTlsSlot
+		{
+			uint32be blockAddr;
+			uint32be unused;
+		};
+		static_assert(sizeof(GHSTlsSlot) == 8);
 
-	#define IOB_FLAG_CHANNEL(__x)	((__x)<<18)
+		// OSThread_t keeps the TLS table address and slot count as raw big-endian values
+		uint16be& ThreadTlsSlotCount(OSThread_t* thread)
+		{
+			static_assert(sizeof(thread->numAllocatedTLSBlocks) == sizeof(uint16be));
+			return *reinterpret_cast<uint16be*>(&thread->numAllocatedTLSBlocks);
+		}
 
-	void PrepareGHSRuntime()
-	{
-		g_ghs_data->ghs_environ = nullptr;
-		g_ghs_data->__gh_FOPEN_MAX = GHS_FOPEN_MAX;
-		g_ghs_data->ghs_Errno = 0;
-
-		for (sint32 i = 0; i < GHS_FOPEN_MAX; i++)
-			_flockMutexMask[i] = false;
-		// init stdin/stdout/stderr
-		g_ghs_data->_iob[0].flags = IOB_FLAG_IN;
-		g_ghs_data->_iob[1].flags = IOB_FLAG_OUT;
-		g_ghs_data->_iob[1].flags = IOB_FLAG_OUT;
-		g_ghs_data->_iob[0].flags |= IOB_FLAG_CHANNEL(0);
-		g_ghs_data->_iob[1].flags |= IOB_FLAG_CHANNEL(1);
-		g_ghs_data->_iob[2].flags |= IOB_FLAG_CHANNEL(2);
-		__ghs_flock_create(__ghs_flock_ptr(g_ghs_data->_iob + 0));
-		__ghs_flock_create(__ghs_flock_ptr(g_ghs_data->_iob + 1));
-		__ghs_flock_create(__ghs_flock_ptr(g_ghs_data->_iob + 2));
-
-		osLib_addVirtualPointer("coreinit", "__gh_FOPEN_MAX", memory_getVirtualOffsetFromPointer(&g_ghs_data->__gh_FOPEN_MAX));
-		osLib_addVirtualPointer("coreinit", "_iob", memory_getVirtualOffsetFromPointer(g_ghs_data->_iob));
-		osLib_addVirtualPointer("coreinit", "environ", memory_getVirtualOffsetFromPointer(&g_ghs_data->ghs_environ));
-		osLib_addVirtualPointer("coreinit", "errno", memory_getVirtualOffsetFromPointer(&g_ghs_data->ghs_Errno));
+		uint32be& ThreadTlsTable(OSThread_t* thread)
+		{
+			static_assert(sizeof(thread->tlsBlocksMPTR) == sizeof(uint32be));
+			return *reinterpret_cast<uint32be*>(&thread->tlsBlocksMPTR);
+		}
 	}
 
-	void __ghs_flock_create(ghs_flock* flock)
+	// slot is the guest's lock word for one stream; it receives the pool index
+	void __ghs_flock_create(uint32be* slot)
 	{
-		g_ghsLockFlock.lock();
-		// find available mutex
-		sint32 mutexIndex = -1;
-		for (sint32 i = 0; i < GHS_FOPEN_MAX; i++)
+		std::lock_guard guard(s_poolGuard);
+		uint32 slotIndex = kMaxStreams;
+		for (uint32 i = 0; i < kMaxStreams; i++)
 		{
-			if (!_flockMutexMask[i])
+			if (!s_streamMutexInUse[i])
 			{
-				mutexIndex = i;
+				slotIndex = i;
 				break;
 			}
 		}
-		if (mutexIndex == -1)
+		if (slotIndex == kMaxStreams)
 		{
-			cemuLog_log(LogType::Force, "__ghs_flock_create(): No flock available");
-			cemu_assert(false); // no available mutex
+			cemuLog_log(LogType::Force, "GHS: stream lock pool exhausted");
+			cemu_assert(false);
+			return;
 		}
-		// mark mutex as reserved
-		_flockMutexMask[mutexIndex] = true;
-		// init mutex
-		coreinit::OSInitMutexEx(_flockMutexArray.GetPtr() + mutexIndex, NULL);
-		// update flock to point to the reserved mutex
-		flock->mutexIndex = mutexIndex;
-		g_ghsLockFlock.unlock();
+		s_streamMutexInUse[slotIndex] = true;
+		OSInitMutexEx(StreamMutex(slotIndex), nullptr);
+		*slot = slotIndex;
 	}
 
 	void __ghs_flock_destroy(uint32 index)
 	{
-		g_ghsLockFlock.lock();
-		cemu_assert_debug(index > 2); // stdin/stdout/stderr should never be released?
-		cemu_assert(index < GHS_FOPEN_MAX);
-		cemu_assert_debug(_flockMutexMask[index]);
-		_flockMutexMask[index] = false;
-		g_ghsLockFlock.unlock();
+		std::lock_guard guard(s_poolGuard);
+		cemu_assert_debug(index > 2); // the three standard streams are never closed
+		cemu_assert(index < kMaxStreams);
+		if (index >= kMaxStreams)
+			return;
+		cemu_assert_debug(s_streamMutexInUse[index]);
+		s_streamMutexInUse[index] = false;
 	}
 
-	ghs_flock* __ghs_flock_ptr(iobbuf* iob)
+	// maps an _iob entry to its lock word
+	uint32be* __ghs_flock_ptr(GHSStream* stream)
 	{
-		size_t streamIndex = iob - g_ghs_data->_iob;
-		return (ghs_flock*)&(g_ghs_data->_iob_lock[streamIndex]);
+		ptrdiff_t index = stream - s_runtime->streams;
+		return s_runtime->streamLock + index;
 	}
 
 	void __ghs_flock_file(uint32 index)
 	{
-		cemu_assert(index < GHS_FOPEN_MAX);
-		OSLockMutex(_flockMutexArray.GetPtr() + index);
+		cemu_assert(index < kMaxStreams);
+		OSLockMutex(StreamMutex(index));
 	}
 
 	void __ghs_funlock_file(uint32 index)
 	{
-		cemu_assert(index < GHS_FOPEN_MAX);
-		OSUnlockMutex(_flockMutexArray.GetPtr() + index);
+		cemu_assert(index < kMaxStreams);
+		OSUnlockMutex(StreamMutex(index));
 	}
 
 	void __ghsLock()
 	{
-		while (!g_ghsLock.try_lock())
-		{
+		// the lock may be held by a guest thread that is currently descheduled,
+		// so yield to the scheduler instead of blocking the host thread
+		while (!s_runtimeLock.try_lock())
 			PPCCore_switchToScheduler();
-		}
 	}
 
 	void __ghsUnlock()
 	{
-		g_ghsLock.unlock();
+		s_runtimeLock.unlock();
 	}
 
 	void* __get_eh_init_block()
@@ -146,20 +164,27 @@ namespace coreinit
 
 	void* __get_eh_globals()
 	{
-		OSThread_t* currentThread = coreinit::OSGetCurrentThread();
-		return currentThread->crt.eh_globals.GetPtr();
+		return OSGetCurrentThread()->crt.eh_globals.GetPtr();
 	}
 
 	void* __get_eh_mem_manage()
 	{
-		OSThread_t* currentThread = coreinit::OSGetCurrentThread();
-		return &currentThread->crt.eh_mem_manage;
+		return OSGetCurrentThread()->crt.eh_mem_manage;
+	}
+
+	void* __get_eh_store_globals()
+	{
+		return OSGetCurrentThread()->crt.eh_store_globals;
+	}
+
+	void* __get_eh_store_globals_tdeh()
+	{
+		return OSGetCurrentThread()->crt.eh_store_globals_tdeh;
 	}
 
 	sint32be* __gh_errno_ptr()
 	{
-		OSThread_t* currentThread = coreinit::OSGetCurrentThread();
-		return &currentThread->context.ghs_errno;
+		return &OSGetCurrentThread()->context.ghs_errno;
 	}
 
 	void __gh_set_errno(sint32 errNo)
@@ -172,100 +197,92 @@ namespace coreinit
 		return *__gh_errno_ptr();
 	}
 
-	void* __get_eh_store_globals()
+	// guest-side handle of a runtime mutex: just a pointer to a heap-allocated OSMutex
+	struct GHSMutexHandle
 	{
-		OSThread_t* currentThread = coreinit::OSGetCurrentThread();
-		return &currentThread->crt.eh_store_globals;
-	}
-
-	void* __get_eh_store_globals_tdeh()
-	{
-		OSThread_t* currentThread = coreinit::OSGetCurrentThread();
-		return &currentThread->crt.eh_store_globals_tdeh;
-	}
-
-	struct ghs_mtx_t
-	{
-		MEMPTR<coreinit::OSMutex> mutexPtr;
+		MEMPTR<OSMutex> mutex;
 	};
 
-	void __ghs_mtx_init(ghs_mtx_t* mtx)
+	void __ghs_mtx_init(GHSMutexHandle* handle)
 	{
-		mtx->mutexPtr = (coreinit::OSMutex*)coreinit::_weak_MEMAllocFromDefaultHeapEx(ppcsizeof<coreinit::OSMutex>(), 8);
-		coreinit::OSInitMutex(mtx->mutexPtr.GetPtr());
+		handle->mutex = (OSMutex*)_weak_MEMAllocFromDefaultHeapEx(ppcsizeof<OSMutex>(), 8);
+		OSInitMutex(handle->mutex.GetPtr());
 	}
 
-	void __ghs_mtx_dst(ghs_mtx_t* mtx)
+	void __ghs_mtx_dst(GHSMutexHandle* handle)
 	{
-		coreinit::_weak_MEMFreeToDefaultHeap(mtx->mutexPtr.GetPtr());
-		mtx->mutexPtr = nullptr;
+		_weak_MEMFreeToDefaultHeap(handle->mutex.GetPtr());
+		handle->mutex = nullptr;
 	}
 
-	void __ghs_mtx_lock(ghs_mtx_t* mtx)
+	void __ghs_mtx_lock(GHSMutexHandle* handle)
 	{
-		coreinit::OSLockMutex(mtx->mutexPtr.GetPtr());
+		OSLockMutex(handle->mutex.GetPtr());
 	}
 
-	void __ghs_mtx_unlock(ghs_mtx_t* mtx)
+	void __ghs_mtx_unlock(GHSMutexHandle* handle)
 	{
-		coreinit::OSUnlockMutex(mtx->mutexPtr.GetPtr());
+		OSUnlockMutex(handle->mutex.GetPtr());
 	}
 
-	struct OSTLSBlock
+	void* __tls_get_addr(GHSTlsIndex* tlsIndex)
 	{
-		MPTR addr;
-		uint32 ukn04;
-	};
+		OSThread_t* thread = OSGetCurrentThread();
+		const uint16 moduleIndex = tlsIndex->moduleIndex;
+		if (moduleIndex == 0)
+			assert_dbg(); // index 0 is never handed out
 
-	static_assert(sizeof(OSTLSBlock) == 8);
-
-	struct TLS_Index
-	{
-		uint16 ukn00;
-		uint16 tlsModuleIndex;
-		MPTR   ukn04;
-	};
-
-	void* __tls_get_addr(TLS_Index* tlsIndex)
-	{
-		OSThread_t* currentThread = coreinit::OSGetCurrentThread();
-
-		if (_swapEndianU16(tlsIndex->tlsModuleIndex) == 0)
-			assert_dbg();
-
-		// check if we need to allocate additional TLS blocks for this thread
-		if (_swapEndianU16(tlsIndex->tlsModuleIndex) >= _swapEndianU32(currentThread->numAllocatedTLSBlocks))
+		// The slot table is created on first use, sized for every TLS module index
+		// the loader knows about at that moment. It is not resized afterwards.
+		uint16be& slotCount = ThreadTlsSlotCount(thread);
+		uint32be& table = ThreadTlsTable(thread);
+		if (slotCount == 0)
 		{
-			uint32 allocSize = (RPLLoader_GetMaxTLSModuleIndex() + 1) * sizeof(OSTLSBlock); // __OSDynLoad_gTLSHeader.ukn00 * 8;
-			MPTR allocMem = coreinit_allocFromSysArea(allocSize, 4);
-			memset(memory_getPointerFromVirtualOffset(allocMem), 0, allocSize);
-			if (_swapEndianU32(currentThread->numAllocatedTLSBlocks) != 0)
-			{
-				// keep previously allocated blocks
-				memcpy(memory_getPointerFromVirtualOffset(allocMem), memory_getPointerFromVirtualOffset(_swapEndianU32(currentThread->tlsBlocksMPTR)), _swapEndianU32(currentThread->numAllocatedTLSBlocks) * 8);
-			}
-			currentThread->tlsBlocksMPTR = _swapEndianU32(allocMem);
-			currentThread->numAllocatedTLSBlocks = _swapEndianU16(RPLLoader_GetMaxTLSModuleIndex() + 1);
+			const uint32 count = RPLLoader_GetMaxTLSModuleIndex() + 1;
+			const uint32 bytes = count * (uint32)sizeof(GHSTlsSlot);
+			MPTR tableAddr = coreinit_allocFromSysArea(bytes, 4);
+			memset(memory_getPointerFromVirtualOffset(tableAddr), 0, bytes);
+			table = tableAddr;
+			slotCount = (uint16)count;
 		}
-		// look up TLS address based on moduleIndex
-		OSTLSBlock* tlsBlock = (OSTLSBlock*)memory_getPointerFromVirtualOffsetAllowNull(_swapEndianU32(currentThread->tlsBlocksMPTR) + sizeof(OSTLSBlock) * (uint32)_swapEndianU16(tlsIndex->tlsModuleIndex));
-		if (tlsBlock->addr != _swapEndianU32(MPTR_NULL))
+
+		auto* slot = (GHSTlsSlot*)memory_getPointerFromVirtualOffsetAllowNull((uint32)table + (uint32)sizeof(GHSTlsSlot) * moduleIndex);
+		if (slot->blockAddr == MPTR_NULL)
 		{
-			//osLib_returnFromFunction(hCPU, _swapEndianU32(tlsBlock->addr)+_swapEndianU32(tlsIndex->ukn04));
-			return memory_getPointerFromVirtualOffset(_swapEndianU32(tlsBlock->addr) + _swapEndianU32(tlsIndex->ukn04));
+			// first access from this thread: give it its own copy of the module's TLS image
+			uint8* image = nullptr;
+			sint32 imageSize = 0;
+			bool found = RPLLoader_GetTLSDataByTLSIndex((sint16)moduleIndex, &image, &imageSize);
+			cemu_assert(found);
+			cemu_assert(imageSize != 0);
+			MPTR block = coreinit_allocFromSysArea(imageSize, 32);
+			memcpy(memory_getPointerFromVirtualOffset(block), image, imageSize);
+			slot->blockAddr = block;
 		}
-		// alloc data for TLS block
-		uint8* tlsSectionData = nullptr;
-		sint32 tlsSize = 0;
+		return memory_getPointerFromVirtualOffset((uint32)slot->blockAddr + (uint32)tlsIndex->offset);
+	}
 
-		bool r = RPLLoader_GetTLSDataByTLSIndex((sint16)_swapEndianU16(tlsIndex->tlsModuleIndex), &tlsSectionData, &tlsSize);
-		cemu_assert(r);
-		cemu_assert(tlsSize != 0);
+	void PrepareGHSRuntime()
+	{
+		GHSRuntimeBlock& rt = *s_runtime.GetPtr();
+		rt.environPtr = nullptr;
+		rt.fopenMax = kMaxStreams;
+		rt.errnoValue = 0;
 
-		MPTR tlsData = coreinit_allocFromSysArea(tlsSize, 32);
-		memcpy(memory_getPointerFromVirtualOffset(tlsData), tlsSectionData, tlsSize);
-		tlsBlock->addr = _swapEndianU32(tlsData);
-		return memory_getPointerFromVirtualOffset(_swapEndianU32(tlsBlock->addr) + _swapEndianU32(tlsIndex->ukn04));
+		std::fill(std::begin(s_streamMutexInUse), std::end(s_streamMutexInUse), false);
+
+		// stdin, stdout, stderr. Only stdin and stdout get their direction bit
+		// assigned; stderr keeps whatever mode it had and just gains its channel.
+		rt.streams[0].mode = kStreamModeRead | StreamChannel(0);
+		rt.streams[1].mode = kStreamModeWrite | StreamChannel(1);
+		rt.streams[2].mode = rt.streams[2].mode | StreamChannel(2);
+		for (uint32 i = 0; i < 3; i++)
+			__ghs_flock_create(__ghs_flock_ptr(rt.streams + i));
+
+		osLib_addVirtualPointer("coreinit", "__gh_FOPEN_MAX", memory_getVirtualOffsetFromPointer(&rt.fopenMax));
+		osLib_addVirtualPointer("coreinit", "_iob", memory_getVirtualOffsetFromPointer(rt.streams));
+		osLib_addVirtualPointer("coreinit", "environ", memory_getVirtualOffsetFromPointer(&rt.environPtr));
+		osLib_addVirtualPointer("coreinit", "errno", memory_getVirtualOffsetFromPointer(&rt.errnoValue));
 	}
 
 	void InitializeGHS()
