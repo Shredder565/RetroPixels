@@ -1,32 +1,39 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/OS/libs/coreinit/coreinit_SysHeap.h"
 #include "Cafe/OS/libs/coreinit/coreinit_MEM_ExpHeap.h"
 
+/* OSAllocFromSystem / OSFreeToSystem
+ * A thread-safe expanded heap in the emulator system area, created once per boot. */
+
 namespace coreinit
 {
-	coreinit::MEMHeapHandle _sysHeapHandle = MPTR_NULL;
-	sint32 _sysHeapAllocCounter = 0;
-	sint32 _sysHeapFreeCounter = 0;
+	namespace
+	{
+		constexpr uint32 SYSTEM_HEAP_SIZE = 8 * 1024 * 1024;
+		MEMHeapHandle s_systemHeap = nullptr;
+		uint32 s_systemAllocCount = 0;
+		uint32 s_systemFreeCount = 0;
+	}
 
 	void* OSAllocFromSystem(uint32 size, uint32 alignment)
 	{
-		_sysHeapAllocCounter++;
-		return coreinit::MEMAllocFromExpHeapEx(_sysHeapHandle, size, alignment);
+		s_systemAllocCount++;
+		return MEMAllocFromExpHeapEx(s_systemHeap, size, alignment);
 	}
 
 	void OSFreeToSystem(void* ptr)
 	{
-		_sysHeapFreeCounter++;
-		coreinit::MEMFreeToExpHeap(_sysHeapHandle, ptr);
+		s_systemFreeCount++;
+		MEMFreeToExpHeap(s_systemHeap, ptr);
 	}
 
 	void InitSysHeap()
 	{
-		uint32 sysHeapSize = 8 * 1024 * 1024; // actual size is unknown
-		MEMPTR<void> heapBaseAddress = memory_getPointerFromVirtualOffset(coreinit_allocFromSysArea(sysHeapSize, 0x1000));
-		_sysHeapHandle = coreinit::MEMCreateExpHeapEx(heapBaseAddress.GetPtr(), sysHeapSize, MEM_HEAP_OPTION_THREADSAFE);
-		_sysHeapAllocCounter = 0;
-		_sysHeapFreeCounter = 0;
+		void* base = MEMPTR<void>(coreinit_allocFromSysArea(SYSTEM_HEAP_SIZE, 0x1000)).GetPtr();
+		s_systemHeap = MEMCreateExpHeapEx(base, SYSTEM_HEAP_SIZE, MEM_HEAP_OPTION_THREADSAFE);
+		s_systemAllocCount = 0;
+		s_systemFreeCount = 0;
 	}
 
 	void InitializeSysHeap()
@@ -34,5 +41,4 @@ namespace coreinit
 		cafeExportRegister("coreinit", OSAllocFromSystem, LogType::CoreinitMem);
 		cafeExportRegister("coreinit", OSFreeToSystem, LogType::CoreinitMem);
 	}
-
 }

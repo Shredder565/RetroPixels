@@ -1,136 +1,122 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/OS/libs/coreinit/coreinit_MEM.h"
 #include "Cafe/OS/libs/coreinit/coreinit_MEM_UnitHeap.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Spinlock.h"
 
+/* Unit heap
+ * The heap header is followed (after alignment) by an array of equally sized units. Free units
+ * are chained through their first word; allocation pops the first free unit and freeing pushes
+ * the unit back to the front. */
+
 namespace coreinit
 {
-	void _MEMUnitHeap_IsValidHeap(MEMHeapHandle heap)
+	namespace
 	{
-		cemu_assert(heap != MEM_HEAP_INVALID_HANDLE);
-		cemu_assert(heap->magic == MEMHeapMagic::UNIT_HEAP);
+		void CheckUnitHeap(MEMHeapHandle heap)
+		{
+			cemu_assert(heap != MEM_HEAP_INVALID_HANDLE);
+			cemu_assert(heap->magic == MEMHeapMagic::UNIT_HEAP);
+		}
+
+		uint32 RoundUpUnit(uint32 size, uint32 alignment)
+		{
+			return (size + alignment - 1) & ~(alignment - 1);
+		}
 	}
 
 	MEMHeapBase* MEMCreateUnitHeapEx(void* memStart, uint32 heapSize, uint32 blockSize, uint32 alignment, uint32 createFlags)
 	{
 		cemu_assert_debug(memStart != nullptr);
-		cemu_assert_debug(alignment % MIN_ALIGNMENT == 0);
-		cemu_assert_debug(MIN_ALIGNMENT <= alignment && alignment <= 32);
+		cemu_assert_debug((alignment & 3) == 0 && alignment >= 4 && alignment <= 32);
 
-		uintptr_t startAddr = (uintptr_t)memStart;
-		uintptr_t endAddr = startAddr + heapSize;
-
-		startAddr = (startAddr + MIN_ALIGNMENT_MINUS_ONE) & (~MIN_ALIGNMENT_MINUS_ONE);
-		endAddr &= (~MIN_ALIGNMENT_MINUS_ONE);
-
-		if (startAddr > endAddr)
+		const uint64 rawStart = MEMPTR<void>(memStart).GetMPTR();
+		const uint64 begin = (rawStart + 3) & ~3ull;
+		const uint64 end = (rawStart + heapSize) & ~3ull;
+		if (begin > end)
+			return nullptr;
+		const uint64 alignMinusOne = (uint32)(alignment - 1);
+		const uint64 firstUnit = (begin + sizeof(MEMUnitHeap) + alignMinusOne) & ~alignMinusOne;
+		if (firstUnit > end)
+			return nullptr;
+		blockSize = RoundUpUnit(blockSize, alignment);
+		if (blockSize == 0)
+			return nullptr;
+		const uint32 unitCount = (uint32)(end - firstUnit) / blockSize;
+		if (unitCount == 0)
 			return nullptr;
 
-		const uint32 alignmentMinusOne = alignment - 1;
-
-		MEMUnitHeap* unitHeap = (MEMUnitHeap*)startAddr;
-		uintptr_t alignedStart = startAddr + sizeof(MEMUnitHeap) + alignmentMinusOne & ~((uintptr_t)alignmentMinusOne);
-		if (alignedStart > endAddr)
-			return nullptr;
-
-		blockSize = blockSize + alignmentMinusOne & ~alignmentMinusOne;
-		uint32 totalBlockSize = (uint32)(endAddr - alignedStart);
-		uint32 numBlocks = totalBlockSize / blockSize;
-		if (numBlocks == 0)
-			return nullptr;
-
-		MEMInitHeapBase(unitHeap, MEMHeapMagic::UNIT_HEAP, (void*)alignedStart, (void*)(alignedStart + (numBlocks * blockSize)), createFlags);
-
-		unitHeap->firstFreeBlock = (MEMUnitHeapBlock*)alignedStart;
-		unitHeap->blockSize = blockSize;
-
-		MEMUnitHeapBlock* currentBlock = (MEMUnitHeapBlock*)alignedStart;
-		for (uint32 i = 0; i < numBlocks - 1; ++i)
+		MEMUnitHeap* heap = (MEMUnitHeap*)MEMPTR<void>((uint32)begin).GetPtr();
+		const uint32 unitsBegin = (uint32)firstUnit;
+		MEMInitHeapBase(heap, MEMHeapMagic::UNIT_HEAP, MEMPTR<void>(unitsBegin).GetPtr(), MEMPTR<void>(unitsBegin + unitCount * blockSize).GetPtr(), createFlags);
+		heap->firstFreeBlock = MEMPTR<MEMUnitHeapBlock>(unitsBegin);
+		heap->blockSize = blockSize;
+		// chain every unit to the one after it
+		for (uint32 i = 0; i < unitCount; i++)
 		{
-			MEMUnitHeapBlock* nextBlock = (MEMUnitHeapBlock*)((uintptr_t)currentBlock + blockSize);
-			currentBlock->nextBlock = nextBlock;
-			currentBlock = nextBlock;
+			MEMUnitHeapBlock* unit = MEMPTR<MEMUnitHeapBlock>(unitsBegin + i * blockSize).GetPtr();
+			if (i + 1 < unitCount)
+				unit->nextBlock = MEMPTR<MEMUnitHeapBlock>(unitsBegin + (i + 1) * blockSize);
+			else
+				unit->nextBlock = nullptr;
 		}
-
-		currentBlock->nextBlock = nullptr;
-
-		if ((MEMHeapHandle*)startAddr != nullptr)
-		{
-			MEMHeapTable_Add((MEMHeapHandle)startAddr);
-		}
-
-		return (MEMHeapBase*)startAddr;
+		return heap;
 	}
 
 	void* MEMDestroyUnitHeap(MEMHeapHandle heap)
 	{
-		_MEMUnitHeap_IsValidHeap(heap);
+		CheckUnitHeap(heap);
 		MEMBaseDestroyHeap(heap);
-		MEMHeapTable_Remove(heap);
 		return heap;
 	}
 
+	// heap size needed for blockCount units of blockSize bytes with the given alignment
 	uint32 MEMCalcHeapSizeForUnitHeap(uint32 blockSize, uint32 blockCount, uint32 alignment)
 	{
-		uint32 alignedBlockSize = (blockSize + (alignment - 1)) & ~(alignment - 1);
-		uint32 blockTotalSize = blockCount * alignedBlockSize;
-		uint32 heapSize = blockTotalSize + (alignment - 4) + sizeof(MEMUnitHeap);
-		return heapSize;
+		return blockCount * RoundUpUnit(blockSize, alignment) + (alignment - 4) + sizeof(MEMUnitHeap);
 	}
 
-	uint32 MEMCountFreeBlockForUnitHeap(coreinit::MEMUnitHeap* heap)
+	uint32 MEMCountFreeBlockForUnitHeap(MEMUnitHeap* heap)
 	{
-		_MEMUnitHeap_IsValidHeap(heap);
+		CheckUnitHeap(heap);
 		heap->AcquireLock();
-		MEMUnitHeapBlock* currentBlock = heap->firstFreeBlock;
-		uint32 blockCount = 0;
-		while (currentBlock)
-		{
-			blockCount++;
-			currentBlock = currentBlock->nextBlock;
-		}
+		uint32 count = 0;
+		for (MEMUnitHeapBlock* unit = heap->firstFreeBlock.GetPtr(); unit; unit = unit->nextBlock.GetPtr())
+			count++;
 		heap->ReleaseLock();
-		return blockCount;
+		return count;
 	}
 
 	void* MEMAllocFromUnitHeap(MEMUnitHeap* heap)
 	{
-		_MEMUnitHeap_IsValidHeap(heap);
+		CheckUnitHeap(heap);
 		heap->AcquireLock();
-		MEMUnitHeapBlock* currentBlock = heap->firstFreeBlock;
-		if (!currentBlock)
+		MEMUnitHeapBlock* unit = heap->firstFreeBlock.GetPtr();
+		if (unit)
 		{
-			heap->ReleaseLock();
-			return nullptr;
-		}
-		// remove from list of free blocks
-		heap->firstFreeBlock = currentBlock->nextBlock;
-		// fill block
-		if (heap->HasOptionClear())
-		{
-			memset(currentBlock, 0, heap->blockSize);
-		}
-		else if (heap->HasOptionFill())
-		{
-			memset(currentBlock, coreinit::MEMGetFillValForHeap(coreinit::HEAP_FILL_TYPE::ON_ALLOC), heap->blockSize);
+			heap->firstFreeBlock = unit->nextBlock;
+			if (heap->HasOptionClear())
+				memset(unit, 0, heap->blockSize);
+			else if (heap->HasOptionFill())
+				memset(unit, (int)MEMGetFillValForHeap(HEAP_FILL_TYPE::ON_ALLOC), heap->blockSize);
 		}
 		heap->ReleaseLock();
-		return currentBlock;
+		return unit;
 	}
 
 	void MEMFreeToUnitHeap(MEMUnitHeap* heap, void* mem)
 	{
-		_MEMUnitHeap_IsValidHeap(heap);
+		CheckUnitHeap(heap);
 		if (!mem)
 			return;
 		heap->AcquireLock();
 		cemu_assert_debug(mem >= heap->heapStart.GetPtr() && mem < heap->heapEnd.GetPtr());
-		// add to list of free blocks
-		MEMUnitHeapBlock* releasedBlock = (MEMUnitHeapBlock*)mem;
-		releasedBlock->nextBlock = heap->firstFreeBlock;
-		heap->firstFreeBlock = releasedBlock;
+		MEMUnitHeapBlock* unit = (MEMUnitHeapBlock*)mem;
+		// fill first, the link word must survive
 		if (heap->HasOptionFill())
-			memset(releasedBlock, coreinit::MEMGetFillValForHeap(coreinit::HEAP_FILL_TYPE::ON_FREE), heap->blockSize);
+			memset(unit, (int)MEMGetFillValForHeap(HEAP_FILL_TYPE::ON_FREE), heap->blockSize);
+		unit->nextBlock = heap->firstFreeBlock;
+		heap->firstFreeBlock = unit;
 		heap->ReleaseLock();
 	}
 

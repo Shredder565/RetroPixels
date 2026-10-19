@@ -1,8 +1,10 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "Cafe/OS/libs/coreinit/coreinit_MEM.h"
 
 namespace coreinit
 {
+	// snapshot taken by MEMRecordStateForFrmHeap, stored inside the heap itself
 	struct MEMFrmHeapRecordedState
 	{
 		uint32be id;
@@ -12,15 +14,17 @@ namespace coreinit
 	};
 	static_assert(sizeof(MEMFrmHeapRecordedState) == 0x10);
 
+	// frame heap: allocations grow from the start (head) and from the end (tail) towards each other
 	struct MEMFrmHeap : MEMHeapBase
 	{
-		/* +0x34 */ uint32be ukn34;
-		/* +0x38 */ uint32be ukn38;
-		/* +0x3C */ uint32be ukn3C;
-		/* +0x40 */ MEMPTR<void> allocationHead;
-		/* +0x44 */ MEMPTR<void> allocationTail;
+		/* +0x34 */ uint32be _pad34;
+		/* +0x38 */ uint32be _pad38;
+		/* +0x3C */ uint32be _pad3C;
+		/* +0x40 */ MEMPTR<void> allocationHead; // first free byte
+		/* +0x44 */ MEMPTR<void> allocationTail; // one past the last free byte
 		/* +0x48 */ MEMPTR<MEMFrmHeapRecordedState> recordedStates;
 	};
+	static_assert(offsetof(MEMFrmHeap, allocationHead) == 0x40);
 	static_assert(sizeof(MEMFrmHeap) == 0x4C);
 
 	enum class FrmHeapMode : uint32

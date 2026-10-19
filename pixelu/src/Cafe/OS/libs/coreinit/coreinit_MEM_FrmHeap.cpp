@@ -1,234 +1,200 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/OS/libs/coreinit/coreinit_MEM.h"
 #include "Cafe/OS/libs/coreinit/coreinit_MEM_FrmHeap.h"
 
+/* Frame heap
+ * Two cursors: allocationHead moves up from heapStart, allocationTail moves down from heapEnd.
+ * Memory is only released in bulk (one side or both), or by rolling back to a state that
+ * MEMRecordStateForFrmHeap stored inside the heap. Cursor arithmetic is 32-bit guest
+ * arithmetic, like on the console. */
+
 namespace coreinit
 {
-	bool __FrmHeapDebug_IsValid(MEMFrmHeap* frmHeap, const char* funcName)
+	namespace
 	{
-		if (!frmHeap)
+		bool CheckFrmHeap(MEMFrmHeap* heap, const char* caller)
 		{
-			cemuLog_log(LogType::APIErrors, "{}: Heap is nullptr", funcName);
-			return false;
+			if (!heap)
+			{
+				cemuLog_log(LogType::APIErrors, "{}: heap is null", caller);
+				return false;
+			}
+			if (heap->magic != MEMHeapMagic::FRAME_HEAP)
+			{
+				cemuLog_log(LogType::APIErrors, "{}: not a frame heap", caller);
+				return false;
+			}
+			return true;
 		}
-		if (frmHeap->magic != MEMHeapMagic::FRAME_HEAP)
+
+		void ZeroGuest(uint32 addr, uint32 length)
 		{
-			cemuLog_log(LogType::APIErrors, "{}: Heap has bad magic. Not initialized?", funcName);
-			return false;
+			memset(MEMPTR<uint8>(addr).GetPtr(), 0, length);
 		}
-		return true;
+
+		uint32 AlignMaskOf(sint32 alignment)
+		{
+			return ~((uint32)alignment - 1);
+		}
+
+		void* TakeFromHead(MEMFrmHeap* heap, uint32 size, sint32 alignment)
+		{
+			const uint32 oldHead = heap->allocationHead.GetMPTR();
+			const uint32 start = (oldHead + (uint32)alignment - 1) & AlignMaskOf(alignment);
+			if (start + size > heap->allocationTail.GetMPTR())
+				return nullptr;
+			heap->allocationHead = MEMPTR<void>(start + size);
+			if (heap->HasOptionClear())
+				ZeroGuest(oldHead, start + size - oldHead);
+			return MEMPTR<void>(start).GetPtr();
+		}
+
+		void* TakeFromTail(MEMFrmHeap* heap, uint32 size, sint32 alignment)
+		{
+			const uint32 oldTail = heap->allocationTail.GetMPTR();
+			const uint32 start = (oldTail - size) & AlignMaskOf(alignment);
+			if (start < heap->allocationHead.GetMPTR())
+				return nullptr;
+			heap->allocationTail = MEMPTR<void>(start);
+			if (heap->HasOptionClear())
+				ZeroGuest(start, oldTail - start);
+			return MEMPTR<void>(start).GetPtr();
+		}
 	}
 
 	MEMFrmHeap* MEMCreateFrmHeapEx(void* memStart, uint32 size, uint32 createFlags)
 	{
 		cemu_assert_debug(memStart);
-
-		uintptr_t startAddr = (uintptr_t)memStart;
-		uintptr_t endAddr = startAddr + size;
-
-		// align and pad address
-		startAddr = (startAddr + 3) & ~3;
-		endAddr &= ~3;
-
-		if (startAddr == 0)
+		const uint64 rawStart = MEMPTR<void>(memStart).GetMPTR();
+		const uint64 begin = (rawStart + 3) & ~3ull;
+		const uint64 end = (rawStart + size) & ~3ull;
+		if (begin == 0 || begin > end || end - begin < sizeof(MEMFrmHeap))
 			return nullptr;
-		if (startAddr > endAddr || (endAddr - startAddr) < sizeof(MEMFrmHeap))
-			return nullptr;
-
-		MEMFrmHeap* frmHeap = (MEMFrmHeap*)startAddr;
-		MEMInitHeapBase(frmHeap, MEMHeapMagic::FRAME_HEAP, (void*)((uintptr_t)startAddr + sizeof(MEMFrmHeap)), (void*)endAddr, createFlags);
-		frmHeap->allocationHead = frmHeap->heapStart;
-		frmHeap->allocationTail = frmHeap->heapEnd;
-		frmHeap->recordedStates = nullptr;
-
-		MEMHeapTable_Add(frmHeap);
-		return frmHeap;
+		MEMFrmHeap* heap = (MEMFrmHeap*)MEMPTR<void>((uint32)begin).GetPtr();
+		MEMInitHeapBase(heap, MEMHeapMagic::FRAME_HEAP, MEMPTR<void>((uint32)begin + sizeof(MEMFrmHeap)).GetPtr(), MEMPTR<void>((uint32)end).GetPtr(), createFlags);
+		heap->allocationHead = heap->heapStart;
+		heap->allocationTail = heap->heapEnd;
+		heap->recordedStates = nullptr;
+		return heap;
 	}
 
 	void* MEMDestroyFrmHeap(MEMFrmHeap* frmHeap)
 	{
-		if (!__FrmHeapDebug_IsValid(frmHeap, "MEMDestroyFrmHeap"))
+		if (!CheckFrmHeap(frmHeap, "MEMDestroyFrmHeap"))
 			return nullptr;
 		MEMBaseDestroyHeap(frmHeap);
-		MEMHeapTable_Remove(frmHeap);
 		return frmHeap;
 	}
 
+	// space left between the cursors after aligning the head cursor; the sign of the alignment is ignored
 	uint32 MEMGetAllocatableSizeForFrmHeapEx(MEMFrmHeap* frmHeap, sint32 alignment)
 	{
-		if (!__FrmHeapDebug_IsValid(frmHeap, "MEMGetAllocatableSizeForFrmHeapEx"))
+		if (!CheckFrmHeap(frmHeap, "MEMGetAllocatableSizeForFrmHeapEx"))
 			return 0;
+		const uint32 align = alignment < 0 ? (0u - (uint32)alignment) : (uint32)alignment;
+		if (align == 0 || (align & (align - 1)) != 0)
+		{
+			cemuLog_log(LogType::APIErrors, "MEMGetAllocatableSizeForFrmHeapEx(): invalid alignment {}", alignment);
+			return 0;
+		}
 		frmHeap->AcquireLock();
-		uint32 allocatableSize = 0;
-		bool negativeAlignment = alignment < 0;
-		if (negativeAlignment)
-			alignment = -alignment;
-		uint32 bits = (uint32)alignment;
-		if (bits == 0 || (bits & (bits - 1)) != 0)
-		{
-			cemuLog_log(LogType::APIErrors, "MEMGetAllocatableSizeForFrmHeapEx(): Invalid alignment");
-			return 0;
-		}
-		if (negativeAlignment)
-		{
-			cemu_assert_unimplemented();
-		}
-		else
-		{
-			uint32 headAllocator = frmHeap->allocationHead.GetMPTR();
-			uint32 tailAllocator = frmHeap->allocationTail.GetMPTR();
-			uint32 allocStart = (headAllocator + alignment - 1) & ~(alignment - 1);
-			if (allocStart <= tailAllocator)
-			{
-				allocatableSize = tailAllocator - allocStart;
-			}
-		}
+		const uint32 start = (frmHeap->allocationHead.GetMPTR() + align - 1) & ~(align - 1);
+		const uint32 tail = frmHeap->allocationTail.GetMPTR();
+		const uint32 result = start <= tail ? tail - start : 0;
 		frmHeap->ReleaseLock();
-		return allocatableSize;
+		return result;
 	}
 
 	void* MEMiGetFreeStartForFrmHeap(MEMFrmHeap* heap)
 	{
-		if (!__FrmHeapDebug_IsValid(heap, "MEMiGetFreeStartForFrmHeap"))
+		if (!CheckFrmHeap(heap, "MEMiGetFreeStartForFrmHeap"))
 			return nullptr;
-		return heap->allocationHead;
+		return heap->allocationHead.GetPtr();
 	}
 
 	void* MEMiGetFreeEndForFrmHeap(MEMFrmHeap* heap)
 	{
-		if (!__FrmHeapDebug_IsValid(heap, "MEMiGetFreeEndForFrmHeap"))
+		if (!CheckFrmHeap(heap, "MEMiGetFreeEndForFrmHeap"))
 			return nullptr;
-		return heap->allocationTail;
+		return heap->allocationTail.GetPtr();
 	}
 
-	void* __FrmHeap_AllocFromHead(MEMFrmHeap* frmHeap, uint32 size, sint32 alignment)
-	{
-		uint32 head = frmHeap->allocationHead.GetMPTR();
-		uint32 tail = frmHeap->allocationTail.GetMPTR();
-		uint32 allocStart = (head + alignment - 1) & ~(alignment - 1);
-		if ((allocStart + size) <= tail)
-		{
-			auto prevHead = frmHeap->allocationHead;
-			frmHeap->allocationHead = allocStart + size;
-			if (frmHeap->HasOptionClear())
-				memset(prevHead.GetPtr(), 0, frmHeap->allocationHead.GetMPTR() - prevHead.GetMPTR());
-			return MEMPTR<void>(allocStart).GetPtr();
-		}
-		return nullptr;
-	}
-
-	void* __FrmHeap_AllocFromTail(MEMFrmHeap* frmHeap, uint32 size, sint32 alignment)
-	{
-		uint32 head = frmHeap->allocationHead.GetMPTR();
-		uint32 tail = frmHeap->allocationTail.GetMPTR();
-		uint32 allocStart = (tail - size) & ~(alignment - 1);
-		if (allocStart >= head)
-		{
-			auto prevTail = frmHeap->allocationTail;
-			frmHeap->allocationTail = allocStart;
-			if (frmHeap->HasOptionClear())
-				memset(frmHeap->allocationTail.GetPtr(), 0, prevTail.GetMPTR() - frmHeap->allocationTail.GetMPTR());
-			return MEMPTR<void>(allocStart).GetPtr();
-		}
-		return nullptr;
-	}
-
+	// positive alignment allocates from the head, negative alignment from the tail
 	void* MEMAllocFromFrmHeapEx(MEMFrmHeap* frmHeap, uint32 size, sint32 alignment)
 	{
-		if (!__FrmHeapDebug_IsValid(frmHeap, "MEMAllocFromFrmHeapEx"))
+		if (!CheckFrmHeap(frmHeap, "MEMAllocFromFrmHeapEx"))
 			return nullptr;
 		if (size == 0)
 			size = 4;
-		size = (size + 3) & ~3; // pad to 4 byte alignment
+		size = (size + 3) & ~3u;
 		frmHeap->AcquireLock();
 		void* mem;
-		if (alignment >= 0)
-			mem = __FrmHeap_AllocFromHead(frmHeap, size, alignment);
+		if (alignment < 0)
+			mem = TakeFromTail(frmHeap, size, (sint32)(0u - (uint32)alignment));
 		else
-			mem = __FrmHeap_AllocFromTail(frmHeap, size, -alignment);
+			mem = TakeFromHead(frmHeap, size, alignment);
 		frmHeap->ReleaseLock();
 		return mem;
 	}
 
-	void __FrmHeap_FreeFromHead(MEMFrmHeap* frmHeap)
-	{
-		cemu_assert_debug(frmHeap->recordedStates.IsNull());
-		frmHeap->recordedStates = nullptr;
-		frmHeap->allocationHead = frmHeap->heapStart;
-	}
-
-	void __FrmHeap_FreeFromTail(MEMFrmHeap* frmHeap)
-	{
-		cemu_assert_debug(frmHeap->recordedStates.IsNull());
-		frmHeap->recordedStates = nullptr;
-		void* heapEnd = frmHeap->heapEnd.GetPtr();
-		frmHeap->allocationTail = heapEnd;
-	}
-
 	void MEMFreeToFrmHeap(MEMFrmHeap* frmHeap, FrmHeapMode mode)
 	{
-		if (!__FrmHeapDebug_IsValid(frmHeap, "MEMFreeToFrmHeap"))
+		if (!CheckFrmHeap(frmHeap, "MEMFreeToFrmHeap"))
 			return;
 		frmHeap->AcquireLock();
-
+		// releasing either side invalidates all recorded states
 		if ((mode & FrmHeapMode::Head) != 0)
-			__FrmHeap_FreeFromHead(frmHeap);
-
+		{
+			frmHeap->recordedStates = nullptr;
+			frmHeap->allocationHead = frmHeap->heapStart;
+		}
 		if ((mode & FrmHeapMode::Tail) != 0)
-			__FrmHeap_FreeFromTail(frmHeap);
-
+		{
+			frmHeap->recordedStates = nullptr;
+			frmHeap->allocationTail = frmHeap->heapEnd;
+		}
 		frmHeap->ReleaseLock();
 	}
 
+	// stores the current cursors in a 0x10 byte record allocated from the head
 	bool MEMRecordStateForFrmHeap(MEMFrmHeap* frmHeap, uint32 id)
 	{
-		if (!__FrmHeapDebug_IsValid(frmHeap, "MEMRecordStateForFrmHeap"))
+		if (!CheckFrmHeap(frmHeap, "MEMRecordStateForFrmHeap"))
 			return false;
 		frmHeap->AcquireLock();
-		auto allocationHead = frmHeap->allocationHead;
-		auto allocationTail = frmHeap->allocationTail;
-		MEMFrmHeapRecordedState* rState = (MEMFrmHeapRecordedState*)__FrmHeap_AllocFromHead(frmHeap, sizeof(MEMFrmHeapRecordedState), 4); // modifies memHeap->allocationHead
-		cemu_assert_debug(rState);
-		if (!rState)
+		const MEMPTR<void> head = frmHeap->allocationHead;
+		const MEMPTR<void> tail = frmHeap->allocationTail;
+		auto* record = (MEMFrmHeapRecordedState*)TakeFromHead(frmHeap, sizeof(MEMFrmHeapRecordedState), 4);
+		if (record)
 		{
-			frmHeap->ReleaseLock();
-			return false;
+			record->id = id;
+			record->allocationHead = head;
+			record->allocationTail = tail;
+			record->prevRecordedState = frmHeap->recordedStates;
+			frmHeap->recordedStates = record;
 		}
-		rState->id = id;
-		rState->allocationHead = allocationHead;
-		rState->allocationTail = allocationTail;
-		rState->prevRecordedState = frmHeap->recordedStates;
-		frmHeap->recordedStates = rState;
 		frmHeap->ReleaseLock();
-		return true;
+		return record != nullptr;
 	}
 
+	// rolls back to the newest state with the given id (id 0: the newest state)
 	bool MEMFreeByStateToFrmHeap(MEMFrmHeap* frmHeap, uint32 id)
 	{
-		if (!__FrmHeapDebug_IsValid(frmHeap, "MEMFreeByStateToFrmHeap"))
+		if (!CheckFrmHeap(frmHeap, "MEMFreeByStateToFrmHeap"))
 			return false;
 		frmHeap->AcquireLock();
-		// find matching state
-		MEMFrmHeapRecordedState* rState = frmHeap->recordedStates.GetPtr();
-		while (rState)
+		MEMFrmHeapRecordedState* record = frmHeap->recordedStates.GetPtr();
+		while (record && id != 0 && record->id != id)
+			record = record->prevRecordedState.GetPtr();
+		if (record)
 		{
-			if (id == 0)
-				break;
-			if (rState->id == id)
-				break;
-			rState = rState->prevRecordedState.GetPtr();
+			frmHeap->allocationHead = record->allocationHead;
+			frmHeap->allocationTail = record->allocationTail;
+			frmHeap->recordedStates = record->prevRecordedState;
 		}
-		if (!rState)
-		{
-			frmHeap->ReleaseLock();
-			return false;
-		}
-		// apply state
-		frmHeap->allocationHead = rState->allocationHead;
-		frmHeap->allocationTail = rState->allocationTail;
-		frmHeap->recordedStates = rState->prevRecordedState;
 		frmHeap->ReleaseLock();
-		return true;
+		return record != nullptr;
 	}
 
 	void InitializeMEMFrmHeap()
@@ -239,7 +205,6 @@ namespace coreinit
 		cafeExportRegister("coreinit", MEMiGetFreeStartForFrmHeap, LogType::CoreinitMem);
 		cafeExportRegister("coreinit", MEMiGetFreeEndForFrmHeap, LogType::CoreinitMem);
 		cafeExportRegister("coreinit", MEMAllocFromFrmHeapEx, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMFreeToFrmHeap, LogType::CoreinitMem);
 		cafeExportRegister("coreinit", MEMFreeToFrmHeap, LogType::CoreinitMem);
 		cafeExportRegister("coreinit", MEMRecordStateForFrmHeap, LogType::CoreinitMem);
 		cafeExportRegister("coreinit", MEMFreeByStateToFrmHeap, LogType::CoreinitMem);

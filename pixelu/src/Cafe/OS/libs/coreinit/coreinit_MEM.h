@@ -1,51 +1,32 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include "Cafe/OS/libs/coreinit/coreinit_Spinlock.h"
 
-struct MEMLink_t
-{
-	MPTR prevObject; 
-	MPTR nextObject;
-};
-
-static_assert(sizeof(MEMLink_t) == 8);
-
-struct MEMList_t
-{
-	MPTR headObject;
-	MPTR tailObject;
-	uint16 numObjects;
-	uint16 offset;
-};
-
-static_assert(sizeof(MEMList_t) == 0xC);
-
+// MEMAllocator: a guest object holding an alloc/free function pair plus the heap they act on.
+// MEMAllocFromAllocator(allocator, size) and MEMFreeToAllocator(allocator, ptr) call through it.
 struct MEMAllocatorFunc
 {
-	MEMPTR<void> funcAlloc;
-	MEMPTR<void> funcFree;
+	MEMPTR<void> funcAlloc; // (MEMAllocator*, size) -> ptr
+	MEMPTR<void> funcFree;  // (MEMAllocator*, ptr)
 };
-
 static_assert(sizeof(MEMAllocatorFunc) == 8);
 
 struct MEMAllocator
 {
-	/* +0x000 */ MEMPTR<MEMAllocatorFunc> func;
-	/* +0x004 */ MEMPTR<void> heap;
-	/* +0x00C */ uint32be param1;
-	/* +0x010 */ uint32be param2;
+	/* +0x00 */ MEMPTR<MEMAllocatorFunc> func;
+	/* +0x04 */ MEMPTR<void> heap;
+	/* +0x08 */ uint32be param1; // alignment for heap allocators
+	/* +0x0C */ uint32be param2;
 };
-
 static_assert(sizeof(MEMAllocator) == 0x10);
 
+// Bump allocator for emulator-owned objects that live in guest memory (the "Cemu area" range).
+// Memory handed out here is never returned.
 MPTR coreinit_allocFromSysArea(uint32 size, uint32 alignment);
 void coreinit_freeToSysArea(MPTR mem);
 
-// mem exports
 void coreinitExport_MEMInitAllocatorForDefaultHeap(PPCInterpreter_t* hCPU);
-void coreinitExport_MEMGetBaseHeapHandle(PPCInterpreter_t* hCPU);
-
-/* legacy stuff above */
 
 namespace coreinit
 {
@@ -54,6 +35,7 @@ namespace coreinit
 #define MIN_ALIGNMENT 4
 #define MIN_ALIGNMENT_MINUS_ONE (MIN_ALIGNMENT-1)
 
+	// heap creation flags (stored in MEMHeapBase::flags)
 #define MEM_HEAP_OPTION_NONE		(0)
 #define MEM_HEAP_OPTION_CLEAR		(1 << 0)
 #define MEM_HEAP_OPTION_FILL		(1 << 1)
@@ -68,6 +50,7 @@ namespace coreinit
 		USER_HEAP = 'USRH',
 	};
 
+	// intrusive doubly linked list; 'offset' is where the MEMLink sits inside each object
 	struct MEMLink
 	{
 		MEMPTR<void> prev;
@@ -91,16 +74,17 @@ namespace coreinit
 	void* MEMGetFirstListObject(MEMList* list);
 	void* MEMGetNextListObject(MEMList* list, void* object);
 
+	// common header at the start of every heap
 	struct MEMHeapBase
 	{
 		/* +0x00 */ betype<MEMHeapMagic> magic;
-		/* +0x04 */ MEMLink link;
-		/* +0x0C */ MEMList childList;
+		/* +0x04 */ MEMLink link;        // entry in the parent's child list
+		/* +0x0C */ MEMList childList;   // heaps created inside this heap
 		/* +0x18 */ MEMPTR<void> heapStart;
-		/* +0x1C */ MEMPTR<void> heapEnd; // heap end + 1
+		/* +0x1C */ MEMPTR<void> heapEnd; // one past the last byte
 		/* +0x20 */ OSSpinLock spinlock;
 		/* +0x30 */ uint8 _ukn[3];
-		/* +0x33 */ uint8 flags;
+		/* +0x33 */ uint8 flags;          // MEM_HEAP_OPTION_*
 
 		void AcquireLock()
 		{
@@ -114,44 +98,31 @@ namespace coreinit
 				OSUninterruptibleSpinLock_Release(&spinlock);
 		}
 
-		// if set, memset allocations to zero
 		bool HasOptionClear() const
 		{
 			return (flags & MEM_HEAP_OPTION_CLEAR) != 0;
 		}
 
-		// if set, memset allocations/releases to specific fill values
 		bool HasOptionFill() const
 		{
 			return (flags & MEM_HEAP_OPTION_FILL) != 0;
 		}
 	};
-
 	static_assert(offsetof(MEMHeapBase, childList) == 0xC);
 	static_assert(offsetof(MEMHeapBase, spinlock) == 0x20);
 	static_assert(offsetof(MEMHeapBase, flags) == 0x33);
-	static_assert(sizeof(MEMHeapBase) == 0x34); // heap base is actually 0x40 but bytes 0x34 to 0x40 are padding?
+	static_assert(sizeof(MEMHeapBase) == 0x34);
 
 	typedef MEMHeapBase* MEMHeapHandle;
 
-	/* Heap base */
-
+	// heap base
 	void MEMInitHeapBase(MEMHeapBase* heap, MEMHeapMagic magic, void* heapStart, void* heapEnd, uint32 createFlags);
 	void MEMBaseDestroyHeap(MEMHeapBase* heap);
 
 	MEMHeapBase* MEMGetBaseHeapHandle(uint32 index);
 	MEMHeapBase* MEMSetBaseHeapHandle(uint32 index, MEMHeapBase* heapBase);
 
-	/* Heap list */
-
-	bool MEMHeapTable_Add(MEMHeapBase* heap);
-	bool MEMHeapTable_Remove(MEMHeapBase* heap);
-	MEMHeapBase* _MEMList_FindContainingHeap(MEMList* list, MEMHeapBase* heap);
-	bool MEMList_ContainsHeap(MEMList* list, MEMHeapBase* heap);
-	MEMList* MEMList_FindContainingHeap(MEMHeapBase* head);
-
-	/* Heap settings */
-
+	// fill values used by heaps created with MEM_HEAP_OPTION_FILL
 	enum class HEAP_FILL_TYPE : uint32
 	{
 		ON_HEAP_CREATE = 0,
@@ -163,19 +134,18 @@ namespace coreinit
 	uint32 MEMSetFillValForHeap(HEAP_FILL_TYPE type, uint32 value);
 	MEMHeapHandle MEMFindContainHeap(const void* memBlock);
 
-	/* Heap default allocators */
-
+	// default heap (MEM2 expanded heap) and the guest-callable allocator entry points
 	void InitDefaultHeaps(MEMPTR<MEMHeapBase>& mem1Heap, MEMPTR<MEMHeapBase>& memFGHeap, MEMPTR<MEMHeapBase>& mem2Heap);
 
 	void* default_MEMAllocFromDefaultHeap(uint32 size);
 	void* default_MEMAllocFromDefaultHeapEx(uint32 size, sint32 alignment);
 	void default_MEMFreeToDefaultHeap(void* mem);
 
+	// these go through the guest-visible function pointers, so a game that replaces
+	// the default heap functions gets these calls too
 	void* _weak_MEMAllocFromDefaultHeapEx(uint32 size, sint32 alignment);
 	void* _weak_MEMAllocFromDefaultHeap(uint32 size);
 	void _weak_MEMFreeToDefaultHeap(void* ptr);
-
-	/* Unit heap */
 
 	void InitializeMEMUnitHeap();
 
