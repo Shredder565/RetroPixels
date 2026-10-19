@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Common/precompiled.h"
 #include "DebugSymbolStorage.h"
 

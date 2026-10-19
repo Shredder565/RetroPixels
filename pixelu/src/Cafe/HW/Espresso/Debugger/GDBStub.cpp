@@ -1,990 +1,1109 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "GDBStub.h"
+#include "GDBBreakpoints.h"
 #include "Debugger.h"
 #include "Cafe/HW/Espresso/Recompiler/PPCRecompiler.h"
-#include "GDBBreakpoints.h"
-#include "util/helpers/helpers.h"
-#include "util/ThreadPool/ThreadPool.h"
+#include "Cafe/HW/Espresso/EspressoISA.h"
 #include "Cafe/OS/RPL/rpl.h"
 #include "Cafe/OS/RPL/rpl_structs.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Scheduler.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
-#include "Cafe/HW/Espresso/Interpreter/PPCInterpreterInternal.h"
-#include "Cafe/HW/Espresso/EspressoISA.h"
+#include "util/ThreadPool/ThreadPool.h"
+#include "util/helpers/helpers.h"
 #include "Common/socket.h"
+
+#include <charconv>
 
 #if BOOST_OS_UNIX
 #include <netinet/tcp.h>
 #endif
 
-#define GET_THREAD_ID(threadPtr) memory_getVirtualOffsetFromPointer(threadPtr)
-#define GET_THREAD_BY_ID(threadId) (OSThread_t*)memory_getPointerFromPhysicalOffset(threadId)
+std::unique_ptr<GDBServer> g_gdbstub;
 
-static std::vector<MPTR> findNextInstruction(MPTR currAddress, uint32 lr, uint32 ctr)
+namespace
 {
-	using namespace Espresso;
+	constexpr std::string_view kFeatures = "PacketSize=4096;qXfer:features:read+;qXfer:threads:read+;qXfer:libraries:read+;swbreak+;hwbreak+;vContSupported+";
+	constexpr size_t kMaxPacketLength = 4096;
+	constexpr std::string_view kOk = "OK";
+	constexpr std::string_view kError = "E01";
 
-	uint32 nextInstr = memory_readU32(currAddress);
-	if (GetPrimaryOpcode(nextInstr) == PrimaryOpcode::B)
-	{
-		uint32 LI;
-		bool AA, LK;
-		decodeOp_B(nextInstr, LI, AA, LK);
-		if (!AA)
-			LI += currAddress;
-		return {LI};
-	}
-	if (GetPrimaryOpcode(nextInstr) == PrimaryOpcode::BC)
-	{
-		uint32 BD, BI;
-		BOField BO{};
-		bool AA, LK;
-		decodeOp_BC(nextInstr, BD, BO, BI, AA, LK);
-		if (!LK)
-			BD += currAddress;
-		return {currAddress + 4, BD};
-	}
-	if (GetPrimaryOpcode(nextInstr) == PrimaryOpcode::GROUP_19 && GetGroup19Opcode(nextInstr) == Opcode19::BCLR)
-	{
-		return {currAddress + 4, lr};
-	}
-	if (GetPrimaryOpcode(nextInstr) == PrimaryOpcode::GROUP_19 && GetGroup19Opcode(nextInstr) == Opcode19::BCCTR)
-	{
-		return {currAddress + 4, ctr};
-	}
-	return {currAddress + 4};
-}
+	// GDB register numbers of the PowerPC target description
+	constexpr uint32 kRegGprFirst = 0;
+	constexpr uint32 kRegGprLast = 31;
+	constexpr uint32 kRegPc = 64;
+	constexpr uint32 kRegMsr = 65;
+	constexpr uint32 kRegCr = 66;
+	constexpr uint32 kRegLr = 67;
+	constexpr uint32 kRegCtr = 68;
+	constexpr uint32 kRegXer = 69;
+	constexpr uint32 kRegFprFirst = 71;
+	constexpr uint32 kRegFprLast = 102;
+	constexpr uint32 kRegFpscr = 103;
 
-template<typename F>
-static void selectThread(sint64 selectorId, F&& action_for_thread)
-{
-	__OSLockScheduler();
-	cemu_assert_debug(activeThreadCount != 0);
+	/* parsing */
 
-	if (selectorId == -1)
+	bool ParseHex(std::string_view text, uint64& value)
 	{
-		for (sint32 i = 0; i < activeThreadCount; i++)
+		if (text.empty())
+			return false;
+		auto res = std::from_chars(text.data(), text.data() + text.size(), value, 16);
+		return res.ec == std::errc() && res.ptr == text.data() + text.size();
+	}
+
+	// thread selector: "-1" means all threads, otherwise a hex thread id (0 = any)
+	bool ParseSelector(std::string_view text, sint64& selector)
+	{
+		if (text == "-1")
 		{
-			action_for_thread(GET_THREAD_BY_ID(activeThread[i]));
+			selector = -1;
+			return true;
 		}
+		uint64 v;
+		if (!ParseHex(text, v) || v > 0x7FFFFFFFFFFFFFFFull)
+			return false;
+		selector = (sint64)v;
+		return true;
 	}
-	else if (selectorId == 0)
+
+	// splits "a<sep>b" into a and b; false if sep is missing
+	bool SplitOnce(std::string_view text, char sep, std::string_view& left, std::string_view& right)
 	{
-		// Use first thread if attempted to be stopped
-		// todo: would this work better if it used main?
-		action_for_thread(coreinit::OSGetDefaultThread(1));
+		size_t p = text.find(sep);
+		if (p == std::string_view::npos)
+			return false;
+		left = text.substr(0, p);
+		right = text.substr(p + 1);
+		return true;
 	}
-	else if (selectorId > 0)
+
+	/* guest threads */
+
+	uint32 ThreadId(OSThread_t* thread)
 	{
-		for (sint32 i = 0; i < activeThreadCount; i++)
+		return memory_getVirtualOffsetFromPointer(thread);
+	}
+
+	OSThread_t* ActiveThread(sint32 index)
+	{
+		return (OSThread_t*)memory_getPointerFromVirtualOffset(activeThread[index]);
+	}
+
+	// runs func for the selected threads while holding the scheduler lock
+	template<typename TFunc>
+	void ForSelectedThreads(sint64 selector, TFunc&& func)
+	{
+		__OSLockScheduler();
+		cemu_assert_debug(activeThreadCount != 0);
+		if (selector == 0)
 		{
-			auto* thread = GET_THREAD_BY_ID(activeThread[i]);
-			if (GET_THREAD_ID(thread) == selectorId)
-			{
-				action_for_thread(thread);
-				break;
-			}
-		}
-	}
-	__OSUnlockScheduler();
-}
-
-template<typename F>
-static void selectAndBreakThread(sint64 selectorId, F&& action_for_thread)
-{
-	__OSLockScheduler();
-	cemu_assert_debug(activeThreadCount != 0);
-
-	std::vector<OSThread_t*> pausedThreads;
-	if (selectorId == -1)
-	{
-		for (sint32 i = 0; i < activeThreadCount; i++)
-		{
-			coreinit::__OSSuspendThreadNolock(GET_THREAD_BY_ID(activeThread[i]));
-			pausedThreads.emplace_back(GET_THREAD_BY_ID(activeThread[i]));
-		}
-	}
-	else if (selectorId == 0)
-	{
-		// Use first thread if attempted to be stopped
-		OSThread_t* thread = GET_THREAD_BY_ID(activeThread[0]);
-		for (sint32 i = 0; i < activeThreadCount; i++)
-		{
-			if (GET_THREAD_ID(GET_THREAD_BY_ID(activeThread[i])) < GET_THREAD_ID(thread))
-			{
-				thread = GET_THREAD_BY_ID(activeThread[i]);
-			}
-		}
-		coreinit::__OSSuspendThreadNolock(thread);
-		pausedThreads.emplace_back(thread);
-	}
-	else if (selectorId > 0)
-	{
-		for (sint32 i = 0; i < activeThreadCount; i++)
-		{
-			auto* thread = GET_THREAD_BY_ID(activeThread[i]);
-			if (GET_THREAD_ID(thread) == selectorId)
-			{
-				coreinit::__OSSuspendThreadNolock(thread);
-				pausedThreads.emplace_back(thread);
-				break;
-			}
-		}
-	}
-	__OSUnlockScheduler();
-
-	for (OSThread_t* thread : pausedThreads)
-	{
-		while (coreinit::OSIsThreadRunning(thread))
-			std::this_thread::sleep_for(std::chrono::milliseconds(50));
-		action_for_thread(thread);
-	}
-}
-
-static void selectAndResumeThread(sint64 selectorId)
-{
-	__OSLockScheduler();
-	cemu_assert_debug(activeThreadCount != 0);
-
-	if (selectorId == -1)
-	{
-		for (sint32 i = 0; i < activeThreadCount; i++)
-		{
-			coreinit::__OSResumeThreadInternal(GET_THREAD_BY_ID(activeThread[i]), 4);
-		}
-	}
-	else if (selectorId == 0)
-	{
-		// Use first thread if attempted to be stopped
-		coreinit::__OSResumeThreadInternal(coreinit::OSGetDefaultThread(1), 1);
-	}
-	else if (selectorId > 0)
-	{
-		for (sint32 i = 0; i < activeThreadCount; i++)
-		{
-			auto* thread = GET_THREAD_BY_ID(activeThread[i]);
-			if (GET_THREAD_ID(thread) == selectorId)
-			{
-				coreinit::__OSResumeThreadInternal(thread, 1);
-				break;
-			}
-		}
-	}
-	__OSUnlockScheduler();
-}
-
-static void waitForBrokenThreads(std::unique_ptr<GDBServer::CommandContext> context, std::string_view reason)
-{
-	// This should pause all threads except trapped thread
-	// It should however wait for the trapped thread
-	// The trapped thread should be paused by the trap word instruction handler (aka the running thread)
-	std::vector<OSThread_t*> threadsList;
-	__OSLockScheduler();
-	for (sint32 i = 0; i < activeThreadCount; i++)
-	{
-		threadsList.emplace_back(GET_THREAD_BY_ID(activeThread[i]));
-	}
-	__OSUnlockScheduler();
-
-	for (OSThread_t* thread : threadsList)
-	{
-		while (coreinit::OSIsThreadRunning(thread))
-			std::this_thread::sleep_for(std::chrono::milliseconds(50));
-	}
-
-	context->QueueResponse(reason);
-}
-
-static void breakThreads(sint64 trappedThread)
-{
-	__OSLockScheduler();
-	cemu_assert_debug(activeThreadCount != 0);
-
-	// First, break other threads
-	OSThread_t* mainThread = nullptr;
-	for (sint32 i = 0; i < activeThreadCount; i++)
-	{
-		if (GET_THREAD_ID(GET_THREAD_BY_ID(activeThread[i])) == trappedThread)
-		{
-			mainThread = GET_THREAD_BY_ID(activeThread[i]);
+			func(coreinit::OSGetDefaultThread(1));
 		}
 		else
 		{
-			coreinit::__OSSuspendThreadNolock(GET_THREAD_BY_ID(activeThread[i]));
+			for (sint32 i = 0; i < activeThreadCount; i++)
+			{
+				OSThread_t* thread = ActiveThread(i);
+				if (selector == -1)
+					func(thread);
+				else if (ThreadId(thread) == (uint64)selector)
+				{
+					func(thread);
+					break;
+				}
+			}
+		}
+		__OSUnlockScheduler();
+	}
+
+	std::vector<OSThread_t*> SnapshotActiveThreads()
+	{
+		std::vector<OSThread_t*> threads;
+		__OSLockScheduler();
+		for (sint32 i = 0; i < activeThreadCount; i++)
+			threads.push_back(ActiveThread(i));
+		__OSUnlockScheduler();
+		return threads;
+	}
+
+	void WaitUntilNotRunning(const std::vector<OSThread_t*>& threads)
+	{
+		for (OSThread_t* thread : threads)
+		{
+			while (coreinit::OSIsThreadRunning(thread))
+				std::this_thread::sleep_for(std::chrono::milliseconds(50));
 		}
 	}
 
-	// Second, break trapped thread itself which should also pause execution of this handler
-	// This will temporarily lift the scheduler lock until it's resumed from its suspension
-	coreinit::__OSSuspendThreadNolock(mainThread);
+	// suspends every guest thread and waits until none of them executes anymore
+	void SuspendAllAndWait()
+	{
+		std::vector<OSThread_t*> suspended;
+		__OSLockScheduler();
+		cemu_assert_debug(activeThreadCount != 0);
+		for (sint32 i = 0; i < activeThreadCount; i++)
+		{
+			OSThread_t* thread = ActiveThread(i);
+			coreinit::__OSSuspendThreadNolock(thread);
+			suspended.push_back(thread);
+		}
+		__OSUnlockScheduler();
+		WaitUntilNotRunning(suspended);
+	}
 
-	__OSUnlockScheduler();
+	void ResumeSelectedThreads(sint64 selector)
+	{
+		__OSLockScheduler();
+		cemu_assert_debug(activeThreadCount != 0);
+		if (selector == -1)
+		{
+			// all suspensions done by the stub are undone at once
+			for (sint32 i = 0; i < activeThreadCount; i++)
+				coreinit::__OSResumeThreadInternal(ActiveThread(i), 4);
+		}
+		else if (selector == 0)
+		{
+			coreinit::__OSResumeThreadInternal(coreinit::OSGetDefaultThread(1), 1);
+		}
+		else
+		{
+			for (sint32 i = 0; i < activeThreadCount; i++)
+			{
+				OSThread_t* thread = ActiveThread(i);
+				if (ThreadId(thread) == (uint64)selector)
+				{
+					coreinit::__OSResumeThreadInternal(thread, 1);
+					break;
+				}
+			}
+		}
+		__OSUnlockScheduler();
+	}
+
+	// Called on the thread that hit a trap: suspends all other threads and
+	// then the calling thread itself (which blocks here until it is resumed).
+	void SuspendAllWithTrappedLast(uint32 trappedThreadId)
+	{
+		__OSLockScheduler();
+		cemu_assert_debug(activeThreadCount != 0);
+		OSThread_t* trapped = nullptr;
+		for (sint32 i = 0; i < activeThreadCount; i++)
+		{
+			OSThread_t* thread = ActiveThread(i);
+			if (ThreadId(thread) == trappedThreadId)
+				trapped = thread;
+			else
+				coreinit::__OSSuspendThreadNolock(thread);
+		}
+		coreinit::__OSSuspendThreadNolock(trapped);
+		__OSUnlockScheduler();
+	}
+
+	// runs on a helper thread: answers a parked continue request once every
+	// guest thread came to a halt
+	void ReplyWhenStopped(std::unique_ptr<GDBServer::Request> request, std::string stopReply)
+	{
+		WaitUntilNotRunning(SnapshotActiveThreads());
+		request->Reply(stopReply);
+	}
+
+	/* code flow */
+
+	// addresses that may execute right after the instruction at ip
+	std::vector<MPTR> PossibleSuccessors(MPTR ip, uint32 lr, uint32 ctr)
+	{
+		using namespace Espresso;
+		const uint32 instr = memory_readU32(ip);
+		const PrimaryOpcode primary = GetPrimaryOpcode(instr);
+		if (primary == PrimaryOpcode::B)
+		{
+			uint32 target;
+			bool absolute, link;
+			decodeOp_B(instr, target, absolute, link);
+			return { absolute ? target : ip + target };
+		}
+		if (primary == PrimaryOpcode::BC)
+		{
+			uint32 target, bi;
+			BOField bo{};
+			bool absolute, link;
+			decodeOp_BC(instr, target, bo, bi, absolute, link);
+			return { ip + 4, absolute ? target : ip + target };
+		}
+		if (primary == PrimaryOpcode::GROUP_19)
+		{
+			const Opcode19 op = GetGroup19Opcode(instr);
+			if (op == Opcode19::BCLR)
+				return { ip + 4, lr };
+			if (op == Opcode19::BCCTR)
+				return { ip + 4, ctr };
+		}
+		return { ip + 4 };
+	}
+
+	/* documents for qXfer */
+
+	std::string BuildTargetDescription()
+	{
+		std::string xml;
+		xml += "<?xml version=\"1.0\"?>\n<!DOCTYPE target SYSTEM \"gdb-target.dtd\">\n<target version=\"1.0\">\n";
+		xml += "<architecture>powerpc:common</architecture>\n";
+		xml += "<feature name=\"org.gnu.gdb.power.core\">\n";
+		for (uint32 i = 0; i < 32; i++)
+			xml += fmt::format("<reg name=\"r{}\" bitsize=\"32\" type=\"uint32\"/>\n", i);
+		xml += fmt::format("<reg name=\"pc\" bitsize=\"32\" type=\"code_ptr\" regnum=\"{}\"/>\n", kRegPc);
+		xml += "<reg name=\"msr\" bitsize=\"32\" type=\"uint32\"/>\n";
+		xml += "<reg name=\"cr\" bitsize=\"32\" type=\"uint32\"/>\n";
+		xml += "<reg name=\"lr\" bitsize=\"32\" type=\"code_ptr\"/>\n";
+		xml += "<reg name=\"ctr\" bitsize=\"32\" type=\"uint32\"/>\n";
+		xml += "<reg name=\"xer\" bitsize=\"32\" type=\"uint32\"/>\n";
+		xml += "</feature>\n<feature name=\"org.gnu.gdb.power.fpu\">\n";
+		for (uint32 i = 0; i < 32; i++)
+		{
+			if (i == 0)
+				xml += fmt::format("<reg name=\"f0\" bitsize=\"64\" type=\"ieee_double\" regnum=\"{}\"/>\n", kRegFprFirst);
+			else
+				xml += fmt::format("<reg name=\"f{}\" bitsize=\"64\" type=\"ieee_double\"/>\n", i);
+		}
+		xml += "<reg name=\"fpscr\" bitsize=\"32\" group=\"float\"/>\n";
+		xml += "</feature>\n</target>";
+		return xml;
+	}
+
+	const std::string& TargetDescription()
+	{
+		static const std::string s_xml = BuildTargetDescription();
+		return s_xml;
+	}
+
+	std::string BuildThreadList()
+	{
+		std::map<uint32, std::string> sorted;
+		ForSelectedThreads(-1, [&](OSThread_t* thread) {
+			std::string entry = fmt::format("<thread id=\"{:x}\" core=\"{}\"", ThreadId(thread), thread->context.upir.value());
+			if (!thread->threadName.IsNull())
+				entry += fmt::format(" name=\"{}\"", GDBServer::Request::EscapeXml(thread->threadName.GetPtr()));
+			entry += "></thread>";
+			sorted.emplace(ThreadId(thread), std::move(entry));
+		});
+		std::string xml = "<?xml version=\"1.0\"?><threads>";
+		for (auto& [id, entry] : sorted)
+			xml += entry;
+		xml += "</threads>";
+		return xml;
+	}
+
+	std::string BuildLibraryList()
+	{
+		std::string xml = "<?xml version=\"1.0\"?><library-list>";
+		for (RPLModule* module : RPLLoader_GetModuleList())
+		{
+			xml += fmt::format("<library name=\"{}\"><segment address=\"{:#x}\"/></library>",
+							   GDBServer::Request::EscapeXml(module->moduleName), module->regionMappingBase_text.GetMPTR());
+		}
+		xml += "</library-list>";
+		return xml;
+	}
+
+	// qXfer reply: 'l' marks the last chunk, 'm' means more data follows
+	void ReplyChunk(GDBServer::Request& req, const std::string& document, uint64 offset, uint64 length)
+	{
+		if (offset >= document.size())
+		{
+			req.Reply("l");
+			return;
+		}
+		std::string chunk = document.substr((size_t)offset, (size_t)length);
+		req.Reply(chunk.size() == length ? "m" : "l");
+		req.Reply(chunk);
+	}
+
+	void ShutdownSocket(SOCKET s)
+	{
+		if (s == INVALID_SOCKET)
+			return;
+#if BOOST_OS_WINDOWS
+		shutdown(s, SD_BOTH);
+#else
+		shutdown(s, SHUT_RDWR);
+#endif
+	}
 }
 
-std::unique_ptr<GDBServer> g_gdbstub;
+/* Request */
+
+GDBServer::Request::Request(const GDBServer* server, std::string packet)
+	: m_server(server), m_packet(std::move(packet))
+{
+	send(m_server->m_client_socket, "+", 1, 0);
+}
+
+GDBServer::Request::~Request()
+{
+	std::string body = EscapeBinary(m_reply);
+	std::string framed = fmt::format("${}#{:02x}", body, Checksum(body));
+	send(m_server->m_client_socket, framed.data(), (int)framed.size(), 0);
+}
+
+uint8 GDBServer::Request::Checksum(std::string_view data)
+{
+	uint32 sum = 0;
+	for (char c : data)
+		sum += (uint8)c;
+	return (uint8)sum;
+}
+
+std::string GDBServer::Request::EscapeBinary(std::string_view data)
+{
+	std::string out;
+	out.reserve(data.size());
+	for (char c : data)
+	{
+		switch (c)
+		{
+		case '#':
+		case '$':
+		case '}':
+		case '*':
+			out += '}';
+			out += (char)(c ^ 0x20);
+			break;
+		default:
+			out += c;
+		}
+	}
+	return out;
+}
+
+std::string GDBServer::Request::EscapeXml(std::string_view text)
+{
+	std::string out;
+	out.reserve(text.size());
+	for (char c : text)
+	{
+		switch (c)
+		{
+		case '&': out += "&amp;"; break;
+		case '<': out += "&lt;"; break;
+		case '>': out += "&gt;"; break;
+		case '"': out += "&quot;"; break;
+		case '\'': out += "&apos;"; break;
+		default: out += c;
+		}
+	}
+	return out;
+}
+
+/* server lifetime */
 
 GDBServer::GDBServer(uint16 port)
 	: m_port(port)
 {
 #if BOOST_OS_WINDOWS
-	WSADATA wsa;
-	WSAStartup(MAKEWORD(2, 2), &wsa);
+	WSADATA wsaData;
+	WSAStartup(MAKEWORD(2, 2), &wsaData);
 #endif
 }
 
 GDBServer::~GDBServer()
 {
-	if (m_client_socket != INVALID_SOCKET)
-	{
-		// close socket from other thread to forcefully stop accept() call
-		closesocket(m_client_socket);
-		m_client_socket = INVALID_SOCKET;
-	}
-
+	m_stopRequested = true;
+	// unblock recv() and accept() on the server thread
+	ShutdownSocket(m_client_socket);
+#if BOOST_OS_WINDOWS
 	if (m_server_socket != INVALID_SOCKET)
 	{
 		closesocket(m_server_socket);
+		m_server_socket = INVALID_SOCKET;
 	}
+#else
+	ShutdownSocket(m_server_socket);
+#endif
+	if (m_thread.joinable())
+		m_thread.join();
+	if (m_client_socket != INVALID_SOCKET)
+		closesocket(m_client_socket);
+	if (m_server_socket != INVALID_SOCKET)
+		closesocket(m_server_socket);
+	m_client_socket = INVALID_SOCKET;
+	m_server_socket = INVALID_SOCKET;
 #if BOOST_OS_WINDOWS
 	WSACleanup();
 #endif
-
-	m_stopRequested = false;
-	m_thread.join();
 }
 
 bool GDBServer::Initialize()
 {
 	cemuLog_createLogFile(false);
 
-	if (m_server_socket = socket(PF_INET, SOCK_STREAM, 0); m_server_socket == SOCKET_ERROR)
+	SOCKET s = socket(PF_INET, SOCK_STREAM, 0);
+	if (s == INVALID_SOCKET)
 		return false;
 
-	int reuseEnabled = TRUE;
-	if (setsockopt(m_server_socket, SOL_SOCKET, SO_REUSEADDR, (char*)&reuseEnabled, sizeof(reuseEnabled)) == SOCKET_ERROR)
-	{
-		closesocket(m_server_socket);
-		m_server_socket = INVALID_SOCKET;
+	auto fail = [&]() {
+		closesocket(s);
 		return false;
-	}
+	};
 
-	int nodelayEnabled = TRUE;
-	if (setsockopt(m_server_socket, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelayEnabled, sizeof(nodelayEnabled)) == SOCKET_ERROR)
-	{
-		closesocket(m_server_socket);
-		m_server_socket = INVALID_SOCKET;
-		return false;
-	}
+	int one = 1;
+	if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&one, sizeof(one)) == SOCKET_ERROR)
+		return fail();
+	if (setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char*)&one, sizeof(one)) == SOCKET_ERROR)
+		return fail();
 
-	memset(&m_server_addr, 0, sizeof(m_server_addr));
-	m_server_addr.sin_family = AF_INET;
-	m_server_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-	m_server_addr.sin_port = htons(m_port);
+	sockaddr_in address{};
+	address.sin_family = AF_INET;
+	address.sin_port = htons(m_port);
+	address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	if (bind(s, (const sockaddr*)&address, sizeof(address)) == SOCKET_ERROR)
+		return fail();
+	if (listen(s, 1) == SOCKET_ERROR)
+		return fail();
 
-	if (bind(m_server_socket, (sockaddr*)&m_server_addr, sizeof(m_server_addr)) == SOCKET_ERROR)
-	{
-		closesocket(m_server_socket);
-		m_server_socket = INVALID_SOCKET;
-		return false;
-	}
-
-	if (listen(m_server_socket, s_maxGDBClients) == SOCKET_ERROR)
-	{
-		closesocket(m_server_socket);
-		m_server_socket = INVALID_SOCKET;
-		return false;
-	}
-
-	m_thread = std::thread(std::bind(&GDBServer::ThreadFunc, this));
-
+	m_server_socket = s;
+	m_thread = std::thread([this]() { ServerLoop(); });
 	return true;
 }
 
-void GDBServer::ThreadFunc()
+/* connection handling */
+
+void GDBServer::ServerLoop()
 {
 	SetThreadName("GDBServer");
-
 	while (!m_stopRequested)
 	{
 		if (!m_client_connected)
 		{
-			cemuLog_logDebug(LogType::Force, "[GDBStub] Waiting for client to connect on port {}...", m_port);
-			socklen_t client_addr_size = sizeof(m_client_addr);
-			m_client_socket = accept(m_server_socket, (struct sockaddr*)&m_client_addr, &client_addr_size);
-			m_client_connected = m_client_socket != SOCKET_ERROR;
+			cemuLog_logDebug(LogType::Force, "[GDBStub] Listening for a debugger on port {}", m_port);
+			sockaddr_in peer{};
+			socklen_t peerSize = sizeof(peer);
+			SOCKET client = accept(m_server_socket, (sockaddr*)&peer, &peerSize);
+			if (client == INVALID_SOCKET)
+			{
+				if (!m_stopRequested)
+					std::this_thread::sleep_for(std::chrono::milliseconds(100));
+				continue;
+			}
+			m_client_socket = client;
+			m_client_connected = true;
+			continue;
 		}
-		else
+
+		char c;
+		if (!ReadByte(c))
 		{
-			auto receiveMessage = [&](char* buffer, const int32_t length) -> bool {
-				if (recv(m_client_socket, buffer, length, 0) != SOCKET_ERROR)
-					return false;
-				return true;
-			};
-
-			auto readChar = [&]() -> char {
-				char ret = 0;
-				recv(m_client_socket, &ret, 1, 0);
-				return ret;
-			};
-
-			char packetPrefix = readChar();
-
-			switch (packetPrefix)
+			// the debugger went away; wait for the next one
+			cemuLog_logDebug(LogType::Force, "[GDBStub] Debugger disconnected");
+			m_resumeRequest.reset();
+			m_client_connected = false;
+			if (!m_stopRequested)
 			{
-			case '+':
-			case '-':
-				break;
-			case '\x03':
-			{
-				cemuLog_logDebug(LogType::Force, "[GDBStub] Received interrupt (pressed CTRL+C?) from client!");
-				selectAndBreakThread(-1, [](OSThread_t* thread) {
-				});
-				auto thread_status = fmt::format("T05thread:{:08X};", GET_THREAD_ID(coreinit::OSGetDefaultThread(1)));
-				if (this->m_resumed_context)
-				{
-					this->m_resumed_context->QueueResponse(thread_status);
-					this->m_resumed_context.reset();
-				}
-				else
-				{
-					auto response_full = fmt::format("+${}#{:02x}", thread_status, CommandContext::CalculateChecksum(thread_status));
-					send(m_client_socket, response_full.c_str(), (int)response_full.size(), 0);
-				}
-				break;
+				closesocket(m_client_socket);
+				m_client_socket = INVALID_SOCKET;
 			}
-			case '$':
-			{
-				std::string message;
-				uint8 checkedSum = 0;
-				for (uint32_t i = 1;; i++)
-				{
-					char c = readChar();
-					if (c == '#')
-						break;
-					checkedSum += static_cast<uint8>(c);
-					message.push_back(c);
-
-					if (i >= s_maxPacketSize)
-						cemuLog_logDebug(LogType::Force, "[GDBStub] Received too big of a buffer: {}", message);
-				}
-				char checkSumStr[2];
-				receiveMessage(checkSumStr, 2);
-				uint32_t checkSum = std::stoi(std::string(checkSumStr, sizeof(checkSumStr)), nullptr, 16);
-				assert((checkedSum & 0xFF) == checkSum);
-
-				HandleCommand(message);
-				break;
-			}
-			default:
-				// cemuLog_logDebug(LogType::Force, "[GDBStub] Unknown packet start: {}", packetPrefix);
-				break;
-			}
+			continue;
 		}
+		if (c == '$')
+			ReceivePacket();
+		else if (c == '\x03')
+			ReceiveInterrupt();
+		// '+' / '-' acknowledgements and stray bytes need no handling
 	}
-
-	if (m_client_socket != INVALID_SOCKET)
-		closesocket(m_client_socket);
 }
 
-void GDBServer::HandleCommand(const std::string& command_str)
+bool GDBServer::ReadByte(char& c)
 {
-	auto context = std::make_unique<CommandContext>(this, command_str);
-
-	if (context->IsValid())
-	{
-		// cemuLog_logDebug(LogType::Force, "[GDBStub] Extracted Command {}", fmt::join(context->GetArgs(), ","));
-	}
-
-	switch (context->GetType())
-	{
-	// Extended commands
-	case CMDType::QUERY_GET:
-	case CMDType::QUERY_SET:
-		return HandleQuery(context);
-	case CMDType::VCONT:
-		return HandleVCont(context);
-	// Regular commands
-	case CMDType::IS_THREAD_RUNNING:
-		return CMDIsThreadActive(context);
-	case CMDType::SET_ACTIVE_THREAD:
-		return CMDSetActiveThread(context);
-	case CMDType::ACTIVE_THREAD_STATUS:
-		return CMDGetThreadStatus(context);
-	case CMDType::CONTINUE:
-		return CMDContinue(context);
-	case CMDType::ACTIVE_THREAD_STEP:
-		break;
-	case CMDType::REGISTER_READ:
-		return CMDReadRegister(context);
-	case CMDType::REGISTER_SET:
-		return CMDWriteRegister(context);
-	case CMDType::REGISTERS_READ:
-		return CMDReadRegisters(context);
-	case CMDType::REGISTERS_WRITE:
-		return CMDWriteRegisters(context);
-	case CMDType::MEMORY_READ:
-		return CMDReadMemory(context);
-	case CMDType::MEMORY_WRITE:
-		return CMDWriteMemory(context);
-	case CMDType::BREAKPOINT_SET:
-		return CMDInsertBreakpoint(context);
-	case CMDType::BREAKPOINT_REMOVE:
-		return CMDDeleteBreakpoint(context);
-	case CMDType::INVALID:
-	default:
-		return CMDNotFound(context);
-	}
-
-	CMDNotFound(context);
+	return recv(m_client_socket, &c, 1, 0) == 1;
 }
 
-void GDBServer::HandleQuery(std::unique_ptr<CommandContext>& context) const
+void GDBServer::ReceivePacket()
 {
-	if (!context->IsValid())
-		return context->QueueResponse(RESPONSE_EMPTY);
+	std::string packet;
+	uint32 sum = 0;
+	char c;
+	while (true)
+	{
+		if (!ReadByte(c))
+			return;
+		if (c == '#')
+			break;
+		packet += c;
+		sum += (uint8)c;
+		if (packet.size() == kMaxPacketLength + 1)
+			cemuLog_logDebug(LogType::Force, "[GDBStub] Packet exceeds the advertised size");
+	}
+	char checksumText[2];
+	if (!ReadByte(checksumText[0]) || !ReadByte(checksumText[1]))
+		return;
+	uint64 expected;
+	if (!ParseHex(std::string_view(checksumText, 2), expected) || expected != (sum & 0xFF))
+		cemuLog_logDebug(LogType::Force, "[GDBStub] Checksum mismatch for packet {}", packet);
+	Dispatch(packet);
+}
 
-	const auto& query_cmd = context->GetArgs()[0];
-	const auto& query_args = context->GetArgs().begin() + 1;
+void GDBServer::ReceiveInterrupt()
+{
+	cemuLog_logDebug(LogType::Force, "[GDBStub] Interrupt requested by debugger");
+	SuspendAllAndWait();
+	std::string stopReply = fmt::format("T05thread:{:08X};", ThreadId(coreinit::OSGetDefaultThread(1)));
+	if (m_resumeRequest)
+	{
+		m_resumeRequest->Reply(stopReply);
+		m_resumeRequest.reset();
+		return;
+	}
+	std::string framed = fmt::format("+${}#{:02x}", stopReply, Request::Checksum(stopReply));
+	send(m_client_socket, framed.data(), (int)framed.size(), 0);
+}
 
-	if (query_cmd == "qSupported")
+void GDBServer::Dispatch(const std::string& packet)
+{
+	RequestPtr req = std::make_unique<Request>(this, packet);
+	switch (req->Kind())
 	{
-		context->QueueResponse(s_supportedFeatures);
+	case 'q':
+	case 'Q': OnQuery(req); break;
+	case 'v': OnVCont(req); break;
+	case 'c': OnContinue(req); break;
+	case 'T': OnThreadAlive(req); break;
+	case 'H': OnSetThread(req); break;
+	case '?': OnStopReason(req); break;
+	case 'p': OnReadRegister(req); break;
+	case 'P': OnWriteRegister(req); break;
+	case 'g': OnReadAllRegisters(req); break;
+	case 'G': OnWriteAllRegisters(req); break;
+	case 'm': OnReadMemory(req); break;
+	case 'M': OnWriteMemory(req); break;
+	case 'Z': OnInsertBreakpoint(req); break;
+	case 'z': OnRemoveBreakpoint(req); break;
+	default: break; // unsupported: the empty reply tells the client so
 	}
-	else if (query_cmd == "qAttached")
+}
+
+/* queries */
+
+void GDBServer::OnQuery(RequestPtr& req)
+{
+	const std::string& p = req->Packet();
+	auto isCommand = [&](std::string_view name) {
+		return p == name || (p.size() > name.size() && p.compare(0, name.size(), name) == 0 && p[name.size()] == ':');
+	};
+
+	if (isCommand("qSupported"))
+		req->Reply(kFeatures);
+	else if (isCommand("qAttached"))
+		req->Reply("1");
+	else if (p == "qC")
+		req->Reply(fmt::format("QC{}", m_continueThread));
+	else if (p == "qfThreadInfo")
 	{
-		context->QueueResponse("1");
-	}
-	else if (query_cmd == "qRcmd")
-	{
-	}
-	else if (query_cmd == "qC")
-	{
-		context->QueueResponse("QC");
-		context->QueueResponse(std::to_string(m_activeThreadContinueSelector));
-	}
-	else if (query_cmd == "qOffsets")
-	{
-		const auto module_list = RPLLoader_GetModuleList();
-		for (sint32 i = 0; i < module_list.size(); i++)
-		{
-			const RPLModule* rpl = module_list[i];
-			if (rpl->entrypoint == m_entry_point)
-			{
-				context->QueueResponse(fmt::format("TextSeg={:08X};DataSeg={:08X}", rpl->regionMappingBase_text.GetMPTR(), rpl->regionMappingBase_data));
-			}
-		}
-	}
-	else if (query_cmd == "qfThreadInfo")
-	{
-		std::vector<std::string> threadIds;
-		selectThread(-1, [&threadIds](OSThread_t* thread) {
-			threadIds.emplace_back(fmt::format("{:08X}", memory_getVirtualOffsetFromPointer(thread)));
+		std::string ids;
+		ForSelectedThreads(-1, [&](OSThread_t* thread) {
+			if (!ids.empty())
+				ids += ',';
+			ids += fmt::format("{:08X}", ThreadId(thread));
 		});
-		context->QueueResponse(fmt::format("m{}", fmt::join(threadIds, ",")));
+		req->Reply("m" + ids);
 	}
-	else if (query_cmd == "qsThreadInfo")
-	{
-		context->QueueResponse("l");
-	}
-	else if (query_cmd == "qXfer")
-	{
-		auto& type = query_args[0];
-
-		if (type == "features")
-		{
-			auto& annex = query_args[1];
-			sint64 read_offset = std::stoul(query_args[2], nullptr, 16);
-			sint64 read_length = std::stoul(query_args[3], nullptr, 16);
-			if (annex == "target.xml")
-			{
-				if (read_offset >= GDBTargetXML.size())
-					context->QueueResponse("l");
-				else
-				{
-					auto paginated_str = GDBTargetXML.substr(read_offset, read_length);
-					context->QueueResponse((paginated_str.size() == read_length) ? "m" : "l");
-					context->QueueResponse(paginated_str);
-				}
-			}
-			else
-				cemuLog_logDebug(LogType::Force, "[GDBStub] qXfer:features:read:{} isn't a known feature document", annex);
-		}
-		else if (type == "threads")
-		{
-			sint64 read_offset = std::stoul(query_args[1], nullptr, 16);
-			sint64 read_length = std::stoul(query_args[2], nullptr, 16);
-
-			std::string threads_res;
-			threads_res += R"(<?xml version="1.0"?>)";
-			threads_res += "<threads>";
-			// note: clion seems to default to the first thread
-			std::map<sint64, std::string> threads_list;
-			selectThread(-1, [&threads_list](OSThread_t* thread) {
-				std::string entry;
-				entry += fmt::format(R"(<thread id="{:x}" core="{}")", GET_THREAD_ID(thread), thread->context.upir.value());
-				if (!thread->threadName.IsNull())
-					entry += fmt::format(R"( name="{}")", CommandContext::EscapeXMLString(thread->threadName.GetPtr()));
-				// todo: could add a human-readable description of the thread here
-				entry += fmt::format("></thread>");
-				threads_list.emplace(GET_THREAD_ID(thread), entry);
-			});
-			for (auto& entry : threads_list)
-			{
-				threads_res += entry.second;
-			}
-			threads_res += "</threads>";
-
-			if (read_offset >= threads_res.size())
-				context->QueueResponse("l");
-			else
-			{
-				auto paginated_str = threads_res.substr(read_offset, read_length);
-				context->QueueResponse((paginated_str.size() == read_length) ? "m" : "l");
-				context->QueueResponse(paginated_str);
-			}
-		}
-		else if (type == "libraries")
-		{
-			sint64 read_offset = std::stoul(query_args[1], nullptr, 16);
-			sint64 read_length = std::stoul(query_args[2], nullptr, 16);
-
-			std::string library_list;
-			library_list += R"(<?xml version="1.0"?>)";
-			library_list += "<library-list>";
-
-			const auto module_list = RPLLoader_GetModuleList();
-			for (sint32 i = 0; i < module_list.size(); i++)
-			{
-				library_list += fmt::format(R"(<library name="{}"><segment address="{:#x}"/></library>)", CommandContext::EscapeXMLString(module_list[i]->moduleName), module_list[i]->regionMappingBase_text.GetMPTR());
-			}
-			library_list += "</library-list>";
-
-			if (read_offset >= library_list.size())
-				context->QueueResponse("l");
-			else
-			{
-				auto paginated_str = library_list.substr(read_offset, read_length);
-				context->QueueResponse((paginated_str.size() == read_length) ? "m" : "l");
-				context->QueueResponse(paginated_str);
-			}
-		}
-		else
-		{
-			context->QueueResponse(RESPONSE_EMPTY);
-		}
-	}
-	else
-	{
-		context->QueueResponse(RESPONSE_EMPTY);
-	}
+	else if (p == "qsThreadInfo")
+		req->Reply("l");
+	else if (p.compare(0, 6, "qXfer:") == 0)
+		OnTransfer(req, std::string_view(p).substr(6));
 }
 
-void GDBServer::HandleVCont(std::unique_ptr<CommandContext>& context)
+// <object>:read:<annex>:<offset>,<length>
+void GDBServer::OnTransfer(RequestPtr& req, std::string_view args)
 {
-	if (!context->IsValid())
+	std::string_view object, rest, annex, range, offsetText, lengthText;
+	if (!SplitOnce(args, ':', object, rest) || rest.substr(0, 5) != "read:")
+		return;
+	if (!SplitOnce(rest.substr(5), ':', annex, range) || !SplitOnce(range, ',', offsetText, lengthText))
+		return;
+	uint64 offset, length;
+	if (!ParseHex(offsetText, offset) || !ParseHex(lengthText, length))
+		return;
+
+	if (object == "features")
 	{
-		cemuLog_logDebug(LogType::Force, "[GDBStub] Received unsupported vCont command: {}", context->GetCommand());
-		// cemu_assert_unimplemented();
-		return context->QueueResponse(RESPONSE_EMPTY);
+		if (annex == "target.xml")
+			ReplyChunk(*req, TargetDescription(), offset, length);
+		else
+			cemuLog_logDebug(LogType::Force, "[GDBStub] Unknown feature document {}", annex);
 	}
+	else if (object == "threads")
+		ReplyChunk(*req, BuildThreadList(), offset, length);
+	else if (object == "libraries")
+		ReplyChunk(*req, BuildLibraryList(), offset, length);
+}
 
-	const std::string& vcont_cmd = context->GetArgs()[0];
-	if (vcont_cmd == "vCont?")
-		return context->QueueResponse("vCont;c;C;s;S");
+/* execution control */
 
-	else if (vcont_cmd != "vCont;")
-		return context->QueueResponse(RESPONSE_EMPTY);
-
-	m_resumed_context = std::move(context);
-
-	bool resumedNoThreads = true;
-	for (const auto operation : TokenizeView(m_resumed_context->GetArgs()[1], ';'))
+void GDBServer::OnVCont(RequestPtr& req)
+{
+	const std::string& p = req->Packet();
+	if (p == "vCont?")
 	{
-		// todo: this might have issues with the signal versions (C/S)
-		// todo: test whether this works with multiple vCont;c:123123;c:123123
-		std::string_view operationType = operation.substr(0, operation.find(':'));
-		sint64 threadSelector = operationType.size() == operation.size() ? -1 : std::stoll(std::string(operation.substr(operationType.size() + 1)), nullptr, 16);
+		req->Reply("vCont;c;C;s;S");
+		return;
+	}
+	if (p.size() <= 6 || p.compare(0, 6, "vCont;") != 0)
+		return;
 
-		if (operationType == "c" || operationType.starts_with("C"))
+	const std::string actions = p.substr(6);
+	m_resumeRequest = std::move(req);
+
+	bool resumedAny = false;
+	std::string_view remaining = actions;
+	while (!remaining.empty())
+	{
+		size_t end = remaining.find(';');
+		std::string_view action = remaining.substr(0, end);
+		remaining = (end == std::string_view::npos) ? std::string_view() : remaining.substr(end + 1);
+		if (action.empty())
+			continue;
+
+		std::string_view kind = action;
+		sint64 selector = -1;
+		size_t colon = action.find(':');
+		if (colon != std::string_view::npos)
 		{
-			selectAndResumeThread(threadSelector);
-			resumedNoThreads = false;
+			kind = action.substr(0, colon);
+			if (!ParseSelector(action.substr(colon + 1), selector))
+				continue;
 		}
-		else if (operationType == "s" || operationType.starts_with("S"))
+		if (kind.empty())
+			continue;
+
+		if (kind[0] == 'c' || kind[0] == 'C')
 		{
-			selectThread(threadSelector, [this](OSThread_t* thread) {
-				auto nextInstructions = findNextInstruction(thread->context.srr0, thread->context.lr, thread->context.ctr);
-				for (MPTR nextInstr : nextInstructions)
-				{
-					auto bpIt = m_patchedInstructions.find(nextInstr);
-					if (bpIt == m_patchedInstructions.end())
-						this->m_patchedInstructions.try_emplace(nextInstr, nextInstr, BreakpointType::BP_STEP_POINT, false, "swbreak:;");
-					else
-						bpIt->second.PauseOnNextInterrupt();
-				}
+			if (kind[0] == 'c' && kind.size() != 1)
+				continue;
+			ResumeSelectedThreads(selector);
+			resumedAny = true;
+		}
+		else if (kind[0] == 's' || kind[0] == 'S')
+		{
+			if (kind[0] == 's' && kind.size() != 1)
+				continue;
+			ForSelectedThreads(selector, [&](OSThread_t* thread) {
+				PlantStepTraps(thread->context.srr0, _swapEndianU32(thread->context.lr), thread->context.ctr, "swbreak:;");
 			});
 		}
 	}
 
-	if (resumedNoThreads)
+	if (!resumedAny)
 	{
-		selectAndResumeThread(-1);
-		cemuLog_logDebug(LogType::Force, "[GDBStub] Resumed all threads after skip instructions");
+		ResumeSelectedThreads(-1);
+		cemuLog_logDebug(LogType::Force, "[GDBStub] Resumed all threads for stepping");
 	}
 }
 
-void GDBServer::CMDContinue(std::unique_ptr<CommandContext>& context)
+void GDBServer::OnContinue(RequestPtr& req)
 {
-	m_resumed_context = std::move(context);
-	selectAndResumeThread(m_activeThreadContinueSelector);
+	m_resumeRequest = std::move(req);
+	ResumeSelectedThreads(m_continueThread);
 }
 
-void GDBServer::CMDNotFound(std::unique_ptr<CommandContext>& context)
+void GDBServer::OnThreadAlive(RequestPtr& req)
 {
-	return context->QueueResponse(RESPONSE_EMPTY);
+	sint64 selector;
+	if (!ParseSelector(req->Body(), selector))
+		return;
+	bool found = false;
+	ForSelectedThreads(selector, [&](OSThread_t*) { found = true; });
+	req->Reply(found ? kOk : kError);
 }
 
-void GDBServer::CMDIsThreadActive(std::unique_ptr<CommandContext>& context)
+void GDBServer::OnSetThread(RequestPtr& req)
 {
-	sint64 threadSelector = std::stoll(context->GetArgs()[1], nullptr, 16);
-	bool foundThread = false;
-	selectThread(threadSelector, [&foundThread](OSThread_t* thread) {
-		foundThread = true;
+	std::string_view body = req->Body();
+	if (body.empty() || (body[0] != 'c' && body[0] != 'g'))
+		return;
+	sint64 selector;
+	if (!ParseSelector(body.substr(1), selector))
+		return;
+	if (selector >= 0)
+	{
+		bool found = false;
+		ForSelectedThreads(selector, [&](OSThread_t*) { found = true; });
+		if (!found)
+		{
+			req->Reply(kError);
+			return;
+		}
+	}
+	(body[0] == 'c' ? m_continueThread : m_registerThread) = selector;
+	req->Reply(kOk);
+}
+
+void GDBServer::OnStopReason(RequestPtr& req)
+{
+	ForSelectedThreads(0, [&](OSThread_t* thread) {
+		req->Reply(fmt::format("T05thread:{:08X};", ThreadId(thread)));
+	});
+}
+
+/* registers */
+
+void GDBServer::OnReadRegister(RequestPtr& req)
+{
+	uint64 reg;
+	if (!ParseHex(req->Body(), reg))
+		return;
+	ForSelectedThreads(m_registerThread, [&](OSThread_t* thread) {
+		OSContext_t& ctx = thread->context;
+		if (reg <= kRegGprLast)
+			req->Reply(fmt::format("{:08X}", _swapEndianU32(ctx.gpr[reg])));
+		else if (reg >= kRegFprFirst && reg <= kRegFprLast)
+			req->Reply(fmt::format("{:016X}", ctx.fp_ps0[reg - kRegFprFirst].value()));
+		else if (reg == kRegFpscr)
+			req->Reply(fmt::format("{:08X}", ctx.fpscr.fpscr.value()));
+		else if (reg == kRegPc)
+			req->Reply(fmt::format("{:08X}", ctx.srr0));
+		else if (reg == kRegMsr)
+			req->Reply("xxxxxxxx");
+		else if (reg == kRegCr)
+			req->Reply(fmt::format("{:08X}", ctx.cr));
+		else if (reg == kRegLr)
+			req->Reply(fmt::format("{:08X}", _swapEndianU32(ctx.lr)));
+		else if (reg == kRegCtr)
+			req->Reply(fmt::format("{:08X}", ctx.ctr));
+		else if (reg == kRegXer)
+			req->Reply(fmt::format("{:08X}", ctx.xer));
+	});
+}
+
+void GDBServer::OnWriteRegister(RequestPtr& req)
+{
+	std::string_view regText, valueText;
+	uint64 reg, value;
+	if (!SplitOnce(req->Body(), '=', regText, valueText) || !ParseHex(regText, reg) || !ParseHex(valueText, value))
+		return;
+	ForSelectedThreads(m_registerThread, [&](OSThread_t* thread) {
+		OSContext_t& ctx = thread->context;
+		const uint32 value32 = (uint32)value;
+		bool ok = true;
+		if (reg <= kRegGprLast)
+			ctx.gpr[reg] = _swapEndianU32(value32);
+		else if (reg >= kRegFprFirst && reg <= kRegFprLast)
+			ctx.fp_ps0[reg - kRegFprFirst] = uint64be{ value };
+		else if (reg == kRegFpscr)
+			ctx.fpscr.fpscr = uint32be{ value32 };
+		else if (reg == kRegPc)
+			ctx.srr0 = value32;
+		else if (reg == kRegCr)
+			ctx.cr = value32;
+		else if (reg == kRegLr)
+			ctx.lr = _swapEndianU32(value32);
+		else if (reg == kRegCtr)
+			ctx.ctr = value32;
+		else if (reg == kRegXer)
+			ctx.xer = value32;
+		else
+			ok = false; // MSR and unknown registers are read-only
+		req->Reply(ok ? kOk : kError);
+	});
+}
+
+void GDBServer::OnReadAllRegisters(RequestPtr& req)
+{
+	ForSelectedThreads(m_registerThread, [&](OSThread_t* thread) {
+		for (uint32 gpr : thread->context.gpr)
+			req->Reply(fmt::format("{:08X}", _swapEndianU32(gpr)));
+	});
+}
+
+void GDBServer::OnWriteAllRegisters(RequestPtr& req)
+{
+	std::string_view data = req->Body();
+	const size_t count = std::min<size_t>(32, data.size() / 8);
+	uint32 values[32];
+	for (size_t i = 0; i < count; i++)
+	{
+		uint64 v;
+		if (!ParseHex(data.substr(i * 8, 8), v))
+		{
+			req->Reply(kError);
+			return;
+		}
+		values[i] = (uint32)v;
+	}
+	ForSelectedThreads(m_registerThread, [&](OSThread_t* thread) {
+		for (size_t i = 0; i < count; i++)
+			thread->context.gpr[i] = _swapEndianU32(values[i]);
+	});
+	req->Reply(kOk);
+}
+
+/* memory */
+
+template<typename TFunc>
+void GDBServer::ForEachTrapInRange(MPTR address, uint32 length, TFunc&& func)
+{
+	const uint64 end = (uint64)address + length;
+	auto it = m_codeTraps.lower_bound(address >= 3 ? address - 3 : 0);
+	for (; it != m_codeTraps.end() && it->first < end; ++it)
+	{
+		if ((uint64)it->first + 4 > address)
+			func(it->first, it->second);
+	}
+}
+
+void GDBServer::OnReadMemory(RequestPtr& req)
+{
+	std::string_view addrText, lengthText;
+	uint64 address, length;
+	if (!SplitOnce(req->Body(), ',', addrText, lengthText) || !ParseHex(addrText, address) || !ParseHex(lengthText, length))
+		return;
+	if (address > 0xFFFFFFFF || length > 0xFFFFFFFF || !memory_isAddressRangeAccessible((MPTR)address, (uint32)length))
+	{
+		req->Reply(kError);
+		return;
+	}
+
+	std::vector<uint8> bytes(memory_getPointerFromVirtualOffset((MPTR)address), memory_getPointerFromVirtualOffset((MPTR)address) + length);
+	// show the client the instructions hidden behind our traps
+	ForEachTrapInRange((MPTR)address, (uint32)length, [&](MPTR trapAddress, CodeTrap& trap) {
+		const uint32 word = trap.ClientVisibleWord();
+		for (uint32 b = 0; b < 4; b++)
+		{
+			const uint64 byteAddress = (uint64)trapAddress + b;
+			if (byteAddress >= address && byteAddress < address + length)
+				bytes[byteAddress - address] = (uint8)(word >> (24 - b * 8));
+		}
 	});
 
-	if (foundThread)
-		return context->QueueResponse(RESPONSE_OK);
+	std::string hex;
+	hex.reserve(bytes.size() * 2);
+	for (uint8 v : bytes)
+		hex += fmt::format("{:02X}", v);
+	req->Reply(hex);
+}
+
+void GDBServer::OnWriteMemory(RequestPtr& req)
+{
+	std::string_view header, data, addrText, lengthText;
+	uint64 address, length;
+	if (!SplitOnce(req->Body(), ':', header, data) || !SplitOnce(header, ',', addrText, lengthText) ||
+		!ParseHex(addrText, address) || !ParseHex(lengthText, length))
+		return;
+	if (address > 0xFFFFFFFF || length > 0xFFFFFFFF || data.size() < length * 2 ||
+		!memory_isAddressRangeAccessible((MPTR)address, (uint32)length))
+	{
+		req->Reply(kError);
+		return;
+	}
+
+	std::vector<uint8> bytes((size_t)length);
+	for (size_t i = 0; i < bytes.size(); i++)
+	{
+		uint64 v;
+		if (!ParseHex(data.substr(i * 2, 2), v))
+		{
+			req->Reply(kError);
+			return;
+		}
+		bytes[i] = (uint8)v;
+	}
+
+	uint8* dst = memory_getPointerFromVirtualOffset((MPTR)address);
+	std::vector<bool> handledByTrap(bytes.size(), false);
+	// bytes under an armed trap belong to the saved instruction, not to memory
+	ForEachTrapInRange((MPTR)address, (uint32)length, [&](MPTR trapAddress, CodeTrap& trap) {
+		if (trap.IsDisarmed())
+			return;
+		uint32 saved = trap.SavedInstruction();
+		for (uint32 b = 0; b < 4; b++)
+		{
+			const uint64 byteAddress = (uint64)trapAddress + b;
+			if (byteAddress < address || byteAddress >= address + length)
+				continue;
+			const uint32 shift = 24 - b * 8;
+			saved = (saved & ~(0xFFu << shift)) | ((uint32)bytes[byteAddress - address] << shift);
+			handledByTrap[byteAddress - address] = true;
+		}
+		trap.SetSavedInstruction(saved);
+	});
+	for (size_t i = 0; i < bytes.size(); i++)
+	{
+		if (!handledByTrap[i])
+			dst[i] = bytes[i];
+	}
+	if (length)
+		PPCRecompiler_invalidateRange((MPTR)address, (MPTR)(address + length));
+	req->Reply(kOk);
+}
+
+/* breakpoints */
+
+void GDBServer::OnInsertBreakpoint(RequestPtr& req)
+{
+	std::string_view body = req->Body();
+	std::string_view typeText, rest, addrText, kindText;
+	uint64 type, address, kind;
+	if (!SplitOnce(body, ',', typeText, rest) || !SplitOnce(rest, ',', addrText, kindText) ||
+		!ParseHex(typeText, type) || !ParseHex(addrText, address) || !ParseHex(kindText, kind) || type > 4)
+		return;
+	const MPTR addr = (MPTR)address;
+
+	if (type <= 1)
+	{
+		m_codeTraps.erase(addr);
+		m_codeTraps.try_emplace(addr, addr, BreakpointType::BP_PERSISTENT, type == 0, type == 0 ? "swbreak:;" : "hwbreak:;");
+	}
 	else
-		return context->QueueResponse(RESPONSE_ERROR);
+	{
+		if (m_watchpoint)
+		{
+			req->Reply(kError);
+			return;
+		}
+		m_watchpoint = std::make_unique<Watchpoint>(addr, (AccessPointType)type);
+	}
+	req->Reply(kOk);
 }
 
-void GDBServer::CMDSetActiveThread(std::unique_ptr<CommandContext>& context)
+void GDBServer::OnRemoveBreakpoint(RequestPtr& req)
 {
-	sint64 threadSelector = std::stoll(context->GetArgs()[2], nullptr, 16);
-	if (threadSelector >= 0)
+	std::string_view body = req->Body();
+	std::string_view typeText, rest, addrText, kindText;
+	uint64 type, address, kind;
+	if (!SplitOnce(body, ',', typeText, rest) || !SplitOnce(rest, ',', addrText, kindText) ||
+		!ParseHex(typeText, type) || !ParseHex(addrText, address) || !ParseHex(kindText, kind) || type > 4)
+		return;
+	const MPTR addr = (MPTR)address;
+
+	if (type <= 1)
 	{
-		bool foundThread = false;
-		selectThread(threadSelector, [&foundThread](OSThread_t* thread) {
-			foundThread = true;
-		});
-		if (!foundThread)
-			return context->QueueResponse(RESPONSE_ERROR);
+		auto it = m_codeTraps.find(addr);
+		if (it == m_codeTraps.end() || !it->second.StopsThreads())
+		{
+			req->Reply(kError);
+			return;
+		}
+		m_codeTraps.erase(it);
 	}
-	if (context->GetArgs()[1] == "c")
-		m_activeThreadContinueSelector = threadSelector;
 	else
-		m_activeThreadSelector = threadSelector;
-	return context->QueueResponse(RESPONSE_OK);
-}
-
-void GDBServer::CMDGetThreadStatus(std::unique_ptr<CommandContext>& context)
-{
-	selectThread(0, [&context](OSThread_t* thread) {
-		context->QueueResponse(fmt::format("T05thread:{:08X};", memory_getVirtualOffsetFromPointer(thread)));
-	});
-}
-
-void GDBServer::CMDReadRegister(std::unique_ptr<CommandContext>& context) const
-{
-	sint32 reg = std::stoi(context->GetArgs()[1], nullptr, 16);
-	selectThread(m_activeThreadSelector, [reg, &context](OSThread_t* thread) {
-		auto& cpu = thread->context;
-		if (reg >= RegisterID::R0_START && reg <= RegisterID::R31_END)
-		{
-			return context->QueueResponse(fmt::format("{:08X}", CPU_swapEndianU32(cpu.gpr[reg])));
-		}
-		else if (reg >= RegisterID::F0_START && reg <= RegisterID::F31_END)
-		{
-			return context->QueueResponse(fmt::format("{:016X}", cpu.fp_ps0[reg - RegisterID::F0_START].value()));
-		}
-		else if (reg == RegisterID::FPSCR)
-		{
-			return context->QueueResponse(fmt::format("{:08X}", cpu.fpscr.fpscr.value()));
-		}
-		else
-		{
-			switch (reg)
-			{
-			case RegisterID::PC: return context->QueueResponse(fmt::format("{:08X}", cpu.srr0));
-			case RegisterID::MSR: return context->QueueResponse("xxxxxxxx");
-			case RegisterID::CR: return context->QueueResponse(fmt::format("{:08X}", cpu.cr));
-			case RegisterID::LR: return context->QueueResponse(fmt::format("{:08X}", CPU_swapEndianU32(cpu.lr)));
-			case RegisterID::CTR: return context->QueueResponse(fmt::format("{:08X}", cpu.ctr));
-			case RegisterID::XER: return context->QueueResponse(fmt::format("{:08X}", cpu.xer));
-			default: break;
-			}
-		}
-	});
-}
-
-void GDBServer::CMDWriteRegister(std::unique_ptr<CommandContext>& context) const
-{
-	sint32 reg = std::stoi(context->GetArgs()[1], nullptr, 16);
-	uint64 value = std::stoll(context->GetArgs()[2], nullptr, 16);
-	selectThread(m_activeThreadSelector, [reg, value, &context](OSThread_t* thread) {
-		auto& cpu = thread->context;
-		if (reg >= RegisterID::R0_START && reg <= RegisterID::R31_END)
-		{
-			cpu.gpr[reg] = CPU_swapEndianU32(value);
-			return context->QueueResponse(RESPONSE_OK);
-		}
-		else if (reg >= RegisterID::F0_START && reg <= RegisterID::F31_END)
-		{
-			// todo: figure out how to properly write to paired single registers
-			cpu.fp_ps0[reg - RegisterID::F0_START] = uint64be{value};
-			return context->QueueResponse(RESPONSE_OK);
-		}
-		else if (reg == RegisterID::FPSCR)
-		{
-			cpu.fpscr.fpscr = uint32be{(uint32)value};
-			return context->QueueResponse(RESPONSE_OK);
-		}
-		else
-		{
-			switch (reg)
-			{
-			case RegisterID::PC:
-				cpu.srr0 = value;
-				return context->QueueResponse(RESPONSE_OK);
-			case RegisterID::MSR:
-				return context->QueueResponse(RESPONSE_ERROR);
-			case RegisterID::CR:
-				cpu.cr = value;
-				return context->QueueResponse(RESPONSE_OK);
-			case RegisterID::LR:
-				cpu.lr = CPU_swapEndianU32(value);
-				return context->QueueResponse(RESPONSE_OK);
-			case RegisterID::CTR:
-				cpu.ctr = value;
-				return context->QueueResponse(RESPONSE_OK);
-			case RegisterID::XER:
-				cpu.xer = value;
-				return context->QueueResponse(RESPONSE_OK);
-			default:
-				return context->QueueResponse(RESPONSE_ERROR);
-			}
-		}
-	});
-}
-
-void GDBServer::CMDReadRegisters(std::unique_ptr<CommandContext>& context) const
-{
-	selectThread(m_activeThreadSelector, [&context](OSThread_t* thread) {
-		for (uint32& reg : thread->context.gpr)
-		{
-			context->QueueResponse(fmt::format("{:08X}", CPU_swapEndianU32(reg)));
-		}
-	});
-}
-
-void GDBServer::CMDWriteRegisters(std::unique_ptr<CommandContext>& context) const
-{
-	selectThread(m_activeThreadSelector, [&context](OSThread_t* thread) {
-		auto& registers = context->GetArgs()[1];
-		for (uint32 i = 0; i < 32; i++)
-		{
-			thread->context.gpr[i] = CPU_swapEndianU32(std::stoi(registers.substr(i * 2, 2), nullptr, 16));
-		}
-	});
-}
-
-void GDBServer::CMDReadMemory(std::unique_ptr<CommandContext>& context)
-{
-	sint64 addr = std::stoul(context->GetArgs()[1], nullptr, 16);
-	sint64 length = std::stoul(context->GetArgs()[2], nullptr, 16);
-
-	// todo: handle cross-mmu-range memory requests
-	if (!memory_isAddressRangeAccessible(addr, length))
-		return context->QueueResponse(RESPONSE_ERROR);
-
-	std::string memoryRepr;
-	uint8* values = memory_getPointerFromVirtualOffset(addr);
-	for (sint64 i = 0; i < length; i++)
 	{
-		memoryRepr += fmt::format("{:02X}", values[i]);
-	}
-
-	auto patchesRange = m_patchedInstructions.lower_bound(addr);
-	while (patchesRange != m_patchedInstructions.end() && patchesRange->first < (addr + length))
-	{
-		auto replStr = fmt::format("{:02X}", patchesRange->second.GetVisibleOpCode());
-		memoryRepr[(patchesRange->first - addr) * 2] = replStr[0];
-		memoryRepr[(patchesRange->first - addr) * 2 + 1] = replStr[1];
-		patchesRange++;
-	}
-	return context->QueueResponse(memoryRepr);
-}
-
-void GDBServer::CMDWriteMemory(std::unique_ptr<CommandContext>& context)
-{
-	sint64 addr = std::stoul(context->GetArgs()[1], nullptr, 16);
-	sint64 length = std::stoul(context->GetArgs()[2], nullptr, 16);
-	auto source = context->GetArgs()[3];
-
-	// todo: handle cross-mmu-range memory requests
-	if (!memory_isAddressRangeAccessible(addr, length))
-		return context->QueueResponse(RESPONSE_ERROR);
-
-	uint8* values = memory_getPointerFromVirtualOffset(addr);
-	for (sint64 i = 0; i < length; i++)
-	{
-		uint8 hexValue;
-		const std::from_chars_result result = std::from_chars(source.data() + (i * 2), (source.data() + (i * 2) + 2), hexValue, 16);
-		if (result.ec == std::errc::invalid_argument || result.ec == std::errc::result_out_of_range)
-			return context->QueueResponse(RESPONSE_ERROR);
-
-		if (auto it = m_patchedInstructions.find(addr + i); it != m_patchedInstructions.end())
+		if (!m_watchpoint || m_watchpoint->GetAddress() != addr)
 		{
-			uint32 newOpCode = it->second.GetVisibleOpCode();
-			uint32 byteIndex = 3 - ((addr + i) % 4);			// inverted because of big endian, so address 0 is the highest byte
-			newOpCode &= ~(0xFF << (byteIndex * 8));			// mask out the byte
-			newOpCode |= ((uint32)hexValue << (byteIndex * 8)); // set new byte with OR
-			it->second.WriteNewOpCode(newOpCode);
+			req->Reply(kError);
+			return;
 		}
-		else
+		m_watchpoint.reset();
+	}
+	req->Reply(kOk);
+}
+
+void GDBServer::PlantStepTraps(uint32 ip, uint32 lr, uint32 ctr, const std::string& reason)
+{
+	for (MPTR next : PossibleSuccessors(ip, lr, ctr))
+	{
+		auto it = m_codeTraps.find(next);
+		if (it != m_codeTraps.end() && !it->second.StopsThreads() && !it->second.DroppedOnAnyTrap())
 		{
-			values[i] = hexValue;
+			// a restore point: any trap re-arms breakpoints, so a step point can take its place
+			m_codeTraps.erase(it);
+			it = m_codeTraps.end();
 		}
+		if (it == m_codeTraps.end())
+		{
+			m_codeTraps.try_emplace(next, next, BreakpointType::BP_STEP_POINT, false, reason);
+			continue;
+		}
+		if (it->second.IsDisarmed() && next != ip)
+			it->second.Rearm();
+		it->second.RequestStopOnce();
 	}
-	return context->QueueResponse(RESPONSE_OK);
 }
 
-void GDBServer::CMDInsertBreakpoint(std::unique_ptr<CommandContext>& context)
-{
-	auto type = std::stoul(context->GetArgs()[1], nullptr, 16);
-	MPTR addr = static_cast<MPTR>(std::stoul(context->GetArgs()[2], nullptr, 16));
+/* events from the emulated CPUs */
 
-	if (type == 0 || type == 1)
-	{
-		auto bp = this->m_patchedInstructions.find(addr);
-		if (bp != this->m_patchedInstructions.end())
-			this->m_patchedInstructions.erase(bp);
-		this->m_patchedInstructions.try_emplace(addr, addr, BreakpointType::BP_PERSISTENT, type == 0, type == 0 ? "swbreak:;" : "hwbreak:;");
-	}
-	else if (type == 2 || type == 3 || type == 4)
-	{
-		if (this->m_watch_point)
-			return context->QueueResponse(RESPONSE_ERROR);
-
-		this->m_watch_point = std::make_unique<AccessBreakpoint>(addr, (AccessPointType)type);
-	}
-
-	return context->QueueResponse(RESPONSE_OK);
-}
-
-void GDBServer::CMDDeleteBreakpoint(std::unique_ptr<CommandContext>& context)
-{
-	auto type = std::stoul(context->GetArgs()[1], nullptr, 16);
-	MPTR addr = static_cast<MPTR>(std::stoul(context->GetArgs()[2], nullptr, 16));
-
-	if (type == 0 || type == 1)
-	{
-		auto bp = this->m_patchedInstructions.find(addr);
-		if (bp == this->m_patchedInstructions.end() || !bp->second.ShouldBreakThreads())
-			return context->QueueResponse(RESPONSE_ERROR);
-		else
-			this->m_patchedInstructions.erase(bp);
-	}
-	else if (type == 2 || type == 3 || type == 4)
-	{
-		if (!this->m_watch_point || this->m_watch_point->GetAddress() != addr)
-			return context->QueueResponse(RESPONSE_ERROR);
-
-		this->m_watch_point.reset();
-	}
-
-	return context->QueueResponse(RESPONSE_OK);
-}
-
-// Internal functions for control
 void GDBServer::HandleTrapInstruction(PPCInterpreter_t* hCPU)
 {
-	// First, restore any removed breakpoints
-	for (auto& bp : m_patchedInstructions)
+	const MPTR ip = hCPU->instructionPointer;
+
+	// the thread that stepped over a disarmed breakpoint has moved on, so
+	// every breakpoint can take effect again
+	for (auto& [address, trap] : m_codeTraps)
 	{
-		if (bp.second.IsRemoved())
-			bp.second.Restore();
+		if (address != ip)
+			trap.Rearm();
 	}
 
-	auto patchedBP = m_patchedInstructions.find(hCPU->instructionPointer);
-	if (patchedBP == m_patchedInstructions.end())
-		return cemu_assert_suspicious();
-
-	// Secondly, delete one-shot breakpoints but also temporarily delete patched instruction to run original instruction
-	OSThread_t* currThread = coreinit::OSGetCurrentThread();
-	std::string pauseReason = fmt::format("T05thread:{:08X};core:{:02X};{}", GET_THREAD_ID(currThread), PPCInterpreter_getCoreIndex(hCPU), patchedBP->second.GetReason());
-	bool pauseThreads = patchedBP->second.ShouldBreakThreads() || patchedBP->second.ShouldBreakThreadsOnNextInterrupt();
-	if (patchedBP->second.IsPersistent())
+	auto it = m_codeTraps.find(ip);
+	if (it == m_codeTraps.end())
 	{
-		// Insert new restore breakpoints at next possible instructions which restores breakpoints but won't pause the CPU
-		std::vector<MPTR> nextInstructions = findNextInstruction(hCPU->instructionPointer, hCPU->spr.LR, hCPU->spr.CTR);
-		for (MPTR nextInstr : nextInstructions)
+		cemu_assert_suspicious();
+		return;
+	}
+
+	CodeTrap& trap = it->second;
+	const uint32 threadId = ThreadId(coreinit::OSGetCurrentThread());
+	const std::string stopReply = fmt::format("T05thread:{:08X};core:{:02X};{}", threadId, PPCInterpreter_getCoreIndex(hCPU), trap.StopReason());
+	const bool stop = trap.StopsThreads() || trap.ConsumeStopRequest();
+
+	if (trap.StaysAfterHit())
+	{
+		// let the original instruction execute; restore points right after it re-arm the breakpoint
+		for (MPTR next : PossibleSuccessors(ip, hCPU->spr.LR, hCPU->spr.CTR))
 		{
-			if (!m_patchedInstructions.contains(nextInstr))
-				this->m_patchedInstructions.try_emplace(nextInstr, nextInstr, BreakpointType::BP_STEP_POINT, false, "");
+			if (next != ip && !m_codeTraps.contains(next))
+				m_codeTraps.try_emplace(next, next, BreakpointType::BP_RESTORE_POINT, false, "");
 		}
-		patchedBP->second.RemoveTemporarily();
+		trap.Disarm();
 	}
 	else
 	{
-		m_patchedInstructions.erase(patchedBP);
+		m_codeTraps.erase(it);
 	}
 
-	// Thirdly, delete any instructions that were generated by a skip instruction
-	for (auto it = m_patchedInstructions.cbegin(), next_it = it; it != m_patchedInstructions.cend(); it = next_it)
-	{
-		++next_it;
-		if (it->second.IsSkipBreakpoint())
-		{
-			m_patchedInstructions.erase(it);
-		}
-	}
+	std::erase_if(m_codeTraps, [](const auto& entry) { return entry.second.DroppedOnAnyTrap(); });
 
-	// Fourthly, the stub can insert breakpoints that are just meant to restore patched instructions, in which case we just want to continue
-	if (pauseThreads)
-	{
-		cemuLog_logDebug(LogType::Force, "[GDBStub] Got trapped by a breakpoint!");
-		if (m_resumed_context)
-		{
-			// Spin up thread to signal when another GDB stub trap is found
-			ThreadPool::FireAndForget(&waitForBrokenThreads, std::move(m_resumed_context), pauseReason);
-		}
+	if (!stop)
+		return;
 
-		breakThreads(GET_THREAD_ID(coreinit::OSGetCurrentThread()));
-		cemuLog_logDebug(LogType::Force, "[GDBStub] Resumed from a breakpoint!");
-	}
+	cemuLog_logDebug(LogType::Force, "[GDBStub] Breakpoint hit at {:08x}", ip);
+	if (m_resumeRequest)
+		ThreadPool::FireAndForget(&ReplyWhenStopped, std::move(m_resumeRequest), stopReply);
+	SuspendAllWithTrappedLast(threadId);
+	cemuLog_logDebug(LogType::Force, "[GDBStub] Continuing after breakpoint");
 }
 
 void GDBServer::HandleAccessException(uint64 dr6)
 {
-	bool triggeredWrite = GetBits(dr6, 2, 1);
-	bool triggeredReadWrite = GetBits(dr6, 3, 1);
+	if (!m_watchpoint)
+		return;
+	// DR6.B2 is the write-only slot, DR6.B3 the read/write slot
+	const bool hitWrite = (dr6 >> 2) & 1;
+	const bool hitAccess = (dr6 >> 3) & 1;
+	const MPTR address = m_watchpoint->GetAddress();
 
-	std::string response;
-	if (m_watch_point->GetType() == AccessPointType::BP_WRITE && triggeredWrite)
-		response = fmt::format("watch:{:08X};", m_watch_point->GetAddress());
-	else if (m_watch_point->GetType() == AccessPointType::BP_READ && triggeredReadWrite && !triggeredWrite)
-		response = fmt::format("rwatch:{:08X};", m_watch_point->GetAddress());
-	else if (m_watch_point->GetType() == AccessPointType::BP_BOTH && triggeredReadWrite)
-		response = fmt::format("awatch:{:08X};", m_watch_point->GetAddress());
-
-	if (!response.empty())
+	std::string stopReason;
+	switch (m_watchpoint->GetType())
 	{
-		PPCInterpreter_t* hCPU = PPCInterpreter_getCurrentInstance();
-		cemuLog_logDebug(LogType::Force, "Received matching breakpoint exception: {}", response);
-		auto nextInstructions = findNextInstruction(hCPU->instructionPointer, hCPU->spr.LR, hCPU->spr.CTR);
-		for (MPTR nextInstr : nextInstructions)
-		{
-			auto bpIt = m_patchedInstructions.find(nextInstr);
-			if (bpIt == m_patchedInstructions.end())
-				this->m_patchedInstructions.try_emplace(nextInstr, nextInstr, BreakpointType::BP_STEP_POINT, false, response);
-			else
-				bpIt->second.PauseOnNextInterrupt();
-		}
+	case AccessPointType::BP_WRITE:
+		if (hitWrite)
+			stopReason = fmt::format("watch:{:08X};", address);
+		break;
+	case AccessPointType::BP_READ:
+		if (hitAccess && !hitWrite)
+			stopReason = fmt::format("rwatch:{:08X};", address);
+		break;
+	case AccessPointType::BP_BOTH:
+		if (hitAccess)
+			stopReason = fmt::format("awatch:{:08X};", address);
+		break;
 	}
+	if (stopReason.empty())
+		return;
+
+	cemuLog_logDebug(LogType::Force, "[GDBStub] Watchpoint triggered: {}", stopReason);
+	PPCInterpreter_t* hCPU = PPCInterpreter_getCurrentInstance();
+	PlantStepTraps(hCPU->instructionPointer, hCPU->spr.LR, hCPU->spr.CTR, stopReason);
 }
 
 void GDBServer::HandleEntryStop(uint32 entryAddress)
 {
-	this->m_patchedInstructions.try_emplace(entryAddress, entryAddress, BreakpointType::BP_SINGLE, false, "");
+	m_codeTraps.try_emplace(entryAddress, entryAddress, BreakpointType::BP_SINGLE, false, "");
 	m_entry_point = entryAddress;
 }

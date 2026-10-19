@@ -1,10 +1,13 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// Breakpoints, code patches and the stop/step loop of the guest debugger.
+
 #include "Common/precompiled.h"
 #include "Debugger.h"
 #include "Cafe/OS/RPL/rpl_structs.h"
 #include "Cemu/PPCAssembler/ppcAssembler.h"
 #include "Cafe/HW/Espresso/Recompiler/PPCRecompiler.h"
 #include "Cemu/ExpressionParser/ExpressionParser.h"
-
 #include "Cafe/OS/libs/coreinit/coreinit.h"
 #include "OS/RPL/rpl.h"
 #include "util/helpers/helpers.h"
@@ -13,758 +16,621 @@
 #include <Windows.h>
 #endif
 
-void debugger_updateExecutionBreakpoint(uint32 address, bool forceRestore = false);
-
-DebuggerDispatcher g_debuggerDispatcher;
-
-struct DebuggerState
-{
-	bool breakOnEntry{false};
-	bool logOnlyMemoryBreakpoints{false};
-	// breakpoints
-	std::recursive_mutex breakpointsMtx;
-	std::vector<DebuggerBreakpoint*> breakpoints;
-	// patches
-	std::vector<DebuggerPatch*> patches;
-	// active memory breakpoint (only one for now)
-	DebuggerBreakpoint* activeMemoryBreakpoint{};
-	// debugging session
-	struct
-	{
-		std::mutex debugSessionMtx;
-		std::atomic_bool shouldBreak; // request any thread to break asap
-		std::atomic_bool isTrapped{false};
-		uint32 debuggedThreadMPTR{};
-		PPCInterpreter_t* hCPU{};
-		// step control
-		std::atomic<DebuggerStepCommand> stepCommand{DebuggerStepCommand::None};
-	}debugSession;
-};
-
-DebuggerState s_debuggerState{};
-
-std::vector<DebuggerBreakpoint*>& debugger_lockBreakpoints()
-{
-	s_debuggerState.breakpointsMtx.lock();
-	return s_debuggerState.breakpoints;
-}
-
-void debugger_unlockBreakpoints()
-{
-	s_debuggerState.breakpointsMtx.unlock();
-}
-
-DebuggerBreakpoint* debugger_getFirstBP(uint32 address)
-{
-	for (auto& it : s_debuggerState.breakpoints)
-	{
-		if (it->address == address)
-			return it;
-	}
-	return nullptr;
-}
-
-DebuggerBreakpoint* debugger_getFirstBP(uint32 address, uint8 bpType)
-{
-	for (auto& it : s_debuggerState.breakpoints)
-	{
-		if (it->address == address)
-		{
-			DebuggerBreakpoint* bpItr = it;
-			while (bpItr)
-			{
-				if (bpItr->bpType == bpType)
-					return bpItr;
-				bpItr = bpItr->next;
-			}
-			return nullptr;
-		}
-	}
-	return nullptr;
-}
-
-DebuggerBreakpoint* debugger_getBreakpointById(BreakpointId bpId)
-{
-	for (auto& it : s_debuggerState.breakpoints)
-	{
-		DebuggerBreakpoint* chain = it;
-		while (chain)
-		{
-			if (chain->id == bpId)
-				return chain;
-			chain = chain->next;
-		}
-	}
-	return nullptr;
-}
-
-bool debuggerBPChain_hasType(DebuggerBreakpoint* bp, uint8 bpType)
-{
-	while (bp)
-	{
-		if (bp->bpType == bpType)
-			return true;
-		bp = bp->next;
-	}
-	return false;
-}
-
-void debuggerBPChain_add(uint32 address, DebuggerBreakpoint* bp)
-{
-	bp->next = nullptr;
-	DebuggerBreakpoint* existingBP = debugger_getFirstBP(address);
-	if (existingBP)
-	{
-		while (existingBP->next)
-			existingBP = existingBP->next;
-		existingBP->next = bp;
-		return;
-	}
-	// no breakpoint chain exists for this address
-	s_debuggerState.breakpoints.push_back(bp);
-}
-
-uint32 debugger_getAddressOriginalOpcode(uint32 address)
-{
-	auto bpItr = debugger_getFirstBP(address);
-	while (bpItr)
-	{
-		if (bpItr->isExecuteBP())
-			return bpItr->originalOpcodeValue;
-		bpItr = bpItr->next;
-	}
-	return memory_readU32(address);
-}
-
-void debugger_updateMemoryU32(uint32 address, uint32 newValue)
-{
-	bool memChanged = false;
-	if (newValue != memory_readU32(address))
-		memChanged = true;
-	memory_writeU32(address, newValue);
-	if(memChanged)
-		PPCRecompiler_invalidateRange(address, address + 4);
-}
-
-void debugger_updateExecutionBreakpoint(uint32 address, bool forceRestore)
-{
-	auto bpItr = debugger_getFirstBP(address);
-	bool hasBP = false;
-	uint32 originalOpcodeValue;
-	while (bpItr)
-	{
-		if (bpItr->isExecuteBP())
-		{
-			if (bpItr->enabled && forceRestore == false)
-			{
-				// write TW instruction to memory
-				debugger_updateMemoryU32(address, DEBUGGER_BP_T_DEBUGGER_TW);
-				return;
-			}
-			else
-			{
-				originalOpcodeValue = bpItr->originalOpcodeValue;
-				hasBP = true;
-			}
-		}
-		bpItr = bpItr->next;
-	}
-	if (hasBP)
-	{
-		// restore instruction
-		debugger_updateMemoryU32(address, originalOpcodeValue);
-	}
-}
-
-void debugger_createCodeBreakpoint(uint32 address, uint8 bpType)
-{
-	// check if breakpoint already exists
-	auto existingBP = debugger_getFirstBP(address);
-	if (existingBP && debuggerBPChain_hasType(existingBP, bpType))
-		return; // breakpoint already exists
-	// get original opcode at address
-	uint32 originalOpcode = debugger_getAddressOriginalOpcode(address);
-	// init breakpoint object
-	DebuggerBreakpoint* bp = new DebuggerBreakpoint(address, originalOpcode, bpType, true);
-	debuggerBPChain_add(address, bp);
-	debugger_updateExecutionBreakpoint(address);
-}
-
 namespace coreinit
 {
 	std::vector<std::thread::native_handle_type>& OSGetSchedulerThreads();
 }
 
-void debugger_updateMemoryBreakpoint(DebuggerBreakpoint* bp)
-{
-	std::vector<std::thread::native_handle_type> schedulerThreadHandles = coreinit::OSGetSchedulerThreads();
+DebuggerDispatcher g_debuggerDispatcher;
 
-#if BOOST_OS_WINDOWS
-	s_debuggerState.activeMemoryBreakpoint = bp;
-	for (auto& hThreadNH : schedulerThreadHandles)
+namespace
+{
+	struct
 	{
-		HANDLE hThread = (HANDLE)hThreadNH;
-		CONTEXT ctx{};
-		ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-		SuspendThread(hThread);
-		GetThreadContext(hThread, &ctx);
-		if (s_debuggerState.activeMemoryBreakpoint)
+		bool breakOnEntry = false;
+		bool logOnlyMemoryBreakpoints = false;
+
+		std::recursive_mutex listMutex;
+		std::vector<DebuggerBreakpoint*> breakpoints; // first breakpoint of each address
+		std::vector<DebuggerPatch*> patches;
+		DebuggerBreakpoint* armedMemoryBreakpoint = nullptr; // at most one at a time
+
+		// the thread currently stopped in the debugger
+		std::mutex sessionMutex;
+		std::atomic_bool breakRequested{ false };
+		std::atomic_bool stopped{ false };
+		uint32 stoppedThread = 0;
+		PPCInterpreter_t* stoppedCPU = nullptr;
+		std::atomic<DebuggerStepCommand> pendingStep{ DebuggerStepCommand::None };
+	} s_dbg;
+
+	// ---- breakpoint chains ----
+
+	DebuggerBreakpoint* FindChainWithType(uint32 address, uint8 bpType)
+	{
+		for (DebuggerBreakpoint* bp = debugger_getFirstBP(address); bp; bp = bp->next)
 		{
-			ctx.Dr0 = (DWORD64)memory_getPointerFromVirtualOffset(bp->address);
-			ctx.Dr1 = (DWORD64)memory_getPointerFromVirtualOffset(bp->address);
-			// breakpoint 0
-			SetBits(ctx.Dr7, 0, 1, 1);  // breakpoint #0 enabled: true
-			SetBits(ctx.Dr7, 16, 2, 1); // breakpoint #0 condition: 1 (write)
-			SetBits(ctx.Dr7, 18, 2, 3); // breakpoint #0 length: 3 (4 bytes)
-			// breakpoint 1
-			SetBits(ctx.Dr7, 2, 1, 1);  // breakpoint #1 enabled: true
-			SetBits(ctx.Dr7, 20, 2, 3); // breakpoint #1 condition: 3 (read & write)
-			SetBits(ctx.Dr7, 22, 2, 3); // breakpoint #1 length: 3 (4 bytes)
+			if (bp->bpType == bpType)
+				return bp;
 		}
-		else
-		{
-			// breakpoint 0
-			SetBits(ctx.Dr7, 0, 1, 0);  // breakpoint #0 enabled: false
-			SetBits(ctx.Dr7, 16, 2, 0); // breakpoint #0 condition: 1 (write)
-			SetBits(ctx.Dr7, 18, 2, 0); // breakpoint #0 length: 3 (4 bytes)
-			// breakpoint 1
-			SetBits(ctx.Dr7, 2, 1, 0);  // breakpoint #1 enabled: false
-			SetBits(ctx.Dr7, 20, 2, 0); // breakpoint #1 condition: 3 (read & write)
-			SetBits(ctx.Dr7, 22, 2, 0); // breakpoint #1 length: 3 (4 bytes)
-		}
-		SetThreadContext(hThread, &ctx);
-		ResumeThread(hThread);
+		return nullptr;
 	}
-	#else
-	cemuLog_log(LogType::Force, "Debugger breakpoints are not supported");
-	#endif
+
+	bool ChainContainsType(DebuggerBreakpoint* chain, uint8 bpType)
+	{
+		for (; chain; chain = chain->next)
+		{
+			if (chain->bpType == bpType)
+				return true;
+		}
+		return false;
+	}
+
+	void AppendToChain(DebuggerBreakpoint* bp)
+	{
+		bp->next = nullptr;
+		DebuggerBreakpoint* tail = debugger_getFirstBP(bp->address);
+		if (!tail)
+		{
+			s_dbg.breakpoints.push_back(bp);
+			return;
+		}
+		while (tail->next)
+			tail = tail->next;
+		tail->next = bp;
+	}
+
+	// the instruction at address as the game sees it (ignoring our traps)
+	uint32 OriginalInstruction(uint32 address)
+	{
+		for (DebuggerBreakpoint* bp = debugger_getFirstBP(address); bp; bp = bp->next)
+		{
+			if (bp->isExecuteBP())
+				return bp->originalOpcodeValue;
+		}
+		return memory_readU32(address);
+	}
+
+	void WriteCodeWord(uint32 address, uint32 value)
+	{
+		bool changed = memory_readU32(address) != value;
+		memory_writeU32(address, value);
+		if (changed)
+			PPCRecompiler_invalidateRange(address, address + 4);
+	}
+
+	// Puts a trap at address while any execute breakpoint there is enabled,
+	// otherwise puts the original instruction back. restoreOnly forces the
+	// original instruction (used to step over a breakpoint).
+	void SyncTrapInstruction(uint32 address, bool restoreOnly = false)
+	{
+		bool anyExecute = false;
+		bool anyEnabled = false;
+		uint32 original = 0;
+		for (DebuggerBreakpoint* bp = debugger_getFirstBP(address); bp; bp = bp->next)
+		{
+			if (!bp->isExecuteBP())
+				continue;
+			anyExecute = true;
+			anyEnabled |= bp->enabled;
+			original = bp->originalOpcodeValue;
+		}
+		if (!anyExecute)
+			return;
+		if (anyEnabled && !restoreOnly)
+			WriteCodeWord(address, DEBUGGER_BP_T_DEBUGGER_TW);
+		else
+			WriteCodeWord(address, original);
+	}
+
+	// ---- memory breakpoints (host debug registers) ----
+
+	void ArmMemoryBreakpoint(DebuggerBreakpoint* bp)
+	{
+		std::vector<std::thread::native_handle_type> threads = coreinit::OSGetSchedulerThreads();
+#if BOOST_OS_WINDOWS
+		s_dbg.armedMemoryBreakpoint = bp;
+		for (auto& nativeHandle : threads)
+		{
+			HANDLE thread = (HANDLE)nativeHandle;
+			CONTEXT ctx{};
+			ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+			SuspendThread(thread);
+			GetThreadContext(thread, &ctx);
+			// DR0 watches writes, DR1 reads and writes, both on the same 4 bytes
+			const uint32 enable = bp ? 1 : 0;
+			const uint32 length4 = bp ? 3 : 0;
+			if (bp)
+			{
+				ctx.Dr0 = (DWORD64)memory_getPointerFromVirtualOffset(bp->address);
+				ctx.Dr1 = (DWORD64)memory_getPointerFromVirtualOffset(bp->address);
+			}
+			SetBits(ctx.Dr7, 0, 1, enable);
+			SetBits(ctx.Dr7, 16, 2, bp ? 1 : 0); // DR0: break on write
+			SetBits(ctx.Dr7, 18, 2, length4);
+			SetBits(ctx.Dr7, 2, 1, enable);
+			SetBits(ctx.Dr7, 20, 2, bp ? 3 : 0); // DR1: break on read or write
+			SetBits(ctx.Dr7, 22, 2, length4);
+			SetThreadContext(thread, &ctx);
+			ResumeThread(thread);
+		}
+#else
+		cemuLog_log(LogType::Force, "Debugger breakpoints are not supported");
+#endif
+	}
+
+	// ---- stopping ----
+
+	bool IsCallInstruction(MPTR address)
+	{
+		PPCDisassembledInstruction instr = { 0 };
+		ppcAssembler_disassemble(address, OriginalInstruction(address), &instr);
+		return instr.ppcAsmCode == PPCASM_OP_BL || instr.ppcAsmCode == PPCASM_OP_BLA || instr.ppcAsmCode == PPCASM_OP_BCTRL;
+	}
+
+	// expands {rN} and {fN} in a logging breakpoint comment
+	void ExpandRegisterPlaceholders(std::string& text, std::string_view prefix, const std::function<std::string(int)>& format)
+	{
+		size_t pos = 0;
+		while ((pos = text.find(prefix, pos)) != std::string::npos)
+		{
+			size_t close = text.find('}', pos);
+			if (close == std::string::npos)
+				return;
+			std::string_view number = std::string_view(text).substr(pos + prefix.size(), close - pos - prefix.size());
+			int reg = -1;
+			try
+			{
+				reg = ConvertString<int>(number);
+			}
+			catch (...)
+			{
+				reg = -1;
+			}
+			if (reg < 0 || reg >= 32)
+			{
+				pos = close + 1;
+				continue;
+			}
+			std::string value = format(reg);
+			text.replace(pos, close - pos + 1, value);
+			pos += value.size();
+		}
+	}
+
+	void LogBreakpointHit(PPCInterpreter_t* cpu, DebuggerBreakpoint* bp)
+	{
+		std::string message = bp->comment.empty() ? fmt::format("Breakpoint at 0x{:08X} (no comment)", bp->address) : boost::nowide::narrow(bp->comment);
+		ExpandRegisterPlaceholders(message, "{r", [cpu](int reg) { return fmt::format("0x{:08X}", cpu->gpr[reg]); });
+		ExpandRegisterPlaceholders(message, "{f", [cpu](int reg) { return fmt::format("{}", cpu->fpr[reg].fpr); });
+		uint32 thread = MEMPTR<OSThread_t>(coreinit::OSGetCurrentThread()).GetMPTR();
+		cemuLog_log(LogType::Force, "[Debugger] Breakpoint '{}' was executed! Thread: {:08x} LR: 0x{:08x}", message, thread, cpu->spr.LR);
+		if (cemuLog_advancedPPCLoggingEnabled())
+			DebugLogStackTrace(coreinit::OSGetCurrentThread(), cpu->gpr[1]);
+	}
+
+	// runs the instruction under the trap at the current IP
+	void ExecuteOverTrap(PPCInterpreter_t* cpu)
+	{
+		std::unique_lock lock(s_dbg.listMutex);
+		PPCRecompiler_Enable();
+		MPTR address = cpu->instructionPointer;
+		SyncTrapInstruction(address, true);
+		PPCInterpreterSlim_executeInstruction(cpu);
+		SyncTrapInstruction(address);
+		PPCRecompiler_Disable();
+	}
+
+	// blocks the current thread until the UI resumes it, returns the step request
+	DebuggerStepCommand WaitForUserCommand(PPCInterpreter_t* cpu)
+	{
+		DebuggerStepCommand command = DebuggerStepCommand::Run;
+		if (DebuggerBreakpoint* oneShot = FindChainWithType(cpu->instructionPointer, DEBUGGER_BP_T_ONE_SHOT))
+			debugger_deleteBreakpoint(oneShot->id);
+		g_debuggerDispatcher.NotifyDebugBreakpointHit();
+		g_debuggerDispatcher.UpdateViewThreadsafe();
+		while (s_dbg.stopped)
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+			command = s_dbg.pendingStep.exchange(DebuggerStepCommand::None);
+			if (command != DebuggerStepCommand::None)
+				break;
+			if (!coreinit::OSIsSchedulerActive())
+			{
+				command = DebuggerStepCommand::Run; // emulation is shutting down
+				break;
+			}
+		}
+		// stepping over anything but a call is the same as stepping into it
+		if (command == DebuggerStepCommand::StepOver && !IsCallInstruction(cpu->instructionPointer))
+			command = DebuggerStepCommand::StepInto;
+		g_debuggerDispatcher.UpdateViewThreadsafe();
+		g_debuggerDispatcher.NotifyRun();
+		return command;
+	}
 }
 
-void debugger_handleSingleStepException(uint64 dr6)
+// ---- breakpoint list ----
+
+std::vector<DebuggerBreakpoint*>& debugger_lockBreakpoints()
 {
-	bool triggeredDR0 = GetBits(dr6, 0, 1); // write
-	bool triggeredDR1 = GetBits(dr6, 1, 1); // read and write
-	bool catchBP = false;
-	if (triggeredDR0 && triggeredDR1)
+	s_dbg.listMutex.lock();
+	return s_dbg.breakpoints;
+}
+
+void debugger_unlockBreakpoints()
+{
+	s_dbg.listMutex.unlock();
+}
+
+DebuggerBreakpoint* debugger_getFirstBP(uint32 address)
+{
+	auto it = std::find_if(s_dbg.breakpoints.begin(), s_dbg.breakpoints.end(), [address](DebuggerBreakpoint* bp) { return bp->address == address; });
+	return it != s_dbg.breakpoints.end() ? *it : nullptr;
+}
+
+DebuggerBreakpoint* debugger_getBreakpointById(BreakpointId bpId)
+{
+	for (DebuggerBreakpoint* chain : s_dbg.breakpoints)
 	{
-		// write (and read) access
-		if (s_debuggerState.activeMemoryBreakpoint && s_debuggerState.activeMemoryBreakpoint->bpType == DEBUGGER_BP_T_MEMORY_WRITE)
-			catchBP = true;
-	}
-	else
-	{
-		// read access
-		if (s_debuggerState.activeMemoryBreakpoint && s_debuggerState.activeMemoryBreakpoint->bpType == DEBUGGER_BP_T_MEMORY_READ)
-			catchBP = true;
-	}
-	if (catchBP)
-	{
-		PPCInterpreter_t* hCPU = PPCInterpreter_getCurrentInstance();
-		if (s_debuggerState.logOnlyMemoryBreakpoints)
+		for (DebuggerBreakpoint* bp = chain; bp; bp = bp->next)
 		{
-			float memValueF = memory_readFloat(s_debuggerState.activeMemoryBreakpoint->address);
-			uint32 memValue = memory_readU32(s_debuggerState.activeMemoryBreakpoint->address);
-			cemuLog_log(LogType::Force, "[Debugger] 0x{:08X} was read/written! New Value: 0x{:08X} (float {}) IP: {:08X} LR: {:08X}",
-				s_debuggerState.activeMemoryBreakpoint->address,
-				memValue,
-				memValueF,
-				hCPU->instructionPointer,
-				hCPU->spr.LR
-			);
-			if (cemuLog_advancedPPCLoggingEnabled())
-				DebugLogStackTrace(coreinit::OSGetCurrentThread(), hCPU->gpr[1]);
-		}
-		else
-		{
-			debugger_createCodeBreakpoint(hCPU->instructionPointer + 4, DEBUGGER_BP_T_ONE_SHOT);
+			if (bp->id == bpId)
+				return bp;
 		}
 	}
+	return nullptr;
+}
+
+void debugger_createCodeBreakpoint(uint32 address, uint8 bpType)
+{
+	if (ChainContainsType(debugger_getFirstBP(address), bpType))
+		return;
+	AppendToChain(new DebuggerBreakpoint(address, OriginalInstruction(address), bpType, true));
+	SyncTrapInstruction(address);
 }
 
 void debugger_createMemoryBreakpoint(uint32 address, bool onRead, bool onWrite)
 {
-	// init breakpoint object
-	uint8 bpType;
-	if (onRead && onWrite)
-		assert_dbg();
-	else if (onRead)
-		bpType = DEBUGGER_BP_T_MEMORY_READ;
-	else
-		bpType = DEBUGGER_BP_T_MEMORY_WRITE;
-
+	// read and write at once is not supported, such a request becomes a write breakpoint
+	cemu_assert_debug(!(onRead && onWrite));
+	uint8 bpType = (onRead && !onWrite) ? DEBUGGER_BP_T_MEMORY_READ : DEBUGGER_BP_T_MEMORY_WRITE;
 	DebuggerBreakpoint* bp = new DebuggerBreakpoint(address, 0xFFFFFFFF, bpType, true);
-	debuggerBPChain_add(address, bp);
-	// disable any already existing memory breakpoint
-	if (s_debuggerState.activeMemoryBreakpoint)
+	AppendToChain(bp);
+	if (s_dbg.armedMemoryBreakpoint)
 	{
-		s_debuggerState.activeMemoryBreakpoint->enabled = false;
-		s_debuggerState.activeMemoryBreakpoint = nullptr;
+		s_dbg.armedMemoryBreakpoint->enabled = false;
+		s_dbg.armedMemoryBreakpoint = nullptr;
 	}
-	// activate new breakpoint
-	debugger_updateMemoryBreakpoint(bp);
-}
-
-void debugger_handleEntryBreakpoint(uint32 address)
-{
-	if (!s_debuggerState.breakOnEntry)
-		return;
-
-	debugger_createCodeBreakpoint(address, DEBUGGER_BP_T_NORMAL);
+	ArmMemoryBreakpoint(bp);
 }
 
 void debugger_deleteBreakpoint(BreakpointId bpId)
 {
-	std::unique_lock _l(s_debuggerState.breakpointsMtx);
+	std::unique_lock lock(s_dbg.listMutex);
 	DebuggerBreakpoint* bp = debugger_getBreakpointById(bpId);
 	if (!bp)
 		return;
-	for (auto& it : s_debuggerState.breakpoints)
+	const uint32 address = bp->address;
+	DebuggerBreakpoint* head = debugger_getFirstBP(address);
+	if (head == bp)
 	{
-		if (it->address == bp->address)
-		{
-			// for execution breakpoints make sure the instruction is restored
-			if (it->isExecuteBP())
-			{
-				it->enabled = false;
-				debugger_updateExecutionBreakpoint(it->address);
-			}
-			// remove
-			if (it == bp)
-			{
-				// remove first in list
-				s_debuggerState.breakpoints.erase(std::remove(s_debuggerState.breakpoints.begin(), s_debuggerState.breakpoints.end(), bp), s_debuggerState.breakpoints.end());
-				DebuggerBreakpoint* nextBP = bp->next;
-				if (nextBP)
-					s_debuggerState.breakpoints.push_back(nextBP);
-			}
-			else
-			{
-				// remove from list
-				DebuggerBreakpoint* bpItr = it;
-				while (bpItr->next != bp)
-					bpItr = bpItr->next;
-				cemu_assert_debug(bpItr->next == bp);
-				bpItr->next = bp->next;
-			}
-			delete bp;
-			return;
-		}
+		// the rest of the chain (if any) moves to the end of the list
+		s_dbg.breakpoints.erase(std::remove(s_dbg.breakpoints.begin(), s_dbg.breakpoints.end(), bp), s_dbg.breakpoints.end());
+		if (bp->next)
+			s_dbg.breakpoints.push_back(bp->next);
 	}
+	else
+	{
+		DebuggerBreakpoint* prev = head;
+		while (prev->next != bp)
+			prev = prev->next;
+		prev->next = bp->next;
+	}
+	if (bp->isExecuteBP())
+	{
+		bool otherExecute = false;
+		for (DebuggerBreakpoint* other = debugger_getFirstBP(address); other; other = other->next)
+			otherExecute |= other->isExecuteBP();
+		if (otherExecute)
+			SyncTrapInstruction(address);
+		else
+			WriteCodeWord(address, bp->originalOpcodeValue); // last execute breakpoint here: restore the code
+	}
+	if (s_dbg.armedMemoryBreakpoint == bp)
+		ArmMemoryBreakpoint(nullptr);
+	delete bp;
 }
 
 void debugger_toggleExecuteBreakpoint(uint32 address)
 {
-	std::unique_lock _l(s_debuggerState.breakpointsMtx);
-	auto existingBP = debugger_getFirstBP(address, DEBUGGER_BP_T_NORMAL);
-	if (existingBP)
-	{
-		// delete existing breakpoint
-		debugger_deleteBreakpoint(existingBP->id);
-	}
+	std::unique_lock lock(s_dbg.listMutex);
+	if (DebuggerBreakpoint* bp = FindChainWithType(address, DEBUGGER_BP_T_NORMAL))
+		debugger_deleteBreakpoint(bp->id);
 	else
-	{
-		// create new execution breakpoint
 		debugger_createCodeBreakpoint(address, DEBUGGER_BP_T_NORMAL);
-	}
 }
 
 void debugger_toggleLoggingBreakpoint(uint32 address)
 {
-	std::unique_lock _l(s_debuggerState.breakpointsMtx);
-	auto existingBP = debugger_getFirstBP(address, DEBUGGER_BP_T_LOGGING);
-	if (existingBP)
-	{
-		// delete existing breakpoint
-		debugger_deleteBreakpoint(existingBP->id);
-	}
+	std::unique_lock lock(s_dbg.listMutex);
+	if (DebuggerBreakpoint* bp = FindChainWithType(address, DEBUGGER_BP_T_LOGGING))
+		debugger_deleteBreakpoint(bp->id);
 	else
-	{
-		// create new logging breakpoint
 		debugger_createCodeBreakpoint(address, DEBUGGER_BP_T_LOGGING);
-	}
-}
-
-bool debugger_isTrapped()
-{
-	return s_debuggerState.debugSession.isTrapped;
-}
-
-PPCInterpreter_t* debugger_lockDebugSession()
-{
-	s_debuggerState.debugSession.debugSessionMtx.lock();
-	if (!s_debuggerState.debugSession.isTrapped)
-	{
-		s_debuggerState.debugSession.debugSessionMtx.unlock();
-		return nullptr;
-	}
-	return s_debuggerState.debugSession.hCPU;
-}
-
-void debugger_unlockDebugSession(PPCInterpreter_t* hCPU)
-{
-	cemu_assert_debug(s_debuggerState.debugSession.isTrapped);
-	cemu_assert_debug(s_debuggerState.debugSession.hCPU == hCPU);
-	s_debuggerState.debugSession.debugSessionMtx.unlock();
-}
-
-PPCSnapshot debugger_getSnapshotFromSession(PPCInterpreter_t* hCPU)
-{
-	cemu_assert_debug(s_debuggerState.debugSession.isTrapped);
-	cemu_assert_debug(s_debuggerState.debugSession.hCPU == hCPU);
-	PPCSnapshot snapshot{};
-	memcpy(snapshot.gpr, hCPU->gpr, sizeof(uint32) * 32);
-	memcpy(snapshot.fpr, hCPU->fpr, sizeof(FPR_t) * 32);
-	snapshot.spr_lr = hCPU->spr.LR;
-	for (uint32 i = 0; i < 32; i++)
-		snapshot.cr[i] = hCPU->cr[i];
-	return snapshot;
-}
-
-void debugger_resume()
-{
-	s_debuggerState.debugSession.stepCommand = DebuggerStepCommand::Run;
-}
-
-void debugger_stepCommand(DebuggerStepCommand stepCommand)
-{
-	s_debuggerState.debugSession.stepCommand = stepCommand;
-}
-
-void debugger_requestBreak()
-{
-	s_debuggerState.debugSession.shouldBreak = true;
 }
 
 void debugger_toggleBreakpoint(uint32 address, bool state, DebuggerBreakpoint* bp)
 {
-	DebuggerBreakpoint* bpItr = debugger_getFirstBP(address);
-	while (bpItr)
+	DebuggerBreakpoint* itr = debugger_getFirstBP(address);
+	while (itr && itr != bp)
+		itr = itr->next;
+	if (!itr || bp->enabled == state)
+		return;
+	if (bp->bpType == DEBUGGER_BP_T_NORMAL || bp->bpType == DEBUGGER_BP_T_LOGGING)
 	{
-		if (bpItr == bp)
+		bp->enabled = state;
+		SyncTrapInstruction(address);
+		g_debuggerDispatcher.UpdateViewThreadsafe();
+	}
+	else if (bp->isMemBP())
+	{
+		// only one memory breakpoint can be active
+		for (DebuggerBreakpoint* chain : s_dbg.breakpoints)
 		{
-			if (bp->enabled == state)
-				return;
-			if (bpItr->bpType == DEBUGGER_BP_T_NORMAL || bpItr->bpType == DEBUGGER_BP_T_LOGGING)
+			for (DebuggerBreakpoint* other = chain; other; other = other->next)
 			{
-				bp->enabled = state;
-				debugger_updateExecutionBreakpoint(address);
-				g_debuggerDispatcher.UpdateViewThreadsafe();
+				if (other != bp && other->isMemBP())
+					other->enabled = false;
 			}
-			else if (bpItr->isMemBP())
-			{
-				// disable other memory breakpoints
-				for (auto& it : s_debuggerState.breakpoints)
-				{
-					DebuggerBreakpoint* bpItr2 = it;
-					while (bpItr2)
-					{
-						if (bpItr2->isMemBP() && bpItr2 != bp)
-						{
-							bpItr2->enabled = false;
-						}
-						bpItr2 = bpItr2->next;
-					}
-				}
-				bpItr->enabled = state;
-				if (state)
-					debugger_updateMemoryBreakpoint(bpItr);
-				else
-					debugger_updateMemoryBreakpoint(nullptr);
-				g_debuggerDispatcher.UpdateViewThreadsafe();
-			}
-			return;
 		}
-		bpItr = bpItr->next;
+		bp->enabled = state;
+		ArmMemoryBreakpoint(state ? bp : nullptr);
+		g_debuggerDispatcher.UpdateViewThreadsafe();
 	}
 }
 
+void debugger_handleEntryBreakpoint(uint32 address)
+{
+	if (s_dbg.breakOnEntry)
+		debugger_createCodeBreakpoint(address, DEBUGGER_BP_T_NORMAL);
+}
+
+// called by the exception handler when a debug register fired (Windows)
+void debugger_handleSingleStepException(uint64 dr6)
+{
+	DebuggerBreakpoint* bp = s_dbg.armedMemoryBreakpoint;
+	if (!bp)
+		return;
+	// DR0 only watches writes, so DR0+DR1 means a write and DR1 alone a read
+	const bool hitDR0 = (dr6 & 1) != 0;
+	const bool hitDR1 = (dr6 & 2) != 0;
+	const bool isWrite = hitDR0 && hitDR1;
+	if (bp->bpType != (isWrite ? DEBUGGER_BP_T_MEMORY_WRITE : DEBUGGER_BP_T_MEMORY_READ))
+		return;
+	PPCInterpreter_t* cpu = PPCInterpreter_getCurrentInstance();
+	if (!s_dbg.logOnlyMemoryBreakpoints)
+	{
+		// stop right after the accessing instruction
+		debugger_createCodeBreakpoint(cpu->instructionPointer + 4, DEBUGGER_BP_T_ONE_SHOT);
+		return;
+	}
+	cemuLog_log(LogType::Force, "[Debugger] 0x{:08X} was read/written! New Value: 0x{:08X} (float {}) IP: {:08X} LR: {:08X}",
+		bp->address, memory_readU32(bp->address), memory_readFloat(bp->address), cpu->instructionPointer, cpu->spr.LR);
+	if (cemuLog_advancedPPCLoggingEnabled())
+		DebugLogStackTrace(coreinit::OSGetCurrentThread(), cpu->gpr[1]);
+}
+
+// ---- patches ----
+
 void debugger_createPatch(uint32 address, std::span<uint8> patchData)
 {
+	cemu_assert_debug((address & 3) == 0);
+	cemu_assert_debug((patchData.size() & 3) == 0);
+	const uint32 wordCount = (uint32)(patchData.size() / 4);
+
 	DebuggerPatch* patch = new DebuggerPatch();
 	patch->address = address;
-	patch->length = patchData.size();
-	patch->data.resize(4);
-	patch->origData.resize(4);
-	memcpy(&patch->data.front(), patchData.data(), patchData.size());
-	memcpy(&patch->origData.front(), memory_getPointerFromVirtualOffset(address), patchData.size());
-	// get original data from breakpoints
-	if ((address & 3) != 0)
-		cemu_assert_debug(false);
-	for (sint32 i = 0; i < patchData.size() / 4; i++)
+	patch->length = (sint32)patchData.size();
+	patch->data.assign(patchData.begin(), patchData.end());
+	patch->origData.resize(patchData.size());
+	memcpy(patch->origData.data(), memory_getPointerFromVirtualOffset(address), patchData.size());
+	// words covered by a trap: the original instruction is kept in the breakpoint
+	for (uint32 i = 0; i < wordCount; i++)
 	{
-		DebuggerBreakpoint* bpItr = debugger_getFirstBP(address);
-		while (bpItr)
+		for (DebuggerBreakpoint* bp = debugger_getFirstBP(address + i * 4); bp; bp = bp->next)
 		{
-			if (bpItr->isExecuteBP())
+			if (bp->isExecuteBP())
 			{
-				*(uint32*)(&patch->origData.front() + i * 4) = _swapEndianU32(bpItr->originalOpcodeValue);
+				uint32be original = bp->originalOpcodeValue;
+				memcpy(patch->origData.data() + i * 4, &original, 4);
 			}
-			bpItr = bpItr->next;
 		}
 	}
-	// merge with existing patches if the ranges touch
-	for(sint32 i=0; i<s_debuggerState.patches.size(); i++)
+
+	// merge with patches that overlap or touch; the oldest original bytes win
+	for (size_t i = 0; i < s_dbg.patches.size();)
 	{
-		auto& patchItr = s_debuggerState.patches[i];
-		if (address + patchData.size() >= patchItr->address && address <= patchItr->address + patchItr->length)
+		DebuggerPatch* other = s_dbg.patches[i];
+		const uint32 begin = patch->address, end = patch->address + patch->length;
+		const uint32 otherBegin = other->address, otherEnd = other->address + other->length;
+		if (end < otherBegin || begin > otherEnd)
 		{
-			uint32 newAddress = std::min(patch->address, patchItr->address);
-			uint32 newEndAddress = std::max(patch->address + patch->length, patchItr->address + patchItr->length);
-			uint32 newLength = newEndAddress - newAddress;
-
-			DebuggerPatch* newPatch = new DebuggerPatch();
-			newPatch->address = newAddress;
-			newPatch->length = newLength;
-			newPatch->data.resize(newLength);
-			newPatch->origData.resize(newLength);
-			memcpy(&newPatch->data.front() + (address - newAddress), &patch->data.front(), patch->length);
-			memcpy(&newPatch->data.front() + (patchItr->address - newAddress), &patchItr->data.front(), patchItr->length);
-
-			memcpy(&newPatch->origData.front() + (address - newAddress), &patch->origData.front(), patch->length);
-			memcpy(&newPatch->origData.front() + (patchItr->address - newAddress), &patchItr->origData.front(), patchItr->length);
-
-			delete patch;
-			patch = newPatch;
-			delete patchItr;
-			// remove currently iterated patch
-			s_debuggerState.patches.erase(s_debuggerState.patches.begin()+i);
-			i--;
+			i++;
+			continue;
 		}
+		const uint32 mergedBegin = std::min(begin, otherBegin);
+		const uint32 mergedEnd = std::max(end, otherEnd);
+		DebuggerPatch* merged = new DebuggerPatch();
+		merged->address = mergedBegin;
+		merged->length = (sint32)(mergedEnd - mergedBegin);
+		merged->data.resize(merged->length);
+		merged->origData.resize(merged->length);
+		memcpy(merged->data.data() + (otherBegin - mergedBegin), other->data.data(), other->length);
+		memcpy(merged->data.data() + (begin - mergedBegin), patch->data.data(), patch->length);
+		memcpy(merged->origData.data() + (begin - mergedBegin), patch->origData.data(), patch->length);
+		memcpy(merged->origData.data() + (otherBegin - mergedBegin), other->origData.data(), other->length);
+		delete patch;
+		delete other;
+		patch = merged;
+		s_dbg.patches.erase(s_dbg.patches.begin() + i);
 	}
-	s_debuggerState.patches.push_back(patch);
-	// apply patch (if breakpoints exist then update those instead of actual data)
-	if ((address & 3) != 0)
-		cemu_assert_debug(false);
-	if ((patchData.size() & 3) != 0)
-		cemu_assert_debug(false);
-	for (sint32 i = 0; i < patchData.size() / 4; i++)
+	s_dbg.patches.push_back(patch);
+
+	// write the new code; under an enabled trap only the saved instruction changes
+	for (uint32 i = 0; i < wordCount; i++)
 	{
-		DebuggerBreakpoint* bpItr = debugger_getFirstBP(address);
-		bool hasActiveExecuteBP = false;
-		while (bpItr)
+		const uint32 wordAddress = address + i * 4;
+		bool trapped = false;
+		for (DebuggerBreakpoint* bp = debugger_getFirstBP(wordAddress); bp; bp = bp->next)
 		{
-			if (bpItr->isExecuteBP())
-			{
-				bpItr->originalOpcodeValue = *(uint32be*)(patchData.data() + i * 4);
-				if (bpItr->enabled)
-					hasActiveExecuteBP = true;
-			}
-			bpItr = bpItr->next;
+			if (!bp->isExecuteBP())
+				continue;
+			bp->originalOpcodeValue = *(uint32be*)(patchData.data() + i * 4);
+			trapped |= bp->enabled;
 		}
-		if (hasActiveExecuteBP == false)
+		if (!trapped)
 		{
-			memcpy(memory_getPointerFromVirtualOffset(address + i * 4), patchData.data() + i * 4, 4);
-			PPCRecompiler_invalidateRange(address, address + 4);
+			memcpy(memory_getPointerFromVirtualOffset(wordAddress), patchData.data() + i * 4, 4);
+			PPCRecompiler_invalidateRange(wordAddress, wordAddress + 4);
 		}
 	}
 }
 
 bool debugger_hasPatch(uint32 address)
 {
-	for (auto& patch : s_debuggerState.patches)
-	{
-		if (address + 4 > patch->address && address < patch->address + patch->length)
-			return true;
-	}
-	return false;
+	return std::any_of(s_dbg.patches.begin(), s_dbg.patches.end(), [address](DebuggerPatch* patch) {
+		return address + 4 > patch->address && address < patch->address + patch->length;
+	});
 }
 
 void debugger_removePatch(uint32 address)
 {
-	for (sint32 i = 0; i < s_debuggerState.patches.size(); i++)
-	{
-		auto& patch = s_debuggerState.patches[i];
-		if (address < patch->address || address >= (patch->address + patch->length))
-			continue;
-		MPTR startAddress = patch->address;
-		MPTR endAddress = patch->address + patch->length;
-		// remove any breakpoints overlapping with the patch
-		for (auto& bp : s_debuggerState.breakpoints)
-		{
-			if (bp->address + 4 > startAddress && bp->address < endAddress)
-			{
-				bp->enabled = false;
-				debugger_updateExecutionBreakpoint(bp->address);
-			}
-		}
-		// restore original data
-		memcpy(MEMPTR<void>(startAddress).GetPtr(), patch->origData.data(), patch->length);
-		PPCRecompiler_invalidateRange(startAddress, endAddress);
-		// remove patch
-		delete patch;
-		s_debuggerState.patches.erase(s_debuggerState.patches.begin() + i);
+	auto it = std::find_if(s_dbg.patches.begin(), s_dbg.patches.end(), [address](DebuggerPatch* patch) {
+		return address >= patch->address && address < patch->address + patch->length;
+	});
+	if (it == s_dbg.patches.end())
 		return;
-	}
-}
-
-bool debugger_CanStepOverInstruction(MPTR address)
-{
-	PPCDisassembledInstruction disasmInstr = { 0 };
-	ppcAssembler_disassemble(address, debugger_getAddressOriginalOpcode(address), &disasmInstr);
-	return disasmInstr.ppcAsmCode == PPCASM_OP_BL || disasmInstr.ppcAsmCode == PPCASM_OP_BLA || disasmInstr.ppcAsmCode == PPCASM_OP_BCTRL;
-}
-
-void debugger_handleLoggingBreakpoint(PPCInterpreter_t* hCPU, DebuggerBreakpoint* bp)
-{
-	std::string comment = !bp->comment.empty() ? boost::nowide::narrow(bp->comment) : fmt::format("Breakpoint at 0x{:08X} (no comment)", bp->address);
-
-	auto replacePlaceholders = [&](const std::string& prefix, const auto& formatFunc)
+	DebuggerPatch* patch = *it;
+	const MPTR begin = patch->address;
+	const MPTR end = patch->address + patch->length;
+	// breakpoints inside the patched range are switched off
+	for (DebuggerBreakpoint* bp : s_dbg.breakpoints)
 	{
-		size_t pos = 0;
-		while ((pos = comment.find(prefix, pos)) != std::string::npos)
+		if (bp->address + 4 > begin && bp->address < end)
 		{
-			size_t endPos = comment.find('}', pos);
-			if (endPos == std::string::npos)
-				break;
-
-			try
-			{
-				if (int regNum = ConvertString<int>(comment.substr(pos + prefix.length(), endPos - pos - prefix.length())); regNum >= 0 && regNum < 32)
-				{
-					std::string replacement = formatFunc(regNum);
-					comment.replace(pos, endPos - pos + 1, replacement);
-					pos += replacement.length();
-				}
-				else
-				{
-					pos = endPos + 1;
-				}
-			}
-			catch (...)
-			{
-				pos = endPos + 1;
-			}
+			bp->enabled = false;
+			SyncTrapInstruction(bp->address);
 		}
-	};
-
-	// Replace integer register placeholders {rX}
-	replacePlaceholders("{r", [&](int regNum) {
-		return fmt::format("0x{:08X}", hCPU->gpr[regNum]);
-	});
-
-	// Replace floating point register placeholders {fX}
-	replacePlaceholders("{f", [&](int regNum) {
-		return fmt::format("{}", hCPU->fpr[regNum].fpr);
-	});
-
-	std::string logName = "Breakpoint '" + comment + "'";
-	std::string logContext = fmt::format("Thread: {:08x} LR: 0x{:08x}", MEMPTR<OSThread_t>(coreinit::OSGetCurrentThread()).GetMPTR(), hCPU->spr.LR, cemuLog_advancedPPCLoggingEnabled() ? " Stack Trace:" : "");
-	cemuLog_log(LogType::Force, "[Debugger] {} was executed! {}", logName, logContext);
-	if (cemuLog_advancedPPCLoggingEnabled())
-		DebugLogStackTrace(coreinit::OSGetCurrentThread(), hCPU->gpr[1]);
+	}
+	memcpy(MEMPTR<void>(begin).GetPtr(), patch->origData.data(), patch->length);
+	PPCRecompiler_invalidateRange(begin, end);
+	delete patch;
+	s_dbg.patches.erase(it);
 }
 
-// used to escape the breakpoint on the current instruction
-void debugger_stepOverCurrentBreakpoint(PPCInterpreter_t* hCPU)
+// ---- debug session ----
+
+bool debugger_isTrapped()
 {
-	std::unique_lock _l(s_debuggerState.breakpointsMtx);
-	PPCRecompiler_Enable();
-	MPTR bpAddress = hCPU->instructionPointer;
-	debugger_updateExecutionBreakpoint(bpAddress, true);
-	PPCInterpreterSlim_executeInstruction(hCPU);
-	debugger_updateExecutionBreakpoint(bpAddress);
-	PPCRecompiler_Disable();
+	return s_dbg.stopped;
 }
 
+PPCInterpreter_t* debugger_lockDebugSession()
+{
+	s_dbg.sessionMutex.lock();
+	if (s_dbg.stopped)
+		return s_dbg.stoppedCPU; // stays locked until debugger_unlockDebugSession
+	s_dbg.sessionMutex.unlock();
+	return nullptr;
+}
+
+void debugger_unlockDebugSession(PPCInterpreter_t* hCPU)
+{
+	cemu_assert_debug(s_dbg.stopped && s_dbg.stoppedCPU == hCPU);
+	s_dbg.sessionMutex.unlock();
+}
+
+PPCSnapshot debugger_getSnapshotFromSession(PPCInterpreter_t* hCPU)
+{
+	cemu_assert_debug(s_dbg.stopped && s_dbg.stoppedCPU == hCPU);
+	PPCSnapshot snapshot{};
+	std::copy(std::begin(hCPU->gpr), std::end(hCPU->gpr), snapshot.gpr);
+	std::copy(std::begin(hCPU->fpr), std::end(hCPU->fpr), snapshot.fpr);
+	std::copy(std::begin(hCPU->cr), std::end(hCPU->cr), snapshot.cr);
+	snapshot.spr_lr = hCPU->spr.LR;
+	return snapshot;
+}
+
+void debugger_stepCommand(DebuggerStepCommand stepCommand)
+{
+	s_dbg.pendingStep = stepCommand;
+}
+
+void debugger_requestBreak()
+{
+	s_dbg.breakRequested = true;
+}
+
+// entered from the interpreter when it executes one of our traps
 void debugger_enterTW(PPCInterpreter_t* hCPU, bool isSingleStep)
 {
-	s_debuggerState.debugSession.debugSessionMtx.lock();
-	while ( true )
+	// only one thread can be stopped at a time
+	for (;;)
 	{
-		bool trappedExpectedVal = false;
-		if ( s_debuggerState.debugSession.isTrapped.compare_exchange_strong(trappedExpectedVal, true) )
+		std::unique_lock lock(s_dbg.sessionMutex);
+		bool expected = false;
+		if (s_dbg.stopped.compare_exchange_strong(expected, true))
+		{
+			s_dbg.stoppedThread = MEMPTR<OSThread_t>(coreinit::OSGetCurrentThread()).GetMPTR();
+			s_dbg.stoppedCPU = hCPU;
+			s_dbg.pendingStep = DebuggerStepCommand::None;
 			break;
-		s_debuggerState.debugSession.debugSessionMtx.unlock();
+		}
+		lock.unlock();
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
-		s_debuggerState.debugSession.debugSessionMtx.lock();
 	}
-	// init debug state
-	s_debuggerState.debugSession.debuggedThreadMPTR = MEMPTR<OSThread_t>(coreinit::OSGetCurrentThread()).GetMPTR();
-	s_debuggerState.debugSession.hCPU = hCPU;
-	s_debuggerState.debugSession.stepCommand = DebuggerStepCommand::None;
-	s_debuggerState.debugSession.debugSessionMtx.unlock();
-	// handle logging points
-	DebuggerBreakpoint* bp = debugger_getFirstBP(hCPU->instructionPointer);
-	bool shouldBreak = debuggerBPChain_hasType(bp, DEBUGGER_BP_T_NORMAL) || debuggerBPChain_hasType(bp, DEBUGGER_BP_T_ONE_SHOT);
-	while (bp)
+
+	DebuggerBreakpoint* chain = debugger_getFirstBP(hCPU->instructionPointer);
+	const bool stops = ChainContainsType(chain, DEBUGGER_BP_T_NORMAL) || ChainContainsType(chain, DEBUGGER_BP_T_ONE_SHOT);
+	for (DebuggerBreakpoint* bp = chain; bp; bp = bp->next)
 	{
 		if (bp->bpType == DEBUGGER_BP_T_LOGGING && bp->enabled)
-			debugger_handleLoggingBreakpoint(hCPU, bp);
-		bp = bp->next;
+			LogBreakpointHit(hCPU, bp);
 	}
-	// for logging breakpoints skip the waiting and notifying of the UI
-	DebuggerStepCommand stepCommand = DebuggerStepCommand::Run;
-	if (shouldBreak || isSingleStep)
+
+	DebuggerStepCommand command = DebuggerStepCommand::Run;
+	if (stops || isSingleStep)
+		command = WaitForUserCommand(hCPU);
+
 	{
-		// remove one-shot breakpoint if it exists
-		DebuggerBreakpoint* singleshotBP = debugger_getFirstBP(hCPU->instructionPointer, DEBUGGER_BP_T_ONE_SHOT);
-		if (singleshotBP)
-			debugger_deleteBreakpoint(singleshotBP->id);
-		g_debuggerDispatcher.NotifyDebugBreakpointHit();
-		g_debuggerDispatcher.UpdateViewThreadsafe();
-		while (s_debuggerState.debugSession.isTrapped)
-		{
-			std::this_thread::sleep_for(std::chrono::milliseconds(1));
-			// check for step commands from UI
-			stepCommand = s_debuggerState.debugSession.stepCommand.exchange(DebuggerStepCommand::None);
-			if (stepCommand != DebuggerStepCommand::None)
-				break;
-			if (!coreinit::OSIsSchedulerActive())
-			{
-				// quit if scheduler is being shutdown
-				stepCommand = DebuggerStepCommand::Run;
-				break;
-			}
-		}
-		if (stepCommand == DebuggerStepCommand::StepOver && !debugger_CanStepOverInstruction(hCPU->instructionPointer))
-		{
-			stepCommand = DebuggerStepCommand::StepInto;
-		}
-		g_debuggerDispatcher.UpdateViewThreadsafe();
-		g_debuggerDispatcher.NotifyRun();
+		std::unique_lock lock(s_dbg.sessionMutex);
+		s_dbg.stoppedCPU = nullptr;
+		s_dbg.stopped = false;
 	}
-	s_debuggerState.debugSession.debugSessionMtx.lock();
-	s_debuggerState.debugSession.hCPU = nullptr;
-	s_debuggerState.debugSession.isTrapped = false;
-	s_debuggerState.debugSession.debugSessionMtx.unlock();
-	// leave the breakpointed instruction
-	MPTR initialIP = hCPU->instructionPointer;
-	debugger_stepOverCurrentBreakpoint(hCPU);
 
-	// todo - if the current instruction is a HLE gateway, then we need to handle it with special logic (instead of generic debugger_stepOverCurrentBreakpoint):
-	// First grab the HLE index from the original opcode and look up the function pointer
-	// And then call the HLE func (must happen last, since it may not return immediately or ever)
-
-	if (stepCommand == DebuggerStepCommand::StepInto)
-	{
+	const MPTR trapAddress = hCPU->instructionPointer;
+	ExecuteOverTrap(hCPU);
+	if (command == DebuggerStepCommand::StepInto)
 		debugger_enterTW(hCPU, true);
-	}
-	else if (stepCommand == DebuggerStepCommand::StepOver)
-	{
-		debugger_createCodeBreakpoint(initialIP + 4, DEBUGGER_BP_T_ONE_SHOT);
-	}
+	else if (command == DebuggerStepCommand::StepOver)
+		debugger_createCodeBreakpoint(trapAddress + 4, DEBUGGER_BP_T_ONE_SHOT);
 }
 
+// module base addresses and (when stopped) GPRs for address expressions
 void debugger_addParserSymbols(class ExpressionParser& ep)
 {
-	const auto moduleList = RPLLoader_GetModuleList();
-	std::vector<double> moduleTmp(moduleList.size());
-	for (sint32 i = 0; i < moduleList.size(); i++)
+	for (RPLModule* module : RPLLoader_GetModuleList())
 	{
-		const auto module = moduleList[i];
 		if (module)
-		{
-			moduleTmp[i] = (double)module->regionMappingBase_text.GetMPTR();
-			ep.AddConstant(module->moduleName, moduleTmp[i]);
-		}
+			ep.AddConstant(module->moduleName, (double)module->regionMappingBase_text.GetMPTR());
 	}
-	PPCInterpreter_t* hCPU = debugger_lockDebugSession();
-	if (hCPU)
+	if (PPCInterpreter_t* cpu = debugger_lockDebugSession())
 	{
-		PPCSnapshot snapshot = debugger_getSnapshotFromSession(hCPU);
+		PPCSnapshot snapshot = debugger_getSnapshotFromSession(cpu);
 		for (sint32 i = 0; i < 32; i++)
 			ep.AddConstant(fmt::format("r{}", i), snapshot.gpr[i]);
-		debugger_unlockDebugSession(hCPU);
+		debugger_unlockDebugSession(cpu);
 	}
 }
 
@@ -773,22 +639,24 @@ void debugger_jumpToAddressInDisasm(MPTR address)
 	g_debuggerDispatcher.MoveToAddressInDisassembly(address);
 }
 
+// ---- options ----
+
 void debugger_setOptionBreakOnEntry(bool isEnabled)
 {
-	s_debuggerState.breakOnEntry = isEnabled;
-}
-
-void debugger_setOptionLogOnlyMemoryBreakpoints(bool isEnabled)
-{
-	s_debuggerState.logOnlyMemoryBreakpoints = isEnabled;
+	s_dbg.breakOnEntry = isEnabled;
 }
 
 bool debugger_getOptionBreakOnEntry()
 {
-	return s_debuggerState.breakOnEntry;
+	return s_dbg.breakOnEntry;
+}
+
+void debugger_setOptionLogOnlyMemoryBreakpoints(bool isEnabled)
+{
+	s_dbg.logOnlyMemoryBreakpoints = isEnabled;
 }
 
 bool debugger_getOptionLogOnlyMemoryBreakpoints()
 {
-	return s_debuggerState.logOnlyMemoryBreakpoints;
+	return s_dbg.logOnlyMemoryBreakpoints;
 }
