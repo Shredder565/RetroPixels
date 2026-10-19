@@ -54,12 +54,12 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 89839 | 29.4% |
-| Cemu, untouched | 159309 | 52.2% |
+| Original (RetroPixels) | 95815 | 31.6% |
+| Cemu, untouched | 150949 | 49.8% |
 | Cemu, with PixelU changes | 14833 | 4.9% |
 | PixelU-added files (MPL-2.0 header) | 1940 | 0.6% |
-| Third-party | 39404 | 12.9% |
-| **All** | **305325** | 100% |
+| Third-party | 39404 | 13.0% |
+| **All** | **302941** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -81,7 +81,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/HW/Latte/Core | 20296 | 0 | Cemu + PixelU change |
 | Cafe/HW/Latte/ISA | 2618 | 2618 | original |
 | Cafe/HW/Latte/LatteAddrLib | 1242 | 1242 | original |
-| Cafe/HW/Latte/LegacyShaderDecompiler | 13807 | 0 | Cemu |
+| Cafe/HW/Latte/LegacyShaderDecompiler | 11423 | 5976 | mixed (52% original) |
 | Cafe/HW/Latte/Renderer | 1236 | 0 | Cemu + PixelU change |
 | Cafe/HW/Latte/Renderer/Metal | 7309 | 0 | Cemu |
 | Cafe/HW/Latte/Renderer/OpenGL | 5862 | 0 | Cemu + PixelU change |
@@ -690,3 +690,58 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
   checks the requested mode; the cached macro tiled address keeps its 32
   bit wrap-around and full-sample slice/macro tile sizes (so it can differ
   from the uncached function for multisampled surfaces, as before).
+- Batch 10b: the legacy shader decompiler (Cafe/HW/Latte/LegacyShaderDecompiler)
+  rewritten as original code, except the Metal emitter: the analyzer
+  (LatteDecompilerAnalyzer.cpp), the decompiler front end and CF/clause
+  parsing (LatteDecompiler.cpp), the register data type tracker, the
+  shared headers (LatteDecompiler.h, LatteDecompilerInternal.h,
+  LatteDecompilerInstructions.h), the GLSL emitter
+  (LatteDecompilerEmitGLSL.cpp), its declaration section
+  (LatteDecompilerEmitGLSLHeader.hpp) and the vertex attribute decoder
+  (LatteDecompilerEmitGLSLAttrDecoder.cpp, now table driven). File names,
+  public functions, structs, field layouts and the Instructions.h macros are
+  unchanged. The globals other files use are kept: the three Decompile*
+  entry points, LatteDecompiler_IsALUTransInstruction (LatteSoftware.cpp),
+  the LatteGSCopyShaderParser declarations and the helpers the MSL emitter
+  links against (_getVertexShaderOutParamSemanticId,
+  _getInputRegisterDataType, _getALUInstructionOutputDataType,
+  _isReductionInstruction, LatteDecompiler_getColorOutputIndexFromExportIndex).
+  Generated GLSL is byte-identical, including the uniform offset tables,
+  the resource mappings and the "predetermined by Cemu" dump marker that
+  shader replacements rely on.
+  Not rewritten: LatteDecompilerEmitMSL.cpp, LatteDecompilerEmitMSLHeader.hpp
+  and LatteDecompilerEmitMSLAttrDecoder.cpp (about 5400 lines). They are only
+  built with ENABLE_METAL on macOS and include the Metal renderer headers
+  (metal-cpp). Neither a compile check nor an output comparison is possible
+  here, so they are left as they are for a batch that can build them.
+  Old-vs-new harness: a random shader generator (CF/ALU/TEX/VTX/export/
+  streamout/GS ring programs, fetch shaders, context registers, uniform
+  modes, both APIs' options) runs the full decompile and hashes the GLSL,
+  the output struct and the uniform offsets. Over 20000 release seeds and
+  30000 CEMU_DEBUG_ASSERT seeds under ASan/UBSan the output is identical to
+  the old code once its two undefined shifts are patched out. The only
+  differences from the unpatched old code are the 190 seeds where it
+  shifts by a negative amount. g++ and clang++ syntax checks are clean for
+  every rewritten file and the files that include its headers;
+  object symbol comparison shows only internal symbols dropped.
+  Fixes and defined behaviour: reads past the end of the program return
+  zero; literal and dst-select data start zeroed; only subroutines that are
+  called get parsed; a failed GS copy shader parse sets the error flag and
+  the parse result is freed; the uniform usage log checks every buffer;
+  colour export index -1 no longer sets bit 31 of pixelColorOutputMask
+  (old: 1<<-1); GPR marks with index -1 or 128 and above are ignored (old:
+  negative shift); RESINFO/LOD with an out-of-range texture index are
+  ignored; the VFETCH range check covers 0x80+16. In the emitter, an
+  out-of-range texture unit no longer indexes past the dimension table; a
+  REMAPPED constant with no remap entry reads entry 0 instead of
+  dereferencing null; an invalid source select prints "_" instead of
+  reading past the swizzle table; a memory read with an unknown format
+  reads zero components instead of an uninitialised count; a GS with a
+  zero vertex item size gets max_vertices 0 instead of a division by zero.
+  The source buffer starts at 64 KiB and grows (old: a fixed 12 MiB
+  buffer).
+  Quirks kept on purpose: the streamout uniforms keep the (A && B) || C
+  grouping, so a GS always declares uf_verticesPerInstance; the
+  front-facing input is only loaded when R0 is used; the fragCoordScale
+  padding slot for old shader replacements; the AMD rg8 attribute
+  workaround; the REMAPPED lookup order.
