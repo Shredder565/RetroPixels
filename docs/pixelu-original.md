@@ -54,12 +54,12 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 48986 | 15.3% |
-| Cemu, untouched | 214182 | 67.0% |
-| Cemu, with PixelU changes | 15096 | 4.7% |
+| Original (RetroPixels) | 63178 | 20.0% |
+| Cemu, untouched | 195765 | 61.9% |
+| Cemu, with PixelU changes | 16078 | 5.1% |
 | PixelU-added files (MPL-2.0 header) | 1940 | 0.6% |
-| Third-party | 39404 | 12.3% |
-| **All** | **319608** | 100% |
+| Third-party | 39404 | 12.5% |
+| **All** | **316365** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -95,7 +95,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/IOSU/ccr_nfc | 335 | 335 | original |
 | Cafe/IOSU/fsa | 1043 | 1043 | original |
 | Cafe/IOSU/kernel | 678 | 678 | original |
-| Cafe/IOSU/legacy | 4405 | 4405 | original |
+| Cafe/IOSU/legacy | 4410 | 4410 | original |
 | Cafe/IOSU/nn | 2200 | 2200 | original |
 | Cafe/IOSU/ODM | 139 | 139 | original |
 | Cafe/IOSU/PDM | 517 | 517 | original |
@@ -103,7 +103,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/OS/libs (shared headers) | 352 | 352 | original |
 | Cafe/OS/libs/avm | 60 | 60 | original |
 | Cafe/OS/libs/camera | 266 | 266 | original |
-| Cafe/OS/libs/coreinit | 19977 | 0 | Cemu |
+| Cafe/OS/libs/coreinit | 16729 | 14187 | mixed (85% original) |
 | Cafe/OS/libs/dmae | 174 | 174 | original |
 | Cafe/OS/libs/drmapp | 53 | 53 | original |
 | Cafe/OS/libs/erreula | 514 | 514 | original |
@@ -153,7 +153,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cemu/FileCache | 762 | 0 | Cemu |
 | Cemu/Logging | 415 | 0 | Cemu |
 | Cemu/napi | 2450 | 0 | Cemu |
-| Cemu/ncrypto | 1203 | 0 | Cemu |
+| Cemu/ncrypto | 1203 | 0 | Cemu + PixelU change |
 | Cemu/nex | 4220 | 0 | Cemu |
 | Cemu/PPCAssembler | 4106 | 0 | Cemu |
 | Cemu/Tools | 2017 | 0 | Cemu |
@@ -405,3 +405,66 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
     requirement.
   The h264 parser API (h264Parser_*) has no callers outside h264_avc and
   is kept for interface compatibility.
+- Batch 7a: all of `coreinit` rewritten as original code (headers and
+  sources): the MEM heap tree and lists, the default heap and allocator
+  objects, the expanded, frame, unit and block heaps and SysHeap; tick and
+  calendar conversion, host and guest alarms and the alarm thread; the guest
+  printf behind OSReport/__os_snprintf/COSWarn/OSLogPrintf, console logging
+  and the title/process queries; the per-core IOS IPC driver, IPC buffer
+  pools, the legacy IOS device path and MCP/UCReadSysConfig; threads, the
+  scheduler, thread queues, mutexes, condition variables, semaphores,
+  events, fast mutexes, spinlocks, atomics, message queues, MP task queues
+  and coroutines; the FS client, command block queue and FSA layer with
+  mounting; BSP, system info, overlay arena, HW registers, IM, virtual
+  memory reservations, the codegen area, deferred guest callbacks, the
+  locked cache, the foreground bucket and clipboard, cache/memory helpers
+  and OSScreen; the module entry, title start-up (argc/argv, default heaps
+  and __preinit_user), the GHS runtime support (stream locks, errno, EH
+  globals, GHS mutexes, __tls_get_addr) and OSDynLoad. Only the generated
+  OSScreen font table (coreinit_OSScreen_font.h) is unchanged.
+  Exports, argument layouts, return values, guest struct layouts
+  (static_asserts), FS/FSA result codes, the export registration order and
+  the order of PPC callables and SysAllocator/system-area allocations are
+  unchanged, so heap and system-area addresses come out the same for the
+  same call sequence. Thread scheduling semantics are unchanged.
+  Old-vs-new harnesses (ASan/UBSan) give identical logs, return values and
+  guest memory hashes: MEM heaps 30 seeds x 4000 random operations; time
+  conversion over 3M samples; the printf family 40 seeds x 3000 random
+  formats and argument lists (including va_list state); IPCBufPool 30 seeds
+  x 5000 operations; the IPC driver against a fake IOSU 40 seeds x 3000
+  requests; the scheduler with real fibers on three cores 300 seeds x 100k
+  scripted guest operations; FS/FSA against a fake IOSU with deferred
+  completions 300 seeds x 3000 steps; the small modules (locked cache,
+  memory mapping, OSScreen, memory helpers, foreground bucket, codegen, IM,
+  BSP, overlay arena, HW registers, system info) 60 seeds x 3000 steps; the
+  GHS runtime on three fake threads 200 seeds x 3000 steps.
+  Fixes and defined behaviour: MEMInitList zeroes the object count;
+  MEMGetNthListObject past the end returns null; expanded heap group id and
+  attribute bits are stored big endian; the frame heap's allocatable-size
+  query ignores the alignment sign and no longer leaks the heap lock; a unit
+  heap with block size 0 returns null and memory fill no longer overwrites
+  the free link; the block heap tail off-by-one, stale tail block after a
+  merge and tail size wrap are fixed; fill mode index 3 or above returns 0.
+  Due guest alarms fire earliest first; a one-shot host alarm no longer
+  leaks. The guest printf no longer has undefined behaviour on `*` with
+  floats and uses a bounded float buffer; OSLaunchTitleByPath no longer
+  throws on a malformed title id in the target's app.xml. IPC buffer overflow, bad geometry, bad frees and MCP misuse log
+  instead of breaking into the debugger; an IPC buffer pool with block size
+  0 no longer divides by zero; when all IPC request slots are in use the
+  caller yields until one is free; UCReadSysConfig checks its pointers. The
+  mutex contention warning is logged once. FSAChangeMode clamps paths over
+  640 characters instead of overflowing; unknown commands in the FS result
+  copy-out are ignored. LCDisableDMA's debug leak check no longer reads out
+  of bounds. Title arguments beyond 32 entries or the 4 KiB argument
+  storage are dropped with a log line instead of overflowing; long
+  OSDynLoad module paths no longer overflow a 512 byte buffer. Log texts
+  differ throughout. The unused codegen memory-write callback is removed.
+  Kept on purpose: MEMSetAllocModeForExpHeap cannot clear the mode;
+  unsupported printf specifiers such as %lx still stop formatting; the FS
+  command queue leaves the stale back link after popping the head;
+  FSAGetFreeSpaceSize and FSAGetDeviceInfo send each other's query type; a
+  rejected blocking FS call returns 0; only the top byte of the FS error
+  mask is stored; the per-thread TLS table is sized once on first use; an
+  OSDynLoad notification for a module that cannot be found stops without
+  freeing the info block; the argv string cursor advances past the rest of
+  the launch string, so argv addresses stay the same.
