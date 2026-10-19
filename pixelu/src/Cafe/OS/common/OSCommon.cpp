@@ -1,177 +1,83 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// Registry of HLE exports. Every system library export implemented in C++ is
+// registered here under (library, symbol); the RPL loader looks names up when
+// it resolves a module's imports and patches the import to the HLE index.
+// Data exports (variables) are stored as plain guest addresses.
+#include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/HW/Espresso/PPCState.h"
-#include "Cafe/OS/libs/proc_ui/proc_ui.h"
-#include "Cafe/OS/libs/nsysnet/nsysnet.h"
-#include "Cafe/OS/libs/nlibnss/nlibnss.h"
-#include "Cafe/OS/libs/nlibcurl/nlibcurl.h"
-#include "Cafe/OS/libs/nn_nfp/nn_nfp.h"
-#include "Cafe/OS/libs/nn_act/nn_act.h"
-#include "Cafe/OS/libs/nn_acp/nn_acp.h"
-#include "Cafe/OS/libs/nn_ac/nn_ac.h"
-#include "Cafe/OS/libs/nn_uds/nn_uds.h"
-#include "Cafe/OS/libs/nn_nim/nn_nim.h"
-#include "Cafe/OS/libs/nn_ndm/nn_ndm.h"
-#include "Cafe/OS/libs/nn_spm/nn_spm.h"
-#include "Cafe/OS/libs/nn_ec/nn_ec.h"
-#include "Cafe/OS/libs/nn_boss/nn_boss.h"
-#include "Cafe/OS/libs/nn_sl/nn_sl.h"
-#include "Cafe/OS/libs/nn_fp/nn_fp.h"
-#include "Cafe/OS/libs/nn_olv/nn_olv.h"
-#include "Cafe/OS/libs/nn_idbe/nn_idbe.h"
-#include "Cafe/OS/libs/nn_save/nn_save.h"
-#include "Cafe/OS/libs/erreula/erreula.h"
-#include "Cafe/OS/libs/sysapp/sysapp.h"
-#include "Cafe/OS/libs/dmae/dmae.h"
-#include "Cafe/OS/libs/snd_core/ax.h"
-#include "Cafe/OS/libs/gx2/GX2.h"
-#include "Cafe/OS/libs/vpad/vpad.h"
-#include "Cafe/OS/libs/nsyskbd/nsyskbd.h"
-#include "Cafe/OS/libs/nsyshid/nsyshid.h"
-#include "Cafe/OS/libs/snd_user/snd_user.h"
-#include "Cafe/OS/libs/zlib125/zlib125.h"
-#include "Cafe/OS/libs/padscore/padscore.h"
-#include "Cafe/OS/libs/camera/camera.h"
-#include "../libs/swkbd/swkbd.h"
 
-struct osFunctionEntry_t
+namespace
 {
-	uint32 libHashA;
-	uint32 libHashB;
-	uint32 funcHashA;
-	uint32 funcHashB;
-	std::string name;
-	HLEIDX hleFunc;
+	// library and symbol names cannot contain a NUL, so this joins them without ambiguity
+	std::string ExportKey(std::string_view lib, std::string_view sym)
+	{
+		std::string k;
+		k.reserve(lib.size() + 1 + sym.size());
+		k.append(lib);
+		k.push_back('\0');
+		k.append(sym);
+		return k;
+	}
 
-	osFunctionEntry_t(uint32 libHashA, uint32 libHashB, uint32 funcHashA, uint32 funcHashB, std::string_view name, HLEIDX hleFunc) :
-		libHashA(libHashA), libHashB(libHashB), funcHashA(funcHashA), funcHashB(funcHashB), name(name), hleFunc(hleFunc) {};
-};
+	struct ExportRegistry
+	{
+		std::unordered_map<std::string, HLEIDX> functions;
+		std::unordered_map<std::string, uint32> data;
+	};
 
-typedef struct
-{
-	uint32 libHashA;
-	uint32 libHashB;
-	uint32 funcHashA;
-	uint32 funcHashB;
-	uint32 vPtr;
-}osPointerEntry_t;
-
-std::vector<osFunctionEntry_t>* s_osFunctionTable;
-std::vector<osPointerEntry_t> osDataTable;
+	// libraries register their exports from static initialisers too, so build on first use
+	ExportRegistry& Registry()
+	{
+		static ExportRegistry s_registry;
+		return s_registry;
+	}
+}
 
 void osLib_generateHashFromName(const char* name, uint32* hashA, uint32* hashB)
 {
-	uint32 h1 = 0x688BA2BA;
-	uint32 h2 = 0xF64A71D5;
-	while( *name )
+	// two independent 32-bit FNV-1a variants
+	uint32 a = 0x811C9DC5;
+	uint32 b = 0x050C5D1F;
+	for (const char* p = name; *p; p++)
 	{
-		uint32 c = (uint32)*name;
-		h1 += c;
-		h1 = (h1<<3)|((h1>>29));
-		h2 ^= c;
-		h2 = (h2<<7)|((h2>>25));
-		h1 += h2;
-		h2 += c;
-		h2 = (h2<<3)|((h2>>29));
-		name++;
+		const uint8 c = (uint8)*p;
+		a = (a ^ c) * 0x01000193;
+		b = (b ^ c) * 0x01000193 + 0x9E3779B9;
 	}
-	*hashA = h1;
-	*hashB = h2;
+	*hashA = a;
+	*hashB = b;
 }
 
 void osLib_addFunctionInternal(const char* libraryName, const char* functionName, void(*osFunction)(PPCInterpreter_t* hCPU))
 {
-	if (!s_osFunctionTable)
-		s_osFunctionTable = new std::vector<osFunctionEntry_t>(); // replace with static allocation + constinit once we have C++20 available
-	// calculate hash
-	uint32 libHashA, libHashB;
-	uint32 funcHashA, funcHashB;
-	osLib_generateHashFromName(libraryName, &libHashA, &libHashB);
-	osLib_generateHashFromName(functionName, &funcHashA, &funcHashB);
-	std::string hleName = fmt::format("{}.{}", libraryName, functionName);
-	// if entry already exists, update it
-	for (auto& it : *s_osFunctionTable)
-	{
-		if (it.libHashA == libHashA &&
-			it.libHashB == libHashB &&
-			it.funcHashA == funcHashA &&
-			it.funcHashB == funcHashB)
-		{
-			it.hleFunc = PPCInterpreter_registerHLECall(osFunction, hleName);
-			return;
-		}
-	}
-	s_osFunctionTable->emplace_back(libHashA, libHashB, funcHashA, funcHashB, hleName, PPCInterpreter_registerHLECall(osFunction, hleName));
+	// registering a name again replaces the earlier implementation
+	HLEIDX idx = PPCInterpreter_registerHLECall(osFunction, fmt::format("{}.{}", libraryName, functionName));
+	Registry().functions[ExportKey(libraryName, functionName)] = idx;
 }
 
-extern "C" DLLEXPORT void osLib_registerHLEFunction(const char* libraryName, const char* functionName, void(*osFunction)(PPCInterpreter_t * hCPU))
+extern "C" DLLEXPORT void osLib_registerHLEFunction(const char* libraryName, const char* functionName, void(*osFunction)(PPCInterpreter_t* hCPU))
 {
 	osLib_addFunctionInternal(libraryName, functionName, osFunction);
 }
 
 sint32 osLib_getFunctionIndex(const char* libraryName, const char* functionName)
 {
-	uint32 libHashA, libHashB;
-	uint32 funcHashA, funcHashB;
-	osLib_generateHashFromName(libraryName, &libHashA, &libHashB);
-	osLib_generateHashFromName(functionName, &funcHashA, &funcHashB);
-	for (auto& it : *s_osFunctionTable)
-	{
-		if (it.libHashA == libHashA &&
-			it.libHashB == libHashB &&
-			it.funcHashA == funcHashA &&
-			it.funcHashB == funcHashB)
-		{
-			return it.hleFunc;
-		}
-	}
-	return -1;
+	auto& fns = Registry().functions;
+	auto it = fns.find(ExportKey(libraryName, functionName));
+	return it != fns.end() ? it->second : -1;
 }
 
 void osLib_addVirtualPointer(const char* libraryName, const char* functionName, uint32 vPtr)
 {
-	// calculate hash
-	uint32 libHashA, libHashB;
-	uint32 funcHashA, funcHashB;
-	osLib_generateHashFromName(libraryName, &libHashA, &libHashB);
-	osLib_generateHashFromName(functionName, &funcHashA, &funcHashB);
-	// if entry already exists, update it
-	for (auto& it : osDataTable)
-	{
-		if (it.libHashA == libHashA &&
-			it.libHashB == libHashB &&
-			it.funcHashA == funcHashA &&
-			it.funcHashB == funcHashB)
-		{
-			it.vPtr = vPtr;
-			return;
-		}
-	}
-	// add entry
-	auto writeIndex = osDataTable.size();
-	osDataTable.resize(osDataTable.size() + 1);
-	osDataTable[writeIndex].libHashA = libHashA;
-	osDataTable[writeIndex].libHashB = libHashB;
-	osDataTable[writeIndex].funcHashA = funcHashA;
-	osDataTable[writeIndex].funcHashB = funcHashB;
-	osDataTable[writeIndex].vPtr = vPtr;
+	Registry().data[ExportKey(libraryName, functionName)] = vPtr;
 }
 
 uint32 osLib_getPointer(const char* libraryName, const char* functionName)
 {
-	uint32 libHashA, libHashB;
-	uint32 funcHashA, funcHashB;
-	osLib_generateHashFromName(libraryName, &libHashA, &libHashB);
-	osLib_generateHashFromName(functionName, &funcHashA, &funcHashB);
-	for (auto& it : osDataTable)
-	{
-		if (it.libHashA == libHashA &&
-			it.libHashB == libHashB &&
-			it.funcHashA == funcHashA &&
-			it.funcHashB == funcHashB)
-		{
-			return it.vPtr;
-		}
-	}
-	return 0xFFFFFFFF;
+	auto& vars = Registry().data;
+	auto it = vars.find(ExportKey(libraryName, functionName));
+	return it != vars.end() ? it->second : 0xFFFFFFFF;
 }
 
 void osLib_returnFromFunction(PPCInterpreter_t* hCPU, uint32 returnValue)
@@ -182,7 +88,7 @@ void osLib_returnFromFunction(PPCInterpreter_t* hCPU, uint32 returnValue)
 
 void osLib_returnFromFunction64(PPCInterpreter_t* hCPU, uint64 returnValue64)
 {
-	hCPU->gpr[3] = (returnValue64>>32)&0xFFFFFFFF;
-	hCPU->gpr[4] = (returnValue64>>0)&0xFFFFFFFF;
+	hCPU->gpr[3] = (uint32)(returnValue64 >> 32);
+	hCPU->gpr[4] = (uint32)returnValue64;
 	hCPU->instructionPointer = hCPU->spr.LR;
 }

@@ -1,3 +1,9 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// Single-consumer queue that hands items from host threads to one guest
+// thread. The guest thread suspends itself while the queue is empty and every
+// push resumes it once, so suspend and resume counts stay balanced. All
+// queue accesses happen under the guest scheduler lock.
 #pragma once
 
 #include <mutex>
@@ -14,55 +20,28 @@ public:
 	PPCConcurrentQueue(const PPCConcurrentQueue&) = delete;
 	PPCConcurrentQueue& operator=(const PPCConcurrentQueue&) = delete;
 
-	void push(const T& item, OSThread_t* thread)
+	// add an item and wake the consumer thread
+	void push(const T& item, OSThread_t* consumer)
 	{
-		//if(thread == nullptr)
-		//	thread = coreinitThread_getCurrentThread(ppcInterpreterCurrentInstance);
-		//OSThread_t* currentThread = coreinit::OSGetCurrentThread();
-		//cemu_assert_debug(thread == nullptr || currentThread == thread);
-
-		// cemuLog_logDebug(LogType::Force, "push suspend count: {}", _swapEndianU32(thread->suspend) - m_suspendCount);
-
-		//__OSLockScheduler();
-
 		__OSLockScheduler();
-		m_queue.push(item);
-		coreinit::__OSResumeThreadInternal(thread, 1);
+		m_items.push(item);
+		coreinit::__OSResumeThreadInternal(consumer, 1);
 		__OSUnlockScheduler();
-
-		//__OSUnlockScheduler();
-
-		//m_prevSuspendCount = _swapEndianU32(thread->suspend) - m_suspendCount;
-		//coreinit_resumeThread(thread, _swapEndianU32(thread->suspend));
 	}
 
-	T pop(OSThread_t* thread = nullptr)
+	// called on the consumer thread itself; blocks while nothing is queued
+	T pop(OSThread_t* consumer = nullptr)
 	{
-		//if (thread == nullptr)
-		//	thread = coreinitThread_getCurrentThread(ppcInterpreterCurrentInstance);
-
-		OSThread_t* currentThread = coreinit::OSGetCurrentThread();
-		cemu_assert_debug(thread == nullptr || currentThread == thread);
-
-		//thread = coreinitThread_getCurrentThread(ppcInterpreterCurrentInstance);
-
-		// cemuLog_logDebug(LogType::Force, "pop suspend count: {}", _swapEndianU32(thread->suspend) + m_suspendCount);
-
+		cemu_assert_debug(consumer == nullptr || consumer == coreinit::OSGetCurrentThread());
 		__OSLockScheduler();
-		if (m_queue.empty())
-			coreinit::__OSSuspendThreadInternal(thread);
-		auto val = m_queue.front();
-		m_queue.pop();
+		if (m_items.empty())
+			coreinit::__OSSuspendThreadInternal(consumer);
+		T front = m_items.front();
+		m_items.pop();
 		__OSUnlockScheduler();
-
-		//coreinit_suspendThread(thread, m_suspendCount + m_prevSuspendCount);
-		//m_prevSuspendCount = 0;
-		//PPCCore_switchToScheduler();
-
-		return val;
+		return front;
 	}
+
 private:
-	//const int m_suspendCount = 8000;
-	std::queue<T> m_queue;
-	//std::atomic<uint32> m_prevSuspendCount;
+	std::queue<T> m_items;
 };
