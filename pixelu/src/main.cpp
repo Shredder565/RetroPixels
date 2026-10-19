@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "WindowSystem.h"
 #include "util/crypto/aes128.h"
 #include "Cafe/OS/RPL/rpl.h"
@@ -26,8 +27,9 @@
 
 #include "audio/IAudioAPI.h"
 #include "audio/IAudioInputAPI.h"
+
 #if BOOST_OS_WINDOWS
-#pragma comment(lib,"Dbghelp.lib")
+#pragma comment(lib, "Dbghelp.lib")
 #endif
 
 #ifdef HAS_SDL
@@ -37,15 +39,14 @@
 #endif
 
 #if BOOST_OS_LINUX
-#define _putenv(__s) putenv((char*)(__s))
 #include <sys/sysinfo.h>
 #elif BOOST_OS_MACOS || BOOST_OS_BSD
-#define _putenv(__s) putenv((char*)(__s))
 #include <sys/types.h>
 #include <sys/sysctl.h>
 #endif
 
 #if BOOST_OS_WINDOWS
+// ask hybrid-graphics laptops for the discrete GPU
 extern "C"
 {
 	__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
@@ -55,98 +56,106 @@ extern "C"
 
 std::atomic_bool g_isGPUInitFinished = false;
 
-std::wstring executablePath;
+std::wstring executablePath; // Windows: full path of the running executable
 
-// some implementations of _putenv dont copy the string and instead only store a pointer
-// thus we use a helper to keep a permanent copy
-std::vector<std::string*> sPutEnvMap;
-
-void _putenvSafe(const char* c)
+namespace
 {
-    auto s = new std::string(c);
-    sPutEnvMap.emplace_back(s);
-    _putenv(s->c_str());
-}
-
-void reconfigureGLDrivers()
-{
-#ifdef ENABLE_OPENGL
-	// reconfigure GL drivers to store
-	const fs::path nvCacheDir = ActiveSettings::GetCachePath("shaderCache/driver/nvidia/");
-
-	std::error_code err;
-	fs::create_directories(nvCacheDir, err);
-
-	std::string nvCacheDirEnvOption("__GL_SHADER_DISK_CACHE_PATH=");
-	nvCacheDirEnvOption.append(_pathToUtf8(nvCacheDir));
-
+	// Sets an environment variable from a "NAME=value" string. putenv may keep
+	// the pointer instead of copying, so the strings are never freed.
+	void setEnvironmentPermanently(const char* assignment)
+	{
+		static std::vector<std::unique_ptr<std::string>> s_storage;
+		std::string* stored = s_storage.emplace_back(std::make_unique<std::string>(assignment)).get();
 #if BOOST_OS_WINDOWS
-	std::wstring tmpW = boost::nowide::widen(nvCacheDirEnvOption);
-	_wputenv(tmpW.c_str());
+		_putenv(stored->c_str());
 #else
-    _putenvSafe(nvCacheDirEnvOption.c_str());
+		putenv(stored->data());
 #endif
-    _putenvSafe("__GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1");
-#endif
-}
+	}
 
-void reconfigureVkDrivers()
-{
+	// let the NVIDIA OpenGL driver keep its shader cache inside our cache folder
+	void configureOpenGLDriverCache()
+	{
+#ifdef ENABLE_OPENGL
+		const fs::path cacheDir = ActiveSettings::GetCachePath("shaderCache/driver/nvidia/");
+		std::error_code ec;
+		fs::create_directories(cacheDir, ec);
+		const std::string assignment = "__GL_SHADER_DISK_CACHE_PATH=" + _pathToUtf8(cacheDir);
+#if BOOST_OS_WINDOWS
+		_wputenv(boost::nowide::widen(assignment).c_str()); // the path may contain non-ANSI characters
+#else
+		setEnvironmentPermanently(assignment.c_str());
+#endif
+		setEnvironmentPermanently("__GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1");
+#endif
+	}
+
+	// implicit Vulkan layers known to cause trouble
+	void disableProblematicVulkanLayers()
+	{
 #ifdef ENABLE_VULKAN
-    _putenvSafe("DISABLE_LAYER_AMD_SWITCHABLE_GRAPHICS_1=1");
-    _putenvSafe("DISABLE_VK_LAYER_VALVE_steam_fossilize_1=1");
+		setEnvironmentPermanently("DISABLE_LAYER_AMD_SWITCHABLE_GRAPHICS_1=1");
+		setEnvironmentPermanently("DISABLE_VK_LAYER_VALVE_steam_fossilize_1=1");
 #endif
+	}
+
+	// Windows: run from the executable's folder at raised priority
+	void prepareWindowsProcess()
+	{
+#if BOOST_OS_WINDOWS
+		std::wstring path(4096, L'\0');
+		const DWORD length = GetModuleFileNameW(nullptr, path.data(), (DWORD)path.size());
+		path.resize(length);
+		executablePath = path;
+		SetCurrentDirectoryW(fs::path(executablePath).parent_path().c_str());
+		SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+#endif
+	}
+
+	bool s_consoleAttached = false;
 }
 
-void WindowsInitCwd()
-{
-	#if BOOST_OS_WINDOWS
-	executablePath.resize(4096);
-	int i = GetModuleFileNameW(NULL, executablePath.data(), executablePath.size());
-	if(i >= 0)
-		executablePath.resize(i);
-	else
-		executablePath.clear();
-	SetCurrentDirectoryW(fs::path(executablePath).parent_path().c_str());
-	// set high priority
-	SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
-	#endif
-}
-
+// startup shared by all front ends, after the command line and the folders are set
 void CemuCommonInit()
 {
-	reconfigureGLDrivers();
-	reconfigureVkDrivers();
-	// crypto init
+	configureOpenGLDriverCache();
+	disableProblematicVulkanLayers();
 	AES128_init();
-	// init PPC timer
-	// call this as early as possible because it measures frequency of RDTSC using an asynchronous thread over 3 seconds
+	// measures the timestamp counter frequency in the background, so start it early
 	PPCTimer_init();
 
-	WindowsInitCwd();
-    ExceptionHandler_Init();
-	// read config
+	prepareWindowsProcess();
+	ExceptionHandler_Init();
+
 	GetConfigHandle().Load();
 	if (NetworkConfig::XMLExists())
 		n_config.Load();
-	// parallelize expensive init code
-	std::future<int> futureInitAudioAPI = std::async(std::launch::async, []{ IAudioAPI::InitializeStatic(); IAudioInputAPI::InitializeStatic(); return 0; });
-	std::future<int> futureInitGraphicPacks = std::async(std::launch::async, []{ GraphicPack2::LoadAll(); return 0; });
+
+	// audio backends and graphic packs load in parallel with the input setup
+	auto audioInit = std::async(std::launch::async, [] {
+		IAudioAPI::InitializeStatic();
+		IAudioInputAPI::InitializeStatic();
+		return 0;
+	});
+	auto graphicPackInit = std::async(std::launch::async, [] {
+		GraphicPack2::LoadAll();
+		return 0;
+	});
 	DefaultControllerProfile_CreateIfMissing(); // PixelU: a fresh PixelU gets a working player 1 profile
 	InputManager::instance().load();
-	futureInitAudioAPI.wait();
-	futureInitGraphicPacks.wait();
-	// init Cafe system
+	audioInit.wait();
+	graphicPackInit.wait();
+
 	CafeSystem::Initialize();
-	// init title list
+
 	CafeTitleList::Initialize(ActiveSettings::GetUserDataPath("title_list_cache.xml"));
-	for (auto& it : GetConfig().game_paths)
-		CafeTitleList::AddScanPath(_utf8ToPath(it));
-	fs::path mlcPath = ActiveSettings::GetMlcPath();
+	for (const std::string& gamePath : GetConfig().game_paths)
+		CafeTitleList::AddScanPath(_utf8ToPath(gamePath));
+	const fs::path mlcPath = ActiveSettings::GetMlcPath();
 	if (!mlcPath.empty())
 		CafeTitleList::SetMLCPath(mlcPath);
 	CafeTitleList::Refresh();
-	// init save list
+
 	CafeSaveList::Initialize();
 	if (!mlcPath.empty())
 	{
@@ -162,6 +171,7 @@ void ExpressionParser_test();
 void FSTVolumeTest();
 void CRCTest();
 
+// self tests of various components (debug builds)
 void UnitTests()
 {
 	ExpressionParser_test();
@@ -171,105 +181,108 @@ void UnitTests()
 	CRCTest();
 }
 
-bool isConsoleConnected = false;
+// Windows GUI programs have no console. When started from a console window,
+// attach to it so that output written to stdout/stderr shows up there.
 void requireConsole()
 {
-    #if BOOST_OS_WINDOWS
-    if (isConsoleConnected)
-        return;
-
-    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-    DWORD dwFileType = GetFileType(hOut);
-
-    if (dwFileType == FILE_TYPE_UNKNOWN || dwFileType == FILE_TYPE_CHAR)
-    {
-        if (AttachConsole(ATTACH_PARENT_PROCESS) != FALSE)
-        {
-            freopen("CONOUT$", "w", stdout);
-            freopen("CONOUT$", "w", stderr);
-            freopen("CONIN$", "r", stdin);
-            isConsoleConnected = true;
-        }
-    }
-    else
-    {
-        isConsoleConnected = true; 
-    }
-    #endif
+#if BOOST_OS_WINDOWS
+	if (s_consoleAttached)
+		return;
+	const DWORD outputType = GetFileType(GetStdHandle(STD_OUTPUT_HANDLE));
+	const bool redirected = outputType != FILE_TYPE_UNKNOWN && outputType != FILE_TYPE_CHAR;
+	if (redirected)
+	{
+		s_consoleAttached = true; // output already goes to a file or pipe
+		return;
+	}
+	if (AttachConsole(ATTACH_PARENT_PROCESS))
+	{
+		freopen("CONOUT$", "w", stdout);
+		freopen("CONOUT$", "w", stderr);
+		freopen("CONIN$", "r", stdin);
+		s_consoleAttached = true;
+	}
+#endif
 }
 
+// removes the "<exe>.backup" an update leaves behind; tries for a few seconds at most
 void HandlePostUpdate()
 {
-	auto exeBackupPath = ActiveSettings::GetExecutablePath();
-	exeBackupPath.replace_extension( _utf8ToPath(_pathToUtf8(exeBackupPath.extension()).append(".backup")));
+	fs::path backup = ActiveSettings::GetExecutablePath();
+	backup.replace_extension(_utf8ToPath(_pathToUtf8(backup.extension()) + ".backup"));
 	std::error_code ec;
-	if (!fs::exists(exeBackupPath, ec))
+	if (!fs::exists(backup, ec))
 		return;
-	// try to delete update residue, but give up quickly as to not cause a permanent hang
-	// it may succeed on next turn
-	for (sint32 i=0; i<3; i++)
+	for (int attempt = 0; attempt < 3; attempt++)
 	{
-		if (fs::remove(exeBackupPath, ec))
-			break;
-		std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+		if (fs::remove(backup, ec))
+			return;
+		std::this_thread::sleep_for(std::chrono::seconds(1)); // the old process may still be exiting
 	}
 }
 
 void ToolShaderCacheMerger();
 
-#if BOOST_OS_WINDOWS
-
-// entrypoint for release builds
-int wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nShowCmd)
+namespace
 {
-	if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE)))
-		cemuLog_log(LogType::Force, "CoInitializeEx() failed");
+	// parses the command line, then hands over to the window system
+	template<typename... TArgs>
+	int runApplication(TArgs&&... commandLine)
+	{
+		if (const std::optional<int> exitCode = LaunchSettings::HandleCommandline(std::forward<TArgs>(commandLine)...))
+			return *exitCode;
+		WindowSystem::Create();
+		return 0;
+	}
+
+#if BOOST_OS_WINDOWS
+	void prepareWindowsEntry()
+	{
+		if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE)))
+			cemuLog_log(LogType::Force, "CoInitializeEx() failed");
 #ifdef HAS_SDL
-	SDL_SetMainReady();
+		SDL_SetMainReady();
 #endif
-	auto parse_rc = LaunchSettings::HandleCommandline(lpCmdLine);
-	if (parse_rc.has_value())
-		return *parse_rc;
-	WindowSystem::Create();
-	return 0;
+	}
+#endif
 }
 
-// entrypoint for debug builds with console
+#if BOOST_OS_WINDOWS
+
+// release builds (GUI subsystem)
+int wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nShowCmd)
+{
+	prepareWindowsEntry();
+	return runApplication((const wchar_t*)lpCmdLine);
+}
+
+// debug builds (console subsystem)
 int main(int argc, char* argv[])
 {
-	if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE)))
-		cemuLog_log(LogType::Force, "CoInitializeEx() failed");
-#ifdef HAS_SDL
-	SDL_SetMainReady();
-#endif
-	auto parse_rc = LaunchSettings::HandleCommandline(argc, argv);
-	if (parse_rc.has_value())
-		return *parse_rc;
-	WindowSystem::Create();
-	return 0;
+	prepareWindowsEntry();
+	return runApplication(argc, argv);
 }
 
 #else
 
 int BreathOfTheWildChildProcessMain();
-int main(int argc, char *argv[])
+
+int main(int argc, char* argv[])
 {
 #if BOOST_OS_LINUX && defined(ENABLE_VULKAN)
+	// helper process used to detect the RADV driver (see VulkanRenderer.cpp)
 	if (getenv("CEMU_DETECT_RADV") != nullptr)
 		return BreathOfTheWildChildProcessMain();
 #endif
-
 #if BOOST_OS_LINUX || BOOST_OS_BSD
-    XInitThreads();
+	XInitThreads(); // Xlib is used from several threads
 #endif
-	auto parse_rc = LaunchSettings::HandleCommandline(argc, argv);
-  if (parse_rc.has_value())
-		return *parse_rc;
-	WindowSystem::Create();
-	return 0;
+	return runApplication(argc, argv);
 }
+
 #endif
 
+// read by external tools attached to the process
 extern "C" DLLEXPORT uint64 gameMeta_getTitleId()
 {
 	return CafeSystem::GetForegroundTitleId();

@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "NetworkSettings.h"
 #include "ActiveSettings.h"
 #include "LaunchSettings.h"
@@ -6,20 +7,25 @@
 
 XMLNetworkConfig_t n_config(L"network_services.xml");
 
-
-void NetworkConfig::LoadOnce() 
+namespace
 {
-	n_config.SetFilename(ActiveSettings::GetConfigPath("network_services.xml").generic_wstring());
+	constexpr const char* kFileName = "network_services.xml";
+}
+
+void NetworkConfig::LoadOnce()
+{
+	n_config.SetFilename(ActiveSettings::GetConfigPath(kFileName).generic_wstring());
 	if (XMLExists())
 		n_config.Load();
 }
 
-void NetworkConfig::Load(XMLConfigParser& parser) 
+void NetworkConfig::Load(XMLConfigParser& parser)
 {
-	auto config = parser.get("content");
-	networkname = config.get("networkname", "Custom");
-	disablesslver = config.get("disablesslverification", disablesslver);
-	auto u = config.get("urls");
+	XMLConfigParser content = parser.get("content");
+	networkname = content.get("networkname", "Custom");
+	disablesslver = content.get("disablesslverification", disablesslver);
+	// URLs that are not set fall back to the official servers
+	XMLConfigParser u = content.get("urls");
 	urls.ACT = u.get("act", NintendoURLs::ACTURL);
 	urls.ECS = u.get("ecs", NintendoURLs::ECSURL);
 	urls.NUS = u.get("nus", NintendoURLs::NUSURL);
@@ -32,17 +38,13 @@ void NetworkConfig::Load(XMLConfigParser& parser)
 	urls.OLV = u.get("olv", NintendoURLs::OLVURL);
 }
 
-bool NetworkConfig::XMLExists() 
+bool NetworkConfig::XMLExists()
 {
-	static std::optional<bool> s_exists; // caches result of fs::exists
-	if(s_exists.has_value())
-		return *s_exists;
-	std::error_code ec;
-	if (!fs::exists(ActiveSettings::GetConfigPath("network_services.xml"), ec))
+	static std::optional<bool> s_cachedResult;
+	if (!s_cachedResult)
 	{
-		s_exists = false;
-		return false;
+		std::error_code ec;
+		s_cachedResult = fs::exists(ActiveSettings::GetConfigPath(kFileName), ec);
 	}
-	s_exists = true;
-	return true;
+	return *s_cachedResult;
 }

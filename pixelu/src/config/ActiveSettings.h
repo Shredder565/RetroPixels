@@ -1,67 +1,75 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "config/CemuConfig.h"
 #include "config/NetworkSettings.h"
 
-// global active settings for fast access (reflects settings from command line and game profile)
+// The settings currently in effect, combining settings.xml, the command line
+// and the running game's profile. Also owns the user/config/cache/data
+// folder locations.
 class ActiveSettings
 {
 private:
-	template <typename ...TArgs>
+	// base / formatted sub path (UTF-8 format string, fmt syntax)
+	template<typename... TArgs>
 	static fs::path GetPath(const fs::path& path, std::string_view format, TArgs&&... args)
 	{
-		cemu_assert_debug(format.empty() || (format[0] != '/' && format[0] != '\\'));
-		std::string tmpPathStr = fmt::format(fmt::runtime(format), std::forward<TArgs>(args)...);
-		return path / _utf8ToPath(tmpPathStr);
+		cemu_assert_debug(format.empty() || (format[0] != '/' && format[0] != '\\')); // must be relative
+		return path / _utf8ToPath(fmt::format(fmt::runtime(format), std::forward<TArgs>(args)...));
 	}
 
-	template <typename ...TArgs>
+	// base / formatted sub path (wide format string)
+	template<typename... TArgs>
 	static fs::path GetPath(const fs::path& path, std::wstring_view format, TArgs&&... args)
 	{
-		cemu_assert_debug(format.empty() || (format[0] != L'/' && format[0] != L'\\'));
+		cemu_assert_debug(format.empty() || (format[0] != L'/' && format[0] != L'\\')); // must be relative
 		return path / fmt::format(fmt::runtime(format), std::forward<TArgs>(args)...);
 	}
-	static fs::path GetPath(const fs::path& path, std::string_view p) 
+
+	// base / UTF-8 sub path, used as is
+	static fs::path GetPath(const fs::path& path, std::string_view subPath)
 	{
-		std::basic_string_view<char8_t> s((const char8_t*)p.data(), p.size());
-		return path / fs::path(s);
+		return path / fs::path(std::u8string_view((const char8_t*)subPath.data(), subPath.size()));
 	}
+
 	static fs::path GetPath(const fs::path& path)
 	{
 		return path;
 	}
 
 public:
-	// Set directories and return all directories that failed write access test
+	// Sets the folders (once, before Init) and creates the writable ones.
+	// failedWriteAccess receives the folders that cannot be written to.
 	static void
 	SetPaths(bool isPortableMode,
-		   const fs::path& executablePath,
-		   const fs::path& userDataPath,
-		   const fs::path& configPath,
-		   const fs::path& cachePath,
-		   const fs::path& dataPath,
-		   std::set<fs::path>& failedWriteAccess);
+			 const fs::path& executablePath,
+			 const fs::path& userDataPath,
+			 const fs::path& configPath,
+			 const fs::path& cachePath,
+			 const fs::path& dataPath,
+			 std::set<fs::path>& failedWriteAccess);
 
 	static void Init();
 
 	[[nodiscard]] static fs::path GetExecutablePath() { return s_executable_path; }
 	[[nodiscard]] static fs::path GetExecutableFilename() { return s_executable_filename; }
-	template <typename ...TArgs>
-	[[nodiscard]] static fs::path GetUserDataPath(TArgs&&... args){ return GetPath(s_user_data_path, std::forward<TArgs>(args)...); };
-	template <typename ...TArgs>
-	[[nodiscard]] static fs::path GetConfigPath(TArgs&&... args){ return GetPath(s_config_path, std::forward<TArgs>(args)...); };
-	template <typename ...TArgs>
-	[[nodiscard]] static fs::path GetCachePath(TArgs&&... args){ return GetPath(s_cache_path, std::forward<TArgs>(args)...); };
-	template <typename ...TArgs>
-	[[nodiscard]] static fs::path GetDataPath(TArgs&&... args){ return GetPath(s_data_path, std::forward<TArgs>(args)...); };
+	template<typename... TArgs>
+	[[nodiscard]] static fs::path GetUserDataPath(TArgs&&... args) { return GetPath(s_user_data_path, std::forward<TArgs>(args)...); }
+	template<typename... TArgs>
+	[[nodiscard]] static fs::path GetConfigPath(TArgs&&... args) { return GetPath(s_config_path, std::forward<TArgs>(args)...); }
+	template<typename... TArgs>
+	[[nodiscard]] static fs::path GetCachePath(TArgs&&... args) { return GetPath(s_cache_path, std::forward<TArgs>(args)...); }
+	template<typename... TArgs>
+	[[nodiscard]] static fs::path GetDataPath(TArgs&&... args) { return GetPath(s_data_path, std::forward<TArgs>(args)...); }
 
+	// command line, then settings.xml, then <user data>/mlc01
 	[[nodiscard]] static fs::path GetMlcPath();
 
-	template <typename ...TArgs>
-	[[nodiscard]] static fs::path GetMlcPath(TArgs&&... args){ return GetPath(GetMlcPath(), std::forward<TArgs>(args)...); };
+	template<typename... TArgs>
+	[[nodiscard]] static fs::path GetMlcPath(TArgs&&... args) { return GetPath(GetMlcPath(), std::forward<TArgs>(args)...); }
 	static bool IsCustomMlcPath();
 	static bool IsCommandLineMlcPath();
 
-	// get mlc path to default cemu root dir/mlc01
+	// <user data>/mlc01
 	[[nodiscard]] static fs::path GetDefaultMLCPath();
 
 private:
@@ -71,11 +79,11 @@ private:
 	inline static fs::path s_config_path;
 	inline static fs::path s_cache_path;
 	inline static fs::path s_data_path;
-	inline static fs::path s_executable_filename; // cemu.exe
+	inline static fs::path s_executable_filename; // file name part of s_executable_path
 	inline static fs::path s_mlc_path;
 
 public:
-	// can be called before Init
+	// valid before Init
 	[[nodiscard]] static bool IsPortableMode();
 
 	// general
@@ -87,7 +95,7 @@ public:
 	[[nodiscard]] static uint8 GetTimerShiftFactor();
 
 	static void SetTimerShiftFactor(uint8 shiftFactor);
-	
+
 	// gpu
 	[[nodiscard]] static PrecompiledShaderOption GetPrecompiledShadersOption();
 	[[nodiscard]] static bool RenderUpsideDownEnabled();
@@ -107,6 +115,7 @@ public:
 	[[nodiscard]] static bool IsOnlineEnabled();
 	[[nodiscard]] static bool HasRequiredOnlineFiles();
 	[[nodiscard]] static NetworkService GetNetworkService();
+
 	// dump options
 	[[nodiscard]] static bool DumpShadersEnabled();
 	[[nodiscard]] static bool DumpTexturesEnabled();
@@ -117,7 +126,7 @@ public:
 	static void EnableDumpRecompilerFunctions(bool state);
 	static void EnableDumpLibcurlRequests(bool state);
 
-	// hacks
+	// per-game workarounds
 	[[nodiscard]] static bool VPADDelayEnabled();
 	[[nodiscard]] static bool ShaderPreventInfiniteLoopsEnabled();
 	[[nodiscard]] static bool FlushGPUCacheOnSwap();
@@ -125,18 +134,16 @@ public:
 
 private:
 	inline static bool s_setPathsCalled = false;
-	// dump options
+
 	inline static bool s_dump_shaders = false;
 	inline static bool s_dump_textures = false;
 	inline static bool s_dump_recompiler_functions = false;
 	inline static bool s_dump_libcurl_requests = false;
 
-	// timer speed
-	inline static uint8 s_timer_shift = 3; // right shift factor, 0 -> 8x, 3 -> 1x, 4 -> 0.5x
+	// guest timer speed as a right shift: 0 = 8x, 3 = 1x (normal), 4 = 0.5x
+	inline static uint8 s_timer_shift = 3;
 
-	// debug
 	inline static bool s_audio_aux_only = false;
 
 	inline static bool s_has_required_online_files = false;
 };
-

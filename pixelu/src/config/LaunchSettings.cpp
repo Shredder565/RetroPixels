@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "LaunchSettings.h"
 
 #include "util/helpers/helpers.h"
@@ -15,376 +16,351 @@
 #include "Cafe/TitleList/TitleId.h"
 #include "util/helpers/StringHelpers.h"
 
-void requireConsole();
+void requireConsole(); // main.cpp
+
+namespace po = boost::program_options;
+
+namespace
+{
+	// Values of short options written as "-g=value" arrive with the '='
+	// still attached, so a single leading '=' is removed.
+	template<typename TString>
+	TString withoutLeadingEquals(TString text)
+	{
+		if (!text.empty() && text.front() == '=')
+			text.erase(0, 1);
+		return text;
+	}
+
+	template<typename T>
+	T argument(const po::variables_map& vm, const char* name)
+	{
+		return vm[name].as<T>();
+	}
+
+	// "--name" alone means true; "--name false" etc. is also accepted
+	po::typed_value<bool>* boolSwitch()
+	{
+		return po::value<bool>()->implicit_value(true);
+	}
+
+	// --rp-parent: decimal or 0x-prefixed hexadecimal, non-zero, nothing else
+	std::optional<uint64> parseWindowHandle(const std::string& text)
+	{
+		const bool hex = text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X');
+		const std::string digits = hex ? text.substr(2) : text;
+		size_t consumed = 0;
+		const uint64 handle = std::stoull(digits, &consumed, hex ? 16 : 10); // throws on garbage
+		if (handle == 0 || consumed != digits.size())
+			return std::nullopt;
+		return handle;
+	}
+
+	// "host path:guest path"; on Windows a drive letter colon at the start does not count
+	size_t findMountSeparator(const std::wstring& mount)
+	{
+		size_t searchFrom = 0;
+#if BOOST_OS_WINDOWS
+		static const std::wregex drivePrefix(LR"(^(?:\\\\\?\\)?[A-Za-z]:)");
+		std::wsmatch match;
+		if (std::regex_search(mount, match, drivePrefix))
+			searchFrom = (size_t)match.length();
+#endif
+		return mount.find(L':', searchFrom);
+	}
+
+	std::string versionText()
+	{
+#if EMULATOR_VERSION_PATCH == 0
+		return fmt::format("{}.{}{}", EMULATOR_VERSION_MAJOR, EMULATOR_VERSION_MINOR, EMULATOR_VERSION_SUFFIX);
+#else
+		return fmt::format("{}.{}-{}{}", EMULATOR_VERSION_MAJOR, EMULATOR_VERSION_MINOR, EMULATOR_VERSION_PATCH, EMULATOR_VERSION_SUFFIX);
+#endif
+	}
+}
 
 std::optional<int> LaunchSettings::HandleCommandline(const wchar_t* lpCmdLine)
 {
-	#if BOOST_OS_WINDOWS
-	const std::vector<std::wstring> args = boost::program_options::split_winmain(lpCmdLine);
-	return HandleCommandline(args);
-	#else
+#if BOOST_OS_WINDOWS
+	return HandleCommandline(po::split_winmain(lpCmdLine));
+#else
 	cemu_assert_unimplemented();
 	return 1;
-	#endif
+#endif
 }
 
 std::optional<int> LaunchSettings::HandleCommandline(int argc, wchar_t* argv[])
 {
-	std::vector<std::wstring> args;
-	args.reserve(argc);
-	for(int i = 0; i < argc; ++i)
-	{
-		args.emplace_back(argv[i]);
-	}
-	
-	return HandleCommandline(args);
+	return HandleCommandline(std::vector<std::wstring>(argv, argv + argc));
 }
 
 std::optional<int> LaunchSettings::HandleCommandline(int argc, char* argv[])
 {
 	std::vector<std::wstring> args;
 	args.reserve(argc);
-	for(int i = 0; i < argc; ++i)
-	{
-		args.emplace_back(boost::nowide::widen(argv[i]));
-	}
-	
+	for (int i = 0; i < argc; i++)
+		args.push_back(boost::nowide::widen(argv[i]));
 	return HandleCommandline(args);
 }
 
 std::optional<int> LaunchSettings::HandleCommandline(const std::vector<std::wstring>& args)
 {
-	namespace po = boost::program_options;
-	po::options_description desc{ "Launch options" };
-	desc.add_options()
-		("help,h", "This help screen")
-		("version,v", "Displays the version of Cemu")
+	po::options_description launchOptions{"Launch options"};
+	launchOptions.add_options()
+		("help,h", "Show this list of options")
+		("version,v", "Print the version number")
 #if !BOOST_OS_WINDOWS
-		("verbose", "Log to stdout")
+		("verbose", "Also write the log to stdout")
 #endif
 
-		("game,g", po::wvalue<std::wstring>(), "Path of game to launch")
-		("title-id,t", po::value<std::string>(), "Title ID of the title to be launched (overridden by --game)")
-		("mlc,m", po::wvalue<std::wstring>(), "Custom mlc folder location")
+		("game,g", po::wvalue<std::wstring>(), "Game file or folder to start")
+		("title-id,t", po::value<std::string>(), "Title ID (hex) of an installed title to start; --game takes precedence")
+		("mlc,m", po::wvalue<std::wstring>(), "Use this MLC folder instead of the configured one")
 
-		("fullscreen,f", po::value<bool>()->implicit_value(true), "Launch games in fullscreen mode")
-		("ud,u", po::value<bool>()->implicit_value(true), "Render output upside-down")
+		("fullscreen,f", boolSwitch(), "Start games in fullscreen")
+		("ud,u", boolSwitch(), "Flip the output vertically")
 
-		("account,a", po::value<std::string>(), "Persistent id of account")
+		("account,a", po::value<std::string>(), "Persistent ID (hex) of the account to use")
 
-		("cos-mounts", po::wvalue<std::vector<std::wstring>>()->composing(), "A series of mounts in the form of: (path on host:path within emulated system, e.g. `/tmp:/vol/temporary/`)")
-		("forward-console-logging", "Forward OSReport, OSConsoleWrite, etc. to stdout/stderr.")
-		("cos-argstr", po::value<std::string>(), "A custom argstr ('file.rpx ....') that overrides the arguments to the first RPX that is launched, and will be unset after the first launch.")
+		("cos-mounts", po::wvalue<std::vector<std::wstring>>()->composing(), "Extra mounts, each written as host path:guest path (for example /tmp:/vol/temporary/)")
+		("forward-console-logging", "Print OSReport, OSConsoleWrite and similar guest output to stdout/stderr")
+		("cos-argstr", po::value<std::string>(), "Argument string for the first RPX started ('file.rpx ...'); used once")
 
-		("force-interpreter", po::value<bool>()->implicit_value(true), "Force interpreter CPU emulation, disables recompiler. Useful for debugging purposes where you want to get accurate memory accesses and stack traces.")
-		("force-multicore-interpreter", po::value<bool>()->implicit_value(true), "Force multi-core interpreter CPU emulation, disables recompiler. Only useful for getting stack traces, but slightly faster than the single-core interpreter mode.")
-		("enable-gdbstub", po::value<bool>()->implicit_value(true), "Enable GDB stub to debug executables inside Cemu using an external debugger")
-		("open-debugger", po::value<bool>()->implicit_value(true), "Open the PPC debugger window on startup")
+		("force-interpreter", boolSwitch(), "Use the single-core CPU interpreter only (no recompiler); slow, but gives exact memory accesses and stack traces")
+		("force-multicore-interpreter", boolSwitch(), "Use the multi-core CPU interpreter only (no recompiler); for stack traces, a little faster than --force-interpreter")
+		("enable-gdbstub", boolSwitch(), "Start the GDB stub so an external debugger can attach")
+		("open-debugger", boolSwitch(), "Open the PPC debugger window at startup")
 
+		// PixelU: options used by RetroPixels
 		("rp-record", po::wvalue<std::wstring>(), "RetroPixels: record the game's TV picture and audio into this folder (needs --rp-ffmpeg)")
 		("rp-ffmpeg", po::wvalue<std::wstring>(), "RetroPixels: full path of the ffmpeg executable used for recording")
 		("rp-opengl", "RetroPixels: draw with OpenGL instead of Vulkan for this run (Vulkan doesn't work on this PC)")
 		("rp-embed", "RetroPixels: a window that shows only the game, for docking into another window; no menus, game list or optional dialogs")
 		("rp-parent", po::value<std::string>(), "RetroPixels: (Windows) show the game as a child of this window (HWND, decimal or 0x hex), filling it; implies --rp-embed");
 
-	po::options_description hidden{ "Hidden options" };
-	hidden.add_options()
-		("nsight", po::value<bool>()->implicit_value(true), "NSight debugging options")
-		("legacy", po::value<bool>()->implicit_value(true), "Intel legacy graphic mode")
-		("ppcrec-lower-addr", po::value<std::string>(), "For debugging: Lower address allowed for PPC recompilation")
-		("ppcrec-upper-addr", po::value<std::string>(), "For debugging: Upper address allowed for PPC recompilation");
+	po::options_description hiddenOptions{"Hidden options"};
+	hiddenOptions.add_options()
+		("nsight", boolSwitch(), "Settings for debugging with NSight")
+		("legacy", boolSwitch(), "Legacy Intel graphics mode")
+		("ppcrec-lower-addr", po::value<std::string>(), "Debugging: lowest address the PPC recompiler may translate")
+		("ppcrec-upper-addr", po::value<std::string>(), "Debugging: highest address the PPC recompiler may translate");
 
-	po::options_description extractor{ "Extractor tool" };
-	extractor.add_options()
-		("extract,e", po::wvalue<std::wstring>(), "Path to WUD or WUX file for extraction")
-		("path,p", po::value<std::string>(), "Path of file to extract (for example meta/meta.xml)")
-		("output,o", po::wvalue<std::wstring>(), "Output path for extracted file.");
-	
-	po::options_description all;
-	all.add(desc).add(hidden).add(extractor);
+	po::options_description extractorOptions{"Extractor tool"};
+	extractorOptions.add_options()
+		("extract,e", po::wvalue<std::wstring>(), "WUD or WUX image to extract a file from")
+		("path,p", po::value<std::string>(), "Path of the file inside the image (for example meta/meta.xml)")
+		("output,o", po::wvalue<std::wstring>(), "Folder to write the extracted file to (default: print it)");
 
-	po::options_description visible;
-	visible.add(desc).add(extractor);
+	po::options_description allOptions;
+	allOptions.add(launchOptions).add(hiddenOptions).add(extractorOptions);
+	po::options_description shownInHelp;
+	shownInHelp.add(launchOptions).add(extractorOptions);
 
 	try
 	{
-		po::wcommand_line_parser parser{ args };
-		parser.allow_unregistered().options(all).style(po::command_line_style::allow_long | po::command_line_style::allow_short | po::command_line_style::allow_dash_for_short | po::command_line_style::case_insensitive |
-			po::command_line_style::long_allow_next |
-			po::command_line_style::short_allow_next |
-			po::command_line_style::allow_long_disguise);
-
-		const auto parsed_options = parser.run();
-
+		namespace style = po::command_line_style;
+		po::wcommand_line_parser parser{args};
+		parser.allow_unregistered()
+			.options(allOptions)
+			.style(style::allow_long | style::allow_short | style::allow_dash_for_short | style::case_insensitive |
+				   style::long_allow_next | style::short_allow_next | style::allow_long_disguise);
 		po::variables_map vm;
-		po::store(parsed_options, vm);
-		notify(vm);
+		po::store(parser.run(), vm);
+		po::notify(vm);
+		auto has = [&vm](const char* name) { return vm.count(name) != 0; };
 
-		if (vm.count("help"))
+		if (has("help"))
 		{
 			requireConsole();
-			std::cout << visible << std::endl;
-			return 0; // exit in main
+			std::cout << shownInHelp << std::endl;
+			return 0;
 		}
-		if (vm.count("version"))
+		if (has("version"))
 		{
 			requireConsole();
-			std::string versionStr;
-#if EMULATOR_VERSION_PATCH == 0
-			versionStr = fmt::format("{}.{}{}", EMULATOR_VERSION_MAJOR, EMULATOR_VERSION_MINOR, EMULATOR_VERSION_SUFFIX);
-#else
-			versionStr = fmt::format("{}.{}-{}{}", EMULATOR_VERSION_MAJOR, EMULATOR_VERSION_MINOR, EMULATOR_VERSION_PATCH, EMULATOR_VERSION_SUFFIX);
-#endif
-			std::cout << versionStr << std::endl;
-			return 0; // exit in main
+			std::cout << versionText() << std::endl;
+			return 0;
 		}
 
-		if (vm.count("verbose"))
+		if (has("verbose"))
 			s_verbose = true;
 
-		if (vm.count("game"))
+		if (has("game"))
+			s_load_game_file = withoutLeadingEquals(argument<std::wstring>(vm, "game"));
+		if (has("title-id"))
 		{
-			std::wstring tmp = vm["game"].as<std::wstring>();
-			// workaround for boost command_line_parser not trimming token for short name parameters despite short_allow_adjacent
-			if (tmp.size() > 0 && tmp.front() == '=')
-				tmp.erase(tmp.begin()+0);
-			
-			s_load_game_file = tmp;
-		}
-        if (vm.count("title-id"))
-        {
-            auto titleParam = vm["title-id"].as<std::string>();
-            try {
-                if (titleParam.starts_with('='))
-                    titleParam.erase(titleParam.begin());
-            	TitleId titleId{};
-            	if (!TitleIdParser::ParseFromStr(titleParam, titleId))
-            		std::cerr << "Invalid title id format";
-                s_load_title_id = titleId;
-            }
-            catch (std::invalid_argument const& e)
-            {
-                std::cerr << "Expected title_param ID as an unsigned 64-bit hexadecimal string\n";
-            }
-        }
-			
-		if (vm.count("mlc"))
-		{
-			std::wstring tmp = vm["mlc"].as<std::wstring>();
-			// workaround for boost command_line_parser not trimming token for short name parameters despite short_allow_adjacent
-			if (tmp.size() > 0 && tmp.front() == '=')
-				tmp.erase(tmp.begin() + 0);
-
-			s_mlc_path = tmp;
-		}
-
-		if (vm.count("rp-record") && vm.count("rp-ffmpeg"))
-		{
-			auto getPathParam = [&](const char* name) {
-				std::wstring tmp = vm[name].as<std::wstring>();
-				if (tmp.size() > 0 && tmp.front() == '=')
-					tmp.erase(tmp.begin() + 0);
-				return fs::path(tmp);
-			};
-			s_rp_record_path = getPathParam("rp-record");
-			s_rp_ffmpeg_path = getPathParam("rp-ffmpeg");
-		}
-
-		if (vm.count("rp-embed"))
-			s_rp_embed = true;
-		if (vm.count("rp-opengl"))
-			s_rp_opengl = true;
-		if (vm.count("rp-parent"))
-		{
-			std::string tmp = vm["rp-parent"].as<std::string>();
-			if (tmp.size() > 0 && tmp.front() == '=')
-				tmp.erase(tmp.begin() + 0);
 			try
 			{
-				const bool isHex = tmp.size() > 2 && tmp[0] == '0' && (tmp[1] == 'x' || tmp[1] == 'X');
-				size_t used = 0;
-				const uint64 hwnd = std::stoull(isHex ? tmp.substr(2) : tmp, &used, isHex ? 16 : 10);
-				if (hwnd != 0 && used == (isHex ? tmp.size() - 2 : tmp.size()))
-					s_rp_parent_window = hwnd;
-				else
-					std::cerr << "Invalid --rp-parent window handle\n";
+				const std::string text = withoutLeadingEquals(argument<std::string>(vm, "title-id"));
+				TitleId titleId{};
+				if (!TitleIdParser::ParseFromStr(text, titleId))
+					std::cerr << "Invalid title id format";
+				s_load_title_id = titleId; // also set (to 0) when invalid
+			}
+			catch (const std::invalid_argument&)
+			{
+				std::cerr << "Expected title_param ID as an unsigned 64-bit hexadecimal string\n";
+			}
+		}
+		if (has("mlc"))
+			s_mlc_path = withoutLeadingEquals(argument<std::wstring>(vm, "mlc"));
+
+		// PixelU: recording needs both the output folder and ffmpeg
+		if (has("rp-record") && has("rp-ffmpeg"))
+		{
+			s_rp_record_path = fs::path(withoutLeadingEquals(argument<std::wstring>(vm, "rp-record")));
+			s_rp_ffmpeg_path = fs::path(withoutLeadingEquals(argument<std::wstring>(vm, "rp-ffmpeg")));
+		}
+		if (has("rp-embed"))
+			s_rp_embed = true;
+		if (has("rp-opengl"))
+			s_rp_opengl = true;
+		if (has("rp-parent"))
+		{
+			std::optional<uint64> handle;
+			try
+			{
+				handle = parseWindowHandle(withoutLeadingEquals(argument<std::string>(vm, "rp-parent")));
 			}
 			catch (const std::exception&)
 			{
-				std::cerr << "Invalid --rp-parent window handle\n";
 			}
-			s_rp_embed = true;
+			if (handle)
+				s_rp_parent_window = *handle;
+			else
+				std::cerr << "Invalid --rp-parent window handle\n";
+			s_rp_embed = true; // embedding is implied even when the handle is invalid
 		}
 
-		if (vm.count("account"))
+		if (has("account"))
 		{
-			const auto id = ConvertString<uint32>(vm["account"].as<std::string>(), 16);
-			if (id >= Account::kMinPersistendId)
-				s_persistent_id = id;
+			const uint32 persistentId = ConvertString<uint32>(argument<std::string>(vm, "account"), 16);
+			if (persistentId >= Account::kMinPersistendId)
+				s_persistent_id = persistentId;
 		}
-		
-		if (vm.count("fullscreen"))
-			s_fullscreen = vm["fullscreen"].as<bool>();
-		if (vm.count("ud"))
-			s_render_upside_down = vm["ud"].as<bool>();
-		
-		if (vm.count("nsight"))
-			s_nsight_mode = vm["nsight"].as<bool>();
 
-		if(vm.count("force-interpreter"))
-			s_force_interpreter = vm["force-interpreter"].as<bool>();
+		if (has("fullscreen"))
+			s_fullscreen = argument<bool>(vm, "fullscreen");
+		if (has("ud"))
+			s_render_upside_down = argument<bool>(vm, "ud");
+		if (has("nsight"))
+			s_nsight_mode = argument<bool>(vm, "nsight");
+		if (has("force-interpreter"))
+			s_force_interpreter = argument<bool>(vm, "force-interpreter");
+		if (has("force-multicore-interpreter"))
+			s_force_multicore_interpreter = argument<bool>(vm, "force-multicore-interpreter");
+		if (has("enable-gdbstub"))
+			s_enable_gdbstub = argument<bool>(vm, "enable-gdbstub");
+		if (has("open-debugger"))
+			s_open_debugger = argument<bool>(vm, "open-debugger");
 
-		if(vm.count("force-multicore-interpreter"))
-			s_force_multicore_interpreter = vm["force-multicore-interpreter"].as<bool>();
-		
-		if (vm.count("enable-gdbstub"))
-			s_enable_gdbstub = vm["enable-gdbstub"].as<bool>();
-
-		if (vm.count("open-debugger"))
-			s_open_debugger = vm["open-debugger"].as<bool>();
-
-		if (vm.count("forward-console-logging"))
+		if (has("forward-console-logging"))
 		{
 			requireConsole();
 			s_forward_console_logging = true;
 		}
 
-		if (vm.count("cos-argstr")) {
-			std::string potential_argstr = vm["cos-argstr"].as<std::string>();
-
-			// Validate our first argument has a '.rpx'; this is a requirement of COS.
-			size_t space_pos = potential_argstr.find(' ');
-			std::string_view first_arg = (space_pos == std::string_view::npos) ? std::string_view(potential_argstr) : std::string_view(potential_argstr).substr(0, space_pos);
-			if (first_arg.length() < 4 || first_arg.substr(first_arg.length() - 4) != ".rpx") {
+		if (has("cos-argstr"))
+		{
+			const std::string argstr = argument<std::string>(vm, "cos-argstr");
+			// the first argument has to be the RPX file name
+			const std::string_view firstArgument = std::string_view(argstr).substr(0, argstr.find(' '));
+			if (!firstArgument.ends_with(".rpx"))
+			{
 				std::cout << "--cos-argstr's first argument _must_ be a filename that ends in '.rpx'." << std::endl;
 				return 1;
 			}
-			s_cos_argstr = potential_argstr;
+			s_cos_argstr = argstr;
 		}
 
-		if (vm.count("cos-mounts"))
+		if (has("cos-mounts"))
 		{
-			for (const auto& argument : vm["cos-mounts"].as<std::vector<std::wstring>>())
+			for (const std::wstring& mount : argument<std::vector<std::wstring>>(vm, "cos-mounts"))
 			{
-				sint32 winDriveColonOffset = 0;
-#if BOOST_OS_WINDOWS
-				// on Windows a path may start with \\?\C:\ or C:\ (where C can be an arbitrary drive letter), but the delimiter is also a colon, so filter out the drive colon
-				static const std::wregex winDrivePrefixRegex(LR"(^(?:\\\\\?\\)?[A-Za-z]:)");
-				std::wsmatch winDrivePrefixMatch;
-				if (std::regex_search(argument, winDrivePrefixMatch, winDrivePrefixRegex))
-					winDriveColonOffset = static_cast<sint32>(winDrivePrefixMatch.length());
-#endif
-				size_t colonLocation = argument.find(L':', winDriveColonOffset);
-				if (colonLocation == std::wstring::npos)
+				const size_t separator = findMountSeparator(mount);
+				if (separator == std::wstring::npos)
 				{
-					std::cerr << "Argument for a mount expects to be in the format: `path on host:path in emulated system`, was not: `" << boost::nowide::narrow(argument) << "`\n";
+					std::cerr << "Argument for a mount expects to be in the format: `path on host:path in emulated system`, was not: `" << boost::nowide::narrow(mount) << "`\n";
 					continue;
 				}
-
-				s_cos_mounts[argument.substr(0, colonLocation)] = argument.substr(colonLocation + 1);
+				s_cos_mounts[mount.substr(0, separator)] = mount.substr(separator + 1);
 			}
 		}
 
-		std::wstring extract_path, log_path;
-		std::string output_path;
-		if (vm.count("extract"))
-			extract_path = vm["extract"].as<std::wstring>();
-		if (vm.count("path"))
-			output_path = vm["path"].as<std::string>();
-		if (vm.count("output"))
-			log_path = vm["output"].as<std::wstring>();
+		const std::wstring extractImage = has("extract") ? argument<std::wstring>(vm, "extract") : std::wstring();
+		const std::string extractFile = has("path") ? argument<std::string>(vm, "path") : std::string();
+		const std::wstring extractTo = has("output") ? argument<std::wstring>(vm, "output") : std::wstring();
 
-		// recompiler range limit for debugging
-		if (vm.count("ppcrec-lower-addr"))
-		{
-			uint32 addr = (uint32)StringHelpers::ToInt64(vm["ppcrec-lower-addr"].as<std::string>());
-			ppcRec_limitLowerAddr = addr;
-		}
-		if (vm.count("ppcrec-upper-addr"))
-		{
-			uint32 addr = (uint32)StringHelpers::ToInt64(vm["ppcrec-upper-addr"].as<std::string>());
-			ppcRec_limitUpperAddr = addr;
-		}
-		if(ppcRec_limitLowerAddr != 0 && ppcRec_limitUpperAddr != 0)
+		if (has("ppcrec-lower-addr"))
+			ppcRec_limitLowerAddr = (uint32)StringHelpers::ToInt64(argument<std::string>(vm, "ppcrec-lower-addr"));
+		if (has("ppcrec-upper-addr"))
+			ppcRec_limitUpperAddr = (uint32)StringHelpers::ToInt64(argument<std::string>(vm, "ppcrec-upper-addr"));
+		if (ppcRec_limitLowerAddr != 0 && ppcRec_limitUpperAddr != 0)
 			cemuLog_log(LogType::Force, "PPCRec range limited to 0x{:08x}-0x{:08x}", ppcRec_limitLowerAddr, ppcRec_limitUpperAddr);
 
-		if(!extract_path.empty())
+		if (!extractImage.empty())
 		{
-			ExtractorTool(extract_path, output_path, log_path);
+			ExtractorTool(extractImage, extractFile, extractTo);
 			return 0;
 		}
-
 		return std::nullopt;
 	}
 	catch (const std::exception& ex)
 	{
-		std::string errorMsg;
-		errorMsg.append("Error while trying to parse command line parameter:\n");
-		errorMsg.append(ex.what());
-		std::cout << errorMsg << std::endl;
+		std::cout << "Error while trying to parse command line parameter:\n" << ex.what() << std::endl;
 		return 1;
 	}
-	
 }
 
 bool LaunchSettings::ExtractorTool(std::wstring_view wud_path, std::string_view output_path, std::wstring_view log_path)
 {
-	// extracting requires path of file
 	if (output_path.empty())
 	{
 		requireConsole();
 		puts("Cannot extract files because no source path was specified (-p)\n");
 		return false;
 	}
-	// mount wud
+
 	AES128_init();
-	FSTVolume* srcVolume = FSTVolume::OpenFromDiscImage(fs::path(wud_path));
-	if (!srcVolume)
-	{
-		requireConsole();
-		puts(fmt::format("Unable to open \"%s\"\n", fs::path(wud_path).generic_string()).c_str());
-		return false;
-	}
+	const fs::path imagePath(wud_path);
+	std::vector<uint8> fileData;
 	bool fileFound = false;
-	std::vector<uint8> fileData = srcVolume->ExtractFile(output_path, &fileFound);
-	delete srcVolume;
+	{
+		std::unique_ptr<FSTVolume> volume(FSTVolume::OpenFromDiscImage(imagePath));
+		if (!volume)
+		{
+			requireConsole();
+			puts(fmt::format("Unable to open \"{}\"\n", imagePath.generic_string()).c_str());
+			return false;
+		}
+		fileData = volume->ExtractFile(output_path, &fileFound);
+	}
 	if (!fileFound)
 	{
 		requireConsole();
-		puts(fmt::format("Unable to read file \"%s\"\n", output_path).c_str());
+		puts(fmt::format("Unable to read file \"{}\"\n", output_path).c_str());
 		return false;
 	}
-	// output on console (if no output path was specified)
-	if (!log_path.empty())
-	{
-		try
-		{
-			fs::path filename(std::wstring{ log_path });
 
-			filename /= boost::nowide::widen(std::string(output_path));
-			
-			fs::path p = filename;
-			p.remove_filename();
-			
-			fs::create_directories(p);
-			std::ofstream file(filename, std::ios::out | std::ios::binary);
-			file.write((const char*)fileData.data(), fileData.size());
-			file.flush();
-			file.close();
-		}
-		catch (const std::exception& ex)
-		{
-			cemuLog_log(LogType::Force, "can't write file: {}", ex.what());
-			puts(fmt::format("can't write file: %s\n", ex.what()).c_str());
-		}
-	}
-	else
+	if (log_path.empty())
 	{
-		// output to console
+		// no output folder: print the file
 		requireConsole();
 		printf("%.*s", (int)fileData.size(), fileData.data());
 		fflush(stdout);
+		return true;
 	}
-	
+	try
+	{
+		const fs::path target = fs::path(std::wstring(log_path)) / boost::nowide::widen(std::string(output_path));
+		fs::create_directories(fs::path(target).remove_filename());
+		std::ofstream out(target, std::ios::out | std::ios::binary);
+		out.write((const char*)fileData.data(), (std::streamsize)fileData.size());
+	}
+	catch (const std::exception& ex)
+	{
+		cemuLog_log(LogType::Force, "can't write file: {}", ex.what());
+		puts(fmt::format("can't write file: {}\n", ex.what()).c_str());
+	}
 	return true;
 }

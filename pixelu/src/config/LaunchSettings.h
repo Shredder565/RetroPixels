@@ -1,23 +1,27 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include <optional>
 #include <string>
 #include <unordered_map>
 
+// Options given on the command line. HandleCommandline returns a process
+// exit code when the program should stop (help, version, extractor tool,
+// invalid arguments) and nullopt when it should start normally.
 class LaunchSettings
 {
 public:
-	// winmain
+	// Windows WinMain command line
 	static std::optional<int> HandleCommandline(const wchar_t* lpCmdLine);
-	// wmain
+	// wide argv
 	static std::optional<int> HandleCommandline(int argc, wchar_t* argv[]);
-	// main (unix)
+	// UTF-8 argv
 	static std::optional<int> HandleCommandline(int argc, char* argv[]);
 
 	static std::optional<int> HandleCommandline(const std::vector<std::wstring>& args);
 
 	static std::optional<fs::path> GetLoadFile() { return s_load_game_file; }
-	static std::optional<uint64> GetLoadTitleID() {return s_load_title_id;}
+	static std::optional<uint64> GetLoadTitleID() { return s_load_title_id; }
 	static std::optional<fs::path> GetMLCPath() { return s_mlc_path; }
 
 	static std::optional<bool> RenderUpsideDownEnabled() { return s_render_upside_down; }
@@ -34,22 +38,23 @@ public:
 	static bool OpenDebuggerEnabled() { return s_open_debugger; }
 	static bool NSightModeEnabled() { return s_nsight_mode; }
 
-	static bool ForceInterpreter() { return s_force_interpreter; };
+	static bool ForceInterpreter() { return s_force_interpreter; }
 	static bool ForceMultiCoreInterpreter() { return s_force_multicore_interpreter; }
 
 	static std::optional<uint32> GetPersistentId() { return s_persistent_id; }
 
-	// PixelU: RetroPixels game recording (see Cafe/HW/Latte/Core/LatteRecorder.h)
+	// PixelU: RetroPixels game recording, --rp-record and --rp-ffmpeg (see Cafe/HW/Latte/Core/LatteRecorder.h)
 	static std::optional<fs::path> GetRPRecordPath() { return s_rp_record_path; }
 	static std::optional<fs::path> GetRPFFmpegPath() { return s_rp_ffmpeg_path; }
-	// PixelU: RetroPixels shows the game inside its own window (see gui/wxgui/RPEmbed.h)
+	// PixelU: --rp-embed, RetroPixels shows the game inside its own window (see gui/wxgui/RPEmbed.h)
 	static bool RPEmbedEnabled() { return s_rp_embed; }
-	// PixelU: --rp-opengl, RetroPixels found Vulkan not working on this PC
+	// PixelU: --rp-opengl, RetroPixels found that Vulkan does not work on this PC
 	static bool RPForceOpenGL() { return s_rp_opengl; }
+	// PixelU: --rp-parent, native handle of the window to show the game in
 	static std::optional<uint64> GetRPParentWindow() { return s_rp_parent_window; }
 
-	static uint32 GetPPCRecLowerAddr() { return ppcRec_limitLowerAddr; };
-	static uint32 GetPPCRecUpperAddr() { return ppcRec_limitUpperAddr; };
+	static uint32 GetPPCRecLowerAddr() { return ppcRec_limitLowerAddr; }
+	static uint32 GetPPCRecUpperAddr() { return ppcRec_limitUpperAddr; }
 
 private:
 	inline static std::optional<fs::path> s_load_game_file{};
@@ -71,7 +76,7 @@ private:
 
 	inline static bool s_force_interpreter = false;
 	inline static bool s_force_multicore_interpreter = false;
-	
+
 	inline static std::optional<uint32> s_persistent_id{};
 
 	inline static std::optional<fs::path> s_rp_record_path{};
@@ -80,9 +85,10 @@ private:
 	inline static bool s_rp_opengl = false;
 	inline static std::optional<uint64> s_rp_parent_window{};
 
-	// for recompiler debugging
+	// address range the PPC recompiler is limited to (debugging aid, 0 = no limit)
 	inline static uint32 ppcRec_limitLowerAddr{};
 	inline static uint32 ppcRec_limitUpperAddr{};
 
+	// --extract: writes one file of a WUD/WUX image to a folder or to stdout
 	static bool ExtractorTool(std::wstring_view wud_path, std::string_view output_path, std::wstring_view log_path);
 };

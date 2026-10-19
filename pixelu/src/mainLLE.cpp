@@ -1,48 +1,46 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "util/crypto/aes128.h"
 #include "WindowSystem.h"
 #include "Common/FileStream.h"
 
+// Experimental low-level emulation entry: boots the console's own boot ROM
+// and kernel image (bootrom.bin and kernel.img in the working folder)
+// instead of high-level emulating the OS.
+
 void CemuCommonInit();
 
-typedef struct  
+namespace
 {
-	/* +0x000 */ uint32be magic;
-}ppcAncastHeader_t;
+	constexpr uint32 kBootRomPhysAddr = 0x00000000;
+	constexpr uint32 kKernelPhysAddr = 0x08000000;
+	constexpr uint32 kAncastMagic = 0xEFA282D9; // first word of an ancast image
+	constexpr uint32 kResetVector = 0x00000100;
 
-void loadEncryptedPPCAncastKernel()
-{
-	auto kernelData = FileStream::LoadIntoMemory("kernel.img");
-	if (!kernelData)
-		exit(-1);
-	// check header
-	ppcAncastHeader_t* ancastHeader = (ppcAncastHeader_t*)kernelData->data();
-	if(ancastHeader->magic != (uint32be)0xEFA282D9)
-		assert_dbg(); // invalid magic
-	memcpy(memory_getPointerFromPhysicalOffset(0x08000000), kernelData->data(), kernelData->size());
-}
-
-void loadPPCBootrom()
-{
-	auto bootromData = FileStream::LoadIntoMemory("bootrom.bin");
-	if (!bootromData)
-		exit(-1);
-	memcpy(memory_getPointerFromPhysicalOffset(0x00000000), bootromData->data(), bootromData->size());
+	// loads a file into physical memory; exits the process if it is missing
+	std::vector<uint8> loadIntoPhysicalMemory(const char* fileName, uint32 physAddr)
+	{
+		std::optional<std::vector<uint8>> data = FileStream::LoadIntoMemory(fileName);
+		if (!data)
+			exit(-1);
+		memcpy(memory_getPointerFromPhysicalOffset(physAddr), data->data(), data->size());
+		return std::move(*data);
+	}
 }
 
 void mainEmulatorLLE()
 {
 	CemuCommonInit();
-	// memory init
 	memory_initPhysicalLayout();
-	
-	// start GUI thread
-	WindowSystem::Create();
-	// load kernel ancast image
-	loadPPCBootrom();
-	loadEncryptedPPCAncastKernel();
-	
-	PPCTimer_waitForInit();
-	// begin execution
-	PPCCoreLLE_startSingleCoreScheduler(0x00000100);
-}
+	WindowSystem::Create(); // starts the GUI thread
 
+	loadIntoPhysicalMemory("bootrom.bin", kBootRomPhysAddr);
+	const std::vector<uint8> kernel = loadIntoPhysicalMemory("kernel.img", kKernelPhysAddr);
+	uint32be magic = 0;
+	if (kernel.size() >= sizeof(magic))
+		memcpy(&magic, kernel.data(), sizeof(magic));
+	if (magic != kAncastMagic)
+		assert_dbg(); // not an ancast image
+
+	PPCTimer_waitForInit();
+	PPCCoreLLE_startSingleCoreScheduler(kResetVector);
+}

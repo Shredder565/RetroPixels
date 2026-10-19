@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/GameProfile/GameProfile.h"
 #include "Cafe/IOSU/legacy/iosu_crypto.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
@@ -11,34 +12,48 @@
 #include "Cafe/Account/Account.h"
 #include "util/helpers/helpers.h"
 
-void ActiveSettings::SetPaths(bool isPortableMode,
-		const fs::path& executablePath,
-		const fs::path& userDataPath,
-		const fs::path& configPath,
-		const fs::path& cachePath,
-		const fs::path& dataPath,
-		std::set<fs::path>& failedWriteAccess)
+namespace
 {
-	cemu_assert_debug(!s_setPathsCalled); // can only change paths before loading
+	bool isAnyOf(uint64 titleId, std::initializer_list<uint64> titleIds)
+	{
+		return std::find(titleIds.begin(), titleIds.end(), titleId) != titleIds.end();
+	}
+
+	bool isOnlineService(NetworkService service)
+	{
+		return service == NetworkService::Nintendo || service == NetworkService::Pretendo || service == NetworkService::Custom;
+	}
+}
+
+void ActiveSettings::SetPaths(bool isPortableMode,
+							  const fs::path& executablePath,
+							  const fs::path& userDataPath,
+							  const fs::path& configPath,
+							  const fs::path& cachePath,
+							  const fs::path& dataPath,
+							  std::set<fs::path>& failedWriteAccess)
+{
+	cemu_assert_debug(!s_setPathsCalled); // the folders cannot change once in use
 	s_isPortableMode = isPortableMode;
 	s_executable_path = executablePath;
+	s_executable_filename = executablePath.filename();
 	s_user_data_path = userDataPath;
 	s_config_path = configPath;
 	s_cache_path = cachePath;
 	s_data_path = dataPath;
+
+	// the data folder may be read-only, the others must be writable
 	failedWriteAccess.clear();
-	for (auto&& path : {userDataPath, configPath, cachePath})
+	for (const fs::path& dir : {userDataPath, configPath, cachePath})
 	{
 		std::error_code ec;
-		if (!fs::exists(path, ec))
-			fs::create_directories(path, ec);
-		if (!TestWriteAccess(path))
-		{
-			cemuLog_log(LogType::Force, "Failed to write to {}", _pathToUtf8(path));
-			failedWriteAccess.insert(path);
-		}
+		if (!fs::exists(dir, ec))
+			fs::create_directories(dir, ec);
+		if (TestWriteAccess(dir))
+			continue;
+		cemuLog_log(LogType::Force, "Failed to write to {}", _pathToUtf8(dir));
+		failedWriteAccess.insert(dir);
 	}
-	s_executable_filename = s_executable_path.filename();
 	s_setPathsCalled = true;
 }
 
@@ -50,8 +65,8 @@ void ActiveSettings::SetPaths(bool isPortableMode,
 void ActiveSettings::Init()
 {
 	cemu_assert_debug(s_setPathsCalled);
-	std::string additionalErrorInfo;
-	s_has_required_online_files = iosuCrypt_checkRequirementsForOnlineMode(additionalErrorInfo) == IOS_CRYPTO_ONLINE_REQ_OK;
+	std::string errorDetails;
+	s_has_required_online_files = iosuCrypt_checkRequirementsForOnlineMode(errorDetails) == IOS_CRYPTO_ONLINE_REQ_OK;
 }
 
 bool ActiveSettings::LoadSharedLibrariesEnabled()
@@ -66,19 +81,17 @@ bool ActiveSettings::DisplayDRCEnabled()
 
 CPUMode ActiveSettings::GetCPUMode()
 {
-	auto mode = g_current_game_profile->GetCPUMode().value_or(CPUMode::Auto);
-
-	if (mode == CPUMode::Auto)
+	const CPUMode mode = g_current_game_profile->GetCPUMode().value_or(CPUMode::Auto);
+	switch (mode)
 	{
-		if (GetPhysicalCoreCount() >= 4)
-			mode = CPUMode::MulticoreRecompiler;
-		else
-			mode = CPUMode::SinglecoreRecompiler;
+	case CPUMode::Auto:
+		// the multi-core recompiler needs at least four physical cores to pay off
+		return GetPhysicalCoreCount() >= 4 ? CPUMode::MulticoreRecompiler : CPUMode::SinglecoreRecompiler;
+	case CPUMode::DualcoreRecompiler: // retired, mapped to multi-core
+		return CPUMode::MulticoreRecompiler;
+	default:
+		return mode;
 	}
-	else if (mode == CPUMode::DualcoreRecompiler) // dualcore is disabled now
-		mode = CPUMode::MulticoreRecompiler;
-
-	return mode;
 }
 
 uint8 ActiveSettings::GetTimerShiftFactor()
@@ -93,7 +106,7 @@ void ActiveSettings::SetTimerShiftFactor(uint8 shiftFactor)
 
 PrecompiledShaderOption ActiveSettings::GetPrecompiledShadersOption()
 {
-	return PrecompiledShaderOption::Auto; // g_current_game_profile->GetPrecompiledShadersState().value_or(GetConfig().precompiled_shaders);
+	return PrecompiledShaderOption::Auto; // not configurable at the moment
 }
 
 bool ActiveSettings::RenderUpsideDownEnabled()
@@ -106,46 +119,53 @@ bool ActiveSettings::WaitForGX2DrawDoneEnabled()
 	return GetConfig().gx2drawdone_sync;
 }
 
+// The game profile's API, else the configured one; --rp-opengl overrides both.
+// If that API is not available, the first available of Vulkan, Metal, OpenGL
+// is used.
 GraphicAPI ActiveSettings::GetGraphicsAPI()
 {
-	GraphicAPI api = g_current_game_profile->GetGraphicsAPI().value_or(GetConfig().graphic_api);
+	GraphicAPI wanted = g_current_game_profile->GetGraphicsAPI().value_or(GetConfig().graphic_api);
 #ifdef ENABLE_OPENGL
-	if (LaunchSettings::RPForceOpenGL()) // PixelU: RetroPixels asked for OpenGL (Vulkan doesn't work here)
-		api = kOpenGL;
+	if (LaunchSettings::RPForceOpenGL()) // PixelU: RetroPixels asked for OpenGL (Vulkan does not work on this PC)
+		wanted = kOpenGL;
 #endif
-	std::optional<GraphicAPI> fallbackAPI;
+	std::optional<GraphicAPI> firstAvailable;
+	auto offer = [&](GraphicAPI api) -> bool {
+		if (wanted == api)
+			return true;
+		if (!firstAvailable)
+			firstAvailable = api;
+		return false;
+	};
 #ifdef ENABLE_VULKAN
-	if (g_vulkan_available)
-	{
-		if (api == kVulkan)
-			return api;
-		fallbackAPI = kVulkan;
-	}
+	if (g_vulkan_available && offer(kVulkan))
+		return kVulkan;
 #endif
 #ifdef ENABLE_METAL
-	if (api == kMetal)
-		return api;
-	fallbackAPI = fallbackAPI.value_or(kMetal);
+	if (offer(kMetal))
+		return kMetal;
 #endif
 #ifdef ENABLE_OPENGL
-	if (api == kOpenGL)
-		return api;
-	fallbackAPI = fallbackAPI.value_or(kOpenGL);
+	if (offer(kOpenGL))
+		return kOpenGL;
 #endif
-	cemu_assert(fallbackAPI.has_value());
-	return *fallbackAPI;
+	cemu_assert(firstAvailable.has_value());
+	return *firstAvailable;
 }
 
+// the game's gamma unless overridden, plus the configured value
 float ActiveSettings::GetTVGamma()
 {
-	const auto& config = GetConfig();
-	return config.overrideGammaValue.GetValue() + LatteGPUState.tvGamma * !config.overrideAppGammaPreference.GetValue();
+	const CemuConfig& cfg = GetConfig();
+	const float gameGamma = cfg.overrideAppGammaPreference.GetValue() ? 0.0f : LatteGPUState.tvGamma;
+	return cfg.overrideGammaValue.GetValue() + gameGamma;
 }
 
 float ActiveSettings::GetDRCGamma()
 {
-	const auto& config = GetConfig();
-	return config.overrideGammaValue.GetValue() + LatteGPUState.drcGamma * !config.overrideAppGammaPreference.GetValue();
+	const CemuConfig& cfg = GetConfig();
+	const float gameGamma = cfg.overrideAppGammaPreference.GetValue() ? 0.0f : LatteGPUState.drcGamma;
+	return cfg.overrideGammaValue.GetValue() + gameGamma;
 }
 
 bool ActiveSettings::AudioOutputOnlyAux()
@@ -165,12 +185,11 @@ uint32 ActiveSettings::GetPersistentId()
 
 bool ActiveSettings::IsOnlineEnabled()
 {
-	if(!Account::GetAccount(GetPersistentId()).IsValidOnlineAccount())
+	if (!Account::GetAccount(GetPersistentId()).IsValidOnlineAccount())
 		return false;
-	if(!HasRequiredOnlineFiles())
+	if (!HasRequiredOnlineFiles())
 		return false;
-	NetworkService networkService = static_cast<NetworkService>(GetConfig().GetAccountNetworkService(GetPersistentId()));
-	return networkService == NetworkService::Nintendo || networkService == NetworkService::Pretendo || networkService == NetworkService::Custom;
+	return isOnlineService(GetConfig().GetAccountNetworkService(GetPersistentId()));
 }
 
 bool ActiveSettings::HasRequiredOnlineFiles()
@@ -183,109 +202,74 @@ NetworkService ActiveSettings::GetNetworkService()
 	return GetConfig().GetAccountNetworkService(GetPersistentId());
 }
 
-bool ActiveSettings::DumpShadersEnabled()
-{
-	return s_dump_shaders;
-}
+bool ActiveSettings::DumpShadersEnabled() { return s_dump_shaders; }
+bool ActiveSettings::DumpTexturesEnabled() { return s_dump_textures; }
+bool ActiveSettings::DumpRecompilerFunctionsEnabled() { return s_dump_recompiler_functions; }
+bool ActiveSettings::DumpLibcurlRequestsEnabled() { return s_dump_libcurl_requests; }
+void ActiveSettings::EnableDumpShaders(bool state) { s_dump_shaders = state; }
+void ActiveSettings::EnableDumpTextures(bool state) { s_dump_textures = state; }
+void ActiveSettings::EnableDumpRecompilerFunctions(bool state) { s_dump_recompiler_functions = state; }
+void ActiveSettings::EnableDumpLibcurlRequests(bool state) { s_dump_libcurl_requests = state; }
 
-bool ActiveSettings::DumpTexturesEnabled()
-{
-	return s_dump_textures;
-}
-
-bool ActiveSettings::DumpRecompilerFunctionsEnabled()
-{
-	return s_dump_recompiler_functions;
-}
-
-bool ActiveSettings::DumpLibcurlRequestsEnabled()
-{
-	return s_dump_libcurl_requests;
-}
-
-void ActiveSettings::EnableDumpShaders(bool state)
-{
-	s_dump_shaders = state;
-}
-
-void ActiveSettings::EnableDumpTextures(bool state)
-{
-	s_dump_textures = state;
-}
-
-void ActiveSettings::EnableDumpRecompilerFunctions(bool state)
-{
-	s_dump_recompiler_functions = state;
-}
-
-void ActiveSettings::EnableDumpLibcurlRequests(bool state)
-{
-	s_dump_libcurl_requests = state;
-}
-
+// Art Academy calls VPADRead in a tight loop
 bool ActiveSettings::VPADDelayEnabled()
 {
-	const uint64 titleId = CafeSystem::GetForegroundTitleId();
-	// workaround for Art Academy spamming VPADRead
-	return /* Art Academy: Home Studio (US) */ titleId == 0x000500001017BF00 ||
-		/* Art Academy: Home Studio (JP) */ titleId == 0x000500001017BE00 ||
-		/* Art Academy: Atelier (EU) */ titleId == 0x000500001017B500;
+	return isAnyOf(CafeSystem::GetForegroundTitleId(), {
+		0x000500001017BF00, // Art Academy: Home Studio (US)
+		0x000500001017BE00, // Art Academy: Home Studio (JP)
+		0x000500001017B500, // Art Academy: Atelier (EU)
+	});
 }
 
+// games with shaders that can loop forever (a guard is added to loops)
 bool ActiveSettings::ShaderPreventInfiniteLoopsEnabled()
 {
-	const uint64 titleId = CafeSystem::GetForegroundTitleId();
-	// workaround for NSMBU (and variants) having a bug where shaders can get stuck in infinite loops
-	// Fatal Frame has an actual infinite loop in shader 0xb6a67c19f6472e00 encountered during a cutscene for the second drop (eShop version only?)
-	// update: As of Cemu 1.20.0 this should no longer be required for NSMBU/NSLU due to fixes with uniform handling. But we leave it here for good measure
-	// todo - Once we add support for loop config registers this workaround should become unnecessary
-	return /* NSMBU JP */ titleId == 0x0005000010101C00 ||
-		/* NSMBU US */ titleId == 0x0005000010101D00 ||
-		/* NSMBU EU */ titleId == 0x0005000010101E00 ||
-		/* NSMBU+L US */ titleId == 0x000500001014B700 ||
-		/* NSMBU+L EU */ titleId == 0x000500001014B800 ||
-		/* NSLU US */ titleId == 0x0005000010142300 ||
-		/* NSLU EU */ titleId == 0x0005000010142400 ||
-	   /* Project Zero: Maiden of Black Water (EU) */ titleId == 0x00050000101D0300 ||
-	   /* Fatal Frame: Maiden of Black Water (US) */ titleId == 0x00050000101D0600 ||
-	   /* Project Zero: Maiden of Black Water (JP) */ titleId == 0x000500001014D200 ||
-	   /* Project Zero: Maiden of Black Water (Trial, EU) */ titleId == 0x00050000101D3F00;
+	return isAnyOf(CafeSystem::GetForegroundTitleId(), {
+		0x0005000010101C00, // New Super Mario Bros. U (JP)
+		0x0005000010101D00, // New Super Mario Bros. U (US)
+		0x0005000010101E00, // New Super Mario Bros. U (EU)
+		0x000500001014B700, // New Super Mario Bros. U + Luigi (US)
+		0x000500001014B800, // New Super Mario Bros. U + Luigi (EU)
+		0x0005000010142300, // New Super Luigi U (US)
+		0x0005000010142400, // New Super Luigi U (EU)
+		0x00050000101D0300, // Project Zero: Maiden of Black Water (EU)
+		0x00050000101D0600, // Fatal Frame: Maiden of Black Water (US)
+		0x000500001014D200, // Project Zero: Maiden of Black Water (JP)
+		0x00050000101D3F00, // Project Zero: Maiden of Black Water (trial, EU)
+	});
 }
 
+// games that need the GPU caches flushed between frames
 bool ActiveSettings::FlushGPUCacheOnSwap()
 {
-	const uint64 titleId = CafeSystem::GetForegroundTitleId();
-	// games that require flushing the cache between frames
-	return
-		/* PAC-MAN and the Ghostly Adventures (EU) */ titleId == 0x0005000010147900 ||
-		/* PAC-MAN and the Ghostly Adventures (US) */ titleId == 0x0005000010146300 ||
-		/* PAC-MAN and the Ghostly Adventures 2 (EU) */ titleId == 0x000500001017E500 ||
-		/* PAC-MAN and the Ghostly Adventures 2 (US) */ titleId == 0x000500001017E600;
+	return isAnyOf(CafeSystem::GetForegroundTitleId(), {
+		0x0005000010147900, // PAC-MAN and the Ghostly Adventures (EU)
+		0x0005000010146300, // PAC-MAN and the Ghostly Adventures (US)
+		0x000500001017E500, // PAC-MAN and the Ghostly Adventures 2 (EU)
+		0x000500001017E600, // PAC-MAN and the Ghostly Adventures 2 (US)
+	});
 }
 
+// Games that sample exactly on texel edges. The console's sampler rounds
+// there, while host GPUs truncate when converting coordinates, which picks
+// the neighbouring texel.
 bool ActiveSettings::ForceSamplerRoundToPrecision()
 {
-	// some Wayforward games (Duck Tales, Adventure Time Explore The Dungeon) sample textures exactly on the texel edge. On Wii U this is fine because the rounding mode can be controlled
-	// on OpenGL/Vulkan when uv coordinates are converted from (un)normalized to integer the implementation always truncates which causes an off-by-one error in edge cases
-	// In the future we should look into optionally correctly emulating sampler behavior (its quite complex, Latte supports flexible precision levels)
-	const uint64 titleId = CafeSystem::GetForegroundTitleId();
-	return
-		/* Adventure Time ETDBIDK (EU) */ titleId == 0x000500001014E100 ||
-		/* Adventure Time ETDBIDK (US) */ titleId == 0x0005000010144000 ||
-		/* DuckTales Remastered (EU) */ titleId == 0x0005000010129200 ||
-		/* DuckTales Remastered (US) */ titleId == 0x0005000010129000;
-	return false;
+	return isAnyOf(CafeSystem::GetForegroundTitleId(), {
+		0x000500001014E100, // Adventure Time: Explore the Dungeon... (EU)
+		0x0005000010144000, // Adventure Time: Explore the Dungeon... (US)
+		0x0005000010129200, // DuckTales: Remastered (EU)
+		0x0005000010129000, // DuckTales: Remastered (US)
+	});
 }
 
 fs::path ActiveSettings::GetMlcPath()
 {
 	cemu_assert_debug(s_setPathsCalled);
-	if(const auto launch_mlc = LaunchSettings::GetMLCPath(); launch_mlc.has_value())
-		return launch_mlc.value();
-
-	if(const auto config_mlc = GetConfig().mlc_path.GetValue(); !config_mlc.empty())
-		return _utf8ToPath(config_mlc);
-
+	if (const auto fromCommandLine = LaunchSettings::GetMLCPath())
+		return *fromCommandLine;
+	if (const std::string fromConfig = GetConfig().mlc_path.GetValue(); !fromConfig.empty())
+		return _utf8ToPath(fromConfig);
 	return GetDefaultMLCPath();
 }
 
@@ -304,4 +288,3 @@ fs::path ActiveSettings::GetDefaultMLCPath()
 {
 	return GetUserDataPath("mlc01");
 }
-
