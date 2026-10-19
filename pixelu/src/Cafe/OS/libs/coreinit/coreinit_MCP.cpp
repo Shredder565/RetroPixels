@@ -1,397 +1,298 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/IOSU/legacy/iosu_ioctl.h"
 #include "Cafe/IOSU/legacy/iosu_mcp.h"
 #include "Cafe/OS/libs/coreinit/coreinit_IOS.h"
 #include "Cafe/OS/libs/coreinit/coreinit_MCP.h"
-
-
 #include "Cafe/OS/libs/nn_common.h"
 #include "Cafe/OS/libs/nn_act/nn_act.h"
 #include "config/CemuConfig.h"
-
 #include "Cafe/CafeSystem.h"
 
-#define mcpPrepareRequest() \
-StackAllocator<iosuMcpCemuRequest_t> _buf_mcpRequest; \
-StackAllocator<ioBufferVector_t> _buf_bufferVector; \
-iosuMcpCemuRequest_t* mcpRequest = _buf_mcpRequest.GetPointer(); \
-ioBufferVector_t* mcpBufferVector = _buf_bufferVector.GetPointer(); \
-memset(mcpRequest, 0, sizeof(iosuMcpCemuRequest_t)); \
-memset(mcpBufferVector, 0, sizeof(ioBufferVector_t)); \
-mcpBufferVector->buffer = (uint8*)mcpRequest;
+// MCP (title and device management) client calls, plus UCReadSysConfig for system settings.
+// Title queries go to the HLE IOSU MCP device through a private request format.
 
-#define MCP_FAKE_HANDLE		(0x00000010)
+static_assert(sizeof(MCPTitleInfo) == 0x61);
+static_assert(offsetof(MCPTitleInfo, appPath) == 0x0C);
+static_assert(offsetof(MCPTitleInfo, titleVersion) == 0x48);
+static_assert(offsetof(MCPTitleInfo, osVersion) == 0x4A);
 
-typedef struct
+namespace
 {
-	uint32be n0;
-	uint32be n1;
-	uint32be n2;
-}mcpSystemVersion_t;
+	constexpr MCPHANDLE kMcpHandle = 0x10; // there is no real MCP session; every open gets this handle
 
-static_assert(sizeof(MCPTitleInfo) == 0x61, "title entry size is invalid");
-static_assert(offsetof(MCPTitleInfo, appPath) == 0xC, "title entry appPath has invalid offset");
-static_assert(offsetof(MCPTitleInfo, titleVersion) == 0x48, "title entry titleVersion has invalid offset");
-static_assert(offsetof(MCPTitleInfo, osVersion) == 0x4A, "title entry osVersion has invalid offset");
+	uint32 Arg(PPCInterpreter_t* hCPU, uint32 index)
+	{
+		return PPCInterpreter_getCallParamU32(hCPU, index);
+	}
+
+	template<typename T>
+	T* ArgPtr(PPCInterpreter_t* hCPU, uint32 index)
+	{
+		return (T*)memory_getPointerFromVirtualOffsetAllowNull(Arg(hCPU, index));
+	}
+
+	uint64 Arg64(PPCInterpreter_t* hCPU, uint32 index)
+	{
+		return ((uint64)Arg(hCPU, index) << 32) | Arg(hCPU, index + 1);
+	}
+
+	// a title list request to the IOSU MCP device; the request and its vector live on the guest stack
+	class McpTitleQuery
+	{
+	public:
+		McpTitleQuery(uint32 requestCode)
+		{
+			memset(m_request.GetPointer(), 0, sizeof(iosuMcpCemuRequest_t));
+			memset(m_vector.GetPointer(), 0, sizeof(ioBufferVector_t));
+			m_vector->buffer = (uint8*)m_request.GetPointer();
+			m_request->requestCode = requestCode;
+		}
+
+		iosuMcpCemuRequest_t* operator->() { return m_request.GetPointer(); }
+
+		void Run()
+		{
+			__depr__IOS_Ioctlv(IOS_DEVICE_MCP, IOSU_MCP_REQUEST_CEMU, 1, 1, m_vector.GetPointer());
+		}
+
+	private:
+		StackAllocator<iosuMcpCemuRequest_t> m_request;
+		StackAllocator<ioBufferVector_t> m_vector;
+	};
+
+	struct McpSystemVersion
+	{
+		uint32be major;
+		uint32be minor;
+		uint32be patch;
+	};
+	static_assert(sizeof(McpSystemVersion) == 0xC);
+
+	#pragma pack(push, 1)
+	struct McpDeviceInfo
+	{
+		/* +0x000 */ char typeName[0x8];   // "mlc", "slc", "usb", ...
+		/* +0x008 */ char volumeId[0x10];
+		/* +0x018 */ uint8 unk018[0x90 - 0x18];
+		/* +0x090 */ char mountPath[0x27F];
+		/* +0x30F */ uint32be flags;
+		/* +0x313 */ uint8 unk313[4];
+		/* +0x317 */ uint8 unk317[4];
+	};
+	#pragma pack(pop)
+	static_assert(offsetof(McpDeviceInfo, mountPath) == 0x90);
+	static_assert(offsetof(McpDeviceInfo, flags) == 0x30F);
+	static_assert(sizeof(McpDeviceInfo) == 0x31B);
+
+	void Export_MCP_Open(PPCInterpreter_t* hCPU)
+	{
+		osLib_returnFromFunction(hCPU, MCP_Open());
+	}
+
+	void Export_MCP_Close(PPCInterpreter_t* hCPU)
+	{
+		MCP_Close(Arg(hCPU, 0));
+		osLib_returnFromFunction(hCPU, 0);
+	}
+
+	void Export_MCP_GetSysProdSettings(PPCInterpreter_t* hCPU)
+	{
+		sint32 r = MCP_GetSysProdSettings(Arg(hCPU, 0), (SysProdSettings*)memory_getPointerFromVirtualOffset(Arg(hCPU, 1)));
+		osLib_returnFromFunction(hCPU, (uint32)r);
+	}
+
+	// MCP_TitleListByAppType(handle, appType, uint32be* countOut, MCPTitleInfo* list, uint32 listBytes)
+	void Export_MCP_TitleListByAppType(PPCInterpreter_t* hCPU)
+	{
+		uint32 appType = Arg(hCPU, 1);
+		uint32be* countOut = ArgPtr<uint32be>(hCPU, 2);
+		MCPTitleInfo* list = ArgPtr<MCPTitleInfo>(hCPU, 3);
+		uint32 listBytes = Arg(hCPU, 4);
+		McpTitleQuery q(IOSU_MCP_GET_TITLE_LIST_BY_APP_TYPE);
+		q->titleListRequest.titleCount = listBytes / (uint32)sizeof(MCPTitleInfo);
+		q->titleListRequest.titleList = list;
+		q->titleListRequest.titleListBufferSize = (uint32)sizeof(MCPTitleInfo);
+		q->titleListRequest.appType = appType;
+		q.Run();
+		*countOut = q->titleListRequest.titleCount;
+		osLib_returnFromFunction(hCPU, 0);
+	}
+
+	// MCP_TitleList(handle, uint32be* countInOut, MCPTitleInfo* list, uint32 listBytes)
+	void Export_MCP_TitleList(PPCInterpreter_t* hCPU)
+	{
+		uint32be* count = ArgPtr<uint32be>(hCPU, 1);
+		McpTitleQuery q(IOSU_MCP_GET_TITLE_LIST);
+		q->titleListRequest.titleCount = *count;
+		q->titleListRequest.titleList = ArgPtr<MCPTitleInfo>(hCPU, 2);
+		q->titleListRequest.titleListBufferSize = Arg(hCPU, 3);
+		q.Run();
+		*count = q->titleListRequest.titleCount;
+		cemuLog_logDebug(LogType::Force, "MCP_TitleList: {} titles", (uint32)q->titleListRequest.titleCount);
+		osLib_returnFromFunction(hCPU, q->returnCode);
+	}
+
+	void Export_MCP_TitleCount(PPCInterpreter_t* hCPU)
+	{
+		McpTitleQuery q(IOSU_MCP_GET_TITLE_COUNT);
+		q->titleListRequest.titleCount = 0;
+		q.Run();
+		osLib_returnFromFunction(hCPU, q->titleListRequest.titleCount);
+	}
+
+	// looks up one title; returns the number of entries found (0 or 1) through the query
+	uint32 QueryTitleInfo(McpTitleQuery& q, uint64 titleId, MCPTitleInfo* out)
+	{
+		q->titleListRequest.titleCount = 1;
+		q->titleListRequest.titleList = out;
+		q->titleListRequest.titleListBufferSize = (uint32)sizeof(MCPTitleInfo);
+		q->titleListRequest.titleId = titleId;
+		q.Run();
+		return q->titleListRequest.titleCount;
+	}
+
+	// MCP_GetTitleInfo(handle, <pad>, uint64 titleId, MCPTitleInfo* out)
+	void Export_MCP_GetTitleInfo(PPCInterpreter_t* hCPU)
+	{
+		McpTitleQuery q(IOSU_MCP_GET_TITLE_INFO);
+		if (QueryTitleInfo(q, Arg64(hCPU, 2), ArgPtr<MCPTitleInfo>(hCPU, 4)) == 0)
+			cemuLog_log(LogType::Force, "MCP_GetTitleInfo: title not found");
+		osLib_returnFromFunction(hCPU, q->returnCode);
+	}
+
+	// MCP_GetTitleInfoByTitleAndDevice(handle, <pad>, uint64 titleId, const char* device, MCPTitleInfo* out)
+	void Export_MCP_GetTitleInfoByTitleAndDevice(PPCInterpreter_t* hCPU)
+	{
+		// the device name ("mlc", "odd", ...) is not used to narrow the search
+		McpTitleQuery q(IOSU_MCP_GET_TITLE_INFO);
+		if (QueryTitleInfo(q, Arg64(hCPU, 2), ArgPtr<MCPTitleInfo>(hCPU, 5)) == 0)
+		{
+			// callers such as nn_vctl expect an error when the title does not exist
+			osLib_returnFromFunction(hCPU, BUILD_NN_RESULT(NN_RESULT_LEVEL_STATUS, NN_RESULT_MODULE_MCP, 0));
+			return;
+		}
+		osLib_returnFromFunction(hCPU, q->returnCode);
+	}
+
+	void Export_MCP_TitleListByDevice(PPCInterpreter_t* hCPU)
+	{
+		// placeholder answer: a single dummy title
+		uint32be* countOut = ArgPtr<uint32be>(hCPU, 2);
+		MCPTitleInfo* list = ArgPtr<MCPTitleInfo>(hCPU, 3);
+		list[0].titleIdHigh = 0x00050000;
+		list[0].titleIdLow = 0x11223344;
+		strcpy(list[0].appPath, "titlePathTest");
+		*countOut = 1;
+		cemuLog_logDebug(LogType::Force, "MCP_TitleListByDevice: placeholder");
+		osLib_returnFromFunction(hCPU, 0);
+	}
+
+	void Export_MCP_GetSystemVersion(PPCInterpreter_t* hCPU)
+	{
+		McpSystemVersion* v = ArgPtr<McpSystemVersion>(hCPU, 1);
+		v->major = 5;
+		v->minor = 5;
+		v->patch = 5;
+		osLib_returnFromFunction(hCPU, 0);
+	}
+
+	void Export_MCP_Get4SecondOffStatus(PPCInterpreter_t* hCPU)
+	{
+		// 1 would make the system menu warn about the last forced (4 second) power off
+		osLib_returnFromFunction(hCPU, 0);
+	}
+
+	void FillDevice(McpDeviceInfo& dev, const char* typeName, const char* volumeId, uint32 flags, const char* mountPath)
+	{
+		strcpy(dev.typeName, typeName);
+		if (volumeId)
+			strcpy(dev.volumeId, volumeId);
+		dev.flags = flags;
+		strcpy(dev.mountPath, mountPath);
+	}
+
+	void Export_MCP_DeviceList(PPCInterpreter_t* hCPU)
+	{
+		uint32be* countOut = ArgPtr<uint32be>(hCPU, 1);
+		McpDeviceInfo* list = ArgPtr<McpDeviceInfo>(hCPU, 2);
+		uint32 listBytes = Arg(hCPU, 3);
+		if (listBytes / sizeof(McpDeviceInfo) < 2)
+			cemuLog_log(LogType::Force, "MCP_DeviceList: list has room for fewer than two devices");
+		// the friend list (frd) waits forever unless both mlc and slc are reported
+		memset(list, 0, sizeof(McpDeviceInfo));
+		FillDevice(list[0], "mlc", nullptr, 1, "/vol/storage_mlc01");
+		FillDevice(list[1], "slc", nullptr, 1, "/vol/storage_slc01");
+		*countOut = 2;
+		osLib_returnFromFunction(hCPU, 0);
+	}
+
+	void Export_MCP_FullDeviceList(PPCInterpreter_t* hCPU)
+	{
+		uint32be* countOut = ArgPtr<uint32be>(hCPU, 1);
+		McpDeviceInfo* list = ArgPtr<McpDeviceInfo>(hCPU, 2);
+		uint32 listBytes = Arg(hCPU, 3);
+		cemu_assert(listBytes / sizeof(McpDeviceInfo) >= 2);
+		memset(list, 0, listBytes);
+		// flag 0x2 is needed by the system menu and friend list, without 0x8 the menu shows a disc loading screen
+		const uint32 flags = 0x2 | 0x8;
+		FillDevice(list[0], "slc", "VOLID_SLC", flags, "/vol/system_slc");
+		FillDevice(list[1], "mlc", "VOLID_MLC", flags, "/vol/storage_mlc01");
+		*countOut = 2; // no USB storage
+		osLib_returnFromFunction(hCPU, 0);
+	}
+
+	void Export_MCP_UpdateCheckContext(PPCInterpreter_t* hCPU)
+	{
+		*ArgPtr<uint32be>(hCPU, 1) = 1;
+		osLib_returnFromFunction(hCPU, 0);
+	}
+
+	void Export_MCP_TitleListUpdateGetNext(PPCInterpreter_t* hCPU)
+	{
+		// the callback would tell the caller that the title list changed; it is never invoked since
+		// the system menu reacts by querying the whole list again
+		osLib_returnFromFunction(hCPU, 0);
+	}
+
+	// MCP_GetOverlayAppInfo(handle, appType, ?, MCPTitleInfo* out): first title of the given app type
+	void Export_MCP_GetOverlayAppInfo(PPCInterpreter_t* hCPU)
+	{
+		McpTitleQuery q(IOSU_MCP_GET_TITLE_LIST_BY_APP_TYPE);
+		q->titleListRequest.titleCount = 1;
+		q->titleListRequest.titleList = ArgPtr<MCPTitleInfo>(hCPU, 3);
+		q->titleListRequest.titleListBufferSize = (uint32)sizeof(MCPTitleInfo);
+		q->titleListRequest.appType = Arg(hCPU, 1);
+		q.Run();
+		if (q->titleListRequest.titleCount != 1)
+			cemuLog_log(LogType::Force, "MCP_GetOverlayAppInfo: no title of app type 0x{:08x}", Arg(hCPU, 1));
+		osLib_returnFromFunction(hCPU, 0);
+	}
+}
 
 MCPHANDLE MCP_Open()
 {
-	// placeholder
-	return MCP_FAKE_HANDLE;
+	return kMcpHandle;
 }
 
 void MCP_Close(MCPHANDLE mcpHandle)
 {
-	// placeholder
-}
-
-void coreinitExport_MCP_Open(PPCInterpreter_t* hCPU)
-{
-	// placeholder
-	osLib_returnFromFunction(hCPU, MCP_Open());
-}
-
-void coreinitExport_MCP_Close(PPCInterpreter_t* hCPU)
-{
-	// placeholder
-	osLib_returnFromFunction(hCPU, 0);
 }
 
 sint32 MCP_GetSysProdSettings(MCPHANDLE mcpHandle, SysProdSettings* sysProdSettings)
 {
-	memset(sysProdSettings, 0x00, sizeof(SysProdSettings));
-	// todo: Other fields are currently unknown
-
+	memset(sysProdSettings, 0, sizeof(SysProdSettings));
 	sysProdSettings->gameRegion = (uint8)CafeSystem::GetForegroundTitleRegion();
 	sysProdSettings->platformRegion = (uint8)CafeSystem::GetPlatformRegion();
-
-	// contains Wii U serial parts at +0x1A and +0x22?
 	return 0;
-}
-
-void coreinitExport_MCP_GetSysProdSettings(PPCInterpreter_t* hCPU)
-{
-	sint32 result = MCP_GetSysProdSettings(hCPU->gpr[3], (SysProdSettings*)memory_getPointerFromVirtualOffset(hCPU->gpr[4]));
-	osLib_returnFromFunction(hCPU, result);
-}
-
-void coreinitExport_MCP_TitleListByAppType(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "MCP_TitleListByAppType(0x{:08x},0x{:08x},0x{:08x},0x{:08x},0x{:08x})", hCPU->gpr[3], hCPU->gpr[4], hCPU->gpr[5], hCPU->gpr[6], hCPU->gpr[7]);
-
-	ppcDefineParamU32(mcpHandle, 0);
-	ppcDefineParamU32(appType, 1);
-	ppcDefineParamU32BEPtr(countOutput, 2);
-	ppcDefineParamStructPtr(titleList, MCPTitleInfo, 3);
-	ppcDefineParamU32(titleListSize, 4);
-
-	sint32 maxCount = titleListSize / sizeof(MCPTitleInfo);
-
-	mcpPrepareRequest();
-	mcpRequest->requestCode = IOSU_MCP_GET_TITLE_LIST_BY_APP_TYPE;
-	mcpRequest->titleListRequest.titleCount = maxCount;
-	mcpRequest->titleListRequest.titleList = titleList;
-	mcpRequest->titleListRequest.titleListBufferSize = sizeof(MCPTitleInfo) * 1;
-	mcpRequest->titleListRequest.appType = appType;
-	__depr__IOS_Ioctlv(IOS_DEVICE_MCP, IOSU_MCP_REQUEST_CEMU, 1, 1, mcpBufferVector);
-
-	*countOutput = mcpRequest->titleListRequest.titleCount;
-			
-	osLib_returnFromFunction(hCPU, 0);
-}
-
-void coreinitExport_MCP_TitleList(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamU32(mcpHandle, 0);
-	ppcDefineParamU32BEPtr(countOutput, 1);
-	ppcDefineParamStructPtr(titleList, MCPTitleInfo, 2);
-	ppcDefineParamU32(titleListBufferSize, 3);
-
-	// todo -> Other parameters?
-
-	mcpPrepareRequest();
-	mcpRequest->requestCode = IOSU_MCP_GET_TITLE_LIST;
-	mcpRequest->titleListRequest.titleCount = *countOutput;
-	mcpRequest->titleListRequest.titleList = titleList;
-	mcpRequest->titleListRequest.titleListBufferSize = titleListBufferSize;
-	__depr__IOS_Ioctlv(IOS_DEVICE_MCP, IOSU_MCP_REQUEST_CEMU, 1, 1, mcpBufferVector);
-
-	*countOutput = mcpRequest->titleListRequest.titleCount;
-
-	cemuLog_logDebug(LogType::Force, "MCP_TitleList(...) returned {} titles", (uint32)mcpRequest->titleListRequest.titleCount);
-
-	osLib_returnFromFunction(hCPU, mcpRequest->returnCode);
-}
-
-void coreinitExport_MCP_TitleCount(PPCInterpreter_t* hCPU)
-{
-	cemuLog_logDebug(LogType::Force, "MCP_TitleCount(): Untested");
-	ppcDefineParamU32(mcpHandle, 0);
-
-	mcpPrepareRequest();
-	mcpRequest->requestCode = IOSU_MCP_GET_TITLE_COUNT;
-	mcpRequest->titleListRequest.titleCount = 0;
-	__depr__IOS_Ioctlv(IOS_DEVICE_MCP, IOSU_MCP_REQUEST_CEMU, 1, 1, mcpBufferVector);
-
-	osLib_returnFromFunction(hCPU, mcpRequest->titleListRequest.titleCount);
-}
-
-void coreinitExport_MCP_GetTitleInfo(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamU32(mcpHandle, 0);
-	ppcDefineParamU64(titleId, 2);
-	ppcDefineParamStructPtr(titleList, MCPTitleInfo, 4);
-
-	cemuLog_logDebug(LogType::Force, "MCP_GetTitleInfo() called");
-
-	mcpPrepareRequest();
-	mcpRequest->requestCode = IOSU_MCP_GET_TITLE_INFO;
-	mcpRequest->titleListRequest.titleCount = 1;
-	mcpRequest->titleListRequest.titleList = titleList;
-	mcpRequest->titleListRequest.titleListBufferSize = sizeof(MCPTitleInfo);
-	mcpRequest->titleListRequest.titleId = titleId;
-	__depr__IOS_Ioctlv(IOS_DEVICE_MCP, IOSU_MCP_REQUEST_CEMU, 1, 1, mcpBufferVector);
-
-	if (mcpRequest->titleListRequest.titleCount == 0)
-	{
-		cemuLog_log(LogType::Force, "MCP_GetTitleInfo() failed to get title info");
-	}
-
-	osLib_returnFromFunction(hCPU, mcpRequest->returnCode);
-
-}
-
-void coreinitExport_MCP_GetTitleInfoByTitleAndDevice(PPCInterpreter_t* hCPU)
-{
-	ppcDefineParamU32(mcpHandle, 0);
-	ppcDefineParamU64(titleId, 2);
-	ppcDefineParamStr(device, 4); // e.g. "odd"
-	ppcDefineParamStructPtr(titleList, MCPTitleInfo, 5);
-
-	cemuLog_logDebug(LogType::Force, "MCP_GetTitleInfoByTitleAndDevice() called (todo - device type support)");
-
-	mcpPrepareRequest();
-	mcpRequest->requestCode = IOSU_MCP_GET_TITLE_INFO;
-	mcpRequest->titleListRequest.titleCount = 1;
-	mcpRequest->titleListRequest.titleList = titleList;
-	mcpRequest->titleListRequest.titleListBufferSize = sizeof(MCPTitleInfo);
-	mcpRequest->titleListRequest.titleId = titleId;
-	__depr__IOS_Ioctlv(IOS_DEVICE_MCP, IOSU_MCP_REQUEST_CEMU, 1, 1, mcpBufferVector);
-
-	if (mcpRequest->titleListRequest.titleCount == 0)
-	{
-		cemuLog_logDebug(LogType::Force, "MCP_GetTitleInfoByTitleAndDevice() no title found");
-		osLib_returnFromFunction(hCPU, BUILD_NN_RESULT(NN_RESULT_LEVEL_STATUS, NN_RESULT_MODULE_MCP, 0)); // E-Shop/nn_vctl.rpl expects error to be returned when no title is found
-		return;
-	}
-
-	osLib_returnFromFunction(hCPU, mcpRequest->returnCode);
 }
 
 namespace coreinit
 {
-
-	void export_MCP_GetSystemVersion(PPCInterpreter_t* hCPU)
-	{
-		cemuLog_logDebug(LogType::Force, "MCP_GetSystemVersion({},0x{:08x})", hCPU->gpr[3], hCPU->gpr[4]);
-		ppcDefineParamU32(mcpHandle, 0);
-		ppcDefineParamStructPtr(systemVersion, mcpSystemVersion_t, 1);
-
-		systemVersion->n0 = 0x5;
-		systemVersion->n1 = 0x5;
-		systemVersion->n2 = 0x5;
-		// todo: Load this from \sys\title\00050010\10041200\content\version.bin
-
-		osLib_returnFromFunction(hCPU, 0);
-	}
-
-	void export_MCP_Get4SecondOffStatus(PPCInterpreter_t* hCPU)
-	{
-		// r3 = mcpHandle
-		cemuLog_logDebug(LogType::Force, "MCP_Get4SecondOffStatus(...) placeholder");
-		// if this returns 1 then Barista will display the warning about cold-shutdown ('Holding the POWER button for at least four seconds...')
-		osLib_returnFromFunction(hCPU, 0);
-	}
-
-	void export_MCP_TitleListByDevice(PPCInterpreter_t* hCPU)
-	{
-		ppcDefineParamU32(mcpHandle, 0);
-		ppcDefineParamStr(deviceName, 1);
-		ppcDefineParamU32BEPtr(titleCount, 2);
-		ppcDefineParamStructPtr(titleList, MCPTitleInfo, 3); // type guessed
-		// purpose of r7 parameter is unknown
-
-		cemu_assert_unimplemented();
-
-		titleList[0].titleIdHigh = 0x00050000;
-		titleList[0].titleIdLow = 0x11223344;
-		strcpy(titleList[0].appPath, "titlePathTest");
-
-		*titleCount = 1;
-
-		cemuLog_logDebug(LogType::Force, "MCP_TitleListByDevice() - placeholder");
-
-		osLib_returnFromFunction(hCPU, 0);
-	}
-
-#pragma pack(1)
-	struct MCPDevice_t
-	{
-		/* +0x000 */ char storageName[0x8]; // the name in the storage path (mlc, slc, usb?) // volumeId at +8
-		/* +0x008 */ char volumeId[16]; //
-		/* +0x018 */ char ukn[0x90 - 0x18];
-		/* +0x090 */ char storagePath[0x280 - 1]; // /vol/storage_%s%02x
-		/* +0x30F */ uint32be flags; // men.rpx checks for 0x2 and 0x8
-		uint8 ukn313[4];
-		uint8 ukn317[4];
-	};
-#pragma pack()
-
-	static_assert(sizeof(MCPDevice_t) == 0x31B);
-
-	static_assert(sizeof(MCPDevice_t) == 0x31B);
-	static_assert(offsetof(MCPDevice_t, storagePath) == 0x90);
-	static_assert(offsetof(MCPDevice_t, flags) == 0x30F);
-	static_assert(offsetof(MCPDevice_t, ukn313) == 0x313);
-	static_assert(offsetof(MCPDevice_t, ukn317) == 0x317);
-
-	void MCP_DeviceListEx(uint32 mcpHandle, uint32be* deviceCount, MCPDevice_t* deviceList, uint32 deviceListSize, bool returnFullList)
-	{
-		sint32 maxDeviceCount = deviceListSize / sizeof(MCPDevice_t);
-
-		cemu_assert(maxDeviceCount >= 2);
-
-		memset(deviceList, 0, deviceListSize);
-		sint32 index = 0;
-
-		uint32 flags = 2 | 8;
-		// flag 2 is necessary for Wii U menu and Friend List to load
-		// if we dont set flag 0x8 then Wii U menu will show a disk loading icon and screen
-		// slc
-		strcpy(deviceList[index].storageName, "slc");
-		strcpy(deviceList[index].volumeId, "VOLID_SLC");
-		deviceList[index].flags = flags;
-		strcpy(deviceList[index].storagePath, "/vol/system_slc"); // unsure
-		index++;
-		// mlc
-		strcpy(deviceList[index].storageName, "mlc");
-		strcpy(deviceList[index].volumeId, "VOLID_MLC");
-		deviceList[index].flags = flags;
-		sprintf(deviceList[index].storagePath, "/vol/storage_mlc01");
-		index++;
-
-		// we currently dont emulate USB storage
-
-		*deviceCount = index;
-	}
-
-	void export_MCP_DeviceList(PPCInterpreter_t* hCPU)
-	{
-		ppcDefineParamU32(mcpHandle, 0);
-		ppcDefineParamU32BEPtr(deviceCount, 1);
-		ppcDefineParamStructPtr(deviceList, MCPDevice_t, 2);
-		ppcDefineParamU32(deviceListSize, 3);
-
-		cemuLog_logDebug(LogType::Force, "MCP_DeviceList()");
-
-		sint32 maxDeviceCount = deviceListSize / sizeof(MCPDevice_t);
-
-		if (maxDeviceCount < 2)
-			assert_dbg();
-
-		// if this doesnt return both MLC and SLC friendlist (frd.rpx) will softlock during boot
-
-		memset(deviceList, 0, sizeof(MCPDevice_t) * 1);
-		// 0
-		strcpy(deviceList[0].storageName, "mlc");
-		deviceList[0].flags = (0x01); // bitmask?
-		sprintf(deviceList[0].storagePath, "/vol/storage_%s%02x", deviceList[0].storageName, (sint32)deviceList[0].flags);
-		// 1
-		strcpy(deviceList[1].storageName, "slc");
-		deviceList[1].flags = (0x01); // bitmask?
-		sprintf(deviceList[1].storagePath, "/vol/storage_%s%02x", deviceList[1].storageName, (sint32)deviceList[1].flags);
-
-		// 2
-		//strcpy(deviceList[2].storageName, "usb");
-		//deviceList[2].storageSubindex = 1;
-		//sprintf(deviceList[2].storagePath, "/vol/storage_%s%02x", deviceList[2].storageName, (sint32)deviceList[2].storageSubindex);
-
-
-		*deviceCount = 2;
-
-		osLib_returnFromFunction(hCPU, 0);
-	}
-
-	void export_MCP_FullDeviceList(PPCInterpreter_t* hCPU)
-	{
-		ppcDefineParamU32(mcpHandle, 0);
-		ppcDefineParamU32BEPtr(deviceCount, 1);
-		ppcDefineParamStructPtr(deviceList, MCPDevice_t, 2);
-		ppcDefineParamU32(deviceListSize, 3);
-
-		cemuLog_logDebug(LogType::Force, "MCP_FullDeviceList()");
-
-		MCP_DeviceListEx(mcpHandle, deviceCount, deviceList, deviceListSize, true);
-
-		osLib_returnFromFunction(hCPU, 0);
-	}
-
-	void export_MCP_UpdateCheckContext(PPCInterpreter_t* hCPU)
-	{
-		ppcDefineParamU32(mcpHandle, 0);
-		ppcDefineParamU32BEPtr(unknownParam, 1);
-
-		cemuLog_logDebug(LogType::Force, "MCP_UpdateCheckContext() - placeholder (might be wrong)");
-
-		*unknownParam = 1;
-
-
-		osLib_returnFromFunction(hCPU, 0);
-	}
-
-	void export_MCP_TitleListUpdateGetNext(PPCInterpreter_t* hCPU)
-	{
-		ppcDefineParamU32(mcpHandle, 0);
-		ppcDefineParamMPTR(callbackMPTR, 1);
-
-		cemuLog_logDebug(LogType::Force, "MCP_TitleListUpdateGetNext() - placeholder/unimplemented");
-
-		// this callback is to let the app know when the title list changed?
-
-		//PPCCoreCallback(callbackMPTR); // -> If we trigger the callback then the menu will repeat with a call to MCP_GetTitleList(), MCP_DeviceList() and MCP_TitleListUpdateGetNext
-
-		osLib_returnFromFunction(hCPU, 0);
-	}
-
-	void export_MCP_GetOverlayAppInfo(PPCInterpreter_t* hCPU)
-	{
-		cemuLog_logDebug(LogType::Force, "MCP_GetOverlayAppInfo(...) placeholder");
-		ppcDefineParamU32(mcpHandle, 0);
-		ppcDefineParamU32(appType, 1);
-		ppcDefineParamU32(uknR5, 2);
-		ppcDefineParamStructPtr(titleList, MCPTitleInfo, 3);
-
-		// hacky
-
-		mcpPrepareRequest();
-		mcpRequest->requestCode = IOSU_MCP_GET_TITLE_LIST_BY_APP_TYPE;
-		mcpRequest->titleListRequest.titleCount = 1;
-		mcpRequest->titleListRequest.titleList = titleList;
-		mcpRequest->titleListRequest.titleListBufferSize = sizeof(MCPTitleInfo)*1;
-		mcpRequest->titleListRequest.appType = appType;
-		__depr__IOS_Ioctlv(IOS_DEVICE_MCP, IOSU_MCP_REQUEST_CEMU, 1, 1, mcpBufferVector);
-
-		if (mcpRequest->titleListRequest.titleCount != 1)
-			assert_dbg();
-
-		osLib_returnFromFunction(hCPU, 0);
-	}
-
 	uint32 MCP_UpdateClearContextAsync(uint32 mcpHandle, betype<MPTR>* callbackPtr)
 	{
-		cemuLog_logDebug(LogType::Force, "MCP_UpdateClearContextAsync() - stubbed");
-		uint32 clearContextResult = 0;
-		PPCCoreCallback(*callbackPtr, clearContextResult);
+		// nothing to clear: report success right away
+		PPCCoreCallback(*callbackPtr, 0u);
 		return 0;
 	}
 
@@ -403,7 +304,8 @@ namespace coreinit
 
 	uint32 MCP_GetEcoSettings(uint32 mcpHandle, uint32be* flagCaffeineEnable, uint32be* uknFlag2, uint32be* uknFlag3)
 	{
-		*flagCaffeineEnable = 1; // returning 1 here will stop the Wii U Menu from showing the Quick Start setup dialogue
+		// Quick Start enabled, so the system menu skips its Quick Start setup dialog
+		*flagCaffeineEnable = 1;
 		*uknFlag2 = 0;
 		*uknFlag3 = 0;
 		return 0;
@@ -423,8 +325,7 @@ namespace coreinit
 
 	uint32 MCP_DemoLaunchGetRemainder(uint32 mcpHandle, uint64 titleId, uint32be* outRemainder)
 	{
-		// stub to always return 99 uses remaining for game demos.
-		// used by drmapp.rpl to determine remaining uses for game demos
+		// demos (checked by drmapp) always have uses left
 		if (outRemainder)
 			*outRemainder = 99;
 		return 0;
@@ -432,25 +333,25 @@ namespace coreinit
 
 	void InitializeMCP()
 	{
-		osLib_addFunction("coreinit", "MCP_Open", coreinitExport_MCP_Open);
-		osLib_addFunction("coreinit", "MCP_Close", coreinitExport_MCP_Close);
-		osLib_addFunction("coreinit", "MCP_GetSysProdSettings", coreinitExport_MCP_GetSysProdSettings);
-		osLib_addFunction("coreinit", "MCP_TitleListByAppType", coreinitExport_MCP_TitleListByAppType);
-		osLib_addFunction("coreinit", "MCP_TitleList", coreinitExport_MCP_TitleList);
-		osLib_addFunction("coreinit", "MCP_TitleCount", coreinitExport_MCP_TitleCount);
-		osLib_addFunction("coreinit", "MCP_GetTitleInfo", coreinitExport_MCP_GetTitleInfo);
-		osLib_addFunction("coreinit", "MCP_GetTitleInfoByTitleAndDevice", coreinitExport_MCP_GetTitleInfoByTitleAndDevice);
+		osLib_addFunction("coreinit", "MCP_Open", Export_MCP_Open);
+		osLib_addFunction("coreinit", "MCP_Close", Export_MCP_Close);
+		osLib_addFunction("coreinit", "MCP_GetSysProdSettings", Export_MCP_GetSysProdSettings);
+		osLib_addFunction("coreinit", "MCP_TitleListByAppType", Export_MCP_TitleListByAppType);
+		osLib_addFunction("coreinit", "MCP_TitleList", Export_MCP_TitleList);
+		osLib_addFunction("coreinit", "MCP_TitleCount", Export_MCP_TitleCount);
+		osLib_addFunction("coreinit", "MCP_GetTitleInfo", Export_MCP_GetTitleInfo);
+		osLib_addFunction("coreinit", "MCP_GetTitleInfoByTitleAndDevice", Export_MCP_GetTitleInfoByTitleAndDevice);
 
-		osLib_addFunction("coreinit", "MCP_TitleListByDevice", export_MCP_TitleListByDevice);
-		osLib_addFunction("coreinit", "MCP_GetSystemVersion", export_MCP_GetSystemVersion);
-		osLib_addFunction("coreinit", "MCP_Get4SecondOffStatus", export_MCP_Get4SecondOffStatus);
+		osLib_addFunction("coreinit", "MCP_TitleListByDevice", Export_MCP_TitleListByDevice);
+		osLib_addFunction("coreinit", "MCP_GetSystemVersion", Export_MCP_GetSystemVersion);
+		osLib_addFunction("coreinit", "MCP_Get4SecondOffStatus", Export_MCP_Get4SecondOffStatus);
 
-		osLib_addFunction("coreinit", "MCP_DeviceList", export_MCP_DeviceList);
-		osLib_addFunction("coreinit", "MCP_FullDeviceList", export_MCP_FullDeviceList);
+		osLib_addFunction("coreinit", "MCP_DeviceList", Export_MCP_DeviceList);
+		osLib_addFunction("coreinit", "MCP_FullDeviceList", Export_MCP_FullDeviceList);
 
-		osLib_addFunction("coreinit", "MCP_UpdateCheckContext", export_MCP_UpdateCheckContext);
-		osLib_addFunction("coreinit", "MCP_TitleListUpdateGetNext", export_MCP_TitleListUpdateGetNext);
-		osLib_addFunction("coreinit", "MCP_GetOverlayAppInfo", export_MCP_GetOverlayAppInfo);
+		osLib_addFunction("coreinit", "MCP_UpdateCheckContext", Export_MCP_UpdateCheckContext);
+		osLib_addFunction("coreinit", "MCP_TitleListUpdateGetNext", Export_MCP_TitleListUpdateGetNext);
+		osLib_addFunction("coreinit", "MCP_GetOverlayAppInfo", Export_MCP_GetOverlayAppInfo);
 		cafeExportRegister("coreinit", MCP_UpdateClearContextAsync, LogType::Placeholder);
 
 		cafeExportRegister("coreinit", MCP_InstallUtilGetTitleEnability, LogType::Placeholder);
@@ -461,175 +362,143 @@ namespace coreinit
 		cafeExportRegister("coreinit", MCP_GetTitleId, LogType::Placeholder);
 		cafeExportRegister("coreinit", MCP_DemoLaunchGetRemainder, LogType::Placeholder);
 	}
-
 }
 
-typedef struct  
+/* UCReadSysConfig: system configuration (SCI) values */
+
+namespace
 {
-	char settingName[0x40];
-	uint32 ukn1;
-	uint32 ukn2;
-	uint32 ukn3;
-	uint32 ukn4_size; // size guessed
-	MPTR resultPtr; // pointer to output value
-}UCParamStruct_t;
-
-static_assert(sizeof(UCParamStruct_t) == 0x54); // unsure
-
-#if BOOST_OS_LINUX || BOOST_OS_MACOS || BOOST_OS_BSD
-#define _strcmpi strcasecmp
-#endif
-
-void coreinitExport_UCReadSysConfig(PPCInterpreter_t* hCPU)
-{
-	// parameters:
-	// r3 = UC handle?
-	// r4 = Number of values to read (count of UCParamStruct_t entries)
-	// r5 = UCParamStruct_t*
-	UCParamStruct_t* ucParamBase = (UCParamStruct_t*)memory_getPointerFromVirtualOffset(hCPU->gpr[5]);
-	uint32 ucParamCount = hCPU->gpr[4];
-	for(uint32 i=0; i<ucParamCount; i++)
+	// one requested setting
+	struct UCSysConfigItem
 	{
-		UCParamStruct_t* ucParam = ucParamBase+i;
-		if(_strcmpi(ucParam->settingName, "cafe.cntry_reg") == 0)
-		{
-			// country code
-			// get country from simple address
-			uint32be simpleAddress = 0;
-			nn::act::GetSimpleAddressIdEx(&simpleAddress, nn::act::ACT_SLOT_CURRENT);
+		/* +0x00 */ char name[0x40];
+		/* +0x40 */ uint32 unk40;
+		/* +0x44 */ uint32 unk44;
+		/* +0x48 */ uint32 unk48;
+		/* +0x4C */ uint32 rawSize;    // not byte swapped, see the uuid case
+		/* +0x50 */ uint32be resultAddr;
+	};
+	static_assert(sizeof(UCSysConfigItem) == 0x54);
 
-			uint32 countryCode = nn::act::getCountryCodeFromSimpleAddress(simpleAddress);
+	enum class SettingKind
+	{
+		U8,
+		U16,
+		U32,
+		CountryCode,
+		Language,
+		AccountUuid,
+	};
 
-			if( ucParam->resultPtr != _swapEndianU32(MPTR_NULL) )
-				memory_writeU32(_swapEndianU32(ucParam->resultPtr), countryCode);
-		}
-		else if (_strcmpi(ucParam->settingName, "cafe.language") == 0)
+	struct SysConfigSetting
+	{
+		const char* name;
+		SettingKind kind;
+		uint32 value;
+	};
+
+	// names are matched case-insensitively
+	constexpr SysConfigSetting s_sysConfigSettings[] =
+	{
+		{ "cafe.cntry_reg", SettingKind::CountryCode, 0 },
+		{ "cafe.language", SettingKind::Language, 0 },
+		{ "cafe.initial_launch", SettingKind::U8, 2 },  // 2 = set up with a user (1 would start user creation)
+		{ "cafe.eula_version", SettingKind::U32, 0 },
+		{ "cafe.eula_agree", SettingKind::U8, 0 },
+		{ "cafe.version", SettingKind::U16, 0 },
+		{ "cafe.eco", SettingKind::U8, 0 },
+		{ "cafe.fast_boot", SettingKind::U8, 0 },
+		{ "parent.enable", SettingKind::U32, 0 },        // parental controls off
+		{ "nn.act.account_repaired", SettingKind::U8, 0 },
+		{ "p_acct1.net_communication_on_game", SettingKind::U8, 0 }, // 0 = online play allowed
+		{ "p_acct1.int_movie", SettingKind::U8, 0 },     // 0 = videos allowed (Pikmin 3)
+		{ "p_acct1.network_launcher", SettingKind::U8, 0 }, // Miiverse: 0 = unrestricted
+		{ "s_acct01.uuid", SettingKind::AccountUuid, 0 },
+		{ "s_acct01.nn.ec.eshop_initialized", SettingKind::U8, 1 }, // skips the eShop welcome screen
+		{ "p_acct1.int_browser", SettingKind::U8, 0 },
+		{ "caffeine.enable", SettingKind::U8, 1 },       // Quick Start
+		{ "caffeine.ad_enable", SettingKind::U8, 0 },
+		{ "caffeine.push_enable", SettingKind::U8, 0 },
+		{ "caffeine.drcled_enable", SettingKind::U8, 0 },
+	};
+
+	bool SameNameIgnoreCase(const char* a, const char* b)
+	{
+		for (;; a++, b++)
 		{
-			// language
-			// 0 -> Japanese
-			// 1 -> English
-			// ...
-			uint32 languageId = (uint32)GetConfig().console_language.GetValue();
-			if (ucParam->resultPtr != _swapEndianU32(MPTR_NULL))
-				memory_writeU32(_swapEndianU32(ucParam->resultPtr), languageId);
-		}
-		else if (_strcmpi(ucParam->settingName, "cafe.initial_launch") == 0)
-		{
-			// initial launch
-			// possible ids:
-			// 0xFF		Set by SCIFormatSystem (default?)
-			// 0x01		Inited but no user created yet (setting this will make the home menu go into user creation dialog)
-			// 0x02		Inited, with user
-			// other values are unknown
-			memory_writeU8(_swapEndianU32(ucParam->resultPtr), 2);
-		}
-		else if (_strcmpi(ucParam->settingName, "cafe.eula_version") == 0)
-		{
-			// todo - investigate values
-			memory_writeU32(_swapEndianU32(ucParam->resultPtr), 0);
-		}
-		else if (_strcmpi(ucParam->settingName, "cafe.eula_agree") == 0)
-		{
-			// todo - investigate values
-			memory_writeU8(_swapEndianU32(ucParam->resultPtr), 0);
-		}
-		else if (_strcmpi(ucParam->settingName, "cafe.version") == 0)
-		{
-			// todo - investigate values
-			memory_writeU16(_swapEndianU32(ucParam->resultPtr), 0);
-		}
-		else if (_strcmpi(ucParam->settingName, "cafe.eco") == 0)
-		{
-			// todo - investigate values
-			memory_writeU8(_swapEndianU32(ucParam->resultPtr), 0);
-		}
-		else if (_strcmpi(ucParam->settingName, "cafe.fast_boot") == 0)
-		{
-			// todo - investigate values
-			memory_writeU8(_swapEndianU32(ucParam->resultPtr), 0);
-		}
-		else if (_strcmpi(ucParam->settingName, "parent.enable") == 0)
-		{
-			// parental feature enabled
-			if (ucParam->resultPtr != _swapEndianU32(MPTR_NULL))
-				memory_writeU32(_swapEndianU32(ucParam->resultPtr), 0);
-		}
-		else if (_strcmpi(ucParam->settingName, "nn.act.account_repaired") == 0)
-		{
-			if (ucParam->resultPtr != _swapEndianU32(MPTR_NULL))
-				memory_writeU8(_swapEndianU32(ucParam->resultPtr), 0);
-		}
-		else if (_strcmpi(ucParam->settingName, "p_acct1.net_communication_on_game") == 0)
-		{
-			// get parental online control for online features
-			// note: This option is account-bound, the p_acct1 prefix indicates that the account in slot 1 is used
-			// a non-zero value means network access is restricted through parental access. 0 means allowed
-			// account in slot 1
-			if (ucParam->resultPtr != _swapEndianU32(MPTR_NULL))
-				memory_writeU8(_swapEndianU32(ucParam->resultPtr), 0); // data type is guessed
-		}
-		else if (_strcmpi(ucParam->settingName, "p_acct1.int_movie") == 0)
-		{
-			// get parental online control for movies?
-			// used by Pikmin HD movies
-			if (ucParam->resultPtr != _swapEndianU32(MPTR_NULL))
-				memory_writeU8(_swapEndianU32(ucParam->resultPtr), 0); // 0 -> allowed
-		}
-		else if (_strcmpi(ucParam->settingName, "p_acct1.network_launcher") == 0)
-		{
-			// miiverse restrictions
-			if (ucParam->resultPtr != _swapEndianU32(MPTR_NULL))
-				memory_writeU8(_swapEndianU32(ucParam->resultPtr), 0); // data type is guessed (0 -> no restrictions, 1 -> read only, 2 -> no access)
-		}
-		else if (_strcmpi(ucParam->settingName, "s_acct01.uuid") == 0)
-		{
-			if (ucParam->resultPtr != _swapEndianU32(MPTR_NULL) && ucParam->ukn4_size >= 37)
-			{
-				StackAllocator<uint8, 16> _uuid;
-				uint8* uuid = _uuid.GetPointer();
-				nn::act::GetUuidEx(uuid, 1, 0);
-				char tempStr[64];
-				sprintf(tempStr, "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X", uuid[0], uuid[1], uuid[2], uuid[3], uuid[4], uuid[5], uuid[6], uuid[7],
-					uuid[8], uuid[9], uuid[10], uuid[11], uuid[12], uuid[13], uuid[14], uuid[15]);
-				strcpy((char*)memory_getPointerFromVirtualOffset(_swapEndianU32(ucParam->resultPtr)), tempStr);
-			}
-		}
-		else if (_strcmpi(ucParam->settingName, "s_acct01.nn.ec.eshop_initialized") == 0)
-		{
-			// E-Shop welcome screen
-			if (ucParam->resultPtr != _swapEndianU32(MPTR_NULL))
-				memory_writeU8(_swapEndianU32(ucParam->resultPtr), 1); // data type is guessed
-		}
-		else if (_strcmpi(ucParam->settingName, "p_acct1.int_browser") == 0)
-		{
-			if (ucParam->resultPtr != _swapEndianU32(MPTR_NULL))
-				memory_writeU8(_swapEndianU32(ucParam->resultPtr), 0);
-		}
-		/* caffeine settings (Quick Start) */
-		else if (_strcmpi(ucParam->settingName, "caffeine.enable") == 0)
-		{
-			if (ucParam->resultPtr != _swapEndianU32(MPTR_NULL))
-				memory_writeU8(_swapEndianU32(ucParam->resultPtr), 1);
-		}
-		else if (_strcmpi(ucParam->settingName, "caffeine.ad_enable") == 0)
-		{
-			if (ucParam->resultPtr != _swapEndianU32(MPTR_NULL))
-				memory_writeU8(_swapEndianU32(ucParam->resultPtr), 0);
-		}
-		else if (_strcmpi(ucParam->settingName, "caffeine.push_enable") == 0)
-		{
-			if (ucParam->resultPtr != _swapEndianU32(MPTR_NULL))
-				memory_writeU8(_swapEndianU32(ucParam->resultPtr), 0);
-		}
-		else if (_strcmpi(ucParam->settingName, "caffeine.drcled_enable") == 0)
-		{
-			if (ucParam->resultPtr != _swapEndianU32(MPTR_NULL))
-				memory_writeU8(_swapEndianU32(ucParam->resultPtr), 0);
-		}
-		else
-		{
-			cemuLog_logDebug(LogType::Force, "Unsupported SCI value: {} Size {:08x}", ucParam->settingName, ucParam->ukn4_size);
+			int ca = tolower((unsigned char)*a);
+			int cb = tolower((unsigned char)*b);
+			if (ca != cb)
+				return false;
+			if (ca == 0)
+				return true;
 		}
 	}
-	osLib_returnFromFunction(hCPU, 0); // 0 -> success
+
+	void ReadSysConfigItem(UCSysConfigItem& item)
+	{
+		const SysConfigSetting* setting = nullptr;
+		for (const SysConfigSetting& s : s_sysConfigSettings)
+		{
+			if (SameNameIgnoreCase(item.name, s.name))
+			{
+				setting = &s;
+				break;
+			}
+		}
+		if (!setting)
+		{
+			cemuLog_logDebug(LogType::Force, "UCReadSysConfig: unknown setting {} (size field {:08x})", item.name, item.rawSize);
+			return;
+		}
+		MPTR out = item.resultAddr;
+		if (out == MPTR_NULL)
+			return;
+		switch (setting->kind)
+		{
+		case SettingKind::U8:
+			memory_writeU8(out, (uint8)setting->value);
+			break;
+		case SettingKind::U16:
+			memory_writeU16(out, (uint16)setting->value);
+			break;
+		case SettingKind::U32:
+			memory_writeU32(out, setting->value);
+			break;
+		case SettingKind::CountryCode:
+		{
+			uint32be simpleAddress = 0;
+			nn::act::GetSimpleAddressIdEx(&simpleAddress, nn::act::ACT_SLOT_CURRENT);
+			memory_writeU32(out, nn::act::getCountryCodeFromSimpleAddress(simpleAddress));
+			break;
+		}
+		case SettingKind::Language:
+			memory_writeU32(out, (uint32)GetConfig().console_language.GetValue());
+			break;
+		case SettingKind::AccountUuid:
+		{
+			// written as a 36 character string. The size field is compared without byte swapping, so
+			// in practice any small non-zero size is accepted
+			if (item.rawSize < 37)
+				break;
+			StackAllocator<uint8, 16> uuidBuf;
+			uint8* u = uuidBuf.GetPointer();
+			nn::act::GetUuidEx(u, 1, 0);
+			std::string text = fmt::format("{:02X}{:02X}{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+				u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7], u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
+			memcpy(memory_getPointerFromVirtualOffset(out), text.c_str(), text.size() + 1);
+			break;
+		}
+		}
+	}
+}
+
+// UCReadSysConfig(handle, count, UCSysConfigItem* items)
+void coreinitExport_UCReadSysConfig(PPCInterpreter_t* hCPU)
+{
+	uint32 count = hCPU->gpr[4];
+	UCSysConfigItem* items = (UCSysConfigItem*)memory_getPointerFromVirtualOffset(hCPU->gpr[5]);
+	for (uint32 i = 0; i < count; i++)
+		ReadSysConfigItem(items[i]);
+	osLib_returnFromFunction(hCPU, 0);
 }

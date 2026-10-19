@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/IOSU/kernel/iosu_kernel.h"
 #include "Cafe/HW/Espresso/Const.h"
@@ -5,444 +6,406 @@
 #include "coreinit_MessageQueue.h"
 #include "coreinit_IPC.h"
 
+// PPC side of the IOS IPC channel. Each core owns a driver with a fixed set of request slots; a
+// slot holds one 0x80 byte request buffer (the command body plus room for an IOS_Open path).
+// Requests go straight to the HLE IOSU kernel. Replies come back through IPCDriver_NotifyResponses
+// and either wake the synchronous caller, are posted to a message queue, or are handed to the
+// core's IPC thread which runs the async callback.
+
 namespace coreinit
 {
-	static constexpr inline size_t IPC_NUM_RESOURCE_BUFFERS = 0x30;
-	
-	struct IPCResourceBuffer
+	namespace
 	{
-		IPCCommandBody commandBody;
-		uint8 bufferData[0x80 - 0x48];
-	};
-	
-	static_assert(sizeof(IPCCommandBody) == 0x48);
-	static_assert(sizeof(IPCResourceBuffer) == 0x80);
+		constexpr uint32 kSlotsPerCore = 0x30;
+		constexpr uint32 kMaxRepliesPerNotify = 11;
+		constexpr uint32 kMaxDevicePathLength = 31;
 
-	struct IPCResourceBufferDescriptor
-	{
-		/* +0x00 */ uint32be IsAllocated;
-		/* +0x04 */ MEMPTR<OSMessageQueue> asyncMsgQueue; // optional, if set a message will be sent to this queue...
-		/* +0x08 */ MEMPTR<void> asyncResultFunc; // ...otherwise this is checked and delegated to the IPC threads. If false, only eventSynchronousIPC will be signaled. If true, a message will be sent to the per-core ipc queue
-		/* +0x0C */ MEMPTR<void> asyncResultUserParam;
-		/* +0x10 */ uint32 ukn10;
-		/* +0x14 */ MEMPTR<IPCResourceBuffer> resourcePtr;
-		/* +0x18 */ OSEvent eventSynchronousIPC;
-	};
-
-	static_assert(sizeof(IPCResourceBufferDescriptor) == 0x3C);
-
-	struct IPCBufferFIFO
-	{
-		sint32be writeIndex;
-		sint32be readIndex;
-		sint32be numQueuedEntries;
-		sint32be mostQueuedEntries;
-		MEMPTR<IPCResourceBufferDescriptor> ringbufferArray[IPC_NUM_RESOURCE_BUFFERS];
-
-		void Init()
+		struct IPCRequestBuffer
 		{
-			writeIndex = 0;
-			readIndex = -1;
-			numQueuedEntries = 0;
-			mostQueuedEntries = 0;
-			for (size_t i = 0; i < IPC_NUM_RESOURCE_BUFFERS; i++)
-				ringbufferArray[i] = nullptr;
-		}
+			IPCCommandBody cmd;
+			uint8 payload[0x80 - sizeof(IPCCommandBody)];
+		};
+		static_assert(sizeof(IPCCommandBody) == 0x48);
+		static_assert(sizeof(IPCRequestBuffer) == 0x80);
 
-		void Push(IPCResourceBufferDescriptor* descriptor)
+		struct IPCRequestSlot
 		{
-			cemu_assert(readIndex != writeIndex); // if equal, fifo is full (should not happen as there not more buffers than ringbuffer entries)
-			ringbufferArray[writeIndex] = descriptor;
-			if (readIndex < 0)
-				readIndex = writeIndex;
-			writeIndex = (writeIndex + 1) % IPC_NUM_RESOURCE_BUFFERS;
-			++numQueuedEntries;
-			if (numQueuedEntries > mostQueuedEntries)
-				mostQueuedEntries = numQueuedEntries;
-		}
+			/* +0x00 */ uint32be inUse;
+			/* +0x04 */ MEMPTR<OSMessageQueue> replyQueue; // if set, the reply is posted here
+			/* +0x08 */ MEMPTR<void> replyCallback;        // otherwise, if set, the core's IPC thread calls this
+			/* +0x0C */ MEMPTR<void> replyContext;
+			/* +0x10 */ uint32 reserved10;
+			/* +0x14 */ MEMPTR<IPCRequestBuffer> buffer;
+			/* +0x18 */ OSEvent replyEvent;                 // signalled for synchronous requests
+		};
+		static_assert(sizeof(IPCRequestSlot) == 0x3C);
 
-		IPCResourceBufferDescriptor* Pop()
+		// FIFO of slot pointers
+		struct IPCSlotQueue
 		{
-			if (numQueuedEntries == 0)
-				return nullptr;
-			IPCResourceBufferDescriptor* r = ringbufferArray[readIndex].GetPtr();
-			--numQueuedEntries;
-			if (numQueuedEntries == 0)
-				readIndex = -1;
-			else
-				readIndex = (readIndex + 1) % IPC_NUM_RESOURCE_BUFFERS;
-			return r;
-		}
-	};
+			sint32be putPos;
+			sint32be takePos; // -1 while empty
+			sint32be count;
+			sint32be peakCount;
+			MEMPTR<IPCRequestSlot> entries[kSlotsPerCore];
 
-	struct IPCDriverCOSKernelCommunicationArea
-	{
-		uint32be numAvailableResponses;
-		MEMPTR<IPCCommandBody> responseArray[11];
-	};
-
-	static_assert(sizeof(IPCDriverCOSKernelCommunicationArea) == 0x30);
-
-	struct alignas(64) IPCDriver
-	{
-		betype<IPCDriverState> state;
-		uint32 ukn04;
-		uint32 coreIndex;
-		uint32 writeIndexCmd020;
-		MEMPTR<IPCResourceBuffer> resourceBuffers;
-
-		/* 0x16C */ IPCBufferFIFO fifoFreeBuffers;
-		/* 0x23C */ IPCBufferFIFO fifoBuffersInFlight;
-
-		/* 0x334 */ uint32 resourceBuffersInitialized;
-		/* 0x338 */ IPCDriverCOSKernelCommunicationArea kernelSharedArea; // this is passed to system call 0x1E00 (IPCOpen)
-
-		/* 0x3FC */ IPCResourceBufferDescriptor resBufferDescriptor[IPC_NUM_RESOURCE_BUFFERS];
-	};
-
-	//static_assert(sizeof(IPCDriverInstance) == 0x1740);
-
-	SysAllocator<IPCResourceBuffer, IPC_NUM_RESOURCE_BUFFERS * Espresso::CORE_COUNT, 0x40> s_ipcResourceBuffers;
-	SysAllocator<IPCDriver, Espresso::CORE_COUNT, 0x40> s_ipcDriver;
-
-	IPCDriver& IPCDriver_GetByCore(uint32 coreIndex)
-	{
-		cemu_assert_debug(coreIndex >= 0 && coreIndex < (uint32)Espresso::CORE_COUNT);
-		return s_ipcDriver[coreIndex];
-	}
-
-	void IPCDriver_InitForCore(uint32 coreIndex)
-	{
-		IPCDriver& ipcDriver = IPCDriver_GetByCore(coreIndex);
-		ipcDriver.coreIndex = coreIndex;
-		ipcDriver.state = IPCDriverState::INITIALIZED;
-		ipcDriver.resourceBuffers = s_ipcResourceBuffers.GetPtr() + IPC_NUM_RESOURCE_BUFFERS * coreIndex;
-		ipcDriver.resourceBuffersInitialized = 0;
-		// setup resource descriptors
-		for (size_t i = 0; i < IPC_NUM_RESOURCE_BUFFERS; i++)
-		{
-			ipcDriver.resBufferDescriptor[i].resourcePtr = ipcDriver.resourceBuffers.GetPtr() + i;
-			ipcDriver.resBufferDescriptor[i].asyncResultFunc = nullptr;
-			ipcDriver.resBufferDescriptor[i].asyncResultUserParam = nullptr;
-		}
-		ipcDriver.resourceBuffersInitialized = 1;
-		// setup resource buffer FIFOs
-		ipcDriver.fifoFreeBuffers.Init();
-		ipcDriver.fifoBuffersInFlight.Init();
-		for (size_t i = 0; i < IPC_NUM_RESOURCE_BUFFERS; i++)
-			ipcDriver.fifoFreeBuffers.Push(ipcDriver.resBufferDescriptor + i);
-	}
-
-	IPCResourceBufferDescriptor* IPCDriver_AllocateResource(IPCDriver* ipcDriver, IOSDevHandle devHandle, IPCCommandId cmdId, OSMessageQueue* asyncMessageQueue, MEMPTR<void> asyncResultFunc, MEMPTR<void> asyncResultUserParam)
-	{
-		cemu_assert_debug(ipcDriver->coreIndex == OSGetCoreId());
-		IPCResourceBufferDescriptor* descriptor = nullptr;
-		while (true) 
-		{
-			descriptor = ipcDriver->fifoFreeBuffers.Pop();
-			if (!descriptor)
+			void Reset()
 			{
-				cemuLog_log(LogType::Force, "IPCDriver: Exceeded free resources");
-				OSYieldThread();
-				cemu_assert_unimplemented(); // we should wait for an event instead of busylooping
+				putPos = 0;
+				takePos = -1;
+				count = 0;
+				peakCount = 0;
+				for (auto& e : entries)
+					e = nullptr;
 			}
-			else
-				break;
-		}
-		cemu_assert_debug(descriptor >= ipcDriver->resBufferDescriptor && descriptor < ipcDriver->resBufferDescriptor + IPC_NUM_RESOURCE_BUFFERS);
-		cemu_assert_debug(descriptor->resourcePtr.GetPtr() >= ipcDriver->resourceBuffers.GetPtr() && descriptor->resourcePtr.GetPtr() < (ipcDriver->resourceBuffers.GetPtr() + IPC_NUM_RESOURCE_BUFFERS));
-		IPCResourceBuffer* res = descriptor->resourcePtr;
-		IPCCommandBody& cmdBody = res->commandBody;
 
-		descriptor->IsAllocated = 1;
-		descriptor->asyncMsgQueue = asyncMessageQueue;
-		descriptor->asyncResultFunc = asyncResultFunc;
-		descriptor->asyncResultUserParam = asyncResultUserParam;
+			void Add(IPCRequestSlot* slot)
+			{
+				// there are never more slots than entries, so this cannot overflow
+				cemu_assert(takePos != putPos);
+				sint32 put = putPos;
+				entries[put] = slot;
+				if (takePos < 0)
+					takePos = put;
+				putPos = (put + 1) % (sint32)kSlotsPerCore;
+				count = count + 1;
+				if (count > peakCount)
+					peakCount = (sint32)count;
+			}
 
-		cmdBody.cmdId = cmdId;
-		cmdBody.ukn0C = 0;
-		cmdBody.ukn14 = 0;
-		cmdBody.result = 0;
-		cmdBody.devHandle = devHandle;
+			IPCRequestSlot* Remove()
+			{
+				if (count == 0)
+					return nullptr;
+				sint32 take = takePos;
+				IPCRequestSlot* slot = entries[take].GetPtr();
+				count = count - 1;
+				takePos = (count == 0) ? -1 : (take + 1) % (sint32)kSlotsPerCore;
+				return slot;
+			}
+		};
+		static_assert(sizeof(IPCSlotQueue) == 0xD0);
 
-		return descriptor;
-	}
-
-	void IPCDriver_ReleaseResource(IPCDriver* ipcDriver, IPCResourceBufferDescriptor* requestDescriptor)
-	{
-		requestDescriptor->IsAllocated = 0;
-		ipcDriver->fifoFreeBuffers.Push(requestDescriptor);
-	}
-
-	/* IPC threads */
-
-	SysAllocator<OSThread_t, Espresso::CORE_COUNT> gIPCThread;
-	SysAllocator<uint8, 0x4000 * Espresso::CORE_COUNT> _gIPCThreadStack;
-	SysAllocator<uint8, 0x18 * Espresso::CORE_COUNT> _gIPCThreadNameStorage;
-	SysAllocator<OSMessageQueue, Espresso::CORE_COUNT> gIPCThreadMsgQueue;
-	SysAllocator<OSMessage, Espresso::CORE_COUNT * IPC_NUM_RESOURCE_BUFFERS> _gIPCThreadSemaphoreStorage;
-
-	// handler thread for asynchronous callbacks for IPC responses
-	void __IPCDriverThreadFunc(PPCInterpreter_t* hCPU)
-	{
-		uint32 coreIndex = OSGetCoreId();
-		while (true)
+		// reply list the COS kernel would fill in before calling back into the driver
+		struct IPCReplyMailbox
 		{
-			OSMessage msg;
-			OSReceiveMessage(gIPCThreadMsgQueue.GetPtr() + coreIndex, &msg, OS_MESSAGE_BLOCK);
-			cemu_assert(msg.data2 == 1); // type must be callback
-			MEMPTR<void> cbFunc{ msg.message };
-			cemu_assert(cbFunc != nullptr);
-			PPCCoreCallback(cbFunc.GetPtr(), (uint32)msg.data0, (uint32)msg.data1);
-		}
-		osLib_returnFromFunction(hCPU, 0);
-	}
+			uint32be count;
+			MEMPTR<IPCCommandBody> replies[kMaxRepliesPerNotify];
+		};
+		static_assert(sizeof(IPCReplyMailbox) == 0x30);
 
-	void IPCDriver_InitIPCThread(uint32 coreIndex)
-	{
-		// create a thread with 0x4000 stack space
-		// and a message queue large enough to hold the maximum number of commands (IPC_NUM_RESOURCE_BUFFERS)
-		OSInitMessageQueue(gIPCThreadMsgQueue.GetPtr() + coreIndex, _gIPCThreadSemaphoreStorage.GetPtr() + coreIndex * IPC_NUM_RESOURCE_BUFFERS, IPC_NUM_RESOURCE_BUFFERS);
-		OSThread_t* ipcThread = gIPCThread.GetPtr() + coreIndex;
-		__OSCreateThreadType(ipcThread, PPCInterpreter_makeCallableExportDepr(__IPCDriverThreadFunc), 0, nullptr, _gIPCThreadStack.GetPtr() + 0x4000 * coreIndex + 0x4000, 0x4000, 15, (1 << coreIndex), OSThread_t::THREAD_TYPE::TYPE_DRIVER);
-		sprintf((char*)_gIPCThreadNameStorage.GetPtr()+coreIndex*0x18, "{SYS IPC Core %d}", coreIndex);
-		OSSetThreadName(ipcThread, (char*)_gIPCThreadNameStorage.GetPtr() + coreIndex * 0x18);
-		OSResumeThread(ipcThread);
-	}
-
-	/* coreinit IOS_* API */
-
-	void _IPCDriver_SubmitCmdAllQueued(IPCDriver& ipcDriver)
-	{
-		// on COS, submitted commands first go to the COS kernel via syscall 0x2000, where they are processed, copied and queued again
-		// we skip all of this and just pass our IPC commands directly to the IOSU kernel handler HLE function
-		// important: IOSU needs to know which PPC core sent the command, so that it can also notify the same core about the result
-		ipcDriver.state = IPCDriverState::SUBMITTING;
-		while (true)
+		struct alignas(64) IPCCoreDriver
 		{
-			IPCResourceBufferDescriptor* res = ipcDriver.fifoBuffersInFlight.Pop();
-			if (!res)
-				break;
-			// resolve pointers
-			switch (res->resourcePtr->commandBody.cmdId)
+			/* +0x000 */ betype<IPCDriverState> state;
+			/* +0x004 */ uint32 reserved004;
+			/* +0x008 */ uint32 coreIndex;
+			/* +0x00C */ uint32 reserved00C;
+			/* +0x010 */ MEMPTR<IPCRequestBuffer> buffers;
+			/* +0x014 */ IPCSlotQueue freeSlots;
+			/* +0x0E4 */ IPCSlotQueue pendingSlots;
+			/* +0x1B4 */ uint32 slotsReady;
+			/* +0x1B8 */ IPCReplyMailbox mailbox;
+			/* +0x1E8 */ IPCRequestSlot slots[kSlotsPerCore];
+		};
+		static_assert(offsetof(IPCCoreDriver, slots) == 0x1E8);
+		static_assert(sizeof(IPCCoreDriver) == 0xD40);
+
+		SysAllocator<IPCRequestBuffer, kSlotsPerCore * Espresso::CORE_COUNT, 0x40> s_requestBuffers;
+		SysAllocator<IPCCoreDriver, Espresso::CORE_COUNT, 0x40> s_coreDrivers;
+
+		SysAllocator<OSThread_t, Espresso::CORE_COUNT> s_ipcThreads;
+		SysAllocator<uint8, 0x4000 * Espresso::CORE_COUNT> s_ipcThreadStacks;
+		SysAllocator<uint8, 0x18 * Espresso::CORE_COUNT> s_ipcThreadNames;
+		SysAllocator<OSMessageQueue, Espresso::CORE_COUNT> s_ipcThreadQueues;
+		SysAllocator<OSMessage, Espresso::CORE_COUNT * kSlotsPerCore> s_ipcThreadQueueStorage;
+
+		constexpr uint32 kIpcThreadStackSize = 0x4000;
+		constexpr uint32 kIpcThreadNameSize = 0x18;
+
+		// message tags used on the IPC thread queue and on caller supplied reply queues
+		constexpr uint32 kReplyMessageQueued = 0;
+		constexpr uint32 kReplyMessageCallback = 1;
+
+		IPCCoreDriver& DriverOf(uint32 coreIndex)
+		{
+			cemu_assert_debug(coreIndex < (uint32)Espresso::CORE_COUNT);
+			return s_coreDrivers[coreIndex];
+		}
+
+		IPCCoreDriver& CurrentDriver()
+		{
+			return DriverOf(OSGetCoreId());
+		}
+
+		void SetUpDriver(uint32 coreIndex)
+		{
+			IPCCoreDriver& drv = DriverOf(coreIndex);
+			drv.coreIndex = coreIndex;
+			drv.state = IPCDriverState::INITIALIZED;
+			drv.buffers = s_requestBuffers.GetPtr() + kSlotsPerCore * coreIndex;
+			drv.slotsReady = 0;
+			for (uint32 i = 0; i < kSlotsPerCore; i++)
+			{
+				IPCRequestSlot& slot = drv.slots[i];
+				slot.buffer = drv.buffers.GetPtr() + i;
+				slot.replyCallback = nullptr;
+				slot.replyContext = nullptr;
+			}
+			drv.slotsReady = 1;
+			drv.freeSlots.Reset();
+			drv.pendingSlots.Reset();
+			for (uint32 i = 0; i < kSlotsPerCore; i++)
+				drv.freeSlots.Add(drv.slots + i);
+		}
+
+		IPCRequestSlot* AcquireSlot(IPCCoreDriver& drv, IOSDevHandle devHandle, IPCCommandId cmdId, OSMessageQueue* replyQueue, MEMPTR<void> replyCallback, MEMPTR<void> replyContext)
+		{
+			cemu_assert_debug(drv.coreIndex == OSGetCoreId());
+			IPCRequestSlot* slot = drv.freeSlots.Remove();
+			if (!slot)
+			{
+				// every slot is waiting for IOSU; let other threads run until one comes back
+				cemuLog_log(LogType::Force, "IPC: all request slots of core {} are busy", drv.coreIndex);
+				do
+				{
+					OSYieldThread();
+					slot = drv.freeSlots.Remove();
+				} while (!slot);
+			}
+			slot->inUse = 1;
+			slot->replyQueue = replyQueue;
+			slot->replyCallback = replyCallback;
+			slot->replyContext = replyContext;
+			IPCCommandBody& cmd = slot->buffer->cmd;
+			cmd.cmdId = cmdId;
+			cmd.devHandle = devHandle;
+			cmd.result = 0;
+			cmd.ukn0C = 0;
+			cmd.ukn14 = 0;
+			return slot;
+		}
+
+		void ReturnSlot(IPCCoreDriver& drv, IPCRequestSlot* slot)
+		{
+			slot->inUse = 0;
+			drv.freeSlots.Add(slot);
+		}
+
+		// on hardware the kernel translates the PPC pointers of a request; here the virtual
+		// addresses are passed on unchanged
+		void FillInPointers(IPCCommandBody& cmd)
+		{
+			switch ((IPCCommandId)cmd.cmdId)
 			{
 			case IPCCommandId::IOS_OPEN:
-				res->resourcePtr->commandBody.args[0] = res->resourcePtr->commandBody.ppcVirt0.GetMPTR();
+				cmd.args[0] = cmd.ppcVirt0.GetMPTR();
 				break;
 			case IPCCommandId::IOS_CLOSE:
 				break;
 			case IPCCommandId::IOS_IOCTL:
-				res->resourcePtr->commandBody.args[1] = res->resourcePtr->commandBody.ppcVirt0.GetMPTR();
-				res->resourcePtr->commandBody.args[3] = res->resourcePtr->commandBody.ppcVirt1.GetMPTR();
+				cmd.args[1] = cmd.ppcVirt0.GetMPTR();
+				cmd.args[3] = cmd.ppcVirt1.GetMPTR();
 				break;
 			case IPCCommandId::IOS_IOCTLV:
-				res->resourcePtr->commandBody.args[3] = res->resourcePtr->commandBody.ppcVirt0.GetMPTR();
+				cmd.args[3] = cmd.ppcVirt0.GetMPTR();
 				break;
 			default:
-				cemu_assert_unimplemented();
+				cemuLog_log(LogType::Force, "IPC: unknown command {}", (uint32)(IPCCommandId)cmd.cmdId);
 				break;
 			}
-			iosu::kernel::IPCSubmitFromCOS(ipcDriver.coreIndex, &res->resourcePtr->commandBody);
 		}
-		ipcDriver.state = IPCDriverState::READY;
-	}
 
-	void _IPCDriver_SubmitCmd(IPCDriver& ipcDriver, IPCResourceBufferDescriptor* requestDescriptor)
-	{
-		if (requestDescriptor->asyncResultFunc == nullptr)
-			OSInitEvent(&requestDescriptor->eventSynchronousIPC, OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, OSEvent::EVENT_MODE::MODE_AUTO);
-		ipcDriver.fifoBuffersInFlight.Push(requestDescriptor);
-		cemu_assert_debug(ipcDriver.state == IPCDriverState::READY || ipcDriver.state == IPCDriverState::INITIALIZED);
-		_IPCDriver_SubmitCmdAllQueued(ipcDriver);
-	}
-
-	uint32 _IPCDriver_WaitForResultAndRelease(IPCDriver& ipcDriver, IPCResourceBufferDescriptor* requestDescriptor)
-	{
-		OSWaitEvent(&requestDescriptor->eventSynchronousIPC);
-		uint32 r = requestDescriptor->resourcePtr->commandBody.result;
-		IPCDriver_ReleaseResource(&ipcDriver, requestDescriptor);
-		return r;
-	}
-
-	void IPCDriver_HandleResponse(IPCDriver& ipcDriver, IPCCommandBody* res, uint32 ppcCoreIndex)
-	{
-		size_t index = (IPCResourceBuffer*)res - ipcDriver.resourceBuffers.GetPtr();
-		cemu_assert(index < IPC_NUM_RESOURCE_BUFFERS);
-		IPCResourceBufferDescriptor* descriptor = ipcDriver.resBufferDescriptor + index;
-		cemu_assert(descriptor->IsAllocated != 0);
-		if (descriptor->asyncMsgQueue != nullptr)
+		void Submit(IPCCoreDriver& drv, IPCRequestSlot* slot)
 		{
-			OSMessage msg;
-			msg.message = 0;
-			msg.data0 = res->result;
-			msg.data1 = descriptor->asyncResultUserParam.GetMPTR();
-			msg.data2 = 0;
-			sint32 r = OSSendMessage(descriptor->asyncMsgQueue.GetPtr(), &msg, 0);
-			cemu_assert(r != 0);
-			IPCDriver_ReleaseResource(&ipcDriver, descriptor);
-			return;
+			if (!slot->replyCallback)
+				OSInitEvent(&slot->replyEvent, OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, OSEvent::EVENT_MODE::MODE_AUTO);
+			drv.pendingSlots.Add(slot);
+			cemu_assert_debug(drv.state == IPCDriverState::READY || drv.state == IPCDriverState::INITIALIZED);
+			// IOSU has to know the sending core so the reply comes back to the same driver
+			drv.state = IPCDriverState::SUBMITTING;
+			while (IPCRequestSlot* next = drv.pendingSlots.Remove())
+			{
+				IPCCommandBody& cmd = next->buffer->cmd;
+				FillInPointers(cmd);
+				iosu::kernel::IPCSubmitFromCOS(drv.coreIndex, &cmd);
+			}
+			drv.state = IPCDriverState::READY;
 		}
-		if (descriptor->asyncResultFunc != nullptr)
+
+		uint32 WaitForReply(IPCCoreDriver& drv, IPCRequestSlot* slot)
 		{
-			OSMessage msg;
-			msg.message = descriptor->asyncResultFunc.GetMPTR();
-			msg.data0 = res->result;
-			msg.data1 = descriptor->asyncResultUserParam.GetMPTR();
-			msg.data2 = 1;
-			sint32 r = OSSendMessage(gIPCThreadMsgQueue.GetPtr() + ppcCoreIndex, &msg, 0);
-			cemu_assert(r != 0);
-			IPCDriver_ReleaseResource(&ipcDriver, descriptor);
-			return;
+			OSWaitEvent(&slot->replyEvent);
+			uint32 result = slot->buffer->cmd.result;
+			ReturnSlot(drv, slot);
+			return result;
 		}
-		// signal event for synchronous IPC
-		OSSignalEvent(&descriptor->eventSynchronousIPC);
+
+		void DeliverReply(IPCCoreDriver& drv, IPCCommandBody* reply, uint32 coreIndex)
+		{
+			uint32 index = (uint32)((IPCRequestBuffer*)reply - drv.buffers.GetPtr());
+			cemu_assert(index < kSlotsPerCore);
+			IPCRequestSlot& slot = drv.slots[index];
+			cemu_assert(slot.inUse != 0);
+			if (slot.replyQueue)
+			{
+				OSMessage msg;
+				msg.message = 0;
+				msg.data0 = reply->result;
+				msg.data1 = slot.replyContext.GetMPTR();
+				msg.data2 = kReplyMessageQueued;
+				cemu_assert(OSSendMessage(slot.replyQueue.GetPtr(), &msg, 0) != 0);
+				ReturnSlot(drv, &slot);
+			}
+			else if (slot.replyCallback)
+			{
+				OSMessage msg;
+				msg.message = slot.replyCallback.GetMPTR();
+				msg.data0 = reply->result;
+				msg.data1 = slot.replyContext.GetMPTR();
+				msg.data2 = kReplyMessageCallback;
+				cemu_assert(OSSendMessage(s_ipcThreadQueues.GetPtr() + coreIndex, &msg, 0) != 0);
+				ReturnSlot(drv, &slot);
+			}
+			else
+			{
+				// synchronous: the waiting caller reads the result and frees the slot
+				OSSignalEvent(&slot.replyEvent);
+			}
+		}
+
+		// runs the async reply callbacks of one core
+		void IPCThreadMain(PPCInterpreter_t* hCPU)
+		{
+			OSMessageQueue* queue = s_ipcThreadQueues.GetPtr() + OSGetCoreId();
+			for (;;)
+			{
+				OSMessage msg;
+				OSReceiveMessage(queue, &msg, OS_MESSAGE_BLOCK);
+				cemu_assert(msg.data2 == kReplyMessageCallback);
+				MPTR callback = msg.message;
+				cemu_assert(callback != MPTR_NULL);
+				PPCCoreCallback(callback, (uint32)msg.data0, (uint32)msg.data1);
+			}
+		}
+
+		void StartIPCThread(uint32 coreIndex)
+		{
+			// the queue can hold a reply for every slot of the core
+			OSInitMessageQueue(s_ipcThreadQueues.GetPtr() + coreIndex, s_ipcThreadQueueStorage.GetPtr() + coreIndex * kSlotsPerCore, kSlotsPerCore);
+			OSThread_t* thread = s_ipcThreads.GetPtr() + coreIndex;
+			uint8* stackTop = s_ipcThreadStacks.GetPtr() + kIpcThreadStackSize * (coreIndex + 1);
+			__OSCreateThreadType(thread, PPCInterpreter_makeCallableExportDepr(IPCThreadMain), 0, nullptr, stackTop, kIpcThreadStackSize, 15, 1u << coreIndex, OSThread_t::THREAD_TYPE::TYPE_DRIVER);
+			char* name = (char*)s_ipcThreadNames.GetPtr() + coreIndex * kIpcThreadNameSize;
+			snprintf(name, kIpcThreadNameSize, "{SYS IPC Core %u}", coreIndex);
+			OSSetThreadName(thread, name);
+			OSResumeThread(thread);
+		}
+
+		void PrepareOpen(IPCRequestSlot* slot, const char* devicePath, uint32 flags)
+		{
+			IPCRequestBuffer* buf = slot->buffer.GetPtr();
+			size_t length = strlen(devicePath);
+			if (length > kMaxDevicePathLength)
+			{
+				cemuLog_log(LogType::Force, "IOS_Open: device path longer than {} characters", kMaxDevicePathLength);
+				cemu_assert_error();
+			}
+			// the path is carried in the request buffer right after the command body
+			memcpy(buf->payload, devicePath, length + 1);
+			IPCCommandBody& cmd = buf->cmd;
+			cmd.ppcVirt0 = MEMPTR<void>(buf->payload).GetMPTR();
+			cmd.args[0] = MPTR_NULL;
+			cmd.args[1] = (uint32)(length + 1);
+			cmd.args[2] = flags;
+		}
+
+		void PrepareIoctl(IPCRequestSlot* slot, uint32 requestId, void* ptrIn, uint32 sizeIn, void* ptrOut, uint32 sizeOut)
+		{
+			IPCCommandBody& cmd = slot->buffer->cmd;
+			cmd.args[0] = requestId;
+			cmd.args[1] = MPTR_NULL;
+			cmd.args[2] = sizeIn;
+			cmd.args[3] = MPTR_NULL;
+			cmd.args[4] = sizeOut;
+			cmd.ppcVirt0 = MEMPTR<void>(ptrIn).GetMPTR();
+			cmd.ppcVirt1 = MEMPTR<void>(ptrOut).GetMPTR();
+		}
+
+		void PrepareIoctlv(IPCRequestSlot* slot, uint32 requestId, uint32 numIn, uint32 numOut, IPCIoctlVector* vec)
+		{
+			IPCCommandBody& cmd = slot->buffer->cmd;
+			cmd.ppcVirt0 = MEMPTR<void>(vec).GetMPTR();
+			cmd.args[0] = requestId;
+			cmd.args[1] = numIn;
+			cmd.args[2] = numOut;
+			cmd.args[3] = MPTR_NULL;
+		}
 	}
 
-	// handles responses queued in shared region
-	void IPCDriver_KernelCallback(IPCDriver& ipcDriver)
-	{
-		cemu_assert_debug(ipcDriver.kernelSharedArea.numAvailableResponses != 0);
-		for (uint32 i = 0; i < ipcDriver.kernelSharedArea.numAvailableResponses; i++)
-			IPCDriver_HandleResponse(ipcDriver, ipcDriver.kernelSharedArea.responseArray[i], ipcDriver.coreIndex);
-		ipcDriver.kernelSharedArea.numAvailableResponses = 0;
-	}
-
-	// called by our HLE'd IOSU directly
 	void IPCDriver_NotifyResponses(uint32 ppcCoreIndex, IPCCommandBody** responseArray, uint32 numResponses)
 	{
-		cemu_assert(numResponses < 11);
-		IPCDriver& ipcDriver = IPCDriver_GetByCore(ppcCoreIndex);
-		ipcDriver.kernelSharedArea.numAvailableResponses = numResponses;
+		cemu_assert(numResponses < kMaxRepliesPerNotify);
+		IPCCoreDriver& drv = DriverOf(ppcCoreIndex);
+		drv.mailbox.count = numResponses;
 		for (uint32 i = 0; i < numResponses; i++)
-			ipcDriver.kernelSharedArea.responseArray[i] = responseArray[i];
-		IPCDriver_KernelCallback(ipcDriver);
-	}
-
-	void _IPCDriver_SetupCmd_IOSOpen(IPCDriver& ipcDriver, IPCResourceBufferDescriptor* requestDescriptor, const char* devicePath, uint32 flags)
-	{
-		// store the path in the buffer after the command body
-		IPCResourceBuffer* resBuffer = requestDescriptor->resourcePtr;
-		IPCCommandBody& cmdBody = resBuffer->commandBody;
-
-		uint8* buffer = resBuffer->bufferData;
-		size_t pathLen = strlen(devicePath);
-		if (pathLen > 31)
-		{
-			cemuLog_log(LogType::Force, "IOS_Open(): Device path must not exceed 31 characters");
-			cemu_assert_error();
-		}
-		memcpy(buffer, devicePath, pathLen + 1);
-
-		cmdBody.ppcVirt0 = MEMPTR<void>(buffer).GetMPTR();
-		cmdBody.args[0] = 0;
-		cmdBody.args[1] = (uint32)(pathLen + 1);
-		cmdBody.args[2] = flags;
-	}
-
-	IOS_ERROR _IPCDriver_SetupCmd_IOSIoctl(IPCDriver& ipcDriver, IPCResourceBufferDescriptor* requestDescriptor, uint32 requestId, void* ptrIn, uint32 sizeIn, void* ptrOut, uint32 sizeOut)
-	{
-		IPCCommandBody& cmdBody = requestDescriptor->resourcePtr->commandBody;
-		cmdBody.args[0] = requestId;
-		cmdBody.args[1] = MPTR_NULL; // set to ppcVirt0 later
-		cmdBody.args[2] = sizeIn;
-		cmdBody.args[3] = MPTR_NULL; // set to ppcVirt1 later
-		cmdBody.args[4] = sizeOut;
-		cmdBody.ppcVirt0 = MEMPTR<void>(ptrIn).GetMPTR();
-		cmdBody.ppcVirt1 = MEMPTR<void>(ptrOut).GetMPTR();
-		return IOS_ERROR_OK;
-	}
-
-	IOS_ERROR _IPCDriver_SetupCmd_IOSIoctlv(IPCDriver& ipcDriver, IPCResourceBufferDescriptor* requestDescriptor, uint32 requestId, uint32 numIn, uint32 numOut, IPCIoctlVector* vec)
-	{
-		IPCCommandBody& cmdBody = requestDescriptor->resourcePtr->commandBody;
-		// set args
-		cmdBody.ppcVirt0 = MEMPTR<void>(vec).GetMPTR();
-		cmdBody.args[0] = requestId;
-		cmdBody.args[1] = numIn;
-		cmdBody.args[2] = numOut;
-		cmdBody.args[3] = 0; // set to ppcVirt0 later
-		return IOS_ERROR_OK;
+			drv.mailbox.replies[i] = responseArray[i];
+		cemu_assert_debug(numResponses != 0);
+		for (uint32 i = 0; i < drv.mailbox.count; i++)
+			DeliverReply(drv, drv.mailbox.replies[i].GetPtr(), drv.coreIndex);
+		drv.mailbox.count = 0;
 	}
 
 	IOSDevHandle IOS_Open(const char* devicePath, uint32 flags)
 	{
-		IPCDriver& ipcDriver = IPCDriver_GetByCore(OSGetCoreId());
-		IPCResourceBufferDescriptor* ipcDescriptor = IPCDriver_AllocateResource(&ipcDriver, 0, IPCCommandId::IOS_OPEN, nullptr, nullptr, nullptr);
-		_IPCDriver_SetupCmd_IOSOpen(ipcDriver, ipcDescriptor, devicePath, flags);
-		_IPCDriver_SubmitCmd(ipcDriver, ipcDescriptor);
-		uint32 r = _IPCDriver_WaitForResultAndRelease(ipcDriver, ipcDescriptor);
-		return r;
+		IPCCoreDriver& drv = CurrentDriver();
+		IPCRequestSlot* slot = AcquireSlot(drv, 0, IPCCommandId::IOS_OPEN, nullptr, nullptr, nullptr);
+		PrepareOpen(slot, devicePath, flags);
+		Submit(drv, slot);
+		return WaitForReply(drv, slot);
 	}
 
 	IOS_ERROR IOS_Close(IOSDevHandle devHandle)
 	{
-		IPCDriver& ipcDriver = IPCDriver_GetByCore(OSGetCoreId());
-		IPCResourceBufferDescriptor* ipcDescriptor = IPCDriver_AllocateResource(&ipcDriver, devHandle, IPCCommandId::IOS_CLOSE, nullptr, nullptr, nullptr);
-		_IPCDriver_SubmitCmd(ipcDriver, ipcDescriptor);
-		IOS_ERROR r = (IOS_ERROR)_IPCDriver_WaitForResultAndRelease(ipcDriver, ipcDescriptor);
-		return r;
+		IPCCoreDriver& drv = CurrentDriver();
+		IPCRequestSlot* slot = AcquireSlot(drv, devHandle, IPCCommandId::IOS_CLOSE, nullptr, nullptr, nullptr);
+		Submit(drv, slot);
+		return (IOS_ERROR)WaitForReply(drv, slot);
 	}
 
 	IOS_ERROR IOS_Ioctl(IOSDevHandle devHandle, uint32 requestId, void* ptrIn, uint32 sizeIn, void* ptrOut, uint32 sizeOut)
 	{
-		IPCDriver& ipcDriver = IPCDriver_GetByCore(OSGetCoreId());
-		IPCResourceBufferDescriptor* ipcDescriptor = IPCDriver_AllocateResource(&ipcDriver, devHandle, IPCCommandId::IOS_IOCTL, nullptr, nullptr, nullptr);
-		IOS_ERROR r = _IPCDriver_SetupCmd_IOSIoctl(ipcDriver, ipcDescriptor, requestId, ptrIn, sizeIn, ptrOut, sizeOut);
-		if (r != IOS_ERROR_OK)
-		{
-			cemuLog_log(LogType::Force, "IOS_Ioctl failed due to bad parameters");
-			IPCDriver_ReleaseResource(&ipcDriver, ipcDescriptor);
-			return r;
-		}
-		_IPCDriver_SubmitCmd(ipcDriver, ipcDescriptor);
-		r = (IOS_ERROR)_IPCDriver_WaitForResultAndRelease(ipcDriver, ipcDescriptor);
-		return r;
+		IPCCoreDriver& drv = CurrentDriver();
+		IPCRequestSlot* slot = AcquireSlot(drv, devHandle, IPCCommandId::IOS_IOCTL, nullptr, nullptr, nullptr);
+		PrepareIoctl(slot, requestId, ptrIn, sizeIn, ptrOut, sizeOut);
+		Submit(drv, slot);
+		return (IOS_ERROR)WaitForReply(drv, slot);
 	}
 
 	IOS_ERROR IOS_IoctlAsync(IOSDevHandle devHandle, uint32 requestId, void* ptrIn, uint32 sizeIn, void* ptrOut, uint32 sizeOut, MEMPTR<void> asyncResultFunc, MEMPTR<void> asyncResultUserParam)
 	{
-		IPCDriver& ipcDriver = IPCDriver_GetByCore(OSGetCoreId());
-		IPCResourceBufferDescriptor* ipcDescriptor = IPCDriver_AllocateResource(&ipcDriver, devHandle, IPCCommandId::IOS_IOCTL, nullptr, asyncResultFunc, asyncResultUserParam);
-		IOS_ERROR r = _IPCDriver_SetupCmd_IOSIoctl(ipcDriver, ipcDescriptor, requestId, ptrIn, sizeIn, ptrOut, sizeOut);
-		if (r != IOS_ERROR_OK)
-		{
-			cemuLog_log(LogType::Force, "IOS_Ioctl failed due to bad parameters");
-			IPCDriver_ReleaseResource(&ipcDriver, ipcDescriptor);
-			return r;
-		}
-		_IPCDriver_SubmitCmd(ipcDriver, ipcDescriptor);
-		return r;
+		IPCCoreDriver& drv = CurrentDriver();
+		IPCRequestSlot* slot = AcquireSlot(drv, devHandle, IPCCommandId::IOS_IOCTL, nullptr, asyncResultFunc, asyncResultUserParam);
+		PrepareIoctl(slot, requestId, ptrIn, sizeIn, ptrOut, sizeOut);
+		Submit(drv, slot);
+		return IOS_ERROR_OK;
 	}
 
 	IOS_ERROR IOS_Ioctlv(IOSDevHandle devHandle, uint32 requestId, uint32 numIn, uint32 numOut, IPCIoctlVector* vec)
 	{
-		IPCDriver& ipcDriver = IPCDriver_GetByCore(OSGetCoreId());
-		IPCResourceBufferDescriptor* ipcDescriptor = IPCDriver_AllocateResource(&ipcDriver, devHandle, IPCCommandId::IOS_IOCTLV, nullptr, nullptr, nullptr);
-		IOS_ERROR r = _IPCDriver_SetupCmd_IOSIoctlv(ipcDriver, ipcDescriptor, requestId, numIn, numOut, vec);
-		if (r != IOS_ERROR_OK)
-		{
-			cemuLog_log(LogType::Force, "IOS_Ioctlv failed due to bad parameters");
-			IPCDriver_ReleaseResource(&ipcDriver, ipcDescriptor);
-			return r;
-		}
-		_IPCDriver_SubmitCmd(ipcDriver, ipcDescriptor);
-		r = (IOS_ERROR)_IPCDriver_WaitForResultAndRelease(ipcDriver, ipcDescriptor);
-		return r;
+		IPCCoreDriver& drv = CurrentDriver();
+		IPCRequestSlot* slot = AcquireSlot(drv, devHandle, IPCCommandId::IOS_IOCTLV, nullptr, nullptr, nullptr);
+		PrepareIoctlv(slot, requestId, numIn, numOut, vec);
+		Submit(drv, slot);
+		return (IOS_ERROR)WaitForReply(drv, slot);
 	}
 
 	IOS_ERROR IOS_IoctlvAsync(IOSDevHandle devHandle, uint32 requestId, uint32 numIn, uint32 numOut, IPCIoctlVector* vec, MEMPTR<void> asyncResultFunc, MEMPTR<void> asyncResultUserParam)
 	{
-		IPCDriver& ipcDriver = IPCDriver_GetByCore(OSGetCoreId());
-		IPCResourceBufferDescriptor* ipcDescriptor = IPCDriver_AllocateResource(&ipcDriver, devHandle, IPCCommandId::IOS_IOCTLV, nullptr, asyncResultFunc, asyncResultUserParam);
-		IOS_ERROR r = _IPCDriver_SetupCmd_IOSIoctlv(ipcDriver, ipcDescriptor, requestId, numIn, numOut, vec);
-		if (r != IOS_ERROR_OK)
-		{
-			cemuLog_log(LogType::Force, "IOS_Ioctlv failed due to bad parameters");
-			IPCDriver_ReleaseResource(&ipcDriver, ipcDescriptor);
-			return r;
-		}
-		_IPCDriver_SubmitCmd(ipcDriver, ipcDescriptor);
-		return r;
+		IPCCoreDriver& drv = CurrentDriver();
+		IPCRequestSlot* slot = AcquireSlot(drv, devHandle, IPCCommandId::IOS_IOCTLV, nullptr, asyncResultFunc, asyncResultUserParam);
+		PrepareIoctlv(slot, requestId, numIn, numOut, vec);
+		Submit(drv, slot);
+		return IOS_ERROR_OK;
 	}
 
 	void MapIPCExports()
@@ -457,11 +420,10 @@ namespace coreinit
 
 	void InitializeIPC()
 	{
-		for (uint32 i = 0; i < Espresso::CORE_COUNT; i++)
+		for (uint32 core = 0; core < Espresso::CORE_COUNT; core++)
 		{
-			IPCDriver_InitForCore(i);
-			IPCDriver_InitIPCThread(i);
+			SetUpDriver(core);
+			StartIPCThread(core);
 		}
 	}
-
-};
+}

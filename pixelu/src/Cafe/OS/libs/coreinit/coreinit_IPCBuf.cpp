@@ -1,200 +1,184 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
 #include "coreinit_IPCBuf.h"
 
+// IPC buffer pools: a fixed number of equally sized blocks carved out of one area. Free blocks
+// sit in a ring buffer of pointers, so blocks are handed out in the order they were returned.
+
 namespace coreinit
 {
-	void FIFOInit(IPCFifo_t* fifo, uint32 entryCount, void* entryArray)
+	namespace
 	{
-		fifo->entryCount = entryCount;
-		fifo->entryArray = (FIFOEntry_t*)entryArray;
-		fifo->writeIndex = 0;
-		fifo->readIndex = -1;
-		fifo->availableEntries = 0;
-	}
+		constexpr uint32 kPoolMagic = 0x0BADF00D;
+		constexpr uint32 kBlockGranularity = 0x40;
+		constexpr uint32 kRingEmpty = 0xFFFFFFFF;
 
-	sint32 FIFOPush(IPCFifo_t* fifo, void* entry)
-	{
-		if (fifo->readIndex == fifo->writeIndex)
+		constexpr sint32 kErrRingFull = -8;
+		constexpr sint32 kErrRingEmpty = -7;
+		constexpr sint32 kErrBadPool = -4;
+
+		void RingReset(IPCBufPoolFreeRing& ring, uint32 capacity, MPTR slotArray)
 		{
-			assert_dbg();
-			return -8;
+			ring.capacity = capacity;
+			ring.slots = MEMPTR<MEMPTR<uint8>>(slotArray);
+			ring.putPos = 0;
+			ring.takePos = kRingEmpty;
+			ring.used = 0;
 		}
-		fifo->entryArray[(uint32)fifo->writeIndex].p = (uint8*)entry;
-		if ((sint32)fifo->readIndex < 0)
+
+		bool RingIsEmpty(const IPCBufPoolFreeRing& ring)
 		{
-			// set readIndex to valid value when fifo was empty
-			fifo->readIndex = fifo->writeIndex;
+			return (sint32)(uint32)ring.takePos < 0;
 		}
-		fifo->availableEntries = (uint32)fifo->availableEntries + 1;
-		fifo->writeIndex = ((uint32)fifo->writeIndex + 1) % (uint32)fifo->entryCount;
-		return 0;
-	}
 
-	sint32 FIFOPop(IPCFifo_t* fifo, uint8** entry)
-	{
-		*entry = nullptr;
-		if ((sint32)fifo->readIndex < 0)
-			return -7;
-		fifo->availableEntries = (uint32)fifo->availableEntries - 1;
-		*entry = fifo->entryArray[(uint32)fifo->readIndex].p.GetPtr();
-		fifo->readIndex = ((uint32)fifo->readIndex + 1) % (uint32)fifo->entryCount;
-
-		if (fifo->availableEntries == (uint32be)0)
+		sint32 RingPut(IPCBufPoolFreeRing& ring, MPTR block)
 		{
-			fifo->readIndex = -1;
+			uint32 put = ring.putPos;
+			if (ring.takePos == put)
+			{
+				cemuLog_log(LogType::APIErrors, "IPCBufPool: free ring overflow");
+				return kErrRingFull;
+			}
+			ring.slots.GetPtr()[put] = MEMPTR<uint8>(block);
+			if (RingIsEmpty(ring))
+				ring.takePos = put;
+			ring.used = ring.used + 1;
+			ring.putPos = (put + 1) % (uint32)ring.capacity;
+			return 0;
 		}
-		return 0;
-	}
 
-	void* getUpwardsAlignedAddr(void* addr, uint32 alignment)
-	{
-		uint64 v = ((uint64)addr + alignment - 1) & ~(uint64)(alignment - 1);
-		return (uint8*)v;
-	}
+		sint32 RingTake(IPCBufPoolFreeRing& ring, MPTR& block)
+		{
+			block = MPTR_NULL;
+			if (RingIsEmpty(ring))
+				return kErrRingEmpty;
+			uint32 take = ring.takePos;
+			ring.used = ring.used - 1;
+			block = ring.slots.GetPtr()[take].GetMPTR();
+			if (ring.used == 0)
+				ring.takePos = kRingEmpty;
+			else
+				ring.takePos = (take + 1) % (uint32)ring.capacity;
+			return 0;
+		}
 
-	void* getDownwardsAlignedAddr(void* addr, uint32 alignment)
-	{
-		uint64 v = ((uint64)addr) & ~(uint64)(alignment - 1);
-		return (uint8*)v;
+		bool IsValidPool(const IPCBufPool_t* pool)
+		{
+			return pool->magic == kPoolMagic;
+		}
 	}
 
 	IPCBufPool_t* IPCBufPoolCreate(uint8* bufferArea, uint32 bufferSize, uint32 entrySize, uint32be* entryCountOutput, uint32 uknR7)
 	{
 		memset(bufferArea, 0, bufferSize);
-		IPCBufPool_t* ipcBufPool = (IPCBufPool_t*)getUpwardsAlignedAddr(bufferArea, 4);
-		uint8* alignedEnd = (uint8*)getDownwardsAlignedAddr(bufferArea + bufferSize, 4);
-		uint8* dataStart = (uint8*)getUpwardsAlignedAddr(ipcBufPool + 1, 0x4);
+		const MPTR areaAddr = memory_getVirtualOffsetFromPointer(bufferArea);
+		const MPTR areaEnd = areaAddr + bufferSize;
+		const MPTR poolAddr = (areaAddr + 3) & ~3u;
+		const MPTR slotsAddr = (poolAddr + (uint32)sizeof(IPCBufPool_t) + 3) & ~3u;
+		IPCBufPool_t* pool = MEMPTR<IPCBufPool_t>(poolAddr).GetPtr();
 
 		*entryCountOutput = 0;
-		// todo: Validate parameters
+		OSInitMutexEx(&pool->mutex, nullptr);
+		pool->area = bufferArea;
+		pool->areaSize = bufferSize;
+		pool->createFlags = uknR7;
+		pool->reserved10 = 0;
+		pool->magic = kPoolMagic;
 
-		OSInitMutexEx(&ipcBufPool->mutex, NULL);
+		const uint32 blockSize = (entrySize + (kBlockGranularity - 1)) & ~(kBlockGranularity - 1);
+		pool->blockSize = blockSize;
+		pool->blockStride = blockSize;
 
-		ipcBufPool->fullBufferPtr = bufferArea;
-		ipcBufPool->fullBufferSize = bufferSize;
-		ipcBufPool->uknFromParamR7 = uknR7;
-
-		uint32 paddedEntrySize = (entrySize + 0x3F) & ~0x3F;
-
-		ipcBufPool->ukn10 = 0;
-		ipcBufPool->magic = 0xBADF00D;
-
-		ipcBufPool->entrySize1 = paddedEntrySize;
-		ipcBufPool->entrySize2 = paddedEntrySize;
-
-		uint32 remainingSize = (uint32)((bufferArea + bufferSize) - dataStart);
-		uint32 entryCount = remainingSize / paddedEntrySize;
-		if (entryCount <= 1)
-			assert_dbg();
-
-		ipcBufPool->entryCountMul4 = entryCount * 4;
-		if ((uint32)ipcBufPool->entryCountMul4 >= paddedEntrySize)
+		// every block needs one ring slot; the slot array takes the place of one block
+		uint32 fit = blockSize ? (uint32)(areaEnd - slotsAddr) / blockSize : 0;
+		cemu_assert_debug(fit > 1);
+		pool->slotBytes = fit * 4;
+		if (fit * 4 >= blockSize)
 		{
-			// special handling required (need to adjust entry count?)
-			assert_dbg();
+			// the slot array would not fit in the space of one block: the pool stays empty
+			cemuLog_log(LogType::APIErrors, "IPCBufPoolCreate: unsupported geometry (size 0x{:x}, block 0x{:x})", bufferSize, blockSize);
 		}
 		else
 		{
-			entryCount--; // remove one entry to make room for entry pointer array
-			ipcBufPool->entryCount = entryCount;
-			*entryCountOutput = entryCount;
-			ipcBufPool->entryStartPtr = (dataStart + (uint32)ipcBufPool->entryCountMul4);
-			FIFOInit(&ipcBufPool->fifo, (uint32)ipcBufPool->entryCount, dataStart);
+			const uint32 blockCount = fit - 1;
+			pool->blockCount = blockCount;
+			*entryCountOutput = blockCount;
+			pool->firstBlock = MEMPTR<uint8>(slotsAddr + fit * 4);
+			RingReset(pool->freeRing, blockCount, slotsAddr);
 		}
-		// add all entries to the fifo
-		for (sint32 i = 0; i < (sint32)ipcBufPool->entryCount; i++)
+		const MPTR firstBlock = pool->firstBlock.GetMPTR();
+		for (sint32 i = 0; i < (sint32)(uint32)pool->blockCount; i++)
 		{
-			uint8* entry = ipcBufPool->entryStartPtr.GetPtr() + i * (uint32)ipcBufPool->entrySize2;
-			if (FIFOPush(&ipcBufPool->fifo, entry) != 0)
+			if (RingPut(pool->freeRing, firstBlock + (uint32)i * blockSize) != 0)
 				return nullptr;
 		}
-		return ipcBufPool;
+		return pool;
 	}
 
 	uint8* IPCBufPoolAllocate(IPCBufPool_t* ipcBufPool, uint32 size)
 	{
-		uint8* entry = nullptr;
+		MPTR block = MPTR_NULL;
 		OSLockMutex(&ipcBufPool->mutex);
-		if (ipcBufPool->magic == (uint32be)0xBADF00D && size <= (uint32)ipcBufPool->entrySize1)
-		{
-			FIFOPop(&ipcBufPool->fifo, &entry);
-		}
+		if (IsValidPool(ipcBufPool) && size <= ipcBufPool->blockSize)
+			RingTake(ipcBufPool->freeRing, block);
 		else
-		{
-			assert_dbg();
-		}
+			cemuLog_log(LogType::APIErrors, "IPCBufPoolAllocate: bad pool or size 0x{:x} too large", size);
 		OSUnlockMutex(&ipcBufPool->mutex);
-		return entry;
+		return MEMPTR<uint8>(block).GetPtr();
 	}
 
 	sint32 IPCBufPoolFree(IPCBufPool_t* ipcBufPool, uint8* entry)
 	{
+		sint32 result = 0;
 		OSLockMutex(&ipcBufPool->mutex);
-		sint32 res = 0;
-		if (ipcBufPool->magic == (uint32be)0xBADF00D)
+		if (IsValidPool(ipcBufPool))
 		{
-			// check if entry is actually part of the pool
-			uint32 offset = (uint32)(entry - (uint8*)ipcBufPool->entryStartPtr.GetPtr());
-			if ((offset % (uint32)ipcBufPool->entrySize2) != 0)
-				assert_dbg();
-			uint32 index = offset / (uint32)ipcBufPool->entrySize2;
-			if ((index >= (uint32)ipcBufPool->entryCount))
-				assert_dbg();
-			FIFOPush(&ipcBufPool->fifo, entry);
+			MPTR block = memory_getVirtualOffsetFromPointer(entry);
+			uint32 offset = block - ipcBufPool->firstBlock.GetMPTR();
+			uint32 stride = ipcBufPool->blockStride;
+			if (stride == 0 || offset % stride != 0 || offset / stride >= ipcBufPool->blockCount)
+				cemuLog_log(LogType::APIErrors, "IPCBufPoolFree: 0x{:08x} is not a block of this pool", block);
+			RingPut(ipcBufPool->freeRing, block);
 		}
 		else
 		{
-			assert_dbg();
-			res = -4;
+			cemuLog_log(LogType::APIErrors, "IPCBufPoolFree: bad pool");
+			result = kErrBadPool;
 		}
 		OSUnlockMutex(&ipcBufPool->mutex);
-		return res;
+		return result;
 	}
 
-	void coreinitExport_IPCBufPoolCreate(PPCInterpreter_t* hCPU)
+	namespace
 	{
-		ppcDefineParamTypePtr(bufferArea, uint8, 0);
-		ppcDefineParamU32(bufferSize, 1);
-		ppcDefineParamU32(entrySize, 2);
-		ppcDefineParamU32BEPtr(entryCountOutput, 3);
-		ppcDefineParamU32(uknR7, 4);
-		IPCBufPool_t* ipcBufPool = IPCBufPoolCreate(bufferArea, bufferSize, entrySize, entryCountOutput, uknR7);
-		osLib_returnFromFunction(hCPU, memory_getVirtualOffsetFromPointer(ipcBufPool));
-		return;
-		// example dump of IPC buffer (at 0x1011FF40):
-		// 0000   0B AD F0 0D 10 11 FF 40  00 00 53 01 00 00 00 01  00 00 00 00 00 00 02 C0  00 00 02 C0 00 00 00 1D
-		// 0020   10 12 00 40 00 00 00 78  00 00 00 00 00 00 00 00  00 00 00 1D 00 00 00 1D  10 11 FF A8 6D 55 74 58
-		// 0040   10 00 87 2C 00 00 00 00  00 00 00 00 00 00 00 00  10 11 FF 7C 00 00 00 00  00 00 00 00 00 00 00 00
-		// 0060   00 00 00 00 00 00 00 00  10 12 00 40 10 12 03 00  10 12 05 C0 10 12 08 80  10 12 0B 40 10 12 0E 00
-		// 0080   10 12 10 C0 10 12 13 80  10 12 16 40 10 12 19 00  10 12 1B C0 10 12 1E 80  10 12 21 40 10 12 24 00
-		// 00A0   10 12 26 C0 10 12 29 80  10 12 2C 40 10 12 2F 00  10 12 31 C0 10 12 34 80  10 12 37 40 10 12 3A 00
-		// 00C0   10 12 3C C0 10 12 3F 80  10 12 42 40 10 12 45 00  10 12 47 C0 10 12 4A 80  10 12 4D 40 00 00 00 00
-		// 00E0   00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00  00 00 00 00 00 00 00 00
-	}
+		void Export_IPCBufPoolCreate(PPCInterpreter_t* hCPU)
+		{
+			uint8* area = MEMPTR<uint8>(hCPU->gpr[3]).GetPtr();
+			uint32be* countOut = MEMPTR<uint32be>(hCPU->gpr[6]).GetPtr();
+			IPCBufPool_t* pool = IPCBufPoolCreate(area, hCPU->gpr[4], hCPU->gpr[5], countOut, hCPU->gpr[7]);
+			osLib_returnFromFunction(hCPU, memory_getVirtualOffsetFromPointer(pool));
+		}
 
-	void coreinitExport_IPCBufPoolAllocate(PPCInterpreter_t* hCPU)
-	{
-		debug_printf("IPCBufPoolAllocate(0x%08x,0x%x)\n", hCPU->gpr[3], hCPU->gpr[4]);
-		ppcDefineParamStructPtr(ipcBufPool, IPCBufPool_t, 0);
-		ppcDefineParamU32(size, 1);
-		uint8* entry = IPCBufPoolAllocate(ipcBufPool, size);
-		osLib_returnFromFunction(hCPU, memory_getVirtualOffsetFromPointer(entry));
-	}
+		void Export_IPCBufPoolAllocate(PPCInterpreter_t* hCPU)
+		{
+			IPCBufPool_t* pool = MEMPTR<IPCBufPool_t>(hCPU->gpr[3]).GetPtr();
+			uint8* block = IPCBufPoolAllocate(pool, hCPU->gpr[4]);
+			osLib_returnFromFunction(hCPU, memory_getVirtualOffsetFromPointer(block));
+		}
 
-	void coreinitExport_IPCBufPoolFree(PPCInterpreter_t* hCPU)
-	{
-		debug_printf("IPCBufPoolFree(0x%08x,0x%08x)\n", hCPU->gpr[3], hCPU->gpr[4]);
-		ppcDefineParamStructPtr(ipcBufPool, IPCBufPool_t, 0);
-		ppcDefineParamTypePtr(entry, uint8, 1);
-		sint32 res = IPCBufPoolFree(ipcBufPool, entry);
-		osLib_returnFromFunction(hCPU, res);
+		void Export_IPCBufPoolFree(PPCInterpreter_t* hCPU)
+		{
+			IPCBufPool_t* pool = MEMPTR<IPCBufPool_t>(hCPU->gpr[3]).GetPtr();
+			uint8* block = MEMPTR<uint8>(hCPU->gpr[4]).GetPtr();
+			osLib_returnFromFunction(hCPU, (uint32)IPCBufPoolFree(pool, block));
+		}
 	}
 
 	void InitializeIPCBuf()
 	{
-		osLib_addFunction("coreinit", "IPCBufPoolCreate", coreinitExport_IPCBufPoolCreate);
-		osLib_addFunction("coreinit", "IPCBufPoolAllocate", coreinitExport_IPCBufPoolAllocate);
-		osLib_addFunction("coreinit", "IPCBufPoolFree", coreinitExport_IPCBufPoolFree);
+		osLib_addFunction("coreinit", "IPCBufPoolCreate", Export_IPCBufPoolCreate);
+		osLib_addFunction("coreinit", "IPCBufPoolAllocate", Export_IPCBufPoolAllocate);
+		osLib_addFunction("coreinit", "IPCBufPoolFree", Export_IPCBufPoolFree);
 	}
 }

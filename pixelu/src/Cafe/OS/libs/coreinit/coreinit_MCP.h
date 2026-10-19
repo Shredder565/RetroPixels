@@ -1,43 +1,20 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
+// system production settings returned by MCP_GetSysProdSettings. Only the region fields are known
 struct SysProdSettings
 {
-	uint8 ukn00;			// 0x00
-	uint8 ukn01;			// 0x01
-	uint8 ukn02;			// 0x02
-	uint8 platformRegion;	// 0x03
-	uint8 ukn04;
-	uint8 ukn05;
-	uint8 ukn06;
-	uint8 ukn07;
-	uint8 prevBlock;
-	uint8 ukn09;
-	uint8 ukn0A;
-	uint8 gameRegion;		// game region?
-	uint8 nextBlock;
-	uint8 ukn0D;
-	uint8 ukn0E;
-	uint8 ukn0F;
-	uint8 ukn10;
-	uint8 ukn11;
-	uint8 ukn12;
-	uint8 ukn13;
-	uint8 ukn14[4];
-	uint8 ukn18[4];
-	uint8 ukn1C[4];
-	uint8 ukn20[4];
-	uint8 ukn24[4];
-	uint8 ukn28[4];
-	uint8 ukn2C[4];
-	uint8 ukn30[4];
-	uint8 ukn34[4];
-	uint8 ukn38[4];
-	uint8 ukn3C[4];
-	uint8 ukn40[4];
-	uint8 ukn44;
-	uint8 ukn45;
+	/* +0x00 */ uint8 unk00[3];
+	/* +0x03 */ uint8 platformRegion;
+	/* +0x04 */ uint8 unk04[4];
+	/* +0x08 */ uint8 prevBlock;
+	/* +0x09 */ uint8 unk09[2];
+	/* +0x0B */ uint8 gameRegion;
+	/* +0x0C */ uint8 nextBlock;
+	/* +0x0D */ uint8 unk0D[0x46 - 0x0D];
 };
-
+static_assert(offsetof(SysProdSettings, platformRegion) == 0x03);
+static_assert(offsetof(SysProdSettings, gameRegion) == 0x0B);
 static_assert(sizeof(SysProdSettings) == 0x46);
 
 typedef uint32 MCPHANDLE;
