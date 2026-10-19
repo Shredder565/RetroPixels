@@ -1,4 +1,9 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
+
+// Client side of the console's online services: the account server (ACT), the
+// SOAP shop services (NUS, IAS, ECS), the content servers (CCS), icon database
+// (IDBE) and the update version lists (TAGAYA).
 
 enum class NetworkService;
 enum class CafeConsoleRegion;
@@ -7,68 +12,65 @@ enum class CafeConsoleLanguage;
 enum class NAPI_RESULT
 {
 	SUCCESS = 0,
-	FAILED = 1, // general failure
-	XML_ERROR = 2, // XML response unexpected
-	DATA_ERROR = 3, // incorrect values
-	SERVICE_ERROR = 4, // server reply indicates error. Extended error code (serviceError) is set
+	FAILED = 1,        // transport failure or anything not covered below
+	XML_ERROR = 2,     // reply could not be parsed or lacks expected elements
+	DATA_ERROR = 3,    // reply parsed but carried unusable values
+	SERVICE_ERROR = 4, // server reported an error; see serviceError
 };
 
 namespace NAPI
 {
-	// common auth info structure shared by ACT, ECS and IAS service
+	// Identity used when talking to the account, IAS and ECS servers
 	struct AuthInfo
 	{
-		// nnid
+		// Nintendo Network ID credentials
 		std::string accountId;
 		std::array<uint8, 32> passwordHash;
-		// console
+		// console identity
 		uint32 deviceId;
 		std::string serial;
 		CafeConsoleRegion region;
 		std::string country;
 		std::string deviceCertBase64;
 
+		// device id as sent to the SOAP services: platform 5 in the upper word
 		uint64 getDeviceIdWithPlatform()
 		{
-			uint64 deviceType = 5;
-			return (deviceType << 32) | ((uint64)deviceId);
+			return (uint64(5) << 32) | uint64(deviceId);
 		}
 
-		// IAS token (for ECS and other SOAP service requests)
-		struct 
+		// obtained from IAS, attached to later SOAP requests
+		struct
 		{
-			std::string accountId; // console account id
+			std::string accountId;
 			std::string deviceToken;
 		}IASToken;
 
-		// service selection, if not set fall back to global setting
+		// when empty, the globally configured service is used
 		std::optional<NetworkService> serviceOverwrite;
 
 		NetworkService GetService() const;
 	};
 
-	bool NAPI_MakeAuthInfoFromCurrentAccount(AuthInfo& authInfo); // helper function. Returns false if online credentials/dumped files are not available
+	// fills authInfo from the active account and console keys; false when those are missing
+	bool NAPI_MakeAuthInfoFromCurrentAccount(AuthInfo& authInfo);
 
-	/* Shared result */
-
-	// ErrorCodes IAS:
-	//	928		-> IAS - Device cert does not verify.
-	//  954     -> IAS - Invalid Challenge
-
+	// error numbers seen in SOAP replies
 	enum class EC_ERROR_CODE
 	{
 		NONE = 0,
 		ECS_INVALID_DEVICE_TOKEN = 903,
-		IAS_DEVICE_CERT_ERROR = 928, // either invalid signature or mismatching incorrect device cert chain
+		IAS_DEVICE_CERT_ERROR = 928,
 		IAS_INVALID_CHALLENGE = 954,
-		ECS_NO_PERMISSION = 701, // AccountGetETickets
-		NUS_SOAP_INVALID_VERSION = 1301, // seen when accidentally passing wrong SOAP version to GetSystemCommonETicket
+		ECS_NO_PERMISSION = 701,
+		NUS_SOAP_INVALID_VERSION = 1301,
 	};
 
-	enum class ACT_ERROR_CODE // are these shared with EC_ERROR_CODE?
+	// error numbers seen in account server replies
+	enum class ACT_ERROR_CODE
 	{
 		NONE = 0,
-		ACT_GAME_SERVER_NOT_FOUND = 1021, // seen when passing wrong serverId to nex token request
+		ACT_GAME_SERVER_NOT_FOUND = 1021,
 	};
 
 	struct _NAPI_CommonResultSOAP
@@ -76,10 +78,7 @@ namespace NAPI
 		NAPI_RESULT apiError{ NAPI_RESULT::FAILED };
 		EC_ERROR_CODE serviceError{ EC_ERROR_CODE::NONE };
 
-		bool isValid() const
-		{
-			return apiError == NAPI_RESULT::SUCCESS;
-		}
+		bool isValid() const { return apiError == NAPI_RESULT::SUCCESS; }
 	};
 
 	struct _NAPI_CommonResultACT
@@ -87,33 +86,33 @@ namespace NAPI
 		NAPI_RESULT apiError{ NAPI_RESULT::FAILED };
 		ACT_ERROR_CODE serviceError{ ACT_ERROR_CODE::NONE };
 
-		bool isValid() const
-		{
-			return apiError == NAPI_RESULT::SUCCESS;
-		}
+		bool isValid() const { return apiError == NAPI_RESULT::SUCCESS; }
 	};
 
-	/* account service (account.nintendo.net) */
+	/* ---- account server ---- */
 
-	struct ACTGetProfileResult 
+	struct ACTGetProfileResult
 	{
 		int todo;
 	};
 
 	bool ACT_GetProfile(AuthInfo& authInfo, ACTGetProfileResult& result);
 
+	// layout is shared with emulated software, keep it fixed
 	struct ACTNexToken
 	{
-		/* +0x000 */ char token[0x201];
-		/* +0x201 */ uint8 _padding201[3];
-		/* +0x204 */ char nexPassword[0x41];
-		/* +0x245 */ uint8 _padding245[3];
-		/* +0x248 */ char host[0x10];
-		/* +0x258 */ uint16be port;
-		/* +0x25A */ uint8 _padding25A[2];
+		char token[0x201];
+		uint8 _padding201[3];
+		char nexPassword[0x41];
+		uint8 _padding245[3];
+		char host[0x10];
+		uint16be port;
+		uint8 _padding25A[2];
 	};
-
 	static_assert(sizeof(ACTNexToken) == 0x25C);
+	static_assert(offsetof(ACTNexToken, nexPassword) == 0x204);
+	static_assert(offsetof(ACTNexToken, host) == 0x248);
+	static_assert(offsetof(ACTNexToken, port) == 0x258);
 
 	struct ACTGetNexTokenResult : public _NAPI_CommonResultACT
 	{
@@ -138,7 +137,7 @@ namespace NAPI
 
 	ACTConvertNnidToPrincipalIdResult ACT_ACTConvertNnidToPrincipalId(AuthInfo& authInfo, std::string_view nnid);
 
-	/* NUS */
+	/* ---- NUS ---- */
 
 	struct NAPI_NUSGetSystemCommonETicket_Result : public _NAPI_CommonResultSOAP
 	{
@@ -148,8 +147,8 @@ namespace NAPI
 
 	NAPI_NUSGetSystemCommonETicket_Result NUS_GetSystemCommonETicket(AuthInfo& authInfo, uint64 titleId);
 
-	/* IAS/ECS */
-	
+	/* ---- IAS / ECS ---- */
+
 	struct NAPI_IASGetChallenge_Result : public _NAPI_CommonResultSOAP
 	{
 		std::string challenge;
@@ -174,7 +173,7 @@ namespace NAPI
 		std::string accountId;
 		AccountStatus accountStatus{ AccountStatus::UNKNOWN };
 
-		struct 
+		struct
 		{
 			std::string ContentPrefixURL;
 			std::string UncachedContentPrefixURL;
@@ -211,7 +210,7 @@ namespace NAPI
 	NAPI_ECSAccountListETicketIds_Result ECS_AccountListETicketIds(AuthInfo& authInfo);
 	NAPI_ECSAccountGetETickets_Result ECS_AccountGetETickets(AuthInfo& authInfo, sint64 ticketId);
 
-	/* CCS */
+	/* ---- CCS (plain HTTP file downloads) ---- */
 
 	struct NAPI_CCSGetTMD_Result
 	{
@@ -237,8 +236,9 @@ namespace NAPI
 	bool CCS_GetContentFile(NetworkService service, uint64 titleId, uint32 contentId, bool(*cbWriteCallback)(void* userData, const void* ptr, size_t len, bool isLast), void* userData);
 	NAPI_CCSGetContentH3_Result CCS_GetContentH3File(NetworkService service, uint64 titleId, uint32 contentId);
 
-	/* IDBE */
+	/* ---- IDBE (title icons and names) ---- */
 
+	// decrypted icon file, 0x12060 bytes
 	struct IDBEIconDataV0
 	{
 		struct LanguageInfo
@@ -247,35 +247,25 @@ namespace NAPI
 			std::string GetGameLongNameUTF8();
 			std::string GetPublisherNameUTF8();
 		private:
-			uint16be gameName[0x40]{};
-			uint16be gameLongName[0x80]{};
-			uint16be publisherName[0x40]{};
+			uint16be m_shortName[0x40]{};
+			uint16be m_longName[0x80]{};
+			uint16be m_publisher[0x40]{};
 		};
 
 		LanguageInfo& GetLanguageStrings(CafeConsoleLanguage index)
 		{
-			if ((uint32)index >= 16)
-				return languageInfo[0];
-			return languageInfo[(uint32)index];
+			uint32 i = (uint32)index;
+			return languageInfo[i < 16 ? i : 0];
 		}
 
 	private:
-		/* +0x00000 */ uint32be titleIdHigh{};
-		/* +0x00004 */ uint32be titleIdLow{};
-		/* +0x00008 */ uint32 ukn00008;
-		/* +0x0000C */ uint32 ukn0000C;
-		/* +0x00010 */ uint32 ukn00010;
-		/* +0x00014 */ uint32 ukn00014;
-		/* +0x00018 */ uint32 ukn00018;
-		/* +0x0001C */ uint32 ukn0001C;
-		/* +0x00020 */ uint32 ukn00020;
-		/* +0x00024 */ uint32 ukn00024;
-		/* +0x00028 */ uint32 ukn00028;
-		/* +0x0002C */ uint32 ukn0002C;
-		/* +0x00030 */ LanguageInfo languageInfo[16];
-		/* +0x02030 */ uint8 tgaData[0x10030]{};
+		uint32be m_titleIdHigh{};
+		uint32be m_titleIdLow{};
+		uint32 m_unknown[10];
+		LanguageInfo languageInfo[16];   // at 0x30
+		uint8 m_iconTga[0x10030]{};      // at 0x2030
 	};
-
+	static_assert(sizeof(IDBEIconDataV0::LanguageInfo) == 0x200);
 	static_assert(sizeof(IDBEIconDataV0) == 0x12060);
 
 	struct IDBEHeader
@@ -284,13 +274,13 @@ namespace NAPI
 		uint8 keyIndex;
 		uint8 hashSHA256[32];
 	};
-
 	static_assert(sizeof(IDBEHeader) == 2+32);
 
 	std::optional<IDBEIconDataV0> IDBE_Request(NetworkService networkService, uint64 titleId);
-	std::vector<uint8> IDBE_RequestRawEncrypted(NetworkService networkService, uint64 titleId); // same as IDBE_Request but doesn't strip the header and decrypt the IDBE
+	// the downloaded file as is: header plus still encrypted icon data
+	std::vector<uint8> IDBE_RequestRawEncrypted(NetworkService networkService, uint64 titleId);
 
-	/* Version list */
+	/* ---- TAGAYA (title update version lists) ---- */
 
 	struct NAPI_VersionListVersion_Result
 	{
@@ -304,11 +294,10 @@ namespace NAPI
 	struct NAPI_VersionList_Result
 	{
 		bool isValid{ false };
-		std::unordered_map<uint64, uint16> titleVersionList; // key = titleId, value = version
+		std::unordered_map<uint64, uint16> titleVersionList; // titleId -> latest version
 	};
 
 	NAPI_VersionList_Result TAG_GetVersionList(AuthInfo& authInfo, std::string_view fqdnURL, uint32 versionListVersion);
-
 }
 
 void NAPI_NUS_GetSystemUpdate();

@@ -1,12 +1,12 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "napi.h"
 #include "config/CemuConfig.h"
 #include "config/NetworkSettings.h"
 #include "config/ActiveSettings.h"
 
-namespace NAPI
+NetworkService NAPI::AuthInfo::GetService() const
 {
-	NetworkService AuthInfo::GetService() const
-	{
-		return serviceOverwrite.value_or(ActiveSettings::GetNetworkService());
-	}
+	if (serviceOverwrite.has_value())
+		return *serviceOverwrite;
+	return ActiveSettings::GetNetworkService();
 }
