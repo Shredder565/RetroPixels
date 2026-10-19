@@ -1,666 +1,447 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "FileCache.h"
 #include "util/helpers/helpers.h"
 
-#include <mutex>
 #include <condition_variable>
+#include <deque>
 #include "zlib.h"
 #include "Common/FileStream.h"
 
-struct FileCacheAsyncJob
+// On-disk layout (all values little endian):
+//   0x00 u32 magic, 0x04 u32 extra version (caller-defined cache version),
+//   0x08 u64 start of the data area, 0x10 u64 file table offset (relative to
+//   the data area), 0x18 u32 file table size in bytes; the header area is
+//   0x80 bytes. The data area holds the stored files; the file table is an
+//   array of 0x20-byte records and is stored there as a file under a reserved
+//   name. A record with both names 0 is unused.
+//   Compressed files start with their uncompressed size (u32 big endian)
+//   followed by a zlib stream.
+namespace
 {
-	FileCache* fileCache;
-	uint64 name1;
-	uint64 name2;
-	std::vector<uint8> fileData;
-};
+	constexpr uint32 kMagicLegacy = 0x8371b694;     // 32-bit offsets, no longer readable
+	constexpr uint32 kMagicLarge = 0x8371b695;      // 64-bit offsets, no compression flag
+	constexpr uint32 kMagicCompressed = 0x8371b696; // current format, written for all new caches
+	constexpr uint64 kHeaderArea = 0x80;
+	constexpr sint32 kInitialSlots = 32;
+	constexpr sint32 kSlotsPerGrowth = 64;
+	constexpr uint64 kTableName1 = 0xEFEFEFEFEFEFEFEFULL;
+	constexpr uint64 kTableName2 = 0xFEFEFEFEFEFEFEFEULL;
+	constexpr uint8 kFlagZlib = 0x01;
+	constexpr int kZlibLevel = 4;
 
-struct _FileCacheAsyncWriter
-{
-	_FileCacheAsyncWriter()
+	bool IsUnused(uint64 name1, uint64 name2)
 	{
-		m_isRunning.store(true);
-		m_fileCacheThread = std::thread(&_FileCacheAsyncWriter::FileCacheThread, this);
+		return name1 == 0 && name2 == 0;
 	}
 
-	~_FileCacheAsyncWriter()
+	bool IsTableName(uint64 name1, uint64 name2)
 	{
-		if (m_isRunning.load())
+		return name1 == kTableName1 && name2 == kTableName2;
+	}
+
+	// returns false (and leaves 'out' empty) if zlib fails
+	bool Deflate(const uint8* data, uint32 size, std::vector<uint8>& out)
+	{
+		uLongf packedLen = compressBound(size);
+		out.resize(4 + packedLen);
+		if (compress2(out.data() + 4, &packedLen, data, size, kZlibLevel) != Z_OK)
 		{
-			m_isRunning.store(false);
-			m_fileCacheCondVar.notify_one();
-			m_fileCacheThread.join();
+			out.clear();
+			return false;
 		}
+		out[0] = (uint8)(size >> 24);
+		out[1] = (uint8)(size >> 16);
+		out[2] = (uint8)(size >> 8);
+		out[3] = (uint8)size;
+		out.resize(4 + packedLen);
+		return true;
 	}
 
-	void AddJob(FileCache* fileCache, const FileCache::FileName& name, const uint8* fileData, sint32 fileSize)
+	bool Inflate(const std::vector<uint8>& stored, std::vector<uint8>& out)
 	{
-		FileCacheAsyncJob async;
-		async.fileCache = fileCache;
-		async.name1 = name.name1;
-		async.name2 = name.name2;
-		async.fileData = { fileData, fileData + fileSize };
-
-		std::unique_lock lock(m_fileCacheMutex);
-		m_writeRequests.emplace_back(std::move(async));
-
-		lock.unlock();
-		m_fileCacheCondVar.notify_one();
-	}
-
-private:
-	void FileCacheThread()
-	{
-		SetThreadName("fileCache");
-		while (true)
+		out.clear();
+		if (stored.size() < 4)
+			return false;
+		const uint32 expected = ((uint32)stored[0] << 24) | ((uint32)stored[1] << 16) | ((uint32)stored[2] << 8) | (uint32)stored[3];
+		out.resize(expected);
+		uLongf outLen = expected;
+		uLong inLen = (uLong)(stored.size() - 4);
+		const int status = uncompress2(out.data(), &outLen, stored.data() + 4, &inLen);
+		if (status != Z_OK || outLen != expected || inLen != stored.size() - 4)
 		{
-			std::unique_lock lock(m_fileCacheMutex);
-			while (m_writeRequests.empty())
+			out.clear();
+			return false;
+		}
+		return true;
+	}
+
+	// background writer behind AddFileAsync, started on first use
+	class DeferredWriter
+	{
+	public:
+		~DeferredWriter()
+		{
 			{
-				m_fileCacheCondVar.wait(lock);
-				if (!m_isRunning.load(std::memory_order::relaxed))
+				std::lock_guard guard(m_lock);
+				if (!m_worker.joinable())
 					return;
+				m_stop = true;
 			}
+			m_signal.notify_all();
+			m_worker.join();
+		}
 
-			std::vector<FileCacheAsyncJob> requestsCopy;
-			requestsCopy.swap(m_writeRequests); // fast copy & clear
-			lock.unlock();
-
-			for (const auto& entry : requestsCopy)
+		void Enqueue(FileCache* target, uint64 name1, uint64 name2, const uint8* data, sint32 size)
+		{
+			Request req{ target, name1, name2, std::vector<uint8>(data, data + size) };
 			{
-				entry.fileCache->AddFile({ entry.name1, entry.name2 }, entry.fileData.data(), (sint32)entry.fileData.size());
+				std::lock_guard guard(m_lock);
+				if (!m_worker.joinable())
+					m_worker = std::thread(&DeferredWriter::Run, this);
+				m_pending.push_back(std::move(req));
+			}
+			m_signal.notify_all();
+		}
+
+	private:
+		struct Request
+		{
+			FileCache* target;
+			uint64 name1;
+			uint64 name2;
+			std::vector<uint8> bytes;
+		};
+
+		void Run()
+		{
+			SetThreadName("fileCache");
+			std::unique_lock guard(m_lock);
+			while (true)
+			{
+				m_signal.wait(guard, [this] { return m_stop || !m_pending.empty(); });
+				if (m_pending.empty())
+					return;
+				std::deque<Request> work;
+				work.swap(m_pending);
+				guard.unlock();
+				for (Request& r : work)
+					r.target->AddFile({ r.name1, r.name2 }, r.bytes.data(), (sint32)r.bytes.size());
+				guard.lock();
 			}
 		}
-	}
 
-	std::thread m_fileCacheThread;
-	std::mutex m_fileCacheMutex;
-	std::condition_variable m_fileCacheCondVar;
-	std::vector<FileCacheAsyncJob> m_writeRequests;
-	std::atomic_bool m_isRunning;
-}FileCacheAsyncWriter;
+		std::mutex m_lock;
+		std::condition_variable m_signal;
+		std::deque<Request> m_pending;
+		std::thread m_worker;
+		bool m_stop = false;
+	};
 
-#define FILECACHE_MAGIC_V1					0x8371b694 // used prior to Cemu 1.7.4, only supported caches up to 4GB
-#define FILECACHE_MAGIC_V2					0x8371b695 // added support for large caches
-#define FILECACHE_MAGIC_V3					0x8371b696 // introduced in Cemu 1.16.0 (non-WIP). Adds zlib compression
-#define FILECACHE_HEADER_RESV				128 // number of bytes reserved for the header
-#define FILECACHE_FILETABLE_NAME1			0xEFEFEFEFEFEFEFEFULL
-#define FILECACHE_FILETABLE_NAME2			0xFEFEFEFEFEFEFEFEULL
-#define FILECACHE_FILETABLE_FREE_NAME		0ULL
+	DeferredWriter g_deferredWriter;
+}
+
+void FileCache::WriteHeader()
+{
+	m_stream->SetPosition(0);
+	m_stream->writeU32(kMagicCompressed);
+	m_stream->writeU32(m_extraVersion);
+	m_stream->writeU64(m_dataStart);
+	m_stream->writeU64(m_tableOffset);
+	m_stream->writeU32(m_tableSize);
+}
+
+void FileCache::WriteSlotRecord(sint32 index)
+{
+	m_stream->SetPosition(m_dataStart + m_tableOffset + (uint64)index * sizeof(Slot));
+	m_stream->writeData(&m_slots[index], sizeof(Slot));
+}
 
 FileCache* FileCache::Create(const fs::path& path, uint32 extraVersion)
 {
-	FileStream* fs = FileStream::createFile2(path);
-	if (!fs)
+	FileStream* stream = FileStream::createFile2(path);
+	if (!stream)
 	{
 		cemuLog_log(LogType::Force, "Failed to create cache file \"{}\"", _pathToUtf8(path));
 		return nullptr;
 	}
-	// init file cache
-	auto* fileCache = new FileCache();
-	fileCache->fileStream = fs;
-	fileCache->dataOffset = FILECACHE_HEADER_RESV;
-	fileCache->fileTableEntryCount = 32;
-	fileCache->fileTableOffset = 0;
-	fileCache->fileTableSize = sizeof(FileTableEntry) * fileCache->fileTableEntryCount;
-	fileCache->fileTableEntries = (FileTableEntry*)malloc(fileCache->fileTableSize);
-	fileCache->extraVersion = extraVersion;
-	memset(fileCache->fileTableEntries, 0, fileCache->fileTableSize);
-	// file table stores info about itself
-	fileCache->fileTableEntries[0].name1 = FILECACHE_FILETABLE_NAME1;
-	fileCache->fileTableEntries[0].name2 = FILECACHE_FILETABLE_NAME2;
-	fileCache->fileTableEntries[0].fileOffset = fileCache->fileTableOffset;
-	fileCache->fileTableEntries[0].fileSize = fileCache->fileTableSize;
-	// write header
-
-	fs->writeU32(FILECACHE_MAGIC_V3);
-	fs->writeU32(fileCache->extraVersion);
-	fs->writeU64(fileCache->dataOffset);
-	fs->writeU64(fileCache->fileTableOffset);
-	fs->writeU32(fileCache->fileTableSize);
-	// write file table
-	fs->SetPosition(fileCache->dataOffset+fileCache->fileTableOffset);
-	fs->writeData(fileCache->fileTableEntries, fileCache->fileTableSize);
-	// done
-	return fileCache;
+	FileCache* cache = new FileCache();
+	cache->m_stream = stream;
+	cache->m_extraVersion = extraVersion;
+	cache->m_dataStart = kHeaderArea;
+	cache->m_slots.assign(kInitialSlots, Slot{});
+	cache->m_tableOffset = 0;
+	cache->m_tableSize = (uint32)(kInitialSlots * sizeof(Slot));
+	Slot& self = cache->m_slots[0];
+	self.name1 = kTableName1;
+	self.name2 = kTableName2;
+	self.offset = cache->m_tableOffset;
+	self.size = cache->m_tableSize;
+	cache->WriteHeader();
+	stream->SetPosition(cache->m_dataStart + cache->m_tableOffset);
+	stream->writeData(cache->m_slots.data(), (sint32)cache->m_tableSize);
+	return cache;
 }
 
-FileCache* FileCache::_OpenExisting(const fs::path& path, bool compareExtraVersion, uint32 extraVersion)
+FileCache* FileCache::OpenWithCheck(const fs::path& path, bool checkVersion, uint32 extraVersion)
 {
-	FileStream* fs = FileStream::openFile2(path, true);
-	if (!fs)
+	FileStream* stream = FileStream::openFile2(path, true);
+	if (!stream)
 		return nullptr;
-	// read header
-	uint32 headerMagic = 0;
-	fs->readU32(headerMagic);
-	bool isV2 = false;
-	if (headerMagic != FILECACHE_MAGIC_V1 && headerMagic != FILECACHE_MAGIC_V2 && headerMagic != FILECACHE_MAGIC_V3)
+	uint32 magic = 0;
+	stream->readU32(magic);
+	if (magic != kMagicLarge && magic != kMagicCompressed) // includes kMagicLegacy
 	{
-		delete fs;
+		delete stream;
 		return nullptr;
 	}
-	if (headerMagic == FILECACHE_MAGIC_V1)
+	uint32 storedVersion = 0xFFFFFFFF;
+	stream->readU32(storedVersion);
+	if (checkVersion && storedVersion != extraVersion)
 	{
-		// support for V1 file format removed with the addition of V3
-		delete fs;
+		delete stream;
 		return nullptr;
 	}
-	if (headerMagic == FILECACHE_MAGIC_V2)
-		isV2 = true;
-	uint32 headerExtraVersion = 0xFFFFFFFF;
-	fs->readU32(headerExtraVersion);
-	if (compareExtraVersion && headerExtraVersion != extraVersion)
+	uint64 dataStart = 0;
+	uint64 tableOffset = 0;
+	uint32 tableSize = 0;
+	stream->readU64(dataStart);
+	stream->readU64(tableOffset);
+	if (!stream->readU32(tableSize) || (tableSize % sizeof(Slot)) != 0)
 	{
-		delete fs;
+		cemuLog_log(LogType::Force, "\"{}\" is corrupted", _pathToUtf8(path));
+		delete stream;
 		return nullptr;
-	}
-	if (!compareExtraVersion)
-	{
-		extraVersion = headerExtraVersion;
 	}
 
-	uint64 headerDataOffset = 0;
-	uint64 headerFileTableOffset = 0;
-	uint32 headerFileTableSize = 0;
-	fs->readU64(headerDataOffset);
-	fs->readU64(headerFileTableOffset);
-	if (!fs->readU32(headerFileTableSize))
+	FileCache* cache = new FileCache();
+	cache->m_stream = stream;
+	cache->m_extraVersion = checkVersion ? extraVersion : storedVersion;
+	cache->m_dataStart = dataStart;
+	cache->m_tableOffset = tableOffset;
+	cache->m_tableSize = tableSize;
+	cache->m_slots.assign(tableSize / sizeof(Slot), Slot{});
+	stream->SetPosition(dataStart + tableOffset);
+	const bool complete = stream->readData(cache->m_slots.data(), tableSize) == tableSize;
+	if (magic == kMagicLarge)
 	{
-		cemuLog_log(LogType::Force, "\"{}\" is corrupted", _pathToUtf8(path));
-		delete fs;
-		return nullptr;
-	}
-	uint32 fileTableEntryCount = 0;
-	bool invalidFileTableSize = false;
-	// V2 and V3
-	fileTableEntryCount = headerFileTableSize / sizeof(FileTableEntry);
-	invalidFileTableSize = (headerFileTableSize % sizeof(FileTableEntry)) != 0;
-	if (invalidFileTableSize)
-	{
-		cemuLog_log(LogType::Force, "\"{}\" is corrupted", _pathToUtf8(path));
-		delete fs;
-		return nullptr;
-	}
-	// init struct
-	auto* fileCache = new FileCache();
-	fileCache->fileStream = fs;
-	fileCache->extraVersion = extraVersion;
-	fileCache->dataOffset = headerDataOffset;
-	fileCache->fileTableEntryCount = fileTableEntryCount;
-	fileCache->fileTableOffset = headerFileTableOffset;
-	fileCache->fileTableSize = fileTableEntryCount * sizeof(FileTableEntry);
-	fileCache->fileTableEntries = (FileTableEntry*)malloc(fileTableEntryCount * sizeof(FileTableEntry));
-	memset(fileCache->fileTableEntries, 0, fileTableEntryCount * sizeof(FileTableEntry));
-	// read file table
-	fileCache->fileStream->SetPosition(fileCache->dataOffset + fileCache->fileTableOffset);
-	bool incompleteFileTable = false;
-	if (isV2)
-	{
-		// read file table entries in old format
-		incompleteFileTable = fileCache->fileStream->readData(fileCache->fileTableEntries, fileCache->fileTableSize) != fileCache->fileTableSize;
-		// in V2 the extra field wasn't guaranteed to have well defined values
-		for (uint32 i = 0; i < fileTableEntryCount; i++)
+		// the older format left the flag bytes undefined
+		for (Slot& s : cache->m_slots)
 		{
-			fileCache->fileTableEntries[i].flags = FileTableEntry::FLAGS::FLAG_NONE;
-			fileCache->fileTableEntries[i].extraReserved1 = 0;
-			fileCache->fileTableEntries[i].extraReserved2 = 0;
-			fileCache->fileTableEntries[i].extraReserved3 = 0;
+			s.flags = 0;
+			s.reserved[0] = s.reserved[1] = s.reserved[2] = 0;
 		}
 	}
-	else
-	{
-		incompleteFileTable = fileCache->fileStream->readData(fileCache->fileTableEntries, fileCache->fileTableSize) != fileCache->fileTableSize;
-	}
-	if (incompleteFileTable)
+	if (!complete)
 	{
 		cemuLog_log(LogType::Force, "\"{}\" is corrupted (incomplete file table)", _pathToUtf8(path));
-		delete fileCache;
+		delete cache;
 		return nullptr;
 	}
-	return fileCache;
+	return cache;
 }
 
 FileCache* FileCache::Open(const fs::path& path, bool allowCreate, uint32 extraVersion)
 {
-	FileCache* fileCache = _OpenExisting(path, true, extraVersion);
-	if (fileCache)
-		return fileCache;
-	if (!allowCreate)
-		return nullptr;
-	return Create(path, extraVersion);
+	if (FileCache* existing = OpenWithCheck(path, true, extraVersion))
+		return existing;
+	return allowCreate ? Create(path, extraVersion) : nullptr;
 }
 
 FileCache* FileCache::Open(const fs::path& path)
 {
-	return _OpenExisting(path, false, 0);
+	return OpenWithCheck(path, false, 0);
 }
 
 FileCache::~FileCache()
 {
-	free(this->fileTableEntries);
-	delete fileStream;
+	delete m_stream;
 }
 
-void FileCache::fileCache_updateFiletable(sint32 extraEntriesToAllocate)
+sint32 FileCache::FindSlot(uint64 name1, uint64 name2) const
 {
-	// recreate file table with bigger size (optional)
-	this->fileTableEntries[0].name1 = FILECACHE_FILETABLE_FREE_NAME;
-	this->fileTableEntries[0].name2 = FILECACHE_FILETABLE_FREE_NAME;
-	sint32 newFileTableEntryCount = this->fileTableEntryCount + extraEntriesToAllocate;
-	this->fileTableEntries = (FileTableEntry*)realloc(this->fileTableEntries, sizeof(FileTableEntry)*newFileTableEntryCount);
-	for (sint32 f = this->fileTableEntryCount; f < newFileTableEntryCount; f++)
+	for (size_t i = 0; i < m_slots.size(); i++)
 	{
-		this->fileTableEntries[f].name1 = FILECACHE_FILETABLE_FREE_NAME;
-		this->fileTableEntries[f].name2 = FILECACHE_FILETABLE_FREE_NAME;
-		this->fileTableEntries[f].fileOffset = 0;
-		this->fileTableEntries[f].fileSize = 0;
-		this->fileTableEntries[f].flags = FileTableEntry::FLAGS::FLAG_NONE;
-		this->fileTableEntries[f].extraReserved1 = 0;
-		this->fileTableEntries[f].extraReserved2 = 0;
-		this->fileTableEntries[f].extraReserved3 = 0;
+		if (m_slots[i].name1 == name1 && m_slots[i].name2 == name2)
+			return (sint32)i;
 	}
-	this->fileTableEntryCount = newFileTableEntryCount;
-	this->_addFileInternal(FILECACHE_FILETABLE_NAME1, FILECACHE_FILETABLE_NAME2, (uint8*)this->fileTableEntries, sizeof(FileTableEntry)*newFileTableEntryCount, true);
-	// update file table info in struct
-	if (this->fileTableEntries[0].name1 != FILECACHE_FILETABLE_NAME1 || this->fileTableEntries[0].name2 != FILECACHE_FILETABLE_NAME2)
+	return -1;
+}
+
+// Enlarges the table and stores it again as a file. Slot 0 always describes
+// the table itself; it is released first so the table can move anywhere.
+void FileCache::GrowTable(sint32 additionalSlots)
+{
+	if (m_slots.empty())
+		m_slots.resize(1, Slot{});
+	m_slots[0].name1 = 0;
+	m_slots[0].name2 = 0;
+	m_slots.resize(m_slots.size() + additionalSlots, Slot{});
+	Store(kTableName1, kTableName2, reinterpret_cast<const uint8*>(m_slots.data()), (sint32)(m_slots.size() * sizeof(Slot)), false);
+	if (!IsTableName(m_slots[0].name1, m_slots[0].name2))
 	{
 		cemuLog_log(LogType::Force, "Corruption in cache file detected");
 		assert_dbg();
 	}
-	this->fileTableOffset = this->fileTableEntries[0].fileOffset;
-	this->fileTableSize = this->fileTableEntries[0].fileSize;
-	// update header
-	fileStream->SetPosition(0);
-	fileStream->writeU32(FILECACHE_MAGIC_V3);
-	fileStream->writeU32(this->extraVersion);
-	fileStream->writeU64(this->dataOffset);
-	fileStream->writeU64(this->fileTableOffset);
-	fileStream->writeU32(this->fileTableSize);
+	m_tableOffset = m_slots[0].offset;
+	m_tableSize = m_slots[0].size;
+	WriteHeader();
 }
 
-uint8* _fileCache_compressFileData(const uint8* fileData, uint32 fileSize, sint32& compressedSize)
+void FileCache::Store(uint64 name1, uint64 name2, const uint8* data, sint32 size, bool allowCompression)
 {
-	// compress data using zlib deflate
-	// stores the size of the uncompressed file in the first 4 bytes
-	Bytef* uncompressedInput = (Bytef*)fileData;
-	uLongf uncompressedLen = fileSize;
-	uLongf compressedLen = compressBound(fileSize);
-	Bytef* compressedData = (Bytef*)malloc(4 + compressedLen);
-	int zret = compress2(compressedData + 4, &compressedLen, uncompressedInput, uncompressedLen, 4); // level 4 has good compression to performance ratio
-	if (zret != Z_OK)
-	{
-		free(compressedData);
-		return nullptr;
-	}
-	compressedData[0] = ((uint32)fileSize >> 24) & 0xFF;
-	compressedData[1] = ((uint32)fileSize >> 16) & 0xFF;
-	compressedData[2] = ((uint32)fileSize >> 8) & 0xFF;
-	compressedData[3] = ((uint32)fileSize >> 0) & 0xFF;
-	compressedSize = 4 + compressedLen;
-	return compressedData;
-}
-
-bool _uncompressFileData(const uint8* rawData, size_t rawSize, std::vector<uint8>& dataOut)
-{
-	if (rawSize < 4)
-	{
-		dataOut.clear();
-		return false;
-	}
-	// get size of uncompressed file
-	uint32 fileSize = 0;
-	fileSize |= ((uint32)rawData[0] << 24);
-	fileSize |= ((uint32)rawData[1] << 16);
-	fileSize |= ((uint32)rawData[2] << 8);
-	fileSize |= ((uint32)rawData[3] << 0);
-	// allocate buffer
-	Bytef* compressedInput = (Bytef*)rawData + 4;
-	uLongf compressedLen = (uLongf)(rawSize - 4);
-	uLongf uncompressedLen = fileSize;
-	dataOut.resize(fileSize);
-	int zret = uncompress2(dataOut.data(), &uncompressedLen, compressedInput, &compressedLen);
-	if (zret != Z_OK)
-	{
-		dataOut.clear();
-		return false;
-	}
-	if (uncompressedLen != fileSize || compressedLen != (rawSize - 4))
-	{
-		// uncompressed size does not match stored size
-		dataOut.clear();
-		return false;
-	}
-	return true;
-}
-
-void FileCache::_addFileInternal(uint64 name1, uint64 name2, const uint8* fileData, sint32 fileSize, bool noCompression)
-{
-	if (fileSize < 0)
+	if (size < 0)
 		return;
-	if (!enableCompression)
-		noCompression = true;
-	// compress data
-	sint32 rawSize = 0;
-	uint8* rawData = nullptr;
-	bool isCompressed = false;
-	if (noCompression)
+	std::vector<uint8> packed;
+	const bool compressed = allowCompression && m_compress && Deflate(data, (uint32)size, packed);
+	const uint8* payload = compressed ? packed.data() : data;
+	const uint32 payloadSize = compressed ? (uint32)packed.size() : (uint32)size;
+
+	std::unique_lock guard(m_lock);
+	// reuse the record of an existing file with this name, else the first unused one
+	sint32 index = FindSlot(name1, name2);
+	while (index < 0)
 	{
-		rawData = (uint8*)fileData;
-		rawSize = fileSize;
-	}
-	else
-	{
-		// compress file
-		rawData = _fileCache_compressFileData(fileData, fileSize, rawSize);
-		if (rawData)
-		{
-			isCompressed = true;
-		}
-		else
-		{
-			rawData = (uint8*)fileData;
-			rawSize = fileSize;
-		}
-	}
-	std::unique_lock lock(this->mutex);
-	// find free entry in file table
-	sint32 entryIndex = -1;
-	// scan for already existing entry
-	for (sint32 i = 0; i < this->fileTableEntryCount; i++)
-	{
-		if (this->fileTableEntries[i].name1 == name1 && this->fileTableEntries[i].name2 == name2)
-		{
-			entryIndex = i;
+		index = FindSlot(0, 0);
+		if (index >= 0)
 			break;
+		if (IsTableName(name1, name2))
+		{
+			cemuLog_log(LogType::Force, "Error in cache file");
+			cemu_assert_debug(false);
 		}
+		GrowTable(kSlotsPerGrowth);
 	}
-	if (entryIndex == -1)
+
+	// Lowest offset whose range [p, p + payloadSize] (end inclusive) does not
+	// touch any used record's range [offset, offset + size). Records being
+	// replaced still count as used. Each used record rules out the offsets
+	// [offset - payloadSize, offset + size); sweep those in ascending order.
+	std::vector<std::pair<sint64, sint64>> blocked;
+	blocked.reserve(m_slots.size());
+	for (const Slot& s : m_slots)
 	{
-		while (true)
-		{
-			// if no entry exists, search for empty one
-			for (sint32 i = 0; i < this->fileTableEntryCount; i++)
-			{
-				if (this->fileTableEntries[i].name1 == FILECACHE_FILETABLE_FREE_NAME && this->fileTableEntries[i].name2 == FILECACHE_FILETABLE_FREE_NAME)
-				{
-					entryIndex = i;
-					break;
-				}
-			}
-			if (entryIndex == -1)
-			{
-				if (name1 == FILECACHE_FILETABLE_NAME1 && name2 == FILECACHE_FILETABLE_NAME2)
-				{
-					cemuLog_log(LogType::Force, "Error in cache file");
-					cemu_assert_debug(false);
-				}
-				// no free entry, recreate file table with larger size
-				fileCache_updateFiletable(64);
-				// try again
-				continue;
-			}
-			else
-				break;
-		}
+		if (IsUnused(s.name1, s.name2))
+			continue;
+		blocked.emplace_back((sint64)s.offset - (sint64)payloadSize, (sint64)(s.offset + s.size));
 	}
-	// find free space
-	sint64 currentStartOffset = 0;
-	while (true)
+	std::sort(blocked.begin(), blocked.end());
+	sint64 position = 0;
+	for (const auto& [from, to] : blocked)
 	{
-		bool hasCollision = false;
-		sint64 currentEndOffset = currentStartOffset + rawSize;
-		FileTableEntry* entry = this->fileTableEntries;
-		FileTableEntry* entryLast = this->fileTableEntries + this->fileTableEntryCount;
-		while (entry < entryLast)
-		{
-			if (entry->name1 == FILECACHE_FILETABLE_FREE_NAME && entry->name2 == FILECACHE_FILETABLE_FREE_NAME)
-			{
-				entry++;
-				continue;
-			}
-			if (currentEndOffset >= (sint64)entry->fileOffset && currentStartOffset < (sint64)(entry->fileOffset + entry->fileSize))
-			{
-				currentStartOffset = entry->fileOffset + entry->fileSize;
-				hasCollision = true;
-				break;
-			}
-			entry++;
-		}
-		// optimized logic to speed up scanning for free offsets
-		// assumes that most of the time entries are stored in direct succession (holds true more often than not)
-		if (hasCollision && (entry + 1) < entryLast)
-		{
-			entry++;
-			while (entry < entryLast)
-			{
-				if (entry->name1 == FILECACHE_FILETABLE_FREE_NAME && entry->name2 == FILECACHE_FILETABLE_FREE_NAME)
-				{
-					entry++;
-					continue;
-				}
-				if (entry->fileOffset == currentStartOffset)
-				{
-					currentStartOffset = entry->fileOffset + entry->fileSize;
-					entry++;
-					continue;
-				}
-				break;
-			}
-		}
-		// retry in case of collision
-		if (hasCollision == false)
+		if (from > position)
 			break;
+		position = std::max(position, to);
 	}
-	// update file table entry
-	this->fileTableEntries[entryIndex].name1 = name1;
-	this->fileTableEntries[entryIndex].name2 = name2;
-	this->fileTableEntries[entryIndex].fileOffset = currentStartOffset;
-	this->fileTableEntries[entryIndex].fileSize = rawSize;
-	this->fileTableEntries[entryIndex].flags = isCompressed ? FileTableEntry::FLAGS::FLAG_COMPRESSED : FileTableEntry::FLAGS::FLAG_NONE;
-	this->fileTableEntries[entryIndex].extraReserved1 = 0;
-	this->fileTableEntries[entryIndex].extraReserved2 = 0;
-	this->fileTableEntries[entryIndex].extraReserved3 = 0;
-	// write file data
-	fileStream->SetPosition(this->dataOffset + currentStartOffset);
-	fileStream->writeData(rawData, rawSize);
+
+	Slot& slot = m_slots[index];
+	slot.name1 = name1;
+	slot.name2 = name2;
+	slot.offset = (uint64)position;
+	slot.size = payloadSize;
+	slot.flags = compressed ? kFlagZlib : 0;
+	slot.reserved[0] = slot.reserved[1] = slot.reserved[2] = 0;
+
+	// when the table stores itself, payload points into m_slots, so the record
+	// just updated above is part of the written data
+	m_stream->SetPosition(m_dataStart + (uint64)position);
+	m_stream->writeData(payload, (sint32)payloadSize);
 #ifdef __APPLE__
-    fileStream->Flush();
+	m_stream->Flush();
 #endif
-	// write file table entry
-	fileStream->SetPosition(this->dataOffset + this->fileTableOffset + (uint64)(sizeof(FileTableEntry)*entryIndex));
-	fileStream->writeData(this->fileTableEntries + entryIndex, sizeof(FileTableEntry));
+	WriteSlotRecord(index);
 #ifdef __APPLE__
-    fileStream->Flush();
+	m_stream->Flush();
 #endif
-	if (isCompressed)
-		free(rawData);
 }
 
 void FileCache::AddFile(const FileName&& name, const uint8* fileData, sint32 fileSize)
 {
-	this->_addFileInternal(name.name1, name.name2, fileData, fileSize, false);
-}
-
-bool FileCache::DeleteFile(const FileName&& name)
-{
-	if( name.name1 == FILECACHE_FILETABLE_NAME1 && name.name2 == FILECACHE_FILETABLE_NAME2 )
-		return false; // prevent filetable from being deleted
-	std::unique_lock lock(this->mutex);
-	FileTableEntry* entry = this->fileTableEntries;
-	FileTableEntry* entryLast = this->fileTableEntries+this->fileTableEntryCount;
-	while( entry < entryLast )
-	{
-		if( entry->name1 == name.name1 && entry->name2 == name.name2 )
-		{
-			entry->name1 = FILECACHE_FILETABLE_FREE_NAME;
-			entry->name2 = FILECACHE_FILETABLE_FREE_NAME;
-			entry->fileOffset = 0;
-			entry->fileSize = 0;
-			// store updated entry to file cache
-			size_t entryIndex = entry - this->fileTableEntries;
-			fileStream->SetPosition(this->dataOffset+this->fileTableOffset+(uint64)(sizeof(FileTableEntry)*entryIndex));
-			fileStream->writeData(this->fileTableEntries+entryIndex, sizeof(FileTableEntry));
-			return true;
-		}
-		entry++;
-	}
-	return false;
+	Store(name.name1, name.name2, fileData, fileSize, true);
 }
 
 void FileCache::AddFileAsync(const FileName& name, const uint8* fileData, sint32 fileSize)
 {
-	FileCacheAsyncWriter.AddJob(this, name, fileData, fileSize);
+	g_deferredWriter.Enqueue(this, name.name1, name.name2, fileData, fileSize);
 }
 
-bool FileCache::_getFileDataInternal(const FileTableEntry* entry, std::vector<uint8>& dataOut)
+bool FileCache::DeleteFile(const FileName&& name)
 {
-	std::vector<uint8> rawData(entry->fileSize);
+	if (IsTableName(name.name1, name.name2))
+		return false;
+	std::unique_lock guard(m_lock);
+	const sint32 index = FindSlot(name.name1, name.name2);
+	if (index < 0)
+		return false;
+	Slot& slot = m_slots[index];
+	slot.name1 = 0;
+	slot.name2 = 0;
+	slot.offset = 0;
+	slot.size = 0;
+	WriteSlotRecord(index);
+	return true;
+}
 
-	fileStream->SetPosition(this->dataOffset + entry->fileOffset);
-	fileStream->readData(rawData.data(), entry->fileSize);
-
-	if ((entry->flags&FileTableEntry::FLAG_COMPRESSED) == 0)
+bool FileCache::ReadSlot(sint32 index, std::vector<uint8>& dataOut)
+{
+	const Slot& slot = m_slots[index];
+	std::vector<uint8> stored(slot.size);
+	m_stream->SetPosition(m_dataStart + slot.offset);
+	m_stream->readData(stored.data(), slot.size);
+	if ((slot.flags & kFlagZlib) == 0)
 	{
-		// uncompressed
-		std::swap(rawData, dataOut);
+		dataOut = std::move(stored);
 		return true;
 	}
-	// decompress
-	sint32 uncompressedSize = 0;
-	if (!_uncompressFileData(rawData.data(), rawData.size(), dataOut))
-	{
-		dataOut.clear();
-		return false;
-	}
-	return true;
+	return Inflate(stored, dataOut);
 }
 
 bool FileCache::GetFile(const FileName&& name, std::vector<uint8>& dataOut)
 {
-	std::unique_lock lock(this->mutex);
-	FileTableEntry* entry = this->fileTableEntries;
-	FileTableEntry* entryLast = this->fileTableEntries+this->fileTableEntryCount;
-	while( entry < entryLast )
+	std::unique_lock guard(m_lock);
+	const sint32 index = FindSlot(name.name1, name.name2);
+	if (index < 0)
 	{
-		if( entry->name1 == name.name1 && entry->name2 == name.name2 )
-		{
-			return _getFileDataInternal(entry, dataOut);
-		}
-		entry++;
+		dataOut.clear();
+		return false;
 	}
-	dataOut.clear();
-	return false;
+	return ReadSlot(index, dataOut);
 }
 
 bool FileCache::GetFileByIndex(sint32 index, uint64* name1, uint64* name2, std::vector<uint8>& dataOut)
 {
-	if (index < 0 || index >= this->fileTableEntryCount)
+	std::unique_lock guard(m_lock);
+	if (index < 0 || index >= (sint32)m_slots.size())
 		return false;
-	FileTableEntry* entry = this->fileTableEntries + index;
-	if (this->fileTableEntries == nullptr)
-	{
-		cemuLog_log(LogType::Force, "GetFileByIndex() fileTable is NULL");
+	const Slot& slot = m_slots[index];
+	if (IsUnused(slot.name1, slot.name2) || IsTableName(slot.name1, slot.name2))
 		return false;
-	}
-	if (entry->name1 == FILECACHE_FILETABLE_FREE_NAME && entry->name2 == FILECACHE_FILETABLE_FREE_NAME)
-		return false;
-	if (entry->name1 == FILECACHE_FILETABLE_NAME1 && entry->name2 == FILECACHE_FILETABLE_NAME2)
-		return false;
-
-	std::unique_lock lock(this->mutex);
-	if(name1)
-		*name1 = entry->name1;
-	if(name2)
-		*name2 = entry->name2;
-	return _getFileDataInternal(entry, dataOut);
+	if (name1)
+		*name1 = slot.name1;
+	if (name2)
+		*name2 = slot.name2;
+	return ReadSlot(index, dataOut);
 }
 
 bool FileCache::HasFile(const FileName&& name)
 {
-	std::unique_lock lock(this->mutex);
-	FileTableEntry* entry = this->fileTableEntries;
-	FileTableEntry* entryLast = this->fileTableEntries + this->fileTableEntryCount;
-	while (entry < entryLast)
-	{
-		if (entry->name1 == name.name1 && entry->name2 == name.name2)
-			return true;
-		entry++;
-	}
-	return false;
+	std::unique_lock guard(m_lock);
+	return FindSlot(name.name1, name.name2) >= 0;
 }
 
 sint32 FileCache::GetMaximumFileIndex()
 {
-	return this->fileTableEntryCount;
+	std::unique_lock guard(m_lock);
+	return (sint32)m_slots.size();
 }
 
 sint32 FileCache::GetFileCount()
 {
-	std::unique_lock lock(this->mutex);
-	sint32 fileCount = 0;
-	FileTableEntry* entry = this->fileTableEntries;
-	FileTableEntry* entryLast = this->fileTableEntries+this->fileTableEntryCount;
-	while( entry < entryLast )
+	std::unique_lock guard(m_lock);
+	sint32 count = 0;
+	for (const Slot& s : m_slots)
 	{
-		if( entry->name1 == FILECACHE_FILETABLE_FREE_NAME && entry->name2 == FILECACHE_FILETABLE_FREE_NAME )
-		{
-			entry++;
-			continue;
-		}
-		if( entry->name1 == FILECACHE_FILETABLE_NAME1 && entry->name2 == FILECACHE_FILETABLE_NAME2 )
-		{
-			entry++;
-			continue;
-		}
-		fileCount++;
-		entry++;
+		if (!IsUnused(s.name1, s.name2) && !IsTableName(s.name1, s.name2))
+			count++;
 	}
-
-	return fileCount;
-}
-
-void fileCache_test()
-{
-	FileCache* fc = FileCache::Create("testCache.bin", 0);
-	uint32 time1 = GetTickCount();
-
-	char* testString1 = (char*)malloc(1024 * 1024 * 8);
-	char* testString2 = (char*)malloc(1024 * 1024 * 8);
-	char* testString3 = (char*)malloc(1024 * 1024 * 8);
-	for (sint32 f = 0; f < 1024 * 1024 * 8; f++)
-	{
-		testString1[f] = 'a' + (f & 7);
-		testString2[f] = 'd' + (f & 3);
-		testString3[f] = 'f' + (f & 3);
-	}
-
-	for(sint32 i=0; i<2200; i++)
-	{
-		fc->AddFile({ 0x1000001ULL, (uint64)i }, (uint8*)testString1, 1024 * 1024 * 1);
-		fc->AddFile({ 0x1000002ULL, (uint64)i }, (uint8*)testString2, 1024 * 1024 * 1);
-		fc->AddFile({ 0x1000003ULL, (uint64)i }, (uint8*)testString3, 1024 * 1024 * 1);
-	}
-	uint32 time2 = GetTickCount();
-	debug_printf("Writing took %dms\n", time2-time1);
-	delete fc;
-	// verify if all entries are still valid
-	FileCache* fcRead = FileCache::Open("testCache.bin", 0);
-	uint32 time3 = GetTickCount();
-	for(sint32 i=0; i<2200; i++)
-	{
-		std::vector<uint8> fileData;
-		bool r = fcRead->GetFile({ 0x1000001ULL, (uint64)i }, fileData);
-		if (!r || fileData.size() != 1024 * 1024 * 1 || memcmp(fileData.data(), testString1, 1024 * 1024 * 1) != 0)
-			cemu_assert_debug(false);
-		r = fcRead->GetFile({ 0x1000002ULL, (uint64)i }, fileData);
-		if( !r || fileData.size() != 1024 * 1024 * 1 || memcmp(fileData.data(), testString2, 1024 * 1024 * 1) != 0 )
-			cemu_assert_debug(false);
-		r = fcRead->GetFile({ 0x1000003ULL, (uint64)i }, fileData);
-		if( !r || fileData.size() != 1024 * 1024 * 1 || memcmp(fileData.data(), testString3, 1024 * 1024 * 1) != 0 )
-			cemu_assert_debug(false);
-	}
-	uint32 time4 = GetTickCount();
-	debug_printf("Reading took %dms\n", time4-time3);
-	delete fcRead;
-	cemu_assert_debug(false);
-	exit(0);
+	return count;
 }
