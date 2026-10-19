@@ -1,57 +1,28 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// Recompiler runtime: jump table, compile requests and the background
+// compiler thread, entering and leaving generated code, invalidation.
+
 #include "Cafe/HW/Espresso/Interpreter/PPCInterpreterInternal.h"
 #include "PPCFunctionBoundaryTracker.h"
 #include "PPCRecompiler.h"
 #include "PPCRecompilerIml.h"
+#include "IML/IML.h"
+#include "IML/IMLRegisterAllocator.h"
 #include "util/containers/RangeStore.h"
 #include "Cafe/OS/libs/coreinit/coreinit_CodeGen.h"
 #include "config/ActiveSettings.h"
 #include "config/LaunchSettings.h"
-#include "Common/ExceptionHandler/ExceptionHandler.h"
-#include "Common/cpu_features.h"
+#include "Common/FileStream.h"
 #include "util/helpers/fspinlock.h"
 #include "util/helpers/helpers.h"
 #include "util/MemMapper/MemMapper.h"
 
-#include "IML/IML.h"
-#include "IML/IMLRegisterAllocator.h"
+#if defined(ARCH_X86_64)
 #include "BackendX64/BackendX64.h"
-#ifdef __aarch64__
+#elif defined(__aarch64__)
 #include "BackendAArch64/BackendAArch64.h"
 #endif
-#include "util/highresolutiontimer/HighResolutionTimer.h"
-
-#define PPCREC_FORCE_SYNCHRONOUS_COMPILATION	0 // if 1, then function recompilation will block and execute on the thread that called PPCRecompiler_visitAddressNoBlock
-#define PPCREC_LOG_RECOMPILATION_RESULTS		0
-
-struct ppcInvalidationRange
-{
-	MPTR startAddress;
-	uint32 size;
-
-	ppcInvalidationRange(MPTR _startAddress, uint32 _size) : startAddress(_startAddress), size(_size) {};
-};
-
-struct ppcRecompilerFuncRange
-{
-	MPTR	ppcStart;
-	uint32  ppcSize;
-	void*   x86Start;
-	size_t  x86Size;
-};
-
-struct
-{
-	std::atomic_bool initialized{false};
-	FSpinlock recompilerSpinlock;
-	std::queue<MPTR> targetQueue;
-	std::vector<ppcInvalidationRange> invalidationRanges;
-	std::atomic_int_fast32_t recompilerEnableCount{0};
-	// recompiler thread
-	std::thread workerThread;
-	std::atomic_bool workerThreadStopSignal{false};
-	// function storage
-	RangeStore<PPCRecFunction_t*, uint32, 7703, 0x2000> functionStorage;
-}s_ppcRecompilerState;
 
 void ATTR_MS_ABI (*PPCRecompiler_enterRecompilerCode)(uint64 codeMem, uint64 ppcInterpreterInstance);
 void ATTR_MS_ABI (*PPCRecompiler_leaveRecompilerCode_visited)();
@@ -59,615 +30,339 @@ void ATTR_MS_ABI (*PPCRecompiler_leaveRecompilerCode_unvisited)();
 
 PPCRecompilerInstanceData_t* ppcRecompilerInstanceData;
 
-#if PPCREC_FORCE_SYNCHRONOUS_COMPILATION
-static std::mutex s_singleRecompilationMutex;
-#endif
-
-void PPCRecompiler_recompileAtAddress(uint32 address);
-
-// this function does never block and can fail if the recompiler lock cannot be acquired immediately
-void PPCRecompiler_visitAddressNoBlock(uint32 enterAddress)
+namespace
 {
-#if PPCREC_FORCE_SYNCHRONOUS_COMPILATION
-	if (ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[enterAddress / 4] != PPCRecompiler_leaveRecompilerCode_unvisited)
-		return;
-	s_ppcRecompilerState.recompilerSpinlock.lock();
-	if (ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[enterAddress / 4] != PPCRecompiler_leaveRecompilerCode_unvisited)
-	{
-		s_ppcRecompilerState.recompilerSpinlock.unlock();
-		return;
-	}
-	ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[enterAddress / 4] = PPCRecompiler_leaveRecompilerCode_visited;
-	s_ppcRecompilerState.recompilerSpinlock.unlock();
-	s_singleRecompilationMutex.lock();
-	if (ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[enterAddress / 4] == PPCRecompiler_leaveRecompilerCode_visited)
-	{
-		PPCRecompiler_recompileAtAddress(enterAddress);
-	}
-	s_singleRecompilationMutex.unlock();
-	return;
-#endif
-	// quick read-only check without lock
-	if (ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[enterAddress / 4] != PPCRecompiler_leaveRecompilerCode_unvisited)
-		return;
-	// try to acquire lock
-	if (!s_ppcRecompilerState.recompilerSpinlock.try_lock())
-		return;
-	auto funcPtr = ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[enterAddress / 4];
-	if (funcPtr != PPCRecompiler_leaveRecompilerCode_unvisited)
-	{
-		// was visited since previous check
-		s_ppcRecompilerState.recompilerSpinlock.unlock();
-		return;
-	}
-	// add to recompilation queue and flag as visited
-	s_ppcRecompilerState.targetQueue.emplace(enterAddress);
-	ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[enterAddress / 4] = PPCRecompiler_leaveRecompilerCode_visited;
+	// jump table memory is committed in steps covering 4MB of guest code
+	constexpr uint32 kTableStep = 4 * 1024 * 1024;
+	constexpr uint32 kTableStepCount = (MEMORY_CODEAREA_ADDR + MEMORY_CODEAREA_SIZE + kTableStep - 1) / kTableStep;
 
-	s_ppcRecompilerState.recompilerSpinlock.unlock();
+	struct
+	{
+		std::atomic_bool initialized{false};
+		std::atomic<sint32> enableCount{0};
+		FSpinlock lock; // protects the jump table writes, the queue, the invalidations and the function store
+		std::queue<uint32> requests;
+		// invalidations that happened while a function was being compiled
+		std::vector<std::pair<uint32, uint32>> invalidatedDuringCompile;
+		RangeStore<PPCRecCompiledFunction*, uint32, 7703, 0x2000> functions;
+		std::bitset<kTableStepCount> tableStepCommitted;
+		std::thread worker;
+		std::atomic_bool stopWorker{false};
+	}s_rec;
+
+	PPCREC_JUMP_ENTRY* JumpTable()
+	{
+		return ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable;
+	}
+
+	bool HasTableEntry(uint32 address)
+	{
+		if (address >= MEMORY_CODEAREA_ADDR + MEMORY_CODEAREA_SIZE)
+			return false;
+		return s_rec.tableStepCommitted[address / kTableStep];
+	}
+
+	bool IsCompiledEntry(PPCREC_JUMP_ENTRY e)
+	{
+		return e != PPCRecompiler_leaveRecompilerCode_unvisited && e != PPCRecompiler_leaveRecompilerCode_visited;
+	}
+
+	// queues the address for compilation unless that happened before. Never
+	// blocks: if the lock is busy the request is dropped (the address is
+	// requested again the next time execution gets there)
+	void RequestCompilation(uint32 address)
+	{
+		PPCREC_JUMP_ENTRY* table = JumpTable();
+		if (table[address / 4] != PPCRecompiler_leaveRecompilerCode_unvisited)
+			return;
+		if (!s_rec.lock.try_lock())
+			return;
+		if (table[address / 4] == PPCRecompiler_leaveRecompilerCode_unvisited)
+		{
+			s_rec.requests.emplace(address);
+			table[address / 4] = PPCRecompiler_leaveRecompilerCode_visited;
+		}
+		s_rec.lock.unlock();
+	}
+
+	void RunCompiledCode(PPCInterpreter_t* hCPU, PPCREC_JUMP_ENTRY code)
+	{
+#if BOOST_OS_WINDOWS
+		// generated code expects round-to-nearest
+		uint32 previousCsr = _mm_getcsr();
+		bool restoreRounding = (previousCsr & _MM_ROUND_MASK) != 0;
+		if (restoreRounding) [[unlikely]]
+			_mm_setcsr(previousCsr & ~_MM_ROUND_MASK);
+		PPCRecompiler_enterRecompilerCode((uint64)code, (uint64)hCPU);
+		if (restoreRounding) [[unlikely]]
+			_mm_setcsr((_mm_getcsr() & ~_MM_ROUND_MASK) | (previousCsr & _MM_ROUND_MASK));
+#else
+		PPCRecompiler_enterRecompilerCode((uint64)code, (uint64)hCPU);
+#endif
+		// generated code left early: ask for the code where execution continues
+		if (hCPU->remainingCycles > 0)
+			RequestCompilation(hCPU->instructionPointer);
+	}
+
+	bool InCodeGenArea(uint32 address)
+	{
+		uint32 start = 0, size = 0;
+		coreinit::OSGetCodegenVirtAddrRangeInternal(start, size);
+		return size != 0 && address >= start && address < start + size;
+	}
+
+	PPCRecCompiledFunction* CompileFunction(uint32 entryAddress, const PPCFunctionBoundaryTracker& tracker, std::vector<std::pair<uint32, uint32>>& entryPointsOut)
+	{
+		if (entryAddress >= PPC_REC_CODE_AREA_END)
+		{
+			cemuLog_log(LogType::Force, "Recompiler: function at 0x{:08x} is outside of the code area", entryAddress);
+			return nullptr;
+		}
+		// code written at runtime (JIT engines in games) is left to the interpreter when asked to
+		if (InCodeGenArea(entryAddress) && coreinit::codeGenShouldAvoid())
+			return nullptr;
+		uint32 lowerLimit = LaunchSettings::GetPPCRecLowerAddr();
+		uint32 upperLimit = LaunchSettings::GetPPCRecUpperAddr();
+		if (lowerLimit != 0 && upperLimit != 0 && (entryAddress < lowerLimit || entryAddress > upperLimit))
+			return nullptr;
+
+		IMLFunction func;
+		PPCIMLTranslator translator(func, tracker);
+		if (!translator.Translate(entryAddress))
+			return nullptr;
+		PPCRecompilerIML_IsolateEntries(func);
+		func.RemoveUnreachable();
+		IMLRegisterAllocator_PrepareGuestRegisters(func);
+		IMLOptimizer_Run(func);
+#ifdef PPCREC_VERIFY_IML
+		// consistency checks of the intermediate code (test builds)
+		std::string problem;
+		if (!IMLAnalyzer_Verify(func, &problem))
+		{
+			cemuLog_log(LogType::Force, "Recompiler: invalid intermediate code for 0x{:08x}: {}", entryAddress, problem);
+			IMLDebug_Dump(func);
+			return nullptr;
+		}
+#endif
+
+		PPCRecCompiledFunction* result = new PPCRecCompiledFunction();
+		result->entryAddress = entryAddress;
+		bool generated = false;
+#if defined(ARCH_X86_64)
+		if (IMLRegisterAllocator_AllocateRegisters(func, X64Backend::GetAllocatorParameters()))
+			generated = PPCRecompiler_generateX64Code(result, func, entryPointsOut);
+#elif defined(__aarch64__)
+		if (IMLRegisterAllocator_AllocateRegisters(func, AArch64Backend_GetAllocatorParameters()))
+			generated = PPCRecompiler_generateAArch64Code(result, func, entryPointsOut);
+#endif
+		if (!generated)
+		{
+			delete result;
+			return nullptr;
+		}
+		for (const auto& r : tracker.GetRanges())
+			result->ranges.push_back({r.start, r.end, nullptr});
+
+		if (ActiveSettings::DumpRecompilerFunctionsEnabled())
+		{
+			FileStream* fs = FileStream::createFile2(ActiveSettings::GetUserDataPath(fmt::format("dump/recompiler/ppc_{:08x}.bin", entryAddress)));
+			if (fs)
+			{
+				fs->writeData(result->hostCode, result->hostCodeSize);
+				delete fs;
+			}
+		}
+		return result;
+	}
+
+	// publishes the entry points of a compiled function in the jump table
+	bool ActivateFunction(uint32 requestedAddress, PPCRecCompiledFunction* func, const std::vector<std::pair<uint32, uint32>>& entryPoints)
+	{
+		PPCREC_JUMP_ENTRY* table = JumpTable();
+		s_rec.lock.lock();
+		// the request may have been dropped by an invalidation while compiling
+		if (table[requestedAddress / 4] != PPCRecompiler_leaveRecompilerCode_visited)
+		{
+			s_rec.lock.unlock();
+			return false;
+		}
+		for (const auto& [invStart, invEnd] : s_rec.invalidatedDuringCompile)
+		{
+			for (const auto& r : func->ranges)
+			{
+				if (r.start < invEnd && r.end > invStart)
+				{
+					s_rec.lock.unlock();
+					return false;
+				}
+			}
+		}
+		for (const auto& [guestAddress, offset] : entryPoints)
+		{
+			if (!HasTableEntry(guestAddress))
+				continue;
+			void* host = (uint8*)func->hostCode + offset;
+			table[guestAddress / 4] = (PPCREC_JUMP_ENTRY)host;
+			func->entryPoints.emplace_back(guestAddress, host);
+		}
+		// addresses inside the function that were requested but did not get an
+		// entry point are requested again when execution reaches them
+		for (const auto& r : func->ranges)
+		{
+			for (uint32 a = r.start; a < r.end; a += 4)
+			{
+				if (HasTableEntry(a) && table[a / 4] == PPCRecompiler_leaveRecompilerCode_visited)
+					table[a / 4] = PPCRecompiler_leaveRecompilerCode_unvisited;
+			}
+		}
+		for (auto& r : func->ranges)
+			r.storeHandle = s_rec.functions.storeRange(func, r.start, r.end);
+		s_rec.lock.unlock();
+		return true;
+	}
+
+	void CompileRequested(uint32 address)
+	{
+		s_rec.lock.lock();
+		s_rec.invalidatedDuringCompile.clear();
+		s_rec.lock.unlock();
+
+		PPCFunctionBoundaryTracker tracker;
+		tracker.Discover(address);
+		std::vector<std::pair<uint32, uint32>> entryPoints;
+		PPCRecCompiledFunction* func = CompileFunction(address, tracker, entryPoints);
+		if (!func)
+			return; // stays marked as visited, the interpreter keeps running it
+		if (!ActivateFunction(address, func, entryPoints))
+			delete func; // the generated code itself is not reclaimed
+	}
+
+	void CompilerThread()
+	{
+		SetThreadName("PPCRecompiler");
+		while (!s_rec.stopWorker)
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			while (!s_rec.stopWorker)
+			{
+				s_rec.lock.lock();
+				if (s_rec.requests.empty())
+				{
+					s_rec.lock.unlock();
+					break;
+				}
+				uint32 address = s_rec.requests.front();
+				s_rec.requests.pop();
+				bool stillWanted = JumpTable()[address / 4] == PPCRecompiler_leaveRecompilerCode_visited;
+				s_rec.lock.unlock();
+				if (stillWanted)
+					CompileRequested(address);
+			}
+		}
+	}
+
+	void CommitTableStep(uint32 stepIndex)
+	{
+		if (s_rec.tableStepCommitted[stepIndex])
+			return;
+		PPCREC_JUMP_ENTRY* first = JumpTable() + (size_t)stepIndex * (kTableStep / 4);
+		void* p = MemMapper::AllocateMemory(first, (kTableStep / 4) * sizeof(PPCREC_JUMP_ENTRY), MemMapper::PAGE_PERMISSION::P_RW, true);
+		if (!p)
+		{
+			cemuLog_log(LogType::Force, "Recompiler: failed to commit the jump table for 0x{:08x}", stepIndex * kTableStep);
+			cemu_assert(false);
+			return;
+		}
+		for (uint32 i = 0; i < kTableStep / 4; i++)
+			first[i] = PPCRecompiler_leaveRecompilerCode_unvisited;
+		s_rec.tableStepCommitted[stepIndex] = true;
+	}
+
+	void DeleteFunction(PPCRecCompiledFunction* func)
+	{
+		PPCREC_JUMP_ENTRY* table = JumpTable();
+		for (auto& [guestAddress, host] : func->entryPoints)
+		{
+			if (table[guestAddress / 4] == (PPCREC_JUMP_ENTRY)host)
+				table[guestAddress / 4] = PPCRecompiler_leaveRecompilerCode_unvisited;
+		}
+		for (auto& r : func->ranges)
+		{
+			if (r.storeHandle)
+				s_rec.functions.deleteRange(r.storeHandle);
+			r.storeHandle = nullptr;
+		}
+		// the host code is not freed, another core may still be running it
+		delete func;
+	}
 }
 
 void PPCRecompiler_recompileIfUnvisited(uint32 enterAddress)
 {
-	if (s_ppcRecompilerState.recompilerEnableCount <= 0)
+	if (s_rec.enableCount <= 0)
 		return;
-	PPCRecompiler_visitAddressNoBlock(enterAddress);
-}
-
-void PPCRecompiler_enter(PPCInterpreter_t* hCPU, PPCREC_JUMP_ENTRY funcPtr)
-{
-#if BOOST_OS_WINDOWS
-	uint32 prevCsr = _mm_getcsr();
-	if (prevCsr & _MM_ROUND_MASK) [[unlikely]]
-		_mm_setcsr(prevCsr & ~_MM_ROUND_MASK);
-	PPCRecompiler_enterRecompilerCode((uint64)funcPtr, (uint64)hCPU);
-	if (prevCsr & _MM_ROUND_MASK) [[unlikely]]
-		_mm_setcsr((_mm_getcsr() & ~_MM_ROUND_MASK) | (prevCsr & _MM_ROUND_MASK));
-	// debug recompiler exit - useful to find frequently executed functions which couldn't be recompiled
-	#ifdef CEMU_DEBUG_ASSERT
-	if (hCPU->remainingCycles > 0 && GetAsyncKeyState(VK_F4))
-	{
-		auto t = std::chrono::high_resolution_clock::now();
-		auto dur = std::chrono::duration_cast<std::chrono::microseconds>(t.time_since_epoch()).count();
-		cemuLog_log(LogType::Force, "Recompiler exit: 0x{:08x} LR: 0x{:08x} Timestamp {}.{:04}", hCPU->instructionPointer, hCPU->spr.LR, dur / 1000LL, (dur % 1000LL));
-	}
-	#endif
-#else
-	PPCRecompiler_enterRecompilerCode((uint64)funcPtr, (uint64)hCPU);
-#endif
-	// after leaving recompiler prematurely attempt to recompile the code at the new location
-	if (hCPU->remainingCycles > 0)
-	{
-		PPCRecompiler_visitAddressNoBlock(hCPU->instructionPointer);
-	}
-}
-
-void PPCRecompiler_attemptEnterWithoutRecompile(PPCInterpreter_t* hCPU, uint32 enterAddress)
-{
-	cemu_assert_debug(hCPU->instructionPointer == enterAddress);
-	if (s_ppcRecompilerState.recompilerEnableCount <= 0)
-		return;
-	auto funcPtr = ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[enterAddress / 4];
-	if (funcPtr != PPCRecompiler_leaveRecompilerCode_unvisited && funcPtr != PPCRecompiler_leaveRecompilerCode_visited)
-	{
-		cemu_assert_debug(ppcRecompilerInstanceData != nullptr);
-		PPCRecompiler_enter(hCPU, funcPtr);
-	}
+	RequestCompilation(enterAddress);
 }
 
 void PPCRecompiler_attemptEnter(PPCInterpreter_t* hCPU, uint32 enterAddress)
 {
 	cemu_assert_debug(hCPU->instructionPointer == enterAddress);
-	if (s_ppcRecompilerState.recompilerEnableCount <= 0)
+	if (s_rec.enableCount <= 0 || hCPU->remainingCycles <= 0)
 		return;
-	if (hCPU->remainingCycles <= 0)
+	PPCREC_JUMP_ENTRY code = JumpTable()[enterAddress / 4];
+	if (code == PPCRecompiler_leaveRecompilerCode_unvisited)
+		RequestCompilation(enterAddress);
+	else if (code != PPCRecompiler_leaveRecompilerCode_visited)
+		RunCompiledCode(hCPU, code);
+}
+
+void PPCRecompiler_attemptEnterWithoutRecompile(PPCInterpreter_t* hCPU, uint32 enterAddress)
+{
+	cemu_assert_debug(hCPU->instructionPointer == enterAddress);
+	if (s_rec.enableCount <= 0)
 		return;
-	auto funcPtr = ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[enterAddress / 4];
-	if (funcPtr == PPCRecompiler_leaveRecompilerCode_unvisited)
-	{
-		PPCRecompiler_visitAddressNoBlock(enterAddress);
-	}
-	else if (funcPtr != PPCRecompiler_leaveRecompilerCode_visited)
-	{
-		// enter
-		cemu_assert_debug(ppcRecompilerInstanceData != nullptr);
-		PPCRecompiler_enter(hCPU, funcPtr);
-	}
-}
-bool PPCRecompiler_ApplyIMLPasses(ppcImlGenContext_t& ppcImlGenContext);
-
-PPCRecFunction_t* PPCRecompiler_recompileFunction(PPCFunctionBoundaryTracker::PPCRange_t range, std::set<uint32>& entryAddresses, std::vector<std::pair<MPTR, uint32>>& entryPointsOut, PPCFunctionBoundaryTracker& boundaryTracker)
-{
-	if (range.startAddress >= PPC_REC_CODE_AREA_END)
-	{
-		cemuLog_log(LogType::Force, "Attempting to recompile function outside of allowed code area");
-		return nullptr;
-	}
-	uint32 codeGenRangeStart;
-	uint32 codeGenRangeSize = 0;
-	coreinit::OSGetCodegenVirtAddrRangeInternal(codeGenRangeStart, codeGenRangeSize);
-	if (codeGenRangeSize != 0)
-	{
-		if (range.startAddress >= codeGenRangeStart && range.startAddress < (codeGenRangeStart + codeGenRangeSize))
-		{
-			if (coreinit::codeGenShouldAvoid())
-			{
-				return nullptr;
-			}
-		}
-	}
-
-	PPCRecFunction_t* ppcRecFunc = new PPCRecFunction_t();
-	ppcRecFunc->ppcAddress = range.startAddress;
-	ppcRecFunc->ppcSize = range.length;
-
-#if PPCREC_LOG_RECOMPILATION_RESULTS
-	BenchmarkTimer bt;
-	bt.Start();
-#endif
-
-	// generate intermediate code
-	ppcImlGenContext_t ppcImlGenContext = { 0 };
-	ppcImlGenContext.debug_entryPPCAddress = range.startAddress;
-	bool compiledSuccessfully = PPCRecompiler_generateIntermediateCode(ppcImlGenContext, ppcRecFunc, entryAddresses, boundaryTracker);
-	if (compiledSuccessfully == false)
-	{
-		delete ppcRecFunc;
-		return nullptr;
-	}
-
-	uint32 ppcRecLowerAddr = LaunchSettings::GetPPCRecLowerAddr();
-	uint32 ppcRecUpperAddr = LaunchSettings::GetPPCRecUpperAddr();
-
-	if (ppcRecLowerAddr != 0 && ppcRecUpperAddr != 0)
-	{
-		if (ppcRecFunc->ppcAddress < ppcRecLowerAddr || ppcRecFunc->ppcAddress > ppcRecUpperAddr)
-		{
-			delete ppcRecFunc;
-			return nullptr;
-		}
-	}
-
-	// apply passes
-	if (!PPCRecompiler_ApplyIMLPasses(ppcImlGenContext))
-	{
-		delete ppcRecFunc;
-		return nullptr;
-	}
-
-#if defined(ARCH_X86_64)
-	// emit x64 code
-	bool x64GenerationSuccess = PPCRecompiler_generateX64Code(ppcRecFunc, &ppcImlGenContext);
-	if (x64GenerationSuccess == false)
-	{
-		return nullptr;
-	}
-#elif defined(__aarch64__)
-	bool aarch64GenerationSuccess = PPCRecompiler_generateAArch64Code(ppcRecFunc, &ppcImlGenContext);
-	if (aarch64GenerationSuccess == false)
-	{
-		return nullptr;
-	}
-#endif
-	if (ActiveSettings::DumpRecompilerFunctionsEnabled())
-	{
-		FileStream* fs = FileStream::createFile2(ActiveSettings::GetUserDataPath(fmt::format("dump/recompiler/ppc_{:08x}.bin", ppcRecFunc->ppcAddress)));
-		if (fs)
-		{
-			fs->writeData(ppcRecFunc->x86Code, ppcRecFunc->x86Size);
-			delete fs;
-		}
-	}
-
-	// collect list of PPC-->x64 entry points
-	entryPointsOut.clear();
-	for(IMLSegment* imlSegment : ppcImlGenContext.segmentList2)
-	{
-		if (imlSegment->isEnterable == false)
-			continue;
-
-		uint32 ppcEnterOffset = imlSegment->enterPPCAddress;
-		uint32 x64Offset = imlSegment->x64Offset;
-
-		entryPointsOut.emplace_back(ppcEnterOffset, x64Offset);
-	}
-
-#if PPCREC_LOG_RECOMPILATION_RESULTS
-	bt.Stop();
-	uint32 codeHash = 0;
-	for (uint32 i = 0; i < ppcRecFunc->x86Size; i++)
-	{
-		codeHash = _rotr(codeHash, 3);
-		codeHash += ((uint8*)ppcRecFunc->x86Code)[i];
-	}
-	cemuLog_log(LogType::Force, "[Recompiler] PPC 0x{:08x} -> x64: 0x{:x} Took {:.4}ms | Size {:04x} CodeHash {:08x}", (uint32)ppcRecFunc->ppcAddress, (uint64)(uintptr_t)ppcRecFunc->x86Code, bt.GetElapsedMilliseconds(), ppcRecFunc->x86Size, codeHash);
-#endif
-
-	return ppcRecFunc;
-}
-
-void PPCRecompiler_NativeRegisterAllocatorPass(ppcImlGenContext_t& ppcImlGenContext)
-{
-	IMLRegisterAllocatorParameters raParam;
-
-	for (auto& it : ppcImlGenContext.mappedRegs)
-		raParam.regIdToName.try_emplace(it.second.GetRegID(), it.first);
-
-#if defined(ARCH_X86_64)
-	auto& gprPhysPool = raParam.GetPhysRegPool(IMLRegFormat::I64);
-	gprPhysPool.SetAvailable(IMLArchX86::PHYSREG_GPR_BASE + X86_REG_RAX);
-	gprPhysPool.SetAvailable(IMLArchX86::PHYSREG_GPR_BASE + X86_REG_RDX);
-	gprPhysPool.SetAvailable(IMLArchX86::PHYSREG_GPR_BASE + X86_REG_RBX);
-	gprPhysPool.SetAvailable(IMLArchX86::PHYSREG_GPR_BASE + X86_REG_RBP);
-	gprPhysPool.SetAvailable(IMLArchX86::PHYSREG_GPR_BASE + X86_REG_RSI);
-	gprPhysPool.SetAvailable(IMLArchX86::PHYSREG_GPR_BASE + X86_REG_RDI);
-	gprPhysPool.SetAvailable(IMLArchX86::PHYSREG_GPR_BASE + X86_REG_R8);
-	gprPhysPool.SetAvailable(IMLArchX86::PHYSREG_GPR_BASE + X86_REG_R9);
-	gprPhysPool.SetAvailable(IMLArchX86::PHYSREG_GPR_BASE + X86_REG_R10);
-	gprPhysPool.SetAvailable(IMLArchX86::PHYSREG_GPR_BASE + X86_REG_R11);
-	gprPhysPool.SetAvailable(IMLArchX86::PHYSREG_GPR_BASE + X86_REG_R12);
-	gprPhysPool.SetAvailable(IMLArchX86::PHYSREG_GPR_BASE + X86_REG_RCX);
-
-	// add XMM registers, except XMM15 which is the temporary register
-	auto& fprPhysPool = raParam.GetPhysRegPool(IMLRegFormat::F64);
-	fprPhysPool.SetAvailable(IMLArchX86::PHYSREG_FPR_BASE + 0);
-	fprPhysPool.SetAvailable(IMLArchX86::PHYSREG_FPR_BASE + 1);
-	fprPhysPool.SetAvailable(IMLArchX86::PHYSREG_FPR_BASE + 2);
-	fprPhysPool.SetAvailable(IMLArchX86::PHYSREG_FPR_BASE + 3);
-	fprPhysPool.SetAvailable(IMLArchX86::PHYSREG_FPR_BASE + 4);
-	fprPhysPool.SetAvailable(IMLArchX86::PHYSREG_FPR_BASE + 5);
-	fprPhysPool.SetAvailable(IMLArchX86::PHYSREG_FPR_BASE + 6);
-	fprPhysPool.SetAvailable(IMLArchX86::PHYSREG_FPR_BASE + 7);
-	fprPhysPool.SetAvailable(IMLArchX86::PHYSREG_FPR_BASE + 8);
-	fprPhysPool.SetAvailable(IMLArchX86::PHYSREG_FPR_BASE + 9);
-	fprPhysPool.SetAvailable(IMLArchX86::PHYSREG_FPR_BASE + 10);
-	fprPhysPool.SetAvailable(IMLArchX86::PHYSREG_FPR_BASE + 11);
-	fprPhysPool.SetAvailable(IMLArchX86::PHYSREG_FPR_BASE + 12);
-	fprPhysPool.SetAvailable(IMLArchX86::PHYSREG_FPR_BASE + 13);
-	fprPhysPool.SetAvailable(IMLArchX86::PHYSREG_FPR_BASE + 14);
-#elif defined(__aarch64__)
-	auto& gprPhysPool = raParam.GetPhysRegPool(IMLRegFormat::I64);
-	for (auto i = IMLArchAArch64::PHYSREG_GPR_BASE; i < IMLArchAArch64::PHYSREG_GPR_BASE + IMLArchAArch64::PHYSREG_GPR_COUNT; i++)
-	{
-		if (i == IMLArchAArch64::PHYSREG_GPR_BASE + 18)
-			continue; // Skip reserved platform register
-		gprPhysPool.SetAvailable(i);
-	}
-
-	auto& fprPhysPool = raParam.GetPhysRegPool(IMLRegFormat::F64);
-	for (auto i = IMLArchAArch64::PHYSREG_FPR_BASE; i < IMLArchAArch64::PHYSREG_FPR_BASE + IMLArchAArch64::PHYSREG_FPR_COUNT; i++)
-		fprPhysPool.SetAvailable(i);
-#endif
-
-	IMLRegisterAllocator_AllocateRegisters(&ppcImlGenContext, raParam);
-}
-
-bool PPCRecompiler_ApplyIMLPasses(ppcImlGenContext_t& ppcImlGenContext)
-{
-	// isolate entry points from function flow (enterable segments must not be the target of any other segment)
-	// this simplifies logic during register allocation
-	PPCRecompilerIML_isolateEnterableSegments(&ppcImlGenContext);
-
-	// merge certain float load+store patterns
-	IMLOptimizer_OptimizeDirectFloatCopies(&ppcImlGenContext);
-	// delay byte swapping for certain load+store patterns
-	IMLOptimizer_OptimizeDirectIntegerCopies(&ppcImlGenContext);
-
-	IMLOptimizer_StandardOptimizationPass(ppcImlGenContext);
-
-	IMLOptimizer_OptimizeSinglePrecisionStores(ppcImlGenContext);
-
-	PPCRecompiler_NativeRegisterAllocatorPass(ppcImlGenContext);
-
-	return true;
-}
-
-bool PPCRecompiler_makeRecompiledFunctionActive(uint32 initialEntryPoint, PPCFunctionBoundaryTracker::PPCRange_t& range, PPCRecFunction_t* ppcRecFunc, std::vector<std::pair<MPTR, uint32>>& entryPoints)
-{
-	// update jump table
-	s_ppcRecompilerState.recompilerSpinlock.lock();
-
-	// check if the initial entrypoint is still flagged for recompilation
-	// its possible that the range has been invalidated during the time it took to translate the function
-	if (ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[initialEntryPoint / 4] != PPCRecompiler_leaveRecompilerCode_visited)
-	{
-		s_ppcRecompilerState.recompilerSpinlock.unlock();
-		return false;
-	}
-
-	// check if the current range got invalidated during the time it took to recompile it
-	bool isInvalidated = false;
-	for (auto& invRange : s_ppcRecompilerState.invalidationRanges)
-	{
-		MPTR rStartAddr = invRange.startAddress;
-		MPTR rEndAddr = rStartAddr + invRange.size;
-		for (auto& recFuncRange : ppcRecFunc->list_ranges)
-		{
-			if (recFuncRange.ppcAddress < (rEndAddr) && (recFuncRange.ppcAddress + recFuncRange.ppcSize) > rStartAddr)
-			{
-				isInvalidated = true;
-				break;
-			}
-		}
-	}
-	s_ppcRecompilerState.invalidationRanges.clear();
-	if (isInvalidated)
-	{
-		s_ppcRecompilerState.recompilerSpinlock.unlock();
-		return false;
-	}
-
-	// update jump table and remember which entries we updated
-	cemu_assert_debug(ppcRecFunc->jumpTableEntries.empty());
-	for (auto& itr : entryPoints)
-	{
-		ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[itr.first / 4] = (PPCREC_JUMP_ENTRY)((uint8*)ppcRecFunc->x86Code + itr.second);
-		ppcRecFunc->jumpTableEntries.emplace_back(itr.first, ((uint8*)ppcRecFunc->x86Code + itr.second));
-	}
-
-	// due to inlining, some entrypoints can get optimized away
-	// therefore we reset all addresses that are still marked as visited (but not recompiled)
-	// we dont remove the points from the queue but any address thats not marked as visited won't get recompiled
-	// if they are reachable, the interpreter will queue them again
-	for (uint32 v = range.startAddress; v < (range.startAddress + range.length); v += 4)
-	{
-		auto funcPtr = ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[v / 4];
-		if (funcPtr == PPCRecompiler_leaveRecompilerCode_visited)
-			ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[v / 4] = PPCRecompiler_leaveRecompilerCode_unvisited;
-	}
-
-	// register ranges
-	for (auto& r : ppcRecFunc->list_ranges)
-	{
-		r.storedRange = s_ppcRecompilerState.functionStorage.storeRange(ppcRecFunc, r.ppcAddress, r.ppcAddress + r.ppcSize);
-	}
-	s_ppcRecompilerState.recompilerSpinlock.unlock();
-	return true;
-}
-
-void PPCRecompiler_recompileAtAddress(uint32 address)
-{
-	cemu_assert_debug(ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[address / 4] == PPCRecompiler_leaveRecompilerCode_visited);
-
-	// get size
-	PPCFunctionBoundaryTracker funcBoundaries;
-	funcBoundaries.trackStartPoint(address);
-	// get range that encompasses address
-	PPCFunctionBoundaryTracker::PPCRange_t range;
-	if (funcBoundaries.getRangeForAddress(address, range) == false)
-	{
-		cemu_assert_debug(false);
-	}
-
-	// todo - use info from previously compiled ranges to determine full size of this function (and merge all the entryAddresses)
-
-	// collect all currently known entry points for this range
-	s_ppcRecompilerState.recompilerSpinlock.lock();
-	std::set<uint32> entryAddresses;
-	entryAddresses.emplace(address);
-	s_ppcRecompilerState.recompilerSpinlock.unlock();
-
-	std::vector<std::pair<MPTR, uint32>> functionEntryPoints;
-	PPCRecFunction_t* func = PPCRecompiler_recompileFunction(range, entryAddresses, functionEntryPoints, funcBoundaries);
-	if (!func)
-		return; // recompilation failed
-	PPCRecompiler_makeRecompiledFunctionActive(address, range, func, functionEntryPoints);
-}
-
-void PPCRecompiler_thread()
-{
-	SetThreadName("PPCRecompiler");
-#if PPCREC_FORCE_SYNCHRONOUS_COMPILATION
-	return;
-#endif
-
-	while (true)
-	{
-        if(s_ppcRecompilerState.workerThreadStopSignal)
-            return;
-		std::this_thread::sleep_for(std::chrono::milliseconds(10));
-		// asynchronous recompilation:
-		// 1) take address from queue
-		// 2) check if address is still marked as visited
-		// 3) if yes -> calculate size, gather all entry points, recompile and update jump table
-		while (true)
-		{
-			s_ppcRecompilerState.recompilerSpinlock.lock();
-			if (s_ppcRecompilerState.targetQueue.empty())
-			{
-				s_ppcRecompilerState.recompilerSpinlock.unlock();
-				break;
-			}
-			auto enterAddress = s_ppcRecompilerState.targetQueue.front();
-			s_ppcRecompilerState.targetQueue.pop();
-
-			auto funcPtr = ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[enterAddress / 4];
-			if (funcPtr != PPCRecompiler_leaveRecompilerCode_visited)
-			{
-				// only recompile functions if marked as visited
-				s_ppcRecompilerState.recompilerSpinlock.unlock();
-				continue;
-			}
-			s_ppcRecompilerState.recompilerSpinlock.unlock();
-
-			PPCRecompiler_recompileAtAddress(enterAddress);
-			if(s_ppcRecompilerState.workerThreadStopSignal)
-				return;
-		}
-	}
-}
-
-#define PPC_REC_ALLOC_BLOCK_SIZE	(4*1024*1024) // 4MB
-
-constexpr uint32 PPCRecompiler_GetNumAddressSpaceBlocks()
-{
-    return (MEMORY_CODEAREA_ADDR + MEMORY_CODEAREA_SIZE + PPC_REC_ALLOC_BLOCK_SIZE - 1) / PPC_REC_ALLOC_BLOCK_SIZE;
-}
-
-std::bitset<PPCRecompiler_GetNumAddressSpaceBlocks()> ppcRecompiler_reservedBlockMask;
-
-void PPCRecompiler_reserveLookupTableBlock(uint32 offset)
-{
-	uint32 blockIndex = offset / PPC_REC_ALLOC_BLOCK_SIZE;
-	offset = blockIndex * PPC_REC_ALLOC_BLOCK_SIZE;
-
-	if (ppcRecompiler_reservedBlockMask[blockIndex])
-		return;
-	ppcRecompiler_reservedBlockMask[blockIndex] = true;
-
-	void* p = MemMapper::AllocateMemory(&(ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[offset/4]), (PPC_REC_ALLOC_BLOCK_SIZE/4)*sizeof(void*), MemMapper::PAGE_PERMISSION::P_RW, true);
-	if( !p )
-	{
-		cemuLog_log(LogType::Force, "Failed to allocate memory for recompiler (0x{:08x})", offset);
-		cemu_assert(false);
-		return;
-	}
-	for(uint32 i=0; i<PPC_REC_ALLOC_BLOCK_SIZE/4; i++)
-	{
-		ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[offset/4+i] = PPCRecompiler_leaveRecompilerCode_unvisited;
-	}
+	PPCREC_JUMP_ENTRY code = JumpTable()[enterAddress / 4];
+	if (IsCompiledEntry(code))
+		RunCompiledCode(hCPU, code);
 }
 
 void PPCRecompiler_allocateRange(uint32 startAddress, uint32 size)
 {
-	if (ppcRecompilerInstanceData == nullptr)
+	if (!ppcRecompilerInstanceData)
 		return;
-	uint32 endAddress = (startAddress + size + PPC_REC_ALLOC_BLOCK_SIZE - 1) & ~(PPC_REC_ALLOC_BLOCK_SIZE-1);
-	startAddress = (startAddress) & ~(PPC_REC_ALLOC_BLOCK_SIZE-1);
-	startAddress = std::min(startAddress, (uint32)MEMORY_CODEAREA_ADDR + MEMORY_CODEAREA_SIZE);
-	endAddress = std::min(endAddress, (uint32)MEMORY_CODEAREA_ADDR + MEMORY_CODEAREA_SIZE);
-	for (uint32 i = startAddress; i < endAddress; i += PPC_REC_ALLOC_BLOCK_SIZE)
-	{
-		PPCRecompiler_reserveLookupTableBlock(i);
-	}
-}
-
-bool PPCRecompiler_findFuncRanges(uint32 addr, ppcRecompilerFuncRange* rangesOut, size_t* countInOut)
-{
-	s_ppcRecompilerState.recompilerSpinlock.lock();
-	size_t countIn = *countInOut;
-	size_t countOut = 0;
-
-	s_ppcRecompilerState.functionStorage.findRanges(addr, addr + 4, [rangesOut, countIn, &countOut](uint32 start, uint32 end, PPCRecFunction_t* func)
-	{
-		if (countOut < countIn)
-		{
-			rangesOut[countOut].ppcStart = start;
-			rangesOut[countOut].ppcSize = (end-start);
-			rangesOut[countOut].x86Start = func->x86Code;
-			rangesOut[countOut].x86Size = func->x86Size;
-		}
-		countOut++;
-	}
-	);
-	s_ppcRecompilerState.recompilerSpinlock.unlock();
-	*countInOut = countOut;
-	if (countOut > countIn)
-		return false;
-	return true;
-}
-
-extern "C" DLLEXPORT uintptr_t* PPCRecompiler_getJumpTableBase()
-{
-	if (ppcRecompilerInstanceData == nullptr)
-		return nullptr;
-	return (uintptr_t*)ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable;
-}
-
-void PPCRecompiler_deleteFunction(PPCRecFunction_t* func)
-{
-	cemu_assert_debug(s_ppcRecompilerState.recompilerSpinlock.is_locked());
-	// unlink entrypoints from JumpTable
-	for (auto& entrypoint : func->jumpTableEntries)
-	{
-		if (ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[entrypoint.ppcAddr / 4] == entrypoint.hostEntrypoint)
-			ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[entrypoint.ppcAddr / 4] = PPCRecompiler_leaveRecompilerCode_unvisited;
-	}
-	// delete from storage
-	for (auto& r : func->list_ranges)
-	{
-		if(r.storedRange)
-			s_ppcRecompilerState.functionStorage.deleteRange(r.storedRange);
-		r.storedRange = nullptr;
-	}
-	// todo - free x86 code
+	uint32 limit = MEMORY_CODEAREA_ADDR + MEMORY_CODEAREA_SIZE;
+	uint32 first = std::min(startAddress, limit) / kTableStep;
+	uint32 end = (uint32)std::min<uint64>(((uint64)startAddress + size + kTableStep - 1) / kTableStep, kTableStepCount);
+	for (uint32 i = first; i < end; i++)
+		CommitTableStep(i);
 }
 
 void PPCRecompiler_invalidateRange(uint32 startAddr, uint32 endAddr)
 {
-	if (!s_ppcRecompilerState.initialized)
+	if (!s_rec.initialized)
 		return;
 	if (startAddr >= PPC_REC_CODE_AREA_SIZE)
 		return;
 	cemu_assert_debug(endAddr >= startAddr);
-
-	s_ppcRecompilerState.recompilerSpinlock.lock();
-
-	uint32 rStart;
-	uint32 rEnd;
-	PPCRecFunction_t* rFunc;
-	// delete functions which intersect the invalidated range
-	while (s_ppcRecompilerState.functionStorage.findFirstRange(startAddr, endAddr, rStart, rEnd, rFunc))
-		PPCRecompiler_deleteFunction(rFunc);
-	// add entry to invalidation queue, this is used to invalidate functions for which recompilation has already started
-	s_ppcRecompilerState.invalidationRanges.emplace_back(startAddr, endAddr-startAddr);
-
-	s_ppcRecompilerState.recompilerSpinlock.unlock();
+	s_rec.lock.lock();
+	uint32 rStart, rEnd;
+	PPCRecCompiledFunction* func;
+	while (s_rec.functions.findFirstRange(startAddr, endAddr, rStart, rEnd, func))
+		DeleteFunction(func);
+	s_rec.invalidatedDuringCompile.emplace_back(startAddr, endAddr);
+	s_rec.lock.unlock();
 }
 
-#if defined(ARCH_X86_64)
-void PPCRecompiler_initPlatform()
+extern "C" DLLEXPORT uintptr_t* PPCRecompiler_getJumpTableBase()
 {
-	ppcRecompilerInstanceData->_x64XMM_xorNegateMaskBottom[0] = 1ULL << 63ULL;
-	ppcRecompilerInstanceData->_x64XMM_xorNegateMaskBottom[1] = 0ULL;
-	ppcRecompilerInstanceData->_x64XMM_xorNegateMaskPair[0] = 1ULL << 63ULL;
-	ppcRecompilerInstanceData->_x64XMM_xorNegateMaskPair[1] = 1ULL << 63ULL;
-	ppcRecompilerInstanceData->_x64XMM_xorNOTMask[0] = 0xFFFFFFFFFFFFFFFFULL;
-	ppcRecompilerInstanceData->_x64XMM_xorNOTMask[1] = 0xFFFFFFFFFFFFFFFFULL;
-	ppcRecompilerInstanceData->_x64XMM_andAbsMaskBottom[0] = ~(1ULL << 63ULL);
-	ppcRecompilerInstanceData->_x64XMM_andAbsMaskBottom[1] = ~0ULL;
-	ppcRecompilerInstanceData->_x64XMM_andAbsMaskPair[0] = ~(1ULL << 63ULL);
-	ppcRecompilerInstanceData->_x64XMM_andAbsMaskPair[1] = ~(1ULL << 63ULL);
-	ppcRecompilerInstanceData->_x64XMM_andFloatAbsMaskBottom[0] = ~(1 << 31);
-	ppcRecompilerInstanceData->_x64XMM_andFloatAbsMaskBottom[1] = 0xFFFFFFFF;
-	ppcRecompilerInstanceData->_x64XMM_andFloatAbsMaskBottom[2] = 0xFFFFFFFF;
-	ppcRecompilerInstanceData->_x64XMM_andFloatAbsMaskBottom[3] = 0xFFFFFFFF;
-	ppcRecompilerInstanceData->_x64XMM_constDouble2p149[0] = 0x1p149;
-	ppcRecompilerInstanceData->_x64XMM_constDouble2p149[1] = 0.0;
-	ppcRecompilerInstanceData->_x64XMM_constDouble1_1[0] = 1.0;
-	ppcRecompilerInstanceData->_x64XMM_constDouble1_1[1] = 1.0;
-	ppcRecompilerInstanceData->_x64XMM_constDouble0_0[0] = 0.0;
-	ppcRecompilerInstanceData->_x64XMM_constDouble0_0[1] = 0.0;
-	ppcRecompilerInstanceData->_x64XMM_constFloat0_0[0] = 0.0f;
-	ppcRecompilerInstanceData->_x64XMM_constFloat0_0[1] = 0.0f;
-	ppcRecompilerInstanceData->_x64XMM_constFloat1_1[0] = 1.0f;
-	ppcRecompilerInstanceData->_x64XMM_constFloat1_1[1] = 1.0f;
-	*(uint32*)&ppcRecompilerInstanceData->_x64XMM_constFloatMin[0] = 0x00800000;
-	*(uint32*)&ppcRecompilerInstanceData->_x64XMM_constFloatMin[1] = 0x00800000;
-	ppcRecompilerInstanceData->_x64XMM_flushDenormalMask1[0] = 0x7F800000;
-	ppcRecompilerInstanceData->_x64XMM_flushDenormalMask1[1] = 0x7F800000;
-	ppcRecompilerInstanceData->_x64XMM_flushDenormalMask1[2] = 0x7F800000;
-	ppcRecompilerInstanceData->_x64XMM_flushDenormalMask1[3] = 0x7F800000;
-	ppcRecompilerInstanceData->_x64XMM_flushDenormalMaskResetSignBits[0] = ~0x80000000;
-	ppcRecompilerInstanceData->_x64XMM_flushDenormalMaskResetSignBits[1] = ~0x80000000;
-	ppcRecompilerInstanceData->_x64XMM_flushDenormalMaskResetSignBits[2] = ~0x80000000;
-	ppcRecompilerInstanceData->_x64XMM_flushDenormalMaskResetSignBits[3] = ~0x80000000;
-
-	// mxcsr
-	ppcRecompilerInstanceData->_x64XMM_mxCsr_ftzOn = 0x1F80 | 0x8000;
-	ppcRecompilerInstanceData->_x64XMM_mxCsr_ftzOff = 0x1F80;
-	ppcRecompilerInstanceData->_x64_pextSingleMask = 0xC7FFFFFFE0000000ULL; // sign, exponent bit 62, then bits 58-29
+	if (!ppcRecompilerInstanceData)
+		return nullptr;
+	return (uintptr_t*)ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable;
 }
-#else
-void PPCRecompiler_initPlatform()
-{
-
-}
-#endif
 
 void PPCRecompiler_init()
 {
-	s_ppcRecompilerState.recompilerEnableCount = 0;
+	s_rec.enableCount = 0;
 	if (ActiveSettings::GetCPUMode() == CPUMode::SinglecoreInterpreter)
 	{
 		cemuLog_log(LogType::Force, "Using singlecore interpreter");
@@ -678,72 +373,70 @@ void PPCRecompiler_init()
 		cemuLog_log(LogType::Force, "Recompiler disabled. Command line --force-interpreter or force-multicore-interpreter was passed");
 		return;
 	}
+#if !defined(ARCH_X86_64) && !defined(__aarch64__)
+	cemuLog_log(LogType::Force, "Recompiler not available on this architecture");
+	return;
+#endif
 	if (ppcRecompilerInstanceData)
 	{
 		MemMapper::FreeReservation(ppcRecompilerInstanceData, sizeof(PPCRecompilerInstanceData_t));
 		ppcRecompilerInstanceData = nullptr;
 	}
-	cemuLog_logDebug(LogType::Force, "Reserving {}MB for recompiler instance data", (sint32)(sizeof(PPCRecompilerInstanceData_t) / 1024 / 1024));
 	ppcRecompilerInstanceData = (PPCRecompilerInstanceData_t*)MemMapper::ReserveMemory(nullptr, sizeof(PPCRecompilerInstanceData_t), MemMapper::PAGE_PERMISSION::P_RW);
-	MemMapper::AllocateMemory(&(ppcRecompilerInstanceData->_x64XMM_xorNegateMaskBottom), sizeof(PPCRecompilerInstanceData_t) - offsetof(PPCRecompilerInstanceData_t, _x64XMM_xorNegateMaskBottom), MemMapper::PAGE_PERMISSION::P_RW, true);
-#ifdef ARCH_X86_64
+	s_rec.tableStepCommitted.reset();
+#if defined(ARCH_X86_64)
 	PPCRecompilerX64Gen_generateRecompilerInterfaceFunctions();
 #elif defined(__aarch64__)
 	PPCRecompilerAArch64Gen_generateRecompilerInterfaceFunctions();
 #endif
-    PPCRecompiler_allocateRange(0, 0x1000); // the first entry is used for fallback to interpreter
-    PPCRecompiler_allocateRange(mmuRange_TRAMPOLINE_AREA.getBase(), mmuRange_TRAMPOLINE_AREA.getSize());
-    PPCRecompiler_allocateRange(mmuRange_CODECAVE.getBase(), mmuRange_CODECAVE.getSize());
-
-    PPCRecompiler_initPlatform();
+	// guest address 0 also serves as the fallback entry
+	PPCRecompiler_allocateRange(0, 0x1000);
+	PPCRecompiler_allocateRange(mmuRange_TRAMPOLINE_AREA.getBase(), mmuRange_TRAMPOLINE_AREA.getSize());
+	PPCRecompiler_allocateRange(mmuRange_CODECAVE.getBase(), mmuRange_CODECAVE.getSize());
 
 	cemuLog_log(LogType::Force, "Recompiler initialized");
-
-	s_ppcRecompilerState.initialized = true;
-	s_ppcRecompilerState.recompilerEnableCount = 1; // enabled
-
-	// launch recompilation thread
-    s_ppcRecompilerState.workerThreadStopSignal = false;
-    s_ppcRecompilerState.workerThread = std::thread(PPCRecompiler_thread);
+	s_rec.initialized = true;
+	s_rec.enableCount = 1;
+	s_rec.stopWorker = false;
+	s_rec.worker = std::thread(CompilerThread);
 }
 
 void PPCRecompiler_Shutdown()
 {
-    // shut down recompiler thread
-    s_ppcRecompilerState.workerThreadStopSignal = true;
-    if(s_ppcRecompilerState.workerThread.joinable())
-        s_ppcRecompilerState.workerThread.join();
-    // clean up queues
-    while(!s_ppcRecompilerState.targetQueue.empty())
-        s_ppcRecompilerState.targetQueue.pop();
-    s_ppcRecompilerState.invalidationRanges.clear();
-    // clean range store
-    s_ppcRecompilerState.functionStorage.clear();
-    // clean up memory
-    uint32 numBlocks = PPCRecompiler_GetNumAddressSpaceBlocks();
-    for(uint32 i=0; i<numBlocks; i++)
-    {
-        if(!ppcRecompiler_reservedBlockMask[i])
-            continue;
-        // deallocate
-        uint64 offset = i * PPC_REC_ALLOC_BLOCK_SIZE;
-        MemMapper::FreeMemory(&(ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable[offset/4]), (PPC_REC_ALLOC_BLOCK_SIZE/4)*sizeof(void*), true);
-        // mark as unmapped
-        ppcRecompiler_reservedBlockMask[i] = false;
-    }
-	s_ppcRecompilerState.recompilerEnableCount = 0;
-	s_ppcRecompilerState.initialized = false;
+	s_rec.stopWorker = true;
+	if (s_rec.worker.joinable())
+		s_rec.worker.join();
+	std::queue<uint32>().swap(s_rec.requests);
+	s_rec.invalidatedDuringCompile.clear();
+	{
+		uint32 rStart, rEnd;
+		PPCRecCompiledFunction* func;
+		while (s_rec.functions.findFirstRange(0, 0xFFFFFFFF, rStart, rEnd, func))
+			DeleteFunction(func);
+	}
+	s_rec.functions.clear();
+	if (ppcRecompilerInstanceData)
+	{
+		for (uint32 i = 0; i < kTableStepCount; i++)
+		{
+			if (!s_rec.tableStepCommitted[i])
+				continue;
+			MemMapper::FreeMemory(JumpTable() + (size_t)i * (kTableStep / 4), (kTableStep / 4) * sizeof(PPCREC_JUMP_ENTRY), true);
+			s_rec.tableStepCommitted[i] = false;
+		}
+	}
+	s_rec.enableCount = 0;
+	s_rec.initialized = false;
 }
 
-// For each Enable call, Disable needs to be called once and vice versa
 void PPCRecompiler_Enable()
 {
-	if (s_ppcRecompilerState.initialized)
-		s_ppcRecompilerState.recompilerEnableCount++;
+	if (s_rec.initialized)
+		s_rec.enableCount++;
 }
 
 void PPCRecompiler_Disable()
 {
-	if (s_ppcRecompilerState.initialized)
-		s_ppcRecompilerState.recompilerEnableCount--;
+	if (s_rec.initialized)
+		s_rec.enableCount--;
 }

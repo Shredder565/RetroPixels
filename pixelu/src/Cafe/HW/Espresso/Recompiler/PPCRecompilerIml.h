@@ -1,101 +1,112 @@
-bool PPCRecompiler_generateIntermediateCode(ppcImlGenContext_t& ppcImlGenContext, PPCRecFunction_t* PPCRecFunction, std::set<uint32>& entryAddresses, class PPCFunctionBoundaryTracker& boundaryTracker);
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+#pragma once
+#include "IML/IML.h"
+#include "PPCFunctionBoundaryTracker.h"
 
-IMLSegment* PPCIMLGen_CreateSplitSegmentAtEnd(ppcImlGenContext_t& ppcImlGenContext, PPCBasicBlockInfo& basicBlockInfo);
-IMLSegment* PPCIMLGen_CreateNewSegmentAsBranchTarget(ppcImlGenContext_t& ppcImlGenContext, PPCBasicBlockInfo& basicBlockInfo);
+// Front end of the recompiler: turns the guest code of one function (as
+// found by PPCFunctionBoundaryTracker) into intermediate code.
+//
+// Every guest basic block becomes one IMLSegment that starts with a CYCLES
+// instruction. Blocks that can be entered from the jump table get a
+// separate entry block (see PPCRecompilerIML_IsolateEntries) so that entry
+// blocks never have predecessors. Loop headers are preceded by a block that
+// leaves to the scheduler once the time slice is used up.
 
-void PPCIMLGen_AssertIfNotLastSegmentInstruction(ppcImlGenContext_t& ppcImlGenContext);
-
-IMLInstruction* PPCRecompilerImlGen_generateNewEmptyInstruction(ppcImlGenContext_t* ppcImlGenContext);
-void PPCRecompiler_pushBackIMLInstructions(IMLSegment* imlSegment, sint32 index, sint32 shiftBackCount);
-IMLInstruction* PPCRecompiler_insertInstruction(IMLSegment* imlSegment, sint32 index);
-
-void PPCRecompilerIml_insertSegments(ppcImlGenContext_t* ppcImlGenContext, sint32 index, sint32 count);
-
-void PPCRecompilerIml_setSegmentPoint(IMLSegmentPoint* segmentPoint, IMLSegment* imlSegment, sint32 index);
-void PPCRecompilerIml_removeSegmentPoint(IMLSegmentPoint* segmentPoint);
-
-// Register management
-IMLReg PPCRecompilerImlGen_LookupReg(ppcImlGenContext_t* ppcImlGenContext, IMLName mappedName, IMLRegFormat regFormat);
-
-IMLReg PPCRecompilerImlGen_loadRegister(ppcImlGenContext_t* ppcImlGenContext, uint32 mappedName);
-
-// IML instruction generation
-void PPCRecompilerImlGen_generateNewInstruction_conditional_r_s32(ppcImlGenContext_t* ppcImlGenContext, IMLInstruction* imlInstruction, uint32 operation, IMLReg registerIndex, sint32 immS32, uint32 crRegisterIndex, uint32 crBitIndex, bool bitMustBeSet);
-
-// IML generation - FPU
-bool PPCRecompilerImlGen_LFS_LFSU_LFD_LFDU(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode, bool withUpdate, bool isDouble);
-bool PPCRecompilerImlGen_LFSX_LFSUX_LFDX_LFDUX(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode, bool withUpdate, bool isDouble);
-bool PPCRecompilerImlGen_STFS_STFSU_STFD_STFDU(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode, bool withUpdate, bool isDouble);
-bool PPCRecompilerImlGen_STFSX_STFSUX_STFDX_STFDUX(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode, bool hasUpdate, bool isDouble);
-bool PPCRecompilerImlGen_STFIWX(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FADD(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FSUB(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FMUL(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FDIV(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FMADD(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FMSUB(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FNMSUB(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FMULS(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FDIVS(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FADDS(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FSUBS(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FMADDS(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FMSUBS(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FNMSUBS(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FCMPO(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FCMPU(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FMR(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FABS(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FNABS(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FRES(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FRSP(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FNEG(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FSEL(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FRSQRTE(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_FCTIWZ(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_PSQ_L(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode, bool withUpdate);
-bool PPCRecompilerImlGen_PSQ_ST(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode, bool withUpdate);
-bool PPCRecompilerImlGen_PS_MULSX(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode, bool isVariant1);
-bool PPCRecompilerImlGen_PS_MADDSX(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode, bool isVariant1);
-bool PPCRecompilerImlGen_PS_ADD(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_PS_SUB(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_PS_MUL(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_PS_DIV(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_PS_MADD(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_PS_NMADD(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_PS_MSUB(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode, bool withNegative);
-bool PPCRecompilerImlGen_PS_SUM0(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_PS_SUM1(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_PS_NEG(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_PS_ABS(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_PS_RES(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_PS_RSQRTE(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_PS_MR(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_PS_SEL(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_PS_MERGE00(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_PS_MERGE01(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_PS_MERGE10(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_PS_MERGE11(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_PS_CMPO0(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_PS_CMPU0(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-bool PPCRecompilerImlGen_PS_CMPU1(ppcImlGenContext_t* ppcImlGenContext, uint32 opcode);
-
-// IML general
-
-void PPCRecompilerIML_isolateEnterableSegments(ppcImlGenContext_t* ppcImlGenContext);
-
-void PPCIMLGen_CreateSegmentBranchedPath(ppcImlGenContext_t& ppcImlGenContext, PPCBasicBlockInfo& basicBlockInfo, const std::function<void(ppcImlGenContext_t&)>& genSegmentBranchTaken, const std::function<void(ppcImlGenContext_t&)>& genSegmentBranchNotTaken);
-void PPCIMLGen_CreateSegmentBranchedPath(ppcImlGenContext_t& ppcImlGenContext, PPCBasicBlockInfo& basicBlockInfo, const std::function<void(ppcImlGenContext_t&)>& genSegmentBranchNotTaken); // no else segment
-void PPCIMLGen_CreateSegmentBranchedPathMultiple(ppcImlGenContext_t& ppcImlGenContext, PPCBasicBlockInfo& basicBlockInfo, IMLSegment** segmentsOut, IMLReg compareReg, sint32* compareValues, sint32 count, sint32 defaultCaseIndex);
-
-class IMLRedirectInstOutput
+class PPCIMLTranslator
 {
 public:
-	IMLRedirectInstOutput(ppcImlGenContext_t* ppcImlGenContext, IMLSegment* outputSegment);
-	~IMLRedirectInstOutput();
+	PPCIMLTranslator(IMLFunction& func, const PPCFunctionBoundaryTracker& tracker);
 
+	// returns false if the function cannot be compiled
+	bool Translate(uint32 entryAddress);
+
+	// guest addresses that received an entry point
+	const std::vector<uint32>& GetEntryAddresses() const { return m_entryAddresses; }
+
+	// ---- used by the instruction translators ----
+
+	IMLReg Temp() { return m_func.NewTemp(IMLRegKind::Int); }
+	IMLReg FTemp() { return m_func.NewTemp(IMLRegKind::Float); }
+
+	IMLInstruction& Emit(const IMLInstruction& inst) { return m_cur->Append(inst); }
+	void Op2(IMLOp op, IMLReg d, IMLReg a) { Emit(IMLInstruction::Make(op, d, a)); }
+	void Op3(IMLOp op, IMLReg d, IMLReg a, IMLReg b) { Emit(IMLInstruction::Make(op, d, a, b)); }
+	void Op3i(IMLOp op, IMLReg d, IMLReg a, sint32 imm) { Emit(IMLInstruction::MakeImm(op, d, a, imm)); }
+	void Mov(IMLReg d, IMLReg a)
+	{
+		if (d != a)
+			Op2(IMLOp::MOV, d, a);
+	}
+	void Movi(IMLReg d, uint32 v)
+	{
+		IMLInstruction i = IMLInstruction::Make(IMLOp::MOVI, d);
+		i.imm = (sint32)v;
+		Emit(i);
+	}
+	// CR0 from a result (record forms)
+	void UpdateCR0(IMLReg result);
+	// CR field from a compare
+	void CompareToCR(uint32 field, IMLReg a, IMLReg b, bool hasImm, sint32 imm, bool isSigned);
+	// effective address base + imm into a new temporary (rA = 0 means no base)
+	IMLReg AddressD(uint32 rA, sint32 imm);
+	IMLReg AddressX(uint32 rA, uint32 rB);
+	// hands the current instruction to the interpreter
+	void Interp();
+	// leaves to the interpreter right before the current instruction
+	void LeaveHere();
+
+	// floating point and paired single instructions (PPCRecompilerImlGenFPU.cpp)
+	bool TranslateFPLoadStore(uint32 op);
+	bool TranslateGroup4(uint32 op);
+	bool TranslateGroup59(uint32 op);
+	bool TranslateGroup63(uint32 op);
+
+	IMLFunction& m_func;
+	IMLSegment* m_cur{nullptr};
+	uint32 m_addr{0}; // address of the instruction being translated
 
 private:
-	ppcImlGenContext_t* m_context;
-	IMLSegment* m_prevSegment;
+	struct GuestBlock
+	{
+		uint32 start;
+		uint32 end;
+		IMLSegment* head{nullptr};  // first block (the cycle check block of loop headers)
+		IMLSegment* body{nullptr};
+		bool needsCycleCheck{false};
+		bool isEntry{false};
+	};
+
+	void CollectBlocks(uint32 entryAddress);
+	void TranslateBlock(GuestBlock& block);
+	bool TranslateInstruction(uint32 op);
+	bool TranslateGroup19(uint32 op);
+	bool TranslateGroup31(uint32 op);
+	bool TranslateIntLoadStore(uint32 op);
+
+	// branches
+	void TranslateB(uint32 op);
+	void TranslateBC(uint32 op);
+	void TranslateBCLR(uint32 op);
+	void TranslateBCCTR(uint32 op);
+	// emits the BO/BI test of a conditional branch. Jumps to 'taken' when
+	// the branch is taken, continues in a new current block otherwise
+	void EmitBranchCondition(uint32 bo, uint32 bi, bool decrementsCtr, IMLSegment* taken);
+
+	// block that continues at a guest address: the local block or an exit
+	IMLSegment* BlockForTarget(uint32 address);
+	IMLSegment* NewExitBlock(IMLOp exitOp, uint32 address);
+	// starts a new block in the middle of a guest block (after a branch)
+	IMLSegment* ContinueInNewBlock();
+	void EndBlock(IMLInstruction terminator, IMLSegment* taken, IMLSegment* next);
+
+	const PPCFunctionBoundaryTracker& m_tracker;
+	std::map<uint32, GuestBlock> m_blocks; // by start address
+	std::set<uint32> m_entrySet;
+	std::vector<uint32> m_entryAddresses;
+	bool m_blockEnded{false}; // current guest instruction ended the guest block
 };
+
+// PPCRecompilerIntermediate.cpp
+
+// gives every entry block a separate entry segment without predecessors
+void PPCRecompilerIML_IsolateEntries(IMLFunction& func);

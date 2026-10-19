@@ -1,193 +1,168 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "IMLInstruction.h"
 
-#include <boost/container/small_vector.hpp>
+// Blocks and functions of the intermediate code.
+//
+// A block (IMLSegment) is a list of instructions. Only its last instruction
+// may be a terminator. Control continues at 'taken' when a JUMP, BRANCH,
+// BRANCHCMP or CYCLECHECK goes there and at 'next' otherwise; a block
+// without terminator continues at 'next'. Blocks ending in an exit have no
+// successors.
 
-// special values to mark the index of ranges that reach across the segment border
-#define RA_INTER_RANGE_START	(-1)
-#define RA_INTER_RANGE_END		(0x70000000)
-
-struct IMLSegmentPoint
+// a fixed size set of virtual registers
+class IMLRegSet
 {
-	friend struct IMLSegmentInterval;
+public:
+	void Resize(size_t count) { m_words.assign((count + 63) / 64, 0); }
+	size_t WordCount() const { return m_words.size(); }
 
-	sint32 index;
-	struct IMLSegment* imlSegment; // do we really need to track this? SegmentPoints are always accessed via the segment that they are part of
-	IMLSegmentPoint* next;
-	IMLSegmentPoint* prev;
+	void Add(IMLReg r) { m_words[r >> 6] |= (1ull << (r & 63)); }
+	void Remove(IMLReg r) { m_words[r >> 6] &= ~(1ull << (r & 63)); }
+	bool Has(IMLReg r) const { return (m_words[r >> 6] >> (r & 63)) & 1; }
+	void Clear() { std::fill(m_words.begin(), m_words.end(), 0); }
 
-	// the index is the instruction index times two.
-	// this gives us the ability to cover half an instruction with RA ranges
-	// covering only the first half of an instruction (0-0) means that the register is read, but not preserved
-	// covering first and the second half means the register is read and preserved
-	// covering only the second half means the register is written but not read
-
-	sint32 GetInstructionIndex() const
+	// returns true when this set changed
+	bool Merge(const IMLRegSet& other)
 	{
-		return index;
-	}
-
-	void SetInstructionIndex(sint32 index)
-	{
-		this->index = index;
-	}
-
-	void ShiftIfAfter(sint32 instructionIndex, sint32 shiftCount)
-	{
-		if (!IsPreviousSegment() && !IsNextSegment())
+		bool changed = false;
+		for (size_t i = 0; i < m_words.size(); i++)
 		{
-			if (GetInstructionIndex() >= instructionIndex)
-				index += shiftCount;
+			uint64 v = m_words[i] | other.m_words[i];
+			changed |= (v != m_words[i]);
+			m_words[i] = v;
+		}
+		return changed;
+	}
+
+	void Subtract(const IMLRegSet& other)
+	{
+		for (size_t i = 0; i < m_words.size(); i++)
+			m_words[i] &= ~other.m_words[i];
+	}
+
+	void Intersect(const IMLRegSet& other)
+	{
+		for (size_t i = 0; i < m_words.size(); i++)
+			m_words[i] &= other.m_words[i];
+	}
+
+	bool operator==(const IMLRegSet& other) const { return m_words == other.m_words; }
+
+	template<typename F>
+	void ForEach(F f) const
+	{
+		for (size_t w = 0; w < m_words.size(); w++)
+		{
+			uint64 bits = m_words[w];
+			while (bits)
+			{
+				uint32 b = (uint32)std::countr_zero(bits);
+				bits &= bits - 1;
+				f((IMLReg)(w * 64 + b));
+			}
 		}
 	}
 
-	void DecrementByOneInstruction()
-	{
-		index--;
-	}
-
-	// the segment point can point beyond the first and last instruction which indicates that it is an infinite range reaching up to the previous or next segment
-	bool IsPreviousSegment() const { return index == RA_INTER_RANGE_START; }
-	bool IsNextSegment() const { return index == RA_INTER_RANGE_END; }
-
-	// overload operand > and <
-	bool operator>(const IMLSegmentPoint& other) const { return index > other.index; }
-	bool operator<(const IMLSegmentPoint& other) const { return index < other.index; }
-	bool operator==(const IMLSegmentPoint& other) const { return index == other.index; }
-	bool operator!=(const IMLSegmentPoint& other) const { return index != other.index; }
-
-	// overload comparison operands for sint32
-	bool operator>(const sint32 other) const { return index > other; }
-	bool operator<(const sint32 other) const { return index < other; }
-	bool operator<=(const sint32 other) const { return index <= other; }
-	bool operator>=(const sint32 other) const { return index >= other; }
-};
-
-struct IMLSegmentInterval
-{
-	IMLSegmentPoint start;
-	IMLSegmentPoint end;
-
-	bool ContainsInstructionIndex(sint32 offset) const { return start <= offset && end > offset; }
-
-	bool IsRangeOverlapping(const IMLSegmentInterval& other)
-	{
-		// todo - compare the raw index
-		sint32 r1start = this->start.GetInstructionIndex();
-		sint32 r1end = this->end.GetInstructionIndex();
-		sint32 r2start = other.start.GetInstructionIndex();
-		sint32 r2end = other.end.GetInstructionIndex();
-		if (r1start < r2end && r1end > r2start)
-			return true;
-		if (this->start.IsPreviousSegment() && r1start == r2start)
-			return true;
-		if (this->end.IsNextSegment() && r1end == r2end)
-			return true;
-		return false;
-	}
-
-	bool ExtendsIntoPreviousSegment() const
-	{
-		return start.IsPreviousSegment();
-	}
-
-	bool ExtendsIntoNextSegment() const
-	{
-		return end.IsNextSegment();
-	}
-
-	bool IsNextSegmentOnly() const
-	{
-		if(!start.IsNextSegment())
-			return false;
-		cemu_assert_debug(end.IsNextSegment());
-		return true;
-	}
-
-	bool IsPreviousSegmentOnly() const
-	{
-		if (!end.IsPreviousSegment())
-			return false;
-		cemu_assert_debug(start.IsPreviousSegment());
-		return true;
-	}
-
-	sint32 GetDistance() const
-	{
-		// todo - assert if either start or end is outside the segment
-		// we may also want to switch this to raw indices?
-		return end.GetInstructionIndex() - start.GetInstructionIndex();
-	}
-};
-
-struct PPCSegmentRegisterAllocatorInfo_t
-{
-	// used during loop detection
-	bool isPartOfProcessedLoop{}; 
-	sint32 lastIterationIndex{};
-	// linked lists
-	struct raLivenessRange* linkedList_allSubranges{};
-	std::unordered_map<IMLRegID, struct raLivenessRange*> linkedList_perVirtualRegister;
+private:
+	std::vector<uint64> m_words;
 };
 
 struct IMLSegment
 {
-	sint32 momentaryIndex{}; // index in segment list, generally not kept up to date except if needed (necessary for loop detection)
-	sint32 loopDepth{};
-	uint32 ppcAddress{}; // ppc address (0xFFFFFFFF if not associated with an address)
-	uint32 x64Offset{}; // x64 code offset of segment start
-	// list of intermediate instructions in this segment
-	std::vector<IMLInstruction> imlList;
-	// segment link
-	IMLSegment* nextSegmentBranchNotTaken{}; // this is also the default for segments where there is no branch
-	IMLSegment* nextSegmentBranchTaken{};
-	bool nextSegmentIsUncertain{};
-	std::vector<IMLSegment*> list_prevSegments{};
-	// source for overwrite analysis (if nextSegmentIsUncertain is true)
-	// sometimes a segment is marked as an exit point, but for the purposes of dead code elimination we know the next segment
-	IMLSegment* deadCodeEliminationHintSeg{};
-	std::vector<IMLSegment*> list_deadCodeHintBy{};
-	// enterable segments
-	bool isEnterable{}; // this segment can be entered from outside the recompiler (no preloaded registers necessary)
-	uint32 enterPPCAddress{}; // used if isEnterable is true
-	// register allocator info
-	PPCSegmentRegisterAllocatorInfo_t raInfo{};
-	// segment state API
-	void SetEnterable(uint32 enterAddress);
-	void SetLinkBranchNotTaken(IMLSegment* imlSegmentDst);
-	void SetLinkBranchTaken(IMLSegment* imlSegmentDst);
+	uint32 index{0};             // position in IMLFunction::blocks
+	uint32 ppcAddress{0};        // first guest instruction, 0 for blocks made by the compiler
+	uint32 ppcEndAddress{0};     // address after the last guest instruction
+	bool isEntry{false};         // can be entered from the jump table
+	uint32 entryAddress{0};
+	std::vector<IMLInstruction> insts;
+	IMLSegment* taken{nullptr};
+	IMLSegment* next{nullptr};
+	std::vector<IMLSegment*> preds;
+	uint32 loopDepth{0};
 
-	IMLSegment* GetBranchTaken()
+	// analysis results
+	IMLRegSet liveIn;
+	IMLRegSet liveOut;
+
+	// backend
+	sint32 codeOffset{-1};
+
+	IMLInstruction* Terminator()
 	{
-		return nextSegmentBranchTaken;
+		if (insts.empty() || !insts.back().Info().terminator)
+			return nullptr;
+		return &insts.back();
 	}
 
-	IMLSegment* GetBranchNotTaken()
+	bool EndsInExit()
 	{
-		return nextSegmentBranchNotTaken;
+		IMLInstruction* t = Terminator();
+		return t && t->Info().leaves;
 	}
 
-	void SetNextSegmentForOverwriteHints(IMLSegment* seg)
+	IMLInstruction& Append(const IMLInstruction& inst)
 	{
-		cemu_assert_debug(!deadCodeEliminationHintSeg);
-		deadCodeEliminationHintSeg = seg;
-		if (seg)
-			seg->list_deadCodeHintBy.push_back(this);
+		insts.push_back(inst);
+		return insts.back();
 	}
 
-	// instruction API
-	IMLInstruction* AppendInstruction();
+	// inserts in front of the terminator (or at the end)
+	IMLInstruction& AppendBeforeTerminator(const IMLInstruction& inst)
+	{
+		size_t pos = insts.size();
+		if (Terminator())
+			pos--;
+		insts.insert(insts.begin() + pos, inst);
+		return insts[pos];
+	}
 
-	bool HasSuffixInstruction() const;
-	sint32 GetSuffixInstructionIndex() const;
-	IMLInstruction* GetLastInstruction();
-
-	// segment points
-	IMLSegmentPoint* segmentPointList{};
+	template<typename F>
+	void ForEachSuccessor(F f)
+	{
+		if (taken)
+			f(taken);
+		if (next && next != taken)
+			f(next);
+	}
 };
 
+struct IMLVRegInfo
+{
+	IMLRegKind kind{IMLRegKind::Int};
+	// home slot: offset into PPCInterpreter_t for guest registers, spill slot index for temporaries (-1 = none)
+	sint32 home{-1};
+	uint8 homeSize{4};
+	// register allocation result
+	sint16 hostReg{-1};
+	bool spilled{false};
+	bool noSpill{false}; // short lived reload/store temporary made by the spiller
+};
 
-void IMLSegment_SetLinkBranchNotTaken(IMLSegment* imlSegmentSrc, IMLSegment* imlSegmentDst);
-void IMLSegment_SetLinkBranchTaken(IMLSegment* imlSegmentSrc, IMLSegment* imlSegmentDst);
-void IMLSegment_RelinkInputSegment(IMLSegment* imlSegmentOrig, IMLSegment* imlSegmentNew);
-void IMLSegment_RemoveLink(IMLSegment* imlSegmentSrc, IMLSegment* imlSegmentDst);
+struct IMLFunction
+{
+	uint32 entryAddress{0};
+	std::vector<IMLSegment*> blocks;
+	std::vector<IMLVRegInfo> vregs;
+	uint32 spillSlotCount{0};
+
+	IMLFunction();
+	~IMLFunction();
+	IMLFunction(const IMLFunction&) = delete;
+	IMLFunction& operator=(const IMLFunction&) = delete;
+
+	IMLSegment* NewBlock();
+	IMLSegment* InsertBlockAfter(IMLSegment* after);
+	void Renumber();
+	void RebuildPredecessors();
+	void RemoveUnreachable();
+
+	IMLReg NewTemp(IMLRegKind kind);
+	IMLRegKind KindOf(IMLReg r) const { return vregs[r].kind; }
+	size_t RegCount() const { return vregs.size(); }
+	uint32 AllocSpillSlot() { return spillSlotCount++; }
+};
+
+// home slot offset of a guest register in PPCInterpreter_t
+sint32 IMLGuest_HomeOffset(IMLReg r);
+uint8 IMLGuest_HomeSize(IMLReg r);

@@ -1,125 +1,36 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
+#include "IML.h"
 
-// container for storing a set of register indices
-// specifically optimized towards storing typical range of physical register indices (expected to be below 64)
-class IMLPhysRegisterSet
-{
-public:
-	void SetAvailable(uint32 index)
-	{
-		cemu_assert_debug(index < 64);
-		m_regBitmask |= ((uint64)1 << index);
-	}
-
-	void SetReserved(uint32 index)
-	{
-		cemu_assert_debug(index < 64);
-		m_regBitmask &= ~((uint64)1 << index);
-	}
-
-	void SetAllAvailable()
-	{
-		m_regBitmask = ~0ull;
-	}
-
-	bool HasAllAvailable() const
-	{
-		return m_regBitmask == ~0ull;
-	}
-
-	bool IsAvailable(uint32 index) const
-	{
-		return (m_regBitmask & ((uint64)1 << index)) != 0;
-	}
-
-	IMLPhysRegisterSet& operator&=(const IMLPhysRegisterSet& other)
-	{
-		this->m_regBitmask &= other.m_regBitmask;
-		return *this;
-	}
-
-	IMLPhysRegisterSet& operator=(const IMLPhysRegisterSet& other)
-	{
-		this->m_regBitmask = other.m_regBitmask;
-		return *this;
-	}
-
-	void RemoveRegisters(const IMLPhysRegisterSet& other)
-	{
-		this->m_regBitmask &= ~other.m_regBitmask;
-	}
-
-	bool HasAnyAvailable() const
-	{
-		return m_regBitmask != 0;
-	}
-
-	bool HasExactlyOneAvailable() const
-	{
-		return m_regBitmask != 0 && (m_regBitmask & (m_regBitmask - 1)) == 0;
-	}
-
-	// returns index of first available register. Do not call when HasAnyAvailable() == false
-	IMLPhysReg GetFirstAvailableReg()
-	{
-		cemu_assert_debug(m_regBitmask != 0);
-		sint32 regIndex = 0;
-		auto tmp = m_regBitmask;
-		while ((tmp & 0xFF) == 0)
-		{
-			regIndex += 8;
-			tmp >>= 8;
-		}
-		while ((tmp & 0x1) == 0)
-		{
-			regIndex++;
-			tmp >>= 1;
-		}
-		return regIndex;
-	}
-
-	// returns index of next available register (search includes any register index >= startIndex)
-	// returns -1 if there is no more register
-	IMLPhysReg GetNextAvailableReg(sint32 startIndex) const
-	{
-		if (startIndex >= 64)
-			return -1;
-		uint32 regIndex = startIndex;
-		auto tmp = m_regBitmask;
-		tmp >>= regIndex;
-		if (!tmp)
-			return -1;
-		while ((tmp & 0xFF) == 0)
-		{
-			regIndex += 8;
-			tmp >>= 8;
-		}
-		while ((tmp & 0x1) == 0)
-		{
-			regIndex++;
-			tmp >>= 1;
-		}
-		return regIndex;
-	}
-
-	sint32 CountAvailableRegs() const
-	{
-		return std::popcount(m_regBitmask);
-	}
-
-private:
-	uint64 m_regBitmask{ 0 };
-};
+// Register allocation.
+//
+// Guest registers are kept in host registers while the function works with
+// them; their home slots in PPCInterpreter_t are updated right after every
+// write (stores that a later write in the same block makes redundant are
+// left out). This keeps the home slots current wherever the function can be
+// left, so exits and interpreter calls need no extra stores.
+//
+// Each virtual register gets one host register (a "color") for the whole
+// function, chosen with a priority based graph coloring. Registers that do
+// not get a color are spilled: they live in their home slot (guest
+// registers) or in a stack slot (temporaries) and every access goes through
+// a short lived temporary.
 
 struct IMLRegisterAllocatorParameters
 {
-	inline IMLPhysRegisterSet& GetPhysRegPool(IMLRegFormat regFormat)
-	{
-		return perTypePhysPool[stdx::to_underlying(regFormat)];
-	}
-
-	IMLPhysRegisterSet perTypePhysPool[stdx::to_underlying(IMLRegFormat::TYPE_COUNT)];
-	std::unordered_map<IMLRegID, IMLName> regIdToName;
+	uint32 intRegCount{0};          // usable integer host registers (colors 0..n-1)
+	uint32 floatRegCount{0};        // usable vector host registers
+	uint32 intCallerSavedMask{0};   // colors a helper call clobbers
+	uint32 floatCallerSavedMask{0};
 };
 
-void IMLRegisterAllocator_AllocateRegisters(ppcImlGenContext_t* ppcImlGenContext, IMLRegisterAllocatorParameters& raParam);
+// saveMask layout on helper calls: integer colors in bits 0-15, float colors in bits 16-31
+constexpr uint32 IML_SAVEMASK_FLOAT_SHIFT = 16;
+
+// adds the guest register loads at entry points and after interpreter calls
+// and the home slot stores after every write
+void IMLRegisterAllocator_PrepareGuestRegisters(IMLFunction& func);
+
+// assigns host registers (IMLVRegInfo::hostReg) and fills IMLInstruction::saveMask.
+// Returns false if no allocation was found
+bool IMLRegisterAllocator_AllocateRegisters(IMLFunction& func, const IMLRegisterAllocatorParameters& params);

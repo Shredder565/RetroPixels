@@ -1,328 +1,191 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "Cafe/HW/Espresso/EspressoISA.h"
 #include "Cafe/HW/MMU/MMU.h"
 
 bool GamePatch_IsNonReturnFunction(uint32 hleIndex);
 
-// utility class to determine shape of a function
+// Finds the extent of the guest function that contains an entry address.
+//
+// Starting at the entry, guest code is followed until the flow ends (an
+// unconditional branch, a return or an HLE call that does not come back).
+// Targets of local branches (b/bc without link) are followed as well, so the
+// result can consist of several address ranges. Calls (branches with link)
+// are not followed; they leave the compiled function.
 class PPCFunctionBoundaryTracker
 {
 public:
-	struct PPCRange_t
+	struct Range
 	{
-		PPCRange_t() = default;
-		PPCRange_t(uint32 _startAddress) : startAddress(_startAddress) {};
-
-		uint32 startAddress{};
-		uint32 length{};
-		//bool isProcessed{false};
-
-		uint32 getEndAddress() const { return startAddress + length; };
+		uint32 start; // first instruction
+		uint32 end;   // address after the last instruction
 	};
 
-public:
-	~PPCFunctionBoundaryTracker()
+	// upper bound for the number of instructions taken into one function
+	static constexpr uint32 kMaxInstructions = 0x2000;
+
+	void Discover(uint32 entryAddress)
 	{
-		while (!map_ranges.empty())
+		m_covered.clear();
+		m_branchTargets.clear();
+		m_ranges.clear();
+		std::vector<uint32> pending;
+		pending.push_back(entryAddress);
+		uint32 budget = kMaxInstructions;
+		while (!pending.empty() && budget > 0)
 		{
-			PPCRange_t* range = *map_ranges.begin();
-			delete range;
-			map_ranges.erase(map_ranges.begin());
+			uint32 address = pending.back();
+			pending.pop_back();
+			ScanFlow(address, pending, budget);
 		}
+		BuildRanges();
 	}
 
-	void trackStartPoint(MPTR startAddress)
+	const std::vector<Range>& GetRanges() const { return m_ranges; }
+
+	bool ContainsAddress(uint32 address) const
 	{
-		processRange(startAddress, nullptr, nullptr);
-		processBranchTargets();
+		return m_covered.find(address) != m_covered.end();
 	}
 
-	bool getRangeForAddress(uint32 address, PPCRange_t& range)
+	// targets of local branches (inside or outside of the function)
+	const std::set<uint32>& GetBranchTargets() const { return m_branchTargets; }
+
+	// the range that contains an address, false if there is none
+	bool GetRangeForAddress(uint32 address, Range& rangeOut) const
 	{
-		for (auto itr : map_ranges)
+		for (const Range& r : m_ranges)
 		{
-			if (address >= itr->startAddress && address < (itr->startAddress + itr->length))
+			if (address >= r.start && address < r.end)
 			{
-				range = *itr;
+				rangeOut = r;
 				return true;
 			}
 		}
 		return false;
 	}
 
-	std::vector<PPCRange_t> GetRanges()
+	static bool IsCodeAddress(uint32 address)
 	{
-		std::vector<PPCRange_t> r;
-		for (auto& it : map_ranges)
-			r.emplace_back(*it);
-		return r;
-	}
-
-	bool ContainsAddress(uint32 addr) const
-	{
-		for (auto& it : map_ranges)
-		{
-			if (addr >= it->startAddress && addr < it->getEndAddress())
-				return true;
-		}
-		return false;
-	}
-
-	const std::set<uint32>& GetBranchTargets() const
-	{
-		return map_branchTargetsAll;
+		return (address & 3) == 0 && address >= 0x00001000 && address < 0x10000000 && memory_isAddressRangeAccessible(address, 4);
 	}
 
 private:
-	void addBranchDestination(PPCRange_t* sourceRange, MPTR address)
+	static uint32 ReadOpcode(uint32 address)
 	{
-		map_queuedBranchTargets.emplace(address);
-		map_branchTargetsAll.emplace(address);
+		return memory_readU32(address);
 	}
 
-	// process flow of instruction
-	// returns false if the IP cannot increment past the current instruction
-	bool processInstruction(PPCRange_t* range, MPTR address)
+	static bool IsUnconditionalJump(uint32 opcode)
 	{
-		// parse instructions
-		uint32 opcode = memory_readU32(address);
-		switch (Espresso::GetPrimaryOpcode(opcode))
+		return (opcode >> 26) == 18 && (opcode & 1) == 0;
+	}
+
+	// relative or absolute target of a b/bc instruction
+	static uint32 BranchTarget(uint32 address, uint32 opcode)
+	{
+		uint32 displacement;
+		if ((opcode >> 26) == 18)
+			displacement = (uint32)(((sint32)(opcode << 6)) >> 6) & ~3u;
+		else
+			displacement = (uint32)(sint32)(sint16)(uint16)(opcode & 0xFFFC);
+		return (opcode & 2) ? displacement : address + displacement;
+	}
+
+	// returns false when the flow does not continue after the instruction
+	bool FlowContinues(uint32 address, uint32 opcode, std::vector<uint32>& pending)
+	{
+		uint32 primary = opcode >> 26;
+		switch (primary)
 		{
-		case Espresso::PrimaryOpcode::ZERO:
+		case 0:
+			return opcode != 0;
+		case 1:
 		{
-			if (opcode == 0)
-				return false; // invalid instruction
-			break;
-		}
-		case Espresso::PrimaryOpcode::VIRTUAL_HLE:
-		{
-			// end of function
-			// is there a jump to a instruction after this one?
-			uint32 hleFuncId = opcode & 0xFFFF;
-			if (hleFuncId >= 0x1000 && hleFuncId < 0x4000)
-			{
-				if (GamePatch_IsNonReturnFunction(hleFuncId - 0x1000) == false)
-				{
-					return true;
-				}
-			}
+			// HLE call. Patched game functions (ids 0x1000-0x3FFF) may continue
+			// after the call unless they are known not to return.
+			uint32 id = opcode & 0xFFFF;
+			if (id >= 0x1000 && id < 0x4000)
+				return !GamePatch_IsNonReturnFunction(id - 0x1000);
 			return false;
 		}
-		case Espresso::PrimaryOpcode::BC:
+		case 16: // bc
+			if ((opcode & 1) == 0)
+				AddTarget(BranchTarget(address, opcode), pending);
+			return true;
+		case 18: // b
 		{
-			uint32 BD, BI;
-			Espresso::BOField BO;
-			bool AA, LK;
-			Espresso::decodeOp_BC(opcode, BD, BO, BI, AA, LK);
-			uint32 branchTarget = AA ? BD : BD + address;
-			if (!LK)
-				addBranchDestination(range, branchTarget);
-			break;
+			if (opcode & 1)
+				return true; // call
+			AddTarget(BranchTarget(address, opcode), pending);
+			// a run of unconditional jumps is usually a jump table, keep going
+			bool tableAfter = IsUnconditionalJump(ReadOpcodeSafe(address + 4)) && IsUnconditionalJump(ReadOpcodeSafe(address + 8));
+			bool tableBefore = IsUnconditionalJump(ReadOpcodeSafe(address - 4)) && IsUnconditionalJump(ReadOpcodeSafe(address - 8));
+			return tableAfter || tableBefore;
 		}
-		case Espresso::PrimaryOpcode::B:	
+		case 19:
 		{
-			uint32 LI;
-			bool AA, LK;
-			Espresso::decodeOp_B(opcode, LI, AA, LK);
-			uint32 branchTarget = AA ? LI : LI + address;
-			if (!LK)
+			uint32 xo = (opcode >> 1) & 0x3FF;
+			uint32 bo = (opcode >> 21) & 0x1F;
+			bool link = (opcode & 1) != 0;
+			if (xo == 16) // bclr
+				return !(((bo & 0x14) == 0x14) && !link);
+			if (xo == 528) // bcctr
 			{
-				addBranchDestination(range, branchTarget);
-				// if the next two or previous two instructions are branch instructions, we assume that they are destinations of a jump table
-				// todo - can we make this more reliable by checking for BCTR or similar instructions first?
-				// example: The Swapper 0x01B1FC04
-				if (PPCRecompilerCalcFuncSize_isUnconditionalBranchInstruction(memory_readU32(address + 4)) && PPCRecompilerCalcFuncSize_isUnconditionalBranchInstruction(memory_readU32(address + 8)) ||
-					PPCRecompilerCalcFuncSize_isUnconditionalBranchInstruction(memory_readU32(address - 8)) && PPCRecompilerCalcFuncSize_isUnconditionalBranchInstruction(memory_readU32(address - 4)))
-				{
+				if (opcode != 0x4E800420)
 					return true;
-				}
-				return false; // current flow ends at unconditional branch instruction
+				// bctr is often a switch statement with the case code right behind it.
+				// Only alignment padding or data after it ends the function.
+				uint32 nextOp = ReadOpcodeSafe(address + 4);
+				return !(nextOp == 0x60000000 || (nextOp >> 26) == 0);
 			}
-			break;
-		}
-		case Espresso::PrimaryOpcode::GROUP_19:
-			switch (Espresso::GetGroup19Opcode(opcode))
-			{
-			case Espresso::Opcode19::BCLR:
-			{
-				Espresso::BOField BO;
-				uint32 BI;
-				bool LK;
-				Espresso::decodeOp_BCSPR(opcode, BO, BI, LK);
-				if (BO.branchAlways() && !LK)
-				{
-					// unconditional BLR
-					return false;
-				}
-				break;
-			}
-			case Espresso::Opcode19::BCCTR:
-				if (opcode == 0x4E800420)
-				{
-					// unconditional BCTR
-					// this instruction is often used for switch statements, therefore we should be wary of ending the function here
-					// It's better to overestimate function size than to predict sizes that are too short
-
-					// Currently we only end the function if the BCTR is followed by a NOP (alignment) or invalid instruction
-					// todo: improve robustness, find better ways to handle false positives
-					uint32 nextOpcode = memory_readU32(address + 4);
-
-					if (nextOpcode == 0x60000000 || PPCRecompilerCalcFuncSize_isValidInstruction(nextOpcode) == false)
-					{
-						return false;
-					}
-					return true;
-				}
-				// conditional BCTR
-				return true;
-			default:
-				break;
-			}
-			break;
-		default:
-			break;
-		}
-		return true;
-	}
-
-	void checkForCollisions()
-	{
-#ifdef CEMU_DEBUG_ASSERT
-		uint32 endOfPrevious = 0;
-		for (auto itr : map_ranges)
-		{
-			if (endOfPrevious > itr->startAddress)
-			{
-				cemu_assert_debug(false);
-			}
-			endOfPrevious = itr->startAddress + itr->length;
-		}
-#endif
-	}
-
-	// nextRange must point to the closest range after startAddress, or NULL if there is none
-	void processRange(MPTR startAddress, PPCRange_t* previousRange, PPCRange_t* nextRange)
-	{
-		checkForCollisions();
-		cemu_assert_debug(previousRange == nullptr || (startAddress == (previousRange->startAddress + previousRange->length)));
-		PPCRange_t* newRange;
-		if (previousRange && (previousRange->startAddress + previousRange->length) == startAddress)
-		{
-			newRange = previousRange;
-		}
-		else
-		{
-			cemu_assert_debug(previousRange == nullptr);
-			newRange = new PPCRange_t(startAddress);
-			map_ranges.emplace(newRange);
-		}
-		// process instruction flow until it is interrupted by a non-conditional branch
-		MPTR currentAddress = startAddress;
-		MPTR endAddress = 0xFFFFFFFF;
-		if (nextRange)
-			endAddress = nextRange->startAddress;
-		while (currentAddress < endAddress)
-		{
-			if (!processInstruction(newRange, currentAddress))
-			{
-				currentAddress += 4;
-				break;
-			}
-			currentAddress += 4;
-		}
-		newRange->length = currentAddress - newRange->startAddress;
-
-		if (nextRange && currentAddress >= nextRange->startAddress)
-		{
-			// merge with next range
-			newRange->length = (nextRange->startAddress + nextRange->length) - newRange->startAddress;
-			map_ranges.erase(nextRange);
-			delete nextRange;
-			checkForCollisions();
-			return;
-		}
-		checkForCollisions();
-	}
-
-	// find first unvisited branch target and start a new range there
-	// return true if method should be called again
-	bool processBranchTargetsSinglePass()
-	{
-		cemu_assert_debug(!map_ranges.empty());
-		auto rangeItr = map_ranges.begin();
-
-		PPCRange_t* previousRange = nullptr;
-		for (std::set<uint32_t>::const_iterator targetItr = map_queuedBranchTargets.begin() ; targetItr != map_queuedBranchTargets.end(); )
-		{
-			while (rangeItr != map_ranges.end() && ((*rangeItr)->startAddress + (*rangeItr)->length) <= (*targetItr))
-			{
-				previousRange = *rangeItr;
-				rangeItr++;
-				if (rangeItr == map_ranges.end())
-				{
-					// last range reached
-					if ((previousRange->startAddress + previousRange->length) == *targetItr)
-						processRange(*targetItr, previousRange, nullptr);
-					else
-						processRange(*targetItr, nullptr, nullptr);
-					return true;
-				}
-			}
-
-			if ((*targetItr) >= (*rangeItr)->startAddress &&
-				(*targetItr) < ((*rangeItr)->startAddress + (*rangeItr)->length))
-			{
-				// delete visited targets
-				targetItr = map_queuedBranchTargets.erase(targetItr);
-				continue;
-			}
-
-			cemu_assert_debug((*rangeItr)->startAddress > (*targetItr));
-			if (previousRange && (previousRange->startAddress + previousRange->length) == *targetItr)
-				processRange(*targetItr, previousRange, *rangeItr); // extend previousRange
-			else
-				processRange(*targetItr, nullptr, *rangeItr);
 			return true;
 		}
-		return false;
-	}
-
-	void processBranchTargets()
-	{
-		while (processBranchTargetsSinglePass());
-	}
-
-	private:
-	bool PPCRecompilerCalcFuncSize_isUnconditionalBranchInstruction(uint32 opcode)
-	{
-		if (Espresso::GetPrimaryOpcode(opcode) == Espresso::PrimaryOpcode::B)
-		{
-			uint32 LI;
-			bool AA, LK;
-			Espresso::decodeOp_B(opcode, LI, AA, LK);
-			if (!LK)
-				return true;
+		default:
+			return true;
 		}
-		return false;
 	}
 
-	bool PPCRecompilerCalcFuncSize_isValidInstruction(uint32 opcode)
+	static uint32 ReadOpcodeSafe(uint32 address)
 	{
-		if ((opcode >> 26) == 0)
-			return false;
-		return true;
+		if (!IsCodeAddress(address))
+			return 0;
+		return ReadOpcode(address);
 	}
 
-private:
-	struct RangePtrCmp
+	void AddTarget(uint32 target, std::vector<uint32>& pending)
 	{
-		bool operator()(const PPCRange_t* lhs, const PPCRange_t* rhs) const
+		m_branchTargets.insert(target);
+		if (IsCodeAddress(target) && !ContainsAddress(target))
+			pending.push_back(target);
+	}
+
+	void ScanFlow(uint32 address, std::vector<uint32>& pending, uint32& budget)
+	{
+		while (budget > 0 && IsCodeAddress(address) && !ContainsAddress(address))
 		{
-			return lhs->startAddress < rhs->startAddress;
+			m_covered.insert(address);
+			budget--;
+			uint32 opcode = ReadOpcode(address);
+			if (!FlowContinues(address, opcode, pending))
+				return;
+			address += 4;
 		}
-	};
+	}
 
-	std::set<PPCRange_t*, RangePtrCmp> map_ranges;
-	std::set<uint32> map_queuedBranchTargets;
-	std::set<uint32> map_branchTargetsAll;
+	void BuildRanges()
+	{
+		m_ranges.clear();
+		for (uint32 address : m_covered)
+		{
+			if (!m_ranges.empty() && m_ranges.back().end == address)
+				m_ranges.back().end += 4;
+			else
+				m_ranges.push_back({address, address + 4});
+		}
+	}
+
+	std::set<uint32> m_covered; // ordered, used to build the ranges
+	std::set<uint32> m_branchTargets;
+	std::vector<Range> m_ranges;
 };

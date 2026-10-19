@@ -1,1779 +1,529 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// x86-64 backend: integer instructions, integer memory accesses, home slot
+// accesses and control flow.
+
+#include "Cafe/HW/Espresso/PPCState.h"
 #include "BackendX64.h"
-
-// x86/x64 extension opcodes that could be useful:
-// ANDN
-// mulx, rorx, sarx, shlx, shrx
-// PDEP, PEXT
-
-void x64Gen_writeU8(x64GenContext_t* x64GenContext, uint8 v)
-{
-	x64GenContext->emitter->_emitU8(v);
-}
-
-void x64Gen_writeU16(x64GenContext_t* x64GenContext, uint32 v)
-{
-	x64GenContext->emitter->_emitU16(v);
-}
-
-void x64Gen_writeU32(x64GenContext_t* x64GenContext, uint32 v)
-{
-	x64GenContext->emitter->_emitU32(v);
-}
-
-void x64Gen_writeU64(x64GenContext_t* x64GenContext, uint64 v)
-{
-	x64GenContext->emitter->_emitU64(v);
-}
-
 #include "X64Emit.hpp"
 
-void _x64Gen_writeMODRMDeprecated(x64GenContext_t* x64GenContext, sint32 dataRegister, sint32 memRegisterA64, sint32 memRegisterB64, sint32 memImmS32)
-{
-	bool forceUseOffset = false;
-	if ((memRegisterA64 & 7) == 5)
-	{
-		// RBP and R13 have no memImmS32 == 0 encoding, therefore we need to use a 1 byte offset with the value 0
-		forceUseOffset = true;
-	}
+using namespace x64;
 
-	if (memRegisterB64 == X86_REG_NONE)
+namespace X64Backend
+{
+	namespace
 	{
-		// memRegisterA64 + memImmS32
-		uint8 modRM = (dataRegister & 7) * 8 + (memRegisterA64 & 7);
-		if (forceUseOffset && memImmS32 == 0)
+		bool IsCommutative(IMLOp op)
 		{
-			// 1 byte offset
-			modRM |= (1 << 6);
+			return op == IMLOp::ADD || op == IMLOp::AND || op == IMLOp::OR || op == IMLOp::XOR || op == IMLOp::MUL;
 		}
-		if (memImmS32 == 0)
+
+		AluOp ToAlu(IMLOp op)
 		{
-			// no offset
-			modRM |= (0 << 6);
-		}
-		else if (memImmS32 >= -128 && memImmS32 <= 127)
-		{
-			// 1 byte offset
-			modRM |= (1 << 6);
-		}
-		else
-		{
-			// 4 byte offset
-			modRM |= (2 << 6);
-		}
-		x64Gen_writeU8(x64GenContext, modRM);
-		// SIB byte
-		if ((memRegisterA64 & 7) == 4) // RSP and R12
-		{
-			x64Gen_writeU8(x64GenContext, 0x24);
-		}
-		// offset
-		if (((modRM >> 6) & 3) == 0)
-			; // no offset
-		else if (((modRM >> 6) & 3) == 1)
-			x64Gen_writeU8(x64GenContext, (uint8)memImmS32);
-		else if (((modRM >> 6) & 3) == 2)
-			x64Gen_writeU32(x64GenContext, (uint32)memImmS32);
-		else
-			assert_dbg();
-		return;
-	}
-	// note: Swapping mem register A and mem register B does not work because the instruction prefix defines the register group which might not match (e.g. regA in r0-r8 range and regB in RAX-RDI range)
-	if( (memRegisterA64&7) == 4 )
-	{
-		assert_dbg();
-		//sint32 temp = memRegisterA64;
-		//memRegisterA64 = memRegisterB64;
-		//memRegisterB64 = temp;
-	}
-	//if( (memRegisterA64&7) == 5 )
-	//{
-	//	sint32 temp = memRegisterA64;
-	//	memRegisterA64 = memRegisterB64;
-	//	memRegisterB64 = temp;
-	//}
-	if( (memRegisterA64&7) == 4 )
-		assert_dbg();
-	uint8 modRM = (0x04<<0)+((dataRegister&7)<<3);
-	if( forceUseOffset && memImmS32 == 0 )
-	{
-		// 1 byte offset
-		modRM |= (1<<6);
-	}
-	if( memImmS32 == 0 )
-	{
-		// no offset
-		modRM |= (0<<6);
-	}
-	else if( memImmS32 >= -128 && memImmS32 <= 127 )
-	{
-		// 1 byte offset
-		modRM |= (1<<6);
-	}
-	else
-	{
-		// 4 byte offset
-		modRM |= (2<<6);
-	}
-	x64Gen_writeU8(x64GenContext, modRM);
-	// sib byte
-	x64Gen_writeU8(x64GenContext, 0x00+(memRegisterA64&7)+(memRegisterB64&7)*8);
-	// offset
-	if( ((modRM>>6)&3) == 0 )
-		; // no offset
-	else if( ((modRM>>6)&3) == 1 )
-		x64Gen_writeU8(x64GenContext, (uint8)memImmS32);
-	else if( ((modRM>>6)&3) == 2 )
-		x64Gen_writeU32(x64GenContext, (uint32)memImmS32);
-	else
-		assert_dbg();
-}
-
-void x64Emit_mov_reg32_mem32(x64GenContext_t* x64GenContext, sint32 destReg, sint32 memBaseReg64, sint32 memOffset)
-{
-	x64Gen_writeMODRM_dyn<x64_opc_1byte<0x8B>>(x64GenContext, x64MODRM_opr_reg64(destReg), x64MODRM_opr_memReg64(memBaseReg64, memOffset));
-}
-
-void x64Emit_mov_mem32_reg32(x64GenContext_t* x64GenContext, sint32 memBaseReg64, sint32 memOffset, sint32 srcReg)
-{
-	x64Gen_writeMODRM_dyn<x64_opc_1byte_rev<0x89>>(x64GenContext, x64MODRM_opr_memReg64(memBaseReg64, memOffset), x64MODRM_opr_reg64(srcReg));
-}
-
-void x64Emit_mov_mem64_reg64(x64GenContext_t* x64GenContext, sint32 memBaseReg64, sint32 memOffset, sint32 srcReg)
-{
-	x64Gen_writeMODRM_dyn<x64_opc_1byte_rev<0x89, true>>(x64GenContext, x64MODRM_opr_memReg64(memBaseReg64, memOffset), x64MODRM_opr_reg64(srcReg));
-}
-
-void x64Emit_mov_reg64_mem64(x64GenContext_t* x64GenContext, sint32 destReg, sint32 memBaseReg64, sint32 memOffset)
-{
-	x64Gen_writeMODRM_dyn<x64_opc_1byte<0x8B, true>>(x64GenContext, x64MODRM_opr_reg64(destReg), x64MODRM_opr_memReg64(memBaseReg64, memOffset));
-}
-
-void x64Emit_mov_reg64_mem32(x64GenContext_t* x64GenContext, sint32 destReg, sint32 memBaseReg64, sint32 memOffset)
-{
-	x64Gen_writeMODRM_dyn<x64_opc_1byte<0x8B>>(x64GenContext, x64MODRM_opr_reg64(destReg), x64MODRM_opr_memReg64(memBaseReg64, memOffset));
-}
-
-void x64Emit_mov_mem32_reg64(x64GenContext_t* x64GenContext, sint32 memBaseReg64, sint32 memOffset, sint32 srcReg)
-{
-	x64Gen_writeMODRM_dyn<x64_opc_1byte_rev<0x89>>(x64GenContext, x64MODRM_opr_memReg64(memBaseReg64, memOffset), x64MODRM_opr_reg64(srcReg));
-}
-
-void x64Emit_mov_reg64_mem64(x64GenContext_t* x64GenContext, sint32 destReg, sint32 memBaseReg64, sint32 memIndexReg64, sint32 memOffset)
-{
-	x64Gen_writeMODRM_dyn<x64_opc_1byte<0x8B, true>>(x64GenContext, x64MODRM_opr_reg64(destReg), x64MODRM_opr_memRegPlusReg(memBaseReg64, memIndexReg64, memOffset));
-}
-
-void x64Emit_mov_reg32_mem32(x64GenContext_t* x64GenContext, sint32 destReg, sint32 memBaseReg64, sint32 memIndexReg64, sint32 memOffset)
-{
-	x64Gen_writeMODRM_dyn<x64_opc_1byte<0x8B>>(x64GenContext, x64MODRM_opr_reg64(destReg), x64MODRM_opr_memRegPlusReg(memBaseReg64, memIndexReg64, memOffset));
-}
-
-void x64Emit_mov_reg64b_mem8(x64GenContext_t* x64GenContext, sint32 destReg, sint32 memBaseReg64, sint32 memIndexReg64, sint32 memOffset)
-{
-	x64Gen_writeMODRM_dyn<x64_opc_1byte<0x8A>>(x64GenContext, x64MODRM_opr_reg64(destReg), x64MODRM_opr_memRegPlusReg(memBaseReg64, memIndexReg64, memOffset));
-}
-
-void x64Emit_movZX_reg32_mem8(x64GenContext_t* x64GenContext, sint32 destReg, sint32 memBaseReg64, sint32 memIndexReg64, sint32 memOffset)
-{
-	x64Gen_writeMODRM_dyn<x64_opc_2byte<0x0F,0xB6>>(x64GenContext, x64MODRM_opr_reg64(destReg), x64MODRM_opr_memRegPlusReg(memBaseReg64, memIndexReg64, memOffset));
-}
-
-void x64Emit_movZX_reg64_mem8(x64GenContext_t* x64GenContext, sint32 destReg, sint32 memBaseReg64, sint32 memOffset)
-{
-	x64Gen_writeMODRM_dyn<x64_opc_2byte<0x0F, 0xB6>>(x64GenContext, x64MODRM_opr_reg64(destReg), x64MODRM_opr_memReg64(memBaseReg64, memOffset));
-}
-
-void x64Gen_movSignExtend_reg64Low32_mem8Reg64PlusReg64(x64GenContext_t* x64GenContext, sint32 dstRegister, sint32 memRegisterA64, sint32 memRegisterB64, sint32 memImmS32)
-{
-	// MOVSX <dstReg64> (low dword), BYTE [<reg64> + <reg64> + <imm64>]
-	if (dstRegister >= 8 && memRegisterA64 >= 8 && memRegisterB64 >= 8)
-		x64Gen_writeU8(x64GenContext, 0x47);
-	else if (memRegisterA64 >= 8 && memRegisterB64 >= 8)
-		x64Gen_writeU8(x64GenContext, 0x43);
-	else if (dstRegister >= 8 && memRegisterB64 >= 8)
-		x64Gen_writeU8(x64GenContext, 0x42);
-	else if (dstRegister >= 8 && memRegisterA64 >= 8)
-		x64Gen_writeU8(x64GenContext, 0x45);
-	else if (dstRegister >= 8)
-		x64Gen_writeU8(x64GenContext, 0x44);
-	else if (memRegisterA64 >= 8)
-		x64Gen_writeU8(x64GenContext, 0x41);
-	else if (memRegisterB64 >= 8)
-		x64Gen_writeU8(x64GenContext, 0x42);
-	else if (dstRegister >= 4)
-		x64Gen_writeU8(x64GenContext, 0x40);
-
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0xBE);
-	_x64Gen_writeMODRMDeprecated(x64GenContext, dstRegister, memRegisterA64, memRegisterB64, memImmS32);
-}
-
-void x64Gen_mov_mem64Reg64PlusReg64_reg64(x64GenContext_t* x64GenContext, sint32 srcRegister, sint32 memRegisterA64, sint32 memRegisterB64, sint32 memImmS32)
-{
-	// MOV QWORD [<reg64> + <reg64> + <imm64>], <dstReg64>
-	if( srcRegister >= 8 && memRegisterA64 >= 8 && memRegisterB64 >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x47|8);
-	else if( memRegisterA64 >= 8 && memRegisterB64 >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x43|8);
-	else if( srcRegister >= 8 && memRegisterB64 >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x42|8);
-	else if( srcRegister >= 8 && memRegisterA64 >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x45|8);
-	else if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x44|8);
-	else if( memRegisterA64 >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41|8);
-	else if( memRegisterB64 >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x42|8);
-	else
-		x64Gen_writeU8(x64GenContext, 0x48);
-	x64Gen_writeU8(x64GenContext, 0x89);
-	_x64Gen_writeMODRMDeprecated(x64GenContext, srcRegister, memRegisterA64, memRegisterB64, memImmS32);
-}
-
-void x64Gen_movZeroExtend_reg64Low16_mem16Reg64PlusReg64(x64GenContext_t* x64GenContext, sint32 dstRegister, sint32 memRegisterA64, sint32 memRegisterB64, sint32 memImmS32)
-{
-	// MOV <dstReg64> (low word), WORD [<reg64> + <reg64> + <imm64>]
-	x64Gen_writeU8(x64GenContext, 0x66); // 16bit prefix
-	x64Emit_mov_reg32_mem32(x64GenContext, dstRegister, memRegisterA64, memRegisterB64, memImmS32);
-}
-
-void x64Gen_movTruncate_mem32Reg64PlusReg64_reg64(x64GenContext_t* x64GenContext, sint32 memRegisterA64, sint32 memRegisterB64, sint32 memImmS32, sint32 srcRegister)
-{
-	// MOV DWORD [<reg64> + <reg64> + <imm64>], <srcReg64> (low dword)
-	if( srcRegister >= 8 && memRegisterA64 >= 8 && memRegisterB64 >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x47);
-	else if( memRegisterA64 >= 8 && memRegisterB64 >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x43);
-	else if( srcRegister >= 8 && memRegisterB64 >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x42);
-	else if( srcRegister >= 8 && memRegisterA64 >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x45);
-	else if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x44);
-	else if( memRegisterA64 >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	else if( memRegisterB64 >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x42);
-
-	x64Gen_writeU8(x64GenContext, 0x89);
-	_x64Gen_writeMODRMDeprecated(x64GenContext, srcRegister, memRegisterA64, memRegisterB64, memImmS32);
-}
-
-void x64Gen_movTruncate_mem16Reg64PlusReg64_reg64(x64GenContext_t* x64GenContext, sint32 memRegisterA64, sint32 memRegisterB64, sint32 memImmS32, sint32 srcRegister)
-{
-	// MOV WORD [<reg64> + <reg64> + <imm64>], <srcReg64> (low dword)
-	x64Gen_writeU8(x64GenContext, 0x66); // 16bit prefix	
-	x64Gen_movTruncate_mem32Reg64PlusReg64_reg64(x64GenContext, memRegisterA64, memRegisterB64, memImmS32, srcRegister);
-}
-
-void x64Gen_movTruncate_mem8Reg64PlusReg64_reg64(x64GenContext_t* x64GenContext, sint32 memRegisterA64, sint32 memRegisterB64, sint32 memImmS32, sint32 srcRegister)
-{
-	// MOV BYTE [<reg64> + <reg64> + <imm64>], <srcReg64> (low byte)
-
-	// when no REX byte is present: Source register can range from AL to BH
-	// when a REX byte is present: Source register can range from AL to DIL or R8B to R15B
-	// todo: We don't need the REX byte when when the source register is AL,BL,CL or DL and neither memRegister A or B are within r8 - r15
-
-	uint8 rexByte = 0x40;
-	if( srcRegister >= 8 )
-		rexByte |= (1<<2);
-	if( memRegisterA64 >= 8 )
-		rexByte |= (1<<0);
-	if( memRegisterB64 >= 8 )
-		rexByte |= (1<<1);
-	x64Gen_writeU8(x64GenContext, rexByte);
-
-	x64Gen_writeU8(x64GenContext, 0x88);
-	_x64Gen_writeMODRMDeprecated(x64GenContext, srcRegister, memRegisterA64, memRegisterB64, memImmS32);
-}
-
-void x64Gen_mov_mem32Reg64_imm32(x64GenContext_t* x64GenContext, sint32 memRegister, uint32 memImmU32, uint32 dataImmU32)
-{
-	// MOV DWORD [<memReg>+<memImmU32>], dataImmU32
-	if( (memRegister&7) == 4 )
-	{
-		if( memRegister >= 8 )
-			x64Gen_writeU8(x64GenContext, 0x41);
-		sint32 memImmS32 = (sint32)memImmU32;
-		if( memImmS32 >= -128 && memImmS32 <= 127 )
-		{
-			x64Gen_writeU8(x64GenContext, 0xC7);
-			x64Gen_writeU8(x64GenContext, 0x44);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU8(x64GenContext, (uint8)memImmU32);
-		}
-		else
-		{
-			x64Gen_writeU8(x64GenContext, 0xC7);
-			x64Gen_writeU8(x64GenContext, 0x84);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU32(x64GenContext, memImmU32);
-		}
-		x64Gen_writeU32(x64GenContext, dataImmU32);
-	}
-	else
-	{
-		assert_dbg();
-	}
-}
-
-void x64Gen_mov_mem64Reg64_imm32(x64GenContext_t* x64GenContext, sint32 memRegister, uint32 memImmU32, uint32 dataImmU32)
-{
-	// MOV QWORD [<memReg>+<memImmU32>], dataImmU32
-	if( memRegister == X86_REG_R14 )
-	{
-		sint32 memImmS32 = (sint32)memImmU32;
-		if( memImmS32 == 0 )
-		{
-			x64Gen_writeU8(x64GenContext, 0x49);
-			x64Gen_writeU8(x64GenContext, 0xC7);
-			x64Gen_writeU8(x64GenContext, 0x06);
-			x64Gen_writeU32(x64GenContext, dataImmU32);
-		}
-		else if( memImmS32 >= -128 && memImmS32 <= 127 )
-		{
-			x64Gen_writeU8(x64GenContext, 0x49);
-			x64Gen_writeU8(x64GenContext, 0xC7);
-			x64Gen_writeU8(x64GenContext, 0x46);
-			x64Gen_writeU8(x64GenContext, (uint8)memImmS32);
-			x64Gen_writeU32(x64GenContext, dataImmU32);
-		}
-		else
-		{
-			assert_dbg();
-		}
-	}
-	else
-	{
-		assert_dbg();
-	}
-}
-
-void x64Gen_mov_mem8Reg64_imm8(x64GenContext_t* x64GenContext, sint32 memRegister, uint32 memImmU32, uint8 dataImmU8)
-{
-	// MOV BYTE [<memReg64>+<memImmU32>], dataImmU8
-	if( memRegister == X86_REG_RSP )
-	{
-		sint32 memImmS32 = (sint32)memImmU32;
-		if( memImmS32 >= -128 && memImmS32 <= 127 )
-		{
-			x64Gen_writeU8(x64GenContext, 0xC6);
-			x64Gen_writeU8(x64GenContext, 0x44);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU8(x64GenContext, (uint8)memImmU32);
-		}
-		else
-		{
-			x64Gen_writeU8(x64GenContext, 0xC6);
-			x64Gen_writeU8(x64GenContext, 0x84);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU32(x64GenContext, memImmU32);
-		}
-		x64Gen_writeU8(x64GenContext, dataImmU8);
-	}
-	else
-	{
-		assert_dbg();
-	}
-}
-
-void x64Gen_mov_reg64_imm64(x64GenContext_t* x64GenContext, sint32 destRegister, uint64 immU64)
-{
-	// MOV <destReg64>, <imm64>
-	x64Gen_writeU8(x64GenContext, 0x48+(destRegister/8));
-	x64Gen_writeU8(x64GenContext, 0xB8+(destRegister%8));
-	x64Gen_writeU64(x64GenContext, immU64);
-}
-
-void x64Gen_mov_reg64Low32_imm32(x64GenContext_t* x64GenContext, sint32 destRegister, uint64 immU32)
-{
-	// todo: Emit shorter opcode if immU32 is 0 or falls in sint8 range?
-	// MOV <destReg64>, <imm64>
-	if( destRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	x64Gen_writeU8(x64GenContext, 0xB8+(destRegister&7));
-	x64Gen_writeU32(x64GenContext, (uint32)immU32);
-}
-
-void x64Gen_mov_reg64_reg64(x64GenContext_t* x64GenContext, sint32 destRegister, sint32 srcRegister)
-{
-	// MOV <destReg64>, <srcReg64>
-	if( destRegister >= 8 && srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x4D);
-	else if( destRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x49);
-	else if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x4C);
-	else
-		x64Gen_writeU8(x64GenContext, 0x48);
-	x64Gen_writeU8(x64GenContext, 0x89);
-	x64Gen_writeU8(x64GenContext, 0xC0+(destRegister&7)+(srcRegister&7)*8);
-}
-
-void x64Gen_xchg_reg64_reg64(x64GenContext_t* x64GenContext, sint32 destRegister, sint32 srcRegister)
-{
-	// XCHG <destReg64>, <srcReg64>
-	if( destRegister >= 8 && srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x4D);
-	else if( destRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x49);
-	else if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x4C);
-	else
-		x64Gen_writeU8(x64GenContext, 0x48);
-	x64Gen_writeU8(x64GenContext, 0x87);
-	x64Gen_writeU8(x64GenContext, 0xC0+(destRegister&7)+(srcRegister&7)*8);
-}
-
-void x64Gen_mov_reg64Low32_reg64Low32(x64GenContext_t* x64GenContext, sint32 destRegister, sint32 srcRegister)
-{
-	// MOV <destReg64_low32>, <srcReg64_low32>
-	if (destRegister >= 8 && srcRegister >= 8)
-		x64Gen_writeU8(x64GenContext, 0x45);
-	else if (destRegister >= 8)
-		x64Gen_writeU8(x64GenContext, 0x41);
-	else if (srcRegister >= 8)
-		x64Gen_writeU8(x64GenContext, 0x44);
-	x64Gen_writeU8(x64GenContext, 0x89);
-	x64Gen_writeU8(x64GenContext, 0xC0 + (destRegister & 7) + (srcRegister & 7) * 8);
-}
-
-void x64Gen_cmovcc_reg64Low32_reg64Low32(x64GenContext_t* x64GenContext, uint32 conditionType, sint32 destRegister, sint32 srcRegister)
-{
-	// cMOVcc <destReg64_low32>, <srcReg64_low32>
-	if (destRegister >= 8 && srcRegister >= 8)
-		x64Gen_writeU8(x64GenContext, 0x45);
-	else if (srcRegister >= 8)
-		x64Gen_writeU8(x64GenContext, 0x41);
-	else if (destRegister >= 8)
-		x64Gen_writeU8(x64GenContext, 0x44);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	if (conditionType == X86_CONDITION_CARRY || conditionType == X86_CONDITION_UNSIGNED_BELOW)
-		x64Gen_writeU8(x64GenContext, 0x42);
-	else if (conditionType == X86_CONDITION_NOT_CARRY || conditionType == X86_CONDITION_UNSIGNED_ABOVE_EQUAL)
-		x64Gen_writeU8(x64GenContext, 0x43);
-	else if (conditionType == X86_CONDITION_EQUAL)
-		x64Gen_writeU8(x64GenContext, 0x44);
-	else if (conditionType == X86_CONDITION_NOT_EQUAL)
-		x64Gen_writeU8(x64GenContext, 0x45);
-	else if (conditionType == X86_CONDITION_UNSIGNED_BELOW_EQUAL)
-		x64Gen_writeU8(x64GenContext, 0x46);
-	else if (conditionType == X86_CONDITION_UNSIGNED_ABOVE)
-		x64Gen_writeU8(x64GenContext, 0x47);
-	else if (conditionType == X86_CONDITION_SIGN)
-		x64Gen_writeU8(x64GenContext, 0x48);
-	else if (conditionType == X86_CONDITION_NOT_SIGN)
-		x64Gen_writeU8(x64GenContext, 0x49);
-	else if (conditionType == X86_CONDITION_PARITY)
-		x64Gen_writeU8(x64GenContext, 0x4A);
-	else if (conditionType == X86_CONDITION_SIGNED_LESS)
-		x64Gen_writeU8(x64GenContext, 0x4C);
-	else if (conditionType == X86_CONDITION_SIGNED_GREATER_EQUAL)
-		x64Gen_writeU8(x64GenContext, 0x4D);
-	else if (conditionType == X86_CONDITION_SIGNED_LESS_EQUAL)
-		x64Gen_writeU8(x64GenContext, 0x4E);
-	else if (conditionType == X86_CONDITION_SIGNED_GREATER)
-		x64Gen_writeU8(x64GenContext, 0x4F);
-	else
-	{
-		assert_dbg();
-	}
-	x64Gen_writeU8(x64GenContext, 0xC0 + (destRegister & 7) * 8 + (srcRegister & 7));
-}
-
-void x64Gen_movSignExtend_reg64Low32_reg64Low16(x64GenContext_t* x64GenContext, sint32 destRegister, sint32 srcRegister)
-{
-	// MOVSX <destReg64_lowDWORD>, <srcReg64_lowWORD>
-	if( destRegister >= 8 && srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x4D);
-	else if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	else if( destRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x4C);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0xBF);
-	x64Gen_writeU8(x64GenContext, 0xC0+(srcRegister&7)+(destRegister&7)*8);
-}
-
-void x64Gen_movZeroExtend_reg64Low32_reg64Low16(x64GenContext_t* x64GenContext, sint32 destRegister, sint32 srcRegister)
-{
-	// MOVZX <destReg64_lowDWORD>, <srcReg64_lowWORD>
-	if( destRegister >= 8 && srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x4D);
-	else if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	else if( destRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x4C);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0xB7);
-	x64Gen_writeU8(x64GenContext, 0xC0+(srcRegister&7)+(destRegister&7)*8);
-}
-
-void x64Gen_movSignExtend_reg64Low32_reg64Low8(x64GenContext_t* x64GenContext, sint32 destRegister, sint32 srcRegister)
-{
-	// MOVSX <destReg64_lowDWORD>, <srcReg64_lowBYTE>
-	if( destRegister >= 8 && srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x4D);
-	else if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	else if( destRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x4C);
-	else if( srcRegister >= 4 )
-		x64Gen_writeU8(x64GenContext, 0x40);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0xBE);
-	x64Gen_writeU8(x64GenContext, 0xC0+(srcRegister&7)+(destRegister&7)*8);
-}
-
-void x64Gen_movZeroExtend_reg64Low32_reg64Low8(x64GenContext_t* x64GenContext, sint32 destRegister, sint32 srcRegister)
-{
-	// MOVZX <destReg64_lowDWORD>, <srcReg64_lowBYTE>
-	if( destRegister >= 8 && srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x4D);
-	else if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	else if( destRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x4C);
-	else if( srcRegister >= 4 )
-		x64Gen_writeU8(x64GenContext, 0x40);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0xB6);
-	x64Gen_writeU8(x64GenContext, 0xC0+(srcRegister&7)+(destRegister&7)*8);
-}
-
-void x64Gen_lea_reg32_scaledIndex(x64GenContext_t* x64GenContext, sint32 dstRegister, sint32 index, uint8 scale, sint32 offset)
-{
-	cemu_assert_debug(dstRegister >= 0 && dstRegister < 16 && index >= 0 && index < 16 && index != X86_REG_RSP && scale < 4);
-	if (dstRegister >= 8 || index >= 8)
-		x64Gen_writeU8(x64GenContext, 0x40 | (dstRegister >= 8 ? 4 : 0) | (index >= 8 ? 2 : 0));
-	x64Gen_writeU8(x64GenContext, 0x8D);
-	x64Gen_writeU8(x64GenContext, 0x04 | ((dstRegister & 7) << 3));
-	x64Gen_writeU8(x64GenContext, (scale << 6) | ((index & 7) << 3) | 5);
-	x64Gen_writeU32(x64GenContext, static_cast<uint32>(offset));
-}
-
-void x64Gen_lea_reg64Low32_reg64Low32PlusReg64Low32(x64GenContext_t* x64GenContext, sint32 dstRegister, sint32 memRegisterA64, sint32 memRegisterB64)
-{
-	// MOV <reg32>, DWORD [<reg32> + <reg32>]
-	if ((memRegisterA64 & 0x7) == 5)
-	{
-		// RBP
-		// swap mem registers to get the shorter instruction encoding
-		sint32 temp = memRegisterA64;
-		memRegisterA64 = memRegisterB64;
-		memRegisterB64 = temp;
-	}
-	if ((memRegisterA64 & 0x7) == 4)
-	{
-		// RSP
-		// swap mem registers
-		sint32 temp = memRegisterA64;
-		memRegisterA64 = memRegisterB64;
-		memRegisterB64 = temp;
-		if ((memRegisterA64 & 0x7) == 4)
-			assert_dbg(); // double RSP not supported
-	}
-
-	x64Gen_writeU8(x64GenContext, 0x67);
-	if (dstRegister >= 8 && memRegisterA64 >= 8 && memRegisterB64 >= 8)
-		x64Gen_writeU8(x64GenContext, 0x47);
-	else if (dstRegister >= 8 && memRegisterA64 >= 8)
-		x64Gen_writeU8(x64GenContext, 0x45);
-	else if (dstRegister >= 8 && memRegisterB64 >= 8)
-		x64Gen_writeU8(x64GenContext, 0x46);
-	else if (dstRegister >= 8)
-		x64Gen_writeU8(x64GenContext, 0x44);
-	else if (memRegisterA64 >= 8 && memRegisterB64 >= 8)
-		x64Gen_writeU8(x64GenContext, 0x43);
-	else if (memRegisterB64 >= 8)
-		x64Gen_writeU8(x64GenContext, 0x42);
-	else if (memRegisterA64 >= 8)
-		x64Gen_writeU8(x64GenContext, 0x41);
-
-	x64Gen_writeU8(x64GenContext, 0x8D);
-	_x64Gen_writeMODRMDeprecated(x64GenContext, dstRegister&0x7, memRegisterA64 & 0x7, memRegisterB64 & 0x7, 0);
-}
-
-void _x64_op_reg64Low_mem8Reg64(x64GenContext_t* x64GenContext, sint32 dstRegister, sint32 memRegister64, sint32 memImmS32, uint8 opByte)
-{
-	// OR <dstReg64> (low byte), BYTE [<reg64> + <imm64>]
-	if (dstRegister >= 8 && memRegister64 >= 8)
-		x64Gen_writeU8(x64GenContext, 0x45);
-	if (dstRegister >= 8)
-		x64Gen_writeU8(x64GenContext, 0x44);
-	if (memRegister64 >= 8)
-		x64Gen_writeU8(x64GenContext, 0x41);
-	x64Gen_writeU8(x64GenContext, opByte);
-	_x64Gen_writeMODRMDeprecated(x64GenContext, dstRegister, memRegister64, X86_REG_NONE, memImmS32);
-}
-
-void x64Gen_or_reg64Low8_mem8Reg64(x64GenContext_t* x64GenContext, sint32 dstRegister, sint32 memRegister64, sint32 memImmS32)
-{
-	_x64_op_reg64Low_mem8Reg64(x64GenContext, dstRegister, memRegister64, memImmS32, 0x0A);
-}
-
-void x64Gen_and_reg64Low8_mem8Reg64(x64GenContext_t* x64GenContext, sint32 dstRegister, sint32 memRegister64, sint32 memImmS32)
-{
-	_x64_op_reg64Low_mem8Reg64(x64GenContext, dstRegister, memRegister64, memImmS32, 0x22);
-}
-
-void x64Gen_mov_mem8Reg64_reg64Low8(x64GenContext_t* x64GenContext, sint32 dstRegister, sint32 memRegister64, sint32 memImmS32)
-{
-	_x64_op_reg64Low_mem8Reg64(x64GenContext, dstRegister, memRegister64, memImmS32, 0x88);
-}
-
-void x64Gen_add_reg64_reg64(x64GenContext_t* x64GenContext, sint32 destRegister, sint32 srcRegister)
-{
-	// ADD <destReg>, <srcReg>
-	x64Gen_writeU8(x64GenContext, 0x48+(destRegister/8)+(srcRegister/8)*4);
-	x64Gen_writeU8(x64GenContext, 0x01);
-	x64Gen_writeU8(x64GenContext, 0xC0+(srcRegister&7)*8+(destRegister&7));
-}
-
-void x64Gen_add_reg64_imm32(x64GenContext_t* x64GenContext, sint32 srcRegister, uint32 immU32)
-{
-	sint32 immS32 = (sint32)immU32;
-	if (srcRegister >= 8)
-		x64Gen_writeU8(x64GenContext, 0x49);
-	else
-		x64Gen_writeU8(x64GenContext, 0x48);
-	if (immS32 >= -128 && immS32 <= 127)
-	{
-		x64Gen_writeU8(x64GenContext, 0x83);
-		x64Gen_writeU8(x64GenContext, 0xC0 + (srcRegister & 7));
-		x64Gen_writeU8(x64GenContext, (uint8)immS32);
-	}
-	else
-	{
-		x64Gen_writeU8(x64GenContext, 0x81);
-		x64Gen_writeU8(x64GenContext, 0xC0 + (srcRegister & 7));
-		x64Gen_writeU32(x64GenContext, immU32);
-	}
-}
-
-void x64Gen_add_reg64Low32_reg64Low32(x64GenContext_t* x64GenContext, sint32 destRegister, sint32 srcRegister)
-{
-	// ADD <destReg64_low32>, <srcReg64_low32>
-	if( destRegister >= 8 && srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x45);
-	else if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x44);
-	else if( destRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	x64Gen_writeU8(x64GenContext, 0x01);
-	x64Gen_writeU8(x64GenContext, 0xC0+(srcRegister&7)*8+(destRegister&7));
-}
-
-void x64Gen_add_reg64Low32_imm32(x64GenContext_t* x64GenContext, sint32 srcRegister, uint32 immU32)
-{
-	sint32 immS32 = (sint32)immU32;
-	if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	if( immS32 >= -128 && immS32 <= 127 )
-	{
-		x64Gen_writeU8(x64GenContext, 0x83);
-		x64Gen_writeU8(x64GenContext, 0xC0+(srcRegister&7));
-		x64Gen_writeU8(x64GenContext, (uint8)immS32);
-	}
-	else
-	{
-		if( srcRegister == X86_REG_RAX )
-		{
-			// special EAX short form
-			x64Gen_writeU8(x64GenContext, 0x05);
-		}
-		else
-		{
-			x64Gen_writeU8(x64GenContext, 0x81);
-			x64Gen_writeU8(x64GenContext, 0xC0+(srcRegister&7));
-		}
-		x64Gen_writeU32(x64GenContext, immU32);
-	}
-}
-
-void x64Gen_sub_reg64Low32_reg64Low32(x64GenContext_t* x64GenContext, sint32 destRegister, sint32 srcRegister)
-{
-	// SUB <destReg64_low32>, <srcReg64_low32>
-	if( destRegister >= 8 && srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x45);
-	else if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x44);
-	else if( destRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	x64Gen_writeU8(x64GenContext, 0x29);
-	x64Gen_writeU8(x64GenContext, 0xC0+(srcRegister&7)*8+(destRegister&7));
-}
-
-void x64Gen_sub_reg64Low32_imm32(x64GenContext_t* x64GenContext, sint32 srcRegister, uint32 immU32)
-{
-	sint32 immS32 = (sint32)immU32;
-	if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	if( immS32 >= -128 && immS32 <= 127 )
-	{
-		x64Gen_writeU8(x64GenContext, 0x83);
-		x64Gen_writeU8(x64GenContext, 0xE8+(srcRegister&7));
-		x64Gen_writeU8(x64GenContext, (uint8)immS32);
-	}
-	else
-	{
-		if( srcRegister == X86_REG_RAX )
-		{
-			// special EAX short form
-			x64Gen_writeU8(x64GenContext, 0x2D);
-		}
-		else
-		{
-			x64Gen_writeU8(x64GenContext, 0x81);
-			x64Gen_writeU8(x64GenContext, 0xE8+(srcRegister&7));
-		}
-		x64Gen_writeU32(x64GenContext, immU32);
-	}
-}
-
-void x64Gen_sub_reg64_imm32(x64GenContext_t* x64GenContext, sint32 srcRegister, uint32 immU32)
-{
-	sint32 immS32 = (sint32)immU32;
-	if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x49);
-	else
-		x64Gen_writeU8(x64GenContext, 0x48);
-	if( immS32 >= -128 && immS32 <= 127 )
-	{
-		x64Gen_writeU8(x64GenContext, 0x83);
-		x64Gen_writeU8(x64GenContext, 0xE8+(srcRegister&7));
-		x64Gen_writeU8(x64GenContext, (uint8)immS32);
-	}
-	else
-	{
-		x64Gen_writeU8(x64GenContext, 0x81);
-		x64Gen_writeU8(x64GenContext, 0xE8+(srcRegister&7));
-		x64Gen_writeU32(x64GenContext, immU32);
-	}
-}
-
-void x64Gen_sub_mem32reg64_imm32(x64GenContext_t* x64GenContext, sint32 memRegister, sint32 memImmS32, uint64 immU32)
-{
-	// SUB <mem32_memReg64>, <imm32>
-	sint32 immS32 = (sint32)immU32;
-	if( memRegister == X86_REG_RSP )
-	{
-		if( memImmS32 >= 128 )
-		{
-			if( immS32 >= -128 && immS32 <= 127 )
+			switch (op)
 			{
-				// 4 byte mem imm + 1 byte imm
-				x64Gen_writeU8(x64GenContext, 0x83);
-				x64Gen_writeU8(x64GenContext, 0xAC);
-				x64Gen_writeU8(x64GenContext, 0x24);
-				x64Gen_writeU32(x64GenContext, (uint32)memImmS32);
-				x64Gen_writeU8(x64GenContext, (uint8)immU32);
+			case IMLOp::ADD: return ALU_ADD;
+			case IMLOp::SUB: return ALU_SUB;
+			case IMLOp::AND: return ALU_AND;
+			case IMLOp::OR: return ALU_OR;
+			case IMLOp::XOR: return ALU_XOR;
+			default: break;
+			}
+			cemu_assert_debug(false);
+			return ALU_ADD;
+		}
+	}
+
+	bool CodeGenerator::EmitInt(const IMLInstruction& inst)
+	{
+		auto& e = m_e;
+		switch (inst.op)
+		{
+		case IMLOp::MOV:
+			MoveGpr(Gpr(inst.r[0]), Gpr(inst.r[1]));
+			return true;
+		case IMLOp::MOVI:
+			e.MOV_ri32(Gpr(inst.r[0]), (uint32)inst.imm);
+			return true;
+		case IMLOp::ADD:
+		case IMLOp::SUB:
+		case IMLOp::AND:
+		case IMLOp::OR:
+		case IMLOp::XOR:
+		case IMLOp::MUL:
+		{
+			uint8 d = Gpr(inst.r[0]);
+			uint8 a = Gpr(inst.r[1]);
+			bool isMul = inst.op == IMLOp::MUL;
+			if (inst.HasImm())
+			{
+				if (isMul)
+				{
+					e.IMUL_rri(d, a, (uint32)inst.imm);
+					return true;
+				}
+				MoveGpr(d, a);
+				e.ALU_ri(ToAlu(inst.op), d, (uint32)inst.imm);
+				return true;
+			}
+			uint8 b = Gpr(inst.r[2]);
+			auto op2 = [&](uint8 dst, uint8 src)
+			{
+				if (isMul)
+					e.IMUL_rr(dst, src);
+				else
+					e.ALU_rr(ToAlu(inst.op), dst, src);
+			};
+			if (d == a)
+				op2(d, b);
+			else if (d == b)
+			{
+				if (IsCommutative(inst.op))
+					op2(d, a);
+				else
+				{
+					e.MOV_rr(RAX, a);
+					op2(RAX, b);
+					e.MOV_rr(d, RAX);
+				}
 			}
 			else
 			{
-				// 4 byte mem imm + 4 byte imm
-				x64Gen_writeU8(x64GenContext, 0x81);
-				x64Gen_writeU8(x64GenContext, 0xAC);
-				x64Gen_writeU8(x64GenContext, 0x24);
-				x64Gen_writeU32(x64GenContext, (uint32)memImmS32);
-				x64Gen_writeU32(x64GenContext, (uint32)immU32);
+				e.MOV_rr(d, a);
+				op2(d, b);
 			}
+			return true;
+		}
+		case IMLOp::ANDC:
+		case IMLOp::ORC:
+			e.MOV_rr(RAX, Gpr(inst.r[2]));
+			e.NOT(RAX);
+			e.ALU_rr(inst.op == IMLOp::ANDC ? ALU_AND : ALU_OR, RAX, Gpr(inst.r[1]));
+			e.MOV_rr(Gpr(inst.r[0]), RAX);
+			return true;
+		case IMLOp::NOT:
+		case IMLOp::NEG:
+		{
+			uint8 d = Gpr(inst.r[0]);
+			MoveGpr(d, Gpr(inst.r[1]));
+			if (inst.op == IMLOp::NOT)
+				e.NOT(d);
+			else
+				e.NEG(d);
+			return true;
+		}
+		case IMLOp::MULHS:
+		case IMLOp::MULHU:
+			// 64-bit product of the extended operands, high half
+			if (inst.op == IMLOp::MULHS)
+			{
+				e.MOVSXD_rr(RAX, Gpr(inst.r[1]));
+				e.MOVSXD_rr(RCX, Gpr(inst.r[2]));
+			}
+			else
+			{
+				e.MOV_rr(RAX, Gpr(inst.r[1]));
+				e.MOV_rr(RCX, Gpr(inst.r[2]));
+			}
+			e.IMUL_rr(RAX, RCX, true);
+			e.SHIFT_ri(SH_SHR, RAX, 32, true);
+			e.MOV_rr(Gpr(inst.r[0]), RAX);
+			return true;
+		case IMLOp::DIVS:
+		{
+			// x / 0 = (x < 0 ? -1 : 0), 0x80000000 / -1 = -1
+			e.MOV_rr(RAX, Gpr(inst.r[1]));
+			e.MOV_rr(RCX, Gpr(inst.r[2]));
+			e.TEST_rr(RCX, RCX);
+			size_t toZero = e.Jcc_rel32(CC_E);
+			e.ALU_ri(ALU_CMP, RCX, 0xFFFFFFFF);
+			size_t toDiv1 = e.Jcc_rel32(CC_NE);
+			e.ALU_ri(ALU_CMP, RAX, 0x80000000);
+			size_t toDiv2 = e.Jcc_rel32(CC_NE);
+			e.MOV_ri32(RAX, 0xFFFFFFFF);
+			size_t toDone1 = e.JMP_rel32();
+			e.BindRel32(toDiv1, e.Size());
+			e.BindRel32(toDiv2, e.Size());
+			e.CDQ();
+			e.IDIV(RCX);
+			size_t toDone2 = e.JMP_rel32();
+			e.BindRel32(toZero, e.Size());
+			e.SHIFT_ri(SH_SAR, RAX, 31);
+			e.BindRel32(toDone1, e.Size());
+			e.BindRel32(toDone2, e.Size());
+			e.MOV_rr(Gpr(inst.r[0]), RAX);
+			return true;
+		}
+		case IMLOp::DIVU:
+		{
+			e.MOV_rr(RAX, Gpr(inst.r[1]));
+			e.MOV_rr(RCX, Gpr(inst.r[2]));
+			e.TEST_rr(RCX, RCX);
+			size_t toZero = e.Jcc_rel32(CC_E);
+			e.ALU_rr(ALU_XOR, RDX, RDX);
+			e.DIV(RCX);
+			size_t toDone = e.JMP_rel32();
+			e.BindRel32(toZero, e.Size());
+			e.ALU_rr(ALU_XOR, RAX, RAX);
+			e.BindRel32(toDone, e.Size());
+			e.MOV_rr(Gpr(inst.r[0]), RAX);
+			return true;
+		}
+		case IMLOp::SHL:
+		case IMLOp::SHR:
+		case IMLOp::SAR:
+		{
+			uint8 d = Gpr(inst.r[0]);
+			MoveGpr(d, Gpr(inst.r[1]));
+			uint8 amount = (uint8)(inst.imm & 31);
+			if (amount)
+				e.SHIFT_ri(inst.op == IMLOp::SHL ? SH_SHL : inst.op == IMLOp::SHR ? SH_SHR : SH_SAR, d, amount);
+			return true;
+		}
+		case IMLOp::ROTL:
+		{
+			uint8 d = Gpr(inst.r[0]);
+			if (inst.HasImm())
+			{
+				MoveGpr(d, Gpr(inst.r[1]));
+				if (inst.imm & 31)
+					e.SHIFT_ri(SH_ROL, d, (uint8)(inst.imm & 31));
+				return true;
+			}
+			e.MOV_rr(RCX, Gpr(inst.r[2]));
+			e.MOV_rr(RAX, Gpr(inst.r[1]));
+			e.SHIFT_rcl(SH_ROL, RAX);
+			e.MOV_rr(d, RAX);
+			return true;
+		}
+		case IMLOp::SLW:
+		case IMLOp::SRW:
+			// 6-bit amount: 32 or more clears the result
+			e.MOV_rr(RCX, Gpr(inst.r[2]));
+			e.MOV_rr(RAX, Gpr(inst.r[1]));
+			e.SHIFT_rcl(inst.op == IMLOp::SLW ? SH_SHL : SH_SHR, RAX);
+			e.ALU_rr(ALU_XOR, RDX, RDX);
+			e.TEST_ri(RCX, 32);
+			e.CMOV_rr(CC_NE, RAX, RDX);
+			e.MOV_rr(Gpr(inst.r[0]), RAX);
+			return true;
+		case IMLOp::SRAW:
+		{
+			uint8 d = Gpr(inst.r[0]);
+			uint8 ca = Gpr(inst.r[1]);
+			if (inst.HasImm())
+			{
+				uint32 amount = (uint32)inst.imm & 31;
+				e.MOV_rr(RAX, Gpr(inst.r[2]));
+				if (amount == 0)
+				{
+					e.MOV_rr(d, RAX);
+					e.MOV_ri32(ca, 0);
+					return true;
+				}
+				// CA = negative and one bits shifted out
+				e.MOV_rr(RDX, RAX);
+				e.SHIFT_ri(SH_SAR, RDX, 31);
+				e.ALU_rr(ALU_AND, RDX, RAX);
+				e.TEST_ri(RDX, (1u << amount) - 1);
+				e.SETcc(CC_NE, RCX);
+				e.MOVZX_r8(RCX, RCX);
+				e.SHIFT_ri(SH_SAR, RAX, (uint8)amount);
+				e.MOV_rr(d, RAX);
+				e.MOV_rr(ca, RCX);
+				return true;
+			}
+			// shift the sign extended 64-bit value by up to 63
+			e.MOV_rr(RCX, Gpr(inst.r[3]));
+			e.ALU_ri(ALU_AND, RCX, 63);
+			e.MOVSXD_rr(RDX, Gpr(inst.r[2]));
+			e.MOV_rr(RAX, RDX, true);
+			e.SHIFT_rcl(SH_SAR, RAX, true);
+			e.MOV_rr(d, RAX);
+			// bits were lost if shifting back does not give the original value
+			e.SHIFT_rcl(SH_SHL, RAX, true);
+			e.ALU_rr(ALU_CMP, RAX, RDX, true);
+			e.SETcc(CC_NE, RAX);
+			e.MOVZX_r8(RAX, RAX);
+			e.SHIFT_ri(SH_SHR, RDX, 63, true);
+			e.ALU_rr(ALU_AND, RAX, RDX);
+			e.MOV_rr(ca, RAX);
+			return true;
+		}
+		case IMLOp::EXTS8:
+			e.MOVSX_r8(Gpr(inst.r[0]), Gpr(inst.r[1]));
+			return true;
+		case IMLOp::EXTS16:
+			e.MOVSX_r16(Gpr(inst.r[0]), Gpr(inst.r[1]));
+			return true;
+		case IMLOp::CNTLZ:
+			EmitCountLeadingZeros(Gpr(inst.r[0]), Gpr(inst.r[1]));
+			return true;
+		case IMLOp::BSWAP32:
+		{
+			uint8 d = Gpr(inst.r[0]);
+			MoveGpr(d, Gpr(inst.r[1]));
+			e.BSWAP(d);
+			return true;
+		}
+		case IMLOp::BSWAP16:
+			e.MOVZX_r16(RAX, Gpr(inst.r[1]));
+			e.ROL16_ri(RAX, 8);
+			e.MOV_rr(Gpr(inst.r[0]), RAX);
+			return true;
+		case IMLOp::ADDC:
+		case IMLOp::ADDE:
+		{
+			e.MOV_rr(RAX, Gpr(inst.r[2]));
+			if (inst.flags & IMLF_INV_A)
+				e.NOT(RAX);
+			if (inst.op == IMLOp::ADDE)
+			{
+				// CF = carry in
+				e.MOV_rr(RCX, Gpr(inst.r[1]));
+				e.NEG(RCX);
+			}
+			AluOp op = inst.op == IMLOp::ADDE ? ALU_ADC : ALU_ADD;
+			if (inst.HasImm())
+				e.ALU_ri(op, RAX, (uint32)inst.imm);
+			else
+				e.ALU_rr(op, RAX, Gpr(inst.r[3]));
+			e.SETcc(CC_B, RCX);
+			e.MOVZX_r8(RCX, RCX);
+			e.MOV_rr(Gpr(inst.r[0]), RAX);
+			e.MOV_rr(Gpr(inst.r[1]), RCX);
+			return true;
+		}
+		case IMLOp::CMPSET:
+			if (inst.HasImm())
+				e.ALU_ri(ALU_CMP, Gpr(inst.r[1]), (uint32)inst.imm);
+			else
+				e.ALU_rr(ALU_CMP, Gpr(inst.r[1]), Gpr(inst.r[2]));
+			e.SETcc(ToHostCond(inst.Cond()), RAX);
+			e.MOVZX_r8(RAX, RAX);
+			e.MOV_rr(Gpr(inst.r[0]), RAX);
+			return true;
+		case IMLOp::CMPCR:
+		{
+			bool isSigned = inst.Cond() == IMLCond::SLT;
+			if (inst.HasImm())
+				e.ALU_ri(ALU_CMP, Gpr(inst.r[3]), (uint32)inst.imm);
+			else
+				e.ALU_rr(ALU_CMP, Gpr(inst.r[3]), Gpr(inst.r[4]));
+			e.SETcc(isSigned ? CC_L : CC_B, RAX);
+			e.SETcc(isSigned ? CC_G : CC_A, RCX);
+			e.SETcc(CC_E, RDX);
+			e.MOVZX_r8(Gpr(inst.r[0]), RAX);
+			e.MOVZX_r8(Gpr(inst.r[1]), RCX);
+			e.MOVZX_r8(Gpr(inst.r[2]), RDX);
+			return true;
+		}
+		default:
+			cemu_assert_debug(false);
+			return false;
+		}
+	}
+
+	bool CodeGenerator::EmitMemory(const IMLInstruction& inst)
+	{
+		auto& e = m_e;
+		switch (inst.op)
+		{
+		case IMLOp::LOAD:
+		{
+			uint8 d = Gpr(inst.r[0]);
+			Mem m = GuestAddress(inst);
+			bool reverse = (inst.flags & IMLF_BYTEREV) != 0;
+			if (inst.size == 4)
+			{
+				if (reverse)
+					e.MOV_rm(d, m);
+				else
+					EmitLoadSwapped32(d, m);
+			}
+			else if (inst.size == 2)
+			{
+				e.MOVZX_m16(d, m);
+				if (!reverse)
+					e.ROL16_ri(d, 8);
+				if (inst.flags & IMLF_SIGNEXT)
+					e.MOVSX_r16(d, d);
+			}
+			else
+			{
+				if (inst.flags & IMLF_SIGNEXT)
+					e.MOVSX_m8(d, m);
+				else
+					e.MOVZX_m8(d, m);
+			}
+			return true;
+		}
+		case IMLOp::STORE:
+		{
+			e.MOV_rr(RCX, Gpr(inst.r[0]));
+			Mem m = GuestAddress(inst);
+			bool reverse = (inst.flags & IMLF_BYTEREV) != 0;
+			if (inst.size == 4)
+			{
+				if (!reverse)
+					e.BSWAP(RCX);
+				e.MOV_mr(m, RCX);
+			}
+			else if (inst.size == 2)
+			{
+				if (!reverse)
+					e.ROL16_ri(RCX, 8);
+				e.MOV_mr16(m, RCX);
+			}
+			else
+				e.MOV_mr8(m, RCX);
+			return true;
+		}
+		case IMLOp::ZEROLINE:
+			GuestAddressToEAX(inst);
+			e.ALU_ri(ALU_AND, RAX, ~31u);
+			e.XORPD(kXmmScratch0, kXmmScratch0);
+			e.MOVUPS_mr(mem(kRegMemBase, RAX, 1, 0), kXmmScratch0);
+			e.MOVUPS_mr(mem(kRegMemBase, RAX, 1, 16), kXmmScratch0);
+			return true;
+		case IMLOp::CMPXCHG:
+		{
+			// r0 = ok, r1 = ea, r2 = expected, r3 = new value, r4 = attempt (0: fail without access)
+			e.MOV_rr(RDX, Gpr(inst.r[1]));
+			e.MOV_rr(RAX, Gpr(inst.r[2]));
+			e.BSWAP(RAX);
+			e.MOV_rr(RCX, Gpr(inst.r[3]));
+			e.BSWAP(RCX);
+			e.TEST_rr(Gpr(inst.r[4]), Gpr(inst.r[4]));
+			size_t skip = e.Jcc_rel32(CC_E);
+			e.LOCK_CMPXCHG_mr(mem(kRegMemBase, RDX, 1, 0), RCX);
+			e.SETcc(CC_E, RAX);
+			e.MOVZX_r8(RAX, RAX);
+			size_t done = e.JMP_rel32();
+			e.BindRel32(skip, e.Size());
+			e.ALU_rr(ALU_XOR, RAX, RAX);
+			e.BindRel32(done, e.Size());
+			e.MOV_rr(Gpr(inst.r[0]), RAX);
+			return true;
+		}
+		default:
+			return false;
+		}
+	}
+
+	bool CodeGenerator::EmitHome(const IMLInstruction& inst)
+	{
+		auto& e = m_e;
+		IMLReg owner = (IMLReg)inst.imm;
+		const IMLVRegInfo& info = m_func.vregs[owner];
+		Mem m;
+		if (IMLGuest::IsGuest(owner))
+			m = CPU(info.home);
+		else
+		{
+			cemu_assert_debug(info.home >= 0 && info.home < (sint32)kMaxSpillSlots);
+			m = Stack(kFrameSpillArea + info.home * 16);
+		}
+		bool isFloat = m_func.KindOf(inst.r[0]) == IMLRegKind::Float;
+		bool isByte = IMLGuest::IsGuest(owner) && info.homeSize == 1;
+		if (inst.op == IMLOp::HOMELOAD)
+		{
+			if (isFloat)
+				e.MOVUPD_rm(Fpr(inst.r[0]), m);
+			else if (isByte)
+				e.MOVZX_m8(Gpr(inst.r[0]), m);
+			else
+				e.MOV_rm(Gpr(inst.r[0]), m);
 		}
 		else
-			assert_dbg();
-	}
-	else
-	{
-		assert_dbg();
-	}
-}
-
-void x64Gen_dec_mem32(x64GenContext_t* x64GenContext, sint32 memoryRegister, uint32 memoryImmU32)
-{
-	// DEC dword [<reg64>+imm]
-	sint32 memoryImmS32 = (sint32)memoryImmU32;
-	if (memoryRegister != X86_REG_RSP)
-		assert_dbg(); // not supported yet
-	if (memoryImmS32 >= -128 && memoryImmS32 <= 127)
-	{
-		x64Gen_writeU8(x64GenContext, 0xFF);
-		x64Gen_writeU8(x64GenContext, 0x4C);
-		x64Gen_writeU8(x64GenContext, 0x24);
-		x64Gen_writeU8(x64GenContext, (uint8)memoryImmU32);
-	}
-	else
-	{
-		x64Gen_writeU8(x64GenContext, 0xFF);
-		x64Gen_writeU8(x64GenContext, 0x8C);
-		x64Gen_writeU8(x64GenContext, 0x24);
-		x64Gen_writeU32(x64GenContext, memoryImmU32);
-	}
-}
-
-void x64Gen_imul_reg64Low32_reg64Low32(x64GenContext_t* x64GenContext, sint32 destRegister, sint32 operandRegister)
-{
-	// IMUL <destReg64_low32>, <operandReg64_low32>
-	if( destRegister >= 8 && operandRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x45);
-	else if( operandRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	else if( destRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x44);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0xAF);
-	x64Gen_writeU8(x64GenContext, 0xC0+(operandRegister&7)+(destRegister&7)*8);
-}
-
-void x64Gen_idiv_reg64Low32(x64GenContext_t* x64GenContext, sint32 operandRegister)
-{
-	// IDIV <destReg64_low32>
-	if( operandRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	x64Gen_writeU8(x64GenContext, 0xF7);
-	x64Gen_writeU8(x64GenContext, 0xF8+(operandRegister&7));
-}
-
-void x64Gen_div_reg64Low32(x64GenContext_t* x64GenContext, sint32 operandRegister)
-{
-	// DIV <destReg64_low32>
-	if( operandRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	x64Gen_writeU8(x64GenContext, 0xF7);
-	x64Gen_writeU8(x64GenContext, 0xF0+(operandRegister&7));
-}
-
-void x64Gen_imul_reg64Low32(x64GenContext_t* x64GenContext, sint32 operandRegister)
-{
-	// IMUL <destReg64_low32>
-	if( operandRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	x64Gen_writeU8(x64GenContext, 0xF7);
-	x64Gen_writeU8(x64GenContext, 0xE8+(operandRegister&7));
-}
-
-void x64Gen_mul_reg64Low32(x64GenContext_t* x64GenContext, sint32 operandRegister)
-{
-	// MUL <destReg64_low32>
-	if( operandRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	x64Gen_writeU8(x64GenContext, 0xF7);
-	x64Gen_writeU8(x64GenContext, 0xE0+(operandRegister&7));
-}
-
-void x64Gen_and_reg64Low32_imm32(x64GenContext_t* x64GenContext, sint32 srcRegister, uint32 immU32)
-{
-	sint32 immS32 = (sint32)immU32;
-	if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	if( immS32 >= -128 && immS32 <= 127 )
-	{
-		x64Gen_writeU8(x64GenContext, 0x83);
-		x64Gen_writeU8(x64GenContext, 0xE0+(srcRegister&7));
-		x64Gen_writeU8(x64GenContext, (uint8)immS32);
-	}
-	else
-	{
-		if( srcRegister == X86_REG_RAX )
 		{
-			// special EAX short form
-			x64Gen_writeU8(x64GenContext, 0x25);
+			if (isFloat)
+				e.MOVUPD_mr(m, Fpr(inst.r[0]));
+			else if (isByte)
+				e.MOV_mr8(m, Gpr(inst.r[0]));
+			else
+				e.MOV_mr(m, Gpr(inst.r[0]));
 		}
-		else
+		return true;
+	}
+
+	bool CodeGenerator::EmitControl(const IMLInstruction& inst, IMLSegment* block, IMLSegment* layoutNext)
+	{
+		auto& e = m_e;
+		auto conditional = [&](Cond cc)
 		{
-			x64Gen_writeU8(x64GenContext, 0x81);
-			x64Gen_writeU8(x64GenContext, 0xE0+(srcRegister&7));
+			if (block->taken == layoutNext)
+				JccToBlock(InvertHostCond(cc), block->next);
+			else
+			{
+				JccToBlock(cc, block->taken);
+				if (block->next != layoutNext)
+					JumpToBlock(block->next);
+			}
+		};
+		auto leaveOrTable = [&]()
+		{
+			// RAX = guest address. Only the code area has jump table entries
+			e.ALU_ri(ALU_CMP, RAX, PPC_REC_CODE_AREA_END);
+			size_t outside = e.Jcc_rel32(CC_AE);
+			EmitJumpViaTableEAX();
+			e.BindRel32(outside, e.Size());
+			EmitLeaveEAX();
+		};
+		switch (inst.op)
+		{
+		case IMLOp::JUMP:
+			if (block->taken != layoutNext)
+				JumpToBlock(block->taken);
+			return true;
+		case IMLOp::BRANCH:
+		{
+			uint8 r = Gpr(inst.r[0]);
+			e.TEST_rr(r, r);
+			conditional(inst.Cond() == IMLCond::NE ? CC_NE : CC_E);
+			return true;
 		}
-		x64Gen_writeU32(x64GenContext, immU32);
-	}
-}
-
-void x64Gen_and_reg64Low32_reg64Low32(x64GenContext_t* x64GenContext, sint32 destRegister, sint32 srcRegister)
-{
-	// AND <destReg64_lowDWORD>, <srcReg64_lowDWORD>
-	if( destRegister >= 8 && srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x45);
-	else if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x44);
-	else if( destRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	x64Gen_writeU8(x64GenContext, 0x21);
-	x64Gen_writeU8(x64GenContext, 0xC0+(destRegister&7)+(srcRegister&7)*8);
-}
-
-void x64Gen_test_reg64Low32_reg64Low32(x64GenContext_t* x64GenContext, sint32 destRegister, sint32 srcRegister)
-{
-	// TEST <destReg64_lowDWORD>, <srcReg64_lowDWORD>
-	if( destRegister >= 8 && srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x45);
-	else if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	else if( destRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x44);
-	x64Gen_writeU8(x64GenContext, 0x85);
-	x64Gen_writeU8(x64GenContext, 0xC0+(destRegister&7)*8+(srcRegister&7));
-}
-
-void x64Gen_test_reg64Low32_imm32(x64GenContext_t* x64GenContext, sint32 srcRegister, uint32 immU32)
-{
-	sint32 immS32 = (sint32)immU32;
-	if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	if( srcRegister == X86_REG_RAX )
-	{
-		// special EAX short form
-		x64Gen_writeU8(x64GenContext, 0xA9);
-	}
-	else
-	{
-		x64Gen_writeU8(x64GenContext, 0xF7);
-		x64Gen_writeU8(x64GenContext, 0xC0+(srcRegister&7));
-	}
-	x64Gen_writeU32(x64GenContext, immU32);
-}
-
-void x64Gen_cmp_reg16_imm16(x64GenContext_t* x64GenContext, sint32 dstRegister, uint16 value)
-{
-	cemu_assert_debug(dstRegister >= 0 && dstRegister < 16);
-	x64Gen_writeU8(x64GenContext, 0x66);
-	if (dstRegister >= 8)
-		x64Gen_writeU8(x64GenContext, 0x41);
-	x64Gen_writeU8(x64GenContext, 0x81);
-	x64Gen_writeU8(x64GenContext, 0xF8 | (dstRegister & 7));
-	x64Gen_writeU16(x64GenContext, value);
-}
-
-void x64Gen_cmp_reg64Low32_imm32(x64GenContext_t* x64GenContext, sint32 srcRegister, sint32 immS32)
-{
-	if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	if( immS32 >= -128 && immS32 <= 127 )
-	{
-		// 83 F8 00          CMP EAX,0
-		x64Gen_writeU8(x64GenContext, 0x83);
-		x64Gen_writeU8(x64GenContext, 0xF8+(srcRegister&7));
-		x64Gen_writeU8(x64GenContext, (uint8)immS32);
-	}
-	else
-	{
-		if( srcRegister == X86_REG_RAX )
+		case IMLOp::BRANCHCMP:
+			if (inst.HasImm())
+				e.ALU_ri(ALU_CMP, Gpr(inst.r[0]), (uint32)inst.imm);
+			else
+				e.ALU_rr(ALU_CMP, Gpr(inst.r[0]), Gpr(inst.r[1]));
+			conditional(ToHostCond(inst.Cond()));
+			return true;
+		case IMLOp::CYCLECHECK:
+			e.ALU_mi(ALU_CMP, CPU(offsetof(PPCInterpreter_t, remainingCycles)), 0);
+			conditional(CC_L);
+			return true;
+		case IMLOp::EXITB:
+			e.MOV_ri32(RAX, inst.addr);
+			if (inst.addr >= PPC_REC_CODE_AREA_END)
+				EmitLeaveEAX();
+			else
+				EmitJumpViaTableEAX();
+			return true;
+		case IMLOp::EXITBR:
+			e.MOV_rr(RAX, Gpr(inst.r[0]));
+			leaveOrTable();
+			return true;
+		case IMLOp::EXITLEAVE:
+			e.MOV_ri32(RAX, inst.addr);
+			EmitLeaveEAX();
+			return true;
+		case IMLOp::HLE:
 		{
-			// special RAX short form
-			x64Gen_writeU8(x64GenContext, 0x3D);
+			e.MOV_mi32(CPU(offsetof(PPCInterpreter_t, instructionPointer)), inst.addr);
+			CallHelper2((const void*)&Helper_HLE, (uint32)inst.imm, 0);
+			e.MOV_rm(RAX, CPU(offsetof(PPCInterpreter_t, instructionPointer)));
+			e.ALU_mi(ALU_CMP, CPU(offsetof(PPCInterpreter_t, remainingCycles)), 0);
+			size_t timeUp = e.Jcc_rel32(CC_L);
+			leaveOrTable();
+			e.BindRel32(timeUp, e.Size());
+			EmitLeaveEAX();
+			return true;
 		}
-		else
-		{
-			x64Gen_writeU8(x64GenContext, 0x81);
-			x64Gen_writeU8(x64GenContext, 0xF8+(srcRegister&7));
+		default:
+			cemu_assert_debug(false);
+			return false;
 		}
-		x64Gen_writeU32(x64GenContext, (uint32)immS32);
 	}
-}
-
-void x64Gen_cmp_reg64Low32_reg64Low32(x64GenContext_t* x64GenContext, sint32 destRegister, sint32 srcRegister)
-{
-	// CMP <destReg64_lowDWORD>, <srcReg64_lowDWORD>
-	if( destRegister >= 8 && srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x45);
-	else if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x44);
-	else if( destRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	x64Gen_writeU8(x64GenContext, 0x39);
-	x64Gen_writeU8(x64GenContext, 0xC0+(destRegister&7)+(srcRegister&7)*8);
-}
-
-void x64Gen_cmp_reg64Low32_mem32reg64(x64GenContext_t* x64GenContext, sint32 destRegister, sint32 memRegister, sint32 memImmS32)
-{
-	// CMP <destReg64_lowDWORD>, DWORD [<memRegister>+<immS32>]
-	if( memRegister == X86_REG_RSP )
-	{
-		if( memImmS32 >= -128 && memImmS32 <= 127 )
-			assert_dbg(); // todo -> Shorter instruction form
-		if( destRegister >= 8 )
-			x64Gen_writeU8(x64GenContext, 0x44);
-		x64Gen_writeU8(x64GenContext, 0x3B);
-		x64Gen_writeU8(x64GenContext, 0x84+(destRegister&7)*8);
-		x64Gen_writeU8(x64GenContext, 0x24);
-		x64Gen_writeU32(x64GenContext, (uint32)memImmS32);
-	}
-	else
-	{
-		assert_dbg();
-	}
-}
-
-void x64Gen_or_reg64Low32_imm32(x64GenContext_t* x64GenContext, sint32 srcRegister, uint32 immU32)
-{
-	sint32 immS32 = (sint32)immU32;
-	if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	if( immS32 >= -128 && immS32 <= 127 )
-	{
-		x64Gen_writeU8(x64GenContext, 0x83);
-		x64Gen_writeU8(x64GenContext, 0xC8+(srcRegister&7));
-		x64Gen_writeU8(x64GenContext, (uint8)immS32);
-	}
-	else
-	{
-		if( srcRegister == X86_REG_RAX )
-		{
-			// special EAX short form
-			x64Gen_writeU8(x64GenContext, 0x0D);
-		}
-		else
-		{
-			x64Gen_writeU8(x64GenContext, 0x81);
-			x64Gen_writeU8(x64GenContext, 0xC8+(srcRegister&7));
-		}
-		x64Gen_writeU32(x64GenContext, immU32);
-	}
-}
-
-void x64Gen_or_reg64Low32_reg64Low32(x64GenContext_t* x64GenContext, sint32 destRegister, sint32 srcRegister)
-{
-	// OR <destReg64_lowDWORD>, <srcReg64_lowDWORD>
-	if( destRegister >= 8 && srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x45);
-	else if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x44);
-	else if( destRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	x64Gen_writeU8(x64GenContext, 0x09);
-	x64Gen_writeU8(x64GenContext, 0xC0+(destRegister&7)+(srcRegister&7)*8);
-}
-
-void x64Gen_xor_reg32_reg32(x64GenContext_t* x64GenContext, sint32 destRegister, sint32 srcRegister)
-{
-	// XOR <destReg>, <srcReg>
-	x64Gen_writeU8(x64GenContext, 0x33);
-	x64Gen_writeU8(x64GenContext, 0xC0+srcRegister+destRegister*8);
-}
-
-void x64Gen_xor_reg64Low32_reg64Low32(x64GenContext_t* x64GenContext, sint32 destRegister, sint32 srcRegister)
-{
-	// XOR <destReg64_lowDWORD>, <srcReg64_lowDWORD>
-	if( destRegister >= 8 && srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x45);
-	else if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x44);
-	else if( destRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	x64Gen_writeU8(x64GenContext, 0x31);
-	x64Gen_writeU8(x64GenContext, 0xC0+(destRegister&7)+(srcRegister&7)*8);
-}
-
-void x64Gen_xor_reg64Low32_imm32(x64GenContext_t* x64GenContext, sint32 srcRegister, uint32 immU32)
-{
-	sint32 immS32 = (sint32)immU32;
-	if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	if( immS32 >= -128 && immS32 <= 127 )
-	{
-		x64Gen_writeU8(x64GenContext, 0x83);
-		x64Gen_writeU8(x64GenContext, 0xF0+(srcRegister&7));
-		x64Gen_writeU8(x64GenContext, (uint8)immS32);
-	}
-	else
-	{
-		if( srcRegister == X86_REG_RAX )
-		{
-			// special EAX short form
-			x64Gen_writeU8(x64GenContext, 0x35);
-		}
-		else
-		{
-			x64Gen_writeU8(x64GenContext, 0x81);
-			x64Gen_writeU8(x64GenContext, 0xF0+(srcRegister&7));
-		}
-		x64Gen_writeU32(x64GenContext, immU32);
-	}
-}
-
-void x64Gen_rol_reg64Low32_imm8(x64GenContext_t* x64GenContext, sint32 srcRegister, sint8 immS8)
-{
-	if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	if( immS8 == 1 )
-	{
-		// short form for 1 bit ROL
-		x64Gen_writeU8(x64GenContext, 0xD1);
-		x64Gen_writeU8(x64GenContext, 0xC0+(srcRegister&7));
-	}
-	else
-	{
-		x64Gen_writeU8(x64GenContext, 0xC1);
-		x64Gen_writeU8(x64GenContext, 0xC0+(srcRegister&7));
-		x64Gen_writeU8(x64GenContext, (uint8)immS8);
-	}
-}
-
-void x64Gen_rol_reg64Low32_cl(x64GenContext_t* x64GenContext, sint32 srcRegister)
-{
-	if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	x64Gen_writeU8(x64GenContext, 0xD3);
-	x64Gen_writeU8(x64GenContext, 0xC0+(srcRegister&7));
-}
-
-void x64Gen_rol_reg64Low16_imm8(x64GenContext_t* x64GenContext, sint32 srcRegister, sint8 immS8)
-{
-	x64Gen_writeU8(x64GenContext, 0x66); // 16bit prefix
-	if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	if( immS8 == 1 )
-	{
-		// short form for 1 bit ROL
-		x64Gen_writeU8(x64GenContext, 0xD1);
-		x64Gen_writeU8(x64GenContext, 0xC0+(srcRegister&7));
-	}
-	else
-	{
-		x64Gen_writeU8(x64GenContext, 0xC1);
-		x64Gen_writeU8(x64GenContext, 0xC0+(srcRegister&7));
-		x64Gen_writeU8(x64GenContext, (uint8)immS8);
-	}
-}
-
-void x64Gen_rol_reg64_imm8(x64GenContext_t* x64GenContext, sint32 srcRegister, sint8 immS8)
-{
-	if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x49);
-	else
-		x64Gen_writeU8(x64GenContext, 0x48);
-	if( immS8 == 1 )
-	{
-		// short form for 1 bit ROL
-		x64Gen_writeU8(x64GenContext, 0xD1);
-		x64Gen_writeU8(x64GenContext, 0xC0+(srcRegister&7));
-	}
-	else
-	{
-		x64Gen_writeU8(x64GenContext, 0xC1);
-		x64Gen_writeU8(x64GenContext, 0xC0+(srcRegister&7));
-		x64Gen_writeU8(x64GenContext, (uint8)immS8);
-	}
-}
-
-void x64Gen_shl_reg64Low32_imm8(x64GenContext_t* x64GenContext, sint32 srcRegister, sint8 immS8)
-{
-	if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	if( immS8 == 1 )
-	{
-		// short form for 1 bit SHL
-		x64Gen_writeU8(x64GenContext, 0xD1);
-		x64Gen_writeU8(x64GenContext, 0xF0+(srcRegister&7));
-	}
-	else
-	{
-		x64Gen_writeU8(x64GenContext, 0xC1);
-		x64Gen_writeU8(x64GenContext, 0xF0+(srcRegister&7));
-		x64Gen_writeU8(x64GenContext, (uint8)immS8);
-	}
-}
-
-void x64Gen_shr_reg8_imm8(x64GenContext_t* x64GenContext, sint32 dstRegister, uint8 shift)
-{
-	cemu_assert_debug(dstRegister >= 0 && dstRegister < 16);
-	if (dstRegister >= 4)
-		x64Gen_writeU8(x64GenContext, dstRegister >= 8 ? 0x41 : 0x40);
-	x64Gen_writeU8(x64GenContext, 0xC0);
-	x64Gen_writeU8(x64GenContext, 0xE8 | (dstRegister & 7));
-	x64Gen_writeU8(x64GenContext, shift);
-}
-
-void x64Gen_shr_reg64Low32_imm8(x64GenContext_t* x64GenContext, sint32 srcRegister, sint8 immS8)
-{
-	if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	if( immS8 == 1 )
-	{
-		// short form for 1 bit SHR
-		x64Gen_writeU8(x64GenContext, 0xD1);
-		x64Gen_writeU8(x64GenContext, 0xE8+(srcRegister&7));
-	}
-	else
-	{
-		x64Gen_writeU8(x64GenContext, 0xC1);
-		x64Gen_writeU8(x64GenContext, 0xE8+(srcRegister&7));
-		x64Gen_writeU8(x64GenContext, (uint8)immS8);
-	}
-}
-
-void x64Gen_sar_reg64Low32_imm8(x64GenContext_t* x64GenContext, sint32 srcRegister, sint8 immS8)
-{
-	if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	if( immS8 == 1 )
-	{
-		// short form for 1 bit ROL
-		x64Gen_writeU8(x64GenContext, 0xD1);
-		x64Gen_writeU8(x64GenContext, 0xF8+(srcRegister&7));
-	}
-	else
-	{
-		x64Gen_writeU8(x64GenContext, 0xC1);
-		x64Gen_writeU8(x64GenContext, 0xF8+(srcRegister&7));
-		x64Gen_writeU8(x64GenContext, (uint8)immS8);
-	}
-}
-
-void x64Gen_not_reg64Low32(x64GenContext_t* x64GenContext, sint32 destRegister)
-{
-	if( destRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	x64Gen_writeU8(x64GenContext, 0xF7);
-	x64Gen_writeU8(x64GenContext, 0xD0+(destRegister&7));
-}
-
-void x64Gen_neg_reg64Low32(x64GenContext_t* x64GenContext, sint32 destRegister)
-{
-	if( destRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	x64Gen_writeU8(x64GenContext, 0xF7);
-	x64Gen_writeU8(x64GenContext, 0xD8+(destRegister&7));
-}
-
-void x64Gen_cdq(x64GenContext_t* x64GenContext)
-{
-	x64Gen_writeU8(x64GenContext, 0x99);
-}
-
-void x64Gen_bswap_reg64Lower32bit(x64GenContext_t* x64GenContext, sint32 destRegister)
-{
-	if( destRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0xC8+(destRegister&7));
-}
-
-void x64Gen_lzcnt_reg64Low32_reg64Low32(x64GenContext_t* x64GenContext, sint32 destRegister, sint32 srcRegister)
-{
-	// SSE4
-	// LZCNT <destReg>, <srcReg>
-	x64Gen_writeU8(x64GenContext, 0xF3);
-	if( destRegister >= 8 && srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x45);
-	else if( destRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x44);
-	else if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0xBD);
-	x64Gen_writeU8(x64GenContext, 0xC0+(destRegister&7)*8+(srcRegister&7));
-}
-
-void x64Gen_bsr_reg64Low32_reg64Low32(x64GenContext_t* x64GenContext, sint32 destRegister, sint32 srcRegister)
-{
-	// BSR <destReg>, <srcReg>
-	if( destRegister >= 8 && srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x45);
-	else if( destRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x44);
-	else if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0xBD);
-	x64Gen_writeU8(x64GenContext, 0xC0+(destRegister&7)*8+(srcRegister&7));
-}
-
-void x64Gen_setcc_mem8(x64GenContext_t* x64GenContext, sint32 conditionType, sint32 memoryRegister, uint32 memoryImmU32)
-{
-	// SETcc [<reg64>+imm]
-	sint32 memoryImmS32 = (sint32)memoryImmU32;
-	if( memoryRegister != X86_REG_RSP )
-		assert_dbg(); // not supported
-	if( memoryRegister >= 8 )
-		assert_dbg(); // not supported
-	if( memoryImmS32 >= -128 && memoryImmS32 <= 127 )
-	{
-		if( conditionType == X86_CONDITION_EQUAL )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x94);
-			x64Gen_writeU8(x64GenContext, 0x44);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU8(x64GenContext, (uint32)memoryImmU32);
-		}
-		else if( conditionType == X86_CONDITION_NOT_EQUAL )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x95);
-			x64Gen_writeU8(x64GenContext, 0x44);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU8(x64GenContext, (uint32)memoryImmU32);
-		}
-		else if( conditionType == X86_CONDITION_UNSIGNED_ABOVE )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x97);
-			x64Gen_writeU8(x64GenContext, 0x44);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU8(x64GenContext, (uint32)memoryImmU32);
-		}
-		else if( conditionType == X86_CONDITION_UNSIGNED_ABOVE_EQUAL )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x93);
-			x64Gen_writeU8(x64GenContext, 0x44);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU8(x64GenContext, (uint32)memoryImmU32);
-		}
-		else if( conditionType == X86_CONDITION_UNSIGNED_BELOW )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x92);
-			x64Gen_writeU8(x64GenContext, 0x44);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU8(x64GenContext, (uint32)memoryImmU32);
-		}
-		else if( conditionType == X86_CONDITION_UNSIGNED_BELOW_EQUAL )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x96);
-			x64Gen_writeU8(x64GenContext, 0x44);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU8(x64GenContext, (uint32)memoryImmU32);
-		}
-		else if( conditionType == X86_CONDITION_SIGNED_GREATER )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x9F);
-			x64Gen_writeU8(x64GenContext, 0x44);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU8(x64GenContext, (uint32)memoryImmU32);
-		}
-		else if( conditionType == X86_CONDITION_SIGNED_GREATER_EQUAL )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x9D);
-			x64Gen_writeU8(x64GenContext, 0x44);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU8(x64GenContext, (uint32)memoryImmU32);
-		}
-		else if( conditionType == X86_CONDITION_SIGNED_LESS )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x9C);
-			x64Gen_writeU8(x64GenContext, 0x44);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU8(x64GenContext, (uint32)memoryImmU32);
-		}
-		else if( conditionType == X86_CONDITION_SIGNED_LESS_EQUAL )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x9E);
-			x64Gen_writeU8(x64GenContext, 0x44);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU8(x64GenContext, (uint32)memoryImmU32);
-		}		
-		else if( conditionType == X86_CONDITION_PARITY )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x9A);
-			x64Gen_writeU8(x64GenContext, 0x44);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU8(x64GenContext, (uint32)memoryImmU32);
-		}
-		else
-			assert_dbg();
-	}
-	else
-	{
-		if( conditionType == X86_CONDITION_EQUAL )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x94);
-			x64Gen_writeU8(x64GenContext, 0x84);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU32(x64GenContext, (uint32)memoryImmU32);
-		}
-		else if( conditionType == X86_CONDITION_NOT_EQUAL )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x95);
-			x64Gen_writeU8(x64GenContext, 0x84);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU32(x64GenContext, (uint32)memoryImmU32);
-		}
-		else if( conditionType == X86_CONDITION_UNSIGNED_ABOVE )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x97);
-			x64Gen_writeU8(x64GenContext, 0x84);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU32(x64GenContext, (uint32)memoryImmU32);
-		}
-		else if( conditionType == X86_CONDITION_UNSIGNED_ABOVE_EQUAL )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x93);
-			x64Gen_writeU8(x64GenContext, 0x84);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU32(x64GenContext, (uint32)memoryImmU32);
-		}
-		else if( conditionType == X86_CONDITION_UNSIGNED_BELOW || conditionType == X86_CONDITION_CARRY )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x92);
-			x64Gen_writeU8(x64GenContext, 0x84);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU32(x64GenContext, (uint32)memoryImmU32);
-		}
-		else if( conditionType == X86_CONDITION_NOT_CARRY )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x93);
-			x64Gen_writeU8(x64GenContext, 0x84);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU32(x64GenContext, (uint32)memoryImmU32);
-		}
-		else if( conditionType == X86_CONDITION_UNSIGNED_BELOW_EQUAL )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x96);
-			x64Gen_writeU8(x64GenContext, 0x84);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU32(x64GenContext, (uint32)memoryImmU32);
-		}
-		else if( conditionType == X86_CONDITION_SIGNED_GREATER )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x9F);
-			x64Gen_writeU8(x64GenContext, 0x84);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU32(x64GenContext, (uint32)memoryImmU32);
-		}
-		else if( conditionType == X86_CONDITION_SIGNED_GREATER_EQUAL )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x9D);
-			x64Gen_writeU8(x64GenContext, 0x84);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU32(x64GenContext, (uint32)memoryImmU32);
-		}
-		else if( conditionType == X86_CONDITION_SIGNED_LESS )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x9C);
-			x64Gen_writeU8(x64GenContext, 0x84);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU32(x64GenContext, (uint32)memoryImmU32);
-		}
-		else if( conditionType == X86_CONDITION_SIGNED_LESS_EQUAL )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x9E);
-			x64Gen_writeU8(x64GenContext, 0x84);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU32(x64GenContext, (uint32)memoryImmU32);
-		}
-		else if( conditionType == X86_CONDITION_SIGN )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x98);
-			x64Gen_writeU8(x64GenContext, 0x84);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU32(x64GenContext, (uint32)memoryImmU32);
-		}
-		else if( conditionType == X86_CONDITION_PARITY )
-		{
-			x64Gen_writeU8(x64GenContext, 0x0F);
-			x64Gen_writeU8(x64GenContext, 0x9A);
-			x64Gen_writeU8(x64GenContext, 0x84);
-			x64Gen_writeU8(x64GenContext, 0x24);
-			x64Gen_writeU32(x64GenContext, (uint32)memoryImmU32);
-		}
-		else
-			assert_dbg();
-	}
-}
-
-void x64Gen_setcc_reg64b(x64GenContext_t* x64GenContext, sint32 conditionType, sint32 dataRegister)
-{
-	// SETcc <reg64_low8>
-	if (conditionType == X86_CONDITION_NOT_EQUAL)
-	{
-		if (dataRegister >= 8)
-			x64Gen_writeU8(x64GenContext, 0x41);
-		else if (dataRegister >= 4)
-			x64Gen_writeU8(x64GenContext, 0x40);
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x95);
-		x64Gen_writeU8(x64GenContext, 0xC0 + (dataRegister & 7));
-	}
-	else if (conditionType == X86_CONDITION_EQUAL)
-	{
-		if (dataRegister >= 8)
-			x64Gen_writeU8(x64GenContext, 0x41);
-		else if (dataRegister >= 4)
-			x64Gen_writeU8(x64GenContext, 0x40);
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x94);
-		x64Gen_writeU8(x64GenContext, 0xC0 + (dataRegister & 7));
-	}
-	else
-		assert_dbg();
-}
-
-void x64Gen_bt_mem8(x64GenContext_t* x64GenContext, sint32 memoryRegister, uint32 memoryImmU32, uint8 bitIndex)
-{
-	// BT [<reg64>+imm], bitIndex	(bit test)
-	sint32 memoryImmS32 = (sint32)memoryImmU32;
-	if( memoryRegister != X86_REG_RSP )
-		assert_dbg(); // not supported yet
-	if( memoryImmS32 >= -128 && memoryImmS32 <= 127 )
-	{
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0xBA);
-		x64Gen_writeU8(x64GenContext, 0x64);
-		x64Gen_writeU8(x64GenContext, 0x24);
-		x64Gen_writeU8(x64GenContext, (uint8)memoryImmU32);
-		x64Gen_writeU8(x64GenContext, bitIndex);
-	}
-	else
-	{
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0xBA);
-		x64Gen_writeU8(x64GenContext, 0xA4);
-		x64Gen_writeU8(x64GenContext, 0x24);
-		x64Gen_writeU32(x64GenContext, memoryImmU32);
-		x64Gen_writeU8(x64GenContext, bitIndex);
-	}
-}
-
-void x64Gen_cmc(x64GenContext_t* x64GenContext)
-{
-	x64Gen_writeU8(x64GenContext, 0xF5);
-}
-
-void x64Gen_jmp_imm32(x64GenContext_t* x64GenContext, uint32 destImm32)
-{
-	x64Gen_writeU8(x64GenContext, 0xE9);
-	x64Gen_writeU32(x64GenContext, destImm32);
-}
-
-void x64Gen_jmp_memReg64(x64GenContext_t* x64GenContext, sint32 memRegister, uint32 immU32)
-{
-	if( memRegister == X86_REG_NONE )
-	{
-		assert_dbg();
-	}
-	if( memRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	sint32 immS32 = (sint32)immU32;
-	if( immS32 == 0 )
-	{
-		x64Gen_writeU8(x64GenContext, 0xFF);
-		x64Gen_writeU8(x64GenContext, 0x20+(memRegister&7));
-	}
-	else if( immS32 >= -128 && immS32 <= 127 )
-	{
-		x64Gen_writeU8(x64GenContext, 0xFF);
-		x64Gen_writeU8(x64GenContext, 0x60+(memRegister&7));
-		x64Gen_writeU8(x64GenContext, (uint8)immU32);
-	}
-	else
-	{
-		x64Gen_writeU8(x64GenContext, 0xFF);
-		x64Gen_writeU8(x64GenContext, 0xA0+(memRegister&7));
-		x64Gen_writeU32(x64GenContext, immU32);
-	}
-}
-
-void x64Gen_jmpc_far(x64GenContext_t* x64GenContext, sint32 conditionType, sint32 relativeDest)
-{
-	// far JMPc #+relativeDest
-	if( conditionType == X86_CONDITION_NONE )
-	{
-		// E9 FFFFFFFF
-		x64Gen_writeU8(x64GenContext, 0xE9);
-	}
-	else if( conditionType == X86_CONDITION_UNSIGNED_BELOW || conditionType == X86_CONDITION_CARRY )
-	{
-		// 0F 82 FFFFFFFF
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x82);
-	}
-	else if( conditionType == X86_CONDITION_NOT_CARRY || conditionType == X86_CONDITION_UNSIGNED_ABOVE_EQUAL )
-	{
-		// 0F 83 FFFFFFFF
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x83);
-	}
-	else if( conditionType == X86_CONDITION_EQUAL )
-	{
-		// 0F 84 FFFFFFFF
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x84);
-	}
-	else if( conditionType == X86_CONDITION_NOT_EQUAL )
-	{
-		// 0F 85 FFFFFFFF
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x85);
-	}
-	else if( conditionType == X86_CONDITION_UNSIGNED_BELOW_EQUAL )
-	{
-		// 0F 86 FFFFFFFF
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x86);
-	}
-	else if( conditionType == X86_CONDITION_UNSIGNED_ABOVE )
-	{
-		// 0F 87 FFFFFFFF
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x87);
-	}
-	else if( conditionType == X86_CONDITION_SIGN )
-	{
-		// 0F 88 FFFFFFFF
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x88);
-	}
-	else if( conditionType == X86_CONDITION_NOT_SIGN )
-	{
-		// 0F 89 FFFFFFFF
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x89);
-	}
-	else if( conditionType == X86_CONDITION_PARITY )
-	{
-		// 0F 8A FFFFFFFF
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x8A);
-	}
-	else if( conditionType == X86_CONDITION_SIGNED_LESS )
-	{
-		// 0F 8C FFFFFFFF
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x8C);
-	}
-	else if( conditionType == X86_CONDITION_SIGNED_GREATER_EQUAL )
-	{
-		// 0F 8D FFFFFFFF
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x8D);
-	}
-	else if( conditionType == X86_CONDITION_SIGNED_LESS_EQUAL )
-	{
-		// 0F 8E FFFFFFFF
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x8E);
-	}
-	else if( conditionType == X86_CONDITION_SIGNED_GREATER )
-	{
-		// 0F 8F FFFFFFFF
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x8F);
-	}
-	else
-		assert_dbg();
-	x64Gen_writeU32(x64GenContext, (uint32)relativeDest);
-}
-
-
-void x64Gen_jmpc_near(x64GenContext_t* x64GenContext, sint32 conditionType, sint32 relativeDest)
-{
-	// near JMPc #+relativeDest
-	if (conditionType == X86_CONDITION_NONE)
-	{
-		x64Gen_writeU8(x64GenContext, 0xEB);
-	}
-	else if (conditionType == X86_CONDITION_UNSIGNED_BELOW || conditionType == X86_CONDITION_CARRY)
-	{
-		x64Gen_writeU8(x64GenContext, 0x72);
-	}
-	else if (conditionType == X86_CONDITION_NOT_CARRY || conditionType == X86_CONDITION_UNSIGNED_ABOVE_EQUAL)
-	{
-		x64Gen_writeU8(x64GenContext, 0x73);
-	}
-	else if (conditionType == X86_CONDITION_EQUAL)
-	{
-		x64Gen_writeU8(x64GenContext, 0x74);
-	}
-	else if (conditionType == X86_CONDITION_NOT_EQUAL)
-	{
-		x64Gen_writeU8(x64GenContext, 0x75);
-	}
-	else if (conditionType == X86_CONDITION_UNSIGNED_BELOW_EQUAL)
-	{
-		x64Gen_writeU8(x64GenContext, 0x76);
-	}
-	else if (conditionType == X86_CONDITION_UNSIGNED_ABOVE)
-	{
-		x64Gen_writeU8(x64GenContext, 0x77);
-	}
-	else if (conditionType == X86_CONDITION_SIGN)
-	{
-		x64Gen_writeU8(x64GenContext, 0x78);
-	}
-	else if (conditionType == X86_CONDITION_NOT_SIGN)
-	{
-		x64Gen_writeU8(x64GenContext, 0x79);
-	}
-	else if (conditionType == X86_CONDITION_PARITY)
-	{
-		x64Gen_writeU8(x64GenContext, 0x7A);
-	}
-	else if (conditionType == X86_CONDITION_SIGNED_LESS)
-	{
-		x64Gen_writeU8(x64GenContext, 0x7C);
-	}
-	else if (conditionType == X86_CONDITION_SIGNED_GREATER_EQUAL)
-	{
-		x64Gen_writeU8(x64GenContext, 0x7D);
-	}
-	else if (conditionType == X86_CONDITION_SIGNED_LESS_EQUAL)
-	{
-		x64Gen_writeU8(x64GenContext, 0x7E);
-	}
-	else if (conditionType == X86_CONDITION_SIGNED_GREATER)
-	{
-		x64Gen_writeU8(x64GenContext, 0x7F);
-	}
-	else
-		assert_dbg();
-	x64Gen_writeU8(x64GenContext, (uint8)relativeDest);
-}
-
-void x64Gen_push_reg64(x64GenContext_t* x64GenContext, sint32 srcRegister)
-{
-	if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	x64Gen_writeU8(x64GenContext, 0x50+(srcRegister&7));
-}
-
-void x64Gen_pop_reg64(x64GenContext_t* x64GenContext, sint32 destRegister)
-{
-	if( destRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	x64Gen_writeU8(x64GenContext, 0x58+(destRegister&7));
-}
-
-void x64Gen_jmp_reg64(x64GenContext_t* x64GenContext, sint32 srcRegister)
-{
-	if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	x64Gen_writeU8(x64GenContext, 0xFF);
-	x64Gen_writeU8(x64GenContext, 0xE0+(srcRegister&7));
-}
-
-void x64Gen_call_reg64(x64GenContext_t* x64GenContext, sint32 srcRegister)
-{
-	if( srcRegister >= 8 )
-		x64Gen_writeU8(x64GenContext, 0x41);
-	x64Gen_writeU8(x64GenContext, 0xFF);
-	x64Gen_writeU8(x64GenContext, 0xD0+(srcRegister&7));
-}
-
-void x64Gen_ret(x64GenContext_t* x64GenContext)
-{
-	x64Gen_writeU8(x64GenContext, 0xC3);
-}
-
-void x64Gen_int3(x64GenContext_t* x64GenContext)
-{
-	x64Gen_writeU8(x64GenContext, 0xCC);
 }

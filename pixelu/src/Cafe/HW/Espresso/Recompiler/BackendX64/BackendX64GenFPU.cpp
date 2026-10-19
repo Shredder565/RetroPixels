@@ -1,803 +1,371 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// x86-64 backend: floating point and paired single arithmetic.
+//
+// Every operation is computed in the same way as the interpreter computes it
+// with host doubles: double precision results in ps0, single precision
+// results rounded to float and widened back, the frC operand of single
+// precision multiplies cut to 25 significant bits.
+
+#include "Cafe/HW/Espresso/PPCState.h"
 #include "BackendX64.h"
+#include "X64Emit.hpp"
 
-void x64Gen_genSSEVEXPrefix2(x64GenContext_t* x64GenContext, sint32 xmmRegister1, sint32 xmmRegister2, bool use64BitMode)
-{
-	if( xmmRegister1 < 8 && xmmRegister2 < 8 && use64BitMode == false )
-		return;
-	uint8 v = 0x40;
-	if( xmmRegister1 >= 8 )
-		v |= 0x01;
-	if( xmmRegister2 >= 8 )
-		v |= 0x04;
-	if( use64BitMode )
-		v |= 0x08;
-	x64Gen_writeU8(x64GenContext, v);
-}
+using namespace x64;
 
-void x64Gen_genSSEVEXPrefix1(x64GenContext_t* x64GenContext, sint32 xmmRegister, bool use64BitMode)
+namespace X64Backend
 {
-	if( xmmRegister < 8 && use64BitMode == false )
-		return;
-	uint8 v = 0x40;
-	if( use64BitMode )
-		v |= 0x01;
-	if( xmmRegister >= 8 )
-		v |= 0x04;
-	x64Gen_writeU8(x64GenContext, v);
-}
-
-void x64Gen_movaps_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSource)
-{
-	// SSE
-	// copy xmm register
-	// MOVAPS <xmm>, <xmm>
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSource, xmmRegisterDest, false); // tested
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x28); // alternative encoding: 0x29, source and destination register are exchanged
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSource&7));
-}
-
-void x64Gen_movupd_xmmReg_memReg128(x64GenContext_t* x64GenContext, sint32 xmmRegister, sint32 memRegister, uint32 memImmU32)
-{
-	// SSE2
-	// move two doubles from memory into xmm register
-	// MOVUPD <xmm>, [<reg>+<imm>]
-	if( memRegister == X86_REG_ESP )
+	namespace
 	{
-		// todo: Short form of instruction if memImmU32 is 0 or in -128 to 127 range
-		// 66 0F 10 84 E4 23 01 00 00
-		x64Gen_writeU8(x64GenContext, 0x66);
-		x64Gen_genSSEVEXPrefix1(x64GenContext, xmmRegister, false);
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x10);
-		x64Gen_writeU8(x64GenContext, 0x84+(xmmRegister&7)*8);
-		x64Gen_writeU8(x64GenContext, 0xE4);
-		x64Gen_writeU32(x64GenContext, memImmU32);
+		constexpr uint8 kCmpLE = 2; // CMPSD/CMPPD predicate "less or equal" (false for NaN)
 	}
-	else if( memRegister == X86_REG_NONE )
+
+	bool CodeGenerator::EmitFloat(const IMLInstruction& inst)
 	{
-		assert_dbg();
-		//x64Gen_writeU8(x64GenContext, 0x66);
-		//x64Gen_writeU8(x64GenContext, 0x0F);
-		//x64Gen_writeU8(x64GenContext, 0x10);
-		//x64Gen_writeU8(x64GenContext, 0x05+(xmmRegister&7)*8);
-		//x64Gen_writeU32(x64GenContext, memImmU32);
+		auto& e = m_e;
+		const Xmm s0 = kXmmScratch0;
+		const Xmm s1 = kXmmScratch1;
+
+		// rounds both lanes of x to single precision and back
+		auto roundPairToSingle = [&](Xmm x)
+		{
+			e.CVTPD2PS(x, x);
+			e.CVTPS2PD(x, x);
+		};
+		// rounds the low lane to single precision and copies it to both lanes
+		auto roundLowToSingleBoth = [&](Xmm x)
+		{
+			e.CVTSD2SS(x, x);
+			e.CVTSS2SD(x, x);
+			e.UNPCKLPD(x, x);
+		};
+		auto negate = [&](Xmm x)
+		{
+			LoadConstantTable();
+			e.XORPD_m(x, mem(RAX, offsetof(VectorConstants, signBits)));
+		};
+		auto scalarArith = [&](IMLArith op, Xmm d, Xmm src)
+		{
+			switch (op)
+			{
+			case IMLArith::ADD: e.ADDSD(d, src); break;
+			case IMLArith::SUB: e.SUBSD(d, src); break;
+			case IMLArith::MUL: e.MULSD(d, src); break;
+			case IMLArith::DIV: e.DIVSD(d, src); break;
+			}
+		};
+		auto pairArith = [&](IMLArith op, Xmm d, Xmm src)
+		{
+			switch (op)
+			{
+			case IMLArith::ADD: e.ADDPD(d, src); break;
+			case IMLArith::SUB: e.SUBPD(d, src); break;
+			case IMLArith::MUL: e.MULPD(d, src); break;
+			case IMLArith::DIV: e.DIVPD(d, src); break;
+			}
+		};
+
+		switch (inst.op)
+		{
+		case IMLOp::FMOV:
+			MoveXmm(Fpr(inst.r[0]), Fpr(inst.r[1]));
+			return true;
+		case IMLOp::FMOVLO:
+			if (Fpr(inst.r[0]) != Fpr(inst.r[1]))
+				e.MOVSD_rr(Fpr(inst.r[0]), Fpr(inst.r[1]));
+			return true;
+		case IMLOp::FSIGN:
+		case IMLOp::PSIGN:
+		{
+			e.MOVAPD(s0, Fpr(inst.r[1]));
+			LoadConstantTable();
+			switch ((IMLSign)inst.sub)
+			{
+			case IMLSign::NEG: e.XORPD_m(s0, mem(RAX, offsetof(VectorConstants, signBits))); break;
+			case IMLSign::ABS: e.ANDPD_m(s0, mem(RAX, offsetof(VectorConstants, absMask))); break;
+			case IMLSign::NABS: e.ORPD_m(s0, mem(RAX, offsetof(VectorConstants, signBits))); break;
+			}
+			if (inst.op == IMLOp::FSIGN)
+				e.MOVSD_rr(Fpr(inst.r[0]), s0);
+			else
+				e.MOVAPD(Fpr(inst.r[0]), s0);
+			return true;
+		}
+		case IMLOp::PMERGE:
+			// ps0 from a (lane sub>>1), ps1 from b (lane sub&1)
+			e.MOVAPD(s0, Fpr(inst.r[1]));
+			e.SHUFPD(s0, Fpr(inst.r[2]), (uint8)((inst.sub >> 1) | ((inst.sub & 1) << 1)));
+			e.MOVAPD(Fpr(inst.r[0]), s0);
+			return true;
+		case IMLOp::FARITH:
+			e.MOVAPD(s0, Fpr(inst.r[1]));
+			scalarArith((IMLArith)inst.sub, s0, Fpr(inst.r[2]));
+			e.MOVSD_rr(Fpr(inst.r[0]), s0);
+			return true;
+		case IMLOp::FARITHS:
+			e.MOVAPD(s0, Fpr(inst.r[1]));
+			if ((IMLArith)inst.sub == IMLArith::MUL)
+			{
+				e.MOVAPD(s1, Fpr(inst.r[2]));
+				RoundMultiplier25(s1);
+				e.MULSD(s0, s1);
+			}
+			else
+				scalarArith((IMLArith)inst.sub, s0, Fpr(inst.r[2]));
+			roundLowToSingleBoth(s0);
+			e.MOVAPD(Fpr(inst.r[0]), s0);
+			return true;
+		case IMLOp::FMADD:
+		case IMLOp::FMADDS:
+		{
+			// r1 = a, r2 = c, r3 = b
+			IMLMadd kind = (IMLMadd)inst.sub;
+			bool single = inst.op == IMLOp::FMADDS;
+			if (single)
+			{
+				e.MOVAPD(s1, Fpr(inst.r[2]));
+				RoundMultiplier25(s1);
+				e.MOVAPD(s0, Fpr(inst.r[1]));
+				e.MULSD(s0, s1);
+			}
+			else
+			{
+				e.MOVAPD(s0, Fpr(inst.r[1]));
+				e.MULSD(s0, Fpr(inst.r[2]));
+			}
+			if (kind == IMLMadd::MADD || kind == IMLMadd::NMADD)
+				e.ADDSD(s0, Fpr(inst.r[3]));
+			else
+				e.SUBSD(s0, Fpr(inst.r[3]));
+			if (kind == IMLMadd::NMADD || kind == IMLMadd::NMSUB)
+				negate(s0);
+			if (single)
+			{
+				roundLowToSingleBoth(s0);
+				e.MOVAPD(Fpr(inst.r[0]), s0);
+			}
+			else
+				e.MOVSD_rr(Fpr(inst.r[0]), s0);
+			return true;
+		}
+		case IMLOp::PARITH:
+			e.MOVAPD(s0, Fpr(inst.r[1]));
+			if ((IMLArith)inst.sub == IMLArith::MUL)
+			{
+				e.MOVAPD(s1, Fpr(inst.r[2]));
+				RoundMultiplier25(s1);
+				e.MULPD(s0, s1);
+			}
+			else
+				pairArith((IMLArith)inst.sub, s0, Fpr(inst.r[2]));
+			roundPairToSingle(s0);
+			e.MOVAPD(Fpr(inst.r[0]), s0);
+			return true;
+		case IMLOp::PMADD:
+		{
+			// r1 = a, r2 = c, r3 = b
+			IMLMadd kind = (IMLMadd)inst.sub;
+			e.MOVAPD(s1, Fpr(inst.r[2]));
+			RoundMultiplier25(s1);
+			e.MOVAPD(s0, Fpr(inst.r[1]));
+			e.MULPD(s0, s1);
+			if (kind == IMLMadd::MADD)
+				roundPairToSingle(s0); // ps_madd rounds the product first
+			if (kind == IMLMadd::MADD || kind == IMLMadd::NMADD)
+				e.ADDPD(s0, Fpr(inst.r[3]));
+			else
+				e.SUBPD(s0, Fpr(inst.r[3]));
+			if (kind == IMLMadd::NMADD || kind == IMLMadd::NMSUB)
+				negate(s0);
+			roundPairToSingle(s0);
+			e.MOVAPD(Fpr(inst.r[0]), s0);
+			return true;
+		}
+		case IMLOp::PMULS:
+		case IMLOp::PMADDS:
+		{
+			// one lane of c times both lanes of a (plus b)
+			e.MOVAPD(s1, Fpr(inst.r[2]));
+			if (inst.sub == 0)
+				e.UNPCKLPD(s1, s1);
+			else
+				e.UNPCKHPD(s1, s1);
+			RoundMultiplier25(s1);
+			e.MOVAPD(s0, Fpr(inst.r[1]));
+			e.MULPD(s0, s1);
+			if (inst.op == IMLOp::PMADDS)
+				e.ADDPD(s0, Fpr(inst.r[3]));
+			roundPairToSingle(s0);
+			e.MOVAPD(Fpr(inst.r[0]), s0);
+			return true;
+		}
+		case IMLOp::PSUM:
+		{
+			// r1 = a, r2 = b, r3 = c. sum = a.ps0 + b.ps1
+			e.MOVAPD(s1, Fpr(inst.r[2]));
+			e.UNPCKHPD(s1, s1);
+			e.MOVAPD(s0, Fpr(inst.r[1]));
+			e.ADDSD(s0, s1);
+			e.MOVAPD(s1, Fpr(inst.r[3]));
+			if (inst.sub == 0)
+			{
+				// ps0 = sum, ps1 = c.ps1
+				e.SHUFPD(s0, s1, 0x2);
+				roundPairToSingle(s0);
+				e.MOVAPD(Fpr(inst.r[0]), s0);
+			}
+			else
+			{
+				// ps0 = c.ps0, ps1 = sum
+				e.SHUFPD(s1, s0, 0x0);
+				roundPairToSingle(s1);
+				e.MOVAPD(Fpr(inst.r[0]), s1);
+			}
+			return true;
+		}
+		case IMLOp::FSEL:
+		case IMLOp::PSEL:
+		{
+			// r1 = a, r2 = c, r3 = b: c where a >= -0.0, b otherwise (also for NaN)
+			e.XORPD(s1, s1);
+			if (inst.op == IMLOp::FSEL)
+			{
+				e.CMPSD(s1, Fpr(inst.r[1]), kCmpLE);
+				e.UNPCKLPD(s1, s1);
+			}
+			else
+				e.CMPPD(s1, Fpr(inst.r[1]), kCmpLE);
+			e.MOVAPD(s0, Fpr(inst.r[2]));
+			e.ANDPD(s0, s1);
+			e.ANDNPD(s1, Fpr(inst.r[3]));
+			e.ORPD(s0, s1);
+			e.MOVAPD(Fpr(inst.r[0]), s0);
+			return true;
+		}
+		case IMLOp::FRSP:
+			e.MOVAPD(s0, Fpr(inst.r[1]));
+			roundLowToSingleBoth(s0);
+			e.MOVAPD(Fpr(inst.r[0]), s0);
+			return true;
+		case IMLOp::FCTIWZ:
+		{
+			Xmm b = Fpr(inst.r[1]);
+			// truncate; out of range and NaN give 0x80000000, positive overflow becomes 0x7FFFFFFF
+			e.CVTTSD2SI(RAX, b);
+			e.ALU_ri(ALU_CMP, RAX, 0x80000000);
+			size_t inRange = e.Jcc_rel32(CC_NE);
+			e.XORPD(s0, s0);
+			e.UCOMISD(b, s0);
+			size_t notPositive = e.Jcc_rel32(CC_BE);
+			e.MOV_ri32(RAX, 0x7FFFFFFF);
+			e.BindRel32(inRange, e.Size());
+			e.BindRel32(notPositive, e.Size());
+			// 0xFFF80000 in the upper word, bit 32 for negative inputs that give 0
+			e.MOV_rr(RCX, RAX);
+			e.MOV_ri64(RDX, 0xFFF8000000000000ull);
+			e.ALU_rr(ALU_OR, RCX, RDX, true);
+			e.TEST_rr(RAX, RAX);
+			size_t nonZero = e.Jcc_rel32(CC_NE);
+			e.MOVQ_rx(RDX, b);
+			e.SHIFT_ri(SH_SHR, RDX, 63, true);
+			e.SHIFT_ri(SH_SHL, RDX, 32, true);
+			e.ALU_rr(ALU_OR, RCX, RDX, true);
+			e.BindRel32(nonZero, e.Size());
+			e.MOVQ_xr(s0, RCX);
+			e.MOVSD_rr(Fpr(inst.r[0]), s0);
+			return true;
+		}
+		case IMLOp::FCTIW:
+		case IMLOp::FRES:
+		case IMLOp::FRSQRTE:
+		case IMLOp::PRES:
+		case IMLOp::PRSQRTE:
+		{
+			const Mem tmp = CPU(offsetof(PPCInterpreter_t, temporaryFPR));
+			e.MOVUPD_mr(tmp, Fpr(inst.r[1]));
+			const void* helper = nullptr;
+			switch (inst.op)
+			{
+			case IMLOp::FCTIW: helper = (const void*)&Helper_FCTIW; break;
+			case IMLOp::FRES: helper = (const void*)&Helper_FRES; break;
+			case IMLOp::FRSQRTE: helper = (const void*)&Helper_FRSQRTE; break;
+			case IMLOp::PRES: helper = (const void*)&Helper_PRES; break;
+			default: helper = (const void*)&Helper_PRSQRTE; break;
+			}
+			CallHelper(helper, inst.saveMask);
+			if (inst.op == IMLOp::FCTIW || inst.op == IMLOp::FRSQRTE)
+				e.MOVLPD_rm(Fpr(inst.r[0]), tmp); // ps1 is kept
+			else
+				e.MOVUPD_rm(Fpr(inst.r[0]), tmp);
+			return true;
+		}
+		case IMLOp::FCMP:
+		{
+			// r0-r3 = LT, GT, EQ, UN; r4 = a, r5 = b; sub = lane
+			Xmm a = Fpr(inst.r[4]);
+			Xmm b = Fpr(inst.r[5]);
+			if (inst.sub == 1)
+			{
+				e.MOVAPD(s0, a);
+				e.UNPCKHPD(s0, s0);
+				e.MOVAPD(s1, b);
+				e.UNPCKHPD(s1, s1);
+				a = s0;
+				b = s1;
+			}
+			uint8 lt = Gpr(inst.r[0]), gt = Gpr(inst.r[1]), eq = Gpr(inst.r[2]), un = Gpr(inst.r[3]);
+			e.UCOMISD(a, b);
+			e.SETcc(CC_P, RAX);   // unordered
+			e.SETcc(CC_A, RCX);   // greater (never for unordered)
+			e.SETcc(CC_B, RDX);   // less or unordered
+			e.SETcc(CC_E, eq);    // equal or unordered
+			e.MOVZX_r8(RAX, RAX);
+			e.MOVZX_r8(RCX, RCX);
+			e.MOVZX_r8(RDX, RDX);
+			e.MOVZX_r8(eq, eq);
+			e.MOV_rr(gt, RCX);
+			e.MOV_rr(RCX, RAX);
+			e.ALU_ri(ALU_XOR, RCX, 1);
+			e.ALU_rr(ALU_AND, RDX, RCX);
+			e.MOV_rr(lt, RDX);
+			e.ALU_rr(ALU_AND, eq, RCX);
+			e.MOV_rr(un, RAX);
+			// FPSCR[FPCC] = LT GT EQ UN
+			e.MOV_rr(RCX, lt);
+			e.SHIFT_ri(SH_SHL, RCX, 3);
+			e.MOV_rr(RDX, gt);
+			e.SHIFT_ri(SH_SHL, RDX, 2);
+			e.ALU_rr(ALU_OR, RCX, RDX);
+			e.MOV_rr(RDX, eq);
+			e.ALU_rr(ALU_ADD, RDX, RDX);
+			e.ALU_rr(ALU_OR, RCX, RDX);
+			e.ALU_rr(ALU_OR, RCX, un);
+			e.SHIFT_ri(SH_SHL, RCX, 12);
+			const Mem fpscr = CPU(offsetof(PPCInterpreter_t, fpscr));
+			e.MOV_rm(RDX, fpscr);
+			e.ALU_ri(ALU_AND, RDX, ~0x0000F000u);
+			e.ALU_rr(ALU_OR, RCX, RDX);
+			if ((inst.flags & IMLF_ORDERED) == 0)
+			{
+				// unordered compares set VXSNAN for signaling NaN operands
+				LoadConstantTable();
+				for (Xmm x : {a, b})
+				{
+					e.MOVQ_rx(RDX, x);
+					e.ALU_rr(ALU_ADD, RDX, RDX, true);
+					e.ALU_rm(ALU_ADD, RDX, mem(RAX, offsetof(VectorConstants, snanBias)), true);
+					e.ALU_rm(ALU_CMP, RDX, mem(RAX, offsetof(VectorConstants, snanLimit)), true);
+					size_t notSignaling = e.Jcc_rel32(CC_AE);
+					e.ALU_ri(ALU_OR, RCX, 0x01000000);
+					e.BindRel32(notSignaling, e.Size());
+				}
+			}
+			e.MOV_mr(fpscr, RCX);
+			return true;
+		}
+		default:
+			cemu_assert_debug(false);
+			return false;
+		}
 	}
-	else
-	{
-		assert_dbg();
-	}
-}
-
-void x64Gen_movupd_memReg128_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegister, sint32 memRegister, uint32 memImmU32)
-{
-	// SSE2
-	// move two doubles from memory into xmm register
-	// MOVUPD [<reg>+<imm>], <xmm>
-	if( memRegister == X86_REG_ESP )
-	{
-		// todo: Short form of instruction if memImmU32 is 0 or in -128 to 127 range
-		x64Gen_writeU8(x64GenContext, 0x66);
-		x64Gen_genSSEVEXPrefix1(x64GenContext, xmmRegister, false);
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x11);
-		x64Gen_writeU8(x64GenContext, 0x84+(xmmRegister&7)*8);
-		x64Gen_writeU8(x64GenContext, 0xE4);
-		x64Gen_writeU32(x64GenContext, memImmU32);
-	}
-	else if( memRegister == X86_REG_NONE )
-	{
-		assert_dbg();
-		//x64Gen_writeU8(x64GenContext, 0x66);
-		//x64Gen_writeU8(x64GenContext, 0x0F);
-		//x64Gen_writeU8(x64GenContext, 0x11);
-		//x64Gen_writeU8(x64GenContext, 0x05+(xmmRegister&7)*8);
-		//x64Gen_writeU32(x64GenContext, memImmU32);
-	}
-	else
-	{
-		assert_dbg();
-	}
-}
-
-void x64Gen_movddup_xmmReg_memReg64(x64GenContext_t* x64GenContext, sint32 xmmRegister, sint32 memRegister, uint32 memImmU32)
-{
-	// SSE3
-	// move one double from memory into lower and upper half of a xmm register
-	if( memRegister == X86_REG_RSP )
-	{
-		// MOVDDUP <xmm>, [<reg>+<imm>]
-		// todo: Short form of instruction if memImmU32 is 0 or in -128 to 127 range
-		x64Gen_writeU8(x64GenContext, 0xF2);
-		if( xmmRegister >= 8 )
-			x64Gen_writeU8(x64GenContext, 0x44);
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x12);
-		x64Gen_writeU8(x64GenContext, 0x84+(xmmRegister&7)*8);
-		x64Gen_writeU8(x64GenContext, 0xE4);
-		x64Gen_writeU32(x64GenContext, memImmU32);
-	}
-	else if( memRegister == X86_REG_R15 )
-	{
-		// MOVDDUP <xmm>, [<reg>+<imm>]
-		// todo: Short form of instruction if memImmU32 is 0 or in -128 to 127 range
-		// F2 41 0F 12 87 - 44 33 22 11 
-		x64Gen_writeU8(x64GenContext, 0xF2);
-		x64Gen_genSSEVEXPrefix1(x64GenContext, xmmRegister, true);
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x12);
-		x64Gen_writeU8(x64GenContext, 0x87+(xmmRegister&7)*8);
-		x64Gen_writeU32(x64GenContext, memImmU32);
-	}
-	else if( memRegister == X86_REG_NONE )
-	{
-		// MOVDDUP <xmm>, [<imm>]
-		// 36 F2 0F 12 05 - 00 00 00 00
-		assert_dbg();
-		//x64Gen_writeU8(x64GenContext, 0x36);
-		//x64Gen_writeU8(x64GenContext, 0xF2);
-		//x64Gen_writeU8(x64GenContext, 0x0F);
-		//x64Gen_writeU8(x64GenContext, 0x12);
-		//x64Gen_writeU8(x64GenContext, 0x05+(xmmRegister&7)*8);
-		//x64Gen_writeU32(x64GenContext, memImmU32);
-	}
-	else
-	{
-		assert_dbg();
-	}
-}
-
-void x64Gen_movddup_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE3
-	// move low double from xmm register into lower and upper half of a different xmm register
-	x64Gen_writeU8(x64GenContext, 0xF2);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x12);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_movhlps_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE1
-	// move high double from xmm register into lower and upper half of a different xmm register
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x12);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_movsd_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// move lower double from xmm register into lower half of a different xmm register, leave other half untouched
-	x64Gen_writeU8(x64GenContext, 0xF2);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x10); // alternative encoding: 0x11, src and dest exchanged
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_movsd_memReg64_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegister, sint32 memRegister, uint32 memImmU32)
-{
-	// SSE2
-	// move lower 64bits (double) of xmm register to memory location
-	if( memRegister == X86_REG_NONE )
-	{
-		// MOVSD [<imm>], <xmm>
-		// F2 0F 11 05 - 45 23 01 00
-		assert_dbg();
-		//x64Gen_writeU8(x64GenContext, 0xF2);
-		//x64Gen_genSSEVEXPrefix(x64GenContext, xmmRegister, 0, false);
-		//x64Gen_writeU8(x64GenContext, 0x0F);
-		//x64Gen_writeU8(x64GenContext, 0x11);
-		//x64Gen_writeU8(x64GenContext, 0x05+xmmRegister*8);
-		//x64Gen_writeU32(x64GenContext, memImmU32);
-	}
-	else if( memRegister == X86_REG_RSP )
-	{
-		// MOVSD [RSP+<imm>], <xmm>
-		// F2 0F 11 84 24 - 33 22 11 00
-		x64Gen_writeU8(x64GenContext, 0xF2);
-		x64Gen_genSSEVEXPrefix2(x64GenContext, 0, xmmRegister, false);
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x11);
-		x64Gen_writeU8(x64GenContext, 0x84+(xmmRegister&7)*8);
-		x64Gen_writeU8(x64GenContext, 0x24);
-		x64Gen_writeU32(x64GenContext, memImmU32);
-	}
-	else
-	{
-		assert_dbg();
-	}
-}
-
-void x64Gen_movsd_xmmReg_memReg64(x64GenContext_t* x64GenContext, sint32 xmmRegister, sint32 memRegister, uint32 memImmU32)
-{
-	// SSE2
-	if( memRegister == X86_REG_RSP )
-	{
-		// MOVSD <xmm>, [RSP+<imm>]
-		x64Gen_writeU8(x64GenContext, 0xF2);
-		x64Gen_genSSEVEXPrefix2(x64GenContext, 0, xmmRegister, false);
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x10);
-		x64Gen_writeU8(x64GenContext, 0x84+(xmmRegister&7)*8);
-		x64Gen_writeU8(x64GenContext, 0x24);
-		x64Gen_writeU32(x64GenContext, memImmU32);
-	}
-	else if( memRegister == 15 )
-	{
-		// MOVSD <xmm>, [R15+<imm>]
-		x64Gen_writeU8(x64GenContext, 0x36);
-		x64Gen_writeU8(x64GenContext, 0xF2);
-		x64Gen_genSSEVEXPrefix2(x64GenContext, memRegister, xmmRegister, false);
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x10);
-		x64Gen_writeU8(x64GenContext, 0x87+(xmmRegister&7)*8);
-		x64Gen_writeU32(x64GenContext, memImmU32);
-	}
-	else
-	{
-		assert_dbg();
-	}
-}
-
-void x64Gen_movlpd_xmmReg_memReg64(x64GenContext_t* x64GenContext, sint32 xmmRegister, sint32 memRegister, uint32 memImmU32)
-{
-	// SSE3
-	// move one double from memory into lower half of a xmm register, leave upper half unchanged(?)
-	if( memRegister == X86_REG_NONE )
-	{
-		// MOVLPD <xmm>, [<imm>]
-		//x64Gen_writeU8(x64GenContext, 0x66);
-		//x64Gen_writeU8(x64GenContext, 0x0F);
-		//x64Gen_writeU8(x64GenContext, 0x12);
-		//x64Gen_writeU8(x64GenContext, 0x05+(xmmRegister&7)*8);
-		//x64Gen_writeU32(x64GenContext, memImmU32);
-		assert_dbg();
-	}
-	else if( memRegister == X86_REG_RSP )
-	{
-		// MOVLPD <xmm>, [<reg64>+<imm>]
-		// 66 0F 12 84 24 - 33 22 11 00
-		x64Gen_writeU8(x64GenContext, 0x66);
-		x64Gen_genSSEVEXPrefix2(x64GenContext, 0, xmmRegister, false);
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x12);
-		x64Gen_writeU8(x64GenContext, 0x84+(xmmRegister&7)*8);
-		x64Gen_writeU8(x64GenContext, 0x24);
-		x64Gen_writeU32(x64GenContext, memImmU32);
-	}
-	else
-	{
-		assert_dbg();
-	}
-}
-
-void x64Gen_unpcklpd_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	x64Gen_writeU8(x64GenContext, 0x66);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x14);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_unpckhpd_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	x64Gen_writeU8(x64GenContext, 0x66);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x15);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_shufpd_xmmReg_xmmReg_imm8(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc, uint8 imm8)
-{
-	// SSE2
-	// shuffled copy source to destination
-	x64Gen_writeU8(x64GenContext, 0x66);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0xC6);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-	x64Gen_writeU8(x64GenContext, imm8);
-}
-
-void x64Gen_addsd_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// add bottom double of two xmm registers, leave upper quadword unchanged
-	x64Gen_writeU8(x64GenContext, 0xF2);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false); // untested
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x58);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_addpd_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// add both doubles of two xmm registers
-	x64Gen_writeU8(x64GenContext, 0x66);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x58);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_subsd_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// subtract bottom double of two xmm registers, leave upper quadword unchanged
-	x64Gen_writeU8(x64GenContext, 0xF2);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x5C);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_subpd_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// subtract both doubles of two xmm registers
-	x64Gen_writeU8(x64GenContext, 0x66);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false); // untested
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x5C);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_mulsd_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// multiply bottom double of two xmm registers, leave upper quadword unchanged
-	x64Gen_writeU8(x64GenContext, 0xF2);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x59);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_mulpd_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// multiply both doubles of two xmm registers
-	x64Gen_writeU8(x64GenContext, 0x66);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false); // untested
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x59);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_mulpd_xmmReg_memReg128(x64GenContext_t* x64GenContext, sint32 xmmRegister, sint32 memRegister, uint32 memImmU32)
-{
-	// SSE2
-	if (memRegister == X86_REG_NONE)
-	{
-		assert_dbg();
-	}
-	else if (memRegister == X86_REG_R14)
-	{
-		x64Gen_writeU8(x64GenContext, 0x66);
-		x64Gen_writeU8(x64GenContext, (xmmRegister < 8) ? 0x41 : 0x45);
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x59);
-		x64Gen_writeU8(x64GenContext, 0x86 + (xmmRegister & 7) * 8);
-		x64Gen_writeU32(x64GenContext, memImmU32);
-	}
-	else
-	{
-		assert_dbg();
-	}
-}
-
-void x64Gen_divsd_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// divide bottom double of two xmm registers, leave upper quadword unchanged
-	x64Gen_writeU8(x64GenContext, 0xF2);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x5E);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_divpd_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// divide bottom and top double of two xmm registers
-	x64Gen_writeU8(x64GenContext, 0x66);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x5E);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_comisd_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// compare bottom doubles
-	x64Gen_writeU8(x64GenContext, 0x66);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false); // untested
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x2F);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_comisd_xmmReg_mem64Reg64(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 memoryReg, sint32 memImmS32)
-{
-	// SSE2
-	// compare bottom double with double from memory location
-	if( memoryReg == X86_REG_R15 )
-	{
-		x64Gen_writeU8(x64GenContext, 0x66);
-		x64Gen_genSSEVEXPrefix1(x64GenContext, xmmRegisterDest, true);
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x2F);
-		x64Gen_writeU8(x64GenContext, 0x87+(xmmRegisterDest&7)*8);
-		x64Gen_writeU32(x64GenContext, (uint32)memImmS32);
-	}
-	else
-		assert_dbg();
-}
-
-void x64Gen_ucomisd_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// compare bottom doubles
-	x64Gen_writeU8(x64GenContext, 0x66);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x2E);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_comiss_xmmReg_mem64Reg64(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 memoryReg, sint32 memImmS32)
-{
-	// SSE2
-	// compare bottom float with float from memory location
-	if (memoryReg == X86_REG_R15)
-	{
-		x64Gen_genSSEVEXPrefix1(x64GenContext, xmmRegisterDest, true);
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x2F);
-		x64Gen_writeU8(x64GenContext, 0x87 + (xmmRegisterDest & 7) * 8);
-		x64Gen_writeU32(x64GenContext, (uint32)memImmS32);
-	}
-	else
-		assert_dbg();
-}
-
-void x64Gen_orps_xmmReg_mem128Reg64(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, uint32 memReg, uint32 memImmS32)
-{
-	// SSE2
-	// and xmm register with 128 bit value from memory
-	if( memReg == X86_REG_R15 )
-	{
-		x64Gen_genSSEVEXPrefix2(x64GenContext, memReg, xmmRegisterDest, false);
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x56);
-		x64Gen_writeU8(x64GenContext, 0x87+(xmmRegisterDest&7)*8);
-		x64Gen_writeU32(x64GenContext, (uint32)memImmS32);
-	}
-	else
-		assert_dbg();
-}
-
-void x64Gen_xorps_xmmReg_mem128Reg64(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, uint32 memReg, uint32 memImmS32)
-{
-	// SSE2
-	// xor xmm register with 128 bit value from memory
-	if( memReg == X86_REG_R15 )
-	{
-		x64Gen_genSSEVEXPrefix1(x64GenContext, xmmRegisterDest, true); // todo: should be x64Gen_genSSEVEXPrefix2() with memReg?
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x57);
-		x64Gen_writeU8(x64GenContext, 0x87+(xmmRegisterDest&7)*8);
-		x64Gen_writeU32(x64GenContext, (uint32)memImmS32);
-	}
-	else
-		assert_dbg();
-}
-
-void x64Gen_andpd_xmmReg_memReg128(x64GenContext_t* x64GenContext, sint32 xmmRegister, sint32 memRegister, uint32 memImmU32)
-{
-	// SSE2
-	if (memRegister == X86_REG_NONE)
-	{
-		assert_dbg();
-	}
-	else if (memRegister == X86_REG_R14)
-	{
-		x64Gen_writeU8(x64GenContext, 0x66);
-		x64Gen_writeU8(x64GenContext, (xmmRegister < 8) ? 0x41 : 0x45);
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x54);
-		x64Gen_writeU8(x64GenContext, 0x86 + (xmmRegister & 7) * 8);
-		x64Gen_writeU32(x64GenContext, memImmU32);
-	}
-	else
-	{
-		assert_dbg();
-	}
-}
-
-void x64Gen_andps_xmmReg_mem128Reg64(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, uint32 memReg, uint32 memImmS32)
-{
-	// SSE2
-	// and xmm register with 128 bit value from memory
-	if( memReg == X86_REG_R15 )
-	{
-		x64Gen_genSSEVEXPrefix1(x64GenContext, xmmRegisterDest, true); // todo: should be x64Gen_genSSEVEXPrefix2() with memReg?
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x54);
-		x64Gen_writeU8(x64GenContext, 0x87+(xmmRegisterDest&7)*8);
-		x64Gen_writeU32(x64GenContext, (uint32)memImmS32);
-	}
-	else
-		assert_dbg();
-}
-
-void x64Gen_andps_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// and xmm register with xmm register
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x54);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_pcmpeqd_xmmReg_mem128Reg64(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, uint32 memReg, uint32 memImmS32)
-{
-	// SSE2
-	// doubleword integer compare
-	if( memReg == X86_REG_R15 )
-	{
-		x64Gen_writeU8(x64GenContext, 0x66);
-		x64Gen_genSSEVEXPrefix1(x64GenContext, xmmRegisterDest, true);
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x76);
-		x64Gen_writeU8(x64GenContext, 0x87+(xmmRegisterDest&7)*8);
-		x64Gen_writeU32(x64GenContext, (uint32)memImmS32);
-	}
-	else
-		assert_dbg();
-}
-
-void x64Gen_cvttpd2dq_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// convert two doubles into two 32-bit integers in bottom part of xmm register, reset upper 64 bits of destination register
-	x64Gen_writeU8(x64GenContext, 0x66);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0xE6);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_cvttsd2si_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 registerDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// convert double to truncated integer in general purpose register
-	x64Gen_writeU8(x64GenContext, 0xF2);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, registerDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x2C);
-	x64Gen_writeU8(x64GenContext, 0xC0+(registerDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_cvtsi2sd_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 registerSrc)
-{
-	// SSE2
-	x64Gen_writeU8(x64GenContext, 0xF2);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, registerSrc, xmmRegisterDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x2A);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(registerSrc&7));
-}
-
-void x64Gen_cvtsd2ss_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// converts bottom 64bit double to bottom 32bit single
-	x64Gen_writeU8(x64GenContext, 0xF2);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x5A);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_cvtpd2ps_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// converts two 64bit doubles to two 32bit singles in bottom half of register
-	x64Gen_writeU8(x64GenContext, 0x66);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x5A);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_cvtps2pd_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// converts two 32bit singles to two 64bit doubles
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x5A);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_cvtss2sd_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// converts bottom 32bit single to bottom 64bit double
-	x64Gen_writeU8(x64GenContext, 0xF3);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x5A);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_cvtpi2pd_xmmReg_mem64Reg64(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 memReg, sint32 memImmS32)
-{
-	// SSE2
-	// converts two signed 32bit integers to two doubles
-	if( memReg == X86_REG_RSP )
-	{
-		x64Gen_writeU8(x64GenContext, 0x66);
-		x64Gen_genSSEVEXPrefix1(x64GenContext, xmmRegisterDest, false);
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x2A);
-		x64Gen_writeU8(x64GenContext, 0x84+(xmmRegisterDest&7)*8);
-		x64Gen_writeU8(x64GenContext, 0x24);
-		x64Gen_writeU32(x64GenContext, (uint32)memImmS32);
-	}
-	else
-	{
-		assert_dbg();
-	}
-}
-
-void x64Gen_cvtsd2si_reg64Low_xmmReg(x64GenContext_t* x64GenContext, sint32 registerDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// converts bottom 64bit double to 32bit signed integer in general purpose register, round based on float-point control
-	x64Gen_writeU8(x64GenContext, 0xF2);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, registerDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x2D);
-	x64Gen_writeU8(x64GenContext, 0xC0+(registerDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_cvttsd2si_reg64Low_xmmReg(x64GenContext_t* x64GenContext, sint32 registerDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// converts bottom 64bit double to 32bit signed integer in general purpose register, always truncate
-	x64Gen_writeU8(x64GenContext, 0xF2);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, registerDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x2C);
-	x64Gen_writeU8(x64GenContext, 0xC0+(registerDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_sqrtsd_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// calculates square root of bottom double
-	x64Gen_writeU8(x64GenContext, 0xF2);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x51);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_sqrtpd_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// calculates square root of bottom and top double
-	x64Gen_writeU8(x64GenContext, 0x66);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x51);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_rcpss_xmmReg_xmmReg(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// approximates reciprocal of bottom 32bit single
-	x64Gen_writeU8(x64GenContext, 0xF3);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, xmmRegisterSrc, xmmRegisterDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x53);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(xmmRegisterSrc&7));
-}
-
-void x64Gen_mulss_xmmReg_memReg64(x64GenContext_t* x64GenContext, sint32 xmmRegister, sint32 memRegister, uint32 memImmU32)
-{
-	// SSE2
-	if( memRegister == X86_REG_NONE )
-	{
-		assert_dbg();
-	}
-	else if( memRegister == 15 )
-	{
-		x64Gen_writeU8(x64GenContext, 0xF3);
-		x64Gen_writeU8(x64GenContext, (xmmRegister<8)?0x41:0x45);
-		x64Gen_writeU8(x64GenContext, 0x0F);
-		x64Gen_writeU8(x64GenContext, 0x59);
-		x64Gen_writeU8(x64GenContext, 0x87+(xmmRegister&7)*8);
-		x64Gen_writeU32(x64GenContext, memImmU32);
-	}
-	else
-	{
-		assert_dbg();
-	}
-}
-
-void x64Gen_movd_xmmReg_reg64Low32(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 registerSrc)
-{
-	// SSE2
-	// copy low 32bit of general purpose register into xmm register
-	// MOVD <xmm>, <reg32>
-	x64Gen_writeU8(x64GenContext, 0x66);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, registerSrc, xmmRegisterDest, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x6E); // alternative encoding: 0x29, source and destination register are exchanged
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(registerSrc&7));
-}
-
-void x64Gen_pextrw_reg32_xmmReg(x64GenContext_t* x64GenContext, sint32 dstRegister, sint32 srcRegister, uint8 word)
-{
-	cemu_assert_debug(dstRegister >= 0 && dstRegister < 16 && srcRegister >= 0 && srcRegister < 16 && word < 8);
-	x64Gen_writeU8(x64GenContext, 0x66);
-	if (dstRegister >= 8 || srcRegister >= 8)
-		x64Gen_writeU8(x64GenContext, 0x40 | (dstRegister >= 8 ? 4 : 0) | (srcRegister >= 8 ? 1 : 0));
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0xC5);
-	x64Gen_writeU8(x64GenContext, 0xC0 | ((dstRegister & 7) << 3) | (srcRegister & 7));
-	x64Gen_writeU8(x64GenContext, word);
-}
-
-void x64Gen_movd_reg64Low32_xmmReg(x64GenContext_t* x64GenContext, sint32 registerDest, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// copy low 32bit of general purpose register into xmm register
-	// MOVD <reg32>, <xmm>
-	x64Gen_writeU8(x64GenContext, 0x66);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, registerDest, xmmRegisterSrc, false);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x7E); // alternative encoding: 0x29, source and destination register are exchanged
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterSrc&7)*8+(registerDest&7));
-}
-
-void x64Gen_movq_xmmReg_reg64(x64GenContext_t* x64GenContext, sint32 xmmRegisterDest, sint32 registerSrc)
-{
-	// SSE2
-	// copy general purpose register into xmm register
-	// MOVD <xmm>, <reg64>
-	x64Gen_writeU8(x64GenContext, 0x66);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, registerSrc, xmmRegisterDest, true);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x6E); // alternative encoding: 0x29, source and destination register are exchanged
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterDest&7)*8+(registerSrc&7));
-}
-
-void x64Gen_movq_reg64_xmmReg(x64GenContext_t* x64GenContext, sint32 registerDst, sint32 xmmRegisterSrc)
-{
-	// SSE2
-	// copy general purpose register into xmm register
-	// MOVD <xmm>, <reg64>
-	x64Gen_writeU8(x64GenContext, 0x66);
-	x64Gen_genSSEVEXPrefix2(x64GenContext, registerDst, xmmRegisterSrc, true);
-	x64Gen_writeU8(x64GenContext, 0x0F);
-	x64Gen_writeU8(x64GenContext, 0x7E);
-	x64Gen_writeU8(x64GenContext, 0xC0+(xmmRegisterSrc&7)*8+(registerDst&7));
 }

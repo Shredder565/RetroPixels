@@ -1,518 +1,196 @@
-#include "../PPCRecompiler.h"
-#include "../IML/IML.h"
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// x86-64 backend: floating point loads and stores, including the quantized
+// paired single accesses.
+
+#include "Cafe/HW/Espresso/PPCState.h"
 #include "BackendX64.h"
-#include "Common/cpu_features.h"
+#include "X64Emit.hpp"
 
-uint32 _regF64(IMLReg physReg);
+using namespace x64;
 
-uint32 _regI32(IMLReg r)
+namespace X64Backend
 {
-	cemu_assert_debug(r.GetRegFormat() == IMLRegFormat::I32);
-	return (uint32)r.GetRegID();
-}
-
-static x86Assembler64::GPR32 _reg32(sint8 physRegId)
-{
-	return (x86Assembler64::GPR32)physRegId;
-}
-
-static x86Assembler64::GPR8_REX _reg8(IMLReg r)
-{
-	cemu_assert_debug(r.GetRegFormat() == IMLRegFormat::I32); // currently bool regs are implemented as 32bit registers
-	return (x86Assembler64::GPR8_REX)r.GetRegID();
-}
-
-static x86Assembler64::GPR32 _reg32_from_reg8(x86Assembler64::GPR8_REX regId)
-{
-	return (x86Assembler64::GPR32)regId;
-}
-
-static x86Assembler64::GPR8_REX _reg8_from_reg32(x86Assembler64::GPR32 regId)
-{
-	return (x86Assembler64::GPR8_REX)regId;
-}
-
-// load from memory
-bool PPCRecompilerX64Gen_imlInstruction_fpr_load(PPCRecFunction_t* PPCRecFunction, ppcImlGenContext_t* ppcImlGenContext, x64GenContext_t* x64GenContext, IMLInstruction* imlInstruction, bool indexed)
-{
-	sint32 realRegisterXMM =  _regF64(imlInstruction->op_storeLoad.registerData);
-	sint32 realRegisterMem = _regI32(imlInstruction->op_storeLoad.registerMem);
-	sint32 realRegisterMem2 = PPC_REC_INVALID_REGISTER;
-	if( indexed )
-		realRegisterMem2 = _regI32(imlInstruction->op_storeLoad.registerMem2);
-	uint8 mode = imlInstruction->op_storeLoad.mode;
-
-	if( mode == PPCREC_FPR_LD_MODE_SINGLE )
+	bool CodeGenerator::EmitFloatMemory(const IMLInstruction& inst)
 	{
-		// load byte swapped single into temporary FPR
-		if( indexed )
+		auto& e = m_e;
+		const Xmm s0 = kXmmScratch0;
+		const Xmm s1 = kXmmScratch1;
+		switch (inst.op)
 		{
-			x64Gen_mov_reg64Low32_reg64Low32(x64GenContext, REG_RESV_TEMP, realRegisterMem2);
-			x64Gen_add_reg64Low32_reg64Low32(x64GenContext, REG_RESV_TEMP, realRegisterMem);
-			if(g_CPUFeatures.x86.movbe)
-				x64Gen_movBEZeroExtend_reg64_mem32Reg64PlusReg64(x64GenContext, REG_RESV_TEMP, REG_RESV_MEMBASE, REG_RESV_TEMP, imlInstruction->op_storeLoad.immS32);
-			else
-				x64Emit_mov_reg32_mem32(x64GenContext, REG_RESV_TEMP, REG_RESV_MEMBASE, REG_RESV_TEMP, imlInstruction->op_storeLoad.immS32);
+		case IMLOp::LOADFS:
+		{
+			// exact widening (lfs keeps signaling NaNs signaling, unlike CVTSS2SD)
+			Mem m = GuestAddress(inst);
+			e.MOV_rm(RCX, m);
+			e.BSWAP(RCX);
+			e.MOV_rr(RAX, RCX);
+			e.ALU_ri(ALU_AND, RAX, 0x7F800000);
+			e.ALU_ri(ALU_CMP, RAX, 0x7F800000);
+			size_t special = e.Jcc_rel32(CC_E);
+			e.MOVD_xr(s0, RCX);
+			e.CVTSS2SD(s0, s0);
+			size_t done = e.JMP_rel32();
+			e.BindRel32(special, e.Size());
+			// infinity or NaN: sign, all ones exponent, fraction moved to the top
+			e.MOV_rr(RAX, RCX);
+			e.ALU_ri(ALU_AND, RAX, 0x007FFFFF);
+			e.SHIFT_ri(SH_SHL, RAX, 29, true);
+			e.MOV_rr(RDX, RCX);
+			e.ALU_ri(ALU_AND, RDX, 0x80000000);
+			e.SHIFT_ri(SH_SHL, RDX, 32, true);
+			e.ALU_rr(ALU_OR, RAX, RDX, true);
+			e.MOV_ri64(RDX, 0x7FF0000000000000ull);
+			e.ALU_rr(ALU_OR, RAX, RDX, true);
+			e.MOVQ_xr(s0, RAX);
+			e.BindRel32(done, e.Size());
+			e.UNPCKLPD(s0, s0);
+			e.MOVAPD(Fpr(inst.r[0]), s0);
+			return true;
 		}
-		else
+		case IMLOp::LOADFD:
 		{
-			if(g_CPUFeatures.x86.movbe)
-				x64Gen_movBEZeroExtend_reg64_mem32Reg64PlusReg64(x64GenContext, REG_RESV_TEMP, REG_RESV_MEMBASE, realRegisterMem, imlInstruction->op_storeLoad.immS32);
-			else
-				x64Emit_mov_reg32_mem32(x64GenContext, REG_RESV_TEMP, REG_RESV_MEMBASE, realRegisterMem, imlInstruction->op_storeLoad.immS32);
+			Mem m = GuestAddress(inst);
+			e.MOV_rm(RCX, m, true);
+			e.BSWAP(RCX, true);
+			e.MOVQ_xr(s0, RCX);
+			e.MOVSD_rr(Fpr(inst.r[0]), s0);
+			return true;
 		}
-		if(g_CPUFeatures.x86.movbe == false )
-			x64Gen_bswap_reg64Lower32bit(x64GenContext, REG_RESV_TEMP);
-		x64Gen_movd_xmmReg_reg64Low32(x64GenContext, realRegisterXMM, REG_RESV_TEMP);
-
-		if (imlInstruction->op_storeLoad.flags2.notExpanded)
+		case IMLOp::STOREF:
 		{
-			// leave value as single
-		}
-		else
-		{
-			x64Gen_cvtss2sd_xmmReg_xmmReg(x64GenContext, realRegisterXMM, realRegisterXMM);
-		}
-	}
-	else if( mode == PPCREC_FPR_LD_MODE_DOUBLE )
-	{
-		if( g_CPUFeatures.x86.avx )
-		{
-			if( indexed )
+			Xmm src = Fpr(inst.r[0]);
+			switch ((IMLFMem)inst.sub)
 			{
-				// calculate offset
-				x64Gen_mov_reg64Low32_reg64Low32(x64GenContext, REG_RESV_TEMP, realRegisterMem);
-				x64Gen_add_reg64Low32_reg64Low32(x64GenContext, REG_RESV_TEMP, realRegisterMem2);
-				// load value
-				x64Emit_mov_reg64_mem64(x64GenContext, REG_RESV_TEMP, REG_RESV_MEMBASE, REG_RESV_TEMP, imlInstruction->op_storeLoad.immS32+0);
-				x64GenContext->emitter->BSWAP_q(REG_RESV_TEMP);
-				x64Gen_movq_xmmReg_reg64(x64GenContext, REG_RESV_FPR_TEMP, REG_RESV_TEMP);
-				x64Gen_movsd_xmmReg_xmmReg(x64GenContext, realRegisterXMM, REG_RESV_FPR_TEMP);
+			case IMLFMem::SINGLE:
+			{
+				// stfs: no rounding. Values in the single denormal range are
+				// denormalised, everything else keeps the sign, the top
+				// exponent bit and the next 30 bits
+				e.MOVQ_rx(RAX, src);
+				e.MOV_rr(RCX, RAX, true);
+				e.SHIFT_ri(SH_SHR, RCX, 52, true);
+				e.ALU_ri(ALU_AND, RCX, 0x7FF);
+				e.LEA32(RDX, mem(RCX, -874));
+				e.ALU_ri(ALU_CMP, RDX, 22);
+				size_t denormal = e.Jcc_rel32(CC_BE);
+				e.MOV_rr(RCX, RAX, true);
+				e.SHIFT_ri(SH_SHR, RCX, 32, true);
+				e.ALU_ri(ALU_AND, RCX, 0xC0000000);
+				e.SHIFT_ri(SH_SHR, RAX, 29, true);
+				e.ALU_ri(ALU_AND, RAX, 0x3FFFFFFF);
+				e.ALU_rr(ALU_OR, RCX, RAX);
+				size_t done = e.JMP_rel32();
+				e.BindRel32(denormal, e.Size());
+				e.NEG(RCX);
+				e.ALU_ri(ALU_ADD, RCX, 905);
+				e.MOV_rr(RDX, RAX, true);
+				e.SHIFT_ri(SH_SHL, RDX, 12, true);
+				e.SHIFT_ri(SH_SHR, RDX, 33, true);
+				e.ALU_ri(ALU_OR, RDX, 0x80000000);
+				e.SHIFT_rcl(SH_SHR, RDX);
+				e.SHIFT_ri(SH_SHR, RAX, 32, true);
+				e.ALU_ri(ALU_AND, RAX, 0x80000000);
+				e.ALU_rr(ALU_OR, RDX, RAX);
+				e.MOV_rr(RCX, RDX);
+				e.BindRel32(done, e.Size());
+				e.BSWAP(RCX);
+				Mem m = GuestAddress(inst);
+				e.MOV_mr(m, RCX);
+				return true;
+			}
+			case IMLFMem::DOUBLE:
+			{
+				e.MOVQ_rx(RCX, src);
+				e.BSWAP(RCX, true);
+				Mem m = GuestAddress(inst);
+				e.MOV_mr(m, RCX, true);
+				return true;
+			}
+			case IMLFMem::IWX:
+			{
+				e.MOVD_rx(RCX, src);
+				e.BSWAP(RCX);
+				Mem m = GuestAddress(inst);
+				e.MOV_mr(m, RCX);
+				return true;
+			}
+			}
+			return false;
+		}
+		case IMLOp::PSQLOAD:
+		{
+			bool single = (inst.flags & IMLF_PSQ_W) != 0;
+			GuestAddressToEAX(inst);
+			uint8 gqr = Gpr(inst.r[3]);
+			Xmm d = Fpr(inst.r[0]);
+			// float data (load type 0) is converted inline
+			e.TEST_ri(gqr, 0x00070000);
+			size_t slow = e.Jcc_rel32(CC_NE);
+			if (single)
+			{
+				e.MOV_rm(RCX, mem(kRegMemBase, RAX, 1, 0));
+				e.BSWAP(RCX);
+				e.MOVD_xr(s0, RCX);
+				e.CVTSS2SD(s0, s0);
+				LoadConstantTable();
+				e.MOVUPD_rm(s1, mem(RAX, offsetof(VectorConstants, one)));
+				e.MOVSD_rr(s1, s0);
+				e.MOVAPD(d, s1);
 			}
 			else
 			{
-				x64Emit_mov_reg64_mem64(x64GenContext, REG_RESV_TEMP, REG_RESV_MEMBASE, realRegisterMem, imlInstruction->op_storeLoad.immS32+0);
-				x64GenContext->emitter->BSWAP_q(REG_RESV_TEMP);
-				x64Gen_movq_xmmReg_reg64(x64GenContext, REG_RESV_FPR_TEMP, REG_RESV_TEMP);
-				x64Gen_movsd_xmmReg_xmmReg(x64GenContext, realRegisterXMM, REG_RESV_FPR_TEMP);
+				e.MOV_rm(RCX, mem(kRegMemBase, RAX, 1, 0), true);
+				e.BSWAP(RCX, true);
+				e.SHIFT_ri(SH_ROL, RCX, 32, true); // first value in the low half
+				e.MOVQ_xr(s0, RCX);
+				e.CVTPS2PD(s0, s0);
+				e.MOVAPD(d, s0);
 			}
+			size_t done = e.JMP_rel32();
+			e.BindRel32(slow, e.Size());
+			e.MOV_mr(CPU(offsetof(PPCInterpreter_t, temporaryGPR)), RAX);
+			e.MOV_mr(CPU(offsetof(PPCInterpreter_t, temporaryGPR) + 4), gqr);
+			CallHelper(single ? (const void*)&Helper_PSQLoadSingle : (const void*)&Helper_PSQLoad, inst.saveMask);
+			e.MOVUPD_rm(d, CPU(offsetof(PPCInterpreter_t, temporaryFPR)));
+			e.BindRel32(done, e.Size());
+			return true;
 		}
-		else
+		case IMLOp::PSQSTORE:
 		{
-			if( indexed )
+			bool single = (inst.flags & IMLF_PSQ_W) != 0;
+			GuestAddressToEAX(inst);
+			uint8 gqr = Gpr(inst.r[3]);
+			Xmm src = Fpr(inst.r[0]);
+			// float data (store type 0) is converted inline
+			e.TEST_ri(gqr, 0x00000007);
+			size_t slow = e.Jcc_rel32(CC_NE);
+			if (single)
 			{
-				// calculate offset
-				x64Gen_mov_reg64Low32_reg64Low32(x64GenContext, REG_RESV_TEMP, realRegisterMem);
-				x64Gen_add_reg64Low32_reg64Low32(x64GenContext, REG_RESV_TEMP, realRegisterMem2);
-				// load double low part to temporaryFPR
-				x64Emit_mov_reg32_mem32(x64GenContext, REG_RESV_TEMP, REG_RESV_MEMBASE, REG_RESV_TEMP, imlInstruction->op_storeLoad.immS32+0);
-				x64Gen_bswap_reg64Lower32bit(x64GenContext, REG_RESV_TEMP);
-				x64Emit_mov_mem32_reg64(x64GenContext, REG_RESV_HCPU, offsetof(PPCInterpreter_t, temporaryFPR)+4, REG_RESV_TEMP);
-				// calculate offset again
-				x64Gen_mov_reg64Low32_reg64Low32(x64GenContext, REG_RESV_TEMP, realRegisterMem);
-				x64Gen_add_reg64Low32_reg64Low32(x64GenContext, REG_RESV_TEMP, realRegisterMem2);
-				// load double high part to temporaryFPR
-				x64Emit_mov_reg32_mem32(x64GenContext, REG_RESV_TEMP, REG_RESV_MEMBASE, REG_RESV_TEMP, imlInstruction->op_storeLoad.immS32+4);
-				x64Gen_bswap_reg64Lower32bit(x64GenContext, REG_RESV_TEMP);
-				x64Emit_mov_mem32_reg64(x64GenContext, REG_RESV_HCPU, offsetof(PPCInterpreter_t, temporaryFPR)+0, REG_RESV_TEMP);
-				// load double from temporaryFPR
-				x64Gen_movlpd_xmmReg_memReg64(x64GenContext, realRegisterXMM, REG_RESV_HCPU, offsetof(PPCInterpreter_t, temporaryFPR));
+				e.CVTSD2SS(s0, src);
+				e.MOVD_rx(RCX, s0);
+				e.BSWAP(RCX);
+				e.MOV_mr(mem(kRegMemBase, RAX, 1, 0), RCX);
 			}
 			else
 			{
-				// load double low part to temporaryFPR
-				x64Emit_mov_reg32_mem32(x64GenContext, REG_RESV_TEMP, REG_RESV_MEMBASE, realRegisterMem, imlInstruction->op_storeLoad.immS32+0);
-				x64Gen_bswap_reg64Lower32bit(x64GenContext, REG_RESV_TEMP);
-				x64Emit_mov_mem32_reg64(x64GenContext, REG_RESV_HCPU, offsetof(PPCInterpreter_t, temporaryFPR)+4, REG_RESV_TEMP);
-				// load double high part to temporaryFPR
-				x64Emit_mov_reg32_mem32(x64GenContext, REG_RESV_TEMP, REG_RESV_MEMBASE, realRegisterMem, imlInstruction->op_storeLoad.immS32+4);
-				x64Gen_bswap_reg64Lower32bit(x64GenContext, REG_RESV_TEMP);
-				x64Emit_mov_mem32_reg64(x64GenContext, REG_RESV_HCPU, offsetof(PPCInterpreter_t, temporaryFPR)+0, REG_RESV_TEMP);
-				// load double from temporaryFPR
-				x64Gen_movlpd_xmmReg_memReg64(x64GenContext, realRegisterXMM, REG_RESV_HCPU, offsetof(PPCInterpreter_t, temporaryFPR));
+				e.CVTPD2PS(s0, src);
+				e.MOVQ_rx(RCX, s0);
+				e.SHIFT_ri(SH_ROL, RCX, 32, true);
+				e.BSWAP(RCX, true);
+				e.MOV_mr(mem(kRegMemBase, RAX, 1, 0), RCX, true);
 			}
+			size_t done = e.JMP_rel32();
+			e.BindRel32(slow, e.Size());
+			e.MOV_mr(CPU(offsetof(PPCInterpreter_t, temporaryGPR)), RAX);
+			e.MOV_mr(CPU(offsetof(PPCInterpreter_t, temporaryGPR) + 4), gqr);
+			e.MOVUPD_mr(CPU(offsetof(PPCInterpreter_t, temporaryFPR)), src);
+			CallHelper(single ? (const void*)&Helper_PSQStoreSingle : (const void*)&Helper_PSQStore, inst.saveMask);
+			e.BindRel32(done, e.Size());
+			return true;
+		}
+		default:
+			return false;
 		}
 	}
-	else
-	{
-		return false;
-	}
-	return true;
-}
-
-// stfs truncates instead of rounding, so preserve tiny values explicitly
-static void PPCRecompilerX64Gen_fprConvertToSingleBits(x64GenContext_t* x64GenContext, sint32 realRegisterXMM)
-{
-	// doubling removes the sign, so one comparison covers exponents 874-896
-	x64Gen_pextrw_reg32_xmmReg(x64GenContext, REG_RESV_TEMP, realRegisterXMM, 3);
-	x64Gen_lea_reg32_scaledIndex(x64GenContext, REG_RESV_TEMP, REG_RESV_TEMP, 1, -(874 << 5));
-	x64Gen_cmp_reg16_imm16(x64GenContext, REG_RESV_TEMP, 23 << 5);
-	const sint32 denormalJump = x64GenContext->emitter->GetWriteIndex();
-	x64Gen_jmpc_far(x64GenContext, X86_CONDITION_UNSIGNED_BELOW, 0);
-
-	x64Gen_movq_reg64_xmmReg(x64GenContext, REG_RESV_TEMP, realRegisterXMM);
-	if (g_CPUFeatures.x86.fastPext)
-	{
-		x64Gen_pext_reg64_reg64_mem64Reg64(x64GenContext, REG_RESV_TEMP, REG_RESV_TEMP,
-			REG_RESV_RECDATA, offsetof(PPCRecompilerInstanceData_t, _x64_pextSingleMask));
-	}
-	else
-	{
-		// rotate the unwanted exponent bits into the low byte, then shift them out
-		x64Gen_rol_reg64_imm8(x64GenContext, REG_RESV_TEMP, 5);
-		x64Gen_shr_reg8_imm8(x64GenContext, REG_RESV_TEMP, 3);
-		x64Gen_rol_reg64_imm8(x64GenContext, REG_RESV_TEMP, 30);
-	}
-	const sint32 resume = x64GenContext->emitter->GetWriteIndex();
-	const bool avx = g_CPUFeatures.x86.avx;
-	x64GenContext->m_coldCode.emplace_back([denormalJump, resume, realRegisterXMM, avx](x64GenContext_t* x64GenContext)
-	{
-		PPCRecompilerX64Gen_redirectRelativeJump(x64GenContext, denormalJump, x64GenContext->emitter->GetWriteIndex());
-		// scale denormals before extracting the mantissa
-		if (avx)
-			x64Gen_avx_VMULSD_xmm_xmm_mem64Reg64(x64GenContext, REG_RESV_FPR_TEMP, realRegisterXMM,
-				REG_RESV_RECDATA, offsetof(PPCRecompilerInstanceData_t, _x64XMM_constDouble2p149));
-		else
-		{
-			x64Gen_movsd_xmmReg_memReg64(x64GenContext, REG_RESV_FPR_TEMP, REG_RESV_RECDATA,
-				offsetof(PPCRecompilerInstanceData_t, _x64XMM_constDouble2p149));
-			x64Gen_mulsd_xmmReg_xmmReg(x64GenContext, REG_RESV_FPR_TEMP, realRegisterXMM);
-		}
-		x64Gen_cvttsd2si_reg64Low_xmmReg(x64GenContext, REG_RESV_TEMP, REG_RESV_FPR_TEMP);
-		x64Gen_test_reg64Low32_reg64Low32(x64GenContext, REG_RESV_TEMP, REG_RESV_TEMP);
-		const sint32 positiveJump = x64GenContext->emitter->GetWriteIndex();
-		x64Gen_jmpc_far(x64GenContext, X86_CONDITION_NOT_SIGN, 0);
-		PPCRecompilerX64Gen_redirectRelativeJump(x64GenContext, positiveJump, resume);
-		x64Gen_neg_reg64Low32(x64GenContext, REG_RESV_TEMP);
-		x64Gen_or_reg64Low32_imm32(x64GenContext, REG_RESV_TEMP, 0x80000000u);
-		const sint32 doneJump = x64GenContext->emitter->GetWriteIndex();
-		x64Gen_jmpc_far(x64GenContext, X86_CONDITION_NONE, 0);
-		PPCRecompilerX64Gen_redirectRelativeJump(x64GenContext, doneJump, resume);
-	});
-}
-
-// store to memory
-bool PPCRecompilerX64Gen_imlInstruction_fpr_store(PPCRecFunction_t* PPCRecFunction, ppcImlGenContext_t* ppcImlGenContext, x64GenContext_t* x64GenContext, IMLInstruction* imlInstruction, bool indexed)
-{
-	sint32 realRegisterXMM = _regF64(imlInstruction->op_storeLoad.registerData);
-	sint32 realRegisterMem = _regI32(imlInstruction->op_storeLoad.registerMem);
-	sint32 realRegisterMem2 = PPC_REC_INVALID_REGISTER;
-	if( indexed )
-		realRegisterMem2 = _regI32(imlInstruction->op_storeLoad.registerMem2);
-	uint8 mode = imlInstruction->op_storeLoad.mode;
-	if( mode == PPCREC_FPR_ST_MODE_SINGLE || mode == PPCREC_FPR_ST_MODE_SINGLE_FTZ )
-	{
-		if (imlInstruction->op_storeLoad.flags2.notExpanded)
-		{
-			// value is already in single format
-			x64Gen_movd_reg64Low32_xmmReg(x64GenContext, REG_RESV_TEMP, realRegisterXMM);
-		}
-		else if (mode == PPCREC_FPR_ST_MODE_SINGLE_FTZ)
-		{
-			x64Gen_cvtsd2ss_xmmReg_xmmReg(x64GenContext, REG_RESV_FPR_TEMP, realRegisterXMM);
-			x64Gen_movd_reg64Low32_xmmReg(x64GenContext, REG_RESV_TEMP, REG_RESV_FPR_TEMP);
-		}
-		else
-		{
-			PPCRecompilerX64Gen_fprConvertToSingleBits(x64GenContext, realRegisterXMM);
-		}
-		if(g_CPUFeatures.x86.movbe == false )
-			x64Gen_bswap_reg64Lower32bit(x64GenContext, REG_RESV_TEMP);
-		if( indexed )
-		{
-			if( realRegisterMem == realRegisterMem2 )
-				assert_dbg();
-			x64Gen_add_reg64Low32_reg64Low32(x64GenContext, realRegisterMem, realRegisterMem2);
-		}
-		if(g_CPUFeatures.x86.movbe)
-			x64Gen_movBETruncate_mem32Reg64PlusReg64_reg64(x64GenContext, REG_RESV_MEMBASE, realRegisterMem, imlInstruction->op_storeLoad.immS32, REG_RESV_TEMP);
-		else
-			x64Gen_movTruncate_mem32Reg64PlusReg64_reg64(x64GenContext, REG_RESV_MEMBASE, realRegisterMem, imlInstruction->op_storeLoad.immS32, REG_RESV_TEMP);
-		if( indexed )
-		{
-			x64Gen_sub_reg64Low32_reg64Low32(x64GenContext, realRegisterMem, realRegisterMem2);
-		}
-	}
-	else if( mode == PPCREC_FPR_ST_MODE_DOUBLE )
-	{
-		if( indexed )
-		{
-			if( realRegisterMem == realRegisterMem2 )
-				assert_dbg();
-			x64Gen_add_reg64Low32_reg64Low32(x64GenContext, realRegisterMem, realRegisterMem2);
-		}
-		x64Gen_movq_reg64_xmmReg(x64GenContext, REG_RESV_TEMP, realRegisterXMM);
-		x64GenContext->emitter->BSWAP_q(REG_RESV_TEMP);
-		x64Gen_mov_mem64Reg64PlusReg64_reg64(x64GenContext, REG_RESV_TEMP, REG_RESV_MEMBASE, realRegisterMem, imlInstruction->op_storeLoad.immS32);
-		if( indexed )
-		{
-			x64Gen_sub_reg64Low32_reg64Low32(x64GenContext, realRegisterMem, realRegisterMem2);
-		}
-	}
-	else if( mode == PPCREC_FPR_ST_MODE_UI32_FROM_PS0 )
-	{
-		x64Gen_movd_reg64Low32_xmmReg(x64GenContext, REG_RESV_TEMP, realRegisterXMM);
-		x64Gen_bswap_reg64Lower32bit(x64GenContext, REG_RESV_TEMP);
-		if( indexed )
-		{
-			cemu_assert_debug(realRegisterMem == realRegisterMem2);
-			x64Gen_add_reg64Low32_reg64Low32(x64GenContext, realRegisterMem, realRegisterMem2);
-			x64Gen_movTruncate_mem32Reg64PlusReg64_reg64(x64GenContext, REG_RESV_MEMBASE, realRegisterMem, imlInstruction->op_storeLoad.immS32, REG_RESV_TEMP);
-			x64Gen_sub_reg64Low32_reg64Low32(x64GenContext, realRegisterMem, realRegisterMem2);
-		}
-		else
-		{
-			x64Gen_movTruncate_mem32Reg64PlusReg64_reg64(x64GenContext, REG_RESV_MEMBASE, realRegisterMem, imlInstruction->op_storeLoad.immS32, REG_RESV_TEMP);
-		}
-	}
-	else
-	{
-		debug_printf("PPCRecompilerX64Gen_imlInstruction_fpr_store(): Unsupported mode %d\n", mode);
-		return false;
-	}
-	return true;
-}
-
-// FPR op FPR
-void PPCRecompilerX64Gen_imlInstruction_fpr_r_r(PPCRecFunction_t* PPCRecFunction, ppcImlGenContext_t* ppcImlGenContext, x64GenContext_t* x64GenContext, IMLInstruction* imlInstruction)
-{
-	if( imlInstruction->operation == PPCREC_IML_OP_FPR_FLOAT_TO_INT )
-	{
-		uint32 regGpr = _regI32(imlInstruction->op_fpr_r_r.regR);
-		uint32 regFpr = _regF64(imlInstruction->op_fpr_r_r.regA);
-		x64Gen_cvttsd2si_reg64Low_xmmReg(x64GenContext, regGpr, regFpr);
-		return;
-	}
-	else if( imlInstruction->operation == PPCREC_IML_OP_FPR_INT_TO_FLOAT )
-	{
-		uint32 regFpr = _regF64(imlInstruction->op_fpr_r_r.regR);
-		uint32 regGpr = _regI32(imlInstruction->op_fpr_r_r.regA);
-		x64Gen_cvtsi2sd_xmmReg_xmmReg(x64GenContext, regFpr, regGpr);
-		return;
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_FPR_BITCAST_INT_TO_FLOAT)
-	{
-		cemu_assert_debug(imlInstruction->op_fpr_r_r.regR.GetRegFormat() == IMLRegFormat::F64); // assuming target is always F64 for now
-		cemu_assert_debug(imlInstruction->op_fpr_r_r.regA.GetRegFormat() == IMLRegFormat::I32); // supporting only 32bit floats as input for now
-		// exact operation depends on size of types. Floats are automatically promoted to double if the target is F64
-		uint32 regFpr = _regF64(imlInstruction->op_fpr_r_r.regR);
-		if (imlInstruction->op_fpr_r_r.regA.GetRegFormat() == IMLRegFormat::I32)
-		{
-			uint32 regGpr = _regI32(imlInstruction->op_fpr_r_r.regA);
-			x64Gen_movq_xmmReg_reg64(x64GenContext, regFpr, regGpr); // using reg32 as reg64 param here is ok. We'll refactor later
-			// float to double
-			x64Gen_cvtss2sd_xmmReg_xmmReg(x64GenContext, regFpr, regFpr);
-		}
-		else
-		{
-			cemu_assert_unimplemented();
-		}
-		return;
-	}
-
-	uint32 regR = _regF64(imlInstruction->op_fpr_r_r.regR);
-	uint32 regA = _regF64(imlInstruction->op_fpr_r_r.regA);
-	if( imlInstruction->operation == PPCREC_IML_OP_FPR_ASSIGN )
-	{
-		x64Gen_movsd_xmmReg_xmmReg(x64GenContext, regR, regA);
-	}
-	else if( imlInstruction->operation == PPCREC_IML_OP_FPR_MULTIPLY )
-	{
-		x64Gen_mulsd_xmmReg_xmmReg(x64GenContext, regR, regA);
-	}
-	else if( imlInstruction->operation == PPCREC_IML_OP_FPR_DIVIDE )
-	{
-		x64Gen_divsd_xmmReg_xmmReg(x64GenContext, regR, regA);
-	}
-	else if( imlInstruction->operation == PPCREC_IML_OP_FPR_ADD )
-	{
-		x64Gen_addsd_xmmReg_xmmReg(x64GenContext, regR, regA);
-	}
-	else if( imlInstruction->operation == PPCREC_IML_OP_FPR_SUB )
-	{
-		x64Gen_subsd_xmmReg_xmmReg(x64GenContext, regR, regA);
-	}
-	else if( imlInstruction->operation == PPCREC_IML_OP_FPR_FCTIWZ )
-	{
-		x64Gen_cvttsd2si_xmmReg_xmmReg(x64GenContext, REG_RESV_TEMP, regA);
-		x64Gen_mov_reg64Low32_reg64Low32(x64GenContext, REG_RESV_TEMP, REG_RESV_TEMP);
-		// move to FPR register
-		x64Gen_movq_xmmReg_reg64(x64GenContext, regR, REG_RESV_TEMP);
-	}
-	else
-	{
-		assert_dbg();
-	}
-}
-
-/*
- * FPR = op (fprA, fprB)
- */
-void PPCRecompilerX64Gen_imlInstruction_fpr_r_r_r(PPCRecFunction_t* PPCRecFunction, ppcImlGenContext_t* ppcImlGenContext, x64GenContext_t* x64GenContext, IMLInstruction* imlInstruction)
-{
-	uint32 regR = _regF64(imlInstruction->op_fpr_r_r_r.regR);
-	uint32 regA = _regF64(imlInstruction->op_fpr_r_r_r.regA);
-	uint32 regB = _regF64(imlInstruction->op_fpr_r_r_r.regB);
-
-	if (imlInstruction->operation == PPCREC_IML_OP_FPR_MULTIPLY)
-	{
-		if (regR == regA)
-		{
-			x64Gen_mulsd_xmmReg_xmmReg(x64GenContext, regR, regB);
-		}
-		else if (regR == regB)
-		{
-			x64Gen_mulsd_xmmReg_xmmReg(x64GenContext, regR, regA);
-		}
-		else
-		{
-			x64Gen_movsd_xmmReg_xmmReg(x64GenContext, regR, regA);
-			x64Gen_mulsd_xmmReg_xmmReg(x64GenContext, regR, regB);
-		}
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_FPR_ADD)
-	{
-		// todo: Use AVX 3-operand VADDSD if available
-		if (regR == regA)
-		{
-			x64Gen_addsd_xmmReg_xmmReg(x64GenContext, regR, regB);
-		}
-		else if (regR == regB)
-		{
-			x64Gen_addsd_xmmReg_xmmReg(x64GenContext, regR, regA);
-		}
-		else
-		{
-			x64Gen_movaps_xmmReg_xmmReg(x64GenContext, regR, regA);
-			x64Gen_addsd_xmmReg_xmmReg(x64GenContext, regR, regB);
-		}
-	}
-	else if( imlInstruction->operation == PPCREC_IML_OP_FPR_SUB )
-	{
-		if( regR == regA )
-		{
-			x64Gen_subsd_xmmReg_xmmReg(x64GenContext, regR, regB);
-		}
-		else if( regR == regB )
-		{
-			x64Gen_movsd_xmmReg_xmmReg(x64GenContext, REG_RESV_FPR_TEMP, regA);
-			x64Gen_subsd_xmmReg_xmmReg(x64GenContext, REG_RESV_FPR_TEMP, regB);
-			x64Gen_movsd_xmmReg_xmmReg(x64GenContext, regR, REG_RESV_FPR_TEMP);
-		}
-		else
-		{
-			x64Gen_movsd_xmmReg_xmmReg(x64GenContext, regR, regA);
-			x64Gen_subsd_xmmReg_xmmReg(x64GenContext, regR, regB);
-		}
-	}
-	else
-		assert_dbg();
-}
-
-/*
- * FPR = op (fprA, fprB, fprC)
- */
-void PPCRecompilerX64Gen_imlInstruction_fpr_r_r_r_r(PPCRecFunction_t* PPCRecFunction, ppcImlGenContext_t* ppcImlGenContext, x64GenContext_t* x64GenContext, IMLInstruction* imlInstruction)
-{
-	uint32 regR = _regF64(imlInstruction->op_fpr_r_r_r_r.regR);
-	uint32 regA = _regF64(imlInstruction->op_fpr_r_r_r_r.regA);
-	uint32 regB = _regF64(imlInstruction->op_fpr_r_r_r_r.regB);
-	uint32 regC = _regF64(imlInstruction->op_fpr_r_r_r_r.regC);
-
-	if( imlInstruction->operation == PPCREC_IML_OP_FPR_SELECT )
-	{
-		x64Gen_comisd_xmmReg_mem64Reg64(x64GenContext, regA, REG_RESV_RECDATA, offsetof(PPCRecompilerInstanceData_t, _x64XMM_constDouble0_0));
-		sint32 jumpInstructionOffset1 = x64GenContext->emitter->GetWriteIndex();
-		x64Gen_jmpc_near(x64GenContext, X86_CONDITION_UNSIGNED_BELOW, 0);
-		// select C
-		x64Gen_movsd_xmmReg_xmmReg(x64GenContext, regR, regC);
-		sint32 jumpInstructionOffset2 = x64GenContext->emitter->GetWriteIndex();
-		x64Gen_jmpc_near(x64GenContext, X86_CONDITION_NONE, 0);
-		// select B
-		PPCRecompilerX64Gen_redirectRelativeJump(x64GenContext, jumpInstructionOffset1, x64GenContext->emitter->GetWriteIndex());
-		x64Gen_movsd_xmmReg_xmmReg(x64GenContext, regR, regB);
-		// end
-		PPCRecompilerX64Gen_redirectRelativeJump(x64GenContext, jumpInstructionOffset2, x64GenContext->emitter->GetWriteIndex());
-	}
-	else
-		assert_dbg();
-}
-
-void PPCRecompilerX64Gen_imlInstruction_fpr_r(PPCRecFunction_t* PPCRecFunction, ppcImlGenContext_t* ppcImlGenContext, x64GenContext_t* x64GenContext, IMLInstruction* imlInstruction)
-{
-	uint32 regR = _regF64(imlInstruction->op_fpr_r.regR);
-
-	if( imlInstruction->operation == PPCREC_IML_OP_FPR_NEGATE )
-	{
-		x64Gen_xorps_xmmReg_mem128Reg64(x64GenContext, regR, REG_RESV_RECDATA, offsetof(PPCRecompilerInstanceData_t, _x64XMM_xorNegateMaskBottom));
-	}
-	else if( imlInstruction->operation == PPCREC_IML_OP_FPR_LOAD_ONE )
-	{
-		x64Gen_movsd_xmmReg_memReg64(x64GenContext, regR, REG_RESV_RECDATA, offsetof(PPCRecompilerInstanceData_t, _x64XMM_constDouble1_1));
-	}
-	else if( imlInstruction->operation == PPCREC_IML_OP_FPR_ABS )
-	{
-		x64Gen_andps_xmmReg_mem128Reg64(x64GenContext, regR, REG_RESV_RECDATA, offsetof(PPCRecompilerInstanceData_t, _x64XMM_andAbsMaskBottom));
-	}
-	else if( imlInstruction->operation == PPCREC_IML_OP_FPR_NEGATIVE_ABS )
-	{
-		x64Gen_orps_xmmReg_mem128Reg64(x64GenContext, regR, REG_RESV_RECDATA, offsetof(PPCRecompilerInstanceData_t, _x64XMM_xorNegateMaskBottom));
-	}
-	else if( imlInstruction->operation == PPCREC_IML_OP_FPR_ROUND_TO_SINGLE_PRECISION_BOTTOM )
-	{
-		// convert to 32bit single
-		x64Gen_cvtsd2ss_xmmReg_xmmReg(x64GenContext, regR, regR);
-		// convert back to 64bit double
-		x64Gen_cvtss2sd_xmmReg_xmmReg(x64GenContext, regR, regR);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_FPR_EXPAND_F32_TO_F64)
-	{
-		// convert bottom to 64bit double
-		x64Gen_cvtss2sd_xmmReg_xmmReg(x64GenContext, regR, regR);
-	}
-	else
-	{
-		cemu_assert_unimplemented();
-	}
-}
-
-void PPCRecompilerX64Gen_imlInstruction_fpr_compare(PPCRecFunction_t* PPCRecFunction, ppcImlGenContext_t* ppcImlGenContext, x64GenContext_t* x64GenContext, IMLInstruction* imlInstruction)
-{
-	auto regR = _reg8(imlInstruction->op_fpr_compare.regR);
-	auto regA = _regF64(imlInstruction->op_fpr_compare.regA);
-	auto regB = _regF64(imlInstruction->op_fpr_compare.regB);
-
-	x64GenContext->emitter->XOR_dd(_reg32_from_reg8(regR), _reg32_from_reg8(regR));
-	x64Gen_ucomisd_xmmReg_xmmReg(x64GenContext, regA, regB);
-
-	if (imlInstruction->op_fpr_compare.cond == IMLCondition::UNORDERED_GT)
-	{
-		// GT case can be covered with a single SETnbe which checks CF==0 && ZF==0 (unordered sets both)
-		x64GenContext->emitter->SETcc_b(X86Cond::X86_CONDITION_NBE, regR);
-		return;
-	}
-	else if (imlInstruction->op_fpr_compare.cond == IMLCondition::UNORDERED_U)
-	{
-		// unordered case can be checked via PF
-		x64GenContext->emitter->SETcc_b(X86Cond::X86_CONDITION_PE, regR);
-		return;
-	}
-
-	// remember unordered state
-	auto regTmp = _reg32_from_reg8(_reg32(REG_RESV_TEMP));
-	x64GenContext->emitter->SETcc_b(X86Cond::X86_CONDITION_PO, regTmp); // by reversing the parity we can avoid having to XOR the value for masking the LT/EQ conditions
-
-	X86Cond x86Cond;
-	switch (imlInstruction->op_fpr_compare.cond)
-	{
-	case IMLCondition::UNORDERED_LT:
-		x64GenContext->emitter->SETcc_b(X86Cond::X86_CONDITION_B, regR);
-		break;
-	case IMLCondition::UNORDERED_EQ:
-		x64GenContext->emitter->SETcc_b(X86Cond::X86_CONDITION_Z, regR);
-		break;
-	default:
-		cemu_assert_unimplemented();
-	}
-	x64GenContext->emitter->AND_bb(_reg8_from_reg32(regR), _reg8_from_reg32(regTmp)); // if unordered (PF=1) then force LT/GT/EQ to zero 
 }
