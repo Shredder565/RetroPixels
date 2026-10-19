@@ -54,12 +54,12 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 33845 | 10.5% |
-| Cemu, untouched | 232950 | 72.1% |
+| Original (RetroPixels) | 48986 | 15.3% |
+| Cemu, untouched | 214182 | 67.0% |
 | Cemu, with PixelU changes | 15096 | 4.7% |
 | PixelU-added files (MPL-2.0 header) | 1940 | 0.6% |
-| Third-party | 39404 | 12.2% |
-| **All** | **323235** | 100% |
+| Third-party | 39404 | 12.3% |
+| **All** | **319608** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -91,16 +91,16 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/HW/MMU | 808 | 0 | Cemu |
 | Cafe/HW/SI | 165 | 0 | Cemu |
 | Cafe/HW/VI | 11 | 0 | Cemu |
-| Cafe/IOSU (shared headers) | 107 | 0 | Cemu |
-| Cafe/IOSU/ccr_nfc | 437 | 0 | Cemu |
-| Cafe/IOSU/fsa | 1257 | 0 | Cemu |
-| Cafe/IOSU/kernel | 809 | 0 | Cemu |
-| Cafe/IOSU/legacy | 5530 | 0 | Cemu |
-| Cafe/IOSU/nn | 2454 | 0 | Cemu |
-| Cafe/IOSU/ODM | 166 | 0 | Cemu |
-| Cafe/IOSU/PDM | 537 | 0 | Cemu |
-| Cafe/OS/common | 634 | 0 | Cemu |
-| Cafe/OS/libs (shared headers) | 374 | 0 | Cemu |
+| Cafe/IOSU (shared headers) | 91 | 91 | original |
+| Cafe/IOSU/ccr_nfc | 335 | 335 | original |
+| Cafe/IOSU/fsa | 1043 | 1043 | original |
+| Cafe/IOSU/kernel | 678 | 678 | original |
+| Cafe/IOSU/legacy | 4405 | 4405 | original |
+| Cafe/IOSU/nn | 2200 | 2200 | original |
+| Cafe/IOSU/ODM | 139 | 139 | original |
+| Cafe/IOSU/PDM | 517 | 517 | original |
+| Cafe/OS/common | 565 | 565 | original |
+| Cafe/OS/libs (shared headers) | 352 | 352 | original |
 | Cafe/OS/libs/avm | 60 | 60 | original |
 | Cafe/OS/libs/camera | 266 | 266 | original |
 | Cafe/OS/libs/coreinit | 19977 | 0 | Cemu |
@@ -108,7 +108,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/OS/libs/drmapp | 53 | 53 | original |
 | Cafe/OS/libs/erreula | 514 | 514 | original |
 | Cafe/OS/libs/gx2 | 6269 | 6269 | original |
-| Cafe/OS/libs/h264_avc | 3097 | 0 | Cemu |
+| Cafe/OS/libs/h264_avc | 2291 | 2291 | original |
 | Cafe/OS/libs/mic | 397 | 397 | original |
 | Cafe/OS/libs/nfc | 1081 | 1081 | original |
 | Cafe/OS/libs/nlibcurl | 1243 | 1243 | original |
@@ -146,7 +146,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/OS/libs/TCL | 216 | 216 | original |
 | Cafe/OS/libs/vpad | 636 | 636 | original |
 | Cafe/OS/libs/zlib125 | 306 | 306 | original |
-| Cafe/OS/RPL | 3366 | 0 | Cemu |
+| Cafe/OS/RPL | 2525 | 2525 | original |
 | Cafe/TitleList | 2597 | 0 | Cemu |
 | Cemu/DiscordPresence | 846 | 0 | Cemu |
 | Cemu/ExpressionParser | 725 | 0 | Cemu |
@@ -311,3 +311,97 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
   address; overlapping 2D-tiled software copies use memmove; mip shifts of 32
   or more wrap like the x86 shift. The disabled addrlib self-test and the
   surface copy benchmark are removed (their hooks stay and do nothing).
+
+- Batch 7b: `OS/common` (OSCommon/OSUtil export marshalling and the
+  PPC varargs helpers), the shared nn headers (`nn_common.h`,
+  `nn_client_service.h`), the RPL loader (`rpl.cpp`, `elf.cpp`, COSModule,
+  rpl_structs, symbol storage, debug symbols) and all of IOSU rewritten as
+  original code: the kernel (message queues, timers, device registration,
+  IPC routing), /dev/fsa, /dev/ccr_nfc, /dev/odm, PDM play statistics, the nn
+  service base classes, the nn boss service and its shared types, and the
+  legacy devices (ioctl queues, mcp, nim, crypto, acp, act, fpd). Finally
+  `h264_avc` (the h264.rpl exports, the ih264d-based AVC backend, which still
+  wraps dependencies/ih264d, and the stream parser). Exports, the order in
+  which exports are registered, argument layouts, return values, guest
+  struct layouts (with new static_asserts), IOSU result codes, handle and
+  queue id formats, IPC wire formats and the mlc folder and file layout
+  (saveinfo.xml, fad.db, play statistics, account.dat) are unchanged.
+  PixelU-specific behaviour is kept: the BotW h264 title quirks, and the
+  account, friend and boss behaviour that PixelU's online features rely on.
+  Old-vs-new harnesses (ASan/UBSan) gave these results:
+  * RPL loader: generated RPLs, seeds 1-400 valid, give identical memory
+    images, export tables and symbol resolution. A real RPX is also
+    identical. Corrupt-file seeds 1000-1150 differ only where the new
+    loader now rejects bad input cleanly.
+  * IOSU kernel, nn service, nfc and ODM: harness identical over seeds
+    1-60 plus 80 earlier seeds.
+  * FSA path resolution: 3M fuzz cases, no mismatches.
+  * PDM 300/300, crypto 150/150 (base64 over 200k cases), ACP 300/300,
+    ACT 300/300, FPD 150/150 and boss 80/80 seeds identical.
+  * h264 decoder: 11 generated streams × seeds 1-40, plus the parser API
+    fuzz × seeds 1-60, all identical.
+  * The only mismatches seen were timing races in a hang that the old code
+    has too (buffered mode with a multi-slice stream): both builds produce
+    the same set of outputs when the case is rerun.
+  Every changed file and its callers pass a g++ and clang++ syntax check;
+  the only failures (GraphicPack2Patches, the wx GUI files,
+  ActiveSettings.cpp) are present in the original tree too.
+  Fixes and defined behaviour:
+  * RPL loader:
+    * A section header table with the wrong entry size, or a compressed
+      section smaller than 4 bytes, fails the load instead of asserting
+      or reading out of bounds.
+    * The patch CRC skips compressed sections whose data lies outside the
+      file.
+    * A TLS relocation against a non-TLS symbol, and an SDA21 relocation
+      against a register other than r2/r13, log the problem and are
+      skipped.
+    * FindModuleOrHLEExport with an unknown handle returns 0 instead of
+      dereferencing null.
+    * Inflated section data is zero-initialised.
+    * Library names over 63 characters are truncated.
+    * The HLE stub cache is keyed by the full name instead of a 64-bit hash
+      (this differs only on a hash collision).
+    * Dependency records and replaced debug comments are freed.
+  * IOSU kernel and services:
+    * Destroying a message queue wakes its waiters.
+    * IPCSimpleService forgets a closed client instead of keeping a
+      dangling pointer.
+    * FSA WriteFile with element size 0 returns OK instead of dividing by
+      zero.
+    * The ccr_nfc shutdown guard actually works (the old `< 0` test was on
+      an unsigned value).
+  * Legacy devices:
+    * The crypto private-key buffer is sized to the file instead of a fixed
+      4096-byte stack buffer.
+    * An empty or missing value in an ACP XML file reads as 0 instead of
+      crashing or storing garbage.
+    * ACT treats slot 0 and slots above 12 as "no account"; its time zone
+      string is bounded and NUL-terminated, and its strings are copied
+      bounded.
+    * FPD clears exactly `count` entries for screen names and basic info
+      (the old code cleared 11 entries, or 4 bytes); the GetMyComment
+      result starts zeroed; NNIDs are copied bounded; notification pruning
+      is locked.
+  * h264:
+    * ParseSPS starts from a cleared state (the old code read an
+      uninitialised flag).
+    * The aligned allocator returns null when allocation fails instead of
+      a garbage pointer.
+    * The codec reset and core-count requests are zero-initialised.
+  Quirks kept on purpose:
+  * RPL loader: module handle and TLS counters survive UnloadAll; the TLS
+    start is the unrelocated vaddr; the last matching module's small-data
+    bases win; HLE data imports use the raw library name.
+  * ODM still does not destroy its queue at shutdown.
+  * PDM creates play statistics without creating their directory.
+  * NIM: the package info title id is stored in host order.
+  * ACPGetTitleSaveDirEx still reports the final count when the user
+    directory iterator fails.
+  * The boss service keeps its parameter read order, and TitleStop does
+    not stop the task thread.
+  * h264: list-1 reordering still counts and writes like list 0, and the
+    BotW titles still get a 1080-line size and an unchecked 256-byte memory
+    requirement.
+  The h264 parser API (h264Parser_*) has no callers outside h264_avc and
+  is kept for interface compatibility.
