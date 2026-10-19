@@ -1,10 +1,16 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "Cafe/HW/Latte/Core/LatteConst.h"
 #include "Cafe/HW/Latte/Renderer/RendererShader.h"
 #include <boost/container/static_vector.hpp>
 
+// Public interface of the legacy Latte shader decompiler: it turns a Latte
+// vertex/geometry/pixel program plus the current register state into GLSL
+// (OpenGL/Vulkan) or MSL source and describes the resources the result uses.
+
 namespace LatteDecompiler
 {
+	// placeholder kept for source compatibility; all members share one value
 	enum class DataType
 	{
 		UNDEFINED = 0,
@@ -14,26 +20,27 @@ namespace LatteDecompiler
 	};
 };
 
-// decompiler shader types
-
+// a constant (register or buffer entry) that was packed into the compact uniform array
 typedef struct
 {
-	bool	isRegister; // if true -> Uniform register, if false -> Uniform buffer
-	uint8	kcacheBankId; // uniform buffer id (if uniform buffer)
-	uint32	index; // uniform address (in 4-DWORD tuples)
-	uint32	mappedIndex; // index in remapped uniform array
+	bool	isRegister; // true: constant file register, false: constant buffer entry
+	uint8	kcacheBankId; // buffer slot when isRegister is false
+	uint32	index; // vec4 index in the source
+	uint32	mappedIndex; // vec4 index in the packed array
 }LatteDecompilerRemappedUniformEntry_t;
 
+// pre-scaled (byte offset) form of a remapped register entry
 typedef struct
 {
-	uint32	indexOffset; // uniform address (in 4-DWORD tuples)
-	uint32	mappedIndexOffset; // index in remapped uniform array
+	uint32	indexOffset;
+	uint32	mappedIndexOffset;
 }LatteFastAccessRemappedUniformEntry_register_t;
 
+// pre-scaled (byte offset) form of a remapped buffer entry
 typedef struct
 {
-	uint16	indexOffset; // uniform address (in 4-DWORD tuples)
-	uint16	mappedIndexOffset; // index in remapped uniform array
+	uint16	indexOffset;
+	uint16	mappedIndexOffset;
 }LatteFastAccessRemappedUniformEntry_buffer_t;
 
 typedef struct
@@ -43,32 +50,33 @@ typedef struct
 	float currentValue[2];
 }LatteUniformTextureScaleEntry_t;
 
+// binding slots of everything a generated shader references, per backend
 struct LatteDecompilerShaderResourceMapping
 {
 	static constexpr sint8 UNUSED_BINDING = -1;
 
 	LatteDecompilerShaderResourceMapping()
 	{
-		std::fill(textureUnitToBindingPoint, textureUnitToBindingPoint + LATTE_NUM_MAX_TEX_UNITS, UNUSED_BINDING);
-		std::fill(relBindingPointToRelTextureUnit, relBindingPointToRelTextureUnit + LATTE_NUM_MAX_TEX_UNITS, UNUSED_BINDING);
-		std::fill(uniformBuffersBindingPoint, uniformBuffersBindingPoint + LATTE_NUM_MAX_UNIFORM_BUFFERS, UNUSED_BINDING);
-		std::fill(attributeMapping, attributeMapping + LATTE_NUM_MAX_ATTRIBUTE_LOCATIONS, UNUSED_BINDING);
+		for (auto& v : textureUnitToBindingPoint) v = UNUSED_BINDING;
+		for (auto& v : relBindingPointToRelTextureUnit) v = UNUSED_BINDING;
+		for (auto& v : uniformBuffersBindingPoint) v = UNUSED_BINDING;
+		for (auto& v : attributeMapping) v = UNUSED_BINDING;
 	}
-	// texture
-	sint8 textureUnitToBindingPoint[LATTE_NUM_MAX_TEX_UNITS]; // mostly for OpenGL backwards compatibility where texture units are not remapped and binding points are sparse
-	sint8 relBindingPointToRelTextureUnit[LATTE_NUM_MAX_TEX_UNITS]; // (only used on VK and Metal) index is relative binding point (absoluteBindingPoint - textureUnitBaseBindingPoint)
+	// textures
+	sint8 textureUnitToBindingPoint[LATTE_NUM_MAX_TEX_UNITS]; // absolute binding per texture unit (OpenGL keeps units sparse)
+	sint8 relBindingPointToRelTextureUnit[LATTE_NUM_MAX_TEX_UNITS]; // Vulkan/Metal: (binding - base) -> texture unit
 	sint8 textureUnitBaseBindingPoint{UNUSED_BINDING};
-	sint8 textureUnitCount{0}; // number of entries set in textureUnitToBindingPoint
-	// uniform buffer
-	sint8 uniformVarsBufferBindingPoint{UNUSED_BINDING}; // special block for uniform registers/remapped array/custom variables
+	sint8 textureUnitCount{0};
+	// uniforms
+	sint8 uniformVarsBufferBindingPoint{UNUSED_BINDING}; // block holding uniform registers / remapped constants / helper values
 	sint8 uniformBuffersBindingPoint[LATTE_NUM_MAX_UNIFORM_BUFFERS];
-	// shader storage buffer for transform feedback (if alternative mode is used)
+	// storage buffer used when transform feedback is emulated with an SSBO
 	sint8 tfStorageBindingPoint{UNUSED_BINDING};
-	// attributes (vertex shader only)
+	// vertex attributes, indexed by semantic id
 	sint8 attributeMapping[LATTE_NUM_MAX_ATTRIBUTE_LOCATIONS];
-	// Vulkan exclusive
+	// Vulkan descriptor set
 	sint8 setIndex{};
-	// Metal exclusive
+	// Metal only
 	sint8 verticesPerInstanceBinding{UNUSED_BINDING};
 	sint8 indexBufferBinding{UNUSED_BINDING};
 	sint8 indexTypeBinding{UNUSED_BINDING};
@@ -84,33 +92,37 @@ struct LatteDecompilerShaderResourceMapping
 		return relBindingPointToRelTextureUnit[relativeBindingPoint];
 	}
 
-	// returns -1 if no there is no texture binding point
+	// -1 when the shader samples no texture
 	sint32 getTextureBaseBindingPoint()
 	{
 		return textureUnitBaseBindingPoint;
 	}
 
+	// lowest and highest binding used by any uniform block; false if there is none
 	bool getUniformBufferBindingRange(sint32& minBinding, sint32& maxBinding)
 	{
-		sint32 minBindingPoint = 9999;
-		sint32 maxBindingPoint = -9999;
-		if (uniformVarsBufferBindingPoint >= 0)
+		bool found = false;
+		sint32 lo = 0, hi = 0;
+		auto consider = [&](sint8 binding)
 		{
-			minBindingPoint = std::min(minBindingPoint, (sint32)uniformVarsBufferBindingPoint);
-			maxBindingPoint = std::max(maxBindingPoint, (sint32)uniformVarsBufferBindingPoint);
-		}
-		for (sint32 i = 0; i < LATTE_NUM_MAX_UNIFORM_BUFFERS; i++)
-		{
-			if (uniformBuffersBindingPoint[i] >= 0)
+			if (binding < 0)
+				return;
+			if (!found)
 			{
-				minBindingPoint = std::min(minBindingPoint, (sint32)uniformBuffersBindingPoint[i]);
-				maxBindingPoint = std::max(maxBindingPoint, (sint32)uniformBuffersBindingPoint[i]);
+				lo = hi = binding;
+				found = true;
+				return;
 			}
-		}
-		if (minBindingPoint == 9999)
+			lo = std::min(lo, (sint32)binding);
+			hi = std::max(hi, (sint32)binding);
+		};
+		consider(uniformVarsBufferBindingPoint);
+		for (sint8 b : uniformBuffersBindingPoint)
+			consider(b);
+		if (!found)
 			return false;
-		minBinding = minBindingPoint;
-		maxBinding = maxBindingPoint;
+		minBinding = lo;
+		maxBinding = hi;
 		return true;
 	}
 
@@ -121,9 +133,9 @@ struct LatteDecompilerShaderResourceMapping
 
 	bool hasUniformBuffers()
 	{
-		for (sint32 i = 0; i < LATTE_NUM_MAX_UNIFORM_BUFFERS; i++)
+		for (sint8 b : uniformBuffersBindingPoint)
 		{
-			if (uniformBuffersBindingPoint[i] >= 0)
+			if (b >= 0)
 				return true;
 		}
 		return false;
@@ -136,6 +148,7 @@ struct LatteDecompilerShaderResourceMapping
 	}
 };
 
+// result object of a decompilation; owned by the shader cache afterwards
 struct LatteDecompilerShader
 {
 	LatteDecompilerShader(LatteConst::ShaderType shaderType) : shaderType(shaderType) {}
@@ -144,11 +157,11 @@ struct LatteDecompilerShader
 	LatteConst::ShaderType shaderType;
 	uint64 baseHash{0};
 	uint64 auxHash{0};
-	// vertex shader
+	// vertex shaders: the fetch shader this was generated against
 	struct LatteFetchShader* compatibleFetchShader{};
-	// error tracking
-	bool hasError{false}; // if set, the shader cannot be used
-	// compact resource lists for optimized access
+	// set when the program could not be translated
+	bool hasError{false};
+	// uniform buffers the shader reads and how many bytes of each
 	struct QuickBufferEntry
 	{
 		uint32 index : 8;
@@ -157,57 +170,57 @@ struct LatteDecompilerShader
 	boost::container::static_vector<QuickBufferEntry, LATTE_NUM_MAX_UNIFORM_BUFFERS> list_quickBufferList;
 	uint8 textureUnitList[LATTE_NUM_MAX_TEX_UNITS];
 	uint8 textureUnitListCount{ 0 };
-	// input
-	Latte::E_DIM textureUnitDim[LATTE_NUM_MAX_TEX_UNITS]{}; // dimension of texture unit, from the currently set texture
+	// texture state the code was specialised for
+	Latte::E_DIM textureUnitDim[LATTE_NUM_MAX_TEX_UNITS]{};
 	bool textureIsIntegerFormat[LATTE_NUM_MAX_TEX_UNITS]{};
-	// analyzer stage (uniforms)
-	uint8 uniformMode{0}; // determines how uniforms are managed within the shader (see LATTE_DECOMPILER_UNIFORM_MODE_* constants)
-	uint64 uniformDataHash64[2]{0}; // used to avoid redundant calls to glUniform*
+	// uniforms
+	uint8 uniformMode{0}; // LATTE_DECOMPILER_UNIFORM_MODE_*
+	uint64 uniformDataHash64[2]{0}; // last uploaded data, to skip redundant updates
 	std::vector<LatteDecompilerRemappedUniformEntry_t> list_remappedUniformEntries;
-	// analyzer stage (textures)
+	// textures
 	std::bitset<LATTE_NUM_MAX_TEX_UNITS> textureUnitMask2;
-	uint16 textureUnitSamplerAssignment[LATTE_NUM_MAX_TEX_UNITS]{ 0 }; // LATTE_DECOMPILER_SAMPLER_NONE means undefined
+	uint16 textureUnitSamplerAssignment[LATTE_NUM_MAX_TEX_UNITS]{ 0 }; // LATTE_DECOMPILER_SAMPLER_NONE if unassigned
 	bool textureUsesDepthCompare[LATTE_NUM_MAX_TEX_UNITS]{};
 	uint8 textureRenderTargetIndex[LATTE_NUM_MAX_TEX_UNITS];
 
-	// analyzer stage (pixel outputs)
-	uint32 pixelColorOutputMask{ 0 }; // from LSB to MSB, 1 bit per written output. 1 if written (indices of color attachments)
-	// analyzer stage (depth output)
+	// pixel shaders: one bit per color attachment that is written
+	uint32 pixelColorOutputMask{ 0 };
+	// pixel shaders: depth is exported
 	bool depthMask{ false };
-	// analyzer stage (geometry shader parameters/inputs)
+	// ring buffer parameters (vertex -> geometry stage)
 	uint32 ringParameterCount{ 0 };
-	uint32 ringParameterCountFromPrevStage{ 0 }; // used in geometry shader to hold VS ringParameterCount
-	// analyzer stage (misc)
+	uint32 ringParameterCountFromPrevStage{ 0 }; // geometry shaders: count written by the vertex shader
+	// transform feedback
 	std::bitset<LATTE_NUM_STREAMOUT_BUFFER> streamoutBufferWriteMask;
 	bool hasStreamoutBufferWrite{ false };
-	// output code
+	// generated source
 	class StringBuf* strBuf_shaderSource{ nullptr };
-	// separable shaders
+	// compiled host shader
 	RendererShader* shader{ nullptr };
 	bool isCustomShader{ false };
 
 	uint32 outputParameterMask{ 0 };
-	// resource mapping (binding points)
+	// bindings of the active backend
 	LatteDecompilerShaderResourceMapping resourceMapping{};
-	// uniforms
+	// uniform locations / cached values (filled by the renderer)
 	struct
 	{
-		sint32 loc_remapped; // uf_remappedVS/uf_remappedGS/uf_remappedPS
-		sint32 loc_uniformRegister; // uf_uniformRegisterVS/uf_uniformRegisterGS/uf_uniformRegisterPS
+		sint32 loc_remapped;
+		sint32 loc_uniformRegister;
 		sint32 count_uniformRegister;
-		sint32 loc_windowSpaceToClipSpaceTransform; // uf_windowSpaceToClipSpaceTransform
-		sint32 loc_alphaTestRef; // uf_alphaTestRef
-		sint32 loc_pointSize; // uf_pointSize
+		sint32 loc_windowSpaceToClipSpaceTransform;
+		sint32 loc_alphaTestRef;
+		sint32 loc_pointSize;
 		sint32 loc_fragCoordScale;
 		sint32 loc_framebufferFetchSize[LATTE_NUM_MAX_TEX_UNITS];
-		std::vector<LatteUniformTextureScaleEntry_t> list_ufTexRescale; // list of mappings for uf_tex*Scale <-> uniform location
+		std::vector<LatteUniformTextureScaleEntry_t> list_ufTexRescale;
 		float ufCurrentValueAlphaTestRef;
 		float ufCurrentValueFragCoordScale[2];
 		sint32 loc_verticesPerInstance;
 		sint32 loc_streamoutBufferBase[LATTE_NUM_STREAMOUT_BUFFER];
-		uint32 uniformRangeSize; // entire size of uniform variable block
+		uint32 uniformRangeSize; // size of the whole uniform variable block
 	}uniform{ 0 };
-	// fast access
+	// remapped constants grouped for fast uploads
 	struct _RemappedUniformBufferGroup
 	{
 		_RemappedUniformBufferGroup(uint16 bufferId, uint16 _kcacheBankIdOffset) : bufferId(bufferId), kcacheBankIdOffset(_kcacheBankIdOffset) {};
@@ -217,15 +230,16 @@ struct LatteDecompilerShader
 	};
 	std::vector<LatteFastAccessRemappedUniformEntry_register_t>	list_remappedUniformEntries_register;
 	std::vector<_RemappedUniformBufferGroup> list_remappedUniformEntries_bufferGroups;
-	// keys in shader state cache
+	// shader state cache keys referencing this shader
 	std::vector<uint64> m_shaderStateCacheKeys;
 };
 
+// byte offsets of the helper uniforms inside the uniform variable block (-1 = absent)
 struct LatteDecompilerOutputUniformOffsets
 {
 	sint32 offset_remapped;
 	sint32 offset_uniformRegister;
-	sint32 count_uniformRegister; // in vec4
+	sint32 count_uniformRegister; // vec4 entries
 	sint32 offset_alphaTestRef;
 	sint32 offset_pointSize;
 	sint32 offset_fragCoordScale;
@@ -234,7 +248,7 @@ struct LatteDecompilerOutputUniformOffsets
 	sint32 offset_texScale[LATTE_NUM_MAX_TEX_UNITS];
 	sint32 offset_verticesPerInstance{-1};
 	sint32 offset_streamoutBufferBase[LATTE_NUM_STREAMOUT_BUFFER]{ -1, -1, -1, -1 };
-	sint32 offset_endOfBlock; // stores size of uniform variable block
+	sint32 offset_endOfBlock; // total size of the block
 
 	LatteDecompilerOutputUniformOffsets()
 	{
@@ -245,11 +259,8 @@ struct LatteDecompilerOutputUniformOffsets
 		offset_pointSize = -1;
 		offset_fragCoordScale = -1;
 		offset_windowSpaceToClipSpaceTransform = -1;
-		for (sint32 i = 0; i < LATTE_NUM_MAX_TEX_UNITS; i++)
-		{
-			offset_framebufferFetchSize[i] = -1;
-			offset_texScale[i] = -1;
-		}
+		for (sint32& v : offset_framebufferFetchSize) v = -1;
+		for (sint32& v : offset_texScale) v = -1;
 		offset_endOfBlock = 0;
 	}
 };
@@ -257,9 +268,9 @@ struct LatteDecompilerOutputUniformOffsets
 struct LatteDecompilerOptions
 {
 	bool usesGeometryShader{ false };
-	// floating point math
-	bool strictMul{}; // if true, 0*anything=0 rule is emulated
-	// Vulkan-specific
+	// emulate the 0 * x = 0 rule of the non-IEEE multiply
+	bool strictMul{};
+	// Vulkan: transform feedback via storage buffer
 	bool useTFViaSSBO{ false };
 	struct
 	{
@@ -272,17 +283,17 @@ struct LatteDecompilerOutput_t
 	LatteDecompilerShader* shader;
 	LatteConst::ShaderType shaderType;
 
-	// texture info
+	// texture units sampled by the program
 	std::bitset<LATTE_NUM_MAX_TEX_UNITS> textureUnitMask;
 
-	// streamout info
+	// transform feedback buffers written and their strides in bytes
 	std::bitset<LATTE_NUM_STREAMOUT_BUFFER> streamoutBufferWriteMask;
 	uint32 streamoutBufferStride[LATTE_NUM_STREAMOUT_BUFFER]{};
 
-	// uniform locations
+	// helper uniform layout per API
 	LatteDecompilerOutputUniformOffsets uniformOffsetsGL;
 	LatteDecompilerOutputUniformOffsets uniformOffsetsVK;
-	// mapping and binding information
+	// binding layout per API
 	LatteDecompilerShaderResourceMapping resourceMappingGL;
 	LatteDecompilerShaderResourceMapping resourceMappingVK;
 	LatteDecompilerShaderResourceMapping resourceMappingMTL;
@@ -294,14 +305,14 @@ void LatteDecompiler_DecompileVertexShader(uint64 shaderBaseHash, uint32* contex
 void LatteDecompiler_DecompileGeometryShader(uint64 shaderBaseHash, uint32* contextRegisters, uint8* programData, uint32 programSize, uint8* gsCopyProgramData, uint32 gsCopyProgramSize, uint32 vsRingParameterCount, LatteDecompilerOptions& options, LatteDecompilerOutput_t* output);
 void LatteDecompiler_DecompilePixelShader(uint64 shaderBaseHash, uint32* contextRegisters, uint8* programData, uint32 programSize, LatteDecompilerOptions& options, LatteDecompilerOutput_t* output);
 
-// specialized shader parsers
+// geometry shader copy program (implemented in Core/LatteGSCopyShaderParser.cpp)
 
 #define GPU7_COPY_SHADER_MAX_PARAMS	(32)
 
 struct LatteGSCopyShaderStreamWrite_t
 {
 	uint8 bufferIndex;
-	uint16 offset; // offset in ring buffer from GS
+	uint16 offset; // ring buffer offset of the source value
 	uint32 exportArrayBase;
 	uint32 memWriteArraySize;
 	uint32 memWriteCompMask;
@@ -317,7 +328,6 @@ struct LatteParsedGSCopyShader
 		uint8  exportParam;
 	}paramMapping[GPU7_COPY_SHADER_MAX_PARAMS];
 	sint32 numParam;
-	// streamout writes
 	std::vector<LatteGSCopyShaderStreamWrite_t> list_streamWrites;
 };
 

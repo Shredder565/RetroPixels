@@ -1,23 +1,28 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
+// Decoded program representation and shared state of the legacy decompiler.
+// These types are private to the LegacyShaderDecompiler directory (GLSL and
+// MSL back ends). Field names and layout are relied on by both emitters.
+
+// one slot of an ALU instruction group
 struct LatteDecompilerALUInstruction
 {
-	struct LatteDecompilerCFInstruction* cfInstruction{};
+	struct LatteDecompilerCFInstruction* cfInstruction{}; // owning clause
 	bool isOP3{};
 	uint32 opcode{};
-	uint32 instructionGroupIndex{};
-	uint8 indexMode{};
+	uint32 instructionGroupIndex{}; // group number inside the clause
+	uint8 indexMode{}; // which AR component (or loop index) relative operands use
 	uint8 omod{};
-	// destination
+	// result
 	uint32 destGpr{};
 	uint8 destRel{};
 	uint8 destElem{};
 	uint8 destClamp{};
-	uint8 writeMask{};
-	// flags
+	uint8 writeMask{}; // 0 means the result only goes to PV/PS
 	uint8 updateExecuteMask{};
 	uint8 updatePredicate{};
-	// source operands
+	// inputs; sel == 0xFFFFFFFF marks an operand slot the encoding does not have
 	struct
 	{
 		uint32 sel{};
@@ -26,40 +31,41 @@ struct LatteDecompilerALUInstruction
 		uint8 neg{};
 		uint8 chan{};
 	}sourceOperand[3];
+	// literal constants of the group this instruction belongs to
 	union
 	{
 		uint32 w[4];
 		float f[4];
 	}literalData;
-	// information from analyzer stage
-	uint8 aluUnit{}; // 0-3 -> ALU.x/y/u/w (PV), 4 -> Trans unit (PS)
-	uint8 indexInGroup{}; // index of instruction within instruction group
+	// filled while decoding
+	uint8 aluUnit{}; // 0..3 vector unit x/y/z/w (PV), 4 = scalar trans unit (PS)
+	uint8 indexInGroup{};
 	bool isLastInstructionOfGroup{};
 };
 
+// one entry of a TEX/VTX clause
 struct LatteDecompilerTEXInstruction
 {
 	struct LatteDecompilerCFInstruction* cfInstruction{};
 	uint32 opcode{};
-	// texture or vertex fetch
-	// shared
+	// common to all fetch kinds
 	sint32 srcGpr;
 	sint32 dstGpr;
 	sint8 dstSel[4];
-	// texture fetch
+	// texture sample / vertex fetch fields
 	struct
 	{
-		sint32 textureIndex{};
+		sint32 textureIndex{}; // resource id (texture unit or vertex buffer id)
 		sint32 samplerIndex{};
-		uint32 offset{};
+		uint32 offset{}; // byte offset for vertex fetches
 		sint8 srcSel[4]{};
 		sint8 offsetX{};
 		sint8 offsetY{};
 		sint8 offsetZ{};
-		bool unnormalized[4]{}; // set if texture coordinates are in [0,dim] range instead of [0,1]
-		sint8 lodBias{}; // divide by 16 to get actual value
+		bool unnormalized[4]{}; // coordinate given in texels instead of [0,1]
+		sint8 lodBias{}; // fixed point, 1/16 steps
 	}textureFetch;
-	// memRead
+	// scatter buffer read fields
 	struct
 	{
 		uint32 arrayBase{};
@@ -70,64 +76,60 @@ struct LatteDecompilerTEXInstruction
 	}memRead;
 };
 
+// one control flow instruction, with the clause it references (if any)
 struct LatteDecompilerCFInstruction
 {
-	uint32 type{};
-	uint32 cfAddr{};
-	// for clauses with instructions
+	uint32 type{}; // GPU7_CF_INST_*
+	uint32 cfAddr{}; // index of this CF slot in the program
+	// clause location
 	uint32 addr{};
 	sint32 count{};
-	// clause contains either ALU or TEX instructions
+	// a clause holds either ALU or TEX entries, never both
 	std::vector<LatteDecompilerALUInstruction> instructionsALU;
 	std::vector<LatteDecompilerTEXInstruction> instructionsTEX;
-	// for clauses that access uniform buffers
+	// constant cache setup of ALU clauses
 	uint32 cBank0Index{};
 	uint32 cBank1Index{};
 	uint32 cBank0AddrBase{};
 	uint32 cBank1AddrBase{};
-	// for exports
+	// export fields
 	uint32 exportType{};
 	uint8  exportComponentSel[4]{};
 	uint32 exportBurstCount{};
-	// for mem write
+	// memory export fields
 	uint32 memWriteArraySize{};
 	uint8 memWriteCompMask{};
-	uint8 memWriteElemSize{}; // 0-3
-	// for exports and mem write
+	uint8 memWriteElemSize{};
+	// shared by exports and memory exports
 	uint32 exportArrayBase{};
 	uint32 exportSourceGPR{};
-	// misc
+	// condition and stack
 	uint32 cfCond{};
 	uint32 popCount{};
-	// information from analyzer stage
+	// filled by the analyzer
 	bool modifiesPredicate{};
 	bool modifiesActiveMask{};
 	uint32 numPredInstructions{};
-	sint32 activeStackDepth{}; // stack depth during the clause/CF instruction
+	sint32 activeStackDepth{}; // execution mask stack level this instruction runs at
 
-	LatteDecompilerCFInstruction()
-	{
-
-	}
-
+	LatteDecompilerCFInstruction() = default;
 	~LatteDecompilerCFInstruction()
 	{
-		cemu_assert_debug(!(instructionsALU.size() != 0 && instructionsTEX.size() != 0)); // make sure we haven't accidentally added the wrong instruction type
+		cemu_assert_debug(instructionsALU.empty() || instructionsTEX.empty());
 	}
-
-	LatteDecompilerCFInstruction(const LatteDecompilerCFInstruction& mE) = default;
-	LatteDecompilerCFInstruction(LatteDecompilerCFInstruction&& mE) = default;
-
-	LatteDecompilerCFInstruction& operator=(LatteDecompilerCFInstruction&& mE) = default;
+	LatteDecompilerCFInstruction(const LatteDecompilerCFInstruction& other) = default;
+	LatteDecompilerCFInstruction(LatteDecompilerCFInstruction&& other) = default;
+	LatteDecompilerCFInstruction& operator=(LatteDecompilerCFInstruction&& other) = default;
 };
 
+// a CALL target and the CF instructions up to its RETURN
 struct LatteDecompilerSubroutineInfo
 {
 	uint32 cfAddr;
 	std::vector<LatteDecompilerCFInstruction> instructions;
 };
 
-// helper struct to track the highest accessed offset within a buffer
+// records which entries of a constant file / constant buffer are read
 struct LatteDecompilerBufferAccessTracker
 {
 	bool hasStaticIndexAccess{false};
@@ -135,43 +137,31 @@ struct LatteDecompilerBufferAccessTracker
 	sint32 highestAccessDynamicIndex{0};
 	sint32 highestAccessStaticIndex{0};
 
-	// track access, index is the array index and not a byte offset
+	// index counts vec4 entries
 	void TrackAccess(sint32 index, bool isDynamicIndex)
 	{
-		if (isDynamicIndex)
-		{
-			hasDynamicIndexAccess = true;
-			if (index > highestAccessDynamicIndex)
-				highestAccessDynamicIndex = index;
-		}
-		else
-		{
-			hasStaticIndexAccess = true;
-			if (index > highestAccessStaticIndex)
-				highestAccessStaticIndex = index;
-		}
+		bool& seen = isDynamicIndex ? hasDynamicIndexAccess : hasStaticIndexAccess;
+		sint32& highest = isDynamicIndex ? highestAccessDynamicIndex : highestAccessStaticIndex;
+		seen = true;
+		highest = std::max(highest, index);
 	}
 
+	// number of vec4 entries that must be made available to the shader
 	sint32 DetermineSize(uint64 shaderBaseHash, sint32 maximumSize) const
 	{
-		// here we try to predict the accessed byte range so we dont have to upload the whole buffer
-		// if no bound can be determined then return maximumSize
-		// for some known shaders we use hand-tuned values instead of the maximumSize fallback value that those shaders would normally use
-		if(shaderBaseHash == 0x8ff56afdf1a2f837) // XCX text rendering
-			return 24;
-		if(shaderBaseHash == 0x37b9100c1310d3bb) // BotW UI backdrops 1
-			return 24;
-		if(shaderBaseHash == 0xf7ba548c1fefe24a) // BotW UI backdrops 2
-			return 30;
-
-		sint32 highestAccessIndex = -1;
-		if(hasStaticIndexAccess)
-			highestAccessIndex = highestAccessStaticIndex;
-		if(hasDynamicIndexAccess)
-			return maximumSize; // dynamic index exists and no bound can be determined
-		if (highestAccessIndex < 0)
-			return 1; // no access at all? But avoid zero as a size
-		return highestAccessIndex + 1;
+		// a few known shaders index dynamically but only ever touch a small range
+		switch (shaderBaseHash)
+		{
+		case 0x8ff56afdf1a2f837: return 24; // XCX text
+		case 0x37b9100c1310d3bb: return 24; // BotW UI backdrop
+		case 0xf7ba548c1fefe24a: return 30; // BotW UI backdrop
+		default: break;
+		}
+		if (hasDynamicIndexAccess)
+			return maximumSize;
+		if (!hasStaticIndexAccess)
+			return 1; // never return an empty array
+		return highestAccessStaticIndex + 1;
 	}
 
 	bool HasAccess() const
@@ -185,85 +175,78 @@ struct LatteDecompilerBufferAccessTracker
 	}
 };
 
+// all state of one decompilation run
 struct LatteDecompilerShaderContext
 {
 	LatteDecompilerOutput_t* output;
 	LatteDecompilerShader* shader;
 	LatteConst::ShaderType shaderType;
 	const class LatteDecompilerOptions* options;
-	uint32* contextRegisters; // deprecated
-	struct LatteContextRegister* contextRegistersNew;
+	uint32* contextRegisters; // raw register file
+	struct LatteContextRegister* contextRegistersNew; // same memory, typed view
 	uint64 shaderBaseHash;
 	StringBuf* shaderSource;
-	std::vector<LatteDecompilerCFInstruction> cfInstructions;
-	// fetch shader (required for vertex shader)
-	LatteFetchShader* fetchShader{};
-	// geometry copy shader (only present when geometry shader is active)
-	LatteParsedGSCopyShader* parsedGSCopyShader;
-	// state
+	std::vector<LatteDecompilerCFInstruction> cfInstructions; // main program
+	LatteFetchShader* fetchShader{}; // vertex shaders only
+	LatteParsedGSCopyShader* parsedGSCopyShader; // geometry shaders only
 	bool hasError;
-	// type tracker
+	// register representation chosen after analysis
 	struct
 	{
-		// data type tracker
-		uint8 defaultDataType;
-		bool genFloatReg; // if set, generate R*f register variables
-		bool genIntReg; // if set, generate R*i register variables
-		bool useArrayGPRs; // if set, an array is used to represent GPRs instead of individual variables
+		uint8 defaultDataType; // LATTE_DECOMPILER_DTYPE_*
+		bool genFloatReg; // declare R*f registers
+		bool genIntReg; // declare R*i registers
+		bool useArrayGPRs; // registers live in one indexable array
 	}typeTracker;
-	// analyzer
+	// facts gathered by the analyzer
 	struct
 	{
-		// general
-		bool hasStreamoutEnable{}; // set if streamout is enabled
-		bool hasLoops{}; // loop directives present in shader
-		// vertex shader
-		bool isPointsPrimitive{}; // set if current render primitive is points
-		bool outputPointSize{}; // set if the current shader should output the point size
-		std::bitset<256> inputAttributSemanticMask; // one set bit for every used semanticId - todo: there are only 128 bit available semantic locations? The MSB has special meaning?
-		// uniforms
+		bool hasStreamoutEnable{};
+		bool hasLoops{};
+		// vertex stage
+		bool isPointsPrimitive{};
+		bool outputPointSize{};
+		std::bitset<256> inputAttributSemanticMask; // indexed by semantic id
+		// uniform usage
 		LatteDecompilerBufferAccessTracker uniformRegisterAccessTracker;
 		LatteDecompilerBufferAccessTracker uniformBufferAccessTracker[LATTE_NUM_MAX_UNIFORM_BUFFERS];
-		// ssbo
-		bool hasSSBORead; // shader has instructions that read from SSBO
-		bool hasSSBOWrite; // shader has instructions that write to SSBO
+		// storage buffers
+		bool hasSSBORead;
+		bool hasSSBOWrite;
 		// textures
 		std::bitset<LATTE_NUM_MAX_TEX_UNITS> texUnitUsesTexelCoordinates;
-		bool hasCubeMapTexture; // set to true if a cubemap texture is used
-		bool hasGradientLookup; // set to true if texture lookup with custom gradients is used
-		// misc
-		bool usesRelativeGPRRead; // set if indexed GPR reads are used
-		bool usesRelativeGPRWrite; // set if indexed GPR writes are used
-		uint8 gprUseMask[(LATTE_NUM_GPR + 7) / 8]; // 1 bit per GPR, set if GPR is read/written anywhere in the program (ignores GPR accesses with relative index)
-		bool hasStreamoutWrite; // stream-out CF instructions are used
-		bool hasRedcCUBE; // has cube reduction instruction
-		bool hasFragCoordAccess{false}; // accesses gl_FragCoord
-		bool modifiesPixelActiveState; // set if the active mask is changed anywhere in the shader (If false, we can skip active mask checks)
-		bool usesIntegerValues; // set if the shader uses any kind of integer instruction or integer-based GPR/AR access
-		sint32 activeStackMaxDepth; // maximum depth of pixel state stack
-		// analyzer stage (vs)
+		bool hasCubeMapTexture;
+		bool hasGradientLookup;
+		// registers and misc
+		bool usesRelativeGPRRead;
+		bool usesRelativeGPRWrite;
+		uint8 gprUseMask[(LATTE_NUM_GPR + 7) / 8]; // GPRs accessed with a fixed index
+		bool hasStreamoutWrite;
+		bool hasRedcCUBE;
+		bool hasFragCoordAccess{false};
+		bool modifiesPixelActiveState; // any instruction that changes the execution mask
+		bool usesIntegerValues;
+		sint32 activeStackMaxDepth;
 		bool writesPointSize{};
-		// streamout (vs and gs)
 		bool useSSBOForStreamout{};
-		// geometry shader
-		uint32 numEmitVertex{}; // counts how often emit vertex instruction is found
+		uint32 numEmitVertex{}; // geometry shader EMIT_VERTEX count
 	}analyzer;
 
-	// set while generating code for subroutine
+	// set while a subroutine body is being emitted
 	bool isSubroutine;
 	LatteDecompilerSubroutineInfo* subroutineInfo;
 
-	// emitter
+	// emitter state
 	bool hasUniformVarBlock;
 	sint32 currentBindingPointVK{};
 	sint32 currentBufferBindingPointMTL{};
 	sint32 currentTextureBindingPointMTL{};
-	struct ALUClauseTemporariesState* aluPVPSState{nullptr};
-	
-	// misc
+	struct ALUClauseTemporariesState* aluPVPSState{nullptr}; // used by the MSL emitter
+
 	std::vector<LatteDecompilerSubroutineInfo> list_subroutines;
 };
 
+// stages, called in this order by LatteDecompiler.cpp
 void LatteDecompiler_analyze(LatteDecompilerShaderContext* shaderContext, LatteDecompilerShader* shader);
 void LatteDecompiler_analyzeDataTypes(LatteDecompilerShaderContext* shaderContext);
 void LatteDecompiler_emitGLSLShader(LatteDecompilerShaderContext* shaderContext, LatteDecompilerShader* shader);
@@ -273,6 +256,5 @@ void LatteDecompiler_emitMSLShader(LatteDecompilerShaderContext* shaderContext, 
 
 void LatteDecompiler_cleanup(LatteDecompilerShaderContext* shaderContext);
 
-// helper functions
-
+// maps a pixel shader export slot to the color attachment it lands in (-1 if none)
 sint32 LatteDecompiler_getColorOutputIndexFromExportIndex(LatteDecompilerShaderContext* shaderContext, sint32 exportIndex);

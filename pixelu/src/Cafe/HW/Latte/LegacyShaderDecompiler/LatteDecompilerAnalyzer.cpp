@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/HW/Latte/Core/LatteConst.h"
 #include "Cafe/HW/Latte/Core/LatteShaderAssembly.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
@@ -15,133 +16,88 @@
 #include "HW/Latte/Renderer/Metal/MetalRenderer.h"
 #endif
 
-// Defined in LatteTextureLegacy.cpp
+// Analysis pass of the legacy decompiler. It walks the decoded program once
+// and collects everything the code generator has to know up front: which
+// registers, constants, textures and outputs are touched, how deep the
+// execution mask stack gets, and which binding slots each backend uses.
+
+// implemented with the texture cache
 Latte::E_GX2SURFFMT LatteTexture_ReconstructGX2Format(const Latte::LATTE_SQ_TEX_RESOURCE_WORD1_N& texUnitWord1, const Latte::LATTE_SQ_TEX_RESOURCE_WORD4_N& texUnitWord4);
 
-/*
- * Return index of used color attachment based on shader pixel export index (0-7)
- */
+// The pixel shader writes its color exports densely (export 0, 1, ...) while
+// CB_SHADER_MASK enables attachments sparsely; export n goes to the n-th
+// enabled attachment.
 sint32 LatteDecompiler_getColorOutputIndexFromExportIndex(LatteDecompilerShaderContext* shaderContext, sint32 exportIndex)
 {
-	sint32 colorOutputIndex = -1;
-	sint32 outputCounter = 0;
-	uint32 cbShaderMask = shaderContext->contextRegisters[mmCB_SHADER_MASK];
-	uint32 cbShaderControl = shaderContext->contextRegisters[mmCB_SHADER_CONTROL];
-	for(sint32 m=0; m<8; m++)
+	const uint32 shaderMask = shaderContext->contextRegisters[mmCB_SHADER_MASK];
+	sint32 enabledSeen = 0;
+	for (sint32 target = 0; target < LATTE_NUM_COLOR_TARGET; target++)
 	{
-		uint32 outputMask = (cbShaderMask>>(m*4))&0xF;
-		if( outputMask == 0 )
+		const uint32 channels = (shaderMask >> (target * 4)) & 0xF;
+		if (channels == 0)
 			continue;
-		cemu_assert_debug(outputMask == 0xF); // mask is unsupported
-		if( outputCounter == exportIndex )
-		{
-			colorOutputIndex = m;
-			break;
-		}
-		outputCounter++;
+		cemu_assert_debug(channels == 0xF); // partial channel masks are not handled
+		if (enabledSeen == exportIndex)
+			return target;
+		enabledSeen++;
 	}
-	cemu_assert_debug(colorOutputIndex != -1); // real outputs and outputs defined via mask do not match up
-	return colorOutputIndex;
+	cemu_assert_debug(false); // shader exports more colors than the mask enables
+	return -1;
 }
 
-void _remapUniformAccess(LatteDecompilerShaderContext* shaderContext, bool isRegisterUniform, uint32 kcacheBankId, uint32 uniformIndex)
+namespace
 {
-	auto& list_uniformMapping = shaderContext->shader->list_remappedUniformEntries;
-	for(uint32 i=0; i<list_uniformMapping.size(); i++)
+	bool isALUClause(uint32 type)
 	{
-		LatteDecompilerRemappedUniformEntry_t* ufMapping = list_uniformMapping.data()+i;
-		if( isRegisterUniform )
-		{
-			if( ufMapping->isRegister == true && ufMapping->index == uniformIndex )
-			{
-				return;
-			}
-		}
-		else
-		{
-			if( ufMapping->isRegister == false && ufMapping->kcacheBankId == kcacheBankId && ufMapping->index == uniformIndex )
-			{
-				return;
-			}
-		}
+		return type == GPU7_CF_INST_ALU || type == GPU7_CF_INST_ALU_PUSH_BEFORE || type == GPU7_CF_INST_ALU_POP_AFTER ||
+			type == GPU7_CF_INST_ALU_POP2_AFTER || type == GPU7_CF_INST_ALU_BREAK || type == GPU7_CF_INST_ALU_ELSE_AFTER;
 	}
-	// add new mapping
-	LatteDecompilerRemappedUniformEntry_t newMapping = {0};
-	if( isRegisterUniform )
-	{
-		newMapping.isRegister = true;
-		newMapping.index = uniformIndex;
-		newMapping.mappedIndex = (uint32)list_uniformMapping.size();
-	}
-	else
-	{
-		newMapping.isRegister = false;
-		newMapping.kcacheBankId = kcacheBankId;
-		newMapping.index = uniformIndex;
-		newMapping.mappedIndex = (uint32)list_uniformMapping.size();
-	}
-	list_uniformMapping.emplace_back(newMapping);
-}
 
-/*
- * Returns true if the instruction takes integer operands or returns a integer value
- */
-bool _isIntegerInstruction(const LatteDecompilerALUInstruction& aluInstruction)
-{
-	if (aluInstruction.isOP3 == false)
+	void markGPRUsed(LatteDecompilerShaderContext* ctx, sint64 index)
 	{
-		// OP2
-		switch (aluInstruction.opcode)
+		if (index < 0 || index >= LATTE_NUM_GPR)
+			return;
+		ctx->analyzer.gprUseMask[index >> 3] |= (uint8)(1u << (index & 7));
+	}
+
+	// statically addressed constants get a slot in the compact uniform array
+	void addRemappedConstant(LatteDecompilerShaderContext* ctx, bool isRegister, uint32 bufferSlot, uint32 index)
+	{
+		auto& entries = ctx->shader->list_remappedUniformEntries;
+		for (const auto& e : entries)
 		{
-		case ALU_OP2_INST_ADD:
-		case ALU_OP2_INST_MUL:
-		case ALU_OP2_INST_MUL_IEEE:
-		case ALU_OP2_INST_MAX:
-		case ALU_OP2_INST_MIN:
-		case ALU_OP2_INST_FLOOR:
-		case ALU_OP2_INST_FRACT:
-		case ALU_OP2_INST_TRUNC:
-		case ALU_OP2_INST_MOV:
-		case ALU_OP2_INST_NOP:
-		case ALU_OP2_INST_DOT4:
-		case ALU_OP2_INST_DOT4_IEEE:
-		case ALU_OP2_INST_CUBE:
-		case ALU_OP2_INST_EXP_IEEE:
-		case ALU_OP2_INST_LOG_CLAMPED:
-		case ALU_OP2_INST_LOG_IEEE:
-		case ALU_OP2_INST_SQRT_IEEE:
-		case ALU_OP2_INST_SIN:
-		case ALU_OP2_INST_COS:
-		case ALU_OP2_INST_RNDNE:
-		case ALU_OP2_INST_MAX_DX10:
-		case ALU_OP2_INST_MIN_DX10:
-		case ALU_OP2_INST_SETGT:
-		case ALU_OP2_INST_SETGE:
-		case ALU_OP2_INST_SETNE:
-		case ALU_OP2_INST_SETE:
-		case ALU_OP2_INST_PRED_SETE:
-		case ALU_OP2_INST_PRED_SETGT:
-		case ALU_OP2_INST_PRED_SETGE:
-		case ALU_OP2_INST_PRED_SETNE:
-		case ALU_OP2_INST_KILLE:
-		case ALU_OP2_INST_KILLGT:
-		case ALU_OP2_INST_KILLGE:
-		case ALU_OP2_INST_RECIP_CLAMPED:
-		case ALU_OP2_INST_RECIP_FF:
-		case ALU_OP2_INST_RECIP_IEEE:
-		case ALU_OP2_INST_RECIPSQRT_CLAMPED:
-		case ALU_OP2_INST_RECIPSQRT_FF:
-		case ALU_OP2_INST_RECIPSQRT_IEEE:
-			return false;
-		case ALU_OP2_INST_FLT_TO_INT:
-		case ALU_OP2_INST_INT_TO_FLOAT:
-		case ALU_OP2_INST_UINT_TO_FLOAT:
-		case ALU_OP2_INST_ASHR_INT:
-		case ALU_OP2_INST_LSHR_INT:
-		case ALU_OP2_INST_LSHL_INT:
-		case ALU_OP2_INST_MULLO_INT:
-		case ALU_OP2_INST_MULLO_UINT:
-		case ALU_OP2_INST_FLT_TO_UINT:
+			if (e.isRegister != isRegister || e.index != index)
+				continue;
+			if (isRegister || e.kcacheBankId == bufferSlot)
+				return;
+		}
+		LatteDecompilerRemappedUniformEntry_t e{};
+		e.isRegister = isRegister;
+		e.kcacheBankId = isRegister ? 0 : (uint8)bufferSlot;
+		e.index = index;
+		e.mappedIndex = (uint32)entries.size();
+		entries.push_back(e);
+	}
+
+	// true for operations whose inputs or result are integers. Any of these
+	// makes the code generator store registers as ints.
+	bool usesIntegerData(const LatteDecompilerALUInstruction& ins)
+	{
+		if (ins.isOP3)
+		{
+			switch (ins.opcode)
+			{
+			case ALU_OP3_INST_CNDE_INT:
+			case ALU_OP3_INST_CNDGT_INT:
+			case ALU_OP3_INST_CMOVGE_INT:
+				return true;
+			default:
+				return false;
+			}
+		}
+		switch (ins.opcode)
+		{
+		// integer arithmetic, logic and shifts
 		case ALU_OP2_INST_AND_INT:
 		case ALU_OP2_INST_OR_INT:
 		case ALU_OP2_INST_XOR_INT:
@@ -152,6 +108,12 @@ bool _isIntegerInstruction(const LatteDecompilerALUInstruction& aluInstruction)
 		case ALU_OP2_INST_MIN_INT:
 		case ALU_OP2_INST_MAX_UINT:
 		case ALU_OP2_INST_MIN_UINT:
+		case ALU_OP2_INST_ASHR_INT:
+		case ALU_OP2_INST_LSHR_INT:
+		case ALU_OP2_INST_LSHL_INT:
+		case ALU_OP2_INST_MULLO_INT:
+		case ALU_OP2_INST_MULLO_UINT:
+		// integer compares, predicates and kills
 		case ALU_OP2_INST_SETE_INT:
 		case ALU_OP2_INST_SETGT_INT:
 		case ALU_OP2_INST_SETGE_INT:
@@ -165,426 +127,575 @@ bool _isIntegerInstruction(const LatteDecompilerALUInstruction& aluInstruction)
 		case ALU_OP2_INST_KILLE_INT:
 		case ALU_OP2_INST_KILLGT_INT:
 		case ALU_OP2_INST_KILLNE_INT:
+		// conversions
+		case ALU_OP2_INST_FLT_TO_INT:
+		case ALU_OP2_INST_FLT_TO_UINT:
+		case ALU_OP2_INST_INT_TO_FLOAT:
+		case ALU_OP2_INST_UINT_TO_FLOAT:
+		// address register loads
 		case ALU_OP2_INST_MOVA_FLOOR:
 		case ALU_OP2_INST_MOVA_INT:
-			return true;
-		// these return an integer result but are usually used only for conditionals
+		// float compares with an integer mask result
 		case ALU_OP2_INST_SETE_DX10:
 		case ALU_OP2_INST_SETGT_DX10:
 		case ALU_OP2_INST_SETGE_DX10:
 		case ALU_OP2_INST_SETNE_DX10:
 			return true;
 		default:
-#ifdef CEMU_DEBUG_ASSERT
-			debug_printf("_isIntegerInstruction(): OP3=%s opcode=%02x\n", aluInstruction.isOP3 ? "true" : "false", aluInstruction.opcode);
-			cemu_assert_debug(false);
-#endif
-			break;
+			return false;
 		}
 	}
-	else
+
+	void trackConstantBufferRead(LatteDecompilerShaderContext* ctx, uint32 slot, uint32 offset, bool relative)
 	{
-		// OP3
-		switch (aluInstruction.opcode)
+		cemu_assert(slot < LATTE_NUM_MAX_UNIFORM_BUFFERS);
+		addRemappedConstant(ctx, false, slot, offset);
+		ctx->analyzer.uniformBufferAccessTracker[slot].TrackAccess((sint32)offset, relative);
+	}
+
+	void scanALUClause(LatteDecompilerShaderContext* ctx, LatteDecompilerCFInstruction* cf)
+	{
+		auto& a = ctx->analyzer;
+		if (cf->type != GPU7_CF_INST_ALU)
+			a.modifiesPixelActiveState = true; // every other ALU clause type pushes/pops/breaks
+		for (auto& ins : cf->instructionsALU)
 		{
-		case ALU_OP3_INST_MULADD:
-		case ALU_OP3_INST_MULADD_D2:
-		case ALU_OP3_INST_MULADD_M2:
-		case ALU_OP3_INST_MULADD_M4:
-		case ALU_OP3_INST_MULADD_IEEE:
-		case ALU_OP3_INST_CMOVE:
-		case ALU_OP3_INST_CMOVGT:
-		case ALU_OP3_INST_CMOVGE:
-			return false;
-		case ALU_OP3_INST_CNDE_INT:
-		case ALU_OP3_INST_CNDGT_INT:
-		case ALU_OP3_INST_CMOVGE_INT:
+			if (!ins.isOP3 && ins.opcode == ALU_OP2_INST_NOP)
+				continue;
+			if (!ins.isOP3 && ins.opcode == ALU_OP2_INST_CUBE)
+				a.hasRedcCUBE = true;
+			if (usesIntegerData(ins))
+				a.usesIntegerValues = true;
+			for (const auto& src : ins.sourceOperand)
+			{
+				const uint32 sel = src.sel;
+				if (sel == 0xFFFFFFFF)
+					continue;
+				const bool rel = src.rel != 0;
+				if (GPU7_ALU_SRC_IS_CFILE(sel))
+				{
+					const uint32 reg = GPU7_ALU_SRC_GET_CFILE_INDEX(sel);
+					// relative reads can reach any register, so they are not remapped
+					if (!rel)
+						addRemappedConstant(ctx, true, 0, reg);
+					a.uniformRegisterAccessTracker.TrackAccess((sint32)reg, rel);
+				}
+				else if (GPU7_ALU_SRC_IS_CBANK0(sel))
+					trackConstantBufferRead(ctx, cf->cBank0Index, GPU7_ALU_SRC_GET_CBANK0_INDEX(sel) + cf->cBank0AddrBase, rel);
+				else if (GPU7_ALU_SRC_IS_CBANK1(sel))
+					trackConstantBufferRead(ctx, cf->cBank1Index, GPU7_ALU_SRC_GET_CBANK1_INDEX(sel) + cf->cBank1AddrBase, rel);
+				else if (GPU7_ALU_SRC_IS_GPR(sel))
+				{
+					markGPRUsed(ctx, GPU7_ALU_SRC_GET_GPR_INDEX(sel));
+					if (rel)
+						a.usesRelativeGPRRead = true;
+				}
+			}
+			if (ins.destRel != 0)
+				a.usesRelativeGPRWrite = true;
+			markGPRUsed(ctx, ins.destGpr);
+		}
+	}
+
+	bool isSampleOpcode(uint32 op)
+	{
+		switch (op)
+		{
+		case GPU7_TEX_INST_SAMPLE:
+		case GPU7_TEX_INST_SAMPLE_L:
+		case GPU7_TEX_INST_SAMPLE_LB:
+		case GPU7_TEX_INST_SAMPLE_LZ:
+		case GPU7_TEX_INST_SAMPLE_C:
+		case GPU7_TEX_INST_SAMPLE_C_L:
+		case GPU7_TEX_INST_SAMPLE_C_LZ:
+		case GPU7_TEX_INST_FETCH4:
+		case GPU7_TEX_INST_SAMPLE_G:
+		case GPU7_TEX_INST_LD:
 			return true;
 		default:
-#ifdef CEMU_DEBUG_ASSERT
-			debug_printf("_isIntegerInstruction(): OP3=%s opcode=%02x\n", aluInstruction.isOP3?"true":"false", aluInstruction.opcode);
-#endif
-			break;
+			return false;
 		}
 	}
-	return false;
-}
 
-/*
- * Analyze ALU CF instruction and all instructions within the ALU clause
- */
-void LatteDecompiler_analyzeALUClause(LatteDecompilerShaderContext* shaderContext, LatteDecompilerCFInstruction* cfInstruction)
-{
-	// check if this shader has any clause that potentially modifies the pixel execution state
-	if( cfInstruction->type == GPU7_CF_INST_ALU_PUSH_BEFORE || cfInstruction->type == GPU7_CF_INST_ALU_POP_AFTER || cfInstruction->type == GPU7_CF_INST_ALU_POP2_AFTER || cfInstruction->type == GPU7_CF_INST_ALU_BREAK || cfInstruction->type == GPU7_CF_INST_ALU_ELSE_AFTER )
+	void scanTEXClause(LatteDecompilerShaderContext* ctx, LatteDecompilerCFInstruction* cf)
 	{
-		shaderContext->analyzer.modifiesPixelActiveState = true;
-	}
-	// analyze ALU instructions
-	for(auto& aluInstruction : cfInstruction->instructionsALU)
-	{
-		// ignore NOP instruction
-		if( !aluInstruction.isOP3 && aluInstruction.opcode == ALU_OP2_INST_NOP )
-			continue;
-		// check for CUBE instruction
-		if( !aluInstruction.isOP3 && aluInstruction.opcode == ALU_OP2_INST_CUBE )
+		LatteDecompilerShader* shader = ctx->shader;
+		auto& a = ctx->analyzer;
+		for (auto& t : cf->instructionsTEX)
 		{
-			shaderContext->analyzer.hasRedcCUBE = true;
-		}
-		// check for integer instruction
-		if (_isIntegerInstruction(aluInstruction))
-			shaderContext->analyzer.usesIntegerValues = true;
-		// process all available operands (inputs)
-		for(sint32 f=0; f<3; f++)
-		{
-			// check input for uniform access
-			if( aluInstruction.sourceOperand[f].sel == 0xFFFFFFFF )
-				continue; // source operand not set/used
-			// about uniform register and buffer access tracking:
-			// for absolute indices we can determine a maximum size that is accessed
-			// relative accesses are tricky because the upper bound of accessed indices is unknown
-			// worst case we have to load the full file (256 * 16 byte entries) or for buffers an arbitrary upper bound (64KB in our case)
-			if( GPU7_ALU_SRC_IS_CFILE(aluInstruction.sourceOperand[f].sel) )
+			const sint32 unit = t.textureFetch.textureIndex;
+			if (isSampleOpcode(t.opcode))
 			{
-				if (aluInstruction.sourceOperand[f].rel)
+				if (unit < 0 || unit >= LATTE_NUM_MAX_TEX_UNITS)
 				{
-					shaderContext->analyzer.uniformRegisterAccessTracker.TrackAccess(GPU7_ALU_SRC_GET_CFILE_INDEX(aluInstruction.sourceOperand[f].sel), true);
-				}
-				else
-				{
-					_remapUniformAccess(shaderContext, true, 0, GPU7_ALU_SRC_GET_CFILE_INDEX(aluInstruction.sourceOperand[f].sel));
-					shaderContext->analyzer.uniformRegisterAccessTracker.TrackAccess(GPU7_ALU_SRC_GET_CFILE_INDEX(aluInstruction.sourceOperand[f].sel), false);
-				}
-			}
-			else if( GPU7_ALU_SRC_IS_CBANK0(aluInstruction.sourceOperand[f].sel) )
-			{
-				// uniform bank 0 (uniform buffer with index cfInstruction->cBank0Index)
-				uint32 uniformBufferIndex = cfInstruction->cBank0Index;
-				cemu_assert(uniformBufferIndex < LATTE_NUM_MAX_UNIFORM_BUFFERS);
-				uint32 offset = GPU7_ALU_SRC_GET_CBANK0_INDEX(aluInstruction.sourceOperand[f].sel)+cfInstruction->cBank0AddrBase;
-				_remapUniformAccess(shaderContext, false, uniformBufferIndex, offset);
-				shaderContext->analyzer.uniformBufferAccessTracker[uniformBufferIndex].TrackAccess(offset, aluInstruction.sourceOperand[f].rel);
-			}
-			else if( GPU7_ALU_SRC_IS_CBANK1(aluInstruction.sourceOperand[f].sel) )
-			{
-				// uniform bank 1 (uniform buffer with index cfInstruction->cBank1Index)
-				uint32 uniformBufferIndex = cfInstruction->cBank1Index;
-				cemu_assert(uniformBufferIndex < LATTE_NUM_MAX_UNIFORM_BUFFERS);
-				uint32 offset = GPU7_ALU_SRC_GET_CBANK1_INDEX(aluInstruction.sourceOperand[f].sel)+cfInstruction->cBank1AddrBase;
-				_remapUniformAccess(shaderContext, false, uniformBufferIndex, offset);
-				shaderContext->analyzer.uniformBufferAccessTracker[uniformBufferIndex].TrackAccess(offset, aluInstruction.sourceOperand[f].rel);
-			}
-			else if( GPU7_ALU_SRC_IS_GPR(aluInstruction.sourceOperand[f].sel) )
-			{
-				sint32 gprIndex = GPU7_ALU_SRC_GET_GPR_INDEX(aluInstruction.sourceOperand[f].sel);
-				shaderContext->analyzer.gprUseMask[gprIndex/8] |= (1<<(gprIndex%8));
-				if( aluInstruction.sourceOperand[f].rel != 0 )
-				{
-					// if indexed register access is used, all possibly referenced registers are stored to a separate array at the beginning of the group
-					shaderContext->analyzer.usesRelativeGPRRead = true;
+					cemuLog_logDebug(LogType::Force, "Shader {:16x} has out of bounds texture access (texture {})", shader->baseHash, unit);
 					continue;
 				}
+				cemu_assert_debug(t.textureFetch.samplerIndex >= 0 && t.textureFetch.samplerIndex < 0x12);
+				cemu_assert_debug(!ctx->output->textureUnitMask[unit] || shader->textureUnitSamplerAssignment[unit] == LATTE_DECOMPILER_SAMPLER_NONE || shader->textureUnitSamplerAssignment[unit] == t.textureFetch.samplerIndex);
+				ctx->output->textureUnitMask[unit] = true;
+				shader->textureUnitSamplerAssignment[unit] = (uint16)t.textureFetch.samplerIndex;
+				if (t.opcode == GPU7_TEX_INST_SAMPLE_C || t.opcode == GPU7_TEX_INST_SAMPLE_C_L || t.opcode == GPU7_TEX_INST_SAMPLE_C_LZ)
+					shader->textureUsesDepthCompare[unit] = true;
+				// texelFetch() paths need the texture size scale uniform
+				const auto& un = t.textureFetch.unnormalized;
+				const bool allTexelCoords = un[0] && un[1] && un[2] && un[3];
+				if (t.opcode == GPU7_TEX_INST_LD || (t.opcode == GPU7_TEX_INST_SAMPLE && allTexelCoords))
+					a.texUnitUsesTexelCoordinates.set(unit);
+			}
+			else if (t.opcode == GPU7_TEX_INST_GET_COMP_TEX_LOD || t.opcode == GPU7_TEX_INST_GET_TEXTURE_RESINFO)
+			{
+				if (unit >= 0 && unit < LATTE_NUM_MAX_TEX_UNITS)
+					ctx->output->textureUnitMask[unit] = true;
+			}
+			else if (t.opcode == GPU7_TEX_INST_SET_GRADIENTS_H || t.opcode == GPU7_TEX_INST_SET_GRADIENTS_V)
+				a.hasGradientLookup = true;
+			else if (t.opcode == GPU7_TEX_INST_VFETCH)
+			{
+				// a vertex fetch from buffer ids 0x80+ reads a constant buffer with a computed index
+				if (unit >= 0x80 && unit < 0x80 + LATTE_NUM_MAX_UNIFORM_BUFFERS)
+					a.uniformBufferAccessTracker[unit - 0x80].TrackAccess(0, true);
+			}
+			else if (t.opcode == GPU7_TEX_INST_MEM)
+				a.hasSSBORead = true;
+			markGPRUsed(ctx, t.dstGpr);
+			markGPRUsed(ctx, t.srcGpr);
+		}
+	}
 
+	void scanExport(LatteDecompilerShaderContext* ctx, LatteDecompilerCFInstruction* cf)
+	{
+		LatteDecompilerShader* shader = ctx->shader;
+		const uint32 slots = cf->exportBurstCount + 1;
+		if (shader->shaderType == LatteConst::ShaderType::Pixel && cf->exportType == 0)
+		{
+			if (cf->exportArrayBase < 8)
+			{
+				for (uint32 i = 0; i < slots; i++)
+				{
+					sint32 target = LatteDecompiler_getColorOutputIndexFromExportIndex(ctx, (sint32)(cf->exportArrayBase + i));
+					if (target >= 0)
+						shader->pixelColorOutputMask |= (1u << target);
+				}
+			}
+			else if (cf->exportArrayBase == 61)
+			{
+				// depth export; Metal additionally requires a bound depth buffer (part of its pipeline key)
+				if (g_renderer->GetType() != RendererAPI::Metal || LatteMRT::GetActiveDepthBufferMask(*ctx->contextRegistersNew))
+					shader->depthMask = true;
 			}
 		}
-		if( aluInstruction.destRel != 0 )
-			shaderContext->analyzer.usesRelativeGPRWrite = true;
-		shaderContext->analyzer.gprUseMask[aluInstruction.destGpr/8] |= (1<<(aluInstruction.destGpr%8));
-	}
-}
-
-// analyze TEX CF instruction and all instructions within the TEX clause
-void LatteDecompiler_analyzeTEXClause(LatteDecompilerShaderContext* shaderContext, LatteDecompilerCFInstruction* cfInstruction)
-{
-	LatteDecompilerShader* shader = shaderContext->shader;
-	for(auto& texInstruction : cfInstruction->instructionsTEX)
-	{
-		if( texInstruction.opcode == GPU7_TEX_INST_SAMPLE ||
-			texInstruction.opcode == GPU7_TEX_INST_SAMPLE_L ||
-			texInstruction.opcode == GPU7_TEX_INST_SAMPLE_LB ||
-			texInstruction.opcode == GPU7_TEX_INST_SAMPLE_LZ ||
-			texInstruction.opcode == GPU7_TEX_INST_SAMPLE_C ||
-			texInstruction.opcode == GPU7_TEX_INST_SAMPLE_C_L ||
-			texInstruction.opcode == GPU7_TEX_INST_SAMPLE_C_LZ ||
-			texInstruction.opcode == GPU7_TEX_INST_FETCH4 ||
-			texInstruction.opcode == GPU7_TEX_INST_SAMPLE_G ||
-			texInstruction.opcode == GPU7_TEX_INST_LD )
+		else if (shader->shaderType == LatteConst::ShaderType::Vertex)
 		{
-			if (texInstruction.textureFetch.textureIndex < 0 || texInstruction.textureFetch.textureIndex >= LATTE_NUM_MAX_TEX_UNITS)
+			if (cf->exportType == 2 && cf->exportArrayBase < 32)
 			{
-				cemuLog_logDebug(LogType::Force, "Shader {:16x} has out of bounds texture access (texture {})", shaderContext->shader->baseHash, (sint32)texInstruction.textureFetch.textureIndex);
+				for (uint32 i = 0; i < slots; i++)
+				{
+					const uint32 param = cf->exportArrayBase + i;
+					if (param >= 32)
+						break;
+					shader->outputParameterMask |= (1u << param);
+				}
+			}
+			else if (cf->exportType == 1 && cf->exportArrayBase == GPU7_DECOMPILER_CF_EXPORT_POINT_SIZE)
+				ctx->analyzer.writesPointSize = true;
+		}
+		for (uint32 i = 0; i < slots; i++)
+			markGPRUsed(ctx, (sint64)cf->exportSourceGPR + i);
+	}
+
+	// highest component written by a memory export, as byte count
+	uint32 vectorBytesFromMask(uint32 compMask)
+	{
+		uint32 bytes = 0;
+		for (uint32 c = 0; c < 4; c++)
+		{
+			if (compMask & (1u << c))
+				bytes = (c + 1) * 4;
+		}
+		return bytes;
+	}
+
+	void scanControlFlow(LatteDecompilerShaderContext* ctx)
+	{
+		auto& a = ctx->analyzer;
+		LatteDecompilerShader* shader = ctx->shader;
+		for (auto& cf : ctx->cfInstructions)
+		{
+			const uint32 type = cf.type;
+			if (isALUClause(type))
+				scanALUClause(ctx, &cf);
+			else if (type == GPU7_CF_INST_TEX)
+				scanTEXClause(ctx, &cf);
+			else if (type == GPU7_CF_INST_EXPORT || type == GPU7_CF_INST_EXPORT_DONE)
+				scanExport(ctx, &cf);
+			else if (type == GPU7_CF_INST_ELSE || type == GPU7_CF_INST_POP)
+				a.modifiesPixelActiveState = true;
+			else if (type == GPU7_CF_INST_LOOP_START_DX10 || type == GPU7_CF_INST_LOOP_START_NO_AL || type == GPU7_CF_INST_LOOP_END || type == GPU7_CF_INST_LOOP_BREAK)
+			{
+				a.modifiesPixelActiveState = true;
+				a.hasLoops = true;
+			}
+			else if (type == GPU7_CF_INST_MEM_STREAM0_WRITE || type == GPU7_CF_INST_MEM_STREAM1_WRITE)
+			{
+				const uint32 buffer = type == GPU7_CF_INST_MEM_STREAM0_WRITE ? 0 : 1;
+				a.hasStreamoutWrite = true;
+				ctx->output->streamoutBufferWriteMask[buffer] = true;
+				// strides of all streamout buffers come from the registers
+				for (uint32 b = 0; b < LATTE_NUM_STREAMOUT_BUFFER; b++)
+					ctx->output->streamoutBufferStride[b] = ctx->contextRegisters[mmVGT_STRMOUT_VTX_STRIDE_0 + b * 4] << 2;
+				cemu_assert_debug(cf.exportArrayBase * 4 + vectorBytesFromMask(cf.memWriteCompMask) <= ctx->output->streamoutBufferStride[buffer]);
+			}
+			else if (type == GPU7_CF_INST_MEM_RING_WRITE)
+			{
+				cemu_assert_debug(cf.memWriteElemSize == 3);
+				// ring parameters are vec4; remember the furthest one written
+				const uint32 dwordsWritten = (cf.exportBurstCount + 1) * 4;
+				shader->ringParameterCount = std::max(shader->ringParameterCount, (cf.exportArrayBase + dwordsWritten) / 4);
+				for (uint32 i = 0; i <= cf.exportBurstCount; i++)
+					markGPRUsed(ctx, (sint64)cf.exportSourceGPR + i);
+			}
+			else if (type == GPU7_CF_INST_EMIT_VERTEX)
+				a.numEmitVertex++;
+		}
+	}
+
+	// execution mask stack depth before/at each CF instruction of the main program
+	void computeStackDepths(LatteDecompilerShaderContext* ctx)
+	{
+		sint32 depth = 0;
+		sint32 maxDepth = 0;
+		for (auto& cf : ctx->cfInstructions)
+		{
+			switch (cf.type)
+			{
+			case GPU7_CF_INST_ALU_PUSH_BEFORE:
+				depth++;
+				maxDepth = std::max(maxDepth, depth);
+				cf.activeStackDepth = depth;
+				break;
+			case GPU7_CF_INST_ALU_POP_AFTER:
+				cf.activeStackDepth = depth;
+				depth -= 1;
+				break;
+			case GPU7_CF_INST_ALU_POP2_AFTER:
+				cf.activeStackDepth = depth;
+				depth -= 2;
+				break;
+			case GPU7_CF_INST_POP:
+				cf.activeStackDepth = depth;
+				depth -= (sint32)cf.popCount;
+				cemu_assert_debug(depth >= 0);
+				break;
+			case GPU7_CF_INST_ALU:
+			case GPU7_CF_INST_ALU_BREAK:
+			case GPU7_CF_INST_ALU_ELSE_AFTER:
+			case GPU7_CF_INST_ELSE:
+			case GPU7_CF_INST_LOOP_START_DX10:
+			case GPU7_CF_INST_LOOP_START_NO_AL:
+			case GPU7_CF_INST_LOOP_END:
+			case GPU7_CF_INST_LOOP_BREAK: // treated as not taken, so no stack change
+			case GPU7_CF_INST_TEX:
+			case GPU7_CF_INST_EXPORT:
+			case GPU7_CF_INST_EXPORT_DONE:
+			case GPU7_CF_INST_MEM_STREAM0_WRITE:
+			case GPU7_CF_INST_MEM_STREAM1_WRITE:
+			case GPU7_CF_INST_MEM_RING_WRITE:
+			case GPU7_CF_INST_EMIT_VERTEX:
+			case GPU7_CF_INST_CALL:
+				cf.activeStackDepth = depth;
+				break;
+			default:
+				break;
+			}
+		}
+		ctx->analyzer.activeStackMaxDepth = maxDepth;
+		cemu_assert_debug(depth == 0);
+	}
+
+	void chooseUniformMode(LatteDecompilerShaderContext* ctx)
+	{
+		const auto& a = ctx->analyzer;
+		bool anyBufferRead = false;
+		bool anyBufferIndexed = false;
+		for (const auto& t : a.uniformBufferAccessTracker)
+		{
+			anyBufferRead = anyBufferRead || t.HasAccess();
+			anyBufferIndexed = anyBufferIndexed || t.HasRelativeAccess();
+		}
+		uint8 mode;
+		if (anyBufferIndexed)
+			mode = LATTE_DECOMPILER_UNIFORM_MODE_FULL_CBANK;
+		else if (a.uniformRegisterAccessTracker.HasRelativeAccess())
+			mode = LATTE_DECOMPILER_UNIFORM_MODE_FULL_CFILE;
+		else if (anyBufferRead || a.uniformRegisterAccessTracker.HasAccess())
+			mode = LATTE_DECOMPILER_UNIFORM_MODE_REMAPPED;
+		else
+			mode = LATTE_DECOMPILER_UNIFORM_MODE_NONE;
+		ctx->shader->uniformMode = mode;
+		// buffers the renderer has to bind, with the byte range actually read
+		cemu_assert_debug(ctx->shader->list_quickBufferList.empty());
+		for (uint32 i = 0; i < LATTE_NUM_MAX_UNIFORM_BUFFERS; i++)
+		{
+			if (!a.uniformBufferAccessTracker[i].HasAccess())
+				continue;
+			LatteDecompilerShader::QuickBufferEntry q;
+			q.index = i;
+			q.size = a.uniformBufferAccessTracker[i].DetermineSize(ctx->shaderBaseHash, LATTE_GLSL_DYNAMIC_UNIFORM_BLOCK_SIZE) * 16;
+			ctx->shader->list_quickBufferList.push_back(q);
+		}
+	}
+
+	_LatteRegisterSetTextureUnit* stageTextureRegisters(LatteDecompilerShaderContext* ctx)
+	{
+		switch (ctx->shader->shaderType)
+		{
+		case LatteConst::ShaderType::Vertex: return ctx->contextRegistersNew->SQ_TEX_START_VS;
+		case LatteConst::ShaderType::Pixel: return ctx->contextRegistersNew->SQ_TEX_START_PS;
+		case LatteConst::ShaderType::Geometry: return ctx->contextRegistersNew->SQ_TEX_START_GS;
+		default: return nullptr;
+		}
+	}
+
+	void collectTextureInfo(LatteDecompilerShaderContext* ctx)
+	{
+		LatteDecompilerShader* shader = ctx->shader;
+		_LatteRegisterSetTextureUnit* units = stageTextureRegisters(ctx);
+		for (sint32 i = 0; i < LATTE_NUM_MAX_TEX_UNITS; i++)
+		{
+			if (!ctx->output->textureUnitMask[i])
+			{
+				shader->textureUnitDim[i] = (Latte::E_DIM)0xFF;
 				continue;
 			}
-			if( texInstruction.textureFetch.samplerIndex < 0 || texInstruction.textureFetch.samplerIndex >= 0x12 )
-				cemu_assert_debug(false);
-			if(shaderContext->output->textureUnitMask[texInstruction.textureFetch.textureIndex] && shader->textureUnitSamplerAssignment[texInstruction.textureFetch.textureIndex] != texInstruction.textureFetch.samplerIndex && shader->textureUnitSamplerAssignment[texInstruction.textureFetch.textureIndex] != LATTE_DECOMPILER_SAMPLER_NONE )
+			const Latte::E_DIM dim = units[i].word0.get_DIM();
+			shader->textureUnitDim[i] = dim;
+			if (dim == Latte::E_DIM::DIM_CUBEMAP)
+				ctx->analyzer.hasCubeMapTexture = true;
+			shader->textureIsIntegerFormat[i] = units[i].word4.get_NUM_FORM_ALL() == Latte::LATTE_SQ_TEX_RESOURCE_WORD4_N::E_NUM_FORMAT_ALL::NUM_FORMAT_INT;
+		}
+		shader->textureUnitListCount = 0;
+		for (sint32 i = 0; i < LATTE_NUM_MAX_TEX_UNITS; i++)
+		{
+			if (ctx->output->textureUnitMask[i])
+				shader->textureUnitList[shader->textureUnitListCount++] = (uint8)i;
+			shader->textureRenderTargetIndex[i] = 255;
+		}
+		if (shader->shaderType != LatteConst::ShaderType::Pixel)
+			return;
+		// detect textures that alias a bound color buffer (feedback loops)
+		struct BoundTarget
+		{
+			sint32 index;
+			MPTR address;
+			Latte::E_GX2SURFFMT format;
+			Latte::E_HWTILEMODE tileMode;
+		};
+		BoundTarget targets[LATTE_NUM_COLOR_TARGET]{};
+		sint32 numTargets = 0;
+		const uint8 enabledTargets = LatteMRT::GetActiveColorBufferMask(shader, *ctx->contextRegistersNew);
+		for (sint32 i = 0; i < LATTE_NUM_COLOR_TARGET; i++)
+		{
+			if ((enabledTargets & (1 << i)) == 0)
+				continue;
+			const uint32 base = ctx->contextRegisters[mmCB_COLOR0_BASE + i] & 0xFFFFFF00;
+			const uint32 info = ctx->contextRegisters[mmCB_COLOR0_INFO + i];
+			targets[numTargets++] = { i, base, LatteMRT::GetColorBufferFormat(i, *ctx->contextRegistersNew), (Latte::E_HWTILEMODE)((info >> 8) & 0xF) };
+		}
+		for (sint32 n = 0; n < shader->textureUnitListCount; n++)
+		{
+			const sint32 unit = shader->textureUnitList[n];
+			const auto& regs = units[unit];
+			const MPTR address = regs.word2.get_BASE_ADDRESS() << 8;
+			if (address == MPTR_NULL)
+				continue;
+			// only single-level 2D textures are matched
+			if (shader->textureUnitDim[unit] != Latte::E_DIM::DIM_2D || regs.word5.get_LAST_LEVEL() != 0)
+				continue;
+			const auto tileMode = regs.word0.get_TILE_MODE();
+			const Latte::E_GX2SURFFMT format = LatteTexture_ReconstructGX2Format(regs.word1, regs.word4);
+			for (sint32 t = 0; t < numTargets; t++)
 			{
-				cemu_assert_debug(false);
-			}
-			shaderContext->output->textureUnitMask[texInstruction.textureFetch.textureIndex] = true;
-			shader->textureUnitSamplerAssignment[texInstruction.textureFetch.textureIndex] = texInstruction.textureFetch.samplerIndex;
-			if( texInstruction.opcode == GPU7_TEX_INST_SAMPLE_C || texInstruction.opcode == GPU7_TEX_INST_SAMPLE_C_L || texInstruction.opcode == GPU7_TEX_INST_SAMPLE_C_LZ)
-				shader->textureUsesDepthCompare[texInstruction.textureFetch.textureIndex] = true;
-
-			bool useTexelCoords = false;
-			if (texInstruction.opcode == GPU7_TEX_INST_SAMPLE && (texInstruction.textureFetch.unnormalized[0] && texInstruction.textureFetch.unnormalized[1] && texInstruction.textureFetch.unnormalized[2] && texInstruction.textureFetch.unnormalized[3]))
-				useTexelCoords = true;
-			else if (texInstruction.opcode == GPU7_TEX_INST_LD)
-				useTexelCoords = true;
-			if (useTexelCoords)
-			{
-				shaderContext->analyzer.texUnitUsesTexelCoordinates.set(texInstruction.textureFetch.textureIndex);
-			}
-		}
-		else if( texInstruction.opcode == GPU7_TEX_INST_GET_COMP_TEX_LOD || texInstruction.opcode == GPU7_TEX_INST_GET_TEXTURE_RESINFO )
-		{
-			if( texInstruction.textureFetch.textureIndex < 0 || texInstruction.textureFetch.textureIndex >= LATTE_NUM_MAX_TEX_UNITS )
-				debugBreakpoint();
-			if( texInstruction.textureFetch.samplerIndex != 0 )
-				debugBreakpoint(); // sampler is ignored and should be 0
-			shaderContext->output->textureUnitMask[texInstruction.textureFetch.textureIndex] = true;
-		}
-		else if( texInstruction.opcode == GPU7_TEX_INST_SET_CUBEMAP_INDEX )
-		{
-			// no analysis required
-		}
-		else if (texInstruction.opcode == GPU7_TEX_INST_GET_GRADIENTS_H || texInstruction.opcode == GPU7_TEX_INST_GET_GRADIENTS_V)
-		{
-			// no analysis required
-		}
-		else if (texInstruction.opcode == GPU7_TEX_INST_SET_GRADIENTS_H || texInstruction.opcode == GPU7_TEX_INST_SET_GRADIENTS_V)
-		{
-			shaderContext->analyzer.hasGradientLookup = true;
-		}
-		else if( texInstruction.opcode == GPU7_TEX_INST_VFETCH )
-		{
-			// VFETCH is used to access uniform buffers dynamically
-			if( texInstruction.textureFetch.textureIndex >= 0x80 && texInstruction.textureFetch.textureIndex <= 0x8F )
-			{
-				uint32 uniformBufferIndex = texInstruction.textureFetch.textureIndex - 0x80;
-				shaderContext->analyzer.uniformBufferAccessTracker[uniformBufferIndex].TrackAccess(0, true);
-			}
-			else if( texInstruction.textureFetch.textureIndex == 0x9F && shader->shaderType == LatteConst::ShaderType::Geometry )
-			{
-				// instruction to read geometry shader input from ringbuffer
-			}
-			else
-				debugBreakpoint();
-		}
-		else if (texInstruction.opcode == GPU7_TEX_INST_MEM)
-		{
-			// SSBO access
-			shaderContext->analyzer.hasSSBORead = true;
-		}
-		else
-			debugBreakpoint();
-		// mark read and written registers as used
-		if(texInstruction.dstGpr < LATTE_NUM_GPR)
-			shaderContext->analyzer.gprUseMask[texInstruction.dstGpr/8] |= (1<<(texInstruction.dstGpr%8));
-		if(texInstruction.srcGpr < LATTE_NUM_GPR)
-			shaderContext->analyzer.gprUseMask[texInstruction.srcGpr/8] |= (1<<(texInstruction.srcGpr%8));
-	}
-}
-
-/*
- * Analyze export CF instruction
- */
-void LatteDecompiler_analyzeExport(LatteDecompilerShaderContext* shaderContext, LatteDecompilerCFInstruction* cfInstruction)
-{
-	LatteDecompilerShader* shader = shaderContext->shader;
-	if( shader->shaderType == LatteConst::ShaderType::Pixel )
-	{
-		if (cfInstruction->exportType == 0 && cfInstruction->exportArrayBase < 8)
-		{
-			// remember color outputs that are written
-			for(uint32 i=0; i<(cfInstruction->exportBurstCount+1); i++)
-			{
-				sint32 colorOutputIndex = LatteDecompiler_getColorOutputIndexFromExportIndex(shaderContext, cfInstruction->exportArrayBase+i);
-				shader->pixelColorOutputMask |= (1<<colorOutputIndex);
-			}
-		}
-		else if (cfInstruction->exportType == 0 && cfInstruction->exportArrayBase == 61)
-		{
-			// Only check for depth buffer mask on Metal, as its not in the PS hash on other backends
-			if (g_renderer->GetType() != RendererAPI::Metal || LatteMRT::GetActiveDepthBufferMask(*shaderContext->contextRegistersNew))
-				shader->depthMask = true;
-		}
-		else
-			debugBreakpoint();
-	}
-	else if (shader->shaderType == LatteConst::ShaderType::Vertex)
-	{
-		if (cfInstruction->exportType == 2 && cfInstruction->exportArrayBase < 32)
-		{
-			for (uint32 burstIndex = 0; burstIndex < (cfInstruction->exportBurstCount + 1); burstIndex++)
-			{
-				uint32 paramIndex = cfInstruction->exportArrayBase + burstIndex;
-				if (paramIndex >= 32)
+				if (targets[t].address == address && targets[t].format == format && targets[t].tileMode == tileMode)
 				{
-					cemu_assert_unimplemented();
+					shader->textureRenderTargetIndex[unit] = (uint8)targets[t].index;
 					break;
 				}
-				shaderContext->shader->outputParameterMask |= (1u << paramIndex);
 			}
 		}
-		else if (cfInstruction->exportType == 1 && cfInstruction->exportArrayBase == GPU7_DECOMPILER_CF_EXPORT_POINT_SIZE)
+	}
+
+	void collectCopyShaderStreamout(LatteDecompilerShaderContext* ctx)
+	{
+		if (ctx->shader->shaderType != LatteConst::ShaderType::Geometry)
+			return;
+		const auto& writes = ctx->parsedGSCopyShader->list_streamWrites;
+		if (writes.empty())
+			return;
+		ctx->analyzer.hasStreamoutWrite = true;
+		if (ctx->contextRegisters[mmVGT_STRMOUT_EN] != 0)
+			ctx->analyzer.hasStreamoutEnable = true;
+		for (const auto& w : writes)
 		{
-			shaderContext->analyzer.writesPointSize = true;
+			ctx->output->streamoutBufferWriteMask[w.bufferIndex] = true;
+			uint32& stride = ctx->output->streamoutBufferStride[w.bufferIndex];
+			stride = std::max(stride, w.exportArrayBase * 4 + vectorBytesFromMask(w.memWriteCompMask));
 		}
 	}
-	// mark input GPRs as used
-	for(uint32 i=0; i<(cfInstruction->exportBurstCount+1); i++)
+
+	// GPR number an attribute is loaded into (R0 holds vertex/instance id), or -1
+	sint32 attributeRegister(LatteDecompilerShaderContext* ctx, uint32 semanticId)
 	{
-		shaderContext->analyzer.gprUseMask[(cfInstruction->exportSourceGPR+i)/8] |= (1<<((cfInstruction->exportSourceGPR+i)%8));
+		for (sint32 slot = 0; slot < 32; slot++)
+		{
+			if (ctx->contextRegisters[mmSQ_VTX_SEMANTIC_0 + slot] == semanticId)
+				return slot + 1;
+		}
+		return -1;
 	}
-}
 
-void LatteDecompiler_analyzeSubroutine(LatteDecompilerShaderContext* shaderContext, uint32 cfAddr)
-{
-	// analyze CF and clauses up to RET statement
-
-	// todo - find cfInstruction index from cfAddr
-	cemu_assert_debug(false);
-
-	for(auto& cfInstruction : shaderContext->cfInstructions)
+	// shader inputs are loaded into GPRs at startup; with indexed reads every one may be used
+	void markInputsForRelativeReads(LatteDecompilerShaderContext* ctx)
 	{
-		if (cfInstruction.type == GPU7_CF_INST_ALU || cfInstruction.type == GPU7_CF_INST_ALU_PUSH_BEFORE || cfInstruction.type == GPU7_CF_INST_ALU_POP_AFTER || cfInstruction.type == GPU7_CF_INST_ALU_POP2_AFTER || cfInstruction.type == GPU7_CF_INST_ALU_BREAK || cfInstruction.type == GPU7_CF_INST_ALU_ELSE_AFTER)
+		if (!ctx->analyzer.usesRelativeGPRRead)
+			return;
+		const auto type = ctx->shader->shaderType;
+		if (type == LatteConst::ShaderType::Vertex || type == LatteConst::ShaderType::Geometry)
 		{
-			LatteDecompiler_analyzeALUClause(shaderContext, &cfInstruction);
+			if (!ctx->fetchShader)
+				return;
+			for (const auto& group : ctx->fetchShader->bufferGroups)
+			{
+				for (sint32 i = 0; i < group.attribCount; i++)
+				{
+					sint32 reg = attributeRegister(ctx, group.attrib[i].semanticId);
+					if (reg >= 0)
+						markGPRUsed(ctx, reg);
+				}
+			}
 		}
-		else if (cfInstruction.type == GPU7_CF_INST_TEX)
+		else if (type == LatteConst::ShaderType::Pixel)
 		{
-			LatteDecompiler_analyzeTEXClause(shaderContext, &cfInstruction);
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_EXPORT || cfInstruction.type == GPU7_CF_INST_EXPORT_DONE)
-		{
-			LatteDecompiler_analyzeExport(shaderContext, &cfInstruction);
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_ELSE || cfInstruction.type == GPU7_CF_INST_POP)
-		{
-			shaderContext->analyzer.modifiesPixelActiveState = true;
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_LOOP_START_DX10 || cfInstruction.type == GPU7_CF_INST_LOOP_END ||
-				 cfInstruction.type == GPU7_CF_INST_LOOP_START_NO_AL)
-		{
-			shaderContext->analyzer.modifiesPixelActiveState = true;
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_LOOP_BREAK)
-		{
-			shaderContext->analyzer.modifiesPixelActiveState = true;
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_EMIT_VERTEX)
-		{
-			// nothing to analyze
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_CALL)
-		{
-			cemu_assert_debug(false); // CALLs inside subroutines are still todo
-		}
-		else
-		{
-			cemu_assert_unimplemented();
+			const LatteShaderPSInputTable* inputs = LatteSHRC_GetPSInputTable();
+			for (sint32 i = 0; i < inputs->count; i++)
+				markGPRUsed(ctx, i);
 		}
 	}
-}
 
-namespace LatteDecompiler
-{
-	void _initTextureBindingPointsGL(LatteDecompilerShaderContext* decompilerContext)
+	bool isGPRUsed(LatteDecompilerShaderContext* ctx, sint32 index)
 	{
-		// for OpenGL we use the relative texture unit index
-		sint8 bindingBase = 0;
-		if (decompilerContext->shaderType == LatteConst::ShaderType::Vertex)
-			bindingBase = LATTE_CEMU_VS_TEX_UNIT_BASE;
-		else if (decompilerContext->shaderType == LatteConst::ShaderType::Geometry)
-			bindingBase = LATTE_CEMU_GS_TEX_UNIT_BASE;
-		else if (decompilerContext->shaderType == LatteConst::ShaderType::Pixel)
-			bindingBase = LATTE_CEMU_PS_TEX_UNIT_BASE;
+		return (ctx->analyzer.gprUseMask[index >> 3] & (1u << (index & 7))) != 0;
+	}
 
+	void detectFragCoordUse(LatteDecompilerShaderContext* ctx)
+	{
+		if (ctx->shader->shaderType != LatteConst::ShaderType::Pixel)
+			return;
+		const LatteShaderPSInputTable* inputs = LatteSHRC_GetPSInputTable();
+		for (sint32 i = 0; i < inputs->count; i++)
+		{
+			if (!isGPRUsed(ctx, i) && !ctx->analyzer.usesRelativeGPRRead)
+				continue;
+			if (inputs->import[i].semanticId == LATTE_ANALYZER_IMPORT_INDEX_SPIPOSITION)
+			{
+				ctx->analyzer.hasFragCoordAccess = true;
+				break;
+			}
+		}
+		// graphic pack replacements for these shaders expect uf_fragCoordScale to exist
+		static const uint64 kNeedsFragCoordScale[] = {
+			0x21e6bc9b0cdbe8d7, 0x37040a485a29d54e, 0x37a4ec1a7dbc7391, 0x50e29e8929cea348, 0x572a6cfa3943923d,
+			0x59df1c7e1806366c, 0x6ea8b1aa69c0b6f7, 0x88133ee405eaae28, 0x95a5a89d62998e0d, 0x998a9f67e353657b,
+			0x9f6adb9a651f84b9, 0xa5e9d150276a805c, 0xa7f4801a8d29e333, 0xbe99d80628d31127, 0xc14019840473ff86,
+			0xc612390d4c70f430, 0xcb0e6e8cbec4502a, 0xe334517825fdd599, 0xe39a2a718bc419fe, 0xfdf33c607cd1d737,
+			0xff71dcd2ad4defdc,
+		};
+		for (uint64 h : kNeedsFragCoordScale)
+		{
+			if (h == ctx->shaderBaseHash)
+				ctx->analyzer.hasFragCoordAccess = true;
+		}
+	}
+
+	// ---- binding point assignment ----
+
+	void assignTextureBindings(LatteDecompilerShaderContext* ctx)
+	{
+		LatteDecompilerOutput_t* out = ctx->output;
+		// OpenGL: fixed per-stage ranges, unit numbers kept as-is
+		sint8 glBase = 0;
+		switch (ctx->shaderType)
+		{
+		case LatteConst::ShaderType::Vertex: glBase = LATTE_CEMU_VS_TEX_UNIT_BASE; break;
+		case LatteConst::ShaderType::Geometry: glBase = LATTE_CEMU_GS_TEX_UNIT_BASE; break;
+		case LatteConst::ShaderType::Pixel: glBase = LATTE_CEMU_PS_TEX_UNIT_BASE; break;
+		default: break;
+		}
 		for (sint32 i = 0; i < LATTE_NUM_MAX_TEX_UNITS; i++)
 		{
-			if (!decompilerContext->output->textureUnitMask[i])
-				continue;
-			decompilerContext->output->resourceMappingGL.textureUnitToBindingPoint[i] = bindingBase + i;
+			if (out->textureUnitMask[i])
+				out->resourceMappingGL.textureUnitToBindingPoint[i] = (sint8)(glBase + i);
 		}
-	}
-
-	void _initTextureBindingPointsVK(LatteDecompilerShaderContext* decompilerContext)
-	{
-		// for Vulkan we use consecutive indices
-		decompilerContext->output->resourceMappingVK.textureUnitBaseBindingPoint = decompilerContext->currentBindingPointVK;
-		sint32 relBindingPointIndex = 0;
+		// Vulkan: packed descriptor bindings
+		auto& vk = out->resourceMappingVK;
+		vk.textureUnitBaseBindingPoint = (sint8)ctx->currentBindingPointVK;
+		sint32 packed = 0;
 		for (sint32 i = 0; i < LATTE_NUM_MAX_TEX_UNITS; i++)
 		{
-			if (!decompilerContext->output->textureUnitMask[i])
+			if (!out->textureUnitMask[i])
 				continue;
-			decompilerContext->output->resourceMappingVK.textureUnitToBindingPoint[i] = decompilerContext->currentBindingPointVK;
-			decompilerContext->output->resourceMappingVK.relBindingPointToRelTextureUnit[relBindingPointIndex] = i;
-			relBindingPointIndex++;
-			decompilerContext->output->resourceMappingVK.textureUnitCount++;
-			decompilerContext->currentBindingPointVK++;
+			vk.textureUnitToBindingPoint[i] = (sint8)ctx->currentBindingPointVK++;
+			vk.relBindingPointToRelTextureUnit[packed++] = (sint8)i;
+			vk.textureUnitCount++;
 		}
-		if (relBindingPointIndex==0)
-			decompilerContext->output->resourceMappingVK.textureUnitBaseBindingPoint = -1;
-	}
-
+		if (packed == 0)
+			vk.textureUnitBaseBindingPoint = -1;
 #ifdef ENABLE_METAL
-	void _initTextureBindingPointsMTL(LatteDecompilerShaderContext* decompilerContext)
-	{
-		decompilerContext->output->resourceMappingMTL.textureUnitBaseBindingPoint = decompilerContext->currentTextureBindingPointMTL;
-		sint32 relBindingPointIndex = 0;
+		// Metal: packed as well, textures read through framebuffer fetch get no binding
+		auto& mtl = out->resourceMappingMTL;
+		mtl.textureUnitBaseBindingPoint = (sint8)ctx->currentTextureBindingPointMTL;
+		sint32 packedMtl = 0;
 		for (sint32 i = 0; i < LATTE_NUM_MAX_TEX_UNITS; i++)
 		{
-			if (!decompilerContext->output->textureUnitMask[i] || decompilerContext->shader->textureRenderTargetIndex[i] != 255)
+			if (!out->textureUnitMask[i] || ctx->shader->textureRenderTargetIndex[i] != 255)
 				continue;
-			decompilerContext->output->resourceMappingMTL.textureUnitToBindingPoint[i] = decompilerContext->currentTextureBindingPointMTL;
-			decompilerContext->output->resourceMappingMTL.relBindingPointToRelTextureUnit[relBindingPointIndex] = i;
-			relBindingPointIndex++;
-			decompilerContext->output->resourceMappingMTL.textureUnitCount++;
-			decompilerContext->currentTextureBindingPointMTL++;
+			mtl.textureUnitToBindingPoint[i] = (sint8)ctx->currentTextureBindingPointMTL++;
+			mtl.relBindingPointToRelTextureUnit[packedMtl++] = (sint8)i;
+			mtl.textureUnitCount++;
 		}
-		if (relBindingPointIndex==0)
-			decompilerContext->output->resourceMappingMTL.textureUnitBaseBindingPoint = -1;
-	}
+		if (packedMtl == 0)
+			mtl.textureUnitBaseBindingPoint = -1;
 #endif
+	}
 
-	void _initHasUniformVarBlock(LatteDecompilerShaderContext* decompilerContext)
+	bool anyViewportScaleDisabled(LatteDecompilerShaderContext* ctx)
 	{
-		decompilerContext->hasUniformVarBlock = false;
-		if (decompilerContext->shader->uniformMode == LATTE_DECOMPILER_UNIFORM_MODE_REMAPPED)
-			decompilerContext->hasUniformVarBlock = true;
-		else if (decompilerContext->shader->uniformMode == LATTE_DECOMPILER_UNIFORM_MODE_FULL_CFILE)
-			decompilerContext->hasUniformVarBlock = true;
+		const auto& vte = ctx->contextRegistersNew->PA_CL_VTE_CNTL;
+		return !vte.get_VPORT_X_SCALE_ENA() || !vte.get_VPORT_Y_SCALE_ENA() || !vte.get_VPORT_Z_SCALE_ENA();
+	}
 
-		bool hasAnyViewportScaleDisabled =
-			!decompilerContext->contextRegistersNew->PA_CL_VTE_CNTL.get_VPORT_X_SCALE_ENA() ||
-			!decompilerContext->contextRegistersNew->PA_CL_VTE_CNTL.get_VPORT_Y_SCALE_ENA() ||
-			!decompilerContext->contextRegistersNew->PA_CL_VTE_CNTL.get_VPORT_Z_SCALE_ENA();
-		// we currently only support all on/off. Individual component scaling is not supported
-		cemu_assert_debug(decompilerContext->contextRegistersNew->PA_CL_VTE_CNTL.get_VPORT_X_SCALE_ENA() == !hasAnyViewportScaleDisabled);
-		cemu_assert_debug(decompilerContext->contextRegistersNew->PA_CL_VTE_CNTL.get_VPORT_Y_SCALE_ENA() == !hasAnyViewportScaleDisabled);
-		cemu_assert_debug(decompilerContext->contextRegistersNew->PA_CL_VTE_CNTL.get_VPORT_Z_SCALE_ENA() == !hasAnyViewportScaleDisabled);
-		cemu_assert_debug(decompilerContext->contextRegistersNew->PA_CL_VTE_CNTL.get_VPORT_X_OFFSET_ENA() == !hasAnyViewportScaleDisabled);
-		cemu_assert_debug(decompilerContext->contextRegistersNew->PA_CL_VTE_CNTL.get_VPORT_Y_OFFSET_ENA() == !hasAnyViewportScaleDisabled);
-		cemu_assert_debug(decompilerContext->contextRegistersNew->PA_CL_VTE_CNTL.get_VPORT_Z_OFFSET_ENA() == !hasAnyViewportScaleDisabled);
-
-		if (decompilerContext->shaderType == LatteConst::ShaderType::Vertex && hasAnyViewportScaleDisabled)
-			decompilerContext->hasUniformVarBlock = true; // uf_windowSpaceToClipSpaceTransform
-		bool alphaTestEnable = decompilerContext->contextRegistersNew->SX_ALPHA_TEST_CONTROL.get_ALPHA_TEST_ENABLE();
-		if (decompilerContext->shaderType == LatteConst::ShaderType::Pixel && alphaTestEnable != 0)
-			decompilerContext->hasUniformVarBlock = true; // uf_alphaTestRef
-		if (decompilerContext->shaderType == LatteConst::ShaderType::Pixel && decompilerContext->analyzer.hasFragCoordAccess)
-			decompilerContext->hasUniformVarBlock = true; // uf_fragCoordScale
-		if (decompilerContext->shaderType == LatteConst::ShaderType::Vertex && decompilerContext->analyzer.outputPointSize && decompilerContext->analyzer.writesPointSize == false)
-			decompilerContext->hasUniformVarBlock = true; // uf_pointSize
-		if (decompilerContext->shaderType == LatteConst::ShaderType::Geometry && decompilerContext->analyzer.outputPointSize && decompilerContext->analyzer.writesPointSize == false)
-			decompilerContext->hasUniformVarBlock = true; // uf_pointSize
-		if (decompilerContext->analyzer.useSSBOForStreamout &&
-			(decompilerContext->shaderType == LatteConst::ShaderType::Vertex && !decompilerContext->options->usesGeometryShader) ||
-			(decompilerContext->shaderType == LatteConst::ShaderType::Geometry))
-		{
-			decompilerContext->hasUniformVarBlock = true; // uf_verticesPerInstance and uf_streamoutBufferBase*
-		}
+	// whether the shader declares the block of helper uniforms
+	bool needsUniformVarBlock(LatteDecompilerShaderContext* ctx)
+	{
+		const auto& a = ctx->analyzer;
+		const auto type = ctx->shaderType;
+		const bool isVS = type == LatteConst::ShaderType::Vertex;
+		const bool isPS = type == LatteConst::ShaderType::Pixel;
+		const bool isGS = type == LatteConst::ShaderType::Geometry;
+		const uint8 mode = ctx->shader->uniformMode;
+		bool needed = mode == LATTE_DECOMPILER_UNIFORM_MODE_REMAPPED || mode == LATTE_DECOMPILER_UNIFORM_MODE_FULL_CFILE;
+		if (isVS && anyViewportScaleDisabled(ctx))
+			needed = true; // uf_windowSpaceToClipSpaceTransform
+		if (isPS && ctx->contextRegistersNew->SX_ALPHA_TEST_CONTROL.get_ALPHA_TEST_ENABLE())
+			needed = true; // uf_alphaTestRef
+		if (isPS && a.hasFragCoordAccess)
+			needed = true; // uf_fragCoordScale
+		if ((isVS || isGS) && a.outputPointSize && !a.writesPointSize)
+			needed = true; // uf_pointSize
+		// note: geometry shaders always get the block here, matching the
+		// historical binding layout that existing pipelines/caches rely on
+		if ((a.useSSBOForStreamout && isVS && !ctx->options->usesGeometryShader) || isGS)
+			needed = true; // uf_verticesPerInstance, uf_streamoutBufferBase*
 #ifdef ENABLE_METAL
 		if (g_renderer->GetType() == RendererAPI::Metal)
 		{
@@ -592,600 +703,124 @@ namespace LatteDecompiler
 			{
 				for (sint32 t = 0; t < LATTE_NUM_MAX_TEX_UNITS; t++)
 				{
-					if (decompilerContext->shader->textureRenderTargetIndex[t] != 255)
-						decompilerContext->hasUniformVarBlock = true; // framebufferFetchSize
+					if (ctx->shader->textureRenderTargetIndex[t] != 255)
+						needed = true; // framebufferFetchSize
 				}
 			}
-            bool usesGeometryShader = UseGeometryShader(*decompilerContext->contextRegistersNew, decompilerContext->options->usesGeometryShader);
-
-		    if (decompilerContext->shaderType == LatteConst::ShaderType::Vertex && usesGeometryShader)
-				decompilerContext->hasUniformVarBlock = true; // uf_verticesPerInstance
+			if (isVS && UseGeometryShader(*ctx->contextRegistersNew, ctx->options->usesGeometryShader))
+				needed = true; // uf_verticesPerInstance
 		}
 #endif
+		if (isPS && a.texUnitUsesTexelCoordinates.any())
+			needed = true; // uf_tex*Scale
+		return needed;
 	}
 
-	void _initUniformBindingPoints(LatteDecompilerShaderContext* decompilerContext)
+	void assignUniformBindings(LatteDecompilerShaderContext* ctx)
 	{
-		// check if uniform vars block has at least one variable
-		_initHasUniformVarBlock(decompilerContext);
-
-		if (decompilerContext->shaderType == LatteConst::ShaderType::Pixel)
+		LatteDecompilerOutput_t* out = ctx->output;
+		ctx->hasUniformVarBlock = needsUniformVarBlock(ctx);
+		if (ctx->hasUniformVarBlock)
 		{
-			for (sint32 t = 0; t < LATTE_NUM_MAX_TEX_UNITS; t++)
-			{
-				if (decompilerContext->analyzer.texUnitUsesTexelCoordinates.test(t) == false)
-					continue;
-				decompilerContext->hasUniformVarBlock = true; // uf_tex%dScale
-			}
+			out->resourceMappingVK.uniformVarsBufferBindingPoint = (sint8)ctx->currentBindingPointVK++;
+			out->resourceMappingMTL.uniformVarsBufferBindingPoint = (sint8)ctx->currentBufferBindingPointMTL++;
 		}
-		// assign binding point to uniform var block
-		if (decompilerContext->hasUniformVarBlock)
+		else if (ctx->shaderType == LatteConst::ShaderType::Pixel)
 		{
-			decompilerContext->output->resourceMappingVK.uniformVarsBufferBindingPoint = decompilerContext->currentBindingPointVK;
-			decompilerContext->currentBindingPointVK++;
-			decompilerContext->output->resourceMappingMTL.uniformVarsBufferBindingPoint = decompilerContext->currentBufferBindingPointMTL;
-			decompilerContext->currentBufferBindingPointMTL++;
+			// pixel shaders always reserve the slot so bindings stay stable for
+			// graphic pack replacement shaders written before the block became optional
+			ctx->currentBindingPointVK++;
+			ctx->currentBufferBindingPointMTL++;
 		}
-		else if (decompilerContext->shaderType == LatteConst::ShaderType::Pixel) // compatibility workaround to keep binding indices the same with existing gfx pack shader replacements, we now only emit uf_fragCoord when needed and it can lead to hasUniformVarBlock being false
+		if (ctx->shader->uniformMode == LATTE_DECOMPILER_UNIFORM_MODE_FULL_CBANK)
 		{
-			decompilerContext->currentBindingPointVK++;
-			decompilerContext->currentBufferBindingPointMTL++;
-		}
-		// assign binding points to uniform buffers
-		if (decompilerContext->shader->uniformMode == LATTE_DECOMPILER_UNIFORM_MODE_FULL_CBANK)
-		{
-			// for Vulkan we use consecutive indices
+			sint32 glStageBase = 0;
+			if (ctx->shaderType == LatteConst::ShaderType::Pixel)
+				glStageBase = 32;
+			else if (ctx->shaderType == LatteConst::ShaderType::Geometry)
+				glStageBase = 64;
 			for (uint32 i = 0; i < LATTE_NUM_MAX_UNIFORM_BUFFERS; i++)
 			{
-				if (!decompilerContext->analyzer.uniformBufferAccessTracker[i].HasAccess())
+				if (!ctx->analyzer.uniformBufferAccessTracker[i].HasAccess())
 					continue;
-				sint32 uniformBindingPoint = i;
-				if (decompilerContext->shaderType == LatteConst::ShaderType::Geometry)
-					uniformBindingPoint += 64;
-				else if (decompilerContext->shaderType == LatteConst::ShaderType::Vertex)
-					uniformBindingPoint += 0;
-				else if (decompilerContext->shaderType == LatteConst::ShaderType::Pixel)
-					uniformBindingPoint += 32;
-
-				decompilerContext->output->resourceMappingVK.uniformBuffersBindingPoint[i] = decompilerContext->currentBindingPointVK;
-				decompilerContext->currentBindingPointVK++;
-				decompilerContext->output->resourceMappingMTL.uniformBuffersBindingPoint[i] = decompilerContext->currentBufferBindingPointMTL;
-				decompilerContext->currentBufferBindingPointMTL++;
-			}
-			// for OpenGL we use the relative buffer index
-			for (uint32 i = 0; i < LATTE_NUM_MAX_UNIFORM_BUFFERS; i++)
-			{
-				if (!decompilerContext->analyzer.uniformBufferAccessTracker[i].HasAccess())
-					continue;
-				sint32 uniformBindingPoint = i;
-				if (decompilerContext->shaderType == LatteConst::ShaderType::Geometry)
-					uniformBindingPoint += 64;
-				else if (decompilerContext->shaderType == LatteConst::ShaderType::Vertex)
-					uniformBindingPoint += 0;
-				else if (decompilerContext->shaderType == LatteConst::ShaderType::Pixel)
-					uniformBindingPoint += 32;
-				decompilerContext->output->resourceMappingGL.uniformBuffersBindingPoint[i] = uniformBindingPoint;
+				out->resourceMappingVK.uniformBuffersBindingPoint[i] = (sint8)ctx->currentBindingPointVK++;
+				out->resourceMappingMTL.uniformBuffersBindingPoint[i] = (sint8)ctx->currentBufferBindingPointMTL++;
+				out->resourceMappingGL.uniformBuffersBindingPoint[i] = (sint8)(glStageBase + (sint32)i);
 			}
 		}
-		// shader storage buffer for alternative transform feedback path
-		if (decompilerContext->analyzer.useSSBOForStreamout)
+		if (ctx->analyzer.useSSBOForStreamout)
 		{
-			decompilerContext->output->resourceMappingVK.tfStorageBindingPoint = decompilerContext->currentBindingPointVK;
-			decompilerContext->currentBindingPointVK++;
-			decompilerContext->output->resourceMappingMTL.tfStorageBindingPoint = decompilerContext->currentBufferBindingPointMTL;
-			decompilerContext->currentBufferBindingPointMTL++;
+			out->resourceMappingVK.tfStorageBindingPoint = (sint8)ctx->currentBindingPointVK++;
+			out->resourceMappingMTL.tfStorageBindingPoint = (sint8)ctx->currentBufferBindingPointMTL++;
 		}
 	}
 
-	void _initAttributeBindingPoints(LatteDecompilerShaderContext* decompilerContext)
+	void assignAttributeBindings(LatteDecompilerShaderContext* ctx)
 	{
-		if (decompilerContext->shaderType != LatteConst::ShaderType::Vertex)
+		if (ctx->shaderType != LatteConst::ShaderType::Vertex)
 			return;
-		// create input attribute binding mapping
-		// OpenGL and Vulkan use consecutive indices starting at 0
-		sint8 bindingIndex = 0;
-		for (sint32 i = 0; i < LATTE_NUM_MAX_ATTRIBUTE_LOCATIONS; i++)
+		sint8 location = 0;
+		for (sint32 sem = 0; sem < LATTE_NUM_MAX_ATTRIBUTE_LOCATIONS; sem++)
 		{
-			if (decompilerContext->analyzer.inputAttributSemanticMask[i])
-			{
-				decompilerContext->output->resourceMappingGL.attributeMapping[i] = bindingIndex;
-				decompilerContext->output->resourceMappingVK.attributeMapping[i] = bindingIndex;
-				decompilerContext->output->resourceMappingMTL.attributeMapping[i] = bindingIndex;
-				bindingIndex++;
-			}
+			if (!ctx->analyzer.inputAttributSemanticMask[sem])
+				continue;
+			ctx->output->resourceMappingGL.attributeMapping[sem] = location;
+			ctx->output->resourceMappingVK.attributeMapping[sem] = location;
+			ctx->output->resourceMappingMTL.attributeMapping[sem] = location;
+			location++;
 		}
 	}
-
 }
 
-/*
- * Analyze the shader program
- * This will help to determine:
- * 1) Uniform usage
- * 2) Texture usage
- * 3) Data types
- * 4) CF stack and execution flow
- */
 void LatteDecompiler_analyze(LatteDecompilerShaderContext* shaderContext, LatteDecompilerShader* shader)
 {
-	// analyze render state
-	shaderContext->analyzer.isPointsPrimitive = shaderContext->contextRegistersNew->VGT_PRIMITIVE_TYPE.get_PRIMITIVE_MODE() == Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::POINTS;
-	shaderContext->analyzer.hasStreamoutEnable = shaderContext->contextRegisters[mmVGT_STRMOUT_EN] != 0; // set if the shader is used for transform feedback operations
-	if (shaderContext->shaderType == LatteConst::ShaderType::Vertex && !shaderContext->options->usesGeometryShader)
-		shaderContext->analyzer.outputPointSize = shaderContext->analyzer.isPointsPrimitive;
-	else if (shaderContext->shaderType == LatteConst::ShaderType::Geometry)
+	auto* ctx = shaderContext;
+	auto& a = ctx->analyzer;
+	const auto type = shader->shaderType;
+	// render state that influences the generated code
+	a.isPointsPrimitive = ctx->contextRegistersNew->VGT_PRIMITIVE_TYPE.get_PRIMITIVE_MODE() == Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::POINTS;
+	a.hasStreamoutEnable = ctx->contextRegisters[mmVGT_STRMOUT_EN] != 0;
+	if (ctx->shaderType == LatteConst::ShaderType::Vertex && !ctx->options->usesGeometryShader)
+		a.outputPointSize = a.isPointsPrimitive;
+	else if (ctx->shaderType == LatteConst::ShaderType::Geometry && ctx->contextRegisters[mmVGT_GS_OUT_PRIM_TYPE] == 0)
+		a.outputPointSize = true; // point output
+	// attributes provided by the fetch shader
+	if ((type == LatteConst::ShaderType::Vertex || type == LatteConst::ShaderType::Geometry) && ctx->fetchShader)
 	{
-		uint32 gsOutPrimType = shaderContext->contextRegisters[mmVGT_GS_OUT_PRIM_TYPE];
-		if (gsOutPrimType == 0) // points
-			shaderContext->analyzer.outputPointSize = true;
-	}
-	// analyze input attributes for vertex/geometry shader
-	if (shader->shaderType == LatteConst::ShaderType::Vertex || shader->shaderType == LatteConst::ShaderType::Geometry)
-	{
-		if(shaderContext->fetchShader)
+		for (const auto& group : ctx->fetchShader->bufferGroups)
 		{
-			LatteFetchShader* parsedFetchShader = shaderContext->fetchShader;
-			for(auto& bufferGroup : parsedFetchShader->bufferGroups)
+			for (sint32 i = 0; i < group.attribCount; i++)
 			{
-				for (sint32 i = 0; i < bufferGroup.attribCount; i++)
-				{
-					uint8 semanticId = bufferGroup.attrib[i].semanticId;
-					if (semanticId == 0xFF)
-					{
-						// unused attribute? Found in Hot Wheels: World's best driver
-						continue;
-					}
-					cemu_assert_debug(semanticId < 0x80);
-					shaderContext->analyzer.inputAttributSemanticMask[semanticId] = true;
-				}
+				const uint8 sem = group.attrib[i].semanticId;
+				if (sem == 0xFF)
+					continue; // unused slot (seen in some titles)
+				cemu_assert_debug(sem < 0x80);
+				a.inputAttributSemanticMask[sem] = true;
 			}
 		}
 	}
-	// list of subroutines (call destinations)
-	std::vector<uint32> list_subroutineAddrs;
-	// analyze CF and clauses
-	for(auto& cfInstruction : shaderContext->cfInstructions)
-	{
-		if (cfInstruction.type == GPU7_CF_INST_ALU || cfInstruction.type == GPU7_CF_INST_ALU_PUSH_BEFORE || cfInstruction.type == GPU7_CF_INST_ALU_POP_AFTER || cfInstruction.type == GPU7_CF_INST_ALU_POP2_AFTER || cfInstruction.type == GPU7_CF_INST_ALU_BREAK || cfInstruction.type == GPU7_CF_INST_ALU_ELSE_AFTER)
-		{
-			LatteDecompiler_analyzeALUClause(shaderContext, &cfInstruction);
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_TEX)
-		{
-			LatteDecompiler_analyzeTEXClause(shaderContext, &cfInstruction);
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_EXPORT || cfInstruction.type == GPU7_CF_INST_EXPORT_DONE)
-		{
-			LatteDecompiler_analyzeExport(shaderContext, &cfInstruction);
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_ELSE || cfInstruction.type == GPU7_CF_INST_POP)
-		{
-			shaderContext->analyzer.modifiesPixelActiveState = true;
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_LOOP_START_DX10 || cfInstruction.type == GPU7_CF_INST_LOOP_END ||
-				 cfInstruction.type == GPU7_CF_INST_LOOP_START_NO_AL)
-		{
-			shaderContext->analyzer.modifiesPixelActiveState = true;
-			shaderContext->analyzer.hasLoops = true;
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_LOOP_BREAK)
-		{
-			shaderContext->analyzer.modifiesPixelActiveState = true;
-			shaderContext->analyzer.hasLoops = true;
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_MEM_STREAM0_WRITE ||
-			cfInstruction.type == GPU7_CF_INST_MEM_STREAM1_WRITE)
-		{
-			uint32 streamoutBufferIndex;
-			if (cfInstruction.type == GPU7_CF_INST_MEM_STREAM0_WRITE)
-				streamoutBufferIndex = 0;
-			else if (cfInstruction.type == GPU7_CF_INST_MEM_STREAM1_WRITE)
-				streamoutBufferIndex = 1;
-			else
-				cemu_assert_debug(false);
-			shaderContext->analyzer.hasStreamoutWrite = true;
-			cemu_assert(streamoutBufferIndex < shaderContext->output->streamoutBufferWriteMask.size());
-			shaderContext->output->streamoutBufferWriteMask[streamoutBufferIndex] = true;
-			uint32 vectorWriteSize = 0;
-			for (sint32 f = 0; f < 4; f++)
-			{
-				if ((cfInstruction.memWriteCompMask & (1 << f)) != 0)
-					vectorWriteSize = (f + 1) * 4;
-				shaderContext->output->streamoutBufferStride[f] = shaderContext->contextRegisters[mmVGT_STRMOUT_VTX_STRIDE_0 + f * 4] << 2;
-			}
-
-			cemu_assert_debug((cfInstruction.exportArrayBase * 4 + vectorWriteSize) <= shaderContext->output->streamoutBufferStride[streamoutBufferIndex]);
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_MEM_RING_WRITE)
-		{
-			// track number of parameters that are output (simplified by just tracking the offset of the last one)
-			if (cfInstruction.memWriteElemSize != 3)
-				debugBreakpoint();
-			if (cfInstruction.exportBurstCount != 0 && cfInstruction.memWriteElemSize != 3)
-			{
-				debugBreakpoint();
-			}
-			uint32 dwordWriteCount = (cfInstruction.exportBurstCount + 1) * 4;
-			uint32 numRingParameter = (cfInstruction.exportArrayBase + dwordWriteCount) / 4;
-			shader->ringParameterCount = std::max(shader->ringParameterCount, numRingParameter);
-			// mark input GPRs as used
-			for (uint32 i = 0; i < (cfInstruction.exportBurstCount + 1); i++)
-			{
-				shaderContext->analyzer.gprUseMask[(cfInstruction.exportSourceGPR + i) / 8] |= (1 << ((cfInstruction.exportSourceGPR + i) % 8));
-			}
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_EMIT_VERTEX)
-		{
-			shaderContext->analyzer.numEmitVertex++;
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_CALL)
-		{
-			// CALL instruction does not need analyzing
-			// and subroutines are analyzed separately
-		}
-		else
-			cemu_assert_unimplemented();
-	}
-	// analyze subroutines
-	for (auto subroutineAddr : list_subroutineAddrs)
-	{
-		LatteDecompiler_analyzeSubroutine(shaderContext, subroutineAddr);
-	}
-	// decide which uniform mode to use
-	bool hasAnyDynamicBufferAccess = false;
-	bool hasAnyBufferAccess = false;
-	for(auto& it : shaderContext->analyzer.uniformBufferAccessTracker)
-	{
-		if( it.HasRelativeAccess() )
-			hasAnyDynamicBufferAccess = true;
-		if( it.HasAccess() )
-			hasAnyBufferAccess = true;
-	}
-	if (hasAnyDynamicBufferAccess)
-	{
-		shader->uniformMode = LATTE_DECOMPILER_UNIFORM_MODE_FULL_CBANK;
-	}
-	else if(shaderContext->analyzer.uniformRegisterAccessTracker.HasRelativeAccess() )
-	{
-		shader->uniformMode = LATTE_DECOMPILER_UNIFORM_MODE_FULL_CFILE;
-	}
-	else if(hasAnyBufferAccess || shaderContext->analyzer.uniformRegisterAccessTracker.HasAccess() )
-	{
-		shader->uniformMode = LATTE_DECOMPILER_UNIFORM_MODE_REMAPPED;
-	}
-	else
-	{
-		shader->uniformMode = LATTE_DECOMPILER_UNIFORM_MODE_NONE;
-	}
-	// generate compact list of uniform buffers (for faster access)
-	cemu_assert_debug(shader->list_quickBufferList.empty());
-	for (uint32 i = 0; i < LATTE_NUM_MAX_UNIFORM_BUFFERS; i++)
-	{
-		if( !shaderContext->analyzer.uniformBufferAccessTracker[i].HasAccess() )
-			continue;
-		LatteDecompilerShader::QuickBufferEntry entry;
-		entry.index = i;
-		entry.size = shaderContext->analyzer.uniformBufferAccessTracker[i].DetermineSize(shaderContext->shaderBaseHash, LATTE_GLSL_DYNAMIC_UNIFORM_BLOCK_SIZE) * 16;
-		shader->list_quickBufferList.push_back(entry);
-	}
-	// get dimension of each used texture
-	_LatteRegisterSetTextureUnit* texRegs = nullptr;
-	if( shader->shaderType == LatteConst::ShaderType::Vertex )
-		texRegs = shaderContext->contextRegistersNew->SQ_TEX_START_VS;
-	else if( shader->shaderType == LatteConst::ShaderType::Pixel )
-		texRegs = shaderContext->contextRegistersNew->SQ_TEX_START_PS;
-	else if( shader->shaderType == LatteConst::ShaderType::Geometry )
-		texRegs = shaderContext->contextRegistersNew->SQ_TEX_START_GS;
-
-	for(sint32 i=0; i<LATTE_NUM_MAX_TEX_UNITS; i++)
-	{
-		if (!shaderContext->output->textureUnitMask[i])
-		{
-			// texture unit not used
-			shader->textureUnitDim[i] = (Latte::E_DIM)0xFF;
-			continue;
-		}
-		auto& texUnit = texRegs[i];
-		auto dim = texUnit.word0.get_DIM();
-		shader->textureUnitDim[i] = dim;
-		if(dim == Latte::E_DIM::DIM_CUBEMAP)
-			shaderContext->analyzer.hasCubeMapTexture = true;
-		shader->textureIsIntegerFormat[i] = texUnit.word4.get_NUM_FORM_ALL() == Latte::LATTE_SQ_TEX_RESOURCE_WORD4_N::E_NUM_FORMAT_ALL::NUM_FORMAT_INT;
-	}
-	// generate list of used texture units
-	shader->textureUnitListCount = 0;
-	for (sint32 i = 0; i < LATTE_NUM_MAX_TEX_UNITS; i++)
-	{
-		if (shaderContext->output->textureUnitMask[i])
-		{
-			shader->textureUnitList[shader->textureUnitListCount] = i;
-			shader->textureUnitListCount++;
-		}
-		shader->textureRenderTargetIndex[i] = 255;
-	}
-	// check if textures are used as render targets
-	if (shader->shaderType == LatteConst::ShaderType::Pixel)
-	{
-		struct {
-		    sint32 index;
-		    MPTR physAddr;
-			Latte::E_GX2SURFFMT format;
-			Latte::E_HWTILEMODE tileMode;
-		} colorBuffers[LATTE_NUM_COLOR_TARGET]{};
-
-        uint8 colorBufferMask = LatteMRT::GetActiveColorBufferMask(shader, *shaderContext->contextRegistersNew);
-        sint32 colorBufferCount = 0;
-		for (sint32 i = 0; i < LATTE_NUM_COLOR_TARGET; i++)
-        {
-            auto& colorBuffer = colorBuffers[colorBufferCount];
-            if (((colorBufferMask) & (1 << i)) == 0)
-                continue; // color buffer not enabled
-
-            uint32* colorBufferRegBase = shaderContext->contextRegisters + (mmCB_COLOR0_BASE + i);
-           	uint32 regColorBufferBase = colorBufferRegBase[mmCB_COLOR0_BASE - mmCB_COLOR0_BASE] & 0xFFFFFF00; // the low 8 bits are ignored? How to Survive seems to rely on this
-
-            uint32 regColorInfo = colorBufferRegBase[mmCB_COLOR0_INFO - mmCB_COLOR0_BASE];
-
-           	MPTR colorBufferPhysMem = regColorBufferBase;
-            Latte::E_HWTILEMODE colorBufferTileMode = (Latte::E_HWTILEMODE)((regColorInfo >> 8) & 0xF);
-
-            Latte::E_GX2SURFFMT colorBufferFormat = LatteMRT::GetColorBufferFormat(i, *shaderContext->contextRegistersNew);
-
-            colorBuffer = {i, colorBufferPhysMem, colorBufferFormat, colorBufferTileMode};
-            colorBufferCount++;
-        }
-
-	    for (sint32 i = 0; i < shader->textureUnitListCount; i++)
-        {
-            sint32 textureIndex = shader->textureUnitList[i];
-      		const auto& texRegister = texRegs[textureIndex];
-
-      		// get physical address of texture data
-      		MPTR physAddr = (texRegister.word2.get_BASE_ADDRESS() << 8);
-      		if (physAddr == MPTR_NULL)
-                continue; // invalid data
-
-            auto tileMode = texRegister.word0.get_TILE_MODE();
-
-            // Check for dimension
-            auto dim = shader->textureUnitDim[textureIndex];
-            // TODO: 2D arrays could be supported as well
-            if (dim != Latte::E_DIM::DIM_2D)
-                continue;
-
-            // Check for mip level
-            auto lastMip = texRegister.word5.get_LAST_LEVEL();
-            // TODO: multiple mip levels could be supported as well
-            if (lastMip != 0)
-                continue;
-
-            Latte::E_GX2SURFFMT format = LatteTexture_ReconstructGX2Format(texRegister.word1, texRegister.word4);
-
-            // Check if the texture is used as render target
-            for (sint32 j = 0; j < colorBufferCount; j++)
-            {
-                const auto& colorBuffer = colorBuffers[j];
-
-                if (physAddr == colorBuffer.physAddr && format == colorBuffer.format && tileMode == colorBuffer.tileMode)
-                {
-                    shader->textureRenderTargetIndex[textureIndex] = colorBuffer.index;
-                    break;
-                }
-            }
-        }
-	}
-	// for geometry shaders check the copy shader for stream writes
-	if (shader->shaderType == LatteConst::ShaderType::Geometry && shaderContext->parsedGSCopyShader->list_streamWrites.empty() == false)
-	{
-		shaderContext->analyzer.hasStreamoutWrite = true;
-		if (shaderContext->contextRegisters[mmVGT_STRMOUT_EN] != 0)
-			shaderContext->analyzer.hasStreamoutEnable = true;
-		for (auto& it : shaderContext->parsedGSCopyShader->list_streamWrites)
-		{
-			shaderContext->output->streamoutBufferWriteMask[it.bufferIndex] = true;
-			uint32 vectorWriteSize = 0;
-			for (sint32 f = 0; f < 4; f++)
-			{
-				if ((it.memWriteCompMask&(1 << f)) != 0)
-					vectorWriteSize = (f + 1) * 4;
-			}
-			shaderContext->output->streamoutBufferStride[it.bufferIndex] = std::max(shaderContext->output->streamoutBufferStride[it.bufferIndex], it.exportArrayBase * 4 + vectorWriteSize);
-		}
-	}
-	// analyze input attributes again (if shader has relative GPR read)
-	if(shaderContext->analyzer.usesRelativeGPRRead && (shader->shaderType == LatteConst::ShaderType::Vertex || shader->shaderType == LatteConst::ShaderType::Geometry) )
-	{
-		if(shaderContext->fetchShader)
-		{
-			LatteFetchShader* parsedFetchShader = shaderContext->fetchShader;
-			for(auto& bufferGroup : parsedFetchShader->bufferGroups)
-			{
-				for (sint32 i = 0; i < bufferGroup.attribCount; i++)
-				{
-					uint32 registerIndex;
-					// get register index based on vtx semantic table
-					uint32 attributeShaderLoc = 0xFFFFFFFF;
-					for (sint32 f = 0; f < 32; f++)
-					{
-						if (shaderContext->contextRegisters[mmSQ_VTX_SEMANTIC_0 + f] == bufferGroup.attrib[i].semanticId)
-						{
-							attributeShaderLoc = f;
-							break;
-						}
-					}
-					if (attributeShaderLoc == 0xFFFFFFFF)
-						continue; // attribute is not mapped to VS input
-					registerIndex = attributeShaderLoc + 1;
-					shaderContext->analyzer.gprUseMask[registerIndex / 8] |= (1 << (registerIndex % 8));
-				}
-			}
-		}
-	}
-	else if (shaderContext->analyzer.usesRelativeGPRRead && shader->shaderType == LatteConst::ShaderType::Pixel)
-	{
-		// mark pixel shader inputs as used if there is any relative GPR access
-		LatteShaderPSInputTable* psInputTable = LatteSHRC_GetPSInputTable();
-		for (sint32 i = 0; i < psInputTable->count; i++)
-		{
-			shaderContext->analyzer.gprUseMask[i / 8] |= (1 << (i % 8));
-		}
-	}
-	// check if shader accesses frag coord
-	if (shader->shaderType == LatteConst::ShaderType::Pixel)
-	{
-		LatteShaderPSInputTable* psInputTable = LatteSHRC_GetPSInputTable();
-		for (sint32 i = 0; i < psInputTable->count; i++)
-		{
-			sint32 gprIndex = i;
-			if ((shaderContext->analyzer.gprUseMask[gprIndex / 8] & (1 << (gprIndex % 8))) == 0 && shaderContext->analyzer.usesRelativeGPRRead == false)
-				continue;
-			uint32 psInputSemanticId = psInputTable->import[i].semanticId;
-			if (psInputSemanticId == LATTE_ANALYZER_IMPORT_INDEX_SPIPOSITION)
-			{
-				shaderContext->analyzer.hasFragCoordAccess = true;
-				break;
-			}
-		}
-		// some existing graphic pack replacement shaders rely on uf_fragCoordScale despite the original shader not needing it. We handle these exceptions here
-		switch (shaderContext->shaderBaseHash)
-		{
-		case 0x21e6bc9b0cdbe8d7: case 0x37040a485a29d54e: case 0x37a4ec1a7dbc7391:
-		case 0x50e29e8929cea348: case 0x572a6cfa3943923d: case 0x59df1c7e1806366c:
-		case 0x6ea8b1aa69c0b6f7: case 0x88133ee405eaae28: case 0x95a5a89d62998e0d:
-		case 0x998a9f67e353657b: case 0x9f6adb9a651f84b9: case 0xa5e9d150276a805c:
-		case 0xa7f4801a8d29e333: case 0xbe99d80628d31127: case 0xc14019840473ff86:
-		case 0xc612390d4c70f430: case 0xcb0e6e8cbec4502a: case 0xe334517825fdd599:
-		case 0xe39a2a718bc419fe: case 0xfdf33c607cd1d737: case 0xff71dcd2ad4defdc:
-			shaderContext->analyzer.hasFragCoordAccess = true;
-			break;
-		default:
-			break;
-		}
-	}
-	// analyze CF stack
-	sint32 cfCurrentStackDepth = 0;
-	sint32 cfCurrentMaxStackDepth = 0;
-	for(auto& cfInstruction : shaderContext->cfInstructions)
-	{
-		if (cfInstruction.type == GPU7_CF_INST_ALU)
-		{
-			// no effect on stack depth
-			cfInstruction.activeStackDepth = cfCurrentStackDepth;
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_ALU_PUSH_BEFORE )
-		{
-			cfCurrentStackDepth++;
-			cfCurrentMaxStackDepth = std::max(cfCurrentMaxStackDepth, cfCurrentStackDepth);
-			cfInstruction.activeStackDepth = cfCurrentStackDepth;
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_ALU_POP_AFTER)
-		{
-			cfInstruction.activeStackDepth = cfCurrentStackDepth;
-			cfCurrentStackDepth--;
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_ALU_POP2_AFTER)
-		{
-			cfInstruction.activeStackDepth = cfCurrentStackDepth;
-			cfCurrentStackDepth -= 2;
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_ALU_BREAK )
-		{
-			cfInstruction.activeStackDepth = cfCurrentStackDepth;
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_ALU_ELSE_AFTER)
-		{
-			if (cfInstruction.popCount != 0)
-				debugBreakpoint();
-			cfInstruction.activeStackDepth = cfCurrentStackDepth;
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_ELSE )
-		{
-			//if (cfInstruction.popCount != 0)
-			//	debugBreakpoint(); -> Only relevant when ELSE jump is taken
-			cfInstruction.activeStackDepth = cfCurrentStackDepth;
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_POP)
-		{
-			cfInstruction.activeStackDepth = cfCurrentStackDepth;
-			cfCurrentStackDepth -= cfInstruction.popCount;
-			if (cfCurrentStackDepth < 0)
-				debugBreakpoint();
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_LOOP_START_DX10 || cfInstruction.type == GPU7_CF_INST_LOOP_END ||
-				 cfInstruction.type == GPU7_CF_INST_LOOP_START_NO_AL)
-		{
-			// no effect on stack depth
-			cfInstruction.activeStackDepth = cfCurrentStackDepth;
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_LOOP_BREAK)
-		{
-			// since we assume that the break is not taken (for all pixels), we also don't need to worry about the stack depth adjustment
-			cfInstruction.activeStackDepth = cfCurrentStackDepth;
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_TEX)
-		{
-			// no effect on stack depth
-			cfInstruction.activeStackDepth = cfCurrentStackDepth;
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_EXPORT || cfInstruction.type == GPU7_CF_INST_EXPORT_DONE)
-		{
-			// no effect on stack depth
-			cfInstruction.activeStackDepth = cfCurrentStackDepth;
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_MEM_STREAM0_WRITE ||
-			cfInstruction.type == GPU7_CF_INST_MEM_STREAM1_WRITE)
-		{
-			// no effect on stack depth
-			cfInstruction.activeStackDepth = cfCurrentStackDepth;
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_MEM_RING_WRITE)
-		{
-			// no effect on stack depth
-			cfInstruction.activeStackDepth = cfCurrentStackDepth;
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_EMIT_VERTEX)
-		{
-			// no effect on stack depth
-			cfInstruction.activeStackDepth = cfCurrentStackDepth;
-		}
-		else if (cfInstruction.type == GPU7_CF_INST_CALL)
-		{
-			// no effect on stack depth
-			cfInstruction.activeStackDepth = cfCurrentStackDepth;
-		}
-		else
-		{
-			cemu_assert_debug(false);
-		}
-	}
-	shaderContext->analyzer.activeStackMaxDepth = cfCurrentMaxStackDepth;
-	if (cfCurrentStackDepth != 0)
-	{
-		debug_printf("cfCurrentStackDepth is not zero after all CF instructions. depth is %d\n", cfCurrentStackDepth);
-		cemu_assert_debug(false);
-	}
-	if(list_subroutineAddrs.empty() == false)
-		cemuLog_logDebug(LogType::Force, "Todo - analyze shader subroutine CF stack");
-	// TF mode
-	if (shaderContext->options->useTFViaSSBO && shaderContext->output->streamoutBufferWriteMask.any())
-	{
-		shaderContext->analyzer.useSSBOForStreamout = true;
-	}
-	// assign binding points
-	if (shaderContext->shaderType == LatteConst::ShaderType::Vertex)
-		shaderContext->output->resourceMappingVK.setIndex = 0;
-	else if (shaderContext->shaderType == LatteConst::ShaderType::Pixel)
-		shaderContext->output->resourceMappingVK.setIndex = 1;
-	else if (shaderContext->shaderType == LatteConst::ShaderType::Geometry)
-		shaderContext->output->resourceMappingVK.setIndex = 2;
-	LatteDecompiler::_initTextureBindingPointsGL(shaderContext);
-	LatteDecompiler::_initTextureBindingPointsVK(shaderContext);
-#ifdef ENABLE_METAL
-	LatteDecompiler::_initTextureBindingPointsMTL(shaderContext);
-#endif
-	LatteDecompiler::_initUniformBindingPoints(shaderContext);
-	LatteDecompiler::_initAttributeBindingPoints(shaderContext);
-	shaderContext->output->resourceMappingMTL.verticesPerInstanceBinding = shaderContext->currentBufferBindingPointMTL++;
-	shaderContext->output->resourceMappingMTL.indexBufferBinding = shaderContext->currentBufferBindingPointMTL++;
-	shaderContext->output->resourceMappingMTL.indexTypeBinding = shaderContext->currentBufferBindingPointMTL++;
+	// note: subroutine bodies are not scanned, only the main program
+	scanControlFlow(ctx);
+	chooseUniformMode(ctx);
+	collectTextureInfo(ctx);
+	collectCopyShaderStreamout(ctx);
+	markInputsForRelativeReads(ctx);
+	detectFragCoordUse(ctx);
+	computeStackDepths(ctx);
+	if (ctx->options->useTFViaSSBO && ctx->output->streamoutBufferWriteMask.any())
+		a.useSSBOForStreamout = true;
+	// binding points
+	if (ctx->shaderType == LatteConst::ShaderType::Vertex)
+		ctx->output->resourceMappingVK.setIndex = 0;
+	else if (ctx->shaderType == LatteConst::ShaderType::Pixel)
+		ctx->output->resourceMappingVK.setIndex = 1;
+	else if (ctx->shaderType == LatteConst::ShaderType::Geometry)
+		ctx->output->resourceMappingVK.setIndex = 2;
+	assignTextureBindings(ctx);
+	assignUniformBindings(ctx);
+	assignAttributeBindings(ctx);
+	auto& mtl = ctx->output->resourceMappingMTL;
+	mtl.verticesPerInstanceBinding = (sint8)ctx->currentBufferBindingPointMTL++;
+	mtl.indexBufferBinding = (sint8)ctx->currentBufferBindingPointMTL++;
+	mtl.indexTypeBinding = (sint8)ctx->currentBufferBindingPointMTL++;
 }
