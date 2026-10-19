@@ -1,23 +1,28 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "config/CemuConfig.h"
 
+// integer setting as edited by the game profile window
 struct gameProfileIntegerOption_t
 {
 	bool isPresent = false;
 	sint32 value;
 };
 
+// Per-title settings, read from gameProfiles/<titleid>.ini in the config folder
+// (user profile) or the data folder (bundled default profile). Unset optional
+// values mean "use the global setting".
 class GameProfile
 {
-	friend class GameProfileWindow;
+	friend class GameProfileWindow; // edits the members below directly
 
-public:
+  public:
 	static const uint32 kThreadQuantumDefault = 45000;
 
-	bool Load(uint64_t title_id);
-	void Save(uint64_t title_id);
-	void ResetOptional();
-	void Reset();
+	bool Load(uint64_t title_id); // false if no profile exists for the title
+	void Save(uint64_t title_id); // always writes the user profile
+	void ResetOptional();         // clears everything back to "use global setting"
+	void Reset();                 // sets every option to an explicit default
 
 	[[nodiscard]] uint64 GetTitleId() const { return m_title_id; }
 	[[nodiscard]] bool IsLoaded() const { return m_is_loaded; }
@@ -41,20 +46,20 @@ public:
 
 	[[nodiscard]] bool IsAudioDisabled() const { return m_disableAudio; }
 
-	[[nodiscard]] const std::array< std::optional<std::string>, 8>& GetControllerProfile() const { return m_controllerProfile; }
+	[[nodiscard]] const std::array<std::optional<std::string>, 8>& GetControllerProfile() const { return m_controllerProfile; }
 
-private:
+  private:
 	uint64_t m_title_id = 0;
 	bool m_is_loaded = false;
 	bool m_is_default = true;
 
 	std::optional<std::string> m_gameName{};
 
-	// general settings
-	std::optional<bool> m_loadSharedLibraries{}; // = true;
+	// [General]
+	std::optional<bool> m_loadSharedLibraries{};
 	bool m_startWithPadView = false;
 
-	// graphic settings
+	// [Graphics]
 	std::optional<GraphicAPI> m_graphics_api{};
 	AccurateShaderMulOption m_accurateShaderMul = AccurateShaderMulOption::True;
 #ifdef ENABLE_METAL
@@ -63,14 +68,19 @@ private:
 	PositionInvariance m_positionInvariance = PositionInvariance::Auto;
 #endif
 	std::optional<PrecompiledShaderOption> m_precompiledShaders{};
-	// cpu settings
-	uint32 m_threadQuantum = kThreadQuantumDefault; // values: 20000 45000 60000 80000 100000
-	std::optional<CPUMode> m_cpuMode{}; // = CPUModeOption::kSingleCoreRecompiler;
-	// audio
+
+	// [CPU]
+	uint32 m_threadQuantum = kThreadQuantumDefault;
+	std::optional<CPUMode> m_cpuMode{};
+
+	// [Audio]
 	bool m_disableAudio = false;
-	// controller settings
-	std::array< std::optional<std::string>, 8> m_controllerProfile{};
+
+	// [Controller] controller1 ... controller8
+	std::array<std::optional<std::string>, 8> m_controllerProfile{};
 };
+
 extern std::unique_ptr<GameProfile> g_current_game_profile;
 
+// loads the profile of the foreground title into g_current_game_profile
 void gameProfile_load();

@@ -1,8 +1,6 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/GameProfile/GameProfile.h"
 #include "util/helpers/helpers.h"
-
-#include "boost/nowide/convert.hpp"
-
 #include "config/ActiveSettings.h"
 #include "Common/FileStream.h"
 #include "util/IniParser/IniParser.h"
@@ -11,269 +9,198 @@
 
 std::unique_ptr<GameProfile> g_current_game_profile = std::make_unique<GameProfile>();
 
-struct gameProfileBooleanOption_t
+namespace
 {
-	bool isPresent = false;
-	bool value;
-};
-
-/*
-* Attempts to load a boolean option
-* If the option exists, true is returned.
-* The boolean is stored in *optionValue
-*/
-bool gameProfile_loadBooleanOption(IniParser* iniParser, char* optionName, gameProfileBooleanOption_t* option)
-{
-	auto option_value = iniParser->FindOption(optionName);
-	option->isPresent = false;
-	option->value = false;
-	if (!option_value)
-		return false;
-	// parse option
-	if (boost::iequals(*option_value, "false") || boost::iequals(*option_value, "0"))
+	void LogBadValue(std::string_view value, std::string_view option)
 	{
-		option->isPresent = true;
-		option->value = false;
-		return true;
+		cemuLog_log(LogType::Force, "Game profile: unsupported value '{}' for option '{}'", value, option);
 	}
-	else if (boost::iequals(*option_value, "true") || boost::iequals(*option_value, "1"))
-	{
-		option->isPresent = true;
-		option->value = true;
-		return true;
-	}
-	else
-		cemuLog_log(LogType::Force, "Unknown value '{}' for option '{}' in game profile", *option_value, optionName);
-	return false;
-}
 
-
-bool gameProfile_loadBooleanOption2(IniParser& iniParser, const char* optionName, bool& option)
-{
-	auto option_value = iniParser.FindOption(optionName);
-	if (!option_value)
-		return false;
-	if (boost::iequals(*option_value, "1") || boost::iequals(*option_value, "true"))
+	void LogOutOfRange(std::string_view value, std::string_view option)
 	{
-		option = true;
-		return true;
+		cemuLog_log(LogType::Force, "Game profile: value '{}' of option '{}' is out of range", value, option);
 	}
-	else if (boost::iequals(*option_value, "0") || boost::iequals(*option_value, "false"))
-	{
-		option = false;
-		return true;
-	}
-	else
-		cemuLog_log(LogType::Force, "Unknown value '{}' for option '{}' in game profile", *option_value, optionName);
-	return false;
-}
 
-bool gameProfile_loadBooleanOption2(IniParser& iniParser, const char* optionName, std::optional<bool>& option)
-{
-	bool tmp;
-	const auto result = gameProfile_loadBooleanOption2(iniParser, optionName, tmp);
-	if(result)
-		option = tmp;
-	return result;
-}
-
-/*
-* Attempts to load a integer option
-* Allows to specify min and max value (error is logged if out of range and default value is picked)
-*/
-bool gameProfile_loadIntegerOption(IniParser* iniParser, const char* optionName, gameProfileIntegerOption_t* option, sint32 defaultValue, sint32 minVal, sint32 maxVal)
-{
-	auto option_value = iniParser->FindOption(optionName);
-	option->isPresent = false;
-	if (!option_value)
+	// "1"/"true" and "0"/"false", case-insensitive
+	bool ReadBool(IniParser& ini, std::string_view name, bool& out)
 	{
-		option->value = defaultValue;
-		return false;
-	}
-	// parse option
-	sint32 val = StringHelpers::ToInt(*option_value, defaultValue);
-	if (val < minVal || val > maxVal)
-	{
-		cemuLog_log(LogType::Force, "Value '{}' is out of range for option '{}' in game profile", *option_value, optionName);
-		option->value = defaultValue;
-		return false;
-	}
-	option->isPresent = true;
-	option->value = val;
-	return true;
-}
-
-template <typename T>
-bool gameProfile_loadIntegerOption(IniParser& iniParser, const char* optionName, T& option, T minVal, T maxVal)
-{
-	static_assert(std::is_integral_v<T>);
-	auto option_value = iniParser.FindOption(optionName);
-	if (!option_value)
-		return false;
-	// parse option
-	try
-	{
-		T val = ConvertString<T>(*option_value);
-		if (val < minVal || val > maxVal)
+		std::optional<std::string_view> text = ini.FindOption(name);
+		if (!text)
+			return false;
+		if (boost::iequals(*text, "1") || boost::iequals(*text, "true"))
+			out = true;
+		else if (boost::iequals(*text, "0") || boost::iequals(*text, "false"))
+			out = false;
+		else
 		{
-			cemuLog_log(LogType::Force, "Value '{}' is out of range for option '{}' in game profile", *option_value, optionName);
+			LogBadValue(*text, name);
 			return false;
 		}
-
-		option = val;
 		return true;
 	}
-	catch(std::exception&)
+
+	void ReadBool(IniParser& ini, std::string_view name, std::optional<bool>& out)
 	{
-		cemuLog_log(LogType::Force, "Value '{}' is out of range for option '{}' in game profile", *option_value, optionName);
+		bool value;
+		if (ReadBool(ini, name, value))
+			out = value;
+	}
+
+	// Enum values are accepted by number or by the name the enum's formatter prints
+	template<typename TEnum>
+	bool ReadEnum(IniParser& ini, std::string_view name, TEnum& out)
+	{
+		static_assert(std::is_enum_v<TEnum>);
+		std::optional<std::string_view> text = ini.FindOption(name);
+		if (!text)
+			return false;
+		for (TEnum candidate : TEnum())
+		{
+			if (boost::iequals(fmt::format("{}", fmt::underlying(candidate)), *text) || boost::iequals(fmt::format("{}", candidate), *text))
+			{
+				out = candidate;
+				return true;
+			}
+		}
 		return false;
 	}
-}
 
-template<typename T>
-bool gameProfile_loadEnumOption(IniParser& iniParser, const char* optionName, T& option)
-{
-	static_assert(std::is_enum_v<T>);
-	auto option_value = iniParser.FindOption(optionName);
-	if (!option_value)
-		return false;
-	for(const T& v : T())
+	template<typename TEnum>
+	bool ReadEnum(IniParser& ini, std::string_view name, std::optional<TEnum>& out)
 	{
-		// test integer option
-		if (boost::iequals(fmt::format("{}", fmt::underlying(v)), *option_value))
-		{
-			option = v;
-			return true;
-		}
-
-		// test enum name
-		if(boost::iequals(fmt::format("{}", v), *option_value))
-		{
-			option = v;
-			return true;
-		}
+		TEnum value;
+		if (!ReadEnum(ini, name, value))
+			return false;
+		out = value;
+		return true;
 	}
-	return false;
-}
 
-template<typename T>
-bool gameProfile_loadEnumOption(IniParser& iniParser, const char* optionName, std::optional<T>& option)
-{
-	T tmp;
-	const auto result = gameProfile_loadEnumOption(iniParser, optionName, tmp);
-	if(result)
-		option = tmp;
-	return result;
+	// first line "# <name>" of a profile names the game (at most 127 bytes are looked at)
+	std::optional<std::string> ReadGameNameComment(const std::vector<uint8>& content)
+	{
+		if (content.empty() || content[0] != '#')
+			return std::nullopt;
+		const size_t limit = std::min<size_t>(content.size(), 128);
+		size_t end = 1;
+		while (end < limit && content[end] != '\n')
+			end++;
+		std::string name(content.begin() + 1, content.begin() + end);
+		trim(name);
+		return name;
+	}
+
+	template<typename T>
+	void WriteSetting(FileStream* file, std::string_view key, const T& value)
+	{
+		file->writeLine(fmt::format("{} = {}", key, value).c_str());
+	}
+
+	template<typename T>
+	void WriteSetting(FileStream* file, std::string_view key, const std::optional<T>& value)
+	{
+		if (value)
+			WriteSetting(file, key, *value);
+	}
 }
 
 void gameProfile_load()
 {
-	g_current_game_profile->ResetOptional(); // reset with global values as optional
+	g_current_game_profile->ResetOptional();
 	g_current_game_profile->Load(CafeSystem::GetForegroundTitleId());
 
-	// apply some settings immediately
 	ppcThreadQuantum = g_current_game_profile->GetThreadQuantum();
-
 	if (ppcThreadQuantum != GameProfile::kThreadQuantumDefault)
 		cemuLog_log(LogType::Force, "Thread quantum set to {}", ppcThreadQuantum);
 }
 
 bool GameProfile::Load(uint64_t title_id)
 {
-	auto gameProfilePath = ActiveSettings::GetConfigPath("gameProfiles/{:016x}.ini", title_id);
-
-	std::optional<std::vector<uint8>> profileContents = FileStream::LoadIntoMemory(gameProfilePath);
-	if (!profileContents)
+	// a profile in the user's config folder wins over the bundled default one
+	fs::path path = ActiveSettings::GetConfigPath("gameProfiles/{:016x}.ini", title_id);
+	std::optional<std::vector<uint8>> content = FileStream::LoadIntoMemory(path);
+	bool isBundledDefault = false;
+	if (!content)
 	{
-		gameProfilePath = ActiveSettings::GetDataPath("gameProfiles/default/{:016x}.ini", title_id);
-		profileContents = FileStream::LoadIntoMemory(gameProfilePath);
-		if (!profileContents)
-			return false;
-		m_is_default = true;
+		path = ActiveSettings::GetDataPath("gameProfiles/default/{:016x}.ini", title_id);
+		content = FileStream::LoadIntoMemory(path);
+		if (!content)
+			return false; // nothing loaded, state unchanged
+		isBundledDefault = true;
 	}
-	else
-		m_is_default = false;
-
+	m_is_default = isBundledDefault;
 	m_is_loaded = true;
-	// most official gameprofiles start with "# gamename"
-	std::vector<char> game_name;
-	if (profileContents->size() > 0 && profileContents->data()[0] == '#')
-	{
-		char c;
-		size_t idx = 1;
-		while (idx < profileContents->size() && (c = profileContents->data()[idx]) != '\n' && idx < 128)
-		{
-			game_name.emplace_back(c);
-			idx++;
-		}
-		m_gameName = std::string(game_name.begin(), game_name.end());
-		trim(m_gameName.value());
-	}
-	IniParser iniParser(*profileContents, _pathToUtf8(gameProfilePath));
-	// parse ini
-	while (iniParser.NextSection())
-	{
-		if (boost::iequals(iniParser.GetCurrentSectionName(), "General"))
-		{
-			gameProfile_loadBooleanOption2(iniParser, "loadSharedLibraries", m_loadSharedLibraries);
-			gameProfile_loadBooleanOption2(iniParser, "startWithPadView", m_startWithPadView);
-		}
-		else if (boost::iequals(iniParser.GetCurrentSectionName(), "Graphics"))
-		{
-			gameProfileIntegerOption_t graphicsApi;
-			gameProfile_loadIntegerOption(&iniParser, "graphics_api", &graphicsApi, -1, 0, 1);
-			if (graphicsApi.value != -1)
-				m_graphics_api = (GraphicAPI)graphicsApi.value;
 
-			gameProfile_loadEnumOption(iniParser, "accurateShaderMul", m_accurateShaderMul);
-#ifdef ENABLE_METAL
-			gameProfile_loadBooleanOption2(iniParser, "shaderFastMath", m_shaderFastMath);
-			gameProfile_loadEnumOption(iniParser, "metalBufferCacheMode2", m_metalBufferCacheMode);
-			gameProfile_loadEnumOption(iniParser, "positionInvariance2", m_positionInvariance);
-#endif
+	if (std::optional<std::string> name = ReadGameNameComment(*content))
+		m_gameName = std::move(name);
 
-			// legacy support
-			auto option_precompiledShaders = iniParser.FindOption("precompiledShaders");
-			if (option_precompiledShaders)
+	IniParser ini(*content, _pathToUtf8(path));
+	while (ini.NextSection())
+	{
+		const std::string_view section = ini.GetCurrentSectionName();
+		if (boost::iequals(section, "General"))
+		{
+			ReadBool(ini, "loadSharedLibraries", m_loadSharedLibraries);
+			ReadBool(ini, "startWithPadView", m_startWithPadView);
+		}
+		else if (boost::iequals(section, "Graphics"))
+		{
+			if (std::optional<std::string_view> api = ini.FindOption("graphics_api"))
 			{
-				if (boost::iequals(*option_precompiledShaders, "1") || boost::iequals(*option_precompiledShaders, "true"))
-					m_precompiledShaders = PrecompiledShaderOption::Enable;
-				else if (boost::iequals(*option_precompiledShaders, "0") || boost::iequals(*option_precompiledShaders, "false"))
-					m_precompiledShaders = PrecompiledShaderOption::Disable;
+				const sint32 value = StringHelpers::ToInt(*api, -1);
+				if (value == 0 || value == 1)
+					m_graphics_api = (GraphicAPI)value;
 				else
-					m_precompiledShaders = PrecompiledShaderOption::Auto;
+					LogOutOfRange(*api, "graphics_api");
 			}
-			else
-				m_precompiledShaders = PrecompiledShaderOption::Auto;
-		}
-		else if (boost::iequals(iniParser.GetCurrentSectionName(), "Audio"))
-		{
-			gameProfile_loadBooleanOption2(iniParser, "disableAudio", m_disableAudio);
-		}
-		else if (boost::iequals(iniParser.GetCurrentSectionName(), "CPU"))
-		{
-			gameProfile_loadIntegerOption(iniParser, "threadQuantum", m_threadQuantum, 1000U, 536870912U);
-			if (!gameProfile_loadEnumOption(iniParser, "cpuMode", m_cpuMode))
+			ReadEnum(ini, "accurateShaderMul", m_accurateShaderMul);
+#ifdef ENABLE_METAL
+			ReadBool(ini, "shaderFastMath", m_shaderFastMath);
+			ReadEnum(ini, "metalBufferCacheMode2", m_metalBufferCacheMode);
+			ReadEnum(ini, "positionInvariance2", m_positionInvariance);
+#endif
+			// boolean in older profiles; anything else (or no entry) means Auto
+			m_precompiledShaders = PrecompiledShaderOption::Auto;
+			if (std::optional<std::string_view> precompiled = ini.FindOption("precompiledShaders"))
 			{
-				// try to load the old enum value strings
-				std::optional<CPUModeLegacy> cpu_mode_legacy;
-				if (gameProfile_loadEnumOption(iniParser, "cpuMode", cpu_mode_legacy) && cpu_mode_legacy.has_value())
+				if (boost::iequals(*precompiled, "1") || boost::iequals(*precompiled, "true"))
+					m_precompiledShaders = PrecompiledShaderOption::Enable;
+				else if (boost::iequals(*precompiled, "0") || boost::iequals(*precompiled, "false"))
+					m_precompiledShaders = PrecompiledShaderOption::Disable;
+			}
+		}
+		else if (boost::iequals(section, "Audio"))
+		{
+			ReadBool(ini, "disableAudio", m_disableAudio);
+		}
+		else if (boost::iequals(section, "CPU"))
+		{
+			if (std::optional<std::string_view> quantum = ini.FindOption("threadQuantum"))
+			{
+				const uint32 value = ConvertString<uint32>(*quantum);
+				if (value >= 1000 && value <= 0x20000000)
+					m_threadQuantum = value;
+				else
+					LogOutOfRange(*quantum, "threadQuantum");
+			}
+			if (!ReadEnum(ini, "cpuMode", m_cpuMode))
+			{
+				// profiles written by older versions use the legacy mode names
+				CPUModeLegacy legacy;
+				if (ReadEnum(ini, "cpuMode", legacy))
 				{
-					m_cpuMode = (CPUMode)cpu_mode_legacy.value();
+					m_cpuMode = (CPUMode)legacy;
 					if (m_cpuMode == CPUMode::DualcoreRecompiler)
 						m_cpuMode = CPUMode::MulticoreRecompiler;
 				}
 			}
 		}
-		else if (boost::iequals(iniParser.GetCurrentSectionName(), "Controller"))
+		else if (boost::iequals(section, "Controller"))
 		{
-			for (int i = 0; i < 8; ++i)
+			for (size_t i = 0; i < m_controllerProfile.size(); i++)
 			{
-				auto option_value = iniParser.FindOption(fmt::format("controller{}", (i + 1)));
-				if (option_value)
-					m_controllerProfile[i] = std::string(*option_value);
+				if (std::optional<std::string_view> profile = ini.FindOption(fmt::format("controller{}", i + 1)))
+					m_controllerProfile[i] = std::string(*profile);
 			}
-
 		}
 	}
 	return true;
@@ -281,95 +208,71 @@ bool GameProfile::Load(uint64_t title_id)
 
 void GameProfile::Save(uint64_t title_id)
 {
-	auto gameProfileDir = ActiveSettings::GetConfigPath("gameProfiles");
-	if (std::error_code ex_ec; !fs::exists(gameProfileDir, ex_ec))
-		fs::create_directories(gameProfileDir, ex_ec);
-	auto gameProfilePath = gameProfileDir / fmt::format("{:016x}.ini", title_id);
-	FileStream* fs = FileStream::createFile2(gameProfilePath);
-	if (!fs)
+	const fs::path folder = ActiveSettings::GetConfigPath("gameProfiles");
+	std::error_code ec;
+	if (!fs::exists(folder, ec))
+		fs::create_directories(folder, ec);
+	std::unique_ptr<FileStream> file(FileStream::createFile2(folder / fmt::format("{:016x}.ini", title_id)));
+	if (!file)
 	{
-		cemuLog_log(LogType::Force, "Failed to write game profile");
+		cemuLog_log(LogType::Force, "Game profile: could not write the profile file");
 		return;
 	}
 
 	if (m_gameName)
-		fs->writeLine(fmt::format("# {}\n", m_gameName.value()).c_str());
+		file->writeLine(fmt::format("# {}\n", *m_gameName).c_str());
 
-#define WRITE_OPTIONAL_ENTRY(__NAME) if (m_##__NAME) fs->writeLine(fmt::format("{} = {}", #__NAME, m_##__NAME.value()).c_str());
-#define WRITE_ENTRY(__NAME) fs->writeLine(fmt::format("{} = {}", #__NAME, m_##__NAME).c_str());
-#define WRITE_ENTRY_NUMBERED(__NAME, __NUM) fs->writeLine(fmt::format("{} = {}", #__NAME #__NUM, m_##__NAME).c_str());
+	file->writeLine("[General]");
+	WriteSetting(file.get(), "loadSharedLibraries", m_loadSharedLibraries);
+	WriteSetting(file.get(), "startWithPadView", m_startWithPadView);
+	file->writeLine("");
 
-	fs->writeLine("[General]");
-	WRITE_OPTIONAL_ENTRY(loadSharedLibraries);
-	WRITE_ENTRY(startWithPadView);
-	fs->writeLine("");
+	file->writeLine("[CPU]");
+	WriteSetting(file.get(), "cpuMode", m_cpuMode);
+	WriteSetting(file.get(), "threadQuantum", m_threadQuantum);
+	file->writeLine("");
 
-	fs->writeLine("[CPU]");
-	WRITE_OPTIONAL_ENTRY(cpuMode);
-	WRITE_ENTRY(threadQuantum);
-	fs->writeLine("");
-
-	fs->writeLine("[Graphics]");
-	WRITE_ENTRY(accurateShaderMul);
+	file->writeLine("[Graphics]");
+	WriteSetting(file.get(), "accurateShaderMul", m_accurateShaderMul);
 #ifdef ENABLE_METAL
-	WRITE_ENTRY(shaderFastMath);
-	WRITE_ENTRY_NUMBERED(metalBufferCacheMode, 2);
-	WRITE_ENTRY_NUMBERED(positionInvariance, 2);
+	WriteSetting(file.get(), "shaderFastMath", m_shaderFastMath);
+	WriteSetting(file.get(), "metalBufferCacheMode2", m_metalBufferCacheMode);
+	WriteSetting(file.get(), "positionInvariance2", m_positionInvariance);
 #endif
-	WRITE_OPTIONAL_ENTRY(precompiledShaders);
-	WRITE_OPTIONAL_ENTRY(graphics_api);
-	fs->writeLine("");
+	WriteSetting(file.get(), "precompiledShaders", m_precompiledShaders);
+	WriteSetting(file.get(), "graphics_api", m_graphics_api);
+	file->writeLine("");
 
-	fs->writeLine("[Controller]");
-	for (int i = 0; i < 8; ++i)
-	{
-		if (m_controllerProfile[i])
-			fs->writeLine(fmt::format("controller{} = {}", (i + 1), m_controllerProfile[i].value()).c_str());
-	}
-
-	fs->writeLine("");
-
-#undef WRITE_OPTIONAL_ENTRY
-#undef WRITE_ENTRY
-#undef WRITE_ENTRY_NUMBERED
-
-	delete fs;
+	file->writeLine("[Controller]");
+	for (size_t i = 0; i < m_controllerProfile.size(); i++)
+		WriteSetting(file.get(), fmt::format("controller{}", i + 1), m_controllerProfile[i]);
+	file->writeLine("");
 }
 
 void GameProfile::ResetOptional()
 {
 	m_gameName.reset();
-
-	// general settings
-	m_loadSharedLibraries.reset(); // true;
+	m_loadSharedLibraries.reset();
 	m_startWithPadView = false;
-
-	// graphic settings
 	m_accurateShaderMul = AccurateShaderMulOption::True;
 #ifdef ENABLE_METAL
 	m_shaderFastMath = true;
 	m_metalBufferCacheMode = MetalBufferCacheMode::Auto;
 	m_positionInvariance = PositionInvariance::Auto;
 #endif
-	// cpu settings
+	// graphics API and precompiled shader choice are left as they are
 	m_threadQuantum = kThreadQuantumDefault;
-	m_cpuMode.reset(); // CPUModeOption::kSingleCoreRecompiler;
-	// audio
+	m_cpuMode.reset();
 	m_disableAudio = false;
-	// controller settings
-	for (auto& profile : m_controllerProfile)
+	for (std::optional<std::string>& profile : m_controllerProfile)
 		profile.reset();
 }
 
 void GameProfile::Reset()
 {
 	m_gameName.reset();
-
-	// general settings
 	m_loadSharedLibraries = true;
 	m_startWithPadView = false;
-
-	// graphic settings
 	m_accurateShaderMul = AccurateShaderMulOption::True;
 #ifdef ENABLE_METAL
 	m_shaderFastMath = true;
@@ -377,12 +280,10 @@ void GameProfile::Reset()
 	m_positionInvariance = PositionInvariance::Auto;
 #endif
 	m_precompiledShaders = PrecompiledShaderOption::Auto;
-	// cpu settings
+	// graphics API is left as it is
 	m_threadQuantum = kThreadQuantumDefault;
 	m_cpuMode = CPUMode::Auto;
-	// audio
 	m_disableAudio = false;
-	// controller settings
-	for (auto& profile : m_controllerProfile)
+	for (std::optional<std::string>& profile : m_controllerProfile)
 		profile.reset();
 }
