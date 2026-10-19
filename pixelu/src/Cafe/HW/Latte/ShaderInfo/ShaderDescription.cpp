@@ -1,56 +1,50 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/HW/Latte/ShaderInfo/ShaderInfo.h"
 #include "Cafe/HW/Latte/ISA/LatteInstructions.h"
 
 namespace Latte
 {
+	namespace
+	{
+		constexpr uint32 kNumColorTargets = 8;
+
+		bool IsExport(LatteCFInstruction::OPCODE op)
+		{
+			return op == LatteCFInstruction::INST_EXPORT || op == LatteCFInstruction::INST_EXPORT_DONE;
+		}
+	}
+
 	bool ShaderDescription::analyzeShaderCode(void* shaderProgram, size_t sizeInBytes, LatteConst::ShaderType shaderType)
 	{
-		assert_dbg();
-
-
-		// parse CF flow
-		// we need to parse:
-		// - Export clauses to gather info about exported attributes and written render targets
-		// - ALU clauses to gather info about accessed uniforms (and the remapped uniform)
-
-		const LatteCFInstruction* cfCode = (const LatteCFInstruction*)shaderProgram;
-		const size_t cfMaxCount = sizeInBytes / 8;
-
-		size_t cfIndex = 0;
-		while (cfIndex < cfMaxCount)
+		renderTargetWriteMask = {};
+		if (!shaderProgram)
+			return false;
+		const auto* program = static_cast<const LatteCFInstruction*>(shaderProgram);
+		const size_t numWords = sizeInBytes / sizeof(LatteCFInstruction);
+		for (size_t i = 0; i < numWords; i++)
 		{
-			const LatteCFInstruction* baseInstr = cfCode + cfIndex;
-			cfIndex++;
-			bool isALU = false;
-			if (const auto cfInstr = baseInstr->getParserIfOpcodeMatch<LatteCFInstruction_DEFAULT>())
+			const LatteCFInstruction& cf = program[i];
+			const LatteCFInstruction::OPCODE op = cf.getField_Opcode();
+			if ((op & LatteCFInstruction::MASK_ALU) != 0)
+				continue; // ALU clauses carry no end-of-program flag
+			if (IsExport(op) && shaderType == LatteConst::ShaderType::Pixel)
 			{
-				cemu_assert_debug(cfInstr->getField_WHOLE_QUAD_MODE() == 0);
-
-				cemu_assert_debug(cfInstr->getField_CALL_COUNT() == 0); // todo
-				cemu_assert_debug(cfInstr->getField_POP_COUNT() == 0); // todo
-
-				auto cond = cfInstr->getField_COND();
-
-				assert_dbg();
+				const LatteCFInstruction_EXPORT_IMPORT* exp = cf.getParser_EXPORT();
+				if (exp->getField_TYPE() == LatteCFInstruction_EXPORT_IMPORT::PIXEL)
+				{
+					// a burst writes consecutive targets starting at ARRAY_BASE
+					for (uint32 k = 0; k < exp->getField_BURST_COUNT(); k++)
+					{
+						const uint32 target = exp->getField_ARRAY_BASE() + k;
+						if (target < kNumColorTargets)
+							renderTargetWriteMask.set(target);
+					}
+				}
 			}
-			else if (const auto cfInstr = baseInstr->getParserIfOpcodeMatch<LatteCFInstruction_ALU>())
-			{
-				assert_dbg();
-				isALU = true;
-			}
-			else if (const auto cfInstr = baseInstr->getParserIfOpcodeMatch<LatteCFInstruction_EXPORT_IMPORT>())
-			{
-				assert_dbg();
-			}
-			else
-			{
-				cemuLog_log(LogType::Force, "ShaderDescription::analyzeShaderCode(): Missing implementation for CF opcode 0x%02x\n", baseInstr->getField_Opcode());
-				cemu_assert_debug(false); // todo
-			}
-			if (!isALU && baseInstr->getField_END_OF_PROGRAM())
-				break;
+			if (cf.getField_END_OF_PROGRAM())
+				return true;
 		}
-
+		// no end-of-program flag inside the given size, keep what was found
 		return true;
 	}
 };

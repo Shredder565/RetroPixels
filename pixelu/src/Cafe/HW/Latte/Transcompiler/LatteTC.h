@@ -1,35 +1,25 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "Cafe/HW/Latte/ISA/LatteInstructions.h"
 #include "Cafe/HW/Latte/Core/FetchShader.h"
 #include "Cafe/HW/Latte/Core/LatteConst.h"
 #include "util/Zir/Core/IR.h"
 
-#include <boost/container/static_vector.hpp>
+#include <array>
+#include <bitset>
 
 namespace ZpIR
 {
 	class BasicBlockBuilder;
 }
 
-// transforms GPU7/Latte shader binaries into an SSA IR (ZpIR) representation
+// Experimental translator from Latte (R7xx) shader binaries to the ZpIR SSA form.
+// Only straight-line programs and a small set of ALU operations are understood so far;
+// anything else is reported through cemu_assert_debug and skipped.
 class LatteTCGenIR
 {
-	//friend class CFNodeInfo;
-	friend struct CFNodeInfo_CALL_FS;
-private:
-	struct NodeDAG // one per function (shaders usually have main only)
-	{
-		std::vector<class CFBlockNode*> m_nodes;
-		// class CFBlockNode* entrypoint;
-
-		class CFBlockNode* GetEntryNode()
-		{
-			return m_nodes[0];
-		}
-	};
-	
 public:
-	typedef unsigned short GPRElementIndex; // grpIndex*4+channel
+	typedef unsigned short GPRElementIndex; // gpr * 4 + channel
 
 	enum SHADER_TYPE
 	{
@@ -38,163 +28,86 @@ public:
 		PIXEL,
 	};
 
+	// vertex shaders: fetch shader layout and the SQ_VTX_SEMANTIC_* table that maps
+	// attribute semantics to input GPRs
 	void setVertexShaderContext(const LatteFetchShader* parsedFetchShader, const uint32* vtxSemanticTable);
 
 	ZpIR::ZpIRFunction* transcompileLatteToIR(const void* programData, uint32 programSize, SHADER_TYPE shaderType);
 
 private:
-	ZpIR::IRReg getIRRegFromGPRElement(uint32 gprIndex, uint32 channel, ZpIR::DataType typeHint);
-	ZpIR::IRReg getTypedIRRegFromGPRElement(uint32 gprIndex, uint32 channel, ZpIR::DataType type);
+	static constexpr uint32 kNumGPRs = 128;
+	static constexpr uint32 kNumALUSlots = 5; // x, y, z, w, t
 
-	ZpIR::IRReg loadALUOperand(LatteALUSrcSel srcSel, uint8 srcChan, bool isNeg, bool isAbs, bool isRel, uint8 indexMode, const uint32* literalData, ZpIR::DataType typeHint, bool convertOnTypeMismatch);
-	void emitALUGroup(const class LatteClauseInstruction_ALU* aluUnit[5], const uint32* literalData);
-	
-	void genIRForNode(class CFBlockNode& node);
+	static GPRElementIndex MakeElement(uint32 gpr, uint32 channel) { return (GPRElementIndex)(gpr * 4 + channel); }
 
-	void parseCFToDAG();
-	void parseCF_createNodes(NodeDAG& nodeDAG);
-	void emitIR();
-	void cleanup();
-
-	// IR emitter
-	void processCF_CALL_FS(const LatteCFInstruction_DEFAULT& cfInstruction);
-	void processCF_ALU(const LatteCFInstruction_ALU& cfInstruction);
-	void processCF_EXPORT(const LatteCFInstruction_EXPORT_IMPORT& cfInstruction);
-
-	// helpers
-	void CF_CALL_FS_emitFetchAttribute(LatteParsedFetchShaderAttribute& attribute, Latte::GPRType dstGPR);
-
-private:
-	// tracks mapping GPR<->IR variable for current basic block
-	struct IREmitterActiveVars
+	// IR value held by every GPR channel (and by PV/PS) at the current point of the block.
+	// Values produced by an ALU group are queued and only become visible once the whole
+	// group has read its operands.
+	class ValueMap
 	{
-		bool get(uint32 gprIndex, uint32 channelIndex, ZpIR::IRReg& reg)
-		{
-			size_t index = gprIndex * 4 + channelIndex;
-			if (!m_present.test(index))
-				return false;
-			reg = m_irReg[index];
-			return true;
-		}
+	public:
+		bool lookup(GPRElementIndex element, ZpIR::IRReg& value) const;
+		void bind(GPRElementIndex element, ZpIR::IRReg value);
+		bool lookupPrevious(uint32 slot, ZpIR::IRReg& value) const;
 
-		void set(uint32 gprIndex, uint32 channelIndex, ZpIR::IRReg reg)
-		{
-			size_t index = gprIndex * 4 + channelIndex;
-			m_present.set(index);
-			m_irReg[index] = reg;
-		}
+		void queueWrite(uint32 slot, GPRElementIndex element, ZpIR::IRReg value);
+		void queuePrevious(uint32 slot, ZpIR::IRReg value);
+		void commitGroup();
 
-		// set register after current group
-		struct DelayedAssignment
-		{
-			uint16 index;
-			ZpIR::IRReg reg;
-			bool isSet{false};
-		};
-
-		struct DelayedAssignmentPVPS
-		{
-			ZpIR::IRReg reg;
-			bool isSet{ false };
-		};
-
-		void setAfterGroup(uint8 aluUnit, uint32 gprIndex, uint32 channelIndex, ZpIR::IRReg reg)
-		{
-			cemu_assert_debug(aluUnit < 5);
-			cemu_assert_debug(!m_delayedAssignments[aluUnit].isSet);
-			m_delayedAssignments[aluUnit].reg = reg;
-			m_delayedAssignments[aluUnit].index = gprIndex * 4 + channelIndex;
-			m_delayedAssignments[aluUnit].isSet = true;
-		}
-
-		void setAfterGroupPVPS(uint8 aluUnit, ZpIR::IRReg reg)
-		{
-			cemu_assert_debug(aluUnit < 5);
-			cemu_assert_debug(!m_delayedAssignmentsPSPV[aluUnit].isSet);
-			m_delayedAssignmentsPSPV[aluUnit].reg = reg;
-			m_delayedAssignmentsPSPV[aluUnit].isSet = true;
-		}
-
-		void applyDelayedAfterGroup()
-		{
-			// GPRs
-			for (size_t i = 0; i < 5; i++)
-			{
-				auto& assignment = m_delayedAssignments[i];
-				if(!assignment.isSet)
-					continue;
-				setGPR(assignment.index, assignment.reg);
-				assignment.isSet = false;
-			}
-			// PV/PS
-			for (size_t i = 0; i < 5; i++)
-			{
-				auto& assignment = m_delayedAssignmentsPSPV[i];
-				if (!assignment.isSet)
-					continue;
-				setPVPS((uint32)i, assignment.reg);
-				assignment.isSet = false;
-			}
-		}
-
-		void reset()
-		{
-			m_present.reset();
-		}
+		void clear();
 
 	private:
-		void setGPR(uint32 gprChannelindex, ZpIR::IRReg reg)
+		struct QueuedWrite
 		{
-			m_present.set(gprChannelindex);
-			m_irReg[gprChannelindex] = reg;
-		}
+			GPRElementIndex element{};
+			ZpIR::IRReg value{};
+			bool toGpr{};
+			bool toPrevious{};
+			ZpIR::IRReg previousValue{};
+		};
 
-		void setPVPS(uint32 unitIndex, ZpIR::IRReg reg)
-		{
-			m_presentPVPS.set(unitIndex);
-			m_irRegPVPS[unitIndex] = reg;
-		}
-
-		ZpIR::IRReg m_irReg[128 * 4]{};
-		ZpIR::IRReg m_irRegPVPS[5]{};
-		std::bitset<128 * 4> m_present;
-		std::bitset<5> m_presentPVPS;
-		DelayedAssignment m_delayedAssignments[5]{};
-		DelayedAssignmentPVPS m_delayedAssignmentsPSPV[5]{};
+		std::array<ZpIR::IRReg, kNumGPRs * 4> m_gprValue{};
+		std::bitset<kNumGPRs * 4> m_gprKnown;
+		std::array<ZpIR::IRReg, kNumALUSlots> m_prevValue{};
+		std::bitset<kNumALUSlots> m_prevKnown;
+		std::array<QueuedWrite, kNumALUSlots> m_queue{};
 	};
 
-	struct
+	struct OperandDesc
 	{
-		IREmitterActiveVars activeVars;
-		ZpIR::BasicBlockBuilder* irBuilder;
-		bool isEntryBasicBlock{};
+		uint32 sel;
+		uint32 chan;
+		bool neg;
+		bool rel;
+	};
 
-		void reset()
-		{
-			activeVars.reset();
-		}
-	}m_irGenContext;
+	// translation of one block
+	void translateBlock(ZpIR::ZpIRBasicBlock* block, uint32 firstCF, uint32 endCF, bool isEntry);
+	void translateFetchShaderCall();
+	void translateFetchedAttribute(const LatteParsedFetchShaderAttribute& attribute, uint32 dstGPR);
+	void translateALUClause(const LatteCFInstruction_ALU& clause);
+	void translateALUGroup(const LatteClauseInstruction_ALU_OP2* const slots[kNumALUSlots], const uint32* literals);
+	void translateExport(const LatteCFInstruction_EXPORT_IMPORT& exp);
 
-	struct  
-	{
-		const uint32* programData;
-		uint32 programSize;
-		//std::vector<struct CFNodeInfo*> list_irNodesCtx;
-		// first node in flow of main() function
-		//struct CFNodeInfo* mainEntry;
-		
-		SHADER_TYPE shaderType;
+	// operand access
+	ZpIR::IRReg readGPR(uint32 gpr, uint32 channel, ZpIR::DataType typeHint);
+	ZpIR::IRReg readGPRAs(uint32 gpr, uint32 channel, ZpIR::DataType type);
+	ZpIR::IRReg readOperand(const OperandDesc& op, const uint32* literals, ZpIR::DataType type);
+	ZpIR::IRReg castTo(ZpIR::IRReg value, ZpIR::DataType type);
+	ZpIR::DataType guessOperandType(const OperandDesc& op, const uint32* literals) const;
 
-		NodeDAG mainFunctionDAG;
-		// current IR object
-		struct ZpIR::ZpIRFunction* irObject;
-	}m_ctx;
+	void unsupported(); // marks the translation incomplete
 
+	// state of the current translation
+	const uint32* m_program{};
+	uint32 m_programSize{};
+	SHADER_TYPE m_shaderType{};
+	ZpIR::BasicBlockBuilder* m_builder{};
+	bool m_inEntryBlock{};
+	bool m_incomplete{};
+	ValueMap m_values;
 
-	// vertex shader info
-	struct
-	{
-		const LatteFetchShader* parsedFetchShader{};
-		const uint32* vtxSemanticTable{};
-	}m_vertexShaderCtx{};
+	// vertex shader context
+	const LatteFetchShader* m_fetchShader{};
+	const uint32* m_semanticTable{};
 };
