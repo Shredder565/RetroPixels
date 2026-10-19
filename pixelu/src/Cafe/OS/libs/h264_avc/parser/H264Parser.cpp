@@ -1,870 +1,574 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Header level H.264 parsing (ITU-T H.264 7.3). Only the fields needed to locate pictures and
+// compute their order are kept; everything else is read and discarded.
+// Unsupported stream features (pic_order_cnt_type 1 slices, 4:4:4 scaling lists, explicit
+// scaling list lookups) stop the emulator with an assert, as before.
 #include "Cafe/OS/libs/h264_avc/parser/H264Parser.h"
 
-void parse_hrd_parameters(h264ParserState_t* h264ParserState, RBSPInputBitstream& nalStream)
+namespace
 {
-	uint32 cpb_cnt_minus1 = nalStream.readUV_E();
-	uint8 bit_rate_scale = nalStream.readBits<4>();
-	uint8 cpb_size_scale = nalStream.readBits<4>();
-	for (uint8 schedSelIdx = 0; schedSelIdx <= cpb_cnt_minus1; schedSelIdx++)
-	{
-		uint32 bit_rate_value_minus1 = nalStream.readUV_E();
-		uint32 cpb_size_value_minus1 = nalStream.readUV_E();
-		uint8 cbr_flag = nalStream.readBit();
-	}
-	uint8 initial_cpb_removal_delay_length_minus1 = nalStream.readBits<5>();
-	uint8 cpb_removal_delay_length_minus1 = nalStream.readBits<5>();
-	uint8 dpb_output_delay_length_minus1 = nalStream.readBits<5>();
-	uint8 time_offset_length = nalStream.readBits<5>();
-}
+	using Reader = RBSPInputBitstream;
 
-void parseNAL_scaling_list4x4(RBSPInputBitstream& rbspStream, h264_scaling_matrix4x4_t& scalingMatrix4x4)
-{
-	if (rbspStream.readBit() == 0)
+	// profiles whose SPS carries the chroma format / bit depth / scaling list block
+	bool HasHighProfileFields(uint8 profile)
 	{
-		scalingMatrix4x4.isPresent = 0;
-		return;
+		static constexpr uint8 kProfiles[] = { 100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135 };
+		return std::find(std::begin(kProfiles), std::end(kProfiles), profile) != std::end(kProfiles);
 	}
-	scalingMatrix4x4.isPresent = 1;
 
-	cemu_assert_debug(false); // needs testing
-	sint32 lastScale = 8;
-	sint32 nextScale = 8;
-	for (sint32 j = 0; j < 4 * 4; j++)
+	// scaling_list(): 'size' entries, delta coded. 'list' and the default flag are only written when present
+	template<typename TMatrix, size_t TSize>
+	void ReadScalingList(Reader& r, TMatrix& m)
 	{
-		if (nextScale != 0)
+		m.isPresent = r.readBit();
+		if (!m.isPresent)
+			return;
+		cemu_assert_debug(false); // untested
+		sint32 last = 8;
+		sint32 next = 8;
+		for (size_t j = 0; j < TSize; j++)
 		{
-			sint32 delta_scale = rbspStream.readSV_E();
-			nextScale = (lastScale + delta_scale + 256) % 256;
-			scalingMatrix4x4.UseDefaultScalingMatrix = (j == 0 && nextScale == 0);
-		}
-		scalingMatrix4x4.list[j] = (nextScale == 0) ? lastScale : nextScale;
-		lastScale = scalingMatrix4x4.list[j];
-	}
-}
-
-void parseNAL_scaling_list8x8(RBSPInputBitstream& rbspStream, h264_scaling_matrix8x8_t& scalingMatrix8x8)
-{
-	if (rbspStream.readBit() == 0)
-	{
-		scalingMatrix8x8.isPresent = 0;
-		return;
-	}
-	scalingMatrix8x8.isPresent = 1;
-
-	cemu_assert_debug(false); // needs testing
-	sint32 lastScale = 8;
-	sint32 nextScale = 8;
-	for (sint32 j = 0; j < 8 * 8; j++)
-	{
-		if (nextScale != 0)
-		{
-			sint32 delta_scale = rbspStream.readSV_E();
-			nextScale = (lastScale + delta_scale + 256) % 256;
-			scalingMatrix8x8.UseDefaultScalingMatrix = (j == 0 && nextScale == 0);
-		}
-		scalingMatrix8x8.list[j] = (nextScale == 0) ? lastScale : nextScale;
-		lastScale = scalingMatrix8x8.list[j];
-	}
-}
-
-void parseNAL_pps_scaling_lists(h264ParserState_t* h264ParserState, RBSPInputBitstream& nalStream)
-{
-	parseNAL_scaling_list4x4(nalStream, h264ParserState->pps.ScalingList4x4[0]);
-	parseNAL_scaling_list4x4(nalStream, h264ParserState->pps.ScalingList4x4[1]);
-	parseNAL_scaling_list4x4(nalStream, h264ParserState->pps.ScalingList4x4[2]);
-	parseNAL_scaling_list4x4(nalStream, h264ParserState->pps.ScalingList4x4[3]);
-	parseNAL_scaling_list4x4(nalStream, h264ParserState->pps.ScalingList4x4[4]);
-	parseNAL_scaling_list4x4(nalStream, h264ParserState->pps.ScalingList4x4[5]);
-
-	if (h264ParserState->pps.transform_8x8_mode_flag)
-	{
-		parseNAL_scaling_list8x8(nalStream, h264ParserState->pps.ScalingList8x8[0]);
-		parseNAL_scaling_list8x8(nalStream, h264ParserState->pps.ScalingList8x8[1]);
-
-		if (h264ParserState->sps.chroma_format_idc == 3)
-			cemu_assert(false); // todo - more scaling lists to parse
-	}
-}
-
-void parseNAL_sps_scaling_lists(h264ParserState_t* h264ParserState, RBSPInputBitstream& nalStream)
-{
-	parseNAL_scaling_list4x4(nalStream, h264ParserState->sps.ScalingList4x4[0]);
-	parseNAL_scaling_list4x4(nalStream, h264ParserState->sps.ScalingList4x4[1]);
-	parseNAL_scaling_list4x4(nalStream, h264ParserState->sps.ScalingList4x4[2]);
-	parseNAL_scaling_list4x4(nalStream, h264ParserState->sps.ScalingList4x4[3]);
-	parseNAL_scaling_list4x4(nalStream, h264ParserState->sps.ScalingList4x4[4]);
-	parseNAL_scaling_list4x4(nalStream, h264ParserState->sps.ScalingList4x4[5]);
-
-	parseNAL_scaling_list8x8(nalStream, h264ParserState->sps.ScalingList8x8[0]);
-	parseNAL_scaling_list8x8(nalStream, h264ParserState->sps.ScalingList8x8[1]);
-
-	if (h264ParserState->sps.chroma_format_idc == 3)
-		cemu_assert(false); // todo - more scaling lists to parse
-}
-
-bool parseNAL_seq_parameter_set_rbsp(h264ParserState_t* h264ParserState, h264ParserOutput_t* output, RBSPInputBitstream& nalStream)
-{
-	memset(&h264ParserState->sps, 0, sizeof(h264State_seq_parameter_set_t));
-
-	h264ParserState->sps.profile_idc = nalStream.readU8(); // 0x64 = high profile
-	h264ParserState->sps.constraint = nalStream.readU8(); // 6 flags + 2 reserved bits
-	h264ParserState->sps.level_idc = nalStream.readU8(); // 0x29 = level 4.1
-
-	// some default values in case flags are not set
-	h264ParserState->sps.separate_colour_plane_flag = 0;
-	h264ParserState->sps.chroma_format_idc = 1; // Spec 7.4.2.1.1
-	h264ParserState->sps.qpprime_y_zero_transform_bypass_flag = 0;
-	h264ParserState->sps.seq_scaling_matrix_present_flag = 0;
-	//h264ParserState->sps.mb_adaptive_frame_field_flag = 0;
-
-
-
-	uint32 seq_parameter_set_id = nalStream.readUV_E();
-	if (h264ParserState->sps.profile_idc == 100 || h264ParserState->sps.profile_idc == 110 || h264ParserState->sps.profile_idc == 122 ||
-		h264ParserState->sps.profile_idc == 244 || h264ParserState->sps.profile_idc == 44 || h264ParserState->sps.profile_idc == 83 ||
-		h264ParserState->sps.profile_idc == 86 || h264ParserState->sps.profile_idc == 118 || h264ParserState->sps.profile_idc == 128 ||
-		h264ParserState->sps.profile_idc == 138 || h264ParserState->sps.profile_idc == 139 || h264ParserState->sps.profile_idc == 134 || h264ParserState->sps.profile_idc == 135)
-	{
-		h264ParserState->sps.chroma_format_idc = nalStream.readUV_E();
-		if (h264ParserState->sps.chroma_format_idc == 3)
-		{
-			h264ParserState->sps.separate_colour_plane_flag = nalStream.readBit();
-		}
-		h264ParserState->sps.bit_depth_luma_minus8 = nalStream.readUV_E();
-		h264ParserState->sps.bit_depth_chroma_minus8 = nalStream.readUV_E();
-		h264ParserState->sps.qpprime_y_zero_transform_bypass_flag = nalStream.readBit();
-		h264ParserState->sps.seq_scaling_matrix_present_flag = nalStream.readBit();
-		if (h264ParserState->sps.seq_scaling_matrix_present_flag)
-		{
-			parseNAL_sps_scaling_lists(h264ParserState, nalStream);
-		}
-	}
-
-	h264ParserState->sps.log2_max_frame_num_minus4 = nalStream.readUV_E();
-	h264ParserState->sps.pic_order_cnt_type = nalStream.readUV_E();
-	if (h264ParserState->sps.pic_order_cnt_type == 0)
-	{
-		h264ParserState->sps.log2_max_pic_order_cnt_lsb_minus4 = nalStream.readUV_E();
-	}
-	else if (h264ParserState->sps.pic_order_cnt_type == 2)
-	{
-		// nothing to parse
-	}
-	else
-	{
-		// todo - parse fields
-		cemu_assert_debug(false);
-	}
-	h264ParserState->sps.num_ref_frames = nalStream.readUV_E();
-	h264ParserState->sps.gaps_in_frame_num_value_allowed_flag = nalStream.readBit();
-	h264ParserState->sps.pic_width_in_mbs_minus1 = nalStream.readUV_E();
-	h264ParserState->sps.pic_height_in_map_units_minus1 = nalStream.readUV_E();
-	h264ParserState->sps.frame_mbs_only_flag = nalStream.readBit();
-	if (h264ParserState->sps.frame_mbs_only_flag == 0)
-	{
-		h264ParserState->sps.mb_adaptive_frame_field_flag = nalStream.readBit();
-		cemu_assert_debug(false);
-	}
-	else
-		h264ParserState->sps.mb_adaptive_frame_field_flag = 0; // default is zero?
-
-	h264ParserState->sps.direct_8x8_inference_flag = nalStream.readBit();
-	if (h264ParserState->sps.frame_mbs_only_flag == 0 && h264ParserState->sps.direct_8x8_inference_flag != 1)
-	{
-		cemu_assert_debug(false); // not allowed
-	}
-
-	h264ParserState->sps.frame_cropping_flag = nalStream.readBit();
-	if (h264ParserState->sps.frame_cropping_flag)
-	{
-		h264ParserState->sps.frame_crop_left_offset = nalStream.readUV_E();
-		h264ParserState->sps.frame_crop_right_offset = nalStream.readUV_E();
-		h264ParserState->sps.frame_crop_top_offset = nalStream.readUV_E();
-		h264ParserState->sps.frame_crop_bottom_offset = nalStream.readUV_E();
-	}
-	uint8 vui_parameters_present_flag = nalStream.readBit();
-	if (vui_parameters_present_flag)
-	{
-		// vui_parameters
-		uint8 aspect_ratio_info_present_flag = nalStream.readBit();
-		if (aspect_ratio_info_present_flag)
-		{
-			uint32 aspect_ratio_idc = nalStream.readBits<8>();
-			if (aspect_ratio_idc == 255) // Extended_SAR
+			if (next != 0)
 			{
-				uint16 sar_width = nalStream.readBits<16>();
-				uint16 sar_height = nalStream.readBits<16>();
+				next = (last + r.readSV_E() + 256) % 256;
+				m.UseDefaultScalingMatrix = (j == 0 && next == 0);
+			}
+			m.list[j] = next == 0 ? last : next;
+			last = m.list[j];
+		}
+	}
+
+	void Read4x4(Reader& r, h264_scaling_matrix4x4_t& m) { ReadScalingList<h264_scaling_matrix4x4_t, 16>(r, m); }
+	void Read8x8(Reader& r, h264_scaling_matrix8x8_t& m) { ReadScalingList<h264_scaling_matrix8x8_t, 64>(r, m); }
+
+	// hrd_parameters(); nothing is kept. The counter is 8 bits wide, as in the original parser
+	void SkipHrd(Reader& r)
+	{
+		const uint32 cpbCount = r.readUV_E();
+		r.readBits(4 + 4); // bit_rate_scale, cpb_size_scale
+		for (uint8 i = 0; i <= cpbCount; i++)
+		{
+			r.readUV_E(); // bit_rate_value_minus1
+			r.readUV_E(); // cpb_size_value_minus1
+			r.readBit(); // cbr_flag
+		}
+		r.readBits(5 * 4); // the four delay / offset lengths
+	}
+
+	// vui_parameters(); nothing is kept
+	void SkipVui(Reader& r)
+	{
+		if (r.readBit()) // aspect_ratio_info_present_flag
+		{
+			if (r.readBits(8) == 255) // Extended_SAR
+				r.readBits(32); // sar_width, sar_height
+		}
+		if (r.readBit()) // overscan_info_present_flag
+			cemu_assert_debug(false); // overscan_appropriate_flag is not consumed
+		if (r.readBit()) // video_signal_type_present_flag
+		{
+			r.readBits(3 + 1); // video_format, video_full_range_flag
+			if (r.readBit()) // colour_description_present_flag
+				r.readBits(24);
+		}
+		if (r.readBit()) // chroma_loc_info_present_flag
+		{
+			r.readUV_E();
+			r.readUV_E();
+		}
+		if (r.readBit()) // timing_info_present_flag
+		{
+			r.readBits(32); // num_units_in_tick
+			r.readBits(32); // time_scale
+			r.readBit(); // fixed_frame_rate_flag
+		}
+		const bool nalHrd = r.readBit() != 0;
+		if (nalHrd)
+			SkipHrd(r);
+		const bool vclHrd = r.readBit() != 0;
+		if (vclHrd)
+			SkipHrd(r);
+		if (nalHrd || vclHrd)
+			r.readBit(); // low_delay_hrd_flag
+		r.readBit(); // pic_struct_present_flag
+		if (r.readBit()) // bitstream_restriction_flag
+		{
+			r.readBit();
+			for (int i = 0; i < 6; i++)
+				r.readUV_E();
+		}
+	}
+
+	// seq_parameter_set_rbsp(). The SPS counts as received only when the trailing bits are valid
+	bool ParseSps(h264ParserState_t& state, h264ParserOutput_t* output, Reader& r)
+	{
+		h264State_seq_parameter_set_t& sps = state.sps;
+		memset(&sps, 0, sizeof(sps));
+		sps.profile_idc = r.readU8();
+		sps.constraint = r.readU8();
+		sps.level_idc = r.readU8();
+		sps.chroma_format_idc = 1; // 4:2:0 when not signalled
+		r.readUV_E(); // seq_parameter_set_id (only one SPS is tracked)
+		if (HasHighProfileFields(sps.profile_idc))
+		{
+			sps.chroma_format_idc = r.readUV_E();
+			if (sps.chroma_format_idc == 3)
+				sps.separate_colour_plane_flag = r.readBit();
+			sps.bit_depth_luma_minus8 = r.readUV_E();
+			sps.bit_depth_chroma_minus8 = r.readUV_E();
+			sps.qpprime_y_zero_transform_bypass_flag = r.readBit();
+			sps.seq_scaling_matrix_present_flag = r.readBit();
+			if (sps.seq_scaling_matrix_present_flag)
+			{
+				for (auto& m : sps.ScalingList4x4)
+					Read4x4(r, m);
+				Read8x8(r, sps.ScalingList8x8[0]);
+				Read8x8(r, sps.ScalingList8x8[1]);
+				if (sps.chroma_format_idc == 3)
+					cemu_assert(false); // 4:4:4 needs six 8x8 lists
 			}
 		}
-		uint8 overscan_info_present_flag = nalStream.readBit();
-		if (overscan_info_present_flag)
+		sps.log2_max_frame_num_minus4 = r.readUV_E();
+		sps.pic_order_cnt_type = r.readUV_E();
+		if (sps.pic_order_cnt_type == 0)
+			sps.log2_max_pic_order_cnt_lsb_minus4 = r.readUV_E();
+		else if (sps.pic_order_cnt_type != 2)
+			cemu_assert_debug(false); // type 1 fields are not read
+		sps.num_ref_frames = r.readUV_E();
+		sps.gaps_in_frame_num_value_allowed_flag = r.readBit();
+		sps.pic_width_in_mbs_minus1 = r.readUV_E();
+		sps.pic_height_in_map_units_minus1 = r.readUV_E();
+		sps.frame_mbs_only_flag = r.readBit();
+		sps.mb_adaptive_frame_field_flag = sps.frame_mbs_only_flag ? 0 : r.readBit();
+		cemu_assert_debug(sps.frame_mbs_only_flag);
+		sps.direct_8x8_inference_flag = r.readBit();
+		sps.frame_cropping_flag = r.readBit();
+		if (sps.frame_cropping_flag)
 		{
+			sps.frame_crop_left_offset = r.readUV_E();
+			sps.frame_crop_right_offset = r.readUV_E();
+			sps.frame_crop_top_offset = r.readUV_E();
+			sps.frame_crop_bottom_offset = r.readUV_E();
+		}
+		if (r.readBit()) // vui_parameters_present_flag
+			SkipVui(r);
+		if (r.readTrailingRBSPBits())
+		{
+			state.hasSPS = true;
+			if (output)
+				output->hasSPS = true;
+		}
+		return true;
+	}
+
+	// pic_parameter_set_rbsp(). Slice groups are not supported and abort the PPS early
+	bool ParsePps(h264ParserState_t& state, h264ParserOutput_t* output, Reader& r)
+	{
+		h264State_pic_parameter_set_t& pps = state.pps;
+		memset(&pps, 0, sizeof(pps));
+		pps.pic_parameter_set_id = r.readUV_E();
+		pps.seq_parameter_set_id = r.readUV_E();
+		pps.entropy_coding_mode_flag = r.readBit();
+		pps.bottom_field_pic_order_in_frame_present_flag = r.readBit();
+		pps.num_slice_groups_minus1 = r.readUV_E();
+		if (pps.num_slice_groups_minus1 != 0)
+			return false;
+		pps.num_ref_idx_l0_default_active_minus1 = r.readUV_E();
+		pps.num_ref_idx_l1_default_active_minus1 = r.readUV_E();
+		pps.weighted_pred_flag = r.readBit();
+		pps.weighted_bipred_idc = r.readBits(2);
+		pps.pic_init_qp_minus26 = r.readSV_E();
+		pps.pic_init_qs_minus26 = r.readSV_E();
+		pps.chroma_qp_index_offset = r.readSV_E();
+		pps.deblocking_filter_control_present_flag = r.readBit();
+		pps.constrained_intra_pred_flag = r.readBit();
+		pps.redundant_pic_cnt_present_flag = r.readBit();
+		if (r.more_rbsp_data())
+		{
+			pps.transform_8x8_mode_flag = r.readBit();
+			pps.pic_scaling_matrix_present_flag = r.readBit();
+			if (pps.pic_scaling_matrix_present_flag)
+			{
+				for (auto& m : pps.ScalingList4x4)
+					Read4x4(r, m);
+				if (pps.transform_8x8_mode_flag)
+				{
+					Read8x8(r, pps.ScalingList8x8[0]);
+					Read8x8(r, pps.ScalingList8x8[1]);
+					if (state.sps.chroma_format_idc == 3)
+						cemu_assert(false);
+				}
+			}
+			pps.second_chroma_qp_index_offset = r.readSV_E();
+		}
+		if (r.readTrailingRBSPBits())
+		{
+			state.hasPPS = true;
+			if (output)
+				output->hasPPS = true;
+		}
+		return true;
+	}
+
+	// ref_pic_list_modification(). Returning early also skips the list 1 part
+	void ReadListModification(Reader& r, nal_slice_header_t& h)
+	{
+		if (!h.slice_type.isSliceTypeI() && !h.slice_type.isSliceTypeSI() && r.readBit())
+		{
+			auto& count = h.pic_list_modification0Count;
+			for (count = 0;; count++)
+			{
+				if (count >= 32)
+					return;
+				auto& entry = h.pic_list_modification0Array[count];
+				const uint32 idc = r.readUV_E();
+				entry.type = idc;
+				if (idc == 3)
+					break;
+				if (idc > 3)
+					return;
+				if (idc == 2)
+					entry.long_term_pic_num = r.readUV_E();
+				else
+					entry.abs_diff_pic_num_minus1 = r.readUV_E();
+			}
+		}
+		if (h.slice_type.isSliceTypeB() && r.readBit())
+		{
+			cemu_assert_debug(false); // untested
+			// list 1 entries all land in slot 0 and are counted in the list 0 counter; the list 1
+			// counter stays zero (behaviour kept from the original parser)
+			auto& entry = h.pic_list_modification1Array[h.pic_list_modification1Count];
+			while (true)
+			{
+				const uint32 idc = r.readUV_E();
+				entry.type = idc;
+				if (idc >= 3)
+					break;
+				if (idc == 2)
+					entry.long_term_pic_num = r.readUV_E();
+				else
+					entry.abs_diff_pic_num_minus1 = r.readUV_E();
+				h.pic_list_modification0Count++;
+			}
+		}
+	}
+
+	// pred_weight_table(); nothing is kept. For list 1 only the luma flags are consumed
+	void SkipWeightTable(const h264State_seq_parameter_set_t& sps, Reader& r, const nal_slice_header_t& h)
+	{
+		r.readUV_E(); // luma_log2_weight_denom
+		const uint32 chromaArrayType = sps.separate_colour_plane_flag ? 0 : sps.chroma_format_idc;
+		if (chromaArrayType != 0)
+			r.readUV_E(); // chroma_log2_weight_denom
+		for (uint32 i = 0; i <= h.num_ref_idx_l0_active_minus1; i++)
+		{
+			if (r.readBit())
+			{
+				r.readSV_E();
+				r.readSV_E();
+			}
+			if (chromaArrayType != 0 && r.readBit())
+			{
+				for (int k = 0; k < 4; k++)
+					r.readSV_E();
+			}
+		}
+		if (!h.slice_type.isSliceTypeB())
+			return;
+		for (uint32 i = 0; i <= h.num_ref_idx_l1_active_minus1; i++)
+		{
+			if (r.readBit())
+				cemu_assert_debug(false);
+			if (chromaArrayType != 0)
+				cemu_assert_debug(false);
+		}
+	}
+
+	// dec_ref_pic_marking()
+	void ReadRefPicMarking(Reader& r, nal_slice_header_t& h)
+	{
+		h.memory_management_control_operation_num = 0;
+		if (h.IdrPicFlag)
+		{
+			r.readBit(); // no_output_of_prior_pics_flag
+			r.readBit(); // long_term_reference_flag
+			h.adaptive_ref_pic_marking_mode_flag = 1;
+			return;
+		}
+		h.adaptive_ref_pic_marking_mode_flag = r.readBit();
+		if (!h.adaptive_ref_pic_marking_mode_flag)
+			return;
+		while (true)
+		{
+			const uint32 op = r.readUV_E();
+			if (op == nal_slice_header_t::MEMOP_END)
+				return;
+			sint32& n = h.memory_management_control_operation_num;
+			if (n >= 16)
+				return;
+			auto& e = h.memory_management_control_operation[n];
+			e.op = op;
+			switch (op)
+			{
+			case nal_slice_header_t::MEMOP_REMOVE_REF_FROM_SHORT_TERM:
+				e.difference_of_pic_nums_minus1 = r.readUV_E();
+				break;
+			case nal_slice_header_t::MEMOP_REMOVE_REF_FROM_LONG_TERM:
+				e.long_term_pic_num = r.readUV_E();
+				break;
+			case nal_slice_header_t::MEMOP_MAKE_LONG_TERM_REF:
+				e.difference_of_pic_nums_minus1 = r.readUV_E();
+				e.long_term_frame_idx = r.readUV_E();
+				break;
+			case nal_slice_header_t::MEMOP_MAX_LONG_TERM_INDEX:
+				e.max_long_term_frame_idx_plus1 = r.readUV_E();
+				break;
+			case nal_slice_header_t::MEMOP_MAKE_CURRENT_LONG_TERM_REF:
+				e.long_term_frame_idx = r.readUV_E();
+				break;
+			default:
+				break;
+			}
+			n++;
+		}
+	}
+
+	// slice_header()
+	void ReadSliceHeader(const h264State_seq_parameter_set_t& sps, const h264State_pic_parameter_set_t& pps, Reader& r, uint8 nalType, uint8 nalRefIdc, nal_slice_header_t& h)
+	{
+		memset(&h, 0, sizeof(h));
+		h.nal_ref_idc = nalRefIdc;
+		h.nal_unit_type = nalType;
+		h.first_mb_in_slice = r.readUV_E();
+		h.slice_type = H264SliceType(r.readUV_E());
+		h.pic_parameter_set_id = r.readUV_E();
+		if (sps.separate_colour_plane_flag)
+			return; // colour_plane_id is not supported
+		h.frame_num = r.readBits(sps.log2_max_frame_num_minus4 + 4);
+		if (!sps.frame_mbs_only_flag)
+		{
+			h.field_pic_flag = r.readBit();
+			if (h.field_pic_flag)
+				h.bottom_field_flag = r.readBit();
+		}
+		const bool isIdr = nalType == 5;
+		h.IdrPicFlag = isIdr ? 1 : 0;
+		if (isIdr)
+			h.idr_pic_id = r.readUV_E();
+		if (sps.pic_order_cnt_type == 0)
+		{
+			h.pic_order_cnt_lsb = r.readBits(sps.log2_max_pic_order_cnt_lsb_minus4 + 4);
+			if (pps.bottom_field_pic_order_in_frame_present_flag && !h.field_pic_flag)
+				h.delta_pic_order_cnt_bottom = r.readSV_E();
+		}
+		else if (sps.pic_order_cnt_type == 1)
+			cemu_assert(false); // delta_pic_order_cnt[] not supported
+		if (pps.redundant_pic_cnt_present_flag)
+			h.redundant_pic_cnt = r.readUV_E();
+		const H264SliceType type = h.slice_type;
+		if (type.isSliceTypeB())
+			h.direct_spatial_mv_pred_flag = r.readBit();
+		h.num_ref_idx_l0_active_minus1 = pps.num_ref_idx_l0_default_active_minus1;
+		h.num_ref_idx_l1_active_minus1 = pps.num_ref_idx_l1_default_active_minus1;
+		if (type.isSliceTypeP() || type.isSliceTypeSP() || type.isSliceTypeB())
+		{
+			h.num_ref_idx_active_override_flag = r.readBit();
+			if (h.num_ref_idx_active_override_flag)
+			{
+				h.num_ref_idx_l0_active_minus1 = r.readUV_E();
+				if (type.isSliceTypeB())
+					h.num_ref_idx_l1_active_minus1 = r.readUV_E();
+			}
+		}
+		if (nalType != 20 && nalType != 21) // MVC lists are not supported
+			ReadListModification(r, h);
+		const bool explicitWeights = (pps.weighted_pred_flag && (type.isSliceTypeP() || type.isSliceTypeSP())) || (pps.weighted_bipred_idc == 1 && type.isSliceTypeB());
+		if (explicitWeights)
+			SkipWeightTable(sps, r, h);
+		if (h.nal_ref_idc != 0)
+			ReadRefPicMarking(r, h);
+		// the remaining fields are read for completeness only
+		if (pps.entropy_coding_mode_flag && !type.isSliceTypeI() && !type.isSliceTypeSI())
+			r.readUV_E(); // cabac_init_idc
+		r.readSV_E(); // slice_qp_delta
+		if (type.isSliceTypeSP() || type.isSliceTypeSI())
+		{
+			if (type.isSliceTypeSP())
+				r.readBit(); // sp_for_switch_flag
+			r.readSV_E(); // slice_qs_delta
+		}
+		if (pps.deblocking_filter_control_present_flag && r.readUV_E() != 1)
+		{
+			r.readSV_E(); // slice_alpha_c0_offset_div2
+			r.readSV_E(); // slice_beta_offset_div2
+		}
+	}
+
+	// picture order count (8.2.1) for pic_order_cnt_type 0 and 2; only TopFieldOrderCnt is kept
+	void ComputePictureOrder(h264ParserState_t& state, const h264State_seq_parameter_set_t& sps, nal_slice_header_t& h)
+	{
+		auto& po = state.picture_order;
+		if (sps.pic_order_cnt_type == 0)
+		{
+			const uint32 prevMsb = h.IdrPicFlag ? 0 : po.prevPicOrderCntMsb;
+			const uint32 prevLsb = h.IdrPicFlag ? 0 : po.prevPicOrderCntLsb;
+			const uint32 maxLsb = 1 << (sps.log2_max_pic_order_cnt_lsb_minus4 + 4);
+			const uint32 lsb = h.pic_order_cnt_lsb;
+			const sint32 halfRange = (sint32)(maxLsb / 2);
+			uint32 msb = prevMsb;
+			if (lsb < prevLsb && (sint32)prevLsb - (sint32)lsb >= halfRange)
+				msb = prevMsb + maxLsb; // lsb wrapped forwards
+			else if (lsb > prevLsb && (sint32)lsb - (sint32)prevLsb > halfRange)
+				msb = prevMsb - maxLsb;
+			const uint32 top = msb + lsb;
+			if (h.IdrPicFlag && top != 0)
+				cemu_assert(false);
+			h.calculated.TopFieldOrderCnt = top;
+			po.prevPicOrderCntMsb = msb;
+			po.prevPicOrderCntLsb = lsb;
+		}
+		else if (sps.pic_order_cnt_type == 2)
+		{
+			uint32 frameNumOffset = 0;
+			if (!h.IdrPicFlag)
+			{
+				frameNumOffset = po.prevFrameNumOffset;
+				if (po.prevFrameNum > h.frame_num)
+					frameNumOffset += sps.getMaxFrameNum(); // frame_num wrapped
+			}
+			uint32 order = 0;
+			if (!h.IdrPicFlag)
+				order = 2 * (frameNumOffset + h.frame_num) - (h.nal_ref_idc == 0 ? 1 : 0);
+			// field pictures are not supported: a bottom field reports 0
+			cemu_assert_debug(!h.field_pic_flag);
+			h.calculated.TopFieldOrderCnt = (h.field_pic_flag && h.bottom_field_flag) ? 0 : order;
+			po.prevFrameNum = h.frame_num;
+			po.prevFrameNumOffset = frameNumOffset;
+		}
+		else
 			cemu_assert_debug(false);
-		}
-		uint8 video_signal_type_present_flag = nalStream.readBit();
-		if (video_signal_type_present_flag)
-		{
-			uint8 video_format = nalStream.readBits<3>();
-			uint8 video_full_range_flag = nalStream.readBit();
-			uint8 colour_description_present_flag = nalStream.readBit();
-			if (colour_description_present_flag)
-			{
-				uint8 colour_primaries = nalStream.readBits<8>();
-				uint8 transfer_characteristics = nalStream.readBits<8>();
-				uint8 matrix_coefficients = nalStream.readBits<8>();
-			}
-		}
-		uint8 chroma_loc_info_present_flag = nalStream.readBit();
-		if (chroma_loc_info_present_flag)
-		{
-			uint32 chroma_sample_loc_type_top_field = nalStream.readUV_E();
-			uint32 chroma_sample_loc_type_bottom_field = nalStream.readUV_E();
-		}
-		uint8 timing_info_present_flag = nalStream.readBit();
-		if (timing_info_present_flag)
-		{
-			uint32 num_units_in_tick = nalStream.readBits<32>();
-			uint32 time_scale = nalStream.readBits<32>();
-			uint8 fixed_frame_rate_flag = nalStream.readBits<1>();
-		}
-		uint8 nal_hrd_parameters_present_flag = nalStream.readBit();
-		if (nal_hrd_parameters_present_flag)
-		{
-			parse_hrd_parameters(h264ParserState, nalStream);
-		}
-		uint8 vcl_hrd_parameters_present_flag = nalStream.readBit();
-		if (vcl_hrd_parameters_present_flag)
-		{
-			parse_hrd_parameters(h264ParserState, nalStream);
-		}
-		if (nal_hrd_parameters_present_flag || vcl_hrd_parameters_present_flag)
-		{
-			uint8 low_delay_hrd_flag = nalStream.readBit();
-		}
-		uint8 pic_struct_present_flag = nalStream.readBit();
-		uint8 bitstream_restriction_flag = nalStream.readBit();
-		if (bitstream_restriction_flag)
-		{
-			uint8 motion_vectors_over_pic_boundaries_flag = nalStream.readBit();
-			uint32 max_bytes_per_pic_denom = nalStream.readUV_E();
-			uint32 max_bits_per_mb_denom = nalStream.readUV_E();
-			uint32 log2_max_mv_length_horizontal = nalStream.readUV_E();
-			uint32 log2_max_mv_length_vertical = nalStream.readUV_E();
-			uint32 max_num_reorder_frames = nalStream.readUV_E();
-			uint32 max_dec_frame_buffering = nalStream.readUV_E();
-		}
 	}
-	// trailing bits
-	bool nalValid = true;
-	if (nalStream.readTrailingRBSPBits() == false)
-		nalValid = false;
-	if (nalValid)
+
+	void ParseSlice(h264ParserState_t& state, h264ParserOutput_t* output, sint32 offset, sint32 size, Reader& r, uint8 nalRefIdc, uint8 nalType)
 	{
-		if(output)
-			output->hasSPS = true;
-		h264ParserState->hasSPS = true;
-	}
-	return true;
-}
-
-bool parseNAL_pic_parameter_set_rbsp(h264ParserState_t* h264ParserState, h264ParserOutput_t* output, RBSPInputBitstream& nalStream)
-{
-	memset(&h264ParserState->pps, 0, sizeof(h264State_pic_parameter_set_t));
-
-	h264ParserState->pps.pic_parameter_set_id = nalStream.readUV_E();
-	h264ParserState->pps.seq_parameter_set_id = nalStream.readUV_E();
-	h264ParserState->pps.entropy_coding_mode_flag = nalStream.readBit();
-	h264ParserState->pps.bottom_field_pic_order_in_frame_present_flag = nalStream.readBit();
-
-	h264ParserState->pps.num_slice_groups_minus1 = nalStream.readUV_E();
-	if (h264ParserState->pps.num_slice_groups_minus1 > 0)
-	{
-		cemu_assert_debug(false);
-		return false;
+		cemu_assert_debug(state.hasPPS && state.hasSPS);
+		nal_slice_t slice = {};
+		ReadSliceHeader(state.sps, state.pps, r, nalType, nalRefIdc, slice.slice_header);
+		ComputePictureOrder(state, state.sps, slice.slice_header);
+		if (output->sliceCount >= (sint32)output->sliceInfo.size())
+			return; // slice table full
+		nal_slice_info_t& info = output->sliceInfo[output->sliceCount++];
+		info.header = slice.slice_header;
+		info.streamSubOffset = offset;
+		info.streamSubSize = size;
 	}
 
-	h264ParserState->pps.num_ref_idx_l0_default_active_minus1 = nalStream.readUV_E();
-	h264ParserState->pps.num_ref_idx_l1_default_active_minus1 = nalStream.readUV_E();
-	h264ParserState->pps.weighted_pred_flag = nalStream.readBit();
-	h264ParserState->pps.weighted_bipred_idc = nalStream.readBits<2>();
-	h264ParserState->pps.pic_init_qp_minus26 = nalStream.readSV_E();
-	h264ParserState->pps.pic_init_qs_minus26 = nalStream.readSV_E();
-	h264ParserState->pps.chroma_qp_index_offset = nalStream.readSV_E();
-
-	h264ParserState->pps.deblocking_filter_control_present_flag = nalStream.readBit();
-	h264ParserState->pps.constrained_intra_pred_flag = nalStream.readBit();
-	h264ParserState->pps.redundant_pic_cnt_present_flag = nalStream.readBit();
-
-	if (nalStream.more_rbsp_data())
+	struct NalHeader
 	{
-		h264ParserState->pps.transform_8x8_mode_flag = nalStream.readBit();
-		h264ParserState->pps.pic_scaling_matrix_present_flag = nalStream.readBit();
-		if (h264ParserState->pps.pic_scaling_matrix_present_flag)
+		bool valid; // forbidden_zero_bit is clear
+		uint8 refIdc;
+		uint8 type;
+	};
+
+	NalHeader ReadNalHeader(Reader& r)
+	{
+		const uint8 b = r.readU8();
+		return { (b & 0x80) == 0, (uint8)((b >> 5) & 3), (uint8)(b & 0x1F) };
+	}
+
+	// offset of the first 00 00 01 in data, or -1
+	sint32 FindFirstStartCode(const uint8* data, uint32 length)
+	{
+		const sint32 limit = (sint32)(length - 3);
+		for (sint32 i = 0; i < limit; i++)
 		{
-			parseNAL_pps_scaling_lists(h264ParserState, nalStream);
+			if (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1)
+				return i;
 		}
-		h264ParserState->pps.second_chroma_qp_index_offset = nalStream.readSV_E();
+		return -1;
 	}
 
-	// trailing bits
-	bool nalValid = true;
-	if (nalStream.readTrailingRBSPBits() == false)
-		nalValid = false;
-	if (nalValid)
+	const uint8 kDefault4x4Intra[16] = { 6, 13, 13, 20, 20, 20, 28, 28, 28, 28, 32, 32, 32, 37, 37, 42 };
+	const uint8 kDefault4x4Inter[16] = { 10, 14, 14, 20, 20, 20, 24, 24, 24, 24, 27, 27, 27, 30, 30, 34 };
+	const uint8 kDefault8x8Intra[64] =
 	{
-		if(output)
-			output->hasPPS = true;
-		h264ParserState->hasPPS = true;
+		6, 10, 10, 13, 11, 13, 16, 16, 16, 16, 18, 18, 18, 18, 18, 23,
+		23, 23, 23, 23, 23, 25, 25, 25, 25, 25, 25, 25, 27, 27, 27, 27,
+		27, 27, 27, 27, 29, 29, 29, 29, 29, 29, 29, 31, 31, 31, 31, 31,
+		31, 33, 33, 33, 33, 33, 36, 36, 36, 36, 38, 38, 38, 40, 40, 42
+	};
+	const uint8 kDefault8x8Inter[64] =
+	{
+		9, 13, 13, 15, 13, 15, 17, 17, 17, 17, 19, 19, 19, 19, 19, 21,
+		21, 21, 21, 21, 21, 22, 22, 22, 22, 22, 22, 22, 24, 24, 24, 24,
+		24, 24, 24, 24, 25, 25, 25, 25, 25, 25, 25, 27, 27, 27, 27, 27,
+		27, 28, 28, 28, 28, 28, 30, 30, 30, 30, 32, 32, 32, 33, 33, 35
+	};
+
+	// Table 7-2 fall-back rule A: the PPS lists win over the SPS lists, which win over flat 16.
+	// Explicitly coded lists are not supported (the copy below only runs after the assert).
+	template<typename TMatrix>
+	void SelectScalingMatrix(bool ppsHasLists, const TMatrix& ppsList, bool spsHasLists, const TMatrix& spsList, const uint8* defaultList, size_t count, uint8* out)
+	{
+		const TMatrix* source = ppsHasLists ? &ppsList : (spsHasLists ? &spsList : nullptr);
+		if (!source)
+		{
+			memset(out, 16, count);
+			return;
+		}
+		if (source->isPresent)
+		{
+			cemu_assert(false);
+			memcpy(out, source->list, count);
+			return;
+		}
+		memcpy(out, defaultList, count);
 	}
-	return true;
 }
 
 bool h264Parser_ParseSPS(uint8* data, uint32 length, h264State_seq_parameter_set_t& sps)
 {
-	h264ParserState_t parserState;
-	RBSPInputBitstream nalStream(data, length);
-	bool r = parseNAL_seq_parameter_set_rbsp(&parserState, nullptr, nalStream);
-	if(!r || !parserState.hasSPS)
+	h264ParserState_t state{};
+	Reader r(data, length);
+	if (!ParseSps(state, nullptr, r) || !state.hasSPS)
 		return false;
-	sps = parserState.sps;
+	sps = state.sps;
 	return true;
-}
-
-void parseNAL_ref_pic_list_modification(const h264State_seq_parameter_set_t& sps, const h264State_pic_parameter_set_t& pps, RBSPInputBitstream& nalStream, nal_slice_header_t* sliceHeader)
-{
-	if (!sliceHeader->slice_type.isSliceTypeI() && !sliceHeader->slice_type.isSliceTypeSI())
-	{
-		uint8 ref_pic_list_modification_flag_l0 = nalStream.readBit();
-		if (ref_pic_list_modification_flag_l0)
-		{
-			sliceHeader->pic_list_modification0Count = 0;
-			uint32 modType;
-			while(true)
-			{
-				if (sliceHeader->pic_list_modification0Count >= 32)
-				{
-					cemu_assert_debug(false);
-					return;
-				}
-				modType = nalStream.readUV_E();
-				sliceHeader->pic_list_modification0Array[sliceHeader->pic_list_modification0Count].type = modType;
-				if (modType == 0 || modType == 1)
-				{
-					sliceHeader->pic_list_modification0Array[sliceHeader->pic_list_modification0Count].abs_diff_pic_num_minus1 = nalStream.readUV_E();
-				}
-				else if (modType == 2)
-				{
-					sliceHeader->pic_list_modification0Array[sliceHeader->pic_list_modification0Count].long_term_pic_num = nalStream.readUV_E();
-				}
-				else if (modType == 3)
-				{
-					// end of list
-					break;
-				}
-				else
-				{
-					cemu_assert_debug(false); // invalid type
-					return;
-				}
-				sliceHeader->pic_list_modification0Count++;
-			}
-		}
-	}
-	if (sliceHeader->slice_type.isSliceTypeB())
-	{
-		uint8 ref_pic_list_modification_flag_l1 = nalStream.readBit();
-		if (ref_pic_list_modification_flag_l1)
-		{
-			cemu_assert_debug(false); // testing required
-			while (true)
-			{
-				if (sliceHeader->pic_list_modification1Count >= 32)
-				{
-					cemu_assert_debug(false);
-					return;
-				}
-				uint32 modType = nalStream.readUV_E(); // aka modification_of_pic_nums_idc
-				sliceHeader->pic_list_modification1Array[sliceHeader->pic_list_modification1Count].type = modType;
-				if (modType == 0 || modType == 1)
-				{
-					sliceHeader->pic_list_modification1Array[sliceHeader->pic_list_modification1Count].abs_diff_pic_num_minus1 = nalStream.readUV_E();
-				}
-				else if (modType == 2)
-				{
-					sliceHeader->pic_list_modification1Array[sliceHeader->pic_list_modification1Count].long_term_pic_num = nalStream.readUV_E();
-				}
-				else if(modType == 3)
-				{
-					break;
-				}
-				else
-				{
-					cemu_assert_debug(false); // invalid mode
-					break;
-				}
-				sliceHeader->pic_list_modification0Count++;
-			}
-			if (sliceHeader->pic_list_modification1Count > 0)
-			{
-				cemuLog_logDebug(LogType::Force, "sliceHeader->pic_list_modification1Count non-zero is not supported");
-				cemu_assert_unimplemented();
-			}
-		}
-	}
-}
-
-void parseNAL_dec_ref_pic_marking(const h264State_seq_parameter_set_t& sps, const h264State_pic_parameter_set_t& pps, RBSPInputBitstream& nalStream, nal_slice_header_t* sliceHeader)
-{
-	sliceHeader->memory_management_control_operation_num = 0;
-	if (sliceHeader->IdrPicFlag)
-	{
-		uint8 no_output_of_prior_pics_flag = nalStream.readBit();
-		if (no_output_of_prior_pics_flag)
-			cemu_assert_debug(false);
-		uint8 long_term_reference_flag = nalStream.readBit();
-		if (long_term_reference_flag)
-			cemu_assert_debug(false);
-
-		sliceHeader->adaptive_ref_pic_marking_mode_flag = 1;
-	}
-	else
-	{
-		sliceHeader->adaptive_ref_pic_marking_mode_flag = nalStream.readBit();
-		if (sliceHeader->adaptive_ref_pic_marking_mode_flag)
-		{
-			while (true)
-			{
-				uint32 memory_management_control_operation = nalStream.readUV_E();
-				if (memory_management_control_operation == nal_slice_header_t::MEMOP_END)
-					break;
-				if (sliceHeader->memory_management_control_operation_num >= 16)
-				{
-					cemu_assert_debug(false);
-					return;
-				}
-				sliceHeader->memory_management_control_operation[sliceHeader->memory_management_control_operation_num].op = memory_management_control_operation;
-				if (memory_management_control_operation == nal_slice_header_t::MEMOP_REMOVE_REF_FROM_SHORT_TERM || memory_management_control_operation == nal_slice_header_t::MEMOP_MAKE_LONG_TERM_REF)
-				{
-					sliceHeader->memory_management_control_operation[sliceHeader->memory_management_control_operation_num].difference_of_pic_nums_minus1 = nalStream.readUV_E();
-				}
-				else if (memory_management_control_operation == nal_slice_header_t::MEMOP_REMOVE_REF_FROM_LONG_TERM)
-				{
-					sliceHeader->memory_management_control_operation[sliceHeader->memory_management_control_operation_num].long_term_pic_num = nalStream.readUV_E();
-				}
-				if (memory_management_control_operation == nal_slice_header_t::MEMOP_MAKE_LONG_TERM_REF || memory_management_control_operation == nal_slice_header_t::MEMOP_MAKE_CURRENT_LONG_TERM_REF)
-				{
-					sliceHeader->memory_management_control_operation[sliceHeader->memory_management_control_operation_num].long_term_frame_idx = nalStream.readUV_E();
-				}
-				if (memory_management_control_operation == nal_slice_header_t::MEMOP_MAX_LONG_TERM_INDEX)
-				{
-					sliceHeader->memory_management_control_operation[sliceHeader->memory_management_control_operation_num].max_long_term_frame_idx_plus1 = nalStream.readUV_E();
-				}
-				sliceHeader->memory_management_control_operation_num++;
-			}
-		}
-	}
-}
-
-void parseNAL_pred_weight_table(const h264State_seq_parameter_set_t& sps, const h264State_pic_parameter_set_t& pps, RBSPInputBitstream& nalStream, nal_slice_header_t* sliceHeader)
-{
-	uint8 luma_log2_weight_denom = nalStream.readUV_E();
-
-	uint32 ChromaArrayType;
-	if (sps.separate_colour_plane_flag == 0)
-		ChromaArrayType = sps.chroma_format_idc;
-	else
-		ChromaArrayType = 0;
-
-	if (ChromaArrayType != 0)
-	{
-		uint32 chroma_log2_weight_denom = nalStream.readUV_E();
-	}
-
-	for (uint32 i = 0; i <= sliceHeader->num_ref_idx_l0_active_minus1; i++)
-	{
-		uint8 luma_weight_l0_flag = nalStream.readBit();
-		if (luma_weight_l0_flag) 
-		{
-			uint32 luma_weight_l0 = nalStream.readSV_E();
-			uint32 luma_offset_l0 = nalStream.readSV_E();
-		}
-		if (ChromaArrayType != 0)
-		{
-			uint8 chroma_weight_l0_flag = nalStream.readBit();
-			if (chroma_weight_l0_flag)
-			{
-				for (sint32 j = 0; j < 2; j++)
-				{
-					uint32 chroma_weight_l0 = nalStream.readSV_E();
-					uint32 chroma_offset_l0 = nalStream.readSV_E();
-				}
-			}
-		}
-	}
-	if (sliceHeader->slice_type.isSliceTypeB())
-	{
-		for (uint32 i = 0; i <= sliceHeader->num_ref_idx_l1_active_minus1; i++)
-		{
-			uint8 luma_weight_l1_flag = nalStream.readBit();
-			if (luma_weight_l1_flag)
-			{
-				cemu_assert_debug(false);
-				//luma_weight_l1[i]
-				//luma_offset_l1[i]
-			}
-			if (ChromaArrayType != 0)
-			{
-				cemu_assert_debug(false);
-				//chroma_weight_l1_flag
-				//if (chroma_weight_l1_flag)
-				//{
-				//	for (j = 0; j < 2; j++)
-				//	{
-				//		chroma_weight_l1[i][j]
-				//			chroma_offset_l1[i][j]
-				//	}
-				//}
-			}
-		}
-	}
-}
-
-void parseNAL_slice_header(const h264State_seq_parameter_set_t& sps, const h264State_pic_parameter_set_t& pps, RBSPInputBitstream& nalStream, uint8 nal_unit_type, uint8 nal_ref_idc, nal_slice_header_t* sliceHeader)
-{
-	bool IdrPicFlag = nal_unit_type == 5;
-
-	memset(sliceHeader, 0, sizeof(nal_slice_header_t));
-	sliceHeader->nal_ref_idc = nal_ref_idc;
-	sliceHeader->nal_unit_type = nal_unit_type;
-	sliceHeader->first_mb_in_slice = nalStream.readUV_E(); // address of first macroblock in slice
-	sliceHeader->slice_type = { nalStream.readUV_E() };
-	sliceHeader->pic_parameter_set_id = nalStream.readUV_E();
-
-	if (sps.separate_colour_plane_flag == 1)
-	{
-		cemu_assert_debug(false);
-		return;
-	}
-
-	sliceHeader->frame_num = nalStream.readBits(sps.log2_max_frame_num_minus4 + 4);
-
-	if (sps.frame_mbs_only_flag == 0)
-	{
-		sliceHeader->field_pic_flag = nalStream.readBit();
-		if (sliceHeader->field_pic_flag)
-		{
-			sliceHeader->bottom_field_flag = nalStream.readBit();
-		}
-	}
-
-	sliceHeader->IdrPicFlag = IdrPicFlag?1:0;
-
-	if (IdrPicFlag)
-	{
-		sliceHeader->idr_pic_id = nalStream.readUV_E();
-	}
-	if (sps.pic_order_cnt_type == 0)
-	{
-		sliceHeader->pic_order_cnt_lsb = nalStream.readBits(sps.log2_max_pic_order_cnt_lsb_minus4 + 4);
-		if (pps.bottom_field_pic_order_in_frame_present_flag && sliceHeader->field_pic_flag == 0)
-			sliceHeader->delta_pic_order_cnt_bottom = nalStream.readSV_E();
-	}
-	else if (sps.pic_order_cnt_type == 1)
-	{
-		cemu_assert(false);
-	}
-	if (pps.redundant_pic_cnt_present_flag)
-	{
-		sliceHeader->redundant_pic_cnt = nalStream.readUV_E();
-	}
-
-	if (sliceHeader->slice_type.isSliceTypeB())
-	{
-		sliceHeader->direct_spatial_mv_pred_flag = nalStream.readBit();
-	}
-
-	sliceHeader->num_ref_idx_l0_active_minus1 = pps.num_ref_idx_l0_default_active_minus1;
-	sliceHeader->num_ref_idx_l1_active_minus1 = pps.num_ref_idx_l1_default_active_minus1;
-
-	if (sliceHeader->slice_type.isSliceTypeP() || sliceHeader->slice_type.isSliceTypeSP() || sliceHeader->slice_type.isSliceTypeB())
-	{
-		sliceHeader->num_ref_idx_active_override_flag = nalStream.readBit();
-		if (sliceHeader->num_ref_idx_active_override_flag)
-		{
-			sliceHeader->num_ref_idx_l0_active_minus1 = nalStream.readUV_E();
-			if (sliceHeader->slice_type.isSliceTypeB())
-			{
-				sliceHeader->num_ref_idx_l1_active_minus1 = nalStream.readUV_E();
-			}
-		}
-	}
-
-	// todo - ref_pic_list_mvc_modification etc
-	if (nal_unit_type == 20 || nal_unit_type == 21)
-	{
-		cemu_assert_debug(false);
-	}
-	else
-	{
-		parseNAL_ref_pic_list_modification(sps, pps, nalStream, sliceHeader);
-	}
-
-	if ((pps.weighted_pred_flag && (sliceHeader->slice_type.isSliceTypeP() || sliceHeader->slice_type.isSliceTypeSP())) || (pps.weighted_bipred_idc == 1 && sliceHeader->slice_type.isSliceTypeB()))
-	{
-		parseNAL_pred_weight_table(sps, pps, nalStream, sliceHeader);
-	}
-
-	if (sliceHeader->nal_ref_idc != 0)
-	{
-		parseNAL_dec_ref_pic_marking(sps, pps, nalStream, sliceHeader);
-	}
-
-	if (pps.entropy_coding_mode_flag && !sliceHeader->slice_type.isSliceTypeI() && !sliceHeader->slice_type.isSliceTypeSI())
-	{
-		uint32 cabac_init_idc = nalStream.readUV_E();
-		cemu_assert_debug(cabac_init_idc <= 2); // invalid value
-	}
-
-	sint32 slice_qp_delta = nalStream.readSV_E();
-	if (sliceHeader->slice_type.isSliceTypeSP() || sliceHeader->slice_type.isSliceTypeSI())
-	{
-		if (sliceHeader->slice_type.isSliceTypeSP())
-		{
-			uint8 sp_for_switch_flag = nalStream.readBit();
-		}
-		sint32 slice_qs_delta = nalStream.readSV_E();
-	}
-
-	if (pps.deblocking_filter_control_present_flag)
-	{
-		uint32 disable_deblocking_filter_idc = nalStream.readUV_E();
-		if (disable_deblocking_filter_idc != 1)
-		{
-			sint32 slice_alpha_c0_offset_div2 = nalStream.readSV_E();
-			sint32 slice_beta_offset_div2 = nalStream.readSV_E();
-		}
-	}
-	if (pps.num_slice_groups_minus1 > 0 && pps.slice_group_map_type >= 3 && pps.slice_group_map_type <= 5)
-	{
-		cemu_assert_debug(false); // todo
-	}
-}
-
-void _calculateFrameOrder(h264ParserState_t* h264ParserState, const h264State_seq_parameter_set_t& sps, const h264State_pic_parameter_set_t& pps, nal_slice_header_t* sliceHeader)
-{
-	if (sps.pic_order_cnt_type == 0)
-	{
-		// calculate TopFieldOrderCnt
-		uint32 prevPicOrderCntMsb;
-		uint32 prevPicOrderCntLsb;
-		if (sliceHeader->IdrPicFlag)
-		{
-			sliceHeader->calculated.TopFieldOrderCnt = 0;
-
-			prevPicOrderCntMsb = 0;
-			prevPicOrderCntLsb = 0;
-
-		}
-		else
-		{
-			uint32 prevRefPic_PicOrderCntMsb = h264ParserState->picture_order.prevPicOrderCntMsb;
-			uint32 prevRefPic_pic_order_cnt_lsb = h264ParserState->picture_order.prevPicOrderCntLsb; // todo
-
-			prevPicOrderCntMsb = prevRefPic_PicOrderCntMsb;
-			prevPicOrderCntLsb = prevRefPic_pic_order_cnt_lsb;
-
-		}
-
-		uint32 MaxPicOrderCntLsb = 1 << (sps.log2_max_pic_order_cnt_lsb_minus4 + 4); // todo - verify
-
-		uint32 PicOrderCntMsb;
-
-		if ((sliceHeader->pic_order_cnt_lsb < prevPicOrderCntLsb) && (((sint32)prevPicOrderCntLsb - (sint32)sliceHeader->pic_order_cnt_lsb) >= (sint32)(MaxPicOrderCntLsb / 2)))
-			PicOrderCntMsb = prevPicOrderCntMsb + MaxPicOrderCntLsb;
-		else if ((sliceHeader->pic_order_cnt_lsb > prevPicOrderCntLsb) && (((sint32)sliceHeader->pic_order_cnt_lsb - (sint32)prevPicOrderCntLsb) > (sint32)(MaxPicOrderCntLsb / 2)))
-			PicOrderCntMsb = prevPicOrderCntMsb - MaxPicOrderCntLsb;
-		else
-			PicOrderCntMsb = prevPicOrderCntMsb;
-
-		uint32 TopFieldOrderCnt = PicOrderCntMsb + sliceHeader->pic_order_cnt_lsb;
-
-		if (sliceHeader->IdrPicFlag != 0 && TopFieldOrderCnt != 0)
-			cemu_assert(false);
-
-		sliceHeader->calculated.TopFieldOrderCnt = TopFieldOrderCnt;
-
-		h264ParserState->picture_order.prevPicOrderCntMsb = PicOrderCntMsb;
-		h264ParserState->picture_order.prevPicOrderCntLsb = sliceHeader->pic_order_cnt_lsb;
-	}
-	else if (sps.pic_order_cnt_type == 2)
-	{
-		// display order matches decode order
-		uint32 prevFrameNum = h264ParserState->picture_order.prevFrameNum;
-
-		uint32 FrameNumOffset;
-		if (sliceHeader->IdrPicFlag)
-		{
-			FrameNumOffset = 0;
-		}
-		else
-		{
-			// todo - check for memory_management_control_operation 5
-			// prevFrameNumOffset is set equal to the value of FrameNumOffset of the previous picture in decoding order.
-			uint32 prevFrameNumOffset = h264ParserState->picture_order.prevFrameNumOffset;
-
-			if (prevFrameNum > sliceHeader->frame_num)
-				FrameNumOffset = prevFrameNumOffset + sps.getMaxFrameNum();
-			else
-				FrameNumOffset = prevFrameNumOffset;
-		}
-
-		uint32 tempPicOrderCnt;
-		if (sliceHeader->IdrPicFlag == 1)
-			tempPicOrderCnt = 0;
-		else if (sliceHeader->nal_ref_idc == 0)
-			tempPicOrderCnt = 2 * (FrameNumOffset + sliceHeader->frame_num) - 1;
-		else
-			tempPicOrderCnt = 2 * (FrameNumOffset + sliceHeader->frame_num);
-
-		uint32 TopFieldOrderCnt = 0;
-		uint32 BottomFieldOrderCnt = 0;
-
-		if (sliceHeader->field_pic_flag == 0)
-		{
-			TopFieldOrderCnt = tempPicOrderCnt;
-			BottomFieldOrderCnt = tempPicOrderCnt;
-		}
-		else if (sliceHeader->bottom_field_flag != 0)
-		{
-			cemu_assert_debug(false); // fields aren't supported
-			BottomFieldOrderCnt = tempPicOrderCnt;
-		}
-		else
-		{
-			cemu_assert_debug(false); // fields aren't supported
-			TopFieldOrderCnt = tempPicOrderCnt;
-		}
-
-		sliceHeader->calculated.TopFieldOrderCnt = TopFieldOrderCnt;
-
-		h264ParserState->picture_order.prevFrameNum = sliceHeader->frame_num;
-		h264ParserState->picture_order.prevFrameNumOffset = FrameNumOffset;
-	}
-	else
-	{
-		cemu_assert_debug(false);
-	}
-}
-
-void parseNAL_slice_layer_without_partitioning_rbsp(h264ParserState_t* h264ParserState, h264ParserOutput_t* output, sint32 streamSubOffset, sint32 streamSubLength, RBSPInputBitstream& nalStream, uint8 nal_ref_idc, uint8 nal_unit_type)
-{
-	nal_slice_t slice = {};
-	cemu_assert_debug(h264ParserState->hasPPS && h264ParserState->hasSPS);
-	parseNAL_slice_header(h264ParserState->sps, h264ParserState->pps, nalStream, nal_unit_type, nal_ref_idc, &slice.slice_header);
-	_calculateFrameOrder(h264ParserState, h264ParserState->sps, h264ParserState->pps, &slice.slice_header);
-	if (output->sliceCount >= output->sliceInfo.size())
-	{
-		cemu_assert_debug(false); // internal slice buffer full
-		return;
-	}
-	output->sliceInfo[output->sliceCount].header = slice.slice_header;
-	output->sliceInfo[output->sliceCount].streamSubOffset = streamSubOffset;
-	output->sliceInfo[output->sliceCount].streamSubSize = streamSubLength;
-	output->sliceCount++;
 }
 
 void h264Parse(h264ParserState_t* h264ParserState, h264ParserOutput_t* output, uint8* data, uint32 length, bool parseSlices)
 {
 	memset(output, 0, sizeof(h264ParserOutput_t));
-	NALInputBitstream nalStream(data, length);
-
-	if (nalStream.hasError())
+	NALInputBitstream nal(data, length);
+	Reader r;
+	while (!nal.isEndOfStream() && nal.getNextRBSP(r))
 	{
-		cemu_assert_debug(false);
-		return;
-	}
-
-	// parse NAL data
-	while (true)
-	{
-		if (nalStream.isEndOfStream())
-			break;
-		RBSPInputBitstream rbspStream;
-		if (nalStream.getNextRBSP(rbspStream) == false)
-			break;
-
-		sint32 streamSubOffset = (sint32)(rbspStream.getBasePtr() - data);
-		sint32 streamSubLength = rbspStream.getBaseLength();
-
-		// parse NAL header
-		uint8 nalHeaderByte = rbspStream.readU8();
-		if ((nalHeaderByte & 0x80) != 0)
-		{
-			// MSB must be zero
-			cemu_assert_debug(false);
+		const sint32 offset = (sint32)(r.getBasePtr() - data);
+		const sint32 size = r.getBaseLength();
+		const NalHeader hdr = ReadNalHeader(r);
+		if (!hdr.valid)
 			continue;
-		}
-		uint8 nal_ref_idc = (nalHeaderByte >> 5) & 0x3;
-		uint8 nal_unit_type = (nalHeaderByte >> 0) & 0x1f;
-		// nal_ref_idc -> If not 0, reference picture. Contains sequence set ??
-		// nal_unit_type -> RBSP type
-		// nal_unit_type:
-		// 0 - unspecified
-		// 1 - Coded slice of a non-IDR picture	slice_layer_without_partitioning_rbsp()
-		// 2 - Coded slice data partition A slice_data_partition_a_layer_rbsp()
-		// 3 - Coded slice data partition B	slice_data_partition_b_layer_rbsp()
-		// 4 - Coded slice data partition C	slice_data_partition_c_layer_rbsp()
-		// 5 - Coded slice of an IDR picture slice_layer_without_partitioning_rbsp()
-		// 6 - Supplemental enhancement information (SEI) sei_rbsp()
-		// 7 - Sequence parameter set seq_parameter_set_rbsp()
-		// 8 - Picture parameter set pic_parameter_set_rbsp()
-		// 9 - Access unit delimiter access_unit_delimiter_rbsp()
-		// 10 - End of sequence end_of_seq_rbsp()
-		// 11 - End of stream end_of_stream_rbsp()
-		// 12 - Filler data	filler_data_rbsp()
-		// 13 to 23 - reserved
-		// 24 to 31 - unspecified
-		// VCL NAL -> nal_unit_type 1,2,3,4,5
-		// non-VCL NAL -> All other nal_unit_type values
-
-		if (nal_unit_type == 14 || nal_unit_type == 20 || nal_unit_type == 21)
+		switch (hdr.type)
 		{
-			cemu_assert_debug(false);
-			// todo - there are fields to parse here
-		}
-		switch (nal_unit_type)
-		{
-		case 1:
+		case 1: // non-IDR slice
+		case 5: // IDR slice
 			if (parseSlices)
-				parseNAL_slice_layer_without_partitioning_rbsp(h264ParserState, output, streamSubOffset, streamSubLength, rbspStream, nal_ref_idc, nal_unit_type);
-			break;
-		case 5:
-			if (parseSlices)
-				parseNAL_slice_layer_without_partitioning_rbsp(h264ParserState, output, streamSubOffset, streamSubLength, rbspStream, nal_ref_idc, nal_unit_type);
-			break;
-		case 6:
-			// SEI
+				ParseSlice(*h264ParserState, output, offset, size, r, hdr.refIdc, hdr.type);
 			break;
 		case 7:
-			cemu_assert_debug(parseNAL_seq_parameter_set_rbsp(h264ParserState, output, rbspStream));
+			ParseSps(*h264ParserState, output, r);
 			break;
 		case 8:
-			cemu_assert_debug(parseNAL_pic_parameter_set_rbsp(h264ParserState, output, rbspStream));
+			ParsePps(*h264ParserState, output, r);
 			break;
-		case 9:
-			// access unit delimiter
-			break;
-		case 10:
-			// end of sequence
-			break;
-		case 12:
-			// filler data
-			// seen in Cocoto Magic Circus 2 intro video
+		case 6: // SEI
+		case 9: // access unit delimiter
+		case 10: // end of sequence
+		case 12: // filler data
 			break;
 		default:
-			cemuLog_logDebug(LogType::Force, "Unsupported NAL unit type {}", nal_unit_type);
-			cemu_assert_debug(false);
-			// todo
+			cemuLog_logDebug(LogType::Force, "H264 parser: NAL unit type {} ignored", hdr.type);
 			break;
 		}
 	}
@@ -872,211 +576,51 @@ void h264Parse(h264ParserState_t* h264ParserState, h264ParserOutput_t* output, u
 
 sint32 h264GetUnitLength(h264ParserState_t* h264ParserState, uint8* data, uint32 length)
 {
-	NALInputBitstream nalStream(data, length);
-
-	if (nalStream.hasError())
-	{
-		cemu_assert_debug(false);
+	// the NAL walk covers the whole buffer; the start code offset only feeds the result
+	NALInputBitstream nal(data, length);
+	const sint32 startCode = FindFirstStartCode(data, length);
+	if (startCode < 0)
 		return -1;
-	}
-
-	// search for start code
-	sint32 startCodeOffset = 0;
-	bool hasStartcode = false;
-	while (startCodeOffset < (sint32)(length - 3))
+	const uint8* unitStart = data + startCode;
+	Reader r;
+	while (!nal.isEndOfStream() && nal.getNextRBSP(r, true))
 	{
-		if (data[startCodeOffset + 0] == 0x00 && data[startCodeOffset + 1] == 0x00 && data[startCodeOffset + 2] == 0x01)
-		{
-			hasStartcode = true;
-			break;
-		}
-		startCodeOffset++;
-	}
-	if (hasStartcode == false)
-		return -1;
-	data += startCodeOffset;
-	length -= startCodeOffset;
-
-	// parse NAL data
-	while (true)
-	{
-		if (nalStream.isEndOfStream())
-			break;
-		RBSPInputBitstream rbspStream;
-		if (nalStream.getNextRBSP(rbspStream, true) == false)
-			break;
-
-		sint32 streamSubOffset = (sint32)(rbspStream.getBasePtr() - data);
-		sint32 streamSubLength = rbspStream.getBaseLength();
-
-		// parse NAL header
-		uint8 nalHeaderByte = rbspStream.readU8();
-		if ((nalHeaderByte & 0x80) != 0)
-		{
-			// MSB must be zero
-			cemu_assert_debug(false);
+		const NalHeader hdr = ReadNalHeader(r);
+		if (!hdr.valid || hdr.type == 14 || hdr.type == 20 || hdr.type == 21)
 			continue;
-		}
-		uint8 nal_ref_idc = (nalHeaderByte >> 5) & 0x3;
-		uint8 nal_unit_type = (nalHeaderByte >> 0) & 0x1f;
-		if (nal_unit_type == 14 || nal_unit_type == 20 || nal_unit_type == 21)
-		{
-			cemu_assert_debug(false);
-			continue;
-		}
-		switch (nal_unit_type)
+		switch (hdr.type)
 		{
 		case 1:
 		case 5:
-		{
-			// note: We cant parse the slice data because we dont have SPS and PPS data reliably available
-			// 
-			// currently we just assume there is 1 slice per unit
-			return (sint32)((rbspStream.getBasePtr() + rbspStream.getBaseLength()) - data) + startCodeOffset;
-			
-			break;
-		}
-		case 6:
-			// SEI
-			break;
+			// one slice per picture is assumed; the unit ends with the first slice
+			return (sint32)(r.getBasePtr() + r.getBaseLength() - unitStart) + startCode;
 		case 7:
-			cemu_assert_debug(parseNAL_seq_parameter_set_rbsp(h264ParserState, nullptr, rbspStream));
+			ParseSps(*h264ParserState, nullptr, r);
 			break;
 		case 8:
-			cemu_assert_debug(parseNAL_pic_parameter_set_rbsp(h264ParserState, nullptr, rbspStream));
+			ParsePps(*h264ParserState, nullptr, r);
 			break;
+		case 6:
 		case 9:
-			// access unit delimiter
-			break;
 		case 10:
-			// end of sequence
 			break;
 		default:
-			cemuLog_logDebug(LogType::Force, "Unsupported NAL unit type {}", nal_unit_type);
-			assert_dbg(); // todo - NAL 10 is used in DKC TF
-			// todo
+			cemuLog_logDebug(LogType::Force, "H264 parser: NAL unit type {} not handled", hdr.type);
+			assert_dbg();
 			break;
 		}
 	}
 	return -1;
 }
 
-static const unsigned char h264_default_4x4_Intra[16] =
-{
-	6, 13, 13, 20,
-	20, 20, 28, 28,
-	28, 28, 32, 32,
-	32, 37, 37, 42
-};
-
-static const unsigned char h264_default_4x4_Inter[16] =
-{
-	10, 14, 14, 20,
-	20, 20, 24, 24,
-	24, 24, 27, 27,
-	27, 30, 30, 34
-};
-
-static const unsigned char h264_default_8x8_Intra[64] =
-{
-	6, 10, 10, 13, 11, 13, 16, 16,
-	16, 16, 18, 18, 18, 18, 18, 23,
-	23, 23, 23, 23, 23, 25, 25, 25,
-	25, 25, 25, 25, 27, 27, 27, 27,
-	27, 27, 27, 27, 29, 29, 29, 29,
-	29, 29, 29, 31, 31, 31, 31, 31,
-	31, 33, 33, 33, 33, 33, 36, 36,
-	36, 36, 38, 38, 38, 40, 40, 42
-};
-
-static const unsigned char h264_default_8x8_Inter[64] =
-{
-	9, 13, 13, 15, 13, 15, 17, 17,
-	17, 17, 19, 19, 19, 19, 19, 21,
-	21, 21, 21, 21, 21, 22, 22, 22,
-	22, 22, 22, 22, 24, 24, 24, 24,
-	24, 24, 24, 24, 25, 25, 25, 25,
-	25, 25, 25, 27, 27, 27, 27, 27,
-	27, 28, 28, 28, 28, 28, 30, 30,
-	30, 30, 32, 32, 32, 33, 33, 35
-};
-
 void h264Parser_getScalingMatrix4x4(h264State_seq_parameter_set_t* sps, h264State_pic_parameter_set_t* pps, nal_slice_header_t* sliceHeader, sint32 index, uint8* matrix4x4)
 {
-	// use scaling lists from PPS first
-	if (pps->pic_scaling_matrix_present_flag)
-	{
-		if (pps->ScalingList4x4[index].isPresent)
-		{
-			cemu_assert(false); // testing needed (what about UseDefaultScalingMatrix?)
-			memcpy(matrix4x4, pps->ScalingList4x4[index].list, 4 * 4 * sizeof(uint8));
-		}
-		else
-		{
-			if (index < 3)
-				memcpy(matrix4x4, h264_default_4x4_Intra, 4 * 4 * sizeof(uint8));
-			else
-				memcpy(matrix4x4, h264_default_4x4_Inter, 4 * 4 * sizeof(uint8));
-		}
-		return;
-	}
-	// use scaling lists from SPS
-	if (sps->seq_scaling_matrix_present_flag)
-	{
-		if (sps->ScalingList4x4[index].isPresent)
-		{
-			cemu_assert(false); // testing needed (what about UseDefaultScalingMatrix?)
-			memcpy(matrix4x4, sps->ScalingList4x4[index].list, 4 * 4 * sizeof(uint8));
-		}
-		else
-		{
-			if (index < 3)
-				memcpy(matrix4x4, h264_default_4x4_Intra, 4 * 4 * sizeof(uint8));
-			else
-				memcpy(matrix4x4, h264_default_4x4_Inter, 4 * 4 * sizeof(uint8));
-		}
-		return;
-	}
-	// default (Flat_4x4_16)
-	memset(matrix4x4, 16, 4 * 4 * sizeof(uint8));
+	SelectScalingMatrix(pps->pic_scaling_matrix_present_flag, pps->ScalingList4x4[index], sps->seq_scaling_matrix_present_flag, sps->ScalingList4x4[index],
+		index < 3 ? kDefault4x4Intra : kDefault4x4Inter, 16, matrix4x4);
 }
 
 void h264Parser_getScalingMatrix8x8(h264State_seq_parameter_set_t* sps, h264State_pic_parameter_set_t* pps, nal_slice_header_t* sliceHeader, sint32 index, uint8* matrix8x8)
 {
-	// use scaling lists from PPS first
-	if (pps->pic_scaling_matrix_present_flag)
-	{
-		if (pps->ScalingList8x8[index].isPresent)
-		{
-			cemu_assert(false); // testing needed (what about UseDefaultScalingMatrix?)
-			memcpy(matrix8x8, pps->ScalingList8x8[index].list, 8 * 8 * sizeof(uint8));
-		}
-		else
-		{
-			if ((index&1) == 0)
-				memcpy(matrix8x8, h264_default_8x8_Intra, 8 * 8 * sizeof(uint8));
-			else
-				memcpy(matrix8x8, h264_default_8x8_Inter, 8 * 8 * sizeof(uint8));
-		}
-		return;
-	}
-	// use scaling lists from SPS
-	if (sps->seq_scaling_matrix_present_flag)
-	{
-		if (sps->ScalingList8x8[index].isPresent)
-		{
-			cemu_assert(false); // testing needed (what about UseDefaultScalingMatrix?)
-			memcpy(matrix8x8, sps->ScalingList8x8[index].list, 8 * 8 * sizeof(uint8));
-		}
-		else
-		{
-			if ((index & 1) == 0)
-				memcpy(matrix8x8, h264_default_8x8_Intra, 8 * 8 * sizeof(uint8));
-			else
-				memcpy(matrix8x8, h264_default_8x8_Inter, 8 * 8 * sizeof(uint8));
-		}
-		return;
-	}
-	// default (Flat_8x8_16)
-	memset(matrix8x8, 16, 8 * 8 * sizeof(uint8));
+	SelectScalingMatrix(pps->pic_scaling_matrix_present_flag, pps->ScalingList8x8[index], sps->seq_scaling_matrix_present_flag, sps->ScalingList8x8[index],
+		(index & 1) == 0 ? kDefault8x8Intra : kDefault8x8Inter, 64, matrix8x8);
 }

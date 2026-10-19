@@ -1,3 +1,10 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// h264.rpl: the console's H.264 decoder library.
+//
+// The guest owns a work memory block that holds our context (H264Context). Each opened context gets
+// a decoder session (see H264DecInternal.h) identified by a handle stored in the context.
+// H264DECExecute takes one access unit; in buffered mode up to five pictures stay in flight so the
+// host decoder can work ahead, otherwise every call returns its own frame.
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/HW/Espresso/PPCCallback.h"
 #include "Cafe/OS/libs/h264_avc/parser/H264Parser.h"
@@ -16,18 +23,23 @@ enum class H264DEC_STATUS : uint32
 
 namespace H264
 {
+	// Breath of the Wild (all regions) gets two adjustments that the Cemuhook plugin used to provide:
+	// a tiny work memory requirement and 1920x1088 pictures reported as 1920x1080. Together they let
+	// the game play 1080p replacement videos
 	bool H264_IsBotW()
 	{
-		// Cemuhook has a hack where it always returns a small size for H264DECMemoryRequirement (256 bytes)
-		// it also outputs images pre-cropped instead of giving the game raw uncropped images
-		// both of these are required to allow Breath of the Wild to playback the higher res (1080p) videos from the Switch version
-		// we mirror these hacks for user convenience and because there are no downsides
-		uint64 currentTitleId = CafeSystem::GetForegroundTitleId();
-		if (currentTitleId == 0x00050000101c9500 || currentTitleId == 0x00050000101c9400 || currentTitleId == 0x00050000101c9300)
+		switch (CafeSystem::GetForegroundTitleId())
+		{
+		case 0x00050000101c9300:
+		case 0x00050000101c9400:
+		case 0x00050000101c9500:
 			return true;
-		return false;
+		default:
+			return false;
+		}
 	}
 
+	// lives in guest work memory
 	struct H264Context
 	{
 		struct
@@ -39,21 +51,21 @@ namespace H264
 		struct
 		{
 			MEMPTR<void> outputFunc{ nullptr };
-			uint8be outputPerFrame{ 0 }; // default is 0
+			uint8be outputPerFrame{ 0 }; // 0 = buffered output
 			MEMPTR<void> userMemoryParam{ nullptr };
 		}Param;
-		// misc
 		uint32be sessionHandle;
-
-		// decoder state
 		struct
 		{
 			uint32 numFramesInFlight{0};
 			bool isFirstBegin{true};
-			bool isTryingToRecover{false};
+			bool isTryingToRecover{false}; // set by every Begin after the first, cleared at the next IDR picture
 		}decoderState;
 	};
 
+	/* stream inspection */
+
+	// work memory needed per level_idc
 	H264DEC_STATUS H264DECMemoryRequirement(uint32 codecProfile, uint32 codecLevel, uint32 width, uint32 height, uint32be* sizeRequirementOut)
 	{
 		if (H264_IsBotW())
@@ -62,292 +74,410 @@ namespace H264
 			*sizeRequirementOut = 256;
 			return H264DEC_STATUS::SUCCESS;
 		}
-
-		// note: On console this seems to check if maxWidth or maxHeight < 64 but Pikmin 3 passes 32x32 and crashes if this function fails ?
-		if (width < 32 || height < 32 || width > 2800 || height > 1408 || !sizeRequirementOut || codecLevel >= 52 || (codecProfile != 66 && codecProfile != 77 && codecProfile != 100))
+		// the console seems to require at least 64x64 but Pikmin 3 asks for 32x32 and needs this to succeed
+		const bool knownProfile = codecProfile == 66 || codecProfile == 77 || codecProfile == 100;
+		if (!sizeRequirementOut || !knownProfile || codecLevel >= 52 || width < 32 || height < 32 || width > 2800 || height > 1408)
 			return H264DEC_STATUS::INVALID_PARAM;
 
-		uint32 workbufferSize = 0;
-		if (codecLevel < 0xB)
+		struct LevelSize
 		{
-			workbufferSize = 0x18C << 10;
-		}
-		else if (codecLevel == 0xB)
+			uint32 lastLevel;
+			uint32 size;
+		};
+		static constexpr LevelSize kSizes[] =
 		{
-			workbufferSize = 0x384 << 10;
-		}
-		else if (codecLevel >= 0xC && codecLevel <= 0x14)
+			{ 0x0A, 0x18C << 10 },
+			{ 0x0B, 0x384 << 10 },
+			{ 0x14, 0x948 << 10 },
+			{ 0x15, 0x1290 << 10 },
+			{ 0x1E, 0x1FA4 << 10 },
+			{ 0x1F, 0x4650 << 10 },
+			{ 0x20, 0x1400000 },
+			{ 0x29, 0x8000 << 10 },
+			{ 0x2A, 0x2200000 },
+			{ 0x32, 0x1AF40 << 10 },
+			{ 0xFFFFFFFF, 0x2D000 << 10 },
+		};
+		uint32 size = 0;
+		for (const LevelSize& e : kSizes)
 		{
-			workbufferSize = 0x948 << 10;
+			if (codecLevel <= e.lastLevel)
+			{
+				size = e.size;
+				break;
+			}
 		}
-		else if (codecLevel == 0x15)
-		{
-			workbufferSize = 0x1290 << 10;
-		}
-		else if (codecLevel >= 0x16 && codecLevel <= 0x1E)
-		{
-			workbufferSize = 0x1FA4 << 10;
-		}
-		else if (codecLevel == 0x1F)
-		{
-			workbufferSize = 0x4650 << 10;
-		}
-		else if (codecLevel == 0x20)
-		{
-			workbufferSize = 0x1400000;
-		}
-		else if (codecLevel >= 0x21 && codecLevel <= 0x29)
-		{
-			workbufferSize = 0x8000 << 10;
-		}
-		else if (codecLevel == 0x2A)
-		{
-			workbufferSize = 0x2200000;
-		}
-		else if (codecLevel >= 0x2B && codecLevel <= 0x32)
-		{
-			workbufferSize = 0x1AF40 << 10;
-		}
-		else if (codecLevel >= 0x33)
-		{
-			workbufferSize = 0x2D000 << 10;
-		}
-		workbufferSize += 0x447;
-		*sizeRequirementOut = workbufferSize;
+		*sizeRequirementOut = size + 0x447;
 		return H264DEC_STATUS::SUCCESS;
 	}
 
 	uint32 H264DECCheckMemSegmentation(MPTR memory, uint32 size)
 	{
-		// return 0 for valid, 1 for invalid
-		// currently we allow any range
-		return 0;
+		return 0; // every range is accepted (1 would mean invalid)
+	}
+
+	// Looks for a 00 00 01 start code whose NAL header (with nal_ref_idc masked out) is one of
+	// 'types'. The reported offset is one byte before the start code, as on the console
+	static H264DEC_STATUS FindNalStart(const uint8* data, uint32 length, uint32be* offsetOut, std::initializer_list<uint8> types)
+	{
+		if (!data || length < 4 || !offsetOut)
+			return H264DEC_STATUS::INVALID_PARAM;
+		for (uint32 i = 0; i < length - 4; i++) // start codes beginning in the last four bytes are not reported
+		{
+			if (data[i] != 0 || data[i + 1] != 0 || data[i + 2] != 1)
+				continue;
+			const uint8 header = data[i + 3] & 0x9F;
+			if (std::find(types.begin(), types.end(), header) == types.end())
+				continue;
+			*offsetOut = i == 0 ? 0 : i - 1;
+			return H264DEC_STATUS::SUCCESS;
+		}
+		return H264DEC_STATUS::BAD_STREAM;
 	}
 
 	H264DEC_STATUS H264DECFindDecstartpoint(uint8* ptr, uint32 length, uint32be* offsetOut)
 	{
-		if (!ptr || length < 4 || !offsetOut)
-			return H264DEC_STATUS::INVALID_PARAM;
-		for (uint32 i = 0; i < length - 4; ++i)
-		{
-			uint8 b = ptr[i];
-			if (b != 0)
-				continue;
-
-			b = ptr[i + 1];
-			if (b != 0)
-				continue;
-
-			b = ptr[i + 2];
-			if (b != 1)
-				continue;
-
-			b = ptr[i + 3];
-			b &= 0x9F;
-			if (b != 7) // check for NAL type SPS
-				continue;
-
-			if (i > 0)
-				*offsetOut = i - 1;
-			else
-				*offsetOut = 0;
-
-			return H264DEC_STATUS::SUCCESS;
-		}
-		return H264DEC_STATUS::BAD_STREAM;
+		return FindNalStart(ptr, length, offsetOut, { 7 }); // SPS
 	}
 
 	H264DEC_STATUS H264DECFindIdrpoint(uint8* ptr, uint32 length, uint32be* offsetOut)
 	{
-		if (!ptr || length < 4 || !offsetOut)
-			return H264DEC_STATUS::INVALID_PARAM;
-
-		for (uint32 i = 0; i < length - 4; ++i)
-		{
-			uint8 b = ptr[i];
-			if (b != 0)
-				continue;
-
-			b = ptr[i + 1];
-			if (b != 0)
-				continue;
-
-			b = ptr[i + 2];
-			if (b != 1)
-				continue;
-
-			b = ptr[i + 3];
-			b &= 0x9F;
-			if (b != 5 && b != 7 && b != 8) // check for NAL type IDR slice, but also accept SPS or PPS slices
-				continue;
-
-			if (i > 0)
-				*offsetOut = i - 1;
-			else
-				*offsetOut = 0;
-
-			return H264DEC_STATUS::SUCCESS;
-		}
-		return H264DEC_STATUS::BAD_STREAM;
+		return FindNalStart(ptr, length, offsetOut, { 5, 7, 8 }); // IDR slice, SPS or PPS
 	}
 
-	struct H264Dec_SeqParameterSet
+	// the SPS fields H264DECGetImageSize needs
+	struct SpsDimensions
 	{
-		// for now this contains only the fields we care about
-		uint32 pic_width_in_luma_samples{};
-		uint32 pic_height_in_map_units_x16{};
-		uint8 frame_mbs_only_flag{};
+		uint32 widthInPixels{};
+		uint32 heightInMapUnitsTimes16{};
+		uint8 frameMbsOnly{};
 	};
 
-	void H264Dec_parseScalingList(RBSPInputBitstream& stream, sint32 size)
+	static void SkipScalingList(RBSPInputBitstream& r, sint32 count)
 	{
-		sint32 lastScale = 8;
-		sint32 nextScale = 8;
-		for (sint32 i = 0; i < size; i++)
+		sint32 last = 8;
+		sint32 next = 8;
+		for (sint32 i = 0; i < count; i++)
 		{
-			if (nextScale != 0)
-			{
-				sint32 deltaScale = stream.readSV_E();
-				nextScale = (lastScale + deltaScale + 256) % 256;
-			}
-			if (nextScale != 0)
-				lastScale = nextScale;
+			if (next != 0)
+				next = (last + r.readSV_E() + 256) % 256;
+			if (next != 0)
+				last = next;
 		}
 	}
 
-	bool H264Dec_parseSequencePS(RBSPInputBitstream& stream, H264Dec_SeqParameterSet& ps)
+	// Reads an SPS up to the picture size, rejecting what the console decoder does not support
+	// (profiles other than baseline/main/high, chroma formats other than 4:2:0, out of range fields)
+	static bool ReadSpsDimensions(RBSPInputBitstream& r, SpsDimensions& out)
 	{
-		ps = {};
-		uint32 profileIdc = stream.readBits<8>();
-		if (profileIdc != 66 && profileIdc != 77 && profileIdc != 100)
+		out = {};
+		const uint32 profile = r.readBits(8);
+		if (profile != 66 && profile != 77 && profile != 100)
 			return false;
-		stream.readBits<8>(); // constraint_set flags
-		stream.readBits<8>(); // level_idc
-		uint32 seqParameterSetId = stream.readUV_E();
-		if (seqParameterSetId >= 32)
+		r.readBits(16); // constraint flags, level_idc
+		if (r.readUV_E() >= 32) // seq_parameter_set_id
 			return false;
-		if (profileIdc == 100)
+		if (profile == 100)
 		{
-			uint32 chromaFormatIdc = stream.readUV_E();
-			if (chromaFormatIdc > 1)
+			if (r.readUV_E() > 1) // chroma_format_idc
 				return false;
-			stream.readUV_E(); // bit_depth_luma_minus8
-			stream.readUV_E(); // bit_depth_chroma_minus8
-			stream.readBit(); // qpprime_y_zero_transform_bypass_flag
-			if (stream.readBit()) // seq_scaling_matrix_present_flag
+			r.readUV_E(); // bit_depth_luma_minus8
+			r.readUV_E(); // bit_depth_chroma_minus8
+			r.readBit(); // qpprime_y_zero_transform_bypass_flag
+			if (r.readBit()) // seq_scaling_matrix_present_flag
 			{
 				for (sint32 i = 0; i < 8; i++)
 				{
-					if (stream.readBit())
-						H264Dec_parseScalingList(stream, i < 6 ? 16 : 64);
+					if (r.readBit())
+						SkipScalingList(r, i < 6 ? 16 : 64);
 				}
 			}
 		}
-		uint32 log2MaxFrameNumMinus4 = stream.readUV_E();
-		if (log2MaxFrameNumMinus4 > 12)
+		if (r.readUV_E() > 12) // log2_max_frame_num_minus4
 			return false;
-		uint32 picOrderCntType = stream.readUV_E();
-		if (picOrderCntType > 2)
+		const uint32 pocType = r.readUV_E();
+		if (pocType > 2)
 			return false;
-		if (picOrderCntType == 0)
+		if (pocType == 0 && r.readUV_E() > 12) // log2_max_pic_order_cnt_lsb_minus4
+			return false;
+		if (pocType == 1)
 		{
-			uint32 log2MaxPicOrderCntLsbMinus4 = stream.readUV_E();
-			if (log2MaxPicOrderCntLsbMinus4 > 12)
+			r.readBit(); // delta_pic_order_always_zero_flag
+			r.readSV_E(); // offset_for_non_ref_pic
+			r.readSV_E(); // offset_for_top_to_bottom_field
+			const uint32 cycleLength = r.readUV_E();
+			if (cycleLength > 255)
 				return false;
+			for (uint32 i = 0; i < cycleLength; i++)
+				r.readSV_E();
 		}
-		else if (picOrderCntType == 1)
-		{
-			stream.readBit(); // delta_pic_order_always_zero_flag
-			stream.readSV_E(); // offset_for_non_ref_pic
-			stream.readSV_E(); // offset_for_top_to_bottom_field
-			uint32 numRefFramesInPicOrderCntCycle = stream.readUV_E();
-			if (numRefFramesInPicOrderCntCycle > 0xFF)
-				return false;
-			for (uint32 i = 0; i < numRefFramesInPicOrderCntCycle; i++)
-				stream.readSV_E();
-		}
-		uint32 maxNumRefFrames = stream.readUV_E();
-		if (maxNumRefFrames > 16)
+		if (r.readUV_E() > 16) // max_num_ref_frames
 			return false;
-		stream.readBit(); // gaps_in_frame_num_value_allowed_flag
-		uint32 picWidthInMbsMinus1 = stream.readUV_E();
-		uint32 width = 16 * (picWidthInMbsMinus1 + 1);
+		r.readBit(); // gaps_in_frame_num_value_allowed_flag
+		const uint32 width = 16 * (r.readUV_E() + 1);
 		if ((width & 0xFFF0) < 0x10)
 			return false;
-		uint32 picHeightInMapUnitsMinus1 = stream.readUV_E();
-		uint32 heightInMapUnitsX16 = 16 * (picHeightInMapUnitsMinus1 + 1);
-		if ((heightInMapUnitsX16 & 0xFFF0) < 0x10)
+		const uint32 height = 16 * (r.readUV_E() + 1);
+		if ((height & 0xFFF0) < 0x10)
 			return false;
-		ps.pic_width_in_luma_samples = width;
-		ps.pic_height_in_map_units_x16 = heightInMapUnitsX16;
-		ps.frame_mbs_only_flag = stream.readBit();
-		if (!ps.frame_mbs_only_flag)
-			stream.readBit(); // mb_adaptive_frame_field_flag
-		stream.readBit(); // direct_8x8_inference_flag
-		if (stream.readBit()) // frame_cropping_flag
+		out.widthInPixels = width;
+		out.heightInMapUnitsTimes16 = height;
+		out.frameMbsOnly = r.readBit();
+		if (!out.frameMbsOnly)
+			r.readBit(); // mb_adaptive_frame_field_flag
+		r.readBit(); // direct_8x8_inference_flag
+		if (r.readBit()) // frame_cropping_flag
 		{
-			stream.readUV_E(); // frame_crop_left_offset
-			stream.readUV_E(); // frame_crop_right_offset
-			stream.readUV_E(); // frame_crop_top_offset
-			stream.readUV_E(); // frame_crop_bottom_offset
+			for (int i = 0; i < 4; i++)
+				r.readUV_E();
 		}
-		stream.readBit(); // vui_parameters_present_flag
-		// vui parsing unnecessary as we currently dont need any of the fields
+		r.readBit(); // vui_parameters_present_flag (VUI is not needed)
 		return true;
 	}
 
 	H264DEC_STATUS H264DECGetImageSize(uint8* stream, sint32 streamSize, sint32 offset, uint32be* outputWidth, uint32be* outputHeight)
 	{
-		if (!stream || streamSize < 4 || offset < 0 || !outputWidth || !outputHeight || offset >= streamSize)
+		if (!stream || !outputWidth || !outputHeight || streamSize < 4 || offset < 0 || offset >= streamSize || offset + 4 >= streamSize)
 			return H264DEC_STATUS::INVALID_PARAM;
-		if ( (offset+4) >= streamSize )
-			return H264DEC_STATUS::INVALID_PARAM;
-		uint8* cur = stream + offset;
-		uint8* end = stream + streamSize;
-		while (cur < end-2)
+		const uint8* end = stream + streamSize;
+		// The start code test looks two bytes behind the 01 byte, which for offset < 2 reads in front
+		// of the buffer. The console library does the same
+		for (const uint8* p = stream + offset; p < end - 2; p++)
 		{
-			// check for start code
-			if(*cur != 1)
-			{
-				cur++;
+			if (p[0] != 1 || p[-1] != 0 || p[-2] != 0 || (p[1] & 0x1F) != 7)
 				continue;
-			}
-			// check if this is a valid NAL header
-			if(cur[-2] != 0 || cur[-1] != 0 || cur[0] != 1) // if offset is < 2, this will read out of bounds. The console implementation has this behavior too so we have to replicate this bug
-			{
-				cur++;
-				continue;
-			}
-			uint8 nalHeader = cur[1];
-			if((nalHeader & 0x1F) != 7)
-			{
-				cur++;
-				continue;
-			}
-			uint8* spsStart = cur + 2;
-			uint32 spsLength = (uint32)(end - spsStart);
-			H264Dec_SeqParameterSet psp;
-			RBSPInputBitstream rbspStream(spsStart, spsLength, false);
-			bool r = H264Dec_parseSequencePS(rbspStream, psp);
-			if(!r)
+			uint8* sps = (uint8*)p + 2;
+			RBSPInputBitstream reader(sps, (uint32)(end - sps), false);
+			SpsDimensions dim;
+			if (!ReadSpsDimensions(reader, dim))
 			{
 				cemuLog_log(LogType::Force, "H264DECGetImageSize: Invalid SPS data");
-				cemu_assert_suspicious(); // should not happen
+				cemu_assert_suspicious();
 				return H264DEC_STATUS::BAD_STREAM;
 			}
-			*outputWidth = psp.pic_width_in_luma_samples;
-			*outputHeight = psp.pic_height_in_map_units_x16;
-			if (!psp.frame_mbs_only_flag)
-				*outputHeight *= 2;
-			if (!*outputHeight || !*outputWidth)
+			*outputWidth = dim.widthInPixels;
+			*outputHeight = dim.frameMbsOnly ? dim.heightInMapUnitsTimes16 : dim.heightInMapUnitsTimes16 * 2;
+			if (*outputWidth == 0 || *outputHeight == 0)
 				return H264DEC_STATUS::BAD_STREAM;
-			// BotW 1080p video support
 			if (H264_IsBotW() && *outputWidth == 1920 && *outputHeight == 1088)
 				*outputHeight = 1080;
 			return H264DEC_STATUS::SUCCESS;
 		}
 		return H264DEC_STATUS::BAD_STREAM;
 	}
+
+	// Size of the next decode unit at data+offset: everything up to the end of the first picture
+	// slice (NAL type 1 or 5), counted from data+offset. Pictures are assumed to have one slice
+	H264DEC_STATUS H264DECCheckDecunitLength(void* workMemory, uint8* data, uint32 maxLength, uint32 offset, uint32be* unitLengthOut)
+	{
+		if (offset >= maxLength || maxLength < 4)
+			return H264DEC_STATUS::INVALID_PARAM;
+		uint8* unit = data + offset;
+		const uint32 available = maxLength - offset;
+		NALInputBitstream nal(unit, available);
+		if (nal.hasError())
+		{
+			cemu_assert_debug(false);
+			return H264DEC_STATUS::BAD_STREAM;
+		}
+		// a unit without any start code is rejected
+		sint32 startCode = -1;
+		for (sint32 i = 0; i < (sint32)(available - 3); i++)
+		{
+			if (unit[i] == 0 && unit[i + 1] == 0 && unit[i + 2] == 1)
+			{
+				startCode = i;
+				break;
+			}
+		}
+		if (startCode < 0)
+			return H264DEC_STATUS::BAD_STREAM;
+		const uint8* unitStart = unit + startCode;
+		RBSPInputBitstream r;
+		while (!nal.isEndOfStream() && nal.getNextRBSP(r, true))
+		{
+			const uint8 header = r.readU8();
+			if (header & 0x80)
+			{
+				cemu_assert_debug(false); // forbidden_zero_bit
+				continue;
+			}
+			const uint8 type = header & 0x1F;
+			switch (type)
+			{
+			case 1: // non-IDR slice
+			case 5: // IDR slice
+				*unitLengthOut = (uint32)(sint32)((r.getBasePtr() + r.getBaseLength()) - unitStart) + startCode;
+				return H264DEC_STATUS::SUCCESS;
+			case 6: // SEI
+			case 7: // SPS
+			case 8: // PPS
+			case 9: // access unit delimiter
+			case 10: // end of sequence
+				break;
+			case 14:
+			case 20:
+			case 21:
+				cemu_assert_debug(false); // SVC/MVC
+				break;
+			default:
+				cemuLog_logDebug(LogType::Force, "H264: NAL unit type {} skipped", type);
+				cemu_assert_unimplemented();
+				break;
+			}
+		}
+		return H264DEC_STATUS::BAD_STREAM;
+	}
+
+	/* decoder sessions */
+
+	class SessionTable
+	{
+	public:
+		uint32 Create()
+		{
+			std::lock_guard lock(m_mutex);
+			const uint32 handle = m_nextHandle.fetch_add(1);
+			m_sessions.try_emplace(handle, CreateAVCDecoder());
+			return handle;
+		}
+
+		H264DecoderBackend* Get(uint32 handle)
+		{
+			std::lock_guard lock(m_mutex);
+			auto it = m_sessions.find(handle);
+			if (it == m_sessions.end())
+				return nullptr;
+			if (m_sessions.size() >= 5)
+			{
+				cemuLog_log(LogType::Force, "H264: Warning - more than 5 active sessions");
+				cemu_assert_suspicious();
+			}
+			return it->second;
+		}
+
+		void Destroy(uint32 handle)
+		{
+			std::lock_guard lock(m_mutex);
+			auto it = m_sessions.find(handle);
+			if (it == m_sessions.end())
+				return;
+			H264DecoderBackend* session = it->second;
+			session->Destroy();
+			delete session;
+			m_sessions.erase(it);
+		}
+
+	private:
+		std::mutex m_mutex;
+		std::unordered_map<uint32, H264DecoderBackend*> m_sessions;
+		std::atomic_uint32_t m_nextHandle{ 1 };
+	};
+
+	static SessionTable s_sessions;
+
+	static H264DecoderBackend* SessionOf(void* workMemory, const char* caller)
+	{
+		H264DecoderBackend* session = s_sessions.Get(((H264Context*)workMemory)->sessionHandle);
+		if (!session)
+			cemuLog_log(LogType::Force, "{}(): Invalid session", caller);
+		return session;
+	}
+
+	/* frame output */
+
+	struct H264DECFrameOutput
+	{
+		/* +0x00 */ uint32be result;
+		/* +0x04 */ uint32be padding04;
+		/* +0x08 */ betype<double> timestamp;
+		/* +0x10 */ uint32be frameWidth;
+		/* +0x14 */ uint32be frameHeight;
+		/* +0x18 */ uint32be bytesPerRow;
+		/* +0x1C */ uint32be cropEnable;
+		/* +0x20 */ uint32be cropTop;
+		/* +0x24 */ uint32be cropBottom;
+		/* +0x28 */ uint32be cropLeft;
+		/* +0x2C */ uint32be cropRight;
+		/* +0x30 */ uint32be ukn30;
+		/* +0x34 */ uint32be ukn34;
+		/* +0x38 */ uint32be ukn38;
+		/* +0x3C */ uint32be ukn3C;
+		/* +0x40 */ uint32be ukn40;
+		/* +0x44 */ MEMPTR<uint8> imagePtr;
+		/* +0x48 */ uint32 vuiEnable;
+		/* +0x4C */ MPTR vuiPtr;
+		/* +0x50 */ sint32 unused[10];
+	};
+	static_assert(sizeof(H264DECFrameOutput) == 0x78);
+
+	// argument of the guest output callback
+	struct H264OutputCBStruct
+	{
+		uint32be frameCount;
+		MEMPTR<MEMPTR<H264DECFrameOutput>> resultArray;
+		uint32be userParam;
+	};
+	static_assert(sizeof(H264OutputCBStruct) == 12);
+
+	// passes one frame to the guest callback (if one is set). Space for 8 frames is reserved on the
+	// guest stack, but frames are always reported one at a time
+	static void OutputFrame(H264Context* ctx, H264DecoderBackend::DecodeResult& frame)
+	{
+		constexpr sint32 kFrameCount = 1;
+		StackAllocator<MEMPTR<void>, 8> resultPtrs;
+		StackAllocator<H264DECFrameOutput, 8> results;
+		for (sint32 i = 0; i < kFrameCount; i++)
+			resultPtrs[i] = &results + i;
+
+		H264DECFrameOutput* out = &results + 0;
+		memset(out, 0, sizeof(H264DECFrameOutput));
+		out->result = 100;
+		out->timestamp = frame.timestamp;
+		out->frameWidth = frame.frameWidth;
+		out->frameHeight = frame.frameHeight;
+		out->bytesPerRow = frame.bytesPerRow;
+		out->cropEnable = frame.cropEnable;
+		out->cropTop = frame.cropTop;
+		out->cropBottom = frame.cropBottom;
+		out->cropLeft = frame.cropLeft;
+		out->cropRight = frame.cropRight;
+		out->imagePtr = (uint8*)frame.imageOutput;
+
+		StackAllocator<H264OutputCBStruct> cbArg;
+		cbArg->frameCount = kFrameCount;
+		cbArg->resultArray = (MEMPTR<H264DECFrameOutput>*)resultPtrs.GetPointer();
+		cbArg->userParam = ctx->Param.userMemoryParam.GetBEValue();
+
+		if (ctx->Param.outputFunc.IsNull())
+			return;
+		cemuLog_log(LogType::H264, "H264: Outputting frame via callback. Timestamp: {} Buffer 0x{:08x} UserParam 0x{:08x}", (double)frame.timestamp, (uint32)out->imagePtr.GetMPTR(), ctx->Param.userMemoryParam.GetMPTR());
+		PPCCoreCallback(ctx->Param.outputFunc.GetMPTR(), cbArg.GetMPTR());
+	}
+
+	// true when the first picture slice in the data is an IDR slice
+	static bool StartsWithIdrPicture(uint8* data, sint32 length)
+	{
+		NALInputBitstream nal(data, length);
+		RBSPInputBitstream r;
+		while (nal.getNextRBSP(r))
+		{
+			const uint8 header = r.readU8();
+			if (header & 0x80)
+			{
+				cemu_assert_suspicious();
+				return false;
+			}
+			const uint8 type = header & 0x1F;
+			if (type == 5)
+				return true;
+			if (type == 1)
+				return false;
+		}
+		return false;
+	}
+
+	/* session control */
 
 	uint32 H264DECInitParam(uint32 workMemorySize, void* workMemory)
 	{
@@ -356,123 +486,59 @@ namespace H264
 		return 0;
 	}
 
-	std::unordered_map<uint32, H264DecoderBackend*> sDecoderSessions;
-	std::mutex sDecoderSessionsMutex;
-	std::atomic_uint32_t sCurrentSessionHandle{ 1 };
-
-	H264DecoderBackend* CreateAVCDecoder();
-
-	static H264DecoderBackend* _CreateDecoderSession(uint32& handleOut)
-	{
-		std::unique_lock _lock(sDecoderSessionsMutex);
-		handleOut = sCurrentSessionHandle.fetch_add(1);
-		H264DecoderBackend* session = CreateAVCDecoder();
-		sDecoderSessions.try_emplace(handleOut, session);
-		return session;
-	}
-
-	static H264DecoderBackend* _AcquireDecoderSession(uint32 handle)
-	{
-		std::unique_lock _lock(sDecoderSessionsMutex);
-		auto it = sDecoderSessions.find(handle);
-		if (it == sDecoderSessions.end())
-			return nullptr;
-		H264DecoderBackend* session = it->second;
-		if (sDecoderSessions.size() >= 5)
-		{
-			cemuLog_log(LogType::Force, "H264: Warning - more than 5 active sessions");
-			cemu_assert_suspicious();
-		}
-		return session;
-	}
-
-	static void _ReleaseDecoderSession(H264DecoderBackend* session)
-	{
-		std::unique_lock _lock(sDecoderSessionsMutex);
-
-	}
-
-	static void _DestroyDecoderSession(uint32 handle)
-	{
-		std::unique_lock _lock(sDecoderSessionsMutex);
-		auto it = sDecoderSessions.find(handle);
-		if (it == sDecoderSessions.end())
-			return;
-		H264DecoderBackend* session = it->second;
-		session->Destroy();
-		delete session;
-		sDecoderSessions.erase(it);
-	}
-
 	uint32 H264DECOpen(void* workMemory)
 	{
-		H264Context* ctx = (H264Context*)workMemory;
-		uint32 sessionHandle;
-		_CreateDecoderSession(sessionHandle);
-		ctx->sessionHandle = sessionHandle;
+		((H264Context*)workMemory)->sessionHandle = s_sessions.Create();
 		return 0;
 	}
 
 	uint32 H264DECClose(void* workMemory)
 	{
 		if (workMemory)
-		{
-			H264Context* ctx = (H264Context*)workMemory;
-			_DestroyDecoderSession(ctx->sessionHandle);
-		}
+			s_sessions.Destroy(((H264Context*)workMemory)->sessionHandle);
 		return 0;
 	}
 
 	uint32 H264DECBegin(void* workMemory)
 	{
 		H264Context* ctx = (H264Context*)workMemory;
-		H264DecoderBackend* session = _AcquireDecoderSession(ctx->sessionHandle);
+		H264DecoderBackend* session = SessionOf(workMemory, "H264DECBegin");
 		if (!session)
+			return 0;
+		if (!ctx->decoderState.isFirstBegin)
 		{
-			cemuLog_log(LogType::Force, "H264DECBegin(): Invalid session");
+			// playback restarts, possibly somewhere else in the stream: wait for the next IDR picture
+			ctx->decoderState.isTryingToRecover = true;
 			return 0;
 		}
-		if (ctx->decoderState.isFirstBegin)
-		{
-			session->Init(ctx->Param.outputPerFrame == 0);
-			ctx->decoderState.isFirstBegin = false;
-		}
-		else
-			ctx->decoderState.isTryingToRecover = true;
-		//ctx->decoderState.numFramesInFlight = 0;
-		_ReleaseDecoderSession(session);
+		session->Init(ctx->Param.outputPerFrame == 0);
+		ctx->decoderState.isFirstBegin = false;
 		return 0;
 	}
 
-	void H264DoFrameOutputCallback(H264Context* ctx, H264DecoderBackend::DecodeResult& decodeResult);
-
+	// outputs all remaining frames. The session stays usable for a following H264DECBegin
 	H264DEC_STATUS H264DECEnd(void* workMemory)
 	{
 		H264Context* ctx = (H264Context*)workMemory;
-		H264DecoderBackend* session = _AcquireDecoderSession(ctx->sessionHandle);
+		H264DecoderBackend* session = SessionOf(workMemory, "H264DECEnd");
 		if (!session)
-		{
-			cemuLog_log(LogType::Force, "H264DECEnd(): Invalid session");
 			return H264DEC_STATUS::SUCCESS;
-		}
-		coreinit::OSEvent* flushEvt = &session->GetFlushEvent();
-		coreinit::OSResetEvent(flushEvt);
+		coreinit::OSEvent* flushDone = &session->GetFlushEvent();
+		coreinit::OSResetEvent(flushDone);
 		session->QueueFlush();
-		coreinit::OSWaitEvent(flushEvt);
-		while(true)
+		coreinit::OSWaitEvent(flushDone);
+		H264DecoderBackend::DecodeResult frame;
+		while (session->GetFrameOutputIfReady(frame))
 		{
-			H264DecoderBackend::DecodeResult decodeResult;
-			if( !session->GetFrameOutputIfReady(decodeResult) )
-				break;
-			// todo - output all frames in a single callback?
-			H264DoFrameOutputCallback(ctx, decodeResult);
+			OutputFrame(ctx, frame);
 			ctx->decoderState.numFramesInFlight--;
+			frame = {};
 		}
-		cemu_assert_debug(ctx->decoderState.numFramesInFlight == 0); // no frames should be in flight anymore. Exact behavior is not well understood but we may have to output dummy frames if necessary
-		_ReleaseDecoderSession(session);
-		// does not destroy decoder session, keeps it mostly intact so playback can resume after the next H264DECBegin call (potentially at a different location in the stream)
+		cemu_assert_debug(ctx->decoderState.numFramesInFlight == 0);
 		return H264DEC_STATUS::SUCCESS;
 	}
+
+	/* parameters */
 
 	H264DEC_STATUS H264DECSetParam_FPTR_OUTPUT(H264Context* ctx, void* outputFunc)
 	{
@@ -494,34 +560,35 @@ namespace H264
 
 	H264DEC_STATUS H264DECSetParam(H264Context* ctx, uint32 paramId, void* paramValue)
 	{
-		const uint32 PARAMID_FPTR_OUTPUT = 0x1;
-		const uint32 PARAMID_OUTPUT_PER_FRAME = 0x20000002;
-		const uint32 PARAMID_USER_MEMORY = 0x70000001;
-		const uint32 PARAMID_UKN = 0x20000030;
-
-		if (paramId == PARAMID_FPTR_OUTPUT)
+		enum : uint32
 		{
+			kParamOutputFunction = 0x1,
+			kParamOutputPerFrame = 0x20000002,
+			kParamUnknown30 = 0x20000030, // used by MK8, points to a bool; no effect
+			kParamUserMemory = 0x70000001,
+		};
+		switch (paramId)
+		{
+		case kParamOutputFunction:
 			ctx->Param.outputFunc = paramValue;
-		}
-		else if (paramId == PARAMID_USER_MEMORY)
-		{
+			break;
+		case kParamUserMemory:
 			ctx->Param.userMemoryParam = paramValue;
-		}
-		else if (paramId == PARAMID_OUTPUT_PER_FRAME)
-		{
+			break;
+		case kParamOutputPerFrame:
 			ctx->Param.outputPerFrame = *(uint8be*)paramValue != 0;
-		}
-		else if (paramId == PARAMID_UKN)
-		{
-			// unknown purpose, seen in MK8. paramValue points to a bool
-		}
-		else
-		{
+			break;
+		case kParamUnknown30:
+			break;
+		default:
 			cemuLog_log(LogType::Force, "h264Export_H264DECSetParam(): Unsupported parameterId 0x{:08x}\n", paramId);
 			cemu_assert_unimplemented();
+			break;
 		}
 		return H264DEC_STATUS::SUCCESS;
 	}
+
+	/* decoding */
 
 	uint32 H264DECSetBitstream(void* workMemory, void* ptr, uint32 length, double timestamp)
 	{
@@ -532,258 +599,47 @@ namespace H264
 		return 0;
 	}
 
-	struct H264DECFrameOutput
-	{
-		/* +0x00 */ uint32be result;
-		/* +0x04 */ uint32be padding04;
-		/* +0x08 */ betype<double> timestamp;
-		/* +0x10 */ uint32be frameWidth;
-		/* +0x14 */ uint32be frameHeight;
-		/* +0x18 */ uint32be bytesPerRow;
-		/* +0x1C */ uint32be cropEnable;
-		/* +0x20 */ uint32be cropTop;
-		/* +0x24 */ uint32be cropBottom;
-		/* +0x28 */ uint32be cropLeft;
-		/* +0x2C */ uint32be cropRight;
-
-		/* +0x30 */ uint32be ukn30;
-		/* +0x34 */ uint32be ukn34;
-		/* +0x38 */ uint32be ukn38;
-		/* +0x3C */ uint32be ukn3C;
-		/* +0x40 */ uint32be ukn40;
-
-		/* +0x44 */ MEMPTR<uint8> imagePtr;
-
-		/* +0x48 */ uint32 vuiEnable;
-		/* +0x4C */ MPTR   vuiPtr;
-		/* +0x50 */ sint32 unused[10];
-	};
-
-	struct H264OutputCBStruct
-	{
-		uint32be frameCount;
-		MEMPTR<MEMPTR<H264DECFrameOutput>> resultArray;
-		uint32be userParam;
-	};
-
-	static_assert(sizeof(H264OutputCBStruct) == 12);
-
-	void H264DoFrameOutputCallback(H264Context* ctx, H264DecoderBackend::DecodeResult& decodeResult)
-	{
-		sint32 outputFrameCount = 1;
-
-		cemu_assert(outputFrameCount < 8);
-
-		StackAllocator<MEMPTR<void>, 8> stack_resultPtrArray;
-		StackAllocator<H264DECFrameOutput, 8> stack_decodedFrameResult;
-
-		for (sint32 i = 0; i < outputFrameCount; i++)
-			stack_resultPtrArray[i] = &stack_decodedFrameResult + i;
-
-		H264DECFrameOutput* frameOutput = &stack_decodedFrameResult + 0;
-		memset(frameOutput, 0x00, sizeof(H264DECFrameOutput));
-		frameOutput->imagePtr = (uint8*)decodeResult.imageOutput;
-		frameOutput->result = 100;
-		frameOutput->timestamp = decodeResult.timestamp;
-		frameOutput->frameWidth = decodeResult.frameWidth;
-		frameOutput->frameHeight = decodeResult.frameHeight;
-		frameOutput->bytesPerRow = decodeResult.bytesPerRow;
-		frameOutput->cropEnable = decodeResult.cropEnable;
-		frameOutput->cropTop = decodeResult.cropTop;
-		frameOutput->cropBottom = decodeResult.cropBottom;
-		frameOutput->cropLeft = decodeResult.cropLeft;
-		frameOutput->cropRight = decodeResult.cropRight;
-
-		StackAllocator<H264OutputCBStruct> stack_fptrOutputData;
-		stack_fptrOutputData->frameCount = outputFrameCount;
-		stack_fptrOutputData->resultArray = (MEMPTR<H264DECFrameOutput>*)stack_resultPtrArray.GetPointer();
-		stack_fptrOutputData->userParam = ctx->Param.userMemoryParam.GetBEValue();
-
-		// FPTR callback
-		if (!ctx->Param.outputFunc.IsNull())
-		{
-			cemuLog_log(LogType::H264, "H264: Outputting frame via callback. Timestamp: {} Buffer 0x{:08x} UserParam 0x{:08x}", (double)decodeResult.timestamp, (uint32)frameOutput->imagePtr.GetMPTR(), ctx->Param.userMemoryParam.GetMPTR());
-			PPCCoreCallback(ctx->Param.outputFunc.GetMPTR(), stack_fptrOutputData.GetMPTR());
-		}
-	}
-
-	// find the first framedata slice (if there is any) and check if the type is idr
-	bool IsIDRSlice(uint8* streamData, sint32 length)
-	{
-		NALInputBitstream nalStream(streamData, length);
-		RBSPInputBitstream rbspStream;
-		while (nalStream.getNextRBSP(rbspStream))
-		{
-			// parse NAL header
-			uint8 nalHeaderByte = rbspStream.readU8();
-			if ((nalHeaderByte & 0x80) == 0)
-			{
-				uint8 nal_unit_type = (nalHeaderByte >> 0) & 0x1f;
-				if (nal_unit_type == 1) // non-idr
-					return false;
-				else if (nal_unit_type == 5) // idr
-					return true;
-			}
-			else
-			{
-				cemu_assert_suspicious();
-				return false; // corrupted stream?
-			}
-		}
-		return false;
-	}
-
 	uint32 H264DECExecute(void* workMemory, void* imageOutput)
 	{
+		constexpr uint32 kResultFrameOutput = 0x80 | 100;
+		constexpr uint32 kResultNotRecovered = 0x400; // exact console code unknown
 		cemuLog_log(LogType::H264, "H264DECExecute(): [BEGIN]");
-		BenchmarkTimer bt;
-		bt.Start();
+		BenchmarkTimer timer;
+		timer.Start();
 		H264Context* ctx = (H264Context*)workMemory;
-		H264DecoderBackend* session = _AcquireDecoderSession(ctx->sessionHandle);
+		H264DecoderBackend* session = SessionOf(workMemory, "H264DECExecute");
 		if (!session)
-		{
-			cemuLog_log(LogType::Force, "H264DECExecute(): Invalid session");
 			return 0;
-		}
-		// if in recovery mode then return an error until we reach a IDR frame
+		uint8* data = (uint8*)ctx->BitStream.ptr.GetPtr();
+		const uint32 length = ctx->BitStream.length;
 		if (ctx->decoderState.isTryingToRecover)
 		{
-			bool isIDR = IsIDRSlice((uint8*)ctx->BitStream.ptr.GetPtr(), ctx->BitStream.length);
-			if (isIDR)
-			{
-				ctx->decoderState.isTryingToRecover = false;
-			}
-			else
-			{
-				return 0x400; // error (figure out exact error code. Bit 0x80 indicates presence of frame?)
-			}
+			if (!StartsWithIdrPicture(data, length))
+				return kResultNotRecovered;
+			ctx->decoderState.isTryingToRecover = false;
 		}
-		// feed data to backend
-		session->QueueForDecode((uint8*)ctx->BitStream.ptr.GetPtr(), ctx->BitStream.length, ctx->BitStream.timestamp, imageOutput);
+		session->QueueForDecode(data, length, ctx->BitStream.timestamp, imageOutput);
 		ctx->decoderState.numFramesInFlight++;
-		// H264DECExecute is synchronous and will return a frame after either every call (non-buffered) or after 6 calls (buffered)
-		// normally frame decoding happens only during H264DECExecute, but in order to hide the latency of our CPU decoder we will decode asynchronously in buffered mode
-		uint32 numFramesToBuffer = (ctx->Param.outputPerFrame == 0) ? 5 : 0;
-		if(ctx->decoderState.numFramesInFlight > numFramesToBuffer)
+		// the console decodes synchronously; buffered mode lets the host decoder run five pictures ahead
+		const uint32 maxInFlight = ctx->Param.outputPerFrame == 0 ? 5 : 0;
+		if (ctx->decoderState.numFramesInFlight > maxInFlight)
 		{
 			ctx->decoderState.numFramesInFlight--;
-			while(true)
+			H264DecoderBackend::DecodeResult frame;
+			do
 			{
-				coreinit::OSEvent& evt = session->GetFrameOutputEvent();
-				coreinit::OSWaitEvent(&evt);
-				H264DecoderBackend::DecodeResult decodeResult;
-				if( !session->GetFrameOutputIfReady(decodeResult) )
-					continue;
-				H264DoFrameOutputCallback(ctx, decodeResult);
-				break;
-			}
+				coreinit::OSWaitEvent(&session->GetFrameOutputEvent());
+			} while (!session->GetFrameOutputIfReady(frame));
+			OutputFrame(ctx, frame);
 		}
-		_ReleaseDecoderSession(session);
-		bt.Stop();
-		double callTime = bt.GetElapsedMilliseconds();
-		cemuLog_log(LogType::H264, "H264Bench | H264DECExecute took {}ms", callTime);
-		return 0x80 | 100;
-	}
-
-	H264DEC_STATUS H264DECCheckDecunitLength(void* workMemory, uint8* data, uint32 maxLength, uint32 offset, uint32be* unitLengthOut)
-	{
-		// todo: our implementation for this currently doesn't parse slice headers and instead assumes that each frame is encoded into a single NAL slice. For all known cases this is sufficient but it doesn't match console behavior for cases where frames are split into multiple NALs
-		if (offset >= maxLength || maxLength < 4)
-		{
-			return H264DEC_STATUS::INVALID_PARAM;
-		}
-
-		data += offset;
-		maxLength -= offset;
-
-		NALInputBitstream nalStream(data, maxLength);
-
-		if (nalStream.hasError())
-		{
-			cemu_assert_debug(false);
-			return H264DEC_STATUS::BAD_STREAM;
-		}
-
-		// search for start code
-		sint32 startCodeOffset = 0;
-		bool hasStartcode = false;
-		while (startCodeOffset < (sint32)(maxLength - 3))
-		{
-			if (data[startCodeOffset + 0] == 0x00 && data[startCodeOffset + 1] == 0x00 && data[startCodeOffset + 2] == 0x01)
-			{
-				hasStartcode = true;
-				break;
-			}
-			startCodeOffset++;
-		}
-		if (hasStartcode == false)
-			return H264DEC_STATUS::BAD_STREAM;
-		data += startCodeOffset;
-		maxLength -= startCodeOffset;
-
-		// parse NAL data
-		while (true)
-		{
-			if (nalStream.isEndOfStream())
-				break;
-			RBSPInputBitstream rbspStream;
-			if (nalStream.getNextRBSP(rbspStream, true) == false)
-				break;
-
-			sint32 streamSubOffset = (sint32)(rbspStream.getBasePtr() - data);
-			sint32 streamSubLength = rbspStream.getBaseLength();
-
-			// parse NAL header
-			uint8 nalHeaderByte = rbspStream.readU8();
-			if ((nalHeaderByte & 0x80) != 0)
-			{
-				// MSB must be zero
-				cemu_assert_debug(false);
-				continue;
-			}
-			uint8 nal_ref_idc = (nalHeaderByte >> 5) & 0x3;
-			uint8 nal_unit_type = (nalHeaderByte >> 0) & 0x1f;
-			if (nal_unit_type == 14 || nal_unit_type == 20 || nal_unit_type == 21)
-			{
-				cemu_assert_debug(false);
-				continue;
-			}
-			switch (nal_unit_type)
-			{
-			case 1:
-			case 5:
-			{
-				*unitLengthOut = (sint32)((rbspStream.getBasePtr() + rbspStream.getBaseLength()) - data) + startCodeOffset;
-				return H264DEC_STATUS::SUCCESS;
-			}
-			case 6:
-				// SEI
-				break;
-			case 7:
-				// SPS
-				break;
-			case 8:
-				// PPS
-				break;
-			case 9:
-				// access unit delimiter
-				break;
-			case 10:
-				// end of sequence
-				break;
-			default:
-				cemuLog_logDebug(LogType::Force, "Unsupported NAL unit type {}", nal_unit_type);
-				cemu_assert_unimplemented();
-				// todo
-				break;
-			}
-		}
-		return H264DEC_STATUS::BAD_STREAM;
+		timer.Stop();
+		cemuLog_log(LogType::H264, "H264Bench | H264DECExecute took {}ms", timer.GetElapsedMilliseconds());
+		return kResultFrameOutput;
 	}
 
 	class : public COSModule
 	{
-		public:
+	public:
 		std::string_view GetName() override
 		{
 			return "h264";
@@ -813,10 +669,10 @@ namespace H264
 
 			cafeExportRegister("h264", H264DECCheckDecunitLength, LogType::H264);
 		};
-	}s_COSh264Module;
+	}s_h264Module;
 
 	COSModule* GetModule()
 	{
-		return &s_COSh264Module;
+		return &s_h264Module;
 	}
 }

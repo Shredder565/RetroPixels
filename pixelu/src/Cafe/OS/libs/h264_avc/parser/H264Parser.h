@@ -1,290 +1,196 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// H.264 Annex B helpers: a bit reader over one NAL payload, a splitter that walks start codes,
+// and a small header parser (SPS, PPS, slice headers) with its state structs.
 #pragma once
 
-/* stream parsers */
-
+// Reads bits MSB first from one NAL unit payload. Emulation prevention bytes (00 00 03) are skipped
+// unless disabled. Reads past the end return zero bits.
 class RBSPInputBitstream
 {
 public:
 	RBSPInputBitstream() {};
 
-	RBSPInputBitstream(uint8* stream, uint32 length, bool removeEmulationByte = true) : m_removeEmulationByte(removeEmulationByte)
+	RBSPInputBitstream(uint8* stream, uint32 length, bool removeEmulationByte = true)
+		: streamPtr(stream), streamLength(length), m_removeEmulationByte(removeEmulationByte)
 	{
-		this->streamPtr = stream;
-		this->streamLength = length;
-		if (streamLength >= 1)
-			currentRBSPByte = streamPtr[0];
-		else
-			currentRBSPByte = 0;
-		errorFlag = false;
+		currentRBSPByte = length > 0 ? stream[0] : 0;
 	}
 
-	bool hasError() const
-	{
-		return errorFlag;
-	}
+	bool hasError() const { return errorFlag; }
+	bool isByteAligned() const { return bitIndex == 0; }
+	bool isEndOfStream() { return readIndex >= streamLength; }
 
-	bool isByteAligned() const
-	{
-		return bitIndex == 0;
-	}
+	uint8* getBasePtr() { return streamPtr; }
+	sint32 getBaseLength() { return streamLength; }
 
 	uint8 readU8()
 	{
-		if (readIndex >= streamLength)
+		if (isEndOfStream())
 			return 0;
 		cemu_assert_debug(bitIndex == 0);
-		uint8 v = _getCurrentRBSPByte();
-		_nextRBSPByte();
+		const uint8 v = currentRBSPByte;
+		advanceByte();
 		return v;
 	}
 
 	uint8 readBit()
 	{
-		if (readIndex >= streamLength)
+		if (isEndOfStream())
 			return 0;
-		uint8 v = _getCurrentRBSPByte();
-		uint8 bitValue = (v >> (7 - bitIndex)) & 1;
-		bitIndex += 1;
-		if (bitIndex >= 8)
+		const uint8 bit = (currentRBSPByte >> (7 - bitIndex)) & 1;
+		if (++bitIndex == 8)
 		{
 			bitIndex = 0;
-			_nextRBSPByte();
+			advanceByte();
 		}
-		return bitValue;
+		return bit;
+	}
+
+	uint32 readBits(sint32 count)
+	{
+		uint32 v = 0;
+		while (count-- > 0)
+			v = (v << 1) | readBit();
+		return v;
 	}
 
 	template<int N>
 	uint32 readBits()
 	{
-		uint32 v = 0;
-		for (sint32 i = 0; i < N; i++)
-		{
-			v <<= 1;
-			v |= (readBit() ? 1 : 0);
-		}
-		return v;
+		return readBits(N);
 	}
 
-	uint32 readBits(sint32 N)
-	{
-		uint32 v = 0;
-		for (sint32 i = 0; i < N; i++)
-		{
-			v <<= 1;
-			v |= (readBit() ? 1 : 0);
-		}
-		return v;
-	}
-
+	// unsigned Exp-Golomb code; more than 30 leading zeros yields 0
 	uint32 readUV_E()
 	{
-		if (readBit() != 0)
+		for (sint32 zeros = 0; zeros < 31; zeros++)
 		{
-			return 0;
-		}
-		for (sint32 i = 1; i < 31; i++)
-		{
-			uint8 bitValue = readBit();
-			if (bitValue)
-			{
-				uint32 rangeBase = (1 << i) - 1;
-				// read range bits
-				uint32 suffixBits = 0;
-				for (sint32 b = 0; b < i; b++)
-				{
-					suffixBits <<= 1;
-					suffixBits |= (readBit() ? 1 : 0);
-				}
-				return rangeBase + suffixBits;
-			}
+			if (readBit() == 0)
+				continue;
+			if (zeros == 0)
+				return 0;
+			return ((1u << zeros) - 1) + readBits(zeros);
 		}
 		cemu_assert_debug(false);
 		return 0;
 	}
 
+	// signed Exp-Golomb code: 1, 2, 3, 4 ... map to 1, -1, 2, -2 ...
 	sint32 readSV_E()
 	{
-		uint32 t = readUV_E();
-		if (t == 0)
-			return 0;
-		if ((t & 1) != 0)
-		{
-			// positive
-			return (sint32)((t + 1) / 2);
-		}
-		// negative
-		return -(sint32)((t + 1) / 2);
+		const uint32 code = readUV_E();
+		const sint32 magnitude = (sint32)((code + 1) / 2);
+		return (code & 1) ? magnitude : -magnitude;
 	}
 
+	// rbsp_trailing_bits: a one bit, zero bits up to the byte boundary, and nothing after that
 	bool readTrailingRBSPBits()
 	{
-		// read the stop bit which must always be 1
-		if (readBit() == 0)
+		if (readBit() != 1)
 			return false;
-		// read zero bits until byte aligned
 		while (bitIndex != 0)
 		{
 			if (readBit() != 0)
-				return false; // invalid padding bit
+				return false;
 		}
-		// check if we reached end of stream
-		if (readIndex >= streamLength)
-			return true;
-		return false;
+		return isEndOfStream();
 	}
 
 	bool more_rbsp_data()
 	{
-		uint32 storedReadIndex = readIndex;
-		uint32 storedBitIndex = bitIndex;
-		bool hasMoreRBSPData = readTrailingRBSPBits() == false;
-		readIndex = storedReadIndex;
-		bitIndex = storedBitIndex;
-		currentRBSPByte = streamPtr[readIndex];
-		return hasMoreRBSPData;
-	}
-
-	bool isEndOfStream()
-	{
-		return readIndex >= streamLength;
-	}
-
-
-	uint8* getBasePtr()
-	{
-		return streamPtr;
-	}
-
-	sint32 getBaseLength()
-	{
-		return streamLength;
+		const uint32 savedIndex = readIndex;
+		const sint32 savedBit = bitIndex;
+		const bool atTrailingBits = readTrailingRBSPBits();
+		readIndex = savedIndex;
+		bitIndex = savedBit;
+		currentRBSPByte = readIndex < streamLength ? streamPtr[readIndex] : 0;
+		return !atTrailingBits;
 	}
 
 private:
-	uint8 _getCurrentRBSPByte()
+	void advanceByte()
 	{
-		return currentRBSPByte;
+		readIndex++;
+		// the window is checked on the raw bytes, so a skipped 03 can itself start the next pattern
+		if (m_removeEmulationByte && readIndex >= 2 && readIndex < streamLength &&
+			streamPtr[readIndex] == 0x03 && streamPtr[readIndex - 1] == 0x00 && streamPtr[readIndex - 2] == 0x00)
+			readIndex++;
+		currentRBSPByte = readIndex < streamLength ? streamPtr[readIndex] : 0;
 	}
 
-	void _nextRBSPByte()
-	{
-		readIndex += sizeof(uint8);
-		if (readIndex >= 2 && streamPtr[readIndex - 2] == 0x00 && streamPtr[readIndex - 1] == 0x00 && streamPtr[readIndex] == 0x03 && m_removeEmulationByte)
-		{
-			readIndex += 1;
-			currentRBSPByte = streamPtr[readIndex];
-			return;
-		}
-		else
-		{
-			currentRBSPByte = streamPtr[readIndex];
-		}
-	}
-
-private:
-	uint8* streamPtr;
-	uint32 streamLength;
+	uint8* streamPtr{};
+	uint32 streamLength{};
 	uint32 readIndex{};
-	uint8  currentRBSPByte{};
+	uint8 currentRBSPByte{};
 	sint32 bitIndex{};
 	bool errorFlag{};
 	bool m_removeEmulationByte{};
 };
 
+// Splits an Annex B byte stream into NAL units at 00 00 01 / 00 00 00 01 start codes.
 class NALInputBitstream
 {
 public:
-	NALInputBitstream(uint8* stream, uint32 length)
-	{
-		this->nalStreamPtr = stream;
-		this->nalStreamLength = length;
-		errorFlag = false;
-	}
+	NALInputBitstream(uint8* stream, uint32 length) : nalStreamPtr(stream), nalStreamLength((sint32)length) {}
 
-	bool hasError()
-	{
-		return errorFlag;
-	}
+	bool hasError() { return errorFlag; }
+	bool isEndOfStream() { return readIndex >= nalStreamLength; }
 
+	// Returns the payload between the current position and the next start code. When no further
+	// start code exists the unit runs to the end of the buffer, unless mustEndAtStartCode is set.
 	bool getNextRBSP(RBSPInputBitstream& rbspInputBitstream, bool mustEndAtStartCode = false)
 	{
-		sint32 indexNextStartSignature = findNextStartSignature();
-
-		if (indexNextStartSignature < 0)
+		sint32 unitEnd = FindNextStartCode();
+		if (unitEnd < 0)
 		{
 			if (mustEndAtStartCode)
 				return false;
-			indexNextStartSignature = nalStreamLength;
+			unitEnd = nalStreamLength;
 		}
-		if (indexNextStartSignature <= readIndex)
+		if (unitEnd <= readIndex)
 			return false;
-		// skip current start signature
-		if ((nalStreamLength - readIndex) >= 3 && nalStreamPtr[readIndex + 0] == 0 && nalStreamPtr[readIndex + 1] == 0 && nalStreamPtr[readIndex + 2] == 1)
-		{
+		// step over the start code of this unit. Like the console library, the four byte form is
+		// tested whenever three bytes remain
+		if (nalStreamLength - readIndex >= 3 && IsShortStartCode(readIndex))
 			readIndex += 3;
-		}
-		else if ((nalStreamLength - readIndex) >= 3 && nalStreamPtr[readIndex + 0] == 0 && nalStreamPtr[readIndex + 1] == 0 && nalStreamPtr[readIndex + 2] == 0 && nalStreamPtr[readIndex + 3] == 1)
-		{
+		else if (nalStreamLength - readIndex >= 3 && IsLongStartCode(readIndex))
 			readIndex += 4;
-		}
-		else
-		{
-			// no start signature
-		}
-		cemu_assert(readIndex <= indexNextStartSignature);
-		cemu_assert_debug(readIndex != indexNextStartSignature);
-		// create rbsp substream
-		rbspInputBitstream = RBSPInputBitstream(nalStreamPtr + readIndex, indexNextStartSignature - readIndex);
-		readIndex = indexNextStartSignature;
+		cemu_assert(readIndex <= unitEnd);
+		cemu_assert_debug(readIndex != unitEnd);
+		rbspInputBitstream = RBSPInputBitstream(nalStreamPtr + readIndex, unitEnd - readIndex);
+		readIndex = unitEnd;
 		return true;
 	}
 
-	bool isEndOfStream()
-	{
-		return readIndex >= nalStreamLength;
-	}
-
 private:
-	sint32 findNextStartSignature()
+	bool IsShortStartCode(sint32 i) const { return nalStreamPtr[i] == 0 && nalStreamPtr[i + 1] == 0 && nalStreamPtr[i + 2] == 1; }
+	bool IsLongStartCode(sint32 i) const { return nalStreamPtr[i] == 0 && nalStreamPtr[i + 1] == 0 && nalStreamPtr[i + 2] == 0 && nalStreamPtr[i + 3] == 1; }
+
+	// offset of the start code that follows the unit at readIndex, or -1
+	sint32 FindNextStartCode() const
 	{
 		if (readIndex >= nalStreamLength)
 			return -1;
-		sint32 offset = readIndex;
-		// if there is a start signature at the current address, skip it
-		if ((offset + 3) <= nalStreamLength && nalStreamPtr[offset + 0] == 0x00 && nalStreamPtr[offset + 1] == 0x00 && nalStreamPtr[offset + 2] == 0x01)
+		sint32 pos = readIndex;
+		if (pos + 3 <= nalStreamLength && IsShortStartCode(pos))
+			pos += 3;
+		else if (pos + 4 <= nalStreamLength && IsLongStartCode(pos))
+			pos += 4;
+		for (; pos < nalStreamLength - 3; pos++)
 		{
-			offset += 3;
-		}
-		else if ((offset + 4) <= nalStreamLength && nalStreamPtr[offset + 0] == 0x00 && nalStreamPtr[offset + 1] == 0x00 && nalStreamPtr[offset + 2] == 0x00 && nalStreamPtr[offset + 3] == 0x01)
-		{
-			offset += 4;
-		}
-		while (offset < (nalStreamLength - 3))
-		{
-			if (nalStreamPtr[offset + 0] == 0x00 && nalStreamPtr[offset + 1] == 0x00)
-			{
-				if (nalStreamPtr[offset + 2] == 0x01)
-				{
-					return offset;
-				}
-				else if ((nalStreamLength - offset) >= 4 && nalStreamPtr[offset + 2] == 0x00 && nalStreamPtr[offset + 3] == 0x01)
-				{
-					return offset;
-				}
-			}
-			offset++;
+			if (IsShortStartCode(pos) || IsLongStartCode(pos))
+				return pos;
 		}
 		return -1;
 	}
 
-private:
 	uint8* nalStreamPtr;
 	sint32 nalStreamLength;
 	sint32 readIndex{};
 	bool errorFlag{};
 };
 
-/* H264 NAL parser */
+/* parsed header data */
 
 struct h264_scaling_matrix4x4_t
 {
@@ -305,14 +211,10 @@ struct h264State_pic_parameter_set_t
 	uint32 pic_parameter_set_id;
 	uint32 seq_parameter_set_id;
 	uint8 entropy_coding_mode_flag;
-	uint8 bottom_field_pic_order_in_frame_present_flag; // alias pic_order_present_flag
+	uint8 bottom_field_pic_order_in_frame_present_flag;
 	uint32 num_slice_groups_minus1;
-	// slice group
-	uint32 slice_group_map_type;
-	// todo - some variable sized fields
-
-	uint32 slice_group_change_rate_minus1; // todo
-
+	uint32 slice_group_map_type; // slice groups are not parsed
+	uint32 slice_group_change_rate_minus1;
 	uint32 num_ref_idx_l0_default_active_minus1;
 	uint32 num_ref_idx_l1_default_active_minus1;
 	uint8 weighted_pred_flag;
@@ -320,53 +222,40 @@ struct h264State_pic_parameter_set_t
 	sint32 pic_init_qp_minus26;
 	sint32 pic_init_qs_minus26;
 	sint32 chroma_qp_index_offset;
-
 	uint8 deblocking_filter_control_present_flag;
 	uint8 constrained_intra_pred_flag;
 	uint8 redundant_pic_cnt_present_flag;
-
 	uint8 transform_8x8_mode_flag;
 	uint8 pic_scaling_matrix_present_flag;
 	h264_scaling_matrix4x4_t ScalingList4x4[6];
 	h264_scaling_matrix8x8_t ScalingList8x8[6];
-
 	sint32 second_chroma_qp_index_offset;
 };
 
-
 struct h264State_seq_parameter_set_t
 {
-	uint8 profile_idc; // 0x64 = high profile
-	uint8 constraint; // 6 flags + 2 reserved bits
-	uint8 level_idc; // 0x29 = level 4.1
-
-	uint32 seq_parameter_set_id;
+	uint8 profile_idc;
+	uint8 constraint; // constraint_set flags and reserved bits
+	uint8 level_idc;
+	uint32 seq_parameter_set_id; // not stored by the parser
 	uint32 chroma_format_idc;
-
-	uint8 separate_colour_plane_flag; // aka residual_colour_transform_flag
-
+	uint8 separate_colour_plane_flag;
 	uint32 bit_depth_luma_minus8;
 	uint32 bit_depth_chroma_minus8;
 	uint8 qpprime_y_zero_transform_bypass_flag;
 	uint8 seq_scaling_matrix_present_flag;
 	h264_scaling_matrix4x4_t ScalingList4x4[6];
 	h264_scaling_matrix8x8_t ScalingList8x8[6];
-
 	uint32 log2_max_frame_num_minus4;
 	uint32 pic_order_cnt_type;
-
-	// picture order count type 0
-	uint32 log2_max_pic_order_cnt_lsb_minus4;
-
+	uint32 log2_max_pic_order_cnt_lsb_minus4; // pic_order_cnt_type 0 only
 	uint32 num_ref_frames;
 	uint32 gaps_in_frame_num_value_allowed_flag;
 	uint32 pic_width_in_mbs_minus1;
 	uint32 pic_height_in_map_units_minus1;
 	uint8 frame_mbs_only_flag;
 	uint8 mb_adaptive_frame_field_flag;
-
 	uint8 direct_8x8_inference_flag;
-	
 	uint8 frame_cropping_flag;
 	uint32 frame_crop_left_offset;
 	uint32 frame_crop_right_offset;
@@ -375,23 +264,24 @@ struct h264State_seq_parameter_set_t
 
 	uint32 getMaxFrameNum() const
 	{
-		return 1<<(log2_max_frame_num_minus4+4);
+		return 1 << (log2_max_frame_num_minus4 + 4);
 	}
-
 };
 
+// slice_type values 0-4 and 5-9 name the same types
 struct H264SliceType
 {
 	H264SliceType() {};
 	H264SliceType(uint32 slice_type) : m_sliceType(slice_type) {};
 
-	bool isSliceTypeP() const { return (this->m_sliceType % 5) == 0; };
-	bool isSliceTypeB() const { return (this->m_sliceType % 5) == 1; };
-	bool isSliceTypeI() const { return (this->m_sliceType % 5) == 2; };
-	bool isSliceTypeSP() const { return (this->m_sliceType % 5) == 3; };
-	bool isSliceTypeSI() const { return (this->m_sliceType % 5) == 4; };
+	bool isSliceTypeP() const { return Kind() == 0; };
+	bool isSliceTypeB() const { return Kind() == 1; };
+	bool isSliceTypeI() const { return Kind() == 2; };
+	bool isSliceTypeSP() const { return Kind() == 3; };
+	bool isSliceTypeSI() const { return Kind() == 4; };
 
 private:
+	uint32 Kind() const { return m_sliceType % 5; }
 	uint32 m_sliceType{};
 };
 
@@ -399,42 +289,30 @@ typedef struct
 {
 	uint8 nal_ref_idc;
 	uint8 nal_unit_type;
-
 	uint32 first_mb_in_slice;
 	H264SliceType slice_type;
 	uint32 pic_parameter_set_id;
-
 	uint32 frame_num;
-
 	uint8 field_pic_flag;
 	uint8 bottom_field_flag;
-
 	uint32 idr_pic_id;
-	
 	uint32 pic_order_cnt_lsb;
 	sint32 delta_pic_order_cnt_bottom;
-
 	uint32 redundant_pic_cnt;
-
-	// slice type B
-	uint8 direct_spatial_mv_pred_flag;
-
-	// slice type P, SP, B
-	uint8 num_ref_idx_active_override_flag;
+	uint8 direct_spatial_mv_pred_flag; // B slices
+	uint8 num_ref_idx_active_override_flag; // P, SP and B slices
 	uint32 num_ref_idx_l0_active_minus1;
 	uint32 num_ref_idx_l1_active_minus1;
 
-	// ref_pic_list_modification_flag_l0
-	struct  
+	// ref_pic_list_modification for list 0 and list 1
+	struct
 	{
 		uint8 type;
 		uint32 abs_diff_pic_num_minus1;
 		uint32 long_term_pic_num;
 	}pic_list_modification0Array[32];
 	sint32 pic_list_modification0Count;
-
-	// ref_pic_list_modification_flag_l1
-	struct  
+	struct
 	{
 		uint8 type;
 		uint32 abs_diff_pic_num_minus1;
@@ -442,7 +320,7 @@ typedef struct
 	}pic_list_modification1Array[32];
 	sint32 pic_list_modification1Count;
 
-	// memory_management_control_operation
+	// dec_ref_pic_marking
 	enum
 	{
 		MEMOP_END = 0,
@@ -453,9 +331,8 @@ typedef struct
 		MEMOP_REMOVE_ALL_REFS = 5,
 		MEMOP_MAKE_CURRENT_LONG_TERM_REF = 6
 	};
-
 	uint8 adaptive_ref_pic_marking_mode_flag;
-	struct  
+	struct
 	{
 		uint8 op;
 		uint32 difference_of_pic_nums_minus1;
@@ -465,10 +342,8 @@ typedef struct
 	}memory_management_control_operation[16];
 	sint32 memory_management_control_operation_num;
 
-	// derived values
 	uint8 IdrPicFlag;
-
-	struct  
+	struct
 	{
 		uint32 TopFieldOrderCnt;
 	}calculated;
@@ -481,11 +356,11 @@ typedef struct
 	nal_slice_header_t header;
 }nal_slice_info_t;
 
-typedef struct  
+// result of one h264Parse call
+typedef struct
 {
 	bool hasSPS;
 	bool hasPPS;
-	// list of NAL slices
 	sint32 sliceCount;
 	std::array<nal_slice_info_t, 32> sliceInfo;
 }h264ParserOutput_t;
@@ -495,14 +370,14 @@ typedef struct
 	nal_slice_header_t slice_header;
 }nal_slice_t;
 
-typedef struct  
+// state carried between h264Parse calls: the last SPS/PPS and picture order counters
+typedef struct
 {
-	//static const int MAX_SLICES = 32;
 	bool hasSPS;
 	bool hasPPS;
 	h264State_seq_parameter_set_t sps;
 	h264State_pic_parameter_set_t pps;
-	struct  
+	struct
 	{
 		uint32 prevPicOrderCntMsb;
 		uint32 prevPicOrderCntLsb;
@@ -519,13 +394,14 @@ bool h264Parser_ParseSPS(uint8* data, uint32 length, h264State_seq_parameter_set
 void h264Parser_getScalingMatrix4x4(h264State_seq_parameter_set_t* sps, h264State_pic_parameter_set_t* pps, nal_slice_header_t* sliceHeader, sint32 index, uint8* matrix4x4);
 void h264Parser_getScalingMatrix8x8(h264State_seq_parameter_set_t* sps, h264State_pic_parameter_set_t* pps, nal_slice_header_t* sliceHeader, sint32 index, uint8* matrix8x8);
 
+// output frames are NV12 with rows padded to 256 bytes
 static sint32 h264GetFramePitch(sint32 width)
 {
-	return (width+0xFF)&~0xFF;
+	return (width + 0xFF) & ~0xFF;
 }
 
 static sint32 h264GetFrameSize(sint32 width, sint32 height)
 {
-	sint32 pitch = h264GetFramePitch(width);
-	return height * pitch + (height / 2) * pitch;
+	const sint32 pitch = h264GetFramePitch(width);
+	return pitch * height + pitch * (height / 2);
 }

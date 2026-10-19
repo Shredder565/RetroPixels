@@ -1,3 +1,8 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Interface between the h264 export layer (H264Dec.cpp) and a decoder backend.
+//
+// The export layer queues compressed pictures; the backend decodes them on its own thread and
+// hands finished frames back in display order. Up to 32 pictures can be in flight.
 #pragma once
 
 #include "util/helpers/Semaphore.h"
@@ -10,23 +15,14 @@ namespace H264
 {
 	class H264DecoderBackend
 	{
-	  protected:
-		struct DataToDecode
-		{
-			uint8* m_data;
-			uint32 m_length;
-			std::vector<uint8> m_buffer;
-		};
-
-		static constexpr uint32 CMD_FLUSH = 0xFFFFFFFF;
-
-	  public:
+	public:
+		// a decoded frame as reported to the guest
 		struct DecodeResult
 		{
 			bool isDecoded{false};
-			bool hasFrame{false}; // set to true if a full frame was successfully decoded
+			bool hasFrame{false};
 			double timestamp{};
-			void* imageOutput{nullptr};
+			void* imageOutput{nullptr}; // guest buffer the frame is written to
 			sint32 frameWidth{0};
 			sint32 frameHeight{0};
 			uint32 bytesPerRow{0};
@@ -37,6 +33,70 @@ namespace H264
 			sint32 cropRight{0};
 		};
 
+		H264DecoderBackend()
+		{
+			m_displayQueueEvt = NewAutoResetEvent();
+			m_flushEvt = NewAutoResetEvent();
+		}
+
+		virtual ~H264DecoderBackend()
+		{
+			coreinit::OSFreeToSystem(m_displayQueueEvt);
+			coreinit::OSFreeToSystem(m_flushEvt);
+		}
+
+		virtual void Init(bool isBufferedMode) = 0;
+		virtual void Destroy() = 0;
+
+		// copies the data and queues it for decoding
+		void QueueForDecode(uint8* data, uint32 length, double timestamp, void* imagePtr)
+		{
+			std::lock_guard lock(m_decodeQueueMtx);
+			const uint32 index = ClaimSlot();
+			DecodedSlice& slot = m_decodedSliceArray[index];
+			slot.dataToDecode.m_buffer.assign(data, data + length);
+			slot.dataToDecode.m_data = slot.dataToDecode.m_buffer.data();
+			slot.dataToDecode.m_length = length;
+			slot.result.isDecoded = false;
+			slot.result.imageOutput = imagePtr;
+			slot.result.timestamp = timestamp;
+			m_decodeQueue.push_back(index);
+			m_decodeSem.increment();
+		}
+
+		// asks the decoder thread to drain all buffered frames; m_flushEvt is signalled when done
+		void QueueFlush()
+		{
+			std::lock_guard lock(m_decodeQueueMtx);
+			m_decodeQueue.push_back(CMD_FLUSH);
+			m_decodeSem.increment();
+		}
+
+		// takes the next frame in display order and frees its slot
+		bool GetFrameOutputIfReady(DecodeResult& result)
+		{
+			std::lock_guard lock(m_decodeQueueMtx);
+			if (m_displayQueue.empty())
+				return false;
+			DecodedSlice& slot = m_decodedSliceArray[m_displayQueue.front()];
+			m_displayQueue.erase(m_displayQueue.begin());
+			cemu_assert_debug(slot.result.isDecoded);
+			std::swap(result, slot.result);
+			slot.isUsed = false;
+			return true;
+		}
+
+		coreinit::OSEvent& GetFrameOutputEvent() { return *m_displayQueueEvt; }
+		coreinit::OSEvent& GetFlushEvent() { return *m_flushEvt; }
+
+	protected:
+		struct DataToDecode
+		{
+			uint8* m_data;
+			uint32 m_length;
+			std::vector<uint8> m_buffer;
+		};
+
 		struct DecodedSlice
 		{
 			bool isUsed{false};
@@ -44,96 +104,39 @@ namespace H264
 			DataToDecode dataToDecode;
 		};
 
-		H264DecoderBackend()
+		static constexpr uint32 CMD_FLUSH = 0xFFFFFFFF; // queue entry that requests a flush
+
+		// first free slot; when all are taken slot 0 is reused
+		uint32 ClaimSlot()
 		{
-			m_displayQueueEvt = (coreinit::OSEvent*)coreinit::OSAllocFromSystem(sizeof(coreinit::OSEvent), 4);
-			coreinit::OSInitEvent(m_displayQueueEvt, coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_AUTO);
-			m_flushEvt = (coreinit::OSEvent*)coreinit::OSAllocFromSystem(sizeof(coreinit::OSEvent), 4);
-			coreinit::OSInitEvent(m_flushEvt, coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_AUTO);
-		};
-
-		virtual ~H264DecoderBackend()
-		{
-			coreinit::OSFreeToSystem(m_displayQueueEvt);
-			coreinit::OSFreeToSystem(m_flushEvt);
-		};
-
-		virtual void Init(bool isBufferedMode) = 0;
-		virtual void Destroy() = 0;
-
-		void QueueForDecode(uint8* data, uint32 length, double timestamp, void* imagePtr)
-		{
-			std::unique_lock _l(m_decodeQueueMtx);
-
-			DecodedSlice& ds = GetFreeDecodedSliceEntry();
-
-			ds.dataToDecode.m_buffer.assign(data, data + length);
-			ds.dataToDecode.m_data = ds.dataToDecode.m_buffer.data();
-			ds.dataToDecode.m_length = length;
-
-			ds.result.isDecoded = false;
-			ds.result.imageOutput = imagePtr;
-			ds.result.timestamp = timestamp;
-
-			m_decodeQueue.push_back(std::distance(m_decodedSliceArray.data(), &ds));
-			m_decodeSem.increment();
-		}
-
-		void QueueFlush()
-		{
-			std::unique_lock _l(m_decodeQueueMtx);
-			m_decodeQueue.push_back(CMD_FLUSH);
-			m_decodeSem.increment();
-		}
-
-		bool GetFrameOutputIfReady(DecodeResult& result)
-		{
-			std::unique_lock _l(m_decodeQueueMtx);
-			if(m_displayQueue.empty())
-				return false;
-			uint32 sliceIndex = m_displayQueue.front();
-			DecodedSlice& ds = m_decodedSliceArray[sliceIndex];
-			cemu_assert_debug(ds.result.isDecoded);
-			std::swap(result, ds.result);
-			ds.isUsed = false;
-			m_displayQueue.erase(m_displayQueue.begin());
-			return true;
-		}
-
-		coreinit::OSEvent& GetFrameOutputEvent()
-		{
-			return *m_displayQueueEvt;
-		}
-
-		coreinit::OSEvent& GetFlushEvent()
-		{
-			return *m_flushEvt;
-		}
-
-	  protected:
-		DecodedSlice& GetFreeDecodedSliceEntry()
-		{
-			for (auto& slice : m_decodedSliceArray)
+			for (uint32 i = 0; i < m_decodedSliceArray.size(); i++)
 			{
-				if (!slice.isUsed)
+				if (!m_decodedSliceArray[i].isUsed)
 				{
-					slice.isUsed = true;
-					return slice;
+					m_decodedSliceArray[i].isUsed = true;
+					return i;
 				}
 			}
 			cemu_assert_suspicious();
-			return m_decodedSliceArray[0];
+			return 0;
 		}
 
-		std::mutex m_decodeQueueMtx;
-		std::vector<uint32> m_decodeQueue; // indices into m_decodedSliceArray, in order of decode input
+		std::mutex m_decodeQueueMtx; // guards the queues and the slots
+		std::vector<uint32> m_decodeQueue; // slot indices (or CMD_FLUSH) in submission order
 		CounterSemaphore m_decodeSem;
-		std::vector<uint32> m_displayQueue; // indices into m_decodedSliceArray, in order of frame display output
-		coreinit::OSEvent* m_displayQueueEvt; // signalled when a new frame is ready for display
-		coreinit::OSEvent* m_flushEvt; // signalled after flush operation finished and all queued slices are decoded
-
-		// frame output queue
-		std::mutex m_frameOutputMtx;
+		std::vector<uint32> m_displayQueue; // slot indices in display order
+		coreinit::OSEvent* m_displayQueueEvt; // signalled whenever a frame was added to m_displayQueue
+		coreinit::OSEvent* m_flushEvt;
 		std::array<DecodedSlice, 32> m_decodedSliceArray;
+
+	private:
+		static coreinit::OSEvent* NewAutoResetEvent()
+		{
+			auto* evt = (coreinit::OSEvent*)coreinit::OSAllocFromSystem(sizeof(coreinit::OSEvent), 4);
+			coreinit::OSInitEvent(evt, coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_AUTO);
+			return evt;
+		}
 	};
+
+	H264DecoderBackend* CreateAVCDecoder();
 }
