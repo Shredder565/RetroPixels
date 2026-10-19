@@ -1,127 +1,107 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
+// 64-bit Wii U title id: <platform:16><category:8><unique id...>
+// e.g. 00050000-1010ED00 (base game), 0005000E-1010ED00 (its update)
 using TitleId = uint64;
 
 static_assert(sizeof(TitleId) == 8);
 
 class TitleIdParser
 {
-public:
+  public:
+	// value of the category byte (bits 32-39)
 	enum class TITLE_TYPE
 	{
-		/* XX */ UNKNOWN = 0xFF, // placeholder
-		/* 00 */ BASE_TITLE = 0x00, // eShop and disc titles
-		/* 02 */ BASE_TITLE_DEMO = 0x02,
-		/* 0E */ BASE_TITLE_UPDATE = 0x0E, // update for BASE_TITLE (and maybe BASE_TITLE_DEMO?)
-		/* 0F */ HOMEBREW = 0x0F,
-		/* 0C */ AOC = 0x0C, // DLC
-		/* 10 */ SYSTEM_TITLE = 0x10, // eShop etc
-		/* 1B */ SYSTEM_DATA = 0x1B,
-		/* 30 */ SYSTEM_OVERLAY_TITLE = 0x30,
+		UNKNOWN = 0xFF,
+		BASE_TITLE = 0x00,        // disc and eShop games
+		BASE_TITLE_DEMO = 0x02,
+		BASE_TITLE_UPDATE = 0x0E,
+		HOMEBREW = 0x0F,
+		AOC = 0x0C,               // DLC
+		SYSTEM_TITLE = 0x10,
+		SYSTEM_DATA = 0x1B,
+		SYSTEM_OVERLAY_TITLE = 0x30,
 	};
 
-	TitleIdParser(uint64 titleId) : m_titleId(titleId) {};
+	TitleIdParser(uint64 titleId) : m_titleId(titleId) {}
 
-	// controls whether this title installs to /usr/title or /sys/title
-	bool IsSystemTitle() const 
-	{
-		return (GetTypeByte() & 0x10) != 0;
-	};
+	// system titles live in sys/title instead of usr/title
+	bool IsSystemTitle() const { return (CategoryByte() & 0x10) != 0; }
 
-	bool IsBaseTitleUpdate() const
-	{
-		return GetType() == TITLE_TYPE::BASE_TITLE_UPDATE;
-	}
+	bool IsBaseTitleUpdate() const { return GetType() == TITLE_TYPE::BASE_TITLE_UPDATE; }
 
 	TITLE_TYPE GetType() const
 	{
-		uint8 b = GetTypeByte();
-		switch (b)
+		const uint8 category = CategoryByte();
+		switch (static_cast<TITLE_TYPE>(category))
 		{
-		case 0x00:
-			return TITLE_TYPE::BASE_TITLE;
-		case 0x02:
-			return TITLE_TYPE::BASE_TITLE_DEMO;
-		case 0x0E:
-			return TITLE_TYPE::BASE_TITLE_UPDATE;
-		case 0x0F:
-			return TITLE_TYPE::HOMEBREW;
-		case 0x0C:
-			return TITLE_TYPE::AOC;
-		case 0x10:
-			return TITLE_TYPE::SYSTEM_TITLE;
-		case 0x1B:
-			return TITLE_TYPE::SYSTEM_DATA;
-		case 0x30:
-			return TITLE_TYPE::SYSTEM_OVERLAY_TITLE;
+		case TITLE_TYPE::BASE_TITLE:
+		case TITLE_TYPE::BASE_TITLE_DEMO:
+		case TITLE_TYPE::BASE_TITLE_UPDATE:
+		case TITLE_TYPE::HOMEBREW:
+		case TITLE_TYPE::AOC:
+		case TITLE_TYPE::SYSTEM_TITLE:
+		case TITLE_TYPE::SYSTEM_DATA:
+		case TITLE_TYPE::SYSTEM_OVERLAY_TITLE:
+			return static_cast<TITLE_TYPE>(category);
+		default:
+			break;
 		}
-		cemuLog_log(LogType::Force, "Unknown title type ({0:016x})", m_titleId);
+		cemuLog_log(LogType::Force, "Title id {:016x} has an unknown category", m_titleId);
 		return TITLE_TYPE::UNKNOWN;
 	}
 
-	bool IsPlatformCafe() const
-	{
-		return GetPlatformWord() == 0x0005;
-	}
+	bool IsPlatformCafe() const { return (m_titleId >> 48) == 0x0005; }
 
-	bool CanHaveSeparateUpdateTitleId() const
-	{
-		return GetType() == TITLE_TYPE::BASE_TITLE;
-	}
+	// only base titles have a separate update title (same id, category 0E)
+	bool CanHaveSeparateUpdateTitleId() const { return GetType() == TITLE_TYPE::BASE_TITLE; }
 
 	TitleId GetSeparateUpdateTitleId() const
 	{
 		cemu_assert_debug(CanHaveSeparateUpdateTitleId());
-		return MakeTitleIdWithType(TITLE_TYPE::BASE_TITLE_UPDATE); // e.g. 00050000-11223344 -> 0005000E-11223344
+		return WithCategory(TITLE_TYPE::BASE_TITLE_UPDATE);
 	}
 
+	// maps an update title id to its base title id, any other id is returned unchanged
 	static TitleId MakeBaseTitleId(TitleId titleId)
 	{
-		TitleIdParser titleIdParser(titleId);
-		if (titleIdParser.GetType() == TITLE_TYPE::BASE_TITLE_UPDATE)
-			return titleIdParser.MakeTitleIdWithType(TITLE_TYPE::BASE_TITLE);
+		TitleIdParser parsed(titleId);
+		if (parsed.GetType() == TITLE_TYPE::BASE_TITLE_UPDATE)
+			return parsed.WithCategory(TITLE_TYPE::BASE_TITLE);
 		return titleId;
 	}
 
-	static bool ParseFromStr(std::string_view strView, TitleId& titleIdOut)
+	// parses the first 16 characters as hex digits (anything after is ignored)
+	static bool ParseFromStr(std::string_view text, TitleId& titleIdOut)
 	{
-		if (strView.size() < 16)
+		if (text.size() < 16)
 			return false;
-		uint64 tmp = 0;
-		for (size_t i = 0; i < 8*2; i++)
+		TitleId value = 0;
+		for (size_t i = 0; i < 16; i++)
 		{
-			tmp <<= 4;
-			char c = strView[i];
-			if (c >= 'A' && c <= 'F')
-				tmp += (uint64)(c - 'A' + 10);
+			const char c = text[i];
+			uint32 digit;
+			if (c >= '0' && c <= '9')
+				digit = c - '0';
 			else if (c >= 'a' && c <= 'f')
-				tmp += (uint64)(c - 'a' + 10);
-			else if (c >= '0' && c <= '9')
-				tmp += (uint64)(c - '0');
+				digit = c - 'a' + 10;
+			else if (c >= 'A' && c <= 'F')
+				digit = c - 'A' + 10;
 			else
 				return false;
+			value = (value << 4) | digit;
 		}
-		titleIdOut = tmp;
+		titleIdOut = value;
 		return true;
 	}
 
-private:
-	uint8 GetTypeByte() const
-	{
-		return (m_titleId >> 32) & 0xFF;
-	}
+  private:
+	uint8 CategoryByte() const { return (uint8)(m_titleId >> 32); }
 
-	TitleId MakeTitleIdWithType(TITLE_TYPE newType) const
+	TitleId WithCategory(TITLE_TYPE category) const
 	{
-		TitleId t = m_titleId;
-		t &= ~(0xFFull << 32);
-		t |= ((uint64)newType << 32);
-		return t;
-	}
-
-	uint16 GetPlatformWord() const // might not be a whole word?
-	{
-		return (m_titleId >> 48) & 0xFFFF;
+		return (m_titleId & ~(0xFFull << 32)) | ((uint64)category << 32);
 	}
 
 	TitleId m_titleId;

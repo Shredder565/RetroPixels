@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include "TitleInfo.h"
@@ -12,13 +13,15 @@ struct CafeTitleListCallbackEvent
 		SCAN_FINISHED,
 	};
 	TYPE eventType;
-	TitleInfo* titleInfo;
+	TitleInfo* titleInfo; // null for SCAN_FINISHED
 };
 
+// All titles found in the game folders and the mlc. A cache file lets the
+// list show titles immediately at startup, before the background scan
+// (Refresh) has confirmed them.
 class CafeTitleList
 {
-public:
-
+  public:
 	static void Initialize(const fs::path cacheXmlFile);
 	static void LoadCacheFile();
 	static void StoreCacheFile();
@@ -26,28 +29,29 @@ public:
 	static void ClearScanPaths();
 	static void AddScanPath(fs::path path);
 	static void SetMLCPath(fs::path path);
-	static void Refresh(); // scan all paths
-	static bool IsScanning(); // returns true if async refresh is currently active
-	static void WaitForMandatoryScan(); // wait for current scan result if no cached info is available
+	static void Refresh();              // rescan in the background
+	static bool IsScanning();
+	static void WaitForMandatoryScan(); // blocks while a scan runs and there was no usable cache
 	static void AddTitleFromPath(fs::path path);
 
-	static uint64 RegisterCallback(void(*cb)(CafeTitleListCallbackEvent* evt, void* ctx), void* ctx); // on register, the callback will be invoked for every already known title
+	// the callback is immediately called for every known title (and SCAN_FINISHED if idle)
+	static uint64 RegisterCallback(void (*cb)(CafeTitleListCallbackEvent* evt, void* ctx), void* ctx);
 	static void UnregisterCallback(uint64 id);
 
-	// utility functions
-	static bool HasTitle(TitleId titleId, uint16& versionOut);
+	static bool HasTitle(TitleId titleId, uint16& versionOut); // versionOut = highest version found
 	static bool HasTitleAndVersion(TitleId titleId, uint16 version);
 	static std::vector<TitleId> GetAllTitleIds();
 	static bool GetFirstByTitleId(TitleId titleId, TitleInfo& titleInfoOut);
 	static bool FindBaseTitleId(TitleId titleId, TitleId& titleIdBaseOut);
 
+	// locks the list until ReleaseInternalList
 	static std::span<TitleInfo*> AcquireInternalList();
 	static void ReleaseInternalList();
 
 	static GameInfo2 GetGameInfo(TitleId titleId);
 	static TitleInfo GetTitleInfoByUID(uint64 uid);
 
-private:
+  private:
 	static bool RefreshWorkerThread();
 	static void ScanGamePath(const fs::path& path);
 	static void ScanMLCPath(const fs::path& path);

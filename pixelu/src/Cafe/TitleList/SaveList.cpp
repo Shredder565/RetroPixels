@@ -1,179 +1,141 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "SaveList.h"
 #include <charconv>
-#include <util/helpers/helpers.h>
+#include "util/helpers/helpers.h"
 
-std::mutex sSLMutex;
-fs::path sSLMLCPath;
-
-std::vector<SaveInfo*> sSLList;
-
-// callback list
-struct SaveListCallbackEntry
+namespace
 {
-	SaveListCallbackEntry(void(*cb)(CafeSaveListCallbackEvent* evt, void* ctx), void* ctx, uint64 uniqueId) :
-		cb(cb), ctx(ctx), uniqueId(uniqueId) {};
-	void (*cb)(CafeSaveListCallbackEvent* evt, void* ctx);
-	void* ctx;
-	uint64 uniqueId;
-};
-std::vector<SaveListCallbackEntry> sSLCallbackList;
+	struct SaveListener
+	{
+		void (*callback)(CafeSaveListCallbackEvent* evt, void* ctx);
+		void* context;
+		uint64 id;
+	};
 
-// worker thread
-std::atomic_bool sSLWorkerThreadActive{false};
+	std::mutex s_mutex;
+	fs::path s_mlcPath;
+	std::vector<SaveInfo*> s_saves;
+	std::vector<SaveListener> s_listeners;
+	std::atomic_bool s_scanning{false};
 
+	// caller holds s_mutex
+	void Notify(CafeSaveListCallbackEvent::TYPE type, SaveInfo* saveInfo)
+	{
+		CafeSaveListCallbackEvent evt{type, saveInfo};
+		for (const SaveListener& listener : s_listeners)
+			listener.callback(&evt, listener.context);
+	}
+
+	// save folder names are hex; like std::from_chars a valid prefix is enough
+	bool ParseHexFolderName(const fs::path& folder, uint32& valueOut)
+	{
+		const std::string name = _pathToUtf8(folder.filename());
+		if (name.empty())
+			return false;
+		return std::from_chars(name.data(), name.data() + name.size(), valueOut, 16).ec == std::errc();
+	}
+}
 
 void CafeSaveList::Initialize()
 {
-
 }
 
 void CafeSaveList::SetMLCPath(fs::path mlcPath)
 {
-	std::unique_lock _lock(sSLMutex);
-	sSLMLCPath = mlcPath;
+	std::lock_guard lock(s_mutex);
+	s_mlcPath = std::move(mlcPath);
 }
 
 void CafeSaveList::Refresh()
 {
-	std::unique_lock _lock(sSLMutex);
-	if (sSLWorkerThreadActive)
+	std::lock_guard lock(s_mutex);
+	if (s_scanning)
 		return;
-	sSLWorkerThreadActive = true;
-	std::thread t(RefreshThreadWorker);
-	t.detach();
+	s_scanning = true;
+	std::thread(RefreshThreadWorker).detach();
 }
 
 void CafeSaveList::RefreshThreadWorker()
 {
 	SetThreadName("SaveListWorker");
-	// clear save list
-	for (auto& itSaveInfo : sSLList)
+	fs::path mlcPath;
 	{
-		for (auto& it : sSLCallbackList)
+		// forget everything found by the previous scan
+		std::lock_guard lock(s_mutex);
+		for (SaveInfo* saveInfo : s_saves)
 		{
-			CafeSaveListCallbackEvent evt;
-			evt.eventType = CafeSaveListCallbackEvent::TYPE::SAVE_REMOVED;
-			evt.saveInfo = itSaveInfo;
-			it.cb(&evt, it.ctx);
+			Notify(CafeSaveListCallbackEvent::TYPE::SAVE_REMOVED, saveInfo);
+			delete saveInfo;
 		}
-		delete itSaveInfo;
+		s_saves.clear();
+		mlcPath = s_mlcPath;
 	}
-	sSLList.clear();
-
-	sSLMutex.lock();
-	fs::path mlcPath = sSLMLCPath;
-	sSLMutex.unlock();
+	// usr/save/<title id high>/<title id low>
 	std::error_code ec;
-	for (auto it_titleHigh : fs::directory_iterator(mlcPath / "usr/save", ec))
+	for (const fs::directory_entry& highFolder : fs::directory_iterator(mlcPath / "usr/save", ec))
 	{
-		if(!it_titleHigh.is_directory(ec))
+		uint32 high;
+		if (!highFolder.is_directory(ec) || !ParseHexFolderName(highFolder.path(), high))
 			continue;
-		std::string dirName = _pathToUtf8(it_titleHigh.path().filename());
-		if(dirName.empty())
-			continue;		
-		uint32 titleIdHigh;
-		std::from_chars_result r = std::from_chars(dirName.data(), dirName.data() + dirName.size(), titleIdHigh, 16);
-		if (r.ec != std::errc())
-			continue;
-		fs::path tmp = it_titleHigh.path();
-		for (auto it_titleLow : fs::directory_iterator(tmp, ec))
+		for (const fs::directory_entry& lowFolder : fs::directory_iterator(highFolder.path(), ec))
 		{
-			if (!it_titleLow.is_directory(ec))
+			uint32 low;
+			if (!lowFolder.is_directory(ec) || !ParseHexFolderName(lowFolder.path(), low))
 				continue;
-			dirName = _pathToUtf8(it_titleLow.path().filename());
-			if (dirName.empty())
-				continue;
-			uint32 titleIdLow;
-			std::from_chars_result r = std::from_chars(dirName.data(), dirName.data() + dirName.size(), titleIdLow, 16);
-			if (r.ec != std::errc())
-				continue;
-			// found save
-			TitleId titleId = (uint64)titleIdHigh << 32 | (uint64)titleIdLow;
-			SaveInfo* saveInfo = new SaveInfo(titleId);
+			auto saveInfo = std::make_unique<SaveInfo>(((TitleId)high << 32) | low);
 			if (saveInfo->IsValid())
-				DiscoveredSave(saveInfo);
-			else
-				delete saveInfo;
+				DiscoveredSave(saveInfo.release());
 		}
 	}
-	sSLMutex.lock();
-	sSLWorkerThreadActive = false;
-	sSLMutex.unlock();
-	// send notification about finished scan
-	for (auto& it : sSLCallbackList)
-	{
-		CafeSaveListCallbackEvent evt;
-		evt.eventType = CafeSaveListCallbackEvent::TYPE::SCAN_FINISHED;
-		evt.saveInfo = nullptr;
-		it.cb(&evt, it.ctx);
-	}
+	std::lock_guard lock(s_mutex);
+	s_scanning = false;
+	Notify(CafeSaveListCallbackEvent::TYPE::SCAN_FINISHED, nullptr);
 }
 
 void CafeSaveList::DiscoveredSave(SaveInfo* saveInfo)
 {
-	if (!saveInfo->ParseMetaData())
-	{
-		delete saveInfo;
+	std::unique_ptr<SaveInfo> owned(saveInfo);
+	if (!owned->ParseMetaData())
+		return; // saves without meta data are not listed
+	std::lock_guard lock(s_mutex);
+	const TitleId titleId = owned->GetTitleId();
+	if (std::any_of(s_saves.begin(), s_saves.end(), [titleId](const SaveInfo* s) { return s->GetTitleId() == titleId; }))
 		return;
-	}
-	std::unique_lock _lock(sSLMutex);
-	auto it = std::find_if(sSLList.begin(), sSLList.end(), [saveInfo](const SaveInfo* rhs) { return saveInfo->GetTitleId() == rhs->GetTitleId(); });
-	if (it != sSLList.end())
-	{
-		// save already known
-		delete saveInfo;
-		return;
-	}
-	sSLList.emplace_back(saveInfo);
-	// send notification
-	for (auto& it : sSLCallbackList)
-	{
-		CafeSaveListCallbackEvent evt;
-		evt.eventType = CafeSaveListCallbackEvent::TYPE::SAVE_DISCOVERED;
-		evt.saveInfo = saveInfo;
-		it.cb(&evt, it.ctx);
-	}
+	s_saves.push_back(owned.release());
+	Notify(CafeSaveListCallbackEvent::TYPE::SAVE_DISCOVERED, saveInfo);
 }
 
-uint64 CafeSaveList::RegisterCallback(void(*cb)(CafeSaveListCallbackEvent* evt, void* ctx), void* ctx)
+uint64 CafeSaveList::RegisterCallback(void (*cb)(CafeSaveListCallbackEvent* evt, void* ctx), void* ctx)
 {
-	static std::atomic<uint64_t> sCallbackIdGen = 1;
-	uint64 id = sCallbackIdGen.fetch_add(1);
-	std::unique_lock _lock(sSLMutex);
-	sSLCallbackList.emplace_back(cb, ctx, id);
-	// immediately notify of all known titles
-	for (auto& it : sSLList)
+	static std::atomic<uint64> s_nextId{1};
+	const uint64 id = s_nextId.fetch_add(1);
+	std::lock_guard lock(s_mutex);
+	s_listeners.push_back({cb, ctx, id});
+	for (SaveInfo* saveInfo : s_saves)
 	{
-		CafeSaveListCallbackEvent evt;
-		evt.eventType = CafeSaveListCallbackEvent::TYPE::SAVE_DISCOVERED;
-		evt.saveInfo = it;
+		CafeSaveListCallbackEvent evt{CafeSaveListCallbackEvent::TYPE::SAVE_DISCOVERED, saveInfo};
 		cb(&evt, ctx);
 	}
-	// if not scanning then send out scan finished notification
-	if (!sSLWorkerThreadActive)
-	{
-		CafeSaveListCallbackEvent evt;
-		evt.eventType = CafeSaveListCallbackEvent::TYPE::SCAN_FINISHED;
-		evt.saveInfo = nullptr;
-		for (auto& it : sSLCallbackList)
-			it.cb(&evt, it.ctx);
-	}
+	if (!s_scanning)
+		Notify(CafeSaveListCallbackEvent::TYPE::SCAN_FINISHED, nullptr); // all listeners, as before
 	return id;
 }
 
 void CafeSaveList::UnregisterCallback(uint64 id)
 {
-	std::unique_lock _lock(sSLMutex);
-	auto it = std::find_if(sSLCallbackList.begin(), sSLCallbackList.end(), [id](auto& e) { return e.uniqueId == id; });
-	cemu_assert(it != sSLCallbackList.end());
-	sSLCallbackList.erase(it);
+	std::lock_guard lock(s_mutex);
+	auto it = std::find_if(s_listeners.begin(), s_listeners.end(), [id](const SaveListener& l) { return l.id == id; });
+	cemu_assert(it != s_listeners.end());
+	s_listeners.erase(it);
 }
 
 SaveInfo CafeSaveList::GetSaveByTitleId(TitleId titleId)
 {
-	std::unique_lock _lock(sSLMutex);
-	for (auto& it : sSLList)
-		if (it->GetTitleId() == titleId)
-			return *it;
+	std::lock_guard lock(s_mutex);
+	for (SaveInfo* saveInfo : s_saves)
+	{
+		if (saveInfo->GetTitleId() == titleId)
+			return *saveInfo;
+	}
 	return {};
 }

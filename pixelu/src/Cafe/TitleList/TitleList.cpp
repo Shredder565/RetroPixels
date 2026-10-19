@@ -1,628 +1,518 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "TitleList.h"
 #include "Common/FileStream.h"
-
 #include "util/helpers/helpers.h"
 
 #include <zarchive/zarchivereader.h>
 
-bool sTLInitialized{ false };
-fs::path sTLCacheFilePath;
-
-// lists for tracking known titles
-// note: The list may only contain titles with valid meta data (except for certain system titles). Entries loaded from the cache may not have been parsed yet, but they will use a cached value for titleId and titleVersion
-std::mutex sTLMutex;
-std::vector<TitleInfo*> sTLList;
-std::vector<TitleInfo*> sTLListPending;
-std::unordered_multimap<uint64, TitleInfo*> sTLMap;
-bool sTLCacheDirty{false};
-
-// paths
-fs::path sTLMLCPath;
-std::vector<fs::path> sTLScanPaths;
-
-// worker
-std::thread sTLRefreshWorker;
-bool sTLRefreshWorkerActive{false};
-std::atomic_uint32_t sTLRefreshRequests{};
-std::atomic_bool sTLIsScanMandatory{ false };
-
-// callback list
-struct TitleListCallbackEntry 
+namespace
 {
-	TitleListCallbackEntry(void(*cb)(CafeTitleListCallbackEvent* evt, void* ctx), void* ctx, uint64 uniqueId) :
-		cb(cb), ctx(ctx), uniqueId(uniqueId) {};
-	void (*cb)(CafeTitleListCallbackEvent* evt, void* ctx);
-	void* ctx;
-	uint64 uniqueId;
-};
+	struct ListenerEntry
+	{
+		void (*callback)(CafeTitleListCallbackEvent* evt, void* ctx);
+		void* context;
+		uint64 id;
+	};
 
-std::vector<TitleListCallbackEntry> sTLCallbackList;
+	// Everything below is guarded by s_mutex unless noted otherwise.
+	// s_titles only holds titles with usable meta data (or cache entries for them).
+	std::mutex s_mutex;
+	bool s_initialized{false};
+	fs::path s_cacheFile;
+	std::vector<TitleInfo*> s_titles;
+	std::unordered_multimap<TitleId, TitleInfo*> s_titlesById;
+	// during a scan: titles known before the scan that have not been found again yet
+	std::vector<TitleInfo*> s_notYetRediscovered;
+	bool s_cacheNeedsSaving{false};
+
+	fs::path s_mlcPath;
+	std::vector<fs::path> s_gamePaths;
+
+	std::thread s_scanThread;
+	bool s_scanThreadRunning{false};
+	std::atomic_uint32_t s_pendingScanRequests{0}; // lock free
+	std::atomic_bool s_waitForScan{false};          // lock free
+
+	std::vector<ListenerEntry> s_listeners;
+
+	void Notify(CafeTitleListCallbackEvent::TYPE type, TitleInfo* titleInfo)
+	{
+		CafeTitleListCallbackEvent evt{type, titleInfo};
+		for (const ListenerEntry& listener : s_listeners)
+			listener.callback(&evt, listener.context);
+	}
+
+	void ForgetTitleId(TitleInfo* titleInfo)
+	{
+		auto [first, last] = s_titlesById.equal_range(titleInfo->GetAppTitleId());
+		for (auto it = first; it != last; ++it)
+		{
+			if (it->second == titleInfo)
+			{
+				s_titlesById.erase(it);
+				return;
+			}
+		}
+		cemu_assert_suspicious();
+	}
+
+	// file names worth probing while scanning game folders (extracted titles are
+	// found through their code/content/meta folders instead)
+	bool IsCandidateTitleFile(const fs::path& path)
+	{
+		std::string extension = _pathToUtf8(path.extension());
+		std::transform(extension.begin(), extension.end(), extension.begin(), _ansiToLower);
+		if (extension == ".tmd")
+		{
+			std::string name = _pathToUtf8(path.filename());
+			std::transform(name.begin(), name.end(), name.begin(), _ansiToLower);
+			return name == "title.tmd";
+		}
+		return extension == ".wud" || extension == ".wux" || extension == ".iso" || extension == ".wua" || extension == ".wuhb";
+	}
+
+	bool IsTitleSubfolderName(std::string_view name)
+	{
+		return boost::iequals(name, "content") || boost::iequals(name, "code") || boost::iequals(name, "meta");
+	}
+
+	bool IsHexString(std::string_view s)
+	{
+		return std::all_of(s.begin(), s.end(), [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); });
+	}
+}
 
 void CafeTitleList::Initialize(const fs::path cacheXmlFile)
 {
-	std::unique_lock _lock(sTLMutex);
-	sTLInitialized = true;
-	sTLCacheFilePath = cacheXmlFile;
+	std::lock_guard lock(s_mutex);
+	s_initialized = true;
+	s_cacheFile = cacheXmlFile;
 	LoadCacheFile();
 }
 
+// Cache file layout:
+// <title_list>
+//   <title titleId="0005000010101a00" version="16" sdk_version="20811" group_id="00000101" app_type="80000000">
+//     <region>2</region><name>...</name><format>1</format><path>...</path>[<sub_path>...</sub_path>]
+//   </title>
+// </title_list>
 void CafeTitleList::LoadCacheFile()
 {
-	sTLIsScanMandatory = true;
-	cemu_assert_debug(sTLInitialized);
-	cemu_assert_debug(sTLList.empty());
-	auto xmlData = FileStream::LoadIntoMemory(sTLCacheFilePath);
-	if (!xmlData)
+	s_waitForScan = true;
+	cemu_assert_debug(s_initialized);
+	cemu_assert_debug(s_titles.empty());
+	std::optional<std::vector<uint8>> xml = FileStream::LoadIntoMemory(s_cacheFile);
+	if (!xml)
 		return;
 	pugi::xml_document doc;
-	if (!doc.load_buffer_inplace(xmlData->data(), xmlData->size(), pugi::parse_default, pugi::xml_encoding::encoding_utf8))
+	if (!doc.load_buffer_inplace(xml->data(), xml->size(), pugi::parse_default, pugi::xml_encoding::encoding_utf8))
 		return;
-	auto titleListNode = doc.child("title_list");
-	pugi::xml_node itNode = titleListNode.first_child();
-	for (const auto& titleInfoNode : doc.child("title_list"))
+	for (pugi::xml_node node : doc.child("title_list"))
 	{
-		TitleId titleId;
-		if( !TitleIdParser::ParseFromStr(titleInfoNode.attribute("titleId").as_string(), titleId))
+		TitleInfo::CachedInfo entry;
+		if (!TitleIdParser::ParseFromStr(node.attribute("titleId").as_string(), entry.titleId))
 			continue;
-		uint16 titleVersion = titleInfoNode.attribute("version").as_uint();
-		uint32 sdkVersion = titleInfoNode.attribute("sdk_version").as_uint();
-		TitleInfo::TitleDataFormat format = (TitleInfo::TitleDataFormat)ConvertString<uint32>(titleInfoNode.child_value("format"));
-		CafeConsoleRegion region = (CafeConsoleRegion)ConvertString<uint32>(titleInfoNode.child_value("region"));
-		std::string name = titleInfoNode.child_value("name");
-		std::string path = titleInfoNode.child_value("path");
-		std::string sub_path = titleInfoNode.child_value("sub_path");
-		uint32 group_id = ConvertString<uint32>(titleInfoNode.attribute("group_id").as_string(), 16);
-		uint32 app_type = ConvertString<uint32>(titleInfoNode.attribute("app_type").as_string(), 16);
+		entry.titleVersion = (uint16)node.attribute("version").as_uint();
+		entry.sdkVersion = node.attribute("sdk_version").as_uint();
+		entry.group_id = ConvertString<uint32>(node.attribute("group_id").as_string(), 16);
+		entry.app_type = ConvertString<uint32>(node.attribute("app_type").as_string(), 16);
+		entry.titleDataFormat = (TitleInfo::TitleDataFormat)ConvertString<uint32>(node.child_value("format"));
+		entry.region = (CafeConsoleRegion)ConvertString<uint32>(node.child_value("region"));
+		entry.titleName = node.child_value("name");
+		entry.path = _utf8ToPath(node.child_value("path"));
+		entry.subPath = node.child_value("sub_path");
 
-		TitleInfo::CachedInfo cacheEntry;
-		cacheEntry.titleId = titleId;
-		cacheEntry.titleVersion = titleVersion;
-		cacheEntry.sdkVersion = sdkVersion;
-		cacheEntry.titleDataFormat = format;
-		cacheEntry.region = region;
-		cacheEntry.titleName = std::move(name);
-		cacheEntry.path = _utf8ToPath(path);
-		cacheEntry.subPath = std::move(sub_path);
-		cacheEntry.group_id = group_id;
-		cacheEntry.app_type = app_type;
-
-		TitleInfo* ti = new TitleInfo(cacheEntry);
-		if (!ti->IsValid())
+		auto titleInfo = std::make_unique<TitleInfo>(entry);
+		if (!titleInfo->IsValid())
 		{
-			cemuLog_log(LogType::Force, "Title cache contained invalid title");
-			delete ti;
+			cemuLog_log(LogType::Force, "Title list cache: skipping an invalid entry");
 			continue;
 		}
-		AddTitle(ti);
+		AddTitle(titleInfo.release());
 	}
-	sTLIsScanMandatory = false;
+	s_waitForScan = false;
 }
 
 void CafeTitleList::StoreCacheFile()
 {
-	cemu_assert_debug(sTLInitialized);
-	if (sTLCacheFilePath.empty())
+	cemu_assert_debug(s_initialized);
+	if (s_cacheFile.empty())
 		return;
-	std::unique_lock _lock(sTLMutex);
+	std::lock_guard lock(s_mutex);
 
 	pugi::xml_document doc;
-	auto declarationNode = doc.append_child(pugi::node_declaration);
-	declarationNode.append_attribute("version") = "1.0";
-	declarationNode.append_attribute("encoding") = "UTF-8";
-	auto title_list_node = doc.append_child("title_list");
-
-	for (auto& tiIt : sTLList)
+	pugi::xml_node declaration = doc.append_child(pugi::node_declaration);
+	declaration.append_attribute("version") = "1.0";
+	declaration.append_attribute("encoding") = "UTF-8";
+	pugi::xml_node list = doc.append_child("title_list");
+	auto addText = [](pugi::xml_node parent, const char* name, const std::string& value) {
+		parent.append_child(name).append_child(pugi::node_pcdata).set_value(value.c_str());
+	};
+	for (TitleInfo* titleInfo : s_titles)
 	{
-		TitleInfo::CachedInfo info = tiIt->MakeCacheEntry();
-		auto titleInfoNode = title_list_node.append_child("title");
-		titleInfoNode.append_attribute("titleId").set_value(fmt::format("{:016x}", info.titleId).c_str());
-		titleInfoNode.append_attribute("version").set_value(fmt::format("{:}", info.titleVersion).c_str());
-		titleInfoNode.append_attribute("sdk_version").set_value(fmt::format("{:}", info.sdkVersion).c_str());
-		titleInfoNode.append_attribute("group_id").set_value(fmt::format("{:08x}", info.group_id).c_str());
-		titleInfoNode.append_attribute("app_type").set_value(fmt::format("{:08x}", info.app_type).c_str());
-		titleInfoNode.append_child("region").append_child(pugi::node_pcdata).set_value(fmt::format("{}", (uint32)info.region).c_str());
-		titleInfoNode.append_child("name").append_child(pugi::node_pcdata).set_value(info.titleName.c_str());
-		titleInfoNode.append_child("format").append_child(pugi::node_pcdata).set_value(fmt::format("{}", (uint32)info.titleDataFormat).c_str());
-		titleInfoNode.append_child("path").append_child(pugi::node_pcdata).set_value(_pathToUtf8(info.path).c_str());
-		if(!info.subPath.empty())
-			titleInfoNode.append_child("sub_path").append_child(pugi::node_pcdata).set_value(_pathToUtf8(info.subPath).c_str());
+		const TitleInfo::CachedInfo info = titleInfo->MakeCacheEntry();
+		pugi::xml_node node = list.append_child("title");
+		node.append_attribute("titleId").set_value(fmt::format("{:016x}", info.titleId).c_str());
+		node.append_attribute("version").set_value(fmt::format("{}", info.titleVersion).c_str());
+		node.append_attribute("sdk_version").set_value(fmt::format("{}", info.sdkVersion).c_str());
+		node.append_attribute("group_id").set_value(fmt::format("{:08x}", info.group_id).c_str());
+		node.append_attribute("app_type").set_value(fmt::format("{:08x}", info.app_type).c_str());
+		addText(node, "region", fmt::format("{}", (uint32)info.region));
+		addText(node, "name", info.titleName);
+		addText(node, "format", fmt::format("{}", (uint32)info.titleDataFormat));
+		addText(node, "path", _pathToUtf8(info.path));
+		if (!info.subPath.empty())
+			addText(node, "sub_path", info.subPath);
 	}
 
-	fs::path tmpPath = fs::path(sTLCacheFilePath.parent_path()).append(fmt::format("{}__tmp", _pathToUtf8(sTLCacheFilePath.filename())));
-	std::ofstream fileOut(tmpPath, std::ios::out | std::ios::binary | std::ios::trunc);
-	if (!fileOut.is_open())
+	// write a temporary file next to the cache, then replace the cache with it
+	const fs::path tempFile = s_cacheFile.parent_path() / fmt::format("{}__tmp", _pathToUtf8(s_cacheFile.filename()));
+	std::ofstream out(tempFile, std::ios::out | std::ios::binary | std::ios::trunc);
+	if (!out.is_open())
 	{
-		cemuLog_log(LogType::Force, "Unable to store title list in {}", _pathToUtf8(tmpPath));
+		cemuLog_log(LogType::Force, "Title list cache: cannot write {}", _pathToUtf8(tempFile));
 		return;
 	}
-	doc.save(fileOut, " ", 1, pugi::xml_encoding::encoding_utf8);
-	fileOut.flush();
-	fileOut.close();
-
+	doc.save(out, " ", pugi::format_indent, pugi::xml_encoding::encoding_utf8);
+	out.close();
 	std::error_code ec;
-	fs::rename(tmpPath, sTLCacheFilePath, ec);
+	fs::rename(tempFile, s_cacheFile, ec);
 }
 
 void CafeTitleList::ClearScanPaths()
 {
-	std::unique_lock _lock(sTLMutex);
-	sTLScanPaths.clear();
+	std::lock_guard lock(s_mutex);
+	s_gamePaths.clear();
 }
 
 void CafeTitleList::AddScanPath(fs::path path)
-{	
-	std::unique_lock _lock(sTLMutex);
-	sTLScanPaths.emplace_back(path);
+{
+	std::lock_guard lock(s_mutex);
+	s_gamePaths.push_back(std::move(path));
 }
 
 void CafeTitleList::SetMLCPath(fs::path path)
 {
-	std::unique_lock _lock(sTLMutex);
+	std::lock_guard lock(s_mutex);
 	std::error_code ec;
 	if (!fs::is_directory(path, ec))
 	{
-		cemuLog_log(LogType::Force, "MLC set to invalid path: {}", _pathToUtf8(path));
+		cemuLog_log(LogType::Force, "Title list: mlc path {} is not a folder", _pathToUtf8(path));
 		return;
 	}
-	sTLMLCPath = path;
+	s_mlcPath = std::move(path);
 }
 
 void CafeTitleList::Refresh()
 {
-	std::unique_lock _lock(sTLMutex);
-	cemu_assert_debug(sTLInitialized);
-	sTLRefreshRequests++;
-	if (!sTLRefreshWorkerActive)
+	std::lock_guard lock(s_mutex);
+	cemu_assert_debug(s_initialized);
+	s_pendingScanRequests++;
+	if (!s_scanThreadRunning)
 	{
-		if (sTLRefreshWorker.joinable())
-			sTLRefreshWorker.join();
-		sTLRefreshWorkerActive = true;
-		sTLRefreshWorker = std::thread(RefreshWorkerThread);
+		if (s_scanThread.joinable())
+			s_scanThread.join();
+		s_scanThreadRunning = true;
+		s_scanThread = std::thread(RefreshWorkerThread);
 	}
-	sTLIsScanMandatory = false;
+	s_waitForScan = false;
 }
 
 bool CafeTitleList::IsScanning()
 {
-	std::unique_lock _lock(sTLMutex);
-	return sTLRefreshWorkerActive;
+	std::lock_guard lock(s_mutex);
+	return s_scanThreadRunning;
 }
 
 void CafeTitleList::WaitForMandatoryScan()
 {
-	if (!sTLIsScanMandatory)
+	if (!s_waitForScan)
 		return;
 	while (IsScanning())
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
 }
 
-void _RemoveTitleFromMultimap(TitleInfo* titleInfo)
-{
-	auto mapRange = sTLMap.equal_range(titleInfo->GetAppTitleId());
-	for (auto mapIt = mapRange.first; mapIt != mapRange.second; ++mapIt)
-	{
-		if (mapIt->second == titleInfo)
-		{
-			sTLMap.erase(mapIt);
-			return;
-		}
-	}
-	cemu_assert_suspicious();
-}
-
-// check if path is a valid title and if it is, permanently add it to the title list
-// in the special case that path points to a WUA file, all contained titles will be added
+// A .wua can hold several titles; each root folder named <titleid>_v<version>
+// is one title. Any other path is probed as a single title.
 void CafeTitleList::AddTitleFromPath(fs::path path)
 {
 	if (path.has_extension() && boost::iequals(_pathToUtf8(path.extension()), ".wua"))
 	{
-		ZArchiveReader* zar = ZArchiveReader::OpenFromFile(path);
-		if (!zar)
+		std::unique_ptr<ZArchiveReader> archive(ZArchiveReader::OpenFromFile(path));
+		if (!archive)
 		{
-			cemuLog_log(LogType::Force, "Found {} but it is not a valid Wii U archive file", _pathToUtf8(path));
+			cemuLog_log(LogType::Force, "{} is not a valid Wii U archive", _pathToUtf8(path));
 			return;
 		}
-		// enumerate all contained titles
-		ZArchiveNodeHandle rootDir = zar->LookUp("", false, true);
-		cemu_assert(rootDir != ZARCHIVE_INVALID_NODE);
-		for (uint32 i = 0; i < zar->GetDirEntryCount(rootDir); i++)
+		const ZArchiveNodeHandle root = archive->LookUp("", false, true);
+		cemu_assert(root != ZARCHIVE_INVALID_NODE);
+		const uint32 count = archive->GetDirEntryCount(root);
+		for (uint32 i = 0; i < count; i++)
 		{
-			ZArchiveReader::DirEntry dirEntry;
-			if( !zar->GetDirEntry(rootDir, i, dirEntry) )
+			ZArchiveReader::DirEntry entry;
+			if (!archive->GetDirEntry(root, i, entry) || !entry.isDirectory)
 				continue;
-			if(!dirEntry.isDirectory)
-				continue;
-			TitleId parsedId;
-			uint16 parsedVersion;
-			if (!TitleInfo::ParseWuaTitleFolderName(dirEntry.name, parsedId, parsedVersion))
+			TitleId titleId;
+			uint16 version;
+			if (!TitleInfo::ParseWuaTitleFolderName(entry.name, titleId, version))
 			{
-				cemuLog_log(LogType::Force, "Invalid title directory in {}: \"{}\"", _pathToUtf8(path), dirEntry.name);
+				cemuLog_log(LogType::Force, "{}: folder \"{}\" is not named like a title", _pathToUtf8(path), entry.name);
 				continue;
 			}
-			// valid subdirectory
-			TitleInfo* titleInfo = new TitleInfo(path, dirEntry.name);
+			auto titleInfo = std::make_unique<TitleInfo>(path, entry.name);
 			if (titleInfo->IsValid())
-				AddDiscoveredTitle(titleInfo);
-			else
-				delete titleInfo;
+				AddDiscoveredTitle(titleInfo.release());
 		}
-		delete zar;
 		return;
 	}
-	TitleInfo* titleInfo = new TitleInfo(path);
+	auto titleInfo = std::make_unique<TitleInfo>(path);
 	if (titleInfo->IsValid())
-		AddDiscoveredTitle(titleInfo);
-	else
-		delete titleInfo;
+		AddDiscoveredTitle(titleInfo.release());
 }
 
 bool CafeTitleList::RefreshWorkerThread()
 {
 	SetThreadName("TitleListWorker");
-	while (sTLRefreshRequests.load())
+	while (s_pendingScanRequests.exchange(0) != 0)
 	{
-		sTLRefreshRequests.store(0);
-		// create copies of all the paths
-		sTLMutex.lock();
-		fs::path mlcPath = sTLMLCPath;
-		std::vector<fs::path> gamePaths = sTLScanPaths;
-		// remember the current list of known titles
-		// during the scanning process we will erase matches from the pending list
-		// at the end of scanning, we can then use this list to identify and remove any titles that are no longer discoverable
-		sTLListPending = sTLList;
-		sTLMutex.unlock();
-		// scan game paths
-		for (auto& it : gamePaths)
-			ScanGamePath(it);
-		// scan MLC
+		fs::path mlcPath;
+		std::vector<fs::path> gamePaths;
+		{
+			std::lock_guard lock(s_mutex);
+			mlcPath = s_mlcPath;
+			gamePaths = s_gamePaths;
+			s_notYetRediscovered = s_titles;
+		}
+		for (const fs::path& gamePath : gamePaths)
+			ScanGamePath(gamePath);
 		if (!mlcPath.empty())
 		{
 			std::error_code ec;
-			for (auto& it : fs::directory_iterator(mlcPath / "usr/title", ec))
+			for (const fs::directory_entry& entry : fs::directory_iterator(mlcPath / "usr/title", ec))
 			{
-				if (!it.is_directory(ec))
-					continue;
-				ScanMLCPath(it.path());
+				if (entry.is_directory(ec))
+					ScanMLCPath(entry.path());
 			}
 			ScanMLCPath(mlcPath / "sys/title/00050010");
 			ScanMLCPath(mlcPath / "sys/title/00050030");
 		}
 
-		// remove any titles that are still pending
-		for (auto& itPending : sTLListPending)
+		// whatever was not found again is gone
+		std::lock_guard lock(s_mutex);
+		if (!s_notYetRediscovered.empty())
+			s_cacheNeedsSaving = true;
+		for (TitleInfo* gone : s_notYetRediscovered)
 		{
-			_RemoveTitleFromMultimap(itPending);
-			std::erase(sTLList, itPending);
+			ForgetTitleId(gone);
+			std::erase(s_titles, gone);
 		}
-		// send notifications for removed titles, but only if there exists no other title with the same titleId and version
-		if (!sTLListPending.empty())
-			sTLCacheDirty = true;
-		for (auto& itPending : sTLListPending)
+		for (TitleInfo* gone : s_notYetRediscovered)
 		{
-			CafeTitleListCallbackEvent evt;
-			evt.eventType = CafeTitleListCallbackEvent::TYPE::TITLE_REMOVED;
-			evt.titleInfo = itPending;
-			for (auto& it : sTLCallbackList)
-				it.cb(&evt, it.ctx);
-			delete itPending;
+			Notify(CafeTitleListCallbackEvent::TYPE::TITLE_REMOVED, gone);
+			delete gone;
 		}
-		sTLListPending.clear();
+		s_notYetRediscovered.clear();
 	}
-	sTLMutex.lock();
-	sTLRefreshWorkerActive = false;
-	// send notification that scanning finished
-	CafeTitleListCallbackEvent evt;
-	evt.eventType = CafeTitleListCallbackEvent::TYPE::SCAN_FINISHED;
-	evt.titleInfo = nullptr;
-	for (auto& it : sTLCallbackList)
-		it.cb(&evt, it.ctx);
-	sTLMutex.unlock();
-	if (sTLCacheDirty)
+	{
+		std::lock_guard lock(s_mutex);
+		s_scanThreadRunning = false;
+		Notify(CafeTitleListCallbackEvent::TYPE::SCAN_FINISHED, nullptr);
+	}
+	if (s_cacheNeedsSaving)
 	{
 		StoreCacheFile();
-		sTLCacheDirty = false;
+		s_cacheNeedsSaving = false;
 	}
 	return true;
 }
 
-bool _IsKnownFileNameOrExtension(const fs::path& path)
-{
-	std::string fileExtension = _pathToUtf8(path.extension());
-	for (auto& it : fileExtension)
-		it = _ansiToLower(it);
-	if(fileExtension == ".tmd")
-	{
-		// must be "title.tmd"
-		std::string fileName = _pathToUtf8(path.filename());
-		for (auto& it : fileName)
-			it = _ansiToLower(it);
-		return fileName == "title.tmd";
-	}
-	return
-		fileExtension == ".wud" ||
-		fileExtension == ".wux" ||
-		fileExtension == ".iso" ||
-		fileExtension == ".wua" ||
-		fileExtension == ".wuhb";
-	// note: To detect extracted titles with RPX we rely on the presence of the content,code,meta directory structure
-}
-
 void CafeTitleList::ScanGamePath(const fs::path& path)
 {
-	// scan the whole directory first to determine if this is a title folder
-	std::vector<fs::path> filesInDirectory;
-	std::vector<fs::path> dirsInDirectory;
-	bool hasContentFolder = false, hasCodeFolder = false, hasMetaFolder = false;
+	std::vector<fs::path> files;
+	std::vector<fs::path> folders;
+	bool hasContent = false, hasCode = false, hasMeta = false;
 	std::error_code ec;
-	for (auto& it : fs::directory_iterator(path, ec))
-	{		
-		if (it.is_regular_file(ec))
+	for (const fs::directory_entry& entry : fs::directory_iterator(path, ec))
+	{
+		if (entry.is_regular_file(ec))
+			files.push_back(entry.path());
+		else if (entry.is_directory(ec))
 		{
-			filesInDirectory.emplace_back(it.path());
-		}
-		else if (it.is_directory(ec))
-		{
-			dirsInDirectory.emplace_back(it.path());
-			std::string dirName = _pathToUtf8(it.path().filename());
-			if (boost::iequals(dirName, "content"))
-				hasContentFolder = true;
-			else if (boost::iequals(dirName, "code"))
-				hasCodeFolder = true;
-			else if (boost::iequals(dirName, "meta"))
-				hasMetaFolder = true;
+			folders.push_back(entry.path());
+			const std::string name = _pathToUtf8(entry.path().filename());
+			hasContent |= boost::iequals(name, "content");
+			hasCode |= boost::iequals(name, "code");
+			hasMeta |= boost::iequals(name, "meta");
 		}
 	}
-	// always check individual files
-	for (auto& it : filesInDirectory)
+	// probing files is slow, only look at known title file names
+	for (const fs::path& file : files)
 	{
-		// since checking individual files is slow, we limit it to known file names or extensions
-		if (!it.has_extension())
-			continue;
-		if (!_IsKnownFileNameOrExtension(it))
-			continue;
-		AddTitleFromPath(it);
+		if (file.has_extension() && IsCandidateTitleFile(file))
+			AddTitleFromPath(file);
 	}
-	// is the current directory a title folder?
-	if (hasContentFolder && hasCodeFolder && hasMetaFolder)
+	if (hasContent && hasCode && hasMeta)
 	{
-		// verify if this folder is a valid title
-		TitleInfo* titleInfo = new TitleInfo(path);
+		// this folder is an extracted title
+		auto titleInfo = std::make_unique<TitleInfo>(path);
 		if (titleInfo->IsValid())
-			AddDiscoveredTitle(titleInfo);
-		else
-			delete titleInfo;
-		// if there are other folders besides content/code/meta then traverse those
-		if (dirsInDirectory.size() > 3)
+			AddDiscoveredTitle(titleInfo.release());
+		// it may still contain further titles in other subfolders
+		if (folders.size() > 3)
 		{
-			for (auto& it : dirsInDirectory)
+			for (const fs::path& folder : folders)
 			{
-				std::string dirName = _pathToUtf8(it.filename());
-				if (!boost::iequals(dirName, "content") &&
-					!boost::iequals(dirName, "code") &&
-					!boost::iequals(dirName, "meta"))
-					ScanGamePath(it);
+				if (!IsTitleSubfolderName(_pathToUtf8(folder.filename())))
+					ScanGamePath(folder);
 			}
 		}
 	}
 	else
 	{
-		// scan subdirectories
-		for (auto& it : dirsInDirectory)
-			ScanGamePath(it);
+		for (const fs::path& folder : folders)
+			ScanGamePath(folder);
 	}
 }
 
+// mlc layout: <...>/title/<id high>/<id low>/{code,content,meta}
 void CafeTitleList::ScanMLCPath(const fs::path& path)
 {
 	std::error_code ec;
-	for (auto& it : fs::directory_iterator(path, ec))
+	for (const fs::directory_entry& entry : fs::directory_iterator(path, ec))
 	{
-		if (!it.is_directory())
+		if (!entry.is_directory(ec))
 			continue;
-		// only scan directories which match the title id naming scheme
-		std::string dirName = _pathToUtf8(it.path().filename());
-		if(dirName.size() != 8)
+		const std::string name = _pathToUtf8(entry.path().filename());
+		if (name.size() != 8 || !IsHexString(name))
 			continue;
-		bool containsNoHexCharacter = false;
-		for (auto& it : dirName)
-		{
-			if(it >= 'A' && it <= 'F' ||
-				it >= 'a' && it <= 'f' ||
-				it >= '0' && it <= '9')
-				continue;
-			containsNoHexCharacter = true;
-			break;
-		}
-		if(containsNoHexCharacter)
+		if (!fs::is_directory(entry.path() / "code", ec) || !fs::is_directory(entry.path() / "content", ec) || !fs::is_directory(entry.path() / "meta", ec))
 			continue;
-
-		if (fs::is_directory(it.path() / "code", ec) &&
-			fs::is_directory(it.path() / "content", ec) &&
-			fs::is_directory(it.path() / "meta", ec))
-		{
-			TitleInfo* titleInfo = new TitleInfo(it);
-			if (titleInfo->IsValid() && titleInfo->ParseXmlInfo())
-				AddDiscoveredTitle(titleInfo);
-			else
-				delete titleInfo;
-		}
+		auto titleInfo = std::make_unique<TitleInfo>(entry.path());
+		if (titleInfo->IsValid() && titleInfo->ParseXmlInfo())
+			AddDiscoveredTitle(titleInfo.release());
 	}
 }
 
 void CafeTitleList::AddDiscoveredTitle(TitleInfo* titleInfo)
 {
 	cemu_assert_debug(titleInfo->ParseXmlInfo());
-	std::unique_lock _lock(sTLMutex);
-	// remove from pending list
-	auto pendingIt = std::find_if(sTLListPending.begin(), sTLListPending.end(), [titleInfo](const TitleInfo* it) { return it->IsEqualByLocation(*titleInfo); });
-	if (pendingIt != sTLListPending.end())
-		sTLListPending.erase(pendingIt);
-	AddTitle(titleInfo);	
+	std::lock_guard lock(s_mutex);
+	auto stillKnown = std::find_if(s_notYetRediscovered.begin(), s_notYetRediscovered.end(), [titleInfo](const TitleInfo* t) { return t->IsEqualByLocation(*titleInfo); });
+	if (stillKnown != s_notYetRediscovered.end())
+		s_notYetRediscovered.erase(stillKnown);
+	AddTitle(titleInfo);
 }
 
+// takes ownership; caller holds the lock
 void CafeTitleList::AddTitle(TitleInfo* titleInfo)
 {
-	// check if title is already known
-	if (titleInfo->IsCached())
+	auto sameLocation = std::find_if(s_titles.begin(), s_titles.end(), [titleInfo](const TitleInfo* t) { return t->IsEqualByLocation(*titleInfo); });
+	if (sameLocation != s_titles.end())
 	{
-		bool isKnown = std::any_of(sTLList.cbegin(), sTLList.cend(), [&titleInfo](const TitleInfo* ti) { return titleInfo->IsEqualByLocation(*ti); });
-		if (isKnown)
+		// a parsed title replaces a cache entry for the same location, anything else is a duplicate
+		if (titleInfo->IsCached() || !(*sameLocation)->IsCached())
 		{
 			delete titleInfo;
 			return;
 		}
+		TitleInfo* replaced = *sameLocation;
+		s_titles.erase(sameLocation);
+		ForgetTitleId(replaced);
+		delete replaced;
 	}
-	else
-	{
-		auto it = std::find_if(sTLList.begin(), sTLList.end(), [titleInfo](const TitleInfo* it) { return it->IsEqualByLocation(*titleInfo); });
-		if (it != sTLList.end())
-		{
-			if ((*it)->IsCached())
-			{
-				// replace cached entry with newly parsed title
-				TitleInfo* deletedInfo = *it;
-				sTLList.erase(it);
-				_RemoveTitleFromMultimap(deletedInfo);
-				delete deletedInfo;
-			}
-			else
-			{
-				// title already known
-				delete titleInfo;
-				return;
-			}
-		}
-	}
-	sTLList.emplace_back(titleInfo);
-	sTLMap.emplace(titleInfo->GetAppTitleId(), titleInfo);
-	// send out notification
-	CafeTitleListCallbackEvent evt;
-	evt.eventType = CafeTitleListCallbackEvent::TYPE::TITLE_DISCOVERED;
-	evt.titleInfo = titleInfo;
-	for (auto& it : sTLCallbackList)
-		it.cb(&evt, it.ctx);
-	sTLCacheDirty = true;
+	s_titles.push_back(titleInfo);
+	s_titlesById.emplace(titleInfo->GetAppTitleId(), titleInfo);
+	Notify(CafeTitleListCallbackEvent::TYPE::TITLE_DISCOVERED, titleInfo);
+	s_cacheNeedsSaving = true;
 }
 
-uint64 CafeTitleList::RegisterCallback(void(*cb)(CafeTitleListCallbackEvent* evt, void* ctx), void* ctx)
+uint64 CafeTitleList::RegisterCallback(void (*cb)(CafeTitleListCallbackEvent* evt, void* ctx), void* ctx)
 {
-	static std::atomic<uint64_t> sCallbackIdGen = 1;
-	uint64 id = sCallbackIdGen.fetch_add(1);
-	std::unique_lock _lock(sTLMutex);
-	sTLCallbackList.emplace_back(cb, ctx, id);
-	// immediately notify of all known titles
-	for (auto& it : sTLList)
+	static std::atomic<uint64> s_nextId{1};
+	const uint64 id = s_nextId.fetch_add(1);
+	std::lock_guard lock(s_mutex);
+	s_listeners.push_back({cb, ctx, id});
+	for (TitleInfo* titleInfo : s_titles)
 	{
-		CafeTitleListCallbackEvent evt;
-		evt.eventType = CafeTitleListCallbackEvent::TYPE::TITLE_DISCOVERED;
-		evt.titleInfo = it;
+		CafeTitleListCallbackEvent evt{CafeTitleListCallbackEvent::TYPE::TITLE_DISCOVERED, titleInfo};
 		cb(&evt, ctx);
 	}
-	// if not scanning then send out scan finished notification
-	if (!sTLRefreshWorkerActive)
-	{
-		CafeTitleListCallbackEvent evt;
-		evt.eventType = CafeTitleListCallbackEvent::TYPE::SCAN_FINISHED;
-		evt.titleInfo = nullptr;
-		for (auto& it : sTLCallbackList)
-			it.cb(&evt, it.ctx);
-	}
+	if (!s_scanThreadRunning)
+		Notify(CafeTitleListCallbackEvent::TYPE::SCAN_FINISHED, nullptr); // (all listeners, as before)
 	return id;
 }
 
 void CafeTitleList::UnregisterCallback(uint64 id)
 {
-	std::unique_lock _lock(sTLMutex);
-	auto it = std::find_if(sTLCallbackList.begin(), sTLCallbackList.end(), [id](auto& e) { return e.uniqueId == id; });
-	cemu_assert(it != sTLCallbackList.end()); // must be a valid callback
-	sTLCallbackList.erase(it);
+	std::lock_guard lock(s_mutex);
+	auto it = std::find_if(s_listeners.begin(), s_listeners.end(), [id](const ListenerEntry& e) { return e.id == id; });
+	cemu_assert(it != s_listeners.end());
+	s_listeners.erase(it);
 }
 
 bool CafeTitleList::HasTitle(TitleId titleId, uint16& versionOut)
 {
-	// todo - optimize?
-	bool matchFound = false;
 	versionOut = 0;
-	std::unique_lock _lock(sTLMutex);
-	for (auto& it : sTLList)
+	bool found = false;
+	std::lock_guard lock(s_mutex);
+	for (TitleInfo* titleInfo : s_titles)
 	{
-		if (it->GetAppTitleId() == titleId)
-		{
-			uint16 titleVersion = it->GetAppTitleVersion();
-			if (titleVersion > versionOut)
-				versionOut = titleVersion;
-			matchFound = true;
-		}
+		if (titleInfo->GetAppTitleId() != titleId)
+			continue;
+		found = true;
+		versionOut = std::max(versionOut, titleInfo->GetAppTitleVersion());
 	}
-	return matchFound;
+	return found;
 }
 
 bool CafeTitleList::HasTitleAndVersion(TitleId titleId, uint16 version)
 {
-	std::unique_lock _lock(sTLMutex);
-	for (auto& it : sTLList)
-	{
-		if (it->GetAppTitleId() == titleId && it->GetAppTitleVersion() == version)
-			return true;
-	}
-	return false;
+	std::lock_guard lock(s_mutex);
+	return std::any_of(s_titles.begin(), s_titles.end(), [&](TitleInfo* t) { return t->GetAppTitleId() == titleId && t->GetAppTitleVersion() == version; });
 }
 
 std::vector<TitleId> CafeTitleList::GetAllTitleIds()
 {
-	std::unordered_set<TitleId> visitedTitleIds;
-	std::unique_lock _lock(sTLMutex);
-	std::vector<TitleId> titleIds;
-	titleIds.reserve(sTLList.size());
-	for (auto& it : sTLList)
+	std::lock_guard lock(s_mutex);
+	std::vector<TitleId> result;
+	std::unordered_set<TitleId> seen;
+	for (TitleInfo* titleInfo : s_titles)
 	{
-		TitleId tid = it->GetAppTitleId();
-		if (visitedTitleIds.find(tid) != visitedTitleIds.end())
-			continue;
-		titleIds.emplace_back(tid);
-		visitedTitleIds.emplace(tid);
+		const TitleId titleId = titleInfo->GetAppTitleId();
+		if (seen.insert(titleId).second)
+			result.push_back(titleId);
 	}
-	return titleIds;
+	return result;
 }
 
 std::span<TitleInfo*> CafeTitleList::AcquireInternalList()
 {
-	sTLMutex.lock();
-	return { sTLList.data(), sTLList.size() };
+	s_mutex.lock();
+	return {s_titles.data(), s_titles.size()};
 }
 
 void CafeTitleList::ReleaseInternalList()
 {
-	sTLMutex.unlock();
+	s_mutex.unlock();
 }
 
 bool CafeTitleList::GetFirstByTitleId(TitleId titleId, TitleInfo& titleInfoOut)
 {
-	std::unique_lock _lock(sTLMutex);
-	auto it = sTLMap.find(titleId);
-	if (it != sTLMap.end())
-	{
-		cemu_assert_debug(it->first == titleId);
-		titleInfoOut = *it->second;
-		return true;
-	}
-	return false;
+	std::lock_guard lock(s_mutex);
+	auto it = s_titlesById.find(titleId);
+	if (it == s_titlesById.end())
+		return false;
+	titleInfoOut = *it->second;
+	return true;
 }
 
-// takes update or AOC title id and returns the title id of the associated base title
-// this can fail if trying to translate an AOC title id without having the base title meta information
+// Update and DLC ids map to the base game id. DLC is assumed to share the base
+// game's id apart from the category byte.
 bool CafeTitleList::FindBaseTitleId(TitleId titleId, TitleId& titleIdBaseOut)
 {
 	titleId = TitleIdParser::MakeBaseTitleId(titleId);
-
-	// aoc to base
-	// todo - this requires scanning all base titles and their updates to see if they reference this title id
-	// for now we assume there is a direct match of ids
 	if (((titleId >> 32) & 0xFF) == 0x0C)
-	{
-		titleId &= ~0xFF00000000;
-		titleId |= 0x0000000000;
-	}
+		titleId &= ~(0xFFull << 32);
 	titleIdBaseOut = titleId;
 	return true;
 }
@@ -630,47 +520,30 @@ bool CafeTitleList::FindBaseTitleId(TitleId titleId, TitleId& titleIdBaseOut)
 GameInfo2 CafeTitleList::GetGameInfo(TitleId titleId)
 {
 	GameInfo2 gameInfo;
-
-	// find base title id
-	uint64 baseTitleId;
+	TitleId baseTitleId;
 	if (!FindBaseTitleId(titleId, baseTitleId))
-	{
 		cemu_assert_suspicious();
-	}
-	// determine if an optional update title id exists
-	TitleIdParser tip(baseTitleId);
-	bool hasSeparateUpdateTitleId = tip.CanHaveSeparateUpdateTitleId();
-	uint64 updateTitleId = 0;
-	if (hasSeparateUpdateTitleId)
-		updateTitleId = tip.GetSeparateUpdateTitleId();	
-	// scan the title list for base and update
-	std::unique_lock _lock(sTLMutex);
-	for (auto& it : sTLList)
-	{
-		TitleId appTitleId = it->GetAppTitleId();
-		if (appTitleId == baseTitleId)
-		{
-			gameInfo.SetBase(*it);
-		}
-		if (hasSeparateUpdateTitleId && appTitleId == updateTitleId)
-		{
-			gameInfo.SetUpdate(*it);
-		}
-	}
+	const TitleIdParser baseParser(baseTitleId);
+	const bool hasUpdateId = baseParser.CanHaveSeparateUpdateTitleId();
+	const TitleId updateTitleId = hasUpdateId ? baseParser.GetSeparateUpdateTitleId() : 0;
 
-	// if this title can have AOC content then do a second scan
-	// todo - get a list of all AOC title ids from the base/update meta information
-	// for now we assume there is a direct match between the base titleId and the aoc titleId
-	if (tip.CanHaveSeparateUpdateTitleId())
+	std::lock_guard lock(s_mutex);
+	for (TitleInfo* titleInfo : s_titles)
 	{
-		uint64 aocTitleId = baseTitleId | 0xC00000000;
-		for (auto& it : sTLList)
+		const TitleId id = titleInfo->GetAppTitleId();
+		if (id == baseTitleId)
+			gameInfo.SetBase(*titleInfo);
+		if (hasUpdateId && id == updateTitleId)
+			gameInfo.SetUpdate(*titleInfo);
+	}
+	if (hasUpdateId)
+	{
+		// DLC: same id with category 0C
+		const TitleId aocTitleId = baseTitleId | (0x0Cull << 32);
+		for (TitleInfo* titleInfo : s_titles)
 		{
-			TitleId appTitleId = it->GetAppTitleId();
-			if (appTitleId == aocTitleId)
-			{
-				gameInfo.AddAOC(*it); // stores the AOC with the highest title version
-			}
+			if (titleInfo->GetAppTitleId() == aocTitleId)
+				gameInfo.AddAOC(*titleInfo);
 		}
 	}
 	return gameInfo;
@@ -678,15 +551,15 @@ GameInfo2 CafeTitleList::GetGameInfo(TitleId titleId)
 
 TitleInfo CafeTitleList::GetTitleInfoByUID(uint64 uid)
 {
-	TitleInfo titleInfo;
-	std::unique_lock _lock(sTLMutex);
-	for (auto& it : sTLList)
+	TitleInfo result;
+	std::lock_guard lock(s_mutex);
+	for (TitleInfo* titleInfo : s_titles)
 	{
-		if (it->GetUID() == uid)
+		if (titleInfo->GetUID() == uid)
 		{
-			titleInfo = *it;
+			result = *titleInfo;
 			break;
 		}
 	}
-	return titleInfo;
+	return result;
 }
