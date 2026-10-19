@@ -1,7 +1,9 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "Cafe/IOSU/iosu_types_common.h"
 #include "Common/CafeString.h"
 
+// Data exchanged with nn_fp over /dev/fpd. All layouts are fixed by the guest library.
 namespace iosu
 {
 	namespace fpd
@@ -11,46 +13,44 @@ namespace iosu
 		static const int RELATIONSHIP_FRIENDREQUEST_IN = 2;
 		static const int RELATIONSHIP_FRIEND = 3;
 
-		static const int GAMEMODE_MAX_MESSAGE_LENGTH = 0x80; // limit includes null-terminator character, so only 0x7F actual characters can be used
-		static const int MY_COMMENT_LENGTH = 0x11; // includes null-terminator character
+		static const int GAMEMODE_MAX_MESSAGE_LENGTH = 0x80; // in UTF-16 units, terminator included
+		static const int MY_COMMENT_LENGTH = 0x11; // in UTF-16 units, terminator included
 
 		struct FPDDate
 		{
-			/* +0x0 */ uint16be year;
-			/* +0x2 */ uint8 month;
-			/* +0x3 */ uint8 day;
-			/* +0x4 */ uint8 hour;
-			/* +0x5 */ uint8 minute;
-			/* +0x6 */ uint8 second;
-			/* +0x7 */ uint8 padding;
+			uint16be year;
+			uint8 month;
+			uint8 day;
+			uint8 hour;
+			uint8 minute;
+			uint8 second;
+			uint8 padding;
 		};
-
 		static_assert(sizeof(FPDDate) == 8);
 
 		struct RecentPlayRecordEx
 		{
-			/* +0x00 */ uint32be pid;
-			/* +0x04 */ uint8 ukn04;
-			/* +0x05 */ uint8 ukn05;
-			/* +0x06 */ uint8 ukn06[0x22];
-			/* +0x28 */ uint8 ukn28[0x22];
-			/* +0x4A */ uint8 _uknOrPadding4A[6];
-			/* +0x50 */ uint32be ukn50;
-			/* +0x54 */ uint32be ukn54;
-			/* +0x58 */ uint16be ukn58;
-			/* +0x5C */ uint8 _padding5C[4];
-			/* +0x60 */ iosu::fpd::FPDDate date;
+			uint32be pid;
+			uint8 ukn04;
+			uint8 ukn05;
+			uint8 ukn06[0x22];
+			uint8 ukn28[0x22];
+			uint8 _uknOrPadding4A[6];
+			uint32be ukn50;
+			uint32be ukn54;
+			uint16be ukn58;
+			uint8 _padding5C[4];
+			iosu::fpd::FPDDate date;
 		};
-
-		static_assert(sizeof(RecentPlayRecordEx) == 0x68, "");
-		static_assert(offsetof(RecentPlayRecordEx, ukn06) == 0x06, "");
-		static_assert(offsetof(RecentPlayRecordEx, ukn50) == 0x50, "");
+		static_assert(sizeof(RecentPlayRecordEx) == 0x68);
+		static_assert(offsetof(RecentPlayRecordEx, ukn06) == 0x06);
+		static_assert(offsetof(RecentPlayRecordEx, ukn50) == 0x50);
 
 		struct GameKey
 		{
-			/* +0x00 */ uint64be titleId;
-			/* +0x08 */ uint16be ukn08;
-			/* +0x0A */ uint8 _padding0A[6];
+			uint64be titleId;
+			uint16be ukn08; // title version
+			uint8 _padding0A[6];
 		};
 		static_assert(sizeof(GameKey) == 0x10);
 
@@ -65,74 +65,73 @@ namespace iosu
 
 		struct GameMode
 		{
-			/* +0x00 */ uint32be joinFlagMask;
-			/* +0x04 */ uint32be matchmakeType;
-			/* +0x08 */ uint32be joinGameId;
-			/* +0x0C */ uint32be joinGameMode;
-			/* +0x10 */ uint32be hostPid;
-			/* +0x14 */ uint32be groupId;
-			/* +0x18 */ uint8    appSpecificData[0x14];
+			uint32be joinFlagMask;
+			uint32be matchmakeType;
+			uint32be joinGameId;
+			uint32be joinGameMode;
+			uint32be hostPid;
+			uint32be groupId;
+			uint8 appSpecificData[0x14];
 		};
 		static_assert(sizeof(GameMode) == 0x2C);
 
 		struct Comment
 		{
-			/* +0x00 */ uint8 unk0;
-			/* +0x01 */ uint8 unk1;
-			/* +0x02 */ CafeWideString<MY_COMMENT_LENGTH> commentString;
+			uint8 unk0;
+			uint8 unk1;
+			CafeWideString<MY_COMMENT_LENGTH> commentString;
 		};
 		static_assert(sizeof(Comment) == 0x24);
 
+		// one entry of GetFriendListEx; the first 0xA0 bytes are shared by friends and friend requests
 		struct FriendData
 		{
-			/* +0x000 */ uint8 type; // type (Non-Zero -> Friend, 0 -> Friend request ? )
-			/* +0x001 */ uint8 _padding1[7];
-			/* +0x008 */ uint32be pid;
-			/* +0x00C */ char nnid[0x10 + 1];
-			/* +0x01D */ uint8 ukn01D;
-			/* +0x01E */ uint8 _padding1E[2];
-			/* +0x020 */ uint16be screenname[10 + 1];
-			/* +0x036 */ uint8 ukn036;
-			/* +0x037 */ uint8 _padding037;
-			/* +0x038 */ uint8 mii[0x60];
-			/* +0x098 */ FPDDate uknDate;
-			// sub struct (the part above seems to be shared with friend requests)
+			uint8 type; // 1 = friend, 0 = friend request
+			uint8 _padding1[7];
+			uint32be pid;
+			char nnid[0x10 + 1];
+			uint8 ukn01D;
+			uint8 _padding1E[2];
+			uint16be screenname[10 + 1];
+			uint8 ukn036;
+			uint8 _padding037;
+			uint8 mii[0x60];
+			FPDDate uknDate;
 			union
 			{
 				struct
 				{
-					/* +0x0A0 */ Profile profile; // this is returned for nn_fp.GetFriendProfile
-					/* +0x0A4 */ uint32be ukn0A4;
-					/* +0x0A8 */ GameKey gameKey;
-					/* +0x0B8 */ GameMode gameMode;
-					/* +0x0E4 */ uint8 unk0E4;
-					/* +0x0E5 */ uint8 unk0E5;
-					/* +0x0E6 */ CafeWideString<GAMEMODE_MAX_MESSAGE_LENGTH> gameModeDescription;
-					/* +0x1E6 */ uint8 unk1E6;
-					/* +0x1E7 */ uint8 unk1E7;
-					/* +0x1E8 */ Profile profile1E8; // how does it differ from the one at 0xA0? Returned by GetFriendPresence
-					/* +0x1EC */ uint8 isOnline;
-					/* +0x1ED */ uint8 _padding1ED[3];
-					// some other sub struct?
-					/* +0x1F0 */ Comment comment; // pops up every few seconds in friend list
-					/* +0x214 */ uint32be _padding214;
-					/* +0x218 */ FPDDate approvalTime;
-					/* +0x220 */ FPDDate lastOnline;
+					Profile profile; // GetFriendProfile
+					uint32be ukn0A4;
+					GameKey gameKey;
+					GameMode gameMode;
+					uint8 unk0E4;
+					uint8 unk0E5;
+					CafeWideString<GAMEMODE_MAX_MESSAGE_LENGTH> gameModeDescription;
+					uint8 unk1E6;
+					uint8 unk1E7;
+					Profile profile1E8; // GetFriendPresence
+					uint8 isOnline;
+					uint8 _padding1ED[3];
+					Comment comment;
+					uint32be _padding214;
+					FPDDate approvalTime;
+					FPDDate lastOnline;
 				}friendExtraData;
 				struct
 				{
-					/* +0x0A0 */ uint64be messageId; // guessed. If 0, then relationship is FRIENDSHIP_REQUEST_OUT, otherwise FRIENDSHIP_REQUEST_IN
-					/* +0x0A8 */ uint8 ukn0A8;
-					/* +0x0A9 */ uint8 ukn0A9; // comment language? (guessed)
-					/* +0x0AA */ uint16be comment[0x40];
-					/* +0x12A */ uint8 ukn12A; // ingame name language? (guessed)
-					/* +0x12B */ uint8 _padding12B;
-					/* +0x12C */ uint16be uknMessage[18]; // exact length unknown, could be shorter (ingame screen name?)
-					/* +0x150 */ uint64 gameKeyTitleId;
-					/* +0x158 */ uint16be gameKeyUkn;
-					/* +0x15A */ uint8 _padding[6];
-					/* +0x160 */ FPDDate uknData0;
-					/* +0x168 */ FPDDate uknData1;
+					uint64be messageId; // 0 for outgoing requests
+					uint8 ukn0A8;
+					uint8 ukn0A9;
+					uint16be comment[0x40];
+					uint8 ukn12A;
+					uint8 _padding12B;
+					uint16be uknMessage[18];
+					uint64 gameKeyTitleId;
+					uint16be gameKeyUkn;
+					uint8 _padding[6];
+					FPDDate uknData0;
+					FPDDate uknData1; // shown as the expiry date
 				}requestExtraData;
 			};
 		};
@@ -140,7 +139,6 @@ namespace iosu
 		static_assert(offsetof(FriendData, friendExtraData.gameKey) == 0x0A8);
 		static_assert(offsetof(FriendData, friendExtraData.gameModeDescription) == 0x0E6);
 		static_assert(offsetof(FriendData, friendExtraData.comment) == 0x1F0);
-
 		static_assert(offsetof(FriendData, requestExtraData.messageId) == 0x0A0);
 		static_assert(offsetof(FriendData, requestExtraData.comment) == 0x0AA);
 		static_assert(offsetof(FriendData, requestExtraData.uknMessage) == 0x12C);
@@ -149,17 +147,16 @@ namespace iosu
 
 		struct FriendBasicInfo
 		{
-			/* +0x00 */ uint32be pid;
-			/* +0x04 */ char nnid[0x11];
-			/* +0x15 */ uint8 ukn15;
-			/* +0x16 */ uint8 uknOrPadding[2];
-			/* +0x18 */ uint16be screenname[11];
-			/* +0x2E */ uint8 ukn2E; // bool option
-			/* +0x2F */ uint8 ukn2F;
-			/* +0x30 */ uint8 miiData[0x60];
-			/* +0x90 */ FPDDate uknDate90;
+			uint32be pid;
+			char nnid[0x11];
+			uint8 ukn15;
+			uint8 uknOrPadding[2];
+			uint16be screenname[11];
+			uint8 ukn2E;
+			uint8 ukn2F;
+			uint8 miiData[0x60];
+			FPDDate uknDate90;
 		};
-
 		static_assert(sizeof(FriendBasicInfo) == 0x98);
 		static_assert(offsetof(FriendBasicInfo, nnid) == 0x04);
 		static_assert(offsetof(FriendBasicInfo, ukn15) == 0x15);
@@ -169,30 +166,29 @@ namespace iosu
 
 		struct FriendRequest
 		{
-			/* +0x000 */ uint32be pid;
-			/* +0x004 */ uint8 nnid[17]; // guessed type
-			/* +0x015 */ uint8 _uknOrPadding15;
-			/* +0x016 */ uint8 _uknOrPadding16;
-			/* +0x017 */ uint8 _uknOrPadding17;
-			/* +0x018 */ uint16be screenname[11];
-			/* +0x02E */ uint8 ukn2E; // bool option
-			/* +0x02F */ uint8 ukn2F;  // ukn
-			/* +0x030 */ uint8 miiData[0x60];
-			/* +0x090 */ FPDDate uknDate;
-			/* +0x098 */ uint64 ukn98;
-			/* +0x0A0 */ uint8 isMarkedAsReceived;
-			/* +0x0A1 */ uint8 uknA1;
-			/* +0x0A2 */ uint16be message[0x40];
-			/* +0x122 */ uint8 ukn122;
-			/* +0x123 */ uint8 _padding123;
-			/* +0x124 */ uint16be uknString2[18];
-			/* +0x148 */ uint64 gameKeyTitleId;
-			/* +0x150 */ uint16be gameKeyUkn;
-			/* +0x152 */ uint8 _padding152[6];
-			/* +0x158 */ FPDDate uknDate2;
-			/* +0x160 */ FPDDate expireDate;
+			uint32be pid;
+			uint8 nnid[17];
+			uint8 _uknOrPadding15;
+			uint8 _uknOrPadding16;
+			uint8 _uknOrPadding17;
+			uint16be screenname[11];
+			uint8 ukn2E;
+			uint8 ukn2F;
+			uint8 miiData[0x60];
+			FPDDate uknDate;
+			uint64 ukn98;
+			uint8 isMarkedAsReceived;
+			uint8 uknA1;
+			uint16be message[0x40];
+			uint8 ukn122;
+			uint8 _padding123;
+			uint16be uknString2[18];
+			uint64 gameKeyTitleId;
+			uint16be gameKeyUkn;
+			uint8 _padding152[6];
+			FPDDate uknDate2;
+			FPDDate expireDate;
 		};
-
 		static_assert(sizeof(FriendRequest) == 0x168);
 		static_assert(offsetof(FriendRequest, uknDate) == 0x090);
 		static_assert(offsetof(FriendRequest, message) == 0x0A2);
@@ -202,10 +198,10 @@ namespace iosu
 		struct FriendPresence
 		{
 			GameMode gameMode;
-			/* +0x2C */ Profile  profile;
-			/* +0x30 */ uint8	 isOnline;
-			/* +0x31 */ uint8    isValid;
-			/* +0x32 */ uint8	 padding[2]; // guessed
+			Profile profile;
+			uint8 isOnline;
+			uint8 isValid;
+			uint8 padding[2];
 		};
 		static_assert(sizeof(FriendPresence) == 0x34);
 		static_assert(offsetof(FriendPresence, isOnline) == 0x30);
@@ -219,13 +215,14 @@ namespace iosu
 
 		struct FPDPreference
 		{
-			uint8be showOnline; // show online status to others
-			uint8be showGame; // show played game to others
-			uint8be blockFriendRequests; // block friend requests
-			uint8be ukn; // probably padding?
+			uint8be showOnline;
+			uint8be showGame;
+			uint8be blockFriendRequests;
+			uint8be ukn;
 		};
 		static_assert(sizeof(FPDPreference) == 4);
 
+		// ioctlv request numbers of /dev/fpd
 		enum class FPD_REQUEST_ID
 		{
 			LoginAsync = 0x2775,
@@ -248,10 +245,10 @@ namespace iosu
 			GetFriendMii = 0x2841,
 			GetBlackList = 0x28A1,
 			GetFriendRequestList = 0x2905,
-			UpdateGameModeVariation1 = 0x2969, // there seem to be two different requestIds for the 2-param and 3-param version of UpdateGameMode,
-			UpdateGameModeVariation2 = 0x296A, // but the third parameter is never used and the same handler is used for both
+			UpdateGameModeVariation1 = 0x2969, // UpdateGameMode with two and with three parameters,
+			UpdateGameModeVariation2 = 0x296A, // both handled the same way
 			AddFriendAsyncByPid = 0x29CD,
-			AddFriendAsyncByXXX = 0x29CE, // probably by name?
+			AddFriendAsyncByXXX = 0x29CE,
 			GetRequestBlockSettingAsync = 0x2B5D,
 			GetMyComment = 0x4EE9,
 			GetMyPlayingGame = 0x4EEA,
