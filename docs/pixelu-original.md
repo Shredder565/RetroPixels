@@ -54,12 +54,12 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 95815 | 31.6% |
-| Cemu, untouched | 150949 | 49.8% |
-| Cemu, with PixelU changes | 14833 | 4.9% |
-| PixelU-added files (MPL-2.0 header) | 1940 | 0.6% |
-| Third-party | 39404 | 13.0% |
-| **All** | **302941** | 100% |
+| Original (RetroPixels) | 103633 | 36.2% |
+| Cemu, untouched | 126344 | 44.2% |
+| Cemu, with PixelU changes | 14833 | 5.2% |
+| PixelU-added files (MPL-2.0 header) | 1940 | 0.7% |
+| Third-party | 39404 | 13.8% |
+| **All** | **286154** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -76,7 +76,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/HW/Espresso (core) | 1029 | 1029 | original |
 | Cafe/HW/Espresso/Debugger | 2459 | 2459 | original |
 | Cafe/HW/Espresso/Interpreter | 3252 | 3252 | original |
-| Cafe/HW/Espresso/Recompiler | 24605 | 0 | Cemu |
+| Cafe/HW/Espresso/Recompiler | 7818 | 7818 | original |
 | Cafe/HW/Latte/Common | 3130 | 3130 | original |
 | Cafe/HW/Latte/Core | 20296 | 0 | Cemu + PixelU change |
 | Cafe/HW/Latte/ISA | 2618 | 2618 | original |
@@ -745,3 +745,86 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
   front-facing input is only loaded when R0 is used; the fragCoordScale
   padding slot for old shader replacements; the AMD rg8 attribute
   workaround; the REMAPPED lookup order.
+- Batch 9: the PowerPC recompiler rewritten as original code: the front end
+  (PPCRecompilerImlGen.cpp, PPCRecompilerImlGenFPU.cpp,
+  PPCRecompilerIntermediate.cpp, PPCRecompilerIml.h, the function boundary
+  tracker), a new intermediate representation (IML/: instructions, blocks,
+  liveness and loop analysis, verifier, dead code removal, debug output),
+  a graph colouring register allocator (IMLRegisterAllocator*), the x86-64
+  backend (BackendX64/, including its own instruction encoder), the
+  AArch64 backend (BackendAArch64/, emitted with xbyak_aarch64) and the
+  runtime (PPCRecompiler.cpp/h: jump table, compile queue and worker
+  thread, entering and leaving generated code, invalidation). File names
+  and every symbol used outside the directory are unchanged:
+  PPCRecompiler_init/Shutdown/Enable/Disable, allocateRange,
+  invalidateRange, recompileIfUnvisited, attemptEnter(WithoutRecompile),
+  the enter/leave stub pointers, ppcRecompilerInstanceData and the jump
+  table layout (8 bytes per guest instruction, 4MB steps).
+  The IR is new: guest registers are fixed virtual registers (GPRs, FPRs
+  as paired doubles, one register per CR bit, CA/OV/SO, LR, CTR, GQRs, the
+  lwarx reservation), guest state is written back to PPCInterpreter_t
+  after every write that can be observed, and helper calls save only the
+  live caller-saved host registers. Instructions the front end does not
+  translate are run through the interpreter one at a time.
+  Verified with a differential harness that generates random guest
+  programs (integer, rotate/mask, load/store incl. string and byte-reversed
+  forms, lwarx/stwcx., FPU, paired singles, quantized loads/stores with all
+  GQR types, CR logic, branches, loops, bdnz, calls, HLE stubs that return,
+  continue, yield or burn cycles, and unsupported opcodes), runs each one
+  in the interpreter and in the recompiler, and compares all registers,
+  CR/XER/FPSCR, the reservation, LR/CTR and 1MB of data memory:
+  * x86-64, ASan/UBSan, g++: 1000 + 4x40000 programs without FTZ,
+    4x40000 with MXCSR.FTZ (as set for guest threads), 4x40000 with NaN
+    inputs excluded and exact NaN comparison, plus 4x25000 more (2 with,
+    2 without FTZ). 0 interpreted steps inside JIT runs. The only
+    remaining differences (0-2 per 10000 programs) are which NaN payload
+    wins when two NaN operands meet (the interpreter's result depends on
+    the host compiler's operand order; the JIT uses frA first like the
+    hardware), also when such a NaN is stored or moved through mtfsf.
+  * AArch64, UBSan, aarch64-linux-gnu-g++ -std=gnu++20 -O2 under
+    qemu-aarch64: 8x1000 + 8x5000 programs without FPCR.FZ, 8x5000 with
+    FZ, 8x5000 with FZ, no NaN inputs and exact NaN comparison. Same
+    result: only two-NaN payload differences (3 programs in 128000; NaNs
+    still appear in the NaN-free runs through fctiw results). ASan does not run under
+    qemu-user, so ASan coverage of the shared front end, IR and allocator
+    comes from the x86-64 runs.
+  * The old recompiler in the same harness (x86-64, 1000 programs) shows
+    286 mismatches against the interpreter (reservation, FPSCR[FPCC], CR,
+    paired single lanes, memory); those are the old JIT's deviations.
+  Syntax checks with g++ and clang++ of all recompiler files and of the
+  callers (CafeSystem, coreinit_Thread, coreinit_CodeGen, rpl, elf,
+  GraphicPack2PatchesApply, PPCInterpreterOPC, PPCScheduler, Debugger,
+  GDBStub, GDBBreakpoints); aarch64 cross g++ and clang
+  --target=aarch64 for all recompiler files including the x86-64 backend
+  sources that the aarch64 build also compiles. The x86-64 backend calls
+  helpers with the Microsoft x64 convention (ATTR_MS_ABI) on every OS.
+  Fixes and defined behaviour:
+  * Results follow the interpreter bit for bit: lfs widens exactly
+    (signaling NaNs stay signaling, denormals are normalised, independent
+    of FTZ/FZ), stfs stores without rounding, single precision multiplies
+    cut frC to 25 bits, ps_madd rounds the product first, fctiw/fctiwz
+    give 0xFFF80000 in the upper word (+1 for a negative input that gives
+    0) and 0x80000000 for NaN, divw/divwu give the Espresso results for
+    x/0 and 0x80000000/-1, fcmpu/ps_cmpu set FPSCR[FPCC] and VXSNAN,
+    ps_cmpo0 sets FPCC only, effective addresses wrap at 32 bits.
+  * On AArch64 the multiply-add family is fused like the compiler
+    contracts the interpreter's a*c+b. Whether fnmadds/fnmsubs negate
+    before or after rounding to single (GCC and clang differ, visible only
+    in the sign of an exact zero) is probed once from the interpreter's
+    own handler.
+  * dcbst and dcbf run through the interpreter (the old JIT skipped them,
+    so the data cache flush notification was lost).
+  * Compiled function records are freed on invalidation and shutdown (the
+    old code leaked them). Generated code memory is never reused, as
+    before.
+  * AArch64: code is assembled into ordinary memory and copied into one
+    RWX arena (MAP_JIT with pthread_jit_write_protect_np on macOS), with
+    an instruction cache flush. stwcx. at an unaligned address falls back
+    to a plain compare and store instead of faulting on the exclusive
+    access.
+  Kept on purpose:
+  * mftb returns OSGetSystemTime() like the old JIT did.
+  * Calls to unimplemented imports (HLE 0xFFD0) cost 500 extra cycles.
+  * The two leave stubs are identical code at different addresses; the
+    address marks a jump table entry as visited or not.
+  Log texts differ throughout.
