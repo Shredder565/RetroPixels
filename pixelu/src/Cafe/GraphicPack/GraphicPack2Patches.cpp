@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/GraphicPack/GraphicPack2.h"
 #include "Cemu/Logging/CemuLogging.h"
 #include "Common/FileStream.h"
@@ -7,194 +8,177 @@
 #include "Cafe/OS/RPL/rpl_structs.h"
 #include "boost/algorithm/string.hpp"
 
-// error handler
+std::recursive_mutex GraphicPack2::s_patchMutex;
+std::vector<const RPLModule*> GraphicPack2::s_loadedModules;
+
+// ---------------------------------------------------------------- error reporting
+
 void PatchErrorHandler::printError(class PatchGroup* patchGroup, sint32 lineNumber, std::string_view errorMsg)
 {
-	if (m_anyErrorTriggered == false)
+	if (!m_anyErrorTriggered)
 	{
-		// stage error msg
 		cemu_assert(m_gp);
-		if (m_stage == STAGE::PARSER)
-			cemuLog_writeLineToLog(fmt::format("An error occurred while trying to parse the patches for graphic pack \'{}\'", m_gp->GetName()), true, true);
-		else if (m_stage == STAGE::APPLY)
-			cemuLog_writeLineToLog(fmt::format("An error occurred while trying to apply the patches for graphic pack \'{}\'", m_gp->GetName()), true, true);
+		const char* what = m_stage == STAGE::PARSER ? "parsing" : "applying";
+		cemuLog_writeLineToLog(fmt::format("Graphic pack '{}': error while {} patches", m_gp->GetName(), what), true, true);
 	}
-
-	std::string msg;
-	if (patchGroup == nullptr && lineNumber >= 0)
-		msg.append(fmt::format("[Line {}] ", lineNumber));
-	else if (patchGroup && lineNumber >= 0)
-		msg.append(fmt::format("[{}, Line {}] ", patchGroup->getName(), lineNumber));
-	else if (patchGroup && lineNumber < 0)
-		msg.append(fmt::format("[{}] ", patchGroup->getName()));
-
-	msg.append(errorMsg);
-
-	cemuLog_writeLineToLog(msg, true, true);
 	m_anyErrorTriggered = true;
 
+	std::string location;
+	if (lineNumber >= 0)
+		location = patchGroup ? fmt::format("[{}, Line {}] ", patchGroup->getName(), lineNumber) : fmt::format("[Line {}] ", lineNumber);
+	else if (patchGroup)
+		location = fmt::format("[{}] ", patchGroup->getName());
+	std::string line = location + std::string(errorMsg);
+
+	cemuLog_writeLineToLog(line, true, true);
 	if (cemuLog_isLoggingEnabled(LogType::Patches))
-		errorMessages.emplace_back(msg);
+		errorMessages.push_back(std::move(line));
 }
 
 void PatchErrorHandler::showStageErrorMessageBox()
 {
-	std::string errorMsg;
+	cemu_assert_debug(m_gp != nullptr);
+	std::string text;
 	if (m_gp)
 	{
 		if (m_stage == STAGE::PARSER)
-			errorMsg.assign(_tr("Failed to load patches for graphic pack \'{}\'", m_gp->GetName()));
+			text = _tr("Failed to load patches for graphic pack \'{}\'", m_gp->GetName());
 		else
-			errorMsg.assign(_tr("Failed to apply patches for graphic pack \'{}\'", m_gp->GetName()));
-	}
-	else
-	{
-		cemu_assert_debug(false); // graphic pack should always be set
+			text = _tr("Failed to apply patches for graphic pack \'{}\'", m_gp->GetName());
 	}
 	if (cemuLog_isLoggingEnabled(LogType::Patches))
 	{
-		errorMsg.append("\n \n")
-			.append(_tr("Details:"))
-			.append("\n");
-		for (auto& itr : errorMessages)
+		text += "\n \n";
+		text += _tr("Details:");
+		text += "\n";
+		for (const std::string& msg : errorMessages)
 		{
-			errorMsg.append(itr);
-			errorMsg.append("\n");
+			text += msg;
+			text += "\n";
 		}
 	}
-
-	WindowSystem::ShowErrorDialog(errorMsg, _tr("Graphic pack error"), WindowSystem::ErrorCategory::GRAPHIC_PACKS);
+	WindowSystem::ShowErrorDialog(text, _tr("Graphic pack error"), WindowSystem::ErrorCategory::GRAPHIC_PACKS);
 }
 
-// loads Cemu-style patches (patch_<anything>.asm)
-// returns true if at least one file was found even if it could not be successfully parsed
+// ---------------------------------------------------------------- loading patch files
+
+// patch_*.asm files (Cemu format); returns true if at least one such file exists, even when it fails to parse
 bool GraphicPack2::LoadCemuPatches()
 {
-	bool foundPatches = false;
-	fs::path path(m_rulesPath);
-	path.remove_filename();
-	for (auto& p : fs::directory_iterator(path))
+	bool anyFile = false;
+	std::error_code ec;
+	for (const auto& entry : fs::directory_iterator(m_rulesPath.parent_path(), ec))
 	{
-		auto& path = p.path();
-		if (fs::is_regular_file(p.status()) && path.has_filename())
+		const fs::path& file = entry.path();
+		if (!entry.is_regular_file(ec) || !file.has_filename())
+			continue;
+		const std::string fileName = _pathToUtf8(file.filename());
+		if (!boost::istarts_with(fileName, "patch_") || !boost::iends_with(fileName, ".asm"))
+			continue;
+		anyFile = true;
+		std::unique_ptr<FileStream> stream(FileStream::openFile2(file));
+		if (!stream)
 		{
-			// check if filename matches
-			std::string filename = _pathToUtf8(path.filename());
-			if (boost::istarts_with(filename, "patch_") && boost::iends_with(filename, ".asm"))
-			{
-				FileStream* patchFile = FileStream::openFile2(path);
-				if (patchFile)
-				{
-					// read file
-					std::vector<uint8> fileData;
-					patchFile->extract(fileData);
-					delete patchFile;
-					MemStreamReader patchesStream(fileData.data(), (sint32)fileData.size());
-					// load Cemu style patch file
-					if (!ParseCemuPatchesTxtInternal(patchesStream))
-					{
-						cemuLog_log(LogType::Force, "Error while processing \"{}\". No patches for this graphic pack will be applied.", _pathToUtf8(path));
-						cemu_assert_debug(list_patchGroups.empty());
-						return true; // return true since a .asm patch was found even if we could not parse it
-					}
-				}
-				else
-				{
-					cemuLog_log(LogType::Force, "Unable to load patch file \"{}\"", _pathToUtf8(path));
-				}
-				foundPatches = true;
-			}
+			cemuLog_log(LogType::Force, "Graphic pack: cannot open patch file {}", _pathToUtf8(file));
+			continue;
+		}
+		std::vector<uint8> text;
+		stream->extract(text);
+		MemStreamReader reader(text.data(), (sint32)text.size());
+		if (!ParseCemuPatchesTxtInternal(reader))
+		{
+			cemuLog_log(LogType::Force, "Graphic pack: {} has errors, none of the pack's patches are used", _pathToUtf8(file));
+			return true;
 		}
 	}
-	return foundPatches;
+	return anyFile;
 }
 
 void GraphicPack2::LoadPatchFiles()
 {
-	// order of loading patches:
-	// 1) Load Cemu-style patches (patch_<name>.asm), stop here if at least one patch file exists
-	// 2) Load Cemuhook patches.txt
+	// patch_*.asm files take precedence; patches.txt (Cemuhook format) is only read when there are none
 	if (LoadCemuPatches())
-		return; // exit if at least one Cemu style patch file was found
-	// fall back to Cemuhook patches.txt to guarantee backward compatibility
-	fs::path path(m_rulesPath);
-	path.remove_filename();
-	path.append("patches.txt");
-	FileStream* patchFile = FileStream::openFile2(path);
-	if (patchFile == nullptr)
 		return;
-	// read file
-	std::vector<uint8> fileData;
-	patchFile->extract(fileData);
-	delete patchFile;
-	cemu_assert_debug(list_patchGroups.empty());
-	// parse
-	MemStreamReader patchesStream(fileData.data(), (sint32)fileData.size());
-	ParseCemuhookPatchesTxtInternal(patchesStream);
-}
-
-void GraphicPack2::EnablePatches()
-{
-	std::lock_guard<std::recursive_mutex> lock(mtx_patches);
-	for (auto& itr : list_modules)
-		ApplyPatchesForModule(itr);
-}
-
-void GraphicPack2::UnloadPatches()
-{
-	if (list_patchGroups.empty())
+	std::unique_ptr<FileStream> stream(FileStream::openFile2(m_rulesPath.parent_path() / "patches.txt"));
+	if (!stream)
 		return;
-	std::lock_guard<std::recursive_mutex> lock(mtx_patches);
-	// if any patch groups were applied then revert here
-	// do this by calling RevertPatchesForModule for every module?
-	for (auto& itr : list_modules)
-		RevertPatchesForModule(itr);
-	// delete all patches
-	for (auto itr : list_patchGroups)
-		delete itr;
-	list_patchGroups.clear();
+	std::vector<uint8> text;
+	stream->extract(text);
+	MemStreamReader reader(text.data(), (sint32)text.size());
+	ParseCemuhookPatchesTxtInternal(reader);
 }
 
-bool GraphicPack2::HasPatches()
+void GraphicPack2::DropPatchGroups()
 {
-	return !list_patchGroups.empty();
+	for (PatchGroup* group : m_patchGroups)
+		delete group;
+	m_patchGroups.clear();
 }
 
-const std::vector<PatchGroup*>& GraphicPack2::GetPatchGroups() {
-	return list_patchGroups;
+// ---------------------------------------------------------------- applying to modules
+
+std::vector<PatchGroup*> GraphicPack2::GroupsForModule(const RPLModule* rpl) const
+{
+	std::vector<PatchGroup*> matching;
+	for (PatchGroup* group : m_patchGroups)
+	{
+		if (group->matchesCRC(rpl->patchCRC) || (group->m_targetsRpx && rpl->IsRPX()))
+			matching.push_back(group);
+	}
+	return matching;
 }
 
 void GraphicPack2::ApplyPatchesForModule(const RPLModule* rpl)
 {
-	if (list_patchGroups.empty())
-		return;
-	// gather list of all patch groups that apply to this module
-	std::vector<PatchGroup*> list_groups;
-	for (auto itr : list_patchGroups)
-	{
-		if (itr->matchesCRC(rpl->patchCRC) || (itr->m_isRpxOnlyTarget && rpl->IsRPX()))
-			list_groups.emplace_back(itr);
-	}
-	// apply all groups at once
-	if (!list_groups.empty())
-		ApplyPatchGroups(list_groups, rpl);
+	auto groups = GroupsForModule(rpl);
+	if (!groups.empty())
+		ApplyPatchGroups(groups, rpl);
 }
 
 void GraphicPack2::RevertPatchesForModule(const RPLModule* rpl)
 {
-	if (list_patchGroups.empty())
-		return;
-	// gather list of all patch groups that apply to this module
-	std::vector<PatchGroup*> list_groups;
-	for (auto itr : list_patchGroups)
-	{
-		if (itr->matchesCRC(rpl->patchCRC) || (itr->m_isRpxOnlyTarget && rpl->IsRPX()))
-			list_groups.emplace_back(itr);
-	}
-	// undo all groups at once
-	if (!list_groups.empty())
-		UndoPatchGroups(list_groups, rpl);
+	auto groups = GroupsForModule(rpl);
+	if (!groups.empty())
+		UndoPatchGroups(groups, rpl);
 }
 
-std::recursive_mutex GraphicPack2::mtx_patches;
-std::vector<const RPLModule*> GraphicPack2::list_modules;
+void GraphicPack2::EnablePatches()
+{
+	std::lock_guard lock(s_patchMutex);
+	for (const RPLModule* module : s_loadedModules)
+		ApplyPatchesForModule(module);
+}
+
+void GraphicPack2::UnloadPatches()
+{
+	if (m_patchGroups.empty())
+		return;
+	std::lock_guard lock(s_patchMutex);
+	for (const RPLModule* module : s_loadedModules)
+		RevertPatchesForModule(module);
+	DropPatchGroups();
+	m_callbacks.clear();
+}
+
+bool GraphicPack2::HasPatches()
+{
+	return !m_patchGroups.empty();
+}
+
+const std::vector<PatchGroup*>& GraphicPack2::GetPatchGroups()
+{
+	return m_patchGroups;
+}
+
+void GraphicPack2::NotifyModuleLoaded(const RPLModule* rpl)
+{
+	cemuLog_log(LogType::Force, "Module '{}' loaded, patch checksum 0x{:08x}", rpl->moduleName, rpl->patchCRC);
+	std::lock_guard lock(s_patchMutex);
+	s_loadedModules.push_back(rpl);
+}
+
+void GraphicPack2::NotifyModuleUnloaded(const RPLModule* rpl)
+{
+	std::lock_guard lock(s_patchMutex);
+	std::erase(s_loadedModules, rpl);
+}

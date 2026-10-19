@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include "util/helpers/helpers.h"
@@ -12,6 +13,7 @@
 enum class RendererAPI;
 enum class GfxVendor;
 
+// A graphic pack: a folder with a rules.txt and optionally shaders, patches and replacement files.
 class GraphicPack2
 {
 public:
@@ -22,17 +24,18 @@ public:
 		GEOMETRY = 2,
 	};
 
+	// rules.txt format versions with a meaning to the loader
 	enum
 	{
-		GFXPACK_VERSION_5 = 5,
-		GFXPACK_VERSION_6 = 6, // added memory extensions
-		GFXPACK_VERSION_7 = 7, // added fine-grained origin control in patch format (no more forced 4 byte alignment), .string directive (an alias to .byte) and support for more than one constant per data directive
-		GFXPACK_VERSION_8 = 8, // (Cemu 2.7) added: titleId and rpx hash wildcards (*), added .callback entry <symbol> to call a function when the main entrypoint is reached
+		GFXPACK_VERSION_5 = 5, // categorised presets
+		GFXPACK_VERSION_6 = 6, // [RAM] section
+		GFXPACK_VERSION_7 = 7, // finer origin control in patches
+		GFXPACK_VERSION_8 = 8, // wildcards and .callback
 	};
 
+	// [TextureRedefine]: textures matching the filter get the overwrite values
 	struct TextureRule
 	{
-		// filter (texture must match these settings)
 		struct FILTER_SETTINGS
 		{
 			enum class MEM1_FILTER {
@@ -49,16 +52,15 @@ public:
 			std::vector<sint32> tilemode_whitelist{};
 			std::vector<sint32> tilemode_blacklist{};
 		} filter_settings;
-		// overwrite (if match found, these settings are overwritten)
 		struct OVERWRITE_SETTINGS
 		{
 			sint32 width = -1;
 			sint32 height = -1;
 			sint32 depth = -1;
 			sint32 format = -1;
-			sint32 lod_bias = -1; // in 1/64th steps
-			sint32 relative_lod_bias = -1; // in 1/64th steps
-			sint32 anistropic_value = -1; // 1<<n
+			sint32 lod_bias = -1; // units of 1/64
+			sint32 relative_lod_bias = -1; // units of 1/64
+			sint32 anistropic_value = -1; // log2 of the anisotropy
 		} overwrite_settings;
 	};
 
@@ -68,8 +70,8 @@ public:
 		uint64 shader_base_hash;
 		uint64 shader_aux_hash;
 		GP_SHADER_TYPE type;
-		bool isPreVulkanShader{}; // set to true for V3 packs since the shaders are not compatible with the Vulkan renderer
-		bool isMetalShader{}; // set to true if the shader is written in Metal Shading Language
+		bool isPreVulkanShader{}; // packs up to version 3; not used with Vulkan
+		bool isMetalShader{}; // file name ends in _msl
 	};
 
 	enum VarType
@@ -81,13 +83,13 @@ public:
 
 	struct Preset
 	{
-		std::string category; // preset category (empty for default)
-		std::string name; // displayed name
-		std::string condition;
+		std::string category; // empty when the pack has no categories
+		std::string name;
+		std::string condition; // expression deciding visibility (version 5 and later)
 		std::unordered_map<std::string, PresetVar> variables;
-		bool active = false; // selected/active preset
-		bool visible = true; // set by condition or true
-		bool is_default = false; // selected by default
+		bool active = false;
+		bool visible = true;
+		bool is_default = false;
 
 		Preset(std::string_view name, std::unordered_map<std::string, PresetVar> vars)
 			: name(name), variables(std::move(vars)) {}
@@ -100,6 +102,7 @@ public:
 	};
 	using PresetPtr = std::shared_ptr<Preset>;
 
+	// rules must be positioned in the [Definition] section; throws if the pack is unusable
 	GraphicPack2(fs::path rulesPath, class IniParser& rules);
 
 	bool IsEnabled() const { return m_enabled; }
@@ -110,13 +113,13 @@ public:
 	bool RequiresRestart(bool changeEnableState, bool changePreset);
 	bool Reload();
 
-	bool HasName() const { return !m_name.empty();  }
+	bool HasName() const { return !m_name.empty(); }
 	bool IsUniversal() const { return m_universal; }
 
 	const std::string& GetName() const { return m_name.empty() ? m_virtualPath : m_name; }
-	const std::string& GetVirtualPath() const { return m_virtualPath; } // returns the path in the gfx tree hierarchy
+	const std::string& GetVirtualPath() const { return m_virtualPath; } // position in the pack tree shown to the user
 	const std::string& GetDescription() const { return m_description; }
-	bool IsDefaultEnabled() const {	return m_default_enabled; }
+	bool IsDefaultEnabled() const { return m_default_enabled; }
 	bool AllowRendertargetSizeOptimization() const { return m_allowRendertargetSizeOptimization; }
 
 	void SetEnabled(bool state) { m_enabled = state; }
@@ -125,10 +128,9 @@ public:
 	const std::vector<uint64_t>& GetTitleIds() const { return m_title_ids; }
 	bool HasCustomVSyncFrequency() const { return m_vsync_frequency >= 1; }
 	sint32 GetCustomVSyncFrequency() const { return m_vsync_frequency; }
-	
+
 	const std::vector<std::pair<MPTR, GPCallbackType>>& GetCallbacks() const { return m_callbacks; }
 
-	// texture rules
 	const std::vector<TextureRule>& GetTextureRules() const { return m_texture_rules; }
 
 	// presets
@@ -148,8 +150,7 @@ public:
 
 	[[nodiscard]] const std::vector<PresetPtr>& GetPresets() const { return m_presets; }
 	[[nodiscard]] std::unordered_map<std::string, std::vector<PresetPtr>> GetCategorizedPresets(std::vector<std::string>& order) const;
-	
-	// permissions
+
 	const std::vector<std::pair<CosCapabilityGroup, uint64>>& GetPermissionOverrides() { return m_permissions; }
 
 	// shaders
@@ -168,7 +169,7 @@ public:
 	LatteTextureView::MagFilter GetUpscalingMagFilter() const { return m_output_settings.upscale_filter; }
 	LatteTextureView::MagFilter GetDownscalingMagFilter() const { return m_output_settings.downscale_filter; }
 
-	// static methods
+	// the list of all packs and of the packs used by the running title
 	static void LoadAll();
 
 	static const std::vector<std::shared_ptr<GraphicPack2>>& GetGraphicPacks() { return s_graphic_packs; }
@@ -178,7 +179,7 @@ public:
 	static bool ActivateGraphicPack(const std::shared_ptr<GraphicPack2>& graphic_pack);
 	static bool DeactivateGraphicPack(const std::shared_ptr<GraphicPack2>& graphic_pack);
 	static void ClearGraphicPacks();
-	static void WaitUntilReady(); // wait until all graphic packs finished activation
+	static void WaitUntilReady(); // blocks until ActivateForCurrentTitle() has run
 
 	static void ActivateForCurrentTitle();
 	static void Reset();
@@ -191,53 +192,58 @@ private:
 	static std::vector<std::shared_ptr<GraphicPack2>> s_active_graphic_packs;
 	static std::atomic_bool s_isReady;
 
+	// puts the preset variables into an expression parser
 	template<typename TType>
-	void FillPresetConstants(TExpressionParser<TType>& parser) const
-	{
-		// fils preset variables with priority
-		// active && visible > active > default
-		const auto active_presets = GetActivePresets();
-		for(const auto& preset : active_presets)
-		{
-			if(preset->visible)
-			{
-				for (auto& var : preset->variables)
-					parser.AddConstant(var.first, (TType)var.second.second);
-			}
-		}
-		for(const auto& preset : active_presets)
-		{
-			if(!preset->visible)
-			{
-				for (auto& var : preset->variables)
-					parser.TryAddConstant(var.first, (TType)var.second.second);
-			}
-		}
+	void FillPresetConstants(TExpressionParser<TType>& parser) const;
 
-		for (auto& var : m_preset_vars)
-			parser.TryAddConstant(var.first, (TType)var.second.second);
-	}
+	// rules.txt sections read once when the pack is found
+	void ReadDefinition(class IniParser& rules);
+	void ReadLoadTimeSections(class IniParser& rules);
+	void ReadRamSection(class IniParser& rules);
+	void ReadPermissionSection(class IniParser& rules);
+	void CheckPresets();
+	// rules.txt sections read on activation
+	bool ReadActivationSections();
+
+	std::unordered_map<std::string, PresetVar> ParsePresetVars(class IniParser& rules) const;
+	std::vector<uint64> ParseTitleIds(class IniParser& rules, const char* option_name);
+
+	CustomShader LoadShader(const fs::path& path, uint64 shader_base_hash, uint64 shader_aux_hash, GP_SHADER_TYPE shader_type, bool isMetalShader) const;
+	void ApplyShaderPresets(std::string& shader_source) const;
+	void LoadReplacedFiles();
+	void RedirectFolder(const fs::path& hostFolder, const std::string& virtualBase);
+
+	// patch files
+	void LoadPatchFiles();
+	bool LoadCemuPatches();
+	void ParseCemuhookPatchesTxtInternal(MemStreamReader& patchesStream);
+	bool ParseCemuPatchesTxtInternal(MemStreamReader& patchesStream);
+	void AddPatchGroup(PatchGroup* group);
+	void DropPatchGroups();
+	sint32 GetLengthWithoutComment(const char* str, size_t length);
+	void LogPatchesSyntaxError(sint32 lineNumber, std::string_view errorMsg);
+
+	void ApplyPatchGroups(std::vector<PatchGroup*>& groups, const RPLModule* rpl);
+	void UndoPatchGroups(std::vector<PatchGroup*>& groups, const RPLModule* rpl);
+	std::vector<PatchGroup*> GroupsForModule(const RPLModule* rpl) const;
 
 	fs::path m_rulesPath;
-
 	sint32 m_version;
 	std::string m_name;
 	std::string m_virtualPath;
 	std::string m_description;
-
 	bool m_default_enabled = false;
+	bool m_allowRendertargetSizeOptimization = false; // "colorbufferOptimizationAware"
 
-	bool m_allowRendertargetSizeOptimization = false; // gfx pack supports framebuffers with non-padded sizes, which is an optional optimization introduced with Cemu 2.0-74
-
-	// filter
+	// the pack is only used with this renderer / this GPU vendor
 	std::optional<RendererAPI> m_renderer_api;
 	std::optional<GfxVendor> m_gfx_vendor;
 
 	bool m_enabled = false;
-	bool m_activated = false; // set if the graphic pack is currently used by the running game
+	bool m_activated = false;
 	std::vector<uint64_t> m_title_ids;
-	bool m_patchedFilesLoaded = false; // set to true once patched files are loaded
-	bool m_universal = false; // set if this pack applies to every title id
+	bool m_universal = false; // titleIds = *
+	bool m_patchedFilesLoaded = false;
 
 	sint32 m_vsync_frequency = -1;
 	sint32 m_fs_priority = 100;
@@ -249,50 +255,21 @@ private:
 	} m_output_settings;
 
 	std::vector<PresetPtr> m_presets;
-	// default preset vars
-	std::unordered_map<std::string, PresetVar> m_preset_vars;
+	std::unordered_map<std::string, PresetVar> m_preset_vars; // [Default]
 
 	std::vector<CustomShader> m_custom_shaders;
 	std::vector<TextureRule> m_texture_rules;
 	std::string m_output_shader_source, m_upscaling_shader_source, m_downscaling_shader_source;
 	std::unique_ptr<RendererOutputShader> m_output_shader, m_upscaling_shader, m_downscaling_shader, m_output_shader_ud, m_upscaling_shader_ud, m_downscaling_shader_ud;
 
-	std::unordered_map<std::string, PresetVar> ParsePresetVars(IniParser& rules) const;
-
-	std::vector<uint64> ParseTitleIds(IniParser& rules, const char* option_name);
-
-	CustomShader LoadShader(const fs::path& path, uint64 shader_base_hash, uint64 shader_aux_hash, GP_SHADER_TYPE shader_type, bool isMetalShader) const;
-	void ApplyShaderPresets(std::string& shader_source) const;
-	void LoadReplacedFiles();
-	void _iterateReplacedFiles(const fs::path& currentPath, bool isAOC, const char* virtualMountBase);
-
-	// ram mappings
 	std::vector<std::pair<MPTR, MPTR>> m_ramMappings;
-	
-	// permissions
 	std::vector<std::pair<CosCapabilityGroup, uint64>> m_permissions;
 
-	// patches
-	void LoadPatchFiles(); // loads Cemuhook or Cemu patches
-	bool LoadCemuPatches();
-
-	void ParseCemuhookPatchesTxtInternal(MemStreamReader& patchesStream);
-	bool ParseCemuPatchesTxtInternal(MemStreamReader& patchesStream);
-	void CancelParsingPatches();
-
-	void ApplyPatchGroups(std::vector<PatchGroup*>& groups, const RPLModule* rpl);
-	void UndoPatchGroups(std::vector<PatchGroup*>& groups, const RPLModule* rpl);
-
-	void AddPatchGroup(PatchGroup* group);
-	sint32 GetLengthWithoutComment(const char* str, size_t length);
-	void LogPatchesSyntaxError(sint32 lineNumber, std::string_view errorMsg);
-
-	std::vector<PatchGroup*> list_patchGroups;
-	
+	std::vector<PatchGroup*> m_patchGroups; // owned
 	std::vector<std::pair<MPTR, GPCallbackType>> m_callbacks;
 
-	static std::recursive_mutex mtx_patches;
-	static std::vector<const RPLModule*> list_modules;
+	static std::recursive_mutex s_patchMutex;
+	static std::vector<const RPLModule*> s_loadedModules;
 
 public:
 	static std::vector<std::pair<MPTR, MPTR>> GetActiveRAMMappings();

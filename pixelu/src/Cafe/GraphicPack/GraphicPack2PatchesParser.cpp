@@ -1,563 +1,402 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/GraphicPack/GraphicPack2.h"
 #include "Common/FileStream.h"
 #include "util/helpers/StringParser.h"
 #include "Cemu/PPCAssembler/ppcAssembler.h"
 #include "Cafe/OS/RPL/rpl_structs.h"
 
+namespace
+{
+	constexpr uint32 kNoAddress = 0xFFFFFFFF;
+	// origins past this point no longer grow the code cave
+	constexpr uint32 kCodeCaveLimit = 32 * 1024 * 1024;
+
+	bool StartsWithHexPrefix(StringTokenParser& line)
+	{
+		return line.compareCharacter(0, '0') && line.compareCharacterI(1, 'x');
+	}
+
+	// "[name]" with nothing after it; on success name points into the line
+	enum class GroupHeader
+	{
+		NotAHeader,
+		Ok,
+		MissingBracket,
+		TrailingText,
+	};
+
+	GroupHeader ReadGroupHeader(StringTokenParser& line, const char*& name, sint32& nameLength)
+	{
+		if (!line.compareCharacter(0, '['))
+			return GroupHeader::NotAHeader;
+		line.skipCharacters(1);
+		name = line.getCurrentPtr();
+		nameLength = line.skipToCharacter(']');
+		if (nameLength < 0)
+			return GroupHeader::MissingBracket;
+		line.skipCharacters(1);
+		line.skipWhitespaces();
+		return line.isEndOfString() ? GroupHeader::Ok : GroupHeader::TrailingText;
+	}
+
+	// the rest of the line with the white space on both ends removed
+	std::string_view RestOfLine(StringTokenParser& line)
+	{
+		line.skipWhitespaces();
+		line.trimWhitespaces();
+		return std::string_view(line.getCurrentPtr(), std::max<sint32>(line.getCurrentLen(), 0));
+	}
+
+	PatchEntryInstruction* MakeInstruction(sint32 lineNumber, uint32 address, PPCAssemblerInOut& assembled)
+	{
+		return new PatchEntryInstruction(lineNumber, address, {assembled.outputData.data(), assembled.outputData.size()}, assembled.list_relocs);
+	}
+}
+
+// length of the line without a trailing # or ; comment (quoted text may contain both)
 sint32 GraphicPack2::GetLengthWithoutComment(const char* str, size_t length)
 {
-	sint32 index = 0;
-	bool isInString = false;
-	while (index < length)
+	bool quoted = false;
+	for (size_t i = 0; i < length; i++)
 	{
-		const char c = str[index];
-		if (c == '\"')
-			isInString = !isInString;
-		else if (c == '#' || c == ';')
-		{
-			if (!isInString)
-				return index;
-		}
-		index++;
+		const char c = str[i];
+		if (c == '"')
+			quoted = !quoted;
+		else if (!quoted && (c == '#' || c == ';'))
+			return (sint32)i;
 	}
 	return (sint32)length;
 }
 
+// logs the problem and drops every group loaded so far
 void GraphicPack2::LogPatchesSyntaxError(sint32 lineNumber, std::string_view errorMsg)
 {
-	cemuLog_log(LogType::Force, "Syntax error while parsing patch for graphic pack '{}':", _pathToUtf8(this->GetRulesPath()));
-	if(lineNumber >= 0)
-		cemuLog_log(LogType::Force, fmt::format("Line {0}: {1}", lineNumber, errorMsg));
+	cemuLog_log(LogType::Force, "Graphic pack {}: syntax error in patches", _pathToUtf8(GetRulesPath()));
+	if (lineNumber >= 0)
+		cemuLog_log(LogType::Force, "Line {}: {}", lineNumber, errorMsg);
 	else
-		cemuLog_log(LogType::Force, fmt::format("{0}", errorMsg));
-	list_patchGroups.clear();
-}
-
-void GraphicPack2::CancelParsingPatches()
-{
-	// unload everything, set error flag
-	cemu_assert_debug(false);
+		cemuLog_log(LogType::Force, "{}", errorMsg);
+	DropPatchGroups();
 }
 
 void GraphicPack2::AddPatchGroup(PatchGroup* group)
 {
-	if (group->list_moduleMatches.empty() && !group->m_isRpxOnlyTarget)
+	if (group->m_moduleChecksums.empty() && !group->m_targetsRpx)
 	{
-		LogPatchesSyntaxError(-1, fmt::format("Group \"{}\" has no moduleMatches definition", group->name));
-		CancelParsingPatches();
+		LogPatchesSyntaxError(-1, fmt::format("Group \"{}\" does not say which modules it is for (moduleMatches)", group->m_name));
 		delete group;
 		return;
 	}
-	// calculate code cave size
-	uint32 codeCaveMaxAddr = 0;
-	for (auto& itr : group->list_patches)
+	// the code cave has to cover every instruction placed at a cave offset
+	uint32 caveEnd = 0;
+	for (PatchEntry* entry : group->m_entries)
 	{
-		PatchEntryInstruction* patchData = dynamic_cast<PatchEntryInstruction*>(itr);
-		if (patchData)
-		{
-			uint32 patchAddr = patchData->getAddr();
-			if (patchAddr < PatchGroup::CODECAVE_MAX_OFFSET)
-			{
-				// everything that gets relocated relative to the code cave needs to be part of it
-				codeCaveMaxAddr = std::max(codeCaveMaxAddr, patchAddr + patchData->getSize());
-			}
-		}
-
+		auto* instruction = dynamic_cast<PatchEntryInstruction*>(entry);
+		if (instruction && instruction->getAddr() < PatchGroup::CODECAVE_MAX_OFFSET)
+			caveEnd = std::max(caveEnd, instruction->getAddr() + instruction->getSize());
 	}
-	uint32 numEstimatedCodeCaveInstr = codeCaveMaxAddr / 4;
-	if (group->list_patches.size() < (numEstimatedCodeCaveInstr / 8))
-	{
-		// if less than 1/8th of the code cave is filled print a warning
-		cemuLog_log(LogType::Force, "Graphic pack patches: Code cave for group [{}] in gfx pack \"{}\" ranges from 0 to 0x{:x} but has only few instructions. Is this intentional?", group->name, this->m_name, codeCaveMaxAddr);
-	}
-	group->codeCaveSize = codeCaveMaxAddr;
-	list_patchGroups.emplace_back(group);
+	if (group->m_entries.size() < (caveEnd / 4) / 8)
+		cemuLog_log(LogType::Force, "Graphic pack {}: the code cave of group [{}] reaches 0x{:x} but holds few entries", m_name, group->m_name, caveEnd);
+	group->m_codeCaveSize = caveEnd;
+	m_patchGroups.push_back(group);
 }
 
+// patches.txt (Cemuhook format): every patched instruction has an explicit address
 void GraphicPack2::ParseCemuhookPatchesTxtInternal(MemStreamReader& patchesStream)
 {
-	sint32 lineNumber = 0;
-	PatchGroup* currentGroup = nullptr;
-	while (true)
-	{
-		auto lineStr = patchesStream.readLine();
-		lineNumber++;
-		if (patchesStream.hasError())
-			break;
-		// trim comment
-		size_t lineLength = GetLengthWithoutComment(lineStr.data(), lineStr.size());
-
-		StringTokenParser parser(lineStr.data(), (sint32)lineLength);
-
-		// skip whitespaces at the beginning
-		parser.skipWhitespaces();
-		// parse line
-		if (parser.isEndOfString())
-			continue;
-		if (parser.compareCharacter(0, '['))
-		{
-			// group
-			parser.skipCharacters(1);
-			// find end of group name
-			const char* groupNameStr = parser.getCurrentPtr();
-			sint32 groupNameLength = parser.skipToCharacter(']');
-			if (groupNameLength < 0)
-			{
-
-				LogPatchesSyntaxError(lineNumber, "Expected ']'");
-				CancelParsingPatches();
-				return;
-			}
-			parser.skipCharacters(1); // skip the ']'
-			parser.skipWhitespaces();
-			if (!parser.isEndOfString())
-			{
-				LogPatchesSyntaxError(lineNumber, "Unexpected characters after ']'");
-				CancelParsingPatches();
-				return;
-			}
-			// begin new group
-			if (currentGroup)
-			{
-				AddPatchGroup(currentGroup);
-			}
-			currentGroup = new PatchGroup(this, groupNameStr, groupNameLength);
-		}
-		else if (parser.compareCharacter(0, '0') && parser.compareCharacterI(1, 'x'))
-		{
-			// if the line starts with a hex address then it is a patched location
-			uint32 patchedAddress;
-			if (!parser.parseU32(patchedAddress))
-			{
-				LogPatchesSyntaxError(lineNumber, "Malformed address");
-				CancelParsingPatches();
-				return;
-			}
-			if (parser.matchWordI("=") == false)
-			{
-				LogPatchesSyntaxError(lineNumber, "Expected '=' after address");
-				CancelParsingPatches();
-				return;
-			}
-			parser.skipWhitespaces();
-			parser.trimWhitespaces();
-			// assemble instruction
-			std::string instrText(parser.getCurrentPtr(), parser.getCurrentLen());
-			PPCAssemblerInOut ctx{};
-			ctx.virtualAddress = patchedAddress;
-			if (!ppcAssembler_assembleSingleInstruction(instrText.c_str(), &ctx))
-			{
-				LogPatchesSyntaxError(lineNumber, fmt::format("Error in assembler: {}", ctx.errorMsg));
-				CancelParsingPatches();
-				return;
-			}
-			currentGroup->list_patches.emplace_back(new PatchEntryInstruction(lineNumber, patchedAddress, { ctx.outputData.data(), ctx.outputData.size() }, ctx.list_relocs));
-		}
-		else if (parser.matchWordI("moduleMatches"))
-		{
-			if (currentGroup == nullptr)
-			{
-				LogPatchesSyntaxError(lineNumber, "Specified 'ModuleMatches' outside of a group");
-				CancelParsingPatches();
-				return;
-			}
-			if (parser.matchWordI("=") == false)
-			{
-				LogPatchesSyntaxError(lineNumber, "Expected '=' after ModuleMatches");
-				CancelParsingPatches();
-				return;
-			}
-			// read the checksums
-			while (true)
-			{
-				uint32 checksum = 0;
-				if (parser.parseU32(checksum) == false)
-				{
-					LogPatchesSyntaxError(lineNumber, "Invalid value for ModuleMatches");
-					CancelParsingPatches();
-					return;
-				}
-				currentGroup->list_moduleMatches.emplace_back(checksum);
-				if (parser.matchWordI(",") == false)
-					break;
-			}
-			parser.skipWhitespaces();
-			if (!parser.isEndOfString())
-			{
-				LogPatchesSyntaxError(lineNumber, "Unexpected character in line");
-				CancelParsingPatches();
-				return;
-			}
-			continue;
-		}
-		else
-		{
-			// Cemuhook requires that user defined symbols start with _ but we are more lenient and allow them to start with letters too
-			// the downside is that there is some ambiguity and parsing gets a little bit more complex
-			
-			// check for <symbolName> = pattern
-			StringTokenParser bakParser;
-			const char* symbolStr;
-			sint32 symbolLen;
-			parser.storeParserState(&bakParser);
-			if (parser.parseSymbolName(symbolStr, symbolLen) && parser.matchWordI("="))
-			{
-				// matches pattern: <symbolName> = ...
-				parser.skipWhitespaces();
-				parser.trimWhitespaces();
-				const char* expressionStr = parser.getCurrentPtr();
-				sint32 expressionLen = parser.getCurrentLen();
-				// create entry for symbol value assignment
-				currentGroup->list_patches.emplace_back(new PatchEntryCemuhookSymbolValue(lineNumber, symbolStr, symbolLen, expressionStr, expressionLen));
-				continue;
-			}
-			else
-			{
-				LogPatchesSyntaxError(lineNumber, fmt::format("Invalid syntax"));
-				CancelParsingPatches();
-				return;
-			}
-		}
-	}
-	if (currentGroup)
-		AddPatchGroup(currentGroup);
-}
-
-static inline uint32 INVALID_ORIGIN = 0xFFFFFFFF;
-
-bool GraphicPack2::ParseCemuPatchesTxtInternal(MemStreamReader& patchesStream)
-{
-	sint32 lineNumber = 0;
-	PatchGroup* currentGroup = nullptr;
-
-	struct  
-	{
-		void reset()
-		{
-			currentOrigin = INVALID_ORIGIN;
-			codeCaveOrigin = 0;
-		}
-
-		void setOrigin(uint32 origin)
-		{
-			currentOrigin = origin;
-		}
-
-		void setOriginCodeCave()
-		{
-			currentOrigin = codeCaveOrigin;
-		}
-
-		bool isValidOrigin()
-		{
-			return currentOrigin != INVALID_ORIGIN;
-		}
-
-		void incrementOrigin(uint32 size)
-		{
-			currentOrigin += size;
-			if (currentOrigin <= 32 * 1024 * 1024)
-				codeCaveOrigin = std::max(codeCaveOrigin, currentOrigin);
-		}
-
-		uint32 currentOrigin{};
-		uint32 codeCaveOrigin{};
-	}originInfo;
-	// labels dont get emitted immediately, instead they are assigned a VA after the next alignment zone
-	std::vector<PatchEntryLabel*> scheduledLabels; 
-	// this is to prevent code like this from putting alignment bytes after the label. (The label 'sticks' to the data after it)
-	// .byte 123
-	// Label:
-	// BLR
-
-	auto flushLabels = [&]()
-	{
-		// flush remaining labels
-		for (auto& itr : scheduledLabels)
-		{
-			itr->setAssignedVA(originInfo.currentOrigin);
-			currentGroup->list_patches.emplace_back(itr);
-		}
-		scheduledLabels.clear();
+	PatchGroup* group = nullptr;
+	auto fail = [&](sint32 lineNumber, std::string_view message) {
+		LogPatchesSyntaxError(lineNumber, message);
+		delete group;
 	};
 
-	while (true)
+	for (sint32 lineNumber = 1;; lineNumber++)
 	{
-		size_t lineLength;
-		auto lineStr = patchesStream.readLine();
-		lineNumber++;
+		std::string_view text = patchesStream.readLine();
 		if (patchesStream.hasError())
 			break;
-		// trim comment
-		lineLength = GetLengthWithoutComment(lineStr.data(), lineStr.size());
-
-		StringTokenParser parser(lineStr.data(), (sint32)lineLength);
-
-		// skip whitespaces at the beginning
-		parser.skipWhitespaces();
-		// parse line
-		if (parser.isEndOfString())
+		StringTokenParser line(text.data(), GetLengthWithoutComment(text.data(), text.size()));
+		line.skipWhitespaces();
+		if (line.isEndOfString())
 			continue;
-		if (parser.compareCharacter(0, '['))
+
+		const char* name;
+		sint32 nameLength;
+		switch (ReadGroupHeader(line, name, nameLength))
 		{
-			// group
-			parser.skipCharacters(1);
-			// find end of group name
-			const char* groupNameStr = parser.getCurrentPtr();
-			sint32 groupNameLength = parser.skipToCharacter(']');
-			if (groupNameLength < 0)
-			{
-				LogPatchesSyntaxError(lineNumber, "Expected ']'");
-				CancelParsingPatches();
-				return false;
-			}
-			parser.skipCharacters(1); // skip the ']'
-			parser.skipWhitespaces();
-			if (!parser.isEndOfString())
-			{
-				LogPatchesSyntaxError(lineNumber, "Unexpected characters after ']'");
-				CancelParsingPatches();
-				return false;
-			}
-			// begin new group
-			if (currentGroup)
-			{
-				flushLabels();
-				AddPatchGroup(currentGroup);
-			}
-			currentGroup = new PatchGroup(this, groupNameStr, groupNameLength);
-			// reset origin tracking
-			originInfo.reset();
+		case GroupHeader::Ok:
+			if (group)
+				AddPatchGroup(group);
+			group = new PatchGroup(this, name, nameLength);
+			continue;
+		case GroupHeader::MissingBracket:
+			return fail(lineNumber, "Group name is missing the closing ']'");
+		case GroupHeader::TrailingText:
+			return fail(lineNumber, "Unexpected text after the group name");
+		case GroupHeader::NotAHeader:
+			break;
+		}
+
+		if (StartsWithHexPrefix(line))
+		{
+			// <address> = <instruction>
+			uint32 address;
+			if (!line.parseU32(address))
+				return fail(lineNumber, "Address is not a valid number");
+			if (!line.matchWordI("="))
+				return fail(lineNumber, "Expected '=' after the address");
+			if (!group)
+				return fail(lineNumber, "Instruction outside of a group");
+			PPCAssemblerInOut assembled{};
+			assembled.virtualAddress = address;
+			const std::string instruction(RestOfLine(line));
+			if (!ppcAssembler_assembleSingleInstruction(instruction.c_str(), &assembled))
+				return fail(lineNumber, fmt::format("Assembler: {}", assembled.errorMsg));
+			group->m_entries.push_back(MakeInstruction(lineNumber, address, assembled));
 			continue;
 		}
-		else if (parser.matchWordI("moduleMatches"))
+
+		if (line.matchWordI("moduleMatches"))
 		{
-			if (currentGroup == nullptr)
+			if (!group)
+				return fail(lineNumber, "moduleMatches outside of a group");
+			if (!line.matchWordI("="))
+				return fail(lineNumber, "Expected '=' after moduleMatches");
+			do
 			{
-				LogPatchesSyntaxError(lineNumber, "Specified 'ModuleMatches' outside of a group");
-				CancelParsingPatches();
-				return false;
-			}
-			if (parser.matchWordI("=") == false)
+				uint32 checksum = 0;
+				if (!line.parseU32(checksum))
+					return fail(lineNumber, "moduleMatches has an invalid checksum");
+				group->m_moduleChecksums.push_back(checksum);
+			} while (line.matchWordI(","));
+			line.skipWhitespaces();
+			if (!line.isEndOfString())
+				return fail(lineNumber, "Unexpected text after moduleMatches");
+			continue;
+		}
+
+		// <symbol> = <expression>; symbols may start with a letter as well as with '_'
+		const char* symbol;
+		sint32 symbolLength;
+		if (line.parseSymbolName(symbol, symbolLength) && line.matchWordI("="))
+		{
+			if (!group)
+				return fail(lineNumber, "Symbol outside of a group");
+			std::string_view expression = RestOfLine(line);
+			group->m_entries.push_back(new PatchEntryCemuhookSymbolValue(lineNumber, symbol, symbolLength, expression.data(), (sint32)expression.size()));
+			continue;
+		}
+		return fail(lineNumber, "Line not understood");
+	}
+	if (group)
+		AddPatchGroup(group);
+}
+
+// patch_*.asm (Cemu format): code is placed at a running origin, labels and variables can be used
+bool GraphicPack2::ParseCemuPatchesTxtInternal(MemStreamReader& patchesStream)
+{
+	PatchGroup* group = nullptr;
+	// where the next instruction goes; starts out usable (0) until the first group header resets it
+	uint32 origin = 0;
+	// highest origin reached in the current group, ".origin = codecave" continues from there
+	uint32 caveHighWater = 0;
+	// labels on their own line wait for the next instruction so they end up after its alignment padding
+	std::vector<PatchEntryLabel*> pendingLabels;
+
+	auto advance = [&](uint32 bytes) {
+		origin += bytes;
+		if (origin <= kCodeCaveLimit)
+			caveHighWater = std::max(caveHighWater, origin);
+	};
+	auto placePendingLabels = [&](uint32 address) {
+		for (PatchEntryLabel* label : pendingLabels)
+		{
+			label->setAssignedVA(address);
+			group->m_entries.push_back(label);
+		}
+		pendingLabels.clear();
+	};
+	auto fail = [&](sint32 lineNumber, std::string_view message) {
+		LogPatchesSyntaxError(lineNumber, message);
+		for (PatchEntryLabel* label : pendingLabels)
+			delete label;
+		delete group;
+		return false;
+	};
+
+	for (sint32 lineNumber = 1;; lineNumber++)
+	{
+		std::string_view text = patchesStream.readLine();
+		if (patchesStream.hasError())
+			break;
+		StringTokenParser line(text.data(), GetLengthWithoutComment(text.data(), text.size()));
+		line.skipWhitespaces();
+		if (line.isEndOfString())
+			continue;
+
+		const char* name;
+		sint32 nameLength;
+		switch (ReadGroupHeader(line, name, nameLength))
+		{
+		case GroupHeader::Ok:
+			if (group)
 			{
-				LogPatchesSyntaxError(lineNumber, "Expected '=' after ModuleMatches");
-				CancelParsingPatches();
-				return false;
+				placePendingLabels(origin);
+				AddPatchGroup(group);
 			}
-			// read the checksums
+			group = new PatchGroup(this, name, nameLength);
+			origin = kNoAddress;
+			caveHighWater = 0;
+			continue;
+		case GroupHeader::MissingBracket:
+			return fail(lineNumber, "Group name is missing the closing ']'");
+		case GroupHeader::TrailingText:
+			return fail(lineNumber, "Unexpected text after the group name");
+		case GroupHeader::NotAHeader:
+			break;
+		}
+
+		if (line.matchWordI("moduleMatches"))
+		{
+			if (!group)
+				return fail(lineNumber, "moduleMatches outside of a group");
+			if (!line.matchWordI("="))
+				return fail(lineNumber, "Expected '=' after moduleMatches");
 			while (true)
 			{
-                if (parser.matchWordI("rpx"))
-                {
-                   	currentGroup->m_isRpxOnlyTarget = true;
-                   	break;
-                }
-			
-				uint32 checksum = 0;
-				if (parser.parseU32(checksum) == false)
+				if (line.matchWordI("rpx"))
 				{
-					LogPatchesSyntaxError(lineNumber, "Invalid value for ModuleMatches");
-					CancelParsingPatches();
-					return false;
+					group->m_targetsRpx = true;
+					break;
 				}
-				currentGroup->list_moduleMatches.emplace_back(checksum);
-				if (parser.matchWordI(",") == false)
+				uint32 checksum = 0;
+				if (!line.parseU32(checksum))
+					return fail(lineNumber, "moduleMatches has an invalid checksum");
+				group->m_moduleChecksums.push_back(checksum);
+				if (!line.matchWordI(","))
 					break;
 			}
-			parser.skipWhitespaces();
-			if (!parser.isEndOfString())
-			{
-				LogPatchesSyntaxError(lineNumber, "Unexpected character");
-				CancelParsingPatches();
-				return false;
-			}
+			line.skipWhitespaces();
+			if (!line.isEndOfString())
+				return fail(lineNumber, "Unexpected text after moduleMatches");
 			continue;
 		}
 
-		// if a line starts with <hex_address> = then it temporarily overwrites the origin for the current line
-		uint32 overwriteOrigin = INVALID_ORIGIN;
-		if (parser.compareCharacter(0, '0') && parser.compareCharacterI(1, 'x'))
+		// "<address> = ..." places just this line at a fixed address
+		uint32 fixedAddress = kNoAddress;
+		if (StartsWithHexPrefix(line))
 		{
-			uint32 patchedAddress;
-			if (!parser.parseU32(patchedAddress))
-			{
-				LogPatchesSyntaxError(lineNumber, "Malformed address");
-				CancelParsingPatches();
-				return false;
-			}
-			if (parser.matchWordI("=") == false)
-			{
-				LogPatchesSyntaxError(lineNumber, "Expected '=' after address");
-				CancelParsingPatches();
-				return false;
-			}
-			parser.skipWhitespaces();
-			parser.trimWhitespaces();
-			overwriteOrigin = patchedAddress;
+			if (!line.parseU32(fixedAddress))
+				return fail(lineNumber, "Address is not a valid number");
+			if (!line.matchWordI("="))
+				return fail(lineNumber, "Expected '=' after the address");
+			line.skipWhitespaces();
+			line.trimWhitespaces();
 		}
-		// check for known directives
-		if (parser.matchWordI(".origin"))
+
+		if (line.matchWordI(".origin"))
 		{
-			// .origin = <origin> directive
-			if (overwriteOrigin != INVALID_ORIGIN)
-			{
-				LogPatchesSyntaxError(lineNumber, fmt::format(".origin directive must appear alone without <address> = prefix."));
-				CancelParsingPatches();
-				return false;
-			}
-			if (!parser.matchWordI("="))
-			{
-				LogPatchesSyntaxError(lineNumber, fmt::format("Missing '=' after .origin"));
-				CancelParsingPatches();
-				return false;
-			}
-			// parse origin
-			uint32 originAddress;
-			if (parser.matchWordI("codecave"))
-			{
-				// keyword codecave means we set the origin to the end of the current known codecave size
-				originInfo.setOriginCodeCave();
-			}
-			else if(parser.parseU32(originAddress))
-			{
-				// hex address
-				originInfo.setOrigin(originAddress);
-			}
+			if (fixedAddress != kNoAddress)
+				return fail(lineNumber, ".origin cannot have an address prefix");
+			if (!line.matchWordI("="))
+				return fail(lineNumber, "Expected '=' after .origin");
+			uint32 newOrigin;
+			if (line.matchWordI("codecave"))
+				origin = caveHighWater;
+			else if (line.parseU32(newOrigin))
+				origin = newOrigin;
 			else
-			{
-				LogPatchesSyntaxError(lineNumber, fmt::format("\'.origin =\' must be followed by the keyword codecave or a valid address"));
-				CancelParsingPatches();
-				return false;
-			}
+				return fail(lineNumber, ".origin must be set to an address or to codecave");
 			continue;
 		}
-		else if (parser.matchWordI(".callback"))
+
+		if (line.matchWordI(".callback"))
 		{
-		    if (parser.matchWordI("entry"))
-    		{
-                const char* symbolStr;
-    			sint32 symbolLen;
-    		    if (parser.parseSymbolName(symbolStr, symbolLen))
-    		    {
-    				currentGroup->list_callbacks.push_back(std::make_pair(std::string(symbolStr, static_cast<size_t>(symbolLen)), GPCallbackType::Entry));
-    				continue;
-    		    }
-    		    else
-    		    {
-                    LogPatchesSyntaxError(lineNumber, "'.callback' must reference a symbol after the type");
-                    CancelParsingPatches();
-                    return false;
-    		    }
-    		}
-		    else
-		    {
-				LogPatchesSyntaxError(lineNumber, "Unrecognized type for '.callback'");
-				CancelParsingPatches();
-				return false;
-			}
-		}
-
-		// next we attempt to parse symbol assignment
-		// symbols can be labels or variables. The type is determined by what comes after the symbol name
-		// <symbolName> = <expression> defines a variable
-		// <symbolName>: defines a label
-
-		StringTokenParser bakParser;
-		const char* symbolStr;
-		sint32 symbolLen;
-		parser.storeParserState(&bakParser);
-
-		// check for pattern <symbolName>:
-		if (parser.parseSymbolName(symbolStr, symbolLen) && parser.matchWordI(":"))
-		{
-			// label
-			parser.skipWhitespaces();
-			if (!parser.isEndOfString())
-			{
-				LogPatchesSyntaxError(lineNumber, fmt::format("Unexpected characters after label"));
-				CancelParsingPatches();
-				return false;
-			}
-			uint32 labelAddress;
-			if (overwriteOrigin != INVALID_ORIGIN)
-				labelAddress = overwriteOrigin;
-			else
-			{
-				if (!originInfo.isValidOrigin())
-				{
-					LogPatchesSyntaxError(lineNumber, fmt::format("Defined label has no address assigned or there is no active .origin"));
-					CancelParsingPatches();
-					return false;
-				}
-				labelAddress = originInfo.currentOrigin;
-			}
-			if (overwriteOrigin == INVALID_ORIGIN)
-			{
-				// if label is part of code flow, delay emitting it until the next data instruction
-				// this is so we can avoid generating alignment padding, whose size is unknown in advance, between labels and data instructions
-				scheduledLabels.emplace_back(new PatchEntryLabel(lineNumber, symbolStr, symbolLen));
-			}
-			else
-			{
-				PatchEntryLabel* patchLabel = new PatchEntryLabel(lineNumber, symbolStr, symbolLen);
-				patchLabel->setAssignedVA(labelAddress);
-				currentGroup->list_patches.emplace_back(patchLabel);
-			}
+			if (!line.matchWordI("entry"))
+				return fail(lineNumber, ".callback type not supported");
+			const char* symbol;
+			sint32 symbolLength;
+			if (!line.parseSymbolName(symbol, symbolLength))
+				return fail(lineNumber, ".callback needs a symbol after the type");
+			if (!group)
+				return fail(lineNumber, ".callback outside of a group");
+			group->m_callbackSymbols.emplace_back(std::string(symbol, (size_t)symbolLength), GPCallbackType::Entry);
 			continue;
 		}
-		parser.restoreParserState(&bakParser);
-		// check for pattern <symbolName> =
-		if (parser.parseSymbolName(symbolStr, symbolLen) && parser.matchWordI("="))
+
+		StringTokenParser lineStart;
+		line.storeParserState(&lineStart);
+		const char* symbol;
+		sint32 symbolLength;
+
+		// <label>:
+		if (line.parseSymbolName(symbol, symbolLength) && line.matchWordI(":"))
 		{
-			// variable definition
-			parser.skipWhitespaces();
-			parser.trimWhitespaces();
-			const char* expressionStr = parser.getCurrentPtr();
-			sint32 expressionLen = parser.getCurrentLen();
-			// create entry for symbol/variable value assignment
-			currentGroup->list_patches.emplace_back(new PatchEntryVariableValue(lineNumber, symbolStr, symbolLen, PATCHVARTYPE::UINT, expressionStr, expressionLen));
+			line.skipWhitespaces();
+			if (!line.isEndOfString())
+				return fail(lineNumber, "Unexpected text after the label");
+			if (fixedAddress == kNoAddress)
+			{
+				if (origin == kNoAddress)
+					return fail(lineNumber, "Label without an address (set .origin or use <address> = )");
+				pendingLabels.push_back(new PatchEntryLabel(lineNumber, symbol, symbolLength));
+				continue;
+			}
+			if (!group)
+				return fail(lineNumber, "Label outside of a group");
+			auto* label = new PatchEntryLabel(lineNumber, symbol, symbolLength);
+			label->setAssignedVA(fixedAddress);
+			group->m_entries.push_back(label);
 			continue;
 		}
-		// if all patterns mismatch then we assume it's an assembly instruction
-		parser.restoreParserState(&bakParser);
-		std::string instrText(parser.getCurrentPtr(), parser.getCurrentLen());
-		PPCAssemblerInOut ctx{};
-		ctx.forceNoAlignment = overwriteOrigin != INVALID_ORIGIN; // dont auto-align when a fixed address is assigned
-		if (overwriteOrigin != INVALID_ORIGIN)
-			ctx.virtualAddress = overwriteOrigin;
-		else if(originInfo.isValidOrigin())
-			ctx.virtualAddress = originInfo.currentOrigin;
+
+		// <variable> = <expression>
+		line.restoreParserState(&lineStart);
+		if (line.parseSymbolName(symbol, symbolLength) && line.matchWordI("="))
+		{
+			if (!group)
+				return fail(lineNumber, "Variable outside of a group");
+			std::string_view expression = RestOfLine(line);
+			group->m_entries.push_back(new PatchEntryVariableValue(lineNumber, symbol, symbolLength, PATCHVARTYPE::UINT, expression.data(), (sint32)expression.size()));
+			continue;
+		}
+
+		// anything else is handed to the assembler
+		line.restoreParserState(&lineStart);
+		PPCAssemblerInOut assembled{};
+		if (fixedAddress != kNoAddress)
+		{
+			assembled.virtualAddress = fixedAddress;
+			assembled.forceNoAlignment = true; // a fixed address is used exactly as given
+		}
+		else if (origin != kNoAddress)
+			assembled.virtualAddress = origin;
 		else
+			return fail(lineNumber, "Instruction without an address (set .origin or use <address> = )");
+		if (!group)
+			return fail(lineNumber, "Instruction outside of a group");
+		const std::string instruction(line.getCurrentPtr(), std::max<sint32>(line.getCurrentLen(), 0));
+		if (!ppcAssembler_assembleSingleInstruction(instruction.c_str(), &assembled))
+			return fail(lineNumber, fmt::format("Assembler: {}", assembled.errorMsg));
+		cemu_assert_debug(assembled.alignmentRequirement != 0);
+		if (fixedAddress == kNoAddress)
 		{
-			LogPatchesSyntaxError(lineNumber, fmt::format("Trying to assemble line but no address specified. (Declare .origin or prefix line with <address> = )"));
-			CancelParsingPatches();
-			return false;
+			advance(assembled.alignmentPaddingSize);
+			advance((uint32)assembled.outputData.size());
 		}
-		if (!ppcAssembler_assembleSingleInstruction(instrText.c_str(), &ctx))
-		{
-			LogPatchesSyntaxError(lineNumber, fmt::format("Error in assembler: {}", ctx.errorMsg));
-			CancelParsingPatches();
-			return false;
-		}
-		cemu_assert_debug(ctx.alignmentRequirement != 0);
-		if (overwriteOrigin == INVALID_ORIGIN)
-		{
-			originInfo.incrementOrigin((sint32)ctx.alignmentPaddingSize); // alignment padding	
-			originInfo.incrementOrigin((sint32)ctx.outputData.size()); // instruction size
-		}
-		// flush labels
-		for (auto& itr : scheduledLabels)
-		{
-			itr->setAssignedVA(ctx.virtualAddressAligned);
-			currentGroup->list_patches.emplace_back(itr);
-		}
-		scheduledLabels.clear();
-		// append instruction
-		currentGroup->list_patches.emplace_back(new PatchEntryInstruction(lineNumber, ctx.virtualAddressAligned, { ctx.outputData.data(), ctx.outputData.size() }, ctx.list_relocs));
+		placePendingLabels(assembled.virtualAddressAligned);
+		group->m_entries.push_back(MakeInstruction(lineNumber, assembled.virtualAddressAligned, assembled));
 	}
-	flushLabels();
 
-	if (currentGroup)
-		AddPatchGroup(currentGroup);
+	if (group)
+	{
+		placePendingLabels(origin);
+		AddPatchGroup(group);
+	}
+	else
+	{
+		for (PatchEntryLabel* label : pendingLabels)
+			delete label;
+	}
 	return true;
 }

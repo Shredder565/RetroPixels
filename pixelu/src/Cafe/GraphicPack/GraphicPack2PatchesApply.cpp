@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/GraphicPack/GraphicPack2.h"
 #include "Common/FileStream.h"
 #include "Cemu/PPCAssembler/ppcAssembler.h"
@@ -6,698 +7,541 @@
 #include "Cafe/HW/Espresso/Recompiler/PPCRecompiler.h"
 #include "Cafe/HW/Espresso/Debugger/DebugSymbolStorage.h"
 
-bool _relocateAddress(PatchGroup* group, PatchContext_t* ctx, uint32 addr, uint32& relocatedAddress)
+namespace
 {
-	if (addr <= PatchGroup::CODECAVE_MAX_OFFSET)
+	// The expression parser calls back through plain function pointers, so the
+	// group and line being resolved are kept here while an expression is evaluated.
+	struct ResolveSession
 	{
-		// codecave address
-		relocatedAddress = group->getCodeCaveBase() + addr;
-		return true;
+		PatchContext_t* context{};
+		PatchGroup* group{};
+		sint32 line{-1};
+		bool missingSymbol{};
+		bool reportMissing{}; // only the final diagnostic pass records missing names
+	};
+	ResolveSession s_session;
+
+	void NoteMissing(std::string name)
+	{
+		s_session.missingSymbol = true;
+		if (s_session.reportMissing)
+			s_session.context->unresolvedSymbols.emplace(s_session.line, s_session.group, std::move(name));
 	}
-	// check if address is within module section
-	for (sint32 i = 0; i < ctx->matchedModule->sectionTable.size(); i++)
+
+	// patch addresses below the code cave limit are offsets into the group's cave,
+	// everything else must fall into a section of the module being patched
+	bool MapPatchAddress(PatchGroup* group, const PatchContext_t& ctx, uint32 address, uint32& mapped)
 	{
-		const RPLFileSectionEntry& sect = ctx->matchedModule->sectionTable[i];
-		if (addr >= sect.virtualAddress && addr < (sect.virtualAddress + sect.sectionSize))
+		if (address <= PatchGroup::CODECAVE_MAX_OFFSET)
 		{
-			relocatedAddress = addr - sect.virtualAddress + memory_getVirtualOffsetFromPointer(ctx->matchedModule->sectionAddressTable[i].ptr);
+			mapped = group->getCodeCaveBase() + address;
 			return true;
 		}
-	}
-	relocatedAddress = 0;
-	return false;
-}
-
-struct  
-{
-	bool hasUnknownVariable;
-	PatchContext_t* activePatchContext;
-	PatchGroup* currentGroup;
-	// additional error information tracking
-	sint32 lineNumber; // line number of the expression being processed, negative if not available
-	bool captureUnresolvedSymbols;
-}resolverState{};
-
-bool GraphicPack2::ResolvePresetConstant(const std::string& varname, double& value) const
-{
-	const auto var = GetPresetVariable(GetActivePresets(), varname);
-	if (var)
-	{
-		value = var->second;
-		return true;
-	}
-	return false;
-}
-
-template<typename T>
-T _expressionFuncReloc(T input)
-{
-	uint32 addr = (uint32)input;
-	uint32 relocatedAddress = 0;
-	if(!_relocateAddress(resolverState.currentGroup, resolverState.activePatchContext, addr, relocatedAddress))
-	{
-		resolverState.activePatchContext->errorHandler.printError(resolverState.currentGroup, resolverState.lineNumber, fmt::format("reloc({0:#08x}): Address does not point to a known memory region", addr));
-		return (T)0;
-	}
-	return (T)relocatedAddress;
-}
-
-double _cbResolveConstant(std::string_view varname)
-{
-	std::string varnameOnly;
-	varnameOnly = varname;
-
-	double value;
-	if (varnameOnly.length() >= 1 && varnameOnly[0] == '$')
-	{
-		// resolve preset variable
-		if (!resolverState.activePatchContext->graphicPack->ResolvePresetConstant(varnameOnly, value))
+		const RPLModule* module = ctx.matchedModule;
+		for (size_t i = 0; i < module->sectionTable.size(); i++)
 		{
-			resolverState.hasUnknownVariable = true;
-			if (resolverState.captureUnresolvedSymbols)
-				resolverState.activePatchContext->unresolvedSymbols.emplace(resolverState.lineNumber, resolverState.currentGroup, varnameOnly);
-			return 0.0;
-		}
-	}
-	else if (varnameOnly.length() >= 7 && boost::iequals(varnameOnly.substr(0, 7), "import."))
-	{
-		// resolve import
-		std::string importName = varnameOnly.substr(7);
-		// detect imports
-		const auto idxDot = importName.find('.');
-		bool isValidImport = false;
-		std::string_view importError = "";
-		if (idxDot != std::string_view::npos)
-		{
-			std::string moduleName = importName.substr(0, idxDot);
-			std::string functionName = importName.substr(idxDot + 1);
-			uint32 rplHandle = RPLLoader_GetHandleByModuleName(moduleName.c_str());
-			if (rplHandle == RPL_INVALID_HANDLE)
+			const RPLFileSectionEntry& section = module->sectionTable[i];
+			const uint32 start = section.virtualAddress;
+			if (address >= start && address < start + (uint32)section.sectionSize)
 			{
-				importError = " (module not found)";
+				mapped = memory_getVirtualOffsetFromPointer(module->sectionAddressTable[i].ptr) + (address - start);
+				return true;
 			}
+		}
+		mapped = 0;
+		return false;
+	}
+
+	double LookupImport(std::string_view importName)
+	{
+		const size_t dot = importName.find('.');
+		const char* problem = " (invalid import syntax)";
+		if (dot != std::string_view::npos)
+		{
+			const std::string module(importName.substr(0, dot));
+			const std::string function(importName.substr(dot + 1));
+			const uint32 handle = RPLLoader_GetHandleByModuleName(module.c_str());
+			if (handle == RPL_INVALID_HANDLE)
+				problem = " (module not found)";
+			else if (MPTR address = RPLLoader_FindModuleOrHLEExport(handle, false, function.c_str()))
+				return (double)address;
 			else
-			{
-				MPTR exportResult = RPLLoader_FindModuleOrHLEExport(rplHandle, false, functionName.c_str());
-				if (exportResult)
-				{
-					isValidImport = true;
-					value = (double)exportResult;
-				}
-				else
-					importError = " (function not found)";
-			}
+				problem = " (function not found)";
 		}
-		else
-			importError = " (invalid import syntax)";
-		// error output
-		if (!isValidImport)
-		{
-			resolverState.hasUnknownVariable = true;
-			if (resolverState.captureUnresolvedSymbols)
-			{
-				std::string detailedSymbolName;
-				detailedSymbolName.assign(importName);
-				detailedSymbolName.append(importError);
-				resolverState.activePatchContext->unresolvedSymbols.emplace(resolverState.lineNumber, resolverState.currentGroup, detailedSymbolName);
-			}
-			return 0.0;
-		}
-	}
-	else
-	{
-		// resolve variable
-		const auto v = resolverState.activePatchContext->map_values.find(varnameOnly);
-		if (v == resolverState.activePatchContext->map_values.end())
-		{
-			resolverState.hasUnknownVariable = true;
-			if (resolverState.captureUnresolvedSymbols)
-				resolverState.activePatchContext->unresolvedSymbols.emplace(resolverState.lineNumber, resolverState.currentGroup, varnameOnly);
-			return 0.0;
-		}
-		value = v->second;
-	}
-	return value;
-}
-
-double _cbResolveFunction(std::string_view funcname, double input)
-{
-	std::string funcnameLC(funcname);
-	std::transform(funcnameLC.cbegin(), funcnameLC.cend(), funcnameLC.begin(), tolower);
-	double value = input;
-	if (funcnameLC == "ha" || funcnameLC == "ha16")
-		value = TExpressionParser<double>::ExpressionFuncHA(value);
-	else if (funcnameLC == "hi" || funcnameLC == "hi16")
-		value = TExpressionParser<double>::ExpressionFuncHI(value);
-	else if (funcnameLC == "lo" || funcnameLC == "lo16")
-		value = TExpressionParser<double>::ExpressionFuncLO(value);
-	else if (funcnameLC == "reloc")
-		value = _expressionFuncReloc<double>(value);
-	else
-	{
-		// unresolvable function
-		resolverState.hasUnknownVariable = true;
-		if (resolverState.captureUnresolvedSymbols)
-		{
-			std::string detailedSymbolName;
-			detailedSymbolName.assign(funcname);
-			detailedSymbolName.append("() (unknown function)");
-			resolverState.activePatchContext->unresolvedSymbols.emplace(resolverState.lineNumber, resolverState.currentGroup, detailedSymbolName);
-		}
+		NoteMissing(std::string(importName) + problem);
 		return 0.0;
 	}
-	return value;
+
+	// names inside patch expressions: $preset variables, import.<module>.<function> and patch symbols
+	double ResolveName(std::string_view name)
+	{
+		if (!name.empty() && name.front() == '$')
+		{
+			double value;
+			if (s_session.context->graphicPack->ResolvePresetConstant(std::string(name), value))
+				return value;
+			NoteMissing(std::string(name));
+			return 0.0;
+		}
+		if (name.size() >= 7 && boost::iequals(name.substr(0, 7), "import."))
+			return LookupImport(name.substr(7));
+		auto it = s_session.context->map_values.find(std::string(name));
+		if (it == s_session.context->map_values.end())
+		{
+			NoteMissing(std::string(name));
+			return 0.0;
+		}
+		return it->second;
+	}
+
+	double ApplyFunction(std::string_view name, double input)
+	{
+		std::string lower(name);
+		for (char& c : lower)
+			c = (char)tolower((unsigned char)c);
+		if (lower == "ha" || lower == "ha16")
+			return TExpressionParser<double>::ExpressionFuncHA(input);
+		if (lower == "hi" || lower == "hi16")
+			return TExpressionParser<double>::ExpressionFuncHI(input);
+		if (lower == "lo" || lower == "lo16")
+			return TExpressionParser<double>::ExpressionFuncLO(input);
+		if (lower == "reloc")
+		{
+			const uint32 address = (uint32)input;
+			uint32 mapped;
+			if (MapPatchAddress(s_session.group, *s_session.context, address, mapped))
+				return (double)mapped;
+			s_session.context->errorHandler.printError(s_session.group, s_session.line, fmt::format("reloc({0:#08x}): address is not inside the code cave or a module section", address));
+			return 0.0;
+		}
+		NoteMissing(std::string(name) + "() (unknown function)");
+		return 0.0;
+	}
+
+	template<typename T>
+	EXPRESSION_RESOLVE_RESULT Evaluate(PatchContext_t& ctx, const std::string& expression, T& result, sint32 line)
+	{
+		s_session.line = line;
+		s_session.missingSymbol = false;
+		ExpressionParser parser;
+		parser.AddConstantCallback(ResolveName);
+		parser.SetFunctionCallback(ApplyFunction);
+		try
+		{
+			result = (T)parser.Evaluate(expression);
+		}
+		catch (const std::exception&)
+		{
+			ctx.errorHandler.printError(nullptr, -1, fmt::format("Expression \"{}\" could not be evaluated", expression));
+			return EXPRESSION_RESOLVE_RESULT::EXPRESSION_ERROR;
+		}
+		return s_session.missingSymbol ? EXPRESSION_RESOLVE_RESULT::UNKNOWN_VARIABLE : EXPRESSION_RESOLVE_RESULT::AVAILABLE;
+	}
+
+	PATCH_RESOLVE_RESULT ToPatchResult(EXPRESSION_RESOLVE_RESULT r)
+	{
+		switch (r)
+		{
+		case EXPRESSION_RESOLVE_RESULT::AVAILABLE:
+			return PATCH_RESOLVE_RESULT::RESOLVED;
+		case EXPRESSION_RESOLVE_RESULT::UNKNOWN_VARIABLE:
+			return PATCH_RESOLVE_RESULT::UNKNOWN_VARIABLE;
+		default:
+			return PATCH_RESOLVE_RESULT::EXPRESSION_ERROR;
+		}
+	}
+
+	// makes the name known to later expressions; false if it already exists
+	bool DefineSymbol(PatchContext_t& ctx, const std::string& name, uint32 value)
+	{
+		cemuLog_log(LogType::Patches, "Patch symbol {} = 0x{:08x}", name, value);
+		if (!ctx.map_values.try_emplace(name, value).second)
+			return false;
+		rplSymbolStorage_store(ctx.graphicPack->GetName().data(), name.data(), value, RPL_STORED_SYMBOL_PATCH);
+		return true;
+	}
+
+	template<typename T>
+	void StoreBE(std::vector<uint8>& buffer, uint32 offset, T value)
+	{
+		cemu_assert(offset + sizeof(T) <= buffer.size());
+		*(betype<T>*)(buffer.data() + offset) = value;
+	}
+
+	uint32 LoadBE32(const std::vector<uint8>& buffer, uint32 offset)
+	{
+		cemu_assert(offset + sizeof(uint32) <= buffer.size());
+		return *(const betype<uint32>*)(buffer.data() + offset);
+	}
+
+	// relative branch displacement from 'from' to 'to'; false when it does not fit
+	// (backward reach is one step larger than forward reach, as with two's complement)
+	bool BranchDisplacement(uint32 from, uint32 to, uint32 reach, uint32& displacement)
+	{
+		if (to < from)
+		{
+			const uint32 back = from - to;
+			if (back > reach)
+				return false;
+			displacement = 0u - back;
+			return true;
+		}
+		const uint32 forward = to - from;
+		if (forward >= reach)
+			return false;
+		displacement = forward;
+		return true;
+	}
+
+	struct PendingEntries
+	{
+		PatchGroup* group;
+		std::vector<PatchEntry*> entries;
+	};
+
+	// one pass over everything not resolved yet; returns how many entries got resolved
+	sint32 ResolvePass(PatchContext_t& ctx, std::vector<PendingEntries>& pending, bool reportMissing)
+	{
+		s_session.reportMissing = reportMissing;
+		sint32 resolvedCount = 0;
+		for (PendingEntries& p : pending)
+		{
+			s_session.group = p.group;
+			std::erase_if(p.entries, [&](PatchEntry* entry) {
+				const PATCH_RESOLVE_RESULT r = entry->resolve(ctx);
+				switch (r)
+				{
+				case PATCH_RESOLVE_RESULT::RESOLVED:
+					resolvedCount++;
+					return true;
+				case PATCH_RESOLVE_RESULT::UNKNOWN_VARIABLE: // may work on a later pass
+				case PATCH_RESOLVE_RESULT::INVALID_ADDRESS: // already reported
+				case PATCH_RESOLVE_RESULT::VARIABLE_CONFLICT: // already reported
+					return false;
+				default:
+					ctx.errorHandler.printError(p.group, entry->getLineNumber(), "Expression could not be evaluated or the value is unusable");
+					return false;
+				}
+			});
+		}
+		return resolvedCount;
+	}
+
+	bool AllResolved(const std::vector<PendingEntries>& pending)
+	{
+		return std::all_of(pending.begin(), pending.end(), [](const PendingEntries& p) { return p.entries.empty(); });
+	}
 }
 
-template<typename T>
-EXPRESSION_RESOLVE_RESULT _resolveExpression(PatchContext_t& ctx, std::string& expressionString, T& result, sint32 associatedLineNumber = -1)
-{
-	resolverState.lineNumber = associatedLineNumber;
-	ExpressionParser ep;
-	try
-	{
-		// add all the graphic pack constants
-		ep.AddConstantCallback(_cbResolveConstant);
-		ep.SetFunctionCallback(_cbResolveFunction);
-		resolverState.hasUnknownVariable = false;
-		result = (T)ep.Evaluate(expressionString);
-		if (resolverState.hasUnknownVariable)
-			return EXPRESSION_RESOLVE_RESULT::UNKNOWN_VARIABLE;
-	}
-	catch (const std::exception&)
-	{
-		cemu_assert_debug(false);
-		ctx.errorHandler.printError(nullptr, -1, fmt::format("Unexpected error in expression \"{}\"", expressionString));
-		return EXPRESSION_RESOLVE_RESULT::EXPRESSION_ERROR;
-	}
-	return EXPRESSION_RESOLVE_RESULT::AVAILABLE;
-}
-
-PATCH_RESOLVE_RESULT translateExpressionResult(EXPRESSION_RESOLVE_RESULT expressionResult)
-{
-	if (expressionResult == EXPRESSION_RESOLVE_RESULT::AVAILABLE)
-		return PATCH_RESOLVE_RESULT::RESOLVED;
-	else if (expressionResult == EXPRESSION_RESOLVE_RESULT::EXPRESSION_ERROR)
-		return PATCH_RESOLVE_RESULT::EXPRESSION_ERROR;
-	else if (expressionResult == EXPRESSION_RESOLVE_RESULT::UNKNOWN_VARIABLE)
-		return PATCH_RESOLVE_RESULT::UNKNOWN_VARIABLE;
-	cemu_assert(false);
-	return PATCH_RESOLVE_RESULT::EXPRESSION_ERROR;
-}
+// ---------------------------------------------------------------- entries
 
 PATCH_RESOLVE_RESULT PatchEntryInstruction::resolveReloc(PatchContext_t& ctx, PPCAssemblerReloc* reloc)
 {
-	MPTR finalRelocAddr = m_relocatedAddr + reloc->m_byteOffset;
+	const uint32 offset = reloc->m_byteOffset;
+	const MPTR target = m_finalAddress + offset;
+
 	if (reloc->m_relocType == PPCASM_RELOC::FLOAT)
 	{
-		// resolve float expression
-		float result;
-		auto r = _resolveExpression<float>(ctx, reloc->m_expression, result, m_lineNumber);
-		if (r == EXPRESSION_RESOLVE_RESULT::AVAILABLE)
-		{
-			cemu_assert((reloc->m_byteOffset + sizeof(betype<float>)) <= m_length);
-			*(betype<float>*)(m_dataWithRelocs + reloc->m_byteOffset) = result;
-			DebugSymbolStorage::StoreDataType(finalRelocAddr, DEBUG_SYMBOL_TYPE::FLOAT);
-			return PATCH_RESOLVE_RESULT::RESOLVED;
-		}
-		else
-			return translateExpressionResult(r);
-	}
-	else if (reloc->m_relocType == PPCASM_RELOC::DOUBLE)
-	{
-		// resolve double expression
-		double result;
-		auto r = _resolveExpression<double>(ctx, reloc->m_expression, result, m_lineNumber);
-		if (r == EXPRESSION_RESOLVE_RESULT::AVAILABLE)
-		{
-			cemu_assert((reloc->m_byteOffset + sizeof(betype<double>)) <= m_length);
-			*(betype<double>*)(m_dataWithRelocs + reloc->m_byteOffset) = result;
-			DebugSymbolStorage::StoreDataType(finalRelocAddr, DEBUG_SYMBOL_TYPE::DOUBLE);
-			return PATCH_RESOLVE_RESULT::RESOLVED;
-		}
-		else
-			return translateExpressionResult(r);
-	}
-	else
-	{
-		// resolve uint32 expression
-		uint32 result;
-		auto r = _resolveExpression<uint32>(ctx, reloc->m_expression, result, m_lineNumber);
+		float value;
+		auto r = Evaluate<float>(ctx, reloc->m_expression, value, m_line);
 		if (r != EXPRESSION_RESOLVE_RESULT::AVAILABLE)
-			return translateExpressionResult(r);
-		if (reloc->m_relocType == PPCASM_RELOC::U32)
-		{
-			cemu_assert((reloc->m_byteOffset + sizeof(betype<uint32>)) <= m_length);
-			*(betype<uint32>*)(m_dataWithRelocs + reloc->m_byteOffset) = result;
-			DebugSymbolStorage::StoreDataType(finalRelocAddr, DEBUG_SYMBOL_TYPE::U32);
-			return PATCH_RESOLVE_RESULT::RESOLVED;
-		}
-		else if (reloc->m_relocType == PPCASM_RELOC::U16)
-		{
-			cemu_assert((reloc->m_byteOffset + sizeof(betype<uint16>)) <= m_length);
-			*(betype<uint16>*)(m_dataWithRelocs + reloc->m_byteOffset) = (uint16)result;
-			DebugSymbolStorage::StoreDataType(finalRelocAddr, DEBUG_SYMBOL_TYPE::U16);
-			return PATCH_RESOLVE_RESULT::RESOLVED;
-		}
-		else if (reloc->m_relocType == PPCASM_RELOC::U8)
-		{
-			cemu_assert((reloc->m_byteOffset + sizeof(betype<uint8>)) <= m_length);
-			*(betype<uint8>*)(m_dataWithRelocs + reloc->m_byteOffset) = (uint8)result;
-			DebugSymbolStorage::StoreDataType(finalRelocAddr, DEBUG_SYMBOL_TYPE::U8);
-			return PATCH_RESOLVE_RESULT::RESOLVED;
-		}
-		else if (reloc->m_relocType == PPCASM_RELOC::U32_MASKED_IMM)
-		{
-			cemu_assert((reloc->m_byteOffset + sizeof(betype<uint32>)) <= m_length);
-			uint32 opcode = *(betype<uint32>*)(m_dataWithRelocs + reloc->m_byteOffset);
-			cemu_assert_debug(reloc->m_bitCount != 0);
-			uint32 mask = 0xFFFFFFFF >> (32 - reloc->m_bitCount);
-			mask <<= reloc->m_bitOffset;
-			opcode &= ~mask;
-			opcode |= ((result << reloc->m_bitOffset) & mask);
-			*(betype<uint32>*)(m_dataWithRelocs + reloc->m_byteOffset) = opcode;
-			return PATCH_RESOLVE_RESULT::RESOLVED;
-		}
-		else if (reloc->m_relocType == PPCASM_RELOC::BRANCH_S26)
-		{
-			cemu_assert((reloc->m_byteOffset + sizeof(betype<uint32>)) <= m_length);
-			uint32 opcode = *(betype<uint32>*)(m_dataWithRelocs + reloc->m_byteOffset);
-			if (opcode & 2)
-			{
-				// absolute
-				if (result >= 0x3FFFFFC)
-				{
-					cemuLog_log(LogType::Force, "Target \'{}\' for branch at line {} out of range", reloc->m_expression, m_lineNumber);
-					return PATCH_RESOLVE_RESULT::VALUE_ERROR;
-				}
-				opcode &= ~0x3FFFFFC;
-				opcode |= (result & 0x3FFFFFC);
-			}
-			else
-			{
-				// relative
-				uint32 instrAddr = this->getRelocatedAddr() + reloc->m_byteOffset;
-				if (result < instrAddr)
-				{
-					// jump backwards
-					uint32 jumpB = instrAddr - result;
-					if (jumpB > 0x1FFFFFF)
-					{
-						ctx.errorHandler.printError(nullptr, m_lineNumber, fmt::format("Target \'{0}\' for branch out of range (use MTCTR + BCTR or similar for long distance branches)", reloc->m_expression.c_str()));
-						return PATCH_RESOLVE_RESULT::VALUE_ERROR;
-					}
-					opcode &= ~0x3FFFFFC;
-					opcode |= ((~jumpB + 1) & 0x3FFFFFC);
-				}
-				else
-				{
-					// jump forwards
-					uint32 jumpF = result - instrAddr;
-					if (jumpF >= 0x1FFFFFF)
-					{
-						ctx.errorHandler.printError(nullptr, m_lineNumber, fmt::format("Target \'{0}\' for branch out of range (use MTCTR + BCTR or similar for long distance branches)", reloc->m_expression.c_str()));
-						return PATCH_RESOLVE_RESULT::VALUE_ERROR;
-					}
-					opcode &= ~0x3FFFFFC;
-					opcode |= (jumpF & 0x3FFFFFC);
-				}
-			}
-			*(betype<uint32>*)(m_dataWithRelocs + reloc->m_byteOffset) = opcode;
-			return PATCH_RESOLVE_RESULT::RESOLVED;
-		}
-		else if (reloc->m_relocType == PPCASM_RELOC::BRANCH_S16)
-		{
-			cemu_assert((reloc->m_byteOffset + sizeof(betype<uint32>)) <= m_length);
-			uint32 opcode = *(betype<uint32>*)(m_dataWithRelocs + reloc->m_byteOffset);
-			uint32 instrAddr = this->getRelocatedAddr() + reloc->m_byteOffset;
-			if (result < instrAddr)
-			{
-				// jump backwards
-				uint32 jumpB = instrAddr - result;
-				if (jumpB > 0x8000)
-				{
-					ctx.errorHandler.printError(nullptr, m_lineNumber, fmt::format("Target \'{0}\' for branch out of range (use MTCTR + BCTR or similar for long distance branches)", reloc->m_expression.c_str()));
-					return PATCH_RESOLVE_RESULT::VALUE_ERROR;
-				}
-				opcode &= ~0xFFFC;
-				opcode |= ((~jumpB + 1) & 0xFFFC);
-			}
-			else
-			{
-				// jump forwards
-				uint32 jumpF = result - instrAddr;
-				if (jumpF >= 0x8000)
-				{
-					ctx.errorHandler.printError(nullptr, m_lineNumber, fmt::format("Target \'{0}\' for branch out of range (use MTCTR + BCTR or similar for long distance branches)", reloc->m_expression.c_str()));
-					return PATCH_RESOLVE_RESULT::VALUE_ERROR;
-				}
-				opcode &= ~0xFFFC;
-				opcode |= (jumpF & 0xFFFC);
-			}
-			*(betype<uint32>*)(m_dataWithRelocs + reloc->m_byteOffset) = opcode;
-			return PATCH_RESOLVE_RESULT::RESOLVED;
-		}
-
-
-		// *internalCtx.opcode |= (relativeAddr & 0xFFFC);
-		cemu_assert_debug(false);
+			return ToPatchResult(r);
+		StoreBE<float>(m_final, offset, value);
+		DebugSymbolStorage::StoreDataType(target, DEBUG_SYMBOL_TYPE::FLOAT);
+		return PATCH_RESOLVE_RESULT::RESOLVED;
 	}
-	return PATCH_RESOLVE_RESULT::UNDEFINED_ERROR;
+	if (reloc->m_relocType == PPCASM_RELOC::DOUBLE)
+	{
+		double value;
+		auto r = Evaluate<double>(ctx, reloc->m_expression, value, m_line);
+		if (r != EXPRESSION_RESOLVE_RESULT::AVAILABLE)
+			return ToPatchResult(r);
+		StoreBE<double>(m_final, offset, value);
+		DebugSymbolStorage::StoreDataType(target, DEBUG_SYMBOL_TYPE::DOUBLE);
+		return PATCH_RESOLVE_RESULT::RESOLVED;
+	}
+
+	uint32 value;
+	auto r = Evaluate<uint32>(ctx, reloc->m_expression, value, m_line);
+	if (r != EXPRESSION_RESOLVE_RESULT::AVAILABLE)
+		return ToPatchResult(r);
+
+	auto branchTooFar = [&]() {
+		ctx.errorHandler.printError(nullptr, m_line, fmt::format("Branch target '{}' is out of range (use mtctr + bctr to jump further)", reloc->m_expression));
+		return PATCH_RESOLVE_RESULT::VALUE_ERROR;
+	};
+
+	switch (reloc->m_relocType)
+	{
+	case PPCASM_RELOC::U32:
+		StoreBE<uint32>(m_final, offset, value);
+		DebugSymbolStorage::StoreDataType(target, DEBUG_SYMBOL_TYPE::U32);
+		return PATCH_RESOLVE_RESULT::RESOLVED;
+	case PPCASM_RELOC::U16:
+		StoreBE<uint16>(m_final, offset, (uint16)value);
+		DebugSymbolStorage::StoreDataType(target, DEBUG_SYMBOL_TYPE::U16);
+		return PATCH_RESOLVE_RESULT::RESOLVED;
+	case PPCASM_RELOC::U8:
+		StoreBE<uint8>(m_final, offset, (uint8)value);
+		DebugSymbolStorage::StoreDataType(target, DEBUG_SYMBOL_TYPE::U8);
+		return PATCH_RESOLVE_RESULT::RESOLVED;
+	case PPCASM_RELOC::U32_MASKED_IMM:
+	{
+		uint32 word = LoadBE32(m_final, offset);
+		cemu_assert_debug(reloc->m_bitCount != 0);
+		const uint32 field = (0xFFFFFFFFu >> (32 - reloc->m_bitCount)) << reloc->m_bitOffset;
+		word = (word & ~field) | ((value << reloc->m_bitOffset) & field);
+		StoreBE<uint32>(m_final, offset, word);
+		return PATCH_RESOLVE_RESULT::RESOLVED;
+	}
+	case PPCASM_RELOC::BRANCH_S26:
+	{
+		constexpr uint32 kField = 0x03FFFFFC;
+		uint32 word = LoadBE32(m_final, offset);
+		uint32 encoded;
+		if (word & 2) // AA bit: absolute target
+		{
+			if (value >= kField)
+			{
+				cemuLog_log(LogType::Force, "Patches: absolute branch target '{}' on line {} is out of range", reloc->m_expression, m_line);
+				return PATCH_RESOLVE_RESULT::VALUE_ERROR;
+			}
+			encoded = value;
+		}
+		else if (!BranchDisplacement(getRelocatedAddr() + offset, value, 0x1FFFFFF, encoded))
+			return branchTooFar();
+		word = (word & ~kField) | (encoded & kField);
+		StoreBE<uint32>(m_final, offset, word);
+		return PATCH_RESOLVE_RESULT::RESOLVED;
+	}
+	case PPCASM_RELOC::BRANCH_S16:
+	{
+		constexpr uint32 kField = 0xFFFC;
+		uint32 word = LoadBE32(m_final, offset);
+		uint32 encoded;
+		if (!BranchDisplacement(getRelocatedAddr() + offset, value, 0x8000, encoded))
+			return branchTooFar();
+		word = (word & ~kField) | (encoded & kField);
+		StoreBE<uint32>(m_final, offset, word);
+		return PATCH_RESOLVE_RESULT::RESOLVED;
+	}
+	default:
+		cemu_assert_debug(false);
+		return PATCH_RESOLVE_RESULT::UNDEFINED_ERROR;
+	}
 }
 
 PATCH_RESOLVE_RESULT PatchEntryInstruction::resolve(PatchContext_t& ctx)
 {
-	// relocate patch address
-	if (!m_addrRelocated)
+	if (!m_hasFinalAddress)
 	{
-		if (_relocateAddress(resolverState.currentGroup, &ctx, m_addr, m_relocatedAddr) == false)
+		if (!MapPatchAddress(s_session.group, ctx, m_patchAddress, m_finalAddress))
 		{
-			cemuLog_log(LogType::Force, "Patches: Address 0x{:08x} (line {}) is not within code cave or any module section", this->getAddr(), this->m_lineNumber);
-			cemu_assert_debug(false);
+			cemuLog_log(LogType::Force, "Patches: address 0x{:08x} on line {} is outside the code cave and the module", m_patchAddress, m_line);
 			return PATCH_RESOLVE_RESULT::INVALID_ADDRESS;
 		}
-		m_addrRelocated = true;
+		m_hasFinalAddress = true;
 	}
-	// apply relocations to instruction
-	for (auto& itr : this->m_relocs)
+	for (PPCAssemblerReloc& reloc : m_relocs)
 	{
-		if(itr.isApplied())
+		if (reloc.isApplied())
 			continue;
-		// evaluate expression and apply reloc to internal buffer
-		auto r = resolveReloc(ctx, &itr);
-		if (r == PATCH_RESOLVE_RESULT::RESOLVED)
-		{
-			itr.setApplied();
-			continue;
-		}
-		return r;
+		const PATCH_RESOLVE_RESULT r = resolveReloc(ctx, &reloc);
+		if (r != PATCH_RESOLVE_RESULT::RESOLVED)
+			return r;
+		reloc.setApplied();
 	}
 	return PATCH_RESOLVE_RESULT::RESOLVED;
 }
 
 void PatchEntryInstruction::applyPatch()
 {
-	const uint32 addr = getRelocatedAddr();
-	if (addr == 0)
+	const uint32 address = m_finalAddress;
+	if (address == 0)
 	{
 		cemu_assert_debug(false);
 		return;
 	}
-	uint8* patchAddr = (uint8*)memory_base + addr;
-	memcpy(m_dataBackup, patchAddr, m_length);
-	memcpy(patchAddr, m_dataWithRelocs, m_length);
-	PPCRecompiler_invalidateRange(addr, addr + m_length);
+	uint8* memory = (uint8*)memory_base + address;
+	const size_t length = m_final.size();
+	if (length != 0) // directives like .align can produce no bytes
+	{
+		std::memcpy(m_saved.data(), memory, length);
+		std::memcpy(memory, m_final.data(), length);
+	}
+	PPCRecompiler_invalidateRange(address, address + (uint32)length);
 }
 
 void PatchEntryInstruction::undoPatch()
 {
-	const uint32 addr = getRelocatedAddr();
-	if (addr == 0)
+	const uint32 address = m_finalAddress;
+	if (address == 0)
 	{
 		cemu_assert_debug(false);
 		return;
 	}
-	uint8* patchAddr = (uint8*)memory_base + addr;
-	memcpy(patchAddr, m_dataBackup, m_length);
-	PPCRecompiler_invalidateRange(addr, addr + m_length);
-	rplSymbolStorage_removeRange(addr, m_length, RPL_STORED_SYMBOL_PATCH);
-	DebugSymbolStorage::ClearRange(addr, m_length);
-}
-
-// returns true on success, false if variable with same name already exists
-bool registerU32Variable(PatchContext_t& ctx, std::string& name, uint32 value, PatchGroup* associatedPatchGroup, uint32 associatedLineNumber, bool isAddress)
-{
-	cemuLog_log(LogType::Patches, "Resolved symbol {} with value 0x{:08x}", name.c_str(), value);
-	if (ctx.map_values.find(name) != ctx.map_values.end())
-	{
-		return false;
-	}
-	ctx.map_values[name] = value;
-	// keep track of address symbols for the debugger
-	rplSymbolStorage_store(ctx.graphicPack->GetName().data(), name.data(), value, RPL_STORED_SYMBOL_PATCH);
-
-	return true;
+	const uint32 length = (uint32)m_saved.size();
+	if (length != 0)
+		std::memcpy((uint8*)memory_base + address, m_saved.data(), length);
+	PPCRecompiler_invalidateRange(address, address + length);
+	rplSymbolStorage_removeRange(address, (sint32)length, RPL_STORED_SYMBOL_PATCH);
+	DebugSymbolStorage::ClearRange(address, length);
 }
 
 PATCH_RESOLVE_RESULT PatchEntryCemuhookSymbolValue::resolve(PatchContext_t& ctx)
 {
-	uint32 addr;
-	auto r = _resolveExpression<uint32>(ctx, m_expressionString, addr, m_lineNumber);
-	if (r == EXPRESSION_RESOLVE_RESULT::AVAILABLE)
-	{
-		if (_relocateAddress(resolverState.currentGroup, &ctx, addr, m_resolvedValue))
-		{
-			m_isResolved = true;
-			// register variable
-			if (!registerU32Variable(ctx, m_symbolName, m_resolvedValue, resolverState.currentGroup, getLineNumber(), true))
-			{
-				if (resolverState.captureUnresolvedSymbols)
-					ctx.errorHandler.printError(resolverState.currentGroup, m_lineNumber, fmt::format("Symbol {} is already defined", m_symbolName));
-				return PATCH_RESOLVE_RESULT::VARIABLE_CONFLICT;
-			}
-			return PATCH_RESOLVE_RESULT::RESOLVED;
-		}
+	uint32 address;
+	auto r = Evaluate<uint32>(ctx, m_expression, address, m_line);
+	if (r != EXPRESSION_RESOLVE_RESULT::AVAILABLE)
+		return ToPatchResult(r);
+	if (!MapPatchAddress(s_session.group, ctx, address, m_address))
 		return PATCH_RESOLVE_RESULT::INVALID_ADDRESS;
+	if (!DefineSymbol(ctx, m_name, m_address))
+	{
+		if (s_session.reportMissing)
+			ctx.errorHandler.printError(s_session.group, m_line, fmt::format("Symbol {} is defined twice", m_name));
+		return PATCH_RESOLVE_RESULT::VARIABLE_CONFLICT;
 	}
-	return translateExpressionResult(r);
+	return PATCH_RESOLVE_RESULT::RESOLVED;
 }
 
 PATCH_RESOLVE_RESULT PatchEntryLabel::resolve(PatchContext_t& ctx)
 {
-	if (_relocateAddress(resolverState.currentGroup, &ctx, m_address, m_relocatedAddress))
+	if (!MapPatchAddress(s_session.group, ctx, m_patchAddress, m_finalAddress))
 	{
-		m_isResolved = true;
-		// register variable
-		if (!registerU32Variable(ctx, m_symbolName, m_relocatedAddress, resolverState.currentGroup, getLineNumber(), true))
-		{
-			if (resolverState.captureUnresolvedSymbols)
-				ctx.errorHandler.printError(resolverState.currentGroup, m_lineNumber, fmt::format("Label {} is already defined", m_symbolName));
-			return PATCH_RESOLVE_RESULT::VARIABLE_CONFLICT;
-		}
-		return PATCH_RESOLVE_RESULT::RESOLVED;
+		if (s_session.reportMissing)
+			ctx.errorHandler.printError(s_session.group, m_line, fmt::format("Label {} at {:#08x} is outside the code cave and the module", m_name, m_patchAddress));
+		return PATCH_RESOLVE_RESULT::INVALID_ADDRESS;
 	}
-	if(resolverState.captureUnresolvedSymbols)
-		ctx.errorHandler.printError(resolverState.currentGroup, m_lineNumber, fmt::format("Address {:#08x} of label {} does not point to any module section or code cave", m_address, m_symbolName));
-	return PATCH_RESOLVE_RESULT::INVALID_ADDRESS;
+	if (!DefineSymbol(ctx, m_name, m_finalAddress))
+	{
+		if (s_session.reportMissing)
+			ctx.errorHandler.printError(s_session.group, m_line, fmt::format("Label {} is defined twice", m_name));
+		return PATCH_RESOLVE_RESULT::VARIABLE_CONFLICT;
+	}
+	return PATCH_RESOLVE_RESULT::RESOLVED;
 }
 
 PATCH_RESOLVE_RESULT PatchEntryVariableValue::resolve(PatchContext_t& ctx)
 {
-	uint32 v;
-	auto r = _resolveExpression<uint32>(ctx, m_expressionString, v, m_lineNumber);
-	if (r == EXPRESSION_RESOLVE_RESULT::AVAILABLE)
+	uint32 value;
+	auto r = Evaluate<uint32>(ctx, m_expression, value, m_line);
+	if (r != EXPRESSION_RESOLVE_RESULT::AVAILABLE)
+		return ToPatchResult(r);
+	if (!DefineSymbol(ctx, m_name, value))
 	{
-		// register variable
-		if (!registerU32Variable(ctx, m_symbolName, v, resolverState.currentGroup, getLineNumber(), false))
-		{
-			if (resolverState.captureUnresolvedSymbols)
-				ctx.errorHandler.printError(resolverState.currentGroup, m_lineNumber, fmt::format("Variable {} is already defined", m_symbolName));
-			return PATCH_RESOLVE_RESULT::VARIABLE_CONFLICT;
-		}
-		return PATCH_RESOLVE_RESULT::RESOLVED;
+		if (s_session.reportMissing)
+			ctx.errorHandler.printError(s_session.group, m_line, fmt::format("Variable {} is defined twice", m_name));
+		return PATCH_RESOLVE_RESULT::VARIABLE_CONFLICT;
 	}
-	return translateExpressionResult(r);
+	return PATCH_RESOLVE_RESULT::RESOLVED;
 }
 
-struct UnresolvedPatches_t
-{
-	PatchGroup* patchGroup;
-	std::vector<PatchEntry*> list_unresolvedPatches;
-};
-
-// returns number of resolved entries
-bool _resolverPass(PatchContext_t& patchContext, std::vector<UnresolvedPatches_t>& unresolvedPatches, bool captureUnresolvedSymbols = false)
-{
-	resolverState.captureUnresolvedSymbols = captureUnresolvedSymbols;
-	sint32 numResolvedEntries = 0;
-	for (auto& unresolvedGroup : unresolvedPatches)
-	{
-		resolverState.currentGroup = unresolvedGroup.patchGroup;
-		auto& list_unresolvedPatches = unresolvedGroup.list_unresolvedPatches;
-		std::erase_if(list_unresolvedPatches, [&](PatchEntry* entry)
-		{
-			auto r = entry->resolve(patchContext);
-			if (r == PATCH_RESOLVE_RESULT::RESOLVED)
-			{
-				numResolvedEntries++;
-				return true;
-			}
-			else if (r == PATCH_RESOLVE_RESULT::UNKNOWN_VARIABLE)
-			{
-				// dependency on other not yet resolved entry, continue iterating
-			}
-			else if (r == PATCH_RESOLVE_RESULT::INVALID_ADDRESS ||
-				r == PATCH_RESOLVE_RESULT::VARIABLE_CONFLICT)
-			{
-				// errors handled and printed inside resolve()
-			}
-			else
-			{
-				// unknown error
-				sint32 lineNumber = entry->getLineNumber();
-				patchContext.errorHandler.printError(resolverState.currentGroup, lineNumber, "Unable to parse expression or other internal error");
-			}
-			return false;
-		});
-	}
-	return numResolvedEntries;
-}
+// ---------------------------------------------------------------- groups
 
 void GraphicPack2::ApplyPatchGroups(std::vector<PatchGroup*>& groups, const RPLModule* rpl)
 {
-	// init context information
-	PatchContext_t patchContext{};
-	patchContext.graphicPack = this;
-	patchContext.matchedModule = rpl;
-	resolverState.activePatchContext = &patchContext;
-	// setup error handler
-	patchContext.errorHandler.setCurrentGraphicPack(this);
-	patchContext.errorHandler.setStage(PatchErrorHandler::STAGE::APPLY);
-	// no group can be applied more than once
-	for (auto patchGroup : groups)
+	PatchContext_t ctx{};
+	ctx.graphicPack = this;
+	ctx.matchedModule = rpl;
+	ctx.errorHandler.setCurrentGraphicPack(this);
+	ctx.errorHandler.setStage(PatchErrorHandler::STAGE::APPLY);
+	s_session = ResolveSession{};
+	s_session.context = &ctx;
+
+	for (PatchGroup* group : groups)
 	{
-		if (patchGroup->isApplied())
+		if (group->isApplied())
 		{
-			patchContext.errorHandler.printError(patchGroup, -1, "Group already applied to a different module.");
+			ctx.errorHandler.printError(group, -1, "This group is already applied to another module");
 			return;
 		}
 	}
-	// allocate code cave for every group
-	for (auto patchGroup : groups)
-	{
-		if (patchGroup->codeCaveSize > 0)
-		{
-			auto codeCaveMem = RPLLoader_AllocateCodeCaveMem(256, patchGroup->codeCaveSize);
-			if (!codeCaveMem)
-			{
-				patchContext.errorHandler.printError(patchGroup, -1, fmt::format("Not enough code cave memory for {} bytes, the code caves of all graphic packs share {} bytes", patchGroup->codeCaveSize, MEMORY_CODECAVEAREA_SIZE));
-				patchContext.errorHandler.showStageErrorMessageBox();
-				return;
-			}
-			cemuLog_log(LogType::Force, "Applying patch group \'{}\' (Codecave: {:08x}-{:08x})", patchGroup->name, codeCaveMem.GetMPTR(), codeCaveMem.GetMPTR() + patchGroup->codeCaveSize);
-			patchGroup->codeCaveMem = codeCaveMem;
-		}
-		else
-		{
-			cemuLog_log(LogType::Force, "Applying patch group \'{}\'", patchGroup->name);
-			patchGroup->codeCaveMem = nullptr;
-		}
-	}
-	// resolve the patch entries
-	// this means:
-	// - resolving the expressions for variables and registering them
-	// - calculating relocated addresses
-	// - applying relocations to temporary patch buffer
 
-	// multiple passes may be necessary since forward and backward references are allowed as well as references across group boundaries
-
-	// create a copy of all the patch references and keep the group association intact
-	std::vector<UnresolvedPatches_t> unresolvedPatches;
-	unresolvedPatches.resize(groups.size());
-	for (size_t i = 0; i < groups.size(); i++)
+	for (PatchGroup* group : groups)
 	{
-		unresolvedPatches[i].patchGroup = groups[i];
-		unresolvedPatches[i].list_unresolvedPatches = groups[i]->list_patches;
+		if (group->m_codeCaveSize == 0)
+		{
+			cemuLog_log(LogType::Force, "Applying patch group '{}'", group->m_name);
+			group->m_codeCave = nullptr;
+			continue;
+		}
+		MEMPTR<void> cave = RPLLoader_AllocateCodeCaveMem(256, group->m_codeCaveSize);
+		if (!cave)
+		{
+			ctx.errorHandler.printError(group, -1, fmt::format("The code cave needs {} bytes but not enough is left (all packs share {} bytes)", group->m_codeCaveSize, MEMORY_CODECAVEAREA_SIZE));
+			ctx.errorHandler.showStageErrorMessageBox();
+			return;
+		}
+		cemuLog_log(LogType::Force, "Applying patch group '{}' (code cave {:08x}-{:08x})", group->m_name, cave.GetMPTR(), cave.GetMPTR() + group->m_codeCaveSize);
+		group->m_codeCave = cave;
 	}
 
-	auto isUnresolvedPatchesEmpty = [&unresolvedPatches]()
+	// Entries may refer to symbols defined later or in other groups, so resolving takes
+	// several passes. It stops when a pass makes no progress or after a fixed number of passes.
+	std::vector<PendingEntries> pending;
+	for (PatchGroup* group : groups)
+		pending.push_back({group, group->m_entries});
+
+	constexpr sint32 kMaxPasses = 30;
+	for (sint32 pass = 1; pass <= kMaxPasses; pass++)
 	{
-		for (auto& itr : unresolvedPatches)
-			if (!itr.list_unresolvedPatches.empty())
-				return false;
-		return true;
-	};
-	// resolve and relocate
-	for (sint32 pass = 0; pass < 30; pass++)
-	{
-		bool isLastPass = (pass == 29);
-		sint32 numResolvedEntries = _resolverPass(patchContext, unresolvedPatches, false);
-		if (isUnresolvedPatchesEmpty())
+		const sint32 progress = ResolvePass(ctx, pending, false);
+		if (AllResolved(pending))
 			break;
-		if (numResolvedEntries == 0 || isLastPass)
-		{
-			// stuck due to reference to undefined variable or unresolvable cross-references
-			// iterate all remaining expressions and output them to log
-			// execute another resolver pass but capture all the unresolved variables this time
-			patchContext.unresolvedSymbols.clear();
-			_resolverPass(patchContext, unresolvedPatches, true);
-			// generate messages
-			if(isLastPass)
-				patchContext.errorHandler.printError(nullptr, -1, "Some symbols could not be resolved because the dependency chain is too deep");
-			for (auto& itr : patchContext.unresolvedSymbols)
-				patchContext.errorHandler.printError(itr.patchGroup, itr.lineNumber, fmt::format("Unresolved symbol: {}", itr.symbolName));
-			patchContext.errorHandler.showStageErrorMessageBox();
-			return;
-		}
-	}
-	if (!isUnresolvedPatchesEmpty() || patchContext.errorHandler.hasError())
-	{
-		patchContext.errorHandler.showStageErrorMessageBox();
+		if (progress != 0 && pass < kMaxPasses)
+			continue;
+		// stuck: one more pass that records what is missing, then report
+		ctx.unresolvedSymbols.clear();
+		ResolvePass(ctx, pending, true);
+		if (pass == kMaxPasses)
+			ctx.errorHandler.printError(nullptr, -1, "Some symbols depend on each other too deeply to be resolved");
+		for (const auto& missing : ctx.unresolvedSymbols)
+			ctx.errorHandler.printError(missing.patchGroup, missing.lineNumber, fmt::format("Unresolved symbol: {}", missing.symbolName));
+		ctx.errorHandler.showStageErrorMessageBox();
 		return;
 	}
-	// apply relocated patches
-	for (auto patchGroup : groups)
+	if (!AllResolved(pending) || ctx.errorHandler.hasError())
 	{
-		for (auto& patch : patchGroup->list_patches)
+		ctx.errorHandler.showStageErrorMessageBox();
+		return;
+	}
+
+	for (PatchGroup* group : groups)
+	{
+		for (PatchEntry* entry : group->m_entries)
 		{
-			PatchEntryInstruction* patchInstruction = dynamic_cast<PatchEntryInstruction*>(patch);
-			if (patchInstruction == nullptr)
-				continue;
-			patchInstruction->applyPatch();
+			if (auto* instruction = dynamic_cast<PatchEntryInstruction*>(entry))
+				instruction->applyPatch();
 		}
-		
-		for (const auto& [name, type] : patchGroup->list_callbacks)
+		for (const auto& [symbolName, type] : group->m_callbackSymbols)
 		{
-            auto it = patchContext.map_values.find(name);
-            if (it != patchContext.map_values.end())
-            {
-                m_callbacks.push_back(std::make_pair(it->second, type));
-            }
-            else
-            {
-                patchContext.errorHandler.printError(patchGroup, -1, fmt::format("Failed to resolve .callback symbol: {}", name));
-                patchContext.errorHandler.showStageErrorMessageBox();
-                return;
-            }
+			auto it = ctx.map_values.find(symbolName);
+			if (it == ctx.map_values.end())
+			{
+				ctx.errorHandler.printError(group, -1, fmt::format(".callback symbol {} is not defined", symbolName));
+				ctx.errorHandler.showStageErrorMessageBox();
+				return;
+			}
+			m_callbacks.emplace_back(it->second, type);
 		}
 	}
-	// mark groups as applied
-	for (auto patchGroup : groups)
-		patchGroup->setApplied();
+	for (PatchGroup* group : groups)
+		group->setApplied();
 }
 
 void GraphicPack2::UndoPatchGroups(std::vector<PatchGroup*>& groups, const RPLModule* rpl)
 {
-	// restore original data
-	for (auto patchGroup : groups)
+	for (PatchGroup* group : groups)
 	{
-		if (!patchGroup->isApplied())
+		if (!group->isApplied())
 			continue;
-		for (auto& patch : patchGroup->list_patches)
+		for (PatchEntry* entry : group->m_entries)
 		{
-			PatchEntryInstruction* patchInstruction = dynamic_cast<PatchEntryInstruction*>(patch);
-			if (patchInstruction == nullptr)
-				continue;
-			patchInstruction->undoPatch();
+			if (auto* instruction = dynamic_cast<PatchEntryInstruction*>(entry))
+				instruction->undoPatch();
 		}
 	}
-	// mark groups as not applied
-	for (auto patchGroup : groups)
-		patchGroup->resetApplied();
-}
-
-void GraphicPack2::NotifyModuleLoaded(const RPLModule* rpl)
-{
-	cemuLog_log(LogType::Force, "Loaded module \'{}\' with checksum 0x{:08x}", rpl->moduleName, rpl->patchCRC);
-
-	std::lock_guard<std::recursive_mutex> lock(mtx_patches);
-	list_modules.emplace_back(rpl);
-
-	// todo - iterate all active graphic packs and apply any matching patch groups
-}
-
-void GraphicPack2::NotifyModuleUnloaded(const RPLModule* rpl)
-{
-	std::lock_guard<std::recursive_mutex> lock(mtx_patches);
-	list_modules.erase(std::remove(list_modules.begin(), list_modules.end(), rpl), list_modules.end());
+	for (PatchGroup* group : groups)
+		group->resetApplied();
 }
