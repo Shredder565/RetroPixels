@@ -1,189 +1,218 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+#pragma once
+// Interpreter-private helpers: floating point bit conversions, paired single
+// quantization and the handlers that are shared by both memory models.
 
-static uint32 ppc_cmp_and_mask[8] = {
-	0xfffffff0,
-	0xffffff0f,
-	0xfffff0ff,
-	0xffff0fff,
-	0xfff0ffff,
-	0xff0fffff,
-	0xf0ffffff,
-	0x0fffffff,
-};
+#include "PPCInterpreterInternal.h"
 
-
-#define ppc_word_rotl(_data, _n) (std::rotl<uint32>(_data,(_n)&0x1F))
-
-static inline uint32 ppc_mask(int MB, int ME)
+namespace EspressoItp
 {
-	uint32 maskMB = 0xFFFFFFFF >> MB;
-	uint32 maskME = 0xFFFFFFFF << (31-ME);
-	uint32 mask2 = (MB <= ME) ? maskMB & maskME : maskMB | maskME;
-	return mask2;
-}
+	using OpHandler = void (*)(PPCInterpreter_t* cpu, uint32 opcode);
 
-static inline bool ppc_carry_3(uint32 a, uint32 b, uint32 c)
-{
-	if ((a+b) < a) {
-		return true;
-	}
-	if ((a+b+c) < c) {
-		return true;
-	}
-	return false;
-}
+	// ---- floating point bit access ----
 
-#define PPC_getBits(__value, __index, __bitCount) ((__value>>(31-__index))&((1<<__bitCount)-1))
+	inline uint64 DoubleBits(double v) { return std::bit_cast<uint64>(v); }
+	inline double DoubleFromBits(uint64 v) { return std::bit_cast<double>(v); }
+	inline uint32 FloatBits(float v) { return std::bit_cast<uint32>(v); }
+	inline float FloatFromBits(uint32 v) { return std::bit_cast<float>(v); }
 
-const static float LD_SCALE[] = {
-1.000000f, 0.500000f, 0.250000f, 0.125000f, 0.062500f, 0.031250f, 0.015625f,
-0.007813f, 0.003906f, 0.001953f, 0.000977f, 0.000488f, 0.000244f, 0.000122f,
-0.000061f, 0.000031f, 0.000015f, 0.000008f, 0.000004f, 0.000002f, 0.000001f,
-0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f, 0.000000f,
-0.000000f, 0.000000f, 0.000000f, 0.000000f, 4294967296.000000f, 2147483648.000000f,
-1073741824.000000f, 536870912.000000f, 268435456.000000f, 134217728.000000f, 67108864.000000f,
-33554432.000000f, 16777216.000000f, 8388608.000000f, 4194304.000000f, 2097152.000000f, 1048576.000000f,
-524288.000000f, 262144.000000f, 131072.000000f, 65536.000000f, 32768.000000f, 16384.000000f,
-8192.000000f, 4096.000000f, 2048.000000f, 1024.000000f, 512.000000f, 256.000000f, 128.000000f, 64.000000f, 32.000000f,
-16.000000f, 8.000000f, 4.000000f, 2.000000f };
+	constexpr uint64 kDoubleSignBit = 0x8000000000000000ull;
+	constexpr uint64 kDoubleExpMask = 0x7FF0000000000000ull;
+	constexpr uint64 kDoubleFracMask = 0x000FFFFFFFFFFFFFull;
 
-const static float ST_SCALE[] = {
-1.000000f, 2.000000f, 4.000000f, 8.000000f,
-16.000000f, 32.000000f, 64.000000f, 128.000000f,
-256.000000f, 512.000000f, 1024.000000f, 2048.000000f,
-4096.000000f, 8192.000000f, 16384.000000f, 32768.000000f,
-65536.000000f, 131072.000000f, 262144.000000f, 524288.000000f,
-1048576.000000f, 2097152.000000f, 4194304.000000f, 8388608.000000f,
-16777216.000000f, 33554432.000000f, 67108864.000000f, 134217728.000000f,
-268435456.000000f, 536870912.000000f, 1073741824.000000f, 2147483648.000000f,
-0.000000f, 0.000000f, 0.000000f, 0.000000f,
-0.000000f, 0.000000f, 0.000000f, 0.000000f,
-0.000000f, 0.000000f, 0.000000f, 0.000000f,
-0.000001f, 0.000002f, 0.000004f, 0.000008f,
-0.000015f, 0.000031f, 0.000061f, 0.000122f,
-0.000244f, 0.000488f, 0.000977f, 0.001953f,
-0.003906f, 0.007813f, 0.015625f, 0.031250f,
-0.062500f, 0.125000f, 0.250000f, 0.500000f };
+	inline bool IsNaNBits(uint64 v) { return (v & kDoubleExpMask) == kDoubleExpMask && (v & kDoubleFracMask) != 0; }
+	inline bool IsSignalingNaNBits(uint64 v) { return IsNaNBits(v) && (v & 0x0008000000000000ull) == 0; }
+	inline bool IsQuietNaNBits(uint64 v) { return IsNaNBits(v) && (v & 0x0008000000000000ull) != 0; }
 
-static float dequantize(uint32 data, sint32 type, uint8 scale)
-{
-	float f;
-	switch (type)
+	// Single to double as done by lfs/psq_l on the 750CL: exact widening,
+	// denormals are normalised and NaNs keep their payload (no quieting).
+	inline uint64 SingleToDoubleBits(uint32 s)
 	{
-	case 4: // u8
-		f = (float)(uint8)data; 
-		f *= LD_SCALE[scale];
-		break;
-	case 5: // u16
-		f = (float)(uint16)data; 
-		f *= LD_SCALE[scale];
-		break;
-	case 6: // s8
-		f = (float)(sint8)data;
-		f *= LD_SCALE[scale];
-		break;
-	case 7: // float
-		f = (float)(sint16)data;
-		f *= LD_SCALE[scale];
-		break;
-	case 0:
-	default:
-		f = *((float *)&data);
-		// scale does not apply when loading floats
-		break;
+		const uint64 sign = (uint64)(s & 0x80000000u) << 32;
+		const uint32 exp = (s >> 23) & 0xFF;
+		const uint32 frac = s & 0x007FFFFF;
+		if (exp == 0xFF)
+			return sign | kDoubleExpMask | ((uint64)frac << 29);
+		if (exp != 0)
+			return sign | ((uint64)(exp + (1023 - 127)) << 52) | ((uint64)frac << 29);
+		if (frac == 0)
+			return sign;
+		// denormal single: value is frac * 2^-149, top set bit at position p
+		const uint32 p = 31 - (uint32)std::countl_zero(frac);
+		const uint64 normFrac = ((uint64)frac << (23 - p)) & 0x007FFFFF;
+		return sign | ((uint64)(p + 874) << 52) | (normFrac << 29);
 	}
-	return f;
-}
 
-static uint32 quantize(float data, sint32 type, uint8 scale)
-{
-	uint32 val;
-
-	switch (type)
+	// Double to single as done by stfs (750CL manual, "floating-point store"):
+	// no rounding, values in the single denormal range are denormalised and
+	// everything else keeps sign, the top exponent bit and the next 30 bits.
+	inline uint32 DoubleToSingleBits(uint64 d)
 	{
-	case 4: // u8
-		data *= ST_SCALE[scale];
-		if (data < 0) data = 0;
-		if (data > 255) data = 255;
-		val = (uint8)(uint32)data; 
-		break;
-	case 5: // u16
-		data *= ST_SCALE[scale];
-		if (data < 0) data = 0;
-		if (data > 65535) data = 65535;
-		val = (uint16)(uint32)data; 
-		break;
-	case 6: // s8
-		data *= ST_SCALE[scale];
-		if (data < -128) data = -128;
-		if (data > 127) data = 127;
-		val = (sint8)(uint8)(sint32)(uint32)data;
-		break;
-	case 7: // s16
-		data *= ST_SCALE[scale];
-		if (data < -32768) data = -32768;
-		if (data > 32767) data = 32767;
-		val = (sint16)(uint16)(sint32)(uint32)data;
-		break;
-	case 0: // float
-	default: 
-		// scale does not apply when storing floats
-		*((float*)&val) = data; 
-		break;
-	}
-	return val;
-}
-
-#define _uint32_fastSignExtend(__v, __bits) (uint32)(((sint32)(__v)<<(31-(__bits)))>>(31-(__bits)));
-
-static inline uint64 ConvertToDoubleNoFTZ(uint32 value)
-{
-	// http://www.freescale.com/files/product/doc/MPCFPE32B.pdf
-
-	uint64 x = value;
-	uint64 exp = (x >> 23) & 0xff;
-	uint64 frac = x & 0x007fffff;
-
-	if (exp > 0 && exp < 255)
-	{
-		uint64 y = !(exp >> 7);
-		uint64 z = y << 61 | y << 60 | y << 59;
-		return ((x & 0xc0000000) << 32) | z | ((x & 0x3fffffff) << 29);
-	}
-	else if (exp == 0 && frac != 0) // denormal
-	{
-		exp = 1023 - 126;
-		do
+		const uint32 exp = (uint32)(d >> 52) & 0x7FF;
+		if (exp >= 874 && exp <= 896)
 		{
-			frac <<= 1;
-			exp -= 1;
-		} while ((frac & 0x00800000) == 0);
+			uint32 mant = 0x80000000u | (uint32)((d & kDoubleFracMask) >> 21);
+			return (mant >> (905 - exp)) | ((uint32)(d >> 32) & 0x80000000u);
+		}
+		return ((uint32)(d >> 32) & 0xC0000000u) | ((uint32)(d >> 29) & 0x3FFFFFFFu);
+	}
 
-		return ((x & 0x80000000) << 32) | (exp << 52) | ((frac & 0x007fffff) << 29);
-	}
-	else  // QNaN, SNaN or Zero
+	// single precision multiplies on the Espresso only see the upper 25 bits
+	// of the frC significand (rounded at the dropped bit)
+	inline double RoundMultiplier25(double v)
 	{
-		uint64 y = exp >> 7;
-		uint64 z = y << 61 | y << 60 | y << 59;
-		return ((x & 0xc0000000) << 32) | z | ((x & 0x3fffffff) << 29);
+		return DoubleFromBits((DoubleBits(v) + 0x08000000ull) & ~0x0FFFFFFFull);
 	}
-}
 
-static inline uint32 ConvertToSingleNoFTZ(uint64 x)
-{
-	uint32 exp = (x >> 52) & 0x7ff;
-	if (exp > 896 || (x & ~0x8000000000000000ULL) == 0)
+	// ---- paired single quantization (GQR) ----
+
+	// GQR data type field values
+	constexpr uint32 kGqrFloat = 0;
+	constexpr uint32 kGqrU8 = 4;
+	constexpr uint32 kGqrU16 = 5;
+	constexpr uint32 kGqrS8 = 6;
+	constexpr uint32 kGqrS16 = 7;
+
+	inline uint32 GqrAccessSize(uint32 type)
 	{
-		return ((x >> 32) & 0xc0000000) | ((x >> 29) & 0x3fffffff);
+		if (type == kGqrU8 || type == kGqrS8)
+			return 1;
+		if (type == kGqrU16 || type == kGqrS16)
+			return 2;
+		return 4; // float32, also used for the reserved types 1-3
 	}
-	else if (exp >= 874)
+
+	// 2^exponent for exponents in [-32, 32] built directly from the float bits
+	inline float PowerOfTwoF(sint32 exponent)
 	{
-		uint32 t = (uint32)(0x80000000 | ((x & 0x000FFFFFFFFFFFFFULL) >> 21));
-		t = t >> (905 - exp);
-		t |= (x >> 32) & 0x80000000;
-		return t;
+		return FloatFromBits((uint32)(127 + exponent) << 23);
 	}
-	else
+
+	// scale fields are 6-bit two's complement numbers
+	inline sint32 GqrScaleExponent(uint32 scaleField)
 	{
-		return ((x >> 32) & 0xc0000000) | ((x >> 29) & 0x3fffffff);
+		return ((sint32)(scaleField << 26)) >> 26;
 	}
+
+	inline float Dequantize(uint32 raw, uint32 type, uint32 scaleField)
+	{
+		float v;
+		switch (type)
+		{
+		case kGqrU8: v = (float)(uint8)raw; break;
+		case kGqrU16: v = (float)(uint16)raw; break;
+		case kGqrS8: v = (float)(sint8)(uint8)raw; break;
+		case kGqrS16: v = (float)(sint16)(uint16)raw; break;
+		default:
+			return FloatFromBits(raw); // floats are never scaled
+		}
+		return v * PowerOfTwoF(-GqrScaleExponent(scaleField));
+	}
+
+	inline uint32 Quantize(float value, uint32 type, uint32 scaleField)
+	{
+		float lo, hi;
+		switch (type)
+		{
+		case kGqrU8: lo = 0.0f; hi = 255.0f; break;
+		case kGqrU16: lo = 0.0f; hi = 65535.0f; break;
+		case kGqrS8: lo = -128.0f; hi = 127.0f; break;
+		case kGqrS16: lo = -32768.0f; hi = 32767.0f; break;
+		default:
+			return FloatBits(value);
+		}
+		float v = value * PowerOfTwoF(GqrScaleExponent(scaleField));
+		if (v != v)
+			return 0; // NaN
+		v = std::min(std::max(v, lo), hi);
+		return (uint32)(sint32)v; // truncates toward zero
+	}
+
+	// ---- handlers implemented in the .cpp files (no memory access) ----
+
+	// PPCInterpreterOPC.cpp
+	void Op_B(PPCInterpreter_t* cpu, uint32 op);
+	void Op_BC(PPCInterpreter_t* cpu, uint32 op);
+	void Op_BCLR(PPCInterpreter_t* cpu, uint32 op);
+	void Op_BCCTR(PPCInterpreter_t* cpu, uint32 op);
+	void Op_SC(PPCInterpreter_t* cpu, uint32 op);
+	void Op_RFI(PPCInterpreter_t* cpu, uint32 op);
+	void Op_MFMSR(PPCInterpreter_t* cpu, uint32 op);
+	void Op_MTMSR(PPCInterpreter_t* cpu, uint32 op);
+	void Op_MCRF(PPCInterpreter_t* cpu, uint32 op);
+	void Op_MFCR(PPCInterpreter_t* cpu, uint32 op);
+	void Op_MTCRF(PPCInterpreter_t* cpu, uint32 op);
+	void Op_MCRXR(PPCInterpreter_t* cpu, uint32 op);
+	void Op_CacheFlush(PPCInterpreter_t* cpu, uint32 op);  // dcbst, dcbf
+	void Op_ICBI(PPCInterpreter_t* cpu, uint32 op);
+	void Op_NoEffect(PPCInterpreter_t* cpu, uint32 op);    // dcbt, dcbi, dcbz_l, sync, isync, eieio, tlbie
+	void Op_TLBSYNC(PPCInterpreter_t* cpu, uint32 op);
+	void Op_TW(PPCInterpreter_t* cpu, uint32 op);
+	void Op_TWI(PPCInterpreter_t* cpu, uint32 op);
+	void Op_HLE(PPCInterpreter_t* cpu, uint32 op);         // PPCInterpreterHLE.cpp
+
+	// PPCInterpreterFPU.cpp
+	void Op_FCMPU(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FMR(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FNEG(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FABS(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FNABS(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FSEL(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FCTIW(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FCTIWZ(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FRSP(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FRES(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FRSQRTE(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FADD(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FSUB(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FMUL(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FDIV(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FMADD(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FMSUB(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FNMADD(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FNMSUB(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FADDS(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FSUBS(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FMULS(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FDIVS(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FMADDS(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FMSUBS(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FNMADDS(PPCInterpreter_t* cpu, uint32 op);
+	void Op_FNMSUBS(PPCInterpreter_t* cpu, uint32 op);
+	void Op_MFFS(PPCInterpreter_t* cpu, uint32 op);
+	void Op_MTFSF(PPCInterpreter_t* cpu, uint32 op);
+	void Op_MTFSB1(PPCInterpreter_t* cpu, uint32 op);
+
+	// PPCInterpreterPS.cpp
+	void Op_PS_CMPU0(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_CMPO0(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_CMPU1(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_NEG(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_MR(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_NABS(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_ABS(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_SUM0(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_SUM1(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_MULS0(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_MULS1(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_MADDS0(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_MADDS1(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_MERGE00(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_MERGE01(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_MERGE10(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_MERGE11(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_DIV(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_SUB(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_ADD(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_SEL(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_RES(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_MUL(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_RSQRTE(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_MSUB(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_MADD(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_NMSUB(PPCInterpreter_t* cpu, uint32 op);
+	void Op_PS_NMADD(PPCInterpreter_t* cpu, uint32 op);
+
+	// FPCC/CR update shared by fcmpu and ps_cmpu0/1; crBitBase is the cr[] index of the field's LT bit
+	void CompareUnordered(PPCInterpreter_t* cpu, uint32 crBitBase, double a, double b);
 }

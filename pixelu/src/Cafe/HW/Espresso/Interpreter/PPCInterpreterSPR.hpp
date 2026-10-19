@@ -1,875 +1,236 @@
-#define SPR_TBL_WRITE	(284)
-#define SPR_TBU_WRITE	(285)
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// Special purpose register access for mfspr/mtspr. Included by
+// PPCInterpreterImpl.cpp only.
+//
+// The HLE model (Cafe OS user mode) only knows the registers games may touch
+// in problem state. The LLE model additionally handles the supervisor
+// registers the Cafe OS kernel sets up (BATs, segment registers, SPRGs, the
+// locked cache DMA registers, ...). Unknown registers read as zero and
+// writes to them are ignored.
 
-#define SPR_DBATU_0		(536)
-#define SPR_DBATU_1		(538)
-#define SPR_DBATU_2		(540)
-#define SPR_DBATU_3		(542)
-#define SPR_DBATU_4		(568)
-#define SPR_DBATU_5		(570)
-#define SPR_DBATU_6		(572)
-#define SPR_DBATU_7		(574)
-
-#define SPR_DBATL_0		(537)
-#define SPR_DBATL_1		(539)
-#define SPR_DBATL_2		(541)
-#define SPR_DBATL_3		(543)
-#define SPR_DBATL_4		(569)
-#define SPR_DBATL_5		(571)
-#define SPR_DBATL_6		(573)
-#define SPR_DBATL_7		(575)
-
-#define SPR_IBATU_0		(528)
-#define SPR_IBATU_1		(530)
-#define SPR_IBATU_2		(532)
-#define SPR_IBATU_3		(534)
-#define SPR_IBATU_4		(560)
-#define SPR_IBATU_5		(562)
-#define SPR_IBATU_6		(564)
-#define SPR_IBATU_7		(566)
-
-#define SPR_IBATL_0		(529)
-#define SPR_IBATL_1		(531)
-#define SPR_IBATL_2		(533)
-#define SPR_IBATL_3		(535)
-#define SPR_IBATL_4		(561)
-#define SPR_IBATL_5		(563)
-#define SPR_IBATL_6		(565)
-#define SPR_IBATL_7		(567)
-
-#define SPR_DSISR		(18)
-#define SPR_DAR			(19)
-
-#define SPR_SPRG0		(272)
-#define SPR_SPRG1		(273)
-#define SPR_SPRG2		(274)
-#define SPR_SPRG3		(275)
-
-//#define SPR_HID0		(1008)
-//#define SPR_HID2		(920)
-#define SPR_HID4		(1011)
-#define SPR_HID5		(944)
-
-#define SPR_L2CR		(1017) // L2 cache control
-
-#define SPR_CAR			(948) // global
-#define SPR_BCR			(949) // global
-
-static uint32 getPVR(PPCInterpreter_t* hCPU)
+namespace EspressoItp
 {
-	return 0x70010101; // guessed
-}
-
-static uint32 getFPECR(PPCInterpreter_t* hCPU)
-{
-	return hCPU->sprExtended.fpecr;
-}
-
-static void setFPECR(PPCInterpreter_t* hCPU, uint32 newValue)
-{
-	hCPU->sprExtended.fpecr = newValue;
-}
-
-static void setDEC(PPCInterpreter_t* hCPU, uint32 newValue)
-{
-	debug_printf("Set DEC to 0x%08x\n", newValue);
-	//hCPU->sprExtended.fpecr = newValue;
-}
-
-static uint32 getSPRG(PPCInterpreter_t* hCPU, uint32 sprgIndex)
-{
-	return hCPU->sprExtended.sprg[sprgIndex];
-}
-
-static void setSPRG(PPCInterpreter_t* hCPU, uint32 sprgIndex, uint32 newValue)
-{
-	hCPU->sprExtended.sprg[sprgIndex] = newValue;
-}
-
-static uint32 getDAR(PPCInterpreter_t* hCPU)
-{
-	return hCPU->sprExtended.dar;
-}
-
-static uint32 getDSISR(PPCInterpreter_t* hCPU)
-{
-	return hCPU->sprExtended.dsisr;
-}
-
-static uint32 getHID0(PPCInterpreter_t* hCPU)
-{
-	return 0; // todo
-}
-
-static void setHID0(PPCInterpreter_t* hCPU, uint32 newValue)
-{
-	// todo
-	debug_printf("Set HID0 to 0x%08x\n", newValue);
-}
-
-static uint32 getHID1(PPCInterpreter_t* hCPU)
-{
-	debug_printf("Get HID1 IP 0x%08x\n", hCPU->instructionPointer);
-	return 0; // todo
-}
-
-static uint32 getHID2(PPCInterpreter_t* hCPU)
-{
-	debug_printf("Get HID2 IP 0x%08x\n", hCPU->instructionPointer);
-	return 0; // todo
-}
-
-static void setHID2(PPCInterpreter_t* hCPU, uint32 newValue)
-{
-	// todo
-	debug_printf("Set HID2 to 0x%08x\n", newValue);
-}
-
-static uint32 getHID4(PPCInterpreter_t* hCPU)
-{
-	debug_printf("Get HID4 IP 0x%08x\n", hCPU->instructionPointer);
-	return 0; // todo
-}
-
-static void setHID4(PPCInterpreter_t* hCPU, uint32 newValue)
-{
-	// todo
-	debug_printf("Set HID4 to 0x%08x\n", newValue);
-}
-
-static uint32 getHID5(PPCInterpreter_t* hCPU)
-{
-	// Wii-U only
-	debug_printf("Get HID5 IP 0x%08x\n", hCPU->instructionPointer);
-	return 0; // todo
-}
-
-static void setHID5(PPCInterpreter_t* hCPU, uint32 newValue)
-{
-	// Wii-U only
-	// todo
-	debug_printf("Set HID5 to 0x%08x\n", newValue);
-}
-
-static uint32 getSCR(PPCInterpreter_t* hCPU)
-{
-	// WiiU mode only?
-	return 0; // todo
-}
-
-static void setSCR(PPCInterpreter_t* hCPU, uint32 newValue)
-{
-	uint32 previousSCR = hCPU->global->sprGlobal.scr;
-	newValue |= (previousSCR&0x80000000); // this bit always sticks?
-	if ((previousSCR&0x80000000) == 0 && (newValue & 0x80000000) != 0)
+	// supervisor register numbers that only matter to the LLE model
+	enum : uint32
 	{
-		// this bit is used to disable bootrom mapping, but we use it to know when to copy the decrypted ancast image into kernel memory
-		debug_printf("SCR MSB set. Unmap bootrom?\n");
+		kSprDSISR = 18,
+		kSprDAR = 19,
+		kSprSPRG0 = 272, // SPRG0-3 are 272-275
+		kSprTBLWrite = 284,
+		kSprTBUWrite = 285,
+		kSprIBAT0U = 528, // IBAT0-3 at 528-535, DBAT0-3 at 536-543 (upper, lower pairs)
+		kSprIBAT4U = 560, // IBAT4-7 at 560-567, DBAT4-7 at 568-575
+		kSprHID5 = 944,
+		kSprCAR = 948,
+		kSprBCR = 949,
+		kSprHID4 = 1011,
+		kSprL2CR = 1017,
+	};
 
-		//memcpy(memory_base + 0xFFE00000, memory_base + 0x08000000, 0x180000);
-		// hack - clear low memory (where bootrom was mapped/loaded)
-		memset(memory_base, 0, 0x4000);
-		//// todo - normally IOSU sets up some stuff here (probably)
-		
-		// for debugging purposes make lowest page read-only
+	// decodes the BAT register numbers: returns false if spr is not a BAT
+	inline bool DecodeBatSpr(uint32 spr, bool& isData, bool& isLower, uint32& index)
+	{
+		uint32 rel;
+		uint32 group;
+		if (spr >= kSprIBAT0U && spr < kSprIBAT0U + 16)
+		{
+			rel = spr - kSprIBAT0U;
+			group = 0;
+		}
+		else if (spr >= kSprIBAT4U && spr < kSprIBAT4U + 16)
+		{
+			rel = spr - kSprIBAT4U;
+			group = 4;
+		}
+		else
+			return false;
+		isData = rel >= 8;
+		isLower = (rel & 1) != 0;
+		index = group + ((rel & 7) >> 1);
+		return true;
+	}
+
+	inline uint32* BatRegister(PPCInterpreter_t* cpu, bool isData, bool isLower, uint32 index)
+	{
+		auto& ext = cpu->sprExtended;
+		if (isData)
+			return isLower ? &ext.dbatL[index] : &ext.dbatU[index];
+		return isLower ? &ext.ibatL[index] : &ext.ibatU[index];
+	}
+
+	// registers that are visible in problem state (both models)
+	inline bool ReadUserSpr(PPCInterpreter_t* cpu, uint32 spr, uint32& value)
+	{
+		switch (spr)
+		{
+		case SPR_LR: value = cpu->spr.LR; return true;
+		case SPR_CTR: value = cpu->spr.CTR; return true;
+		case SPR_XER: value = PPCInterpreter_getXER(cpu); return true;
+		case SPR_UPIR: value = cpu->spr.UPIR; return true;
+		default: break;
+		}
+		if (spr >= SPR_UGQR0 && spr <= SPR_UGQR7)
+		{
+			value = cpu->spr.UGQR[spr - SPR_UGQR0];
+			return true;
+		}
+		return false;
+	}
+
+	inline bool WriteUserSpr(PPCInterpreter_t* cpu, uint32 spr, uint32 value)
+	{
+		switch (spr)
+		{
+		case SPR_LR: cpu->spr.LR = value; return true;
+		case SPR_CTR: cpu->spr.CTR = value; return true;
+		case SPR_XER: PPCInterpreter_setXER(cpu, value); return true;
+		default: break;
+		}
+		if (spr >= SPR_UGQR0 && spr <= SPR_UGQR7)
+		{
+			cpu->spr.UGQR[spr - SPR_UGQR0] = value;
+			return true;
+		}
+		return false;
+	}
+
+	// ---- HLE model ----
+
+	inline uint32 ReadSprHLE(PPCInterpreter_t* cpu, uint32 spr)
+	{
+		uint32 value = 0;
+		if (ReadUserSpr(cpu, spr, value))
+			return value;
+		if (spr == SPR_DEC)
+		{
+			// Cafe OS never reads DEC from user code
+			assert_dbg();
+			uint64 elapsed = PPCInterpreter_getMainCoreCycleCounter() - ppcMainThreadDECCycleStart;
+			return elapsed >= ppcMainThreadDECCycleValue ? 0 : (uint32)(ppcMainThreadDECCycleValue - elapsed);
+		}
+		if (spr == SPR_PVR)
+		{
+			assert_dbg(); // not readable in problem state
+			return 0;
+		}
+		cemuLog_logDebug(LogType::Force, "Interpreter: mfspr of unhandled SPR {} at {:08x}", spr, cpu->instructionPointer);
+		return 0;
+	}
+
+	inline void WriteSprHLE(PPCInterpreter_t* cpu, uint32 spr, uint32 value)
+	{
+		if (WriteUserSpr(cpu, spr, value))
+			return;
+		cemuLog_logDebug(LogType::Force, "Interpreter: mtspr of unhandled SPR {} at {:08x}", spr, cpu->instructionPointer);
+	}
+
+	// ---- LLE model ----
+
+	inline uint32 ReadSprLLE(PPCInterpreter_t* cpu, uint32 spr)
+	{
+		uint32 value = 0;
+		if (ReadUserSpr(cpu, spr, value))
+			return value;
+		auto& ext = cpu->sprExtended;
+		switch (spr)
+		{
+		case SPR_PVR: return 0x70010101; // Espresso
+		case kSprDAR: return ext.dar;
+		case kSprDSISR: return ext.dsisr;
+		case SPR_FPECR: return ext.fpecr;
+		case kSprSPRG0 + 0:
+		case kSprSPRG0 + 1:
+		case kSprSPRG0 + 2:
+		case kSprSPRG0 + 3:
+			return ext.sprg[spr - kSprSPRG0];
+		// HID0/1/2/4/5, SCR, CAR, BCR and L2CR are not modelled and read as zero
+		default:
+			break;
+		}
+		bool isData, isLower;
+		uint32 index;
+		if (DecodeBatSpr(spr, isData, isLower, index))
+			return *BatRegister(cpu, isData, isLower, index);
+		return 0;
+	}
+
+	// SCR bit 31 disables the boot ROM mapping. When the kernel sets it we
+	// clear low memory where the boot ROM was visible.
+	inline void WriteSCR(PPCInterpreter_t* cpu, uint32 value)
+	{
+		constexpr uint32 kBootRomDisable = 0x80000000;
+		uint32 previous = cpu->global->sprGlobal.scr;
+		value |= previous & kBootRomDisable; // the bit cannot be cleared again
+		if ((previous & kBootRomDisable) == 0 && (value & kBootRomDisable) != 0)
+		{
+			memset(memory_base, 0, 0x4000);
 #ifdef _WIN32
-		DWORD oldProtect;
-		VirtualProtect(memory_base, 0x1000, PAGE_READONLY, &oldProtect);
+			// catch stray accesses to the old boot ROM area while debugging
+			DWORD oldProtect;
+			VirtualProtect(memory_base, 0x1000, PAGE_READONLY, &oldProtect);
 #endif
-	}
-	debug_printf("Set SCR to 0x%08x\n", newValue);
-	hCPU->global->sprGlobal.scr = newValue;
-}
-
-// SCR probably has bits to control following:
-// disable bootrom (bit 0x80000000)
-// disable PPC OTP
-// bits to start the extra cores
-
-static uint32 getCAR(PPCInterpreter_t* hCPU)
-{
-	// global
-	// WiiU mode only
-	return 0; // todo
-}
-
-static void setCAR(PPCInterpreter_t* hCPU, uint32 newValue)
-{
-	// global
-	// WiiU mode only
-	debug_printf("Set CAR to 0x%08x\n", newValue);
-}
-
-static uint32 getBCR(PPCInterpreter_t* hCPU)
-{
-	// global
-	// WiiU mode only
-	return 0; // todo
-}
-
-static void setBCR(PPCInterpreter_t* hCPU, uint32 newValue)
-{
-	// global
-	// WiiU mode only
-	debug_printf("Set BCR to 0x%08x\n", newValue);
-}
-
-
-static uint32 getL2CR(PPCInterpreter_t* hCPU)
-{
-	return 0; // todo
-}
-
-static void setL2CR(PPCInterpreter_t* hCPU, uint32 newValue)
-{
-	// todo
-}
-
-static void setSRR0(PPCInterpreter_t* hCPU, uint32 newValue)
-{
-	hCPU->sprExtended.srr0 = newValue;
-}
-
-static void setSRR1(PPCInterpreter_t* hCPU, uint32 newValue)
-{
-	hCPU->sprExtended.srr1 = newValue;
-}
-
-static void setDMAU(PPCInterpreter_t* hCPU, uint32 newValue)
-{
-	hCPU->sprExtended.dmaU = newValue;
-}
-
-static void setDMAL(PPCInterpreter_t* hCPU, uint32 newValue)
-{
-	hCPU->sprExtended.dmaL = newValue;
-	// LC DMA
-	if(newValue &0x2 )
-	{
-		uint32 transferLength = (((hCPU->sprExtended.dmaU>>0)&0x1F)<<2)|((newValue>>2)&3);
-		uint32 memAddr = (hCPU->sprExtended.dmaU)&0xFFFFFFE0;
-		uint32 cacheAddr = (newValue)&0xFFFFFFE0;
-		if( transferLength == 0 )
-			transferLength = 128;
-		transferLength *= 32;
-		bool isLoad = ((newValue>>4)&1)!=0;
-		if( (cacheAddr>>28) != 0xE )
-		{
-			debug_printf("LCTransfer: Not a cache address\n");
-			cacheAddr = 0;
 		}
+		cpu->global->sprGlobal.scr = value;
+	}
+
+	// DMAL with the trigger bit set copies between memory and the locked cache (0xE0000000)
+	inline void WriteDMAL(PPCInterpreter_t* cpu, uint32 value)
+	{
+		auto& ext = cpu->sprExtended;
+		ext.dmaL = value;
+		if ((value & 2) == 0)
+			return;
+		uint32 lineCount = ((ext.dmaU & 0x1F) << 2) | ((value >> 2) & 3);
+		if (lineCount == 0)
+			lineCount = 128;
+		uint32 byteCount = lineCount * 32;
+		uint32 memAddr = ext.dmaU & ~0x1Fu;
+		uint32 cacheAddr = value & ~0x1Fu;
+		uint32 cacheOffset = ((cacheAddr >> 28) == 0xE) ? cacheAddr - 0xE0000000 : 0;
+		uint8* cachePtr = memory_base + 0xE0000000 + cacheOffset;
+		uint8* memPtr = memory_getPointerFromVirtualOffset(memAddr);
+		if ((value >> 4) & 1)
+			memmove(cachePtr, memPtr, byteCount); // load: memory -> locked cache
 		else
+			memmove(memPtr, cachePtr, byteCount); // store: locked cache -> memory
+		ext.dmaL = value & ~2u;
+	}
+
+	inline void WriteSprLLE(PPCInterpreter_t* cpu, uint32 spr, uint32 value)
+	{
+		if (WriteUserSpr(cpu, spr, value))
+			return;
+		auto& ext = cpu->sprExtended;
+		switch (spr)
 		{
-			cacheAddr -= 0xE0000000;
+		case kSprTBLWrite:
+		case kSprTBUWrite:
+			// only used to reset the time base
+			if (value != 0)
+				assert_dbg();
+			cpu->global->tb = 0;
+			return;
+		case SPR_FPECR: ext.fpecr = value; return;
+		case SPR_SRR0: ext.srr0 = value; return;
+		case SPR_SRR1: ext.srr1 = value; return;
+		case kSprSPRG0 + 0:
+		case kSprSPRG0 + 1:
+		case kSprSPRG0 + 2:
+		case kSprSPRG0 + 3:
+			ext.sprg[spr - kSprSPRG0] = value;
+			return;
+		case SPR_SCR: WriteSCR(cpu, value); return;
+		case SPR_DMAU: ext.dmaU = value; return;
+		case SPR_DMAL: WriteDMAL(cpu, value); return;
+		case SPR_SDR1: ext.sdr1 = value; return;
+		// DEC, HID0/2/4/5, L2CR, CAR, BCR and the performance monitor are accepted and ignored
+		default:
+			break;
 		}
-		if( isLoad == 0 )
-		{
-			// locked cache -> memory
-			debug_printf("L2->MEM %08x -> %08x size: 0x%x\n", memAddr, 0xE0000000 + cacheAddr, transferLength);
-			memcpy(memory_getPointerFromVirtualOffset(memAddr), memory_base+0xE0000000+cacheAddr, transferLength);
-		}
-		else
-		{
-			// memory -> locked cache
-			debug_printf("MEM->L2 %08x -> %08x size: 0x%x\n", 0xE0000000 + cacheAddr, memAddr, transferLength);
-			memcpy(memory_base + 0xE0000000 + cacheAddr, memory_getPointerFromVirtualOffset(memAddr), transferLength);
-		}
-		newValue &= ~2;
-		hCPU->sprExtended.dmaL = newValue;
+		bool isData, isLower;
+		uint32 index;
+		if (DecodeBatSpr(spr, isData, isLower, index))
+			*BatRegister(cpu, isData, isLower, index) = value;
 	}
-}
-
-static void setDBATL(PPCInterpreter_t* hCPU, uint32 index, uint32 newValue)
-{
-	debug_printf("Set DBATL%d to 0x%08x\n", index, newValue);
-	hCPU->sprExtended.dbatL[index] = newValue;
-}
-
-static void setDBATU(PPCInterpreter_t* hCPU, uint32 index, uint32 newValue)
-{
-	debug_printf("Set DBATU%d to 0x%08x\n", index, newValue);
-	hCPU->sprExtended.dbatU[index] = newValue;
-}
-
-static void setIBATL(PPCInterpreter_t* hCPU, uint32 index, uint32 newValue)
-{
-	debug_printf("Set IBATL%d to 0x%08x\n", index, newValue);
-	hCPU->sprExtended.ibatL[index] = newValue;
-}
-
-static void setIBATU(PPCInterpreter_t* hCPU, uint32 index, uint32 newValue)
-{
-	debug_printf("Set IBATU%d to 0x%08x\n", index, newValue);
-	hCPU->sprExtended.ibatU[index] = newValue;
-}
-
-static uint32 getDBATL(PPCInterpreter_t* hCPU, uint32 index)
-{
-	return hCPU->sprExtended.dbatL[index];
-}
-
-static uint32 getDBATU(PPCInterpreter_t* hCPU, uint32 index)
-{
-	return hCPU->sprExtended.dbatU[index];
-}
-
-static uint32 getIBATL(PPCInterpreter_t* hCPU, uint32 index)
-{
-	return hCPU->sprExtended.ibatL[index];
-}
-
-static uint32 getIBATU(PPCInterpreter_t* hCPU, uint32 index)
-{
-	return hCPU->sprExtended.ibatU[index];
-}
-
-static void setSR(PPCInterpreter_t* hCPU, uint32 index, uint32 newValue)
-{
-	debug_printf("Set SR%d to 0x%08x IP %08x LR %08x\n", index, newValue, hCPU->instructionPointer, hCPU->spr.LR);
-	hCPU->sprExtended.sr[index] = newValue;
-}
-
-static uint32 getSR(PPCInterpreter_t* hCPU, uint32 index)
-{
-	return hCPU->sprExtended.sr[index];
-}
-
-static void setSDR1(PPCInterpreter_t* hCPU, uint32 newValue)
-{
-	debug_printf("Set SDR1 to 0x%08x\n", newValue);
-	hCPU->sprExtended.sdr1 = newValue;
-}
-
-static void setTBL(PPCInterpreter_t* hCPU, uint32 newValue)
-{
-	if (newValue != 0)
-		assert_dbg();
-	debug_printf("Reset TB\n");
-	hCPU->global->tb = 0;
-}
-
-static void setTBU(PPCInterpreter_t* hCPU, uint32 newValue)
-{
-	if (newValue != 0)
-		assert_dbg();
-	debug_printf("Reset TB\n");
-	hCPU->global->tb = 0;
-}
-
-static void PPCSprSupervisor_set(PPCInterpreter_t* hCPU, uint32 spr, uint32 newValue)
-{
-	switch (spr)
-	{
-	case SPR_LR:
-		hCPU->spr.LR = newValue;
-		break;
-	case SPR_CTR:
-		hCPU->spr.CTR = newValue;
-		break;
-	case SPR_DEC:
-		setDEC(hCPU, newValue);
-		break;
-	case SPR_XER:
-		PPCInterpreter_setXER(hCPU, newValue);
-		break;
-	case SPR_UGQR0:
-	case SPR_UGQR1:
-	case SPR_UGQR2:
-	case SPR_UGQR3:
-	case SPR_UGQR4:
-	case SPR_UGQR5:
-	case SPR_UGQR6:
-	case SPR_UGQR7:
-		hCPU->spr.UGQR[spr - SPR_UGQR0] = newValue;
-		break;
-	// values above are user mode accessible
-	case SPR_TBL_WRITE: // TBL
-		setTBL(hCPU, newValue);
-		break;
-	case SPR_TBU_WRITE: // TBU
-		setTBU(hCPU, newValue);
-		break;
-	case SPR_FPECR:
-		setFPECR(hCPU, newValue);
-		break;
-	case SPR_HID0:
-		setHID0(hCPU, newValue);
-		break;
-	case SPR_HID2:
-		setHID2(hCPU, newValue);
-		break;
-	case SPR_HID4:
-		setHID4(hCPU, newValue);
-		break;
-	case SPR_HID5:
-		setHID5(hCPU, newValue);
-		break;
-	case SPR_L2CR:
-		setL2CR(hCPU, newValue);
-		break;
-	case SPR_SRR0:
-		setSRR0(hCPU, newValue);
-		break;
-	case SPR_SRR1:
-		setSRR1(hCPU, newValue);
-		break;
-	case SPR_SPRG0:
-		setSPRG(hCPU, 0, newValue);
-		break;
-	case SPR_SPRG1:
-		setSPRG(hCPU, 1, newValue);
-		break;
-	case SPR_SPRG2:
-		setSPRG(hCPU, 2, newValue);
-		break;
-	case SPR_SPRG3:
-		setSPRG(hCPU, 3, newValue);
-		break;
-	case SPR_SCR:
-		setSCR(hCPU, newValue);
-		break;
-	case SPR_CAR:
-		setCAR(hCPU, newValue);
-		break;
-	case SPR_BCR:
-		setBCR(hCPU, newValue);
-		break;
-	case SPR_DMAU:
-		setDMAU(hCPU, newValue);
-		break;
-	case SPR_DMAL:
-		setDMAL(hCPU, newValue);
-		break;
-	case SPR_DBATU_0:
-		setDBATU(hCPU, 0, newValue);
-		break;
-	case SPR_DBATU_1:
-		setDBATU(hCPU, 1, newValue);
-		break;
-	case SPR_DBATU_2:
-		setDBATU(hCPU, 2, newValue);
-		break;
-	case SPR_DBATU_3:
-		setDBATU(hCPU, 3, newValue);
-		break;
-	case SPR_DBATU_4:
-		setDBATU(hCPU, 4, newValue);
-		break;
-	case SPR_DBATU_5:
-		setDBATU(hCPU, 5, newValue);
-		break;
-	case SPR_DBATU_6:
-		setDBATU(hCPU, 6, newValue);
-		break;
-	case SPR_DBATU_7:
-		setDBATU(hCPU, 7, newValue);
-		break;
-	case SPR_DBATL_0:
-		setDBATL(hCPU, 0, newValue);
-		break;
-	case SPR_DBATL_1:
-		setDBATL(hCPU, 1, newValue);
-		break;
-	case SPR_DBATL_2:
-		setDBATL(hCPU, 2, newValue);
-		break;
-	case SPR_DBATL_3:
-		setDBATL(hCPU, 3, newValue);
-		break;
-	case SPR_DBATL_4:
-		setDBATL(hCPU, 4, newValue);
-		break;
-	case SPR_DBATL_5:
-		setDBATL(hCPU, 5, newValue);
-		break;
-	case SPR_DBATL_6:
-		setDBATL(hCPU, 6, newValue);
-		break;
-	case SPR_DBATL_7:
-		setDBATL(hCPU, 7, newValue);
-		break;
-	case SPR_IBATU_0:
-		setIBATU(hCPU, 0, newValue);
-		break;
-	case SPR_IBATU_1:
-		setIBATU(hCPU, 1, newValue);
-		break;
-	case SPR_IBATU_2:
-		setIBATU(hCPU, 2, newValue);
-		break;
-	case SPR_IBATU_3:
-		setIBATU(hCPU, 3, newValue);
-		break;
-	case SPR_IBATU_4:
-		setIBATU(hCPU, 4, newValue);
-		break;
-	case SPR_IBATU_5:
-		setIBATU(hCPU, 5, newValue);
-		break;
-	case SPR_IBATU_6:
-		setIBATU(hCPU, 6, newValue);
-		break;
-	case SPR_IBATU_7:
-		setIBATU(hCPU, 7, newValue);
-		break;
-	case SPR_IBATL_0:
-		setIBATL(hCPU, 0, newValue);
-		break;
-	case SPR_IBATL_1:
-		setIBATL(hCPU, 1, newValue);
-		break;
-	case SPR_IBATL_2:
-		setIBATL(hCPU, 2, newValue);
-		break;
-	case SPR_IBATL_3:
-		setIBATL(hCPU, 3, newValue);
-		break;
-	case SPR_IBATL_4:
-		setIBATL(hCPU, 4, newValue);
-		break;
-	case SPR_IBATL_5:
-		setIBATL(hCPU, 5, newValue);
-		break;
-	case SPR_IBATL_6:
-		setIBATL(hCPU, 6, newValue);
-		break;
-	case SPR_IBATL_7:
-		setIBATL(hCPU, 7, newValue);
-		break;
-	case SPR_SDR1:
-		setSDR1(hCPU, newValue);
-		break;
-	case 0x3B8: // mmcr0
-		debug_printf("Write performance monitor SPR mmcr0 0x%08x", newValue);
-		break;
-	case 0x3B9: // PMC1
-		debug_printf("Write performance monitor SPR PMC1 0x%08x", newValue);
-		break;
-	case 0x3BA: // PMC2
-		debug_printf("Write performance monitor SPR PMC2 0x%08x", newValue);
-		break;
-	case 0x3BC: // mmcr1
-		debug_printf("Write performance monitor SPR mmcr1 0x%08x", newValue);
-		break;
-	case 0x3BD: // PMC3
-		debug_printf("Write performance monitor SPR PMC3 0x%08x", newValue);
-		break;
-	case 0x3BE: // PMC4
-		debug_printf("Write performance monitor SPR PMC4 0x%08x", newValue);
-		break;
-	default:
-		debug_printf("[C%d] Set unhandled SPR 0x%x to %08x (supervisor mode)\n", hCPU->spr.UPIR, spr, newValue);
-#ifdef CEMU_DEBUG_ASSERT
-		assert_dbg();
-#endif
-		break;
-	}
-}
-
-static void PPCSpr_set(PPCInterpreter_t* hCPU, uint32 spr, uint32 newValue)
-{
-	if constexpr(ppcItpCtrl::allowSupervisorMode)
-	{
-		// todo - check if in supervisor mode or user mode
-		PPCSprSupervisor_set(hCPU, spr, newValue);
-		return;
-	}
-
-	switch (spr)
-	{
-	case SPR_LR:
-		hCPU->spr.LR = newValue;
-		break;
-	case SPR_CTR:
-		hCPU->spr.CTR = newValue;
-		break;
-	case SPR_XER:
-		PPCInterpreter_setXER(hCPU, newValue);
-		break;
-	case SPR_UGQR0:
-	case SPR_UGQR1:
-	case SPR_UGQR2:
-	case SPR_UGQR3:
-	case SPR_UGQR4:
-	case SPR_UGQR5:
-	case SPR_UGQR6:
-	case SPR_UGQR7:
-		hCPU->spr.UGQR[spr - SPR_UGQR0] = newValue;
-		break;
-	default:
-		debug_printf("[C%d] Set unhandled SPR %d to %08x\n", hCPU->spr.UPIR, spr, newValue);
-#ifdef CEMU_DEBUG_ASSERT
-		assert_dbg();
-#endif
-		break;
-	}
-}
-
-static uint32 PPCSprSupervisor_get(PPCInterpreter_t* hCPU, uint32 spr)
-{
-	uint32 v = 0;
-	switch (spr)
-	{
-	case SPR_LR:
-		v = hCPU->spr.LR;
-		break;
-	case SPR_CTR:
-		v = hCPU->spr.CTR;
-		break;
-	case SPR_XER:
-		v = PPCInterpreter_getXER(hCPU);
-		break;
-	case SPR_UPIR:
-		v = hCPU->spr.UPIR;
-		break;
-	case SPR_UGQR0:
-	case SPR_UGQR1:
-	case SPR_UGQR2:
-	case SPR_UGQR3:
-	case SPR_UGQR4:
-	case SPR_UGQR5:
-	case SPR_UGQR6:
-	case SPR_UGQR7:
-		v = hCPU->spr.UGQR[spr - SPR_UGQR0];
-		break;
-	// above are registers accessible in user mode
-	case SPR_PVR:
-		v = getPVR(hCPU);
-		break;
-	case SPR_HID0:
-		v = getHID0(hCPU);
-		break;
-	case SPR_HID1:
-		v = getHID1(hCPU);
-		break;
-	case SPR_HID2:
-		v = getHID2(hCPU);
-		break;
-	case SPR_HID4:
-		v = getHID4(hCPU);
-		break;
-	case SPR_HID5:
-		v = getHID5(hCPU);
-		break;
-	case SPR_SCR:
-		v = getSCR(hCPU);
-		break;
-	case SPR_CAR:
-		v = getCAR(hCPU);
-		break;
-	case SPR_BCR:
-		v = getBCR(hCPU);
-		break;
-	case SPR_DAR:
-		v = getDAR(hCPU);
-		break;
-	case SPR_DSISR:
-		v = getDSISR(hCPU);
-		break;
-	case SPR_L2CR:
-		v = getL2CR(hCPU);
-		break;
-	case SPR_FPECR:
-		v = getFPECR(hCPU);
-		break;
-	case SPR_SPRG0:
-		v = getSPRG(hCPU, 0);
-		break;
-	case SPR_SPRG1:
-		v = getSPRG(hCPU, 1);
-		break;
-	case SPR_SPRG2:
-		v = getSPRG(hCPU, 2);
-		break;
-	case SPR_SPRG3:
-		v = getSPRG(hCPU, 3);
-		break;
-	case SPR_DBATU_0:
-		v = getDBATU(hCPU, 0);
-		break;
-	case SPR_DBATU_1:
-		v = getDBATU(hCPU, 1);
-		break;
-	case SPR_DBATU_2:
-		v = getDBATU(hCPU, 2);
-		break;
-	case SPR_DBATU_3:
-		v = getDBATU(hCPU, 3);
-		break;
-	case SPR_DBATU_4:
-		v = getDBATU(hCPU, 4);
-		break;
-	case SPR_DBATU_5:
-		v = getDBATU(hCPU, 5);
-		break;
-	case SPR_DBATU_6:
-		v = getDBATU(hCPU, 6);
-		break;
-	case SPR_DBATU_7:
-		v = getDBATU(hCPU, 7);
-		break;
-	case SPR_DBATL_0:
-		v = getDBATL(hCPU, 0);
-		break;
-	case SPR_DBATL_1:
-		v = getDBATL(hCPU, 1);
-		break;
-	case SPR_DBATL_2:
-		v = getDBATL(hCPU, 2);
-		break;
-	case SPR_DBATL_3:
-		v = getDBATL(hCPU, 3);
-		break;
-	case SPR_DBATL_4:
-		v = getDBATL(hCPU, 4);
-		break;
-	case SPR_DBATL_5:
-		v = getDBATL(hCPU, 5);
-		break;
-	case SPR_DBATL_6:
-		v = getDBATL(hCPU, 6);
-		break;
-	case SPR_DBATL_7:
-		v = getDBATL(hCPU, 7);
-		break;
-	case SPR_IBATU_0:
-		v = getIBATU(hCPU, 0);
-		break;
-	case SPR_IBATU_1:
-		v = getIBATU(hCPU, 1);
-		break;
-	case SPR_IBATU_2:
-		v = getIBATU(hCPU, 2);
-		break;
-	case SPR_IBATU_3:
-		v = getIBATU(hCPU, 3);
-		break;
-	case SPR_IBATU_4:
-		v = getIBATU(hCPU, 4);
-		break;
-	case SPR_IBATU_5:
-		v = getIBATU(hCPU, 5);
-		break;
-	case SPR_IBATU_6:
-		v = getIBATU(hCPU, 6);
-		break;
-	case SPR_IBATU_7:
-		v = getIBATU(hCPU, 7);
-		break;
-	case SPR_IBATL_0:
-		v = getIBATL(hCPU, 0);
-		break;
-	case SPR_IBATL_1:
-		v = getIBATL(hCPU, 1);
-		break;
-	case SPR_IBATL_2:
-		v = getIBATL(hCPU, 2);
-		break;
-	case SPR_IBATL_3:
-		v = getIBATL(hCPU, 3);
-		break;
-	case SPR_IBATL_4:
-		v = getIBATL(hCPU, 4);
-		break;
-	case SPR_IBATL_5:
-		v = getIBATL(hCPU, 5);
-		break;
-	case SPR_IBATL_6:
-		v = getIBATL(hCPU, 6);
-		break;
-	case SPR_IBATL_7:
-		v = getIBATL(hCPU, 7);
-		break;
-	default:
-		debug_printf("[C%d] Get unhandled SPR %d\n", hCPU->spr.UPIR, spr);
-#ifdef CEMU_DEBUG_ASSERT
-		assert_dbg();
-#endif
-		break;
-	}
-	return v;
-}
-
-static uint32 PPCSpr_get(PPCInterpreter_t* hCPU, uint32 spr)
-{
-	if constexpr(ppcItpCtrl::allowSupervisorMode)
-	{
-		// todo - check if in supervisor mode or user mode
-		return PPCSprSupervisor_get(hCPU, spr);
-	}
-
-	uint32 v = 0;
-	switch (spr)
-	{
-	case SPR_LR:
-		v = hCPU->spr.LR;
-		break;
-	case SPR_CTR:
-		v = hCPU->spr.CTR;
-		break;
-	case SPR_XER:
-		v = PPCInterpreter_getXER(hCPU);
-		break;
-	case SPR_DEC:
-		// special handling for DEC register
-	{
-		assert_dbg();
-		uint64 passedCycled = PPCInterpreter_getMainCoreCycleCounter() - ppcMainThreadDECCycleStart;
-		if (passedCycled >= (uint64)ppcMainThreadDECCycleValue)
-			v = 0;
-		else
-			v = (uint32)(ppcMainThreadDECCycleValue - passedCycled);
-	}
-	break;
-	case SPR_UPIR:
-		v = hCPU->spr.UPIR;
-		break;
-	case SPR_PVR:
-		assert_dbg();
-		//v = hCPU->sprNew.PVR;
-		break;
-	case SPR_UGQR0:
-	case SPR_UGQR1:
-	case SPR_UGQR2:
-	case SPR_UGQR3:
-	case SPR_UGQR4:
-	case SPR_UGQR5:
-	case SPR_UGQR6:
-	case SPR_UGQR7:
-		v = hCPU->spr.UGQR[spr - SPR_UGQR0];
-		break;
-	default:
-		debug_printf("[C%d] Get unhandled SPR %d\n", hCPU->spr.UPIR, spr);
-#ifdef CEMU_DEBUG_ASSERT
-		assert_dbg();
-#endif
-		break;
-	}
-
-
-
-	//if( spr == SPR_LR || spr == SPR_PVR || spr == SPR_UPIR || spr == SPR_SCR || (spr >= SPR_UGQR0 && spr <= SPR_UGQR7) )
-	//{
-	//	// readable registers
-	//	v = hCPU->spr[spr];
-	//}
-	//else if( spr == SPR_DEC )
-	//{
-	//	// special handling for DEC register
-	//	uint64 passedCycled = PPCInterpreter_getMainCoreCycleCounter() - ppcMainThreadDECCycleStart;
-	//	if( passedCycled >= (uint64)ppcMainThreadDECCycleValue )
-	//		v = 0;
-	//	else
-	//		v = ppcMainThreadDECCycleValue - passedCycled;
-	//}
-	//else if( spr == SPR_XER )
-	//{
-	//	v = PPCInterpreter_getXER(hCPU);
-	//}
-	//else
-	//{
-	//	debug_printf("[C%d] Get unhandled SPR %d value: %08x\n", hCPU->spr[SPR_UPIR], spr, hCPU->spr[spr]);
-	//	v = hCPU->spr[spr];
-	//}
-	return v;
 }

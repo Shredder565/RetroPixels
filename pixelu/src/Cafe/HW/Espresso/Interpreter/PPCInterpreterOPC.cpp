@@ -1,358 +1,231 @@
-#include "../PPCState.h"
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// Branches, condition register moves, cache control, traps and the few
+// supervisor instructions the interpreter knows about. None of these touch
+// guest memory directly, so they are shared by both memory models.
+
 #include "PPCInterpreterInternal.h"
 #include "PPCInterpreterHelper.h"
-
+#include "Cafe/HW/Espresso/Recompiler/PPCRecompiler.h"
+#include "Cafe/HW/Espresso/Debugger/Debugger.h"
+#include "Cafe/HW/Espresso/Debugger/GDBStub.h"
+#include "Cafe/HW/Latte/Core/LatteBufferCache.h"
 #include "Cafe/OS/libs/coreinit/coreinit_CodeGen.h"
 
-#include "../Recompiler/PPCRecompiler.h"
-
-#include <float.h>
-#include "Cafe/HW/Latte/Core/LatteBufferCache.h"
-
-void PPCInterpreter_MFMSR(PPCInterpreter_t* hCPU, uint32 Opcode)
+namespace EspressoItp
 {
-	cemuLog_logDebug(LogType::Force, "Rare instruction: MFMSR");
-	if (hCPU->sprExtended.msr & MSR_PR)
+	// ---- branches ----
+
+	// evaluates the BO/BI condition of bc/bclr; decrements CTR when BO says so
+	static bool EvaluateBranchCondition(PPCInterpreter_t* cpu, uint32 bo, uint32 bi)
 	{
-		PPC_ASSERT(true);
-		return;
-	}
-	int rD, rA, rB;
-	PPC_OPC_TEMPL_X(Opcode, rD, rA, rB);
-	hCPU->gpr[rD] = hCPU->sprExtended.msr;
-
-	PPCInterpreter_nextInstruction(hCPU);
-
-}
-
-void PPCInterpreter_MTMSR(PPCInterpreter_t* hCPU, uint32 Opcode)
-{
-	cemuLog_logDebug(LogType::Force, "Rare instruction: MTMSR");
-	if (hCPU->sprExtended.msr & MSR_PR)
-	{
-		PPC_ASSERT(true);
-		return;
-	}
-	int rS, rA, rB;
-	PPC_OPC_TEMPL_X(Opcode, rS, rA, rB);
-
-	hCPU->sprExtended.msr = hCPU->gpr[rS];
-	PPCInterpreter_nextInstruction(hCPU);
-}
-
-void PPCInterpreter_MTFSB1X(PPCInterpreter_t* hCPU, uint32 Opcode)
-{
-	cemuLog_logDebug(LogType::Force, "Rare instruction: MTFSB1X");
-	int crbD, n1, n2;
-	PPC_OPC_TEMPL_X(Opcode, crbD, n1, n2);
-	if (crbD != 1 && crbD != 2) 
-	{
-		hCPU->fpscr |= 1 << (31 - crbD);
-	}
-	if (Opcode & PPC_OPC_RC) 
-	{
-		// update cr1 flags
-		PPC_ASSERT(true);
+		const bool useCtr = (bo & 4) == 0;
+		if (useCtr)
+			cpu->spr.CTR--;
+		const bool ctrOk = !useCtr || ((cpu->spr.CTR != 0) != ((bo & 2) != 0));
+		const bool condOk = (bo & 16) != 0 || ((cpu->cr[bi] != 0) == ((bo & 8) != 0));
+		return ctrOk && condOk;
 	}
 
-	PPCInterpreter_nextInstruction(hCPU);
-}
-
-void PPCInterpreter_MCRF(PPCInterpreter_t* hCPU, uint32 Opcode)
-{
-	uint32 crD, crS, b;
-	PPC_OPC_TEMPL_X(Opcode, crD, crS, b);
-	crD >>= 2;
-	crS >>= 2;
-	for (sint32 i = 0; i<4; i++)
-		ppc_setCRBit(hCPU, crD * 4 + i, ppc_getCRBit(hCPU, crS * 4 + i));
-
-	PPCInterpreter_nextInstruction(hCPU);
-}
-
-void PPCInterpreter_MFCR(PPCInterpreter_t* hCPU, uint32 Opcode)
-{
-	// frequently used by GCC compiled code (e.g. SM64 port)
-	int rD, rA, rB;
-	PPC_OPC_TEMPL_X(Opcode, rD, rA, rB);
-	
-	// in our array: cr0.LT is entry with index 0
-	// in GPR: cr0.LT is in MSB
-	uint32 cr = 0;
-	for (sint32 i = 0; i < 32; i++)
+	void Op_B(PPCInterpreter_t* cpu, uint32 op)
 	{
-		cr <<= 1;
-		if (ppc_getCRBit(hCPU, i) != 0)
-			cr |= 1;
-	}
-	hCPU->gpr[rD] = cr;
-	PPCInterpreter_nextInstruction(hCPU);
-}
-
-void PPCInterpreter_MTCRF(PPCInterpreter_t* hCPU, uint32 Opcode)
-{
-	// frequently used by GCC compiled code (e.g. SM64 port)
-	// tested
-	uint32 rS;
-	uint32 crfMask;
-	PPC_OPC_TEMPL_XFX(Opcode, rS, crfMask);
-
-	for (sint32 crIndex = 0; crIndex < 8; crIndex++)
-	{
-		if (!ppc_MTCRFMaskHasCRFieldSet(crfMask, crIndex))
-			continue;
-
-		uint32 crBitBase = crIndex * 4;
-		uint8 nibble = (uint8)(hCPU->gpr[rS] >> (28 - crIndex * 4));
-		ppc_setCRBit(hCPU, crBitBase + 0, (nibble >> 3) & 1);
-		ppc_setCRBit(hCPU, crBitBase + 1, (nibble >> 2) & 1);
-		ppc_setCRBit(hCPU, crBitBase + 2, (nibble >> 1) & 1);
-		ppc_setCRBit(hCPU, crBitBase + 3, (nibble >> 0) & 1);
-	}
-
-	PPCInterpreter_nextInstruction(hCPU);
-}
-
-void PPCInterpreter_MCRXR(PPCInterpreter_t* hCPU, uint32 Opcode)
-{	
-	// used in Dont Starve: Giant Edition
-	// also used frequently by Web Browser (webkit?)
-	uint32 cr;
-	cr = (Opcode >> (31 - 8)) & 7;
-	cr >>= 2;
-
-	uint32 xer = PPCInterpreter_getXER(hCPU);
-	uint32 xerBits = (xer >> 28) & 0xF;
-
-	// todo - is the order correct?
-	ppc_setCRBit(hCPU, cr * 4 + 0, (xerBits >> 0) & 1);
-	ppc_setCRBit(hCPU, cr * 4 + 1, (xerBits >> 1) & 1);
-	ppc_setCRBit(hCPU, cr * 4 + 2, (xerBits >> 2) & 1);
-	ppc_setCRBit(hCPU, cr * 4 + 3, (xerBits >> 3) & 1);
-
-	// reset copied bits
-	PPCInterpreter_setXER(hCPU, xer&~0xF0000000);
-
-	PPCInterpreter_nextInstruction(hCPU);
-}
-
-void PPCInterpreter_TLBIE(PPCInterpreter_t* hCPU, uint32 Opcode)
-{
-	int rS, rA, rB;
-	PPC_OPC_TEMPL_X(Opcode, rS, rA, rB);
-
-	PPCInterpreter_nextInstruction(hCPU);
-}
-
-void PPCInterpreter_TLBSYNC(PPCInterpreter_t* hCPU, uint32 Opcode)
-{
-	cemu_assert_unimplemented();
-	PPCInterpreter_nextInstruction(hCPU);
-}
-
-// branch instructions
-
-void PPCInterpreter_BX(PPCInterpreter_t* hCPU, uint32 Opcode)
-{
-	uint32 li;
-	PPC_OPC_TEMPL_I(Opcode, li);
-	if ((Opcode & PPC_OPC_AA) == 0)
-		li += (unsigned int)hCPU->instructionPointer;
-	if (Opcode & PPC_OPC_LK) 
-	{
-		// update LR and IP
-		hCPU->spr.LR = (unsigned int)hCPU->instructionPointer + 4;
-		hCPU->instructionPointer = li;
-		PPCInterpreter_jumpToInstruction(hCPU, li);
-		PPCRecompiler_attemptEnter(hCPU, li);
-		return;
-	}
-	PPCInterpreter_jumpToInstruction(hCPU, li);
-}
-
-
-void PPCInterpreter_BCX(PPCInterpreter_t* hCPU, uint32 Opcode)
-{
-	uint32 BO, BI, BD;
-	PPC_OPC_TEMPL_B(Opcode, BO, BI, BD);
-	if (!(BO & 4))
-		hCPU->spr.CTR--;
-	bool bo2 = (BO & 2) != 0;
-	bool bo8 = (BO & 8) != 0; // branch condition true
-	bool cr = ppc_getCRBit(hCPU, BI) != 0;
-	if (((BO & 4) || ((hCPU->spr.CTR != 0) ^ bo2)) 
-		&& ((BO & 16) || (!(cr ^ bo8)))) 
-	{
-		if (!(Opcode & PPC_OPC_AA))
+		uint32 target;
+		PPC_OPC_TEMPL_I(op, target);
+		if ((op & PPC_OPC_AA) == 0)
+			target += cpu->instructionPointer;
+		if (op & PPC_OPC_LK)
 		{
-			BD += (unsigned int)hCPU->instructionPointer;
+			cpu->spr.LR = cpu->instructionPointer + 4;
+			cpu->instructionPointer = target;
+			// calls are a good point to switch over to recompiled code
+			PPCRecompiler_attemptEnter(cpu, target);
+			return;
 		}
+		cpu->instructionPointer = target;
+	}
+
+	void Op_BC(PPCInterpreter_t* cpu, uint32 op)
+	{
+		if (!EvaluateBranchCondition(cpu, ppcOpField_D(op), ppcOpField_A(op)))
+		{
+			PPCInterpreter_nextInstruction(cpu);
+			return;
+		}
+		uint32 target = ppcOpSImm16(op & 0xFFFC);
+		if ((op & PPC_OPC_AA) == 0)
+			target += cpu->instructionPointer;
 		else
-		{
-			// should never happen
-			cemu_assert_unimplemented();
-		}
-		if (Opcode & PPC_OPC_LK)
-			hCPU->spr.LR = ((unsigned int)hCPU->instructionPointer) + 4;
-		PPCInterpreter_jumpToInstruction(hCPU, BD);
+			cemu_assert_unimplemented(); // absolute conditional branches are not expected in Wii U code
+		if (op & PPC_OPC_LK)
+			cpu->spr.LR = cpu->instructionPointer + 4;
+		cpu->instructionPointer = target;
 	}
-	else
-		PPCInterpreter_nextInstruction(hCPU);
-}
 
-void PPCInterpreter_BCLRX(PPCInterpreter_t* hCPU, uint32 Opcode)
-{
-	uint32 BO, BI, BD;
-	PPC_OPC_TEMPL_XL(Opcode, BO, BI, BD);
-	PPC_ASSERT(BD == 0);
-	if (!(BO & 4))
+	void Op_BCLR(PPCInterpreter_t* cpu, uint32 op)
 	{
-		if (hCPU->spr.CTR == 0)
+		if ((ppcOpField_D(op) & 4) == 0 && cpu->spr.CTR == 0)
+			cemuLog_logDebug(LogType::Force, "bclr: CTR wraps around at {:08x}", cpu->instructionPointer);
+		if (!EvaluateBranchCondition(cpu, ppcOpField_D(op), ppcOpField_A(op)))
 		{
-			PPC_ASSERT(true);
-			cemuLog_logDebug(LogType::Force, "Decrementer underflow!");
+			PPCInterpreter_nextInstruction(cpu);
+			return;
 		}
-		hCPU->spr.CTR--;
+		uint32 target = cpu->spr.LR & ~3u;
+		if (op & PPC_OPC_LK)
+			cpu->spr.LR = cpu->instructionPointer + 4;
+		cpu->instructionPointer = target;
+		PPCRecompiler_attemptEnter(cpu, target);
 	}
-	bool bo2 = (BO & 2) ? true : false;
-	bool bo8 = (BO & 8) ? true : false;
-	bool cr = ppc_getCRBit(hCPU, BI) != 0;
-	if (((BO & 4) || ((hCPU->spr.CTR != 0) ^ bo2))
-		&& ((BO & 16) || (!(cr ^ bo8))))
+
+	// bcctr only tests the CR bit (CTR decrementing forms are invalid)
+	void Op_BCCTR(PPCInterpreter_t* cpu, uint32 op)
 	{
-		BD = hCPU->spr.LR & 0xfffffffc;
-		if (Opcode & PPC_OPC_LK)
+		uint32 bo = ppcOpField_D(op);
+		bool condOk = (bo & 16) != 0 || ((cpu->cr[ppcOpField_A(op)] != 0) == ((bo & 8) != 0));
+		if (!condOk)
 		{
-			hCPU->spr.LR = (unsigned int)hCPU->instructionPointer + 4;
+			cpu->instructionPointer += 4;
+			return;
 		}
-		PPCInterpreter_jumpToInstruction(hCPU, BD);
-		PPCRecompiler_attemptEnter(hCPU, BD);
-		return;
+		if (op & PPC_OPC_LK)
+			cpu->spr.LR = cpu->instructionPointer + 4;
+		cpu->instructionPointer = cpu->spr.CTR & ~3u;
+		PPCRecompiler_attemptEnter(cpu, cpu->instructionPointer);
 	}
-	else
-	{
-		BD = (unsigned int)hCPU->instructionPointer + 4;
-		PPCInterpreter_nextInstruction(hCPU);
-	}
-}
 
-void PPCInterpreter_BCCTR(PPCInterpreter_t* hCPU, uint32 Opcode)
-{
-	uint32 x = (unsigned int)hCPU->instructionPointer;
-	uint32 BO, BI, BD;
-	PPC_OPC_TEMPL_XL(Opcode, BO, BI, BD);
-	PPC_ASSERT(BD == 0);
-	PPC_ASSERT(!(BO & 2));
-	bool bo8 = (BO & 8) ? true : false;
-	bool cr = ppc_getCRBit(hCPU, BI) != 0;
-	if ((BO & 16) || (!(cr ^ bo8)))
+	// ---- system ----
+
+	void Op_SC(PPCInterpreter_t* cpu, uint32 op)
 	{
-		if (Opcode & PPC_OPC_LK)
+		cemuLog_logDebug(LogType::Force, "Interpreter: sc at {:08x} ignored", cpu->instructionPointer);
+		PPCInterpreter_nextInstruction(cpu);
+	}
+
+	// return from interrupt: restores the MSR bits saved in SRR1 and jumps to SRR0
+	void Op_RFI(PPCInterpreter_t* cpu, uint32 op)
+	{
+		constexpr uint32 kRestoredBits = 0x87C0FF73;
+		cemuLog_logDebug(LogType::Force, "Interpreter: rfi to {:08x}", cpu->sprExtended.srr0);
+		uint32 msr = cpu->sprExtended.msr & ~(kRestoredBits | MSR_POW);
+		msr |= cpu->sprExtended.srr1 & kRestoredBits;
+		cpu->sprExtended.msr = msr | MSR_RI;
+		cpu->instructionPointer = cpu->sprExtended.srr0;
+	}
+
+	// mfmsr/mtmsr in problem state would raise a program exception; the
+	// instruction just does not complete (and is retried)
+	void Op_MFMSR(PPCInterpreter_t* cpu, uint32 op)
+	{
+		cemuLog_logDebug(LogType::Force, "Interpreter: mfmsr at {:08x}", cpu->instructionPointer);
+		if (cpu->sprExtended.msr & MSR_PR)
+			return;
+		cpu->gpr[ppcOpField_D(op)] = cpu->sprExtended.msr;
+		PPCInterpreter_nextInstruction(cpu);
+	}
+
+	void Op_MTMSR(PPCInterpreter_t* cpu, uint32 op)
+	{
+		cemuLog_logDebug(LogType::Force, "Interpreter: mtmsr at {:08x}", cpu->instructionPointer);
+		if (cpu->sprExtended.msr & MSR_PR)
+			return;
+		cpu->sprExtended.msr = cpu->gpr[ppcOpField_D(op)];
+		PPCInterpreter_nextInstruction(cpu);
+	}
+
+	// ---- condition register moves ----
+
+	void Op_MCRF(PPCInterpreter_t* cpu, uint32 op)
+	{
+		uint32 dst = (ppcOpField_D(op) >> 2) * 4;
+		uint32 src = (ppcOpField_A(op) >> 2) * 4;
+		uint8 field[4];
+		std::copy_n(cpu->cr + src, 4, field);
+		std::copy_n(field, 4, cpu->cr + dst);
+		PPCInterpreter_nextInstruction(cpu);
+	}
+
+	void Op_MFCR(PPCInterpreter_t* cpu, uint32 op)
+	{
+		cpu->gpr[ppcOpField_D(op)] = ppc_getCR(cpu);
+		PPCInterpreter_nextInstruction(cpu);
+	}
+
+	void Op_MTCRF(PPCInterpreter_t* cpu, uint32 op)
+	{
+		uint32 bitMask = ppc_MTCRFMaskToCRBitMask((op >> 12) & 0xFF);
+		uint32 value = cpu->gpr[ppcOpField_D(op)];
+		for (uint32 bit = 0; bit < 32; bit++)
 		{
-			hCPU->spr.LR = (unsigned int)hCPU->instructionPointer + 4;
-			hCPU->instructionPointer = (unsigned int)(hCPU->spr.CTR & 0xfffffffc);
+			if ((bitMask >> bit) & 1)
+				cpu->cr[bit] = (uint8)((value >> (31 - bit)) & 1);
 		}
-		else
-		{
-			hCPU->instructionPointer = (unsigned int)(hCPU->spr.CTR & 0xfffffffc);
-		}
-		PPCRecompiler_attemptEnter(hCPU, hCPU->instructionPointer);
+		PPCInterpreter_nextInstruction(cpu);
 	}
-	else
+
+	// mcrxr crfD: CR field crfD = XER[0-3] (SO, OV, CA, 0 -> LT, GT, EQ, SO), then XER[0-3] = 0
+	void Op_MCRXR(PPCInterpreter_t* cpu, uint32 op)
 	{
-		hCPU->instructionPointer += 4;
+		uint32 crBase = ((op >> 23) & 7) * 4;
+		uint32 xer = PPCInterpreter_getXER(cpu);
+		for (uint32 i = 0; i < 4; i++)
+			cpu->cr[crBase + i] = (uint8)((xer >> (31 - i)) & 1);
+		PPCInterpreter_setXER(cpu, xer & 0x0FFFFFFF);
+		PPCInterpreter_nextInstruction(cpu);
 	}
-}
 
-void PPCInterpreter_DCBT(PPCInterpreter_t* hCPU, uint32 Opcode)
-{
-	sint32 rA, rB;
-	rA = (Opcode >> (31 - 15)) & 0x1F;
-	rB = (Opcode >> (31 - 20)) & 0x1F;
-	PPCInterpreter_nextInstruction(hCPU);
-}
+	// ---- cache control ----
 
-void PPCInterpreter_DCBST(PPCInterpreter_t* hCPU, uint32 Opcode)
-{
-	sint32 rA, rB;
-	rA = (Opcode >> (31 - 15)) & 0x1F;
-	rB = (Opcode >> (31 - 20)) & 0x1F;
+	static uint32 IndexedEA(PPCInterpreter_t* cpu, uint32 op)
+	{
+		uint32 rA = ppcOpField_A(op);
+		return (rA ? cpu->gpr[rA] : 0) + cpu->gpr[ppcOpField_B(op)];
+	}
 
-	uint32 ea = (rA ? hCPU->gpr[rA] : 0) + hCPU->gpr[rB];
+	// dcbst/dcbf: the GPU buffer cache wants to know when the CPU writes back a line
+	void Op_CacheFlush(PPCInterpreter_t* cpu, uint32 op)
+	{
+		LatteBufferCache_notifyDCFlush(IndexedEA(cpu, op), 32);
+		PPCInterpreter_nextInstruction(cpu);
+	}
 
-	LatteBufferCache_notifyDCFlush(ea, 32);
-	
-	PPCInterpreter_nextInstruction(hCPU);
-}
+	void Op_ICBI(PPCInterpreter_t* cpu, uint32 op)
+	{
+		coreinit::codeGenHandleICBI(IndexedEA(cpu, op));
+		PPCInterpreter_nextInstruction(cpu);
+	}
 
-void PPCInterpreter_DCBF(PPCInterpreter_t* hCPU, uint32 Opcode)
-{
-	sint32 rA, rB;
-	rA = (Opcode >> (31 - 15)) & 0x1F;
-	rB = (Opcode >> (31 - 20)) & 0x1F;
+	void Op_NoEffect(PPCInterpreter_t* cpu, uint32 op)
+	{
+		PPCInterpreter_nextInstruction(cpu);
+	}
 
-	uint32 ea = (rA ? hCPU->gpr[rA] : 0) + hCPU->gpr[rB];
+	void Op_TLBSYNC(PPCInterpreter_t* cpu, uint32 op)
+	{
+		cemu_assert_unimplemented();
+		PPCInterpreter_nextInstruction(cpu);
+	}
 
-	LatteBufferCache_notifyDCFlush(ea, 32);
+	// ---- traps ----
 
-	PPCInterpreter_nextInstruction(hCPU);
-}
+	// Only the unconditional "tw 0, rX, rY" forms planted by the debuggers
+	// are used; rA tells which debugger owns the breakpoint. The debugger
+	// moves the instruction pointer itself.
+	void Op_TW(PPCInterpreter_t* cpu, uint32 op)
+	{
+		uint32 to = ppcOpField_D(op);
+		uint32 rA = ppcOpField_A(op);
+		cemu_assert_debug(to == 0);
+		if (to != 0)
+			PPCInterpreter_nextInstruction(cpu);
+		if (rA == DEBUGGER_BP_T_DEBUGGER)
+			debugger_enterTW(cpu);
+		else if (rA == DEBUGGER_BP_T_GDBSTUB)
+			g_gdbstub->HandleTrapInstruction(cpu);
+	}
 
-void PPCInterpreter_DCBZL(PPCInterpreter_t* hCPU, uint32 Opcode) //Undocumented
-{
-	// no-op
-	PPCInterpreter_nextInstruction(hCPU);
-}
-
-void PPCInterpreter_DCBI(PPCInterpreter_t* hCPU, uint32 Opcode)
-{
-	// no-op
-	PPCInterpreter_nextInstruction(hCPU);
-}
-
-void PPCInterpreter_ICBI(PPCInterpreter_t* hCPU, uint32 Opcode)
-{
-	sint32 rD, rA, rB;
-	PPC_OPC_TEMPL_X(Opcode, rD, rA, rB);
-	uint32 ea = (rA ? hCPU->gpr[rA] : 0) + hCPU->gpr[rB];
-	// invalidate range
-	coreinit::codeGenHandleICBI(ea);
-	PPCInterpreter_nextInstruction(hCPU);
-}
-
-void PPCInterpreter_EIEIO(PPCInterpreter_t* hCPU, uint32 Opcode)
-{
-	// no effect
-	// next instruction
-	PPCInterpreter_nextInstruction(hCPU);
-}
-
-void PPCInterpreter_SC(PPCInterpreter_t* hCPU, uint32 Opcode)
-{
-	cemuLog_logDebug(LogType::Force, "SC executed at 0x{:08x}", hCPU->instructionPointer);
-	// next instruction
-	PPCInterpreter_nextInstruction(hCPU);
-}
-
-void PPCInterpreter_SYNC(PPCInterpreter_t* hCPU, uint32 Opcode)
-{
-	// no-op
-	// next instruction
-	PPCInterpreter_nextInstruction(hCPU);
-}
-
-void PPCInterpreter_ISYNC(PPCInterpreter_t* hCPU, uint32 Opcode)
-{
-	// no-op
-	// next instruction
-	PPCInterpreter_nextInstruction(hCPU);
-}
-
-void PPCInterpreter_RFI(PPCInterpreter_t* hCPU, uint32 Opcode)
-{
-	cemuLog_logDebug(LogType::Force, "RFI");
-	hCPU->sprExtended.msr &= ~(0x87C0FF73 | 0x00040000);
-	hCPU->sprExtended.msr |= hCPU->sprExtended.srr1 & 0x87c0ff73;
-	hCPU->sprExtended.msr |= MSR_RI;
-	hCPU->instructionPointer = (unsigned int)(hCPU->sprExtended.srr0);
+	void Op_TWI(PPCInterpreter_t* cpu, uint32 op)
+	{
+		cemuLog_logDebug(LogType::Force, "Interpreter: twi at {:08x} ignored", cpu->instructionPointer);
+		PPCInterpreter_nextInstruction(cpu);
+	}
 }

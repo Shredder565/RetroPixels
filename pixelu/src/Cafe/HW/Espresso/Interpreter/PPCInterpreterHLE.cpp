@@ -1,72 +1,86 @@
-#include "../PPCState.h"
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// High level emulation calls. Guest stubs for host implemented functions
+// contain a pseudo instruction with primary opcode 1 whose low 16 bits index
+// the table below. Index 0xFFD0 marks an import nobody implements; the stub
+// is followed (8 bytes after the pseudo instruction) by the function name.
+
 #include "PPCInterpreterInternal.h"
 #include "PPCInterpreterHelper.h"
 
-std::unordered_set<std::string> s_unsupportedHLECalls;
-
-void PPCInterpreter_handleUnsupportedHLECall(PPCInterpreter_t* hCPU)
+namespace
 {
-	const char* libFuncName = (char*)memory_getPointerFromVirtualOffset(hCPU->instructionPointer + 8);
-	std::string tempString = fmt::format("Unsupported lib call: {}", libFuncName);
-	if (s_unsupportedHLECalls.find(tempString) == s_unsupportedHLECalls.end())
+	constexpr sint32 kHleCallCapacity = 0x4000;
+	constexpr uint32 kUnsupportedImportId = 0xFFD0;
+
+	struct HleCallTable
 	{
-		cemuLog_log(LogType::UnsupportedAPI, "{}", tempString);
-		s_unsupportedHLECalls.emplace(tempString);
+		std::mutex mutex;
+		HLECALL entries[kHleCallCapacity]{};
+		std::atomic<sint32> count{0};
+	};
+
+	HleCallTable& GetHleTable()
+	{
+		static HleCallTable s_table;
+		return s_table;
 	}
-	hCPU->gpr[3] = 0;
-	PPCInterpreter_nextInstruction(hCPU);
+
+	std::mutex s_unsupportedLogMutex;
+	std::unordered_set<std::string> s_reportedUnsupported;
+
+	void ReportUnsupportedImport(PPCInterpreter_t* cpu)
+	{
+		const char* name = (const char*)memory_getPointerFromVirtualOffset(cpu->instructionPointer + 8);
+		{
+			std::lock_guard lock(s_unsupportedLogMutex);
+			std::string message = fmt::format("Unsupported lib call: {}", name);
+			if (s_reportedUnsupported.insert(message).second)
+				cemuLog_log(LogType::UnsupportedAPI, "{}", message);
+		}
+		cpu->gpr[3] = 0; // unimplemented imports return 0
+		PPCInterpreter_nextInstruction(cpu);
+	}
 }
 
-static constexpr size_t HLE_TABLE_CAPACITY = 0x4000;
-HLECALL s_ppcHleTable[HLE_TABLE_CAPACITY]{};
-sint32 s_ppcHleTableWriteIndex = 0;
-std::mutex s_ppcHleTableMutex;
-
+// returns the existing index if the same function was registered before
 HLEIDX PPCInterpreter_registerHLECall(HLECALL hleCall, std::string hleName)
 {
-	std::unique_lock _l(s_ppcHleTableMutex);
-	if (s_ppcHleTableWriteIndex >= HLE_TABLE_CAPACITY)
+	HleCallTable& table = GetHleTable();
+	std::lock_guard lock(table.mutex);
+	sint32 count = table.count.load(std::memory_order_relaxed);
+	for (sint32 i = 0; i < count; i++)
 	{
-		cemuLog_log(LogType::Force, "HLE table is full");
-		cemu_assert(false);
-	}
-	for (sint32 i = 0; i < s_ppcHleTableWriteIndex; i++)
-	{
-		if (s_ppcHleTable[i] == hleCall)
-		{
+		if (table.entries[i] == hleCall)
 			return i;
-		}
 	}
-	cemu_assert(s_ppcHleTableWriteIndex < HLE_TABLE_CAPACITY);
-	s_ppcHleTable[s_ppcHleTableWriteIndex] = hleCall;
-	HLEIDX funcIndex = s_ppcHleTableWriteIndex;
-	s_ppcHleTableWriteIndex++;
-	return funcIndex;
+	if (count >= kHleCallCapacity)
+	{
+		cemuLog_log(LogType::Force, "HLE call table is full, cannot register {}", hleName);
+		cemu_assert(false);
+		return -1;
+	}
+	table.entries[count] = hleCall;
+	table.count.store(count + 1, std::memory_order_release);
+	return count;
 }
 
 HLECALL PPCInterpreter_getHLECall(HLEIDX funcIndex)
 {
-	if (funcIndex < 0 || funcIndex >= HLE_TABLE_CAPACITY)
+	if (funcIndex < 0 || funcIndex >= kHleCallCapacity)
 		return nullptr;
-	return s_ppcHleTable[funcIndex];
+	return GetHleTable().entries[funcIndex];
 }
 
-std::mutex s_hleLogMutex;
-
-void PPCInterpreter_virtualHLE(PPCInterpreter_t* hCPU, unsigned int opcode)
+void EspressoItp::Op_HLE(PPCInterpreter_t* cpu, uint32 op)
 {
-	uint32 hleFuncId = opcode & 0xFFFF;
-	if (hleFuncId == 0xFFD0) [[unlikely]]
+	uint32 callId = op & 0xFFFF;
+	if (callId == kUnsupportedImportId) [[unlikely]]
 	{
-		s_hleLogMutex.lock();
-		PPCInterpreter_handleUnsupportedHLECall(hCPU);
-		s_hleLogMutex.unlock();
+		ReportUnsupportedImport(cpu);
+		return;
 	}
-	else
-	{
-		// os lib function
-		auto hleCall = PPCInterpreter_getHLECall(hleFuncId);
-		cemu_assert(hleCall);
-		hleCall(hCPU);
-	}
+	HLECALL func = PPCInterpreter_getHLECall((HLEIDX)callId);
+	cemu_assert(func != nullptr);
+	func(cpu);
 }
