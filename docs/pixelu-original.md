@@ -54,12 +54,12 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 21029 | 6.4% |
-| Cemu, untouched | 250252 | 76.2% |
-| Cemu, with PixelU changes | 15633 | 4.8% |
+| Original (RetroPixels) | 27360 | 8.4% |
+| Cemu, untouched | 241166 | 74.2% |
+| Cemu, with PixelU changes | 15096 | 4.6% |
 | PixelU-added files (MPL-2.0 header) | 1940 | 0.6% |
-| Third-party | 39404 | 12.0% |
-| **All** | **328258** | 100% |
+| Third-party | 39404 | 12.1% |
+| **All** | **324966** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -126,7 +126,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/OS/libs/nn_ndm | 119 | 119 | original |
 | Cafe/OS/libs/nn_nfp | 850 | 850 | original |
 | Cafe/OS/libs/nn_nim | 241 | 241 | original |
-| Cafe/OS/libs/nn_olv | 4486 | 0 | Cemu |
+| Cafe/OS/libs/nn_olv | 2887 | 2887 | original |
 | Cafe/OS/libs/nn_pdm | 66 | 66 | original |
 | Cafe/OS/libs/nn_save | 566 | 566 | original |
 | Cafe/OS/libs/nn_sl | 121 | 121 | original |
@@ -139,7 +139,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/OS/libs/ntag | 623 | 623 | original |
 | Cafe/OS/libs/padscore | 737 | 737 | original |
 | Cafe/OS/libs/proc_ui | 868 | 868 | original |
-| Cafe/OS/libs/snd_core | 5511 | 374 | mixed (7% original) |
+| Cafe/OS/libs/snd_core | 3818 | 3818 | original |
 | Cafe/OS/libs/snd_user | 1030 | 1030 | original |
 | Cafe/OS/libs/swkbd | 613 | 613 | original |
 | Cafe/OS/libs/sysapp | 435 | 435 | original |
@@ -249,3 +249,37 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
   registration order; nn_save application box 4 returns NOT_FOUND instead of
   an uninitialised path; AXAcquireMultiVoice no longer leaks voices when it
   runs out part way through.
+- Batch 5: the rest of `snd_core` (`ax.h`, `ax_internal.h`, `ax_voice.cpp`,
+  `ax_mix.cpp`, `ax_ist.cpp`, `ax_out.cpp`, `ax_exports.cpp`: voices, ADPCM
+  and PCM decoding, resampling, envelopes, filters, bus mixing, aux, the
+  32-to-48 kHz upsampler, final-mix callbacks, remix matrices, the frame
+  thread and host output) and all of `nn_olv` (Miiverse, including the offline
+  post archive) rewritten as original code. Exports, guest struct layouts
+  (voice parameter blocks are checked byte for byte with static_asserts) and
+  the PixelU recorder hook in `ax_out.cpp` are unchanged. An old-vs-new
+  harness (ASan/UBSan, random voices, offsets, ADPCM, SRC, envelopes, filters,
+  mixes, aux and final-mix callbacks, remix, 32/48 kHz, sndcore1/2, mono,
+  stereo and surround) produces byte-identical parameter blocks, TV and
+  GamePad output and recorder data for every scenario that avoids the fixes
+  below. The nn_olv community-code and TGA checks match the old code on 13M
+  random inputs.
+  snd_core fixes: ADPCM prediction no longer overflows 32 bits; a one-shot
+  ADPCM voice ending in its first partial frame no longer repeats its last
+  sample past the buffer; PCM8 voices without sample-rate conversion decode
+  instead of mixing uninitialised data; freeing a voice twice no longer
+  corrupts the free list; AXUserEnd removes the caller's entry wherever it
+  is; the second GamePad's mix masks, upsampler offsets and final-mix data
+  are in their own slots (GamePad channels 2/3 at 32 kHz were overwritten
+  before); each device decides its own upsample stage; the GamePad remix
+  uses the GamePad matrix; AXGetDeviceFinalOutput no longer byte-swaps
+  twice; AXGetVoiceLoopCount no longer divides by zero on short loops;
+  invalid AXInit parameters, remix queries and voice priorities return errors
+  instead of asserting.
+  nn_olv fixes: community data returned by the upload calls is big endian like
+  the downloaded data; output sizes of GetBodyMemo and GetAppData are big
+  endian; oversized app data and icons are clamped to their buffers; a
+  topic list with more than 10 topics no longer writes past the list;
+  negative UTC offsets give the right param-pack value; a post that fails to
+  parse in the offline archive is skipped instead of looping forever; the
+  offline archive keeps the requested community id; the "post app" stub
+  thread returns properly.

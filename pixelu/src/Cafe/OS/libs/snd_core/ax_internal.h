@@ -1,3 +1,13 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// Shared state of the AX implementation files.
+//
+// Every voice has two copies of its DSP parameter block (AXVPBInternal_t):
+// the "PPC copy" that the AXSetVoice* functions write, and the "DSP copy"
+// that the renderer reads and updates while it plays the voice. At the start
+// of each frame the frame thread exchanges the two (ax_ist.cpp): parameters
+// the title changed (AXVPB.sync bits) go PPC -> DSP, playback progress
+// (position, decoder history, envelope) comes back DSP -> PPC.
 #pragma once
 #include "Cafe/OS/libs/snd_core/ax.h"
 
@@ -7,218 +17,197 @@ namespace snd_core
 	{
 		bool isInitialized{false};
 		bool isSoundCore2{false};
-		// init params
 		struct
 		{
-			uint32 rendererFreq{0}; // 32Khz or 48Khz
-			uint32 frameLength{0}; // 3MS
+			uint32 rendererFreq{0}; // AX_RENDERER_FREQ_*
+			uint32 frameLength{0};  // AX_FRAMELENGTH_*
 			uint32 pipelineMode{0};
 		}initParam;
 	};
-
 	extern sndGeneric_t sndGeneric;
 
-	const uint32 AX_SYNCFLAG_SRCFILTER = 0x1;				// Voice src type (AXSetVoiceSrcType)
-	const uint32 AX_SYNCFLAG_DEVICEMIXMASK = 0x2;			// Voice mix related (AXSetVoiceDeviceMix)
-	const uint32 AX_SYNCFLAG_PLAYBACKSTATE = 0x4;			// Voice play state (AXSetVoiceState)
-	const uint32 AX_SYNCFLAG_VOICETYPE = 0x8;				// Voice type (AXSetVoiceType)
-	const uint32 AX_SYNCFLAG_DEVICEMIX = 0x10;				// Voice mix related (AXSetVoiceDeviceMix)
-	const uint32 AX_SYNCFLAG_ITD20 = 0x20;					// Voice initial time delay (AXSetVoiceItdOn)
-	const uint32 AX_SYNCFLAG_ITD40 = 0x40;					// Voice initial time delay (AXSetVoiceItdOn, AXSetVoiceItdTarget)
-	const uint32 AX_SYNCFLAG_VE = 0x100;					// Voice ve (AXSetVoiceVe)
-	const uint32 AX_SYNCFLAG_VEDELTA = 0x200;				// Voice ve delta (AXSetVoiceVeDelta)
-	const uint32 AX_SYNCFLAG_OFFSETS = 0x400;				// Voice offset data (AXSetVoiceOffsets)
-	const uint32 AX_SYNCFLAG_LOOPFLAG = 0x800;				// Voice loop flag (AXSetVoiceLoop)
-	const uint32 AX_SYNCFLAG_LOOPOFFSET = 0x1000;			// Voice loop offset (AXSetVoiceLoopOffset)
-	const uint32 AX_SYNCFLAG_ENDOFFSET = 0x2000;			// Voice end offset (AXSetVoiceEndOffset)
-	const uint32 AX_SYNCFLAG_CURRENTOFFSET = 0x4000;		// Voice current offset (AXSetVoiceCurrentOffset)
-	const uint32 AX_SYNCFLAG_ADPCMDATA = 0x8000;			// Voice adpcm data (AXSetVoiceAdpcm)
-	const uint32 AX_SYNCFLAG_SRCDATA = 0x10000;				// Voice src + src ratio (AXSetVoiceSrc)
-	const uint32 AX_SYNCFLAG_SRCRATIO = 0x20000;			// Voice src ratio (AXSetVoiceSrcRatio)
-	const uint32 AX_SYNCFLAG_ADPCMLOOP = 0x40000;			// Voice adpcm loop (AXSetVoiceAdpcmLoop)
-	const uint32 AX_SYNCFLAG_LPFDATA = 0x80000;				// Voice lpf (AXSetVoiceLpf)
-	const uint32 AX_SYNCFLAG_LPFCOEF = 0x100000;			// Voice lpf coef (AXSetVoiceLpfCoefs)
-	const uint32 AX_SYNCFLAG_BIQUADDATA = 0x200000;			// Voice biquad (AXSetVoiceBiquad)
-	const uint32 AX_SYNCFLAG_BIQUADCOEF = 0x400000;			// Voice biquad coef (AXSetVoiceBiquadCoefs)
-	const uint32 AX_SYNCFLAG_VOICEREMOTEON = 0x800000;		// ??? (AXSetVoiceRmtOn?)
-	const uint32 AX_SYNCFLAG_4000000 = 0x4000000;			// ???
-	const uint32 AX_SYNCFLAG_8000000 = 0x8000000;			// ???
-
-	struct axADPCMInternal_t
+	// AXVPB.sync: which parameter groups the title changed since the last frame
+	namespace VoiceDirty
 	{
-		/* +0x00 | +0x190 */ uint16 coef[16];
-		/* +0x20 | +0x1B0 */ uint16 gain;
-		/* +0x22 | +0x1B2 */ uint16 scale;
-		/* +0x24 | +0x1B4 */ uint16 yn1;
-		/* +0x26 | +0x1B6 */ uint16 yn2;
-		// size: 0x28
-	};
+		constexpr uint32 SrcType      = 1u << 0;  // AXSetVoiceSrcType
+		constexpr uint32 MixMask      = 1u << 1;  // AXSetVoiceDeviceMix
+		constexpr uint32 State        = 1u << 2;  // AXSetVoiceState
+		constexpr uint32 Type         = 1u << 3;  // AXSetVoiceType
+		constexpr uint32 Mix          = 1u << 4;  // AXSetVoiceDeviceMix
+		constexpr uint32 ItdOn        = 1u << 5;
+		constexpr uint32 ItdTarget    = 1u << 6;
+		constexpr uint32 Ve           = 1u << 8;  // AXSetVoiceVe
+		constexpr uint32 VeDelta      = 1u << 9;
+		constexpr uint32 Offsets      = 1u << 10; // AXSetVoiceOffsets
+		constexpr uint32 LoopFlag     = 1u << 11; // AXSetVoiceLoop
+		constexpr uint32 LoopOffset   = 1u << 12; // AXSetVoiceLoopOffset
+		constexpr uint32 EndOffset    = 1u << 13; // AXSetVoiceEndOffset
+		constexpr uint32 CurOffset    = 1u << 14; // AXSetVoiceCurrentOffset
+		constexpr uint32 Adpcm        = 1u << 15; // AXSetVoiceAdpcm
+		constexpr uint32 Src          = 1u << 16; // AXSetVoiceSrc
+		constexpr uint32 SrcRatio     = 1u << 17; // AXSetVoiceSrcRatio
+		constexpr uint32 AdpcmLoop    = 1u << 18; // AXSetVoiceAdpcmLoop
+		constexpr uint32 Lpf          = 1u << 19; // AXSetVoiceLpf
+		constexpr uint32 LpfCoefs     = 1u << 20; // AXSetVoiceLpfCoefs
+		constexpr uint32 Biquad       = 1u << 21; // AXSetVoiceBiquad
+		constexpr uint32 BiquadCoefs  = 1u << 22; // AXSetVoiceBiquadCoefs
+		constexpr uint32 RmtOn        = 1u << 23;
+		constexpr uint32 RmtSrc       = 1u << 27;
+		constexpr uint32 RmtIir       = 1u << 28;
+	}
 
-	struct axADPCMLoopInternal_t
+	// sample position block. Addresses are absolute "sample word" addresses:
+	// bytes for PCM8, halfwords for PCM16, nibbles for ADPCM. 'addrExt'
+	// holds bits 29-31 of the byte address the 29-bit fields cannot carry.
+	struct AXVoiceAddr
 	{
-		/* +0x00 | 0x1C6 */ uint16 loopScale;
-		/* +0x02 | 0x1C8 */ uint16 loopYn1;
-		/* +0x04 | 0x1CA */ uint16 loopYn2;
-		// size: 0x6
+		/* +0x00 */ uint16be loopFlag;
+		/* +0x02 */ uint16be format;
+		/* +0x04 */ uint16be addrExt;
+		/* +0x06 */ uint16be loopHi;
+		/* +0x08 */ uint16be loopLo;
+		/* +0x0A */ uint16be endHi;
+		/* +0x0C */ uint16be endLo;
+		/* +0x0E */ uint16be curHi;
+		/* +0x10 */ uint16be curLo;
+
+		static uint32 Join(const uint16be& hi, const uint16be& lo) { return ((uint32)hi.value() << 16) | lo.value(); }
+		static void Split(uint16be& hi, uint16be& lo, uint32 v) { hi = (uint16)(v >> 16); lo = (uint16)v; }
+
+		uint32 Loop() const { return Join(loopHi, loopLo); }
+		uint32 End() const { return Join(endHi, endLo); }
+		uint32 Cur() const { return Join(curHi, curLo); }
+		void SetLoop(uint32 v) { Split(loopHi, loopLo, v); }
+		void SetEnd(uint32 v) { Split(endHi, endLo, v); }
+		void SetCur(uint32 v) { Split(curHi, curLo, v); }
 	};
+	static_assert(sizeof(AXVoiceAddr) == 0x12);
 
-	struct axOffsetsInternal_t
-	{
-		/* +0x00 / 0x17E */ uint16 loopFlag;
-		/* +0x02 / 0x180 */ uint16 format;
-		/* +0x04 / 0x182 */ uint16 ptrHighExtension; // defines 512mb range (highest 3 bit of current offset ptr counted in bytes)
-		// offsets (relative to NULL, counted in sample words)
-		// note: All offset ptr variables can only store values up to 512MB (PCM8 mask -> 0x1FFFFFFF, PCM16 mask -> 0x0FFFFFFF, ADPCM mask -> 0x3FFFFFFF)
-		/* +0x06 / 0x184 */ uint16 loopOffsetPtrHigh;
-		/* +0x08 / 0x186 */ uint16 loopOffsetPtrLow;
-		/* +0x0A / 0x188 */ uint16 endOffsetPtrHigh;
-		/* +0x0C / 0x18A */ uint16 endOffsetPtrLow;
-		/* +0x0E / 0x18C */ uint16 currentOffsetPtrHigh;
-		/* +0x10 / 0x18E */ uint16 currentOffsetPtrLow;
-
-		uint32 GetLoopOffset32() const
-		{
-			uint32 offset = (uint32)_swapEndianU16(loopOffsetPtrHigh) << 16;
-			return offset | (uint32)_swapEndianU16(loopOffsetPtrLow);
-		}
-
-		uint32 GetEndOffset32() const
-		{
-			uint32 offset = (uint32)_swapEndianU16(endOffsetPtrHigh) << 16;
-			return offset | (uint32)_swapEndianU16(endOffsetPtrLow);
-		}
-
-		uint32 GetCurrentOffset32() const
-		{
-			uint32 offset = (uint32)_swapEndianU16(currentOffsetPtrHigh) << 16;
-			return offset | (uint32)_swapEndianU16(currentOffsetPtrLow);
-		}
-	};
-
-	const int AX_BUS_COUNT = 4;
-
+	// one voice parameter block as the DSP sees it. Fields the audio debugger
+	// window reads (playbackState, src, lpf, biquad, deviceMixTV) use the raw
+	// convention, the rest are typed big-endian.
 	struct AXVPBInternal_t
 	{
-		/* matches what the DSP expects */
-		/* +0x000 */ uint16be nextAddrHigh; // points to next shadow copy (physical pointer, NULL for last voice in list)
-		/* +0x002 */ uint16be nextAddrLow;
-		/* +0x004 */ uint16be selfAddrHigh; // points to shadow copy of self (physical pointer)
-		/* +0x006 */ uint16be selfAddrLow;
-		/* +0x008 */ uint16 srcFilterMode; // AX_FILTER_MODE_*
-		/* +0x00A */ uint16 srcTapFilter; // AX_FILTER_TAP_*
+		/* +0x000 */ uint16be nextHi;          // physical address of the next DSP block in the play list
+		/* +0x002 */ uint16be nextLo;
+		/* +0x004 */ uint16be selfHi;          // physical address of this voice's DSP block
+		/* +0x006 */ uint16be selfLo;
+		/* +0x008 */ uint16be srcMode;         // AX_FILTER_MODE_*
+		/* +0x00A */ uint16be srcTap;          // AX_FILTER_LOWPASS_*
 		/* +0x00C */ uint16be mixerSelect;
-		/* +0x00E */ uint16 voiceType;
-		/* +0x010 */ uint16 deviceMixMaskTV[4];
-		/* +0x018 */ uint16 deviceMixMaskDRC[4 * 2];
-		/* +0x028 */ AXCHMIX_DEPR deviceMixTV[AX_BUS_COUNT * AX_TV_CHANNEL_COUNT]; // TV device mix
-		/* +0x088 */ AXCHMIX_DEPR deviceMixDRC[AX_BUS_COUNT * AX_DRC_CHANNEL_COUNT * 2]; // DRC device mix
-		/* +0x108 */ AXCHMIX_DEPR deviceMixRMT[0x40 / 4]; // RMT device mix (size unknown)
-		/* +0x148 */ uint16 reserved148_voiceRmtOn;
-		/* +0x14A */ uint16 deviceMixMaskRMT[0x10];
+		/* +0x00E */ uint16be voiceType;
+		/* +0x010 */ uint16be mixMaskTV[AX_MAX_NUM_BUS];       // per bus: 2 bits per channel (1 = volume, 3 = ramping)
+		/* +0x018 */ uint16be mixMaskDRC[2 * AX_MAX_NUM_BUS];
+		/* +0x028 */ AXCHMIX_DEPR deviceMixTV[AX_TV_CHANNEL_COUNT * AX_MAX_NUM_BUS];       // [channel][bus]
+		/* +0x088 */ AXCHMIX_DEPR deviceMixDRC[2 * AX_DRC_CHANNEL_COUNT * AX_MAX_NUM_BUS]; // [gamepad][channel][bus]
+		/* +0x108 */ AXCHMIX_DEPR deviceMixRMT[16];
+		/* +0x148 */ uint16be rmtOn;
+		/* +0x14A */ uint16be mixMaskRMT[16];
 		/* +0x16A */ uint16 playbackState;
-		// itd (0x16C - 0x1B4?)
-		/* +0x16C */ uint16 reserved16C;
-		/* +0x16E */ uint16be itdAddrHigh; // points to AXItd_t (physical pointer)
-		/* +0x170 */ uint16be itdAddrLow;
-		/* +0x172 */ uint16 reserved172;
-		/* +0x174 */ uint16 reserved174;
-		/* +0x176 */ uint16 reserved176_itdRelated;
-		/* +0x178 */ uint16 reserved178_itdRelated;
+		/* +0x16C */ uint16be itdOn;
+		/* +0x16E */ uint16be itdAddrHi;
+		/* +0x170 */ uint16be itdAddrLo;
+		/* +0x172 */ uint16be itdState[4];
 		/* +0x17A */ uint16be veVolume;
 		/* +0x17C */ uint16be veDelta;
-		/* +0x17E */ axOffsetsInternal_t internalOffsets;
-		/* +0x190 */ axADPCMInternal_t adpcmData;
+		/* +0x17E */ AXVoiceAddr addr;
+		/* +0x190 */ AXPBADPCM_t adpcm;
 		/* +0x1B8 */ AXPBSRC_t src;
-		/* +0x1C6 */ axADPCMLoopInternal_t adpcmLoop;
-		struct
-		{
-			/* +0x1CC */ uint16 on;
-			/* +0x1CE */ uint16 yn1;
-			/* +0x1D0 */ uint16 a0;
-			/* +0x1D2 */ uint16 b0;
-		}lpf;
-		struct
-		{
-			/* +0x1D4 */ uint16 on;
-			/* +0x1D6 */ sint16 xn1;
-			/* +0x1D8 */ sint16 xn2;
-			/* +0x1DA */ sint16 yn1;
-			/* +0x1DC */ sint16 yn2;
-			/* +0x1DE */ uint16 b0;
-			/* +0x1E0 */ uint16 b1;
-			/* +0x1E2 */ uint16 b2;
-			/* +0x1E4 */ uint16 a1;
-			/* +0x1E6 */ uint16 a2;
-		}biquad;
-		uint16 reserved1E8[0x18];
-		uint16 reserved218[0x20]; // not related to device mix?
-		uint16 reserved258[0x10]; // not related to device mix?
-		// rmt src related
-		uint16 reserved278;
-		uint16 reserved27A;
-		uint16 reserved27C;
-		uint16 reserved27E;
-		uint16 reserved280;
-		uint16 reserved282_rmtIIRGuessed;
-		uint32 reserved284;
-		uint32 reserved288;
-		uint32 reserved28C;
-		uint32 reserved290;
-		uint16 reserved294;
-		uint16 reserved296;
-		/* +0x298 */ uint16 reserved298;
-		/* +0x29A */ uint16 reserved29A;
-		/* +0x29C */ uint16 reserved29C;
-		/* +0x29E */ uint16 reserved29E;
+		/* +0x1C6 */ AXPBADPCMLOOP_t adpcmLoop;
+		/* +0x1CC */ AXPBLPF_t lpf;
+		/* +0x1D4 */ AXPBBIQUAD_t biquad;
+		/* +0x1E8 */ uint16 tvVolumeNow[AX_MAX_NUM_BUS * AX_TV_CHANNEL_COUNT]; // TV volume after this frame's ramps
+		/* +0x218 */ uint16 reserved218[0x20];
+		/* +0x258 */ uint16 reserved258[0x10];
+		/* +0x278 */ uint16be rmtSrcState[6];
+		/* +0x284 */ uint32 reserved284[4];
+		/* +0x294 */ uint16 reserved294[6];
 		/* +0x2A0 */ uint16be index;
-		/* +0x2A2 */ uint16be ukn2A2; // voice active/valid and being processed?
-		uint16 reserved2A4;
-		uint16 reserved2A6;
-		uint16 reserved2A8;
-		uint16 reserved2AA;
-		/* +0x2AC */ MEMPTR<AXVPBInternal_t> nextToProcess;
-		uint32 reserved2B0;
-		uint32 reserved2B4;
-		uint32 reserved2B8;
-		uint32 reserved2BC;
-		// size: 0x2C0
+		/* +0x2A2 */ uint16be listState;        // 1 = in this frame's play list, 2 = idle
+		/* +0x2A4 */ uint16 reserved2A4[4];
+		/* +0x2AC */ MEMPTR<AXVPBInternal_t> nextToProcess; // host-side play list (DSP copies)
+		/* +0x2B0 */ uint32 reserved2B0[4];
 	};
-
+	static_assert(offsetof(AXVPBInternal_t, srcMode) == 0x008);
+	static_assert(offsetof(AXVPBInternal_t, mixMaskTV) == 0x010);
+	static_assert(offsetof(AXVPBInternal_t, mixMaskDRC) == 0x018);
+	static_assert(offsetof(AXVPBInternal_t, deviceMixTV) == 0x028);
+	static_assert(offsetof(AXVPBInternal_t, deviceMixDRC) == 0x088);
+	static_assert(offsetof(AXVPBInternal_t, deviceMixRMT) == 0x108);
+	static_assert(offsetof(AXVPBInternal_t, rmtOn) == 0x148);
+	static_assert(offsetof(AXVPBInternal_t, mixMaskRMT) == 0x14A);
+	static_assert(offsetof(AXVPBInternal_t, playbackState) == 0x16A);
+	static_assert(offsetof(AXVPBInternal_t, itdAddrHi) == 0x16E);
+	static_assert(offsetof(AXVPBInternal_t, itdState) == 0x172);
+	static_assert(offsetof(AXVPBInternal_t, veVolume) == 0x17A);
+	static_assert(offsetof(AXVPBInternal_t, addr) == 0x17E);
+	static_assert(offsetof(AXVPBInternal_t, adpcm) == 0x190);
+	static_assert(offsetof(AXVPBInternal_t, src) == 0x1B8);
+	static_assert(offsetof(AXVPBInternal_t, adpcmLoop) == 0x1C6);
+	static_assert(offsetof(AXVPBInternal_t, lpf) == 0x1CC);
+	static_assert(offsetof(AXVPBInternal_t, biquad) == 0x1D4);
+	static_assert(offsetof(AXVPBInternal_t, tvVolumeNow) == 0x1E8);
+	static_assert(offsetof(AXVPBInternal_t, reserved218) == 0x218);
+	static_assert(offsetof(AXVPBInternal_t, reserved258) == 0x258);
+	static_assert(offsetof(AXVPBInternal_t, rmtSrcState) == 0x278);
+	static_assert(offsetof(AXVPBInternal_t, index) == 0x2A0);
+	static_assert(offsetof(AXVPBInternal_t, listState) == 0x2A2);
+	static_assert(offsetof(AXVPBInternal_t, nextToProcess) == 0x2AC);
 	static_assert(sizeof(AXVPBInternal_t) == 0x2C0);
 
+	// voice storage (guest memory). __AXVPBInternalVoiceArray holds the PPC
+	// copies, the DSP copies are reached through DspBlock().
 	extern AXVPBInternal_t* __AXVPBInternalVoiceArray;
-	extern AXVPBInternal_t* __AXVPBInternalVoiceShadowCopyArrayPtr;
 	extern AXVPB* __AXVPBArrayPtr;
+	AXVPBInternal_t* DspBlock(uint32 voiceIndex);
 
-	void AXResetVoiceLoopCount(AXVPB* vpb);
-
-	std::vector<AXVPB*>& AXVoiceList_GetListByPriority(uint32 priority);
-	std::vector<AXVPB*>& AXVoiceList_GetFreeVoices();
-
-	inline AXVPBInternal_t* GetInternalVoice(const AXVPB* vpb)
+	inline AXVPBInternal_t* PpcBlock(const AXVPB* vpb)
 	{
-		return __AXVPBInternalVoiceArray + (size_t)vpb->index;
+		return __AXVPBInternalVoiceArray + (uint32)vpb->index;
 	}
 
-	inline uint32 GetVoiceIndex(const AXVPB* vpb)
-	{
-		return (uint32)vpb->index;
-	}
+	// ax_voice.cpp
+	void AXVPB_Init();      // AXInit: build the voice pool
+	void AXVPB_Reset();     // drop every voice
+	extern FSpinlock g_axVoiceListLock;
+	const std::vector<AXVPB*>& AXVoicesOfPriority(uint32 priority);
+	const std::vector<AXVPB*>& AXFreeVoices();
+	bool AXIsVoiceProtected(const AXVPB* vpb); // inside an AXVoiceBegin/AXUserBegin block of any thread
+	bool AXVoiceProtectedForCaller(const AXVPB* vpb); // AXVoiceIsProtected
 
-    void AXVBP_Reset();
+	// ax_mix.cpp
+	void AXMix_Init();
+	void AXMix_process(AXVPBInternal_t* firstDspBlock); // render one frame of all listed voices
 
-	// AXIst
+	// ax_ist.cpp: the frame thread and everything after the mixer
+	void AXIst_Init();
 	void AXIst_InitThread();
-	OSThread_t* AXIst_GetThread();
 	void AXIst_StopThread();
-
+	void AXIst_QueueFrame();
+	bool AXIst_IsFrameBeingProcessed();
 	void AXIst_HandleFrameCallbacks();
+	void AXResetCallbacks();
+	void AXIst_ResetRemixMatrices();
+	// main mix of the current frame, [channel][sample] at the renderer rate,
+	// 24-bit samples. TV: 6 channels; GamePad: 4 channels of gamepad 0, then 4 of gamepad 1
+	sint32be* AXIst_TVMix();
+	sint32be* AXIst_DRCMix();
+	// 48 kHz result handed to ax_out, [channel][144], 16-bit range
+	sint32be* AXIst_TVOutput48();
+	sint32be* AXIst_DRCOutput48();
 
-	// AXAux
+	// ax_aux.cpp
 	void AXAux_incrementBufferIndex();
 
-	// internal mix buffers
-	extern SysAllocator<sint32, AX_SAMPLES_MAX * AX_TV_CHANNEL_COUNT> __AXTVOutputBuffer;
-	extern SysAllocator<sint32, AX_SAMPLES_MAX * AX_DRC_CHANNEL_COUNT * 2> __AXDRCOutputBuffer;
-
+	// ax_out.cpp
+	void AXOut_Init();                    // AXInit: pick the device modes
+	sint32 AXOut_OutputChannelCount(sint32 device); // channels the host device is fed
+	void AXOut_SubmitTVFrame();
+	void AXOut_SubmitDRCFrame();
+	sint32 AIGetSamplesPerChannel(uint32 device);
+	sint32 AIGetChannelCount(uint32 device);
+	sint16* AIGetCurrentDMABuffer(uint32 device); // last frame as sent to the host, sint16 big endian, interleaved
+	void resetNumProcessedFrames();
+	uint32 getNumProcessedFrames();
+	void AXOut_FrameDone();
 }

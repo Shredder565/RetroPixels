@@ -1,3 +1,16 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// The voice renderer: what the DSP does for each voice in a frame.
+//
+//   decode (ADPCM / PCM16 / PCM8, from guest memory)
+//   -> resample to the renderer rate (linear interpolation, 16.16 step)
+//   -> volume envelope -> biquad -> one-pole low pass
+//   -> add into the main and aux buses of TV and GamePad (per-bus volume ramps)
+//
+// Samples are carried as floats scaled to 24 bits (16-bit value << 8). After
+// all voices, the aux sends are handed to the aux effects, the effects'
+// returns from the previous frame are added back, and the main buses are
+// summed into the device mixes ax_ist.cpp picks up.
 #include "Cafe/OS/libs/snd_core/ax.h"
 #include "Cafe/OS/libs/snd_core/ax_internal.h"
 #include "Cafe/HW/MMU/MMU.h"
@@ -7,1027 +20,559 @@ void mic_updateOnAXFrame();
 
 namespace snd_core
 {
-	uint32 __AXDefaultMixerSelect = AX_MIXER_SELECT_BOTH;
 	uint16 __AXTVAuxReturnVolume[AX_AUX_BUS_COUNT];
+
+	namespace
+	{
+		constexpr uint32 kOne = 0x10000;            // 1.0 in 16.16
+		constexpr uint16 kUnityVolume = 0x8000;     // 1.0 in 1.15
+		constexpr float kVolumeScale = 32768.0f;
+		constexpr sint32 kMaxDecodeAhead = 4096;    // input samples one voice may consume per frame
+
+		uint32 s_defaultMixerSelect = AX_MIXER_SELECT_BOTH;
+
+		// bus lanes, [bus][channel][sample], channel stride = samples per frame
+		float s_tvLanes[AX_MAX_NUM_BUS * AX_TV_CHANNEL_COUNT * AX_SAMPLES_MAX];
+		float s_drcLanes[AX_MAX_NUM_BUS * AX_DRC_CHANNEL_COUNT * AX_SAMPLES_MAX];
+
+		uint16 Be16(uint16 raw) { return _swapEndianU16(raw); }
+		sint16 Be16s(uint16 raw) { return (sint16)_swapEndianU16(raw); }
+
+		// float -> integer the way x86 converts (truncate to 32 bits, then narrow)
+		sint16 ToS16Wrap(float f) { return (sint16)(sint32)f; }
+		uint16 ToU16Wrap(float f) { return (uint16)(sint32)f; }
+
+		sint32 AddWrap(sint32 a, sint32 b) { return (sint32)((uint32)a + (uint32)b); }
+
+		// --- sample sources -----------------------------------------------------------
+
+		// PCM8 / PCM16 straight from guest memory. A source that runs off its end
+		// without a loop clears the voice's playback state.
+		struct PcmSource
+		{
+			AXVPBInternal_t* pb;
+			bool wide;   // PCM16
+			uint32 pos;  // byte addresses
+			uint32 end;
+			uint32 loop;
+			sint32 held = 0; // last PCM16 sample read in this frame
+			bool justEnded = false;
+
+			PcmSource(AXVPBInternal_t* block, bool pcm16) : pb(block), wide(pcm16)
+			{
+				const uint32 ext = (uint32)pb->addr.addrExt << 29;
+				const uint32 unit = wide ? 2 : 1;
+				pos = (pb->addr.Cur() * unit) | ext;
+				end = (pb->addr.End() * unit) | ext;
+				loop = (pb->addr.Loop() * unit) | ext;
+			}
+
+			bool Playing() const { return pb->playbackState != 0; }
+
+			sint32 Next()
+			{
+				justEnded = false;
+				if (!Playing())
+					return wide ? held : 0; // PCM16 holds its last value, PCM8 falls silent
+				sint32 s;
+				if (wide)
+					s = held = (sint16)_swapEndianU16(*(uint16*)(memory_base + pos));
+				else
+					s = (sint32)(sint8)memory_base[pos] * 256;
+				if (pos == end)
+				{
+					if (pb->addr.loopFlag != 0)
+						pos = loop;
+					else
+					{
+						pb->playbackState = 0;
+						justEnded = true;
+					}
+				}
+				else
+					pos += wide ? 2 : 1;
+				return s;
+			}
+
+			void Store()
+			{
+				uint32 word = pos & 0x1FFFFFFF;
+				if (wide)
+					word >>= 1;
+				pb->addr.SetCur(word);
+			}
+		};
+
+		// 4-bit DSPADPCM: frames of 8 bytes, a predictor/scale header byte
+		// followed by 14 nibbles. Positions are nibble offsets from the sample
+		// buffer named in the voice handle, so the header occupies nibbles 0-1.
+		struct AdpcmSource
+		{
+			AXVPBInternal_t* pb;
+			const uint8* data;
+			bool active;
+			uint32 pos;
+			uint32 startPos;
+			uint32 end;
+			uint32 loopPos;
+			uint32 startWord;
+			uint16 header;
+			sint32 coef1 = 0;
+			sint32 coef2 = 0;
+			uint32 shift = 0;
+			sint32 hist1;
+			sint32 hist2;
+
+			explicit AdpcmSource(AXVPBInternal_t* block) : pb(block)
+			{
+				const AXVPB& handle = __AXVPBArrayPtr[(uint32)pb->index];
+				active = pb->playbackState != 0;
+				data = memory_getPointerFromVirtualOffset(_swapEndianU32(handle.offsets.samples));
+				const uint32 loopOffset = _swapEndianU32(handle.offsets.loopOffset);
+				end = _swapEndianU32(handle.offsets.endOffset);
+				// an end offset on a frame header can never be reached (a title using
+				// 0x40000 jumped from 0x3FFFF straight to 0x40002); move it onto the first sample
+				if ((end & 0xF) <= 1)
+					end += 2;
+				startWord = pb->addr.Cur();
+				pos = startPos = loopOffset + (startWord - pb->addr.Loop());
+				loopPos = loopOffset;
+				SetHeader(Be16(pb->adpcm.scale));
+				hist1 = Be16s(pb->adpcm.yn1);
+				hist2 = Be16s(pb->adpcm.yn2);
+			}
+
+			void SetHeader(uint16 ps)
+			{
+				header = ps;
+				shift = ps & 0xF;
+				const uint32 pair = (ps >> 4) & 7;
+				coef1 = Be16s(pb->adpcm.a[pair * 2 + 0]);
+				coef2 = Be16s(pb->adpcm.a[pair * 2 + 1]);
+			}
+
+			sint32 Next()
+			{
+				if (!active || pb->playbackState == 0)
+					return 0;
+				if ((pos & 0xF) == 0)
+				{
+					SetHeader(data[pos >> 1]);
+					pos += 2;
+				}
+				const uint8 byte = data[pos >> 1];
+				const sint32 nibble = (pos & 1) ? (sint32)(sint8)(uint8)(byte << 4) >> 4 : (sint32)(sint8)byte >> 4;
+				const sint64 predicted = ((sint64)nibble << (11 + shift)) + (sint64)hist1 * coef1 + (sint64)hist2 * coef2;
+				const sint32 s = (sint32)std::clamp<sint64>((predicted + 0x400) >> 11, -32768, 32767);
+				hist2 = hist1;
+				hist1 = s;
+				if (pos == end)
+				{
+					if (pb->addr.loopFlag != 0)
+					{
+						SetHeader(Be16(pb->adpcmLoop.loopScale));
+						pos = loopPos;
+					}
+					else
+						pb->playbackState = 0;
+				}
+				else
+					pos++;
+				return s;
+			}
+
+			void Store()
+			{
+				if (!active)
+					return;
+				pb->adpcm.scale = Be16(header);
+				pb->adpcm.yn1 = Be16((uint16)(sint16)hist1);
+				pb->adpcm.yn2 = Be16((uint16)(sint16)hist2);
+				pb->addr.SetCur(startWord + (pos - startPos));
+			}
+		};
+
+		// --- resampling -----------------------------------------------------------------
+
+		// The last four input samples, oldest first. The DSP block keeps them in
+		// one of two arrangements: ADPCM and PCM8 store the newest sample first
+		// and interpolate between the two newest; PCM16 stores them oldest first
+		// and interpolates between the two oldest (three samples later).
+		struct History
+		{
+			sint32 s[4]; // s[3] newest
+			bool lagged;
+
+			History(const AXPBSRC_t& src, bool pcm16) : lagged(pcm16)
+			{
+				sint32 stored[4];
+				for (sint32 i = 0; i < 4; i++)
+					stored[i] = Be16s(src.historySamples[i]);
+				if (lagged)
+				{
+					for (sint32 i = 0; i < 4; i++)
+						s[i] = stored[i];
+				}
+				else
+				{
+					s[3] = stored[0];
+					s[0] = stored[1];
+					s[1] = stored[2];
+					s[2] = stored[3];
+				}
+			}
+
+			void Push(sint32 v)
+			{
+				s[0] = s[1];
+				s[1] = s[2];
+				s[2] = s[3];
+				s[3] = (sint16)v;
+			}
+
+			sint32 From() const { return lagged ? s[0] : s[2]; }
+			sint32 To() const { return lagged ? s[1] : s[3]; }
+
+			void Store(AXPBSRC_t& src) const
+			{
+				const sint32 order[4] = { lagged ? s[0] : s[3], lagged ? s[1] : s[0], lagged ? s[2] : s[1], lagged ? s[3] : s[2] };
+				for (sint32 i = 0; i < 4; i++)
+					src.historySamples[i] = Be16((uint16)(sint16)order[i]);
+			}
+		};
+
+		template<typename TSource>
+		void ResampleLinear(AXVPBInternal_t* pb, TSource& source, bool pcm16, float* out, sint32 count)
+		{
+			uint32 frac = Be16(pb->src.currentFrac);
+			const uint32 step = pb->src.Ratio();
+			History h(pb->src, pcm16);
+			for (sint32 i = 0; i < count; i++)
+			{
+				frac += step;
+				while (frac >= kOne)
+				{
+					h.Push(source.Next());
+					frac -= kOne;
+				}
+				const sint32 a = (h.From() * (sint32)(kOne - frac)) >> 7;
+				const sint32 b = (h.To() * (sint32)frac) >> 7;
+				out[i] = (float)((a + b) >> 1);
+			}
+			pb->src.currentFrac = Be16((uint16)frac);
+			h.Store(pb->src);
+		}
+
+		void RenderAdpcm(AXVPBInternal_t* pb, bool resample, float* out, sint32 count)
+		{
+			if (resample)
+			{
+				const uint32 needed = (Be16(pb->src.currentFrac) + pb->src.Ratio() * (uint32)count) >> 16;
+				if ((sint32)needed >= kMaxDecodeAhead)
+				{
+					cemuLog_log(LogType::Force, "AX: voice {} resample ratio {:08x} is too high, muted", (uint32)pb->index, pb->src.Ratio());
+					std::fill(out, out + count, 0.0f);
+					return;
+				}
+			}
+			AdpcmSource source(pb);
+			if (resample)
+				ResampleLinear(pb, source, false, out, count);
+			else
+			{
+				for (sint32 i = 0; i < count; i++)
+					out[i] = (float)(source.Next() * 256);
+			}
+			source.Store();
+		}
+
+		void RenderPcm(AXVPBInternal_t* pb, bool pcm16, bool resample, float* out, sint32 count)
+		{
+			PcmSource source(pb, pcm16);
+			if (resample)
+			{
+				ResampleLinear(pb, source, pcm16, out, count);
+			}
+			else
+			{
+				if (!source.Playing())
+				{
+					std::fill(out, out + count, 0.0f);
+					return;
+				}
+				for (sint32 i = 0; i < count; i++)
+				{
+					if (!source.Playing())
+					{
+						out[i] = 0.0f;
+						continue;
+					}
+					const sint32 s = source.Next();
+					// the sample that ends a non-looping voice is not played
+					out[i] = source.justEnded ? 0.0f : (float)(s * 256);
+				}
+			}
+			source.Store();
+		}
+
+		void RenderSamples(AXVPBInternal_t* pb, float* out, sint32 count)
+		{
+			const uint16 mode = pb->srcMode;
+			const uint16 format = pb->addr.format;
+			if (mode != AX_FILTER_MODE_TAP && mode != AX_FILTER_MODE_LINEAR && mode != AX_FILTER_MODE_NONE)
+			{
+				std::fill(out, out + count, 0.0f);
+				return;
+			}
+			// the tap (polyphase) filters are approximated by linear interpolation
+			const bool resample = mode != AX_FILTER_MODE_NONE;
+			switch (format)
+			{
+			case AX_FORMAT_ADPCM: RenderAdpcm(pb, resample, out, count); break;
+			case AX_FORMAT_PCM16: RenderPcm(pb, true, resample, out, count); break;
+			case AX_FORMAT_PCM8: RenderPcm(pb, false, resample, out, count); break;
+			default: std::fill(out, out + count, 0.0f); break;
+			}
+		}
+
+		// --- per-voice processing -------------------------------------------------------
+
+		// sndcore2 limits enveloped samples to the 24-bit range when the volume can exceed 1.0
+		float Limit24(float x)
+		{
+			return std::min(8388352.0f, std::max(-8388608.0f, x));
+		}
+
+		void ApplyEnvelope(AXVPBInternal_t* pb, float* x, sint32 count)
+		{
+			const uint16 volume = pb->veVolume;
+			const sint16 delta = (sint16)(uint16)pb->veDelta;
+			if (volume == kUnityVolume && delta == 0)
+				return;
+			const uint16 endVolume = (uint16)((sint32)volume + delta * count);
+			const bool limit = sndGeneric.isSoundCore2 && !(volume <= kUnityVolume && endVolume <= kUnityVolume);
+			float gain = (float)volume / kVolumeScale;
+			if (delta == 0)
+			{
+				for (sint32 i = 0; i < count; i++)
+					x[i] = limit ? Limit24(x[i] * gain) : x[i] * gain;
+				return;
+			}
+			const float step = (float)delta / kVolumeScale;
+			for (sint32 i = 0; i < count; i++)
+			{
+				gain += step;
+				x[i] = limit ? Limit24(x[i] * gain) : x[i] * gain;
+			}
+			pb->veVolume = endVolume;
+		}
+
+		// y = b0 x + b1 x[-1] + b2 x[-2] + a1 y[-1] + a2 y[-2], on 16-bit scaled samples,
+		// coefficients 2.14 (a1/a2 are stored with the sign the sum needs)
+		void ApplyBiquad(AXVPBInternal_t* pb, float* x, sint32 count)
+		{
+			AXPBBIQUAD_t& f = pb->biquad;
+			if (f.on == AX_BIQUAD_OFF)
+				return;
+			const float b0 = (float)Be16s(f.b0) / 16384.0f;
+			const float b1 = (float)Be16s(f.b1) / 16384.0f;
+			const float b2 = (float)Be16s(f.b2) / 16384.0f;
+			const float a1 = (float)Be16s(f.a1) / 16384.0f;
+			const float a2 = (float)Be16s(f.a2) / 16384.0f;
+			float x1 = (float)Be16s((uint16)f.xn1);
+			float x2 = (float)Be16s((uint16)f.xn2);
+			float y1 = (float)Be16s((uint16)f.yn1);
+			float y2 = (float)Be16s((uint16)f.yn2);
+			for (sint32 i = 0; i < count; i++)
+			{
+				const float in = x[i] / 256.0f;
+				const float y = b0 * in + b1 * x1 + b2 * x2 + a1 * y1 + a2 * y2;
+				x[i] = y * 256.0f;
+				x2 = x1;
+				x1 = in;
+				y2 = y1;
+				y1 = std::max(-32768.0f, std::min(32767.0f, y)); // feedback saturates at 16 bits
+			}
+			f.xn1 = (sint16)Be16((uint16)ToS16Wrap(x1));
+			f.xn2 = (sint16)Be16((uint16)ToS16Wrap(x2));
+			f.yn1 = (sint16)Be16((uint16)ToS16Wrap(y1));
+			f.yn2 = (sint16)Be16((uint16)ToS16Wrap(y2));
+		}
+
+		// y = a0 x - b0 y[-1], coefficients 0.15, state kept on the 16-bit scale
+		void ApplyLowPass(AXVPBInternal_t* pb, float* x, sint32 count)
+		{
+			AXPBLPF_t& f = pb->lpf;
+			if (f.on == AX_LPF_OFF)
+				return;
+			const float a0 = (float)Be16s((uint16)f.a0) / 32767.0f;
+			const float b0 = (float)Be16s((uint16)f.b0) / 32767.0f;
+			float y = (float)Be16s((uint16)f.yn1) * 256.0f / 32767.0f;
+			for (sint32 i = 0; i < count; i++)
+			{
+				y = a0 * x[i] - b0 * y;
+				x[i] = y;
+			}
+			f.yn1 = (sint16)Be16((uint16)ToS16Wrap(y / 256.0f * 32767.0f));
+		}
+
+		// add a voice into one bus lane with its volume (ramping by 'delta' per
+		// sample); the volume reached is written back for the next frame
+		void AddToLane(const float* in, float* lane, sint32 count, AXCHMIX_DEPR& mix)
+		{
+			const sint16 delta = Be16s((uint16)mix.delta);
+			float volume = (float)Be16(mix.vol) / kVolumeScale;
+			if (delta != 0)
+			{
+				const float step = (float)delta / kVolumeScale;
+				for (sint32 i = 0; i < count; i++)
+				{
+					volume += step;
+					lane[i] += in[i] * volume;
+				}
+			}
+			else
+			{
+				for (sint32 i = 0; i < count; i++)
+					lane[i] += in[i] * volume;
+			}
+			mix.vol = Be16(ToU16Wrap(volume * kVolumeScale));
+		}
+
+		float* TvLane(sint32 bus, sint32 channel, sint32 stride)
+		{
+			return s_tvLanes + (bus * AX_TV_CHANNEL_COUNT + channel) * stride;
+		}
+
+		float* DrcLane(sint32 bus, sint32 channel, sint32 stride)
+		{
+			return s_drcLanes + (bus * AX_DRC_CHANNEL_COUNT + channel) * stride;
+		}
+
+		uint32 MixBits(const uint16be& busMask, sint32 channel)
+		{
+			return ((uint32)(uint16)busMask >> (channel * 2)) & 3;
+		}
+
+		void MixVoice(AXVPBInternal_t* pb, const float* samples, sint32 count)
+		{
+			for (sint32 bus = 0; bus < AX_MAX_NUM_BUS; bus++)
+			{
+				for (sint32 ch = 0; ch < AX_TV_CHANNEL_COUNT; ch++)
+				{
+					uint16& now = pb->tvVolumeNow[bus * AX_TV_CHANNEL_COUNT + ch];
+					if (MixBits(pb->mixMaskTV[bus], ch) == 0)
+					{
+						now = 0;
+						continue;
+					}
+					AXCHMIX_DEPR& mix = pb->deviceMixTV[ch * AX_MAX_NUM_BUS + bus];
+					AddToLane(samples, TvLane(bus, ch, count), count, mix);
+					now = mix.vol;
+				}
+			}
+			// first GamePad only; the second GamePad and the remote speakers are not rendered
+			for (sint32 bus = 0; bus < AX_MAX_NUM_BUS; bus++)
+			{
+				for (sint32 ch = 0; ch < AX_DRC_CHANNEL_COUNT; ch++)
+				{
+					if (MixBits(pb->mixMaskDRC[bus], ch) == 0)
+						continue;
+					AddToLane(samples, DrcLane(bus, ch, count), count, pb->deviceMixDRC[ch * AX_MAX_NUM_BUS + bus]);
+				}
+			}
+		}
+
+		void RenderVoices(AXVPBInternal_t* first, sint32 count)
+		{
+			float buffer[AX_SAMPLES_MAX];
+			for (AXVPBInternal_t* pb = first; pb; pb = pb->nextToProcess.GetPtr())
+			{
+				RenderSamples(pb, buffer, count);
+				ApplyEnvelope(pb, buffer, count);
+				ApplyBiquad(pb, buffer, count);
+				ApplyLowPass(pb, buffer, count);
+				MixVoice(pb, buffer, count);
+			}
+		}
+
+		// --- buses ------------------------------------------------------------------------
+
+		// aux sends go to the effects at 16-bit scale
+		void SendAux(sint32 count)
+		{
+			const sint32 n = count * AX_TV_CHANNEL_COUNT;
+			for (sint32 aux = 0; aux < AX_AUX_BUS_COUNT; aux++)
+			{
+				sint32be* send = AXAux_GetInputBuffer(AX_DEV_TV, 0, aux);
+				if (!send)
+					continue;
+				const float* lanes = TvLane(1 + aux, 0, count);
+				for (sint32 i = 0; i < n; i++)
+					send[i] = (sint32)lanes[i] >> 8;
+			}
+		}
+
+		void AddMainToDevice(const float* lanes, sint32be* out, sint32 samples)
+		{
+			constexpr float kMasterGain = (float)kUnityVolume / kVolumeScale;
+			for (sint32 i = 0; i < samples; i++)
+				out[i] = AddWrap(out[i], (sint32)(lanes[i] * kMasterGain));
+		}
+
+		void FinishTV(sint32 count)
+		{
+			const sint32 n = count * AX_TV_CHANNEL_COUNT;
+			float* main = TvLane(0, 0, count);
+			if (ActiveSettings::AudioOutputOnlyAux())
+				std::fill(main, main + n, 0.0f); // debug option: hear only what the effects return
+			for (sint32 aux = 0; aux < AX_AUX_BUS_COUNT; aux++)
+			{
+				const sint32be* ret = AXAux_GetOutputBuffer(AX_DEV_TV, 0, aux);
+				if (!ret)
+					continue;
+				const float gain = (float)__AXTVAuxReturnVolume[aux] / kVolumeScale;
+				for (sint32 i = 0; i < n; i++)
+					main[i] += (float)((sint32)ret[i] << 8) * gain;
+			}
+			AddMainToDevice(main, AXIst_TVMix(), n);
+		}
+
+		void FinishDRC(sint32 count)
+		{
+			AddMainToDevice(DrcLane(0, 0, count), AXIst_DRCMix(), count * AX_DRC_CHANNEL_COUNT);
+		}
+	}
 
 	void AXSetDefaultMixerSelect(uint32 mixerSelect)
 	{
-		__AXDefaultMixerSelect = mixerSelect;
+		s_defaultMixerSelect = mixerSelect;
 	}
 
 	uint32 AXGetDefaultMixerSelect()
 	{
-		return __AXDefaultMixerSelect;
+		return s_defaultMixerSelect;
 	}
 
 	void AXMix_Init()
 	{
+		// everything is rendered on the host, so voices default to the PPC mixer
 		AXSetDefaultMixerSelect(AX_MIXER_SELECT_PPC);
 	}
 
-	void AXMix_DepopVoice(AXVPBInternal_t* internalShadowCopy)
+	void AXMix_process(AXVPBInternal_t* firstDspBlock)
 	{
-		// todo
-	}
-
-#define handleAdpcmDecodeLoop() \
-	if (internalShadowCopy->internalOffsets.loopFlag != 0) \
-	{	\
-		scale = _swapEndianU16(internalShadowCopy->adpcmLoop.loopScale); \
-		delta = 1 << (scale & 0xF); \
-		coefIndex = (scale >> 4) & 7; \
-		coefA = (sint32)(sint16)_swapEndianU16(internalShadowCopy->adpcmData.coef[coefIndex * 2 + 0]); \
-		coefB = (sint32)(sint16)_swapEndianU16(internalShadowCopy->adpcmData.coef[coefIndex * 2 + 1]); \
-		playbackNibbleOffset = vpbLoopOffset; \
-	} \
-	else \
-	{ \
-		/* no loop */ \
-		internalShadowCopy->playbackState = 0; \
-		memset(outputWriter, 0, sampleCount * sizeof(sint16)); \
-		break; \
-	}
-
-	uint32 _AX_fixAdpcmEndOffset(uint32 adpcmOffset)
-	{
-		// How to Survive uses an end offset of 0x40000 which is not a valid adpcm sample offset and thus can never be reached (the ppc side decoder jumps from 0x3FFFF to 0x40002)
-		// todo - investigate if the DSP decoder routines can handle invalid ADPCM end offsets
-
-		// for now we use this workaround to force a valid address
-		if ((adpcmOffset & 0xF) <= 1)
-			return adpcmOffset + 2;
-		return adpcmOffset;
-	}
-
-	void AX_readADPCMSamples(AXVPBInternal_t* internalShadowCopy, sint16* output, sint32 sampleCount)
-	{
-		if (internalShadowCopy->playbackState == 0)
-		{
-			memset(output, 0, sampleCount * sizeof(sint16));
-			return;
-		}
-
-		AXVPB* vpb = __AXVPBArrayPtr + (sint32)internalShadowCopy->index;
-
-		uint8* sampleBase = (uint8*)memory_getPointerFromVirtualOffset(_swapEndianU32(vpb->offsets.samples));
-
-		uint32 vpbLoopOffset = _swapEndianU32(*(uint32*)&vpb->offsets.loopOffset);
-		uint32 vpbEndOffset = _swapEndianU32(*(uint32*)&vpb->offsets.endOffset);
-		
-		vpbEndOffset = _AX_fixAdpcmEndOffset(vpbEndOffset);
-
-		uint32 internalCurrentOffset = _swapEndianU32(*(uint32*)&internalShadowCopy->internalOffsets.currentOffsetPtrHigh);
-		uint32 internalLoopOffset = _swapEndianU32(*(uint32*)&internalShadowCopy->internalOffsets.loopOffsetPtrHigh);
-
-		sint32 scale = (sint32)_swapEndianU16(internalShadowCopy->adpcmData.scale);
-		sint32 delta = 1 << (scale & 0xF);
-		sint32 coefIndex = (scale >> 4) & 7;
-
-		sint32 coefA = (sint32)(sint16)_swapEndianU16(internalShadowCopy->adpcmData.coef[coefIndex * 2 + 0]);
-		sint32 coefB = (sint32)(sint16)_swapEndianU16(internalShadowCopy->adpcmData.coef[coefIndex * 2 + 1]);
-
-		sint32 hist0 = (sint32)_swapEndianS16(internalShadowCopy->adpcmData.yn1);
-		sint32 hist1 = (sint32)_swapEndianS16(internalShadowCopy->adpcmData.yn2);
-
-		uint32 playbackNibbleOffset = vpbLoopOffset + (internalCurrentOffset - internalLoopOffset);
-		uint32 playbackNibbleOffsetStart = playbackNibbleOffset;
-
-		sint16* outputWriter = output;
-		// decode samples from current partial ADPCM block
-		while (sampleCount && (playbackNibbleOffset & 0xF))
-		{
-			sint8 nibble = (sint8)sampleBase[(sint32)playbackNibbleOffset >> 1];
-			nibble <<= (4 * ((playbackNibbleOffset & 1)));
-			nibble &= 0xF0;
-			sint32 v = (sint32)nibble;
-			v <<= (11 - 4);
-			v *= delta;
-			v += (hist0 * coefA + hist1 * coefB);
-			v = (v + 0x400) >> 11;
-			v = std::clamp(v, -32768, 32767);
-
-			hist1 = hist0;
-			hist0 = v;
-			*outputWriter = v;
-			outputWriter++;
-
-			// check for loop / end offset
-			if (playbackNibbleOffset == vpbEndOffset)
-			{
-				handleAdpcmDecodeLoop();
-			}
-			else
-			{
-				playbackNibbleOffset++;
-			}
-			sampleCount--;
-		}
-		// optimized code to decode whole blocks
-		if (!(playbackNibbleOffset <= vpbEndOffset && ((uint64)playbackNibbleOffset + (uint64)(sampleCount * 16 / 14)) >= (uint64)vpbEndOffset))
-		{
-			while (sampleCount >= 14) // 14 samples per 16 byte block
-			{
-				// decode header
-				sint8* sampleInputData = (sint8*)sampleBase + ((sint32)playbackNibbleOffset >> 1);
-				scale = (uint8)sampleInputData[0];
-				delta = 1 << (scale & 0xF);
-				coefIndex = (scale >> 4) & 7;
-				coefA = (sint32)(sint16)_swapEndianU16(internalShadowCopy->adpcmData.coef[coefIndex * 2 + 0]);
-				coefB = (sint32)(sint16)_swapEndianU16(internalShadowCopy->adpcmData.coef[coefIndex * 2 + 1]);
-				playbackNibbleOffset += 2;
-				// decode samples
-				sampleInputData++;
-				for (sint32 i = 0; i < 7; i++)
-				{
-					// n0
-					sint8 nibble = *sampleInputData;
-					sampleInputData++;
-					sint32 v;
-					// upper nibble
-					v = (sint32)(sint8)(nibble & 0xF0);
-					v <<= (11 - 4);
-					v *= delta;
-					v += (hist0 * coefA + hist1 * coefB);
-					v = (v + 0x400) >> 11;
-
-					v = std::min(v, 32767);
-					v = std::max(v, -32768);
-
-					hist1 = hist0;
-					hist0 = v;
-					*outputWriter = v;
-					outputWriter++;
-					// lower nibble
-					v = (sint32)(sint8)(nibble << 4);
-					v <<= (11 - 4);
-					v *= delta;
-					v += (hist0 * coefA + hist1 * coefB);
-					v = (v + 0x400) >> 11;
-
-					v = std::min(v, 32767);
-					v = std::max(v, -32768);
-
-					hist1 = hist0;
-					hist0 = v;
-
-					*outputWriter = v;
-					outputWriter++;
-				}
-				playbackNibbleOffset += 7 * 2;
-				sampleCount -= 7 * 2;
-			}
-		}
-		// decode remaining samples
-		while (sampleCount)
-		{
-			if ((playbackNibbleOffset & 0xF) == 0)
-			{
-				scale = sampleBase[(sint32)playbackNibbleOffset >> 1];
-				delta = 1 << (scale & 0xF);
-				coefIndex = (scale >> 4) & 7;
-				coefA = (sint32)(sint16)_swapEndianU16(internalShadowCopy->adpcmData.coef[coefIndex * 2 + 0]);
-				coefB = (sint32)(sint16)_swapEndianU16(internalShadowCopy->adpcmData.coef[coefIndex * 2 + 1]);
-				playbackNibbleOffset += 2;
-			}
-			sint8 nibble = (sint8)sampleBase[(sint32)playbackNibbleOffset >> 1];
-			nibble <<= (4 * ((playbackNibbleOffset & 1)));
-			nibble &= 0xF0;
-			sint32 v = (sint32)nibble;
-			v <<= (11 - 4);
-			v *= delta;
-			v += (hist0 * coefA + hist1 * coefB);
-			v = (v + 0x400) >> 11;
-
-			v = std::min(v, 32767);
-			v = std::max(v, -32768);
-
-			hist1 = hist0;
-			hist0 = v;
-			*outputWriter = v;
-			outputWriter++;
-
-			// check for loop / end offset
-			if (playbackNibbleOffset == vpbEndOffset)
-			{
-				handleAdpcmDecodeLoop();
-			}
-			else
-			{
-				playbackNibbleOffset++;
-			}
-			sampleCount--;
-		}
-
-		// write updated values
-		internalShadowCopy->adpcmData.scale = _swapEndianU16(scale);
-		internalShadowCopy->adpcmData.yn1 = (uint16)_swapEndianS16(hist0);
-		internalShadowCopy->adpcmData.yn2 = (uint16)_swapEndianS16(hist1);
-
-		uint32 newInternalCurrentOffset = internalCurrentOffset + (playbackNibbleOffset - playbackNibbleOffsetStart);
-		*(uint32*)&internalShadowCopy->internalOffsets.currentOffsetPtrHigh = _swapEndianU32(newInternalCurrentOffset);
-	}
-
-	void AX_DecodeSamplesADPCM_NoSrc(AXVPBInternal_t* internalShadowCopy, float* output, sint32 sampleCount)
-	{
-		sint16 sampleBuffer[1024];
-		cemu_assert(sampleCount <= (sizeof(sampleBuffer) / sizeof(sampleBuffer[0])));
-		AX_readADPCMSamples(internalShadowCopy, sampleBuffer, sampleCount);
-		for (sint32 i = 0; i < sampleCount; i++)
-		{
-			// decode next sample
-			sint32 s = sampleBuffer[i];
-			s <<= 8;
-			*output = (float)s;
-			output++;
-		}
-	}
-
-	void AX_DecodeSamplesADPCM_Linear(AXVPBInternal_t* internalShadowCopy, float* output, sint32 sampleCount)
-	{
-		uint32 currentFracPos = (uint32)_swapEndianU16(internalShadowCopy->src.currentFrac);
-		uint32 ratio = _swapEndianU32(*(uint32*)&internalShadowCopy->src.ratioHigh);
-
-		sint16 historySamples[4];
-		historySamples[0] = _swapEndianS16(internalShadowCopy->src.historySamples[0]);
-		historySamples[1] = _swapEndianS16(internalShadowCopy->src.historySamples[1]);
-		historySamples[2] = _swapEndianS16(internalShadowCopy->src.historySamples[2]);
-		historySamples[3] = _swapEndianS16(internalShadowCopy->src.historySamples[3]);
-
-		sint32 historyIndex = 0;
-
-		sint32 numberOfDecodedAdpcmSamples = (sint32)((currentFracPos + ratio * sampleCount) >> 16);
-		sint16 adpcmSampleBuffer[4096];
-		if (numberOfDecodedAdpcmSamples >= 4096)
-		{
-			memset(output, 0, sizeof(float)*sampleCount);
-			cemuLog_log(LogType::Force, "Too many ADPCM samples to decode. ratio = {:08x}", ratio);
-			return;
-		}
-		AX_readADPCMSamples(internalShadowCopy, adpcmSampleBuffer, numberOfDecodedAdpcmSamples);
-
-		sint32 readSampleCount = 0;
-
-		if (ratio == 0x10000 && currentFracPos == 0)
-		{
-			// optimized path when accessing only fully aligned samples
-			for (sint32 i = 0; i < sampleCount; i++)
-			{
-				cemu_assert_debug(readSampleCount < numberOfDecodedAdpcmSamples);
-				// get next sample
-				sint16 s = adpcmSampleBuffer[readSampleCount];
-				readSampleCount++;
-				historyIndex = (historyIndex + 1) & 3;
-				historySamples[historyIndex] = s;
-				// use previous sample
-				sint32 previousSample = historySamples[(historyIndex + 3) & 3];
-				sint32 p0 = previousSample << 8;
-				*output = (float)p0;
-				output++;
-			}
-		}
-		else
-		{
-			for (sint32 i = 0; i < sampleCount; i++)
-			{
-				// move playback pos
-				currentFracPos += ratio;
-				// get more samples if needed
-				while (currentFracPos >= 0x10000)
-				{
-					cemu_assert_debug(readSampleCount < numberOfDecodedAdpcmSamples);
-					sint16 s = adpcmSampleBuffer[readSampleCount];
-					readSampleCount++;
-					currentFracPos -= 0x10000;
-					historyIndex = (historyIndex + 1) & 3;
-					historySamples[historyIndex] = s;
-				}
-				// linear interpolation of current sample
-				sint32 previousSample = historySamples[(historyIndex + 3) & 3];
-				sint32 nextSample = historySamples[historyIndex];
-
-				sint32 p0 = (sint32)previousSample * (sint32)(0x10000 - currentFracPos);
-				sint32 p1 = (sint32)nextSample * (sint32)(currentFracPos);
-
-				p0 >>= 7;
-				p1 >>= 7;
-
-				sint32 interpolatedSample = p0 + p1;
-				interpolatedSample >>= 1;
-
-				*output = (float)interpolatedSample;
-				output++;
-			}
-		}
-		cemu_assert_debug(readSampleCount == numberOfDecodedAdpcmSamples);
-		// set variables
-		internalShadowCopy->src.currentFrac = _swapEndianU16((uint16)(currentFracPos));
-		internalShadowCopy->src.historySamples[0] = _swapEndianS16(historySamples[(historyIndex + 0) & 3]);
-		internalShadowCopy->src.historySamples[1] = _swapEndianS16(historySamples[(historyIndex + 1) & 3]);
-		internalShadowCopy->src.historySamples[2] = _swapEndianS16(historySamples[(historyIndex + 2) & 3]);
-		internalShadowCopy->src.historySamples[3] = _swapEndianS16(historySamples[(historyIndex + 3) & 3]);
-	}
-
-	void AX_DecodeSamplesADPCM_Tap(AXVPBInternal_t* internalShadowCopy, float* output, sint32 sampleCount)
-	{
-		// todo - implement this
-		AX_DecodeSamplesADPCM_Linear(internalShadowCopy, output, sampleCount);
-	}
-
-	void AX_DecodeSamplesPCM8_Linear(AXVPBInternal_t* internalShadowCopy, float* output, sint32 sampleCount)
-	{
-		// get variables
-		uint32 currentFracPos = (uint32)_swapEndianU16(internalShadowCopy->src.currentFrac);
-		uint32 ratio = _swapEndianU32(*(uint32*)&internalShadowCopy->src.ratioHigh);
-
-		uint32 endOffsetPtr = _swapEndianU32(*(uint32*)&internalShadowCopy->internalOffsets.endOffsetPtrHigh);
-		uint32 currentOffsetPtr = _swapEndianU32(*(uint32*)&internalShadowCopy->internalOffsets.currentOffsetPtrHigh);
-		uint32 loopOffsetPtr = _swapEndianU32(*(uint32*)&internalShadowCopy->internalOffsets.loopOffsetPtrHigh);
-		uint32 ptrHighExtension = _swapEndianU16(internalShadowCopy->internalOffsets.ptrHighExtension);
-
-		uint8* endOffsetAddr = memory_base + (endOffsetPtr | (ptrHighExtension << 29));
-		uint8* currentOffsetAddr = memory_base + (currentOffsetPtr | (ptrHighExtension << 29));
-
-		sint16 historySamples[4];
-		historySamples[0] = _swapEndianS16(internalShadowCopy->src.historySamples[0]);
-		historySamples[1] = _swapEndianS16(internalShadowCopy->src.historySamples[1]);
-		historySamples[2] = _swapEndianS16(internalShadowCopy->src.historySamples[2]);
-		historySamples[3] = _swapEndianS16(internalShadowCopy->src.historySamples[3]);
-
-		sint32 historyIndex = 0;
-
-		for (sint32 i = 0; i<sampleCount; i++)
-		{
-			currentFracPos += ratio;
-			while (currentFracPos >= 0x10000)
-			{
-				// read next sample
-				historyIndex = (historyIndex + 1) & 3;
-				if (internalShadowCopy->playbackState)
-				{
-					sint32 s = (sint32)(sint8)*currentOffsetAddr;
-					s <<= 8;
-					historySamples[historyIndex] = s;
-					if (currentOffsetAddr == endOffsetAddr)
-					{
-						if (internalShadowCopy->internalOffsets.loopFlag)
-						{
-							// loop
-							currentOffsetAddr = memory_base + (loopOffsetPtr | (ptrHighExtension << 29));
-						}
-						else
-						{
-							// stop playing
-							internalShadowCopy->playbackState = 0;
-						}
-					}
-					else
-					{
-						currentOffsetAddr++;
-					}
-				}
-				else
-				{
-					// voice not playing, read sample as 0
-					historySamples[historyIndex] = 0;
-				}
-				currentFracPos -= 0x10000;
-			}
-			// interpolate sample
-			sint32 previousSample = historySamples[(historyIndex + 3) & 3];
-			sint32 nextSample = historySamples[historyIndex];
-			sint32 p0 = (sint32)previousSample * (sint32)(0x10000 - currentFracPos);
-			sint32 p1 = (sint32)nextSample * (sint32)(currentFracPos);
-			p0 >>= 7;
-			p1 >>= 7;
-			sint32 interpolatedSample = p0 + p1;
-			interpolatedSample >>= 1;
-			*output = (float)interpolatedSample;
-			output++;
-		}
-		// set variables
-		internalShadowCopy->src.currentFrac = _swapEndianU16((uint16)(currentFracPos));
-		internalShadowCopy->src.historySamples[0] = _swapEndianS16(historySamples[(historyIndex + 0) & 3]);
-		internalShadowCopy->src.historySamples[1] = _swapEndianS16(historySamples[(historyIndex + 1) & 3]);
-		internalShadowCopy->src.historySamples[2] = _swapEndianS16(historySamples[(historyIndex + 2) & 3]);
-		internalShadowCopy->src.historySamples[3] = _swapEndianS16(historySamples[(historyIndex + 3) & 3]);
-		// store current offset
-		currentOffsetPtr = (uint32)((uint8*)currentOffsetAddr - memory_base);
-		currentOffsetPtr &= 0x1FFFFFFF; // is this correct?
-		*(uint32*)&internalShadowCopy->internalOffsets.currentOffsetPtrHigh = _swapEndianU32(currentOffsetPtr);
-	}
-
-	void AX_DecodeSamplesPCM8_Tap(AXVPBInternal_t* internalShadowCopy, float* output, sint32 sampleCount)
-	{
-		// todo - implement this
-		AX_DecodeSamplesPCM8_Linear(internalShadowCopy, output, sampleCount);
-	}
-
-	void AX_DecodeSamplesPCM8_NoSrc(AXVPBInternal_t* internalShadowCopy, float* output, sint32 sampleCount)
-	{
-		// get variables
-		uint32 currentFracPos = (uint32)_swapEndianU16(internalShadowCopy->src.currentFrac);
-		uint32 ratio = _swapEndianU32(*(uint32*)&internalShadowCopy->src.ratioHigh);
-
-		uint32 endOffsetPtr = _swapEndianU32(*(uint32*)&internalShadowCopy->internalOffsets.endOffsetPtrHigh);
-		uint32 currentOffsetPtr = _swapEndianU32(*(uint32*)&internalShadowCopy->internalOffsets.currentOffsetPtrHigh);
-		uint32 ptrHighExtension = _swapEndianU16(internalShadowCopy->internalOffsets.ptrHighExtension);
-
-		uint8* endOffsetAddr = memory_base + (endOffsetPtr | (ptrHighExtension << 29));
-		uint8* currentOffsetAddr = memory_base + (currentOffsetPtr | (ptrHighExtension << 29));
-
-		sint16 historySamples[4];
-		historySamples[0] = _swapEndianS16(internalShadowCopy->src.historySamples[0]);
-		historySamples[1] = _swapEndianS16(internalShadowCopy->src.historySamples[1]);
-		historySamples[2] = _swapEndianS16(internalShadowCopy->src.historySamples[2]);
-		historySamples[3] = _swapEndianS16(internalShadowCopy->src.historySamples[3]);
-
-		cemu_assert_debug(false); // todo
-	}
-
-	void AX_DecodeSamplesPCM16_Linear(AXVPBInternal_t* internalShadowCopy, float* output, sint32 sampleCount)
-	{
-		uint32 currentFracPos = (uint32)_swapEndianU16(internalShadowCopy->src.currentFrac);
-		uint32 ratio = _swapEndianU32(*(uint32*)&internalShadowCopy->src.ratioHigh);
-
-		uint32 endOffsetPtr = _swapEndianU32(*(uint32*)&internalShadowCopy->internalOffsets.endOffsetPtrHigh);
-		uint32 currentOffsetPtr = _swapEndianU32(*(uint32*)&internalShadowCopy->internalOffsets.currentOffsetPtrHigh);
-		uint32 loopOffsetPtr = _swapEndianU32(*(uint32*)&internalShadowCopy->internalOffsets.loopOffsetPtrHigh);
-		uint32 ptrHighExtension = _swapEndianU16(internalShadowCopy->internalOffsets.ptrHighExtension);
-
-		uint16* endOffsetAddr = (uint16*)(memory_base + ((endOffsetPtr * 2) | (ptrHighExtension << 29)));
-		uint16* currentOffsetAddr = (uint16*)(memory_base + ((currentOffsetPtr * 2) | (ptrHighExtension << 29)));
-
-		sint16 historySamples[4];
-		historySamples[0] = _swapEndianS16(internalShadowCopy->src.historySamples[0]);
-		historySamples[1] = _swapEndianS16(internalShadowCopy->src.historySamples[1]);
-		historySamples[2] = _swapEndianS16(internalShadowCopy->src.historySamples[2]);
-		historySamples[3] = _swapEndianS16(internalShadowCopy->src.historySamples[3]);
-
-		sint32 historyIndex = 0;
-
-		sint32 s = 0;
-		for (sint32 i = 0; i < sampleCount; i++)
-		{
-			currentFracPos += ratio;
-			while (currentFracPos >= 0x10000)
-			{
-				// read next sample
-				sint32 prevIndex = historyIndex;
-				historyIndex = (historyIndex + 1) & 3;
-				if (internalShadowCopy->playbackState)
-				{
-					s = _swapEndianS16(*currentOffsetAddr);
-					historySamples[prevIndex] = s;
-					if (currentOffsetAddr == endOffsetAddr)
-					{
-						if (internalShadowCopy->internalOffsets.loopFlag)
-						{
-							// loop
-							currentOffsetAddr = (uint16*)(memory_base + ((loopOffsetPtr * 2) | (ptrHighExtension << 29)));
-						}
-						else
-						{
-							// stop playing
-							internalShadowCopy->playbackState = 0;
-						}
-					}
-					else
-					{
-						currentOffsetAddr++; // increment pointer only if not at end offset
-					}
-				}
-				else
-				{
-					// voice not playing -> repeat previous sample
-					historySamples[prevIndex] = s;
-				}
-				currentFracPos -= 0x10000;
-			}
-			// interpolate sample
-			sint32 curSample = historySamples[historyIndex];
-			sint32 nextSample = historySamples[(historyIndex + 1) & 3];
-
-			sint32 p0 = (sint32)curSample * (sint32)(0x10000 - currentFracPos);
-			sint32 p1 = (sint32)nextSample * (sint32)(currentFracPos);
-			p0 >>= 7;
-			p1 >>= 7;
-			sint32 interpolatedSample = p0 + p1;
-			interpolatedSample >>= 1;
-
-			*output = (float)interpolatedSample;
-			output++;
-		}
-
-		// set variables
-		internalShadowCopy->src.currentFrac = _swapEndianU16((uint16)(currentFracPos));
-		internalShadowCopy->src.historySamples[0] = _swapEndianS16(historySamples[(historyIndex + 0) & 3]);
-		internalShadowCopy->src.historySamples[1] = _swapEndianS16(historySamples[(historyIndex + 1) & 3]);
-		internalShadowCopy->src.historySamples[2] = _swapEndianS16(historySamples[(historyIndex + 2) & 3]);
-		internalShadowCopy->src.historySamples[3] = _swapEndianS16(historySamples[(historyIndex + 3) & 3]);
-		// store current offset
-		currentOffsetPtr = (uint32)((uint8*)currentOffsetAddr - memory_base);
-		currentOffsetPtr &= 0x1FFFFFFF;
-		currentOffsetPtr >>= 1;
-		*(uint32*)&internalShadowCopy->internalOffsets.currentOffsetPtrHigh = _swapEndianU32(currentOffsetPtr);
-	}
-
-	void AX_DecodeSamplesPCM16_Tap(AXVPBInternal_t* internalShadowCopy, float* output, sint32 sampleCount)
-	{
-		// todo - implement this
-		AX_DecodeSamplesPCM16_Linear(internalShadowCopy, output, sampleCount);
-	}
-
-	void AX_DecodeSamplesPCM16_NoSrc(AXVPBInternal_t* internalShadowCopy, float* output, sint32 sampleCount)
-	{
-		// get variables
-		uint32 currentFracPos = (uint32)_swapEndianU16(internalShadowCopy->src.currentFrac);
-		uint32 ratio = _swapEndianU32(*(uint32*)&internalShadowCopy->src.ratioHigh);
-
-		uint32 endOffsetPtr = _swapEndianU32(*(uint32*)&internalShadowCopy->internalOffsets.endOffsetPtrHigh);
-		uint32 currentOffsetPtr = _swapEndianU32(*(uint32*)&internalShadowCopy->internalOffsets.currentOffsetPtrHigh);
-		uint32 loopOffsetPtr = _swapEndianU32(*(uint32*)&internalShadowCopy->internalOffsets.loopOffsetPtrHigh);
-		uint32 ptrHighExtension = _swapEndianU16(internalShadowCopy->internalOffsets.ptrHighExtension);
-
-		uint16* endOffsetAddr = (uint16*)(memory_base + (endOffsetPtr * 2 | (ptrHighExtension << 29)));
-		uint16* currentOffsetAddr = (uint16*)(memory_base + (currentOffsetPtr * 2 | (ptrHighExtension << 29)));
-
-		if (internalShadowCopy->playbackState == 0)
-		{
-			memset(output, 0, sizeof(float)*sampleCount);
-			return;
-		}
-
-		for (sint32 i = 0; i < sampleCount; i++)
-		{
-			sint32 s = _swapEndianS16(*currentOffsetAddr);
-			s <<= 8;
-			output[i] = (float)s;
-			if (currentOffsetAddr == endOffsetAddr)
-			{
-				if (internalShadowCopy->internalOffsets.loopFlag)
-				{
-					currentOffsetAddr = (uint16*)(memory_base + (loopOffsetPtr * 2 | (ptrHighExtension << 29)));
-				}
-				else
-				{
-					internalShadowCopy->playbackState = 0;
-					for (; i < sampleCount; i++)
-					{
-						output[i] = 0.0f;
-					}
-					break;
-				}
-			}
-			else
-				currentOffsetAddr++;
-		}
-		// store current offset
-		currentOffsetPtr = (uint32)((uint8*)currentOffsetAddr - memory_base);
-		currentOffsetPtr &= 0x1FFFFFFF;
-		currentOffsetPtr >>= 1;
-
-		*(uint32*)&internalShadowCopy->internalOffsets.currentOffsetPtrHigh = _swapEndianU32(currentOffsetPtr);
-	}
-
-	void AXVoiceMix_DecodeSamples(AXVPBInternal_t* internalShadowCopy, float* output, sint32 sampleCount)
-	{
-		uint32 srcFilterMode = _swapEndianU16(internalShadowCopy->srcFilterMode);
-		uint16 format = _swapEndianU16(internalShadowCopy->internalOffsets.format);
-
-		if (srcFilterMode == AX_FILTER_MODE_TAP)
-		{
-			if (format == AX_FORMAT_ADPCM)
-				AX_DecodeSamplesADPCM_Tap(internalShadowCopy, output, sampleCount);
-			else if (format == AX_FORMAT_PCM16)
-				AX_DecodeSamplesPCM16_Tap(internalShadowCopy, output, sampleCount);
-			else if (format == AX_FORMAT_PCM8)
-				AX_DecodeSamplesPCM8_Tap(internalShadowCopy, output, sampleCount);
-			else
-				cemu_assert_debug(false);
-		}
-		else if (srcFilterMode == AX_FILTER_MODE_LINEAR)
-		{
-			if (format == AX_FORMAT_ADPCM)
-				AX_DecodeSamplesADPCM_Linear(internalShadowCopy, output, sampleCount);
-			else if (format == AX_FORMAT_PCM16)
-				AX_DecodeSamplesPCM16_Linear(internalShadowCopy, output, sampleCount);
-			else if (format == AX_FORMAT_PCM8)
-				AX_DecodeSamplesPCM8_Linear(internalShadowCopy, output, sampleCount);
-			else
-				cemu_assert_debug(false);
-		}
-		else if (srcFilterMode == AX_FILTER_MODE_NONE)
-		{
-			if (format == AX_FORMAT_ADPCM)
-				AX_DecodeSamplesADPCM_NoSrc(internalShadowCopy, output, sampleCount);
-			else if (format == AX_FORMAT_PCM16)
-				AX_DecodeSamplesPCM16_NoSrc(internalShadowCopy, output, sampleCount);
-			else if (format == AX_FORMAT_PCM8)
-				AX_DecodeSamplesPCM8_NoSrc(internalShadowCopy, output, sampleCount);
-			else
-				cemu_assert_debug(false);
-		}
-	}
-
-	sint32 AXVoiceMix_MergeInto(float* inputSamples, float* outputSamples, sint32 sampleCount, AXCHMIX_DEPR* mix, sint16 deltaI)
-	{
-		float vol = (float)_swapEndianU16(mix->vol) / (float)0x8000;
-		if (deltaI != 0)
-		{
-			float delta = (float)deltaI / (float)0x8000;
-			for (sint32 i = 0; i < sampleCount; i++)
-			{
-				vol += delta;
-				outputSamples[i] += inputSamples[i] * vol;
-			}
-		}
-		else
-		{
-			// optimized version for delta == 0.0
-			for (sint32 i = 0; i < sampleCount; i++)
-			{
-				outputSamples[i] += inputSamples[i] * vol;
-			}
-		}
-		uint16 volI = (uint16)(vol * 32768.0f);
-		mix->vol = _swapEndianU16(volI);
-		return volI;
-	}
-
-	float __AXMixBufferTV[AX_SAMPLES_MAX * AX_TV_CHANNEL_COUNT * AX_BUS_COUNT];
-	float __AXMixBufferDRC[2 * AX_SAMPLES_MAX * AX_DRC_CHANNEL_COUNT * AX_BUS_COUNT];
-
-	void AXVoiceMix_ApplyADSR_NoClamp(AXVPBInternal_t* internalShadowCopy, float* sampleData, sint32 sampleCount)
-	{
-		uint16 volume = internalShadowCopy->veVolume;
-		sint16 volumeDelta = (sint16)internalShadowCopy->veDelta;
-		if (volume == 0x8000 && volumeDelta == 0)
-			return;
-		float volumeScaler = (float)volume / 32768.0f;
-		if (volumeDelta == 0)
-		{
-			// without delta
-			for (sint32 i = 0; i < sampleCount; i += 4)
-			{
-				sampleData[i+0] *= volumeScaler;
-				sampleData[i+1] *= volumeScaler;
-				sampleData[i+2] *= volumeScaler;
-				sampleData[i+3] *= volumeScaler;
-			}
-			return;
-		}
-		// with delta
-		float volumeScalerDelta = volumeDelta / 32768.0f;
-		for (sint32 i = 0; i < sampleCount; i++)
-		{
-			volumeScaler += (float)volumeScalerDelta;
-			sampleData[i] *= volumeScaler;
-		}
-		internalShadowCopy->veVolume = (uint16)((sint32)internalShadowCopy->veVolume + volumeDelta * sampleCount);
-	}
-
-	FORCE_INLINE float ClampADSRSample(float x)
-	{
-		if (x > 8388352.0f)
-			return 8388352.0f;
-		if (x < -8388608.0f)
-			return -8388608.0f;
-		return x;
-	}
-
-	void AXVoiceMix_ApplyADSR_Sndcore2(AXVPBInternal_t* internalShadowCopy, float* sampleData, sint32 sampleCount)
-	{
-		// sndcore2 clamps samples to -8388608,8388352 range (16bit signed range << 8)
-		uint16 volume = internalShadowCopy->veVolume;
-		sint16 volumeDelta = (sint16)internalShadowCopy->veDelta;
-		uint16 finalVolume =  (uint16)((sint32)volume + volumeDelta * sampleCount);
-		if (volume == 0x8000 && volumeDelta == 0)
-			return;
-		if (volume <= 0x8000 && finalVolume <= 0x8000) // if volume scaler doesn't exceed 1.0 then we don't need to clamp. We assume that volume never wraps around
-			return AXVoiceMix_ApplyADSR_NoClamp(internalShadowCopy, sampleData, sampleCount);
-		float volumeScaler = (float)volume / 32768.0f;
-		if (volumeDelta == 0)
-		{
-			// without delta
-			for (sint32 i = 0; i < sampleCount; i += 4)
-			{
-				sampleData[i+0] = ClampADSRSample(sampleData[i+0] * volumeScaler);
-				sampleData[i+1] = ClampADSRSample(sampleData[i+1] * volumeScaler);
-				sampleData[i+2] = ClampADSRSample(sampleData[i+2] * volumeScaler);
-				sampleData[i+3] = ClampADSRSample(sampleData[i+3] * volumeScaler);
-			}
-			return;
-		}
-		// with delta
-		float volumeScalerDelta = volumeDelta / 32768.0f;
-		for (sint32 i = 0; i < sampleCount; i++)
-		{
-			volumeScaler += volumeScalerDelta;
-			sampleData[i] = ClampADSRSample(sampleData[i] * volumeScaler);
-		}
-		internalShadowCopy->veVolume = finalVolume;
-	}
-
-	void AXVoiceMix_ApplyADSR(AXVPBInternal_t* internalShadowCopy, float* sampleData, sint32 sampleCount)
-	{
-		if (sndGeneric.isSoundCore2)
-			AXVoiceMix_ApplyADSR_Sndcore2(internalShadowCopy, sampleData, sampleCount);
-		else
-			AXVoiceMix_ApplyADSR_NoClamp(internalShadowCopy, sampleData, sampleCount);
-	}
-
-	void AXVoiceMix_ApplyBiquad(AXVPBInternal_t* internalShadowCopy, float* sampleData, sint32 sampleCount)
-	{
-		if (internalShadowCopy->biquad.on == AX_BIQUAD_OFF)
-			return;
-#ifdef CEMU_DEBUG_ASSERT
-		if (internalShadowCopy->biquad.on != 0x0200)
-		{
-			cemuLog_logDebug(LogType::Force, "AX_ApplyBiquad() with incorrect biquad.on value 0x{:04x}", _swapEndianU16(internalShadowCopy->biquad.on));
-		}
-#endif
-
-		float a1 = (float)(sint16)_swapEndianS16(internalShadowCopy->biquad.a1) / 16384.0f;
-		float a2 = (float)(sint16)_swapEndianS16(internalShadowCopy->biquad.a2) / 16384.0f;
-		float b0 = (float)(sint16)_swapEndianS16(internalShadowCopy->biquad.b0) / 16384.0f;
-		float b1 = (float)(sint16)_swapEndianS16(internalShadowCopy->biquad.b1) / 16384.0f;
-		float b2 = (float)(sint16)_swapEndianS16(internalShadowCopy->biquad.b2) / 16384.0f;
-
-		float yn1 = (float)_swapEndianS16(internalShadowCopy->biquad.yn1);
-		float yn2 = (float)_swapEndianS16(internalShadowCopy->biquad.yn2);
-		float xn1 = (float)_swapEndianS16(internalShadowCopy->biquad.xn1);
-		float xn2 = (float)_swapEndianS16(internalShadowCopy->biquad.xn2);
-		if (internalShadowCopy->biquad.b1 != 0)
-		{
-			for (sint32 i = 0; i < sampleCount; i++)
-			{
-				float inputSample = sampleData[i] / 256.0f;
-				float temp = b0 * inputSample + b1 * xn1 + b2 * xn2 + a1 * yn1 + a2 * yn2;
-				sampleData[i] = temp * 256.0f;
-				temp = std::min(32767.0f, temp);
-				temp = std::max(-32768.0f, temp);
-				yn2 = yn1;
-				xn2 = xn1;
-				yn1 = temp;
-				xn1 = inputSample;
-			}
-		}
-		else
-		{
-			// optimized variant where voiceInternal->biquad.b1 is hardcoded as zero (used heavily in BotW and Splatoon)
-			for (sint32 i = 0; i < sampleCount; i++)
-			{
-				float inputSample = sampleData[i] / 256.0f;
-				float temp = b0 * inputSample + b2 * xn2 + a1 * yn1 + a2 * yn2;
-				sampleData[i] = temp * 256.0f;
-				temp = std::min(32767.0f, temp);
-				temp = std::max(-32768.0f, temp);
-				yn2 = yn1;
-				xn2 = xn1;
-				yn1 = temp;
-				xn1 = inputSample;
-			}
-		}
-
-		internalShadowCopy->biquad.yn1 = _swapEndianU16((sint16)(yn1));
-		internalShadowCopy->biquad.yn2 = _swapEndianU16((sint16)(yn2));
-		internalShadowCopy->biquad.xn1 = _swapEndianU16((sint16)(xn1));
-		internalShadowCopy->biquad.xn2 = _swapEndianU16((sint16)(xn2));
-	}
-
-	void AXVoiceMix_ApplyLowPass(AXVPBInternal_t* internalShadowCopy, float* sampleData, sint32 sampleCount)
-	{
-		if (internalShadowCopy->lpf.on == _swapEndianU16(AX_LPF_OFF))
-			return;
-		float a0 = (float)_swapEndianS16(internalShadowCopy->lpf.a0) / 32767.0f;
-		float b0 = (float)_swapEndianS16(internalShadowCopy->lpf.b0) / 32767.0f;
-		float prevSample = (float)_swapEndianS16((sint16)internalShadowCopy->lpf.yn1) * 256.0f / 32767.0f;
-		for (sint32 i = 0; i < sampleCount; i++)
-		{
-			sampleData[i] = a0 * sampleData[i] - b0 * prevSample;
-			prevSample = sampleData[i];
-		}
-		internalShadowCopy->lpf.yn1 = (uint16)_swapEndianS16((sint16)(prevSample / 256.0f * 32767.0f));
-	}
-
-	// mix audio generated from voice into main bus and aux buses
-	void AXVoiceMix_MixIntoBuses(AXVPBInternal_t* internalShadowCopy, float* sampleData, sint32 sampleCount, sint32 samplesPerFrame)
-	{
-		// TV mixing
-		for (sint32 busIndex = 0; busIndex < AX_BUS_COUNT; busIndex++)
-		{
-			for (sint32 channel = 0; channel < 6; channel++)
-			{
-				uint32 channelMixMask = (_swapEndianU16(internalShadowCopy->deviceMixMaskTV[busIndex]) >> (channel * 2)) & 3;
-				if (channelMixMask == 0)
-				{
-					internalShadowCopy->reserved1E8[busIndex*AX_TV_CHANNEL_COUNT + channel] = 0;
-					continue;
-				}
-				AXCHMIX_DEPR* mix = internalShadowCopy->deviceMixTV + channel * 4 + busIndex;
-				float* output = __AXMixBufferTV + (busIndex * 6 + channel) * samplesPerFrame;
-				AXVoiceMix_MergeInto(sampleData, output, sampleCount, mix, _swapEndianS16(mix->delta));
-				internalShadowCopy->reserved1E8[busIndex*AX_TV_CHANNEL_COUNT + channel] = mix->vol;
-			}
-		}
-		// DRC0 mixing
-		for (sint32 busIndex = 0; busIndex < AX_BUS_COUNT; busIndex++)
-		{
-			for (sint32 channel = 0; channel < AX_DRC_CHANNEL_COUNT; channel++)
-			{
-				uint32 channelMixMask = (_swapEndianU16(internalShadowCopy->deviceMixMaskDRC[busIndex]) >> (channel * 2)) & 3;
-
-				if (channelMixMask == 0)
-				{
-					//internalShadowCopy->reserved1E8[busIndex*AX_DRC_CHANNEL_COUNT + channel] = 0;
-					continue;
-				}
-				AXCHMIX_DEPR* mix = internalShadowCopy->deviceMixDRC + channel * 4 + busIndex;
-				float* output = __AXMixBufferDRC + (busIndex * AX_DRC_CHANNEL_COUNT + channel) * samplesPerFrame;
-				AXVoiceMix_MergeInto(sampleData, output, sampleCount, mix, _swapEndianS16(mix->delta));
-			}
-		}
-
-		// DRC1 mixing + RMT mixing
-		// todo
-	}
-
-	void AXMix_ProcessVoices(AXVPBInternal_t* firstVoice)
-	{
-		if (firstVoice == nullptr)
-			return;
-		size_t sampleCount = AXGetInputSamplesPerFrame();
-		AXVPBInternal_t* internalVoice = firstVoice;
-		cemu_assert_debug(sndGeneric.initParam.frameLength == 0);
-		float tmpSampleBuffer[AX_SAMPLES_MAX];
-		while (internalVoice)
-		{
-			AXVoiceMix_DecodeSamples(internalVoice, tmpSampleBuffer, sampleCount);
-			AXVoiceMix_ApplyADSR(internalVoice, tmpSampleBuffer, sampleCount);
-			AXVoiceMix_ApplyBiquad(internalVoice, tmpSampleBuffer, sampleCount);
-			AXVoiceMix_ApplyLowPass(internalVoice, tmpSampleBuffer, sampleCount);
-			AXVoiceMix_MixIntoBuses(internalVoice, tmpSampleBuffer, sampleCount, sampleCount);
-			// next
-			internalVoice = internalVoice->nextToProcess.GetPtr();
-		}
-	}
-
-	void AXMix_MergeBusSamples(float* input, sint32* output, sint32 sampleCount, uint16& volume, sint16 delta)
-	{
-		float volumeF = (float)volume / 32768.0f;
-		float deltaF = (float)delta / 32768.0f;
-
-		if (delta)
-		{
-			for (sint32 i = 0; i < sampleCount; i++)
-			{
-				float s = *input;
-				input++;
-				s *= volumeF;
-				volumeF += deltaF;
-				*output = _swapEndianS32(_swapEndianS32(*output) + (sint32)s);
-				output++;
-			}
-			volume = (uint16)(volumeF * 32768.0f);
-		}
-		else
-		{
-			// no delta
-			for (sint32 i = 0; i < sampleCount; i++)
-			{
-				float s = *input;
-				input++;
-				s *= volumeF;
-				*output = _swapEndianS32(_swapEndianS32(*output) + (sint32)s);
-				output++;
-			}
-		}
-	}
-
-	void AXAuxMix_StoreAuxSamples(float* input, sint32be* output, sint32 sampleCount)
-	{
-		// Not 100% sure why but we need to temporarily right shift the aux samples by 8 to get the sample range the games expect for the AUX callback
-		// without this, Color Splash will apply it's effects incorrectly
-		// Its probably because AUX mixing always goes through the DSP which uses 16bit arithmetic?
-
-		// no delta
-		for (sint32 i = 0; i < sampleCount; i++)
-		{
-			float s = *input;
-			input++;
-			*output = ((sint32)s) >> 8;
-			output++;
-		}
-	}
-
-	void AXAuxMix_MixProcessedAuxSamplesIntoOutput(sint32be* input, float* output, sint32 sampleCount, uint16* volumePtr, sint16 delta)
-	{
-		uint16 volume = *volumePtr;
-		float volumeF = (float)volume / 32768.0f;
-		float deltaF = (float)delta / 32768.0f;
-
-		cemu_assert_debug(delta == 0); // todo
-
-		for (sint32 i = 0; i < sampleCount; i++)
-		{
-			float s = (float)(((sint32)*input)<<8);
-			input++;
-			s *= volumeF;
-			*output += s;
-			output++;
-		}
-		*volumePtr = volume;
-	}
-
-	uint16 __AXMasterVolume = 0x8000;
-	uint16 __AXDRCMasterVolume = 0x8000;
-
-	// mix into __AXTVOutputBuffer
-	void AXMix_mergeTVBuses()
-	{
-		size_t sampleCount = AXGetInputSamplesPerFrame();
-
-		// debug - Erase main bus and only output AUX
-		if (ActiveSettings::AudioOutputOnlyAux())
-		{
-			memset(__AXMixBufferTV, 0, sizeof(float) * sampleCount * 6);
-		}
-		// Mix aux into TV main bus
-		for (sint32 auxBus = 0; auxBus < AX_AUX_BUS_COUNT; auxBus++)
-		{
-			sint32be* auxOutput = AXAux_GetOutputBuffer(AX_DEV_TV, 0, auxBus);
-			if (auxOutput == nullptr)
-				continue;
-			// AUX return from output buffer
-			uint16 auxReturnVolume = __AXTVAuxReturnVolume[auxBus];
-			sint16 auxReturnDelta = 0;
-			AXAuxMix_MixProcessedAuxSamplesIntoOutput(auxOutput, __AXMixBufferTV, sampleCount * AX_TV_CHANNEL_COUNT, &auxReturnVolume, auxReturnDelta);
-		}
-		// mix TV main bus into output
-		float* input = __AXMixBufferTV;
-		uint16 masterVolume = __AXMasterVolume;
-		sint32* output = __AXTVOutputBuffer.GetPtr();
-		cemu_assert_debug(masterVolume == 0x8000); // todo -> Calculate delta between old master volume and new volume
-		sint16 delta = 0;
-		for (uint16 c = 0; c < AX_TV_CHANNEL_COUNT; c++)
-		{
-			AXMix_MergeBusSamples(input, output, sampleCount, masterVolume, delta);
-			output += sampleCount;
-			input += sampleCount;
-		}
-	}
-
-	// mix into __AXDRCOutputBuffer
-	void AXMix_mergeDRC0Buses()
-	{
-		sint32* output = __AXDRCOutputBuffer.GetPtr();
-		uint16 masterVolume = __AXDRCMasterVolume;		
-		size_t sampleCount = AXGetInputSamplesPerFrame();
-
-		// todo - drc0 AUX
-
-		// mix DRC0 main bus into output
-		float* input = __AXMixBufferDRC;
-		cemu_assert_debug(masterVolume == 0x8000); // todo -> Calculate delta between old master volume and new volume
-		sint16 delta = 0;
-		for (uint16 c = 0; c < AX_DRC_CHANNEL_COUNT; c++)
-		{
-			AXMix_MergeBusSamples(input, output, sampleCount, masterVolume, delta);
-			output += sampleCount;
-			input += sampleCount;
-		}
-	}
-
-	void AXMix_process(AXVPBInternal_t* internalShadowCopyHead)
-	{
-		memset(__AXMixBufferTV, 0, sizeof(__AXMixBufferTV));
-		memset(__AXMixBufferDRC, 0, sizeof(__AXMixBufferDRC));
-
-		AXMix_ProcessVoices(internalShadowCopyHead);
-		AXAux_Process(); // apply AUX effects to previous frame
+		const sint32 count = AXGetInputSamplesPerFrame();
+		std::fill(std::begin(s_tvLanes), std::end(s_tvLanes), 0.0f);
+		std::fill(std::begin(s_drcLanes), std::end(s_drcLanes), 0.0f);
+
+		RenderVoices(firstDspBlock, count);
+		AXAux_Process(); // effects process last frame's sends
 		AXIst_HandleFrameCallbacks();
-
-		size_t sampleCount = AXGetInputSamplesPerFrame();
-		// TV aux store
-		for (sint32 auxBus = 0; auxBus < AX_AUX_BUS_COUNT; auxBus++)
-		{
-			sint32be* auxInput = AXAux_GetInputBuffer(AX_DEV_TV, 0, auxBus);
-			if (auxInput == nullptr)
-				continue;
-			float* tvInput = __AXMixBufferTV + (1 + auxBus) * (sampleCount * AX_TV_CHANNEL_COUNT);
-			AXAuxMix_StoreAuxSamples(tvInput, auxInput, sampleCount * AX_TV_CHANNEL_COUNT);
-		}
-
-		// DRC aux store
-		// todo
-
-		// merge main and aux buses
-		AXMix_mergeTVBuses();
-		AXMix_mergeDRC0Buses();
-
+		SendAux(count);
+		FinishTV(count);
+		FinishDRC(count);
 		AXAux_incrementBufferIndex();
-		// update microphone
 		mic_updateOnAXFrame();
 	}
-
 }

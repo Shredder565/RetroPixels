@@ -1,285 +1,388 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "nn_olv_Common.h"
+#include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
+#include "Cemu/ncrypto/ncrypto.h"
+#include "Common/StackAllocator.h"
+#include "config/ActiveSettings.h"
 #include <zlib.h>
+#include <future>
+#include <charconv>
 
-namespace nn
+namespace nn::olv
 {
-	namespace olv
+	ParamPackStorage g_ParamPack;
+	DiscoveryResultStorage g_DiscoveryResults;
+	OliveState g_olv;
+
+	// --- requests ---------------------------------------------------------------
+
+	nnResult RunBlockingOnHost(const std::function<nnResult()>& fn)
 	{
+		StackAllocator<coreinit::OSEvent> done;
+		coreinit::OSInitEvent(done.GetPointer(), coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_MANUAL);
+		coreinit::OSEvent* event = done.GetPointer();
+		std::future<nnResult> result = std::async(std::launch::async, [&fn, event]() {
+			nnResult r = fn();
+			coreinit::OSSignalEvent(event);
+			return r;
+		});
+		coreinit::OSWaitEvent(event);
+		return result.get();
+	}
 
-		sint32 olv_copy_wstr(char16_t* dest, const char16_t* src, uint32_t maxSize, uint32_t destSize)
+	void BeginOliveRequest(CurlRequestHelper& req, const std::string& url)
+	{
+		req.initate(ActiveSettings::GetNetworkService(), url, CurlRequestHelper::SERVER_SSL_CONTEXT::OLIVE);
+		req.addHeaderField("X-Nintendo-ServiceToken", g_DiscoveryResults.serviceToken);
+		req.addHeaderField("X-Nintendo-ParamPack", g_ParamPack.encodedParamPack);
+		curl_easy_setopt(req.getCURL(), CURLOPT_USERAGENT, g_DiscoveryResults.userAgent);
+	}
+
+	nnResult FinishOliveRequest(CurlRequestHelper& req, const std::string& url, bool post, pugi::xml_document& reply)
+	{
+		const bool sent = req.submitRequest(post);
+		long status = 0;
+		curl_easy_getinfo(req.getCURL(), CURLINFO_RESPONSE_CODE, &status);
+		// an HTTP error page still carries an Olive <result> worth decoding
+		if (!sent)
 		{
-			size_t len = maxSize + 1;
-			if (olv_wstrnlen(src, len) > maxSize)
-				return OLV_RESULT_NOT_ENOUGH_SIZE;
+			cemuLog_log(LogType::Force, "nn_olv: request to {} failed (HTTP {})", url, status);
+			if (status < 400)
+				return kOlvRequestFailed;
+		}
+		const std::vector<uint8>& body = req.getReceivedData();
+		if (!reply.load_buffer(body.data(), body.size()))
+		{
+			cemuLog_log(LogType::Force, "nn_olv: reply from {} is not valid XML", url);
+			return kOlvBadXml;
+		}
+		const nnResult envelope = CheckResultEnvelope(reply);
+		if (NN_RESULT_IS_FAILURE(envelope))
+			return envelope;
+		if (status != 200)
+			return OlvStatus((uint32)status + 4000);
+		return kOlvSuccess;
+	}
 
-			memset(dest, 0, 2 * destSize);
-			olv_wstrncpy(dest, src, len);
-			return OLV_RESULT_SUCCESS;
+	nnResult CheckResultEnvelope(const pugi::xml_document& doc)
+	{
+		pugi::xml_node result = doc.child("result");
+		if (!result)
+		{
+			cemuLog_log(LogType::Force, "nn_olv: reply has no <result> element");
+			return kOlvBadXml;
+		}
+		if (std::string_view(result.child_value("has_error")) == "1")
+		{
+			const sint32 detail = StringHelpers::ToInt(result.child_value("error_code"), -1);
+			if (detail >= 0)
+				return OlvStatus((uint32)detail + 5000);
+			return OlvStatus((uint32)(StringHelpers::ToInt(result.child_value("code"), -1) + 4000));
+		}
+		if (std::string_view(result.child_value("version")) != "1")
+			return kOlvBadVersion;
+		return kOlvSuccess;
+	}
+
+	void AppendQuery(std::string& url, std::string_view query)
+	{
+		url.push_back(url.find('?') == std::string::npos ? '?' : '&');
+		url.append(query);
+	}
+
+	// --- wide strings -----------------------------------------------------------
+
+	size_t WideLength(const uint16be* str, size_t maxLength)
+	{
+		size_t n = 0;
+		while (n < maxLength && (uint16)str[n] != 0)
+			n++;
+		return n;
+	}
+
+	void WideCopyPadded(uint16be* dst, const uint16be* src, size_t count)
+	{
+		size_t i = 0;
+		for (; i < count && (uint16)src[i] != 0; i++)
+			dst[i] = src[i];
+		for (; i < count; i++)
+			dst[i] = 0;
+	}
+
+	nnResult WideAssignChecked(uint16be* dst, size_t capacity, const uint16be* src)
+	{
+		if (WideLength(src, capacity) >= capacity)
+			return kOlvNotEnoughSize;
+		memset(dst, 0, capacity * sizeof(uint16be));
+		WideCopyPadded(dst, src, capacity);
+		return kOlvSuccess;
+	}
+
+	uint32 WideAssignTruncated(uint16be* dst, size_t capacity, const uint16be* src)
+	{
+		const size_t n = WideLength(src, capacity - 1);
+		for (size_t i = 0; i < n; i++)
+			dst[i] = src[i];
+		dst[n] = 0;
+		return (uint32)n;
+	}
+
+	uint32 Utf8ToWideTerminated(uint16be* dst, size_t capacity, std::string_view text)
+	{
+		const std::vector<uint16be> wide = StringHelpers::FromUtf8(text);
+		const size_t n = std::min(wide.size(), capacity - 1);
+		std::copy_n(wide.begin(), n, dst);
+		dst[n] = 0;
+		return (uint32)n;
+	}
+
+	uint32 Utf8ToWideFixed(uint16be* dst, size_t capacity, std::string_view text)
+	{
+		const std::vector<uint16be> wide = StringHelpers::FromUtf8(text);
+		const size_t n = std::min(wide.size(), capacity);
+		std::copy_n(wide.begin(), n, dst);
+		return (uint32)n;
+	}
+
+	// --- TGA ------------------------------------------------------------------------
+
+	namespace
+	{
+		// the fields of the 18 byte TGA header we look at (little endian on disk)
+		struct TgaInfo
+		{
+			uint8 idLength, colorMapType, imageType;
+			uint16 colorMapFirst, colorMapLength;
+			uint8 colorMapDepth;
+			uint16 originX, originY, width, height;
+			uint8 pixelDepth, descriptor;
+		};
+
+		TgaInfo ReadTgaHeader(const uint8* p)
+		{
+			auto u16 = [p](int at) { return (uint16)(p[at] | (p[at + 1] << 8)); };
+			TgaInfo h;
+			h.idLength = p[0];
+			h.colorMapType = p[1];
+			h.imageType = p[2];
+			h.colorMapFirst = u16(3);
+			h.colorMapLength = u16(5);
+			h.colorMapDepth = p[7];
+			h.originX = u16(8);
+			h.originY = u16(10);
+			h.width = u16(12);
+			h.height = u16(14);
+			h.pixelDepth = p[16];
+			h.descriptor = p[17];
+			return h;
 		}
 
-		size_t olv_wstrnlen(const char16_t* str, size_t max_len)
+		const char* TgaProblem(const TgaInfo& h, TgaKind kind)
 		{
-			size_t len = 0;
-			while (len < max_len && str[len] != u'\0')
-				len++;
-
-			return len;
+			switch (kind)
+			{
+			case TgaKind::Painting:
+			{
+				const bool plain = h.idLength == 0 && h.colorMapType == 0 && h.imageType == 2 &&
+					h.colorMapFirst == 0 && h.colorMapLength == 0 && h.colorMapDepth == 0 &&
+					h.originX == 0 && h.originY == 0;
+				if (!plain || h.width != 320 || h.height != 120 || h.pixelDepth != 32 || h.descriptor != 8)
+					return "painting must be an uncompressed 320x120 32-bit TGA";
+				return nullptr;
+			}
+			case TgaKind::CommunityIcon:
+				if (h.width != 128 || h.height != 128 || h.pixelDepth != 32)
+					return "community icon must be a 128x128 32-bit TGA";
+				return nullptr;
+			case TgaKind::Icon100or200:
+				if (h.pixelDepth != 32)
+					return "icon must be a 32-bit TGA";
+				if (!((h.width == 100 && h.height == 100) || (h.width == 200 && h.height == 200)))
+					return "icon must be 100x100 or 200x200";
+				return nullptr;
+			}
+			return "unknown TGA check";
 		}
+	}
 
-		char16_t* olv_wstrncpy(char16_t* dest, const char16_t* src, size_t n)
+	bool IsValidTga(const uint8* data, uint32 size, TgaKind kind)
+	{
+		if (!data || size < 18)
 		{
-			char16_t* ret = dest;
-			while (n > 0 && *src != u'\0')
-			{
-				*dest++ = *src++;
-				n--;
-			}
-			while (n > 0)
-			{
-				*dest++ = u'\0';
-				n--;
-			}
-			return ret;
-		}
-
-		bool CheckTGA(const uint8* pTgaFile, uint32 pTgaFileLen, TGACheckType checkType)
-		{
-			const TGAHeader* header = (const TGAHeader*)pTgaFile;
-			try
-			{
-				if (checkType == TGACheckType::CHECK_PAINTING)
-				{
-					if (
-						header->idLength ||
-						header->colorMapType ||
-						header->imageType != 2 || // Uncompressed true color
-						header->first_entry_idx ||
-						header->colormap_length ||
-						header->bpp ||
-						header->x_origin ||
-						header->y_origin ||
-						header->width != 320 ||
-						header->height != 120 ||
-						header->pixel_depth_bpp != 32 ||
-						header->image_desc_bits != 8
-						)
-					{
-						throw std::runtime_error("TGACheckType::CHECK_PAINTING - Invalid TGA file!");
-					}
-				}
-				else if (checkType == TGACheckType::CHECK_COMMUNITY_ICON)
-				{
-					if (header->width != 128 || header->height != 128 || header->pixel_depth_bpp != 32)
-						throw std::runtime_error("TGACheckType::CHECK_COMMUNITY_ICON - Invalid TGA file -> width, height or bpp is wrong");
-				}
-				else if (checkType == TGACheckType::CHECK_100x100_200x200)
-				{
-					if (header->pixel_depth_bpp != 32)
-						throw std::runtime_error("TGACheckType::CHECK_100x100_200x200 - Invalid TGA file -> bpp is wrong");
-
-					if (header->width == 100)
-					{
-						if (header->height != 100)
-							throw std::runtime_error("TGACheckType::CHECK_100x100_200x200 - Invalid TGA file -> Not 100x100");
-					}
-					else if (header->width != 200 || header->height != 200)
-						throw std::runtime_error("TGACheckType::CHECK_100x100_200x200 - Invalid TGA file -> Not 100x100 or 200x200");
-				}
-			}
-			catch (const std::runtime_error& error)
-			{
-				// TGA Check Error! illegal format
-				cemuLog_log(LogType::Force, error.what());
-				return false;
-			}
-			return true;
-		}
-
-		sint32 DecodeTGA(uint8* pInBuffer, uint32 inSize, uint8* pOutBuffer, uint32 outSize, TGACheckType checkType)
-		{
-			uint32 decompressedSize = outSize;
-			if (DecompressTGA(pOutBuffer, &decompressedSize, pInBuffer, inSize))
-			{
-				if (CheckTGA(pOutBuffer, decompressedSize, checkType))
-					return decompressedSize;
-				
-				return -2;
-			}
-			else
-			{
-				cemuLog_log(LogType::Force, "OLIVE uncompress error.\n");
-				return -1;
-			}
-		}
-
-		sint32 EncodeTGA(uint8* pInBuffer, uint32 inSize, uint8* pOutBuffer, uint32 outSize, TGACheckType checkType)
-		{
-			if (inSize == outSize)
-			{
-				if (!CheckTGA(pInBuffer, inSize, checkType))
-					return -1;
-				
-					uint32 compressedSize = outSize;
-					if (CompressTGA(pOutBuffer, &compressedSize, pInBuffer, inSize))
-						return compressedSize;
-					else
-					{
-						cemuLog_log(LogType::Force, "OLIVE compress error.\n");
-						return -1;
-					}
-			}
-			else
-			{
-				cemuLog_log(LogType::Force, "compress buffer size check error. uSrcBufSize({}) != uDstBufSize({})\n", inSize, outSize);
-				return -1;
-			}
-		}
-
-		bool DecompressTGA(uint8* pOutBuffer, uint32* pOutSize, uint8* pInBuffer, uint32 inSize)
-		{
-			if (pOutBuffer == nullptr || pOutSize == nullptr || pInBuffer == nullptr || inSize == 0)
-				return false;
-
-			uLongf bufferSize = *pOutSize;
-			int result = uncompress(pOutBuffer, &bufferSize, pInBuffer, inSize);
-
-			if (result == Z_OK)
-			{
-				*pOutSize = static_cast<unsigned int>(bufferSize);
-				return true;
-			}
-			else
-			{
-				const char* error_msg = (result == Z_MEM_ERROR) ? "Insufficient memory" : "Unknown decompression error";
-				cemuLog_log(LogType::Force, "OLIVE ZLIB - ERROR: {}\n", error_msg);
-				return false;
-			}
-		}
-
-		bool CompressTGA(uint8* pOutBuffer, uint32* pOutSize, uint8* pInBuffer, uint32 inSize)
-		{
-			if (pOutBuffer == nullptr || pOutSize == nullptr || pInBuffer == nullptr || inSize == 0)
-				return false;
-
-			uLongf bufferSize = *pOutSize;
-			int result = compress(pOutBuffer, &bufferSize, pInBuffer, inSize);
-
-			if (result == Z_OK)
-			{
-				*pOutSize = static_cast<unsigned int>(bufferSize);
-				return true;
-			}
-			else
-			{
-				const char* error_msg = (result == Z_MEM_ERROR) ? "Insufficient memory" : "Unknown compression error";
-				cemuLog_log(LogType::Force, "OLIVE ZLIB - ERROR: {}\n", error_msg);
-				return false;
-			}
-		}
-
-		constexpr uint32 CreateCommunityCodeById(uint32 communityId)
-		{
-			uint32 res = communityId ^ (communityId << 18) ^ (communityId << 24) ^ (communityId << 30);
-			return res ^ (16 * (res & 0xF0F0F0F)) ^ ((res ^ (16 * (res & 0xF0F0F0F))) >> 17) ^ ((res ^ (16 * (res & 0xF0F0F0F))) >> 23) ^ ((res ^ (16 * (res & 0xF0F0F0F))) >> 29) ^ 0x20121002;
-		}
-
-		constexpr uint32 CreateCommunityIdByCode(uint32 code)
-		{
-			uint32 res = code ^ 0x20121002 ^ ((code ^ 0x20121002u) >> 17) ^ ((code ^ 0x20121002u) >> 23) ^ ((code ^ 0x20121002u) >> 29);
-			return res ^ (16 * (res & 0xF0F0F0F)) ^ ((res ^ (16 * (res & 0xF0F0F0F))) << 18) ^ ((res ^ (16 * (res & 0xF0F0F0F))) << 24) ^ ((res ^ (16 * (res & 0xF0F0F0F))) << 30);
-		}
-
-
-		constexpr uint32 GetCommunityCodeTopByte(uint32 communityId)
-		{
-			uint8 code_byte3 = (uint8_t)(communityId >> 0x18);
-			uint8 code_byte2 = (uint8_t)(communityId >> 0x10);
-			uint8 code_byte1 = (uint8_t)(communityId >> 8);
-			uint8 code_byte0 = (uint8_t)(communityId >> 0);
-			return code_byte3 ^ code_byte2 ^ code_byte1 ^ code_byte0 ^ 0xff;
-		}
-
-		constexpr uint64 GetRealCommunityCode(uint32_t communityId)
-		{
-			uint64 topByte = GetCommunityCodeTopByte(communityId);
-			if ((0xe7 < topByte) && ((0xe8 < topByte || (0xd4a50fff < communityId))))
-				return ((topByte << 32) | communityId) & 0x7fffffffff;
-
-			return ((topByte << 32) | communityId);
-		}
-
-		void WriteCommunityCode(char* pOutCode, uint32 communityId)
-		{
-			uint32 code = CreateCommunityCodeById(communityId);
-			uint64 communityCode = GetRealCommunityCode(code);
-			sprintf(pOutCode, "%012llu", communityCode);
-		}
-
-		bool EnsureCommunityCode(char* pCode)
-		{
-			uint64 code;
-			if (sscanf(pCode, "%012llu", &code) > 0)
-			{
-				uint32 lowerCode = code;
-				uint64 newCode = GetRealCommunityCode(code);
-				return code == newCode;
-			}
+			cemuLog_log(LogType::Force, "nn_olv: TGA data is too short");
 			return false;
 		}
-
-		bool FormatCommunityCode(char* pOutCode, uint32* outLen, uint32 communityId)
+		if (const char* problem = TgaProblem(ReadTgaHeader(data), kind))
 		{
-			bool result = false;
-			if (communityId != -1)
-			{
-				if (communityId)
-				{
-					WriteCommunityCode(pOutCode, communityId);
-					*outLen = strnlen(pOutCode, 12);
-					if (EnsureCommunityCode(pOutCode))
-						result = 1;
-				}
-			}
-			return result;
+			cemuLog_log(LogType::Force, "nn_olv: {}", problem);
+			return false;
+		}
+		return true;
+	}
+
+	sint32 InflateTga(const uint8* in, uint32 inSize, uint8* out, uint32 outCapacity, TgaKind kind)
+	{
+		if (!in || !out || inSize == 0)
+			return -1;
+		uLongf produced = outCapacity;
+		const int r = uncompress(out, &produced, in, inSize);
+		if (r != Z_OK)
+		{
+			cemuLog_log(LogType::Force, "nn_olv: inflating image failed (zlib {})", r);
+			return -1;
+		}
+		return IsValidTga(out, (uint32)produced, kind) ? (sint32)produced : -2;
+	}
+
+	sint32 DeflateTga(const uint8* in, uint32 inSize, uint8* out, uint32 outCapacity, TgaKind kind)
+	{
+		if (inSize != outCapacity)
+		{
+			cemuLog_log(LogType::Force, "nn_olv: image buffer sizes differ ({} vs {})", inSize, outCapacity);
+			return -1;
+		}
+		if (!IsValidTga(in, inSize, kind))
+			return -1;
+		if (!out || inSize == 0)
+			return -1;
+		uLongf produced = outCapacity;
+		const int r = compress(out, &produced, in, inSize);
+		if (r != Z_OK)
+		{
+			cemuLog_log(LogType::Force, "nn_olv: compressing image failed (zlib {})", r);
+			return -1;
+		}
+		return (sint32)produced;
+	}
+
+	// --- community codes --------------------------------------------------------------
+	// The code is a scrambled form of the id followed by a check byte. The scramble is
+	// a fixed sequence of xor-shift steps, each of which can be undone.
+
+	namespace
+	{
+		constexpr uint32 kCodeSalt = 0x20121002;
+
+		constexpr uint32 SwapNibbleMix(uint32 v) { return v ^ ((v & 0x0F0F0F0Fu) << 4); }
+		constexpr uint32 SpreadUp(uint32 v) { return v ^ (v << 18) ^ (v << 24) ^ (v << 30); }
+		constexpr uint32 SpreadDown(uint32 v) { return v ^ (v >> 17) ^ (v >> 23) ^ (v >> 29); }
+
+		constexpr uint32 ScrambleId(uint32 id)
+		{
+			return SpreadDown(SwapNibbleMix(SpreadUp(id))) ^ kCodeSalt;
 		}
 
-		static_assert(GetRealCommunityCode(CreateCommunityCodeById(140500)) == 717651734336, "Wrong community code generation code, result must match.");
-
-		uint32 ExtractCommunityIdFromCode(char* pCode)
+		constexpr uint32 UnscrambleCode(uint32 code)
 		{
-			uint32 id = 0;
-			uint64 code;
-			if (sscanf(pCode, "%012llu", &code) > 0)
-			{
-				uint32 lower_code = code;
-				id = CreateCommunityIdByCode(lower_code);
-			}
-			return id;
+			// each step is its own inverse for these shift distances
+			return SpreadUp(SwapNibbleMix(SpreadDown(code ^ kCodeSalt)));
 		}
 
-		bool GetCommunityIdFromCode(uint32* pOutId, const char* pCode)
+		// 40-bit value printed as the code: check byte above the scrambled id
+		constexpr uint64 WithCheckByte(uint32 scrambled)
 		{
-			if (!EnsureCommunityCode((char*)pCode))
+			const uint32 check = ((scrambled >> 24) ^ (scrambled >> 16) ^ (scrambled >> 8) ^ scrambled ^ 0xFF) & 0xFF;
+			uint64 value = ((uint64)check << 32) | scrambled;
+			// large values would not fit into 12 decimal digits; their top bit is dropped
+			if (check > 0xE8 || (check == 0xE8 && scrambled > 0xD4A50FFFu))
+				value &= 0x7FFFFFFFFFull;
+			return value;
+		}
+
+		static_assert(UnscrambleCode(ScrambleId(140500)) == 140500);
+		static_assert(WithCheckByte(ScrambleId(140500)) == 717651734336ull);
+
+		bool ParseCode(const char* text, uint64& value)
+		{
+			while (*text == ' ' || *text == '\t' || *text == '\n')
+				text++;
+			size_t len = 0;
+			while (len < 12 && text[len] >= '0' && text[len] <= '9')
+				len++;
+			if (len == 0)
 				return false;
-
-			*pOutId = ExtractCommunityIdFromCode((char*)pCode);
-			return true;
+			return std::from_chars(text, text + len, value).ec == std::errc();
 		}
 
-		sint32 olv_curlformcode_to_error(CURLFORMcode code)
+		bool IsWellFormedCode(const char* text, uint64& value)
 		{
-			switch (code)
-			{
-				case CURL_FORMADD_OK:
-					return OLV_RESULT_SUCCESS;
-
-				case CURL_FORMADD_MEMORY:
-					return OLV_RESULT_FATAL(25);
-
-				case CURL_FORMADD_OPTION_TWICE:
-				default:
-					return OLV_RESULT_LVL6(50);
-			}
+			return ParseCode(text, value) && WithCheckByte((uint32)value) == value;
 		}
+	}
+
+	bool CommunityIdFromCode(uint32* outId, const char* code)
+	{
+		uint64 value;
+		if (!code || !IsWellFormedCode(code, value))
+			return false;
+		*outId = UnscrambleCode((uint32)value);
+		return true;
+	}
+
+	bool CommunityCodeFromId(char* outCode, uint32* outLength, uint32 communityId)
+	{
+		if (communityId == 0 || communityId == 0xFFFFFFFF)
+			return false;
+		const std::string text = fmt::format("{:012}", WithCheckByte(ScrambleId(communityId)));
+		memcpy(outCode, text.c_str(), text.size() + 1);
+		*outLength = (uint32)std::min<size_t>(text.size(), 12);
+		uint64 value;
+		return IsWellFormedCode(outCode, value);
+	}
+
+	// --- community records ---------------------------------------------------------
+
+	nnResult StoreCommunityReply(CommunityRecord& rec, const CommunityReply& reply)
+	{
+		if (!reply.appData.empty())
+		{
+			const std::vector<uint8> bytes = NCrypto::base64Decode(reply.appData);
+			if (bytes.empty())
+				return kOlvBadTextField;
+			const size_t n = std::min(bytes.size(), sizeof(rec.appData));
+			memcpy(rec.appData, bytes.data(), n);
+			rec.appDataSize = (uint32)n;
+			rec.flags = rec.flags | CommunityFlag::AppData;
+		}
+
+		const sint64 id = StringHelpers::ToInt64(reply.communityId, -1);
+		if (id == -1)
+			return kOlvBadIntegerField;
+		rec.communityId = (uint32)id;
+
+		if (!reply.name.empty())
+		{
+			const uint32 n = Utf8ToWideFixed(rec.title, std::size(rec.title), reply.name);
+			if (n == 0)
+				return kOlvBadTextField;
+			rec.titleLength = n;
+			rec.flags = rec.flags | CommunityFlag::Title;
+		}
+
+		if (!reply.description.empty())
+		{
+			const uint32 n = Utf8ToWideFixed(rec.description, std::size(rec.description), reply.description);
+			if (n == 0)
+				return kOlvBadTextField;
+			rec.descriptionLength = n;
+			rec.flags = rec.flags | CommunityFlag::Description;
+		}
+
+		const sint64 pid = StringHelpers::ToInt64(reply.pid, -1);
+		if (pid == -1)
+			return kOlvBadIntegerField;
+		rec.ownerPid = (uint32)pid;
+
+		if (!reply.icon.empty())
+		{
+			const std::vector<uint8> bytes = NCrypto::base64Decode(reply.icon);
+			if (bytes.empty())
+				return kOlvBadTextField;
+			const size_t n = std::min(bytes.size(), sizeof(rec.icon));
+			memcpy(rec.icon, bytes.data(), n);
+			rec.iconSize = (uint32)n;
+			rec.flags = rec.flags | CommunityFlag::Icon;
+		}
+		return kOlvSuccess;
 	}
 }

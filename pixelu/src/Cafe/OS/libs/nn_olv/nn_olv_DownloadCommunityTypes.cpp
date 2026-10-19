@@ -1,234 +1,251 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "nn_olv_DownloadCommunityTypes.h"
+#include "Cemu/ncrypto/ncrypto.h"
 
-namespace nn
+namespace nn::olv
 {
-	namespace olv
+	namespace
 	{
+		using Record = CommunityRecordApi<DownloadedCommunityData>;
+		using ListParam = DownloadCommunityDataListParam;
 
-		sint32 DownloadCommunityDataList_AsyncRequestImpl(
-			CurlRequestHelper& req, const char* reqUrl,
-			DownloadedCommunityData* pOutList, uint32* pOutNum, uint32 numMaxList, const DownloadCommunityDataListParam* pParam);
+		// --- DownloadedCommunityData extras -----------------------------------------
 
-
-		sint32 DownloadCommunityDataList_AsyncRequest(
-			CurlRequestHelper& req, const char* reqUrl, coreinit::OSEvent* requestDoneEvent,
-			DownloadedCommunityData* pOutList, uint32* pOutNum, uint32 numMaxList, const DownloadCommunityDataListParam* pParam
-		)
+		sint32 GetOwnerMiiData(DownloadedCommunityData* self, void* out)
 		{
-			sint32 res = DownloadCommunityDataList_AsyncRequestImpl(req, reqUrl, pOutList, pOutNum, numMaxList, pParam);
-			coreinit::OSSignalEvent(requestDoneEvent);
-			return res;
+			if (!Record::TestFlags(self, CommunityFlag::Mii))
+				return kOlvMissingData;
+			if (!out)
+				return kOlvInvalidPointer;
+			memcpy(out, self->ownerMii, sizeof(self->ownerMii));
+			return kOlvSuccess;
 		}
 
-		sint32 DownloadCommunityDataList(DownloadedCommunityData* pOutList, uint32* pOutNum, uint32 numMaxList, const DownloadCommunityDataListParam* pParam)
+		uint16be* GetOwnerMiiNickname(DownloadedCommunityData* self)
 		{
-			if (!g_IsInitialized)
-				return OLV_RESULT_NOT_INITIALIZED;
-
-			if (!g_IsOnlineMode)
-				return OLV_RESULT_OFFLINE_MODE_REQUEST;
-
-			if (!pOutList || !pOutNum || !pParam)
-				return OLV_RESULT_INVALID_PTR;
-
-			if (!numMaxList)
-				return OLV_RESULT_NOT_ENOUGH_SIZE;
-
-			for (int i = 0; i < numMaxList; i++)
-				DownloadedCommunityData::Clean(&pOutList[i]);
-
-			char reqUrl[2048];
-			sint32 res = pParam->GetRawDataUrl(reqUrl, sizeof(reqUrl));
-			if (res < 0)
-				return res;
-
-			CurlRequestHelper req;
-			req.initate(ActiveSettings::GetNetworkService(), reqUrl, CurlRequestHelper::SERVER_SSL_CONTEXT::OLIVE);
-			InitializeOliveRequest(req);
-
-			StackAllocator<coreinit::OSEvent> requestDoneEvent;
-			coreinit::OSInitEvent(&requestDoneEvent, coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_MANUAL);
-			std::future<sint32> requestRes = std::async(std::launch::async, DownloadCommunityDataList_AsyncRequest,
-				std::ref(req), reqUrl, requestDoneEvent.GetPointer(), pOutList, pOutNum, numMaxList, pParam);
-			coreinit::OSWaitEvent(&requestDoneEvent);
-
-			return requestRes.get();	
+			return self->ownerNickname[0] != 0 ? self->ownerNickname : nullptr;
 		}
 
-		sint32 DownloadCommunityDataList_AsyncRequestImpl(
-			CurlRequestHelper& req, const char* reqUrl,
-			DownloadedCommunityData* pOutList, uint32* pOutNum, uint32 numMaxList, const DownloadCommunityDataListParam* pParam
-		)
+		// --- DownloadCommunityDataListParam ----------------------------------------
+
+		uint32 UsedIdSlots(const ListParam* p)
 		{
+			uint32 n = 0;
+			for (const uint32be& id : p->idList)
+				n += (uint32)id != ListParam::kNoId ? 1 : 0;
+			return n;
+		}
 
-			bool reqResult = req.submitRequest();
-			long httpCode = 0;
-			curl_easy_getinfo(req.getCURL(), CURLINFO_RESPONSE_CODE, &httpCode);
+		ListParam* ListParam_Construct(ListParam* p)
+		{
+			if (!p)
+				return nullptr;
+			p->flags = 0;
+			p->maxCount = 0;
+			p->communityId = 0;
+			for (uint32be& id : p->idList)
+				id = ListParam::kNoId;
+			return p;
+		}
 
+		sint32 ListParam_SetFlags(ListParam* p, uint32 flags)
+		{
+			p->flags = flags;
+			return kOlvSuccess;
+		}
 
-			if (!reqResult)
+		sint32 ListParam_SetCommunityId(ListParam* p, uint32 communityId)
+		{
+			if (communityId == 0xFFFFFFFF)
+				return kOlvInvalidParameter;
+			p->communityId = communityId;
+			if (communityId != 0 && p->maxCount == 0)
+				p->maxCount = 1;
+			return kOlvSuccess;
+		}
+
+		sint32 ListParam_SetCommunityIdAt(ListParam* p, uint32 communityId, uint8 slot)
+		{
+			if (communityId == 0xFFFFFFFF || slot >= ListParam::kIdSlots)
+				return kOlvInvalidParameter;
+			p->idList[slot] = communityId;
+			const uint32 used = UsedIdSlots(p);
+			if (used > p->maxCount)
+				p->maxCount = used;
+			return kOlvSuccess;
+		}
+
+		sint32 ListParam_SetCommunityDataMaxNum(ListParam* p, uint32 count)
+		{
+			if (count == 0 || UsedIdSlots(p) > count)
+				return kOlvInvalidParameter;
+			p->maxCount = count;
+			return kOlvSuccess;
+		}
+
+		nnResult BuildListUrl(const ListParam* p, std::string& url)
+		{
+			const uint32 flags = p->flags;
+			const uint32 used = UsedIdSlots(p);
+			if (used != 0)
 			{
-				cemuLog_log(LogType::Force, "Failed request: {} ({})", reqUrl, httpCode);
-				if (!(httpCode >= 400))
-					return OLV_RESULT_FAILED_REQUEST;
+				// a list of ids: the search goes to the last listed community and names all of them
+				if (p->communityId != 0 && p->communityId != ListParam::kNoId)
+					return kOlvInvalidParameter;
+				if (flags & ~(ListParam::kWithMii | ListParam::kWithIcon))
+					return kOlvInvalidParameter;
+				uint32 lastId = 0;
+				for (const uint32be& id : p->idList)
+					if ((uint32)id != ListParam::kNoId)
+						lastId = id;
+				url = fmt::format("{}/v1/communities/{}.search", g_DiscoveryResults.apiEndpoint, lastId);
+				for (const uint32be& id : p->idList)
+					if ((uint32)id != ListParam::kNoId)
+						AppendQuery(url, fmt::format("community_id={}", (uint32)id));
 			}
+			else
+				url = fmt::format("{}/v1/communities", g_DiscoveryResults.apiEndpoint);
 
-			pugi::xml_document doc;
-			if (!doc.load_buffer(req.getReceivedData().data(), req.getReceivedData().size()))
+			if (p->communityId != 0)
+				AppendQuery(url, fmt::format("community_id={}", (uint32)p->communityId));
+			else
 			{
-				cemuLog_log(LogType::Force, fmt::format("Invalid XML in community download response"));
-				return OLV_RESULT_INVALID_XML;
+				const bool favorites = flags & ListParam::kFilterFavorites;
+				const bool official = flags & ListParam::kFilterOfficial;
+				const bool owned = flags & ListParam::kFilterOwned;
+				if ((int)favorites + (int)official + (int)owned != 1)
+					return kOlvInvalidParameter;
+				AppendQuery(url, fmt::format("limit={}", (uint32)p->maxCount));
+				AppendQuery(url, favorites ? "type=favorite" : official ? "type=official" : "type=my");
 			}
+			if (flags & ListParam::kWithMii)
+				AppendQuery(url, "with_mii=1");
+			if (flags & ListParam::kWithIcon)
+				AppendQuery(url, "with_icon=1");
+			return kOlvSuccess;
+		}
 
-			sint32 responseError = CheckOliveResponse(doc);
-			if (responseError < 0)
-				return responseError;
+		sint32 ListParam_GetRawDataUrl(ListParam* p, char* out, uint32 outSize)
+		{
+			if (!g_olv.online)
+				return kOlvOfflineMode;
+			if (!out)
+				return kOlvInvalidPointer;
+			if (outSize == 0)
+				return kOlvNotEnoughSize;
+			std::string url;
+			const nnResult r = BuildListUrl(p, url);
+			if (NN_RESULT_IS_FAILURE(r))
+				return r;
+			// like snprintf: truncate to the buffer
+			const size_t n = std::min<size_t>(url.size(), outSize - 1);
+			memcpy(out, url.data(), n);
+			out[n] = '\0';
+			return kOlvSuccess;
+		}
 
-			if (httpCode != 200)
-				return OLV_RESULT_STATUS(httpCode + 4000);
+		// --- download -------------------------------------------------------------------
 
-			std::string request_name = doc.select_node("//request_name").node().child_value();
-			if (request_name.size() == 0)
+		nnResult ReadCommunities(const pugi::xml_document& reply, DownloadedCommunityData* list, uint32 capacity, uint32be* outCount)
+		{
+			const std::string_view requestName = reply.select_node("//request_name").node().child_value();
+			if (requestName.empty())
 			{
-				cemuLog_log(LogType::Force, "Community download response doesn't contain <request_name>");
-				return OLV_RESULT_INVALID_XML;
+				cemuLog_log(LogType::Force, "nn_olv: community reply has no <request_name>");
+				return kOlvBadXml;
 			}
-
-			if ((request_name.compare("communities") != 0) && (request_name.compare("specified_communities") != 0))
+			if (requestName != "communities" && requestName != "specified_communities")
 			{
-				cemuLog_log(LogType::Force, "Community download response <request_name> isn't \"communities\" or \"specified_communities\"");
-				return OLV_RESULT_INVALID_XML;
+				cemuLog_log(LogType::Force, "nn_olv: unexpected community reply \"{}\"", requestName);
+				return kOlvBadXml;
 			}
-
-			pugi::xml_node communities = doc.select_node("//communities").node();
+			pugi::xml_node communities = reply.select_node("//communities").node();
 			if (!communities)
 			{
-				cemuLog_log(LogType::Force, "Community download response doesn't contain <communities>");
-				return OLV_RESULT_INVALID_XML;
+				cemuLog_log(LogType::Force, "nn_olv: community reply has no <communities>");
+				return kOlvBadXml;
 			}
 
-			int idx = 0;
-			for (pugi::xml_node communityNode : communities.children("community"))
+			uint32 count = 0;
+			for (pugi::xml_node node : communities.children("community"))
 			{
-				if (idx >= numMaxList)
+				if (count >= capacity)
 					break;
+				DownloadedCommunityData& entry = list[count];
+				CommunityReply fields;
+				fields.appData = node.child_value("app_data");
+				fields.communityId = node.child_value("community_id");
+				fields.name = node.child_value("name");
+				fields.description = node.child_value("description");
+				fields.pid = node.child_value("pid");
+				fields.icon = node.child_value("icon");
+				const nnResult r = StoreCommunityReply(entry.rec, fields);
+				if (NN_RESULT_IS_FAILURE(r))
+					return r;
 
-				DownloadedCommunityData* pOutData = &pOutList[idx];
-
-				std::string_view app_data = communityNode.child_value("app_data");
-				std::string_view community_id = communityNode.child_value("community_id");
-				std::string_view name = communityNode.child_value("name");
-				std::string_view description = communityNode.child_value("description");
-				std::string_view pid = communityNode.child_value("pid");
-				std::string_view icon = communityNode.child_value("icon");
-				std::string_view mii = communityNode.child_value("mii");
-				std::string_view screen_name = communityNode.child_value("screen_name");
-
-				if (app_data.size() != 0)
+				const std::string_view mii = node.child_value("mii");
+				if (!mii.empty())
 				{
-					auto app_data_bin = NCrypto::base64Decode(app_data);
-					if (app_data_bin.size() != 0)
-					{
-						memcpy(pOutData->appData, app_data_bin.data(), std::min(size_t(0x400), app_data_bin.size()));
-						pOutData->flags |= DownloadedCommunityData::FLAG_HAS_APP_DATA;
-						pOutData->appDataLen = app_data_bin.size();
-					}
-					else
-						return OLV_RESULT_INVALID_TEXT_FIELD;
+					const std::vector<uint8> bytes = NCrypto::base64Decode(mii);
+					if (bytes.empty())
+						return kOlvBadTextField;
+					memcpy(entry.ownerMii, bytes.data(), std::min(bytes.size(), sizeof(entry.ownerMii)));
+					entry.rec.flags = entry.rec.flags | CommunityFlag::Mii;
 				}
-
-				sint64 community_id_val = StringHelpers::ToInt64(community_id, -1);
-				if (community_id_val == -1)
-					return OLV_RESULT_INVALID_INTEGER_FIELD;
-
-				pOutData->communityId = community_id_val;
-
-				if (name.size() != 0)
-				{
-					auto name_utf16 = StringHelpers::FromUtf8(name);
-					name_utf16.resize(std::min<size_t>(name_utf16.size(), 128));
-					if (name_utf16.size() != 0)
-					{
-						for (int i = 0; i < name_utf16.size(); i++)
-							pOutData->titleText[i] = name_utf16.at(i).bevalue();
-
-						pOutData->flags |= DownloadedCommunityData::FLAG_HAS_TITLE_TEXT;
-						pOutData->titleTextMaxLen = name_utf16.size();
-					}
-					else
-						return OLV_RESULT_INVALID_TEXT_FIELD;
-				}
-
-				if (description.size() != 0)
-				{
-					auto description_utf16 = StringHelpers::FromUtf8(description);
-					description_utf16.resize(std::min<size_t>(description_utf16.size(), 256));
-					if (description_utf16.size() != 0)
-					{
-						for (int i = 0; i < description_utf16.size(); i++)
-							pOutData->description[i] = description_utf16.at(i).bevalue();
-
-						pOutData->flags |= DownloadedCommunityData::FLAG_HAS_DESC_TEXT;
-						pOutData->descriptionMaxLen = description_utf16.size();
-					}
-					else
-						return OLV_RESULT_INVALID_TEXT_FIELD;
-				}
-
-				sint64 pid_val = StringHelpers::ToInt64(pid, -1);
-				if (pid_val == -1)
-					return OLV_RESULT_INVALID_INTEGER_FIELD;
-
-				pOutData->pid = pid_val;
-
-				if (icon.size() != 0)
-				{
-					auto icon_bin = NCrypto::base64Decode(icon);
-					if (icon_bin.size() != 0)
-					{
-						memcpy(pOutData->iconData, icon_bin.data(), std::min(size_t(0x1002c), icon_bin.size()));
-						pOutData->flags |= DownloadedCommunityData::FLAG_HAS_ICON_DATA;
-						pOutData->iconDataSize = icon_bin.size();
-					}
-					else
-						return OLV_RESULT_INVALID_TEXT_FIELD;
-				}
-
-				if (mii.size() != 0)
-				{
-					auto mii_bin = NCrypto::base64Decode(mii);
-					if (mii_bin.size() != 0)
-					{
-						memcpy(pOutData->miiFFLStoreData, mii_bin.data(), std::min(size_t(96), mii_bin.size()));
-						pOutData->flags |= DownloadedCommunityData::FLAG_HAS_MII_DATA;
-					}
-					else
-						return OLV_RESULT_INVALID_TEXT_FIELD;
-				}
-
-				if (screen_name.size() != 0)
-				{
-					auto screen_name_utf16 = StringHelpers::FromUtf8(screen_name);
-					screen_name_utf16.resize(std::min<size_t>(screen_name_utf16.size(), 32));
-					if (screen_name_utf16.size() != 0)
-					{
-						for (int i = 0; i < screen_name_utf16.size(); i++)
-							pOutData->miiDisplayName[i] = screen_name_utf16.at(i).bevalue();
-					}
-					else
-						return OLV_RESULT_INVALID_TEXT_FIELD;
-				}
-
-				idx++;
-
+				const std::string_view screenName = node.child_value("screen_name");
+				if (!screenName.empty() && Utf8ToWideFixed(entry.ownerNickname, std::size(entry.ownerNickname), screenName) == 0)
+					return kOlvBadTextField;
+				count++;
 			}
-
-			*pOutNum = _swapEndianU32(idx);
-			sint32 res = OLV_RESULT_SUCCESS;
-			if (idx > 0)
-				res = 0; // nn_olv doesn't do it like that, but it's the same effect. I have no clue why it returns 0 when you have 1+ communities downloaded
-
-			return res;
+			*outCount = count;
+			// the library answers 0 rather than the success code once something was found
+			return count > 0 ? 0 : kOlvSuccess;
 		}
+	}
+
+	sint32 DownloadCommunityDataList(DownloadedCommunityData* pOutList, uint32be* pOutNum, uint32 numMaxList, const DownloadCommunityDataListParam* pParam)
+	{
+		if (!g_olv.initialized)
+			return kOlvNotInitialized;
+		if (!g_olv.online)
+			return kOlvOfflineMode;
+		if (!pOutList || !pOutNum || !pParam)
+			return kOlvInvalidPointer;
+		if (numMaxList == 0)
+			return kOlvNotEnoughSize;
+		for (uint32 i = 0; i < numMaxList; i++)
+			Record::Clear(pOutList + i);
+
+		std::string url;
+		const nnResult urlResult = BuildListUrl(pParam, url);
+		if (NN_RESULT_IS_FAILURE(urlResult))
+			return urlResult;
+		if (url.size() >= 2048)
+			url.resize(2047);
+
+		return RunBlockingOnHost([&]() -> nnResult {
+			CurlRequestHelper req;
+			BeginOliveRequest(req, url);
+			pugi::xml_document reply;
+			const nnResult r = FinishOliveRequest(req, url, false, reply);
+			if (NN_RESULT_IS_FAILURE(r))
+				return r;
+			return ReadCommunities(reply, pOutList, numMaxList, pOutNum);
+		});
+	}
+
+	void RegisterDownloadCommunityExports()
+	{
+		OLV_REGISTER_COMMUNITY_RECORD(DownloadedCommunityData, "23DownloadedCommunityData");
+		cafeExportRegisterFunc(GetOwnerMiiData, "nn_olv", "GetOwnerMiiData__Q3_2nn3olv23DownloadedCommunityDataCFP12FFLStoreData", LogType::NN_OLV);
+		cafeExportRegisterFunc(GetOwnerMiiNickname, "nn_olv", "GetOwnerMiiNickname__Q3_2nn3olv23DownloadedCommunityDataCFv", LogType::NN_OLV);
+
+		cafeExportRegisterFunc(ListParam_Construct, "nn_olv", "__ct__Q3_2nn3olv30DownloadCommunityDataListParamFv", LogType::NN_OLV);
+		cafeExportRegisterFunc(ListParam_SetFlags, "nn_olv", "SetFlags__Q3_2nn3olv30DownloadCommunityDataListParamFUi", LogType::NN_OLV);
+		cafeExportRegisterFunc(ListParam_SetCommunityDataMaxNum, "nn_olv", "SetCommunityDataMaxNum__Q3_2nn3olv30DownloadCommunityDataListParamFUi", LogType::NN_OLV);
+		cafeExportRegisterFunc(ListParam_GetRawDataUrl, "nn_olv", "GetRawDataUrl__Q3_2nn3olv30DownloadCommunityDataListParamCFPcUi", LogType::NN_OLV);
+		cafeExportRegisterFunc(ListParam_SetCommunityId, "nn_olv", "SetCommunityId__Q3_2nn3olv30DownloadCommunityDataListParamFUi", LogType::NN_OLV);
+		cafeExportRegisterFunc(ListParam_SetCommunityIdAt, "nn_olv", "SetCommunityId__Q3_2nn3olv30DownloadCommunityDataListParamFUiUc", LogType::NN_OLV);
+		cafeExportRegisterFunc(DownloadCommunityDataList, "nn_olv", "DownloadCommunityDataList__Q2_2nn3olvFPQ3_2nn3olv23DownloadedCommunityDataPUiUiPCQ3_2nn3olv30DownloadCommunityDataListParam", LogType::NN_OLV);
 	}
 }

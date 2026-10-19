@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "nn_olv.h"
 
 #include "nn_olv_InitializeTypes.h"
@@ -7,97 +8,97 @@
 #include "nn_olv_PostTypes.h"
 #include "nn_olv_OfflineDB.h"
 
-#include "Cafe/OS/libs/proc_ui/proc_ui.h"
+#include "Cafe/OS/RPL/rpl.h"
+#include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Time.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Misc.h"
 
-namespace nn
+namespace nn::olv
 {
-	namespace olv
+	namespace
 	{
-		static SysAllocator<OSThread_t> s_OlvReleaseBgThread;
-		SysAllocator<uint8, 1024> s_OlvReleaseBgThreadStack;
-		SysAllocator<char, 32> s_OlvReleaseBgThreadName;
+		// --- posting through the Miiverse applet ------------------------------------
+		// There is no applet to hand the post to. The title is sent to the background
+		// and brought back as if the user had closed the posting screen.
 
-		void StubPostAppReleaseBackground(PPCInterpreter_t* hCPU)
+		SysAllocator<OSThread_t> s_returnThread;
+		SysAllocator<uint8, 1024> s_returnThreadStack;
+		SysAllocator<char, 32> s_returnThreadName;
+		std::atomic<bool> s_returnPending{false};
+
+		void ReturnFromPostApp()
 		{
-			coreinit::OSSleepTicks(ESPRESSO_TIMER_CLOCK * 2); // Sleep 2s
+			coreinit::OSSleepTicks(ESPRESSO_TIMER_CLOCK * 2);
 			coreinit::StartBackgroundForegroundTransition();
+			s_returnPending = false;
 		}
 
-		sint32 StubPostApp(void* pAnyPostParam)
+		sint32 UploadByPostApp(void* /*param*/)
 		{
-			coreinit::OSCreateThreadType(s_OlvReleaseBgThread.GetPtr(), RPLLoader_MakePPCCallable(StubPostAppReleaseBackground), 0, nullptr, s_OlvReleaseBgThreadStack.GetPtr() + s_OlvReleaseBgThreadStack.GetByteSize(), (sint32)s_OlvReleaseBgThreadStack.GetByteSize(), 0, (1 << 1) | (1 << 3), OSThread_t::THREAD_TYPE::TYPE_APP);
-			coreinit::OSResumeThread(s_OlvReleaseBgThread.GetPtr());
-			strcpy(s_OlvReleaseBgThreadName.GetPtr(), "StubPostApp!");
-			coreinit::OSSetThreadName(s_OlvReleaseBgThread.GetPtr(),s_OlvReleaseBgThreadName.GetPtr());
-			return OLV_RESULT_SUCCESS;
+			if (s_returnPending.exchange(true))
+				return kOlvSuccess; // a return to the title is already on its way
+			OSThread_t* thread = s_returnThread.GetPtr();
+			uint8* stack = s_returnThreadStack.GetPtr();
+			const uint32 stackSize = s_returnThreadStack.GetByteSize();
+			constexpr uint32 kAffinityCore1 = 1 << 1, kDetached = 1 << 3;
+			coreinit::OSCreateThreadType(thread, makeCallableExport<&ReturnFromPostApp>(), 0, nullptr, stack + stackSize, (sint32)stackSize, 0,
+				kAffinityCore1 | kDetached, OSThread_t::THREAD_TYPE::TYPE_APP);
+			coreinit::OSResumeThread(thread);
+			strcpy(s_returnThreadName.GetPtr(), "StubPostApp!");
+			coreinit::OSSetThreadName(thread, s_returnThreadName.GetPtr());
+			return kOlvSuccess;
 		}
 
-		sint32 StubPostAppResult()
+		sint32 PostAppResult()
 		{
-			return OLV_RESULT_STATUS(301); // Cancelled post app
+			return OlvStatus(301); // the user cancelled the post
 		}
 
-		// Somehow required, MK8 doesn't even seem to care about the error codes lol
-		char* UploadedPostData_GetPostId(char* pPostData)
+		sint32 PostAppResultWithData(void* /*uploadedData*/)
 		{
-			pPostData[4] = '\0';
-			return &pPostData[4];
+			return PostAppResult();
 		}
 
-		// https://github.com/kinnay/NintendoClients/wiki/Wii-U-Error-Codes#act-error-codes
-		constexpr uint32 GetErrorCodeImpl(uint32 in)
+		// UploadedPostData::GetPostId; the id is left empty
+		char* UploadedPostData_GetPostId(char* data)
 		{
-			uint32_t errorCode = in;
-			uint32_t errorVersion = (errorCode >> 27) & 3;
-			uint32_t errorModuleMask = (errorVersion != 3) ? 0x1FF00000 : 0x7F00000;
-			bool isCodeFailure = errorCode & 0x80000000;
+			data[4] = '\0';
+			return data + 4;
+		}
 
-			if (((errorCode & errorModuleMask) >> 20) == NN_RESULT_MODULE_NN_ACT)
+		// --- error codes ---------------------------------------------------------------
+
+		// map an nn::Result to the 115xxxx error code shown to the user
+		constexpr uint32 ErrorCodeFor(uint32 result)
+		{
+			const uint32 version = (result >> 27) & 3;
+			const uint32 moduleMask = version == 3 ? 0x07F00000 : 0x1FF00000;
+			const uint32 module = (result & moduleMask) >> 20;
+			const bool failed = (result & 0x80000000) != 0;
+			if (module == NN_RESULT_MODULE_NN_OLV && failed)
 			{
-				// BANNED_ACCOUNT_IN_INDEPENDENT_SERVICE or BANNED_ACCOUNT_IN_INDEPENDENT_SERVICE_TEMPORARILY
-				if (errorCode == OLV_ACT_RESULT_STATUS(2805) || errorCode == OLV_ACT_RESULT_STATUS(2825))
-				{
-					uint32 tmpCode = OLV_RESULT_STATUS(1008);
-					return GetErrorCodeImpl(tmpCode);
-				}
-				// BANNED_DEVICE_IN_INDEPENDENT_SERVICE or  BANNED_DEVICE_IN_INDEPENDENT_SERVICE_TEMPORARILY
-				else if (errorCode == OLV_ACT_RESULT_STATUS(2815) || errorCode == OLV_ACT_RESULT_STATUS(2835))
-				{
-					uint32 tmpCode = OLV_RESULT_STATUS(1009);
-					return GetErrorCodeImpl(tmpCode);
-				}
-				else
-				{
-					// Check ACT error code
-					return 1159999;
-				}
+				const uint32 detailMask = version == 3 ? 0x3FF : 0xFFFFF;
+				return ((result & detailMask) >> 7) + 1150000;
 			}
-			else
-			{
-				if (((errorCode & errorModuleMask) >> 20) == NN_RESULT_MODULE_NN_OLV && isCodeFailure)
-				{
-					uint32_t errorValueMask = (errorVersion != 3) ? 0xFFFFF : 0x3FF;
-					return ((errorCode & errorValueMask) >> 7) + 1150000;
-				}
-				else
-				{
-					return 1159999;
-				}
-			}
+			// account (nn_act) errors and anything else get the generic code
+			return 1159999;
+		}
+		static_assert(ErrorCodeFor(0xA119C600) == 1155004);
+
+		uint32 GetErrorCode(uint32be* result)
+		{
+			return ErrorCodeFor(*result);
 		}
 
-		uint32 GetErrorCode(uint32be* pResult)
+		void ResetLibraryState()
 		{
-			return GetErrorCodeImpl(pResult->value());
+			g_olv = OliveState{};
+			s_returnPending = false;
 		}
 
-		static_assert(GetErrorCodeImpl(0xa119c600) == 1155004);
-
-		class : public COSModule
+		class OliveModule : public COSModule
 		{
-			public:
+		public:
 			std::string_view GetName() override
 			{
 				return "nn_olv";
@@ -105,46 +106,40 @@ namespace nn
 
 			void RPLMapped() override
 			{
-				loadOliveInitializeTypes();
-				loadOliveUploadCommunityTypes();
-				loadOliveDownloadCommunityTypes();
-				loadOliveUploadFavoriteTypes();
-				loadOlivePostAndTopicTypes();
+				RegisterInitializeExports();
+				RegisterUploadCommunityExports();
+				RegisterDownloadCommunityExports();
+				RegisterUploadFavoriteExports();
+				RegisterPostExports();
 
 				cafeExportRegisterFunc(GetErrorCode, "nn_olv", "GetErrorCode__Q2_2nn3olvFRCQ2_2nn6Result", LogType::NN_OLV);
 
-				cafeExportRegisterFunc(StubPostApp, "nn_olv", "UploadPostDataByPostApp__Q2_2nn3olvFPCQ3_2nn3olv28UploadPostDataByPostAppParam", LogType::NN_OLV);
-				cafeExportRegisterFunc(StubPostApp, "nn_olv", "UploadCommentDataByPostApp__Q2_2nn3olvFPCQ3_2nn3olv31UploadCommentDataByPostAppParam", LogType::NN_OLV);
-				cafeExportRegisterFunc(StubPostApp, "nn_olv", "UploadDirectMessageDataByPostApp__Q2_2nn3olvFPCQ3_2nn3olv37UploadDirectMessageDataByPostAppParam", LogType::NN_OLV);
+				cafeExportRegisterFunc(UploadByPostApp, "nn_olv", "UploadPostDataByPostApp__Q2_2nn3olvFPCQ3_2nn3olv28UploadPostDataByPostAppParam", LogType::NN_OLV);
+				cafeExportRegisterFunc(UploadByPostApp, "nn_olv", "UploadCommentDataByPostApp__Q2_2nn3olvFPCQ3_2nn3olv31UploadCommentDataByPostAppParam", LogType::NN_OLV);
+				cafeExportRegisterFunc(UploadByPostApp, "nn_olv", "UploadDirectMessageDataByPostApp__Q2_2nn3olvFPCQ3_2nn3olv37UploadDirectMessageDataByPostAppParam", LogType::NN_OLV);
 
-				cafeExportRegisterFunc(StubPostAppResult, "nn_olv", "GetResultByPostApp__Q2_2nn3olvFv", LogType::NN_OLV);
-				cafeExportRegisterFunc(StubPostAppResult, "nn_olv", "GetResultWithUploadedPostDataByPostApp__Q2_2nn3olvFPQ3_2nn3olv16UploadedPostData", LogType::NN_OLV);
-				cafeExportRegisterFunc(StubPostAppResult, "nn_olv", "GetResultWithUploadedDirectMessageDataByPostApp__Q2_2nn3olvFPQ3_2nn3olv25UploadedDirectMessageData", LogType::NN_OLV);
-				cafeExportRegisterFunc(StubPostAppResult, "nn_olv", "GetResultWithUploadedCommentDataByPostApp__Q2_2nn3olvFPQ3_2nn3olv19UploadedCommentData", LogType::NN_OLV);
+				cafeExportRegisterFunc(PostAppResult, "nn_olv", "GetResultByPostApp__Q2_2nn3olvFv", LogType::NN_OLV);
+				cafeExportRegisterFunc(PostAppResultWithData, "nn_olv", "GetResultWithUploadedPostDataByPostApp__Q2_2nn3olvFPQ3_2nn3olv16UploadedPostData", LogType::NN_OLV);
+				cafeExportRegisterFunc(PostAppResultWithData, "nn_olv", "GetResultWithUploadedDirectMessageDataByPostApp__Q2_2nn3olvFPQ3_2nn3olv25UploadedDirectMessageData", LogType::NN_OLV);
+				cafeExportRegisterFunc(PostAppResultWithData, "nn_olv", "GetResultWithUploadedCommentDataByPostApp__Q2_2nn3olvFPQ3_2nn3olv19UploadedCommentData", LogType::NN_OLV);
 
 				cafeExportRegisterFunc(UploadedPostData_GetPostId, "nn_olv", "GetPostId__Q3_2nn3olv16UploadedPostDataCFv", LogType::NN_OLV);
-			};
+			}
 
 			void rpl_entry(uint32 moduleHandle, coreinit::RplEntryReason reason) override
 			{
 				if (reason == coreinit::RplEntryReason::Loaded)
-				{
-					g_ReportTypes = 0;
-					g_IsOnlineMode = false;
-					g_IsInitialized = false;
-					g_IsOfflineDBMode = false;
-				}
+					ResetLibraryState();
 				else if (reason == coreinit::RplEntryReason::Unloaded)
-				{
 					OfflineDB_Shutdown();
-				}
 			}
-		}s_COSnnOlvModule;
+		};
 
-		COSModule* GetModule()
-		{
-			return &s_COSnnOlvModule;
-		}
+		OliveModule s_module;
+	}
 
+	COSModule* GetModule()
+	{
+		return &s_module;
 	}
 }

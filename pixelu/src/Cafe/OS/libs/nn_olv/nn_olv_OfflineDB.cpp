@@ -1,215 +1,181 @@
-#include "nn_olv_Common.h"
-#include "nn_olv_PostTypes.h"
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "nn_olv_OfflineDB.h"
-#include "Cemu/ncrypto/ncrypto.h" // for base64 encoder/decoder
-#include "util/helpers/helpers.h"
 #include "config/ActiveSettings.h"
 #include "Cafe/CafeSystem.h"
-#include <pugixml.hpp>
 #include <zlib.h>
+#include <random>
 #include <zarchive/zarchivereader.h>
 
-namespace nn
+namespace nn::olv
 {
-	namespace olv
+	namespace
 	{
-		std::mutex g_offlineDBMutex;
-		bool g_offlineDBInitialized = false;
-		ZArchiveReader* g_offlineDBArchive{nullptr};
+		std::mutex s_archiveLock;
+		bool s_archiveOpened = false; // tried to open (it may be missing)
+		std::unique_ptr<ZArchiveReader> s_archive;
 
-		void OfflineDB_LazyInit()
+		void OpenArchiveOnce()
 		{
-			std::scoped_lock _l(g_offlineDBMutex);
-			if(g_offlineDBInitialized)
+			std::scoped_lock lock(s_archiveLock);
+			if (s_archiveOpened)
 				return;
-			// open archive
-			g_offlineDBArchive = ZArchiveReader::OpenFromFile(ActiveSettings::GetUserDataPath("resources/miiverse/OfflineDB.zar"));
-			if(!g_offlineDBArchive)
-				cemuLog_log(LogType::Force, "Offline miiverse posts are not available");
-			g_offlineDBInitialized = true;
+			s_archive.reset(ZArchiveReader::OpenFromFile(ActiveSettings::GetUserDataPath("resources/miiverse/OfflineDB.zar")));
+			if (!s_archive)
+				cemuLog_log(LogType::Force, "nn_olv: the offline Miiverse archive is not installed, no posts will be shown");
+			s_archiveOpened = true;
 		}
 
-		void OfflineDB_Shutdown()
+		std::optional<uint64> ArchiveFileSize(const std::string& path)
 		{
-			std::scoped_lock _l(g_offlineDBMutex);
-			if(!g_offlineDBInitialized)
-				return;
-			delete g_offlineDBArchive;
-			g_offlineDBInitialized = false;
+			if (!s_archive)
+				return std::nullopt;
+			ZArchiveNodeHandle node = s_archive->LookUp(path);
+			if (!s_archive->IsFile(node))
+				return std::nullopt;
+			return s_archive->GetFileSize(node);
 		}
 
-		bool CheckForOfflineDBFile(const char* filePath, uint32* fileSize)
+		bool ReadArchiveFile(const std::string& path, std::vector<uint8>& data)
 		{
-			if(!g_offlineDBArchive)
+			data.clear();
+			if (!s_archive)
 				return false;
-			ZArchiveNodeHandle fileHandle = g_offlineDBArchive->LookUp(filePath);
-			if (!g_offlineDBArchive->IsFile(fileHandle))
+			ZArchiveNodeHandle node = s_archive->LookUp(path);
+			if (!s_archive->IsFile(node))
 				return false;
-			if(fileSize)
-				*fileSize = g_offlineDBArchive->GetFileSize(fileHandle);
+			data.resize(s_archive->GetFileSize(node));
+			s_archive->ReadFromFile(node, 0, data.size(), data.data());
 			return true;
 		}
 
-		bool LoadOfflineDBFile(const char* filePath, std::vector<uint8>& fileData)
+		// which bundled post list belongs to the running title
+		const char* PostListFor(uint64 titleId)
 		{
-			fileData.clear();
-			if(!g_offlineDBArchive)
-				return false;
-			ZArchiveNodeHandle fileHandle = g_offlineDBArchive->LookUp(filePath);
-			if (!g_offlineDBArchive->IsFile(fileHandle))
-				return false;
-			fileData.resize(g_offlineDBArchive->GetFileSize(fileHandle));
-			g_offlineDBArchive->ReadFromFile(fileHandle, 0, fileData.size(), fileData.data());
-			return true;
-		}
-
-		void TryLoadCompressedMemoImage(DownloadedPostData& downloadedPostData)
-		{
-			const unsigned char tgaHeader_320x120_32BPP[] = {0x0,0x0,0x2,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x0,0x40,0x1,0x78,0x0,0x20,0x8};
-			std::string memoImageFilename = fmt::format("memo/{}", (char*)downloadedPostData.downloadedDataBase.postId);
-			std::vector<uint8> bitmaskCompressedImg;
-			if (!LoadOfflineDBFile(memoImageFilename.c_str(), bitmaskCompressedImg))
-				return;
-			if (bitmaskCompressedImg.size() != (320*120)/8)
-				return;
-			std::vector<uint8> decompressedImage;
-			decompressedImage.resize(sizeof(tgaHeader_320x120_32BPP) + 320 * 120 * 4);
-			memcpy(decompressedImage.data(), tgaHeader_320x120_32BPP, sizeof(tgaHeader_320x120_32BPP));
-			uint8* pOut = decompressedImage.data() + sizeof(tgaHeader_320x120_32BPP);
-			for(int i=0; i<320*120; i++)
+			switch (titleId)
 			{
-				bool isWhite = (bitmaskCompressedImg[i/8] & (1 << (i%8))) != 0;
-				if(isWhite)
-				{
-					pOut[0] = pOut[1] = pOut[2] = pOut[3] = 0xFF;
-				}
-				else
-				{
-					pOut[0] = pOut[1] = pOut[2] = 0;
-					pOut[3] = 0xFF;
-				}
-				pOut += 4;
+			case 0x0005000010143400: // The Legend of Zelda: The Wind Waker HD (JP, US, EU)
+			case 0x0005000010143500:
+			case 0x0005000010143600:
+				return "PostList_WindWakerHD.xml";
+			default:
+				return nullptr;
 			}
-			// store compressed image
-			uLongf compressedDestLen = 40960;
-			int r = compress((uint8*)downloadedPostData.downloadedDataBase.compressedMemoBody, &compressedDestLen, decompressedImage.data(), decompressedImage.size());
-			if( r != Z_OK)
-				return;
-			downloadedPostData.downloadedDataBase.compressedMemoBodySize = compressedDestLen;
-			downloadedPostData.downloadedDataBase.SetFlag(DownloadedDataBase::FLAGS::HAS_BODY_MEMO);
 		}
 
-		void CheckForExternalImage(DownloadedPostData& downloadedPostData)
+		// paintings are stored as a 1 bit 320x120 mask; games expect a compressed 32-bit TGA
+		void AttachPainting(DownloadedPostData& post)
 		{
-			std::string externalImageFilename = fmt::format("image/{}.jpg", (char*)downloadedPostData.downloadedDataBase.postId);
-			uint32 fileSize;
-			if (!CheckForOfflineDBFile(externalImageFilename.c_str(), &fileSize))
+			constexpr uint32 kWidth = 320, kHeight = 120;
+			std::vector<uint8> mask;
+			if (!ReadArchiveFile(fmt::format("memo/{}", (const char*)post.base.postId), mask))
 				return;
-			strcpy((char*)downloadedPostData.downloadedDataBase.externalImageDataUrl, externalImageFilename.c_str());
-			downloadedPostData.downloadedDataBase.SetFlag(DownloadedDataBase::FLAGS::HAS_EXTERNAL_IMAGE);
-			downloadedPostData.downloadedDataBase.externalImageDataSize = fileSize;
+			if (mask.size() != kWidth * kHeight / 8)
+				return;
+			const uint8 header[18] = { 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+				(uint8)(kWidth & 0xFF), (uint8)(kWidth >> 8), (uint8)(kHeight & 0xFF), (uint8)(kHeight >> 8), 32, 8 };
+			std::vector<uint8> tga(sizeof(header) + kWidth * kHeight * 4);
+			memcpy(tga.data(), header, sizeof(header));
+			uint8* pixel = tga.data() + sizeof(header);
+			for (uint32 i = 0; i < kWidth * kHeight; i++, pixel += 4)
+			{
+				const uint8 shade = ((mask[i / 8] >> (i % 8)) & 1) ? 0xFF : 0x00;
+				pixel[0] = shade;
+				pixel[1] = shade;
+				pixel[2] = shade;
+				pixel[3] = 0xFF;
+			}
+			uLongf packed = sizeof(post.base.memo);
+			if (compress((uint8*)post.base.memo, &packed, tga.data(), tga.size()) != Z_OK)
+				return;
+			post.base.memoSize = (uint32)packed;
+			post.base.Set(PostFlag::BodyMemo);
 		}
 
-		nnResult _Async_OfflineDB_DownloadPostDataListParam_DownloadPostDataList(coreinit::OSEvent* event, DownloadedTopicData* downloadedTopicData, DownloadedPostData* downloadedPostData, uint32be* postCountOut, uint32 maxCount, DownloadPostDataListParam* param)
+		void AttachExternalImage(DownloadedPostData& post)
 		{
-			stdx::scope_exit _se([&](){coreinit::OSSignalEvent(event);});
+			const std::string path = fmt::format("image/{}.jpg", (const char*)post.base.postId);
+			const std::optional<uint64> size = ArchiveFileSize(path);
+			if (!size || path.size() >= sizeof(post.base.externalImageUrl))
+				return;
+			memcpy(post.base.externalImageUrl, path.c_str(), path.size() + 1);
+			post.base.externalImageSize = (uint32)*size;
+			post.base.Set(PostFlag::ExternalImage);
+		}
 
-			uint64 titleId = CafeSystem::GetForegroundTitleId();
-
-			memset(downloadedTopicData, 0, sizeof(DownloadedTopicData));
-			memset(downloadedPostData, 0, sizeof(DownloadedPostData) * maxCount);
-			*postCountOut = 0;
-
-			const char* postXmlFilename = nullptr;
-			if(titleId == 0x0005000010143400 || titleId == 0x0005000010143500 || titleId == 0x0005000010143600)
-				postXmlFilename = "PostList_WindWakerHD.xml";
-
-			if (!postXmlFilename)
-				return OLV_RESULT_SUCCESS;
-
-			// load post XML
-			std::vector<uint8> xmlData;
-			if (!LoadOfflineDBFile(postXmlFilename, xmlData))
-				return OLV_RESULT_SUCCESS;
+		// pick up to maxCount random posts of the title's list
+		uint32 CollectPosts(DownloadedPostData* posts, uint32 maxCount)
+		{
+			const char* listName = PostListFor(CafeSystem::GetForegroundTitleId());
+			if (!listName)
+				return 0;
+			std::vector<uint8> xml;
+			if (!ReadArchiveFile(listName, xml))
+				return 0;
 			pugi::xml_document doc;
-			pugi::xml_parse_result result = doc.load_buffer(xmlData.data(), xmlData.size());
-			if (!result)
-				return OLV_RESULT_SUCCESS;
-			// collect list of all post xml nodes
-			std::vector<pugi::xml_node> postXmlNodes;
-			for (pugi::xml_node postNode = doc.child("posts").child("post"); postNode; postNode = postNode.next_sibling("post"))
-				postXmlNodes.push_back(postNode);
+			if (!doc.load_buffer(xml.data(), xml.size()))
+				return 0;
+			std::vector<pugi::xml_node> pool;
+			for (pugi::xml_node n : doc.child("posts").children("post"))
+				pool.push_back(n);
 
-			// randomly select up to maxCount posts
-			srand(GetTickCount());
-			uint32 postCount = 0;
-			while(!postXmlNodes.empty() && postCount < maxCount)
+			std::mt19937 rng(std::random_device{}());
+			uint32 count = 0;
+			while (!pool.empty() && count < maxCount)
 			{
-				uint32 index = rand() % postXmlNodes.size();
-				pugi::xml_node& postNode = postXmlNodes[index];
+				const size_t pick = std::uniform_int_distribution<size_t>(0, pool.size() - 1)(rng);
+				const pugi::xml_node node = pool[pick];
+				pool[pick] = pool.back();
+				pool.pop_back();
 
-				auto& addedPost = downloadedPostData[postCount];
-				memset(&addedPost, 0, sizeof(DownloadedPostData));
-				if (!ParseXML_DownloadedPostData(addedPost, postNode) )
+				DownloadedPostData& post = posts[count];
+				memset(&post, 0, sizeof(post));
+				if (!ReadPostXml(post, node))
 					continue;
-				TryLoadCompressedMemoImage(addedPost);
-				CheckForExternalImage(addedPost);
-				postCount++;
-				// remove from post list
-				postXmlNodes[index] = postXmlNodes.back();
-				postXmlNodes.pop_back();
+				AttachPainting(post);
+				AttachExternalImage(post);
+				count++;
 			}
-			*postCountOut = postCount;
-			return OLV_RESULT_SUCCESS;
+			return count;
 		}
+	}
 
-		nnResult OfflineDB_DownloadPostDataListParam_DownloadPostDataList(DownloadedTopicData* downloadedTopicData, DownloadedPostData* downloadedPostData, uint32be* postCountOut, uint32 maxCount, DownloadPostDataListParam* param)
-		{
-			OfflineDB_LazyInit();
+	void OfflineDB_Shutdown()
+	{
+		std::scoped_lock lock(s_archiveLock);
+		s_archive.reset();
+		s_archiveOpened = false;
+	}
 
-			memset(downloadedTopicData, 0, sizeof(DownloadedTopicData));
-			downloadedTopicData->communityId = param->communityId;
-			*postCountOut = 0;
+	nnResult OfflineDB_ListPosts(DownloadedTopicData* topic, DownloadedPostData* posts, uint32be* postCountOut, uint32 maxCount, DownloadPostDataListParam* param)
+	{
+		OpenArchiveOnce();
+		memset(topic, 0, sizeof(*topic));
+		topic->communityId = param->communityId;
+		*postCountOut = 0;
+		if (param->Has(DownloadPostDataListParam::kSelfOnly))
+			return kOlvSuccess; // the archive holds no posts of the user
 
-			if(param->_HasFlag(DownloadPostDataListParam::FLAGS::SELF_ONLY))
-				return OLV_RESULT_SUCCESS; // the offlineDB doesn't contain any self posts
+		memset(posts, 0, sizeof(DownloadedPostData) * maxCount);
+		return RunBlockingOnHost([&]() -> nnResult {
+			*postCountOut = CollectPosts(posts, maxCount);
+			return kOlvSuccess;
+		});
+	}
 
-			StackAllocator<coreinit::OSEvent> doneEvent;
-			coreinit::OSInitEvent(&doneEvent, coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_MANUAL);
-			auto asyncTask = std::async(std::launch::async, _Async_OfflineDB_DownloadPostDataListParam_DownloadPostDataList, doneEvent.GetPointer(), downloadedTopicData, downloadedPostData, postCountOut, maxCount, param);
-			coreinit::OSWaitEvent(&doneEvent);
-			nnResult r = asyncTask.get();
-			return r;
-		}
-
-		nnResult _Async_OfflineDB_DownloadPostDataListParam_DownloadExternalImageData(coreinit::OSEvent* event, DownloadedDataBase* _this, void* imageDataOut, uint32be* imageSizeOut, uint32 maxSize)
-		{
-			stdx::scope_exit _se([&](){coreinit::OSSignalEvent(event);});
-
-			if (!_this->TestFlags(_this, DownloadedDataBase::FLAGS::HAS_EXTERNAL_IMAGE))
-				return OLV_RESULT_MISSING_DATA;
-
-			// not all games may use JPEG files?
-			std::string externalImageFilename = fmt::format("image/{}.jpg", (char*)_this->postId);
-			std::vector<uint8> jpegData;
-			if (!LoadOfflineDBFile(externalImageFilename.c_str(), jpegData))
-				return OLV_RESULT_FAILED_REQUEST;
-
-			memcpy(imageDataOut, jpegData.data(), jpegData.size());
-			*imageSizeOut = jpegData.size();
-
-			return OLV_RESULT_SUCCESS;
-		}
-
-		nnResult OfflineDB_DownloadPostDataListParam_DownloadExternalImageData(DownloadedDataBase* _this, void* imageDataOut, uint32be* imageSizeOut, uint32 maxSize)
-		{
-			StackAllocator<coreinit::OSEvent> doneEvent;
-			coreinit::OSInitEvent(&doneEvent, coreinit::OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, coreinit::OSEvent::EVENT_MODE::MODE_MANUAL);
-			auto asyncTask = std::async(std::launch::async, _Async_OfflineDB_DownloadPostDataListParam_DownloadExternalImageData, doneEvent.GetPointer(), _this, imageDataOut, imageSizeOut, maxSize);
-			coreinit::OSWaitEvent(&doneEvent);
-			nnResult r = asyncTask.get();
-			return r;
-		}
-
+	nnResult OfflineDB_ReadExternalImage(DownloadedDataBase* post, void* out, uint32be* outSize, uint32 maxSize)
+	{
+		OpenArchiveOnce();
+		return RunBlockingOnHost([&]() -> nnResult {
+			if (!post->Has(PostFlag::ExternalImage))
+				return kOlvMissingData;
+			std::vector<uint8> jpeg;
+			if (!ReadArchiveFile(fmt::format("image/{}.jpg", (const char*)post->postId), jpeg))
+				return kOlvRequestFailed;
+			if (jpeg.size() > maxSize)
+				return kOlvNotEnoughSize;
+			memcpy(out, jpeg.data(), jpeg.size());
+			*outSize = (uint32)jpeg.size();
+			return kOlvSuccess;
+		});
 	}
 }

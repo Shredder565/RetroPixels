@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include "Cafe/OS/common/OSCommon.h"
@@ -9,11 +10,14 @@
 
 #include "nn_olv_Common.h"
 
+// nn_olv: the Miiverse client library
+
 namespace nn::olv
 {
 	extern ParamPackStorage g_ParamPack;
 	extern DiscoveryResultStorage g_DiscoveryResults;
 
+	// the running title's Olive access key; fails with status 1102 when the title has none
 	sint32 GetOlvAccessKey(uint32* pOutKey);
 
 	COSModule* GetModule();

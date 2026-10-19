@@ -1,3 +1,21 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// The voice pool and the AXSetVoice* parameter API.
+//
+// A voice is an AXVPB handle (guest memory, given to the title) plus its two
+// parameter blocks (see ax_internal.h). Setters write the PPC copy and mark
+// the changed group in AXVPB.sync; the frame thread copies marked groups to
+// the DSP copy before rendering.
+//
+// Allocation: free voices sit on a stack; allocated voices are kept per
+// priority in allocation order. When the pool is empty, the oldest voice of
+// the lowest priority below the requested one is taken away from its owner
+// (the owner's drop callback is called first).
+//
+// Protection: between AXUserBegin/AXUserEnd (per thread, nestable) or
+// AXVoiceBegin/AXVoiceEnd (per voice), the frame thread must not pick up a
+// half-written set of parameters. A protected voice keeps rendering with its
+// old parameters until the owning thread ends the block.
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/HW/Espresso/PPCState.h"
 #include "Cafe/HW/Espresso/PPCCallback.h"
@@ -8,142 +26,421 @@
 
 namespace snd_core
 {
-	inline void AXSetSyncFlag(AXVPB* vpb, uint32 flags)
+	FSpinlock g_axVoiceListLock;
+	AXVPBInternal_t* __AXVPBInternalVoiceArray = nullptr;
+	AXVPB* __AXVPBArrayPtr = nullptr;
+
+	namespace
 	{
-		vpb->sync = (uint32be)((uint32)vpb->sync | flags);
-	}
+		// result codes
+		constexpr sint32 kErrBadVoice = -1;
+		constexpr sint32 kErrInFrame = -2;
+		constexpr sint32 kErrNotProtected = -3;
+		constexpr sint32 kErrTableFull = -4;
+		constexpr sint32 kErrNullMix = -3;
+		constexpr sint32 kErrNullVoice = -4;
 
-	inline void AXResetSyncFlag(AXVPB* vpb, uint32 flags)
-	{
-		vpb->sync = (uint32be)((uint32)vpb->sync & ~flags);
-	}
+		// sync bits every freshly (re)initialised voice starts with
+		constexpr uint32 kResetDirty = VoiceDirty::State | VoiceDirty::Src | VoiceDirty::Lpf | VoiceDirty::Biquad |
+			VoiceDirty::RmtOn | VoiceDirty::ItdOn | VoiceDirty::RmtSrc | VoiceDirty::RmtIir;
 
-	/* voice lists */
-	FSpinlock __AXVoiceListSpinlock;
+		// storage the title and the DSP can see
+		SysAllocator<AXVPB, AX_MAX_VOICES> s_handles;
+		SysAllocator<AXVPBInternal_t, AX_MAX_VOICES> s_ppcBlocks;
+		SysAllocator<AXVPBInternal_t, AX_MAX_VOICES> s_dspBlocks;
+		SysAllocator<AXVPBItd, AX_MAX_VOICES> s_itd;
 
-	std::vector<AXVPB*> __AXVoicesPerPriority[AX_PRIORITY_MAX];
-	std::vector<AXVPB*> __AXFreeVoices;
+		struct Pool
+		{
+			std::vector<AXVPB*> freeStack;
+			std::vector<AXVPB*> byPriority[AX_PRIORITY_MAX];
+		};
+		Pool s_pool;
 
-	void AXVoiceList_AddFreeVoice(AXVPB* vpb)
-	{
-		cemu_assert(vpb->priority != AX_PRIORITY_FREE);
-		__AXFreeVoices.push_back(vpb);
-		vpb->prev = nullptr;
-		vpb->next = nullptr;
-	}
+		// who holds a voice: owner thread (guest address) and nesting depth
+		struct Hold
+		{
+			MPTR thread = MPTR_NULL;
+			uint32 depth = 0;
+		};
+		std::vector<Hold> s_userHolds;    // AXUserBegin, per thread, in begin order
+		Hold s_voiceHolds[AX_MAX_VOICES]; // AXVoiceBegin / implicit, per voice
 
-	AXVPB* AXVoiceList_GetFreeVoice()
-	{
-		if (__AXFreeVoices.empty())
+		struct LoopTracker
+		{
+			uint32 loops = 0;
+			uint32 lastPos = 0;
+		};
+		LoopTracker s_loops[AX_MAX_VOICES];
+
+		MPTR CallerThread()
+		{
+			return memory_getVirtualOffsetFromPointer(coreinit::OSGetCurrentThread());
+		}
+
+		void MarkDirty(AXVPB* vpb, uint32 bits)
+		{
+			vpb->sync = (uint32)vpb->sync | bits;
+		}
+
+		void ClearDirty(AXVPB* vpb, uint32 bits)
+		{
+			vpb->sync = (uint32)vpb->sync & ~bits;
+		}
+
+		Hold* UserHoldOf(MPTR thread)
+		{
+			for (auto it = s_userHolds.rbegin(); it != s_userHolds.rend(); ++it)
+			{
+				if (it->thread == thread)
+					return &*it;
+			}
 			return nullptr;
-		AXVPB* vpb = __AXFreeVoices.back();
-		__AXFreeVoices.pop_back();
+		}
+
+		// a setter touched the voice inside a user block: keep the frame thread off it
+		// until that thread's AXUserEnd
+		void HoldForCaller(AXVPB* vpb)
+		{
+			if (s_userHolds.empty() || AXIst_IsFrameBeingProcessed())
+				return;
+			Hold& h = s_voiceHolds[(uint32)vpb->index];
+			if (h.thread == MPTR_NULL)
+				h.thread = CallerThread();
+		}
+
+		void Touched(AXVPB* vpb, uint32 bits)
+		{
+			MarkDirty(vpb, bits);
+			HoldForCaller(vpb);
+		}
+
+		void PushAllocated(AXVPB* vpb, uint32 priority)
+		{
+			s_pool.byPriority[priority].push_back(vpb);
+			vpb->next = nullptr;
+			vpb->prev = nullptr;
+			vpb->priority = priority;
+		}
+
+		void RemoveAllocated(AXVPB* vpb)
+		{
+			const uint32 priority = vpb->priority;
+			if (priority == AX_PRIORITY_FREE || priority >= AX_PRIORITY_MAX)
+				return;
+			auto& list = s_pool.byPriority[priority];
+			list.erase(std::remove(list.begin(), list.end(), vpb), list.end());
+		}
+
+		void PushFree(AXVPB* vpb)
+		{
+			vpb->priority = AX_PRIORITY_FREE;
+			vpb->next = nullptr;
+			vpb->prev = nullptr;
+			s_pool.freeStack.push_back(vpb);
+		}
+
+		AXVPB* PopFree()
+		{
+			if (s_pool.freeStack.empty())
+				return nullptr;
+			AXVPB* vpb = s_pool.freeStack.back();
+			s_pool.freeStack.pop_back();
+			return vpb;
+		}
+
+		void ResetLoopCount(uint32 index)
+		{
+			s_loops[index] = LoopTracker{};
+		}
+
+		// what a voice looks like right after allocation or release
+		void ResetVoice(AXVPB* vpb)
+		{
+			AXVPBInternal_t* pb = PpcBlock(vpb);
+			const uint32 mixer = AXGetDefaultMixerSelect();
+			vpb->playbackState = 0;
+			vpb->sync = kResetDirty;
+			vpb->mixerSelect = mixer;
+			pb->mixerSelect = (uint16)mixer;
+			pb->playbackState = 0;
+			pb->itdOn = 0;
+			pb->rmtOn = 0;
+			pb->lpf.on = 0;
+			pb->biquad.on = 0;
+			pb->srcMode = AX_FILTER_MODE_TAP;
+			pb->src.currentFrac = 0;
+			for (auto& h : pb->src.historySamples)
+				h = 0;
+			for (auto& v : pb->rmtSrcState)
+				v = 0;
+			for (auto& m : pb->mixMaskTV)
+				m = 0;
+			for (auto& m : pb->mixMaskDRC)
+				m = 0;
+			for (auto& m : pb->mixMaskRMT)
+				m = 0;
+			memset(pb->tvVolumeNow, 0, sizeof(pb->tvVolumeNow));
+			memset(pb->reserved218, 0, sizeof(pb->reserved218));
+			memset(pb->reserved258, 0, sizeof(pb->reserved258));
+			ResetLoopCount(vpb->index);
+		}
+
+		// take the oldest voice of the lowest priority below 'priority' away from its owner
+		AXVPB* StealVoice(uint32 priority)
+		{
+			for (uint32 p = AX_PRIORITY_LOWEST; p < priority; p++)
+			{
+				auto& list = s_pool.byPriority[p];
+				if (list.empty())
+					continue;
+				AXVPB* victim = list.front();
+				cemuLog_logDebug(LogType::Force, "AX: voice {} dropped for a priority {} request", (uint32)victim->index, priority);
+				if (victim->playbackState != 0u)
+					victim->depop = 1;
+				if (victim->callback != 0u)
+					PPCCoreCallback(victim->callback, victim);
+				victim->dropReason = 0;
+				if (victim->callbackEx != 0u)
+					PPCCoreCallback(victim->callbackEx, victim, victim->userParam, victim->dropReason);
+				RemoveAllocated(victim);
+				PushAllocated(victim, priority);
+				return victim;
+			}
+			return nullptr;
+		}
+
+		void WipeStorage()
+		{
+			__AXVPBArrayPtr = s_handles.GetPtr();
+			__AXVPBInternalVoiceArray = s_ppcBlocks.GetPtr();
+			memset(s_handles.GetPtr(), 0, sizeof(AXVPB) * AX_MAX_VOICES);
+			memset(s_ppcBlocks.GetPtr(), 0, sizeof(AXVPBInternal_t) * AX_MAX_VOICES);
+			memset(s_dspBlocks.GetPtr(), 0, sizeof(AXVPBInternal_t) * AX_MAX_VOICES);
+			memset(s_itd.GetPtr(), 0, sizeof(AXVPBItd) * AX_MAX_VOICES);
+		}
+
+		MPTR PhysicalOf(void* p)
+		{
+			return memory_virtualToPhysical(memory_getVirtualOffsetFromPointer(p));
+		}
+
+		// a sample-word address of 'offset' within the buffer at physical 'base'
+		// (the low 29 address bits; see AXVoiceAddr)
+		uint32 WordAddress(uint16 format, uint32 base, uint32 offset)
+		{
+			switch (format)
+			{
+			case AX_FORMAT_PCM8: return base + offset;
+			case AX_FORMAT_PCM16: return base / 2 + offset;
+			case AX_FORMAT_ADPCM: return base * 2 + offset;
+			}
+			return 0;
+		}
+
+		// the address extension bits (bits 29-31 of the byte address)
+		uint32 AddressExtension(uint16 format, uint32 base, uint32 offset)
+		{
+			switch (format)
+			{
+			case AX_FORMAT_PCM8: return (base + offset) >> 29;
+			case AX_FORMAT_PCM16: return (base + offset * 2) >> 29;
+			case AX_FORMAT_ADPCM: return (base + offset / 2) >> 29;
+			}
+			return 0;
+		}
+
+		// high half mask of a word address, the 29-bit byte range in words
+		uint32 WordHighMask(uint16 format)
+		{
+			switch (format)
+			{
+			case AX_FORMAT_PCM8: return 0x1FFF;
+			case AX_FORMAT_PCM16: return 0x0FFF;
+			case AX_FORMAT_ADPCM: return 0x3FFF;
+			}
+			return 0;
+		}
+
+		bool IsKnownFormat(uint16 format)
+		{
+			return format == AX_FORMAT_PCM8 || format == AX_FORMAT_PCM16 || format == AX_FORMAT_ADPCM;
+		}
+
+		// absolute word address -> offset relative to the physical sample base
+		uint32 RelativeOffset(uint16 format, uint32 word, uint32 ext, uint32 base)
+		{
+			const uint32 extBytes = ext << 29;
+			switch (format)
+			{
+			case AX_FORMAT_PCM8: return (word | extBytes) - base;
+			case AX_FORMAT_PCM16: return (word | (extBytes / 2)) - base / 2;
+			case AX_FORMAT_ADPCM: return (word | (extBytes * 2)) - base * 2;
+			}
+			return 0;
+		}
+
+		enum class OffsetField { Cur, Loop, End };
+
+		// AXSetVoiceCurrentOffset & co: move one position of an already configured voice
+		void SetOneOffset(AXVPB* vpb, OffsetField field, uint32 offset)
+		{
+			AXVPBInternal_t* pb = PpcBlock(vpb);
+			const uint32 offsetRaw = _swapEndianU32(offset);
+			switch (field)
+			{
+			case OffsetField::Cur: vpb->offsets.currentOffset = offsetRaw; break;
+			case OffsetField::Loop: vpb->offsets.loopOffset = offsetRaw; break;
+			case OffsetField::End: vpb->offsets.endOffset = offsetRaw; break;
+			}
+			const uint16 format = pb->addr.format;
+			if (!IsKnownFormat(format))
+			{
+				cemuLog_logDebug(LogType::Force, "AX: offset change on voice {} without a sample format", (uint32)vpb->index);
+				return;
+			}
+			const uint32 base = memory_virtualToPhysical(_swapEndianU32(vpb->offsets.samples)) & 0x1FFFFFFF;
+			const uint32 word = WordAddress(format, base, offset);
+			switch (field)
+			{
+			case OffsetField::Cur: pb->addr.SetCur(word); Touched(vpb, VoiceDirty::CurOffset); break;
+			case OffsetField::Loop: pb->addr.SetLoop(word); Touched(vpb, VoiceDirty::LoopOffset); break;
+			case OffsetField::End: pb->addr.SetEnd(word); Touched(vpb, VoiceDirty::EndOffset); break;
+			}
+		}
+
+		bool IsValidHandle(AXVPB* voice, const char* what)
+		{
+			if (voice && (uint32)voice->index < (uint32)AX_MAX_VOICES)
+				return true;
+			cemuLog_log(LogType::Force, "{}: invalid voice", what);
+			return false;
+		}
+	}
+
+	AXVPBInternal_t* DspBlock(uint32 voiceIndex)
+	{
+		return s_dspBlocks.GetPtr() + voiceIndex;
+	}
+
+	const std::vector<AXVPB*>& AXVoicesOfPriority(uint32 priority)
+	{
+		return s_pool.byPriority[priority];
+	}
+
+	const std::vector<AXVPB*>& AXFreeVoices()
+	{
+		return s_pool.freeStack;
+	}
+
+	// --- pool -------------------------------------------------------------------------
+
+	void AXVPB_Reset()
+	{
+		s_pool.freeStack.clear();
+		for (auto& list : s_pool.byPriority)
+			list.clear();
+		s_userHolds.clear();
+		for (auto& h : s_voiceHolds)
+			h = Hold{};
+		WipeStorage();
+	}
+
+	void AXVPB_Init()
+	{
+		AXVPB_Reset();
+		AXVPB* handles = s_handles.GetPtr();
+		for (uint32 i = 0; i < (uint32)AX_MAX_VOICES; i++)
+		{
+			AXVPB* vpb = handles + i;
+			AXVPBInternal_t* ppc = s_ppcBlocks.GetPtr() + i;
+			AXVPBInternal_t* dsp = s_dspBlocks.GetPtr() + i;
+			vpb->index = i;
+			vpb->itd = s_itd.GetPtr() + i;
+			vpb->callback = MPTR_NULL;
+			vpb->callbackEx = MPTR_NULL;
+			ResetVoice(vpb);
+			// the DSP blocks form one chain in memory order; the frame thread relinks it
+			const MPTR self = PhysicalOf(dsp);
+			const MPTR next = (i + 1 < (uint32)AX_MAX_VOICES) ? self + (MPTR)sizeof(AXVPBInternal_t) : 0;
+			const MPTR itd = PhysicalOf(s_itd.GetPtr() + i);
+			for (AXVPBInternal_t* pb : { ppc, dsp })
+			{
+				pb->index = (uint16)i;
+				AXVoiceAddr::Split(pb->nextHi, pb->nextLo, next);
+				AXVoiceAddr::Split(pb->selfHi, pb->selfLo, self);
+				AXVoiceAddr::Split(pb->itdAddrHi, pb->itdAddrLo, itd);
+			}
+			PushFree(vpb);
+		}
+	}
+
+	AXVPB* AXAcquireVoiceEx(uint32 priority, MPTR callbackEx, MPTR userParam)
+	{
+		if (priority == AX_PRIORITY_FREE || priority >= AX_PRIORITY_MAX)
+		{
+			cemuLog_log(LogType::APIErrors, "AXAcquireVoiceEx: invalid priority {}", priority);
+			return nullptr;
+		}
+		g_axVoiceListLock.lock();
+		AXVPB* vpb = PopFree();
+		if (vpb)
+			PushAllocated(vpb, priority);
+		else
+			vpb = StealVoice(priority);
+		if (vpb)
+		{
+			vpb->userParam = userParam;
+			vpb->callback = MPTR_NULL;
+			vpb->callbackEx = callbackEx;
+			ResetVoice(vpb);
+		}
+		g_axVoiceListLock.unlock();
 		return vpb;
 	}
 
-	std::vector<AXVPB*>& AXVoiceList_GetFreeVoices()
+	void AXFreeVoice(AXVPB* vpb)
 	{
-		return __AXFreeVoices;
+		if (!vpb)
+			return;
+		g_axVoiceListLock.lock();
+		if ((uint32)vpb->priority == AX_PRIORITY_FREE)
+		{
+			cemuLog_log(LogType::Force, "AXFreeVoice: voice {} is already free", (uint32)vpb->index);
+			g_axVoiceListLock.unlock();
+			return;
+		}
+		s_voiceHolds[(uint32)vpb->index] = Hold{};
+		RemoveAllocated(vpb);
+		if (vpb->playbackState != 0u)
+			vpb->depop = 1;
+		ResetVoice(vpb);
+		vpb->callback = MPTR_NULL;
+		vpb->callbackEx = MPTR_NULL;
+		PushFree(vpb);
+		g_axVoiceListLock.unlock();
 	}
 
-	void AXVoiceList_AddVoice(AXVPB* vpb, sint32 priority)
-	{
-		cemu_assert(priority != AX_PRIORITY_FREE && priority < AX_PRIORITY_MAX);
-		__AXVoicesPerPriority[priority].push_back(vpb);
-		vpb->next = nullptr;
-		vpb->prev = nullptr;
-		vpb->priority = priority;
-	}
-
-	void AXVoiceList_RemoveVoice(AXVPB* vpb)
-	{
-		uint32 priority = (uint32)vpb->priority;
-		cemu_assert(priority != AX_PRIORITY_FREE && priority < AX_PRIORITY_MAX);
-		vectorRemoveByValue(__AXVoicesPerPriority[priority], vpb);
-	}
-
-	AXVPB* AXVoiceList_GetLeastRecentVoiceByPriority(uint32 priority)
-	{
-		cemu_assert(priority != AX_PRIORITY_FREE && priority < AX_PRIORITY_MAX);
-		if (__AXVoicesPerPriority[priority].empty())
-			return nullptr;
-		return __AXVoicesPerPriority[priority].front();
-	}
-
-	std::vector<AXVPB*>& AXVoiceList_GetListByPriority(uint32 priority)
-	{
-		cemu_assert(priority != AX_PRIORITY_FREE && priority < AX_PRIORITY_MAX);
-		return __AXVoicesPerPriority[priority];
-	}
-
-    void AXVoiceList_Reset()
-    {
-        __AXFreeVoices.clear();
-        for (uint32 i = 0; i < AX_PRIORITY_MAX; i++)
-            __AXVoicesPerPriority[i].clear();
-    }
-
-	SysAllocator<AXVPBInternal_t, AX_MAX_VOICES> _buffer__AXVPBInternalVoiceArray;
-	AXVPBInternal_t* __AXVPBInternalVoiceArray;
-
-	SysAllocator<AXVPBInternal_t, AX_MAX_VOICES> _buffer__AXVPBInternalVoiceShadowCopyArray;
-	AXVPBInternal_t* __AXVPBInternalVoiceShadowCopyArrayPtr; // this is the array used by audio mixing (it's synced at the beginning of every audio frame with __AXVPBInternalVoiceArray)
-
-	SysAllocator<AXVPBItd, AX_MAX_VOICES> _buffer__AXVPBItdArray;
-	AXVPBItd* __AXVPBItdArrayPtr;
-
-	SysAllocator<AXVPB, AX_MAX_VOICES> _buffer__AXVPBArray;
-	AXVPB* __AXVPBArrayPtr;
-
-	struct AXUSERPROTECTION
-	{
-		MPTR threadMPTR;
-		uint32 count;
-	};
-
-	uint32 __AXUserProtectionArraySize = 0;
-	AXUSERPROTECTION __AXUserProtectionArray[AX_MAX_VOICES] = { 0 };
-	AXUSERPROTECTION __AXVoiceProtection[AX_MAX_VOICES] = { 0 };
+	// --- protection -------------------------------------------------------------------
 
 	bool AXUserIsProtected()
 	{
-		return __AXUserProtectionArraySize != 0;
+		return !s_userHolds.empty();
 	}
 
 	sint32 AXUserBegin()
 	{
-		// some games (e.g. Color Splash) can block themselves from calling AXSetVoice* API in time if a thread gets 
-		// rescheduled while inside a AXUserBegin() + AXUserEnd() block
-		// to prevent this from happening we extend the current thread's quantum while the protection is raised
+		// a title that gets descheduled inside its user block can miss frames
+		// (seen in Paper Mario: Color Splash), so give it a longer time slice
 		PPCCore_boostQuantum(10000);
-
 		if (AXIst_IsFrameBeingProcessed())
-		{
-			return -2;
-		}
-		MPTR currentThreadMPTR = memory_getVirtualOffsetFromPointer(coreinit::OSGetCurrentThread());
-		for (sint32 i = __AXUserProtectionArraySize - 1; i >= 0; i--)
-		{
-			if (__AXUserProtectionArray[i].threadMPTR == currentThreadMPTR)
-			{
-				sint32 newCount = __AXUserProtectionArray[i].count + 1;
-				__AXUserProtectionArray[i].count = newCount;
-				return newCount;
-			}
-		}
-		// no matching entry found
-		if (__AXUserProtectionArraySize >= AX_MAX_VOICES)
-		{
-			// no entry available
-			return -4;
-		}
-		// create new entry
-		if (__AXUserProtectionArraySize < 0)
-			assert_dbg();
-		sint32 entryIndex = __AXUserProtectionArraySize;
-		__AXUserProtectionArray[entryIndex].threadMPTR = currentThreadMPTR;
-		__AXUserProtectionArray[entryIndex].count = 1;
-		__AXUserProtectionArraySize++;
+			return kErrInFrame;
+		const MPTR thread = CallerThread();
+		if (Hold* h = UserHoldOf(thread))
+			return (sint32)++h->depth;
+		if (s_userHolds.size() >= (size_t)AX_MAX_VOICES)
+			return kErrTableFull;
+		s_userHolds.push_back(Hold{ thread, 1 });
 		return 1;
 	}
 
@@ -151,1080 +448,453 @@ namespace snd_core
 	{
 		PPCCore_deboostQuantum(10000);
 		if (AXIst_IsFrameBeingProcessed())
-			return -2;
-		MPTR currentThreadMPTR = memory_getVirtualOffsetFromPointer(coreinit::OSGetCurrentThread());
-		for (sint32 i = __AXUserProtectionArraySize - 1; i >= 0; i--)
+			return kErrInFrame;
+		const MPTR thread = CallerThread();
+		Hold* h = UserHoldOf(thread);
+		if (!h)
 		{
-			if (__AXUserProtectionArray[i].threadMPTR == currentThreadMPTR)
+			cemuLog_logDebug(LogType::Force, "AXUserEnd without AXUserBegin");
+			return kErrNotProtected;
+		}
+		const sint32 depth = (sint32)--h->depth;
+		if (depth == 0)
+		{
+			s_userHolds.erase(s_userHolds.begin() + (h - s_userHolds.data()));
+			// voices this thread touched implicitly are released now
+			for (auto& vh : s_voiceHolds)
 			{
-				sint32 newCount = __AXUserProtectionArray[i].count - 1;
-				__AXUserProtectionArray[i].count = newCount;
-				if (__AXUserProtectionArray[i].count == 0)
-				{
-					// count == 0 -> remove entry
-					if (i >= (sint32)(__AXUserProtectionArraySize - 1))
-					{
-						// entry is last in array, can just decrease array size
-						__AXUserProtectionArraySize--;
-						__AXUserProtectionArray[i].threadMPTR = MPTR_NULL;
-					}
-					else
-					{
-						// remove entry by shifting all remaining entries
-						//for (sint32 f = i; f >= 0; f--)
-						//{
-						//	__AXUserProtectionArray[f].threadMPTR = __AXUserProtectionArray[f + 1].threadMPTR;
-						//	__AXUserProtectionArray[f].count = __AXUserProtectionArray[f + 1].count;
-						//}
-						cemu_assert_debug(false);
-					}
-					// remove entries associated with the current thread from __AXVoiceProtection[] if the count is zero
-					for (sint32 f = 0; f < AX_MAX_VOICES; f++)
-					{
-						if (__AXVoiceProtection[f].threadMPTR == currentThreadMPTR && __AXVoiceProtection[f].count == 0)
-						{
-							__AXVoiceProtection[f].threadMPTR = MPTR_NULL;
-						}
-					}
-				}
-				return newCount;
+				if (vh.thread == thread && vh.depth == 0)
+					vh.thread = MPTR_NULL;
 			}
 		}
-		cemu_assert_debug(false); // voice not found in list, did the game not call AXUserBegin()?
-		return -3;
-	}
-
-	bool AXVoiceProtection_IsProtectedByAnyThread(AXVPB* vpb)
-	{
-		sint32 index = vpb->index;
-		return __AXVoiceProtection[index].threadMPTR != MPTR_NULL;
-	}
-
-	bool AXVoiceProtection_IsProtectedByCurrentThread(AXVPB* vpb)
-	{
-		sint32 index = vpb->index;
-		bool isProtected = false;
-		if (AXIst_IsFrameBeingProcessed())
-			isProtected = __AXVoiceProtection[index].threadMPTR != MPTR_NULL;
-		else
-			isProtected = __AXVoiceProtection[index].threadMPTR != memory_getVirtualOffsetFromPointer(coreinit::OSGetCurrentThread());
-		return isProtected;
-	}
-
-	void AXVoiceProtection_Acquire(AXVPB* vpb)
-	{
-		sint32 index = vpb->index;
-		if (AXUserIsProtected() == false)
-			return;
-		if (AXIst_IsFrameBeingProcessed())
-			return;
-		if (__AXVoiceProtection[index].threadMPTR == MPTR_NULL)
-		{
-			__AXVoiceProtection[index].threadMPTR = memory_getVirtualOffsetFromPointer(coreinit::OSGetCurrentThread());
-			// does not set count?
-		}
-	}
-
-	void AXVoiceProtection_Release(AXVPB* vpb)
-	{
-		sint32 index = vpb->index;
-		__AXVoiceProtection[index].threadMPTR = MPTR_NULL;
-		__AXVoiceProtection[index].count = 0;
+		return depth;
 	}
 
 	sint32 AXVoiceBegin(AXVPB* voice)
 	{
-		if (voice == nullptr)
-		{
-			cemuLog_log(LogType::Force, "AXVoiceBegin(): Invalid voice");
-			return -1;
-		}
-		uint32 index = (uint32)voice->index;
-		if (index >= AX_MAX_VOICES)
-		{
-			cemuLog_log(LogType::Force, "AXVoiceBegin(): Invalid voice index");
-			return -1;
-		}
+		if (!IsValidHandle(voice, "AXVoiceBegin"))
+			return kErrBadVoice;
 		if (AXIst_IsFrameBeingProcessed())
-			return -2;
-		MPTR currentThreadMPTR = memory_getVirtualOffsetFromPointer(coreinit::OSGetCurrentThread());
-		if (__AXVoiceProtection[index].threadMPTR == MPTR_NULL)
+			return kErrInFrame;
+		const MPTR thread = CallerThread();
+		Hold& h = s_voiceHolds[(uint32)voice->index];
+		if (h.thread == MPTR_NULL)
 		{
-			__AXVoiceProtection[index].threadMPTR = currentThreadMPTR;
-			__AXVoiceProtection[index].count = 1;
+			h = Hold{ thread, 1 };
 			return 1;
 		}
-		else if (__AXVoiceProtection[index].threadMPTR == currentThreadMPTR)
-		{
-			__AXVoiceProtection[index].count++;
-			return __AXVoiceProtection[index].count;
-		}
-		return -1;
-	}
-
-	sint32 __GetThreadProtection(MPTR threadMPTR)
-	{
-		for (sint32 i = __AXUserProtectionArraySize - 1; i >= 0; i--)
-		{
-			if (__AXUserProtectionArray[i].threadMPTR == threadMPTR)
-				return i;
-		}
-		return -1;
+		if (h.thread == thread)
+			return (sint32)++h.depth;
+		return kErrBadVoice; // held by another thread
 	}
 
 	sint32 AXVoiceEnd(AXVPB* voice)
 	{
-		if (voice == nullptr)
-		{
-			cemuLog_log(LogType::Force, "AXVoiceBegin(): Invalid voice");
-			return -1;
-		}
-		uint32 index = (uint32)voice->index;
-		if (index >= AX_MAX_VOICES)
-		{
-			cemuLog_log(LogType::Force, "AXVoiceBegin(): Invalid voice index");
-			return -1;
-		}
+		if (!IsValidHandle(voice, "AXVoiceEnd"))
+			return kErrBadVoice;
 		if (AXIst_IsFrameBeingProcessed())
-			return -2;
-		MPTR currentThreadMPTR = memory_getVirtualOffsetFromPointer(coreinit::OSGetCurrentThread());
-		if (__AXVoiceProtection[index].threadMPTR == currentThreadMPTR)
-		{
-			if (__AXVoiceProtection[index].count > 0)
-				__AXVoiceProtection[index].count--;
-			if (__AXVoiceProtection[index].count == 0)
-			{
-				if (__GetThreadProtection(currentThreadMPTR) == -1)
-				{
-					__AXVoiceProtection[index].threadMPTR = 0;
-				}
-			}
-			sint32 count = __AXVoiceProtection[index].count;
-			return count;
-		}
-		else
-		{
-			if (__AXVoiceProtection[index].threadMPTR == MPTR_NULL)
-			{
-				return -3;
-			}
-			else
-			{
-				return -1;
-			}
-		}
+			return kErrInFrame;
+		const MPTR thread = CallerThread();
+		Hold& h = s_voiceHolds[(uint32)voice->index];
+		if (h.thread == MPTR_NULL)
+			return kErrNotProtected;
+		if (h.thread != thread)
+			return kErrBadVoice;
+		if (h.depth > 0)
+			h.depth--;
+		// inside a user block the voice stays held until AXUserEnd
+		if (h.depth == 0 && !UserHoldOf(thread))
+			h.thread = MPTR_NULL;
+		return (sint32)h.depth;
 	}
 
-	void AXVPB_SetVoiceDefault(AXVPB* vpb)
+	bool AXIsVoiceProtected(const AXVPB* vpb)
 	{
-		AXVPBInternal_t* internal = GetInternalVoice(vpb);
-		uint32 index = GetVoiceIndex(vpb);
-		vpb->playbackState = 0;
-		vpb->sync = 0;
-		AXSetSyncFlag(vpb, AX_SYNCFLAG_PLAYBACKSTATE);
-		AXSetSyncFlag(vpb, AX_SYNCFLAG_SRCDATA);
-		AXSetSyncFlag(vpb, AX_SYNCFLAG_LPFDATA);
-		AXSetSyncFlag(vpb, AX_SYNCFLAG_BIQUADDATA);
-		AXSetSyncFlag(vpb, AX_SYNCFLAG_VOICEREMOTEON);
-		AXSetSyncFlag(vpb, AX_SYNCFLAG_ITD20);
-		AXSetSyncFlag(vpb, AX_SYNCFLAG_8000000);
-		AXSetSyncFlag(vpb, 0x10000000);
-		internal->reserved282_rmtIIRGuessed = 0;
-		internal->reserved16C = 0;
-		internal->reserved148_voiceRmtOn = 0;
-		internal->biquad.on = 0;
-		internal->lpf.on = 0;
-		internal->playbackState = 0;
-		uint32 defaultMixer = AXGetDefaultMixerSelect();
-		internal->mixerSelect = defaultMixer;
-		vpb->mixerSelect = defaultMixer;
-		AXResetVoiceLoopCount(vpb);
-		internal->reserved280 = 0;
-		internal->src.currentFrac = 0;
-		internal->src.historySamples[0] = 0;
-		internal->src.historySamples[1] = 0;
-		internal->src.historySamples[2] = 0;
-		internal->src.historySamples[3] = 0;
-		internal->reserved278 = 0;
-		internal->reserved27A = 0;
-		internal->reserved27C = 0;
-		internal->reserved27E = 0;
-		internal->srcFilterMode = 0;
-		memset(&internal->deviceMixMaskTV, 0, 8);
-		memset(&internal->deviceMixMaskDRC, 0, 16);
-		memset(&internal->deviceMixMaskRMT, 0, 0x20);
-		memset(&internal->reserved1E8, 0, 0x30);
-		memset(&internal->reserved218, 0, 0x40);
-		memset(&internal->reserved258, 0, 0x20);
+		return s_voiceHolds[(uint32)vpb->index].thread != MPTR_NULL;
 	}
 
-	AXVPB* AXVPB_DropVoice(sint32 priority)
+	// what AXVoiceIsProtected reports. Outside a frame this is "not held by the
+	// calling thread", which is also true for a voice nobody holds; titles have
+	// only ever seen this answer, so it is kept.
+	bool AXVoiceProtectedForCaller(const AXVPB* vpb)
 	{
-		for (sint32 i = 1; i < priority; i++)
-		{
-			AXVPB* voiceItr = AXVoiceList_GetLeastRecentVoiceByPriority(i);
-			if (voiceItr)
-			{
-				// get last voice in chain
-				while (voiceItr->next)
-					voiceItr = voiceItr->next.GetPtr();
-				cemuLog_logDebug(LogType::Force, "Dropped voice {}", (uint32)voiceItr->index);
-				// drop voice
-				if (voiceItr->playbackState != 0)
-				{
-					voiceItr->depop = 1;
-				}
-				// do drop callback
-				if (voiceItr->callback)
-				{
-					PPCCoreCallback(voiceItr->callback, voiceItr);
-				}
-				voiceItr->ukn4C_dropReason = 0; // probably drop reason?
-				if (voiceItr->callbackEx)
-				{
-					PPCCoreCallback(voiceItr->callbackEx, voiceItr, voiceItr->userParam, voiceItr->ukn4C_dropReason);
-				}
-				// move voice to new stack
-				AXVoiceList_RemoveVoice(voiceItr);
-				AXVoiceList_AddVoice(voiceItr, priority);
-				return voiceItr;
-			}
-		}
-		return nullptr;
+		const MPTR owner = s_voiceHolds[(uint32)vpb->index].thread;
+		if (AXIst_IsFrameBeingProcessed())
+			return owner != MPTR_NULL;
+		return owner != CallerThread();
 	}
 
-	AXVPB* AXAcquireVoiceEx(uint32 priority, MPTR callbackEx, MPTR userParam)
-	{
-		cemu_assert(priority != AX_PRIORITY_FREE && priority < AX_PRIORITY_MAX);
-		__AXVoiceListSpinlock.lock();
-		AXVPB* vpb = AXVoiceList_GetFreeVoice();
-		if (vpb != nullptr)
-		{
-			AXVoiceList_AddVoice(vpb, priority);
-		}
-		else
-		{
-			// no free voice available, try to drop a voice with lower priority
-			vpb = AXVPB_DropVoice(priority);
-			if (!vpb)
-			{
-				// no voice available
-				__AXVoiceListSpinlock.unlock();
-				return nullptr;
-			}
-		}
-		vpb->userParam = userParam;
-		vpb->callback = MPTR_NULL;
-		vpb->callbackEx = callbackEx;
-		AXVPB_SetVoiceDefault(vpb);
-		__AXVoiceListSpinlock.unlock();
-		return vpb;
-	}
-
-	void AXFreeVoice(AXVPB* vpb)
-	{
-		cemu_assert(vpb != nullptr);
-		__AXVoiceListSpinlock.lock();
-		if (vpb->priority == (uint32be)AX_PRIORITY_FREE)
-		{
-			cemuLog_log(LogType::Force, "AXFreeVoice() called on free voice");
-			__AXVoiceListSpinlock.unlock();
-			return;
-		}
-		AXVoiceProtection_Release(vpb);
-		AXVoiceList_RemoveVoice(vpb);
-		if (vpb->playbackState != (uint32be)0)
-		{
-			vpb->depop = (uint32be)1;
-		}
-		AXVPB_SetVoiceDefault(vpb);
-		vpb->callback = MPTR_NULL;
-		vpb->callbackEx = MPTR_NULL;
-		AXVoiceList_AddFreeVoice(vpb);
-		__AXVoiceListSpinlock.unlock();
-	}
-
-    void __AXVPBResetVoices()
-    {
-        __AXVPBInternalVoiceArray = _buffer__AXVPBInternalVoiceArray.GetPtr();
-        __AXVPBInternalVoiceShadowCopyArrayPtr = _buffer__AXVPBInternalVoiceShadowCopyArray.GetPtr();
-        __AXVPBArrayPtr = _buffer__AXVPBArray.GetPtr();
-        __AXVPBItdArrayPtr = _buffer__AXVPBItdArray.GetPtr();
-
-        memset(__AXVPBInternalVoiceShadowCopyArrayPtr, 0, sizeof(AXVPBInternal_t)*AX_MAX_VOICES);
-        memset(__AXVPBInternalVoiceArray, 0, sizeof(AXVPBInternal_t)*AX_MAX_VOICES);
-        memset(__AXVPBItdArrayPtr, 0, sizeof(AXVPBItd)*AX_MAX_VOICES);
-        memset(__AXVPBArrayPtr, 0, sizeof(AXVPB)*AX_MAX_VOICES);
-    }
-
-	void AXVPBInit()
-	{
-        __AXVPBResetVoices();
-		for (sint32 i = 0; i < AX_MAX_VOICES; i++)
-		{
-			AXVPBItd* itd = __AXVPBItdArrayPtr + i;
-			AXVPBInternal_t* internalShadowCopy = __AXVPBInternalVoiceShadowCopyArrayPtr + i;
-			AXVPBInternal_t* internal = __AXVPBInternalVoiceArray + i;
-			AXVPB* vpb = __AXVPBArrayPtr + i;
-
-			MPTR internalShadowCopyPhys = memory_virtualToPhysical(memory_getVirtualOffsetFromPointer(internalShadowCopy));
-			MPTR itdPhys = memory_virtualToPhysical(memory_getVirtualOffsetFromPointer(itd));
-
-			vpb->callbackEx = MPTR_NULL;
-			vpb->itd = itd;
-			vpb->callback = MPTR_NULL;
-			vpb->index = i;
-			AXVPB_SetVoiceDefault(vpb);
-
-			if (i == (AX_MAX_VOICES - 1))
-			{
-				internal->nextAddrHigh = 0;
-				internal->nextAddrLow = 0;
-				internalShadowCopy->nextAddrHigh = 0;
-				internalShadowCopy->nextAddrLow = 0;
-			}
-			else
-			{
-				MPTR nextShadowCopyPhys = internalShadowCopyPhys + sizeof(AXVPBInternal_t);
-				internalShadowCopy->nextAddrHigh = internal->nextAddrHigh = (nextShadowCopyPhys >> 16);
-				internalShadowCopy->nextAddrLow = internal->nextAddrLow = (nextShadowCopyPhys & 0xFFFF);
-			}
-			internalShadowCopy->index = internal->index = i;
-			internalShadowCopy->selfAddrHigh = internal->selfAddrHigh = (internalShadowCopyPhys >> 16);
-			internalShadowCopy->selfAddrLow = internal->selfAddrLow = (internalShadowCopyPhys & 0xFFFF);
-			internalShadowCopy->itdAddrHigh = internal->itdAddrHigh = (itdPhys >> 16);
-			internalShadowCopy->itdAddrLow = internal->itdAddrLow = (itdPhys & 0xFFFF);
-			vpb->priority = 1;
-			AXVoiceList_AddFreeVoice(vpb);
-		}
-	}
-
-	void AXVPB_Init()
-	{
-		__AXVPBResetVoices();
-		AXVPBInit();
-	}
-
-    void AXVBP_Reset()
-    {
-        AXVoiceList_Reset();
-        __AXVPBResetVoices();
-    }
+	// --- parameters -------------------------------------------------------------------
 
 	sint32 AXIsValidDevice(sint32 device, sint32 deviceIndex)
 	{
+		// remote speakers are not accepted here
 		if (device == AX_DEV_TV)
-		{
-			if (deviceIndex != 0)
-				return -2;
-		}
-		else if (device == AX_DEV_DRC)
-		{
-			if (deviceIndex != 0 && deviceIndex != 1)
-				return -2;
-		}
-		else if (device == AX_DEV_TV)
-		{
-			if (deviceIndex < 0 || deviceIndex >= 4)
-				return -2;
-		}
-		else
-			return -1;
-		return 0;
+			return deviceIndex == 0 ? 0 : -2;
+		if (device == AX_DEV_DRC)
+			return (deviceIndex == 0 || deviceIndex == 1) ? 0 : -2;
+		return -1;
 	}
 
-
-	void __AXSetVoiceChannelMix(AXCHMIX_DEPR* mixOut, AXCHMIX_DEPR* mixIn, sint16* mixMask)
-	{
-		for (sint32 i = 0; i < AX_BUS_COUNT; i++)
-		{
-			mixOut[i].vol = mixIn[i].vol;
-			mixOut[i].delta = mixIn[i].delta;
-			if (mixIn[i].delta)
-				mixMask[i] = 3;
-			else if (mixIn[i].vol)
-				mixMask[i] = 1;
-			else
-				mixMask[i] = 0;
-		}
-	}
-
+	// 'mix' holds one AXCHMIX per bus for each channel of the device, channel by channel
 	sint32 AXSetVoiceDeviceMix(AXVPB* vpb, sint32 device, sint32 deviceIndex, AXCHMIX_DEPR* mix)
 	{
-		if (vpb == nullptr)
-			return -4;
-		if (mix == nullptr)
-			return -3;
-		sint32 r = AXIsValidDevice(device, deviceIndex);
-		if (r)
+		if (!vpb)
+			return kErrNullVoice;
+		if (!mix)
+			return kErrNullMix;
+		if (sint32 r = AXIsValidDevice(device, deviceIndex); r != 0)
 			return r;
-		AXVPBInternal_t* internal = __AXVPBInternalVoiceArray + (sint32)vpb->index;
-		sint32 channelCount;
-
-		uint16* deviceMixMask;
-		AXCHMIX_DEPR* voiceMix;
+		AXVPBInternal_t* pb = PpcBlock(vpb);
+		sint32 channels;
+		AXCHMIX_DEPR* dst;
+		uint16be* masks;
 		if (device == AX_DEV_TV)
 		{
-			channelCount = AX_TV_CHANNEL_COUNT;
-			voiceMix = internal->deviceMixTV + deviceIndex * 0x60 / 4;
-			deviceMixMask = internal->deviceMixMaskTV;
+			channels = AX_TV_CHANNEL_COUNT;
+			dst = pb->deviceMixTV;
+			masks = pb->mixMaskTV;
 		}
-		else if (device == AX_DEV_DRC)
+		else
 		{
-			channelCount = AX_DRC_CHANNEL_COUNT;
-			voiceMix = internal->deviceMixDRC + deviceIndex * 16;
-			deviceMixMask = internal->deviceMixMaskDRC;
+			channels = AX_DRC_CHANNEL_COUNT;
+			dst = pb->deviceMixDRC + deviceIndex * AX_DRC_CHANNEL_COUNT * AX_MAX_NUM_BUS;
+			masks = pb->mixMaskDRC + deviceIndex * AX_MAX_NUM_BUS;
 		}
-		else if (device == AX_DEV_RMT)
+		uint16 busMask[AX_MAX_NUM_BUS] = {};
+		for (sint32 ch = 0; ch < channels; ch++)
 		{
-			assert_dbg();
-			channelCount = AX_RMT_CHANNEL_COUNT;
-		}
-		sint16 updatedMixMask[AX_BUS_COUNT];
-		for (sint32 i = 0; i < AX_BUS_COUNT; i++)
-		{
-			updatedMixMask[i] = 0;
-		}
-		sint16 channelMixMask[AX_BUS_COUNT];
-		for (sint32 c = 0; c < channelCount; c++)
-		{
-			__AXSetVoiceChannelMix(voiceMix, mix, channelMixMask);
-			for (sint32 i = 0; i < AX_BUS_COUNT; i++)
+			for (sint32 bus = 0; bus < AX_MAX_NUM_BUS; bus++)
 			{
-				updatedMixMask[i] |= (channelMixMask[i] << (c * 2));
+				const AXCHMIX_DEPR& in = mix[ch * AX_MAX_NUM_BUS + bus];
+				dst[ch * AX_MAX_NUM_BUS + bus] = in;
+				const uint16 state = in.delta != 0 ? 3 : (in.vol != 0 ? 1 : 0);
+				busMask[bus] |= (uint16)(state << (ch * 2));
 			}
-			// next channel
-			voiceMix += AX_BUS_COUNT;
-			mix += AX_BUS_COUNT;
 		}
-		for (sint32 i = 0; i < AX_BUS_COUNT; i++)
-		{
-			deviceMixMask[i] = _swapEndianU16(updatedMixMask[i]);
-		}
-		vpb->sync = (uint32)vpb->sync | (AX_SYNCFLAG_DEVICEMIXMASK | AX_SYNCFLAG_DEVICEMIX);
-		AXVoiceProtection_Acquire(vpb);
+		for (sint32 bus = 0; bus < AX_MAX_NUM_BUS; bus++)
+			masks[bus] = busMask[bus];
+		Touched(vpb, VoiceDirty::MixMask | VoiceDirty::Mix);
 		return 0;
 	}
 
 	void AXSetVoiceState(AXVPB* vpb, sint32 voiceState)
 	{
-		if (vpb->playbackState != (uint32be)voiceState)
-		{
-			vpb->playbackState = voiceState;
-			AXVPBInternal_t* internal = __AXVPBInternalVoiceArray + (sint32)vpb->index;
-			internal->playbackState = _swapEndianU16(voiceState);
-			AXSetSyncFlag(vpb, AX_SYNCFLAG_PLAYBACKSTATE);
-			AXVoiceProtection_Acquire(vpb);
-			if (voiceState == 0)
-			{
-				vpb->depop = (uint32be)1;
-			}
-		}
+		if ((uint32)vpb->playbackState == (uint32)voiceState)
+			return;
+		vpb->playbackState = (uint32)voiceState;
+		PpcBlock(vpb)->playbackState = _swapEndianU16((uint16)voiceState);
+		Touched(vpb, VoiceDirty::State);
+		if (voiceState == 0)
+			vpb->depop = 1;
 	}
 
 	sint32 AXIsVoiceRunning(AXVPB* vpb)
 	{
-		AXVPBInternal_t* internal = __AXVPBInternalVoiceArray + (sint32)vpb->index;
-		return (_swapEndianU16(internal->playbackState) == 1) ? 1 : 0;
+		return _swapEndianU16(PpcBlock(vpb)->playbackState) == 1 ? 1 : 0;
 	}
 
 	void AXSetVoiceType(AXVPB* vpb, uint16 voiceType)
 	{
-		AXVPBInternal_t* internal = __AXVPBInternalVoiceArray + (sint32)vpb->index;
-		internal->voiceType = _swapEndianU16(voiceType);
-		AXSetSyncFlag(vpb, AX_SYNCFLAG_VOICETYPE);
-		AXVoiceProtection_Acquire(vpb);
+		PpcBlock(vpb)->voiceType = voiceType;
+		Touched(vpb, VoiceDirty::Type);
 	}
 
+	// only coefficients, gain and predictor/scale; the decoder history stays
 	void AXSetVoiceAdpcm(AXVPB* vpb, AXPBADPCM_t* adpcm)
 	{
-		AXVPBInternal_t* internal = __AXVPBInternalVoiceArray + (sint32)(vpb->index);
-		for (sint32 i = 0; i < 16; i++)
-			internal->adpcmData.coef[i] = adpcm->a[i];
-		internal->adpcmData.gain = adpcm->gain;
-		internal->adpcmData.scale = adpcm->scale;
-		AXSetSyncFlag(vpb, AX_SYNCFLAG_ADPCMDATA);
-		AXVoiceProtection_Acquire(vpb);
+		AXPBADPCM_t& dst = PpcBlock(vpb)->adpcm;
+		memcpy(dst.a, adpcm->a, sizeof(dst.a));
+		dst.gain = adpcm->gain;
+		dst.scale = adpcm->scale;
+		Touched(vpb, VoiceDirty::Adpcm);
 	}
 
 	void AXSetVoiceAdpcmLoop(AXVPB* vpb, AXPBADPCMLOOP_t* adpcmLoop)
 	{
-		AXVPBInternal_t* internal = __AXVPBInternalVoiceArray + (sint32)vpb->index;
-		internal->adpcmLoop.loopScale = adpcmLoop->loopScale;
-		if (internal->voiceType == 0)
+		AXVPBInternal_t* pb = PpcBlock(vpb);
+		pb->adpcmLoop.loopScale = adpcmLoop->loopScale;
+		// streamed voices (type 1) keep running history across the loop
+		if (pb->voiceType == 0)
 		{
-			internal->adpcmLoop.loopYn1 = adpcmLoop->loopYn1;
-			internal->adpcmLoop.loopYn2 = adpcmLoop->loopYn2;
+			pb->adpcmLoop.loopYn1 = adpcmLoop->loopYn1;
+			pb->adpcmLoop.loopYn2 = adpcmLoop->loopYn2;
 		}
-		AXSetSyncFlag(vpb, AX_SYNCFLAG_ADPCMLOOP);
-		AXVoiceProtection_Acquire(vpb);
+		Touched(vpb, VoiceDirty::AdpcmLoop);
 	}
 
 	void AXSetVoiceSrc(AXVPB* vpb, AXPBSRC_t* src)
 	{
-		AXVPBInternal_t* internal = __AXVPBInternalVoiceArray + (sint32)vpb->index;
-		internal->src.ratioHigh = src->ratioHigh;
-		internal->src.ratioLow = src->ratioLow;
-		internal->src.currentFrac = src->currentFrac;
-		internal->src.historySamples[0] = src->historySamples[0];
-		internal->src.historySamples[1] = src->historySamples[1];
-		internal->src.historySamples[2] = src->historySamples[2];
-		internal->src.historySamples[3] = src->historySamples[3];
-		AXResetSyncFlag(vpb, AX_SYNCFLAG_SRCRATIO);
-		AXSetSyncFlag(vpb, AX_SYNCFLAG_SRCDATA);
-		AXVoiceProtection_Acquire(vpb);
+		PpcBlock(vpb)->src = *src;
+		ClearDirty(vpb, VoiceDirty::SrcRatio);
+		Touched(vpb, VoiceDirty::Src);
 	}
 
 	void AXSetVoiceSrcType(AXVPB* vpb, uint32 srcType)
 	{
-		AXVPBInternal_t* internal = __AXVPBInternalVoiceArray + (sint32)vpb->index;
-		if (srcType == AX_SRC_TYPE_NONE)
+		AXVPBInternal_t* pb = PpcBlock(vpb);
+		switch (srcType)
 		{
-			internal->srcFilterMode = _swapEndianU16(AX_FILTER_MODE_NONE);
+		case AX_SRC_TYPE_NONE:
+			pb->srcMode = AX_FILTER_MODE_NONE;
+			break;
+		case AX_SRC_TYPE_LINEAR:
+			pb->srcMode = AX_FILTER_MODE_LINEAR;
+			break;
+		case AX_SRC_TYPE_LOWPASS1:
+		case AX_SRC_TYPE_LOWPASS2:
+		case AX_SRC_TYPE_LOWPASS3:
+			pb->srcMode = AX_FILTER_MODE_TAP;
+			pb->srcTap = (uint16)(AX_FILTER_LOWPASS_8K + (srcType - AX_SRC_TYPE_LOWPASS1));
+			break;
+		default:
+			cemuLog_log(LogType::Force, "AXSetVoiceSrcType: unknown type {}", srcType);
+			break;
 		}
-		else if (srcType == AX_SRC_TYPE_LINEAR)
-		{
-			internal->srcFilterMode = _swapEndianU16(AX_FILTER_MODE_LINEAR);
-		}
-		else if (srcType == AX_SRC_TYPE_LOWPASS1)
-		{
-			internal->srcFilterMode = _swapEndianU16(AX_FILTER_MODE_TAP);
-			internal->srcTapFilter = _swapEndianU16(AX_FILTER_LOWPASS_8K);
-		}
-		else if (srcType == AX_SRC_TYPE_LOWPASS2)
-		{
-			internal->srcFilterMode = _swapEndianU16(AX_FILTER_MODE_TAP);
-			internal->srcTapFilter = _swapEndianU16(AX_FILTER_LOWPASS_12K);
-		}
-		else if (srcType == AX_SRC_TYPE_LOWPASS3)
-		{
-			internal->srcFilterMode = _swapEndianU16(AX_FILTER_MODE_TAP);
-			internal->srcTapFilter = _swapEndianU16(AX_FILTER_LOWPASS_16K);
-		}
-		else
-		{
-			cemuLog_log(LogType::Force, "AXSetVoiceSrcType(): Unsupported src type {}", srcType);
-		}
-		AXSetSyncFlag(vpb, AX_SYNCFLAG_SRCFILTER);
-		AXVoiceProtection_Acquire(vpb);
+		Touched(vpb, VoiceDirty::SrcType);
 	}
 
+	// ratio = input rate / output rate, stored as 16.16 fixed point, at most 8.0
 	sint32 AXSetVoiceSrcRatio(AXVPB* vpb, float ratio)
 	{
-		AXVPBInternal_t* internal = __AXVPBInternalVoiceArray + (sint32)vpb->index;
-		ratio *= 65536.0f;
-#ifdef CEMU_DEBUG_ASSERT
-		if (ratio >= 4294967296.0f)
-			assert_dbg();
-#endif
-		sint32 ratioI = (sint32)ratio;
-		if (ratioI < 0)
-			ratioI = 0;
-		else if (ratioI > 0x80000)
-			ratioI = 0x80000;
-
-		uint16 ratioHigh = (uint16)(ratioI >> 16);
-		uint16 ratioLow = (uint16)(ratioI & 0xFFFF);
-
-		ratioHigh = _swapEndianU16(ratioHigh);
-		ratioLow = _swapEndianU16(ratioLow);
-
-		if (internal->src.ratioHigh != ratioHigh || internal->src.ratioLow != ratioLow)
+		constexpr uint32 kMaxRatio = 8u << 16;
+		const float scaled = ratio * 65536.0f;
+		uint32 fixed;
+		if (!(scaled > 0.0f))
+			fixed = 0; // also NaN
+		else if (scaled >= (float)kMaxRatio)
+			fixed = kMaxRatio;
+		else
+			fixed = (uint32)scaled;
+		AXPBSRC_t& src = PpcBlock(vpb)->src;
+		const uint16 hiRaw = _swapEndianU16((uint16)(fixed >> 16));
+		const uint16 loRaw = _swapEndianU16((uint16)fixed);
+		if (src.ratioHigh != hiRaw || src.ratioLow != loRaw)
 		{
-			internal->src.ratioHigh = ratioHigh;
-			internal->src.ratioLow = ratioLow;
-			AXSetSyncFlag(vpb, AX_SYNCFLAG_SRCRATIO);
-			AXVoiceProtection_Acquire(vpb);
+			src.ratioHigh = hiRaw;
+			src.ratioLow = loRaw;
+			Touched(vpb, VoiceDirty::SrcRatio);
 		}
 		return 0;
 	}
 
 	void AXSetVoiceVe(AXVPB* vpb, AXPBVE* ve)
 	{
-		AXVPBInternal_t* internal = __AXVPBInternalVoiceArray + (sint32)vpb->index;
-		internal->veVolume = ve->currentVolume;
-		internal->veDelta = ve->currentDelta;
-		AXSetSyncFlag(vpb, AX_SYNCFLAG_VE);
-		AXVoiceProtection_Acquire(vpb);
+		AXVPBInternal_t* pb = PpcBlock(vpb);
+		pb->veVolume = (uint16)ve->currentVolume;
+		pb->veDelta = (uint16)(sint16)ve->currentDelta;
+		Touched(vpb, VoiceDirty::Ve);
 	}
 
+	// one-pole low pass for a cutoff in Hz at the 32 kHz DSP rate:
+	// b0 = c - sqrt(c^2 - 1) with c = 2 - cos(w), a0 = 1 - b0, both 0.15 fixed point
 	void AXComputeLpfCoefs(uint32 freq, uint16be* a0, uint16be* b0)
 	{
-		// todo - verify algorithm
-		float t1 = cos((float)freq / 32000.0f * 6.2831855f);
-		float t2 = 2.0f - t1;
-		t1 = (float)sqrt(t2 * t2 - 1.0f);
-		t1 = t1 - t2;
-		t1 = t1 * 32768.0f;
-		t1 = -t1;
-		uint32 r = (uint16)t1;
-		*a0 = 0x7FFF - r;
-		*b0 = r;
+		const float w = (float)freq / 32000.0f * 6.2831855f;
+		const float c = 2.0f - std::cos(w);
+		const float pole = -(std::sqrt(c * c - 1.0f) - c) * 32768.0f;
+		const uint32 b = (uint16)(sint32)pole;
+		*a0 = (uint16)(0x7FFF - b);
+		*b0 = (uint16)b;
 	}
 
 	void AXSetVoiceLpf(AXVPB* vpb, AXPBLPF_t* lpf)
 	{
-		AXVPBInternal_t* internal = __AXVPBInternalVoiceArray + (sint32)vpb->index;
-		internal->lpf.on = lpf->on;
-		internal->lpf.yn1 = lpf->yn1;
-		internal->lpf.a0 = lpf->a0;
-		internal->lpf.b0 = lpf->b0;
-		AXSetSyncFlag(vpb, AX_SYNCFLAG_LPFDATA);
-		AXVoiceProtection_Acquire(vpb);
+		PpcBlock(vpb)->lpf = *lpf;
+		Touched(vpb, VoiceDirty::Lpf);
 	}
 
 	void AXSetVoiceLpfCoefs(AXVPB* vpb, uint16 a0, uint16 b0)
 	{
-		AXVPBInternal_t* internal = __AXVPBInternalVoiceArray + (sint32)vpb->index;
-		internal->lpf.a0 = _swapEndianU16(a0);
-		internal->lpf.b0 = _swapEndianU16(b0);
-		AXSetSyncFlag(vpb, AX_SYNCFLAG_LPFCOEF);
-		AXVoiceProtection_Acquire(vpb);
+		AXPBLPF_t& lpf = PpcBlock(vpb)->lpf;
+		lpf.a0 = (sint16)_swapEndianU16(a0);
+		lpf.b0 = (sint16)_swapEndianU16(b0);
+		Touched(vpb, VoiceDirty::LpfCoefs);
 	}
 
 	void AXSetVoiceBiquad(AXVPB* vpb, AXPBBIQUAD_t* biquad)
 	{
-		AXVPBInternal_t* internal = __AXVPBInternalVoiceArray + (sint32)vpb->index;
-		internal->biquad.on = biquad->on;
-		internal->biquad.xn1 = biquad->xn1;
-		internal->biquad.xn2 = biquad->xn2;
-		internal->biquad.yn1 = biquad->yn1;
-		internal->biquad.yn2 = biquad->yn2;
-		internal->biquad.b0 = biquad->b0;
-		internal->biquad.b1 = biquad->b1;
-		internal->biquad.b2 = biquad->b2;
-		internal->biquad.a1 = biquad->a1;
-		internal->biquad.a2 = biquad->a2;
-		AXSetSyncFlag(vpb, AX_SYNCFLAG_BIQUADDATA);
-		AXVoiceProtection_Acquire(vpb);
+		PpcBlock(vpb)->biquad = *biquad;
+		Touched(vpb, VoiceDirty::Biquad);
 	}
 
 	void AXSetVoiceBiquadCoefs(AXVPB* vpb, uint16 b0, uint16 b1, uint16 b2, uint16 a1, uint16 a2)
 	{
-		AXVPBInternal_t* internal = __AXVPBInternalVoiceArray + (sint32)vpb->index;
-		internal->biquad.b0 = _swapEndianU16(b0);
-		internal->biquad.b1 = _swapEndianU16(b1);
-		internal->biquad.b2 = _swapEndianU16(b2);
-		internal->biquad.a1 = _swapEndianU16(a1);
-		internal->biquad.a2 = _swapEndianU16(a2);
-		AXSetSyncFlag(vpb, AX_SYNCFLAG_BIQUADCOEF);
-		AXVoiceProtection_Acquire(vpb);
+		AXPBBIQUAD_t& bq = PpcBlock(vpb)->biquad;
+		bq.b0 = _swapEndianU16(b0);
+		bq.b1 = _swapEndianU16(b1);
+		bq.b2 = _swapEndianU16(b2);
+		bq.a1 = _swapEndianU16(a1);
+		bq.a2 = _swapEndianU16(a2);
+		Touched(vpb, VoiceDirty::BiquadCoefs);
 	}
 
-	void __AXSetVoiceAddr(AXVPB* vpb, axOffsetsInternal_t* voiceAddr)
-	{
-		sint32 voiceIndex = (sint32)(vpb->index);
-		AXVPBInternal_t* internal = __AXVPBInternalVoiceArray + voiceIndex;
-		memcpy(&internal->internalOffsets, voiceAddr, sizeof(axOffsetsInternal_t));
-		uint16 format = _swapEndianU16(voiceAddr->format);
-		if (format == AX_FORMAT_PCM8)
-		{
-			memset(&internal->adpcmData, 0x00, sizeof(axADPCMInternal_t));
-			internal->adpcmData.gain = 0x100;
-			AXSetSyncFlag(vpb, AX_SYNCFLAG_ADPCMDATA);
-			AXResetSyncFlag(vpb, AX_SYNCFLAG_LOOPFLAG | AX_SYNCFLAG_LOOPOFFSET | AX_SYNCFLAG_ENDOFFSET | AX_SYNCFLAG_CURRENTOFFSET);
-			AXSetSyncFlag(vpb, AX_SYNCFLAG_OFFSETS);
-			AXVoiceProtection_Acquire(vpb);
-		}
-		else if (format == AX_FORMAT_PCM16)
-		{
-			memset(&internal->adpcmData, 0x00, sizeof(axADPCMInternal_t));
-			internal->adpcmData.gain = 0x800;
-			AXSetSyncFlag(vpb, AX_SYNCFLAG_ADPCMDATA);
-			AXResetSyncFlag(vpb, AX_SYNCFLAG_LOOPFLAG | AX_SYNCFLAG_LOOPOFFSET | AX_SYNCFLAG_ENDOFFSET | AX_SYNCFLAG_CURRENTOFFSET);
-			AXSetSyncFlag(vpb, AX_SYNCFLAG_OFFSETS);
-			AXVoiceProtection_Acquire(vpb);
-		}
-		else if (format == AX_FORMAT_ADPCM)
-		{
-			// .adpcmData is left intact
-			AXResetSyncFlag(vpb, AX_SYNCFLAG_LOOPFLAG | AX_SYNCFLAG_LOOPOFFSET | AX_SYNCFLAG_ENDOFFSET | AX_SYNCFLAG_CURRENTOFFSET);
-			AXSetSyncFlag(vpb, AX_SYNCFLAG_OFFSETS);
-			AXVoiceProtection_Acquire(vpb);
-		}
-		else
-		{
-			cemu_assert_debug(false);
-		}
-	}
+	// --- sample positions -------------------------------------------------------------
 
 	void AXSetVoiceOffsets(AXVPB* vpb, AXPBOFFSET_t* pbOffset)
 	{
-		cemuLog_log(LogType::SoundAPI, fmt::format("AXSetVoiceOffsets() -> Format: {0:04x} Current: {1:08x} End: {2:08x} Loop: {3:08x}", _swapEndianU16(pbOffset->format), _swapEndianU32(pbOffset->currentOffset), _swapEndianU32(pbOffset->endOffset), _swapEndianU32(pbOffset->loopOffset)));
-		MPTR sampleBase = _swapEndianU32(pbOffset->samples);
-		if (sampleBase == MPTR_NULL)
+		const MPTR samples = _swapEndianU32(pbOffset->samples);
+		const uint16 format = _swapEndianU16(pbOffset->format);
+		const uint32 cur = _swapEndianU32(pbOffset->currentOffset);
+		const uint32 loop = _swapEndianU32(pbOffset->loopOffset);
+		const uint32 end = _swapEndianU32(pbOffset->endOffset);
+		cemuLog_log(LogType::SoundAPI, "AXSetVoiceOffsets: format {:04x} samples {:08x} cur {:08x} loop {:08x} end {:08x}", format, samples, cur, loop, end);
+		if (samples == MPTR_NULL)
 		{
-			cemuLog_log(LogType::Force, "AXSetVoiceOffsets(): Invalid sample address");
-			cemu_assert_debug(false);
+			cemuLog_log(LogType::Force, "AXSetVoiceOffsets: no sample buffer");
 			return;
 		}
-		memcpy(&vpb->offsets, pbOffset, sizeof(AXPBOFFSET_t));
-		sampleBase = memory_virtualToPhysical(sampleBase);
-		uint16 format = _swapEndianU16(pbOffset->format);
-
-		axOffsetsInternal_t voiceAddr;
-		if (format == AX_FORMAT_PCM8)
+		vpb->offsets = *pbOffset;
+		if (!IsKnownFormat(format))
 		{
-			uint32 loopOffsetPtr = sampleBase + _swapEndianU32(pbOffset->loopOffset);
-			uint32 endOffsetPtr = sampleBase + _swapEndianU32(pbOffset->endOffset);
-			uint32 currentOffsetPtr = sampleBase + _swapEndianU32(pbOffset->currentOffset);
-			voiceAddr.format = _swapEndianU16(pbOffset->format);
-			voiceAddr.loopFlag = _swapEndianU16(pbOffset->loopFlag);
-			voiceAddr.loopOffsetPtrHigh = (loopOffsetPtr >> 16) & 0x1FFF;
-			voiceAddr.loopOffsetPtrLow = loopOffsetPtr & 0xFFFF;
-			voiceAddr.endOffsetPtrHigh = (endOffsetPtr >> 16) & 0x1FFF;
-			voiceAddr.endOffsetPtrLow = endOffsetPtr & 0xFFFF;
-			voiceAddr.currentOffsetPtrHigh = (currentOffsetPtr >> 16) & 0x1FFF;
-			voiceAddr.currentOffsetPtrLow = currentOffsetPtr & 0xFFFF;
-			voiceAddr.ptrHighExtension = (currentOffsetPtr >> 29);
-			// convert to big endian
-			voiceAddr.format = _swapEndianU16(voiceAddr.format);
-			voiceAddr.loopFlag = _swapEndianU16(voiceAddr.loopFlag);
-			voiceAddr.loopOffsetPtrHigh = _swapEndianU16(voiceAddr.loopOffsetPtrHigh);
-			voiceAddr.loopOffsetPtrLow = _swapEndianU16(voiceAddr.loopOffsetPtrLow);
-			voiceAddr.endOffsetPtrHigh = _swapEndianU16(voiceAddr.endOffsetPtrHigh);
-			voiceAddr.endOffsetPtrLow = _swapEndianU16(voiceAddr.endOffsetPtrLow);
-			voiceAddr.currentOffsetPtrHigh = _swapEndianU16(voiceAddr.currentOffsetPtrHigh);
-			voiceAddr.currentOffsetPtrLow = _swapEndianU16(voiceAddr.currentOffsetPtrLow);
-			voiceAddr.ptrHighExtension = _swapEndianU16(voiceAddr.ptrHighExtension);
-			__AXSetVoiceAddr(vpb, &voiceAddr);
+			cemuLog_log(LogType::Force, "AXSetVoiceOffsets: unknown format {:04x}", format);
+			return;
 		}
-		else if (format == AX_FORMAT_PCM16)
+		const uint32 base = memory_virtualToPhysical(samples);
+		const uint32 hiMask = (WordHighMask(format) << 16) | 0xFFFF;
+		AXVPBInternal_t* pb = PpcBlock(vpb);
+		AXVoiceAddr& a = pb->addr;
+		a.format = format;
+		a.loopFlag = _swapEndianU16(pbOffset->loopFlag);
+		a.SetLoop(WordAddress(format, base, loop) & hiMask);
+		a.SetEnd(WordAddress(format, base, end) & hiMask);
+		a.SetCur(WordAddress(format, base, cur) & hiMask);
+		a.addrExt = (uint16)AddressExtension(format, base, cur);
+		if (format != AX_FORMAT_ADPCM)
 		{
-			uint32 loopOffsetPtr = sampleBase / 2 + _swapEndianU32(pbOffset->loopOffset);
-			uint32 endOffsetPtr = sampleBase / 2 + _swapEndianU32(pbOffset->endOffset);
-			uint32 currentOffset = _swapEndianU32(pbOffset->currentOffset);
-			uint32 currentOffsetPtr = sampleBase / 2 + currentOffset;
-			voiceAddr.format = _swapEndianU16(pbOffset->format);
-			voiceAddr.loopFlag = _swapEndianU16(pbOffset->loopFlag);
-			voiceAddr.loopOffsetPtrHigh = (loopOffsetPtr >> 16) & 0x0FFF;
-			voiceAddr.loopOffsetPtrLow = loopOffsetPtr & 0xFFFF;
-			voiceAddr.endOffsetPtrHigh = (endOffsetPtr >> 16) & 0x0FFF;
-			voiceAddr.endOffsetPtrLow = endOffsetPtr & 0xFFFF;
-			voiceAddr.currentOffsetPtrHigh = (currentOffsetPtr >> 16) & 0x0FFF;
-			voiceAddr.currentOffsetPtrLow = currentOffsetPtr & 0xFFFF;
-			voiceAddr.ptrHighExtension = ((sampleBase + currentOffset * 2) >> 29);
-			// convert to big endian
-			voiceAddr.format = _swapEndianU16(voiceAddr.format);
-			voiceAddr.loopFlag = _swapEndianU16(voiceAddr.loopFlag);
-			voiceAddr.loopOffsetPtrHigh = _swapEndianU16(voiceAddr.loopOffsetPtrHigh);
-			voiceAddr.loopOffsetPtrLow = _swapEndianU16(voiceAddr.loopOffsetPtrLow);
-			voiceAddr.endOffsetPtrHigh = _swapEndianU16(voiceAddr.endOffsetPtrHigh);
-			voiceAddr.endOffsetPtrLow = _swapEndianU16(voiceAddr.endOffsetPtrLow);
-			voiceAddr.currentOffsetPtrHigh = _swapEndianU16(voiceAddr.currentOffsetPtrHigh);
-			voiceAddr.currentOffsetPtrLow = _swapEndianU16(voiceAddr.currentOffsetPtrLow);
-			voiceAddr.ptrHighExtension = _swapEndianU16(voiceAddr.ptrHighExtension);
-			__AXSetVoiceAddr(vpb, &voiceAddr);
+			// PCM goes through the same decoder stage with a fixed gain. The renderer
+			// never reads it; it is kept in host order because that is the byte
+			// pattern the block has always held.
+			memset(&pb->adpcm, 0, sizeof(pb->adpcm));
+			pb->adpcm.gain = (uint16)(format == AX_FORMAT_PCM8 ? 0x0100 : 0x0800);
+			MarkDirty(vpb, VoiceDirty::Adpcm);
 		}
-		else if (format == AX_FORMAT_ADPCM)
-		{
-			uint32 loopOffsetPtr = sampleBase * 2 + _swapEndianU32(pbOffset->loopOffset);
-			uint32 endOffsetPtr = sampleBase * 2 + _swapEndianU32(pbOffset->endOffset);
-			uint32 currentOffset = _swapEndianU32(pbOffset->currentOffset);
-			uint32 currentOffsetPtr = sampleBase * 2 + currentOffset;
-			voiceAddr.format = _swapEndianU16(pbOffset->format);
-			voiceAddr.loopFlag = _swapEndianU16(pbOffset->loopFlag);
-			voiceAddr.loopOffsetPtrHigh = (loopOffsetPtr >> 16) & 0x3FFF;
-			voiceAddr.loopOffsetPtrLow = loopOffsetPtr & 0xFFFF;
-			voiceAddr.endOffsetPtrHigh = (endOffsetPtr >> 16) & 0x3FFF;
-			voiceAddr.endOffsetPtrLow = endOffsetPtr & 0xFFFF;
-			voiceAddr.currentOffsetPtrHigh = (currentOffsetPtr >> 16) & 0x3FFF;
-			voiceAddr.currentOffsetPtrLow = currentOffsetPtr & 0xFFFF;
-			voiceAddr.ptrHighExtension = ((sampleBase + currentOffset / 2) >> 29);
-			// convert to big endian
-			voiceAddr.format = _swapEndianU16(voiceAddr.format);
-			voiceAddr.loopFlag = _swapEndianU16(voiceAddr.loopFlag);
-			voiceAddr.loopOffsetPtrHigh = _swapEndianU16(voiceAddr.loopOffsetPtrHigh);
-			voiceAddr.loopOffsetPtrLow = _swapEndianU16(voiceAddr.loopOffsetPtrLow);
-			voiceAddr.endOffsetPtrHigh = _swapEndianU16(voiceAddr.endOffsetPtrHigh);
-			voiceAddr.endOffsetPtrLow = _swapEndianU16(voiceAddr.endOffsetPtrLow);
-			voiceAddr.currentOffsetPtrHigh = _swapEndianU16(voiceAddr.currentOffsetPtrHigh);
-			voiceAddr.currentOffsetPtrLow = _swapEndianU16(voiceAddr.currentOffsetPtrLow);
-			voiceAddr.ptrHighExtension = _swapEndianU16(voiceAddr.ptrHighExtension);
-			__AXSetVoiceAddr(vpb, &voiceAddr);
-		}
-		else
-		{
-			cemu_assert_debug(false);
-		}
+		// the whole block supersedes single offset changes
+		ClearDirty(vpb, VoiceDirty::LoopFlag | VoiceDirty::LoopOffset | VoiceDirty::EndOffset | VoiceDirty::CurOffset);
+		Touched(vpb, VoiceDirty::Offsets);
 	}
 
 	void AXSetVoiceOffsetsEx(AXVPB* vpb, AXPBOFFSET_t* pbOffset, void* sampleBase)
 	{
-		// used by F1 Racing
-		cemu_assert(vpb != NULL && sampleBase != MPTR_NULL);
-
-		AXPBOFFSET_t tmpOffsets = *pbOffset;
-		tmpOffsets.samples = _swapEndianU32(memory_getVirtualOffsetFromPointer(sampleBase));
-		AXSetVoiceOffsets(vpb, &tmpOffsets);
+		if (!vpb || !sampleBase)
+		{
+			cemuLog_log(LogType::APIErrors, "AXSetVoiceOffsetsEx: null voice or sample base");
+			return;
+		}
+		AXPBOFFSET_t withBase = *pbOffset;
+		withBase.samples = _swapEndianU32(memory_getVirtualOffsetFromPointer(sampleBase));
+		AXSetVoiceOffsets(vpb, &withBase);
 	}
 
-	void AXSetVoiceSamplesAddr(AXVPB* vpb, void* sampleBase)
-	{
-		vpb->offsets.samples = _swapEndianU32(memory_getVirtualOffsetFromPointer(sampleBase));
-		AXGetVoiceOffsets(vpb, &vpb->offsets);
-	}
-
+	// positions relative to vpb->offsets.samples, from the PPC copy (which the
+	// frame thread keeps up to date with the playback position)
 	void AXGetVoiceOffsets(AXVPB* vpb, AXPBOFFSET_t* pbOffset)
 	{
-		AXVPBInternal_t* internal = __AXVPBInternalVoiceArray + (sint32)vpb->index;
-
-		memcpy(pbOffset, &vpb->offsets, sizeof(AXPBOFFSET_t));
-		MPTR sampleBase = _swapEndianU32(vpb->offsets.samples);
-		sampleBase = memory_virtualToPhysical(sampleBase);
-		uint16 format = _swapEndianU16(pbOffset->format);
-		uint32 loopOffsetPtrLow = _swapEndianU16(internal->internalOffsets.loopOffsetPtrLow);
-		uint32 loopOffsetPtrHigh = _swapEndianU16(internal->internalOffsets.loopOffsetPtrHigh);
-		uint32 endOffsetPtrLow = _swapEndianU16(internal->internalOffsets.endOffsetPtrLow);
-		uint32 endOffsetPtrHigh = _swapEndianU16(internal->internalOffsets.endOffsetPtrHigh);
-		uint32 currentOffsetPtrLow = _swapEndianU16(internal->internalOffsets.currentOffsetPtrLow);
-		uint32 currentOffsetPtrHigh = _swapEndianU16(internal->internalOffsets.currentOffsetPtrHigh);
-		uint32 ptrHighExtension = _swapEndianU16(internal->internalOffsets.ptrHighExtension);
-
-		if (format == AX_FORMAT_PCM8)
+		const AXVoiceAddr& a = PpcBlock(vpb)->addr;
+		*pbOffset = vpb->offsets;
+		const uint16 format = _swapEndianU16(pbOffset->format);
+		if (IsKnownFormat(format))
 		{
-			uint32 loopOffset = (loopOffsetPtrLow | (loopOffsetPtrHigh << 16) | (ptrHighExtension << 29)) - sampleBase;
-			uint32 endOffset = (endOffsetPtrLow | (endOffsetPtrHigh << 16) | (ptrHighExtension << 29)) - sampleBase;
-			uint32 currentOffset = (currentOffsetPtrLow | (currentOffsetPtrHigh << 16) | (ptrHighExtension << 29)) - sampleBase;
-
-			pbOffset->loopOffset = _swapEndianU32(loopOffset);
-			pbOffset->endOffset = _swapEndianU32(endOffset);
-			pbOffset->currentOffset = _swapEndianU32(currentOffset);
+			const uint32 base = memory_virtualToPhysical(_swapEndianU32(vpb->offsets.samples));
+			const uint32 ext = a.addrExt;
+			pbOffset->loopOffset = _swapEndianU32(RelativeOffset(format, a.Loop(), ext, base));
+			pbOffset->endOffset = _swapEndianU32(RelativeOffset(format, a.End(), ext, base));
+			pbOffset->currentOffset = _swapEndianU32(RelativeOffset(format, a.Cur(), ext, base));
 		}
-		else if (format == AX_FORMAT_PCM16)
-		{
-			uint32 loopOffset = (loopOffsetPtrLow | (loopOffsetPtrHigh << 16) | ((ptrHighExtension << 29) / 2)) - sampleBase / 2;
-			uint32 endOffset = (endOffsetPtrLow | (endOffsetPtrHigh << 16) | ((ptrHighExtension << 29) / 2)) - sampleBase / 2;
-			uint32 currentOffset = (currentOffsetPtrLow | (currentOffsetPtrHigh << 16) | ((ptrHighExtension << 29) / 2)) - sampleBase / 2;
-
-			pbOffset->loopOffset = _swapEndianU32(loopOffset);
-			pbOffset->endOffset = _swapEndianU32(endOffset);
-			pbOffset->currentOffset = _swapEndianU32(currentOffset);
-		}
-		else if (format == AX_FORMAT_ADPCM)
-		{
-			uint32 loopOffset = (loopOffsetPtrLow | (loopOffsetPtrHigh << 16) | ((ptrHighExtension << 29) * 2)) - sampleBase * 2;
-			uint32 endOffset = (endOffsetPtrLow | (endOffsetPtrHigh << 16) | ((ptrHighExtension << 29) * 2)) - sampleBase * 2;
-			uint32 currentOffset = (currentOffsetPtrLow | (currentOffsetPtrHigh << 16) | ((ptrHighExtension << 29) * 2)) - sampleBase * 2;
-
-			pbOffset->loopOffset = _swapEndianU32(loopOffset);
-			pbOffset->endOffset = _swapEndianU32(endOffset);
-			pbOffset->currentOffset = _swapEndianU32(currentOffset);
-		}
-		else
-		{
-			cemu_assert_debug(false);
-		}
-		cemuLog_log(LogType::SoundAPI, "Retrieved voice offsets for voice {:08x} - base {:08x} current {:08x} loopFlag {:04x} loop {:08x} end {:08x}", memory_getVirtualOffsetFromPointer(vpb), _swapEndianU32(pbOffset->samples), _swapEndianU32(pbOffset->currentOffset), _swapEndianU16(pbOffset->loopFlag), _swapEndianU32(pbOffset->loopOffset), _swapEndianU32(pbOffset->endOffset));
+		cemuLog_log(LogType::SoundAPI, "AXGetVoiceOffsets: voice {} samples {:08x} cur {:08x} loop {:08x} end {:08x}", (uint32)vpb->index,
+			_swapEndianU32(pbOffset->samples), _swapEndianU32(pbOffset->currentOffset), _swapEndianU32(pbOffset->loopOffset), _swapEndianU32(pbOffset->endOffset));
 	}
 
 	void AXGetVoiceOffsetsEx(AXVPB* vpb, AXPBOFFSET_t* pbOffset, MPTR sampleBase)
 	{
-		cemu_assert(vpb != NULL && sampleBase != MPTR_NULL);
-
 		vpb->offsets.samples = _swapEndianU32(sampleBase);
 		AXGetVoiceOffsets(vpb, pbOffset);
-		memcpy(&vpb->offsets, pbOffset, sizeof(AXPBOFFSET_t));
+		vpb->offsets = *pbOffset;
+	}
+
+	// re-express the current positions against a new sample base (the voice keeps playing where it is)
+	void AXSetVoiceSamplesAddr(AXVPB* vpb, void* sampleBase)
+	{
+		vpb->offsets.samples = _swapEndianU32(memory_getVirtualOffsetFromPointer(sampleBase));
+		AXPBOFFSET_t rebased;
+		AXGetVoiceOffsets(vpb, &rebased);
+		vpb->offsets = rebased;
 	}
 
 	void AXSetVoiceCurrentOffset(AXVPB* vpb, uint32 currentOffset)
 	{
-		// untested
-		AXVPBInternal_t* internal = __AXVPBInternalVoiceArray + (sint32)(vpb->index);
-		MPTR sampleBase = memory_virtualToPhysical(_swapEndianU32(vpb->offsets.samples));
-		vpb->offsets.currentOffset = _swapEndianU32(currentOffset);
-		uint16 voiceFormat = _swapEndianU16(internal->internalOffsets.format);
-		uint32 currentOffsetPtr;
-		sampleBase &= 0x1FFFFFFF;
-		if (voiceFormat == AX_FORMAT_PCM8)
-		{
-			// calculate offset (in bytes)
-			currentOffsetPtr = sampleBase + currentOffset;
-		}
-		else if (voiceFormat == AX_FORMAT_PCM16)
-		{
-			// calculate offset (in shorts)
-			currentOffsetPtr = sampleBase / 2 + currentOffset;
-		}
-		else if (voiceFormat == AX_FORMAT_ADPCM)
-		{
-			// calculate offset (in nibbles)
-			currentOffsetPtr = sampleBase * 2 + currentOffset;
-		}
-		else
-		{
-			cemu_assert_debug(false);
-		}
-		internal->internalOffsets.currentOffsetPtrHigh = _swapEndianU16(currentOffsetPtr >> 16);
-		internal->internalOffsets.currentOffsetPtrLow = _swapEndianU16(currentOffsetPtr & 0xFFFF);
-		AXSetSyncFlag(vpb, AX_SYNCFLAG_CURRENTOFFSET);
-		AXVoiceProtection_Acquire(vpb);
+		SetOneOffset(vpb, OffsetField::Cur, currentOffset);
 	}
 
 	void AXSetVoiceLoopOffset(AXVPB* vpb, uint32 loopOffset)
 	{
-		AXVPBInternal_t* internal = __AXVPBInternalVoiceArray + (sint32)(vpb->index);
-		MPTR sampleBase = memory_virtualToPhysical(_swapEndianU32(vpb->offsets.samples));
-		vpb->offsets.loopOffset = _swapEndianU32(loopOffset);
-		uint16 voiceFormat = _swapEndianU16(internal->internalOffsets.format);
-		uint32 loopOffsetPtr;
-		sampleBase &= 0x1FFFFFFF;
-		if (voiceFormat == AX_FORMAT_PCM8)
-		{
-			// calculate offset (in bytes)
-			loopOffsetPtr = sampleBase + loopOffset;
-		}
-		else if (voiceFormat == AX_FORMAT_PCM16)
-		{
-			// calculate offset (in shorts)
-			loopOffsetPtr = sampleBase / 2 + loopOffset;
-		}
-		else if (voiceFormat == AX_FORMAT_ADPCM)
-		{
-			// calculate offset (in nibbles)
-			loopOffsetPtr = sampleBase * 2 + loopOffset;
-		}
-		else
-		{
-			cemu_assert_debug(false);
-		}
-		internal->internalOffsets.loopOffsetPtrHigh = _swapEndianU16(loopOffsetPtr >> 16);
-		internal->internalOffsets.loopOffsetPtrLow = _swapEndianU16(loopOffsetPtr & 0xFFFF);
-		AXSetSyncFlag(vpb, AX_SYNCFLAG_LOOPOFFSET);
-		AXVoiceProtection_Acquire(vpb);
+		SetOneOffset(vpb, OffsetField::Loop, loopOffset);
 	}
 
 	void AXSetVoiceEndOffset(AXVPB* vpb, uint32 endOffset)
 	{
-		// untested
-		AXVPBInternal_t* internal = __AXVPBInternalVoiceArray + (sint32)(vpb->index);
-		MPTR sampleBase = memory_virtualToPhysical(_swapEndianU32(vpb->offsets.samples));
-		vpb->offsets.endOffset = _swapEndianU32(endOffset);
-		uint16 voiceFormat = _swapEndianU16(internal->internalOffsets.format);
-		uint32 endOffsetPtr;
-		sampleBase &= 0x1FFFFFFF;
-		if (voiceFormat == AX_FORMAT_PCM8)
-		{
-			// calculate offset (in bytes)
-			endOffsetPtr = sampleBase + endOffset;
-		}
-		else if (voiceFormat == AX_FORMAT_PCM16)
-		{
-			// calculate offset (in shorts)
-			endOffsetPtr = sampleBase / 2 + endOffset;
-		}
-		else if (voiceFormat == AX_FORMAT_ADPCM)
-		{
-			// calculate offset (in nibbles)
-			endOffsetPtr = sampleBase * 2 + endOffset;
-		}
-		else
-		{
-			cemu_assert_debug(false);
-		}
-		internal->internalOffsets.endOffsetPtrHigh = _swapEndianU16(endOffsetPtr >> 16);
-		internal->internalOffsets.endOffsetPtrLow = _swapEndianU16(endOffsetPtr & 0xFFFF);
-		AXSetSyncFlag(vpb, AX_SYNCFLAG_ENDOFFSET);
-		AXVoiceProtection_Acquire(vpb);
+		SetOneOffset(vpb, OffsetField::End, endOffset);
 	}
 
 	void AXSetVoiceCurrentOffsetEx(AXVPB* vpb, uint32 currentOffset, MPTR sampleBase)
 	{
-		cemu_assert(vpb != NULL && sampleBase != MPTR_NULL);
-		AXPBOFFSET_t pbOffset;
 		vpb->offsets.samples = _swapEndianU32(sampleBase);
-		AXGetVoiceOffsets(vpb, &pbOffset);
-		AXSetVoiceCurrentOffset(vpb, currentOffset);
+		SetOneOffset(vpb, OffsetField::Cur, currentOffset);
 	}
 
 	void AXSetVoiceLoopOffsetEx(AXVPB* vpb, uint32 loopOffset, MPTR sampleBase)
 	{
-		cemu_assert(vpb != NULL && sampleBase != MPTR_NULL);
-		AXPBOFFSET_t pbOffset;
 		vpb->offsets.samples = _swapEndianU32(sampleBase);
-		AXGetVoiceOffsets(vpb, &pbOffset);
-		AXSetVoiceLoopOffset(vpb, loopOffset);
+		SetOneOffset(vpb, OffsetField::Loop, loopOffset);
 	}
 
 	void AXSetVoiceEndOffsetEx(AXVPB* vpb, uint32 endOffset, MPTR sampleBase)
 	{
-		cemu_assert(vpb != NULL && sampleBase != MPTR_NULL);
-		AXPBOFFSET_t pbOffset;
 		vpb->offsets.samples = _swapEndianU32(sampleBase);
-		AXGetVoiceOffsets(vpb, &pbOffset);
-		AXSetVoiceEndOffset(vpb, endOffset);
+		SetOneOffset(vpb, OffsetField::End, endOffset);
 	}
 
 	uint32 AXGetVoiceCurrentOffsetEx(AXVPB* vpb, MPTR sampleBase)
 	{
-		cemu_assert(vpb != NULL && sampleBase != MPTR_NULL);
-		AXPBOFFSET_t pbOffset;
-		AXGetVoiceOffsetsEx(vpb, &pbOffset, sampleBase);
-		return _swapEndianU32(pbOffset.currentOffset);
+		AXPBOFFSET_t o;
+		AXGetVoiceOffsetsEx(vpb, &o, sampleBase);
+		return _swapEndianU32(o.currentOffset);
 	}
 
 	void AXSetVoiceLoop(AXVPB* vpb, uint16 loopState)
 	{
-		AXVPBInternal_t* internal = __AXVPBInternalVoiceArray + (sint32)(vpb->index);
 		vpb->offsets.loopFlag = _swapEndianU16(loopState);
-		internal->internalOffsets.loopFlag = _swapEndianU16(loopState);
-		AXSetSyncFlag(vpb, AX_SYNCFLAG_LOOPFLAG);
-		AXVoiceProtection_Acquire(vpb);
+		PpcBlock(vpb)->addr.loopFlag = loopState;
+		Touched(vpb, VoiceDirty::LoopFlag);
 	}
 
-	uint32 vpbLoopTracker_loopCount[AX_MAX_VOICES];
-	uint32 vpbLoopTracker_prevCurrentOffset[AX_MAX_VOICES];
-
-	void AXResetVoiceLoopCount(AXVPB* vpb)
-	{
-		if (!vpb)
-			return;
-		uint32 voiceIndex = vpb->index;
-		vpbLoopTracker_loopCount[voiceIndex] = 0;
-		vpbLoopTracker_prevCurrentOffset[voiceIndex] = 0;
-	}
-
+	// The DSP does not count loops for us, so this infers them from how the
+	// position moved since the previous call: a jump backwards into the loop
+	// region is one loop, and a loop shorter than a frame wraps several times per frame.
 	sint32 AXGetVoiceLoopCount(AXVPB* vpb)
 	{
 		if (!vpb)
 			return 0;
-		uint32 voiceIndex = vpb->index;
-		AXVPBInternal_t* internal = __AXVPBInternalVoiceArray + voiceIndex;
-
-		uint32 loopOffset = internal->internalOffsets.GetLoopOffset32();
-		uint32 endOffset = internal->internalOffsets.GetEndOffset32();
-		uint32 currentOffset = internal->internalOffsets.GetCurrentOffset32();
-
-		uint32 srcRatio;
-		if (internal->srcFilterMode == AX_FILTER_MODE_NONE)
-			srcRatio = 0x10000;
-		else 
-			srcRatio = internal->src.GetSrcRatio32();
-
-		uint32 loopLength = 0;
-		if (srcRatio != 0)
-			loopLength = ((endOffset - loopOffset) * 0x10000) / srcRatio;
-
-		uint32 prevCurrentOffset = vpbLoopTracker_prevCurrentOffset[voiceIndex];
-		uint32 voiceSamplesPerFrame = AXGetInputSamplesPerFrame();
-
-		if (loopOffset < endOffset && srcRatio != 0 && loopLength <= voiceSamplesPerFrame)
+		const uint32 index = vpb->index;
+		const AXVPBInternal_t* pb = PpcBlock(vpb);
+		const uint32 loop = pb->addr.Loop();
+		const uint32 end = pb->addr.End();
+		const uint32 cur = pb->addr.Cur();
+		const uint32 ratio = pb->srcMode == AX_FILTER_MODE_NONE ? 0x10000u : pb->src.Ratio();
+		const uint32 framePos = (uint32)AXGetInputSamplesPerFrame();
+		LoopTracker& t = s_loops[index];
+		const uint64 loopLen = ratio ? ((uint64)(end - loop) << 16) / ratio : 0;
+		if (loop < end && loopLen != 0 && loopLen <= framePos)
 		{
-			// handle loops shorter than one frame
-			uint32 loopsInFrame = ((prevCurrentOffset - loopOffset) + voiceSamplesPerFrame) / loopLength;
-			vpbLoopTracker_loopCount[voiceIndex] += loopsInFrame;
+			t.loops += (uint32)(((t.lastPos - loop) + framePos) / (uint32)loopLen);
 		}
-		else // loopOffset >= endOffset
+		else if (t.lastPos <= end)
 		{
-			if (prevCurrentOffset <= endOffset) // loop could only happen if playback cursor was before end
-			{
-				if (loopOffset > endOffset && currentOffset >= loopOffset)
-					vpbLoopTracker_loopCount[voiceIndex]++;
-				else if (currentOffset < prevCurrentOffset && currentOffset >= loopOffset)
-					vpbLoopTracker_loopCount[voiceIndex]++;
-			}
+			const bool jumpedIntoLoop = loop > end ? cur >= loop : (cur < t.lastPos && cur >= loop);
+			if (jumpedIntoLoop)
+				t.loops++;
 		}
-		vpbLoopTracker_prevCurrentOffset[voiceIndex] = currentOffset;
-		return vpbLoopTracker_loopCount[voiceIndex];
+		t.lastPos = cur;
+		return (sint32)t.loops;
 	}
 }
