@@ -1,9 +1,11 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include "Cafe/HW/Latte/Core/LatteTexture.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanAPI.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/VKRBase.h"
 
+// A guest texture view. The Vulkan image views are made on demand, one per sampler swizzle.
 class LatteTextureViewVk : public LatteTextureView
 {
 public:
@@ -17,28 +19,35 @@ public:
 	VkFormat GetFormat() const { return m_format; }
 
 	LatteTextureVk* GetBaseImage() const { return (LatteTextureVk*)baseTexture; }
-	
-	void AddDescriptorSetReference(struct VkDescriptorSetInfo* dsInfo) { if (std::find(list_descriptorSets.begin(), list_descriptorSets.end(), dsInfo) == list_descriptorSets.end()) list_descriptorSets.emplace_back(dsInfo); };
-	void RemoveDescriptorSetReference(struct VkDescriptorSetInfo* dsInfo) { list_descriptorSets.erase(std::remove(list_descriptorSets.begin(), list_descriptorSets.end(), dsInfo), list_descriptorSets.end()); };
+
+	// descriptor sets that use this view; they are deleted together with the view
+	void AddDescriptorSetReference(struct VkDescriptorSetInfo* dsInfo)
+	{
+		if (std::find(m_descriptorSets.begin(), m_descriptorSets.end(), dsInfo) == m_descriptorSets.end())
+			m_descriptorSets.emplace_back(dsInfo);
+	};
+	void RemoveDescriptorSetReference(struct VkDescriptorSetInfo* dsInfo)
+	{
+		m_descriptorSets.erase(std::remove(m_descriptorSets.begin(), m_descriptorSets.end(), dsInfo), m_descriptorSets.end());
+	};
 
 private:
-	VkImageViewType GetImageViewTypeFromGX2Dim(Latte::E_DIM dim);
-	VKRObjectTextureView* CreateView(uint32 gpuSamplerSwizzle);
+	VKRObjectTextureView* MakeImageView(uint32 swizzle);
 
-	// each texture view holds one Vulkan image view per swizzle mask. Image views are only instantiated when requested via GetViewRGBA/GetSamplerView
-	// since a large majority of texture views will only have 1 or 2 instantiated image views, we use a small fixed-size cache
-	// and only allocate the larger map (m_fallbackCache) if necessary
-	inline static const uint32 CACHE_EMPTY_ENTRY = 0xFFFFFFFF;
+	// Most views only ever see one or two swizzles, so two inline slots come first and the map
+	// is only allocated for the rest.
+	static constexpr uint32 kFreeSlot = 0xFFFFFFFF;
+	struct CachedView
+	{
+		uint32 swizzle = kFreeSlot;
+		VKRObjectTextureView* view = nullptr;
+	};
+	CachedView m_inlineViews[2];
+	std::unordered_map<uint32, VKRObjectTextureView*>* m_moreViews{};
 
-	uint32 m_smallCacheSwizzle0 = { CACHE_EMPTY_ENTRY };
-	uint32 m_smallCacheSwizzle1 = { CACHE_EMPTY_ENTRY };
-	VKRObjectTextureView* m_smallCacheView0 = {};
-	VKRObjectTextureView* m_smallCacheView1 = {};
-	std::unordered_map<uint32, VKRObjectTextureView*>* m_fallbackCache{};
-	
 	VkDevice m_device;
 	VkFormat m_format;
-	std::vector<struct VkDescriptorSetInfo*> list_descriptorSets; // list of descriptors sets referencing this view
+	std::vector<struct VkDescriptorSetInfo*> m_descriptorSets;
 
 	uint64 m_uniqueId;
 };

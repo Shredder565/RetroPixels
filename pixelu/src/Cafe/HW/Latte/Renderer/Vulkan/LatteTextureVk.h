@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include "Cafe/HW/Latte/Core/LatteTexture.h"
@@ -6,6 +7,8 @@
 
 #include "Cafe/HW/Latte/Renderer/Vulkan/VKRBase.h"
 
+// A guest texture backed by a VkImage. The image layout is tracked per subresource: one entry per
+// mip level for 3D textures, one per mip level and array layer otherwise.
 class LatteTextureVk : public LatteTexture
 {
 public:
@@ -17,62 +20,42 @@ public:
 	void AllocateOnHost() override;
 
 	VKRObjectTexture* GetImageObj() const { return vkObjTex; };
-	
+
 	VkFormat GetFormat() const { return vkObjTex->m_format; }
 	VkImageAspectFlags GetImageAspect() const { return vkObjTex->m_imageAspect; }
 	VkImageLayout GetDefaultLayout() const { return m_defaultLayout; }
 
 	VkImageLayout GetImageLayout(VkImageSubresource& subresource)
 	{
-		cemu_assert_debug(subresource.mipLevel < m_layoutsMips);
-		cemu_assert_debug(subresource.arrayLayer < m_layoutsDepth);
-		if (Is3DTexture())
-			return m_layouts[subresource.mipLevel];
-		return m_layouts[subresource.mipLevel * m_layoutsDepth + subresource.arrayLayer];
+		return m_layouts[LayoutSlot(subresource.mipLevel, subresource.arrayLayer)];
 	}
 
+	// a range covers a single mip level; all layers in it are expected to share one layout
 	VkImageLayout GetImageLayout(VkImageSubresourceRange& subresource)
 	{
-		cemu_assert_debug(subresource.baseMipLevel < m_layoutsMips);
-		cemu_assert_debug(subresource.baseArrayLayer < m_layoutsDepth);
 		cemu_assert_debug(subresource.levelCount == 1);
-		if (Is3DTexture())
-			return m_layouts[subresource.baseMipLevel];
-		cemu_assert_debug(subresource.layerCount > 0);
-		if (subresource.layerCount > 1)
+		const size_t first = LayoutSlot(subresource.baseMipLevel, subresource.baseArrayLayer);
+		if (!Is3DTexture())
 		{
-			VkImageLayout imgLayout = m_layouts[subresource.baseMipLevel * m_layoutsDepth + subresource.baseArrayLayer];
-			for (uint32 i = 1; i < subresource.layerCount; i++)
-			{
-				cemu_assert_debug(m_layouts[subresource.baseMipLevel * m_layoutsDepth + subresource.baseArrayLayer + i] == imgLayout);
-			}
-			return imgLayout;
+			cemu_assert_debug(subresource.layerCount > 0);
+			for (uint32 layer = 1; layer < subresource.layerCount; layer++)
+				cemu_assert_debug(m_layouts[first + layer] == m_layouts[first]);
 		}
-		return m_layouts[subresource.baseMipLevel * m_layoutsDepth + subresource.baseArrayLayer];
+		return m_layouts[first];
 	}
 
 	void SetImageLayout(VkImageSubresource& subresource, VkImageLayout newLayout)
 	{
-		cemu_assert_debug(subresource.mipLevel < m_layoutsMips);
-		cemu_assert_debug(subresource.arrayLayer < m_layoutsDepth);
-		if (Is3DTexture())
-			m_layouts[subresource.mipLevel] = newLayout;
-		else
-			m_layouts[subresource.mipLevel * m_layoutsDepth + subresource.arrayLayer] = newLayout;
+		m_layouts[LayoutSlot(subresource.mipLevel, subresource.arrayLayer)] = newLayout;
 	}
 
 	void SetImageLayout(VkImageSubresourceRange& subresource, VkImageLayout newLayout)
 	{
-		cemu_assert_debug(subresource.baseMipLevel < m_layoutsMips);
-		cemu_assert_debug(subresource.baseArrayLayer < m_layoutsDepth);
 		cemu_assert_debug(subresource.levelCount == 1);
-		if (Is3DTexture())
-			m_layouts[subresource.baseMipLevel] = newLayout;
-		else
-		{
-			for(uint32 i=0; i<subresource.layerCount; i++)
-				m_layouts[subresource.baseMipLevel * m_layoutsDepth + subresource.baseArrayLayer + i] = newLayout;
-		}
+		const size_t first = LayoutSlot(subresource.baseMipLevel, subresource.baseArrayLayer);
+		const uint32 layers = Is3DTexture() ? 1 : subresource.layerCount;
+		for (uint32 layer = 0; layer < layers; layer++)
+			m_layouts[first + layer] = newLayout;
 	}
 
 protected:
@@ -84,15 +67,23 @@ public:
 	uint64 m_vkFlushIndex_read{};
 	uint64 m_vkFlushIndex_write{};
 
-	uint32 m_selfDependencyCheckIndex{}; // used to track if texture is being both sampled and output to during drawcall
+	uint32 m_selfDependencyCheckIndex{}; // draw in which the texture was last seen; detects sampling from a bound render target
 	VkImageAspectFlags m_selfDependencyCheckAspectMask{};
 
-	bool m_isAlternateFormat{}; // true if host pixel format does not 1:1 match the emulated guest texture pixel format
+	bool m_isAlternateFormat{}; // the host format differs from the guest format (data gets converted)
 private:
+	size_t LayoutSlot(uint32 mip, uint32 layer) const
+	{
+		cemu_assert_debug(mip < m_layoutsMips);
+		cemu_assert_debug(layer < m_layoutsDepth);
+		return Is3DTexture() ? mip : (size_t)mip * m_layoutsDepth + layer;
+	}
+
 	class VulkanRenderer* m_vkr{};
 
 	VKRObjectTexture* vkObjTex{};
-	VkImageLayout m_defaultLayout{ VK_IMAGE_LAYOUT_GENERAL }; // the targetted long term layout of the texture. Can be either VK_IMAGE_LAYOUT_GENERAL or VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT for potential rendertargets if supported
+	// long term layout: GENERAL, or ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT for render targets when that is supported
+	VkImageLayout m_defaultLayout{ VK_IMAGE_LAYOUT_GENERAL };
 	std::vector<VkImageLayout> m_layouts;
 	uint32 m_layoutsMips;
 	uint32 m_layoutsDepth;

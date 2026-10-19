@@ -1,17 +1,20 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include "Cafe/HW/Latte/Core/LatteCachedFBO.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/VKRBase.h"
 
+// Render target combination of the Vulkan backend: a render pass plus framebuffer, and the same
+// attachments described for VK_KHR_dynamic_rendering.
 class CachedFBOVk : public LatteCachedFBO
 {
 public:
 	CachedFBOVk(uint64 key, VkDevice device)
 		: LatteCachedFBO(key), m_device(device)
 	{
-		CreateRenderPass();
-		CreateFramebuffer();
-		InitDynamicRenderingData();
+		BuildRenderPass();
+		BuildFramebuffer();
+		BuildRenderingInfo();
 	}
 
 	~CachedFBOVk();
@@ -31,10 +34,10 @@ public:
 	// for KHR_dynamic_rendering
 	VkRenderingInfoKHR* GetRenderingInfo()
 	{
-		return &m_vkRenderingInfo;
+		return &m_renderingInfo;
 	}
 
-
+	// pipelines compiled against this render pass; they are deleted with it
 	void TrackDependency(class PipelineInfo* pipelineInfo)
 	{
 		s_spinlockDependency.lock();
@@ -49,11 +52,11 @@ public:
 		s_spinlockDependency.unlock();
 	}
 
-	[[nodiscard]] const VkExtent2D& GetExtend() const { return m_extend;}
+	[[nodiscard]] const VkExtent2D& GetExtend() const { return m_extent; }
 
 	struct RendertargetSelfDependencyMask
 	{
-		VkImageAspectFlags aspectMaskFlags{}; // aspect flags which are simultaneously sampled and written
+		VkImageAspectFlags aspectMaskFlags{}; // aspects that are sampled and rendered to in the same draw
 		bool hasNonPixelSelfDependency{false};
 
 		VkImageAspectFlags GetAspectMask() const
@@ -66,36 +69,35 @@ public:
 			return GetAspectMask() != 0;
 		}
 
+		// a vertex or geometry shader samples one of the render targets
 		bool HasVertexOrGeometrySelfDependency() const
 		{
-			return hasNonPixelSelfDependency; // vertex or geometry shader samples texture which is written to
+			return hasNonPixelSelfDependency;
 		}
 	};
 
-	// checks if any of the sampled textures are output by the FBO
+	// which of the textures bound by the three descriptor sets are also attachments of this FBO
 	RendertargetSelfDependencyMask CheckForSelfDependency(VkDescriptorSetInfo* vsDS, VkDescriptorSetInfo* gsDS, VkDescriptorSetInfo* psDS) const;
 
 private:
+	void BuildRenderPass();
+	void BuildFramebuffer();
+	void BuildRenderingInfo();
 
-	void CreateRenderPass();
-	void CreateFramebuffer();
-
-	void InitDynamicRenderingData();
-
-	VKRObjectTextureView* GetColorBufferImageView(uint32 index);
-	VKRObjectTextureView* GetDepthStencilBufferImageView(bool& hasStencil);
+	VKRObjectTextureView* ColorView(uint32 index);
+	VKRObjectTextureView* DepthView(bool& hasStencil);
 
 	VkDevice m_device;
 	VKRObjectRenderPass* m_vkrObjRenderPass{};
 	VKRObjectFramebuffer* m_vkrObjFramebuffer{};
 
-	VkExtent2D m_extend;
+	VkExtent2D m_extent;
 
 	// for KHR_dynamic_rendering
-	VkRenderingInfoKHR m_vkRenderingInfo;
-	VkRenderingAttachmentInfoKHR m_vkColorAttachments[8];
-	VkRenderingAttachmentInfoKHR m_vkDepthAttachment;
-	VkRenderingAttachmentInfoKHR m_vkStencilAttachment;
+	VkRenderingInfoKHR m_renderingInfo{};
+	VkRenderingAttachmentInfoKHR m_colorAttachments[8]{};
+	VkRenderingAttachmentInfoKHR m_depthAttachment{};
+	VkRenderingAttachmentInfoKHR m_stencilAttachment{};
 
-	std::vector<class PipelineInfo*> m_usedByPipelines; // PipelineInfo objects which use this renderpass/framebuffer
+	std::vector<class PipelineInfo*> m_usedByPipelines;
 };

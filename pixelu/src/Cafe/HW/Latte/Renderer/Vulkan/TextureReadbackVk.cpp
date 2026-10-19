@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanTextureReadback.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/LatteTextureVk.h"
@@ -9,75 +10,66 @@ LatteTextureReadbackInfoVk::LatteTextureReadbackInfoVk(VkDevice device, LatteTex
 	m_rowPitch = m_image_size / textureView->baseTexture->GetMipHeight(m_firstMip);
 }
 
-LatteTextureReadbackInfoVk::~LatteTextureReadbackInfoVk()
-{
-}
+LatteTextureReadbackInfoVk::~LatteTextureReadbackInfoVk() = default;
 
 uint32 LatteTextureReadbackInfoVk::GetImageSize(LatteTextureView* textureView)
 {
-	auto* baseTexture = (LatteTextureVk*)textureView->baseTexture;
-	if (baseTexture->m_isAlternateFormat || baseTexture->IsCompressedFormat())
+	// converted host formats and block compressed data cannot be handed back as guest data
+	auto* texture = (LatteTextureVk*)textureView->baseTexture;
+	if (texture->m_isAlternateFormat || texture->IsCompressedFormat())
 	{
-		cemuLog_logDebug(LogType::Force, "Vulkan does not support readback of texture format 0x{:x}", (uint32)baseTexture->format);
+		cemuLog_logDebug(LogType::Force, "Vulkan does not support readback of texture format 0x{:x}", (uint32)texture->format);
 		return 0;
 	}
 	return LatteTextureReadbackInfo::GetReadbackImageSize(textureView, GetReadbackRowPitch(textureView));
 }
 
-
 void LatteTextureReadbackInfoVk::StartTransfer()
 {
 	cemu_assert(m_textureView);
+	auto* texture = (LatteTextureVk*)m_textureView->baseTexture;
+	cemu_assert_debug(texture->dim != Latte::E_DIM::DIM_3D);
+	texture->GetImageObj()->flagForCurrentCommandBuffer();
 
-	auto* baseTexture = (LatteTextureVk*)m_textureView->baseTexture;
-	baseTexture->GetImageObj()->flagForCurrentCommandBuffer();
+	const uint32 width = texture->GetMipWidth(m_firstMip);
+	const uint32 height = texture->GetMipHeight(m_firstMip);
+	VkBufferImageCopy copy{};
+	copy.bufferOffset = m_offset;
+	copy.bufferRowLength = width;
+	copy.bufferImageHeight = height;
+	copy.imageSubresource.aspectMask = texture->GetImageAspect();
+	copy.imageSubresource.mipLevel = m_firstMip;
+	copy.imageSubresource.baseArrayLayer = m_firstSlice;
+	copy.imageSubresource.layerCount = 1;
+	copy.imageOffset = { 0, 0, 0 };
+	copy.imageExtent = { width, height, 1 };
 
-	cemu_assert_debug(m_textureView->baseTexture->dim != Latte::E_DIM::DIM_3D);
-
-	VkBufferImageCopy region{};
-	region.bufferOffset = m_buffer_offset;
-	region.bufferRowLength = baseTexture->GetMipWidth(m_firstMip);
-	region.bufferImageHeight = baseTexture->GetMipHeight(m_firstMip);
-
-	region.imageSubresource.aspectMask = baseTexture->GetImageAspect();
-	region.imageSubresource.baseArrayLayer = m_firstSlice;
-	region.imageSubresource.layerCount = 1;
-	region.imageSubresource.mipLevel = m_firstMip;
-
-	region.imageOffset = {0,0,0};
-	region.imageExtent = {region.bufferRowLength, region.bufferImageHeight, 1};
-
-	const auto renderer = VulkanRenderer::GetInstance();
+	VulkanRenderer* renderer = VulkanRenderer::GetInstance();
 	renderer->draw_endRenderPass();
 
-	renderer->barrier_image<VulkanRenderer::ANY_TRANSFER | VulkanRenderer::IMAGE_WRITE, VulkanRenderer::TRANSFER_READ>(baseTexture, region.imageSubresource, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-
+	// earlier writes finish, then the image is copied out in transfer source layout
+	renderer->barrier_image<VulkanRenderer::ANY_TRANSFER | VulkanRenderer::IMAGE_WRITE, VulkanRenderer::TRANSFER_READ>(texture, copy.imageSubresource, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 	renderer->barrier_sequentializeTransfer();
-
-	vkCmdCopyImageToBuffer(renderer->getCurrentCommandBuffer(), baseTexture->GetImageObj()->m_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m_buffer, 1, &region);
-
+	vkCmdCopyImageToBuffer(renderer->getCurrentCommandBuffer(), texture->GetImageObj()->m_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m_target, 1, &copy);
 	renderer->barrier_sequentializeTransfer();
+	// later writes to the image wait for the copy, the host reads the buffer only after it
+	renderer->barrier_image<VulkanRenderer::TRANSFER_READ, VulkanRenderer::ANY_TRANSFER | VulkanRenderer::IMAGE_WRITE>(texture, copy.imageSubresource, texture->GetDefaultLayout());
+	renderer->barrier_bufferRange<VulkanRenderer::TRANSFER_WRITE, VulkanRenderer::HOST_READ>(m_target, m_offset, m_image_size);
 
-	renderer->barrier_image<VulkanRenderer::TRANSFER_READ, VulkanRenderer::ANY_TRANSFER | VulkanRenderer::IMAGE_WRITE>(baseTexture, region.imageSubresource, baseTexture->GetDefaultLayout()); // make sure transfer is finished before image is modified
-	renderer->barrier_bufferRange<VulkanRenderer::TRANSFER_WRITE, VulkanRenderer::HOST_READ>(m_buffer, m_buffer_offset, m_image_size); // make sure transfer is finished before result is read
-
-	m_associatedCommandBufferId = renderer->GetCurrentCommandBufferId();
+	m_commandBufferId = renderer->GetCurrentCommandBufferId();
 	m_textureView = nullptr;
 
-	// to decrease latency of readbacks make sure that the current command buffer is submitted soon
+	// get the command buffer submitted early so the result arrives sooner
 	renderer->RequestSubmitSoon();
 	renderer->RequestSubmitOnIdle();
 }
 
 bool LatteTextureReadbackInfoVk::IsFinished()
 {
-	const auto renderer = VulkanRenderer::GetInstance();
-	return renderer->HasCommandBufferFinished(m_associatedCommandBufferId);
+	return VulkanRenderer::GetInstance()->HasCommandBufferFinished(m_commandBufferId);
 }
 
 void LatteTextureReadbackInfoVk::ForceFinish()
 {
-	const auto renderer = VulkanRenderer::GetInstance();
-	renderer->WaitCommandBufferFinished(m_associatedCommandBufferId);
+	VulkanRenderer::GetInstance()->WaitCommandBufferFinished(m_commandBufferId);
 }
-

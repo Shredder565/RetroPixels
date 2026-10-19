@@ -1,240 +1,199 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanAPI.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/CachedFBOVk.h"
 
-void CachedFBOVk::CreateRenderPass()
+namespace
 {
-	VKRObjectRenderPass::AttachmentInfo_t attachmentInfo;
-
-	for (int i = 0; i < 8; ++i)
+	// attachment that is neither loaded nor stored; filled in when the slot is used
+	VkRenderingAttachmentInfoKHR UnusedAttachment()
 	{
-		auto& buffer = colorBuffer[i];
-		auto textureViewVk = (LatteTextureViewVk*)buffer.texture;
-		if (!textureViewVk)
-		{
-			attachmentInfo.colorAttachment[i].viewObj = nullptr;
+		VkRenderingAttachmentInfoKHR a{};
+		a.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
+		a.imageView = VK_NULL_HANDLE;
+		a.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+		a.resolveMode = VK_RESOLVE_MODE_NONE;
+		a.resolveImageView = VK_NULL_HANDLE;
+		a.resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		a.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		a.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		return a;
+	}
+
+	LatteTextureVk* BaseTextureOf(LatteTextureView* view)
+	{
+		return static_cast<LatteTextureVk*>(view->baseTexture);
+	}
+
+	// increases with every self dependency check, marks the attachments of the FBO being checked
+	uint32 s_checkGeneration = 1;
+}
+
+void CachedFBOVk::BuildRenderPass()
+{
+	VKRObjectRenderPass::AttachmentInfo_t attachments;
+	for (uint32 i = 0; i < 8; i++)
+	{
+		auto& slot = attachments.colorAttachment[i];
+		slot.viewObj = nullptr;
+		auto* view = (LatteTextureViewVk*)colorBuffer[i].texture;
+		if (!view)
 			continue;
-		}
-		// setup color attachment
-		auto viewObj = textureViewVk->GetViewRGBA();
-		attachmentInfo.colorAttachment[i].viewObj = viewObj;
-		attachmentInfo.colorAttachment[i].format = textureViewVk->GetFormat();
+		slot.viewObj = view->GetViewRGBA();
+		slot.format = view->GetFormat();
 	}
 
-	// setup depth attachment
-	if (depthBuffer.texture)
+	auto& depth = attachments.depthAttachment;
+	depth.viewObj = nullptr;
+	if (auto* view = static_cast<LatteTextureViewVk*>(depthBuffer.texture))
 	{
-		LatteTextureViewVk* depthTexVk = static_cast<LatteTextureViewVk*>(depthBuffer.texture);
-		auto depthBufferViewObj = depthTexVk->GetViewRGBA();
-		attachmentInfo.depthAttachment.viewObj = depthBufferViewObj;
-		attachmentInfo.depthAttachment.format = depthTexVk->GetFormat();
-		attachmentInfo.depthAttachment.hasStencil = depthTexVk->baseTexture->hasStencil;
+		depth.viewObj = view->GetViewRGBA();
+		depth.format = view->GetFormat();
+		depth.hasStencil = view->baseTexture->hasStencil;
 	}
-	else
-	{
-		// no depth attachment
-		attachmentInfo.depthAttachment.viewObj = nullptr;
-	}
-
-	m_vkrObjRenderPass = new VKRObjectRenderPass(attachmentInfo);
+	m_vkrObjRenderPass = new VKRObjectRenderPass(attachments);
 }
 
 CachedFBOVk::~CachedFBOVk()
 {
+	// a pipeline unregisters itself when deleted
 	while (!m_usedByPipelines.empty())
-		delete m_usedByPipelines[0];
-	auto vkr = VulkanRenderer::GetInstance();
-	vkr->ReleaseDestructibleObject(m_vkrObjFramebuffer);
+		delete m_usedByPipelines.front();
+	VulkanRenderer* renderer = VulkanRenderer::GetInstance();
+	renderer->ReleaseDestructibleObject(m_vkrObjFramebuffer);
 	m_vkrObjFramebuffer = nullptr;
-	vkr->ReleaseDestructibleObject(m_vkrObjRenderPass);
+	renderer->ReleaseDestructibleObject(m_vkrObjRenderPass);
 	m_vkrObjRenderPass = nullptr;
 }
 
-VKRObjectTextureView* CachedFBOVk::GetColorBufferImageView(uint32 index)
+VKRObjectTextureView* CachedFBOVk::ColorView(uint32 index)
 {
 	cemu_assert(index < 8);
-	auto& cb = colorBuffer[index];
-	auto textureViewVk = (LatteTextureViewVk*)cb.texture;
-	if (!textureViewVk)
-		return nullptr;
-	auto viewDim = textureViewVk->dim;
-	if (viewDim == Latte::E_DIM::DIM_3D)
-		viewDim = Latte::E_DIM::DIM_2D; // bind 3D texture slices as 2D images
-	return textureViewVk->GetViewRGBA();
+	auto* view = (LatteTextureViewVk*)colorBuffer[index].texture;
+	// slices of 3D textures are rendered through their RGBA view as well
+	return view ? view->GetViewRGBA() : nullptr;
 }
 
-VKRObjectTextureView* CachedFBOVk::GetDepthStencilBufferImageView(bool& hasStencil)
+VKRObjectTextureView* CachedFBOVk::DepthView(bool& hasStencil)
 {
 	hasStencil = false;
-	auto textureViewVk = (LatteTextureViewVk*)depthBuffer.texture;
-	if (!textureViewVk)
+	auto* view = (LatteTextureViewVk*)depthBuffer.texture;
+	if (!view)
 		return nullptr;
-	cemu_assert_debug(textureViewVk->numMip == 1);
-	hasStencil = textureViewVk->baseTexture->hasStencil;
-	return textureViewVk->GetViewRGBA();
+	cemu_assert_debug(view->numMip == 1);
+	hasStencil = view->baseTexture->hasStencil;
+	return view->GetViewRGBA();
 }
 
-void CachedFBOVk::CreateFramebuffer()
+void CachedFBOVk::BuildFramebuffer()
 {
-	std::array<VKRObjectTextureView*, 9> imageViews{};
-	int imageViewIndex = 0;
-	for (uint32 i = 0; i < 8; ++i)
+	// colour attachments in slot order without gaps, then depth/stencil
+	std::array<VKRObjectTextureView*, 9> views{};
+	size_t count = 0;
+	for (uint32 i = 0; i < 8; i++)
 	{
-		VKRObjectTextureView* cbView = GetColorBufferImageView(i);
-		if (!cbView)
-			continue;
-		imageViews[imageViewIndex++] = cbView;
+		if (VKRObjectTextureView* v = ColorView(i))
+			views[count++] = v;
 	}
+	bool hasStencil;
+	if (VKRObjectTextureView* v = DepthView(hasStencil))
+		views[count++] = v;
+	cemu_assert_debug(count < 9);
 
-	bool hasStencil = false;
-	VKRObjectTextureView* depthStencilView = GetDepthStencilBufferImageView(hasStencil);
-	if (depthStencilView)
-		imageViews[imageViewIndex++] = depthStencilView;
-
-	cemu_assert_debug(imageViewIndex < 9);
-
-	m_vkrObjFramebuffer = new VKRObjectFramebuffer(m_vkrObjRenderPass, std::span<VKRObjectTextureView*>(imageViews.data(), imageViewIndex), m_size);
-
-	m_extend = { (uint32)m_size.x, (uint32)m_size.y };
+	m_vkrObjFramebuffer = new VKRObjectFramebuffer(m_vkrObjRenderPass, std::span<VKRObjectTextureView*>(views.data(), count), m_size);
+	m_extent = { (uint32)m_size.x, (uint32)m_size.y };
 }
 
-
-void CachedFBOVk::InitDynamicRenderingData()
+void CachedFBOVk::BuildRenderingInfo()
 {
-	// init struct for KHR_dynamic_rendering
-	for (int i = 0; i < 8; ++i)
+	// colour slots keep their index; unused trailing slots are cut off
+	uint32 colorCount = 0;
+	for (uint32 i = 0; i < 8; i++)
 	{
-		m_vkColorAttachments[i].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
-		m_vkColorAttachments[i].pNext = nullptr;
-		m_vkColorAttachments[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-		m_vkColorAttachments[i].resolveMode = VK_RESOLVE_MODE_NONE;
-		m_vkColorAttachments[i].resolveImageView = VK_NULL_HANDLE;
-		m_vkColorAttachments[i].resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-		m_vkColorAttachments[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-		m_vkColorAttachments[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-
-		// ignore clearValue
-
-		VKRObjectTextureView* cbView = GetColorBufferImageView(i);
-
-		auto& buffer = colorBuffer[i];
-		if (!cbView)
-		{
-			m_vkColorAttachments[i].imageView = VK_NULL_HANDLE;
+		VkRenderingAttachmentInfoKHR& a = m_colorAttachments[i];
+		a = UnusedAttachment();
+		a.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+		a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		VKRObjectTextureView* view = ColorView(i);
+		if (!view)
 			continue;
-		}
-		else
-		{
-			m_vkColorAttachments[i].imageLayout = static_cast<LatteTextureVk*>(buffer.texture->baseTexture)->GetDefaultLayout();
-			m_vkColorAttachments[i].imageView = cbView->m_textureImageView;
-		}
+		a.imageView = view->m_textureImageView;
+		a.imageLayout = BaseTextureOf(colorBuffer[i].texture)->GetDefaultLayout();
+		colorCount = i + 1;
 	}
 
-	m_vkRenderingInfo.pColorAttachments = m_vkColorAttachments;
-	m_vkRenderingInfo.colorAttachmentCount = 8;
-	// trim the color attachment list if tail entries are not set
-	while (m_vkRenderingInfo.colorAttachmentCount > 0)
+	m_depthAttachment = UnusedAttachment();
+	m_stencilAttachment = UnusedAttachment();
+	m_renderingInfo.pDepthAttachment = nullptr;
+	m_renderingInfo.pStencilAttachment = nullptr;
+	bool hasStencil;
+	if (VKRObjectTextureView* view = DepthView(hasStencil))
 	{
-		if (m_vkColorAttachments[m_vkRenderingInfo.colorAttachmentCount - 1].imageView)
-			break;
-		m_vkRenderingInfo.colorAttachmentCount--;
-	}
-
-	// initially set both stencil and depth attachment to an empty default
-	m_vkDepthAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
-	m_vkDepthAttachment.pNext = nullptr;
-	m_vkDepthAttachment.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-	m_vkDepthAttachment.resolveMode = VK_RESOLVE_MODE_NONE;
-	m_vkDepthAttachment.resolveImageView = VK_NULL_HANDLE;
-	m_vkDepthAttachment.resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	m_vkDepthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-	m_vkDepthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-
-	m_vkStencilAttachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
-	m_vkStencilAttachment.pNext = nullptr;
-	m_vkStencilAttachment.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-	m_vkStencilAttachment.resolveMode = VK_RESOLVE_MODE_NONE;
-	m_vkStencilAttachment.resolveImageView = VK_NULL_HANDLE;
-	m_vkStencilAttachment.resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	m_vkStencilAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-	m_vkStencilAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-
-	m_vkRenderingInfo.pDepthAttachment = nullptr;
-	m_vkRenderingInfo.pStencilAttachment = nullptr;
-
-	bool hasStencil = false;
-	VKRObjectTextureView* depthStencilView = GetDepthStencilBufferImageView(hasStencil);
-
-	// setup depth and stencil attachment
-	if (depthStencilView)
-	{
-		auto depthTexVk = static_cast<LatteTextureVk*>(depthBuffer.texture->baseTexture);
-		m_vkDepthAttachment.imageLayout = depthTexVk->GetDefaultLayout();
-		m_vkStencilAttachment.imageLayout = depthTexVk->GetDefaultLayout();
-		m_vkDepthAttachment.imageView = depthStencilView->m_textureImageView;
-		m_vkDepthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-		m_vkDepthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-		m_vkRenderingInfo.pDepthAttachment = &m_vkDepthAttachment;
+		const VkImageLayout layout = BaseTextureOf(depthBuffer.texture)->GetDefaultLayout();
+		m_depthAttachment.imageView = view->m_textureImageView;
+		m_depthAttachment.imageLayout = layout;
+		m_depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+		m_depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		m_renderingInfo.pDepthAttachment = &m_depthAttachment;
+		m_stencilAttachment.imageLayout = layout;
 		if (hasStencil)
 		{
-			m_vkStencilAttachment.imageView = depthStencilView->m_textureImageView;
-			m_vkStencilAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-			m_vkStencilAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-			m_vkRenderingInfo.pStencilAttachment = &m_vkStencilAttachment;
+			m_stencilAttachment.imageView = view->m_textureImageView;
+			m_stencilAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+			m_stencilAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+			m_renderingInfo.pStencilAttachment = &m_stencilAttachment;
 		}
 	}
 
-	m_vkRenderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO_KHR;
-	m_vkRenderingInfo.pNext = nullptr;
-	m_vkRenderingInfo.flags = 0;
-	m_vkRenderingInfo.renderArea.offset = { 0, 0 };
-	m_vkRenderingInfo.renderArea.extent = m_extend;
-	m_vkRenderingInfo.viewMask = 0; // multiview disabled
-	m_vkRenderingInfo.layerCount = 1;
+	m_renderingInfo.sType = VK_STRUCTURE_TYPE_RENDERING_INFO_KHR;
+	m_renderingInfo.pNext = nullptr;
+	m_renderingInfo.flags = 0;
+	m_renderingInfo.renderArea.offset = { 0, 0 };
+	m_renderingInfo.renderArea.extent = m_extent;
+	m_renderingInfo.layerCount = 1;
+	m_renderingInfo.viewMask = 0;
+	m_renderingInfo.colorAttachmentCount = colorCount;
+	m_renderingInfo.pColorAttachments = m_colorAttachments;
 }
-
-static uint32 s_selfDependencyCheckIndex = 1;
 
 CachedFBOVk::RendertargetSelfDependencyMask CachedFBOVk::CheckForSelfDependency(VkDescriptorSetInfo* vsDS, VkDescriptorSetInfo* gsDS, VkDescriptorSetInfo* psDS) const
 {
-	s_selfDependencyCheckIndex++;
-	const uint32 curColIndex = s_selfDependencyCheckIndex;
-	for (auto& colorAttachment : colorBuffer)
+	// tag every attachment's texture with this check's generation and the aspects written
+	const uint32 generation = ++s_checkGeneration;
+	for (const auto& cb : colorBuffer)
 	{
-		if (colorAttachment.texture)
-		{
-			LatteTextureVk* vkTex = static_cast<LatteTextureVk*>(colorAttachment.texture->baseTexture);
-			vkTex->m_selfDependencyCheckIndex = curColIndex;
-			vkTex->m_selfDependencyCheckAspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-		}
+		if (!cb.texture)
+			continue;
+		LatteTextureVk* tex = BaseTextureOf(cb.texture);
+		tex->m_selfDependencyCheckIndex = generation;
+		tex->m_selfDependencyCheckAspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 	}
 	if (depthBuffer.texture)
 	{
-		LatteTextureVk* vkTex = static_cast<LatteTextureVk*>(depthBuffer.texture->baseTexture);
-		vkTex->m_selfDependencyCheckIndex = curColIndex;
-		vkTex->m_selfDependencyCheckAspectMask = depthBuffer.hasStencil ? (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT): VK_IMAGE_ASPECT_DEPTH_BIT;
+		LatteTextureVk* tex = BaseTextureOf(depthBuffer.texture);
+		tex->m_selfDependencyCheckIndex = generation;
+		tex->m_selfDependencyCheckAspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | (depthBuffer.hasStencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
 	}
 
-	auto getSelfDependencyMask = [curColIndex](VkDescriptorSetInfo* ds) -> VkImageAspectFlags
-	{
-		VkImageAspectFlags aspectMask = 0;
-		if (!ds)
-			return aspectMask;
-		for (auto& itr : ds->list_fboCandidates)
+	// then look for tagged textures among the sampled ones
+	auto sampledAttachmentAspects = [generation](VkDescriptorSetInfo* ds) -> VkImageAspectFlags {
+		VkImageAspectFlags aspects = 0;
+		if (ds)
 		{
-			if (itr->m_selfDependencyCheckIndex == curColIndex)
-				aspectMask |= itr->m_selfDependencyCheckAspectMask;
+			for (LatteTextureVk* tex : ds->list_fboCandidates)
+			{
+				if (tex->m_selfDependencyCheckIndex == generation)
+					aspects |= tex->m_selfDependencyCheckAspectMask;
+			}
 		}
-		return aspectMask;
+		return aspects;
 	};
+	const VkImageAspectFlags fromVertex = sampledAttachmentAspects(vsDS);
+	const VkImageAspectFlags fromGeometry = sampledAttachmentAspects(gsDS);
+	const VkImageAspectFlags fromPixel = sampledAttachmentAspects(psDS);
 
-	RendertargetSelfDependencyMask selfDepInfo{};
-	VkImageAspectFlags vertexAspectFlags = getSelfDependencyMask(vsDS);
-	VkImageAspectFlags geometryAspectFlags = getSelfDependencyMask(gsDS);
-	VkImageAspectFlags pixelAspectFlags = getSelfDependencyMask(psDS);
-	selfDepInfo.aspectMaskFlags = vertexAspectFlags | geometryAspectFlags | pixelAspectFlags;
-	selfDepInfo.hasNonPixelSelfDependency = (vertexAspectFlags | geometryAspectFlags) != 0;
-	return selfDepInfo;
+	RendertargetSelfDependencyMask result{};
+	result.aspectMaskFlags = fromVertex | fromGeometry | fromPixel;
+	result.hasNonPixelSelfDependency = (fromVertex | fromGeometry) != 0;
+	return result;
 }

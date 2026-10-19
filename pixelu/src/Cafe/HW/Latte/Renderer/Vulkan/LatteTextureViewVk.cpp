@@ -1,254 +1,227 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/HW/Latte/Renderer/Vulkan/LatteTextureViewVk.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/LatteTextureVk.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanAPI.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h"
 #include "Cafe/HW/Latte/Core/LattePerformanceMonitor.h"
 
-uint32 LatteTextureVk_AdjustTextureCompSel(Latte::E_GX2SURFFMT format, uint32 compSel)
+namespace
 {
-	switch (format)
+	// Some guest formats store their channels in a different place than the host format they are
+	// mapped to; the sampler's component selects (0-3 = RGBA, 4/5 = 0/1) are remapped to compensate.
+	uint32 RemapComponentSelect(Latte::E_GX2SURFFMT format, uint32 sel)
 	{
-	case Latte::E_GX2SURFFMT::R8_UNORM: // R8 is replicated on all channels (while OpenGL would return 1.0 for BGA instead)
-	case Latte::E_GX2SURFFMT::R8_SNORM: // probably the same as _UNORM, but needs testing
-		if (compSel >= 1 && compSel <= 3)
-			compSel = 0;
-		break;
-	case Latte::E_GX2SURFFMT::A1_B5_G5_R5_UNORM: // order of components is reversed (RGBA -> ABGR)
-		if (compSel >= 0 && compSel <= 3)
-			compSel = 3 - compSel;
-		break;
-	case Latte::E_GX2SURFFMT::BC4_UNORM:
-	case Latte::E_GX2SURFFMT::BC4_SNORM:
-		if (compSel >= 1 && compSel <= 3)
-			compSel = 0;
-		break;
-	case Latte::E_GX2SURFFMT::BC5_UNORM:
-	case Latte::E_GX2SURFFMT::BC5_SNORM:
-		// RG maps to RG
-		// B maps to ?
-		// A maps to G (guessed)
-		if (compSel == 3)
-			compSel = 1; // read Alpha as Green
-		break;
-	case Latte::E_GX2SURFFMT::A2_B10_G10_R10_UNORM:
-		// reverse components (Wii U: ABGR, OpenGL: RGBA)
-		// used in Resident Evil Revelations
-		if (compSel >= 0 && compSel <= 3)
-			compSel = 3 - compSel;
-		break;
-	case Latte::E_GX2SURFFMT::X24_G8_UINT:
-		// map everything to alpha?
-		if (compSel >= 0 && compSel <= 3)
-			compSel = 3;
-		break;
-	case Latte::E_GX2SURFFMT::R4_G4_UNORM:
-		// red and green swapped
-		if (compSel == 0)
-			compSel = 1;
-		else if (compSel == 1)
-			compSel = 0;
-		break;
-	default:
-		break;
+		using Fmt = Latte::E_GX2SURFFMT;
+		const bool isChannel = sel <= 3;
+		switch (format)
+		{
+		case Fmt::R8_UNORM:
+		case Fmt::R8_SNORM:
+		case Fmt::BC4_UNORM:
+		case Fmt::BC4_SNORM:
+			// single channel formats return red in every channel
+			return (sel >= 1 && sel <= 3) ? 0 : sel;
+		case Fmt::A1_B5_G5_R5_UNORM:
+		case Fmt::A2_B10_G10_R10_UNORM:
+			// channel order is reversed relative to the host format
+			return isChannel ? 3 - sel : sel;
+		case Fmt::BC5_UNORM:
+		case Fmt::BC5_SNORM:
+			// two channel format, alpha reads green
+			return sel == 3 ? 1 : sel;
+		case Fmt::X24_G8_UINT:
+			// only the stencil part is meaningful, it lives in alpha
+			return isChannel ? 3 : sel;
+		case Fmt::R4_G4_UNORM:
+			// red and green trade places
+			if (sel == 0)
+				return 1;
+			if (sel == 1)
+				return 0;
+			return sel;
+		default:
+			return sel;
+		}
 	}
-	return compSel;
+
+	VkImageViewType ViewTypeOf(Latte::E_DIM dim)
+	{
+		switch (dim)
+		{
+		case Latte::E_DIM::DIM_1D:
+			return VK_IMAGE_VIEW_TYPE_1D;
+		case Latte::E_DIM::DIM_2D:
+		case Latte::E_DIM::DIM_2D_MSAA:
+			return VK_IMAGE_VIEW_TYPE_2D;
+		case Latte::E_DIM::DIM_2D_ARRAY:
+			return VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+		case Latte::E_DIM::DIM_3D:
+			return VK_IMAGE_VIEW_TYPE_3D;
+		case Latte::E_DIM::DIM_CUBEMAP:
+			return VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
+		default:
+			cemu_assert_unimplemented();
+			return VK_IMAGE_VIEW_TYPE_2D;
+		}
+	}
+
+	// the 3-bit component select of the sampler word, 6 and 7 behave like 4 (zero)
+	constexpr VkComponentSwizzle s_componentSources[8] = {
+		VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A,
+		VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ONE, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO
+	};
+
+	constexpr uint32 kSwizzleMask = 0x0FFF0000; // the four component selects of SQ_TEX_RESOURCE word 4
+	constexpr uint32 kSwizzleRGBA = 0x06880000; // 0,1,2,3
 }
 
 LatteTextureViewVk::LatteTextureViewVk(VkDevice device, LatteTextureVk* texture, Latte::E_DIM dim, Latte::E_GX2SURFFMT format, sint32 firstMip, sint32 mipCount, sint32 firstSlice, sint32 sliceCount)
 	: LatteTextureView(texture, firstMip, mipCount, firstSlice, sliceCount, dim, format), m_device(device)
 {
-	if(texture->overwriteInfo.hasFormatOverwrite)
+	const bool sameAsTexture = dim == texture->dim && format == texture->format;
+	if (texture->overwriteInfo.hasFormatOverwrite)
 	{
-		cemu_assert_debug(format == texture->format); // if format overwrite is used, the texture is no longer taking part in aliasing and the format of any view has to match
+		// textures with an overridden format do not alias, so their views keep the texture's format
+		cemu_assert_debug(format == texture->format);
 		m_format = texture->GetFormat();
 	}
-	else if (dim != texture->dim || format != texture->format)
+	else if (sameAsTexture)
 	{
-		VulkanRenderer::FormatInfoVK texFormatInfo;
-		VulkanRenderer::GetInstance()->GetTextureFormatInfoVK(format, texture->isDepth, dim, 0, 0, &texFormatInfo);
-		m_format = texFormatInfo.vkImageFormat;
+		m_format = texture->GetFormat();
 	}
 	else
-		m_format = texture->GetFormat();
+	{
+		VulkanRenderer::FormatInfoVK info;
+		VulkanRenderer::GetInstance()->GetTextureFormatInfoVK(format, texture->isDepth, dim, 0, 0, &info);
+		m_format = info.vkImageFormat;
+	}
 	m_uniqueId = VulkanRenderer::GetInstance()->GenUniqueId();
 }
 
 LatteTextureViewVk::~LatteTextureViewVk()
 {
-	while (!list_descriptorSets.empty())
-		delete list_descriptorSets[0];
+	// a descriptor set info unregisters itself when deleted
+	while (!m_descriptorSets.empty())
+		delete m_descriptorSets.front();
 
-	if (m_smallCacheView0)
-		VulkanRenderer::GetInstance()->ReleaseDestructibleObject(m_smallCacheView0);
-	if (m_smallCacheView1)
-		VulkanRenderer::GetInstance()->ReleaseDestructibleObject(m_smallCacheView1);
-
-	if (m_fallbackCache)
+	VulkanRenderer* renderer = VulkanRenderer::GetInstance();
+	for (CachedView& slot : m_inlineViews)
 	{
-		for (auto& itr : *m_fallbackCache)
-			VulkanRenderer::GetInstance()->ReleaseDestructibleObject(itr.second);
-		delete m_fallbackCache;
-		m_fallbackCache = nullptr;
+		if (slot.view)
+			renderer->ReleaseDestructibleObject(slot.view);
+	}
+	if (m_moreViews)
+	{
+		for (auto& entry : *m_moreViews)
+			renderer->ReleaseDestructibleObject(entry.second);
+		delete m_moreViews;
+		m_moreViews = nullptr;
 	}
 }
 
-VKRObjectTextureView* LatteTextureViewVk::CreateView(uint32 gpuSamplerSwizzle)
+VKRObjectTextureView* LatteTextureViewVk::MakeImageView(uint32 swizzle)
 {
-	uint32 compSelR = (gpuSamplerSwizzle >> 16) & 0x7;
-	uint32 compSelG = (gpuSamplerSwizzle >> 19) & 0x7;
-	uint32 compSelB = (gpuSamplerSwizzle >> 22) & 0x7;
-	uint32 compSelA = (gpuSamplerSwizzle >> 25) & 0x7;
-	compSelR = LatteTextureVk_AdjustTextureCompSel(format, compSelR);
-	compSelG = LatteTextureVk_AdjustTextureCompSel(format, compSelG);
-	compSelB = LatteTextureVk_AdjustTextureCompSel(format, compSelB);
-	compSelA = LatteTextureVk_AdjustTextureCompSel(format, compSelA);
+	LatteTextureVk* image = GetBaseImage();
 
-	VkImageViewCreateInfo viewInfo{};
-	viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-	viewInfo.image = GetBaseImage()->GetImageObj()->m_image;
-	viewInfo.viewType = GetImageViewTypeFromGX2Dim(dim);
-	viewInfo.format = m_format;
-	viewInfo.subresourceRange.aspectMask = GetBaseImage()->GetImageAspect();
-	if (viewInfo.subresourceRange.aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT)
-		viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT; // make sure stencil is never set, we only support sampling depth for now
-	viewInfo.subresourceRange.baseMipLevel = firstMip;
-	viewInfo.subresourceRange.levelCount = this->numMip;
-	if (viewInfo.viewType == VK_IMAGE_VIEW_TYPE_3D && baseTexture->Is3DTexture())
+	VkImageViewCreateInfo info{};
+	info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+	info.image = image->GetImageObj()->m_image;
+	info.viewType = ViewTypeOf(dim);
+	info.format = m_format;
+
+	VkComponentSwizzle* targets[4] = { &info.components.r, &info.components.g, &info.components.b, &info.components.a };
+	for (uint32 c = 0; c < 4; c++)
 	{
+		const uint32 sel = (swizzle >> (16 + c * 3)) & 7;
+		*targets[c] = s_componentSources[RemapComponentSelect(format, sel)];
+	}
+
+	// depth/stencil images are only sampled for depth
+	VkImageAspectFlags aspect = image->GetImageAspect();
+	if (aspect & VK_IMAGE_ASPECT_DEPTH_BIT)
+		aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+	info.subresourceRange.aspectMask = aspect;
+	info.subresourceRange.baseMipLevel = firstMip;
+	info.subresourceRange.levelCount = numMip;
+	if (info.viewType == VK_IMAGE_VIEW_TYPE_3D && baseTexture->Is3DTexture())
+	{
+		// a 3D view of a 3D image always covers all slices
 		cemu_assert_debug(firstMip == 0);
-		cemu_assert_debug(this->numSlice == baseTexture->depth);
-		viewInfo.subresourceRange.baseArrayLayer = 0;
-		viewInfo.subresourceRange.layerCount = 1;
+		cemu_assert_debug(numSlice == baseTexture->depth);
+		info.subresourceRange.baseArrayLayer = 0;
+		info.subresourceRange.layerCount = 1;
 	}
 	else
 	{
-		viewInfo.subresourceRange.baseArrayLayer = firstSlice;
-		viewInfo.subresourceRange.layerCount = this->numSlice;
+		info.subresourceRange.baseArrayLayer = firstSlice;
+		info.subresourceRange.layerCount = numSlice;
 	}
 
-	static const VkComponentSwizzle swizzle[] =
-	{
-		VK_COMPONENT_SWIZZLE_R,
-		VK_COMPONENT_SWIZZLE_G,
-		VK_COMPONENT_SWIZZLE_B,
-		VK_COMPONENT_SWIZZLE_A,
-		VK_COMPONENT_SWIZZLE_ZERO,
-		VK_COMPONENT_SWIZZLE_ONE,
-		VK_COMPONENT_SWIZZLE_ZERO,
-		VK_COMPONENT_SWIZZLE_ZERO
-	};
-
-	viewInfo.components.r = swizzle[compSelR];
-	viewInfo.components.g = swizzle[compSelG];
-	viewInfo.components.b = swizzle[compSelB];
-	viewInfo.components.a = swizzle[compSelA];
-
-	VkImageView view;
-	if (vkCreateImageView(m_device, &viewInfo, nullptr, &view) != VK_SUCCESS)
+	VkImageView handle;
+	if (vkCreateImageView(m_device, &info, nullptr, &handle) != VK_SUCCESS)
 		throw std::runtime_error("failed to create texture image view!");
-
-	return new VKRObjectTextureView(GetBaseImage()->GetImageObj(), view);
+	return new VKRObjectTextureView(image->GetImageObj(), handle);
 }
 
 VKRObjectTextureView* LatteTextureViewVk::GetViewRGBA()
-{ 
-	return GetSamplerView(0x06880000); // RGBA swizzle
+{
+	return GetSamplerView(kSwizzleRGBA);
 }
 
 VKRObjectTextureView* LatteTextureViewVk::GetSamplerView(uint32 gpuSamplerSwizzle)
 {
-	gpuSamplerSwizzle &= 0x0FFF0000;
-	// look up view in cache
-	// intentionally using unrolled code here instead of a loop for a small performance gain
-	if (m_smallCacheSwizzle0 == gpuSamplerSwizzle)
-		return m_smallCacheView0;
-	if (m_smallCacheSwizzle1 == gpuSamplerSwizzle)
-		return m_smallCacheView1;
-	auto fallbackCache = m_fallbackCache;
-	if (m_fallbackCache)
+	const uint32 swizzle = gpuSamplerSwizzle & kSwizzleMask;
+	if (m_inlineViews[0].swizzle == swizzle)
+		return m_inlineViews[0].view;
+	if (m_inlineViews[1].swizzle == swizzle)
+		return m_inlineViews[1].view;
+	if (m_moreViews)
 	{
-		const auto it = fallbackCache->find(gpuSamplerSwizzle);
-		if (it != fallbackCache->cend())
+		auto it = m_moreViews->find(swizzle);
+		if (it != m_moreViews->end())
 			return it->second;
 	}
-	// not cached, create new view and store in cache
-	auto viewObj = CreateView(gpuSamplerSwizzle);
-	if (m_smallCacheSwizzle0 == CACHE_EMPTY_ENTRY)
+
+	VKRObjectTextureView* view = MakeImageView(swizzle);
+	for (CachedView& slot : m_inlineViews)
 	{
-		m_smallCacheSwizzle0 = gpuSamplerSwizzle;
-		m_smallCacheView0 = viewObj;
+		if (slot.swizzle == kFreeSlot)
+		{
+			slot.swizzle = swizzle;
+			slot.view = view;
+			return view;
+		}
 	}
-	else if (m_smallCacheSwizzle1 == CACHE_EMPTY_ENTRY)
-	{
-		m_smallCacheSwizzle1 = gpuSamplerSwizzle;
-		m_smallCacheView1 = viewObj;
-	}
-	else
-	{
-		if (!m_fallbackCache)
-			m_fallbackCache = new std::unordered_map<uint32, VKRObjectTextureView*>();
-		m_fallbackCache->insert_or_assign(gpuSamplerSwizzle, viewObj);
-	}
-	return viewObj;
+	if (!m_moreViews)
+		m_moreViews = new std::unordered_map<uint32, VKRObjectTextureView*>();
+	(*m_moreViews)[swizzle] = view;
+	return view;
 }
 
 VkSampler LatteTextureViewVk::GetDefaultTextureSampler(bool useLinearTexFilter)
 {
+	// the RGBA image view owns the two default samplers (nearest, linear)
 	VkSampler& sampler = GetViewRGBA()->m_textureDefaultSampler[useLinearTexFilter ? 1 : 0];
-
 	if (sampler != VK_NULL_HANDLE)
 		return sampler;
 
-	VkSamplerCreateInfo samplerInfo{};
-	samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-
-	// emulate OpenGL minFilters
-	// see note under: https://docs.vulkan.org/spec/latest/chapters/samplers.html#VkSamplerCreateInfo
-	// if maxLod = 0 then magnification is always performed
-	samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-	samplerInfo.minLod = 0.0f;
-	samplerInfo.maxLod = 0.25f;
-
-	if (useLinearTexFilter)
-	{
-		samplerInfo.magFilter = VK_FILTER_LINEAR;
-		samplerInfo.minFilter = VK_FILTER_LINEAR;
-	}
-	else
-	{
-		samplerInfo.magFilter = VK_FILTER_NEAREST;
-		samplerInfo.minFilter = VK_FILTER_NEAREST;
-	}
-	samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-	samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-	samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-
-	if (vkCreateSampler(m_device, &samplerInfo, nullptr, &sampler) != VK_SUCCESS)
+	const VkFilter filter = useLinearTexFilter ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+	VkSamplerCreateInfo info{};
+	info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+	info.magFilter = filter;
+	info.minFilter = filter;
+	// a max LOD of 0.25 keeps sampling on mip 0 while magnification/minification still follow
+	// the LOD, which is how OpenGL's non-mipmapped min filters behave
+	info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+	info.minLod = 0.0f;
+	info.maxLod = 0.25f;
+	info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+	if (vkCreateSampler(m_device, &info, nullptr, &sampler) != VK_SUCCESS)
 	{
 		cemuLog_log(LogType::Force, "Failed to create default sampler");
 		throw std::runtime_error("failed to create texture sampler!");
 	}
-
 	return sampler;
-}
-
-VkImageViewType LatteTextureViewVk::GetImageViewTypeFromGX2Dim(Latte::E_DIM dim)
-{
-	switch (dim)
-	{
-	case Latte::E_DIM::DIM_1D:
-		return VK_IMAGE_VIEW_TYPE_1D;
-	case Latte::E_DIM::DIM_2D:
-	case Latte::E_DIM::DIM_2D_MSAA:
-		return VK_IMAGE_VIEW_TYPE_2D;
-	case Latte::E_DIM::DIM_2D_ARRAY:
-		return VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-	case Latte::E_DIM::DIM_3D:
-		return VK_IMAGE_VIEW_TYPE_3D;
-	case Latte::E_DIM::DIM_CUBEMAP:
-		return VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
-	default:
-		cemu_assert_unimplemented();
-	}
-	return VK_IMAGE_VIEW_TYPE_2D;
 }
