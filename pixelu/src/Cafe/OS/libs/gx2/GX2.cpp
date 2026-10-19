@@ -1,153 +1,226 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "Cafe/HW/Espresso/PPCCallback.h"
-#include "GX2.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
+#include "Cafe/HW/Latte/Core/LattePM4.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Time.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
 #include "Cafe/CafeSystem.h"
-#include "Cafe/HW/Latte/Core/LattePM4.h"
 #include "input/InputManager.h"
 
+#include "GX2.h"
 #include "GX2_Command.h"
-#include "GX2_State.h"
 #include "GX2_Memory.h"
-#include "GX2_Event.h"
-#include "GX2_Shader.h"
-#include "GX2_Blit.h"
-#include "GX2_Draw.h"
-#include "GX2_Query.h"
-#include "GX2_Misc.h"
+#include "GX2_Resource.h"
 #include "GX2_Surface.h"
 #include "GX2_Surface_Copy.h"
 #include "GX2_Texture.h"
+#include "GX2_State.h"
+#include "GX2_Shader.h"
+#include "GX2_Event.h"
+#include "GX2_Blit.h"
+#include "GX2_Draw.h"
+#include "GX2_Streamout.h"
+#include "GX2_Query.h"
+#include "GX2_Misc.h"
 
-#include <cinttypes>
+// Scan buffers (the images that end up on the TV and the GamePad), presenting and
+// the gx2.rpl module itself.
+//
+// Presenting does not copy anything here: the PM4 stream carries HLE packets that
+// Latte's command processor turns into the actual copy and flip. PixelU's GamePad
+// screen toggle and the recorder hook in at that end, so the packets below have to
+// stay exactly as they are.
 
-#define GX2_TV_RENDER_NONE			0
-#define GX2_TV_RENDER_480			1
-#define GX2_TV_RENDER_480_WIDE		2
-#define GX2_TV_RENDER_720			3
-#define GX2_TV_RENDER_720I			4
-#define GX2_TV_RENDER_1080			5
-#define GX2_TV_RENDER_COUNT			6
-
-struct
-{
-	sint32 width;
-	sint32 height;
-}tvScanBufferResolutions[GX2_TV_RENDER_COUNT] = {
-0,0,
-640,480,
-854,480,
-1280,720,
-1280,720,
-1920,1080
-};
-
+// time of the most recent GX2SwapScanBuffers in OSTime ticks (read by GX2GetSwapStatus)
 uint64 lastSwapTime = 0;
+
+namespace
+{
+	// TV render modes as GX2CalcTVSize gets them
+	enum TVRenderMode : uint32
+	{
+		TV_MODE_NONE = 0,
+		TV_MODE_480 = 1,
+		TV_MODE_480_WIDE = 2,
+		TV_MODE_720 = 3,
+		TV_MODE_720I = 4,
+		TV_MODE_1080 = 5,
+		TV_MODE_COUNT
+	};
+
+	struct ScanSize
+	{
+		uint32 width;
+		uint32 height;
+	};
+
+	constexpr ScanSize kTVScanSize[TV_MODE_COUNT] =
+	{
+		{ 0, 0 },       // NONE
+		{ 640, 480 },   // 480
+		{ 854, 480 },   // 480 wide
+		{ 1280, 720 },  // 720
+		{ 1280, 720 },  // 720 interlaced
+		{ 1920, 1080 }, // 1080
+	};
+
+	constexpr ScanSize kDRCScanSize = { 854, 480 };
+
+	// titles that need the GPU to be idle before every swap
+	bool SwapNeedsDrawDone(uint64 titleId)
+	{
+		switch (titleId)
+		{
+		case 0x00050000101DF500ull: // Pokken Tournament
+		case 0x00050000101C5800ull:
+		case 0x00050000101DF400ull:
+			return true;
+		default:
+			return false;
+		}
+	}
+
+	uint32 FlipRequestCount()
+	{
+		return _swapEndianU32(LatteGPUState.sharedArea->flipRequestCountBE);
+	}
+
+	uint32 FlipExecuteCount()
+	{
+		return _swapEndianU32(LatteGPUState.sharedArea->flipExecuteCountBE);
+	}
+
+	// the CPU may run at most this many swaps ahead of the GPU
+	constexpr sint32 kMaxFlipsInFlight = 5;
+
+	// a linear, single slice 2D colour buffer of the given size, sized like the console does it
+	void DescribeScanBuffer(GX2ColorBuffer& cb, uint32 width, uint32 height, Latte::E_GX2SURFFMT format)
+	{
+		GX2Surface& s = cb.surface;
+		s.resFlag = GX2_RESFLAG_USAGE_TEXTURE | GX2_RESFLAG_USAGE_COLOR_BUFFER;
+		s.width = width;
+		s.height = height;
+		s.depth = 1;
+		s.numLevels = 1;
+		s.dim = Latte::E_DIM::DIM_2D;
+		s.format = format;
+		s.tileMode = Latte::E_GX2TILEMODE::TM_LINEAR_GENERAL;
+		s.swizzle = 0;
+		s.aa = 0;
+		s.mipPtr = MPTR_NULL;
+		cb.viewMip = 0;
+		cb.viewFirstSlice = 0;
+		cb.viewNumSlices = 1;
+		GX2::GX2CalcSurfaceSizeAndAlignment(&s);
+		// the scan buffer flag is only added once the size is known
+		s.resFlag = GX2_RESFLAG_USAGE_TEXTURE | GX2_RESFLAG_USAGE_COLOR_BUFFER | GX2_RESFLAG_USAGE_SCAN_BUFFER;
+	}
+
+	// bytes needed for 'bufferCount' scan buffers that each start aligned; the last one needs no padding after it
+	// 'fieldCount' is 2 for interlaced output, which needs room for both fields
+	uint32 ScanBufferSetSize(uint32 width, uint32 height, Latte::E_GX2SURFFMT format, uint32 bufferCount, uint32 fieldCount)
+	{
+		GX2ColorBuffer cb;
+		memset(&cb, 0, sizeof(cb));
+		DescribeScanBuffer(cb, width, height, format);
+		const uint32 imageSize = cb.surface.imageSize;
+		const uint32 alignment = cb.surface.alignment;
+		const uint32 padding = (alignment - imageSize % alignment) % alignment;
+		const uint32 stride = imageSize + padding;
+		return stride * bufferCount * fieldCount - padding;
+	}
+}
 
 void gx2Export_GX2SwapScanBuffers(PPCInterpreter_t* hCPU)
 {
 	cemuLog_log(LogType::GX2, "GX2SwapScanBuffers()");
 
-	bool isPokken = false;
-
-	uint64 titleId = CafeSystem::GetForegroundTitleId();
-	if (titleId == 0x00050000101DF500ull || titleId == 0x00050000101C5800ull || titleId == 0x00050000101DF400ull)
-		isPokken = true;
-
-	if (isPokken)
+	if (SwapNeedsDrawDone(CafeSystem::GetForegroundTitleId()))
 		GX2::GX2DrawDone();
 
-	GX2::GX2ReserveCmdSpace(5+2);
+	// two 2-word packets (plus headroom so the pair is never split)
+	GX2::GX2ReserveCmdSpace(7);
 
-	uint64 tick64 = PPCInterpreter_getMainCoreCycleCounter() / 20ULL;
-	lastSwapTime = tick64;
-	// count flip request
-	// is this updated via a PM4 MEM_WRITE operation?
+	lastSwapTime = PPCInterpreter_getMainCoreCycleCounter() / 20ULL;
 
-	// Orochi Warriors seems to call GX2SwapScanBuffers on arbitrary threads/cores. The PM4 commands should go through to the GPU as long as there is no active display list and no other core is submitting commands simultaneously
-	// right now, we work around this by avoiding the infinite loop below (request counter incremented, but PM4 not sent)
-	uint32 coreIndex = coreinit::OSGetCoreId();
-	if (GX2::sGX2MainCoreIndex == coreIndex)
-		LatteGPUState.sharedArea->flipRequestCountBE = _swapEndianU32(_swapEndianU32(LatteGPUState.sharedArea->flipRequestCountBE) + 1);
+	// Some titles (Orochi Warriors) present from other cores. Their packets still reach the GPU, but only
+	// the core that owns the command buffer counts the request, otherwise the wait below would never end.
+	if ((uint32)coreinit::OSGetCoreId() == GX2::sGX2MainCoreIndex)
+		LatteGPUState.sharedArea->flipRequestCountBE = _swapEndianU32(FlipRequestCount() + 1);
 
 	gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_HLE_REQUEST_SWAP_BUFFERS, 1));
-	gx2WriteGather_submitU32AsBE(0); // reserved
-
-	// swap frames
+	gx2WriteGather_submitU32AsBE(0);
 	gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_HLE_TRIGGER_SCANBUFFER_SWAP, 1));
-	gx2WriteGather_submitU32AsBE(0); // reserved
+	gx2WriteGather_submitU32AsBE(0);
 
-	// wait for flip if the CPU is too far ahead
-	// doing it after swap request is how the actual console does it, but that still causes issues in Pokken
-	while ((sint32)(_swapEndianU32(LatteGPUState.sharedArea->flipRequestCountBE) - _swapEndianU32(LatteGPUState.sharedArea->flipExecuteCountBE)) > 5)
-	{
+	// throttle the CPU when it gets too far ahead (done after queuing the swap, like the console)
+	while ((sint32)(FlipRequestCount() - FlipExecuteCount()) > kMaxFlipsInFlight)
 		GX2::GX2WaitForFlip();
-	}
 
 	osLib_returnFromFunction(hCPU, 0);
 }
 
 void gx2Export_GX2CopyColorBufferToScanBuffer(PPCInterpreter_t* hCPU)
 {
-	cemuLog_log(LogType::GX2, "GX2CopyColorBufferToScanBuffer(0x{:08x},{})", hCPU->gpr[3], hCPU->gpr[4]);
+	const MPTR colorBufferAddr = hCPU->gpr[3];
+	const uint32 scanTarget = hCPU->gpr[4];
+	cemuLog_log(LogType::GX2, "GX2CopyColorBufferToScanBuffer(0x{:08x},{})", colorBufferAddr, scanTarget);
+
 	GX2::GX2ReserveCmdSpace(10);
-
-	// todo: proper implementation
-
-	GX2ColorBuffer* colorBuffer = (GX2ColorBuffer*)memory_getPointerFromVirtualOffset(hCPU->gpr[3]);
-
+	const GX2ColorBuffer* cb = (const GX2ColorBuffer*)memory_getPointerFromVirtualOffset(colorBufferAddr);
+	const GX2Surface& s = cb->surface;
+	// header + 9 words: where the image is, how it is laid out, and which screen it is meant for
 	gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_HLE_COPY_COLORBUFFER_TO_SCANBUFFER, 9));
-	gx2WriteGather_submitU32AsBE(memory_virtualToPhysical(colorBuffer->surface.imagePtr));
-	gx2WriteGather_submitU32AsBE((uint32)colorBuffer->surface.width);
-	gx2WriteGather_submitU32AsBE((uint32)colorBuffer->surface.height);
-	gx2WriteGather_submitU32AsBE((uint32)colorBuffer->surface.pitch);
-	gx2WriteGather_submitU32AsBE((uint32)colorBuffer->surface.tileMode.value());
-	gx2WriteGather_submitU32AsBE((uint32)colorBuffer->surface.swizzle);
-	gx2WriteGather_submitU32AsBE((uint32)colorBuffer->viewFirstSlice);
-	gx2WriteGather_submitU32AsBE((uint32)colorBuffer->surface.format.value());
-	gx2WriteGather_submitU32AsBE(hCPU->gpr[4]);
+	gx2WriteGather_submitU32AsBE(memory_virtualToPhysical(s.imagePtr));
+	gx2WriteGather_submitU32AsBE((uint32)s.width);
+	gx2WriteGather_submitU32AsBE((uint32)s.height);
+	gx2WriteGather_submitU32AsBE((uint32)s.pitch);
+	gx2WriteGather_submitU32AsBE((uint32)s.tileMode.value());
+	gx2WriteGather_submitU32AsBE((uint32)s.swizzle);
+	gx2WriteGather_submitU32AsBE((uint32)cb->viewFirstSlice);
+	gx2WriteGather_submitU32AsBE((uint32)s.format.value());
+	gx2WriteGather_submitU32AsBE(scanTarget);
 
 	osLib_returnFromFunction(hCPU, 0);
 }
 
 void gx2Export_GX2WaitForFreeScanBuffer(PPCInterpreter_t* hCPU)
 {
-	// todo: proper implementation
+	// scan buffers are never busy from the guest's point of view
 	debug_printf("GX2WaitForFreeScanBuffer(): Unimplemented\n");
-
 	osLib_returnFromFunction(hCPU, 0);
 }
 
 void gx2Export_GX2GetCurrentScanBuffer(PPCInterpreter_t* hCPU)
 {
-	// todo: proper implementation
-	uint32 scanTarget = hCPU->gpr[3];
-	GX2ColorBuffer* colorBufferBE = (GX2ColorBuffer*)memory_getPointerFromVirtualOffset(hCPU->gpr[4]);
-	memset(colorBufferBE, 0x00, sizeof(GX2ColorBuffer));
-	colorBufferBE->surface.width = 100;
-	colorBufferBE->surface.height = 100;
-	// note: For now we abuse the tiling aperture memory area as framebuffer pointers
-	if( scanTarget == GX2_SCAN_TARGET_TV )
+	const uint32 scanTarget = hCPU->gpr[3];
+	GX2ColorBuffer* cb = (GX2ColorBuffer*)memory_getPointerFromVirtualOffset(hCPU->gpr[4]);
+	// there is no real scan buffer memory; hand out a small placeholder that points into the tiling aperture range
+	memset(cb, 0, sizeof(GX2ColorBuffer));
+	cb->surface.width = 100;
+	cb->surface.height = 100;
+	switch (scanTarget)
 	{
-		colorBufferBE->surface.imagePtr = MEMORY_TILINGAPERTURE_AREA_ADDR+0x200000;
-	}
-	else if( scanTarget == GX2_SCAN_TARGET_DRC_FIRST )
-	{
-		colorBufferBE->surface.imagePtr = MEMORY_TILINGAPERTURE_AREA_ADDR+0x40000;
+	case GX2_SCAN_TARGET_TV:
+		cb->surface.imagePtr = MEMORY_TILINGAPERTURE_AREA_ADDR + 0x200000;
+		break;
+	case GX2_SCAN_TARGET_DRC_FIRST:
+		cb->surface.imagePtr = MEMORY_TILINGAPERTURE_AREA_ADDR + 0x40000;
+		break;
+	default:
+		break;
 	}
 	osLib_returnFromFunction(hCPU, 0);
 }
 
-void coreinitExport_GX2GetSystemTVScanMode(PPCInterpreter_t* hCPU)
+static void gx2Export_GX2GetSystemTVScanMode(PPCInterpreter_t* hCPU)
 {
-	// 1080p = 7
-	osLib_returnFromFunction(hCPU, 7);
+	osLib_returnFromFunction(hCPU, 7); // 1080p
 }
 
-void coreinitExport_GX2GetSystemTVAspectRatio(PPCInterpreter_t* hCPU)
+static void gx2Export_GX2GetSystemTVAspectRatio(PPCInterpreter_t* hCPU)
 {
 	osLib_returnFromFunction(hCPU, 1); // 16:9
 }
@@ -157,99 +230,45 @@ void gx2Export_GX2TempGetGPUVersion(PPCInterpreter_t* hCPU)
 	osLib_returnFromFunction(hCPU, 2);
 }
 
-void _GX2InitScanBuffer(GX2ColorBuffer* colorBuffer, sint32 width, sint32 height, Latte::E_GX2SURFFMT format)
-{
-	colorBuffer->surface.resFlag = GX2_RESFLAG_USAGE_TEXTURE | GX2_RESFLAG_USAGE_COLOR_BUFFER;
-	colorBuffer->surface.width = width;
-	colorBuffer->surface.height = height;
-	colorBuffer->viewFirstSlice = 0;
-	colorBuffer->viewNumSlices = 1;
-	colorBuffer->viewMip = 0;
-	colorBuffer->surface.numLevels = 1;
-	colorBuffer->surface.dim = Latte::E_DIM::DIM_2D;
-	colorBuffer->surface.swizzle = 0;
-	colorBuffer->surface.depth = 1;
-	colorBuffer->surface.tileMode = Latte::E_GX2TILEMODE::TM_LINEAR_GENERAL;
-	colorBuffer->surface.format = format;
-	colorBuffer->surface.mipPtr = MPTR_NULL;
-	colorBuffer->surface.aa = 0;
-	GX2::GX2CalcSurfaceSizeAndAlignment(&colorBuffer->surface);
-	colorBuffer->surface.resFlag = GX2_RESFLAG_USAGE_TEXTURE | GX2_RESFLAG_USAGE_COLOR_BUFFER | GX2_RESFLAG_USAGE_SCAN_BUFFER;
-}
-
 void gx2Export_GX2CalcTVSize(PPCInterpreter_t* hCPU)
 {
-	uint32 tvRenderMode = hCPU->gpr[3];
-	Latte::E_GX2SURFFMT format = (Latte::E_GX2SURFFMT)hCPU->gpr[4];
-	uint32 bufferingMode = hCPU->gpr[5];
-	uint32 outputSizeMPTR = hCPU->gpr[6];
-	uint32 outputScaleNeededMPTR = hCPU->gpr[7];
+	const uint32 mode = hCPU->gpr[3];
+	const auto format = (Latte::E_GX2SURFFMT)hCPU->gpr[4];
+	const uint32 bufferingMode = hCPU->gpr[5];
+	const MPTR sizeOut = hCPU->gpr[6];
+	const MPTR scaleNeededOut = hCPU->gpr[7];
 
-	cemu_assert(tvRenderMode < GX2_TV_RENDER_COUNT);
+	cemu_assert(mode < TV_MODE_COUNT);
+	if (mode >= TV_MODE_COUNT)
+	{
+		osLib_returnFromFunction(hCPU, 0);
+		return;
+	}
 
-	uint32 width = tvScanBufferResolutions[tvRenderMode].width;
-	uint32 height = tvScanBufferResolutions[tvRenderMode].height;
-	
-	GX2ColorBuffer colorBuffer;
-	memset(&colorBuffer, 0, sizeof(GX2ColorBuffer));
-	_GX2InitScanBuffer(&colorBuffer, width, height, format);
+	// the SD modes always reserve four buffers
+	const uint32 bufferCount = mode < TV_MODE_720 ? 4 : bufferingMode;
+	const uint32 fieldCount = mode == TV_MODE_720I ? 2 : 1;
+	const uint32 size = ScanBufferSetSize(kTVScanSize[mode].width, kTVScanSize[mode].height, format, bufferCount, fieldCount);
 
-	uint32 imageSize = colorBuffer.surface.imageSize;
-	uint32 alignment = colorBuffer.surface.alignment;
-
-	uint32 alignmentPaddingSize = (alignment - (imageSize%alignment)) % alignment;
-
-	uint32 uknMult = 1; // probably for interlaced?
-	if (tvRenderMode == GX2_TV_RENDER_720I)
-		uknMult = 2;
-
-	uint32 adjustedBufferingMode = bufferingMode;
-	if (tvRenderMode < GX2_TV_RENDER_720)
-		adjustedBufferingMode = 4;
-
-	uint32 bufferedImageSize = (imageSize + alignmentPaddingSize) * adjustedBufferingMode;
-	bufferedImageSize = bufferedImageSize * uknMult - alignmentPaddingSize;
-	
-	memory_writeU32(outputSizeMPTR, bufferedImageSize);
-	memory_writeU32(outputScaleNeededMPTR, 0); // todo
+	memory_writeU32(sizeOut, size);
+	memory_writeU32(scaleNeededOut, 0);
 	osLib_returnFromFunction(hCPU, 0);
 }
 
 void gx2Export_GX2CalcDRCSize(PPCInterpreter_t* hCPU)
 {
-
 	ppcDefineParamS32(drcMode, 0);
 	ppcDefineParamU32(format, 1);
 	ppcDefineParamU32(bufferingMode, 2);
-	ppcDefineParamMPTR(sizeMPTR, 3);
-	ppcDefineParamMPTR(scaleNeededMPTR, 4);
+	ppcDefineParamMPTR(sizeOut, 3);
+	ppcDefineParamMPTR(scaleNeededOut, 4);
 
-	uint32 width = 0;
-	uint32 height = 0;
-	if (drcMode > 0)
-	{
-		width = 854;
-		height = 480;
-	}
+	// mode 0 means no GamePad output, which still reports the (empty) buffer size
+	const ScanSize dim = drcMode > 0 ? kDRCScanSize : ScanSize{ 0, 0 };
+	const uint32 size = ScanBufferSetSize(dim.width, dim.height, (Latte::E_GX2SURFFMT)format, bufferingMode, 1);
 
-	GX2ColorBuffer colorBuffer = {};
-	memset(&colorBuffer, 0, sizeof(colorBuffer));
-	_GX2InitScanBuffer(&colorBuffer, width, height, (Latte::E_GX2SURFFMT)format);
-
-	uint32 imageSize = colorBuffer.surface.imageSize;
-	uint32 alignment = colorBuffer.surface.alignment;
-
-	uint32 alignmentPaddingSize = (alignment - (imageSize%alignment)) % alignment;
-
-
-	uint32 adjustedBufferingMode = bufferingMode;
-
-	uint32 bufferedImageSize = (imageSize + alignmentPaddingSize) * adjustedBufferingMode;
-	bufferedImageSize = bufferedImageSize - alignmentPaddingSize;
-
-	memory_writeU32(sizeMPTR, bufferedImageSize);
-	memory_writeU32(scaleNeededMPTR, 0);
-
+	memory_writeU32(sizeOut, size);
+	memory_writeU32(scaleNeededOut, 0);
 	osLib_returnFromFunction(hCPU, 0);
 }
 
@@ -264,13 +283,11 @@ void gx2Export_GX2SetDRCConnectCallback(PPCInterpreter_t* hCPU)
 	ppcDefineParamS32(channel, 0);
 	ppcDefineParamMEMPTR(callback, void, 1);
 	cemuLog_log(LogType::GX2, "GX2SetDRCConnectCallback({}, 0x{:08x})", channel, callback.GetMPTR());
-	if(callback.GetPtr())
+	if (callback.GetPtr())
 	{
-		// force channel 0 to always be present (like VPADRead) but the second GamePad must actually be configured
-		// note - Just Dance 2018 refuses input if we trigger the callback for second GamePad here
-		bool connected = InputManager::instance().get_vpad_controller(channel) != nullptr;
-		if (channel == 0)
-			connected = true;
+		// The first GamePad is always there. A second one only counts when it is configured,
+		// some titles (Just Dance 2018) stop taking input if it is reported without being usable.
+		const bool connected = channel == 0 || InputManager::instance().get_vpad_controller(channel) != nullptr;
 		PPCCoreCallback(callback, channel, connected ? 1 : 0);
 	}
 	osLib_returnFromFunction(hCPU, 0);
@@ -278,133 +295,145 @@ void gx2Export_GX2SetDRCConnectCallback(PPCInterpreter_t* hCPU)
 
 void gx2Export_GX2SetSemaphore(PPCInterpreter_t* hCPU)
 {
-	cemuLog_log(LogType::GX2, "GX2SetSemaphore(0x{:08x},{})", hCPU->gpr[3], hCPU->gpr[4]);
-	ppcDefineParamMPTR(semaphoreMPTR, 0);
+	ppcDefineParamMPTR(semaphoreAddr, 0);
 	ppcDefineParamS32(mode, 1);
+	cemuLog_log(LogType::GX2, "GX2SetSemaphore(0x{:08x},{})", hCPU->gpr[3], hCPU->gpr[4]);
 
-	uint32 SEM_SEL;
+	// MEM_SEMAPHORE control word: operation in bits 29-31, bit 12 makes a wait block until signalled
+	constexpr uint32 kSemOpSignal = 6;
+	constexpr uint32 kSemOpWait = 7;
+	constexpr uint32 kWaitOnSignal = 0x1000;
 
-	if (mode == 0)
+	uint32 op;
+	switch (mode)
 	{
-		// wait
-		SEM_SEL = 7;
-	}
-	else if (mode == 1)
-	{
-		// signal
-		SEM_SEL = 6;
-	}
-	else
-	{
+	case 0: op = kSemOpWait; break;
+	case 1: op = kSemOpSignal; break;
+	default:
 		cemu_assert_debug(false);
 		osLib_returnFromFunction(hCPU, 0);
 		return;
 	}
-	uint32 semaphoreControl = (SEM_SEL << 29);
-	semaphoreControl |= 0x1000; // WAIT_ON_SIGNAL
 
 	GX2::GX2ReserveCmdSpace(3);
 	gx2WriteGather_submitU32AsBE(pm4HeaderType3(IT_MEM_SEMAPHORE, 2));
-	gx2WriteGather_submitU32AsBE(memory_virtualToPhysical(semaphoreMPTR)); // semaphore physical address
-	gx2WriteGather_submitU32AsBE(semaphoreControl); // control
+	gx2WriteGather_submitU32AsBE(memory_virtualToPhysical(semaphoreAddr));
+	gx2WriteGather_submitU32AsBE((op << 29) | kWaitOnSignal);
 
 	osLib_returnFromFunction(hCPU, 0);
 }
 
 namespace GX2
 {
-	class : public COSModule
+	namespace
 	{
-		public:
-		std::vector<std::string_view> GetDependencies() override
+		struct LegacyExport
 		{
-			return {"avm", "coreinit", "tcl"};
-		}
+			const char* name;
+			void (*fn)(PPCInterpreter_t*);
+		};
 
-		std::string_view GetName() override
+		// registration order is kept stable
+		const LegacyExport kLegacyExports[] =
 		{
-			return "gx2";
-		}
+			{ "GX2GetContextStateDisplayList", gx2Export_GX2GetContextStateDisplayList },
 
-		void RPLMapped() override
-		{
-			osLib_addFunction("gx2", "GX2GetContextStateDisplayList", gx2Export_GX2GetContextStateDisplayList);
+			// presenting
+			{ "GX2SwapScanBuffers", gx2Export_GX2SwapScanBuffers },
+			{ "GX2GetSwapStatus", gx2Export_GX2GetSwapStatus },
+			{ "GX2CopyColorBufferToScanBuffer", gx2Export_GX2CopyColorBufferToScanBuffer },
+			{ "GX2WaitForFreeScanBuffer", gx2Export_GX2WaitForFreeScanBuffer },
+			{ "GX2GetCurrentScanBuffer", gx2Export_GX2GetCurrentScanBuffer },
 
-			// swap, vsync & timing
-			osLib_addFunction("gx2", "GX2SwapScanBuffers", gx2Export_GX2SwapScanBuffers);
-			osLib_addFunction("gx2", "GX2GetSwapStatus", gx2Export_GX2GetSwapStatus);
-			osLib_addFunction("gx2", "GX2CopyColorBufferToScanBuffer", gx2Export_GX2CopyColorBufferToScanBuffer);
-			osLib_addFunction("gx2", "GX2WaitForFreeScanBuffer", gx2Export_GX2WaitForFreeScanBuffer);
-			osLib_addFunction("gx2", "GX2GetCurrentScanBuffer", gx2Export_GX2GetCurrentScanBuffer);
+			// shaders and uniform blocks
+			{ "GX2SetPixelShader", gx2Export_GX2SetPixelShader },
+			{ "GX2SetGeometryShader", gx2Export_GX2SetGeometryShader },
+			{ "GX2SetComputeShader", gx2Export_GX2SetComputeShader },
+			{ "GX2SetVertexUniformBlock", gx2Export_GX2SetVertexUniformBlock },
+			{ "GX2RSetVertexUniformBlock", gx2Export_GX2RSetVertexUniformBlock },
+			{ "GX2SetPixelUniformBlock", gx2Export_GX2SetPixelUniformBlock },
+			{ "GX2SetGeometryUniformBlock", gx2Export_GX2SetGeometryUniformBlock },
+			{ "GX2CalcGeometryShaderInputRingBufferSize", gx2Export_GX2CalcGeometryShaderInputRingBufferSize },
+			{ "GX2CalcGeometryShaderOutputRingBufferSize", gx2Export_GX2CalcGeometryShaderOutputRingBufferSize },
 
-			// shader stuff
-			osLib_addFunction("gx2", "GX2SetPixelShader", gx2Export_GX2SetPixelShader);
-			osLib_addFunction("gx2", "GX2SetGeometryShader", gx2Export_GX2SetGeometryShader);
-			osLib_addFunction("gx2", "GX2SetComputeShader", gx2Export_GX2SetComputeShader);
-			osLib_addFunction("gx2", "GX2SetVertexUniformBlock", gx2Export_GX2SetVertexUniformBlock);
-			osLib_addFunction("gx2", "GX2RSetVertexUniformBlock", gx2Export_GX2RSetVertexUniformBlock);
+			// render targets
+			{ "GX2InitColorBufferRegs", gx2Export_GX2InitColorBufferRegs },
+			{ "GX2InitDepthBufferRegs", gx2Export_GX2InitDepthBufferRegs },
+			{ "GX2SetColorBuffer", gx2Export_GX2SetColorBuffer },
+			{ "GX2SetDepthBuffer", gx2Export_GX2SetDepthBuffer },
+			{ "GX2SetDRCBuffer", gx2Export_GX2SetDRCBuffer },
+			{ "GX2MarkScanBufferCopied", gx2Export_GX2MarkScanBufferCopied },
 
-			osLib_addFunction("gx2", "GX2SetPixelUniformBlock", gx2Export_GX2SetPixelUniformBlock);
-			osLib_addFunction("gx2", "GX2SetGeometryUniformBlock", gx2Export_GX2SetGeometryUniformBlock);
+			// display configuration
+			{ "GX2TempGetGPUVersion", gx2Export_GX2TempGetGPUVersion },
+			{ "GX2CalcTVSize", gx2Export_GX2CalcTVSize },
+			{ "GX2CalcDRCSize", gx2Export_GX2CalcDRCSize },
+			{ "GX2SetDRCScale", gx2Export_GX2SetDRCScale },
+			{ "GX2SetDRCConnectCallback", gx2Export_GX2SetDRCConnectCallback },
+			{ "GX2GetSystemTVScanMode", gx2Export_GX2GetSystemTVScanMode },
+			{ "GX2GetSystemTVAspectRatio", gx2Export_GX2GetSystemTVAspectRatio },
 
-			osLib_addFunction("gx2", "GX2CalcGeometryShaderInputRingBufferSize", gx2Export_GX2CalcGeometryShaderInputRingBufferSize);
-			osLib_addFunction("gx2", "GX2CalcGeometryShaderOutputRingBufferSize", gx2Export_GX2CalcGeometryShaderOutputRingBufferSize);
+			// timing
+			{ "GX2SetSwapInterval", gx2Export_GX2SetSwapInterval },
+			{ "GX2GetSwapInterval", gx2Export_GX2GetSwapInterval },
+			{ "GX2GetGPUTimeout", gx2Export_GX2GetGPUTimeout },
+			{ "GX2SampleTopGPUCycle", gx2Export_GX2SampleTopGPUCycle },
+			{ "GX2SampleBottomGPUCycle", gx2Export_GX2SampleBottomGPUCycle },
 
-			// color/depth buffers
-			osLib_addFunction("gx2", "GX2InitColorBufferRegs", gx2Export_GX2InitColorBufferRegs);
-			osLib_addFunction("gx2", "GX2InitDepthBufferRegs", gx2Export_GX2InitDepthBufferRegs);
-			osLib_addFunction("gx2", "GX2SetColorBuffer", gx2Export_GX2SetColorBuffer);
-			osLib_addFunction("gx2", "GX2SetDepthBuffer", gx2Export_GX2SetDepthBuffer);
-
-			osLib_addFunction("gx2", "GX2SetDRCBuffer", gx2Export_GX2SetDRCBuffer);
-			osLib_addFunction("gx2", "GX2MarkScanBufferCopied", gx2Export_GX2MarkScanBufferCopied);
-
-			// misc
-			osLib_addFunction("gx2", "GX2TempGetGPUVersion", gx2Export_GX2TempGetGPUVersion);
-			osLib_addFunction("gx2", "GX2CalcTVSize", gx2Export_GX2CalcTVSize);
-			osLib_addFunction("gx2", "GX2CalcDRCSize", gx2Export_GX2CalcDRCSize);
-			osLib_addFunction("gx2", "GX2SetDRCScale", gx2Export_GX2SetDRCScale);
-			osLib_addFunction("gx2", "GX2SetDRCConnectCallback", gx2Export_GX2SetDRCConnectCallback);
-
-			osLib_addFunction("gx2", "GX2GetSystemTVScanMode", coreinitExport_GX2GetSystemTVScanMode);
-			osLib_addFunction("gx2", "GX2GetSystemTVAspectRatio", coreinitExport_GX2GetSystemTVAspectRatio);
-
-			osLib_addFunction("gx2", "GX2SetSwapInterval", gx2Export_GX2SetSwapInterval);
-			osLib_addFunction("gx2", "GX2GetSwapInterval", gx2Export_GX2GetSwapInterval);
-			osLib_addFunction("gx2", "GX2GetGPUTimeout", gx2Export_GX2GetGPUTimeout);
-			osLib_addFunction("gx2", "GX2SampleTopGPUCycle", gx2Export_GX2SampleTopGPUCycle);
-			osLib_addFunction("gx2", "GX2SampleBottomGPUCycle", gx2Export_GX2SampleBottomGPUCycle);
-
-			osLib_addFunction("gx2", "GX2AllocateTilingApertureEx", gx2Export_GX2AllocateTilingApertureEx);
-			osLib_addFunction("gx2", "GX2FreeTilingAperture", gx2Export_GX2FreeTilingAperture);
+			// tiling aperture
+			{ "GX2AllocateTilingApertureEx", gx2Export_GX2AllocateTilingApertureEx },
+			{ "GX2FreeTilingAperture", gx2Export_GX2FreeTilingAperture },
 
 			// context state
-			osLib_addFunction("gx2", "GX2SetDefaultState", gx2Export_GX2SetDefaultState);
-			osLib_addFunction("gx2", "GX2SetupContextStateEx", gx2Export_GX2SetupContextStateEx);
-			osLib_addFunction("gx2", "GX2SetContextState", gx2Export_GX2SetContextState);
+			{ "GX2SetDefaultState", gx2Export_GX2SetDefaultState },
+			{ "GX2SetupContextStateEx", gx2Export_GX2SetupContextStateEx },
+			{ "GX2SetContextState", gx2Export_GX2SetContextState },
 
-			// semaphore
-			osLib_addFunction("gx2", "GX2SetSemaphore", gx2Export_GX2SetSemaphore);
-
-			GX2::GX2MemInit();
-			GX2::GX2ResourceInit();
-			GX2::GX2CommandInit();
-			GX2::GX2SurfaceInit();
-			GX2::GX2SurfaceCopyInit();
-			GX2::GX2TextureInit();
-			GX2::GX2StateInit();
-			GX2::GX2ShaderInit();
-			GX2::GX2EventInit();
-			GX2::GX2BlitInit();
-			GX2::GX2DrawInit();
-			GX2::GX2StreamoutInit();
-			GX2::GX2QueryInit();
-			GX2::GX2MiscInit();
+			// synchronisation
+			{ "GX2SetSemaphore", gx2Export_GX2SetSemaphore },
 		};
-	}s_COSGX2Module;
+
+		class GX2Module : public COSModule
+		{
+		public:
+			std::string_view GetName() override
+			{
+				return "gx2";
+			}
+
+			std::vector<std::string_view> GetDependencies() override
+			{
+				return { "avm", "coreinit", "tcl" };
+			}
+
+			void RPLMapped() override
+			{
+				for (const LegacyExport& e : kLegacyExports)
+					osLib_addFunction("gx2", e.name, e.fn);
+
+				// each part registers its own typed exports; the order matters for init side effects
+				GX2MemInit();
+				GX2ResourceInit();
+				GX2CommandInit();
+				GX2SurfaceInit();
+				GX2SurfaceCopyInit();
+				GX2TextureInit();
+				GX2StateInit();
+				GX2ShaderInit();
+				GX2EventInit();
+				GX2BlitInit();
+				GX2DrawInit();
+				GX2StreamoutInit();
+				GX2QueryInit();
+				GX2MiscInit();
+			}
+		};
+
+		GX2Module s_module;
+	}
 
 	COSModule* GetModule()
 	{
-		return &s_COSGX2Module;
+		return &s_module;
 	}
 }
