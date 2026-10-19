@@ -1,30 +1,39 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "Cafe/HW/Latte/Core/LatteConst.h"
 
+// A Latte fetch shader is a small program of vertex fetch instructions that the
+// vertex shader calls to load its inputs. PixelU never runs it; it is decoded
+// into the attribute layout below, which the shader generators and the renderers
+// turn into host vertex input state.
+
+// one vertex fetch (one shader input)
 struct LatteParsedFetchShaderAttribute
 {
-	uint8								attributeBufferIndex;
-	uint8								semanticId;
+	uint8								attributeBufferIndex; // vertex buffer slot (0-15 valid)
+	uint8								semanticId; // input location seen by the vertex shader
 	Latte::E_HWFMT						format;
-	LatteConst::VertexFetchType2		fetchType;
-	uint8								nfa;
+	LatteConst::VertexFetchType2		fetchType; // per vertex or per instance
+	uint8								nfa; // number format (norm/int/scaled)
 	uint8								isSigned;
 	LatteConst::VertexFetchEndianMode	endianSwap;
-	uint8								ds[4]; // destination component select
-	sint32								aluDivisor;
-	uint32								offset;
+	uint8								ds[4]; // destination swizzle per output component
+	sint32								aluDivisor; // -1 = per vertex, otherwise instance step rate
+	uint32								offset; // byte offset inside the vertex
 };
 
+// all fetches that read from the same vertex buffer
 struct LatteParsedFetchShaderBufferGroup
 {
-	uint8 attributeBufferIndex{}; // index of buffer (0 to 15 are valid)
+	uint8 attributeBufferIndex{};
 	sint8 attribCount{};
 	bool hasVtxIndexAccess : 1;
 	bool hasInstanceIndexAccess : 1;
-	uint32 minOffset{};
-	uint32 totalAttribRangeSize{}; // max attribOffset+attribSize
-	LatteParsedFetchShaderAttribute* attrib{}; // attributes for this buffer
+	uint32 minOffset{}; // smallest attribute offset
+	uint32 totalAttribRangeSize{}; // largest offset + attribute size
+	LatteParsedFetchShaderAttribute* attrib{}; // attribCount entries (malloc'd)
 
+	// stride of this group's buffer as currently set in the SQ_VTX_ATTRIBUTE block
 	uint32 getCurrentBufferStride(uint32* contextRegister) const;
 };
 
@@ -35,20 +44,20 @@ struct LatteFetchShader
 	~LatteFetchShader();
 
 	std::vector<LatteParsedFetchShaderBufferGroup> bufferGroups;
-	std::vector<LatteParsedFetchShaderBufferGroup> bufferGroupsInvalid; // groups with buffer index not being a valid buffer (dst components of these can affect shader code, but no actual vertex imports are done)
+	// fetches from buffer ids outside 0-15: no data is fetched, but their swizzles still shape the shader
+	std::vector<LatteParsedFetchShaderBufferGroup> bufferGroupsInvalid;
 
-	uint64 key{};
-	uint32 attributeBufferMask{}; // mask of buffers sourced by this fetch shader
+	uint64 key{}; // compact hash of the decoded attribute layout
+	uint32 attributeBufferMask{}; // bit per referenced buffer slot
 
-	// Vulkan
-	uint64 vkPipelineHashFragment{}; // hash of all fetch shader state that influences the Vulkan graphics pipeline
+	// Vulkan: hash of the parts of the layout that are baked into a graphics pipeline
+	uint64 vkPipelineHashFragment{};
 
-	// Metal
+	// Metal: attributes that can't use the native vertex fetch path
 	bool mtlFetchVertexManually{};
 
-	// cache info
-	CacheHash m_cacheHash{};
-	bool m_isRegistered{}; // if true, fetch shader is referenced by cache (RegisterInCache() succeeded)
+	CacheHash m_cacheHash{}; // hash of the program code
+	bool m_isRegistered{}; // true once this object owns its m_cacheHash entry
 
 	void CalculateFetchShaderVkHash();
 
@@ -60,11 +69,11 @@ struct LatteFetchShader
 
 	static bool isValidBufferIndex(const uint32 index) { return index < 0x10; };
 
-	// keys in shader state cache
+	// shader state cache entries that reference this fetch shader
 	std::vector<uint64> m_shaderStateCacheKeys;
 
-	// fetch shader cache (move these to separate Cache class?)
-	LatteFetchShader* RegisterInCache(CacheHash fsHash); // fails if another fetch shader object is already registered with the same fsHash. Returns the previously registered fetch shader or null
+	// registry of decoded fetch shaders by program hash
+	LatteFetchShader* RegisterInCache(CacheHash fsHash); // returns the already registered object, or null if this one got registered
 	void UnregisterInCache();
 	static CacheHash CalculateCacheHash(void* programCode, uint32 programSize);
 	static LatteFetchShader* FindInCacheByHash(CacheHash fsHash);
