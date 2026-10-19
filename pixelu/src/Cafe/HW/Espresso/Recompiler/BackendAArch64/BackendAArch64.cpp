@@ -1,1749 +1,1850 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// AArch64 backend: code generation for every intermediate op, the helpers
+// called from generated code, the entry/exit stubs and executable memory.
+//
+// Floating point results follow what the interpreter computes when it is
+// built for AArch64: the multiply-add forms are fused like the compiler
+// contracts a*c+b, single precision results are rounded with FCVT, and
+// conversions that must not depend on FPCR.FZ (lfs, stfs) are done with
+// integer instructions.
+
+#include "Cafe/HW/Espresso/Interpreter/PPCInterpreterInternal.h"
+#include "Cafe/HW/Espresso/Interpreter/PPCInterpreterHelper.h"
+#include "Cafe/OS/libs/coreinit/coreinit_Time.h"
+#include "util/MemMapper/MemMapper.h"
 #include "BackendAArch64.h"
 
-#pragma push_macro("CSIZE")
-#undef CSIZE
 #include <xbyak_aarch64.h>
-#pragma pop_macro("CSIZE")
-#include <xbyak_aarch64_util.h>
 
-#include <cstddef>
-
-#include "../PPCRecompiler.h"
-#include "Common/precompiled.h"
-#include "Common/cpu_features.h"
-#include "HW/Espresso/Interpreter/PPCInterpreterInternal.h"
-#include "HW/Espresso/Interpreter/PPCInterpreterHelper.h"
-#include "HW/Espresso/PPCState.h"
-
-using namespace Xbyak_aarch64;
-
-constexpr uint32 TEMP_GPR_1_ID = 25;
-constexpr uint32 TEMP_GPR_2_ID = 26;
-constexpr uint32 PPC_RECOMPILER_INSTANCE_DATA_REG_ID = 27;
-constexpr uint32 MEMORY_BASE_REG_ID = 28;
-constexpr uint32 HCPU_REG_ID = 29;
-
-constexpr uint32 TEMP_FPR_ID = 31;
-
-struct FPReg
-{
-	explicit FPReg(size_t index)
-		: index(index), VReg(index), QReg(index), DReg(index), SReg(index), HReg(index), BReg(index)
-	{
-	}
-	const size_t index;
-	const ::VReg VReg;
-	const ::QReg QReg;
-	const ::DReg DReg;
-	const ::SReg SReg;
-	const ::HReg HReg;
-	const ::BReg BReg;
-};
-
-struct GPReg
-{
-	explicit GPReg(size_t index)
-		: index(index), XReg(index), WReg(index)
-	{
-	}
-	const size_t index;
-	const ::XReg XReg;
-	const ::WReg WReg;
-};
-
-static const XReg HCPU_REG{HCPU_REG_ID}, PPC_REC_INSTANCE_REG{PPC_RECOMPILER_INSTANCE_DATA_REG_ID}, MEM_BASE_REG{MEMORY_BASE_REG_ID};
-static const GPReg TEMP_GPR1{TEMP_GPR_1_ID};
-static const GPReg TEMP_GPR2{TEMP_GPR_2_ID};
-static const GPReg LR{TEMP_GPR_2_ID};
-
-static const FPReg TEMP_FPR{TEMP_FPR_ID};
-
-static const util::Cpu s_cpu;
-
-class AArch64Allocator : public Allocator
-{
-  private:
-#ifdef XBYAK_USE_MMAP_ALLOCATOR
-	inline static MmapAllocator s_allocator;
-#else
-	inline static Allocator s_allocator;
+#if defined(__APPLE__)
+#include <sys/mman.h>
+#include <pthread.h>
+#include <libkern/OSCacheControl.h>
+#elif defined(_WIN32)
+#include <Windows.h>
 #endif
-	Allocator* m_allocatorImpl;
-	bool m_freeDisabled = false;
 
-  public:
-	AArch64Allocator()
-		: m_allocatorImpl(reinterpret_cast<Allocator*>(&s_allocator)) {}
-
-	uint32* alloc(size_t size) override
-	{
-		return m_allocatorImpl->alloc(size);
-	}
-
-	void setFreeDisabled(bool disabled)
-	{
-		m_freeDisabled = disabled;
-	}
-
-	void free(uint32* p) override
-	{
-		if (!m_freeDisabled)
-			m_allocatorImpl->free(p);
-	}
-
-	[[nodiscard]] bool useProtect() const override
-	{
-		return !m_freeDisabled && m_allocatorImpl->useProtect();
-	}
-};
-
-struct UnconditionalJumpInfo
+namespace AArch64Backend
 {
-	IMLSegment* target;
-};
+	namespace xa = Xbyak_aarch64;
 
-struct ConditionalRegJumpInfo
-{
-	IMLSegment* target;
-	WReg regBool;
-	bool mustBeTrue;
-};
+	constexpr uint32 kIntColorCount = 16;
+	constexpr uint32 kFloatColorCount = 16;
+	// X4-X15 are not preserved by called functions, X22-X25 are
+	constexpr uint32 kIntColorRegs[kIntColorCount] = {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 22, 23, 24, 25};
+	constexpr uint32 kIntCallerSavedColors = 0x0FFF;
+	// V16-V31; called functions preserve at most the low half of V8-V15, so none of them is preserved
+	constexpr uint32 kFloatRegBase = 16;
+	constexpr uint32 kFloatCallerSavedColors = 0xFFFF;
 
-struct NegativeRegValueJumpInfo
-{
-	IMLSegment* target;
-	WReg regValue;
-};
+	constexpr uint32 kRegCPU = 19;
+	constexpr uint32 kRegMemBase = 20;
+	constexpr uint32 kRegJumpTable = 21;
 
-using JumpInfo = std::variant<
-	UnconditionalJumpInfo,
-	ConditionalRegJumpInfo,
-	NegativeRegValueJumpInfo>;
+	// stack frame below the saved registers (offsets from SP)
+	constexpr uint32 kFrameIntSave = 0;                         // caller saved integer colors, 8 bytes each
+	constexpr uint32 kFrameFloatSave = kFrameIntSave + 12 * 8;  // vector colors, 16 bytes each
+	constexpr uint32 kFrameSpill = kFrameFloatSave + 16 * 16;
+	constexpr uint32 kMaxSpillSlots = 64;                       // 16 bytes each
+	constexpr uint32 kFrameSize = kFrameSpill + kMaxSpillSlots * 16;
+	constexpr uint32 kSavedRegsSize = 96;                       // X19-X28, X29, X30
+	static_assert(kFrameSize % 16 == 0 && kFrameSize < 4096);
 
-struct AArch64GenContext_t : CodeGenerator
-{
-	explicit AArch64GenContext_t(Allocator* allocator = nullptr);
-	void enterRecompilerCode();
-	void leaveRecompilerCode();
+	static_assert(FPSCR_VXSNAN == (1 << 24));
 
-	void r_name(IMLInstruction* imlInstruction);
-	void name_r(IMLInstruction* imlInstruction);
-	bool r_s32(IMLInstruction* imlInstruction);
-	bool r_r(IMLInstruction* imlInstruction);
-	bool r_r_s32(IMLInstruction* imlInstruction);
-	bool r_r_s32_carry(IMLInstruction* imlInstruction);
-	bool r_r_r(IMLInstruction* imlInstruction);
-	bool r_r_r_carry(IMLInstruction* imlInstruction);
-	void compare(IMLInstruction* imlInstruction);
-	void compare_s32(IMLInstruction* imlInstruction);
-	bool load(IMLInstruction* imlInstruction, bool indexed);
-	bool store(IMLInstruction* imlInstruction, bool indexed);
-	void atomic_cmp_store(IMLInstruction* imlInstruction);
-	bool macro(IMLInstruction* imlInstruction);
-	void call_imm(IMLInstruction* imlInstruction);
-	bool fpr_load(IMLInstruction* imlInstruction, bool indexed);
-	bool fpr_store(IMLInstruction* imlInstruction, bool indexed);
-	void fpr_r_r(IMLInstruction* imlInstruction);
-	void fpr_r_r_r(IMLInstruction* imlInstruction);
-	void fpr_r_r_r_r(IMLInstruction* imlInstruction);
-	void fpr_r(IMLInstruction* imlInstruction);
-	void fpr_compare(IMLInstruction* imlInstruction);
-	void cjump(IMLInstruction* imlInstruction, IMLSegment* imlSegment);
-	void jump(IMLSegment* imlSegment);
-	void conditionalJumpCycleCheck(IMLSegment* imlSegment);
+	// ---- helpers called from generated code ----
 
-	static constexpr size_t MAX_JUMP_INSTR_COUNT = 2;
-	std::list<std::pair<size_t, JumpInfo>> jumps;
-	void prepareJump(JumpInfo&& jumpInfo)
+	uint32 Helper_Interpret(PPCInterpreter_t* hCPU, uint32 address)
 	{
-		jumps.emplace_back(getSize(), jumpInfo);
-		for (int i = 0; i < MAX_JUMP_INSTR_COUNT; ++i)
-			nop();
+		hCPU->instructionPointer = address;
+		PPCInterpreterSlim_executeInstruction(hCPU);
+		return hCPU->instructionPointer;
 	}
 
-	// cold code emitted after the main code
-	std::vector<std::function<void()>> m_coldCode;
-
-	std::map<IMLSegment*, size_t> segmentStarts;
-	void storeSegmentStart(IMLSegment* imlSegment)
+	void Helper_HLE(PPCInterpreter_t* hCPU, uint32 opcode)
 	{
-		segmentStarts[imlSegment] = getSize();
+		// unimplemented imports cost extra time so guest code polling one
+		// of them does not keep other threads from running
+		if ((opcode & 0xFFFF) == 0xFFD0)
+			hCPU->remainingCycles -= 500;
+		EspressoItp::Op_HLE(hCPU, opcode);
 	}
 
-	bool processAllJumps()
+	uint32 Helper_TimeBaseLower(PPCInterpreter_t* hCPU)
 	{
-		for (auto jump : jumps)
-		{
-			auto jumpStart = jump.first;
-			auto jumpInfo = jump.second;
-			bool success = std::visit(
-				[&, this](const auto& jump) {
-					setSize(jumpStart);
-					sint64 targetAddress = segmentStarts.at(jump.target);
-					sint64 addressOffset = targetAddress - jumpStart;
-					return handleJump(addressOffset, jump);
-				},
-				jumpInfo);
-			if (!success)
-			{
-				return false;
-			}
-		}
-		return true;
+		return (uint32)coreinit::OSGetSystemTime();
 	}
 
-	bool handleJump(sint64 addressOffset, const UnconditionalJumpInfo& jump)
+	uint32 Helper_TimeBaseUpper(PPCInterpreter_t* hCPU)
 	{
-		// in +/-128MB
-		if (-0x8000000 <= addressOffset && addressOffset <= 0x7ffffff)
-		{
-			b(addressOffset);
-			return true;
-		}
-
-		cemu_assert_suspicious();
-
-		return false;
+		return (uint32)(coreinit::OSGetSystemTime() >> 32);
 	}
 
-	bool handleJump(sint64 addressOffset, const ConditionalRegJumpInfo& jump)
+	// the floating point helpers read their operand from temporaryFPR[0] and write the result back there
+
+	void Helper_FRES(PPCInterpreter_t* hCPU)
 	{
-		bool mustBeTrue = jump.mustBeTrue;
+		FPR_t& t = hCPU->temporaryFPR[0];
+		const double estimate = fres_espresso(t.fp0);
+		t.fp0 = estimate;
+		t.fp1 = estimate;
+	}
 
-		// in +/-32KB
-		if (-0x8000 <= addressOffset && addressOffset <= 0x7fff)
-		{
-			if (mustBeTrue)
-				tbnz(jump.regBool, 0, addressOffset);
-			else
-				tbz(jump.regBool, 0, addressOffset);
-			return true;
-		}
+	void Helper_FRSQRTE(PPCInterpreter_t* hCPU)
+	{
+		FPR_t& t = hCPU->temporaryFPR[0];
+		t.fp0 = frsqrte_espresso(t.fp0);
+	}
 
-		// in +/-1MB
-		if (-0x100000 <= addressOffset && addressOffset <= 0xfffff)
-		{
-			if (mustBeTrue)
-				cbnz(jump.regBool, addressOffset);
-			else
-				cbz(jump.regBool, addressOffset);
-			return true;
-		}
+	void Helper_PRES(PPCInterpreter_t* hCPU)
+	{
+		FPR_t& t = hCPU->temporaryFPR[0];
+		const double lane0 = t.fp0, lane1 = t.fp1;
+		t.fp0 = (double)(float)fres_espresso(lane0);
+		t.fp1 = (double)(float)fres_espresso(lane1);
+	}
 
-		Label skipJump;
-		if (mustBeTrue)
-			tbz(jump.regBool, 0, skipJump);
+	void Helper_PRSQRTE(PPCInterpreter_t* hCPU)
+	{
+		FPR_t& t = hCPU->temporaryFPR[0];
+		const double lane0 = t.fp0, lane1 = t.fp1;
+		t.fp0 = (double)(float)frsqrte_espresso(lane0);
+		t.fp1 = (double)(float)frsqrte_espresso(lane1);
+	}
+
+	// fctiw: rounding per FPSCR[RN]. The word goes to the low half, the
+	// high half is 0xFFF80000 (+1 for negative inputs that round to 0)
+	void Helper_FCTIW(PPCInterpreter_t* hCPU)
+	{
+		FPR_t& t = hCPU->temporaryFPR[0];
+		const double input = t.fp0;
+		uint32 word;
+		if (input != input)
+			word = 0x80000000;
+		else if (input >= 2147483648.0)
+			word = 0x7FFFFFFF;
+		else if (input < -2147483648.0)
+			word = 0x80000000;
 		else
-			tbnz(jump.regBool, 0, skipJump);
-		addressOffset -= 4;
-
-		// in +/-128MB
-		if (-0x8000000 <= addressOffset && addressOffset <= 0x7ffffff)
 		{
-			b(addressOffset);
-			L(skipJump);
-			return true;
+			double rounded;
+			switch (hCPU->fpscr & 3)
+			{
+			case 0: rounded = std::nearbyint(input); break;
+			case 1: rounded = std::trunc(input); break;
+			case 2: rounded = std::ceil(input); break;
+			default: rounded = std::floor(input); break;
+			}
+			if (rounded >= 2147483648.0)
+				word = 0x7FFFFFFF;
+			else if (rounded < -2147483648.0)
+				word = 0x80000000;
+			else
+				word = (uint32)(sint32)rounded;
 		}
-
-		cemu_assert_suspicious();
-
-		return false;
+		uint64 bits = 0xFFF8000000000000ull | word;
+		if (word == 0 && std::signbit(input))
+			bits |= 1ull << 32;
+		t.fp0int = bits;
 	}
 
-	bool handleJump(sint64 addressOffset, const NegativeRegValueJumpInfo& jump)
+	// quantized accesses: EA in temporaryGPR_reg[0], GQR in temporaryGPR_reg[1], data in temporaryFPR[0]
+
+	uint32 ReadQuantized(uint32 ea, uint32 size)
 	{
-		// in +/-32KB
-		if (-0x8000 <= addressOffset && addressOffset <= 0x7fff)
-		{
-			tbnz(jump.regValue, 31, addressOffset);
-			return true;
-		}
-
-		// in +/-1MB
-		if (-0x100000 <= addressOffset && addressOffset <= 0xfffff)
-		{
-			tst(jump.regValue, 0x80000000);
-			addressOffset -= 4;
-			bne(addressOffset);
-			return true;
-		}
-
-		Label skipJump;
-		tbz(jump.regValue, 31, skipJump);
-		addressOffset -= 4;
-
-		// in +/-128MB
-		if (-0x8000000 <= addressOffset && addressOffset <= 0x7ffffff)
-		{
-			b(addressOffset);
-			L(skipJump);
-			return true;
-		}
-
-		cemu_assert_suspicious();
-
-		return false;
+		const uint8* p = memory_base + ea;
+		if (size == 1)
+			return p[0];
+		if (size == 2)
+			return ((uint32)p[0] << 8) | p[1];
+		return ((uint32)p[0] << 24) | ((uint32)p[1] << 16) | ((uint32)p[2] << 8) | p[3];
 	}
-};
 
-template<std::derived_from<VRegSc> T>
-T fpReg(const IMLReg& imlReg)
-{
-	cemu_assert_debug(imlReg.GetRegFormat() == IMLRegFormat::F64);
-	auto regId = imlReg.GetRegID();
-	cemu_assert_debug(regId >= IMLArchAArch64::PHYSREG_FPR_BASE && regId < IMLArchAArch64::PHYSREG_FPR_BASE + IMLArchAArch64::PHYSREG_FPR_COUNT);
-	return T(regId - IMLArchAArch64::PHYSREG_FPR_BASE);
-}
+	void WriteQuantized(uint32 ea, uint32 size, uint32 value)
+	{
+		uint8* p = memory_base + ea;
+		for (uint32 i = 0; i < size; i++)
+			p[i] = (uint8)(value >> ((size - 1 - i) * 8));
+	}
 
-template<std::derived_from<RReg> T>
-T gpReg(const IMLReg& imlReg)
-{
-	auto regFormat = imlReg.GetRegFormat();
-	if (std::is_same_v<T, WReg>)
-		cemu_assert_debug(regFormat == IMLRegFormat::I32);
-	else if (std::is_same_v<T, XReg>)
-		cemu_assert_debug(regFormat == IMLRegFormat::I64);
-	else
-		cemu_assert_unimplemented();
+	void PairedLoad(PPCInterpreter_t* hCPU, bool singleSlot)
+	{
+		const uint32 ea = hCPU->temporaryGPR_reg[0];
+		const uint32 gqr = hCPU->temporaryGPR_reg[1];
+		const uint32 type = (gqr >> 16) & 7;
+		const uint32 scale = (gqr >> 24) & 0x3F;
+		const uint32 size = EspressoItp::GqrAccessSize(type);
+		FPR_t& t = hCPU->temporaryFPR[0];
+		const uint32 first = ReadQuantized(ea, size);
+		const uint32 second = singleSlot ? 0 : ReadQuantized(ea + size, size);
+		t.fp0 = (double)EspressoItp::Dequantize(first, type, scale);
+		t.fp1 = singleSlot ? 1.0 : (double)EspressoItp::Dequantize(second, type, scale);
+	}
 
-	auto regId = imlReg.GetRegID();
-	cemu_assert_debug(regId >= IMLArchAArch64::PHYSREG_GPR_BASE && regId < IMLArchAArch64::PHYSREG_GPR_BASE + IMLArchAArch64::PHYSREG_GPR_COUNT);
-	return T(regId - IMLArchAArch64::PHYSREG_GPR_BASE);
-}
+	void PairedStore(PPCInterpreter_t* hCPU, bool singleSlot)
+	{
+		const uint32 ea = hCPU->temporaryGPR_reg[0];
+		const uint32 gqr = hCPU->temporaryGPR_reg[1];
+		const uint32 type = gqr & 7;
+		const uint32 scale = (gqr >> 8) & 0x3F;
+		const uint32 size = EspressoItp::GqrAccessSize(type);
+		const FPR_t& t = hCPU->temporaryFPR[0];
+		WriteQuantized(ea, size, EspressoItp::Quantize((float)t.fp0, type, scale));
+		if (!singleSlot)
+			WriteQuantized(ea + size, size, EspressoItp::Quantize((float)t.fp1, type, scale));
+	}
 
-template<std::derived_from<VRegSc> To, std::derived_from<VRegSc> From>
-To aliasAs(const From& reg)
-{
-	return To(reg.getIdx());
-}
+	void Helper_PSQLoad(PPCInterpreter_t* hCPU) { PairedLoad(hCPU, false); }
+	void Helper_PSQLoadSingle(PPCInterpreter_t* hCPU) { PairedLoad(hCPU, true); }
+	void Helper_PSQStore(PPCInterpreter_t* hCPU) { PairedStore(hCPU, false); }
+	void Helper_PSQStoreSingle(PPCInterpreter_t* hCPU) { PairedStore(hCPU, true); }
 
-template<std::derived_from<RReg> To, std::derived_from<RReg> From>
-To aliasAs(const From& reg)
-{
-	return To(reg.getIdx());
-}
+	// The interpreter computes fnmadds as -(float)(a*c+b) or as
+	// (float)(-(a*c)-b) depending on how the host compiler contracted the
+	// expression; the two differ in the sign of an exact zero. This runs the
+	// interpreter's handler once on a*c == -b to find out which one it is.
+	bool InterpreterNegatesSingleMaddAfterRounding()
+	{
+		static const bool s_result = []()
+		{
+			auto cpu = std::make_unique<PPCInterpreter_t>();
+			memset(cpu.get(), 0, sizeof(PPCInterpreter_t));
+			cpu->fpr[1].fp0 = 1.0;  // frA
+			cpu->fpr[2].fp0 = 1.0;  // frC
+			cpu->fpr[3].fp0 = -1.0; // frB
+			const uint32 opcode = (59u << 26) | (0u << 21) | (1u << 16) | (3u << 11) | (2u << 6) | (31u << 1); // fnmadds f0, f1, f2, f3
+			EspressoItp::Op_FNMADDS(cpu.get(), opcode);
+			return std::signbit(cpu->fpr[0].fp0);
+		}();
+		return s_result;
+	}
 
-AArch64GenContext_t::AArch64GenContext_t(Allocator* allocator)
-	: CodeGenerator(DEFAULT_MAX_CODE_SIZE, AutoGrow, allocator)
-{
-}
+	// ---- executable memory ----
 
-constexpr uint64 ones(uint32 size)
-{
-	return (size == 64) ? 0xffffffffffffffff : ((uint64)1 << size) - 1;
-}
+	std::mutex s_execMutex;
+	uint8* s_execBlock = nullptr;
+	size_t s_execBlockSize = 0;
+	size_t s_execBlockUsed = 0;
 
-constexpr bool isAdrImmValidFPR(sint32 imm, uint32 bits)
-{
-	uint32 times = bits / 8;
-	uint32 sh = std::countr_zero(times);
-	return (0 <= imm && imm <= 4095 * times) && ((uint64)imm & ones(sh)) == 0;
-}
+	uint8* AllocateExecutable(size_t size)
+	{
+		size = (size + 63) & ~(size_t)63;
+		if (!s_execBlock || s_execBlockUsed + size > s_execBlockSize)
+		{
+			const size_t blockSize = std::max<size_t>(4 * 1024 * 1024, (size + 0xFFFF) & ~(size_t)0xFFFF);
+#if defined(__APPLE__)
+			void* block = mmap(nullptr, blockSize, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+			if (block == MAP_FAILED)
+				block = nullptr;
+#else
+			void* block = MemMapper::AllocateMemory(nullptr, blockSize, MemMapper::PAGE_PERMISSION::P_RWX);
+#endif
+			if (!block)
+				return nullptr;
+			s_execBlock = (uint8*)block;
+			s_execBlockSize = blockSize;
+			s_execBlockUsed = 0;
+		}
+		uint8* p = s_execBlock + s_execBlockUsed;
+		s_execBlockUsed += size;
+		return p;
+	}
 
-constexpr bool isAdrImmValidGPR(sint32 imm, uint32 bits = 32)
-{
-	uint32 size = std::countr_zero(bits / 8u);
-	sint32 times = 1 << size;
-	return (0 <= imm && imm <= 4095 * times) && ((uint64)imm & ones(size)) == 0;
-}
+	// copies finished code into executable memory
+	void* PublishCode(const uint8* code, size_t size)
+	{
+		std::lock_guard<std::mutex> lock(s_execMutex);
+		uint8* p = AllocateExecutable(size);
+		if (!p)
+			return nullptr;
+#if defined(__APPLE__)
+		pthread_jit_write_protect_np(0);
+		memcpy(p, code, size);
+		pthread_jit_write_protect_np(1);
+		sys_icache_invalidate(p, size);
+#elif defined(_WIN32)
+		memcpy(p, code, size);
+		FlushInstructionCache(GetCurrentProcess(), p, size);
+#else
+		memcpy(p, code, size);
+		__builtin___clear_cache((char*)p, (char*)p + size);
+#endif
+		return p;
+	}
 
-constexpr bool isAdrImmRangeValid(sint32 rangeStart, sint32 rangeOffset, sint32 bits, std::invocable<sint32, uint32> auto check)
-{
-	for (sint32 i = rangeStart; i <= rangeStart + rangeOffset; i += bits / 8)
-		if (!check(i, bits))
+	// code is assembled into ordinary memory and copied to its final place afterwards
+	class StagingAllocator : public xa::Allocator
+	{
+	public:
+		uint32_t* alloc(size_t size) override { return new uint32_t[(size + 3) / 4]; }
+		void free(uint32_t* p) override { delete[] p; }
+		bool useProtect() const override { return false; }
+	};
+
+	// true if v is an AArch64 logical immediate for 32-bit operations
+	bool IsLogicalImm32(uint32 v)
+	{
+		if (v == 0 || v == 0xFFFFFFFF)
 			return false;
-	return true;
-}
-
-constexpr bool isAdrImmRangeValidGPR(sint32 rangeStart, sint32 rangeOffset, sint32 bits = 32)
-{
-	return isAdrImmRangeValid(rangeStart, rangeOffset, bits, isAdrImmValidGPR);
-}
-
-constexpr bool isAdrImmRangeValidFpr(sint32 rangeStart, sint32 rangeOffset, sint32 bits)
-{
-	return isAdrImmRangeValid(rangeStart, rangeOffset, bits, isAdrImmValidFPR);
-}
-
-// Verify that all of the offsets for the PPCInterpreter_t members that we use in r_name/name_r have a valid imm value for AdrUimm
-static_assert(isAdrImmRangeValidGPR(offsetof(PPCInterpreter_t, gpr), sizeof(uint32) * 31));
-static_assert(isAdrImmValidGPR(offsetof(PPCInterpreter_t, spr.LR)));
-static_assert(isAdrImmValidGPR(offsetof(PPCInterpreter_t, spr.CTR)));
-static_assert(isAdrImmValidGPR(offsetof(PPCInterpreter_t, spr.XER)));
-static_assert(isAdrImmRangeValidGPR(offsetof(PPCInterpreter_t, spr.UGQR), sizeof(PPCInterpreter_t::spr.UGQR[0]) * (SPR_UGQR7 - SPR_UGQR0)));
-static_assert(isAdrImmRangeValidGPR(offsetof(PPCInterpreter_t, temporaryGPR_reg), sizeof(uint32) * 3));
-static_assert(isAdrImmValidGPR(offsetof(PPCInterpreter_t, xer_ca), 8));
-static_assert(isAdrImmValidGPR(offsetof(PPCInterpreter_t, xer_so), 8));
-static_assert(isAdrImmRangeValidGPR(offsetof(PPCInterpreter_t, cr), PPCREC_NAME_CR_LAST - PPCREC_NAME_CR, 8));
-static_assert(isAdrImmValidGPR(offsetof(PPCInterpreter_t, reservedMemAddr)));
-static_assert(isAdrImmValidGPR(offsetof(PPCInterpreter_t, reservedMemValue)));
-static_assert(isAdrImmRangeValidFpr(offsetof(PPCInterpreter_t, fpr), sizeof(FPR_t) * 63, 64));
-static_assert(isAdrImmRangeValidFpr(offsetof(PPCInterpreter_t, temporaryFPR), sizeof(FPR_t) * 7, 128));
-
-void AArch64GenContext_t::r_name(IMLInstruction* imlInstruction)
-{
-	uint32 name = imlInstruction->op_r_name.name;
-
-	if (imlInstruction->op_r_name.regR.GetBaseFormat() == IMLRegFormat::I64)
-	{
-		XReg regRXReg = gpReg<XReg>(imlInstruction->op_r_name.regR);
-		WReg regR = aliasAs<WReg>(regRXReg);
-		if (name >= PPCREC_NAME_R0 && name < PPCREC_NAME_R0 + 32)
+		// smallest repeating element
+		uint32 width = 32;
+		while (width > 2)
 		{
-			ldr(regR, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, gpr) + sizeof(uint32) * (name - PPCREC_NAME_R0)));
+			const uint32 half = width / 2;
+			const uint32 mask = (1u << half) - 1;
+			if ((v & mask) != ((v >> half) & mask))
+				break;
+			width = half;
 		}
-		else if (name >= PPCREC_NAME_SPR0 && name < PPCREC_NAME_SPR0 + 999)
+		const uint32 mask = width == 32 ? 0xFFFFFFFFu : ((1u << width) - 1);
+		const uint32 e = v & mask;
+		// a rotated run of ones has exactly two bit changes going round the element
+		const uint32 rotated = ((e >> 1) | (e << (width - 1))) & mask;
+		return std::popcount(e ^ rotated) == 2;
+	}
+
+	// ---- emitter with the building blocks shared by the stubs and the code generator ----
+
+	class Emitter : public xa::CodeGenerator
+	{
+	public:
+		Emitter(size_t maxSize, xa::Allocator* allocator) : xa::CodeGenerator(maxSize, xa::DontSetProtectRWE, allocator) {}
+
+		const xa::XReg rCPU{kRegCPU};
+		const xa::XReg rMemBase{kRegMemBase};
+		const xa::XReg rJumpTable{kRegJumpTable};
+
+		void MoveW(const xa::WReg& d, const xa::WReg& s)
 		{
-			uint32 sprIndex = (name - PPCREC_NAME_SPR0);
-			if (sprIndex == SPR_LR)
-				ldr(regR, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, spr.LR)));
-			else if (sprIndex == SPR_CTR)
-				ldr(regR, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, spr.CTR)));
-			else if (sprIndex == SPR_XER)
-				ldr(regR, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, spr.XER)));
-			else if (sprIndex >= SPR_UGQR0 && sprIndex <= SPR_UGQR7)
-				ldr(regR, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, spr.UGQR) + sizeof(PPCInterpreter_t::spr.UGQR[0]) * (sprIndex - SPR_UGQR0)));
+			if (d.getIdx() != s.getIdx())
+				mov(d, s);
+		}
+
+		void MoveV(const xa::VReg& d, const xa::VReg& s)
+		{
+			if (d.getIdx() != s.getIdx())
+				mov(d.b16, s.b16);
+		}
+
+		void LoadImm32(const xa::WReg& d, uint32 v)
+		{
+			const uint32 lo = v & 0xFFFF, hi = v >> 16;
+			if (hi == 0)
+				movz(d, lo);
+			else if (lo == 0)
+				movz(d, hi, 16);
+			else if (hi == 0xFFFF)
+				movn(d, (~v) & 0xFFFF);
+			else if (lo == 0xFFFF)
+				movn(d, (~v) >> 16, 16);
 			else
-				cemu_assert_suspicious();
+			{
+				movz(d, lo);
+				movk(d, hi, 16);
+			}
 		}
-		else if (name >= PPCREC_NAME_TEMPORARY && name < PPCREC_NAME_TEMPORARY + 4)
-		{
-			ldr(regR, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, temporaryGPR_reg) + sizeof(uint32) * (name - PPCREC_NAME_TEMPORARY)));
-		}
-		else if (name == PPCREC_NAME_XER_CA)
-		{
-			ldrb(regR, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, xer_ca)));
-		}
-		else if (name == PPCREC_NAME_XER_SO)
-		{
-			ldrb(regR, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, xer_so)));
-		}
-		else if (name >= PPCREC_NAME_CR && name <= PPCREC_NAME_CR_LAST)
-		{
-			ldrb(regR, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, cr) + (name - PPCREC_NAME_CR)));
-		}
-		else if (name == PPCREC_NAME_CPU_MEMRES_EA)
-		{
-			ldr(regR, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, reservedMemAddr)));
-		}
-		else if (name == PPCREC_NAME_CPU_MEMRES_VAL)
-		{
-			ldr(regR, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, reservedMemValue)));
-		}
-		else
-		{
-			cemu_assert_suspicious();
-		}
-	}
-	else if (imlInstruction->op_r_name.regR.GetBaseFormat() == IMLRegFormat::F64)
-	{
-		auto imlRegR = imlInstruction->op_r_name.regR;
 
-		if (name >= PPCREC_NAME_FPR_HALF && name < (PPCREC_NAME_FPR_HALF + 64))
+		void LoadImm64(const xa::XReg& d, uint64 v)
 		{
-			uint32 regIndex = (name - PPCREC_NAME_FPR_HALF) / 2;
-			uint32 pairIndex = (name - PPCREC_NAME_FPR_HALF) % 2;
-			uint32 offset = offsetof(PPCInterpreter_t, fpr) + sizeof(FPR_t) * regIndex + (pairIndex ? sizeof(double) : 0);
-			ldr(fpReg<DReg>(imlRegR), AdrUimm(HCPU_REG, offset));
+			bool first = true;
+			for (uint32 shift = 0; shift < 64; shift += 16)
+			{
+				const uint32 part = (uint32)(v >> shift) & 0xFFFF;
+				if (part == 0)
+					continue;
+				if (first)
+					movz(d, part, shift);
+				else
+					movk(d, part, shift);
+				first = false;
+			}
+			if (first)
+				movz(d, 0);
 		}
-		else if (name >= PPCREC_NAME_TEMPORARY_FPR0 && name < (PPCREC_NAME_TEMPORARY_FPR0 + 8))
-		{
-			ldr(fpReg<QReg>(imlRegR), AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, temporaryFPR) + sizeof(FPR_t) * (name - PPCREC_NAME_TEMPORARY_FPR0)));
-		}
-		else
-		{
-			cemu_assert_suspicious();
-		}
-	}
-	else
-	{
-		cemu_assert_suspicious();
-	}
-}
 
-void AArch64GenContext_t::name_r(IMLInstruction* imlInstruction)
-{
-	uint32 name = imlInstruction->op_r_name.name;
-
-	if (imlInstruction->op_r_name.regR.GetBaseFormat() == IMLRegFormat::I64)
-	{
-		XReg regRXReg = gpReg<XReg>(imlInstruction->op_r_name.regR);
-		WReg regR = aliasAs<WReg>(regRXReg);
-		if (name >= PPCREC_NAME_R0 && name < PPCREC_NAME_R0 + 32)
+		// d = s + imm (32-bit). tmp must differ from s
+		void AddImm32(const xa::WReg& d, const xa::WReg& s, uint32 imm, const xa::WReg& tmp)
 		{
-			str(regR, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, gpr) + sizeof(uint32) * (name - PPCREC_NAME_R0)));
-		}
-		else if (name >= PPCREC_NAME_SPR0 && name < PPCREC_NAME_SPR0 + 999)
-		{
-			uint32 sprIndex = (name - PPCREC_NAME_SPR0);
-			if (sprIndex == SPR_LR)
-				str(regR, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, spr.LR)));
-			else if (sprIndex == SPR_CTR)
-				str(regR, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, spr.CTR)));
-			else if (sprIndex == SPR_XER)
-				str(regR, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, spr.XER)));
-			else if (sprIndex >= SPR_UGQR0 && sprIndex <= SPR_UGQR7)
-				str(regR, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, spr.UGQR) + sizeof(PPCInterpreter_t::spr.UGQR[0]) * (sprIndex - SPR_UGQR0)));
+			const uint32 neg = 0u - imm;
+			if (imm == 0)
+				MoveW(d, s);
+			else if (imm < 4096)
+				add(d, s, imm);
+			else if (neg < 4096)
+				sub(d, s, neg);
+			else if ((imm & 0xFFF) == 0 && imm < 0x1000000)
+				add(d, s, imm >> 12, 12);
+			else if ((neg & 0xFFF) == 0 && neg < 0x1000000)
+				sub(d, s, neg >> 12, 12);
 			else
-				cemu_assert_suspicious();
+			{
+				LoadImm32(tmp, imm);
+				add(d, s, tmp);
+			}
 		}
-		else if (name >= PPCREC_NAME_TEMPORARY && name < PPCREC_NAME_TEMPORARY + 4)
+
+		// flags = a compared with imm (may use W16)
+		void CompareImm32(const xa::WReg& a, uint32 imm)
 		{
-			str(regR, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, temporaryGPR_reg) + sizeof(uint32) * (name - PPCREC_NAME_TEMPORARY)));
-		}
-		else if (name == PPCREC_NAME_XER_CA)
-		{
-			strb(regR, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, xer_ca)));
-		}
-		else if (name == PPCREC_NAME_XER_SO)
-		{
-			strb(regR, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, xer_so)));
-		}
-		else if (name >= PPCREC_NAME_CR && name <= PPCREC_NAME_CR_LAST)
-		{
-			strb(regR, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, cr) + (name - PPCREC_NAME_CR)));
-		}
-		else if (name == PPCREC_NAME_CPU_MEMRES_EA)
-		{
-			str(regR, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, reservedMemAddr)));
-		}
-		else if (name == PPCREC_NAME_CPU_MEMRES_VAL)
-		{
-			str(regR, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, reservedMemValue)));
-		}
-		else
-		{
-			cemu_assert_suspicious();
-		}
-	}
-	else if (imlInstruction->op_r_name.regR.GetBaseFormat() == IMLRegFormat::F64)
-	{
-		auto imlRegR = imlInstruction->op_r_name.regR;
-		if (name >= PPCREC_NAME_FPR_HALF && name < (PPCREC_NAME_FPR_HALF + 64))
-		{
-			uint32 regIndex = (name - PPCREC_NAME_FPR_HALF) / 2;
-			uint32 pairIndex = (name - PPCREC_NAME_FPR_HALF) % 2;
-			sint32 offset = offsetof(PPCInterpreter_t, fpr) + sizeof(FPR_t) * regIndex + pairIndex * sizeof(double);
-			str(fpReg<DReg>(imlRegR), AdrUimm(HCPU_REG, offset));
-		}
-		else if (name >= PPCREC_NAME_TEMPORARY_FPR0 && name < (PPCREC_NAME_TEMPORARY_FPR0 + 8))
-		{
-			str(fpReg<QReg>(imlRegR), AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, temporaryFPR) + sizeof(FPR_t) * (name - PPCREC_NAME_TEMPORARY_FPR0)));
-		}
-		else
-		{
-			cemu_assert_suspicious();
-		}
-	}
-	else
-	{
-		cemu_assert_suspicious();
-	}
-}
-
-bool AArch64GenContext_t::r_r(IMLInstruction* imlInstruction)
-{
-	WReg regR = gpReg<WReg>(imlInstruction->op_r_r.regR);
-	WReg regA = gpReg<WReg>(imlInstruction->op_r_r.regA);
-
-	if (imlInstruction->operation == PPCREC_IML_OP_ASSIGN)
-	{
-		mov(regR, regA);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_ENDIAN_SWAP)
-	{
-		rev(regR, regA);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_ASSIGN_S8_TO_S32)
-	{
-		sxtb(regR, regA);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_ASSIGN_S16_TO_S32)
-	{
-		sxth(regR, regA);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_NOT)
-	{
-		mvn(regR, regA);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_NEG)
-	{
-		neg(regR, regA);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_CNTLZW)
-	{
-		clz(regR, regA);
-	}
-	else
-	{
-		cemuLog_log(LogType::Recompiler, "PPCRecompilerAArch64Gen_imlInstruction_r_r(): Unsupported operation {:x}", imlInstruction->operation);
-		return false;
-	}
-	return true;
-}
-
-bool AArch64GenContext_t::r_s32(IMLInstruction* imlInstruction)
-{
-	sint32 imm32 = imlInstruction->op_r_immS32.immS32;
-	WReg reg = gpReg<WReg>(imlInstruction->op_r_immS32.regR);
-
-	if (imlInstruction->operation == PPCREC_IML_OP_ASSIGN)
-	{
-		mov(reg, imm32);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_LEFT_ROTATE)
-	{
-		ror(reg, reg, 32 - (imm32 & 0x1f));
-	}
-	else
-	{
-		cemuLog_log(LogType::Recompiler, "PPCRecompilerAArch64Gen_imlInstruction_r_s32(): Unsupported operation {:x}", imlInstruction->operation);
-		return false;
-	}
-	return true;
-}
-
-bool AArch64GenContext_t::r_r_s32(IMLInstruction* imlInstruction)
-{
-	WReg regR = gpReg<WReg>(imlInstruction->op_r_r_s32.regR);
-	WReg regA = gpReg<WReg>(imlInstruction->op_r_r_s32.regA);
-	sint32 immS32 = imlInstruction->op_r_r_s32.immS32;
-
-	if (imlInstruction->operation == PPCREC_IML_OP_ADD)
-	{
-		add_imm(regR, regA, immS32, TEMP_GPR1.WReg);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_SUB)
-	{
-		sub_imm(regR, regA, immS32, TEMP_GPR1.WReg);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_AND)
-	{
-		mov(TEMP_GPR1.WReg, immS32);
-		and_(regR, regA, TEMP_GPR1.WReg);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_OR)
-	{
-		mov(TEMP_GPR1.WReg, immS32);
-		orr(regR, regA, TEMP_GPR1.WReg);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_XOR)
-	{
-		mov(TEMP_GPR1.WReg, immS32);
-		eor(regR, regA, TEMP_GPR1.WReg);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_MULTIPLY_SIGNED)
-	{
-		mov(TEMP_GPR1.WReg, immS32);
-		mul(regR, regA, TEMP_GPR1.WReg);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_LEFT_SHIFT)
-	{
-		lsl(regR, regA, (uint32)immS32 & 0x1f);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_RIGHT_SHIFT_U)
-	{
-		lsr(regR, regA, (uint32)immS32 & 0x1f);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_RIGHT_SHIFT_S)
-	{
-		asr(regR, regA, (uint32)immS32 & 0x1f);
-	}
-	else
-	{
-		cemuLog_log(LogType::Recompiler, "PPCRecompilerAArch64Gen_imlInstruction_r_r_s32(): Unsupported operation {:x}", imlInstruction->operation);
-		cemu_assert_suspicious();
-		return false;
-	}
-	return true;
-}
-
-bool AArch64GenContext_t::r_r_s32_carry(IMLInstruction* imlInstruction)
-{
-	WReg regR = gpReg<WReg>(imlInstruction->op_r_r_s32_carry.regR);
-	WReg regA = gpReg<WReg>(imlInstruction->op_r_r_s32_carry.regA);
-	WReg regCarry = gpReg<WReg>(imlInstruction->op_r_r_s32_carry.regCarry);
-
-	sint32 immS32 = imlInstruction->op_r_r_s32_carry.immS32;
-	if (imlInstruction->operation == PPCREC_IML_OP_ADD)
-	{
-		adds_imm(regR, regA, immS32, TEMP_GPR1.WReg);
-		cset(regCarry, Cond::CS);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_ADD_WITH_CARRY)
-	{
-		mov(TEMP_GPR1.WReg, immS32);
-		cmp(regCarry, 1);
-		adcs(regR, regA, TEMP_GPR1.WReg);
-		cset(regCarry, Cond::CS);
-	}
-	else
-	{
-		cemu_assert_suspicious();
-		return false;
-	}
-
-	return true;
-}
-
-bool AArch64GenContext_t::r_r_r(IMLInstruction* imlInstruction)
-{
-	WReg regResult = gpReg<WReg>(imlInstruction->op_r_r_r.regR);
-	XReg reg64Result = aliasAs<XReg>(regResult);
-	WReg regOperand1 = gpReg<WReg>(imlInstruction->op_r_r_r.regA);
-	WReg regOperand2 = gpReg<WReg>(imlInstruction->op_r_r_r.regB);
-
-	if (imlInstruction->operation == PPCREC_IML_OP_ADD)
-	{
-		add(regResult, regOperand1, regOperand2);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_SUB)
-	{
-		sub(regResult, regOperand1, regOperand2);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_OR)
-	{
-		orr(regResult, regOperand1, regOperand2);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_AND)
-	{
-		and_(regResult, regOperand1, regOperand2);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_XOR)
-	{
-		eor(regResult, regOperand1, regOperand2);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_MULTIPLY_SIGNED)
-	{
-		mul(regResult, regOperand1, regOperand2);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_SLW)
-	{
-		tst(regOperand2, 32);
-		lsl(regResult, regOperand1, regOperand2);
-		csel(regResult, regResult, wzr, Cond::EQ);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_SRW)
-	{
-		tst(regOperand2, 32);
-		lsr(regResult, regOperand1, regOperand2);
-		csel(regResult, regResult, wzr, Cond::EQ);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_LEFT_ROTATE)
-	{
-		neg(TEMP_GPR1.WReg, regOperand2);
-		ror(regResult, regOperand1, TEMP_GPR1.WReg);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_RIGHT_SHIFT_S)
-	{
-		asr(regResult, regOperand1, regOperand2);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_RIGHT_SHIFT_U)
-	{
-		lsr(regResult, regOperand1, regOperand2);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_LEFT_SHIFT)
-	{
-		lsl(regResult, regOperand1, regOperand2);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_DIVIDE_SIGNED)
-	{
-		// sdiv returns 0 for a zero divisor and 0x80000000 on overflow, divw gives the dividend sign and -1
-		Label divisorZero;
-		Label overflow;
-		Label divide;
-		Label done;
-		cbz(regOperand2, divisorZero);
-		cmn(regOperand2, 1);
-		bne(divide);
-		mov(TEMP_GPR1.WReg, 0x80000000);
-		cmp(regOperand1, TEMP_GPR1.WReg);
-		beq(overflow);
-		L(divide);
-		sdiv(regResult, regOperand1, regOperand2);
-		b(done);
-		L(divisorZero);
-		asr(regResult, regOperand1, 31);
-		b(done);
-		L(overflow);
-		mov(regResult, 0xFFFFFFFF);
-		L(done);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_DIVIDE_UNSIGNED)
-	{
-		udiv(regResult, regOperand1, regOperand2);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_MULTIPLY_HIGH_SIGNED)
-	{
-		smull(reg64Result, regOperand1, regOperand2);
-		lsr(reg64Result, reg64Result, 32);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_MULTIPLY_HIGH_UNSIGNED)
-	{
-		umull(reg64Result, regOperand1, regOperand2);
-		lsr(reg64Result, reg64Result, 32);
-	}
-	else
-	{
-		cemuLog_log(LogType::Recompiler, "PPCRecompilerAArch64Gen_imlInstruction_r_r_r(): Unsupported operation {:x}", imlInstruction->operation);
-		return false;
-	}
-	return true;
-}
-
-bool AArch64GenContext_t::r_r_r_carry(IMLInstruction* imlInstruction)
-{
-	WReg regR = gpReg<WReg>(imlInstruction->op_r_r_r_carry.regR);
-	WReg regA = gpReg<WReg>(imlInstruction->op_r_r_r_carry.regA);
-	WReg regB = gpReg<WReg>(imlInstruction->op_r_r_r_carry.regB);
-	WReg regCarry = gpReg<WReg>(imlInstruction->op_r_r_r_carry.regCarry);
-
-	if (imlInstruction->operation == PPCREC_IML_OP_ADD)
-	{
-		adds(regR, regA, regB);
-		cset(regCarry, Cond::CS);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_ADD_WITH_CARRY)
-	{
-		cmp(regCarry, 1);
-		adcs(regR, regA, regB);
-		cset(regCarry, Cond::CS);
-	}
-	else
-	{
-		cemu_assert_suspicious();
-		return false;
-	}
-
-	return true;
-}
-
-Cond ImlCondToArm64Cond(IMLCondition condition)
-{
-	switch (condition)
-	{
-	case IMLCondition::EQ:
-		return Cond::EQ;
-	case IMLCondition::NEQ:
-		return Cond::NE;
-	case IMLCondition::UNSIGNED_GT:
-		return Cond::HI;
-	case IMLCondition::UNSIGNED_LT:
-		return Cond::LO;
-	case IMLCondition::SIGNED_GT:
-		return Cond::GT;
-	case IMLCondition::SIGNED_LT:
-		return Cond::LT;
-	default:
-	{
-		cemu_assert_suspicious();
-		return Cond::EQ;
-	}
-	}
-}
-
-void AArch64GenContext_t::compare(IMLInstruction* imlInstruction)
-{
-	WReg regR = gpReg<WReg>(imlInstruction->op_compare.regR);
-	WReg regA = gpReg<WReg>(imlInstruction->op_compare.regA);
-	WReg regB = gpReg<WReg>(imlInstruction->op_compare.regB);
-	Cond cond = ImlCondToArm64Cond(imlInstruction->op_compare.cond);
-	cmp(regA, regB);
-	cset(regR, cond);
-}
-
-void AArch64GenContext_t::compare_s32(IMLInstruction* imlInstruction)
-{
-	WReg regR = gpReg<WReg>(imlInstruction->op_compare.regR);
-	WReg regA = gpReg<WReg>(imlInstruction->op_compare.regA);
-	sint32 imm = imlInstruction->op_compare_s32.immS32;
-	auto cond = ImlCondToArm64Cond(imlInstruction->op_compare.cond);
-	cmp_imm(regA, imm, TEMP_GPR1.WReg);
-	cset(regR, cond);
-}
-
-void AArch64GenContext_t::cjump(IMLInstruction* imlInstruction, IMLSegment* imlSegment)
-{
-	auto regBool = gpReg<WReg>(imlInstruction->op_conditional_jump.registerBool);
-	prepareJump(ConditionalRegJumpInfo{
-		.target = imlSegment->nextSegmentBranchTaken,
-		.regBool = regBool,
-		.mustBeTrue = imlInstruction->op_conditional_jump.mustBeTrue,
-	});
-}
-
-void AArch64GenContext_t::jump(IMLSegment* imlSegment)
-{
-	prepareJump(UnconditionalJumpInfo{.target = imlSegment->nextSegmentBranchTaken});
-}
-
-void AArch64GenContext_t::conditionalJumpCycleCheck(IMLSegment* imlSegment)
-{
-	ldr(TEMP_GPR1.WReg, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, remainingCycles)));
-	prepareJump(NegativeRegValueJumpInfo{
-		.target = imlSegment->nextSegmentBranchTaken,
-		.regValue = TEMP_GPR1.WReg,
-	});
-}
-
-void* PPCRecompiler_virtualHLE(PPCInterpreter_t* ppcInterpreter, uint32 hleFuncId)
-{
-	void* prevRSPTemp = ppcInterpreter->rspTemp;
-	if (hleFuncId == 0xFFD0)
-	{
-		ppcInterpreter->remainingCycles -= 500; // let subtract about 500 cycles for each HLE call
-		ppcInterpreter->gpr[3] = 0;
-		PPCInterpreter_nextInstruction(ppcInterpreter);
-		return PPCInterpreter_getCurrentInstance();
-	}
-	else
-	{
-		auto hleCall = PPCInterpreter_getHLECall(hleFuncId);
-		cemu_assert(hleCall != nullptr);
-		hleCall(ppcInterpreter);
-	}
-	ppcInterpreter->rspTemp = prevRSPTemp;
-	return PPCInterpreter_getCurrentInstance();
-}
-
-bool AArch64GenContext_t::macro(IMLInstruction* imlInstruction)
-{
-	if (imlInstruction->operation == PPCREC_IML_MACRO_B_TO_REG)
-	{
-		WReg branchDstReg = gpReg<WReg>(imlInstruction->op_macro.paramReg);
-
-		mov(TEMP_GPR1.WReg, offsetof(PPCRecompilerInstanceData_t, ppcRecompilerDirectJumpTable));
-		add(TEMP_GPR1.WReg, TEMP_GPR1.WReg, branchDstReg, ShMod::LSL, 1);
-		ldr(TEMP_GPR1.XReg, AdrExt(PPC_REC_INSTANCE_REG, TEMP_GPR1.WReg, ExtMod::UXTW));
-		mov(LR.WReg, branchDstReg);
-		br(TEMP_GPR1.XReg);
-		return true;
-	}
-	else if (imlInstruction->operation == PPCREC_IML_MACRO_BL)
-	{
-		uint32 newLR = imlInstruction->op_macro.param + 4;
-
-		mov(TEMP_GPR1.WReg, newLR);
-		str(TEMP_GPR1.WReg, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, spr.LR)));
-
-		uint32 newIP = imlInstruction->op_macro.param2;
-		uint64 lookupOffset = (uint64)offsetof(PPCRecompilerInstanceData_t, ppcRecompilerDirectJumpTable) + (uint64)newIP * 2ULL;
-		mov(TEMP_GPR1.XReg, lookupOffset);
-		ldr(TEMP_GPR1.XReg, AdrReg(PPC_REC_INSTANCE_REG, TEMP_GPR1.XReg));
-		mov(LR.WReg, newIP);
-		br(TEMP_GPR1.XReg);
-		return true;
-	}
-	else if (imlInstruction->operation == PPCREC_IML_MACRO_B_FAR)
-	{
-		uint32 newIP = imlInstruction->op_macro.param2;
-		uint64 lookupOffset = (uint64)offsetof(PPCRecompilerInstanceData_t, ppcRecompilerDirectJumpTable) + (uint64)newIP * 2ULL;
-		mov(TEMP_GPR1.XReg, lookupOffset);
-		ldr(TEMP_GPR1.XReg, AdrReg(PPC_REC_INSTANCE_REG, TEMP_GPR1.XReg));
-		mov(LR.WReg, newIP);
-		br(TEMP_GPR1.XReg);
-		return true;
-	}
-	else if (imlInstruction->operation == PPCREC_IML_MACRO_LEAVE)
-	{
-		uint32 currentInstructionAddress = imlInstruction->op_macro.param;
-		mov(TEMP_GPR1.XReg, (uint64)offsetof(PPCRecompilerInstanceData_t, ppcRecompilerDirectJumpTable)); // newIP = 0 special value for recompiler exit
-		ldr(TEMP_GPR1.XReg, AdrReg(PPC_REC_INSTANCE_REG, TEMP_GPR1.XReg));
-		mov(LR.WReg, currentInstructionAddress);
-		br(TEMP_GPR1.XReg);
-		return true;
-	}
-	else if (imlInstruction->operation == PPCREC_IML_MACRO_DEBUGBREAK)
-	{
-		brk(0xf000);
-		return true;
-	}
-	else if (imlInstruction->operation == PPCREC_IML_MACRO_COUNT_CYCLES)
-	{
-		uint32 cycleCount = imlInstruction->op_macro.param;
-		AdrUimm adrCycles = AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, remainingCycles));
-		ldr(TEMP_GPR1.WReg, adrCycles);
-		sub_imm(TEMP_GPR1.WReg, TEMP_GPR1.WReg, cycleCount, TEMP_GPR2.WReg);
-		str(TEMP_GPR1.WReg, adrCycles);
-		return true;
-	}
-	else if (imlInstruction->operation == PPCREC_IML_MACRO_HLE)
-	{
-		uint32 ppcAddress = imlInstruction->op_macro.param;
-		uint32 funcId = imlInstruction->op_macro.param2;
-		Label cyclesLeftLabel;
-
-		// update instruction pointer
-		mov(TEMP_GPR1.WReg, ppcAddress);
-		str(TEMP_GPR1.WReg, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, instructionPointer)));
-		// set parameters
-		str(x30, AdrPreImm(sp, -16));
-
-		mov(x0, HCPU_REG);
-		mov(w1, funcId);
-		// call HLE function
-
-		mov(TEMP_GPR1.XReg, (uint64)PPCRecompiler_virtualHLE);
-		blr(TEMP_GPR1.XReg);
-
-		mov(HCPU_REG, x0);
-
-		ldr(x30, AdrPostImm(sp, 16));
-
-		// check if cycles where decreased beyond zero, if yes -> leave recompiler
-		ldr(TEMP_GPR1.WReg, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, remainingCycles)));
-		tbz(TEMP_GPR1.WReg, 31, cyclesLeftLabel); // check if negative
-
-		mov(TEMP_GPR1.XReg, offsetof(PPCRecompilerInstanceData_t, ppcRecompilerDirectJumpTable));
-		ldr(TEMP_GPR1.XReg, AdrReg(PPC_REC_INSTANCE_REG, TEMP_GPR1.XReg));
-		ldr(LR.WReg, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, instructionPointer)));
-		// branch to recompiler exit
-		br(TEMP_GPR1.XReg);
-
-		L(cyclesLeftLabel);
-		// check if instruction pointer was changed
-		// assign new instruction pointer to LR.WReg
-		ldr(LR.WReg, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, instructionPointer)));
-		mov(TEMP_GPR1.XReg, offsetof(PPCRecompilerInstanceData_t, ppcRecompilerDirectJumpTable));
-		add(TEMP_GPR1.XReg, TEMP_GPR1.XReg, LR.XReg, ShMod::LSL, 1);
-		ldr(TEMP_GPR1.XReg, AdrReg(PPC_REC_INSTANCE_REG, TEMP_GPR1.XReg));
-		// branch to [ppcRecompilerDirectJumpTable + PPCInterpreter_t::instructionPointer * 2]
-		br(TEMP_GPR1.XReg);
-		return true;
-	}
-	else
-	{
-		cemuLog_log(LogType::Recompiler, "Unknown recompiler macro operation %d\n", imlInstruction->operation);
-		cemu_assert_suspicious();
-	}
-	return false;
-}
-
-bool AArch64GenContext_t::load(IMLInstruction* imlInstruction, bool indexed)
-{
-	cemu_assert_debug(imlInstruction->op_storeLoad.registerData.GetRegFormat() == IMLRegFormat::I32);
-	cemu_assert_debug(imlInstruction->op_storeLoad.registerMem.GetRegFormat() == IMLRegFormat::I32);
-	if (indexed)
-		cemu_assert_debug(imlInstruction->op_storeLoad.registerMem2.GetRegFormat() == IMLRegFormat::I32);
-
-	sint32 memOffset = imlInstruction->op_storeLoad.immS32;
-	bool signExtend = imlInstruction->op_storeLoad.flags2.signExtend;
-	bool switchEndian = imlInstruction->op_storeLoad.flags2.swapEndian;
-	WReg memReg = gpReg<WReg>(imlInstruction->op_storeLoad.registerMem);
-	WReg dataReg = gpReg<WReg>(imlInstruction->op_storeLoad.registerData);
-
-	add_imm(TEMP_GPR1.WReg, memReg, memOffset, TEMP_GPR1.WReg);
-	if (indexed)
-		add(TEMP_GPR1.WReg, TEMP_GPR1.WReg, gpReg<WReg>(imlInstruction->op_storeLoad.registerMem2));
-
-	auto adr = AdrExt(MEM_BASE_REG, TEMP_GPR1.WReg, ExtMod::UXTW);
-	if (imlInstruction->op_storeLoad.copyWidth == 32)
-	{
-		ldr(dataReg, adr);
-		if (switchEndian)
-			rev(dataReg, dataReg);
-	}
-	else if (imlInstruction->op_storeLoad.copyWidth == 16)
-	{
-		if (switchEndian)
-		{
-			ldrh(dataReg, adr);
-			rev(dataReg, dataReg);
-			if (signExtend)
-				asr(dataReg, dataReg, 16);
+			const uint32 neg = 0u - imm;
+			if (imm < 4096)
+				cmp(a, imm);
+			else if (neg < 4096)
+				cmn(a, neg);
 			else
-				lsr(dataReg, dataReg, 16);
+			{
+				LoadImm32(w16, imm);
+				cmp(a, w16);
+			}
 		}
-		else
+
+		// ---- PPCInterpreter_t field access (may use X17) ----
+
+		void CpuLoadW(const xa::WReg& r, uint32 offset)
 		{
-			if (signExtend)
-				ldrsh(dataReg, adr);
+			if (offset % 4 == 0 && offset < 4 * 4096)
+				ldr(r, ptr(rCPU, offset));
+			else if (offset < 256)
+				ldur(r, ptr(rCPU, (sint32)offset));
 			else
-				ldrh(dataReg, adr);
+			{
+				LoadImm64(x17, offset);
+				ldr(r, ptr(rCPU, x17));
+			}
+		}
+
+		void CpuStoreW(const xa::WReg& r, uint32 offset)
+		{
+			if (offset % 4 == 0 && offset < 4 * 4096)
+				str(r, ptr(rCPU, offset));
+			else if (offset < 256)
+				stur(r, ptr(rCPU, (sint32)offset));
+			else
+			{
+				LoadImm64(x17, offset);
+				str(r, ptr(rCPU, x17));
+			}
+		}
+
+		void CpuLoadB(const xa::WReg& r, uint32 offset)
+		{
+			if (offset < 4096)
+				ldrb(r, ptr(rCPU, offset));
+			else
+			{
+				LoadImm64(x17, offset);
+				ldrb(r, ptr(rCPU, x17));
+			}
+		}
+
+		void CpuStoreB(const xa::WReg& r, uint32 offset)
+		{
+			if (offset < 4096)
+				strb(r, ptr(rCPU, offset));
+			else
+			{
+				LoadImm64(x17, offset);
+				strb(r, ptr(rCPU, x17));
+			}
+		}
+
+		void CpuLoadQ(const xa::QReg& r, uint32 offset)
+		{
+			if (offset % 16 == 0 && offset < 16 * 4096)
+				ldr(r, ptr(rCPU, offset));
+			else if (offset < 256)
+				ldur(r, ptr(rCPU, (sint32)offset));
+			else
+			{
+				LoadImm64(x17, offset);
+				ldr(r, ptr(rCPU, x17));
+			}
+		}
+
+		void CpuStoreQ(const xa::QReg& r, uint32 offset)
+		{
+			if (offset % 16 == 0 && offset < 16 * 4096)
+				str(r, ptr(rCPU, offset));
+			else if (offset < 256)
+				stur(r, ptr(rCPU, (sint32)offset));
+			else
+			{
+				LoadImm64(x17, offset);
+				str(r, ptr(rCPU, x17));
+			}
+		}
+
+		void CpuLoadD(const xa::DReg& r, uint32 offset)
+		{
+			if (offset % 8 == 0 && offset < 8 * 4096)
+				ldr(r, ptr(rCPU, offset));
+			else if (offset < 256)
+				ldur(r, ptr(rCPU, (sint32)offset));
+			else
+			{
+				LoadImm64(x17, offset);
+				ldr(r, ptr(rCPU, x17));
+			}
+		}
+
+		// leave generated code, W0 = guest address to continue at
+		void EmitLeave()
+		{
+			LoadImm64(x16, (uint64)(uintptr_t)PPCRecompiler_leaveRecompilerCode_visited);
+			br(x16);
+		}
+
+		// continue at the guest address in W0 through the jump table (8 bytes per 4 byte instruction)
+		void EmitJumpViaTable()
+		{
+			add(x16, rJumpTable, x0, xa::LSL, 1);
+			ldr(x16, ptr(x16));
+			br(x16);
+		}
+
+		// W0 = guest address; only the code area has jump table entries
+		void EmitLeaveOrJumpViaTable()
+		{
+			static_assert(PPC_REC_CODE_AREA_START == 0 && PPC_REC_CODE_AREA_END == 0x10000000);
+			xa::Label outside;
+			lsr(w16, w0, 28);
+			cbnz(w16, outside);
+			EmitJumpViaTable();
+			L(outside);
+			EmitLeave();
+		}
+	};
+
+	// ---- code generator for one function ----
+
+	class Generator : public Emitter
+	{
+	public:
+		Generator(IMLFunction& func, size_t maxSize, xa::Allocator* allocator) : Emitter(maxSize, allocator), m_func(func) {}
+
+		bool Generate();
+		const std::vector<std::pair<uint32, uint32>>& EntryPoints() const { return m_entryPoints; }
+
+	private:
+		IMLFunction& m_func;
+		std::vector<std::pair<uint32, uint32>> m_entryPoints;
+		std::unordered_map<const IMLSegment*, size_t> m_blockIndex;
+		std::vector<xa::Label> m_blockLabels;
+
+		xa::Label& BlockLabel(const IMLSegment* b) { return m_blockLabels[m_blockIndex.at(b)]; }
+
+		uint32 Color(IMLReg r) const
+		{
+			const sint16 c = m_func.vregs[r].hostReg;
+			cemu_assert_debug(c >= 0);
+			return (uint32)c;
+		}
+		xa::WReg W(IMLReg r) const
+		{
+			cemu_assert_debug(m_func.KindOf(r) == IMLRegKind::Int && Color(r) < kIntColorCount);
+			return xa::WReg(kIntColorRegs[Color(r)]);
+		}
+		xa::XReg X(IMLReg r) const { return xa::XReg(kIntColorRegs[Color(r)]); }
+		xa::VReg V(IMLReg r) const
+		{
+			cemu_assert_debug(m_func.KindOf(r) == IMLRegKind::Float && Color(r) < kFloatColorCount);
+			return xa::VReg(kFloatRegBase + Color(r));
+		}
+		xa::DReg D(IMLReg r) const { return xa::DReg(kFloatRegBase + Color(r)); }
+		xa::QReg Q(IMLReg r) const { return xa::QReg(kFloatRegBase + Color(r)); }
+
+		// W16 = 32-bit guest address of a memory instruction (may use W17)
+		void GuestAddressToW16(const IMLInstruction& inst)
+		{
+			const IMLReg base = inst.r[1], index = inst.r[2];
+			if (base != IML_NOREG && index != IML_NOREG)
+			{
+				add(w16, W(base), W(index));
+				AddImm32(w16, w16, (uint32)inst.imm, w17);
+			}
+			else if (base != IML_NOREG || index != IML_NOREG)
+				AddImm32(w16, W(base != IML_NOREG ? base : index), (uint32)inst.imm, w17);
+			else
+				LoadImm32(w16, (uint32)inst.imm);
+		}
+
+		// host address operand of a guest memory access (may use W16/W17)
+		xa::AdrExt GuestMemory(const IMLInstruction& inst)
+		{
+			if (inst.r[1] != IML_NOREG && inst.r[2] == IML_NOREG && inst.imm == 0)
+				return xa::ptr(rMemBase, W(inst.r[1]), xa::UXTW);
+			GuestAddressToW16(inst);
+			return xa::ptr(rMemBase, w16, xa::UXTW);
+		}
+
+		void CallHelper(const void* function, uint32 saveMask)
+		{
+			const uint32 intMask = saveMask & 0xFFFF;
+			const uint32 floatMask = saveMask >> IML_SAVEMASK_FLOAT_SHIFT;
+			cemu_assert_debug((intMask & ~kIntCallerSavedColors) == 0);
+			for (uint32 c = 0; c < kIntColorCount; c++)
+			{
+				if (intMask & (1u << c))
+					str(xa::XReg(kIntColorRegs[c]), ptr(sp, kFrameIntSave + c * 8));
+			}
+			for (uint32 c = 0; c < kFloatColorCount; c++)
+			{
+				if (floatMask & (1u << c))
+					str(xa::QReg(kFloatRegBase + c), ptr(sp, kFrameFloatSave + c * 16));
+			}
+			mov(x0, rCPU);
+			LoadImm64(x16, (uint64)(uintptr_t)function);
+			blr(x16);
+			for (uint32 c = 0; c < kIntColorCount; c++)
+			{
+				if (intMask & (1u << c))
+					ldr(xa::XReg(kIntColorRegs[c]), ptr(sp, kFrameIntSave + c * 8));
+			}
+			for (uint32 c = 0; c < kFloatColorCount; c++)
+			{
+				if (floatMask & (1u << c))
+					ldr(xa::QReg(kFloatRegBase + c), ptr(sp, kFrameFloatSave + c * 16));
+			}
+		}
+
+		void CallHelperWithArg(const void* function, uint32 arg, uint32 saveMask)
+		{
+			LoadImm32(w1, arg);
+			CallHelper(function, saveMask);
+		}
+
+		// dst = src with the significand cut to 25 bits as the Espresso does for the frC operand of single precision multiplies (both lanes, uses V2 and W0)
+		void RoundMultiplier25(const xa::VReg& dst, const xa::VReg& src)
+		{
+			LoadImm32(w0, 0x08000000);
+			dup(v2.d2, x0);
+			add(dst.d2, src.d2, v2.d2);
+			ushr(dst.d2, dst.d2, 28);
+			shl(dst.d2, dst.d2, 28);
+		}
+
+		// both lanes rounded to single precision and widened again
+		void RoundPairToSingle(const xa::VReg& r)
+		{
+			fcvtn(r.s2, r.d2);
+			fcvtl(r.d2, r.s2);
+		}
+
+		bool EmitInt(const IMLInstruction& inst);
+		bool EmitMemory(const IMLInstruction& inst);
+		bool EmitFloat(const IMLInstruction& inst);
+		bool EmitFloatMemory(const IMLInstruction& inst);
+		bool EmitHome(const IMLInstruction& inst);
+		bool EmitControl(const IMLInstruction& inst, IMLSegment* block, IMLSegment* layoutNext);
+	};
+
+	xa::Cond HostCond(IMLCond c)
+	{
+		switch (c)
+		{
+		case IMLCond::EQ: return xa::EQ;
+		case IMLCond::NE: return xa::NE;
+		case IMLCond::SLT: return xa::LT;
+		case IMLCond::SGT: return xa::GT;
+		case IMLCond::SLE: return xa::LE;
+		case IMLCond::SGE: return xa::GE;
+		case IMLCond::ULT: return xa::LO;
+		case IMLCond::UGT: return xa::HI;
+		case IMLCond::ULE: return xa::LS;
+		case IMLCond::UGE: return xa::HS;
+		}
+		cemu_assert_debug(false);
+		return xa::EQ;
+	}
+
+	xa::Cond InvertCond(xa::Cond c)
+	{
+		return (xa::Cond)((uint32)c ^ 1);
+	}
+
+	bool Generator::EmitInt(const IMLInstruction& inst)
+	{
+		switch (inst.op)
+		{
+		case IMLOp::MOV:
+			MoveW(W(inst.r[0]), W(inst.r[1]));
+			return true;
+		case IMLOp::MOVI:
+			LoadImm32(W(inst.r[0]), (uint32)inst.imm);
+			return true;
+		case IMLOp::ADD:
+		case IMLOp::SUB:
+		case IMLOp::AND:
+		case IMLOp::OR:
+		case IMLOp::XOR:
+		case IMLOp::MUL:
+		{
+			const xa::WReg d = W(inst.r[0]);
+			const xa::WReg a = W(inst.r[1]);
+			if (inst.HasImm())
+			{
+				const uint32 imm = (uint32)inst.imm;
+				switch (inst.op)
+				{
+				case IMLOp::ADD: AddImm32(d, a, imm, w16); return true;
+				case IMLOp::SUB: AddImm32(d, a, 0u - imm, w16); return true;
+				case IMLOp::MUL:
+					LoadImm32(w16, imm);
+					mul(d, a, w16);
+					return true;
+				default:
+					break;
+				}
+				// logical operations
+				if (imm == 0)
+				{
+					if (inst.op == IMLOp::AND)
+						movz(d, 0);
+					else
+						MoveW(d, a);
+					return true;
+				}
+				if (imm == 0xFFFFFFFF && inst.op != IMLOp::OR)
+				{
+					if (inst.op == IMLOp::AND)
+						MoveW(d, a);
+					else
+						mvn(d, a);
+					return true;
+				}
+				if (IsLogicalImm32(imm))
+				{
+					if (inst.op == IMLOp::AND)
+						and_(d, a, (uint64)imm);
+					else if (inst.op == IMLOp::OR)
+						orr(d, a, (uint64)imm);
+					else
+						eor(d, a, (uint64)imm);
+					return true;
+				}
+				LoadImm32(w16, imm);
+				if (inst.op == IMLOp::AND)
+					and_(d, a, w16);
+				else if (inst.op == IMLOp::OR)
+					orr(d, a, w16);
+				else
+					eor(d, a, w16);
+				return true;
+			}
+			const xa::WReg b = W(inst.r[2]);
+			switch (inst.op)
+			{
+			case IMLOp::ADD: add(d, a, b); break;
+			case IMLOp::SUB: sub(d, a, b); break;
+			case IMLOp::AND: and_(d, a, b); break;
+			case IMLOp::OR: orr(d, a, b); break;
+			case IMLOp::XOR: eor(d, a, b); break;
+			default: mul(d, a, b); break;
+			}
+			return true;
+		}
+		case IMLOp::ANDC:
+			bic(W(inst.r[0]), W(inst.r[1]), W(inst.r[2]));
+			return true;
+		case IMLOp::ORC:
+			orn(W(inst.r[0]), W(inst.r[1]), W(inst.r[2]));
+			return true;
+		case IMLOp::NOT:
+			mvn(W(inst.r[0]), W(inst.r[1]));
+			return true;
+		case IMLOp::NEG:
+			neg(W(inst.r[0]), W(inst.r[1]));
+			return true;
+		case IMLOp::MULHS:
+			smull(x0, W(inst.r[1]), W(inst.r[2]));
+			lsr(X(inst.r[0]), x0, 32);
+			return true;
+		case IMLOp::MULHU:
+			umull(x0, W(inst.r[1]), W(inst.r[2]));
+			lsr(X(inst.r[0]), x0, 32);
+			return true;
+		case IMLOp::DIVS:
+		{
+			// the host gives 0 for x/0 and 0x80000000 for 0x80000000/-1,
+			// the Espresso gives (x < 0 ? -1 : 0) and -1
+			const xa::WReg a = W(inst.r[1]);
+			const xa::WReg b = W(inst.r[2]);
+			sdiv(w0, a, b);
+			asr(w1, a, 31);
+			cmp(b, 0);
+			csel(w0, w1, w0, xa::EQ);
+			LoadImm32(w2, 0x80000000);
+			cmp(a, w2);
+			ccmn(b, 1, 0, xa::EQ);
+			movn(w1, 0);
+			csel(w0, w1, w0, xa::EQ);
+			mov(W(inst.r[0]), w0);
+			return true;
+		}
+		case IMLOp::DIVU:
+			udiv(W(inst.r[0]), W(inst.r[1]), W(inst.r[2]));
+			return true;
+		case IMLOp::SHL:
+		case IMLOp::SHR:
+		case IMLOp::SAR:
+		{
+			const xa::WReg d = W(inst.r[0]);
+			const xa::WReg a = W(inst.r[1]);
+			const uint32 amount = (uint32)inst.imm & 31;
+			if (amount == 0)
+				MoveW(d, a);
+			else if (inst.op == IMLOp::SHL)
+				lsl(d, a, amount);
+			else if (inst.op == IMLOp::SHR)
+				lsr(d, a, amount);
+			else
+				asr(d, a, amount);
+			return true;
+		}
+		case IMLOp::ROTL:
+		{
+			const xa::WReg d = W(inst.r[0]);
+			const xa::WReg a = W(inst.r[1]);
+			if (inst.HasImm())
+			{
+				const uint32 amount = (uint32)inst.imm & 31;
+				if (amount == 0)
+					MoveW(d, a);
+				else
+					ror(d, a, 32 - amount);
+				return true;
+			}
+			// rotating right by -n mod 32
+			neg(w0, W(inst.r[2]));
+			ror(d, a, w0);
+			return true;
+		}
+		case IMLOp::SLW:
+		case IMLOp::SRW:
+		{
+			// the host uses the amount mod 32, the guest clears the result for 32-63
+			const xa::WReg b = W(inst.r[2]);
+			if (inst.op == IMLOp::SLW)
+				lsl(w0, W(inst.r[1]), b);
+			else
+				lsr(w0, W(inst.r[1]), b);
+			tst(b, (uint64)32);
+			csel(W(inst.r[0]), wzr, w0, xa::NE);
+			return true;
+		}
+		case IMLOp::SRAW:
+		{
+			const xa::WReg d = W(inst.r[0]);
+			const xa::WReg ca = W(inst.r[1]);
+			const xa::WReg a = W(inst.r[2]);
+			if (inst.HasImm())
+			{
+				const uint32 amount = (uint32)inst.imm & 31;
+				if (amount == 0)
+				{
+					movz(w0, 0);
+					MoveW(d, a);
+					mov(ca, w0);
+					return true;
+				}
+				// CA: negative value and a one bit shifted out
+				tst(a, (uint64)((1u << amount) - 1));
+				cset(w0, xa::NE);
+				lsr(w1, a, 31);
+				and_(w0, w0, w1);
+				asr(d, a, amount);
+				mov(ca, w0);
+				return true;
+			}
+			// shift the sign extended value by the 6-bit amount
+			and_(w16, W(inst.r[3]), (uint64)63);
+			sxtw(x1, a);
+			asr(x0, x1, x16);
+			lsl(x2, x0, x16);
+			cmp(x2, x1);
+			cset(w2, xa::NE);
+			lsr(x1, x1, 63);
+			and_(w2, w2, w1);
+			mov(d, w0);
+			mov(ca, w2);
+			return true;
+		}
+		case IMLOp::EXTS8:
+			sxtb(W(inst.r[0]), W(inst.r[1]));
+			return true;
+		case IMLOp::EXTS16:
+			sxth(W(inst.r[0]), W(inst.r[1]));
+			return true;
+		case IMLOp::CNTLZ:
+			clz(W(inst.r[0]), W(inst.r[1]));
+			return true;
+		case IMLOp::BSWAP32:
+			rev(W(inst.r[0]), W(inst.r[1]));
+			return true;
+		case IMLOp::BSWAP16:
+			rev(w0, W(inst.r[1]));
+			lsr(W(inst.r[0]), w0, 16);
+			return true;
+		case IMLOp::ADDC:
+		case IMLOp::ADDE:
+		{
+			// r0 = result, r1 = carry (in and out for ADDE), r2 = a, r3 = b
+			xa::WReg a = W(inst.r[2]);
+			if (inst.flags & IMLF_INV_A)
+			{
+				mvn(w0, a);
+				a = w0;
+			}
+			xa::WReg b = w1;
+			if (inst.HasImm())
+				LoadImm32(w1, (uint32)inst.imm);
+			else
+				b = W(inst.r[3]);
+			if (inst.op == IMLOp::ADDE)
+			{
+				cmp(W(inst.r[1]), 1); // C = carry in
+				adcs(w2, a, b);
+			}
+			else
+				adds(w2, a, b);
+			cset(w3, xa::CS);
+			mov(W(inst.r[0]), w2);
+			mov(W(inst.r[1]), w3);
+			return true;
+		}
+		case IMLOp::CMPSET:
+			if (inst.HasImm())
+				CompareImm32(W(inst.r[1]), (uint32)inst.imm);
+			else
+				cmp(W(inst.r[1]), W(inst.r[2]));
+			cset(W(inst.r[0]), HostCond(inst.Cond()));
+			return true;
+		case IMLOp::CMPCR:
+		{
+			const bool isSigned = inst.Cond() == IMLCond::SLT;
+			if (inst.HasImm())
+				CompareImm32(W(inst.r[3]), (uint32)inst.imm);
+			else
+				cmp(W(inst.r[3]), W(inst.r[4]));
+			cset(W(inst.r[0]), isSigned ? xa::LT : xa::LO);
+			cset(W(inst.r[1]), isSigned ? xa::GT : xa::HI);
+			cset(W(inst.r[2]), xa::EQ);
+			return true;
+		}
+		default:
+			cemu_assert_debug(false);
+			return false;
 		}
 	}
-	else if (imlInstruction->op_storeLoad.copyWidth == 8)
-	{
-		if (signExtend)
-			ldrsb(dataReg, adr);
-		else
-			ldrb(dataReg, adr);
-	}
-	else
-	{
-		return false;
-	}
-	return true;
-}
 
-bool AArch64GenContext_t::store(IMLInstruction* imlInstruction, bool indexed)
-{
-	cemu_assert_debug(imlInstruction->op_storeLoad.registerData.GetRegFormat() == IMLRegFormat::I32);
-	cemu_assert_debug(imlInstruction->op_storeLoad.registerMem.GetRegFormat() == IMLRegFormat::I32);
-	if (indexed)
-		cemu_assert_debug(imlInstruction->op_storeLoad.registerMem2.GetRegFormat() == IMLRegFormat::I32);
-
-	WReg dataReg = gpReg<WReg>(imlInstruction->op_storeLoad.registerData);
-	WReg memReg = gpReg<WReg>(imlInstruction->op_storeLoad.registerMem);
-	sint32 memOffset = imlInstruction->op_storeLoad.immS32;
-	bool swapEndian = imlInstruction->op_storeLoad.flags2.swapEndian;
-
-	add_imm(TEMP_GPR1.WReg, memReg, memOffset, TEMP_GPR1.WReg);
-	if (indexed)
-		add(TEMP_GPR1.WReg, TEMP_GPR1.WReg, gpReg<WReg>(imlInstruction->op_storeLoad.registerMem2));
-	AdrExt adr = AdrExt(MEM_BASE_REG, TEMP_GPR1.WReg, ExtMod::UXTW);
-	if (imlInstruction->op_storeLoad.copyWidth == 32)
+	bool Generator::EmitMemory(const IMLInstruction& inst)
 	{
-		if (swapEndian)
+		switch (inst.op)
 		{
-			rev(TEMP_GPR2.WReg, dataReg);
-			str(TEMP_GPR2.WReg, adr);
+		case IMLOp::LOAD:
+		{
+			const xa::WReg d = W(inst.r[0]);
+			const bool reversed = (inst.flags & IMLF_BYTEREV) != 0;
+			const xa::AdrExt m = GuestMemory(inst);
+			if (inst.size == 4)
+			{
+				ldr(d, m);
+				if (!reversed)
+					rev(d, d);
+			}
+			else if (inst.size == 2)
+			{
+				ldrh(d, m);
+				if (!reversed)
+					rev16(d, d);
+				if (inst.flags & IMLF_SIGNEXT)
+					sxth(d, d);
+			}
+			else
+			{
+				if (inst.flags & IMLF_SIGNEXT)
+					ldrsb(d, m);
+				else
+					ldrb(d, m);
+			}
+			return true;
 		}
-		else
+		case IMLOp::STORE:
 		{
-			str(dataReg, adr);
+			const bool reversed = (inst.flags & IMLF_BYTEREV) != 0;
+			xa::WReg v = W(inst.r[0]);
+			if (!reversed && inst.size == 4)
+			{
+				rev(w1, v);
+				v = w1;
+			}
+			else if (!reversed && inst.size == 2)
+			{
+				rev16(w1, v);
+				v = w1;
+			}
+			const xa::AdrExt m = GuestMemory(inst);
+			if (inst.size == 4)
+				str(v, m);
+			else if (inst.size == 2)
+				strh(v, m);
+			else
+				strb(v, m);
+			return true;
 		}
-	}
-	else if (imlInstruction->op_storeLoad.copyWidth == 16)
-	{
-		if (swapEndian)
+		case IMLOp::ZEROLINE:
+			GuestAddressToW16(inst);
+			and_(w16, w16, (uint64)0xFFFFFFE0);
+			add(x16, rMemBase, w16, xa::UXTW);
+			stp(xzr, xzr, ptr(x16));
+			stp(xzr, xzr, ptr(x16, 16));
+			return true;
+		case IMLOp::CMPXCHG:
 		{
-			rev(TEMP_GPR2.WReg, dataReg);
-			lsr(TEMP_GPR2.WReg, TEMP_GPR2.WReg, 16);
-			strh(TEMP_GPR2.WReg, adr);
-		}
-		else
-		{
-			strh(dataReg, adr);
-		}
-	}
-	else if (imlInstruction->op_storeLoad.copyWidth == 8)
-	{
-		strb(dataReg, adr);
-	}
-	else
-	{
-		return false;
-	}
-	return true;
-}
-
-void AArch64GenContext_t::atomic_cmp_store(IMLInstruction* imlInstruction)
-{
-	WReg outReg = gpReg<WReg>(imlInstruction->op_atomic_compare_store.regBoolOut);
-	WReg eaReg = gpReg<WReg>(imlInstruction->op_atomic_compare_store.regEA);
-	WReg valReg = gpReg<WReg>(imlInstruction->op_atomic_compare_store.regWriteValue);
-	WReg cmpValReg = gpReg<WReg>(imlInstruction->op_atomic_compare_store.regCompareValue);
-
-	if (s_cpu.isAtomicSupported())
-	{
-		mov(TEMP_GPR2.WReg, cmpValReg);
-		add(TEMP_GPR1.XReg, MEM_BASE_REG, eaReg, ExtMod::UXTW);
-		casal(TEMP_GPR2.WReg, valReg, AdrNoOfs(TEMP_GPR1.XReg));
-		cmp(TEMP_GPR2.WReg, cmpValReg);
-		cset(outReg, Cond::EQ);
-	}
-	else
-	{
-		Label notEqual;
-		Label storeFailed;
-
-		add(TEMP_GPR1.XReg, MEM_BASE_REG, eaReg, ExtMod::UXTW);
-		L(storeFailed);
-		ldaxr(TEMP_GPR2.WReg, AdrNoOfs(TEMP_GPR1.XReg));
-		cmp(TEMP_GPR2.WReg, cmpValReg);
-		bne(notEqual);
-		stlxr(TEMP_GPR2.WReg, valReg, AdrNoOfs(TEMP_GPR1.XReg));
-		cbnz(TEMP_GPR2.WReg, storeFailed);
-
-		L(notEqual);
-		cset(outReg, Cond::EQ);
-	}
-}
-
-bool AArch64GenContext_t::fpr_load(IMLInstruction* imlInstruction, bool indexed)
-{
-	const IMLReg& dataReg = imlInstruction->op_storeLoad.registerData;
-	SReg dataSReg = fpReg<SReg>(dataReg);
-	DReg dataDReg = fpReg<DReg>(dataReg);
-	WReg realRegisterMem = gpReg<WReg>(imlInstruction->op_storeLoad.registerMem);
-	WReg indexReg = indexed ? gpReg<WReg>(imlInstruction->op_storeLoad.registerMem2) : wzr;
-	sint32 adrOffset = imlInstruction->op_storeLoad.immS32;
-	uint8 mode = imlInstruction->op_storeLoad.mode;
-
-	if (mode == PPCREC_FPR_LD_MODE_SINGLE)
-	{
-		add_imm(TEMP_GPR1.WReg, realRegisterMem, adrOffset, TEMP_GPR1.WReg);
-		if (indexed)
-			add(TEMP_GPR1.WReg, TEMP_GPR1.WReg, indexReg);
-		ldr(TEMP_GPR2.WReg, AdrExt(MEM_BASE_REG, TEMP_GPR1.WReg, ExtMod::UXTW));
-		rev(TEMP_GPR2.WReg, TEMP_GPR2.WReg);
-		fmov(dataSReg, TEMP_GPR2.WReg);
-
-		if (imlInstruction->op_storeLoad.flags2.notExpanded)
-		{
-			// leave value as single
-		}
-		else
-		{
-			fcvt(dataDReg, dataSReg);
-		}
-	}
-	else if (mode == PPCREC_FPR_LD_MODE_DOUBLE)
-	{
-		add_imm(TEMP_GPR1.WReg, realRegisterMem, adrOffset, TEMP_GPR1.WReg);
-		if (indexed)
-			add(TEMP_GPR1.WReg, TEMP_GPR1.WReg, indexReg);
-		ldr(TEMP_GPR2.XReg, AdrExt(MEM_BASE_REG, TEMP_GPR1.WReg, ExtMod::UXTW));
-		rev(TEMP_GPR2.XReg, TEMP_GPR2.XReg);
-		fmov(dataDReg, TEMP_GPR2.XReg);
-	}
-	else
-	{
-		return false;
-	}
-	return true;
-}
-
-// store to memory
-bool AArch64GenContext_t::fpr_store(IMLInstruction* imlInstruction, bool indexed)
-{
-	const IMLReg& dataImlReg = imlInstruction->op_storeLoad.registerData;
-	DReg dataDReg = fpReg<DReg>(dataImlReg);
-	SReg dataSReg = fpReg<SReg>(dataImlReg);
-	WReg memReg = gpReg<WReg>(imlInstruction->op_storeLoad.registerMem);
-	WReg indexReg = indexed ? gpReg<WReg>(imlInstruction->op_storeLoad.registerMem2) : wzr;
-	sint32 memOffset = imlInstruction->op_storeLoad.immS32;
-	uint8 mode = imlInstruction->op_storeLoad.mode;
-
-	if (mode == PPCREC_FPR_ST_MODE_SINGLE || mode == PPCREC_FPR_ST_MODE_SINGLE_FTZ)
-	{
-		if (imlInstruction->op_storeLoad.flags2.notExpanded)
-		{
-			// value is already in single format
-			fmov(TEMP_GPR2.WReg, dataSReg);
-		}
-		else if (mode == PPCREC_FPR_ST_MODE_SINGLE_FTZ)
-		{
-			fcvt(TEMP_FPR.SReg, dataDReg);
-			fmov(TEMP_GPR2.WReg, TEMP_FPR.SReg);
-		}
-		else
-		{
-			// stfs truncates instead of rounding, so build the result directly
-			Label denormal;
-			Label done;
-			fmov(TEMP_GPR2.XReg, dataDReg);
-			ubfx(TEMP_GPR1.XReg, TEMP_GPR2.XReg, 52, 11);
-			sub(TEMP_GPR1.WReg, TEMP_GPR1.WReg, 874);
-			cmp(TEMP_GPR1.WReg, 23);
-			blo(denormal);
-			lsr(TEMP_GPR1.XReg, TEMP_GPR2.XReg, 62);
-			ubfx(TEMP_GPR2.XReg, TEMP_GPR2.XReg, 29, 30);
-			orr(TEMP_GPR2.WReg, TEMP_GPR2.WReg, TEMP_GPR1.WReg, ShMod::LSL, 30);
+			// r0 = success, r1 = EA, r2 = expected value, r3 = new value, r4 = 0: fail without access
+			xa::Label fail, done, retry, mismatch, unaligned;
+			cbz(W(inst.r[4]), fail);
+			rev(w0, W(inst.r[2]));
+			rev(w1, W(inst.r[3]));
+			add(x16, rMemBase, W(inst.r[1]), xa::UXTW);
+			tst(W(inst.r[1]), (uint64)3);
+			b(xa::NE, unaligned);
+			L(retry);
+			ldaxr(w2, ptr(x16));
+			cmp(w2, w0);
+			b(xa::NE, mismatch);
+			stlxr(w3, w1, ptr(x16));
+			cbnz(w3, retry);
+			movz(W(inst.r[0]), 1);
+			b(done);
+			L(mismatch);
+			clrex(15);
+			b(fail);
+			// exclusive accesses need natural alignment
+			L(unaligned);
+			ldr(w2, ptr(x16));
+			cmp(w2, w0);
+			b(xa::NE, fail);
+			str(w1, ptr(x16));
+			movz(W(inst.r[0]), 1);
+			b(done);
+			L(fail);
+			movz(W(inst.r[0]), 0);
 			L(done);
-			m_coldCode.emplace_back([this, denormal, done, dataDReg]() mutable
-			{
-				// scale denormals before extracting the mantissa
-				L(denormal);
-				mov(TEMP_GPR1.XReg, 0x4940000000000000ull); // 2^149
-				fmov(TEMP_FPR.DReg, TEMP_GPR1.XReg);
-				fmul(TEMP_FPR.DReg, TEMP_FPR.DReg, dataDReg);
-				fabs(TEMP_FPR.DReg, TEMP_FPR.DReg);
-				fcvtzs(TEMP_GPR1.WReg, TEMP_FPR.DReg);
-				lsr(TEMP_GPR2.XReg, TEMP_GPR2.XReg, 63);
-				orr(TEMP_GPR2.WReg, TEMP_GPR1.WReg, TEMP_GPR2.WReg, ShMod::LSL, 31);
-				b(done);
-			});
+			return true;
 		}
-		add_imm(TEMP_GPR1.WReg, memReg, memOffset, TEMP_GPR1.WReg);
-		if (indexed)
-			add(TEMP_GPR1.WReg, TEMP_GPR1.WReg, indexReg);
-		rev(TEMP_GPR2.WReg, TEMP_GPR2.WReg);
-		str(TEMP_GPR2.WReg, AdrExt(MEM_BASE_REG, TEMP_GPR1.WReg, ExtMod::UXTW));
-	}
-	else if (mode == PPCREC_FPR_ST_MODE_DOUBLE)
-	{
-		add_imm(TEMP_GPR1.WReg, memReg, memOffset, TEMP_GPR1.WReg);
-		if (indexed)
-			add(TEMP_GPR1.WReg, TEMP_GPR1.WReg, indexReg);
-		fmov(TEMP_GPR2.XReg, dataDReg);
-		rev(TEMP_GPR2.XReg, TEMP_GPR2.XReg);
-		str(TEMP_GPR2.XReg, AdrExt(MEM_BASE_REG, TEMP_GPR1.WReg, ExtMod::UXTW));
-	}
-	else if (mode == PPCREC_FPR_ST_MODE_UI32_FROM_PS0)
-	{
-		add_imm(TEMP_GPR1.WReg, memReg, memOffset, TEMP_GPR1.WReg);
-		if (indexed)
-			add(TEMP_GPR1.WReg, TEMP_GPR1.WReg, indexReg);
-		fmov(TEMP_GPR2.WReg, dataSReg);
-		rev(TEMP_GPR2.WReg, TEMP_GPR2.WReg);
-		str(TEMP_GPR2.WReg, AdrExt(MEM_BASE_REG, TEMP_GPR1.WReg, ExtMod::UXTW));
-	}
-	else
-	{
-		cemu_assert_suspicious();
-		cemuLog_log(LogType::Recompiler, "PPCRecompilerAArch64Gen_imlInstruction_fpr_store(): Unsupported mode %d\n", mode);
-		return false;
-	}
-	return true;
-}
-
-// FPR op FPR
-void AArch64GenContext_t::fpr_r_r(IMLInstruction* imlInstruction)
-{
-	auto imlRegR = imlInstruction->op_fpr_r_r.regR;
-	auto imlRegA = imlInstruction->op_fpr_r_r.regA;
-
-	if (imlInstruction->operation == PPCREC_IML_OP_FPR_FLOAT_TO_INT)
-	{
-		fcvtzs(gpReg<WReg>(imlRegR), fpReg<DReg>(imlRegA));
-		return;
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_FPR_INT_TO_FLOAT)
-	{
-		scvtf(fpReg<DReg>(imlRegR), gpReg<WReg>(imlRegA));
-		return;
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_FPR_BITCAST_INT_TO_FLOAT)
-	{
-		cemu_assert_debug(imlRegR.GetRegFormat() == IMLRegFormat::F64); // assuming target is always F64 for now
-		// exact operation depends on size of types. Floats are automatically promoted to double if the target is F64
-		DReg regFprDReg = fpReg<DReg>(imlRegR);
-		SReg regFprSReg = fpReg<SReg>(imlRegR);
-		if (imlRegA.GetRegFormat() == IMLRegFormat::I32)
-		{
-			fmov(regFprSReg, gpReg<WReg>(imlRegA));
-			// float to double
-			fcvt(regFprDReg, regFprSReg);
+		default:
+			return false;
 		}
-		else if (imlRegA.GetRegFormat() == IMLRegFormat::I64)
+	}
+
+	bool Generator::EmitHome(const IMLInstruction& inst)
+	{
+		const IMLReg owner = (IMLReg)inst.imm;
+		const IMLVRegInfo& info = m_func.vregs[owner];
+		const bool isFloat = m_func.KindOf(inst.r[0]) == IMLRegKind::Float;
+		const bool load = inst.op == IMLOp::HOMELOAD;
+		if (IMLGuest::IsGuest(owner))
 		{
-			fmov(regFprDReg, gpReg<XReg>(imlRegA));
-		}
-		else
-		{
-			cemu_assert_unimplemented();
-		}
-		return;
-	}
-
-	DReg regR = fpReg<DReg>(imlRegR);
-	DReg regA = fpReg<DReg>(imlRegA);
-
-	if (imlInstruction->operation == PPCREC_IML_OP_FPR_ASSIGN)
-	{
-		fmov(regR, regA);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_FPR_MULTIPLY)
-	{
-		fmul(regR, regR, regA);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_FPR_DIVIDE)
-	{
-		fdiv(regR, regR, regA);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_FPR_ADD)
-	{
-		fadd(regR, regR, regA);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_FPR_SUB)
-	{
-		fsub(regR, regR, regA);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_FPR_FCTIWZ)
-	{
-		fcvtzs(regR, regA);
-	}
-	else
-	{
-		cemu_assert_suspicious();
-	}
-}
-
-void AArch64GenContext_t::fpr_r_r_r(IMLInstruction* imlInstruction)
-{
-	DReg regR = fpReg<DReg>(imlInstruction->op_fpr_r_r_r.regR);
-	DReg regA = fpReg<DReg>(imlInstruction->op_fpr_r_r_r.regA);
-	DReg regB = fpReg<DReg>(imlInstruction->op_fpr_r_r_r.regB);
-
-	if (imlInstruction->operation == PPCREC_IML_OP_FPR_MULTIPLY)
-	{
-		fmul(regR, regA, regB);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_FPR_ADD)
-	{
-		fadd(regR, regA, regB);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_FPR_SUB)
-	{
-		fsub(regR, regA, regB);
-	}
-	else
-	{
-		cemu_assert_suspicious();
-	}
-}
-
-/*
- * FPR = op (fprA, fprB, fprC)
- */
-void AArch64GenContext_t::fpr_r_r_r_r(IMLInstruction* imlInstruction)
-{
-	DReg regR = fpReg<DReg>(imlInstruction->op_fpr_r_r_r_r.regR);
-	DReg regA = fpReg<DReg>(imlInstruction->op_fpr_r_r_r_r.regA);
-	DReg regB = fpReg<DReg>(imlInstruction->op_fpr_r_r_r_r.regB);
-	DReg regC = fpReg<DReg>(imlInstruction->op_fpr_r_r_r_r.regC);
-
-	if (imlInstruction->operation == PPCREC_IML_OP_FPR_SELECT)
-	{
-		fcmp(regA, 0.0);
-		fcsel(regR, regC, regB, Cond::GE);
-	}
-	else
-	{
-		cemu_assert_suspicious();
-	}
-}
-
-void AArch64GenContext_t::fpr_r(IMLInstruction* imlInstruction)
-{
-	DReg regRDReg = fpReg<DReg>(imlInstruction->op_fpr_r.regR);
-	SReg regRSReg = fpReg<SReg>(imlInstruction->op_fpr_r.regR);
-
-	if (imlInstruction->operation == PPCREC_IML_OP_FPR_NEGATE)
-	{
-		fneg(regRDReg, regRDReg);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_FPR_LOAD_ONE)
-	{
-		fmov(regRDReg, 1.0);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_FPR_ABS)
-	{
-		fabs(regRDReg, regRDReg);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_FPR_NEGATIVE_ABS)
-	{
-		fabs(regRDReg, regRDReg);
-		fneg(regRDReg, regRDReg);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_FPR_ROUND_TO_SINGLE_PRECISION_BOTTOM)
-	{
-		// convert to 32bit single
-		fcvt(regRSReg, regRDReg);
-		// convert back to 64bit double
-		fcvt(regRDReg, regRSReg);
-	}
-	else if (imlInstruction->operation == PPCREC_IML_OP_FPR_EXPAND_F32_TO_F64)
-	{
-		// convert bottom to 64bit double
-		fcvt(regRDReg, regRSReg);
-	}
-	else
-	{
-		cemu_assert_unimplemented();
-	}
-}
-
-Cond ImlFPCondToArm64Cond(IMLCondition cond)
-{
-	switch (cond)
-	{
-	case IMLCondition::UNORDERED_GT:
-		return Cond::GT;
-	case IMLCondition::UNORDERED_LT:
-		return Cond::MI;
-	case IMLCondition::UNORDERED_EQ:
-		return Cond::EQ;
-	case IMLCondition::UNORDERED_U:
-		return Cond::VS;
-	default:
-	{
-		cemu_assert_suspicious();
-		return Cond::EQ;
-	}
-	}
-}
-
-void AArch64GenContext_t::fpr_compare(IMLInstruction* imlInstruction)
-{
-	WReg regR = gpReg<WReg>(imlInstruction->op_fpr_compare.regR);
-	DReg regA = fpReg<DReg>(imlInstruction->op_fpr_compare.regA);
-	DReg regB = fpReg<DReg>(imlInstruction->op_fpr_compare.regB);
-	auto cond = ImlFPCondToArm64Cond(imlInstruction->op_fpr_compare.cond);
-	fcmp(regA, regB);
-	cset(regR, cond);
-}
-
-void AArch64GenContext_t::call_imm(IMLInstruction* imlInstruction)
-{
-	str(x30, AdrPreImm(sp, -16));
-	mov(TEMP_GPR1.XReg, imlInstruction->op_call_imm.callAddress);
-	blr(TEMP_GPR1.XReg);
-	ldr(x30, AdrPostImm(sp, 16));
-}
-
-bool PPCRecompiler_generateAArch64Code(struct PPCRecFunction_t* PPCRecFunction, struct ppcImlGenContext_t* ppcImlGenContext)
-{
-	AArch64Allocator allocator;
-	AArch64GenContext_t aarch64GenContext{&allocator};
-
-	// generate iml instruction code
-	bool codeGenerationFailed = false;
-	for (IMLSegment* segIt : ppcImlGenContext->segmentList2)
-	{
-		if (codeGenerationFailed)
-			break;
-		segIt->x64Offset = aarch64GenContext.getSize();
-
-		aarch64GenContext.storeSegmentStart(segIt);
-
-		for (size_t i = 0; i < segIt->imlList.size(); i++)
-		{
-			IMLInstruction* imlInstruction = segIt->imlList.data() + i;
-			if (imlInstruction->type == PPCREC_IML_TYPE_R_NAME)
+			const uint32 offset = (uint32)info.home;
+			if (isFloat)
 			{
-				aarch64GenContext.r_name(imlInstruction);
+				if (load)
+					CpuLoadQ(Q(inst.r[0]), offset);
+				else
+					CpuStoreQ(Q(inst.r[0]), offset);
 			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_NAME_R)
+			else if (info.homeSize == 1)
 			{
-				aarch64GenContext.name_r(imlInstruction);
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_R_R)
-			{
-				if (!aarch64GenContext.r_r(imlInstruction))
-					codeGenerationFailed = true;
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_R_S32)
-			{
-				if (!aarch64GenContext.r_s32(imlInstruction))
-					codeGenerationFailed = true;
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_R_R_S32)
-			{
-				if (!aarch64GenContext.r_r_s32(imlInstruction))
-					codeGenerationFailed = true;
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_R_R_S32_CARRY)
-			{
-				if (!aarch64GenContext.r_r_s32_carry(imlInstruction))
-					codeGenerationFailed = true;
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_R_R_R)
-			{
-				if (!aarch64GenContext.r_r_r(imlInstruction))
-					codeGenerationFailed = true;
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_R_R_R_CARRY)
-			{
-				if (!aarch64GenContext.r_r_r_carry(imlInstruction))
-					codeGenerationFailed = true;
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_COMPARE)
-			{
-				aarch64GenContext.compare(imlInstruction);
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_COMPARE_S32)
-			{
-				aarch64GenContext.compare_s32(imlInstruction);
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_CONDITIONAL_JUMP)
-			{
-				aarch64GenContext.cjump(imlInstruction, segIt);
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_JUMP)
-			{
-				aarch64GenContext.jump(segIt);
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_CJUMP_CYCLE_CHECK)
-			{
-				aarch64GenContext.conditionalJumpCycleCheck(segIt);
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_MACRO)
-			{
-				if (!aarch64GenContext.macro(imlInstruction))
-					codeGenerationFailed = true;
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_LOAD)
-			{
-				if (!aarch64GenContext.load(imlInstruction, false))
-					codeGenerationFailed = true;
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_LOAD_INDEXED)
-			{
-				if (!aarch64GenContext.load(imlInstruction, true))
-					codeGenerationFailed = true;
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_STORE)
-			{
-				if (!aarch64GenContext.store(imlInstruction, false))
-					codeGenerationFailed = true;
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_STORE_INDEXED)
-			{
-				if (!aarch64GenContext.store(imlInstruction, true))
-					codeGenerationFailed = true;
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_ATOMIC_CMP_STORE)
-			{
-				aarch64GenContext.atomic_cmp_store(imlInstruction);
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_CALL_IMM)
-			{
-				aarch64GenContext.call_imm(imlInstruction);
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_NO_OP)
-			{
-				// no op
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_FPR_LOAD)
-			{
-				if (!aarch64GenContext.fpr_load(imlInstruction, false))
-					codeGenerationFailed = true;
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_FPR_LOAD_INDEXED)
-			{
-				if (!aarch64GenContext.fpr_load(imlInstruction, true))
-					codeGenerationFailed = true;
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_FPR_STORE)
-			{
-				if (!aarch64GenContext.fpr_store(imlInstruction, false))
-					codeGenerationFailed = true;
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_FPR_STORE_INDEXED)
-			{
-				if (!aarch64GenContext.fpr_store(imlInstruction, true))
-					codeGenerationFailed = true;
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_FPR_R_R)
-			{
-				aarch64GenContext.fpr_r_r(imlInstruction);
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_FPR_R_R_R)
-			{
-				aarch64GenContext.fpr_r_r_r(imlInstruction);
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_FPR_R_R_R_R)
-			{
-				aarch64GenContext.fpr_r_r_r_r(imlInstruction);
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_FPR_R)
-			{
-				aarch64GenContext.fpr_r(imlInstruction);
-			}
-			else if (imlInstruction->type == PPCREC_IML_TYPE_FPR_COMPARE)
-			{
-				aarch64GenContext.fpr_compare(imlInstruction);
+				if (load)
+					CpuLoadB(W(inst.r[0]), offset);
+				else
+					CpuStoreB(W(inst.r[0]), offset);
 			}
 			else
 			{
-				codeGenerationFailed = true;
-				cemu_assert_suspicious();
-				cemuLog_log(LogType::Recompiler, "PPCRecompiler_generateAArch64Code(): Unsupported iml type {}", imlInstruction->type);
+				if (load)
+					CpuLoadW(W(inst.r[0]), offset);
+				else
+					CpuStoreW(W(inst.r[0]), offset);
 			}
+			return true;
+		}
+		cemu_assert_debug(info.home >= 0 && info.home < (sint32)kMaxSpillSlots);
+		const uint32 offset = kFrameSpill + (uint32)info.home * 16;
+		if (isFloat)
+		{
+			if (load)
+				ldr(Q(inst.r[0]), ptr(sp, offset));
+			else
+				str(Q(inst.r[0]), ptr(sp, offset));
+		}
+		else
+		{
+			if (load)
+				ldr(W(inst.r[0]), ptr(sp, offset));
+			else
+				str(W(inst.r[0]), ptr(sp, offset));
+		}
+		return true;
+	}
+
+	bool Generator::EmitFloat(const IMLInstruction& inst)
+	{
+		switch (inst.op)
+		{
+		case IMLOp::FMOV:
+			MoveV(V(inst.r[0]), V(inst.r[1]));
+			return true;
+		case IMLOp::FMOVLO:
+			if (Color(inst.r[0]) != Color(inst.r[1]))
+				ins(V(inst.r[0]).d2[0], V(inst.r[1]).d2[0]);
+			return true;
+		case IMLOp::FSIGN:
+		case IMLOp::PSIGN:
+		{
+			// sign bit operations, NaNs are not touched otherwise
+			const xa::VReg a = V(inst.r[1]);
+			switch ((IMLSign)inst.sub)
+			{
+			case IMLSign::NEG:
+				fneg(v0.d2, a.d2);
+				break;
+			case IMLSign::ABS:
+				fabs(v0.d2, a.d2);
+				break;
+			case IMLSign::NABS:
+				fabs(v0.d2, a.d2);
+				fneg(v0.d2, v0.d2);
+				break;
+			}
+			if (inst.op == IMLOp::FSIGN)
+				ins(V(inst.r[0]).d2[0], v0.d2[0]);
+			else
+				mov(V(inst.r[0]).b16, v0.b16);
+			return true;
+		}
+		case IMLOp::PMERGE:
+			ins(v0.d2[0], V(inst.r[1]).d2[inst.sub >> 1]);
+			ins(v0.d2[1], V(inst.r[2]).d2[inst.sub & 1]);
+			mov(V(inst.r[0]).b16, v0.b16);
+			return true;
+		case IMLOp::FARITH:
+		{
+			const xa::DReg a = D(inst.r[1]);
+			const xa::DReg b = D(inst.r[2]);
+			switch ((IMLArith)inst.sub)
+			{
+			case IMLArith::ADD: fadd(d0, a, b); break;
+			case IMLArith::SUB: fsub(d0, a, b); break;
+			case IMLArith::MUL: fmul(d0, a, b); break;
+			case IMLArith::DIV: fdiv(d0, a, b); break;
+			}
+			ins(V(inst.r[0]).d2[0], v0.d2[0]);
+			return true;
+		}
+		case IMLOp::FARITHS:
+		{
+			const xa::DReg a = D(inst.r[1]);
+			const xa::DReg b = D(inst.r[2]);
+			switch ((IMLArith)inst.sub)
+			{
+			case IMLArith::ADD: fadd(d0, a, b); break;
+			case IMLArith::SUB: fsub(d0, a, b); break;
+			case IMLArith::MUL:
+				RoundMultiplier25(v1, V(inst.r[2]));
+				fmul(d0, a, d1);
+				break;
+			case IMLArith::DIV: fdiv(d0, a, b); break;
+			}
+			fcvt(s0, d0);
+			fcvt(d0, s0);
+			dup(V(inst.r[0]).d2, v0.d2[0]);
+			return true;
+		}
+		case IMLOp::FMADD:
+		{
+			// r1 = a, r2 = c, r3 = b
+			const xa::DReg a = D(inst.r[1]);
+			const xa::DReg c = D(inst.r[2]);
+			const xa::DReg b = D(inst.r[3]);
+			switch ((IMLMadd)inst.sub)
+			{
+			case IMLMadd::MADD: fmadd(d0, a, c, b); break;   // a*c + b
+			case IMLMadd::MSUB: fnmsub(d0, a, c, b); break;  // a*c - b
+			case IMLMadd::NMADD: fnmadd(d0, a, c, b); break; // -a*c - b
+			case IMLMadd::NMSUB: fmsub(d0, a, c, b); break;  // b - a*c
+			}
+			ins(V(inst.r[0]).d2[0], v0.d2[0]);
+			return true;
+		}
+		case IMLOp::FMADDS:
+		{
+			// the negated forms are negated either after rounding to single
+			// precision or inside the fused operation, like the interpreter
+			const IMLMadd kind = (IMLMadd)inst.sub;
+			const bool negated = kind == IMLMadd::NMADD || kind == IMLMadd::NMSUB;
+			const bool negateAfterRounding = negated && InterpreterNegatesSingleMaddAfterRounding();
+			const xa::DReg a = D(inst.r[1]);
+			const xa::DReg b = D(inst.r[3]);
+			RoundMultiplier25(v1, V(inst.r[2]));
+			if (kind == IMLMadd::MADD || (kind == IMLMadd::NMADD && negateAfterRounding))
+				fmadd(d0, a, d1, b);          // a*c + b
+			else if (kind == IMLMadd::MSUB || (kind == IMLMadd::NMSUB && negateAfterRounding))
+				fnmsub(d0, a, d1, b);         // a*c - b
+			else if (kind == IMLMadd::NMADD)
+				fnmadd(d0, a, d1, b);         // -a*c - b
+			else
+				fmsub(d0, a, d1, b);          // b - a*c
+			fcvt(s0, d0);
+			if (negateAfterRounding)
+				fneg(s0, s0);
+			fcvt(d0, s0);
+			dup(V(inst.r[0]).d2, v0.d2[0]);
+			return true;
+		}
+		case IMLOp::PARITH:
+		{
+			const xa::VReg a = V(inst.r[1]);
+			const xa::VReg b = V(inst.r[2]);
+			switch ((IMLArith)inst.sub)
+			{
+			case IMLArith::ADD: fadd(v0.d2, a.d2, b.d2); break;
+			case IMLArith::SUB: fsub(v0.d2, a.d2, b.d2); break;
+			case IMLArith::MUL:
+				RoundMultiplier25(v1, b);
+				fmul(v0.d2, a.d2, v1.d2);
+				break;
+			case IMLArith::DIV: fdiv(v0.d2, a.d2, b.d2); break;
+			}
+			RoundPairToSingle(v0);
+			mov(V(inst.r[0]).b16, v0.b16);
+			return true;
+		}
+		case IMLOp::PMADD:
+		{
+			// r1 = a, r2 = c, r3 = b
+			const IMLMadd kind = (IMLMadd)inst.sub;
+			const xa::VReg a = V(inst.r[1]);
+			const xa::VReg b = V(inst.r[3]);
+			RoundMultiplier25(v1, V(inst.r[2]));
+			if (kind == IMLMadd::MADD)
+			{
+				// ps_madd rounds the product before adding
+				fmul(v0.d2, a.d2, v1.d2);
+				RoundPairToSingle(v0);
+				fadd(v0.d2, v0.d2, b.d2);
+				RoundPairToSingle(v0);
+			}
+			else
+			{
+				if (kind == IMLMadd::NMADD)
+					mov(v0.b16, b.b16);
+				else
+					fneg(v0.d2, b.d2);
+				fmla(v0.d2, a.d2, v1.d2);
+				fcvtn(v0.s2, v0.d2);
+				if (kind != IMLMadd::MSUB)
+					fneg(v0.s2, v0.s2);
+				fcvtl(v0.d2, v0.s2);
+			}
+			mov(V(inst.r[0]).b16, v0.b16);
+			return true;
+		}
+		case IMLOp::PMULS:
+		case IMLOp::PMADDS:
+		{
+			// both lanes of a times one lane of c (plus b)
+			dup(v1.d2, V(inst.r[2]).d2[inst.sub & 1]);
+			RoundMultiplier25(v1, v1);
+			if (inst.op == IMLOp::PMULS)
+				fmul(v0.d2, V(inst.r[1]).d2, v1.d2);
+			else
+			{
+				mov(v0.b16, V(inst.r[3]).b16);
+				fmla(v0.d2, V(inst.r[1]).d2, v1.d2);
+			}
+			RoundPairToSingle(v0);
+			mov(V(inst.r[0]).b16, v0.b16);
+			return true;
+		}
+		case IMLOp::PSUM:
+		{
+			// r1 = a, r2 = b, r3 = c. The sum is a.ps0 + b.ps1
+			dup(d1, V(inst.r[2]).d2[1]);
+			fadd(d0, D(inst.r[1]), d1);
+			mov(v2.b16, V(inst.r[3]).b16);
+			ins(v2.d2[inst.sub == 0 ? 0 : 1], v0.d2[0]);
+			RoundPairToSingle(v2);
+			mov(V(inst.r[0]).b16, v2.b16);
+			return true;
+		}
+		case IMLOp::FSEL:
+		case IMLOp::PSEL:
+		{
+			// r1 = a, r2 = c, r3 = b: c where a >= -0.0, b otherwise (also for NaN)
+			if (inst.op == IMLOp::FSEL)
+			{
+				fcmge(d0, D(inst.r[1]), 0.0);
+				dup(v0.d2, v0.d2[0]);
+			}
+			else
+				fcmge(v0.d2, V(inst.r[1]).d2, 0.0);
+			bsl(v0.b16, V(inst.r[2]).b16, V(inst.r[3]).b16);
+			mov(V(inst.r[0]).b16, v0.b16);
+			return true;
+		}
+		case IMLOp::FRSP:
+			fcvt(s0, D(inst.r[1]));
+			fcvt(d0, s0);
+			dup(V(inst.r[0]).d2, v0.d2[0]);
+			return true;
+		case IMLOp::FCTIWZ:
+		{
+			// truncate with saturation; NaN gives 0x80000000
+			const xa::DReg b = D(inst.r[1]);
+			fcvtzs(w0, b);
+			fcmp(b, b);
+			LoadImm32(w16, 0x80000000);
+			csel(w0, w16, w0, xa::VS);
+			// 0xFFF80000 in the upper word, bit 32 for negative inputs giving 0
+			fmov(x1, b);
+			lsr(x1, x1, 63);
+			cmp(w0, 0);
+			csel(x1, x1, xzr, xa::EQ);
+			movz(x16, 0xFFF8, 48);
+			orr(x16, x16, x0);
+			orr(x16, x16, x1, xa::LSL, 32);
+			ins(V(inst.r[0]).d2[0], x16);
+			return true;
+		}
+		case IMLOp::FCTIW:
+		case IMLOp::FRES:
+		case IMLOp::FRSQRTE:
+		case IMLOp::PRES:
+		case IMLOp::PRSQRTE:
+		{
+			const uint32 tmp = offsetof(PPCInterpreter_t, temporaryFPR);
+			CpuStoreQ(Q(inst.r[1]), tmp);
+			const void* helper;
+			switch (inst.op)
+			{
+			case IMLOp::FCTIW: helper = (const void*)&Helper_FCTIW; break;
+			case IMLOp::FRES: helper = (const void*)&Helper_FRES; break;
+			case IMLOp::FRSQRTE: helper = (const void*)&Helper_FRSQRTE; break;
+			case IMLOp::PRES: helper = (const void*)&Helper_PRES; break;
+			default: helper = (const void*)&Helper_PRSQRTE; break;
+			}
+			CallHelper(helper, inst.saveMask);
+			if (inst.op == IMLOp::FCTIW || inst.op == IMLOp::FRSQRTE)
+			{
+				// ps1 is kept
+				CpuLoadD(d0, tmp);
+				ins(V(inst.r[0]).d2[0], v0.d2[0]);
+			}
+			else
+				CpuLoadQ(Q(inst.r[0]), tmp);
+			return true;
+		}
+		case IMLOp::FCMP:
+		{
+			// r0-r3 = LT, GT, EQ, UN; r4 = a, r5 = b; sub = lane
+			xa::DReg a = D(inst.r[4]);
+			xa::DReg b = D(inst.r[5]);
+			if (inst.sub == 1)
+			{
+				dup(d0, V(inst.r[4]).d2[1]);
+				dup(d1, V(inst.r[5]).d2[1]);
+				a = d0;
+				b = d1;
+			}
+			const xa::WReg lt = W(inst.r[0]), gt = W(inst.r[1]), eq = W(inst.r[2]), un = W(inst.r[3]);
+			fcmp(a, b);
+			cset(lt, xa::MI);
+			cset(gt, xa::GT);
+			cset(eq, xa::EQ);
+			cset(un, xa::VS);
+			// FPSCR[FPCC] = LT GT EQ UN
+			orr(w2, un, eq, xa::LSL, 1);
+			orr(w2, w2, gt, xa::LSL, 2);
+			orr(w2, w2, lt, xa::LSL, 3);
+			const uint32 fpscrOffset = offsetof(PPCInterpreter_t, fpscr);
+			CpuLoadW(w3, fpscrOffset);
+			and_(w3, w3, (uint64)0xFFFF0FFF);
+			orr(w3, w3, w2, xa::LSL, 12);
+			if ((inst.flags & IMLF_ORDERED) == 0)
+			{
+				// signaling NaN operands set VXSNAN: all ones exponent,
+				// non-zero fraction and the quiet bit clear
+				movz(x16, 0xFFE0, 48);
+				for (const xa::DReg& operand : {a, b})
+				{
+					fmov(x0, operand);
+					lsl(x1, x0, 1);
+					cmp(x1, x16);
+					cset(w1, xa::HI);
+					tst(x0, (uint64)0x0008000000000000ull);
+					csel(w1, w1, wzr, xa::EQ);
+					orr(w3, w3, w1, xa::LSL, 24);
+				}
+			}
+			CpuStoreW(w3, fpscrOffset);
+			return true;
+		}
+		default:
+			cemu_assert_debug(false);
+			return false;
 		}
 	}
 
-	// handle failed code generation
-	if (codeGenerationFailed)
+	bool Generator::EmitFloatMemory(const IMLInstruction& inst)
 	{
-		return false;
+		switch (inst.op)
+		{
+		case IMLOp::LOADFS:
+		{
+			// lfs widens exactly with integer operations: FCVT would flush
+			// denormals when FPCR.FZ is set and quiet signaling NaNs
+			ldr(w0, GuestMemory(inst));
+			rev(w0, w0);
+			xa::Label lowExponent, assemble;
+			ubfx(w1, w0, 23, 8);         // exponent
+			and_(w2, w0, (uint64)0x007FFFFF); // fraction
+			and_(w3, w0, (uint64)0x80000000); // sign
+			cbz(w1, lowExponent);
+			cmp(w1, 0xFF);
+			add(w1, w1, 1023 - 127);
+			movz(w16, 0x7FF);
+			csel(w1, w16, w1, xa::EQ);
+			b(assemble);
+			L(lowExponent);
+			cbz(w2, assemble); // zero
+			// denormal: normalise the fraction
+			clz(w16, w2);
+			sub(w1, w16, 8);
+			lsl(w2, w2, w1);
+			and_(w2, w2, (uint64)0x007FFFFF);
+			movz(w1, 905);
+			sub(w1, w1, w16);
+			L(assemble);
+			lsl(x2, x2, 29);
+			orr(x2, x2, x1, xa::LSL, 52);
+			orr(x2, x2, x3, xa::LSL, 32);
+			dup(V(inst.r[0]).d2, x2);
+			return true;
+		}
+		case IMLOp::LOADFD:
+			ldr(x0, GuestMemory(inst));
+			rev(x0, x0);
+			ins(V(inst.r[0]).d2[0], x0);
+			return true;
+		case IMLOp::STOREF:
+		{
+			const xa::VReg src = V(inst.r[0]);
+			switch ((IMLFMem)inst.sub)
+			{
+			case IMLFMem::SINGLE:
+			{
+				// stfs does not round: values in the single denormal range
+				// are denormalised, everything else keeps the sign, the top
+				// exponent bit and the next 30 bits
+				xa::Label denormal, store;
+				fmov(x0, xa::DReg(src.getIdx()));
+				ubfx(x1, x0, 52, 11);
+				sub(w2, w1, 874);
+				cmp(w2, 22);
+				b(xa::LS, denormal);
+				lsr(x2, x0, 32);
+				and_(w2, w2, (uint64)0xC0000000);
+				ubfx(x3, x0, 29, 30);
+				orr(w2, w2, w3);
+				b(store);
+				L(denormal);
+				ubfx(x3, x0, 21, 31);
+				orr(w3, w3, (uint64)0x80000000);
+				movz(w2, 905);
+				sub(w2, w2, w1);
+				lsr(w3, w3, w2);
+				lsr(x2, x0, 32);
+				and_(w2, w2, (uint64)0x80000000);
+				orr(w2, w2, w3);
+				L(store);
+				rev(w2, w2);
+				str(w2, GuestMemory(inst));
+				return true;
+			}
+			case IMLFMem::DOUBLE:
+				fmov(x0, xa::DReg(src.getIdx()));
+				rev(x0, x0);
+				str(x0, GuestMemory(inst));
+				return true;
+			case IMLFMem::IWX:
+				fmov(w0, xa::SReg(src.getIdx()));
+				rev(w0, w0);
+				str(w0, GuestMemory(inst));
+				return true;
+			}
+			return false;
+		}
+		case IMLOp::PSQLOAD:
+		{
+			const bool singleSlot = (inst.flags & IMLF_PSQ_W) != 0;
+			const xa::WReg gqr = W(inst.r[3]);
+			GuestAddressToW16(inst);
+			const xa::AdrExt m = xa::ptr(rMemBase, w16, xa::UXTW);
+			xa::Label slow, done;
+			// float data (load type 0) is converted inline
+			tst(gqr, (uint64)0x00070000);
+			b(xa::NE, slow);
+			if (singleSlot)
+			{
+				ldr(w0, m);
+				rev(w0, w0);
+				fmov(s0, w0);
+				fcvt(d0, s0);
+				fmov(d1, 1.0);
+				ins(v0.d2[1], v1.d2[0]);
+			}
+			else
+			{
+				ldr(x0, m);
+				rev32(x0, x0); // first value in the low half
+				fmov(d0, x0);
+				fcvtl(v0.d2, v0.s2);
+			}
+			mov(V(inst.r[0]).b16, v0.b16);
+			b(done);
+			L(slow);
+			CpuStoreW(w16, offsetof(PPCInterpreter_t, temporaryGPR_reg));
+			CpuStoreW(gqr, offsetof(PPCInterpreter_t, temporaryGPR_reg) + 4);
+			CallHelper(singleSlot ? (const void*)&Helper_PSQLoadSingle : (const void*)&Helper_PSQLoad, inst.saveMask);
+			CpuLoadQ(Q(inst.r[0]), offsetof(PPCInterpreter_t, temporaryFPR));
+			L(done);
+			return true;
+		}
+		case IMLOp::PSQSTORE:
+		{
+			const bool singleSlot = (inst.flags & IMLF_PSQ_W) != 0;
+			const xa::WReg gqr = W(inst.r[3]);
+			const xa::VReg src = V(inst.r[0]);
+			GuestAddressToW16(inst);
+			const xa::AdrExt m = xa::ptr(rMemBase, w16, xa::UXTW);
+			xa::Label slow, done;
+			// float data (store type 0) is converted inline
+			tst(gqr, (uint64)0x00000007);
+			b(xa::NE, slow);
+			if (singleSlot)
+			{
+				fcvt(s0, xa::DReg(src.getIdx()));
+				fmov(w0, s0);
+				rev(w0, w0);
+				str(w0, m);
+			}
+			else
+			{
+				fcvtn(v0.s2, src.d2);
+				fmov(x0, d0);
+				rev32(x0, x0);
+				str(x0, m);
+			}
+			b(done);
+			L(slow);
+			CpuStoreW(w16, offsetof(PPCInterpreter_t, temporaryGPR_reg));
+			CpuStoreW(gqr, offsetof(PPCInterpreter_t, temporaryGPR_reg) + 4);
+			CpuStoreQ(Q(inst.r[0]), offsetof(PPCInterpreter_t, temporaryFPR));
+			CallHelper(singleSlot ? (const void*)&Helper_PSQStoreSingle : (const void*)&Helper_PSQStore, inst.saveMask);
+			L(done);
+			return true;
+		}
+		default:
+			return false;
+		}
 	}
 
-	for (size_t i = 0; i < aarch64GenContext.m_coldCode.size(); i++)
-		aarch64GenContext.m_coldCode[i]();
-
-	const size_t codeSize = aarch64GenContext.getSize();
-	if (!aarch64GenContext.processAllJumps())
+	bool Generator::EmitControl(const IMLInstruction& inst, IMLSegment* block, IMLSegment* layoutNext)
 	{
-		cemuLog_log(LogType::Recompiler, "PPCRecompiler_generateAArch64Code(): some jumps exceeded the +/-128MB offset.");
+		auto conditional = [&](xa::Cond cc)
+		{
+			if (block->taken == layoutNext)
+				b(InvertCond(cc), BlockLabel(block->next));
+			else
+			{
+				b(cc, BlockLabel(block->taken));
+				if (block->next != layoutNext)
+					b(BlockLabel(block->next));
+			}
+		};
+		const uint32 cyclesOffset = offsetof(PPCInterpreter_t, remainingCycles);
+		switch (inst.op)
+		{
+		case IMLOp::JUMP:
+			if (block->taken != layoutNext)
+				b(BlockLabel(block->taken));
+			return true;
+		case IMLOp::BRANCH:
+		{
+			const xa::WReg r = W(inst.r[0]);
+			const bool takenIfNonZero = inst.Cond() == IMLCond::NE;
+			if (block->taken == layoutNext)
+			{
+				if (takenIfNonZero)
+					cbz(r, BlockLabel(block->next));
+				else
+					cbnz(r, BlockLabel(block->next));
+			}
+			else
+			{
+				if (takenIfNonZero)
+					cbnz(r, BlockLabel(block->taken));
+				else
+					cbz(r, BlockLabel(block->taken));
+				if (block->next != layoutNext)
+					b(BlockLabel(block->next));
+			}
+			return true;
+		}
+		case IMLOp::BRANCHCMP:
+			if (inst.HasImm())
+				CompareImm32(W(inst.r[0]), (uint32)inst.imm);
+			else
+				cmp(W(inst.r[0]), W(inst.r[1]));
+			conditional(HostCond(inst.Cond()));
+			return true;
+		case IMLOp::CYCLECHECK:
+			CpuLoadW(w16, cyclesOffset);
+			cmp(w16, 0);
+			conditional(xa::LT);
+			return true;
+		case IMLOp::EXITB:
+			LoadImm32(w0, inst.addr);
+			if (inst.addr >= PPC_REC_CODE_AREA_END)
+				EmitLeave();
+			else
+				EmitJumpViaTable();
+			return true;
+		case IMLOp::EXITBR:
+			mov(w0, W(inst.r[0]));
+			EmitLeaveOrJumpViaTable();
+			return true;
+		case IMLOp::EXITLEAVE:
+			LoadImm32(w0, inst.addr);
+			EmitLeave();
+			return true;
+		case IMLOp::HLE:
+		{
+			LoadImm32(w16, inst.addr);
+			CpuStoreW(w16, offsetof(PPCInterpreter_t, instructionPointer));
+			CallHelperWithArg((const void*)&Helper_HLE, (uint32)inst.imm, 0);
+			CpuLoadW(w0, offsetof(PPCInterpreter_t, instructionPointer));
+			CpuLoadW(w16, cyclesOffset);
+			xa::Label timeUp;
+			tbnz(w16, 31, timeUp);
+			EmitLeaveOrJumpViaTable();
+			L(timeUp);
+			EmitLeave();
+			return true;
+		}
+		default:
+			cemu_assert_debug(false);
+			return false;
+		}
+	}
+
+	bool Generator::Generate()
+	{
+		if (m_func.spillSlotCount > kMaxSpillSlots)
+			return false;
+		const size_t blockCount = m_func.blocks.size();
+		m_blockLabels = std::vector<xa::Label>(blockCount);
+		for (size_t i = 0; i < blockCount; i++)
+			m_blockIndex[m_func.blocks[i]] = i;
+		for (size_t bi = 0; bi < blockCount; bi++)
+		{
+			IMLSegment* block = m_func.blocks[bi];
+			IMLSegment* layoutNext = bi + 1 < blockCount ? m_func.blocks[bi + 1] : nullptr;
+			L(m_blockLabels[bi]);
+			if (block->isEntry)
+				m_entryPoints.emplace_back(block->entryAddress, (uint32)getSize());
+			bool terminated = false;
+			for (const IMLInstruction& inst : block->insts)
+			{
+				bool ok = true;
+				switch (inst.op)
+				{
+				case IMLOp::NOP:
+					break;
+				case IMLOp::LOAD:
+				case IMLOp::STORE:
+				case IMLOp::ZEROLINE:
+				case IMLOp::CMPXCHG:
+					ok = EmitMemory(inst);
+					break;
+				case IMLOp::LOADFS:
+				case IMLOp::LOADFD:
+				case IMLOp::STOREF:
+				case IMLOp::PSQLOAD:
+				case IMLOp::PSQSTORE:
+					ok = EmitFloatMemory(inst);
+					break;
+				case IMLOp::HOMELOAD:
+				case IMLOp::HOMESTORE:
+					ok = EmitHome(inst);
+					break;
+				case IMLOp::FMOV:
+				case IMLOp::FMOVLO:
+				case IMLOp::FSIGN:
+				case IMLOp::PSIGN:
+				case IMLOp::PMERGE:
+				case IMLOp::FARITH:
+				case IMLOp::FARITHS:
+				case IMLOp::FMADD:
+				case IMLOp::FMADDS:
+				case IMLOp::PARITH:
+				case IMLOp::PMADD:
+				case IMLOp::PMULS:
+				case IMLOp::PMADDS:
+				case IMLOp::PSUM:
+				case IMLOp::FSEL:
+				case IMLOp::PSEL:
+				case IMLOp::FRSP:
+				case IMLOp::FCTIWZ:
+				case IMLOp::FCTIW:
+				case IMLOp::FRES:
+				case IMLOp::FRSQRTE:
+				case IMLOp::PRES:
+				case IMLOp::PRSQRTE:
+				case IMLOp::FCMP:
+					ok = EmitFloat(inst);
+					break;
+				case IMLOp::CYCLES:
+				{
+					const uint32 offset = offsetof(PPCInterpreter_t, remainingCycles);
+					CpuLoadW(w0, offset);
+					AddImm32(w0, w0, 0u - (uint32)inst.imm, w1);
+					CpuStoreW(w0, offset);
+					break;
+				}
+				case IMLOp::INTERP:
+				{
+					CallHelperWithArg((const void*)&Helper_Interpret, inst.addr, inst.saveMask);
+					// anything but the next instruction leaves generated code
+					xa::Label next;
+					CompareImm32(w0, inst.addr + 4);
+					b(xa::EQ, next);
+					EmitLeave();
+					L(next);
+					break;
+				}
+				case IMLOp::MFTB:
+					CallHelper(inst.sub ? (const void*)&Helper_TimeBaseUpper : (const void*)&Helper_TimeBaseLower, inst.saveMask);
+					mov(W(inst.r[0]), w0);
+					break;
+				default:
+					if (inst.Info().terminator)
+					{
+						ok = EmitControl(inst, block, layoutNext);
+						terminated = true;
+					}
+					else
+						ok = EmitInt(inst);
+					break;
+				}
+				if (!ok)
+					return false;
+			}
+			if (!terminated && block->next != layoutNext)
+				b(BlockLabel(block->next));
+		}
+		return true;
+	}
+
+	// generous upper bound of the code size of a function
+	size_t EstimateCodeSize(const IMLFunction& func)
+	{
+		size_t count = 0;
+		for (const IMLSegment* b : func.blocks)
+			count += b->insts.size() + 1;
+		return 4096 + count * 512;
+	}
+}
+
+IMLRegisterAllocatorParameters AArch64Backend_GetAllocatorParameters()
+{
+	using namespace AArch64Backend;
+	IMLRegisterAllocatorParameters p;
+	p.intRegCount = kIntColorCount;
+	p.floatRegCount = kFloatColorCount;
+	p.intCallerSavedMask = kIntCallerSavedColors;
+	p.floatCallerSavedMask = kFloatCallerSavedColors;
+	return p;
+}
+
+bool PPCRecompiler_generateAArch64Code(PPCRecCompiledFunction* recFunc, IMLFunction& func, std::vector<std::pair<uint32, uint32>>& entryPointsOut)
+{
+	using namespace AArch64Backend;
+	StagingAllocator allocator;
+	try
+	{
+		Generator gen(func, EstimateCodeSize(func), &allocator);
+		if (!gen.Generate())
+			return false;
+		void* code = PublishCode(gen.getCode(), gen.getSize());
+		if (!code)
+			return false;
+		recFunc->hostCode = code;
+		recFunc->hostCodeSize = gen.getSize();
+		entryPointsOut = gen.EntryPoints();
+		return true;
+	}
+	catch (const Xbyak_aarch64::Error& e)
+	{
+		// code too big or a branch out of range: the function stays interpreted
+		cemuLog_log(LogType::Force, "Recompiler: AArch64 code generation failed for 0x{:08x} ({})", func.entryAddress, e.what());
 		return false;
 	}
-	aarch64GenContext.setSize(codeSize);
-
-	aarch64GenContext.readyRE();
-
-	// set code
-	PPCRecFunction->x86Code = aarch64GenContext.getCode<void*>();
-	PPCRecFunction->x86Size = aarch64GenContext.getMaxSize();
-	// set free disabled to skip freeing the code from the CodeGenerator destructor
-	allocator.setFreeDisabled(true);
-	return true;
 }
 
-void PPCRecompiler_cleanupAArch64Code(void* code, size_t size)
-{
-	AArch64Allocator allocator;
-	if (allocator.useProtect())
-		CodeArray::protect(code, size, CodeArray::PROTECT_RW);
-	allocator.free(static_cast<uint32*>(code));
-}
-
-void AArch64GenContext_t::enterRecompilerCode()
-{
-	constexpr size_t STACK_SIZE = 160 /* x19 .. x30 + v8.d[0] .. v15.d[0] */;
-	static_assert(STACK_SIZE % 16 == 0);
-	sub(sp, sp, STACK_SIZE);
-	mov(x9, sp);
-
-	stp(x19, x20, AdrPostImm(x9, 16));
-	stp(x21, x22, AdrPostImm(x9, 16));
-	stp(x23, x24, AdrPostImm(x9, 16));
-	stp(x25, x26, AdrPostImm(x9, 16));
-	stp(x27, x28, AdrPostImm(x9, 16));
-	stp(x29, x30, AdrPostImm(x9, 16));
-	st4((v8.d - v11.d)[0], AdrPostImm(x9, 32));
-	st4((v12.d - v15.d)[0], AdrPostImm(x9, 32));
-	mov(HCPU_REG, x1); // call argument 2
-	mov(PPC_REC_INSTANCE_REG, (uint64)ppcRecompilerInstanceData);
-	mov(MEM_BASE_REG, (uint64)memory_base);
-
-	// branch to recFunc
-	blr(x0); // call argument 1
-
-	mov(x9, sp);
-	ldp(x19, x20, AdrPostImm(x9, 16));
-	ldp(x21, x22, AdrPostImm(x9, 16));
-	ldp(x23, x24, AdrPostImm(x9, 16));
-	ldp(x25, x26, AdrPostImm(x9, 16));
-	ldp(x27, x28, AdrPostImm(x9, 16));
-	ldp(x29, x30, AdrPostImm(x9, 16));
-	ld4((v8.d - v11.d)[0], AdrPostImm(x9, 32));
-	ld4((v12.d - v15.d)[0], AdrPostImm(x9, 32));
-
-	add(sp, sp, STACK_SIZE);
-
-	ret();
-}
-
-void AArch64GenContext_t::leaveRecompilerCode()
-{
-	str(LR.WReg, AdrUimm(HCPU_REG, offsetof(PPCInterpreter_t, instructionPointer)));
-	ret();
-}
-
-bool initializedInterfaceFunctions = false;
-AArch64GenContext_t enterRecompilerCode_ctx{};
-
-AArch64GenContext_t leaveRecompilerCode_unvisited_ctx{};
-AArch64GenContext_t leaveRecompilerCode_visited_ctx{};
 void PPCRecompilerAArch64Gen_generateRecompilerInterfaceFunctions()
 {
-	if (initializedInterfaceFunctions)
-		return;
-	initializedInterfaceFunctions = true;
-
-	enterRecompilerCode_ctx.enterRecompilerCode();
-	enterRecompilerCode_ctx.readyRE();
-	PPCRecompiler_enterRecompilerCode = enterRecompilerCode_ctx.getCode<decltype(PPCRecompiler_enterRecompilerCode)>();
-
-	leaveRecompilerCode_unvisited_ctx.leaveRecompilerCode();
-	leaveRecompilerCode_unvisited_ctx.readyRE();
-	PPCRecompiler_leaveRecompilerCode_unvisited = leaveRecompilerCode_unvisited_ctx.getCode<decltype(PPCRecompiler_leaveRecompilerCode_unvisited)>();
-
-	leaveRecompilerCode_visited_ctx.leaveRecompilerCode();
-	leaveRecompilerCode_visited_ctx.readyRE();
-	PPCRecompiler_leaveRecompilerCode_visited = leaveRecompilerCode_visited_ctx.getCode<decltype(PPCRecompiler_leaveRecompilerCode_visited)>();
+	using namespace AArch64Backend;
+	namespace xa = Xbyak_aarch64;
+	StagingAllocator allocator;
+	// enter: X0 = code to run, X1 = PPCInterpreter_t*
+	{
+		Emitter e(4096, &allocator);
+		e.stp(e.x29, e.x30, xa::pre_ptr(e.sp, -(sint32)kSavedRegsSize));
+		e.stp(e.x19, e.x20, xa::ptr(e.sp, 16));
+		e.stp(e.x21, e.x22, xa::ptr(e.sp, 32));
+		e.stp(e.x23, e.x24, xa::ptr(e.sp, 48));
+		e.stp(e.x25, e.x26, xa::ptr(e.sp, 64));
+		e.stp(e.x27, e.x28, xa::ptr(e.sp, 80));
+		e.add(e.x29, e.sp, 0);
+		e.sub(e.sp, e.sp, kFrameSize);
+		e.mov(e.rCPU, e.x1);
+		e.LoadImm64(e.x16, (uint64)(uintptr_t)&memory_base);
+		e.ldr(e.rMemBase, xa::ptr(e.x16));
+		e.LoadImm64(e.rJumpTable, (uint64)(uintptr_t)ppcRecompilerInstanceData->ppcRecompilerDirectJumpTable);
+		e.br(e.x0);
+		PPCRecompiler_enterRecompilerCode = (void ATTR_MS_ABI (*)(uint64, uint64))PublishCode(e.getCode(), e.getSize());
+	}
+	// leave: W0 = guest address to continue at. The two variants behave the
+	// same; their addresses mark jump table entries as unvisited/visited
+	auto makeLeave = [&]()
+	{
+		Emitter e(4096, &allocator);
+		e.CpuStoreW(e.w0, offsetof(PPCInterpreter_t, instructionPointer));
+		e.add(e.sp, e.sp, kFrameSize);
+		e.ldp(e.x27, e.x28, xa::ptr(e.sp, 80));
+		e.ldp(e.x25, e.x26, xa::ptr(e.sp, 64));
+		e.ldp(e.x23, e.x24, xa::ptr(e.sp, 48));
+		e.ldp(e.x21, e.x22, xa::ptr(e.sp, 32));
+		e.ldp(e.x19, e.x20, xa::ptr(e.sp, 16));
+		e.ldp(e.x29, e.x30, xa::post_ptr(e.sp, (sint32)kSavedRegsSize));
+		e.ret();
+		return (void ATTR_MS_ABI (*)())PublishCode(e.getCode(), e.getSize());
+	};
+	PPCRecompiler_leaveRecompilerCode_unvisited = makeLeave();
+	PPCRecompiler_leaveRecompilerCode_visited = makeLeave();
+	cemu_assert(PPCRecompiler_enterRecompilerCode && PPCRecompiler_leaveRecompilerCode_unvisited && PPCRecompiler_leaveRecompilerCode_visited);
 }
