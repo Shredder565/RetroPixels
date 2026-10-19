@@ -54,12 +54,12 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 82048 | 26.5% |
-| Cemu, untouched | 171676 | 55.4% |
-| Cemu, with PixelU changes | 14833 | 4.8% |
+| Original (RetroPixels) | 89839 | 29.4% |
+| Cemu, untouched | 159309 | 52.2% |
+| Cemu, with PixelU changes | 14833 | 4.9% |
 | PixelU-added files (MPL-2.0 header) | 1940 | 0.6% |
-| Third-party | 39404 | 12.7% |
-| **All** | **309901** | 100% |
+| Third-party | 39404 | 12.9% |
+| **All** | **305325** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -77,17 +77,17 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/HW/Espresso/Debugger | 2459 | 2459 | original |
 | Cafe/HW/Espresso/Interpreter | 3252 | 3252 | original |
 | Cafe/HW/Espresso/Recompiler | 24605 | 0 | Cemu |
-| Cafe/HW/Latte/Common | 5959 | 0 | Cemu |
+| Cafe/HW/Latte/Common | 3130 | 3130 | original |
 | Cafe/HW/Latte/Core | 20296 | 0 | Cemu + PixelU change |
-| Cafe/HW/Latte/ISA | 3062 | 0 | Cemu |
-| Cafe/HW/Latte/LatteAddrLib | 2206 | 0 | Cemu |
+| Cafe/HW/Latte/ISA | 2618 | 2618 | original |
+| Cafe/HW/Latte/LatteAddrLib | 1242 | 1242 | original |
 | Cafe/HW/Latte/LegacyShaderDecompiler | 13807 | 0 | Cemu |
 | Cafe/HW/Latte/Renderer | 1236 | 0 | Cemu + PixelU change |
 | Cafe/HW/Latte/Renderer/Metal | 7309 | 0 | Cemu |
 | Cafe/HW/Latte/Renderer/OpenGL | 5862 | 0 | Cemu + PixelU change |
 | Cafe/HW/Latte/Renderer/Vulkan | 14432 | 0 | Cemu + PixelU change |
-| Cafe/HW/Latte/ShaderInfo | 73 | 0 | Cemu |
-| Cafe/HW/Latte/Transcompiler | 1067 | 0 | Cemu |
+| Cafe/HW/Latte/ShaderInfo | 70 | 70 | original |
+| Cafe/HW/Latte/Transcompiler | 731 | 731 | original |
 | Cafe/HW/MMU | 681 | 681 | original |
 | Cafe/HW/SI | 132 | 132 | original |
 | Cafe/HW/VI | 5 | 5 | original |
@@ -626,3 +626,67 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
   Kept on purpose: preset and variable quirks of the rules.txt parser, the
   patch resolver's pass limit, the Cemuhook grammar, the per-game patch
   order and the start-up initialisation order.
+- Batch 10a: the Latte support code under Cafe/HW/Latte rewritten as
+  original code: the ISA headers (the LATTEREG register views and the
+  LatteContextRegister layout in LatteReg.h, the mm* register index table
+  in RegDefines.h, the CF/VTX/ALU instruction views in
+  LatteInstructions.h); the surface address library (LatteAddrLib.h/.cpp,
+  LatteAddrLib_Coord.cpp: GX2 surface info, mip/slice offsets, bank swap
+  width, rotation, linear/micro/macro tiled element addressing and the
+  cached macro tiled path) and the texture copy loops in
+  AddrLibFastDecode.h; the pipeline cache serializers
+  (RegisterSerializer, ShaderSerializer); ShaderInfo (ShaderDescription,
+  ShaderInstanceInfo) and the experimental Latte-to-ZpIR transcompiler
+  (LatteTC.h/.cpp, LatteTCGenIR.cpp). The two zstd dictionaries
+  (s_shaderDict 0xA985 bytes, s_regDataDict 0x5AD2 bytes) are data and are
+  byte-identical, only reformatted; both keep external linkage.
+  Register and field names, enum values, register offsets
+  (static_asserts), instruction field positions, the GX2 surface results
+  and the on-disk pipeline cache format are unchanged, so existing shader
+  and pipeline caches stay readable and newly written entries are
+  byte-identical.
+  Old-vs-new harnesses (ASan/UBSan) give identical output: every LATTEREG
+  field get/set and helper over 4000 random register files plus all enum
+  values and register offsets (1.73M lines); instruction decode of all
+  CF/VTX/ALU views over 200k random words (19.3M lines); addrlib over every
+  format x tile mode x dimension x AA x 11 sizes x 8 mip levels x
+  depth/scan flags, then 200k random surfaces and mip chains (including
+  CalculateMipOffset and CalculateMipAndSliceAddr with random slices and
+  swizzles), all pixel index tables, bank swap widths and 2M random
+  linear/micro/macro/cached element addresses (19.6M lines); the copy
+  loops for 9 texel types x 600 random 2D_TILED_THIN1, LINEAR_ALIGNED and
+  other surfaces in both directions (surface and linear buffer hashes);
+  the serializers over 3000 random register snapshots and 400 random
+  shader programs up to 600 KB (serialized bytes identical, round trip
+  exact, 4 mutated/truncated inputs each give the same accept/reject and
+  result), old-written blobs read by the new code and new-written blobs
+  read by the old code; register Store/Load through 50 random register
+  files.
+  Fixes and defined behaviour: the macro tiled address no longer divides by
+  zero when one sample of a thick micro tile exceeds the 2 KiB split size
+  (bpp 96/128 THICK with AA); surface info for formats with no bit size is
+  computed as LINEAR_GENERAL instead of dividing by zero; a 0 base
+  alignment in the mip walk counts as 1; mipIndex <= 0 gives level 0
+  instead of reading uninitialised data; rotation for tile modes above 15
+  is 0; the bank swap width is 0 for bpp 0 instead of dividing by zero and
+  its halving loop stops at 0 instead of spinning forever for pitch 0; the
+  cached macro tiled setup computes its shifts with countr_zero instead of
+  relying on x86 shift masking of the Linux _BitScanReverse stand-in.
+  ShaderDescription::analyzeShaderCode now walks the CF program and
+  records exported colour targets (renderTargetWriteMask) instead of
+  breaking into the debugger; the transcompiler keeps a single block for
+  main(), additionally handles ADD, the 1.0/0.5/1/-1 inline constants,
+  PV/PS operands, negated float operands, masked fetch channels, constant
+  export swizzles and export bursts, and reports anything else through
+  cemu_assert_debug instead of assert_dbg (both are only reachable from
+  the unused LatteShader_CompileSeparableVertexShader2). The register
+  serializer's boot self-test uses a different test pattern.
+  Kept on purpose: register setters do not mask their value;
+  LOD_USES_MINOR_AXIS stays at bit 25; setField_Opcode clears only bits
+  23-26; SRF_MODE_ALL reads bit 30; the linear surface size applies the
+  sample count twice; the display flag has no effect on macro pitch
+  alignment; LINEAR_SPECIAL keeps the 32 bit surface size; BC formats keep
+  the power-of-two sizing above level 0; the THICK to 1D fallback still
+  checks the requested mode; the cached macro tiled address keeps its 32
+  bit wrap-around and full-sample slice/macro tile sizes (so it can differ
+  from the uncached function for multisampled surfaces, as before).
