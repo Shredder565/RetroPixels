@@ -1,41 +1,40 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 void iosuAct_init_depr();
 bool iosuAct_isInitialized();
 
-#define ACT_ACCOUNTID_LENGTH 	(17) // includes '\0'
+#define ACT_ACCOUNTID_LENGTH 	(17) // with the terminator
 
-// Mii
-
+// Mii storage as kept in the account data
 #define MII_FFL_STORAGE_SIZE	(96)
+#define MII_FFL_NAME_LENGTH		(10) // UTF-16 code units
 
-#define MII_FFL_NAME_LENGTH		(10) // counted in wchar_t elements (16-bit unicode)
-
-#define ACT_NICKNAME_LENGTH	(10) // aka Mii nickname
+#define ACT_NICKNAME_LENGTH	(10)
 #define ACT_NICKNAME_SIZE	(11)
 
-typedef struct  
+typedef struct
 {
 	uint32be high;
 	uint32be low;
 }FFLDataID_t;
 
-typedef struct  
+typedef struct
 {
-	/* +0x00 */ uint32		uknFlags;
-	/* +0x04 */ FFLDataID_t miiId; // bytes 8 and 9 are part of the CRC? (miiId is based on account transferable id?)
-	/* +0x0C */ uint8		ukn0C[0xA];
-	/* +0x16 */ uint8		ukn16[2];
-	/* +0x18 */ uint16		ukn18;
-	/* +0x1A */ uint16le	miiName[MII_FFL_NAME_LENGTH];
-	/* +0x2E */ uint16		ukn2E;
-	/* +0x30 */ uint8		ukn30[MII_FFL_STORAGE_SIZE-0x30];
+	uint32 uknFlags;
+	FFLDataID_t miiId;
+	uint8 ukn0C[0xA];
+	uint8 ukn16[2];
+	uint16 ukn18;
+	uint16le miiName[MII_FFL_NAME_LENGTH];
+	uint16 ukn2E;
+	uint8 ukn30[MII_FFL_STORAGE_SIZE - 0x30];
 }FFLData_t;
 
-static_assert(sizeof(FFLData_t) == MII_FFL_STORAGE_SIZE, "FFLData_t size invalid");
-static_assert(offsetof(FFLData_t, miiId) == 0x04, "FFLData->miiId offset invalid");
-static_assert(offsetof(FFLData_t, miiName) == 0x1A, "FFLData->miiName offset invalid");
-static_assert(offsetof(FFLData_t, ukn2E) == 0x2E, "FFLData->ukn2E offset invalid");
+static_assert(sizeof(FFLData_t) == MII_FFL_STORAGE_SIZE);
+static_assert(offsetof(FFLData_t, miiId) == 0x04);
+static_assert(offsetof(FFLData_t, miiName) == 0x1A);
+static_assert(offsetof(FFLData_t, ukn2E) == 0x2E);
 
 static uint16 FFLCalculateCRC16(uint8* input, sint32 length);
 
@@ -51,7 +50,7 @@ namespace iosu
 		bool getCountryIndex(uint8 slot, uint32* countryIndex);
 		bool GetPersistentId(uint8 slot, uint32* persistentId);
 
-		std::string getAccountId2(uint8 slot);
+		std::string getAccountId2(uint8 slot); // empty if the slot is not in use
 
 		static constexpr uint8 ACT_SLOT_CURRENT = 0xFE;
 
@@ -60,13 +59,13 @@ namespace iosu
 	}
 }
 
-// custom dev/act/ protocol (Cemu only)
+// PixelU private request on /dev/act, sent by nn_act
 #define IOSU_ACT_REQUEST_CEMU (0xEE)
 
 struct iosuActCemuRequest_t
 {
 	uint32 requestCode;
-	// input
+	// in
 	uint8 accountSlot;
 	uint32 unique;
 	sint32 uuidName;
@@ -75,7 +74,7 @@ struct iosuActCemuRequest_t
 	uint32 serverId;
 	char clientId[64];
 	uint32 expiresIn;
-	// output
+	// out
 	uint32 returnCode;
 	union
 	{
@@ -91,7 +90,7 @@ struct iosuActCemuRequest_t
 		{
 			char strBuffer[1024];
 		}resultString;
-		struct  
+		struct
 		{
 			uint8 binBuffer[1024];
 		}resultBinary;
@@ -103,7 +102,7 @@ struct iosuActCemuRequest_t
 	}
 };
 
-// Act Request Cemu subcodes
+// values for iosuActCemuRequest_t::requestCode
 #define IOSU_ARC_INIT					0x00
 #define IOSU_ARC_ACCOUNT_ID				0x01
 #define IOSU_ARC_TRANSFERABLEID			0x02
