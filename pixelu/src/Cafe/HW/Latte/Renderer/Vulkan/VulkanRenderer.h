@@ -669,6 +669,13 @@ private:
 
 	void draw_execute_first(uint32 baseVertex, uint32 baseInstance, uint32 instanceCount, uint32 count, MPTR indexDataMPTR, Latte::LATTE_VGT_DMA_INDEX_TYPE::E_INDEX_TYPE indexType, const LatteDrawcallContext& drawcallContext);
 	void draw_execute_continued(uint32 baseVertex, uint32 baseInstance, uint32 instanceCount, uint32 count, MPTR indexDataMPTR, Latte::LATTE_VGT_DMA_INDEX_TYPE::E_INDEX_TYPE indexType, const LatteDrawcallContext& drawcallContext);
+	// steps shared by draw_execute_first and draw_execute_continued
+	bool DrawHandleSpecialStates();
+	void DrawPrepareIndices(MPTR indexDataMPTR, Latte::LATTE_VGT_DMA_INDEX_TYPE::E_INDEX_TYPE indexType, uint32 count, uint32& indexMax, Renderer::INDEX_TYPE& hostIndexType, uint32& hostIndexCount);
+	void DrawUpdateDirectAccessBuffers();
+	void DrawBindPipeline(PipelineInfo* pipelineInfo);
+	void DrawBindDescriptorSet(PipelineInfo* pipelineInfo, uint32 firstSet, VkDescriptorSetInfo* first, uint32 firstStage, VkDescriptorSetInfo* second, uint32 secondStage);
+	void DrawIssue(Renderer::INDEX_TYPE hostIndexType, uint32 hostIndexCount, uint32 count, uint32 instanceCount, uint32 baseVertex, uint32 baseInstance);
 
 	// dynamic offsets of the uniform ring and of the guest uniform buffers, per stage
 	struct
