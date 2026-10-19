@@ -1,254 +1,203 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/HW/Latte/Core/Latte.h"
 #include "Cafe/HW/Latte/LatteAddrLib/LatteAddrLib.h"
 #include "Cafe/OS/libs/gx2/GX2_Surface.h"
+#include <bit>
+
+// Element addressing: byte offset of an element (x, y, slice, sample) inside
+// linear, micro tiled and macro tiled surfaces.
 
 using namespace Latte;
 
 namespace LatteAddrLib
 {
-
-#if BOOST_OS_LINUX || BOOST_OS_MACOS || BOOST_OS_BSD
-	unsigned char _BitScanReverse(uint32* _Index, uint32 _Mask)
+	namespace
 	{
-		if (!_Mask)
-			return 0;
-		*_Index = 31 - __builtin_clzl(_Mask);
-		return 1;
-	}
-#endif
+		// order in which bank swapped modes permute the banks along a row
+		constexpr uint32 kBankSwapPattern[4] = { 0, 1, 3, 2 };
 
-	static const uint32 bankSwapOrder[] = { 0, 1, 3, 2 };
+		// Element index bits inside a micro tile. Each entry gives the source
+		// of index bits 0-5: high nibble = axis (0 = x, 1 = y), low nibble = bit.
+		constexpr uint8 X(uint8 b) { return b; }
+		constexpr uint8 Y(uint8 b) { return 0x10 | b; }
 
-	uint32 _GetMicroTileType(bool isDepth)
-	{
-		return isDepth ? 1 : 0;
+		constexpr uint8 kLayoutDepth[6] = { X(0), Y(0), X(1), Y(1), X(2), Y(2) };
+		constexpr uint8 kLayout8[6] = { X(0), X(1), X(2), Y(1), Y(0), Y(2) };
+		constexpr uint8 kLayout16[6] = { X(0), X(1), X(2), Y(0), Y(1), Y(2) };
+		constexpr uint8 kLayout32[6] = { X(0), X(1), Y(0), X(2), Y(1), Y(2) }; // also 96 bit and anything unknown
+		constexpr uint8 kLayout64[6] = { X(0), Y(0), X(1), X(2), Y(1), Y(2) };
+		constexpr uint8 kLayout128[6] = { Y(0), X(0), X(1), X(2), Y(1), Y(2) };
+
+		const uint8* SelectLayout(uint32 bpp, uint32 microTileType)
+		{
+			if (microTileType != 0)
+				return kLayoutDepth;
+			switch (bpp)
+			{
+			case 8: return kLayout8;
+			case 16: return kLayout16;
+			case 64: return kLayout64;
+			case 128: return kLayout128;
+			default: return kLayout32;
+			}
+		}
+
+		uint32 PipeOfCoord(uint32 x, uint32 y)
+		{
+			return ((x >> 3) ^ (y >> 3)) & 1;
+		}
+
+		uint32 BankOfCoord(uint32 x, uint32 y)
+		{
+			const uint32 bank0 = ((x >> 3) ^ (y >> 5)) & 1;
+			const uint32 bank1 = ((x >> 4) ^ (y >> 4)) & 1;
+			return bank0 | (bank1 << 1);
+		}
+
+		// macro tile size in elements
+		void MacroTileDims(E_HWTILEMODE tileMode, uint32& width, uint32& height)
+		{
+			uint32 aspect = 1;
+			switch (tileMode)
+			{
+			case E_HWTILEMODE::TM_2D_TILED_THIN2:
+			case E_HWTILEMODE::TM_2B_TILED_THIN2:
+				aspect = 2;
+				break;
+			case E_HWTILEMODE::TM_2D_TILED_THIN4:
+			case E_HWTILEMODE::TM_2B_TILED_THIN4:
+				aspect = 4;
+				break;
+			default:
+				break;
+			}
+			width = 8 * kNumBanks / aspect;
+			height = 8 * kNumPipes * aspect;
+		}
+
+		// inserts the pipe and bank bits above the 256 byte interleave
+		// tileByteOffset is the byte offset of the micro tile in the unswizzled layout
+		uint32 ComposeTiledAddress(uint64 tileByteOffset, uint32 inTileByteOffset, uint32 pipe, uint32 bank)
+		{
+			constexpr uint32 swizzleBits = 3; // 1 pipe bit + 2 bank bits
+			const uint32 offset = (uint32)(tileByteOffset >> swizzleBits) + inTileByteOffset;
+			const uint32 low = offset & (kPipeInterleaveBytes - 1);
+			const uint32 high = offset & ~(kPipeInterleaveBytes - 1);
+			return (high << swizzleBits) | low | (pipe << 8) | (bank << 9);
+		}
+
+		// splits a bit offset inside a micro tile into sample groups when the
+		// tile is larger than the split size
+		struct SampleSplit
+		{
+			uint32 groups = 1; // number of groups
+			uint32 group = 0; // group of this element
+			uint32 samplesPerGroup;
+		};
+
+		SampleSplit SplitSamples(uint32 numSamples, uint32 microTileBits, uint32& bitOffset)
+		{
+			SampleSplit s;
+			s.samplesPerGroup = numSamples;
+			const uint32 microTileBytes = microTileBits >> 3;
+			if (numSamples > 1 && microTileBytes > kSplitSize)
+			{
+				// at least one sample per group (a single sample larger than the split size
+				// would otherwise make the group count undefined)
+				s.samplesPerGroup = std::max<uint32>(kSplitSize / (microTileBytes / numSamples), 1);
+				s.groups = numSamples / s.samplesPerGroup;
+				const uint32 groupBits = microTileBits / s.groups;
+				s.group = bitOffset / groupBits;
+				bitOffset %= groupBits;
+			}
+			return s;
+		}
+
+		uint32 RotateBankPipe(uint32 pipe, uint32 bank, uint32 group, uint32 rotationXor, uint32& pipeOut, uint32& bankOut)
+		{
+			uint32 bankPipe = pipe + kNumPipes * bank;
+			bankPipe ^= (kNumPipes * group * (kNumBanks / 2 + 1)) ^ rotationXor;
+			bankPipe %= kNumPipes * kNumBanks;
+			pipeOut = bankPipe % kNumPipes;
+			bankOut = bankPipe / kNumPipes;
+			return bankPipe;
+		}
 	}
 
 	uint32 _ComputePixelIndexWithinMicroTile(uint32 x, uint32 y, uint32 z, uint32 bpp, E_HWTILEMODE tileMode, uint32 microTileType)
 	{
 		cemu_assert_debug(microTileType == 0 || microTileType == 1);
-		uint32 pixelBit0, pixelBit1, pixelBit2, pixelBit3, pixelBit4, pixelBit5, pixelBit6, pixelBit7, pixelBit8;
-		pixelBit6 = 0;
-		pixelBit7 = 0;
-		pixelBit8 = 0;
-		uint32 thickness = LatteAddrLib::TM_GetThickness(tileMode);
-		if (microTileType)
+		const uint8* layout = SelectLayout(bpp, microTileType);
+		uint32 index = 0;
+		for (uint32 i = 0; i < 6; i++)
 		{
-			pixelBit0 = x & 1;
-			pixelBit1 = y & 1;
-			pixelBit2 = (x & 2) >> 1;
-			pixelBit3 = (y & 2) >> 1;
-			pixelBit4 = (x & 4) >> 2;
-			pixelBit5 = (y & 4) >> 2;
+			const uint32 coord = (layout[i] & 0x10) ? y : x;
+			index |= ((coord >> (layout[i] & 0xF)) & 1) << i;
 		}
-		else
-		{
-			switch (bpp)
-			{
-			case 8:
-				pixelBit0 = x & 1;
-				pixelBit1 = (x & 2) >> 1;
-				pixelBit2 = (x & 4) >> 2;
-				pixelBit3 = (y & 2) >> 1;
-				pixelBit4 = y & 1;
-				pixelBit5 = (y & 4) >> 2;
-				break;
-			case 0x10:
-				pixelBit0 = x & 1;
-				pixelBit1 = (x & 2) >> 1;
-				pixelBit2 = (x & 4) >> 2;
-				pixelBit3 = y & 1;
-				pixelBit4 = (y & 2) >> 1;
-				pixelBit5 = (y & 4) >> 2;
-				break;
-			case 0x20:
-			case 0x60:
-				pixelBit0 = x & 1;
-				pixelBit1 = (x & 2) >> 1;
-				pixelBit2 = y & 1;
-				pixelBit3 = (x & 4) >> 2;
-				pixelBit4 = (y & 2) >> 1;
-				pixelBit5 = (y & 4) >> 2;
-				break;
-			case 0x40:
-				pixelBit0 = x & 1;
-				pixelBit1 = y & 1;
-				pixelBit2 = (x & 2) >> 1;
-				pixelBit3 = (x & 4) >> 2;
-				pixelBit4 = (y & 2) >> 1;
-				pixelBit5 = (y & 4) >> 2;
-				break;
-			case 0x80:
-				pixelBit0 = y & 1;
-				pixelBit1 = x & 1;
-				pixelBit2 = (x & 2) >> 1;
-				pixelBit3 = (x & 4) >> 2;
-				pixelBit4 = (y & 2) >> 1;
-				pixelBit5 = (y & 4) >> 2;
-				break;
-			default:
-				pixelBit0 = x & 1;
-				pixelBit1 = (x & 2) >> 1;
-				pixelBit2 = y & 1;
-				pixelBit3 = (x & 4) >> 2;
-				pixelBit4 = (y & 2) >> 1;
-				pixelBit5 = (y & 4) >> 2;
-				break;
-			}
-		}
-		if (thickness > 1)
-		{
-			pixelBit6 = z & 1;
-			pixelBit7 = (z & 2) >> 1;
-		}
-		return (pixelBit8 << 8) | (pixelBit7 << 7) | (pixelBit6 << 6) | (pixelBit5 << 5) | (pixelBit4 << 4) | (pixelBit3 << 3) | (pixelBit2 << 2) | (pixelBit1 << 1) | pixelBit0;
-	}
-
-	uint32 _ComputePipeFromCoordWoRotation(uint32 x, uint32 y)
-	{
-		// hardcoded to assume 2 pipes
-		uint32 pipe;
-		pipe = ((y >> 3) ^ (x >> 3)) & 1;
-		return pipe;
-	}
-
-	uint32 _ComputeBankFromCoordWoRotation(uint32 x, uint32 y)
-	{
-		uint32 bank;
-		if (m_banks == 4)
-		{
-			uint32 bankNew = (y >> 4) & 3;
-			bankNew = ((bankNew >> 1) | (bankNew << 1)); // swap lowest two bits
-			bankNew ^= (x >> 3);
-			bankNew &= 3;
-			bank = bankNew;
-		}
-		else if (m_banks == 8)
-		{
-			cemu_assert_unimplemented();
-			bank = 0;
-		}
-		else
-		{
-			bank = 0;
-		}
-		return bank;
+		if (TM_IsThick(tileMode))
+			index |= (z & 3) << 6;
+		return index;
 	}
 
 	uint32 ComputeSurfaceAddrFromCoordLinear(uint32 x, uint32 y, uint32 slice, uint32 sample, uint32 bpp, uint32 pitch, uint32 height, uint32 numSlices)
 	{
-		uint32 pixelIndex = x + pitch * y + (slice + numSlices * sample) * height * pitch;
-		return (pixelIndex * bpp) / 8;
+		const uint32 sliceIndex = slice + numSlices * sample;
+		const uint32 element = x + y * pitch + sliceIndex * height * pitch;
+		return element * bpp / 8;
 	}
 
-	uint32 ComputeSurfaceAddrFromCoordMicroTiled(uint32 x, uint32 y, uint32 slice, uint32 bpp, uint32 pitch, uint32 height, Latte::E_HWTILEMODE tileMode, bool isDepth)
+	uint32 ComputeSurfaceAddrFromCoordMicroTiled(uint32 x, uint32 y, uint32 slice, uint32 bpp, uint32 pitch, uint32 height, E_HWTILEMODE tileMode, bool isDepth)
 	{
-		uint32 microTileThickness = (tileMode == Latte::E_HWTILEMODE::TM_1D_TILED_THICK) ? 4 : 1;
-		uint32 microTilesPerRow = pitch >> 3;
-		uint32 microTileIndexX = x >> 3;
-		uint32 microTileIndexY = y >> 3;
-		uint32 microTileBytes = microTileThickness * (((bpp << 6) + 7) >> 3); // each tile is 8x8 or 8x8x4
-		uint32 microTileOffset = microTileBytes * (uint64)((x >> 3) + (pitch >> 3) * (y >> 3));
-		uint32 sliceBytes = (height * (uint64)pitch * microTileThickness * bpp + 7) / 8;
-		uint32 sliceOffset = sliceBytes * (slice / microTileThickness);
-		uint32 pixelIndex = _ComputePixelIndexWithinMicroTile(x, y, slice, bpp, tileMode, _GetMicroTileType(isDepth));
-		uint32 pixelOffset = bpp * pixelIndex;
-		pixelOffset >>= 3;
-		return pixelOffset + microTileOffset + sliceOffset;
+		const uint32 thickness = (tileMode == E_HWTILEMODE::TM_1D_TILED_THICK) ? 4 : 1;
+		const uint32 microTileBytes = thickness * ((bpp * 64 + 7) / 8);
+		const uint32 tileIndex = (x >> 3) + (pitch >> 3) * (y >> 3);
+		const uint32 tileOffset = (uint32)(microTileBytes * (uint64)tileIndex);
+		const uint32 sliceBytes = (uint32)(((uint64)height * pitch * thickness * bpp + 7) / 8);
+		const uint32 sliceOffset = sliceBytes * (slice / thickness);
+		const uint32 element = _ComputePixelIndexWithinMicroTile(x, y, slice, bpp, tileMode, isDepth ? 1 : 0);
+		return sliceOffset + tileOffset + ((bpp * element) >> 3);
 	}
 
-	uint32 ComputeSurfaceAddrFromCoordMacroTiled(uint32 x, uint32 y, uint32 slice, uint32 sample, uint32 bpp, uint32 pitch, uint32 height, uint32 numSamples, Latte::E_HWTILEMODE tileMode, bool isDepth, uint32 pipeSwizzle, uint32 bankSwizzle)
+	uint32 ComputeSurfaceAddrFromCoordMacroTiled(uint32 x, uint32 y, uint32 slice, uint32 sample, uint32 bpp, uint32 pitch, uint32 height, uint32 numSamples, E_HWTILEMODE tileMode, bool isDepth, uint32 pipeSwizzle, uint32 bankSwizzle)
 	{
-		uint32 microTileThickness = LatteAddrLib::TM_GetThickness((E_HWTILEMODE)tileMode);
-		uint32 microTileBits = numSamples * bpp * (microTileThickness * (8 * 8));
-		uint32 microTileBytes = microTileBits >> 3;
-		uint32 pixelIndex = _ComputePixelIndexWithinMicroTile(x, y, slice, bpp, tileMode, _GetMicroTileType(isDepth));
-		uint32 sampleOffset, pixelOffset;
+		const uint32 thickness = TM_GetThickness(tileMode);
+		const uint32 microTileBits = numSamples * bpp * thickness * 64;
+		const uint32 element = _ComputePixelIndexWithinMicroTile(x, y, slice, bpp, tileMode, isDepth ? 1 : 0);
+
+		// depth tiles interleave samples per element, colour tiles store whole sample planes
+		uint32 bitOffset;
 		if (isDepth)
-		{
-			sampleOffset = bpp * sample;
-			pixelOffset = numSamples * bpp * pixelIndex;
-		}
+			bitOffset = numSamples * bpp * element + bpp * sample;
 		else
-		{
-			sampleOffset = sample * (microTileBits / numSamples);
-			pixelOffset = bpp * pixelIndex;
-		}
-		uint32 elemOffset = pixelOffset + sampleOffset;
-		uint32 bytesPerSample = microTileBytes / numSamples;
-		uint32 sampleSlice, numSampleSplits;
-		if (numSamples <= 1 || microTileBytes <= m_splitSize)
-		{
-			numSampleSplits = 1;
-			sampleSlice = 0;
-		}
-		else
-		{
-			uint32 samplesPerSlice = m_splitSize / bytesPerSample;
-			numSampleSplits = numSamples / samplesPerSlice;
-			numSamples = samplesPerSlice;
-			sampleSlice = elemOffset / (microTileBits / numSampleSplits);
-			elemOffset %= microTileBits / numSampleSplits;
-		}
-		elemOffset >>= 3;
-		uint32 pipe = _ComputePipeFromCoordWoRotation(x, y);
-		uint32 bank = _ComputeBankFromCoordWoRotation(x, y);
-		uint32 bankPipe = pipe + m_pipes * bank;
-		uint32 rotation = ComputeSurfaceRotationFromTileMode(tileMode);
-		uint32 swizzle = pipeSwizzle + m_pipes * bankSwizzle;
-		uint32 sliceIn = slice;
-		if (TM_IsThickAndMacroTiled(tileMode))
-			sliceIn >>= 2;
-		bankPipe ^= m_pipes * sampleSlice * ((m_banks >> 1) + 1) ^ (swizzle + sliceIn * rotation);
-		bankPipe %= m_pipes * m_banks;
-		pipe = bankPipe % m_pipes;
-		bank = bankPipe / m_pipes;
-		uint64 sliceBytes = (((uint64)height * pitch * microTileThickness * bpp * numSamples + 7) / 8);
-		uint64 sliceOffset = sliceBytes * ((sampleSlice + numSampleSplits * slice) / microTileThickness);
-		uint32 macroTilePitch = 8 * m_banks;
-		uint32 macroTileHeight = 8 * m_pipes;
-		switch (tileMode)
-		{
-		case Latte::E_HWTILEMODE::TM_2D_TILED_THIN2:
-		case Latte::E_HWTILEMODE::TM_2B_TILED_THIN2:
-			macroTilePitch >>= 1;
-			macroTileHeight <<= 1;
-			break;
-		case Latte::E_HWTILEMODE::TM_2D_TILED_THIN4:
-		case Latte::E_HWTILEMODE::TM_2B_TILED_THIN4:
-			macroTilePitch >>= 2;
-			macroTileHeight <<= 2;
-			break;
-		default:
-			break;
-		}
-		uint32 macroTilesPerRow = pitch / macroTilePitch;
-		uint32 macroTileBytes = (numSamples * microTileThickness * bpp * macroTileHeight * macroTilePitch + 7) >> 3;
-		uint32 macroTileIndexX = x / macroTilePitch;
-		uint32 macroTileIndexY = y / macroTileHeight;
-		uint32 macroTileOffset = (x / macroTilePitch + pitch / macroTilePitch * (y / macroTileHeight)) * macroTileBytes;
+			bitOffset = bpp * element + sample * (microTileBits / numSamples);
+		const SampleSplit split = SplitSamples(numSamples, microTileBits, bitOffset);
+		const uint32 inTileBytes = bitOffset >> 3;
+
+		const uint32 rotatedSlice = TM_IsThickAndMacroTiled(tileMode) ? (slice >> 2) : slice;
+		const uint32 swizzle = pipeSwizzle + kNumPipes * bankSwizzle;
+		uint32 pipe, bank;
+		RotateBankPipe(PipeOfCoord(x, y), BankOfCoord(x, y), split.group, swizzle + rotatedSlice * ComputeSurfaceRotationFromTileMode(tileMode), pipe, bank);
+
+		const uint64 sliceBytes = ((uint64)height * pitch * thickness * bpp * split.samplesPerGroup + 7) / 8;
+		const uint64 sliceOffset = sliceBytes * ((split.group + split.groups * slice) / thickness);
+
+		uint32 macroWidth, macroHeight;
+		MacroTileDims(tileMode, macroWidth, macroHeight);
+		const uint32 macroTileBytes = (split.samplesPerGroup * thickness * bpp * macroHeight * macroWidth + 7) >> 3;
+		const uint32 macroX = x / macroWidth;
+		const uint32 macroTileOffset = (macroX + pitch / macroWidth * (y / macroHeight)) * macroTileBytes;
+
 		if (TM_IsBankSwapped(tileMode))
 		{
-			uint32 bankSwapWidth = ComputeSurfaceBankSwappedWidth(tileMode, bpp, numSamples, pitch);
-			uint32 swapIndex = macroTilePitch * macroTileIndexX / bankSwapWidth;
-			uint32 bankMask = m_banks - 1;
-			bank ^= bankSwapOrder[swapIndex & bankMask];
+			const uint32 swapWidth = ComputeSurfaceBankSwappedWidth(tileMode, bpp, split.samplesPerGroup, pitch);
+			bank ^= kBankSwapPattern[(macroWidth * macroX / swapWidth) & (kNumBanks - 1)];
 		}
-		uint32 pipeOffset = (pipe << m_pipeInterleaveBytesBitcount);
-		uint32 bankOffset = (bank << (m_pipesBitcount + m_pipeInterleaveBytesBitcount));
-		uint32 numSwizzleBits = (m_banksBitcount + m_pipesBitcount);
-		uint32 macroSliceOffset = (uint32)((macroTileOffset + sliceOffset) >> numSwizzleBits);
-		macroSliceOffset += elemOffset;
-
-		uint32 macroSliceOffsetHigh = macroSliceOffset & ~((1 << m_pipeInterleaveBytesBitcount) - 1);
-		uint32 macroSliceOffsetLow = macroSliceOffset & ((1 << m_pipeInterleaveBytesBitcount) - 1);
-
-		uint32 finalMacroTileOffset = (macroSliceOffsetHigh << numSwizzleBits) | macroSliceOffsetLow;
-		return finalMacroTileOffset | pipeOffset | bankOffset;
+		return ComposeTiledAddress(macroTileOffset + sliceOffset, inTileBytes, pipe, bank);
 	}
 
 	void SetupCachedSurfaceAddrInfo(CachedSurfaceAddrInfo* info, uint32 slice, uint32 sample, uint32 bpp, uint32 pitch, uint32 height, uint32 depth, uint32 numSamples, E_HWTILEMODE tileMode, int isDepth, uint32 pipeSwizzle, uint32 bankSwizzle)
 	{
+		cemu_assert_debug(sample == 0); // the cached path addresses sample 0 only
 		info->slice = slice;
 		info->sample = sample;
 		info->bpp = bpp;
@@ -260,146 +209,54 @@ namespace LatteAddrLib
 		info->isDepth = isDepth;
 		info->pipeSwizzle = pipeSwizzle;
 		info->bankSwizzle = bankSwizzle;
-		// calculate static info
-		info->microTileThickness = LatteAddrLib::TM_GetThickness((E_HWTILEMODE)tileMode);
-		info->microTileBits = info->numSamples * info->bpp * (info->microTileThickness * (8 * 8));
+
+		info->microTileType = isDepth ? 1 : 0;
+		info->microTileThickness = TM_GetThickness(tileMode);
+		info->microTileBits = numSamples * bpp * info->microTileThickness * 64;
 		info->microTileBytes = info->microTileBits >> 3;
-		info->microTileType = (info->isDepth != 0) ? 1 : 0;
-		cemu_assert_debug(sample == 0); // non-zero not supported
-		info->rotation = ComputeSurfaceRotationFromTileMode((E_HWTILEMODE)tileMode);
-		// macro tile
-		info->macroTilePitch = 8 * m_banks;
-		info->macroTileHeight = 8 * m_pipes;
-		switch (info->tileMode)
-		{
-		case E_HWTILEMODE::TM_2D_TILED_THIN2:
-		case E_HWTILEMODE::TM_2B_TILED_THIN2:
-			info->macroTilePitch >>= 1;
-			info->macroTileHeight <<= 1;
-			break;
-		case E_HWTILEMODE::TM_2D_TILED_THIN4:
-		case E_HWTILEMODE::TM_2B_TILED_THIN4:
-			info->macroTilePitch >>= 2;
-			info->macroTileHeight <<= 2;
-			break;
-		default:
-			break;
-		}
-		_BitScanReverse((DWORD*)&info->macroTilePitchBits, info->macroTilePitch);
-		_BitScanReverse((DWORD*)&info->macroTileHeightBits, info->macroTileHeight);
-		info->macroTilesPerRow = info->pitch / info->macroTilePitch;
-		info->macroTileBytes = (info->numSamples * info->microTileThickness * info->bpp * info->macroTileHeight * info->macroTilePitch + 7) >> 3;
-		// slice
-		info->sliceBytes = (info->height * (uint64)info->pitch * info->microTileThickness * info->bpp * info->numSamples + 7) / 8;
-		info->sliceIn = info->slice;
-		if (TM_IsThickAndMacroTiled(tileMode))
-			info->sliceIn >>= 2;
-		// bank swap
-		if (TM_IsBankSwapped(tileMode))
-			info->bankSwapWidth = ComputeSurfaceBankSwappedWidth(tileMode, info->bpp, info->numSamples, info->pitch);
-		// pixel offset multiplier
-		if (info->isDepth)
-		{
-			info->pixelOffsetMul = info->numSamples * info->bpp;
-		}
-		else
-		{
-			info->pixelOffsetMul = info->bpp;
-		}
-		info->bytesPerPixel = info->pixelOffsetMul >> 3;
-		// table for micro tile offset calculation (we could pre-generate these)
-		for (sint32 z = 0; z < 8; z++)
-		{
-			for (sint32 y = 0; y < 8; y++)
-			{
-				for (sint32 x = 0; x < 8; x++)
-				{
-					uint16 v = _ComputePixelIndexWithinMicroTile(x, y, z, info->bpp, info->tileMode, info->microTileType);
-					info->microTilePixelIndexTable[x + y * 8 + z * 8 * 8] = v;
-				}
-			}
-		}
-		// other constant values
-		uint32 swizzle = info->pipeSwizzle + m_pipes * info->bankSwizzle;
-		info->c0 = (swizzle + info->sliceIn * info->rotation);
+		info->elementBits = isDepth ? numSamples * bpp : bpp;
+
+		MacroTileDims(tileMode, info->macroTileWidth, info->macroTileHeight);
+		info->macroTileWidthShift = std::countr_zero(info->macroTileWidth);
+		info->macroTileHeightShift = std::countr_zero(info->macroTileHeight);
+		info->macroTileBytes = (numSamples * info->microTileThickness * bpp * info->macroTileHeight * info->macroTileWidth + 7) >> 3;
+		info->sliceBytes = (uint32)(((uint64)height * pitch * info->microTileThickness * bpp * numSamples + 7) / 8);
+		info->bankSwapWidth = TM_IsBankSwapped(tileMode) ? ComputeSurfaceBankSwappedWidth(tileMode, bpp, numSamples, pitch) : 0;
+
+		const uint32 rotatedSlice = TM_IsThickAndMacroTiled(tileMode) ? (slice >> 2) : slice;
+		info->bankPipeXor = pipeSwizzle + kNumPipes * bankSwizzle + rotatedSlice * ComputeSurfaceRotationFromTileMode(tileMode);
+
+		for (uint32 z = 0; z < 8; z++)
+			for (uint32 y = 0; y < 8; y++)
+				for (uint32 x = 0; x < 8; x++)
+					info->microTilePixelIndexTable[(z << 6) | (y << 3) | x] = (uint16)_ComputePixelIndexWithinMicroTile(x, y, z, bpp, tileMode, info->microTileType);
 	}
 
 	uint32 ComputeSurfaceAddrFromCoordMacroTiledCached(uint32 x, uint32 y, CachedSurfaceAddrInfo* info)
 	{
-		uint32 numSamples = info->numSamples;
-		uint32 pixelIndex = (uint32)info->microTilePixelIndexTable[(x & 7) + ((y & 7) << 3) + ((info->slice & 7) << 6)];
-		uint32 pixelOffset = pixelIndex * info->pixelOffsetMul;
-		uint32 bytesPerSample = info->microTileBytes / numSamples;
-		uint32 sampleSlice, numSampleSplits, samplesPerSlice;
-		if (numSamples <= 1 || info->microTileBytes <= m_splitSize)
-		{
-			samplesPerSlice = numSamples;
-			numSampleSplits = 1;
-			sampleSlice = 0;
-		}
-		else
-		{
-			samplesPerSlice = m_splitSize / bytesPerSample;
-			numSampleSplits = numSamples / samplesPerSlice;
-			numSamples = samplesPerSlice;
-			sampleSlice = pixelOffset / (info->microTileBits / numSampleSplits);
-			pixelOffset %= info->microTileBits / numSampleSplits;
-		}
-		pixelOffset >>= 3;
-		uint32 pipe = _ComputePipeFromCoordWoRotation(x, y);
-		uint32 bank = _ComputeBankFromCoordWoRotation(x, y);
-		uint32 bankPipe = pipe + m_pipes * bank;
-		bankPipe ^= m_pipes * sampleSlice * ((m_banks >> 1) + 1) ^ info->c0;
-		bankPipe %= m_pipes * m_banks;
-		pipe = bankPipe % m_pipes;
-		bank = bankPipe / m_pipes;
-		uint32 sliceOffset = info->sliceBytes * ((sampleSlice + numSampleSplits * info->slice) / info->microTileThickness);
-		uint32 macroTileIndexX = x >> info->macroTilePitchBits;
-		uint32 macroTileIndexY = y >> info->macroTileHeightBits;
-		uint32 macroTileOffset = (macroTileIndexX + (info->pitch >> info->macroTilePitchBits) * macroTileIndexY) * info->macroTileBytes;
+		const uint32 element = info->microTilePixelIndexTable[((info->slice & 7) << 6) | ((y & 7) << 3) | (x & 7)];
+		uint32 bitOffset = element * info->elementBits;
+		const SampleSplit split = SplitSamples(info->numSamples, info->microTileBits, bitOffset);
+		uint32 pipe, bank;
+		RotateBankPipe(PipeOfCoord(x, y), BankOfCoord(x, y), split.group, info->bankPipeXor, pipe, bank);
+		// slice and macro tile sizes keep the full sample count here
+		const uint32 sliceOffset = info->sliceBytes * ((split.group + split.groups * info->slice) / info->microTileThickness);
+		const uint32 macroX = x >> info->macroTileWidthShift;
+		const uint32 macroTileOffset = (macroX + (info->pitch >> info->macroTileWidthShift) * (y >> info->macroTileHeightShift)) * info->macroTileBytes;
 		if (TM_IsBankSwapped(info->tileMode))
-		{
-			uint32 swapIndex = info->macroTilePitch * macroTileIndexX / info->bankSwapWidth;
-			bank ^= bankSwapOrder[swapIndex & (m_banks - 1)];
-		}
-		uint32 pipeOffset = (pipe << m_pipeInterleaveBytesBitcount);
-		uint32 bankOffset = (bank << (m_pipesBitcount + m_pipeInterleaveBytesBitcount));
-		uint32 numSwizzleBits = (m_banksBitcount + m_pipesBitcount);
-		uint32 macroSliceOffset = (uint32)((macroTileOffset + sliceOffset) >> numSwizzleBits);
-		macroSliceOffset += pixelOffset;
-		uint32 macroSliceOffsetHigh = macroSliceOffset & ~((1 << m_pipeInterleaveBytesBitcount) - 1);
-		uint32 macroSliceOffsetLow = macroSliceOffset & ((1 << m_pipeInterleaveBytesBitcount) - 1);
-		uint32 finalMacroTileOffset = (macroSliceOffsetHigh << numSwizzleBits) | macroSliceOffsetLow;
-		return finalMacroTileOffset | pipeOffset | bankOffset;
+			bank ^= kBankSwapPattern[(info->macroTileWidth * macroX / info->bankSwapWidth) & (kNumBanks - 1)];
+		return ComposeTiledAddress(macroTileOffset + sliceOffset, bitOffset >> 3, pipe, bank);
 	}
 
-	/*
-	 * Optimized routine with following assumptions:
-	 * tileMode is 4
-	 * samples is 1
-	 */
 	uint32 ComputeSurfaceAddrFromCoordMacroTiledCached_tm04_sample1(uint32 x, uint32 y, CachedSurfaceAddrInfo* info)
 	{
-		uint32 pixelIndex = (uint32)info->microTilePixelIndexTable[(x & 7) + ((y & 7) << 3) + ((info->slice & 7) << 6)];
-		uint32 pixelOffset = pixelIndex * info->pixelOffsetMul;
-		pixelOffset >>= 3; // bits to bytes
-		uint32 pipe = _ComputePipeFromCoordWoRotation(x, y); // pipe = ((y >> 3) ^ (x >> 3)) & 1;
-		uint32 bank = _ComputeBankFromCoordWoRotation(x, y); // based on (x>>3)&3 and (y>>4)&3
-		pipe ^= (info->c0 >> 0) & 1;
-		bank ^= (info->c0 >> 1) & 3;
-		uint32 sliceOffset = info->sliceBytes * (info->slice / info->microTileThickness);
-		uint32 macroTileIndexX = x >> info->macroTilePitchBits;
-		uint32 macroTileIndexY = y >> info->macroTileHeightBits;
-		uint32 macroTileOffset = (macroTileIndexX + (info->pitch >> info->macroTilePitchBits) * macroTileIndexY) * info->macroTileBytes;
-		uint32 pipeOffset = (pipe << m_pipeInterleaveBytesBitcount);
-		uint32 bankOffset = (bank << (m_pipesBitcount + m_pipeInterleaveBytesBitcount));
-		uint32 numSwizzleBits = (m_banksBitcount + m_pipesBitcount);
-		uint32 macroSliceOffset = (uint32)((macroTileOffset + sliceOffset) >> numSwizzleBits);
-		macroSliceOffset += pixelOffset;
-		uint32 macroSliceOffsetHigh = macroSliceOffset & ~((1 << m_pipeInterleaveBytesBitcount) - 1);
-		uint32 macroSliceOffsetLow = macroSliceOffset & ((1 << m_pipeInterleaveBytesBitcount) - 1);
-		uint32 finalMacroTileOffset = (macroSliceOffsetHigh << numSwizzleBits) | macroSliceOffsetLow;
-		return finalMacroTileOffset | pipeOffset | bankOffset;
+		const uint32 element = info->microTilePixelIndexTable[((info->slice & 7) << 6) | ((y & 7) << 3) | (x & 7)];
+		const uint32 inTileBytes = (element * info->elementBits) >> 3;
+		// one sample, no bank swap: the rotation only flips pipe and bank bits
+		const uint32 pipe = PipeOfCoord(x, y) ^ (info->bankPipeXor & 1);
+		const uint32 bank = BankOfCoord(x, y) ^ ((info->bankPipeXor >> 1) & 3);
+		const uint32 sliceOffset = info->sliceBytes * (info->slice / info->microTileThickness);
+		const uint32 macroTileOffset = ((x >> info->macroTileWidthShift) + (info->pitch >> info->macroTileWidthShift) * (y >> info->macroTileHeightShift)) * info->macroTileBytes;
+		return ComposeTiledAddress(macroTileOffset + sliceOffset, inTileBytes, pipe, bank);
 	}
-
 };

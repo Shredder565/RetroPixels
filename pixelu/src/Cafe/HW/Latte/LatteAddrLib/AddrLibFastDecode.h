@@ -1,384 +1,156 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "Cafe/HW/Latte/LatteAddrLib/LatteAddrLib.h"
 
-template<typename texelBaseType, int texelBaseTypeCount, bool isEncodeDirection, bool isCompressed>
-void optimizedDecodeLoop_tm04_numSamples1_8x8(LatteTextureLoaderCtx* textureLoader, uint8* outputData, sint32 texelCountX, sint32 texelCountY)
+// Copy loops between a tiled surface and a linear texel buffer.
+// texelBaseType * texelBaseTypeCount is the size of one texel (or one BCn block),
+// isEncodeDirection copies linear -> tiled instead of tiled -> linear.
+
+namespace LatteFastDecode
 {
-	uint16* tableBase = textureLoader->computeAddrInfo.microTilePixelIndexTable + ((textureLoader->computeAddrInfo.slice & 7) << 6);
-	for (sint32 yt = 0; yt < texelCountY; yt += 8)
+	// copies one texel between surface memory and the linear buffer
+	template<typename T, int count, bool encode>
+	inline void CopyTexel(uint8* surface, T* linear)
 	{
-		for (sint32 xt = 0; xt < texelCountX; xt += 8)
+		T* s = reinterpret_cast<T*>(surface);
+		for (int i = 0; i < count; i++)
 		{
-			sint32 baseOffset = LatteAddrLib::ComputeSurfaceAddrFromCoordMacroTiledCached_tm04_sample1(xt, yt, &textureLoader->computeAddrInfo); // this is only 10-20% of execution time
-			for (sint32 ry = 0; ry < 8; ry++)
+			if constexpr (encode)
+				s[i] = linear[i];
+			else
+				linear[i] = s[i];
+		}
+	}
+
+	// copies n consecutive bytes
+	template<bool encode>
+	inline void CopyRun(uint8* surface, uint8* linear, size_t n)
+	{
+		if constexpr (encode)
+			memcpy(surface, linear, n);
+		else
+			memcpy(linear, surface, n);
+	}
+
+	// micro tile element index -> byte offset; elements of tiles larger than 256 bytes
+	// are spread over the pipe/bank interleave (8 x 256 byte groups)
+	template<size_t texelSize>
+	inline uint32 InTileOffset(uint32 elementIndex)
+	{
+		uint32 offset = elementIndex * (uint32)texelSize;
+		if constexpr (texelSize * 64 > 256)
+			offset = (offset & 0xFF) | ((offset & ~0xFFu) << 3);
+		return offset;
+	}
+
+	// For 2D_TILED_THIN1 colour surfaces the eight texels of a micro tile row form
+	// runs that stay contiguous in memory. Returns the run length in texels
+	// (0 = copy texel by texel). Runs start at row elements 0, run, 2*run, ...
+	// and are spaced 'stride' elements apart in the micro tile.
+	template<size_t texelSize>
+	constexpr uint32 RowRunLength() { return texelSize == 1 ? 8 : (texelSize == 4 ? 4 : (texelSize == 8 ? 2 : 0)); }
+	template<size_t texelSize>
+	constexpr uint32 RowRunStride() { return texelSize == 4 ? 8 : (texelSize == 8 ? 4 : 0); }
+
+	// full 8x8 micro tiles of a 2D_TILED_THIN1 single sample surface
+	template<typename T, int count, bool encode, bool useRuns>
+	void CopyFullTiles(LatteTextureLoaderCtx* ctx, uint8* linearData, sint32 tilesWidth, sint32 tilesHeight)
+	{
+		constexpr size_t texelSize = sizeof(T) * count;
+		const uint16* sliceTable = ctx->computeAddrInfo.microTilePixelIndexTable + ((ctx->computeAddrInfo.slice & 7) << 6);
+		const size_t linearRowBytes = (size_t)ctx->decodedTexelCountX * texelSize;
+		for (sint32 ty = 0; ty < tilesHeight; ty += 8)
+		{
+			for (sint32 tx = 0; tx < tilesWidth; tx += 8)
 			{
-				sint32 pixelOffset = ((yt + ry)*textureLoader->decodedTexelCountX + (xt)) * (sizeof(texelBaseType)*texelBaseTypeCount);
-				texelBaseType* blockOutput = (texelBaseType*)(outputData + pixelOffset);
-
-				uint16* pixelOffsets = tableBase + (ry << 3);
-
-				for (sint32 rx = 0; rx < 8; rx++)
+				const uint32 tileAddr = LatteAddrLib::ComputeSurfaceAddrFromCoordMacroTiledCached_tm04_sample1(tx, ty, &ctx->computeAddrInfo);
+				for (sint32 row = 0; row < 8; row++)
 				{
-					uint32 pixelIndex = *pixelOffsets;
-					pixelOffsets++;
-					uint32 pixelOffset = pixelIndex * sizeof(texelBaseType)*texelBaseTypeCount;
-					uint32 elemOffset = pixelOffset;
-					if ((sizeof(texelBaseType)*texelBaseTypeCount * 8 * 8) > 256)
+					uint8* linearRow = linearData + (size_t)(ty + row) * linearRowBytes + (size_t)tx * texelSize;
+					const uint16* rowTable = sliceTable + row * 8;
+					if constexpr (useRuns)
 					{
-						// separate group bytes, for small formats this step is not necessary since elemOffset is never over 0xFF (maximum is 8*8*bpp)
-						elemOffset = (elemOffset & 0xFF) | ((elemOffset&~0xFF) << 3);
-					}
-
-					sint32 offset = baseOffset + elemOffset;
-
-					uint8* blockData = textureLoader->inputData + offset;
-					// copy as-is
-					if (texelBaseTypeCount == 1)
-					{
-						if (isEncodeDirection)
-							*(texelBaseType*)blockData = *blockOutput;
-						else
-							*blockOutput = *(texelBaseType*)blockData;
-						blockOutput++;
-					}
-					else if (texelBaseTypeCount == 2)
-					{
-						if (isEncodeDirection)
-						{
-							((texelBaseType*)blockData)[0] = blockOutput[0];
-							((texelBaseType*)blockData)[1] = blockOutput[1];
-						}
-						else
-						{
-							blockOutput[0] = ((texelBaseType*)blockData)[0];
-							blockOutput[1] = ((texelBaseType*)blockData)[1];
-						}
-						blockOutput += 2;
+						constexpr uint32 runLength = RowRunLength<texelSize>();
+						constexpr uint32 runStride = RowRunStride<texelSize>();
+						uint8* rowBase = ctx->inputData + tileAddr + InTileOffset<texelSize>(rowTable[0]);
+						for (uint32 r = 0; r < 8 / runLength; r++)
+							CopyRun<encode>(rowBase + r * runStride * texelSize, linearRow + r * runLength * texelSize, runLength * texelSize);
 					}
 					else
-						assert_dbg();
+					{
+						for (sint32 col = 0; col < 8; col++)
+							CopyTexel<T, count, encode>(ctx->inputData + tileAddr + InTileOffset<texelSize>(rowTable[col]), reinterpret_cast<T*>(linearRow) + col * count);
+					}
 				}
 			}
 		}
 	}
-}
 
-template<typename texelBaseType, int texelBaseTypeCount, bool isEncodeDirection, bool isCompressed>
-void optimizedDecodeLoop_tm04_numSamples1_8x8_optimizedRowCopy(LatteTextureLoaderCtx* textureLoader, uint8* outputData, sint32 texelCountX, sint32 texelCountY)
-{
-	uint16* tableBase = textureLoader->computeAddrInfo.microTilePixelIndexTable + ((textureLoader->computeAddrInfo.slice & 7) << 6);
-	for (sint32 yt = 0; yt < texelCountY; yt += 8)
+	// texels of a 2D_TILED_THIN1 surface addressed one by one
+	template<typename T, int count, bool encode>
+	void CopyTexelRect(LatteTextureLoaderCtx* ctx, uint8* linearData, sint32 x0, sint32 x1, sint32 y0, sint32 y1)
 	{
-		for (sint32 xt = 0; xt < texelCountX; xt += 8)
+		constexpr size_t texelSize = sizeof(T) * count;
+		for (sint32 y = y0; y < y1; y++)
 		{
-			sint32 baseOffset = ComputeSurfaceAddrFromCoordMacroTiledCached_tm04_sample1(xt, yt, &textureLoader->computeAddrInfo); // this is only 10-20% of execution time
-			for (sint32 ry = 0; ry < 8; ry++)
+			T* linear = reinterpret_cast<T*>(linearData + ((size_t)y * ctx->decodedTexelCountX + x0) * texelSize);
+			for (sint32 x = x0; x < x1; x++, linear += count)
 			{
-				sint32 pixelOffset = ((yt + ry)*textureLoader->decodedTexelCountX + (xt)) * (sizeof(texelBaseType)*texelBaseTypeCount);
-				texelBaseType* blockOutput = (texelBaseType*)(outputData + pixelOffset);
-
-				uint16* pixelOffsets = tableBase + (ry << 3);
-
-				uint32 pixelIndex = *pixelOffsets;
-				pixelOffsets++;
-				uint32 elemOffset = pixelIndex * sizeof(texelBaseType)*texelBaseTypeCount;
-				if ((sizeof(texelBaseType)*texelBaseTypeCount * 8 * 8) > 256)
-				{
-					// separate group bytes, for small formats this step is not necessary since elemOffset is never over 0xFF (maximum is 8*8*bpp)
-					elemOffset = (elemOffset & 0xFF) | ((elemOffset&~0xFF) << 3);
-				}
-
-				sint32 offset = baseOffset + elemOffset;
-
-				texelBaseType* blockData = (texelBaseType*)(textureLoader->inputData + offset);
-				// x-to-offset translation table (for bpp = 64)
-				// 0	->	0
-				// 1	->	1
-				// 2	->	4
-				// 3	->	5
-				// 4	->	8
-				// 5	->	9
-				// 6	->	12
-				// 7	->	13
-
-				// x-to-offset translation table (for bpp = 32)
-				// 0	->	0
-				// 1	->	1
-				// 2	->	2
-				// 3	->	3
-				// 4	->	8
-				// 5	->	9
-				// 6	->	10
-				// 7	->	11
-
-
-				if ((sizeof(texelBaseType)*texelBaseTypeCount) == 8)
-				{
-					// bpp = 64
-					if (texelBaseTypeCount == 1)
-					{
-						if (isEncodeDirection)
-						{
-							blockData[0] = blockOutput[0];
-							blockData[1] = blockOutput[1];
-							blockData[4] = blockOutput[2];
-							blockData[5] = blockOutput[3];
-							blockData[8] = blockOutput[4];
-							blockData[9] = blockOutput[5];
-							blockData[12] = blockOutput[6];
-							blockData[13] = blockOutput[7];
-						}
-						else
-						{
-							blockOutput[0] = blockData[0];
-							blockOutput[1] = blockData[1];
-							blockOutput[2] = blockData[4];
-							blockOutput[3] = blockData[5];
-							blockOutput[4] = blockData[8];
-							blockOutput[5] = blockData[9];
-							blockOutput[6] = blockData[12];
-							blockOutput[7] = blockData[13];
-						}
-						blockOutput += 8;
-					}
-					else
-						assert_dbg();
-				}
-				else if ((sizeof(texelBaseType)*texelBaseTypeCount) == 4)
-				{
-					// bpp = 32
-					if (texelBaseTypeCount == 1)
-					{
-						uint64* blockOutput64 = (uint64*)blockOutput;
-						uint64* blockData64 = (uint64*)blockData;
-						if (isEncodeDirection)
-						{
-							blockData64[0] = blockOutput64[0];
-							blockData64[1] = blockOutput64[1];
-							blockData64[4] = blockOutput64[2];
-							blockData64[5] = blockOutput64[3];
-						}
-						else
-						{
-							blockOutput64[0] = blockData64[0];
-							blockOutput64[1] = blockData64[1];
-							blockOutput64[2] = blockData64[4];
-							blockOutput64[3] = blockData64[5];
-						}
-						blockOutput += 8;
-					}
-					else
-						cemu_assert_unimplemented();
-				}
-				else if ((sizeof(texelBaseType)*texelBaseTypeCount) == 1)
-				{
-					// bpp = 8
-					if (texelBaseTypeCount == 1)
-					{
-						uint64* blockOutput64 = (uint64*)blockOutput;
-						uint64* blockData64 = (uint64*)blockData;
-						if (isEncodeDirection)
-							blockData64[0] = blockOutput64[0];
-						else
-							blockOutput64[0] = blockData64[0];
-						blockOutput += 8;
-					}
-					else
-						cemu_assert_unimplemented();
-				}
-				else
-					cemu_assert_unimplemented();
+				const uint32 addr = LatteAddrLib::ComputeSurfaceAddrFromCoordMacroTiledCached_tm04_sample1(x, y, &ctx->computeAddrInfo);
+				CopyTexel<T, count, encode>(ctx->inputData + addr, linear);
 			}
 		}
 	}
-}
+};
 
 template<typename texelBaseType, int texelBaseTypeCount, bool isEncodeDirection, bool isCompressed>
 void optimizedDecodeLoops(LatteTextureLoaderCtx* textureLoader, uint8* outputData)
 {
-	sint32 texelCountX;
-	sint32 texelCountY;
-	if (isCompressed)
+	using namespace LatteFastDecode;
+	using T = texelBaseType;
+	constexpr int count = texelBaseTypeCount;
+	constexpr bool encode = isEncodeDirection;
+	constexpr size_t texelSize = sizeof(T) * count;
+
+	sint32 texelsX = textureLoader->width;
+	sint32 texelsY = textureLoader->height;
+	if constexpr (isCompressed)
 	{
-		texelCountX = (textureLoader->width + 3) / 4;
-		texelCountY = (textureLoader->height + 3) / 4;
-	}
-	else
-	{
-		texelCountX = textureLoader->width;
-		texelCountY = textureLoader->height;
+		texelsX = (texelsX + 3) / 4;
+		texelsY = (texelsY + 3) / 4;
 	}
 
 	if (textureLoader->tileMode == Latte::E_HWTILEMODE::TM_2D_TILED_THIN1 && textureLoader->computeAddrInfo.numSamples == 1)
 	{
-		sint32 texelCountOrigX = texelCountX;
-		sint32 texelCountOrigY = texelCountY;
-		texelCountX &= ~7;
-		texelCountY &= ~7;
-		// full tiles (assuming tileMode=4 and numSamples=1)
-		// only recalculate tile related offset at the beginning of each block
-		// calculate offsets in loop
-
-		// unsure if this variant is faster:
-		if (textureLoader->computeAddrInfo.microTileType == 0 && (sizeof(texelBaseType)*texelBaseTypeCount) == 8)
-		{
-			optimizedDecodeLoop_tm04_numSamples1_8x8_optimizedRowCopy<texelBaseType, texelBaseTypeCount, isEncodeDirection, isCompressed>(textureLoader, outputData, texelCountX, texelCountY);
-		}
-		else if (textureLoader->computeAddrInfo.microTileType == 0 && (sizeof(texelBaseType)*texelBaseTypeCount) == 4)
-		{
-			optimizedDecodeLoop_tm04_numSamples1_8x8_optimizedRowCopy<texelBaseType, texelBaseTypeCount, isEncodeDirection, isCompressed>(textureLoader, outputData, texelCountX, texelCountY);
-		}
-		else if (textureLoader->computeAddrInfo.microTileType == 0 && (sizeof(texelBaseType)*texelBaseTypeCount) == 1)
-		{
-			optimizedDecodeLoop_tm04_numSamples1_8x8_optimizedRowCopy<texelBaseType, texelBaseTypeCount, isEncodeDirection, isCompressed>(textureLoader, outputData, texelCountX, texelCountY);
-		}
+		const sint32 fullX = texelsX & ~7;
+		const sint32 fullY = texelsY & ~7;
+		constexpr bool runsPossible = (count == 1) && RowRunLength<texelSize>() != 0;
+		if (runsPossible && textureLoader->computeAddrInfo.microTileType == 0)
+			CopyFullTiles<T, count, encode, runsPossible>(textureLoader, outputData, fullX, fullY);
 		else
-		{
-			optimizedDecodeLoop_tm04_numSamples1_8x8<texelBaseType, texelBaseTypeCount, isEncodeDirection, isCompressed>(textureLoader, outputData, texelCountX, texelCountY);
-		}
-		// the above code only handles full 8x8 pixel blocks, for uneven sizes we need to process the remaining pixels here
-		// right border
-		for (sint32 yt = 0; yt < texelCountY; yt++)
-		{
-			sint32 pixelOffset = (yt*textureLoader->decodedTexelCountX + texelCountX) * (sizeof(texelBaseType)*texelBaseTypeCount);
-			texelBaseType* blockOutput = (texelBaseType*)(outputData + pixelOffset);
-			for (sint32 xt = texelCountX; xt < texelCountOrigX; xt++)
-			{
-				sint32 offset = ComputeSurfaceAddrFromCoordMacroTiledCached_tm04_sample1(xt, yt, &textureLoader->computeAddrInfo);
-				uint8* blockData = textureLoader->inputData + offset;
-				// copy as-is
-				if (texelBaseTypeCount == 1)
-				{
-					if (isEncodeDirection)
-						*(texelBaseType*)blockData = *blockOutput;
-					else
-						*blockOutput = *(texelBaseType*)blockData;
-					blockOutput++;
-				}
-				else if (texelBaseTypeCount == 2)
-				{
-					if (isEncodeDirection)
-					{
-						((texelBaseType*)blockData)[0] = blockOutput[0];
-						((texelBaseType*)blockData)[1] = blockOutput[1];
-					}
-					else
-					{
-						blockOutput[0] = ((texelBaseType*)blockData)[0];
-						blockOutput[1] = ((texelBaseType*)blockData)[1];
-					}
-					blockOutput += 2;
-				}
-			}
-		}
-		// bottom border (with bottom right corner)
-		for (sint32 yt = texelCountY; yt < texelCountOrigY; yt++)
-		{
-			sint32 pixelOffset = (yt*textureLoader->decodedTexelCountX) * (sizeof(texelBaseType)*texelBaseTypeCount);
-			texelBaseType* blockOutput = (texelBaseType*)(outputData + pixelOffset);
-			for (sint32 xt = 0; xt < texelCountOrigX; xt++)
-			{
-				sint32 offset = ComputeSurfaceAddrFromCoordMacroTiledCached_tm04_sample1(xt, yt, &textureLoader->computeAddrInfo);
-				uint8* blockData = textureLoader->inputData + offset;
-				// copy as-is
-				if (texelBaseTypeCount == 1)
-				{
-					if (isEncodeDirection)
-						*(texelBaseType*)blockData = *blockOutput;
-					else
-						*blockOutput = *(texelBaseType*)blockData;
-					blockOutput++;
-				}
-				else if (texelBaseTypeCount == 2)
-				{
-					if (isEncodeDirection)
-					{
-						((texelBaseType*)blockData)[0] = blockOutput[0];
-						((texelBaseType*)blockData)[1] = blockOutput[1];
-					}
-					else
-					{
-						blockOutput[0] = ((texelBaseType*)blockData)[0];
-						blockOutput[1] = ((texelBaseType*)blockData)[1];
-					}
-					blockOutput += 2;
-				}
-			}
-		}
+			CopyFullTiles<T, count, encode, false>(textureLoader, outputData, fullX, fullY);
+		// partial tiles: right edge of the full rows, then the remaining rows
+		CopyTexelRect<T, count, encode>(textureLoader, outputData, fullX, texelsX, 0, fullY);
+		CopyTexelRect<T, count, encode>(textureLoader, outputData, 0, texelsX, fullY, texelsY);
 	}
 	else if (textureLoader->tileMode == Latte::E_HWTILEMODE::TM_LINEAR_ALIGNED)
 	{
-		// optimized handler for linear textures
-		uint32 sliceOffset = textureLoader->sliceIndex * textureLoader->height * textureLoader->pitch;
-		for (sint32 y = 0; y < texelCountY; y++)
+		const uint32 sliceTexelOffset = textureLoader->sliceIndex * textureLoader->height * textureLoader->pitch;
+		for (sint32 y = 0; y < texelsY; y++)
 		{
-			sint32 pixelOffset = (y*textureLoader->decodedTexelCountX) * (sizeof(texelBaseType)*texelBaseTypeCount);
-			texelBaseType* blockOutput = (texelBaseType*)(outputData + pixelOffset);
-			texelBaseType* blockData = (texelBaseType*)(textureLoader->inputData + (textureLoader->pitch * y + sliceOffset) * (sizeof(texelBaseType)*texelBaseTypeCount));
-			for (sint32 x = 0; x < texelCountX; x++)
-			{
-				// copy as-is
-				if (texelBaseTypeCount == 1)
-				{
-					if(isEncodeDirection)
-						*(texelBaseType*)blockData = *blockOutput;
-					else
-						*blockOutput = *(texelBaseType*)blockData;
-					blockData++;
-					blockOutput++;
-				}
-				else if (texelBaseTypeCount == 2)
-				{
-					if (isEncodeDirection)
-					{
-						((texelBaseType*)blockData)[0] = blockOutput[0];
-						((texelBaseType*)blockData)[1] = blockOutput[1];
-					}
-					else
-					{
-						blockOutput[0] = ((texelBaseType*)blockData)[0];
-						blockOutput[1] = ((texelBaseType*)blockData)[1];
-					}
-					blockData += 2;
-					blockOutput += 2;
-				}
-			}
+			uint8* linear = outputData + (size_t)y * textureLoader->decodedTexelCountX * texelSize;
+			uint8* surface = textureLoader->inputData + (textureLoader->pitch * y + sliceTexelOffset) * texelSize;
+			CopyRun<encode>(surface, linear, (size_t)std::max<sint32>(texelsX, 0) * texelSize);
 		}
 	}
 	else
 	{
-		// generic handler
+		// any other tile mode goes through the generic per-texel address function
 		for (sint32 y = 0; y < textureLoader->height; y += textureLoader->stepY)
 		{
-			sint32 pixelOffset = ((y / textureLoader->stepY)*textureLoader->decodedTexelCountX) * (sizeof(texelBaseType)*texelBaseTypeCount);
-			texelBaseType* blockOutput = (texelBaseType*)(outputData + pixelOffset);
-			for (sint32 x = 0; x < textureLoader->width; x += textureLoader->stepX)
-			{
-				uint8* blockData = LatteTextureLoader_GetInput(textureLoader, x, y);
-				// copy as-is
-				if (texelBaseTypeCount == 1)
-				{
-					if (isEncodeDirection)
-						*(texelBaseType*)blockData = *blockOutput;
-					else
-						*blockOutput = *(texelBaseType*)blockData;
-					blockOutput++;
-				}
-				else if (texelBaseTypeCount == 2)
-				{
-					if (isEncodeDirection)
-					{
-						((texelBaseType*)blockData)[0] = blockOutput[0];
-						((texelBaseType*)blockData)[1] = blockOutput[1];
-					}
-					else
-					{
-						blockOutput[0] = ((texelBaseType*)blockData)[0];
-						blockOutput[1] = ((texelBaseType*)blockData)[1];
-					}
-					blockOutput += 2;
-				}
-			}
+			T* linear = reinterpret_cast<T*>(outputData + (size_t)(y / textureLoader->stepY) * textureLoader->decodedTexelCountX * texelSize);
+			for (sint32 x = 0; x < textureLoader->width; x += textureLoader->stepX, linear += count)
+				CopyTexel<T, count, encode>(LatteTextureLoader_GetInput(textureLoader, x, y), linear);
 		}
 	}
 }
