@@ -54,16 +54,16 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 135127 | 49.0% |
-| Cemu, untouched | 92987 | 33.7% |
-| Cemu, with PixelU changes | 7818 | 2.8% |
+| Original (RetroPixels) | 148119 | 54.3% |
+| Cemu, untouched | 77945 | 28.6% |
+| Cemu, with PixelU changes | 6757 | 2.5% |
 | PixelU-added files (MPL-2.0 header) | 519 | 0.2% |
-| Third-party | 39404 | 14.3% |
-| **All** | **275855** | 100% |
+| Third-party | 39404 | 14.4% |
+| **All** | **272744** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
-| (top level: main.cpp, mainLLE.cpp) | 324 | 0 | Cemu + PixelU change |
+| (top level: main.cpp, mainLLE.cpp) | 335 | 335 | original |
 | audio | 3050 | 0 | Cemu, 1058 lines third-party |
 | Cafe (CafeSystem, GamePatch) | 1559 | 1559 | original |
 | Cafe/Account | 696 | 696 | original |
@@ -157,8 +157,8 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cemu/nex | 4220 | 0 | Cemu |
 | Cemu/PPCAssembler | 4106 | 0 | Cemu |
 | Cemu/Tools | 2017 | 0 | Cemu |
-| Common | 31891 | 0 | Cemu, 28314 lines third-party |
-| config | 3015 | 0 | Cemu + PixelU change |
+| Common | 31625 | 3311 | mixed (10% original), 28314 lines third-party |
+| config | 2969 | 2132 | mixed (72% original) |
 | gui/interface | 126 | 0 | Cemu |
 | gui/wxgui (top level) | 14868 | 0 | Cemu + PixelU change |
 | gui/wxgui/canvas | 389 | 0 | Cemu + PixelU change |
@@ -177,27 +177,27 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | input/motion | 540 | 0 | Cemu |
 | resource | 3594 | 0 | Cemu |
 | tools | 145 | 0 | Cemu |
-| util (top level) | 66 | 0 | Cemu |
-| util/boost | 109 | 0 | Cemu |
-| util/bootSound | 71 | 0 | Cemu |
-| util/ChunkedHeap | 657 | 0 | Cemu |
-| util/containers | 4318 | 0 | Cemu, 3949 lines third-party |
-| util/crypto | 1659 | 0 | Cemu, 418 lines third-party |
-| util/DXGIWrapper | 75 | 0 | Cemu |
-| util/Fiber | 122 | 0 | Cemu |
-| util/helpers | 2710 | 0 | Cemu |
-| util/highresolutiontimer | 191 | 0 | Cemu |
-| util/ImageWriter | 160 | 0 | Cemu |
-| util/IniParser | 306 | 0 | Cemu |
-| util/libusbWrapper | 122 | 0 | Cemu |
-| util/math | 635 | 0 | Cemu |
-| util/MemMapper | 156 | 0 | Cemu |
-| util/ScreenSaver | 72 | 0 | Cemu |
-| util/SystemInfo | 265 | 0 | Cemu |
-| util/ThreadPool | 14 | 0 | Cemu |
+| util (top level) | 54 | 54 | original |
+| util/boost | 65 | 65 | original |
+| util/bootSound | 88 | 88 | original |
+| util/ChunkedHeap | 489 | 489 | original |
+| util/containers | 4295 | 346 | mixed (8% original), 3949 lines third-party |
+| util/crypto | 896 | 478 | mixed (53% original), 418 lines third-party |
+| util/DXGIWrapper | 77 | 77 | original |
+| util/Fiber | 148 | 148 | original |
+| util/helpers | 2327 | 2327 | original |
+| util/highresolutiontimer | 171 | 171 | original |
+| util/ImageWriter | 123 | 123 | original |
+| util/IniParser | 225 | 225 | original |
+| util/libusbWrapper | 9 | 9 | original |
+| util/math | 391 | 391 | original |
+| util/MemMapper | 157 | 157 | original |
+| util/ScreenSaver | 45 | 45 | original |
+| util/SystemInfo | 236 | 236 | original |
+| util/ThreadPool | 14 | 14 | original |
 | util/tinyxml2 | 5027 | 0 | third-party |
-| util/VirtualHeap | 194 | 0 | Cemu |
-| util/Zir | 2489 | 0 | Cemu |
+| util/VirtualHeap | 161 | 161 | original |
+| util/Zir | 1610 | 1610 | original |
 <!-- table:end -->
 
 ## Log
@@ -1063,3 +1063,86 @@ Done:
   offset that is never updated; the feedback-loop relaxation in sync_inputTexturesChanged
   is unchanged. Metal is not touched. CocoaSurface.mm (Objective-C++) could
   not be compiled here and was reviewed by hand.
+- Batch 13b: `util`, the Cemu-authored parts of `Common`, the settings in
+  `config` (CemuConfig, ActiveSettings, LaunchSettings, NetworkSettings)
+  and the entry points `main.cpp`/`mainLLE.cpp` rewritten as original code.
+  util: the chunked, virtual and VHeap heaps, the memory mapper, fibers,
+  the thread pool, the high resolution timer, system info, DXGI and
+  screensaver wrappers, the boot sound reader, BMP/TGA writers, the INI
+  parser, the event service, AES-128 and CRC32, the containers
+  (IntervalBucketContainer, LookupTableL3, RangeStore, SmallBitset), the
+  helpers (string helpers/parser/buffer, serializer, state hasher, queues,
+  semaphores, ring buffer, memory pool, spinlock, enum_array and friends),
+  the math types and the whole Zir shader IR (IR, builder, passes,
+  scheduler, register allocators, GLSL emitter). Common: precompiled.h and
+  precompiled.cpp, betype, MemPtr, StackAllocator, SysAllocator,
+  CafeString, enumFlags, platform/version/socket headers, the unix and
+  Windows platform layers and FileStream implementations, cpu_features,
+  the exception handlers (common, POSIX, Win32) and the ELF symbol table.
+  Not rewritten: third-party code (tinyxml2, robin_hood.h,
+  flat_hash_map.hpp, md5, unix/date.h, unix/fast_float.h, GLInclude), the
+  CMakeLists files, and config/ConfigValue.h and config/XMLConfig.h (not
+  in this batch).
+  File names, every public symbol, macro and type used elsewhere in the
+  tree, and the exported C symbols (gameMeta_getTitleId, the AMD/NVIDIA
+  GPU-selection exports) are unchanged. settings.xml is read and written
+  with the same element names, value types, defaults and order, so an
+  existing settings.xml loads to the same values and saves to the same
+  bytes. StackAllocator and SysAllocator keep their sizes, alignment and
+  registration order, so guest addresses come out the same.
+  The PixelU additions keep their names, parsing and effect: --rp-embed,
+  --rp-record/--rp-ffmpeg, --rp-parent (decimal or 0x hex, implies
+  --rp-embed), --rp-opengl with LaunchSettings::RPForceOpenGL(), which
+  ActiveSettings::GetGraphicsAPI still honours under ENABLE_OPENGL, and
+  DefaultControllerProfile_CreateIfMissing() still runs before the input
+  profiles are loaded.
+  Old-vs-new harnesses (ASan/UBSan) give identical output: util (crypto,
+  strings, parser, INI, serializer, containers, heaps, math; 106k lines);
+  Zir IR building, passes, register allocation and GLSL emission (69k
+  lines); Common (endian types, precompiled helpers, enum flags,
+  CafeString, string copies, StackAllocator/SysAllocator guest addresses,
+  MemPtr, FileStream); LaunchSettings over 4011 command lines, each in its
+  own process (all options including the --rp-* ones); CemuConfig over
+  3000 random settings.xml files through Load and Save, comparing the
+  loaded values and the saved bytes. A new-only test covers the FileStream
+  fixes. g++ and clang++ syntax checks of 320 files across Cafe, input,
+  Cemu, util and main, and of the 117 files that include the config
+  headers, fail only where the old tree fails too (missing third-party
+  headers in this environment); a mingw-target clang check of the Windows
+  sources shows the same results as the old tree.
+  Fixes and defined behaviour: StringBuf grows instead of truncating; AES
+  no longer modifies its input, handles tail blocks safely and its
+  function pointers are valid before init; ParseHexString and ToUtf8 are
+  bounds checked; GetParentProcess no longer raises SIGTRAP outside
+  Windows; StateHasher uses a new hash (only compared within a run);
+  MemMapper returns null instead of MAP_FAILED and Windows MEM_RELEASE
+  passes size 0; LookupTableL3 frees its tables; VirtualHeap checks the
+  first allocation's size, grows its pool and allocateAddr is null-safe;
+  Vector3 Rotate* use the original components; timer frequency fixes;
+  Fiber sets uc_link to null and on Windows the destructor converts a
+  running fiber back to a thread; VHeap frees all blocks and uses loops
+  instead of recursion; the regular register allocator works instead of
+  trapping; Zir debug print format differs; DXGIWrapper null checks;
+  SystemInfo bounds checks; betype operator| returns by value (the old
+  one returned a reference to a temporary); libusbWrapper and bmp.h are
+  minimal placeholders matching their use; boost/bluetooth.h is a corrected
+  Windows-only version; EventService disconnect calls slot.disconnect().
+  SysAllocator's string constructor pads to the element count and its
+  void* conversion is fixed; CafeString guards empty copies and Length
+  checks the bound first. The unix FileStream clears the stream state
+  before tell/seek, implements SetEndOfFile, adds readU16/writeU16 and
+  ends its va_list; the Windows Flush is a no-op. cpu_features detection
+  is rewritten. The ELF symbol table no longer munmaps MAP_FAILED and
+  bounds checks its tables; the POSIX backtrace offset is parsed from the
+  correct substring; both exception handlers check g_gdbstub; the Win32
+  handler no longer leaks a module reference. LaunchSettings help texts
+  are reworded (the --rp-* descriptions are unchanged) and the extractor
+  messages print their arguments; the legacy network service index
+  increment cannot overflow; when the game's gamma is overridden it is
+  left out instead of multiplied by 0 (differs only for a non-finite game
+  gamma). main.cpp's helper functions are internal. Log texts differ
+  in places.
+  Kept on purpose: settings.xml reads mtlDevice as an int and writes it as
+  a 64-bit value; the DSU port (uint16) is never loaded from settings.xml;
+  legacy graphic packs insert the normalized path but store the preset
+  under the original one.
