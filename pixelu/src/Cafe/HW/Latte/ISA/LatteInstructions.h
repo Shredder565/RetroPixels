@@ -1,10 +1,40 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "Cafe/HW/Latte/Core/LatteConst.h"
+
+// Decoding helpers for R7xx shader microcode: control flow (CF) words,
+// vertex fetch clause instructions and ALU clause instructions.
+// Every class is a thin view over the raw little-endian instruction words.
 
 namespace Latte
 {
 	using GPRType = uint8;
 };
+
+namespace LatteISA
+{
+	// bits [shift, shift+width) of a word
+	constexpr uint32 Bits(uint32 word, uint32 shift, uint32 width)
+	{
+		return (word >> shift) & ((width >= 32) ? 0xFFFFFFFFu : ((1u << width) - 1u));
+	}
+
+	constexpr bool Bit(uint32 word, uint32 bit)
+	{
+		return ((word >> bit) & 1u) != 0;
+	}
+
+	// replaces bits [shift, shift+width) of word with value (value is not masked)
+	inline void Put(uint32& word, uint32 shift, uint32 width, uint32 value)
+	{
+		const uint32 mask = ((width >= 32) ? 0xFFFFFFFFu : ((1u << width) - 1u)) << shift;
+		word = (word & ~mask) | (value << shift);
+	}
+};
+
+/* -------------------------------------------------------------------------
+   Control flow instructions (64 bit: word0 = CF_DWORD0, word1 = CF_DWORD1)
+------------------------------------------------------------------------- */
 
 class LatteCFInstruction
 {
@@ -17,14 +47,15 @@ public:
 		CF_COND_NOT_BOOL = 3,
 	};
 
+	// 7-bit CF_INST for the normal encodings, ALU clauses use a 4-bit
+	// CF_INST at bit 26 and are tagged here with MASK_ALU
 	enum OPCODE
 	{
-		// SQ_CF_INST_*
 		INST_NOP = 0x00,
 		INST_TEX = 0x01,
-		INST_VTX = 0x02, // vertex fetch clause, used only in GS copy program?
-		INST_VTX_TC = 0x03, // vertex fetch clause, through texture cache
-		INST_LOOP_START = 0x04, // DX9 style loop
+		INST_VTX = 0x02,
+		INST_VTX_TC = 0x03,
+		INST_LOOP_START = 0x04,
 		INST_LOOP_END = 0x05,
 		INST_LOOP_START_DX10 = 0x06,
 		INST_LOOP_BREAK = 0x09,
@@ -35,81 +66,67 @@ public:
 		INST_CALL = 0x12,
 		INST_CALL_FS = 0x13,
 		INST_RETURN = 0x14,
-		INST_EMIT_VERTEX = 0x15, // only available in geometry shader
-		INST_MEM_STREAM0_WRITE = 0x20, // for stream out (index selects buffer)
+		INST_EMIT_VERTEX = 0x15,
+		INST_MEM_STREAM0_WRITE = 0x20,
 		INST_MEM_STREAM1_WRITE = 0x21,
 		INST_MEM_STREAM2_WRITE = 0x22,
 		INST_MEM_STREAM3_WRITE = 0x23,
-		INST_MEM_RING_WRITE = 0x26, // used to pass data to/from geometry shader
+		INST_MEM_RING_WRITE = 0x26,
 		INST_EXPORT = 0x27,
-		INST_EXPORT_DONE = 0x28, // last export
+		INST_EXPORT_DONE = 0x28,
 
-		// ALU instructions
-		MASK_ALU = 0x40, // mask to differentiate ALU instructions
-		INST_ALU = (0x08 | MASK_ALU),
-		INST_ALU_PUSH_BEFORE = (0x09 | MASK_ALU),
-		INST_ALU_POP_AFTER = (0x0A | MASK_ALU),
-		INST_ALU_POP2_AFTER = (0x0B | MASK_ALU),
-		// reserved
-		INST_ALU_CONTINUE = (0x0D | MASK_ALU),
-		INST_ALU_BREAK = (0x0E | MASK_ALU),
-		INST_ALU_ELSE_AFTER = (0x0F | MASK_ALU),
+		MASK_ALU = 0x40,
+		INST_ALU = 0x48,
+		INST_ALU_PUSH_BEFORE = 0x49,
+		INST_ALU_POP_AFTER = 0x4A,
+		INST_ALU_POP2_AFTER = 0x4B,
+		INST_ALU_CONTINUE = 0x4D,
+		INST_ALU_BREAK = 0x4E,
+		INST_ALU_ELSE_AFTER = 0x4F,
 	};
 
 	OPCODE getField_Opcode() const
 	{
-		uint32 cf_inst23_7 = (word1 >> 23) & 0x7F;
-		// check the bigger opcode fields first
-		if (cf_inst23_7 < 0x40) // starting at 0x40 the bits overlap with the ALU instruction encoding
-		{
-			// cf_inst23_7 is opcode
-			return (OPCODE)cf_inst23_7;
-		}
-		uint32 cf_inst26_4 = ((word1 >> 26) & 0xF);
-		// cf_inst26_4 is ALU opcode
-		return (OPCODE)(cf_inst26_4 | OPCODE::MASK_ALU);
+		// the 7-bit field overlaps the ALU encoding; values with the top bit
+		// set are ALU clauses and take their opcode from bits 26-29
+		const uint32 wide = LatteISA::Bits(word1, 23, 7);
+		if (wide < 0x40)
+			return static_cast<OPCODE>(wide);
+		return static_cast<OPCODE>(LatteISA::Bits(word1, 26, 4) | OPCODE::MASK_ALU);
 	}
 
 	bool getField_END_OF_PROGRAM() const
 	{
-		// shared by all CF instruction types except ALU
-		cemu_assert_debug((getField_Opcode() & OPCODE::MASK_ALU) != OPCODE::MASK_ALU);
-		return ((word1 >> 21) & 1) != 0;
+		cemu_assert_debug((getField_Opcode() & OPCODE::MASK_ALU) == 0);
+		return LatteISA::Bit(word1, 21);
 	}
 
 	const class LatteCFInstruction_ALU* getParser_ALU() const
 	{
-		cemu_assert_debug((getField_Opcode() & OPCODE::MASK_ALU) == OPCODE::MASK_ALU);
-		return (const LatteCFInstruction_ALU*)this;
+		cemu_assert_debug((getField_Opcode() & OPCODE::MASK_ALU) != 0);
+		return reinterpret_cast<const LatteCFInstruction_ALU*>(this);
 	}
 
-	// EXPORT is for:
-	// SQ_CF_INST_MEM_STREAM0 - SQ_CF_INST_MEM_STREAM3
-	// SQ_CF_INST_MEM_SCRATCH
-	// SQ_CF_INST_MEM_REDUCTION
-	// SQ_CF_INST_MEM_RING
-	// SQ_CF_INST_EXPORT
-	// SQ_CF_INST_EXPORT_DONE
+	// view for the MEM_* and EXPORT* opcodes
 	const class LatteCFInstruction_EXPORT_IMPORT* getParser_EXPORT() const
 	{
-		return (const LatteCFInstruction_EXPORT_IMPORT*)this;
+		return reinterpret_cast<const LatteCFInstruction_EXPORT_IMPORT*>(this);
 	}
 
+	// returns the encoding view if the opcode belongs to it, otherwise nullptr
 	template<typename TCFEncoding>
 	const TCFEncoding* getParserIfOpcodeMatch() const
 	{
-		auto opcode = getField_Opcode();
-		if (TCFEncoding::MatchesOpcode(opcode))
-			return (const TCFEncoding*)this;
-		return nullptr;
+		if (!TCFEncoding::MatchesOpcode(getField_Opcode()))
+			return nullptr;
+		return reinterpret_cast<const TCFEncoding*>(this);
 	}
 
-	// writing
+	// only non-ALU opcodes; clears the low four bits of CF_INST and ORs in the opcode
 	void setField_Opcode(OPCODE opcode)
 	{
-		cemu_assert_debug(((uint32)opcode & (uint32)OPCODE::MASK_ALU) == 0);
-		word1 &= ~(0xF << 23);
-		word1 |= ((uint32)opcode << 23);
+		cemu_assert_debug((static_cast<uint32>(opcode) & static_cast<uint32>(OPCODE::MASK_ALU)) == 0);
+		word1 = (word1 & ~(0xFu << 23)) | (static_cast<uint32>(opcode) << 23);
 	}
 
 protected:
@@ -117,8 +134,7 @@ protected:
 	uint32 word1;
 };
 
-// default encoding, CF_DWORD0 + CF_DWORD1
-// used for opcodes: See list in MatchesOpcode()
+// CF_DWORD0/CF_DWORD1: clause fetches, calls, loops, jumps and stack ops
 class LatteCFInstruction_DEFAULT : public LatteCFInstruction
 {
 public:
@@ -130,94 +146,57 @@ public:
 
 	static bool MatchesOpcode(const OPCODE opcode)
 	{
-		return opcode == OPCODE::INST_NOP ||
-			opcode == OPCODE::INST_VTX ||
-			opcode == OPCODE::INST_VTX_TC ||
-			opcode == OPCODE::INST_TEX ||
-			opcode == OPCODE::INST_CALL_FS ||
-			opcode == OPCODE::INST_CALL ||
-			opcode == OPCODE::INST_RETURN ||
-			opcode == OPCODE::INST_LOOP_START ||
-			opcode == OPCODE::INST_LOOP_END ||
-			opcode == OPCODE::INST_LOOP_START_DX10 ||
-			//opcode == OPCODE::INST_LOOP_CONTINUE ||
-			//opcode == OPCODE::INST_LOOP_BREAK ||
-			opcode == OPCODE::INST_JUMP ||
-			//opcode == OPCODE::INST_PUSH ||
-			//opcode == OPCODE::INST_PUSH_ELSE ||
-			opcode == OPCODE::INST_ELSE ||
-			opcode == OPCODE::INST_POP ||
-			//opcode == OPCODE::INST_POP_JUMP ||
-			opcode == OPCODE::INST_JUMP ||
-			//opcode == OPCODE::INST_POP_PUSH ||
-			//opcode == OPCODE::INST_PUSH ||
-			//opcode == OPCODE::INST_POP_PUSH_ELSE ||
-			//opcode == OPCODE::INST_PUSH_ELSE ||
-			opcode == OPCODE::INST_EMIT_VERTEX
-			//opcode == OPCODE::INST_EMIT_CUT_VERTEX ||
-			//opcode == OPCODE::INST_CUT_VERTEX ||
-			//opcode == OPCODE::INST_KILL
-			;
+		switch (opcode)
+		{
+		case OPCODE::INST_NOP:
+		case OPCODE::INST_TEX:
+		case OPCODE::INST_VTX:
+		case OPCODE::INST_VTX_TC:
+		case OPCODE::INST_LOOP_START:
+		case OPCODE::INST_LOOP_END:
+		case OPCODE::INST_LOOP_START_DX10:
+		case OPCODE::INST_JUMP:
+		case OPCODE::INST_ELSE:
+		case OPCODE::INST_POP:
+		case OPCODE::INST_CALL:
+		case OPCODE::INST_CALL_FS:
+		case OPCODE::INST_RETURN:
+		case OPCODE::INST_EMIT_VERTEX:
+			return true;
+		default:
+			return false;
+		}
 	}
 
-	// returns offset in bytes
-	uint32 getField_ADDR() const // returns offset in bytes
-	{
-		return word0 << 3;
-	}
+	// clause or jump target in bytes (stored in 64-bit units)
+	uint32 getField_ADDR() const { return word0 << 3; }
+	uint32 getField_POP_COUNT() const { return LatteISA::Bits(word1, 0, 3); }
+	uint32 getField_CF_CONST() const { return LatteISA::Bits(word1, 3, 5); }
+	CF_COND getField_COND() const { return static_cast<CF_COND>(LatteISA::Bits(word1, 8, 2)); }
 
-	uint32 getField_POP_COUNT() const
-	{
-		return (word1 >> 0) & 7;
-	}
-
-	uint32 getField_CF_CONST() const
-	{
-		return (word1 >> 3) & 0x1F;
-	}
-
-	CF_COND getField_COND() const
-	{
-		return (CF_COND)((word1 >> 8) & 0x3);
-	}
-
+	// instruction count of the clause: 3 bits at 10 plus the R7xx extension bit at 19
 	uint32 getField_COUNT() const
-	{		
-		uint32 count = (word1 >> 10) & 0x7; // R600 field
-		count |= ((word1 >> 16)&0x8); // R700 has an extra bit at 19
-		return count + 1;
-	}
-
-	uint32 getField_CALL_COUNT() const
 	{
-		return (word1 >> 13) & 0x3F;
+		return (LatteISA::Bits(word1, 10, 3) | (LatteISA::Bits(word1, 19, 1) << 3)) + 1;
 	}
 
-	uint32 getField_VALID_PIXEL_MODE() const
-	{
-		return (word1 >> 22) & 1;
-	}
+	uint32 getField_CALL_COUNT() const { return LatteISA::Bits(word1, 13, 6); }
+	uint32 getField_VALID_PIXEL_MODE() const { return LatteISA::Bits(word1, 22, 1); }
+	uint32 getField_WHOLE_QUAD_MODE() const { return LatteISA::Bits(word1, 30, 1); }
+	uint32 getField_BARRIER() const { return LatteISA::Bits(word1, 31, 1); }
 
-	uint32 getField_WHOLE_QUAD_MODE() const
-	{
-		return (word1 >> 30) & 1;
-	}
-
-	uint32 getField_BARRIER() const
-	{
-		return (word1 >> 31) & 1;
-	}
-
+	// fetch clause bytes of a VTX/VTX_TC instruction (16 bytes per fetch)
 	std::span<uint8> getClauseCode(std::span<uint8> programCode) const
 	{
+		const uint32 offset = getField_ADDR();
+		const uint32 length = getField_COUNT() * 16;
 		cemu_assert_debug(getField_Opcode() == LatteCFInstruction::INST_VTX || getField_Opcode() == LatteCFInstruction::INST_VTX_TC);
-		cemu_assert_debug(getField_ADDR() <= programCode.size());
-		cemu_assert_debug((programCode.size() - getField_ADDR()) >= getField_COUNT() * 16);
-		return programCode.subspan(getField_ADDR(), getField_COUNT() * 16);
+		cemu_assert_debug(offset <= programCode.size());
+		cemu_assert_debug(programCode.size() - offset >= length);
+		return programCode.subspan(offset, length);
 	}
 
-	// writing
-	void setField_ADDR(uint32 addrInBytes) // in bytes
+	void setField_ADDR(uint32 addrInBytes)
 	{
 		word0 = addrInBytes >> 3;
 	}
@@ -225,38 +204,37 @@ public:
 	void setField_COUNT(uint32 count)
 	{
 		cemu_assert_debug(count > 0 && count <= 16);
-		count--;
-		word1 &= ~((0x7 << 10) | (1 << 19));
-		word1 |= ((count & 0x7) << 10);
-		word1 |= ((count << 16) & (1<<19));
+		const uint32 stored = count - 1;
+		LatteISA::Put(word1, 10, 3, stored & 7);
+		LatteISA::Put(word1, 19, 1, (stored >> 3) & 1);
 	}
 
 	void setField_BARRIER(bool isEnabled)
 	{
-		if (isEnabled)
-			word1 |= (1 << 31);
-		else
-			word1 &= ~(1 << 31);
+		LatteISA::Put(word1, 31, 1, isEnabled ? 1u : 0u);
 	}
-
 };
 
-// CF_ALLOC_EXPORT_DWORD0 + CF_ALLOC_EXPORT_DWORD1_BUF / CF_ALLOC_EXPORT_DWORD1_SWIZ
-// this has two different encoding. Use isEncodingBUF() to determine which fields are valid
-class LatteCFInstruction_EXPORT_IMPORT : public LatteCFInstruction // CF_ALLOC_EXPORT_DWORD1_SWIZ
+// CF_ALLOC_EXPORT_DWORD0 + CF_ALLOC_EXPORT_DWORD1_BUF or _SWIZ
+// word1 bits 0-15 hold either the buffer fields or the swizzle fields
+class LatteCFInstruction_EXPORT_IMPORT : public LatteCFInstruction
 {
 public:
 	static bool MatchesOpcode(const OPCODE opcode)
 	{
-		return opcode == OPCODE::INST_MEM_STREAM0_WRITE ||
-			opcode == OPCODE::INST_MEM_STREAM1_WRITE ||
-			opcode == OPCODE::INST_MEM_STREAM2_WRITE ||
-			opcode == OPCODE::INST_MEM_STREAM3_WRITE ||
-			//opcode == OPCODE::INST_MEM_SCRATCH ||
-			//opcode == OPCODE::INST_MEM_REDUCTION ||
-			opcode == OPCODE::INST_MEM_RING_WRITE ||
-			opcode == OPCODE::INST_EXPORT ||
-			opcode == OPCODE::INST_EXPORT_DONE;
+		switch (opcode)
+		{
+		case OPCODE::INST_MEM_STREAM0_WRITE:
+		case OPCODE::INST_MEM_STREAM1_WRITE:
+		case OPCODE::INST_MEM_STREAM2_WRITE:
+		case OPCODE::INST_MEM_STREAM3_WRITE:
+		case OPCODE::INST_MEM_RING_WRITE:
+		case OPCODE::INST_EXPORT:
+		case OPCODE::INST_EXPORT_DONE:
+			return true;
+		default:
+			return false;
+		}
 	}
 
 	enum EXPORT_TYPE : uint8
@@ -279,144 +257,71 @@ public:
 		MASKED
 	};
 
-	EXPORT_TYPE getField_TYPE() const
-	{
-		return (EXPORT_TYPE)((word0 >> 13) & 0x3);
-	}
+	uint32 getField_ARRAY_BASE() const { return LatteISA::Bits(word0, 0, 13); }
+	EXPORT_TYPE getField_TYPE() const { return static_cast<EXPORT_TYPE>(LatteISA::Bits(word0, 13, 2)); }
+	uint32 getField_RW_GPR() const { return LatteISA::Bits(word0, 15, 7); }
+	bool getField_RW_REL() const { return LatteISA::Bit(word0, 22); } // RW_GPR is indexed
+	uint32 getField_INDEX_GPR() const { return LatteISA::Bits(word0, 23, 7); }
+	uint8 getField_ELEM_SIZE() const { return static_cast<uint8>(LatteISA::Bits(word0, 30, 2) + 1); }
+	uint8 getField_BURST_COUNT() const { return static_cast<uint8>(LatteISA::Bits(word1, 17, 4) + 1); }
 
-	uint32 getField_ARRAY_BASE() const
-	{
-		return (word0 >> 0) & 0x1FFF;
-	}
-
-	uint32 getField_INDEX_GPR() const
-	{
-		return (word0 >> 23) & 0x7F;
-	}
-
-	// read/write GPR (source/destination)
-	uint32 getField_RW_GPR() const
-	{
-		return (word0 >> 15) & 0x7F;
-	}
-
-	// if true, RW_GPR is indexed
-	bool getField_RW_REL() const
-	{
-		return ((word0 >> 22) & 0x1) != 0;
-	}
-
-	uint8 getField_BURST_COUNT() const
-	{
-		return ((word1 >> 17) & 0xF) + 1;
-	}
-
-	uint8 getField_ELEM_SIZE() const
-	{
-		return ((word0 >> 30) & 0x3) + 1;
-	}
-
-	// word1 bits 0-15 differ depending on BUF/SWIZ encoding
-	// returns true if BUF encoding is used (BUF fields valid, SWIZ invalid). Otherwise SWIZ encoding is used (BUF fields invalid, SWIZ fields valid)
+	// a non-zero component mask means the BUF variant of word1
 	bool isEncodingBUF() const
 	{
-		return ((word1 >> 12) & 0xF) != 0;
+		return LatteISA::Bits(word1, 12, 4) != 0;
 	}
 
-	// fields specific to SWIZ encoding 
+	// SWIZ variant
+	COMPSEL getSwizField_SEL_X() const { cemu_assert_debug(!isEncodingBUF()); return static_cast<COMPSEL>(LatteISA::Bits(word1, 0, 3)); }
+	COMPSEL getSwizField_SEL_Y() const { cemu_assert_debug(!isEncodingBUF()); return static_cast<COMPSEL>(LatteISA::Bits(word1, 3, 3)); }
+	COMPSEL getSwizField_SEL_Z() const { cemu_assert_debug(!isEncodingBUF()); return static_cast<COMPSEL>(LatteISA::Bits(word1, 6, 3)); }
+	COMPSEL getSwizField_SEL_W() const { cemu_assert_debug(!isEncodingBUF()); return static_cast<COMPSEL>(LatteISA::Bits(word1, 9, 3)); }
 
-	COMPSEL getSwizField_SEL_X() const { cemu_assert_debug(!isEncodingBUF()); return (COMPSEL)((word1 >> 0) & 0x7); }
-	COMPSEL getSwizField_SEL_Y() const { cemu_assert_debug(!isEncodingBUF()); return (COMPSEL)((word1 >> 3) & 0x7); }
-	COMPSEL getSwizField_SEL_Z() const { cemu_assert_debug(!isEncodingBUF()); return (COMPSEL)((word1 >> 6) & 0x7); }
-	COMPSEL getSwizField_SEL_W() const { cemu_assert_debug(!isEncodingBUF()); return (COMPSEL)((word1 >> 9) & 0x7); }
-
-	// fields specific to BUF encoding (word1 bits 0-15)
-	
+	// BUF variant
 	uint32 getBufField_ARRAY_SIZE() const
 	{
 		cemu_assert_debug(isEncodingBUF());
-		return (word1 >> 0) & 0xFFF;
+		return LatteISA::Bits(word1, 0, 12);
 	}
 
-	// applies only to writes
 	uint32 getBufField_COMP_MASK() const
 	{
 		cemu_assert_debug(isEncodingBUF());
-		return (word1 >> 12) & 0xF;
+		return LatteISA::Bits(word1, 12, 4);
 	}
 
-	// these are not specific to EXPORT instr? Move to LatteCFInstruction?
-	bool getValidPixelMode() const
-	{
-		return ((word1 >> 22) & 0x1) != 0;
-	}
-
-	bool getWholeQuadMode() const
-	{
-		return ((word1 >> 30) & 0x1) != 0;
-
-	}
+	bool getValidPixelMode() const { return LatteISA::Bit(word1, 22); }
+	bool getWholeQuadMode() const { return LatteISA::Bit(word1, 30); }
 };
 
-// encoding for CF_ALU_DWORD0 + CF_ALU_DWORD1
-// used for: 
-// CF_INST_ALU
-// CF_INST_ALU_PUSH_BEFORE
-// CF_INST_ALU_POP_AFTER
-// CF_INST_ALU_POP2_AFTER
-// CF_INST_ALU_CONTINUE
-// CF_INST_ALU_BREAK
-// CF_INST_ALU_ELSE_AFTER
+// CF_ALU_DWORD0 + CF_ALU_DWORD1
 class LatteCFInstruction_ALU : public LatteCFInstruction
 {
 public:
 	static bool MatchesOpcode(const OPCODE opcode)
 	{
-		return opcode == OPCODE::INST_ALU ||
-			opcode == OPCODE::INST_ALU_PUSH_BEFORE ||
-			opcode == OPCODE::INST_ALU_POP_AFTER ||
-			opcode == OPCODE::INST_ALU_POP2_AFTER ||
-			opcode == OPCODE::INST_ALU_CONTINUE ||
-			opcode == OPCODE::INST_ALU_BREAK ||
-			opcode == OPCODE::INST_ALU_ELSE_AFTER;
+		switch (opcode)
+		{
+		case OPCODE::INST_ALU:
+		case OPCODE::INST_ALU_PUSH_BEFORE:
+		case OPCODE::INST_ALU_POP_AFTER:
+		case OPCODE::INST_ALU_POP2_AFTER:
+		case OPCODE::INST_ALU_CONTINUE:
+		case OPCODE::INST_ALU_BREAK:
+		case OPCODE::INST_ALU_ELSE_AFTER:
+			return true;
+		default:
+			return false;
+		}
 	}
 
-	uint32 getField_ADDR() const
-	{
-		return (word0 >> 0) & 0x3FFFFF;
-	}
-
-	uint32 getField_COUNT() const
-	{
-		return ((word1 >> 18) & 0x7F) + 1;
-	}
-
-	uint32 getField_KCACHE_BANK0() const
-	{
-		return (word0 >> 22) & 0xF;
-	}
-
-	uint32 getField_KCACHE_BANK1() const
-	{
-		return (word0 >> 26) & 0xF;
-	}
-
-	uint32 getField_KCACHE_ADDR0() const
-	{
-		return (word1 >> 2) & 0xFF;
-	}
-
-	uint32 getField_KCACHE_ADDR1() const
-	{
-		return (word1 >> 10) & 0xFF;
-	}
-
-	bool getField_USES_WATERFALL() const
-	{
-		return ((word1 >> 25)&1) !=0;
-	}
-
-	// todo - KCACHE_MODE0, KCACHE_MODE1, WHOLE_QUAD_MODE, BARRIER
+	uint32 getField_ADDR() const { return LatteISA::Bits(word0, 0, 22); } // in 64-bit units
+	uint32 getField_KCACHE_BANK0() const { return LatteISA::Bits(word0, 22, 4); }
+	uint32 getField_KCACHE_BANK1() const { return LatteISA::Bits(word0, 26, 4); }
+	uint32 getField_KCACHE_ADDR0() const { return LatteISA::Bits(word1, 2, 8); }
+	uint32 getField_KCACHE_ADDR1() const { return LatteISA::Bits(word1, 10, 8); }
+	uint32 getField_COUNT() const { return LatteISA::Bits(word1, 18, 7) + 1; }
+	bool getField_USES_WATERFALL() const { return LatteISA::Bit(word1, 25); }
 };
 
 static_assert(sizeof(LatteCFInstruction) == 8);
@@ -424,9 +329,11 @@ static_assert(sizeof(LatteCFInstruction_DEFAULT) == 8);
 static_assert(sizeof(LatteCFInstruction_EXPORT_IMPORT) == 8);
 static_assert(sizeof(LatteCFInstruction_ALU) == 8);
 
-/* Latte instructions */
+/* -------------------------------------------------------------------------
+   Vertex fetch clause instruction (128 bit, VTX_DWORD0..2 + padding)
+------------------------------------------------------------------------- */
 
-class LatteClauseInstruction_VTX // used by CF VTX and VTX_TC clauses
+class LatteClauseInstruction_VTX
 {
 public:
 	LatteClauseInstruction_VTX()
@@ -437,7 +344,6 @@ public:
 		word3 = 0;
 	}
 
-	// VTX_DWORD0
 	enum class VTX_INST
 	{
 		_VTX_INST_FETCH = 0,
@@ -459,16 +365,16 @@ public:
 		SEL_Y = 1,
 		SEL_Z = 2,
 		SEL_W = 3,
-		SEL_0 = 4, // constant 0.0
-		SEL_1 = 5, // constant 1.0
+		SEL_0 = 4,
+		SEL_1 = 5,
 		SEL_RESERVED = 6,
 		SEL_MASK = 7,
 	};
 
-	enum class NUM_FORMAT_ALL // NFA
+	enum class NUM_FORMAT_ALL
 	{
-		NUM_FORMAT_NORM = 0, // normalized to float (-1.0 to 1.0 for signed, 0.0 to 1.0 for unsigned)
-		NUM_FORMAT_INT = 1, // interpreted as integer
+		NUM_FORMAT_NORM = 0, // normalized to [0,1] or [-1,1]
+		NUM_FORMAT_INT = 1,
 		NUM_FORMAT_SCALED = 2,
 	};
 
@@ -484,281 +390,158 @@ public:
 		SRF_MODE_NO_ZERO = 1,
 	};
 
-	// fields todo:
-	// FETCH_WHOLE_QUAD
-	// MEGA_FETCH_COUNT
-	// MEGA_FETCH (word2)
-	// ALT_CONST (word2)
+	// word0
+	VTX_INST getField_VTX_INST() const { return static_cast<VTX_INST>(LatteISA::Bits(word0, 0, 5)); }
+	LatteConst::VertexFetchType2 getField_FETCH_TYPE() const { return static_cast<LatteConst::VertexFetchType2>(LatteISA::Bits(word0, 5, 2)); }
+	uint32 getField_BUFFER_ID() const { return LatteISA::Bits(word0, 8, 8); }
+	uint32 getField_SRC_GPR() const { return LatteISA::Bits(word0, 16, 7); }
+	bool getField_SRC_REL() const { return LatteISA::Bit(word0, 23); }
+	SRC_SEL getField_SRC_SEL_X() const { return static_cast<SRC_SEL>(LatteISA::Bits(word0, 24, 2)); }
 
-	VTX_INST getField_VTX_INST() const // alias opcode
-	{
-		return (VTX_INST)((word0 >> 0) & 0x1F);
-	}
-
-	LatteConst::VertexFetchType2 getField_FETCH_TYPE() const
-	{
-		return (LatteConst::VertexFetchType2)((word0 >> 5) & 0x3);
-	}
-
-	uint32 getField_BUFFER_ID() const
-	{
-		return (word0 >> 8) & 0xFF;
-	}
-
-	uint32 getField_SRC_GPR() const
-	{
-		return (word0 >> 16) & 0x7F;
-	}
-	
-	bool getField_SRC_REL() const
-	{
-		return ((word0 >> 23) & 1) != 0;
-	}
-
-	SRC_SEL getField_SRC_SEL_X() const
-	{
-		return (SRC_SEL)((word0 >> 24) & 0x3);
-	}
-
-	// WORD1 depends on instruction type but some fields are shared
-	// VTX_DWORD1 / VTX_DWORD1_GPR / VTX_DWORD1_SEM
-
-	DST_SEL getField_DST_SEL(uint32 index) const // shared field
+	// word1 (common part of the GPR and SEM variants)
+	DST_SEL getField_DST_SEL(uint32 index) const
 	{
 		cemu_assert_debug(index <= 3);
-		return (DST_SEL)((word1 >> (9 + index*3)) & 0x7);
+		return static_cast<DST_SEL>(LatteISA::Bits(word1, 9 + index * 3, 3));
 	}
 
-	bool getField_USE_CONST_FIELDS() const  // shared field
-	{
-		return ((word1 >> 21) & 1) != 0;
-	}
+	bool getField_USE_CONST_FIELDS() const { return LatteISA::Bit(word1, 21); }
+	Latte::E_HWFMT getField_DATA_FORMAT() const { return static_cast<Latte::E_HWFMT>(LatteISA::Bits(word1, 22, 6)); }
+	NUM_FORMAT_ALL getField_NUM_FORMAT_ALL() const { return static_cast<NUM_FORMAT_ALL>(LatteISA::Bits(word1, 28, 2)); }
+	FORMAT_COMP getField_FORMAT_COMP_ALL() const { return static_cast<FORMAT_COMP>(LatteISA::Bits(word1, 30, 1)); }
+	// PixelU has always decoded SRF_MODE_ALL from bit 30 as well
+	SRF_MODE getField_SRF_MODE_ALL() const { return static_cast<SRF_MODE>(LatteISA::Bits(word1, 30, 1)); }
 
-	Latte::E_HWFMT getField_DATA_FORMAT() const // shared field
-	{
-		return (Latte::E_HWFMT)((word1 >> 22) & 0x3F);
-	}
+	// word1, SEM variant
+	uint32 getFieldSEM_SEMANTIC_ID() const { return LatteISA::Bits(word1, 0, 8); }
 
-	NUM_FORMAT_ALL getField_NUM_FORMAT_ALL() const // shared field
-	{
-		return (NUM_FORMAT_ALL)((word1 >> 28) & 3);
-	}
+	// word2
+	uint32 getField_OFFSET() const { return LatteISA::Bits(word2, 0, 16); }
+	LatteConst::VertexFetchEndianMode getField_ENDIAN_SWAP() const { return static_cast<LatteConst::VertexFetchEndianMode>(LatteISA::Bits(word2, 16, 2)); }
+	bool getField_CONST_BUF_NO_STRIDE() const { return LatteISA::Bit(word2, 18); }
 
-	FORMAT_COMP getField_FORMAT_COMP_ALL() const // shared field
-	{
-		return (FORMAT_COMP)((word1 >> 30) & 1);
-	}
-
-	SRF_MODE getField_SRF_MODE_ALL() const // shared field
-	{
-		return (SRF_MODE)((word1 >> 30) & 1);
-	}
-
-	// VTX_DWORD1_SEM specific fields (VTX_INST_SEMANTIC)
-	uint32 getFieldSEM_SEMANTIC_ID() const
-	{
-		return ((word1 >> 0) & 0xFF);
-	}
-
-	// VTX_DWORD1_GPR specific fields (VTX_INST_FETCH?)
-	// todo
-
-	// VTX_DWORD2
-	uint32 getField_OFFSET() const // shared field
-	{
-		return ((word2 >> 0) & 0xFFFF);
-	}
-
-	LatteConst::VertexFetchEndianMode getField_ENDIAN_SWAP() const // shared field
-	{
-		return (LatteConst::VertexFetchEndianMode)((word2 >> 16) & 0x3);
-	}
-
-	bool getField_CONST_BUF_NO_STRIDE() const // shared field
-	{
-		return ((word2 >> 18) & 0x1) != 0;
-	}
-
-	// writing
+	// setters (values are not masked, callers pass in-range values)
 	LatteClauseInstruction_VTX& setField_VTX_INST(VTX_INST inst)
 	{
-		word0 &= ~(0x1F << 0);
-		word0 |= ((uint32)inst << 0);
+		LatteISA::Put(word0, 0, 5, static_cast<uint32>(inst));
 		return *this;
 	}
 
 	LatteClauseInstruction_VTX& setField_FETCH_TYPE(LatteConst::VertexFetchType2 fetchType)
 	{
-		word0 &= ~(0x3 << 5);
-		word0 |= ((uint32)fetchType << 5);
+		LatteISA::Put(word0, 5, 2, static_cast<uint32>(fetchType));
 		return *this;
 	}
 
 	LatteClauseInstruction_VTX& setField_BUFFER_ID(uint32 bufferId)
 	{
-		word0 &= ~(0xFF << 8);
-		word0 |= (bufferId << 8);
+		LatteISA::Put(word0, 8, 8, bufferId);
 		return *this;
 	}
 
 	LatteClauseInstruction_VTX& setField_SRC_GPR(uint32 srcGPR)
 	{
-		word0 &= ~(0x7F << 16);
-		word0 |= (srcGPR << 16);
+		LatteISA::Put(word0, 16, 7, srcGPR);
 		return *this;
 	}
 
 	LatteClauseInstruction_VTX& setField_SRC_REL(bool isRel)
 	{
-		if(isRel)
-			word0 |= (1 << 23);
-		else
-			word0 &= ~(0x1 << 23);
+		LatteISA::Put(word0, 23, 1, isRel ? 1u : 0u);
 		return *this;
 	}
 
 	LatteClauseInstruction_VTX& setField_SRC_SEL_X(SRC_SEL srcSel)
 	{
-		word0 &= ~(0x3 << 24);
-		word0 |= ((uint32)srcSel << 24);
+		LatteISA::Put(word0, 24, 2, static_cast<uint32>(srcSel));
 		return *this;
 	}
 
 	LatteClauseInstruction_VTX& setFieldSEM_SEMANTIC_ID(uint32 semanticId)
 	{
 		cemu_assert_debug(semanticId <= 0xFF);
-		word1 &= ~(0xFF);
-		word1 |= ((uint32)semanticId);
-		return *this;
-	}
-
-	LatteClauseInstruction_VTX& setField_OFFSET(uint32 offset)
-	{
-		cemu_assert_debug(offset < 0x10000);
-		word2 &= ~(0xFFFF << 0);
-		word2 |= ((uint32)offset);
-		return *this;
-	}
-
-	LatteClauseInstruction_VTX& setField_DATA_FORMAT(Latte::E_HWFMT fetchFormat)
-	{
-		 word1 &= ~(0x3F << 22);
-		 word1 |= ((uint32)fetchFormat << 22);
-		 return *this;
-	}
-
-	LatteClauseInstruction_VTX& setField_NUM_FORMAT_ALL(NUM_FORMAT_ALL nfa)
-	{
-		word1 &= ~(0x3 << 28);
-		word1 |= ((uint32)nfa << 28);
-		return *this;
-	}
-
-	LatteClauseInstruction_VTX& setField_FORMAT_COMP_ALL(FORMAT_COMP componentFormat)
-	{
-		word1 &= ~(0x1 << 30);
-		word1 |= ((uint32)componentFormat << 30);
+		LatteISA::Put(word1, 0, 8, semanticId);
 		return *this;
 	}
 
 	LatteClauseInstruction_VTX& setField_DST_SEL(uint32 index, DST_SEL dstSel)
 	{
 		cemu_assert_debug(index <= 3);
-		word1 &= ~(0x7 << (9 + index * 3));
-		word1 |= ((uint32)dstSel << (9 + index * 3));
+		LatteISA::Put(word1, 9 + index * 3, 3, static_cast<uint32>(dstSel));
+		return *this;
+	}
+
+	LatteClauseInstruction_VTX& setField_DATA_FORMAT(Latte::E_HWFMT fetchFormat)
+	{
+		LatteISA::Put(word1, 22, 6, static_cast<uint32>(fetchFormat));
+		return *this;
+	}
+
+	LatteClauseInstruction_VTX& setField_NUM_FORMAT_ALL(NUM_FORMAT_ALL nfa)
+	{
+		LatteISA::Put(word1, 28, 2, static_cast<uint32>(nfa));
+		return *this;
+	}
+
+	LatteClauseInstruction_VTX& setField_FORMAT_COMP_ALL(FORMAT_COMP componentFormat)
+	{
+		LatteISA::Put(word1, 30, 1, static_cast<uint32>(componentFormat));
+		return *this;
+	}
+
+	LatteClauseInstruction_VTX& setField_OFFSET(uint32 offset)
+	{
+		cemu_assert_debug(offset < 0x10000);
+		LatteISA::Put(word2, 0, 16, offset);
 		return *this;
 	}
 
 	LatteClauseInstruction_VTX& setField_ENDIAN_SWAP(LatteConst::VertexFetchEndianMode endianSwap)
 	{
-		word2 &= ~(0x3 << 16);
-		word2 |= ((uint32)endianSwap << 16);
+		LatteISA::Put(word2, 16, 2, static_cast<uint32>(endianSwap));
 		return *this;
 	}
-
 
 protected:
 	uint32 word0;
 	uint32 word1;
 	uint32 word2;
-	uint32 word3; // not used
+	uint32 word3; // padding to 128 bit
 };
 
 static_assert(sizeof(LatteClauseInstruction_VTX) == 16);
 
+/* -------------------------------------------------------------------------
+   ALU clause instructions (64 bit: ALU_DWORD0 + ALU_DWORD1_OP2/OP3)
+------------------------------------------------------------------------- */
+
 class LatteClauseInstruction_ALU
 {
 public:
+	// ALU_INST of the OP2 encoding (only the ones PixelU decodes by name)
 	enum OPCODE_OP2
 	{
 		ADD = 0x00,
 		MUL = 0x01,
 		MUL_IEEE = 0x02,
-		//#define ALU_OP2_INST_MAX			(0x003)
-		//#define ALU_OP2_INST_MIN			(0x004)
-		//#define ALU_OP2_INST_MAX_DX10		(0x005)
-		//#define ALU_OP2_INST_SETE			(0x008)
-		//#define ALU_OP2_INST_SETGT			(0x009)
-		//#define ALU_OP2_INST_SETGE			(0x00A)
-		//#define ALU_OP2_INST_SETNE			(0x00B)
-		//#define ALU_OP2_INST_SETE_DX10		(0x00C)
-		//#define ALU_OP2_INST_SETGT_DX10		(0x00D)
-		//#define ALU_OP2_INST_SETGE_DX10		(0x00E)
-		//#define ALU_OP2_INST_SETNE_DX10		(0x00F)
-		//#define ALU_OP2_INST_FLOOR			(0x014)
-		//#define ALU_OP2_INST_FRACT			(0x010)
-		//#define ALU_OP2_INST_TRUNC			(0x011)
-		//#define ALU_OP2_INST_RNDNE			(0x013)
-		//#define ALU_OP2_INST_MOVA_FLOOR		(0x016) // changes address register
-		//#define ALU_OP2_INST_MOVA_INT		(0x018) // changes address register
 		MOV = 0x19,
-		//#define ALU_OP2_INST_NOP			(0x01A)
-		//#define ALU_OP2_INST_PRED_SETE		(0x020)
-		//#define ALU_OP2_INST_PRED_SETGT		(0x021)
-		//#define ALU_OP2_INST_PRED_SETGE		(0x022)
-		//#define ALU_OP2_INST_PRED_SETNE		(0x023)
-		//#define ALU_OP2_INST_AND_INT		(0x030) // integer instruction
-		//#define ALU_OP2_INST_OR_INT			(0x031) // integer instruction
-		//#define ALU_OP2_INST_XOR_INT		(0x032) // integer instruction
-		//#define ALU_OP2_INST_NOT_INT		(0x033) // integer instruction
-		//#define ALU_OP2_INST_ADD_INT		(0x034) // integer instruction
-		//#define ALU_OP2_INST_SUB_INT		(0x035) // integer instruction
-		//#define ALU_OP2_INST_MAX_INT		(0x036) // integer instruction
-		//#define ALU_OP2_INST_MIN_INT		(0x037) // integer instruction
-		//#define ALU_OP2_INST_SETE_INT		(0x03A) // integer instruction
-		//#define ALU_OP2_INST_SETGT_INT		(0x03B) // integer instruction
-		//#define ALU_OP2_INST_SETGE_INT		(0x03C) // integer instruction
-		//#define ALU_OP2_INST_SETNE_INT		(0x03D) // integer instruction
-		//#define ALU_OP2_INST_SETGT_UINT		(0x03E) // integer instruction
-		//#define ALU_OP2_INST_SETGE_UINT		(0x03F) // integer instruction
-		//#define ALU_OP2_INST_PRED_SETE_INT	(0x042) // integer instruction 
-		//#define ALU_OP2_INST_PRED_SETGT_INT	(0x043) // integer instruction
-		//#define ALU_OP2_INST_PRED_SETGE_INT	(0x044) // integer instruction
-		//#define ALU_OP2_INST_PRED_SETNE_INT	(0x045) // integer instruction 
-		//#define ALU_OP2_INST_KILLE			(0x02C)
-		//#define ALU_OP2_INST_KILLGT			(0x02D)
-		//#define ALU_OP2_INST_KILLGE			(0x02E)
-		//#define ALU_OP2_INST_KILLE_INT		(0x046)
-		//#define ALU_OP2_INST_KILLGT_INT		(0x047)
-		//#define ALU_OP2_INST_KILLNE_INT		(0x049)
 		DOT4 = 0x50,
-		//#define ALU_OP2_INST_DOT4_IEEE		(0x051)
 		CUBE = 0x52,
 		EXP_IEEE = 0x61,
 		LOG_CLAMPED = 0x62,
 		LOG_IEEE = 0x63,
-		SQRT_IEEE = 0x6A,
-		SIN = 0x06E,
-		COS = 0x06F,
 		RECIP_CLAMPED = 0x64,
 		RECIP_FF = 0x65,
 		RECIP_IEEE = 0x66,
 		RECIPSQRT_CLAMPED = 0x67,
 		RECIPSQRT_FF = 0x68,
 		RECIPSQRT_IEEE = 0x69,
+		SQRT_IEEE = 0x6A,
 		FLT_TO_INT = 0x6B,
 		INT_TO_FLOAT = 0x6C,
 		UINT_TO_FLOAT = 0x6D,
+		SIN = 0x6E,
+		COS = 0x6F,
 		ASHR_INT = 0x70,
 		LSHR_INT = 0x71,
 		LSHL_INT = 0x72,
@@ -767,26 +550,25 @@ public:
 		FLT_TO_UINT = 0x79,
 	};
 
+	// OP3 instructions have a 5-bit opcode at bit 13 with a value of 8 or more
 	bool isOP3() const
 	{
-		uint32 alu_inst13_5 = (word1 >> 13) & 0x1F;
-		return alu_inst13_5 >= 0x8;
+		return LatteISA::Bits(word1, 13, 5) >= 8;
 	}
 
 	OPCODE_OP2 getOP2Code() const
 	{
-		uint32 alu_inst7_11 = (word1 >> 7) & 0x7FF;
-		return (OPCODE_OP2)alu_inst7_11;
+		return static_cast<OPCODE_OP2>(LatteISA::Bits(word1, 7, 11));
 	}
 
 	bool isLastInGroup() const
 	{
-		return (word0 & 0x80000000) != 0;
+		return LatteISA::Bit(word0, 31);
 	}
 
 	const class LatteClauseInstruction_ALU_OP2* getOP2Instruction() const
 	{
-		return (const class LatteClauseInstruction_ALU_OP2*)this;
+		return reinterpret_cast<const LatteClauseInstruction_ALU_OP2*>(this);
 	}
 
 protected:
@@ -794,133 +576,75 @@ protected:
 	const uint32 word1 = 0;
 };
 
+// ALU source operand selector (9 bit)
 class LatteALUSrcSel
 {
 public:
 	LatteALUSrcSel(const uint16 op) : m_op(op) {};
 
 	bool isGPR() const { return m_op < 128; };
-	bool isAnyConst() const { return m_op >= 248 && m_op <= 252; };
+	bool isAnyConst() const { return m_op >= 248 && m_op <= 252; }; // 0.0, 1.0, 1 int, -1 int, 0.5
 	bool isConst_0F() const { return m_op == 248; };
 	bool isLiteral() const { return m_op == 253; };
-	bool isCFile() const { return m_op >= 256; };
+	bool isCFile() const { return m_op >= 256; }; // constant file (uniform register)
 
 	uint32 getGPR() const { return m_op; };
-	uint32 getCFile() const { return (m_op & 0xFF); };
+	uint32 getCFile() const { return m_op & 0xFF; };
 
 private:
-	const uint16 m_op; // 0 - 511
+	const uint16 m_op;
 };
 
 class LatteClauseInstruction_ALU_OP2 : public LatteClauseInstruction_ALU
 {
 public:
-	uint32 getDestGpr() const
-	{
-		return (word1 >> 21) & 0x7F;
-	}
+	// ALU_DWORD0
+	const LatteALUSrcSel getSrc0Sel() const { return LatteALUSrcSel(static_cast<uint16>(LatteISA::Bits(word0, 0, 9))); }
+	bool isSrc0Rel() const { return LatteISA::Bit(word0, 9); }
+	const uint8 getSrc0Chan() const { return static_cast<uint8>(LatteISA::Bits(word0, 10, 2)); }
+	bool isSrc0Neg() const { return LatteISA::Bit(word0, 12); }
+	const LatteALUSrcSel getSrc1Sel() const { return LatteALUSrcSel(static_cast<uint16>(LatteISA::Bits(word0, 13, 9))); }
+	bool isSrc1Rel() const { return LatteISA::Bit(word0, 22); }
+	const uint8 getSrc1Chan() const { return static_cast<uint8>(LatteISA::Bits(word0, 23, 2)); }
+	bool isSrc1Neg() const { return LatteISA::Bit(word0, 25); }
+	uint8 getIndexMode() const { return static_cast<uint8>(LatteISA::Bits(word0, 26, 3)); }
 
-	uint32 getDestElem() const
-	{
-		return (word1 >> 29) & 3;
-	}
+	// ALU_DWORD1_OP2
+	bool getWriteMask() const { return LatteISA::Bit(word1, 4); }
+	uint8 getOMod() const { return static_cast<uint8>(LatteISA::Bits(word1, 5, 2)); }
+	uint32 getDestGpr() const { return LatteISA::Bits(word1, 21, 7); }
+	bool getDestRel() const { return LatteISA::Bit(word1, 28); }
+	uint32 getDestElem() const { return LatteISA::Bits(word1, 29, 2); }
+	bool getDestClamp() const { return LatteISA::Bit(word1, 31); }
 
-	bool getDestRel() const
-	{
-		return ((word1 >> 28) & 1) != 0;
-	}
-
-	bool getDestClamp() const
-	{
-		return ((word1 >> 31) & 1) != 0;
-	}
-
-	bool getWriteMask() const
-	{
-		return ((word1 >> 4) & 1) != 0;
-	}
-
-	uint8 getOMod() const // use enum?
-	{
-		return (word1 >> 5) & 3;
-	}
-
-	const LatteALUSrcSel getSrc0Sel() const
-	{
-		return LatteALUSrcSel((word0 >> 0) & 0x1FF);
-	}
-
-	const uint8 getSrc0Chan() const
-	{
-		return (word0 >> 10) & 0x3;
-	}
-
-	const LatteALUSrcSel getSrc1Sel() const
-	{
-		return LatteALUSrcSel((word0 >> 13) & 0x1FF);
-	}
-
-	const uint8 getSrc1Chan() const
-	{
-		return (word0 >> 23) & 0x3;
-	}
-
-	bool isSrc0Neg() const
-	{
-		return ((word0 >> 12) & 0x1) != 0;
-	}
-
-	bool isSrc1Neg() const
-	{
-		return ((word0 >> 25) & 0x1) != 0;
-	}
-
-	bool isSrc0Rel() const
-	{
-		return ((word0 >> 9) & 0x1) != 0;
-	}
-
-	bool isSrc1Rel() const
-	{
-		return ((word0 >> 22) & 0x1) != 0;
-	}
-
-	uint8 getIndexMode() const
-	{
-		return (word0 >> 26) & 7;;
-	}
-
+	// instructions that only the scalar (t) unit can execute
 	bool isTranscedentalUnit() const
 	{
-		const uint32 op2 = this->getOP2Code();
-		switch (op2)
+		switch (getOP2Code())
 		{
-		case COS:
-		case SIN:
+		case EXP_IEEE:
+		case LOG_CLAMPED:
+		case LOG_IEEE:
 		case RECIP_CLAMPED:
-		case RECIP_FF: // todo: verify
-		case RECIP_IEEE: // todo: verify
-		case RECIPSQRT_IEEE: // todo: verify
-		case RECIPSQRT_CLAMPED: // todo: verify
-		case RECIPSQRT_FF: // todo: verify
-		case MULLO_INT:
-		case MULLO_UINT:
+		case RECIP_FF:
+		case RECIP_IEEE:
+		case RECIPSQRT_CLAMPED:
+		case RECIPSQRT_FF:
+		case RECIPSQRT_IEEE:
+		case SQRT_IEEE:
 		case FLT_TO_INT:
 		case FLT_TO_UINT:
 		case INT_TO_FLOAT:
 		case UINT_TO_FLOAT:
-		case LOG_CLAMPED:
-		case LOG_IEEE:
-		case EXP_IEEE:
-		case SQRT_IEEE:
+		case SIN:
+		case COS:
+		case MULLO_INT:
+		case MULLO_UINT:
 			return true;
 		default:
-			break;
+			return false;
 		}
-		return false;
 	}
-
 };
 
 static_assert(sizeof(LatteClauseInstruction_ALU) == 8);
-
