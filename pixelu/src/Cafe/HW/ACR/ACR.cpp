@@ -1,68 +1,42 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/HW/MMU/MMU.h"
 #include "Cafe/HW/Common/HwReg.h"
 
+// ACR video interface window. Wii U mode software selects a legacy VI register
+// through the select register and then accesses it through the data register,
+// holding the control register's ownership bit while doing so. The legacy VI
+// itself is not emulated, so data accesses are only logged.
+
 namespace HW_ACR
 {
-
-	struct  
+	namespace
 	{
-		HWREG::ACR_VI_ADDR viAddr;
-		HWREG::ACR_VI_CTRL viCtrl;
-	}g_acr;
+		HWREG::ACR_VI_ADDR s_selectedViReg;
+		HWREG::ACR_VI_CTRL s_viControl;
 
-	/* 
-	Is this some kind of VI emulation interface? 
-	Pattern seen in Twilight Princess HD:
-	- If Hollywood hardware then read/write old 16bit GC VI register directly
-	- Otherwise these steps are performed:
-		VICONTROL |= 1
-		VIADDR = registerIndex
-		VIDATA = data
-		VICONTROL &= ~1
-		All the register accesses here are 32bit
-	*/
+		HWREG::ACR_VI_DATA ReadViData(PAddr)
+		{
+			cemuLog_logDebug(LogType::Force, "ACR: read of legacy VI register {:08x} (not emulated)", s_selectedViReg.Index());
+			return {};
+		}
 
-	/* 0x0D00021C | Accesses VI register currently selected by VIADDR */
-	HWREG::ACR_VI_DATA ACR_VIDATA_R32(PAddr addr)
-	{
-		cemuLog_logDebug(LogType::Force, "ACR_VIDATA read with selected reg {:08x}", g_acr.viAddr.get_ADDR());
-		return HWREG::ACR_VI_DATA();
-	}
+		void WriteViData(PAddr, HWREG::ACR_VI_DATA value)
+		{
+			cemuLog_logDebug(LogType::Force, "ACR: write {:08x} to legacy VI register {:08x} (not emulated)", value.Data(), s_selectedViReg.Index());
+		}
 
-	void ACR_VIDATA_W32(PAddr addr, HWREG::ACR_VI_DATA newValue)
-	{
-		cemuLog_logDebug(LogType::Force, "ACR_VIDATA write {:08x} with selected reg {:08x}", newValue.get_DATA(), g_acr.viAddr.get_ADDR());
-	}
+		HWREG::ACR_VI_ADDR ReadViSelect(PAddr) { return s_selectedViReg; }
+		void WriteViSelect(PAddr, HWREG::ACR_VI_ADDR value) { s_selectedViReg = value; }
 
-	/* 0x0D000224 | Controls the selected VI register? */
-	HWREG::ACR_VI_ADDR ACR_VIADDR_R32(PAddr addr)
-	{
-		return g_acr.viAddr;
-	}
-
-	void ACR_VIADDR_W32(PAddr addr, HWREG::ACR_VI_ADDR newValue)
-	{
-		g_acr.viAddr = newValue;
-	}
-
-	/* 0x0D000228 | Some kind of VI interface control? */
-	HWREG::ACR_VI_CTRL ACR_VICONTROL_R32(PAddr addr)
-	{
-		return g_acr.viCtrl;
-	}
-
-	void ACR_VICONTROL_W32(PAddr addr, HWREG::ACR_VI_CTRL newValue)
-	{
-		g_acr.viCtrl = newValue;
+		HWREG::ACR_VI_CTRL ReadViControl(PAddr) { return s_viControl; }
+		void WriteViControl(PAddr, HWREG::ACR_VI_CTRL value) { s_viControl = value; }
 	}
 
 	RunAtCemuBoot _initACR([]()
 	{
-		MMU::RegisterMMIO_32<HWREG::ACR_VI_DATA, ACR_VIDATA_R32, ACR_VIDATA_W32>(MMU::MMIOInterface::INTERFACE_0D000000, 0x21C);
-		MMU::RegisterMMIO_32<HWREG::ACR_VI_ADDR, ACR_VIADDR_R32, ACR_VIADDR_W32>(MMU::MMIOInterface::INTERFACE_0D000000, 0x224);
-		MMU::RegisterMMIO_32<HWREG::ACR_VI_CTRL, ACR_VICONTROL_R32, ACR_VICONTROL_W32>(MMU::MMIOInterface::INTERFACE_0D000000, 0x228);
-
-		// init 
+		using MMU::MMIOInterface;
+		MMU::RegisterMMIO_32<HWREG::ACR_VI_DATA, ReadViData, WriteViData>(MMIOInterface::INTERFACE_0D000000, 0x21C);
+		MMU::RegisterMMIO_32<HWREG::ACR_VI_ADDR, ReadViSelect, WriteViSelect>(MMIOInterface::INTERFACE_0D000000, 0x224);
+		MMU::RegisterMMIO_32<HWREG::ACR_VI_CTRL, ReadViControl, WriteViControl>(MMIOInterface::INTERFACE_0D000000, 0x228);
 	});
-
 }

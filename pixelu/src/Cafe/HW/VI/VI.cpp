@@ -1,11 +1,5 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/HW/MMU/MMU.h"
 
-
-namespace HW_VI
-{
-
-	RunAtCemuBoot _initVI([]()
-	{
-		//MMU::RegisterMMIO_R16(MMU::MMIOInterface::INTERFACE_0C000000, 0x1e0002, VI_UKN1E0002_R16);
-	});
-}
+// Video interface registers. Scan-out is emulated by GX2/Latte, so no VI
+// register is backed here; unhandled MMIO accesses read as zero.
