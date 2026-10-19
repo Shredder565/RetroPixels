@@ -54,25 +54,25 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 69918 | 22.4% |
-| Cemu, untouched | 185263 | 59.3% |
-| Cemu, with PixelU changes | 16078 | 5.1% |
+| Original (RetroPixels) | 82048 | 26.5% |
+| Cemu, untouched | 171676 | 55.4% |
+| Cemu, with PixelU changes | 14833 | 4.8% |
 | PixelU-added files (MPL-2.0 header) | 1940 | 0.6% |
-| Third-party | 39404 | 12.6% |
-| **All** | **312603** | 100% |
+| Third-party | 39404 | 12.7% |
+| **All** | **309901** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
 | (top level: main.cpp, mainLLE.cpp) | 324 | 0 | Cemu + PixelU change |
 | audio | 3050 | 0 | Cemu, 1058 lines third-party |
-| Cafe (CafeSystem, GamePatch) | 1843 | 0 | Cemu + PixelU change |
-| Cafe/Account | 780 | 0 | Cemu |
-| Cafe/Filesystem | 4429 | 0 | Cemu |
-| Cafe/GameProfile | 464 | 0 | Cemu |
-| Cafe/GraphicPack | 3437 | 0 | Cemu |
-| Cafe/HW/ACR | 68 | 0 | Cemu |
-| Cafe/HW/AI | 19 | 0 | Cemu |
-| Cafe/HW/Common | 211 | 0 | Cemu |
+| Cafe (CafeSystem, GamePatch) | 1559 | 1559 | original |
+| Cafe/Account | 696 | 696 | original |
+| Cafe/Filesystem | 3355 | 3355 | original |
+| Cafe/GameProfile | 375 | 375 | original |
+| Cafe/GraphicPack | 2835 | 2835 | original |
+| Cafe/HW/ACR | 42 | 42 | original |
+| Cafe/HW/AI | 8 | 8 | original |
+| Cafe/HW/Common | 129 | 129 | original |
 | Cafe/HW/Espresso (core) | 1029 | 1029 | original |
 | Cafe/HW/Espresso/Debugger | 2459 | 2459 | original |
 | Cafe/HW/Espresso/Interpreter | 3252 | 3252 | original |
@@ -88,9 +88,9 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/HW/Latte/Renderer/Vulkan | 14432 | 0 | Cemu + PixelU change |
 | Cafe/HW/Latte/ShaderInfo | 73 | 0 | Cemu |
 | Cafe/HW/Latte/Transcompiler | 1067 | 0 | Cemu |
-| Cafe/HW/MMU | 808 | 0 | Cemu |
-| Cafe/HW/SI | 165 | 0 | Cemu |
-| Cafe/HW/VI | 11 | 0 | Cemu |
+| Cafe/HW/MMU | 681 | 681 | original |
+| Cafe/HW/SI | 132 | 132 | original |
+| Cafe/HW/VI | 5 | 5 | original |
 | Cafe/IOSU (shared headers) | 91 | 91 | original |
 | Cafe/IOSU/ccr_nfc | 335 | 335 | original |
 | Cafe/IOSU/fsa | 1043 | 1043 | original |
@@ -147,7 +147,7 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/OS/libs/vpad | 636 | 636 | original |
 | Cafe/OS/libs/zlib125 | 306 | 306 | original |
 | Cafe/OS/RPL | 2525 | 2525 | original |
-| Cafe/TitleList | 2597 | 0 | Cemu |
+| Cafe/TitleList | 2313 | 2313 | original |
 | Cemu/DiscordPresence | 846 | 0 | Cemu |
 | Cemu/ExpressionParser | 725 | 0 | Cemu |
 | Cemu/FileCache | 762 | 0 | Cemu |
@@ -563,3 +563,66 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
   internal classes (CommandContext, ExecutionBreakpoint, AccessBreakpoint,
   now Request, CodeTrap and Watchpoint) and its unreachable
   qOffsets/qRcmd branches. Log texts differ throughout.
+- Batch 8a: CafeSystem, GamePatch, Account, Filesystem, GameProfile,
+  GraphicPack, TitleList and the HW modules ACR, AI, Common, MMU, SI and VI
+  rewritten as original code (headers and sources). CafeSystem covers system
+  start-up and shutdown, host/MLC folder mounting, preparing a title from the
+  title list or a standalone RPX, launch, title queries, override arguments
+  and the RPX hashes; the PixelU recorder hooks are unchanged
+  (LatteRecorder::Start() right after WindowSystem::NotifyGameLoaded(),
+  LatteRecorder::Stop() right after snd_core::reset()). GamePatch keeps the
+  same built-in game fixes in the same order, with the signatures stored as
+  big-endian words and word masks; a script check confirms every signature
+  and mask equals the old byte arrays, and the scan range, 4-byte step and
+  HLE registration names (h000000001-4) are the same. Filesystem covers
+  fsc, the HostFS, redirect, WUD/WUX, WUA and WUHB devices, the WUHB RomFS
+  reader, the WUD/WUX reader, KeyCache and FST. GraphicPack covers rules.txt
+  loading, presets, shader and texture/output rules, replacement files,
+  activation, the Cemuhook and Cemu patch parsers, symbol and expression
+  resolution, code caves and patch apply/undo. TitleList covers title and
+  save discovery, meta.xml/app.xml/cos.xml/Aroma ini parsing, the title
+  cache and GameInfo. Account covers account.dat, default Miis and
+  persistent ids; GameProfile the per-title ini.
+  Public interfaces, globals and externs used elsewhere, rules.txt and patch
+  grammar, preset quirks, file formats and mount layouts are unchanged, so
+  existing graphic packs, profiles, account files and every game format
+  (folder, WUD, WUX, WUA, WUHB, NUS) still load.
+  Old-vs-new harnesses (ASan/UBSan) give identical results: MMU 300 seeds x
+  3000 operations; account.dat 300 seeds; game profiles 40 seeds; title
+  list 200 seeds of generated titles, xml files and caches (plus 60
+  malformed seeds on the new build only, clean); fsc with HostFS and WUHB
+  150 seeds of generated trees, file operations and directory walks (plus
+  80 non-strict seeds on the new build only, clean); graphic packs 500
+  seeds of generated packs, presets, patch files and fake RPX/RPL modules
+  with activate/reload/deactivate and memory hashing (649 packs, 296
+  activations, 51 applied patch groups). The remaining differences are the
+  fixes below. Changed files and their 333 transitive includers (including
+  the wx GUI) compile with g++ and clang++ with no new errors against the
+  baseline; clang -Wall -Wextra gives no warnings in the rewritten files.
+  Fixes and defined behaviour: MMIO reads without a handler return 0. The
+  account utc offset starts at 0; whitespace-only values and keys without
+  a terminator are no longer read past the buffer. Title list: malformed
+  numbers give 0 instead of throwing, TitleInfo copies keep their location
+  uid and no longer leak, failed mounts close their containers, Aroma ini
+  files with missing keys and overflowing .wua versions are rejected, and
+  the list is locked during removal and the scan-finished callback. fsc:
+  unmounting a path without a device returns false, the root can be
+  unmounted, directory entry dedupe is bounded and leftover directory
+  handles are freed. HostFS directory listing no longer throws, setting the
+  file length sets the size, and reads past the end are clamped (the old
+  build lost later data on Linux once a read hit EOF; this is the only
+  harness difference, 3 of 150 seeds). WUHB entries with an oversized name
+  length fall back to the default entry and names stop at 255 characters.
+  WUX files with an incomplete index table are rejected and sizes are 64
+  bit. FST: 64-bit file offsets, no endless loop on a folder that ends at
+  its own index, correct name bounds check, a missing GM volume no longer
+  crashes, .app indices and content hash sizes are bounds checked. Graphic
+  packs: unresolved symbols are ordered correctly (report order can
+  differ), patch lines outside a group report an error instead of crashing,
+  callbacks are cleared on unload so a reload no longer registers them
+  twice, folder iteration errors no longer throw, and zero-length patches
+  skip the copy. The unused XCX critical-section HLE is a correct lock.
+  MLC title copies are freed on shutdown. Log texts differ throughout.
+  Kept on purpose: preset and variable quirks of the rules.txt parser, the
+  patch resolver's pass limit, the Cemuhook grammar, the per-game patch
+  order and the start-up initialisation order.
