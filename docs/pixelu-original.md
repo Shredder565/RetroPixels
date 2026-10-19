@@ -54,12 +54,12 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 117740 | 42.1% |
-| Cemu, untouched | 108159 | 38.6% |
-| Cemu, with PixelU changes | 13733 | 4.9% |
-| PixelU-added files (MPL-2.0 header) | 929 | 0.3% |
-| Third-party | 39404 | 14.1% |
-| **All** | **279965** | 100% |
+| Original (RetroPixels) | 135127 | 49.0% |
+| Cemu, untouched | 92987 | 33.7% |
+| Cemu, with PixelU changes | 7818 | 2.8% |
+| PixelU-added files (MPL-2.0 header) | 519 | 0.2% |
+| Third-party | 39404 | 14.3% |
+| **All** | **275855** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -82,10 +82,10 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/HW/Latte/ISA | 2618 | 2618 | original |
 | Cafe/HW/Latte/LatteAddrLib | 1249 | 1249 | original |
 | Cafe/HW/Latte/LegacyShaderDecompiler | 11423 | 5976 | mixed (52% original) |
-| Cafe/HW/Latte/Renderer | 1236 | 0 | Cemu + PixelU change |
+| Cafe/HW/Latte/Renderer | 1028 | 995 | mixed (97% original) |
 | Cafe/HW/Latte/Renderer/Metal | 7309 | 0 | Cemu |
-| Cafe/HW/Latte/Renderer/OpenGL | 5862 | 0 | Cemu + PixelU change |
-| Cafe/HW/Latte/Renderer/Vulkan | 14432 | 0 | Cemu + PixelU change |
+| Cafe/HW/Latte/Renderer/OpenGL | 4531 | 4531 | original |
+| Cafe/HW/Latte/Renderer/Vulkan | 11861 | 11861 | original |
 | Cafe/HW/Latte/ShaderInfo | 70 | 70 | original |
 | Cafe/HW/Latte/Transcompiler | 731 | 731 | original |
 | Cafe/HW/MMU | 681 | 681 | original |
@@ -991,3 +991,75 @@ Done:
 - LatteRecorder.cpp/.h: these are PixelU's own code (commit 991eb0e), not
   Cemu code. Only the MPL header was swapped for the original-code line;
   the code is unchanged, so its behaviour and output stay identical.
+- Batch 12: the renderer layer under `Cafe/HW/Latte/Renderer` rewritten as
+  original code (headers and sources), except Metal. 12a: the base
+  Renderer, RendererCore, RendererShader and RendererOuputShader (output
+  shader sources and the graphic-pack preamble names) and all of OpenGL
+  (renderer, textures and views, FBOs, surface copy, shader objects and the
+  GL shader cache, streamout, queries, canvas glue). 12b: all of Vulkan:
+  the loader and function table (VulkanAPI), instance/device creation with
+  the Vulkan 1.1 requirement, queues, swapchain and present (SwapchainInfoVk,
+  including the embed/overlay-dock and GamePad window paths), the vsync
+  driver, command buffer pool and submission, the memory manager and ring /
+  heap allocators (VKRMemoryManager, VKRBase), the shader objects and SPIR-V
+  cache (RendererShaderVk), the pipeline compiler and the on-disk pipeline
+  cache (VulkanPipelineCompiler, VulkanPipelineStableCache, VKRPipelineInfo),
+  textures, views, FBOs and readback (LatteTextureVk, LatteTextureViewVk,
+  CachedFBOVk, TextureReadbackVk), surface copy (VulkanSurfaceCopy), draw
+  submission, uniforms, descriptor sets and synchronisation
+  (VulkanRendererCore), occlusion queries (VulkanQuery), the recorder
+  capture (VulkanRecorderCapture) and the macOS surface (CocoaSurface).
+  File names, public interfaces and every symbol used outside the renderer
+  are unchanged. The Vulkan call order, pNext chains, glslang settings and
+  resource limits (verified with memcmp), the internal GLSL texts (rect
+  geometry shader, surface copy shaders) and the on-disk formats (SPIR-V
+  cache, vkpipeline.bin: version, stage mask, big-endian hashes, register
+  state, SHA-256 name) are unchanged, so caches written by either version
+  load in the other. The recorder captures the same frames at the same
+  points, with the same slot choice, barriers and drop messages.
+  Verification: GL through a call-stream logging shim on Mesa llvmpipe,
+  seeds 1-40 x 3000 steps: identical call streams apart from the rewritten
+  output/copy shader sources, presented images within 1 LSB. Vulkan with a
+  headless harness on Mesa lavapipe that drives textures, views, clears,
+  copies, readbacks, game shaders with fetch shaders and uniforms,
+  descriptor sets, draws in first/continued sequences, queries, present and
+  teardown, through a Vulkan logging shim: each group against the previous
+  code for seeds 1-8 x 400 steps, comparing the call stream, rendered
+  readbacks, the pipeline and SPIR-V cache bytes, and old-cache to
+  new-binary cross-loading. All identical.
+  Fixes and defined behaviour: the hermite output filter uses a weight form
+  (results agree within 1 LSB; Inf/NaN in the source propagate
+  differently); unsupported colour formats give an all-UNDEFINED format
+  info; the RGB8 screenshot path no longer reads out of bounds;
+  VKRObjectSampler::DestroyCache no longer erases while iterating; the
+  object reference drop is a single atomic decrement; texture_loadSlice
+  and the CachedFBO rendering structs are value-initialised (unused
+  attachments get VK_NULL_HANDLE views); the vsync driver state is atomic;
+  the surface copy cache destructor is null-safe; the pipeline cache loader
+  frees its temporary state when a shader is missing; the (unreachable)
+  geometry-stage ALU branch of the incremental uniform upload asserts
+  instead of being marked unreachable. GL: unsupported
+  formats map to 0; streamout with an unsupported primitive uses
+  GL_POINTS; out-of-range semantic ids are guarded; the Linux libEGL
+  fallback is fixed.
+  In-memory keys use new hash functions over the same inputs: the graphics
+  pipeline state hash, the descriptor set hash (it now also mixes in the
+  binding slot, so two layouts that differ only in slot position no
+  longer collide), the surface copy pipeline key, the blit pipeline and
+  descriptor keys, the sampler key and the render pass pipeline hash.
+  None of these are written to disk. Debug callback filters are table
+  driven. Log texts differ in places.
+  Removed (no users): the dead Vulkan benchmark (the empty
+  VulkanBenchmarkPrintResults is kept), dlopen_vulkan_loader,
+  requestedFormatList, the unused depth-format helpers in surface copy,
+  LatteTextureVk_AdjustTextureCompSel, s_syncOnNextDraw. File-local now:
+  the rect-emulation geometry shader generator, the integer-format check,
+  the uniform staging buffers, the shader compile thread pool and SPIR-V
+  cache globals, and the pipeline cache queue and state.
+  Kept on purpose: the depth-stencil and rasterizer setup read the global
+  context registers, not the passed register set; blend factors 0x0B/0x0C
+  map to MAX_ENUM; unsupported logic ops fall back to COPY with logic ops
+  enabled; the direct-access vertex binding compares against a binding
+  offset that is never updated; the feedback-loop relaxation in sync_inputTexturesChanged
+  is unchanged. Metal is not touched. CocoaSurface.mm (Objective-C++) could
+  not be compiled here and was reviewed by hand.
