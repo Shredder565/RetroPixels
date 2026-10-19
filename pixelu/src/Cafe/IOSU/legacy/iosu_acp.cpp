@@ -1,3 +1,6 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// ACP (application config) service: the private /dev/acp_main request used by nn_acp,
+// plus the save directory helpers that nn_acp and nn_save call directly.
 #include "iosu_ioctl.h"
 #include "iosu_acp.h"
 #include "Cafe/OS/libs/nn_common.h"
@@ -8,767 +11,529 @@
 #include "Cafe/OS/libs/nn_acp/nn_acp.h"
 #include "Cafe/OS/libs/coreinit/coreinit_FS.h"
 #include "Cafe/Filesystem/fsc.h"
-//#include "Cafe/HW/Espresso/PPCState.h"
-
 #include "Cafe/IOSU/iosu_types_common.h"
 #include "Cafe/IOSU/nn/iosu_nn_service.h"
-
 #include "Cafe/IOSU/legacy/iosu_act.h"
 #include "Cafe/CafeSystem.h"
 #include "config/ActiveSettings.h"
 
 #include <inttypes.h>
 
-using ACPDeviceType = iosu::acp::ACPDeviceType;
-
-static_assert(sizeof(acpMetaXml_t) == 0x3440);
-static_assert(offsetof(acpMetaXml_t, title_id) == 0x0000);
-static_assert(offsetof(acpMetaXml_t, boss_id) == 0x0008);
-static_assert(offsetof(acpMetaXml_t, os_version) == 0x0010);
-static_assert(offsetof(acpMetaXml_t, app_size) == 0x0018);
-static_assert(offsetof(acpMetaXml_t, common_save_size) == 0x0020);
-
-static_assert(offsetof(acpMetaXml_t, version) == 0x0048);
-static_assert(offsetof(acpMetaXml_t, product_code) == 0x004C);
-static_assert(offsetof(acpMetaXml_t, logo_type) == 0x00B4);
-static_assert(offsetof(acpMetaXml_t, pc_cero) == 0x0100);
-
-static_assert(offsetof(acpMetaXml_t, longname_ja) == 0x038C);
-static_assert(offsetof(acpMetaXml_t, shortname_ja) == 0x1B8C);
-static_assert(offsetof(acpMetaXml_t, publisher_ja) == 0x278C);
-
-static_assert(sizeof(acpMetaData_t) == 0x1AB00);
-static_assert(offsetof(acpMetaData_t, bootMovie) == 0);
-static_assert(offsetof(acpMetaData_t, bootLogoTex) == 0x13B38);
-
 namespace iosu
 {
-
-	struct
+	namespace
 	{
-		bool isInitialized;
-	}iosuAcp = { 0 };
+		constexpr const char* kMlcVolume = "/vol/storage_mlc01/";
 
-	void _xml_parseU32(tinyxml2::XMLElement* xmlElement, const char* name, uint32be* v)
-	{
-		tinyxml2::XMLElement* subElement = xmlElement->FirstChildElement(name);
-		*v = 0;
-		if (subElement == nullptr)
-			return;
-		const char* text = subElement->GetText();
-		uint32 value;
-		if (sscanf(text, "%u", &value) == 0)
-			return;
-		*v = value;
-	}
+		// ---- meta.xml reader -----------------------------------------------------------
 
-	void _xml_parseHex16(tinyxml2::XMLElement* xmlElement, const char* name, uint16be* v)
-	{
-		tinyxml2::XMLElement* subElement = xmlElement->FirstChildElement(name);
-		*v = 0;
-		if (subElement == nullptr)
-			return;
-		const char* text = subElement->GetText();
-		uint32 value;
-		if (sscanf(text, "%x", &value) == 0)
-			return;
-		*v = value;
-	}
-
-	void _xml_parseHex32(tinyxml2::XMLElement* xmlElement, const char* name, uint32be* v)
-	{
-		tinyxml2::XMLElement* subElement = xmlElement->FirstChildElement(name);
-		*v = 0;
-		if (subElement == nullptr)
-			return;
-		const char* text = subElement->GetText();
-		uint32 value;
-		if (sscanf(text, "%x", &value) == 0)
-			return;
-		*v = value;
-	}
-
-	void _xml_parseHex64(tinyxml2::XMLElement* xmlElement, const char* name, uint64* v)
-	{
-		tinyxml2::XMLElement* subElement = xmlElement->FirstChildElement(name);
-		*v = 0;
-		if (subElement == nullptr)
-			return;
-		const char* text = subElement->GetText();
-		uint64 value;
-		if (sscanf(text, "%" SCNx64, &value) == 0)
-			return;
-		*v = _swapEndianU64(value);
-	}
-
-	void _xml_parseString_(tinyxml2::XMLElement* xmlElement, const char* name, char* output, sint32 maxLength)
-	{
-		tinyxml2::XMLElement* subElement = xmlElement->FirstChildElement(name);
-		output[0] = '\0';
-		if (subElement == nullptr)
-			return;
-		const char* text = subElement->GetText();
-		if (text == nullptr)
+		enum class MetaField
 		{
-			output[0] = '\0';
-			return;
+			Dec32, // decimal, stored as uint32be
+			Hex32, // hexadecimal, stored as uint32be
+			Hex64, // hexadecimal, stored byte swapped in a uint64
+			Text,  // zero terminated string, truncated to the field size
+		};
+
+		struct MetaFieldDesc
+		{
+			const char* tag;
+			MetaField kind;
+			size_t offset;
+			size_t size;
+		};
+
+#define META_FIELD(_kind, _member) { #_member, MetaField::_kind, offsetof(acpMetaXml_t, _member), sizeof(acpMetaXml_t::_member) }
+
+		const MetaFieldDesc kMetaFields[] =
+		{
+			META_FIELD(Hex64, title_id), META_FIELD(Hex64, boss_id), META_FIELD(Hex64, os_version),
+			META_FIELD(Hex64, app_size), META_FIELD(Hex64, common_save_size), META_FIELD(Hex64, account_save_size),
+			META_FIELD(Hex64, common_boss_size), META_FIELD(Hex64, account_boss_size), META_FIELD(Hex64, join_game_mode_mask),
+			META_FIELD(Dec32, version),
+			META_FIELD(Text, product_code), META_FIELD(Text, content_platform), META_FIELD(Text, company_code), META_FIELD(Text, mastering_date),
+			META_FIELD(Dec32, logo_type), META_FIELD(Dec32, app_launch_type), META_FIELD(Dec32, invisible_flag),
+			META_FIELD(Dec32, no_managed_flag), META_FIELD(Dec32, no_event_log), META_FIELD(Dec32, no_icon_database),
+			META_FIELD(Dec32, launching_flag), META_FIELD(Dec32, install_flag), META_FIELD(Dec32, closing_msg),
+			META_FIELD(Dec32, title_version), META_FIELD(Hex32, group_id), META_FIELD(Dec32, save_no_rollback),
+			META_FIELD(Dec32, bg_daemon_enable), META_FIELD(Hex32, join_game_id), META_FIELD(Dec32, olv_accesskey),
+			META_FIELD(Dec32, wood_tin), META_FIELD(Dec32, e_manual), META_FIELD(Dec32, e_manual_version),
+			META_FIELD(Hex32, region),
+			META_FIELD(Dec32, pc_cero), META_FIELD(Dec32, pc_esrb), META_FIELD(Dec32, pc_bbfc), META_FIELD(Dec32, pc_usk),
+			META_FIELD(Dec32, pc_pegi_gen), META_FIELD(Dec32, pc_pegi_fin), META_FIELD(Dec32, pc_pegi_prt), META_FIELD(Dec32, pc_pegi_bbfc),
+			META_FIELD(Dec32, pc_cob), META_FIELD(Dec32, pc_grb), META_FIELD(Dec32, pc_cgsrr), META_FIELD(Dec32, pc_oflc),
+			META_FIELD(Dec32, pc_reserved0), META_FIELD(Dec32, pc_reserved1), META_FIELD(Dec32, pc_reserved2), META_FIELD(Dec32, pc_reserved3),
+			META_FIELD(Dec32, ext_dev_nunchaku), META_FIELD(Dec32, ext_dev_classic), META_FIELD(Dec32, ext_dev_urcc),
+			META_FIELD(Dec32, ext_dev_board), META_FIELD(Dec32, ext_dev_usb_keyboard), META_FIELD(Dec32, ext_dev_etc),
+			META_FIELD(Text, ext_dev_etc_name),
+			META_FIELD(Dec32, eula_version), META_FIELD(Dec32, drc_use), META_FIELD(Dec32, network_use),
+			META_FIELD(Dec32, online_account_use), META_FIELD(Dec32, direct_boot),
+		};
+#undef META_FIELD
+
+		// the long name, short name and publisher strings exist once per language
+		const char* const kMetaLanguages[12] = { "ja", "en", "fr", "de", "it", "es", "zhs", "ko", "nl", "pt", "ru", "zht" };
+
+		void ReadNumber(tinyxml2::XMLElement* menu, const char* tag, MetaField kind, void* dst)
+		{
+			tinyxml2::XMLElement* el = menu->FirstChildElement(tag);
+			if (!el)
+				return;
+			const char* text = el->GetText();
+			if (!text)
+				return;
+			if (kind == MetaField::Hex64)
+			{
+				uint64 v;
+				if (sscanf(text, "%" SCNx64, &v) == 1)
+					*(uint64*)dst = _swapEndianU64(v);
+				return;
+			}
+			uint32 v;
+			if (sscanf(text, kind == MetaField::Hex32 ? "%x" : "%u", &v) == 1)
+				*(uint32be*)dst = v;
 		}
-		strncpy(output, text, maxLength - 1);
-		output[maxLength - 1] = '\0';
-	}
 
-#define _metaXml_parseString(__xmlElement, __name, __output) _xml_parseString_(__xmlElement, __name, __output, sizeof(__output));
-
-	void parseSaveMetaXml(uint8* metaXmlData, sint32 metaXmlLength, acpMetaXml_t* metaXml)
-	{
-		memset(metaXml, 0, sizeof(acpMetaXml_t));
-		tinyxml2::XMLDocument appXml;
-		appXml.Parse((const char*)metaXmlData, metaXmlLength);
-		uint32 titleVersion = 0xFFFFFFFF;
-		tinyxml2::XMLElement* menuElement = appXml.FirstChildElement("menu");
-		if (menuElement)
+		void ReadText(tinyxml2::XMLElement* menu, const char* tag, char* dst, size_t capacity)
 		{
-			_xml_parseHex64(menuElement, "title_id", &metaXml->title_id);
-			_xml_parseHex64(menuElement, "boss_id", &metaXml->boss_id);
-			_xml_parseHex64(menuElement, "os_version", &metaXml->os_version);
-			_xml_parseHex64(menuElement, "app_size", &metaXml->app_size);
-			_xml_parseHex64(menuElement, "common_save_size", &metaXml->common_save_size);
-			_xml_parseHex64(menuElement, "account_save_size", &metaXml->account_save_size);
-			_xml_parseHex64(menuElement, "common_boss_size", &metaXml->common_boss_size);
-			_xml_parseHex64(menuElement, "account_boss_size", &metaXml->account_boss_size);
-			_xml_parseHex64(menuElement, "join_game_mode_mask", &metaXml->join_game_mode_mask);
-			_xml_parseU32(menuElement, "version", &metaXml->version);
-			_metaXml_parseString(menuElement, "product_code", metaXml->product_code);
-			_metaXml_parseString(menuElement, "content_platform", metaXml->content_platform);
-			_metaXml_parseString(menuElement, "company_code", metaXml->company_code);
-			_metaXml_parseString(menuElement, "mastering_date", metaXml->mastering_date);
-			_xml_parseU32(menuElement, "logo_type", &metaXml->logo_type);
+			tinyxml2::XMLElement* el = menu->FirstChildElement(tag);
+			if (!el)
+				return;
+			const char* text = el->GetText();
+			if (!text)
+				return;
+			size_t n = std::min(strlen(text), capacity - 1);
+			memcpy(dst, text, n);
+			dst[n] = '\0';
+		}
 
-			_xml_parseU32(menuElement, "app_launch_type", &metaXml->app_launch_type);
-			_xml_parseU32(menuElement, "invisible_flag", &metaXml->invisible_flag);
-			_xml_parseU32(menuElement, "no_managed_flag", &metaXml->no_managed_flag);
-			_xml_parseU32(menuElement, "no_event_log", &metaXml->no_event_log);
-			_xml_parseU32(menuElement, "no_icon_database", &metaXml->no_icon_database);
-			_xml_parseU32(menuElement, "launching_flag", &metaXml->launching_flag);
-			_xml_parseU32(menuElement, "install_flag", &metaXml->install_flag);
-			_xml_parseU32(menuElement, "closing_msg", &metaXml->closing_msg);
-			_xml_parseU32(menuElement, "title_version", &metaXml->title_version);
-			_xml_parseHex32(menuElement, "group_id", &metaXml->group_id);
-			_xml_parseU32(menuElement, "save_no_rollback", &metaXml->save_no_rollback);
-			_xml_parseU32(menuElement, "bg_daemon_enable", &metaXml->bg_daemon_enable);
-			_xml_parseHex32(menuElement, "join_game_id", &metaXml->join_game_id);
-
-			_xml_parseU32(menuElement, "olv_accesskey", &metaXml->olv_accesskey);
-			_xml_parseU32(menuElement, "wood_tin", &metaXml->wood_tin);
-			_xml_parseU32(menuElement, "e_manual", &metaXml->e_manual);
-			_xml_parseU32(menuElement, "e_manual_version", &metaXml->e_manual_version);
-			_xml_parseHex32(menuElement, "region", &metaXml->region);
-
-			_xml_parseU32(menuElement, "pc_cero", &metaXml->pc_cero);
-			_xml_parseU32(menuElement, "pc_esrb", &metaXml->pc_esrb);
-			_xml_parseU32(menuElement, "pc_bbfc", &metaXml->pc_bbfc);
-			_xml_parseU32(menuElement, "pc_usk", &metaXml->pc_usk);
-			_xml_parseU32(menuElement, "pc_pegi_gen", &metaXml->pc_pegi_gen);
-			_xml_parseU32(menuElement, "pc_pegi_fin", &metaXml->pc_pegi_fin);
-			_xml_parseU32(menuElement, "pc_pegi_prt", &metaXml->pc_pegi_prt);
-			_xml_parseU32(menuElement, "pc_pegi_bbfc", &metaXml->pc_pegi_bbfc);
-
-			_xml_parseU32(menuElement, "pc_cob", &metaXml->pc_cob);
-			_xml_parseU32(menuElement, "pc_grb", &metaXml->pc_grb);
-			_xml_parseU32(menuElement, "pc_cgsrr", &metaXml->pc_cgsrr);
-			_xml_parseU32(menuElement, "pc_oflc", &metaXml->pc_oflc);
-
-			_xml_parseU32(menuElement, "pc_reserved0", &metaXml->pc_reserved0);
-			_xml_parseU32(menuElement, "pc_reserved1", &metaXml->pc_reserved1);
-			_xml_parseU32(menuElement, "pc_reserved2", &metaXml->pc_reserved2);
-			_xml_parseU32(menuElement, "pc_reserved3", &metaXml->pc_reserved3);
-
-			_xml_parseU32(menuElement, "ext_dev_nunchaku", &metaXml->ext_dev_nunchaku);
-			_xml_parseU32(menuElement, "ext_dev_classic", &metaXml->ext_dev_classic);
-			_xml_parseU32(menuElement, "ext_dev_urcc", &metaXml->ext_dev_urcc);
-			_xml_parseU32(menuElement, "ext_dev_board", &metaXml->ext_dev_board);
-			_xml_parseU32(menuElement, "ext_dev_usb_keyboard", &metaXml->ext_dev_usb_keyboard);
-			_xml_parseU32(menuElement, "ext_dev_etc", &metaXml->ext_dev_etc);
-
-			_metaXml_parseString(menuElement, "ext_dev_etc_name", metaXml->ext_dev_etc_name);
-
-			_xml_parseU32(menuElement, "eula_version", &metaXml->eula_version);
-			_xml_parseU32(menuElement, "drc_use", &metaXml->drc_use);
-			_xml_parseU32(menuElement, "network_use", &metaXml->network_use);
-			_xml_parseU32(menuElement, "online_account_use", &metaXml->online_account_use);
-			_xml_parseU32(menuElement, "direct_boot", &metaXml->direct_boot);
-			_xml_parseU32(menuElement, "reserved_flag0", &(metaXml->reserved_flag[0]));
-			_xml_parseU32(menuElement, "reserved_flag1", &(metaXml->reserved_flag[1]));
-			_xml_parseU32(menuElement, "reserved_flag2", &(metaXml->reserved_flag[2]));
-			_xml_parseU32(menuElement, "reserved_flag3", &(metaXml->reserved_flag[3]));
-			_xml_parseU32(menuElement, "reserved_flag4", &(metaXml->reserved_flag[4]));
-			_xml_parseU32(menuElement, "reserved_flag5", &(metaXml->reserved_flag[5]));
-			_xml_parseU32(menuElement, "reserved_flag6", &(metaXml->reserved_flag[6]));
-			_xml_parseU32(menuElement, "reserved_flag7", &(metaXml->reserved_flag[7]));
-
-			_metaXml_parseString(menuElement, "longname_ja", metaXml->longname_ja);
-			_metaXml_parseString(menuElement, "longname_en", metaXml->longname_en);
-			_metaXml_parseString(menuElement, "longname_fr", metaXml->longname_fr);
-			_metaXml_parseString(menuElement, "longname_de", metaXml->longname_de);
-			_metaXml_parseString(menuElement, "longname_it", metaXml->longname_it);
-			_metaXml_parseString(menuElement, "longname_es", metaXml->longname_es);
-			_metaXml_parseString(menuElement, "longname_zhs", metaXml->longname_zhs);
-			_metaXml_parseString(menuElement, "longname_ko", metaXml->longname_ko);
-			_metaXml_parseString(menuElement, "longname_nl", metaXml->longname_nl);
-			_metaXml_parseString(menuElement, "longname_pt", metaXml->longname_pt);
-			_metaXml_parseString(menuElement, "longname_ru", metaXml->longname_ru);
-			_metaXml_parseString(menuElement, "longname_zht", metaXml->longname_zht);
-
-			_metaXml_parseString(menuElement, "shortname_ja", metaXml->shortname_ja);
-			_metaXml_parseString(menuElement, "shortname_en", metaXml->shortname_en);
-			_metaXml_parseString(menuElement, "shortname_fr", metaXml->shortname_fr);
-			_metaXml_parseString(menuElement, "shortname_de", metaXml->shortname_de);
-			_metaXml_parseString(menuElement, "shortname_it", metaXml->shortname_it);
-			_metaXml_parseString(menuElement, "shortname_es", metaXml->shortname_es);
-			_metaXml_parseString(menuElement, "shortname_zhs", metaXml->shortname_zhs);
-			_metaXml_parseString(menuElement, "shortname_ko", metaXml->shortname_ko);
-			_metaXml_parseString(menuElement, "shortname_nl", metaXml->shortname_nl);
-			_metaXml_parseString(menuElement, "shortname_pt", metaXml->shortname_pt);
-			_metaXml_parseString(menuElement, "shortname_ru", metaXml->shortname_ru);
-			_metaXml_parseString(menuElement, "shortname_zht", metaXml->shortname_zht);
-
-			_metaXml_parseString(menuElement, "publisher_ja", metaXml->publisher_ja);
-			_metaXml_parseString(menuElement, "publisher_en", metaXml->publisher_en);
-			_metaXml_parseString(menuElement, "publisher_fr", metaXml->publisher_fr);
-			_metaXml_parseString(menuElement, "publisher_de", metaXml->publisher_de);
-			_metaXml_parseString(menuElement, "publisher_it", metaXml->publisher_it);
-			_metaXml_parseString(menuElement, "publisher_es", metaXml->publisher_es);
-			_metaXml_parseString(menuElement, "publisher_zhs", metaXml->publisher_zhs);
-			_metaXml_parseString(menuElement, "publisher_ko", metaXml->publisher_ko);
-			_metaXml_parseString(menuElement, "publisher_nl", metaXml->publisher_nl);
-			_metaXml_parseString(menuElement, "publisher_pt", metaXml->publisher_pt);
-			_metaXml_parseString(menuElement, "publisher_ru", metaXml->publisher_ru);
-			_metaXml_parseString(menuElement, "publisher_zht", metaXml->publisher_zht);
-
+		void ParseMetaXml(const uint8* xmlData, uint32 xmlSize, acpMetaXml_t* out)
+		{
+			memset(out, 0, sizeof(acpMetaXml_t));
+			tinyxml2::XMLDocument doc;
+			doc.Parse((const char*)xmlData, xmlSize);
+			tinyxml2::XMLElement* menu = doc.FirstChildElement("menu");
+			if (!menu)
+				return;
+			uint8* base = (uint8*)out;
+			for (const MetaFieldDesc& f : kMetaFields)
+			{
+				if (f.kind == MetaField::Text)
+					ReadText(menu, f.tag, (char*)(base + f.offset), f.size);
+				else
+					ReadNumber(menu, f.tag, f.kind, base + f.offset);
+			}
+			struct { const char* prefix; char* first; size_t stride; } localized[] =
+			{
+				{ "longname_", out->longname_ja, sizeof(out->longname_ja) },
+				{ "shortname_", out->shortname_ja, sizeof(out->shortname_ja) },
+				{ "publisher_", out->publisher_ja, sizeof(out->publisher_ja) },
+			};
+			for (auto& group : localized)
+			{
+				for (size_t lang = 0; lang < 12; lang++)
+				{
+					std::string tag = std::string(group.prefix) + kMetaLanguages[lang];
+					ReadText(menu, tag.c_str(), group.first + lang * group.stride, group.stride);
+				}
+			}
+			for (sint32 i = 0; i < 8; i++)
+			{
+				std::string tag = fmt::format("reserved_flag{}", i);
+				ReadNumber(menu, tag.c_str(), MetaField::Dec32, &out->reserved_flag[i]);
+			}
 			for (sint32 i = 0; i < 32; i++)
 			{
-				char tempStr[256];
-				sprintf(tempStr, "add_on_unique_id%d", i);
-				_xml_parseU32(menuElement, tempStr, &(metaXml->add_on_unique_id[i]));
+				std::string tag = fmt::format("add_on_unique_id{}", i);
+				ReadNumber(menu, tag.c_str(), MetaField::Dec32, &out->add_on_unique_id[i]);
 			}
 		}
-	}
 
-	bool _is8DigitHex(const char* str)
-	{
-		if (strlen(str) != 8)
-			return false;
-		for (sint32 f = 0; f < 8; f++)
+		bool ReadMetaXmlFile(const char* path, acpMetaXml_t* out)
 		{
-			if (str[f] >= '0' && str[f] <= '9')
-				continue;
-			if (str[f] >= 'a' && str[f] <= 'f')
-				continue;
-			if (str[f] >= 'A' && str[f] <= 'F')
-				continue;
-			return false;
+			uint32 size = 0;
+			uint8* data = fsc_extractFile(path, &size);
+			if (!data)
+				return false;
+			ParseMetaXml(data, size, out);
+			free(data);
+			return true;
 		}
-		return true;
-	}
 
-	sint32 ACPGetSaveDataTitleIdList(uint32 storageDeviceGuessed, acpTitleId_t* titleIdList, sint32 maxCount, uint32be* countOut)
-	{
-		sint32 count = 0;
+		// ---- helpers ---------------------------------------------------------------------
 
-		const char* devicePath = "/vol/storage_mlc01/";
-		if (storageDeviceGuessed != 3)
-			cemu_assert_unimplemented();
-		char searchPath[FSA_CMD_PATH_MAX_LENGTH];
-		sprintf(searchPath, "%susr/save/", devicePath);
-		sint32 fscStatus = 0;
-		FSCVirtualFile* fscDirIteratorTitleIdHigh = fsc_openDirIterator(searchPath, &fscStatus);
-		FSCDirEntry dirEntryTitleIdHigh;
-		FSCDirEntry dirEntryTitleIdLow;
-		if(fscDirIteratorTitleIdHigh)
-		{ 
-			while (fsc_nextDir(fscDirIteratorTitleIdHigh, &dirEntryTitleIdHigh))
+		bool IsPersistentIdName(const char* name)
+		{
+			if (strlen(name) != 8)
+				return false;
+			for (sint32 i = 0; i < 8; i++)
 			{
-				// is 8-digit hex?
-				if(_is8DigitHex(dirEntryTitleIdHigh.path) == false)
-					continue;
-				uint32 titleIdHigh;
-				sscanf(dirEntryTitleIdHigh.path, "%x", &titleIdHigh);
-				sprintf(searchPath, "%susr/save/%08x/", devicePath, titleIdHigh);
-				FSCVirtualFile* fscDirIteratorTitleIdLow = fsc_openDirIterator(searchPath, &fscStatus);
-				if (fscDirIteratorTitleIdLow)
+				if (!isxdigit((unsigned char)name[i]))
+					return false;
+			}
+			return true;
+		}
+
+		uint32 HexNameToU32(const char* name)
+		{
+			uint32 v = 0;
+			sscanf(name, "%x", &v);
+			return v;
+		}
+
+		std::string SaveRoot(uint32 high, uint32 low)
+		{
+			return fmt::format("{}usr/save/{:08x}/{:08x}/", kMlcVolume, high, low);
+		}
+
+		std::string TitleRoot(uint64 titleId)
+		{
+			// system titles live under sys/, everything else under usr/
+			const char* area = ((titleId >> 32) & 0x10) ? "sys" : "usr";
+			return fmt::format("{}{}/title/{:08x}/{:08x}/", kMlcVolume, area, GetTitleIdHigh(titleId), GetTitleIdLow(titleId));
+		}
+
+		uint64 NowSeconds()
+		{
+			return coreinit::OSGetTime() / ESPRESSO_TIMER_CLOCK;
+		}
+
+		// ---- request handlers ------------------------------------------------------------
+
+		sint32 ListSaveTitles(uint32 device, acpTitleId_t* list, sint32 maxCount, uint32be* countOut)
+		{
+			if (device != 3)
+				cemu_assert_unimplemented();
+			sint32 found = 0;
+			sint32 status = 0;
+			std::string root = fmt::format("{}usr/save/", kMlcVolume);
+			FSCVirtualFile* highDir = fsc_openDirIterator(root.c_str(), &status);
+			if (highDir)
+			{
+				FSCDirEntry highEntry;
+				while (fsc_nextDir(highDir, &highEntry))
 				{
-					while (fsc_nextDir(fscDirIteratorTitleIdLow, &dirEntryTitleIdLow))
+					if (!IsPersistentIdName(highEntry.path))
+						continue;
+					uint32 high = HexNameToU32(highEntry.path);
+					std::string highPath = fmt::format("{}{:08x}/", root, high);
+					FSCVirtualFile* lowDir = fsc_openDirIterator(highPath.c_str(), &status);
+					if (!lowDir)
+						continue;
+					FSCDirEntry lowEntry;
+					while (fsc_nextDir(lowDir, &lowEntry))
 					{
-						// is 8-digit hex?
-						if (_is8DigitHex(dirEntryTitleIdLow.path) == false)
+						if (!IsPersistentIdName(lowEntry.path))
 							continue;
-						uint32 titleIdLow;
-						sscanf(dirEntryTitleIdLow.path, "%x", &titleIdLow);
-						// check if /meta/meta.xml exists
-						char tempPath[FSA_CMD_PATH_MAX_LENGTH];
-						sprintf(tempPath, "%susr/save/%08x/%08x/meta/meta.xml", devicePath, titleIdHigh, titleIdLow);
-						if (fsc_doesFileExist(tempPath))
+						uint32 low = HexNameToU32(lowEntry.path);
+						std::string metaPath = SaveRoot(high, low) + "meta/meta.xml";
+						if (!fsc_doesFileExist(metaPath.c_str()))
 						{
-							if (count < maxCount)
-							{
-								titleIdList[count].titleIdHigh = titleIdHigh;
-								titleIdList[count].titleIdLow = titleIdLow;
-								count++;
-							}
+							cemuLog_logDebug(LogType::Force, "ACP: save {:08x}-{:08x} has no meta.xml", high, low);
+							continue;
 						}
-						else
+						if (found < maxCount)
 						{
-							cemuLog_logDebug(LogType::Force, "ACPGetSaveDataTitleIdList(): Missing meta.xml for save {:08x}-{:08x}", titleIdHigh, titleIdLow);
+							list[found].titleIdHigh = high;
+							list[found].titleIdLow = low;
+							found++;
 						}
 					}
-					fsc_close(fscDirIteratorTitleIdLow);
+					fsc_close(lowDir);
 				}
+				fsc_close(highDir);
 			}
-			fsc_close(fscDirIteratorTitleIdHigh);
-		}
-		*countOut = count;
-		return 0;
-	}
-
-	sint32 ACPGetTitleSaveMetaXml(uint64 titleId, acpMetaXml_t* acpMetaXml, sint32 uknType)
-	{
-		// uknType is probably the storage device?
-		if (uknType != 3) // mlc01 ?
-			assert_dbg();
-
-		char xmlPath[FSA_CMD_PATH_MAX_LENGTH];
-		sprintf(xmlPath, "%susr/save/%08x/%08x/meta/meta.xml", "/vol/storage_mlc01/", (uint32)(titleId>>32), (uint32)(titleId&0xFFFFFFFF));
-
-		uint32 saveMetaXmlSize = 0;
-		uint8* saveMetaXmlData = fsc_extractFile(xmlPath, &saveMetaXmlSize);
-		if (saveMetaXmlData)
-		{
-			parseSaveMetaXml(saveMetaXmlData, saveMetaXmlSize, acpMetaXml);
-			free(saveMetaXmlData);
-		}
-		else
-		{
-			cemuLog_log(LogType::Force, "ACPGetTitleSaveMetaXml(): Meta file \"{}\" does not exist", xmlPath);
-			memset(acpMetaXml, 0, sizeof(acpMetaXml_t));
-		}
-		return 0;
-	}
-
-	sint32 ACPGetTitleMetaData(uint64 titleId, acpMetaData_t* acpMetaData)
-	{
-		memset(acpMetaData, 0, sizeof(acpMetaData_t));
-
-		char titlePath[1024];
-
-		if (((titleId >> 32) & 0x10) != 0)
-		{
-			sprintf(titlePath, "/vol/storage_mlc01/sys/title/%08x/%08x/", (uint32)(titleId >> 32), (uint32)(titleId & 0xFFFFFFFF));
-		}
-		else
-		{
-			sprintf(titlePath, "/vol/storage_mlc01/usr/title/%08x/%08x/", (uint32)(titleId >> 32), (uint32)(titleId & 0xFFFFFFFF));
+			*countOut = found;
+			return 0;
 		}
 
-
-		char filePath[FSA_CMD_PATH_MAX_LENGTH];
-		sprintf(filePath, "%smeta/bootMovie.h264", titlePath);
-
-		// bootMovie.h264
-		uint32 metaBootMovieSize = 0;
-		uint8* metaBootMovieData = fsc_extractFile(filePath, &metaBootMovieSize);
-		if (metaBootMovieData)
+		sint32 ReadSaveMetaXml(uint64 titleId, acpMetaXml_t* out, sint32 device)
 		{
-			memcpy(acpMetaData->bootMovie, metaBootMovieData, std::min<uint32>(metaBootMovieSize, sizeof(acpMetaData->bootMovie)));
-			free(metaBootMovieData);
-		}
-		else
-			cemuLog_log(LogType::Force, "ACPGetTitleMetaData(): Unable to load \"{}\"", filePath);
-		// bootLogoTex.tga
-		sprintf(filePath, "%smeta/bootLogoTex.tga", titlePath);
-		uint32 metaBootLogoSize = 0;
-		uint8* metaBootLogoData = fsc_extractFile(filePath, &metaBootLogoSize);
-		if (metaBootLogoData)
-		{
-			memcpy(acpMetaData->bootLogoTex, metaBootLogoData, std::min<uint32>(metaBootLogoSize, sizeof(acpMetaData->bootLogoTex)));
-			free(metaBootLogoData);
-		}
-		else
-			cemuLog_log(LogType::Force, "ACPGetTitleMetaData(): Unable to load \"{}\"", filePath);
-
-
-		return 0;
-	}
-
-	sint32 ACPGetTitleMetaXml(uint64 titleId, acpMetaXml_t* acpMetaXml)
-	{
-		memset(acpMetaXml, 0, sizeof(acpMetaXml_t));
-
-		char titlePath[1024];
-
-		if (((titleId >> 32) & 0x10) != 0)
-		{
-			sprintf(titlePath, "/vol/storage_mlc01/sys/title/%08x/%08x/", (uint32)(titleId >> 32), (uint32)(titleId & 0xFFFFFFFF));
-		}
-		else
-		{
-			sprintf(titlePath, "/vol/storage_mlc01/usr/title/%08x/%08x/", (uint32)(titleId >> 32), (uint32)(titleId & 0xFFFFFFFF));
-		}
-
-
-		char filePath[FSA_CMD_PATH_MAX_LENGTH];
-		sprintf(filePath, "%smeta/meta.xml", titlePath);
-
-		uint32 metaXmlSize = 0;
-		uint8* metaXmlData = fsc_extractFile(filePath, &metaXmlSize);
-		if (metaXmlData)
-		{
-			parseSaveMetaXml(metaXmlData, metaXmlSize, acpMetaXml);
-			free(metaXmlData);
-		}
-		else
-		{
-			cemuLog_log(LogType::Force, "ACPGetTitleMetaXml(): Meta file \"{}\" does not exist", filePath);
-		}
-
-		return 0;
-	}
-
-	sint32 ACPGetTitleSaveDirEx(uint64 titleId, uint32 storageDeviceGuessed, acpSaveDirInfo_t* saveDirInfo, sint32 maxCount, uint32be* countOut)
-	{
-		sint32 count = 0;
-
-		const char* devicePath = "/vol/storage_mlc01/";
-		if (storageDeviceGuessed != 3)
-			cemu_assert_unimplemented();
-
-		char searchPath[FSA_CMD_PATH_MAX_LENGTH];
-		char tempPath[FSA_CMD_PATH_MAX_LENGTH];
-
-		sint32 fscStatus = 0;
-		// add common dir
-		sprintf(searchPath, "%susr/save/%08x/%08x/user/common/", devicePath, (uint32)(titleId >> 32), (uint32)(titleId & 0xFFFFFFFF));
-		if (fsc_doesDirectoryExist(searchPath))
-		{
-			acpSaveDirInfo_t* entry = saveDirInfo + count;
-			if (count < maxCount)
+			if (device != 3)
+				assert_dbg();
+			std::string path = SaveRoot(GetTitleIdHigh(titleId), GetTitleIdLow(titleId)) + "meta/meta.xml";
+			if (!ReadMetaXmlFile(path.c_str(), out))
 			{
-				// get dir size
-				sprintf(tempPath, "%susr/save/%08x/%08x/user/common/", devicePath, (uint32)(titleId >> 32), (uint32)(titleId & 0xFFFFFFFF));
-				FSCVirtualFile* fscDir = fsc_open(tempPath, FSC_ACCESS_FLAG::OPEN_DIR, &fscStatus);
-				uint64 dirSize = 0;
-				if (fscDir)
-				{
-					dirSize = fsc_getFileSize(fscDir);
-					fsc_close(fscDir);
-				}
-
-				memset(entry, 0, sizeof(acpSaveDirInfo_t));
-				entry->ukn00 = (uint32)(titleId>>32);
-				entry->ukn04 = (uint32)(titleId&0xFFFFFFFF);
-				entry->persistentId = 0; // 0 -> common save
-				entry->ukn0C = 0;
-				entry->sizeA = _swapEndianU64(0); // ukn
-				entry->sizeB = _swapEndianU64(dirSize);
-				entry->time = _swapEndianU64((coreinit::OSGetTime() / ESPRESSO_TIMER_CLOCK));
-				sprintf(entry->path, "%susr/save/%08x/%08x/meta/", devicePath, (uint32)(titleId >> 32), (uint32)(titleId & 0xFFFFFFFF));
-				count++;
+				cemuLog_log(LogType::Force, "ACP: save meta file \"{}\" not found", path);
+				memset(out, 0, sizeof(acpMetaXml_t));
 			}
+			return 0;
 		}
-		// add user directories
-		sprintf(searchPath, "%susr/save/%08x/%08x/user/", devicePath, (uint32)(titleId >> 32), (uint32)(titleId & 0xFFFFFFFF));
-		FSCVirtualFile* fscDirIterator = fsc_openDirIterator(searchPath, &fscStatus);
-		if (fscDirIterator == nullptr)
-		{
-			cemuLog_log(LogType::Force, "ACPGetTitleSaveDirEx(): Failed to iterate directories in \"{}\"", searchPath);
-			*countOut = 0;
-		}
-		else
-		{
-			FSCDirEntry dirEntry;
-			while( fsc_nextDir(fscDirIterator, &dirEntry) )
-			{
-				if(dirEntry.isDirectory == false)
-					continue;
-				// is 8-digit hex name? (persistent id)
-				if(_is8DigitHex(dirEntry.path) == false )
-					continue;
-				uint32 persistentId = 0;
-				sscanf(dirEntry.path, "%x", &persistentId);
-				acpSaveDirInfo_t* entry = saveDirInfo + count;
-				if (count < maxCount)
-				{
-					memset(entry, 0, sizeof(acpSaveDirInfo_t));
-					entry->ukn00 = (uint32)(titleId >> 32); // titleId?
-					entry->ukn04 = (uint32)(titleId & 0xFFFFFFFF); // titleId?
-					entry->persistentId = persistentId; // 0 -> common save
-					entry->ukn0C = 0;
-					entry->sizeA = _swapEndianU64(0);
-					entry->sizeB = _swapEndianU64(0);
-					entry->time = _swapEndianU64((coreinit::OSGetTime() / ESPRESSO_TIMER_CLOCK));
-					sprintf(entry->path, "%susr/save/%08x/%08x/meta/", devicePath, (uint32)(titleId >> 32), (uint32)(titleId & 0xFFFFFFFF));
-					count++;
-				}
-			}
-			fsc_close(fscDirIterator);
-		}
-		*countOut = count;
-		return 0;
-	}
 
-	int iosuAcp_thread()
-	{
-		SetThreadName("iosuAcp_thread");
-		while (true)
+		void LoadIntoBuffer(const std::string& path, uint8* dst, uint32 capacity)
 		{
-			uint32 returnValue = 0; // Ioctl return value
-			ioQueueEntry_t* ioQueueEntry = iosuIoctl_getNextWithWait(IOS_DEVICE_ACP_MAIN);
-			if (ioQueueEntry->request == IOSU_ACP_REQUEST_CEMU)
+			uint32 size = 0;
+			uint8* data = fsc_extractFile(path.c_str(), &size);
+			if (!data)
 			{
-				iosuAcpCemuRequest_t* acpCemuRequest = (iosuAcpCemuRequest_t*)ioQueueEntry->bufferVectors[0].buffer.GetPtr();
-				if (acpCemuRequest->requestCode == IOSU_ACP_GET_SAVE_DATA_TITLE_ID_LIST)
+				cemuLog_log(LogType::Force, "ACP: could not read \"{}\"", path);
+				return;
+			}
+			memcpy(dst, data, std::min(size, capacity));
+			free(data);
+		}
+
+		sint32 ReadTitleMetaData(uint64 titleId, acpMetaData_t* out)
+		{
+			memset(out, 0, sizeof(acpMetaData_t));
+			std::string metaDir = TitleRoot(titleId) + "meta/";
+			LoadIntoBuffer(metaDir + "bootMovie.h264", out->bootMovie, sizeof(out->bootMovie));
+			LoadIntoBuffer(metaDir + "bootLogoTex.tga", out->bootLogoTex, sizeof(out->bootLogoTex));
+			return 0;
+		}
+
+		sint32 ReadTitleMetaXml(uint64 titleId, acpMetaXml_t* out)
+		{
+			memset(out, 0, sizeof(acpMetaXml_t));
+			std::string path = TitleRoot(titleId) + "meta/meta.xml";
+			if (!ReadMetaXmlFile(path.c_str(), out))
+				cemuLog_log(LogType::Force, "ACP: title meta file \"{}\" not found", path);
+			return 0;
+		}
+
+		void FillSaveDirEntry(acpSaveDirInfo_t& e, uint64 titleId, uint32 persistentId, uint64 size)
+		{
+			memset(&e, 0, sizeof(acpSaveDirInfo_t));
+			uint32 high = GetTitleIdHigh(titleId);
+			uint32 low = GetTitleIdLow(titleId);
+			e.ukn00 = high;
+			e.ukn04 = low;
+			e.persistentId = persistentId;
+			e.ukn0C = 0;
+			e.sizeA = _swapEndianU64(0);
+			e.sizeB = _swapEndianU64(size);
+			e.time = _swapEndianU64(NowSeconds());
+			std::string metaPath = SaveRoot(high, low) + "meta/";
+			strncpy(e.path, metaPath.c_str(), sizeof(e.path) - 1);
+		}
+
+		sint32 ListSaveDirs(uint64 titleId, uint32 device, acpSaveDirInfo_t* out, sint32 maxCount, uint32be* countOut)
+		{
+			if (device != 3)
+				cemu_assert_unimplemented();
+			sint32 found = 0;
+			sint32 status = 0;
+			std::string userDir = SaveRoot(GetTitleIdHigh(titleId), GetTitleIdLow(titleId)) + "user/";
+			// the common save comes first, reported with persistent id 0
+			std::string commonDir = userDir + "common/";
+			if (fsc_doesDirectoryExist(commonDir.c_str()) && found < maxCount)
+			{
+				uint64 size = 0;
+				if (FSCVirtualFile* dir = fsc_open(commonDir.c_str(), FSC_ACCESS_FLAG::OPEN_DIR, &status))
 				{
-					uint32be count = 0;
-					acpCemuRequest->returnCode = ACPGetSaveDataTitleIdList(acpCemuRequest->type, (acpTitleId_t*)acpCemuRequest->ptr.GetPtr(), acpCemuRequest->maxCount, &count);
-					acpCemuRequest->resultU32.u32 = count;
+					size = fsc_getFileSize(dir);
+					fsc_close(dir);
 				}
-				else if (acpCemuRequest->requestCode == IOSU_ACP_GET_TITLE_SAVE_META_XML)
-				{
-					acpCemuRequest->returnCode = ACPGetTitleSaveMetaXml(acpCemuRequest->titleId, (acpMetaXml_t*)acpCemuRequest->ptr.GetPtr(), acpCemuRequest->type);
-				}
-				else if (acpCemuRequest->requestCode == IOSU_ACP_GET_TITLE_SAVE_DIR)
-				{
-					uint32be count = 0;
-					acpCemuRequest->returnCode = ACPGetTitleSaveDirEx(acpCemuRequest->titleId, acpCemuRequest->type, (acpSaveDirInfo_t*)acpCemuRequest->ptr.GetPtr(), acpCemuRequest->maxCount, &count);
-					acpCemuRequest->resultU32.u32 = count;
-				}
-				else if (acpCemuRequest->requestCode == IOSU_ACP_GET_TITLE_META_DATA)
-				{
-					acpCemuRequest->returnCode = ACPGetTitleMetaData(acpCemuRequest->titleId, (acpMetaData_t*)acpCemuRequest->ptr.GetPtr());
-				}
-				else if (acpCemuRequest->requestCode == IOSU_ACP_GET_TITLE_META_XML)
-				{
-					acpCemuRequest->returnCode = ACPGetTitleMetaXml(acpCemuRequest->titleId, (acpMetaXml_t*)acpCemuRequest->ptr.GetPtr());
-				}
-				else if (acpCemuRequest->requestCode == IOSU_ACP_CREATE_SAVE_DIR_EX)
-				{
-					acpCemuRequest->returnCode = acp::ACPCreateSaveDirEx(acpCemuRequest->accountSlot, acpCemuRequest->titleId);
-				}
-				else
-					cemu_assert_unimplemented();
+				FillSaveDirEntry(out[found++], titleId, 0, size);
+			}
+			// then one entry per account directory
+			FSCVirtualFile* it = fsc_openDirIterator(userDir.c_str(), &status);
+			if (!it)
+			{
+				cemuLog_log(LogType::Force, "ACP: cannot list \"{}\"", userDir);
 			}
 			else
-				cemu_assert_unimplemented();
-			iosuIoctl_completeRequest(ioQueueEntry, returnValue);
+			{
+				FSCDirEntry entry;
+				while (fsc_nextDir(it, &entry))
+				{
+					if (!entry.isDirectory || !IsPersistentIdName(entry.path))
+						continue;
+					if (found < maxCount)
+						FillSaveDirEntry(out[found++], titleId, HexNameToU32(entry.path), 0);
+				}
+				fsc_close(it);
+			}
+			*countOut = found;
+			return 0;
 		}
-		return 0;
+
+		void HandlePrivateRequest(iosuAcpCemuRequest_t* req)
+		{
+			uint32be count = 0;
+			switch (req->requestCode)
+			{
+			case IOSU_ACP_GET_SAVE_DATA_TITLE_ID_LIST:
+				req->returnCode = ListSaveTitles(req->type, (acpTitleId_t*)req->ptr.GetPtr(), req->maxCount, &count);
+				req->resultU32.u32 = count;
+				break;
+			case IOSU_ACP_GET_TITLE_SAVE_META_XML:
+				req->returnCode = ReadSaveMetaXml(req->titleId, (acpMetaXml_t*)req->ptr.GetPtr(), req->type);
+				break;
+			case IOSU_ACP_GET_TITLE_SAVE_DIR:
+				req->returnCode = ListSaveDirs(req->titleId, req->type, (acpSaveDirInfo_t*)req->ptr.GetPtr(), req->maxCount, &count);
+				req->resultU32.u32 = count;
+				break;
+			case IOSU_ACP_GET_TITLE_META_DATA:
+				req->returnCode = ReadTitleMetaData(req->titleId, (acpMetaData_t*)req->ptr.GetPtr());
+				break;
+			case IOSU_ACP_GET_TITLE_META_XML:
+				req->returnCode = ReadTitleMetaXml(req->titleId, (acpMetaXml_t*)req->ptr.GetPtr());
+				break;
+			case IOSU_ACP_CREATE_SAVE_DIR_EX:
+				req->returnCode = acp::ACPCreateSaveDirEx(req->accountSlot, req->titleId);
+				break;
+			default:
+				cemu_assert_unimplemented();
+				break;
+			}
+		}
+
+		void RequestLoop()
+		{
+			SetThreadName("iosuAcp_thread");
+			for (;;)
+			{
+				ioQueueEntry_t* entry = iosuIoctl_getNextWithWait(IOS_DEVICE_ACP_MAIN);
+				if (entry->request == IOSU_ACP_REQUEST_CEMU)
+					HandlePrivateRequest((iosuAcpCemuRequest_t*)entry->bufferVectors[0].buffer.GetPtr());
+				else
+					cemu_assert_unimplemented();
+				iosuIoctl_completeRequest(entry, 0);
+			}
+		}
+
+		bool g_requestThreadStarted = false;
 	}
 
 	void iosuAcp_init()
 	{
-		if (iosuAcp.isInitialized)
+		if (g_requestThreadStarted)
 			return;
-		std::thread t(iosuAcp_thread);
-		t.detach();
-		iosuAcp.isInitialized = true;
+		std::thread(RequestLoop).detach();
+		g_requestThreadStarted = true;
 	}
-
-	bool iosuAcp_isInitialized()
-	{
-		return iosuAcp.isInitialized;
-	}
-
-	/* Above is the legacy implementation. Below is the new style implementation which also matches the official IPC protocol and works with the real nn_acp.rpl */
 
 	namespace acp
 	{
-
-		uint64 _ACPGetTimestamp()
+		namespace
 		{
-			return coreinit::OSGetTime() / ESPRESSO_TIMER_CLOCK;
+			void CopyTitleMetaFile(const std::string& titleStorage, const char* fileName, uint64 saveTitleId)
+			{
+				sint32 status;
+				std::string src = titleStorage + "/meta/" + fileName;
+				FSCVirtualFile* file = fsc_open(src.c_str(), FSC_ACCESS_FLAG::OPEN_FILE | FSC_ACCESS_FLAG::READ_PERMISSION, &status);
+				if (!file)
+					return;
+				sint32 size = (sint32)fsc_getFileSize(file);
+				std::unique_ptr<uint8[]> buffer = std::make_unique<uint8[]>(size);
+				fsc_readFile(file, buffer.get(), size);
+				fsc_close(file);
+				fs::path dst = ActiveSettings::GetMlcPath("usr/save/{:08x}/{:08x}/meta/{}", GetTitleIdHigh(saveTitleId), GetTitleIdLow(saveTitleId), fileName);
+				std::ofstream out(dst, std::ios::out | std::ios::binary);
+				out.write((const char*)buffer.get(), size);
+			}
+
+			sint32 MakeSaveDirectories(uint32 persistentId, uint64 titleId)
+			{
+				uint32 high = GetTitleIdHigh(titleId) & ~0xCu;
+				uint32 low = GetTitleIdLow(titleId);
+				uint32 account = persistentId == 0 ? 0x80000001 : persistentId;
+				// the exact spelling (including the missing trailing slashes) is kept on purpose
+				const std::string dirs[] =
+				{
+					fmt::format("{}usr/boss/", kMlcVolume),
+					fmt::format("{}usr/boss/{:08x}/", kMlcVolume, high),
+					fmt::format("{}usr/boss/{:08x}/{:08x}/", kMlcVolume, high, low),
+					fmt::format("{}usr/boss/{:08x}/{:08x}/user/", kMlcVolume, high, low),
+					fmt::format("{}usr/boss/{:08x}/{:08x}/user/common", kMlcVolume, high, low),
+					fmt::format("{}usr/boss/{:08x}/{:08x}/user/{:08x}/", kMlcVolume, high, low, account),
+					fmt::format("{}usr/save/{:08x}/", kMlcVolume, high),
+					fmt::format("{}usr/save/{:08x}/{:08x}/", kMlcVolume, high, low),
+					fmt::format("{}usr/save/{:08x}/{:08x}/meta/", kMlcVolume, high, low),
+					fmt::format("{}usr/save/{:08x}/{:08x}/user/", kMlcVolume, high, low),
+					fmt::format("{}usr/save/{:08x}/{:08x}/user/common", kMlcVolume, high, low),
+					fmt::format("{}usr/save/{:08x}/{:08x}/user/{:08x}", kMlcVolume, high, low, account),
+				};
+				sint32 status = FSC_STATUS_FILE_NOT_FOUND;
+				for (const std::string& d : dirs)
+					fsc_createDir(d.c_str(), &status);
+				CreateSaveMetaFiles(persistentId, titleId);
+				return 0;
+			}
 		}
 
 		nnResult ACPUpdateSaveTimeStamp(uint32 persistentId, uint64 titleId, ACPDeviceType deviceType)
 		{
 			if (deviceType == ACPDeviceType::UnknownType)
-			{
 				return (nnResult)0xA030FB80;
+
+			// only an existing, non-empty saveinfo.xml is updated
+			const fs::path file = ActiveSettings::GetMlcPath("usr/save/{:08x}/{:08x}/meta/saveinfo.xml", GetTitleIdHigh(titleId), GetTitleIdLow(titleId));
+			std::optional<std::vector<uint8>> content = FileStream::LoadIntoMemory(file);
+			if (!content || content->empty())
+				return NN_RESULT_SUCCESS;
+
+			tinyxml2::XMLDocument doc;
+			tinyxml2::XMLError err = doc.Parse((const char*)content->data(), content->size());
+			if (err != tinyxml2::XML_SUCCESS && err != tinyxml2::XML_ERROR_EMPTY_DOCUMENT)
+				return NN_RESULT_SUCCESS;
+
+			tinyxml2::XMLNode* first = doc.FirstChild();
+			if (!first || !first->ToDeclaration())
+				doc.InsertFirstChild(doc.NewDeclaration());
+
+			tinyxml2::XMLElement* info = doc.FirstChildElement("info");
+			if (!info)
+				info = doc.InsertEndChild(doc.NewElement("info"))->ToElement();
+
+			const std::string idText = fmt::format("{:08x}", persistentId);
+			char stamp[32];
+			snprintf(stamp, sizeof(stamp), "%" PRIx64, NowSeconds());
+
+			tinyxml2::XMLElement* account = info->FirstChildElement("account");
+			while (account && !account->Attribute("persistentId", idText.c_str()))
+				account = account->NextSiblingElement("account");
+
+			if (account)
+			{
+				tinyxml2::XMLElement* ts = account->FirstChildElement("timestamp");
+				if (ts)
+					ts->SetText(stamp);
+				else
+					account->InsertFirstChild(doc.NewElement("timestamp")); // added without a value
+			}
+			else
+			{
+				account = doc.NewElement("account");
+				account->SetAttribute("persistentId", idText.c_str());
+				tinyxml2::XMLElement* ts = doc.NewElement("timestamp");
+				ts->SetText(stamp);
+				account->InsertFirstChild(ts);
+				info->InsertFirstChild(account);
 			}
 
-			// create or modify the saveinfo
-			const auto saveinfoPath = ActiveSettings::GetMlcPath("usr/save/{:08x}/{:08x}/meta/saveinfo.xml", GetTitleIdHigh(titleId), GetTitleIdLow(titleId));
-			auto saveinfoData = FileStream::LoadIntoMemory(saveinfoPath);
-			if (saveinfoData && !saveinfoData->empty())
+			tinyxml2::XMLPrinter printer;
+			doc.Print(&printer);
+			if (FileStream* out = FileStream::createFile2(file))
 			{
-				namespace xml = tinyxml2;
-				xml::XMLDocument doc;
-				tinyxml2::XMLError xmlError = doc.Parse((const char*)saveinfoData->data(), saveinfoData->size());
-				if (xmlError == xml::XML_SUCCESS || xmlError == xml::XML_ERROR_EMPTY_DOCUMENT)
-				{
-					xml::XMLNode* child = doc.FirstChild();
-					// check for declaration -> <?xml version="1.0" encoding="utf-8"?>
-					if (!child || !child->ToDeclaration())
-					{
-						xml::XMLDeclaration* decl = doc.NewDeclaration();
-						doc.InsertFirstChild(decl);
-					}
-
-					xml::XMLElement* info = doc.FirstChildElement("info");
-					if (!info)
-					{
-						info = doc.NewElement("info");
-						doc.InsertEndChild(info);
-					}
-
-					// find node with persistentId
-					char tmp[64];
-					sprintf(tmp, "%08x", persistentId);
-					bool foundNode = false;
-					for (xml::XMLElement* account = info->FirstChildElement("account"); account; account = account->NextSiblingElement("account"))
-					{
-						if (account->Attribute("persistentId", tmp))
-						{
-							// found the entry! -> update timestamp
-							xml::XMLElement* timestamp = account->FirstChildElement("timestamp");
-							sprintf(tmp, "%" PRIx64, _ACPGetTimestamp());
-							if (timestamp)
-								timestamp->SetText(tmp);
-							else
-							{
-								timestamp = doc.NewElement("timestamp");
-								account->InsertFirstChild(timestamp);
-							}
-
-							foundNode = true;
-							break;
-						}
-					}
-
-					if (!foundNode)
-					{
-						tinyxml2::XMLElement* account = doc.NewElement("account");
-						{
-							sprintf(tmp, "%08x", persistentId);
-							account->SetAttribute("persistentId", tmp);
-
-							tinyxml2::XMLElement* timestamp = doc.NewElement("timestamp");
-							{
-								sprintf(tmp, "%" PRIx64, _ACPGetTimestamp());
-								timestamp->SetText(tmp);
-							}
-
-							account->InsertFirstChild(timestamp);
-						}
-
-						info->InsertFirstChild(account);
-					}
-
-					// update file
-					tinyxml2::XMLPrinter printer;
-					doc.Print(&printer);
-					FileStream* fs = FileStream::createFile2(saveinfoPath);
-					if (fs)
-					{
-						fs->writeString(printer.CStr());
-						delete fs;
-					}
-				}
+				out->writeString(printer.CStr());
+				delete out;
 			}
 			return NN_RESULT_SUCCESS;
 		}
 
 		void CreateSaveMetaFiles(uint32 persistentId, uint64 titleId)
 		{
-			std::string titlePath = CafeSystem::GetMlcStoragePath(CafeSystem::GetForegroundTitleId());
-
-			sint32 fscStatus;
-			FSCVirtualFile* fscFile = fsc_open((titlePath + "/meta/meta.xml").c_str(), FSC_ACCESS_FLAG::OPEN_FILE | FSC_ACCESS_FLAG::READ_PERMISSION, &fscStatus);
-			if (fscFile)
-			{
-				sint32 fileSize = fsc_getFileSize(fscFile);
-
-				std::unique_ptr<uint8[]> fileContent = std::make_unique<uint8[]>(fileSize);
-				fsc_readFile(fscFile, fileContent.get(), fileSize);
-				fsc_close(fscFile);
-
-				const auto outPath = ActiveSettings::GetMlcPath("usr/save/{:08x}/{:08x}/meta/meta.xml", GetTitleIdHigh(titleId), GetTitleIdLow(titleId));
-
-				std::ofstream myFile(outPath, std::ios::out | std::ios::binary);
-				myFile.write((char*)fileContent.get(), fileSize);
-				myFile.close();
-			}
-
-			fscFile = fsc_open((titlePath + "/meta/iconTex.tga").c_str(), FSC_ACCESS_FLAG::OPEN_FILE | FSC_ACCESS_FLAG::READ_PERMISSION, &fscStatus);
-			if (fscFile)
-			{
-				sint32 fileSize = fsc_getFileSize(fscFile);
-
-				std::unique_ptr<uint8[]> fileContent = std::make_unique<uint8[]>(fileSize);
-				fsc_readFile(fscFile, fileContent.get(), fileSize);
-				fsc_close(fscFile);
-
-				const auto outPath = ActiveSettings::GetMlcPath("usr/save/{:08x}/{:08x}/meta/iconTex.tga", GetTitleIdHigh(titleId), GetTitleIdLow(titleId));
-
-				std::ofstream myFile(outPath, std::ios::out | std::ios::binary);
-				myFile.write((char*)fileContent.get(), fileSize);
-				myFile.close();
-			}
-
-			ACPUpdateSaveTimeStamp(persistentId, titleId, iosu::acp::ACPDeviceType::InternalDeviceType);
-		}
-
-
-		sint32 _ACPCreateSaveDir(uint32 persistentId, uint64 titleId, ACPDeviceType type)
-		{
-			uint32 high = GetTitleIdHigh(titleId) & (~0xC);
-			uint32 low = GetTitleIdLow(titleId);
-
-			sint32 fscStatus = FSC_STATUS_FILE_NOT_FOUND;
-			char path[256];
-
-			sprintf(path, "%susr/boss/", "/vol/storage_mlc01/");
-			fsc_createDir(path, &fscStatus);
-			sprintf(path, "%susr/boss/%08x/", "/vol/storage_mlc01/", high);
-			fsc_createDir(path, &fscStatus);
-			sprintf(path, "%susr/boss/%08x/%08x/", "/vol/storage_mlc01/", high, low);
-			fsc_createDir(path, &fscStatus);
-			sprintf(path, "%susr/boss/%08x/%08x/user/", "/vol/storage_mlc01/", high, low);
-			fsc_createDir(path, &fscStatus);
-			sprintf(path, "%susr/boss/%08x/%08x/user/common", "/vol/storage_mlc01/", high, low);
-			fsc_createDir(path, &fscStatus);
-			sprintf(path, "%susr/boss/%08x/%08x/user/%08x/", "/vol/storage_mlc01/", high, low, persistentId == 0 ? 0x80000001 : persistentId);
-			fsc_createDir(path, &fscStatus);
-
-			sprintf(path, "%susr/save/%08x/", "/vol/storage_mlc01/", high);
-			fsc_createDir(path, &fscStatus);
-			sprintf(path, "%susr/save/%08x/%08x/", "/vol/storage_mlc01/", high, low);
-			fsc_createDir(path, &fscStatus);
-			sprintf(path, "%susr/save/%08x/%08x/meta/", "/vol/storage_mlc01/", high, low);
-			fsc_createDir(path, &fscStatus);
-			sprintf(path, "%susr/save/%08x/%08x/user/", "/vol/storage_mlc01/", high, low);
-			fsc_createDir(path, &fscStatus);
-			sprintf(path, "%susr/save/%08x/%08x/user/common", "/vol/storage_mlc01/", high, low);
-			fsc_createDir(path, &fscStatus);
-			sprintf(path, "%susr/save/%08x/%08x/user/%08x", "/vol/storage_mlc01/", high, low, persistentId == 0 ? 0x80000001 : persistentId);
-			fsc_createDir(path, &fscStatus);
-
-			// copy xml meta files
-			CreateSaveMetaFiles(persistentId, titleId);
-			return 0;
+			// the files always come from the running title
+			std::string storage = CafeSystem::GetMlcStoragePath(CafeSystem::GetForegroundTitleId());
+			CopyTitleMetaFile(storage, "meta.xml", titleId);
+			CopyTitleMetaFile(storage, "iconTex.tga", titleId);
+			ACPUpdateSaveTimeStamp(persistentId, titleId, ACPDeviceType::InternalDeviceType);
 		}
 
 		nnResult ACPCreateSaveDir(uint32 persistentId, ACPDeviceType type)
 		{
-			uint64 titleId = CafeSystem::GetForegroundTitleId();
-			return _ACPCreateSaveDir(persistentId, titleId, type);
+			return MakeSaveDirectories(persistentId, CafeSystem::GetForegroundTitleId());
 		}
 
 		sint32 ACPCreateSaveDirEx(uint8 accountSlot, uint64 titleId)
 		{
+			cemu_assert_debug(accountSlot >= 1 && accountSlot <= 13);
 			uint32 persistentId = 0;
-			cemu_assert_debug(accountSlot >= 1 && accountSlot <= 13); // outside valid slot range?
-			bool r = iosu::act::GetPersistentId(accountSlot, &persistentId);
-			cemu_assert_debug(r);
-			return _ACPCreateSaveDir(persistentId, titleId, ACPDeviceType::InternalDeviceType);
+			bool ok = iosu::act::GetPersistentId(accountSlot, &persistentId);
+			cemu_assert_debug(ok);
+			return MakeSaveDirectories(persistentId, titleId);
 		}
 
 		nnResult ACPGetOlvAccesskey(uint32be* accessKey)
@@ -777,37 +542,36 @@ namespace iosu
 			return 0;
 		}
 
-		class AcpMainService : public iosu::nn::IPCService
+		namespace
 		{
-		  public:
-			AcpMainService() : iosu::nn::IPCService("/dev/acp_main") {}
-
-			nnResult ServiceCall(IPCServiceCall& serviceCall) override
+			// IPC endpoint for the real nn_acp.rpl; no commands are implemented yet
+			class MainService : public iosu::nn::IPCService
 			{
-				cemuLog_log(LogType::Force, "Unsupported service call to /dev/acp_main");
-				cemu_assert_unimplemented();
-				return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_ACP, 0);
-			}
-		};
+			public:
+				MainService() : iosu::nn::IPCService("/dev/acp_main") {}
 
-		AcpMainService gACPMainService;
+				nnResult ServiceCall(IPCServiceCall& call) override
+				{
+					cemuLog_log(LogType::Force, "ACP: unsupported call on /dev/acp_main");
+					cemu_assert_unimplemented();
+					return BUILD_NN_RESULT(NN_RESULT_LEVEL_SUCCESS, NN_RESULT_MODULE_NN_ACP, 0);
+				}
+			};
 
-		class : public ::IOSUModule
-		{
-			void TitleStart() override
+			MainService g_mainService;
+
+			class AcpModule : public ::IOSUModule
 			{
-				gACPMainService.Start();
-				// gACPMainService.SetTimerUpdate(1000); // call TimerUpdate() once a second
-			}
-			void TitleStop() override
-			{
-				gACPMainService.Stop();
-			}
-		}sIOSUModuleNNACP;
+				void TitleStart() override { g_mainService.Start(); }
+				void TitleStop() override { g_mainService.Stop(); }
+			};
+
+			AcpModule g_module;
+		}
 
 		IOSUModule* GetModule()
 		{
-			return static_cast<IOSUModule*>(&sIOSUModuleNNACP);
+			return &g_module;
 		}
-	} // namespace acp
-} // namespace iosu
+	}
+}
