@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include <signal.h>
 #include <execinfo.h>
 #include <string.h>
@@ -10,163 +11,134 @@
 #include "Cafe/HW/Espresso/Debugger/GDBBreakpoints.h"
 
 #if BOOST_OS_LINUX
-#include "ELFSymbolTable.h"
+	#include "ELFSymbolTable.h"
 #endif
 
-#if BOOST_OS_LINUX
-void DemangleAndPrintBacktrace(char** backtrace, size_t size)
+namespace
 {
-	ELFSymbolTable symTable;
-	for (char** i = backtrace; i < backtrace + size; i++)
+#if BOOST_OS_LINUX
+	// backtrace_symbols() lines look like "binary(symbol+0xoffset) [0xaddress]".
+	// For functions that are not in the dynamic symbol table the symbol part is
+	// empty; those are looked up in the executable's static symbol table.
+	// Symbols are written demangled.
+	void writeBacktrace(char** lines, size_t count)
 	{
-		std::string_view traceLine{*i};
-
-		// basic check to see if the backtrace line matches expected format
-		size_t parenthesesOpen = traceLine.find_last_of('(');
-		size_t parenthesesClose = traceLine.find_last_of(')');
-		size_t offsetPlus = traceLine.find_last_of('+');
-		if (!parenthesesOpen || !parenthesesClose || !offsetPlus ||
-			 offsetPlus < parenthesesOpen || offsetPlus > parenthesesClose)
+		ELFSymbolTable staticSymbols;
+		for (size_t n = 0; n < count; n++)
 		{
-			// fall back to default string
-            CrashLog_WriteLine(traceLine);
-			continue;
+			const std::string_view line(lines[n]);
+			const size_t open = line.rfind('(');
+			const size_t close = line.rfind(')');
+			const size_t plus = line.rfind('+');
+			if (open == std::string_view::npos || close == std::string_view::npos || plus == std::string_view::npos ||
+				plus < open || plus > close)
+			{
+				CrashLog_WriteLine(line);
+				continue;
+			}
+
+			std::string_view symbol = line.substr(open + 1, plus - open - 1);
+			uint64 offsetInSymbol = (uint64)-1;
+			std::string symbolStorage;
+			if (symbol.empty())
+			{
+				const uint64 fileOffset = (uint64)StringHelpers::ToInt64(line.substr(plus + 1, close - plus - 1));
+				symbolStorage = std::string(staticSymbols.OffsetToSymbol(fileOffset, offsetInSymbol));
+			}
+			else
+				symbolStorage = std::string(symbol);
+
+			CrashLog_WriteLine(line.substr(0, open + 1), false);
+			CrashLog_WriteLine(boost::core::demangle(symbolStorage.c_str()), false);
+			CrashLog_WriteLine("+", false);
+			if (offsetInSymbol != (uint64)-1)
+			{
+				CrashLog_WriteLine(fmt::format("0x{:x}", offsetInSymbol), false);
+				CrashLog_WriteLine(line.substr(close));
+			}
+			else
+				CrashLog_WriteLine(line.substr(plus + 1));
 		}
+	}
+#endif
 
-		// attempt to resolve symbol from regular symbol table if missing from dynamic symbol table
-		uint64 newOffset = -1;
-		std::string_view symbolName = traceLine.substr(parenthesesOpen+1, offsetPlus-parenthesesOpen-1);
-		if (symbolName.empty())
+	// SIGSEGV, SIGABRT and the other signals that would normally dump core:
+	// write a crash log with a host backtrace and the emulated system state,
+	// then either re-raise for a core dump (when enabled) or exit
+	void onFatalSignal(int sig, siginfo_t* info, void* context)
+	{
+#if defined(ARCH_X86_64) && BOOST_OS_LINUX
+		// hardware watchpoints set by the GDB stub arrive as SIGTRAP
+		if (info->si_signo == SIGTRAP && info->si_code == TRAP_HWBKPT)
 		{
-			uint64 symbolOffset = StringHelpers::ToInt64(traceLine.substr(offsetPlus+1,offsetPlus+1-parenthesesClose-1));
-			symbolName = symTable.OffsetToSymbol(symbolOffset, newOffset);
+			if (g_gdbstub)
+				g_gdbstub->HandleAccessException(_ReadDR6());
+			return;
 		}
+#endif
+		if (!CrashLog_Create())
+			return; // a crash log is already being written
 
-        CrashLog_WriteLine(traceLine.substr(0, parenthesesOpen+1), false);
+		const char* description = strsignal(sig);
+		printf("%s!\n", description ? description : "Unknown core dumping signal");
 
-        CrashLog_WriteLine(boost::core::demangle(symbolName.empty() ? "" : symbolName.data()), false);
+		void* frames[128];
+		const int frameCount = backtrace(frames, 128);
+#if defined(ARCH_X86_64) && BOOST_OS_LINUX
+		// the innermost frame is the signal handler, show the faulting instruction instead
+		frames[0] = (void*)((ucontext_t*)context)->uc_mcontext.gregs[REG_RIP];
+#endif
 
-		// print relative or existing symbol offset.
-        CrashLog_WriteLine("+", false);
-		if (newOffset != -1)
+		CrashLog_WriteLine(fmt::format("Error: signal {}:", sig));
+#if BOOST_OS_LINUX
+		if (char** lines = backtrace_symbols(frames, frameCount))
 		{
-            CrashLog_WriteLine(fmt::format("0x{:x}", newOffset), false);
-            CrashLog_WriteLine(traceLine.substr(parenthesesClose));
+			writeBacktrace(lines, (size_t)frameCount);
+			free(lines);
 		}
 		else
-		{
-            CrashLog_WriteLine(traceLine.substr(offsetPlus+1));
-		}
-	}
-}
-#endif
-
-// handle signals that would dump core, print stacktrace and then dump depending on config
-void handlerDumpingSignal(int sig, siginfo_t *info, void *context)
-{
-#if defined(ARCH_X86_64) && BOOST_OS_LINUX
-	// Check for hardware breakpoints
-	if (info->si_signo == SIGTRAP && info->si_code == TRAP_HWBKPT)
-	{
-		uint64 dr6 = _ReadDR6();
-		g_gdbstub->HandleAccessException(dr6);
-		return;
-	}
-#endif
-
-    if(!CrashLog_Create())
-        return; // give up if crashlog was already created
-
-    char* sigName = strsignal(sig);
-	if (sigName)
-	{
-		printf("%s!\n", sigName);
-	}
-	else
-	{
-		// should never be the case
-		printf("Unknown core dumping signal!\n");
-	}
-
-	void* backtraceArray[128];
-	size_t size;
-
-	// get void*'s for all entries on the stack
-	size = backtrace(backtraceArray, 128);
-    // replace the deepest entry with the actual crash address
-#if defined(ARCH_X86_64) && BOOST_OS_LINUX > 0
-    ucontext_t *uc = (ucontext_t *)context;
-    backtraceArray[0] = (void *)uc->uc_mcontext.gregs[REG_RIP];
-#endif
-
-    CrashLog_WriteLine(fmt::format("Error: signal {}:", sig));
-
-#if BOOST_OS_LINUX
-	char** symbol_trace = backtrace_symbols(backtraceArray, size);
-
-	if (symbol_trace)
-	{
-        DemangleAndPrintBacktrace(symbol_trace, size);
-		free(symbol_trace);
-	}
-	else
-	{
-        CrashLog_WriteLine("Failed to read backtrace");
-	}
+			CrashLog_WriteLine("Failed to read backtrace");
 #else
-	backtrace_symbols_fd(backtraceArray, size, STDERR_FILENO);
+		backtrace_symbols_fd(frames, frameCount, STDERR_FILENO);
 #endif
 
-    std::cerr << fmt::format("\nStacktrace and additional info written to:") << std::endl;
-    std::cerr << cemuLog_GetLogFilePath().generic_string() << std::endl;
+		std::cerr << "\nStacktrace and additional info written to:" << std::endl;
+		std::cerr << cemuLog_GetLogFilePath().generic_string() << std::endl;
 
-    CrashLog_SetOutputChannels(false, true);
-    ExceptionHandler_LogGeneralInfo();
-    CrashLog_SetOutputChannels(true, true);
+		// the emulator state only goes to the log file
+		CrashLog_SetOutputChannels(false, true);
+		ExceptionHandler_LogGeneralInfo();
+		CrashLog_SetOutputChannels(true, true);
 
-	if (GetConfig().crash_dump == CrashDump::Enabled)
-	{
-		// reset signal handler to default and re-raise signal to dump core
-		signal(sig, SIG_DFL);
-		raise(sig);
-		return;
+		if (GetConfig().crash_dump == CrashDump::Enabled)
+		{
+			signal(sig, SIG_DFL);
+			raise(sig);
+			return;
+		}
+		_Exit(1);
 	}
-	// exit process ignoring all issues
-	_Exit(1);
-}
 
-void handler_SIGINT(int sig)
-{
-	/*
-	 * Received when pressing CTRL + C in a console
-	 * Ideally should be exiting cleanly after saving settings but currently
-	 * there's no clean exit pathway (at least on linux) and exiting the app
-	 * by any mean ends up with a SIGABRT from the standard library destroying
-	 * threads.
-	 */
-	_Exit(0);
+	// Ctrl+C / termination request. There is no orderly shutdown path from a
+	// signal handler (destroying running threads aborts), so exit right away.
+	void onTerminateSignal(int)
+	{
+		_Exit(0);
+	}
 }
 
 void ExceptionHandler_Init()
 {
-	struct sigaction action;
-	action.sa_flags = 0;
-	sigfillset(&action.sa_mask); // don't allow signals to be interrupted
+	struct sigaction terminate{};
+	sigfillset(&terminate.sa_mask); // block other signals while the handler runs
+	terminate.sa_handler = onTerminateSignal;
+	sigaction(SIGINT, &terminate, nullptr);
+	sigaction(SIGTERM, &terminate, nullptr);
 
-	action.sa_handler = handler_SIGINT;
-	sigaction(SIGINT, &action, nullptr);
-	sigaction(SIGTERM, &action, nullptr);
-
-    action.sa_flags = SA_SIGINFO;
-    action.sa_handler = nullptr;
-	action.sa_sigaction = handlerDumpingSignal;
-	sigaction(SIGABRT, &action, nullptr);
-	sigaction(SIGBUS, &action, nullptr);
-	sigaction(SIGFPE, &action, nullptr);
-	sigaction(SIGILL, &action, nullptr);
-	sigaction(SIGIOT, &action, nullptr);
-	sigaction(SIGQUIT, &action, nullptr);
-	sigaction(SIGSEGV, &action, nullptr);
-	sigaction(SIGSYS, &action, nullptr);
-	sigaction(SIGTRAP, &action, nullptr);
+	struct sigaction fatal{};
+	sigfillset(&fatal.sa_mask);
+	fatal.sa_flags = SA_SIGINFO;
+	fatal.sa_sigaction = onFatalSignal;
+	for (int sig : {SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGIOT, SIGQUIT, SIGSEGV, SIGSYS, SIGTRAP})
+		sigaction(sig, &fatal, nullptr);
 }

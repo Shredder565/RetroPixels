@@ -1,6 +1,11 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
-#include <stdlib.h> // for size_t
+// Prefix header included by every translation unit: standard library and
+// third-party includes, the basic integer types, endian helpers, compiler
+// abstraction macros, asserts and small utilities.
+
+#include <stdlib.h>
 
 #include "version.h"
 #include "platform.h"
@@ -11,26 +16,15 @@
 #include <fmt/format.h>
 #include <fmt/ranges.h>
 #if FMT_VERSION > 80000
-#include <fmt/xchar.h> // needed for wchar_t support
+#include <fmt/xchar.h> // wchar_t formatting
 #endif
 
 #define SDL_MAIN_HANDLED
-
-// #if FMT_VERSION > 80102
-// // restore generic formatter for enum (class) to underlying. We currently utilize this for HLE call logging
-// template <typename Enum, std::enable_if_t<std::is_enum<Enum>::value, int> = 0>
-// constexpr auto format_as(Enum e) noexcept -> std::underlying_type<Enum> {
-//   return static_cast<std::underlying_type<Enum>>(e);
-// }
-// #endif
-
-// arch defines
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(_M_AMD64)
 #define ARCH_X86_64
 #endif
 
-// c includes
 #include <cstdint>
 #include <cstdlib>
 #include <cmath>
@@ -41,20 +35,17 @@
 #include <immintrin.h>
 #endif
 
-// c++ includes
 #include <string>
 #include <string_view>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <algorithm>
-
 #include <mutex>
 #include <shared_mutex>
 #include <thread>
 #include <future>
 #include <atomic>
-
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -65,11 +56,9 @@
 #include <array>
 #include <bitset>
 #include <bit>
-
 #include <filesystem>
 #include <memory>
 #include <chrono>
-#include <ctime>
 #include <regex>
 #include <type_traits>
 #include <optional>
@@ -87,7 +76,8 @@ namespace fs = std::filesystem;
 
 #include "enumFlags.h"
 
-// base types
+// ---- integer types ----
+
 using uint64 = uint64_t;
 using uint32 = uint32_t;
 using uint16 = uint16_t;
@@ -106,20 +96,23 @@ typedef SSIZE_T ssize_t;
 #endif
 #endif
 
-// types with explicit big endian order
+// big-endian storage types (betype<T>, uint32be, ...)
 #include "betype.h"
 
-// types with explicit little endian order (on a big-endian system these would be implemented like betype.h)
+// little-endian storage types; the host is little-endian, so these are plain integers
 using uint64le = uint64_t;
 using uint32le = uint32_t;
 using uint16le = uint16_t;
 using uint8le = uint8_t;
 
-// logging
 #include "Cemu/Logging/CemuDebugLogging.h"
 #include "Cemu/Logging/CemuLogging.h"
 
-// localization
+// ---- UI text translation ----
+// The callback lives in an unnamed namespace, so every translation unit has
+// its own copy: SetTranslationCallback() only affects _tr() calls made from
+// the same source file.
+
 namespace
 {
 	std::function<std::string(std::string_view)> g_translate;
@@ -134,111 +127,62 @@ inline void SetTranslationCallback(std::function<std::string(std::string_view)> 
 
 inline std::string _tr(std::string_view text)
 {
-	if (g_translate)
-		return g_translate(text);
-
-	return std::string{text};
+	return g_translate ? g_translate(text) : std::string(text);
 }
 
+// the translated text is used as the format string
 template<typename... TArgs>
 inline std::string _tr(fmt::format_string<TArgs...> text, TArgs... args)
 {
-	if (g_translate)
-	{
-		std::string_view textSV{text.get().data(), text.get().size()};
-		return fmt::format(fmt::runtime(g_translate(textSV)), std::forward<TArgs>(args)...);
-	}
-
-	return fmt::format(text, std::forward<TArgs>(args)...);
+	if (!g_translate)
+		return fmt::format(text, std::forward<TArgs>(args)...);
+	const auto raw = text.get();
+	return fmt::format(fmt::runtime(g_translate(std::string_view(raw.data(), raw.size()))), std::forward<TArgs>(args)...);
 }
 
-// manual endian-swapping
+// ---- byte swapping ----
+
+inline uint16 _swapEndianU16(uint16 v)
+{
+	return (uint16)((v >> 8) | (v << 8));
+}
+
+inline sint16 _swapEndianS16(sint16 v)
+{
+	return (sint16)_swapEndianU16((uint16)v);
+}
 
 #if _MSC_VER
-inline uint64 _swapEndianU64(uint64 v)
-{
-	return _byteswap_uint64(v);
-}
-
-inline uint32 _swapEndianU32(uint32 v)
-{
-	return _byteswap_ulong(v);
-}
+inline uint64 _swapEndianU64(uint64 v) { return _byteswap_uint64(v); }
+inline uint32 _swapEndianU32(uint32 v) { return _byteswap_ulong(v); }
+#elif BOOST_OS_MACOS
+inline uint64 _swapEndianU64(uint64 v) { return OSSwapInt64(v); }
+inline uint32 _swapEndianU32(uint32 v) { return OSSwapInt32(v); }
+#elif BOOST_OS_BSD && defined(__OpenBSD__)
+inline uint64 _swapEndianU64(uint64 v) { return swap64(v); }
+inline uint32 _swapEndianU32(uint32 v) { return swap32(v); }
+#elif BOOST_OS_BSD
+inline uint64 _swapEndianU64(uint64 v) { return bswap64(v); }
+inline uint32 _swapEndianU32(uint32 v) { return bswap32(v); }
+#else
+inline uint64 _swapEndianU64(uint64 v) { return bswap_64(v); }
+inline uint32 _swapEndianU32(uint32 v) { return bswap_32(v); }
+#endif
 
 inline sint32 _swapEndianS32(sint32 v)
 {
-	return (sint32)_byteswap_ulong((uint32)v);
+	return (sint32)_swapEndianU32((uint32)v);
 }
 
-inline uint16 _swapEndianU16(uint16 v)
-{
-	return (v >> 8) | (v << 8);
-}
+// ---- stand-ins for MSVC / Windows SDK definitions on other compilers ----
 
-inline sint16 _swapEndianS16(sint16 v)
+#if !_MSC_VER
+// 64x64 -> 128 bit multiplication: returns the low half, stores the high half
+inline uint64 _umul128(uint64 multiplier, uint64 multiplicand, uint64* highProduct)
 {
-	return (sint16)(((uint16)v >> 8) | ((uint16)v << 8));
-}
-#else
-inline uint64 _swapEndianU64(uint64 v)
-{
-#if BOOST_OS_MACOS
-    return OSSwapInt64(v);
-#elif BOOST_OS_BSD
-#ifdef __OpenBSD__
-    return swap64(v);
-#else // FreeBSD and NetBSD
-    return bswap64(v);
-#endif
-#else
-    return bswap_64(v);
-#endif
-}
-
-inline uint32 _swapEndianU32(uint32 v)
-{
-#if BOOST_OS_MACOS
-    return OSSwapInt32(v);
-#elif BOOST_OS_BSD
-#ifdef __OpenBSD__
-    return swap32(v);
-#else // FreeBSD and NetBSD
-    return bswap32(v);
-#endif
-#else
-    return bswap_32(v);
-#endif
-}
-
-inline sint32 _swapEndianS32(sint32 v)
-{
-#if BOOST_OS_MACOS
-    return (sint32)OSSwapInt32((uint32)v);
-#elif BOOST_OS_BSD
-#ifdef __OpenBSD__
-    return (sint32)swap32((uint32)v);
-#else // FreeBSD and NetBSD
-    return (sint32)bswap32((uint32)v);
-#endif
-#else
-    return (sint32)bswap_32((uint32)v);
-#endif
-}
-
-inline uint16 _swapEndianU16(uint16 v)
-{
-    return (v >> 8) | (v << 8);
-}
-
-inline sint16 _swapEndianS16(sint16 v)
-{
-    return (sint16)(((uint16)v >> 8) | ((uint16)v << 8));
-}
-
-inline uint64 _umul128(uint64 multiplier, uint64 multiplicand, uint64 *highProduct) {
-    unsigned __int128 x = (unsigned __int128)multiplier * (unsigned __int128)multiplicand;
-    *highProduct = (x >> 64);
-    return x & 0xFFFFFFFFFFFFFFFF;
+	const unsigned __int128 product = (unsigned __int128)multiplier * multiplicand;
+	*highProduct = (uint64)(product >> 64);
+	return (uint64)product;
 }
 
 typedef uint8_t BYTE;
@@ -247,90 +191,97 @@ typedef int32_t LONG;
 typedef int64_t LONGLONG;
 
 typedef union _LARGE_INTEGER {
-    struct {
-        DWORD LowPart;
-        LONG  HighPart;
-    };
-    struct {
-        DWORD LowPart;
-        LONG  HighPart;
-    } u;
-    LONGLONG QuadPart;
+	struct {
+		DWORD LowPart;
+		LONG HighPart;
+	};
+	struct {
+		DWORD LowPart;
+		LONG HighPart;
+	} u;
+	LONGLONG QuadPart;
 } LARGE_INTEGER, *PLARGE_INTEGER;
 
-#define DEFINE_ENUM_FLAG_OPERATORS(T)                                                                                                                                            \
-    inline T operator~ (T a) { return static_cast<T>( ~static_cast<std::underlying_type<T>::type>(a) ); }                                                                       \
-    inline T operator| (T a, T b) { return static_cast<T>( static_cast<std::underlying_type<T>::type>(a) | static_cast<std::underlying_type<T>::type>(b) ); }                   \
-    inline T operator& (T a, T b) { return static_cast<T>( static_cast<std::underlying_type<T>::type>(a) & static_cast<std::underlying_type<T>::type>(b) ); }                   \
-    inline T operator^ (T a, T b) { return static_cast<T>( static_cast<std::underlying_type<T>::type>(a) ^ static_cast<std::underlying_type<T>::type>(b) ); }                   \
-    inline T& operator|= (T& a, T b) { return reinterpret_cast<T&>( reinterpret_cast<std::underlying_type<T>::type&>(a) |= static_cast<std::underlying_type<T>::type>(b) ); }   \
-    inline T& operator&= (T& a, T b) { return reinterpret_cast<T&>( reinterpret_cast<std::underlying_type<T>::type&>(a) &= static_cast<std::underlying_type<T>::type>(b) ); }   \
-    inline T& operator^= (T& a, T b) { return reinterpret_cast<T&>( reinterpret_cast<std::underlying_type<T>::type&>(a) ^= static_cast<std::underlying_type<T>::type>(b) ); }
+// bitwise operators for a scoped enum used as flag set
+#define DEFINE_ENUM_FLAG_OPERATORS(T) \
+	inline T operator~(T a) { return static_cast<T>(~static_cast<std::underlying_type<T>::type>(a)); } \
+	inline T operator|(T a, T b) { return static_cast<T>(static_cast<std::underlying_type<T>::type>(a) | static_cast<std::underlying_type<T>::type>(b)); } \
+	inline T operator&(T a, T b) { return static_cast<T>(static_cast<std::underlying_type<T>::type>(a) & static_cast<std::underlying_type<T>::type>(b)); } \
+	inline T operator^(T a, T b) { return static_cast<T>(static_cast<std::underlying_type<T>::type>(a) ^ static_cast<std::underlying_type<T>::type>(b)); } \
+	inline T& operator|=(T& a, T b) { return a = (a | b); } \
+	inline T& operator&=(T& a, T b) { return a = (a & b); } \
+	inline T& operator^=(T& a, T b) { return a = (a ^ b); }
 #endif
+
+#if !defined(_MSC_VER) || defined(__clang__) // clang-cl lacks the _udiv128 intrinsic
+// 128 / 64 bit division: returns the (truncated) quotient, stores the remainder
+inline uint64 _udiv128(uint64 highDividend, uint64 lowDividend, uint64 divisor, uint64* remainder)
+{
+	const unsigned __int128 dividend = ((unsigned __int128)highDividend << 64) | lowDividend;
+	*remainder = (uint64)(dividend % divisor);
+	return (uint64)(dividend / divisor);
+}
+#endif
+
+// ---- bit fields ----
+// numBits must be below 32 (the mask is computed in int)
 
 template<typename T>
 inline T GetBits(T value, uint32 index, uint32 numBits)
 {
-	T mask = (1<<numBits)-1;
-	return (value>>index) & mask;
+	const T mask = (T)((1 << numBits) - 1);
+	return (value >> index) & mask;
 }
 
 template<typename T>
 inline void SetBits(T& value, uint32 index, uint32 numBits, uint32 bitValue)
 {
-	T mask = (1<<numBits)-1;
+	const T mask = (T)((1 << numBits) - 1);
 	value &= ~(mask << index);
 	value |= (bitValue << index);
 }
 
-#if !defined(_MSC_VER) || defined(__clang__) // clang-cl does not have built-in _udiv128
-inline uint64 _udiv128(uint64 highDividend, uint64 lowDividend, uint64 divisor, uint64 *remainder)
-{
-    unsigned __int128 dividend = (((unsigned __int128)highDividend) << 64) | ((unsigned __int128)lowDividend);
-    *remainder = (uint64)((dividend % divisor) & 0xFFFFFFFFFFFFFFFF);
-    return       (uint64)((dividend / divisor) & 0xFFFFFFFFFFFFFFFF);
-}
-#endif
+// ---- compiler abstraction ----
 
 #if defined(_MSC_VER)
-    #define UNREACHABLE __assume(false)
-	#define ASSUME(__cond) __assume(__cond)
-	#define TLS_WORKAROUND_NOINLINE // no-op for MSVC as it has a flag for fiber-safe TLS optimizations
+#define UNREACHABLE __assume(false)
+#define ASSUME(__cond) __assume(__cond)
+#define TLS_WORKAROUND_NOINLINE // MSVC has fiber-safe TLS optimizations as a compiler option
 #elif defined(__GNUC__) && !defined(__llvm__)
-    #define UNREACHABLE __builtin_unreachable()
-	#define ASSUME(__cond) __attribute__((assume(__cond)))
-	#define TLS_WORKAROUND_NOINLINE __attribute__((noinline))
+#define UNREACHABLE __builtin_unreachable()
+#define ASSUME(__cond) __attribute__((assume(__cond)))
+#define TLS_WORKAROUND_NOINLINE __attribute__((noinline))
 #elif defined(__clang__)
-	#define UNREACHABLE __builtin_unreachable()
-	#define ASSUME(__cond) __builtin_assume(__cond)
-	#define TLS_WORKAROUND_NOINLINE __attribute__((noinline))
+#define UNREACHABLE __builtin_unreachable()
+#define ASSUME(__cond) __builtin_assume(__cond)
+#define TLS_WORKAROUND_NOINLINE __attribute__((noinline))
 #else
-    #error Unknown compiler
+#error Unknown compiler
 #endif
 
 #if defined(_MSC_VER)
-    #define DEBUG_BREAK __debugbreak()
+#define DEBUG_BREAK __debugbreak()
 #else
-    #include <csignal>
-    #define DEBUG_BREAK raise(SIGTRAP) 
+#include <csignal>
+#define DEBUG_BREAK raise(SIGTRAP)
 #endif
 
 #if defined(_MSC_VER)
-    #define DLLEXPORT __declspec(dllexport)
+#define DLLEXPORT __declspec(dllexport)
 #elif defined(__GNUC__)
-    #if BOOST_OS_WINDOWS
-        #define DLLEXPORT __attribute__((dllexport))
-    #else
-        #define DLLEXPORT
-    #endif
+#if BOOST_OS_WINDOWS
+#define DLLEXPORT __attribute__((dllexport))
 #else
-    #error No definition for DLLEXPORT
+#define DLLEXPORT
+#endif
+#else
+#error No definition for DLLEXPORT
 #endif
 
 #if BOOST_OS_WINDOWS
-	#define NOEXPORT
+#define NOEXPORT
 #elif defined(__GNUC__)
-	#define NOEXPORT __attribute__ ((visibility ("hidden")))
+#define NOEXPORT __attribute__((visibility("hidden")))
 #endif
 
 #if defined(_MSC_VER)
@@ -341,10 +292,11 @@ inline uint64 _udiv128(uint64 highDividend, uint64 lowDividend, uint64 divisor, 
 #define FORCE_INLINE inline
 #endif
 
-FORCE_INLINE int BSF(uint32 v) // returns index of first bit set, counting from LSB. If v is 0 then result is undefined
+// index of the lowest set bit; undefined for 0
+FORCE_INLINE int BSF(uint32 v)
 {
 #if defined(_MSC_VER)
-	return _tzcnt_u32(v); // TZCNT requires BMI1. But if not supported it will execute as BSF
+	return _tzcnt_u32(v); // runs as BSF on CPUs without BMI1
 #elif defined(__GNUC__) || defined(__clang__)
 	return __builtin_ctz(v);
 #else
@@ -352,19 +304,18 @@ FORCE_INLINE int BSF(uint32 v) // returns index of first bit set, counting from 
 #endif
 }
 
-// On aarch64 we handle some of the x86 intrinsics by implementing them as wrappers
+// x86 intrinsics used by the code base, emulated on aarch64
 #if defined(__aarch64__)
-
 inline void _mm_pause()
 {
-    asm volatile("yield");
+	asm volatile("yield");
 }
 
 inline uint64 __rdtsc()
 {
-    uint64 t;
-    asm volatile("mrs %0, cntvct_el0" : "=r" (t));
-    return t;
+	uint64 ticks;
+	asm volatile("mrs %0, cntvct_el0" : "=r"(ticks));
+	return ticks;
 }
 
 inline void _mm_mfence()
@@ -373,220 +324,192 @@ inline void _mm_mfence()
 	std::atomic_thread_fence(std::memory_order_seq_cst);
 }
 
-inline unsigned char _addcarry_u64(unsigned char carry, unsigned long long a, unsigned long long b, unsigned long long *result)
+inline unsigned char _addcarry_u64(unsigned char carry, unsigned long long a, unsigned long long b, unsigned long long* result)
 {
-    *result = a + b + (unsigned long long)carry;
-    if (*result < a)
-        return 1;
-    return 0;
+	*result = a + b + (unsigned long long)carry;
+	return *result < a ? 1 : 0;
 }
-
 #endif
 
-// asserts
-
+// ---- asserts ----
+// cemu_assert and cemu_assert_error always break; the other variants only
+// with CEMU_DEBUG_ASSERT. The condition is evaluated in every build.
 
 inline void cemu_assert(bool _condition)
 {
-    if ((_condition) == false)
-    {
-        DEBUG_BREAK;
-    }
+	if (!_condition)
+		DEBUG_BREAK;
 }
 
-#ifndef CEMU_DEBUG_ASSERT
-//#define cemu_assert_debug(__cond) -> Forcing __cond not to be evaluated currently has unexpected side-effects
-
+#ifdef CEMU_DEBUG_ASSERT
 inline void cemu_assert_debug(bool _condition)
 {
+	if (!_condition)
+		DEBUG_BREAK;
 }
-
-inline void cemu_assert_unimplemented()
-{
-}
-
-inline void cemu_assert_suspicious()
-{
-}
+inline void cemu_assert_unimplemented() { DEBUG_BREAK; }
+inline void cemu_assert_suspicious() { DEBUG_BREAK; }
+#else
+inline void cemu_assert_debug(bool _condition) { (void)_condition; }
+inline void cemu_assert_unimplemented() {}
+inline void cemu_assert_suspicious() {}
+#endif
 
 inline void cemu_assert_error()
 {
 	DEBUG_BREAK;
 }
-#else
-inline void cemu_assert_debug(bool _condition)
-{
-    if ((_condition) == false)
-        DEBUG_BREAK;
-}
 
-inline void cemu_assert_unimplemented()
-{
-    DEBUG_BREAK;
-}
+#define assert_dbg() DEBUG_BREAK // unconditional break
 
-inline void cemu_assert_suspicious()
-{
-    DEBUG_BREAK;
-}
-
-inline void cemu_assert_error()
-{
-    DEBUG_BREAK;
-}
-#endif
-
-#define assert_dbg() DEBUG_BREAK // old style unconditional generic assert
-
-// MEMPTR
 #include "Common/MemPtr.h"
 
-template <typename T1, typename T2>
+template<typename T1, typename T2>
 constexpr bool HAS_FLAG(T1 flags, T2 test_flag) { return (flags & (T1)test_flag) == (T1)test_flag; }
-template <typename T1, typename T2>
+template<typename T1, typename T2>
 constexpr bool HAS_BIT(T1 value, T2 index) { return (value & ((T1)1 << index)) != 0; }
 
-template <typename T>
-constexpr uint32_t ppcsizeof() { return (uint32_t) sizeof(T); }
+// size of a type as seen by guest code
+template<typename T>
+constexpr uint32_t ppcsizeof() { return (uint32_t)sizeof(T); }
 
-// common utility functions
+// ---- small container helpers ----
 
-template <typename T>
-void vectorAppendUnique(std::vector<T>& vec, const T& val) // for cases where a small vector is more efficient than a set
+// adds val unless it is already present (for small vectors used as sets)
+template<typename T>
+void vectorAppendUnique(std::vector<T>& vec, const T& val)
 {
-    if (std::find(vec.begin(), vec.end(), val) != vec.end())
-        return;
-    vec.emplace_back(val);
+	if (std::find(vec.begin(), vec.end(), val) == vec.end())
+		vec.emplace_back(val);
 }
 
-template <typename T>
+template<typename T>
 void vectorRemoveByValue(std::vector<T>& vec, const T& val)
 {
-    vec.erase(std::remove(vec.begin(), vec.end(), val), vec.end());
+	vec.erase(std::remove(vec.begin(), vec.end(), val), vec.end());
 }
 
-template <typename T>
+template<typename T>
 void vectorRemoveByIndex(std::vector<T>& vec, const size_t index)
 {
-    vec.erase(vec.begin() + index);
+	vec.erase(vec.begin() + index);
 }
 
+// true if value equals any of the others
 template<typename T1, typename... Types>
 bool match_any_of(T1&& value, Types&&... others)
 {
-    return ((value == others) || ...);
+	return (... || (value == others));
 }
 
-// we cache the frequency in a static variable
+// ---- clocks ----
+// On Windows the performance counter is read directly (its frequency is
+// queried once) instead of going through the standard clocks.
+
+#ifdef _WIN32
+namespace detail_clock
+{
+	inline long long perfCounterToNanoseconds()
+	{
+		static const long long s_frequency = _Query_perf_frequency();
+		const long long counter = _Query_perf_counter();
+		static_assert(std::nano::num == 1);
+		// split to avoid overflowing counter * 1e9
+		return (counter / s_frequency) * std::nano::den + (counter % s_frequency) * std::nano::den / s_frequency;
+	}
+}
+#endif
+
 [[nodiscard]] static std::chrono::high_resolution_clock::time_point now_cached() noexcept
 {
 #ifdef _WIN32
-    // get current time
-	static const long long _Freq = _Query_perf_frequency();	// doesn't change after system boot
-	const long long _Ctr = _Query_perf_counter();
-	static_assert(std::nano::num == 1, "This assumes period::num == 1.");
-	const long long _Whole = (_Ctr / _Freq) * std::nano::den;
-	const long long _Part = (_Ctr % _Freq) * std::nano::den / _Freq;
-	return (std::chrono::high_resolution_clock::time_point(std::chrono::nanoseconds(_Whole + _Part)));
+	return std::chrono::high_resolution_clock::time_point(std::chrono::nanoseconds(detail_clock::perfCounterToNanoseconds()));
 #else
-    return std::chrono::high_resolution_clock::now();
+	return std::chrono::high_resolution_clock::now();
 #endif
 }
 
 [[nodiscard]] static std::chrono::steady_clock::time_point tick_cached() noexcept
 {
 #if BOOST_OS_WINDOWS
-    // get current time
-	static const long long _Freq = _Query_perf_frequency();	// doesn't change after system boot
-	const long long _Ctr = _Query_perf_counter();
-	static_assert(std::nano::num == 1, "This assumes period::num == 1.");
-	const long long _Whole = (_Ctr / _Freq) * std::nano::den;
-	const long long _Part = (_Ctr % _Freq) * std::nano::den / _Freq;
-	return (std::chrono::steady_clock::time_point(std::chrono::nanoseconds(_Whole + _Part)));
-#elif BOOST_OS_LINUX
-	struct timespec tp;
-	clock_gettime(CLOCK_MONOTONIC_RAW, &tp);
-	return std::chrono::steady_clock::time_point(
-		std::chrono::seconds(tp.tv_sec) + std::chrono::nanoseconds(tp.tv_nsec));
+	return std::chrono::steady_clock::time_point(std::chrono::nanoseconds(detail_clock::perfCounterToNanoseconds()));
 #elif BOOST_OS_MACOS
-	return std::chrono::steady_clock::time_point(
-		std::chrono::nanoseconds(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)));
-#elif BOOST_OS_BSD
-	struct timespec tp;
-	clock_gettime(CLOCK_MONOTONIC, &tp);
-	return std::chrono::steady_clock::time_point(
-		std::chrono::seconds(tp.tv_sec) + std::chrono::nanoseconds(tp.tv_nsec));
+	return std::chrono::steady_clock::time_point(std::chrono::nanoseconds(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)));
+#else
+#if BOOST_OS_LINUX
+	constexpr clockid_t clockId = CLOCK_MONOTONIC_RAW;
+#else
+	constexpr clockid_t clockId = CLOCK_MONOTONIC;
+#endif
+	struct timespec ts;
+	clock_gettime(clockId, &ts);
+	return std::chrono::steady_clock::time_point(std::chrono::seconds(ts.tv_sec) + std::chrono::nanoseconds(ts.tv_nsec));
 #endif
 }
 
-// Some string conversion helpers because C++20 std::u8string is too cumbersome to use in practice
-// mixing string types generally causes loads of issues and many of the libraries we use dont expose interfaces for u8string
+// ---- UTF-8 helpers ----
+// std::u8string is awkward to use with most libraries, so UTF-8 text is kept
+// in std::string and converted at the boundaries.
 
+// reinterprets UTF-8 code units as char
 inline const char* _utf8WrapperPtr(const char8_t* input)
 {
-    // use with care
-    return (const char*)input;
+	return reinterpret_cast<const char*>(input);
 }
 
 inline std::string_view _utf8Wrapper(std::u8string_view input)
 {
-    std::basic_string_view<char> v((char*)input.data(), input.size());
-    return v;
+	return std::string_view(reinterpret_cast<const char*>(input.data()), input.size());
 }
 
-// convert fs::path to utf8 encoded string
+// path as UTF-8 with forward slashes
 inline std::string _pathToUtf8(const fs::path& path)
 {
-    std::u8string strU8 = path.generic_u8string();
-    std::string v((const char*)strU8.data(), strU8.size());
-    return v;
+	const std::u8string utf8 = path.generic_u8string();
+	return std::string(reinterpret_cast<const char*>(utf8.data()), utf8.size());
 }
 
-// convert utf8 encoded string to fs::path
 inline fs::path _utf8ToPath(std::string_view input)
 {
-    std::basic_string_view<char8_t> v((char8_t*)input.data(), input.size());
-    return fs::path(v);
+	return fs::path(std::u8string_view(reinterpret_cast<const char8_t*>(input.data()), input.size()));
 }
 
-// locale-independent variant of tolower() which also matches Wii U behavior
+// ASCII-only lower case (independent of the C locale, as on the Wii U)
 inline char _ansiToLower(char c)
 {
-	if (c >= 'A' && c <= 'Z')
-		c -= ('A' - 'a');
-	return c;
+	return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
 }
 
-class RunAtCemuBoot // -> replaces this with direct function calls. Linkers other than MSVC may optimize way object files entirely if they are not referenced from outside. So a source file self-registering using this would be causing issues
+// Runs a function during static initialization. Prefer explicit calls: other
+// linkers than MSVC's may drop object files nothing references.
+class RunAtCemuBoot
 {
 public:
-    RunAtCemuBoot(void(*f)())
-    {
-        f();
-    }
+	RunAtCemuBoot(void(*f)())
+	{
+		f();
+	}
 };
 
-// temporary wrapper until Concurrency TS gives us std::future .is_ready()
+// true if the future's result is available without waiting
 template<typename T>
 bool future_is_ready(std::future<T>& f)
 {
 #if defined(__GNUC__)
-    return f.wait_for(std::chrono::nanoseconds(0)) == std::future_status::ready;
+	return f.wait_for(std::chrono::nanoseconds(0)) == std::future_status::ready;
 #else
 	return f._Is_ready();
 #endif
 }
 
-
-// helper function to cast raw pointers to std::atomic
-// this is technically not legal but works on most platforms as long as alignment restrictions are met and the implementation of atomic doesnt come with additional members
-
+// Views a plain variable as std::atomic. Not sanctioned by the standard, but
+// works on all supported compilers when size and alignment match.
 template<typename T>
 std::atomic<T>* _rawPtrToAtomic(T* ptr)
 {
 	static_assert(sizeof(T) == sizeof(std::atomic<T>));
 	cemu_assert_debug((reinterpret_cast<std::uintptr_t>(ptr) % alignof(std::atomic<T>)) == 0);
-    return reinterpret_cast<std::atomic<T>*>(ptr);
+	return reinterpret_cast<std::atomic<T>*>(ptr);
 }
 
 #if defined(__GNUC__)
@@ -595,19 +518,19 @@ std::atomic<T>* _rawPtrToAtomic(T* ptr)
 #define ATTR_MS_ABI
 #endif
 
-#if !defined(TRUE) or !defined(FALSE)
+#if !defined(TRUE) || !defined(FALSE)
 #define TRUE (1)
 #define FALSE (0)
 #endif
 
 inline uint32 GetTitleIdHigh(uint64 titleId)
 {
-	return titleId >> 32;
+	return (uint32)(titleId >> 32);
 }
 
 inline uint32 GetTitleIdLow(uint64 titleId)
 {
-	return titleId & 0xFFFFFFFF;
+	return (uint32)titleId;
 }
 
 #if defined(__GNUC__)
@@ -618,98 +541,95 @@ inline uint32 GetTitleIdLow(uint64 titleId)
 #define memcpy_qwords(__dest, __src, __numQwords) __movsq((unsigned long long*)(__dest), (const unsigned long long*)(__src), __numQwords)
 #endif
 
-// PPC context and memory functions
+// guest memory and CPU state
 #include "Cafe/HW/MMU/MMU.h"
 #include "Cafe/HW/Espresso/PPCState.h"
 #include "Cafe/HW/Espresso/PPCCallback.h"
 
-// PPC stack trace printer
+// logs the guest call stack of a thread
 void DebugLogStackTrace(struct OSThread_t* thread, MPTR sp);
 
-// generic formatter for enums (to underlying)
-template <typename Enum>
+// enums are formatted as their underlying integer
+template<typename Enum>
 	requires std::is_enum_v<Enum>
-struct fmt::formatter<Enum> : fmt::formatter<underlying_t<Enum>>
+struct fmt::formatter<Enum> : fmt::formatter<std::underlying_type_t<Enum>>
 {
 	auto format(const Enum& e, format_context& ctx) const
 	{
-		//return fmt::format_to(ctx.out(), "{}", fmt::underlying(e));
-
-		return formatter<underlying_t<Enum>>::format(fmt::underlying(e), ctx);
+		return fmt::formatter<std::underlying_type_t<Enum>>::format(static_cast<std::underlying_type_t<Enum>>(e), ctx);
 	}
 };
 
-// formatter for betype<T>
-template <typename T>
+// betype<T> is formatted like T
+template<typename T>
 struct fmt::formatter<betype<T>> : fmt::formatter<T>
 {
 	auto format(const betype<T>& e, format_context& ctx) const
 	{
-		return formatter<T>::format(static_cast<T>(e), ctx);
+		return fmt::formatter<T>::format(static_cast<T>(e), ctx);
 	}
 };
 
-// useful future C++ stuff
+// stand-ins for newer standard library features
 namespace stdx
 {
-	// std::to_underlying
-    template <typename EnumT>
+	template<typename EnumT>
 		requires (std::is_enum_v<EnumT>)
-        constexpr std::underlying_type_t<EnumT> to_underlying(EnumT e) noexcept {
-        return static_cast<std::underlying_type_t<EnumT>>(e);
-    };
+	constexpr std::underlying_type_t<EnumT> to_underlying(EnumT e) noexcept
+	{
+		return static_cast<std::underlying_type_t<EnumT>>(e);
+	}
 
-	// std::scope_exit
-	template <typename Fn>
+	// calls the function on destruction unless release() was called
+	template<typename Fn>
 	class scope_exit
 	{
-		Fn m_func;
-		bool m_released = false;
 	public:
-		explicit scope_exit(Fn&& f) noexcept
-			: m_func(std::forward<Fn>(f))
-		{}
-		~scope_exit()
-		{
-			if (!m_released) m_func();
-		}
-		scope_exit(scope_exit&& other) noexcept
-			: m_func(std::move(other.m_func)), m_released(std::exchange(other.m_released, true))
-		{}
+		explicit scope_exit(Fn&& f) noexcept : m_onExit(std::forward<Fn>(f)) {}
+		scope_exit(scope_exit&& other) noexcept : m_onExit(std::move(other.m_onExit)), m_active(std::exchange(other.m_active, false)) {}
 		scope_exit(const scope_exit&) = delete;
 		scope_exit& operator=(scope_exit) = delete;
-		void release() { m_released = true;}
+
+		~scope_exit()
+		{
+			if (m_active)
+				m_onExit();
+		}
+
+		void release() { m_active = false; }
+
+	private:
+		Fn m_onExit;
+		bool m_active{ true };
 	};
 
-	// Xcode 16 doesn't have std::atomic_ref support and we provide a minimalist reimplementation as fallback
 #ifdef __cpp_lib_atomic_ref
-	#include <atomic>
 	template<typename T>
 	using atomic_ref = std::atomic_ref<T>;
 #else
+	// load/store-only fallback for standard libraries without std::atomic_ref
 	template<typename T>
 	class atomic_ref
 	{
 		static_assert(std::is_trivially_copyable_v<T>, "atomic_ref requires trivially copyable types");
+
 	public:
 		using value_type = T;
 
-		explicit atomic_ref(T& obj) noexcept : ptr_(std::addressof(obj)) {}
+		explicit atomic_ref(T& obj) noexcept : m_target(std::addressof(obj)) {}
 
 		T load(std::memory_order order = std::memory_order_seq_cst) const noexcept
 		{
-			auto aptr = reinterpret_cast<std::atomic<T>*>(ptr_);
-			return aptr->load(order);
+			return reinterpret_cast<std::atomic<T>*>(m_target)->load(order);
 		}
 
 		void store(T desired, std::memory_order order = std::memory_order_seq_cst) const noexcept
 		{
-			auto aptr = reinterpret_cast<std::atomic<T>*>(ptr_);
-			aptr->store(desired, order);
+			reinterpret_cast<std::atomic<T>*>(m_target)->store(desired, order);
 		}
 
 	private:
-		T* ptr_;
+		T* m_target;
 	};
 #endif
 }

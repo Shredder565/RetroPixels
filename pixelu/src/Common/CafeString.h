@@ -1,116 +1,95 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "betype.h"
 #include "util/helpers/StringHelpers.h"
 
-/* Helper classes to represent CafeOS strings in emulated memory */
-template <size_t N>
-class CafeString // fixed buffer size, null-terminated, PPC char
+// Fixed-size, zero-terminated 8-bit string as stored in guest structures.
+template<size_t N>
+class CafeString
 {
-  public:
-	constexpr static size_t Size()
-	{
-		return N;
-	}
+public:
+	constexpr static size_t Size() { return N; }
 
-	// checks whether the string and a null terminator can fit into the buffer
-	bool CanHoldString(std::string_view sv) const
-	{
-		return sv.size() < N;
-	}
+	// true if sv plus its terminator fits
+	bool CanHoldString(std::string_view sv) const { return sv.size() < N; }
 
+	// copies sv; a string that does not fit is truncated and false is returned
 	bool assign(std::string_view sv)
 	{
-		if (sv.size() >= N)
-		{
-			memcpy(data, sv.data(), N-1);
-			data[N-1] = '\0';
-			return false;
-		}
-		memcpy(data, sv.data(), sv.size());
-		data[sv.size()] = '\0';
-		return true;
+		const bool fits = CanHoldString(sv);
+		const size_t len = fits ? sv.size() : N - 1;
+		if (len)
+			memcpy(data, sv.data(), len);
+		data[len] = '\0';
+		return fits;
 	}
 
-	void Copy(CafeString<N>& other)
-	{
-		memcpy(data, other.data, N);
-	}
+	void Copy(CafeString<N>& other) { memcpy(data, other.data, N); }
 
-	bool empty() const
-	{
-		return data[0] == '\0';
-	}
+	bool empty() const { return data[0] == '\0'; }
+	const char* c_str() const { return (const char*)data; }
+	void ClearAllBytes() { memset(data, 0, N); }
 
-	const char* c_str() const
-	{
-		return (const char*)data;
-	}
-
-	void ClearAllBytes()
-	{
-		memset(data, 0, N);
-	}
-
+	// compares up to the terminator; bytes after it are ignored
 	auto operator<=>(const CafeString<N>& other) const
 	{
-		for (size_t i = 0; i < N; i++)
-		{
-			if (data[i] != other.data[i])
-				return data[i] <=> other.data[i];
-			if (data[i] == '\0')
-				return std::strong_ordering::equal;
-		}
-		return std::strong_ordering::equal;
+		const size_t i = firstDifference(other);
+		if (i == N)
+			return std::strong_ordering::equal;
+		return data[i] <=> other.data[i];
 	}
 
-	bool operator==(const CafeString<N>& other) const
-	{
-		for (size_t i = 0; i < N; i++)
-		{
-			if (data[i] != other.data[i])
-				return false;
-			if (data[i] == '\0')
-				return true;
-		}
-		return true;
-	}
+	bool operator==(const CafeString<N>& other) const { return firstDifference(other) == N; }
 
 	uint8be data[N];
+
+private:
+	// index of the first differing byte, or N if equal up to the terminator
+	size_t firstDifference(const CafeString<N>& other) const
+	{
+		for (size_t i = 0; i < N; i++)
+		{
+			const uint8 a = data[i], b = other.data[i];
+			if (a != b)
+				return i;
+			if (a == 0)
+				break;
+		}
+		return N;
+	}
 };
 
-template <size_t N>
-class CafeWideString // fixed buffer size, null-terminated, PPC wchar_t (16bit big-endian)
+// Fixed-size, zero-terminated 16-bit big-endian string (guest wchar_t).
+template<size_t N>
+class CafeWideString
 {
-  public:
+public:
+	// copies a zero-terminated string; on overflow the copy is truncated to N-1 characters and false is returned
 	bool assign(const uint16be* input)
 	{
-		size_t i = 0;
-		while(input[i])
+		size_t len = 0;
+		for (; input[len] != 0; len++)
 		{
-			if(i >= N-1)
+			if (len == N - 1)
 			{
-				data[N-1] = 0;
+				data[N - 1] = 0;
 				return false;
 			}
-			data[i] = input[i];
-			i++;
+			data[len] = input[len];
 		}
-		data[i] = 0;
+		data[len] = 0;
 		return true;
 	}
 
 	bool assignFromUTF8(std::string_view sv)
 	{
-		std::vector<uint16be> beStr = StringHelpers::FromUtf8(sv);
-		if(beStr.size() > N-1)
-		{
-			memcpy(data, beStr.data(), (N-1)*sizeof(uint16be));
-			data[N-1] = 0;
-			return false;
-		}
-		memcpy(data, beStr.data(), beStr.size()*sizeof(uint16be));
-		data[beStr.size()] = '\0';
-		return true;
+		const std::vector<uint16be> converted = StringHelpers::FromUtf8(sv);
+		const bool fits = converted.size() <= N - 1;
+		const size_t len = fits ? converted.size() : N - 1;
+		if (len)
+			memcpy(data, converted.data(), len * sizeof(uint16be));
+		data[len] = 0;
+		return fits;
 	}
 
 	uint16be data[N];
@@ -118,11 +97,12 @@ class CafeWideString // fixed buffer size, null-terminated, PPC wchar_t (16bit b
 
 namespace CafeStringHelpers
 {
+	// number of characters before the terminator, at most maxLength
 	static uint32 Length(const uint16be* input, uint32 maxLength)
 	{
-		uint32 i = 0;
-		while(input[i] && i < maxLength)
-			i++;
-		return i;
+		uint32 len = 0;
+		while (len < maxLength && input[len] != 0)
+			len++;
+		return len;
 	}
 };

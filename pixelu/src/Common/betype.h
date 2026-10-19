@@ -1,16 +1,24 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include <type_traits>
+#include <utility>
+#include <climits>
+#include <cstring>
+#include <bit>
 
 namespace Latte
 {
 	class LATTEREG;
 };
 
+// Byte order reversal for any unsigned integer type, usable in constant
+// expressions: byte N of the input moves to byte (size - 1 - N).
 template<class T, std::size_t... N>
 constexpr T bswap_impl(T i, std::index_sequence<N...>)
 {
-	return ((((i >> (N * CHAR_BIT)) & (T)(uint8_t)(-1)) << ((sizeof(T) - 1 - N) * CHAR_BIT)) | ...);
+	constexpr T byteMask = (T)(uint8_t)0xFF;
+	return (T)((((i >> (N * CHAR_BIT)) & byteMask) << ((sizeof(T) - 1 - N) * CHAR_BIT)) | ...);
 }
 
 template<class T, class U = std::make_unsigned_t<T>>
@@ -19,32 +27,24 @@ constexpr T bswap(T i)
 	return (T)bswap_impl<U>((U)i, std::make_index_sequence<sizeof(T)>{});
 }
 
-template <typename T>
+// Reverses the byte order of integers, floating point values, enums and
+// Latte register structs (which are 32 bit).
+template<typename T>
 constexpr T SwapEndian(T value)
 {
 	if constexpr (std::is_integral_v<T>)
 	{
 #ifdef _MSC_VER
 		if constexpr (sizeof(T) == sizeof(uint32_t))
-		{
 			return (T)_byteswap_ulong(value);
-		}
 #endif
-
 		return (T)bswap((std::make_unsigned_t<T>)value);
 	}
 	else if constexpr (std::is_floating_point_v<T>)
 	{
-		if constexpr (sizeof(T) == sizeof(uint32_t))
-		{
-			const auto tmp = bswap<uint32_t>(*(uint32_t*)&value);
-			return *(T*)&tmp;
-		}
-		if constexpr (sizeof(T) == sizeof(uint64_t))
-		{
-			const auto tmp = bswap<uint64_t>(*(uint64_t*)&value);
-			return *(T*)&tmp;
-		}
+		static_assert(sizeof(T) == sizeof(uint32_t) || sizeof(T) == sizeof(uint64_t), "unsupported floating point size");
+		using Bits = std::conditional_t<sizeof(T) == sizeof(uint32_t), uint32_t, uint64_t>;
+		return std::bit_cast<T>(bswap<Bits>(std::bit_cast<Bits>(value)));
 	}
 	else if constexpr (std::is_enum_v<T>)
 	{
@@ -52,99 +52,69 @@ constexpr T SwapEndian(T value)
 	}
 	else if constexpr (std::is_base_of_v<Latte::LATTEREG, T>)
 	{
-		const auto tmp = bswap<uint32_t>(*(uint32_t*)&value);
-		return *(T*)&tmp;
+		static_assert(sizeof(T) == sizeof(uint32_t));
+		uint32_t bits;
+		std::memcpy(&bits, &value, sizeof(bits));
+		bits = bswap<uint32_t>(bits);
+		T result;
+		std::memcpy(&result, &bits, sizeof(bits));
+		return result;
 	}
-    else
-    {
-        static_assert(std::is_integral_v<T>, "unsupported betype specialization!");
-    }
-
-	return value;
+	else
+	{
+		static_assert(std::is_integral_v<T>, "unsupported betype specialization!");
+		return value;
+	}
 }
 
-#ifndef WIN32
-//static_assert(false, "_BE and _LE need to be adjusted");
-#endif
-
-// swap if native isn't big endian
-template <typename T>
+// host value <-> big-endian representation (the host is little-endian)
+template<typename T>
 constexpr T _BE(T value)
 {
 	return SwapEndian(value);
 }
 
-// swap if native isn't little endian
-template <typename T>
+// host value <-> little-endian representation (no-op on little-endian hosts)
+template<typename T>
 constexpr T _LE(T value)
 {
 	return value;
 }
 
-template <typename T>
+// A T stored in big-endian byte order, e.g. a field of a guest structure.
+// Reads and writes convert to and from the host order. Trivially copyable
+// and default-constructible without initialization, so it can be used in
+// structures that are mapped onto guest memory.
+template<typename T>
 class betype
 {
 public:
 	constexpr betype() = default;
+	constexpr betype(T value) : m_value(SwapEndian(value)) {}
+	constexpr betype(const betype& value) = default;
 
-	// copy
-	constexpr betype(T value)
-		: m_value(SwapEndian(value)) {}
+	template<typename U>
+	constexpr betype(const betype<U>& value) : betype((T)value.value()) {}
 
-	constexpr betype(const betype& value) = default; // required for trivially_copyable
-	//constexpr betype(const betype& value)
-	//	: m_value(value.m_value) {}
-
-	template <typename U>
-	constexpr betype(const betype<U>& value)
-		: betype((T)value.value()) {}
-
-	// assigns
+	// wraps a value that is already in big-endian order
 	static betype from_bevalue(T value)
 	{
-		betype result;
-		result.m_value = value;
-		return result;
+		betype r;
+		r.m_value = value;
+		return r;
 	}
 
-	// returns LE value
-	constexpr T value() const { return SwapEndian<T>(m_value); }
-
-	// returns BE value
-	constexpr T bevalue() const { return m_value; }
-
+	constexpr T value() const { return SwapEndian<T>(m_value); } // host order
+	constexpr T bevalue() const { return m_value; }              // stored order
 	constexpr operator T() const { return value(); }
 
-	betype<T>& operator+=(const betype<T>& v)
-	{
-		m_value = SwapEndian(T(value() + v.value()));
-		return *this;
-	}
+	betype<T>& operator+=(const betype<T>& v) { return set(T(value() + v.value())); }
+	betype<T>& operator+=(const T& v) requires std::integral<T> { return set(T(value() + v)); }
+	betype<T>& operator-=(const betype<T>& v) { return set(T(value() - v.value())); }
+	betype<T>& operator*=(const betype<T>& v) { return set(T(value() * v.value())); }
+	betype<T>& operator/=(const betype<T>& v) { return set(T(value() / v.value())); }
 
-	betype<T>& operator+=(const T& v) requires std::integral<T>
-	{
-		m_value = SwapEndian(T(value() + v));
-		return *this;
-	}
-
-	betype<T>& operator-=(const betype<T>& v)
-	{
-		m_value = SwapEndian(T(value() - v.value()));
-		return *this;
-	}
-
-	betype<T>& operator*=(const betype<T>& v)
-	{
-		m_value = SwapEndian(T(value() * v.value()));
-		return *this;
-	}
-
-	betype<T>& operator/=(const betype<T>& v)
-	{
-		m_value = SwapEndian(T(value() / v.value()));
-		return *this;
-	}
-
+	// bitwise operations work on the stored bytes directly
 	betype<T>& operator&=(const betype<T>& v) requires (requires (T& x, const T& y) { x &= y; })
 	{
 		m_value &= v.m_value;
@@ -157,18 +127,14 @@ public:
 		return *this;
 	}
 
-	betype<T>& operator|(const betype<T>& v) const requires (requires (T& x, const T& y) { x | y; })
+	betype<T> operator|(const betype<T>& v) const requires (requires (T& x, const T& y) { x | y; })
 	{
-		betype<T> tmp(*this);
-		tmp.m_value = tmp.m_value | v.m_value;
-		return tmp;
+		return from_bevalue(T(m_value | v.m_value));
 	}
 
 	betype<T> operator|(const T& v) const requires (requires (T& x, const T& y) { x | y; })
 	{
-		betype<T> tmp(*this);
-		tmp.m_value = tmp.m_value | SwapEndian(v);
-		return tmp;
+		return from_bevalue(T(m_value | SwapEndian(v)));
 	}
 
 	betype<T>& operator^=(const betype<T>& v) requires std::integral<T>
@@ -177,56 +143,39 @@ public:
 		return *this;
 	}
 
-	betype<T>& operator>>=(std::size_t idx) requires std::integral<T>
-	{
-		m_value = SwapEndian(T(value() >> idx));
-		return *this;
-	}
-
-	betype<T>& operator<<=(std::size_t idx) requires std::integral<T>
-	{
-		m_value = SwapEndian(T(value() << idx));
-		return *this;
-	}
+	betype<T>& operator>>=(std::size_t idx) requires std::integral<T> { return set(T(value() >> idx)); }
+	betype<T>& operator<<=(std::size_t idx) requires std::integral<T> { return set(T(value() << idx)); }
 
 	betype<T> operator~() const requires std::integral<T>
 	{
 		return from_bevalue(T(~m_value));
 	}
 
-	// pre-increment
-	betype<T>& operator++() requires std::integral<T>
-	{
-		m_value = SwapEndian(T(value() + 1));
-		return *this;
-	}
+	betype<T>& operator++() requires std::integral<T> { return set(T(value() + 1)); }
+	betype<T>& operator--() requires std::integral<T> { return set(T(value() - 1)); }
 
-	// post-increment
 	betype<T> operator++(int) requires std::integral<T>
 	{
-		betype<T> tmp(*this);
-		m_value = SwapEndian(T(value() + 1));
-		return tmp;
+		const betype<T> before(*this);
+		set(T(value() + 1));
+		return before;
 	}
 
-	// pre-decrement
-	betype<T>& operator--() requires std::integral<T>
-	{
-		m_value = SwapEndian(T(value() - 1));
-		return *this;
-	}
-
-	// post-decrement
 	betype<T> operator--(int) requires std::integral<T>
 	{
-		betype<T> tmp(*this);
-		m_value = SwapEndian(T(value() - 1));
-		return tmp;
+		const betype<T> before(*this);
+		set(T(value() - 1));
+		return before;
 	}
 
 private:
-	//T m_value{}; // before 1.26.2
-	T m_value;
+	betype<T>& set(T hostValue)
+	{
+		m_value = SwapEndian(hostValue);
+		return *this;
+	}
+
+	T m_value; // deliberately uninitialized by the default constructor
 };
 
 using uint64be = betype<uint64>;

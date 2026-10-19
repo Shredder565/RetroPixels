@@ -1,130 +1,140 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "cpu_features.h"
 
 #if BOOST_OS_MACOS
-#include <sys/types.h>
-#include <sys/sysctl.h>
+	#include <sys/types.h>
+	#include <sys/sysctl.h>
 #endif
 
-// wrappers with uniform prototype for implementation-specific x86 CPU id
+#if defined(ARCH_X86_64) && defined(__GNUC__)
+	#include <cpuid.h>
+#endif
+
+namespace
+{
 #if defined(ARCH_X86_64)
-#ifdef __GNUC__
-#include <cpuid.h>
-#endif
+	struct CpuidResult
+	{
+		uint32 eax, ebx, ecx, edx;
 
-inline void cpuid(int cpuInfo[4], int functionId) {
-#if defined(_MSC_VER)
-	__cpuid(cpuInfo, functionId);
-#elif defined(__GNUC__)
-	__cpuid(functionId, cpuInfo[0], cpuInfo[1], cpuInfo[2], cpuInfo[3]);
-#else
-#error No definition for cpuid
+		bool bit(uint32 reg, int index) const { return ((reg >> index) & 1) != 0; }
+	};
+
+	CpuidResult queryCpuid(uint32 leaf, uint32 subleaf = 0)
+	{
+		CpuidResult r{};
+	#if defined(_MSC_VER)
+		int regs[4];
+		__cpuidex(regs, (int)leaf, (int)subleaf);
+		r.eax = (uint32)regs[0];
+		r.ebx = (uint32)regs[1];
+		r.ecx = (uint32)regs[2];
+		r.edx = (uint32)regs[3];
+	#elif defined(__GNUC__)
+		__cpuid_count(leaf, subleaf, r.eax, r.ebx, r.ecx, r.edx);
+	#else
+		#error cpuid is not available with this compiler
+	#endif
+		return r;
+	}
+
+	// the 12 character vendor string is stored in ebx, edx, ecx order
+	bool vendorIs(const CpuidResult& leaf0, const char* vendor)
+	{
+		char name[13]{};
+		memcpy(name + 0, &leaf0.ebx, 4);
+		memcpy(name + 4, &leaf0.edx, 4);
+		memcpy(name + 8, &leaf0.ecx, 4);
+		return strcmp(name, vendor) == 0;
+	}
 #endif
 }
-
-inline void cpuidex(int cpuInfo[4], int functionId, int subFunctionId) {
-#if defined(_MSC_VER)
-	__cpuidex(cpuInfo, functionId, subFunctionId);
-#elif defined(__GNUC__)
-	__cpuid_count(functionId, subFunctionId, cpuInfo[0], cpuInfo[1], cpuInfo[2], cpuInfo[3]);
-#else
-#error No definition for cpuidex
-#endif
-}
-#endif
-
 
 CPUFeaturesImpl::CPUFeaturesImpl()
 {
 #if BOOST_OS_MACOS
-	std::string cpuName;
-	size_t size = 0;
-
-	if (sysctlbyname("machdep.cpu.brand_string", nullptr, &size, nullptr, 0) == 0 && size > 0)
+	size_t len = 0;
+	if (sysctlbyname("machdep.cpu.brand_string", nullptr, &len, nullptr, 0) == 0 && len > 0)
 	{
-		std::vector<char> buffer(size);
-
-		if (sysctlbyname("machdep.cpu.brand_string", buffer.data(), &size, nullptr, 0) == 0 && size > 0)
+		std::vector<char> name(len + 1, '\0');
+		if (sysctlbyname("machdep.cpu.brand_string", name.data(), &len, nullptr, 0) == 0)
 		{
-			cpuName.assign(buffer.data());
+			const size_t n = std::min(strlen(name.data()), sizeof(m_cpuBrandName) - 1);
+			memcpy(m_cpuBrandName, name.data(), n);
+			m_cpuBrandName[n] = '\0';
 		}
 	}
-
-	strncpy(m_cpuBrandName, cpuName.c_str(), sizeof(m_cpuBrandName) - 1);
-	m_cpuBrandName[sizeof(m_cpuBrandName) - 1] = '\0';
 #elif defined(ARCH_X86_64)
-	int cpuInfo[4];
-	cpuid(cpuInfo, 0x80000001);
-	x86.lzcnt = ((cpuInfo[2] >> 5) & 1) != 0;
-	cpuid(cpuInfo, 0x1);
-	x86.movbe = ((cpuInfo[2] >> 22) & 1) != 0;
-	x86.avx = ((cpuInfo[2] >> 28) & 1) != 0;
-	x86.aesni = ((cpuInfo[2] >> 25) & 1) != 0;
-	x86.ssse3 = ((cpuInfo[2] >> 9) & 1) != 0;
-	x86.sse4_1 = ((cpuInfo[2] >> 19) & 1) != 0;
-	uint32 family = ((cpuInfo[0] >> 8) & 0xF);
+	const CpuidResult basic = queryCpuid(1);
+	x86.ssse3 = basic.bit(basic.ecx, 9);
+	x86.sse4_1 = basic.bit(basic.ecx, 19);
+	x86.movbe = basic.bit(basic.ecx, 22);
+	x86.aesni = basic.bit(basic.ecx, 25);
+	x86.avx = basic.bit(basic.ecx, 28);
+
+	// family, including the extended family for family 0xF
+	uint32 family = (basic.eax >> 8) & 0xF;
 	if (family == 0xF)
-		family += ((cpuInfo[0] >> 20) & 0xFF);
-	cpuidex(cpuInfo, 0x7, 0);
-	x86.avx2 = ((cpuInfo[1] >> 5) & 1) != 0;
-	x86.bmi2 = ((cpuInfo[1] >> 8) & 1) != 0;
-	// PEXT is slow on older AMD CPUs
-	cpuid(cpuInfo, 0);
-	const bool isIntel = cpuInfo[1] == 0x756E6547 && cpuInfo[3] == 0x49656E69 && cpuInfo[2] == 0x6C65746E; // "GenuineIntel"
-	const bool isAMD = cpuInfo[1] == 0x68747541 && cpuInfo[3] == 0x69746E65 && cpuInfo[2] == 0x444D4163; // "AuthenticAMD"
-	x86.fastPext = x86.bmi2 && (isIntel || (isAMD && family >= 0x19));
-	cpuid(cpuInfo, 0x80000007);
-	x86.invariant_tsc = ((cpuInfo[3] >> 8) & 1);
-	// get CPU brand name
-	uint32_t nExIds, i = 0;
-	memset(m_cpuBrandName, 0, sizeof(m_cpuBrandName));
-	cpuid(cpuInfo, 0x80000000);
-	nExIds = (uint32_t)cpuInfo[0];
-	for (uint32_t i = 0x80000000; i <= nExIds; ++i)
+		family += (basic.eax >> 20) & 0xFF;
+
+	const CpuidResult extendedFeatures = queryCpuid(7, 0);
+	x86.avx2 = extendedFeatures.bit(extendedFeatures.ebx, 5);
+	x86.bmi2 = extendedFeatures.bit(extendedFeatures.ebx, 8);
+
+	const CpuidResult extended1 = queryCpuid(0x80000001);
+	x86.lzcnt = extended1.bit(extended1.ecx, 5);
+
+	// AMD CPUs before Zen 3 (family 0x19) implement PEXT in microcode
+	const CpuidResult vendor = queryCpuid(0);
+	const bool intel = vendorIs(vendor, "GenuineIntel");
+	const bool amd = vendorIs(vendor, "AuthenticAMD");
+	x86.fastPext = x86.bmi2 && (intel || (amd && family >= 0x19));
+
+	const CpuidResult power = queryCpuid(0x80000007);
+	x86.invariant_tsc = power.bit(power.edx, 8);
+
+	// brand string from leaves 0x80000002..0x80000004, 16 bytes each
+	const uint32 highestExtendedLeaf = queryCpuid(0x80000000).eax;
+	for (uint32 part = 0; part < 3; part++)
 	{
-		cpuid(cpuInfo, i);
-		if (i == 0x80000002)
-			memcpy(m_cpuBrandName, cpuInfo, sizeof(cpuInfo));
-		else if (i == 0x80000003)
-			memcpy(m_cpuBrandName + 16, cpuInfo, sizeof(cpuInfo));
-		else if (i == 0x80000004)
-			memcpy(m_cpuBrandName + 32, cpuInfo, sizeof(cpuInfo));
+		const uint32 leaf = 0x80000002 + part;
+		if (leaf > highestExtendedLeaf)
+			break;
+		const CpuidResult r = queryCpuid(leaf);
+		const uint32 regs[4] = {r.eax, r.ebx, r.ecx, r.edx};
+		memcpy(m_cpuBrandName + part * 16, regs, sizeof(regs));
 	}
 #endif
 }
 
 std::string CPUFeaturesImpl::GetCPUName()
 {
-	return { m_cpuBrandName };
+	return std::string(m_cpuBrandName);
 }
 
 std::string CPUFeaturesImpl::GetCommaSeparatedExtensionList()
 {
-	std::string tmp;
-	auto appendExt = [&tmp](const char* str)
-	{
-		if (!tmp.empty())
-			tmp.append(", ");
-		tmp.append(str);
+	const std::pair<bool, const char*> extensions[] = {
+		{x86.ssse3, "SSSE3"},
+		{x86.sse4_1, "SSE4.1"},
+		{x86.avx, "AVX"},
+		{x86.avx2, "AVX2"},
+		{x86.lzcnt, "LZCNT"},
+		{x86.movbe, "MOVBE"},
+		{x86.bmi2, "BMI2"},
+		{x86.aesni, "AES-NI"},
+		{x86.invariant_tsc, "INVARIANT-TSC"},
 	};
-	if (x86.ssse3)
-		appendExt("SSSE3");
-	if (x86.sse4_1)
-		appendExt("SSE4.1");
-	if (x86.avx)
-		appendExt("AVX");
-	if (x86.avx2)
-		appendExt("AVX2");
-	if (x86.lzcnt)
-		appendExt("LZCNT");
-	if (x86.movbe)
-		appendExt("MOVBE");
-	if (x86.bmi2)
-		appendExt("BMI2");
-	if (x86.aesni)
-		appendExt("AES-NI");
-	if(x86.invariant_tsc)
-		appendExt("INVARIANT-TSC");
-	return tmp;
+	std::string list;
+	for (const auto& [present, name] : extensions)
+	{
+		if (!present)
+			continue;
+		if (!list.empty())
+			list += ", ";
+		list += name;
+	}
+	return list;
 }
 
 CPUFeaturesImpl g_CPUFeatures;

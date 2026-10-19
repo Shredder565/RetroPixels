@@ -1,8 +1,11 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include <type_traits>
 
-// enum flag helpers
+// Opt-in bitwise operators for enum types:
+//     enum class MyFlags : uint32 { A = 1, B = 2 };
+//     ENABLE_BITMASK_OPERATORS(MyFlags);
 template<typename TEnum>
 struct EnableBitMaskOperators
 {
@@ -10,73 +13,79 @@ struct EnableBitMaskOperators
 };
 
 template<typename TEnum>
-	requires EnableBitMaskOperators<TEnum>::enable
-TEnum operator &(TEnum lhs, TEnum rhs)
+concept BitMaskEnum = EnableBitMaskOperators<TEnum>::enable;
+
+namespace enumflags_detail
 {
-	return static_cast<TEnum> (static_cast<typename std::underlying_type<TEnum>::type>(lhs) & static_cast<typename std::underlying_type<TEnum>::type>(rhs));
+	template<typename TEnum>
+	constexpr auto raw(TEnum v)
+	{
+		return static_cast<std::underlying_type_t<TEnum>>(v);
+	}
 }
 
-template<typename TEnum>
-	requires EnableBitMaskOperators<TEnum>::enable
-TEnum operator |(TEnum lhs, TEnum rhs)
+template<BitMaskEnum TEnum>
+TEnum operator&(TEnum a, TEnum b)
 {
-	return static_cast<TEnum> (static_cast<typename std::underlying_type<TEnum>::type>(lhs) | static_cast<typename std::underlying_type<TEnum>::type>(rhs));
+	return TEnum(enumflags_detail::raw(a) & enumflags_detail::raw(b));
 }
 
-template<typename TEnum>
-	requires EnableBitMaskOperators<TEnum>::enable
-TEnum operator ^(TEnum lhs, TEnum rhs)
+template<BitMaskEnum TEnum>
+TEnum operator|(TEnum a, TEnum b)
 {
-	return static_cast<TEnum> (static_cast<typename std::underlying_type<TEnum>::type>(lhs) ^ static_cast<typename std::underlying_type<TEnum>::type>(rhs));
+	return TEnum(enumflags_detail::raw(a) | enumflags_detail::raw(b));
 }
 
-template<typename TEnum>
-	requires EnableBitMaskOperators<TEnum>::enable
-TEnum operator ~(TEnum rhs)
+template<BitMaskEnum TEnum>
+TEnum operator^(TEnum a, TEnum b)
 {
-	return static_cast<TEnum> (~static_cast<typename std::underlying_type<TEnum>::type>(rhs));
+	return TEnum(enumflags_detail::raw(a) ^ enumflags_detail::raw(b));
 }
 
-template<typename TEnum>
-	requires EnableBitMaskOperators<TEnum>::enable
-TEnum& operator &=(TEnum& lhs, TEnum rhs)
+template<BitMaskEnum TEnum>
+TEnum operator~(TEnum a)
 {
-	lhs = static_cast<TEnum> (static_cast<typename std::underlying_type<TEnum>::type>(lhs) & static_cast<typename std::underlying_type<TEnum>::type>(rhs));
-	return lhs;
+	return TEnum(~enumflags_detail::raw(a));
 }
 
-template<typename TEnum>
-	requires EnableBitMaskOperators<TEnum>::enable
-TEnum& operator |=(TEnum& lhs, TEnum rhs)
+template<BitMaskEnum TEnum>
+TEnum& operator&=(TEnum& a, TEnum b)
 {
-	lhs = static_cast<TEnum> (static_cast<typename std::underlying_type<TEnum>::type>(lhs) | static_cast<typename std::underlying_type<TEnum>::type>(rhs));
-	return lhs;
+	return a = a & b;
 }
 
-template<typename TEnum>
-	requires EnableBitMaskOperators<TEnum>::enable
-TEnum& operator ^=(TEnum& lhs, TEnum rhs)
+template<BitMaskEnum TEnum>
+TEnum& operator|=(TEnum& a, TEnum b)
 {
-	lhs = static_cast<TEnum> (static_cast<typename std::underlying_type<TEnum>::type>(lhs) ^ static_cast<typename std::underlying_type<TEnum>::type>(rhs));
-	return lhs;
+	return a = a | b;
 }
 
-template<typename TEnum>
-	requires EnableBitMaskOperators<TEnum>::enable
-constexpr bool operator==(TEnum lhs, std::underlying_type_t<TEnum> rhs)
+template<BitMaskEnum TEnum>
+TEnum& operator^=(TEnum& a, TEnum b)
 {
-	return static_cast<std::underlying_type_t<TEnum>>(lhs) == rhs;
+	return a = a ^ b;
 }
-template<typename TEnum>
-	requires EnableBitMaskOperators<TEnum>::enable
-constexpr bool operator!=(TEnum lhs, std::underlying_type_t<TEnum> rhs)
+
+// comparison against a raw value, e.g. (flags & X) == 0
+template<BitMaskEnum TEnum>
+constexpr bool operator==(TEnum a, std::underlying_type_t<TEnum> b)
 {
-	return static_cast<std::underlying_type_t<TEnum>>(lhs) != rhs;
+	return enumflags_detail::raw(a) == b;
+}
+
+template<BitMaskEnum TEnum>
+constexpr bool operator!=(TEnum a, std::underlying_type_t<TEnum> b)
+{
+	return enumflags_detail::raw(a) != b;
 }
 
 #define ENABLE_BITMASK_OPERATORS(x) template<> struct EnableBitMaskOperators<x> { static const bool enable = true; };
 
-
+// Opt-in iteration over a contiguous range of enum values:
+//     ENABLE_ENUM_ITERATORS(MyEnum, MyEnum::First, MyEnum::Last);
+//     for (MyEnum v = begin(MyEnum{}); v != end(MyEnum{}); ++v) ...
+// The trait also provides begin/rbegin (first/last value) and end/rend (one
+// past either side) for code that queries the range, such as ConfigValue.
 template<typename TEnum>
 struct EnableEnumIterators
 {
@@ -84,51 +93,51 @@ struct EnableEnumIterators
 };
 
 template<typename TEnum>
-	requires EnableEnumIterators<TEnum>::enable
-TEnum& operator++(TEnum& lhs) 
+concept IterableEnum = EnableEnumIterators<TEnum>::enable;
+
+template<IterableEnum TEnum>
+TEnum& operator++(TEnum& v)
 {
-	lhs = static_cast<TEnum>(static_cast<typename std::underlying_type<TEnum>::type>(lhs) + 1);
-	return lhs;
+	v = TEnum(enumflags_detail::raw(v) + 1);
+	return v;
 }
 
-template<typename TEnum>
-	requires EnableEnumIterators<TEnum>::enable
-TEnum operator*(TEnum rhs) 
+template<IterableEnum TEnum>
+TEnum operator*(TEnum v)
 {
-	return rhs;
+	return v;
 }
 
-template<typename TEnum>
-	requires EnableEnumIterators<TEnum>::enable
-TEnum begin(TEnum value) 
+template<IterableEnum TEnum>
+TEnum begin(TEnum)
 {
 	return EnableEnumIterators<TEnum>::begin;
 }
 
-template<typename TEnum>
-	requires EnableEnumIterators<TEnum>::enable
-TEnum rbegin(TEnum value) 
+template<IterableEnum TEnum>
+TEnum rbegin(TEnum)
 {
 	return EnableEnumIterators<TEnum>::rbegin;
 }
 
-template<typename TEnum>
-	requires EnableEnumIterators<TEnum>::enable
-TEnum end(TEnum r) {
+template<IterableEnum TEnum>
+TEnum end(TEnum)
+{
 	return EnableEnumIterators<TEnum>::end;
 }
 
-template<typename TEnum>
-	requires EnableEnumIterators<TEnum>::enable
-TEnum rend(TEnum r) {
+template<IterableEnum TEnum>
+TEnum rend(TEnum)
+{
 	return EnableEnumIterators<TEnum>::rend;
 }
 
-#define ENABLE_ENUM_ITERATORS(x, first_value, last_value) template<> struct EnableEnumIterators<x> {\
-	static const bool enable = true;\
-	static const x begin = first_value;\
-	static const x rbegin = last_value;\
-	static const x end = static_cast<x>(static_cast<typename std::underlying_type<x>::type>(last_value) + 1);\
-	static const x rend = static_cast<x>(static_cast<typename std::underlying_type<x>::type>(first_value) - 1);\
-};
-// todo: rend type must be signed?
+#define ENABLE_ENUM_ITERATORS(x, first_value, last_value)                                                     \
+	template<> struct EnableEnumIterators<x>                                                                  \
+	{                                                                                                         \
+		static const bool enable = true;                                                                      \
+		static const x begin = first_value;                                                                   \
+		static const x rbegin = last_value;                                                                   \
+		static const x end = static_cast<x>(static_cast<std::underlying_type_t<x>>(last_value) + 1);          \
+		static const x rend = static_cast<x>(static_cast<std::underlying_type_t<x>>(first_value) - 1);        \
+	};

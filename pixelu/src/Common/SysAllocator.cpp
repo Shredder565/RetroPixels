@@ -1,22 +1,23 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "SysAllocator.h"
 
-void SysAllocatorContainer::Initialize()
+SysAllocatorContainer& SysAllocatorContainer::GetInstance()
 {
-	for (SysAllocatorBase* sysAlloc : m_sysAllocList)
-	{
-		sysAlloc->Initialize();
-	}
+	// function-local so that it exists before the first static SysAllocator registers
+	static SysAllocatorContainer container;
+	return container;
 }
 
 void SysAllocatorContainer::PushSysAllocator(SysAllocatorBase* base)
 {
-	m_sysAllocList.push_back(base);
+	m_entries.emplace_back(base);
 }
 
-SysAllocatorContainer& SysAllocatorContainer::GetInstance()
+void SysAllocatorContainer::Initialize()
 {
-	static SysAllocatorContainer s_instance;
-	return s_instance;
+	// registration order decides the guest addresses, keep it
+	for (size_t i = 0; i < m_entries.size(); i++)
+		m_entries[i]->Initialize();
 }
 
 SysAllocatorBase::SysAllocatorBase()

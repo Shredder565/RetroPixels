@@ -1,162 +1,208 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Common/unix/FileStream_unix.h"
 #include <cstdarg>
 
-fs::path findPathCI(const fs::path& path)
+namespace
 {
-	if (fs::exists(path)) return path;
+	// Returns path itself if it exists. Otherwise every missing component is
+	// looked up case-insensitively in its parent directory; components that
+	// cannot be found are kept as spelled.
+	fs::path resolveCaseInsensitive(const fs::path& path)
+	{
+		if (fs::exists(path))
+			return path;
+		fs::path dir = path.parent_path();
+		const fs::path name = path.filename();
+		if (dir.empty())
+			dir = ".";
+		else if (!fs::exists(dir))
+			dir = resolveCaseInsensitive(dir);
+		const std::string wanted = name.string();
+		std::error_code ec;
+		for (const fs::directory_entry& entry : fs::directory_iterator(dir, ec))
+		{
+			if (boost::iequals(entry.path().filename().string(), wanted))
+				return entry.path();
+		}
+		return dir / name;
+	}
 
-	fs::path fName = path.filename();
-	fs::path parentPath = path.parent_path();
-	if (parentPath.empty())
-		parentPath = ".";
-	else if (!fs::exists(parentPath))
-		parentPath = findPathCI(parentPath);
-
-	std::error_code listErr;
-	for (auto&& dirEntry : fs::directory_iterator(parentPath, listErr))
-		if (boost::iequals(dirEntry.path().filename().string(), fName.string()))
-			return dirEntry;
-
-	return parentPath / fName;
+	template<typename T>
+	bool readValue(FileStream& f, T& v)
+	{
+		return f.readData(&v, sizeof(T)) == sizeof(T);
+	}
 }
 
-FileStream* FileStream::openFile(std::string_view path)
+FileStream::FileStream(const fs::path& path, bool openExisting, bool writable)
 {
-	return openFile2(path, false);
+	m_path = resolveCaseInsensitive(path);
+	std::ios_base::openmode mode = std::ios_base::in | std::ios_base::binary;
+	if (!openExisting)
+		mode |= std::ios_base::out | std::ios_base::trunc;
+	else if (writable)
+		mode |= std::ios_base::out;
+	m_fileStream.open(m_path, mode);
+	m_isValid = m_fileStream.is_open();
+	// directories can be opened as streams on some systems, reject them
+	if (m_isValid && fs::is_directory(path))
+	{
+		m_fileStream.close();
+		m_isValid = false;
+	}
 }
 
-FileStream* FileStream::openFile(const wchar_t* path, bool allowWrite)
+FileStream::~FileStream()
 {
-	return openFile2(path, allowWrite);
+	if (m_isValid)
+		m_fileStream.close();
 }
 
 FileStream* FileStream::openFile2(const fs::path& path, bool allowWrite)
 {
-	FileStream* fs = new FileStream(path, true, allowWrite);
-	if (fs->m_isValid)
-		return fs;
-	delete fs;
-	return nullptr;
+	auto* f = new FileStream(path, true, allowWrite);
+	if (!f->m_isValid)
+	{
+		delete f;
+		return nullptr;
+	}
+	return f;
 }
 
-FileStream* FileStream::createFile(const wchar_t* path)
+FileStream* FileStream::openFile(std::string_view path)
 {
-	return createFile2(path);
+	return openFile2(fs::path(path), false);
 }
 
-FileStream* FileStream::createFile(std::string_view path)
+FileStream* FileStream::openFile(const wchar_t* path, bool allowWrite)
 {
-	return createFile2(path);
+	return openFile2(fs::path(path), allowWrite);
 }
 
 FileStream* FileStream::createFile2(const fs::path& path)
 {
-	FileStream* fs = new FileStream(path, false, false);
-	if (fs->m_isValid)
-		return fs;
-	delete fs;
-	return nullptr;
+	auto* f = new FileStream(path, false, false);
+	if (!f->m_isValid)
+	{
+		delete f;
+		return nullptr;
+	}
+	return f;
+}
+
+FileStream* FileStream::createFile(const wchar_t* path)
+{
+	return createFile2(fs::path(path));
+}
+
+FileStream* FileStream::createFile(std::string_view path)
+{
+	return createFile2(fs::path(path));
 }
 
 std::optional<std::vector<uint8>> FileStream::LoadIntoMemory(const fs::path& path)
 {
-	FileStream* fs = openFile2(path);
-	if (!fs)
+	std::unique_ptr<FileStream> f(openFile2(path));
+	if (!f)
 		return std::nullopt;
-	uint64 fileSize = fs->GetSize();
-	if (fileSize > 0xFFFFFFFFull)
-	{
-		delete fs;
+	const uint64 size = f->GetSize();
+	if (size > 0xFFFFFFFFull)
 		return std::nullopt;
-	}
-	std::optional<std::vector<uint8>> v(fileSize);
-	if (fs->readData(v->data(), (uint32)fileSize) != (uint32)fileSize)
-	{
-		delete fs;
+	std::vector<uint8> data(size);
+	if (f->readData(data.data(), (uint32)size) != (uint32)size)
 		return std::nullopt;
-	}
-	delete fs;
-	return v;
+	return data;
+}
+
+uint64 FileStream::currentPosition()
+{
+	m_fileStream.clear(); // a short read sets eof/fail, which would block tell and seek
+	const std::streampos pos = m_prevOperationWasWrite ? m_fileStream.tellp() : m_fileStream.tellg();
+	return pos < 0 ? 0 : (uint64)pos;
 }
 
 void FileStream::SetPosition(uint64 pos)
 {
 	cemu_assert(m_isValid);
+	m_fileStream.clear();
 	if (m_prevOperationWasWrite)
-		m_fileStream.seekp((std::streampos)pos);
+		m_fileStream.seekp((std::streamoff)pos, std::ios::beg);
 	else
-		m_fileStream.seekg((std::streampos)pos);
+		m_fileStream.seekg((std::streamoff)pos, std::ios::beg);
 }
 
 uint64 FileStream::GetSize()
 {
 	cemu_assert(m_isValid);
-	auto currentPos = m_fileStream.tellg();
+	m_fileStream.clear();
+	const std::streampos restore = m_fileStream.tellg();
 	m_fileStream.seekg(0, std::ios::end);
-	auto fileSize = m_fileStream.tellg();
-	m_fileStream.seekg(currentPos, std::ios::beg);
-	uint64 fs = (uint64)fileSize;
-	return fs;
+	const std::streampos end = m_fileStream.tellg();
+	m_fileStream.seekg(restore, std::ios::beg);
+	return (uint64)end;
 }
 
 bool FileStream::SetEndOfFile()
 {
-	assert_dbg();
-	return true;
-	//return ::SetEndOfFile(m_hFile) != 0;
+	cemu_assert(m_isValid);
+	const uint64 length = currentPosition();
+	m_fileStream.flush();
+	std::error_code ec;
+	fs::resize_file(m_path, length, ec);
+	return !ec;
 }
 
 void FileStream::extract(std::vector<uint8>& data)
 {
-	uint64 fileSize = GetSize();
+	const uint64 size = GetSize();
 	SetPosition(0);
-	data.resize(fileSize);
-	readData(data.data(), fileSize);
+	data.resize(size);
+	readData(data.data(), (uint32)size);
 }
 
 void FileStream::Flush()
 {
-    m_fileStream.flush();
+	m_fileStream.flush();
+}
+
+void FileStream::SyncReadWriteSeek(bool nextOpIsWrite)
+{
+	if (m_prevOperationWasWrite == nextOpIsWrite)
+		return;
+	const uint64 pos = currentPosition();
+	if (nextOpIsWrite)
+		m_fileStream.seekp((std::streamoff)pos, std::ios::beg);
+	else
+		m_fileStream.seekg((std::streamoff)pos, std::ios::beg);
+	m_prevOperationWasWrite = nextOpIsWrite;
 }
 
 uint32 FileStream::readData(void* data, uint32 length)
 {
 	SyncReadWriteSeek(false);
 	m_fileStream.read((char*)data, length);
-	size_t bytesRead = m_fileStream.gcount();
-	return (uint32)bytesRead;
+	return (uint32)m_fileStream.gcount();
 }
 
-bool FileStream::readU64(uint64& v)
-{
-	return readData(&v, sizeof(uint64)) == sizeof(uint64);
-}
-
-bool FileStream::readU32(uint32& v)
-{
-	return readData(&v, sizeof(uint32)) == sizeof(uint32);
-}
-
-bool FileStream::readU8(uint8& v)
-{
-	return readData(&v, sizeof(uint8)) == sizeof(uint8);
-}
+bool FileStream::readU64(uint64& v) { return readValue(*this, v); }
+bool FileStream::readU32(uint32& v) { return readValue(*this, v); }
+bool FileStream::readU16(uint16& v) { return readValue(*this, v); }
+bool FileStream::readU8(uint8& v) { return readValue(*this, v); }
 
 bool FileStream::readLine(std::string& line)
 {
 	line.clear();
+	bool gotAny = false;
 	uint8 c;
-	bool isEOF = true;
 	while (readU8(c))
 	{
-		isEOF = false;
-		if (c == '\r')
-			continue;
+		gotAny = true;
 		if (c == '\n')
 			break;
-		line.push_back((char)c);
+		if (c != '\r')
+			line += (char)c;
 	}
-	return !isEOF;
+	return gotAny;
 }
 
 sint32 FileStream::writeData(const void* data, sint32 length)
@@ -166,28 +212,19 @@ sint32 FileStream::writeData(const void* data, sint32 length)
 	return length;
 }
 
-void FileStream::writeU64(uint64 v)
-{
-	writeData(&v, sizeof(uint64));
-}
-
-void FileStream::writeU32(uint32 v)
-{
-	writeData(&v, sizeof(uint32));
-}
-
-void FileStream::writeU8(uint8 v)
-{
-	writeData(&v, sizeof(uint8));
-}
+void FileStream::writeU64(uint64 v) { writeData(&v, sizeof(v)); }
+void FileStream::writeU32(uint32 v) { writeData(&v, sizeof(v)); }
+void FileStream::writeU16(uint16 v) { writeData(&v, sizeof(v)); }
+void FileStream::writeU8(uint8 v) { writeData(&v, sizeof(v)); }
 
 void FileStream::writeStringFmt(const char* format, ...)
 {
-	char buffer[2048];
+	char text[2048];
 	va_list args;
 	va_start(args, format);
-	vsnprintf(buffer, sizeof(buffer), format, args);
-	writeData(buffer, (sint32)strlen(buffer));
+	vsnprintf(text, sizeof(text), format, args);
+	va_end(args);
+	writeString(text);
 }
 
 void FileStream::writeString(const char* str)
@@ -197,103 +234,64 @@ void FileStream::writeString(const char* str)
 
 void FileStream::writeLine(const char* str)
 {
-	writeData(str, (sint32)strlen(str));
+	writeString(str);
 	writeData("\r\n", 2);
-}
-
-FileStream::~FileStream()
-{
-	if (m_isValid)
-	{
-		m_fileStream.close();
-	}
-	//	CloseHandle(m_hFile);
-}
-
-FileStream::FileStream(const fs::path& path, bool isOpen, bool isWriteable)
-{
-	fs::path CIPath = findPathCI(path);
-	if (isOpen)
-	{
-		m_fileStream.open(CIPath, isWriteable ? (std::ios_base::in | std::ios_base::out | std::ios_base::binary) : (std::ios_base::in | std::ios_base::binary));
-		m_isValid = m_fileStream.is_open();
-	}
-	else
-	{
-		m_fileStream.open(CIPath, std::ios_base::in | std::ios_base::out | std::ios_base::binary | std::ios_base::trunc);
-		m_isValid = m_fileStream.is_open();
-	}
-	if(m_isValid && fs::is_directory(path))
-	{
-		m_isValid = false;
-		m_fileStream.close();
-	}
-}
-
-void FileStream::SyncReadWriteSeek(bool nextOpIsWrite)
-{
-	// nextOpIsWrite == false -> read. Otherwise write
-	if (nextOpIsWrite == m_prevOperationWasWrite)
-		return;
-	if (nextOpIsWrite)
-		m_fileStream.seekp(m_fileStream.tellg(), std::ios::beg);
-	else
-		m_fileStream.seekg(m_fileStream.tellp(), std::ios::beg);
-
-	m_prevOperationWasWrite = nextOpIsWrite;
 }
 
 bool FileStream::WriteFileAtomic(const fs::path& path, std::span<uint8> fileData, bool allowTargetFileRename)
 {
+	// "name.ext" is written as "name.ext_tmp" first
+	fs::path tempPath = path;
+	tempPath.replace_extension(_utf8ToPath(_pathToUtf8(path.extension()) + "_tmp"));
+	auto logFailure = [&](const std::error_code& err) {
+		cemuLog_log(LogType::Force, "Failed to atomically replace file {}, error {}", _pathToUtf8(path), err.message());
+	};
+
 	std::error_code ec;
-	fs::path altPath = path;
-	altPath.replace_extension( _utf8ToPath(_pathToUtf8(altPath.extension()).append("_tmp")));
-	FileStream* fsAlt = FileStream::createFile2(altPath);
-	if (!fsAlt)
-		return false;
-	if (fsAlt->writeData(fileData.data(), fileData.size()) != fileData.size())
 	{
-		delete fsAlt;
-		fs::remove(altPath, ec);
-		return false;
-	}
-	fsAlt->Flush();
-	delete fsAlt;
-	fs::rename(altPath, path, ec);
-	if (ec)
-	{
-		// the target file might be in use, try to rename it if allowed
-		// this isn't strictly atomic
-		if (allowTargetFileRename)
+		std::unique_ptr<FileStream> out(createFile2(tempPath));
+		if (!out)
+			return false;
+		if ((size_t)out->writeData(fileData.data(), (sint32)fileData.size()) != fileData.size())
 		{
-			fs::path backupPath = path;
-			backupPath.replace_extension( _utf8ToPath(_pathToUtf8(backupPath.extension()).append(".backup")));
-			std::error_code ec;
-			fs::rename(path, backupPath, ec);
-			if (ec)
-			{
-				cemuLog_log(LogType::Force, "Failed to atomically replace file {}, error {}", _pathToUtf8(path), ec.message());
-				fs::remove(altPath, ec);
-				return false;
-			}
-			// target file renamed, try to replace it again
-			fs::rename(altPath, path, ec);
-			if (ec)
-			{
-				cemuLog_log(LogType::Force, "Failed to atomically replace file {}, error {}", _pathToUtf8(path), ec.message());
-				fs::rename(backupPath, path, ec); // try to undo rename
-				if (ec)
-					cemuLog_log(LogType::Force, "Failed to restore original file {}, error {}", _pathToUtf8(path), ec.message());
-				fs::remove(altPath, ec);
-				return false;
-			}
-		}
-		else if (ec)
-		{
-			cemuLog_log(LogType::Force, "Failed to atomically replace file {}, error {}", _pathToUtf8(path), ec.message());
-			fs::remove(altPath, ec);
+			out.reset();
+			fs::remove(tempPath, ec);
 			return false;
 		}
+		out->Flush();
+	}
+
+	fs::rename(tempPath, path, ec);
+	if (!ec)
+		return true;
+	if (!allowTargetFileRename)
+	{
+		logFailure(ec);
+		fs::remove(tempPath, ec);
+		return false;
+	}
+
+	// the target may be locked by another process: move it out of the way
+	// ("name.ext" -> "name.ext.backup") and retry; not atomic
+	fs::path backupPath = path;
+	backupPath.replace_extension(_utf8ToPath(_pathToUtf8(path.extension()) + ".backup"));
+	fs::rename(path, backupPath, ec);
+	if (ec)
+	{
+		logFailure(ec);
+		fs::remove(tempPath, ec);
+		return false;
+	}
+	fs::rename(tempPath, path, ec);
+	if (ec)
+	{
+		logFailure(ec);
+		std::error_code undoError;
+		fs::rename(backupPath, path, undoError);
+		if (undoError)
+			cemuLog_log(LogType::Force, "Failed to restore original file {}, error {}", _pathToUtf8(path), undoError.message());
+		fs::remove(tempPath, ec);
+		return false;
 	}
 	return true;
 }

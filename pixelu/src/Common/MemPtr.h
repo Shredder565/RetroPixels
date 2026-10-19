@@ -1,8 +1,9 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include <type_traits>
 #include "betype.h"
 
-using MPTR = uint32; // generic address in PowerPC memory space
+using MPTR = uint32; // address in the guest (PowerPC) address space
 
 #define MPTR_NULL (0)
 
@@ -14,39 +15,25 @@ extern uint8* PPCInterpreterGetStackPointer();
 extern uint8* PPCInterpreter_PushAndReturnStackPointer(sint32 offset);
 extern void PPCInterpreterModifyStackPointer(sint32 offset);
 
+// tag base so templates can detect MEMPTR<...> with std::is_base_of
 class MEMPTRBase
 {
 };
 
+// A guest pointer: a 32-bit big-endian guest address that converts to and
+// from host pointers into the guest memory mapping. Address 0 is null.
+// Note that operator-(MEMPTR) returns the difference in bytes.
 template<typename T>
 class MEMPTR : MEMPTRBase
 {
-  public:
-	constexpr MEMPTR() noexcept
-		: m_value(0) {}
-
-	explicit constexpr MEMPTR(uint32 offset) noexcept
-		: m_value(offset) {}
-
-	explicit constexpr MEMPTR(const uint32be& offset) noexcept
-		: m_value(offset) {}
-
-	constexpr MEMPTR(std::nullptr_t) noexcept
-		: m_value(0) {}
-
-	MEMPTR(T* ptr) noexcept
-	{
-		if (ptr == nullptr)
-			m_value = 0;
-		else
-		{
-			cemu_assert_debug((uint8*)ptr >= memory_base && (uint8*)ptr <= memory_base + 0x100000000);
-			m_value = (uint32)((uintptr_t)ptr - (uintptr_t)memory_base);
-		}
-	}
+public:
+	constexpr MEMPTR() noexcept : m_value(0) {}
+	explicit constexpr MEMPTR(uint32 offset) noexcept : m_value(offset) {}
+	explicit constexpr MEMPTR(const uint32be& offset) noexcept : m_value(offset) {}
+	constexpr MEMPTR(std::nullptr_t) noexcept : m_value(0) {}
+	MEMPTR(T* ptr) noexcept : m_value(toGuest(ptr)) {}
 
 	constexpr MEMPTR(const MEMPTR&) noexcept = default;
-
 	constexpr MEMPTR& operator=(const MEMPTR&) noexcept = default;
 
 	constexpr MEMPTR& operator=(const uint32& offset) noexcept
@@ -63,65 +50,52 @@ class MEMPTR : MEMPTRBase
 
 	MEMPTR& operator=(T* ptr) noexcept
 	{
-		if (ptr == nullptr)
-			m_value = 0;
-		else
-		{
-			cemu_assert_debug((uint8*)ptr >= memory_base && (uint8*)ptr <= memory_base + 0x100000000);
-			m_value = (uint32)((uintptr_t)ptr - (uintptr_t)memory_base);
-		}
+		m_value = toGuest(ptr);
 		return *this;
 	}
 
+	// atomically replaces the pointer with newPtr if it currently equals comparePtr
 	bool atomic_compare_exchange(T* comparePtr, T* newPtr) noexcept
 	{
-		MEMPTR<T> mp_compare = comparePtr;
-		MEMPTR<T> mp_new = newPtr;
-		auto* thisValueAtomic = reinterpret_cast<std::atomic<uint32be>*>(&m_value);
-		return thisValueAtomic->compare_exchange_strong(mp_compare.m_value, mp_new.m_value);
+		uint32be expected = toGuest(comparePtr);
+		const uint32be desired = toGuest(newPtr);
+		return reinterpret_cast<std::atomic<uint32be>*>(&m_value)->compare_exchange_strong(expected, desired);
 	}
 
-	explicit constexpr operator bool() const noexcept
-	{
-		return m_value != 0;
-	}
+	explicit constexpr operator bool() const noexcept { return m_value != 0; }
 
-	// allow implicit cast to wrapped pointer type
-	constexpr operator T*() const noexcept
-	{
-		return GetPtr();
-	}
+	constexpr operator T*() const noexcept { return GetPtr(); }
 
 	template<typename X>
 	explicit operator MEMPTR<X>() const noexcept
 	{
-		return MEMPTR<X>(this->m_value);
+		return MEMPTR<X>(m_value);
 	}
 
+	// distance in bytes
 	sint32 operator-(const MEMPTR& ptr) const noexcept
 		requires(!std::is_void_v<T>)
 	{
-		return static_cast<sint32>(this->GetMPTR() - ptr.GetMPTR());
+		return static_cast<sint32>(GetMPTR() - ptr.GetMPTR());
 	}
 
+	// element-wise pointer arithmetic
 	MEMPTR operator+(sint32 v) const noexcept
 		requires(!std::is_void_v<T>)
 	{
-		// pointer arithmetic
-		return MEMPTR(this->GetMPTR() + v * sizeof(T));
+		return MEMPTR((uint32)(GetMPTR() + v * sizeof(T)));
 	}
 
 	MEMPTR operator-(sint32 v) const noexcept
 		requires(!std::is_void_v<T>)
 	{
-		// pointer arithmetic
-		return MEMPTR(this->GetMPTR() - v * sizeof(T));
+		return MEMPTR((uint32)(GetMPTR() - v * sizeof(T)));
 	}
 
 	MEMPTR& operator+=(sint32 v) noexcept
 		requires(!std::is_void_v<T>)
 	{
-		m_value += v * sizeof(T);
+		m_value = (uint32)(GetMPTR() + v * sizeof(T));
 		return *this;
 	}
 
@@ -132,10 +106,7 @@ class MEMPTR : MEMPTRBase
 		return *GetPtr();
 	}
 
-	constexpr T* operator->() const noexcept
-	{
-		return GetPtr();
-	}
+	constexpr T* operator->() const noexcept { return GetPtr(); }
 
 	template<typename Q = T>
 		requires(!std::is_void_v<Q>)
@@ -146,7 +117,8 @@ class MEMPTR : MEMPTRBase
 
 	T* GetPtr() const noexcept
 	{
-		return (T*)(m_value == 0 ? nullptr : memory_base + (uint32)m_value);
+		const uint32 addr = m_value;
+		return addr == 0 ? nullptr : (T*)(memory_base + addr);
 	}
 
 	template<typename C>
@@ -155,21 +127,19 @@ class MEMPTR : MEMPTRBase
 		return static_cast<C*>(GetPtr());
 	}
 
-	[[nodiscard]] constexpr uint32 GetMPTR() const noexcept
+	[[nodiscard]] constexpr uint32 GetMPTR() const noexcept { return m_value.value(); }
+	[[nodiscard]] constexpr const uint32be& GetBEValue() const noexcept { return m_value; }
+	[[nodiscard]] constexpr bool IsNull() const noexcept { return m_value == 0; }
+
+private:
+	static uint32 toGuest(T* ptr) noexcept
 	{
-		return m_value.value();
-	}
-	[[nodiscard]] constexpr const uint32be& GetBEValue() const noexcept
-	{
-		return m_value;
+		if (!ptr)
+			return 0;
+		cemu_assert_debug((uint8*)ptr >= memory_base && (uint8*)ptr <= memory_base + 0x100000000);
+		return (uint32)((uintptr_t)ptr - (uintptr_t)memory_base);
 	}
 
-	[[nodiscard]] constexpr bool IsNull() const noexcept
-	{
-		return m_value == 0;
-	}
-
-  private:
 	uint32be m_value;
 };
 
@@ -179,6 +149,7 @@ static_assert(std::is_trivially_copyable_v<MEMPTR<void*>>);
 #include "StackAllocator.h"
 #include "SysAllocator.h"
 
+// printed as hex guest address
 template<typename T>
 struct fmt::formatter<MEMPTR<T>> : formatter<string_view>
 {
