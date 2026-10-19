@@ -1,75 +1,73 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "Cafe/HW/Latte/ISA/LatteReg.h"
 #include "util/math/vector2.h"
 
+// Indirection cell for an object that can be moved: holders of a reference keep the cell,
+// and moving the object only repoints the cell.
 class VKRMoveableRefCounterRef
 {
 public:
 	class VKRMoveableRefCounter* ref;
 };
 
+// Objects reference each other to stay alive (a framebuffer holds its views and render pass).
+// m_refCount counts incoming references; dropping the last one calls RefCountReachedZero().
 class VKRMoveableRefCounter
 {
 public:
-	VKRMoveableRefCounter()
+	VKRMoveableRefCounter() : m_handle(new VKRMoveableRefCounterRef())
 	{
-		selfRef = new VKRMoveableRefCounterRef();
-		selfRef->ref = this;
+		m_handle->ref = this;
 	}
 
 	virtual ~VKRMoveableRefCounter()
 	{
 		cemu_assert_debug(m_refCount == 0);
-
-		// remove references
 #ifdef CEMU_DEBUG_ASSERT
-		for (auto itr : refs)
+		for (VKRMoveableRefCounterRef* target : m_targets)
 		{
-			auto& rev = itr->ref->reverseRefs;
-			rev.erase(std::remove(rev.begin(), rev.end(), this->selfRef), rev.end());
+			auto& referrers = target->ref->m_debugReferrers;
+			referrers.erase(std::remove(referrers.begin(), referrers.end(), m_handle), referrers.end());
 		}
 #endif
-		for (auto itr : refs)
-		{
-			itr->ref->m_refCount--;
-			if (itr->ref->m_refCount == 0)
-				itr->ref->RefCountReachedZero();
-		}
-		refs.clear();
-		delete selfRef;
-		selfRef = nullptr;
+		// release outgoing references in the order they were taken
+		for (VKRMoveableRefCounterRef* target : m_targets)
+			target->ref->decRef();
+		m_targets.clear();
+		delete m_handle;
+		m_handle = nullptr;
 	}
 
 	VKRMoveableRefCounter(const VKRMoveableRefCounter&) = delete;
 	VKRMoveableRefCounter& operator=(const VKRMoveableRefCounter&) = delete;
-	VKRMoveableRefCounter(VKRMoveableRefCounter&& rhs) noexcept
+
+	VKRMoveableRefCounter(VKRMoveableRefCounter&& other) noexcept
+		: m_handle(other.m_handle), m_targets(std::move(other.m_targets))
 	{
-		this->refs = std::move(rhs.refs);
-		this->m_refCount.store(rhs.m_refCount);
-		rhs.m_refCount = 0;
-		this->selfRef = rhs.selfRef;
-		rhs.selfRef = nullptr;
-		this->selfRef->ref = this;
+		m_refCount.store(other.m_refCount);
+		other.m_refCount = 0;
+		other.m_handle = nullptr;
+		m_handle->ref = this;
 	}
 
-	VKRMoveableRefCounter& operator=(VKRMoveableRefCounter&& rhs) noexcept
+	VKRMoveableRefCounter& operator=(VKRMoveableRefCounter&& other) noexcept
 	{
-		cemu_assert(false);
+		cemu_assert(false); // not supported
 		return *this;
 	}
 
+	// keep refTarget alive at least as long as this object
 	void addRef(VKRMoveableRefCounter* refTarget)
 	{
-		this->refs.emplace_back(refTarget->selfRef);
+		m_targets.emplace_back(refTarget->m_handle);
 		refTarget->m_refCount++;
-
 #ifdef CEMU_DEBUG_ASSERT
-		// add reverse ref
-		refTarget->reverseRefs.emplace_back(this->selfRef);
+		refTarget->m_debugReferrers.emplace_back(m_handle);
 #endif
 	}
 
-	// methods to directly increment/decrement ref counter (for situations where no external object is available)
+	// references held by something that is not itself a ref counted object
 	void incRef()
 	{
 		m_refCount++;
@@ -77,38 +75,37 @@ public:
 
 	void decRef()
 	{
-		m_refCount--;
-		if (m_refCount == 0)
+		if (--m_refCount == 0)
 			RefCountReachedZero();
 	}
 
 protected:
-  	virtual void RefCountReachedZero()
+	virtual void RefCountReachedZero()
 	{
-		// does nothing by default
 	}
 
 	std::atomic_int_least32_t m_refCount{};
+
 private:
-	VKRMoveableRefCounterRef* selfRef;
-	std::vector<VKRMoveableRefCounterRef*> refs;
+	VKRMoveableRefCounterRef* m_handle;
+	std::vector<VKRMoveableRefCounterRef*> m_targets; // objects this one keeps alive
 #ifdef CEMU_DEBUG_ASSERT
-	std::vector<VKRMoveableRefCounterRef*> reverseRefs;
+	std::vector<VKRMoveableRefCounterRef*> m_debugReferrers; // objects keeping this one alive
 #endif
 };
 
+// a Vulkan object whose destruction waits until no submitted command buffer uses it
 class VKRDestructibleObject : public VKRMoveableRefCounter
 {
 public:
 	void flagForCurrentCommandBuffer();
 	bool canDestroy();
 
-	virtual ~VKRDestructibleObject() {};
+	virtual ~VKRDestructibleObject() {}
+
 private:
 	uint64 m_lastCmdBufferId{};
 };
-
-/* Vulkan objects */
 
 class VKRObjectTexture : public VKRDestructibleObject
 {
@@ -121,7 +118,6 @@ public:
 	VkImageCreateFlags m_flags;
 	VkImageAspectFlags m_imageAspect;
 	struct VkImageMemAllocation* m_allocation{};
-
 };
 
 class VKRObjectTextureView : public VKRDestructibleObject
@@ -131,23 +127,24 @@ public:
 	~VKRObjectTextureView() override;
 
 	VkImageView m_textureImageView{ VK_NULL_HANDLE };
-	VkSampler m_textureDefaultSampler[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE }; // relict from LatteTextureViewVk, get rid of it eventually
+	VkSampler m_textureDefaultSampler[2] = { VK_NULL_HANDLE, VK_NULL_HANDLE }; // nearest and linear samplers owned by the view
 };
 
-
+// samplers are shared through a cache keyed by their creation parameters
 class VKRObjectSampler : public VKRDestructibleObject
 {
-  public:
+public:
 	VKRObjectSampler(VkSamplerCreateInfo* samplerInfo);
 	~VKRObjectSampler() override;
 
 	static VKRObjectSampler* GetOrCreateSampler(VkSamplerCreateInfo* samplerInfo);
 	static void DestroyCache();
 
-	void RefCountReachedZero() override; // sampler objects are destroyed when not referenced anymore
+	void RefCountReachedZero() override; // released once nothing references it
 
 	VkSampler GetSampler() const { return m_sampler; }
-  private:
+
+private:
 	static std::unordered_map<uint64, VKRObjectSampler*> s_samplerCache;
 	VkSampler m_sampler{ VK_NULL_HANDLE };
 	uint64 m_hash;
@@ -156,18 +153,19 @@ class VKRObjectSampler : public VKRDestructibleObject
 class VKRObjectRenderPass : public VKRDestructibleObject
 {
 public:
+	// an attachment slot is used when isPresent is set or a view is given
 	struct AttachmentEntryColor_t
 	{
 		VKRObjectTextureView* viewObj{};
 		bool isPresent{};
-		VkFormat format; // todo - we dont need to track isPresent or viewObj, we can just compare this with VK_FORMAT_UNDEFINED
+		VkFormat format;
 	};
 
 	struct AttachmentEntryDepth_t
 	{
 		VKRObjectTextureView* viewObj{};
 		bool isPresent{};
-		VkFormat format; // todo - we dont need to track isPresent or viewObj, we can just compare this with VK_FORMAT_UNDEFINED
+		VkFormat format;
 		bool hasStencil;
 	};
 
@@ -179,9 +177,7 @@ public:
 
 	VkFormat GetColorFormat(size_t index)
 	{
-		if (index >= Latte::GPU_LIMITS::NUM_COLOR_ATTACHMENTS)
-			return VK_FORMAT_UNDEFINED;
-		return m_colorAttachmentFormat[index];
+		return index < Latte::GPU_LIMITS::NUM_COLOR_ATTACHMENTS ? m_colorAttachmentFormat[index] : VK_FORMAT_UNDEFINED;
 	}
 
 	VkFormat GetDepthFormat()
@@ -189,13 +185,13 @@ public:
 		return m_depthAttachmentFormat;
 	}
 
-public:
 	VKRObjectRenderPass(AttachmentInfo_t& attachmentInfo, sint32 colorAttachmentCount = Latte::GPU_LIMITS::NUM_COLOR_ATTACHMENTS);
 	~VKRObjectRenderPass() override;
+
 	VkRenderPass m_renderPass{ VK_NULL_HANDLE };
 	VkFormat m_colorAttachmentFormat[Latte::GPU_LIMITS::NUM_COLOR_ATTACHMENTS];
 	VkFormat m_depthAttachmentFormat;
-	uint64 m_hashForPipeline; // helper var. Holds hash of all the renderpass creation parameters (mainly the formats) that affect the pipeline state
+	uint64 m_hashForPipeline; // summary of the attachment formats, part of the pipeline state hash
 };
 
 class VKRObjectFramebuffer : public VKRDestructibleObject
@@ -213,6 +209,7 @@ public:
 	VKRObjectPipeline();
 	~VKRObjectPipeline() override;
 
+	// a pipeline is assigned once, possibly from a compile thread
 	void SetPipeline(VkPipeline newPipeline);
 	VkPipeline GetPipeline() const { return m_pipeline; }
 
