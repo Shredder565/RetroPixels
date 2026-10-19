@@ -1,3 +1,8 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// Minimal IOSU kernel: message queues, timers, resource manager registration
+// and routing of PPC IPC requests (open/close/ioctl/ioctlv) to the services
+// that registered a device path.
 #include "iosu_kernel.h"
 #include "util/helpers/fspinlock.h"
 #include "util/helpers/helpers.h"
@@ -8,776 +13,633 @@ namespace iosu
 {
 	namespace kernel
 	{
-		std::mutex sInternalMutex;
-
-		void IOS_DestroyResourceManagerForQueueId(IOSMsgQueueId msgQueueId);
-		void _IPCDestroyAllHandlesForMsgQueue(IOSMsgQueueId msgQueueId);
-
-		static void _assume_lock()
+		namespace
 		{
-#ifdef CEMU_DEBUG_ASSERT
-			cemu_assert_debug(!sInternalMutex.try_lock());
-#endif
-		}
+			// handles carry a slot index in the low 12 bits and a generation above it
+			constexpr uint32 kSlotMask = 0xFFF;
 
-		/* message queue */
-
-		struct IOSMessageQueue 
-		{
-			// placeholder
-			/* +0x00 */ uint32be ukn00;
-			/* +0x04 */ uint32be ukn04;
-			/* +0x08 */ uint32be numQueuedMessages;
-			/* +0x0C */ uint32be readIndex;
-			/* +0x10 */ uint32be msgArraySize; // 0 if queue is not allocated
-			/* +0x14 */ MEMPTR<betype<IOSMessage>> msgArray;
-			/* +0x18 */ IOSMsgQueueId queueHandle;
-			/* +0x1C */ uint32be ukn1C;
-
-			uint32 GetWriteIndex()
+			uint32 ComposeHandle(size_t slot, uint32 generation)
 			{
-				uint32 idx = readIndex + numQueuedMessages;
-				if (idx >= msgArraySize)
-					idx -= msgArraySize;
-				return idx;
+				return (uint32)slot | ((generation << 12) & 0x7FFFFFFF);
 			}
 
-			/* HLE extension */
-			std::condition_variable cv_send;
-			std::condition_variable cv_recv;
-		};
+			// guards message queues, resource managers and device handles
+			std::mutex g_kernelLock;
 
-		std::array<IOSMessageQueue, 750> sMsgQueuePool;
+			/* ---- message queues ---- */
 
-		IOS_ERROR _IOS_GetMessageQueue(IOSMsgQueueId queueHandle, IOSMessageQueue*& queueOut)
-		{
-			_assume_lock();
-			uint32 index = (queueHandle & 0xFFF);
-			if (index >= sMsgQueuePool.size())
-				return IOS_ERROR_INVALID;
-			IOSMessageQueue& q = sMsgQueuePool.at(index);
-			if(q.queueHandle != queueHandle)
-				return IOS_ERROR_INVALID;
-			queueOut = &q;
-			return IOS_ERROR_OK;
+			struct MessageQueue
+			{
+				IOSMsgQueueId id = 0;
+				uint32 capacity = 0; // zero while the slot is unused
+				uint32 head = 0;
+				uint32 count = 0;
+				betype<IOSMessage>* ring = nullptr; // storage supplied by the creator
+				std::condition_variable spaceAvailable;
+				std::condition_variable messageAvailable;
+			};
+
+			constexpr size_t kQueueSlots = 750;
+			std::array<MessageQueue, kQueueSlots> g_queues;
+			uint32 g_queueGeneration = 0;
+
+			// g_kernelLock must be held
+			MessageQueue* LookupQueue(IOSMsgQueueId id)
+			{
+				const uint32 slot = id & kSlotMask;
+				if (slot >= g_queues.size())
+					return nullptr;
+				MessageQueue& q = g_queues[slot];
+				return q.id == id ? &q : nullptr;
+			}
+
+			/* ---- resource managers (registered device paths) ---- */
+
+			struct DeviceRegistration
+			{
+				bool used = false;
+				std::string path;
+				IOSMsgQueueId queue = 0;
+			};
+
+			std::array<DeviceRegistration, 512> g_devices;
+
+			// g_kernelLock must be held
+			DeviceRegistration* LookupDevice(std::string_view path)
+			{
+				for (DeviceRegistration& d : g_devices)
+					if (d.used && d.path == path)
+						return &d;
+				return nullptr;
+			}
+
+			/* ---- open device handles ---- */
+
+			struct OpenHandle
+			{
+				bool used = false;
+				uint32 handle = 0;
+				std::string path;
+				IOSMsgQueueId queue = 0;
+				bool hasServiceHandle = false;
+				IOSDevHandle serviceHandle = 0; // handle the service returned for IOS_OPEN
+			};
+
+			constexpr size_t kMaxOpenHandles = 96;
+			OpenHandle g_handles[kMaxOpenHandles];
+			uint32 g_handleGeneration = 1;
+
+			// g_kernelLock must be held
+			void DropHandlesOfQueue(IOSMsgQueueId queue)
+			{
+				for (OpenHandle& h : g_handles)
+				{
+					if (h.used && h.queue == queue)
+						h = OpenHandle{};
+				}
+			}
+
+			// g_kernelLock must be held
+			void DropDevicesOfQueue(IOSMsgQueueId queue)
+			{
+				DropHandlesOfQueue(queue);
+				for (DeviceRegistration& d : g_devices)
+				{
+					if (d.used && d.queue == queue)
+						d = DeviceRegistration{};
+				}
+			}
+
+			// g_kernelLock must be held. Returns the slot or nullptr after logging
+			OpenHandle* ValidateHandle(IOSDevHandle handle)
+			{
+				const uint32 slot = handle & kSlotMask;
+				cemu_assert(slot < kMaxOpenHandles);
+				OpenHandle& h = g_handles[slot];
+				if (!h.used)
+				{
+					cemuLog_log(LogType::Force, "IOSU-Kernel: device handle {:08x} is no longer open", handle);
+					return nullptr;
+				}
+				if (h.handle != handle)
+				{
+					cemuLog_log(LogType::Force, "IOSU-Kernel: stale device handle {:08x}", handle);
+					return nullptr;
+				}
+				return &h;
+			}
 		}
 
 		IOSMsgQueueId IOS_CreateMessageQueue(IOSMessage* messageArray, uint32 messageCount)
 		{
-			std::unique_lock _l(sInternalMutex);
+			std::lock_guard lock(g_kernelLock);
 			cemu_assert(messageCount != 0);
-			auto it = std::find_if(sMsgQueuePool.begin(), sMsgQueuePool.end(), [](const IOSMessageQueue& q) { return q.msgArraySize == 0; });
-			if (it == sMsgQueuePool.end())
+			for (size_t slot = 0; slot < g_queues.size(); slot++)
 			{
-				cemu_assert_suspicious();
-				return IOS_ERROR_MAXIMUM_REACHED;
+				MessageQueue& q = g_queues[slot];
+				if (q.capacity != 0)
+					continue;
+				q.id = ComposeHandle(slot, g_queueGeneration++);
+				q.capacity = messageCount;
+				q.ring = (betype<IOSMessage>*)messageArray;
+				q.head = 0;
+				q.count = 0;
+				return q.id;
 			}
-			size_t index = std::distance(sMsgQueuePool.begin(), it);
-			IOSMessageQueue& msgQueue = sMsgQueuePool.at(index);
-			// create queue handle
-			static uint32 sQueueHandleCounter = 0;
-			uint32 queueHandle = (uint32)index | ((sQueueHandleCounter<<12)&0x7FFFFFFF);
-			sQueueHandleCounter++;
-
-			msgQueue.queueHandle = queueHandle;
-			msgQueue.msgArraySize = messageCount;
-			msgQueue.msgArray = (betype<IOSMessage>*)messageArray;
-
-			msgQueue.numQueuedMessages = 0;
-			msgQueue.readIndex = 0;
-
-			return queueHandle;
+			cemu_assert_suspicious();
+			return (IOSMsgQueueId)IOS_ERROR_MAXIMUM_REACHED;
 		}
 
 		IOS_ERROR IOS_DestroyMessageQueue(IOSMsgQueueId msgQueueId)
 		{
-			std::unique_lock _l(sInternalMutex);
-			IOSMessageQueue* msgQueue = nullptr;
-			IOS_ERROR r = _IOS_GetMessageQueue(msgQueueId, msgQueue);
-			if (r != IOS_ERROR_OK)
-				return r;
-			msgQueue->msgArraySize = 0;
-			msgQueue->queueHandle = 0;
-			IOS_DestroyResourceManagerForQueueId(msgQueueId);
+			std::lock_guard lock(g_kernelLock);
+			MessageQueue* q = LookupQueue(msgQueueId);
+			if (!q)
+				return IOS_ERROR_INVALID;
+			q->capacity = 0;
+			q->id = 0;
+			// anyone still blocked on this queue sees the id change and fails
+			q->spaceAvailable.notify_all();
+			q->messageAvailable.notify_all();
+			DropDevicesOfQueue(msgQueueId);
 			return IOS_ERROR_OK;
 		}
 
 		IOS_ERROR IOS_SendMessage(IOSMsgQueueId msgQueueId, IOSMessage message, uint32 flags)
 		{
-			std::unique_lock _l(sInternalMutex);
-			cemu_assert_debug(flags == 0 || flags == 1);
-			bool dontBlock = (flags & 1) != 0;
-			IOSMessageQueue* msgQueue = nullptr;
-			IOS_ERROR r = _IOS_GetMessageQueue(msgQueueId, msgQueue);
-			if (r != IOS_ERROR_OK)
-				return r;
-			while (true)
+			std::unique_lock lock(g_kernelLock);
+			cemu_assert_debug(flags <= 1);
+			const bool nonBlocking = (flags & 1) != 0;
+			MessageQueue* q = LookupQueue(msgQueueId);
+			if (!q)
+				return IOS_ERROR_INVALID;
+			while (q->count == q->capacity)
 			{
-				if (msgQueue->numQueuedMessages == msgQueue->msgArraySize)
-				{
-					if (dontBlock)
-						return IOS_ERROR_WOULD_BLOCK;
-				}
-				else
-					break;
-				msgQueue->cv_send.wait(_l);
-				// after returning from wait, make sure the queue handle is unchanged
-				if (msgQueue->queueHandle != msgQueueId)
+				if (nonBlocking)
+					return IOS_ERROR_WOULD_BLOCK;
+				q->spaceAvailable.wait(lock);
+				if (q->id != msgQueueId)
 					return IOS_ERROR_INVALID;
 			}
-			uint32 writeIndex = msgQueue->GetWriteIndex();
-			msgQueue->msgArray[writeIndex] = message;
-			msgQueue->numQueuedMessages += 1;
-			msgQueue->cv_recv.notify_one();
+			uint32 tail = q->head + q->count;
+			if (tail >= q->capacity)
+				tail -= q->capacity;
+			q->ring[tail] = message;
+			q->count++;
+			q->messageAvailable.notify_one();
 			return IOS_ERROR_OK;
 		}
 
 		IOS_ERROR IOS_ReceiveMessage(IOSMsgQueueId msgQueueId, IOSMessage* messageOut, uint32 flags)
 		{
-			std::unique_lock _l(sInternalMutex);
-			cemu_assert_debug(flags == 0 || flags == 1);
-			bool dontBlock = (flags & 1) != 0;
-			IOSMessageQueue* msgQueue = nullptr;
-			IOS_ERROR r = _IOS_GetMessageQueue(msgQueueId, msgQueue);
-			if (r != IOS_ERROR_OK)
-				return r;
-			while (true)
+			std::unique_lock lock(g_kernelLock);
+			cemu_assert_debug(flags <= 1);
+			const bool nonBlocking = (flags & 1) != 0;
+			MessageQueue* q = LookupQueue(msgQueueId);
+			if (!q)
+				return IOS_ERROR_INVALID;
+			while (q->count == 0)
 			{
-				if (msgQueue->numQueuedMessages == 0)
-				{
-					if (dontBlock)
-						return IOS_ERROR_NONE_AVAILABLE;
-				}
-				else
-					break;
-				msgQueue->cv_recv.wait(_l);
-				// after returning from wait, make sure the queue handle is unchanged
-				if (msgQueue->queueHandle != msgQueueId)
+				if (nonBlocking)
+					return IOS_ERROR_NONE_AVAILABLE;
+				q->messageAvailable.wait(lock);
+				if (q->id != msgQueueId)
 					return IOS_ERROR_INVALID;
 			}
-			*messageOut = msgQueue->msgArray[(uint32)msgQueue->readIndex];
-			msgQueue->readIndex = msgQueue->readIndex + 1;
-			if (msgQueue->readIndex >= msgQueue->msgArraySize)
-				msgQueue->readIndex -= msgQueue->msgArraySize;
-			msgQueue->numQueuedMessages -= 1;
-			msgQueue->cv_send.notify_one();
+			*messageOut = q->ring[q->head];
+			q->head++;
+			if (q->head >= q->capacity)
+				q->head -= q->capacity;
+			q->count--;
+			q->spaceAvailable.notify_one();
 			return IOS_ERROR_OK;
 		}
 
-		/* timer */
+		/* ---- timers ---- */
 
-		std::mutex sTimerMutex;
-		std::condition_variable sTimerCV;
-		std::atomic_bool sTimerThreadStop;
-
-		struct IOSTimer
+		namespace
 		{
-			IOSMsgQueueId queueId;
-			uint32 message;
-			HRTick nextFire;
-			HRTick repeat;
-			bool isValid;
-		};
+			struct Timer
+			{
+				bool valid = false;
+				IOSMsgQueueId queue = 0;
+				uint32 message = 0;
+				HRTick due = 0; // 0 = not armed
+				HRTick period = 0;
+			};
 
-		std::vector<IOSTimer> sTimers;
-		std::vector<IOSTimerId> sTimersFreeHandles;
+			std::mutex g_timerLock;
+			std::condition_variable g_timerWake;
+			std::atomic_bool g_timerShutdown{ false };
+			std::vector<Timer> g_timers;
+			std::vector<IOSTimerId> g_recycledTimers;
+			std::set<std::pair<HRTick, IOSTimerId>> g_armedTimers; // ordered by due time, then id
 
-		auto sTimerSortComparator = [](const IOSTimerId& idA, const IOSTimerId& idB)
-		{
-			// order by nextFire, then by timerId to avoid duplicate keys
-			IOSTimer& timerA = sTimers[idA];
-			IOSTimer& timerB = sTimers[idB];
-			if (timerA.nextFire != timerB.nextFire)
-				return timerA.nextFire < timerB.nextFire;
-			return idA < idB;
-		};
-		std::set<IOSTimerId, decltype(sTimerSortComparator)> sTimerByFireTime;
+			// g_timerLock must be held
+			void Rearm(IOSTimerId id, HRTick due)
+			{
+				Timer& t = g_timers[id];
+				if (t.due != 0)
+					g_armedTimers.erase({ t.due, id });
+				t.due = due;
+				if (due != 0)
+					g_armedTimers.insert({ due, id });
+			}
 
-		IOSTimer& IOS_GetFreeTimer()
-		{
-			cemu_assert_debug(!sTimerMutex.try_lock()); // lock must be held by current thread
-			if (sTimersFreeHandles.empty())
-				return sTimers.emplace_back();
-			IOSTimerId timerId = sTimersFreeHandles.back();
-			sTimersFreeHandles.pop_back();
-			return sTimers[timerId];
-		}
-
-		void IOS_TimerSetNextFireTime(IOSTimer& timer, HRTick nextFire)
-		{
-			cemu_assert_debug(!sTimerMutex.try_lock()); // lock must be held by current thread
-			IOSTimerId timerId = &timer - sTimers.data();
-			auto it = sTimerByFireTime.find(timerId);
-			if(it != sTimerByFireTime.end())
-				sTimerByFireTime.erase(it);
-			timer.nextFire = nextFire;
-			if(nextFire != 0)
-				sTimerByFireTime.insert(timerId);
-		}
-
-		void IOS_StopTimerInternal(IOSTimerId timerId)
-		{
-			cemu_assert_debug(!sTimerMutex.try_lock());
-			IOS_TimerSetNextFireTime(sTimers[timerId], 0);
+			void TimerThreadMain()
+			{
+				SetThreadName("IOS-Timer");
+				std::unique_lock lock(g_timerLock);
+				while (!g_timerShutdown)
+				{
+					if (g_armedTimers.empty())
+					{
+						g_timerWake.wait_for(lock, std::chrono::seconds(10));
+						continue;
+					}
+					const auto [due, id] = *g_armedTimers.begin();
+					const HRTick now = HighResolutionTimer::now().getTick();
+					if (now < due)
+					{
+						g_timerWake.wait_for(lock, std::chrono::microseconds(HighResolutionTimer::ticksToMicroseconds(due - now)));
+						continue;
+					}
+					const Timer& t = g_timers[id];
+					Rearm(id, t.period != 0 ? due + t.period : 0);
+					const IOSMsgQueueId queue = t.queue;
+					const uint32 message = t.message;
+					lock.unlock();
+					IOS_SendMessage(queue, message, 1);
+					lock.lock();
+				}
+			}
 		}
 
 		IOS_ERROR IOS_CreateTimer(uint32 startMicroseconds, uint32 repeatMicroseconds, uint32 queueId, uint32 message)
 		{
-			std::unique_lock _l(sTimerMutex);
-			IOSTimer& timer = IOS_GetFreeTimer();
-			timer.queueId = queueId;
-			timer.message = message;
-			HRTick nextFire = HighResolutionTimer::now().getTick() + HighResolutionTimer::microsecondsToTicks(startMicroseconds);
-			timer.repeat = HighResolutionTimer::microsecondsToTicks(repeatMicroseconds);
-			IOS_TimerSetNextFireTime(timer, nextFire);
-			timer.isValid = true;
-			sTimerCV.notify_one();
-			return (IOS_ERROR)(&timer - sTimers.data());
+			std::lock_guard lock(g_timerLock);
+			IOSTimerId id;
+			if (!g_recycledTimers.empty())
+			{
+				id = g_recycledTimers.back();
+				g_recycledTimers.pop_back();
+			}
+			else
+			{
+				id = (IOSTimerId)g_timers.size();
+				g_timers.emplace_back();
+			}
+			Timer& t = g_timers[id];
+			t.queue = queueId;
+			t.message = message;
+			t.period = HighResolutionTimer::microsecondsToTicks(repeatMicroseconds);
+			Rearm(id, HighResolutionTimer::now().getTick() + HighResolutionTimer::microsecondsToTicks(startMicroseconds));
+			t.valid = true;
+			g_timerWake.notify_one();
+			return (IOS_ERROR)id;
 		}
 
 		IOS_ERROR IOS_StopTimer(IOSTimerId timerId)
 		{
-			std::unique_lock _l(sTimerMutex);
-			if (timerId >= sTimers.size() || !sTimers[timerId].isValid)
+			std::lock_guard lock(g_timerLock);
+			if (timerId >= g_timers.size() || !g_timers[timerId].valid)
 				return IOS_ERROR_INVALID;
-			IOS_StopTimerInternal(timerId);
+			Rearm(timerId, 0);
 			return IOS_ERROR_OK;
 		}
 
 		IOS_ERROR IOS_DestroyTimer(IOSTimerId timerId)
 		{
-			std::unique_lock _l(sTimerMutex);
-			if (timerId >= sTimers.size() || !sTimers[timerId].isValid)
+			std::lock_guard lock(g_timerLock);
+			if (timerId >= g_timers.size() || !g_timers[timerId].valid)
 				return IOS_ERROR_INVALID;
-			IOS_StopTimerInternal(timerId);
-			sTimers[timerId].isValid = false;
-			sTimersFreeHandles.push_back(timerId);
+			Rearm(timerId, 0);
+			g_timers[timerId].valid = false;
+			g_recycledTimers.push_back(timerId);
 			return IOS_ERROR_OK;
 		}
 
-		void IOSTimerThread()
-		{
-			SetThreadName("IOS-Timer");
-			std::unique_lock _l(sTimerMutex);
-			while (!sTimerThreadStop)
-			{
-				if (sTimerByFireTime.empty())
-				{
-					sTimerCV.wait_for(_l, std::chrono::milliseconds(10000));
-					continue;
-				}
-				IOSTimerId timerId = *sTimerByFireTime.begin();
-				IOSTimer& timer = sTimers[timerId];
-				HRTick now = HighResolutionTimer::now().getTick();
-				if (now >= timer.nextFire)
-				{
-					if(timer.repeat == 0)
-						IOS_TimerSetNextFireTime(timer, 0);
-					else
-						IOS_TimerSetNextFireTime(timer, timer.nextFire + timer.repeat);
-					IOSMsgQueueId queueId = timer.queueId;
-					uint32 message = timer.message;
-					// fire timer
-					_l.unlock();
-					IOSMessage msg;
-					IOS_SendMessage(queueId, message, 1);
-					_l.lock();
-					continue;
-				}
-				else
-				{
-					sTimerCV.wait_for(_l, std::chrono::microseconds(HighResolutionTimer::ticksToMicroseconds(timer.nextFire - now)));
-				}
-			}
-		}
-
-		/* devices and IPC */
-
-		struct IOSResourceManager
-		{
-			bool isSet{false};
-			std::string path;
-			IOSMsgQueueId msgQueueId;
-		};
-
-		std::array<IOSResourceManager, 512> sDeviceResources;
-		
-		IOSResourceManager* _IOS_FindResourceManager(const char* devicePath)
-		{
-			_assume_lock();
-			std::string_view devicePathSV{ devicePath };
-			for (auto& it : sDeviceResources)
-			{
-				if (it.isSet && it.path == devicePathSV)
-					return &it;
-			}
-			return nullptr;
-		}
-
-		IOSResourceManager* _IOS_CreateNewResourceManager(const char* devicePath, IOSMsgQueueId msgQueueId)
-		{
-			_assume_lock();
-			std::string_view devicePathSV{ devicePath };
-			for (auto& it : sDeviceResources)
-			{
-				if (!it.isSet)
-				{
-					it.isSet = true;
-					it.path = devicePath;
-					it.msgQueueId = msgQueueId;
-					return &it;
-				}
-			}
-			return nullptr;
-		}
+		/* ---- resource managers ---- */
 
 		IOS_ERROR IOS_RegisterResourceManager(const char* devicePath, IOSMsgQueueId msgQueueId)
 		{
-			std::unique_lock _lock(sInternalMutex);
-			if (_IOS_FindResourceManager(devicePath))
+			std::lock_guard lock(g_kernelLock);
+			if (LookupDevice(devicePath))
 			{
 				cemu_assert_suspicious();
-				return IOS_ERROR_INVALID; // correct error code?
+				return IOS_ERROR_INVALID;
 			}
-
-			// verify if queue is valid
-			IOSMessageQueue* msgQueue;
-			IOS_ERROR r = _IOS_GetMessageQueue(msgQueueId, msgQueue);
-			if (r != IOS_ERROR_OK)
-				return r;
-
-			// create resource manager
-			IOSResourceManager* resourceMgr = _IOS_CreateNewResourceManager(devicePath, msgQueueId);
-			if (!resourceMgr)
-				return IOS_ERROR_MAXIMUM_REACHED;
-
-			return IOS_ERROR_OK;
-		}
-
-		void IOS_DestroyResourceManagerForQueueId(IOSMsgQueueId msgQueueId)
-		{
-			_assume_lock();
-			// destroy all IPC handles associated with this queue
-			_IPCDestroyAllHandlesForMsgQueue(msgQueueId);
-			// destroy device resource manager
-			for (auto& it : sDeviceResources)
+			if (!LookupQueue(msgQueueId))
+				return IOS_ERROR_INVALID;
+			for (DeviceRegistration& d : g_devices)
 			{
-				if (it.isSet && it.msgQueueId == msgQueueId)
-				{
-					it.isSet = false;
-					it.path.clear();
-					it.msgQueueId = 0;
-				}
+				if (d.used)
+					continue;
+				d.used = true;
+				d.path = devicePath;
+				d.queue = msgQueueId;
+				return IOS_ERROR_OK;
 			}
+			return IOS_ERROR_MAXIMUM_REACHED;
 		}
 
 		IOS_ERROR IOS_DeviceAssociateId(const char* devicePath, uint32 id)
 		{
-			// not yet implemented
-			return IOS_ERROR_OK;
+			return IOS_ERROR_OK; // no id association is tracked
 		}
 
-		/* IPC */
-		
-		struct IOSDispatchableCommand
-		{
-			// stores a copy of incoming IPC requests with some extra information required for replies
-			IPCCommandBody body; // our dispatchable copy
-			IPCIoctlVector vecCopy[8]; // our copy of the Ioctlv vector array
-			IPCCommandBody* originalBody; // the original command that was sent to us
-			uint32 ppcCoreIndex;
-			IOSDevHandle replyHandle; // handle for outgoing replies
-			bool isAllocated{false};
-		};
+		/* ---- IPC routing ---- */
 
-		SysAllocator<IOSDispatchableCommand, 96> sIPCDispatchableCommandPool;
-		std::queue<IOSDispatchableCommand*> sIPCFreeDispatchableCommands;
-		FSpinlock sIPCDispatchableCommandPoolLock;
-
-		void _IPCInitDispatchablePool()
+		namespace
 		{
-			sIPCDispatchableCommandPoolLock.lock();
-			while (!sIPCFreeDispatchableCommands.empty())
-				sIPCFreeDispatchableCommands.pop();
-			for (size_t i = 0; i < sIPCDispatchableCommandPool.GetCount(); i++)
-				sIPCFreeDispatchableCommands.push(sIPCDispatchableCommandPool.GetPtr()+i);
-			sIPCDispatchableCommandPoolLock.unlock();
-		}
-
-		IOSDispatchableCommand* _IPCAllocateDispatchableCommand()
-		{
-			sIPCDispatchableCommandPoolLock.lock();
-			if (sIPCFreeDispatchableCommands.empty())
+			// Kernel side copy of a request. 'request' must stay the first member:
+			// services receive a pointer to it and hand the same pointer back to
+			// IOS_ResourceReply.
+			struct InFlightRequest
 			{
-				cemuLog_log(LogType::Force, "IOS: Exhausted pool of dispatchable commands");
-				sIPCDispatchableCommandPoolLock.unlock();
-				return nullptr;
+				IPCCommandBody request;
+				IPCIoctlVector vectorsCopy[8];
+				IPCCommandBody* sender; // the PPC side command block
+				uint32 coreIndex;
+				IOSDevHandle clientHandle; // the kernel handle the caller knows
+				bool inUse{ false };
+			};
+
+			SysAllocator<InFlightRequest, 96> g_requestPool;
+			std::queue<InFlightRequest*> g_idleRequests;
+			FSpinlock g_requestPoolLock;
+			std::mutex g_replyLock[3];
+
+			bool IsPoolEntry(const InFlightRequest* r)
+			{
+				return r >= g_requestPool.GetPtr() && r < g_requestPool.GetPtr() + g_requestPool.GetCount();
 			}
-			IOSDispatchableCommand* cmd = sIPCFreeDispatchableCommands.front();
-			sIPCFreeDispatchableCommands.pop();
-			cemu_assert_debug(!cmd->isAllocated);
-			cmd->isAllocated = true;
-			sIPCDispatchableCommandPoolLock.unlock();
-			return cmd;
-		}
 
-		void _IPCReleaseDispatchableCommand(IOSDispatchableCommand* cmd)
-		{
-			sIPCDispatchableCommandPoolLock.lock();
-			cemu_assert_debug(cmd->isAllocated);
-			cmd->isAllocated = false;
-			sIPCFreeDispatchableCommands.push(cmd);
-			sIPCDispatchableCommandPoolLock.unlock();
-		}
-
-		static constexpr size_t MAX_NUM_ACTIVE_DEV_HANDLES = 96; // per process
-
-		struct IPCActiveDeviceHandle
-		{
-			bool isSet{false};
-			uint32 handleCheckValue{0};
-			std::string path;
-			IOSMsgQueueId msgQueueId;
-			// dispatch target handle (retrieved via IOS_OPEN command to dispatch target)
-			bool hasDispatchTargetHandle{false};
-			IOSDevHandle dispatchTargetHandle;
-		};
-
-		IPCActiveDeviceHandle sActiveDeviceHandles[MAX_NUM_ACTIVE_DEV_HANDLES];
-
-		IOS_ERROR _IPCCreateResourceHandle(const char* devicePath, IOSDevHandle& handleOut)
-		{
-			std::unique_lock _lock(sInternalMutex);
-			static uint32 sHandleCreationCounter = 1;
-			// find resource manager for device
-			IOSResourceManager* resMgr = _IOS_FindResourceManager(devicePath);
-			if (!resMgr)
+			void ResetRequestPool()
 			{
-				cemuLog_log(LogType::Force, "IOSU-Kernel: IOS_Open() could not open {}", devicePath);
-				return IOS_ERROR_INVALID;
+				g_requestPoolLock.lock();
+				g_idleRequests = {};
+				for (size_t i = 0; i < g_requestPool.GetCount(); i++)
+					g_idleRequests.push(g_requestPool.GetPtr() + i);
+				g_requestPoolLock.unlock();
 			}
-			IOSMsgQueueId msgQueueId = resMgr->msgQueueId;
-			_lock.unlock();
-			// create new handle
-			sint32 deviceHandleIndex = -1;
-			for (size_t i = 0; i < MAX_NUM_ACTIVE_DEV_HANDLES; i++)
+
+			InFlightRequest* TakeRequest()
 			{
-				if (!sActiveDeviceHandles[i].isSet)
+				g_requestPoolLock.lock();
+				InFlightRequest* r = nullptr;
+				if (!g_idleRequests.empty())
 				{
-					deviceHandleIndex = (sint32)i;
-					break;
+					r = g_idleRequests.front();
+					g_idleRequests.pop();
+					cemu_assert_debug(!r->inUse);
+					r->inUse = true;
 				}
-			}
-			cemu_assert_debug(deviceHandleIndex >= 0);
-			if (deviceHandleIndex < 0)
-				return IOS_ERROR_MAXIMUM_REACHED;
-			// calc handle
-			uint32 devHandle = deviceHandleIndex | ((sHandleCreationCounter << 12) & 0x7FFFFFFF);
-			sHandleCreationCounter++;
-			// init handle instance
-			sActiveDeviceHandles[deviceHandleIndex].isSet = true;
-			sActiveDeviceHandles[deviceHandleIndex].handleCheckValue = devHandle;
-			sActiveDeviceHandles[deviceHandleIndex].path = devicePath;
-			sActiveDeviceHandles[deviceHandleIndex].msgQueueId = msgQueueId;
-			sActiveDeviceHandles[deviceHandleIndex].hasDispatchTargetHandle = false;			
-			handleOut = devHandle;
-			return IOS_ERROR_OK;
-		}
-
-		IOS_ERROR _IPCDestroyResourceHandle(IOSDevHandle devHandle)
-		{
-			std::unique_lock _lock(sInternalMutex);
-			uint32 index = devHandle & 0xFFF;
-			cemu_assert(index < MAX_NUM_ACTIVE_DEV_HANDLES);
-			if (!sActiveDeviceHandles[index].isSet)
-			{
-				cemuLog_log(LogType::Force, "_IPCDispatchToResourceManager(): Resource manager destroyed before all IPC commands were processed");
-				return IOS_ERROR_INVALID;
-			}
-			if (devHandle != sActiveDeviceHandles[index].handleCheckValue)
-			{
-				cemuLog_log(LogType::Force, "_IPCDispatchToResourceManager(): Mismatching handle");
-				return IOS_ERROR_INVALID;
-			}
-			sActiveDeviceHandles[index].isSet = false;
-			sActiveDeviceHandles[index].handleCheckValue = 0;
-			sActiveDeviceHandles[index].hasDispatchTargetHandle = false;
-			_lock.unlock();
-			return IOS_ERROR_OK;
-		}
-
-		void _IPCDestroyAllHandlesForMsgQueue(IOSMsgQueueId msgQueueId)
-		{
-			_assume_lock();
-			for (auto& it : sActiveDeviceHandles)
-			{
-				if (it.isSet && it.msgQueueId == msgQueueId)
-				{
-					it.isSet = false;
-					it.path.clear();
-					it.handleCheckValue = 0;
-					it.hasDispatchTargetHandle = false;
-					it.msgQueueId = 0;
-				}
-			}
-		}
-
-		IOS_ERROR _IPCAssignDispatchTargetHandle(IOSDevHandle devHandle, IOSDevHandle internalHandle)
-		{
-			std::unique_lock _lock(sInternalMutex);
-			uint32 index = devHandle & 0xFFF;
-			cemu_assert(index < MAX_NUM_ACTIVE_DEV_HANDLES);
-			if (!sActiveDeviceHandles[index].isSet)
-			{
-				cemuLog_log(LogType::Force, "_IPCDispatchToResourceManager(): Resource manager destroyed before all IPC commands were processed");
-				return IOS_ERROR_INVALID;
-			}
-			if (devHandle != sActiveDeviceHandles[index].handleCheckValue)
-			{
-				cemuLog_log(LogType::Force, "_IPCDispatchToResourceManager(): Mismatching handle");
-				return IOS_ERROR_INVALID;
-			}
-			cemu_assert_debug(!sActiveDeviceHandles[index].hasDispatchTargetHandle);
-			sActiveDeviceHandles[index].hasDispatchTargetHandle = true;
-			sActiveDeviceHandles[index].dispatchTargetHandle = internalHandle;
-			_lock.unlock();
-			return IOS_ERROR_OK;
-		}
-
-		IOS_ERROR _IPCDispatchToResourceManager(IOSDevHandle devHandle, IOSDispatchableCommand* dispatchCmd)
-		{
-			std::unique_lock _lock(sInternalMutex);
-			uint32 index = devHandle & 0xFFF;
-			cemu_assert(index < MAX_NUM_ACTIVE_DEV_HANDLES);
-			if (!sActiveDeviceHandles[index].isSet)
-			{
-				cemuLog_log(LogType::Force, "_IPCDispatchToResourceManager(): Resource manager destroyed before all IPC commands were processed");
-				return IOS_ERROR_INVALID;
-			}
-			if (devHandle != sActiveDeviceHandles[index].handleCheckValue)
-			{
-				cemuLog_log(LogType::Force, "_IPCDispatchToResourceManager(): Mismatching handle");
-				return IOS_ERROR_INVALID;
-			}
-			IOSMsgQueueId msgQueueId = sActiveDeviceHandles[index].msgQueueId;
-			if (dispatchCmd->body.cmdId == IPCCommandId::IOS_OPEN)
-			{
-				cemu_assert(!sActiveDeviceHandles[index].hasDispatchTargetHandle);
-				dispatchCmd->body.devHandle = 0;
-			}
-			else
-			{
-				cemu_assert(sActiveDeviceHandles[index].hasDispatchTargetHandle);
-				dispatchCmd->body.devHandle = sActiveDeviceHandles[index].dispatchTargetHandle;
-			}
-			_lock.unlock();
-			MEMPTR<IOSDispatchableCommand> msgVal{ dispatchCmd };
-			IOS_ERROR r = IOS_SendMessage(msgQueueId, msgVal.GetMPTR(), 1);
-			if(r != IOS_ERROR_OK)
-				cemuLog_log(LogType::Force, "_IPCDispatchToResourceManager(): SendMessage returned {}", (sint32)r);
-			return r;
-		}
-
-		std::mutex sMtxReply[3];
-
-		void _IPCReplyAndRelease(IOSDispatchableCommand* dispatchCmd, uint32 result)
-		{
-			cemu_assert(dispatchCmd->ppcCoreIndex < 3);
-			std::unique_lock _l(sMtxReply[(uint32)dispatchCmd->ppcCoreIndex]);
-			cemu_assert(dispatchCmd >= sIPCDispatchableCommandPool.GetPtr() && dispatchCmd < sIPCDispatchableCommandPool.GetPtr() + sIPCDispatchableCommandPool.GetCount());	
-			dispatchCmd->originalBody->result = result;
-			// submit to COS
-			IPCCommandBody* responseArray[1];
-			responseArray[0] = dispatchCmd->originalBody;
-			coreinit::IPCDriver_NotifyResponses(dispatchCmd->ppcCoreIndex, responseArray, 1);
-			_IPCReleaseDispatchableCommand(dispatchCmd);
-		}
-
-		IOS_ERROR _IPCHandlerIn_IOS_Open(IOSDispatchableCommand* dispatchCmd)
-		{
-			IPCCommandBody& cmd = dispatchCmd->body;
-			const char* name = MEMPTR<const char>(cmd.args[0]).GetPtr();
-			uint32 nameLenPlusOne = cmd.args[1];
-			cemu_assert(nameLenPlusOne > 0);
-			uint32 flags = cmd.args[2];
-			cemu_assert_debug(flags == 0);
-
-			std::string devicePath{ name, nameLenPlusOne - 1 };
-
-			IOSDevHandle handle;
-			IOS_ERROR r = _IPCCreateResourceHandle(devicePath.c_str(), handle);
-			if (r != IOS_ERROR_OK)
+				g_requestPoolLock.unlock();
+				if (!r)
+					cemuLog_log(LogType::Force, "IOSU-Kernel: no free IPC request slots");
 				return r;
-			dispatchCmd->replyHandle = handle;
-			dispatchCmd->body.devHandle = 0;
-			r = _IPCDispatchToResourceManager(handle, dispatchCmd);
-			return r;
-		}
-
-		IOS_ERROR _IPCHandlerIn_IOS_Close(IOSDispatchableCommand* dispatchCmd)
-		{
-			IPCCommandBody& cmd = dispatchCmd->body;
-			IOS_ERROR r = _IPCDispatchToResourceManager(dispatchCmd->body.devHandle, dispatchCmd);
-			return r;
-		}
-
-		IOS_ERROR _IPCHandlerIn_IOS_Ioctl(IOSDispatchableCommand* dispatchCmd)
-		{
-			IPCCommandBody& cmd = dispatchCmd->body;
-			IOS_ERROR r = _IPCDispatchToResourceManager(dispatchCmd->body.devHandle, dispatchCmd);
-			return r;
-		}
-
-		IOS_ERROR _IPCHandlerIn_IOS_Ioctlv(IOSDispatchableCommand* dispatchCmd)
-		{
-			IPCCommandBody& cmd = dispatchCmd->body;
-			uint32 requestId = dispatchCmd->body.args[0];
-			uint32 numIn = dispatchCmd->body.args[1];
-			uint32 numOut = dispatchCmd->body.args[2];
-			IPCIoctlVector* vec = MEMPTR<IPCIoctlVector>(cmd.args[3]).GetPtr();
-			// copy the vector array
-			uint32 numVec = numIn + numOut;
-			if (numVec <= 8)
-			{
-				std::copy(vec, vec + numVec, dispatchCmd->vecCopy);
-				dispatchCmd->body.args[3] = MEMPTR<IPCIoctlVector>(vec).GetMPTR();
 			}
-			else
-			{
-				// reuse the original vector pointer
-				cemuLog_log(LogType::Force, "Info: Ioctlv command with more than 8 vectors");
-			}
-			return _IPCDispatchToResourceManager(dispatchCmd->body.devHandle, dispatchCmd);
-		}
 
-		// normally COS kernel handles this, but currently we skip the IPC getting proxied through it
-		IOS_ERROR _IPCHandlerIn_TranslateVectorAddresses(IOSDispatchableCommand* dispatchCmd)
-		{
-			uint32 numIn = dispatchCmd->body.args[1];
-			uint32 numOut = dispatchCmd->body.args[2];
-			IPCIoctlVector* vec = MEMPTR<IPCIoctlVector>(dispatchCmd->body.args[3]).GetPtr();
-			for (uint32 i = 0; i < numIn + numOut; i++)
+			void ReturnRequest(InFlightRequest* r)
 			{
-				if (vec[i].baseVirt == nullptr && vec[i].size != 0)
+				g_requestPoolLock.lock();
+				cemu_assert_debug(r->inUse);
+				r->inUse = false;
+				g_idleRequests.push(r);
+				g_requestPoolLock.unlock();
+			}
+
+			// writes the result into the PPC command block, hands it back to COS and frees the slot
+			void Complete(InFlightRequest* r, uint32 result)
+			{
+				cemu_assert(r->coreIndex < 3);
+				std::lock_guard lock(g_replyLock[r->coreIndex]);
+				cemu_assert(IsPoolEntry(r));
+				r->sender->result = result;
+				IPCCommandBody* done[1] = { r->sender };
+				coreinit::IPCDriver_NotifyResponses(r->coreIndex, done, 1);
+				ReturnRequest(r);
+			}
+
+			IOS_ERROR OpenHandleForPath(const std::string& path, IOSDevHandle& handleOut)
+			{
+				std::lock_guard lock(g_kernelLock);
+				const DeviceRegistration* dev = LookupDevice(path);
+				if (!dev)
 				{
-					cemuLog_logDebug(LogType::Force, "IPC Ioctlv failed because baseVirt is null but size is not 0");
+					cemuLog_log(LogType::Force, "IOSU-Kernel: IOS_Open() could not open {}", path);
 					return IOS_ERROR_INVALID;
 				}
-				// todo - check for valid pointer range
-				vec[i].basePhys = vec[i].baseVirt;
+				for (size_t slot = 0; slot < kMaxOpenHandles; slot++)
+				{
+					OpenHandle& h = g_handles[slot];
+					if (h.used)
+						continue;
+					h.used = true;
+					h.handle = ComposeHandle(slot, g_handleGeneration++);
+					h.path = path;
+					h.queue = dev->queue;
+					h.hasServiceHandle = false;
+					handleOut = h.handle;
+					return IOS_ERROR_OK;
+				}
+				cemu_assert_debug(false);
+				return IOS_ERROR_MAXIMUM_REACHED;
 			}
-			return IOS_ERROR_OK;
+
+			IOS_ERROR CloseHandle(IOSDevHandle handle)
+			{
+				std::lock_guard lock(g_kernelLock);
+				OpenHandle* h = ValidateHandle(handle);
+				if (!h)
+					return IOS_ERROR_INVALID;
+				h->used = false;
+				h->handle = 0;
+				h->hasServiceHandle = false;
+				return IOS_ERROR_OK;
+			}
+
+			IOS_ERROR BindServiceHandle(IOSDevHandle handle, IOSDevHandle serviceHandle)
+			{
+				std::lock_guard lock(g_kernelLock);
+				OpenHandle* h = ValidateHandle(handle);
+				if (!h)
+					return IOS_ERROR_INVALID;
+				cemu_assert_debug(!h->hasServiceHandle);
+				h->hasServiceHandle = true;
+				h->serviceHandle = serviceHandle;
+				return IOS_ERROR_OK;
+			}
+
+			// translates the handle to the service's own handle and queues the request
+			IOS_ERROR Forward(IOSDevHandle handle, InFlightRequest* r)
+			{
+				IOSMsgQueueId queue;
+				{
+					std::lock_guard lock(g_kernelLock);
+					OpenHandle* h = ValidateHandle(handle);
+					if (!h)
+						return IOS_ERROR_INVALID;
+					queue = h->queue;
+					if (r->request.cmdId == IPCCommandId::IOS_OPEN)
+					{
+						cemu_assert(!h->hasServiceHandle);
+						r->request.devHandle = 0;
+					}
+					else
+					{
+						cemu_assert(h->hasServiceHandle);
+						r->request.devHandle = h->serviceHandle;
+					}
+				}
+				const IOS_ERROR err = IOS_SendMessage(queue, MEMPTR<InFlightRequest>(r).GetMPTR(), 1);
+				if (err != IOS_ERROR_OK)
+					cemuLog_log(LogType::Force, "IOSU-Kernel: could not queue IPC request ({})", (sint32)err);
+				return err;
+			}
+
+			IOS_ERROR ForwardOpen(InFlightRequest* r)
+			{
+				const char* name = MEMPTR<const char>(r->request.args[0]).GetPtr();
+				const uint32 nameSize = r->request.args[1]; // includes the terminator
+				cemu_assert(nameSize > 0);
+				cemu_assert_debug(r->request.args[2] == 0); // open mode
+				IOSDevHandle handle;
+				IOS_ERROR err = OpenHandleForPath(std::string(name, nameSize - 1), handle);
+				if (err != IOS_ERROR_OK)
+					return err;
+				r->clientHandle = handle;
+				r->request.devHandle = 0;
+				return Forward(handle, r);
+			}
+
+			// COS normally fills in the physical addresses. Vectors stay in guest memory
+			// and the service reads them from there.
+			IOS_ERROR PrepareVectors(InFlightRequest* r)
+			{
+				const uint32 count = r->request.args[1] + r->request.args[2];
+				IPCIoctlVector* vectors = MEMPTR<IPCIoctlVector>(r->request.args[3]).GetPtr();
+				for (uint32 i = 0; i < count; i++)
+				{
+					if (vectors[i].baseVirt == nullptr && vectors[i].size != 0)
+					{
+						cemuLog_logDebug(LogType::Force, "IPC Ioctlv rejected: vector {} has a size but no address", i);
+						return IOS_ERROR_INVALID;
+					}
+					vectors[i].basePhys = vectors[i].baseVirt;
+				}
+				if (count <= 8)
+					std::copy(vectors, vectors + count, r->vectorsCopy);
+				else
+					cemuLog_log(LogType::Force, "Info: Ioctlv command with more than 8 vectors");
+				return IOS_ERROR_OK;
+			}
 		}
 
-		// called by COS directly
 		void IPCSubmitFromCOS(uint32 ppcCoreIndex, IPCCommandBody* cmd)
 		{
-			// create a copy of the cmd
-			IOSDispatchableCommand* dispatchCmd = _IPCAllocateDispatchableCommand();
-			dispatchCmd->body = *cmd;
-			dispatchCmd->originalBody = cmd;
-			dispatchCmd->ppcCoreIndex = ppcCoreIndex;
-			dispatchCmd->replyHandle = cmd->devHandle;
-			// forward command to device
-			IOS_ERROR r = IOS_ERROR_INVALID;
+			InFlightRequest* r = TakeRequest();
+			cemu_assert(r != nullptr);
+			r->request = *cmd;
+			r->sender = cmd;
+			r->coreIndex = ppcCoreIndex;
+			r->clientHandle = cmd->devHandle;
+			IOS_ERROR err;
 			switch ((IPCCommandId)cmd->cmdId)
 			{
 			case IPCCommandId::IOS_OPEN:
-				dispatchCmd->replyHandle = 0;
-				r = _IPCHandlerIn_IOS_Open(dispatchCmd);
+				r->clientHandle = 0;
+				err = ForwardOpen(r);
 				break;
 			case IPCCommandId::IOS_CLOSE:
-				r = _IPCHandlerIn_IOS_Close(dispatchCmd);
-				break;
 			case IPCCommandId::IOS_IOCTL:
-				r = _IPCHandlerIn_IOS_Ioctl(dispatchCmd);
+				err = Forward(r->request.devHandle, r);
 				break;
 			case IPCCommandId::IOS_IOCTLV:
-				r = _IPCHandlerIn_TranslateVectorAddresses(dispatchCmd);
-				if(r < 0)
+				err = PrepareVectors(r);
+				if (err < 0)
 					cemuLog_log(LogType::Force, "Ioctlv error");
 				else
-					r = _IPCHandlerIn_IOS_Ioctlv(dispatchCmd);
+					err = Forward(r->request.devHandle, r);
 				break;
 			default:
 				cemuLog_log(LogType::Force, "Invalid IPC command {}", (uint32)(IPCCommandId)cmd->cmdId);
+				err = IOS_ERROR_INVALID;
 				break;
 			}
-			if (r < 0)
+			// on success the service answers later through IOS_ResourceReply
+			if (err < 0)
 			{
-				cemuLog_log(LogType::Force, "Error occurred while trying to dispatch IPC");			
-				_IPCReplyAndRelease(dispatchCmd, r);
-				// in non-error case the device handler will send the result asynchronously via IOS_ResourceReply
+				cemuLog_log(LogType::Force, "Error occurred while trying to dispatch IPC");
+				Complete(r, err);
 			}
 		}
 
 		IOS_ERROR IOS_ResourceReply(IPCCommandBody* cmd, IOS_ERROR result)
 		{
-			IOSDispatchableCommand* dispatchCmd = (IOSDispatchableCommand*)cmd;
-			cemu_assert(dispatchCmd >= sIPCDispatchableCommandPool.GetPtr() && dispatchCmd < sIPCDispatchableCommandPool.GetPtr() + sIPCDispatchableCommandPool.GetCount());
-			cemu_assert_debug(dispatchCmd->isAllocated);
-			dispatchCmd->originalBody->result = result;
-			if (dispatchCmd->originalBody->cmdId == IPCCommandId::IOS_OPEN)
+			InFlightRequest* r = (InFlightRequest*)cmd;
+			cemu_assert(IsPoolEntry(r));
+			cemu_assert_debug(r->inUse);
+			r->sender->result = result;
+			const IPCCommandId kind = r->sender->cmdId;
+			if (kind == IPCCommandId::IOS_OPEN)
 			{
-				IOSDevHandle devHandle = dispatchCmd->replyHandle;
 				if (IOS_ResultIsError(result))
 				{
-					cemuLog_log(LogType::Force, "IOS_ResourceReply(): Target device triggered an error on IOS_OPEN");
-					// dispatch target returned error, destroy our device handle again
-					IOS_ERROR r = _IPCDestroyResourceHandle(devHandle);
-					cemu_assert(r == IOS_ERROR_OK);
+					cemuLog_log(LogType::Force, "IOS_ResourceReply(): service rejected IOS_OPEN");
+					cemu_assert(CloseHandle(r->clientHandle) == IOS_ERROR_OK);
 				}
 				else
 				{
-					cemu_assert(_IPCAssignDispatchTargetHandle(devHandle, (IOSDevHandle)result) == IOS_ERROR_OK);
-					result = (IOS_ERROR)(uint32)devHandle;
+					// the caller gets the kernel handle, the service's handle is remembered
+					cemu_assert(BindServiceHandle(r->clientHandle, (IOSDevHandle)result) == IOS_ERROR_OK);
+					result = (IOS_ERROR)(uint32)r->clientHandle;
 				}
 			}
-			else if (dispatchCmd->originalBody->cmdId == IPCCommandId::IOS_CLOSE)
+			else if (kind == IPCCommandId::IOS_CLOSE)
 			{
 				if (IOS_ResultIsError(result))
-				{
-					cemuLog_log(LogType::Force, "IOS_ResourceReply(): Target device triggered an error on IOS_CLOSE");
-				}
-				// reply, then destroy handle
-				IOSDevHandle devHandle = dispatchCmd->replyHandle;
-				_IPCReplyAndRelease(dispatchCmd, result);
-				IOS_ERROR r = _IPCDestroyResourceHandle(devHandle);
-				cemu_assert_debug(r == IOS_ERROR::IOS_ERROR_OK);
+					cemuLog_log(LogType::Force, "IOS_ResourceReply(): service reported an error for IOS_CLOSE");
+				const IOSDevHandle handle = r->clientHandle;
+				Complete(r, result);
+				const IOS_ERROR closeErr = CloseHandle(handle);
+				cemu_assert_debug(closeErr == IOS_ERROR_OK);
 				return IOS_ERROR_OK;
 			}
-			_IPCReplyAndRelease(dispatchCmd, result);
+			Complete(r, result);
 			return IOS_ERROR_OK;
 		}
 
-		class : public ::IOSUModule
+		namespace
 		{
-			void SystemLaunch() override
+			class KernelModule : public ::IOSUModule
 			{
-				_IPCInitDispatchablePool();
-				// start timer thread
-				sTimerThreadStop = false;
-				m_timerThread = std::thread(IOSTimerThread);
-			}
+			public:
+				void SystemLaunch() override
+				{
+					ResetRequestPool();
+					g_timerShutdown = false;
+					m_timerThread = std::thread(TimerThreadMain);
+				}
 
-			void SystemExit() override
-			{
-				// stop timer thread
-				sTimerThreadStop = true;
-				sTimerCV.notify_one();
-				m_timerThread.join();
-				// reset resources
-				// todo
-			}
+				void SystemExit() override
+				{
+					g_timerShutdown = true;
+					g_timerWake.notify_one();
+					m_timerThread.join();
+				}
 
-			std::thread m_timerThread;
-		}sIOSUModuleKernel;
+			private:
+				std::thread m_timerThread;
+			};
+
+			KernelModule g_kernelModule;
+		}
 
 		IOSUModule* GetModule()
 		{
-			return static_cast<IOSUModule*>(&sIOSUModuleKernel);
+			return &g_kernelModule;
 		}
-
-
 	}
 }

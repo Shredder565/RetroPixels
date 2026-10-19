@@ -1,45 +1,48 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
-enum class FS_RESULT : sint32 // aka FSStatus
+// status codes seen by FS* callers (FSStatus)
+enum class FS_RESULT : sint32
 {
 	SUCCESS = 0,
-	END_ITERATION = -2, // used by FSGetMountSource / FSGetMountSourceNext to indicate when last element was reached
+	END_ITERATION = -2, // no more mount sources
 	MAX_HANDLES = -3,
 	ALREADY_EXISTS = -5,
 	NOT_FOUND = -6,
 	NOT_FILE = -7,
 	NOT_DIR = -8,
 	PERMISSION_ERROR = -10,
-
 	FATAL_ERROR = -0x400,
-	ERR_PLACEHOLDER = -9999, // used when exact error code has yet to be determined
+	ERR_PLACEHOLDER = -9999, // exact code not known yet
 };
 
-enum class FSA_RESULT : sint32 // aka FSError/FSAStatus
+// status codes of the FSA service (FSError / FSAStatus)
+enum class FSA_RESULT : sint32
 {
 	OK = 0,
-	NOT_INIT = -0x30000 - 0x01,
-	END_OF_DIRECTORY = -0x30000 - 0x04,
-	END_OF_FILE = -0x30000 - 0x05,
-	MAX_CLIENTS = -0x30000 - 0x12,
-	MAX_FILES = -0x30000 - 0x13,
-	MAX_DIRS = -0x30000 - 0x14,
-	ALREADY_EXISTS = -0x30000 - 0x16,
-	NOT_FOUND = -0x30000 - 0x17,
-	PERMISSION_ERROR = -0x30000 - 0x1A,
-	INVALID_PARAM = -0x30000 - 0x21,
-	INVALID_PATH = -0x30000 - 0x22,
-	INVALID_BUFFER = -0x30000 - 0x23,
-	INVALID_ALIGNMENT = -0x30000 - 0x24,
-	INVALID_CLIENT_HANDLE = -0x30000 - 0x25,
-	INVALID_FILE_HANDLE = -0x30000 - 0x26,
-	INVALID_DIR_HANDLE = -0x30000 - 0x27,
-	NOT_FILE = -0x30000 - 0x28,
-	NOT_DIR = -0x30000 - 0x29,
-	OUT_OF_RESOURCES = -0x30000 - 0x2C,
-	FATAL_ERROR = -0x30000 - 0x400,
+	NOT_INIT = -0x30001,
+	END_OF_DIRECTORY = -0x30004,
+	END_OF_FILE = -0x30005,
+	MAX_CLIENTS = -0x30012,
+	MAX_FILES = -0x30013,
+	MAX_DIRS = -0x30014,
+	ALREADY_EXISTS = -0x30016,
+	NOT_FOUND = -0x30017,
+	PERMISSION_ERROR = -0x3001A,
+	INVALID_PARAM = -0x30021,
+	INVALID_PATH = -0x30022,
+	INVALID_BUFFER = -0x30023,
+	INVALID_ALIGNMENT = -0x30024,
+	INVALID_CLIENT_HANDLE = -0x30025,
+	INVALID_FILE_HANDLE = -0x30026,
+	INVALID_DIR_HANDLE = -0x30027,
+	NOT_FILE = -0x30028,
+	NOT_DIR = -0x30029,
+	OUT_OF_RESOURCES = -0x3002C,
+	FATAL_ERROR = -0x30400,
 };
 
+// FSA request ids
 enum class FSA_CMD_OPERATION_TYPE : uint32
 {
 	CHANGEDIR = 0x5,
@@ -76,8 +79,8 @@ using FSDirHandle2 = FSResHandle;
 #define FSA_CMD_PATH_MAX_LENGTH FSA_PATH_SIZE_MAX
 #define FSA_MAX_CLIENTS 32
 
-typedef sint32 FSStatus;	  // DEPR - replaced by FS_RESULT
-typedef uint32 FS_ERROR_MASK; // replace with enum bitmask
+typedef sint32 FSStatus;      // older name, FS_RESULT is preferred
+typedef uint32 FS_ERROR_MASK;
 typedef uint32 FSFileSize;
 typedef uint64 FSLargeSize;
 typedef uint64 FSTime;
@@ -94,27 +97,26 @@ DEFINE_ENUM_FLAG_OPERATORS(FSFlag);
 
 struct FSStat_t
 {
-	/* +0x000 */ betype<FSFlag> flag;
-	/* +0x004 */ uint32be permissions;
-	/* +0x008 */ uint32be ownerId;
-	/* +0x00C */ uint32be groupId;
-	/* +0x010 */ betype<FSFileSize> size;
-	/* +0x014 */ betype<FSFileSize> allocatedSize;
-	/* +0x018 */ betype<FSLargeSize> quotaSize;
-	/* +0x020 */ uint32be entryId;
-	/* +0x024 */ betype<FSTime> createdTime;
-	/* +0x02C */ betype<FSTime> modifiedTime;
-	/* +0x034 */ uint8 attributes[0x30];
+	betype<FSFlag> flag;
+	uint32be permissions; // unix style mode bits
+	uint32be ownerId;
+	uint32be groupId;
+	betype<FSFileSize> size;
+	betype<FSFileSize> allocatedSize;
+	betype<FSLargeSize> quotaSize;
+	uint32be entryId;
+	betype<FSTime> createdTime;
+	betype<FSTime> modifiedTime;
+	uint8 attributes[0x30];
 };
-
 static_assert(sizeof(FSStat_t) == 0x64);
+static_assert(offsetof(FSStat_t, entryId) == 0x20);
 
 struct FSDirEntry_t
 {
-	/* +0x00 */ FSStat_t stat;
-	/* +0x64 */ char name[FSA_FILENAME_SIZE_MAX];
+	FSStat_t stat;
+	char name[FSA_FILENAME_SIZE_MAX];
 };
-
 static_assert(sizeof(FSDirEntry_t) == 0xE4);
 
 struct FSADeviceInfo_t
@@ -128,7 +130,7 @@ static_assert(sizeof(FSADeviceInfo_t) == 0x28);
 
 #pragma pack()
 
-// query types for QueryInfo
+// QUERYINFO query types
 #define FSA_QUERY_TYPE_FREESPACE 0
 #define FSA_QUERY_TYPE_DEVICE_INFO 4
 #define FSA_QUERY_TYPE_STAT 5

@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "Cafe/IOSU/kernel/iosu_kernel.h"
 #include "Cafe/IOSU/iosu_ipc_common.h"
@@ -8,7 +9,9 @@ namespace iosu
 {
 	namespace nn
 	{
-		// a simple service interface which wraps handle management and Ioctlv/IoctlvAsync (used by /dev/fpd and others are still to be determined)
+		// Base for devices that take plain ioctlv requests (for example /dev/fpd).
+		// Handles the service thread, per client objects and an optional periodic timer.
+		// Vector order for ServiceCall: inputs first, then outputs.
 		class IPCSimpleService
 		{
 		  public:
@@ -20,42 +23,25 @@ namespace iosu
 
 			virtual std::string GetThreadName() = 0;
 
-			virtual void* CreateClientObject() = 0;
+			virtual void* CreateClientObject() = 0; // nullptr rejects the open
 			virtual void DestroyClientObject(void* clientObject) = 0;
 			virtual uint32 ServiceCall(void* clientObject, uint32 requestId, IPCIoctlVector* vecIn, uint32 numVecIn, IPCIoctlVector* vecOut, uint32 numVecOut) = 0;
 			virtual void TimerUpdate() {};
 
+			// called from inside ServiceCall: the request is answered later with ServiceCallAsyncRespond
 			IPCCommandBody* ServiceCallDelayCurrentResponse();
 			static void ServiceCallAsyncRespond(IPCCommandBody* response, uint32 r);
 
 			void Start();
 			void Stop();
 
+			// calls TimerUpdate() on the service thread every 'milliseconds'
 			void SetTimerUpdate(uint32 milliseconds);
 
 		  private:
 			void ServiceThread();
-
-			IOSDevHandle GetFreeHandle()
-			{
-				while(m_clientObjects.find(m_nextHandle) != m_clientObjects.end() || m_nextHandle == 0)
-				{
-					m_nextHandle++;
-					m_nextHandle &= 0x7FFFFFFF;
-				}
-				IOSDevHandle newHandle = m_nextHandle;
-				m_nextHandle++;
-				m_nextHandle &= 0x7FFFFFFF;
-				return newHandle;
-			}
-
-			void* GetClientObjectByHandle(IOSDevHandle handle) const
-			{
-				auto it = m_clientObjects.find(handle);
-				if(it == m_clientObjects.end())
-					return nullptr;
-				return it->second;
-			}
+			IOSDevHandle AllocateHandle();
+			void* LookupClient(IOSDevHandle handle) const;
 
 			std::string m_devicePath;
 			std::thread m_serviceThread;
@@ -65,15 +51,16 @@ namespace iosu
 			std::unordered_map<IOSDevHandle, void*> m_clientObjects;
 			IOSDevHandle m_nextHandle{1};
 			IOSTimerId m_timerId{IOSInvalidTimerId};
-
 			IPCCommandBody* m_activeCmd{nullptr};
 			bool m_delayResponse{false};
-
 			IOSMsgQueueId m_msgQueueId;
-			SysAllocator<iosu::kernel::IOSMessage, 128> _m_msgBuffer;
+			SysAllocator<iosu::kernel::IOSMessage, 128> m_queueStorage;
 		};
 
-		// a complex service interface which wraps Ioctlv and adds an additional service channel, used by /dev/act, /dev/acp_main, /dev/boss and most nn services
+		// Base for nn style services (/dev/act, /dev/acp_main, /dev/boss, ...).
+		// Each ioctlv carries a request header (service and command id) followed by
+		// serialized parameters; the reply starts with the nn result code.
+		// Vector order on the wire: outputs first, then inputs.
 		class IPCService
 		{
 			struct IPCServiceRequestHeader
@@ -83,31 +70,33 @@ namespace iosu
 				uint32be ukn08;
 				uint32be commandId;
 			};
-
 			static_assert(sizeof(IPCServiceRequestHeader) == 0x10);
 
 			struct IPCServiceResponseHeader
 			{
 				uint32be nnResultCode;
 			};
+
 		public:
-			class IPCParameterStream // input stream for parameters
+			// sequential reader over one input buffer
+			class IPCParameterStream
 			{
 			public:
 				IPCParameterStream() = default;
 				IPCParameterStream(void* data, uint32 size) : m_data((uint8_t*)data), m_size(size) {}
 
+				// on overrun hasError is set and a value initialized T is returned
 				template<typename T>
 				T ReadParameter(bool& hasError)
 				{
-					hasError = false;
-					if (m_readIndex + sizeof(T) > m_size)
+					if (m_size < sizeof(T) || m_readIndex > m_size - sizeof(T))
 					{
 						hasError = true;
 						return T{};
 					}
+					hasError = false;
 					T value;
-					memcpy(&value, &m_data[m_readIndex], sizeof(T));
+					memcpy(&value, m_data + m_readIndex, sizeof(T));
 					m_readIndex += sizeof(T);
 					return value;
 				}
@@ -121,7 +110,8 @@ namespace iosu
 				uint32 m_readIndex{0};
 			};
 
-			class IPCResponseStream // output stream for response data
+			// sequential writer over one output buffer; writes that do not fit are dropped
+			class IPCResponseStream
 			{
 			public:
 				IPCResponseStream() = default;
@@ -130,12 +120,12 @@ namespace iosu
 				template<typename T>
 				void Write(const T& value)
 				{
-					if (m_writtenSize + sizeof(T) > m_size)
+					if (m_size < sizeof(T) || m_writtenSize > m_size - sizeof(T))
 					{
 						m_hasError = true;
 						return;
 					}
-					memcpy(&m_data[m_writtenSize], &value, sizeof(T));
+					memcpy(m_data + m_writtenSize, &value, sizeof(T));
 					m_writtenSize += sizeof(T);
 				}
 
@@ -151,9 +141,11 @@ namespace iosu
 
 			class IPCServiceCall
 			{
+				// describes how a large buffer was split by the client:
+				// an aligned middle part in its own vector, head and tail bytes packed in another
 				struct LargeBufferHeader
 				{
-					uint32be alignedSize; // size of the aligned (middle) part of the buffer
+					uint32be alignedSize;
 					uint8be ukn4;
 					uint8be ukn5;
 					uint8be headSize;
@@ -161,149 +153,129 @@ namespace iosu
 				};
 				static_assert(sizeof(LargeBufferHeader) == 8);
 			public:
+				// a client buffer reassembled from its head, aligned middle and tail parts
 				struct UnalignedBuffer
 				{
-					UnalignedBuffer(bool isOutput, std::span<uint8> head, std::span<uint8> middle, std::span<uint8> tail) : m_isOutput(isOutput)
-					{
-						headPtr = head.data();
-						headSize = (uint32)head.size();
-						middlePtr = middle.data();
-						middleSize = (uint32)middle.size();
-						tailPtr = tail.data();
-						tailSize = (uint32)tail.size();
-					};
+					UnalignedBuffer(bool isOutput, std::span<uint8> head, std::span<uint8> middle, std::span<uint8> tail)
+						: m_parts{ head, middle, tail }, m_isOutput(isOutput) {}
 
+					// concatenates the three parts into a T (input buffers only)
 					template<typename T>
 					T ReadType()
 					{
 						cemu_assert(!m_isOutput);
 						T v;
-						memcpy((uint8_t*)&v, headPtr, headSize);
-						memcpy((uint8_t*)&v + headSize, middlePtr, middleSize);
-						memcpy((uint8_t*)&v + headSize + middleSize, tailPtr, tailSize);
+						uint8_t* dst = (uint8_t*)&v;
+						for (const std::span<uint8>& part : m_parts)
+						{
+							memcpy(dst, part.data(), part.size());
+							dst += part.size();
+						}
 						return v;
 					}
 
+					// scatters 'size' bytes over head, middle and tail (output buffers only)
 					void WriteData(void* data, size_t size)
 					{
 						if (size == 0)
 							return;
 						cemu_assert(m_isOutput);
-						cemu_assert((headSize + middleSize + tailSize) >= size);
-						size_t bytesToCopy = std::min<size_t>(size, headSize);
-						memcpy(headPtr, data, bytesToCopy);
-						size -= bytesToCopy;
-						if (size > 0)
+						cemu_assert(GetSize() >= size);
+						const uint8* src = (const uint8*)data;
+						for (const std::span<uint8>& part : m_parts)
 						{
-							bytesToCopy = std::min<size_t>(size, middleSize);
-							memcpy(middlePtr, (uint8_t*)data + headSize, bytesToCopy);
-							size -= bytesToCopy;
-						}
-						if (size > 0)
-						{
-							bytesToCopy = std::min<size_t>(size, tailSize);
-							memcpy(tailPtr, (uint8_t*)data + headSize + middleSize, bytesToCopy);
+							if (size == 0)
+								break;
+							const size_t n = std::min<size_t>(size, part.size());
+							memcpy(part.data(), src, n);
+							src += part.size();
+							size -= n;
 						}
 					}
 
 					size_t GetSize() const
 					{
-						return headSize + middleSize + tailSize;
+						return m_parts[0].size() + m_parts[1].size() + m_parts[2].size();
 					}
 
 				private:
-					void* headPtr;
-					uint32 headSize;
-					void* middlePtr; // aligned
-					uint32 middleSize;
-					void* tailPtr;
-					uint32 tailSize;
+					std::span<uint8> m_parts[3];
 					bool m_isOutput;
 				};
 
-				IPCServiceCall(IOSDevHandle clientHandle, uint32 serviceId, uint32 commandId) : m_clientHandle(clientHandle), m_serviceId(serviceId), m_commandId(commandId)
-				{
-				}
+				IPCServiceCall(IOSDevHandle clientHandle, uint32 serviceId, uint32 commandId)
+					: m_clientHandle(clientHandle), m_serviceId(serviceId), m_commandId(commandId) {}
 
 				void AddInputStream(void* data, uint32 size)
 				{
-					cemu_assert(m_paramStreamArraySize < 4);
-					m_paramStreamArray[m_paramStreamArraySize++] = IPCParameterStream(data, size);
+					cemu_assert(m_numInputs < kMaxStreams);
+					m_inputs[m_numInputs++] = IPCParameterStream(data, size);
 				}
 
 				void AddOutputStream(void* data, uint32 size)
 				{
-					cemu_assert(m_responseStreamArraySize < 4);
-					m_responseStreamArray[m_responseStreamArraySize++] = IPCResponseStream(data, size);
+					cemu_assert(m_numOutputs < kMaxStreams);
+					m_outputs[m_numOutputs++] = IPCResponseStream(data, size);
 				}
 
-				uint32 GetServiceId() const
-				{
-					return m_serviceId;
-				}
+				uint32 GetServiceId() const { return m_serviceId; }
+				uint32 GetCommandId() const { return m_commandId; }
 
-				uint32 GetCommandId() const
-				{
-					return m_commandId;
-				}
-
+				// parameters are always read from the first input stream
 				template<typename T>
 				T ReadParameter()
 				{
-					// read only from stream 0 for now
-					return m_paramStreamArray[0].ReadParameter<T>(m_hasError);
+					return m_inputs[0].ReadParameter<T>(m_hasError);
 				}
 
+				// buffer descriptors consume two further streams each
 				UnalignedBuffer ReadUnalignedInputBufferInfo()
 				{
-					// how large/unaligned buffers work:
-					// Instead of appending the data into the parameter stream, there are two separate buffers created:
-					// 1. A ioctl vector that points directly to the aligned part of the original buffer. Both the pointer and the size are aligned
-					// 2. A ioctl vector with an allocated up-to-128byte buffer that holds any unaligned head or tail data (e.g. anything that isn't occupying the full 64 byte alignment)
-					// The buffer layout is then also serialized into the parameter stream
-					LargeBufferHeader header = ReadParameter<LargeBufferHeader>();
-					// get aligned buffer part
-					void* alignedBuffer = m_paramStreamArray[m_inputBufferIndex+0].GetData();
-					cemu_assert(m_paramStreamArray[m_inputBufferIndex+0].GetSize() == header.alignedSize);
-					// get head and tail buffer parts
-					uint8* unalignedDataBuffer = m_paramStreamArray[m_inputBufferIndex+1].GetData();
-					cemu_assert((header.headSize + header.tailSize) <= m_paramStreamArray[m_inputBufferIndex+1].GetSize());
-					UnalignedBuffer largeBuffer(false, {(uint8*)unalignedDataBuffer, header.headSize}, {(uint8*)alignedBuffer, header.alignedSize}, {(uint8*)unalignedDataBuffer + header.headSize, header.tailSize});
-					m_inputBufferIndex += 2; // if there is no unaligned data then are both buffers still present?
-					return largeBuffer;
+					const LargeBufferHeader info = ReadParameter<LargeBufferHeader>();
+					IPCParameterStream& middle = m_inputs[m_nextInput];
+					IPCParameterStream& edges = m_inputs[m_nextInput + 1];
+					m_nextInput += 2;
+					return SplitBuffer(false, info, middle.GetData(), middle.GetSize(), edges.GetData(), edges.GetSize());
 				}
 
 				UnalignedBuffer ReadUnalignedOutputBufferInfo()
 				{
-					LargeBufferHeader header = ReadParameter<LargeBufferHeader>();
-					// get aligned buffer part
-					void* alignedBuffer = m_responseStreamArray[m_outputBufferIndex+0].GetData();
-					cemu_assert(m_responseStreamArray[m_outputBufferIndex+0].GetSize() == header.alignedSize);
-					// get head and tail buffer parts
-					uint8* unalignedDataBuffer = m_responseStreamArray[m_outputBufferIndex+1].GetData();
-					cemu_assert((header.headSize + header.tailSize) <= m_responseStreamArray[m_outputBufferIndex+1].GetSize());
-					UnalignedBuffer largeBuffer(true, {(uint8*)unalignedDataBuffer, header.headSize}, {(uint8*)alignedBuffer, header.alignedSize}, {(uint8*)unalignedDataBuffer + header.headSize, header.tailSize});
-					m_outputBufferIndex += 2; // if there is no unaligned data then are both buffers still present?
-					return largeBuffer;
+					const LargeBufferHeader info = ReadParameter<LargeBufferHeader>();
+					IPCResponseStream& middle = m_outputs[m_nextOutput];
+					IPCResponseStream& edges = m_outputs[m_nextOutput + 1];
+					m_nextOutput += 2;
+					return SplitBuffer(true, info, middle.GetData(), middle.GetSize(), edges.GetData(), edges.GetSize());
 				}
 
+				// responses always go to the first output stream
 				template<typename T>
 				void WriteResponse(const T& value)
 				{
-					m_responseStreamArray[0].Write<T>(value);
+					m_outputs[0].Write<T>(value);
 				}
 
 			private:
+				static UnalignedBuffer SplitBuffer(bool isOutput, const LargeBufferHeader& info, uint8* middle, uint32 middleSize, uint8* edges, uint32 edgesSize)
+				{
+					const uint32 alignedSize = info.alignedSize;
+					const uint8 headSize = info.headSize;
+					const uint8 tailSize = info.tailSize;
+					cemu_assert(middleSize == alignedSize);
+					cemu_assert((uint32)headSize + tailSize <= edgesSize);
+					return UnalignedBuffer(isOutput, { edges, headSize }, { middle, alignedSize }, { edges + headSize, tailSize });
+				}
+
+				static constexpr size_t kMaxStreams = 4;
 				IOSDevHandle m_clientHandle;
 				uint32 m_serviceId;
 				uint32 m_commandId;
-				IPCParameterStream m_paramStreamArray[4]{};
-				size_t m_paramStreamArraySize{0};
-				IPCResponseStream m_responseStreamArray[4]{};
-				size_t m_responseStreamArraySize{0};
+				IPCParameterStream m_inputs[kMaxStreams]{};
+				size_t m_numInputs{0};
+				IPCResponseStream m_outputs[kMaxStreams]{};
+				size_t m_numOutputs{0};
 				bool m_hasError{false};
-				sint8 m_inputBufferIndex{1};
-				sint8 m_outputBufferIndex{1};
+				sint8 m_nextInput{1};
+				sint8 m_nextOutput{1};
 			};
 
 			IPCService(std::string_view devicePath) : m_devicePath(devicePath) {};
@@ -316,7 +288,6 @@ namespace iosu
 
 			virtual void CloseClientHandle(IOSDevHandle handle)
 			{
-				
 			}
 
 			virtual nnResult ServiceCall(IPCServiceCall& serviceCall)
@@ -330,16 +301,15 @@ namespace iosu
 
 		private:
 			void ServiceThread();
+			void HandleServiceRequest(IPCCommandBody* cmd);
 
 			std::string m_devicePath;
 			std::thread m_serviceThread;
 			std::atomic_bool m_requestStop{false};
 			std::atomic_bool m_isRunning{false};
 			std::atomic_bool m_threadInitialized{ false };
-
 			IOSMsgQueueId m_msgQueueId;
-			SysAllocator<iosu::kernel::IOSMessage, 128> _m_msgBuffer;
+			SysAllocator<iosu::kernel::IOSMessage, 128> m_queueStorage;
 		};
-
 	};
 };

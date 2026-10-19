@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "Cafe/IOSU/iosu_types_common.h"
 
@@ -9,9 +10,11 @@ namespace iosu
 {
 	namespace ccr_nfc
 	{
+		// Tag image plus the layout of its protected areas. All offsets index
+		// into 'data'. Exchanged with /dev/ccr_nfc in host byte order.
 		struct CCRNFCCryptData
 		{
-			uint32 version;
+			uint32 version; // 0 or 2
 			uint32 dataSize;
 			uint32 seedOffset;
 			uint32 keyGenSaltOffset;

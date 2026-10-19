@@ -1,3 +1,10 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+//
+// Play time tracking (PDM). Two files in the system save area of the mlc:
+//   PlayStats.dat  be32 entry count + 256 fixed size per title records
+//   PlayDiary.dat  be32 read/write index header + ring of diary records
+// While a title runs a background thread adds the elapsed minutes to its
+// PlayStats record.
 #include <util/helpers/helpers.h>
 #include "iosu_pdm.h"
 #include "Cafe/CafeSystem.h"
@@ -6,492 +13,462 @@
 #include "util/helpers/Semaphore.h"
 
 #if BOOST_OS_LINUX
-// using chrono::year_month_date and other features require a relatively recent stdlibc++
-// to avoid upping the required version we use the STL reference implementation for now
+// older libstdc++ versions lack the C++20 calendar types, use the reference implementation
 #include "Common/unix/date.h"
 namespace chrono_d = date;
 #else
 namespace chrono_d = std::chrono;
 #endif
 
-
 namespace iosu
 {
 	namespace pdm
 	{
-		std::recursive_mutex sPlaystatsLock;
-		std::recursive_mutex sDiaryLock;
-
-		fs::path GetPDFile(const char* filename)
+		namespace
 		{
-			// todo - support for per-account tracking
-			return ActiveSettings::GetMlcPath(fmt::format("usr/save/system/pdm/80000001/{}", filename));
-		}
-
-		void MakeDirectory()
-		{
-			fs::path path = GetPDFile(".");
-			std::error_code ec;
-			fs::create_directories(path, ec);
-		}
-
-		chrono_d::year_month_day GetDateFromDayIndex(uint16 dayIndex)
-		{
-			chrono_d::sys_days startDateDay(chrono_d::year(2000) / chrono_d::January / chrono_d::day(1));
-			chrono_d::sys_days lastPlayedDay = startDateDay + chrono_d::days(dayIndex);
-			return chrono_d::year_month_day(lastPlayedDay);
-		}
-
-		uint16 GetTodaysDayIndex()
-		{
-			chrono_d::sys_days startDateDay(chrono_d::year(2000) / chrono_d::January / chrono_d::day(1));
-			chrono_d::sys_days currentDateDay = chrono_d::floor<chrono_d::days>(std::chrono::system_clock::now());
-			return (uint16)(currentDateDay - startDateDay).count();
-		}
-
-		struct PlayStatsEntry 
-		{
-			uint32be titleIdHigh;
-			uint32be titleIdLow;
-			uint32be totalMinutesPlayed;
-			uint16be numTimesLaunched;
-			uint16be firstLaunchDayIndex; // first time this title was launched
-			uint16be mostRecentDayIndex; // last time this title was played
-			uint16be ukn12; // maybe just padding?
-		};
-
-		static_assert(sizeof(PlayStatsEntry) == 0x14);
-
-		struct
-		{
-			FileStream* fs{};
-			uint32be numEntries;
-			PlayStatsEntry entry[NUM_PLAY_STATS_ENTRIES];
-		}PlayStats;
-
-		void CreatePlaystats()
-		{
-			PlayStats.fs = FileStream::createFile2(GetPDFile("PlayStats.dat"));
-			if (!PlayStats.fs)
+			// all data is tracked for the first account only
+			fs::path DataFilePath(const char* name)
 			{
-				cemuLog_log(LogType::Force, "Unable to open or create PlayStats.dat");
-				return;
+				return ActiveSettings::GetMlcPath(fmt::format("usr/save/system/pdm/80000001/{}", name));
 			}
-			uint32be entryCount = 0;
-			PlayStats.fs->writeData(&entryCount, sizeof(uint32be));
-			PlayStats.fs->writeData(PlayStats.entry, NUM_PLAY_STATS_ENTRIES * sizeof(PlayStatsEntry));
-			static_assert((NUM_PLAY_STATS_ENTRIES * sizeof(PlayStatsEntry)) == 0x1400);
-		}
 
-		void OpenPlaystats()
-		{
-			std::unique_lock _l(sPlaystatsLock);
-			PlayStats.numEntries = 0;
-			for (size_t i = 0; i < NUM_PLAY_STATS_ENTRIES; i++)
+			void EnsureDataDirectory()
 			{
-				auto& e = PlayStats.entry[i];
-				memset(&e, 0, sizeof(PlayStatsEntry));
+				std::error_code ec;
+				fs::create_directories(DataFilePath("."), ec);
 			}
-			cemu_assert_debug(!PlayStats.fs);
-			PlayStats.fs = FileStream::openFile2(GetPDFile("PlayStats.dat"), true);
-			if (!PlayStats.fs)
-			{
-				CreatePlaystats();
-				return;
-			}
-			if (PlayStats.fs->GetSize() != (NUM_PLAY_STATS_ENTRIES * 20 + 4))
-			{
-				delete PlayStats.fs;
-				PlayStats.fs = nullptr;
-				cemuLog_log(LogType::Force, "PlayStats.dat malformed. Time tracking wont be used");
-				// dont delete the existing file in case it could still be salvaged (todo) and instead just dont track play time
-				return;
-			}
-			PlayStats.numEntries = 0;
-			PlayStats.fs->readData(&PlayStats.numEntries, sizeof(uint32be));
-			if (PlayStats.numEntries > NUM_PLAY_STATS_ENTRIES)
-				PlayStats.numEntries = NUM_PLAY_STATS_ENTRIES;
-			PlayStats.fs->readData(PlayStats.entry, NUM_PLAY_STATS_ENTRIES * 20);
-		}
 
-		void ClosePlaystats()
-		{
-			std::unique_lock _l(sPlaystatsLock);
-			if (PlayStats.fs)
-			{
-				delete PlayStats.fs;
-				PlayStats.fs = nullptr;
-			}
-		}
+			// days are counted from 2000-01-01
+			const chrono_d::sys_days kEpoch{ chrono_d::year(2000) / chrono_d::January / chrono_d::day(1) };
 
-		void UnloadPlaystats()
-		{
-			std::unique_lock _l(sPlaystatsLock);
-			cemu_assert_debug(!PlayStats.fs); // unloading expects that file is closed
-			PlayStats.numEntries = 0;
-			for(auto& it : PlayStats.entry)
-				it = PlayStatsEntry{};
-		}
-
-		PlayStatsEntry* PlayStats_GetEntry(uint64 titleId)
-		{
-			std::unique_lock _l(sPlaystatsLock);
-			uint32be titleIdHigh = (uint32)(titleId>>32);
-			uint32be titleIdLow = (uint32)(titleId & 0xFFFFFFFF);
-			size_t numEntries = PlayStats.numEntries;
-			for (size_t i = 0; i < numEntries; i++)
+			uint16 TodayDayNumber()
 			{
-				if (PlayStats.entry[i].titleIdHigh == titleIdHigh && PlayStats.entry[i].titleIdLow == titleIdLow)
-					return &PlayStats.entry[i];
+				const chrono_d::sys_days today = chrono_d::floor<chrono_d::days>(std::chrono::system_clock::now());
+				return (uint16)(today - kEpoch).count();
 			}
-			return nullptr;
-		}
 
-		void PlayStats_WriteEntryNoLock(PlayStatsEntry* entry, bool writeEntryCount = false)
-		{
-			if (!PlayStats.fs)
-				return;
-			size_t entryIndex = entry - PlayStats.entry;
-			cemu_assert(entryIndex < NUM_PLAY_STATS_ENTRIES);
-			PlayStats.fs->SetPosition(4 + entryIndex * sizeof(PlayStatsEntry));
-			if (PlayStats.fs->writeData(entry, sizeof(PlayStatsEntry)) != sizeof(PlayStatsEntry))
+			chrono_d::year_month_day DayNumberToDate(uint16 day)
 			{
-				cemuLog_log(LogType::Force, "Failed to write to PlayStats.dat");
-				return;
+				return chrono_d::year_month_day(kEpoch + chrono_d::days(day));
 			}
-			if (writeEntryCount)
-			{
-				uint32be numEntries = PlayStats.numEntries;
-				PlayStats.fs->SetPosition(0);
-				PlayStats.fs->writeData(&numEntries, sizeof(uint32be));
-			}
-		}
 
-		void PlayStats_WriteEntry(PlayStatsEntry* entry, bool writeEntryCount = false)
-		{
-			std::unique_lock _l(sPlaystatsLock);
-			PlayStats_WriteEntryNoLock(entry, writeEntryCount);
-		}
+			/* ---- PlayStats.dat ---- */
 
-		PlayStatsEntry* PlayStats_CreateEntry(uint64 titleId)
-		{
-			std::unique_lock _l(sPlaystatsLock);
-			bool entryCountChanged = false;
-			PlayStatsEntry* newEntry;
-			if(PlayStats.numEntries < NUM_PLAY_STATS_ENTRIES)
+			struct TitleStats
 			{
-				newEntry = PlayStats.entry + PlayStats.numEntries;
-				PlayStats.numEntries += 1;
-				entryCountChanged = true;
-			}
-			else
+				uint32be titleIdHigh;
+				uint32be titleIdLow;
+				uint32be totalMinutesPlayed;
+				uint16be numTimesLaunched;
+				uint16be firstLaunchDayIndex;
+				uint16be mostRecentDayIndex;
+				uint16be ukn12;
+			};
+			static_assert(sizeof(TitleStats) == 0x14);
+
+			constexpr uint32 kStatsTableBytes = NUM_PLAY_STATS_ENTRIES * sizeof(TitleStats);
+			static_assert(kStatsTableBytes == 0x1400);
+			constexpr uint64 kStatsFileSize = 4 + kStatsTableBytes;
+
+			class PlayStatsStore
 			{
-				// list is full - find existing entry with least amount of minutes and replace it
-				newEntry = PlayStats.entry + 0;
-				for (uint32 i = 1; i < NUM_PLAY_STATS_ENTRIES; i++)
+			public:
+				void Load()
 				{
-					if(PlayStats.entry[i].totalMinutesPlayed < newEntry->totalMinutesPlayed)
-						newEntry = PlayStats.entry + i;
+					std::lock_guard lock(m_mutex);
+					ResetNoLock();
+					cemu_assert_debug(!m_file);
+					m_file = FileStream::openFile2(DataFilePath("PlayStats.dat"), true);
+					if (!m_file)
+					{
+						CreateNoLock();
+						return;
+					}
+					if (m_file->GetSize() != kStatsFileSize)
+					{
+						// keep the file untouched so it can be repaired by hand; tracking stays off
+						CloseNoLock();
+						cemuLog_log(LogType::Force, "PlayStats.dat malformed. Time tracking wont be used");
+						return;
+					}
+					m_count = 0;
+					m_file->readData(&m_count, sizeof(m_count));
+					if (m_count > NUM_PLAY_STATS_ENTRIES)
+						m_count = NUM_PLAY_STATS_ENTRIES;
+					m_file->readData(m_records, kStatsTableBytes);
+				}
+
+				void Close()
+				{
+					std::lock_guard lock(m_mutex);
+					CloseNoLock();
+				}
+
+				void Unload()
+				{
+					std::lock_guard lock(m_mutex);
+					cemu_assert_debug(!m_file);
+					m_count = 0;
+					for (TitleStats& r : m_records)
+						r = TitleStats{};
+				}
+
+				// returns false when the title has no record
+				bool Lookup(uint64 titleId, uint32& minutes, uint16& lastDay)
+				{
+					std::lock_guard lock(m_mutex);
+					const TitleStats* r = FindNoLock(titleId);
+					if (!r)
+						return false;
+					minutes = r->totalMinutesPlayed;
+					lastDay = r->mostRecentDayIndex;
+					return true;
+				}
+
+				// marks a launch of the title and returns the slot used for its record
+				size_t BeginSession(uint64 titleId)
+				{
+					std::lock_guard lock(m_mutex);
+					if (TitleStats* r = FindNoLock(titleId))
+					{
+						r->mostRecentDayIndex = TodayDayNumber();
+						r->numTimesLaunched += 1;
+						StoreNoLock(*r, false);
+						return r - m_records;
+					}
+					bool grew = false;
+					TitleStats* r;
+					if (m_count < NUM_PLAY_STATS_ENTRIES)
+					{
+						r = m_records + m_count;
+						m_count += 1;
+						grew = true;
+					}
+					else
+					{
+						// table is full: recycle the record with the least play time
+						r = m_records;
+						for (size_t i = 1; i < NUM_PLAY_STATS_ENTRIES; i++)
+							if (m_records[i].totalMinutesPlayed < r->totalMinutesPlayed)
+								r = m_records + i;
+					}
+					r->titleIdHigh = (uint32)(titleId >> 32);
+					r->titleIdLow = (uint32)titleId;
+					r->firstLaunchDayIndex = TodayDayNumber();
+					r->mostRecentDayIndex = r->firstLaunchDayIndex;
+					r->numTimesLaunched = 1;
+					r->totalMinutesPlayed = 0;
+					r->ukn12 = 0;
+					StoreNoLock(*r, grew);
+					return r - m_records;
+				}
+
+				void AddMinutes(size_t slot, uint32 minutes)
+				{
+					std::lock_guard lock(m_mutex);
+					if (minutes == 0)
+						return;
+					TitleStats& r = m_records[slot];
+					r.totalMinutesPlayed += minutes;
+					r.mostRecentDayIndex = TodayDayNumber();
+					StoreNoLock(r, false);
+				}
+
+			private:
+				void ResetNoLock()
+				{
+					m_count = 0;
+					memset(m_records, 0, sizeof(m_records));
+				}
+
+				void CreateNoLock()
+				{
+					m_file = FileStream::createFile2(DataFilePath("PlayStats.dat"));
+					if (!m_file)
+					{
+						cemuLog_log(LogType::Force, "Unable to open or create PlayStats.dat");
+						return;
+					}
+					const uint32be zero = 0;
+					m_file->writeData(&zero, sizeof(zero));
+					m_file->writeData(m_records, kStatsTableBytes);
+				}
+
+				void CloseNoLock()
+				{
+					delete m_file;
+					m_file = nullptr;
+				}
+
+				TitleStats* FindNoLock(uint64 titleId)
+				{
+					const uint32 high = (uint32)(titleId >> 32);
+					const uint32 low = (uint32)titleId;
+					for (uint32 i = 0; i < (uint32)m_count; i++)
+						if (m_records[i].titleIdHigh == high && m_records[i].titleIdLow == low)
+							return m_records + i;
+					return nullptr;
+				}
+
+				void StoreNoLock(const TitleStats& r, bool withCount)
+				{
+					if (!m_file)
+						return;
+					const size_t slot = &r - m_records;
+					cemu_assert(slot < NUM_PLAY_STATS_ENTRIES);
+					m_file->SetPosition(4 + slot * sizeof(TitleStats));
+					if (m_file->writeData(&r, sizeof(TitleStats)) != sizeof(TitleStats))
+					{
+						cemuLog_log(LogType::Force, "Failed to write to PlayStats.dat");
+						return;
+					}
+					if (withCount)
+					{
+						const uint32be count = m_count;
+						m_file->SetPosition(0);
+						m_file->writeData(&count, sizeof(count));
+					}
+				}
+
+				std::mutex m_mutex;
+				FileStream* m_file = nullptr;
+				uint32be m_count = 0;
+				TitleStats m_records[NUM_PLAY_STATS_ENTRIES]{};
+			};
+
+			PlayStatsStore g_stats;
+
+			/* ---- PlayDiary.dat ---- */
+
+			// ring buffer: entries [readIndex, writeIndex) are valid
+			struct DiaryHeader
+			{
+				uint32be readIndex;
+				uint32be writeIndex;
+			};
+			static_assert(sizeof(DiaryHeader) == 0x8);
+			static_assert(sizeof(PlayDiaryEntry) == 0x10);
+
+			class PlayDiaryStore
+			{
+			public:
+				void Load()
+				{
+					std::lock_guard lock(m_mutex);
+					cemu_assert_debug(!m_file);
+					m_file = FileStream::openFile2(DataFilePath("PlayDiary.dat"), true);
+					if (!m_file)
+					{
+						CreateNoLock();
+						return;
+					}
+					if (m_file->readData(&m_header, sizeof(m_header)) != sizeof(m_header))
+					{
+						cemuLog_log(LogType::Force, "Failed to read valid PlayDiary header");
+						CloseNoLock();
+						CreateNoLock();
+						return;
+					}
+					const uint32 readIndex = m_header.readIndex;
+					const uint32 writeIndex = m_header.writeIndex;
+					if (readIndex > NUM_PLAY_DIARY_ENTRIES_MAX || writeIndex > NUM_PLAY_DIARY_ENTRIES_MAX)
+					{
+						cemuLog_log(LogType::Force, "Bad value in play diary header (read={} write={})", readIndex, writeIndex);
+						m_header.readIndex = readIndex % NUM_PLAY_DIARY_ENTRIES_MAX;
+						m_header.writeIndex = writeIndex % NUM_PLAY_DIARY_ENTRIES_MAX;
+					}
+					const uint32 bytes = m_file->readData(m_entries, (uint32)sizeof(m_entries));
+					for (size_t i = bytes / sizeof(PlayDiaryEntry); i < NUM_PLAY_DIARY_ENTRIES_MAX; i++)
+						m_entries[i] = PlayDiaryEntry{};
+				}
+
+				void Close()
+				{
+					std::lock_guard lock(m_mutex);
+					CloseNoLock();
+				}
+
+				void Unload()
+				{
+					std::lock_guard lock(m_mutex);
+					cemu_assert_debug(!m_file);
+					m_header.readIndex = 0;
+					m_header.writeIndex = 0;
+					for (PlayDiaryEntry& e : m_entries)
+						e = PlayDiaryEntry{};
+				}
+
+				uint32 Read(PlayDiaryEntry* out, uint32 maxEntries)
+				{
+					std::lock_guard lock(m_mutex);
+					uint32 n = 0;
+					for (uint32 i = m_header.readIndex; i != (uint32)m_header.writeIndex && n < maxEntries; i = (i + 1) % NUM_PLAY_DIARY_ENTRIES_MAX)
+						out[n++] = m_entries[i];
+					return n;
+				}
+
+			private:
+				void CreateNoLock()
+				{
+					EnsureDataDirectory();
+					cemu_assert_debug(!m_file);
+					m_file = FileStream::createFile2(DataFilePath("PlayDiary.dat"));
+					if (!m_file)
+						cemuLog_log(LogType::Force, "Failed to read or write PlayDiary.dat, playtime tracking will not be possible");
+					m_header.readIndex = 0;
+					m_header.writeIndex = 0;
+					if (m_file)
+						m_file->writeData(&m_header, sizeof(m_header));
+				}
+
+				void CloseNoLock()
+				{
+					delete m_file;
+					m_file = nullptr;
+				}
+
+				std::mutex m_mutex;
+				FileStream* m_file = nullptr;
+				DiaryHeader m_header{};
+				PlayDiaryEntry m_entries[NUM_PLAY_DIARY_ENTRIES_MAX]{};
+			};
+
+			PlayDiaryStore g_diary;
+
+			/* ---- session tracking thread ---- */
+
+			std::thread g_trackerThread;
+			CounterSemaphore g_trackerWake;
+			std::atomic_bool g_trackerQuit{ false };
+
+			void TrackerMain(uint64 titleId)
+			{
+				SetThreadName("PlayDiaryThread");
+				const size_t slot = g_stats.BeginSession(titleId);
+				const auto start = std::chrono::steady_clock::now();
+				uint32 creditedMinutes = 0;
+				while (true)
+				{
+					g_trackerWake.decrementWithWaitAndTimeout(15000);
+					if (g_trackerQuit.load(std::memory_order::relaxed))
+						break;
+					const uint32 minutes = (uint32)std::chrono::duration_cast<std::chrono::minutes>(std::chrono::steady_clock::now() - start).count();
+					if (minutes > creditedMinutes)
+					{
+						g_stats.AddMinutes(slot, minutes - creditedMinutes);
+						creditedMinutes = minutes;
+					}
 				}
 			}
-			newEntry->titleIdHigh = (uint32)(titleId >> 32);
-			newEntry->titleIdLow = (uint32)(titleId & 0xFFFFFFFF);
-			newEntry->firstLaunchDayIndex = GetTodaysDayIndex();
-			newEntry->mostRecentDayIndex = newEntry->firstLaunchDayIndex;
-			newEntry->numTimesLaunched = 1;
-			newEntry->totalMinutesPlayed = 0;
-			newEntry->ukn12 = 0;
-			PlayStats_WriteEntryNoLock(newEntry, entryCountChanged);
-			return newEntry;
-		}
 
-		// sets last played if entry already exists
-		// if it does not exist it creates a new entry with first and last played set to today
-		PlayStatsEntry* PlayStats_BeginNewTracking(uint64 titleId)
-		{
-			std::unique_lock _l(sPlaystatsLock);
-			PlayStatsEntry* entry = PlayStats_GetEntry(titleId);
-			if (entry)
+			void LoadAll()
 			{
-				entry->mostRecentDayIndex = GetTodaysDayIndex();
-				entry->numTimesLaunched += 1;
-				PlayStats_WriteEntry(entry);
-				return entry;
+				g_stats.Load();
+				g_diary.Load();
 			}
-			return PlayStats_CreateEntry(titleId);
-		}
 
-		void PlayStats_CountAdditionalMinutes(PlayStatsEntry* entry, uint32 additionalMinutes)
-		{
-			std::unique_lock _l(sPlaystatsLock);
-			if (additionalMinutes == 0)
-				return;
-			entry->totalMinutesPlayed += additionalMinutes;
-			entry->mostRecentDayIndex = GetTodaysDayIndex();
-			PlayStats_WriteEntryNoLock(entry);
-		}
-
-		struct PlayDiaryHeader
-		{
-			// the play diary is a rolling log
-			// initially only writeIndex increases
-			// after the log is filled, writeIndex wraps over and readIndex will increase as well
-			uint32be readIndex;
-			uint32be writeIndex;
-		};
-
-		static_assert(sizeof(PlayDiaryEntry) == 0x10);
-		static_assert(sizeof(PlayDiaryHeader) == 0x8);
-
-		struct
-		{
-			FileStream* fs{};
-			PlayDiaryHeader header;
-			PlayDiaryEntry entry[NUM_PLAY_DIARY_ENTRIES_MAX];
-		}PlayDiaryData;
-
-		void CreatePlayDiary()
-		{
-			MakeDirectory();
-			cemu_assert_debug(!PlayDiaryData.fs);
-			PlayDiaryData.fs = FileStream::createFile2(GetPDFile("PlayDiary.dat"));
-			if (!PlayDiaryData.fs)
+			void CloseAll()
 			{
-				cemuLog_log(LogType::Force, "Failed to read or write PlayDiary.dat, playtime tracking will not be possible");
+				g_stats.Close();
+				g_diary.Close();
 			}
-			// write header
-			PlayDiaryData.header.readIndex = 0;
-			PlayDiaryData.header.writeIndex = 0;
-			if (PlayDiaryData.fs)
-				PlayDiaryData.fs->writeData(&PlayDiaryData.header, sizeof(PlayDiaryHeader));
-		}
 
-		void OpenPlayDiary()
-		{
-			std::unique_lock _lock(sDiaryLock);
-			cemu_assert_debug(!PlayDiaryData.fs);
-			PlayDiaryData.fs = FileStream::openFile2(GetPDFile("PlayDiary.dat"), true);
-			if (!PlayDiaryData.fs)
+			void UnloadAll()
 			{
-				CreatePlayDiary();
-				return;
+				g_stats.Unload();
+				g_diary.Unload();
 			}
-			// read header
-			if (PlayDiaryData.fs->readData(&PlayDiaryData.header, sizeof(PlayDiaryHeader)) != sizeof(PlayDiaryHeader))
-			{
-				cemuLog_log(LogType::Force, "Failed to read valid PlayDiary header");
-				delete PlayDiaryData.fs;
-				PlayDiaryData.fs = nullptr;
-				CreatePlayDiary();
-				return;
-			}
-			if (PlayDiaryData.header.readIndex > NUM_PLAY_DIARY_ENTRIES_MAX || PlayDiaryData.header.writeIndex > NUM_PLAY_DIARY_ENTRIES_MAX)
-			{
-				cemuLog_log(LogType::Force, "Bad value in play diary header (read={} write={})", (uint32)PlayDiaryData.header.readIndex, (uint32)PlayDiaryData.header.writeIndex);
-				PlayDiaryData.header.readIndex = PlayDiaryData.header.readIndex % NUM_PLAY_DIARY_ENTRIES_MAX;
-				PlayDiaryData.header.writeIndex = PlayDiaryData.header.writeIndex % NUM_PLAY_DIARY_ENTRIES_MAX;
-			}
-			// read entries and set any not-yet-written entries to zero
-			uint32 readBytes = PlayDiaryData.fs->readData(PlayDiaryData.entry, NUM_PLAY_DIARY_ENTRIES_MAX * sizeof(PlayDiaryEntry));
-			uint32 readEntries = readBytes / sizeof(PlayDiaryEntry);
-			while (readEntries < NUM_PLAY_DIARY_ENTRIES_MAX)
-			{
-				PlayDiaryData.entry[readEntries].titleId = 0;
-				PlayDiaryData.entry[readEntries].ukn08 = 0;
-				PlayDiaryData.entry[readEntries].dayIndex = 0;
-				PlayDiaryData.entry[readEntries].ukn0E = 0;
-				readEntries++;
-			}
-		}
 
-		void ClosePlayDiary()
-		{
-			std::unique_lock _lock(sDiaryLock);
-			if (PlayDiaryData.fs)
+			class PdmModule : public ::IOSUModule
 			{
-				delete PlayDiaryData.fs;
-				PlayDiaryData.fs = nullptr;
-			}
-		}
+			public:
+				void SystemLaunch() override
+				{
+					// load once, then release the files so the mlc can be changed while idle
+					LoadAll();
+					CloseAll();
+				}
 
-		void UnloadDiaryData()
-		{
-			std::unique_lock _lock(sDiaryLock);
-			cemu_assert_debug(!PlayDiaryData.fs); // unloading expects that file is closed
-			PlayDiaryData.header.readIndex = 0;
-			PlayDiaryData.header.writeIndex = 0;
-			for (auto& it : PlayDiaryData.entry)
-				it = PlayDiaryEntry{};
+				void SystemExit() override
+				{
+					CloseAll();
+					UnloadAll();
+				}
+
+				void TitleStart() override
+				{
+					// reload from disk and keep the files open for the session
+					UnloadAll();
+					LoadAll();
+					g_trackerQuit = false;
+					g_trackerThread = std::thread(TrackerMain, CafeSystem::GetForegroundTitleId());
+				}
+
+				void TitleStop() override
+				{
+					g_trackerQuit.store(true);
+					g_trackerWake.increment();
+					if (g_trackerThread.joinable())
+						g_trackerThread.join();
+					CloseAll();
+				}
+			};
+
+			PdmModule g_module;
 		}
 
 		uint32 GetDiaryEntries(uint8 accountSlot, PlayDiaryEntry* diaryEntries, uint32 maxEntries)
 		{
-			std::unique_lock _lock(sDiaryLock);
-			uint32 numReadEntries = 0;
-			uint32 currentEntryIndex = PlayDiaryData.header.readIndex;
-			while (currentEntryIndex != PlayDiaryData.header.writeIndex && numReadEntries < maxEntries)
-			{
-				*diaryEntries = PlayDiaryData.entry[currentEntryIndex];
-				numReadEntries++;
-				diaryEntries++;
-				currentEntryIndex = (currentEntryIndex+1) % NUM_PLAY_DIARY_ENTRIES_MAX;
-			}
-			return numReadEntries;
+			return g_diary.Read(diaryEntries, maxEntries);
 		}
 
 		bool GetStatForGamelist(uint64 titleId, GameListStat& stat)
 		{
-			stat.last_played.year = 0;
-			stat.last_played.month = 0;
-			stat.last_played.day = 0;
+			stat.last_played = {};
 			stat.numMinutesPlayed = 0;
-			std::unique_lock _lock(sDiaryLock);
-			// the play stats give us last time played and the total minutes
-			PlayStatsEntry* playStats = PlayStats_GetEntry(titleId);
-			if (playStats)
+			uint32 minutes;
+			uint16 lastDay;
+			if (g_stats.Lookup(titleId, minutes, lastDay))
 			{
-				stat.numMinutesPlayed = playStats->totalMinutesPlayed;
-				chrono_d::year_month_day ymd = GetDateFromDayIndex(playStats->mostRecentDayIndex);
-				stat.last_played.year = (int)ymd.year();
-				stat.last_played.month = (unsigned int)ymd.month() - 1;
-				stat.last_played.day = (unsigned int)ymd.day();
+				stat.numMinutesPlayed = minutes;
+				const chrono_d::year_month_day date = DayNumberToDate(lastDay);
+				stat.last_played.year = (int)date.year();
+				stat.last_played.month = (unsigned int)date.month() - 1; // zero based month
+				stat.last_played.day = (unsigned int)date.day();
 			}
-			_lock.unlock();
-			// check legacy time tracking for game entries in settings.xml
-			std::unique_lock _lockGC(GetConfig().game_cache_entries_mutex);
-			for (auto& gameEntry : GetConfig().game_cache_entries)
+			// merge in play time recorded by older versions in the settings file
+			std::lock_guard lock(GetConfig().game_cache_entries_mutex);
+			for (const auto& entry : GetConfig().game_cache_entries)
 			{
-				if(gameEntry.title_id != titleId)
+				if (entry.title_id != titleId)
 					continue;
-				stat.numMinutesPlayed += (gameEntry.legacy_time_played / 60);				
-				if (gameEntry.legacy_last_played != 0)
-				{
-					time_t td = gameEntry.legacy_last_played;
-					tm* date = localtime(&td);
-					uint32 legacyYear = (uint32)date->tm_year + 1900;
-					uint32 legacyMonth = (uint32)date->tm_mon;
-					uint32 legacyDay = (uint32)date->tm_mday;
-					if (stat.last_played.year == 0 || std::tie(legacyYear, legacyMonth, legacyDay) > std::tie(stat.last_played.year, stat.last_played.month, stat.last_played.day))
-					{
-						stat.last_played.year = legacyYear;
-						stat.last_played.month = legacyMonth;
-						stat.last_played.day = legacyDay;
-					}
-				}
+				stat.numMinutesPlayed += (uint32)(entry.legacy_time_played / 60);
+				if (entry.legacy_last_played == 0)
+					continue;
+				const time_t when = (time_t)entry.legacy_last_played;
+				const tm* local = localtime(&when);
+				GameListStat::LastPlayDate legacy{ (uint32)local->tm_year + 1900, (uint32)local->tm_mon, (uint32)local->tm_mday };
+				if (stat.last_played.year == 0 || stat.last_played < legacy)
+					stat.last_played = legacy;
 			}
 			return true;
 		}
 
-		std::thread sPDMTimeTrackingThread;
-		CounterSemaphore sPDMSem;
-		std::atomic_bool sPDMRequestExitThread{ false };
-
-		void TimeTrackingThread(uint64 titleId)
-		{
-			SetThreadName("PlayDiaryThread");
-			PlayStatsEntry* playStatsEntry = PlayStats_BeginNewTracking(titleId);
-
-			auto startTime = std::chrono::steady_clock::now();
-			uint32 prevMinuteCounter = 0;
-			while (true)
-			{
-				sPDMSem.decrementWithWaitAndTimeout(15000);
-				if (sPDMRequestExitThread.load(std::memory_order::relaxed))
-					break;
-				auto currentTime = std::chrono::steady_clock::now();
-				uint32 elapsedMinutes = std::chrono::duration_cast<std::chrono::minutes>(currentTime - startTime).count();
-				if (elapsedMinutes > prevMinuteCounter)
-				{
-					PlayStats_CountAdditionalMinutes(playStatsEntry, (elapsedMinutes - prevMinuteCounter));
-					// todo - also update PlayDiary (and other files)
-					prevMinuteCounter = elapsedMinutes;
-				}
-			}
-		}
-
-		class : public ::IOSUModule
-		{
-			void PDMLoadAll()
-			{
-				OpenPlaystats();
-				OpenPlayDiary();
-			}
-
-			void PDMUnloadAll()
-			{
-				UnloadPlaystats();
-				UnloadDiaryData();
-			}
-
-			void PDMCloseAll()
-			{
-				ClosePlaystats();
-				ClosePlayDiary();
-			}
-
-			void SystemLaunch() override
-			{
-				// todo - add support for per-account handling
-				PDMLoadAll();
-				PDMCloseAll(); // close the files again, user may mess with MLC files or change MLC path while no game is running
-			}
-			void SystemExit() override
-			{
-				PDMCloseAll();
-				PDMUnloadAll();
-			}
-			void TitleStart() override
-			{
-				// reload data and keep files open
-				PDMUnloadAll();
-				PDMLoadAll();
-				auto titleId = CafeSystem::GetForegroundTitleId();
-				sPDMRequestExitThread = false;
-				sPDMTimeTrackingThread = std::thread(TimeTrackingThread, titleId);
-			}
-			void TitleStop() override
-			{
-				sPDMRequestExitThread.store(true);
-				sPDMSem.increment();
-				if(sPDMTimeTrackingThread.joinable())
-					sPDMTimeTrackingThread.join();
-				PDMCloseAll();
-			}
-		}sIOSUModuleNNPDM;
-
 		IOSUModule* GetModule()
 		{
-			return static_cast<IOSUModule*>(&sIOSUModuleNNPDM);
+			return &g_module;
 		}
-
 
 		bool GameListStat::LastPlayDate::operator<(const LastPlayDate& b) const
 		{
-			const auto& a = *this;
-
-			if(a.year < b.year)
-				return true;
-			if(a.year > b.year)
-				return false;
-
-			// same year
-			if(a.month < b.month)
-				return true;
-			if(a.month > b.month)
-				return false;
-
-			// same year and month
-			return a.day < b.day;
+			return std::tie(year, month, day) < std::tie(b.year, b.month, b.day);
 		}
 
 		bool GameListStat::LastPlayDate::operator==(const LastPlayDate& b) const
 		{
-			const auto& a = *this;
-			return a.year == b.year &&
-				   a.month == b.month &&
-				   a.day == b.day;
+			return year == b.year && month == b.month && day == b.day;
 		}
-		std::weak_ordering GameListStat::LastPlayDate::operator<=>(const LastPlayDate& b) const = default;
 
-	};
-};
+		std::weak_ordering GameListStat::LastPlayDate::operator<=>(const LastPlayDate& b) const = default;
+	}
+}
