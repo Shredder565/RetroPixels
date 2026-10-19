@@ -1,165 +1,125 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/HW/Latte/Core/Latte.h"
 #include "Cafe/HW/Latte/Core/LatteAsyncCommands.h"
 #include "Cafe/HW/Latte/Core/LatteShader.h"
 #include "Cafe/HW/Latte/Core/LatteSurfaceCopy.h"
 #include "Cafe/HW/Latte/Core/LatteTexture.h"
+#include <variant>
+
+// CPU-side code (GX2 HLE) sometimes needs the GPU thread to do something outside of
+// the command buffer. Requests are queued here and run by the GPU thread whenever the
+// command processor polls LatteAsyncCommands_checkAndExecute.
 
 void LatteThread_Exit();
 
-SlimRWLock swl_gpuAsyncCommands;
-
-typedef struct  
+namespace
 {
-	uint32 type;
-	union
+	// copy a texture back to guest memory right away
+	struct ReadbackRequest
 	{
-		struct
-		{
-			MPTR physAddr;
-			MPTR mipAddr;
-			uint32 swizzle;
-			sint32 format;
-			sint32 width;
-			sint32 height;
-			sint32 depth;
-			uint32 pitch;
-			uint32 slice;
-			sint32 dim;
-			Latte::E_HWTILEMODE tilemode;
-			sint32 aa;
-			sint32 level;
-		}forceTextureReadback;
-
-		struct
-		{
-			uint64 shaderBaseHash; 
-			uint64 shaderAuxHash; 
-			LatteConst::ShaderType shaderType;
-		}deleteShader;
-
-		struct
-		{
-			LatteSurfaceCopyParam src;
-			LatteSurfaceCopyParam dst;
-			LatteSurfaceCopyRect rect;
-		}textureCopy;
+		MPTR physAddr;
+		MPTR mipAddr;
+		sint32 format;
+		Latte::E_HWTILEMODE tilemode;
+		sint32 width;
+		sint32 height;
+		sint32 depth;
+		uint32 pitch;
+		uint32 slice;
+		sint32 level;
 	};
-}LatteAsyncCommand_t;
 
-#define ASYNC_CMD_FORCE_TEXTURE_READBACK		1
-#define ASYNC_CMD_DELETE_SHADER					2
-#define ASYNC_CMD_TEXTURE_COPY					3
+	struct DeleteShaderRequest
+	{
+		uint64 baseHash;
+		uint64 auxHash;
+		LatteConst::ShaderType type;
+	};
 
-std::queue<LatteAsyncCommand_t> LatteAsyncCommandQueue;
+	struct CopyRequest
+	{
+		LatteSurfaceCopyParam src;
+		LatteSurfaceCopyParam dst;
+		LatteSurfaceCopyRect rect;
+	};
+
+	using Request = std::variant<ReadbackRequest, DeleteShaderRequest, CopyRequest>;
+
+	std::mutex s_queueMutex;
+	std::deque<Request> s_queue;
+	std::atomic<uint32> s_unfinished{0}; // queued or currently running
+
+	void Enqueue(Request&& request)
+	{
+		std::lock_guard lock(s_queueMutex);
+		s_queue.emplace_back(std::move(request));
+		s_unfinished++;
+	}
+
+	void Run(const ReadbackRequest& r)
+	{
+		cemu_assert_debug(r.level == 0); // mip levels would need their own swizzle
+		// the swizzle is not used for the lookup
+		LatteTextureView* view = LatteTC_GetTextureSliceViewOrTryCreate(r.physAddr, r.mipAddr, (Latte::E_GX2SURFFMT)r.format, r.tilemode, r.width, r.height, r.depth, r.pitch, 0, r.slice, r.level);
+		if (!view)
+		{
+			cemuLog_logDebug(LogType::Force, "Forced readback: no texture at {:08x}", r.physAddr);
+			return;
+		}
+		LatteTexture_UpdateDataToLatest(view->baseTexture);
+		LatteTextureReadback_StartTransfer(view);
+		LatteTextureReadback_UpdateFinishedTransfers(true); // blocks until the data is written back
+	}
+
+	void Run(const DeleteShaderRequest& r)
+	{
+		LatteSHRC_RemoveFromCacheByHash(r.baseHash, r.auxHash, r.type);
+	}
+
+	void Run(const CopyRequest& r)
+	{
+		LatteSurfaceCopy_copySurfaceNew(r.src, r.dst, r.rect);
+	}
+}
 
 void LatteAsyncCommands_queueForceTextureReadback(MPTR physAddr, MPTR mipAddr, uint32 swizzle, sint32 format, sint32 width, sint32 height, sint32 depth, uint32 pitch, uint32 slice, sint32 dim, Latte::E_HWTILEMODE tilemode, sint32 aa, sint32 level)
 {
-	LatteAsyncCommand_t asyncCommand = {};
-	// setup command
-	asyncCommand.type = ASYNC_CMD_FORCE_TEXTURE_READBACK;
-	
-	asyncCommand.forceTextureReadback.physAddr = physAddr;
-	asyncCommand.forceTextureReadback.mipAddr = mipAddr;
-	asyncCommand.forceTextureReadback.swizzle = swizzle;
-	asyncCommand.forceTextureReadback.format = format;
-	asyncCommand.forceTextureReadback.width = width;
-	asyncCommand.forceTextureReadback.height = height;
-	asyncCommand.forceTextureReadback.depth = depth;
-	asyncCommand.forceTextureReadback.pitch = pitch;
-	asyncCommand.forceTextureReadback.slice = slice;
-	asyncCommand.forceTextureReadback.dim = dim;
-	asyncCommand.forceTextureReadback.tilemode = tilemode;
-	asyncCommand.forceTextureReadback.aa = aa;
-	asyncCommand.forceTextureReadback.level = level;
-	swl_gpuAsyncCommands.LockWrite();
-	LatteAsyncCommandQueue.push(asyncCommand);
-	swl_gpuAsyncCommands.UnlockWrite();
+	// swizzle, dim and aa are accepted for the GX2 side but not needed
+	Enqueue(ReadbackRequest{ physAddr, mipAddr, format, tilemode, width, height, depth, pitch, slice, level });
 }
 
 void LatteAsyncCommands_queueDeleteShader(uint64 shaderBaseHash, uint64 shaderAuxHash, LatteConst::ShaderType shaderType)
 {
-	LatteAsyncCommand_t asyncCommand = {};
-	// setup command
-	asyncCommand.type = ASYNC_CMD_DELETE_SHADER;
-
-	asyncCommand.deleteShader.shaderBaseHash = shaderBaseHash;
-	asyncCommand.deleteShader.shaderAuxHash = shaderAuxHash;
-	asyncCommand.deleteShader.shaderType = shaderType;
-
-	swl_gpuAsyncCommands.LockWrite();
-	LatteAsyncCommandQueue.push(asyncCommand);
-	swl_gpuAsyncCommands.UnlockWrite();
+	Enqueue(DeleteShaderRequest{ shaderBaseHash, shaderAuxHash, shaderType });
 }
 
 void LatteAsyncCommand_queueTextureCopy(const LatteSurfaceCopyParam& src, const LatteSurfaceCopyParam& dst, const LatteSurfaceCopyRect& rect)
 {
-	LatteAsyncCommand_t asyncCommand = {};
-	// setup command
-	asyncCommand.type = ASYNC_CMD_TEXTURE_COPY;
-	asyncCommand.textureCopy.src = src;
-	asyncCommand.textureCopy.dst = dst;
-	asyncCommand.textureCopy.rect = rect;
-
-	swl_gpuAsyncCommands.LockWrite();
-	LatteAsyncCommandQueue.push(asyncCommand);
-	swl_gpuAsyncCommands.UnlockWrite();
+	Enqueue(CopyRequest{ src, dst, rect });
 }
 
 void LatteAsyncCommands_waitUntilAllProcessed()
 {
-	while (LatteAsyncCommandQueue.empty() == false)
-	{
+	while (s_unfinished.load() != 0)
 		_mm_pause();
-	}
 }
 
-/*
- * Called by the GPU command processor frequently
- */
+// GPU thread, polled by the command processor. Also where the thread notices a stop request.
 void LatteAsyncCommands_checkAndExecute()
 {
-	// quick check if queue is empty (requires no lock)
 	if (Latte_GetStopSignal())
 		LatteThread_Exit();
-	if (LatteAsyncCommandQueue.empty())
-		return;
-	swl_gpuAsyncCommands.LockWrite();
-	while (LatteAsyncCommandQueue.empty() == false)
+	while (s_unfinished.load() != 0)
 	{
-		// get first command in queue
-		LatteAsyncCommand_t asyncCommand = LatteAsyncCommandQueue.front();
-		swl_gpuAsyncCommands.UnlockWrite();
-		if (asyncCommand.type == ASYNC_CMD_FORCE_TEXTURE_READBACK)
+		Request request;
 		{
-			cemu_assert_debug(asyncCommand.forceTextureReadback.level == 0); // implement mip swizzle and verify
-			LatteTextureView* textureView = LatteTC_GetTextureSliceViewOrTryCreate(asyncCommand.forceTextureReadback.physAddr, asyncCommand.forceTextureReadback.mipAddr, (Latte::E_GX2SURFFMT)asyncCommand.forceTextureReadback.format, asyncCommand.forceTextureReadback.tilemode, asyncCommand.forceTextureReadback.width, asyncCommand.forceTextureReadback.height, asyncCommand.forceTextureReadback.depth, asyncCommand.forceTextureReadback.pitch, 0, asyncCommand.forceTextureReadback.slice, asyncCommand.forceTextureReadback.level);
-			if (textureView != nullptr)
-			{
-				LatteTexture_UpdateDataToLatest(textureView->baseTexture);
-				// start transfer
-				LatteTextureReadback_StartTransfer(textureView);
-				// wait until finished
-				LatteTextureReadback_UpdateFinishedTransfers(true);
-			}
-			else
-			{
-				cemuLog_logDebug(LogType::Force, "Texture not found for readback");
-			}
+			std::lock_guard lock(s_queueMutex);
+			if (s_queue.empty())
+				return;
+			request = std::move(s_queue.front());
+			s_queue.pop_front();
 		}
-		else if (asyncCommand.type == ASYNC_CMD_DELETE_SHADER)
-		{
-			LatteSHRC_RemoveFromCacheByHash(asyncCommand.deleteShader.shaderBaseHash, asyncCommand.deleteShader.shaderAuxHash, asyncCommand.deleteShader.shaderType);
-		}
-		else if (asyncCommand.type == ASYNC_CMD_TEXTURE_COPY)
-		{
-			LatteSurfaceCopy_copySurfaceNew(asyncCommand.textureCopy.src, asyncCommand.textureCopy.dst, asyncCommand.textureCopy.rect);
-		}
-		else
-		{
-			cemu_assert_unimplemented();
-		}
-		swl_gpuAsyncCommands.LockWrite();
-		LatteAsyncCommandQueue.pop();
+		std::visit([](const auto& r) { Run(r); }, request);
+		s_unfinished--;
 	}
-	swl_gpuAsyncCommands.UnlockWrite();
 }

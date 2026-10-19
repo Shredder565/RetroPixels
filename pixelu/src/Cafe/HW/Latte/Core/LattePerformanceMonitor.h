@@ -1,121 +1,123 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
-#define PERFORMANCE_MONITOR_TRACK_CYCLES	(5) // one cycle lasts one second
+// GPU statistics shown by the overlay. Counters are collected in one-second slots and
+// the last PERFORMANCE_MONITOR_TRACK_CYCLES slots are averaged.
 
-// todo - replace PPCTimer with HighResolutionTimer.h
+#define PERFORMANCE_MONITOR_TRACK_CYCLES	(5)
+
 uint64 PPCTimer_getRawTsc();
 uint64 PPCTimer_tscToMicroseconds(uint64 us);
 
+// accumulates time between begin/end pairs over a frame
 class LattePerfStatTimer
 {
 public:
 	void beginMeasuring()
 	{
-		timerStart = PPCTimer_getRawTsc();
+		m_start = PPCTimer_getRawTsc();
 	}
 
 	void endMeasuring()
 	{
-		uint64 dif = PPCTimer_getRawTsc() - timerStart;
-		currentSum += dif;
+		m_frameTotal += PPCTimer_getRawTsc() - m_start;
 	}
 
+	// closes the frame: the total becomes the previous frame value
 	void frameFinished()
 	{
-		previousFrame = currentSum;
-		currentSum = 0;
+		m_lastFrame = std::exchange(m_frameTotal, 0);
 	}
 
 	uint64 getPreviousFrameValue()
 	{
-		return previousFrame;
+		return m_lastFrame;
 	}
 
 private:
-	uint64 currentSum{};
-	uint64 previousFrame{};
-	uint64 timerStart{};
+	uint64 m_start{};
+	uint64 m_frameTotal{};
+	uint64 m_lastFrame{};
 };
 
+// thread-safe object counter
 class LattePerfStatCounter
 {
 public:
 	void increment()
 	{
-		m_value++;
+		m_count++;
 	}
 
 	void decrement()
 	{
-		cemu_assert_debug(m_value > 0);
-		m_value--;
+		cemu_assert_debug(m_count > 0);
+		m_count--;
 	}
 
 	void decrement(uint32 count)
 	{
-		cemu_assert_debug(count <= m_value);
-		m_value -= count;
+		cemu_assert_debug(count <= m_count);
+		m_count -= count;
 	}
 
 	uint32 get()
 	{
-		return m_value;
+		return m_count;
 	}
 
 	void reset()
 	{
-		m_value = 0;
+		m_count = 0;
 	}
 
 private:
-	std::atomic_uint32_t m_value{};
+	std::atomic_uint32_t m_count{};
 };
 
-typedef struct
+struct performanceMonitor_t
 {
+	// one slot per second
 	struct
 	{
-		// CPU
 		uint64 lastCycleCount;
 		uint64 skippedCycles;
-		uint32 recompilerLeaveCount; // increased everytime the recompiler switches back to interpreter
-		uint32 threadLeaveCount; // increased everytime a thread gives up it's timeslice
-		// GPU
-		uint32 lastUpdate;
+		uint32 recompilerLeaveCount;
+		uint32 threadLeaveCount;
+		uint32 lastUpdate; // tick count when the slot started
 		uint32 frameCounter;
 		uint32 drawCallCounter;
 		uint32 fastDrawCallCounter;
 		uint32 shaderBindCount;
-		uint64 vertexDataUploaded; // amount of vertex data uploaded to GPU (bytes)
-		uint64 vertexDataCached; // amount of vertex data reused from GPU cache (bytes)
-		uint64 uniformBankUploadedData; // amount of uniform buffer data (excluding remapped uniforms) uploaded to GPU
-		uint64 uniformBankUploadedCount; // number of separate uploads for uniformBankDataUploaded
+		uint64 vertexDataUploaded; // bytes
+		uint64 vertexDataCached; // bytes served from the buffer cache
+		uint64 uniformBankUploadedData; // uniform buffer bytes (not counting remapped uniforms)
+		uint64 uniformBankUploadedCount;
 		uint64 indexDataUploaded;
 		uint64 indexDataCached;
 	}cycle[PERFORMANCE_MONITOR_TRACK_CYCLES];
 	sint32 cycleIndex;
-	// new stats
+
+	// per-frame timers
 	LattePerfStatTimer gpuTime_frameTime;
 	LattePerfStatTimer gpuTime_shaderCreate;
-	LattePerfStatTimer gpuTime_idleTime; // time spent waiting for new commands from CPU
-	LattePerfStatTimer gpuTime_fenceTime; // time spent waiting for fence condition
+	LattePerfStatTimer gpuTime_idleTime; // waiting for commands from the CPU
+	LattePerfStatTimer gpuTime_fenceTime; // waiting on fences
+	// draw call stages
+	LattePerfStatTimer gpuTime_dcStageTextures;
+	LattePerfStatTimer gpuTime_dcStageVertexMgr;
+	LattePerfStatTimer gpuTime_dcStageShaderAndUniformMgr;
+	LattePerfStatTimer gpuTime_dcStageIndexMgr;
+	LattePerfStatTimer gpuTime_dcStageMRT;
+	LattePerfStatTimer gpuTime_dcStageDrawcallAPI;
+	LattePerfStatTimer gpuTime_waitForAsync; // GX2DrawDone, forced readbacks, query polling
 
-	LattePerfStatTimer gpuTime_dcStageTextures; // drawcall texture/mrt setup
-	LattePerfStatTimer gpuTime_dcStageVertexMgr; // drawcall vertex setup and upload
-	LattePerfStatTimer gpuTime_dcStageShaderAndUniformMgr; // drawcall shader setup and uniform management/upload
-	LattePerfStatTimer gpuTime_dcStageIndexMgr; // drawcall index data setup and upload
-	LattePerfStatTimer gpuTime_dcStageMRT; // drawcall render target API
+	uint32 numCompiledVS;
+	uint32 numCompiledGS;
+	uint32 numCompiledPS;
 
-	LattePerfStatTimer gpuTime_dcStageDrawcallAPI; // drawcall api call
-	LattePerfStatTimer gpuTime_waitForAsync; // waiting for operations to complete (e.g. GX2DrawDone or force texture readback) Also includes texture readback and occlusion query polling logic
-
-	// generic
-	uint32 numCompiledVS; // number of compiled vertex shader programs
-	uint32 numCompiledGS; // number of compiled geometry shader programs
-	uint32 numCompiledPS; // number of compiled pixel shader programs
-
-	// Vulkan
-	struct  
+	// Vulkan object counts
+	struct
 	{
 		LattePerfStatCounter numDescriptorSets;
 		LattePerfStatCounter numDescriptorDynUniformBuffers;
@@ -127,23 +129,23 @@ typedef struct
 		LattePerfStatCounter numSamplers;
 		LattePerfStatCounter numRenderPass;
 		LattePerfStatCounter numFramebuffer;
-
-		// per frame
+		// reset every frame
 		LattePerfStatCounter numDrawBarriersPerFrame;
 		LattePerfStatCounter numBeginRenderpassPerFrame;
 	}vk;
 
-	// calculated stats (per frame)
+	// derived values, updated once per slot
 	struct
 	{
 		uint32 indexDataUploadPerFrame;
 	}stats;
-}performanceMonitor_t;
+};
 
 extern performanceMonitor_t performanceMonitor;
 
 void LattePerformanceMonitor_frameEnd();
 void LattePerformanceMonitor_frameBegin();
 
+// for code templated on a THasProfiling flag
 #define beginPerfMonProfiling(__obj) if( THasProfiling ) __obj.beginMeasuring()
 #define endPerfMonProfiling(__obj) if( THasProfiling ) __obj.endMeasuring()

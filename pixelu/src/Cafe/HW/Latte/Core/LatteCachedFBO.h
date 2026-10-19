@@ -1,96 +1,73 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include "Cafe/HW/Latte/Core/LatteTexture.h"
 #include "util/math/vector2.h"
 
+// A framebuffer object for one combination of color and depth attachments. Renderers
+// derive from it to hold their API object. The attachments are taken from the current
+// LatteMRT state when the object is constructed (see LatteRenderTarget.cpp).
 class LatteCachedFBO
 {
 public:
 	LatteCachedFBO(uint64 key);
+	virtual ~LatteCachedFBO() {};
 
 	uint32 calculateNumColorBuffers()
 	{
-		uint32 n = 0;
-		for (sint32 i = 0; i < 8; i++)
-			if (colorBuffer[i].texture)
-				n++;
-		return n;
+		uint32 count = 0;
+		for (auto& slot : colorBuffer)
+			count += slot.texture ? 1 : 0;
+		return count;
 	}
 
 	bool hasDepthBuffer()
 	{
-		return depthBuffer.texture;
+		return depthBuffer.texture != nullptr;
 	}
 
+	// base textures of all attachments
 	std::vector<LatteTexture*>& GetTextures()
 	{
 		return m_referencedTextures;
 	}
 
-	virtual ~LatteCachedFBO() {};
-
 private:
-	void calculateEffectiveRenderAreaSize()
+	// the drawable area is the smallest effective size of all attachments
+	static void ShrinkToView(Vector2i& area, LatteTextureView* view)
 	{
-		Vector2i rtEffectiveSize;
-		rtEffectiveSize.x = 0;
-		rtEffectiveSize.y = 0;
-		sint32 numViews = 0;
-		// derive extent from color buffers
-		for (sint32 i = 0; i < 8; i++)
+		sint32 w, h;
+		view->baseTexture->GetEffectiveSize(w, h, view->firstMip);
+		if (area.x == 0 && area.y == 0)
 		{
-			if(colorBuffer[i].texture == nullptr)
-				continue;
-			sint32 effectiveWidth, effectiveHeight;
-			colorBuffer[i].texture->baseTexture->GetEffectiveSize(effectiveWidth, effectiveHeight, colorBuffer[i].texture->firstMip);
-			if (rtEffectiveSize.x == 0 && rtEffectiveSize.y == 0)
-			{
-				rtEffectiveSize.x = effectiveWidth;
-				rtEffectiveSize.y = effectiveHeight;
-			}
-			if (effectiveWidth < rtEffectiveSize.x)
-			{
-				cemuLog_logDebug(LogType::Force, "Framebuffer has color texture with smaller effective width ({} -> {})", rtEffectiveSize.x, effectiveWidth);
-				rtEffectiveSize.x = effectiveWidth;
-			}
-			if (effectiveHeight < rtEffectiveSize.y)
-			{
-				cemuLog_logDebug(LogType::Force, "Framebuffer has color texture with smaller effective height ({} -> {})", rtEffectiveSize.y, effectiveHeight);
-				rtEffectiveSize.y = effectiveHeight;
-			}
-			numViews++;
-		}
-		// derive extent from depth buffer
-		if (depthBuffer.texture)
-		{
-			sint32 effectiveWidth, effectiveHeight;
-			depthBuffer.texture->baseTexture->GetEffectiveSize(effectiveWidth, effectiveHeight, depthBuffer.texture->firstMip);
-			if (rtEffectiveSize.x == 0 && rtEffectiveSize.y == 0)
-			{
-				rtEffectiveSize.x = effectiveWidth;
-				rtEffectiveSize.y = effectiveHeight;
-			}
-			if (effectiveWidth < rtEffectiveSize.x)
-			{
-				cemuLog_logDebug(LogType::Force, "Framebuffer has depth texture with smaller effective width ({} -> {})", rtEffectiveSize.x, effectiveWidth);
-				rtEffectiveSize.x = effectiveWidth;
-			}
-			if (effectiveHeight < rtEffectiveSize.y)
-			{
-				cemuLog_logDebug(LogType::Force, "Framebuffer has depth texture with smaller effective height ({} -> {})", rtEffectiveSize.y, effectiveHeight);
-				rtEffectiveSize.y = effectiveHeight;
-			}
-			numViews++;
-		}
-		if (numViews == 0)
-		{
-			// empty FBO
-			m_size = Vector2i(32, 32);
+			area = Vector2i(w, h);
 			return;
 		}
-		cemu_assert_debug(rtEffectiveSize.x != 0);
-		cemu_assert_debug(rtEffectiveSize.y != 0);
-		m_size = rtEffectiveSize;
+		if (w < area.x || h < area.y)
+			cemuLog_logDebug(LogType::Force, "Framebuffer attachment is smaller than the others ({}x{} vs {}x{})", w, h, area.x, area.y);
+		area.x = std::min(area.x, w);
+		area.y = std::min(area.y, h);
+	}
+
+	void computeSize()
+	{
+		Vector2i area(0, 0);
+		bool anyAttachment = false;
+		for (auto& slot : colorBuffer)
+		{
+			if (!slot.texture)
+				continue;
+			ShrinkToView(area, slot.texture);
+			anyAttachment = true;
+		}
+		if (depthBuffer.texture)
+		{
+			ShrinkToView(area, depthBuffer.texture);
+			anyAttachment = true;
+		}
+		// without attachments the renderers still need some size
+		m_size = anyAttachment ? area : Vector2i(32, 32);
+		cemu_assert_debug(m_size.x != 0 && m_size.y != 0);
 	}
 
 public:
@@ -108,22 +85,24 @@ public:
 	}depthBuffer{};
 	uint32 drawBuffersMask{};
 
-	std::vector<LatteTexture*> m_referencedTextures; // color and depth views combined
+	std::vector<LatteTexture*> m_referencedTextures; // in attachment order, color first
 };
 
+// The render target state: which textures are attached as color and depth buffers,
+// derived from the GPU registers, and the cached FBOs for those combinations.
 class LatteMRT
 {
 public:
 	static void NotifyTextureDeletion(LatteTexture* texture);
 
-	// GPU state
+	// attachments described by the GPU registers
 	static LatteTextureView* GetColorAttachmentTexture(uint32 index, bool createNew, bool checkForTextureChanges);
 	static uint8 GetActiveColorBufferMask(const LatteDecompilerShader* pixelShader, const struct LatteContextRegister& lcr);
 	static bool GetActiveDepthBufferMask(const struct LatteContextRegister& lcr);
 	static Latte::E_GX2SURFFMT GetColorBufferFormat(const uint32 index, const LatteContextRegister& lcr);
 	static Latte::E_GX2SURFFMT GetDepthBufferFormat(const struct LatteContextRegister& lcr);
 
-	// FBO state management
+	// pending attachments, ApplyCurrentState binds them
 	static void SetColorAttachment(uint32 index, LatteTextureView* view);
 	static void SetDepthAndStencilAttachment(LatteTextureView* view, bool hasStencil);
 	static LatteTextureView* GetColorAttachment(uint32 index);
@@ -131,16 +110,16 @@ public:
 
 	static void ApplyCurrentState();
 
-	static bool UpdateCurrentFBO(); // update FBO with info from current GPU state
+	// sets the attachments from the GPU registers, false if there is nothing to draw into
+	static bool UpdateCurrentFBO();
 
-	// helper functions
 	static void BindColorBufferOnly(LatteTextureView* view);
 	static void BindDepthBufferOnly(LatteTextureView* view);
 
 	static void GetCurrentFragCoordScale(float* coordScale);
-	static void GetVirtualViewportDimensions(sint32& width, sint32& height); // returns the width and height of the current GPU viewport (unaffected by graphic pack rules)
+	// size of the guest viewport, not scaled by graphic pack rules
+	static void GetVirtualViewportDimensions(sint32& width, sint32& height);
 
-	// todo - move this into FBO destructor (?)
 	static void DeleteCachedFBO(LatteCachedFBO* cfbo);
 
 private:

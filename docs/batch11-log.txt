@@ -121,3 +121,43 @@ Done:
   identical. Differences: unsupported attribute formats read as zero
   instead of uninitialised stack; unsupported operands read 0 instead of
   hitting assert_dbg; the CF loop stops at the program end.
+- LatteThread.cpp: original. Same start/stop handshake, init order, idle
+  frames until a title runs, graphic pack wait and size-optimization check,
+  reset registers, OSScreen flips (the four OSScreen buffer textures are
+  looked up in the same order) and teardown in LatteThread_Exit. Not
+  harness-tested (thread/renderer glue); syntax-checked with its callers.
+  Dropped globals nobody used (the OSScreen texture pointers, an unused
+  extern, the thread state copies).
+- LatteRenderTarget.cpp, LatteCachedFBO.h: original. Same FBO key (built
+  from the attachment pointers) and lookup view, same register decoding
+  (padded sizes, scissor size hint, swizzle bits), same masks, clears,
+  output shader choice, window image area, viewport/scissor math. The
+  TV/GamePad swap (isDRCPrimary, Tab / Ctrl+Tab / controller screen
+  button) and the recorder hook before the copyToBackbuffer calls are
+  kept as they were. Kept quirks: a depth buffer with a valid size but no
+  address keeps the previous depth attachment; NotifyTextureDeletion only
+  clears color attachments. Harness (stub texture cache/renderer, objects
+  in a fixed-address arena so the pointer-based FBO keys are compared
+  too): 5000 seeds, 1.39M lines identical; a deliberate one-line change
+  is caught. The controller screen button path was not covered (no
+  emulated controllers in the harness). prevScissor* and
+  hasValidFramebufferAttached are still exported.
+- LatteAsyncCommands.cpp/.h: original (variant queue under a mutex; the
+  wait now counts commands that are queued or running instead of reading
+  the queue without a lock). The forced readback still looks up the
+  texture with swizzle 0 as before.
+- LattePerformanceMonitor.cpp/.h: original, same fields and slot logic,
+  same overlay values (fps over the last two slots, draw calls per frame
+  over all slots). Dropped computed values nobody read (cycles per
+  second and leave counts); that also removes a possible integer division
+  by zero. Harness (fake tick counter): 2M frames, 869k lines identical.
+- LatteOverlay.cpp/.h: original. Same panels, order, stacking, texts,
+  timings (5s session info, 750ms battery blink, 2.5s compile counters)
+  and locking. The three g_compiling_pipelines* globals stay exported.
+  The per-core CPU loop is bounded by the vectors it reads.
+- Latte.h, LatteConst.h, LatteDraw.h, LatteIndices.h, LatteBufferCache.h:
+  original headers, same declarations, values and LatteGPUState_t field
+  order.
+- LatteRecorder.cpp/.h: these are PixelU's own code (commit 991eb0e), not
+  Cemu code. Only the MPL header was swapped for the original-code line;
+  the code is unchanged, so its behaviour and output stay identical.
