@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "input/ControllerFactory.h"
 
 #include "input/emulated/VPADController.h"
@@ -22,8 +23,47 @@
 #include "input/api/SDL/SDLController.h"
 #endif
 
-ControllerPtr ControllerFactory::CreateController(InputAPI::Type api, std::string_view uuid,
-                                                  std::string_view display_name)
+// uuid formats as stored in profiles:
+//   Keyboard     anything ("Keyboard")
+//   DirectInput  the device GUID in braces, or "0" for whichever DirectInput device comes first
+//                (mouse2joystick setups ship profiles like that)
+//   XInput       the user index 0..3
+//   SDL          "<index among devices with this GUID>_<SDL GUID string>"
+//   DSU          the server slot 0..3
+//   GameCube     "<adapter>_<port>"
+//   Wiimote      the device index
+
+namespace
+{
+	// splits "a_b" at the first underscore
+	[[maybe_unused]] std::pair<std::string_view, std::string_view> SplitUuid(std::string_view uuid, std::string_view what)
+	{
+		const size_t sep = uuid.find('_');
+		if (sep == std::string_view::npos)
+			throw std::invalid_argument(fmt::format("invalid {} uuid format: {}", what, uuid));
+		return { uuid.substr(0, sep), uuid.substr(sep + 1) };
+	}
+
+#if HAS_DIRECTINPUT
+	GUID DirectInputGuid(std::string_view uuid)
+	{
+		std::string text{ uuid };
+		if (uuid == "0")
+		{
+			const auto devices = InputManager::instance().get_api_provider(InputAPI::DirectInput)->get_controllers();
+			if (devices.empty())
+				throw std::invalid_argument("can't apply non-uuid-specific directinput profile when no controllers are available");
+			text = devices.front()->uuid();
+		}
+		GUID guid;
+		if (!GUIDFromString(text.c_str(), guid))
+			throw std::invalid_argument(fmt::format("invalid guid format: {}", uuid));
+		return guid;
+	}
+#endif
+}
+
+ControllerPtr ControllerFactory::CreateController(InputAPI::Type api, std::string_view uuid, std::string_view display_name)
 {
 	switch (api)
 	{
@@ -33,102 +73,52 @@ ControllerPtr ControllerFactory::CreateController(InputAPI::Type api, std::strin
 #endif
 #if HAS_DIRECTINPUT
 	case InputAPI::DirectInput:
-		{
-			GUID guid;
-			// Workaround for mouse2joystick users, which has 0 as it's uuid in it's profile and counts on Cemu applying it to the first directinput controller. GUIDFromString also doesn't allow for invalid uuids either.
-			if (uuid == "0")
-			{
-				const auto provider = InputManager::instance().get_api_provider(InputAPI::DirectInput);
-				const auto controllers = provider->get_controllers();
-				if (controllers.empty())
-					throw std::invalid_argument(fmt::format(
-						"can't apply non-uuid-specific directinput profile when no controllers are available"));
-				if (!GUIDFromString(controllers.front()->uuid().c_str(), guid))
-					throw std::invalid_argument(fmt::format("invalid guid format: {}", uuid));
-			}
-			else
-			{
-				if (!GUIDFromString(uuid.data(), guid))
-					throw std::invalid_argument(fmt::format("invalid guid format: {}", uuid));
-			}
-
-			return std::make_shared<DirectInputController>(guid);
-		}
+		return std::make_shared<DirectInputController>(DirectInputGuid(uuid));
 #endif
 #if HAS_XINPUT
 	case InputAPI::XInput:
-		{
-			const auto index = ConvertString<uint32>(uuid);
-			return std::make_shared<XInputController>(index);
-		}
+		return std::make_shared<XInputController>(ConvertString<uint32>(uuid));
 #endif
 #ifdef HAS_SDL
 	case InputAPI::SDLController:
-		{
-			// diid_guid
-			const auto index = uuid.find_first_of('_');
-			if (index == std::string_view::npos)
-				throw std::invalid_argument(fmt::format("invalid sdl uuid format: {}", uuid));
-
-			const auto guid_index = ConvertString<size_t>(uuid.substr(0, index));
-			const auto guid = SDL_StringToGUID(std::string{uuid.substr(index + 1)}.c_str());
-
-			if (display_name.empty())
-				return std::make_shared<SDLController>(guid, guid_index);
-			else
-				return std::make_shared<SDLController>(guid, guid_index, display_name);
-		}
+	{
+		const auto [index, guid_text] = SplitUuid(uuid, "sdl");
+		const auto guid_index = ConvertString<size_t>(index);
+		const auto guid = SDL_StringToGUID(std::string{ guid_text }.c_str());
+		if (display_name.empty())
+			return std::make_shared<SDLController>(guid, guid_index);
+		return std::make_shared<SDLController>(guid, guid_index, display_name);
+	}
 #endif
 #if HAS_DSU
 	case InputAPI::DSUClient:
-		{
-			const auto index = ConvertString<uint32>(uuid);
-			return std::make_shared<DSUController>(index);
-		}
+		return std::make_shared<DSUController>(ConvertString<uint32>(uuid));
 #endif
 #if defined(HAS_GAMECUBE) && HAS_GAMECUBE && defined(HAS_LIBUSB)
 	case InputAPI::GameCube:
-		{
-			const auto index = uuid.find_first_of('_');
-			if (index == std::string_view::npos)
-				throw std::invalid_argument(fmt::format("invalid gamecube uuid format: {}", uuid));
-
-			const auto adapter = ConvertString<int>(uuid.substr(0, index));
-			const auto controller_index = ConvertString<int>(uuid.substr(index + 1));
-			return std::make_shared<GameCubeController>(adapter, controller_index);
-		}
+	{
+		const auto [adapter, port] = SplitUuid(uuid, "gamecube");
+		return std::make_shared<GameCubeController>(ConvertString<int>(adapter), ConvertString<int>(port));
+	}
 #endif
 #if HAS_WIIMOTE
 	case InputAPI::Wiimote:
-		{
-			const auto index = ConvertString<uint32>(uuid);
-			return std::make_shared<NativeWiimoteController>(index);
-		}
+		return std::make_shared<NativeWiimoteController>(ConvertString<uint32>(uuid));
 #endif
 	default:
 		throw std::invalid_argument(fmt::format("unhandled controller api: {}", api));
 	}
-	/*
-	case InputAPI::WGIGamepad: break;
-	case InputAPI::WGIRawController: break;
-	*/
 }
 
-EmulatedControllerPtr
-ControllerFactory::CreateEmulatedController(size_t player_index, EmulatedController::Type type)
+EmulatedControllerPtr ControllerFactory::CreateEmulatedController(size_t player_index, EmulatedController::Type type)
 {
 	switch (type)
 	{
-	case EmulatedController::Type::VPAD:
-		return std::make_shared<VPADController>(player_index);
-	case EmulatedController::Type::Pro:
-		return std::make_shared<ProController>(player_index);
-	case EmulatedController::Type::Classic:
-		return std::make_shared<ClassicController>(player_index);
-	case EmulatedController::Type::Wiimote:
-		return std::make_shared<WiimoteController>(player_index);
-	default:
-		throw std::runtime_error(fmt::format("unknown emulated controller type: {}", type));
+	case EmulatedController::Type::VPAD: return std::make_shared<VPADController>(player_index);
+	case EmulatedController::Type::Pro: return std::make_shared<ProController>(player_index);
+	case EmulatedController::Type::Classic: return std::make_shared<ClassicController>(player_index);
+	case EmulatedController::Type::Wiimote: return std::make_shared<WiimoteController>(player_index);
+	default: throw std::runtime_error(fmt::format("unknown emulated controller type: {}", type));
 	}
 }
 
@@ -154,19 +144,11 @@ ControllerProviderPtr ControllerFactory::CreateControllerProvider(InputAPI::Type
 #endif
 #if HAS_DSU
 	case InputAPI::DSUClient:
-		{
-			try
-			{
-				const auto& dsu_settings = dynamic_cast<const DSUProviderSettings&>(settings);
-				return std::make_shared<DSUControllerProvider>(dsu_settings);
-			}
-			catch (const std::bad_cast&)
-			{
-				cemuLog_log(LogType::Force, "failing to cast ControllerProviderSettings class to DSUControllerProvider");
-				return std::make_shared<DSUControllerProvider>();
-			}
-		}
-
+		// a DSU provider is per server address
+		if (const auto* dsu = dynamic_cast<const DSUProviderSettings*>(&settings))
+			return std::make_shared<DSUControllerProvider>(*dsu);
+		cemuLog_log(LogType::Force, "failing to cast ControllerProviderSettings class to DSUControllerProvider");
+		return std::make_shared<DSUControllerProvider>();
 #endif
 #if defined(HAS_GAMECUBE) && HAS_GAMECUBE && defined(HAS_LIBUSB)
 	case InputAPI::GameCube:

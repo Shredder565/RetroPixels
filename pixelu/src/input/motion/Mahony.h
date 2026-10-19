@@ -1,6 +1,16 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
-#include <math.h>
+// Orientation tracking for controllers that report raw gyro and accelerometer samples
+// (SDL pads, DSU servers, ...). This is a Mahony style complementary filter: the gyro
+// rate is integrated into a unit quaternion, and the direction of gravity seen by the
+// accelerometer pulls the estimate back so that it does not drift away over time.
+// A slowly averaged gyro offset (taken only while the pad is held still) is removed
+// first, and tiny rates are ignored so a resting pad does not creep around its yaw.
+//
+// The angles it reports keep counting whole turns, the way the GamePad's own
+// orientation values do.
+
 #include <cmath>
 #include "util/math/quaternion.h"
 
@@ -9,157 +19,164 @@ class MahonySensorFusion
 public:
 	MahonySensorFusion()
 	{
-		// assume default forward pose (holding controller in hand, tilted forward so the sticks/buttons face upward)
-		m_imuQ.Assign(sqrtf(0.5), sqrtf(0.5), 0.0f, 0.0f);
+		// resting pose: held in both hands, front tilted up by a quarter turn about x
+		const float half = sqrtf(0.5);
+		m_q = { half, half, 0.0f, 0.0f };
 	}
 
-	// gx, gy, gz are in radians/sec
+	// gx/gy/gz: angular rate in radians per second, ax/ay/az: acceleration in g
 	void updateIMU(float deltaTime, float gx, float gy, float gz, float ax, float ay, float az)
 	{
-		Vector3f av(ax, ay, az);
-		Vector3f gv(gx, gy, gz);
-		if (deltaTime > 0.2f)
-			deltaTime = 0.2f; // dont let stutter mess up the internal state
-		updateGyroBias(gx, gy, gz);
-		gv.x -= m_gyroBias[0];
-		gv.y -= m_gyroBias[1];
-		gv.z -= m_gyroBias[2];
+		// a long stall (loading screen, window drag) would otherwise throw the estimate around
+		const float dt = deltaTime > 0.2f ? 0.2f : deltaTime;
 
-		// ignore small angles to avoid drift due to bias (especially on yaw)
-		if (fabs(gv.x) < 0.015f)
-			gv.x = 0.0f;
-		if (fabs(gv.y) < 0.015f)
-			gv.y = 0.0f;
-		if (fabs(gv.z) < 0.015f)
-			gv.z = 0.0f;
-
-		// cemuLog_logDebug(LogType::Force, "[IMU Quat] time {:7.4} | {:7.2} {:7.2} {:7.2} {:7.2} | gyro( - bias) {:7.4} {:7.4} {:7.4} | acc {:7.2} {:7.2} {:7.2} | GyroBias {:7.4} {:7.4} {:7.4}", deltaTime, m_imuQ.x, m_imuQ.y, m_imuQ.z, m_imuQ.w, gv.x, gv.y, gv.z, ax, ay, az, m_gyroBias[0], m_gyroBias[1], m_gyroBias[2]);
-
-		if (fabs(av.x) > 0.000001f || fabs(av.y) > 0.000001f || fabs(av.z) > 0.000001f)
+		trackGyroOffset(gx, gy, gz);
+		float rate[3] = { gx - m_gyroOffset[0], gy - m_gyroOffset[1], gz - m_gyroOffset[2] };
+		for (float& r : rate)
 		{
-			av.Normalize();
-			Vector3f grav = m_imuQ.GetVectorZ();
-			grav.Scale(0.5f);
-			Vector3f errorFeedback = grav.Cross(av);
-			// apply scaled feedback
-			gv -= errorFeedback;
+			if (std::fabs(r) < kRateDeadband)
+				r = 0.0f;
 		}
-		gv.Scale(0.5f * deltaTime);
-		m_imuQ += (m_imuQ * Quaternionf(0.0f, gv.x, gv.y, gv.z));
-		m_imuQ.NormalizeXYZW();
-		updateOrientationAngles();
+
+		const bool haveAcc = std::fabs(ax) > kMinAcc || std::fabs(ay) > kMinAcc || std::fabs(az) > kMinAcc;
+		if (haveAcc)
+		{
+			float down[3] = { ax, ay, az };
+			const float len = std::sqrt((down[0] * down[0]) + (down[1] * down[1]) + (down[2] * down[2]));
+			if (len != 0)
+			{
+				down[0] /= len;
+				down[1] /= len;
+				down[2] /= len;
+			}
+			// where the current estimate expects gravity (third column of its rotation), at half weight
+			const Quat& q = m_q;
+			float expect[3] = {
+				2.0f * (q.x * q.z - q.w * q.y),
+				2.0f * (q.y * q.z + q.w * q.x),
+				2.0f * (q.w * q.w + q.z * q.z) - 1.0f };
+			for (float& e : expect)
+				e *= 0.5f;
+			// the cross product of expected and measured gravity is the correction rate
+			rate[0] -= expect[1] * down[2] - expect[2] * down[1];
+			rate[1] -= expect[2] * down[0] - expect[0] * down[2];
+			rate[2] -= expect[0] * down[1] - expect[1] * down[0];
+		}
+
+		const float step = 0.5f * dt;
+		for (float& r : rate)
+			r *= step;
+
+		// q' = q + q * (0, rate)
+		const Quat delta = multiply(m_q, Quat{ 0.0f, rate[0], rate[1], rate[2] });
+		m_q.w += delta.w;
+		m_q.x += delta.x;
+		m_q.y += delta.y;
+		m_q.z += delta.z;
+		const float inv = 1.0f / sqrtf(m_q.w * m_q.w + m_q.x * m_q.x + m_q.y * m_q.y + m_q.z * m_q.z);
+		m_q.w *= inv;
+		m_q.x *= inv;
+		m_q.y *= inv;
+		m_q.z *= inv;
+
+		refreshAngles();
 	}
 
-	float getRollRadians()
-	{
-		return m_roll + (float)m_rollWinding * 2.0f * 3.14159265f;
-	}
+	float getRollRadians() { return withTurns(m_angle[kRoll], m_turns[kRoll]); }
+	float getPitchRadians() { return withTurns(m_angle[kPitch], m_turns[kPitch]); }
+	float getYawRadians() { return withTurns(m_angle[kYaw], m_turns[kYaw]); }
 
-	float getPitchRadians()
-	{
-		return m_pitch + (float)m_pitchWinding * 2.0f * 3.14159265f;
-	}
-
-	float getYawRadians()
-	{
-		return m_yaw + (float)m_yawWinding * 2.0f * 3.14159265f;
-	}
-
+	// w, x, y, z
 	void getQuaternion(float q[4]) const
 	{
-		q[0] = m_imuQ.w;
-		q[1] = m_imuQ.x;
-		q[2] = m_imuQ.y;
-		q[3] = m_imuQ.z;
+		q[0] = m_q.w;
+		q[1] = m_q.x;
+		q[2] = m_q.y;
+		q[3] = m_q.z;
 	}
 
 	void getGyroBias(float gBias[3]) const
 	{
-		gBias[0] = m_gyroBias[0];
-		gBias[1] = m_gyroBias[1];
-		gBias[2] = m_gyroBias[2];
+		for (int i = 0; i < 3; ++i)
+			gBias[i] = m_gyroOffset[i];
 	}
 
 private:
-
-	// calculate roll, yaw and pitch in radians. (-0.5 to 0.5)
-	void calcOrientation()
+	struct Quat
 	{
-		float sinr_cosp = 2.0f * (m_imuQ.z * m_imuQ.w + m_imuQ.x * m_imuQ.y);
-		float cosr_cosp = 1.0f - 2.0f * (m_imuQ.w * m_imuQ.w + m_imuQ.x * m_imuQ.x);
-		m_roll = std::atan2(sinr_cosp, cosr_cosp);
+		float w, x, y, z;
+	};
 
-		// pitch (y-axis rotation)
-		float sinp = 2.0f * (m_imuQ.z * m_imuQ.x - m_imuQ.y * m_imuQ.w);
-		if (std::abs(sinp) >= 1.0)
-			m_pitch = std::copysign(3.14159265359f / 2.0f, sinp);
-		else
-			m_pitch = std::asin(sinp);
+	static constexpr float kPi = 3.14159265f;
+	static constexpr float kRateDeadband = 0.015f;
+	static constexpr float kMinAcc = 0.000001f;
+	// rates above this mean the pad is moving, so they say nothing about the offset.
+	// It can't be much lower: some pads rest at almost 0.1 rad/s on one axis.
+	static constexpr float kStillRate = 0.35f;
+	static constexpr uint64 kOffsetSamples = 200;
 
-		// yaw (z-axis rotation)
-		float siny_cosp = 2.0f * (m_imuQ.z * m_imuQ.y + m_imuQ.w * m_imuQ.x);
-		float cosy_cosp = 1.0f - 2.0f * (m_imuQ.x * m_imuQ.x + m_imuQ.y * m_imuQ.y);
-		m_yaw = std::atan2(siny_cosp, cosy_cosp);
+	enum { kRoll, kPitch, kYaw };
+
+	static Quat multiply(const Quat& a, const Quat& b)
+	{
+		return Quat{
+			a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+			a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+			a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+			a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w };
 	}
 
-	void updateOrientationAngles()
+	static float withTurns(float angle, int turns)
 	{
-		auto calcWindingCountChange = [](float prevAngle, float newAngle) -> int
-		{
-			if (newAngle > prevAngle)
-			{
-				float angleDif = newAngle - prevAngle;
-				if (angleDif > 3.14159265f)
-					return -1;
-			}
-			else if (newAngle < prevAngle)
-			{
-				float angleDif = prevAngle - newAngle;
-				if (angleDif > 3.14159265f)
-					return 1;
-			}
-			return 0;
-		};
-		float prevRoll = m_roll;
-		float prevPitch = m_pitch;
-		float prevYaw = m_yaw;
-		calcOrientation();
-		// calculate roll, yaw and pitch including winding count to match what VPAD API returns
-		m_rollWinding += calcWindingCountChange(prevRoll, m_roll);
-		m_pitchWinding += calcWindingCountChange(prevPitch, m_pitch);
-		m_yawWinding += calcWindingCountChange(prevYaw, m_yaw);
+		return angle + (float)turns * 2.0f * kPi;
 	}
 
-	void updateGyroBias(float gx, float gy, float gz)
+	void trackGyroOffset(float gx, float gy, float gz)
 	{
-		// dont let actual movement influence the bias
-		// but be careful about setting this too low, there are controllers out there with really bad bias (my Switch Pro had -0.0933 0.0619 0.0179 in resting state)
-		if (fabs(gx) >= 0.35f || fabs(gy) >= 0.35f || fabs(gz) >= 0.35f)
+		if (std::fabs(gx) >= kStillRate || std::fabs(gy) >= kStillRate || std::fabs(gz) >= kStillRate)
 			return;
+		m_stillSum[0] += gx;
+		m_stillSum[1] += gy;
+		m_stillSum[2] += gz;
+		++m_stillCount;
+		if (m_stillCount < kOffsetSamples)
+			return;
+		for (int i = 0; i < 3; ++i)
+			m_gyroOffset[i] = (float)(m_stillSum[i] / (double)m_stillCount);
+	}
 
-		m_gyroTotalSum[0] += gx;
-		m_gyroTotalSum[1] += gy;
-		m_gyroTotalSum[2] += gz;
-		m_gyroTotalSampleCount++;
-		if (m_gyroTotalSampleCount >= 200)
+	// a jump of more than half a turn between two samples is a wrap of atan2/asin
+	static int wrapCount(float before, float after)
+	{
+		if (after > before && after - before > kPi)
+			return -1;
+		if (after < before && before - after > kPi)
+			return 1;
+		return 0;
+	}
+
+	void refreshAngles()
+	{
+		const Quat& q = m_q;
+		float angle[3];
+		angle[kRoll] = std::atan2(2.0f * (q.z * q.w + q.x * q.y), 1.0f - 2.0f * (q.w * q.w + q.x * q.x));
+		const float s = 2.0f * (q.z * q.x - q.y * q.w);
+		if (std::abs(s) >= 1.0)
+			angle[kPitch] = std::copysign(3.14159265359f / 2.0f, s);
+		else
+			angle[kPitch] = std::asin(s);
+		angle[kYaw] = std::atan2(2.0f * (q.z * q.y + q.w * q.x), 1.0f - 2.0f * (q.x * q.x + q.y * q.y));
+		for (int i = 0; i < 3; ++i)
 		{
-			m_gyroBias[0] = (float)(m_gyroTotalSum[0] / (double)m_gyroTotalSampleCount);
-			m_gyroBias[1] = (float)(m_gyroTotalSum[1] / (double)m_gyroTotalSampleCount);
-			m_gyroBias[2] = (float)(m_gyroTotalSum[2] / (double)m_gyroTotalSampleCount);
+			m_turns[i] += wrapCount(m_angle[i], angle[i]);
+			m_angle[i] = angle[i];
 		}
 	}
 
-	private:
-		Quaternionf m_imuQ; // current orientation
-		// angle data
-		float m_roll{};
-		float m_pitch{};
-		float m_yaw{};
-		int m_rollWinding{};
-		int m_pitchWinding{};
-		int m_yawWinding{};
-		// gyro bias
-		float m_gyroBias[3]{};
-		double m_gyroTotalSum[3]{};
-		uint64 m_gyroTotalSampleCount{};
+	Quat m_q{};
+	float m_angle[3]{};
+	int m_turns[3]{};
+	float m_gyroOffset[3]{};
+	double m_stillSum[3]{};
+	uint64 m_stillCount{};
 };

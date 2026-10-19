@@ -1,4 +1,8 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
+
+// The host input APIs PixelU can read controllers from. The names are what
+// controller profiles store in their <api> element, so they must not change.
 
 #include "util/helpers/helpers.h"
 
@@ -14,6 +18,7 @@ namespace InputAPI
 		GameCube,
 		Wiimote,
 
+		// reserved, not implemented
 		WGIGamepad,
 		WGIRawController,
 
@@ -24,56 +29,31 @@ namespace InputAPI
 	{
 		switch (type)
 		{
-		case Keyboard:
-			return "Keyboard";
-		case DirectInput:
-			return "DirectInput";
-		case XInput:
-			return "XInput";
-		case Wiimote:
-			return "Wiimote";
-		case GameCube:
-			return "GameCube";
-		case DSUClient:
-			return "DSUController";
-		case WGIGamepad:
-			return "WGIGamepad";
-		case WGIRawController:
-			return "WGIRawController";
-		case SDLController:
-			return "SDLController";
-		default:
-			break;
+		case Keyboard: return "Keyboard";
+		case SDLController: return "SDLController";
+		case XInput: return "XInput";
+		case DirectInput: return "DirectInput";
+		case DSUClient: return "DSUController";
+		case GameCube: return "GameCube";
+		case Wiimote: return "Wiimote";
+		case WGIGamepad: return "WGIGamepad";
+		case WGIRawController: return "WGIRawController";
+		default: break;
 		}
-
 		throw std::runtime_error(fmt::format("unknown input api: {}", stdx::to_underlying(type)));
 	}
 
 	constexpr Type from_string(std::string_view str)
 	{
-		if (str == to_string(Keyboard))
-			return Keyboard;
-		else if (str == to_string(DirectInput))
-			return DirectInput;
-		else if (str == to_string(XInput))
-			return XInput;
-		else if (str == to_string(Wiimote))
-			return Wiimote;
-		else if (str == to_string(GameCube))
-			return GameCube;
-		else if (str == to_string(DSUClient))
+		// the WGI entries can't be loaded from a profile
+		constexpr Type kLoadable[] = { Keyboard, DirectInput, XInput, Wiimote, GameCube, DSUClient, SDLController };
+		for (const Type type : kLoadable)
+		{
+			if (str == to_string(type))
+				return type;
+		}
+		if (str == "DSU") // name used by old profiles
 			return DSUClient;
-		else if (str == to_string(SDLController))
-			return SDLController;
-		else if (str == "DSU") // legacy
-			return DSUClient;
-		
-		//else if (str == "WGIGamepad")
-		//	return WGIGamepad;
-		//
-		//else if (str == "WGIRawController")
-		//	return WGIRawController;
-
 		throw std::runtime_error(fmt::format("unknown input api: {}", str));
 	}
 }

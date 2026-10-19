@@ -1,4 +1,11 @@
-﻿#pragma once
+﻿// Original code for RetroPixels (PixelU). Not derived from Cemu.
+#pragma once
+
+// The state a host controller reports at one point in time: its sticks and triggers
+// in [-1, 1] and the ids of the buttons that are held. Button ids are the controller
+// API's own numbers (see Buttons2 in Controller.h); stick directions also show up as
+// button ids once they pass ControllerState::kAxisThreshold, so they can be mapped
+// like buttons.
 
 #include <glm/vec2.hpp>
 #include "util/helpers/fspinlock.h"
@@ -9,126 +16,135 @@ enum class PositionVisibility {
 	PARTIAL = 2
 };
 
-// helper class for storing and managing button press states in a thread-safe manner
+// Held buttons, safe to read from one thread while another updates them. Only a
+// handful of buttons are ever held together, so they live in a short list, in the
+// order they were pressed.
 struct ControllerButtonState
 {
 	ControllerButtonState() = default;
+
 	ControllerButtonState(const ControllerButtonState& other)
 	{
-		this->m_pressedButtons = other.m_pressedButtons;
+		std::lock_guard guard(other.m_lock);
+		m_held = other.m_held;
 	}
 
 	ControllerButtonState(ControllerButtonState&& other)
 	{
-		this->m_pressedButtons = std::move(other.m_pressedButtons);
+		std::lock_guard guard(other.m_lock);
+		m_held = std::move(other.m_held);
 	}
 
-	void SetButtonState(uint32 buttonId, bool isPressed)
+	ControllerButtonState& operator=(const ControllerButtonState& other)
 	{
-		std::lock_guard _l(this->m_spinlock);
-		if (isPressed)
+		if (this != &other)
 		{
-			if (std::find(m_pressedButtons.cbegin(), m_pressedButtons.cend(), buttonId) != m_pressedButtons.end())
-				return;
-			m_pressedButtons.emplace_back(buttonId);
+			std::scoped_lock guard(m_lock, other.m_lock);
+			m_held = other.m_held;
 		}
-		else
-		{
-			std::erase(m_pressedButtons, buttonId);
-		}
-	}
-
-	// set multiple buttons at once within a single lock interval
-	void SetPressedButtons(std::span<uint32> buttonList)
-	{
-		std::lock_guard _l(this->m_spinlock);
-		for (auto& buttonId : buttonList)
-		{
-			if (std::find(m_pressedButtons.cbegin(), m_pressedButtons.cend(), buttonId) == m_pressedButtons.end())
-				m_pressedButtons.emplace_back(buttonId);
-		}
-	}
-
-	// returns true if pressed
-	bool GetButtonState(uint32 buttonId) const
-	{
-		std::lock_guard _l(this->m_spinlock);
-		bool r = std::find(m_pressedButtons.cbegin(), m_pressedButtons.cend(), buttonId) != m_pressedButtons.cend();
-		return r;
-	}
-
-	// remove pressed state for all pressed buttons in buttonsToUnset
-	void UnsetButtons(const ControllerButtonState& buttonsToUnset)
-	{
-		std::scoped_lock _l(this->m_spinlock, buttonsToUnset.m_spinlock);
-		for (auto it = m_pressedButtons.begin(); it != m_pressedButtons.end();)
-		{
-			if (std::find(buttonsToUnset.m_pressedButtons.cbegin(), buttonsToUnset.m_pressedButtons.cend(), *it) == buttonsToUnset.m_pressedButtons.cend())
-			{
-				++it;
-				continue;
-			}
-			it = m_pressedButtons.erase(it);
-		}
-	}
-
-	// returns true if no buttons are pressed
-	bool IsIdle() const
-	{
-		std::lock_guard _l(this->m_spinlock);
-		const bool r = m_pressedButtons.empty();
-		return r;
-	}
-
-	std::vector<uint32> GetButtonList() const
-	{
-		std::lock_guard _l(this->m_spinlock);
-		std::vector<uint32> copy = m_pressedButtons;
-		return copy;
-	}
-
-	bool operator==(const ControllerButtonState& other) const
-	{
-		std::scoped_lock _l(this->m_spinlock, other.m_spinlock);
-		auto& otherButtons = other.m_pressedButtons;
-		if (m_pressedButtons.size() != otherButtons.size())
-		{
-			return false;
-		}
-		for (auto& buttonId : m_pressedButtons)
-		{
-			if (std::find(otherButtons.cbegin(), otherButtons.cend(), buttonId) == otherButtons.cend())
-			{
-				return false;
-			}
-		}
-		return true;
+		return *this;
 	}
 
 	ControllerButtonState& operator=(ControllerButtonState&& other)
 	{
-		cemu_assert_debug(!other.m_spinlock.is_locked());
-		std::scoped_lock _l(this->m_spinlock, other.m_spinlock);
-		this->m_pressedButtons = std::move(other.m_pressedButtons);
+		if (this != &other)
+		{
+			std::scoped_lock guard(m_lock, other.m_lock);
+			m_held = std::move(other.m_held);
+		}
 		return *this;
 	}
 
+	void SetButtonState(uint32 buttonId, bool isPressed)
+	{
+		std::lock_guard guard(m_lock);
+		const auto it = std::find(m_held.begin(), m_held.end(), buttonId);
+		if (isPressed)
+		{
+			if (it == m_held.end())
+				m_held.push_back(buttonId);
+		}
+		else if (it != m_held.end())
+		{
+			m_held.erase(it);
+		}
+	}
+
+	// marks every listed button as held, under one lock
+	void SetPressedButtons(std::span<uint32> buttonList)
+	{
+		std::lock_guard guard(m_lock);
+		for (const uint32 id : buttonList)
+		{
+			if (!contains(m_held, id))
+				m_held.push_back(id);
+		}
+	}
+
+	bool GetButtonState(uint32 buttonId) const
+	{
+		std::lock_guard guard(m_lock);
+		return contains(m_held, buttonId);
+	}
+
+	// releases every button that is held in `buttonsToUnset`
+	void UnsetButtons(const ControllerButtonState& buttonsToUnset)
+	{
+		if (this == &buttonsToUnset)
+		{
+			std::lock_guard guard(m_lock);
+			m_held.clear();
+			return;
+		}
+		std::scoped_lock guard(m_lock, buttonsToUnset.m_lock);
+		const auto& drop = buttonsToUnset.m_held;
+		std::erase_if(m_held, [&drop](uint32 id) { return contains(drop, id); });
+	}
+
+	bool IsIdle() const
+	{
+		std::lock_guard guard(m_lock);
+		return m_held.empty();
+	}
+
+	std::vector<uint32> GetButtonList() const
+	{
+		std::lock_guard guard(m_lock);
+		return m_held;
+	}
+
+	// same set of held buttons, in any order
+	bool operator==(const ControllerButtonState& other) const
+	{
+		if (this == &other)
+			return true;
+		std::scoped_lock guard(m_lock, other.m_lock);
+		if (m_held.size() != other.m_held.size())
+			return false;
+		return std::all_of(m_held.begin(), m_held.end(), [&other](uint32 id) { return contains(other.m_held, id); });
+	}
+
 private:
-	std::vector<uint32> m_pressedButtons; // since only very few buttons are pressed at a time, using a vector with linear scan is more efficient than a set/map
-	mutable FSpinlock m_spinlock;
+	static bool contains(const std::vector<uint32>& list, uint32 id)
+	{
+		return std::find(list.begin(), list.end(), id) != list.end();
+	}
+
+	std::vector<uint32> m_held;
+	mutable FSpinlock m_lock;
 };
 
 struct ControllerState
 {
-	// when does a axis counts as pressed
+	// how far an axis has to move before its direction counts as a pressed button
 	constexpr static float kAxisThreshold = 0.1f;
 
-	// on the real console the stick x or y values never really reach 0.0 if one of the axis is moved
-	// some games rely on this due to incorrectly checking if the stick is tilted via if (vstick.x != 0 && vstick.y != 0)
-	// here we simulate a slight bias if the axis is almost perfectly centered
+	// A moved stick never reads exactly 0 on its other axis on real hardware, and some
+	// games test "x != 0 && y != 0" to see whether the stick is tilted at all. Axes that
+	// end up at 0 while the other one is moved get this tiny value instead.
 	constexpr static float kMinAxisValue = 0.0000001f;
 
-	// [-1; 1]
+	// [-1, 1]
 	glm::vec2 axis{ };
 	glm::vec2 rotation{ };
 	glm::vec2 trigger{ };
@@ -137,6 +153,7 @@ struct ControllerState
 
 	uint64 last_state = 0;
 
+	// two states are equal when the same buttons are held (the axes are not compared)
 	bool operator==(const ControllerState& other) const;
 	bool operator!=(const ControllerState& other) const
 	{

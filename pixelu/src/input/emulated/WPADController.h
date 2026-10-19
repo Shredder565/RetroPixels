@@ -1,11 +1,19 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
+
+// Common base of the emulated controllers that games read through padscore (WPAD/KPAD):
+// the Wii remote (with or without an extension), the Classic Controller and the Wii U Pro
+// Controller. The data format a game asks for decides how the button bits are laid out
+// and which extension fields are filled.
 
 #include "input/emulated/EmulatedController.h"
 #include "Cafe/OS/libs/padscore/padscore.h"
 #include "Cafe/OS/libs/vpad/vpad.h"
 
+// set in the hold mask on a repeat pulse
 constexpr uint32 kWPADButtonRepeat = 0x80000000;
 
+// device ids as WPADProbe reports them
 enum WPADDeviceType
 {
 	kWAPDevCore = 0,
@@ -19,7 +27,7 @@ enum WPADDeviceType
 	kWAPDevUnknown = 255,
 };
 
-// core, balanceboard
+// Wii remote buttons (also the balance board)
 enum WPADCoreButtons
 {
 	kWPADButton_Left = 0x1,
@@ -35,14 +43,14 @@ enum WPADCoreButtons
 	kWPADButton_Home = 0x8000,
 };
 
-// Nunchuck aka Freestyle
+// Nunchuk ("freestyle") buttons, in the same word as the Wii remote's
 enum WPADNunchuckButtons
 {
 	kWPADButton_Z = 0x2000,
 	kWPADButton_C = 0x4000,
 };
 
-// Classic Controller
+// Classic Controller buttons
 enum WPADClassicButtons
 {
 	kCLButton_Up = 0x1,
@@ -62,7 +70,7 @@ enum WPADClassicButtons
 	kCLButton_Right = 0x8000
 };
 
-// Pro Controller aka URCC
+// Wii U Pro Controller ("URCC") buttons
 enum WPADProButtons
 {
 	kProButton_Up = 0x1,
@@ -84,62 +92,67 @@ enum WPADProButtons
 	kProButton_StickL = 0x20000
 };
 
+// WPADSetDataFormat values
 enum WPADDataFormat {
-	 kDataFormat_CORE = 0,
-	 kDataFormat_CORE_ACC = 1,
-	 kDataFormat_CORE_ACC_DPD = 2,
-	 kDataFormat_FREESTYLE = 3,
-	 kDataFormat_FREESTYLE_ACC = 4,
-	 kDataFormat_FREESTYLE_ACC_DPD = 5,
-	 kDataFormat_CLASSIC = 6,
-	 kDataFormat_CLASSIC_ACC = 7,
-	 kDataFormat_CLASSIC_ACC_DPD = 8,
-	 kDataFormat_CORE_ACC_DPD_FULL = 9, // buttons, motion, pointing
-	 kDataFormat_TRAIN = 10,
-	 kDataFormat_GUITAR = 11,
-	 kDataFormat_BALANCE_CHECKER = 12,
-	 kDataFormat_DRUM = 15,
-	 kDataFormat_MPLS = 16, // buttons, motion, pointing, motion plus
-	 kDataFormat_TAIKO = 17,
-	 kDataFormat_URCC = 22, // buttons, URCC aka pro
+	kDataFormat_CORE = 0,
+	kDataFormat_CORE_ACC = 1,
+	kDataFormat_CORE_ACC_DPD = 2,
+	kDataFormat_FREESTYLE = 3,
+	kDataFormat_FREESTYLE_ACC = 4,
+	kDataFormat_FREESTYLE_ACC_DPD = 5,
+	kDataFormat_CLASSIC = 6,
+	kDataFormat_CLASSIC_ACC = 7,
+	kDataFormat_CLASSIC_ACC_DPD = 8,
+	kDataFormat_CORE_ACC_DPD_FULL = 9,
+	kDataFormat_TRAIN = 10,
+	kDataFormat_GUITAR = 11,
+	kDataFormat_BALANCE_CHECKER = 12,
+	kDataFormat_DRUM = 15,
+	kDataFormat_MPLS = 16,
+	kDataFormat_TAIKO = 17,
+	kDataFormat_URCC = 22,
 };
 
 class WPADController : public EmulatedController
 {
-	using base_type = EmulatedController;
 public:
 	WPADController(size_t player_index, WPADDataFormat data_format);
 
+	// button bit of a mapping id in the layout of `format`
 	uint32 get_emulated_button_flag(WPADDataFormat format, uint32 id) const;
 
 	virtual WPADDeviceType get_device_type() const = 0;
 
 	WPADDataFormat get_data_format() const { return m_data_format; }
 	void set_data_format(WPADDataFormat data_format) { m_data_format = data_format; }
+	// the format a game gets until it picks one
+	WPADDataFormat get_default_data_format() const;
 
+	// raw WPAD sample in the current data format
 	void WPADRead(WPADStatus_t* status);
-
+	// processed KPAD sample (adds to the hold masks of `status`)
 	void KPADRead(KPADStatus_t& status, const BtnRepeat& repeat);
+
 	virtual bool is_mpls_attached() { return false; }
 
+	// what padscore still has to tell the game about this slot / its extension
 	enum class ConnectCallbackStatus
 	{
-		None, // do nothing
-		ReportDisconnect, // call disconnect
-		ReportConnect, // call connect
+		None,
+		ReportDisconnect,
+		ReportConnect,
 	};
 	ConnectCallbackStatus m_status = ConnectCallbackStatus::ReportConnect;
 	ConnectCallbackStatus m_extension_status = ConnectCallbackStatus::ReportConnect;
-
-	WPADDataFormat get_default_data_format() const;
 
 protected:
 	WPADDataFormat m_data_format;
 
 private:
-	uint32be m_last_holdvalue = 0;
+	using Clock = std::chrono::steady_clock;
 
-	std::chrono::steady_clock::time_point m_last_hold_change{}, m_last_pulse{};
+	uint32 collect_buttons() const;
 
-	
+	uint32 m_previous_hold = 0;
+	Clock::time_point m_hold_changed{}, m_last_repeat{};
 };

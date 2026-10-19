@@ -1,10 +1,14 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
+
+// The emulated Wii U Pro Controller: two sticks with clickable buttons, digital triggers.
 
 #include "input/emulated/WPADController.h"
 
 class ProController : public WPADController
 {
 public:
+	// mapping ids, stored in profiles
 	enum ButtonId
 	{
 		kButtonId_None,
@@ -49,15 +53,16 @@ public:
 	Type type() const override { return Type::Pro; }
 	WPADDeviceType get_device_type() const override { return kWAPDevURCC; }
 
-	uint32 get_emulated_button_flag(uint32 id) const override;
+	uint32 get_emulated_button_flag(uint32 id) const override { return s_get_emulated_button_flag(id); }
+	// kProButton_* bit of a mapping id (0 for the home button and the stick directions)
+	static uint32 s_get_emulated_button_flag(uint32 id);
+
 	size_t get_highest_mapping_id() const override { return kButtonId_Max; }
 	bool is_axis_mapping(uint64 mapping) const override { return mapping >= kButtonId_StickL_Up && mapping <= kButtonId_StickR_Right; }
 
 	glm::vec2 get_axis() const override;
 	glm::vec2 get_rotation() const override;
 	glm::vec2 get_trigger() const override;
-
-	static uint32 s_get_emulated_button_flag(uint32 id);
 
 	static std::string_view get_button_name(ButtonId id);
 
