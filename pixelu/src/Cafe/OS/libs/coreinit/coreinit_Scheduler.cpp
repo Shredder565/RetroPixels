@@ -1,120 +1,148 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/OS/common/OSCommon.h"
 #include "coreinit_Scheduler.h"
 
-thread_local sint32 s_schedulerLockCount = 0;
-
 #if BOOST_OS_WINDOWS
 #include <synchapi.h>
-CRITICAL_SECTION s_csSchedulerLock;
 #else
 #include <pthread.h>
-pthread_mutex_t s_ptmSchedulerLock;
 #endif
+
+namespace
+{
+	// recursive host mutex owned by the host thread (not the fiber) that took it
+	class SchedulerMutex
+	{
+	public:
+		void Init()
+		{
+#if BOOST_OS_WINDOWS
+			InitializeCriticalSection(&m_cs);
+#else
+			pthread_mutexattr_t attr;
+			pthread_mutexattr_init(&attr);
+			pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+			pthread_mutex_init(&m_mutex, &attr);
+			pthread_mutexattr_destroy(&attr);
+#endif
+		}
+
+		void Lock()
+		{
+#if BOOST_OS_WINDOWS
+			EnterCriticalSection(&m_cs);
+#else
+			pthread_mutex_lock(&m_mutex);
+#endif
+		}
+
+		bool TryLock()
+		{
+#if BOOST_OS_WINDOWS
+			return TryEnterCriticalSection(&m_cs) != 0;
+#else
+			return pthread_mutex_trylock(&m_mutex) == 0;
+#endif
+		}
+
+		void Unlock()
+		{
+#if BOOST_OS_WINDOWS
+			LeaveCriticalSection(&m_cs);
+#else
+			pthread_mutex_unlock(&m_mutex);
+#endif
+		}
+
+	private:
+#if BOOST_OS_WINDOWS
+		CRITICAL_SECTION m_cs;
+#else
+		pthread_mutex_t m_mutex;
+#endif
+	};
+
+	SchedulerMutex s_schedulerMutex;
+	// depth on this host thread; the scheduler lock is never meant to be taken recursively
+	thread_local sint32 t_schedulerLockDepth = 0;
+
+	// while interrupts are off the running thread gets this many extra cycles so its timeslice
+	// effectively never runs out
+	constexpr sint32 kInterruptsOffCycleBonus = 0x40000000;
+}
 
 void __OSLockScheduler(void* obj)
 {
-#if BOOST_OS_WINDOWS
-	EnterCriticalSection(&s_csSchedulerLock);
-#else
-	pthread_mutex_lock(&s_ptmSchedulerLock);
-#endif
-	s_schedulerLockCount++;
-	cemu_assert_debug(s_schedulerLockCount <= 1); // >= 2 should not happen. Scheduler lock does not allow recursion
+	s_schedulerMutex.Lock();
+	t_schedulerLockDepth++;
+	cemu_assert_debug(t_schedulerLockDepth == 1);
 }
 
 bool __OSHasSchedulerLock()
 {
-	return s_schedulerLockCount > 0;
+	return t_schedulerLockDepth > 0;
 }
 
 bool __OSTryLockScheduler(void* obj)
 {
-	bool r;
-#if BOOST_OS_WINDOWS
-	r = TryEnterCriticalSection(&s_csSchedulerLock);
-#else
-	r = pthread_mutex_trylock(&s_ptmSchedulerLock) == 0;
-#endif
-	if (r)
-	{
-		s_schedulerLockCount++;
-		return true;
-	}
-	return false;
+	if (!s_schedulerMutex.TryLock())
+		return false;
+	t_schedulerLockDepth++;
+	return true;
 }
 
 void __OSUnlockScheduler(void* obj)
 {
-	s_schedulerLockCount--;
-	cemu_assert_debug(s_schedulerLockCount >= 0);
-#if BOOST_OS_WINDOWS
-	LeaveCriticalSection(&s_csSchedulerLock);
-#else
-	pthread_mutex_unlock(&s_ptmSchedulerLock);
-#endif
+	t_schedulerLockDepth--;
+	cemu_assert_debug(t_schedulerLockDepth >= 0);
+	s_schedulerMutex.Unlock();
 }
 
 namespace coreinit
 {
 	uint32 OSIsInterruptEnabled()
 	{
-		PPCInterpreter_t* hCPU = PPCInterpreter_getCurrentInstance();
-		if (hCPU == nullptr)
-			return 0;
-
-		return hCPU->coreInterruptMask;
+		PPCInterpreter_t* cpu = PPCInterpreter_getCurrentInstance();
+		return cpu ? cpu->coreInterruptMask : 0;
 	}
 
-	// disables interrupts and scheduling
 	uint32 OSDisableInterrupts()
 	{
-		PPCInterpreter_t* hCPU = PPCInterpreter_getCurrentInstance();
-		if (hCPU == nullptr)
+		PPCInterpreter_t* cpu = PPCInterpreter_getCurrentInstance();
+		if (!cpu)
 			return 0;
-		uint32 prevInterruptMask = hCPU->coreInterruptMask;
-		if (hCPU->coreInterruptMask != 0)
+		uint32 previous = cpu->coreInterruptMask;
+		if (previous != 0)
 		{
-			// we have no efficient method to turn off scheduling completely, so instead we just increase the remaining cycles
-			if (hCPU->remainingCycles >= 0x40000000)
-				cemuLog_log(LogType::Force, "OSDisableInterrupts(): Warning - Interrupts already disabled but the mask was still set? remCycles {:08x} LR {:08x}", hCPU->remainingCycles, hCPU->spr.LR);
-			hCPU->remainingCycles += 0x40000000;
+			if (cpu->remainingCycles >= kInterruptsOffCycleBonus)
+				cemuLog_log(LogType::Force, "OSDisableInterrupts: interrupts look disabled already (remaining cycles {:08x}, LR {:08x})", cpu->remainingCycles, cpu->spr.LR);
+			cpu->remainingCycles += kInterruptsOffCycleBonus;
 		}
-		hCPU->coreInterruptMask = 0;
-		return prevInterruptMask;
+		cpu->coreInterruptMask = 0;
+		return previous;
 	}
 
 	uint32 OSRestoreInterrupts(uint32 interruptMask)
 	{
-		PPCInterpreter_t* hCPU = PPCInterpreter_getCurrentInstance();
-		if (hCPU == nullptr)
+		PPCInterpreter_t* cpu = PPCInterpreter_getCurrentInstance();
+		if (!cpu)
 			return 0;
-		uint32 prevInterruptMask = hCPU->coreInterruptMask;
-		if (hCPU->coreInterruptMask == 0 && interruptMask != 0)
-		{
-			hCPU->remainingCycles -= 0x40000000;
-		}
-		hCPU->coreInterruptMask = interruptMask;
-		return prevInterruptMask;
+		uint32 previous = cpu->coreInterruptMask;
+		if (previous == 0 && interruptMask != 0)
+			cpu->remainingCycles -= kInterruptsOffCycleBonus;
+		cpu->coreInterruptMask = interruptMask;
+		return previous;
 	}
 
 	uint32 OSEnableInterrupts()
 	{
-		PPCInterpreter_t* hCPU = PPCInterpreter_getCurrentInstance();
-		uint32 prevInterruptMask = hCPU->coreInterruptMask;
-		OSRestoreInterrupts(1);
-		return prevInterruptMask;
+		return OSRestoreInterrupts(1);
 	}
 
 	void InitializeSchedulerLock()
 	{
-#if BOOST_OS_WINDOWS
-		InitializeCriticalSection(&s_csSchedulerLock);
-#else
-		pthread_mutexattr_t ma;
-		pthread_mutexattr_init(&ma);
-		pthread_mutexattr_settype(&ma, PTHREAD_MUTEX_RECURSIVE);
-		pthread_mutex_init(&s_ptmSchedulerLock, &ma);
-#endif
+		s_schedulerMutex.Init();
+
 		cafeExportRegister("coreinit", __OSLockScheduler, LogType::Placeholder);
 		cafeExportRegister("coreinit", __OSUnlockScheduler, LogType::Placeholder);
 
@@ -122,4 +150,4 @@ namespace coreinit
 		cafeExportRegister("coreinit", OSEnableInterrupts, LogType::CoreinitThread);
 		cafeExportRegister("coreinit", OSRestoreInterrupts, LogType::CoreinitThread);
 	}
-};
+}

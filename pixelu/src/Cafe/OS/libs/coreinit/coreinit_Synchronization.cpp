@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/OS/libs/coreinit/coreinit.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Thread.h"
@@ -5,14 +6,40 @@
 #include "Cafe/OS/libs/coreinit/coreinit_Time.h"
 #include "util/helpers/fspinlock.h"
 
+// Blocking primitives of coreinit: events, rendezvous, mutexes, condition variables, semaphores
+// and the "fast" mutex/condition variants. All waiting goes through the thread queues of
+// coreinit_ThreadQueue.cpp and happens under the scheduler lock.
+
 namespace coreinit
 {
-	/************* OSEvent ************/
+	namespace
+	{
+		constexpr uint32 kEventMagic = 0x65566E54;     // 'eVnT'
+		constexpr uint32 kCondMagic = 0x634E6456;      // 'cNdV'
+		constexpr uint32 kSemaphoreMagic = 0x73506852; // 'sPhR'
+		constexpr uint32 kFastMutexMagic = 0x664D7458; // 'fMtX'
+		constexpr uint32 kFastCondMagic = 0x664E6456;  // 'fNdV'
+		// OSMutex stores its magic in host byte order
+		constexpr uint32 kMutexMagicHost = ((uint32)'m' << 24) | ((uint32)'U' << 16) | ((uint32)'t' << 8) | (uint32)'X';
+
+		bool IsSignaled(const OSEvent* event)
+		{
+			return event->state == OSEvent::EVENT_STATE::STATE_SIGNALED;
+		}
+
+		// an auto reset event is consumed by the waiter that sees it signalled
+		void ConsumeSignal(OSEvent* event)
+		{
+			if (event->mode == OSEvent::EVENT_MODE::MODE_AUTO)
+				event->state = OSEvent::EVENT_STATE::STATE_NOT_SIGNALED;
+		}
+	}
+
+	/* OSEvent */
 
 	void OSInitEvent(OSEvent* event, OSEvent::EVENT_STATE initialState, OSEvent::EVENT_MODE mode)
 	{
-		event->magic = 'eVnT';
-		cemu_assert_debug(event->magic == 0x65566e54);
+		event->magic = kEventMagic;
 		event->userData = nullptr;
 		event->ukn08 = 0;
 		event->state = initialState;
@@ -29,23 +56,17 @@ namespace coreinit
 	void OSResetEvent(OSEvent* event)
 	{
 		__OSLockScheduler();
-		if (event->state == OSEvent::EVENT_STATE::STATE_SIGNALED)
+		if (IsSignaled(event))
 			event->state = OSEvent::EVENT_STATE::STATE_NOT_SIGNALED;
 		__OSUnlockScheduler();
 	}
 
 	void OSWaitEventInternal(OSEvent* event)
 	{
-		if (event->state == OSEvent::EVENT_STATE::STATE_SIGNALED)
-		{
-			if (event->mode == OSEvent::EVENT_MODE::MODE_AUTO)
-				event->state = OSEvent::EVENT_STATE::STATE_NOT_SIGNALED;
-		}
+		if (IsSignaled(event))
+			ConsumeSignal(event);
 		else
-		{
-			// enter wait queue
 			event->threadQueue.queueAndWait(OSGetCurrentThread());
-		}
 	}
 
 	void OSWaitEvent(OSEvent* event)
@@ -55,85 +76,63 @@ namespace coreinit
 		__OSUnlockScheduler();
 	}
 
-	struct WaitEventWithTimeoutData
+	struct EventTimeoutState
 	{
-		OSThread_t* thread;
-		OSThreadQueue* threadQueue;
-		std::atomic_bool hasTimeout;
+		OSThread_t* waiter;
+		OSThreadQueue* queue;
+		bool timedOut;
 	};
 
-	void _OSWaitEventWithTimeoutHandler(uint64 currentTick, void* context)
+	void EventTimeoutFired(uint64 currentTick, void* context)
 	{
 		cemu_assert_debug(__OSHasSchedulerLock());
-		WaitEventWithTimeoutData* data = (WaitEventWithTimeoutData*)context;
-		if (data->thread->state == OSThread_t::THREAD_STATE::STATE_WAITING)
-		{
-			data->hasTimeout = true;
-			data->threadQueue->cancelWait(data->thread);
-		}
+		EventTimeoutState* state = (EventTimeoutState*)context;
+		if (state->waiter->state != OSThread_t::THREAD_STATE::STATE_WAITING)
+			return; // already woken by a signal
+		state->timedOut = true;
+		state->queue->cancelWait(state->waiter);
 	}
 
 	bool OSWaitEventWithTimeout(OSEvent* event, uint64 timeout)
 	{
 		__OSLockScheduler();
-		if (event->state == OSEvent::EVENT_STATE::STATE_SIGNALED)
+		if (IsSignaled(event))
 		{
-			if (event->mode == OSEvent::EVENT_MODE::MODE_AUTO)
-				event->state = OSEvent::EVENT_STATE::STATE_NOT_SIGNALED;
+			ConsumeSignal(event);
+			__OSUnlockScheduler();
+			return true;
 		}
-		else
+		if (timeout == 0)
 		{
-			if (timeout == 0)
-			{
-				// fail immediately
-				__OSUnlockScheduler();
-				return false;
-			}
-			// wait and set timeout
-
-			// workaround for a bad implementation in some Unity games (like Qube Directors Cut, see FEventWiiU::Wait)
-			// where the the return value of OSWaitEventWithTimeout is ignored and instead the game measures the elapsed time to determine if a timeout occurred
-			if (timeout < 0x00FFFFFFFFFFFFFFULL)
-				timeout = timeout * 98ULL / 100ULL; // 98% (we want the function to return slightly before the actual timeout)
-
-			WaitEventWithTimeoutData data;
-			data.thread = OSGetCurrentThread();
-			data.threadQueue = &event->threadQueue;
-			data.hasTimeout = false;
-			auto hostAlarm = coreinit::OSHostAlarmCreate(OSGetTime() + coreinit::EspressoTime::ConvertNsToTimerTicks(timeout), 0, _OSWaitEventWithTimeoutHandler, &data);
-			event->threadQueue.queueAndWait(OSGetCurrentThread());
-			coreinit::OSHostAlarmDestroy(hostAlarm);
-			if (data.hasTimeout)
-			{
-				__OSUnlockScheduler();
-				return false;
-			}
+			__OSUnlockScheduler();
+			return false;
 		}
+		// Some Unity titles (Qube Director's Cut) ignore the result and decide whether the wait timed
+		// out by measuring the elapsed time, so the wait ends a little early (98%)
+		if (timeout < 0x00FFFFFFFFFFFFFFull)
+			timeout = timeout * 98 / 100;
+		EventTimeoutState state{ OSGetCurrentThread(), &event->threadQueue, false };
+		OSHostAlarm* alarm = OSHostAlarmCreate(OSGetTime() + EspressoTime::ConvertNsToTimerTicks(timeout), 0, EventTimeoutFired, &state);
+		event->threadQueue.queueAndWait(state.waiter);
+		OSHostAlarmDestroy(alarm);
 		__OSUnlockScheduler();
-		return true;
+		return !state.timedOut;
 	}
 
 	void OSSignalEventInternal(OSEvent* event)
 	{
 		cemu_assert_debug(__OSHasSchedulerLock());
-		if (event->state == OSEvent::EVENT_STATE::STATE_SIGNALED)
-		{
+		if (IsSignaled(event))
 			return;
-		}
-		if (event->mode == OSEvent::EVENT_MODE::MODE_AUTO)
+		if (event->mode == OSEvent::EVENT_MODE::MODE_MANUAL)
 		{
-			// in auto mode wake up one thread or if there is none then set signaled
-			if (event->threadQueue.isEmpty())
-				event->state = OSEvent::EVENT_STATE::STATE_SIGNALED;
-			else
-				event->threadQueue.wakeupSingleThreadWaitQueue(true);
-		}
-		else
-		{
-			// in manual mode wake up all threads and set to signaled
 			event->state = OSEvent::EVENT_STATE::STATE_SIGNALED;
 			event->threadQueue.wakeupEntireWaitQueue(true);
 		}
+		else if (event->threadQueue.isEmpty())
+			event->state = OSEvent::EVENT_STATE::STATE_SIGNALED; // kept until a thread waits
+		else
+			event->threadQueue.wakeupSingleThreadWaitQueue(true); // handed directly to one waiter
 	}
 
 	void OSSignalEvent(OSEvent* event)
@@ -143,26 +142,15 @@ namespace coreinit
 		__OSUnlockScheduler();
 	}
 
+	// like OSSignalEvent, but an auto reset event releases every waiter
 	void OSSignalEventAllInternal(OSEvent* event)
 	{
-		if (event->state == OSEvent::EVENT_STATE::STATE_SIGNALED)
-		{
+		if (IsSignaled(event))
 			return;
-		}
-		if (event->mode == OSEvent::EVENT_MODE::MODE_AUTO)
-		{
-			// in auto mode wake up one thread or if there is none then set signaled
-			if (event->threadQueue.isEmpty())
-				event->state = OSEvent::EVENT_STATE::STATE_SIGNALED;
-			else
-				event->threadQueue.wakeupEntireWaitQueue(true);
-		}
-		else
-		{
-			// in manual mode wake up all threads and set to signaled
+		if (event->mode == OSEvent::EVENT_MODE::MODE_MANUAL || event->threadQueue.isEmpty())
 			event->state = OSEvent::EVENT_STATE::STATE_SIGNALED;
+		if (!event->threadQueue.isEmpty())
 			event->threadQueue.wakeupEntireWaitQueue(true);
-		}
 	}
 
 	void OSSignalEventAll(OSEvent* event)
@@ -172,16 +160,17 @@ namespace coreinit
 		__OSUnlockScheduler();
 	}
 
-	/************* OSRendezvous ************/
+	/* OSRendezvous */
 
-	SysAllocator<OSEvent> g_rendezvousEvent;
+	// all rendezvous share one event; every arrival wakes all waiters so they recheck their own object
+	SysAllocator<OSEvent> s_rendezvousArrival;
 
 	void OSInitRendezvous(OSRendezvous* rendezvous)
 	{
 		__OSLockScheduler();
 		rendezvous->userData = rendezvous;
-		for (sint32 i = 0; i < PPC_CORE_COUNT; i++)
-			rendezvous->coreHit[i] = 0;
+		for (auto& hit : rendezvous->coreHit)
+			hit = 0;
 		__OSUnlockScheduler();
 	}
 
@@ -189,33 +178,26 @@ namespace coreinit
 	{
 		__OSLockScheduler();
 		rendezvous->coreHit[OSGetCoreId()] = 1;
-		OSSignalEventAllInternal(g_rendezvousEvent.GetPtr());
-		while (true)
-		{
-			bool metAll = true;
-			for(sint32 i=0; i<PPC_CORE_COUNT; i++)
-			{ 
-				if( (coreMask & (1<<i)) == 0 )
-					continue; // core not required by core mask
-				if (rendezvous->coreHit[i] == 0)
-				{
-					metAll = false;
-					break;
-				}
+		OSSignalEventAllInternal(s_rendezvousArrival.GetPtr());
+		auto everyoneArrived = [&]() {
+			for (uint32 core = 0; core < PPC_CORE_COUNT; core++)
+			{
+				if ((coreMask & (1u << core)) != 0 && rendezvous->coreHit[core] == 0)
+					return false;
 			}
-			if (metAll)
-				break;
-			OSWaitEventInternal(g_rendezvousEvent.GetPtr());
-		}
+			return true;
+		};
+		while (!everyoneArrived())
+			OSWaitEventInternal(s_rendezvousArrival.GetPtr());
 		__OSUnlockScheduler();
 		return true;
 	}
 
-	/************* OSMutex ************/
+	/* OSMutex */
 
 	void OSInitMutexEx(OSMutex* mutex, void* userData)
 	{
-		mutex->magic = 'mUtX';
+		mutex->magic = kMutexMagicHost;
 		mutex->userData = userData;
 		mutex->ukn08 = 0;
 		mutex->owner = nullptr;
@@ -228,36 +210,40 @@ namespace coreinit
 		OSInitMutexEx(mutex, nullptr);
 	}
 
-	void OSLockMutexInternal(OSMutex* mutex)
+	namespace
 	{
-		OSThread_t* currentThread = OSGetCurrentThread();
-		int_fast32_t failedAttempts = 0;
-		while (true)
+		// takes the mutex if it is free or already ours; scheduler lock held
+		bool TryTakeMutex(OSMutex* mutex, OSThread_t* self)
 		{
-			if (mutex->owner == nullptr)
+			if (mutex->owner.IsNull())
 			{
-				// acquire lock
-				mutex->owner = currentThread;
 				cemu_assert_debug(mutex->lockCount == 0);
+				mutex->owner = self;
 				mutex->lockCount = 1;
-				// cemu_assert_debug(mutex->next == nullptr && mutex->prev == nullptr); -> not zero initialized
-				currentThread->mutexQueue.addMutex(mutex);
-				break;
+				self->mutexQueue.addMutex(mutex);
+				return true;
 			}
-			else if (mutex->owner == currentThread)
+			if (mutex->owner == self)
 			{
 				mutex->lockCount = mutex->lockCount + 1;
-				break;
+				return true;
 			}
-			else
-			{
-				if (failedAttempts >= 0x800)
-					cemuLog_log(LogType::Force, "Detected long-term contested OSLockMutex");
-				currentThread->waitingForMutex = mutex;
-				mutex->threadQueue.queueAndWait(currentThread);
-				currentThread->waitingForMutex = nullptr;
-				failedAttempts++;
-			}
+			return false;
+		}
+	}
+
+	void OSLockMutexInternal(OSMutex* mutex)
+	{
+		OSThread_t* self = OSGetCurrentThread();
+		uint32 contendedWaits = 0;
+		while (!TryTakeMutex(mutex, self))
+		{
+			if (contendedWaits == 0x800)
+				cemuLog_log(LogType::Force, "OSLockMutex: mutex 0x{:08x} has been contended for a long time", MEMPTR<OSMutex>(mutex).GetMPTR());
+			self->waitingForMutex = mutex;
+			mutex->threadQueue.queueAndWait(self);
+			self->waitingForMutex = nullptr;
+			contendedWaits++;
 		}
 	}
 
@@ -271,54 +257,34 @@ namespace coreinit
 
 	bool OSTryLockMutex(OSMutex* mutex)
 	{
-		OSThread_t* currentThread = OSGetCurrentThread();
+		OSThread_t* self = OSGetCurrentThread();
 		__OSLockScheduler();
 		OSTestThreadCancelInternal();
-		if (mutex->owner == nullptr)
-		{
-			// acquire lock
-			mutex->owner = currentThread;
-			cemu_assert_debug(mutex->lockCount == 0);
-			mutex->lockCount = 1;
-			// cemu_assert_debug(mutex->next == nullptr && mutex->prev == nullptr); -> not zero initialized
-			currentThread->mutexQueue.addMutex(mutex);
-			// currentThread->cancelState = currentThread->cancelState | 0x10000;
-		}
-		else if (mutex->owner == currentThread)
-		{
-			mutex->lockCount = mutex->lockCount + 1;
-		}
-		else
-		{
-			__OSUnlockScheduler();
-			return false;
-		}
+		bool taken = TryTakeMutex(mutex, self);
 		__OSUnlockScheduler();
-		return true;
+		return taken;
 	}
 
 	void OSUnlockMutexInternal(OSMutex* mutex)
 	{
-		OSThread_t* currentThread = OSGetCurrentThread();
+		OSThread_t* self = OSGetCurrentThread();
 		if (mutex->lockCount == 0)
 		{
-			cemuLog_log(LogType::APIErrors, "OSUnlockMutex called on a mutex which is not locked");
+			cemuLog_log(LogType::APIErrors, "OSUnlockMutex: mutex 0x{:08x} is not locked", MEMPTR<OSMutex>(mutex).GetMPTR());
 			return;
 		}
-		if (mutex->owner != currentThread)
+		if (mutex->owner != self)
 		{
-			cemuLog_log(LogType::APIErrors, "OSUnlockMutex called by a different thread than the one owning it (owner=0x{:08x} currentThread=0x{:08x})", mutex->owner.GetMPTR(), MEMPTR<void>(currentThread).GetMPTR());
+			cemuLog_log(LogType::APIErrors, "OSUnlockMutex: mutex 0x{:08x} is owned by thread 0x{:08x}, not by the caller 0x{:08x}", MEMPTR<OSMutex>(mutex).GetMPTR(), mutex->owner.GetMPTR(), MEMPTR<OSThread_t>(self).GetMPTR());
 			return;
 		}
 		mutex->lockCount = mutex->lockCount - 1;
-		if (mutex->lockCount == 0)
-		{
-			currentThread->mutexQueue.removeMutex(mutex);
-			mutex->owner = nullptr;
-			if (!mutex->threadQueue.isEmpty())
-				mutex->threadQueue.wakeupSingleThreadWaitQueue(true, true);
-		}
-		// currentThread->cancelState = currentThread->cancelState & ~0x10000;
+		if (mutex->lockCount != 0)
+			return;
+		self->mutexQueue.removeMutex(mutex);
+		mutex->owner = nullptr;
+		if (!mutex->threadQueue.isEmpty())
+			mutex->threadQueue.wakeupSingleThreadWaitQueue(true, true);
 	}
 
 	void OSUnlockMutex(OSMutex* mutex)
@@ -328,11 +294,11 @@ namespace coreinit
 		__OSUnlockScheduler();
 	}
 
-	/************* OSCond ************/
+	/* OSCond */
 
 	void OSInitCond(OSCond* cond)
 	{
-		cond->magic = 0x634e6456;
+		cond->magic = kCondMagic;
 		cond->userData = nullptr;
 		cond->ukn08 = 0;
 		OSInitThreadQueueEx(&cond->threadQueue, cond);
@@ -346,37 +312,34 @@ namespace coreinit
 
 	void OSSignalCond(OSCond* cond)
 	{
+		// wakes all waiters; each one re-acquires the mutex in turn
 		OSWakeupThread(&cond->threadQueue);
 	}
 
 	void OSWaitCond(OSCond* cond, OSMutex* mutex)
 	{
-		// seen in Bayonetta 2
-		// releases the mutex while waiting for the condition to be signaled
 		__OSLockScheduler();
-		OSThread_t* currentThread = OSGetCurrentThread();
-		cemu_assert_debug(mutex->owner == currentThread);
-		sint32 prevLockCount = mutex->lockCount;
-		// unlock mutex
+		OSThread_t* self = OSGetCurrentThread();
+		cemu_assert_debug(mutex->owner == self);
+		// release the mutex completely, whatever its recursion depth (used by Bayonetta 2)
+		sint32 savedDepth = mutex->lockCount;
 		mutex->lockCount = 0;
-		currentThread->mutexQueue.removeMutex(mutex);
+		self->mutexQueue.removeMutex(mutex);
 		mutex->owner = nullptr;
 		if (!mutex->threadQueue.isEmpty())
 			mutex->threadQueue.wakeupEntireWaitQueue(false);
-		// wait on condition
-		cond->threadQueue.queueAndWait(currentThread);
-		// reacquire mutex
+		cond->threadQueue.queueAndWait(self);
 		OSLockMutexInternal(mutex);
-		mutex->lockCount = prevLockCount;
+		mutex->lockCount = savedDepth;
 		__OSUnlockScheduler();
 	}
 
-	/************* OSSemaphore ************/
+	/* OSSemaphore */
 
 	void OSInitSemaphoreEx(OSSemaphore* semaphore, sint32 initialCount, void* userData)
 	{
 		__OSLockScheduler();
-		semaphore->magic = 0x73506852;
+		semaphore->magic = kSemaphoreMagic;
 		semaphore->userData = userData;
 		semaphore->ukn08 = 0;
 		semaphore->count = initialCount;
@@ -389,76 +352,74 @@ namespace coreinit
 		OSInitSemaphoreEx(semaphore, initialCount, nullptr);
 	}
 
+	// returns the count before the decrement
 	sint32 OSWaitSemaphoreInternal(OSSemaphore* semaphore)
 	{
 		cemu_assert_debug(__OSHasSchedulerLock());
-		while (true)
-		{
-			sint32 prevCount = semaphore->count;
-			if (prevCount > 0)
-			{
-				semaphore->count = prevCount - 1;
-				return prevCount;
-			}
+		while (semaphore->count <= 0)
 			semaphore->threadQueue.queueAndWait(OSGetCurrentThread());
-		}
+		sint32 previous = semaphore->count;
+		semaphore->count = previous - 1;
+		return previous;
 	}
 
 	sint32 OSWaitSemaphore(OSSemaphore* semaphore)
 	{
 		__OSLockScheduler();
-		sint32 r = OSWaitSemaphoreInternal(semaphore);
+		sint32 previous = OSWaitSemaphoreInternal(semaphore);
 		__OSUnlockScheduler();
-		return r;
+		return previous;
 	}
 
 	sint32 OSTryWaitSemaphore(OSSemaphore* semaphore)
 	{
 		__OSLockScheduler();
-		sint32 prevCount = semaphore->count;
-		if (prevCount > 0)
-		{
-			semaphore->count = prevCount - 1;
-		}
+		sint32 previous = semaphore->count;
+		if (previous > 0)
+			semaphore->count = previous - 1;
 		__OSUnlockScheduler();
-		return prevCount;
+		return previous;
 	}
 
 	sint32 OSSignalSemaphoreInternal(OSSemaphore* semaphore, bool reschedule)
 	{
 		cemu_assert_debug(__OSHasSchedulerLock());
-		sint32 prevCount = semaphore->count;
-		semaphore->count = prevCount + 1;
+		sint32 previous = semaphore->count;
+		semaphore->count = previous + 1;
+		// all waiters recheck the count, the first to run takes it
 		semaphore->threadQueue.wakeupEntireWaitQueue(reschedule);
-		return prevCount;
+		return previous;
 	}
 
 	sint32 OSSignalSemaphore(OSSemaphore* semaphore)
 	{
 		__OSLockScheduler();
-		sint32 r = OSSignalSemaphoreInternal(semaphore, true);
+		sint32 previous = OSSignalSemaphoreInternal(semaphore, true);
 		__OSUnlockScheduler();
-		return r;
+		return previous;
 	}
 
 	sint32 OSGetSemaphoreCount(OSSemaphore* semaphore)
 	{
-		// seen in Assassin's Creed 4
 		__OSLockScheduler();
-		sint32 currentCount = semaphore->count;
+		sint32 count = semaphore->count;
 		__OSUnlockScheduler();
-		return currentCount;
+		return count;
 	}
 
-	/************* OSFastMutex ************/
+	/* OSFastMutex */
+
+	// Fast mutexes are taken without the scheduler lock. One host spinlock serialises the
+	// owner/count updates of all fast mutexes; the scheduler lock is only taken to block or wake.
+	FSpinlock s_fastMutexGuard;
 
 	void OSFastMutex_Init(OSFastMutex* fastMutex, void* userData)
 	{
-		fastMutex->magic = 0x664d7458;
+		fastMutex->magic = kFastMutexMagic;
 		fastMutex->userData = userData;
+		fastMutex->contendedState = 0;
 		fastMutex->owner = nullptr;
 		fastMutex->lockCount = 0;
-		fastMutex->contendedState = 0;
 		fastMutex->threadQueueSmall.head = nullptr;
 		fastMutex->threadQueueSmall.tail = nullptr;
 		fastMutex->ownedLink.next = nullptr;
@@ -467,54 +428,44 @@ namespace coreinit
 		fastMutex->contendedLink.prev = nullptr;
 	}
 
-	FSpinlock g_fastMutexSpinlock;
-
-	void _OSFastMutex_AcquireContention(OSFastMutex* fastMutex)
+	namespace
 	{
-		g_fastMutexSpinlock.lock();
-	}
-
-	void _OSFastMutex_ReleaseContention(OSFastMutex* fastMutex)
-	{
-		g_fastMutexSpinlock.unlock();
+		// with s_fastMutexGuard held
+		bool TryTakeFastMutex(OSFastMutex* fastMutex, OSThread_t* self)
+		{
+			if (fastMutex->owner.atomic_compare_exchange(nullptr, self))
+			{
+				cemu_assert_debug(fastMutex->lockCount == 0);
+				fastMutex->lockCount = 1;
+				return true;
+			}
+			if (fastMutex->owner == self)
+			{
+				fastMutex->lockCount = fastMutex->lockCount + 1;
+				return true;
+			}
+			return false;
+		}
 	}
 
 	void OSFastMutex_LockInternal(OSFastMutex* fastMutex)
 	{
 		cemu_assert_debug(!__OSHasSchedulerLock());
-		OSThread_t* currentThread = OSGetCurrentThread();
-		_OSFastMutex_AcquireContention(fastMutex);
-		while (true)
+		OSThread_t* self = OSGetCurrentThread();
+		s_fastMutexGuard.lock();
+		while (!TryTakeFastMutex(fastMutex, self))
 		{
-			if (fastMutex->owner.atomic_compare_exchange(nullptr, currentThread))//(fastMutex->owner == nullptr)
-			{
-				// acquire lock
-				cemu_assert_debug(fastMutex->owner == currentThread);
-				cemu_assert_debug(fastMutex->lockCount == 0);
-				fastMutex->lockCount = 1;
-
-				// todo - add to thread owned fast mutex queue
-				break;
-			}
-			else if (fastMutex->owner == currentThread)
-			{
-				fastMutex->lockCount = fastMutex->lockCount + 1;
-				break;
-			}
-			else
-			{
-				currentThread->waitingForFastMutex = fastMutex;
-				__OSLockScheduler();
-				fastMutex->threadQueueSmall.queueOnly(currentThread);
-				_OSFastMutex_ReleaseContention(fastMutex);
-				PPCCore_switchToSchedulerWithLock();
-				currentThread->waitingForFastMutex = nullptr;
-				__OSUnlockScheduler();
-				_OSFastMutex_AcquireContention(fastMutex);
-				continue;
-			}
+			// enqueue before dropping the guard so an unlock in between cannot miss us
+			self->waitingForFastMutex = fastMutex;
+			__OSLockScheduler();
+			fastMutex->threadQueueSmall.queueOnly(self);
+			s_fastMutexGuard.unlock();
+			PPCCore_switchToSchedulerWithLock();
+			self->waitingForFastMutex = nullptr;
+			__OSUnlockScheduler();
+			s_fastMutexGuard.lock();
 		}
-		_OSFastMutex_ReleaseContention(fastMutex);
+		s_fastMutexGuard.unlock();
 	}
 
 	void OSFastMutex_Lock(OSFastMutex* fastMutex)
@@ -524,73 +475,44 @@ namespace coreinit
 
 	bool OSFastMutex_TryLock(OSFastMutex* fastMutex)
 	{
-		OSThread_t* currentThread = OSGetCurrentThread();
-		_OSFastMutex_AcquireContention(fastMutex);
-		if (fastMutex->owner.atomic_compare_exchange(nullptr, currentThread))
-		{
-			// acquire lock
-			cemu_assert_debug(fastMutex->owner == currentThread);
-			cemu_assert_debug(fastMutex->lockCount == 0);
-			fastMutex->lockCount = 1;
-
-			// todo - add to thread owned fast mutex queue
-		}
-		else if (fastMutex->owner == currentThread)
-		{
-			fastMutex->lockCount = fastMutex->lockCount + 1;
-		}
-		else
-		{
-			_OSFastMutex_ReleaseContention(fastMutex);
-			return false;
-		}
-		_OSFastMutex_ReleaseContention(fastMutex);
-		return true;
-	}
-
-	void OSFastMutex_UnlockInternal(OSFastMutex* fastMutex)
-	{
-		cemu_assert_debug(!__OSHasSchedulerLock());
-		OSThread_t* currentThread = OSGetCurrentThread();
-		_OSFastMutex_AcquireContention(fastMutex);
-		if (fastMutex->owner != currentThread)
-		{
-			// seen in Paper Mario Color Splash
-			//cemuLog_log(LogType::Force, "OSFastMutex_Unlock() called on mutex which is not owned by current thread");
-			_OSFastMutex_ReleaseContention(fastMutex);
-			return;
-		}
-		cemu_assert_debug(fastMutex->lockCount > 0);
-		fastMutex->lockCount = fastMutex->lockCount - 1;
-		if (fastMutex->lockCount == 0)
-		{
-			// set owner to null
-			if (!fastMutex->owner.atomic_compare_exchange(currentThread, nullptr))
-			{
-				cemu_assert_debug(false); // should never happen
-			}
-			if (!fastMutex->threadQueueSmall.isEmpty())
-			{
-				__OSLockScheduler();
-				fastMutex->threadQueueSmall.wakeupSingleThreadWaitQueue(false);
-				__OSUnlockScheduler();
-			}
-		}
-		_OSFastMutex_ReleaseContention(fastMutex);
+		OSThread_t* self = OSGetCurrentThread();
+		s_fastMutexGuard.lock();
+		bool taken = TryTakeFastMutex(fastMutex, self);
+		s_fastMutexGuard.unlock();
+		return taken;
 	}
 
 	void OSFastMutex_Unlock(OSFastMutex* fastMutex)
 	{
-		//__OSLockScheduler();
-		OSFastMutex_UnlockInternal(fastMutex);
-		//__OSUnlockScheduler();
+		cemu_assert_debug(!__OSHasSchedulerLock());
+		OSThread_t* self = OSGetCurrentThread();
+		s_fastMutexGuard.lock();
+		// unlocking a fast mutex the caller does not own is ignored (Paper Mario Color Splash does it)
+		if (fastMutex->owner == self)
+		{
+			cemu_assert_debug(fastMutex->lockCount > 0);
+			fastMutex->lockCount = fastMutex->lockCount - 1;
+			if (fastMutex->lockCount == 0)
+			{
+				bool released = fastMutex->owner.atomic_compare_exchange(self, nullptr);
+				cemu_assert_debug(released);
+				(void)released;
+				if (!fastMutex->threadQueueSmall.isEmpty())
+				{
+					__OSLockScheduler();
+					fastMutex->threadQueueSmall.wakeupSingleThreadWaitQueue(false);
+					__OSUnlockScheduler();
+				}
+			}
+		}
+		s_fastMutexGuard.unlock();
 	}
 
-	/************* OSFastCond ************/
+	/* OSFastCond */
 
 	void OSFastCond_Init(OSFastCond* fastCond, void* userData)
 	{
-		fastCond->magic = 0x664e6456;
+		fastCond->magic = kFastCondMagic;
 		fastCond->userData = userData;
 		fastCond->ukn08 = 0;
 		OSInitThreadQueueEx(&fastCond->threadQueue, fastCond);
@@ -598,21 +520,18 @@ namespace coreinit
 
 	void OSFastCond_Wait(OSFastCond* fastCond, OSFastMutex* fastMutex)
 	{
-		// releases the mutex while waiting for the condition to be signaled
 		__OSLockScheduler();
-		cemu_assert_debug(fastMutex->owner == OSGetCurrentThread());
-		sint32 prevLockCount = fastMutex->lockCount;
-		// unlock mutex
+		OSThread_t* self = OSGetCurrentThread();
+		cemu_assert_debug(fastMutex->owner == self);
+		uint32 savedDepth = fastMutex->lockCount;
 		fastMutex->lockCount = 0;
 		fastMutex->owner = nullptr;
 		if (!fastMutex->threadQueueSmall.isEmpty())
 			fastMutex->threadQueueSmall.wakeupEntireWaitQueue(false);
-		// wait on condition
-		fastCond->threadQueue.queueAndWait(OSGetCurrentThread());
-		// reacquire mutex
+		fastCond->threadQueue.queueAndWait(self);
 		__OSUnlockScheduler();
 		OSFastMutex_LockInternal(fastMutex);
-		fastMutex->lockCount = prevLockCount;
+		fastMutex->lockCount = savedDepth;
 	}
 
 	void OSFastCond_Signal(OSFastCond* fastCond)
@@ -620,13 +539,10 @@ namespace coreinit
 		OSWakeupThread(&fastCond->threadQueue);
 	}
 
-	/************* init ************/
-
 	void InitializeConcurrency()
 	{
-		OSInitEvent(g_rendezvousEvent.GetPtr(), OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, OSEvent::EVENT_MODE::MODE_AUTO);
+		OSInitEvent(s_rendezvousArrival.GetPtr(), OSEvent::EVENT_STATE::STATE_NOT_SIGNALED, OSEvent::EVENT_MODE::MODE_AUTO);
 
-		// OSEvent
 		cafeExportRegister("coreinit", OSInitEvent, LogType::CoreinitThreadSync);
 		cafeExportRegister("coreinit", OSInitEventEx, LogType::CoreinitThreadSync);
 		cafeExportRegister("coreinit", OSResetEvent, LogType::CoreinitThreadSync);
@@ -635,24 +551,20 @@ namespace coreinit
 		cafeExportRegister("coreinit", OSSignalEvent, LogType::CoreinitThreadSync);
 		cafeExportRegister("coreinit", OSSignalEventAll, LogType::CoreinitThreadSync);
 
-		// OSRendezvous
 		cafeExportRegister("coreinit", OSInitRendezvous, LogType::CoreinitThreadSync);
 		cafeExportRegister("coreinit", OSWaitRendezvous, LogType::CoreinitThreadSync);
 
-		// OSMutex
 		cafeExportRegister("coreinit", OSInitMutex, LogType::CoreinitThreadSync);
 		cafeExportRegister("coreinit", OSInitMutexEx, LogType::CoreinitThreadSync);
 		cafeExportRegister("coreinit", OSLockMutex, LogType::CoreinitThreadSync);
 		cafeExportRegister("coreinit", OSTryLockMutex, LogType::CoreinitThreadSync);
 		cafeExportRegister("coreinit", OSUnlockMutex, LogType::CoreinitThreadSync);
 
-		// OSCond
 		cafeExportRegister("coreinit", OSInitCond, LogType::CoreinitThreadSync);
 		cafeExportRegister("coreinit", OSInitCondEx, LogType::CoreinitThreadSync);
 		cafeExportRegister("coreinit", OSSignalCond, LogType::CoreinitThreadSync);
 		cafeExportRegister("coreinit", OSWaitCond, LogType::CoreinitThreadSync);
 
-		// OSSemaphore
 		cafeExportRegister("coreinit", OSInitSemaphore, LogType::CoreinitThreadSync);
 		cafeExportRegister("coreinit", OSInitSemaphoreEx, LogType::CoreinitThreadSync);
 		cafeExportRegister("coreinit", OSWaitSemaphore, LogType::CoreinitThreadSync);
@@ -660,16 +572,13 @@ namespace coreinit
 		cafeExportRegister("coreinit", OSSignalSemaphore, LogType::CoreinitThreadSync);
 		cafeExportRegister("coreinit", OSGetSemaphoreCount, LogType::CoreinitThreadSync);
 
-		// OSFastMutex
 		cafeExportRegister("coreinit", OSFastMutex_Init, LogType::CoreinitThreadSync);
 		cafeExportRegister("coreinit", OSFastMutex_Lock, LogType::CoreinitThreadSync);
 		cafeExportRegister("coreinit", OSFastMutex_TryLock, LogType::CoreinitThreadSync);
 		cafeExportRegister("coreinit", OSFastMutex_Unlock, LogType::CoreinitThreadSync);
 
-		// OSFastCond
 		cafeExportRegister("coreinit", OSFastCond_Init, LogType::CoreinitThreadSync);
 		cafeExportRegister("coreinit", OSFastCond_Wait, LogType::CoreinitThreadSync);
 		cafeExportRegister("coreinit", OSFastCond_Signal, LogType::CoreinitThreadSync);
 	}
-
-};
+}

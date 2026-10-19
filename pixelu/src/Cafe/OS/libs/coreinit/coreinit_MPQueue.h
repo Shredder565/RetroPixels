@@ -1,14 +1,17 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include "Cafe/OS/libs/coreinit/coreinit.h"
 #include "Cafe/OS/libs/coreinit/coreinit_Spinlock.h"
+
+// MP task queues: a list of function calls that worker threads on several cores take and run.
 
 namespace coreinit
 {
 	enum MPTaskState
 	{
 		MP_TASK_STATE_INIT = (1 << 0),
-		MP_TASK_STATE_READY = (1 << 1),
+		MP_TASK_STATE_READY = (1 << 1), // queued
 		MP_TASK_STATE_RUN = (1 << 2),
 		MP_TASK_STATE_DONE = (1 << 3)
 	};
@@ -17,11 +20,12 @@ namespace coreinit
 	{
 		MP_TASKQ_STATE_INIT = (1 << 0),
 		MP_TASKQ_STATE_RUN = (1 << 1),
-		MP_TASKQ_STATE_STOPPING = (1 << 2),
+		MP_TASKQ_STATE_STOPPING = (1 << 2), // stop requested, tasks still running
 		MP_TASKQ_STATE_STOP = (1 << 3),
-		MP_TASKQ_STATE_DONE = (1 << 4)
+		MP_TASKQ_STATE_DONE = (1 << 4)      // every queued task finished
 	};
 
+	// the call a task makes: result = func(data, size)
 	struct MPTaskFunction
 	{
 		/* +0x00 */ MEMPTR<void> func;
@@ -37,32 +41,32 @@ namespace coreinit
 	{
 		/* +0x00 */ MEMPTR<void> thisptr;
 		/* +0x04 */ MEMPTR<struct MPTaskQ> taskQ;
-		/* +0x08 */ uint32be taskState;
+		/* +0x08 */ uint32be taskState;  // MPTaskState
 		/* +0x0C */ MPTaskFunction taskFunc;
-		/* +0x1C */ uint32be coreIndex;
-		/* +0x20 */ sint64be runtime;
+		/* +0x1C */ uint32be coreIndex;  // core that ran it, PPC_CORE_COUNT before that
+		/* +0x20 */ sint64be runtime;    // in timer ticks
 		/* +0x28 */ MEMPTR<void> userdata;
 	};
 	static_assert(sizeof(MPTask) == 0x2C);
-	
+
 #pragma pack()
 
 	struct MPTaskQ
 	{
 		/* +0x00 */ MEMPTR<void> thisptr;
-		/* +0x04 */ uint32be state;
+		/* +0x04 */ uint32be state; // MPTaskQState
 		/* +0x08 */ uint32be taskCount;
 		/* +0x0C */ uint32be taskReadyCount;
 		/* +0x10 */ uint32be taskRunCount;
 		/* +0x14 */ uint32be taskDoneCount[PPC_CORE_COUNT];
 		/* +0x20 */ sint32be nextIndex[PPC_CORE_COUNT];
 		/* +0x2C */ sint32be endIndex[PPC_CORE_COUNT];
-		/* +0x38 */ MEMPTR<MEMPTR<MPTask>> taskQueue;
+		/* +0x38 */ MEMPTR<MEMPTR<MPTask>> taskQueue; // caller provided array of task pointers
 		/* +0x3C */ uint32be taskQueueSize;
 		/* +0x40 */	OSSpinLock spinlock;
 	};
 	static_assert(sizeof(MPTaskQ) == 0x50);
-	
+
 	struct MPTaskQInfo
 	{
 		/* +0x00 */ uint32be state;
@@ -72,15 +76,18 @@ namespace coreinit
 		/* +0x10 */ uint32be taskDoneCount;
 	};
 	static_assert(sizeof(MPTaskQInfo) == 0x14);
-	
+
 	struct MPTaskInfo
 	{
 		/* +0x00 */ uint32be state;
 		/* +0x04 */ uint32be funcResult;
 		/* +0x08 */ uint32be coreIndex;
-		/* +0x0C */ sint64be runtime;
+		/* +0x10 */ sint64be runtime;
 	};
-	static_assert(sizeof(MPTaskQInfo) == 0x14);
+	// Not packed, so runtime is 8 byte aligned. The console struct is 0x14 bytes with the runtime at
+	// 0x0C; the existing PixelU layout is kept unchanged here.
+	static_assert(offsetof(MPTaskInfo, runtime) == 0x10);
+	static_assert(sizeof(MPTaskInfo) == 0x18);
 
 	void MPInitTask(MPTask* task, void* func, void* data, uint32 size);
 	bool MPTermTask(MPTask* task);

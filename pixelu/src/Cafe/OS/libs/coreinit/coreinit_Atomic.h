@@ -1,5 +1,9 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include <atomic>
+
+// Atomic operations on big endian words in guest memory. Read-modify-write functions return the
+// value from before the operation.
 
 namespace coreinit
 {
@@ -7,7 +11,7 @@ namespace coreinit
 	bool OSCompareAndSwapAtomic(std::atomic<uint32be>* mem, uint32 compareValue, uint32 swapValue);
 	bool OSCompareAndSwapAtomicEx(std::atomic<uint32be>* mem, uint32 compareValue, uint32 swapValue, uint32be* previousValue);
 	uint32 OSAddAtomic(std::atomic<uint32be>* mem, uint32 adder);
-	
+
 	uint64 OSSwapAtomic64(std::atomic<uint64be>* mem, uint64 newValue);
 	uint64 OSSetAtomic64(std::atomic<uint64be>* mem, uint64 newValue);
 	uint64 OSGetAtomic64(std::atomic<uint64be>* mem);

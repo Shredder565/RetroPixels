@@ -1,23 +1,45 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/OS/common/OSCommon.h"
 #include "Cafe/OS/libs/coreinit/coreinit_MessageQueue.h"
 
 namespace coreinit
 {
+	// coreinit_Misc.cpp: feeds pending system messages into the queue / reacts to received ones
 	void UpdateSystemMessageQueue();
 	void HandleReceivedSystemMessage(OSMessage* msg);
 
-	SysAllocator<OSMessageQueue> g_systemMessageQueue;
-	SysAllocator<OSMessage, 16> _systemMessageQueueArray;
+	SysAllocator<OSMessageQueue> s_systemMessageQueue;
+	SysAllocator<OSMessage, 16> s_systemMessageStorage;
+
+	namespace
+	{
+		constexpr uint32 kMessageQueueMagic = 0x6D536751; // 'mSgQ'
+
+		bool IsEmpty(const OSMessageQueue* q)
+		{
+			return (uint32)q->usedCount == 0;
+		}
+
+		bool IsFull(const OSMessageQueue* q)
+		{
+			return (uint32)q->usedCount >= (uint32)q->msgCount;
+		}
+
+		OSMessage* SlotAt(OSMessageQueue* q, uint32 index)
+		{
+			return q->msgArray.GetPtr() + index;
+		}
+	}
 
 	void OSInitMessageQueueEx(OSMessageQueue* msgQueue, OSMessage* msgArray, uint32 msgCount, void* userData)
 	{
-		msgQueue->magic = 'mSgQ';
+		msgQueue->magic = kMessageQueueMagic;
 		msgQueue->userData = userData;
+		msgQueue->ukn08 = 0;
 		msgQueue->msgArray = msgArray;
 		msgQueue->msgCount = msgCount;
 		msgQueue->firstIndex = 0;
 		msgQueue->usedCount = 0;
-		msgQueue->ukn08 = 0;
 		OSInitThreadQueueEx(&msgQueue->threadQueueReceive, msgQueue);
 		OSInitThreadQueueEx(&msgQueue->threadQueueSend, msgQueue);
 	}
@@ -29,90 +51,69 @@ namespace coreinit
 
 	bool OSReceiveMessage(OSMessageQueue* msgQueue, OSMessage* msg, uint32 flags)
 	{
-		bool isSystemMessageQueue = (msgQueue == g_systemMessageQueue);
-		if(isSystemMessageQueue)
+		const bool fromSystemQueue = msgQueue == s_systemMessageQueue.GetPtr();
+		if (fromSystemQueue)
 			UpdateSystemMessageQueue();
 		__OSLockScheduler(msgQueue);
-		while (msgQueue->usedCount == (uint32be)0)
+		while (IsEmpty(msgQueue))
 		{
-			if ((flags & OS_MESSAGE_BLOCK))
-			{
-				msgQueue->threadQueueReceive.queueAndWait(OSGetCurrentThread());
-			}
-			else
+			if ((flags & OS_MESSAGE_BLOCK) == 0)
 			{
 				__OSUnlockScheduler(msgQueue);
 				return false;
 			}
+			msgQueue->threadQueueReceive.queueAndWait(OSGetCurrentThread());
 		}
-		// copy message
-		sint32 messageIndex = msgQueue->firstIndex;
-		OSMessage* readMsg = &(msgQueue->msgArray[messageIndex]);
-		memcpy(msg, readMsg, sizeof(OSMessage));
-		msgQueue->firstIndex = ((uint32)msgQueue->firstIndex + 1) % (uint32)(msgQueue->msgCount);
+		uint32 first = msgQueue->firstIndex;
+		*msg = *SlotAt(msgQueue, first);
+		msgQueue->firstIndex = (first + 1) % (uint32)msgQueue->msgCount;
 		msgQueue->usedCount = (uint32)msgQueue->usedCount - 1;
-		// wake up any thread waiting to add a message
+		// one slot became free
 		if (!msgQueue->threadQueueSend.isEmpty())
 			msgQueue->threadQueueSend.wakeupSingleThreadWaitQueue(true);
 		__OSUnlockScheduler(msgQueue);
-		if(isSystemMessageQueue)
+		if (fromSystemQueue)
 			HandleReceivedSystemMessage(msg);
 		return true;
 	}
 
+	// copies the oldest message without removing it; msg may be null to only test for one
 	bool OSPeekMessage(OSMessageQueue* msgQueue, OSMessage* msg)
 	{
 		__OSLockScheduler(msgQueue);
-		if ((msgQueue->usedCount == (uint32be)0))
-		{
-			__OSUnlockScheduler(msgQueue);
-			return false;
-		}
-		// copy message
-		sint32 messageIndex = msgQueue->firstIndex;
-		if (msg)
-		{
-			OSMessage* readMsg = &(msgQueue->msgArray[messageIndex]);
-			memcpy(msg, readMsg, sizeof(OSMessage));
-		}
+		bool available = !IsEmpty(msgQueue);
+		if (available && msg)
+			*msg = *SlotAt(msgQueue, msgQueue->firstIndex);
 		__OSUnlockScheduler(msgQueue);
-		return true;
+		return available;
 	}
 
 	sint32 OSSendMessage(OSMessageQueue* msgQueue, OSMessage* msg, uint32 flags)
 	{
 		__OSLockScheduler();
-		while (msgQueue->usedCount >= msgQueue->msgCount)
+		while (IsFull(msgQueue))
 		{
-			if ((flags & OS_MESSAGE_BLOCK))
-			{
-				msgQueue->threadQueueSend.queueAndWait(OSGetCurrentThread());																  
-			}
-			else
+			if ((flags & OS_MESSAGE_BLOCK) == 0)
 			{
 				__OSUnlockScheduler();
 				return 0;
 			}
+			msgQueue->threadQueueSend.queueAndWait(OSGetCurrentThread());
 		}
-		// add message
-		if ((flags & OS_MESSAGE_HIGH_PRIORITY))
+		uint32 slot;
+		if ((flags & OS_MESSAGE_HIGH_PRIORITY) != 0)
 		{
-			// decrease firstIndex
-			sint32 newFirstIndex = (sint32)((sint32)msgQueue->firstIndex + (sint32)msgQueue->msgCount - 1) % (sint32)msgQueue->msgCount;
-			msgQueue->firstIndex = newFirstIndex;
-			// insert message at new first index
-			msgQueue->usedCount = (uint32)msgQueue->usedCount + 1;
-			OSMessage* newMsg = &(msgQueue->msgArray[newFirstIndex]);
-			memcpy(newMsg, msg, sizeof(OSMessage));
+			// step the ring start back by one and store the message there
+			sint32 capacity = (sint32)(uint32)msgQueue->msgCount;
+			slot = (uint32)(((sint32)(uint32)msgQueue->firstIndex + capacity - 1) % capacity);
+			msgQueue->firstIndex = slot;
 		}
 		else
 		{
-			sint32 messageIndex = (uint32)(msgQueue->firstIndex + msgQueue->usedCount) % (uint32)msgQueue->msgCount;
-			msgQueue->usedCount = (uint32)msgQueue->usedCount + 1;
-			OSMessage* newMsg = &(msgQueue->msgArray[messageIndex]);
-			memcpy(newMsg, msg, sizeof(OSMessage));
+			slot = ((uint32)msgQueue->firstIndex + (uint32)msgQueue->usedCount) % (uint32)msgQueue->msgCount;
 		}
-		// wake up any thread waiting to read a message
+		msgQueue->usedCount = (uint32)msgQueue->usedCount + 1;
+		*SlotAt(msgQueue, slot) = *msg;
 		if (!msgQueue->threadQueueReceive.isEmpty())
 			msgQueue->threadQueueReceive.wakeupSingleThreadWaitQueue(true);
 		__OSUnlockScheduler();
@@ -121,12 +122,12 @@ namespace coreinit
 
 	OSMessageQueue* OSGetSystemMessageQueue()
 	{
-		return g_systemMessageQueue.GetPtr();
+		return s_systemMessageQueue.GetPtr();
 	}
 
 	void InitializeMessageQueue()
 	{
-		OSInitMessageQueue(g_systemMessageQueue.GetPtr(), _systemMessageQueueArray.GetPtr(), _systemMessageQueueArray.GetCount());
+		OSInitMessageQueue(s_systemMessageQueue.GetPtr(), s_systemMessageStorage.GetPtr(), s_systemMessageStorage.GetCount());
 
 		cafeExportRegister("coreinit", OSInitMessageQueueEx, LogType::CoreinitThread);
 		cafeExportRegister("coreinit", OSInitMessageQueue, LogType::CoreinitThread);
@@ -136,4 +137,3 @@ namespace coreinit
 		cafeExportRegister("coreinit", OSGetSystemMessageQueue, LogType::CoreinitThread);
 	}
 };
-

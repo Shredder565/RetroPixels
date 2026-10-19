@@ -1,57 +1,63 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/OS/common/OSCommon.h"
 #include <atomic>
 #include "coreinit_Atomic.h"
 
 namespace coreinit
 {
-	/* 32bit atomic operations */
+	namespace
+	{
+		// applies op to the stored value atomically and returns the value it replaced
+		template<typename T, typename TOp>
+		T AtomicUpdate(std::atomic<betype<T>>* mem, TOp op)
+		{
+			betype<T> expected = mem->load();
+			betype<T> desired;
+			do
+			{
+				desired = (T)op((T)expected);
+			} while (!mem->compare_exchange_strong(expected, desired));
+			return expected;
+		}
+
+		// compare and swap; reports the value found in memory through foundValue
+		template<typename T>
+		bool CompareAndSwap(std::atomic<betype<T>>* mem, T compareValue, T swapValue, betype<T>* foundValue)
+		{
+			betype<T> expected = compareValue;
+			bool swapped = mem->compare_exchange_strong(expected, betype<T>(swapValue));
+			if (foundValue)
+				*foundValue = expected;
+			return swapped;
+		}
+	}
 
 	uint32 OSSwapAtomic(std::atomic<uint32be>* mem, uint32 newValue)
 	{
-		uint32be _newValue = newValue;
-		uint32be previousValue = mem->exchange(_newValue);
-		return previousValue;
+		return mem->exchange(uint32be(newValue));
 	}
 
 	bool OSCompareAndSwapAtomic(std::atomic<uint32be>* mem, uint32 compareValue, uint32 swapValue)
 	{
-		// seen in GTA3 homebrew port
-		uint32be _compareValue = compareValue;
-		uint32be _swapValue = swapValue;
-		return mem->compare_exchange_strong(_compareValue, _swapValue);
+		return CompareAndSwap<uint32>(mem, compareValue, swapValue, nullptr);
 	}
 
 	bool OSCompareAndSwapAtomicEx(std::atomic<uint32be>* mem, uint32 compareValue, uint32 swapValue, uint32be* previousValue)
 	{
-		// seen in GTA3 homebrew port
-		uint32be _compareValue = compareValue;
-		uint32be _swapValue = swapValue;
-		bool r = mem->compare_exchange_strong(_compareValue, _swapValue);
-		*previousValue = _compareValue;
-		return r;
+		uint32be found;
+		bool swapped = CompareAndSwap<uint32>(mem, compareValue, swapValue, &found);
+		*previousValue = found;
+		return swapped;
 	}
 
 	uint32 OSAddAtomic(std::atomic<uint32be>* mem, uint32 adder)
 	{
-        // used by SDL Wii U port
-		uint32be knownValue;
-		while (true)
-		{
-			knownValue = mem->load();
-			uint32be newValue = knownValue + adder;
-			if (mem->compare_exchange_strong(knownValue, newValue))
-				break;
-		}
-		return knownValue;
+		return AtomicUpdate<uint32>(mem, [adder](uint32 v) { return v + adder; });
 	}
-
-	/* 64bit atomic operations */
 
 	uint64 OSSwapAtomic64(std::atomic<uint64be>* mem, uint64 newValue)
 	{
-		uint64be _newValue = newValue;
-		uint64be previousValue = mem->exchange(_newValue);
-		return previousValue;
+		return mem->exchange(uint64be(newValue));
 	}
 
 	uint64 OSSetAtomic64(std::atomic<uint64be>* mem, uint64 newValue)
@@ -66,68 +72,39 @@ namespace coreinit
 
 	uint64 OSAddAtomic64(std::atomic<uint64be>* mem, uint64 adder)
 	{
-		uint64be knownValue;
-		while (true)
-		{
-			knownValue = mem->load();
-			uint64be newValue = knownValue + adder;
-			if (mem->compare_exchange_strong(knownValue, newValue))
-				break;
-		}
-		return knownValue;
+		return AtomicUpdate<uint64>(mem, [adder](uint64 v) { return v + adder; });
 	}
 
 	uint64 OSAndAtomic64(std::atomic<uint64be>* mem, uint64 val)
 	{
-		uint64be knownValue;
-		while (true)
-		{
-			knownValue = mem->load();
-			uint64be newValue = knownValue & val;
-			if (mem->compare_exchange_strong(knownValue, newValue))
-				break;
-		}
-		return knownValue;
+		return AtomicUpdate<uint64>(mem, [val](uint64 v) { return v & val; });
 	}
 
 	uint64 OSOrAtomic64(std::atomic<uint64be>* mem, uint64 val)
 	{
-		uint64be knownValue;
-		while (true)
-		{
-			knownValue = mem->load();
-			uint64be newValue = knownValue | val;
-			if (mem->compare_exchange_strong(knownValue, newValue))
-				break;
-		}
-		return knownValue;
+		return AtomicUpdate<uint64>(mem, [val](uint64 v) { return v | val; });
 	}
 
 	bool OSCompareAndSwapAtomic64(std::atomic<uint64be>* mem, uint64 compareValue, uint64 swapValue)
 	{
-		uint64be _compareValue = compareValue;
-		uint64be _swapValue = swapValue;
-		return mem->compare_exchange_strong(_compareValue, _swapValue);
+		return CompareAndSwap<uint64>(mem, compareValue, swapValue, nullptr);
 	}
 
 	bool OSCompareAndSwapAtomicEx64(std::atomic<uint64be>* mem, uint64 compareValue, uint64 swapValue, uint64be* previousValue)
 	{
-		uint64be _compareValue = compareValue;
-		uint64be _swapValue = swapValue;
-		bool r = mem->compare_exchange_strong(_compareValue, _swapValue);
-		*previousValue = _compareValue;
-		return r;
+		uint64be found;
+		bool swapped = CompareAndSwap<uint64>(mem, compareValue, swapValue, &found);
+		*previousValue = found;
+		return swapped;
 	}
 
 	void InitializeAtomic()
 	{
-		// 32bit atomic operations
 		cafeExportRegister("coreinit", OSSwapAtomic, LogType::Placeholder);
 		cafeExportRegister("coreinit", OSCompareAndSwapAtomic, LogType::Placeholder);
 		cafeExportRegister("coreinit", OSCompareAndSwapAtomicEx, LogType::Placeholder);
 		cafeExportRegister("coreinit", OSAddAtomic, LogType::Placeholder);
-		
-		// 64bit atomic operations
+
 		cafeExportRegister("coreinit", OSSetAtomic64, LogType::Placeholder);
 		cafeExportRegister("coreinit", OSGetAtomic64, LogType::Placeholder);
 		cafeExportRegister("coreinit", OSSwapAtomic64, LogType::Placeholder);
