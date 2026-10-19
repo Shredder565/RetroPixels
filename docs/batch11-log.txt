@@ -30,3 +30,35 @@ Done:
 - LatteTiming.cpp/.h, LatteRingBuffer.cpp/.h: original, same timer
   frequencies, same vsync/flip throttle title list, same allocator rule.
   No harness (timer driven / 10 lines), reviewed by hand.
+- LatteTextureLoader.cpp/.h: original. Every decoder class kept (same names,
+  singletons, byte sizes, texel counts, quirks such as the 10:10:10:2 to
+  RGBA16 placeholders that only clear the first texel of each row, the
+  5:6:5 to RGBA8 "v<<3|v>>3" widening and the alpha<<3 dumps of 5:5:5:1).
+  Harness: 1500 seeds, 1.27M lines identical (LatteTextureLoader_begin
+  fields for random formats/dims/tile modes/mips/swizzles, GetInput
+  addresses, every decoder's decode() output incl. untouched bytes,
+  decodePixelToRGBA, raw BC1-5 block decoders, BC1_GetPixel, readback
+  writes into guest memory). The reference build used Cemu's original
+  AddrLibFastDecode.h so the decoders were compared against the real
+  original behaviour.
+  Fix (in LatteAddrLib/AddrLibFastDecode.h, batch 5 rewrite): the
+  LINEAR_ALIGNED untile path copied rows with memcpy, which skipped the
+  converting assignment of the swapped 5:5:5:1 element types, so linear
+  R5G5B5A1 textures were uploaded without their channel swap on the
+  swappedRB/swappedOpenGL paths. Such element types are now copied one by
+  one again (the harness shows the difference against the 8ffe2a1 header).
+  Other differences: the dump buffer is allocated after the decoder check
+  (no leak when no decoder exists) and sized exactly; readback log texts.
+- LatteBufferCache.cpp: original. The B+ tree interval tree is replaced by
+  a std::map of disjoint ranges (same query results and order). Same page
+  size, streamout signature pattern written to guest RAM, upload batching,
+  dirty interval rules, OOM eviction order and incremental cleanup order.
+  The page hash is a new function (only compared internally).
+  DC flush pages are queued in a vector and de-duplicated when processed
+  (invalidation is order independent). Harness: 2000 seeds, 4.8M lines
+  identical (every upload with data hash, copies, streamout copies,
+  returned offsets, heap stats, final guest memory hash).
+- LatteBufferData.cpp: original. Harness: 300 seeds, 336k lines identical
+  (vertex buffer bindings, uniform buffer binds, remapped uniform output,
+  cache calls, incremental draw rebinding). Dropped the unused
+  rectGenerate4thVertex template.

@@ -1,324 +1,240 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
 #include "Cafe/HW/Latte/Core/LatteShader.h"
 #include "Cafe/HW/Latte/LegacyShaderDecompiler/LatteDecompiler.h"
 #include "Cafe/HW/Latte/Core/FetchShader.h"
-#include "Cafe/GameProfile/GameProfile.h"
-
 #include "Cafe/HW/Latte/Core/LatteBufferCache.h"
 #ifdef ENABLE_VULKAN
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h"
 #endif
 
-template<int vectorLen>
-void rectGenerate4thVertex(uint32be* output, uint32be* input0, uint32be* input1, uint32be* input2)
+// Vertex and uniform buffer setup for a draw: guest buffers are looked up in (and
+// if needed loaded into) the GPU buffer cache and bound by host buffer offset.
+
+namespace
 {
-	float* v = (float*)output;
+	// each vertex/uniform buffer occupies 7 consecutive resource registers
+	constexpr uint32 kBufferResourceStride = 7;
 
-	for (sint32 i = 0; i < vectorLen; i++)
-		output[vectorLen * 0 + i] = _swapEndianU32(input0[i]);
-	for (sint32 i = 0; i < vectorLen; i++)
-		output[vectorLen * 1 + i] = _swapEndianU32(input1[i]);
-	for (sint32 i = 0; i < vectorLen; i++)
-		output[vectorLen * 2 + i] = _swapEndianU32(input2[i]);
+	inline void Copy16(uint8* dst, const void* src) { memcpy(dst, src, 16); }
 
-	float minX = std::min(v[vectorLen * 0 + 0], std::min(v[vectorLen * 1 + 0], v[vectorLen * 2 + 0]));
-	float maxX = std::max(v[vectorLen * 0 + 0], std::max(v[vectorLen * 1 + 0], v[vectorLen * 2 + 0]));
-	float minY = std::min(v[vectorLen * 0 + 1], std::min(v[vectorLen * 1 + 1], v[vectorLen * 2 + 1]));;
-	float maxY = std::max(v[vectorLen * 0 + 1], std::max(v[vectorLen * 1 + 1], v[vectorLen * 2 + 1]));;
+	inline uint32 UniformBlockRegisterBase(LatteConst::ShaderType type)
+	{
+		switch (type)
+		{
+		case LatteConst::ShaderType::Vertex:
+			return mmSQ_VTX_UNIFORM_BLOCK_START;
+		case LatteConst::ShaderType::Pixel:
+			return mmSQ_PS_UNIFORM_BLOCK_START;
+		case LatteConst::ShaderType::Geometry:
+			return mmSQ_GS_UNIFORM_BLOCK_START;
+		default:
+			UNREACHABLE;
+		}
+	}
 
-	float totalX = minX;
-	totalX += maxY;
-	float halfX = totalX / 2.0f;
-
-	float totalY = minY;
-	totalY += maxY;
-	float halfY = totalY / 2.0f;
-
-	sint32 countX =
-		((v[vectorLen * 0 + 0] < halfX) ? 1 : 0) +
-		((v[vectorLen * 1 + 0] < halfX) ? 1 : 0) +
-		((v[vectorLen * 2 + 0] < halfX) ? 1 : 0);
-
-	sint32 countY =
-		((v[vectorLen * 0 + 1] < halfY) ? 1 : 0) +
-		((v[vectorLen * 1 + 1] < halfY) ? 1 : 0) +
-		((v[vectorLen * 2 + 1] < halfY) ? 1 : 0);
-
-	if (countX < 2)
-		v[vectorLen * 3 + 0] = minX;
-	else
-		v[vectorLen * 3 + 0] = maxX;
-	if (countY < 2)
-		v[vectorLen * 3 + 1] = minY;
-	else
-		v[vectorLen * 3 + 1] = maxY;
-
-	if (vectorLen >= 3)
-		v[vectorLen * 3 + 2] = v[vectorLen * 0 + 2]; // z from v0
-	if (vectorLen >= 4)
-		v[vectorLen * 3 + 3] = v[vectorLen * 0 + 3]; // w from v0
-
-	// order of rectangle vertices is
-	// v0 v1
-	// v2 v3
-
-	for (sint32 f = 0; f < vectorLen*4; f++)
-		output[f] = _swapEndianU32(output[f]);
+	inline uint32 StageBit(LatteConst::ShaderType type)
+	{
+		return 1u << static_cast<uint32>(type);
+	}
 }
 
+// Fills the remapped uniform array of a shader (compact layout used when the host
+// cannot bind full constant banks). Returns true if anything was written.
 bool LatteBufferCache_LoadRemappedUniforms(LatteDecompilerShader* shader, float* uniformData, bool aluConstDirty, uint32 uniformBufferDirtyMask)
 {
-	bool hasChange = false;
+	uint8* out = reinterpret_cast<uint8*>(uniformData);
 	if (LatteGPUState.contextNew.SQ_CONFIG.get_DX9_CONSTS())
 	{
-		// ALU const only
-		uint32 shaderAluConst;
+		// constants come from the ALU constant registers; the vertex shader's bank starts 0x400 registers in
+		uint32 bankStart;
 		switch (shader->shaderType)
 		{
 		case LatteConst::ShaderType::Vertex:
-			shaderAluConst = 0x400;
+			bankStart = 0x400;
 			break;
 		case LatteConst::ShaderType::Pixel:
-			shaderAluConst = 0;
-			break;
 		case LatteConst::ShaderType::Geometry:
-			shaderAluConst = 0; // geometry shader has no ALU const
+			bankStart = 0;
 			break;
 		default:
 			UNREACHABLE;
 		}
-		// sourced from uniform registers
-		if (aluConstDirty)
-		{
-			uint32* aluConstBase = LatteGPUState.contextRegister + mmSQ_ALU_CONSTANT0_0 + shaderAluConst;
-			for (auto it : shader->list_remappedUniformEntries_register)
-			{
-				uint64* __restrict uniformRegData = (uint64*)(aluConstBase + it.indexOffset / 4);
-				uint64* __restrict regDest = (uint64*)((uint8*)uniformData + it.mappedIndexOffset);
-				regDest[0] = uniformRegData[0];
-				regDest[1] = uniformRegData[1];
-			}
-			if (!shader->list_remappedUniformEntries_register.empty())
-				hasChange = true;
-		}
+		if (!aluConstDirty)
+			return false;
+		const uint32* bank = LatteGPUState.contextRegister + mmSQ_ALU_CONSTANT0_0 + bankStart;
+		for (const auto& entry : shader->list_remappedUniformEntries_register)
+			Copy16(out + entry.mappedIndexOffset, bank + entry.indexOffset / 4);
+		return !shader->list_remappedUniformEntries_register.empty();
 	}
-	else
+
+	// constants come from uniform buffers in guest memory
+	const uint32 blockRegs = UniformBlockRegisterBase(shader->shaderType);
+	if (uniformBufferDirtyMask == 0)
+		return false;
+	bool wrote = false;
+	for (const auto& group : shader->list_remappedUniformEntries_bufferGroups)
 	{
-		// uniform blocks only
-		uint32 shaderUniformRegisterOffset;
-		switch (shader->shaderType)
+		if ((uniformBufferDirtyMask & (1u << group.bufferId)) == 0)
+			continue;
+		const MPTR bufferAddr = LatteGPUState.contextRegister[blockRegs + group.kcacheBankIdOffset / 4];
+		for (const auto& entry : group.entries)
 		{
-		case LatteConst::ShaderType::Vertex:
-			shaderUniformRegisterOffset = mmSQ_VTX_UNIFORM_BLOCK_START;
-			break;
-		case LatteConst::ShaderType::Pixel:
-			shaderUniformRegisterOffset = mmSQ_PS_UNIFORM_BLOCK_START;
-			break;
-		case LatteConst::ShaderType::Geometry:
-			shaderUniformRegisterOffset = mmSQ_GS_UNIFORM_BLOCK_START;
-			break;
-		default:
-			UNREACHABLE;
+			if (bufferAddr != MPTR_NULL)
+				Copy16(out + entry.mappedIndexOffset, memory_base + bufferAddr + entry.indexOffset);
+			else
+				memset(out + entry.mappedIndexOffset, 0, 16);
 		}
-		// sourced from uniform buffers
-		if (uniformBufferDirtyMask)
-		{
-			for (auto& bufferGroup : shader->list_remappedUniformEntries_bufferGroups)
-			{
-				if ((uniformBufferDirtyMask&(1<<bufferGroup.bufferId)) == 0)
-					continue;
-				MPTR physicalAddr = LatteGPUState.contextRegister[shaderUniformRegisterOffset + bufferGroup.kcacheBankIdOffset / 4];
-				if (physicalAddr)
-				{
-					uint8* __restrict uniformBase = memory_base + physicalAddr;
-					for (auto& it : bufferGroup.entries)
-					{
-						uint64* __restrict regDest = (uint64*)((uint8*)uniformData + it.mappedIndexOffset);
-						uint64* __restrict uniformEntrySrc = (uint64*)(uniformBase + it.indexOffset);
-						memcpy(regDest, uniformEntrySrc, 16);
-					}
-				}
-				else
-				{
-					for (auto& it : bufferGroup.entries)
-					{
-						uint64* regDest = (uint64*)((uint8*)uniformData + it.mappedIndexOffset);
-						regDest[0] = 0;
-						regDest[1] = 0;
-					}
-				}
-				hasChange = true;
-			}
-		}
+		wrote = true;
 	}
-	return hasChange;
+	return wrote;
 }
 
-bool LatteBufferCache_syncGPUUniformBuffers(LatteDecompilerShader* shader, const uint32 uniformBufferRegOffset, LatteConst::ShaderType shaderType, uint32 bufferDirtyMask)
+// Binds the dirty uniform buffers of a shader that reads whole constant banks.
+// Returns true if any of the shader's buffers was dirty.
+static bool LatteBufferCache_syncGPUUniformBuffers(LatteDecompilerShader* shader, const uint32 uniformBufferRegOffset, LatteConst::ShaderType shaderType, uint32 bufferDirtyMask)
 {
 	cemu_assert_debug(shader->uniformMode == LATTE_DECOMPILER_UNIFORM_MODE_FULL_CBANK);
-	bool hasChange = false;
-	for(const auto& buf : shader->list_quickBufferList)
+	bool anyDirty = false;
+	for (const auto& buf : shader->list_quickBufferList)
 	{
-		sint32 i = buf.index;
-		if ((bufferDirtyMask&(1<<i)) == 0)
+		const uint32 index = buf.index;
+		if ((bufferDirtyMask & (1u << index)) == 0)
 			continue;
-		hasChange = true;
-		MPTR physicalAddr = LatteGPUState.contextRegister[uniformBufferRegOffset + i * 7 + 0];
-		uint32 uniformSize = LatteGPUState.contextRegister[uniformBufferRegOffset + i * 7 + 1] + 1;
-		if (physicalAddr == MPTR_NULL) [[unlikely]]
+		anyDirty = true;
+		const uint32* regs = LatteGPUState.contextRegister + uniformBufferRegOffset + index * kBufferResourceStride;
+		const MPTR addr = regs[0];
+		if (addr == MPTR_NULL) [[unlikely]]
 		{
-			g_renderer->buffer_bindUniformBuffer(shaderType, i, 0, 0);
+			g_renderer->buffer_bindUniformBuffer(shaderType, index, 0, 0);
 			continue;
 		}
-		uniformSize = std::min<uint32>(uniformSize, buf.size);
-		uint32 bindOffset = LatteBufferCache_retrieveDataInCache(physicalAddr, uniformSize);
-		g_renderer->buffer_bindUniformBuffer(shaderType, i, bindOffset, uniformSize);
+		// bind no more than the shader actually reads
+		const uint32 size = std::min<uint32>(regs[1] + 1, buf.size);
+		g_renderer->buffer_bindUniformBuffer(shaderType, index, LatteBufferCache_retrieveDataInCache(addr, size), size);
 	}
-	return hasChange;
+	return anyDirty;
 }
 
-// for detecting when vertex buffer size needs to be extended during incremental rendering
-static sint32 s_vtxStateMaxIndex{};
-static sint32 s_vtxStateMaxInstance{};
+// highest vertex index / instance covered by the current vertex buffer bindings (incremental draws)
+static uint32 s_boundMaxVertex{};
+static uint32 s_boundMaxInstance{};
 
-void LatteBufferCache_ProcessQueues()
+// cache housekeeping between (non-incremental) draws
+static void LatteBufferCache_ProcessQueues()
 {
-	static uint32 s_syncBufferCounter = 0;
-
-	s_syncBufferCounter++;
-	if (s_syncBufferCounter >= 25)
+	static uint32 s_drawsSinceCleanup = 0;
+	if (++s_drawsSinceCleanup >= 25)
 	{
 		LatteBufferCache_incrementalCleanup();
-		s_syncBufferCounter = 0;
+		s_drawsSinceCleanup = 0;
 	}
 	LatteBufferCache_processDCFlushQueue();
-	// process queued deallocations from previous drawcall
-	LatteBufferCache_processDeallocations();
+	LatteBufferCache_processDeallocations(); // allocations released by the previous draw
 }
 
-// upload vertex and uniform buffers and update bindings
 void LatteBufferCache_Sync(uint32 maxVtxIndex, uint32 baseInstance, uint32 instanceCount, uint32 attribBufferDirtyMask, uint32 vsUniformBufferDirtyMask, uint32 psUniformBufferDirtyMask, uint32 gsUniformBufferDirtyMask, uint8& stageUniformModifiedMask, bool isIncremental)
 {
-	LatteFetchShader* parsedFetchShader = LatteSHRC_GetActiveFetchShader();
-	cemu_assert_debug(parsedFetchShader);
-	uint32 maxInstance = baseInstance + instanceCount - 1;
+	LatteFetchShader* fetchShader = LatteSHRC_GetActiveFetchShader();
+	cemu_assert_debug(fetchShader);
+	const uint32 maxInstance = baseInstance + instanceCount - 1;
 
-	// todo - vertex attribute offsets may eventually be allowed to change between incremental draws, we should set the attrib dirty bits in that case
 	if (isIncremental)
 	{
-		// dont process flush queue and dont process deallocations yet, we are in the middle of a sequence of drawcalls that (most likely) reuse previous bindings
-		uint32 maxInstance = baseInstance + instanceCount - 1;
-		bool hasBufferChange = attribBufferDirtyMask != 0;
-		if ( maxVtxIndex > s_vtxStateMaxIndex )
+		// Part of a run of draws that keep their bindings: housekeeping is skipped and
+		// buffers are only rebound when the draw reaches past the bound vertex/instance range
+		const bool bindingsChanged = attribBufferDirtyMask != 0;
+		if (maxVtxIndex > s_boundMaxVertex)
 		{
 			attribBufferDirtyMask = 0xFFFFFFFF;
-			s_vtxStateMaxIndex = maxVtxIndex;
+			s_boundMaxVertex = maxVtxIndex;
 		}
-		if ( maxInstance > s_vtxStateMaxInstance )
+		if (maxInstance > s_boundMaxInstance)
 		{
 			attribBufferDirtyMask = 0xFFFFFFFF;
-			s_vtxStateMaxInstance = maxInstance;
+			s_boundMaxInstance = maxInstance;
 		}
-		if (hasBufferChange)
+		if (bindingsChanged)
 		{
-			s_vtxStateMaxIndex = maxVtxIndex;
-			s_vtxStateMaxInstance = maxInstance;
+			s_boundMaxVertex = maxVtxIndex;
+			s_boundMaxInstance = maxInstance;
 		}
 	}
 	else
 	{
 		LatteBufferCache_ProcessQueues();
-		s_vtxStateMaxIndex = maxVtxIndex;
-		s_vtxStateMaxInstance = maxInstance;
+		s_boundMaxVertex = maxVtxIndex;
+		s_boundMaxInstance = maxInstance;
 	}
-	attribBufferDirtyMask &= parsedFetchShader->attributeBufferMask;
+	attribBufferDirtyMask &= fetchShader->attributeBufferMask;
 
-	// sync and bind dirty vertex buffers
 	if (attribBufferDirtyMask != 0)
 	{
-		uint32* __restrict bufferRegStartPtr = LatteGPUState.contextRegister + mmSQ_VTX_ATTRIBUTE_BLOCK_START;
-
-		Renderer::BindBufferParam bindBufferArray[Latte::GPU_LIMITS::NUM_VERTEX_BUFFERS];
-		size_t bindBufferArraySize = 0;
-
-		cemu_assert_debug(parsedFetchShader->bufferGroups.size() < Latte::GPU_LIMITS::NUM_VERTEX_BUFFERS);
-		for (auto& bufferGroup : parsedFetchShader->bufferGroups)
+		const uint32* attribRegs = LatteGPUState.contextRegister + mmSQ_VTX_ATTRIBUTE_BLOCK_START;
+		Renderer::BindBufferParam bindings[Latte::GPU_LIMITS::NUM_VERTEX_BUFFERS];
+		size_t bindingCount = 0;
+		cemu_assert_debug(fetchShader->bufferGroups.size() < Latte::GPU_LIMITS::NUM_VERTEX_BUFFERS);
+		for (const auto& group : fetchShader->bufferGroups)
 		{
-			uint32 bufferIndex = bufferGroup.attributeBufferIndex;
-			if ((attribBufferDirtyMask&(1<<bufferIndex)) == 0)
+			const uint32 bufferIndex = group.attributeBufferIndex;
+			if ((attribBufferDirtyMask & (1u << bufferIndex)) == 0)
 				continue;
-			uint32* __restrict bufferRegs = bufferRegStartPtr + bufferIndex * 7;
-			MPTR bufferAddress = bufferRegs[0];
-			uint32 bufferStride = (bufferRegs[2] >> 11) & 0xFFFF;
-			bindBufferArray[bindBufferArraySize].stride = bufferStride;
-			// todo - respect buffer max size
-
-			if (bufferAddress == MPTR_NULL) [[unlikely]]
+			const uint32* regs = attribRegs + bufferIndex * kBufferResourceStride;
+			const MPTR addr = regs[0];
+			const uint32 stride = (regs[2] >> 11) & 0xFFFF;
+			Renderer::BindBufferParam& bind = bindings[bindingCount];
+			bind.stride = stride;
+			if (addr == MPTR_NULL) [[unlikely]]
 			{
-				bindBufferArray[bindBufferArraySize].index = bufferIndex;
-				bindBufferArray[bindBufferArraySize].bindOffset = 0;
-				bindBufferArray[bindBufferArraySize].bindSize = 0;
-				bindBufferArraySize++;
+				bind.index = bufferIndex;
+				bind.bindOffset = 0;
+				bind.bindSize = 0;
+				bindingCount++;
 				continue;
 			}
-
-			// get max stride index
-			uint32 tmpMaxVtxIndex = bufferGroup.hasVtxIndexAccess ? maxVtxIndex : 0;
-			uint32 tmpMaxInstance = bufferGroup.hasInstanceIndexAccess ? maxInstance : 0;
-			uint32 maxStrideIndex = std::max<uint32>(tmpMaxVtxIndex, tmpMaxInstance);
-
-			// dont rely on buffer size given by game for upload as it may be very large. Only upload the accessed range
-			uint32 fixedBufferSize = bufferStride * (maxStrideIndex) + bufferGroup.totalAttribRangeSize;
-			fixedBufferSize = (fixedBufferSize + 127) & ~127;
-			uint32 lookupRangeSize = fixedBufferSize;
-			if ( lookupRangeSize == 0 )
-				lookupRangeSize = 1;
-
+			// The size the game set for the buffer can be far larger than what the draw
+			// reads, so only the range reachable by the highest index is cached.
+			const uint32 lastElement = std::max<uint32>(group.hasVtxIndexAccess ? maxVtxIndex : 0, group.hasInstanceIndexAccess ? maxInstance : 0);
+			const uint32 accessedSize = (stride * lastElement + group.totalAttribRangeSize + 127) & ~127u;
+			const uint32 lookupSize = std::max<uint32>(accessedSize, 1);
 #if BOOST_OS_MACOS && defined(ENABLE_VULKAN)
-			if(bufferStride % 4 != 0)
+			// MoltenVK needs 4 byte aligned strides: such buffers are repacked
+			if (stride % 4 != 0 && g_renderer->GetType() == RendererAPI::Vulkan)
 			{
-				if (g_renderer->GetType() == RendererAPI::Vulkan)
+				if (VulkanRenderer* vk = VulkanRenderer::GetInstance())
 				{
-					if (VulkanRenderer* vkRenderer = VulkanRenderer::GetInstance())
-					{
-						auto fixedBuffer = vkRenderer->buffer_genStrideWorkaroundVertexBuffer(bufferAddress, fixedBufferSize, bufferStride);
-						vkRenderer->buffer_bindVertexStrideWorkaroundBuffer(fixedBuffer.first, fixedBuffer.second, bufferIndex, fixedBufferSize);
-						continue;
-					}
+					auto repacked = vk->buffer_genStrideWorkaroundVertexBuffer(addr, accessedSize, stride);
+					vk->buffer_bindVertexStrideWorkaroundBuffer(repacked.first, repacked.second, bufferIndex, accessedSize);
+					continue;
 				}
 			}
 #endif
-
-			uint32 bindOffset = LatteBufferCache_retrieveDataInCache(bufferAddress, lookupRangeSize);
-			bindBufferArray[bindBufferArraySize].index = bufferIndex;
-			bindBufferArray[bindBufferArraySize].bindOffset = bindOffset;
-			bindBufferArray[bindBufferArraySize].bindSize = fixedBufferSize;
-			bindBufferArraySize++;
+			bind.index = bufferIndex;
+			bind.bindOffset = LatteBufferCache_retrieveDataInCache(addr, lookupSize);
+			bind.bindSize = accessedSize;
+			bindingCount++;
 		}
-		// update vertex buffer bindings
-		g_renderer->buffer_bindVertexBuffers({bindBufferArray, bindBufferArraySize});
+		g_renderer->buffer_bindVertexBuffers({ bindings, bindingCount });
 	}
-	// sync uniform buffers
-	LatteDecompilerShader* vertexShader = LatteSHRC_GetActiveVertexShader();
-	LatteDecompilerShader* geometryShader = LatteSHRC_GetActiveGeometryShader();
-	LatteDecompilerShader* pixelShader = LatteSHRC_GetActivePixelShader();
-	// todo - if we AND the shader uniform buffer mask and the dirty mask we can completely skip calling syncGPUUniformBuffers if no relevant buffer was updated
-	if (vertexShader && vertexShader->uniformMode == LATTE_DECOMPILER_UNIFORM_MODE_FULL_CBANK)
+
+	struct StageUniforms
 	{
-		if (LatteBufferCache_syncGPUUniformBuffers(vertexShader, mmSQ_VTX_UNIFORM_BLOCK_START, LatteConst::ShaderType::Vertex, vsUniformBufferDirtyMask))
-			stageUniformModifiedMask |= (1<<VulkanRendererConst::SHADER_STAGE_INDEX_VERTEX);
-	}
-	if (pixelShader && pixelShader->uniformMode == LATTE_DECOMPILER_UNIFORM_MODE_FULL_CBANK)
+		LatteDecompilerShader* shader;
+		uint32 dirtyMask;
+		LatteConst::ShaderType type;
+	};
+	const StageUniforms stages[] = {
+		{ LatteSHRC_GetActiveVertexShader(), vsUniformBufferDirtyMask, LatteConst::ShaderType::Vertex },
+		{ LatteSHRC_GetActivePixelShader(), psUniformBufferDirtyMask, LatteConst::ShaderType::Pixel },
+		{ LatteSHRC_GetActiveGeometryShader(), gsUniformBufferDirtyMask, LatteConst::ShaderType::Geometry },
+	};
+	for (const auto& stage : stages)
 	{
-		if (LatteBufferCache_syncGPUUniformBuffers(pixelShader, mmSQ_PS_UNIFORM_BLOCK_START, LatteConst::ShaderType::Pixel, psUniformBufferDirtyMask))
-			stageUniformModifiedMask |= (1<<VulkanRendererConst::SHADER_STAGE_INDEX_FRAGMENT); // todo - move this enum to Latte?
-	}
-	if (geometryShader && geometryShader->uniformMode == LATTE_DECOMPILER_UNIFORM_MODE_FULL_CBANK)
-	{
-		if ( LatteBufferCache_syncGPUUniformBuffers(geometryShader, mmSQ_GS_UNIFORM_BLOCK_START, LatteConst::ShaderType::Geometry, gsUniformBufferDirtyMask) )
-			stageUniformModifiedMask |= (1<<VulkanRendererConst::SHADER_STAGE_INDEX_GEOMETRY);
+		if (!stage.shader || stage.shader->uniformMode != LATTE_DECOMPILER_UNIFORM_MODE_FULL_CBANK)
+			continue;
+		if (LatteBufferCache_syncGPUUniformBuffers(stage.shader, UniformBlockRegisterBase(stage.type), stage.type, stage.dirtyMask))
+			stageUniformModifiedMask |= (uint8)StageBit(stage.type);
 	}
 }

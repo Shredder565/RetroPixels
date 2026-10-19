@@ -124,7 +124,8 @@ void optimizedDecodeLoops(LatteTextureLoaderCtx* textureLoader, uint8* outputDat
 	{
 		const sint32 fullX = texelsX & ~7;
 		const sint32 fullY = texelsY & ~7;
-		constexpr bool runsPossible = (count == 1) && RowRunLength<texelSize>() != 0;
+		// element types with a converting assignment (the 5:5:5:1 swizzles) must be copied one by one
+		constexpr bool runsPossible = (count == 1) && RowRunLength<texelSize>() != 0 && std::is_trivially_copy_assignable_v<T>;
 		if (runsPossible && textureLoader->computeAddrInfo.microTileType == 0)
 			CopyFullTiles<T, count, encode, runsPossible>(textureLoader, outputData, fullX, fullY);
 		else
@@ -140,7 +141,13 @@ void optimizedDecodeLoops(LatteTextureLoaderCtx* textureLoader, uint8* outputDat
 		{
 			uint8* linear = outputData + (size_t)y * textureLoader->decodedTexelCountX * texelSize;
 			uint8* surface = textureLoader->inputData + (textureLoader->pitch * y + sliceTexelOffset) * texelSize;
-			CopyRun<encode>(surface, linear, (size_t)std::max<sint32>(texelsX, 0) * texelSize);
+			if constexpr (std::is_trivially_copy_assignable_v<T>)
+				CopyRun<encode>(surface, linear, (size_t)std::max<sint32>(texelsX, 0) * texelSize);
+			else
+			{
+				for (sint32 x = 0; x < texelsX; x++)
+					CopyTexel<T, count, encode>(surface + (size_t)x * texelSize, reinterpret_cast<T*>(linear) + (size_t)x * count);
+			}
 		}
 	}
 	else
