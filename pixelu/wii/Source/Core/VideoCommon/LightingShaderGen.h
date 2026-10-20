@@ -1,49 +1,32 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <string_view>
+
 #include "Common/CommonTypes.h"
 
 class ShaderCode;
 
-#define LIGHT_COL "{}[{}].color.{}"
-#define LIGHT_COL_PARAMS(index, swizzle) (I_LIGHTS), (index), (swizzle)
-
-#define LIGHT_COSATT "{}[{}].cosatt"
-#define LIGHT_COSATT_PARAMS(index) (I_LIGHTS), (index)
-
-#define LIGHT_DISTATT "{}[{}].distatt"
-#define LIGHT_DISTATT_PARAMS(index) (I_LIGHTS), (index)
-
-#define LIGHT_POS "{}[{}].pos"
-#define LIGHT_POS_PARAMS(index) (I_LIGHTS), (index)
-
-#define LIGHT_DIR "{}[{}].dir"
-#define LIGHT_DIR_PARAMS(index) (I_LIGHTS), (index)
-
-/**
- * Common uid data used for shader generators that use lighting calculations.
- */
+// XF lighting state in UID form. Bit c of the 4-bit masks (and bits 2c..2c+1 of the function
+// fields, bits 8c..8c+7 of light_mask) describe "lit channel" c: 0 and 1 are the colour halves of
+// channels 0 and 1, 2 and 3 their alpha halves.
 struct LightingUidData
 {
-  u32 matsource : 4;       // 4x1 bit
-  u32 enablelighting : 4;  // 4x1 bit
-  u32 ambsource : 4;       // 4x1 bit
-  u32 diffusefunc : 8;     // 4x2 bits
-  u32 attnfunc : 8;        // 4x2 bits
-  u32 light_mask : 32;     // 4x8 bits
+  u32 matsource : 4;       // material from vertex colour (1) or register (0)
+  u32 enablelighting : 4;  // lighting enabled
+  u32 ambsource : 4;       // ambient from vertex colour (1) or register (0)
+  u32 diffusefunc : 8;     // DiffuseFunc per lit channel
+  u32 attnfunc : 8;        // AttenuationFunc per lit channel
+  u32 light_mask : 32;     // lights 0-7 per lit channel
 };
 
-constexpr char s_lighting_struct[] = "struct Light {\n"
-                                     "\tint4 color;\n"
-                                     "\tfloat4 cosatt;\n"
-                                     "\tfloat4 distatt;\n"
-                                     "\tfloat4 pos;\n"
-                                     "\tfloat4 dir;\n"
-                                     "};\n";
+// The "Light" struct of the clights uniform array (VertexShaderConstants::Light).
+void WriteLightStruct(ShaderCode& out);
 
+// dolphin_calculate_lighting_chn0/1(): the fixed-function lighting of both channels.
 void GenerateLightingShaderHeader(ShaderCode& object, const LightingUidData& uid_data);
+// Fills uid_data from the current XF lighting registers.
 void GetLightingShaderUid(LightingUidData& uid_data);
+// Copies the light parameters into the DolphinFragmentInput of custom (graphics mod) shaders.
 void GenerateCustomLighting(ShaderCode* out, const LightingUidData& uid_data);

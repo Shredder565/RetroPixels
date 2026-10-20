@@ -1,7 +1,9 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/LightingShaderGen.h"
+
+#include <array>
+#include <string>
 
 #include "Common/Assert.h"
 #include "Common/CommonTypes.h"
@@ -9,143 +11,211 @@
 #include "VideoCommon/ShaderGenCommon.h"
 #include "VideoCommon/XFMemory.h"
 
-static void GenerateLightShader(ShaderCode& object, const LightingUidData& uid_data, int index,
-                                int litchan_index, bool alpha)
+namespace
 {
-  const char* swizzle = alpha ? "a" : "rgb";
-  const char* swizzle_components = (alpha) ? "" : "3";
+// The lit channels: 0/1 are the colour parts of channels 0/1, 2/3 their alpha parts.
+constexpr u32 NUM_LIT_CHANNELS = 4;
 
-  const auto attnfunc =
-      static_cast<AttenuationFunc>((uid_data.attnfunc >> (2 * litchan_index)) & 0x3);
-  const auto diffusefunc =
-      static_cast<DiffuseFunc>((uid_data.diffusefunc >> (2 * litchan_index)) & 0x3);
-
-  switch (attnfunc)
-  {
-  case AttenuationFunc::None:
-  case AttenuationFunc::Dir:
-    object.Write("ldir = normalize(" LIGHT_POS ".xyz - pos.xyz);\n", LIGHT_POS_PARAMS(index));
-    object.Write("attn = 1.0;\n");
-    object.Write("if (length(ldir) == 0.0)\n\t ldir = _normal;\n");
-    break;
-  case AttenuationFunc::Spec:
-    object.Write("ldir = normalize(" LIGHT_POS ".xyz - pos.xyz);\n", LIGHT_POS_PARAMS(index));
-    object.Write("attn = (dot(_normal, ldir) >= 0.0) ? max(0.0, dot(_normal, " LIGHT_DIR
-                 ".xyz)) : 0.0;\n",
-                 LIGHT_DIR_PARAMS(index));
-    object.Write("cosAttn = " LIGHT_COSATT ".xyz;\n", LIGHT_COSATT_PARAMS(index));
-    object.Write("distAttn = {}(" LIGHT_DISTATT ".xyz);\n",
-                 (diffusefunc == DiffuseFunc::None) ? "" : "normalize",
-                 LIGHT_DISTATT_PARAMS(index));
-    object.Write("attn = max(0.0f, dot(cosAttn, float3(1.0, attn, attn*attn))) / dot(distAttn, "
-                 "float3(1.0, attn, attn*attn));\n");
-    break;
-  case AttenuationFunc::Spot:
-    object.Write("ldir = " LIGHT_POS ".xyz - pos.xyz;\n", LIGHT_POS_PARAMS(index));
-    object.Write("dist2 = dot(ldir, ldir);\n"
-                 "dist = sqrt(dist2);\n"
-                 "ldir = ldir / dist;\n"
-                 "attn = max(0.0, dot(ldir, " LIGHT_DIR ".xyz));\n",
-                 LIGHT_DIR_PARAMS(index));
-    // attn*attn may overflow
-    object.Write("attn = max(0.0, " LIGHT_COSATT ".x + " LIGHT_COSATT ".y*attn + " LIGHT_COSATT
-                 ".z*attn*attn) / dot(" LIGHT_DISTATT ".xyz, float3(1.0,dist,dist2));\n",
-                 LIGHT_COSATT_PARAMS(index), LIGHT_COSATT_PARAMS(index), LIGHT_COSATT_PARAMS(index),
-                 LIGHT_DISTATT_PARAMS(index));
-    break;
-  }
-
-  switch (diffusefunc)
-  {
-  case DiffuseFunc::None:
-    object.Write("lacc.{} += int{}(round(attn * float{}(" LIGHT_COL ")));\n", swizzle,
-                 swizzle_components, swizzle_components, LIGHT_COL_PARAMS(index, swizzle));
-    break;
-  case DiffuseFunc::Sign:
-  case DiffuseFunc::Clamp:
-    object.Write("lacc.{} += int{}(round(attn * {}dot(ldir, _normal)) * float{}(" LIGHT_COL
-                 ")));\n",
-                 swizzle, swizzle_components, diffusefunc != DiffuseFunc::Sign ? "max(0.0," : "(",
-                 swizzle_components, LIGHT_COL_PARAMS(index, swizzle));
-    break;
-  default:
-    ASSERT(false);
-  }
-
-  object.Write("\n");
+bool Bit(u32 mask, u32 lit_channel)
+{
+  return ((mask >> lit_channel) & 1) != 0;
 }
 
-// vertex shader
-// lights/colors
-// materials name is I_MATERIALS in vs and I_PMATERIALS in ps
+AttenuationFunc AttenuationOf(const LightingUidData& uid, u32 lit_channel)
+{
+  return static_cast<AttenuationFunc>((uid.attnfunc >> (2 * lit_channel)) & 3);
+}
+
+DiffuseFunc DiffuseOf(const LightingUidData& uid, u32 lit_channel)
+{
+  return static_cast<DiffuseFunc>((uid.diffusefunc >> (2 * lit_channel)) & 3);
+}
+
+bool LightEnabled(const LightingUidData& uid, u32 lit_channel, u32 light)
+{
+  return ((uid.light_mask >> (8 * lit_channel + light)) & 1) != 0;
+}
+
+// One light's contribution to lacc, using the shader's pos/_normal and the clights[] uniform.
+void WriteLightTerm(ShaderCode& out, const LightingUidData& uid, u32 light, u32 lit_channel,
+                    bool alpha)
+{
+  const std::string lt = fmt::format(I_LIGHTS "[{}]", light);
+  const AttenuationFunc attenuation = AttenuationOf(uid, lit_channel);
+  const DiffuseFunc diffuse = DiffuseOf(uid, lit_channel);
+
+  if (attenuation == AttenuationFunc::Spot)
+  {
+    // Spot light: angular falloff from cosatt, distance falloff from distatt.
+    out.Write("ldir = {}.pos.xyz - pos.xyz;\n", lt);
+    out.Write("dist2 = dot(ldir, ldir);\n");
+    out.Write("dist = sqrt(dist2);\n");
+    out.Write("ldir = ldir / dist;\n");
+    out.Write("attn = max(0.0, dot(ldir, {}.dir.xyz));\n", lt);
+    out.Write("attn = max(0.0, {0}.cosatt.x + {0}.cosatt.y*attn + {0}.cosatt.z*attn*attn) / "
+              "dot({0}.distatt.xyz, float3(1.0,dist,dist2));\n",
+              lt);
+  }
+  else if (attenuation == AttenuationFunc::Spec)
+  {
+    // Specular: attenuation from the half-angle vector stored in dir.
+    out.Write("ldir = normalize({}.pos.xyz - pos.xyz);\n", lt);
+    out.Write("attn = (dot(_normal, ldir) >= 0.0) ? max(0.0, dot(_normal, {}.dir.xyz)) : 0.0;\n",
+              lt);
+    out.Write("cosAttn = {}.cosatt.xyz;\n", lt);
+    out.Write("distAttn = {}({}.distatt.xyz);\n", diffuse == DiffuseFunc::None ? "" : "normalize",
+              lt);
+    out.Write("attn = max(0.0f, dot(cosAttn, float3(1.0, attn, attn*attn))) / dot(distAttn, "
+              "float3(1.0, attn, attn*attn));\n");
+  }
+  else
+  {
+    // No attenuation (also directional lights).
+    out.Write("ldir = normalize({}.pos.xyz - pos.xyz);\n", lt);
+    out.Write("attn = 1.0;\n");
+    out.Write("if (length(ldir) == 0.0)\n\t ldir = _normal;\n");
+  }
+
+  const char* swizzle = alpha ? "a" : "rgb";
+  const char* width = alpha ? "" : "3";
+  if (diffuse == DiffuseFunc::None)
+  {
+    out.Write("lacc.{0} += int{1}(round(attn * float{1}({2}.color.{0})));\n", swizzle, width, lt);
+  }
+  else if (diffuse == DiffuseFunc::Sign || diffuse == DiffuseFunc::Clamp)
+  {
+    const char* clamp_open = diffuse == DiffuseFunc::Clamp ? "max(0.0," : "(";
+    out.Write("lacc.{0} += int{1}(round(attn * {2}dot(ldir, _normal)) * float{1}({3}.color.{0})));\n",
+              swizzle, width, clamp_open, lt);
+  }
+  else
+  {
+    // Diffuse function 3 is not a valid setting.
+    ASSERT(false);
+  }
+  out.Write("\n");
+}
+
+// Statement selecting the material or ambient colour of a channel: from the vertex colour or
+// from the register (cmtrl[reg]).
+void WriteColorSource(ShaderCode& out, std::string_view target, bool from_vertex, bool alpha_only,
+                      u32 reg)
+{
+  if (from_vertex)
+  {
+    if (alpha_only)
+      out.Write("\t{}.w = int(round(base_color.w * 255.0));\n", target);
+    else
+      out.Write("\t{} = int4(round(base_color * 255.0));\n", target);
+  }
+  else
+  {
+    if (alpha_only)
+      out.Write("\t{}.w = {}[{}].w;\n", target, I_MATERIALS, reg);
+    else
+      out.Write("\t{} = {}[{}];\n", target, I_MATERIALS, reg);
+  }
+}
+
+// One member of DolphinLightData with the value it is reset to.
+struct LightField
+{
+  const char* name;
+  const char* zero;
+};
+constexpr std::array<LightField, 6> LIGHT_FIELDS{{
+    {"direction", "float3(0, 0, 0)"},
+    {"position", "float3(0, 0, 0)"},
+    {"color", "float3(0, 0, 0)"},
+    {"cosatt", "float4(0, 0, 0, 0)"},
+    {"distatt", "float4(0, 0, 0, 0)"},
+    {"attenuation_type", "0"},
+}};
+
+// Copies light `light` into slot `slot` of the custom shader's light list.
+void WriteCustomLight(ShaderCode& out, const LightingUidData& uid, u32 light, u32 lit_channel,
+                      u32 channel, u32 slot, bool alpha)
+{
+  const std::string dst =
+      fmt::format("frag_input.lights_chan{}_{}[{}]", channel, alpha ? "alpha" : "color", slot);
+  const std::string src = fmt::format(I_LIGHTS "[{}]", light);
+
+  out.Write("\t{{\n");
+  out.Write("\t\t{}.direction = {}.dir.xyz;\n", dst, src);
+  out.Write("\t\t{}.position = {}.pos.xyz;\n", dst, src);
+  out.Write("\t\t{}.cosatt = {}.cosatt;\n", dst, src);
+  out.Write("\t\t{}.distatt = {}.distatt;\n", dst, src);
+  out.Write("\t\t{}.attenuation_type = {};\n", dst,
+             static_cast<u32>(AttenuationOf(uid, lit_channel)));
+  if (alpha)
+    out.Write("\t\t{}.color = float3({}.color.a) / float3(255.0, 255.0, 255.0);\n", dst, src);
+  else
+    out.Write("\t\t{}.color = {}.color.rgb / float3(255.0, 255.0, 255.0);\n", dst, src);
+  out.Write("\t}}\n");
+}
+}  // namespace
+
+void WriteLightStruct(ShaderCode& out)
+{
+  out.Write("struct Light {{\n");
+  for (const char* member : {"int4 color", "float4 cosatt", "float4 distatt", "float4 pos",
+                             "float4 dir"})
+  {
+    out.Write("\t{};\n", member);
+  }
+  out.Write("}};\n");
+}
+
 void GenerateLightingShaderHeader(ShaderCode& object, const LightingUidData& uid_data)
 {
-  for (u32 j = 0; j < NUM_XF_COLOR_CHANNELS; j++)
+  for (u32 chan = 0; chan < NUM_XF_COLOR_CHANNELS; chan++)
   {
+    const u32 color_part = chan;
+    const u32 alpha_part = chan + 2;
+
     object.Write("vec4 dolphin_calculate_lighting_chn{}(vec4 base_color, vec3 pos, vec3 _normal)\n",
-                 j);
+                 chan);
     object.Write("{{\n");
+    object.Write("\tint4 lacc;\n");
+    object.Write("\tvec3 ldir, h, cosAttn, distAttn;\n");
+    object.Write("\tfloat dist, dist2, attn;\n");
 
-    object.Write("\tint4 lacc;\n"
-                 "\tvec3 ldir, h, cosAttn, distAttn;\n"
-                 "\tfloat dist, dist2, attn;\n");
-
-    const bool colormatsource = !!(uid_data.matsource & (1 << j));
-    if (colormatsource)  // from vertex
+    // Material colour, then the ambient colour that lacc starts from (white when unlit).
+    const bool color_mat_vertex = Bit(uid_data.matsource, color_part);
+    if (color_mat_vertex)
       object.Write("\tint4 mat = int4(round(base_color * 255.0));\n");
-    else  // from color
-      object.Write("\tint4 mat = {}[{}];\n", I_MATERIALS, j + 2);
-
-    if ((uid_data.enablelighting & (1 << j)) != 0)
-    {
-      if ((uid_data.ambsource & (1 << j)) != 0)  // from vertex
-        object.Write("\tlacc = int4(round(base_color * 255.0));\n");
-      else  // from color
-        object.Write("\tlacc = {}[{}];\n", I_MATERIALS, j);
-    }
     else
-    {
+      object.Write("\tint4 mat = {}[{}];\n", I_MATERIALS, chan + 2);
+
+    const bool color_lit = Bit(uid_data.enablelighting, color_part);
+    if (color_lit)
+      WriteColorSource(object, "lacc", Bit(uid_data.ambsource, color_part), false, chan);
+    else
       object.Write("\tlacc = int4(255, 255, 255, 255);\n");
-    }
 
-    // check if alpha is different
-    const bool alphamatsource = !!(uid_data.matsource & (1 << (j + 2)));
-    if (alphamatsource != colormatsource)
-    {
-      if (alphamatsource)  // from vertex
-        object.Write("\tmat.w = int(round(base_color.w * 255.0));\n");
-      else  // from color
-        object.Write("\tmat.w = {}[{}].w;\n", I_MATERIALS, j + 2);
-    }
+    // The alpha half only needs its own material statement when its source differs.
+    const bool alpha_mat_vertex = Bit(uid_data.matsource, alpha_part);
+    if (alpha_mat_vertex != color_mat_vertex)
+      WriteColorSource(object, "mat", alpha_mat_vertex, true, chan + 2);
 
-    if ((uid_data.enablelighting & (1 << (j + 2))) != 0)
-    {
-      if ((uid_data.ambsource & (1 << (j + 2))) != 0)  // from vertex
-        object.Write("\tlacc.w = int(round(base_color.w * 255.0));\n");
-      else  // from color
-        object.Write("\tlacc.w = {}[{}].w;\n", I_MATERIALS, j);
-    }
+    const bool alpha_lit = Bit(uid_data.enablelighting, alpha_part);
+    if (alpha_lit)
+      WriteColorSource(object, "lacc", Bit(uid_data.ambsource, alpha_part), true, chan);
     else
-    {
       object.Write("\tlacc.w = 255;\n");
+
+    for (u32 light = 0; color_lit && light < 8; ++light)
+    {
+      if (LightEnabled(uid_data, color_part, light))
+        WriteLightTerm(object, uid_data, light, color_part, false);
+    }
+    for (u32 light = 0; alpha_lit && light < 8; ++light)
+    {
+      if (LightEnabled(uid_data, alpha_part, light))
+        WriteLightTerm(object, uid_data, light, alpha_part, true);
     }
 
-    if ((uid_data.enablelighting & (1 << j)) != 0)  // Color lights
-    {
-      for (int i = 0; i < 8; ++i)
-      {
-        if ((uid_data.light_mask & (1 << (i + 8 * j))) != 0)
-          GenerateLightShader(object, uid_data, i, j, false);
-      }
-    }
-    if ((uid_data.enablelighting & (1 << (j + 2))) != 0)  // Alpha lights
-    {
-      for (int i = 0; i < 8; ++i)
-      {
-        if ((uid_data.light_mask & (1 << (i + 8 * (j + 2)))) != 0)
-          GenerateLightShader(object, uid_data, i, j + 2, true);
-      }
-    }
+    // lacc is scaled from 0..255 to 0..256 before modulating the material.
     object.Write("\tlacc = clamp(lacc, 0, 255);\n");
     object.Write("\treturn vec4((mat * (lacc + (lacc >> 7))) >> 8) / 255.0;\n");
     object.Write("}}\n\n");
@@ -154,165 +224,94 @@ void GenerateLightingShaderHeader(ShaderCode& object, const LightingUidData& uid
 
 void GetLightingShaderUid(LightingUidData& uid_data)
 {
-  for (u32 j = 0; j < NUM_XF_COLOR_CHANNELS; j++)
+  for (u32 lit = 0; lit < NUM_LIT_CHANNELS; lit++)
   {
-    uid_data.matsource |= static_cast<u32>(xfmem.color[j].matsource.Value()) << j;
-    uid_data.matsource |= static_cast<u32>(xfmem.alpha[j].matsource.Value()) << (j + 2);
-    uid_data.enablelighting |= xfmem.color[j].enablelighting << j;
-    uid_data.enablelighting |= xfmem.alpha[j].enablelighting << (j + 2);
+    const u32 chan = lit % 2;
+    const LitChannel& reg = lit < 2 ? xfmem.color[chan] : xfmem.alpha[chan];
 
-    if ((uid_data.enablelighting & (1 << j)) != 0)  // Color lights
-    {
-      uid_data.ambsource |= static_cast<u32>(xfmem.color[j].ambsource.Value()) << j;
-      uid_data.attnfunc |= static_cast<u32>(xfmem.color[j].attnfunc.Value()) << (2 * j);
-      uid_data.diffusefunc |= static_cast<u32>(xfmem.color[j].diffusefunc.Value()) << (2 * j);
-      uid_data.light_mask |= xfmem.color[j].GetFullLightMask() << (8 * j);
-    }
-    if ((uid_data.enablelighting & (1 << (j + 2))) != 0)  // Alpha lights
-    {
-      uid_data.ambsource |= static_cast<u32>(xfmem.alpha[j].ambsource.Value()) << (j + 2);
-      uid_data.attnfunc |= static_cast<u32>(xfmem.alpha[j].attnfunc.Value()) << (2 * (j + 2));
-      uid_data.diffusefunc |= static_cast<u32>(xfmem.alpha[j].diffusefunc.Value()) << (2 * (j + 2));
-      uid_data.light_mask |= xfmem.alpha[j].GetFullLightMask() << (8 * (j + 2));
-    }
+    uid_data.matsource |= static_cast<u32>(reg.matsource.Value()) << lit;
+    uid_data.enablelighting |= static_cast<u32>(reg.enablelighting.Value()) << lit;
+
+    // The remaining fields only matter for lit channels.
+    if (!reg.enablelighting)
+      continue;
+    uid_data.ambsource |= static_cast<u32>(reg.ambsource.Value()) << lit;
+    uid_data.attnfunc |= static_cast<u32>(reg.attnfunc.Value()) << (2 * lit);
+    uid_data.diffusefunc |= static_cast<u32>(reg.diffusefunc.Value()) << (2 * lit);
+    uid_data.light_mask |= reg.GetFullLightMask() << (8 * lit);
   }
-}
-
-static void GenerateCustomLightingImpl(ShaderCode* out, const LightingUidData& uid_data, int index,
-                                       int litchan_index, u32 channel_index, u32 custom_light_index,
-                                       bool alpha)
-{
-  const auto attnfunc =
-      static_cast<AttenuationFunc>((uid_data.attnfunc >> (2 * litchan_index)) & 0x3);
-
-  const std::string_view light_type = alpha ? "alpha" : "color";
-  const std::string name = fmt::format("lights_chan{}_{}", channel_index, light_type);
-
-  out->Write("\t{{\n");
-  out->Write("\t\tfrag_input.{}[{}].direction = " LIGHT_DIR ".xyz;\n", name, custom_light_index,
-             LIGHT_DIR_PARAMS(index));
-  out->Write("\t\tfrag_input.{}[{}].position = " LIGHT_POS ".xyz;\n", name, custom_light_index,
-             LIGHT_POS_PARAMS(index));
-  out->Write("\t\tfrag_input.{}[{}].cosatt = " LIGHT_COSATT ";\n", name, custom_light_index,
-             LIGHT_COSATT_PARAMS(index));
-  out->Write("\t\tfrag_input.{}[{}].distatt = " LIGHT_DISTATT ";\n", name, custom_light_index,
-             LIGHT_DISTATT_PARAMS(index));
-  out->Write("\t\tfrag_input.{}[{}].attenuation_type = {};\n", name, custom_light_index,
-             static_cast<u32>(attnfunc));
-  if (alpha)
-  {
-    out->Write("\t\tfrag_input.{}[{}].color = float3(" LIGHT_COL
-               ") / float3(255.0, 255.0, 255.0);\n",
-               name, custom_light_index, LIGHT_COL_PARAMS(index, alpha ? "a" : "rgb"));
-  }
-  else
-  {
-    out->Write("\t\tfrag_input.{}[{}].color = " LIGHT_COL " / float3(255.0, 255.0, 255.0);\n", name,
-               custom_light_index, LIGHT_COL_PARAMS(index, alpha ? "a" : "rgb"));
-  }
-  out->Write("\t}}\n");
 }
 
 void GenerateCustomLighting(ShaderCode* out, const LightingUidData& uid_data)
 {
-  for (u32 i = 0; i < 8; i++)
+  // Reset every light slot first.
+  for (u32 slot = 0; slot < 8; slot++)
   {
-    for (u32 channel_index = 0; channel_index < NUM_XF_COLOR_CHANNELS; channel_index++)
+    for (u32 chan = 0; chan < NUM_XF_COLOR_CHANNELS; chan++)
     {
-      out->Write("\tfrag_input.lights_chan{}_color[{}].direction = float3(0, 0, 0);\n",
-                 channel_index, i);
-      out->Write("\tfrag_input.lights_chan{}_color[{}].position = float3(0, 0, 0);\n",
-                 channel_index, i);
-      out->Write("\tfrag_input.lights_chan{}_color[{}].color = float3(0, 0, 0);\n", channel_index,
-                 i);
-      out->Write("\tfrag_input.lights_chan{}_color[{}].cosatt = float4(0, 0, 0, 0);\n",
-                 channel_index, i);
-      out->Write("\tfrag_input.lights_chan{}_color[{}].distatt = float4(0, 0, 0, 0);\n",
-                 channel_index, i);
-      out->Write("\tfrag_input.lights_chan{}_color[{}].attenuation_type = 0;\n", channel_index, i);
-
-      out->Write("\tfrag_input.lights_chan{}_alpha[{}].direction = float3(0, 0, 0);\n",
-                 channel_index, i);
-      out->Write("\tfrag_input.lights_chan{}_alpha[{}].position = float3(0, 0, 0);\n",
-                 channel_index, i);
-      out->Write("\tfrag_input.lights_chan{}_alpha[{}].color = float3(0, 0, 0);\n", channel_index,
-                 i);
-      out->Write("\tfrag_input.lights_chan{}_alpha[{}].cosatt = float4(0, 0, 0, 0);\n",
-                 channel_index, i);
-      out->Write("\tfrag_input.lights_chan{}_alpha[{}].distatt = float4(0, 0, 0, 0);\n",
-                 channel_index, i);
-      out->Write("\tfrag_input.lights_chan{}_alpha[{}].attenuation_type = 0;\n", channel_index, i);
+      for (const char* part : {"color", "alpha"})
+      {
+        for (const LightField& field : LIGHT_FIELDS)
+        {
+          out->Write("\tfrag_input.lights_chan{}_{}[{}].{} = {};\n", chan, part, slot, field.name,
+                     field.zero);
+        }
+      }
     }
   }
 
-  for (u32 j = 0; j < NUM_XF_COLOR_CHANNELS; j++)
+  for (u32 chan = 0; chan < NUM_XF_COLOR_CHANNELS; chan++)
   {
-    const bool colormatsource = !!(uid_data.matsource & (1 << j));
-    if (colormatsource)  // from vertex
-      out->Write("frag_input.base_material[{}] = frag_input.color_{};\n", j, j);
-    else  // from color
-      out->Write("frag_input.base_material[{}] = {}[{}] / 255.0;\n", j, I_MATERIALS, j + 2);
+    const u32 color_part = chan;
+    const u32 alpha_part = chan + 2;
 
-    if ((uid_data.enablelighting & (1 << j)) != 0)
-    {
-      if ((uid_data.ambsource & (1 << j)) != 0)  // from vertex
-        out->Write("frag_input.ambient_lighting[{}] = frag_input.color_{};\n", j, j);
-      else  // from color
-        out->Write("frag_input.ambient_lighting[{}] = {}[{}] / 255.0;\n", j, I_MATERIALS, j);
-    }
+    const bool color_mat_vertex = Bit(uid_data.matsource, color_part);
+    if (color_mat_vertex)
+      out->Write("frag_input.base_material[{0}] = frag_input.color_{0};\n", chan);
     else
-    {
-      out->Write("frag_input.ambient_lighting[{}] = float4(1, 1, 1, 1);\n", j);
-    }
+      out->Write("frag_input.base_material[{}] = {}[{}] / 255.0;\n", chan, I_MATERIALS, chan + 2);
 
-    // check if alpha is different
-    const bool alphamatsource = !!(uid_data.matsource & (1 << (j + 2)));
-    if (alphamatsource != colormatsource)
-    {
-      if (alphamatsource)  // from vertex
-        out->Write("frag_input.base_material[{}].w = frag_input.color_{}.w;\n", j, j);
-      else  // from color
-        out->Write("frag_input.base_material[{}].w = {}[{}].w / 255.0;\n", j, I_MATERIALS, j + 2);
-    }
-
-    if ((uid_data.enablelighting & (1 << (j + 2))) != 0)
-    {
-      if ((uid_data.ambsource & (1 << (j + 2))) != 0)  // from vertex
-        out->Write("frag_input.ambient_lighting[{}].w = frag_input.color_{}.w;\n", j, j);
-      else  // from color
-        out->Write("frag_input.ambient_lighting[{}].w = {}[{}].w / 255.0;\n", j, I_MATERIALS, j);
-    }
+    const bool color_lit = Bit(uid_data.enablelighting, color_part);
+    if (!color_lit)
+      out->Write("frag_input.ambient_lighting[{}] = float4(1, 1, 1, 1);\n", chan);
+    else if (Bit(uid_data.ambsource, color_part))
+      out->Write("frag_input.ambient_lighting[{0}] = frag_input.color_{0};\n", chan);
     else
+      out->Write("frag_input.ambient_lighting[{0}] = {1}[{0}] / 255.0;\n", chan, I_MATERIALS);
+
+    const bool alpha_mat_vertex = Bit(uid_data.matsource, alpha_part);
+    if (alpha_mat_vertex != color_mat_vertex)
     {
-      out->Write("frag_input.ambient_lighting[{}].w = 1;\n", j);
+      if (alpha_mat_vertex)
+        out->Write("frag_input.base_material[{0}].w = frag_input.color_{0}.w;\n", chan);
+      else
+        out->Write("frag_input.base_material[{}].w = {}[{}].w / 255.0;\n", chan, I_MATERIALS,
+                   chan + 2);
     }
 
-    u32 light_count = 0;
-    if ((uid_data.enablelighting & (1 << j)) != 0)  // Color lights
+    const bool alpha_lit = Bit(uid_data.enablelighting, alpha_part);
+    if (!alpha_lit)
+      out->Write("frag_input.ambient_lighting[{}].w = 1;\n", chan);
+    else if (Bit(uid_data.ambsource, alpha_part))
+      out->Write("frag_input.ambient_lighting[{0}].w = frag_input.color_{0}.w;\n", chan);
+    else
+      out->Write("frag_input.ambient_lighting[{0}].w = {1}[{0}].w / 255.0;\n", chan, I_MATERIALS);
+
+    // The enabled lights fill the slots in order; the count tells the shader how many there are.
+    for (const bool alpha : {false, true})
     {
-      for (int i = 0; i < 8; ++i)
+      const u32 part = alpha ? alpha_part : color_part;
+      u32 used = 0;
+      if (Bit(uid_data.enablelighting, part))
       {
-        if ((uid_data.light_mask & (1 << (i + 8 * j))) != 0)
+        for (u32 light = 0; light < 8; ++light)
         {
-          GenerateCustomLightingImpl(out, uid_data, i, j, j, light_count, false);
-          light_count++;
+          if (LightEnabled(uid_data, part, light))
+            WriteCustomLight(*out, uid_data, light, part, chan, used++, alpha);
         }
       }
+      out->Write("\tfrag_input.light_chan{}_{}_count = {};\n", chan, alpha ? "alpha" : "color",
+                 used);
     }
-    out->Write("\tfrag_input.light_chan{}_color_count = {};\n", j, light_count);
-
-    light_count = 0;
-    if ((uid_data.enablelighting & (1 << (j + 2))) != 0)  // Alpha lights
-    {
-      for (int i = 0; i < 8; ++i)
-      {
-        if ((uid_data.light_mask & (1 << (i + 8 * (j + 2)))) != 0)
-        {
-          GenerateCustomLightingImpl(out, uid_data, i, j + 2, j, light_count, true);
-          light_count++;
-        }
-      }
-    }
-    out->Write("\tfrag_input.light_chan{}_alpha_count = {};\n", j, light_count);
   }
 }
