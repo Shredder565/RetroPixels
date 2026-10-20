@@ -75,6 +75,12 @@
       compile stub leaves the dispatcher and the buffer is cleared after
       `RunCycles`. The new JIT emits about 0.69 times the old code size
       (over 979 cases: median 0.71, maximum 1.19).
+  - Found and not fixed (W15, `SDSP::RunDMA`): a DRAM DMA whose length is
+    accepted but runs past the 8 KB DRAM (lengths seen: 9624 and 14554
+    bytes at DSP address 0) copies past the end of `dram`. The harness
+    segfaults there on old and new alike (the "crash" cases below, reached
+    through the JIT's data-write-to-IFX quirk). The bounds check belongs in
+    W15's DMA code.
   - Checked:
     - Harness: old and new JIT side by side, with the W15 DSP core and
       interpreter on both sides. Each case is a random IRAM/IROM program
@@ -109,7 +115,10 @@
       - `$sr` bit 8 is cleared.
       - Data writes to 0x1000..0xefff reach the IFX registers; the
         interpreter drops them.
-      After masking the first two, 154 of the 849 halted cases still differ.
+      With the first two masked, 638 of the 792 cases where both halt
+      match. The other 154 differ, and in 54 more only one side halts,
+      hangs or exits. Only a few were traced; the old JIT gives the same
+      results on all of them, so they are old JIT behaviour, not new.
     - clang `-Wall -Wextra -Wconversion -Wsign-compare -Wshadow-all
       -Wshorten-64-to-32 -Wimplicit-fallthrough -Wunused -Wextra-semi`,
       Linux and `x86_64-w64-windows-gnu`: no warnings in W16 files, nor in
