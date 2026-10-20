@@ -44,21 +44,16 @@ bool IsQuantizedImmediateForm(UGeckoInstruction inst)
 
 Interpreter::Interpreter(Core::System& system, PowerPC::PowerPCState& ppc_state, PowerPC::MMU& mmu,
                          Core::BranchWatch& branch_watch, PPCSymbolDB& ppc_symbol_db)
-    : m_system(system), m_ppc_state(ppc_state), m_mmu(mmu), m_branch_watch(branch_watch),
-      m_ppc_symbol_db(ppc_symbol_db)
+    : m_system{system}, m_ppc_state{ppc_state}, m_mmu{mmu}, m_branch_watch{branch_watch},
+      m_ppc_symbol_db{ppc_symbol_db}
 {
 }
 
 Interpreter::~Interpreter() = default;
 
-void Interpreter::Init()
-{
-  m_end_block = false;
-}
-
-void Interpreter::Shutdown()
-{
-}
+// No per-run resources: starting only forgets a block end left over from a previous run.
+void Interpreter::Init() { m_end_block = false; }
+void Interpreter::Shutdown() {}
 
 void Interpreter::ClearCache()
 {
