@@ -1,75 +1,72 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/EXI/EXI_DeviceEthernet.h"
 
-#include <cstring>
+#include <string>
+#include <utility>
 
 #include "Common/Logging/Log.h"
 
 namespace ExpansionInterface
 {
+// The broadband adapter on a tapserver connection: Ethernet frames pass through unchanged.
 
 CEXIETHERNET::TAPServerNetworkInterface::TAPServerNetworkInterface(CEXIETHERNET* eth_ref,
                                                                    const std::string& destination)
     : NetworkInterface(eth_ref),
-      m_tapserver_if(
-          destination,
-          std::bind(&TAPServerNetworkInterface::HandleReceivedFrame, this, std::placeholders::_1),
-          BBA_RECV_SIZE)
+      m_connection(
+          destination, [this](std::string&& frame) { OnFrame(std::move(frame)); }, BBA_RECV_SIZE)
 {
 }
 
 bool CEXIETHERNET::TAPServerNetworkInterface::Activate()
 {
-  return m_tapserver_if.Activate();
+  return m_connection.Activate();
 }
 
 void CEXIETHERNET::TAPServerNetworkInterface::Deactivate()
 {
-  m_tapserver_if.Deactivate();
+  m_connection.Deactivate();
 }
 
 bool CEXIETHERNET::TAPServerNetworkInterface::IsActivated()
 {
-  return m_tapserver_if.IsActivated();
+  return m_connection.IsActivated();
 }
 
 bool CEXIETHERNET::TAPServerNetworkInterface::RecvInit()
 {
-  return m_tapserver_if.RecvInit();
+  return m_connection.RecvInit();
 }
 
 void CEXIETHERNET::TAPServerNetworkInterface::RecvStart()
 {
-  m_tapserver_if.RecvStart();
+  m_connection.RecvStart();
 }
 
 void CEXIETHERNET::TAPServerNetworkInterface::RecvStop()
 {
-  m_tapserver_if.RecvStop();
+  m_connection.RecvStop();
 }
 
 bool CEXIETHERNET::TAPServerNetworkInterface::SendFrame(const u8* frame, u32 size)
 {
-  const bool ret = m_tapserver_if.SendFrame(frame, size);
-  if (ret)
-    m_eth_ref->SendComplete();
-  return ret;
+  if (!m_connection.SendFrame(frame, size))
+    return false;
+  m_eth_ref->SendComplete();
+  return true;
 }
 
-void CEXIETHERNET::TAPServerNetworkInterface::HandleReceivedFrame(std::string&& data)
+void CEXIETHERNET::TAPServerNetworkInterface::OnFrame(std::string&& frame)
 {
-  if (data.size() > BBA_RECV_SIZE)
+  if (frame.size() > BBA_RECV_SIZE)
   {
     ERROR_LOG_FMT(SP1, "Received BBA frame of size {}, which is larger than maximum size {}",
-                  data.size(), BBA_RECV_SIZE);
+                  frame.size(), BBA_RECV_SIZE);
     return;
   }
-
-  std::memcpy(m_eth_ref->mRecvBuffer.get(), data.data(), data.size());
-  m_eth_ref->mRecvBufferLength = static_cast<u32>(data.size());
-  m_eth_ref->RecvHandlePacket();
+  m_eth_ref->ReceiveFrame(reinterpret_cast<const u8*>(frame.data()),
+                          static_cast<u32>(frame.size()));
 }
 
 }  // namespace ExpansionInterface

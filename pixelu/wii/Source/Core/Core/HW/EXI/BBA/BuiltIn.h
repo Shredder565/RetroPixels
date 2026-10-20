@@ -1,53 +1,32 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #ifdef _WIN32
 #include <winsock2.h>
-using socklen_t = int;
+#include <ws2tcpip.h>
 #else
 #include <netinet/in.h>
 #endif
+
+#include <array>
+#include <vector>
 
 #include <SFML/Network.hpp>
 #include "Common/CommonTypes.h"
 #include "Common/Network.h"
 
-constexpr u16 TCP_FLAG_SIN = 0x2;
-constexpr u16 TCP_FLAG_ACK = 0x10;
-constexpr u16 TCP_FLAG_PSH = 0x8;
-constexpr u16 TCP_FLAG_FIN = 0x1;
-constexpr u16 TCP_FLAG_RST = 0x4;
-
-constexpr u8 MAX_TCP_BUFFER = 4;
-constexpr u16 MAX_UDP_LENGTH = 1500;
-constexpr u16 MAX_TCP_LENGTH = 440;
-
-struct TcpBuffer
+// Pieces of the broadband adapter's built-in network stack (the "HLE" BBA). The console talks
+// to a made-up router; its UDP and TCP traffic is relayed through host sockets.
+namespace ExpansionInterface
 {
-  bool used;
-  u64 tick;
-  u32 seq_id;
-  std::vector<u8> data;
-};
+struct BbaConnection;
 
-struct StackRef;
-
-// Socket helper classes to ensure network interface consistency.
-//
-// If the socket isn't bound, the system will pick the interface to use automatically.
-// This might result in the source IP address changing when talking to the same peer
-// and multiple interfaces/IP addresses can reach the socket's peer.
+// A TCP socket that can be bound to the host address the console's traffic should leave from,
+// so that peers always see the same source address.
 class BbaTcpSocket : public sf::TcpSocket
 {
 public:
-  BbaTcpSocket();
-
-  sf::Socket::Status Connect(const sf::IpAddress& dest, u16 port, u32 net_ip);
-  sf::Socket::Status GetPeerName(sockaddr_in* addr) const;
-  sf::Socket::Status GetSockName(sockaddr_in* addr) const;
-
   enum class ConnectingState
   {
     None,
@@ -56,61 +35,75 @@ public:
     Error
   };
 
-  ConnectingState Connected(StackRef* ref);
+  // Starts a non-blocking connect from net_ip (network byte order).
+  sf::Socket::Status Connect(const sf::IpAddress& dest, u16 port, u32 net_ip);
+  sf::Socket::Status GetPeerName(sockaddr_in* addr) const;
+  sf::Socket::Status GetSockName(sockaddr_in* addr) const;
+
+  // Checks on a pending connect. When it completes, the SYN-ACK for the console is put in the
+  // connection's first retransmission slot.
+  ConnectingState Connected(BbaConnection* connection);
 
 private:
-  ConnectingState m_connecting_state = ConnectingState::None;
+  ConnectingState m_state = ConnectingState::None;
 };
 
+// A UDP socket bound to a given host address. The SSDP port also joins the SSDP multicast group.
 class BbaUdpSocket : public sf::UdpSocket
 {
 public:
-  BbaUdpSocket();
-
   sf::Socket::Status Bind(u16 port, u32 net_ip);
 };
 
-struct StackRef
+// A TCP segment sent to the console and not acknowledged yet.
+struct BbaTcpBuffer
 {
-  u32 ip = 0;
-  u16 local;
-  u16 remote;
-  u16 type;
-  u32 seq_num;
-  u32 ack_num;
-  u32 ack_base;
-  u16 window_size;
-  u64 delay;
-  std::array<TcpBuffer, MAX_TCP_BUFFER> tcp_buffers;
-  bool ready;
-  sockaddr_in from;
-  sockaddr_in to;
+  bool used = false;
+  u64 tick = 0;
+  u32 seq_id = 0;
+  std::vector<u8> data;
+};
+
+// One relayed UDP port or TCP connection. Addresses and ports are in network byte order; "from"
+// is the remote side and "to" the console.
+struct BbaConnection
+{
+  static constexpr std::size_t RETRANSMIT_SLOTS = 4;
+
+  u32 ip = 0;  // 0 marks a free slot
+  u16 local = 0;
+  u16 remote = 0;
+  u16 type = 0;  // IPPROTO_TCP or IPPROTO_UDP
+  u32 seq_num = 0;
+  u32 ack_num = 0;
+  u32 ack_base = 0;
+  u16 window_size = 0;
+  u64 delay = 0;
+  std::array<BbaTcpBuffer, RETRANSMIT_SLOTS> tcp_buffers{};
+  bool ready = false;
+  sockaddr_in from{};
+  sockaddr_in to{};
   Common::MACAddress bba_mac{};
   Common::MACAddress my_mac{};
   BbaUdpSocket udp_socket;
   BbaTcpSocket tcp_socket;
-  u64 poke_time;
+  u64 poke_time = 0;
 };
 
-// Max 10 at same time, I think most gc game had a
-// limit of 8 in the GC framework
-using StackRefs = std::array<StackRef, 10>;
-
-class NetworkRef
+// Up to ten at once; the GameCube network library allows eight sockets.
+class BbaConnections
 {
 public:
-  StackRefs& data() { return m_stacks; }
-  const StackRefs& data() const { return m_stacks; }
-  auto begin() { return m_stacks.begin(); }
-  auto begin() const { return m_stacks.cbegin(); }
-  auto end() { return m_stacks.end(); }
-  auto end() const { return m_stacks.cend(); }
+  BbaConnection* begin() { return m_slots.data(); }
+  BbaConnection* end() { return m_slots.data() + m_slots.size(); }
 
-  StackRef* GetAvailableSlot(u16 port);
-  StackRef* GetTCPSlot(u16 src_port, u16 dst_port, u32 ip);
-
-  void Clear();
+  // The active connection on this local port, else a free slot (port 0: only a free slot).
+  BbaConnection* ForLocalPort(u16 port);
+  BbaConnection* FindTcp(u16 local_port, u16 remote_port, u32 ip);
+  // Closes every socket and frees every slot.
+  void CloseAll();
 
 private:
-  StackRefs m_stacks;
+  std::array<BbaConnection, 10> m_slots;
 };
+}  // namespace ExpansionInterface

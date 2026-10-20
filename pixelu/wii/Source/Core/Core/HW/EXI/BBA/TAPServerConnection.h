@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -13,7 +12,9 @@
 
 namespace ExpansionInterface
 {
-
+// A connection to a tapserver (https://github.com/fuzziqersoftware/tapserver). Both directions
+// carry frames as a 16-bit little-endian length followed by that many bytes. The destination is
+// "host:port", or a UNIX socket path starting with '/' where those exist.
 class TAPServerConnection
 {
 public:
@@ -27,22 +28,24 @@ public:
   bool RecvInit();
   void RecvStart();
   void RecvStop();
+  // Sends every complete HDLC frame (0x7E ... 0x7E) at the start of the buffer and removes it,
+  // together with anything before it. Used by the modem adapter.
   bool SendAndRemoveAllHDLCFrames(std::string* send_buf);
   bool SendFrame(const u8* frame, u32 size);
 
 private:
+  bool SendWithLength(const char* data, std::size_t size, const char* caller);
+  void ReadLoop();
+
   const std::string m_destination;
-  const RecvCallback m_recv_cb;
+  const RecvCallback m_on_frame;
   const std::size_t m_max_frame_size;
   Common::SocketContext m_socket_context;
 
   int m_fd = -1;
   std::thread m_read_thread;
-  Common::Flag m_read_enabled;
-  Common::Flag m_read_shutdown;
-
-  bool StartReadThread();
-  void ReadThreadHandler();
+  Common::Flag m_receiving;
+  Common::Flag m_stop_reading;
 };
 
 }  // namespace ExpansionInterface

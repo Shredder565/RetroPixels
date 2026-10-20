@@ -1,17 +1,20 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/EXI/EXI_DeviceModem.h"
 
+#include <string>
+#include <utility>
+
 namespace ExpansionInterface
 {
+// The modem adapter on a tapserver connection. The modem's data stream is PPP in HDLC framing;
+// each complete HDLC frame travels as one tapserver frame.
 
 CEXIModem::TAPServerNetworkInterface::TAPServerNetworkInterface(CEXIModem* modem_ref,
                                                                 const std::string& destination)
     : NetworkInterface(modem_ref),
       m_tapserver_if(
-          destination,
-          std::bind(&TAPServerNetworkInterface::HandleReceivedFrame, this, std::placeholders::_1),
+          destination, [this](std::string&& data) { HandleReceivedFrame(std::move(data)); },
           MODEM_RECV_SIZE)
 {
 }
@@ -33,11 +36,13 @@ bool CEXIModem::TAPServerNetworkInterface::IsActivated()
 
 bool CEXIModem::TAPServerNetworkInterface::SendAndRemoveAllHDLCFrames(std::string* send_buffer)
 {
-  const std::size_t orig_size = send_buffer->size();
-  const bool send_succeeded = m_tapserver_if.SendAndRemoveAllHDLCFrames(send_buffer);
-  if (send_succeeded && (send_buffer->size() < orig_size))
+  const std::size_t pending_before = send_buffer->size();
+  if (!m_tapserver_if.SendAndRemoveAllHDLCFrames(send_buffer))
+    return false;
+  // Tell the modem when at least one frame went out.
+  if (send_buffer->size() < pending_before)
     m_modem_ref->SendComplete();
-  return send_succeeded;
+  return true;
 }
 
 bool CEXIModem::TAPServerNetworkInterface::RecvInit()

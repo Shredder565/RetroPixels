@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/Logging/Log.h"
 #include "Common/StringUtil.h"
@@ -8,300 +7,229 @@
 #include "SFML/Network/IpAddress.hpp"
 #include "VideoCommon/OnScreenDisplay.h"
 
+#include <algorithm>
+#include <cerrno>
 #include <cstring>
 #include <optional>
+#include <string>
+#include <string_view>
 
-// BBA implementation with UDP interface to XLink Kai PC/MAC/RaspberryPi client
-// For more information please see: https://www.teamxlink.co.uk/wiki/Emulator_Integration_Protocol
-// Still have questions? Please email crunchbite@teamxlink.co.uk
-// When editing this file please maintain proper capitalization of "XLink Kai"
+// The broadband adapter as a client of XLink Kai's emulator integration protocol
+// (https://www.teamxlink.co.uk/wiki/Emulator_Integration_Protocol): text commands and Ethernet
+// frames prefixed with "e;e;" in UDP datagrams to the XLink Kai client. The product's name is
+// written "XLink Kai".
 
 namespace ExpansionInterface
 {
+namespace
+{
+constexpr std::string_view FRAME_PREFIX = "e;e;";
+// Commands are sent from a zeroed buffer of this size.
+constexpr std::size_t COMMAND_BUFFER_SIZE = 255;
+// The keepalive is answered by echoing its first bytes ("keepalive;").
+constexpr std::size_t KEEPALIVE_REPLY_SIZE = 10;
+
+// The text after a "name;" prefix, or nothing if the message is that short.
+std::string TextAfter(const std::string& message, std::size_t prefix_length)
+{
+  return message.size() > prefix_length ? message.substr(prefix_length) : std::string();
+}
+}  // namespace
+
+bool CEXIETHERNET::XLinkNetworkInterface::SendDatagram(const void* data, std::size_t size)
+{
+  return m_socket.send(data, size, m_peer, static_cast<unsigned short>(m_dest_port)) ==
+         sf::Socket::Status::Done;
+}
+
+void CEXIETHERNET::XLinkNetworkInterface::SendCommand(std::string_view command)
+{
+  std::array<u8, COMMAND_BUFFER_SIZE> buffer{};
+  const std::size_t size = std::min(command.size(), buffer.size());
+  std::copy_n(command.begin(), size, buffer.begin());
+  DEBUG_LOG_FMT(SP1, "SendCommandPayload {:x}\n{}", size, ArrayToString(buffer.data(), size, 0x10));
+  if (!SendDatagram(buffer.data(), size))
+    ERROR_LOG_FMT(SP1, "Failed to send '{}' to the XLink Kai client", command.substr(0, 16));
+}
+
 bool CEXIETHERNET::XLinkNetworkInterface::Activate()
 {
   if (IsActivated())
     return true;
 
-  if (m_sf_socket.bind(sf::Socket::AnyPort) != sf::Socket::Status::Done)
+  if (m_socket.bind(sf::Socket::AnyPort) != sf::Socket::Status::Done)
   {
     ERROR_LOG_FMT(SP1, "Couldn't open XLink Kai UDP socket, unable to initialize BBA");
     return false;
   }
+  m_peer = sf::IpAddress::resolve(m_dest_ip).value_or(sf::IpAddress::Any);
 
-  m_sf_recipient_ip = sf::IpAddress::resolve(m_dest_ip.c_str()).value_or(sf::IpAddress::Any);
-
-  // Send connect command with unique local name
   // connect;locally_unique_name;emulator_name;optional_padding
-  u8 buffer[255] = {};
-  std::string cmd =
-      "connect;" + m_client_identifier + ";dolphin;000000000000000000000000000000000000000000";
-
-  const auto size = u32(cmd.length());
-  memmove(buffer, cmd.c_str(), size);
-
-  DEBUG_LOG_FMT(SP1, "SendCommandPayload {:x}\n{}", size, ArrayToString(buffer, size, 0x10));
-
-  if (m_sf_socket.send(buffer, size, m_sf_recipient_ip, m_dest_port) != sf::Socket::Status::Done)
-  {
-    ERROR_LOG_FMT(SP1, "Activate(): failed to send connect message to XLink Kai client");
-  }
+  SendCommand("connect;" + m_client_identifier +
+              ";dolphin;000000000000000000000000000000000000000000");
 
   INFO_LOG_FMT(SP1, "BBA initialized.");
-
   return RecvInit();
 }
 
 void CEXIETHERNET::XLinkNetworkInterface::Deactivate()
 {
-  // Is the BBA Active? If not skip shutdown
   if (!IsActivated())
     return;
 
-  // Send d; to tell XLink we want to disconnect cleanly
   // disconnect;optional_locally_unique_name;optional_padding
-  std::string cmd =
-      "disconnect;" + m_client_identifier + ";0000000000000000000000000000000000000000000";
-  const auto size = u32(cmd.length());
-  u8 buffer[255] = {};
-  memmove(buffer, cmd.c_str(), size);
-
-  DEBUG_LOG_FMT(SP1, "SendCommandPayload {:x}\n{}", size, ArrayToString(buffer, size, 0x10));
-
-  if (m_sf_socket.send(buffer, size, m_sf_recipient_ip, m_dest_port) != sf::Socket::Status::Done)
-  {
-    ERROR_LOG_FMT(SP1, "Deactivate(): failed to send disconnect message to XLink Kai client");
-  }
-
+  SendCommand("disconnect;" + m_client_identifier + ";0000000000000000000000000000000000000000000");
   NOTICE_LOG_FMT(SP1, "XLink Kai BBA deactivated");
 
-  m_bba_link_up = false;
+  m_link_up = false;
 
-  // Disable socket blocking
-  m_sf_socket.setBlocking(false);
-
-  // Set flags for clean shutdown of the read thread
-  m_read_enabled.Clear();
-  m_read_thread_shutdown.Set();
-
-  // Detach the thread and let it die on its own (leaks ~9kb of memory)
+  // The reader may be blocked in receive; stop it and let it finish on its own.
+  m_socket.setBlocking(false);
+  m_receiving.Clear();
+  m_stop_reading.Set();
   m_read_thread.detach();
 
-  // Close the socket
-  m_sf_socket.unbind();
+  m_socket.unbind();
 }
 
 bool CEXIETHERNET::XLinkNetworkInterface::IsActivated()
 {
-  return m_sf_socket.getLocalPort() > 0;
+  return m_socket.getLocalPort() > 0;
 }
 
 bool CEXIETHERNET::XLinkNetworkInterface::SendFrame(const u8* frame, u32 size)
 {
-  // Is the BBA actually connected?
-  if (!m_bba_link_up)
+  if (!m_link_up)
   {
-    // Has the user been told the connection failed?
-    if (!m_bba_failure_notified)
+    // Frames are dropped until the client says it is connected. That is not an error for the
+    // adapter, but the user hears about it once.
+    if (!m_told_user_not_connected)
     {
       OSD::AddMessage("XLink Kai BBA not connected", 30000);
-      m_bba_failure_notified = true;
+      m_told_user_not_connected = true;
     }
-
-    // Return true because this isn't an error dolphin needs to handle
     return true;
   }
 
-  // Overwrite buffer and add header
-  memmove(m_out_frame, "e;e;", 4);
-  memmove(m_out_frame + 4, frame, size);
-  size += 4;
+  std::copy(FRAME_PREFIX.begin(), FRAME_PREFIX.end(), m_out.begin());
+  std::memcpy(m_out.data() + FRAME_PREFIX.size(), frame, size);
+  const std::size_t datagram_size = FRAME_PREFIX.size() + size;
 
-  // Only uncomment for debugging, the performance hit is too big otherwise
-  // INFO_LOG_FMT(SP1, "SendFrame {}\n{}", size, ArrayToString(m_out_frame, size, 0x10)));
-
-  if (m_sf_socket.send(m_out_frame, size, m_sf_recipient_ip, m_dest_port) !=
-      sf::Socket::Status::Done)
+  if (!SendDatagram(m_out.data(), datagram_size))
   {
-    ERROR_LOG_FMT(SP1, "SendFrame(): expected to write {} bytes, but failed, errno {}", size,
-                  errno);
+    ERROR_LOG_FMT(SP1, "SendFrame(): expected to write {} bytes, but failed, errno {}",
+                  datagram_size, errno);
     return false;
   }
-  else
-  {
-    m_eth_ref->SendComplete();
-    return true;
-  }
+
+  m_eth_ref->SendComplete();
+  return true;
 }
 
-void CEXIETHERNET::XLinkNetworkInterface::ReadThreadHandler(
-    CEXIETHERNET::XLinkNetworkInterface* self)
+void CEXIETHERNET::XLinkNetworkInterface::HandleControlMessage(std::size_t size)
+{
+  const std::string message(m_in.data(), size);
+  INFO_LOG_FMT(SP1, "Received XLink Kai control data: {}", message);
+
+  if (message.starts_with("connected"))
+  {
+    // connected;identifier;
+    NOTICE_LOG_FMT(SP1, "XLink Kai BBA connected");
+    OSD::AddMessage("XLink Kai BBA connected", 4500);
+    m_link_up = true;
+    if (m_chat_osd_enabled)
+      SendCommand("setting;chat;true;");
+  }
+  else if (message.starts_with("disconnected"))
+  {
+    // disconnected;optional_identifier;optional_message;
+    NOTICE_LOG_FMT(SP1, "XLink Kai BBA disconnected");
+    OSD::AddMessage("XLink Kai BBA disconnected", 15000);
+    m_link_up = false;
+    m_socket.setBlocking(false);
+    m_receiving.Clear();
+    m_stop_reading.Set();
+    m_socket.unbind();
+  }
+  else if (message.starts_with("keepalive"))
+  {
+    DEBUG_LOG_FMT(SP1, "XLink Kai BBA keepalive");
+    if (!SendDatagram(m_in.data(), KEEPALIVE_REPLY_SIZE))
+      ERROR_LOG_FMT(SP1, "Failed to answer an XLink Kai keepalive");
+  }
+  else if (message.starts_with("message"))
+  {
+    // message;text;
+    std::string text = TextAfter(message, 8);
+    NOTICE_LOG_FMT(SP1, "XLink Kai message: {}", text);
+    OSD::AddMessage(std::move(text), 15000);
+  }
+  else if (message.starts_with("chat"))
+  {
+    // chat;text;
+    std::string text = TextAfter(message, 5);
+    NOTICE_LOG_FMT(SP1, "XLink Kai chat: {}", text);
+    OSD::AddMessage(std::move(text), 5000);
+  }
+  else if (message.starts_with("directmessage"))
+  {
+    // directmessage;text;
+    std::string text = TextAfter(message, 14);
+    NOTICE_LOG_FMT(SP1, "XLink Kai direct message: {}", text);
+    OSD::AddMessage(std::move(text), 5000);
+  }
+  // Anything else is ignored.
+}
+
+void CEXIETHERNET::XLinkNetworkInterface::ReadLoop()
 {
   std::optional<sf::IpAddress> sender;
-  u16 port;
+  unsigned short sender_port = 0;
 
-  while (!self->m_read_thread_shutdown.IsSet())
+  while (!m_stop_reading.IsSet() && IsActivated())
   {
-    if (!self->IsActivated())
-      break;
-
-    // XLink supports jumboframes but GameCube BBA does not. We need to support jumbo frames
-    // *here* because XLink *could* send one
-    std::size_t bytes_read = 0;
-    if (self->m_sf_socket.receive(self->m_in_frame, std::size(self->m_in_frame), bytes_read, sender,
-                                  port) != sf::Socket::Status::Done &&
-        self->m_bba_link_up)
-    {
-      ERROR_LOG_FMT(SP1, "Failed to read from BBA, err={}", bytes_read);
-    }
-
-    // Make sure *anything* was received before going any further
-    if (bytes_read < 1)
+    std::size_t size = 0;
+    const sf::Socket::Status status =
+        m_socket.receive(m_in.data(), m_in.size(), size, sender, sender_port);
+    if (status != sf::Socket::Status::Done && m_link_up)
+      ERROR_LOG_FMT(SP1, "Failed to read from BBA, err={}", size);
+    if (size == 0)
       continue;
 
-    // Did we get an ethernet frame? Copy the first 4 bytes to check the header
-    char temp_check[4];
-    memmove(temp_check, self->m_in_frame, std::size(temp_check));
-
-    // Check for e;e; header; this indicates the received data is an ethernet frame
-    // e;e;raw_ethernet_frame_data
-    if (temp_check[2] == 'e' && temp_check[3] == ';')
+    // Frames carry the "e;e;" prefix; only its second half is checked.
+    const bool is_frame = m_in[2] == 'e' && m_in[3] == ';';
+    if (!is_frame)
     {
-      // Is the frame larger than BBA_RECV_SIZE?
-      if ((bytes_read - 4) < BBA_RECV_SIZE)
-      {
-        // Copy payload into BBA buffer as an ethernet frame
-        memmove(self->m_eth_ref->mRecvBuffer.get(), self->m_in_frame + 4, bytes_read - 4);
-
-        // Check the frame size again after the header is removed
-        if (bytes_read < 1)
-        {
-          ERROR_LOG_FMT(SP1, "Failed to read from BBA, err={}", bytes_read - 4);
-        }
-        else if (self->m_read_enabled.IsSet())
-        {
-          // Only uncomment for debugging, the performance hit is too big otherwise
-          // DEBUG_LOG_FMT(SP1, "Read data: {}", ArrayToString(self->m_eth_ref->mRecvBuffer.get(),
-          // u32(bytes_read - 4), 0x10));
-          self->m_eth_ref->mRecvBufferLength = u32(bytes_read - 4);
-          self->m_eth_ref->RecvHandlePacket();
-        }
-      }
-    }
-    // Otherwise we received control data or junk
-    else
-    {
-      const std::string control_msg(self->m_in_frame, self->m_in_frame + bytes_read);
-      INFO_LOG_FMT(SP1, "Received XLink Kai control data: {}", control_msg);
-
-      // connected;identifier;
-      if (control_msg.starts_with("connected"))
-      {
-        NOTICE_LOG_FMT(SP1, "XLink Kai BBA connected");
-        OSD::AddMessage("XLink Kai BBA connected", 4500);
-
-        self->m_bba_link_up = true;
-        // TODO (in EXI_DeviceEthernet.cpp) bring the BBA link up here
-
-        // Send any extra settings now
-        // Enable XLink chat messages in OSD if set
-        if (self->m_chat_osd_enabled)
-        {
-          constexpr std::string_view cmd = "setting;chat;true;";
-          const auto size = u32(cmd.length());
-          u8 buffer[255] = {};
-          memmove(buffer, cmd.data(), size);
-
-          DEBUG_LOG_FMT(SP1, "SendCommandPayload {:x}\n{}", size,
-                        ArrayToString(buffer, size, 0x10));
-
-          if (self->m_sf_socket.send(buffer, size, self->m_sf_recipient_ip, self->m_dest_port) !=
-              sf::Socket::Status::Done)
-          {
-            ERROR_LOG_FMT(
-                SP1, "ReadThreadHandler(): failed to send setting message to XLink Kai client");
-          }
-        }
-      }
-      // disconnected;optional_identifier;optional_message;
-      else if (control_msg.starts_with("disconnected"))
-      {
-        NOTICE_LOG_FMT(SP1, "XLink Kai BBA disconnected");
-        // Show OSD message for 15 seconds to make sure the user sees it
-        OSD::AddMessage("XLink Kai BBA disconnected", 15000);
-
-        // TODO (TODO in EXI_DeviceEthernet.cpp) bring the BBA link down here
-        self->m_bba_link_up = false;
-
-        // Disable socket blocking
-        self->m_sf_socket.setBlocking(false);
-
-        // Shut down the read thread
-        self->m_read_enabled.Clear();
-        self->m_read_thread_shutdown.Set();
-
-        // Close the socket
-        self->m_sf_socket.unbind();
+      HandleControlMessage(size);
+      if (m_stop_reading.IsSet())
         break;
-      }
-      // keepalive;
-      else if (control_msg.starts_with("keepalive"))
-      {
-        DEBUG_LOG_FMT(SP1, "XLink Kai BBA keepalive");
+      continue;
+    }
 
-        // Only uncomment for debugging, just clogs the log otherwise
-        // INFO_LOG_FMT(SP1, "SendCommandPayload {:x}\n{}", 2, ArrayToString(m_in_frame, 2, 0x10));
-
-        // Reply (using the message that came in!)
-        if (self->m_sf_socket.send(self->m_in_frame, 10, self->m_sf_recipient_ip,
-                                   self->m_dest_port) != sf::Socket::Status::Done)
-        {
-          ERROR_LOG_FMT(SP1, "ReadThreadHandler(): failed to reply to XLink Kai client keepalive");
-        }
-      }
-      // message;message_text;
-      else if (control_msg.starts_with("message"))
-      {
-        std::string msg = control_msg.substr(8, control_msg.length() - 1);
-
-        NOTICE_LOG_FMT(SP1, "XLink Kai message: {}", msg);
-        // Show OSD message for 15 seconds to make sure the user sees it
-        OSD::AddMessage(std::move(msg), 15000);
-      }
-      // chat;message_text;
-      else if (control_msg.starts_with("chat"))
-      {
-        std::string msg = control_msg.substr(5, control_msg.length() - 1);
-
-        NOTICE_LOG_FMT(SP1, "XLink Kai chat: {}", msg);
-        OSD::AddMessage(std::move(msg), 5000);
-      }
-      // directmessage;message_text;
-      else if (control_msg.starts_with("directmessage"))
-      {
-        std::string msg = control_msg.substr(14, control_msg.length() - 1);
-
-        NOTICE_LOG_FMT(SP1, "XLink Kai direct message: {}", msg);
-        OSD::AddMessage(std::move(msg), 5000);
-      }
-      // else junk/unsupported control message
+    // Too short or too large frames are dropped.
+    if (size < FRAME_PREFIX.size() || size - FRAME_PREFIX.size() >= BBA_RECV_SIZE)
+      continue;
+    if (m_receiving.IsSet())
+    {
+      m_eth_ref->ReceiveFrame(reinterpret_cast<const u8*>(m_in.data()) + FRAME_PREFIX.size(),
+                              static_cast<u32>(size - FRAME_PREFIX.size()));
     }
   }
 }
 
 bool CEXIETHERNET::XLinkNetworkInterface::RecvInit()
 {
-  m_read_thread = std::thread(ReadThreadHandler, this);
+  m_read_thread = std::thread(&XLinkNetworkInterface::ReadLoop, this);
   return true;
 }
 
 void CEXIETHERNET::XLinkNetworkInterface::RecvStart()
 {
-  m_read_enabled.Set();
+  m_receiving.Set();
 }
 
 void CEXIETHERNET::XLinkNetworkInterface::RecvStop()
 {
-  m_read_enabled.Clear();
+  m_receiving.Clear();
 }
 }  // namespace ExpansionInterface

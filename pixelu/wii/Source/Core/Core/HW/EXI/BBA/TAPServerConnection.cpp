@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include <cstdlib>
 #include <cstring>
@@ -25,105 +24,122 @@
 
 namespace ExpansionInterface
 {
-
+namespace
+{
 #ifdef _WIN32
-using ws_ssize_t = int;
+using IoSize = int;
+using IoLength = int;
+using AddressLength = int;
+SOCKET Handle(int fd)
+{
+  return static_cast<SOCKET>(fd);
+}
+void CloseSocket(int fd)
+{
+  closesocket(Handle(fd));
+}
 #else
-#define closesocket close
-using ws_ssize_t = ssize_t;
+using IoSize = ssize_t;
+using IoLength = std::size_t;
+using AddressLength = socklen_t;
+int Handle(int fd)
+{
+  return fd;
+}
+void CloseSocket(int fd)
+{
+  close(fd);
+}
 #endif
 
-using Common::SEND_FLAGS;
-
-TAPServerConnection::TAPServerConnection(std::string destination,
-                                         std::function<void(std::string&&)> recv_cb,
-                                         std::size_t max_frame_size)
-    : m_destination(std::move(destination)), m_recv_cb(std::move(recv_cb)),
-      m_max_frame_size(max_frame_size)
-{
-}
-
-static int ConnectToDestination(const std::string& destination)
+// Fills in the address for "host:port" (or a UNIX socket path). Returns its length, or 0.
+int ResolveDestination(const std::string& destination, sockaddr_storage* storage)
 {
   if (destination.empty())
   {
     ERROR_LOG_FMT(SP1, "Cannot connect: destination is empty\n");
-    return -1;
+    return 0;
   }
 
-  int ss_size;
-  sockaddr_storage ss;
-  std::memset(&ss, 0, sizeof(ss));
-  if (destination[0] != '/')
+  if (destination.front() == '/')
   {
-    // IP address or hostname
-    const std::size_t colon_offset = destination.find(':');
-    if (colon_offset == std::string::npos)
-    {
-      ERROR_LOG_FMT(SP1, "Destination IP address does not include port\n");
-      return -1;
-    }
-
-    sockaddr_in* sin = reinterpret_cast<sockaddr_in*>(&ss);
-    const std::optional<sf::IpAddress> dest_ip =
-        sf::IpAddress::resolve(destination.substr(0, colon_offset));
-    if (!dest_ip)
-    {
-      ERROR_LOG_FMT(SP1, "Destination IP address is not valid\n");
-      return -1;
-    }
-    sin->sin_addr.s_addr = htonl(dest_ip->toInteger());
-    sin->sin_family = AF_INET;
-    const std::string port_str = destination.substr(colon_offset + 1);
-    const int dest_port = std::atoi(port_str.c_str());
-    if (dest_port < 1 || dest_port > 65535)
-    {
-      ERROR_LOG_FMT(SP1, "Destination port is not valid\n");
-      return -1;
-    }
-    sin->sin_port = htons(dest_port);
-    ss_size = sizeof(*sin);
-#ifndef _WIN32
-  }
-  else
-  {
-    // UNIX socket
-    sockaddr_un* sun = reinterpret_cast<sockaddr_un*>(&ss);
-    if (destination.size() + 1 > sizeof(sun->sun_path))
+#ifdef _WIN32
+    ERROR_LOG_FMT(SP1, "UNIX sockets are not supported on Windows\n");
+    return 0;
+#else
+    auto* const unix_address = reinterpret_cast<sockaddr_un*>(storage);
+    if (destination.size() >= sizeof(unix_address->sun_path))
     {
       ERROR_LOG_FMT(SP1, "Socket path is too long; unable to create tapserver connection\n");
-      return -1;
+      return 0;
     }
-    sun->sun_family = AF_UNIX;
-    std::strcpy(sun->sun_path, destination.c_str());
-    ss_size = sizeof(*sun);
-#else
-  }
-  else
-  {
-    ERROR_LOG_FMT(SP1, "UNIX sockets are not supported on Windows\n");
-    return -1;
+    unix_address->sun_family = AF_UNIX;
+    std::memcpy(unix_address->sun_path, destination.c_str(), destination.size() + 1);
+    return static_cast<int>(sizeof(*unix_address));
 #endif
   }
 
-  const int fd = socket(ss.ss_family, SOCK_STREAM, (ss.ss_family == AF_INET) ? IPPROTO_TCP : 0);
+  const std::size_t colon = destination.find(':');
+  if (colon == std::string::npos)
+  {
+    ERROR_LOG_FMT(SP1, "Destination IP address does not include port\n");
+    return 0;
+  }
+
+  const std::optional<sf::IpAddress> host = sf::IpAddress::resolve(destination.substr(0, colon));
+  if (!host)
+  {
+    ERROR_LOG_FMT(SP1, "Destination IP address is not valid\n");
+    return 0;
+  }
+
+  const int port = std::atoi(destination.c_str() + colon + 1);
+  if (port < 1 || port > 65535)
+  {
+    ERROR_LOG_FMT(SP1, "Destination port is not valid\n");
+    return 0;
+  }
+
+  auto* const inet_address = reinterpret_cast<sockaddr_in*>(storage);
+  inet_address->sin_family = AF_INET;
+  inet_address->sin_addr.s_addr = htonl(host->toInteger());
+  inet_address->sin_port = htons(static_cast<u16>(port));
+  return static_cast<int>(sizeof(*inet_address));
+}
+
+int OpenConnection(const std::string& destination)
+{
+  sockaddr_storage address{};
+  const int address_length = ResolveDestination(destination, &address);
+  if (address_length == 0)
+    return -1;
+
+  const int protocol = address.ss_family == AF_INET ? IPPROTO_TCP : 0;
+  const int fd = static_cast<int>(socket(address.ss_family, SOCK_STREAM, protocol));
   if (fd == -1)
   {
     ERROR_LOG_FMT(SP1, "Couldn't create socket; unable to create tapserver connection\n");
     return -1;
   }
-
   Common::SetPlatformSocketOptions(fd);
 
-  if (connect(fd, reinterpret_cast<sockaddr*>(&ss), ss_size) == -1)
+  if (connect(Handle(fd), reinterpret_cast<const sockaddr*>(&address),
+              static_cast<AddressLength>(address_length)) == -1)
   {
     INFO_LOG_FMT(SP1, "Couldn't connect socket ({}), unable to create tapserver connection\n",
                  Common::StrNetworkError());
-    closesocket(fd);
+    CloseSocket(fd);
     return -1;
   }
-
   return fd;
+}
+}  // namespace
+
+TAPServerConnection::TAPServerConnection(std::string destination, RecvCallback recv_cb,
+                                         std::size_t max_frame_size)
+    : m_destination(std::move(destination)), m_on_frame(std::move(recv_cb)),
+      m_max_frame_size(max_frame_size)
+{
 }
 
 bool TAPServerConnection::Activate()
@@ -131,80 +147,82 @@ bool TAPServerConnection::Activate()
   if (IsActivated())
     return true;
 
-  m_fd = ConnectToDestination(m_destination);
-  if (m_fd < 0)
-    return false;
-
-  return RecvInit();
+  m_fd = OpenConnection(m_destination);
+  return m_fd >= 0 && RecvInit();
 }
 
 void TAPServerConnection::Deactivate()
 {
-  m_read_enabled.Clear();
-  m_read_shutdown.Set();
+  m_receiving.Clear();
+  m_stop_reading.Set();
   if (m_read_thread.joinable())
     m_read_thread.join();
-  m_read_shutdown.Clear();
+  m_stop_reading.Clear();
 
   if (m_fd >= 0)
-    closesocket(m_fd);
+    CloseSocket(m_fd);
   m_fd = -1;
 }
 
 bool TAPServerConnection::IsActivated()
 {
-  return (m_fd >= 0);
+  return m_fd >= 0;
 }
 
 bool TAPServerConnection::RecvInit()
 {
-  m_read_thread = std::thread(&TAPServerConnection::ReadThreadHandler, this);
+  m_read_thread = std::thread(&TAPServerConnection::ReadLoop, this);
   return true;
 }
 
 void TAPServerConnection::RecvStart()
 {
-  m_read_enabled.Set();
+  m_receiving.Set();
 }
 
 void TAPServerConnection::RecvStop()
 {
-  m_read_enabled.Clear();
+  m_receiving.Clear();
+}
+
+bool TAPServerConnection::SendWithLength(const char* data, std::size_t size, const char* caller)
+{
+  const char length[2] = {static_cast<char>(size & 0xff), static_cast<char>((size >> 8) & 0xff)};
+  if (send(Handle(m_fd), length, 2, Common::SEND_FLAGS) != 2)
+  {
+    ERROR_LOG_FMT(SP1, "{}(): could not write size field", caller);
+    return false;
+  }
+
+  const IoSize sent = send(Handle(m_fd), data, static_cast<IoLength>(size), Common::SEND_FLAGS);
+  if (sent < 0 || static_cast<std::size_t>(sent) != size)
+  {
+    ERROR_LOG_FMT(SP1, "{}(): expected to write {} bytes, instead wrote {}", caller, size, sent);
+    return false;
+  }
+  return true;
 }
 
 bool TAPServerConnection::SendAndRemoveAllHDLCFrames(std::string* send_buf)
 {
+  constexpr char FLAG = 0x7E;
   while (!send_buf->empty())
   {
-    const std::size_t start_offset = send_buf->find(0x7E);
-    if (start_offset == std::string::npos)
-    {
+    const std::size_t opening = send_buf->find(FLAG);
+    if (opening == std::string::npos)
       break;
-    }
-    const std::size_t end_sentinel_offset = send_buf->find(0x7E, start_offset + 1);
-    if (end_sentinel_offset == std::string::npos)
-    {
+    const std::size_t closing = send_buf->find(FLAG, opening + 1);
+    if (closing == std::string::npos)
       break;
-    }
-    const std::size_t end_offset = end_sentinel_offset + 1;
-    const std::size_t size = end_offset - start_offset;
 
-    const u8 size_bytes[2] = {static_cast<u8>(size), static_cast<u8>(size >> 8)};
-    if (send(m_fd, reinterpret_cast<const char*>(size_bytes), 2, SEND_FLAGS) != 2)
+    // Both flag bytes go with the frame.
+    const std::size_t frame_end = closing + 1;
+    if (!SendWithLength(send_buf->data() + opening, frame_end - opening,
+                        "SendAndRemoveAllHDLCFrames"))
     {
-      ERROR_LOG_FMT(SP1, "SendAndRemoveAllHDLCFrames(): could not write size field");
       return false;
     }
-    const int written_bytes =
-        send(m_fd, send_buf->data() + start_offset, static_cast<int>(size), SEND_FLAGS);
-    if (u32(written_bytes) != size)
-    {
-      ERROR_LOG_FMT(SP1,
-                    "SendAndRemoveAllHDLCFrames(): expected to write {} bytes, instead wrote {}",
-                    size, written_bytes);
-      return false;
-    }
-    *send_buf = send_buf->substr(end_offset);
+    send_buf->erase(0, frame_end);
   }
   return true;
 }
@@ -212,147 +230,105 @@ bool TAPServerConnection::SendAndRemoveAllHDLCFrames(std::string* send_buf)
 bool TAPServerConnection::SendFrame(const u8* frame, u32 size)
 {
   INFO_LOG_FMT(SP1, "SendFrame {}\n{}", size, ArrayToString(frame, size, 0x10));
-
-  // On Windows, the data pointer is of type const char*; on other systems it is
-  // of type const void*. This is the reason for the reinterpret_cast here and
-  // in the other send/recv calls in this file.
-  const u8 size_bytes[2] = {static_cast<u8>(size), static_cast<u8>(size >> 8)};
-  if (send(m_fd, reinterpret_cast<const char*>(size_bytes), 2, SEND_FLAGS) != 2)
-  {
-    ERROR_LOG_FMT(SP1, "SendFrame(): could not write size field");
-    return false;
-  }
-  const int written_bytes =
-      send(m_fd, reinterpret_cast<const char*>(frame), static_cast<ws_ssize_t>(size), SEND_FLAGS);
-  if (u32(written_bytes) != size)
-  {
-    ERROR_LOG_FMT(SP1, "SendFrame(): expected to write {} bytes, instead wrote {}", size,
-                  written_bytes);
-    return false;
-  }
-  return true;
+  return SendWithLength(reinterpret_cast<const char*>(frame), size, "SendFrame");
 }
 
-void TAPServerConnection::ReadThreadHandler()
+void TAPServerConnection::ReadLoop()
 {
-  enum class ReadState
+  // Where the reader is within the stream: the two length bytes (possibly split across reads),
+  // then the frame body. Frames are read even while receiving is off, so the server never
+  // blocks, but are only delivered if receiving was on when their length arrived.
+  enum class Expect
   {
-    SIZE,
-    SIZE_HIGH,
-    DATA,
-    SKIP,
+    Length,
+    LengthHigh,
+    Body,
   };
-  ReadState read_state = ReadState::SIZE;
+  Expect expect = Expect::Length;
+  std::size_t frame_length = 0;
+  std::size_t received = 0;
+  bool deliver = false;
+  std::string frame;
 
-  std::size_t frame_bytes_received = 0;
-  std::size_t frame_bytes_expected = 0;
-  std::string frame_data;
-
-  while (!m_read_shutdown.IsSet())
-  {
-    fd_set rfds;
-    FD_ZERO(&rfds);
-    FD_SET(m_fd, &rfds);
-
-    timeval timeout;
-    timeout.tv_sec = 0;
-    timeout.tv_usec = 50000;
-    int select_res = select(m_fd + 1, &rfds, nullptr, nullptr, &timeout);
-    if (select_res < 0)
+  const auto begin_body = [&] {
+    if (frame_length == 0)
     {
-      ERROR_LOG_FMT(SP1, "Can\'t poll tapserver fd: {}", Common::StrNetworkError());
+      // Nothing to read; an empty frame is dropped.
+      expect = Expect::Length;
+      return;
+    }
+    frame.assign(frame_length, '\0');
+    received = 0;
+    deliver = frame_length <= m_max_frame_size && m_receiving.IsSet();
+    if (frame_length > m_max_frame_size)
+      ERROR_LOG_FMT(SP1, "Packet is too large ({} bytes); dropping it", frame_length);
+    expect = Expect::Body;
+  };
+
+  while (!m_stop_reading.IsSet())
+  {
+    fd_set readable;
+    FD_ZERO(&readable);
+    FD_SET(Handle(m_fd), &readable);
+    timeval timeout{0, 50000};
+    const int ready = select(m_fd + 1, &readable, nullptr, nullptr, &timeout);
+    if (ready < 0)
+    {
+      ERROR_LOG_FMT(SP1, "Can't poll tapserver fd: {}", Common::StrNetworkError());
       continue;
     }
-    if (select_res == 0)
+    if (ready == 0)
       continue;
 
-    // The tapserver protocol is very simple: there is a 16-bit little-endian
-    // size field, followed by that many bytes of packet data
-    switch (read_state)
+    if (expect == Expect::Length)
     {
-    case ReadState::SIZE:
-    {
-      u8 size_bytes[2];
-      const ws_ssize_t bytes_read = recv(m_fd, reinterpret_cast<char*>(size_bytes), 2, 0);
-      if (bytes_read == 1)
+      unsigned char length[2];
+      const IoSize got = recv(Handle(m_fd), reinterpret_cast<char*>(length), 2, 0);
+      if (got == 2)
       {
-        read_state = ReadState::SIZE_HIGH;
-        frame_bytes_expected = size_bytes[0];
+        frame_length = length[0] | (std::size_t{length[1]} << 8);
+        begin_body();
       }
-      else if (bytes_read == 2)
+      else if (got == 1)
       {
-        frame_bytes_expected = size_bytes[0] | (size_bytes[1] << 8);
-        frame_data.resize(frame_bytes_expected, '\0');
-        if (frame_bytes_expected > m_max_frame_size)
-        {
-          ERROR_LOG_FMT(SP1, "Packet is too large ({} bytes); dropping it", frame_bytes_expected);
-          read_state = ReadState::SKIP;
-        }
-        else
-        {
-          // If read is disabled, we still need to actually read the frame in
-          // order to avoid applying backpressure on the remote end, but we
-          // should drop the frame instead of forwarding it to the client.
-          read_state = m_read_enabled.IsSet() ? ReadState::DATA : ReadState::SKIP;
-        }
+        frame_length = length[0];
+        expect = Expect::LengthHigh;
       }
       else
       {
         ERROR_LOG_FMT(SP1, "Failed to read size field from destination: {}",
                       Common::StrNetworkError());
       }
-      break;
     }
-    case ReadState::SIZE_HIGH:
+    else if (expect == Expect::LengthHigh)
     {
-      // This handles the annoying case where only one byte of the size field
-      // was available earlier.
-      u8 size_high = 0;
-      const ws_ssize_t bytes_read = recv(m_fd, reinterpret_cast<char*>(&size_high), 1, 0);
-      if (bytes_read != 1)
+      unsigned char high = 0;
+      if (recv(Handle(m_fd), reinterpret_cast<char*>(&high), 1, 0) != 1)
       {
         ERROR_LOG_FMT(SP1, "Failed to read split size field from destination: {}",
                       Common::StrNetworkError());
-        break;
+        continue;
       }
-      frame_bytes_expected |= (size_high << 8);
-      frame_data.resize(frame_bytes_expected, '\0');
-      if (frame_bytes_expected > m_max_frame_size)
-      {
-        ERROR_LOG_FMT(SP1, "Packet is too large ({} bytes); dropping it", frame_bytes_expected);
-        read_state = ReadState::SKIP;
-      }
-      else
-      {
-        read_state = m_read_enabled.IsSet() ? ReadState::DATA : ReadState::SKIP;
-      }
-      break;
+      frame_length |= std::size_t{high} << 8;
+      begin_body();
     }
-    case ReadState::DATA:
-    case ReadState::SKIP:
+    else
     {
-      const std::size_t bytes_to_read = frame_data.size() - frame_bytes_received;
-      const ws_ssize_t bytes_read = recv(m_fd, frame_data.data() + frame_bytes_received,
-                                         static_cast<ws_ssize_t>(bytes_to_read), 0);
-      if (bytes_read <= 0)
+      const IoSize got = recv(Handle(m_fd), frame.data() + received,
+                              static_cast<IoLength>(frame_length - received), 0);
+      if (got <= 0)
       {
         ERROR_LOG_FMT(SP1, "Failed to read data from destination: {}", Common::StrNetworkError());
-        break;
+        continue;
       }
-      frame_bytes_received += bytes_read;
-      if (frame_bytes_received == frame_bytes_expected)
+      received += static_cast<std::size_t>(got);
+      if (received == frame_length)
       {
-        if (read_state == ReadState::DATA)
-        {
-          m_recv_cb(std::move(frame_data));
-        }
-        frame_data.clear();
-        frame_bytes_received = 0;
-        frame_bytes_expected = 0;
-        read_state = ReadState::SIZE;
+        if (deliver)
+          m_on_frame(std::move(frame));
+        frame.clear();
+        expect = Expect::Length;
       }
-      break;
-    }
     }
   }
 }
