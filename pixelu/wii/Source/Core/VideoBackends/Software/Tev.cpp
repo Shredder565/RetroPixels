@@ -167,8 +167,9 @@ float FogDepth(s32 x, s32 z)
     const float weight = static_cast<float>(above) - position;
     const float k = k_below * weight + k_above * (1.f - weight);
     // Unqualified on purpose: this picks the same overload (float on MSVC) as the rest of the
-    // video code.
-    ze = static_cast<float>(ze * (sqrt(offset * offset + k * k) / k));
+    // video code. The factor is rounded to float before it is applied.
+    const float adjust = static_cast<float>(sqrt(offset * offset + k * k) / k);
+    ze *= adjust;
   }
 
   return ze - fog.GetC();
