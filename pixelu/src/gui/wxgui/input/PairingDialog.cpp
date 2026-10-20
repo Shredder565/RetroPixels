@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "wxgui/wxgui.h"
 #include "PairingDialog.h"
 
@@ -11,290 +12,246 @@
 #include <input/api/Wiimote/l2cap/L2CapWiimote.h>
 #endif
 
-wxDECLARE_EVENT(wxEVT_PROGRESS_PAIR, wxCommandEvent);
-wxDEFINE_EVENT(wxEVT_PROGRESS_PAIR, wxCommandEvent);
+namespace
+{
+	// carries a PairingState from the worker to the dialog
+	wxDEFINE_EVENT(EVT_PAIRING_STATE, wxCommandEvent);
+}
 
 PairingDialog::PairingDialog(wxWindow* parent)
-	: wxDialog(parent, wxID_ANY, _("Pairing..."), wxDefaultPosition, wxDefaultSize, wxCAPTION | wxMINIMIZE_BOX | wxSYSTEM_MENU | wxTAB_TRAVERSAL | wxCLOSE_BOX)
+	: wxDialog(parent, wxID_ANY, _("Pairing..."), wxDefaultPosition, wxDefaultSize,
+			   wxCAPTION | wxMINIMIZE_BOX | wxSYSTEM_MENU | wxTAB_TRAVERSAL | wxCLOSE_BOX)
 {
-	auto* sizer = new wxBoxSizer(wxVERTICAL);
-	m_gauge = new wxGauge(this, wxID_ANY, 100, wxDefaultPosition, wxSize(350, 20), wxGA_HORIZONTAL);
-	m_gauge->SetValue(0);
-	sizer->Add(m_gauge, 0, wxALL | wxEXPAND, 5);
+	auto* layout = new wxBoxSizer(wxVERTICAL);
 
-	auto* rows = new wxFlexGridSizer(0, 2, 0, 0);
-	rows->AddGrowableCol(1);
+	m_progress = new wxGauge(this, wxID_ANY, 100, wxDefaultPosition, wxSize(350, 20), wxGA_HORIZONTAL);
+	m_progress->SetValue(0);
+	layout->Add(m_progress, 0, wxALL | wxEXPAND, 5);
 
-	m_text = new wxStaticText(this, wxID_ANY, _("Searching for controllers..."));
-	rows->Add(m_text, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+	auto* bottom = new wxFlexGridSizer(0, 2, 0, 0);
+	bottom->AddGrowableCol(1);
+	m_status = new wxStaticText(this, wxID_ANY, _("Searching for controllers..."));
+	bottom->Add(m_status, 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
 
-	{
-		auto* right_side = new wxBoxSizer(wxHORIZONTAL);
+	auto* buttonBox = new wxBoxSizer(wxHORIZONTAL);
+	m_cancel = new wxButton(this, wxID_ANY, _("Cancel"));
+	m_cancel->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { Close(); });
+	buttonBox->Add(m_cancel, 0, wxALL, 5);
+	bottom->Add(buttonBox, 1, wxALIGN_RIGHT, 5);
+	layout->Add(bottom, 0, wxALL | wxEXPAND, 5);
 
-		m_cancelButton = new wxButton(this, wxID_ANY, _("Cancel"));
-		m_cancelButton->Bind(wxEVT_BUTTON, &PairingDialog::OnCancelButton, this);
-		right_side->Add(m_cancelButton, 0, wxALL, 5);
-
-		rows->Add(right_side, 1, wxALIGN_RIGHT, 5);
-	}
-
-	sizer->Add(rows, 0, wxALL | wxEXPAND, 5);
-
-	SetSizerAndFit(sizer);
+	SetSizerAndFit(layout);
 	Centre(wxBOTH);
 
-	Bind(wxEVT_CLOSE_WINDOW, &PairingDialog::OnClose, this);
-	Bind(wxEVT_PROGRESS_PAIR, &PairingDialog::OnGaugeUpdate, this);
+	Bind(wxEVT_CLOSE_WINDOW, &PairingDialog::OnCloseWindow, this);
+	Bind(EVT_PAIRING_STATE, &PairingDialog::OnStateEvent, this);
 
-	m_thread = std::thread(&PairingDialog::WorkerThread, this);
+	m_worker = std::thread(&PairingDialog::Search, this);
 }
 
 PairingDialog::~PairingDialog()
 {
-	Unbind(wxEVT_CLOSE_WINDOW, &PairingDialog::OnClose, this);
+	Unbind(wxEVT_CLOSE_WINDOW, &PairingDialog::OnCloseWindow, this);
+	// normally already joined by the close handler
+	m_stop = true;
+	if (m_worker.joinable())
+		m_worker.join();
 }
 
-void PairingDialog::OnClose(wxCloseEvent& event)
+void PairingDialog::OnCloseWindow(wxCloseEvent& event)
 {
 	event.Skip();
-
-	m_threadShouldQuit = true;
-	if (m_thread.joinable())
-		m_thread.join();
+	m_stop = true;
+	if (m_worker.joinable())
+		m_worker.join();
 }
 
-void PairingDialog::OnCancelButton(const wxCommandEvent& event)
+void PairingDialog::Report(PairingState state)
 {
-	Close();
-}
-
-void PairingDialog::OnGaugeUpdate(wxCommandEvent& event)
-{
-	PairingState state = (PairingState)event.GetInt();
-
-	switch (state)
-	{
-	case PairingState::Pairing:
-	{
-		m_text->SetLabel(_("Found controller. Pairing..."));
-		m_gauge->SetValue(50);
-		break;
-	}
-
-	case PairingState::Finished:
-	{
-		m_text->SetLabel(_("Successfully paired the controller."));
-		m_gauge->SetValue(100);
-		m_cancelButton->SetLabel(_("Close"));
-		break;
-	}
-
-	case PairingState::NoBluetoothAvailable:
-	{
-		m_text->SetLabel(_("Failed to find a suitable Bluetooth radio."));
-		m_gauge->SetValue(0);
-		m_cancelButton->SetLabel(_("Close"));
-		break;
-	}
-
-	case PairingState::SearchFailed:
-	{
-		m_text->SetLabel(_("Failed to find controllers."));
-		m_gauge->SetValue(0);
-		m_cancelButton->SetLabel(_("Close"));
-		break;
-	}
-
-	case PairingState::PairingFailed:
-	{
-		m_text->SetLabel(_("Failed to pair with the found controller."));
-		m_gauge->SetValue(0);
-		m_cancelButton->SetLabel(_("Close"));
-		break;
-	}
-
-	case PairingState::BluetoothUnusable:
-	{
-		m_text->SetLabel(_("Please use your system's Bluetooth manager instead."));
-		m_gauge->SetValue(0);
-		m_cancelButton->SetLabel(_("Close"));
-		break;
-	}
-
-	default:
-	{
-		break;
-	}
-	}
-}
-
-#if BOOST_OS_WINDOWS
-void PairingDialog::WorkerThread()
-{
-	const std::wstring wiimoteName = L"Nintendo RVL-CNT-01";
-	const std::wstring wiiUProControllerName = L"Nintendo RVL-CNT-01-UC";
-
-	const GUID bthHidGuid = {0x00001124, 0x0000, 0x1000, {0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB}};
-
-	const BLUETOOTH_FIND_RADIO_PARAMS radioFindParams =
-		{
-			.dwSize = sizeof(BLUETOOTH_FIND_RADIO_PARAMS)};
-
-	HANDLE radio = INVALID_HANDLE_VALUE;
-	HBLUETOOTH_RADIO_FIND radioFind = BluetoothFindFirstRadio(&radioFindParams, &radio);
-	if (radioFind == nullptr)
-	{
-		UpdateCallback(PairingState::NoBluetoothAvailable);
-		return;
-	}
-
-	BluetoothFindRadioClose(radioFind);
-
-	BLUETOOTH_RADIO_INFO radioInfo =
-		{
-			.dwSize = sizeof(BLUETOOTH_RADIO_INFO)};
-
-	DWORD result = BluetoothGetRadioInfo(radio, &radioInfo);
-	if (result != ERROR_SUCCESS)
-	{
-		UpdateCallback(PairingState::NoBluetoothAvailable);
-		return;
-	}
-
-	const BLUETOOTH_DEVICE_SEARCH_PARAMS searchParams =
-		{
-			.dwSize = sizeof(BLUETOOTH_DEVICE_SEARCH_PARAMS),
-
-			.fReturnAuthenticated = FALSE,
-			.fReturnRemembered = FALSE,
-			.fReturnUnknown = TRUE,
-			.fReturnConnected = FALSE,
-
-			.fIssueInquiry = TRUE,
-			.cTimeoutMultiplier = 5,
-
-			.hRadio = radio};
-
-	BLUETOOTH_DEVICE_INFO info =
-		{
-			.dwSize = sizeof(BLUETOOTH_DEVICE_INFO)};
-
-	while (!m_threadShouldQuit)
-	{
-		HBLUETOOTH_DEVICE_FIND deviceFind = BluetoothFindFirstDevice(&searchParams, &info);
-		if (deviceFind == nullptr)
-		{
-			UpdateCallback(PairingState::SearchFailed);
-			return;
-		}
-
-		while (!m_threadShouldQuit)
-		{
-			if (info.szName == wiimoteName || info.szName == wiiUProControllerName)
-			{
-				BluetoothFindDeviceClose(deviceFind);
-
-				UpdateCallback(PairingState::Pairing);
-
-				wchar_t passwd[6] = {radioInfo.address.rgBytes[0], radioInfo.address.rgBytes[1], radioInfo.address.rgBytes[2], radioInfo.address.rgBytes[3], radioInfo.address.rgBytes[4], radioInfo.address.rgBytes[5]};
-				DWORD bthResult = BluetoothAuthenticateDevice(nullptr, radio, &info, passwd, 6);
-				if (bthResult != ERROR_SUCCESS)
-				{
-					UpdateCallback(PairingState::PairingFailed);
-					return;
-				}
-
-				bthResult = BluetoothSetServiceState(radio, &info, &bthHidGuid, BLUETOOTH_SERVICE_ENABLE);
-				if (bthResult != ERROR_SUCCESS)
-				{
-					UpdateCallback(PairingState::PairingFailed);
-					return;
-				}
-
-				UpdateCallback(PairingState::Finished);
-				return;
-			}
-
-			BOOL nextDevResult = BluetoothFindNextDevice(deviceFind, &info);
-			if (nextDevResult == FALSE)
-			{
-				break;
-			}
-		}
-
-		BluetoothFindDeviceClose(deviceFind);
-	}
-}
-#elif defined(HAS_BLUEZ)
-void PairingDialog::WorkerThread()
-{
-	constexpr static uint8_t LIAC_LAP[] = {0x00, 0x8b, 0x9e};
-
-	constexpr static auto isWiimoteName = [](std::string_view name) {
-		return name == "Nintendo RVL-CNT-01" || name == "Nintendo RVL-CNT-01-TR";
-	};
-
-	// Get default BT device
-	const auto hostId = hci_get_route(nullptr);
-	if (hostId < 0)
-	{
-		UpdateCallback(PairingState::NoBluetoothAvailable);
-		return;
-	}
-
-	// Search for device
-	inquiry_info* infos = nullptr;
-	m_cancelButton->Disable();
-	const auto respCount = hci_inquiry(hostId, 7, 4, LIAC_LAP, &infos, IREQ_CACHE_FLUSH);
-	m_cancelButton->Enable();
-	if (respCount <= 0)
-	{
-		UpdateCallback(PairingState::SearchFailed);
-		return;
-	}
-	stdx::scope_exit infoFree([&]() { bt_free(infos);});
-
-	if (m_threadShouldQuit)
-		return;
-
-	// Open dev to read name
-	const auto hostDev = hci_open_dev(hostId);
-	stdx::scope_exit devClose([&]() { hci_close_dev(hostDev);});
-
-	char nameBuffer[HCI_MAX_NAME_LENGTH] = {};
-
-	bool foundADevice = false;
-	// Get device name and compare. Would use product and vendor id from SDP, but many third-party Wiimotes don't store them
-	for (const auto& devInfo : std::span(infos, respCount))
-	{
-		const auto& addr = devInfo.bdaddr;
-		const auto err =  hci_read_remote_name(hostDev, &addr, HCI_MAX_NAME_LENGTH, nameBuffer,
-								 2000);
-		if (m_threadShouldQuit)
-			return;
-		if (err || !isWiimoteName(nameBuffer))
-			continue;
-
-		L2CapWiimote::AddCandidateAddress(addr);
-		foundADevice = true;
-		const auto& b = addr.b;
-		cemuLog_log(LogType::Force, "Pairing Dialog: Found '{}' with address '{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}'",
-					nameBuffer, b[5], b[4], b[3], b[2], b[1], b[0]);
-	}
-	if (foundADevice)
-		UpdateCallback(PairingState::Finished);
-	else
-		UpdateCallback(PairingState::SearchFailed);
-}
-#else
-void PairingDialog::WorkerThread()
-{
-	UpdateCallback(PairingState::BluetoothUnusable);
-}
-#endif
-void PairingDialog::UpdateCallback(PairingState state)
-{
-	auto* event = new wxCommandEvent(wxEVT_PROGRESS_PAIR);
+	auto* event = new wxCommandEvent(EVT_PAIRING_STATE);
 	event->SetInt((int)state);
 	wxQueueEvent(this, event);
 }
+
+void PairingDialog::OnStateEvent(wxCommandEvent& event)
+{
+	ShowState((PairingState)event.GetInt());
+}
+
+void PairingDialog::ShowState(PairingState state)
+{
+	wxString text;
+	int progress = 0;
+	switch (state)
+	{
+	case PairingState::Pairing:
+		// still working, keep the Cancel button
+		m_status->SetLabel(_("Found controller. Pairing..."));
+		m_progress->SetValue(50);
+		return;
+	case PairingState::Finished:
+		text = _("Successfully paired the controller.");
+		progress = 100;
+		break;
+	case PairingState::NoBluetoothAvailable:
+		text = _("Failed to find a suitable Bluetooth radio.");
+		break;
+	case PairingState::SearchFailed:
+		text = _("Failed to find controllers.");
+		break;
+	case PairingState::PairingFailed:
+		text = _("Failed to pair with the found controller.");
+		break;
+	case PairingState::BluetoothUnusable:
+		text = _("Please use your system's Bluetooth manager instead.");
+		break;
+	default:
+		return;
+	}
+	// every other state ends the search
+	m_status->SetLabel(text);
+	m_progress->SetValue(progress);
+	m_cancel->SetLabel(_("Close"));
+}
+
+#if BOOST_OS_WINDOWS
+
+void PairingDialog::Search()
+{
+	constexpr std::wstring_view kWiimote = L"Nintendo RVL-CNT-01";
+	constexpr std::wstring_view kProController = L"Nintendo RVL-CNT-01-UC";
+	// Bluetooth HID service class
+	const GUID hidService = {0x00001124, 0x0000, 0x1000, {0x80, 0x00, 0x00, 0x80, 0x5F, 0x9B, 0x34, 0xFB}};
+
+	BLUETOOTH_FIND_RADIO_PARAMS radioQuery{};
+	radioQuery.dwSize = sizeof(radioQuery);
+	HANDLE radio = INVALID_HANDLE_VALUE;
+	HBLUETOOTH_RADIO_FIND radioFind = BluetoothFindFirstRadio(&radioQuery, &radio);
+	if (!radioFind)
+	{
+		Report(PairingState::NoBluetoothAvailable);
+		return;
+	}
+	BluetoothFindRadioClose(radioFind);
+	stdx::scope_exit closeRadio([radio]() { CloseHandle(radio); });
+
+	BLUETOOTH_RADIO_INFO radioInfo{};
+	radioInfo.dwSize = sizeof(radioInfo);
+	if (BluetoothGetRadioInfo(radio, &radioInfo) != ERROR_SUCCESS)
+	{
+		Report(PairingState::NoBluetoothAvailable);
+		return;
+	}
+
+	BLUETOOTH_DEVICE_SEARCH_PARAMS query{};
+	query.dwSize = sizeof(query);
+	query.fReturnAuthenticated = FALSE;
+	query.fReturnRemembered = FALSE;
+	query.fReturnUnknown = TRUE;
+	query.fReturnConnected = FALSE;
+	query.fIssueInquiry = TRUE;
+	query.cTimeoutMultiplier = 5;
+	query.hRadio = radio;
+
+	BLUETOOTH_DEVICE_INFO device{};
+	device.dwSize = sizeof(device);
+
+	// keep inquiring until a controller shows up or the dialog closes
+	while (!m_stop)
+	{
+		HBLUETOOTH_DEVICE_FIND found = BluetoothFindFirstDevice(&query, &device);
+		if (!found)
+		{
+			Report(PairingState::SearchFailed);
+			return;
+		}
+		bool more = true;
+		while (more && !m_stop)
+		{
+			const std::wstring_view name = device.szName;
+			if (name != kWiimote && name != kProController)
+			{
+				more = BluetoothFindNextDevice(found, &device) != FALSE;
+				continue;
+			}
+			BluetoothFindDeviceClose(found);
+			Report(PairingState::Pairing);
+
+			// the remote expects the host's radio address as the PIN, one byte per character
+			wchar_t pin[6];
+			for (int i = 0; i < 6; i++)
+				pin[i] = radioInfo.address.rgBytes[i];
+			if (BluetoothAuthenticateDevice(nullptr, radio, &device, pin, 6) != ERROR_SUCCESS ||
+				BluetoothSetServiceState(radio, &device, &hidService, BLUETOOTH_SERVICE_ENABLE) != ERROR_SUCCESS)
+			{
+				Report(PairingState::PairingFailed);
+				return;
+			}
+			Report(PairingState::Finished);
+			return;
+		}
+		BluetoothFindDeviceClose(found);
+	}
+}
+
+#elif defined(HAS_BLUEZ)
+
+void PairingDialog::Search()
+{
+	// limited inquiry access code, used by remotes in sync mode
+	static constexpr uint8_t kLimitedInquiryLap[] = {0x00, 0x8b, 0x9e};
+	auto isRemoteName = [](std::string_view name) {
+		return name == "Nintendo RVL-CNT-01" || name == "Nintendo RVL-CNT-01-TR";
+	};
+
+	const int adapter = hci_get_route(nullptr);
+	if (adapter < 0)
+	{
+		Report(PairingState::NoBluetoothAvailable);
+		return;
+	}
+
+	// the inquiry blocks for several seconds and cannot be interrupted
+	CallAfter([this]() { m_cancel->Disable(); });
+	inquiry_info* replies = nullptr;
+	const int replyCount = hci_inquiry(adapter, 7, 4, kLimitedInquiryLap, &replies, IREQ_CACHE_FLUSH);
+	CallAfter([this]() { m_cancel->Enable(); });
+	if (replyCount <= 0)
+	{
+		Report(PairingState::SearchFailed);
+		return;
+	}
+	stdx::scope_exit freeReplies([&]() { bt_free(replies); });
+	if (m_stop)
+		return;
+
+	const int socket = hci_open_dev(adapter);
+	stdx::scope_exit closeSocket([&]() { hci_close_dev(socket); });
+
+	// match by name: many third-party remotes carry no usable SDP vendor/product ids
+	bool anyRemote = false;
+	char name[HCI_MAX_NAME_LENGTH] = {};
+	for (const inquiry_info& reply : std::span(replies, replyCount))
+	{
+		const bool failed = hci_read_remote_name(socket, &reply.bdaddr, HCI_MAX_NAME_LENGTH, name, 2000) != 0;
+		if (m_stop)
+			return;
+		if (failed || !isRemoteName(name))
+			continue;
+		L2CapWiimote::AddCandidateAddress(reply.bdaddr);
+		anyRemote = true;
+		const uint8_t* a = reply.bdaddr.b;
+		cemuLog_log(LogType::Force, "Pairing Dialog: Found '{}' with address '{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}'",
+					name, a[5], a[4], a[3], a[2], a[1], a[0]);
+	}
+	Report(anyRemote ? PairingState::Finished : PairingState::SearchFailed);
+}
+
+#else
+
+void PairingDialog::Search()
+{
+	Report(PairingState::BluetoothUnusable);
+}
+
+#endif
