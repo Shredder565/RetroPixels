@@ -1,6 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// Copyright 2005 Duddie
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/DSP/DSPDisassembler.h"
 
@@ -18,6 +16,30 @@
 
 namespace DSP
 {
+namespace
+{
+// The operand's bits, moved down (or, for a negative shift, up) into place.
+u32 ExtractField(const param2_t& field, u16 word)
+{
+  const u32 bits = word & field.mask;
+  if (field.lshift < 0)
+    return bits << -field.lshift;
+  return bits >> field.lshift;
+}
+
+// Which extension, if any, rides along in the low bits of word. In the 0x3xxx
+// group only seven bits are free for it; an all-zero field means none.
+const DSPOPCTemplate* FindExtension(const DSPOPCTemplate& main_op, u16 word)
+{
+  const int group = main_op.opcode >> 12;
+  if (group == 0x3)
+    return (word & 0x007f) != 0 ? FindExtOpInfoByOpcode(word & 0x007f) : nullptr;
+  if (group > 0x3)
+    return (word & 0x00ff) != 0 ? FindExtOpInfoByOpcode(word) : nullptr;
+  return nullptr;
+}
+}  // namespace
+
 DSPDisassembler::DSPDisassembler(const AssemblerSettings& settings) : settings_(settings)
 {
 }
@@ -30,113 +52,96 @@ bool DSPDisassembler::Disassemble(std::span<const u16> code, std::string& text)
     return false;
   }
 
-  for (u16 pc = 0; pc < code.size();)
+  u16 pc = 0;
+  while (pc < code.size())
   {
-    bool failed = !DisassembleOpcode(code, &pc, text);
+    const bool ok = DisassembleOpcode(code, &pc, text);
     text.append("\n");
-    if (failed)
+    if (!ok)
       return false;
   }
   return true;
 }
 
-std::string DSPDisassembler::DisassembleParameters(const DSPOPCTemplate& opc, u16 op1, u16 op2)
+std::string DSPDisassembler::FormatOperands(const DSPOPCTemplate& op, u16 word1, u16 word2) const
 {
-  std::string buf;
-
-  for (int j = 0; j < opc.param_count; j++)
+  std::string out;
+  for (int i = 0; i < op.param_count; ++i)
   {
-    if (j > 0)
-      buf += ", ";
+    const param2_t& field = op.params[i];
+    if (i != 0)
+      out += ", ";
 
-    u32 val = (opc.params[j].loc >= 1) ? op2 : op1;
-    val &= opc.params[j].mask;
-    if (opc.params[j].lshift < 0)
-      val = val << (-opc.params[j].lshift);
-    else
-      val = val >> opc.params[j].lshift;
+    u32 value = ExtractField(field, field.loc >= 1 ? word2 : word1);
+    u32 kind = field.type;
 
-    u32 type = opc.params[j].type;
-    if ((type & 0xff) == 0x10)
-      type &= 0xff00;
+    // The multiplier forms that may name either half of an $ax register print
+    // like plain register operands.
+    if ((kind & 0xff) == 0x10)
+      kind &= 0xff00;
 
-    if (type & P_REG)
+    // Register operands: the field is an offset from the base register encoded in
+    // the kind; for the _D forms it selects the accumulator *not* named.
+    if ((kind & P_REG) != 0)
     {
-      // Check for _D parameter - if so flip.
-      if ((type == P_ACC_D) || (type == P_ACCM_D))  // Used to be P_ACCM_D TODO verify
-        val = (~val & 0x1) | ((type & P_REGS_MASK) >> 8);
+      const u32 base = (kind & P_REGS_MASK) >> 8;
+      if (kind == P_ACC_D || kind == P_ACCM_D)
+        value = base | (~value & 1);
       else
-        val |= (type & P_REGS_MASK) >> 8;
-      type &= ~P_REGS_MASK;
+        value |= base;
+      kind &= ~static_cast<u32>(P_REGS_MASK);
     }
 
-    switch (type)
+    switch (kind)
     {
     case P_REG:
-      if (settings_.decode_registers)
-        buf += fmt::format("${}", pdregname(val));
-      else
-        buf += fmt::format("${}", val);
+      out += settings_.decode_registers ? fmt::format("${}", pdregname(static_cast<int>(value))) :
+                                          fmt::format("${}", value);
       break;
 
     case P_PRG:
-      if (settings_.decode_registers)
-        buf += fmt::format("@${}", pdregname(val));
-      else
-        buf += fmt::format("@${}", val);
+      out += settings_.decode_registers ? fmt::format("@${}", pdregname(static_cast<int>(value))) :
+                                          fmt::format("@${}", value);
       break;
 
     case P_VAL:
     case P_ADDR_I:
     case P_ADDR_D:
-      if (settings_.decode_names)
-      {
-        buf += pdname(val);
-      }
-      else
-      {
-        buf += fmt::format("0x{:04x}", val);
-      }
+      out += settings_.decode_names ? pdname(static_cast<u16>(value)) :
+                                      fmt::format("0x{:04x}", value);
       break;
 
     case P_IMM:
-      if (opc.params[j].size != 2)
+      if (field.size == 2)
       {
-        // LSL, LSR, ASL, ASR
-        if (opc.params[j].mask == 0x003f)
-        {
-          // Left and right shifts function essentially as a single shift by a 7-bit signed value,
-          // but are split into two instructions for clarity.
-          buf += fmt::format("#{}", (val & 0x20) != 0 ? (int(val) - 64) : int(val));
-        }
-        else
-        {
-          buf += fmt::format("#0x{:02x}", val);
-        }
+        out += fmt::format("#0x{:04x}", value);
+      }
+      else if (field.mask == 0x003f)
+      {
+        // Shift counts are 6-bit signed numbers.
+        const int count = (value & 0x20) != 0 ? static_cast<int>(value) - 64 : static_cast<int>(value);
+        out += fmt::format("#{}", count);
       }
       else
       {
-        buf += fmt::format("#0x{:04x}", val);
+        out += fmt::format("#0x{:02x}", value);
       }
       break;
 
     case P_MEM:
-      if (opc.params[j].size != 2)
-        val = (u16)(s16)(s8)val;
-
-      if (settings_.decode_names)
-        buf += fmt::format("@{}", pdname(val));
-      else
-        buf += fmt::format("@0x{:04x}", val);
+      // A one-word instruction holds a short address: a sign-extended byte.
+      if (field.size != 2)
+        value = static_cast<u16>(static_cast<s8>(value & 0xff));
+      out += settings_.decode_names ? fmt::format("@{}", pdname(static_cast<u16>(value))) :
+                                      fmt::format("@0x{:04x}", value);
       break;
 
     default:
-      ERROR_LOG_FMT(DSPLLE, "Unknown parameter type: {:x}", std::to_underlying(opc.params[j].type));
+      ERROR_LOG_FMT(DSPLLE, "Unknown parameter type: {:x}", std::to_underlying(field.type));
       break;
     }
   }
-
-  return buf;
+  return out;
 }
 
 bool DSPDisassembler::DisassembleOpcode(std::span<const u16> code, u16* pc, std::string& dest)
@@ -147,106 +152,72 @@ bool DSPDisassembler::DisassembleOpcode(std::span<const u16> code, u16* pc, std:
 bool DSPDisassembler::DisassembleOpcode(const u16* binbuf, size_t binbuf_size, u16* pc,
                                         std::string& dest)
 {
-  const u16 wrapped_pc = (*pc & 0x7fff);
-  if (wrapped_pc >= binbuf_size)
+  const u16 index = *pc & 0x7fff;
+  if (index >= binbuf_size)
   {
-    ++pc;
+    // *pc is left alone.
     dest.append("; outside memory");
     return false;
   }
 
-  const u16 op1 = binbuf[wrapped_pc];
-
-  // Find main opcode
-  const DSPOPCTemplate* opc = FindOpInfoByOpcode(op1);
-  if (!opc)
-    opc = &cw;
-
-  bool is_extended = false;
-  bool is_only_7_bit_ext = false;
-
-  if (((opc->opcode >> 12) == 0x3) && (op1 & 0x007f))
-  {
-    is_extended = true;
-    is_only_7_bit_ext = true;
-  }
-  else if (((opc->opcode >> 12) > 0x3) && (op1 & 0x00ff))
-  {
-    is_extended = true;
-  }
-
-  const DSPOPCTemplate* opc_ext = nullptr;
-  if (is_extended)
-  {
-    // opcode has an extension
-    const u16 extended_opcode = is_only_7_bit_ext ? op1 & 0x7F : op1;
-    opc_ext = FindExtOpInfoByOpcode(extended_opcode);
-  }
-
-  // printing
+  const u16 word1 = binbuf[index];
+  const DSPOPCTemplate* op = FindOpInfoByOpcode(word1);
+  if (op == nullptr)
+    op = &cw;
+  const DSPOPCTemplate* ext = FindExtension(*op, word1);
 
   if (settings_.show_pc)
-    dest += fmt::format("{:04x} ", wrapped_pc);
+    dest += fmt::format("{:04x} ", index);
 
-  u16 op2;
-
-  // Size 2 - the op has a large immediate.
-  if (opc->size == 2)
+  u16 word2 = 0;
+  if (op->size == 2)
   {
-    if (wrapped_pc + 1u >= binbuf_size)
+    if (index + 1u >= binbuf_size)
     {
       if (settings_.show_hex)
-        dest += fmt::format("{:04x} ???? ", op1);
-      dest += fmt::format("; Insufficient data for large immediate");
-      *pc += opc->size;
+        dest += fmt::format("{:04x} ???? ", word1);
+      dest += "; Insufficient data for large immediate";
+      *pc = static_cast<u16>(*pc + op->size);
       return false;
     }
-
-    op2 = binbuf[wrapped_pc + 1];
+    word2 = binbuf[index + 1];
     if (settings_.show_hex)
-      dest += fmt::format("{:04x} {:04x} ", op1, op2);
+      dest += fmt::format("{:04x} {:04x} ", word1, word2);
   }
-  else
+  else if (settings_.show_hex)
   {
-    op2 = 0;
-    if (settings_.show_hex)
-      dest += fmt::format("{:04x}      ", op1);
+    dest += fmt::format("{:04x}      ", word1);
   }
 
-  std::string opname = opc->name;
-  if (is_extended)
-    opname += fmt::format("{}{}", settings_.ext_separator, opc_ext->name);
+  std::string mnemonic = op->name;
+  if (ext != nullptr)
+  {
+    mnemonic += settings_.ext_separator;
+    mnemonic += ext->name;
+  }
   if (settings_.lower_case_ops)
-    Common::ToLower(&opname);
+    Common::ToLower(&mnemonic);
 
   if (settings_.print_tabs)
-    dest += fmt::format("{}\t", opname);
+    dest += mnemonic + '\t';
   else
-    dest += fmt::format("{:<12}", opname);
+    dest += fmt::format("{:<12}", mnemonic);
 
-  if (opc->param_count > 0)
-    dest += DisassembleParameters(*opc, op1, op2);
+  if (op->param_count > 0)
+    dest += FormatOperands(*op, word1, word2);
 
-  // Handle opcode extension.
-  if (is_extended)
+  if (ext != nullptr)
   {
-    if (opc->param_count > 0)
-      dest += " ";
-
-    dest += ": ";
-
-    if (opc_ext->param_count > 0)
-      dest += DisassembleParameters(*opc_ext, op1, op2);
+    dest += op->param_count > 0 ? " : " : ": ";
+    if (ext->param_count > 0)
+      dest += FormatOperands(*ext, word1, word2);
   }
 
-  if (opc->opcode_mask == 0)
-  {
-    // unknown opcode
+  if (op->opcode_mask == 0)
     dest += "\t\t; *** UNKNOWN OPCODE ***";
-  }
 
-  *pc += is_extended ? opc_ext->size : opc->size;
-
+  // An instruction with an extension is one word long.
+  *pc = static_cast<u16>(*pc + (ext != nullptr ? ext->size : op->size));
   return true;
 }
 }  // namespace DSP
