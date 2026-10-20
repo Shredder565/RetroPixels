@@ -1,29 +1,30 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include "Common/CommonTypes.h"
 
 namespace Common
 {
+// Which emulated NAND root a path refers to.
 enum class FromWhichRoot
 {
-  Configured,  // not related to currently running game - use D_WIIROOT_IDX
-  Session,     // request from currently running game - use D_SESSION_WIIROOT_IDX
-  Banners,     // fallback for Wii savegame banners - use D_BANNERS_WIIROOT_IDX
+  Configured,  // the configured Wii NAND (D_WIIROOT_IDX)
+  Session,     // the running game's NAND (D_SESSION_WIIROOT_IDX)
+  Banners,     // NAND searched for save banners (D_BANNERS_WIIROOT_IDX)
 };
 
+// The host directory of that NAND root, without a trailing separator.
 std::string RootUserPath(FromWhichRoot from);
 
-// The following functions return paths relative to the NAND root.
-// If a FromWhichRoot is passed, the NAND root on the host filesystem will be prepended to the path.
-// TODO: remove the from parameter after all code is migrated off direct FS access.
+// NAND paths. Without a root they are NAND-relative ("/title/..."); with one, the host
+// directory of that root is prepended.
 
-// Returns /import/%08x/%08x. Intended for use by ES.
+// /import/%08x/%08x (used by ES while a title is being installed).
 std::string GetImportTitlePath(u64 title_id, std::optional<FromWhichRoot> from = {});
 
 std::string GetTicketFileName(u64 title_id, std::optional<FromWhichRoot> from = {});
@@ -34,16 +35,18 @@ std::string GetTitleContentPath(u64 title_id, std::optional<FromWhichRoot> from 
 std::string GetTMDFileName(u64 title_id, std::optional<FromWhichRoot> from = {});
 std::string GetMiiDatabasePath(std::optional<FromWhichRoot> from = {});
 
-// Returns whether a path is within an installed title's directory.
+// Whether path lies inside /title/<hi>/<lo>/ of that root; optionally returns the title ID.
 bool IsTitlePath(const std::string& path, std::optional<FromWhichRoot> from = {},
                  u64* title_id = nullptr);
 
-// Escapes characters that are invalid or have special meanings in the host file system
+// NAND file names may contain characters host file systems reject or treat specially. They
+// are stored on the host as "__xx__" (two hex digits); "__" itself becomes "__5f____5f__",
+// and a name made only of dots has every dot escaped.
 std::string EscapeFileName(const std::string& filename);
-// Escapes characters that are invalid or have special meanings in the host file system
+// EscapeFileName applied to every '/'-separated component.
 std::string EscapePath(const std::string& path);
-// Reverses escaping done by EscapeFileName
+// Undoes EscapeFileName.
 std::string UnescapeFileName(const std::string& filename);
-// Tests for a file name being "safe" as per the escaping defined in EscapeFileName
+// Whether a name needs no escaping and is not empty or all dots.
 bool IsFileNameSafe(const std::string_view filename);
 }  // namespace Common

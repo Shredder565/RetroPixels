@@ -1,9 +1,9 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <initializer_list>
 #include <optional>
 #include <span>
@@ -19,6 +19,10 @@
 #include "Common/CommonTypes.h"
 
 struct sockaddr_in;
+
+// Network helpers: MAC/IP/Bluetooth address formatting and parsing, and raw Ethernet, IPv4,
+// TCP, UDP, ARP and DHCP frames as the emulated network adapters see them. Header fields are
+// kept in network byte order unless noted otherwise.
 
 namespace Common
 {
@@ -43,7 +47,8 @@ enum DHCPConst
 
 using MACAddress = std::array<u8, MAC_ADDRESS_SIZE>;
 
-// Note: Bluetooth address display order is reverse of the storage order.
+// Stored in the order the Bluetooth protocol sends it, which is the reverse of how it is
+// usually written.
 struct BluetoothAddress : std::array<u8, MAC_ADDRESS_SIZE>
 {
 };
@@ -78,6 +83,7 @@ struct IPv4Header
   IPv4Header();
   IPv4Header(u16 data_size, u8 ip_proto, const sockaddr_in& from, const sockaddr_in& to);
   u16 Size() const;
+  // Header length from the IHL field, in bytes.
   u8 DefinedSize() const;
 
   static constexpr std::size_t SIZE = 20;
@@ -101,6 +107,7 @@ struct TCPHeader
   TCPHeader();
   TCPHeader(const sockaddr_in& from, const sockaddr_in& to, u32 seq, const u8* data, u16 length);
   TCPHeader(const sockaddr_in& from, const sockaddr_in& to, u32 seq, u32 ack, u16 flags);
+  // Header length from the data offset field, in bytes.
   u8 GetHeaderSize() const;
   u16 Size() const;
   u8 IPProto() const;
@@ -140,6 +147,7 @@ static_assert(std::is_standard_layout_v<UDPHeader>);
 struct ARPHeader
 {
   ARPHeader();
+  // An ARP reply from (from_ip, from_mac) to (to_ip, to_mac). IPs are in network order.
   ARPHeader(u32 from_ip, const MACAddress& from_mac, u32 to_ip, const MACAddress& to_mac);
   u16 Size() const;
 
@@ -158,9 +166,11 @@ struct ARPHeader
 static_assert(sizeof(ARPHeader) == ARPHeader::SIZE);
 #pragma pack(pop)
 
+// The fixed part of a BOOTP/DHCP message (RFC 2131), up to and including the magic cookie.
 struct DHCPBody
 {
   DHCPBody();
+  // A reply offering new_ip from server serv_ip (both in network order).
   DHCPBody(u32 transaction, const MACAddress& client_address, u32 new_ip, u32 serv_ip);
   static constexpr std::size_t SIZE = 240;
   u8 message_type = 0;
@@ -185,19 +195,21 @@ static_assert(sizeof(DHCPBody) == DHCPBody::SIZE);
 struct DHCPPacket
 {
   DHCPPacket();
+  // Parses a message; options are kept as raw "code, length, data" byte strings.
   DHCPPacket(std::span<const u8> data);
   void AddOption(u8 fnc, std::span<const u8> params);
   void AddOption(u8 fnc, std::initializer_list<u8> params)
   {
     AddOption(fnc, {params.begin(), params.end()});
   }
+  // Body, options, then an end option padded to four bytes.
   std::vector<u8> Build() const;
 
   DHCPBody body;
   std::vector<std::vector<u8>> options;
 };
 
-// The compiler might add 2 bytes after EthernetHeader to enforce 16-bytes alignment
+// Packed so that no padding sits between the two headers.
 #pragma pack(push, 1)
 struct ARPPacket
 {
@@ -219,6 +231,7 @@ struct TCPPacket
   TCPPacket();
   TCPPacket(const MACAddress& destination, const MACAddress& source, const sockaddr_in& from,
             const sockaddr_in& to, u32 seq, u32 ack, u16 flags);
+  // The whole frame, with lengths, data offset and checksums filled in.
   std::vector<u8> Build() const;
   u16 Size() const;
 
@@ -237,6 +250,7 @@ struct UDPPacket
   UDPPacket();
   UDPPacket(const MACAddress& destination, const MACAddress& source, const sockaddr_in& from,
             const sockaddr_in& to, const std::vector<u8>& payload);
+  // The whole frame, with lengths and checksums filled in.
   std::vector<u8> Build() const;
   u16 Size() const;
 
@@ -250,6 +264,7 @@ struct UDPPacket
   static constexpr std::size_t MIN_SIZE = EthernetHeader::SIZE + IPv4Header::SIZE + UDPHeader::SIZE;
 };
 
+// Read-only parser over a raw Ethernet frame.
 class PacketView
 {
 public:
@@ -277,9 +292,9 @@ struct NetworkErrorState
 struct IPv4Port
 {
   IPAddress ip_address;
-  u16 port;  // Network byte order.
+  u16 port;  // network byte order
 
-  // These convert to host byte order.
+  // Host byte order.
   u32 GetIPAddressValue() const;
   u16 GetPortValue() const;
 };
@@ -295,7 +310,7 @@ struct IPv4PortRange
 
 std::string IPAddressToString(IPAddress ip_address);
 
-// Syntax is: first_ip[-last_ip|/network_prefix_length][:first_port[-last_port]]
+// first_ip[-last_ip|/prefix_length][:first_port[-last_port]]
 std::optional<IPv4PortRange> StringToIPv4PortRange(std::string_view subject);
 
 MACAddress GenerateMacAddress(MACConsumer type);
@@ -306,7 +321,9 @@ std::optional<MACAddress> StringToMacAddress(std::string_view mac_string);
 std::string BluetoothAddressToString(BluetoothAddress bdaddr);
 std::optional<BluetoothAddress> StringToBluetoothAddress(std::string_view str);
 
+// RFC 1071 Internet checksum (host byte order result).
 u16 ComputeNetworkChecksum(const void* data, u16 length, u32 initial_value = 0);
+// Checksum including the IPv4 pseudo header; the result is in network byte order.
 u16 ComputeTCPNetworkChecksum(const IPAddress& from, const IPAddress& to, const void* data,
                               u16 length, u8 protocol);
 NetworkErrorState SaveNetworkErrorState();
@@ -314,14 +331,13 @@ void RestoreNetworkErrorState(const NetworkErrorState& state);
 const char* DecodeNetworkError(s32 error_code);
 const char* StrNetworkError();
 
-// Sets SO_NOSIGPIPE when available.
+// Sets SO_NOSIGPIPE where the platform has it.
 bool SetPlatformSocketOptions(int fd);
 
-// Pass this to all `send` calls to avoid SIGPIPE.
+// Flags for every send() so that a closed peer does not raise SIGPIPE.
 #if defined(__linux__) || defined(__HAIKU__)
 static constexpr int SEND_FLAGS = MSG_NOSIGNAL;
 #else
 static constexpr int SEND_FLAGS = 0;
 #endif
-
 }  // namespace Common

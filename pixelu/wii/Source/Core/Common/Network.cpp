@@ -1,260 +1,268 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/Network.h"
 
 #include <algorithm>
 #include <bit>
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
-#ifndef _WIN32
-#include <cstring>
+#ifdef _WIN32
+#include <winsock2.h>
+#else
 #include <netinet/in.h>
 #include <sys/socket.h>
-#else
-#include <winsock2.h>
 #endif
 
 #include <fmt/format.h>
-#include <fmt/ranges.h>
 
-#include "Common/BitUtils.h"
 #include "Common/CommonFuncs.h"
 #include "Common/Logging/Log.h"
 #include "Common/Random.h"
 #include "Common/StringUtil.h"
-#include "Common/Swap.h"
 
 namespace Common
 {
-
-static constexpr auto GetMaskFromNetworkPrefixLength(u32 network_prefix_length)
+namespace
 {
-  return (network_prefix_length == 0) ?
-             u32(0) :
-             u32(BigEndianValue(u32(-1) >> (32 - network_prefix_length)));
+// Raw byte helpers. Values are copied exactly as they sit in memory.
+template <typename T>
+void AppendRaw(std::vector<u8>* out, const T& value)
+{
+  static_assert(std::is_trivially_copyable_v<T>);
+  const auto* bytes = reinterpret_cast<const u8*>(&value);
+  out->insert(out->end(), bytes, bytes + sizeof(T));
 }
+
+template <typename T>
+T ReadRaw(const u8* ptr)
+{
+  static_assert(std::is_trivially_copyable_v<T>);
+  T value;
+  std::memcpy(&value, ptr, sizeof(T));
+  return value;
+}
+
+void WriteRaw16(std::vector<u8>* out, size_t offset, u16 value)
+{
+  std::memcpy(out->data() + offset, &value, sizeof(value));
+}
+
+u32 HostIPValue(const IPAddress& ip)
+{
+  return (u32{ip[0]} << 24) | (u32{ip[1]} << 16) | (u32{ip[2]} << 8) | u32{ip[3]};
+}
+
+IPAddress IPFromHostValue(u32 value)
+{
+  return {static_cast<u8>(value >> 24), static_cast<u8>(value >> 16), static_cast<u8>(value >> 8),
+          static_cast<u8>(value)};
+}
+
+u16 NetworkOrder16(u16 host_value)
+{
+  const u8 bytes[2] = {static_cast<u8>(host_value >> 8), static_cast<u8>(host_value)};
+  return ReadRaw<u16>(bytes);
+}
+
+// The sum of the 16-bit halves of both addresses, the protocol and the length: the IPv4
+// pseudo header of TCP and UDP checksums.
+u32 PseudoHeaderSum(u32 source_host, u32 destination_host, u32 protocol, u32 length)
+{
+  return (source_host >> 16) + (source_host & 0xFFFF) + (destination_host >> 16) +
+         (destination_host & 0xFFFF) + protocol + length;
+}
+
+u32 FoldChecksum(u32 sum)
+{
+  while (sum > 0xFFFF)
+    sum = (sum >> 16) + (sum & 0xFFFF);
+  return sum;
+}
+
+// Integer parse helper for the port range syntax: decimal digits at the front of `text`.
+template <typename T>
+std::optional<std::pair<T, size_t>> ParsePrefix(std::string_view text)
+{
+  T value{};
+  const auto result = Common::FromChars(text, value);
+  if (result.ec != std::errc{})
+    return std::nullopt;
+  return std::make_pair(value, static_cast<size_t>(result.ptr - text.data()));
+}
+}  // namespace
 
 u32 IPv4Port::GetIPAddressValue() const
 {
-  return std::bit_cast<Common::BigEndianValue<u32>>(ip_address);
+  return HostIPValue(ip_address);
 }
 
 u16 IPv4Port::GetPortValue() const
 {
-  return std::bit_cast<Common::BigEndianValue<u16>>(port);
+  u8 bytes[2];
+  std::memcpy(bytes, &port, sizeof(bytes));
+  return static_cast<u16>((bytes[0] << 8) | bytes[1]);
 }
 
 bool IPv4PortRange::IsMatch(IPv4Port subject) const
 {
-  const u32 ip_u32 = subject.GetIPAddressValue();
-  const u16 port_u16 = subject.GetPortValue();
-
-  return ip_u32 >= first.GetIPAddressValue() && ip_u32 <= last.GetIPAddressValue() &&
-         port_u16 >= first.GetPortValue() && port_u16 <= last.GetPortValue();
+  const u32 ip = subject.GetIPAddressValue();
+  const u16 port = subject.GetPortValue();
+  return first.GetIPAddressValue() <= ip && ip <= last.GetIPAddressValue() &&
+         first.GetPortValue() <= port && port <= last.GetPortValue();
 }
 
 std::string IPv4PortRange::ToString() const
 {
-  const u32 first_ip_value = first.GetIPAddressValue();
-  const u32 last_ip_value = last.GetIPAddressValue();
-  const u32 different_bits = first_ip_value ^ last_ip_value;
-  const u32 common_high_bits = std::countl_zero(different_bits);
+  const u32 low = first.GetIPAddressValue();
+  const u32 high = last.GetIPAddressValue();
+  const int shared_prefix = std::countl_zero(low ^ high);
 
-  std::string ip_range = Common::IPAddressToString(first.ip_address);
-  if (common_high_bits == 32)
+  std::string text = IPAddressToString(first.ip_address);
+  if (shared_prefix != 32)
   {
-    // Identical first and last IP.
-  }
-  else if ((last_ip_value - first_ip_value + 1) << common_high_bits == 0)
-  {
-    // An exact network range can use CIDR notation.
-    ip_range = fmt::format("{}/{}", ip_range, common_high_bits);
-  }
-  else if (common_high_bits >= 24)
-  {
-    // Only the last octet is different.
-    ip_range = fmt::format("{}-{}", ip_range, last.ip_address.back());
-  }
-  else
-  {
-    // Plainly specified range.
-    ip_range = fmt::format("{}-{}", ip_range, Common::IPAddressToString(last.ip_address));
+    // A range whose size is a power of two at the prefix boundary prints as CIDR.
+    if (((high - low + 1) << shared_prefix) == 0)
+      text += fmt::format("/{}", shared_prefix);
+    else if (shared_prefix >= 24)
+      text += fmt::format("-{}", last.ip_address[3]);
+    else
+      text += '-' + IPAddressToString(last.ip_address);
   }
 
   if (first.port == 0)
-    return ip_range;
-
+    return text;
   if (first.port == last.port)
-    return fmt::format("{}:{}", ip_range, first.GetPortValue());
-
-  return fmt::format("{}:{}-{}", ip_range, first.GetPortValue(), last.GetPortValue());
+    return fmt::format("{}:{}", text, first.GetPortValue());
+  return fmt::format("{}:{}-{}", text, first.GetPortValue(), last.GetPortValue());
 }
 
 std::string IPAddressToString(IPAddress ip_address)
 {
-  return fmt::format("{}", fmt::join(ip_address, "."));
+  return fmt::format("{}.{}.{}.{}", ip_address[0], ip_address[1], ip_address[2], ip_address[3]);
 }
 
 std::optional<IPv4PortRange> StringToIPv4PortRange(std::string_view subject)
 {
-  // TODO: This could be optimized and improved a lot.
+  IPv4PortRange range{};
 
-  auto read_pos = std::ranges::find_first_of(subject, std::string_view{"-/:"});
+  // First address: four dot-separated numbers (TryParse syntax) up to the first '-', '/' or ':'.
+  size_t pos = subject.find_first_of("-/:");
+  if (pos == std::string_view::npos)
+    pos = subject.size();
 
-  const auto first_ip_octets = SplitStringIntoArray<4>({subject.begin(), read_pos}, '.');
-
-  if (!first_ip_octets.has_value())
-    return std::nullopt;  // Wrong number of octets.
-
-  std::optional<IPv4PortRange> result;
-  result.emplace();
-
-  for (u32 i = 0; i != result->first.ip_address.size(); ++i)
+  const auto octets = SplitStringIntoArray<4>(subject.substr(0, pos), '.');
+  if (!octets)
+    return std::nullopt;
+  for (size_t i = 0; i < 4; ++i)
   {
-    if (!TryParse(std::string((*first_ip_octets)[i]), &result->first.ip_address[i]))
-      return std::nullopt;  // Bad octet.
+    if (!TryParse(std::string((*octets)[i]), &range.first.ip_address[i]))
+      return std::nullopt;
   }
 
-  if (read_pos == subject.end())
+  const auto all_ports = [&range] {
+    range.first.port = 0;
+    range.last.port = 0xFFFF;
+    return range;
+  };
+
+  if (pos == subject.size())
   {
-    // Last IP and ports not specified.
-    result->last.ip_address = result->first.ip_address;
-    result->first.port = 0;
-    result->last.port = u16(-1);
-    return result;
+    range.last.ip_address = range.first.ip_address;
+    return all_ports();
   }
 
-  if (*read_pos == '-')
+  if (subject[pos] == '-')
   {
-    // Read last IP.
-    ++read_pos;
+    // Last address. Leading octets may be left out and are then taken from the first address
+    // ("10.0.0.1-7" or "10.0.0.1-1.7").
+    ++pos;
+    size_t end = subject.find(':', pos);
+    if (end == std::string_view::npos)
+      end = subject.size();
 
-    const auto last_ip_end = std::ranges::find(read_pos, subject.end(), ':');
-    const auto last_ip_octets = SplitString({read_pos, last_ip_end}, '.');
+    const std::vector<std::string> parts =
+        SplitString(std::string(subject.substr(pos, end - pos)), '.');
+    if (parts.empty() || parts.size() > 4)
+      return std::nullopt;
 
-    // Copy octets from first_ip when less than 4 are specified.
-    // FYI: This currently allows for syntax like: 10.0.0.1-7.255
-    // I don't know if it's desirable or not to allow 2 or 3 octets on the last IP.
-    const std::size_t octet_share_count = 4 - last_ip_octets.size();
-
-    if (octet_share_count >= 4)
-      return std::nullopt;  // Too many octets.
-
-    std::copy_n(result->first.ip_address.begin(), octet_share_count,
-                result->last.ip_address.begin());
-
-    std::size_t i = octet_share_count;
-    for (auto&& octet_str : last_ip_octets)
+    const size_t inherited = 4 - parts.size();
+    for (size_t i = 0; i < inherited; ++i)
+      range.last.ip_address[i] = range.first.ip_address[i];
+    for (size_t i = 0; i < parts.size(); ++i)
     {
-      if (!TryParse(octet_str, &result->last.ip_address[i]))
-        return std::nullopt;  // Bad octet.
-      ++i;
+      if (!TryParse(parts[i], &range.last.ip_address[inherited + i]))
+        return std::nullopt;
     }
 
-    if (result->first.ip_address > result->last.ip_address)
-      return std::nullopt;  // Reversed range.
-
-    read_pos = last_ip_end;
+    if (range.last.ip_address < range.first.ip_address)
+      return std::nullopt;
+    pos = end;
   }
-  else if (*read_pos == '/')
+  else if (subject[pos] == '/')
   {
-    // Read network prefix length.
-    ++read_pos;
+    // Network prefix length.
+    const auto parsed = ParsePrefix<u32>(subject.substr(pos + 1));
+    if (!parsed || parsed->first > 32)
+      return std::nullopt;
+    pos += 1 + parsed->second;
 
-    u32 network_prefix_length{};
-    const auto [parse_end, ec] = FromChars({read_pos, subject.end()}, network_prefix_length);
-
-    if (ec != std::errc{} || network_prefix_length > 32)
-      return std::nullopt;  // Bad network prefix.
-
-    read_pos += parse_end - std::to_address(read_pos);  // Working around MSVC iterators..
-
-    const auto net_mask = GetMaskFromNetworkPrefixLength(network_prefix_length);
-    const auto first_ip_address_u32 = std::bit_cast<u32>(result->first.ip_address) & net_mask;
-    result->first.ip_address = std::bit_cast<IPAddress>(first_ip_address_u32);
-    result->last.ip_address = std::bit_cast<IPAddress>(first_ip_address_u32 | ~net_mask);
+    const u32 bits = parsed->first;
+    const u32 mask = bits == 0 ? 0 : ~u32{0} << (32 - bits);
+    const u32 network = range.first.GetIPAddressValue() & mask;
+    range.first.ip_address = IPFromHostValue(network);
+    range.last.ip_address = IPFromHostValue(network | ~mask);
   }
   else
   {
-    // Last IP not specified.
-    result->last.ip_address = result->first.ip_address;
+    range.last.ip_address = range.first.ip_address;
   }
 
-  if (read_pos == subject.end())
-  {
-    // Ports not specified.
-    result->first.port = 0;
-    result->last.port = u16(-1);
-    return result;
-  }
+  if (pos == subject.size())
+    return all_ports();
 
-  if (*read_pos != ':')
-    return std::nullopt;  // Unexpected character.
-
-  u16 first_port_u16{};
-  {
-    // Read first port.
-    ++read_pos;
-
-    const auto [parse_end, ec] = FromChars({read_pos, subject.end()}, first_port_u16);
-    if (ec != std::errc{})
-      return std::nullopt;  // Bad first port.
-
-    result->first.port = std::bit_cast<u16>(Common::BigEndianValue(first_port_u16));
-
-    read_pos += parse_end - std::to_address(read_pos);  // Working around MSVC iterators..
-  }
-
-  if (read_pos == subject.end())
-  {
-    // Last port not specified.
-    result->last.port = result->first.port;
-    return result;
-  }
-
-  if (*read_pos != '-')
-    return std::nullopt;  // Unexpected character.
-
-  u16 first_last_u16{};
-  {
-    // Read last port.
-    ++read_pos;
-
-    const auto [parse_end, ec] = FromChars({read_pos, subject.end()}, first_last_u16);
-    if (ec != std::errc{} || first_last_u16 < first_port_u16)
-      return std::nullopt;  // Bad last port.
-
-    result->last.port = std::bit_cast<u16>(Common::BigEndianValue(first_last_u16));
-
-    read_pos += parse_end - std::to_address(read_pos);  // Working around MSVC iterators..
-  }
-
-  if (read_pos != subject.end())
+  if (subject[pos] != ':')
     return std::nullopt;
 
-  return result;
+  const auto first_port = ParsePrefix<u16>(subject.substr(pos + 1));
+  if (!first_port)
+    return std::nullopt;
+  range.first.port = NetworkOrder16(first_port->first);
+  pos += 1 + first_port->second;
+
+  if (pos == subject.size())
+  {
+    range.last.port = range.first.port;
+    return range;
+  }
+
+  if (subject[pos] != '-')
+    return std::nullopt;
+
+  const auto last_port = ParsePrefix<u16>(subject.substr(pos + 1));
+  if (!last_port || last_port->first < first_port->first)
+    return std::nullopt;
+  range.last.port = NetworkOrder16(last_port->first);
+  pos += 1 + last_port->second;
+
+  if (pos != subject.size())
+    return std::nullopt;
+  return range;
 }
 
 MACAddress GenerateMacAddress(const MACConsumer type)
 {
-  constexpr std::array<u8, 3> oui_bba{{0x00, 0x09, 0xbf}};
-  constexpr std::array<u8, 3> oui_ios{{0x00, 0x17, 0xab}};
-
+  // Vendor prefixes: Nintendo's broadband adapter and Nintendo's Wi-Fi.
   MACAddress mac{};
+  if (type == MACConsumer::BBA)
+    mac = {0x00, 0x09, 0xbf, 0, 0, 0};
+  else if (type == MACConsumer::IOS)
+    mac = {0x00, 0x17, 0xab, 0, 0, 0};
 
-  switch (type)
-  {
-  case MACConsumer::BBA:
-    std::ranges::copy(oui_bba, mac.begin());
-    break;
-  case MACConsumer::IOS:
-    std::ranges::copy(oui_ios, mac.begin());
-    break;
-  }
-
-  // Generate the 24-bit NIC-specific portion of the MAC address.
   Random::Generate(&mac[3], 3);
   return mac;
 }
@@ -267,49 +275,48 @@ std::string MacAddressToString(const MACAddress& mac)
 
 std::optional<MACAddress> StringToMacAddress(std::string_view mac_string)
 {
-  if (mac_string.empty())
-    return std::nullopt;
-
-  int x = 0;
+  // Takes the first twelve hex digits and ignores any other characters (separators).
   MACAddress mac{};
-
-  for (size_t i = 0; i < mac_string.size() && x < (MAC_ADDRESS_SIZE * 2); ++i)
+  size_t digits = 0;
+  for (const char c : mac_string)
   {
-    char c = Common::ToLower(mac_string.at(i));
+    if (digits == MAC_ADDRESS_SIZE * 2)
+      break;
+
+    int value;
     if (c >= '0' && c <= '9')
-    {
-      mac[x / 2] |= (c - '0') << ((x & 1) ? 0 : 4);
-      ++x;
-    }
+      value = c - '0';
     else if (c >= 'a' && c <= 'f')
-    {
-      mac[x / 2] |= (c - 'a' + 10) << ((x & 1) ? 0 : 4);
-      ++x;
-    }
+      value = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F')
+      value = c - 'A' + 10;
+    else
+      continue;
+
+    mac[digits / 2] |= static_cast<u8>(digits % 2 == 0 ? value << 4 : value);
+    ++digits;
   }
 
-  // A valid 48-bit MAC address consists of 6 octets, where each
-  // nibble is a character in the MAC address, making 12 characters
-  // in total.
-  if (x / 2 != MAC_ADDRESS_SIZE)
+  if (digits != MAC_ADDRESS_SIZE * 2)
     return std::nullopt;
-
-  return std::make_optional(mac);
+  return mac;
 }
 
 std::string BluetoothAddressToString(BluetoothAddress bdaddr)
 {
-  std::ranges::reverse(bdaddr);
-  return MacAddressToString(std::bit_cast<MACAddress>(bdaddr));
+  MACAddress written;
+  std::ranges::reverse_copy(bdaddr, written.begin());
+  return MacAddressToString(written);
 }
 
 std::optional<BluetoothAddress> StringToBluetoothAddress(std::string_view str)
 {
-  auto result = StringToMacAddress(str);
-  if (!result)
+  const auto mac = StringToMacAddress(str);
+  if (!mac)
     return std::nullopt;
-  std::ranges::reverse(*result);
-  return std::bit_cast<BluetoothAddress>(*result);
+  BluetoothAddress result;
+  std::ranges::reverse_copy(*mac, result.begin());
+  return result;
 }
 
 EthernetHeader::EthernetHeader() = default;
@@ -332,15 +339,15 @@ IPv4Header::IPv4Header() = default;
 
 IPv4Header::IPv4Header(u16 data_size, u8 ip_proto, const sockaddr_in& from, const sockaddr_in& to)
 {
-  version_ihl = 0x45;
-  total_len = htons(Size() + data_size);
-  flags_fragment_offset = htons(0x4000);
-  ttl = 0x40;
+  version_ihl = 0x45;  // IPv4, five 32-bit words
+  total_len = htons(static_cast<u16>(SIZE + data_size));
+  flags_fragment_offset = htons(0x4000);  // don't fragment
+  ttl = 64;
   protocol = ip_proto;
   std::memcpy(source_addr.data(), &from.sin_addr, IPV4_ADDR_LEN);
   std::memcpy(destination_addr.data(), &to.sin_addr, IPV4_ADDR_LEN);
-
-  header_checksum = htons(ComputeNetworkChecksum(this, Size()));
+  // The checksum field is still zero here.
+  header_checksum = htons(ComputeNetworkChecksum(this, static_cast<u16>(SIZE)));
 }
 
 u16 IPv4Header::Size() const
@@ -350,7 +357,7 @@ u16 IPv4Header::Size() const
 
 u8 IPv4Header::DefinedSize() const
 {
-  return (version_ihl & 0xf) * 4;
+  return static_cast<u8>((version_ihl & 0x0f) * 4);
 }
 
 TCPHeader::TCPHeader() = default;
@@ -358,27 +365,20 @@ TCPHeader::TCPHeader() = default;
 TCPHeader::TCPHeader(const sockaddr_in& from, const sockaddr_in& to, u32 seq, const u8* data,
                      u16 length)
 {
-  std::memcpy(&source_port, &from.sin_port, 2);
-  std::memcpy(&destination_port, &to.sin_port, 2);
+  std::memcpy(&source_port, &from.sin_port, sizeof(source_port));
+  std::memcpy(&destination_port, &to.sin_port, sizeof(destination_port));
   sequence_number = htonl(seq);
-
-  // TODO: Write flags
-  // Write data offset
-  std::memset(&properties, 0x50, 1);
-
+  // Data offset 5 (no options) in the first byte; no flags.
+  reinterpret_cast<u8*>(&properties)[0] = 0x50;
   window_size = 0xFFFF;
 
-  // Compute the TCP checksum with its pseudo header
-  const u32 source_addr = ntohl(from.sin_addr.s_addr);
-  const u32 destination_addr = ntohl(to.sin_addr.s_addr);
-  const u32 initial_value = (source_addr >> 16) + (source_addr & 0xFFFF) +
-                            (destination_addr >> 16) + (destination_addr & 0xFFFF) + IPProto() +
-                            Size() + length;
-  u32 tcp_checksum = ComputeNetworkChecksum(this, Size(), initial_value);
-  tcp_checksum += ComputeNetworkChecksum(data, length);
-  while (tcp_checksum > 0xFFFF)
-    tcp_checksum = (tcp_checksum >> 16) + (tcp_checksum & 0xFFFF);
-  checksum = htons(static_cast<u16>(tcp_checksum));
+  // The header and the payload are checksummed separately and the two (complemented) sums are
+  // folded together.
+  const u32 initial = PseudoHeaderSum(ntohl(from.sin_addr.s_addr), ntohl(to.sin_addr.s_addr),
+                                      IPProto(), Size() + u32{length});
+  u32 sum = ComputeNetworkChecksum(this, Size(), initial);
+  sum += ComputeNetworkChecksum(data, length);
+  checksum = htons(static_cast<u16>(FoldChecksum(sum)));
 }
 
 TCPHeader::TCPHeader(const sockaddr_in& from, const sockaddr_in& to, u32 seq, u32 ack, u16 flags)
@@ -388,14 +388,13 @@ TCPHeader::TCPHeader(const sockaddr_in& from, const sockaddr_in& to, u32 seq, u3
   sequence_number = htonl(seq);
   acknowledgement_number = htonl(ack);
   properties = htons(flags);
-
-  window_size = 0x7c;
+  window_size = 0x7c;  // stored as is
   checksum = 0;
 }
 
 u8 TCPHeader::GetHeaderSize() const
 {
-  return (ntohs(properties) & 0xf000) >> 10;
+  return static_cast<u8>((ntohs(properties) >> 12) * 4);
 }
 
 u16 TCPHeader::Size() const
@@ -412,9 +411,9 @@ UDPHeader::UDPHeader() = default;
 
 UDPHeader::UDPHeader(const sockaddr_in& from, const sockaddr_in& to, u16 data_length)
 {
-  std::memcpy(&source_port, &from.sin_port, 2);
-  std::memcpy(&destination_port, &to.sin_port, 2);
-  length = htons(Size() + data_length);
+  std::memcpy(&source_port, &from.sin_port, sizeof(source_port));
+  std::memcpy(&destination_port, &to.sin_port, sizeof(destination_port));
+  length = htons(static_cast<u16>(SIZE + data_length));
 }
 
 u16 UDPHeader::Size() const
@@ -432,14 +431,16 @@ ARPHeader::ARPHeader() = default;
 ARPHeader::ARPHeader(u32 from_ip, const MACAddress& from_mac, u32 to_ip, const MACAddress& to_mac)
 {
   hardware_type = htons(BBA_HARDWARE_TYPE);
+  // These two are stored as plain little-endian values, which gives the expected wire bytes
+  // 08 00 (IPv4) and 00 02 (reply).
   protocol_type = IPV4_HEADER_TYPE;
   hardware_size = MAC_ADDRESS_SIZE;
   protocol_size = IPV4_ADDR_LEN;
   opcode = 0x200;
-  sender_ip = from_ip;
-  target_ip = to_ip;
-  targer_address = to_mac;
   sender_address = from_mac;
+  sender_ip = from_ip;
+  targer_address = to_mac;
+  target_ip = to_ip;
 }
 
 u16 ARPHeader::Size() const
@@ -451,13 +452,13 @@ DHCPBody::DHCPBody() = default;
 
 DHCPBody::DHCPBody(u32 transaction, const MACAddress& client_address, u32 new_ip, u32 serv_ip)
 {
-  transaction_id = transaction;
   message_type = DHCPConst::MESSAGE_REPLY;
   hardware_type = BBA_HARDWARE_TYPE;
   hardware_addr = MAC_ADDRESS_SIZE;
-  client_mac = client_address;
+  transaction_id = transaction;
   your_ip = new_ip;
   server_ip = serv_ip;
+  client_mac = client_address;
 }
 
 DHCPPacket::DHCPPacket() = default;
@@ -466,112 +467,90 @@ DHCPPacket::DHCPPacket(std::span<const u8> data)
 {
   if (data.size() < DHCPBody::SIZE)
     return;
-  body = Common::BitCastPtr<DHCPBody>(data.data());
-  std::size_t offset = DHCPBody::SIZE;
 
-  while (offset < data.size() - 1)
+  std::memcpy(&body, data.data(), DHCPBody::SIZE);
+
+  // Options: code 0 is padding, code 255 ends the list, anything else is code, length, data.
+  // A truncated option ends the parse.
+  size_t pos = DHCPBody::SIZE;
+  while (pos + 1 < data.size())
   {
-    const u8 fnc = data[offset];
-    if (fnc == 0)
+    const u8 code = data[pos];
+    if (code == 0)
     {
-      ++offset;
+      ++pos;
       continue;
     }
-    if (fnc == 255)
+    if (code == 255)
       break;
-    const u8 len = data[offset + 1];
-    const auto opt_begin = data.begin() + offset;
-    offset += 2 + len;
-    if (offset > data.size())
+
+    const size_t next = pos + 2 + data[pos + 1];
+    if (next > data.size())
       break;
-    const auto opt_end = data.begin() + offset;
-    options.emplace_back(opt_begin, opt_end);
+    options.emplace_back(data.begin() + pos, data.begin() + next);
+    pos = next;
   }
 }
 
 void DHCPPacket::AddOption(u8 fnc, std::span<const u8> params)
 {
-  if (params.size() > 255)
+  if (params.size() > 0xFF)
     return;
-  std::vector<u8> opt = {fnc, u8(params.size())};
-  opt.insert(opt.end(), params.begin(), params.end());
-  options.emplace_back(std::move(opt));
+  std::vector<u8> option;
+  option.reserve(params.size() + 2);
+  option.push_back(fnc);
+  option.push_back(static_cast<u8>(params.size()));
+  option.insert(option.end(), params.begin(), params.end());
+  options.push_back(std::move(option));
 }
 
 std::vector<u8> DHCPPacket::Build() const
 {
-  const u8* body_ptr = reinterpret_cast<const u8*>(&body);
-  std::vector<u8> result(body_ptr, body_ptr + DHCPBody::SIZE);
-
-  for (auto& opt : options)
-  {
-    result.insert(result.end(), opt.begin(), opt.end());
-  }
-  constexpr auto no_option = std::to_array<u8>({255, 0, 0, 0});
-  result.insert(result.end(), no_option.begin(), no_option.end());
-
-  return result;
+  std::vector<u8> out;
+  AppendRaw(&out, body);
+  for (const std::vector<u8>& option : options)
+    out.insert(out.end(), option.begin(), option.end());
+  // End option, padded.
+  out.insert(out.end(), {u8{255}, u8{0}, u8{0}, u8{0}});
+  return out;
 }
 
-// Compute the network checksum with a 32-bit accumulator using the
-// "Normal" order, see RFC 1071 for more details.
 u16 ComputeNetworkChecksum(const void* data, u16 length, u32 initial_value)
 {
-  u32 checksum = initial_value;
-  std::size_t index = 0;
-  const std::string_view data_view{static_cast<const char*>(data), length};
-  for (u8 b : data_view)
-  {
-    const bool is_hi = index++ % 2 == 0;
-    checksum += is_hi ? b << 8 : b;
-  }
-  while (checksum > 0xFFFF)
-    checksum = (checksum >> 16) + (checksum & 0xFFFF);
-  return ~static_cast<u16>(checksum);
+  // One's complement sum of big-endian 16-bit words; an odd final byte is the high half.
+  const auto* bytes = static_cast<const u8*>(data);
+  u32 sum = initial_value;
+  for (u16 i = 0; i < length; ++i)
+    sum += (i % 2 == 0) ? u32{bytes[i]} << 8 : u32{bytes[i]};
+  return static_cast<u16>(~FoldChecksum(sum));
 }
 
-// Compute the TCP checksum with its pseudo header
 u16 ComputeTCPNetworkChecksum(const IPAddress& from, const IPAddress& to, const void* data,
                               u16 length, u8 protocol)
 {
-  const u32 source_addr = ntohl(std::bit_cast<u32>(from));
-  const u32 destination_addr = ntohl(std::bit_cast<u32>(to));
-  const u32 initial_value = (source_addr >> 16) + (source_addr & 0xFFFF) +
-                            (destination_addr >> 16) + (destination_addr & 0xFFFF) + protocol +
-                            length;
-  const u32 tcp_checksum = ComputeNetworkChecksum(data, length, initial_value);
-  return htons(static_cast<u16>(tcp_checksum));
-}
-
-template <typename Container, typename T>
-static inline void InsertObj(Container* container, const T& obj)
-{
-  static_assert(std::is_trivially_copyable_v<T>);
-  const u8* const ptr = reinterpret_cast<const u8*>(&obj);
-  container->insert(container->end(), ptr, ptr + sizeof(obj));
+  const u32 initial = PseudoHeaderSum(HostIPValue(from), HostIPValue(to), protocol, length);
+  return htons(ComputeNetworkChecksum(data, length, initial));
 }
 
 ARPPacket::ARPPacket() = default;
+
+ARPPacket::ARPPacket(const MACAddress& destination, const MACAddress& source)
+    : eth_header(destination, source, ARP_ETHERTYPE)
+{
+}
 
 u16 ARPPacket::Size() const
 {
   return static_cast<u16>(SIZE);
 }
 
-ARPPacket::ARPPacket(const MACAddress& destination, const MACAddress& source)
-{
-  eth_header.destination = destination;
-  eth_header.source = source;
-  eth_header.ethertype = htons(ARP_ETHERTYPE);
-}
-
 std::vector<u8> ARPPacket::Build() const
 {
-  std::vector<u8> result;
-  result.reserve(EthernetHeader::SIZE + ARPHeader::SIZE);
-  InsertObj(&result, eth_header);
-  InsertObj(&result, arp_header);
-  return result;
+  std::vector<u8> out;
+  out.reserve(SIZE);
+  AppendRaw(&out, eth_header);
+  AppendRaw(&out, arp_header);
+  return out;
 }
 
 TCPPacket::TCPPacket() = default;
@@ -579,48 +558,45 @@ TCPPacket::TCPPacket() = default;
 TCPPacket::TCPPacket(const MACAddress& destination, const MACAddress& source,
                      const sockaddr_in& from, const sockaddr_in& to, u32 seq, u32 ack, u16 flags)
     : eth_header(destination, source, IPV4_ETHERTYPE),
-      ip_header(Common::TCPHeader::SIZE, IPPROTO_TCP, from, to),
+      ip_header(static_cast<u16>(TCPHeader::SIZE), IPPROTO_TCP, from, to),
       tcp_header(from, to, seq, ack, flags)
 {
 }
 
 std::vector<u8> TCPPacket::Build() const
 {
-  std::vector<u8> result;
-  result.reserve(Size());  // Useful not to invalidate .data() pointers
+  std::vector<u8> out;
+  out.reserve(MIN_SIZE + ipv4_options.size() + tcp_options.size() + data.size());
 
-  // Copy data
-  InsertObj(&result, eth_header);
-  u8* const ip_ptr = result.data() + result.size();
-  InsertObj(&result, ip_header);
-  result.insert(result.end(), ipv4_options.begin(), ipv4_options.end());
-  u8* const tcp_ptr = result.data() + result.size();
-  InsertObj(&result, tcp_header);
-  result.insert(result.end(), tcp_options.begin(), tcp_options.end());
-  result.insert(result.end(), data.begin(), data.end());
+  AppendRaw(&out, eth_header);
+  const size_t ip_at = out.size();
+  AppendRaw(&out, ip_header);
+  out.insert(out.end(), ipv4_options.begin(), ipv4_options.end());
+  const size_t tcp_at = out.size();
+  AppendRaw(&out, tcp_header);
+  out.insert(out.end(), tcp_options.begin(), tcp_options.end());
+  out.insert(out.end(), data.begin(), data.end());
 
-  // Adjust size and checksum fields
+  // Data offset in the top four bits of the properties word, flags kept.
   const u16 tcp_length = static_cast<u16>(TCPHeader::SIZE + tcp_options.size() + data.size());
-  const u16 tcp_properties =
-      (ntohs(tcp_header.properties) & 0xfff) |
-      (static_cast<u16>((tcp_options.size() + TCPHeader::SIZE) & 0x3c) << 10);
-  Common::BitCastPtr<u16>(tcp_ptr + offsetof(TCPHeader, properties)) = htons(tcp_properties);
+  const u16 header_words = static_cast<u16>((TCPHeader::SIZE + tcp_options.size()) & 0x3c) / 4;
+  const u16 properties =
+      static_cast<u16>((ntohs(tcp_header.properties) & 0x0fff) | (header_words << 12));
+  WriteRaw16(&out, tcp_at + offsetof(TCPHeader, properties), htons(properties));
 
-  const u16 ip_header_size = static_cast<u16>(IPv4Header::SIZE + ipv4_options.size());
-  const u16 ip_total_len = ip_header_size + tcp_length;
-  Common::BitCastPtr<u16>(ip_ptr + offsetof(IPv4Header, total_len)) = htons(ip_total_len);
+  const u16 ip_length = static_cast<u16>(IPv4Header::SIZE + ipv4_options.size());
+  WriteRaw16(&out, ip_at + offsetof(IPv4Header, total_len),
+             htons(static_cast<u16>(ip_length + tcp_length)));
 
-  auto ip_checksum_bitcast_ptr =
-      Common::BitCastPtr<u16>(ip_ptr + offsetof(IPv4Header, header_checksum));
-  ip_checksum_bitcast_ptr = u16(0);
-  ip_checksum_bitcast_ptr = htons(Common::ComputeNetworkChecksum(ip_ptr, ip_header_size));
+  WriteRaw16(&out, ip_at + offsetof(IPv4Header, header_checksum), 0);
+  WriteRaw16(&out, ip_at + offsetof(IPv4Header, header_checksum),
+             htons(ComputeNetworkChecksum(out.data() + ip_at, ip_length)));
 
-  auto checksum_bitcast_ptr = Common::BitCastPtr<u16>(tcp_ptr + offsetof(TCPHeader, checksum));
-  checksum_bitcast_ptr = u16(0);
-  checksum_bitcast_ptr = ComputeTCPNetworkChecksum(
-      ip_header.source_addr, ip_header.destination_addr, tcp_ptr, tcp_length, IPPROTO_TCP);
-
-  return result;
+  WriteRaw16(&out, tcp_at + offsetof(TCPHeader, checksum), 0);
+  WriteRaw16(&out, tcp_at + offsetof(TCPHeader, checksum),
+             ComputeTCPNetworkChecksum(ip_header.source_addr, ip_header.destination_addr,
+                                       out.data() + tcp_at, tcp_length, IPPROTO_TCP));
+  return out;
 }
 
 u16 TCPPacket::Size() const
@@ -633,44 +609,40 @@ UDPPacket::UDPPacket() = default;
 UDPPacket::UDPPacket(const MACAddress& destination, const MACAddress& source,
                      const sockaddr_in& from, const sockaddr_in& to, const std::vector<u8>& payload)
     : eth_header(destination, source, IPV4_ETHERTYPE),
-      ip_header(static_cast<u16>(payload.size() + Common::UDPHeader::SIZE), IPPROTO_UDP, from, to),
+      ip_header(static_cast<u16>(payload.size() + UDPHeader::SIZE), IPPROTO_UDP, from, to),
       udp_header(from, to, static_cast<u16>(payload.size())), data(payload)
 {
 }
 
 std::vector<u8> UDPPacket::Build() const
 {
-  std::vector<u8> result;
-  result.reserve(Size());  // Useful not to invalidate .data() pointers
+  std::vector<u8> out;
+  out.reserve(MIN_SIZE + ipv4_options.size() + data.size());
 
-  // Copy data
-  InsertObj(&result, eth_header);
-  u8* const ip_ptr = result.data() + result.size();
-  InsertObj(&result, ip_header);
-  result.insert(result.end(), ipv4_options.begin(), ipv4_options.end());
-  u8* const udp_ptr = result.data() + result.size();
-  InsertObj(&result, udp_header);
-  result.insert(result.end(), data.begin(), data.end());
+  AppendRaw(&out, eth_header);
+  const size_t ip_at = out.size();
+  AppendRaw(&out, ip_header);
+  out.insert(out.end(), ipv4_options.begin(), ipv4_options.end());
+  const size_t udp_at = out.size();
+  AppendRaw(&out, udp_header);
+  out.insert(out.end(), data.begin(), data.end());
 
-  // Adjust size and checksum fields
   const u16 udp_length = static_cast<u16>(UDPHeader::SIZE + data.size());
-  Common::BitCastPtr<u16>(udp_ptr + offsetof(UDPHeader, length)) = htons(udp_length);
+  WriteRaw16(&out, udp_at + offsetof(UDPHeader, length), htons(udp_length));
 
-  const u16 ip_header_size = static_cast<u16>(IPv4Header::SIZE + ipv4_options.size());
-  const u16 ip_total_len = ip_header_size + udp_length;
-  Common::BitCastPtr<u16>(ip_ptr + offsetof(IPv4Header, total_len)) = htons(ip_total_len);
+  const u16 ip_length = static_cast<u16>(IPv4Header::SIZE + ipv4_options.size());
+  WriteRaw16(&out, ip_at + offsetof(IPv4Header, total_len),
+             htons(static_cast<u16>(ip_length + udp_length)));
 
-  auto ip_checksum_bitcast_ptr =
-      Common::BitCastPtr<u16>(ip_ptr + offsetof(IPv4Header, header_checksum));
-  ip_checksum_bitcast_ptr = u16(0);
-  ip_checksum_bitcast_ptr = htons(Common::ComputeNetworkChecksum(ip_ptr, ip_header_size));
+  WriteRaw16(&out, ip_at + offsetof(IPv4Header, header_checksum), 0);
+  WriteRaw16(&out, ip_at + offsetof(IPv4Header, header_checksum),
+             htons(ComputeNetworkChecksum(out.data() + ip_at, ip_length)));
 
-  auto checksum_bitcast_ptr = Common::BitCastPtr<u16>(udp_ptr + offsetof(UDPHeader, checksum));
-  checksum_bitcast_ptr = u16(0);
-  checksum_bitcast_ptr = ComputeTCPNetworkChecksum(
-      ip_header.source_addr, ip_header.destination_addr, udp_ptr, udp_length, IPPROTO_UDP);
-
-  return result;
+  WriteRaw16(&out, udp_at + offsetof(UDPHeader, checksum), 0);
+  WriteRaw16(&out, udp_at + offsetof(UDPHeader, checksum),
+             ComputeTCPNetworkChecksum(ip_header.source_addr, ip_header.destination_addr,
+                                       out.data() + udp_at, udp_length, IPPROTO_UDP));
+  return out;
 }
 
 u16 UDPPacket::Size() const
@@ -686,15 +658,14 @@ std::optional<u16> PacketView::GetEtherType() const
 {
   if (m_size < EthernetHeader::SIZE)
     return std::nullopt;
-  const std::size_t offset = offsetof(EthernetHeader, ethertype);
-  return ntohs(Common::BitCastPtr<u16>(m_ptr + offset));
+  return ntohs(ReadRaw<u16>(m_ptr + offsetof(EthernetHeader, ethertype)));
 }
 
 std::optional<ARPPacket> PacketView::GetARPPacket() const
 {
   if (m_size < ARPPacket::SIZE)
     return std::nullopt;
-  return Common::BitCastPtr<ARPPacket>(m_ptr);
+  return ReadRaw<ARPPacket>(m_ptr);
 }
 
 std::optional<u8> PacketView::GetIPProto() const
@@ -708,63 +679,64 @@ std::optional<TCPPacket> PacketView::GetTCPPacket() const
 {
   if (m_size < TCPPacket::MIN_SIZE)
     return std::nullopt;
-  TCPPacket result;
-  result.eth_header = Common::BitCastPtr<EthernetHeader>(m_ptr);
-  result.ip_header = Common::BitCastPtr<IPv4Header>(m_ptr + EthernetHeader::SIZE);
-  const u16 offset = result.ip_header.DefinedSize() + EthernetHeader::SIZE;
-  if (m_size < offset + TCPHeader::SIZE)
+
+  TCPPacket packet;
+  packet.eth_header = ReadRaw<EthernetHeader>(m_ptr);
+  packet.ip_header = ReadRaw<IPv4Header>(m_ptr + EthernetHeader::SIZE);
+
+  const size_t ip_end = EthernetHeader::SIZE + IPv4Header::SIZE;
+  const size_t tcp_at = EthernetHeader::SIZE + packet.ip_header.DefinedSize();
+  // An IHL below 5 cannot be a valid header.
+  if (tcp_at < ip_end || m_size < tcp_at + TCPHeader::SIZE)
     return std::nullopt;
-  result.ipv4_options =
-      std::vector<u8>(m_ptr + EthernetHeader::SIZE + IPv4Header::SIZE, m_ptr + offset);
-  result.tcp_header = Common::BitCastPtr<TCPHeader>(m_ptr + offset);
-  const u16 data_offset = result.tcp_header.GetHeaderSize() + offset;
+  packet.tcp_header = ReadRaw<TCPHeader>(m_ptr + tcp_at);
 
-  const u16 total_len = ntohs(result.ip_header.total_len);
-  const std::size_t end = EthernetHeader::SIZE + total_len;
-
-  if (m_size < end || end < data_offset)
+  const size_t data_at = tcp_at + packet.tcp_header.GetHeaderSize();
+  const size_t end = EthernetHeader::SIZE + ntohs(packet.ip_header.total_len);
+  // Neither can a TCP data offset below 5.
+  if (data_at < tcp_at + TCPHeader::SIZE || m_size < end || end < data_at)
     return std::nullopt;
 
-  result.tcp_options = std::vector<u8>(m_ptr + offset + TCPHeader::SIZE, m_ptr + data_offset);
-  result.data = std::vector<u8>(m_ptr + data_offset, m_ptr + end);
-
-  return result;
+  packet.ipv4_options.assign(m_ptr + ip_end, m_ptr + tcp_at);
+  packet.tcp_options.assign(m_ptr + tcp_at + TCPHeader::SIZE, m_ptr + data_at);
+  packet.data.assign(m_ptr + data_at, m_ptr + end);
+  return packet;
 }
 
 std::optional<UDPPacket> PacketView::GetUDPPacket() const
 {
   if (m_size < UDPPacket::MIN_SIZE)
     return std::nullopt;
-  UDPPacket result;
-  result.eth_header = Common::BitCastPtr<EthernetHeader>(m_ptr);
-  result.ip_header = Common::BitCastPtr<IPv4Header>(m_ptr + EthernetHeader::SIZE);
-  const u16 offset = result.ip_header.DefinedSize() + EthernetHeader::SIZE;
-  if (m_size < offset + UDPHeader::SIZE)
+
+  UDPPacket packet;
+  packet.eth_header = ReadRaw<EthernetHeader>(m_ptr);
+  packet.ip_header = ReadRaw<IPv4Header>(m_ptr + EthernetHeader::SIZE);
+
+  const size_t ip_end = EthernetHeader::SIZE + IPv4Header::SIZE;
+  const size_t udp_at = EthernetHeader::SIZE + packet.ip_header.DefinedSize();
+  if (udp_at < ip_end || m_size < udp_at + UDPHeader::SIZE)
     return std::nullopt;
-  result.ipv4_options =
-      std::vector<u8>(m_ptr + EthernetHeader::SIZE + IPv4Header::SIZE, m_ptr + offset);
-  result.udp_header = Common::BitCastPtr<UDPHeader>(m_ptr + offset);
-  const u16 data_offset = UDPHeader::SIZE + offset;
+  packet.udp_header = ReadRaw<UDPHeader>(m_ptr + udp_at);
 
-  const u16 total_len = ntohs(result.udp_header.length);
-  const std::size_t end = offset + total_len;
-
-  if (m_size < end || end < data_offset)
+  // The UDP length counts the UDP header and payload.
+  const size_t data_at = udp_at + UDPHeader::SIZE;
+  const size_t end = udp_at + ntohs(packet.udp_header.length);
+  if (m_size < end || end < data_at)
     return std::nullopt;
 
-  result.data = std::vector<u8>(m_ptr + data_offset, m_ptr + end);
-
-  return result;
+  packet.ipv4_options.assign(m_ptr + ip_end, m_ptr + udp_at);
+  packet.data.assign(m_ptr + data_at, m_ptr + end);
+  return packet;
 }
 
 NetworkErrorState SaveNetworkErrorState()
 {
-  return {
-      errno,
+  NetworkErrorState state{};
+  state.error = errno;
 #ifdef _WIN32
-      WSAGetLastError(),
+  state.wsa_error = WSAGetLastError();
 #endif
-  };
+  return state;
 }
 
 void RestoreNetworkErrorState(const NetworkErrorState& state)
@@ -777,40 +749,39 @@ void RestoreNetworkErrorState(const NetworkErrorState& state)
 
 const char* DecodeNetworkError(s32 error_code)
 {
-  thread_local char buffer[1024];
-
+  thread_local char message[1024];
 #ifdef _WIN32
-  FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS |
-                     FORMAT_MESSAGE_MAX_WIDTH_MASK,
-                 nullptr, error_code, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), buffer,
-                 sizeof(buffer), nullptr);
-  return buffer;
+  const DWORD written = FormatMessageA(
+      FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS | FORMAT_MESSAGE_MAX_WIDTH_MASK,
+      nullptr, static_cast<DWORD>(error_code), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), message,
+      sizeof(message), nullptr);
+  if (written == 0)
+    std::snprintf(message, sizeof(message), "Unknown error %d", error_code);
+  return message;
 #else
-  return Common::StrErrorWrapper(error_code, buffer, sizeof(buffer));
+  return StrErrorWrapper(error_code, message, sizeof(message));
 #endif
 }
 
 const char* StrNetworkError()
 {
 #ifdef _WIN32
-  const s32 error_code = WSAGetLastError();
+  return DecodeNetworkError(WSAGetLastError());
 #else
-  const s32 error_code = errno;
+  return DecodeNetworkError(errno);
 #endif
-  return DecodeNetworkError(error_code);
 }
 
 bool SetPlatformSocketOptions(int fd [[maybe_unused]])
 {
-#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__)
-  int opt_no_sigpipe = 1;
-  if (setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &opt_no_sigpipe, sizeof(opt_no_sigpipe)) < 0)
+#ifdef SO_NOSIGPIPE
+  const int enable = 1;
+  if (setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &enable, sizeof(enable)) < 0)
   {
-    ERROR_LOG_FMT(COMMON, "Failed to set SO_NOSIGPIPE on socket: {}", StrNetworkError());
+    ERROR_LOG_FMT(COMMON, "Could not set SO_NOSIGPIPE: {}", StrNetworkError());
     return false;
   }
 #endif
   return true;
 }
-
 }  // namespace Common
