@@ -1,0 +1,134 @@
+- W25 log: rewrote all 22 W25 files in `VideoCommon`: the vertex loaders
+  (`VertexLoader`, `VertexLoaderBase`, `VertexLoaderX64`, `VertexLoaderUtils`,
+  `VertexLoader_Position`, `_Normal`, `_Color`, `_TextCoord`), the loader
+  manager (`VertexLoaderManager`), `NativeVertexFormat.h`, the
+  `IndexGenerator` and `VertexManagerBase`. Every file starts with the
+  original-code header and has no Dolphin copyright or SPDX line. The public
+  names, signatures and layouts used outside W25 are kept: `VB_HAS_*`,
+  `AttributeFormat` / `PortableVertexDeclaration` (memcmp-compared, memset
+  constructor), the `VertexLoaderManager` globals and functions,
+  `VertexLoaderBase` members, every `VertexManagerBase` virtual, protected
+  member and constant the backends use. Members no backend touches are now
+  private. Config keys, log, panic and analytics texts are unchanged (assert
+  condition texts differ).
+  - Design:
+    - C++ loader: a list of steps (`VertexLoaderStep`: function, scale,
+      array, slot) run over a `VertexLoaderCursor` (src, dst, vertices
+      left, drop flag, texture matrix indices). Readers come from
+      `GetReader` templates per format, element count and source (inline,
+      Index8, Index16; a missing position reads nothing). Sizes are
+      computed instead of looked up. Colour conversion widens channels by
+      bit replication into packed RGBA.
+    - JIT: fixed registers, all caller-saved in both ABIs (src R10, dst
+      R11, count R9, anchor RAX, index RCX, array RDX, temp R8, XMM0/1), an
+      8-byte frame for count and dropped vertices, 4 KB code space. Globals
+      (array bases, strides, caches, colour tables, shuffle and scale
+      constants) are reached as displacements from one anchor pointer
+      passed in. Shuffle masks and 2^-frac vectors are constexpr tables;
+      the 565/4444/6666 colours use byte lookup tables ORed together.
+      Dropped vertices branch to an out-of-line stub. The loop starts on a
+      16-byte boundary.
+    - Loader manager: `RefreshLoader` (dirty check inline), `LoadDraw` as
+      the main-thread half of `RunVertices`, `CheckCPConfiguration` split
+      into small helpers, ubershader formats built from a zeroed
+      declaration with `CopyOrDummy`.
+    - Index generator: one switch over the primitives with restart as a
+      template parameter; the writer is passed by value so its pointer
+      stays in a register (the first draft kept it in memory and was up to
+      4x slower on lines; fixed before the checks below).
+    - Vertex manager: the index budget per primitive is a small table
+      (`BudgetFor`), flush statistics, the draw (`DrawBatch`) and the host
+      primitive choice are helpers; calls into the backend, caches, shader
+      managers and graphics mods are in the old order with the old
+      arguments.
+  - Kept as before (outputs, quirks):
+    - Every output vertex byte, the native declaration, vertex counts,
+      zfreeze caches (last three positions and matrix indices, normal,
+      tangent, binormal), statistics and the loader/format caches.
+    - C++ loader: texture coordinates after the last used one are
+      not declared, but the slot that stops the run still gets offset and
+      Float type; colours are always declared as 4 x UByte, offset and
+      enable only when present; matrix indices masked to 0x3f; normal caches
+      written for the last vertex even when it is dropped; an invalid colour
+      format (6/7) panics, writes nothing and still reserves 4 bytes;
+      texture coordinate formats 5-7 assert.
+    - JIT: positions and texture coordinates scaled only with ByteDequant;
+      normals by 2^-7/-6/-15/-14; matrix index bytes not masked; the
+      binormal cache stored for every vertex; a dropped vertex keeps its
+      matrix bytes and cache writes; 0xFF/0xFFFF indices drop; an indexed
+      invalid colour still eats its index; the SSE2 fallback lane contents
+      (u8/s8 read 4 bytes, shorts give [X,0,0,0]/[X,Y,0,0]/[X,Y,Z,X],
+      floats gathered through a GPR, the stale XMM0 lanes); the vertex size
+      assert.
+    - Compare mode builds the JIT loader first, then the C++ one, with the
+      same mismatch messages.
+    - Index generator: with primitive restart a strip is copied as is and
+      then a restart index, even with 0-2 vertices; three vertices left in
+      a quad draw make a triangle; the QUADS_2 warning; the
+      `GetRemainingIndices` panic text and its live config read.
+    - Loader manager: a split draw steps the source by 16380 vertices every
+      run, including the last; `Clear()` leaves the current format pointer.
+  - Deliberate differences:
+    - A C++ loader with no position in the VCD reads nothing; the old one
+      called a null function pointer (crash).
+    - The JIT returns 0 for a count of 0 or less; the old loop ran ~2^32
+      times.
+    - `VertexLoaderUID` and `PortableVertexDeclaration` hash differently
+      (bucket placement only).
+    - The debug-only PRIM_LOG dump and an unreachable trailing ERROR_LOG
+      are gone; assert condition texts differ.
+    - `NativeVertexFormat`'s constructor is `explicit`.
+  - Found and not fixed (old and new alike): with an invalid colour format
+    the declared stride is 4 bytes larger than what the C++ loader writes,
+    and a dropped vertex steps back a whole stride, so the next vertex starts
+    before the buffer; at the start of a batch this writes before the vertex
+    buffer (both harnesses corrupted the heap there with the C++ loader, on
+    old and new alike, until given slack or valid colours). Fixing it would change the output bytes
+    of those draws, so it is left as it was.
+  - Checked:
+    - Loader harness, old vs new with the untouched non-W25 files on both
+      sides: random VCD/VAT (junk bits, sparse, valid-only and invalid
+      formats, ByteDequant), array strides and bases, 1-600 vertices in
+      1-3 batches, 0xFF-biased indices, fixed XMM0/XMM1 on entry. Hashes
+      the declaration, sizes, every output byte, loaded counts, all caches,
+      the loaded-vertex counter and the alert/log texts (assert condition
+      text cut). The output buffer has 8 KB of slack in front, hashed too,
+      for the stepping-back case below. 100000 cases each for C++, JIT, JIT without BMI, without
+      SSSE3, without SSSE3/SSE4.1 (pure SSE2), without MOVBE, Compare mode
+      (valid colours only: invalid ones overflow Compare's scratch buffers
+      on both sides) and the size helpers: all identical. Every value of
+      every direct colour format (all 2^16, all 2^24, a 2^24 sample of the
+      32-bit formats) through C++ and JIT: identical old vs new, and C++ =
+      JIT.
+    - Index generator harness: random primitives, counts (0-6000), external
+      indices, restart / VS expansion settings and config changes after
+      Init, overflow panic: 100000 cases identical.
+    - Vertex manager harness: VertexLoaderManager + VertexManagerBase with
+      recording fakes for the gfx backend, texture cache, framebuffer
+      manager, shader cache, graphics mods (skip, custom shaders, uniform
+      blocks), custom shader cache, bounding box, perf query, CPU cull,
+      shader managers and uids, render states, memory, timers, analytics and
+      video events. Random draws (both threads, splits past 16380), flushes,
+      config changes, CP/XF/BP state, EFB access and copy scheduling, frame
+      end/present events, DoState round trips, utility uploads, texel
+      buffers and format lookups; every fake call is logged with its
+      arguments, plus committed vertex/index bytes. 100000 sequential cases
+      identical.
+    - Performance (clang -O2, best of several alternating runs; the machine
+      was shared, run-to-run noise about +-10%): JIT loaders the same
+      speed (identical instruction sequences in the loops, generated code
+      within 1.2 KB of 4 KB); C++ loader 15-30% faster; index generator the
+      same in total (0.93-1.03 over 64 primitive/size/restart rows).
+    - clang `-Wall -Wextra -Wconversion -Wsign-compare -Wshadow-all
+      -Wshorten-64-to-32`, Linux and `x86_64-w64-windows-gnu`: no warnings
+      in W25 files (VertexManagerBase on the Windows target needs the
+      glslang headers on the path, as on the base tree). The 74 files that
+      include a W25 header compile as on the base tree on both targets; the
+      ones that fail, fail the same way on the base tree for missing
+      third-party headers (Qt, SFML, tinygltf, D3D/WinRT, VMA). With a VMA
+      header added, the Vulkan backend files compile, except VKPipeline.cpp
+      (old Vulkan headers, same on base). The code avoids the MSVC /W4
+      patterns C4319, C4805, C4458 and C4267.
+    - `verbatim-audit.py wii 8`: no run of 8 or more lines in any W25 .cpp.
+      The headers keep some 8-12 line runs of declarations (the
+      `VertexManagerBase` interface and member layout).
