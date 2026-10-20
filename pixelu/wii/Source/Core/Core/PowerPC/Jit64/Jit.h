@@ -319,6 +319,19 @@ private:
   // also emits the continuing-path watch call after that exit.
   void EmitBranchNotTaken(UGeckoInstruction inst, bool watch_after_exit);
 
+  // ps_res/ps_rsqrte: runs both lanes through a scalar estimate routine.
+  void EmitPairedEstimate(UGeckoInstruction inst, const u8* scalar_routine);
+
+  // Integer pieces.
+  // The not-taken side of a compare fused with the following branch.
+  void EmitMergedBranchFallthrough();
+  // divw with a known dividend, a known divisor, or neither.
+  void DivideKnownDividend(UGeckoInstruction inst, u32 dividend);
+  void DivideByConstant(UGeckoInstruction inst, s32 divisor);
+  void DivideRegisters(UGeckoInstruction inst);
+  // slw (left) and srw.
+  void EmitWordShift(UGeckoInstruction inst, bool left);
+
   JitBlockCache blocks{*this};
   TrampolineCache trampolines{*this};
 
