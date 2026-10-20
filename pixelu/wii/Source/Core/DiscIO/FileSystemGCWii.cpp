@@ -276,16 +276,15 @@ FileSystemGCWii::FileSystemGCWii(const VolumeDisc* volume, const Partition& part
 
 FileSystemGCWii::~FileSystemGCWii() = default;
 
+std::unique_ptr<FileInfo> FileSystemGCWii::FindFileInfo(std::string_view path) const
+{
+  // Paths are looked up from the root; an invalid file system has no files.
+  return IsValid() ? FindInDirectory(path, m_root) : nullptr;
+}
+
 const FileInfo& FileSystemGCWii::GetRoot() const
 {
   return m_root;
-}
-
-std::unique_ptr<FileInfo> FileSystemGCWii::FindFileInfo(std::string_view path) const
-{
-  if (!IsValid())
-    return nullptr;
-  return FindInDirectory(path, m_root);
 }
 
 std::unique_ptr<FileInfo> FileSystemGCWii::FindInDirectory(std::string_view path,

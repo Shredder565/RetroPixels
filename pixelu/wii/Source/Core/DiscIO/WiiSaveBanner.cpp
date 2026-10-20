@@ -44,14 +44,15 @@ WiiSaveBanner::WiiSaveBanner(u64 title_id)
   m_valid = file.GetSize() >= minimum_size;
 }
 
-std::string WiiSaveBanner::GetName() const
-{
-  return UTF16BEToUTF8(m_header.name, std::size(m_header.name));
-}
-
+// Both texts are fixed-size big-endian UTF-16 fields, zero-padded.
 std::string WiiSaveBanner::GetDescription() const
 {
   return UTF16BEToUTF8(m_header.description, std::size(m_header.description));
+}
+
+std::string WiiSaveBanner::GetName() const
+{
+  return UTF16BEToUTF8(m_header.name, std::size(m_header.name));
 }
 
 std::vector<u32> WiiSaveBanner::GetBanner(u32* width, u32* height) const

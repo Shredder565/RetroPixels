@@ -229,12 +229,12 @@ bool ExportH3Hashes(const Volume& volume, const Partition& partition,
   if (volume.GetVolumeType() != Platform::WiiDisc)
     return false;
 
-  const std::optional<u64> offset = volume.ReadSwappedAndShifted(
-      partition.offset + WII_PARTITION_H3_OFFSET_ADDRESS, PARTITION_NONE);
-  if (!offset)
-    return false;
-  return ExportData(volume, PARTITION_NONE, partition.offset + *offset, WII_PARTITION_H3_SIZE,
-                    export_filename);
+  // The partition header gives the H3 table's position relative to the partition start.
+  const u64 start = partition.offset;
+  const std::optional<u64> h3_offset =
+      volume.ReadSwappedAndShifted(start + WII_PARTITION_H3_OFFSET_ADDRESS, PARTITION_NONE);
+  return h3_offset.has_value() && ExportData(volume, PARTITION_NONE, start + *h3_offset,
+                                             WII_PARTITION_H3_SIZE, export_filename);
 }
 
 bool ExportHeader(const Volume& volume, const Partition& partition,

@@ -321,8 +321,9 @@ std::optional<BluetoothAddress> StringToBluetoothAddress(std::string_view str)
 
 EthernetHeader::EthernetHeader() = default;
 
-EthernetHeader::EthernetHeader(u16 ether_type) : ethertype(htons(ether_type))
+u16 EthernetHeader::Size() const
 {
+  return static_cast<u16>(SIZE);
 }
 
 EthernetHeader::EthernetHeader(const MACAddress& dest, const MACAddress& src, u16 ether_type)
@@ -330,9 +331,8 @@ EthernetHeader::EthernetHeader(const MACAddress& dest, const MACAddress& src, u1
 {
 }
 
-u16 EthernetHeader::Size() const
+EthernetHeader::EthernetHeader(u16 ether_type) : ethertype(htons(ether_type))
 {
-  return static_cast<u16>(SIZE);
 }
 
 IPv4Header::IPv4Header() = default;
