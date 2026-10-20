@@ -190,8 +190,12 @@ bool VolumeWAD::CheckContentIntegrity(const IOS::ES::Content& content,
   iv[0] = static_cast<u8>(content.index >> 8);
   iv[1] = static_cast<u8>(content.index);
 
+  // Without the owner's keys file the contents can't be decrypted, so they can't be checked.
+  const std::optional<std::array<u8, 16>> title_key = ticket.GetTitleKey();
+  if (!title_key)
+    return false;
   const std::unique_ptr<Common::AES::Context> aes =
-      Common::AES::CreateContextDecrypt(ticket.GetTitleKey().data());
+      Common::AES::CreateContextDecrypt(title_key->data());
   std::vector<u8> plain(encrypted_data.size());
   aes->Crypt(iv.data(), encrypted_data.data(), plain.data(), plain.size());
 

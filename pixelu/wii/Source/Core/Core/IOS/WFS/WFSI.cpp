@@ -9,7 +9,9 @@
 #include "Core/IOS/WFS/WFSI.h"
 
 #include <algorithm>
+#include <array>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -210,7 +212,13 @@ std::optional<IPCReply> WFSIDevice::IOCtl(const IOCtlRequest& request)
       result = WFSI_ENOTICKET;
       break;
     }
-    m_aes_ctx = Common::AES::CreateContextDecrypt(ticket.GetTitleKey(m_ios.GetIOSC()).data());
+    const std::optional<std::array<u8, 16>> title_key = ticket.GetTitleKey(m_ios.GetIOSC());
+    if (!title_key)
+    {
+      result = WFSI_ENOTICKET;
+      break;
+    }
+    m_aes_ctx = Common::AES::CreateContextDecrypt(title_key->data());
 
     SetImportTitleIdAndGroupId(m_tmd.GetTitleId(), m_tmd.GetGroupId());
     if (m_patch_type == PATCH_TYPE_1)

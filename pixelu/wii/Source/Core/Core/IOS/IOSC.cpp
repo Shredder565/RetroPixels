@@ -7,6 +7,9 @@
 #include <cstddef>
 #include <cstring>
 #include <iterator>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -21,6 +24,8 @@
 #include "Common/Crypto/ec.h"
 #include "Common/FileUtil.h"
 #include "Common/IOFile.h"
+#include "Common/Logging/Log.h"
+#include "Common/MsgHandler.h"
 #include "Common/ScopeGuard.h"
 #include "Common/Swap.h"
 #include "Core/IOS/Device.h"
@@ -72,113 +77,208 @@ static_assert(sizeof(KeysBin) == 0x400, "keys.bin is 1 KiB");
 // The NAND HMAC key shares bytes with the end of the NG private key region.
 constexpr size_t KEYS_BIN_NAND_HMAC_OFFSET = 0x144;
 constexpr size_t KEYS_BIN_NAND_HMAC_SIZE = 0x14;
+
+// keys.bin holds the console's 128-byte OTP at 0x100 and its SEEPROM from 0x200 on.
+constexpr size_t KEYS_BIN_OTP_OFFSET = 0x100;
+constexpr size_t KEYS_BIN_SEEPROM_OFFSET = 0x200;
+constexpr size_t WII_OTP_SIZE = 0x80;
+
+// A Wii U OTP dump (WiiUBrew, "Hardware/eFuse") is eight banks of 0x80 bytes. Bank 0 is the
+// vWii's own Wii OTP, laid out like a Wii's. Bank 6 starts with the vWii's MS ID, CA ID, NG key ID
+// and NG signature (the same fields, in the same order, as the start of a Wii's SEEPROM) and holds
+// the Korean common key at 0x348.
+constexpr size_t WIIU_OTP_SIZE = 0x400;
+constexpr size_t WIIU_OTP_WII_CERT_OFFSET = 0x300;
+constexpr size_t WIIU_OTP_WII_CERT_SIZE = 0x48;
+constexpr size_t WIIU_OTP_KOREAN_KEY_OFFSET = 0x348;
+
+// CA and MS numbers of retail and development consoles.
+constexpr u32 RETAIL_CA_ID = 1;
+constexpr u32 RETAIL_MS_ID = 2;
+constexpr u32 DEV_CA_ID = 2;
+constexpr u32 DEV_MS_ID = 3;
+
+// The owner's key files, all in the Wii NAND root.
+constexpr const char* KEYS_BIN_NAME = "keys.bin";
+constexpr const char* OTP_BIN_NAME = "otp.bin";
+constexpr const char* KEYS_TEXT_NAME = "wii_keys.txt";
+
+template <size_t N>
+bool IsAllZero(const std::array<u8, N>& bytes)
+{
+  return std::ranges::all_of(bytes, [](u8 b) { return b == 0; });
+}
+
+std::string NandRoot()
+{
+  return File::GetUserPath(D_WIIROOT_IDX);
+}
+
+// A console's keys as read from the owner's dump, always in the keys.bin layout.
+struct OwnerConsoleKeys
+{
+  KeysBin dump{};
+  // False for a Wii otp.bin: it has no SEEPROM, so the NG signature, NG key ID, boot2 version
+  // and Korean key are unknown (zero), and the CA/MS numbers are those of a retail console.
+  bool has_seeprom = false;
+  std::string path;
+};
+
+std::optional<OwnerConsoleKeys> ReadKeysBin(const std::string& path)
+{
+  File::IOFile file{path, "rb"};
+  if (!file)
+    return std::nullopt;
+
+  OwnerConsoleKeys keys;
+  keys.path = path;
+  keys.has_seeprom = true;
+  if (!file.ReadBytes(&keys.dump, sizeof(keys.dump)) || IsAllZero(keys.dump.common_key))
+  {
+    ERROR_LOG_FMT(IOS, "{} is not a BootMii keys.bin (1 KiB holding a Wii's keys); ignored", path);
+    return std::nullopt;
+  }
+  return keys;
+}
+
+std::optional<OwnerConsoleKeys> ReadOtpBin(const std::string& path)
+{
+  File::IOFile file{path, "rb"};
+  if (!file)
+    return std::nullopt;
+
+  const u64 size = file.GetSize();
+  std::vector<u8> raw;
+  if (size == WII_OTP_SIZE || size == WIIU_OTP_SIZE)
+    raw.resize(static_cast<size_t>(size));
+  if (raw.empty() || !file.ReadBytes(raw.data(), raw.size()))
+  {
+    ERROR_LOG_FMT(IOS, "{} is not an OTP dump (128 bytes from a Wii or 1 KiB from a Wii U); ignored",
+                  path);
+    return std::nullopt;
+  }
+
+  OwnerConsoleKeys keys;
+  keys.path = path;
+  u8* const out = reinterpret_cast<u8*>(&keys.dump);
+  std::memcpy(out + KEYS_BIN_OTP_OFFSET, raw.data(), WII_OTP_SIZE);
+  if (raw.size() == WIIU_OTP_SIZE)
+  {
+    std::memcpy(out + KEYS_BIN_SEEPROM_OFFSET, raw.data() + WIIU_OTP_WII_CERT_OFFSET,
+                WIIU_OTP_WII_CERT_SIZE);
+    std::memcpy(keys.dump.korean_key.data(), raw.data() + WIIU_OTP_KOREAN_KEY_OFFSET,
+                keys.dump.korean_key.size());
+    keys.has_seeprom = true;
+  }
+  else
+  {
+    keys.dump.ms_id = Common::swap32(RETAIL_MS_ID);
+    keys.dump.ca_id = Common::swap32(RETAIL_CA_ID);
+  }
+
+  if (IsAllZero(keys.dump.common_key))
+  {
+    ERROR_LOG_FMT(IOS, "{} holds no common key (a blank or damaged OTP dump); ignored", path);
+    return std::nullopt;
+  }
+  return keys;
+}
+
+// keys.bin first (it is complete), then otp.bin.
+std::optional<OwnerConsoleKeys> ReadOwnerConsoleKeys()
+{
+  const std::string root = NandRoot();
+  if (auto keys = ReadKeysBin(root + KEYS_BIN_NAME))
+    return keys;
+  return ReadOtpBin(root + OTP_BIN_NAME);
+}
+
+IOS::HLE::IOSC::ConsoleType ConsoleTypeOfKeys(const KeysBin& dump)
+{
+  return Common::swap32(dump.ca_id) == DEV_CA_ID ? IOS::HLE::IOSC::ConsoleType::RVT :
+                                                    IOS::HLE::IOSC::ConsoleType::Retail;
+}
+
+std::string_view Trim(std::string_view text)
+{
+  const auto is_space = [](char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
+  while (!text.empty() && is_space(text.front()))
+    text.remove_prefix(1);
+  while (!text.empty() && is_space(text.back()))
+    text.remove_suffix(1);
+  return text;
+}
+
+int HexDigit(char c)
+{
+  if (c >= '0' && c <= '9')
+    return c - '0';
+  if (c >= 'a' && c <= 'f')
+    return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F')
+    return c - 'A' + 10;
+  return -1;
+}
+
+// wii_keys.txt: one "name = hex bytes" per line (":" works too, spaces between the digits are
+// allowed, "#" and ";" start a comment). Names are not case sensitive.
+std::optional<std::vector<u8>> ParseKeyEntry(std::string_view text, std::string_view name,
+                                             const std::string& path)
+{
+  while (!text.empty())
+  {
+    const size_t line_end = std::min(text.find('\n'), text.size());
+    std::string_view line = text.substr(0, line_end);
+    text.remove_prefix(std::min(line_end + 1, text.size()));
+
+    line = line.substr(0, std::min(line.find_first_of("#;"), line.size()));
+    const size_t separator = line.find_first_of("=:");
+    if (separator == std::string_view::npos)
+      continue;
+    const std::string_view entry_name = Trim(line.substr(0, separator));
+    const bool same_name =
+        entry_name.size() == name.size() &&
+        std::equal(entry_name.begin(), entry_name.end(), name.begin(), [](char a, char b) {
+          return (a >= 'A' && a <= 'Z' ? static_cast<char>(a - 'A' + 'a') : a) == b;
+        });
+    if (!same_name)
+      continue;
+
+    std::vector<u8> bytes;
+    int high = -1;
+    for (const char c : line.substr(separator + 1))
+    {
+      if (c == ' ' || c == '\t' || c == '\r')
+        continue;
+      const int digit = HexDigit(c);
+      if (digit < 0)
+      {
+        ERROR_LOG_FMT(IOS, "{}: \"{}\" is not written in hex digits; ignored", path, name);
+        return std::nullopt;
+      }
+      if (high < 0)
+      {
+        high = digit;
+      }
+      else
+      {
+        bytes.push_back(static_cast<u8>(high << 4 | digit));
+        high = -1;
+      }
+    }
+    if (high >= 0 || bytes.empty())
+    {
+      ERROR_LOG_FMT(IOS, "{}: \"{}\" has an incomplete hex value; ignored", path, name);
+      return std::nullopt;
+    }
+    return bytes;
+  }
+  return std::nullopt;
+}
 }  // namespace
 
 namespace IOS::HLE
 {
-// =============================================================================================
-// Key material. These tables are carried over unchanged.
-
-constexpr std::array<u8, 512> ROOT_PUBLIC_KEY = {
-    {0xF8, 0x24, 0x6C, 0x58, 0xBA, 0xE7, 0x50, 0x03, 0x01, 0xFB, 0xB7, 0xC2, 0xEB, 0xE0, 0x01,
-     0x05, 0x71, 0xDA, 0x92, 0x23, 0x78, 0xF0, 0x51, 0x4E, 0xC0, 0x03, 0x1D, 0xD0, 0xD2, 0x1E,
-     0xD3, 0xD0, 0x7E, 0xFC, 0x85, 0x20, 0x69, 0xB5, 0xDE, 0x9B, 0xB9, 0x51, 0xA8, 0xBC, 0x90,
-     0xA2, 0x44, 0x92, 0x6D, 0x37, 0x92, 0x95, 0xAE, 0x94, 0x36, 0xAA, 0xA6, 0xA3, 0x02, 0x51,
-     0x0C, 0x7B, 0x1D, 0xED, 0xD5, 0xFB, 0x20, 0x86, 0x9D, 0x7F, 0x30, 0x16, 0xF6, 0xBE, 0x65,
-     0xD3, 0x83, 0xA1, 0x6D, 0xB3, 0x32, 0x1B, 0x95, 0x35, 0x18, 0x90, 0xB1, 0x70, 0x02, 0x93,
-     0x7E, 0xE1, 0x93, 0xF5, 0x7E, 0x99, 0xA2, 0x47, 0x4E, 0x9D, 0x38, 0x24, 0xC7, 0xAE, 0xE3,
-     0x85, 0x41, 0xF5, 0x67, 0xE7, 0x51, 0x8C, 0x7A, 0x0E, 0x38, 0xE7, 0xEB, 0xAF, 0x41, 0x19,
-     0x1B, 0xCF, 0xF1, 0x7B, 0x42, 0xA6, 0xB4, 0xED, 0xE6, 0xCE, 0x8D, 0xE7, 0x31, 0x8F, 0x7F,
-     0x52, 0x04, 0xB3, 0x99, 0x0E, 0x22, 0x67, 0x45, 0xAF, 0xD4, 0x85, 0xB2, 0x44, 0x93, 0x00,
-     0x8B, 0x08, 0xC7, 0xF6, 0xB7, 0xE5, 0x6B, 0x02, 0xB3, 0xE8, 0xFE, 0x0C, 0x9D, 0x85, 0x9C,
-     0xB8, 0xB6, 0x82, 0x23, 0xB8, 0xAB, 0x27, 0xEE, 0x5F, 0x65, 0x38, 0x07, 0x8B, 0x2D, 0xB9,
-     0x1E, 0x2A, 0x15, 0x3E, 0x85, 0x81, 0x80, 0x72, 0xA2, 0x3B, 0x6D, 0xD9, 0x32, 0x81, 0x05,
-     0x4F, 0x6F, 0xB0, 0xF6, 0xF5, 0xAD, 0x28, 0x3E, 0xCA, 0x0B, 0x7A, 0xF3, 0x54, 0x55, 0xE0,
-     0x3D, 0xA7, 0xB6, 0x83, 0x26, 0xF3, 0xEC, 0x83, 0x4A, 0xF3, 0x14, 0x04, 0x8A, 0xC6, 0xDF,
-     0x20, 0xD2, 0x85, 0x08, 0x67, 0x3C, 0xAB, 0x62, 0xA2, 0xC7, 0xBC, 0x13, 0x1A, 0x53, 0x3E,
-     0x0B, 0x66, 0x80, 0x6B, 0x1C, 0x30, 0x66, 0x4B, 0x37, 0x23, 0x31, 0xBD, 0xC4, 0xB0, 0xCA,
-     0xD8, 0xD1, 0x1E, 0xE7, 0xBB, 0xD9, 0x28, 0x55, 0x48, 0xAA, 0xEC, 0x1F, 0x66, 0xE8, 0x21,
-     0xB3, 0xC8, 0xA0, 0x47, 0x69, 0x00, 0xC5, 0xE6, 0x88, 0xE8, 0x0C, 0xCE, 0x3C, 0x61, 0xD6,
-     0x9C, 0xBB, 0xA1, 0x37, 0xC6, 0x60, 0x4F, 0x7A, 0x72, 0xDD, 0x8C, 0x7B, 0x3E, 0x3D, 0x51,
-     0x29, 0x0D, 0xAA, 0x6A, 0x59, 0x7B, 0x08, 0x1F, 0x9D, 0x36, 0x33, 0xA3, 0x46, 0x7A, 0x35,
-     0x61, 0x09, 0xAC, 0xA7, 0xDD, 0x7D, 0x2E, 0x2F, 0xB2, 0xC1, 0xAE, 0xB8, 0xE2, 0x0F, 0x48,
-     0x92, 0xD8, 0xB9, 0xF8, 0xB4, 0x6F, 0x4E, 0x3C, 0x11, 0xF4, 0xF4, 0x7D, 0x8B, 0x75, 0x7D,
-     0xFE, 0xFE, 0xA3, 0x89, 0x9C, 0x33, 0x59, 0x5C, 0x5E, 0xFD, 0xEB, 0xCB, 0xAB, 0xE8, 0x41,
-     0x3E, 0x3A, 0x9A, 0x80, 0x3C, 0x69, 0x35, 0x6E, 0xB2, 0xB2, 0xAD, 0x5C, 0xC4, 0xC8, 0x58,
-     0x45, 0x5E, 0xF5, 0xF7, 0xB3, 0x06, 0x44, 0xB4, 0x7C, 0x64, 0x06, 0x8C, 0xDF, 0x80, 0x9F,
-     0x76, 0x02, 0x5A, 0x2D, 0xB4, 0x46, 0xE0, 0x3D, 0x7C, 0xF6, 0x2F, 0x34, 0xE7, 0x02, 0x45,
-     0x7B, 0x02, 0xA4, 0xCF, 0x5D, 0x9D, 0xD5, 0x3C, 0xA5, 0x3A, 0x7C, 0xA6, 0x29, 0x78, 0x8C,
-     0x67, 0xCA, 0x08, 0xBF, 0xEC, 0xCA, 0x43, 0xA9, 0x57, 0xAD, 0x16, 0xC9, 0x4E, 0x1C, 0xD8,
-     0x75, 0xCA, 0x10, 0x7D, 0xCE, 0x7E, 0x01, 0x18, 0xF0, 0xDF, 0x6B, 0xFE, 0xE5, 0x1D, 0xDB,
-     0xD9, 0x91, 0xC2, 0x6E, 0x60, 0xCD, 0x48, 0x58, 0xAA, 0x59, 0x2C, 0x82, 0x00, 0x75, 0xF2,
-     0x9F, 0x52, 0x6C, 0x91, 0x7C, 0x6F, 0xE5, 0x40, 0x3E, 0xA7, 0xD4, 0xA5, 0x0C, 0xEC, 0x3B,
-     0x73, 0x84, 0xDE, 0x88, 0x6E, 0x82, 0xD2, 0xEB, 0x4D, 0x4E, 0x42, 0xB5, 0xF2, 0xB1, 0x49,
-     0xA8, 0x1E, 0xA7, 0xCE, 0x71, 0x44, 0xDC, 0x29, 0x94, 0xCF, 0xC4, 0x4E, 0x1F, 0x91, 0xCB,
-     0xD4, 0x95}};
-
-constexpr std::array<u8, 512> ROOT_PUBLIC_KEY_DEV = {
-    {0xD0, 0x1F, 0xE1, 0x00, 0xD4, 0x35, 0x56, 0xB2, 0x4B, 0x56, 0xDA, 0xE9, 0x71, 0xB5, 0xA5,
-     0xD3, 0x84, 0xB9, 0x30, 0x03, 0xBE, 0x1B, 0xBF, 0x28, 0xA2, 0x30, 0x5B, 0x06, 0x06, 0x45,
-     0x46, 0x7D, 0x5B, 0x02, 0x51, 0xD2, 0x56, 0x1A, 0x27, 0x4F, 0x9E, 0x9F, 0x9C, 0xEC, 0x64,
-     0x61, 0x50, 0xAB, 0x3D, 0x2A, 0xE3, 0x36, 0x68, 0x66, 0xAC, 0xA4, 0xBA, 0xE8, 0x1A, 0xE3,
-     0xD7, 0x9A, 0xA6, 0xB0, 0x4A, 0x8B, 0xCB, 0xA7, 0xE6, 0xFB, 0x64, 0x89, 0x45, 0xEB, 0xDF,
-     0xDB, 0x85, 0xBA, 0x09, 0x1F, 0xD7, 0xD1, 0x14, 0xB5, 0xA3, 0xA7, 0x80, 0xE3, 0xA2, 0x2E,
-     0x6E, 0xCD, 0x87, 0xB5, 0xA4, 0xC6, 0xF9, 0x10, 0xE4, 0x03, 0x22, 0x08, 0x81, 0x4B, 0x0C,
-     0xEE, 0xA1, 0xA1, 0x7D, 0xF7, 0x39, 0x69, 0x5F, 0x61, 0x7E, 0xF6, 0x35, 0x28, 0xDB, 0x94,
-     0x96, 0x37, 0xA0, 0x56, 0x03, 0x7F, 0x7B, 0x32, 0x41, 0x38, 0x95, 0xC0, 0xA8, 0xF1, 0x98,
-     0x2E, 0x15, 0x65, 0xE3, 0x8E, 0xED, 0xC2, 0x2E, 0x59, 0x0E, 0xE2, 0x67, 0x7B, 0x86, 0x09,
-     0xF4, 0x8C, 0x2E, 0x30, 0x3F, 0xBC, 0x40, 0x5C, 0xAC, 0x18, 0x04, 0x2F, 0x82, 0x20, 0x84,
-     0xE4, 0x93, 0x68, 0x03, 0xDA, 0x7F, 0x41, 0x34, 0x92, 0x48, 0x56, 0x2B, 0x8E, 0xE1, 0x2F,
-     0x78, 0xF8, 0x03, 0x24, 0x63, 0x30, 0xBC, 0x7B, 0xE7, 0xEE, 0x72, 0x4A, 0xF4, 0x58, 0xA4,
-     0x72, 0xE7, 0xAB, 0x46, 0xA1, 0xA7, 0xC1, 0x0C, 0x2F, 0x18, 0xFA, 0x07, 0xC3, 0xDD, 0xD8,
-     0x98, 0x06, 0xA1, 0x1C, 0x9C, 0xC1, 0x30, 0xB2, 0x47, 0xA3, 0x3C, 0x8D, 0x47, 0xDE, 0x67,
-     0xF2, 0x9E, 0x55, 0x77, 0xB1, 0x1C, 0x43, 0x49, 0x3D, 0x5B, 0xBA, 0x76, 0x34, 0xA7, 0xE4,
-     0xE7, 0x15, 0x31, 0xB7, 0xDF, 0x59, 0x81, 0xFE, 0x24, 0xA1, 0x14, 0x55, 0x4C, 0xBD, 0x8F,
-     0x00, 0x5C, 0xE1, 0xDB, 0x35, 0x08, 0x5C, 0xCF, 0xC7, 0x78, 0x06, 0xB6, 0xDE, 0x25, 0x40,
-     0x68, 0xA2, 0x6C, 0xB5, 0x49, 0x2D, 0x45, 0x80, 0x43, 0x8F, 0xE1, 0xE5, 0xA9, 0xED, 0x75,
-     0xC5, 0xED, 0x45, 0x1D, 0xCE, 0x78, 0x94, 0x39, 0xCC, 0xC3, 0xBA, 0x28, 0xA2, 0x31, 0x2A,
-     0x1B, 0x87, 0x19, 0xEF, 0x0F, 0x73, 0xB7, 0x13, 0x95, 0x0C, 0x02, 0x59, 0x1A, 0x74, 0x62,
-     0xA6, 0x07, 0xF3, 0x7C, 0x0A, 0xA7, 0xA1, 0x8F, 0xA9, 0x43, 0xA3, 0x6D, 0x75, 0x2A, 0x5F,
-     0x41, 0x92, 0xF0, 0x13, 0x61, 0x00, 0xAA, 0x9C, 0xB4, 0x1B, 0xBE, 0x14, 0xBE, 0xB1, 0xF9,
-     0xFC, 0x69, 0x2F, 0xDF, 0xA0, 0x94, 0x46, 0xDE, 0x5A, 0x9D, 0xDE, 0x2C, 0xA5, 0xF6, 0x8C,
-     0x1C, 0x0C, 0x21, 0x42, 0x92, 0x87, 0xCB, 0x2D, 0xAA, 0xA3, 0xD2, 0x63, 0x75, 0x2F, 0x73,
-     0xE0, 0x9F, 0xAF, 0x44, 0x79, 0xD2, 0x81, 0x74, 0x29, 0xF6, 0x98, 0x00, 0xAF, 0xDE, 0x6B,
-     0x59, 0x2D, 0xC1, 0x98, 0x82, 0xBD, 0xF5, 0x81, 0xCC, 0xAB, 0xF2, 0xCB, 0x91, 0x02, 0x9E,
-     0xF3, 0x5C, 0x4C, 0xFD, 0xBB, 0xFF, 0x49, 0xC1, 0xFA, 0x1B, 0x2F, 0xE3, 0x1D, 0xE7, 0xA5,
-     0x60, 0xEC, 0xB4, 0x7E, 0xBC, 0xFE, 0x32, 0x42, 0x5B, 0x95, 0x6F, 0x81, 0xB6, 0x99, 0x17,
-     0x48, 0x7E, 0x3B, 0x78, 0x91, 0x51, 0xDB, 0x2E, 0x78, 0xB1, 0xFD, 0x2E, 0xBE, 0x7E, 0x62,
-     0x6B, 0x3E, 0xA1, 0x65, 0xB4, 0xFB, 0x00, 0xCC, 0xB7, 0x51, 0xAF, 0x50, 0x73, 0x29, 0xC4,
-     0xA3, 0x93, 0x9E, 0xA6, 0xDD, 0x9C, 0x50, 0xA0, 0xE7, 0x38, 0x6B, 0x01, 0x45, 0x79, 0x6B,
-     0x41, 0xAF, 0x61, 0xF7, 0x85, 0x55, 0x94, 0x4F, 0x3B, 0xC2, 0x2D, 0xC3, 0xBD, 0x0D, 0x00,
-     0xF8, 0x79, 0x8A, 0x42, 0xB1, 0xAA, 0xA0, 0x83, 0x20, 0x65, 0x9A, 0xC7, 0x39, 0x5A, 0xB4,
-     0xF3, 0x29}};
-
-constexpr u32 DEFAULT_DEVICE_ID = 0x0403AC68;
-constexpr u32 DEFAULT_KEY_ID = 0x6AAB8C59;
-
-constexpr std::array<u8, 30> DEFAULT_PRIVATE_KEY = {{
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-}};
-
-// clang-format off
-constexpr Common::ec::Signature DEFAULT_SIGNATURE = {{
-    // R
-    0x00, 0xD8, 0x81, 0x63, 0xB2, 0x00, 0x6B, 0x0B, 0x54, 0x82, 0x88, 0x63, 0x81, 0x1C, 0x00, 0x71,
-    0x12, 0xED, 0xB7, 0xFD, 0x21, 0xAB, 0x0E, 0x50, 0x0E, 0x1F, 0xBF, 0x78, 0xAD, 0x37,
-    // S
-    0x00, 0x71, 0x8D, 0x82, 0x41, 0xEE, 0x45, 0x11, 0xC7, 0x3B, 0xAC, 0x08, 0xB6, 0x83, 0xDC, 0x05,
-    0xB8, 0xA8, 0x90, 0x1F, 0xA8, 0x2A, 0x0E, 0x4E, 0x76, 0xEF, 0x44, 0x72, 0x99, 0xF8,
-}};
-// clang-format on
-
-constexpr std::array<u8, 16> COMMON_KEY_RETAIL = {{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
-constexpr std::array<u8, 16> COMMON_KEY_DEV = {{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
-constexpr std::array<u8, 16> SD_KEY = {{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
-constexpr std::array<u8, 16> KOREAN_COMMON_KEY = {{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
-
-// =============================================================================================
-
 namespace
 {
 constexpr size_t AES128_KEY_SIZE = 0x10;
@@ -269,7 +369,7 @@ void IOSC::KeyEntry::DoState(PointerWrap& p)
 IOSC::IOSC(ConsoleType console_type) : m_console_type(console_type)
 {
   LoadDefaultEntries();
-  // Real console keys, when the user has provided a dump, replace some of the defaults.
+  // The keys come from the owner's own console dump; without one the key objects stay empty.
   LoadEntries();
 }
 
@@ -515,6 +615,9 @@ ReturnCode IOSC::VerifyPublicKeySign(const std::array<u8, 20>& sha1, Handle sign
   const KeyEntry* signer = FindEntry(signer_handle, SearchMode::IncludeRootKey);
   if (signer == nullptr)
     return IOSC_EINVAL;
+  // Without the owner's root key nothing can be checked against it.
+  if (signer_handle == HANDLE_ROOT_KEY && signer->data.empty())
+    return IOSC_FAIL_CHECKVALUE;
   // Key pairs are not supported, only public keys.
   if (signer->type != TYPE_PUBLIC_KEY)
     return IOSC_INVALID_OBJTYPE;
@@ -579,8 +682,22 @@ ReturnCode IOSC::ImportCertificate(const ES::CertReader& cert, Handle signer_han
   if (!cert.IsValid())
     return IOSC_INVALID_FORMAT;
 
-  if (VerifyPublicKeySign(cert.GetSha1(), signer_handle, cert.GetSignatureData(), pid) !=
-      IPC_SUCCESS)
+  // RetroPixels has no root key of its own. Unless the owner has given one (root_key in
+  // wii_keys.txt), the root's signature on a CA certificate is taken on trust; every signature
+  // below it (the CA's on the issuer, the issuer's on the ticket or TMD) is still checked.
+  const bool root_unchecked = signer_handle == HANDLE_ROOT_KEY && m_root_key_entry.data.empty();
+  if (root_unchecked)
+  {
+    static bool s_logged = false;
+    if (!s_logged)
+    {
+      WARN_LOG_FMT(IOS, "No root key given: CA certificates are accepted without checking the "
+                        "root signature");
+      s_logged = true;
+    }
+  }
+  else if (VerifyPublicKeySign(cert.GetSha1(), signer_handle, cert.GetSignatureData(), pid) !=
+           IPC_SUCCESS)
   {
     return IOSC_FAIL_CHECKVALUE;
   }
@@ -596,9 +713,11 @@ ReturnCode IOSC::ImportCertificate(const ES::CertReader& cert, Handle signer_han
 // --------------------------------------------------------------------------------------------
 // Console identity
 
+// Without the owner's keys there is no console identity: online services stay off, as they did
+// for the shared stand-in identity before.
 bool IOSC::IsUsingDefaultId() const
 {
-  return GetDeviceId() == DEFAULT_DEVICE_ID;
+  return !m_has_console_keys;
 }
 
 u32 IOSC::GetDeviceId() const
@@ -647,16 +766,15 @@ void IOSC::Sign(u8* sig_out, u8* ap_cert_out, u64 title_id, const u8* data, u32 
 
 void IOSC::LoadDefaultEntries()
 {
-  // Stand-in values for a console without a keys.bin. (A real IOS has its own fall-backs for an
-  // unprogrammed OTP; those are not emulated.)
-  const auto bytes = [](const auto& table) { return std::vector<u8>(table.begin(), table.end()); };
-
-  m_key_entries[HANDLE_CONSOLE_KEY] = {TYPE_SECRET_KEY, ObjectSubType::ECC233,
-                                       bytes(DEFAULT_PRIVATE_KEY), 3};
-  m_console_signature = DEFAULT_SIGNATURE;
-  m_console_key_id = DEFAULT_KEY_ID;
-  m_key_entries[HANDLE_CONSOLE_ID] = {TYPE_DATA, ObjectSubType::Data, {}, DEFAULT_DEVICE_ID,
-                                      0xFFFFFFF};
+  // RetroPixels has no keys of its own. Until the owner's key files are read, every key object is
+  // empty, so anything that needs one fails cleanly (IOSC_FAIL_INTERNAL). Only the objects IOS
+  // itself fills with zeros (NAND key and HMAC, PRNG key) and the console key are zero-filled;
+  // the console key is all zero so that a device certificate can still be built.
+  m_key_entries[HANDLE_CONSOLE_KEY] = {TYPE_SECRET_KEY, ObjectSubType::ECC233, std::vector<u8>(30),
+                                       3};
+  m_console_signature = {};
+  m_console_key_id = 0;
+  m_key_entries[HANDLE_CONSOLE_ID] = {TYPE_DATA, ObjectSubType::Data, {}, 0, 0xFFFFFFF};
   m_key_entries[HANDLE_FS_KEY] = {TYPE_SECRET_KEY, ObjectSubType::AES128,
                                   std::vector<u8>(AES128_KEY_SIZE), 5};
   m_key_entries[HANDLE_FS_MAC] = {TYPE_SECRET_KEY, ObjectSubType::MAC, std::vector<u8>(20), 5};
@@ -665,17 +783,14 @@ void IOSC::LoadDefaultEntries()
   // (Retail key blobs come from CA00000001, which is used here although IOSC itself defaults
   // to 2.)
   const bool dev = m_console_type == ConsoleType::RVT;
-  m_key_entries[HANDLE_COMMON_KEY] = {TYPE_SECRET_KEY, ObjectSubType::AES128,
-                                      bytes(dev ? COMMON_KEY_DEV : COMMON_KEY_RETAIL), 3};
-  m_root_key_entry = {TYPE_PUBLIC_KEY, ObjectSubType::RSA4096,
-                      bytes(dev ? ROOT_PUBLIC_KEY_DEV : ROOT_PUBLIC_KEY), RSA_EXPONENT_65537_BE,
-                      0};
-  m_ms_id = dev ? 3 : 2;
-  m_ca_id = dev ? 2 : 1;
+  m_key_entries[HANDLE_COMMON_KEY] = {TYPE_SECRET_KEY, ObjectSubType::AES128, {}, 3};
+  m_root_key_entry = {TYPE_PUBLIC_KEY, ObjectSubType::RSA4096, {}, RSA_EXPONENT_65537_BE, 0};
+  m_ms_id = dev ? DEV_MS_ID : RETAIL_MS_ID;
+  m_ca_id = dev ? DEV_CA_ID : RETAIL_CA_ID;
 
   m_key_entries[HANDLE_PRNG_KEY] = {TYPE_SECRET_KEY, ObjectSubType::AES128,
                                     std::vector<u8>(AES128_KEY_SIZE), 3};
-  m_key_entries[HANDLE_SD_KEY] = {TYPE_SECRET_KEY, ObjectSubType::AES128, bytes(SD_KEY), 3};
+  m_key_entries[HANDLE_SD_KEY] = {TYPE_SECRET_KEY, ObjectSubType::AES128, {}, 3};
 
   for (const Handle version_slot :
        {HANDLE_BOOT2_VERSION, HANDLE_UNKNOWN_8, HANDLE_UNKNOWN_9, HANDLE_FS_VERSION})
@@ -683,26 +798,31 @@ void IOSC::LoadDefaultEntries()
     m_key_entries[version_slot] = {TYPE_DATA, ObjectSubType::Version, {}, 3};
   }
 
-  m_key_entries[HANDLE_NEW_COMMON_KEY] = {TYPE_SECRET_KEY, ObjectSubType::AES128,
-                                          bytes(KOREAN_COMMON_KEY), 3};
+  m_key_entries[HANDLE_NEW_COMMON_KEY] = {TYPE_SECRET_KEY, ObjectSubType::AES128, {}, 3};
 }
 
 void IOSC::LoadEntries()
 {
-  File::IOFile file{File::GetUserPath(D_WIIROOT_IDX) + "keys.bin", "rb"};
-  if (!file)
+  const bool dev = m_console_type == ConsoleType::RVT;
+
+  // Keys that are not in a console's OTP or SEEPROM come from wii_keys.txt.
+  if (auto root_key = LoadOwnerKey(dev ? "root_key_dev" : "root_key", 512))
+    m_root_key_entry.data = std::move(*root_key);
+  if (auto sd_key = LoadOwnerKey("sd_key", AES128_KEY_SIZE))
+    m_key_entries[HANDLE_SD_KEY].data = std::move(*sd_key);
+
+  const std::optional<OwnerConsoleKeys> keys = ReadOwnerConsoleKeys();
+  if (!keys)
   {
-    WARN_LOG_FMT(IOS, "No keys.bin found; using the built-in default keys");
+    WARN_LOG_FMT(IOS,
+                 "No keys file from the owner's Wii ({} or {} in {}): Wii titles can't be decrypted",
+                 KEYS_BIN_NAME, OTP_BIN_NAME, NandRoot());
     return;
   }
+  INFO_LOG_FMT(IOS, "Using the console keys in {}", keys->path);
+  m_has_console_keys = true;
 
-  KeysBin dump;
-  if (!file.ReadBytes(&dump, sizeof(dump)))
-  {
-    ERROR_LOG_FMT(IOS, "keys.bin could not be read");
-    return;
-  }
-
+  const KeysBin& dump = keys->dump;
   const auto* raw = reinterpret_cast<const u8*>(&dump);
   m_key_entries[HANDLE_CONSOLE_KEY].data.assign(dump.ng_priv.begin(), dump.ng_priv.end());
   m_console_signature = dump.ng_sig;
@@ -716,6 +836,76 @@ void IOSC::LoadEntries()
                                                KEYS_BIN_NAND_HMAC_SIZE);
   m_key_entries[HANDLE_PRNG_KEY].data.assign(dump.backup_key.begin(), dump.backup_key.end());
   m_key_entries[HANDLE_BOOT2_VERSION].misc_data = dump.counters[0].boot2version;
+
+  // A console's common keys only decrypt titles for its own kind of console (retail or
+  // development). For the other kind they would only give garbage, so they are left out.
+  if (ConsoleTypeOfKeys(dump) != m_console_type)
+  {
+    WARN_LOG_FMT(IOS, "The keys in {} are from a {} console; this title is for a {} console",
+                 keys->path, dev ? "retail" : "development", dev ? "development" : "retail");
+    return;
+  }
+  m_key_entries[HANDLE_COMMON_KEY].data.assign(dump.common_key.begin(), dump.common_key.end());
+  if (!IsAllZero(dump.korean_key))
+  {
+    m_key_entries[HANDLE_NEW_COMMON_KEY].data.assign(dump.korean_key.begin(),
+                                                     dump.korean_key.end());
+  }
+}
+
+// --------------------------------------------------------------------------------------------
+// The owner's key files
+
+bool IOSC::HasConsoleKeys()
+{
+  return ReadOwnerConsoleKeys().has_value();
+}
+
+bool IOSC::HasConsoleKeys(ConsoleType console_type)
+{
+  const std::optional<OwnerConsoleKeys> keys = ReadOwnerConsoleKeys();
+  return keys && ConsoleTypeOfKeys(keys->dump) == console_type;
+}
+
+std::optional<std::vector<u8>> IOSC::LoadOwnerKey(std::string_view name, size_t size)
+{
+  const std::string path = NandRoot() + KEYS_TEXT_NAME;
+  std::string text;
+  if (!File::Exists(path) || !File::ReadFileToString(path, text))
+    return std::nullopt;
+  std::optional<std::vector<u8>> bytes = ParseKeyEntry(text, name, path);
+  if (bytes && size != 0 && bytes->size() != size)
+  {
+    ERROR_LOG_FMT(IOS, "{}: \"{}\" must be {} bytes, not {}; ignored", path, name, size,
+                  bytes->size());
+    return std::nullopt;
+  }
+  return bytes;
+}
+
+void IOSC::ReportMissingKeys(ConsoleType console_type)
+{
+  const std::string root = NandRoot();
+  if (!HasConsoleKeys())
+  {
+    PanicAlertFmtT("RetroPixels needs a keys file from your own Wii to play Wii discs, WADs and "
+                   "channels.\n\nMake a NAND backup of your Wii with BootMii and copy its keys.bin "
+                   "(or otp.bin) to:\n{0}\n\nRetroPixels doesn't include Nintendo's keys and never "
+                   "downloads them.",
+                   root);
+  }
+  else if (console_type == ConsoleType::RVT)
+  {
+    PanicAlertFmtT("This title is for development consoles, and the keys file in {0} is from a "
+                   "retail Wii. Put the keys.bin of your own development console there to play it.",
+                   root);
+  }
+  else
+  {
+    PanicAlertFmtT("This title is for retail consoles, and the keys file in {0} is from a "
+                   "development console. Put the keys.bin of your own Wii there to play it.",
+                   root);
+  }
 }
 
 void IOSC::DoState(PointerWrap& p)

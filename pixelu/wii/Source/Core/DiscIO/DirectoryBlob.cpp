@@ -290,6 +290,7 @@ public:
   std::string root_directory;  // empty for a wrapped partition
   std::optional<Partition> wrapped_partition;
   std::array<u8, VolumeWii::AES_KEY_SIZE> key{};
+  bool has_key = false;  // false without the owner's keys file
   DirBlobLayout layout;
 
 private:
@@ -1041,7 +1042,15 @@ void DirectoryBlobReader::Disc::PlacePartitionHeader(DirBlobPartition& partition
   m_outer.Read(address + WII_PARTITION_TICKET_ADDRESS, ticket.size(), ticket.data(), *this);
   const IOS::ES::TicketReader ticket_reader(std::move(ticket));
   if (ticket_reader.IsValid())
-    partition.key = ticket_reader.GetTitleKey();
+  {
+    // Without the owner's keys file there is no title key. Decrypted reads still work; reads of
+    // the encrypted partition fail instead of giving data encrypted with a wrong key.
+    if (const std::optional<std::array<u8, 16>> title_key = ticket_reader.GetTitleKey())
+    {
+      partition.key = *title_key;
+      partition.has_key = true;
+    }
+  }
 }
 
 bool DirectoryBlobReader::Disc::Read(u64 offset, u64 length, u8* out)
@@ -1075,6 +1084,11 @@ bool DirectoryBlobReader::Disc::EncryptPartitionData(u64 offset, u64 size, u8* o
     return false;
   if (!m_encrypted)
     return it->second.layout.Read(offset, size, out, *this);
+  if (!it->second.has_key)
+  {
+    ERROR_LOG_FMT(DISCIO, "Can't encrypt a Wii partition without its title key (no keys file?)");
+    return false;
+  }
   return m_cache.EncryptGroups(offset, size, out, partition_data_offset, decrypted_size,
                                it->second.key);
 }

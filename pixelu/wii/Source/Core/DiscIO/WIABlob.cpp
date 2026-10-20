@@ -1300,8 +1300,13 @@ ConversionResultCode Writer::MakePlan()
     const u64 fst_end = m_volume->PartitionOffsetToRawOffset(*fst_offset + *fst_size, partition);
     const u64 split = std::min(data_end, AlignUp(fst_end - data_start, WII_GROUP) + data_start);
 
+    // Partitions are stored decrypted, which needs the title key (and so the owner's keys file).
+    const std::optional<TitleKey> title_key = ticket.GetTitleKey();
+    if (!title_key)
+      return ConversionResultCode::ReadFailed;
+
     PartitionRecord record;
-    record.key = ticket.GetTitleKey();
+    record.key = *title_key;
     record.parts[0] = AddPartitionPart(data_start, split - data_start, 0);
     record.parts[1] = AddPartitionPart(split, data_end - split, 1);
 

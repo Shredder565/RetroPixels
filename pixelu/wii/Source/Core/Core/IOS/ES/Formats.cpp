@@ -470,7 +470,7 @@ u8 TicketReader::GetCommonKeyIndex() const
   return Be8(m_bytes, offsetof(Ticket, common_key_index));
 }
 
-std::array<u8, 16> TicketReader::GetTitleKey(const HLE::IOSC& iosc) const
+std::optional<std::array<u8, 16>> TicketReader::GetTitleKey(const HLE::IOSC& iosc) const
 {
   // The IV is the title ID followed by eight zero bytes.
   std::array<u8, 16> iv{};
@@ -485,13 +485,20 @@ std::array<u8, 16> TicketReader::GetTitleKey(const HLE::IOSC& iosc) const
   }
 
   std::array<u8, 16> title_key;
-  iosc.Decrypt(HLE::IOSC::COMMON_KEY_HANDLES[key_index], iv.data(),
-               m_bytes.data() + offsetof(Ticket, title_key), title_key.size(), title_key.data(),
-               PID_ES);
+  const HLE::ReturnCode result =
+      iosc.Decrypt(HLE::IOSC::COMMON_KEY_HANDLES[key_index], iv.data(),
+                   m_bytes.data() + offsetof(Ticket, title_key), title_key.size(),
+                   title_key.data(), PID_ES);
+  if (result != HLE::IPC_SUCCESS)
+  {
+    ERROR_LOG_FMT(IOS_ES, "No common key {} to decrypt the title key of {:016x} (no keys file?)",
+                  key_index, GetTitleId());
+    return std::nullopt;
+  }
   return title_key;
 }
 
-std::array<u8, 16> TicketReader::GetTitleKey() const
+std::optional<std::array<u8, 16>> TicketReader::GetTitleKey() const
 {
   const HLE::IOSC iosc{GetConsoleType()};
   return GetTitleKey(iosc);

@@ -250,10 +250,11 @@ public:
   u32 GetTicketSize() const;
   u64 GetTitleId() const;
   u8 GetCommonKeyIndex() const;
-  // The title key, decrypted with the common key held by `iosc`.
-  std::array<u8, 16> GetTitleKey(const HLE::IOSC& iosc) const;
+  // The title key, decrypted with the common key held by `iosc`. Empty when that common key is
+  // not available (no keys file from the owner's console).
+  std::optional<std::array<u8, 16>> GetTitleKey(const HLE::IOSC& iosc) const;
   // As above, with a temporary IOSC whose console type is taken from the issuer.
-  std::array<u8, 16> GetTitleKey() const;
+  std::optional<std::array<u8, 16>> GetTitleKey() const;
 
   // Retail or development, judged from the issuer.
   HLE::IOSC::ConsoleType GetConsoleType() const;

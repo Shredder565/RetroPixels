@@ -7,6 +7,8 @@
 
 #include <array>
 #include <cstddef>
+#include <optional>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -219,12 +221,26 @@ public:
   ReturnCode GetOwnership(Handle handle, u32* owner) const;
   ReturnCode SetOwnership(Handle handle, u32 owner, u32 pid);
 
+  // True when there is no console identity (no keys file from the owner's Wii).
   bool IsUsingDefaultId() const;
   u32 GetDeviceId() const;
   CertECC GetDeviceCertificate() const;
   void Sign(u8* sig_out, u8* ap_cert_out, u64 title_id, const u8* data, u32 data_size) const;
 
   void DoState(PointerWrap& p);
+
+  // The owner's key files. RetroPixels has no Nintendo keys of its own: a console's keys come
+  // from a dump of the owner's own console in the Wii NAND root, either keys.bin (BootMii's 1 KiB
+  // OTP/SEEPROM dump) or otp.bin (a Wii's 128-byte OTP, or a Wii U's 1 KiB OTP, whose first bank
+  // is the vWii's Wii OTP). Keys that are not in a console's OTP (the SD card key and IV, for
+  // example) can be given as "name = hex" lines in wii_keys.txt next to them.
+  static bool HasConsoleKeys();
+  // Also checks that the keys are from the given kind of console (retail or development).
+  static bool HasConsoleKeys(ConsoleType console_type);
+  // A named entry from wii_keys.txt, if it is there and `size` bytes long (any length for 0).
+  static std::optional<std::vector<u8>> LoadOwnerKey(std::string_view name, size_t size);
+  // Tells the player that the keys file is missing (or from the other kind of console).
+  static void ReportMissingKeys(ConsoleType console_type);
 
 private:
   struct KeyEntry
@@ -272,6 +288,8 @@ private:
   u32 m_ms_id = 0;
   u32 m_ca_id = 0;
   u32 m_console_key_id = 0;
+  // Whether the owner's console keys were found (not saved in savestates).
+  bool m_has_console_keys = false;
 };
 }  // namespace HLE
 }  // namespace IOS

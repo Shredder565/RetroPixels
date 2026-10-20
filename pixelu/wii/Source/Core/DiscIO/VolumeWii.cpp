@@ -165,7 +165,11 @@ void VolumeWii::AddPartition(const Partition& partition, u32 type)
     const IOS::ES::TicketReader& ticket = GetTicket(partition);
     if (!ticket.IsValid())
       return nullptr;
-    return Common::AES::CreateContextDecrypt(ticket.GetTitleKey().data());
+    // Without the owner's keys file the partition can't be decrypted: its reads then fail.
+    const std::optional<std::array<u8, 16>> title_key = ticket.GetTitleKey();
+    if (!title_key)
+      return nullptr;
+    return Common::AES::CreateContextDecrypt(title_key->data());
   };
 
   info.data_offset = [this, start]() -> u64 {
