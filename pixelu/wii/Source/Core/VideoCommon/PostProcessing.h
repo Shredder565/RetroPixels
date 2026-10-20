@@ -1,5 +1,4 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -22,10 +21,13 @@ namespace VideoCommon
 {
 class ShaderIncluder;
 
+// The selected user post-processing shader: its GLSL, and the options declared in its
+// [configuration] block together with the values the user set (kept in the main ini, in a
+// "<shader>-options" section).
 class PostProcessingConfiguration
 {
 public:
-  // User defined post process
+  // One option from a shader's [configuration] block.
   struct ConfigurationOption
   {
     enum class OptionType
@@ -37,6 +39,7 @@ public:
 
     bool m_bool_value = false;
 
+    // Up to four components each.
     std::vector<float> m_float_values;
     std::vector<s32> m_integer_values;
 
@@ -53,7 +56,9 @@ public:
 
     std::string m_gui_name;
     std::string m_option_name;
+    // Only shown in the UI while this other (bool) option is on.
     std::string m_dependent_option;
+    // Changed since the values were last uploaded.
     bool m_dirty = false;
   };
 
@@ -62,9 +67,8 @@ public:
   PostProcessingConfiguration();
   virtual ~PostProcessingConfiguration();
 
-  // Loads the configuration with a shader
-  // If the argument is "" the class will load the shader from the g_activeConfig option.
-  // Returns the loaded shader source from file
+  // Loads the named shader (for the current stereo mode) and its options; an empty name, or a
+  // shader that cannot be read, selects the built-in pass-through shader.
   void LoadShader(const std::string& shader);
   void LoadDefaultShader();
   void SaveOptionsConfiguration();
@@ -73,11 +77,11 @@ public:
   ShaderIncluder* GetShaderIncluder() { return m_shader_includer.get(); }
   bool IsDirty() const { return m_any_options_dirty; }
   void SetDirty(bool dirty) { m_any_options_dirty = dirty; }
-  bool HasOptions() const { return m_options.size() > 0; }
+  bool HasOptions() const { return !m_options.empty(); }
   const ConfigMap& GetOptions() const { return m_options; }
   ConfigMap& GetOptions() { return m_options; }
   const ConfigurationOption& GetOption(const std::string& option) { return m_options[option]; }
-  // For updating option's values
+  // Value setters for the options UI. The option must exist.
   void SetOptionf(const std::string& option, int index, float value);
   void SetOptioni(const std::string& option, int index, s32 value);
   void SetOptionb(const std::string& option, bool value);
@@ -93,12 +97,16 @@ private:
   void LoadOptionsConfiguration();
 };
 
+// Draws the XFB to the backbuffer. Up to two passes: a built-in pass (colour correction, gamma
+// and output resampling) and the user's shader. When both are needed the built-in pass renders
+// into an RGBA16F intermediate texture first.
 class PostProcessing
 {
 public:
   PostProcessing();
   virtual ~PostProcessing();
 
+  // Names of the selectable shaders (normal, passive stereo, anaglyph stereo).
   static std::vector<std::string> GetShaderList();
   static std::vector<std::string> GetPassiveShaderList();
   static std::vector<std::string> GetAnaglyphShaderList();
@@ -110,6 +118,8 @@ public:
   void RecompileShader();
   void RecompilePipeline();
 
+  // Draws src of src_tex into dst of the bound framebuffer. A negative src_layer draws every
+  // layer to the matching target layer.
   void BlitFromTexture(const MathUtil::Rectangle<int>& dst, const MathUtil::Rectangle<int>& src,
                        const AbstractTexture* src_tex, int src_layer = -1);
 
@@ -131,10 +141,10 @@ protected:
                          const MathUtil::Rectangle<int>& wnd, u8* buffer, bool user_post_process,
                          bool intermediary_buffer);
 
-  // Timer for determining our time value
+  // Source of the "time" uniform.
   Common::Timer m_timer;
 
-  // Dolphin fixed post process:
+  // Built-in pass.
   PostProcessingConfiguration::ConfigMap m_default_options;
   std::unique_ptr<AbstractShader> m_default_vertex_shader;
   std::unique_ptr<AbstractShader> m_default_pixel_shader;
@@ -142,7 +152,7 @@ protected:
   std::unique_ptr<AbstractFramebuffer> m_intermediary_frame_buffer;
   std::unique_ptr<AbstractTexture> m_intermediary_color_texture;
   std::vector<u8> m_default_uniform_staging_buffer;
-  // User post process:
+  // User pass.
   PostProcessingConfiguration m_config;
   std::unique_ptr<AbstractShader> m_vertex_shader;
   std::unique_ptr<AbstractShader> m_pixel_shader;
