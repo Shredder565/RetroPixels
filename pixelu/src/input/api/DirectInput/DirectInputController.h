@@ -15,11 +15,7 @@ public:
 	DirectInputController(const GUID& guid, std::string_view display_name);
 	~DirectInputController() override;
 
-	std::string_view api_name() const override
-	{
-		static_assert(to_string(InputAPI::DirectInput) == "DirectInput");
-		return to_string(InputAPI::DirectInput);
-	}
+	std::string_view api_name() const override { return to_string(InputAPI::DirectInput); } // "DirectInput"
 	InputAPI::Type api() const override { return InputAPI::DirectInput; }
 
 	void save(pugi::xml_node& node) override;

@@ -80,10 +80,7 @@ public:
 		TitleDownloadStatus status = TitleDownloadStatus::None;
 		std::string errorMsg;
 
-		bool operator==(const TitleEntry& e) const
-		{
-			return type == e.type && titleId == e.titleId && version == e.version;
-		}
+		bool operator==(const TitleEntry& e) const { return titleId == e.titleId && version == e.version && type == e.type; }
 		bool operator!=(const TitleEntry& e) const { return !(*this == e); }
 	};
 	boost::optional<const TitleEntry&> GetSelectedTitleEntry() const;

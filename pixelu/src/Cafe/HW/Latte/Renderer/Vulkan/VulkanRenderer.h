@@ -162,10 +162,7 @@ public:
 	// entry of the GPU selection list in the settings
 	struct DeviceInfo
 	{
-		DeviceInfo(const std::string name, std::span<uint8, VK_UUID_SIZE> uuid) : name(name)
-		{
-			std::copy(uuid.begin(), uuid.end(), this->uuid.begin());
-		}
+		DeviceInfo(const std::string name, std::span<uint8, VK_UUID_SIZE> uuid) : name(name) { std::ranges::copy(uuid, this->uuid.begin()); }
 
 		std::string name;
 		std::array<uint8, VK_UUID_SIZE> uuid;

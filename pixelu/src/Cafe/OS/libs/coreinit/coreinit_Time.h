@@ -25,20 +25,9 @@ namespace coreinit
 	{
 		typedef sint64 TimerTicks;
 
-		constexpr sint64 GetCoreClock()
-		{
-			return Espresso::CORE_CLOCK;
-		}
-
-		constexpr sint64 GetBusClock()
-		{
-			return Espresso::BUS_CLOCK;
-		}
-
-		constexpr sint64 GetTimerClock()
-		{
-			return Espresso::TIMER_CLOCK;
-		}
+		constexpr sint64 GetTimerClock() { return Espresso::TIMER_CLOCK; }
+		constexpr sint64 GetBusClock() { return Espresso::BUS_CLOCK; }
+		constexpr sint64 GetCoreClock() { return Espresso::CORE_CLOCK; }
 
 		// the timer runs at 62.15625 MHz, which is exactly 1989/32000 ticks per nanosecond
 		inline TimerTicks ConvertNsToTimerTicks(uint64 ns)

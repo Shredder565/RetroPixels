@@ -19,23 +19,18 @@ class VulkanPipelineStableCache
 	// (vertex shader base hash, pipeline state hash)
 	struct PipelineHash
 	{
-		PipelineHash(uint64 h0, uint64 h1) : h0(h0), h1(h1) {};
+		PipelineHash(uint64 h0, uint64 h1) : h0(h0), h1(h1) {}
 
 		uint64 h0;
 		uint64 h1;
 
-		bool operator==(const PipelineHash& r) const
-		{
-			return h0 == r.h0 && h1 == r.h1;
-		}
+		bool operator==(const PipelineHash&) const = default;
 
+		// both halves are already hashes, folding them is enough
 		struct HashFunc
 		{
-			size_t operator()(const PipelineHash& v) const
-			{
-				static_assert(sizeof(uint64) == sizeof(size_t));
-				return (size_t)(v.h0 ^ v.h1);
-			}
+			static_assert(sizeof(size_t) == sizeof(uint64));
+			size_t operator()(const PipelineHash& key) const { return (size_t)(key.h1 ^ key.h0); }
 		};
 	};
 

@@ -19,11 +19,7 @@ public:
 		MotionPlus,
 	};
 
-	std::string_view api_name() const override
-	{
-		static_assert(to_string(InputAPI::Wiimote) == "Wiimote");
-		return to_string(InputAPI::Wiimote);
-	}
+	std::string_view api_name() const override { return to_string(InputAPI::Wiimote); } // "Wiimote"
 	InputAPI::Type api() const override { return InputAPI::Wiimote; }
 
 	void save(pugi::xml_node& node) override;

@@ -96,10 +96,7 @@ struct iosuActCemuRequest_t
 		}resultBinary;
 	};
 
-	void setACTReturnCode(uint32 code)
-	{
-		returnCode = code;
-	}
+	void setACTReturnCode(uint32 code) { returnCode = code; }
 };
 
 // values for iosuActCemuRequest_t::requestCode

@@ -492,13 +492,11 @@ private:
 
 typedef XMLDataConfig<CemuConfig> XMLCemuConfig_t;
 
+// the one settings.xml instance, created on first use
 inline XMLCemuConfig_t& GetConfigHandle()
 {
-	static XMLCemuConfig_t config;
-	return config;
+	static XMLCemuConfig_t s_settingsFile;
+	return s_settingsFile;
 }
 
-inline CemuConfig& GetConfig()
-{
-	return GetConfigHandle().data();
-}
+inline CemuConfig& GetConfig() { return GetConfigHandle().data(); }

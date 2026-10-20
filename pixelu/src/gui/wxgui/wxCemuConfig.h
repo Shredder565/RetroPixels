@@ -158,12 +158,5 @@ typedef XMLChildConfig<wxCemuConfig, &wxCemuConfig::Load, &wxCemuConfig::Save> X
 
 extern XMLWxCemuConfig_t g_wxConfig;
 
-inline XMLWxCemuConfig_t& GetWxGuiConfigHandle()
-{
-	return g_wxConfig;
-}
-
-inline wxCemuConfig& GetWxGUIConfig()
-{
-	return g_wxConfig.Data();
-}
+inline XMLWxCemuConfig_t& GetWxGuiConfigHandle() { return g_wxConfig; }
+inline wxCemuConfig& GetWxGUIConfig() { return g_wxConfig.Data(); }

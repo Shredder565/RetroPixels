@@ -134,9 +134,9 @@ namespace iosu
 
 			private:
 				uint8* m_data{nullptr};
-				uint32 m_writtenSize{0};
 				uint32 m_size{0};
-				bool m_hasError{false};
+				uint32 m_writtenSize{0}; // bytes written so far, never beyond m_size
+				bool m_hasError{false}; // set once a write did not fit
 			};
 
 			class IPCServiceCall

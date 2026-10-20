@@ -53,21 +53,11 @@ struct OSContext_t
 	/* +0x318 */ uint32be ummcr0;
 	/* +0x31C */ uint32be ummcr1;
 
-	bool checkMagic()
-	{
-		return magic0 == (uint32)OS_CONTEXT_MAGIC_0 && magic1 == (uint32)OS_CONTEXT_MAGIC_1;
-	}
+	// "OSContxt" in the two magic words marks an initialised context
+	void SetContextMagic() { magic0 = OS_CONTEXT_MAGIC_0; magic1 = OS_CONTEXT_MAGIC_1; }
+	bool checkMagic() { return (uint32)magic0 == (uint32)OS_CONTEXT_MAGIC_0 && (uint32)magic1 == (uint32)OS_CONTEXT_MAGIC_1; }
 
-	void SetContextMagic()
-	{
-		magic0 = OS_CONTEXT_MAGIC_0;
-		magic1 = OS_CONTEXT_MAGIC_1;
-	}
-
-	bool hasCoreAffinitySet(uint32 coreIndex) const
-	{
-		return ((uint32)affinity & (1u << coreIndex)) != 0;
-	}
+	bool hasCoreAffinitySet(uint32 coreIndex) const { return (((uint32)affinity >> coreIndex) & 1) != 0; }
 
 	void setAffinity(uint32 mask)
 	{

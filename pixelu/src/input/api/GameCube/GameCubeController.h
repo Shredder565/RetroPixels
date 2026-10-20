@@ -14,11 +14,7 @@ class GameCubeController : public Controller<GameCubeControllerProvider>
 public:
 	GameCubeController(uint32 adapter, uint32 index);
 
-	std::string_view api_name() const override
-	{
-		static_assert(to_string(InputAPI::GameCube) == "GameCube");
-		return to_string(InputAPI::GameCube);
-	}
+	std::string_view api_name() const override { return to_string(InputAPI::GameCube); } // "GameCube"
 	InputAPI::Type api() const override { return InputAPI::GameCube; }
 
 	bool is_connected() override;

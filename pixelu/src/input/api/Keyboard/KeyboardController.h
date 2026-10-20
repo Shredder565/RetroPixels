@@ -12,11 +12,7 @@ class KeyboardController : public Controller<KeyboardControllerProvider>
 public:
 	KeyboardController();
 
-	std::string_view api_name() const override
-	{
-		static_assert(to_string(InputAPI::Keyboard) == "Keyboard");
-		return to_string(InputAPI::Keyboard);
-	}
+	std::string_view api_name() const override { return to_string(InputAPI::Keyboard); } // "Keyboard"
 	InputAPI::Type api() const override { return InputAPI::Keyboard; }
 
 	bool is_connected() override { return true; }

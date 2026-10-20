@@ -68,13 +68,14 @@ public:
 
 	static std::string_view get_button_name(ButtonId id);
 
-	bool is_start_down() const override { return is_mapping_down(kButtonId_Plus); }
-	bool is_left_down() const override { return is_mapping_down(kButtonId_Left); }
-	bool is_right_down() const override { return is_mapping_down(kButtonId_Right); }
+	// navigation of the emulator's own menus: d-pad, confirm/back, start and home
 	bool is_up_down() const override { return is_mapping_down(kButtonId_Up); }
 	bool is_down_down() const override { return is_mapping_down(kButtonId_Down); }
+	bool is_left_down() const override { return is_mapping_down(kButtonId_Left); }
+	bool is_right_down() const override { return is_mapping_down(kButtonId_Right); }
 	bool is_a_down() const override { return is_mapping_down(kButtonId_A); }
 	bool is_b_down() const override { return is_mapping_down(kButtonId_B); }
+	bool is_start_down() const override { return is_mapping_down(kButtonId_Plus); }
 	bool is_home_down() const override { return is_mapping_down(kButtonId_Home); }
 
 private:

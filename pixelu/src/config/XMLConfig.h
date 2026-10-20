@@ -528,19 +528,10 @@ concept XMLStandaloneConfigurable = requires(T t, XMLConfigParser& configParser)
 template<XMLStandaloneConfigurable T>
 struct XMLConfigWrapper
 {
-	XMLConfigParser Save(XMLConfigParser& configParser)
-	{
-		data.Save(configParser);
-		return configParser;
-	}
-
-	XMLConfigParser Load(XMLConfigParser& configParser)
-	{
-		data.Load(configParser);
-		return configParser;
-	}
-
 	T data;
+
+	XMLConfigParser Load(XMLConfigParser& configParser) { return (data.Load(configParser), configParser); }
+	XMLConfigParser Save(XMLConfigParser& configParser) { return (data.Save(configParser), configParser); }
 };
 
 template<XMLStandaloneConfigurable T>

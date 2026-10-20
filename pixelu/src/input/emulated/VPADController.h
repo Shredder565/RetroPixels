@@ -90,13 +90,14 @@ public:
 	size_t get_highest_mapping_id() const override { return kButtonId_Max; }
 	bool is_axis_mapping(uint64 mapping) const override { return mapping >= kButtonId_StickL_Up && mapping <= kButtonId_StickR_Right; }
 
-	bool is_start_down() const override { return is_mapping_down(kButtonId_Plus); }
-	bool is_left_down() const override { return is_mapping_down(kButtonId_Left); }
-	bool is_right_down() const override { return is_mapping_down(kButtonId_Right); }
+	// navigation of the emulator's own menus: d-pad, confirm/back, start and home
 	bool is_up_down() const override { return is_mapping_down(kButtonId_Up); }
 	bool is_down_down() const override { return is_mapping_down(kButtonId_Down); }
+	bool is_left_down() const override { return is_mapping_down(kButtonId_Left); }
+	bool is_right_down() const override { return is_mapping_down(kButtonId_Right); }
 	bool is_a_down() const override { return is_mapping_down(kButtonId_A); }
 	bool is_b_down() const override { return is_mapping_down(kButtonId_B); }
+	bool is_start_down() const override { return is_mapping_down(kButtonId_Plus); }
 	bool is_home_down() const override { return is_mapping_down(kButtonId_Home); }
 
 	bool set_default_mapping(const std::shared_ptr<ControllerBase>& controller) override;

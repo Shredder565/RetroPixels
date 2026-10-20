@@ -30,10 +30,7 @@ struct DSUProviderSettings : public ControllerProviderSettings
 	{
 	}
 
-	bool operator==(const DSUProviderSettings& s) const
-	{
-		return port == s.port && ip == s.ip;
-	}
+	bool operator==(const DSUProviderSettings& s) const { return ip == s.ip && port == s.port; }
 
 	bool operator==(const ControllerProviderSettings& s) const override
 	{

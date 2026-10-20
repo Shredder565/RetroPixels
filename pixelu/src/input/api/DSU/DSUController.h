@@ -14,11 +14,7 @@ public:
 	DSUController(uint32 index);
 	DSUController(uint32 index, const DSUProviderSettings& settings);
 
-	std::string_view api_name() const override
-	{
-		static_assert(to_string(InputAPI::DSUClient) == "DSUController");
-		return to_string(InputAPI::DSUClient);
-	}
+	std::string_view api_name() const override { return to_string(InputAPI::DSUClient); } // "DSUController"
 	InputAPI::Type api() const override { return InputAPI::DSUClient; }
 
 	// the server address is part of the profile

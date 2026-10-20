@@ -36,23 +36,10 @@ public:
 	constexpr MEMPTR(const MEMPTR&) noexcept = default;
 	constexpr MEMPTR& operator=(const MEMPTR&) noexcept = default;
 
-	constexpr MEMPTR& operator=(const uint32& offset) noexcept
-	{
-		m_value = offset;
-		return *this;
-	}
-
-	constexpr MEMPTR& operator=(std::nullptr_t) noexcept
-	{
-		m_value = 0;
-		return *this;
-	}
-
-	MEMPTR& operator=(T* ptr) noexcept
-	{
-		m_value = toGuest(ptr);
-		return *this;
-	}
+	// assignment from a guest address, from null or from a host pointer into guest memory
+	constexpr MEMPTR& operator=(const uint32& offset) noexcept { return Store(offset); }
+	constexpr MEMPTR& operator=(std::nullptr_t) noexcept { return Store(0); }
+	MEMPTR& operator=(T* ptr) noexcept { return Store(toGuest(ptr)); }
 
 	// atomically replaces the pointer with newPtr if it currently equals comparePtr
 	bool atomic_compare_exchange(T* comparePtr, T* newPtr) noexcept
@@ -138,6 +125,12 @@ private:
 			return 0;
 		cemu_assert_debug((uint8*)ptr >= memory_base && (uint8*)ptr <= memory_base + 0x100000000);
 		return (uint32)((uintptr_t)ptr - (uintptr_t)memory_base);
+	}
+
+	constexpr MEMPTR& Store(uint32 guestAddress) noexcept
+	{
+		m_value = guestAddress;
+		return *this;
 	}
 
 	uint32be m_value;

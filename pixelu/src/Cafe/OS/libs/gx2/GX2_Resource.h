@@ -43,20 +43,9 @@ struct GX2RBuffer
 	/* +0x08 */ uint32be		elementCount;
 	/* +0x0C */ MEMPTR<void>	ptr;
 
-	uint32 GetSize() const
-	{
-		return (uint32)elementSize * (uint32)elementCount;
-	}
-
-	MPTR GetVirtualAddr() const
-	{
-		return ptr.GetMPTR();
-	}
-
-	void* GetPtr() const
-	{
-		return ptr.GetPtr();
-	}
+	void* GetPtr() const { return ptr.GetPtr(); }
+	MPTR GetVirtualAddr() const { return ptr.GetMPTR(); }
+	uint32 GetSize() const { return (uint32)elementCount * (uint32)elementSize; } // in bytes
 };
 
 static_assert(sizeof(GX2RBuffer) == 0x10);

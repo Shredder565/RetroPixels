@@ -137,27 +137,12 @@ public:
 		return true;
 	}
 
-	const char* getCurrentPtr()
-	{
-		return m_str;
-	}
+	const char* getCurrentPtr() { return m_str; }
+	sint32 getCurrentLen() { return m_len; }
 
-	sint32 getCurrentLen()
-	{
-		return m_len;
-	}
-
-	void storeParserState(StringTokenParser* bak)
-	{
-		bak->m_str = m_str;
-		bak->m_len = m_len;
-	}
-
-	void restoreParserState(const StringTokenParser* bak)
-	{
-		m_str = bak->m_str;
-		m_len = bak->m_len;
-	}
+	// the parser state is just the remaining text, so a copy saves and restores it
+	void storeParserState(StringTokenParser* bak) { *bak = *this; }
+	void restoreParserState(const StringTokenParser* bak) { *this = *bak; }
 
 private:
 	static bool isBlank(char c)

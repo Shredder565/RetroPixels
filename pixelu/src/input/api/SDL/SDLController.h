@@ -18,11 +18,7 @@ public:
 
 	~SDLController() override;
 
-	std::string_view api_name() const override
-	{
-		static_assert(to_string(InputAPI::SDLController) == "SDLController");
-		return to_string(InputAPI::SDLController);
-	}
+	std::string_view api_name() const override { return to_string(InputAPI::SDLController); } // "SDLController"
 	InputAPI::Type api() const override { return InputAPI::SDLController; }
 
 	bool is_connected() override;

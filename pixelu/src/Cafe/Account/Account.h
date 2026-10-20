@@ -31,10 +31,8 @@ struct OnlineValidator
 	std::vector<std::wstring> missing_files;
 	OnlineAccountError account_error = OnlineAccountError::kNone;
 
-	bool IsValid() const
-	{
-		return valid_account && otp == FileState::Ok && seeprom == FileState::Ok && missing_files.empty();
-	}
+	// usable online only with the account data, both key files and nothing missing
+	bool IsValid() const { return valid_account && missing_files.empty() && otp == FileState::Ok && seeprom == FileState::Ok; }
 
 	explicit operator bool() const { return IsValid(); }
 };

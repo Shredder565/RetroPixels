@@ -54,40 +54,31 @@ struct FSCDirEntry
 	bool isFile;
 	uint32 fileSize;
 
-	std::string_view GetPath()
-	{
-		return std::string_view(path, strnlen(path, FSC_MAX_DIR_NAME_LENGTH));
-	}
+	std::string_view GetPath() { return {path, strnlen(path, sizeof(path))}; }
 };
+
+// result of a base-class operation that the device or file does not implement
+template<typename T>
+T fscUnsupported(T result)
+{
+	cemu_assert_unimplemented();
+	return result;
+}
+
+inline void fscUnsupported()
+{
+	cemu_assert_unimplemented();
+}
 
 // A mountable device. Paths passed in are relative to the device's target
 // path; ctx is the pointer given to fsc_mount.
 class fscDeviceC
 {
   public:
-	virtual FSCVirtualFile* fscDeviceOpenByPath(std::string_view path, FSC_ACCESS_FLAG accessFlags, void* ctx, sint32* fscStatus)
-	{
-		cemu_assert_unimplemented();
-		return nullptr;
-	}
-
-	virtual bool fscDeviceCreateDir(std::string_view path, void* ctx, sint32* fscStatus)
-	{
-		cemu_assert_unimplemented();
-		return false;
-	}
-
-	virtual bool fscDeviceRemoveFileOrDir(std::string_view path, void* ctx, sint32* fscStatus)
-	{
-		cemu_assert_unimplemented();
-		return false;
-	}
-
-	virtual bool fscDeviceRename(std::string_view srcPath, std::string_view dstPath, void* ctx, sint32* fscStatus)
-	{
-		cemu_assert_unimplemented();
-		return false;
-	}
+	virtual FSCVirtualFile* fscDeviceOpenByPath(std::string_view path, FSC_ACCESS_FLAG accessFlags, void* ctx, sint32* fscStatus) { return fscUnsupported<FSCVirtualFile*>(nullptr); }
+	virtual bool fscDeviceCreateDir(std::string_view path, void* ctx, sint32* fscStatus) { return fscUnsupported(false); }
+	virtual bool fscDeviceRemoveFileOrDir(std::string_view path, void* ctx, sint32* fscStatus) { return fscUnsupported(false); }
+	virtual bool fscDeviceRename(std::string_view srcPath, std::string_view dstPath, void* ctx, sint32* fscStatus) { return fscUnsupported(false); }
 };
 
 // An open file or directory. Devices override what they support.
@@ -102,62 +93,17 @@ struct FSCVirtualFile
 
 	FSCVirtualFile() {}
 
-	virtual ~FSCVirtualFile()
-	{
-		delete dirIterator;
-	}
+	virtual ~FSCVirtualFile() { delete dirIterator; }
 
-	virtual sint32 fscGetType()
-	{
-		cemu_assert_unimplemented();
-		return 0;
-	}
-
-	virtual uint64 fscQueryValueU64(uint32 id)
-	{
-		cemu_assert_unimplemented();
-		return 0;
-	}
-
-	virtual uint32 fscWriteData(void* buffer, uint32 size)
-	{
-		cemu_assert_unimplemented();
-		return 0;
-	}
-
-	virtual uint32 fscReadData(void* buffer, uint32 size)
-	{
-		cemu_assert_unimplemented();
-		return 0;
-	}
-
-	virtual void fscSetSeek(uint64 seek)
-	{
-		cemu_assert_unimplemented();
-	}
-
-	virtual uint64 fscGetSeek()
-	{
-		cemu_assert_unimplemented();
-		return 0;
-	}
-
-	virtual void fscSetFileLength(uint64 endOffset)
-	{
-		cemu_assert_unimplemented();
-	}
-
-	virtual bool fscDirNext(FSCDirEntry* dirEntry)
-	{
-		cemu_assert_unimplemented();
-		return false;
-	}
-
-	virtual bool fscRewindDir()
-	{
-		cemu_assert_unimplemented();
-		return false;
-	}
+	virtual sint32 fscGetType() { return fscUnsupported<sint32>(0); }
+	virtual uint64 fscQueryValueU64(uint32 id) { return fscUnsupported<uint64>(0); }
+	virtual uint32 fscWriteData(void* buffer, uint32 size) { return fscUnsupported<uint32>(0); }
+	virtual uint32 fscReadData(void* buffer, uint32 size) { return fscUnsupported<uint32>(0); }
+	virtual void fscSetSeek(uint64 seek) { fscUnsupported(); }
+	virtual uint64 fscGetSeek() { return fscUnsupported<uint64>(0); }
+	virtual void fscSetFileLength(uint64 endOffset) { fscUnsupported(); }
+	virtual bool fscDirNext(FSCDirEntry* dirEntry) { return fscUnsupported(false); }
+	virtual bool fscRewindDir() { return fscUnsupported(false); }
 
 	FSCDirIteratorState* dirIterator{}; // owned, freed with the file
 

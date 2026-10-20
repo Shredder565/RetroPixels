@@ -248,15 +248,13 @@ struct LatteDecompilerOutputUniformOffsets
 
 	LatteDecompilerOutputUniformOffsets()
 	{
-		offset_remapped = -1;
-		offset_uniformRegister = -1;
+		// -1 marks a uniform the shader does not use
+		for (sint32* unused : {&offset_remapped, &offset_uniformRegister, &offset_alphaTestRef, &offset_pointSize,
+							   &offset_fragCoordScale, &offset_windowSpaceToClipSpaceTransform})
+			*unused = -1;
+		std::fill(std::begin(offset_framebufferFetchSize), std::end(offset_framebufferFetchSize), -1);
+		std::fill(std::begin(offset_texScale), std::end(offset_texScale), -1);
 		count_uniformRegister = 0;
-		offset_alphaTestRef = -1;
-		offset_pointSize = -1;
-		offset_fragCoordScale = -1;
-		offset_windowSpaceToClipSpaceTransform = -1;
-		for (sint32& v : offset_framebufferFetchSize) v = -1;
-		for (sint32& v : offset_texScale) v = -1;
 		offset_endOfBlock = 0;
 	}
 };
