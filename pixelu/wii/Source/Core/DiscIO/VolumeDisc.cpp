@@ -30,6 +30,19 @@ constexpr size_t APPLOADER_DATE_SIZE = 0x10;
 constexpr u64 NKIT_MAGIC_OFFSET = 0x200;
 constexpr u32 NKIT_MAGIC = 0x4E4B4954;  // "NKIT"
 
+// Reads from the disc header at the start of `partition`. A Wii disc's own header (outside the
+// partitions) carries the same ID, maker, revision and name, so it stands in when an existing
+// partition can't be decrypted (no keys file from the owner's Wii): the game list still shows
+// the disc by its ID and name, just without its banner.
+bool ReadHeader(const DiscIO::VolumeDisc& volume, u64 offset, u64 size, u8* out,
+                const DiscIO::Partition& partition)
+{
+  if (volume.Read(offset, size, out, partition))
+    return true;
+  return partition != DiscIO::PARTITION_NONE && volume.GetTicket(partition).IsValid() &&
+         volume.Read(offset, size, out, DiscIO::PARTITION_NONE);
+}
+
 const VolumeDisc::BootID& TriforceBootID(const VolumeDisc& volume)
 {
   // Only VolumeGC reports Platform::Triforce.
@@ -60,7 +73,7 @@ std::string VolumeDisc::GetGameID(const Partition& partition) const
 
   if (GetVolumeType() != Platform::Triforce)
   {
-    if (!Read(0, id.size(), reinterpret_cast<u8*>(id.data()), partition))
+    if (!ReadHeader(*this, 0, id.size(), reinterpret_cast<u8*>(id.data()), partition))
       return {};
     return FilterGameID(id);
   }
@@ -96,9 +109,11 @@ std::string VolumeDisc::GetGameID(const Partition& partition) const
 Country VolumeDisc::GetCountry(const Partition& partition) const
 {
   // A missing byte reads as 0, which means an unknown country.
-  const u8 country_code = GetVolumeType() == Platform::Triforce ?
-                              static_cast<u8>(TriforceCountryLetter(TriforceBootID(*this))) :
-                              ReadSwapped<u8>(3, partition).value_or(0);
+  u8 country_code = 0;
+  if (GetVolumeType() == Platform::Triforce)
+    country_code = static_cast<u8>(TriforceCountryLetter(TriforceBootID(*this)));
+  else if (!ReadHeader(*this, 3, 1, &country_code, partition))
+    country_code = 0;
 
   const Platform platform = GetVolumeType();
   const Region region = GetRegion();
@@ -137,17 +152,18 @@ std::string VolumeDisc::GetMakerID(const Partition& partition) const
   }
 
   std::array<char, 2> maker;
-  if (!Read(HEADER_MAKER_OFFSET, maker.size(), reinterpret_cast<u8*>(maker.data()), partition))
+  if (!ReadHeader(*this, HEADER_MAKER_OFFSET, maker.size(), reinterpret_cast<u8*>(maker.data()),
+                  partition))
     return {};
   return FilterGameID(maker);
 }
 
 std::optional<u16> VolumeDisc::GetRevision(const Partition& partition) const
 {
-  const std::optional<u8> revision = ReadSwapped<u8>(HEADER_REVISION_OFFSET, partition);
-  if (!revision)
+  u8 revision;
+  if (!ReadHeader(*this, HEADER_REVISION_OFFSET, 1, &revision, partition))
     return std::nullopt;
-  return *revision;
+  return revision;
 }
 
 std::string VolumeDisc::GetInternalName(const Partition& partition) const
@@ -156,7 +172,8 @@ std::string VolumeDisc::GetInternalName(const Partition& partition) const
     return DecodeString(TriforceBootID(*this).game_name);
 
   std::array<char, HEADER_NAME_SIZE> name;
-  if (!Read(HEADER_NAME_OFFSET, name.size(), reinterpret_cast<u8*>(name.data()), partition))
+  if (!ReadHeader(*this, HEADER_NAME_OFFSET, name.size(), reinterpret_cast<u8*>(name.data()),
+                  partition))
     return {};
   return DecodeString(name);
 }

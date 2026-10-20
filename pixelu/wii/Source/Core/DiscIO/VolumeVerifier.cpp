@@ -357,6 +357,19 @@ void VolumeVerifier::Start()
   m_is_triforce = platform == Platform::Triforce;
   m_is_not_retail = (platform == Platform::WiiDisc && !m_volume.HasWiiHashes()) || IsDebugSigned();
 
+  // Wii titles are encrypted with keys only the owner's console has. Without its keys file the
+  // encrypted data can't be checked; say so first, since the checks below then fail for it.
+  const bool wii = platform == Platform::WiiDisc || platform == Platform::WiiWAD;
+  const auto console_type =
+      IsDebugSigned() ? IOS::HLE::IOSC::ConsoleType::RVT : IOS::HLE::IOSC::ConsoleType::Retail;
+  if (wii && !m_is_datel && !IOS::HLE::IOSC::HasConsoleKeys(console_type))
+  {
+    AddProblem(Severity::High,
+               Common::GetStringT("RetroPixels needs a keys file from your own Wii to check this "
+                                  "title's encrypted data, so problems reported for it may not be "
+                                  "real."));
+  }
+
   const std::vector<Partition> partitions = CheckPartitions();
   if (IsDisc(platform))
     m_biggest_referenced_offset = GetBiggestReferencedOffset(m_volume, partitions);
