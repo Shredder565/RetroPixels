@@ -1,12 +1,13 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <limits>
 #include <memory>
 #include <span>
+#include <string>
 #include <string_view>
 #include <type_traits>
 #include <vector>
@@ -16,20 +17,25 @@
 
 namespace Common::SHA1
 {
-using Digest = std::array<u8, 160 / 8>;
+using Digest = std::array<u8, 20>;
 static constexpr size_t DIGEST_LEN = sizeof(Digest);
 
+// Incremental SHA-1. Finish() may only be called once.
 class Context
 {
 public:
   virtual ~Context() = default;
+
   virtual void Update(const u8* msg, size_t len) = 0;
   void Update(std::span<const u8> msg) { return Update(msg.data(), msg.size()); }
   void Update(std::string_view msg)
   {
     return Update(reinterpret_cast<const u8*>(msg.data()), msg.size());
   }
+
   virtual Digest Finish() = 0;
+
+  // True when the CPU's SHA instructions are used.
   virtual bool HwAccelerated() const = 0;
 };
 
@@ -41,8 +47,8 @@ template <typename T>
 inline Digest CalculateDigest(const std::vector<T>& msg)
 {
   static_assert(std::is_trivially_copyable_v<T>);
-  ASSERT(std::numeric_limits<size_t>::max() / sizeof(T) >= msg.size());
-  return CalculateDigest(reinterpret_cast<const u8*>(msg.data()), sizeof(T) * msg.size());
+  ASSERT(msg.size() <= std::numeric_limits<size_t>::max() / sizeof(T));
+  return CalculateDigest(reinterpret_cast<const u8*>(msg.data()), msg.size() * sizeof(T));
 }
 
 inline Digest CalculateDigest(const std::string_view& msg)
@@ -57,31 +63,28 @@ inline Digest CalculateDigest(const std::array<T, Size>& msg)
   return CalculateDigest(reinterpret_cast<const u8*>(msg.data()), sizeof(msg));
 }
 
+// Upper-case hex, 40 characters.
 std::string DigestToString(const Digest& digest);
 
+// Parses 40 hex digits (either case). Anything else fails an assertion.
 constexpr Digest StringToDigest(std::string_view str)
 {
-  Digest digest{};
-  ASSERT(str.size() == digest.size() * 2);
+  ASSERT(str.size() == DIGEST_LEN * 2);
 
-  for (size_t i = 0; i < str.size(); ++i)
-  {
-    const char c = str[i];
-    u8 quartet;
+  const auto nibble = [](char c) -> u8 {
     if (c >= '0' && c <= '9')
-      quartet = c - '0';
-    else if (c >= 'A' && c <= 'F')
-      quartet = c - 'A' + 10;
-    else if (c >= 'a' && c <= 'f')
-      quartet = c - 'a' + 10;
-    else
-      ASSERT(false);
+      return static_cast<u8>(c - '0');
+    if (c >= 'a' && c <= 'f')
+      return static_cast<u8>(c - 'a' + 10);
+    if (c >= 'A' && c <= 'F')
+      return static_cast<u8>(c - 'A' + 10);
+    ASSERT(false);
+    return 0;
+  };
 
-    if (i % 2 == 0)
-      digest[i / 2] = quartet << 4;
-    else
-      digest[i / 2] |= quartet;
-  }
-  return digest;
+  Digest result{};
+  for (size_t i = 0; i + 1 < str.size() && i / 2 < DIGEST_LEN; i += 2)
+    result[i / 2] = static_cast<u8>((nibble(str[i]) << 4) | nibble(str[i + 1]));
+  return result;
 }
 }  // namespace Common::SHA1

@@ -1,397 +1,226 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-#include "SHA1.h"
+#include "Common/Crypto/SHA1.h"
 
 #include <algorithm>
-#include <array>
+#include <cstring>
 #include <memory>
 
-#include <fmt/ranges.h>
+#include <fmt/format.h>
 #include <mbedtls/sha1.h>
 
 #include "Common/Assert.h"
 #include "Common/CPUDetect.h"
 #include "Common/CommonTypes.h"
-#include "Common/Swap.h"
 
-#ifdef _MSC_VER
+#if defined(_M_X86_64)
+#if defined(_MSC_VER)
 #include <intrin.h>
 #else
-#ifdef _M_X86_64
 #include <immintrin.h>
-#elif defined(_M_ARM_64)
-#include <arm_acle.h>
-#include <arm_neon.h>
 #endif
 #endif
 
-#ifdef _MSC_VER
-#define ATTRIBUTE_TARGET(x)
+#if defined(_MSC_VER) && !defined(__clang__)
+#define PIXELU_SHANI_FN
 #else
-#define ATTRIBUTE_TARGET(x) [[gnu::target(x)]]
+#define PIXELU_SHANI_FN [[gnu::target("sha,ssse3")]]
 #endif
 
 namespace Common::SHA1
 {
-class ContextMbed final : public Context
+namespace
+{
+// Software path: mbedtls.
+class MbedContext final : public Context
 {
 public:
-  ContextMbed()
+  MbedContext()
   {
-    mbedtls_sha1_init(&ctx);
-    ASSERT(!mbedtls_sha1_starts_ret(&ctx));
+    mbedtls_sha1_init(&m_ctx);
+    const int rc = mbedtls_sha1_starts_ret(&m_ctx);
+    ASSERT(rc == 0);
   }
-  ~ContextMbed() override { mbedtls_sha1_free(&ctx); }
+  ~MbedContext() override { mbedtls_sha1_free(&m_ctx); }
+
+  MbedContext(const MbedContext&) = delete;
+  MbedContext& operator=(const MbedContext&) = delete;
+
   void Update(const u8* msg, size_t len) override
   {
-    ASSERT(!mbedtls_sha1_update_ret(&ctx, msg, len));
+    const int rc = mbedtls_sha1_update_ret(&m_ctx, msg, len);
+    ASSERT(rc == 0);
   }
+
   Digest Finish() override
   {
-    Digest digest;
-    ASSERT(!mbedtls_sha1_finish_ret(&ctx, digest.data()));
-    return digest;
+    Digest out{};
+    const int rc = mbedtls_sha1_finish_ret(&m_ctx, out.data());
+    ASSERT(rc == 0);
+    return out;
   }
+
   bool HwAccelerated() const override { return false; }
 
 private:
-  mbedtls_sha1_context ctx{};
+  mbedtls_sha1_context m_ctx;
 };
 
-class BlockContext : public Context
-{
-protected:
-  static constexpr size_t BLOCK_LEN = 64;
-  static constexpr u32 K[4]{0x5a827999, 0x6ed9eba1, 0x8f1bbcdc, 0xca62c1d6};
-  static constexpr u32 H[5]{0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0};
+#if defined(_M_X86_64)
 
-  virtual void ProcessBlock(const u8* msg) = 0;
-  virtual Digest GetDigest() = 0;
+// SHA-NI path. The five state words live in two registers the way the SHA instructions want
+// them: A..D in one (A in the top dword) and E in the top dword of the other.
+class NiContext final : public Context
+{
+public:
+  PIXELU_SHANI_FN NiContext()
+  {
+    m_abcd = _mm_set_epi32(0x67452301, static_cast<int>(0xefcdab89), static_cast<int>(0x98badcfe),
+                           0x10325476);
+    m_e = _mm_set_epi32(static_cast<int>(0xc3d2e1f0), 0, 0, 0);
+  }
 
   void Update(const u8* msg, size_t len) override
   {
-    m_msg_length += len;
+    if (len == 0)
+      return;
+    m_total += len;
 
-    // Block has some partial data. Copy msg into it.
-    if (m_block_position != 0)
+    if (m_fill != 0)
     {
-      const size_t count_to_fill_block = m_block.size() - m_block_position;
-
-      // Not enough to fill block.
-      if (len < count_to_fill_block)
-      {
-        std::copy_n(msg, len, m_block.data() + m_block_position);
-
-        m_block_position += len;
+      const size_t take = std::min(len, BLOCK - m_fill);
+      std::memcpy(m_pending + m_fill, msg, take);
+      m_fill += take;
+      msg += take;
+      len -= take;
+      if (m_fill < BLOCK)
         return;
-      }
-
-      std::copy_n(msg, count_to_fill_block, m_block.data() + m_block_position);
-      ProcessBlock(m_block.data());
-
-      msg += count_to_fill_block;
-      len -= count_to_fill_block;
-      m_block_position = 0;
+      Compress(m_pending, 1);
+      m_fill = 0;
     }
 
-    // Our block is empty. We can process msg blocks directly, avoiding unnecessary copies.
-    while (len >= m_block.size())
+    const size_t whole = len / BLOCK;
+    if (whole != 0)
     {
-      ProcessBlock(msg);
-
-      msg += m_block.size();
-      len -= m_block.size();
+      Compress(msg, whole);
+      msg += whole * BLOCK;
+      len -= whole * BLOCK;
     }
 
-    // Copy any remaining partial data into block.
-    std::copy_n(msg, len, m_block.data() + m_block_position);
-    m_block_position += len;
+    std::memcpy(m_pending, msg, len);
+    m_fill = len;
   }
 
   Digest Finish() override
   {
-    // m_block_position is guaranteed < BLOCK_LEN
-    m_block[m_block_position++] = 0x80;
-
-    constexpr size_t MSG_LEN_POS = BLOCK_LEN - sizeof(u64);
-
-    if (m_block_position > MSG_LEN_POS)
-    {
-      // Pad current block and process it
-      std::fill(m_block.begin() + m_block_position, m_block.end(), 0x00);
-      ProcessBlock(m_block.data());
-      m_block_position = 0;
-    }
-
-    // Pad block.
-    std::fill(m_block.data() + m_block_position, m_block.data() + MSG_LEN_POS, 0x00);
-    m_block_position = MSG_LEN_POS;
-
-    // Write the message length.
-    const Common::BigEndianValue<u64> msg_bit_length{m_msg_length * CHAR_BIT};
-    Update(reinterpret_cast<const u8*>(&msg_bit_length), sizeof(msg_bit_length));
-
-    return GetDigest();
-  }
-
-private:
-  alignas(64) std::array<u8, BLOCK_LEN> m_block{};
-  size_t m_block_position{};
-  size_t m_msg_length{};
-};
-
-template <typename ValueType, size_t Size>
-class CyclicArray
-{
-public:
-  inline ValueType operator[](size_t i) const { return data[i % Size]; }
-  inline ValueType& operator[](size_t i) { return data[i % Size]; }
-  constexpr size_t size() { return Size; }
-
-private:
-  std::array<ValueType, Size> data;
-};
-
-#ifdef _M_X86_64
-
-// Uses the dedicated SHA1 instructions. Normal SSE(AVX*) would be needed for parallel
-// multi-message processing. While Dolphin could gain from such implementation, it requires the
-// calling code to be modified and/or making the SHA1 implementation asynchronous so it can
-// optimistically batch.
-class ContextX64SHA1 final : public BlockContext
-{
-public:
-  ContextX64SHA1()
-  {
-    state[0] = _mm_set_epi32(H[0], H[1], H[2], H[3]);
-    state[1] = _mm_set_epi32(H[4], 0, 0, 0);
-  }
-
-private:
-  struct XmmReg
-  {
-    // Allows aliasing attributes to be respected in the
-    // face of templates.
-    __m128i data;
-
-    XmmReg& operator=(const __m128i& d)
-    {
-      data = d;
-      return *this;
-    }
-    operator __m128i() const { return data; }
-  };
-  using WorkBlock = CyclicArray<XmmReg, 4>;
-
-  ATTRIBUTE_TARGET("ssse3")
-  static inline __m128i byterev_16B(__m128i x)
-  {
-    return _mm_shuffle_epi8(x, _mm_set_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
-  }
-
-  template <size_t I>
-  ATTRIBUTE_TARGET("sha")
-  static inline __m128i MsgSchedule(WorkBlock* wblock)
-  {
-    auto& w = *wblock;
-    // Update and return this location
-    auto& wx = w[I];
-    // Do all the xors and rol(x,1) required for 4 rounds of msg schedule
-    wx = _mm_sha1msg1_epu32(wx, w[I + 1]);
-    wx = _mm_xor_si128(wx, w[I + 2]);
-    wx = _mm_sha1msg2_epu32(wx, w[I + 3]);
-    return wx;
-  }
-
-  ATTRIBUTE_TARGET("sha")
-  void ProcessBlock(const u8* msg) override
-  {
-    // There are 80 rounds with 4 bytes per round, giving 0x140 byte work space, but we can keep
-    // active state in just 0x40 bytes.
-    // see FIPS 180-4 6.1.3 Alternate Method for Computing a SHA-1 Message Digest
-    WorkBlock w;
-    auto msg_block = (const __m128i*)msg;
-    for (size_t i = 0; i < w.size(); i++)
-      w[i] = byterev_16B(_mm_loadu_si128(&msg_block[i]));
-
-    // 0: abcd, 1: e
-    auto abcde = state;
-
-    // Not sure of a (non-ugly) way to have constant-evaluated for-loop, so just rely on inlining.
-    // Problem is that sha1rnds4 requires imm8 arg, and first/last rounds have different behavior.
-
-    // clang-format off
-    // E0 += MSG0, special case of "nexte", can do normal add
-    abcde[1] = _mm_sha1rnds4_epu32(abcde[0], _mm_add_epi32(abcde[1], w[0]), 0);
-    abcde[0] = _mm_sha1rnds4_epu32(abcde[1], _mm_sha1nexte_epu32(abcde[0], w[1]), 0);
-    abcde[1] = _mm_sha1rnds4_epu32(abcde[0], _mm_sha1nexte_epu32(abcde[1], w[2]), 0);
-    abcde[0] = _mm_sha1rnds4_epu32(abcde[1], _mm_sha1nexte_epu32(abcde[0], w[3]), 0);
-    abcde[1] = _mm_sha1rnds4_epu32(abcde[0], _mm_sha1nexte_epu32(abcde[1], MsgSchedule<4>(&w)), 0);
-    abcde[0] = _mm_sha1rnds4_epu32(abcde[1], _mm_sha1nexte_epu32(abcde[0], MsgSchedule<5>(&w)), 1);
-    abcde[1] = _mm_sha1rnds4_epu32(abcde[0], _mm_sha1nexte_epu32(abcde[1], MsgSchedule<6>(&w)), 1);
-    abcde[0] = _mm_sha1rnds4_epu32(abcde[1], _mm_sha1nexte_epu32(abcde[0], MsgSchedule<7>(&w)), 1);
-    abcde[1] = _mm_sha1rnds4_epu32(abcde[0], _mm_sha1nexte_epu32(abcde[1], MsgSchedule<8>(&w)), 1);
-    abcde[0] = _mm_sha1rnds4_epu32(abcde[1], _mm_sha1nexte_epu32(abcde[0], MsgSchedule<9>(&w)), 1);
-    abcde[1] = _mm_sha1rnds4_epu32(abcde[0], _mm_sha1nexte_epu32(abcde[1], MsgSchedule<10>(&w)), 2);
-    abcde[0] = _mm_sha1rnds4_epu32(abcde[1], _mm_sha1nexte_epu32(abcde[0], MsgSchedule<11>(&w)), 2);
-    abcde[1] = _mm_sha1rnds4_epu32(abcde[0], _mm_sha1nexte_epu32(abcde[1], MsgSchedule<12>(&w)), 2);
-    abcde[0] = _mm_sha1rnds4_epu32(abcde[1], _mm_sha1nexte_epu32(abcde[0], MsgSchedule<13>(&w)), 2);
-    abcde[1] = _mm_sha1rnds4_epu32(abcde[0], _mm_sha1nexte_epu32(abcde[1], MsgSchedule<14>(&w)), 2);
-    abcde[0] = _mm_sha1rnds4_epu32(abcde[1], _mm_sha1nexte_epu32(abcde[0], MsgSchedule<15>(&w)), 3);
-    abcde[1] = _mm_sha1rnds4_epu32(abcde[0], _mm_sha1nexte_epu32(abcde[1], MsgSchedule<16>(&w)), 3);
-    abcde[0] = _mm_sha1rnds4_epu32(abcde[1], _mm_sha1nexte_epu32(abcde[0], MsgSchedule<17>(&w)), 3);
-    abcde[1] = _mm_sha1rnds4_epu32(abcde[0], _mm_sha1nexte_epu32(abcde[1], MsgSchedule<18>(&w)), 3);
-    abcde[0] = _mm_sha1rnds4_epu32(abcde[1], _mm_sha1nexte_epu32(abcde[0], MsgSchedule<19>(&w)), 3);
-    // state += abcde
-    state[1] = _mm_sha1nexte_epu32(abcde[1], state[1]);
-    state[0] = _mm_add_epi32(abcde[0], state[0]);
-    // clang-format on
-  }
-
-  Digest GetDigest() override
-  {
-    Digest digest;
-    _mm_storeu_si128((__m128i*)&digest[0], byterev_16B(state[0]));
-    u32 hi = _mm_cvtsi128_si32(byterev_16B(state[1]));
-    std::memcpy(&digest[sizeof(__m128i)], &hi, sizeof(hi));
-    return digest;
+    // Padding: 0x80, zeros up to 56 mod 64, then the bit length as a big-endian u64.
+    const u64 bits = static_cast<u64>(m_total) * 8;
+    u8 tail[BLOCK * 2] = {};
+    std::memcpy(tail, m_pending, m_fill);
+    tail[m_fill] = 0x80;
+    const size_t tail_len = m_fill < BLOCK - 8 ? BLOCK : BLOCK * 2;
+    for (int i = 0; i < 8; ++i)
+      tail[tail_len - 1 - i] = static_cast<u8>(bits >> (8 * i));
+    Compress(tail, tail_len / BLOCK);
+    m_fill = 0;
+    return Output();
   }
 
   bool HwAccelerated() const override { return true; }
 
-  std::array<XmmReg, 2> state{};
-};
-
-#endif
-
-#ifdef _M_ARM_64
-
-class ContextNeon final : public BlockContext
-{
-public:
-  ContextNeon()
-  {
-    state.abcd = vld1q_u32(&H[0]);
-    state.e = H[4];
-  }
-
 private:
-  using WorkBlock = CyclicArray<uint32x4_t, 4>;
+  static constexpr size_t BLOCK = 64;
 
-  struct State
+  PIXELU_SHANI_FN static __m128i Swap(__m128i v)
   {
-    // ARM thought they were being clever by exposing e as u32, but it actually makes non-asm
-    // implementations pretty annoying/makes compiler's life needlessly difficult.
-    uint32x4_t abcd{};
-    u32 e{};
-  };
-
-  static inline uint32x4_t MsgSchedule(WorkBlock* wblock, size_t i)
-  {
-    auto& w = *wblock;
-    // Update and return this location
-    auto& wx = w[0 + i];
-    wx = vsha1su0q_u32(wx, w[1 + i], w[2 + i]);
-    wx = vsha1su1q_u32(wx, w[3 + i]);
-    return wx;
+    // Reverse all 16 bytes: big-endian words, first word in the top dword.
+    const __m128i order = _mm_set_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    return _mm_shuffle_epi8(v, order);
   }
 
-  template <size_t Func>
-  static inline constexpr uint32x4_t f(State state, uint32x4_t w)
+  // Four rounds per step, 20 steps. w holds the last four message-schedule vectors, indexed
+  // modulo 4; step S >= 4 replaces w[S % 4] with W[4S..4S+3] before using it. `prev` is the
+  // A..D value from before the previous step, which sha1nexte turns into that step's E.
+  template <int S>
+  PIXELU_SHANI_FN static void Step(__m128i& abcd, __m128i& prev, __m128i& e0, __m128i (&w)[4])
   {
-    const auto wk = vaddq_u32(w, vdupq_n_u32(K[Func]));
-    if constexpr (Func == 0)
-      return vsha1cq_u32(state.abcd, state.e, wk);
-    if constexpr (Func == 1 || Func == 3)
-      return vsha1pq_u32(state.abcd, state.e, wk);
-    if constexpr (Func == 2)
-      return vsha1mq_u32(state.abcd, state.e, wk);
+    constexpr int cur = S % 4;
+    if constexpr (S >= 4)
+    {
+      const __m128i t = _mm_xor_si128(_mm_sha1msg1_epu32(w[cur], w[(S + 1) % 4]), w[(S + 2) % 4]);
+      w[cur] = _mm_sha1msg2_epu32(t, w[(S + 3) % 4]);
+    }
+
+    const __m128i e = S == 0 ? _mm_add_epi32(e0, w[cur]) : _mm_sha1nexte_epu32(prev, w[cur]);
+    prev = abcd;
+    abcd = _mm_sha1rnds4_epu32(abcd, e, S / 5);
+
+    if constexpr (S < 19)
+      Step<S + 1>(abcd, prev, e0, w);
   }
 
-  template <size_t Func>
-  static inline constexpr State FourRounds(State state, uint32x4_t w)
+  PIXELU_SHANI_FN void Compress(const u8* data, size_t blocks)
   {
-    return {f<Func>(state, w), vsha1h_u32(vgetq_lane_u32(state.abcd, 0))};
+    __m128i abcd = m_abcd;
+    __m128i e = m_e;
+    for (size_t n = 0; n < blocks; ++n, data += BLOCK)
+    {
+      __m128i w[4];
+      for (int i = 0; i < 4; ++i)
+        w[i] = Swap(_mm_loadu_si128(reinterpret_cast<const __m128i*>(data + 16 * i)));
+
+      const __m128i abcd_in = abcd;
+      const __m128i e_in = e;
+      __m128i prev = abcd;
+      Step<0>(abcd, prev, e, w);
+      e = _mm_sha1nexte_epu32(prev, e_in);
+      abcd = _mm_add_epi32(abcd, abcd_in);
+    }
+    m_abcd = abcd;
+    m_e = e;
   }
 
-  virtual void ProcessBlock(const u8* msg) override
+  PIXELU_SHANI_FN Digest Output() const
   {
-    WorkBlock w;
-    for (size_t i = 0; i < w.size(); i++)
-      w[i] = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(&msg[sizeof(uint32x4_t) * i])));
-
-    std::array<State, 2> states{state};
-
-    // Fashioned to look like x64 impl.
-    // In each case the goal is to have compiler inline + unroll everything.
-    states[1] = FourRounds<0>(states[0], w[0]);
-    states[0] = FourRounds<0>(states[1], w[1]);
-    states[1] = FourRounds<0>(states[0], w[2]);
-    states[0] = FourRounds<0>(states[1], w[3]);
-    states[1] = FourRounds<0>(states[0], MsgSchedule(&w, 4));
-    states[0] = FourRounds<1>(states[1], MsgSchedule(&w, 5));
-    states[1] = FourRounds<1>(states[0], MsgSchedule(&w, 6));
-    states[0] = FourRounds<1>(states[1], MsgSchedule(&w, 7));
-    states[1] = FourRounds<1>(states[0], MsgSchedule(&w, 8));
-    states[0] = FourRounds<1>(states[1], MsgSchedule(&w, 9));
-    states[1] = FourRounds<2>(states[0], MsgSchedule(&w, 10));
-    states[0] = FourRounds<2>(states[1], MsgSchedule(&w, 11));
-    states[1] = FourRounds<2>(states[0], MsgSchedule(&w, 12));
-    states[0] = FourRounds<2>(states[1], MsgSchedule(&w, 13));
-    states[1] = FourRounds<2>(states[0], MsgSchedule(&w, 14));
-    states[0] = FourRounds<3>(states[1], MsgSchedule(&w, 15));
-    states[1] = FourRounds<3>(states[0], MsgSchedule(&w, 16));
-    states[0] = FourRounds<3>(states[1], MsgSchedule(&w, 17));
-    states[1] = FourRounds<3>(states[0], MsgSchedule(&w, 18));
-    states[0] = FourRounds<3>(states[1], MsgSchedule(&w, 19));
-
-    state = {vaddq_u32(state.abcd, states[0].abcd), state.e + states[0].e};
+    Digest out{};
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(out.data()), Swap(m_abcd));
+    const u32 e_be = static_cast<u32>(_mm_cvtsi128_si32(Swap(m_e)));
+    std::memcpy(out.data() + 16, &e_be, sizeof(e_be));
+    return out;
   }
 
-  virtual Digest GetDigest() override
-  {
-    Digest digest;
-    vst1q_u8(&digest[0], vrev32q_u8(vreinterpretq_u8_u32(state.abcd)));
-    u32 e = Common::FromBigEndian(state.e);
-    std::memcpy(&digest[sizeof(state.abcd)], &e, sizeof(e));
-    return digest;
-  }
-
-  virtual bool HwAccelerated() const override { return true; }
-
-  State state;
+  __m128i m_abcd;
+  __m128i m_e;
+  u8 m_pending[BLOCK] = {};
+  size_t m_fill = 0;
+  size_t m_total = 0;
 };
 
 #endif
+}  // namespace
 
 std::unique_ptr<Context> CreateContext()
 {
-  if (cpu_info.bSHA1)
-  {
-#ifdef _M_X86_64
-    // Note: As of mid 2022, > 99% of CPUs reporting to Steam survey have SSSE3, ~40% have SHA.
-    // Seems unlikely we'll see any cpus supporting SHA but not SSSE3 (in the foreseeable future at
-    // least).
-    if (cpu_info.bSSSE3)
-      return std::make_unique<ContextX64SHA1>();
-#elif defined(_M_ARM_64)
-    return std::make_unique<ContextNeon>();
+#if defined(_M_X86_64)
+  if (cpu_info.bSHA1 && cpu_info.bSSSE3)
+    return std::make_unique<NiContext>();
 #endif
-  }
-  return std::make_unique<ContextMbed>();
+  return std::make_unique<MbedContext>();
 }
 
 Digest CalculateDigest(const u8* msg, size_t len)
 {
-  auto ctx = CreateContext();
-  ctx->Update(msg, len);
-  return ctx->Finish();
+  const auto context = CreateContext();
+  context->Update(msg, len);
+  return context->Finish();
 }
 
 std::string DigestToString(const Digest& digest)
 {
-  return fmt::format("{:02X}", fmt::join(digest, ""));
+  std::string text;
+  text.reserve(digest.size() * 2);
+  for (const u8 byte : digest)
+    text += fmt::format("{:02X}", byte);
+  return text;
 }
-
 }  // namespace Common::SHA1
