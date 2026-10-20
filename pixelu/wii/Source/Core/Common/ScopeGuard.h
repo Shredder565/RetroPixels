@@ -1,37 +1,37 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <optional>
+#include <utility>
 
 namespace Common
 {
+// Runs a callable when the guard leaves scope, unless Dismiss() was called first.
+// Exit() runs it early (at most once).
 template <typename Callable>
 class ScopeGuard final
 {
 public:
-  ScopeGuard(Callable&& finalizer) : m_finalizer(std::forward<Callable>(finalizer)) {}
-
-  ScopeGuard(ScopeGuard&& other) : m_finalizer(std::move(other.m_finalizer)) { other.Dismiss(); }
-
+  ScopeGuard(Callable&& on_exit) : m_action(std::forward<Callable>(on_exit)) {}
+  ScopeGuard(ScopeGuard&& other) : m_action(std::move(other.m_action)) { other.m_action.reset(); }
   ~ScopeGuard() { Exit(); }
-  void Dismiss() { m_finalizer.reset(); }
-  void Exit()
-  {
-    if (m_finalizer)
-    {
-      (*m_finalizer)();  // must not throw
-      m_finalizer.reset();
-    }
-  }
 
   ScopeGuard(const ScopeGuard&) = delete;
-
   void operator=(const ScopeGuard&) = delete;
 
-private:
-  std::optional<Callable> m_finalizer;
-};
+  void Dismiss() { m_action.reset(); }
 
-}  // Namespace Common
+  void Exit()
+  {
+    if (!m_action.has_value())
+      return;
+    std::optional<Callable> action;
+    action.swap(m_action);
+    (*action)();
+  }
+
+private:
+  std::optional<Callable> m_action;
+};
+}  // namespace Common

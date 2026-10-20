@@ -1,5 +1,4 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -17,13 +16,12 @@
 
 namespace Common::Log
 {
-// This variable should only be read to update the effective log level, and its base layer should
-// only be set when the user selects a new verbosity. Everything else should use the effective log
-// level instead. When running a release build this prevents overwriting the LDEBUG config value
-// with the clamped LINFO level.
+// The verbosity the user chose. Only read it to recompute the effective level, and only change
+// it when the user picks a new verbosity; everything else uses
+// LogManager::GetEffectiveLogLevel(), which is clamped to what this build compiles in.
 extern const Config::Info<LogLevel> LOGGER_VERBOSITY;
 
-// pure virtual interface
+// Receives finished log lines.
 class LogListener
 {
 public:
@@ -36,7 +34,7 @@ public:
     CONSOLE_LISTENER,
     LOG_WINDOW_LISTENER,
 
-    NUMBER_OF_LISTENERS  // Must be last
+    NUMBER_OF_LISTENERS  // keep last
   };
 };
 
@@ -56,11 +54,12 @@ public:
   static void Init();
   static void Shutdown();
 
+  // `file` is a full source path; the part up to the source tree root is dropped.
   void Log(LogLevel level, LogType type, const char* file, int line, const char* message);
+  // Like Log, but prints `file` as given and does not check whether the log type is enabled.
   void LogWithFullPath(LogLevel level, LogType type, const char* file, int line,
                        const char* message);
 
-  // Use this function instead of LOGGER_VERBOSITY to determine which logs should be printed.
   LogLevel GetEffectiveLogLevel() const;
   void SetConfigLogLevel(LogLevel level);
 
@@ -89,11 +88,11 @@ private:
   static std::string GetTimestamp();
   void SetEffectiveLogLevel();
 
-  std::atomic<LogLevel> m_effective_level;
-  Config::ConfigChangedCallbackID m_config_changed_callback_id;
-  EnumMap<LogContainer, LAST_LOG_TYPE> m_log{};
+  std::atomic<LogLevel> m_effective_level{LogLevel::LNOTICE};
+  Config::ConfigChangedCallbackID m_config_callback;
+  EnumMap<LogContainer, LAST_LOG_TYPE> m_types{};
   std::array<std::unique_ptr<LogListener>, LogListener::NUMBER_OF_LISTENERS> m_listeners{};
-  BitSet32 m_listener_ids;
-  size_t m_path_cutoff_point = 0;
+  BitSet32 m_active_listeners;
+  size_t m_source_root_length = 0;
 };
 }  // namespace Common::Log

@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,40 +8,45 @@
 
 namespace Common
 {
-// A Lazy object holds a value. If a Lazy object is constructed using
-// a function as an argument, that function will be called to compute
-// the value the first time any code tries to access the value.
-
+// Holds either a value or a function producing it. The function runs the first time the value
+// is accessed and its result replaces it. Not thread safe.
 template <typename T>
 class Lazy
 {
 public:
-  Lazy() : m_value(T()) {}
-  Lazy(const std::variant<T, std::function<T()>>& value) : m_value(value) {}
-  Lazy(std::variant<T, std::function<T()>>&& value) : m_value(std::move(value)) {}
-  const Lazy<T>& operator=(const std::variant<T, std::function<T()>>& value)
+  using Source = std::variant<T, std::function<T()>>;
+
+  Lazy() : m_slot(std::in_place_index<0>) {}
+  Lazy(const Source& source) : m_slot(source) {}
+  Lazy(Source&& source) : m_slot(std::move(source)) {}
+
+  const Lazy<T>& operator=(const Source& source)
   {
-    m_value = value;
+    m_slot = source;
     return *this;
   }
-  const Lazy<T>& operator=(std::variant<T, std::function<T()>>&& value)
+  const Lazy<T>& operator=(Source&& source)
   {
-    m_value = std::move(value);
+    m_slot = std::move(source);
     return *this;
   }
-  const T& operator*() const { return *ComputeValue(); }
-  const T* operator->() const { return ComputeValue(); }
-  T& operator*() { return *ComputeValue(); }
-  T* operator->() { return ComputeValue(); }
+
+  T& operator*() { return Resolve(); }
+  const T& operator*() const { return Resolve(); }
+  T* operator->() { return &Resolve(); }
+  const T* operator->() const { return &Resolve(); }
 
 private:
-  T* ComputeValue() const
+  T& Resolve() const
   {
-    if (!std::holds_alternative<T>(m_value))
-      m_value = std::get<std::function<T()>>(m_value)();
-    return &std::get<T>(m_value);
+    if (auto* producer = std::get_if<1>(&m_slot))
+    {
+      T produced = (*producer)();
+      m_slot.template emplace<0>(std::move(produced));
+    }
+    return std::get<0>(m_slot);
   }
 
-  mutable std::variant<T, std::function<T()>> m_value;
+  mutable Source m_slot;
 };
 }  // namespace Common

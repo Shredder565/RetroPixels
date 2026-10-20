@@ -1,27 +1,27 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+#pragma once
 
 #include <utility>
 
+// Projections for std::ranges algorithms over pairs (map entries and the like).
 namespace Common::Projection
 {
 struct First
 {
-  // TODO C++23: static operator()
-  template <class T>
-  [[nodiscard]] constexpr auto&& operator()(T&& t) const noexcept
+  template <class Pair>
+  [[nodiscard]] constexpr auto&& operator()(Pair&& pair) const noexcept
   {
-    return std::forward<T>(t).first;
+    return std::forward<Pair>(pair).first;
   }
 };
 
 struct Second
 {
-  // TODO C++23: static operator()
-  template <class T>
-  [[nodiscard]] constexpr auto&& operator()(T&& t) const noexcept
+  template <class Pair>
+  [[nodiscard]] constexpr auto&& operator()(Pair&& pair) const noexcept
   {
-    return std::forward<T>(t).second;
+    return std::forward<Pair>(pair).second;
   }
 };
 

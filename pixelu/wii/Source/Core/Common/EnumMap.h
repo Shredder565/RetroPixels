@@ -1,9 +1,9 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <array>
+#include <cstddef>
 
 #include "Common/TypeUtils.h"
 
@@ -12,68 +12,64 @@ struct BitField;
 
 namespace Common
 {
-// A type that allows lookup of values associated with an enum as the key.
-// Designed for enums whose numeric values start at 0 and increment continuously with few gaps.
+// A fixed array indexed by an enum whose members run from 0 up to `last_member`.
 template <typename V, Common::Enum auto last_member>
 class EnumMap final
 {
-  using T = decltype(last_member);
-  static constexpr size_t s_size = static_cast<size_t>(last_member) + 1;
-
-  using array_type = std::array<V, s_size>;
-  using iterator = typename array_type::iterator;
-  using const_iterator = typename array_type::const_iterator;
+  using Key = decltype(last_member);
+  static constexpr std::size_t COUNT = static_cast<std::size_t>(last_member) + 1;
+  using Storage = std::array<V, COUNT>;
 
 public:
   constexpr EnumMap() = default;
-  constexpr EnumMap(const EnumMap& other) = default;
-  constexpr EnumMap& operator=(const EnumMap& other) = default;
-  constexpr EnumMap(EnumMap&& other) = default;
-  constexpr EnumMap& operator=(EnumMap&& other) = default;
+  constexpr EnumMap(const EnumMap&) = default;
+  constexpr EnumMap(EnumMap&&) = default;
+  constexpr EnumMap& operator=(const EnumMap&) = default;
+  constexpr EnumMap& operator=(EnumMap&&) = default;
 
-  // Constructor that accepts exactly size Vs (enforcing that all must be specified).
-  template <typename... T>
-  constexpr EnumMap(T... values) requires(Common::IsNOf<V, s_size, T...>::value)
-      : m_array{static_cast<V>(values)...}
+  // Initialises every entry; exactly one value per enum member must be given.
+  template <typename... Values>
+  requires(Common::IsNOf<V, COUNT, Values...>::value)
+  constexpr EnumMap(Values... values) : m_entries{static_cast<V>(values)...}
   {
   }
 
-  constexpr const V& operator[](T key) const { return m_array[static_cast<std::size_t>(key)]; }
-  constexpr V& operator[](T key) { return m_array[static_cast<std::size_t>(key)]; }
+  constexpr V& operator[](Key key) { return m_entries[static_cast<std::size_t>(key)]; }
+  constexpr const V& operator[](Key key) const { return m_entries[static_cast<std::size_t>(key)]; }
 
-  // These only exist to perform the safety check; without them, BitField's implicit conversion
-  // would work (but since BitField is used for game-generated data, we need to be careful about
-  // bounds-checking)
+  // Indexing with a BitField (guest-controlled data) is only allowed when every value the field
+  // can hold has an entry.
   template <std::size_t position, std::size_t bits, typename StorageType>
-  constexpr const V& operator[](BitField<position, bits, T, StorageType> key) const
+  constexpr V& operator[](BitField<position, bits, Key, StorageType> key)
   {
-    static_assert(1 << bits == s_size, "Unsafe indexing into EnumMap (may go out of bounds)");
-    return m_array[static_cast<std::size_t>(key.Value())];
+    static_assert((std::size_t{1} << bits) == COUNT,
+                  "This BitField can hold values outside the EnumMap");
+    return m_entries[static_cast<std::size_t>(key.Value())];
   }
   template <std::size_t position, std::size_t bits, typename StorageType>
-  constexpr V& operator[](BitField<position, bits, T, StorageType> key)
+  constexpr const V& operator[](BitField<position, bits, Key, StorageType> key) const
   {
-    static_assert(1 << bits == s_size, "Unsafe indexing into EnumMap (may go out of bounds)");
-    return m_array[static_cast<std::size_t>(key.Value())];
+    static_assert((std::size_t{1} << bits) == COUNT,
+                  "This BitField can hold values outside the EnumMap");
+    return m_entries[static_cast<std::size_t>(key.Value())];
   }
 
-  constexpr bool InBounds(T key) const { return static_cast<std::size_t>(key) < s_size; }
+  constexpr bool InBounds(Key key) const { return static_cast<std::size_t>(key) < COUNT; }
+  constexpr std::size_t size() const noexcept { return COUNT; }
 
-  constexpr size_t size() const noexcept { return s_size; }
+  constexpr V* data() { return m_entries.data(); }
+  constexpr const V* data() const { return m_entries.data(); }
 
-  constexpr V* data() { return m_array.data(); }
-  constexpr const V* data() const { return m_array.data(); }
+  constexpr auto begin() { return m_entries.begin(); }
+  constexpr auto end() { return m_entries.end(); }
+  constexpr auto begin() const { return m_entries.begin(); }
+  constexpr auto end() const { return m_entries.end(); }
+  constexpr auto cbegin() const { return m_entries.cbegin(); }
+  constexpr auto cend() const { return m_entries.cend(); }
 
-  constexpr iterator begin() { return m_array.begin(); }
-  constexpr iterator end() { return m_array.end(); }
-  constexpr const_iterator begin() const { return m_array.begin(); }
-  constexpr const_iterator end() const { return m_array.end(); }
-  constexpr const_iterator cbegin() const { return m_array.cbegin(); }
-  constexpr const_iterator cend() const { return m_array.cend(); }
-
-  constexpr void fill(const V& v) { m_array.fill(v); }
+  constexpr void fill(const V& value) { m_entries.fill(value); }
 
 private:
-  array_type m_array{};
+  Storage m_entries{};
 };
 }  // namespace Common

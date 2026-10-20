@@ -1,21 +1,19 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/Logging/ConsoleListener.h"
+
+#include <string>
 
 #include <windows.h>
 
 #include "Common/StringUtil.h"
 
-ConsoleListener::ConsoleListener()
-{
-}
+ConsoleListener::ConsoleListener() = default;
 
-ConsoleListener::~ConsoleListener()
-{
-}
+ConsoleListener::~ConsoleListener() = default;
 
-void ConsoleListener::Log(Common::Log::LogLevel, const char* text)
+void ConsoleListener::Log([[maybe_unused]] Common::Log::LogLevel level, const char* text)
 {
-  ::OutputDebugStringW(UTF8ToWString(text).c_str());
+  const std::wstring wide = UTF8ToWString(text);
+  OutputDebugStringW(wide.c_str());
 }

@@ -1,14 +1,17 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <cstddef>
+
 #include <fmt/format.h>
+
 #include "Common/FormatUtil.h"
 
 namespace Common::Log
 {
+// Log channels. Each one can be switched on and off in the log configuration; the names the
+// configuration uses are set up in LogManager.cpp.
 enum class LogType : int
 {
   ACHIEVEMENTS,
@@ -70,27 +73,29 @@ enum class LogType : int
   WII_IPC,
   WIIMOTE,
 
-  NUMBER_OF_LOGS  // Must be last
+  NUMBER_OF_LOGS  // keep last
 };
 
-constexpr LogType LAST_LOG_TYPE =
-    static_cast<LogType>(static_cast<int>(LogType::NUMBER_OF_LOGS) - 1);
+constexpr LogType LAST_LOG_TYPE = LogType(int(LogType::NUMBER_OF_LOGS) - 1);
 
+// Severity, from most to least important. The numbers are stored in the logger configuration.
 enum class LogLevel : int
 {
-  LNOTICE = 1,   // VERY important information that is NOT errors. Like startup and OSReports.
-  LERROR = 2,    // Critical errors
-  LWARNING = 3,  // Something is suspicious.
-  LINFO = 4,     // General information.
-  LDEBUG = 5,    // Detailed debugging - might make things slow.
+  LNOTICE = 1,   // important messages that are not errors (startup, OSReport)
+  LERROR = 2,    // errors
+  LWARNING = 3,  // suspicious situations
+  LINFO = 4,     // general information
+  LDEBUG = 5,    // detailed tracing, may be slow
 };
 
+// Messages above this level are compiled out entirely.
 #if defined(_DEBUG) || defined(DEBUGFAST)
-constexpr auto MAX_EFFECTIVE_LOGLEVEL = Common::Log::LogLevel::LDEBUG;
+constexpr auto MAX_EFFECTIVE_LOGLEVEL = LogLevel::LDEBUG;
 #else
-constexpr auto MAX_EFFECTIVE_LOGLEVEL = Common::Log::LogLevel::LINFO;
-#endif  // logging
+constexpr auto MAX_EFFECTIVE_LOGLEVEL = LogLevel::LINFO;
+#endif
 
+// One letter per level, indexed by the level's number.
 static const char LOG_LEVEL_TO_CHAR[7] = "-NEWID";
 
 void GenericLogFmtImpl(LogLevel level, LogType type, const char* file, int line,
@@ -100,61 +105,40 @@ template <std::size_t NumFields, typename S, typename... Args>
 void GenericLogFmt(LogLevel level, LogType type, const char* file, int line, const S& format,
                    const Args&... args)
 {
-  static_assert(NumFields == sizeof...(args),
-                "Unexpected number of replacement fields in format string; did you pass too few or "
-                "too many arguments?");
+  static_assert(NumFields == sizeof...(Args),
+                "The format string's replacement fields and the arguments don't match up");
 #if FMT_VERSION >= 110000 && FMT_VERSION < 120200
-  // fmt 11 made fmt::string_view no longer directly constructible from compile-time strings.
-  // In fmt 12.2+, compile-time strings are plain string literals, so this is no longer needed.
-  auto&& format_str = fmt::format_string<Args...>(format);
+  // These fmt versions only convert FMT_STRING objects to a string view through format_string.
+  const fmt::format_string<Args...> checked_format(format);
+  GenericLogFmtImpl(level, type, file, line, checked_format.get(), fmt::make_format_args(args...));
 #else
-  auto&& format_str = format;
+  GenericLogFmtImpl(level, type, file, line, format, fmt::make_format_args(args...));
 #endif
-  GenericLogFmtImpl(level, type, file, line, format_str, fmt::make_format_args(args...));
 }
 }  // namespace Common::Log
 
-// fmtlib capable API
+// Logging macros: <LEVEL>_LOG_FMT(LOG_TYPE, "format {}", args...).
 
 #define GENERIC_LOG_FMT(t, v, format, ...)                                                         \
   do                                                                                               \
   {                                                                                                \
-    if (v <= Common::Log::MAX_EFFECTIVE_LOGLEVEL)                                                  \
+    if ((v) <= Common::Log::MAX_EFFECTIVE_LOGLEVEL)                                                \
     {                                                                                              \
-      /* Use a macro-like name to avoid shadowing warnings */                                      \
-      constexpr auto GENERIC_LOG_FMT_N = Common::CountFmtReplacementFields(format);                \
-      Common::Log::GenericLogFmt<GENERIC_LOG_FMT_N>(                                               \
+      constexpr std::size_t GENERIC_LOG_FMT_FIELDS = Common::CountFmtReplacementFields(format);    \
+      Common::Log::GenericLogFmt<GENERIC_LOG_FMT_FIELDS>(                                          \
           v, t, __FILE__, __LINE__, FMT_STRING(format) __VA_OPT__(, ) __VA_ARGS__);                \
     }                                                                                              \
   } while (0)
 
 #define ERROR_LOG_FMT(t, ...)                                                                      \
-  do                                                                                               \
-  {                                                                                                \
-    GENERIC_LOG_FMT(Common::Log::LogType::t,                                                       \
-                    Common::Log::LogLevel::LERROR __VA_OPT__(, ) __VA_ARGS__);                     \
-  } while (0)
+  GENERIC_LOG_FMT(Common::Log::LogType::t, Common::Log::LogLevel::LERROR __VA_OPT__(, ) __VA_ARGS__)
 #define WARN_LOG_FMT(t, ...)                                                                       \
-  do                                                                                               \
-  {                                                                                                \
-    GENERIC_LOG_FMT(Common::Log::LogType::t,                                                       \
-                    Common::Log::LogLevel::LWARNING __VA_OPT__(, ) __VA_ARGS__);                   \
-  } while (0)
+  GENERIC_LOG_FMT(Common::Log::LogType::t,                                                         \
+                  Common::Log::LogLevel::LWARNING __VA_OPT__(, ) __VA_ARGS__)
 #define NOTICE_LOG_FMT(t, ...)                                                                     \
-  do                                                                                               \
-  {                                                                                                \
-    GENERIC_LOG_FMT(Common::Log::LogType::t,                                                       \
-                    Common::Log::LogLevel::LNOTICE __VA_OPT__(, ) __VA_ARGS__);                    \
-  } while (0)
+  GENERIC_LOG_FMT(Common::Log::LogType::t,                                                         \
+                  Common::Log::LogLevel::LNOTICE __VA_OPT__(, ) __VA_ARGS__)
 #define INFO_LOG_FMT(t, ...)                                                                       \
-  do                                                                                               \
-  {                                                                                                \
-    GENERIC_LOG_FMT(Common::Log::LogType::t,                                                       \
-                    Common::Log::LogLevel::LINFO __VA_OPT__(, ) __VA_ARGS__);                      \
-  } while (0)
+  GENERIC_LOG_FMT(Common::Log::LogType::t, Common::Log::LogLevel::LINFO __VA_OPT__(, ) __VA_ARGS__)
 #define DEBUG_LOG_FMT(t, ...)                                                                      \
-  do                                                                                               \
-  {                                                                                                \
-    GENERIC_LOG_FMT(Common::Log::LogType::t,                                                       \
-                    Common::Log::LogLevel::LDEBUG __VA_OPT__(, ) __VA_ARGS__);                     \
-  } while (0)
+  GENERIC_LOG_FMT(Common::Log::LogType::t, Common::Log::LogLevel::LDEBUG __VA_OPT__(, ) __VA_ARGS__)

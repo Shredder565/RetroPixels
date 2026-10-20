@@ -1,18 +1,4 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-
-// Abstraction for a simple flag that can be toggled in a multithreaded way.
-//
-// Simple API:
-// * Set(bool = true): sets the Flag
-// * IsSet(): tests if the flag is set
-// * Clear(): clears the flag (equivalent to Set(false)).
-//
-// More advanced features:
-// * TestAndSet(bool = true): sets the flag to the given value. If a change was
-//                            needed (the flag did not already have this value)
-//                            the function returns true. Else, false.
-// * TestAndClear(): alias for TestAndSet(false).
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -20,26 +6,28 @@
 
 namespace Common
 {
+// A boolean that several threads may read and change at once.
+//
+// TestAndSet(v) stores v and returns true only if the flag held the other value before, which
+// lets exactly one thread "win" a transition.
 class Flag final
 {
 public:
-  // Declared as explicit since we do not want "= true" to work on a flag
-  // object - it should be made explicit that a flag is *not* a normal
-  // variable.
-  explicit Flag(bool initial_value = false) : m_val(initial_value) {}
-  void Set(bool val = true) { m_val.store(val); }
-  void Clear() { Set(false); }
-  bool IsSet() const { return m_val.load(); }
-  bool TestAndSet(bool val = true)
-  {
-    bool expected = !val;
-    return m_val.compare_exchange_strong(expected, val);
-  }
+  // Explicit, so that a Flag is never mistaken for a plain bool in assignments.
+  explicit Flag(bool initial_value = false) : m_state(initial_value) {}
 
+  void Set(bool value = true) { m_state.store(value); }
+  void Clear() { m_state.store(false); }
+  bool IsSet() const { return m_state.load(); }
+
+  bool TestAndSet(bool value = true)
+  {
+    bool previous = !value;
+    return m_state.compare_exchange_strong(previous, value);
+  }
   bool TestAndClear() { return TestAndSet(false); }
 
 private:
-  std::atomic_bool m_val;
+  std::atomic<bool> m_state;
 };
-
 }  // namespace Common

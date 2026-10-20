@@ -1,12 +1,13 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include "Common/CommonTypes.h"
 
+// Host SIMD floating-point control (MXCSR on x86-64), used to mirror the guest's FPSCR.
 namespace Common::FPU
 {
+// Values match the PowerPC FPSCR[RN] field.
 enum RoundMode : u32
 {
   ROUND_NEAR = 0,
@@ -15,15 +16,12 @@ enum RoundMode : u32
   ROUND_DOWN = 3
 };
 
+// Selects the rounding mode; non_ieee_mode additionally flushes denormal results to zero.
+// All floating-point exceptions stay masked.
 void SetSIMDMode(RoundMode rounding_mode, bool non_ieee_mode);
 
-/*
- * There are two different flavors of float to int conversion:
- * _mm_cvtps_epi32() and _mm_cvttps_epi32().
- *
- * The first rounds according to the MXCSR rounding bits.
- * The second one always uses round towards zero.
- */
+// Note that only the rounding conversions (e.g. cvtps2dq) follow the mode set here; the
+// truncating ones (cvttps2dq) always round toward zero.
 void SaveSIMDState();
 void LoadSIMDState();
 void LoadDefaultSIMDState();

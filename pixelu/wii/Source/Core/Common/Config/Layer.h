@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -15,7 +14,7 @@
 
 namespace Config
 {
-// Setting a key to an object of this type will delete the key.
+// Passing a DefaultState as the value removes the setting from the layer.
 struct DefaultState
 {
   friend constexpr bool operator==(DefaultState, DefaultState) { return true; }
@@ -23,23 +22,23 @@ struct DefaultState
 
 namespace detail
 {
+// Converts a stored string into a setting's type (nullopt if it does not parse).
 template <typename T>
 requires(!Common::Enum<T>)
 std::optional<T> TryParse(const std::string& str_value)
 {
-  T value;
-  if (!::TryParse(str_value, &value))
-    return std::nullopt;
-  return value;
+  T parsed;
+  if (::TryParse(str_value, &parsed))
+    return parsed;
+  return std::nullopt;
 }
 
 template <Common::Enum T>
 std::optional<T> TryParse(const std::string& str_value)
 {
-  const auto result = TryParse<std::underlying_type_t<T>>(str_value);
-  if (result)
-    return static_cast<T>(*result);
-  return {};
+  if (const auto number = TryParse<std::underlying_type_t<T>>(str_value))
+    return static_cast<T>(*number);
+  return std::nullopt;
 }
 
 template <>
@@ -53,8 +52,13 @@ template <typename T>
 class Info;
 
 class Layer;
+
+// All values of a layer, as strings. An empty optional marks a key deleted since loading (so
+// the loader knows to remove it from the file).
 using LayerMap = std::map<Location, std::optional<std::string>>;
 
+// Reads a layer's values from somewhere (INI files, a game's settings, a movie) and writes them
+// back.
 class ConfigLayerLoader
 {
 public:
@@ -69,6 +73,7 @@ private:
   const LayerType m_layer;
 };
 
+// The entries of one section of a layer, as an iterable range.
 class Section
 {
 public:
@@ -99,11 +104,12 @@ class Layer
 {
 public:
   explicit Layer(LayerType layer);
+  // Loads the layer right away and saves it (if changed) when destroyed.
   explicit Layer(std::unique_ptr<ConfigLayerLoader> loader);
   virtual ~Layer();
 
-  // Convenience functions
   bool Exists(const Location& location) const;
+  // Returns whether there was a value to delete.
   bool DeleteKey(const Location& location);
   void DeleteAllKeys();
 
@@ -116,11 +122,13 @@ public:
   template <typename T>
   std::optional<T> Get(const Location& location) const
   {
-    const auto iter = m_map.find(location);
-    if (iter == m_map.end() || !iter->second.has_value())
+    const auto entry = m_map.find(location);
+    if (entry == m_map.end() || !entry->second)
       return std::nullopt;
-    return detail::TryParse<T>(*iter->second);
+    return detail::TryParse<T>(*entry->second);
   }
+
+  // The Set functions return whether the layer changed.
 
   template <typename T>
   bool Set(const Info<T>& config_info, DefaultState)
@@ -128,6 +136,7 @@ public:
     return DeleteKey(config_info.GetLocation());
   }
 
+  // (The value's type is not deduced, so it converts to the setting's type.)
   template <typename T>
   bool Set(const Info<T>& config_info, const std::common_type_t<T>& value)
   {
@@ -144,11 +153,18 @@ public:
 
   bool Set(const Location& location, std::string new_value)
   {
-    const auto iter = m_map.find(location);
-    if (iter != m_map.end() && iter->second == new_value)
-      return false;
+    auto entry = m_map.find(location);
+    if (entry == m_map.end())
+    {
+      m_map.emplace(location, std::move(new_value));
+    }
+    else
+    {
+      if (entry->second == new_value)
+        return false;
+      entry->second = std::move(new_value);
+    }
     m_is_dirty = true;
-    m_map.insert_or_assign(location, std::move(new_value));
     return true;
   }
 
@@ -157,7 +173,6 @@ public:
   Section GetSection(System system, const std::string& section);
   ConstSection GetSection(System system, const std::string& section) const;
 
-  // Explicit load and save of layers
   void Load();
   void Save();
 

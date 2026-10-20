@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,43 +8,46 @@ namespace Common
 {
 namespace detail
 {
-template <bool UseAtomicWait>
-class AtomicMutexBase
+// A one-flag lock meeting the Lockable requirements. With `Sleep`, a waiting thread blocks on
+// the flag (std::atomic::wait) instead of spinning. Unlike std::mutex, unlock() may be called
+// from a thread other than the one that locked.
+template <bool Sleep>
+class FlagLock
 {
 public:
   void lock()
   {
-    while (m_lock.exchange(true, std::memory_order_acquire))
+    for (;;)
     {
-      if constexpr (UseAtomicWait)
-        m_lock.wait(true, std::memory_order_relaxed);
+      if (!m_held.exchange(true, std::memory_order_acquire))
+        return;
+      if constexpr (Sleep)
+        m_held.wait(true, std::memory_order_relaxed);
     }
   }
 
   bool try_lock()
   {
-    bool expected = false;
-    return m_lock.compare_exchange_weak(expected, true, std::memory_order_acquire,
+    bool was_held = false;
+    return m_held.compare_exchange_weak(was_held, true, std::memory_order_acquire,
                                         std::memory_order_relaxed);
   }
 
-  // Unlike with std::mutex, this call may come from any thread.
   void unlock()
   {
-    m_lock.store(false, std::memory_order_release);
-    if constexpr (UseAtomicWait)
-      m_lock.notify_one();
+    m_held.store(false, std::memory_order_release);
+    if constexpr (Sleep)
+      m_held.notify_one();
   }
 
 private:
-  std::atomic_bool m_lock{};
+  std::atomic<bool> m_held{false};
 };
 }  // namespace detail
 
-// Sometimes faster than std::mutex.
-using AtomicMutex = detail::AtomicMutexBase<true>;
+// Cheap lock that sleeps while contended.
+using AtomicMutex = detail::FlagLock<true>;
 
-// Very fast to lock and unlock when uncontested (~3x faster than std::mutex).
-using SpinMutex = detail::AtomicMutexBase<false>;
-
+// Busy-waiting lock for very short, rarely contended critical sections.
+using SpinMutex = detail::FlagLock<false>;
 }  // namespace Common

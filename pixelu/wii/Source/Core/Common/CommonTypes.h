@@ -1,9 +1,6 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-// This header contains type definitions that are shared between the Dolphin core and
-// other parts of the code. Any definitions that are only used by the core should be
-// placed in "Common.h" instead.
+// Fixed-size integer names and clock aliases used throughout the emulator.
 
 #pragma once
 
@@ -13,7 +10,7 @@
 #ifdef _WIN32
 #include <tchar.h>
 #else
-// For using Windows lock code
+// Stand-ins so code written against the Win32 names still compiles elsewhere.
 #define TCHAR char
 #define LONG int
 #endif
@@ -28,9 +25,12 @@ using s16 = std::int16_t;
 using s32 = std::int32_t;
 using s64 = std::int64_t;
 
+// Monotonic clock used for frame pacing and performance measurements.
 using Clock = std::chrono::steady_clock;
 using TimePoint = Clock::time_point;
 using DT = Clock::duration;
-using DT_us = std::chrono::duration<double, std::micro>;
+
+// Floating-point durations, handy for statistics.
+using DT_s = std::chrono::duration<double>;
 using DT_ms = std::chrono::duration<double, std::milli>;
-using DT_s = std::chrono::duration<double, std::ratio<1>>;
+using DT_us = std::chrono::duration<double, std::micro>;

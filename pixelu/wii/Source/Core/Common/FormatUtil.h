@@ -1,75 +1,60 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <cstddef>
 #include <string_view>
 
+// Compile-time inspection of fmt format strings, used by the logging and alert macros to check
+// argument counts and translatable strings.
 namespace Common
 {
+// Number of replacement fields ("{...}") in a format string. "{{" is a literal brace.
 constexpr std::size_t CountFmtReplacementFields(std::string_view s)
 {
-  std::size_t count = 0;
-  for (std::size_t i = 0; i < s.size(); ++i)
+  std::size_t fields = 0;
+  std::size_t pos = 0;
+  while ((pos = s.find('{', pos)) != std::string_view::npos)
   {
-    if (s[i] != '{')
-      continue;
-
-    // If the opening brace is followed by another brace, what we have is
-    // an escaped brace, not a replacement field.
-    if (i + 1 < s.size() && s[i + 1] == '{')
+    if (pos + 1 < s.size() && s[pos + 1] == '{')
     {
-      // Skip the second brace.
-      // This ensures that e.g. {{{}}} is counted correctly: when the first brace character
-      // is read and detected as being part of an '{{' escape sequence, the second character
-      // is skipped so the most inner brace (the third character) is not detected
-      // as the end of an '{{' pair.
-      ++i;
+      pos += 2;  // escaped brace
       continue;
     }
-
-    ++count;
+    ++fields;
+    ++pos;
   }
-  return count;
+  return fields;
 }
 
-static_assert(CountFmtReplacementFields("") == 0);
-static_assert(CountFmtReplacementFields("{} test {:x}") == 2);
-static_assert(CountFmtReplacementFields("{} {{}} test {{{}}}") == 2);
-
+// True if any replacement field has no argument index ("{}" or "{:...}"). Translated strings must
+// use indices so that translators can reorder the arguments.
 constexpr bool ContainsNonPositionalArguments(std::string_view s)
 {
-  for (std::size_t i = 0; i < s.size(); ++i)
+  std::size_t pos = 0;
+  while ((pos = s.find('{', pos)) != std::string_view::npos)
   {
-    if (s[i] != '{' || i + 1 == s.size())
+    if (pos + 1 >= s.size())
+      return false;
+    const char after = s[pos + 1];
+    if (after == '{')
+    {
+      pos += 2;
       continue;
-
-    const char next = s[i + 1];
-
-    // If the opening brace is followed by another brace, what we have is
-    // an escaped brace, not a replacement field.
-    if (next == '{')
-    {
-      // Skip the second brace.
-      // This ensures that e.g. {{{}}} is counted correctly: when the first brace character
-      // is read and detected as being part of an '{{' escape sequence, the second character
-      // is skipped so the most inner brace (the third character) is not detected
-      // as the end of an '{{' pair.
-      ++i;
     }
-    else if (next == '}' || next == ':')
-    {
+    if (after == '}' || after == ':')
       return true;
-    }
+    ++pos;
   }
   return false;
 }
 
-static_assert(!ContainsNonPositionalArguments(""));
+static_assert(CountFmtReplacementFields("") == 0);
+static_assert(CountFmtReplacementFields("{} and {:08x}") == 2);
+static_assert(CountFmtReplacementFields("{{}} {} {{{}}}") == 2);
+static_assert(!ContainsNonPositionalArguments("no fields"));
 static_assert(ContainsNonPositionalArguments("{}"));
-static_assert(!ContainsNonPositionalArguments("{0}"));
-static_assert(ContainsNonPositionalArguments("{:x}"));
-static_assert(!ContainsNonPositionalArguments("{0:x}"));
-static_assert(!ContainsNonPositionalArguments("{0} {{}} test {{{1}}}"));
+static_assert(ContainsNonPositionalArguments("{:d}"));
+static_assert(!ContainsNonPositionalArguments("{0} {1:x} {{}}"));
+static_assert(!ContainsNonPositionalArguments("{{{0}}}"));
 }  // namespace Common

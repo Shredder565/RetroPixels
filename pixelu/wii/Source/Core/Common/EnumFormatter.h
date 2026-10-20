@@ -1,95 +1,68 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
-#include "Common/EnumMap.h"
-
-#include <fmt/format.h>
 #include <type_traits>
 
-/*
- * Helper for using enums with fmt.
- *
- * Usage example:
- *
- * enum class Foo
- * {
- *   A = 0,
- *   B = 1,
- *   C = 2,
- * };
- *
- * template <>
- * struct fmt::formatter<Foo> : EnumFormatter<Foo::C>
- * {
- *   constexpr formatter() : EnumFormatter({"A", "B", "C"}) {}
- * };
- *
- * enum class Bar
- * {
- *   D = 0,
- *   E = 1,
- *   F = 3,
- * };
- *
- * template <>
- * struct fmt::formatter<Bar> : EnumFormatter<Bar::F>
- * {
- *   // using std::array here fails due to nullptr not being const char*, at least in MSVC
- *   // (but only when a field is used; directly in the constructor is OK)
- *   static constexpr array_type names = {"D", "E", nullptr, "F"};
- *   constexpr formatter() : EnumFormatter(names) {}
- * };
- */
+#include <fmt/format.h>
+
+#include "Common/EnumMap.h"
+
+// Base for fmt::formatter specialisations of enums. A specialisation passes one name per value
+// (nullptr for gaps) to the constructor:
+//
+//   template <>
+//   struct fmt::formatter<MyEnum> : EnumFormatter<MyEnum::LastValue>
+//   {
+//     static constexpr array_type names = {"First", nullptr, "Third"};
+//     constexpr formatter() : EnumFormatter(names) {}
+//   };
+//
+// Format specs: {} or {:u} gives "Name (3)", {:n} gives "Name", and {:s} gives "0x3u /* Name */"
+// for generated shader code. Values without a name print as "Invalid".
 template <Common::Enum auto last_member>
 class EnumFormatter
 {
-  using T = decltype(last_member);
+  using EnumType = decltype(last_member);
 
 public:
   constexpr auto parse(fmt::format_parse_context& ctx)
   {
-    auto it = ctx.begin(), end = ctx.end();
-    // 'u' for user display, 's' for shader generation, 'n' for name only
-    if (it != end && (*it == 'u' || *it == 's' || *it == 'n'))
-      format_type = *it++;
+    auto it = ctx.begin();
+    if (it != ctx.end() && (*it == 'u' || *it == 'n' || *it == 's'))
+    {
+      format_type = *it;
+      ++it;
+    }
     return it;
   }
 
   template <typename FormatContext>
-  auto format(const T& e, FormatContext& ctx) const
+  auto format(const EnumType& value, FormatContext& ctx) const
   {
-    const auto value_s = static_cast<std::underlying_type_t<T>>(e);      // Possibly signed
-    const auto value_u = static_cast<std::make_unsigned_t<T>>(value_s);  // Always unsigned
-    const bool has_name = m_names.InBounds(e) && m_names[e] != nullptr;
+    using Signed = std::underlying_type_t<EnumType>;
+    using Unsigned = std::make_unsigned_t<EnumType>;  // also valid for bool-based enums
+    const Signed number = static_cast<Signed>(value);
+    const char* name = m_names.InBounds(value) ? m_names[value] : nullptr;
 
-    switch (format_type)
+    if (format_type == 's')
     {
-    default:
-    case 'u':
-      if (has_name)
-        return fmt::format_to(ctx.out(), "{} ({})", m_names[e], value_s);
-      else
-        return fmt::format_to(ctx.out(), "Invalid ({})", value_s);
-    case 's':
-      if (has_name)
-        return fmt::format_to(ctx.out(), "{:#x}u /* {} */", value_u, m_names[e]);
-      else
-        return fmt::format_to(ctx.out(), "{:#x}u /* Invalid */", value_u);
-    case 'n':
-      if (has_name)
-        return fmt::format_to(ctx.out(), "{}", m_names[e]);
-      else
-        return fmt::format_to(ctx.out(), "Invalid ({})", value_s);
+      if (name == nullptr)
+        return fmt::format_to(ctx.out(), "{:#x}u /* Invalid */", static_cast<Unsigned>(number));
+      return fmt::format_to(ctx.out(), "{:#x}u /* {} */", static_cast<Unsigned>(number), name);
     }
+    if (name == nullptr)
+      return fmt::format_to(ctx.out(), "Invalid ({})", number);
+    if (format_type == 'n')
+      return fmt::format_to(ctx.out(), "{}", name);
+    return fmt::format_to(ctx.out(), "{} ({})", name, number);
   }
 
 protected:
-  // This is needed because std::array deduces incorrectly if nullptr is included in the list
+  // An EnumMap rather than a std::array, so that a braced list containing nullptr works.
   using array_type = Common::EnumMap<const char*, last_member>;
 
-  constexpr explicit EnumFormatter(const array_type names) : m_names(std::move(names)) {}
+  constexpr explicit EnumFormatter(const array_type names) : m_names(names) {}
 
   const array_type m_names;
   char format_type = 'u';

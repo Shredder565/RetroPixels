@@ -1,7 +1,8 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/Config/Layer.h"
+
+#include <utility>
 
 namespace Config
 {
@@ -16,7 +17,7 @@ LayerType ConfigLayerLoader::GetLayer() const
   return m_layer;
 }
 
-Layer::Layer(LayerType type) : m_layer(type)
+Layer::Layer(LayerType layer) : m_layer(layer)
 {
 }
 
@@ -33,57 +34,55 @@ Layer::~Layer()
 
 bool Layer::Exists(const Location& location) const
 {
-  const auto iter = m_map.find(location);
-  return iter != m_map.end() && iter->second.has_value();
+  const auto entry = m_map.find(location);
+  return entry != m_map.end() && entry->second.has_value();
 }
 
 bool Layer::DeleteKey(const Location& location)
 {
+  // Marked dirty even if nothing was there, so that a save writes the deletion out.
   m_is_dirty = true;
-  bool had_value = false;
-  const auto iter = m_map.find(location);
-  if (iter != m_map.end() && iter->second.has_value())
-  {
-    iter->second.reset();
-    had_value = true;
-  }
-
-  return had_value;
+  const auto entry = m_map.find(location);
+  if (entry == m_map.end() || !entry->second)
+    return false;
+  entry->second = std::nullopt;
+  return true;
 }
 
 void Layer::DeleteAllKeys()
 {
   m_is_dirty = true;
-  for (auto& pair : m_map)
-  {
-    pair.second.reset();
-  }
+  for (auto& entry : m_map)
+    entry.second = std::nullopt;
 }
 
+// Keys of a section sort between (system, section, "") and the first key of the next possible
+// section name, which is the section name followed by '\x01'.
 Section Layer::GetSection(System system, const std::string& section)
 {
-  return Section{m_map.lower_bound(Location{system, section, ""}),
-                 m_map.lower_bound(Location{system, section + '\001', ""})};
+  const auto first = m_map.lower_bound(Location{system, section, std::string()});
+  const auto last = m_map.lower_bound(Location{system, section + '\x01', std::string()});
+  return Section{first, last};
 }
 
 ConstSection Layer::GetSection(System system, const std::string& section) const
 {
-  return ConstSection{m_map.lower_bound(Location{system, section, ""}),
-                      m_map.lower_bound(Location{system, section + '\001', ""})};
+  const auto first = m_map.lower_bound(Location{system, section, std::string()});
+  const auto last = m_map.lower_bound(Location{system, section + '\x01', std::string()});
+  return ConstSection{first, last};
 }
 
 void Layer::Load()
 {
-  if (m_loader)
+  if (m_loader != nullptr)
     m_loader->Load(this);
   m_is_dirty = false;
 }
 
 void Layer::Save()
 {
-  if (!m_loader || !m_is_dirty)
+  if (m_loader == nullptr || !m_is_dirty)
     return;
-
   m_loader->Save(this);
   m_is_dirty = false;
 }

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: CC0-1.0
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,126 +11,127 @@
 
 namespace Common
 {
-// Similar to std::bitset, this is a class which encapsulates a bitset, i.e.
-// using the set bits of an integer to represent a set of integers.  Like that
-// class, it acts like an array of bools:
-//     BitSet32 bs;
-//     bs[1] = true;
-// but also like the underlying integer ([0] = least significant bit):
-//     BitSet32 bs2 = ...;
-//     bs = (bs ^ bs2) & BitSet32(0xffff);
-// The following additional functionality is provided:
-// - Construction using an initializer list.
-//     BitSet bs { 1, 2, 4, 8 };
-// - Efficiently iterating through the set bits:
-//     for (int i : bs)
-//         [i is the *index* of a set bit]
-//   (This uses the appropriate CPU instruction to find the next set bit in one
-//   operation.)
-// - Counting set bits using .Count() - see comment on that method.
-
+// A set of small integers stored as the bits of an unsigned integer (bit 0 = element 0).
+//
+// It indexes like an array of bools (`set[3] = true`), combines like an integer
+// (`a | b`, `a & ~b`), counts with Count(), and iterating it yields the indices of the set bits
+// in increasing order:
+//
+//   for (int index : BitSet32{1, 5, 9}) ...
 template <typename IntTy>
 class BitSet
 {
-  static_assert(!std::is_signed<IntTy>::value, "BitSet should not be used with signed types");
+  static_assert(std::is_unsigned_v<IntTy>, "BitSet needs an unsigned integer type");
+
+  static constexpr IntTy Bit(std::size_t index) { return static_cast<IntTy>(IntTy{1} << index); }
 
 public:
-  // A reference to a particular bit, returned from operator[].
+  // Proxy for one bit, returned by the non-const operator[].
   class Ref
   {
   public:
-    constexpr Ref(Ref&& other) : m_bs(other.m_bs), m_mask(other.m_mask) {}
-    constexpr Ref(BitSet* bs, IntTy mask) : m_bs(bs), m_mask(mask) {}
-    constexpr operator bool() const { return (m_bs->m_val & m_mask) != 0; }
-    bool operator=(bool set)
+    constexpr Ref(BitSet* owner, IntTy mask) : m_owner(owner), m_mask(mask) {}
+    constexpr Ref(Ref&& other) : m_owner(other.m_owner), m_mask(other.m_mask) {}
+
+    constexpr operator bool() const { return (m_owner->m_val & m_mask) != 0; }
+
+    bool operator=(bool value)
     {
-      m_bs->m_val = (m_bs->m_val & ~m_mask) | (set ? m_mask : 0);
-      return set;
+      if (value)
+        m_owner->m_val |= m_mask;
+      else
+        m_owner->m_val &= static_cast<IntTy>(~m_mask);
+      return value;
     }
 
   private:
-    BitSet* m_bs;
+    BitSet* m_owner;
     IntTy m_mask;
   };
 
-  // A STL-like iterator is required to be able to use range-based for loops.
+  // Walks the set bits from lowest to highest. The end iterator has position -1.
   class Iterator
   {
   public:
-    constexpr Iterator(const Iterator& other) : m_val(other.m_val), m_bit(other.m_bit) {}
-    constexpr Iterator(IntTy val, int bit) : m_val(val), m_bit(bit) {}
-    Iterator& operator=(Iterator other)
+    constexpr Iterator(IntTy remaining, int position) : m_remaining(remaining), m_position(position)
     {
-      new (this) Iterator(other);
+    }
+    constexpr Iterator(const Iterator& other) = default;
+    constexpr Iterator& operator=(const Iterator& other) = default;
+
+    constexpr Iterator& operator++()
+    {
+      if (m_remaining == 0)
+      {
+        m_position = -1;
+        return *this;
+      }
+      m_position = std::countr_zero(m_remaining);
+      m_remaining &= static_cast<IntTy>(m_remaining - 1);  // drop the lowest set bit
       return *this;
     }
-    Iterator& operator++()
+
+    constexpr Iterator operator++(int)
     {
-      if (m_val == 0)
-      {
-        m_bit = -1;
-      }
-      else
-      {
-        int bit = std::countr_zero(m_val);
-        m_val &= ~(IntTy{1} << bit);
-        m_bit = bit;
-      }
-      return *this;
-    }
-    Iterator operator++(int)
-    {
-      Iterator other(*this);
+      Iterator before = *this;
       ++*this;
-      return other;
+      return before;
     }
-    constexpr int operator*() const { return m_bit; }
-    constexpr bool operator==(Iterator other) const { return m_bit == other.m_bit; }
-    constexpr bool operator!=(Iterator other) const { return m_bit != other.m_bit; }
+
+    constexpr int operator*() const { return m_position; }
+    constexpr bool operator==(const Iterator& other) const { return m_position == other.m_position; }
+    constexpr bool operator!=(const Iterator& other) const { return m_position != other.m_position; }
 
   private:
-    IntTy m_val;
-    int m_bit;
+    IntTy m_remaining;
+    int m_position;
   };
 
   constexpr BitSet() = default;
-  constexpr explicit BitSet(IntTy val) : m_val(val) {}
-  constexpr BitSet(std::initializer_list<int> init)
+  constexpr explicit BitSet(IntTy bits) : m_val(bits) {}
+  constexpr BitSet(std::initializer_list<int> indices)
   {
-    for (int bit : init)
-      m_val |= IntTy{1} << bit;
+    for (const int index : indices)
+      m_val |= Bit(static_cast<std::size_t>(index));
   }
 
-  constexpr static BitSet AllTrue(size_t count)
+  // The set {0, 1, ..., count - 1}.
+  static constexpr BitSet AllTrue(std::size_t count)
   {
-    return BitSet(count == sizeof(IntTy) * 8 ? ~IntTy{0} : ((IntTy{1} << count) - 1));
+    if (count >= sizeof(IntTy) * 8)
+      return BitSet(static_cast<IntTy>(~IntTy{0}));
+    return BitSet(static_cast<IntTy>(Bit(count) - 1));
   }
 
-  Ref operator[](size_t bit) { return Ref(this, IntTy{1} << bit); }
-  constexpr const Ref operator[](size_t bit) const { return (*const_cast<BitSet*>(this))[bit]; }
+  Ref operator[](std::size_t index) { return Ref(this, Bit(index)); }
+  constexpr bool operator[](std::size_t index) const { return (m_val & Bit(index)) != 0; }
+
   constexpr bool operator==(BitSet other) const { return m_val == other.m_val; }
   constexpr bool operator!=(BitSet other) const { return m_val != other.m_val; }
   constexpr bool operator<(BitSet other) const { return m_val < other.m_val; }
   constexpr bool operator>(BitSet other) const { return m_val > other.m_val; }
+
   constexpr BitSet operator|(BitSet other) const { return BitSet(m_val | other.m_val); }
   constexpr BitSet operator&(BitSet other) const { return BitSet(m_val & other.m_val); }
   constexpr BitSet operator^(BitSet other) const { return BitSet(m_val ^ other.m_val); }
-  constexpr BitSet operator~() const { return BitSet(~m_val); }
-  constexpr BitSet operator<<(IntTy shift) const { return BitSet(m_val << shift); }
-  constexpr BitSet operator>>(IntTy shift) const { return BitSet(m_val >> shift); }
-  constexpr explicit operator bool() const { return m_val != 0; }
+  constexpr BitSet operator~() const { return BitSet(static_cast<IntTy>(~m_val)); }
+  constexpr BitSet operator<<(IntTy shift) const { return BitSet(static_cast<IntTy>(m_val << shift)); }
+  constexpr BitSet operator>>(IntTy shift) const { return BitSet(static_cast<IntTy>(m_val >> shift)); }
+
   BitSet& operator|=(BitSet other) { return *this = *this | other; }
   BitSet& operator&=(BitSet other) { return *this = *this & other; }
   BitSet& operator^=(BitSet other) { return *this = *this ^ other; }
   BitSet& operator<<=(IntTy shift) { return *this = *this << shift; }
   BitSet& operator>>=(IntTy shift) { return *this = *this >> shift; }
-  // Warning: Even though on modern CPUs this is a single fast instruction,
-  // Dolphin's official builds do not currently assume POPCNT support on x86,
-  // so slower explicit bit twiddling is generated.  Still should generally
-  // be faster than a loop.
-  constexpr unsigned int Count() const { return std::popcount(m_val); }
+
+  constexpr explicit operator bool() const { return m_val != 0; }
+
+  // Number of elements in the set.
+  constexpr unsigned int Count() const { return static_cast<unsigned int>(std::popcount(m_val)); }
+
   constexpr Iterator begin() const { return ++Iterator(m_val, 0); }
   constexpr Iterator end() const { return Iterator(m_val, -1); }
+
   IntTy m_val{};
 };
 }  // namespace Common

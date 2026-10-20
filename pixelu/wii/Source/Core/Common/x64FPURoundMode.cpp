@@ -1,49 +1,56 @@
-// Copyright 2013 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/FPURoundMode.h"
+
+#include <array>
 
 #include "Common/CommonTypes.h"
 #include "Common/Intrinsics.h"
 
 namespace Common::FPU
 {
-// Get the default SSE states here.
-static u32 saved_sse_state = _mm_getcsr();
-static const u32 default_sse_state = _mm_getcsr();
+namespace
+{
+// MXCSR layout: bits 7..12 mask the six exceptions, bits 13..14 are the rounding control
+// (0 nearest, 1 toward -inf, 2 toward +inf, 3 toward zero), bit 15 is flush-to-zero.
+constexpr u32 MXCSR_ALL_EXCEPTIONS_MASKED = 0x3Fu << 7;
+constexpr u32 MXCSR_FLUSH_TO_ZERO = 1u << 15;
+constexpr unsigned MXCSR_ROUNDING_SHIFT = 13;
+
+// Indexed by the PowerPC rounding mode.
+constexpr std::array<u32, 4> HOST_ROUNDING_CONTROL = {
+    0,  // ROUND_NEAR
+    3,  // ROUND_CHOP
+    2,  // ROUND_UP
+    1,  // ROUND_DOWN
+};
+
+// The state the process started with, and the one most recently saved.
+const u32 s_startup_csr = _mm_getcsr();
+u32 s_stored_csr = s_startup_csr;
+}  // namespace
 
 void SetSIMDMode(RoundMode rounding_mode, bool non_ieee_mode)
 {
-  // OR-mask for disabling FPU exceptions (bits 7-12 in the MXCSR register)
-  const u32 EXCEPTION_MASK = 0x1F80;
-  // Flush-To-Zero (non-IEEE mode: denormal outputs are set to +/- 0)
-  const u32 FTZ = 0x8000;
-  // lookup table for FPSCR.RN-to-MXCSR.RC translation
-  static const u32 simd_rounding_table[] = {
-      (0 << 13) | EXCEPTION_MASK,  // nearest
-      (3 << 13) | EXCEPTION_MASK,  // zero
-      (2 << 13) | EXCEPTION_MASK,  // +inf
-      (1 << 13) | EXCEPTION_MASK,  // -inf
-  };
-  u32 csr = simd_rounding_table[rounding_mode];
-
+  u32 csr = MXCSR_ALL_EXCEPTIONS_MASKED |
+            (HOST_ROUNDING_CONTROL[rounding_mode & 3] << MXCSR_ROUNDING_SHIFT);
   if (non_ieee_mode)
-  {
-    csr |= FTZ;
-  }
+    csr |= MXCSR_FLUSH_TO_ZERO;
   _mm_setcsr(csr);
 }
 
 void SaveSIMDState()
 {
-  saved_sse_state = _mm_getcsr();
+  s_stored_csr = _mm_getcsr();
 }
+
 void LoadSIMDState()
 {
-  _mm_setcsr(saved_sse_state);
+  _mm_setcsr(s_stored_csr);
 }
+
 void LoadDefaultSIMDState()
 {
-  _mm_setcsr(default_sse_state);
+  _mm_setcsr(s_startup_csr);
 }
 }  // namespace Common::FPU

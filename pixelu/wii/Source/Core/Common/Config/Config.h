@@ -1,18 +1,21 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <cstddef>
 #include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include "Common/Config/ConfigInfo.h"
 #include "Common/Config/Enums.h"
 #include "Common/Config/Layer.h"
 
+// The layered configuration system. Settings are described by Config::Info objects; reading one
+// gives the value from the highest-priority layer that has it (see SEARCH_ORDER).
 namespace Config
 {
 struct ConfigChangedCallbackID
@@ -24,21 +27,21 @@ struct ConfigChangedCallbackID
 
 using ConfigChangedCallback = std::function<void()>;
 
-// Layer management
+// Layers. Adding a layer replaces any existing layer of the same type.
 void AddLayer(std::unique_ptr<ConfigLayerLoader> loader);
 std::shared_ptr<Layer> GetLayer(LayerType layer);
 void RemoveLayer(LayerType layer);
 
-// Returns an ID that should be passed to RemoveConfigChangedCallback() when the callback is no
-// longer needed. The callback may be called from any thread.
+// Callbacks run (on whichever thread made the change) whenever the configuration changes.
+// Keep the returned ID to remove the callback again.
 [[nodiscard]] ConfigChangedCallbackID AddConfigChangedCallback(ConfigChangedCallback func);
 void RemoveConfigChangedCallback(ConfigChangedCallbackID callback_id);
 void OnConfigChanged();
 
-// Returns the number of times the config has changed in the current execution of the program
+// Increases with every change; used to invalidate the values cached in Info objects.
 u64 GetConfigVersion();
 
-// Explicit load and save of layers
+// Loads or saves every layer through its loader.
 void Load();
 void Save();
 
@@ -49,10 +52,37 @@ void ClearCurrentRunLayer();
 const std::string& GetSystemName(System system);
 std::optional<System> GetSystemFromName(const std::string& system);
 const std::string& GetLayerName(LayerType layer);
+// The layer the effective value of a setting comes from (Base if no layer has it).
 LayerType GetActiveLayerForConfig(const Location&);
 
+// The effective value of a setting as stored, if any layer has it.
 std::optional<std::string> GetAsString(const Location&);
 
+template <typename T>
+T GetUncached(const Info<T>& info)
+{
+  const std::optional<std::string> stored = GetAsString(info.GetLocation());
+  if (!stored.has_value())
+    return info.GetDefaultValue();
+  return detail::TryParse<T>(*stored).value_or(info.GetDefaultValue());
+}
+
+// The effective value of a setting.
+template <typename T>
+T Get(const Info<T>& info)
+{
+  CachedValue<T> cached = info.GetCachedValue();
+  const u64 current_version = GetConfigVersion();
+  if (cached.config_version < current_version)
+  {
+    cached.value = GetUncached(info);
+    cached.config_version = current_version;
+    info.TryToSetCachedValue(cached);
+  }
+  return std::move(cached.value);
+}
+
+// The value in one particular layer (LayerType::Meta means the effective value).
 template <typename T>
 T Get(LayerType layer, const Info<T>& info)
 {
@@ -61,39 +91,13 @@ T Get(LayerType layer, const Info<T>& info)
   return GetLayer(layer)->Get(info);
 }
 
+// The value from a game's own settings layer if one is given, otherwise the effective value.
 template <typename T>
 T Get(const Layer* game_layer, const Info<T>& setting)
 {
-  if (game_layer != nullptr)
-    return game_layer->Get(setting);
-  return Get(setting);
-}
-
-template <typename T>
-T Get(const Info<T>& info)
-{
-  CachedValue<T> cached = info.GetCachedValue();
-  const u64 config_version = GetConfigVersion();
-
-  if (cached.config_version < config_version)
-  {
-    cached.value = GetUncached(info);
-    cached.config_version = config_version;
-
-    info.TryToSetCachedValue(cached);
-  }
-
-  return std::move(cached.value);
-}
-
-template <typename T>
-T GetUncached(const Info<T>& info)
-{
-  const std::optional<std::string> str = GetAsString(info.GetLocation());
-  if (!str)
-    return info.GetDefaultValue();
-
-  return detail::TryParse<T>(*str).value_or(info.GetDefaultValue());
+  if (game_layer == nullptr)
+    return Get(setting);
+  return game_layer->Get(setting);
 }
 
 template <typename T>
@@ -111,7 +115,8 @@ LayerType GetActiveLayerForConfig(const Info<T>& info)
 template <typename InfoT, typename ValueT>
 void Set(LayerType layer, const InfoT& info, const ValueT& value)
 {
-  if (GetLayer(layer)->Set(info, value))
+  const bool changed = GetLayer(layer)->Set(info, value);
+  if (changed)
     OnConfigChanged();
 }
 
@@ -127,13 +132,14 @@ void SetCurrent(const Info<InfoT>& info, const ValueT& value)
   Set(LayerType::CurrentRun, info, value);
 }
 
+// Changes the Base layer if that is where the effective value comes from, otherwise only the
+// current run (so that game-specific or temporary overrides are not written to the user's INI).
 template <typename InfoT, typename ValueT>
 void SetBaseOrCurrent(const Info<InfoT>& info, const ValueT& value)
 {
-  if (GetActiveLayerForConfig(info) == LayerType::Base)
-    Set(LayerType::Base, info, value);
-  else
-    Set(LayerType::CurrentRun, info, value);
+  const LayerType target =
+      GetActiveLayerForConfig(info) == LayerType::Base ? LayerType::Base : LayerType::CurrentRun;
+  Set(target, info, value);
 }
 
 template <typename T>
@@ -149,7 +155,8 @@ bool IsDefaultValue(const Info<T>& info)
   return Get(info) == info.GetDefaultValue();
 }
 
-// Used to defer OnConfigChanged until after the completion of many config changes.
+// While at least one guard exists, change callbacks are held back; they run once when the last
+// guard goes away.
 class ConfigChangeCallbackGuard
 {
 public:
