@@ -99,12 +99,12 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 58494 | 13.4% |
-| Dolphin, untouched | 366597 | 84.3% |
+| Original (RetroPixels) | 63967 | 14.8% |
+| Dolphin, untouched | 359457 | 82.9% |
 | Dolphin, with PixelU changes | 4224 | 1.0% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.3% |
-| **All** | **435078** | 100% |
+| **All** | **433411** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -155,8 +155,8 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/IOS/USB/USB_VEN | 194 | 0 | Dolphin |
 | Core/Core/IOS/WFS | 1346 | 0 | Dolphin |
 | Core/Core/PowerPC (top level) | 9959 | 9959 | original |
-| Core/Core/PowerPC/CachedInterpreter | 1020 | 0 | Dolphin |
-| Core/Core/PowerPC/Interpreter | 6120 | 0 | Dolphin |
+| Core/Core/PowerPC/CachedInterpreter | 1083 | 1083 | original |
+| Core/Core/PowerPC/Interpreter | 4390 | 4390 | original |
 | Core/Core/PowerPC/Jit64 | 10326 | 0 | Dolphin |
 | Core/Core/PowerPC/Jit64Common | 2549 | 0 | Dolphin |
 | Core/Core/PowerPC/JitCommon | 2294 | 0 | Dolphin |
@@ -235,7 +235,7 @@ batch rewrites them.
 | W5 | DiscIO: blob formats and compression | 7584 | 7584 | original |
 | W6 | DiscIO: volumes, filesystems, verifier, Riivolution, NAND import | 8290 | 8290 | original |
 | W7 | PowerPC: CPU state, MMU, caches, analyst, tables, symbols, breakpoints, GDB stub | 10740 | 10740 | original |
-| W8 | PowerPC: interpreter and cached interpreter | 7140 | 0 | Dolphin |
+| W8 | PowerPC: interpreter and cached interpreter | 5473 | 5473 | original |
 | W9 | PowerPC: JIT common and Jit64 | 15169 | 0 | Dolphin |
 | W10 | HW: memory map, MMIO, CPU/PI/MI/VI/AI/DSP interfaces, timers, IPC, CoreTiming | 9898 | 0 | Dolphin |
 | W11 | HW: DVD and GameCube memory cards | 8944 | 0 | Dolphin |
@@ -908,3 +908,85 @@ the third-party Externals directly) before the submodule can go.
     glslang headers here, and the MinGW library's missing `std::expected`).
   - Not rewritten: nothing in W7. The CPU backends (Jit64, interpreter,
     cached interpreter) belong to later batches.
+
+- W8 log: rewrote all 20 files of the PowerPC interpreter and the cached
+  interpreter (Core/PowerPC/Interpreter and Core/PowerPC/CachedInterpreter).
+  Every file starts with the original-code header and has no Dolphin
+  copyright or SPDX line. File names and every public declaration other
+  code uses are unchanged: the Interpreter class with all its static
+  instruction handlers, `GetInterpreterOp`, `RunInterpreterOp`,
+  `RunTable4/19/31/59/63`, `Helper_Carry`, ExceptionUtils'
+  `GenerateAlignmentException`/`GenerateDSIException`/
+  `GenerateProgramException`, and the CachedInterpreter, its block cache
+  and its emitter (`Write`, `PoisonCallback`, `CachedInterpreterCodeBlock`).
+  - Interpreter: FP helpers (`Interpreter_FPUtils.h`, now in namespace
+    `InterpreterFP`) cover FPSCR bookkeeping, rounding to single (with the
+    NI flush quirk), the 25-bit multiplier rounding, the fused multiply-add
+    with the double-rounding correction, NaN propagation order,
+    invalid-operation flags, and the lfs/stfs/psq bit conversions. Scalar
+    and paired-single arithmetic share element-wise helpers. Integer ops
+    compute carries from a 64-bit sum. Loads and stores go through small
+    templates for update, indexed and byte-reversed forms. String and
+    multiple-word transfers keep the old DSI behaviour and the aligned
+    read-modify-write of the last word. The GQR scale tables are built at
+    compile time. Decoding uses switch-based decode functions that are
+    evaluated at compile time into the same flat tables. The fetch/execute
+    loop, HLE hooking, the debug-mode run loop and timing are the same as
+    before. The private helpers that used to be static members
+    (Helper_UpdateCR0, Helper_FloatCompare*, Helper_StoreString, ...) are
+    now file-local.
+  - Cached interpreter: same record format (callback pointer plus operand
+    struct), operand layouts, block sizes, free-range reuse, retry on a
+    full cache, ISI on an untranslatable block start, FPU, breakpoint and
+    idle checks, and disassembly text.
+  - Deliberate differences (bug fixes):
+    - fcmpu/fcmpo/ps_cmpu0/1/ps_cmpo0/1: FPSCR[FPCC] is now replaced by the
+      comparison result. The old code applied FPCC_MASK (0xF << 12) to the
+      5-bit FPRF field, which cleared nothing, so FPCC kept the OR of
+      every earlier comparison. Jit64 and the hardware replace it.
+    - addme/subfme with CA=1: XER[CA] is now the true carry out of
+      rA + 0xFFFFFFFF + 1, which is always 1. The old code computed it as
+      Helper_Carry(rA, CA - 1) and got 0. This now matches Jit64's ADC.
+  - Checked:
+    - Instruction harness: old (base) and new interpreter, each linked with
+      the same base W7 files (PPCTables, ConditionRegister, FloatUtils, the
+      FPU rounding code) and a stubbed system (generated memory with DSI
+      faults, logged MMU, cache, timer, HLE and exception calls). Every
+      handler runs on random state: special GPR values, special and random
+      doubles (zeros, denormals, infinities, QNaN/SNaN with payloads),
+      every rounding mode, NI on/off, random enable bits, FE0/FE1, PR, FP,
+      HID2 PSE/LSQE, random GQR types and scales, and software and host
+      flush-to-zero. Compared each time: all registers, FPSCR, CR, XER,
+      MSR, SPRs, SRs, reservation, MXCSR control bits, branch-watch
+      records, and the ordered log of memory and system calls.
+      - Against the old code with only the two fixes above patched in:
+        identical for 5.2M random instructions over all opcodes (-O2), 2M
+        more with software flush-to-zero, about 24M per-handler cases
+        (300k for each of the 83 FP, paired and FP/quantised load-store
+        handlers), and 500k random plus 100k FP cases at -O0. The unpatched old
+        code differs only in the compare and addme/subfme cases.
+      - Decode tables: GetInterpreterOp gives the same handler for all
+        65,536 (primary, extended) pairs.
+      - Instruction streams: 72k random programs run through
+        SingleStep/Run (HLE hooks, ISI/DSI, breakpoints, debug mode,
+        varying slice lengths): identical.
+    - Cached interpreter harness: old and new CachedInterpreter over the
+      new interpreter, with the base JitCache and PPCAnalyst. Random
+      programs with random memcheck, FP-exception, div-by-zero,
+      profiling, branch following, debugging/breakpoint, stepping,
+      no-block-cache and icbi invalidation settings. Compared: guest state
+      and call log, plus every cached block's size and disassembly text
+      and the free-range statistics. 6,000 programs (about 5.5 blocks
+      each; 293 ran to the step limit) gave identical results. A mutant
+      that never emits the memcheck exception check differs on 147 of 300
+      programs, so the harness can see that check.
+    - Syntax: every W8 .cpp (with -Wall -Wextra: no warnings from W8 code)
+      and the files outside W8 that use W8 headers (System.cpp,
+      PowerPC.cpp, JitInterface.cpp, Jit64/Jit.cpp, Jit64/Jit_Integer.cpp,
+      JitCommon/ConstantPropagation.cpp), compiled with g++ (Linux) and
+      clang `-target x86_64-w64-windows-gnu` and compared with the
+      untouched tree: no new failures. System.cpp fails on the Windows
+      target in both trees because the glslang headers are missing here.
+    - tools/verbatim-audit.py (min run 8): the only runs left in W8 files
+      are in headers: the handler declaration list, the class
+      declarations and the operand structs. No function body is flagged.
