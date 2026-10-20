@@ -1,5 +1,4 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -33,6 +32,7 @@ enum class PadGroup
   Triforce,
 };
 
+// An emulated GameCube controller as seen by the input mapping UI.
 class GCPad : public ControllerEmu::EmulatedController
 {
 public:
@@ -50,10 +50,11 @@ public:
 
   void LoadDefaults(const ControllerInterface& ciface) override;
 
-  // Values averaged from multiple genuine GameCube controllers.
+  // Gate radii measured on genuine controllers (averaged).
   static constexpr ControlState MAIN_STICK_GATE_RADIUS = 0.7937125;
   static constexpr ControlState C_STICK_GATE_RADIUS = 0.7221375;
 
+  // Group names (also the INI section names).
   static constexpr const char* BUTTONS_GROUP = _trans("Buttons");
   static constexpr const char* MAIN_STICK_GROUP = "Main Stick";
   static constexpr const char* C_STICK_GROUP = "C-Stick";
@@ -71,18 +72,18 @@ public:
   static constexpr const char* Z_BUTTON = "Z";
   static constexpr const char* START_BUTTON = "Start";
 
-  // Special Triforce buttons
+  // Triforce cabinet switches.
   static constexpr const char* TEST_BUTTON = _trans("Test");
   static constexpr const char* SERVICE_BUTTON = _trans("Service");
   static constexpr const char* COIN_BUTTON = _trans("Coin");
 
-  // i18n: The left trigger button (labeled L on real controllers)
+  // i18n: Left shoulder trigger (marked L on the pad), pressed fully
   static constexpr const char* L_DIGITAL = _trans("L");
-  // i18n: The right trigger button (labeled R on real controllers)
+  // i18n: Right shoulder trigger (marked R on the pad), pressed fully
   static constexpr const char* R_DIGITAL = _trans("R");
-  // i18n: The left trigger button (labeled L on real controllers) used as an analog input
+  // i18n: How far the left shoulder trigger (L) is pressed
   static constexpr const char* L_ANALOG = _trans("L-Analog");
-  // i18n: The right trigger button (labeled R on real controllers) used as an analog input
+  // i18n: How far the right shoulder trigger (R) is pressed
   static constexpr const char* R_ANALOG = _trans("R-Analog");
 
 private:

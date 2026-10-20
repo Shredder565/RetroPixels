@@ -1,5 +1,4 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/GCPadEmu.h"
 
@@ -17,79 +16,97 @@
 #include "InputCommon/ControllerEmu/StickGate.h"
 #include "InputCommon/GCPadStatus.h"
 
-static const u16 button_bitmasks[] = {
-    PAD_BUTTON_A,
-    PAD_BUTTON_B,
-    PAD_BUTTON_X,
-    PAD_BUTTON_Y,
-    PAD_TRIGGER_Z,
-    PAD_BUTTON_START,
-    0  // MIC HAX
+namespace
+{
+// Status bits for each control, in the order the controls are added below.
+// The face-button list has a trailing zero for spare slots.
+constexpr std::array<u16, 7> FACE_BUTTON_BITS = {
+    PAD_BUTTON_A, PAD_BUTTON_B, PAD_BUTTON_X, PAD_BUTTON_Y, PAD_TRIGGER_Z, PAD_BUTTON_START, 0,
+};
+constexpr std::array<u16, 4> DPAD_BITS = {
+    PAD_BUTTON_UP,
+    PAD_BUTTON_DOWN,
+    PAD_BUTTON_LEFT,
+    PAD_BUTTON_RIGHT,
+};
+constexpr std::array<u16, 2> TRIGGER_BITS = {PAD_TRIGGER_L, PAD_TRIGGER_R};
+constexpr std::array<u8, 3> CABINET_SWITCH_BITS = {SWITCH_TEST, SWITCH_SERVICE, SWITCH_COIN};
+
+struct DefaultMapping
+{
+  int index;
+  const char* expression;
 };
 
-static const u16 trigger_bitmasks[] = {
-    PAD_TRIGGER_L,
-    PAD_TRIGGER_R,
+// Default keyboard mapping (Windows key names).
+constexpr DefaultMapping FACE_DEFAULTS[] = {
+    {0, "`X`"}, {1, "`Z`"}, {2, "`C`"}, {3, "`S`"}, {4, "`D`"}, {5, "`RETURN`"},
 };
+constexpr DefaultMapping DPAD_DEFAULTS[] = {{0, "`T`"}, {1, "`G`"}, {2, "`F`"}, {3, "`H`"}};
+constexpr DefaultMapping CABINET_DEFAULTS[] = {{0, "`1`"}, {1, "`2`"}, {2, "`3`"}};
+// Stick controls are up, down, left, right, then the modifier.
+constexpr DefaultMapping C_STICK_DEFAULTS[] = {
+    {0, "`I`"}, {1, "`K`"}, {2, "`J`"}, {3, "`L`"}, {4, "`Ctrl`"},
+};
+constexpr DefaultMapping MAIN_STICK_DEFAULTS[] = {
+    {0, "`UP`"}, {1, "`DOWN`"}, {2, "`LEFT`"}, {3, "`RIGHT`"}, {4, "`Shift`"},
+};
+constexpr DefaultMapping TRIGGER_DEFAULTS[] = {{0, "`Q`"}, {1, "`W`"}};
 
-static const u16 dpad_bitmasks[] = {PAD_BUTTON_UP, PAD_BUTTON_DOWN, PAD_BUTTON_LEFT,
-                                    PAD_BUTTON_RIGHT};
-static const u8 triforce_bitmask[] = {SWITCH_TEST, SWITCH_SERVICE, SWITCH_COIN};
+template <std::size_t N>
+void ApplyDefaults(ControllerEmu::ControlGroup* group, const DefaultMapping (&mappings)[N])
+{
+  for (const DefaultMapping& mapping : mappings)
+    group->SetControlExpression(mapping.index, mapping.expression);
+}
+}  // namespace
 
 GCPad::GCPad(const unsigned int index) : m_index(index)
 {
-  using Translatability = ControllerEmu::Translatability;
+  using ControllerEmu::Translatability;
 
-  // buttons
-  groups.emplace_back(m_buttons = new ControllerEmu::Buttons(BUTTONS_GROUP));
-  for (const char* named_button : {A_BUTTON, B_BUTTON, X_BUTTON, Y_BUTTON, Z_BUTTON})
-  {
-    m_buttons->AddInput(Translatability::DoNotTranslate, named_button);
-  }
-  // i18n: The START/PAUSE button on GameCube controllers
+  m_buttons = new ControllerEmu::Buttons(BUTTONS_GROUP);
+  groups.emplace_back(m_buttons);
+  for (const char* name : {A_BUTTON, B_BUTTON, X_BUTTON, Y_BUTTON, Z_BUTTON})
+    m_buttons->AddInput(Translatability::DoNotTranslate, name);
+  // i18n: The Start/Pause button of a GameCube controller
   m_buttons->AddInput(Translatability::Translate, START_BUTTON, _trans("START"));
 
-  // sticks
-  groups.emplace_back(m_main_stick = new ControllerEmu::OctagonAnalogStick(
-                          MAIN_STICK_GROUP, _trans("Control Stick"), MAIN_STICK_GATE_RADIUS));
-  groups.emplace_back(m_c_stick = new ControllerEmu::OctagonAnalogStick(
-                          C_STICK_GROUP, _trans("C Stick"), C_STICK_GATE_RADIUS));
+  m_main_stick = new ControllerEmu::OctagonAnalogStick(MAIN_STICK_GROUP, _trans("Control Stick"),
+                                                       MAIN_STICK_GATE_RADIUS);
+  groups.emplace_back(m_main_stick);
+  m_c_stick =
+      new ControllerEmu::OctagonAnalogStick(C_STICK_GROUP, _trans("C Stick"), C_STICK_GATE_RADIUS);
+  groups.emplace_back(m_c_stick);
 
-  // triggers
-  groups.emplace_back(m_triggers = new ControllerEmu::MixedTriggers(TRIGGERS_GROUP));
-  for (const char* named_trigger : {L_DIGITAL, R_DIGITAL, L_ANALOG, R_ANALOG})
-  {
-    m_triggers->AddInput(Translatability::Translate, named_trigger);
-  }
+  m_triggers = new ControllerEmu::MixedTriggers(TRIGGERS_GROUP);
+  groups.emplace_back(m_triggers);
+  for (const char* name : {L_DIGITAL, R_DIGITAL, L_ANALOG, R_ANALOG})
+    m_triggers->AddInput(Translatability::Translate, name);
 
-  // dpad
-  groups.emplace_back(m_dpad = new ControllerEmu::Buttons(DPAD_GROUP));
-  for (const char* named_direction : named_directions)
-  {
-    m_dpad->AddInput(Translatability::Translate, named_direction);
-  }
+  m_dpad = new ControllerEmu::Buttons(DPAD_GROUP);
+  groups.emplace_back(m_dpad);
+  for (const char* name : named_directions)
+    m_dpad->AddInput(Translatability::Translate, name);
 
-  // triforce
-  groups.emplace_back(m_triforce = new ControllerEmu::Buttons(TRIFORCE_GROUP));
-  for (const char* named_button : {TEST_BUTTON, SERVICE_BUTTON, COIN_BUTTON})
-  {
-    m_triforce->AddInput(Translatability::Translate, named_button);
-  }
+  m_triforce = new ControllerEmu::Buttons(TRIFORCE_GROUP);
+  groups.emplace_back(m_triforce);
+  for (const char* name : {TEST_BUTTON, SERVICE_BUTTON, COIN_BUTTON})
+    m_triforce->AddInput(Translatability::Translate, name);
 
-  // Microphone
-  groups.emplace_back(m_mic = new ControllerEmu::Buttons(MIC_GROUP));
+  m_mic = new ControllerEmu::Buttons(MIC_GROUP);
+  groups.emplace_back(m_mic);
   m_mic->AddInput(Translatability::Translate, _trans("Button"));
 
-  // rumble
-  groups.emplace_back(m_rumble = new ControllerEmu::ControlGroup(RUMBLE_GROUP));
+  m_rumble = new ControllerEmu::ControlGroup(RUMBLE_GROUP);
+  groups.emplace_back(m_rumble);
   m_rumble->AddOutput(Translatability::Translate, _trans("Motor"));
 
-  // options
-  groups.emplace_back(m_options = new ControllerEmu::ControlGroup(OPTIONS_GROUP));
+  m_options = new ControllerEmu::ControlGroup(OPTIONS_GROUP);
+  groups.emplace_back(m_options);
   m_options->AddSetting(
       &m_always_connected_setting,
-      // i18n: Treat a controller as always being connected regardless of what
-      // devices the user actually has plugged in
+      // i18n: Report the emulated pad as plugged in even when its mapped device is missing
       {_trans("Always Connected"), nullptr,
        _trans("If checked, the emulated controller is always connected.\n"
               "If unchecked, the connection state of the emulated controller is linked\n"
@@ -99,7 +116,9 @@ GCPad::GCPad(const unsigned int index) : m_index(index)
 
 std::string GCPad::GetName() const
 {
-  return std::string("GCPad") + char('1' + m_index);
+  std::string name = "GCPad";
+  name += static_cast<char>('1' + m_index);
+  return name;
 }
 
 InputConfig* GCPad::GetConfig() const
@@ -129,61 +148,57 @@ ControllerEmu::ControlGroup* GCPad::GetGroup(PadGroup group)
     return m_options;
   case PadGroup::Triforce:
     return m_triforce;
-  default:
-    return nullptr;
   }
+  return nullptr;
 }
 
 GCPadStatus GCPad::GetInput() const
 {
   using ControllerEmu::MapFloat;
 
-  const auto lock = GetStateLock();
-  GCPadStatus pad = {};
+  const auto state_lock = GetStateLock();
+  GCPadStatus status = {};
 
-  if (!(m_always_connected_setting.GetValue() || IsDefaultDeviceConnected() ||
-        m_input_override_function))
+  const bool connected = m_always_connected_setting.GetValue() || IsDefaultDeviceConnected() ||
+                         m_input_override_function;
+  if (!connected)
   {
-    pad.isConnected = false;
-    return pad;
+    status.isConnected = false;
+    return status;
   }
 
-  // buttons
-  m_buttons->GetState(&pad.button, button_bitmasks, m_input_override_function);
+  // The controls are read in a fixed order: face buttons, D-pad, cabinet
+  // switches, main stick, C-stick, triggers.
+  m_buttons->GetState(&status.button, FACE_BUTTON_BITS.data(), m_input_override_function);
+  // Analog A/B simply read fully pressed while the button is down.
+  if ((status.button & PAD_BUTTON_A) != 0)
+    status.analogA = 0xFF;
+  if ((status.button & PAD_BUTTON_B) != 0)
+    status.analogB = 0xFF;
 
-  // set analog A/B analog to full or w/e, prolly not needed
-  if (pad.button & PAD_BUTTON_A)
-    pad.analogA = 0xFF;
-  if (pad.button & PAD_BUTTON_B)
-    pad.analogB = 0xFF;
+  m_dpad->GetState(&status.button, DPAD_BITS.data(), m_input_override_function);
+  m_triforce->GetState(&status.switches, CABINET_SWITCH_BITS.data(), m_input_override_function);
 
-  // dpad
-  m_dpad->GetState(&pad.button, dpad_bitmasks, m_input_override_function);
+  const auto main = m_main_stick->GetState(m_input_override_function);
+  status.stickX = MapFloat<u8>(main.x, GCPadStatus::MAIN_STICK_CENTER_X, 1);
+  status.stickY = MapFloat<u8>(main.y, GCPadStatus::MAIN_STICK_CENTER_Y, 1);
 
-  // triforce
-  m_triforce->GetState(&pad.switches, triforce_bitmask, m_input_override_function);
+  const auto c = m_c_stick->GetState(m_input_override_function);
+  status.substickX = MapFloat<u8>(c.x, GCPadStatus::C_STICK_CENTER_X, 1);
+  status.substickY = MapFloat<u8>(c.y, GCPadStatus::C_STICK_CENTER_Y, 1);
 
-  // sticks
-  const auto main_stick_state = m_main_stick->GetState(m_input_override_function);
-  pad.stickX = MapFloat<u8>(main_stick_state.x, GCPadStatus::MAIN_STICK_CENTER_X, 1);
-  pad.stickY = MapFloat<u8>(main_stick_state.y, GCPadStatus::MAIN_STICK_CENTER_Y, 1);
+  std::array<ControlState, 2> analog{};
+  m_triggers->GetState(&status.button, TRIGGER_BITS.data(), analog.data(),
+                       m_input_override_function);
+  status.triggerLeft = MapFloat<u8>(analog[0], 0);
+  status.triggerRight = MapFloat<u8>(analog[1], 0);
 
-  const auto c_stick_state = m_c_stick->GetState(m_input_override_function);
-  pad.substickX = MapFloat<u8>(c_stick_state.x, GCPadStatus::C_STICK_CENTER_X, 1);
-  pad.substickY = MapFloat<u8>(c_stick_state.y, GCPadStatus::C_STICK_CENTER_Y, 1);
-
-  // triggers
-  std::array<ControlState, 2> triggers;
-  m_triggers->GetState(&pad.button, trigger_bitmasks, triggers.data(), m_input_override_function);
-  pad.triggerLeft = MapFloat<u8>(triggers[0], 0);
-  pad.triggerRight = MapFloat<u8>(triggers[1], 0);
-
-  return pad;
+  return status;
 }
 
 void GCPad::SetOutput(const ControlState strength)
 {
-  const auto lock = GetStateLock();
+  const auto state_lock = GetStateLock();
   m_rumble->controls[0]->control_ref->State(strength);
 }
 
@@ -191,78 +206,21 @@ void GCPad::LoadDefaults(const ControllerInterface& ciface)
 {
   EmulatedController::LoadDefaults(ciface);
 
-#ifdef ANDROID
-  // Rumble
-  m_rumble->SetControlExpression(0, "`Android/0/Device Sensors:Motor 0`");
+  ApplyDefaults(m_buttons, FACE_DEFAULTS);
+  ApplyDefaults(m_dpad, DPAD_DEFAULTS);
+  ApplyDefaults(m_triforce, CABINET_DEFAULTS);
+  ApplyDefaults(m_c_stick, C_STICK_DEFAULTS);
+  ApplyDefaults(m_main_stick, MAIN_STICK_DEFAULTS);
 
-  // Triforce Coin
-  m_triforce->SetControlExpression(2, "pulse(`Android/0/Device Sensors:Accel Down` > 15, 0.1)");
-#else
-  // Buttons: A, B, X, Y, Z
-  m_buttons->SetControlExpression(0, "`X`");
-  m_buttons->SetControlExpression(1, "`Z`");
-  m_buttons->SetControlExpression(2, "`C`");
-  m_buttons->SetControlExpression(3, "`S`");
-  m_buttons->SetControlExpression(4, "`D`");
-#ifdef _WIN32
-  m_buttons->SetControlExpression(5, "`RETURN`");  // Start
-#else
-  // OS X/Linux
-  // Start
-  m_buttons->SetControlExpression(5, "`Return`");
-#endif
-
-  // D-Pad
-  m_dpad->SetControlExpression(0, "`T`");  // Up
-  m_dpad->SetControlExpression(1, "`G`");  // Down
-  m_dpad->SetControlExpression(2, "`F`");  // Left
-  m_dpad->SetControlExpression(3, "`H`");  // Right
-
-  // Triforce
-  m_triforce->SetControlExpression(0, "`1`");  // Test
-  m_triforce->SetControlExpression(1, "`2`");  // Service
-  m_triforce->SetControlExpression(2, "`3`");  // Coin
-
-  // C Stick
-  m_c_stick->SetControlExpression(0, "`I`");  // Up
-  m_c_stick->SetControlExpression(1, "`K`");  // Down
-  m_c_stick->SetControlExpression(2, "`J`");  // Left
-  m_c_stick->SetControlExpression(3, "`L`");  // Right
-  // Modifier
-  m_c_stick->SetControlExpression(4, "`Ctrl`");
-
-  // Control Stick
-#ifdef _WIN32
-  m_main_stick->SetControlExpression(0, "`UP`");     // Up
-  m_main_stick->SetControlExpression(1, "`DOWN`");   // Down
-  m_main_stick->SetControlExpression(2, "`LEFT`");   // Left
-  m_main_stick->SetControlExpression(3, "`RIGHT`");  // Right
-#elif __APPLE__
-  m_main_stick->SetControlExpression(0, "`Up Arrow`");     // Up
-  m_main_stick->SetControlExpression(1, "`Down Arrow`");   // Down
-  m_main_stick->SetControlExpression(2, "`Left Arrow`");   // Left
-  m_main_stick->SetControlExpression(3, "`Right Arrow`");  // Right
-#else
-  m_main_stick->SetControlExpression(0, "`Up`");     // Up
-  m_main_stick->SetControlExpression(1, "`Down`");   // Down
-  m_main_stick->SetControlExpression(2, "`Left`");   // Left
-  m_main_stick->SetControlExpression(3, "`Right`");  // Right
-#endif
-  // Modifier
-  m_main_stick->SetControlExpression(4, "`Shift`");
-
-  // Because our defaults use keyboard input, set calibration shapes to squares.
+  // Keyboard keys give digital stick input, so calibrate both sticks as squares.
   m_c_stick->SetCalibrationFromGate(ControllerEmu::SquareStickGate(1.0));
   m_main_stick->SetCalibrationFromGate(ControllerEmu::SquareStickGate(1.0));
 
-  // Triggers
-  m_triggers->SetControlExpression(0, "`Q`");  // L
-  m_triggers->SetControlExpression(1, "`W`");  // R
-#endif
+  ApplyDefaults(m_triggers, TRIGGER_DEFAULTS);
 }
 
 bool GCPad::GetMicButton() const
 {
-  const auto lock = GetStateLock();
+  const auto state_lock = GetStateLock();
   return m_mic->controls.back()->GetState<bool>();
 }

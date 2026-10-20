@@ -1,62 +1,67 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/GCKeyboard.h"
 
 #include "Common/Common.h"
-
 #include "Core/HW/GCKeyboardEmu.h"
-
 #include "InputCommon/ControllerEmu/ControlGroup/ControlGroup.h"
 #include "InputCommon/InputConfig.h"
 #include "InputCommon/KeyboardStatus.h"
 
 namespace Keyboard
 {
-static InputConfig s_config("GCKeyNew", _trans("Keyboard"), "GCKey", "GCKey");
+namespace
+{
+constexpr int KEYBOARD_COUNT = 4;
+
+// Section "GCKeyNew" in the INI, profiles under "GCKey", profile key "GCKey".
+InputConfig s_keyboard_config("GCKeyNew", _trans("Keyboard"), "GCKey", "GCKey");
+
+GCKeyboard& KeyboardAt(int port)
+{
+  return *static_cast<GCKeyboard*>(s_keyboard_config.GetController(port));
+}
+}  // namespace
+
 InputConfig* GetConfig()
 {
-  return &s_config;
-}
-
-void Shutdown()
-{
-  s_config.UnregisterHotplugCallback();
-
-  s_config.ClearControllers();
+  return &s_keyboard_config;
 }
 
 void Initialize()
 {
-  if (s_config.ControllersNeedToBeCreated())
+  if (s_keyboard_config.ControllersNeedToBeCreated())
   {
-    for (unsigned int i = 0; i < 4; ++i)
-      s_config.CreateController<GCKeyboard>(i);
+    for (unsigned int index = 0; index < KEYBOARD_COUNT; ++index)
+      s_keyboard_config.CreateController<GCKeyboard>(index);
   }
+  s_keyboard_config.RegisterHotplugCallback();
+  s_keyboard_config.LoadConfig();
+}
 
-  s_config.RegisterHotplugCallback();
-
-  // Load the saved controller config
-  s_config.LoadConfig();
+void Shutdown()
+{
+  s_keyboard_config.UnregisterHotplugCallback();
+  s_keyboard_config.ClearControllers();
 }
 
 void LoadConfig()
 {
-  s_config.LoadConfig();
+  s_keyboard_config.LoadConfig();
 }
 
 void GenerateDynamicInputTextures()
 {
-  s_config.GenerateControllerTextures();
+  s_keyboard_config.GenerateControllerTextures();
 }
 
 ControllerEmu::ControlGroup* GetGroup(int port, KeyboardGroup group)
 {
-  return static_cast<GCKeyboard*>(s_config.GetController(port))->GetGroup(group);
+  return KeyboardAt(port).GetGroup(group);
 }
 
 KeyboardStatus GetStatus(int port)
 {
-  return static_cast<GCKeyboard*>(s_config.GetController(port))->GetInput();
+  return KeyboardAt(port).GetInput();
 }
 }  // namespace Keyboard

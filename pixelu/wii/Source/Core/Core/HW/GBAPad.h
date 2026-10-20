@@ -1,5 +1,4 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,6 +11,7 @@ namespace ControllerEmu
 class ControlGroup;
 }  // namespace ControllerEmu
 
+// Button mappings for the four emulated GBAs (link cable or GB Player).
 namespace Pad
 {
 void ShutdownGBA();

@@ -1,7 +1,8 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/GBAPadEmu.h"
+
+#include <array>
 
 #include <fmt/format.h>
 
@@ -10,33 +11,41 @@
 #include "InputCommon/ControllerEmu/ControlGroup/Buttons.h"
 #include "InputCommon/GCPadStatus.h"
 
-static const u16 dpad_bitmasks[] = {PAD_BUTTON_UP, PAD_BUTTON_DOWN, PAD_BUTTON_LEFT,
-                                    PAD_BUTTON_RIGHT};
+namespace
+{
+// Status bits for the controls, in the order they are added. Select is
+// reported as Z.
+constexpr std::array<u16, 6> BUTTON_BITS = {
+    PAD_BUTTON_B, PAD_BUTTON_A, PAD_TRIGGER_L, PAD_TRIGGER_R, PAD_TRIGGER_Z, PAD_BUTTON_START,
+};
+constexpr std::array<u16, 4> DPAD_BITS = {
+    PAD_BUTTON_UP,
+    PAD_BUTTON_DOWN,
+    PAD_BUTTON_LEFT,
+    PAD_BUTTON_RIGHT,
+};
 
-static const u16 button_bitmasks[] = {PAD_BUTTON_B,  PAD_BUTTON_A,  PAD_TRIGGER_L,
-                                      PAD_TRIGGER_R, PAD_TRIGGER_Z, PAD_BUTTON_START};
+// Default keys (Windows names), by control index.
+constexpr std::array<const char*, 6> BUTTON_DEFAULTS = {"`Z`", "`X`", "`Q`",
+                                                        "`W`", "`BACK`", "`RETURN`"};
+constexpr std::array<const char*, 4> DPAD_DEFAULTS = {"`T`", "`G`", "`F`", "`H`"};
+}  // namespace
 
 GBAPad::GBAPad(const unsigned int index) : m_reset_pending(false), m_index(index)
 {
-  using Translatability = ControllerEmu::Translatability;
+  using ControllerEmu::Translatability;
 
-  // Buttons
-  groups.emplace_back(m_buttons = new ControllerEmu::Buttons(BUTTONS_GROUP));
-  for (const char* named_button : {B_BUTTON, A_BUTTON, L_BUTTON, R_BUTTON})
-  {
-    m_buttons->AddInput(Translatability::DoNotTranslate, named_button);
-  }
-  for (const char* named_button : {SELECT_BUTTON, START_BUTTON})
-  {
-    m_buttons->AddInput(Translatability::Translate, named_button);
-  }
+  m_buttons = new ControllerEmu::Buttons(BUTTONS_GROUP);
+  groups.emplace_back(m_buttons);
+  for (const char* name : {B_BUTTON, A_BUTTON, L_BUTTON, R_BUTTON})
+    m_buttons->AddInput(Translatability::DoNotTranslate, name);
+  m_buttons->AddInput(Translatability::Translate, SELECT_BUTTON);
+  m_buttons->AddInput(Translatability::Translate, START_BUTTON);
 
-  // DPad
-  groups.emplace_back(m_dpad = new ControllerEmu::Buttons(DPAD_GROUP));
-  for (const char* named_direction : named_directions)
-  {
-    m_dpad->AddInput(Translatability::Translate, named_direction);
-  }
+  m_dpad = new ControllerEmu::Buttons(DPAD_GROUP);
+  groups.emplace_back(m_dpad);
+  for (const char* name : named_directions)
+    m_dpad->AddInput(Translatability::Translate, name);
 }
 
 std::string GBAPad::GetName() const
@@ -51,39 +60,32 @@ InputConfig* GBAPad::GetConfig() const
 
 ControllerEmu::ControlGroup* GBAPad::GetGroup(GBAPadGroup group) const
 {
-  switch (group)
-  {
-  case GBAPadGroup::Buttons:
+  if (group == GBAPadGroup::Buttons)
     return m_buttons;
-  case GBAPadGroup::DPad:
+  if (group == GBAPadGroup::DPad)
     return m_dpad;
-  default:
-    return nullptr;
-  }
+  return nullptr;
 }
 
 GCPadStatus GBAPad::GetInput()
 {
-  const auto lock = GetStateLock();
-  GCPadStatus pad = {};
+  const auto state_lock = GetStateLock();
 
-  // Buttons
-  m_buttons->GetState(&pad.button, button_bitmasks, m_input_override_function);
+  GCPadStatus status = {};
+  m_buttons->GetState(&status.button, BUTTON_BITS.data(), m_input_override_function);
+  m_dpad->GetState(&status.button, DPAD_BITS.data(), m_input_override_function);
 
-  // DPad
-  m_dpad->GetState(&pad.button, dpad_bitmasks, m_input_override_function);
-
-  // Use X button as a reset signal
+  // A requested reset is reported once, as X.
   if (m_reset_pending)
-    pad.button |= PAD_BUTTON_X;
+    status.button |= PAD_BUTTON_X;
   m_reset_pending = false;
 
-  return pad;
+  return status;
 }
 
 void GBAPad::SetReset(bool reset)
 {
-  const auto lock = GetStateLock();
+  const auto state_lock = GetStateLock();
   m_reset_pending = reset;
 }
 
@@ -91,27 +93,8 @@ void GBAPad::LoadDefaults(const ControllerInterface& ciface)
 {
   EmulatedController::LoadDefaults(ciface);
 
-#ifndef ANDROID
-  // Buttons
-  m_buttons->SetControlExpression(0, "`Z`");  // B
-  m_buttons->SetControlExpression(1, "`X`");  // A
-  m_buttons->SetControlExpression(2, "`Q`");  // L
-  m_buttons->SetControlExpression(3, "`W`");  // R
-#ifdef _WIN32
-  m_buttons->SetControlExpression(4, "`BACK`");    // Select
-  m_buttons->SetControlExpression(5, "`RETURN`");  // Start
-#elif defined __APPLE__
-  m_buttons->SetControlExpression(4, "`Backspace`");  // Select
-  m_buttons->SetControlExpression(5, "`Return`");     // Start
-#else
-  m_buttons->SetControlExpression(4, "`BackSpace`");  // Select
-  m_buttons->SetControlExpression(5, "`Return`");     // Start
-#endif
-
-  // D-Pad
-  m_dpad->SetControlExpression(0, "`T`");  // Up
-  m_dpad->SetControlExpression(1, "`G`");  // Down
-  m_dpad->SetControlExpression(2, "`F`");  // Left
-  m_dpad->SetControlExpression(3, "`H`");  // Right
-#endif
+  for (std::size_t i = 0; i < BUTTON_DEFAULTS.size(); ++i)
+    m_buttons->SetControlExpression(static_cast<int>(i), BUTTON_DEFAULTS[i]);
+  for (std::size_t i = 0; i < DPAD_DEFAULTS.size(); ++i)
+    m_dpad->SetControlExpression(static_cast<int>(i), DPAD_DEFAULTS[i]);
 }

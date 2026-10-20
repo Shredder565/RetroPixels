@@ -1,5 +1,4 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -20,6 +19,8 @@ enum class GBAPadGroup
   Buttons
 };
 
+// Buttons of an emulated GBA, reported in GCPadStatus form (Select as Z,
+// a pending reset as X).
 class GBAPad : public ControllerEmu::EmulatedController
 {
 public:

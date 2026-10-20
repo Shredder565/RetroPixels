@@ -1,5 +1,4 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/GBAPad.h"
 
@@ -10,55 +9,63 @@
 
 namespace Pad
 {
-static InputConfig s_config("GBA", _trans("Pad"), "GBA", "GBA");
+namespace
+{
+constexpr int GBA_COUNT = 4;
+
+// Section "GBA" in the INI, profiles under "GBA", profile key "GBA".
+InputConfig s_gba_config("GBA", _trans("Pad"), "GBA", "GBA");
+
+GBAPad& GBAPadAt(int pad_num)
+{
+  return *static_cast<GBAPad*>(s_gba_config.GetController(pad_num));
+}
+}  // namespace
+
 InputConfig* GetGBAConfig()
 {
-  return &s_config;
-}
-
-void ShutdownGBA()
-{
-  s_config.UnregisterHotplugCallback();
-
-  s_config.ClearControllers();
+  return &s_gba_config;
 }
 
 void InitializeGBA()
 {
-  if (s_config.ControllersNeedToBeCreated())
+  if (s_gba_config.ControllersNeedToBeCreated())
   {
-    for (unsigned int i = 0; i < 4; ++i)
-      s_config.CreateController<GBAPad>(i);
+    for (unsigned int index = 0; index < GBA_COUNT; ++index)
+      s_gba_config.CreateController<GBAPad>(index);
   }
+  s_gba_config.RegisterHotplugCallback();
+  s_gba_config.LoadConfig();
+}
 
-  s_config.RegisterHotplugCallback();
-
-  // Load the saved controller config
-  s_config.LoadConfig();
+void ShutdownGBA()
+{
+  s_gba_config.UnregisterHotplugCallback();
+  s_gba_config.ClearControllers();
 }
 
 void LoadGBAConfig()
 {
-  s_config.LoadConfig();
+  s_gba_config.LoadConfig();
 }
 
 bool IsGBAInitialized()
 {
-  return !s_config.ControllersNeedToBeCreated();
+  return !s_gba_config.ControllersNeedToBeCreated();
 }
 
 GCPadStatus GetGBAStatus(int pad_num)
 {
-  return static_cast<GBAPad*>(s_config.GetController(pad_num))->GetInput();
+  return GBAPadAt(pad_num).GetInput();
 }
 
 void SetGBAReset(int pad_num, bool reset)
 {
-  static_cast<GBAPad*>(s_config.GetController(pad_num))->SetReset(reset);
+  GBAPadAt(pad_num).SetReset(reset);
 }
 
 ControllerEmu::ControlGroup* GetGBAGroup(int pad_num, GBAPadGroup group)
 {
-  return static_cast<GBAPad*>(s_config.GetController(pad_num))->GetGroup(group);
+  return GBAPadAt(pad_num).GetGroup(group);
 }
 }  // namespace Pad

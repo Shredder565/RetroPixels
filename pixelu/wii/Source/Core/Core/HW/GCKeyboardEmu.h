@@ -1,5 +1,4 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -15,6 +14,7 @@ class ControlGroup;
 class Buttons;
 }  // namespace ControllerEmu
 
+// One group per 16-bit word of KeyboardStatus.
 enum class KeyboardGroup
 {
   Kb0x,
@@ -25,6 +25,7 @@ enum class KeyboardGroup
   Kb5x,
 };
 
+// An emulated GameCube ASCII keyboard as seen by the input mapping UI.
 class GCKeyboard : public ControllerEmu::EmulatedController
 {
 public:
