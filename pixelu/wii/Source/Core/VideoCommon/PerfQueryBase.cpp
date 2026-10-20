@@ -1,5 +1,4 @@
-// Copyright 2012 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/PerfQueryBase.h"
 
@@ -11,5 +10,6 @@ std::unique_ptr<PerfQueryBase> g_perf_query;
 
 bool PerfQueryBase::ShouldEmulate()
 {
+  // Set per game ("PerfQueriesEnable" in the game INI's video settings).
   return g_ActiveConfig.bPerfQueriesEnable;
 }

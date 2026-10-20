@@ -1,7 +1,8 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
+
+#include <cstring>
 
 #include "VideoCommon/GeometryShaderGen.h"
 #include "VideoCommon/NativeVertexFormat.h"
@@ -15,12 +16,12 @@ class NativeVertexFormat;
 
 namespace VideoCommon
 {
-// This version number must be incremented whenever any of the shader UID structures change.
-// As pipelines encompass both shader UIDs and render states, changes to either of these should
-// also increment the pipeline UID version. Incrementing the UID version will cause all UID
-// caches to be invalidated.
-constexpr u32 GX_PIPELINE_UID_VERSION = 9;  // Last changed in PR 14789
+// Version of the pipeline UID layout below (and of the shader UIDs and render states inside
+// it). The on-disk UID caches carry it; bumping it discards every cached UID.
+constexpr u32 GX_PIPELINE_UID_VERSION = 9;
 
+// Key of a GX pipeline in the shader cache. Compared bytewise because this lookup happens on
+// every draw; the constructors zero the whole object so padding compares equal too.
 struct GXPipelineUid
 {
   const NativeVertexFormat* vertex_format;
@@ -31,9 +32,6 @@ struct GXPipelineUid
   DepthState depth_state;
   BlendingState blending_state;
 
-  // We use memcmp() for comparing pipelines as std::tie generates a large number of instructions,
-  // and this map lookup can happen every draw call. However, as using memcmp() will also compare
-  // any padding bytes, we have to ensure these are zeroed out.
   GXPipelineUid() { std::memset(static_cast<void*>(this), 0, sizeof(*this)); }
   bool operator<(const GXPipelineUid& rhs) const
   {
@@ -44,6 +42,8 @@ struct GXPipelineUid
     return std::memcmp(this, &rhs, sizeof(*this)) == 0;
   }
 };
+
+// The same for ubershader pipelines.
 struct GXUberPipelineUid
 {
   const NativeVertexFormat* vertex_format;
@@ -65,8 +65,9 @@ struct GXUberPipelineUid
   }
 };
 
-// Disk cache of pipeline UIDs. We can't use the whole UID as a type as it contains pointers.
-// This structure is safe to save to disk, and should be compiler/platform independent.
+// On-disk forms of the UIDs above: the vertex format pointer is replaced by its portable
+// declaration and the render states by their raw bits. Packed, so the file layout does not
+// depend on the compiler.
 #pragma pack(push, 1)
 struct SerializedGXPipelineUid
 {

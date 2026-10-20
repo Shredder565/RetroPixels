@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,14 +8,16 @@
 
 namespace VideoCommon
 {
+// Adjusts a GX pipeline UID for what the host backend and driver can do (logic op and
+// dual-source blending fallbacks, framebuffer-fetch blending, early-Z workarounds, and
+// line/point expansion in the vertex shader).
 GXPipelineUid ApplyDriverBugs(const GXPipelineUid& in);
 
-// Returns a hash of the pipeline, hashing the
-// vertex declarations instead of the native vertex format
-// object
+// Hash of a pipeline UID that uses the vertex declaration instead of the vertex format pointer,
+// so it is stable across runs.
 std::size_t PipelineToHash(const GXPipelineUid& in);
 
-// Updates an existing hash with the hash of the pipeline
+// Feeds the same data into an existing XXH3 state.
 void UpdateHashWithPipeline(const GXPipelineUid& in, XXH3_state_t* hash_state);
 
 }  // namespace VideoCommon

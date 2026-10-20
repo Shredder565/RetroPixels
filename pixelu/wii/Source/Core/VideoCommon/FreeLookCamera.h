@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,6 +10,7 @@
 
 class PointerWrap;
 
+// Something that produces the free-look view matrix and field-of-view scale.
 class CameraController
 {
 public:
@@ -19,7 +19,6 @@ public:
 
   CameraController(const CameraController&) = delete;
   CameraController& operator=(const CameraController&) = delete;
-
   CameraController(CameraController&&) = delete;
   CameraController& operator=(CameraController&&) = delete;
 
@@ -34,6 +33,7 @@ public:
   virtual bool SupportsInput() const = 0;
 };
 
+// A controller driven by the free-look hotkeys/controller: movement, rotation, FOV and speed.
 class CameraControllerInput : public CameraController
 {
 public:
@@ -48,12 +48,12 @@ public:
 
   virtual void MoveVertical(float amt) = 0;
   virtual void MoveHorizontal(float amt) = 0;
-
   virtual void MoveForward(float amt) = 0;
 
   virtual void Rotate(const Common::Vec3& amt) = 0;
   virtual void Rotate(const Common::Quaternion& quat) = 0;
 
+  // Puts the FOV back to normal and marks the camera dirty; overrides also reset the pose.
   virtual void Reset() = 0;
 
   void IncreaseFovX(float fov);
@@ -65,16 +65,13 @@ public:
   float GetSpeed() const;
 
 private:
-  static constexpr float MIN_FOV_MULTIPLIER = 0.025f;
-  static constexpr float DEFAULT_SPEED = 60.0f;
-  static constexpr float DEFAULT_FOV_MULTIPLIER = 1.0f;
-
-  float m_fov_x_multiplier = DEFAULT_FOV_MULTIPLIER;
-  float m_fov_y_multiplier = DEFAULT_FOV_MULTIPLIER;
-  float m_speed = DEFAULT_SPEED;
+  float m_fov_x = 1.0f;
+  float m_fov_y = 1.0f;
+  float m_speed = 60.0f;
   bool m_dirty = false;
 };
 
+// The free-look camera in use, rebuilt when the configured control type changes.
 class FreeLookCamera
 {
 public:
@@ -92,10 +89,9 @@ public:
   CameraController* GetController() const;
 
 private:
-  std::unique_ptr<CameraController> m_camera_controller;
-
-  bool m_is_enabled{};
-  std::optional<FreeLook::ControlType> m_current_type;
+  std::unique_ptr<CameraController> m_controller;
+  bool m_enabled = false;
+  std::optional<FreeLook::ControlType> m_type;
 };
 
 extern FreeLookCamera g_freelook_camera;

@@ -1,5 +1,4 @@
-// Copyright 2012 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,6 +8,7 @@
 
 #include "Common/CommonTypes.h"
 
+// Pixel engine performance counters a game can read.
 enum PerfQueryType
 {
   PQ_ZCOMP_INPUT_ZCOMPLOC = 0,
@@ -20,6 +20,7 @@ enum PerfQueryType
   PQ_NUM_MEMBERS
 };
 
+// Host query groups that the counters are derived from.
 enum PerfQueryGroup
 {
   PQG_ZCOMP_ZCOMPLOC,
@@ -28,6 +29,7 @@ enum PerfQueryGroup
   PQG_NUM_MEMBERS,
 };
 
+// Host occlusion queries backing the PE counters. The base class counts nothing.
 class PerfQueryBase
 {
 public:
@@ -36,32 +38,26 @@ public:
 
   virtual bool Initialize() { return true; }
 
-  // Checks if performance queries are enabled in the gameini configuration.
-  // NOTE: Called from CPU+GPU thread
+  // Whether the game INI asks for the counters (called from the CPU and GPU threads).
   static bool ShouldEmulate();
 
-  // Begin querying the specified value for the following host GPU commands
-  // The call to EnableQuery() should be placed immediately before the draw command, otherwise
-  // there is a risk of GPU resets if the query is left open and the buffer is submitted during
-  // resource binding (D3D12/Vulkan).
-  virtual void EnableQuery(PerfQueryGroup type) {}
+  // Opens a query for the following draws. Call it right before the draw: a query left open
+  // across a command buffer submission can reset the GPU on D3D12 and Vulkan.
+  virtual void EnableQuery(PerfQueryGroup /*type*/) {}
 
-  // Stop querying the specified value for the following host GPU commands
-  virtual void DisableQuery(PerfQueryGroup type) {}
+  // Closes the open query.
+  virtual void DisableQuery(PerfQueryGroup /*type*/) {}
 
-  // Reset query counters to zero and drop any pending queries
+  // Zeroes the counters and forgets pending queries.
   virtual void ResetQuery() {}
 
-  // Return the measured value for the specified query type
-  // NOTE: Called from CPU thread
-  virtual u32 GetQueryResult(PerfQueryType type) { return 0; }
+  // Current value of one counter (called from the CPU thread).
+  virtual u32 GetQueryResult(PerfQueryType /*type*/) { return 0; }
 
-  // Request the value of any pending queries - causes a pipeline flush and thus should be used
-  // carefully!
+  // Waits for pending queries; stalls the GPU pipeline.
   virtual void FlushResults() {}
 
-  // True if there are no further pending query results
-  // NOTE: Called from CPU thread
+  // True when no query results are outstanding (called from the CPU thread).
   virtual bool IsFlushed() const { return true; }
 
 protected:
