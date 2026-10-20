@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,6 +7,8 @@
 
 #include "VideoCommon/XFMemory.h"
 
+// Human-readable descriptions of XF writes, used by the FIFO analyzer and debugger views.
+// Each pair is (name, description).
 std::pair<std::string, std::string> GetXFRegInfo(u32 address, u32 value);
 std::string GetXFMemName(u32 address);
 std::string GetXFMemDescription(u32 address, u32 value);

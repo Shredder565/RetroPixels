@@ -1,7 +1,6 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/XFMemory.h"
 
-// STATE_TO_SAVE
+// The transform unit's register file and matrix/light memory (part of every savestate).
 XFMemory xfmem;

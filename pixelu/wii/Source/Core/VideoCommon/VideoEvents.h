@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -14,51 +13,34 @@ namespace Core
 class System;
 }
 
+// Describes one presentation of a frame to the host display, handed to the present hooks.
 struct PresentInfo
 {
+  // How much the presentation timestamp can be trusted.
   enum class PresentTimeAccuracy
   {
-    // The Driver/OS has given us an exact timestamp of when the first line of the frame started
-    // scanning out to the monitor
-    PresentOnScreenExact,
-
-    // An approximate timestamp of scanout.
-    PresentOnScreen,
-
-    // Dolphin doesn't have visibility of the present time. But the present operation has
-    // been queued with the GPU driver and will happen in the near future.
-    PresentInProgress,
-
-    // Not implemented
-    Unimplemented,
+    PresentOnScreenExact,  // reported by the driver as the moment scan-out began
+    PresentOnScreen,       // a close estimate of scan-out
+    PresentInProgress,     // handed to the driver, will reach the screen shortly
+    Unimplemented,         // no information available
   };
 
+  // What caused the presentation.
   enum class PresentReason
   {
-    Immediate,                // FIFO is Presenting the XFB immediately, straight after the XFB copy
-    VideoInterface,           // VideoInterface has triggered a present with a new frame
-    VideoInterfaceDuplicate,  // VideoInterface has triggered a present with a duplicate frame
+    Immediate,                // the FIFO presented an XFB copy straight away
+    VideoInterface,           // the emulated VI scanned out a new frame
+    VideoInterfaceDuplicate,  // the emulated VI scanned out the previous frame again
   };
 
-  // The number of (unique) frames since the emulated console booted
-  u64 frame_count = 0;
-
-  // The number of presents since the video backend was initialized.
-  // never goes backwards.
-  u64 present_count = 0;
-
-  // The exact emulated time of the when real hardware would have presented this frame
-  u64 emulated_timestamp = 0;
+  u64 frame_count = 0;         // distinct emulated frames since boot
+  u64 present_count = 0;       // presents since the backend started; monotonic
+  u64 emulated_timestamp = 0;  // emulated time at which the console would have shown it
 
   TimePoint intended_present_time{};
-
-  // AfterPresent only: The actual time the frame was presented
-  TimePoint actual_present_time{};
-
-  // Accuracy of actual_present_time
+  TimePoint actual_present_time{};  // only filled in for after_present_event
   PresentTimeAccuracy present_time_accuracy = PresentTimeAccuracy::Unimplemented;
 
-  // Where the presentation of the frame was triggered from
   PresentReason reason = PresentReason::Immediate;
 
   u32 frame_buffer_width;
@@ -67,36 +49,28 @@ struct PresentInfo
   std::vector<std::string_view> xfb_copy_hashes;
 };
 
+// Hook points the video code fires so that other subsystems can follow frame progress.
 struct VideoEvents
 {
-  // Called when certain video config setting are changed
+  // A video setting changed; the argument holds the changed-config bits.
   Common::HookableEvent<u32> config_changed_event;
 
-  // An event called just before the first draw call of a frame
+  // Fired right before the first draw of a frame.
   Common::HookableEvent<> before_frame_event;
 
-  // An event called after the frame XFB copy begins processing on the host GPU.
-  // Useful for "once per frame" usecases.
-  // Note: In a few rare cases, games do multiple XFB copies per frame and join them while
-  // presenting.
-  //       If this matters to your usecase, you should use BeforePresent instead.
+  // Fired once the XFB copy that ends a frame has been submitted to the host GPU. A game that
+  // stitches several XFB copies into one image fires it more than once per shown frame; use
+  // before_present_event when that matters.
   Common::HookableEvent<Core::System&> after_frame_event;
 
-  // An event called just as a frame is queued for presentation.
-  // The exact timing of this event depends on the "Immediately Present XFB" option.
-  //
-  // If enabled, this event will trigger immediately after AfterFrame
-  // If disabled, this event won't trigger until the emulated interface starts drawing out a new
-  // frame.
-  //
-  // frame_count: The number of frames
+  // Fired when a frame is queued for display. With "Immediately Present XFB" this follows
+  // after_frame_event directly; otherwise it waits for the emulated VI to start the next field.
   Common::HookableEvent<PresentInfo&> before_present_event;
 
-  // An event that is triggered after a frame is presented.
-  // The exact timing of this event depends on backend/driver support.
+  // Fired after the host has presented a frame; timing depends on what the backend can observe.
   Common::HookableEvent<PresentInfo&> after_present_event;
 
-  // An end of frame event that runs on the CPU thread
+  // Fired on the CPU thread at the end of each emulated VI field.
   Common::HookableEvent<> vi_end_field_event;
 };
 

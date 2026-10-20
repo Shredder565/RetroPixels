@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/VideoState.h"
 
@@ -27,91 +26,68 @@
 #include "VideoCommon/XFMemory.h"
 #include "VideoCommon/XFStateManager.h"
 
+namespace
+{
+// Serialises one block of state and then stamps its marker, which lets a load detect where a
+// mismatch began.
+template <typename Fn>
+void Section(PointerWrap& p, const char* marker, Fn&& serialise)
+{
+  serialise();
+  p.DoMarker(marker);
+}
+}  // namespace
+
 void VideoCommon_DoState(PointerWrap& p)
 {
-  bool software = false;
-  p.Do(software);
-
-  if (p.IsReadMode() && software == true)
-  {
-    // change mode to abort load of incompatible save state.
+  // Leading flag: states written by the software renderer are not loadable here. Switching the
+  // wrapper into verify mode makes the remainder a dry run so the load is rejected cleanly.
+  bool from_software_renderer = false;
+  p.Do(from_software_renderer);
+  if (from_software_renderer && p.IsReadMode())
     p.SetVerifyMode();
-  }
 
-  // BP Memory
-  p.Do(bpmem);
-  p.DoMarker("BP Memory");
+  Core::System& system = Core::System::GetInstance();
 
-  // CP Memory
-  // We don't save g_preprocess_cp_state separately because the GPU should be
-  // synced around state save/load.
-  p.Do(g_main_cp_state);
-  p.DoMarker("CP Memory");
+  // Register files. Only the CPU-side CP state is stored: the GPU is synchronised around
+  // savestates, so the preprocessing copy can be rebuilt from it.
+  Section(p, "BP Memory", [&] { p.Do(bpmem); });
+  Section(p, "CP Memory", [&] { p.Do(g_main_cp_state); });
+  // (The mode is re-queried each time: a failed read switches the wrapper out of read mode.)
   if (p.IsReadMode())
     CopyPreprocessCPStateFromMain();
+  Section(p, "XF Memory", [&] { p.Do(xfmem); });
 
-  // XF Memory
-  p.Do(xfmem);
-  p.DoMarker("XF Memory");
+  // Texture memory, both the decoder's view and the TMEM cache bookkeeping.
+  Section(p, "texMem", [&] { p.DoArray(s_tex_mem); });
+  Section(p, "TMEM", [&] { TMEM::DoState(p); });
 
-  // Texture decoder
-  p.DoArray(s_tex_mem);
-  p.DoMarker("texMem");
+  // Command pipeline and pixel engine.
+  Section(p, "Fifo", [&] { system.GetFifo().DoState(p); });
+  Section(p, "CommandProcessor", [&] { system.GetCommandProcessor().DoState(p); });
+  Section(p, "PixelEngine", [&] { system.GetPixelEngine().DoState(p); });
 
-  // TMEM
-  TMEM::DoState(p);
-  p.DoMarker("TMEM");
+  // Shader constant managers keep their own copies; replaying BP writes would not restore them.
+  Section(p, "PixelShaderManager", [&] { system.GetPixelShaderManager().DoState(p); });
+  Section(p, "VertexShaderManager", [&] { system.GetVertexShaderManager().DoState(p); });
+  Section(p, "GeometryShaderManager", [&] { system.GetGeometryShaderManager().DoState(p); });
 
-  // FIFO
-  auto& system = Core::System::GetInstance();
-  system.GetFifo().DoState(p);
-  p.DoMarker("Fifo");
+  // Backend-side objects.
+  Section(p, "VertexManager", [&] { g_vertex_manager->DoState(p); });
+  Section(p, "FramebufferManager", [&] { g_framebuffer_manager->DoState(p); });
+  Section(p, "TextureCache", [&] { g_texture_cache->DoState(p); });
+  Section(p, "Presenter", [&] {
+    g_presenter->DoState(p);
+    g_frame_dumper->DoState(p);
+  });
+  Section(p, "Bounding Box", [&] { g_bounding_box->DoState(p); });
+  Section(p, "Widescreen", [&] { g_widescreen->DoState(p); });
+  Section(p, "XFStateManager", [&] { system.GetXFStateManager().DoState(p); });
 
-  auto& command_processor = system.GetCommandProcessor();
-  command_processor.DoState(p);
-  p.DoMarker("CommandProcessor");
+  if (!p.IsReadMode())
+    return;
 
-  system.GetPixelEngine().DoState(p);
-  p.DoMarker("PixelEngine");
-
-  // the old way of replaying current bpmem as writes to push side effects to pixel shader manager
-  // doesn't really work.
-  system.GetPixelShaderManager().DoState(p);
-  p.DoMarker("PixelShaderManager");
-
-  system.GetVertexShaderManager().DoState(p);
-  p.DoMarker("VertexShaderManager");
-
-  system.GetGeometryShaderManager().DoState(p);
-  p.DoMarker("GeometryShaderManager");
-
-  g_vertex_manager->DoState(p);
-  p.DoMarker("VertexManager");
-
-  g_framebuffer_manager->DoState(p);
-  p.DoMarker("FramebufferManager");
-
-  g_texture_cache->DoState(p);
-  p.DoMarker("TextureCache");
-
-  g_presenter->DoState(p);
-  g_frame_dumper->DoState(p);
-  p.DoMarker("Presenter");
-
-  g_bounding_box->DoState(p);
-  p.DoMarker("Bounding Box");
-
-  g_widescreen->DoState(p);
-  p.DoMarker("Widescreen");
-
-  system.GetXFStateManager().DoState(p);
-  p.DoMarker("XFStateManager");
-
-  // Refresh state.
-  if (p.IsReadMode())
-  {
-    // Inform backend of new state from registers.
-    BPReload();
-    VertexLoaderManager::MarkAllDirty();
-  }
+  // Push the restored registers back out to the backend and force vertex loaders to rebuild.
+  BPReload();
+  VertexLoaderManager::MarkAllDirty();
 }
