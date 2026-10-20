@@ -99,12 +99,12 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 124392 | 29.1% |
-| Dolphin, untouched | 292411 | 68.5% |
+| Original (RetroPixels) | 130967 | 30.8% |
+| Dolphin, untouched | 284680 | 66.9% |
 | Dolphin, with PixelU changes | 4224 | 1.0% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.4% |
-| **All** | **426790** | 100% |
+| **All** | **425634** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -127,7 +127,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/FifoPlayer | 2133 | 0 | Dolphin |
 | Core/Core/HLE | 1350 | 0 | Dolphin |
 | Core/Core/HW (top level) | 9909 | 9909 | original |
-| Core/Core/HW/DSPHLE | 7731 | 0 | Dolphin |
+| Core/Core/HW/DSPHLE | 6575 | 6575 | original |
 | Core/Core/HW/DSPLLE | 571 | 571 | original |
 | Core/Core/HW/DVD | 4942 | 2244 | mixed (45% original) |
 | Core/Core/HW/EXI | 7965 | 6494 | mixed (82% original), 91 lines third-party |
@@ -244,7 +244,7 @@ batch rewrites them.
 | W14 | HW: Wii Remote (common, emulated, real) | 11244 | 11244 | original |
 | W15 | DSP: core, interpreter, LLE glue | 8445 | 8445 | original |
 | W16 | DSP: x64 JIT | 7632 | 0 | Dolphin |
-| W17 | DSP: HLE (AX, Zelda, GBA, CARD, ROM ucodes) | 7731 | 0 | Dolphin |
+| W17 | DSP: HLE (AX, Zelda, GBA, CARD, ROM ucodes) | 6575 | 6575 | original |
 | W18 | IOS: kernel, ES, FS, DI, SDIO, STM, WFS, crypto | 15395 | 0 | Dolphin |
 | W19 | IOS: network (SO, KD/WC24, NCD, WD, SSL) and USB host devices | 12334 | 0 | Dolphin |
 | W20 | IOS: Bluetooth and emulated USB devices (Skylanders, Infinity, keyboard, mic) | 13973 | 0 | Dolphin |
@@ -1824,3 +1824,107 @@ Checks
     - `verbatim-audit.py wii 8`: no run of 8 or more lines in any W15
       .cpp file. Remaining runs are in headers only (public declarations,
       enum values, register layout and the interpreter's op list).
+- W17 log: rewrote all 26 W17 files (DSP HLE: `Core/HW/DSPHLE` and
+  every ucode under `UCodes`) as original code. They now have 6575 lines
+  (from 7731). Each starts with the RetroPixels original-code line and
+  has no Dolphin copyright or SPDX header. The files are DSPHLE,
+  MailHandler and the ucodes AX, AXWii, AXStructs.h, AXVoice.h, Zelda,
+  GBA, CARD, INIT, ROM, ASnd, AESnd and UCodes (the shared base,
+  ucode selection and the IRAM/DRAM dumps).
+  - Kept unchanged: file names, and every public declaration that other
+    files use (names, signatures, namespaces, enum values, constants,
+    the AX and AX Wii parameter-block structs with their field order and
+    sizes). Everything that affects emulation also stays the same:
+    - ucode selection: every CRC and the ucode it picks (AX, AX Wii,
+      Zelda with its per-version flags, GBA, CARD, INIT, ROM, ASnd,
+      AESnd), the ASnd/AESnd hash fallbacks and the unknown-ucode path;
+    - every mail, in the same order and at the same point: the ROM and
+      INIT boot handshakes, task yield/resume/halt, the AX and AX Wii
+      command-list protocol, Zelda's standard and light protocols
+      (command queue, sync mails, frame-end mails), GBA, CARD, ASnd and
+      AESnd; the mail queue and its interrupt timing, and the DSP control
+      register and halt-bit handling;
+    - every RAM and ARAM write: AX and AX Wii voice rendering (PB
+      layouts per build including the System Menu 1.0 / Elebits hole
+      before the filters, PB updates, the accelerator and its loop and
+      end handling, ADPCM, the polyphase and linear resamplers, low-pass,
+      biquad and high-pass filters, volume envelopes, initial time delay,
+      dpop, aux buses and the Wii Remote buses), the mix and output
+      commands with their volume ramps and clamping, the compressor, the
+      coefficient file lookup (`dsp_coef.bin` in the GC user folder,
+      then in Sys/GC); the Zelda mixer (AFC and PCM decoding,
+      resampling, the reverb FIR and ring buffers, sine and pattern
+      tables, ARAM and MRAM fetches, the per-version flags); ASnd and
+      AESnd sample formats, pitch and looping; GBA's key computation;
+    - integer results bit for bit: overflowing sums wrap the same way
+      (done through unsigned arithmetic instead of signed overflow) and
+      float volume ramps use the same operations in the same order;
+    - the savestate layout and order of every ucode and of DSPHLE
+      (including the pending boot request), the ucode-dump config key
+      and the two translatable unknown-ucode panic strings.
+  - Kept quirks: AX Wii's aux-mix upload leaves the last downloaded
+    buffer in aux L; Zelda's MRAM fetch still fills from the start of
+    its buffer, and its command queue still spins on a word without the
+    top bit when the queue is empty, as on hardware.
+  - Deliberate differences (genuine bugs, harmless fixes, cleanups):
+    - Buffers the old code left uninitialised are zeroed: the AX PB
+      update list, the parameter blocks, the volume-ramp words, the
+      coefficient buffer, the PB of an unknown AX Wii build, and Zelda's
+      raw and input sample buffers and a voice block read from an invalid
+      address. The boot request's padding is an explicit reserved field
+      (the same bytes in the savestate, now always zero).
+    - A command list read past its 512 words stops processing instead of
+      reading past the buffer.
+    - An unknown Zelda CRC still raises the same panic and then runs
+      with no version flags (the old code read the flags through the
+      table's end iterator).
+    - A null ARAM pointer reads as zeros; a Zelda reverb ring with no
+      slots stays on slot 0 (the old code dereferenced null and divided
+      by zero).
+    - Zelda's raw sample buffer has room for AFC's whole-block decode.
+      Once cached samples have been taken, that decode can write up to 15
+      samples past the size the old code gave the buffer, which
+      overflowed its stack (only samples within the needed count are
+      used, so the output is unchanged).
+    - Some log messages are worded differently. Panic messages and
+      translatable strings are unchanged.
+  - Checked: a harness linked the old and the new code against the same
+    untouched code outside W17 (the DSP accelerator, PointerWrap, the
+    mail and interrupt plumbing) with fake memory, ARAM, timing and
+    config, and a zeroing allocator so that old padding is
+    deterministic. It booted each ucode through the ROM and INIT mails,
+    then sent structured random mails and command lists, switched tasks,
+    and saved and reloaded state (in place and into a fresh DSPHLE). It
+    compared a hash of every mail, interrupt, panic, RAM and ARAM byte
+    and savestate byte. No Nintendo keys, BIOS, firmware, DSP ROMs or
+    games were used. Outputs are identical for 1000 seeds each of AX
+    (every GC build), AX Wii (every Wii build), ASnd, AESnd, GBA, CARD
+    and unknown ucodes, and for 691 of 700 seeds of Zelda (every
+    version, both protocols). Of the other 9 Zelda seeds, 8 make old and
+    new spin the same way in the empty-queue quirk above. In the last
+    one the old code overflows its stack in the AFC decode and crashes
+    or not depending on stack layout; the new code is deterministic
+    there. A run of the new code under AddressSanitizer and UBSan (60
+    seeds per family) found nothing else, apart from unaligned reads
+    from odd guest addresses, which the real Memmap copy makes the same
+    way.
+    - Mutation checks: single changes to the new code each changed the
+      output of some of the 40 seeds tried for their family: the AX
+      compressor gain (16) and aux download mix (24), the low-pass (7)
+      and biquad (8) filters, the AX Wii PB hole (10), Zelda's AFC
+      decoder (30) and reverb ring step (24), the ASnd resampling
+      counter (1), the AESnd right volume (7), the GBA key (24) and the
+      mail handler's savestate order (40). One change, the biquad's
+      rounding constant, was found to be equivalent: the sum is always
+      a multiple of 4, so the old 0x7FFF can never differ from 0x7FFE.
+    - Compile check: the 12 W17 .cpp files and DSPEmulator.cpp (the only
+      other file that includes W17 headers) build with clang on Linux and
+      with `-target x86_64-w64-windows-gnu`. Under `-Wall -Wextra
+      -Wconversion -Wsign-compare -Wshadow-all -Wshorten-64-to-32` the
+      W17 files give no warnings (no fixes were needed outside W17). A
+      scan found no bool mixed with an integer under `|` or `&` (MSVC
+      C4805).
+    - Verbatim audit (`tools/verbatim-audit.py wii 8`): no function body
+      in W17 .cpp files shares 8 or more lines with the old code. The
+      remaining runs are the PB structs in AXStructs.h and class
+      declarations in DSPHLE.h and AESnd.h.
