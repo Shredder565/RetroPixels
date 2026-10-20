@@ -1,10 +1,11 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/PowerPC/PPCCache.h"
 
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <cstring>
 
 #include "Common/ChunkFile.h"
 #include "Common/Swap.h"
@@ -18,75 +19,132 @@ namespace PowerPC
 {
 namespace
 {
-constexpr std::array<u32, 8> s_plru_mask{
-    11, 11, 19, 19, 37, 37, 69, 69,
-};
-constexpr std::array<u32, 8> s_plru_value{
-    11, 3, 17, 1, 36, 4, 64, 0,
+constexpr u32 BLOCK_BYTES = CACHE_BLOCK_SIZE * sizeof(u32);
+constexpr u32 NO_WAY = 0xFF;
+
+// The pseudo-LRU state of a set is a three-level binary tree over the eight
+// ways, stored in seven bits:
+//
+//                 bit 0
+//            /            \
+//        bit 1            bit 2
+//       /     \          /     \
+//    bit 3   bit 4    bit 5   bit 6
+//    /  \    /  \     /  \    /  \
+//   w0  w1  w2  w3   w4  w5  w6  w7
+//
+// A zero bit points to the left subtree, a one bit to the right. The victim
+// is found by following the bits from the root. Using a way flips the three
+// bits on its path to point away from it.
+struct TreePath
+{
+  u32 bits[3];   // tree bit at each level
+  u32 sides[3];  // 0 = the way is to the left at that level, 1 = right
 };
 
-constexpr std::array<u32, 255> s_way_from_valid = [] {
-  std::array<u32, 255> data{};
-  for (size_t m = 0; m < data.size(); m++)
+constexpr TreePath PathTo(u32 way)
+{
+  const u32 half = way >> 2;
+  const u32 quarter = (way >> 1) & 1;
+  const u32 leaf = way & 1;
+  return {{0, 1 + half, 3 + (way >> 1)}, {half, quarter, leaf}};
+}
+
+struct PlruUpdate
+{
+  u8 mask;
+  u8 value;
+};
+
+// What touching each way does to the tree bits.
+constexpr std::array<PlruUpdate, CACHE_WAYS> PLRU_UPDATE = [] {
+  std::array<PlruUpdate, CACHE_WAYS> table{};
+  for (u32 way = 0; way < CACHE_WAYS; ++way)
   {
-    u32 w = 0;
-    while ((m & (size_t{1} << w)) != 0)
-      w++;
-    data[m] = w;
+    const TreePath path = PathTo(way);
+    u32 mask = 0;
+    u32 value = 0;
+    for (u32 level = 0; level < 3; ++level)
+    {
+      mask |= 1u << path.bits[level];
+      if (path.sides[level] == 0)
+        value |= 1u << path.bits[level];
+    }
+    table[way] = {static_cast<u8>(mask), static_cast<u8>(value)};
   }
-  return data;
+  return table;
 }();
 
-constexpr std::array<u32, 128> s_way_from_plru = [] {
-  std::array<u32, 128> data{};
-
-  for (size_t m = 0; m < data.size(); m++)
+// The way the tree bits point at, for every tree state.
+constexpr std::array<u8, 128> PLRU_VICTIM = [] {
+  std::array<u8, 128> table{};
+  for (u32 state = 0; state < table.size(); ++state)
   {
-    std::array<u32, 7> b{};
-    for (size_t i = 0; i < b.size(); i++)
-      b[i] = u32(m & (size_t{1} << i));
-
-    u32 w = 0;
-    if (b[0] != 0)
+    u32 node = 0;
+    u32 way = 0;
+    for (u32 level = 0; level < 3; ++level)
     {
-      if (b[2] != 0)
-      {
-        if (b[6] != 0)
-          w = 7;
-        else
-          w = 6;
-      }
-      else if (b[5] != 0)
-      {
-        w = 5;
-      }
-      else
-      {
-        w = 4;
-      }
+      const u32 right = (state >> node) & 1;
+      way = (way << 1) | right;
+      // Children of node n in this numbering: level 1 nodes are 1 and 2,
+      // level 2 nodes are 3..6.
+      node = level == 0 ? 1 + right : 3 + way;
     }
-    else if (b[1] != 0)
-    {
-      if (b[4] != 0)
-        w = 3;
-      else
-        w = 2;
-    }
-    else if (b[3] != 0)
-    {
-      w = 1;
-    }
-    else
-    {
-      w = 0;
-    }
-
-    data[m] = w;
+    table[state] = static_cast<u8>(way);
   }
-
-  return data;
+  return table;
 }();
-}  // Anonymous namespace
+
+static_assert(PLRU_UPDATE[0].mask == 0b0001011 && PLRU_UPDATE[0].value == 0b0001011);
+static_assert(PLRU_UPDATE[7].mask == 0b1000101 && PLRU_UPDATE[7].value == 0);
+static_assert(PLRU_VICTIM[0] == 0 && PLRU_VICTIM[127] == 7);
+
+constexpr u32 WayBit(u32 way)
+{
+  return 1u << way;
+}
+
+// The lookup-table slot for the block containing a physical address.
+u8& LookupSlot(Cache& cache, Memory::MemoryManager& memory, u32 address)
+{
+  if ((address & CACHE_VMEM_BIT) != 0)
+    return cache.lookup_table_vmem[(address & memory.GetFakeVMemMask()) / BLOCK_BYTES];
+  if ((address & CACHE_EXRAM_BIT) != 0)
+    return cache.lookup_table_ex[(address & memory.GetExRamMask()) / BLOCK_BYTES];
+  return cache.lookup_table[(address & memory.GetRamMask()) / BLOCK_BYTES];
+}
+
+void ForgetBlock(Cache& cache, Memory::MemoryManager& memory, u32 set, u32 way)
+{
+  LookupSlot(cache, memory, cache.addrs[set][way]) = NO_WAY;
+}
+
+bool IsValid(const Cache& cache, u32 set, u32 way)
+{
+  return (cache.valid[set] & WayBit(way)) != 0;
+}
+
+bool IsModified(const Cache& cache, u32 set, u32 way)
+{
+  return (cache.modified[set] & WayBit(way)) != 0;
+}
+
+void WriteBack(Cache& cache, Memory::MemoryManager& memory, u32 set, u32 way, u32 address)
+{
+  memory.CopyToEmu(address, cache.data[set][way].data(), BLOCK_BYTES);
+}
+
+void Drop(Cache& cache, u32 set, u32 way)
+{
+  cache.valid[set] &= ~WayBit(way);
+  cache.modified[set] &= ~WayBit(way);
+}
+
+u32 SetOf(u32 address)
+{
+  return (address / BLOCK_BYTES) % CACHE_SETS;
+}
+}  // namespace
 
 InstructionCache::~InstructionCache()
 {
@@ -99,9 +157,9 @@ void Cache::Reset()
   valid.fill(0);
   plru.fill(0);
   modified.fill(0);
-  std::ranges::fill(lookup_table, 0xFF);
-  std::ranges::fill(lookup_table_ex, 0xFF);
-  std::ranges::fill(lookup_table_vmem, 0xFF);
+  std::ranges::fill(lookup_table, NO_WAY);
+  std::ranges::fill(lookup_table_ex, NO_WAY);
+  std::ranges::fill(lookup_table_vmem, NO_WAY);
 }
 
 void InstructionCache::Reset(JitInterface& jit_interface)
@@ -112,11 +170,14 @@ void InstructionCache::Reset(JitInterface& jit_interface)
 
 void Cache::Init(Memory::MemoryManager& memory)
 {
-  data.fill({});
-  addrs.fill({});
-  lookup_table.resize(memory.GetRamSize() >> 5);
-  lookup_table_ex.resize(memory.GetExRamSize() >> 5);
-  lookup_table_vmem.resize(memory.GetFakeVMemSize() >> 5);
+  for (auto& set : data)
+    for (auto& block : set)
+      block.fill(0);
+  for (auto& set : addrs)
+    set.fill(0);
+  lookup_table.resize(memory.GetRamSize() / BLOCK_BYTES);
+  lookup_table_ex.resize(memory.GetExRamSize() / BLOCK_BYTES);
+  lookup_table_vmem.resize(memory.GetFakeVMemSize() / BLOCK_BYTES);
   Reset();
 }
 
@@ -129,223 +190,154 @@ void InstructionCache::Init(Memory::MemoryManager& memory)
   Cache::Init(memory);
 }
 
+std::pair<u32, u32> Cache::GetCache(Memory::MemoryManager& memory, u32 addr, bool locked)
+{
+  const u32 block_address = addr & ~(BLOCK_BYTES - 1);
+  const u32 set = SetOf(block_address);
+  u8& slot = LookupSlot(*this, memory, block_address);
+  u32 way = slot;
+
+  if (way == NO_WAY && !locked)
+  {
+    // Fill an empty way if there is one, otherwise replace the pseudo-LRU
+    // victim (writing it back first if it was modified).
+    if (valid[set] != 0xFF)
+      way = static_cast<u32>(std::countr_one(valid[set]));
+    else
+      way = PLRU_VICTIM[plru[set]];
+
+    if (IsValid(*this, set, way))
+    {
+      if (IsModified(*this, set, way))
+        WriteBack(*this, memory, set, way, addrs[set][way]);
+      ForgetBlock(*this, memory, set, way);
+    }
+
+    memory.CopyFromEmu(data[set][way].data(), block_address, BLOCK_BYTES);
+    slot = static_cast<u8>(way);
+    addrs[set][way] = block_address;
+    valid[set] |= WayBit(way);
+    modified[set] &= ~WayBit(way);
+  }
+
+  if (way != NO_WAY)
+    plru[set] = (plru[set] & ~PLRU_UPDATE[way].mask) | PLRU_UPDATE[way].value;
+
+  return {set, way};
+}
+
 void Cache::Store(Memory::MemoryManager& memory, u32 addr)
 {
-  auto [set, way] = GetCache(memory, addr, true);
-
-  if (way == 0xff)
+  const auto [set, way] = GetCache(memory, addr, true);
+  if (way == NO_WAY)
     return;
 
-  if (valid[set] & (1U << way) && modified[set] & (1U << way))
-    memory.CopyToEmu((addr & ~0x1f), data[set][way].data(), 32);
-  modified[set] &= ~(1U << way);
+  if (IsValid(*this, set, way) && IsModified(*this, set, way))
+    WriteBack(*this, memory, set, way, addr & ~(BLOCK_BYTES - 1));
+  modified[set] &= ~WayBit(way);
 }
 
 void Cache::FlushAll(Memory::MemoryManager& memory)
 {
-  for (size_t set = 0; set < CACHE_SETS; set++)
+  for (u32 set = 0; set < CACHE_SETS; ++set)
   {
-    for (size_t way = 0; way < CACHE_WAYS; way++)
+    for (u32 way = 0; way < CACHE_WAYS; ++way)
     {
-      if (valid[set] & (1U << way) && modified[set] & (1U << way))
-        memory.CopyToEmu(addrs[set][way], data[set][way].data(), 32);
+      if (IsValid(*this, set, way) && IsModified(*this, set, way))
+        WriteBack(*this, memory, set, way, addrs[set][way]);
     }
   }
-
   Reset();
 }
 
 void Cache::Invalidate(Memory::MemoryManager& memory, u32 addr)
 {
-  auto [set, way] = GetCache(memory, addr, true);
-
-  if (way == 0xff)
+  const auto [set, way] = GetCache(memory, addr, true);
+  if (way == NO_WAY || !IsValid(*this, set, way))
     return;
 
-  if (valid[set] & (1U << way))
-  {
-    if (addrs[set][way] & CACHE_VMEM_BIT)
-      lookup_table_vmem[(addrs[set][way] & memory.GetFakeVMemMask()) >> 5] = 0xff;
-    else if (addrs[set][way] & CACHE_EXRAM_BIT)
-      lookup_table_ex[(addrs[set][way] & memory.GetExRamMask()) >> 5] = 0xff;
-    else
-      lookup_table[(addrs[set][way] & memory.GetRamMask()) >> 5] = 0xff;
-
-    valid[set] &= ~(1U << way);
-    modified[set] &= ~(1U << way);
-  }
+  ForgetBlock(*this, memory, set, way);
+  Drop(*this, set, way);
 }
 
 void Cache::Flush(Memory::MemoryManager& memory, u32 addr)
 {
-  auto [set, way] = GetCache(memory, addr, true);
-
-  if (way == 0xff)
+  const auto [set, way] = GetCache(memory, addr, true);
+  if (way == NO_WAY || !IsValid(*this, set, way))
     return;
 
-  if (valid[set] & (1U << way))
-  {
-    if (modified[set] & (1U << way))
-      memory.CopyToEmu((addr & ~0x1f), data[set][way].data(), 32);
-
-    if (addrs[set][way] & CACHE_VMEM_BIT)
-      lookup_table_vmem[(addrs[set][way] & memory.GetFakeVMemMask()) >> 5] = 0xff;
-    else if (addrs[set][way] & CACHE_EXRAM_BIT)
-      lookup_table_ex[(addrs[set][way] & memory.GetExRamMask()) >> 5] = 0xff;
-    else
-      lookup_table[(addrs[set][way] & memory.GetRamMask()) >> 5] = 0xff;
-
-    valid[set] &= ~(1U << way);
-    modified[set] &= ~(1U << way);
-  }
+  if (IsModified(*this, set, way))
+    WriteBack(*this, memory, set, way, addr & ~(BLOCK_BYTES - 1));
+  ForgetBlock(*this, memory, set, way);
+  Drop(*this, set, way);
 }
 
 void Cache::Touch(Memory::MemoryManager& memory, u32 addr, bool store)
 {
+  // Loads and stores bring a block in the same way.
   GetCache(memory, addr, false);
-}
-
-std::pair<u32, u32> Cache::GetCache(Memory::MemoryManager& memory, u32 addr, bool locked)
-{
-  addr &= ~31;
-  u32 set = (addr >> 5) & 0x7f;
-  u32 way;
-
-  if (addr & CACHE_VMEM_BIT)
-  {
-    way = lookup_table_vmem[(addr & memory.GetFakeVMemMask()) >> 5];
-  }
-  else if (addr & CACHE_EXRAM_BIT)
-  {
-    way = lookup_table_ex[(addr & memory.GetExRamMask()) >> 5];
-  }
-  else
-  {
-    way = lookup_table[(addr & memory.GetRamMask()) >> 5];
-  }
-
-  // load to the cache
-  if (!locked && way == 0xff)
-  {
-    // select a way
-    if (valid[set] != 0xff)
-      way = s_way_from_valid[valid[set]];
-    else
-      way = s_way_from_plru[plru[set]];
-
-    if (valid[set] & (1 << way))
-    {
-      // store the cache back to main memory
-      if (modified[set] & (1 << way))
-        memory.CopyToEmu(addrs[set][way], data[set][way].data(), 32);
-
-      if (addrs[set][way] & CACHE_VMEM_BIT)
-        lookup_table_vmem[(addrs[set][way] & memory.GetFakeVMemMask()) >> 5] = 0xff;
-      else if (addrs[set][way] & CACHE_EXRAM_BIT)
-        lookup_table_ex[(addrs[set][way] & memory.GetExRamMask()) >> 5] = 0xff;
-      else
-        lookup_table[(addrs[set][way] & memory.GetRamMask()) >> 5] = 0xff;
-    }
-
-    // load
-    memory.CopyFromEmu(data[set][way].data(), (addr & ~0x1f), 32);
-
-    if (addr & CACHE_VMEM_BIT)
-      lookup_table_vmem[(addr & memory.GetFakeVMemMask()) >> 5] = way;
-    else if (addr & CACHE_EXRAM_BIT)
-      lookup_table_ex[(addr & memory.GetExRamMask()) >> 5] = way;
-    else
-      lookup_table[(addr & memory.GetRamMask()) >> 5] = way;
-
-    addrs[set][way] = addr;
-    valid[set] |= (1 << way);
-    modified[set] &= ~(1 << way);
-  }
-
-  // update plru
-  if (way != 0xff)
-    plru[set] = (plru[set] & ~s_plru_mask[way]) | s_plru_value[way];
-
-  return {set, way};
 }
 
 void Cache::Read(Memory::MemoryManager& memory, u32 addr, void* buffer, u32 len, bool locked)
 {
-  auto* value = static_cast<u8*>(buffer);
-
-  while (len > 0)
+  u8* out = static_cast<u8*>(buffer);
+  while (len != 0)
   {
-    auto [set, way] = GetCache(memory, addr, locked);
+    const u32 offset = addr & (BLOCK_BYTES - 1);
+    const u32 chunk = std::min(len, BLOCK_BYTES - offset);
+    const auto [set, way] = GetCache(memory, addr, locked);
 
-    u32 offset_in_block = addr - (addr & ~31);
-    u32 len_in_block = std::min<u32>(len, ((addr + 32) & ~31) - addr);
-
-    if (way != 0xff)
-    {
-      std::memcpy(value, reinterpret_cast<u8*>(data[set][way].data()) + offset_in_block,
-                  len_in_block);
-    }
+    if (way == NO_WAY)
+      memory.CopyFromEmu(out, addr, chunk);
     else
-    {
-      memory.CopyFromEmu(value, addr, len_in_block);
-    }
+      std::memcpy(out, reinterpret_cast<const u8*>(data[set][way].data()) + offset, chunk);
 
-    addr += len_in_block;
-    len -= len_in_block;
-    value += len_in_block;
+    addr += chunk;
+    out += chunk;
+    len -= chunk;
   }
 }
 
-void Cache::Write(Memory::MemoryManager& memory, u32 addr, const void* buffer, u32 len, bool locked)
+void Cache::Write(Memory::MemoryManager& memory, u32 addr, const void* buffer, u32 len,
+                  bool locked)
 {
-  auto* value = static_cast<const u8*>(buffer);
-
-  while (len > 0)
+  const u8* in = static_cast<const u8*>(buffer);
+  while (len != 0)
   {
-    auto [set, way] = GetCache(memory, addr, locked);
+    const u32 offset = addr & (BLOCK_BYTES - 1);
+    const u32 chunk = std::min(len, BLOCK_BYTES - offset);
+    const auto [set, way] = GetCache(memory, addr, locked);
 
-    u32 offset_in_block = addr - (addr & ~31);
-    u32 len_in_block = std::min<u32>(len, ((addr + 32) & ~31) - addr);
-
-    if (way != 0xff)
+    if (way == NO_WAY)
     {
-      std::memcpy(reinterpret_cast<u8*>(data[set][way].data()) + offset_in_block, value,
-                  len_in_block);
-      modified[set] |= (1 << way);
+      memory.CopyToEmu(addr, in, chunk);
     }
     else
     {
-      memory.CopyToEmu(addr, value, len_in_block);
+      std::memcpy(reinterpret_cast<u8*>(data[set][way].data()) + offset, in, chunk);
+      modified[set] |= WayBit(way);
     }
 
-    addr += len_in_block;
-    len -= len_in_block;
-    value += len_in_block;
+    addr += chunk;
+    in += chunk;
+    len -= chunk;
   }
 }
 
 void Cache::DoState(Memory::MemoryManager& memory, PointerWrap& p)
 {
+  // The lookup tables are not saved. When loading, only the slots of blocks
+  // that are valid now or after the load are touched, rather than refilling
+  // all of the (several MiB of) tables.
+  const auto for_each_valid_block = [this](auto&& fn) {
+    for (u32 set = 0; set < CACHE_SETS; ++set)
+      for (u32 way = 0; way < CACHE_WAYS; ++way)
+        if (IsValid(*this, set, way))
+          fn(set, way);
+  };
+
   if (p.IsReadMode())
-  {
-    // Clear valid parts of the lookup tables (this is done instead of using fill(0xff) to avoid
-    // loading the entire 4MB of tables into cache)
-    for (u32 set = 0; set < CACHE_SETS; set++)
-    {
-      for (u32 way = 0; way < CACHE_WAYS; way++)
-      {
-        if ((valid[set] & (1 << way)) != 0)
-        {
-          if (addrs[set][way] & CACHE_VMEM_BIT)
-            lookup_table_vmem[(addrs[set][way] & memory.GetFakeVMemMask()) >> 5] = 0xff;
-          else if (addrs[set][way] & CACHE_EXRAM_BIT)
-            lookup_table_ex[(addrs[set][way] & memory.GetExRamMask()) >> 5] = 0xff;
-          else
-            lookup_table[(addrs[set][way] & memory.GetRamMask()) >> 5] = 0xff;
-        }
-      }
-    }
-  }
+    for_each_valid_block([&](u32 set, u32 way) { ForgetBlock(*this, memory, set, way); });
 
   p.DoArray(data);
   p.DoArray(plru);
@@ -355,62 +347,38 @@ void Cache::DoState(Memory::MemoryManager& memory, PointerWrap& p)
 
   if (p.IsReadMode())
   {
-    // Recompute lookup tables
-    for (u32 set = 0; set < CACHE_SETS; set++)
-    {
-      for (u32 way = 0; way < CACHE_WAYS; way++)
-      {
-        if ((valid[set] & (1 << way)) != 0)
-        {
-          if (addrs[set][way] & CACHE_VMEM_BIT)
-            lookup_table_vmem[(addrs[set][way] & memory.GetFakeVMemMask()) >> 5] = way;
-          else if (addrs[set][way] & CACHE_EXRAM_BIT)
-            lookup_table_ex[(addrs[set][way] & memory.GetExRamMask()) >> 5] = way;
-          else
-            lookup_table[(addrs[set][way] & memory.GetRamMask()) >> 5] = way;
-        }
-      }
-    }
+    for_each_valid_block([&](u32 set, u32 way) {
+      LookupSlot(*this, memory, addrs[set][way]) = static_cast<u8>(way);
+    });
   }
 }
 
 u32 InstructionCache::ReadInstruction(Memory::MemoryManager& memory,
                                       PowerPC::PowerPCState& ppc_state, u32 addr)
 {
-  if (!HID0(ppc_state).ICE || m_disable_icache)  // instruction cache is disabled
+  if (m_disable_icache || !HID0(ppc_state).ICE)
     return memory.Read_U32(addr);
 
-  u32 value;
-  Read(memory, addr, &value, sizeof(value), HID0(ppc_state).ILOCK);
-  return Common::swap32(value);
+  u32 word;
+  Read(memory, addr, &word, sizeof(word), HID0(ppc_state).ILOCK);
+  return Common::swap32(word);
 }
 
 void InstructionCache::Invalidate(Memory::MemoryManager& memory, JitInterface& jit_interface,
                                   u32 addr)
 {
-  // Per the 750cl manual, section 3.4.1.5 Instruction Cache Enabling/Disabling (page 137)
-  // and section 3.4.2.6 Instruction Cache Block Invalidate (icbi) (page 140), the icbi
-  // instruction always invalidates, even if the instruction cache is disabled or locked,
-  // and it also invalidates all ways of the corresponding cache set, not just the way corresponding
-  // to the given address.
-  // (However, the icbi instruction's info on page 432 does not include this information)
-  const u32 set = (addr >> 5) & 0x7f;
-  for (size_t way = 0; way < 8; way++)
+  // The 750CL manual (sections 3.4.1.5 and 3.4.2.6) says icbi invalidates
+  // whether or not the cache is enabled or locked, and that it clears every
+  // way of the addressed set, not just the matching block.
+  const u32 set = SetOf(addr);
+  for (u32 way = 0; way < CACHE_WAYS; ++way)
   {
-    if (valid[set] & (1U << way))
-    {
-      if (addrs[set][way] & CACHE_VMEM_BIT)
-        lookup_table_vmem[(addrs[set][way] & memory.GetFakeVMemMask()) >> 5] = 0xff;
-      else if (addrs[set][way] & CACHE_EXRAM_BIT)
-        lookup_table_ex[(addrs[set][way] & memory.GetExRamMask()) >> 5] = 0xff;
-      else
-        lookup_table[(addrs[set][way] & memory.GetRamMask()) >> 5] = 0xff;
-    }
+    if (IsValid(*this, set, way))
+      ForgetBlock(*this, memory, set, way);
   }
   valid[set] = 0;
   modified[set] = 0;
 
-  // Also tell the JIT that the corresponding address has been invalidated
   jit_interface.InvalidateICacheLine(addr);
 }
 
