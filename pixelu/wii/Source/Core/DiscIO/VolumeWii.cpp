@@ -125,7 +125,8 @@ void VolumeWii::AddPartition(const Partition& partition, u32 type)
   };
 
   info.tmd = [this, start]() -> IOS::ES::TMDReader {
-    const std::optional<u32> size = m_reader->ReadSwapped<u32>(start + WII_PARTITION_TMD_SIZE_ADDRESS);
+    const std::optional<u32> size =
+        m_reader->ReadSwapped<u32>(start + WII_PARTITION_TMD_SIZE_ADDRESS);
     const std::optional<u64> offset =
         ReadSwappedAndShifted(start + WII_PARTITION_TMD_OFFSET_ADDRESS, PARTITION_NONE);
     if (!size || !offset)

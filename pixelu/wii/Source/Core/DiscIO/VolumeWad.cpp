@@ -262,8 +262,8 @@ std::string VolumeWAD::GetMakerID(const Partition& partition) const
 {
   // The TMD's group ID holds the maker code. Some channels have 0x0000 there instead.
   std::array<char, 2> maker;
-  if (!Read(u32{m_tmd_offset + TMD_GROUP_ID_OFFSET}, maker.size(), reinterpret_cast<u8*>(maker.data()),
-            partition))
+  if (!Read(u32{m_tmd_offset + TMD_GROUP_ID_OFFSET}, maker.size(),
+            reinterpret_cast<u8*>(maker.data()), partition))
   {
     return "00";
   }

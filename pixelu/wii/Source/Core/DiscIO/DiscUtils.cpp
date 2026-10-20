@@ -90,7 +90,8 @@ std::string NameForPartitionType(u32 partition_type, bool include_prefix)
 
 std::optional<u64> GetApploaderSize(const Volume& volume, const Partition& partition)
 {
-  const std::optional<u32> code_size = volume.ReadSwapped<u32>(APPLOADER_CODE_SIZE_FIELD, partition);
+  const std::optional<u32> code_size =
+      volume.ReadSwapped<u32>(APPLOADER_CODE_SIZE_FIELD, partition);
   const std::optional<u32> trailer_size =
       volume.ReadSwapped<u32>(APPLOADER_TRAILER_SIZE_FIELD, partition);
   if (!code_size || !trailer_size)
@@ -117,8 +118,10 @@ std::optional<u32> GetBootDOLSize(const Volume& volume, const Partition& partiti
   const auto scan = [&](u64 offsets, u64 sizes, u32 count) {
     for (u32 i = 0; i < count; ++i)
     {
-      const std::optional<u32> offset = volume.ReadSwapped<u32>(dol_offset + offsets + i * 4, partition);
-      const std::optional<u32> size = volume.ReadSwapped<u32>(dol_offset + sizes + i * 4, partition);
+      const std::optional<u32> offset =
+          volume.ReadSwapped<u32>(dol_offset + offsets + i * 4, partition);
+      const std::optional<u32> size =
+          volume.ReadSwapped<u32>(dol_offset + sizes + i * 4, partition);
       if (!offset || !size)
         return false;
       end = std::max<u32>(end, *offset + *size);
