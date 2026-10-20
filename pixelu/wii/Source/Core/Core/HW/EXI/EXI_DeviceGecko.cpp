@@ -143,11 +143,15 @@ void CEXIGecko::AdoptWaitingClient()
   if (!socket)
     return;
 
-  // A new PC connection replaces the old one and starts with empty FIFOs.
-  StopPump();
+  // A new PC connection replacing an earlier one starts with empty FIFOs. Bytes the console
+  // queued before the first PC connected are kept and go to that PC.
+  if (m_pump_thread.joinable())
+  {
+    StopPump();
+    m_to_pc.clear();
+    m_from_pc.clear();
+  }
   m_client = std::move(socket);
-  m_to_pc.clear();
-  m_from_pc.clear();
   m_pump_running = true;
   m_pump_thread = std::thread(&CEXIGecko::Pump, this);
 }
