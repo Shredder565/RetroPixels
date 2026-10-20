@@ -26,31 +26,43 @@ std::unique_ptr<PlainFileReader> PlainFileReader::Create(File::DirectIOFile file
   return std::unique_ptr<PlainFileReader>(new PlainFileReader(std::move(file)));
 }
 
-std::unique_ptr<BlobReader> PlainFileReader::CopyReader() const
-{
-  return Create(m_file);
-}
-
 bool PlainFileReader::Read(u64 offset, u64 nbytes, u8* out_ptr)
 {
   return m_file.OffsetRead(offset, out_ptr, nbytes);
 }
+
+std::unique_ptr<BlobReader> PlainFileReader::CopyReader() const
+{
+  // The copy duplicates the handle, so both readers can be used from different threads.
+  return Create(m_file);
+}
+
+namespace
+{
+// Opens (and truncates) the destination of a conversion; tells the user when that fails.
+File::DirectIOFile OpenDestination(const std::string& path)
+{
+  File::DirectIOFile file(path, File::AccessMode::Write);
+  if (!file.IsOpen())
+  {
+    PanicAlertFmtT(
+        "Failed to open the output file \"{0}\".\n"
+        "Check that you have permissions to write the target folder and that the media can "
+        "be written.",
+        path);
+  }
+  return file;
+}
+}  // namespace
 
 bool ConvertToPlain(BlobReader* infile, const std::string& infile_path,
                     const std::string& outfile_path, const CompressCB& callback)
 {
   ASSERT(infile->GetDataSizeType() == DataSizeType::Accurate);
 
-  File::DirectIOFile outfile(outfile_path, File::AccessMode::Write);
+  File::DirectIOFile outfile = OpenDestination(outfile_path);
   if (!outfile.IsOpen())
-  {
-    PanicAlertFmtT(
-        "Failed to open the output file \"{0}\".\n"
-        "Check that you have permissions to write the target folder and that the media can "
-        "be written.",
-        outfile_path);
     return false;
-  }
 
   // Copy in pieces of at least 512 KiB, rounded to whole blocks of the source format.
   constexpr u64 MIN_PIECE = 0x80000;

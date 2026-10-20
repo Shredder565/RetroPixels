@@ -29,21 +29,12 @@ namespace File
 {
 DirectIOFile::DirectIOFile() = default;
 
-DirectIOFile::~DirectIOFile()
+DirectIOFile::DirectIOFile(const std::string& path, AccessMode access_mode, OpenMode open_mode)
 {
-  Close();
+  Open(path, access_mode, open_mode);
 }
 
-DirectIOFile::DirectIOFile(const DirectIOFile& other)
-{
-  *this = other.Duplicate();
-}
-
-DirectIOFile& DirectIOFile::operator=(const DirectIOFile& other)
-{
-  return *this = other.Duplicate();
-}
-
+// Moving hands the handle (and the current offset) over by swapping with an empty object.
 DirectIOFile::DirectIOFile(DirectIOFile&& other)
 {
   Swap(other);
@@ -56,9 +47,20 @@ DirectIOFile& DirectIOFile::operator=(DirectIOFile&& other)
   return *this;
 }
 
-DirectIOFile::DirectIOFile(const std::string& path, AccessMode access_mode, OpenMode open_mode)
+// Copies get their own duplicated handle; see Duplicate().
+DirectIOFile::DirectIOFile(const DirectIOFile& other) : DirectIOFile(other.Duplicate())
 {
-  Open(path, access_mode, open_mode);
+}
+
+DirectIOFile& DirectIOFile::operator=(const DirectIOFile& other)
+{
+  DirectIOFile copy = other.Duplicate();
+  return *this = std::move(copy);
+}
+
+DirectIOFile::~DirectIOFile()
+{
+  Close();
 }
 
 bool DirectIOFile::Open(const std::string& path, AccessMode access_mode, OpenMode open_mode)
