@@ -814,9 +814,10 @@ void ZeldaMixer::GenerateInput(Voice& voice, MixBuffer& out)
   case SOURCE_PCM16_MRAM:
   {
     // The 4 raw samples kept from the previous frame, then this frame's: at most 0x50F (a
-    // ratio of 0xFFFF with a stray integer part in the fraction), rounded up to a whole AFC
-    // block.
-    std::array<s16, 4 + 0x500 + 0x10> raw{};
+    // ratio of 0xFFFF with a stray integer part in the fraction). AFC decodes whole blocks after
+    // taking up to 16 cached samples, so it can write up to 15 samples past that; the slack keeps
+    // those writes inside the buffer.
+    std::array<s16, 4 + 0x500 + 0x40> raw{};
     for (size_t i = 0; i < 4; ++i)
       raw[i] = voice.GetSigned(vpb::HISTORY + i);
     s16* const fresh = raw.data() + 4;
