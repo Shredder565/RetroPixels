@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,5 +9,6 @@ class System;
 
 namespace IOS::HLE::MIOS
 {
+// Switches the console into GameCube mode and runs the GameCube IPL until it is ready.
 bool Load(Core::System& system);
 }  // namespace IOS::HLE::MIOS

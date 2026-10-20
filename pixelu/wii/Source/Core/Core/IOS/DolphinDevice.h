@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,6 +7,8 @@
 
 namespace IOS::HLE
 {
+// /dev/dolphin: an emulator-only device through which homebrew can query and adjust emulator
+// settings (speed limit, version, Discord presence, host clock).
 class DolphinDevice final : public EmulationDevice
 {
 public:

@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/IOS/MIOS.h"
 
@@ -27,21 +26,32 @@
 
 namespace IOS::HLE::MIOS
 {
-static void ReinitHardware(Core::System& system)
+namespace
+{
+// Handshake word between MIOS and the IPL: MIOS clears it, the IPL sets it to IPL_WAITING when
+// it has initialised, and continues once MIOS clears it again.
+constexpr u32 HANDSHAKE_ADDRESS = 0x30f8;
+constexpr u32 IPL_WAITING = 0xdeadbeef;
+
+// Low memory word the IPL reads to find the MIOS build.
+constexpr u32 MIOS_INFO_ADDRESS = 0x3180;
+constexpr u32 MIOS_INFO_VALUE = 0x09142001;
+
+void EnterGameCubeMode(Core::System& system)
 {
   system.SetIsWii(false);
 
-  // IOS clears mem2 and overwrites it with pseudo-random data (for security).
+  // MIOS wipes MEM2 before handing the console over.
   auto& memory = system.GetMemory();
   std::memset(memory.GetEXRAM(), 0, memory.GetExRamSizeReal());
-  // MIOS appears to only reset the DI and the PPC.
-  // HACK However, resetting DI will reset the DTK config, which is set by the system menu
-  // (and not by MIOS), causing games that use DTK to break.  Perhaps MIOS doesn't actually
-  // reset DI fully, in such a way that the DTK config isn't cleared?
-  // system.GetDVDInterface().ResetDrive(true);
+
+  // MIOS resets the CPU and the drive interface. The drive is deliberately left alone here: a
+  // full DI reset would also drop the audio streaming set-up that the System Menu made, and
+  // games relying on streamed audio would then be silent.
   system.GetPowerPC().Reset();
   Wiimote::ResetAllWiimotes();
-  // Note: this is specific to Dolphin and is required because we initialised it in Wii mode.
+
+  // The DSP emulator was started for a Wii and has to be restarted for a GameCube.
   auto& dsp = system.GetDSP();
   dsp.Reinit(Config::Get(Config::MAIN_DSP_HLE));
   dsp.GetDSPEmulator()->Initialize(system.IsWii(), Config::Get(Config::MAIN_DSP_THREAD));
@@ -49,55 +59,67 @@ static void ReinitHardware(Core::System& system)
   system.GetSystemTimers().ChangePPCClock(SystemTimers::Mode::GC);
 }
 
-constexpr u32 ADDRESS_INIT_SEMAPHORE = 0x30f8;
-
-bool Load(Core::System& system)
+// Loads an optional symbol map for the IPL and re-applies HLE patches if one was found.
+void RefreshIPLSymbols(Core::System& system, const Core::CPUThreadGuard& guard)
 {
-  auto& memory = system.GetMemory();
+  auto& symbols = system.GetPowerPC().GetSymbolDB();
+  bool changed = symbols.Clear();
 
-  ASSERT(Core::IsCPUThread());
-  Core::CPUThreadGuard guard(system);
-
-  memory.Write_U32(0x00000000, ADDRESS_INIT_SEMAPHORE);
-  memory.Write_U32(0x09142001, 0x3180);
-
-  ReinitHardware(system);
-  NOTICE_LOG_FMT(IOS, "Reinitialised hardware.");
-
-  auto& power_pc = system.GetPowerPC();
-  auto& ppc_symbol_db = power_pc.GetSymbolDB();
-
-  // Load symbols for the IPL if they exist.
-  bool symbols_changed = ppc_symbol_db.Clear();
-
-  if (ppc_symbol_db.LoadMap(guard, File::GetUserPath(D_MAPS_IDX) + "mios-ipl.map"))
+  const std::string map_path = File::GetUserPath(D_MAPS_IDX) + "mios-ipl.map";
+  if (symbols.LoadMap(guard, map_path))
   {
     ::HLE::Clear();
     ::HLE::PatchFunctions(system);
-    symbols_changed = true;
+    changed = true;
   }
 
-  if (symbols_changed)
+  if (changed)
     Host_PPCSymbolsChanged();
+}
 
-  const PowerPC::CoreMode core_mode = power_pc.GetMode();
-  power_pc.SetMode(PowerPC::CoreMode::Interpreter);
+// Runs the IPL's start-up code until it signals readiness. The interpreter is used so the CPU
+// can be stepped one instruction at a time.
+void RunIPLUntilReady(Core::System& system)
+{
+  auto& cpu = system.GetPowerPC();
+  auto& memory = system.GetMemory();
 
-  PowerPC::PowerPCState& ppc_state = power_pc.GetPPCState();
-  ppc_state.msr.Hex = 0;
-  ppc_state.pc = 0x3400;
-  power_pc.MSRUpdated();
+  const PowerPC::CoreMode previous_mode = cpu.GetMode();
+  cpu.SetMode(PowerPC::CoreMode::Interpreter);
 
-  NOTICE_LOG_FMT(IOS, "Loaded MIOS and bootstrapped PPC.");
+  auto& state = cpu.GetPPCState();
+  state.msr.Hex = 0;
+  state.pc = 0x3400;
+  cpu.MSRUpdated();
 
-  // IOS writes 0 to 0x30f8 before bootstrapping the PPC. Once started, the IPL eventually writes
-  // 0xdeadbeef there, then waits for it to be cleared by IOS before continuing.
-  while (memory.Read_U32(ADDRESS_INIT_SEMAPHORE) != 0xdeadbeef)
-    power_pc.SingleStep();
-  power_pc.SetMode(core_mode);
+  NOTICE_LOG_FMT(IOS, "MIOS: starting the IPL");
 
-  memory.Write_U32(0x00000000, ADDRESS_INIT_SEMAPHORE);
-  NOTICE_LOG_FMT(IOS, "IPL ready.");
+  while (memory.Read_U32(HANDSHAKE_ADDRESS) != IPL_WAITING)
+    cpu.SingleStep();
+
+  cpu.SetMode(previous_mode);
+}
+}  // namespace
+
+bool Load(Core::System& system)
+{
+  ASSERT(Core::IsCPUThread());
+  Core::CPUThreadGuard guard(system);
+
+  auto& memory = system.GetMemory();
+  memory.Write_U32(0, HANDSHAKE_ADDRESS);
+  memory.Write_U32(MIOS_INFO_VALUE, MIOS_INFO_ADDRESS);
+
+  EnterGameCubeMode(system);
+  NOTICE_LOG_FMT(IOS, "MIOS: hardware switched to GameCube mode");
+
+  RefreshIPLSymbols(system, guard);
+  RunIPLUntilReady(system);
+
+  // Release the IPL.
+  memory.Write_U32(0, HANDSHAKE_ADDRESS);
+  NOTICE_LOG_FMT(IOS, "MIOS: IPL is running");
+
   system.SetIsMIOS(true);
   system.GetDVDInterface().UpdateRunningGameMetadata();
   SConfig::OnTitleDirectlyBooted(guard);
