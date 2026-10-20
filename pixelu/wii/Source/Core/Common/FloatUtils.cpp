@@ -1,77 +1,52 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/FloatUtils.h"
 
 #include <bit>
 #include <cmath>
+#include <limits>
 
 namespace Common
 {
+namespace
+{
+template <typename Bits>
+u32 Classify(Bits bits, Bits sign_mask, Bits exp_mask, Bits frac_mask)
+{
+  const bool negative = (bits & sign_mask) != 0;
+  const Bits exponent = bits & exp_mask;
+  const Bits fraction = bits & frac_mask;
+
+  if (exponent == exp_mask)
+  {
+    if (fraction != 0)
+      return PPC_FPCLASS_QNAN;
+    return negative ? PPC_FPCLASS_NINF : PPC_FPCLASS_PINF;
+  }
+  if (exponent != 0)
+    return negative ? PPC_FPCLASS_NN : PPC_FPCLASS_PN;
+  if (fraction != 0)
+    return negative ? PPC_FPCLASS_ND : PPC_FPCLASS_PD;
+  return negative ? PPC_FPCLASS_NZ : PPC_FPCLASS_PZ;
+}
+
+constexpr u64 EXP_FIELD_MAX = 0x7FF;
+constexpr int FRAC_BITS = 52;
+constexpr u64 FRAC_MASK = (u64{1} << FRAC_BITS) - 1;
+}  // namespace
+
 u32 ClassifyDouble(double dvalue)
 {
-  const u64 ivalue = std::bit_cast<u64>(dvalue);
-  const u64 sign = ivalue & DOUBLE_SIGN;
-  const u64 exp = ivalue & DOUBLE_EXP;
-
-  if (exp > DOUBLE_ZERO && exp < DOUBLE_EXP)
-  {
-    // Nice normalized number.
-    return sign ? PPC_FPCLASS_NN : PPC_FPCLASS_PN;
-  }
-
-  const u64 mantissa = ivalue & DOUBLE_FRAC;
-  if (mantissa)
-  {
-    if (exp)
-      return PPC_FPCLASS_QNAN;
-
-    // Denormalized number.
-    return sign ? PPC_FPCLASS_ND : PPC_FPCLASS_PD;
-  }
-
-  if (exp)
-  {
-    // Infinite
-    return sign ? PPC_FPCLASS_NINF : PPC_FPCLASS_PINF;
-  }
-
-  // Zero
-  return sign ? PPC_FPCLASS_NZ : PPC_FPCLASS_PZ;
+  return Classify<u64>(std::bit_cast<u64>(dvalue), DOUBLE_SIGN, DOUBLE_EXP, DOUBLE_FRAC);
 }
 
 u32 ClassifyFloat(float fvalue)
 {
-  const u32 ivalue = std::bit_cast<u32>(fvalue);
-  const u32 sign = ivalue & FLOAT_SIGN;
-  const u32 exp = ivalue & FLOAT_EXP;
-
-  if (exp > FLOAT_ZERO && exp < FLOAT_EXP)
-  {
-    // Nice normalized number.
-    return sign ? PPC_FPCLASS_NN : PPC_FPCLASS_PN;
-  }
-
-  const u32 mantissa = ivalue & FLOAT_FRAC;
-  if (mantissa)
-  {
-    if (exp)
-      return PPC_FPCLASS_QNAN;  // Quiet NAN
-
-    // Denormalized number.
-    return sign ? PPC_FPCLASS_ND : PPC_FPCLASS_PD;
-  }
-
-  if (exp)
-  {
-    // Infinite
-    return sign ? PPC_FPCLASS_NINF : PPC_FPCLASS_PINF;
-  }
-
-  // Zero
-  return sign ? PPC_FPCLASS_NZ : PPC_FPCLASS_PZ;
+  return Classify<u32>(std::bit_cast<u32>(fvalue), FLOAT_SIGN, FLOAT_EXP, FLOAT_FRAC);
 }
 
+// The estimate tables of the Broadway's frsqrte and fres units, as measured on hardware.
+// frsqrte: 16 segments for even and 16 for odd exponents; fres: 32 segments of the mantissa.
 const std::array<BaseAndDec, 32> frsqrte_expected = {{
     {0x1a7e800, -0x568}, {0x17cb800, -0x4f3}, {0x1552800, -0x48d}, {0x130c000, -0x435},
     {0x10f2000, -0x3e7}, {0x0eff000, -0x3a2}, {0x0d2e000, -0x365}, {0x0b7c000, -0x32e},
@@ -83,61 +58,6 @@ const std::array<BaseAndDec, 32> frsqrte_expected = {{
     {0x20c1000, -0x35e}, {0x1f12000, -0x332}, {0x1d79000, -0x30a}, {0x1bf4000, -0x2e6},
 }};
 
-double ApproximateReciprocalSquareRoot(double val)
-{
-  s64 integral = std::bit_cast<s64>(val);
-  s64 mantissa = integral & ((1LL << 52) - 1);
-  const s64 sign = integral & (1ULL << 63);
-  s64 exponent = integral & (0x7FFLL << 52);
-
-  // Special case 0
-  if (mantissa == 0 && exponent == 0)
-  {
-    return sign ? -std::numeric_limits<double>::infinity() :
-                  std::numeric_limits<double>::infinity();
-  }
-
-  // Special case NaN-ish numbers
-  if (exponent == (0x7FFLL << 52))
-  {
-    if (mantissa == 0)
-    {
-      if (sign)
-        return std::numeric_limits<double>::quiet_NaN();
-
-      return 0.0;
-    }
-
-    return MakeQuiet(val);
-  }
-
-  // Negative numbers return NaN
-  if (sign)
-    return std::numeric_limits<double>::quiet_NaN();
-
-  if (!exponent)
-  {
-    // "Normalize" denormal values
-    do
-    {
-      exponent -= 1LL << 52;
-      mantissa <<= 1;
-    } while (!(mantissa & (1LL << 52)));
-    mantissa &= (1LL << 52) - 1;
-    exponent += 1LL << 52;
-  }
-
-  const s64 exponent_lsb = exponent & (1LL << 52);
-  exponent = ((0x3FFLL << 52) - ((exponent - (0x3FELL << 52)) / 2)) & (0x7FFLL << 52);
-  integral = sign | exponent;
-
-  const int i = static_cast<int>((exponent_lsb | mantissa) >> 37);
-  const auto& entry = frsqrte_expected[i / 2048];
-  integral |= static_cast<s64>(entry.m_base + entry.m_dec * (i % 2048)) << 26;
-
-  return std::bit_cast<double>(integral);
-}
-
 const std::array<BaseAndDec, 32> fres_expected = {{
     {0x7ff800, 0x3e1}, {0x783800, 0x3a7}, {0x70ea00, 0x371}, {0x6a0800, 0x340}, {0x638800, 0x313},
     {0x5d6200, 0x2ea}, {0x579000, 0x2c4}, {0x520800, 0x2a0}, {0x4cc800, 0x27f}, {0x47ca00, 0x261},
@@ -148,42 +68,86 @@ const std::array<BaseAndDec, 32> fres_expected = {{
     {0x041c00, 0x108}, {0x020c00, 0x106},
 }};
 
-// Used by fres and ps_res.
-double ApproximateReciprocal(double val)
+double ApproximateReciprocalSquareRoot(double val)
 {
-  s64 integral = std::bit_cast<s64>(val);
-  const s64 mantissa = integral & ((1LL << 52) - 1);
-  const s64 sign = integral & (1ULL << 63);
-  s64 exponent = integral & (0x7FFLL << 52);
+  const u64 bits = std::bit_cast<u64>(val);
+  const u64 sign = bits & DOUBLE_SIGN;
+  s64 exponent = static_cast<s64>((bits & DOUBLE_EXP) >> FRAC_BITS);
+  u64 fraction = bits & FRAC_MASK;
 
-  // Special case 0
-  if (mantissa == 0 && exponent == 0)
-    return std::copysign(std::numeric_limits<double>::infinity(), val);
+  if (exponent == 0 && fraction == 0)
+    return sign ? -std::numeric_limits<double>::infinity() : std::numeric_limits<double>::infinity();
 
-  // Special case NaN-ish numbers
-  if (exponent == (0x7FFLL << 52))
+  if (exponent == static_cast<s64>(EXP_FIELD_MAX))
   {
-    if (mantissa == 0)
-      return std::copysign(0.0, val);
-    return MakeQuiet(val);
+    if (fraction != 0)
+      return MakeQuiet(val);
+    // 1/sqrt(+inf) = +0; 1/sqrt(-inf) is invalid.
+    return sign ? std::numeric_limits<double>::quiet_NaN() : 0.0;
   }
 
-  // Special case small inputs
-  if (exponent < (895LL << 52))
-    return std::copysign(std::numeric_limits<float>::max(), val);
+  if (sign)
+    return std::numeric_limits<double>::quiet_NaN();
 
-  // Special case large inputs
-  if (exponent >= (1149LL << 52))
-    return std::copysign(0.0, val);
+  if (exponent == 0)
+  {
+    // Denormal: shift the fraction up until it has an implicit leading one, lowering the
+    // exponent accordingly (it may go to zero or below).
+    exponent = 1;
+    while ((fraction & (u64{1} << FRAC_BITS)) == 0)
+    {
+      fraction <<= 1;
+      --exponent;
+    }
+    fraction &= FRAC_MASK;
+  }
 
-  exponent = (0x7FDLL << 52) - exponent;
+  // Negate and halve the unbiased exponent: e' = 1023 - (e - 1022) / 2, rounded down and kept
+  // to 11 bits, i.e. floor((2 * 1023 + 1022 - e) / 2).
+  const u64 result_exponent =
+      static_cast<u64>((2 * 0x3FF + 0x3FE - exponent) >> 1) & EXP_FIELD_MAX;
 
-  const int i = static_cast<int>(mantissa >> 37);
-  const auto& entry = fres_expected[i / 1024];
-  integral = sign | exponent;
-  integral |= static_cast<s64>(entry.m_base - (entry.m_dec * (i % 1024) + 1) / 2) << 29;
+  // The table is indexed by the exponent's parity and the top 4 fraction bits; the next 11
+  // fraction bits interpolate within the segment.
+  const u32 index = static_cast<u32>(((static_cast<u64>(exponent) & 1) << 15) | (fraction >> 37));
+  const BaseAndDec& segment = frsqrte_expected[index >> 11];
+  const s64 estimate = segment.m_base + segment.m_dec * static_cast<int>(index & 0x7FF);
 
-  return std::bit_cast<double>(integral);
+  const u64 result = sign | (result_exponent << FRAC_BITS) | (static_cast<u64>(estimate) << 26);
+  return std::bit_cast<double>(result);
 }
 
+double ApproximateReciprocal(double val)
+{
+  const u64 bits = std::bit_cast<u64>(val);
+  const u64 sign = bits & DOUBLE_SIGN;
+  const u64 exponent = (bits & DOUBLE_EXP) >> FRAC_BITS;
+  const u64 fraction = bits & FRAC_MASK;
+
+  if (exponent == 0 && fraction == 0)
+    return std::copysign(std::numeric_limits<double>::infinity(), val);
+
+  if (exponent == EXP_FIELD_MAX)
+  {
+    if (fraction != 0)
+      return MakeQuiet(val);
+    return std::copysign(0.0, val);
+  }
+
+  // Results outside the single-precision range saturate (to FLT_MAX) or flush to zero.
+  if (exponent < 895)
+    return std::copysign(static_cast<double>(std::numeric_limits<float>::max()), val);
+  if (exponent >= 1149)
+    return std::copysign(0.0, val);
+
+  const u64 result_exponent = 0x7FD - exponent;
+
+  const u32 index = static_cast<u32>(fraction >> 37);  // top 15 fraction bits
+  const BaseAndDec& segment = fres_expected[index >> 10];
+  const int step = static_cast<int>(index & 0x3FF);
+  const s64 estimate = segment.m_base - (segment.m_dec * step + 1) / 2;
+
+  const u64 result = sign | (result_exponent << FRAC_BITS) | (static_cast<u64>(estimate) << 29);
+  return std::bit_cast<double>(result);
+}
 }  // namespace Common

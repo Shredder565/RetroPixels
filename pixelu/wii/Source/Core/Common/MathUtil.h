@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,6 +6,7 @@
 #include <bit>
 #include <cmath>
 #include <concepts>
+#include <cstddef>
 #include <limits>
 #include <type_traits>
 #include <utility>
@@ -17,41 +17,44 @@ namespace MathUtil
 {
 constexpr double TAU = 6.2831853071795865;
 constexpr double PI = TAU / 2;
+// Standard gravity in m/s^2.
 constexpr double GRAVITY_ACCELERATION = 9.80665;
 
+// -1, 0 or 1.
 template <typename T>
 constexpr auto Sign(const T& val) -> decltype((T{} < val) - (val < T{}))
 {
   return (T{} < val) - (val < T{});
 }
 
+// Linear interpolation from x (a = 0) to y (a = 1).
 template <typename T, typename F>
 constexpr auto Lerp(const T& x, const T& y, const F& a) -> decltype(x + (y - x) * a)
 {
   return x + (y - x) * a;
 }
 
-// Casts the specified value to a Dest. The value will be clamped to fit in the destination type.
-// Warning: The result of SaturatingCast(NaN) is undefined.
+// Converts to an integer type, clamping to its range. NaN gives an unspecified result.
 template <std::integral Dest, typename T>
 constexpr Dest SaturatingCast(T value)
 {
-  constexpr Dest lo = std::numeric_limits<Dest>::min();
-  constexpr Dest hi = std::numeric_limits<Dest>::max();
-
+  constexpr Dest smallest = std::numeric_limits<Dest>::min();
+  constexpr Dest largest = std::numeric_limits<Dest>::max();
   if constexpr (std::is_integral_v<T>)
   {
-    if (std::cmp_less(value, lo))
-      return lo;
-    if (std::cmp_greater(value, hi))
-      return hi;
+    if (std::cmp_less(value, smallest))
+      return smallest;
+    if (std::cmp_greater(value, largest))
+      return largest;
   }
   else
   {
-    if (value < static_cast<T>(lo))
-      return lo;
-    if (value >= static_cast<T>(hi))
-      return hi;
+    // `largest` may not be exactly representable in T, so anything at or above its rounded
+    // value saturates.
+    if (value < static_cast<T>(smallest))
+      return smallest;
+    if (value >= static_cast<T>(largest))
+      return largest;
   }
   return static_cast<Dest>(value);
 }
@@ -62,17 +65,14 @@ constexpr bool IsPow2(T imm)
   return imm > 0 && (imm & (imm - 1)) == 0;
 }
 
+// Smallest power of two >= value (0 for 0 and for values above 2^31).
 constexpr u32 NextPowerOf2(u32 value)
 {
-  --value;
-  value |= value >> 1;
-  value |= value >> 2;
-  value |= value >> 4;
-  value |= value >> 8;
-  value |= value >> 16;
-  ++value;
-
-  return value;
+  if (value <= 1)
+    return value;
+  if (value > 0x80000000u)
+    return 0;
+  return std::bit_ceil(value);
 }
 
 template <class T>
@@ -95,10 +95,10 @@ struct Rectangle
     return left == r.left && top == r.top && right == r.right && bottom == r.bottom;
   }
 
-  constexpr T GetWidth() const { return GetDistance(left, right); }
-  constexpr T GetHeight() const { return GetDistance(top, bottom); }
-  // If the rectangle is in a coordinate system with a lower-left origin, use
-  // this Clamp.
+  constexpr T GetWidth() const { return Distance(left, right); }
+  constexpr T GetHeight() const { return Distance(top, bottom); }
+
+  // Clamp for coordinate systems with the origin at the lower left (y1 is the top).
   void ClampLL(T x1, T y1, T x2, T y2)
   {
     left = std::clamp(left, x1, x2);
@@ -107,8 +107,7 @@ struct Rectangle
     bottom = std::clamp(bottom, y2, y1);
   }
 
-  // If the rectangle is in a coordinate system with an upper-left origin,
-  // use this Clamp.
+  // Clamp for coordinate systems with the origin at the upper left (y1 is the top).
   void ClampUL(T x1, T y1, T x2, T y2)
   {
     left = std::clamp(left, x1, x2);
@@ -118,22 +117,27 @@ struct Rectangle
   }
 
 private:
-  constexpr T GetDistance(T a, T b) const
+  static constexpr T Distance(T a, T b)
   {
-    if constexpr (std::is_unsigned<T>())
-      return b > a ? b - a : a - b;
+    if constexpr (std::is_unsigned_v<T>)
+      return a < b ? b - a : a - b;
     else
       return std::abs(b - a);
   }
 };
 
+// Mean of a stream of samples, updated incrementally.
 template <typename T>
 class RunningMean
 {
 public:
   constexpr void Clear() { *this = {}; }
 
-  constexpr void Push(T x) { m_mean = m_mean + (x - m_mean) / ++m_count; }
+  constexpr void Push(T x)
+  {
+    ++m_count;
+    m_mean = m_mean + (x - m_mean) / m_count;
+  }
 
   constexpr size_t Count() const { return m_count; }
   constexpr T Mean() const { return m_mean; }
@@ -143,6 +147,7 @@ private:
   T m_mean{};
 };
 
+// Mean and variance of a stream of samples (Welford's method).
 template <typename T>
 class RunningVariance
 {
@@ -151,28 +156,30 @@ public:
 
   constexpr void Push(T x)
   {
-    const auto old_mean = m_running_mean.Mean();
-    m_running_mean.Push(x);
-    m_variance += (x - old_mean) * (x - m_running_mean.Mean());
+    const T previous_mean = m_mean.Mean();
+    m_mean.Push(x);
+    m_sum_of_squares += (x - previous_mean) * (x - m_mean.Mean());
   }
 
-  constexpr size_t Count() const { return m_running_mean.Count(); }
-  constexpr T Mean() const { return m_running_mean.Mean(); }
+  constexpr size_t Count() const { return m_mean.Count(); }
+  constexpr T Mean() const { return m_mean.Mean(); }
 
-  constexpr T Variance() const { return m_variance / (Count() - 1); }
+  // Sample variance (divides by n - 1).
+  constexpr T Variance() const { return m_sum_of_squares / (Count() - 1); }
   T StandardDeviation() const { return std::sqrt(Variance()); }
 
-  constexpr T PopulationVariance() const { return m_variance / Count(); }
+  // Population variance (divides by n).
+  constexpr T PopulationVariance() const { return m_sum_of_squares / Count(); }
   T PopulationStandardDeviation() const { return std::sqrt(PopulationVariance()); }
 
 private:
-  RunningMean<T> m_running_mean;
-  T m_variance{};
+  RunningMean<T> m_mean;
+  T m_sum_of_squares{};
 };
 
-// Rounds down. 0 -> undefined
+// floor(log2(val)); val must not be 0.
 constexpr int IntLog2(u64 val)
 {
-  return 63 - std::countl_zero(val);
+  return std::bit_width(val) - 1;
 }
 }  // namespace MathUtil

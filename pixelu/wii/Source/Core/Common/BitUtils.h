@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,6 +8,8 @@
 #include <cstddef>
 #include <cstring>
 #include <initializer_list>
+#include <memory>
+#include <ranges>
 #include <span>
 #include <type_traits>
 #include <utility>
@@ -17,172 +18,100 @@
 
 namespace Common
 {
-///
-/// Retrieves the size of a type in bits.
-///
-/// @tparam T Type to get the size of.
-///
-/// @return the size of the type in bits.
-///
+// Width of T in bits.
 template <typename T>
 constexpr size_t BitSize() noexcept
 {
   return sizeof(T) * CHAR_BIT;
 }
 
-///
-/// Extracts a bit from a value.
-///
-/// @param  src The value to extract a bit from.
-/// @param  bit The bit to extract.
-///
-/// @tparam T   The type of the value.
-///
-/// @return The extracted bit.
-///
+// Bit `bit` of src, as 0 or 1.
 template <typename T>
 constexpr T ExtractBit(const T src, const size_t bit) noexcept
 {
-  return (src >> bit) & static_cast<T>(1);
+  return static_cast<T>((src >> bit) & static_cast<T>(1));
 }
 
-///
-/// Extracts a bit from a value.
-///
-/// @param  src The value to extract a bit from.
-///
-/// @tparam bit The bit to extract.
-/// @tparam T   The type of the value.
-///
-/// @return The extracted bit.
-///
 template <size_t bit, typename T>
 constexpr T ExtractBit(const T src) noexcept
 {
-  static_assert(bit < BitSize<T>(), "Specified bit must be within T's bit width.");
-
+  static_assert(bit < BitSize<T>(), "Bit index outside the type");
   return ExtractBit(src, bit);
 }
 
-///
-/// Extracts a range of bits from a value.
-///
-/// @param  src    The value to extract the bits from.
-/// @param  begin  The beginning of the bit range. This is inclusive.
-/// @param  end    The ending of the bit range. This is inclusive.
-///
-/// @tparam T      The type of the value.
-/// @tparam Result The returned result type. This is the unsigned analog
-///                of a signed type if a signed type is passed as T.
-///
-/// @return The extracted bits.
-///
+// Bits begin..end (both inclusive) of src, shifted down to bit 0. Signed inputs are treated as
+// their unsigned counterpart.
 template <typename T, typename Result = std::make_unsigned_t<T>>
 constexpr Result ExtractBits(const T src, const size_t begin, const size_t end) noexcept
 {
-  return static_cast<Result>(((static_cast<Result>(src) << ((BitSize<T>() - 1) - end)) >>
-                              (BitSize<T>() - end + begin - 1)));
+  using U = std::make_unsigned_t<T>;
+  const size_t count = end - begin + 1;
+  const U all_ones = static_cast<U>(~U{0});
+  const U mask = count >= BitSize<T>() ? all_ones : static_cast<U>(all_ones >> (BitSize<T>() - count));
+  return static_cast<Result>(static_cast<U>(static_cast<U>(src) >> begin) & mask);
 }
 
-///
-/// Extracts a range of bits from a value.
-///
-/// @param  src    The value to extract the bits from.
-///
-/// @tparam begin  The beginning of the bit range. This is inclusive.
-/// @tparam end    The ending of the bit range. This is inclusive.
-/// @tparam T      The type of the value.
-/// @tparam Result The returned result type. This is the unsigned analog
-///                of a signed type if a signed type is passed as T.
-///
-/// @return The extracted bits.
-///
 template <size_t begin, size_t end, typename T, typename Result = std::make_unsigned_t<T>>
 constexpr Result ExtractBits(const T src) noexcept
 {
-  static_assert(begin < end, "Beginning bit must be less than the ending bit.");
-  static_assert(begin < BitSize<T>(), "Beginning bit is larger than T's bit width.");
-  static_assert(end < BitSize<T>(), "Ending bit is larger than T's bit width.");
-
+  static_assert(begin < end, "The first bit must come before the last");
+  static_assert(begin < BitSize<T>(), "First bit outside the type");
+  static_assert(end < BitSize<T>(), "Last bit outside the type");
   return ExtractBits<T, Result>(src, begin, end);
 }
 
-///
-/// Verifies whether the supplied value is a valid bit mask of the form 0b00...0011...11.
-/// Both edge cases of all zeros and all ones are considered valid masks, too.
-///
-/// @param  mask The mask value to test for validity.
-///
-/// @tparam T    The type of the value.
-///
-/// @return A bool indicating whether the mask is valid.
-///
+// True for masks of the form 0...01...1, including all zeros and all ones.
 template <typename T>
 constexpr bool IsValidLowMask(const T mask) noexcept
 {
-  static_assert(std::is_integral_v<T>, "Mask must be an integral type.");
-  static_assert(std::is_unsigned_v<T>, "Signed masks can introduce hard to find bugs.");
-
-  // Can be efficiently determined without looping or bit counting. It's the counterpart
-  // to https://graphics.stanford.edu/~seander/bithacks.html#DetermineIfPowerOf2
-  // and doesn't require special casing either edge case.
-  return (mask & (mask + 1)) == 0;
+  static_assert(std::is_integral_v<T> && std::is_unsigned_v<T>, "Masks must be unsigned");
+  return (mask & static_cast<T>(mask + 1)) == 0;
 }
 
+// Proxy that reads or writes a T at a possibly unaligned address through memcpy, avoiding
+// strict-aliasing problems. Indexing steps through an array of T.
 template <typename T, typename PtrType>
 class BitCastPtrType
 {
+  static_assert(std::is_trivially_copyable_v<PtrType>, "Source type must be trivially copyable");
+  static_assert(std::is_trivially_copyable_v<T>, "Target type must be trivially copyable");
+  static_assert(!std::is_pointer_v<T>, "Target type must not be a pointer");
+
 public:
-  static_assert(std::is_trivially_copyable<PtrType>(),
-                "BitCastPtr source type must be trivially copyable.");
-  static_assert(std::is_trivially_copyable<T>(),
-                "BitCastPtr destination type must be trivially copyable.");
-  static_assert(!std::is_pointer<T>(), "BitCastPtr destination type must not be a pointer.");
+  explicit BitCastPtrType(PtrType* ptr) : m_address(ptr) {}
 
-  explicit BitCastPtrType(PtrType* ptr) : m_ptr(ptr) {}
-
-  // Enable operator= only for pointers to non-const data
   auto& operator=(const T& source) requires(!std::is_const_v<PtrType>)
   {
-    std::memcpy(m_ptr, &source, sizeof(source));
+    std::memcpy(m_address, &source, sizeof(T));
     return *this;
   }
 
   inline operator T() const
   {
-    T result;
-    std::memcpy(&result, m_ptr, sizeof(result));
-    return result;
+    T value;
+    std::memcpy(&value, m_address, sizeof(T));
+    return value;
   }
 
   inline auto operator[](std::size_t index) const
   {
-    using S = std::conditional_t<std::is_const<PtrType>::value, const std::byte, std::byte>;
-    S* const target = reinterpret_cast<S*>(m_ptr) + index * sizeof(T);
-    return BitCastPtrType<T, S>{target};
+    using Byte = std::conditional_t<std::is_const_v<PtrType>, const std::byte, std::byte>;
+    Byte* const element = reinterpret_cast<Byte*>(m_address) + index * sizeof(T);
+    return BitCastPtrType<T, Byte>{element};
   }
 
 private:
-  PtrType* m_ptr;
+  PtrType* m_address;
 };
 
-// Provides an aliasing-safe alternative to reinterpret_cast'ing pointers to structs
-// Conversion constructor and operator= provided for a convenient syntax.
-// Usage:
-// MyStruct s = BitCastPtr<MyStruct>(some_ptr);
-// BitCastPtr<MyStruct>(some_ptr) = s;
-//
-// Array example:
-// BitCastPtr<MyStruct> unaligned_array(unaligned_ptr);
-// MyStruct s = unaligned_array[2];
-// unaligned_array[2] = s;
+// T value = BitCastPtr<T>(ptr);  BitCastPtr<T>(ptr) = value;  BitCastPtr<T>(ptr)[i] = value;
 template <typename T, typename PtrType>
 inline auto BitCastPtr(PtrType* ptr) noexcept -> BitCastPtrType<T, PtrType>
 {
   return BitCastPtrType<T, PtrType>{ptr};
 }
 
-// Similar to BitCastPtr, but specifically for aliasing structs to arrays.
+// The object's bytes reinterpreted as an array of ValueType.
 template <typename ValueType, typename From>
 [[nodiscard]] constexpr auto BitCastToArray(const From& obj) noexcept
 {
@@ -192,12 +121,12 @@ template <typename ValueType, typename From>
 template <typename T>
 constexpr void SetBit(T& value, size_t bit_number, bool bit_value)
 {
-  static_assert(std::is_unsigned<T>(), "SetBit is only sane on unsigned types.");
-
+  static_assert(std::is_unsigned_v<T>, "SetBit needs an unsigned type");
+  const T bit = static_cast<T>(T{1} << bit_number);
   if (bit_value)
-    value |= (T{1} << bit_number);
+    value = static_cast<T>(value | bit);
   else
-    value &= ~(T{1} << bit_number);
+    value = static_cast<T>(value & static_cast<T>(~bit));
 }
 
 template <size_t bit_number, typename T>
@@ -206,26 +135,27 @@ constexpr void SetBit(T& value, bool bit_value)
   SetBit(value, bit_number, bit_value);
 }
 
+// One flag inside an integer, usable as a bool.
 template <typename T>
 class FlagBit
 {
 public:
-  FlagBit(T* bits, std::type_identity_t<T> bit) : m_bits(*bits), m_bit(bit) {}
-  explicit operator bool() const { return (m_bits & m_bit) != 0; }
+  FlagBit(T* bits, std::type_identity_t<T> bit) : m_word(*bits), m_flag(bit) {}
+
+  explicit operator bool() const { return (m_word & m_flag) != 0; }
+
   FlagBit& operator=(const bool rhs) requires(!std::is_const_v<T>)
   {
-    if (rhs)
-      m_bits |= m_bit;
-    else
-      m_bits &= ~m_bit;
+    m_word = rhs ? static_cast<T>(m_word | m_flag) : static_cast<T>(m_word & ~m_flag);
     return *this;
   }
 
 private:
-  T& m_bits;
-  const T m_bit;
+  T& m_word;
+  const T m_flag;
 };
 
+// A set of enum flags (each enumerator a bit mask) stored in the enum's underlying type.
 template <typename T>
 class Flags
 {
@@ -233,58 +163,54 @@ public:
   constexpr Flags() = default;
   constexpr Flags(std::initializer_list<T> bits)
   {
-    for (auto bit : bits)
-    {
-      m_hex |= static_cast<std::underlying_type_t<T>>(bit);
-    }
+    for (const T bit : bits)
+      m_hex |= std::to_underlying(bit);
   }
+
   auto operator[](T bit) { return FlagBit(&m_hex, std::to_underlying(bit)); }
   auto operator[](T bit) const { return FlagBit(&m_hex, std::to_underlying(bit)); }
 
   std::underlying_type_t<T> m_hex = 0;
 };
 
-// Left-shift a value and set new LSBs to that of the supplied LSB.
-// Converts a value from a N-bit range to an (N+X)-bit range. e.g. 0x101 -> 0x10111
+// Shifts left and fills the new low bits with copies of the old lowest bit, widening an N-bit
+// value to N + left_shift_amount bits (0b101 by 2 -> 0b10111).
 template <typename T>
 T ExpandValue(T value, size_t left_shift_amount)
 {
-  static_assert(std::is_unsigned<T>(), "ExpandValue is only sane on unsigned types.");
-
-  return (value << left_shift_amount) |
-         (T(-ExtractBit<0>(value)) >> (BitSize<T>() - left_shift_amount));
+  static_assert(std::is_unsigned_v<T>, "ExpandValue needs an unsigned type");
+  const T fill = (value & 1) ? static_cast<T>(~T{0}) : T{0};
+  return static_cast<T>((value << left_shift_amount) | (fill >> (BitSize<T>() - left_shift_amount)));
 }
 
-// Convert a contiguous range of a trivially-copyable type to a `span<const u8>`
+// Byte views of contiguous ranges and of single trivially copyable objects.
 template <std::ranges::contiguous_range T>
 requires(std::is_trivially_copyable_v<std::ranges::range_value_t<T>>)
 constexpr auto AsU8Span(const T& range)
 {
-  return std::span{reinterpret_cast<const u8*>(range.data()), range.size() * sizeof(*range.data())};
+  return std::span{reinterpret_cast<const u8*>(std::ranges::data(range)),
+                   std::ranges::size(range) * sizeof(std::ranges::range_value_t<T>)};
 }
 
-// Convert a contiguous range of a non-const trivially-copyable type to a `span<u8>`
 template <std::ranges::contiguous_range T>
 requires(std::is_trivially_copyable_v<std::ranges::range_value_t<T>>)
 constexpr auto AsWritableU8Span(T& range)
 {
-  return std::span{reinterpret_cast<u8*>(range.data()), range.size() * sizeof(*range.data())};
+  return std::span{reinterpret_cast<u8*>(std::ranges::data(range)),
+                   std::ranges::size(range) * sizeof(std::ranges::range_value_t<T>)};
 }
 
-// Convert a trivially-copyable object to a `span<const u8>`
 template <typename T>
 requires(!std::ranges::contiguous_range<T> && std::is_trivially_copyable_v<T>)
 constexpr auto AsU8Span(const T& obj)
 {
-  return std::span{reinterpret_cast<const u8*>(std::addressof(obj)), sizeof(obj)};
+  return std::span{reinterpret_cast<const u8*>(std::addressof(obj)), sizeof(T)};
 }
 
-// Convert a non-const trivially-copyable object to a `span<u8>`
 template <typename T>
 requires(!std::ranges::contiguous_range<T> && std::is_trivially_copyable_v<T>)
 constexpr auto AsWritableU8Span(T& obj)
 {
-  return std::span{reinterpret_cast<u8*>(std::addressof(obj)), sizeof(obj)};
+  return std::span{reinterpret_cast<u8*>(std::addressof(obj)), sizeof(T)};
 }
-
 }  // namespace Common

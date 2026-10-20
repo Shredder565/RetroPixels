@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,82 +7,72 @@
 #include <type_traits>
 #include <utility>
 
-// STL-look-a-like interface, but name is mixed case to distinguish it clearly from the
-// real STL classes.
-//
-// Not fully featured, no safety checking yet. Add features as needed.
-
 namespace Common
 {
+// A ring buffer of at most N elements. Pushing onto a full queue drops the oldest element.
+// No bounds checks: front()/pop() on an empty queue are not allowed.
 template <class T, int N>
 class FixedSizeQueue
 {
 public:
   void clear()
   {
+    // Release resources held by non-trivial elements. (Resetting the whole array at once makes
+    // some compilers generate enormous code for large N.)
     if constexpr (!std::is_trivial_v<T>)
     {
-      // The clear of non-trivial objects previously used "storage = {}". However, this causes GCC
-      // to take a very long time to compile the file/function, as well as generating huge amounts
-      // of debug information (~2GB object file, ~600MB of debug info).
-      while (count > 0)
+      while (m_count > 0)
         pop();
     }
-
-    head = 0;
-    tail = 0;
-    count = 0;
+    m_first = 0;
+    m_next = 0;
+    m_count = 0;
   }
 
-  void push(T t)
-  {
-    if (count == N)
-      head = (head + 1) % N;
-    else
-      count++;
-
-    storage[tail] = std::move(t);
-    tail = (tail + 1) % N;
-  }
+  void push(T t) { Store(std::move(t)); }
 
   template <class... Args>
   void emplace(Args&&... args)
   {
-    if (count == N)
-      head = (head + 1) % N;
-    else
-      count++;
-
-    storage[tail] = T(std::forward<Args>(args)...);
-    tail = (tail + 1) % N;
+    Store(T(std::forward<Args>(args)...));
   }
 
   void pop()
   {
     if constexpr (!std::is_trivial_v<T>)
-      storage[head] = {};
-
-    head = (head + 1) % N;
-    count--;
+      m_items[m_first] = {};
+    m_first = Advance(m_first);
+    --m_count;
   }
 
   T pop_front()
   {
-    T temp = std::move(front());
+    T value = std::move(front());
     pop();
-    return temp;
+    return value;
   }
 
-  T& front() noexcept { return storage[head]; }
-  const T& front() const noexcept { return storage[head]; }
-  size_t size() const noexcept { return count; }
-  bool empty() const noexcept { return size() == 0; }
+  T& front() noexcept { return m_items[m_first]; }
+  const T& front() const noexcept { return m_items[m_first]; }
+  size_t size() const noexcept { return static_cast<size_t>(m_count); }
+  bool empty() const noexcept { return m_count == 0; }
 
 private:
-  std::array<T, N> storage{};
-  int head = 0;
-  int tail = 0;
-  // Sacrifice 4 bytes for a simpler implementation. may optimize away in the future.
-  int count = 0;
+  static constexpr int Advance(int index) { return index + 1 == N ? 0 : index + 1; }
+
+  void Store(T&& value)
+  {
+    if (m_count == N)
+      m_first = Advance(m_first);  // overwrite the oldest element
+    else
+      ++m_count;
+    m_items[m_next] = std::move(value);
+    m_next = Advance(m_next);
+  }
+
+  std::array<T, N> m_items{};
+  int m_first = 0;  // index of the oldest element
+  int m_next = 0;   // where the next element goes
+  int m_count = 0;
 };
 }  // namespace Common

@@ -1,423 +1,207 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <cassert>
 #include <cstddef>
+#include <iterator>
 #include <map>
+#include <type_traits>
 #include <utility>
 
 namespace Common
 {
+// A set of values stored as half-open ranges [from, to). Overlapping or adjacent ranges are
+// merged on insertion, so the stored ranges are always sorted, disjoint and separated by gaps.
 template <typename T>
 class RangeSet
 {
 private:
+  // Key: first value of a range; mapped value: one past its last value.
   using MapT = std::map<T, T>;
 
 public:
   struct const_iterator
   {
   public:
-    const T& from() const { return It->first; }
-
-    const T& to() const { return It->second; }
-
+    const T& from() const { return m_it->first; }
+    const T& to() const { return m_it->second; }
     std::pair<T, T> operator*() { return {from(), to()}; }
 
     const_iterator& operator++()
     {
-      ++It;
+      ++m_it;
       return *this;
     }
-
     const_iterator operator++(int)
     {
-      const_iterator old = *this;
-      ++It;
-      return old;
+      const_iterator before = *this;
+      ++m_it;
+      return before;
     }
-
     const_iterator& operator--()
     {
-      --It;
+      --m_it;
       return *this;
     }
-
     const_iterator operator--(int)
     {
-      const_iterator old = *this;
-      --It;
-      return old;
+      const_iterator before = *this;
+      --m_it;
+      return before;
     }
 
-    bool operator==(const const_iterator& rhs) const { return this->It == rhs.It; }
-
-    bool operator!=(const const_iterator& rhs) const { return !operator==(rhs); }
+    bool operator==(const const_iterator& rhs) const { return m_it == rhs.m_it; }
+    bool operator!=(const const_iterator& rhs) const { return m_it != rhs.m_it; }
 
   private:
-    typename MapT::const_iterator It;
-    const_iterator(typename MapT::const_iterator it) : It(it) {}
+    typename MapT::const_iterator m_it;
+    const_iterator(typename MapT::const_iterator it) : m_it(it) {}
     friend class RangeSet;
   };
 
+  // Adds [from, to).
   void insert(T from, T to)
   {
-    if (from >= to)
+    if (!(from < to))
       return;
 
-    // Start by finding the closest range.
-    // upper_bound() returns the closest range whose starting position
-    // is greater than 'from'.
-    auto bound = Map.upper_bound(from);
-    if (bound == Map.end())
+    auto next = m_ranges.upper_bound(from);
+
+    // A range starting at or before `from` that reaches it absorbs the new values.
+    typename MapT::iterator target = m_ranges.end();
+    if (next != m_ranges.begin())
     {
-      // There is no range that starts greater than the given one.
-      // This means we have three options:
-      // - 1. No range exists yet, this is the first range.
-      if (Map.empty())
-      {
-        insert_range(from, to);
-        return;
-      }
-
-      // - 2. The given range does not overlap the last range.
-      --bound;
-      if (from > get_to(bound))
-      {
-        insert_range(from, to);
-        return;
-      }
-
-      // - 3. The given range does overlap the last range.
-      maybe_expand_to(bound, to);
-      return;
+      const auto previous = std::prev(next);
+      if (!(previous->second < from))
+        target = previous;
     }
 
-    if (bound == Map.begin())
+    // Swallow every following range that starts inside or right after [from, to).
+    T end = to;
+    while (next != m_ranges.end() && !(to < next->first))
     {
-      // The given range starts before any of the existing ones.
-      // We must insert this as a new range even if we potentially overlap
-      // an existing one as we can't modify a key in a std::map.
-      auto inserted = insert_range(from, to);
-      merge_from_iterator_to_value(inserted, bound, to);
-      return;
+      if (end < next->second)
+        end = next->second;
+      next = m_ranges.erase(next);
     }
 
-    auto abound = bound--;
-
-    // 'bound' now points at the first range in the map that
-    // could possibly be affected.
-
-    // If 'bound' overlaps with given range, update bounds object.
-    if (get_to(bound) >= from)
+    if (target != m_ranges.end())
     {
-      maybe_expand_to(bound, to);
-      auto inserted = bound;
-      ++bound;
-      merge_from_iterator_to_value(inserted, bound, to);
-      return;
-    }
-
-    // 'bound' *doesn't* overlap with given range, check next range.
-
-    // If this range overlaps with given range,
-    if (get_from(abound) <= to)
-    {
-      // insert new range
-      auto inserted = insert_range(from, to >= get_to(abound) ? to : get_to(abound));
-      // and delete overlaps
-      abound = erase_range(abound);
-      merge_from_iterator_to_value(inserted, abound, to);
-      return;
-    }
-
-    // Otherwise, if we come here, then this new range overlaps nothing
-    // and must be inserted as a new range.
-    insert_range(from, to);
-  }
-
-  void erase(T from, T to)
-  {
-    if (from >= to)
-      return;
-
-    // Like insert(), we use upper_bound to find the closest range.
-    auto bound = Map.upper_bound(from);
-    if (bound == Map.end())
-    {
-      // There is no range that starts greater than the given one.
-      if (Map.empty())
-      {
-        // nothing to do
-        return;
-      }
-      --bound;
-      // 'bound' now points at the last range.
-      if (from >= get_to(bound))
-      {
-        // Given range is larger than any range that exists, nothing to do.
-        return;
-      }
-
-      if (to >= get_to(bound))
-      {
-        if (from == get_from(bound))
-        {
-          // Given range fully overlaps last range, erase it.
-          erase_range(bound);
-          return;
-        }
-        else
-        {
-          // Given range overlaps end of last range, reduce it.
-          reduce_to(bound, from);
-          return;
-        }
-      }
-
-      if (from == get_from(bound))
-      {
-        // Given range overlaps begin of last range, reduce it.
-        reduce_from(bound, to);
-        return;
-      }
-      else
-      {
-        // Given range overlaps middle of last range, bisect it.
-        bisect_range(bound, from, to);
-        return;
-      }
-    }
-
-    if (bound == Map.begin())
-    {
-      // If we found the first range that means 'from' is before any stored range.
-      // This means we can just erase from start until 'to' and be done with it.
-      erase_from_iterator_to_value(bound, to);
-      return;
-    }
-
-    // check previous range
-    auto abound = bound--;
-
-    if (from == get_from(bound))
-    {
-      // Similarly, if the previous range starts with the given one, just erase until 'to'.
-      erase_from_iterator_to_value(bound, to);
-      return;
-    }
-
-    // If we come here, the given range may or may not overlap part of the current 'bound'
-    // (but never the full range), which means we may need to update the end position of it,
-    // or possibly even split it into two.
-    if (from < get_to(bound))
-    {
-      if (to < get_to(bound))
-      {
-        // need to split in two
-        bisect_range(bound, from, to);
-        return;
-      }
-      else
-      {
-        // just update end
-        reduce_to(bound, from);
-      }
-    }
-
-    // and then just erase until 'to'
-    erase_from_iterator_to_value(abound, to);
-    return;
-  }
-
-  const_iterator erase(const_iterator it) { return const_iterator(erase_range(it.It)); }
-
-  void clear() { Map.clear(); }
-
-  bool contains(T value) const
-  {
-    auto it = Map.upper_bound(value);
-    if (it == Map.begin())
-      return false;
-    --it;
-    return get_from(it) <= value && value < get_to(it);
-  }
-
-  bool overlaps(T from, T to) const
-  {
-    if (from >= to)
-      return false;
-
-    auto it = Map.lower_bound(to);
-    if (it == Map.begin())
-      return false;
-    --it;
-    return get_from(it) < to && from < get_to(it);
-  }
-
-  std::size_t size() const { return Map.size(); }
-
-  bool empty() const { return Map.empty(); }
-
-  void swap(RangeSet<T>& other) { Map.swap(other.Map); }
-
-  const_iterator begin() const { return const_iterator(Map.begin()); }
-
-  const_iterator end() const { return const_iterator(Map.end()); }
-
-  const_iterator cbegin() const { return const_iterator(Map.cbegin()); }
-
-  const_iterator cend() const { return const_iterator(Map.cend()); }
-
-  bool operator==(const RangeSet<T>& other) const { return this->Map == other.Map; }
-
-  bool operator!=(const RangeSet<T>& other) const { return !(*this == other); }
-
-  // Get free size and fragmentation ratio
-  std::pair<std::size_t, double> get_stats() const
-  {
-    std::size_t free_total = 0;
-    if (begin() == end())
-      return {free_total, 1.0};
-    std::size_t largest_size = 0;
-    for (auto iter = begin(); iter != end(); ++iter)
-    {
-      const std::size_t size = calc_size(iter.from(), iter.to());
-      if (size > largest_size)
-        largest_size = size;
-      free_total += size;
-    }
-    return {free_total, static_cast<double>(free_total - largest_size) / free_total};
-  }
-
-private:
-  static std::size_t calc_size(T from, T to)
-  {
-    if constexpr (std::is_pointer_v<T>)
-    {
-      // For pointers we don't want pointer arithmetic here, else void* breaks.
-      return reinterpret_cast<std::size_t>(to) - reinterpret_cast<std::size_t>(from);
+      if (target->second < end)
+        target->second = end;
     }
     else
     {
-      return static_cast<std::size_t>(to - from);
+      m_ranges.emplace_hint(next, from, end);
     }
   }
 
-  // Assumptions that can be made about the data:
-  // - Range are stored in the form [from, to[
-  //   That is, the starting value is inclusive, and the end value is exclusive.
-  // - 'from' is the map key, 'to' is the map value
-  // - 'from' is always smaller than 'to'
-  // - Stored ranges never touch.
-  // - Stored ranges never overlap.
-  MapT Map;
-
-  T get_from(typename MapT::iterator it) const { return it->first; }
-
-  T get_to(typename MapT::iterator it) const { return it->second; }
-
-  T get_from(typename MapT::const_iterator it) const { return it->first; }
-
-  T get_to(typename MapT::const_iterator it) const { return it->second; }
-
-  typename MapT::iterator insert_range(T from, T to) { return Map.emplace(from, to).first; }
-
-  typename MapT::iterator erase_range(typename MapT::iterator it) { return Map.erase(it); }
-
-  typename MapT::const_iterator erase_range(typename MapT::const_iterator it)
+  // Removes [from, to).
+  void erase(T from, T to)
   {
-    return Map.erase(it);
-  }
-
-  void bisect_range(typename MapT::iterator it, T from, T to)
-  {
-    assert(get_from(it) < from);
-    assert(get_from(it) < to);
-    assert(get_to(it) > from);
-    assert(get_to(it) > to);
-    assert(from < to);
-    T itto = get_to(it);
-    reduce_to(it, from);
-    insert_range(to, itto);
-  }
-
-  typename MapT::iterator reduce_from(typename MapT::iterator it, T from)
-  {
-    assert(get_from(it) < from);
-    T itto = get_to(it);
-    erase_range(it);
-    return insert_range(from, itto);
-  }
-
-  void maybe_expand_to(typename MapT::iterator it, T to)
-  {
-    if (to <= get_to(it))
+    if (!(from < to))
       return;
 
-    expand_to(it, to);
-  }
-
-  void expand_to(typename MapT::iterator it, T to)
-  {
-    assert(get_to(it) < to);
-    it->second = to;
-  }
-
-  void reduce_to(typename MapT::iterator it, T to)
-  {
-    assert(get_to(it) > to);
-    it->second = to;
-  }
-
-  void merge_from_iterator_to_value(typename MapT::iterator inserted, typename MapT::iterator bound,
-                                    T to)
-  {
-    // Erase all ranges that overlap the inserted while updating the upper end.
-    while (bound != Map.end() && get_from(bound) <= to)
+    auto it = m_ranges.upper_bound(from);
+    if (it != m_ranges.begin())
     {
-      maybe_expand_to(inserted, get_to(bound));
-      bound = erase_range(bound);
+      const auto previous = std::prev(it);
+      if (previous->first == from)
+      {
+        it = previous;
+      }
+      else if (from < previous->second)
+      {
+        // The range starts before `from`: keep its head, and its tail if it extends past `to`.
+        const T old_end = previous->second;
+        previous->second = from;
+        if (to < old_end)
+        {
+          m_ranges.emplace_hint(it, to, old_end);
+          return;
+        }
+      }
+    }
+
+    while (it != m_ranges.end() && it->first < to)
+    {
+      if (to < it->second)
+      {
+        // Only the head of this range is removed.
+        const T old_end = it->second;
+        it = m_ranges.erase(it);
+        m_ranges.emplace_hint(it, to, old_end);
+        return;
+      }
+      it = m_ranges.erase(it);
     }
   }
 
-  void erase_from_iterator_to_value(typename MapT::iterator bound, T to)
+  const_iterator erase(const_iterator it) { return const_iterator(m_ranges.erase(it.m_it)); }
+
+  void clear() { m_ranges.clear(); }
+
+  bool contains(T value) const
   {
-    // Assumption: Given bound starts at or after the 'from' value of the range to erase.
-    while (true)
-    {
-      // Given range starts before stored range.
-      if (to <= get_from(bound))
-      {
-        // Range ends before this range too, nothing to do.
-        return;
-      }
-
-      if (to < get_to(bound))
-      {
-        // Range ends in the middle of current range, reduce current.
-        reduce_from(bound, to);
-        return;
-      }
-
-      if (to == get_to(bound))
-      {
-        // Range ends exactly with current range, erase current.
-        erase_range(bound);
-        return;
-      }
-
-      // Range ends later than current range.
-      // First erase current, then loop to check the range(s) after this one too.
-      bound = erase_range(bound);
-      if (bound == Map.end())
-      {
-        // Unless that was the last range, in which case there's nothing else to do.
-        return;
-      }
-    }
+    auto it = m_ranges.upper_bound(value);
+    if (it == m_ranges.begin())
+      return false;
+    --it;
+    return !(value < it->first) && value < it->second;
   }
+
+  // Whether any value of [from, to) is in the set.
+  bool overlaps(T from, T to) const
+  {
+    if (!(from < to))
+      return false;
+    auto it = m_ranges.lower_bound(to);  // first range that starts at or after `to`
+    if (it == m_ranges.begin())
+      return false;
+    --it;
+    return from < it->second;
+  }
+
+  std::size_t size() const { return m_ranges.size(); }
+  bool empty() const { return m_ranges.empty(); }
+  void swap(RangeSet<T>& other) { m_ranges.swap(other.m_ranges); }
+
+  const_iterator begin() const { return const_iterator(m_ranges.begin()); }
+  const_iterator end() const { return const_iterator(m_ranges.end()); }
+  const_iterator cbegin() const { return const_iterator(m_ranges.cbegin()); }
+  const_iterator cend() const { return const_iterator(m_ranges.cend()); }
+
+  bool operator==(const RangeSet<T>& other) const { return m_ranges == other.m_ranges; }
+  bool operator!=(const RangeSet<T>& other) const { return !(*this == other); }
+
+  // Total size of all ranges, and the fragmentation ratio (the share of the total that is not
+  // in the largest range; 1.0 for an empty set).
+  std::pair<std::size_t, double> get_stats() const
+  {
+    if (m_ranges.empty())
+      return {0, 1.0};
+    std::size_t total = 0;
+    std::size_t largest = 0;
+    for (const auto& [first, last] : m_ranges)
+    {
+      const std::size_t length = Length(first, last);
+      total += length;
+      if (length > largest)
+        largest = length;
+    }
+    return {total, static_cast<double>(total - largest) / total};
+  }
+
+private:
+  static std::size_t Length(T from, T to)
+  {
+    if constexpr (std::is_pointer_v<T>)
+      return reinterpret_cast<std::size_t>(to) - reinterpret_cast<std::size_t>(from);
+    else
+      return static_cast<std::size_t>(to - from);
+  }
+
+  MapT m_ranges;
 };
 }  // namespace Common

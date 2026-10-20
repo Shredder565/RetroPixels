@@ -1,30 +1,37 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <algorithm>
+#include <functional>
 #include <iterator>
+#include <ranges>
+#include <utility>
 #include <version>
 
+// Common::Contains(range, value) and Common::ContainsSubrange(range, subrange): the C++23
+// std::ranges algorithms, with a fallback for standard libraries that lack them.
 namespace Common
 {
 #if defined(__cpp_lib_ranges_contains) && __cpp_lib_ranges_contains >= 202202L
 
-// Use the standard library functions if available (C++23)
 inline constexpr auto& Contains = std::ranges::contains;
 inline constexpr auto& ContainsSubrange = std::ranges::contains_subrange;
 
 #else
-// TODO C++23: This old implementation likely isn't needed once migrated to C++23. Remove them or
-// this file itself. Ad hoc implementations for C++20
+
 struct ContainsFn
 {
   template <std::input_iterator I, std::sentinel_for<I> S, class T, class Proj = std::identity>
   requires std::indirect_binary_predicate<std::ranges::equal_to, std::projected<I, Proj>, const T*>
   constexpr bool operator()(I first, S last, const T& value, Proj proj = {}) const
   {
-    return std::ranges::find(std::move(first), last, value, std::move(proj)) != last;
+    for (; first != last; ++first)
+    {
+      if (std::invoke(proj, *first) == value)
+        return true;
+    }
+    return false;
   }
 
   template <std::ranges::input_range R, class T, class Proj = std::identity>
@@ -45,10 +52,13 @@ struct ContainsSubrangeFn
   constexpr bool operator()(I1 first1, S1 last1, I2 first2, S2 last2, Pred pred = {},
                             Proj1 proj1 = {}, Proj2 proj2 = {}) const
   {
-    return !std::ranges::search(std::move(first1), std::move(last1), std::move(first2),
-                                std::move(last2), std::move(pred), std::move(proj1),
-                                std::move(proj2))
-                .empty();
+    // Like the standard version, an empty subrange is always contained.
+    if (first2 == last2)
+      return true;
+    const auto match = std::ranges::search(std::move(first1), std::move(last1), std::move(first2),
+                                           std::move(last2), std::move(pred), std::move(proj1),
+                                           std::move(proj2));
+    return !match.empty();
   }
 
   template <std::ranges::forward_range R1, std::ranges::forward_range R2,

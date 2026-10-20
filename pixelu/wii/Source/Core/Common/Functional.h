@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,13 +6,13 @@
 #include <functional>
 #include <memory>
 #include <type_traits>
-
-// TODO C++23: Replace with std::move_only_function.
+#include <utility>
 
 namespace Common
 {
-
-template <typename T>
+// A callable wrapper like std::function that also accepts move-only callables (lambdas that
+// own a unique_ptr, for example). It cannot be copied.
+template <typename Signature>
 class MoveOnlyFunction;
 
 template <typename R, typename... Args>
@@ -26,35 +25,40 @@ public:
 
   template <std::invocable<Args...> F>
   requires(!std::same_as<std::decay_t<F>, MoveOnlyFunction>)
-  MoveOnlyFunction(F&& f) : m_ptr{std::make_unique<Func<F>>(std::forward<F>(f))}
+  MoveOnlyFunction(F&& f) : m_target{std::make_unique<Holder<std::decay_t<F>>>(std::forward<F>(f))}
   {
   }
 
-  result_type operator()(Args... args) const { return m_ptr->Invoke(std::forward<Args>(args)...); }
-  explicit operator bool() const { return m_ptr != nullptr; }
-  void swap(MoveOnlyFunction& other) { m_ptr.swap(other.m_ptr); }
+  result_type operator()(Args... args) const { return m_target->Call(std::forward<Args>(args)...); }
+  explicit operator bool() const { return static_cast<bool>(m_target); }
+  void swap(MoveOnlyFunction& other) { std::swap(m_target, other.m_target); }
 
 private:
-  struct FuncBase
+  struct Callable
   {
-    virtual ~FuncBase() = default;
-    virtual result_type Invoke(Args...) = 0;
+    virtual ~Callable() = default;
+    virtual result_type Call(Args... args) = 0;
   };
 
   template <typename F>
-  struct Func : FuncBase
+  struct Holder final : Callable
   {
-    explicit Func(F&& f) : func{std::forward<F>(f)} {}
-    result_type Invoke(Args... args) override { return func(std::forward<Args>(args)...); }
-    std::decay_t<F> func;
+    template <typename G>
+    explicit Holder(G&& g) : function(std::forward<G>(g))
+    {
+    }
+    result_type Call(Args... args) override
+    {
+      return std::invoke(function, std::forward<Args>(args)...);
+    }
+    F function;
   };
 
-  std::unique_ptr<FuncBase> m_ptr;
+  std::unique_ptr<Callable> m_target;
 };
 
-// A functor type with an invocable non-type template parameter.
-// e.g. Providing a function pointer will create a functor type that invokes said function.
-// It allows using function pointers in contexts that expect a type, e.g. as a "deleter".
+// A stateless function object type that calls the function given as template argument; lets a
+// function pointer be used where a type is needed (a unique_ptr deleter, for example).
 template <auto Invocable>
 struct InvokerOf
 {
@@ -64,5 +68,4 @@ struct InvokerOf
     return std::invoke(Invocable, std::forward<Args>(args)...);
   }
 };
-
 }  // namespace Common

@@ -1,5 +1,4 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,35 +6,32 @@
 #include <cstddef>
 #include <cstring>
 #include <span>
+#include <type_traits>
 
 #include "Common/CommonTypes.h"
 
 namespace Common
 {
-
-// Like std::span::subspan, except undefined behavior is replaced with returning a 0-length span.
+// std::span::subspan with the out-of-range cases clamped to the span instead of undefined.
 template <class T>
 [[nodiscard]] constexpr std::span<T> SafeSubspan(std::span<T> span, size_t offset,
                                                  size_t count = std::dynamic_extent)
 {
-  if (count == std::dynamic_extent || offset > span.size())
-    return span.subspan(std::min(offset, span.size()));
-  else
-    return span.subspan(offset, std::min(count, span.size() - offset));
+  const size_t start = std::min(offset, span.size());
+  const size_t available = span.size() - start;
+  const size_t length = count == std::dynamic_extent ? available : std::min(count, available);
+  return span.subspan(start, length);
 }
 
-// Default-constructs an object of type T, then copies data into it from the specified offset in
-// the specified span. Out-of-bounds reads will be skipped, meaning that specifying a too large
-// offset results in the object partially or entirely remaining default constructed.
+// Reads a T from `offset` in the span; bytes past the end of the span are left
+// value-initialised.
 template <class T>
 [[nodiscard]] T SafeSpanRead(std::span<const u8> span, size_t offset)
 {
-  static_assert(std::is_trivially_copyable<T>());
-
-  const std::span<const u8> subspan = SafeSubspan(span, offset);
-  T result{};
-  std::memcpy(&result, subspan.data(), std::min(subspan.size(), sizeof(result)));
-  return result;
+  static_assert(std::is_trivially_copyable_v<T>, "SafeSpanRead needs a trivially copyable type");
+  const std::span<const u8> source = SafeSubspan(span, offset);
+  T value{};
+  std::memcpy(&value, source.data(), std::min(source.size(), sizeof(T)));
+  return value;
 }
-
 }  // namespace Common
