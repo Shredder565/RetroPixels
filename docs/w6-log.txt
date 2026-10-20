@@ -1,0 +1,88 @@
+- W6 log: rewrote all 32 W6 files in `Core/DiscIO` (volumes, file
+  systems, verifier, Riivolution, NAND import, banners) as original
+  code. They now have 8290 lines (from 8676). Each starts with the
+  RetroPixels original-code line and has no Dolphin copyright or SPDX
+  header. The files are DiscExtractor, DiscUtils, Enums,
+  FileSystemGCWii, Filesystem, GameModDescriptor, NANDImporter,
+  RiivolutionParser, RiivolutionPatcher, Volume, VolumeDisc, VolumeGC,
+  VolumeVerifier, VolumeWad, VolumeWii and WiiSaveBanner (.cpp and .h).
+  - Kept unchanged: file names, and every public declaration (names,
+    signatures, namespaces, enum values, constants, packed structs).
+    Everything that affects output also stays the same:
+    - game IDs, maker IDs, revisions, regions, countries, languages,
+      titles and descriptions;
+    - GC/Wii banners and the WAD and save banner layout;
+    - the partition table, ticket/TMD/cert reads, title-key decryption
+      (IOSC common-key handles 4 and 11, IV = title ID), the hash tree
+      (H0/H1/H2/H3), block encryption and decryption, and `HashGroup`
+      and `EncryptGroup` output;
+    - FST parsing and lookups;
+    - the extraction layout (sys files, apploader, DOL, FST, folders,
+      `_sys`);
+    - the verifier's checks, problem order, severities, hash results,
+      Redump matching and cache file, and every report string;
+    - Riivolution XML parsing, placeholder replacement (builtins first,
+      then params), the HostFS path rules (including the `//` quirk), and
+      file, folder, memory, search and ocarina patch application;
+    - the GameModDescriptor JSON;
+    - the NAND import tree and its keys file;
+    - every GetStringT, FmtFormatT, PanicAlertFmtT and _trans string,
+      and every log string.
+  - Kept quirks: Riivolution `<macro>` elements are still a no-op.
+    `IsValidForGame`/`GeneratePatches` still use `substr`, so they throw
+    on IDs that are too short. Numbers are still parsed with `stoi`.
+    WAD offset sums still wrap as u32. VolumeWii's `GetLongNames` still
+    treats the number of bytes read as a number of characters, so a
+    short read keeps more of the names than were read.
+  - Deliberate differences (genuine bugs, harmless fixes):
+    - `RegionCodeToRegion` returns `Region::Unknown` for codes above 4.
+      It used to return out-of-range enum values.
+    - VolumeWii drops its cached block when a read fails, so the next
+      read doesn't return stale data.
+    - The `ExportDirectory` progress callback gets the full path of each
+      child (`Data/a.bin`, not just `a.bin`). It also adds a `/` to the
+      export folder only when one is missing, so nested folders no
+      longer get a double slash (`out//Sub/`). The files land in the same
+      place.
+    - FileSystemGCWii checks the FST entry count in u64, so a huge count
+      can't overflow the size check. The result is unchanged; only the
+      log message differs.
+    - Copying a default-constructed `FileInfo` const_iterator no longer
+      dereferences null.
+    - `HashGroup` zeroes every padding field of the hash blocks. It used
+      to leave stale bytes in part of the H1/H2 padding.
+    - The fmt formatter for NAND FST entries stops at the end of the
+      12-byte name field (`strnlen`), so it never reads past an
+      unterminated name.
+    - The verifier's hex parse for Redump hashes is a standard hex parse.
+    - `VolumeVerifier::Finish` waits for the Redump lookup before reading
+      its status. This fixes a race.
+    - Riivolution search patches stop at the last whole step, so the
+      search no longer hangs when the length is smaller than the
+      alignment.
+    - Riivolution HostFS `GetFileContents` rejects directories instead
+      of trying to read one as a file.
+    - Enums uses a single `_trans("Unknown")` instead of three copies.
+      The string is the same.
+  - Checked: a harness ran the old and new code on synthetic inputs only:
+    fake GC and Wii headers, a fake FST, fake WADs, fake partitions
+    encrypted with a made-up test key injected through an IOSC/ES stub,
+    and fake sparse BootMii NAND images with a test OTP. No Nintendo
+    keys, images or NAND dumps were used. Outputs are identical for:
+    - the Enums tables (176558 lines);
+    - WAD volumes and WiiSaveBanner;
+    - all Riivolution parsing, patch generation, HostFS, a file-patch
+      fuzz (400 runs) and memory patches;
+    - NAND import (4 image variants, extracted tree and keys);
+    - the GC and Wii volumes, extraction, `HashGroup`/`EncryptGroup`,
+      the verifier, Redump matching (13 scenarios) and a 250-run header
+      fuzz, apart from the deliberate differences above.
+    - String check: every translatable and log string is the same, apart
+      from the `_trans("Unknown")` change.
+    - Compile check: every W6 .cpp builds with g++ (Linux) and clang
+      `-target x86_64-w64-windows-gnu`. Under -Wall -Wextra they give the
+      same warnings as the old code. Both compilers build the 249 files
+      that include W6 headers with the same pass/fail status as the
+      untouched tree (Linux: 124 ok, 125 fail; Windows: 114 ok, 135
+      fail). The failures come from missing Qt, SFML, cubeb, libusb and
+      similar.
