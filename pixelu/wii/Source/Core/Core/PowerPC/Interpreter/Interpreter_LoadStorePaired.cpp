@@ -1,13 +1,20 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// Quantised paired-single loads and stores (psq_l / psq_st and their update and indexed
+// forms).
+//
+// A GQR register chosen by the instruction's I field describes the memory format of each
+// direction: a type (float, u8, u16, s8, s16) and a 6-bit signed scale. Loads multiply the
+// integer by 2^-scale, stores multiply by 2^scale and saturate. With W set only one element is
+// transferred and a load fills ps1 with 1.0.
 
 #include "Core/PowerPC/Interpreter/Interpreter.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
-#include <tuple>
+#include <limits>
 #include <type_traits>
-#include <utility>
 
 #include "Common/Assert.h"
 #include "Common/CommonTypes.h"
@@ -17,373 +24,271 @@
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
 
-// dequantize table
-const float m_dequantizeTable[] = {
-    1.0 / (1ULL << 0),  1.0 / (1ULL << 1),  1.0 / (1ULL << 2),  1.0 / (1ULL << 3),
-    1.0 / (1ULL << 4),  1.0 / (1ULL << 5),  1.0 / (1ULL << 6),  1.0 / (1ULL << 7),
-    1.0 / (1ULL << 8),  1.0 / (1ULL << 9),  1.0 / (1ULL << 10), 1.0 / (1ULL << 11),
-    1.0 / (1ULL << 12), 1.0 / (1ULL << 13), 1.0 / (1ULL << 14), 1.0 / (1ULL << 15),
-    1.0 / (1ULL << 16), 1.0 / (1ULL << 17), 1.0 / (1ULL << 18), 1.0 / (1ULL << 19),
-    1.0 / (1ULL << 20), 1.0 / (1ULL << 21), 1.0 / (1ULL << 22), 1.0 / (1ULL << 23),
-    1.0 / (1ULL << 24), 1.0 / (1ULL << 25), 1.0 / (1ULL << 26), 1.0 / (1ULL << 27),
-    1.0 / (1ULL << 28), 1.0 / (1ULL << 29), 1.0 / (1ULL << 30), 1.0 / (1ULL << 31),
-    (1ULL << 32),       (1ULL << 31),       (1ULL << 30),       (1ULL << 29),
-    (1ULL << 28),       (1ULL << 27),       (1ULL << 26),       (1ULL << 25),
-    (1ULL << 24),       (1ULL << 23),       (1ULL << 22),       (1ULL << 21),
-    (1ULL << 20),       (1ULL << 19),       (1ULL << 18),       (1ULL << 17),
-    (1ULL << 16),       (1ULL << 15),       (1ULL << 14),       (1ULL << 13),
-    (1ULL << 12),       (1ULL << 11),       (1ULL << 10),       (1ULL << 9),
-    (1ULL << 8),        (1ULL << 7),        (1ULL << 6),        (1ULL << 5),
-    (1ULL << 4),        (1ULL << 3),        (1ULL << 2),        (1ULL << 1),
-};
-
-// quantize table
-const float m_quantizeTable[] = {
-    (1ULL << 0),        (1ULL << 1),        (1ULL << 2),        (1ULL << 3),
-    (1ULL << 4),        (1ULL << 5),        (1ULL << 6),        (1ULL << 7),
-    (1ULL << 8),        (1ULL << 9),        (1ULL << 10),       (1ULL << 11),
-    (1ULL << 12),       (1ULL << 13),       (1ULL << 14),       (1ULL << 15),
-    (1ULL << 16),       (1ULL << 17),       (1ULL << 18),       (1ULL << 19),
-    (1ULL << 20),       (1ULL << 21),       (1ULL << 22),       (1ULL << 23),
-    (1ULL << 24),       (1ULL << 25),       (1ULL << 26),       (1ULL << 27),
-    (1ULL << 28),       (1ULL << 29),       (1ULL << 30),       (1ULL << 31),
-    1.0 / (1ULL << 32), 1.0 / (1ULL << 31), 1.0 / (1ULL << 30), 1.0 / (1ULL << 29),
-    1.0 / (1ULL << 28), 1.0 / (1ULL << 27), 1.0 / (1ULL << 26), 1.0 / (1ULL << 25),
-    1.0 / (1ULL << 24), 1.0 / (1ULL << 23), 1.0 / (1ULL << 22), 1.0 / (1ULL << 21),
-    1.0 / (1ULL << 20), 1.0 / (1ULL << 19), 1.0 / (1ULL << 18), 1.0 / (1ULL << 17),
-    1.0 / (1ULL << 16), 1.0 / (1ULL << 15), 1.0 / (1ULL << 14), 1.0 / (1ULL << 13),
-    1.0 / (1ULL << 12), 1.0 / (1ULL << 11), 1.0 / (1ULL << 10), 1.0 / (1ULL << 9),
-    1.0 / (1ULL << 8),  1.0 / (1ULL << 7),  1.0 / (1ULL << 6),  1.0 / (1ULL << 5),
-    1.0 / (1ULL << 4),  1.0 / (1ULL << 3),  1.0 / (1ULL << 2),  1.0 / (1ULL << 1),
-};
-
-template <typename SType>
-SType ScaleAndClamp(double ps, u32 st_scale)
+namespace
 {
-  const float conv_ps = float(ps) * m_quantizeTable[st_scale];
-  constexpr float min = float(std::numeric_limits<SType>::min());
-  constexpr float max = float(std::numeric_limits<SType>::max());
+using PowerPC::PowerPCState;
 
-  return SType(std::clamp(conv_ps, min, max));
+// The scale field is a two's complement 6-bit number.
+constexpr int ScaleExponent(u32 field)
+{
+  return field < 32 ? static_cast<int>(field) : static_cast<int>(field) - 64;
 }
+
+constexpr float PowerOfTwo(int exponent)
+{
+  float value = 1.0f;
+  for (; exponent > 0; --exponent)
+    value *= 2.0f;
+  for (; exponent < 0; ++exponent)
+    value *= 0.5f;
+  return value;
+}
+
+// sign < 0 builds the load (dequantise) factors, sign > 0 the store (quantise) factors.
+constexpr std::array<float, 64> MakeScaleTable(int sign)
+{
+  std::array<float, 64> table{};
+  for (u32 field = 0; field < 64; ++field)
+    table[field] = PowerOfTwo(sign * ScaleExponent(field));
+  return table;
+}
+
+constexpr std::array<float, 64> LOAD_SCALE = MakeScaleTable(-1);
+constexpr std::array<float, 64> STORE_SCALE = MakeScaleTable(1);
+
+// Reads one element, or two adjacent elements as a single wider access.
+template <typename U>
+void ReadElements(PowerPC::MMU& mmu, u32 address, bool single, U& first, U& second)
+{
+  constexpr unsigned BITS = sizeof(U) * 8;
+  using Wide = std::conditional_t<sizeof(U) == 1, u16, std::conditional_t<sizeof(U) == 2, u32, u64>>;
+  if (single)
+  {
+    first = mmu.Read<U>(address);
+    return;
+  }
+  const Wide both = mmu.Read<Wide>(address);
+  first = static_cast<U>(both >> BITS);
+  second = static_cast<U>(both);
+}
+
+template <typename U>
+void WriteElements(PowerPC::MMU& mmu, u32 address, bool single, U first, U second)
+{
+  constexpr unsigned BITS = sizeof(U) * 8;
+  using Wide = std::conditional_t<sizeof(U) == 1, u16, std::conditional_t<sizeof(U) == 2, u32, u64>>;
+  if (single)
+  {
+    mmu.Write<U>(first, address);
+    return;
+  }
+  mmu.Write<Wide>(static_cast<Wide>((static_cast<Wide>(first) << BITS) | second), address);
+}
+
+// ---- loads
 
 template <typename T>
-static T ReadUnpaired(PowerPC::MMU& mmu, u32 addr)
-{
-  return mmu.Read<T>(addr);
-}
-
-template <typename T>
-static std::pair<T, T> ReadPair(PowerPC::MMU& mmu, u32 addr);
-
-template <>
-std::pair<u8, u8> ReadPair<u8>(PowerPC::MMU& mmu, u32 addr)
-{
-  const u16 val = mmu.Read<u16>(addr);
-  return {u8(val >> 8), u8(val)};
-}
-
-template <>
-std::pair<u16, u16> ReadPair<u16>(PowerPC::MMU& mmu, u32 addr)
-{
-  const u32 val = mmu.Read<u32>(addr);
-  return {u16(val >> 16), u16(val)};
-}
-
-template <>
-std::pair<u32, u32> ReadPair<u32>(PowerPC::MMU& mmu, u32 addr)
-{
-  const u64 val = mmu.Read<u64>(addr);
-  return {u32(val >> 32), u32(val)};
-}
-
-template <typename T>
-static void WriteUnpaired(PowerPC::MMU& mmu, T val, u32 addr)
-{
-  mmu.Write<T>(val, addr);
-}
-
-template <typename T>
-static void WritePair(PowerPC::MMU& mmu, T val1, T val2, u32 addr);
-
-template <>
-void WritePair<u8>(PowerPC::MMU& mmu, u8 val1, u8 val2, u32 addr)
-{
-  mmu.Write<u16>((u16{val1} << 8) | u16{val2}, addr);
-}
-
-template <>
-void WritePair<u16>(PowerPC::MMU& mmu, u16 val1, u16 val2, u32 addr)
-{
-  mmu.Write<u32>((u32{val1} << 16) | u32{val2}, addr);
-}
-
-template <>
-void WritePair<u32>(PowerPC::MMU& mmu, u32 val1, u32 val2, u32 addr)
-{
-  mmu.Write<u64>((u64{val1} << 32) | u64{val2}, addr);
-}
-
-template <typename T>
-void QuantizeAndStore(PowerPC::MMU& mmu, double ps0, double ps1, u32 addr, u32 instW, u32 st_scale)
+void LoadInteger(PowerPC::MMU& mmu, u32 address, bool single, u32 scale, double& ps0, double& ps1)
 {
   using U = std::make_unsigned_t<T>;
-
-  const U conv_ps0 = U(ScaleAndClamp<T>(ps0, st_scale));
-  if (instW)
-  {
-    WriteUnpaired<U>(mmu, conv_ps0, addr);
-  }
-  else
-  {
-    const U conv_ps1 = U(ScaleAndClamp<T>(ps1, st_scale));
-    WritePair<U>(mmu, conv_ps0, conv_ps1, addr);
-  }
+  U first{}, second{};
+  ReadElements<U>(mmu, address, single, first, second);
+  const float factor = LOAD_SCALE[scale];
+  // Products of small integers and powers of two are exact normal floats.
+  const float f0 = static_cast<float>(static_cast<T>(first)) * factor;
+  const float f1 = single ? 1.0f : static_cast<float>(static_cast<T>(second)) * factor;
+  ps0 = f0;
+  ps1 = f1;
 }
 
-static void Helper_Quantize(PowerPC::MMU& mmu, const PowerPC::PowerPCState* ppcs, u32 addr,
-                            u32 instI, u32 instRS, u32 instW)
+void LoadQuantized(PowerPC::MMU& mmu, PowerPCState& s, u32 address, u32 gqr_index, u32 rd,
+                   bool single)
 {
-  const UGQR gqr(ppcs->spr[SPR_GQR0 + instI]);
-  const EQuantizeType st_type = gqr.st_type;
-  const u32 st_scale = gqr.st_scale;
-
-  const double ps0 = ppcs->ps[instRS].PS0AsDouble();
-  const double ps1 = ppcs->ps[instRS].PS1AsDouble();
-
-  switch (st_type)
-  {
-  case QUANTIZE_FLOAT:
-  {
-    const u64 integral_ps0 = std::bit_cast<u64>(ps0);
-    const u32 conv_ps0 = ConvertToSingleFTZ(integral_ps0);
-
-    if (instW != 0)
-    {
-      WriteUnpaired<u32>(mmu, conv_ps0, addr);
-    }
-    else
-    {
-      const u64 integral_ps1 = std::bit_cast<u64>(ps1);
-      const u32 conv_ps1 = ConvertToSingleFTZ(integral_ps1);
-
-      WritePair<u32>(mmu, conv_ps0, conv_ps1, addr);
-    }
-    break;
-  }
-
-  case QUANTIZE_U8:
-    QuantizeAndStore<u8>(mmu, ps0, ps1, addr, instW, st_scale);
-    break;
-
-  case QUANTIZE_U16:
-    QuantizeAndStore<u16>(mmu, ps0, ps1, addr, instW, st_scale);
-    break;
-
-  case QUANTIZE_S8:
-    QuantizeAndStore<s8>(mmu, ps0, ps1, addr, instW, st_scale);
-    break;
-
-  case QUANTIZE_S16:
-    QuantizeAndStore<s16>(mmu, ps0, ps1, addr, instW, st_scale);
-    break;
-
-  case QUANTIZE_INVALID1:
-  case QUANTIZE_INVALID2:
-  case QUANTIZE_INVALID3:
-    ASSERT_MSG(POWERPC, 0, "PS dequantize - unknown type to read");
-    break;
-  }
-}
-
-template <typename T>
-std::pair<double, double> LoadAndDequantize(PowerPC::MMU& mmu, u32 addr, u32 instW, u32 ld_scale)
-{
-  using U = std::make_unsigned_t<T>;
-
-  float ps0, ps1;
-  if (instW != 0)
-  {
-    const U value = ReadUnpaired<U>(mmu, addr);
-    ps0 = float(T(value)) * m_dequantizeTable[ld_scale];
-    ps1 = 1.0f;
-  }
-  else
-  {
-    const auto [first, second] = ReadPair<U>(mmu, addr);
-    ps0 = float(T(first)) * m_dequantizeTable[ld_scale];
-    ps1 = float(T(second)) * m_dequantizeTable[ld_scale];
-  }
-  // ps0 and ps1 always contain finite and normal numbers. So we can just cast them to double
-  return {static_cast<double>(ps0), static_cast<double>(ps1)};
-}
-
-static void Helper_Dequantize(PowerPC::MMU& mmu, PowerPC::PowerPCState* ppcs, u32 addr, u32 instI,
-                              u32 instRD, u32 instW)
-{
-  const UGQR gqr(ppcs->spr[SPR_GQR0 + instI]);
-  const EQuantizeType ld_type = gqr.ld_type;
-  const u32 ld_scale = gqr.ld_scale;
-
+  const UGQR gqr(s.spr[SPR_GQR0 + gqr_index]);
+  const u32 scale = gqr.ld_scale;
   double ps0 = 0.0;
   double ps1 = 0.0;
 
-  switch (ld_type)
+  switch (gqr.ld_type)
   {
   case QUANTIZE_FLOAT:
-    if (instW != 0)
-    {
-      const u32 value = ReadUnpaired<u32>(mmu, addr);
-      ps0 = std::bit_cast<double>(ConvertToDouble(value));
-      ps1 = 1.0;
-    }
-    else
-    {
-      const auto [first, second] = ReadPair<u32>(mmu, addr);
-      ps0 = std::bit_cast<double>(ConvertToDouble(first));
-      ps1 = std::bit_cast<double>(ConvertToDouble(second));
-    }
-    break;
-
-  case QUANTIZE_U8:
-    std::tie(ps0, ps1) = LoadAndDequantize<u8>(mmu, addr, instW, ld_scale);
-    break;
-
-  case QUANTIZE_U16:
-    std::tie(ps0, ps1) = LoadAndDequantize<u16>(mmu, addr, instW, ld_scale);
-    break;
-
-  case QUANTIZE_S8:
-    std::tie(ps0, ps1) = LoadAndDequantize<s8>(mmu, addr, instW, ld_scale);
-    break;
-
-  case QUANTIZE_S16:
-    std::tie(ps0, ps1) = LoadAndDequantize<s16>(mmu, addr, instW, ld_scale);
-    break;
-
-  case QUANTIZE_INVALID1:
-  case QUANTIZE_INVALID2:
-  case QUANTIZE_INVALID3:
-    ASSERT_MSG(POWERPC, 0, "PS dequantize - unknown type to read");
-    ps0 = 0.0;
-    ps1 = 0.0;
-    break;
-  }
-
-  if ((ppcs->Exceptions & EXCEPTION_DSI) != 0)
   {
-    return;
+    u32 first = 0, second = 0;
+    ReadElements<u32>(mmu, address, single, first, second);
+    ps0 = std::bit_cast<double>(InterpreterFP::SingleBitsToDouble(first));
+    ps1 = single ? 1.0 : std::bit_cast<double>(InterpreterFP::SingleBitsToDouble(second));
+    break;
+  }
+  case QUANTIZE_U8:
+    LoadInteger<u8>(mmu, address, single, scale, ps0, ps1);
+    break;
+  case QUANTIZE_U16:
+    LoadInteger<u16>(mmu, address, single, scale, ps0, ps1);
+    break;
+  case QUANTIZE_S8:
+    LoadInteger<s8>(mmu, address, single, scale, ps0, ps1);
+    break;
+  case QUANTIZE_S16:
+    LoadInteger<s16>(mmu, address, single, scale, ps0, ps1);
+    break;
+  default:
+    // Reserved types: nothing is read and the register becomes (0, 0).
+    ASSERT_MSG(POWERPC, 0, "psq load with a reserved GQR type");
+    break;
   }
 
-  ppcs->ps[instRD].SetBoth(ps0, ps1);
+  if (s.Exceptions & EXCEPTION_DSI)
+    return;
+  s.ps[rd].SetBoth(ps0, ps1);
 }
+
+// ---- stores
+
+// Scales in single precision, saturates to the integer range and truncates.
+template <typename T>
+T Saturate(double value, u32 scale)
+{
+  constexpr float lowest = static_cast<float>(std::numeric_limits<T>::min());
+  constexpr float highest = static_cast<float>(std::numeric_limits<T>::max());
+  const float scaled = static_cast<float>(value) * STORE_SCALE[scale];
+  return static_cast<T>(std::clamp(scaled, lowest, highest));
+}
+
+template <typename T>
+void StoreInteger(PowerPC::MMU& mmu, u32 address, bool single, u32 scale, double ps0, double ps1)
+{
+  using U = std::make_unsigned_t<T>;
+  const U first = static_cast<U>(Saturate<T>(ps0, scale));
+  const U second = single ? U{0} : static_cast<U>(Saturate<T>(ps1, scale));
+  WriteElements<U>(mmu, address, single, first, second);
+}
+
+void StoreQuantized(PowerPC::MMU& mmu, const PowerPCState& s, u32 address, u32 gqr_index, u32 rs,
+                    bool single)
+{
+  const UGQR gqr(s.spr[SPR_GQR0 + gqr_index]);
+  const u32 scale = gqr.st_scale;
+  const double ps0 = s.ps[rs].PS0AsDouble();
+  const double ps1 = s.ps[rs].PS1AsDouble();
+
+  switch (gqr.st_type)
+  {
+  case QUANTIZE_FLOAT:
+  {
+    const u32 first = InterpreterFP::DoubleToSingleBitsFlushed(std::bit_cast<u64>(ps0));
+    const u32 second =
+        single ? 0u : InterpreterFP::DoubleToSingleBitsFlushed(std::bit_cast<u64>(ps1));
+    WriteElements<u32>(mmu, address, single, first, second);
+    break;
+  }
+  case QUANTIZE_U8:
+    StoreInteger<u8>(mmu, address, single, scale, ps0, ps1);
+    break;
+  case QUANTIZE_U16:
+    StoreInteger<u16>(mmu, address, single, scale, ps0, ps1);
+    break;
+  case QUANTIZE_S8:
+    StoreInteger<s8>(mmu, address, single, scale, ps0, ps1);
+    break;
+  case QUANTIZE_S16:
+    StoreInteger<s16>(mmu, address, single, scale, ps0, ps1);
+    break;
+  default:
+    // Reserved types store nothing.
+    ASSERT_MSG(POWERPC, 0, "psq store with a reserved GQR type");
+    break;
+  }
+}
+
+// The immediate forms are only legal while HID2[LSQE] is set.
+bool QuantizedOpsEnabled(PowerPCState& s)
+{
+  if (HID2(s).LSQE)
+    return true;
+  GenerateProgramException(s, ProgramExceptionCause::IllegalInstruction);
+  return false;
+}
+
+u32 ImmediateAddress(const PowerPCState& s, UGeckoInstruction inst, bool update)
+{
+  const u32 base = (update || inst.RA) ? s.gpr[inst.RA] : 0;
+  return base + static_cast<u32>(inst.SIMM_12);
+}
+
+u32 IndexedAddress(const PowerPCState& s, UGeckoInstruction inst, bool update)
+{
+  const u32 base = (update || inst.RA) ? s.gpr[inst.RA] : 0;
+  return base + s.gpr[inst.RB];
+}
+
+void UpdateBase(PowerPCState& s, UGeckoInstruction inst, u32 address)
+{
+  if (!(s.Exceptions & EXCEPTION_DSI))
+    s.gpr[inst.RA] = address;
+}
+}  // namespace
 
 void Interpreter::psq_l(Interpreter& interpreter, UGeckoInstruction inst)
 {
-  auto& ppc_state = interpreter.m_ppc_state;
-  if (HID2(ppc_state).LSQE == 0)
-  {
-    GenerateProgramException(ppc_state, ProgramExceptionCause::IllegalInstruction);
+  auto& s = interpreter.m_ppc_state;
+  if (!QuantizedOpsEnabled(s))
     return;
-  }
-
-  const u32 EA = inst.RA ? (ppc_state.gpr[inst.RA] + u32(inst.SIMM_12)) : u32(inst.SIMM_12);
-  Helper_Dequantize(interpreter.m_mmu, &ppc_state, EA, inst.I, inst.RD, inst.W);
+  LoadQuantized(interpreter.m_mmu, s, ImmediateAddress(s, inst, false), inst.I, inst.RD, inst.W);
 }
 
 void Interpreter::psq_lu(Interpreter& interpreter, UGeckoInstruction inst)
 {
-  auto& ppc_state = interpreter.m_ppc_state;
-  if (HID2(ppc_state).LSQE == 0)
-  {
-    GenerateProgramException(ppc_state, ProgramExceptionCause::IllegalInstruction);
+  auto& s = interpreter.m_ppc_state;
+  if (!QuantizedOpsEnabled(s))
     return;
-  }
-
-  const u32 EA = ppc_state.gpr[inst.RA] + u32(inst.SIMM_12);
-  Helper_Dequantize(interpreter.m_mmu, &ppc_state, EA, inst.I, inst.RD, inst.W);
-
-  if ((ppc_state.Exceptions & EXCEPTION_DSI) != 0)
-  {
-    return;
-  }
-
-  ppc_state.gpr[inst.RA] = EA;
+  const u32 address = ImmediateAddress(s, inst, true);
+  LoadQuantized(interpreter.m_mmu, s, address, inst.I, inst.RD, inst.W);
+  UpdateBase(s, inst, address);
 }
 
 void Interpreter::psq_st(Interpreter& interpreter, UGeckoInstruction inst)
 {
-  auto& ppc_state = interpreter.m_ppc_state;
-  if (HID2(ppc_state).LSQE == 0)
-  {
-    GenerateProgramException(ppc_state, ProgramExceptionCause::IllegalInstruction);
+  auto& s = interpreter.m_ppc_state;
+  if (!QuantizedOpsEnabled(s))
     return;
-  }
-
-  const u32 EA = inst.RA ? (ppc_state.gpr[inst.RA] + u32(inst.SIMM_12)) : u32(inst.SIMM_12);
-  Helper_Quantize(interpreter.m_mmu, &ppc_state, EA, inst.I, inst.RS, inst.W);
+  StoreQuantized(interpreter.m_mmu, s, ImmediateAddress(s, inst, false), inst.I, inst.RS, inst.W);
 }
 
 void Interpreter::psq_stu(Interpreter& interpreter, UGeckoInstruction inst)
 {
-  auto& ppc_state = interpreter.m_ppc_state;
-  if (HID2(ppc_state).LSQE == 0)
-  {
-    GenerateProgramException(ppc_state, ProgramExceptionCause::IllegalInstruction);
+  auto& s = interpreter.m_ppc_state;
+  if (!QuantizedOpsEnabled(s))
     return;
-  }
-
-  const u32 EA = ppc_state.gpr[inst.RA] + u32(inst.SIMM_12);
-  Helper_Quantize(interpreter.m_mmu, &ppc_state, EA, inst.I, inst.RS, inst.W);
-
-  if ((ppc_state.Exceptions & EXCEPTION_DSI) != 0)
-  {
-    return;
-  }
-
-  ppc_state.gpr[inst.RA] = EA;
+  const u32 address = ImmediateAddress(s, inst, true);
+  StoreQuantized(interpreter.m_mmu, s, address, inst.I, inst.RS, inst.W);
+  UpdateBase(s, inst, address);
 }
 
+// The indexed forms live in primary opcode 4 and are not gated by LSQE.
 void Interpreter::psq_lx(Interpreter& interpreter, UGeckoInstruction inst)
 {
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 EA =
-      inst.RA ? (ppc_state.gpr[inst.RA] + ppc_state.gpr[inst.RB]) : ppc_state.gpr[inst.RB];
-  Helper_Dequantize(interpreter.m_mmu, &ppc_state, EA, inst.Ix, inst.RD, inst.Wx);
-}
-
-void Interpreter::psq_stx(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 EA =
-      inst.RA ? (ppc_state.gpr[inst.RA] + ppc_state.gpr[inst.RB]) : ppc_state.gpr[inst.RB];
-  Helper_Quantize(interpreter.m_mmu, &ppc_state, EA, inst.Ix, inst.RS, inst.Wx);
+  auto& s = interpreter.m_ppc_state;
+  LoadQuantized(interpreter.m_mmu, s, IndexedAddress(s, inst, false), inst.Ix, inst.RD, inst.Wx);
 }
 
 void Interpreter::psq_lux(Interpreter& interpreter, UGeckoInstruction inst)
 {
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 EA = ppc_state.gpr[inst.RA] + ppc_state.gpr[inst.RB];
-  Helper_Dequantize(interpreter.m_mmu, &ppc_state, EA, inst.Ix, inst.RD, inst.Wx);
+  auto& s = interpreter.m_ppc_state;
+  const u32 address = IndexedAddress(s, inst, true);
+  LoadQuantized(interpreter.m_mmu, s, address, inst.Ix, inst.RD, inst.Wx);
+  UpdateBase(s, inst, address);
+}
 
-  if ((ppc_state.Exceptions & EXCEPTION_DSI) != 0)
-  {
-    return;
-  }
-
-  ppc_state.gpr[inst.RA] = EA;
+void Interpreter::psq_stx(Interpreter& interpreter, UGeckoInstruction inst)
+{
+  auto& s = interpreter.m_ppc_state;
+  StoreQuantized(interpreter.m_mmu, s, IndexedAddress(s, inst, false), inst.Ix, inst.RS, inst.Wx);
 }
 
 void Interpreter::psq_stux(Interpreter& interpreter, UGeckoInstruction inst)
 {
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 EA = ppc_state.gpr[inst.RA] + ppc_state.gpr[inst.RB];
-  Helper_Quantize(interpreter.m_mmu, &ppc_state, EA, inst.Ix, inst.RS, inst.Wx);
-
-  if ((ppc_state.Exceptions & EXCEPTION_DSI) != 0)
-  {
-    return;
-  }
-
-  ppc_state.gpr[inst.RA] = EA;
+  auto& s = interpreter.m_ppc_state;
+  const u32 address = IndexedAddress(s, inst, true);
+  StoreQuantized(interpreter.m_mmu, s, address, inst.Ix, inst.RS, inst.Wx);
+  UpdateBase(s, inst, address);
 }

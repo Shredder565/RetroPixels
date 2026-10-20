@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -21,6 +20,9 @@ struct PowerPCState;
 }  // namespace PowerPC
 class PPCSymbolDB;
 
+// The plain Gekko/Broadway interpreter. Every instruction has a static handler with the
+// signature below; the JIT and the cached interpreter call the same handlers (looked up with
+// GetInterpreterOp) for anything they do not translate themselves.
 class Interpreter : public CPUCoreBase
 {
 public:
@@ -35,25 +37,27 @@ public:
   void Init() override;
   void Shutdown() override;
   void SingleStep() override;
+  // Executes the instruction at PC (or the HLE hook placed there) and returns its cycle cost.
   int SingleStepInner();
 
   void Run() override;
   void ClearCache() override;
   const char* GetName() const override;
 
+  using Instruction = void (*)(Interpreter& interpreter, UGeckoInstruction inst);
+
   static void unknown_instruction(Interpreter& interpreter, UGeckoInstruction inst);
 
-  // Branch Instructions
+  // Branches and flow control
   static void bx(Interpreter& interpreter, UGeckoInstruction inst);
   static void bcx(Interpreter& interpreter, UGeckoInstruction inst);
   static void bcctrx(Interpreter& interpreter, UGeckoInstruction inst);
   static void bclrx(Interpreter& interpreter, UGeckoInstruction inst);
   static void HLEFunction(Interpreter& interpreter, UGeckoInstruction inst);
-
-  // Syscall Instruction
   static void sc(Interpreter& interpreter, UGeckoInstruction inst);
+  static void rfi(Interpreter& interpreter, UGeckoInstruction inst);
 
-  // Floating Point Instructions
+  // Scalar floating point
   static void faddsx(Interpreter& interpreter, UGeckoInstruction inst);
   static void fdivsx(Interpreter& interpreter, UGeckoInstruction inst);
   static void fmaddsx(Interpreter& interpreter, UGeckoInstruction inst);
@@ -83,7 +87,7 @@ public:
   static void fselx(Interpreter& interpreter, UGeckoInstruction inst);
   static void fsubx(Interpreter& interpreter, UGeckoInstruction inst);
 
-  // Integer Instructions
+  // Integer arithmetic, logic, rotates, shifts, compares and traps
   static void addi(Interpreter& interpreter, UGeckoInstruction inst);
   static void addic(Interpreter& interpreter, UGeckoInstruction inst);
   static void addic_rc(Interpreter& interpreter, UGeckoInstruction inst);
@@ -137,7 +141,7 @@ public:
   static void subfmex(Interpreter& interpreter, UGeckoInstruction inst);
   static void subfzex(Interpreter& interpreter, UGeckoInstruction inst);
 
-  // Load/Store Instructions
+  // Integer and floating point loads and stores, cache and TLB control
   static void lbz(Interpreter& interpreter, UGeckoInstruction inst);
   static void lbzu(Interpreter& interpreter, UGeckoInstruction inst);
   static void lfd(Interpreter& interpreter, UGeckoInstruction inst);
@@ -209,7 +213,7 @@ public:
   static void tlbie(Interpreter& interpreter, UGeckoInstruction inst);
   static void tlbsync(Interpreter& interpreter, UGeckoInstruction inst);
 
-  // Paired Instructions
+  // Paired singles and quantized loads/stores
   static void psq_l(Interpreter& interpreter, UGeckoInstruction inst);
   static void psq_lu(Interpreter& interpreter, UGeckoInstruction inst);
   static void psq_st(Interpreter& interpreter, UGeckoInstruction inst);
@@ -249,7 +253,7 @@ public:
   static void ps_merge11(Interpreter& interpreter, UGeckoInstruction inst);
   static void dcbz_l(Interpreter& interpreter, UGeckoInstruction inst);
 
-  // System Registers Instructions
+  // Condition register, FPSCR, MSR, segment and special purpose registers
   static void mcrfs(Interpreter& interpreter, UGeckoInstruction inst);
   static void mffsx(Interpreter& interpreter, UGeckoInstruction inst);
   static void mtfsb0x(Interpreter& interpreter, UGeckoInstruction inst);
@@ -277,12 +281,11 @@ public:
   static void crorc(Interpreter& interpreter, UGeckoInstruction inst);
   static void crxor(Interpreter& interpreter, UGeckoInstruction inst);
   static void mcrf(Interpreter& interpreter, UGeckoInstruction inst);
-  static void rfi(Interpreter& interpreter, UGeckoInstruction inst);
   static void sync(Interpreter& interpreter, UGeckoInstruction inst);
   static void isync(Interpreter& interpreter, UGeckoInstruction inst);
 
-  using Instruction = void (*)(Interpreter& interpreter, UGeckoInstruction inst);
-
+  // Decoding. GetInterpreterOp resolves the extended-opcode tables up front;
+  // RunInterpreterOp dispatches through them.
   static Instruction GetInterpreterOp(UGeckoInstruction inst);
   static void RunInterpreterOp(Interpreter& interpreter, UGeckoInstruction inst);
 
@@ -292,29 +295,15 @@ public:
   static void RunTable59(Interpreter& interpreter, UGeckoInstruction inst);
   static void RunTable63(Interpreter& interpreter, UGeckoInstruction inst);
 
+  // Carry out of the 32-bit sum value1 + value2 (1 or 0).
   static u32 Helper_Carry(u32 value1, u32 value2);
 
 private:
   void CheckExceptions();
-
   bool HandleFunctionHooking(u32 address);
-
-  // flag helper
-  static void Helper_UpdateCR0(PowerPC::PowerPCState& ppc_state, u32 value);
-
-  template <typename T>
-  static void Helper_IntCompare(PowerPC::PowerPCState& ppc_state, UGeckoInstruction inst, T a, T b);
-  static void Helper_FloatCompareOrdered(PowerPC::PowerPCState& ppc_state, UGeckoInstruction inst,
-                                         double a, double b);
-  static void Helper_FloatCompareUnordered(PowerPC::PowerPCState& ppc_state, UGeckoInstruction inst,
-                                           double a, double b);
-
-  static void Helper_StoreString(Interpreter& interpreter, const u32 EA, u32 n, u32 r);
-
   void UpdatePC();
-  bool IsInvalidPairedSingleExecution(UGeckoInstruction inst);
-
-  void Trace(const UGeckoInstruction& inst);
+  bool IsInvalidPairedSingleExecution(UGeckoInstruction inst) const;
+  void Trace(UGeckoInstruction inst);
 
   Core::System& m_system;
   PowerPC::PowerPCState& m_ppc_state;
@@ -322,8 +311,11 @@ private:
   Core::BranchWatch& m_branch_watch;
   PPCSymbolDB& m_ppc_symbol_db;
 
+  // The instruction most recently fetched by SingleStepInner.
   UGeckoInstruction m_prev_inst{};
+  // PC of the instruction before the current one (shown when an unknown opcode is hit).
   u32 m_last_pc = 0;
+  // Set by any instruction that ends a block: branches, exceptions, rfi, mtmsr and so on.
   bool m_end_block = false;
   bool m_start_trace = false;
 };

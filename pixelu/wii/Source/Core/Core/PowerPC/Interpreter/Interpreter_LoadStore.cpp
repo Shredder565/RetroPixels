@@ -1,5 +1,11 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// Integer and floating point loads/stores, string and multiple-word transfers, reservations,
+// cache and TLB management.
+//
+// Conventions shared by every access: the MMU raises DSI itself by setting EXCEPTION_DSI; a load
+// then leaves its target register alone and an update form leaves rA alone. When an update form
+// names the same register as target and base, the base (written last) wins.
 
 #include "Core/PowerPC/Interpreter/Interpreter.h"
 
@@ -18,1145 +24,736 @@
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
 
-static u32 Helper_Get_EA(const PowerPC::PowerPCState& ppcs, const UGeckoInstruction inst)
+namespace
 {
-  return inst.RA ? (ppcs.gpr[inst.RA] + u32(inst.SIMM_16)) : u32(inst.SIMM_16);
+using PowerPC::PowerPCState;
+
+bool DSIRaised(const PowerPCState& ppc_state)
+{
+  return (ppc_state.Exceptions & EXCEPTION_DSI) != 0;
 }
 
-static u32 Helper_Get_EA_U(const PowerPC::PowerPCState& ppcs, const UGeckoInstruction inst)
+// Effective addresses. "Base" forms treat rA = 0 as the value 0; update forms always use rA.
+u32 AddrD(const PowerPCState& s, UGeckoInstruction inst)
 {
-  return (ppcs.gpr[inst.RA] + u32(inst.SIMM_16));
+  return (inst.RA ? s.gpr[inst.RA] : 0) + static_cast<u32>(inst.SIMM_16);
+}
+u32 AddrDU(const PowerPCState& s, UGeckoInstruction inst)
+{
+  return s.gpr[inst.RA] + static_cast<u32>(inst.SIMM_16);
+}
+u32 AddrX(const PowerPCState& s, UGeckoInstruction inst)
+{
+  return (inst.RA ? s.gpr[inst.RA] : 0) + s.gpr[inst.RB];
+}
+u32 AddrXU(const PowerPCState& s, UGeckoInstruction inst)
+{
+  return s.gpr[inst.RA] + s.gpr[inst.RB];
 }
 
-static u32 Helper_Get_EA_X(const PowerPC::PowerPCState& ppcs, const UGeckoInstruction inst)
+enum class Ext
 {
-  return inst.RA ? (ppcs.gpr[inst.RA] + ppcs.gpr[inst.RB]) : ppcs.gpr[inst.RB];
-}
+  Zero,
+  Sign,
+  Reverse,
+};
 
-static u32 Helper_Get_EA_UX(const PowerPC::PowerPCState& ppcs, const UGeckoInstruction inst)
+template <typename T, Ext ext>
+u32 LoadValue(PowerPC::MMU& mmu, u32 address)
 {
-  return (ppcs.gpr[inst.RA] + ppcs.gpr[inst.RB]);
-}
-
-void Interpreter::lbz(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 temp = interpreter.m_mmu.Read<u8>(Helper_Get_EA(ppc_state, inst));
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-    ppc_state.gpr[inst.RD] = temp;
-}
-
-void Interpreter::lbzu(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_U(ppc_state, inst);
-  const u32 temp = interpreter.m_mmu.Read<u8>(address);
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
+  const T raw = mmu.Read<T>(address);
+  if constexpr (ext == Ext::Sign)
+    return static_cast<u32>(static_cast<s32>(static_cast<std::make_signed_t<T>>(raw)));
+  else if constexpr (ext == Ext::Reverse)
   {
-    ppc_state.gpr[inst.RD] = temp;
-    ppc_state.gpr[inst.RA] = address;
+    if constexpr (sizeof(T) == 2)
+      return Common::swap16(raw);
+    else
+      return Common::swap32(raw);
   }
+  else
+    return raw;
 }
 
-void Interpreter::lfd(Interpreter& interpreter, UGeckoInstruction inst)
+// Integer load into rD, optionally writing the address back to rA.
+template <typename T, Ext ext = Ext::Zero>
+void LoadInt(Interpreter& interpreter, PowerPCState& s, PowerPC::MMU& mmu, UGeckoInstruction inst,
+             u32 address, bool update)
 {
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA(ppc_state, inst);
-
-  if ((address & 0b11) != 0)
-  {
-    GenerateAlignmentException(ppc_state, address);
+  const u32 value = LoadValue<T, ext>(mmu, address);
+  if (DSIRaised(s))
     return;
-  }
-
-  const u64 temp = interpreter.m_mmu.Read<u64>(address);
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-    ppc_state.ps[inst.FD].SetPS0(temp);
+  s.gpr[inst.RD] = value;
+  if (update)
+    s.gpr[inst.RA] = address;
 }
 
-void Interpreter::lfdu(Interpreter& interpreter, UGeckoInstruction inst)
+// Integer store of rS, optionally writing the address back to rA.
+template <typename T>
+void StoreInt(PowerPCState& s, PowerPC::MMU& mmu, UGeckoInstruction inst, u32 address,
+              bool update)
 {
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_U(ppc_state, inst);
+  mmu.Write<T>(s.gpr[inst.RS], address);
+  if (update && !DSIRaised(s))
+    s.gpr[inst.RA] = address;
+}
 
-  if ((address & 0b11) != 0)
-  {
-    GenerateAlignmentException(ppc_state, address);
+// Floating point accesses must be word aligned.
+bool CheckFloatAlignment(PowerPCState& s, u32 address)
+{
+  if ((address & 3) == 0)
+    return true;
+  GenerateAlignmentException(s, address);
+  return false;
+}
+
+void LoadSingle(PowerPCState& s, PowerPC::MMU& mmu, UGeckoInstruction inst, u32 address,
+                bool update)
+{
+  if (!CheckFloatAlignment(s, address))
     return;
-  }
-
-  const u64 temp = interpreter.m_mmu.Read<u64>(address);
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.ps[inst.FD].SetPS0(temp);
-    ppc_state.gpr[inst.RA] = address;
-  }
-}
-
-void Interpreter::lfdux(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_UX(ppc_state, inst);
-
-  if ((address & 0b11) != 0)
-  {
-    GenerateAlignmentException(ppc_state, address);
+  const u32 word = mmu.Read<u32>(address);
+  if (DSIRaised(s))
     return;
-  }
-
-  const u64 temp = interpreter.m_mmu.Read<u64>(address);
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.ps[inst.FD].SetPS0(temp);
-    ppc_state.gpr[inst.RA] = address;
-  }
+  s.ps[inst.FD].Fill(InterpreterFP::SingleBitsToDouble(word));
+  if (update)
+    s.gpr[inst.RA] = address;
 }
 
-void Interpreter::lfdx(Interpreter& interpreter, UGeckoInstruction inst)
+void LoadDouble(PowerPCState& s, PowerPC::MMU& mmu, UGeckoInstruction inst, u32 address,
+                bool update)
 {
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_X(ppc_state, inst);
-
-  if ((address & 0b11) != 0)
-  {
-    GenerateAlignmentException(ppc_state, address);
+  if (!CheckFloatAlignment(s, address))
     return;
-  }
-
-  const u64 temp = interpreter.m_mmu.Read<u64>(address);
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-    ppc_state.ps[inst.FD].SetPS0(temp);
-}
-
-void Interpreter::lfs(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA(ppc_state, inst);
-
-  if ((address & 0b11) != 0)
-  {
-    GenerateAlignmentException(ppc_state, address);
+  const u64 value = mmu.Read<u64>(address);
+  if (DSIRaised(s))
     return;
-  }
-
-  const u32 temp = interpreter.m_mmu.Read<u32>(address);
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    const u64 value = ConvertToDouble(temp);
-    ppc_state.ps[inst.FD].Fill(value);
-  }
+  s.ps[inst.FD].SetPS0(value);
+  if (update)
+    s.gpr[inst.RA] = address;
 }
 
-void Interpreter::lfsu(Interpreter& interpreter, UGeckoInstruction inst)
+void StoreSingle(PowerPCState& s, PowerPC::MMU& mmu, UGeckoInstruction inst, u32 address,
+                 bool update)
 {
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_U(ppc_state, inst);
-
-  if ((address & 0b11) != 0)
-  {
-    GenerateAlignmentException(ppc_state, address);
+  if (!CheckFloatAlignment(s, address))
     return;
-  }
-
-  const u32 temp = interpreter.m_mmu.Read<u32>(address);
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    const u64 value = ConvertToDouble(temp);
-    ppc_state.ps[inst.FD].Fill(value);
-    ppc_state.gpr[inst.RA] = address;
-  }
+  mmu.Write<u32>(InterpreterFP::DoubleToSingleBits(s.ps[inst.FS].PS0AsU64()), address);
+  if (update && !DSIRaised(s))
+    s.gpr[inst.RA] = address;
 }
 
-void Interpreter::lfsux(Interpreter& interpreter, UGeckoInstruction inst)
+void StoreDouble(PowerPCState& s, PowerPC::MMU& mmu, UGeckoInstruction inst, u32 address,
+                 bool update)
 {
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_UX(ppc_state, inst);
-
-  if ((address & 0b11) != 0)
-  {
-    GenerateAlignmentException(ppc_state, address);
+  if (!CheckFloatAlignment(s, address))
     return;
-  }
-
-  const u32 temp = interpreter.m_mmu.Read<u32>(address);
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    const u64 value = ConvertToDouble(temp);
-    ppc_state.ps[inst.FD].Fill(value);
-    ppc_state.gpr[inst.RA] = address;
-  }
+  mmu.Write<u64>(s.ps[inst.FS].PS0AsU64(), address);
+  if (update && !DSIRaised(s))
+    s.gpr[inst.RA] = address;
 }
 
-void Interpreter::lfsx(Interpreter& interpreter, UGeckoInstruction inst)
+// lswi/lswx: `count` bytes into consecutive registers (wrapping after r31), four per register,
+// big-endian; each register is cleared when its first byte arrives. A count of zero changes
+// nothing (verified on hardware).
+void LoadString(PowerPCState& s, PowerPC::MMU& mmu, u32 address, u32 count, u32 first_reg,
+                bool alert_on_dsi)
 {
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_X(ppc_state, inst);
-
-  if ((address & 0b11) != 0)
+  for (u32 n = 0; n < count; n++)
   {
-    GenerateAlignmentException(ppc_state, address);
-    return;
-  }
-
-  const u32 temp = interpreter.m_mmu.Read<u32>(address);
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    const u64 value = ConvertToDouble(temp);
-    ppc_state.ps[inst.FD].Fill(value);
-  }
-}
-
-void Interpreter::lha(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 temp = u32(s32(s16(interpreter.m_mmu.Read<u16>(Helper_Get_EA(ppc_state, inst)))));
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RD] = temp;
-  }
-}
-
-void Interpreter::lhau(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_U(ppc_state, inst);
-  const u32 temp = u32(s32(s16(interpreter.m_mmu.Read<u16>(address))));
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RD] = temp;
-    ppc_state.gpr[inst.RA] = address;
-  }
-}
-
-void Interpreter::lhz(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 temp = interpreter.m_mmu.Read<u16>(Helper_Get_EA(ppc_state, inst));
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RD] = temp;
-  }
-}
-
-void Interpreter::lhzu(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_U(ppc_state, inst);
-  const u32 temp = interpreter.m_mmu.Read<u16>(address);
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RD] = temp;
-    ppc_state.gpr[inst.RA] = address;
-  }
-}
-
-// FIXME: lmw should do a total rollback if a DSI occurs
-void Interpreter::lmw(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  u32 address = Helper_Get_EA(ppc_state, inst);
-
-  if ((address & 0b11) != 0 || ppc_state.msr.LE)
-  {
-    GenerateAlignmentException(ppc_state, address);
-    return;
-  }
-
-  for (u32 i = inst.RD; i <= 31; i++, address += 4)
-  {
-    const u32 temp_reg = interpreter.m_mmu.Read<u32>(address);
-
-    if ((ppc_state.Exceptions & EXCEPTION_DSI) != 0)
+    const u32 reg = (first_reg + n / 4) & 31;
+    const u32 shift = 24 - 8 * (n % 4);
+    if (n % 4 == 0)
+      s.gpr[reg] = 0;
+    const u32 byte = mmu.Read<u8>(address + n);
+    if (DSIRaised(s))
     {
-      PanicAlertFmt("DSI exception in lmw");
+      if (alert_on_dsi)
+        PanicAlertFmt("lswi: DSI exception during the transfer");
+      NOTICE_LOG_FMT(POWERPC, "DSI exception during a load string instruction");
+      return;
+    }
+    s.gpr[reg] |= byte << shift;
+  }
+}
+
+// stswi/stswx: `count` bytes from consecutive registers. Uncached memory must not see accesses
+// narrower or wider than the instruction asks for, so the bytes go out as aligned 32-bit words;
+// partial words at either end are merged with the bytes already in memory.
+void StoreString(PowerPCState& s, PowerPC::MMU& mmu, u32 address, u32 count, u32 first_reg)
+{
+  const u32 lead = address & 3;  // bytes of the first word that are not ours
+  u32 word_address = address & ~3u;
+  const u32 total = lead + count;
+
+  // Byte `i` of the stream that will be written from word_address onwards.
+  u32 head_word = 0;
+  if (lead != 0)
+  {
+    head_word = mmu.Read<u32>(word_address);
+    if (DSIRaised(s))
+      return;
+  }
+  auto data_byte = [&](u32 i) -> u32 {
+    const u32 k = i - lead;
+    return (s.gpr[(first_reg + k / 4) & 31] >> (24 - 8 * (k % 4))) & 0xFF;
+  };
+  auto head_byte = [&](u32 i) -> u32 { return (head_word >> (24 - 8 * i)) & 0xFF; };
+
+  u32 i = 0;
+  for (; i + 4 <= total; i += 4, word_address += 4)
+  {
+    u32 word = 0;
+    for (u32 j = 0; j < 4; j++)
+      word = (word << 8) | (i + j < lead ? head_byte(i + j) : data_byte(i + j));
+    mmu.Write<u32>(word, word_address);
+    if (DSIRaised(s))
+      return;
+  }
+
+  const u32 remaining = total - i;
+  if (remaining == 0)
+    return;
+
+  const u32 tail_word = mmu.Read<u32>(word_address);
+  if (DSIRaised(s))
+    return;
+  u32 word = 0;
+  for (u32 j = 0; j < 4; j++)
+  {
+    u32 byte;
+    if (j >= remaining)
+      byte = (tail_word >> (24 - 8 * j)) & 0xFF;
+    else if (i + j < lead)
+      byte = head_byte(i + j);
+    else
+      byte = data_byte(i + j);
+    word = (word << 8) | byte;
+  }
+  mmu.Write<u32>(word, word_address);
+}
+
+// Without data cache emulation the cache block instructions instead invalidate the JIT's view
+// of the line: games that patch code tend to flush the data cache but not always icbi.
+template <typename Op>
+void DataCacheOp(Interpreter& interpreter, PowerPCState& s, Core::System& system, u32 address,
+                 Op op)
+{
+  if (!s.m_enable_dcache)
+  {
+    system.GetJitInterface().InvalidateICacheLine(address);
+    return;
+  }
+  op(address);
+}
+
+// eciwx/ecowx need EAR[E] and word alignment.
+bool ExternalControlAllowed(PowerPCState& s, u32 address)
+{
+  if ((s.spr[SPR_EAR] & 0x80000000) == 0)
+  {
+    GenerateDSIException(s, address);
+    return false;
+  }
+  if ((address & 3) != 0)
+  {
+    GenerateAlignmentException(s, address);
+    return false;
+  }
+  return true;
+}
+
+bool Privileged(PowerPCState& s)
+{
+  if (!s.msr.PR)
+    return false;
+  GenerateProgramException(s, ProgramExceptionCause::PrivilegedInstruction);
+  return true;
+}
+}  // namespace
+
+// ---- integer loads
+
+void Interpreter::lbz(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadInt<u8>(i, i.m_ppc_state, i.m_mmu, inst, AddrD(i.m_ppc_state, inst), false);
+}
+void Interpreter::lbzu(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadInt<u8>(i, i.m_ppc_state, i.m_mmu, inst, AddrDU(i.m_ppc_state, inst), true);
+}
+void Interpreter::lbzx(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadInt<u8>(i, i.m_ppc_state, i.m_mmu, inst, AddrX(i.m_ppc_state, inst), false);
+}
+void Interpreter::lbzux(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadInt<u8>(i, i.m_ppc_state, i.m_mmu, inst, AddrXU(i.m_ppc_state, inst), true);
+}
+
+void Interpreter::lhz(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadInt<u16>(i, i.m_ppc_state, i.m_mmu, inst, AddrD(i.m_ppc_state, inst), false);
+}
+void Interpreter::lhzu(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadInt<u16>(i, i.m_ppc_state, i.m_mmu, inst, AddrDU(i.m_ppc_state, inst), true);
+}
+void Interpreter::lhzx(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadInt<u16>(i, i.m_ppc_state, i.m_mmu, inst, AddrX(i.m_ppc_state, inst), false);
+}
+void Interpreter::lhzux(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadInt<u16>(i, i.m_ppc_state, i.m_mmu, inst, AddrXU(i.m_ppc_state, inst), true);
+}
+
+void Interpreter::lha(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadInt<u16, Ext::Sign>(i, i.m_ppc_state, i.m_mmu, inst, AddrD(i.m_ppc_state, inst), false);
+}
+void Interpreter::lhau(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadInt<u16, Ext::Sign>(i, i.m_ppc_state, i.m_mmu, inst, AddrDU(i.m_ppc_state, inst), true);
+}
+void Interpreter::lhax(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadInt<u16, Ext::Sign>(i, i.m_ppc_state, i.m_mmu, inst, AddrX(i.m_ppc_state, inst), false);
+}
+void Interpreter::lhaux(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadInt<u16, Ext::Sign>(i, i.m_ppc_state, i.m_mmu, inst, AddrXU(i.m_ppc_state, inst), true);
+}
+
+void Interpreter::lwz(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadInt<u32>(i, i.m_ppc_state, i.m_mmu, inst, AddrD(i.m_ppc_state, inst), false);
+}
+void Interpreter::lwzu(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadInt<u32>(i, i.m_ppc_state, i.m_mmu, inst, AddrDU(i.m_ppc_state, inst), true);
+}
+void Interpreter::lwzx(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadInt<u32>(i, i.m_ppc_state, i.m_mmu, inst, AddrX(i.m_ppc_state, inst), false);
+}
+void Interpreter::lwzux(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadInt<u32>(i, i.m_ppc_state, i.m_mmu, inst, AddrXU(i.m_ppc_state, inst), true);
+}
+
+void Interpreter::lhbrx(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadInt<u16, Ext::Reverse>(i, i.m_ppc_state, i.m_mmu, inst, AddrX(i.m_ppc_state, inst), false);
+}
+void Interpreter::lwbrx(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadInt<u32, Ext::Reverse>(i, i.m_ppc_state, i.m_mmu, inst, AddrX(i.m_ppc_state, inst), false);
+}
+
+// ---- integer stores
+
+void Interpreter::stb(Interpreter& i, UGeckoInstruction inst)
+{
+  StoreInt<u8>(i.m_ppc_state, i.m_mmu, inst, AddrD(i.m_ppc_state, inst), false);
+}
+void Interpreter::stbu(Interpreter& i, UGeckoInstruction inst)
+{
+  StoreInt<u8>(i.m_ppc_state, i.m_mmu, inst, AddrDU(i.m_ppc_state, inst), true);
+}
+void Interpreter::stbx(Interpreter& i, UGeckoInstruction inst)
+{
+  StoreInt<u8>(i.m_ppc_state, i.m_mmu, inst, AddrX(i.m_ppc_state, inst), false);
+}
+void Interpreter::stbux(Interpreter& i, UGeckoInstruction inst)
+{
+  StoreInt<u8>(i.m_ppc_state, i.m_mmu, inst, AddrXU(i.m_ppc_state, inst), true);
+}
+
+void Interpreter::sth(Interpreter& i, UGeckoInstruction inst)
+{
+  StoreInt<u16>(i.m_ppc_state, i.m_mmu, inst, AddrD(i.m_ppc_state, inst), false);
+}
+void Interpreter::sthu(Interpreter& i, UGeckoInstruction inst)
+{
+  StoreInt<u16>(i.m_ppc_state, i.m_mmu, inst, AddrDU(i.m_ppc_state, inst), true);
+}
+void Interpreter::sthx(Interpreter& i, UGeckoInstruction inst)
+{
+  StoreInt<u16>(i.m_ppc_state, i.m_mmu, inst, AddrX(i.m_ppc_state, inst), false);
+}
+void Interpreter::sthux(Interpreter& i, UGeckoInstruction inst)
+{
+  StoreInt<u16>(i.m_ppc_state, i.m_mmu, inst, AddrXU(i.m_ppc_state, inst), true);
+}
+
+void Interpreter::stw(Interpreter& i, UGeckoInstruction inst)
+{
+  StoreInt<u32>(i.m_ppc_state, i.m_mmu, inst, AddrD(i.m_ppc_state, inst), false);
+}
+void Interpreter::stwu(Interpreter& i, UGeckoInstruction inst)
+{
+  StoreInt<u32>(i.m_ppc_state, i.m_mmu, inst, AddrDU(i.m_ppc_state, inst), true);
+}
+void Interpreter::stwx(Interpreter& i, UGeckoInstruction inst)
+{
+  StoreInt<u32>(i.m_ppc_state, i.m_mmu, inst, AddrX(i.m_ppc_state, inst), false);
+}
+void Interpreter::stwux(Interpreter& i, UGeckoInstruction inst)
+{
+  StoreInt<u32>(i.m_ppc_state, i.m_mmu, inst, AddrXU(i.m_ppc_state, inst), true);
+}
+
+void Interpreter::sthbrx(Interpreter& i, UGeckoInstruction inst)
+{
+  auto& s = i.m_ppc_state;
+  i.m_mmu.Write_U16_Swap(s.gpr[inst.RS], AddrX(s, inst));
+}
+void Interpreter::stwbrx(Interpreter& i, UGeckoInstruction inst)
+{
+  auto& s = i.m_ppc_state;
+  i.m_mmu.Write_U32_Swap(s.gpr[inst.RS], AddrX(s, inst));
+}
+
+// ---- floating point loads and stores
+
+void Interpreter::lfs(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadSingle(i.m_ppc_state, i.m_mmu, inst, AddrD(i.m_ppc_state, inst), false);
+}
+void Interpreter::lfsu(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadSingle(i.m_ppc_state, i.m_mmu, inst, AddrDU(i.m_ppc_state, inst), true);
+}
+void Interpreter::lfsx(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadSingle(i.m_ppc_state, i.m_mmu, inst, AddrX(i.m_ppc_state, inst), false);
+}
+void Interpreter::lfsux(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadSingle(i.m_ppc_state, i.m_mmu, inst, AddrXU(i.m_ppc_state, inst), true);
+}
+
+void Interpreter::lfd(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadDouble(i.m_ppc_state, i.m_mmu, inst, AddrD(i.m_ppc_state, inst), false);
+}
+void Interpreter::lfdu(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadDouble(i.m_ppc_state, i.m_mmu, inst, AddrDU(i.m_ppc_state, inst), true);
+}
+void Interpreter::lfdx(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadDouble(i.m_ppc_state, i.m_mmu, inst, AddrX(i.m_ppc_state, inst), false);
+}
+void Interpreter::lfdux(Interpreter& i, UGeckoInstruction inst)
+{
+  LoadDouble(i.m_ppc_state, i.m_mmu, inst, AddrXU(i.m_ppc_state, inst), true);
+}
+
+void Interpreter::stfs(Interpreter& i, UGeckoInstruction inst)
+{
+  StoreSingle(i.m_ppc_state, i.m_mmu, inst, AddrD(i.m_ppc_state, inst), false);
+}
+void Interpreter::stfsu(Interpreter& i, UGeckoInstruction inst)
+{
+  StoreSingle(i.m_ppc_state, i.m_mmu, inst, AddrDU(i.m_ppc_state, inst), true);
+}
+void Interpreter::stfsx(Interpreter& i, UGeckoInstruction inst)
+{
+  StoreSingle(i.m_ppc_state, i.m_mmu, inst, AddrX(i.m_ppc_state, inst), false);
+}
+void Interpreter::stfsux(Interpreter& i, UGeckoInstruction inst)
+{
+  StoreSingle(i.m_ppc_state, i.m_mmu, inst, AddrXU(i.m_ppc_state, inst), true);
+}
+
+void Interpreter::stfd(Interpreter& i, UGeckoInstruction inst)
+{
+  StoreDouble(i.m_ppc_state, i.m_mmu, inst, AddrD(i.m_ppc_state, inst), false);
+}
+void Interpreter::stfdu(Interpreter& i, UGeckoInstruction inst)
+{
+  StoreDouble(i.m_ppc_state, i.m_mmu, inst, AddrDU(i.m_ppc_state, inst), true);
+}
+void Interpreter::stfdx(Interpreter& i, UGeckoInstruction inst)
+{
+  StoreDouble(i.m_ppc_state, i.m_mmu, inst, AddrX(i.m_ppc_state, inst), false);
+}
+void Interpreter::stfdux(Interpreter& i, UGeckoInstruction inst)
+{
+  StoreDouble(i.m_ppc_state, i.m_mmu, inst, AddrXU(i.m_ppc_state, inst), true);
+}
+
+// stfiwx: the low word of frS, as is.
+void Interpreter::stfiwx(Interpreter& i, UGeckoInstruction inst)
+{
+  auto& s = i.m_ppc_state;
+  const u32 address = AddrX(s, inst);
+  if (!CheckFloatAlignment(s, address))
+    return;
+  i.m_mmu.Write<u32>(s.ps[inst.FS].PS0AsU32(), address);
+}
+
+// ---- multiple and string transfers. A DSI in the middle leaves the registers or memory
+// already transferred as they are (real hardware would restart the instruction).
+
+void Interpreter::lmw(Interpreter& i, UGeckoInstruction inst)
+{
+  auto& s = i.m_ppc_state;
+  u32 address = AddrD(s, inst);
+  if ((address & 3) != 0 || s.msr.LE)
+  {
+    GenerateAlignmentException(s, address);
+    return;
+  }
+  for (u32 reg = inst.RD; reg < 32; reg++, address += 4)
+  {
+    const u32 value = i.m_mmu.Read<u32>(address);
+    if (DSIRaised(s))
+    {
+      PanicAlertFmt("lmw: DSI exception during the transfer");
       NOTICE_LOG_FMT(POWERPC, "DSI exception in lmw");
       return;
     }
-    else
-    {
-      ppc_state.gpr[i] = temp_reg;
-    }
+    s.gpr[reg] = value;
   }
 }
 
-// FIXME: stmw should do a total rollback if a DSI occurs
-void Interpreter::stmw(Interpreter& interpreter, UGeckoInstruction inst)
+void Interpreter::stmw(Interpreter& i, UGeckoInstruction inst)
 {
-  auto& ppc_state = interpreter.m_ppc_state;
-  u32 address = Helper_Get_EA(ppc_state, inst);
-
-  if ((address & 0b11) != 0 || ppc_state.msr.LE)
+  auto& s = i.m_ppc_state;
+  u32 address = AddrD(s, inst);
+  if ((address & 3) != 0 || s.msr.LE)
   {
-    GenerateAlignmentException(ppc_state, address);
+    GenerateAlignmentException(s, address);
     return;
   }
-
-  for (u32 i = inst.RS; i <= 31; i++, address += 4)
+  for (u32 reg = inst.RS; reg < 32; reg++, address += 4)
   {
-    interpreter.m_mmu.Write<u32>(ppc_state.gpr[i], address);
-    if ((ppc_state.Exceptions & EXCEPTION_DSI) != 0)
+    i.m_mmu.Write<u32>(s.gpr[reg], address);
+    if (DSIRaised(s))
     {
-      PanicAlertFmt("DSI exception in stmw");
+      PanicAlertFmt("stmw: DSI exception during the transfer");
       NOTICE_LOG_FMT(POWERPC, "DSI exception in stmw");
       return;
     }
   }
 }
 
-void Interpreter::lwz(Interpreter& interpreter, UGeckoInstruction inst)
+// The string instructions are not available in little-endian mode.
+void Interpreter::lswi(Interpreter& i, UGeckoInstruction inst)
 {
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA(ppc_state, inst);
-  const u32 temp = interpreter.m_mmu.Read<u32>(address);
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
+  auto& s = i.m_ppc_state;
+  const u32 address = inst.RA ? s.gpr[inst.RA] : 0;
+  if (s.msr.LE)
   {
-    ppc_state.gpr[inst.RD] = temp;
-  }
-}
-
-void Interpreter::lwzu(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_U(ppc_state, inst);
-  const u32 temp = interpreter.m_mmu.Read<u32>(address);
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RD] = temp;
-    ppc_state.gpr[inst.RA] = address;
-  }
-}
-
-void Interpreter::stb(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  interpreter.m_mmu.Write<u8>(ppc_state.gpr[inst.RS], Helper_Get_EA(ppc_state, inst));
-}
-
-void Interpreter::stbu(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_U(ppc_state, inst);
-
-  interpreter.m_mmu.Write<u8>(ppc_state.gpr[inst.RS], address);
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RA] = address;
-  }
-}
-
-void Interpreter::stfd(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA(ppc_state, inst);
-
-  if ((address & 0b11) != 0)
-  {
-    GenerateAlignmentException(ppc_state, address);
+    GenerateAlignmentException(s, address);
     return;
   }
-
-  interpreter.m_mmu.Write<u64>(ppc_state.ps[inst.FS].PS0AsU64(), address);
+  LoadString(s, i.m_mmu, address, inst.NB == 0 ? 32 : inst.NB, inst.RD, true);
 }
 
-void Interpreter::stfdu(Interpreter& interpreter, UGeckoInstruction inst)
+void Interpreter::lswx(Interpreter& i, UGeckoInstruction inst)
 {
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_U(ppc_state, inst);
-
-  if ((address & 0b11) != 0)
+  auto& s = i.m_ppc_state;
+  const u32 address = AddrX(s, inst);
+  if (s.msr.LE)
   {
-    GenerateAlignmentException(ppc_state, address);
+    GenerateAlignmentException(s, address);
     return;
   }
-
-  interpreter.m_mmu.Write<u64>(ppc_state.ps[inst.FS].PS0AsU64(), address);
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RA] = address;
-  }
+  // XER[25-31] holds the byte count (Not64, a Wii homebrew N64 emulator, uses this).
+  LoadString(s, i.m_mmu, address, static_cast<u8>(s.xer_stringctrl), inst.RD, false);
 }
 
-void Interpreter::stfs(Interpreter& interpreter, UGeckoInstruction inst)
+void Interpreter::stswi(Interpreter& i, UGeckoInstruction inst)
 {
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA(ppc_state, inst);
-
-  if ((address & 0b11) != 0)
+  auto& s = i.m_ppc_state;
+  const u32 address = inst.RA ? s.gpr[inst.RA] : 0;
+  if (s.msr.LE)
   {
-    GenerateAlignmentException(ppc_state, address);
+    GenerateAlignmentException(s, address);
     return;
   }
-
-  interpreter.m_mmu.Write<u32>(ConvertToSingle(ppc_state.ps[inst.FS].PS0AsU64()), address);
+  StoreString(s, i.m_mmu, address, inst.NB == 0 ? 32 : inst.NB, inst.RS);
 }
 
-void Interpreter::stfsu(Interpreter& interpreter, UGeckoInstruction inst)
+void Interpreter::stswx(Interpreter& i, UGeckoInstruction inst)
 {
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_U(ppc_state, inst);
-
-  if ((address & 0b11) != 0)
+  auto& s = i.m_ppc_state;
+  const u32 address = AddrX(s, inst);
+  if (s.msr.LE)
   {
-    GenerateAlignmentException(ppc_state, address);
+    GenerateAlignmentException(s, address);
     return;
   }
-
-  interpreter.m_mmu.Write<u32>(ConvertToSingle(ppc_state.ps[inst.FS].PS0AsU64()), address);
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RA] = address;
-  }
+  StoreString(s, i.m_mmu, address, static_cast<u8>(s.xer_stringctrl), inst.RS);
 }
 
-void Interpreter::sth(Interpreter& interpreter, UGeckoInstruction inst)
+// ---- reservations. With a single CPU a reservation is only lost to another stwcx.
+
+void Interpreter::lwarx(Interpreter& i, UGeckoInstruction inst)
 {
-  auto& ppc_state = interpreter.m_ppc_state;
-  interpreter.m_mmu.Write<u16>(ppc_state.gpr[inst.RS], Helper_Get_EA(ppc_state, inst));
-}
-
-void Interpreter::sthu(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_U(ppc_state, inst);
-
-  interpreter.m_mmu.Write<u16>(ppc_state.gpr[inst.RS], address);
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RA] = address;
-  }
-}
-
-void Interpreter::stw(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  interpreter.m_mmu.Write<u32>(ppc_state.gpr[inst.RS], Helper_Get_EA(ppc_state, inst));
-}
-
-void Interpreter::stwu(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_U(ppc_state, inst);
-
-  interpreter.m_mmu.Write<u32>(ppc_state.gpr[inst.RS], address);
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RA] = address;
-  }
-}
-
-void Interpreter::dcba(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  ASSERT_MSG(POWERPC, 0, "dcba - Not implemented - not a Gekko instruction");
-}
-
-void Interpreter::dcbf(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_X(ppc_state, inst);
-  if (!ppc_state.m_enable_dcache)
-  {
-    // Invalidate the JIT cache here as a heuristic to compensate for
-    // the lack of precise L1 icache emulation in the JIT. (Portable software
-    // should use icbi consistently, but games aren't portable.)
-    interpreter.m_system.GetJitInterface().InvalidateICacheLine(address);
+  auto& s = i.m_ppc_state;
+  const u32 address = AddrX(s, inst);
+  if (!CheckFloatAlignment(s, address))
     return;
-  }
-
-  interpreter.m_mmu.FlushDCacheLine(address);
-}
-
-void Interpreter::dcbi(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  if (ppc_state.msr.PR)
-  {
-    GenerateProgramException(ppc_state, ProgramExceptionCause::PrivilegedInstruction);
+  const u32 value = i.m_mmu.Read<u32>(address);
+  if (DSIRaised(s))
     return;
-  }
+  s.gpr[inst.RD] = value;
+  s.reserve = true;
+  s.reserve_address = address;
+}
 
-  const u32 address = Helper_Get_EA_X(ppc_state, inst);
-  if (!ppc_state.m_enable_dcache)
-  {
-    // Invalidate the JIT cache here as a heuristic to compensate for
-    // the lack of precise L1 icache emulation in the JIT. (Portable software
-    // should use icbi consistently, but games aren't portable.)
-    interpreter.m_system.GetJitInterface().InvalidateICacheLine(address);
+// stwcx.: CR0 = 00 || stored || SO.
+void Interpreter::stwcxd(Interpreter& i, UGeckoInstruction inst)
+{
+  auto& s = i.m_ppc_state;
+  const u32 address = AddrX(s, inst);
+  if (!CheckFloatAlignment(s, address))
     return;
-  }
 
-  interpreter.m_mmu.InvalidateDCacheLine(address);
-}
-
-void Interpreter::dcbst(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_X(ppc_state, inst);
-  if (!ppc_state.m_enable_dcache)
+  if (s.reserve && s.reserve_address == address)
   {
-    // Invalidate the JIT cache here as a heuristic to compensate for
-    // the lack of precise L1 icache emulation in the JIT. (Portable software
-    // should use icbi consistently, but games aren't portable.)
-    interpreter.m_system.GetJitInterface().InvalidateICacheLine(address);
-    return;
-  }
-
-  interpreter.m_mmu.StoreDCacheLine(address);
-}
-
-// These instructions hint that it might be optimal to prefetch the specified cache line into the
-// data cache. But the CPU is never guaranteed to do this fetch, and in practice it's not more
-// performant to emulate it.
-
-void Interpreter::dcbt(Interpreter& interpreter, UGeckoInstruction inst)
-{
-}
-
-void Interpreter::dcbtst(Interpreter& interpreter, UGeckoInstruction inst)
-{
-}
-
-void Interpreter::dcbz(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 dcbz_addr = Helper_Get_EA_X(ppc_state, inst);
-
-  if (!HID0(ppc_state).DCE)
-  {
-    GenerateAlignmentException(ppc_state, dcbz_addr);
-    return;
-  }
-
-  if (!ppc_state.m_enable_dcache)
-  {
-    // Hack to stop dcbz/dcbi over low MEM1 trashing memory. This is not needed if data cache
-    // emulation is enabled.
-    if ((dcbz_addr < 0x80008000) && (dcbz_addr >= 0x80000000) &&
-        Config::Get(Config::MAIN_LOW_DCBZ_HACK))
+    i.m_mmu.Write<u32>(s.gpr[inst.RS], address);
+    if (!DSIRaised(s))
     {
+      s.reserve = false;
+      s.cr.SetField(0, PowerPC::CR_EQ | s.GetXER_SO());
       return;
     }
   }
-
-  interpreter.m_mmu.ClearDCacheLine(dcbz_addr & (~31));
+  s.cr.SetField(0, s.GetXER_SO());
 }
 
-void Interpreter::dcbz_l(Interpreter& interpreter, UGeckoInstruction inst)
+// ---- external control (unused by games)
+
+void Interpreter::eciwx(Interpreter& i, UGeckoInstruction inst)
 {
-  auto& ppc_state = interpreter.m_ppc_state;
-  if (!HID2(ppc_state).LCE)
+  auto& s = i.m_ppc_state;
+  const u32 address = AddrX(s, inst);
+  if (ExternalControlAllowed(s, address))
+    s.gpr[inst.RD] = i.m_mmu.Read<u32>(address);
+}
+
+void Interpreter::ecowx(Interpreter& i, UGeckoInstruction inst)
+{
+  auto& s = i.m_ppc_state;
+  const u32 address = AddrX(s, inst);
+  if (ExternalControlAllowed(s, address))
+    i.m_mmu.Write<u32>(s.gpr[inst.RS], address);
+}
+
+// ---- cache management
+
+void Interpreter::dcba(Interpreter& i, UGeckoInstruction inst)
+{
+  ASSERT_MSG(POWERPC, false, "dcba is not a Gekko instruction");
+}
+
+void Interpreter::dcbf(Interpreter& i, UGeckoInstruction inst)
+{
+  auto& s = i.m_ppc_state;
+  DataCacheOp(i, s, i.m_system, AddrX(s, inst),
+              [&](u32 address) { i.m_mmu.FlushDCacheLine(address); });
+}
+
+void Interpreter::dcbi(Interpreter& i, UGeckoInstruction inst)
+{
+  auto& s = i.m_ppc_state;
+  if (Privileged(s))
+    return;
+  DataCacheOp(i, s, i.m_system, AddrX(s, inst),
+              [&](u32 address) { i.m_mmu.InvalidateDCacheLine(address); });
+}
+
+void Interpreter::dcbst(Interpreter& i, UGeckoInstruction inst)
+{
+  auto& s = i.m_ppc_state;
+  DataCacheOp(i, s, i.m_system, AddrX(s, inst),
+              [&](u32 address) { i.m_mmu.StoreDCacheLine(address); });
+}
+
+// Touch hints: prefetching is never required for correctness and is not worth emulating.
+void Interpreter::dcbt(Interpreter& i, UGeckoInstruction inst)
+{
+}
+
+void Interpreter::dcbtst(Interpreter& i, UGeckoInstruction inst)
+{
+}
+
+// dcbz needs the data cache enabled (HID0[DCE]); without it the Gekko raises an alignment
+// exception.
+void Interpreter::dcbz(Interpreter& i, UGeckoInstruction inst)
+{
+  auto& s = i.m_ppc_state;
+  const u32 address = AddrX(s, inst);
+  if (!HID0(s).DCE)
   {
-    GenerateProgramException(ppc_state, ProgramExceptionCause::IllegalInstruction);
+    GenerateAlignmentException(s, address);
     return;
   }
 
-  const u32 address = Helper_Get_EA_X(ppc_state, inst);
-
-  if (!HID0(ppc_state).DCE)
+  // Optional hack: ignore dcbz on the first 32 KiB of MEM1 (only without data cache emulation,
+  // which would make it unnecessary).
+  if (!s.m_enable_dcache && address >= 0x80000000 && address < 0x80008000 &&
+      Config::Get(Config::MAIN_LOW_DCBZ_HACK))
   {
-    GenerateAlignmentException(ppc_state, address);
     return;
   }
 
-  interpreter.m_mmu.ClearDCacheLine(address & (~31));
+  i.m_mmu.ClearDCacheLine(address & ~31u);
 }
 
-// eciwx/ecowx technically should access the specified device
-// We just do it instantly from ppc...and hey, it works! :D
-void Interpreter::eciwx(Interpreter& interpreter, UGeckoInstruction inst)
+// dcbz_l zeroes a line of the locked cache and needs HID2[LCE].
+void Interpreter::dcbz_l(Interpreter& i, UGeckoInstruction inst)
 {
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 EA = Helper_Get_EA_X(ppc_state, inst);
-
-  if ((ppc_state.spr[SPR_EAR] & 0x80000000) == 0)
+  auto& s = i.m_ppc_state;
+  if (!HID2(s).LCE)
   {
-    GenerateDSIException(ppc_state, EA);
+    GenerateProgramException(s, ProgramExceptionCause::IllegalInstruction);
     return;
   }
-
-  if ((EA & 0b11) != 0)
+  const u32 address = AddrX(s, inst);
+  if (!HID0(s).DCE)
   {
-    GenerateAlignmentException(ppc_state, EA);
+    GenerateAlignmentException(s, address);
     return;
   }
-
-  ppc_state.gpr[inst.RD] = interpreter.m_mmu.Read<u32>(EA);
+  i.m_mmu.ClearDCacheLine(address & ~31u);
 }
 
-void Interpreter::ecowx(Interpreter& interpreter, UGeckoInstruction inst)
+void Interpreter::icbi(Interpreter& i, UGeckoInstruction inst)
 {
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 EA = Helper_Get_EA_X(ppc_state, inst);
+  auto& s = i.m_ppc_state;
+  const u32 address = AddrX(s, inst);
+  s.iCache.Invalidate(i.m_system.GetMemory(), i.m_system.GetJitInterface(), address);
+}
 
-  if ((ppc_state.spr[SPR_EAR] & 0x80000000) == 0)
-  {
-    GenerateDSIException(ppc_state, EA);
+// ---- ordering (everything already happens in program order here)
+
+void Interpreter::eieio(Interpreter& i, UGeckoInstruction inst)
+{
+}
+
+void Interpreter::sync(Interpreter& i, UGeckoInstruction inst)
+{
+}
+
+// ---- TLB management
+
+void Interpreter::tlbie(Interpreter& i, UGeckoInstruction inst)
+{
+  auto& s = i.m_ppc_state;
+  if (Privileged(s))
     return;
-  }
-
-  if ((EA & 0b11) != 0)
-  {
-    GenerateAlignmentException(ppc_state, EA);
-    return;
-  }
-
-  interpreter.m_mmu.Write<u32>(ppc_state.gpr[inst.RS], EA);
+  i.m_mmu.InvalidateTLBEntry(s.gpr[inst.RB]);
 }
 
-void Interpreter::eieio(Interpreter& interpreter, UGeckoInstruction inst)
+void Interpreter::tlbsync(Interpreter& i, UGeckoInstruction inst)
 {
-  // Basically ensures that loads/stores before this instruction
-  // have completed (in order) before executing the next op.
-  // Prevents real ppc from "smartly" reordering loads/stores
-  // But (at least in interpreter) we do everything realtime anyways.
-}
-
-void Interpreter::icbi(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  // TODO: Raise DSI if translation fails (except for direct-store segments).
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_X(ppc_state, inst);
-  auto& memory = interpreter.m_system.GetMemory();
-  auto& jit_interface = interpreter.m_system.GetJitInterface();
-  ppc_state.iCache.Invalidate(memory, jit_interface, address);
-}
-
-void Interpreter::lbzux(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_UX(ppc_state, inst);
-  const u32 temp = interpreter.m_mmu.Read<u8>(address);
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RD] = temp;
-    ppc_state.gpr[inst.RA] = address;
-  }
-}
-
-void Interpreter::lbzx(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 temp = interpreter.m_mmu.Read<u8>(Helper_Get_EA_X(ppc_state, inst));
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RD] = temp;
-  }
-}
-
-void Interpreter::lhaux(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_UX(ppc_state, inst);
-  const s32 temp = s32{s16(interpreter.m_mmu.Read<u16>(address))};
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RD] = u32(temp);
-    ppc_state.gpr[inst.RA] = address;
-  }
-}
-
-void Interpreter::lhax(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const s32 temp = s32{s16(interpreter.m_mmu.Read<u16>(Helper_Get_EA_X(ppc_state, inst)))};
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RD] = u32(temp);
-  }
-}
-
-void Interpreter::lhbrx(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 temp = Common::swap16(interpreter.m_mmu.Read<u16>(Helper_Get_EA_X(ppc_state, inst)));
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RD] = temp;
-  }
-}
-
-void Interpreter::lhzux(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_UX(ppc_state, inst);
-  const u32 temp = interpreter.m_mmu.Read<u16>(address);
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RD] = temp;
-    ppc_state.gpr[inst.RA] = address;
-  }
-}
-
-void Interpreter::lhzx(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 temp = interpreter.m_mmu.Read<u16>(Helper_Get_EA_X(ppc_state, inst));
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RD] = temp;
-  }
-}
-
-// FIXME: Should rollback if a DSI occurs
-void Interpreter::lswx(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  u32 EA = Helper_Get_EA_X(ppc_state, inst);
-
-  if (ppc_state.msr.LE)
-  {
-    GenerateAlignmentException(ppc_state, EA);
-    return;
-  }
-
-  // Confirmed by hardware test that the zero case doesn't zero gpr[r]
-  for (u32 n = 0; n < static_cast<u8>(ppc_state.xer_stringctrl); n++)
-  {
-    const u32 reg = (inst.RD + (n >> 2)) & 0x1f;
-    const u32 offset = (n & 3) << 3;
-
-    if ((n & 0b11) == 0)
-      ppc_state.gpr[reg] = 0;
-
-    const u32 temp_value = interpreter.m_mmu.Read<u8>(EA) << (24 - offset);
-    // Not64 (Homebrew N64 Emulator for Wii) triggers the following case.
-    if ((ppc_state.Exceptions & EXCEPTION_DSI) != 0)
-    {
-      NOTICE_LOG_FMT(POWERPC, "DSI exception in lswx");
-      return;
-    }
-    ppc_state.gpr[reg] |= temp_value;
-
-    EA++;
-  }
-}
-
-void Interpreter::lwbrx(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 temp = Common::swap32(interpreter.m_mmu.Read<u32>(Helper_Get_EA_X(ppc_state, inst)));
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RD] = temp;
-  }
-}
-
-void Interpreter::lwzux(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_UX(ppc_state, inst);
-  const u32 temp = interpreter.m_mmu.Read<u32>(address);
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RD] = temp;
-    ppc_state.gpr[inst.RA] = address;
-  }
-}
-
-void Interpreter::lwzx(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_X(ppc_state, inst);
-  const u32 temp = interpreter.m_mmu.Read<u32>(address);
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RD] = temp;
-  }
-}
-
-void Interpreter::stbux(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_UX(ppc_state, inst);
-
-  interpreter.m_mmu.Write<u8>(ppc_state.gpr[inst.RS], address);
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RA] = address;
-  }
-}
-
-void Interpreter::stbx(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  interpreter.m_mmu.Write<u8>(ppc_state.gpr[inst.RS], Helper_Get_EA_X(ppc_state, inst));
-}
-
-void Interpreter::stfdux(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_UX(ppc_state, inst);
-
-  if ((address & 0b11) != 0)
-  {
-    GenerateAlignmentException(ppc_state, address);
-    return;
-  }
-
-  interpreter.m_mmu.Write<u64>(ppc_state.ps[inst.FS].PS0AsU64(), address);
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RA] = address;
-  }
-}
-
-void Interpreter::stfdx(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_X(ppc_state, inst);
-
-  if ((address & 0b11) != 0)
-  {
-    GenerateAlignmentException(ppc_state, address);
-    return;
-  }
-
-  interpreter.m_mmu.Write<u64>(ppc_state.ps[inst.FS].PS0AsU64(), address);
-}
-
-// Stores Floating points into Integers indeXed
-void Interpreter::stfiwx(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_X(ppc_state, inst);
-
-  if ((address & 0b11) != 0)
-  {
-    GenerateAlignmentException(ppc_state, address);
-    return;
-  }
-
-  interpreter.m_mmu.Write<u32>(ppc_state.ps[inst.FS].PS0AsU32(), address);
-}
-
-void Interpreter::stfsux(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_UX(ppc_state, inst);
-
-  if ((address & 0b11) != 0)
-  {
-    GenerateAlignmentException(ppc_state, address);
-    return;
-  }
-
-  interpreter.m_mmu.Write<u32>(ConvertToSingle(ppc_state.ps[inst.FS].PS0AsU64()), address);
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RA] = address;
-  }
-}
-
-void Interpreter::stfsx(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_X(ppc_state, inst);
-
-  if ((address & 0b11) != 0)
-  {
-    GenerateAlignmentException(ppc_state, address);
-    return;
-  }
-
-  interpreter.m_mmu.Write<u32>(ConvertToSingle(ppc_state.ps[inst.FS].PS0AsU64()), address);
-}
-
-void Interpreter::sthbrx(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  interpreter.m_mmu.Write_U16_Swap(ppc_state.gpr[inst.RS], Helper_Get_EA_X(ppc_state, inst));
-}
-
-void Interpreter::sthux(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_UX(ppc_state, inst);
-
-  interpreter.m_mmu.Write<u16>(ppc_state.gpr[inst.RS], address);
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RA] = address;
-  }
-}
-
-void Interpreter::sthx(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  interpreter.m_mmu.Write<u16>(ppc_state.gpr[inst.RS], Helper_Get_EA_X(ppc_state, inst));
-}
-
-// lswi - bizarro string instruction
-// FIXME: Should rollback if a DSI occurs
-void Interpreter::lswi(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  u32 EA = 0;
-  if (inst.RA != 0)
-    EA = ppc_state.gpr[inst.RA];
-
-  if (ppc_state.msr.LE)
-  {
-    GenerateAlignmentException(ppc_state, EA);
-    return;
-  }
-
-  u32 n = 32;
-  if (inst.NB != 0)
-    n = inst.NB;
-
-  u32 r = u32{inst.RD} - 1;
-  u32 i = 0;
-  while (n > 0)
-  {
-    if (i == 0)
-    {
-      r++;
-      r &= 31;
-      ppc_state.gpr[r] = 0;
-    }
-
-    const u32 temp_value = interpreter.m_mmu.Read<u8>(EA) << (24 - i);
-    if ((ppc_state.Exceptions & EXCEPTION_DSI) != 0)
-    {
-      PanicAlertFmt("DSI exception in lsw.");
-      return;
-    }
-
-    ppc_state.gpr[r] |= temp_value;
-
-    i += 8;
-    if (i == 32)
-      i = 0;
-    EA++;
-    n--;
-  }
-}
-
-void Interpreter::stswi(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  u32 EA = 0;
-  if (inst.RA != 0)
-    EA = ppc_state.gpr[inst.RA];
-
-  if (ppc_state.msr.LE)
-  {
-    GenerateAlignmentException(ppc_state, EA);
-    return;
-  }
-
-  Helper_StoreString(interpreter, EA, inst.NB == 0 ? 32 : inst.NB, inst.RS);
-}
-
-void Interpreter::stswx(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 EA = Helper_Get_EA_X(ppc_state, inst);
-
-  if (ppc_state.msr.LE)
-  {
-    GenerateAlignmentException(ppc_state, EA);
-    return;
-  }
-
-  Helper_StoreString(interpreter, EA, u8(ppc_state.xer_stringctrl), inst.RS);
-}
-
-void Interpreter::Helper_StoreString(Interpreter& interpreter, const u32 EA, u32 n, u32 r)
-{
-  // Helper for stswi/stswx, the oddball store string instructions.
-  //
-  // If we ask the MMU code to write to uncached memory and the start or end address isn't divisible
-  // by 4, it results in surrounding bytes getting overwritten. stswi/stswx should never trigger
-  // this behavior, so we need to be careful to only use 32-bit writes with proper alignment here.
-  //
-  // TODO: How should DSI exceptions in the middle of the instruction be handled?
-
-  auto& ppc_state = interpreter.m_ppc_state;
-
-  const u32 misalignment_bytes = EA & 3;
-  const u32 misalignment_bits = misalignment_bytes * 8;
-
-  u32 current_address = EA & ~3;
-  u64 current_value = 0;
-  if (misalignment_bytes != 0)
-  {
-    // Handle misalignment at start
-    current_value = interpreter.m_mmu.Read<u32>(current_address);
-    if ((ppc_state.Exceptions & EXCEPTION_DSI) != 0)
-      return;
-    current_value <<= misalignment_bits;
-    current_value &= 0xFFFF'FFFF'0000'0000;
-    n += misalignment_bytes;
-  }
-
-  while (n >= 4)
-  {
-    current_value |= ppc_state.gpr[r];
-    interpreter.m_mmu.Write<u32>(static_cast<u32>(current_value >> misalignment_bits),
-                                 current_address);
-    if ((ppc_state.Exceptions & EXCEPTION_DSI) != 0)
-      return;
-
-    current_value <<= 32;
-    current_address += 4;
-    n -= 4;
-    r = (r + 1) & 0x1f;  // wrap
-  }
-
-  if (n != 0)
-  {
-    // Handle misalignment at end
-    if (n > misalignment_bytes)
-    {
-      current_value |= ppc_state.gpr[r];
-      current_value <<= (n - misalignment_bytes) * 8;
-    }
-    else
-    {
-      current_value >>= (misalignment_bytes - n) * 8;
-    }
-    current_value &= 0xFFFF'FFFF'0000'0000;
-    current_value |= (interpreter.m_mmu.Read<u32>(current_address) << (n * 8)) & 0xFFFF'FFFF;
-    if ((ppc_state.Exceptions & EXCEPTION_DSI) != 0)
-      return;
-    interpreter.m_mmu.Write<u32>(static_cast<u32>(current_value >> (n * 8)), current_address);
-  }
-}
-
-void Interpreter::stwbrx(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_X(ppc_state, inst);
-
-  interpreter.m_mmu.Write_U32_Swap(ppc_state.gpr[inst.RS], address);
-}
-
-// The following two instructions are for SMP communications. On a single
-// CPU, they cannot fail unless an interrupt happens in between.
-
-void Interpreter::lwarx(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_X(ppc_state, inst);
-
-  if ((address & 0b11) != 0)
-  {
-    GenerateAlignmentException(ppc_state, address);
-    return;
-  }
-
-  const u32 temp = interpreter.m_mmu.Read<u32>(address);
-
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RD] = temp;
-    ppc_state.reserve = true;
-    ppc_state.reserve_address = address;
-  }
-}
-
-// Stores Word Conditional indeXed
-void Interpreter::stwcxd(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_X(ppc_state, inst);
-
-  if ((address & 0b11) != 0)
-  {
-    GenerateAlignmentException(ppc_state, address);
-    return;
-  }
-
-  if (ppc_state.reserve)
-  {
-    if (address == ppc_state.reserve_address)
-    {
-      interpreter.m_mmu.Write<u32>(ppc_state.gpr[inst.RS], address);
-      if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-      {
-        ppc_state.reserve = false;
-        ppc_state.cr.SetField(0, 2 | ppc_state.GetXER_SO());
-        return;
-      }
-    }
-  }
-
-  ppc_state.cr.SetField(0, ppc_state.GetXER_SO());
-}
-
-void Interpreter::stwux(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_UX(ppc_state, inst);
-
-  interpreter.m_mmu.Write<u32>(ppc_state.gpr[inst.RS], address);
-  if (!(ppc_state.Exceptions & EXCEPTION_DSI))
-  {
-    ppc_state.gpr[inst.RA] = address;
-  }
-}
-
-void Interpreter::stwx(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  const u32 address = Helper_Get_EA_X(ppc_state, inst);
-
-  interpreter.m_mmu.Write<u32>(ppc_state.gpr[inst.RS], address);
-}
-
-void Interpreter::sync(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  // ignored
-}
-
-void Interpreter::tlbie(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  if (ppc_state.msr.PR)
-  {
-    GenerateProgramException(ppc_state, ProgramExceptionCause::PrivilegedInstruction);
-    return;
-  }
-
-  // Invalidate TLB entry
-  const u32 address = ppc_state.gpr[inst.RB];
-
-  interpreter.m_mmu.InvalidateTLBEntry(address);
-}
-
-void Interpreter::tlbsync(Interpreter& interpreter, UGeckoInstruction inst)
-{
-  auto& ppc_state = interpreter.m_ppc_state;
-  if (ppc_state.msr.PR)
-  {
-    GenerateProgramException(ppc_state, ProgramExceptionCause::PrivilegedInstruction);
-  }
-
-  // Ignored
+  Privileged(i.m_ppc_state);
 }

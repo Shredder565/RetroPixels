@@ -1,483 +1,391 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// Instruction decoding for the interpreter.
+//
+// Each primary opcode group has a decode function that maps the extended opcode bits to a
+// handler. The functions are evaluated at compile time for every possible encoding to build flat
+// dispatch tables, so decoding at run time is one or two array lookups.
 
 #include "Core/PowerPC/Interpreter/Interpreter.h"
 
 #include <array>
+#include <cstddef>
 
-#include "Common/Assert.h"
 #include "Core/PowerPC/Gekko.h"
 
 namespace
 {
-struct InterpreterOpTemplate
+using I = Interpreter;
+using Handler = Interpreter::Instruction;
+
+// Primary opcode (bits 0..5).
+constexpr Handler DecodePrimary(u32 opcd)
 {
-  u32 opcode;
-  Interpreter::Instruction fn;
-};
+  switch (opcd)
+  {
+  case 3: return I::twi;
+  case 4: return I::RunTable4;
+  case 7: return I::mulli;
+  case 8: return I::subfic;
+  case 10: return I::cmpli;
+  case 11: return I::cmpi;
+  case 12: return I::addic;
+  case 13: return I::addic_rc;
+  case 14: return I::addi;
+  case 15: return I::addis;
+  case 16: return I::bcx;
+  case 17: return I::sc;
+  case 18: return I::bx;
+  case 19: return I::RunTable19;
+  case 20: return I::rlwimix;
+  case 21: return I::rlwinmx;
+  case 23: return I::rlwnmx;
+  case 24: return I::ori;
+  case 25: return I::oris;
+  case 26: return I::xori;
+  case 27: return I::xoris;
+  case 28: return I::andi_rc;
+  case 29: return I::andis_rc;
+  case 31: return I::RunTable31;
+  case 32: return I::lwz;
+  case 33: return I::lwzu;
+  case 34: return I::lbz;
+  case 35: return I::lbzu;
+  case 36: return I::stw;
+  case 37: return I::stwu;
+  case 38: return I::stb;
+  case 39: return I::stbu;
+  case 40: return I::lhz;
+  case 41: return I::lhzu;
+  case 42: return I::lha;
+  case 43: return I::lhau;
+  case 44: return I::sth;
+  case 45: return I::sthu;
+  case 46: return I::lmw;
+  case 47: return I::stmw;
+  case 48: return I::lfs;
+  case 49: return I::lfsu;
+  case 50: return I::lfd;
+  case 51: return I::lfdu;
+  case 52: return I::stfs;
+  case 53: return I::stfsu;
+  case 54: return I::stfd;
+  case 55: return I::stfdu;
+  case 56: return I::psq_l;
+  case 57: return I::psq_lu;
+  case 59: return I::RunTable59;
+  case 60: return I::psq_st;
+  case 61: return I::psq_stu;
+  case 63: return I::RunTable63;
+  default: return I::unknown_instruction;
+  }
+}
+
+// Opcode 4: paired singles. xo is the 10-bit extended opcode (bits 21..30). Arithmetic forms
+// only decode the low 5 bits (the rest is the FC register), and the indexed quantised
+// loads/stores decode the low 6 bits (the rest holds W and I).
+constexpr Handler Decode4(u32 xo)
+{
+  switch (xo)
+  {
+  case 0: return I::ps_cmpu0;
+  case 32: return I::ps_cmpo0;
+  case 40: return I::ps_neg;
+  case 64: return I::ps_cmpu1;
+  case 72: return I::ps_mr;
+  case 96: return I::ps_cmpo1;
+  case 136: return I::ps_nabs;
+  case 264: return I::ps_abs;
+  case 528: return I::ps_merge00;
+  case 560: return I::ps_merge01;
+  case 592: return I::ps_merge10;
+  case 624: return I::ps_merge11;
+  case 1014: return I::dcbz_l;
+  default: break;
+  }
+
+  switch (xo & 0x3F)
+  {
+  case 6: return I::psq_lx;
+  case 7: return I::psq_stx;
+  case 38: return I::psq_lux;
+  case 39: return I::psq_stux;
+  default: break;
+  }
+
+  switch (xo & 0x1F)
+  {
+  case 10: return I::ps_sum0;
+  case 11: return I::ps_sum1;
+  case 12: return I::ps_muls0;
+  case 13: return I::ps_muls1;
+  case 14: return I::ps_madds0;
+  case 15: return I::ps_madds1;
+  case 18: return I::ps_div;
+  case 20: return I::ps_sub;
+  case 21: return I::ps_add;
+  case 23: return I::ps_sel;
+  case 24: return I::ps_res;
+  case 25: return I::ps_mul;
+  case 26: return I::ps_rsqrte;
+  case 28: return I::ps_msub;
+  case 29: return I::ps_madd;
+  case 30: return I::ps_nmsub;
+  case 31: return I::ps_nmadd;
+  default: return I::unknown_instruction;
+  }
+}
+
+// Opcode 19: branches to LR/CTR, condition register logic, rfi, isync.
+constexpr Handler Decode19(u32 xo)
+{
+  switch (xo)
+  {
+  case 0: return I::mcrf;
+  case 16: return I::bclrx;
+  case 33: return I::crnor;
+  case 50: return I::rfi;
+  case 129: return I::crandc;
+  case 150: return I::isync;
+  case 193: return I::crxor;
+  case 225: return I::crnand;
+  case 257: return I::crand;
+  case 289: return I::creqv;
+  case 417: return I::crorc;
+  case 449: return I::cror;
+  case 528: return I::bcctrx;
+  default: return I::unknown_instruction;
+  }
+}
+
+// Opcode 31: integer, load/store indexed, cache and system instructions. The OE forms of the
+// arithmetic instructions (xo + 512) share the handler, which reads OE itself.
+constexpr Handler Decode31(u32 xo)
+{
+  switch (xo)
+  {
+  // arithmetic (with and without OE)
+  case 8: case 520: return I::subfcx;
+  case 10: case 522: return I::addcx;
+  case 40: case 552: return I::subfx;
+  case 104: case 616: return I::negx;
+  case 136: case 648: return I::subfex;
+  case 138: case 650: return I::addex;
+  case 200: case 712: return I::subfzex;
+  case 202: case 714: return I::addzex;
+  case 232: case 744: return I::subfmex;
+  case 234: case 746: return I::addmex;
+  case 235: case 747: return I::mullwx;
+  case 266: case 778: return I::addx;
+  case 459: case 971: return I::divwux;
+  case 491: case 1003: return I::divwx;
+  case 11: return I::mulhwux;
+  case 75: return I::mulhwx;
+
+  // logic, compare, shifts
+  case 0: return I::cmp;
+  case 24: return I::slwx;
+  case 26: return I::cntlzwx;
+  case 28: return I::andx;
+  case 32: return I::cmpl;
+  case 60: return I::andcx;
+  case 124: return I::norx;
+  case 284: return I::eqvx;
+  case 316: return I::xorx;
+  case 412: return I::orcx;
+  case 444: return I::orx;
+  case 476: return I::nandx;
+  case 536: return I::srwx;
+  case 792: return I::srawx;
+  case 824: return I::srawix;
+  case 922: return I::extshx;
+  case 954: return I::extsbx;
+
+  // integer loads
+  case 20: return I::lwarx;
+  case 23: return I::lwzx;
+  case 55: return I::lwzux;
+  case 87: return I::lbzx;
+  case 119: return I::lbzux;
+  case 279: return I::lhzx;
+  case 311: return I::lhzux;
+  case 343: return I::lhax;
+  case 375: return I::lhaux;
+  case 533: return I::lswx;
+  case 534: return I::lwbrx;
+  case 597: return I::lswi;
+  case 790: return I::lhbrx;
+
+  // integer stores
+  case 150: return I::stwcxd;
+  case 151: return I::stwx;
+  case 183: return I::stwux;
+  case 215: return I::stbx;
+  case 247: return I::stbux;
+  case 407: return I::sthx;
+  case 439: return I::sthux;
+  case 661: return I::stswx;
+  case 662: return I::stwbrx;
+  case 725: return I::stswi;
+  case 918: return I::sthbrx;
+
+  // floating point loads/stores
+  case 535: return I::lfsx;
+  case 567: return I::lfsux;
+  case 599: return I::lfdx;
+  case 631: return I::lfdux;
+  case 663: return I::stfsx;
+  case 695: return I::stfsux;
+  case 727: return I::stfdx;
+  case 759: return I::stfdux;
+  case 983: return I::stfiwx;
+
+  // caches
+  case 54: return I::dcbst;
+  case 86: return I::dcbf;
+  case 246: return I::dcbtst;
+  case 278: return I::dcbt;
+  case 470: return I::dcbi;
+  case 758: return I::dcba;
+  case 982: return I::icbi;
+  case 1014: return I::dcbz;
+
+  // system registers and control
+  case 4: return I::tw;
+  case 19: return I::mfcr;
+  case 83: return I::mfmsr;
+  case 144: return I::mtcrf;
+  case 146: return I::mtmsr;
+  case 210: return I::mtsr;
+  case 242: return I::mtsrin;
+  case 306: return I::tlbie;
+  case 310: return I::eciwx;
+  case 339: return I::mfspr;
+  case 371: return I::mftb;
+  case 438: return I::ecowx;
+  case 467: return I::mtspr;
+  case 512: return I::mcrxr;
+  case 566: return I::tlbsync;
+  case 595: return I::mfsr;
+  case 598: return I::sync;
+  case 659: return I::mfsrin;
+  case 854: return I::eieio;
+  default: return I::unknown_instruction;
+  }
+}
+
+// Opcode 59: single precision arithmetic, decoded on the low 5 bits.
+constexpr Handler Decode59(u32 xo5)
+{
+  switch (xo5)
+  {
+  case 18: return I::fdivsx;
+  case 20: return I::fsubsx;
+  case 21: return I::faddsx;
+  case 24: return I::fresx;
+  case 25: return I::fmulsx;
+  case 28: return I::fmsubsx;
+  case 29: return I::fmaddsx;
+  case 30: return I::fnmsubsx;
+  case 31: return I::fnmaddsx;
+  default: return I::unknown_instruction;
+  }
+}
+
+// Opcode 63: double precision. Moves, compares, conversions and FPSCR access use the full
+// 10-bit extended opcode; the arithmetic forms only the low 5 bits.
+constexpr Handler Decode63(u32 xo)
+{
+  switch (xo)
+  {
+  case 0: return I::fcmpu;
+  case 12: return I::frspx;
+  case 14: return I::fctiwx;
+  case 15: return I::fctiwzx;
+  case 32: return I::fcmpo;
+  case 38: return I::mtfsb1x;
+  case 40: return I::fnegx;
+  case 64: return I::mcrfs;
+  case 70: return I::mtfsb0x;
+  case 72: return I::fmrx;
+  case 134: return I::mtfsfix;
+  case 136: return I::fnabsx;
+  case 264: return I::fabsx;
+  case 583: return I::mffsx;
+  case 711: return I::mtfsfx;
+  default: break;
+  }
+
+  switch (xo & 0x1F)
+  {
+  case 18: return I::fdivx;
+  case 20: return I::fsubx;
+  case 21: return I::faddx;
+  case 23: return I::fselx;
+  case 25: return I::fmulx;
+  case 26: return I::frsqrtex;
+  case 28: return I::fmsubx;
+  case 29: return I::fmaddx;
+  case 30: return I::fnmsubx;
+  case 31: return I::fnmaddx;
+  default: return I::unknown_instruction;
+  }
+}
+
+template <std::size_t N, typename Decoder>
+consteval std::array<Handler, N> BuildTable(Decoder decode)
+{
+  std::array<Handler, N> table{};
+  for (u32 i = 0; i < N; ++i)
+    table[i] = decode(i);
+  return table;
+}
+
+constexpr auto s_primary = BuildTable<64>(DecodePrimary);
+constexpr auto s_group4 = BuildTable<1024>(Decode4);
+constexpr auto s_group19 = BuildTable<1024>(Decode19);
+constexpr auto s_group31 = BuildTable<1024>(Decode31);
+constexpr auto s_group59 = BuildTable<32>(Decode59);
+constexpr auto s_group63 = BuildTable<1024>(Decode63);
 }  // namespace
 
-constexpr std::array<InterpreterOpTemplate, 54> s_primary_table{{
-    {4, Interpreter::RunTable4},    // RunTable4
-    {19, Interpreter::RunTable19},  // RunTable19
-    {31, Interpreter::RunTable31},  // RunTable31
-    {59, Interpreter::RunTable59},  // RunTable59
-    {63, Interpreter::RunTable63},  // RunTable63
-
-    {16, Interpreter::bcx},  // bcx
-    {18, Interpreter::bx},   // bx
-
-    {3, Interpreter::twi},  // twi
-    {17, Interpreter::sc},  // sc
-
-    {7, Interpreter::mulli},      // mulli
-    {8, Interpreter::subfic},     // subfic
-    {10, Interpreter::cmpli},     // cmpli
-    {11, Interpreter::cmpi},      // cmpi
-    {12, Interpreter::addic},     // addic
-    {13, Interpreter::addic_rc},  // addic_rc
-    {14, Interpreter::addi},      // addi
-    {15, Interpreter::addis},     // addis
-
-    {20, Interpreter::rlwimix},  // rlwimix
-    {21, Interpreter::rlwinmx},  // rlwinmx
-    {23, Interpreter::rlwnmx},   // rlwnmx
-
-    {24, Interpreter::ori},       // ori
-    {25, Interpreter::oris},      // oris
-    {26, Interpreter::xori},      // xori
-    {27, Interpreter::xoris},     // xoris
-    {28, Interpreter::andi_rc},   // andi_rc
-    {29, Interpreter::andis_rc},  // andis_rc
-
-    {32, Interpreter::lwz},   // lwz
-    {33, Interpreter::lwzu},  // lwzu
-    {34, Interpreter::lbz},   // lbz
-    {35, Interpreter::lbzu},  // lbzu
-    {40, Interpreter::lhz},   // lhz
-    {41, Interpreter::lhzu},  // lhzu
-
-    {42, Interpreter::lha},   // lha
-    {43, Interpreter::lhau},  // lhau
-
-    {44, Interpreter::sth},   // sth
-    {45, Interpreter::sthu},  // sthu
-    {36, Interpreter::stw},   // stw
-    {37, Interpreter::stwu},  // stwu
-    {38, Interpreter::stb},   // stb
-    {39, Interpreter::stbu},  // stbu
-
-    {46, Interpreter::lmw},   // lmw
-    {47, Interpreter::stmw},  // stmw
-
-    {48, Interpreter::lfs},   // lfs
-    {49, Interpreter::lfsu},  // lfsu
-    {50, Interpreter::lfd},   // lfd
-    {51, Interpreter::lfdu},  // lfdu
-
-    {52, Interpreter::stfs},   // stfs
-    {53, Interpreter::stfsu},  // stfsu
-    {54, Interpreter::stfd},   // stfd
-    {55, Interpreter::stfdu},  // stfdu
-
-    {56, Interpreter::psq_l},    // psq_l
-    {57, Interpreter::psq_lu},   // psq_lu
-    {60, Interpreter::psq_st},   // psq_st
-    {61, Interpreter::psq_stu},  // psq_stu
-
-    // missing: 0, 1, 2, 5, 6, 9, 22, 30, 62, 58
-}};
-
-constexpr std::array<InterpreterOpTemplate, 13> s_table4{{
-    // SUBOP10
-    {0, Interpreter::ps_cmpu0},      // ps_cmpu0
-    {32, Interpreter::ps_cmpo0},     // ps_cmpo0
-    {40, Interpreter::ps_neg},       // ps_neg
-    {136, Interpreter::ps_nabs},     // ps_nabs
-    {264, Interpreter::ps_abs},      // ps_abs
-    {64, Interpreter::ps_cmpu1},     // ps_cmpu1
-    {72, Interpreter::ps_mr},        // ps_mr
-    {96, Interpreter::ps_cmpo1},     // ps_cmpo1
-    {528, Interpreter::ps_merge00},  // ps_merge00
-    {560, Interpreter::ps_merge01},  // ps_merge01
-    {592, Interpreter::ps_merge10},  // ps_merge10
-    {624, Interpreter::ps_merge11},  // ps_merge11
-
-    {1014, Interpreter::dcbz_l},  // dcbz_l
-}};
-
-constexpr std::array<InterpreterOpTemplate, 17> s_table4_2{{
-    {10, Interpreter::ps_sum0},    // ps_sum0
-    {11, Interpreter::ps_sum1},    // ps_sum1
-    {12, Interpreter::ps_muls0},   // ps_muls0
-    {13, Interpreter::ps_muls1},   // ps_muls1
-    {14, Interpreter::ps_madds0},  // ps_madds0
-    {15, Interpreter::ps_madds1},  // ps_madds1
-    {18, Interpreter::ps_div},     // ps_div
-    {20, Interpreter::ps_sub},     // ps_sub
-    {21, Interpreter::ps_add},     // ps_add
-    {23, Interpreter::ps_sel},     // ps_sel
-    {24, Interpreter::ps_res},     // ps_res
-    {25, Interpreter::ps_mul},     // ps_mul
-    {26, Interpreter::ps_rsqrte},  // ps_rsqrte
-    {28, Interpreter::ps_msub},    // ps_msub
-    {29, Interpreter::ps_madd},    // ps_madd
-    {30, Interpreter::ps_nmsub},   // ps_nmsub
-    {31, Interpreter::ps_nmadd},   // ps_nmadd
-}};
-
-constexpr std::array<InterpreterOpTemplate, 4> s_table4_3{{
-    {6, Interpreter::psq_lx},     // psq_lx
-    {7, Interpreter::psq_stx},    // psq_stx
-    {38, Interpreter::psq_lux},   // psq_lux
-    {39, Interpreter::psq_stux},  // psq_stux
-}};
-
-constexpr std::array<InterpreterOpTemplate, 13> s_table19{{
-    {528, Interpreter::bcctrx},  // bcctrx
-    {16, Interpreter::bclrx},    // bclrx
-    {257, Interpreter::crand},   // crand
-    {129, Interpreter::crandc},  // crandc
-    {289, Interpreter::creqv},   // creqv
-    {225, Interpreter::crnand},  // crnand
-    {33, Interpreter::crnor},    // crnor
-    {449, Interpreter::cror},    // cror
-    {417, Interpreter::crorc},   // crorc
-    {193, Interpreter::crxor},   // crxor
-
-    {150, Interpreter::isync},  // isync
-    {0, Interpreter::mcrf},     // mcrf
-
-    {50, Interpreter::rfi},  // rfi
-}};
-
-constexpr std::array<InterpreterOpTemplate, 107> s_table31{{
-    {266, Interpreter::addx},     // addx
-    {778, Interpreter::addx},     // addox
-    {10, Interpreter::addcx},     // addcx
-    {522, Interpreter::addcx},    // addcox
-    {138, Interpreter::addex},    // addex
-    {650, Interpreter::addex},    // addeox
-    {234, Interpreter::addmex},   // addmex
-    {746, Interpreter::addmex},   // addmeox
-    {202, Interpreter::addzex},   // addzex
-    {714, Interpreter::addzex},   // addzeox
-    {491, Interpreter::divwx},    // divwx
-    {1003, Interpreter::divwx},   // divwox
-    {459, Interpreter::divwux},   // divwux
-    {971, Interpreter::divwux},   // divwuox
-    {75, Interpreter::mulhwx},    // mulhwx
-    {11, Interpreter::mulhwux},   // mulhwux
-    {235, Interpreter::mullwx},   // mullwx
-    {747, Interpreter::mullwx},   // mullwox
-    {104, Interpreter::negx},     // negx
-    {616, Interpreter::negx},     // negox
-    {40, Interpreter::subfx},     // subfx
-    {552, Interpreter::subfx},    // subfox
-    {8, Interpreter::subfcx},     // subfcx
-    {520, Interpreter::subfcx},   // subfcox
-    {136, Interpreter::subfex},   // subfex
-    {648, Interpreter::subfex},   // subfeox
-    {232, Interpreter::subfmex},  // subfmex
-    {744, Interpreter::subfmex},  // subfmeox
-    {200, Interpreter::subfzex},  // subfzex
-    {712, Interpreter::subfzex},  // subfzeox
-
-    {28, Interpreter::andx},     // andx
-    {60, Interpreter::andcx},    // andcx
-    {444, Interpreter::orx},     // orx
-    {124, Interpreter::norx},    // norx
-    {316, Interpreter::xorx},    // xorx
-    {412, Interpreter::orcx},    // orcx
-    {476, Interpreter::nandx},   // nandx
-    {284, Interpreter::eqvx},    // eqvx
-    {0, Interpreter::cmp},       // cmp
-    {32, Interpreter::cmpl},     // cmpl
-    {26, Interpreter::cntlzwx},  // cntlzwx
-    {922, Interpreter::extshx},  // extshx
-    {954, Interpreter::extsbx},  // extsbx
-    {536, Interpreter::srwx},    // srwx
-    {792, Interpreter::srawx},   // srawx
-    {824, Interpreter::srawix},  // srawix
-    {24, Interpreter::slwx},     // slwx
-
-    {54, Interpreter::dcbst},    // dcbst
-    {86, Interpreter::dcbf},     // dcbf
-    {246, Interpreter::dcbtst},  // dcbtst
-    {278, Interpreter::dcbt},    // dcbt
-    {470, Interpreter::dcbi},    // dcbi
-    {758, Interpreter::dcba},    // dcba
-    {1014, Interpreter::dcbz},   // dcbz
-
-    // load word
-    {23, Interpreter::lwzx},   // lwzx
-    {55, Interpreter::lwzux},  // lwzux
-
-    // load halfword
-    {279, Interpreter::lhzx},   // lhzx
-    {311, Interpreter::lhzux},  // lhzux
-
-    // load halfword signextend
-    {343, Interpreter::lhax},   // lhax
-    {375, Interpreter::lhaux},  // lhaux
-
-    // load byte
-    {87, Interpreter::lbzx},    // lbzx
-    {119, Interpreter::lbzux},  // lbzux
-
-    // load byte reverse
-    {534, Interpreter::lwbrx},  // lwbrx
-    {790, Interpreter::lhbrx},  // lhbrx
-
-    // Conditional load/store (Wii SMP)
-    {150, Interpreter::stwcxd},  // stwcxd
-    {20, Interpreter::lwarx},    // lwarx
-
-    // load string (Inst these)
-    {533, Interpreter::lswx},  // lswx
-    {597, Interpreter::lswi},  // lswi
-
-    // store word
-    {151, Interpreter::stwx},   // stwx
-    {183, Interpreter::stwux},  // stwux
-
-    // store halfword
-    {407, Interpreter::sthx},   // sthx
-    {439, Interpreter::sthux},  // sthux
-
-    // store byte
-    {215, Interpreter::stbx},   // stbx
-    {247, Interpreter::stbux},  // stbux
-
-    // store bytereverse
-    {662, Interpreter::stwbrx},  // stwbrx
-    {918, Interpreter::sthbrx},  // sthbrx
-
-    {661, Interpreter::stswx},  // stswx
-    {725, Interpreter::stswi},  // stswi
-
-    // fp load/store
-    {535, Interpreter::lfsx},   // lfsx
-    {567, Interpreter::lfsux},  // lfsux
-    {599, Interpreter::lfdx},   // lfdx
-    {631, Interpreter::lfdux},  // lfdux
-
-    {663, Interpreter::stfsx},   // stfsx
-    {695, Interpreter::stfsux},  // stfsux
-    {727, Interpreter::stfdx},   // stfdx
-    {759, Interpreter::stfdux},  // stfdux
-    {983, Interpreter::stfiwx},  // stfiwx
-
-    {19, Interpreter::mfcr},     // mfcr
-    {83, Interpreter::mfmsr},    // mfmsr
-    {144, Interpreter::mtcrf},   // mtcrf
-    {146, Interpreter::mtmsr},   // mtmsr
-    {210, Interpreter::mtsr},    // mtsr
-    {242, Interpreter::mtsrin},  // mtsrin
-    {339, Interpreter::mfspr},   // mfspr
-    {467, Interpreter::mtspr},   // mtspr
-    {371, Interpreter::mftb},    // mftb
-    {512, Interpreter::mcrxr},   // mcrxr
-    {595, Interpreter::mfsr},    // mfsr
-    {659, Interpreter::mfsrin},  // mfsrin
-
-    {4, Interpreter::tw},      // tw
-    {598, Interpreter::sync},  // sync
-    {982, Interpreter::icbi},  // icbi
-
-    // Unused instructions on GC
-    {310, Interpreter::eciwx},    // eciwx
-    {438, Interpreter::ecowx},    // ecowx
-    {854, Interpreter::eieio},    // eieio
-    {306, Interpreter::tlbie},    // tlbie
-    {566, Interpreter::tlbsync},  // tlbsync
-}};
-
-constexpr std::array<InterpreterOpTemplate, 9> s_table59{{
-    {18, Interpreter::fdivsx},    // fdivsx // TODO
-    {20, Interpreter::fsubsx},    // fsubsx
-    {21, Interpreter::faddsx},    // faddsx
-    {24, Interpreter::fresx},     // fresx
-    {25, Interpreter::fmulsx},    // fmulsx
-    {28, Interpreter::fmsubsx},   // fmsubsx
-    {29, Interpreter::fmaddsx},   // fmaddsx
-    {30, Interpreter::fnmsubsx},  // fnmsubsx
-    {31, Interpreter::fnmaddsx},  // fnmaddsx
-}};
-
-constexpr std::array<InterpreterOpTemplate, 15> s_table63{{
-    {264, Interpreter::fabsx},   // fabsx
-    {32, Interpreter::fcmpo},    // fcmpo
-    {0, Interpreter::fcmpu},     // fcmpu
-    {14, Interpreter::fctiwx},   // fctiwx
-    {15, Interpreter::fctiwzx},  // fctiwzx
-    {72, Interpreter::fmrx},     // fmrx
-    {136, Interpreter::fnabsx},  // fnabsx
-    {40, Interpreter::fnegx},    // fnegx
-    {12, Interpreter::frspx},    // frspx
-
-    {64, Interpreter::mcrfs},     // mcrfs
-    {583, Interpreter::mffsx},    // mffsx
-    {70, Interpreter::mtfsb0x},   // mtfsb0x
-    {38, Interpreter::mtfsb1x},   // mtfsb1x
-    {134, Interpreter::mtfsfix},  // mtfsfix
-    {711, Interpreter::mtfsfx},   // mtfsfx
-}};
-
-constexpr std::array<InterpreterOpTemplate, 10> s_table63_2{{
-    {18, Interpreter::fdivx},     // fdivx
-    {20, Interpreter::fsubx},     // fsubx
-    {21, Interpreter::faddx},     // faddx
-    {23, Interpreter::fselx},     // fselx
-    {25, Interpreter::fmulx},     // fmulx
-    {26, Interpreter::frsqrtex},  // frsqrtex
-    {28, Interpreter::fmsubx},    // fmsubx
-    {29, Interpreter::fmaddx},    // fmaddx
-    {30, Interpreter::fnmsubx},   // fnmsubx
-    {31, Interpreter::fnmaddx},   // fnmaddx
-}};
-
-constexpr std::array<Interpreter::Instruction, 64> s_interpreter_op_table = []() consteval {
-  std::array<Interpreter::Instruction, 64> table{};
-  table.fill(Interpreter::unknown_instruction);
-  for (auto& tpl : s_primary_table)
-  {
-    ASSERT(table[tpl.opcode] == Interpreter::unknown_instruction);
-    table[tpl.opcode] = tpl.fn;
-  };
-  return table;
-}();
-constexpr std::array<Interpreter::Instruction, 1024> s_interpreter_op_table4 = []() consteval {
-  std::array<Interpreter::Instruction, 1024> table{};
-  table.fill(Interpreter::unknown_instruction);
-
-  for (u32 i = 0; i < 32; i++)
-  {
-    const u32 fill = i << 5;
-    for (const auto& tpl : s_table4_2)
-    {
-      const u32 op = fill + tpl.opcode;
-      ASSERT(table[op] == Interpreter::unknown_instruction);
-      table[op] = tpl.fn;
-    }
-  }
-
-  for (u32 i = 0; i < 16; i++)
-  {
-    const u32 fill = i << 6;
-    for (const auto& tpl : s_table4_3)
-    {
-      const u32 op = fill + tpl.opcode;
-      ASSERT(table[op] == Interpreter::unknown_instruction);
-      table[op] = tpl.fn;
-    }
-  }
-
-  for (const auto& tpl : s_table4)
-  {
-    const u32 op = tpl.opcode;
-    ASSERT(table[op] == Interpreter::unknown_instruction);
-    table[op] = tpl.fn;
-  }
-
-  return table;
-}();
-constexpr std::array<Interpreter::Instruction, 1024> s_interpreter_op_table19 = []() consteval {
-  std::array<Interpreter::Instruction, 1024> table{};
-  table.fill(Interpreter::unknown_instruction);
-  for (auto& tpl : s_table19)
-  {
-    ASSERT(table[tpl.opcode] == Interpreter::unknown_instruction);
-    table[tpl.opcode] = tpl.fn;
-  };
-  return table;
-}();
-constexpr std::array<Interpreter::Instruction, 1024> s_interpreter_op_table31 = []() consteval {
-  std::array<Interpreter::Instruction, 1024> table{};
-  table.fill(Interpreter::unknown_instruction);
-  for (auto& tpl : s_table31)
-  {
-    ASSERT(table[tpl.opcode] == Interpreter::unknown_instruction);
-    table[tpl.opcode] = tpl.fn;
-  };
-  return table;
-}();
-constexpr std::array<Interpreter::Instruction, 32> s_interpreter_op_table59 = []() consteval {
-  std::array<Interpreter::Instruction, 32> table{};
-  table.fill(Interpreter::unknown_instruction);
-  for (auto& tpl : s_table59)
-  {
-    ASSERT(table[tpl.opcode] == Interpreter::unknown_instruction);
-    table[tpl.opcode] = tpl.fn;
-  };
-  return table;
-}();
-constexpr std::array<Interpreter::Instruction, 1024> s_interpreter_op_table63 = []() consteval {
-  std::array<Interpreter::Instruction, 1024> table{};
-  table.fill(Interpreter::unknown_instruction);
-  for (auto& tpl : s_table63)
-  {
-    ASSERT(table[tpl.opcode] == Interpreter::unknown_instruction);
-    table[tpl.opcode] = tpl.fn;
-  };
-
-  for (u32 i = 0; i < 32; i++)
-  {
-    const u32 fill = i << 5;
-    for (const auto& tpl : s_table63_2)
-    {
-      const u32 op = fill + tpl.opcode;
-      ASSERT(table[op] == Interpreter::unknown_instruction);
-      table[op] = tpl.fn;
-    }
-  }
-
-  return table;
-}();
-
+// Resolves an instruction all the way to its leaf handler (used by the cached interpreter and
+// the JIT fallbacks, which call the handler directly).
 Interpreter::Instruction Interpreter::GetInterpreterOp(UGeckoInstruction inst)
 {
-  // Check for the appropriate subtable ahead of time.
-  // (This is used by the cached interpreter and JIT, and called once per instruction, so spending a
-  // bit of extra time to optimise is worthwhile)
-  Interpreter::Instruction result = s_interpreter_op_table[inst.OPCD];
-  if (result == Interpreter::RunTable4)
-    return s_interpreter_op_table4[inst.SUBOP10];
-  else if (result == Interpreter::RunTable19)
-    return s_interpreter_op_table19[inst.SUBOP10];
-  else if (result == Interpreter::RunTable31)
-    return s_interpreter_op_table31[inst.SUBOP10];
-  else if (result == Interpreter::RunTable59)
-    return s_interpreter_op_table59[inst.SUBOP5];
-  else if (result == Interpreter::RunTable63)
-    return s_interpreter_op_table63[inst.SUBOP10];
-  else
-    return result;
+  switch (inst.OPCD)
+  {
+  case 4: return s_group4[inst.SUBOP10];
+  case 19: return s_group19[inst.SUBOP10];
+  case 31: return s_group31[inst.SUBOP10];
+  case 59: return s_group59[inst.SUBOP5];
+  case 63: return s_group63[inst.SUBOP10];
+  default: return s_primary[inst.OPCD];
+  }
 }
 
 void Interpreter::RunInterpreterOp(Interpreter& interpreter, UGeckoInstruction inst)
 {
-  // Will handle subtables using RunTable4 etc.
-  s_interpreter_op_table[inst.OPCD](interpreter, inst);
+  s_primary[inst.OPCD](interpreter, inst);
 }
 
 void Interpreter::RunTable4(Interpreter& interpreter, UGeckoInstruction inst)
 {
-  s_interpreter_op_table4[inst.SUBOP10](interpreter, inst);
+  s_group4[inst.SUBOP10](interpreter, inst);
 }
 void Interpreter::RunTable19(Interpreter& interpreter, UGeckoInstruction inst)
 {
-  s_interpreter_op_table19[inst.SUBOP10](interpreter, inst);
+  s_group19[inst.SUBOP10](interpreter, inst);
 }
 void Interpreter::RunTable31(Interpreter& interpreter, UGeckoInstruction inst)
 {
-  s_interpreter_op_table31[inst.SUBOP10](interpreter, inst);
+  s_group31[inst.SUBOP10](interpreter, inst);
 }
 void Interpreter::RunTable59(Interpreter& interpreter, UGeckoInstruction inst)
 {
-  s_interpreter_op_table59[inst.SUBOP5](interpreter, inst);
+  s_group59[inst.SUBOP5](interpreter, inst);
 }
 void Interpreter::RunTable63(Interpreter& interpreter, UGeckoInstruction inst)
 {
-  s_interpreter_op_table63[inst.SUBOP10](interpreter, inst);
+  s_group63[inst.SUBOP10](interpreter, inst);
 }
