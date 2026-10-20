@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -14,28 +13,33 @@
 
 namespace WiimoteEmu
 {
+// Everything one update of an emulated remote reports, gathered from the user's input before
+// it is turned into HID reports. This is what movies record and netplay exchanges.
 struct DesiredWiimoteState
 {
-  // 1g in Z direction, which is the default returned by an unmoving emulated Wiimote.
+  // A remote lying still, face up: 1 g along +Z.
   static constexpr WiimoteCommon::AccelData DEFAULT_ACCELERATION = WiimoteCommon::AccelData(
       {Wiimote::ACCEL_ZERO_G << 2, Wiimote::ACCEL_ZERO_G << 2, Wiimote::ACCEL_ONE_G << 2});
 
-  // No light detected by the IR camera.
+  // The camera sees nothing.
   static constexpr std::array<CameraPoint, 4> DEFAULT_CAMERA = {CameraPoint(), CameraPoint(),
                                                                 CameraPoint(), CameraPoint()};
 
-  WiimoteCommon::ButtonData buttons{};  // non-button state in this is ignored
+  // Only the button bits are used.
+  WiimoteCommon::ButtonData buttons{};
   WiimoteCommon::AccelData acceleration = DEFAULT_ACCELERATION;
   std::array<CameraPoint, 4> camera_points = DEFAULT_CAMERA;
   std::optional<MotionPlus::DataFormat::Data> motion_plus = std::nullopt;
   DesiredExtensionState extension;
 };
 
-// For Netplay.
+// Compact encoding of a DesiredWiimoteState for netplay and movies: at most 1 header byte,
+// 5 bytes of buttons and acceleration, 12 of camera, 6 of MotionPlus and 6 of extension data.
+// Only the first `length` bytes of `data` are meaningful.
 struct SerializedWiimoteState
 {
   u8 length;
-  std::array<u8, 30> data;  // 18 bytes Wiimote, 6 bytes MotionPlus, 6 bytes Extension
+  std::array<u8, 30> data;
 };
 
 SerializedWiimoteState SerializeDesiredState(const DesiredWiimoteState& state);

@@ -1,12 +1,13 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <array>
+#include <iterator>
 #include <numeric>
 #include <optional>
 #include <string>
+#include <type_traits>
 
 #include "Common/Common.h"
 #include "Common/Config/Config.h"
@@ -39,6 +40,10 @@ class ModifySettingsButton;
 class Output;
 class Tilt;
 }  // namespace ControllerEmu
+
+// The emulated Wii Remote: input mapping, motion simulation, the i2c devices (speaker, camera,
+// extension port, MotionPlus) and the HID protocol on top of them. The protocol follows WiiBrew's
+// "Wiimote" page.
 
 namespace WiimoteEmu
 {
@@ -73,38 +78,42 @@ enum class DrawsomeTabletGroup;
 enum class TaTaConGroup;
 enum class ShinkansenGroup;
 
+// Fills the last `cksum_bytes` bytes of a calibration block: the first is 0x55 plus the sum of
+// all bytes before it (mod 256), and each further one is the previous plus 0x55.
 template <typename T>
 void UpdateCalibrationDataChecksum(T& data, int cksum_bytes)
 {
-  constexpr u8 CALIBRATION_MAGIC_NUMBER = 0x55;
+  static_assert(std::is_same_v<decltype(data[0]), u8&>, "Only sane for containers of u8!");
 
-  static_assert(std::is_same<decltype(data[0]), u8&>::value, "Only sane for containers of u8!");
+  constexpr u8 MAGIC = 0x55;
 
-  auto cksum_start = std::end(data) - cksum_bytes;
+  const auto checksum_begin = std::end(data) - cksum_bytes;
 
-  // Checksum is a sum of the previous bytes plus a magic value (0x55).
-  // Extension calibration data has a 2nd checksum byte which is
-  // the magic value (0x55) added to the previous checksum byte.
-  u8 checksum = std::accumulate(std::begin(data), cksum_start, CALIBRATION_MAGIC_NUMBER);
+  u8 sum = MAGIC;
+  for (auto it = std::begin(data); it != checksum_begin; ++it)
+    sum = static_cast<u8>(sum + *it);
 
-  for (auto& i = cksum_start; i != std::end(data); ++i)
+  for (auto it = checksum_begin; it != std::end(data); ++it)
   {
-    *i = checksum;
-    checksum += CALIBRATION_MAGIC_NUMBER;
+    *it = sum;
+    sum = static_cast<u8>(sum + MAGIC);
   }
 }
 
 class Wiimote : public ControllerEmu::EmulatedController, public WiimoteCommon::HIDWiimote
 {
 public:
+  // Default IR camera calibration points.
   static constexpr u16 IR_LOW_X = 0x7F;
   static constexpr u16 IR_LOW_Y = 0x5D;
   static constexpr u16 IR_HIGH_X = 0x380;
   static constexpr u16 IR_HIGH_Y = 0x2A2;
 
+  // Default accelerometer calibration (8 bit values).
   static constexpr u8 ACCEL_ZERO_G = 0x80;
   static constexpr u8 ACCEL_ONE_G = 0x9A;
 
+  // Core button bits.
   static constexpr u16 PAD_LEFT = 0x01;
   static constexpr u16 PAD_RIGHT = 0x02;
   static constexpr u16 PAD_DOWN = 0x04;
@@ -118,6 +127,7 @@ public:
   static constexpr u16 BUTTON_MINUS = 0x1000;
   static constexpr u16 BUTTON_HOME = 0x8000;
 
+  // Control group and control names (also config keys).
   static constexpr const char* BUTTONS_GROUP = _trans("Buttons");
   static constexpr const char* DPAD_GROUP = _trans("D-Pad");
   static constexpr const char* ACCELEROMETER_GROUP = "IMUAccelerometer";
@@ -171,20 +181,20 @@ public:
 
   void DoState(PointerWrap& p);
 
-  // Active extension number is exposed for TAS.
+  // For the TAS input window.
   ExtensionNumber GetActiveExtensionNumber() const;
   ControllerEmu::SubscribableSettingValue<bool>& GetMotionPlusSetting();
 
+  // Applies the X/Y/Z input overrides of control_group to vec.
   static Common::Vec3
   OverrideVec3(const ControllerEmu::ControlGroup* control_group, Common::Vec3 vec,
                const ControllerEmu::InputOverrideFunction& input_override_function);
 
 private:
-  // Used only for error generation:
+  // Slave address of the EEPROM, which cannot be reached over the i2c commands.
   static constexpr u8 EEPROM_I2C_ADDR = 0x50;
 
-  // static constexpr int EEPROM_SIZE = 16 * 1024;
-  // This is the region exposed over bluetooth:
+  // The part of the 16 KiB EEPROM that the HID commands can reach.
   static constexpr int EEPROM_FREE_SIZE = 0x1700;
 
   void RefreshConfig();
@@ -193,19 +203,18 @@ private:
   void UpdateButtonsStatus(const DesiredWiimoteState& target_state);
   void BuildDesiredWiimoteState(DesiredWiimoteState* target_state, SensorBarState sensor_bar_state);
 
-  // Returns simulated accelerometer data in m/s^2.
+  // Simulated accelerometer reading in m/s^2.
   Common::Vec3 GetAcceleration(Common::Vec3 extra_acceleration) const;
 
-  // Returns simulated gyroscope data in radians/s.
+  // Simulated gyroscope reading in radians/s.
   Common::Vec3 GetAngularVelocity(Common::Vec3 extra_angular_velocity) const;
 
-  // Returns the transformation of the world around the wiimote.
-  // Used for simulating camera data and for rotating acceleration data.
-  // Does not include orientation transformations.
+  // How the world is moved and rotated around the remote by the motion inputs (for the camera
+  // and for rotating acceleration). Excludes the sideways/upright orientation.
   Common::Matrix44
   GetTransformation(const Common::Matrix33& extra_rotation = Common::Matrix33::Identity()) const;
 
-  // Returns the world rotation from the effects of sideways/upright settings.
+  // The rotation from the sideways/upright settings.
   Common::Quaternion GetOrientation() const;
 
   std::optional<Common::Vec3> OverrideVec3(const ControllerEmu::ControlGroup* control_group,
@@ -246,6 +255,7 @@ private:
   Extension* GetActiveExtension() const;
   Extension* GetNoneExtension() const;
 
+  // A pending read command (served 16 bytes per update). Saved in savestates.
   struct ReadRequest
   {
     WiimoteCommon::AddressSpace space;
@@ -254,29 +264,29 @@ private:
     u16 size;
   };
 
-  // This is just the usable 0x1700 bytes:
+  // The reachable EEPROM bytes. Saved in savestates.
   union UsableEEPROMData
   {
     struct
     {
-      // addr: 0x0000
+      // 0x0000
       std::array<u8, 11> ir_calibration_1;
       std::array<u8, 11> ir_calibration_2;
 
       std::array<u8, 10> accel_calibration_1;
       std::array<u8, 10> accel_calibration_2;
 
-      // addr: 0x002A
+      // 0x002A
       std::array<u8, 0x0FA0> user_data;
 
-      // addr: 0x0FCA
+      // 0x0FCA
       std::array<u8, 0x02f0> mii_data_1;
       std::array<u8, 0x02f0> mii_data_2;
 
-      // addr: 0x15AA
+      // 0x15AA
       std::array<u8, 0x0126> unk_1;
 
-      // addr: 0x16D0
+      // 0x16D0
       std::array<u8, 24> unk_2;
       std::array<u8, 24> unk_3;
     };
@@ -286,7 +296,7 @@ private:
 
   static_assert(EEPROM_FREE_SIZE == sizeof(UsableEEPROMData));
 
-  // Control groups for user input:
+  // Input groups.
   ControllerEmu::Buttons* m_buttons;
   ControllerEmu::Buttons* m_dpad;
   ControllerEmu::Shake* m_shake;
@@ -309,6 +319,7 @@ private:
   ControllerEmu::SettingValue<double> m_fov_x_setting;
   ControllerEmu::SettingValue<double> m_fov_y_setting;
 
+  // Devices on the remote's i2c bus.
   SpeakerLogic m_speaker_logic;
   MotionPlus m_motion_plus;
   CameraLogic m_camera_logic;
@@ -317,13 +328,10 @@ private:
 
   ExtensionPort m_extension_port{&m_i2c_bus};
 
-  // Wiimote index, 0-3.
-  // Can also be 4 for Balance Board.
-  // This is used to look up the user button config.
+  // Which remote's configuration this is: 0-3, or 4 for the balance board.
   const u8 m_index;
 
-  // The Bluetooth 'slot' this device is connected to.
-  // This is usually the same as m_index, but can differ during Netplay.
+  // The Bluetooth slot in use. Normally m_index, but netplay can remap it.
   u8 m_bt_device_index;
 
   WiimoteCommon::InputReportID m_reporting_mode;
@@ -341,7 +349,7 @@ private:
   ReadRequest m_read_request;
   UsableEEPROMData m_eeprom;
 
-  // Dynamics:
+  // Motion simulation.
   MotionState m_swing_state;
   RotationalState m_tilt_state;
   MotionState m_point_state;
