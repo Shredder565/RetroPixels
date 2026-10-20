@@ -1,740 +1,557 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/PowerPC/PPCTables.h"
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
-#include <cstdio>
+#include <string>
+#include <utility>
 
 #include <fmt/format.h>
 
-#include "Common/Assert.h"
 #include "Common/CommonTypes.h"
 #include "Common/FileUtil.h"
 #include "Common/IOFile.h"
 #include "Common/Logging/Log.h"
-#include "Common/Projection.h"
 
 namespace PPCTables
 {
 namespace
 {
-struct GekkoOPTemplate
+// Where an instruction's encoding lives. The extended opcode (XO) sits in
+// bits 21-30 (IBM numbering), i.e. SUBOP10. A-form instructions only decode
+// the low five XO bits (the upper five hold frC), and the paired-single
+// indexed loads/stores only decode six (the upper bits hold W and I).
+enum class Form : u8
 {
-  u32 opcode;
-  const char* opname;
+  Primary,  // OPCD alone
+  Op4,      // OPCD 4, full XO
+  Op4A,     // OPCD 4, XO bits 0-4 only
+  Op4PSQ,   // OPCD 4, XO bits 0-5 only
+  Op19,
+  Op31,
+  Op59,  // OPCD 59 decodes only five bits (SUBOP5)
+  Op63,
+  Op63A,
+};
+
+struct OpDef
+{
+  Form form;
+  u16 xo;  // OPCD for Form::Primary
+  const char* name;
   OpType type;
-  u32 num_cycles;
+  u32 cycles;
   u64 flags;
 };
 
-constexpr GekkoOPTemplate s_unknown_op_info = {0, "unknown_instruction", OpType::Unknown, 0,
-                                               FL_ENDBLOCK};
+// Common flag groups.
+constexpr u64 LS = FL_LOADSTORE;
+constexpr u64 FPU = FL_USE_FPU;
+constexpr u64 PGM = FL_PROGRAMEXCEPTION;
 
-constexpr std::array<GekkoOPTemplate, 54> s_primary_table{{
-    {4, "RunTable4", OpType::Subtable, 0, 0},
-    {19, "RunTable19", OpType::Subtable, 0, 0},
-    {31, "RunTable31", OpType::Subtable, 0, 0},
-    {59, "RunTable59", OpType::Subtable, 0, 0},
-    {63, "RunTable63", OpType::Subtable, 0, 0},
+// Integer loads and stores: displacement, displacement with update, indexed,
+// and indexed with update.
+constexpr u64 LOAD_D = FL_OUT_D | FL_IN_A0 | LS;
+constexpr u64 LOAD_DU = FL_OUT_D | FL_OUT_A | FL_IN_A | LS;
+constexpr u64 LOAD_X = FL_OUT_D | FL_IN_A0B | LS;
+constexpr u64 LOAD_XU = FL_OUT_D | FL_OUT_A | FL_IN_AB | LS;
+constexpr u64 STORE_D = FL_IN_A0 | FL_IN_S | LS;
+constexpr u64 STORE_DU = FL_OUT_A | FL_IN_A | FL_IN_S | LS;
+constexpr u64 STORE_X = FL_IN_S | FL_IN_A0B | LS;
+constexpr u64 STORE_XU = FL_IN_S | FL_OUT_A | FL_IN_AB | LS;
 
-    {16, "bcx", OpType::Branch, 1, FL_ENDBLOCK | FL_READ_CR_BI},
-    {18, "bx", OpType::Branch, 1, FL_ENDBLOCK},
+// Floating-point loads and stores. Note that the non-indexed FP loads read
+// rA as a register even when it is r0.
+constexpr u64 FLOAD_S = FL_OUT_FLOAT_D | FPU | LS;
+constexpr u64 FLOAD_D = FL_INOUT_FLOAT_D | FPU | LS;
+constexpr u64 FSTORE = FL_IN_FLOAT_S | FPU | LS;
 
-    {3, "twi", OpType::System, 1, FL_IN_A | FL_ENDBLOCK},
-    {17, "sc", OpType::System, 2, FL_ENDBLOCK},
+// Integer arithmetic (XO-form) with a register result and CR0 via Rc.
+constexpr u64 ARITH_AB = FL_OUT_D | FL_IN_AB | FL_RC_BIT;
+constexpr u64 ARITH_A = FL_OUT_D | FL_IN_A | FL_RC_BIT;
+constexpr u64 CARRY_IN_OUT = FL_READ_CA | FL_SET_CA;
+constexpr u64 OE = FL_SET_OE;
 
-    {7, "mulli", OpType::Integer, 3, FL_OUT_D | FL_IN_A},
-    {8, "subfic", OpType::Integer, 1, FL_OUT_D | FL_IN_A | FL_SET_CA},
-    {10, "cmpli", OpType::Integer, 1, FL_IN_A | FL_SET_CRn},
-    {11, "cmpi", OpType::Integer, 1, FL_IN_A | FL_SET_CRn},
-    {12, "addic", OpType::Integer, 1, FL_OUT_D | FL_IN_A | FL_SET_CA},
-    {13, "addic_rc", OpType::Integer, 1, FL_OUT_D | FL_IN_A | FL_SET_CA | FL_SET_CR0},
-    {14, "addi", OpType::Integer, 1, FL_OUT_D | FL_IN_A0},
-    {15, "addis", OpType::Integer, 1, FL_OUT_D | FL_IN_A0},
+// Logical/shift ops writing rA from rS (and rB).
+constexpr u64 LOGIC_SB = FL_OUT_A | FL_IN_SB | FL_RC_BIT;
+constexpr u64 LOGIC_S = FL_OUT_A | FL_IN_S | FL_RC_BIT;
 
-    {20, "rlwimix", OpType::Integer, 1, FL_OUT_A | FL_IN_A | FL_IN_S | FL_RC_BIT},
-    {21, "rlwinmx", OpType::Integer, 1, FL_OUT_A | FL_IN_S | FL_RC_BIT},
-    {23, "rlwnmx", OpType::Integer, 1, FL_OUT_A | FL_IN_SB | FL_RC_BIT},
+// Floating-point arithmetic that rounds, sets FPRF and can trap.
+constexpr u64 FARITH = FL_RC_BIT_F | FPU | FL_SET_FPRF | FL_FLOAT_EXCEPTION;
+constexpr u64 SINGLE_ARITH = FL_OUT_FLOAT_D | FARITH;
+constexpr u64 DOUBLE_ARITH = FL_INOUT_FLOAT_D | FARITH;
+constexpr u64 PAIRED_ARITH = FL_OUT_FLOAT_D | FARITH | PGM;
+constexpr u64 PAIRED_COMPARE = FL_IN_FLOAT_AB | FL_SET_CRn | FPU | FL_READ_FPRF | FL_SET_FPRF |
+                               PGM | FL_FLOAT_EXCEPTION;
+constexpr u64 PAIRED_MOVE_B =
+    FL_OUT_FLOAT_D | FL_IN_FLOAT_B | FL_IN_FLOAT_B_BITEXACT | FL_RC_BIT_F | FPU | PGM;
+constexpr u64 PAIRED_MERGE =
+    FL_OUT_FLOAT_D | FL_IN_FLOAT_AB | FL_IN_FLOAT_AB_BITEXACT | FL_RC_BIT_F | FPU | PGM;
+constexpr u64 DOUBLE_MOVE_B =
+    FL_INOUT_FLOAT_D | FL_IN_FLOAT_B | FL_IN_FLOAT_B_BITEXACT | FL_RC_BIT_F | FPU;
+// fcmp also reads and writes FPRF; that is a conservative description, since
+// a later FPRF write would make computing it here unnecessary.
+constexpr u64 FCOMPARE =
+    FL_IN_FLOAT_AB | FL_SET_CRn | FPU | FL_READ_FPRF | FL_SET_FPRF | FL_FLOAT_EXCEPTION;
+constexpr u64 FPSCR_WRITE = FL_RC_BIT_F | FPU | FL_READ_FPRF | FL_SET_FPRF;
 
-    {24, "ori", OpType::Integer, 1, FL_OUT_A | FL_IN_S},
-    {25, "oris", OpType::Integer, 1, FL_OUT_A | FL_IN_S},
-    {26, "xori", OpType::Integer, 1, FL_OUT_A | FL_IN_S},
-    {27, "xoris", OpType::Integer, 1, FL_OUT_A | FL_IN_S},
-    {28, "andi_rc", OpType::Integer, 1, FL_OUT_A | FL_IN_S | FL_SET_CR0},
-    {29, "andis_rc", OpType::Integer, 1, FL_OUT_A | FL_IN_S | FL_SET_CR0},
+constexpr u64 BRANCH_COND = FL_ENDBLOCK | FL_READ_CR_BI;
 
-    {32, "lwz", OpType::Load, 1, FL_OUT_D | FL_IN_A0 | FL_LOADSTORE},
-    {33, "lwzu", OpType::Load, 1, FL_OUT_D | FL_OUT_A | FL_IN_A | FL_LOADSTORE},
-    {34, "lbz", OpType::Load, 1, FL_OUT_D | FL_IN_A0 | FL_LOADSTORE},
-    {35, "lbzu", OpType::Load, 1, FL_OUT_D | FL_OUT_A | FL_IN_A | FL_LOADSTORE},
-    {40, "lhz", OpType::Load, 1, FL_OUT_D | FL_IN_A0 | FL_LOADSTORE},
-    {41, "lhzu", OpType::Load, 1, FL_OUT_D | FL_OUT_A | FL_IN_A | FL_LOADSTORE},
+using enum Form;
+using enum OpType;
 
-    {42, "lha", OpType::Load, 1, FL_OUT_D | FL_IN_A0 | FL_LOADSTORE},
-    {43, "lhau", OpType::Load, 1, FL_OUT_D | FL_OUT_A | FL_IN_A | FL_LOADSTORE},
+// clang-format off
+constexpr OpDef s_ops[] = {
+    // --- Opcodes that select a secondary table ---------------------------
+    {Primary,  4, "RunTable4",  Subtable, 0, 0},
+    {Primary, 19, "RunTable19", Subtable, 0, 0},
+    {Primary, 31, "RunTable31", Subtable, 0, 0},
+    {Primary, 59, "RunTable59", Subtable, 0, 0},
+    {Primary, 63, "RunTable63", Subtable, 0, 0},
 
-    {44, "sth", OpType::Store, 1, FL_IN_A0 | FL_IN_S | FL_LOADSTORE},
-    {45, "sthu", OpType::Store, 1, FL_OUT_A | FL_IN_A | FL_IN_S | FL_LOADSTORE},
-    {36, "stw", OpType::Store, 1, FL_IN_A0 | FL_IN_S | FL_LOADSTORE},
-    {37, "stwu", OpType::Store, 1, FL_OUT_A | FL_IN_A | FL_IN_S | FL_LOADSTORE},
-    {38, "stb", OpType::Store, 1, FL_IN_A0 | FL_IN_S | FL_LOADSTORE},
-    {39, "stbu", OpType::Store, 1, FL_OUT_A | FL_IN_A | FL_IN_S | FL_LOADSTORE},
+    // --- Branches and flow control ---------------------------------------
+    {Primary, 16, "bcx",    Branch, 1, BRANCH_COND},
+    {Primary, 18, "bx",     Branch, 1, FL_ENDBLOCK},
+    {Op19,    16, "bclrx",  Branch, 1, BRANCH_COND},
+    {Op19,   528, "bcctrx", Branch, 1, BRANCH_COND},
+    {Primary,  3, "twi",    System, 1, FL_IN_A | FL_ENDBLOCK},
+    {Op31,     4, "tw",     System, 2, FL_IN_AB | FL_ENDBLOCK},
+    {Primary, 17, "sc",     System, 2, FL_ENDBLOCK},
+    {Op19,    50, "rfi",    System, 2, FL_ENDBLOCK | FL_CHECKEXCEPTIONS | PGM | FL_SET_MSR},
 
-    {46, "lmw", OpType::System, 11, FL_IN_A0 | FL_LOADSTORE},
-    {47, "stmw", OpType::System, 11, FL_IN_A0 | FL_LOADSTORE},
+    // --- Condition register logic ----------------------------------------
+    {Op19,  33, "crnor",  CR, 1, 0},
+    {Op19, 129, "crandc", CR, 1, 0},
+    {Op19, 193, "crxor",  CR, 1, 0},
+    {Op19, 225, "crnand", CR, 1, 0},
+    {Op19, 257, "crand",  CR, 1, 0},
+    {Op19, 289, "creqv",  CR, 1, 0},
+    {Op19, 417, "crorc",  CR, 1, 0},
+    {Op19, 449, "cror",   CR, 1, 0},
+    {Op19,   0, "mcrf",   System, 1, FL_SET_CRn | FL_READ_CRn},
+    {Op31, 512, "mcrxr",  System, 1, FL_SET_CRn | CARRY_IN_OUT},
+    {Op31,  19, "mfcr",   System, 1, FL_OUT_D | FL_READ_ALL_CR},
+    {Op31, 144, "mtcrf",  System, 1, FL_IN_S | FL_SET_ALL_CR | FL_READ_ALL_CR},
 
-    {48, "lfs", OpType::LoadFP, 1, FL_OUT_FLOAT_D | FL_IN_A | FL_USE_FPU | FL_LOADSTORE},
-    {49, "lfsu", OpType::LoadFP, 1,
-     FL_OUT_FLOAT_D | FL_OUT_A | FL_IN_A | FL_USE_FPU | FL_LOADSTORE},
-    {50, "lfd", OpType::LoadFP, 1, FL_INOUT_FLOAT_D | FL_IN_A | FL_USE_FPU | FL_LOADSTORE},
-    {51, "lfdu", OpType::LoadFP, 1,
-     FL_INOUT_FLOAT_D | FL_OUT_A | FL_IN_A | FL_USE_FPU | FL_LOADSTORE},
+    // --- Integer arithmetic with immediates ------------------------------
+    {Primary,  7, "mulli",    Integer, 3, FL_OUT_D | FL_IN_A},
+    {Primary,  8, "subfic",   Integer, 1, FL_OUT_D | FL_IN_A | FL_SET_CA},
+    {Primary, 12, "addic",    Integer, 1, FL_OUT_D | FL_IN_A | FL_SET_CA},
+    {Primary, 13, "addic_rc", Integer, 1, FL_OUT_D | FL_IN_A | FL_SET_CA | FL_SET_CR0},
+    {Primary, 14, "addi",     Integer, 1, FL_OUT_D | FL_IN_A0},
+    {Primary, 15, "addis",    Integer, 1, FL_OUT_D | FL_IN_A0},
+    {Primary, 10, "cmpli",    Integer, 1, FL_IN_A | FL_SET_CRn},
+    {Primary, 11, "cmpi",     Integer, 1, FL_IN_A | FL_SET_CRn},
 
-    {52, "stfs", OpType::StoreFP, 1, FL_IN_FLOAT_S | FL_IN_A0 | FL_USE_FPU | FL_LOADSTORE},
-    {53, "stfsu", OpType::StoreFP, 1,
-     FL_IN_FLOAT_S | FL_OUT_A | FL_IN_A | FL_USE_FPU | FL_LOADSTORE},
-    {54, "stfd", OpType::StoreFP, 1, FL_IN_FLOAT_S | FL_IN_A0 | FL_USE_FPU | FL_LOADSTORE},
-    {55, "stfdu", OpType::StoreFP, 1,
-     FL_IN_FLOAT_S | FL_OUT_A | FL_IN_A | FL_USE_FPU | FL_LOADSTORE},
+    // --- Integer arithmetic, register forms (each with its OE=1 twin) ----
+    {Op31, 266, "addx",     Integer, 1, ARITH_AB},
+    {Op31, 778, "addox",    Integer, 1, ARITH_AB | OE},
+    {Op31,  10, "addcx",    Integer, 1, ARITH_AB | FL_SET_CA},
+    {Op31, 522, "addcox",   Integer, 1, ARITH_AB | FL_SET_CA | OE},
+    {Op31, 138, "addex",    Integer, 1, ARITH_AB | CARRY_IN_OUT},
+    {Op31, 650, "addeox",   Integer, 1, ARITH_AB | CARRY_IN_OUT | OE},
+    {Op31, 234, "addmex",   Integer, 1, ARITH_A | CARRY_IN_OUT},
+    {Op31, 746, "addmeox",  Integer, 1, ARITH_A | CARRY_IN_OUT | OE},
+    {Op31, 202, "addzex",   Integer, 1, ARITH_A | CARRY_IN_OUT},
+    {Op31, 714, "addzeox",  Integer, 1, ARITH_A | CARRY_IN_OUT | OE},
+    {Op31,  40, "subfx",    Integer, 1, ARITH_AB},
+    {Op31, 552, "subfox",   Integer, 1, ARITH_AB | OE},
+    {Op31,   8, "subfcx",   Integer, 1, ARITH_AB | FL_SET_CA},
+    {Op31, 520, "subfcox",  Integer, 1, ARITH_AB | FL_SET_CA | OE},
+    {Op31, 136, "subfex",   Integer, 1, ARITH_AB | CARRY_IN_OUT},
+    {Op31, 648, "subfeox",  Integer, 1, ARITH_AB | CARRY_IN_OUT | OE},
+    {Op31, 232, "subfmex",  Integer, 1, ARITH_A | CARRY_IN_OUT},
+    {Op31, 744, "subfmeox", Integer, 1, ARITH_A | CARRY_IN_OUT | OE},
+    {Op31, 200, "subfzex",  Integer, 1, ARITH_A | CARRY_IN_OUT},
+    {Op31, 712, "subfzeox", Integer, 1, ARITH_A | CARRY_IN_OUT | OE},
+    {Op31, 104, "negx",     Integer, 1, ARITH_A},
+    {Op31, 616, "negox",    Integer, 1, ARITH_A | OE},
+    {Op31,  75, "mulhwx",   Integer, 5, ARITH_AB},
+    {Op31,  11, "mulhwux",  Integer, 5, ARITH_AB},
+    {Op31, 235, "mullwx",   Integer, 5, ARITH_AB},
+    {Op31, 747, "mullwox",  Integer, 5, ARITH_AB | OE},
+    {Op31, 491, "divwx",    Integer, 40, ARITH_AB},
+    {Op31,1003, "divwox",   Integer, 40, ARITH_AB | OE},
+    {Op31, 459, "divwux",   Integer, 40, ARITH_AB},
+    {Op31, 971, "divwuox",  Integer, 40, ARITH_AB | OE},
+    {Op31,   0, "cmp",      Integer, 1, FL_IN_AB | FL_SET_CRn},
+    {Op31,  32, "cmpl",     Integer, 1, FL_IN_AB | FL_SET_CRn},
 
-    {56, "psq_l", OpType::LoadPS, 1,
-     FL_OUT_FLOAT_D | FL_IN_A0 | FL_USE_FPU | FL_LOADSTORE | FL_PROGRAMEXCEPTION},
-    {57, "psq_lu", OpType::LoadPS, 1,
-     FL_OUT_FLOAT_D | FL_OUT_A | FL_IN_A | FL_USE_FPU | FL_LOADSTORE | FL_PROGRAMEXCEPTION},
-    {60, "psq_st", OpType::StorePS, 1,
-     FL_IN_FLOAT_S | FL_IN_A0 | FL_USE_FPU | FL_LOADSTORE | FL_PROGRAMEXCEPTION},
-    {61, "psq_stu", OpType::StorePS, 1,
-     FL_IN_FLOAT_S | FL_OUT_A | FL_IN_A | FL_USE_FPU | FL_LOADSTORE | FL_PROGRAMEXCEPTION},
+    // --- Logical, rotate and shift ---------------------------------------
+    {Primary, 24, "ori",      Integer, 1, FL_OUT_A | FL_IN_S},
+    {Primary, 25, "oris",     Integer, 1, FL_OUT_A | FL_IN_S},
+    {Primary, 26, "xori",     Integer, 1, FL_OUT_A | FL_IN_S},
+    {Primary, 27, "xoris",    Integer, 1, FL_OUT_A | FL_IN_S},
+    {Primary, 28, "andi_rc",  Integer, 1, FL_OUT_A | FL_IN_S | FL_SET_CR0},
+    {Primary, 29, "andis_rc", Integer, 1, FL_OUT_A | FL_IN_S | FL_SET_CR0},
+    {Op31,  28, "andx",    Integer, 1, LOGIC_SB},
+    {Op31,  60, "andcx",   Integer, 1, LOGIC_SB},
+    {Op31, 124, "norx",    Integer, 1, LOGIC_SB},
+    {Op31, 284, "eqvx",    Integer, 1, LOGIC_SB},
+    {Op31, 316, "xorx",    Integer, 1, LOGIC_SB},
+    {Op31, 412, "orcx",    Integer, 1, LOGIC_SB},
+    {Op31, 444, "orx",     Integer, 1, LOGIC_SB},
+    {Op31, 476, "nandx",   Integer, 1, LOGIC_SB},
+    {Op31,  26, "cntlzwx", Integer, 1, LOGIC_S},
+    {Op31, 922, "extshx",  Integer, 1, LOGIC_S},
+    {Op31, 954, "extsbx",  Integer, 1, LOGIC_S},
+    {Primary, 20, "rlwimix", Integer, 1, FL_OUT_A | FL_IN_A | FL_IN_S | FL_RC_BIT},
+    {Primary, 21, "rlwinmx", Integer, 1, LOGIC_S},
+    {Primary, 23, "rlwnmx",  Integer, 1, LOGIC_SB},
+    {Op31,  24, "slwx",   Integer, 1, LOGIC_SB},
+    {Op31, 536, "srwx",   Integer, 1, LOGIC_SB},
+    {Op31, 792, "srawx",  Integer, 1, LOGIC_SB | FL_SET_CA},
+    {Op31, 824, "srawix", Integer, 1, LOGIC_S | FL_SET_CA},
 
-    // missing: 0, 1, 2, 5, 6, 9, 22, 30, 62, 58
-}};
+    // --- Integer loads ---------------------------------------------------
+    {Primary, 32, "lwz",  Load, 1, LOAD_D},
+    {Primary, 33, "lwzu", Load, 1, LOAD_DU},
+    {Primary, 34, "lbz",  Load, 1, LOAD_D},
+    {Primary, 35, "lbzu", Load, 1, LOAD_DU},
+    {Primary, 40, "lhz",  Load, 1, LOAD_D},
+    {Primary, 41, "lhzu", Load, 1, LOAD_DU},
+    {Primary, 42, "lha",  Load, 1, LOAD_D},
+    {Primary, 43, "lhau", Load, 1, LOAD_DU},
+    {Op31,  23, "lwzx",  Load, 1, LOAD_X},
+    {Op31,  55, "lwzux", Load, 1, LOAD_XU},
+    {Op31,  87, "lbzx",  Load, 1, LOAD_X},
+    {Op31, 119, "lbzux", Load, 1, LOAD_XU},
+    {Op31, 279, "lhzx",  Load, 1, LOAD_X},
+    {Op31, 311, "lhzux", Load, 1, LOAD_XU},
+    {Op31, 343, "lhax",  Load, 1, LOAD_X},
+    {Op31, 375, "lhaux", Load, 1, LOAD_XU},
+    {Op31, 534, "lwbrx", Load, 1, LOAD_X},
+    {Op31, 790, "lhbrx", Load, 1, LOAD_X},
+    {Op31,  20, "lwarx", Load, 1, LOAD_X | FL_SET_CR0},
+    {Op31, 533, "lswx",  Load, 1, LOAD_X},
+    {Op31, 597, "lswi",  Load, 1, LOAD_D},
+    {Primary, 46, "lmw", System, 11, FL_IN_A0 | LS},
 
-constexpr std::array<GekkoOPTemplate, 13> s_table4{{
-    // SUBOP10
-    {0, "ps_cmpu0", OpType::PS, 1,
-     FL_IN_FLOAT_AB | FL_SET_CRn | FL_USE_FPU | FL_READ_FPRF | FL_SET_FPRF | FL_PROGRAMEXCEPTION |
-         FL_FLOAT_EXCEPTION},
-    {32, "ps_cmpo0", OpType::PS, 1,
-     FL_IN_FLOAT_AB | FL_SET_CRn | FL_USE_FPU | FL_READ_FPRF | FL_SET_FPRF | FL_PROGRAMEXCEPTION |
-         FL_FLOAT_EXCEPTION},
-    {40, "ps_neg", OpType::PS, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_B | FL_IN_FLOAT_B_BITEXACT | FL_RC_BIT_F | FL_USE_FPU |
-         FL_PROGRAMEXCEPTION},
-    {136, "ps_nabs", OpType::PS, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_B | FL_IN_FLOAT_B_BITEXACT | FL_RC_BIT_F | FL_USE_FPU |
-         FL_PROGRAMEXCEPTION},
-    {264, "ps_abs", OpType::PS, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_B | FL_IN_FLOAT_B_BITEXACT | FL_RC_BIT_F | FL_USE_FPU |
-         FL_PROGRAMEXCEPTION},
-    {64, "ps_cmpu1", OpType::PS, 1,
-     FL_IN_FLOAT_AB | FL_SET_CRn | FL_USE_FPU | FL_READ_FPRF | FL_SET_FPRF | FL_PROGRAMEXCEPTION |
-         FL_FLOAT_EXCEPTION},
-    {72, "ps_mr", OpType::PS, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_B | FL_IN_FLOAT_B_BITEXACT | FL_RC_BIT_F | FL_USE_FPU |
-         FL_PROGRAMEXCEPTION},
-    {96, "ps_cmpo1", OpType::PS, 1,
-     FL_IN_FLOAT_AB | FL_SET_CRn | FL_USE_FPU | FL_READ_FPRF | FL_SET_FPRF | FL_PROGRAMEXCEPTION |
-         FL_FLOAT_EXCEPTION},
-    {528, "ps_merge00", OpType::PS, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_AB | FL_IN_FLOAT_AB_BITEXACT | FL_RC_BIT_F | FL_USE_FPU |
-         FL_PROGRAMEXCEPTION},
-    {560, "ps_merge01", OpType::PS, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_AB | FL_IN_FLOAT_AB_BITEXACT | FL_RC_BIT_F | FL_USE_FPU |
-         FL_PROGRAMEXCEPTION},
-    {592, "ps_merge10", OpType::PS, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_AB | FL_IN_FLOAT_AB_BITEXACT | FL_RC_BIT_F | FL_USE_FPU |
-         FL_PROGRAMEXCEPTION},
-    {624, "ps_merge11", OpType::PS, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_AB | FL_IN_FLOAT_AB_BITEXACT | FL_RC_BIT_F | FL_USE_FPU |
-         FL_PROGRAMEXCEPTION},
+    // --- Integer stores --------------------------------------------------
+    {Primary, 36, "stw",  Store, 1, STORE_D},
+    {Primary, 37, "stwu", Store, 1, STORE_DU},
+    {Primary, 38, "stb",  Store, 1, STORE_D},
+    {Primary, 39, "stbu", Store, 1, STORE_DU},
+    {Primary, 44, "sth",  Store, 1, STORE_D},
+    {Primary, 45, "sthu", Store, 1, STORE_DU},
+    {Op31, 151, "stwx",   Store, 1, STORE_X},
+    {Op31, 183, "stwux",  Store, 1, STORE_XU},
+    {Op31, 215, "stbx",   Store, 1, STORE_X},
+    {Op31, 247, "stbux",  Store, 1, STORE_XU},
+    {Op31, 407, "sthx",   Store, 1, STORE_X},
+    {Op31, 439, "sthux",  Store, 1, STORE_XU},
+    {Op31, 662, "stwbrx", Store, 1, STORE_X},
+    {Op31, 918, "sthbrx", Store, 1, STORE_X},
+    {Op31, 150, "stwcxd", Store, 1, STORE_X | FL_SET_CR0},
+    {Op31, 661, "stswx",  Store, 1, FL_IN_A0B | LS},
+    {Op31, 725, "stswi",  Store, 1, FL_IN_A0 | LS},
+    {Primary, 47, "stmw", System, 11, FL_IN_A0 | LS},
 
-    {1014, "dcbz_l", OpType::System, 1, FL_IN_A0B | FL_LOADSTORE | FL_PROGRAMEXCEPTION},
-}};
+    // --- Floating-point loads and stores ---------------------------------
+    {Primary, 48, "lfs",   LoadFP,  1, FLOAD_S | FL_IN_A},
+    {Primary, 49, "lfsu",  LoadFP,  1, FLOAD_S | FL_OUT_A | FL_IN_A},
+    {Primary, 50, "lfd",   LoadFP,  1, FLOAD_D | FL_IN_A},
+    {Primary, 51, "lfdu",  LoadFP,  1, FLOAD_D | FL_OUT_A | FL_IN_A},
+    {Primary, 52, "stfs",  StoreFP, 1, FSTORE | FL_IN_A0},
+    {Primary, 53, "stfsu", StoreFP, 1, FSTORE | FL_OUT_A | FL_IN_A},
+    {Primary, 54, "stfd",  StoreFP, 1, FSTORE | FL_IN_A0},
+    {Primary, 55, "stfdu", StoreFP, 1, FSTORE | FL_OUT_A | FL_IN_A},
+    {Op31, 535, "lfsx",   LoadFP,  1, FLOAD_S | FL_IN_A0B},
+    {Op31, 567, "lfsux",  LoadFP,  1, FLOAD_S | FL_IN_AB | FL_OUT_A},
+    {Op31, 599, "lfdx",   LoadFP,  1, FLOAD_D | FL_IN_A0B},
+    {Op31, 631, "lfdux",  LoadFP,  1, FLOAD_D | FL_IN_AB | FL_OUT_A},
+    {Op31, 663, "stfsx",  StoreFP, 1, FSTORE | FL_IN_A0B},
+    {Op31, 695, "stfsux", StoreFP, 1, FSTORE | FL_IN_AB | FL_OUT_A},
+    {Op31, 727, "stfdx",  StoreFP, 1, FSTORE | FL_IN_A0B},
+    {Op31, 759, "stfdux", StoreFP, 1, FSTORE | FL_IN_AB | FL_OUT_A},
+    {Op31, 983, "stfiwx", StoreFP, 1, FSTORE | FL_IN_A0B},
 
-constexpr std::array<GekkoOPTemplate, 17> s_table4_2{{
-    {10, "ps_sum0", OpType::PS, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_ABC | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_PROGRAMEXCEPTION | FL_FLOAT_EXCEPTION},
-    {11, "ps_sum1", OpType::PS, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_ABC | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_PROGRAMEXCEPTION | FL_FLOAT_EXCEPTION},
-    {12, "ps_muls0", OpType::PS, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_AC | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_PROGRAMEXCEPTION | FL_FLOAT_EXCEPTION},
-    {13, "ps_muls1", OpType::PS, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_AC | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_PROGRAMEXCEPTION | FL_FLOAT_EXCEPTION},
-    {14, "ps_madds0", OpType::PS, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_ABC | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_PROGRAMEXCEPTION | FL_FLOAT_EXCEPTION},
-    {15, "ps_madds1", OpType::PS, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_ABC | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_PROGRAMEXCEPTION | FL_FLOAT_EXCEPTION},
-    {18, "ps_div", OpType::PS, 17,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_AB | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_PROGRAMEXCEPTION | FL_FLOAT_EXCEPTION | FL_FLOAT_DIV},
-    {20, "ps_sub", OpType::PS, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_AB | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_PROGRAMEXCEPTION | FL_FLOAT_EXCEPTION},
-    {21, "ps_add", OpType::PS, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_AB | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_PROGRAMEXCEPTION | FL_FLOAT_EXCEPTION},
-    {23, "ps_sel", OpType::PS, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_ABC | FL_IN_FLOAT_BC_BITEXACT | FL_RC_BIT_F | FL_USE_FPU |
-         FL_PROGRAMEXCEPTION},
-    {24, "ps_res", OpType::PS, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_B | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF | FL_PROGRAMEXCEPTION |
-         FL_FLOAT_EXCEPTION | FL_FLOAT_DIV},
-    {25, "ps_mul", OpType::PS, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_AC | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_PROGRAMEXCEPTION | FL_FLOAT_EXCEPTION},
-    {26, "ps_rsqrte", OpType::PS, 2,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_B | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF | FL_PROGRAMEXCEPTION |
-         FL_FLOAT_EXCEPTION | FL_FLOAT_DIV},
-    {28, "ps_msub", OpType::PS, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_ABC | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_PROGRAMEXCEPTION | FL_FLOAT_EXCEPTION},
-    {29, "ps_madd", OpType::PS, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_ABC | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_PROGRAMEXCEPTION | FL_FLOAT_EXCEPTION},
-    {30, "ps_nmsub", OpType::PS, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_ABC | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_PROGRAMEXCEPTION | FL_FLOAT_EXCEPTION},
-    {31, "ps_nmadd", OpType::PS, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_ABC | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_PROGRAMEXCEPTION | FL_FLOAT_EXCEPTION},
-}};
+    // --- Paired-single (quantized) loads and stores ----------------------
+    {Primary, 56, "psq_l",   LoadPS,  1, FL_OUT_FLOAT_D | FL_IN_A0 | FPU | LS | PGM},
+    {Primary, 57, "psq_lu",  LoadPS,  1, FL_OUT_FLOAT_D | FL_OUT_A | FL_IN_A | FPU | LS | PGM},
+    {Primary, 60, "psq_st",  StorePS, 1, FSTORE | FL_IN_A0 | PGM},
+    {Primary, 61, "psq_stu", StorePS, 1, FSTORE | FL_OUT_A | FL_IN_A | PGM},
+    {Op4PSQ,  6, "psq_lx",   LoadPS,  1, FL_OUT_FLOAT_D | FL_IN_A0B | FPU | LS},
+    {Op4PSQ,  7, "psq_stx",  StorePS, 1, FSTORE | FL_IN_A0B},
+    {Op4PSQ, 38, "psq_lux",  LoadPS,  1, FL_OUT_FLOAT_D | FL_OUT_A | FL_IN_AB | FPU | LS},
+    {Op4PSQ, 39, "psq_stux", StorePS, 1, FSTORE | FL_OUT_A | FL_IN_AB},
 
-constexpr std::array<GekkoOPTemplate, 4> s_table4_3{{
-    {6, "psq_lx", OpType::LoadPS, 1, FL_OUT_FLOAT_D | FL_IN_A0B | FL_USE_FPU | FL_LOADSTORE},
-    {7, "psq_stx", OpType::StorePS, 1, FL_IN_FLOAT_S | FL_IN_A0B | FL_USE_FPU | FL_LOADSTORE},
-    {38, "psq_lux", OpType::LoadPS, 1,
-     FL_OUT_FLOAT_D | FL_OUT_A | FL_IN_AB | FL_USE_FPU | FL_LOADSTORE},
-    {39, "psq_stux", OpType::StorePS, 1,
-     FL_IN_FLOAT_S | FL_OUT_A | FL_IN_AB | FL_USE_FPU | FL_LOADSTORE},
-}};
+    // --- Paired-single arithmetic ----------------------------------------
+    {Op4A, 10, "ps_sum0",   PS, 1, PAIRED_ARITH | FL_IN_FLOAT_ABC},
+    {Op4A, 11, "ps_sum1",   PS, 1, PAIRED_ARITH | FL_IN_FLOAT_ABC},
+    {Op4A, 12, "ps_muls0",  PS, 1, PAIRED_ARITH | FL_IN_FLOAT_AC},
+    {Op4A, 13, "ps_muls1",  PS, 1, PAIRED_ARITH | FL_IN_FLOAT_AC},
+    {Op4A, 14, "ps_madds0", PS, 1, PAIRED_ARITH | FL_IN_FLOAT_ABC},
+    {Op4A, 15, "ps_madds1", PS, 1, PAIRED_ARITH | FL_IN_FLOAT_ABC},
+    {Op4A, 18, "ps_div",    PS, 17, PAIRED_ARITH | FL_IN_FLOAT_AB | FL_FLOAT_DIV},
+    {Op4A, 20, "ps_sub",    PS, 1, PAIRED_ARITH | FL_IN_FLOAT_AB},
+    {Op4A, 21, "ps_add",    PS, 1, PAIRED_ARITH | FL_IN_FLOAT_AB},
+    {Op4A, 23, "ps_sel",    PS, 1, FL_OUT_FLOAT_D | FL_IN_FLOAT_ABC | FL_IN_FLOAT_BC_BITEXACT | FL_RC_BIT_F | FPU | PGM},
+    {Op4A, 24, "ps_res",    PS, 1, PAIRED_ARITH | FL_IN_FLOAT_B | FL_FLOAT_DIV},
+    {Op4A, 25, "ps_mul",    PS, 1, PAIRED_ARITH | FL_IN_FLOAT_AC},
+    {Op4A, 26, "ps_rsqrte", PS, 2, PAIRED_ARITH | FL_IN_FLOAT_B | FL_FLOAT_DIV},
+    {Op4A, 28, "ps_msub",   PS, 1, PAIRED_ARITH | FL_IN_FLOAT_ABC},
+    {Op4A, 29, "ps_madd",   PS, 1, PAIRED_ARITH | FL_IN_FLOAT_ABC},
+    {Op4A, 30, "ps_nmsub",  PS, 1, PAIRED_ARITH | FL_IN_FLOAT_ABC},
+    {Op4A, 31, "ps_nmadd",  PS, 1, PAIRED_ARITH | FL_IN_FLOAT_ABC},
+    {Op4,   0, "ps_cmpu0",   PS, 1, PAIRED_COMPARE},
+    {Op4,  32, "ps_cmpo0",   PS, 1, PAIRED_COMPARE},
+    {Op4,  64, "ps_cmpu1",   PS, 1, PAIRED_COMPARE},
+    {Op4,  96, "ps_cmpo1",   PS, 1, PAIRED_COMPARE},
+    {Op4,  40, "ps_neg",     PS, 1, PAIRED_MOVE_B},
+    {Op4,  72, "ps_mr",      PS, 1, PAIRED_MOVE_B},
+    {Op4, 136, "ps_nabs",    PS, 1, PAIRED_MOVE_B},
+    {Op4, 264, "ps_abs",     PS, 1, PAIRED_MOVE_B},
+    {Op4, 528, "ps_merge00", PS, 1, PAIRED_MERGE},
+    {Op4, 560, "ps_merge01", PS, 1, PAIRED_MERGE},
+    {Op4, 592, "ps_merge10", PS, 1, PAIRED_MERGE},
+    {Op4, 624, "ps_merge11", PS, 1, PAIRED_MERGE},
 
-constexpr std::array<GekkoOPTemplate, 13> s_table19{{
-    {528, "bcctrx", OpType::Branch, 1, FL_ENDBLOCK | FL_READ_CR_BI},
-    {16, "bclrx", OpType::Branch, 1, FL_ENDBLOCK | FL_READ_CR_BI},
-    {257, "crand", OpType::CR, 1, 0},
-    {129, "crandc", OpType::CR, 1, 0},
-    {289, "creqv", OpType::CR, 1, 0},
-    {225, "crnand", OpType::CR, 1, 0},
-    {33, "crnor", OpType::CR, 1, 0},
-    {449, "cror", OpType::CR, 1, 0},
-    {417, "crorc", OpType::CR, 1, 0},
-    {193, "crxor", OpType::CR, 1, 0},
+    // --- Single-precision arithmetic -------------------------------------
+    {Op59, 18, "fdivsx",   SingleFP, 17, SINGLE_ARITH | FL_IN_FLOAT_AB | FL_FLOAT_DIV},
+    {Op59, 20, "fsubsx",   SingleFP, 1, SINGLE_ARITH | FL_IN_FLOAT_AB},
+    {Op59, 21, "faddsx",   SingleFP, 1, SINGLE_ARITH | FL_IN_FLOAT_AB},
+    {Op59, 24, "fresx",    SingleFP, 1, SINGLE_ARITH | FL_IN_FLOAT_B | FL_FLOAT_DIV},
+    {Op59, 25, "fmulsx",   SingleFP, 1, SINGLE_ARITH | FL_IN_FLOAT_AC},
+    {Op59, 28, "fmsubsx",  SingleFP, 1, SINGLE_ARITH | FL_IN_FLOAT_ABC},
+    {Op59, 29, "fmaddsx",  SingleFP, 1, SINGLE_ARITH | FL_IN_FLOAT_ABC},
+    {Op59, 30, "fnmsubsx", SingleFP, 1, SINGLE_ARITH | FL_IN_FLOAT_ABC},
+    {Op59, 31, "fnmaddsx", SingleFP, 1, SINGLE_ARITH | FL_IN_FLOAT_ABC},
 
-    {150, "isync", OpType::InstructionCache, 1, FL_NO_REORDER},
-    {0, "mcrf", OpType::System, 1, FL_SET_CRn | FL_READ_CRn},
+    // --- Double-precision arithmetic, moves and conversions --------------
+    {Op63A, 18, "fdivx",    DoubleFP, 31, DOUBLE_ARITH | FL_IN_FLOAT_AB | FL_FLOAT_DIV},
+    {Op63A, 20, "fsubx",    DoubleFP, 1, DOUBLE_ARITH | FL_IN_FLOAT_AB},
+    {Op63A, 21, "faddx",    DoubleFP, 1, DOUBLE_ARITH | FL_IN_FLOAT_AB},
+    {Op63A, 23, "fselx",    DoubleFP, 1, FL_INOUT_FLOAT_D | FL_IN_FLOAT_ABC | FL_IN_FLOAT_BC_BITEXACT | FL_RC_BIT_F | FPU},
+    {Op63A, 25, "fmulx",    DoubleFP, 1, DOUBLE_ARITH | FL_IN_FLOAT_AC},
+    {Op63A, 26, "frsqrtex", DoubleFP, 1, DOUBLE_ARITH | FL_IN_FLOAT_B | FL_FLOAT_DIV},
+    {Op63A, 28, "fmsubx",   DoubleFP, 1, DOUBLE_ARITH | FL_IN_FLOAT_ABC},
+    {Op63A, 29, "fmaddx",   DoubleFP, 1, DOUBLE_ARITH | FL_IN_FLOAT_ABC},
+    {Op63A, 30, "fnmsubx",  DoubleFP, 1, DOUBLE_ARITH | FL_IN_FLOAT_ABC},
+    {Op63A, 31, "fnmaddx",  DoubleFP, 1, DOUBLE_ARITH | FL_IN_FLOAT_ABC},
+    {Op63,   0, "fcmpu",   DoubleFP, 1, FCOMPARE},
+    {Op63,  32, "fcmpo",   DoubleFP, 1, FCOMPARE},
+    {Op63,  40, "fnegx",   DoubleFP, 1, DOUBLE_MOVE_B},
+    {Op63,  72, "fmrx",    DoubleFP, 1, DOUBLE_MOVE_B},
+    {Op63, 136, "fnabsx",  DoubleFP, 1, DOUBLE_MOVE_B},
+    {Op63, 264, "fabsx",   DoubleFP, 1, DOUBLE_MOVE_B},
+    {Op63,  12, "frspx",   DoubleFP, 1, SINGLE_ARITH | FL_IN_FLOAT_B},
+    {Op63,  14, "fctiwx",  DoubleFP, 1, FL_INOUT_FLOAT_D | FL_IN_FLOAT_B | FL_RC_BIT_F | FPU | FL_FLOAT_EXCEPTION},
+    {Op63,  15, "fctiwzx", DoubleFP, 1, FL_INOUT_FLOAT_D | FL_IN_FLOAT_B | FL_RC_BIT_F | FPU | FL_FLOAT_EXCEPTION},
 
-    {50, "rfi", OpType::System, 2,
-     FL_ENDBLOCK | FL_CHECKEXCEPTIONS | FL_PROGRAMEXCEPTION | FL_SET_MSR},
-}};
+    // --- FPSCR access ----------------------------------------------------
+    {Op63,  64, "mcrfs",   SystemFP, 1, FL_SET_CRn | FPU | FL_READ_FPRF},
+    {Op63, 583, "mffsx",   SystemFP, 1, FL_RC_BIT_F | FL_INOUT_FLOAT_D | FPU | FL_READ_FPRF},
+    {Op63,  70, "mtfsb0x", SystemFP, 3, FPSCR_WRITE},
+    {Op63,  38, "mtfsb1x", SystemFP, 3, FPSCR_WRITE | FL_FLOAT_EXCEPTION},
+    {Op63, 134, "mtfsfix", SystemFP, 3, FPSCR_WRITE | FL_FLOAT_EXCEPTION},
+    {Op63, 711, "mtfsfx",  SystemFP, 3, FPSCR_WRITE | FL_IN_FLOAT_B | FL_FLOAT_EXCEPTION},
 
-constexpr std::array<GekkoOPTemplate, 107> s_table31{{
-    {266, "addx", OpType::Integer, 1, FL_OUT_D | FL_IN_AB | FL_RC_BIT},
-    {778, "addox", OpType::Integer, 1, FL_OUT_D | FL_IN_AB | FL_RC_BIT | FL_SET_OE},
-    {10, "addcx", OpType::Integer, 1, FL_OUT_D | FL_IN_AB | FL_SET_CA | FL_RC_BIT},
-    {522, "addcox", OpType::Integer, 1, FL_OUT_D | FL_IN_AB | FL_SET_CA | FL_RC_BIT | FL_SET_OE},
-    {138, "addex", OpType::Integer, 1, FL_OUT_D | FL_IN_AB | FL_READ_CA | FL_SET_CA | FL_RC_BIT},
-    {650, "addeox", OpType::Integer, 1,
-     FL_OUT_D | FL_IN_AB | FL_READ_CA | FL_SET_CA | FL_RC_BIT | FL_SET_OE},
-    {234, "addmex", OpType::Integer, 1, FL_OUT_D | FL_IN_A | FL_READ_CA | FL_SET_CA | FL_RC_BIT},
-    {746, "addmeox", OpType::Integer, 1,
-     FL_OUT_D | FL_IN_A | FL_READ_CA | FL_SET_CA | FL_RC_BIT | FL_SET_OE},
-    {202, "addzex", OpType::Integer, 1, FL_OUT_D | FL_IN_A | FL_READ_CA | FL_SET_CA | FL_RC_BIT},
-    {714, "addzeox", OpType::Integer, 1,
-     FL_OUT_D | FL_IN_A | FL_READ_CA | FL_SET_CA | FL_RC_BIT | FL_SET_OE},
-    {491, "divwx", OpType::Integer, 40, FL_OUT_D | FL_IN_AB | FL_RC_BIT},
-    {1003, "divwox", OpType::Integer, 40, FL_OUT_D | FL_IN_AB | FL_RC_BIT | FL_SET_OE},
-    {459, "divwux", OpType::Integer, 40, FL_OUT_D | FL_IN_AB | FL_RC_BIT},
-    {971, "divwuox", OpType::Integer, 40, FL_OUT_D | FL_IN_AB | FL_RC_BIT | FL_SET_OE},
-    {75, "mulhwx", OpType::Integer, 5, FL_OUT_D | FL_IN_AB | FL_RC_BIT},
-    {11, "mulhwux", OpType::Integer, 5, FL_OUT_D | FL_IN_AB | FL_RC_BIT},
-    {235, "mullwx", OpType::Integer, 5, FL_OUT_D | FL_IN_AB | FL_RC_BIT},
-    {747, "mullwox", OpType::Integer, 5, FL_OUT_D | FL_IN_AB | FL_RC_BIT | FL_SET_OE},
-    {104, "negx", OpType::Integer, 1, FL_OUT_D | FL_IN_A | FL_RC_BIT},
-    {616, "negox", OpType::Integer, 1, FL_OUT_D | FL_IN_A | FL_RC_BIT | FL_SET_OE},
-    {40, "subfx", OpType::Integer, 1, FL_OUT_D | FL_IN_AB | FL_RC_BIT},
-    {552, "subfox", OpType::Integer, 1, FL_OUT_D | FL_IN_AB | FL_RC_BIT | FL_SET_OE},
-    {8, "subfcx", OpType::Integer, 1, FL_OUT_D | FL_IN_AB | FL_SET_CA | FL_RC_BIT},
-    {520, "subfcox", OpType::Integer, 1, FL_OUT_D | FL_IN_AB | FL_SET_CA | FL_RC_BIT | FL_SET_OE},
-    {136, "subfex", OpType::Integer, 1, FL_OUT_D | FL_IN_AB | FL_READ_CA | FL_SET_CA | FL_RC_BIT},
-    {648, "subfeox", OpType::Integer, 1,
-     FL_OUT_D | FL_IN_AB | FL_READ_CA | FL_SET_CA | FL_RC_BIT | FL_SET_OE},
-    {232, "subfmex", OpType::Integer, 1, FL_OUT_D | FL_IN_A | FL_READ_CA | FL_SET_CA | FL_RC_BIT},
-    {744, "subfmeox", OpType::Integer, 1,
-     FL_OUT_D | FL_IN_A | FL_READ_CA | FL_SET_CA | FL_RC_BIT | FL_SET_OE},
-    {200, "subfzex", OpType::Integer, 1, FL_OUT_D | FL_IN_A | FL_READ_CA | FL_SET_CA | FL_RC_BIT},
-    {712, "subfzeox", OpType::Integer, 1,
-     FL_OUT_D | FL_IN_A | FL_READ_CA | FL_SET_CA | FL_RC_BIT | FL_SET_OE},
+    // --- Supervisor state and special registers --------------------------
+    {Op31,  83, "mfmsr",  System, 1, FL_OUT_D | PGM},
+    {Op31, 146, "mtmsr",  System, 1, FL_IN_S | FL_ENDBLOCK | PGM | FL_FLOAT_EXCEPTION | FL_SET_MSR},
+    {Op31, 339, "mfspr",  SPR, 1, FL_OUT_D | PGM},
+    {Op31, 467, "mtspr",  SPR, 2, FL_IN_S | FL_ENDBLOCK | PGM},
+    {Op31, 371, "mftb",   System, 1, FL_OUT_D | FL_TIMER | PGM},
+    {Op31, 595, "mfsr",   System, 3, FL_OUT_D | PGM},
+    {Op31, 659, "mfsrin", System, 3, FL_OUT_D | FL_IN_B | PGM},
+    {Op31, 210, "mtsr",   System, 1, FL_IN_S | PGM},
+    {Op31, 242, "mtsrin", System, 1, FL_IN_SB | PGM},
 
-    {28, "andx", OpType::Integer, 1, FL_OUT_A | FL_IN_SB | FL_RC_BIT},
-    {60, "andcx", OpType::Integer, 1, FL_OUT_A | FL_IN_SB | FL_RC_BIT},
-    {444, "orx", OpType::Integer, 1, FL_OUT_A | FL_IN_SB | FL_RC_BIT},
-    {124, "norx", OpType::Integer, 1, FL_OUT_A | FL_IN_SB | FL_RC_BIT},
-    {316, "xorx", OpType::Integer, 1, FL_OUT_A | FL_IN_SB | FL_RC_BIT},
-    {412, "orcx", OpType::Integer, 1, FL_OUT_A | FL_IN_SB | FL_RC_BIT},
-    {476, "nandx", OpType::Integer, 1, FL_OUT_A | FL_IN_SB | FL_RC_BIT},
-    {284, "eqvx", OpType::Integer, 1, FL_OUT_A | FL_IN_SB | FL_RC_BIT},
-    {0, "cmp", OpType::Integer, 1, FL_IN_AB | FL_SET_CRn},
-    {32, "cmpl", OpType::Integer, 1, FL_IN_AB | FL_SET_CRn},
-    {26, "cntlzwx", OpType::Integer, 1, FL_OUT_A | FL_IN_S | FL_RC_BIT},
-    {922, "extshx", OpType::Integer, 1, FL_OUT_A | FL_IN_S | FL_RC_BIT},
-    {954, "extsbx", OpType::Integer, 1, FL_OUT_A | FL_IN_S | FL_RC_BIT},
-    {536, "srwx", OpType::Integer, 1, FL_OUT_A | FL_IN_SB | FL_RC_BIT},
-    {792, "srawx", OpType::Integer, 1, FL_OUT_A | FL_IN_SB | FL_SET_CA | FL_RC_BIT},
-    {824, "srawix", OpType::Integer, 1, FL_OUT_A | FL_IN_S | FL_SET_CA | FL_RC_BIT},
-    {24, "slwx", OpType::Integer, 1, FL_OUT_A | FL_IN_SB | FL_RC_BIT},
+    // --- Cache, TLB and synchronisation ----------------------------------
+    {Op31,   54, "dcbst",  DataCache, 5, FL_IN_A0B | LS},
+    {Op31,   86, "dcbf",   DataCache, 5, FL_IN_A0B | LS},
+    {Op31,  246, "dcbtst", DataCache, 2, 0},
+    {Op31,  278, "dcbt",   DataCache, 2, 0},
+    {Op31,  470, "dcbi",   DataCache, 5, FL_IN_A0B | LS | PGM},
+    {Op31,  758, "dcba",   DataCache, 5, 0},
+    {Op31, 1014, "dcbz",   DataCache, 5, FL_IN_A0B | LS},
+    {Op4,  1014, "dcbz_l", System, 1, FL_IN_A0B | LS | PGM},
+    {Op31,  982, "icbi",   System, 4, FL_IN_A0B | FL_ENDBLOCK | LS},
+    {Op19,  150, "isync",  InstructionCache, 1, FL_NO_REORDER},
+    {Op31,  598, "sync",   System, 3, 0},
+    {Op31,  854, "eieio",  System, 1, 0},
+    {Op31,  306, "tlbie",  System, 1, FL_IN_B | PGM},
+    {Op31,  566, "tlbsync", System, 1, PGM},
+    // External control (not used by GameCube/Wii software).
+    {Op31,  310, "eciwx",  System, 1, FL_IN_A0B | FL_OUT_D | LS},
+    {Op31,  438, "ecowx",  System, 1, FL_IN_A0B | FL_IN_S | LS},
+};
+// clang-format on
 
-    {54, "dcbst", OpType::DataCache, 5, FL_IN_A0B | FL_LOADSTORE},
-    {86, "dcbf", OpType::DataCache, 5, FL_IN_A0B | FL_LOADSTORE},
-    {246, "dcbtst", OpType::DataCache, 2, 0},
-    {278, "dcbt", OpType::DataCache, 2, 0},
-    {470, "dcbi", OpType::DataCache, 5, FL_IN_A0B | FL_LOADSTORE | FL_PROGRAMEXCEPTION},
-    {758, "dcba", OpType::DataCache, 5, 0},
-    {1014, "dcbz", OpType::DataCache, 5, FL_IN_A0B | FL_LOADSTORE},
-
-    // load word
-    {23, "lwzx", OpType::Load, 1, FL_OUT_D | FL_IN_A0B | FL_LOADSTORE},
-    {55, "lwzux", OpType::Load, 1, FL_OUT_D | FL_OUT_A | FL_IN_AB | FL_LOADSTORE},
-
-    // load halfword
-    {279, "lhzx", OpType::Load, 1, FL_OUT_D | FL_IN_A0B | FL_LOADSTORE},
-    {311, "lhzux", OpType::Load, 1, FL_OUT_D | FL_OUT_A | FL_IN_AB | FL_LOADSTORE},
-
-    // load halfword signextend
-    {343, "lhax", OpType::Load, 1, FL_OUT_D | FL_IN_A0B | FL_LOADSTORE},
-    {375, "lhaux", OpType::Load, 1, FL_OUT_D | FL_OUT_A | FL_IN_AB | FL_LOADSTORE},
-
-    // load byte
-    {87, "lbzx", OpType::Load, 1, FL_OUT_D | FL_IN_A0B | FL_LOADSTORE},
-    {119, "lbzux", OpType::Load, 1, FL_OUT_D | FL_OUT_A | FL_IN_AB | FL_LOADSTORE},
-
-    // load byte reverse
-    {534, "lwbrx", OpType::Load, 1, FL_OUT_D | FL_IN_A0B | FL_LOADSTORE},
-    {790, "lhbrx", OpType::Load, 1, FL_OUT_D | FL_IN_A0B | FL_LOADSTORE},
-
-    // Conditional load/store (Wii SMP)
-    {150, "stwcxd", OpType::Store, 1, FL_IN_S | FL_IN_A0B | FL_SET_CR0 | FL_LOADSTORE},
-    {20, "lwarx", OpType::Load, 1, FL_OUT_D | FL_IN_A0B | FL_SET_CR0 | FL_LOADSTORE},
-
-    // load string (Inst these)
-    {533, "lswx", OpType::Load, 1, FL_IN_A0B | FL_OUT_D | FL_LOADSTORE},
-    {597, "lswi", OpType::Load, 1, FL_IN_A0 | FL_OUT_D | FL_LOADSTORE},
-
-    // store word
-    {151, "stwx", OpType::Store, 1, FL_IN_S | FL_IN_A0B | FL_LOADSTORE},
-    {183, "stwux", OpType::Store, 1, FL_IN_S | FL_OUT_A | FL_IN_AB | FL_LOADSTORE},
-
-    // store halfword
-    {407, "sthx", OpType::Store, 1, FL_IN_S | FL_IN_A0B | FL_LOADSTORE},
-    {439, "sthux", OpType::Store, 1, FL_IN_S | FL_OUT_A | FL_IN_AB | FL_LOADSTORE},
-
-    // store byte
-    {215, "stbx", OpType::Store, 1, FL_IN_S | FL_IN_A0B | FL_LOADSTORE},
-    {247, "stbux", OpType::Store, 1, FL_IN_S | FL_OUT_A | FL_IN_AB | FL_LOADSTORE},
-
-    // store bytereverse
-    {662, "stwbrx", OpType::Store, 1, FL_IN_S | FL_IN_A0B | FL_LOADSTORE},
-    {918, "sthbrx", OpType::Store, 1, FL_IN_S | FL_IN_A0B | FL_LOADSTORE},
-
-    {661, "stswx", OpType::Store, 1, FL_IN_A0B | FL_LOADSTORE},
-    {725, "stswi", OpType::Store, 1, FL_IN_A0 | FL_LOADSTORE},
-
-    // fp load/store
-    {535, "lfsx", OpType::LoadFP, 1, FL_OUT_FLOAT_D | FL_IN_A0B | FL_USE_FPU | FL_LOADSTORE},
-    {567, "lfsux", OpType::LoadFP, 1,
-     FL_OUT_FLOAT_D | FL_IN_AB | FL_OUT_A | FL_USE_FPU | FL_LOADSTORE},
-    {599, "lfdx", OpType::LoadFP, 1, FL_INOUT_FLOAT_D | FL_IN_A0B | FL_USE_FPU | FL_LOADSTORE},
-    {631, "lfdux", OpType::LoadFP, 1,
-     FL_INOUT_FLOAT_D | FL_IN_AB | FL_OUT_A | FL_USE_FPU | FL_LOADSTORE},
-
-    {663, "stfsx", OpType::StoreFP, 1, FL_IN_FLOAT_S | FL_IN_A0B | FL_USE_FPU | FL_LOADSTORE},
-    {695, "stfsux", OpType::StoreFP, 1,
-     FL_IN_FLOAT_S | FL_IN_AB | FL_OUT_A | FL_USE_FPU | FL_LOADSTORE},
-    {727, "stfdx", OpType::StoreFP, 1, FL_IN_FLOAT_S | FL_IN_A0B | FL_USE_FPU | FL_LOADSTORE},
-    {759, "stfdux", OpType::StoreFP, 1,
-     FL_IN_FLOAT_S | FL_IN_AB | FL_OUT_A | FL_USE_FPU | FL_LOADSTORE},
-    {983, "stfiwx", OpType::StoreFP, 1, FL_IN_FLOAT_S | FL_IN_A0B | FL_USE_FPU | FL_LOADSTORE},
-
-    {19, "mfcr", OpType::System, 1, FL_OUT_D | FL_READ_ALL_CR},
-    {83, "mfmsr", OpType::System, 1, FL_OUT_D | FL_PROGRAMEXCEPTION},
-    {144, "mtcrf", OpType::System, 1, FL_IN_S | FL_SET_ALL_CR | FL_READ_ALL_CR},
-    {146, "mtmsr", OpType::System, 1,
-     FL_IN_S | FL_ENDBLOCK | FL_PROGRAMEXCEPTION | FL_FLOAT_EXCEPTION | FL_SET_MSR},
-    {210, "mtsr", OpType::System, 1, FL_IN_S | FL_PROGRAMEXCEPTION},
-    {242, "mtsrin", OpType::System, 1, FL_IN_SB | FL_PROGRAMEXCEPTION},
-    {339, "mfspr", OpType::SPR, 1, FL_OUT_D | FL_PROGRAMEXCEPTION},
-    {467, "mtspr", OpType::SPR, 2, FL_IN_S | FL_ENDBLOCK | FL_PROGRAMEXCEPTION},
-    {371, "mftb", OpType::System, 1, FL_OUT_D | FL_TIMER | FL_PROGRAMEXCEPTION},
-    {512, "mcrxr", OpType::System, 1, FL_SET_CRn | FL_READ_CA | FL_SET_CA},
-    {595, "mfsr", OpType::System, 3, FL_OUT_D | FL_PROGRAMEXCEPTION},
-    {659, "mfsrin", OpType::System, 3, FL_OUT_D | FL_IN_B | FL_PROGRAMEXCEPTION},
-
-    {4, "tw", OpType::System, 2, FL_IN_AB | FL_ENDBLOCK},
-    {598, "sync", OpType::System, 3, 0},
-    {982, "icbi", OpType::System, 4, FL_IN_A0B | FL_ENDBLOCK | FL_LOADSTORE},
-
-    // Unused instructions on GC
-    {310, "eciwx", OpType::System, 1, FL_IN_A0B | FL_OUT_D | FL_LOADSTORE},
-    {438, "ecowx", OpType::System, 1, FL_IN_A0B | FL_IN_S | FL_LOADSTORE},
-    {854, "eieio", OpType::System, 1, 0},
-    {306, "tlbie", OpType::System, 1, FL_IN_B | FL_PROGRAMEXCEPTION},
-    {566, "tlbsync", OpType::System, 1, FL_PROGRAMEXCEPTION},
-}};
-
-constexpr std::array<GekkoOPTemplate, 9> s_table59{{
-    {18, "fdivsx", OpType::SingleFP, 17,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_AB | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF | FL_FLOAT_EXCEPTION |
-         FL_FLOAT_DIV},  // TODO
-    {20, "fsubsx", OpType::SingleFP, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_AB | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF | FL_FLOAT_EXCEPTION},
-    {21, "faddsx", OpType::SingleFP, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_AB | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF | FL_FLOAT_EXCEPTION},
-    {24, "fresx", OpType::SingleFP, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_B | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF | FL_FLOAT_EXCEPTION |
-         FL_FLOAT_DIV},
-    {25, "fmulsx", OpType::SingleFP, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_AC | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF | FL_FLOAT_EXCEPTION},
-    {28, "fmsubsx", OpType::SingleFP, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_ABC | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_FLOAT_EXCEPTION},
-    {29, "fmaddsx", OpType::SingleFP, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_ABC | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_FLOAT_EXCEPTION},
-    {30, "fnmsubsx", OpType::SingleFP, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_ABC | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_FLOAT_EXCEPTION},
-    {31, "fnmaddsx", OpType::SingleFP, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_ABC | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_FLOAT_EXCEPTION},
-}};
-
-constexpr std::array<GekkoOPTemplate, 15> s_table63{{
-    {264, "fabsx", OpType::DoubleFP, 1,
-     FL_INOUT_FLOAT_D | FL_IN_FLOAT_B | FL_IN_FLOAT_B_BITEXACT | FL_RC_BIT_F | FL_USE_FPU},
-
-    // FIXME: fcmp modifies the FPRF flags, but if the flags are clobbered later,
-    // we don't actually need to calculate or store them here. So FL_READ_FPRF and FL_SET_FPRF is
-    // not an ideal representation of fcmp's effect on FPRF flags and might result in slightly
-    // sub-optimal code.
-    {32, "fcmpo", OpType::DoubleFP, 1,
-     FL_IN_FLOAT_AB | FL_SET_CRn | FL_USE_FPU | FL_READ_FPRF | FL_SET_FPRF | FL_FLOAT_EXCEPTION},
-    {0, "fcmpu", OpType::DoubleFP, 1,
-     FL_IN_FLOAT_AB | FL_SET_CRn | FL_USE_FPU | FL_READ_FPRF | FL_SET_FPRF | FL_FLOAT_EXCEPTION},
-
-    {14, "fctiwx", OpType::DoubleFP, 1,
-     FL_INOUT_FLOAT_D | FL_IN_FLOAT_B | FL_RC_BIT_F | FL_USE_FPU | FL_FLOAT_EXCEPTION},
-    {15, "fctiwzx", OpType::DoubleFP, 1,
-     FL_INOUT_FLOAT_D | FL_IN_FLOAT_B | FL_RC_BIT_F | FL_USE_FPU | FL_FLOAT_EXCEPTION},
-    {72, "fmrx", OpType::DoubleFP, 1,
-     FL_INOUT_FLOAT_D | FL_IN_FLOAT_B | FL_IN_FLOAT_B_BITEXACT | FL_RC_BIT_F | FL_USE_FPU},
-    {136, "fnabsx", OpType::DoubleFP, 1,
-     FL_INOUT_FLOAT_D | FL_IN_FLOAT_B | FL_RC_BIT_F | FL_IN_FLOAT_B_BITEXACT | FL_USE_FPU},
-    {40, "fnegx", OpType::DoubleFP, 1,
-     FL_INOUT_FLOAT_D | FL_IN_FLOAT_B | FL_RC_BIT_F | FL_IN_FLOAT_B_BITEXACT | FL_USE_FPU},
-    {12, "frspx", OpType::DoubleFP, 1,
-     FL_OUT_FLOAT_D | FL_IN_FLOAT_B | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF | FL_FLOAT_EXCEPTION},
-
-    {64, "mcrfs", OpType::SystemFP, 1, FL_SET_CRn | FL_USE_FPU | FL_READ_FPRF},
-    {583, "mffsx", OpType::SystemFP, 1, FL_RC_BIT_F | FL_INOUT_FLOAT_D | FL_USE_FPU | FL_READ_FPRF},
-    {70, "mtfsb0x", OpType::SystemFP, 3, FL_RC_BIT_F | FL_USE_FPU | FL_READ_FPRF | FL_SET_FPRF},
-    {38, "mtfsb1x", OpType::SystemFP, 3,
-     FL_RC_BIT_F | FL_USE_FPU | FL_READ_FPRF | FL_SET_FPRF | FL_FLOAT_EXCEPTION},
-    {134, "mtfsfix", OpType::SystemFP, 3,
-     FL_RC_BIT_F | FL_USE_FPU | FL_READ_FPRF | FL_SET_FPRF | FL_FLOAT_EXCEPTION},
-    {711, "mtfsfx", OpType::SystemFP, 3,
-     FL_RC_BIT_F | FL_IN_FLOAT_B | FL_USE_FPU | FL_READ_FPRF | FL_SET_FPRF | FL_FLOAT_EXCEPTION},
-}};
-
-constexpr std::array<GekkoOPTemplate, 10> s_table63_2{{
-    {18, "fdivx", OpType::DoubleFP, 31,
-     FL_INOUT_FLOAT_D | FL_IN_FLOAT_AB | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_FLOAT_EXCEPTION | FL_FLOAT_DIV},
-    {20, "fsubx", OpType::DoubleFP, 1,
-     FL_INOUT_FLOAT_D | FL_IN_FLOAT_AB | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_FLOAT_EXCEPTION},
-    {21, "faddx", OpType::DoubleFP, 1,
-     FL_INOUT_FLOAT_D | FL_IN_FLOAT_AB | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_FLOAT_EXCEPTION},
-    {23, "fselx", OpType::DoubleFP, 1,
-     FL_INOUT_FLOAT_D | FL_IN_FLOAT_ABC | FL_IN_FLOAT_BC_BITEXACT | FL_RC_BIT_F | FL_USE_FPU},
-    {25, "fmulx", OpType::DoubleFP, 1,
-     FL_INOUT_FLOAT_D | FL_IN_FLOAT_AC | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_FLOAT_EXCEPTION},
-    {26, "frsqrtex", OpType::DoubleFP, 1,
-     FL_INOUT_FLOAT_D | FL_IN_FLOAT_B | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_FLOAT_EXCEPTION | FL_FLOAT_DIV},
-    {28, "fmsubx", OpType::DoubleFP, 1,
-     FL_INOUT_FLOAT_D | FL_IN_FLOAT_ABC | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_FLOAT_EXCEPTION},
-    {29, "fmaddx", OpType::DoubleFP, 1,
-     FL_INOUT_FLOAT_D | FL_IN_FLOAT_ABC | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_FLOAT_EXCEPTION},
-    {30, "fnmsubx", OpType::DoubleFP, 1,
-     FL_INOUT_FLOAT_D | FL_IN_FLOAT_ABC | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_FLOAT_EXCEPTION},
-    {31, "fnmaddx", OpType::DoubleFP, 1,
-     FL_INOUT_FLOAT_D | FL_IN_FLOAT_ABC | FL_RC_BIT_F | FL_USE_FPU | FL_SET_FPRF |
-         FL_FLOAT_EXCEPTION},
-}};
-
-constexpr size_t TOTAL_INSTRUCTION_COUNT =
-    1 + s_primary_table.size() + s_table4_2.size() + s_table4_3.size() + s_table4.size() +
-    s_table31.size() + s_table19.size() + s_table59.size() + s_table63.size() + s_table63_2.size();
+// Slot 0 of the info array is the fallback for unrecognised encodings.
+constexpr size_t OP_COUNT = std::size(s_ops) + 1;
+constexpr u16 UNKNOWN = 0;
 
 struct Tables
 {
-  std::array<GekkoOPInfo, TOTAL_INSTRUCTION_COUNT> all_instructions{};
-  u32 unknown_op_info;
-  std::array<u32, 64> primary_table{};
-  std::array<u32, 1024> table4{};
-  std::array<u32, 1024> table19{};
-  std::array<u32, 1024> table31{};
-  std::array<u32, 32> table59{};
-  std::array<u32, 1024> table63{};
+  std::array<GekkoOPInfo, OP_COUNT> info{};
+  std::array<u16, 64> primary{};
+  std::array<u16, 1024> op4{};
+  std::array<u16, 1024> op19{};
+  std::array<u16, 1024> op31{};
+  std::array<u16, 32> op59{};
+  std::array<u16, 1024> op63{};
 };
+
+std::array<GekkoOPStats, OP_COUNT> s_stats;
+
+// Deliberately not constexpr: reaching it while building the tables (two
+// definitions for one encoding) makes the build fail.
+void ConflictingEncoding()
+{
+}
+
+consteval Tables BuildTables()
+{
+  Tables t{};
+  t.info[UNKNOWN] = {"unknown_instruction", OpType::Unknown, 0, FL_ENDBLOCK, &s_stats[UNKNOWN]};
+
+  const auto claim = [](auto& table, u32 index, u16 id) {
+    if (table[index] != UNKNOWN)
+      ConflictingEncoding();
+    table[index] = id;
+  };
+
+  for (size_t i = 0; i < std::size(s_ops); ++i)
+  {
+    const OpDef& op = s_ops[i];
+    const u16 id = static_cast<u16>(i + 1);
+    t.info[id] = {op.name, op.type, op.cycles, op.flags, &s_stats[id]};
+
+    switch (op.form)
+    {
+    case Form::Primary:
+      claim(t.primary, op.xo, id);
+      break;
+    case Form::Op4:
+      claim(t.op4, op.xo, id);
+      break;
+    case Form::Op4A:
+      for (u32 high = 0; high < 1024; high += 32)
+        claim(t.op4, high | op.xo, id);
+      break;
+    case Form::Op4PSQ:
+      for (u32 high = 0; high < 1024; high += 64)
+        claim(t.op4, high | op.xo, id);
+      break;
+    case Form::Op19:
+      claim(t.op19, op.xo, id);
+      break;
+    case Form::Op31:
+      claim(t.op31, op.xo, id);
+      break;
+    case Form::Op59:
+      claim(t.op59, op.xo, id);
+      break;
+    case Form::Op63:
+      claim(t.op63, op.xo, id);
+      break;
+    case Form::Op63A:
+      for (u32 high = 0; high < 1024; high += 32)
+        claim(t.op63, high | op.xo, id);
+      break;
+    }
+  }
+  return t;
+}
+
+constexpr Tables s_tables = BuildTables();
+
+const GekkoOPInfo* InfoFor(u16 id)
+{
+  return &s_tables.info[id];
+}
 }  // namespace
-
-static std::array<GekkoOPStats, TOTAL_INSTRUCTION_COUNT> s_all_instructions_stats;
-
-constexpr Tables s_tables = []() consteval {
-  Tables tables{};
-
-  u32 counter = 0;
-  auto make_info = [&](const GekkoOPTemplate& inst) consteval -> u32 {
-    ASSERT(counter < TOTAL_INSTRUCTION_COUNT);
-    GekkoOPInfo* info = &tables.all_instructions[counter];
-    info->opname = inst.opname;
-    info->flags = inst.flags;
-    info->type = inst.type;
-    info->num_cycles = inst.num_cycles;
-    info->stats = &s_all_instructions_stats[counter];
-    return counter++;
-  };
-
-  u32 unknown_op_info = make_info(s_unknown_op_info);
-  tables.unknown_op_info = unknown_op_info;
-
-  tables.primary_table.fill(unknown_op_info);
-  for (auto& tpl : s_primary_table)
-  {
-    ASSERT(tables.primary_table[tpl.opcode] == unknown_op_info);
-    tables.primary_table[tpl.opcode] = make_info(tpl);
-  };
-
-  tables.table4.fill(unknown_op_info);
-
-  for (const auto& tpl : s_table4_2)
-  {
-    u32 info = make_info(tpl);
-    for (u32 i = 0; i < 32; i++)
-    {
-      const u32 fill = i << 5;
-      const u32 op = fill + tpl.opcode;
-      ASSERT(tables.table4[op] == unknown_op_info);
-      tables.table4[op] = info;
-    }
-  }
-
-  for (const auto& tpl : s_table4_3)
-  {
-    u32 info = make_info(tpl);
-    for (u32 i = 0; i < 16; i++)
-    {
-      const u32 fill = i << 6;
-      const u32 op = fill + tpl.opcode;
-      ASSERT(tables.table4[op] == unknown_op_info);
-      tables.table4[op] = info;
-    }
-  }
-
-  for (const auto& tpl : s_table4)
-  {
-    const u32 op = tpl.opcode;
-    ASSERT(tables.table4[op] == unknown_op_info);
-    tables.table4[op] = make_info(tpl);
-  }
-
-  tables.table19.fill(unknown_op_info);
-  for (auto& tpl : s_table19)
-  {
-    ASSERT(tables.table19[tpl.opcode] == unknown_op_info);
-    tables.table19[tpl.opcode] = make_info(tpl);
-  };
-
-  tables.table31.fill(unknown_op_info);
-  for (auto& tpl : s_table31)
-  {
-    ASSERT(tables.table31[tpl.opcode] == unknown_op_info);
-    tables.table31[tpl.opcode] = make_info(tpl);
-  };
-
-  tables.table59.fill(unknown_op_info);
-  for (auto& tpl : s_table59)
-  {
-    ASSERT(tables.table59[tpl.opcode] == unknown_op_info);
-    tables.table59[tpl.opcode] = make_info(tpl);
-  };
-
-  tables.table63.fill(unknown_op_info);
-  for (auto& tpl : s_table63)
-  {
-    ASSERT(tables.table63[tpl.opcode] == unknown_op_info);
-    tables.table63[tpl.opcode] = make_info(tpl);
-  };
-
-  for (const auto& tpl : s_table63_2)
-  {
-    u32 info = make_info(tpl);
-    for (u32 i = 0; i < 32; i++)
-    {
-      const u32 fill = i << 5;
-      const u32 op = fill + tpl.opcode;
-      ASSERT(tables.table63[op] == unknown_op_info);
-      tables.table63[op] = info;
-    }
-  }
-
-  ASSERT(counter == TOTAL_INSTRUCTION_COUNT);
-  return tables;
-}();
 
 const GekkoOPInfo* GetOpInfo(UGeckoInstruction inst, u32 pc)
 {
-  const GekkoOPInfo* info = &s_tables.all_instructions[s_tables.primary_table[inst.OPCD]];
-  if (info->type == OpType::Subtable)
+  switch (inst.OPCD)
   {
-    switch (inst.OPCD)
-    {
-    case 4:
-      return &s_tables.all_instructions[s_tables.table4[inst.SUBOP10]];
-    case 19:
-      return &s_tables.all_instructions[s_tables.table19[inst.SUBOP10]];
-    case 31:
-      return &s_tables.all_instructions[s_tables.table31[inst.SUBOP10]];
-    case 59:
-      return &s_tables.all_instructions[s_tables.table59[inst.SUBOP5]];
-    case 63:
-      return &s_tables.all_instructions[s_tables.table63[inst.SUBOP10]];
-    default:
-      ASSERT_MSG(POWERPC, 0, "GetOpInfo - invalid subtable op {:08x} @ {:08x}", inst.hex, pc);
-      return &s_tables.all_instructions[s_tables.unknown_op_info];
-    }
-  }
-  else
-  {
-    if (info->type == OpType::Invalid)
-    {
-      ASSERT_MSG(POWERPC, 0, "GetOpInfo - invalid op {:08x} @ {:08x}", inst.hex, pc);
-      return &s_tables.all_instructions[s_tables.unknown_op_info];
-    }
-    return info;
+  case 4:
+    return InfoFor(s_tables.op4[inst.SUBOP10]);
+  case 19:
+    return InfoFor(s_tables.op19[inst.SUBOP10]);
+  case 31:
+    return InfoFor(s_tables.op31[inst.SUBOP10]);
+  case 59:
+    return InfoFor(s_tables.op59[inst.SUBOP5]);
+  case 63:
+    return InfoFor(s_tables.op63[inst.SUBOP10]);
+  default:
+    return InfoFor(s_tables.primary[inst.OPCD]);
   }
 }
-
-// #define OPLOG
-// #define OP_TO_LOG "mtfsb0x"
-
-#ifdef OPLOG
-namespace
-{
-std::vector<u32> rsplocations;
-}
-#endif
 
 const char* GetInstructionName(UGeckoInstruction inst, u32 pc)
 {
-  const GekkoOPInfo* info = GetOpInfo(inst, pc);
-  return info->opname;
+  return GetOpInfo(inst, pc)->opname;
 }
 
 bool IsValidInstruction(UGeckoInstruction inst, u32 pc)
 {
-  const GekkoOPInfo* info = GetOpInfo(inst, pc);
-  return info->type != OpType::Invalid && info->type != OpType::Unknown;
+  const OpType type = GetOpInfo(inst, pc)->type;
+  return type != OpType::Invalid && type != OpType::Unknown;
 }
 
 void CountInstruction(UGeckoInstruction inst, u32 pc)
 {
-  const GekkoOPInfo* info = GetOpInfo(inst, pc);
-  info->stats->run_count++;
+  ++GetOpInfo(inst, pc)->stats->run_count;
 }
 
 void CountInstructionCompile(const GekkoOPInfo* info, u32 pc)
 {
-  info->stats->compile_count++;
-  info->stats->last_use = pc;
-
-#ifdef OPLOG
-  if (!strcmp(info->opname, OP_TO_LOG))
-  {
-    rsplocations.push_back(pc);
-  }
-#endif
+  GekkoOPStats& stats = *info->stats;
+  ++stats.compile_count;
+  stats.last_use = pc;
 }
 
 void PrintInstructionRunCounts()
 {
-  typedef std::pair<const char*, u64> OpInfo;
-  std::array<OpInfo, TOTAL_INSTRUCTION_COUNT> temp;
-  for (size_t i = 0; i < TOTAL_INSTRUCTION_COUNT; i++)
-  {
-    const GekkoOPInfo& info = s_tables.all_instructions[i];
-    temp[i] = std::make_pair(info.opname, info.stats->run_count);
-  }
-  std::ranges::sort(temp, std::ranges::greater{}, Common::Projection::Second{});
+  std::array<std::pair<u64, const char*>, OP_COUNT> counts;
+  for (size_t i = 0; i < OP_COUNT; ++i)
+    counts[i] = {s_tables.info[i].stats->run_count, s_tables.info[i].opname};
 
-  for (auto& inst : temp)
+  std::ranges::sort(counts, [](const auto& a, const auto& b) { return a.first > b.first; });
+  for (const auto& [count, name] : counts)
   {
-    if (inst.second == 0)
+    if (count == 0)
       break;
-
-    INFO_LOG_FMT(POWERPC, "{} : {}", inst.first, inst.second);
+    INFO_LOG_FMT(POWERPC, "{} : {}", name, count);
   }
 }
 
 void LogCompiledInstructions()
 {
-  static unsigned int time = 0;
+  // Each call writes a fresh numbered pair of files.
+  static u32 s_dump_index = 0;
+  const std::string dir = File::GetUserPath(D_LOGS_IDX);
 
-  File::IOFile f(fmt::format("{}inst_log{}.txt", File::GetUserPath(D_LOGS_IDX), time), "w");
-  for (size_t i = 0; i < TOTAL_INSTRUCTION_COUNT; i++)
+  File::IOFile compiled(fmt::format("{}inst_log{}.txt", dir, s_dump_index), "w");
+  for (const GekkoOPInfo& info : s_tables.info)
   {
-    const GekkoOPInfo& info = s_tables.all_instructions[i];
-    if (info.stats->compile_count > 0)
+    const GekkoOPStats& stats = *info.stats;
+    if (stats.compile_count != 0)
     {
-      f.WriteString(fmt::format("{0}\t{1}\t{2}\t{3:08x}\n", info.opname, info.stats->compile_count,
-                                info.stats->run_count, info.stats->last_use));
+      compiled.WriteString(fmt::format("{}\t{}\t{}\t{:08x}\n", info.opname, stats.compile_count,
+                                       stats.run_count, stats.last_use));
     }
   }
 
-  f.Open(fmt::format("{}inst_not{}.txt", File::GetUserPath(D_LOGS_IDX), time), "w");
-  for (size_t i = 0; i < TOTAL_INSTRUCTION_COUNT; i++)
+  File::IOFile never_compiled(fmt::format("{}inst_not{}.txt", dir, s_dump_index), "w");
+  for (const GekkoOPInfo& info : s_tables.info)
   {
-    const GekkoOPInfo& info = s_tables.all_instructions[i];
-    if (info.stats->compile_count == 0)
+    const GekkoOPStats& stats = *info.stats;
+    if (stats.compile_count == 0)
     {
-      f.WriteString(fmt::format("{0}\t{1}\t{2}\n", info.opname, info.stats->compile_count,
-                                info.stats->run_count));
+      never_compiled.WriteString(
+          fmt::format("{}\t{}\t{}\n", info.opname, stats.compile_count, stats.run_count));
     }
   }
 
-#ifdef OPLOG
-  f.Open(fmt::format("{}" OP_TO_LOG "_at{}.txt", File::GetUserPath(D_LOGS_IDX), time), "w");
-  for (auto& rsplocation : rsplocations)
-  {
-    f.WriteString(fmt::format(OP_TO_LOG ": {0:08x}\n", rsplocation));
-  }
-#endif
-
-  ++time;
+  ++s_dump_index;
 }
 
 }  // namespace PPCTables
