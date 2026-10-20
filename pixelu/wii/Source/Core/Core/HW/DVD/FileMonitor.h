@@ -1,11 +1,11 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include "Common/CommonTypes.h"
 #include "DiscIO/Volume.h"
 
+// Logs (to the FILEMON log) which disc file each DVD read lands in.
 namespace FileMonitor
 {
 class FileLogger
@@ -17,6 +17,7 @@ public:
   void Log(const DiscIO::Volume& volume, const DiscIO::Partition& partition, u64 offset);
 
 private:
+  // The last file reported, so consecutive reads of one file log only once.
   DiscIO::Partition m_previous_partition;
   u64 m_previous_file_offset = 0;
 };

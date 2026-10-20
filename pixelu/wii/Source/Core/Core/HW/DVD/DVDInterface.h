@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -37,6 +36,7 @@ class Mapping;
 
 namespace DVD
 {
+// Drive command opcodes (top byte of DICMDBUF0).
 enum class DICommand : u8
 {
   Inquiry = 0x12,
@@ -64,9 +64,8 @@ enum class DICommand : u8
   UnknownEE = 0xee,
 };
 
-// Disc drive state.
-// Reported in error codes as 0 for Ready, and value-1 for the rest
-// (i.e. Ready and ReadyNoReadsMade are both reported as 0)
+// State of the drive itself. In the RequestError reply, Ready and
+// ReadyNoReadsMade both read as 0 and every later state as (value - 1).
 enum class DriveState : u8
 {
   Ready = 0,
@@ -78,26 +77,26 @@ enum class DriveState : u8
   DiscIdNotRead = 6
 };
 
-// Actual drive error codes, which fill the remaining 3 bytes
-// Numbers more or less match a SCSI sense key (1 nybble) followed by SCSI ASC/ASCQ (2 bytes).
+// Low 24 bits of the RequestError reply: a SCSI-style sense key nibble
+// followed by the additional sense code and qualifier.
 enum class DriveError : u32
 {
-  None = 0x00000,                  // No error.
-  MotorStopped = 0x20400,          // Motor stopped.
-  NoDiscID = 0x20401,              // Disk ID not read.
-  MediumNotPresent = 0x23a00,      // Medium not present / Cover opened.
-  SeekNotDone = 0x30200,           // No seek complete.
-  ReadError = 0x31100,             // Unrecovered read error.
-  ProtocolError = 0x40800,         // Transfer protocol error.
-  InvalidCommand = 0x52000,        // Invalid command operation code.
-  NoAudioBuf = 0x52001,            // Audio Buffer not set.
-  BlockOOB = 0x52100,              // Logical block address out of bounds.
-  InvalidField = 0x52400,          // Invalid field in command packet.
-  InvalidAudioCommand = 0x52401,   // Invalid audio command.
-  InvalidPeriod = 0x52402,         // Configuration out of permitted period.
-  EndOfUserArea = 0x56300,         // End of user area encountered on this track.
-  MediumChanged = 0x62800,         // Medium may have changed.
-  MediumRemovalRequest = 0xb5a01,  // Operator medium removal request.
+  None = 0x00000,
+  MotorStopped = 0x20400,
+  NoDiscID = 0x20401,
+  MediumNotPresent = 0x23a00,  // also reported while the lid is open
+  SeekNotDone = 0x30200,
+  ReadError = 0x31100,
+  ProtocolError = 0x40800,
+  InvalidCommand = 0x52000,
+  NoAudioBuf = 0x52001,  // audio streaming has not been enabled
+  BlockOOB = 0x52100,
+  InvalidField = 0x52400,
+  InvalidAudioCommand = 0x52401,
+  InvalidPeriod = 0x52402,  // command no longer allowed at this point
+  EndOfUserArea = 0x56300,
+  MediumChanged = 0x62800,
+  MediumRemovalRequest = 0xb5a01,
 };
 
 enum class DIInterruptType : int
@@ -108,6 +107,7 @@ enum class DIInterruptType : int
   CVRINT = 3,
 };
 
+// Who gets told when a command finishes.
 enum class ReplyType : u32
 {
   NoReply,
@@ -147,104 +147,118 @@ public:
   void ChangeDisc(const Core::CPUThreadGuard& guard, const std::string& new_path);
   bool AutoChangeDisc(const Core::CPUThreadGuard& guard);
 
-  // This function returns true and calls SConfig::SetRunningGameMetadata(Volume&, Partition&)
-  // if both of the following conditions are true:
-  // - A disc is inserted
-  // - The title_id argument doesn't contain a value, or its value matches the disc's title ID
+  // Calls SConfig::SetRunningGameMetadata(Volume&, Partition&) and returns true
+  // when a disc is inserted and either no title_id is given or it equals the
+  // disc's title ID. Returns false otherwise.
   bool UpdateRunningGameMetadata(std::optional<u64> title_id = {});
 
-  // Direct access to DI for IOS HLE (simpler to implement than how real IOS accesses DI,
-  // and lets us skip encrypting/decrypting in some cases)
+  // Entry points for the IOS /dev/di emulation, which talks to the drive
+  // directly instead of through the MMIO registers (and so can skip the
+  // disc encryption).
   void ExecuteCommand(ReplyType reply_type);
   void PerformDecryptingRead(u32 position, u32 length, u32 output_address,
                              const DiscIO::Partition& partition, ReplyType reply_type);
 
-  // For circumventing Error #001 in DirectoryBlobs, which may have data in the offsets being
-  // checked.
+  // Makes the next read fail with BlockOOB. Used so that DirectoryBlobs, which
+  // can contain data beyond a real disc's end, still pass the Error #001 check.
   void ForceOutOfBoundsRead(ReplyType reply_type);
 
-  // Exposed for use by emulated BS2; does not perform any checks on drive state
+  // For the emulated IPL. Bypasses the drive state checks.
   void AudioBufferConfig(bool enable_dtk, u8 dtk_buffer_length);
 
   void SetDriveState(DriveState state);
   void SetDriveError(DriveError error);
 
-  // Used by DVDThread
+  // Called by DVDThread when a read is due.
   void FinishExecutingCommand(ReplyType reply_type, DIInterruptType interrupt_type, s64 cycles_late,
                               std::span<const u8> data = {});
 
-  // Used by IOS HLE
+  // For IOS HLE.
   void SetInterruptEnabled(DIInterruptType interrupt, bool enabled);
   void ClearInterrupt(DIInterruptType interrupt);
 
 private:
-  void DTKStreamingCallback(DIInterruptType interrupt_type, std::span<const u8> audio_data,
-                            s64 cycles_late);
-  size_t ProcessDTKSamples(s16* target_samples, size_t target_block_count,
-                           const std::span<const u8> audio_data);
-  u32 AdvanceDTK(u32 maximum_blocks, u32* blocks_to_process);
+  // Result of decoding one drive command.
+  struct CommandResult
+  {
+    DIInterruptType interrupt = DIInterruptType::TCINT;
+    // True when DVDThread was given the work and will report completion
+    // itself; otherwise a fixed-latency completion event is scheduled.
+    bool queued_on_thread = false;
+  };
 
-  void SetLidOpen();
+  void RunDriveCommand(ReplyType reply_type, CommandResult& result);
+  void RunAudioStreamCommand(CommandResult& result);
+  void RunAudioStatusCommand(CommandResult& result);
+  void RunStopMotorCommand();
+  void RunAudioBufferConfigCommand(CommandResult& result);
+  void Fail(DriveError error, CommandResult& result);
+  void ScheduleCommandCompletion(ReplyType reply_type, DIInterruptType interrupt);
+
+  void StreamAudioBlocks(DIInterruptType interrupt_type, std::span<const u8> audio_data,
+                         s64 cycles_late);
+  u32 AdvanceStreamPosition(u32 max_blocks);
+
+  void UpdateLid();
   void UpdateInterrupts();
-  void GenerateDIInterrupt(DIInterruptType dvd_interrupt);
+  void RaiseInterrupt(DIInterruptType type);
 
-  bool CheckReadPreconditions();
-  bool ExecuteReadCommand(u64 dvd_offset, u32 output_address, u32 dvd_length, u32 output_length,
-                          const DiscIO::Partition& partition, ReplyType reply_type,
-                          DIInterruptType* interrupt_type);
+  bool DriveCanRead();
+  bool StartDiscRead(u64 dvd_offset, u32 output_address, u32 dvd_length, u32 output_length,
+                     const DiscIO::Partition& partition, ReplyType reply_type,
+                     DIInterruptType* interrupt_type);
   void ScheduleReads(u64 offset, u32 length, const DiscIO::Partition& partition, u32 output_address,
                      ReplyType reply_type);
 
-  static void AutoChangeDiscCallback(Core::System& system, u64 userdata, s64 cyclesLate);
-  static void EjectDiscCallback(Core::System& system, u64 userdata, s64 cyclesLate);
-  static void InsertDiscCallback(Core::System& system, u64 userdata, s64 cyclesLate);
+  static void AutoChangeDiscCallback(Core::System& system, u64 userdata, s64 cycles_late);
+  static void EjectDiscCallback(Core::System& system, u64 userdata, s64 cycles_late);
+  static void InsertDiscCallback(Core::System& system, u64 userdata, s64 cycles_late);
   static void FinishExecutingCommandCallback(Core::System& system, u64 userdata, s64 cycles_late);
 
-  // DI Status Register
+  // DISR, the status register (layout as documented in YAGCD).
   union UDISR
   {
     u32 Hex = 0;
 
-    BitField<0, 1, u32> BREAK;      // Stop the Device + Interrupt
-    BitField<1, 1, u32> DEINTMASK;  // Access Device Error Int Mask
-    BitField<2, 1, u32> DEINT;      // Access Device Error Int
-    BitField<3, 1, u32> TCINTMASK;  // Transfer Complete Int Mask
-    BitField<4, 1, u32> TCINT;      // Transfer Complete Int
+    BitField<0, 1, u32> BREAK;
+    BitField<1, 1, u32> DEINTMASK;
+    BitField<2, 1, u32> DEINT;
+    BitField<3, 1, u32> TCINTMASK;
+    BitField<4, 1, u32> TCINT;
     BitField<5, 1, u32> BRKINTMASK;
-    BitField<6, 1, u32> BRKINT;  // w 1: clear brkint
+    BitField<6, 1, u32> BRKINT;
     BitField<7, 25, u32> reserved;
 
     UDISR() = default;
     explicit UDISR(u32 hex) : Hex{hex} {}
   };
 
-  // DI Cover Register
+  // DICVR, the lid register.
   union UDICVR
   {
     u32 Hex = 0;
 
-    BitField<0, 1, u32> CVR;         // 0: Cover closed  1: Cover open
-    BitField<1, 1, u32> CVRINTMASK;  // 1: Interrupt enabled
-    BitField<2, 1, u32> CVRINT;      // r 1: Interrupt requested w 1: Interrupt clear
+    BitField<0, 1, u32> CVR;  // 1 = lid open
+    BitField<1, 1, u32> CVRINTMASK;
+    BitField<2, 1, u32> CVRINT;
     BitField<3, 29, u32> reserved;
 
     UDICVR() = default;
     explicit UDICVR(u32 hex) : Hex{hex} {}
   };
 
-  // DI DMA Control Register
+  // DICR, the transfer control register.
   union UDICR
   {
     u32 Hex = 0;
 
-    BitField<0, 1, u32> TSTART;  // w:1 start   r:0 ready
-    BitField<1, 1, u32> DMA;     // 1: DMA Mode
-                                 // 0: Immediate Mode (can only do Access Register Command)
-    BitField<2, 1, u32> RW;  // 0: Read Command (DVD to Memory)  1: Write Command (Memory to DVD)
+    BitField<0, 1, u32> TSTART;  // set to start, reads 0 when done
+    BitField<1, 1, u32> DMA;     // 0 = immediate (result in DIIMMBUF)
+    BitField<2, 1, u32> RW;      // 0 = disc to memory
     BitField<3, 29, u32> reserved;
   };
 
-  // DI Config Register
+  // DICFG, read-only configuration.
   union UDICFG
   {
     u32 Hex = 0;
@@ -256,7 +270,7 @@ private:
     explicit UDICFG(u32 hex) : Hex{hex} {}
   };
 
-  // Hardware registers
+  // MMIO registers
   UDISR m_DISR;
   UDICVR m_DICVR;
   std::array<u32, 3> m_DICMDBUF{};
@@ -268,35 +282,41 @@ private:
 
   StreamADPCM::ADPCMDecoder m_adpcm_decoder;
 
-  // DTK
-  bool m_stream = false;
-  bool m_stop_at_track_end = false;
-  u64 m_audio_position = 0;
-  u64 m_current_start = 0;
-  u32 m_current_length = 0;
-  u64 m_next_start = 0;
-  u32 m_next_length = 0;
-  u32 m_pending_blocks = 0;
-  bool m_enable_dtk = false;
-  u8 m_dtk_buffer_length = 0;  // TODO: figure out how this affects the regular buffer
+  // Streamed disc audio (DTK)
+  struct AudioStream
+  {
+    bool playing = false;
+    bool stop_at_track_end = false;
+    u64 position = 0;
+    u64 current_start = 0;
+    u32 current_length = 0;
+    u64 next_start = 0;
+    u32 next_length = 0;
+    u32 pending_blocks = 0;
+    bool enabled = false;
+    u8 buffer_length = 0;  // stored, but has no modelled effect
+  };
+  AudioStream m_audio;
 
-  // Disc drive state
   DriveState m_drive_state = DriveState::Ready;
   DriveError m_error_code = DriveError::None;
   u64 m_disc_end_offset = 0;
 
-  // Disc drive timing
-  u64 m_read_buffer_start_time = 0;
-  u64 m_read_buffer_end_time = 0;
-  u64 m_read_buffer_start_offset = 0;
-  u64 m_read_buffer_end_offset = 0;
+  // The drive's read-ahead buffer: it keeps reading past the last request,
+  // filling [start_offset, end_offset) between start_time and end_time.
+  struct ReadAhead
+  {
+    u64 start_time = 0;
+    u64 end_time = 0;
+    u64 start_offset = 0;
+    u64 end_offset = 0;
+  };
+  ReadAhead m_read_ahead;
 
-  // Disc changing
   std::string m_disc_path_to_insert;
   std::vector<std::string> m_auto_disc_change_paths;
   size_t m_auto_disc_change_index = 0;
 
-  // Events
   CoreTiming::EventType* m_finish_executing_command = nullptr;
   CoreTiming::EventType* m_auto_change_disc = nullptr;
   CoreTiming::EventType* m_eject_disc = nullptr;

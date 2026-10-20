@@ -1,11 +1,12 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/DVD/FileMonitor.h"
 
+#include <algorithm>
+#include <array>
 #include <memory>
 #include <string>
-#include <unordered_set>
+#include <string_view>
 
 #include <fmt/format.h>
 
@@ -19,74 +20,56 @@
 
 namespace FileMonitor
 {
-// Filtered files
-static bool IsSoundFile(const std::string& filename)
+namespace
 {
-  std::string extension;
-  SplitPath(filename, nullptr, nullptr, &extension);
-  Common::ToLower(&extension);
+// Streamed audio formats seen on GameCube and Wii discs. Reads of these happen
+// constantly while music plays, so they are logged one level lower.
+constexpr std::array<std::string_view, 13> AUDIO_EXTENSIONS{
+    ".adp", ".adx", ".afc",  ".ast", ".brstm", ".dsp", ".hps",
+    ".ogg", ".sad", ".snd", ".song", ".ssm",   ".str",
+};
 
-  static const std::unordered_set<std::string> extensions = {
-      ".adp",    // 1080 Avalanche, Crash Bandicoot, etc.
-      ".adx",    // Sonic Adventure 2 Battle, etc.
-      ".afc",    // Zelda WW
-      ".ast",    // Zelda TP, Mario Kart
-      ".brstm",  // Wii Sports, Wario Land, etc.
-      ".dsp",    // Metroid Prime
-      ".hps",    // SSB Melee
-      ".ogg",    // Tony Hawk's Underground 2
-      ".sad",    // Disaster
-      ".snd",    // Tales of Symphonia
-      ".song",   // Tales of Symphonia
-      ".ssm",    // Custom Robo, Kirby Air Ride, etc.
-      ".str",    // Harry Potter & the Sorcerer's Stone
-  };
-
-  return extensions.contains(extension);
+bool LooksLikeAudio(const std::string& path)
+{
+  std::string ext;
+  SplitPath(path, nullptr, nullptr, &ext);
+  Common::ToLower(&ext);
+  return std::ranges::find(AUDIO_EXTENSIONS, std::string_view{ext}) != AUDIO_EXTENSIONS.end();
 }
+}  // namespace
 
 FileLogger::FileLogger() = default;
-
 FileLogger::~FileLogger() = default;
 
 void FileLogger::Log(const DiscIO::Volume& volume, const DiscIO::Partition& partition, u64 offset)
 {
-  // Do nothing if the log isn't selected
-  if (!Common::Log::LogManager::GetInstance()->IsEnabled(Common::Log::LogType::FILEMON,
-                                                         Common::Log::LogLevel::LWARNING))
-  {
-    return;
-  }
-
-  const DiscIO::FileSystem* file_system = volume.GetFileSystem(partition);
-
-  // Do nothing if there is no valid file system
-  if (!file_system)
+  const auto* log_manager = Common::Log::LogManager::GetInstance();
+  if (!log_manager->IsEnabled(Common::Log::LogType::FILEMON, Common::Log::LogLevel::LWARNING))
     return;
 
-  const std::unique_ptr<DiscIO::FileInfo> file_info = file_system->FindFileInfo(offset);
-
-  // Do nothing if no file was found at that offset
-  if (!file_info)
+  const DiscIO::FileSystem* fs = volume.GetFileSystem(partition);
+  if (fs == nullptr)
     return;
 
-  const u64 file_offset = file_info->GetOffset();
-
-  // Do nothing if we found the same file again
-  if (m_previous_partition == partition && m_previous_file_offset == file_offset)
+  const std::unique_ptr<DiscIO::FileInfo> info = fs->FindFileInfo(offset);
+  if (info == nullptr)
     return;
 
-  const std::string size_string = Common::ThousandSeparate(file_info->GetSize() / 1000, 7);
-  const std::string path = file_info->GetPath();
-  const std::string log_string = fmt::format("{} kB {}", size_string, path);
-  if (IsSoundFile(path))
-    INFO_LOG_FMT(FILEMON, "{}", log_string);
-  else
-    WARN_LOG_FMT(FILEMON, "{}", log_string);
-
-  // Update the last accessed file
+  const u64 start = info->GetOffset();
+  const bool same_as_before = partition == m_previous_partition && start == m_previous_file_offset;
+  if (same_as_before)
+    return;
   m_previous_partition = partition;
-  m_previous_file_offset = file_offset;
+  m_previous_file_offset = start;
+
+  const std::string path = info->GetPath();
+  const std::string line =
+      fmt::format("{} kB {}", Common::ThousandSeparate(info->GetSize() / 1000, 7), path);
+
+  if (LooksLikeAudio(path))
+    INFO_LOG_FMT(FILEMON, "{}", line);
+  else
+    WARN_LOG_FMT(FILEMON, "{}", line);
 }
 
 }  // namespace FileMonitor
