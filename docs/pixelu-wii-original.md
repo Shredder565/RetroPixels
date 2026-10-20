@@ -99,12 +99,12 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 69439 | 16.1% |
-| Dolphin, untouched | 353211 | 81.6% |
+| Original (RetroPixels) | 77930 | 18.1% |
+| Dolphin, untouched | 343313 | 79.6% |
 | Dolphin, with PixelU changes | 4224 | 1.0% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.3% |
-| **All** | **432637** | 100% |
+| **All** | **431230** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -116,7 +116,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Common/Debug | 436 | 436 | original |
 | Core/Common/GL | 9096 | 0 | Dolphin, 5672 lines third-party |
 | Core/Common/Logging | 581 | 581 | original |
-| Core/Core (top level) | 25099 | 0 | Dolphin + PixelU change |
+| Core/Core (top level) | 25023 | 823 | mixed (3% original) |
 | Core/Core/Boot | 2768 | 0 | Dolphin |
 | Core/Core/Config | 2427 | 0 | Dolphin |
 | Core/Core/ConfigLoaders | 1202 | 0 | Dolphin |
@@ -126,7 +126,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/DSP/Jit | 7632 | 0 | Dolphin |
 | Core/Core/FifoPlayer | 2133 | 0 | Dolphin |
 | Core/Core/HLE | 1350 | 0 | Dolphin |
-| Core/Core/HW (top level) | 11546 | 0 | Dolphin |
+| Core/Core/HW (top level) | 10215 | 7668 | mixed (75% original) |
 | Core/Core/HW/DSPHLE | 7731 | 0 | Dolphin |
 | Core/Core/HW/DSPLLE | 573 | 0 | Dolphin |
 | Core/Core/HW/DVD | 4942 | 2244 | mixed (45% original) |
@@ -237,7 +237,7 @@ batch rewrites them.
 | W7 | PowerPC: CPU state, MMU, caches, analyst, tables, symbols, breakpoints, GDB stub | 10769 | 10769 | original |
 | W8 | PowerPC: interpreter and cached interpreter | 5474 | 5474 | original |
 | W9 | PowerPC: JIT common and Jit64 | 15169 | 0 | Dolphin |
-| W10 | HW: memory map, MMIO, CPU/PI/MI/VI/AI/DSP interfaces, timers, IPC, CoreTiming | 9898 | 0 | Dolphin |
+| W10 | HW: memory map, MMIO, CPU/PI/MI/VI/AI/DSP interfaces, timers, IPC, CoreTiming | 8491 | 8491 | original |
 | W11 | HW: DVD and GameCube memory cards | 8087 | 5389 | mixed (67% original) |
 | W12 | HW: EXI devices (memory card slots, BBA, mic, modem, IPL) | 8358 | 0 | Dolphin |
 | W13 | HW: SI, pads, keyboard, GBA link, HSP, Triforce, MagCard | 11839 | 0 | Dolphin |
@@ -1156,3 +1156,103 @@ Checks
     Qt and imgui headers are missing, windows.h is missing on Linux, and the MinGW library has
     no std::expected (MultithreadedCompressor.h, FileSystem.h, CheatSearch.h). The Linux build
     covers those files.
+
+- W10 log: rewrote all 36 W10 files (CoreTiming and the core hardware
+  in `Core/HW`) as original code. They now have about 8500 lines (from
+  9898). Each starts with the RetroPixels original-code line and has no
+  Dolphin copyright or SPDX header. The files are CoreTiming,
+  AddressSpace, AudioInterface, CPU, DSP, GPFifo, HW, MMIO (with
+  MMIOHandlers.h), Memmap, MemoryInterface, ProcessorInterface, Sram,
+  StreamADPCM, SystemTimers, VideoInterface, WII_IPC and WiiSave (with
+  WiiSaveStructs.h).
+  - Kept unchanged: file names, and every public declaration that other
+    files use (names, signatures, namespaces, enum values, constants,
+    packed structs). Everything that affects emulation also stays the
+    same:
+    - CoreTiming: the event API, every event name ("_lost_event" and the
+      device events), the `Globals` layout the JITs read, the slice and
+      downcount arithmetic, the event heap order (the same std::ranges
+      heap operations), throttling and the savestate layout;
+    - MMIO: the handler factories, the visitor interface Jit64 uses to
+      inline constant and direct reads, the handler tables and
+      `UniqueID` indexing;
+    - the MemoryManager layout, the shared memory segment and fastmem
+      arena layout, DBAT and page-table mappings (small and large host
+      pages), and the Memory savestate;
+    - every register address, bit layout, handler kind (constant,
+      direct, complex) and direct pointer, so JIT fast paths are the
+      same;
+    - SystemTimers, AI, DSP, VI, PI, MI and IPC timing to the cycle,
+      including the integer arithmetic and promotions (the 32-bit
+      decrementer product, the field position modulo done in u64, the
+      31-bit ARAM DMA count);
+    - the DSP ARAM DMA paths, including the configuration-4 mirror and
+      the high speed port;
+    - the CPU thread state machine (State values, stepping, breaks,
+      PauseAndLock, jobs, GDB stub stepping);
+    - the HW init, shutdown and savestate order and marker names;
+    - the SRAM layout, its default contents (including the
+      "DOLPHINSLOTA"/"DOLPHINSLOTB" flash IDs), the card flash ID
+      derivation and the checksums;
+    - the streamed ADPCM decoder and its savestate;
+    - the data.bin format (header, Bk header, file records, MD5 blanker,
+      SD IV, NG ID 0x0403AC68, end magic 0x2f536969), the NAND save walk
+      and the FS call order, Copy/Import/Export/ExportAll and every log
+      string;
+    - every savestate is byte-identical.
+  - Kept quirks: AddressSpace's default 16/32/64-bit writers still write
+    the low part first, and the backward search still stops at a lower
+    bound of length-1 and returns nothing from offset 0. Split 32-bit
+    MMIO writes still write the high half first. The DSP ARAM DMA still wraps
+    its count at 31 bits. SystemTimers still multiplies the decrementer
+    value by TIMER_RATIO in 32 bits. Exported data.bin file records are
+    still written with an all-zero IV, which is also the IV their
+    contents are encrypted with.
+  - Deliberate differences (genuine bugs, harmless fixes, cleanups):
+    - The backward ARAM search in AddressSpace skips start positions
+      whose match would run past the end of ARAM. It used to read past
+      the end of the ARAM buffer.
+    - Split 32-bit MMIO reads read the high half first, then the low
+      half, in a fixed order. The order used to depend on the compiler's
+      evaluation order. No handler in the tree has side effects that
+      depend on it.
+    - Memmap keys merged DBAT runs by their mapped start. The old code
+      keyed them by run start, which would lose a run spanning two
+      regions, but BAT_PHYSICAL_BIT always splits such runs, so nothing
+      observable changes.
+    - Removed public types that nothing else used: the VI register
+      unions, WII_IPC's `CtrlRegister` and the
+      `MMIO_PUBLIC_SPECIALIZATIONS` macros. MMIO declares and defines its
+      explicit instantiations itself.
+    - Empty MMIO slots behave as Invalid without allocating a handling
+      method each.
+  - Checked: a harness linked the old and the new code (each with its own
+    CoreTiming and MMIO) against mocks of the rest of the emulator and
+    compared every trace line, event schedule, interrupt and savestate
+    byte. No Nintendo keys, BIOS, firmware or games were used; WiiSave
+    ran on an in-memory NAND with fake crypto. Outputs are identical for:
+    - CoreTiming (203 seeds), MMIO (50 seeds with the JIT visitor),
+      AddressSpace (30), PI (20), MI (20), SystemTimers (30), AI (30),
+      DSP (30), VI (30), IPC (30), GPFifo (30) and Memmap (50 seeds:
+      BATs, page mappings, accesses, savestates, allocation failures);
+    - CPU (340 scripted single-thread runs covering stepping, breaks,
+      PauseAndLock, jobs, GDB stepping and power down);
+    - HW order and savestate bytes (GC and Wii, with and without SRAM
+      override), Sram (30 seeds, 2000 cards each), StreamADPCM (30 seeds,
+      20000 blocks each) and WiiSave (360 seeds: NAND to data.bin and
+      back, corrupted files, FS failures, Import/Export/ExportAll).
+    - Compile check: every W10 .cpp builds with g++ (Linux) and clang
+      `-target x86_64-w64-windows-gnu`, apart from WiiSave.cpp on the
+      Windows target, which fails in the untouched tree too (this
+      machine's mingw headers lack std::expected). Under clang and g++
+      `-Wall -Wextra -Wconversion -Wsign-compare` the W10 files give no
+      warnings. The 161 files that include W10 headers build with the
+      same pass/fail status as the untouched tree (Linux: 131 ok, 30
+      fail; Windows: 109 ok, 52 fail). The failures come from headers
+      this machine lacks (Qt, SFML, libusb, std::expected in mingw and
+      similar).
+    - Verbatim audit (`tools/verbatim-audit.py wii 8`): no function body
+      in W10 .cpp files shares 8 or more lines with the old code. The
+      remaining runs are register and enum tables, struct layouts and
+      class declarations in the headers, and one register address table
+      in DSP.cpp.
