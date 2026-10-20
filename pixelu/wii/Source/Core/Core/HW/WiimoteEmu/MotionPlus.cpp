@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <optional>
+#include <vector>
 
 #include <mbedtls/bignum.h>
 
@@ -16,6 +18,7 @@
 
 #include "Core/HW/Wiimote.h"
 #include "Core/HW/WiimoteEmu/Extension/DesiredExtensionState.h"
+#include "Core/IOS/IOSC.h"
 
 namespace
 {
@@ -43,13 +46,14 @@ constexpr u8 PARAMETER_Y1_TIME = UpdatesIn(500);
 // emulation stays deterministic. The trailing NUL is part of it.
 constexpr u8 CHALLENGE_SECRET[] = "DOLPHIN DOES WHAT NINTENDON'T.";
 
+// n is public: games check the answers against it (and against v).
 constexpr char CHALLENGE_MODULUS[] =
     "67614561104116375676885818084175632651294951727285593632649596941616763967271774525888270484"
     "88546653264235848263182009106217734439508352645687684489830161";
 
-constexpr char CHALLENGE_SQRT_V[] =
-    "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
-    "00000000000000000000000000000000000000000000000000000000000000";
+// sqrt(v) is the MotionPlus's own secret, Nintendo's, and is not included. The owner can give it
+// (big endian, hex) as motionplus_sqrt_v in wii_keys.txt; without it only y0 can be answered.
+constexpr const char* CHALLENGE_SQRT_V_NAME = "motionplus_sqrt_v";
 
 // An mbedtls big integer with automatic cleanup.
 class BigInt
@@ -72,6 +76,14 @@ public:
   {
     BigInt result;
     mbedtls_mpi_read_binary(&result.m_value, CHALLENGE_SECRET, sizeof(CHALLENGE_SECRET));
+    return result;
+  }
+
+  // Big-endian bytes.
+  static BigInt FromBytes(const std::vector<u8>& bytes)
+  {
+    BigInt result;
+    mbedtls_mpi_read_binary(&result.m_value, bytes.data(), bytes.size());
     return result;
   }
 
@@ -416,7 +428,18 @@ void MotionPlus::Update(const DesiredExtensionState&)
     BigInt y = BigInt::FromSecret();
     if (m_reg_data.challenge_type != 0)
     {
-      y.MultiplyMod(BigInt::FromDecimal(CHALLENGE_SQRT_V), BigInt::FromDecimal(CHALLENGE_MODULUS));
+      const std::optional<std::vector<u8>> sqrt_v =
+          IOS::HLE::IOSC::LoadOwnerKey(CHALLENGE_SQRT_V_NAME, 0);
+      if (sqrt_v)
+      {
+        y.MultiplyMod(BigInt::FromBytes(*sqrt_v), BigInt::FromDecimal(CHALLENGE_MODULUS));
+      }
+      else
+      {
+        // The answer is then wrong and the game fails this challenge (games try again).
+        WARN_LOG_FMT(WIIMOTE, "M+ challenge type {:#x} needs {} in wii_keys.txt",
+                     m_reg_data.challenge_type, CHALLENGE_SQRT_V_NAME);
+      }
     }
     y.StoreLittleEndian(&m_reg_data.challenge_data);
 

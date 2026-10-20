@@ -5,9 +5,11 @@
 
 #include <algorithm>
 #include <array>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "Common/BitUtils.h"
 #include "Common/CommonPaths.h"
@@ -24,6 +26,7 @@
 #include "Core/CommonTitles.h"
 #include "Core/HW/Memmap.h"
 #include "Core/IOS/FS/FileSystem.h"
+#include "Core/IOS/IOSC.h"
 #include "Core/IOS/Network/KD/NetKDTime.h"
 #include "Core/IOS/Network/KD/VFF/VFFUtil.h"
 #include "Core/IOS/Network/Socket.h"
@@ -388,22 +391,34 @@ NWC24::ErrorCode NetKDRequestDevice::KDCheckMail(u32* mail_flag, u32* interval)
   const std::string str_interval = GetValueFromCGIResponse(response_str, "interval");
   DEBUG_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_CHECK_MAIL_NOW: Server HMAC: {}", server_hmac);
 
-  // On a real Wii, a response to a challenge is expected and would be verified by KD.
-  const std::string hmac_message =
-      fmt::format("{}\nw{:016}\n{}\n{}", random_number, m_config.Id(), str_mail_flag, str_interval);
-  std::array<u8, 20> hashed{};
-  Common::HMAC::HMACWithSHA1(
-      MAIL_CHECK_KEY,
-      std::span<const u8>(reinterpret_cast<const u8*>(hmac_message.data()), hmac_message.size()),
-      hashed.data());
-
-  // On a real Wii, strncmp is used to compare both hashes. This means that it is a case-sensitive
-  // comparison. KD will generate a lowercase hash as well as expect a lowercase hash from the
-  // server.
-  if (Common::BytesToHexString(hashed) != server_hmac)
+  // On a real Wii, a response to a challenge is expected and would be verified by KD. The HMAC
+  // key is Nintendo's (it lives in KD) and is not included; the owner can give it as
+  // wc24_mail_check_key in wii_keys.txt. Without it the server's answer is not checked.
+  const std::optional<std::vector<u8>> mail_check_key =
+      IOS::HLE::IOSC::LoadOwnerKey("wc24_mail_check_key", 20);
+  if (mail_check_key)
   {
-    ERROR_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_CHECK_MAIL_NOW: Server HMAC is invalid.");
-    return NWC24::WC24_ERR_SERVER;
+    const std::string hmac_message = fmt::format("{}\nw{:016}\n{}\n{}", random_number,
+                                                 m_config.Id(), str_mail_flag, str_interval);
+    std::array<u8, 20> hashed{};
+    Common::HMAC::HMACWithSHA1(
+        *mail_check_key,
+        std::span<const u8>(reinterpret_cast<const u8*>(hmac_message.data()), hmac_message.size()),
+        hashed.data());
+
+    // On a real Wii, strncmp is used to compare both hashes. This means that it is a
+    // case-sensitive comparison. KD will generate a lowercase hash as well as expect a lowercase
+    // hash from the server.
+    if (Common::BytesToHexString(hashed) != server_hmac)
+    {
+      ERROR_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_CHECK_MAIL_NOW: Server HMAC is invalid.");
+      return NWC24::WC24_ERR_SERVER;
+    }
+  }
+  else
+  {
+    WARN_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_CHECK_MAIL_NOW: no mail check key, so the "
+                           "server HMAC is not checked");
   }
 
   *mail_flag = std::strncmp(str_mail_flag.data(), m_send_list.GetMailFlag().data(), 22) != 0;

@@ -99,9 +99,6 @@ private:
 
   static constexpr u32 MAX_MAIL_SIZE = 208952;
   static std::string GetValueFromCGIResponse(const std::string& response, const std::string& key);
-  static constexpr std::array<u8, 20> MAIL_CHECK_KEY = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                                                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
 
   static constexpr u32 DEFAULT_SCHEDULER_SPAN_MINUTES = 11;
 
