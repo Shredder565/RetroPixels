@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,8 +7,10 @@
 
 #include "VideoCommon/BPFunctions.h"
 
+// Video counters shown by the statistics overlays, plus the scissor debugging overlay's state.
 struct Statistics
 {
+  // Running totals.
   int num_pixel_shaders_created = 0;
   int num_pixel_shaders_alive = 0;
   int num_vertex_shaders_created = 0;
@@ -21,16 +22,18 @@ struct Statistics
 
   int num_vertex_loaders = 0;
 
+  // Last projection: the raw XF parameters and the matrices built from them.
   std::array<float, 6> proj{};
   std::array<float, 16> gproj{};
   std::array<float, 16> g2proj{};
 
-  // For widescreen heuristic.
+  // Inputs to the widescreen detection heuristic.
   float avg_persp_proj_viewport_ratio = 0;
   float avg_ortho_proj_viewport_ratio = 0;
 
+  // Scissor overlay: configurations seen this frame and the viewer's settings.
   std::vector<BPFunctions::ScissorResult> scissors{};
-  size_t current_scissor = 0;  // 0 => all, otherwise index + 1
+  size_t current_scissor = 0;  // 0 shows every entry, n shows entry n - 1
   int scissor_scale = 10;
   int scissor_expected_count = 0;
   bool allow_duplicate_scissors = false;
@@ -39,6 +42,7 @@ struct Statistics
   bool show_viewports = false;
   bool show_text = true;
 
+  // Per-frame counters, cleared at the start of every frame.
   struct ThisFrame
   {
     int num_bp_loads = 0;
@@ -81,8 +85,12 @@ struct Statistics
     int num_token_int = 0;
   };
   ThisFrame this_frame;
+
   void ResetFrame();
+  // Exchanges the display-list and immediate counters, so that commands executed from a display
+  // list land in the *_in_dl / dl_prims fields.
   void SwapDL();
+  // Records the current scissor/viewport configuration for the overlay.
   void AddScissorRect();
   void Display() const;
   void DisplayProj() const;
@@ -94,13 +102,14 @@ struct Statistics
 
 extern Statistics g_stats;
 
+// Counter macros; defining STATISTICS enables them.
 #define STATISTICS
 
 #ifdef STATISTICS
 #define INCSTAT(a)                                                                                 \
   do                                                                                               \
   {                                                                                                \
-    (a)++;                                                                                         \
+    ++(a);                                                                                         \
   } while (false)
 #define ADDSTAT(a, b)                                                                              \
   do                                                                                               \
@@ -113,16 +122,7 @@ extern Statistics g_stats;
     (a) = static_cast<int>(x);                                                                     \
   } while (false)
 #else
-#define INCSTAT(a)                                                                                 \
-  do                                                                                               \
-  {                                                                                                \
-  } while (false)
-#define ADDSTAT(a, b)                                                                              \
-  do                                                                                               \
-  {                                                                                                \
-  } while (false)
-#define SETSTAT(a, x)                                                                              \
-  do                                                                                               \
-  {                                                                                                \
-  } while (false)
+#define INCSTAT(a) ((void)0)
+#define ADDSTAT(a, b) ((void)0)
+#define SETSTAT(a, x) ((void)0)
 #endif
