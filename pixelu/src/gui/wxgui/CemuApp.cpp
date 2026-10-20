@@ -361,7 +361,7 @@ bool CemuApp::OnInit()
 
 #if ( BOOST_OS_LINUX || BOOST_OS_BSD ) && HAS_WAYLAND
 	if (wxWlIsWaylandWindow(m_mainFrame))
-		wxWlSetAppId(m_mainFrame, "info.cemu.Cemu"); // matches the .desktop file in dist/linux
+		wxWlSetAppId(m_mainFrame, "io.github.shredder565.PixelU"); // Wayland app id (a desktop file would use the same name)
 #endif
 
 	return true;
