@@ -1,75 +1,60 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/Software/SWTexture.h"
 
+#include <algorithm>
 #include <cstring>
-
-#include "VideoBackends/Software/CopyRegion.h"
-#include "VideoBackends/Software/SWGfx.h"
+#include <utility>
 
 namespace SW
 {
 namespace
 {
-#pragma pack(push, 1)
-struct Pixel
-{
-  u8 r;
-  u8 g;
-  u8 b;
-  u8 a;
-};
-#pragma pack(pop)
+// Every level is allocated with this many bytes per texel, whatever its format.
+constexpr size_t STORAGE_TEXEL_BYTES = 4;
 
-void CopyTextureData(const TextureConfig& src_config, const u8* src_ptr, u32 src_x, u32 src_y,
-                     u32 width, u32 height, u32 src_level, const TextureConfig& dst_config,
-                     u8* dst_ptr, u32 dst_x, u32 dst_y, u32 dst_level)
+// A rectangle of texels inside one mip level of a texture's memory.
+struct TexelRegion
 {
-  const size_t texel_size = AbstractTexture::GetTexelSizeForFormat(src_config.format);
-  const size_t src_stride = src_config.GetMipStride(src_level);
-  const size_t src_offset =
-      static_cast<size_t>(src_y) * src_stride + static_cast<size_t>(src_x) * texel_size;
-  const size_t dst_stride = dst_config.GetMipStride(dst_level);
-  const size_t dst_offset =
-      static_cast<size_t>(dst_y) * dst_stride + static_cast<size_t>(dst_x) * texel_size;
-  const size_t copy_len = static_cast<size_t>(width) * texel_size;
+  const TextureConfig& config;
+  u32 level;
+  int x;
+  int y;
 
-  src_ptr += src_offset;
-  dst_ptr += dst_offset;
-  for (u32 i = 0; i < height; i++)
+  size_t Stride() const { return config.GetMipStride(level); }
+  size_t Offset() const
   {
-    std::memcpy(dst_ptr, src_ptr, copy_len);
-    src_ptr += src_stride;
-    dst_ptr += dst_stride;
+    const size_t texel = AbstractTexture::GetTexelSizeForFormat(config.format);
+    return static_cast<size_t>(y) * Stride() + static_cast<size_t>(x) * texel;
   }
+};
+
+// Copies a width x height block row by row. The texel size comes from the source's format.
+void CopyRows(const TexelRegion& from, const u8* from_data, const TexelRegion& to, u8* to_data,
+              int width, int height)
+{
+  const size_t row_bytes =
+      static_cast<size_t>(width) * AbstractTexture::GetTexelSizeForFormat(from.config.format);
+  const size_t from_stride = from.Stride();
+  const size_t to_stride = to.Stride();
+  const u8* in = from_data + from.Offset();
+  u8* out = to_data + to.Offset();
+  for (int row = 0; row < height; ++row, in += from_stride, out += to_stride)
+    std::memcpy(out, in, row_bytes);
 }
 }  // namespace
-
-void SWGfx::ScaleTexture(AbstractFramebuffer* dst_framebuffer,
-                         const MathUtil::Rectangle<int>& dst_rect,
-                         const AbstractTexture* src_texture,
-                         const MathUtil::Rectangle<int>& src_rect)
-{
-  const SWTexture* software_source_texture = static_cast<const SWTexture*>(src_texture);
-  SWTexture* software_dest_texture = static_cast<SWTexture*>(dst_framebuffer->GetColorAttachment());
-
-  CopyRegion(reinterpret_cast<const Pixel*>(software_source_texture->GetData(0, 0)), src_rect,
-             src_texture->GetWidth(), src_texture->GetHeight(),
-             reinterpret_cast<Pixel*>(software_dest_texture->GetData(0, 0)), dst_rect,
-             dst_framebuffer->GetWidth(), dst_framebuffer->GetHeight());
-}
 
 SWTexture::SWTexture(const TextureConfig& tex_config) : AbstractTexture(tex_config)
 {
   m_data.resize(tex_config.layers);
-  for (u32 layer = 0; layer < tex_config.layers; layer++)
+  for (auto& levels : m_data)
   {
-    m_data[layer].resize(tex_config.levels);
-    for (u32 level = 0; level < tex_config.levels; level++)
+    levels.resize(tex_config.levels);
+    for (u32 level = 0; level < tex_config.levels; ++level)
     {
-      m_data[layer][level].resize(std::max(tex_config.width >> level, 1u) *
-                                  std::max(tex_config.height >> level, 1u) * sizeof(Pixel));
+      const u32 width = std::max(tex_config.width >> level, 1u);
+      const u32 height = std::max(tex_config.height >> level, 1u);
+      levels[level].resize(width * height * STORAGE_TEXEL_BYTES);
     }
   }
 }
@@ -79,24 +64,29 @@ void SWTexture::CopyRectangleFromTexture(const AbstractTexture* src,
                                          u32 src_level, const MathUtil::Rectangle<int>& dst_rect,
                                          u32 dst_layer, u32 dst_level)
 {
-  CopyTextureData(src->GetConfig(),
-                  static_cast<const SWTexture*>(src)->GetData(src_layer, src_level), src_rect.left,
-                  src_rect.top, src_rect.GetWidth(), src_rect.GetHeight(), src_level, m_config,
-                  GetData(dst_layer, dst_level), dst_rect.left, dst_rect.top, dst_level);
-}
-void SWTexture::ResolveFromTexture(const AbstractTexture* src, const MathUtil::Rectangle<int>& rect,
-                                   u32 layer, u32 level)
-{
+  const auto* source = static_cast<const SWTexture*>(src);
+  CopyRows({src->GetConfig(), src_level, src_rect.left, src_rect.top},
+           source->GetData(src_layer, src_level),
+           {m_config, dst_level, dst_rect.left, dst_rect.top}, GetData(dst_layer, dst_level),
+           src_rect.GetWidth(), src_rect.GetHeight());
 }
 
-void SWTexture::Load(u32 level, u32 width, u32 height, u32 row_length, const u8* buffer,
-                     size_t buffer_size, u32 layer)
+void SWTexture::ResolveFromTexture(const AbstractTexture*, const MathUtil::Rectangle<int>&, u32,
+                                   u32)
 {
-  u8* data = GetData(layer, level);
-  for (u32 y = 0; y < height; y++)
+  // Software textures are never multisampled.
+}
+
+void SWTexture::Load(u32 level, u32 width, u32 height, u32 row_length, const u8* buffer, size_t,
+                     u32 layer)
+{
+  // Uploads are always four bytes per texel; the source rows may be longer than the image.
+  u8* out = GetData(layer, level);
+  const size_t row_bytes = width * STORAGE_TEXEL_BYTES;
+  for (u32 row = 0; row < height; ++row)
   {
-    memcpy(&data[width * y * sizeof(Pixel)], &buffer[y * row_length * sizeof(Pixel)],
-           width * sizeof(Pixel));
+    std::memcpy(out + static_cast<size_t>(width * row) * STORAGE_TEXEL_BYTES,
+                buffer + static_cast<size_t>(row_length * row) * STORAGE_TEXEL_BYTES, row_bytes);
   }
 }
 
@@ -113,9 +103,9 @@ u8* SWTexture::GetData(u32 layer, u32 level)
 SWStagingTexture::SWStagingTexture(StagingTextureType type, const TextureConfig& config)
     : AbstractStagingTexture(type, config)
 {
-  m_data.resize(m_texel_size * config.width * config.height);
-  m_map_pointer = reinterpret_cast<char*>(m_data.data());
   m_map_stride = m_texel_size * config.width;
+  m_data.resize(m_map_stride * config.height);
+  m_map_pointer = reinterpret_cast<char*>(m_data.data());
 }
 
 SWStagingTexture::~SWStagingTexture() = default;
@@ -124,10 +114,10 @@ void SWStagingTexture::CopyFromTexture(const AbstractTexture* src,
                                        const MathUtil::Rectangle<int>& src_rect, u32 src_layer,
                                        u32 src_level, const MathUtil::Rectangle<int>& dst_rect)
 {
-  CopyTextureData(src->GetConfig(),
-                  static_cast<const SWTexture*>(src)->GetData(src_layer, src_level), src_rect.left,
-                  src_rect.top, src_rect.GetWidth(), src_rect.GetHeight(), src_level, m_config,
-                  m_data.data(), dst_rect.left, dst_rect.top, 0);
+  const auto* source = static_cast<const SWTexture*>(src);
+  CopyRows({src->GetConfig(), src_level, src_rect.left, src_rect.top},
+           source->GetData(src_layer, src_level), {m_config, 0, dst_rect.left, dst_rect.top},
+           m_data.data(), src_rect.GetWidth(), src_rect.GetHeight());
   m_needs_flush = true;
 }
 
@@ -135,15 +125,16 @@ void SWStagingTexture::CopyToTexture(const MathUtil::Rectangle<int>& src_rect, A
                                      const MathUtil::Rectangle<int>& dst_rect, u32 dst_layer,
                                      u32 dst_level)
 {
-  CopyTextureData(m_config, m_data.data(), src_rect.left, src_rect.top, src_rect.GetWidth(),
-                  src_rect.GetHeight(), 0, dst->GetConfig(),
-                  static_cast<SWTexture*>(dst)->GetData(dst_layer, dst_level), dst_rect.left,
-                  dst_rect.top, dst_level);
+  auto* target = static_cast<SWTexture*>(dst);
+  CopyRows({m_config, 0, src_rect.left, src_rect.top}, m_data.data(),
+           {dst->GetConfig(), dst_level, dst_rect.left, dst_rect.top},
+           target->GetData(dst_layer, dst_level), src_rect.GetWidth(), src_rect.GetHeight());
   m_needs_flush = true;
 }
 
 bool SWStagingTexture::Map()
 {
+  // The memory is mapped for the texture's whole lifetime.
   return true;
 }
 
@@ -173,19 +164,15 @@ SWFramebuffer::Create(SWTexture* color_attachment, SWTexture* depth_attachment,
   if (!ValidateConfig(color_attachment, depth_attachment, additional_color_attachments))
     return nullptr;
 
-  const AbstractTextureFormat color_format =
-      color_attachment ? color_attachment->GetFormat() : AbstractTextureFormat::Undefined;
-  const AbstractTextureFormat depth_format =
-      depth_attachment ? depth_attachment->GetFormat() : AbstractTextureFormat::Undefined;
-  const SWTexture* either_attachment = color_attachment ? color_attachment : depth_attachment;
-  const u32 width = either_attachment->GetWidth();
-  const u32 height = either_attachment->GetHeight();
-  const u32 layers = either_attachment->GetLayers();
-  const u32 samples = either_attachment->GetSamples();
-
-  return std::make_unique<SWFramebuffer>(color_attachment, depth_attachment,
-                                         std::move(additional_color_attachments), color_format,
-                                         depth_format, width, height, layers, samples);
+  // Size, layer and sample counts come from the colour attachment when there is one.
+  const SWTexture& reference = color_attachment ? *color_attachment : *depth_attachment;
+  const auto format_of = [](const SWTexture* texture) {
+    return texture ? texture->GetFormat() : AbstractTextureFormat::Undefined;
+  };
+  return std::make_unique<SWFramebuffer>(
+      color_attachment, depth_attachment, std::move(additional_color_attachments),
+      format_of(color_attachment), format_of(depth_attachment), reference.GetWidth(),
+      reference.GetHeight(), reference.GetLayers(), reference.GetSamples());
 }
 
 }  // namespace SW

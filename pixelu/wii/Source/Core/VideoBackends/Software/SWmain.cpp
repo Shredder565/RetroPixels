@@ -1,9 +1,9 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/Software/VideoBackend.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -19,23 +19,27 @@
 #include "VideoBackends/Software/SWVertexLoader.h"
 #include "VideoBackends/Software/TextureCache.h"
 
+#include "VideoCommon/PerfQueryBase.h"
 #include "VideoCommon/VideoCommon.h"
 #include "VideoCommon/VideoConfig.h"
 
 namespace SW
 {
-class PerfQuery : public PerfQueryBase
+namespace
+{
+// Performance queries are answered from the counters the EFB keeps as pixels pass through it,
+// so results are always ready.
+class EfbCounterQuery final : public PerfQueryBase
 {
 public:
-  PerfQuery() {}
-  ~PerfQuery() override {}
-  void EnableQuery(PerfQueryGroup type) override {}
-  void DisableQuery(PerfQueryGroup type) override {}
+  void EnableQuery(PerfQueryGroup) override {}
+  void DisableQuery(PerfQueryGroup) override {}
   void ResetQuery() override { EfbInterface::ResetPerfQuery(); }
   u32 GetQueryResult(PerfQueryType type) override { return EfbInterface::GetPerfQueryResult(type); }
   void FlushResults() override {}
   bool IsFlushed() const override { return true; }
 };
+}  // namespace
 
 std::string VideoSoftware::GetConfigName() const
 {
@@ -54,54 +58,52 @@ std::optional<std::string> VideoSoftware::GetWarningMessage() const
                 "really want to enable software rendering? If unsure, select 'No'.");
 }
 
-void VideoSoftware::InitBackendInfo(const WindowSystemInfo& wsi)
+void VideoSoftware::InitBackendInfo(const WindowSystemInfo&)
 {
-  g_backend_info.api_type = APIType::Nothing;
-  g_backend_info.MaxTextureSize = 16384;
-  g_backend_info.bUsesLowerLeftOrigin = false;
-  g_backend_info.bSupports3DVision = false;
-  g_backend_info.bSupportsDualSourceBlend = true;
-  g_backend_info.bSupportsEarlyZ = true;
-  g_backend_info.bSupportsPrimitiveRestart = false;
-  g_backend_info.bSupportsMultithreading = false;
-  g_backend_info.bSupportsComputeShaders = false;
-  g_backend_info.bSupportsGPUTextureDecoding = false;
-  g_backend_info.bSupportsST3CTextures = false;
-  g_backend_info.bSupportsBPTCTextures = false;
-  g_backend_info.bSupportsCopyToVram = false;
-  g_backend_info.bSupportsLargePoints = false;
-  g_backend_info.bSupportsDepthReadback = false;
-  g_backend_info.bSupportsPartialDepthCopies = false;
-  g_backend_info.bSupportsFramebufferFetch = false;
-  g_backend_info.bSupportsBackgroundCompiling = false;
-  g_backend_info.bSupportsLogicOp = true;
-  g_backend_info.bSupportsShaderBinaries = false;
-  g_backend_info.bSupportsPipelineCacheData = false;
-  g_backend_info.bSupportsBBox = true;
-  g_backend_info.bSupportsCoarseDerivatives = false;
-  g_backend_info.bSupportsTextureQueryLevels = false;
-  g_backend_info.bSupportsLodBiasInSampler = false;
-  g_backend_info.bSupportsSettingObjectNames = false;
-  g_backend_info.bSupportsPartialMultisampleResolve = true;
-  g_backend_info.bSupportsDynamicVertexLoader = false;
+  BackendInfo& info = g_backend_info;
+  info.api_type = APIType::Nothing;
+  info.MaxTextureSize = 16384;
+  info.AAModes = {1};  // no multisampling
 
-  // aamodes
-  g_backend_info.AAModes = {1};
+  // What the software pipeline emulates itself.
+  info.bSupportsDualSourceBlend = true;
+  info.bSupportsEarlyZ = true;
+  info.bSupportsLogicOp = true;
+  info.bSupportsBBox = true;
+  info.bSupportsPartialMultisampleResolve = true;
+
+  // GPU-side features that have no meaning here.
+  for (bool* unsupported : {
+           &info.bUsesLowerLeftOrigin,         &info.bSupports3DVision,
+           &info.bSupportsPrimitiveRestart,    &info.bSupportsMultithreading,
+           &info.bSupportsComputeShaders,      &info.bSupportsGPUTextureDecoding,
+           &info.bSupportsST3CTextures,        &info.bSupportsBPTCTextures,
+           &info.bSupportsCopyToVram,          &info.bSupportsLargePoints,
+           &info.bSupportsDepthReadback,       &info.bSupportsPartialDepthCopies,
+           &info.bSupportsFramebufferFetch,    &info.bSupportsBackgroundCompiling,
+           &info.bSupportsShaderBinaries,      &info.bSupportsPipelineCacheData,
+           &info.bSupportsCoarseDerivatives,   &info.bSupportsTextureQueryLevels,
+           &info.bSupportsLodBiasInSampler,    &info.bSupportsSettingObjectNames,
+           &info.bSupportsDynamicVertexLoader,
+       })
+  {
+    *unsupported = false;
+  }
 }
 
 bool VideoSoftware::Initialize(const WindowSystemInfo& wsi)
 {
-  std::unique_ptr<SWOGLWindow> window = SWOGLWindow::Create(wsi);
-  if (!window)
+  auto window = SWOGLWindow::Create(wsi);
+  if (window == nullptr)
     return false;
 
   Clipper::Init();
   Rasterizer::Init();
 
-  return InitializeShared(std::make_unique<SWGfx>(std::move(window)),
-                          std::make_unique<SWVertexLoader>(), std::make_unique<PerfQuery>(),
-                          std::make_unique<SWBoundingBox>(), std::make_unique<SWEFBInterface>(),
-                          std::make_unique<TextureCache>());
+  auto gfx = std::make_unique<SWGfx>(std::move(window));
+  return InitializeShared(std::move(gfx), std::make_unique<SWVertexLoader>(),
+                          std::make_unique<EfbCounterQuery>(), std::make_unique<SWBoundingBox>(),
+                          std::make_unique<SWEFBInterface>(), std::make_unique<TextureCache>());
 }
 
 void VideoSoftware::Shutdown()

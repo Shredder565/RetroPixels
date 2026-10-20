@@ -1,7 +1,10 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
+
+#include <memory>
+#include <string_view>
+#include <vector>
 
 #include "VideoCommon/AbstractGfx.h"
 
@@ -9,6 +12,8 @@ class SWOGLWindow;
 
 namespace SW
 {
+// The graphics device of the software renderer. Textures live in system memory, shaders and
+// pipelines are empty placeholders, and finished frames go to an OpenGL window for display.
 class SWGfx final : public AbstractGfx
 {
 public:

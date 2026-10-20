@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -14,6 +13,8 @@
 
 namespace SW
 {
+// A texture held in system memory: one byte buffer per layer and mip level, each sized for four
+// bytes per texel.
 class SWTexture final : public AbstractTexture
 {
 public:
@@ -33,9 +34,10 @@ public:
   u8* GetData(u32 layer, u32 level);
 
 private:
-  std::vector<std::vector<std::vector<u8>>> m_data;
+  std::vector<std::vector<std::vector<u8>>> m_data;  // [layer][level]
 };
 
+// A staging texture is just a block of memory that is always mapped.
 class SWStagingTexture final : public AbstractStagingTexture
 {
 public:
@@ -53,12 +55,14 @@ public:
   void Unmap() override;
   void Flush() override;
 
+  // EFB copies write with the guest's row pitch rather than the texture's own.
   void SetMapStride(size_t stride) { m_map_stride = stride; }
 
 private:
   std::vector<u8> m_data;
 };
 
+// Framebuffers only record their attachments; the software renderer draws to its EFB instead.
 class SWFramebuffer final : public AbstractFramebuffer
 {
 public:

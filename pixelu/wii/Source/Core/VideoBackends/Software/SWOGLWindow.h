@@ -1,5 +1,4 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,6 +11,8 @@ class AbstractTexture;
 class GLContext;
 struct WindowSystemInfo;
 
+// The window the software renderer presents into: an OpenGL context that draws each finished
+// frame as one full-window textured quad.
 class SWOGLWindow
 {
 public:
@@ -20,9 +21,10 @@ public:
   GLContext* GetContext() const { return m_gl_context.get(); }
   bool IsHeadless() const;
 
-  // Image to show, will be swapped immediately
+  // Uploads the image and presents it straight away.
   void ShowImage(const AbstractTexture* image, const MathUtil::Rectangle<int>& xfb_region);
 
+  // Returns null (after telling the user) when no usable OpenGL 3.1 context can be made.
   static std::unique_ptr<SWOGLWindow> Create(const WindowSystemInfo& wsi);
 
 private:

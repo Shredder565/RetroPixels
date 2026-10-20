@@ -1,13 +1,16 @@
-// Copyright 2011 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <optional>
 #include <string>
+
 #include "VideoCommon/VideoBackendBase.h"
 
 namespace SW
 {
+// The software renderer: a slow, CPU-only GX implementation meant for debugging the hardware
+// backends.
 class VideoSoftware : public VideoBackendBase
 {
   bool Initialize(const WindowSystemInfo& wsi) override;
