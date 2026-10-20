@@ -1,76 +1,70 @@
-add_library(CemuCommon 
-  betype.h
-  cpu_features.cpp
-  cpu_features.h
-  enumFlags.h
-  ExceptionHandler/ExceptionHandler.cpp
-  ExceptionHandler/ExceptionHandler.h
-  FileStream.h
-  GLInclude/glext.h
-  GLInclude/glFunctions.h
-  GLInclude/GLInclude.h
-  GLInclude/glxext.h
-  GLInclude/khrplatform.h
-  GLInclude/wglext.h
-  MemPtr.h
-  platform.h
-  precompiled.cpp
-  precompiled.h
-  socket.h
-  StackAllocator.h
-  SysAllocator.cpp
-  SysAllocator.h
-  CafeString.h
-  version.h
-)
+# Original code for RetroPixels (PixelU). Not derived from Cemu.
+# CemuCommon: platform layer, shared headers and the precompiled header
 
-set_property(TARGET CemuCommon PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+add_library(CemuCommon)
+pixelu_add_folder(CemuCommon .
+	betype.h
+	CafeString.h
+	cpu_features.cpp
+	cpu_features.h
+	enumFlags.h
+	FileStream.h
+	MemPtr.h
+	platform.h
+	precompiled.cpp
+	precompiled.h
+	socket.h
+	StackAllocator.h
+	SysAllocator.cpp
+	SysAllocator.h
+	version.h
+)
+pixelu_add_folder(CemuCommon ExceptionHandler ExceptionHandler.cpp ExceptionHandler.h)
+pixelu_add_folder(CemuCommon GLInclude
+	egl.h
+	glext.h
+	glFunctions.h
+	GLInclude.h
+	glxext.h
+	khrplatform.h
+	wglext.h
+)
+pixelu_add_folder(CemuCommon windows FileStream_win32.h)
 
 if(WIN32)
-	target_sources(CemuCommon PRIVATE
-		windows/platform.cpp
-		windows/platform.h
-		windows/FileStream_win32.cpp
-		ExceptionHandler/ExceptionHandler_win32.cpp
-	)
+	pixelu_add_folder(CemuCommon windows FileStream_win32.cpp platform.cpp platform.h)
+	pixelu_add_folder(CemuCommon ExceptionHandler ExceptionHandler_win32.cpp)
 else()
-target_sources(CemuCommon
-PRIVATE
-    unix/date.h
-    unix/fast_float.h
-    unix/platform.cpp
-    unix/platform.h
-    unix/FileStream_unix.cpp
-    unix/FileStream_unix.h
-    ExceptionHandler/ExceptionHandler_posix.cpp
-)
+	pixelu_add_folder(CemuCommon unix
+		date.h
+		fast_float.h
+		FileStream_unix.cpp
+		FileStream_unix.h
+		platform.cpp
+		platform.h
+	)
+	pixelu_add_folder(CemuCommon ExceptionHandler ExceptionHandler_posix.cpp)
 endif()
 
 if(LINUX)
-	target_sources(CemuCommon PRIVATE
-		ExceptionHandler/ELFSymbolTable.cpp
-		ExceptionHandler/ELFSymbolTable.h
-	)
+	# symbol names for crash reports
+	pixelu_add_folder(CemuCommon ExceptionHandler ELFSymbolTable.cpp ELFSymbolTable.h)
 endif()
 
-# CemuCommon always builts the precompiled header
+set_property(TARGET CemuCommon PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+# the precompiled header is built here (MSVC reuses it in the other libraries)
 target_precompile_headers(CemuCommon PRIVATE precompiled.h)
 target_include_directories(CemuCommon PUBLIC "../")
 
-target_link_libraries(CemuCommon PRIVATE
-	glm::glm
-)
-
-if (UNIX AND NOT APPLE)
+target_link_libraries(CemuCommon PRIVATE glm::glm)
+if(UNIX AND NOT APPLE)
 	target_link_libraries(CemuCommon PRIVATE X11::X11 X11::Xrender X11::Xutil)
 endif()
 
-# PUBLIC because:
-# - boost/nowide/convert.hpp is included in precompiled.h
-# - boost/predef/os.h is included in platform.h
-# - fmt/core.h is included in precompiled.h
+# public: precompiled.h and platform.h include boost (nowide, predef) and fmt;
+# Threads gives every user -pthread where the platform needs it
 target_link_libraries(CemuCommon PUBLIC
-	Threads::Threads # necessary because some targets may need -pthreads
+	Threads::Threads
 	Boost::nowide
 	Boost::headers
 	fmt::fmt

@@ -1,39 +1,23 @@
-add_library(imguiImpl
-	imgui_extension.cpp
-	imgui_extension.h
-)
+# Original code for RetroPixels (PixelU). Not derived from Cemu.
+# imguiImpl: the on-screen overlay. Dear ImGui itself (dependencies/imgui) is
+# compiled into this library together with PixelU's renderer backends.
 
-if (ENABLE_OPENGL)
-	target_sources(imguiImpl PRIVATE
-		imgui_impl_opengl3.cpp
-		imgui_impl_opengl3.h
-	)
+add_library(imguiImpl)
+pixelu_add_folder(imguiImpl . imgui_extension.cpp imgui_extension.h)
+
+if(ENABLE_OPENGL)
+	pixelu_add_folder(imguiImpl . imgui_impl_opengl3.cpp imgui_impl_opengl3.h)
+endif()
+if(ENABLE_VULKAN)
+	pixelu_add_folder(imguiImpl . imgui_impl_vulkan.cpp imgui_impl_vulkan.h)
 endif()
 
-if (ENABLE_VULKAN)
-	target_sources(imguiImpl PRIVATE
-		imgui_impl_vulkan.cpp
-		imgui_impl_vulkan.h
-	)
-endif()
-
-set_property(TARGET imguiImpl PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-
-cemu_use_precompiled_header(imguiImpl)
+pixelu_library(imguiImpl)
 
 target_include_directories(imguiImpl PUBLIC "../")
 
-# imgui source files
-target_sources(imguiImpl PRIVATE
-"../../dependencies/imgui/imgui.cpp"
-"../../dependencies/imgui/imgui_draw.cpp"
-"../../dependencies/imgui/imgui_tables.cpp"
-"../../dependencies/imgui/imgui_widgets.cpp"
-)
+set(PIXELU_IMGUI_DIR "../../dependencies/imgui")
+pixelu_add_folder(imguiImpl ${PIXELU_IMGUI_DIR} imgui.cpp imgui_draw.cpp imgui_tables.cpp imgui_widgets.cpp)
+target_include_directories(imguiImpl PUBLIC "${PIXELU_IMGUI_DIR}/")
 
-target_include_directories(imguiImpl PUBLIC "../../dependencies/imgui/")
-
-target_link_libraries(imguiImpl PRIVATE
-	CemuCommon
-	CemuGui
-)
+target_link_libraries(imguiImpl PRIVATE CemuCommon CemuGui)

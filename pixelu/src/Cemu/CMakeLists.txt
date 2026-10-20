@@ -1,54 +1,48 @@
-add_library(CemuComponents
-  ExpressionParser/ExpressionParser.cpp
-  ExpressionParser/ExpressionParser.h
-  FileCache/FileCache.cpp
-  FileCache/FileCache.h
-  Logging/CemuDebugLogging.h
-  Logging/CemuLogging.cpp
-  Logging/CemuLogging.h
-  napi/napi_act.cpp
-  napi/napi_ec.cpp
-  napi/napi.cpp
-  napi/napi.h
-  napi/napi_helper.cpp
-  napi/napi_helper.h
-  napi/napi_idbe.cpp
-  napi/napi_version.cpp
-  ncrypto/ncrypto.cpp
-  ncrypto/ncrypto.h
-  nex/nex.cpp
-  nex/nexFriends.cpp
-  nex/nexFriends.h
-  nex/nex.h
-  nex/nexThread.cpp
-  nex/nexThread.h
-  nex/nexTypes.h
-  nex/prudp.cpp
-  nex/prudp.h
-  PPCAssembler/ppcAssembler.cpp
-  PPCAssembler/ppcAssembler.h
-  Tools/DownloadManager/DownloadManager.cpp
-  Tools/DownloadManager/DownloadManager.h
+# Original code for RetroPixels (PixelU). Not derived from Cemu.
+# CemuComponents: logging, file cache, online services (NAPI, NEX), the PPC
+# assembler, the title download manager and Discord presence
+
+add_library(CemuComponents)
+pixelu_add_folder(CemuComponents ExpressionParser ExpressionParser.cpp ExpressionParser.h)
+pixelu_add_folder(CemuComponents FileCache FileCache.cpp FileCache.h)
+pixelu_add_folder(CemuComponents Logging CemuDebugLogging.h CemuLogging.cpp CemuLogging.h)
+pixelu_add_folder(CemuComponents napi
+	napi.cpp
+	napi.h
+	napi_act.cpp
+	napi_ec.cpp
+	napi_helper.cpp
+	napi_helper.h
+	napi_idbe.cpp
+	napi_version.cpp
 )
+pixelu_add_folder(CemuComponents ncrypto ncrypto.cpp ncrypto.h)
+pixelu_add_folder(CemuComponents nex
+	nex.cpp
+	nex.h
+	nexFriends.cpp
+	nexFriends.h
+	nexThread.cpp
+	nexThread.h
+	nexTypes.h
+	prudp.cpp
+	prudp.h
+)
+pixelu_add_folder(CemuComponents PPCAssembler ppcAssembler.cpp ppcAssembler.h)
+pixelu_add_folder(CemuComponents Tools/DownloadManager DownloadManager.cpp DownloadManager.h)
 
 if(ENABLE_DISCORD_RPC)
-target_sources(CemuComponents PRIVATE
-		DiscordPresence/DiscordPresence.cpp
-		DiscordPresence/DiscordPresence.h
-		DiscordPresence/DiscordRPCLite.cpp
-		DiscordPresence/DiscordRPCLite.h)
+	pixelu_add_folder(CemuComponents DiscordPresence
+		DiscordPresence.cpp
+		DiscordPresence.h
+		DiscordRPCLite.cpp
+		DiscordRPCLite.h
+	)
 endif()
 
-set_property(TARGET CemuComponents PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-
-cemu_use_precompiled_header(CemuComponents)
+pixelu_library(CemuComponents)
 
 target_include_directories(CemuComponents PUBLIC "../")
-
-target_link_libraries(CemuComponents PRIVATE
-	CemuCommon
-  CemuGui
-)
-
-# PUBLIC because fmt/format.h is included in ExpressionParser/ExpressionParser.h
+target_link_libraries(CemuComponents PRIVATE CemuCommon CemuGui)
+# public: ExpressionParser.h includes fmt
 target_link_libraries(CemuComponents PUBLIC fmt::fmt)

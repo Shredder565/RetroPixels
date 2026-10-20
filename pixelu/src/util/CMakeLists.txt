@@ -1,105 +1,100 @@
-add_library(CemuUtil
-  boost/bluetooth.h
-  bootSound/BootSoundReader.cpp
-  bootSound/BootSoundReader.h
-  ChunkedHeap/ChunkedHeap.h
-  containers/flat_hash_map.hpp
-  containers/IntervalBucketContainer.h
-  containers/LookupTableL3.h
-  containers/RangeStore.h
-  containers/robin_hood.h
-  containers/SmallBitset.h
-  crypto/aes128.cpp
-  crypto/aes128.h
-  crypto/crc32.cpp
-  crypto/crc32.h
-  crypto/md5.cpp
-  crypto/md5.h
-  DXGIWrapper/DXGIWrapper.h
-  EventService.h
-  Fiber/Fiber.h
-  helpers/ClassWrapper.h
-  helpers/ConcurrentQueue.h
-  helpers/enum_array.hpp
-  helpers/fixedSizeList.h
-  helpers/fspinlock.h
-  helpers/helpers.cpp
-  helpers/helpers.h
-  helpers/MapAdaptor.h
-  helpers/MemoryPool.h
-  helpers/ringbuffer.h
-  helpers/StateHasher.h
-  helpers/Semaphore.h
-  helpers/Serializer.cpp
-  helpers/Serializer.h
-  helpers/Singleton.h
-  helpers/StringBuf.h
-  helpers/StringHelpers.h
-  helpers/StringParser.h
-  helpers/SystemException.h
-  helpers/TempState.h
-  helpers/ZipArchive.h
-  highresolutiontimer/HighResolutionTimer.cpp
-  highresolutiontimer/HighResolutionTimer.h
-  ImageWriter/bmp.h
-  ImageWriter/tga.h
-  IniParser/IniParser.cpp
-  IniParser/IniParser.h
-  math/glm.h
-  math/quaternion.h
-  math/vector2.h
-  math/vector3.h
-  MemMapper/MemMapper.h
-  SystemInfo/SystemInfo.cpp
-  SystemInfo/SystemInfo.h
-  ThreadPool/ThreadPool.h
-  tinyxml2/tinyxml2.cpp
-  tinyxml2/tinyxml2.h
-  VirtualHeap/VirtualHeap.cpp
-  VirtualHeap/VirtualHeap.h
-  Zir/Core/IR.cpp
-  Zir/Core/IR.h
-  Zir/Core/ZirUtility.h
-  Zir/Core/ZpIRBuilder.h
-  Zir/Core/ZpIRDebug.h
-  Zir/Core/ZpIRPasses.h
-  Zir/Core/ZpIRScheduler.h
-  Zir/EmitterGLSL/ZpIREmitGLSL.cpp
-  Zir/EmitterGLSL/ZpIREmitGLSL.h
-  Zir/Passes/RegisterAllocatorForGLSL.cpp
-  Zir/Passes/ZpIRRegisterAllocator.cpp
+# Original code for RetroPixels (PixelU). Not derived from Cemu.
+# CemuUtil: helpers, containers, crypto, the Zir shader IR and per-OS system code
+
+add_library(CemuUtil)
+pixelu_add_folder(CemuUtil . EventService.h)
+pixelu_add_folder(CemuUtil boost bluetooth.h)
+pixelu_add_folder(CemuUtil bootSound BootSoundReader.cpp BootSoundReader.h)
+pixelu_add_folder(CemuUtil ChunkedHeap ChunkedHeap.h)
+pixelu_add_folder(CemuUtil containers
+	flat_hash_map.hpp
+	IntervalBucketContainer.h
+	LookupTableL3.h
+	RangeStore.h
+	robin_hood.h
+	SmallBitset.h
 )
+pixelu_add_folder(CemuUtil crypto
+	aes128.cpp
+	aes128.h
+	crc32.cpp
+	crc32.h
+	md5.cpp
+	md5.h
+)
+pixelu_add_folder(CemuUtil DXGIWrapper DXGIWrapper.h)
+pixelu_add_folder(CemuUtil Fiber Fiber.h)
+pixelu_add_folder(CemuUtil helpers
+	ClassWrapper.h
+	ConcurrentQueue.h
+	enum_array.hpp
+	fixedSizeList.h
+	fspinlock.h
+	helpers.cpp
+	helpers.h
+	MapAdaptor.h
+	MemoryPool.h
+	ringbuffer.h
+	Semaphore.h
+	Serializer.cpp
+	Serializer.h
+	Singleton.h
+	StateHasher.h
+	StringBuf.h
+	StringHelpers.h
+	StringParser.h
+	SystemException.h
+	TempState.h
+	ZipArchive.h
+)
+pixelu_add_folder(CemuUtil highresolutiontimer HighResolutionTimer.cpp HighResolutionTimer.h)
+pixelu_add_folder(CemuUtil ImageWriter bmp.h tga.h)
+pixelu_add_folder(CemuUtil IniParser IniParser.cpp IniParser.h)
+pixelu_add_folder(CemuUtil math
+	glm.h
+	quaternion.h
+	vector2.h
+	vector3.h
+)
+pixelu_add_folder(CemuUtil MemMapper MemMapper.h)
+pixelu_add_folder(CemuUtil ScreenSaver ScreenSaver.h)
+pixelu_add_folder(CemuUtil SystemInfo SystemInfo.cpp SystemInfo.h)
+pixelu_add_folder(CemuUtil ThreadPool ThreadPool.h)
+pixelu_add_folder(CemuUtil tinyxml2 tinyxml2.cpp tinyxml2.h)
+pixelu_add_folder(CemuUtil VirtualHeap VirtualHeap.cpp VirtualHeap.h)
+pixelu_add_folder(CemuUtil Zir/Core
+	IR.cpp
+	IR.h
+	ZirUtility.h
+	ZpIRBuilder.h
+	ZpIRDebug.h
+	ZpIRPasses.h
+	ZpIRScheduler.h
+)
+pixelu_add_folder(CemuUtil Zir/EmitterGLSL ZpIREmitGLSL.cpp ZpIREmitGLSL.h)
+pixelu_add_folder(CemuUtil Zir/Passes RegisterAllocatorForGLSL.cpp ZpIRRegisterAllocator.cpp)
 
 if(WIN32)
-	target_sources(CemuUtil PRIVATE Fiber/FiberWin.cpp)
-	target_sources(CemuUtil PRIVATE MemMapper/MemMapperWin.cpp)
-	target_sources(CemuUtil PRIVATE SystemInfo/SystemInfoWin.cpp)
+	pixelu_add_folder(CemuUtil Fiber FiberWin.cpp)
+	pixelu_add_folder(CemuUtil MemMapper MemMapperWin.cpp)
+	pixelu_add_folder(CemuUtil SystemInfo SystemInfoWin.cpp)
 elseif(UNIX)
-	target_sources(CemuUtil PRIVATE Fiber/FiberUnix.cpp)
-	target_sources(CemuUtil PRIVATE MemMapper/MemMapperUnix.cpp)
-	target_sources(CemuUtil PRIVATE SystemInfo/SystemInfoUnix.cpp)
-	if(NOT APPLE)
-		target_sources(CemuUtil PRIVATE SystemInfo/SystemInfoLinux.cpp)
+	pixelu_add_folder(CemuUtil Fiber FiberUnix.cpp)
+	pixelu_add_folder(CemuUtil MemMapper MemMapperUnix.cpp)
+	if(APPLE)
+		pixelu_add_folder(CemuUtil SystemInfo SystemInfoUnix.cpp SystemInfoMac.cpp)
 	else()
-		target_sources(CemuUtil PRIVATE SystemInfo/SystemInfoMac.cpp)
+		pixelu_add_folder(CemuUtil SystemInfo SystemInfoUnix.cpp SystemInfoLinux.cpp)
 	endif()
 else()
-	target_sources(CemuUtil PRIVATE SystemInfo/SystemInfoStub.cpp)
+	pixelu_add_folder(CemuUtil SystemInfo SystemInfoStub.cpp)
 endif()
 
-set_property(TARGET CemuUtil PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+pixelu_library(CemuUtil)
 
-cemu_use_precompiled_header(CemuUtil)
-
-if (ENABLE_LIBUSB)
-  target_sources(CemuUtil PRIVATE
-    libusbWrapper/libusbWrapper.cpp
-    libusbWrapper/libusbWrapper.h
-  )
+if(ENABLE_LIBUSB)
+	pixelu_add_folder(CemuUtil libusbWrapper libusbWrapper.cpp libusbWrapper.h)
 endif()
 
 target_include_directories(CemuUtil PUBLIC "../")
-
-target_link_libraries(CemuUtil PRIVATE
-  CemuCommon
-)
+target_link_libraries(CemuUtil PRIVATE CemuCommon)

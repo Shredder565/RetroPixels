@@ -1,632 +1,616 @@
-add_library(CemuCafe
-  Account/Account.cpp
-  Account/AccountError.h
-  Account/Account.h
-  CafeSystem.cpp
-  CafeSystem.h
-  Filesystem/fsc.cpp
-  Filesystem/fscDeviceHostFS.cpp
-  Filesystem/fscDeviceHostFS.h
-  Filesystem/fscDeviceRedirect.cpp
-  Filesystem/fscDeviceWua.cpp
-  Filesystem/fscDeviceWud.cpp
-  Filesystem/fscDeviceWuhb.cpp
-  Filesystem/fsc.h
-  Filesystem/FST/FST.cpp
-  Filesystem/FST/FST.h
-  Filesystem/FST/fstUtil.h
-  Filesystem/FST/KeyCache.cpp
-  Filesystem/FST/KeyCache.h
-  Filesystem/WUD/wud.cpp
-  Filesystem/WUD/wud.h
-  Filesystem/WUHB/RomFSStructs.h
-  Filesystem/WUHB/WUHBReader.cpp
-  Filesystem/WUHB/WUHBReader.h
-  GamePatch.cpp
-  GamePatch.h
-  GameProfile/GameProfile.cpp
-  GameProfile/GameProfile.h
-  GraphicPack/GraphicPack2.cpp
-  GraphicPack/GraphicPack2.h
-  GraphicPack/GraphicPack2PatchesApply.cpp
-  GraphicPack/GraphicPack2Patches.cpp
-  GraphicPack/GraphicPack2Patches.h
-  GraphicPack/GraphicPack2PatchesParser.cpp
-  GraphicPack/GraphicPackError.h
-  HW/ACR/ACR.cpp
-  HW/AI/AI.cpp
-  HW/AI/AI.h
-  HW/Common/HwReg.h
-  HW/Espresso/Const.h
-  HW/Espresso/Debugger/Debugger.cpp
-  HW/Espresso/Debugger/Debugger.h
-  HW/Espresso/Debugger/DebugSymbolStorage.cpp
-  HW/Espresso/Debugger/DebugSymbolStorage.h
-  HW/Espresso/Debugger/GDBStub.h
-  HW/Espresso/Debugger/GDBStub.cpp
-  HW/Espresso/Debugger/GDBBreakpoints.cpp
-  HW/Espresso/Debugger/GDBBreakpoints.h
-  HW/Espresso/EspressoISA.h
-  HW/Espresso/Interpreter/PPCInterpreterALU.hpp
-  HW/Espresso/Interpreter/PPCInterpreterFPU.cpp
-  HW/Espresso/Interpreter/PPCInterpreterHelper.h
-  HW/Espresso/Interpreter/PPCInterpreterHLE.cpp
-  HW/Espresso/Interpreter/PPCInterpreterImpl.cpp
-  HW/Espresso/Interpreter/PPCInterpreterInternal.h
-  HW/Espresso/Interpreter/PPCInterpreterLoadStore.hpp
-  HW/Espresso/Interpreter/PPCInterpreterMain.cpp
-  HW/Espresso/Interpreter/PPCInterpreterOPC.cpp
-  HW/Espresso/Interpreter/PPCInterpreterOPC.hpp
-  HW/Espresso/Interpreter/PPCInterpreterPS.cpp
-  HW/Espresso/Interpreter/PPCInterpreterSPR.hpp
-  HW/Espresso/PPCCallback.h
-  HW/Espresso/PPCScheduler.cpp
-  HW/Espresso/PPCSchedulerLLE.cpp
-  HW/Espresso/PPCState.h
-  HW/Espresso/PPCTimer.cpp
-  HW/Espresso/Recompiler/PPCFunctionBoundaryTracker.h
-  HW/Espresso/Recompiler/PPCRecompiler.cpp
-  HW/Espresso/Recompiler/PPCRecompiler.h
-  HW/Espresso/Recompiler/IML/IML.h
-  HW/Espresso/Recompiler/IML/IMLSegment.cpp
-  HW/Espresso/Recompiler/IML/IMLSegment.h
-  HW/Espresso/Recompiler/IML/IMLInstruction.cpp
-  HW/Espresso/Recompiler/IML/IMLInstruction.h
-  HW/Espresso/Recompiler/IML/IMLDebug.cpp
-  HW/Espresso/Recompiler/IML/IMLAnalyzer.cpp
-  HW/Espresso/Recompiler/IML/IMLOptimizer.cpp
-  HW/Espresso/Recompiler/IML/IMLRegisterAllocator.cpp
-  HW/Espresso/Recompiler/IML/IMLRegisterAllocator.h
-  HW/Espresso/Recompiler/IML/IMLRegisterAllocatorRanges.cpp
-  HW/Espresso/Recompiler/IML/IMLRegisterAllocatorRanges.h
-  HW/Espresso/Recompiler/PPCRecompilerImlGen.cpp
-  HW/Espresso/Recompiler/PPCRecompilerImlGenFPU.cpp
-  HW/Espresso/Recompiler/PPCRecompilerIml.h
-  HW/Espresso/Recompiler/PPCRecompilerIntermediate.cpp
-  HW/Espresso/Recompiler/BackendX64/BackendX64AVX.cpp
-  HW/Espresso/Recompiler/BackendX64/BackendX64BMI.cpp
-  HW/Espresso/Recompiler/BackendX64/BackendX64.cpp
-  HW/Espresso/Recompiler/BackendX64/BackendX64FPU.cpp
-  HW/Espresso/Recompiler/BackendX64/BackendX64Gen.cpp
-  HW/Espresso/Recompiler/BackendX64/BackendX64GenFPU.cpp
-  HW/Espresso/Recompiler/BackendX64/BackendX64.h
-  HW/Espresso/Recompiler/BackendX64/X64Emit.hpp
-  HW/Espresso/Recompiler/BackendX64/x86Emitter.h
-  HW/Latte/Common/RegisterSerializer.cpp
-  HW/Latte/Common/RegisterSerializer.h
-  HW/Latte/Common/ShaderSerializer.cpp
-  HW/Latte/Common/ShaderSerializer.h
-  HW/Latte/Core/FetchShader.cpp
-  HW/Latte/Core/FetchShader.h
-  HW/Latte/Core/LatteAsyncCommands.cpp
-  HW/Latte/Core/LatteAsyncCommands.h
-  HW/Latte/Core/LatteBufferCache.cpp
-  HW/Latte/Core/LatteBufferCache.h
-  HW/Latte/Core/LatteBufferData.cpp
-  HW/Latte/Core/LatteCachedFBO.h
-  HW/Latte/Core/LatteCommandProcessor.cpp
-  HW/Latte/Core/LatteConst.h
-  HW/Latte/Core/LatteDraw.h
-  HW/Latte/Core/LatteGSCopyShaderParser.cpp
-  HW/Latte/Core/Latte.h
-  HW/Latte/Core/LatteIndices.cpp
-  HW/Latte/Core/LatteIndices.h
-  HW/Latte/Core/LatteOverlay.cpp
-  HW/Latte/Core/LatteOverlay.h
-  HW/Latte/Core/LattePerformanceMonitor.cpp
-  HW/Latte/Core/LattePerformanceMonitor.h
-  HW/Latte/Core/LattePM4.h
-  HW/Latte/Core/LatteQuery.cpp
-  HW/Latte/Core/LatteQueryObject.h
-  HW/Latte/Core/LatteRecorder.cpp
-  HW/Latte/Core/LatteRecorder.h
-  HW/Latte/Core/LatteRenderTarget.cpp
-  HW/Latte/Core/LatteRingBuffer.cpp
-  HW/Latte/Core/LatteRingBuffer.h
-  HW/Latte/Core/LatteShaderAssembly.h
-  HW/Latte/Core/LatteShaderCache.cpp
-  HW/Latte/Core/LatteShaderCache.h
-  HW/Latte/Core/LatteShader.cpp
-  HW/Latte/Core/LatteShader.h
-  HW/Latte/Core/LatteSoftware.cpp
-  HW/Latte/Core/LatteSoftware.h
-  HW/Latte/Core/LatteStreamoutGPU.cpp
-  HW/Latte/Core/LatteSurfaceCopy.cpp
-  HW/Latte/Core/LatteSurfaceCopy.h
-  HW/Latte/Core/LatteTextureCache.cpp
-  HW/Latte/Core/LatteTexture.cpp
-  HW/Latte/Core/LatteTexture.h
-  HW/Latte/Core/LatteTextureLegacy.cpp
-  HW/Latte/Core/LatteTextureLoader.cpp
-  HW/Latte/Core/LatteTextureLoader.h
-  HW/Latte/Core/LatteTextureReadback.cpp
-  HW/Latte/Core/LatteTextureReadbackInfo.h
-  HW/Latte/Core/LatteTextureView.cpp
-  HW/Latte/Core/LatteTextureView.h
-  HW/Latte/Core/LatteThread.cpp
-  HW/Latte/Core/LatteTiming.cpp
-  HW/Latte/Core/LatteTiming.h
-  HW/Latte/ISA/LatteInstructions.h
-  HW/Latte/ISA/LatteReg.h
-  HW/Latte/ISA/RegDefines.h
-  HW/Latte/LatteAddrLib/AddrLibFastDecode.h
-  HW/Latte/LatteAddrLib/LatteAddrLib_Coord.cpp
-  HW/Latte/LatteAddrLib/LatteAddrLib.cpp
-  HW/Latte/LatteAddrLib/LatteAddrLib.h
-  HW/Latte/LegacyShaderDecompiler/LatteDecompilerAnalyzer.cpp
-  HW/Latte/LegacyShaderDecompiler/LatteDecompiler.cpp
-  HW/Latte/LegacyShaderDecompiler/LatteDecompilerEmitGLSLAttrDecoder.cpp
-  HW/Latte/LegacyShaderDecompiler/LatteDecompilerEmitGLSL.cpp
-  HW/Latte/LegacyShaderDecompiler/LatteDecompilerEmitGLSLHeader.hpp
-  HW/Latte/LegacyShaderDecompiler/LatteDecompiler.h
-  HW/Latte/LegacyShaderDecompiler/LatteDecompilerInstructions.h
-  HW/Latte/LegacyShaderDecompiler/LatteDecompilerInternal.h
-  HW/Latte/LegacyShaderDecompiler/LatteDecompilerRegisterDataTypeTracker.cpp
-  HW/Latte/Renderer/Renderer.cpp
-  HW/Latte/Renderer/Renderer.h
-  HW/Latte/Renderer/RendererCore.cpp
-  HW/Latte/Renderer/RendererCore.h
-  HW/Latte/Renderer/RendererOuputShader.cpp
-  HW/Latte/Renderer/RendererOuputShader.h
-  HW/Latte/Renderer/RendererShader.cpp
-  HW/Latte/Renderer/RendererShader.h
-  HW/Latte/ShaderInfo/ShaderDescription.cpp
-  HW/Latte/ShaderInfo/ShaderInfo.h
-  HW/Latte/ShaderInfo/ShaderInstanceInfo.cpp
-  HW/Latte/Transcompiler/LatteTC.cpp
-  HW/Latte/Transcompiler/LatteTCGenIR.cpp
-  HW/Latte/Transcompiler/LatteTC.h
-  HW/MMU/MMU.cpp
-  HW/MMU/MMU.h
-  HW/SI/SI.cpp
-  HW/SI/si.h
-  HW/VI/VI.cpp
-  IOSU/ccr_nfc/iosu_ccr_nfc.cpp
-  IOSU/ccr_nfc/iosu_ccr_nfc.h
-  IOSU/fsa/fsa_types.h
-  IOSU/fsa/iosu_fsa.cpp
-  IOSU/fsa/iosu_fsa.h
-  IOSU/iosu_ipc_common.h
-  IOSU/iosu_types_common.h
-  IOSU/kernel/iosu_kernel.cpp
-  IOSU/kernel/iosu_kernel.h
-  IOSU/legacy/iosu_acp.cpp
-  IOSU/legacy/iosu_acp.h
-  IOSU/legacy/iosu_act.cpp
-  IOSU/legacy/iosu_act.h
-  IOSU/legacy/iosu_crypto.cpp
-  IOSU/legacy/iosu_crypto.h
-  IOSU/legacy/iosu_fpd.cpp
-  IOSU/legacy/iosu_fpd.h
-  IOSU/legacy/iosu_ioctl.cpp
-  IOSU/legacy/iosu_ioctl.h
-  IOSU/legacy/iosu_mcp.cpp
-  IOSU/legacy/iosu_mcp.h
-  IOSU/legacy/iosu_nim.cpp
-  IOSU/legacy/iosu_nim.h
-  IOSU/nn/iosu_nn_service.cpp
-  IOSU/nn/iosu_nn_service.h
-  IOSU/nn/boss/boss_common.cpp
-  IOSU/nn/boss/boss_common.h
-  IOSU/nn/boss/boss_service.cpp
-  IOSU/nn/boss/boss_service.h
-  IOSU/PDM/iosu_pdm.cpp
-  IOSU/PDM/iosu_pdm.h
-  IOSU/ODM/iosu_odm.cpp
-  IOSU/ODM/iosu_odm.h
-  OS/common/OSCommon.cpp
-  OS/common/OSCommon.h
-  OS/common/OSUtil.h
-  OS/common/PPCConcurrentQueue.h
-  OS/libs/avm/avm.cpp
-  OS/libs/avm/avm.h
-  OS/libs/camera/camera.cpp
-  OS/libs/camera/camera.h
-  OS/libs/coreinit/coreinit_Alarm.cpp
-  OS/libs/coreinit/coreinit_Alarm.h
-  OS/libs/coreinit/coreinit_Atomic.cpp
-  OS/libs/coreinit/coreinit_Atomic.h
-  OS/libs/coreinit/coreinit_BSP.cpp
-  OS/libs/coreinit/coreinit_BSP.h
-  OS/libs/coreinit/coreinit_Callbacks.cpp
-  OS/libs/coreinit/coreinit_CodeGen.cpp
-  OS/libs/coreinit/coreinit_CodeGen.h
-  OS/libs/coreinit/coreinit_Coroutine.cpp
-  OS/libs/coreinit/coreinit_Coroutine.h
-  OS/libs/coreinit/coreinit.cpp
-  OS/libs/coreinit/coreinit_DynLoad.cpp
-  OS/libs/coreinit/coreinit_DynLoad.h
-  OS/libs/coreinit/coreinit_FG.cpp
-  OS/libs/coreinit/coreinit_FG.h
-  OS/libs/coreinit/coreinit_FS.cpp
-  OS/libs/coreinit/coreinit_FS.h
-  OS/libs/coreinit/coreinit_GHS.cpp
-  OS/libs/coreinit/coreinit_GHS.h
-  OS/libs/coreinit/coreinit.h
-  OS/libs/coreinit/coreinit_HWInterface.cpp
-  OS/libs/coreinit/coreinit_HWInterface.h
-  OS/libs/coreinit/coreinit_IM.cpp
-  OS/libs/coreinit/coreinit_IM.h
-  OS/libs/coreinit/coreinit_Init.cpp
-  OS/libs/coreinit/coreinit_IOS.cpp
-  OS/libs/coreinit/coreinit_IOS.h
-  OS/libs/coreinit/coreinit_IPCBuf.cpp
-  OS/libs/coreinit/coreinit_IPCBuf.h
-  OS/libs/coreinit/coreinit_IPC.cpp
-  OS/libs/coreinit/coreinit_IPC.h
-  OS/libs/coreinit/coreinit_LockedCache.cpp
-  OS/libs/coreinit/coreinit_LockedCache.h
-  OS/libs/coreinit/coreinit_MCP.cpp
-  OS/libs/coreinit/coreinit_MCP.h
-  OS/libs/coreinit/coreinit_MEM_BlockHeap.cpp
-  OS/libs/coreinit/coreinit_MEM_BlockHeap.h
-  OS/libs/coreinit/coreinit_MEM.cpp
-  OS/libs/coreinit/coreinit_MEM_ExpHeap.cpp
-  OS/libs/coreinit/coreinit_MEM_ExpHeap.h
-  OS/libs/coreinit/coreinit_MEM_FrmHeap.cpp
-  OS/libs/coreinit/coreinit_MEM_FrmHeap.h
-  OS/libs/coreinit/coreinit_MEM.h
-  OS/libs/coreinit/coreinit_Memory.cpp
-  OS/libs/coreinit/coreinit_Memory.h
-  OS/libs/coreinit/coreinit_MemoryMapping.cpp
-  OS/libs/coreinit/coreinit_MemoryMapping.h
-  OS/libs/coreinit/coreinit_MEM_UnitHeap.cpp
-  OS/libs/coreinit/coreinit_MEM_UnitHeap.h
-  OS/libs/coreinit/coreinit_MessageQueue.cpp
-  OS/libs/coreinit/coreinit_MessageQueue.h
-  OS/libs/coreinit/coreinit_Misc.cpp
-  OS/libs/coreinit/coreinit_Misc.h
-  OS/libs/coreinit/coreinit_MPQueue.cpp
-  OS/libs/coreinit/coreinit_MPQueue.h
-  OS/libs/coreinit/coreinit_OSScreen.cpp
-  OS/libs/coreinit/coreinit_OSScreen_font.h
-  OS/libs/coreinit/coreinit_OSScreen.h
-  OS/libs/coreinit/coreinit_OverlayArena.cpp
-  OS/libs/coreinit/coreinit_OverlayArena.h
-  OS/libs/coreinit/coreinit_Scheduler.cpp
-  OS/libs/coreinit/coreinit_Scheduler.h
-  OS/libs/coreinit/coreinit_Spinlock.cpp
-  OS/libs/coreinit/coreinit_Spinlock.h
-  OS/libs/coreinit/coreinit_Synchronization.cpp
-  OS/libs/coreinit/coreinit_SysHeap.cpp
-  OS/libs/coreinit/coreinit_SysHeap.h
-  OS/libs/coreinit/coreinit_SystemInfo.cpp
-  OS/libs/coreinit/coreinit_SystemInfo.h
-  OS/libs/coreinit/coreinit_Thread.cpp
-  OS/libs/coreinit/coreinit_Thread.h
-  OS/libs/coreinit/coreinit_ThreadQueue.cpp
-  OS/libs/coreinit/coreinit_Time.cpp
-  OS/libs/coreinit/coreinit_Time.h
-  OS/libs/dmae/dmae.cpp
-  OS/libs/dmae/dmae.h
-  OS/libs/drmapp/drmapp.cpp
-  OS/libs/drmapp/drmapp.h
-  OS/libs/erreula/erreula.cpp
-  OS/libs/erreula/erreula.h
-  OS/libs/gx2/GX2_AddrTest.cpp
-  OS/libs/gx2/GX2_Blit.cpp
-  OS/libs/gx2/GX2_Blit.h
-  OS/libs/gx2/GX2_Command.cpp
-  OS/libs/gx2/GX2_Command.h
-  OS/libs/gx2/GX2_ContextState.cpp
-  OS/libs/gx2/GX2.cpp
-  OS/libs/gx2/GX2_Draw.cpp
-  OS/libs/gx2/GX2_Draw.h
-  OS/libs/gx2/GX2_Event.cpp
-  OS/libs/gx2/GX2_Event.h
-  OS/libs/gx2/GX2.h
-  OS/libs/gx2/GX2_Memory.cpp
-  OS/libs/gx2/GX2_Memory.h
-  OS/libs/gx2/GX2_Misc.cpp
-  OS/libs/gx2/GX2_Misc.h
-  OS/libs/gx2/GX2_Query.cpp
-  OS/libs/gx2/GX2_Query.h
-  OS/libs/gx2/GX2_RenderTarget.cpp
-  OS/libs/gx2/GX2_Resource.cpp
-  OS/libs/gx2/GX2_Resource.h
-  OS/libs/gx2/GX2_Shader.cpp
-  OS/libs/gx2/GX2_Shader.h
-  OS/libs/gx2/GX2_shader_legacy.cpp
-  OS/libs/gx2/GX2_State.cpp
-  OS/libs/gx2/GX2_State.h
-  OS/libs/gx2/GX2_Streamout.cpp
-  OS/libs/gx2/GX2_Streamout.h
-  OS/libs/gx2/GX2_Surface_Copy.cpp
-  OS/libs/gx2/GX2_Surface_Copy.h
-  OS/libs/gx2/GX2_Surface.cpp
-  OS/libs/gx2/GX2_Surface.h
-  OS/libs/gx2/GX2_Texture.cpp
-  OS/libs/gx2/GX2_Texture.h
-  OS/libs/gx2/GX2_TilingAperture.cpp
-  OS/libs/h264_avc/H264Dec.cpp
-  OS/libs/h264_avc/H264DecBackendAVC.cpp
-  OS/libs/h264_avc/h264dec.h
-  OS/libs/h264_avc/H264DecInternal.h
-  OS/libs/h264_avc/parser
-  OS/libs/h264_avc/parser/H264Parser.cpp
-  OS/libs/h264_avc/parser/H264Parser.h
-  OS/libs/mic/mic.cpp
-  OS/libs/mic/mic.h
-  OS/libs/nfc/ndef.cpp
-  OS/libs/nfc/ndef.h
-  OS/libs/nfc/nfc.cpp
-  OS/libs/nfc/nfc.h
-  OS/libs/nfc/stream.cpp
-  OS/libs/nfc/stream.h
-  OS/libs/nfc/TagV0.cpp
-  OS/libs/nfc/TagV0.h
-  OS/libs/nfc/TLV.cpp
-  OS/libs/nfc/TLV.h
-  OS/libs/nlibcurl/nlibcurl.cpp
-  OS/libs/nlibcurl/nlibcurlDebug.hpp
-  OS/libs/nlibcurl/nlibcurl.h
-  OS/libs/nlibnss/nlibnss.cpp
-  OS/libs/nlibnss/nlibnss.h
-  OS/libs/nn_ac/nn_ac.cpp
-  OS/libs/nn_ac/nn_ac.h
-  OS/libs/nn_acp/nn_acp.cpp
-  OS/libs/nn_acp/nn_acp.h
-  OS/libs/nn_act/nn_act.cpp
-  OS/libs/nn_act/nn_act.h
-  OS/libs/nn_aoc/nn_aoc.cpp
-  OS/libs/nn_aoc/nn_aoc.h
-  OS/libs/nn_boss/nn_boss.cpp
-  OS/libs/nn_boss/nn_boss.h
-  OS/libs/nn_ccr/nn_ccr.cpp
-  OS/libs/nn_ccr/nn_ccr.h
-  OS/libs/nn_cmpt/nn_cmpt.cpp
-  OS/libs/nn_cmpt/nn_cmpt.h
-  OS/libs/nn_client_service.h
-  OS/libs/nn_common.h
-  OS/libs/nn_ec/nn_ec.cpp
-  OS/libs/nn_ec/nn_ec.h
-  OS/libs/nn_fp/nn_fp.cpp
-  OS/libs/nn_fp/nn_fp.h
-  OS/libs/nn_idbe/nn_idbe.cpp
-  OS/libs/nn_idbe/nn_idbe.h
-  OS/libs/nn_ndm/nn_ndm.cpp
-  OS/libs/nn_ndm/nn_ndm.h
-  OS/libs/nn_spm/nn_spm.cpp
-  OS/libs/nn_spm/nn_spm.h
-  OS/libs/nn_sl/nn_sl.cpp
-  OS/libs/nn_sl/nn_sl.h
-  OS/libs/nn_nfp/AmiiboCrypto.h
-  OS/libs/nn_nfp/nn_nfp.cpp
-  OS/libs/nn_nfp/nn_nfp.h
-  OS/libs/nn_nim/nn_nim.cpp
-  OS/libs/nn_nim/nn_nim.h
-  OS/libs/nn_olv/nn_olv.cpp
-  OS/libs/nn_olv/nn_olv.h
-  OS/libs/nn_olv/nn_olv_Common.cpp
-  OS/libs/nn_olv/nn_olv_Common.h
-  OS/libs/nn_olv/nn_olv_InitializeTypes.cpp
-  OS/libs/nn_olv/nn_olv_InitializeTypes.h
-  OS/libs/nn_olv/nn_olv_DownloadCommunityTypes.cpp
-  OS/libs/nn_olv/nn_olv_DownloadCommunityTypes.h
-  OS/libs/nn_olv/nn_olv_UploadCommunityTypes.cpp
-  OS/libs/nn_olv/nn_olv_UploadCommunityTypes.h
-  OS/libs/nn_olv/nn_olv_UploadFavoriteTypes.cpp
-  OS/libs/nn_olv/nn_olv_UploadFavoriteTypes.h
-  OS/libs/nn_olv/nn_olv_PostTypes.cpp
-  OS/libs/nn_olv/nn_olv_PostTypes.h
-  OS/libs/nn_olv/nn_olv_OfflineDB.cpp
-  OS/libs/nn_olv/nn_olv_OfflineDB.h
-  OS/libs/nn_pdm/nn_pdm.cpp
-  OS/libs/nn_pdm/nn_pdm.h
-  OS/libs/nn_save/nn_save.cpp
-  OS/libs/nn_save/nn_save.h
-  OS/libs/nn_temp/nn_temp.cpp
-  OS/libs/nn_temp/nn_temp.h
-  OS/libs/nn_uds/nn_uds.cpp
-  OS/libs/nn_uds/nn_uds.h
-  OS/libs/nsyshid/nsyshid.cpp
-  OS/libs/nsyshid/nsyshid.h
-  OS/libs/nsyshid/Backend.h
-  OS/libs/nsyshid/AttachDefaultBackends.cpp
-  OS/libs/nsyshid/Whitelist.cpp
-  OS/libs/nsyshid/Whitelist.h
-  OS/libs/nsyshid/BackendEmulated.cpp
-  OS/libs/nsyshid/BackendEmulated.h
-  OS/libs/nsyshid/Dimensions.cpp
-  OS/libs/nsyshid/Dimensions.h
-  OS/libs/nsyshid/Infinity.cpp
-  OS/libs/nsyshid/Infinity.h
-  OS/libs/nsyshid/Skylander.cpp
-  OS/libs/nsyshid/Skylander.h
-  OS/libs/nsyshid/SkylanderXbox360.cpp
-  OS/libs/nsyshid/SkylanderXbox360.h
-  OS/libs/nsyshid/g721/g721.cpp
-  OS/libs/nsyshid/g721/g721.h
-  OS/libs/nsyskbd/nsyskbd.cpp
-  OS/libs/nsyskbd/nsyskbd.h
-  OS/libs/nsysnet/nsysnet.cpp
-  OS/libs/nsysnet/nsysnet.h
-  OS/libs/ntag/ntag.cpp
-  OS/libs/ntag/ntag.h
-  OS/libs/padscore/padscore.cpp
-  OS/libs/padscore/padscore.h
-  OS/libs/proc_ui/proc_ui.cpp
-  OS/libs/proc_ui/proc_ui.h
-  OS/libs/snd_core/ax_aux.cpp
-  OS/libs/snd_core/ax_exports.cpp
-  OS/libs/snd_core/ax.h
-  OS/libs/snd_core/ax_internal.h
-  OS/libs/snd_core/ax_ist.cpp
-  OS/libs/snd_core/ax_mix.cpp
-  OS/libs/snd_core/ax_multivoice.cpp
-  OS/libs/snd_core/ax_out.cpp
-  OS/libs/snd_core/ax_voice.cpp
-  OS/libs/snd_user/snd_user.cpp
-  OS/libs/snd_user/snd_user.h
-  OS/libs/swkbd/swkbd.cpp
-  OS/libs/swkbd/swkbd.h
-  OS/libs/sysapp/sysapp.cpp
-  OS/libs/sysapp/sysapp.h
-  OS/libs/TCL/TCL.cpp
-  OS/libs/TCL/TCL.h
-  OS/libs/vpad/vpad.cpp
-  OS/libs/vpad/vpad.h
-  OS/libs/zlib125
-  OS/libs/zlib125/zlib125.cpp
-  OS/libs/zlib125/zlib125.h
-  OS/RPL/COSModule.cpp
-  OS/RPL/COSModule.h
-  OS/RPL/elf.cpp
-  OS/RPL/rpl.cpp
-  OS/RPL/rpl_debug_symbols.cpp
-  OS/RPL/rpl_debug_symbols.h
-  OS/RPL/rpl.h
-  OS/RPL/rpl_structs.h
-  OS/RPL/rpl_symbol_storage.cpp
-  OS/RPL/rpl_symbol_storage.h
-  TitleList/GameInfo.cpp
-  TitleList/GameInfo.h
-  TitleList/ParsedMetaXml.h
-  TitleList/SaveInfo.cpp
-  TitleList/SaveInfo.h
-  TitleList/SaveList.cpp
-  TitleList/SaveList.h
-  TitleList/TitleId.h
-  TitleList/TitleInfo.cpp
-  TitleList/TitleInfo.h
-  TitleList/TitleList.cpp
-  TitleList/TitleList.h
+# Original code for RetroPixels (PixelU). Not derived from Cemu.
+# CemuCafe: the emulated console (CPU, GPU, IOSU, OS libraries, file systems)
+
+add_library(CemuCafe)
+pixelu_add_folder(CemuCafe .
+	CafeSystem.cpp
+	CafeSystem.h
+	GamePatch.cpp
+	GamePatch.h
+)
+pixelu_add_folder(CemuCafe Account Account.cpp Account.h AccountError.h)
+pixelu_add_folder(CemuCafe Filesystem
+	fsc.cpp
+	fsc.h
+	fscDeviceHostFS.cpp
+	fscDeviceHostFS.h
+	fscDeviceRedirect.cpp
+	fscDeviceWua.cpp
+	fscDeviceWud.cpp
+	fscDeviceWuhb.cpp
+)
+pixelu_add_folder(CemuCafe Filesystem/FST
+	FST.cpp
+	FST.h
+	fstUtil.h
+	KeyCache.cpp
+	KeyCache.h
+)
+pixelu_add_folder(CemuCafe Filesystem/WUD wud.cpp wud.h)
+pixelu_add_folder(CemuCafe Filesystem/WUHB RomFSStructs.h WUHBReader.cpp WUHBReader.h)
+pixelu_add_folder(CemuCafe GameProfile GameProfile.cpp GameProfile.h)
+pixelu_add_folder(CemuCafe GraphicPack
+	GraphicPack2.cpp
+	GraphicPack2.h
+	GraphicPack2Patches.cpp
+	GraphicPack2Patches.h
+	GraphicPack2PatchesApply.cpp
+	GraphicPack2PatchesParser.cpp
+	GraphicPackError.h
+)
+pixelu_add_folder(CemuCafe HW/ACR ACR.cpp)
+pixelu_add_folder(CemuCafe HW/AI AI.cpp AI.h)
+pixelu_add_folder(CemuCafe HW/Common HwReg.h)
+pixelu_add_folder(CemuCafe HW/Espresso
+	Const.h
+	EspressoISA.h
+	PPCCallback.h
+	PPCScheduler.cpp
+	PPCSchedulerLLE.cpp
+	PPCState.h
+	PPCTimer.cpp
+)
+pixelu_add_folder(CemuCafe HW/Espresso/Debugger
+	Debugger.cpp
+	Debugger.h
+	DebugSymbolStorage.cpp
+	DebugSymbolStorage.h
+	GDBBreakpoints.cpp
+	GDBBreakpoints.h
+	GDBStub.cpp
+	GDBStub.h
+)
+pixelu_add_folder(CemuCafe HW/Espresso/Interpreter
+	PPCInterpreterALU.hpp
+	PPCInterpreterFPU.cpp
+	PPCInterpreterHelper.h
+	PPCInterpreterHLE.cpp
+	PPCInterpreterImpl.cpp
+	PPCInterpreterInternal.h
+	PPCInterpreterLoadStore.hpp
+	PPCInterpreterMain.cpp
+	PPCInterpreterOPC.cpp
+	PPCInterpreterOPC.hpp
+	PPCInterpreterPS.cpp
+	PPCInterpreterSPR.hpp
+)
+pixelu_add_folder(CemuCafe HW/Espresso/Recompiler
+	PPCFunctionBoundaryTracker.h
+	PPCRecompiler.cpp
+	PPCRecompiler.h
+	PPCRecompilerIml.h
+	PPCRecompilerImlGen.cpp
+	PPCRecompilerImlGenFPU.cpp
+	PPCRecompilerIntermediate.cpp
+)
+pixelu_add_folder(CemuCafe HW/Espresso/Recompiler/BackendX64
+	BackendX64.cpp
+	BackendX64.h
+	BackendX64AVX.cpp
+	BackendX64BMI.cpp
+	BackendX64FPU.cpp
+	BackendX64Gen.cpp
+	BackendX64GenFPU.cpp
+	X64Emit.hpp
+	x86Emitter.h
+)
+pixelu_add_folder(CemuCafe HW/Espresso/Recompiler/IML
+	IML.h
+	IMLAnalyzer.cpp
+	IMLDebug.cpp
+	IMLInstruction.cpp
+	IMLInstruction.h
+	IMLOptimizer.cpp
+	IMLRegisterAllocator.cpp
+	IMLRegisterAllocator.h
+	IMLRegisterAllocatorRanges.cpp
+	IMLRegisterAllocatorRanges.h
+	IMLSegment.cpp
+	IMLSegment.h
+)
+pixelu_add_folder(CemuCafe HW/Latte/Common
+	RegisterSerializer.cpp
+	RegisterSerializer.h
+	ShaderSerializer.cpp
+	ShaderSerializer.h
+)
+pixelu_add_folder(CemuCafe HW/Latte/Core
+	FetchShader.cpp
+	FetchShader.h
+	Latte.h
+	LatteAsyncCommands.cpp
+	LatteAsyncCommands.h
+	LatteBufferCache.cpp
+	LatteBufferCache.h
+	LatteBufferData.cpp
+	LatteCachedFBO.h
+	LatteCommandProcessor.cpp
+	LatteConst.h
+	LatteDraw.h
+	LatteGSCopyShaderParser.cpp
+	LatteIndices.cpp
+	LatteIndices.h
+	LatteOverlay.cpp
+	LatteOverlay.h
+	LattePerformanceMonitor.cpp
+	LattePerformanceMonitor.h
+	LattePM4.h
+	LatteQuery.cpp
+	LatteQueryObject.h
+	LatteRecorder.cpp
+	LatteRecorder.h
+	LatteRenderTarget.cpp
+	LatteRingBuffer.cpp
+	LatteRingBuffer.h
+	LatteShader.cpp
+	LatteShader.h
+	LatteShaderAssembly.h
+	LatteShaderCache.cpp
+	LatteShaderCache.h
+	LatteSoftware.cpp
+	LatteSoftware.h
+	LatteStreamoutGPU.cpp
+	LatteSurfaceCopy.cpp
+	LatteSurfaceCopy.h
+	LatteTexture.cpp
+	LatteTexture.h
+	LatteTextureCache.cpp
+	LatteTextureLegacy.cpp
+	LatteTextureLoader.cpp
+	LatteTextureLoader.h
+	LatteTextureReadback.cpp
+	LatteTextureReadbackInfo.h
+	LatteTextureView.cpp
+	LatteTextureView.h
+	LatteThread.cpp
+	LatteTiming.cpp
+	LatteTiming.h
+)
+pixelu_add_folder(CemuCafe HW/Latte/ISA LatteInstructions.h LatteReg.h RegDefines.h)
+pixelu_add_folder(CemuCafe HW/Latte/LatteAddrLib
+	AddrLibFastDecode.h
+	LatteAddrLib.cpp
+	LatteAddrLib.h
+	LatteAddrLib_Coord.cpp
+)
+pixelu_add_folder(CemuCafe HW/Latte/LegacyShaderDecompiler
+	LatteDecompiler.cpp
+	LatteDecompiler.h
+	LatteDecompilerAnalyzer.cpp
+	LatteDecompilerEmitGLSL.cpp
+	LatteDecompilerEmitGLSLAttrDecoder.cpp
+	LatteDecompilerEmitGLSLHeader.hpp
+	LatteDecompilerInstructions.h
+	LatteDecompilerInternal.h
+	LatteDecompilerRegisterDataTypeTracker.cpp
+)
+pixelu_add_folder(CemuCafe HW/Latte/Renderer
+	Renderer.cpp
+	Renderer.h
+	RendererCore.cpp
+	RendererCore.h
+	RendererOuputShader.cpp
+	RendererOuputShader.h
+	RendererShader.cpp
+	RendererShader.h
+)
+pixelu_add_folder(CemuCafe HW/Latte/Renderer/OpenGL OpenGLSurfaceCopy.h)
+pixelu_add_folder(CemuCafe HW/Latte/ShaderInfo
+	ShaderDescription.cpp
+	ShaderInfo.h
+	ShaderInstanceInfo.cpp
+)
+pixelu_add_folder(CemuCafe HW/Latte/Transcompiler LatteTC.cpp LatteTC.h LatteTCGenIR.cpp)
+pixelu_add_folder(CemuCafe HW/MMU MMU.cpp MMU.h)
+pixelu_add_folder(CemuCafe HW/SI SI.cpp si.h)
+pixelu_add_folder(CemuCafe HW/VI VI.cpp)
+pixelu_add_folder(CemuCafe IOSU iosu_ipc_common.h iosu_types_common.h)
+pixelu_add_folder(CemuCafe IOSU/ccr_nfc iosu_ccr_nfc.cpp iosu_ccr_nfc.h)
+pixelu_add_folder(CemuCafe IOSU/fsa fsa_types.h iosu_fsa.cpp iosu_fsa.h)
+pixelu_add_folder(CemuCafe IOSU/kernel iosu_kernel.cpp iosu_kernel.h)
+pixelu_add_folder(CemuCafe IOSU/legacy
+	iosu_acp.cpp
+	iosu_acp.h
+	iosu_act.cpp
+	iosu_act.h
+	iosu_crypto.cpp
+	iosu_crypto.h
+	iosu_fpd.cpp
+	iosu_fpd.h
+	iosu_ioctl.cpp
+	iosu_ioctl.h
+	iosu_mcp.cpp
+	iosu_mcp.h
+	iosu_nim.cpp
+	iosu_nim.h
+)
+pixelu_add_folder(CemuCafe IOSU/nn iosu_nn_service.cpp iosu_nn_service.h)
+pixelu_add_folder(CemuCafe IOSU/nn/boss
+	boss_common.cpp
+	boss_common.h
+	boss_service.cpp
+	boss_service.h
+)
+pixelu_add_folder(CemuCafe IOSU/ODM iosu_odm.cpp iosu_odm.h)
+pixelu_add_folder(CemuCafe IOSU/PDM iosu_pdm.cpp iosu_pdm.h)
+pixelu_add_folder(CemuCafe OS/common
+	OSCommon.cpp
+	OSCommon.h
+	OSUtil.h
+	PPCConcurrentQueue.h
+)
+pixelu_add_folder(CemuCafe OS/libs nn_client_service.h nn_common.h)
+pixelu_add_folder(CemuCafe OS/libs/avm avm.cpp avm.h)
+pixelu_add_folder(CemuCafe OS/libs/camera camera.cpp camera.h)
+pixelu_add_folder(CemuCafe OS/libs/coreinit
+	coreinit.cpp
+	coreinit.h
+	coreinit_Alarm.cpp
+	coreinit_Alarm.h
+	coreinit_Atomic.cpp
+	coreinit_Atomic.h
+	coreinit_BSP.cpp
+	coreinit_BSP.h
+	coreinit_Callbacks.cpp
+	coreinit_CodeGen.cpp
+	coreinit_CodeGen.h
+	coreinit_Coroutine.cpp
+	coreinit_Coroutine.h
+	coreinit_DynLoad.cpp
+	coreinit_DynLoad.h
+	coreinit_FG.cpp
+	coreinit_FG.h
+	coreinit_FS.cpp
+	coreinit_FS.h
+	coreinit_GHS.cpp
+	coreinit_GHS.h
+	coreinit_HWInterface.cpp
+	coreinit_HWInterface.h
+	coreinit_IM.cpp
+	coreinit_IM.h
+	coreinit_Init.cpp
+	coreinit_IOS.cpp
+	coreinit_IOS.h
+	coreinit_IPC.cpp
+	coreinit_IPC.h
+	coreinit_IPCBuf.cpp
+	coreinit_IPCBuf.h
+	coreinit_LockedCache.cpp
+	coreinit_LockedCache.h
+	coreinit_MCP.cpp
+	coreinit_MCP.h
+	coreinit_MEM.cpp
+	coreinit_MEM.h
+	coreinit_MEM_BlockHeap.cpp
+	coreinit_MEM_BlockHeap.h
+	coreinit_MEM_ExpHeap.cpp
+	coreinit_MEM_ExpHeap.h
+	coreinit_MEM_FrmHeap.cpp
+	coreinit_MEM_FrmHeap.h
+	coreinit_MEM_UnitHeap.cpp
+	coreinit_MEM_UnitHeap.h
+	coreinit_Memory.cpp
+	coreinit_Memory.h
+	coreinit_MemoryMapping.cpp
+	coreinit_MemoryMapping.h
+	coreinit_MessageQueue.cpp
+	coreinit_MessageQueue.h
+	coreinit_Misc.cpp
+	coreinit_Misc.h
+	coreinit_MPQueue.cpp
+	coreinit_MPQueue.h
+	coreinit_OSScreen.cpp
+	coreinit_OSScreen.h
+	coreinit_OSScreen_font.h
+	coreinit_OverlayArena.cpp
+	coreinit_OverlayArena.h
+	coreinit_Scheduler.cpp
+	coreinit_Scheduler.h
+	coreinit_Spinlock.cpp
+	coreinit_Spinlock.h
+	coreinit_Synchronization.cpp
+	coreinit_SysHeap.cpp
+	coreinit_SysHeap.h
+	coreinit_SystemInfo.cpp
+	coreinit_SystemInfo.h
+	coreinit_Thread.cpp
+	coreinit_Thread.h
+	coreinit_ThreadQueue.cpp
+	coreinit_Time.cpp
+	coreinit_Time.h
+)
+pixelu_add_folder(CemuCafe OS/libs/dmae dmae.cpp dmae.h)
+pixelu_add_folder(CemuCafe OS/libs/drmapp drmapp.cpp drmapp.h)
+pixelu_add_folder(CemuCafe OS/libs/erreula erreula.cpp erreula.h)
+pixelu_add_folder(CemuCafe OS/libs/gx2
+	GX2.cpp
+	GX2.h
+	GX2_AddrTest.cpp
+	GX2_Blit.cpp
+	GX2_Blit.h
+	GX2_Command.cpp
+	GX2_Command.h
+	GX2_ContextState.cpp
+	GX2_Draw.cpp
+	GX2_Draw.h
+	GX2_Event.cpp
+	GX2_Event.h
+	GX2_Memory.cpp
+	GX2_Memory.h
+	GX2_Misc.cpp
+	GX2_Misc.h
+	GX2_Query.cpp
+	GX2_Query.h
+	GX2_RenderTarget.cpp
+	GX2_Resource.cpp
+	GX2_Resource.h
+	GX2_Shader.cpp
+	GX2_Shader.h
+	GX2_shader_legacy.cpp
+	GX2_State.cpp
+	GX2_State.h
+	GX2_Streamout.cpp
+	GX2_Streamout.h
+	GX2_Surface.cpp
+	GX2_Surface.h
+	GX2_Surface_Copy.cpp
+	GX2_Surface_Copy.h
+	GX2_Texture.cpp
+	GX2_Texture.h
+	GX2_TilingAperture.cpp
+)
+pixelu_add_folder(CemuCafe OS/libs/h264_avc
+	H264Dec.cpp
+	h264dec.h
+	H264DecBackendAVC.cpp
+	H264DecInternal.h
+)
+pixelu_add_folder(CemuCafe OS/libs/h264_avc/parser H264Parser.cpp H264Parser.h)
+pixelu_add_folder(CemuCafe OS/libs/mic mic.cpp mic.h)
+pixelu_add_folder(CemuCafe OS/libs/nfc
+	ndef.cpp
+	ndef.h
+	nfc.cpp
+	nfc.h
+	stream.cpp
+	stream.h
+	TagV0.cpp
+	TagV0.h
+	TLV.cpp
+	TLV.h
+)
+pixelu_add_folder(CemuCafe OS/libs/nlibcurl nlibcurl.cpp nlibcurl.h nlibcurlDebug.hpp)
+pixelu_add_folder(CemuCafe OS/libs/nlibnss nlibnss.cpp nlibnss.h)
+pixelu_add_folder(CemuCafe OS/libs/nn_ac nn_ac.cpp nn_ac.h)
+pixelu_add_folder(CemuCafe OS/libs/nn_acp nn_acp.cpp nn_acp.h)
+pixelu_add_folder(CemuCafe OS/libs/nn_act nn_act.cpp nn_act.h)
+pixelu_add_folder(CemuCafe OS/libs/nn_aoc nn_aoc.cpp nn_aoc.h)
+pixelu_add_folder(CemuCafe OS/libs/nn_boss nn_boss.cpp nn_boss.h)
+pixelu_add_folder(CemuCafe OS/libs/nn_ccr nn_ccr.cpp nn_ccr.h)
+pixelu_add_folder(CemuCafe OS/libs/nn_cmpt nn_cmpt.cpp nn_cmpt.h)
+pixelu_add_folder(CemuCafe OS/libs/nn_ec nn_ec.cpp nn_ec.h)
+pixelu_add_folder(CemuCafe OS/libs/nn_fp nn_fp.cpp nn_fp.h)
+pixelu_add_folder(CemuCafe OS/libs/nn_idbe nn_idbe.cpp nn_idbe.h)
+pixelu_add_folder(CemuCafe OS/libs/nn_ndm nn_ndm.cpp nn_ndm.h)
+pixelu_add_folder(CemuCafe OS/libs/nn_nfp AmiiboCrypto.h nn_nfp.cpp nn_nfp.h)
+pixelu_add_folder(CemuCafe OS/libs/nn_nim nn_nim.cpp nn_nim.h)
+pixelu_add_folder(CemuCafe OS/libs/nn_olv
+	nn_olv.cpp
+	nn_olv.h
+	nn_olv_Common.cpp
+	nn_olv_Common.h
+	nn_olv_DownloadCommunityTypes.cpp
+	nn_olv_DownloadCommunityTypes.h
+	nn_olv_InitializeTypes.cpp
+	nn_olv_InitializeTypes.h
+	nn_olv_OfflineDB.cpp
+	nn_olv_OfflineDB.h
+	nn_olv_PostTypes.cpp
+	nn_olv_PostTypes.h
+	nn_olv_UploadCommunityTypes.cpp
+	nn_olv_UploadCommunityTypes.h
+	nn_olv_UploadFavoriteTypes.cpp
+	nn_olv_UploadFavoriteTypes.h
+)
+pixelu_add_folder(CemuCafe OS/libs/nn_pdm nn_pdm.cpp nn_pdm.h)
+pixelu_add_folder(CemuCafe OS/libs/nn_save nn_save.cpp nn_save.h)
+pixelu_add_folder(CemuCafe OS/libs/nn_sl nn_sl.cpp nn_sl.h)
+pixelu_add_folder(CemuCafe OS/libs/nn_spm nn_spm.cpp nn_spm.h)
+pixelu_add_folder(CemuCafe OS/libs/nn_temp nn_temp.cpp nn_temp.h)
+pixelu_add_folder(CemuCafe OS/libs/nn_uds nn_uds.cpp nn_uds.h)
+pixelu_add_folder(CemuCafe OS/libs/nsyshid
+	AttachDefaultBackends.cpp
+	Backend.h
+	BackendEmulated.cpp
+	BackendEmulated.h
+	Dimensions.cpp
+	Dimensions.h
+	Infinity.cpp
+	Infinity.h
+	nsyshid.cpp
+	nsyshid.h
+	Skylander.cpp
+	Skylander.h
+	SkylanderXbox360.cpp
+	SkylanderXbox360.h
+	Whitelist.cpp
+	Whitelist.h
+)
+pixelu_add_folder(CemuCafe OS/libs/nsyshid/g721 g721.cpp g721.h)
+pixelu_add_folder(CemuCafe OS/libs/nsyskbd nsyskbd.cpp nsyskbd.h)
+pixelu_add_folder(CemuCafe OS/libs/nsysnet nsysnet.cpp nsysnet.h)
+pixelu_add_folder(CemuCafe OS/libs/ntag ntag.cpp ntag.h)
+pixelu_add_folder(CemuCafe OS/libs/padscore padscore.cpp padscore.h)
+pixelu_add_folder(CemuCafe OS/libs/proc_ui proc_ui.cpp proc_ui.h)
+pixelu_add_folder(CemuCafe OS/libs/snd_core
+	ax.h
+	ax_aux.cpp
+	ax_exports.cpp
+	ax_internal.h
+	ax_ist.cpp
+	ax_mix.cpp
+	ax_multivoice.cpp
+	ax_out.cpp
+	ax_voice.cpp
+)
+pixelu_add_folder(CemuCafe OS/libs/snd_user snd_user.cpp snd_user.h)
+pixelu_add_folder(CemuCafe OS/libs/swkbd swkbd.cpp swkbd.h)
+pixelu_add_folder(CemuCafe OS/libs/sysapp sysapp.cpp sysapp.h)
+pixelu_add_folder(CemuCafe OS/libs/TCL TCL.cpp TCL.h)
+pixelu_add_folder(CemuCafe OS/libs/vpad vpad.cpp vpad.h)
+pixelu_add_folder(CemuCafe OS/libs/zlib125 zlib125.cpp zlib125.h)
+pixelu_add_folder(CemuCafe OS/RPL
+	COSModule.cpp
+	COSModule.h
+	elf.cpp
+	rpl.cpp
+	rpl.h
+	rpl_debug_symbols.cpp
+	rpl_debug_symbols.h
+	rpl_structs.h
+	rpl_symbol_storage.cpp
+	rpl_symbol_storage.h
+)
+pixelu_add_folder(CemuCafe TitleList
+	AppType.h
+	GameInfo.cpp
+	GameInfo.h
+	ParsedMetaXml.h
+	SaveInfo.cpp
+	SaveInfo.h
+	SaveList.cpp
+	SaveList.h
+	TitleId.h
+	TitleInfo.cpp
+	TitleInfo.h
+	TitleList.cpp
+	TitleList.h
 )
 
-if (ENABLE_OPENGL)
-  target_sources(CemuCafe PRIVATE
-    HW/Latte/Renderer/OpenGL/CachedFBOGL.h
-    HW/Latte/Renderer/OpenGL/LatteShaderGL.cpp
-    HW/Latte/Renderer/OpenGL/LatteTextureGL.cpp
-    HW/Latte/Renderer/OpenGL/LatteTextureGL.h
-    HW/Latte/Renderer/OpenGL/LatteTextureViewGL.cpp
-    HW/Latte/Renderer/OpenGL/LatteTextureViewGL.h
-    HW/Latte/Renderer/OpenGL/OpenGLQuery.cpp
-    HW/Latte/Renderer/OpenGL/OpenGLRecorderCapture.cpp
-    HW/Latte/Renderer/OpenGL/OpenGLRendererCore.cpp
-    HW/Latte/Renderer/OpenGL/OpenGLRenderer.cpp
-    HW/Latte/Renderer/OpenGL/OpenGLRenderer.h
-    HW/Latte/Renderer/OpenGL/OpenGLRendererStreamout.cpp
-    HW/Latte/Renderer/OpenGL/OpenGLRendererUniformData.cpp
-    HW/Latte/Renderer/OpenGL/OpenGLSurfaceCopy.cpp
-    HW/Latte/Renderer/OpenGL/OpenGLTextureReadback.h
-    HW/Latte/Renderer/OpenGL/RendererShaderGL.cpp
-    HW/Latte/Renderer/OpenGL/RendererShaderGL.h
-    HW/Latte/Renderer/OpenGL/TextureReadbackGL.cpp
-  )
+if(ENABLE_OPENGL)
+	pixelu_add_folder(CemuCafe HW/Latte/Renderer/OpenGL
+		CachedFBOGL.h
+		LatteShaderGL.cpp
+		LatteTextureGL.cpp
+		LatteTextureGL.h
+		LatteTextureViewGL.cpp
+		LatteTextureViewGL.h
+		OpenGLQuery.cpp
+		OpenGLRecorderCapture.cpp
+		OpenGLRenderer.cpp
+		OpenGLRenderer.h
+		OpenGLRendererCore.cpp
+		OpenGLRendererStreamout.cpp
+		OpenGLRendererUniformData.cpp
+		OpenGLSurfaceCopy.cpp
+		OpenGLTextureReadback.h
+		RendererShaderGL.cpp
+		RendererShaderGL.h
+		TextureReadbackGL.cpp
+	)
 endif()
 
-if (ENABLE_VULKAN)
-  target_sources(CemuCafe PRIVATE
-    HW/Latte/Renderer/Vulkan/CachedFBOVk.cpp
-    HW/Latte/Renderer/Vulkan/CachedFBOVk.h
-    HW/Latte/Renderer/Vulkan/CocoaSurface.h
-    HW/Latte/Renderer/Vulkan/LatteTextureViewVk.cpp
-    HW/Latte/Renderer/Vulkan/LatteTextureViewVk.h
-    HW/Latte/Renderer/Vulkan/LatteTextureVk.cpp
-    HW/Latte/Renderer/Vulkan/LatteTextureVk.h
-    HW/Latte/Renderer/Vulkan/RendererShaderVk.cpp
-    HW/Latte/Renderer/Vulkan/RendererShaderVk.h
-    HW/Latte/Renderer/Vulkan/SwapchainInfoVk.cpp
-    HW/Latte/Renderer/Vulkan/SwapchainInfoVk.h
-    HW/Latte/Renderer/Vulkan/TextureReadbackVk.cpp
-    HW/Latte/Renderer/Vulkan/VKRBase.h
-    HW/Latte/Renderer/Vulkan/VKRMemoryManager.cpp
-    HW/Latte/Renderer/Vulkan/VKRMemoryManager.h
-    HW/Latte/Renderer/Vulkan/VKRPipelineInfo.cpp
-    HW/Latte/Renderer/Vulkan/VsyncDriver.cpp
-    HW/Latte/Renderer/Vulkan/VsyncDriver.h
-    HW/Latte/Renderer/Vulkan/VulkanAPI.cpp
-    HW/Latte/Renderer/Vulkan/VulkanAPI.h
-    HW/Latte/Renderer/Vulkan/VulkanPipelineCompiler.cpp
-    HW/Latte/Renderer/Vulkan/VulkanPipelineCompiler.h
-    HW/Latte/Renderer/Vulkan/VulkanPipelineStableCache.cpp
-    HW/Latte/Renderer/Vulkan/VulkanPipelineStableCache.h
-    HW/Latte/Renderer/Vulkan/VulkanQuery.cpp
-    HW/Latte/Renderer/Vulkan/VulkanRecorderCapture.cpp
-    HW/Latte/Renderer/Vulkan/VulkanRendererCore.cpp
-    HW/Latte/Renderer/Vulkan/VulkanRenderer.cpp
-    HW/Latte/Renderer/Vulkan/VulkanRenderer.h
-    HW/Latte/Renderer/Vulkan/VulkanSurfaceCopy.cpp
-    HW/Latte/Renderer/Vulkan/VulkanTextureReadback.h
-  )
+if(ENABLE_VULKAN)
+	pixelu_add_folder(CemuCafe HW/Latte/Renderer/Vulkan
+		CachedFBOVk.cpp
+		CachedFBOVk.h
+		CocoaSurface.h
+		LatteTextureViewVk.cpp
+		LatteTextureViewVk.h
+		LatteTextureVk.cpp
+		LatteTextureVk.h
+		RendererShaderVk.cpp
+		RendererShaderVk.h
+		SwapchainInfoVk.cpp
+		SwapchainInfoVk.h
+		TextureReadbackVk.cpp
+		VKRBase.h
+		VKRMemoryManager.cpp
+		VKRMemoryManager.h
+		VKRPipelineInfo.cpp
+		VsyncDriver.cpp
+		VsyncDriver.h
+		VulkanAPI.cpp
+		VulkanAPI.h
+		VulkanPipelineCompiler.cpp
+		VulkanPipelineCompiler.h
+		VulkanPipelineStableCache.cpp
+		VulkanPipelineStableCache.h
+		VulkanQuery.cpp
+		VulkanRecorderCapture.cpp
+		VulkanRenderer.cpp
+		VulkanRenderer.h
+		VulkanRendererCore.cpp
+		VulkanSurfaceCopy.cpp
+		VulkanTextureReadback.h
+	)
 endif()
 
 if(APPLE)
-	target_sources(CemuCafe PRIVATE
-	    HW/Latte/Renderer/MetalView.mm
-	    HW/Latte/Renderer/MetalView.h
-	)
-	# CAMetalLayer, used by MetalView for the MoltenVK surface
+	# view with a CAMetalLayer, the surface MoltenVK draws to
+	pixelu_add_folder(CemuCafe HW/Latte/Renderer MetalView.h MetalView.mm)
 	target_link_libraries(CemuCafe PRIVATE "-framework QuartzCore")
-	if (ENABLE_VULKAN)
-		target_sources(CemuCafe PRIVATE
-		    HW/Latte/Renderer/Vulkan/CocoaSurface.mm
-		)
+	if(ENABLE_VULKAN)
+		pixelu_add_folder(CemuCafe HW/Latte/Renderer/Vulkan CocoaSurface.mm)
 	endif()
 endif()
 
 if(CEMU_ARCHITECTURE MATCHES "(aarch64)|(AARCH64)|(arm64)|(ARM64)")
-  target_sources(CemuCafe PRIVATE
-    HW/Espresso/Recompiler/BackendAArch64/BackendAArch64.cpp
-    HW/Espresso/Recompiler/BackendAArch64/BackendAArch64.h
-  )
-  target_link_libraries(CemuCafe PRIVATE xbyak_aarch64)
+	pixelu_add_folder(CemuCafe HW/Espresso/Recompiler/BackendAArch64 BackendAArch64.cpp BackendAArch64.h)
+	target_link_libraries(CemuCafe PRIVATE xbyak_aarch64)
 endif()
 
-set_property(TARGET CemuCafe PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+pixelu_library(CemuCafe)
 
-cemu_use_precompiled_header(CemuCafe)
-
-if (ENABLE_LIBUSB)
-  target_sources(CemuCafe PRIVATE
-    OS/libs/nsyshid/BackendLibusb.cpp
-    OS/libs/nsyshid/BackendLibusb.h
-  )
+if(ENABLE_LIBUSB)
+	pixelu_add_folder(CemuCafe OS/libs/nsyshid BackendLibusb.cpp BackendLibusb.h)
 endif()
 
 target_include_directories(CemuCafe PUBLIC "../")
 
-if (glslang_VERSION VERSION_LESS "15.0.0")
-	set(glslang_target "glslang::SPIRV")
+# glslang 15 merged the SPIRV library into glslang
+if(glslang_VERSION VERSION_LESS "15.0.0")
+	set(PIXELU_GLSLANG glslang::SPIRV)
 else()
-	set(glslang_target "glslang::glslang")
+	set(PIXELU_GLSLANG glslang::glslang)
 endif()
 
-target_link_libraries(CemuCafe PRIVATE
-	CemuCommon
-  CemuGui
-  ZArchive::zarchive
-  imguiImpl
-  pugixml::pugixml
-  ZLIB::ZLIB
-  CURL::libcurl
-  ih264d
-  zstd::zstd
-  ${glslang_target}
-  PUBLIC
-  OpenSSL::SSL
+target_link_libraries(CemuCafe
+	PRIVATE
+		CemuCommon
+		CemuGui
+		ZArchive::zarchive
+		imguiImpl
+		pugixml::pugixml
+		ZLIB::ZLIB
+		CURL::libcurl
+		ih264d
+		zstd::zstd
+		${PIXELU_GLSLANG}
+	PUBLIC
+		OpenSSL::SSL
 )
 
-if (ENABLE_WAYLAND)
-	# PUBLIC because wayland-client.h is included in VulkanAPI.h
-  target_link_libraries(CemuCafe PUBLIC Wayland::Client)
+if(ENABLE_WAYLAND)
+	# public: VulkanAPI.h includes wayland-client.h
+	target_link_libraries(CemuCafe PUBLIC Wayland::Client)
 endif()
 
-if (ENABLE_LIBUSB)
-  if (ENABLE_VCPKG)
-    if(WIN32)
-      set(PKG_CONFIG_EXECUTABLE "${VCPKG_INSTALLED_DIR}/x64-windows/tools/pkgconf/pkgconf.exe")
-    endif()
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(libusb REQUIRED IMPORTED_TARGET libusb-1.0)
-    target_link_libraries(CemuCafe PRIVATE PkgConfig::libusb)
-  else ()
-    find_package(libusb MODULE REQUIRED)
-    target_link_libraries(CemuCafe PRIVATE libusb::libusb)
-  endif ()
+if(ENABLE_LIBUSB)
+	if(ENABLE_VCPKG)
+		# vcpkg's libusb comes with a pkg-config file only
+		if(WIN32)
+			set(PKG_CONFIG_EXECUTABLE "${VCPKG_INSTALLED_DIR}/x64-windows/tools/pkgconf/pkgconf.exe")
+		endif()
+		find_package(PkgConfig REQUIRED)
+		pkg_check_modules(libusb REQUIRED IMPORTED_TARGET libusb-1.0)
+		target_link_libraries(CemuCafe PRIVATE PkgConfig::libusb)
+	else()
+		find_package(libusb MODULE REQUIRED)
+		target_link_libraries(CemuCafe PRIVATE libusb::libusb)
+	endif()
 endif()
 
 if(WIN32)
-	target_link_libraries(CemuCafe PRIVATE iphlpapi)
+	target_link_libraries(CemuCafe PRIVATE iphlpapi) # network adapter queries
 endif()
