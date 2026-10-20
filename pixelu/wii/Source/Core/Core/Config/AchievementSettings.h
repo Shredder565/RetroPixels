@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,7 +8,7 @@
 
 namespace Config
 {
-// Configuration Information
+// RetroAchievements settings (RetroAchievements.ini, [Achievements]).
 extern const Info<bool> RA_ENABLED;
 extern const Info<std::string> RA_USERNAME;
 extern const Info<std::string> RA_HOST_URL;

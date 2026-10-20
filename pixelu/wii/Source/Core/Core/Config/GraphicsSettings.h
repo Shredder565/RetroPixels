@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -21,14 +20,14 @@ enum class VertexLoaderType : int;
 
 namespace Config
 {
-// Configuration Information
+// Settings of the GFX system (GFX.ini).
 
-// Graphics.Hardware
+// [Hardware]
 
 extern const Info<bool> GFX_VSYNC;
 extern const Info<int> GFX_ADAPTER;
 
-// Graphics.Settings
+// [Settings]
 
 extern const Info<bool> GFX_WIDESCREEN_HACK;
 extern const Info<AspectMode> GFX_ASPECT_RATIO;
@@ -115,10 +114,10 @@ extern const Info<bool> GFX_PREFER_GLES;
 
 extern const Info<bool> GFX_MODS_ENABLE;
 
-// Graphics.Enhancements
+// [Enhancements]
 
 extern const Info<TextureFilteringMode> GFX_ENHANCE_FORCE_TEXTURE_FILTERING;
-// NOTE - this is x in (1 << x)
+// Stored as a power of two exponent: the anisotropy is 1 << value.
 extern const Info<AnisotropicFilteringMode> GFX_ENHANCE_MAX_ANISOTROPY;
 extern const Info<OutputResamplingMode> GFX_ENHANCE_OUTPUT_RESAMPLING;
 extern const Info<std::string> GFX_ENHANCE_POST_SHADER;
@@ -128,7 +127,7 @@ extern const Info<bool> GFX_ENHANCE_ARBITRARY_MIPMAP_DETECTION;
 extern const Info<float> GFX_ENHANCE_ARBITRARY_MIPMAP_DETECTION_THRESHOLD;
 extern const Info<bool> GFX_ENHANCE_HDR_OUTPUT;
 
-// Color.Correction
+// [ColorCorrection]
 
 static constexpr float GFX_CC_GAME_GAMMA_MIN = 2.2f;
 static constexpr float GFX_CC_GAME_GAMMA_MAX = 2.8f;
@@ -147,7 +146,7 @@ extern const Info<bool> GFX_CC_SDR_DISPLAY_GAMMA_SRGB;
 extern const Info<float> GFX_CC_SDR_DISPLAY_CUSTOM_GAMMA;
 extern const Info<float> GFX_CC_HDR_PAPER_WHITE_NITS;
 
-// Graphics.Stereoscopy
+// [Stereoscopy]
 
 extern const Info<StereoMode> GFX_STEREO_MODE;
 extern const Info<bool> GFX_STEREO_PER_EYE_RESOLUTION_FULL;
@@ -158,11 +157,11 @@ extern const Info<float> GFX_STEREO_CONVERGENCE;
 extern const Info<bool> GFX_STEREO_EFB_MONO_DEPTH;
 extern const Info<float> GFX_STEREO_DEPTH_PERCENTAGE;
 
-// Stereoscopy pseudo-limits for consistent behavior between enhancements tab and hotkeys.
+// Upper bounds shared by the graphics dialog and the stereoscopy hotkeys.
 static constexpr float GFX_STEREO_DEPTH_MAXIMUM = 100;
 static constexpr float GFX_STEREO_CONVERGENCE_MAXIMUM = 200;
 
-// Graphics.Hacks
+// [Hacks]
 
 extern const Info<bool> GFX_HACK_EFB_ACCESS_ENABLE;
 extern const Info<bool> GFX_HACK_EFB_DEFER_INVALIDATION;
@@ -187,15 +186,15 @@ extern const Info<bool> GFX_HACK_FAST_TEXTURE_SAMPLING;
 extern const Info<bool> GFX_HACK_NO_MIPMAPPING;
 #endif
 
-// Graphics.GameSpecific
+// [GameSpecific]
 
 extern const Info<bool> GFX_PERF_QUERIES_ENABLE;
 
-// Android custom GPU drivers
+// Custom GPU driver library (used on Android builds only)
 
 extern const Info<std::string> GFX_DRIVER_LIB_NAME;
 
-// Vertex loader
+// Vertex loader implementation
 
 extern const Info<VertexLoaderType> GFX_VERTEX_LOADER_TYPE;
 

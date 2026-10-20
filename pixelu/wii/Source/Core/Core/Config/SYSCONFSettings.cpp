@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/Config/SYSCONFSettings.h"
 
@@ -7,34 +6,45 @@
 
 namespace Config
 {
-// SYSCONF.IPL
+namespace
+{
+// The layer location of a SYSCONF entry is its "<group>.<name>" name split in two.
+Location SysconfKey(std::string_view group, std::string_view name)
+{
+  return Location{System::SYSCONF, std::string(group), std::string(name)};
+}
+}  // namespace
 
-const Info<bool> SYSCONF_SCREENSAVER{{System::SYSCONF, "IPL", "SSV"}, false};
-const Info<u32> SYSCONF_LANGUAGE{{System::SYSCONF, "IPL", "LNG"},
-                                 static_cast<u32>(GetDefaultLanguage())};
-const Info<u32> SYSCONF_COUNTRY{{System::SYSCONF, "IPL", "SADR"}, GetDefaultCountry()};
-const Info<bool> SYSCONF_WIDESCREEN{{System::SYSCONF, "IPL", "AR"}, true};
-const Info<bool> SYSCONF_PROGRESSIVE_SCAN{{System::SYSCONF, "IPL", "PGS"}, true};
-const Info<bool> SYSCONF_PAL60{{System::SYSCONF, "IPL", "E60"}, true};
-const Info<u32> SYSCONF_SOUND_MODE{{System::SYSCONF, "IPL", "SND"}, 0x01};
+// IPL group: screen saver, language, country, display and sound options.
+const Info<bool> SYSCONF_SCREENSAVER{SysconfKey("IPL", "SSV"), false};
+const Info<u32> SYSCONF_LANGUAGE{SysconfKey("IPL", "LNG"), static_cast<u32>(GetDefaultLanguage())};
+const Info<u32> SYSCONF_COUNTRY{SysconfKey("IPL", "SADR"), GetDefaultCountry()};
+const Info<bool> SYSCONF_WIDESCREEN{SysconfKey("IPL", "AR"), true};
+const Info<bool> SYSCONF_PROGRESSIVE_SCAN{SysconfKey("IPL", "PGS"), true};
+const Info<bool> SYSCONF_PAL60{SysconfKey("IPL", "E60"), true};
+const Info<u32> SYSCONF_SOUND_MODE{SysconfKey("IPL", "SND"), 0x01};  // stereo
 
-// SYSCONF.BT
+// BT group: sensor bar, Wii Remote speaker and rumble.
+const Info<u32> SYSCONF_SENSOR_BAR_POSITION{SysconfKey("BT", "BAR"), 0x01};  // above the screen
+const Info<u32> SYSCONF_SENSOR_BAR_SENSITIVITY{SysconfKey("BT", "SENS"), 0x03};
+const Info<u32> SYSCONF_SPEAKER_VOLUME{SysconfKey("BT", "SPKV"), 0x58};
+const Info<bool> SYSCONF_WIIMOTE_MOTOR{SysconfKey("BT", "MOT"), true};
 
-const Info<u32> SYSCONF_SENSOR_BAR_POSITION{{System::SYSCONF, "BT", "BAR"}, 0x01};
-const Info<u32> SYSCONF_SENSOR_BAR_SENSITIVITY{{System::SYSCONF, "BT", "SENS"}, 0x03};
-const Info<u32> SYSCONF_SPEAKER_VOLUME{{System::SYSCONF, "BT", "SPKV"}, 0x58};
-const Info<bool> SYSCONF_WIIMOTE_MOTOR{{System::SYSCONF, "BT", "MOT"}, true};
+using Stored = SysConf::Entry::Type;
 
-const std::array<SYSCONFSetting, 11> SYSCONF_SETTINGS{
-    {{&SYSCONF_SCREENSAVER, SysConf::Entry::Type::Byte},
-     {&SYSCONF_LANGUAGE, SysConf::Entry::Type::Byte},
-     {&SYSCONF_COUNTRY, SysConf::Entry::Type::BigArray},
-     {&SYSCONF_WIDESCREEN, SysConf::Entry::Type::Byte},
-     {&SYSCONF_PROGRESSIVE_SCAN, SysConf::Entry::Type::Byte},
-     {&SYSCONF_PAL60, SysConf::Entry::Type::Byte},
-     {&SYSCONF_SOUND_MODE, SysConf::Entry::Type::Byte},
-     {&SYSCONF_SENSOR_BAR_POSITION, SysConf::Entry::Type::Byte},
-     {&SYSCONF_SENSOR_BAR_SENSITIVITY, SysConf::Entry::Type::Long},
-     {&SYSCONF_SPEAKER_VOLUME, SysConf::Entry::Type::Byte},
-     {&SYSCONF_WIIMOTE_MOTOR, SysConf::Entry::Type::Byte}}};
+// How each setting is stored in the SYSCONF file. The order is part of the NetPlay protocol (the
+// host sends the values in this order), so new entries go at the end.
+const std::array<SYSCONFSetting, 11> SYSCONF_SETTINGS{{
+    {&SYSCONF_SCREENSAVER, Stored::Byte},
+    {&SYSCONF_LANGUAGE, Stored::Byte},
+    {&SYSCONF_COUNTRY, Stored::BigArray},
+    {&SYSCONF_WIDESCREEN, Stored::Byte},
+    {&SYSCONF_PROGRESSIVE_SCAN, Stored::Byte},
+    {&SYSCONF_PAL60, Stored::Byte},
+    {&SYSCONF_SOUND_MODE, Stored::Byte},
+    {&SYSCONF_SENSOR_BAR_POSITION, Stored::Byte},
+    {&SYSCONF_SENSOR_BAR_SENSITIVITY, Stored::Long},
+    {&SYSCONF_SPEAKER_VOLUME, Stored::Byte},
+    {&SYSCONF_WIIMOTE_MOTOR, Stored::Byte},
+}};
 }  // namespace Config

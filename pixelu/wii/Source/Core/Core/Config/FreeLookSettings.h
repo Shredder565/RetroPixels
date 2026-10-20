@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -17,12 +16,12 @@ enum class ControlType : int
 
 namespace Config
 {
-// Configuration Information
+// Free look camera settings (FreeLook.ini).
 
 extern const Info<bool> FREE_LOOK_ENABLED;
 extern const Info<bool> FREE_LOOK_BACKGROUND_INPUT;
 
-// FreeLook.Controller1
+// [Camera1]
 extern const Info<FreeLook::ControlType> FL1_CONTROL_TYPE;
 
 }  // namespace Config

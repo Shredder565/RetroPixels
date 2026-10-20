@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -14,7 +13,7 @@
 #include "Core/USBUtils.h"
 #include "DiscIO/Enums.h"
 
-// DSP Backend Types
+// Audio backend names as stored in [DSP] Backend. Two are shown translated.
 #define BACKEND_NULLSOUND _trans("No Audio Output")
 #define BACKEND_ALSA "ALSA"
 #define BACKEND_CUBEB "Cubeb"
@@ -51,7 +50,7 @@ enum class HSPDeviceType : int;
 
 namespace Config
 {
-// Main.Core
+// Main system (Dolphin.ini), [Core] section
 
 extern const Info<bool> MAIN_SKIP_IPL;
 extern const Info<PowerPC::CPUCore> MAIN_CPU_CORE;
@@ -61,7 +60,7 @@ extern const Info<bool> MAIN_PAGE_TABLE_FASTMEM;
 extern const Info<bool> MAIN_FASTMEM_ARENA;
 extern const Info<bool> MAIN_LARGE_ENTRY_POINTS_MAP;
 extern const Info<bool> MAIN_ACCURATE_CPU_CACHE;
-// Should really be in the DSP section, but we're kind of stuck with bad decisions made in the past.
+// DSPHLE has always been stored in [Core] rather than [DSP]; existing INIs depend on it.
 extern const Info<bool> MAIN_DSP_HLE;
 extern const Info<int> MAIN_MAX_FALLBACK;
 extern const Info<int> MAIN_TIMING_VARIANCE;
@@ -141,7 +140,7 @@ extern const Info<bool> MAIN_VI_OVERCLOCK_ENABLE;
 extern const Info<bool> MAIN_RAM_OVERRIDE_ENABLE;
 extern const Info<u32> MAIN_MEM1_SIZE;
 extern const Info<u32> MAIN_MEM2_SIZE;
-// Should really be part of System::GFX, but again, we're stuck with past mistakes.
+// The video backend name is a Main setting too, not a GFX one.
 extern const Info<std::string> MAIN_GFX_BACKEND;
 extern const Info<HSP::HSPDeviceType> MAIN_HSP_DEVICE;
 extern const Info<u32> MAIN_ARAM_EXPANSION_SIZE;
@@ -150,8 +149,8 @@ enum class GPUDeterminismMode
 {
   Auto,
   Disabled,
-  // This is currently the only mode.  There will probably be at least
-  // one more at some point.
+  // GPU work is completed
+  // immediately from the CPU's point of view.
   FakeCompletion,
 };
 extern const Info<std::string> MAIN_GPU_DETERMINISM_MODE;
@@ -169,7 +168,7 @@ extern const Info<s32> MAIN_OVERRIDE_BOOT_IOS;
 extern const Info<std::string> MAIN_WII_NUS_SHOP_URL;
 extern const Info<bool> MAIN_WII_WIILINK_ENABLE;
 
-// Main.DSP
+// [DSP]
 
 extern const Info<bool> MAIN_DSP_THREAD;
 extern const Info<bool> MAIN_DSP_CAPTURE_LOG;
@@ -187,7 +186,7 @@ extern const Info<std::string> MAIN_WASAPI_DEVICE;
 
 bool ShouldUseDPL2Decoder();
 
-// Main.Display
+// [Display]
 
 extern const Info<std::string> MAIN_FULLSCREEN_DISPLAY_RES;
 extern const Info<bool> MAIN_FULLSCREEN;
@@ -201,7 +200,7 @@ extern const Info<bool> MAIN_KEEP_WINDOW_ON_TOP;
 extern const Info<bool> MAIN_DISABLE_SCREENSAVER;
 extern const Info<bool> MAIN_TIME_TRACKING;
 
-// Main.General
+// [General]
 
 extern const Info<std::string> MAIN_DUMP_PATH;
 extern const Info<std::string> MAIN_LOAD_PATH;
@@ -220,7 +219,7 @@ extern const Info<std::string> MAIN_SKYLANDERS_PATH;
 std::vector<std::string> GetIsoPaths();
 void SetIsoPaths(std::span<const std::string> paths);
 
-// Main.GBA
+// [GBA]
 
 #ifdef HAS_LIBMGBA
 extern const Info<std::string> MAIN_GBA_BIOS_PATH;
@@ -231,7 +230,7 @@ extern const Info<bool> MAIN_GBA_SAVES_IN_ROM_PATH;
 static constexpr std::size_t GBPLAYER_GBA_INDEX = 4;
 #endif
 
-// Main.Network
+// [Network]
 
 extern const Info<bool> MAIN_NETWORK_SSL_DUMP_READ;
 extern const Info<bool> MAIN_NETWORK_SSL_DUMP_WRITE;
@@ -242,7 +241,7 @@ extern const Info<bool> MAIN_NETWORK_DUMP_BBA;
 extern const Info<bool> MAIN_NETWORK_DUMP_AS_PCAP;
 extern const Info<int> MAIN_NETWORK_TIMEOUT;
 
-// Main.Interface
+// [Interface]
 
 extern const Info<bool> MAIN_USE_HIGH_CONTRAST_TOOLTIPS;
 extern const Info<bool> MAIN_USE_PANIC_HANDLERS;
@@ -268,13 +267,13 @@ extern const Info<std::string> MAIN_THEME_NAME;
 extern const Info<bool> MAIN_PAUSE_ON_FOCUS_LOST;
 extern const Info<bool> MAIN_ENABLE_DEBUGGING;
 
-// Main.Analytics
+// [Analytics]
 
 extern const Info<std::string> MAIN_ANALYTICS_ID;
 extern const Info<bool> MAIN_ANALYTICS_ENABLED;
 extern const Info<bool> MAIN_ANALYTICS_PERMISSION_ASKED;
 
-// Main.GameList
+// [GameList]
 
 extern const Info<bool> MAIN_GAMELIST_LIST_DRIVES;
 extern const Info<bool> MAIN_GAMELIST_LIST_WAD;
@@ -315,17 +314,17 @@ extern const Info<bool> MAIN_GAMELIST_COLUMN_COMPRESSION;
 extern const Info<bool> MAIN_GAMELIST_COLUMN_TIME_PLAYED;
 extern const Info<bool> MAIN_GAMELIST_COLUMN_TAGS;
 
-// Main.FifoPlayer
+// [FifoPlayer]
 
 extern const Info<bool> MAIN_FIFOPLAYER_LOOP_REPLAY;
 extern const Info<bool> MAIN_FIFOPLAYER_EARLY_MEMORY_UPDATES;
 
-// Main.AutoUpdate
+// [AutoUpdate]
 
 extern const Info<std::string> MAIN_AUTOUPDATE_UPDATE_TRACK;
 extern const Info<std::string> MAIN_AUTOUPDATE_HASH_OVERRIDE;
 
-// Main.Movie
+// [Movie]
 
 extern const Info<bool> MAIN_MOVIE_PAUSE_MOVIE;
 extern const Info<std::string> MAIN_MOVIE_MOVIE_AUTHOR;
@@ -336,7 +335,7 @@ extern const Info<bool> MAIN_MOVIE_SHOW_RTC;
 extern const Info<bool> MAIN_MOVIE_SHOW_RERECORD;
 extern const Info<bool> MAIN_MOVIE_SHOW_OSD;
 
-// Main.Input
+// [Input]
 
 extern const Info<bool> MAIN_INPUT_BACKGROUND_INPUT;
 
@@ -347,7 +346,7 @@ extern const Config::Info<std::string> MAIN_SDL_HINT_JOYSTICK_DIRECTINPUT;
 extern const Config::Info<std::string> MAIN_SDL_HINT_JOYSTICK_HIDAPI_COMBINE_JOY_CONS;
 extern const Config::Info<std::string> MAIN_SDL_HINT_JOYSTICK_HIDAPI_VERTICAL_JOY_CONS;
 
-// Main.Debug
+// [Debug]
 
 extern const Info<bool> MAIN_DEBUG_JIT_OFF;
 extern const Info<bool> MAIN_DEBUG_JIT_LOAD_STORE_OFF;
@@ -364,21 +363,21 @@ extern const Info<bool> MAIN_DEBUG_JIT_BRANCH_OFF;
 extern const Info<bool> MAIN_DEBUG_JIT_REGISTER_CACHE_OFF;
 extern const Info<bool> MAIN_DEBUG_JIT_ENABLE_PROFILING;
 
-// Main.BluetoothPassthrough
+// [BluetoothPassthrough]
 
 extern const Info<bool> MAIN_BLUETOOTH_PASSTHROUGH_ENABLED;
 extern const Info<int> MAIN_BLUETOOTH_PASSTHROUGH_VID;
 extern const Info<int> MAIN_BLUETOOTH_PASSTHROUGH_PID;
 extern const Info<std::string> MAIN_BLUETOOTH_PASSTHROUGH_LINK_KEYS;
 
-// Main.USBPassthrough
+// [USBPassthrough]
 
 extern const Info<bool> MAIN_USB_PASSTHROUGH_DISGUISE_PLAYSTATION_AS_WII;
 extern const Info<std::string> MAIN_USB_PASSTHROUGH_DEVICES;
 std::set<USBUtils::DeviceInfo> GetUSBDeviceWhitelist();
 void SetUSBDeviceWhitelist(const std::set<USBUtils::DeviceInfo>& devices);
 
-// Main.EmulatedUSBDevices
+// [EmulatedUSBDevices]
 
 extern const Info<bool> MAIN_EMULATE_SKYLANDER_PORTAL;
 extern const Info<bool> MAIN_EMULATE_INFINITY_BASE;
@@ -397,7 +396,7 @@ extern const std::array<Info<s16>, EMULATED_LOGITECH_MIC_COUNT> MAIN_LOGITECH_MI
 
 extern const Info<std::string> MAIN_TRIFORCE_IP_REDIRECTIONS;
 
-// Main.WiimoteAudioRouting
+// Wii Remote speaker routing (stored in [Core])
 
 static constexpr std::size_t WIIMOTE_SPEAKER_COUNT = 4;
 
@@ -405,12 +404,13 @@ extern const Info<bool> MAIN_WIIMOTE_AUDIO_ROUTING_ENABLED;
 extern const std::array<Info<bool>, WIIMOTE_SPEAKER_COUNT> MAIN_WIIMOTE_AUDIO_OUTPUT_ENABLED;
 extern const std::array<Info<std::string>, WIIMOTE_SPEAKER_COUNT> MAIN_WIIMOTE_AUDIO_OUTPUT_DEVICE;
 
-// GameCube path utility functions
+// Paths of GameCube files that depend on the region.
 
-// Replaces NTSC-K with some other region, and doesn't replace non-NTSC-K regions
+// Maps NTSC-K (which has no GameCube equivalent) to NTSC-J; other regions are returned as is.
 DiscIO::Region ToGameCubeRegion(DiscIO::Region region);
 
-// The region argument must be valid for GameCube (i.e. must not be NTSC-K)
+// Legacy names Japan "JAP" (memory card files), Modern names it "JPN" (GCI folders).
+// The region passed in must be a GameCube region, so never NTSC-K.
 enum class RegionDirectoryStyle
 {
   Legacy,
@@ -420,9 +420,9 @@ const char* GetDirectoryForRegion(DiscIO::Region region,
                                   RegionDirectoryStyle style = RegionDirectoryStyle::Legacy);
 
 std::string GetBootROMPath(const std::string& region_directory);
-// Builds the memory card according to the configuration with the given region and size. If the
-// given region is std::nullopt, the region in the configured path is used if there is one, or the
-// fallback region otherwise.
+// The memory card image path for a slot, for the given region and card size. Without a region,
+// the region named in the configured path is kept, and failing that the fallback region is
+// used.
 std::string GetMemcardPath(ExpansionInterface::Slot slot, std::optional<DiscIO::Region> region,
                            u16 size_mb = 0x80);
 std::string GetMemcardPath(std::string configured_filename, ExpansionInterface::Slot slot,

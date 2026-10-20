@@ -1,19 +1,16 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include "Common/Config/Config.h"
 
-// This is a temporary solution, although they should be in their respective cpp file in UICommon.
-// However, in order for IsSettingSaveable to compile without some issues, this needs to be here.
-// Once IsSettingSaveable is removed, then you should able to move these back to UICommon.
+// UI settings that live in Core because the config saving code (IsSettingSaveable) needs to
+// see them. They belong to UICommon logically.
 
 namespace Config
 {
-// Configuration Information
 
-// UI.General
+// Main system, [General] section.
 
 extern const Info<bool> MAIN_USE_DISCORD_PRESENCE;
 extern const Info<bool> MAIN_USE_GAME_COVERS;

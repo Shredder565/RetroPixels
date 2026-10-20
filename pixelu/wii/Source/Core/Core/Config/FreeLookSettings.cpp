@@ -1,17 +1,16 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/Config/FreeLookSettings.h"
 
 namespace Config
 {
-// Configuration Information
-const Info<bool> FREE_LOOK_ENABLED{{System::FreeLook, "General", "Enabled"}, false};
-const Info<bool> FREE_LOOK_BACKGROUND_INPUT{{System::FreeLook, "General", "BackgroundInput"},
-                                            false};
+// Global switches, in [General] of FreeLook.ini.
+const Info<bool> FREE_LOOK_ENABLED{Location{System::FreeLook, "General", "Enabled"}, false};
+const Info<bool> FREE_LOOK_BACKGROUND_INPUT{
+    Location{System::FreeLook, "General", "BackgroundInput"}, false};
 
-// FreeLook.Controller1
-const Info<FreeLook::ControlType> FL1_CONTROL_TYPE{{System::FreeLook, "Camera1", "ControlType"},
-                                                   FreeLook::ControlType::SixAxis};
+// How the first (and only) free look camera is steered.
+const Info<FreeLook::ControlType> FL1_CONTROL_TYPE{
+    Location{System::FreeLook, "Camera1", "ControlType"}, FreeLook::ControlType::SixAxis};
 
 }  // namespace Config

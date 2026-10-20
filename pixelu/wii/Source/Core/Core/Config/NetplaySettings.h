@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,9 +9,9 @@
 
 namespace Config
 {
-// Configuration Information
+// NetPlay settings. They are part of the Main system, in the
 
-// Main.NetPlay
+// [NetPlay] section of Dolphin.ini.
 
 extern const Info<std::string> NETPLAY_TRAVERSAL_SERVER;
 extern const Info<u16> NETPLAY_TRAVERSAL_PORT;

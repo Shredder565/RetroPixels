@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/Config/DefaultLocale.h"
 
@@ -23,171 +22,174 @@
 
 namespace Config
 {
-static std::vector<std::string> GetPreferredLocales()
+namespace
+{
+// The host's preferred locales (BCP 47 tags such as "en-US" or "zh-Hant-TW"), asked for once.
+const std::vector<std::string>& HostLocales()
 {
   static const std::vector<std::string> locales = Host_GetPreferredLocales();
   return locales;
 }
 
-static std::optional<DiscIO::Language> TryParseLanguage(const std::string& locale)
+// Wii SYSCONF language codes (IPL.LNG): the value is the position in this list. Simplified and
+// traditional Chinese (values 7 and 8) are told apart separately.
+constexpr std::array<std::pair<std::string_view, DiscIO::Language>, 8> LANGUAGE_CODES{{
+    {"ja", DiscIO::Language::Japanese},
+    {"en", DiscIO::Language::English},
+    {"de", DiscIO::Language::German},
+    {"fr", DiscIO::Language::French},
+    {"es", DiscIO::Language::Spanish},
+    {"it", DiscIO::Language::Italian},
+    {"nl", DiscIO::Language::Dutch},
+    {"ko", DiscIO::Language::Korean},
+}};
+
+DiscIO::Language ChineseVariant(const std::vector<std::string>& subtags)
 {
-  const std::vector<std::string> split_locale = SplitString(locale, '-');
-  if (split_locale.empty())
-    return std::nullopt;
-
-  // Special handling of Chinese due to its two writing systems
-  if (split_locale[0] == "zh")
-  {
-    if (Common::Contains(split_locale, "Hans"))
-      return DiscIO::Language::SimplifiedChinese;
-    if (Common::Contains(split_locale, "Hant"))
-      return DiscIO::Language::TraditionalChinese;
-
-    // Mainland China and Singapore use simplified characters
-    if (Common::Contains(split_locale, "CN") || Common::Contains(split_locale, "SG"))
-      return DiscIO::Language::SimplifiedChinese;
-    else
-      return DiscIO::Language::TraditionalChinese;
-  }
-
-  // Same order as in Wii SYSCONF
-  constexpr std::array<std::string_view, 10> LANGUAGES = {
-      "ja", "en", "de", "fr", "es", "it", "nl", "zh", "zh", "ko",
-  };
-
-  const auto it = std::ranges::find(LANGUAGES, split_locale[0]);
-  if (it == LANGUAGES.cend())
-    return std::nullopt;
-
-  return static_cast<DiscIO::Language>(it - LANGUAGES.cbegin());
+  // An explicit script subtag decides; otherwise mainland China and Singapore write simplified
+  // characters and everybody else (Taiwan, Hong Kong, Macau, ...) traditional ones.
+  if (Common::Contains(subtags, "Hans"))
+    return DiscIO::Language::SimplifiedChinese;
+  if (Common::Contains(subtags, "Hant"))
+    return DiscIO::Language::TraditionalChinese;
+  if (Common::Contains(subtags, "CN") || Common::Contains(subtags, "SG"))
+    return DiscIO::Language::SimplifiedChinese;
+  return DiscIO::Language::TraditionalChinese;
 }
 
-static DiscIO::Language ComputeDefaultLanguage()
+std::optional<DiscIO::Language> LanguageOfLocale(const std::string& locale)
 {
-  for (const std::string& locale : GetPreferredLocales())
+  const std::vector<std::string> subtags = SplitString(locale, '-');
+  if (subtags.empty())
+    return std::nullopt;
+
+  const std::string& primary = subtags.front();
+  if (primary == "zh")
+    return ChineseVariant(subtags);
+
+  for (const auto& [code, language] : LANGUAGE_CODES)
   {
-    if (const std::optional<DiscIO::Language> language = TryParseLanguage(locale))
-      return *language;
+    if (primary == code)
+      return language;
   }
-
-  return DiscIO::Language::English;
-}
-
-static std::optional<std::string> TryParseCountryCode(const std::string& locale)
-{
-  for (const std::string& part : SplitString(locale, '-'))
-  {
-    if (part.size() == 2 && Common::IsUpper(part[0]) && Common::IsUpper(part[1]))
-      return part;
-  }
-
   return std::nullopt;
 }
 
-static std::string ComputeDefaultCountryCode()
+DiscIO::Language PickDefaultLanguage()
+{
+  for (const std::string& locale : HostLocales())
+  {
+    if (const auto language = LanguageOfLocale(locale))
+      return *language;
+  }
+  return DiscIO::Language::English;
+}
+
+// The first two-letter upper case subtag of a locale is its region ("US" in "en-US").
+std::optional<std::string> RegionSubtagOf(const std::string& locale)
+{
+  for (const std::string& subtag : SplitString(locale, '-'))
+  {
+    const bool is_region =
+        subtag.size() == 2 && Common::IsUpper(subtag[0]) && Common::IsUpper(subtag[1]);
+    if (is_region)
+      return subtag;
+  }
+  return std::nullopt;
+}
+
+std::string HostCountryCode()
 {
 #ifdef _WIN32
-  // Windows codepath: Check the regional information.
-  // More likely to match the user's physical location than locales are.
-  const int buffer_size = GetUserDefaultGeoName(nullptr, 0);
-  if (buffer_size == 3)
+  // The Windows home location setting is a better guess of where the user is than the UI
+  // language. GetUserDefaultGeoName reports the buffer size needed: 3 for a two-letter code.
+  const int needed = GetUserDefaultGeoName(nullptr, 0);
+  if (needed == 3)
   {
-    std::wstring buffer(buffer_size, L'\0');
-    const int result = GetUserDefaultGeoName(buffer.data(), buffer_size);
-    buffer.resize(2);
-    if (result > 0)
-      return WStringToUTF8(buffer);
+    std::wstring geo_name(static_cast<size_t>(needed), L'\0');
+    const int written = GetUserDefaultGeoName(geo_name.data(), needed);
+    geo_name.resize(2);
+    if (written > 0)
+      return WStringToUTF8(geo_name);
   }
 #endif
 
-  // Generic codepath: Check the locales.
-  // Might be entirely unrelated to someone's actual country (for instance someone in a
-  // non-English-speaking country using en-US), but could also be a perfect match.
-  for (const std::string& locale : GetPreferredLocales())
+  // Otherwise use the region of the first locale that has one. This can be wrong (plenty of
+  // people use en-US anywhere in the world), but it is the best guess available.
+  for (const std::string& locale : HostLocales())
   {
-    if (const std::optional<std::string> country_code = TryParseCountryCode(locale))
-      return *country_code;
+    if (auto region = RegionSubtagOf(locale))
+      return *region;
   }
-
   return "";
 }
 
-static std::optional<u8> ComputeDefaultCountry()
+// Wii SYSCONF country codes (IPL.SADR): ISO 3166 codes at their SYSCONF value, two characters
+// each. "--" marks values that no country uses.
+constexpr std::string_view SYSCONF_COUNTRY_CODES =
+    "--JP------------AIAGARAWBSBBBZBO"  // 0-15
+    "BRVGCAKYCLCOCRDMDOECSVGFGDGPGTGY"  // 16-31
+    "HTHNJMMQMXMSANNIPAPYPEKNLCVCSRTT"  // 32-47
+    "TCUSUYVIVE----------------------"  // 48-63
+    "ALAUATBEBABWBGHRCYCZDKEEFIFRDEGR"  // 64-79
+    "HUISIEITLVLSLILTLUMKMTMEMZNANLNZ"  // 80-95
+    "NOPLPTRORURSSKSIZAESSZSECHTRGBZM"  // 96-111
+    "ZWAZMRMLNETDSDERDJSO------------"  // 112-127
+    "TW--------------KR--------------"  // 128-143
+    "HKMO------------IDSGTHPHMY------"  // 144-159
+    "CN--------------AEINEGOMQAKWSASY"  // 160-175
+    "BHJO";                             // 176-177
+static_assert(SYSCONF_COUNTRY_CODES.size() == 178 * 2);
+
+std::optional<u8> PickDefaultCountry()
 {
-  // clang-format off
-  // Same order as in Wii SYSCONF
-  static constexpr std::array<std::string_view, 178> COUNTRIES = {
-    "--", "JP", "--", "--", "--", "--", "--", "--", "AI", "AG", "AR", "AW", "BS", "BB", "BZ", "BO",
-    "BR", "VG", "CA", "KY", "CL", "CO", "CR", "DM", "DO", "EC", "SV", "GF", "GD", "GP", "GT", "GY",
-    "HT", "HN", "JM", "MQ", "MX", "MS", "AN", "NI", "PA", "PY", "PE", "KN", "LC", "VC", "SR", "TT",
-    "TC", "US", "UY", "VI", "VE", "--", "--", "--", "--", "--", "--", "--", "--", "--", "--", "--",
-    "AL", "AU", "AT", "BE", "BA", "BW", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR",
-    "HU", "IS", "IE", "IT", "LV", "LS", "LI", "LT", "LU", "MK", "MT", "ME", "MZ", "NA", "NL", "NZ",
-    "NO", "PL", "PT", "RO", "RU", "RS", "SK", "SI", "ZA", "ES", "SZ", "SE", "CH", "TR", "GB", "ZM",
-    "ZW", "AZ", "MR", "ML", "NE", "TD", "SD", "ER", "DJ", "SO", "--", "--", "--", "--", "--", "--",
-    "TW", "--", "--", "--", "--", "--", "--", "--", "KR", "--", "--", "--", "--", "--", "--", "--",
-    "HK", "MO", "--", "--", "--", "--", "--", "--", "ID", "SG", "TH", "PH", "MY", "--", "--", "--",
-    "CN", "--", "--", "--", "--", "--", "--", "--", "AE", "IN", "EG", "OM", "QA", "KW", "SA", "SY",
-    "BH", "JO",
-  };
-  // clang-format on
+  std::string code = HostCountryCode();
 
-  std::string country = ComputeDefaultCountryCode();
+  // The Netherlands Antilles were dissolved after the Wii came out; their successors use the old
+  // code.
+  if (code == "BQ" || code == "CW" || code == "SX")
+    code = "AN";
 
-  // Netherlands Antilles was split into three new codes after the release of the Wii
-  if (country == "BQ" || country == "CW" || country == "SX")
-    country = "AN";
-
-  const auto it = std::ranges::find(COUNTRIES, country);
-  if (it == COUNTRIES.cend())
+  if (code.size() != 2)
     return std::nullopt;
-
-  return static_cast<u8>(it - COUNTRIES.cbegin());
+  for (size_t value = 0; value * 2 < SYSCONF_COUNTRY_CODES.size(); ++value)
+  {
+    if (SYSCONF_COUNTRY_CODES.substr(value * 2, 2) == code)
+      return static_cast<u8>(value);
+  }
+  return std::nullopt;
 }
 
-static DiscIO::Region ComputeDefaultRegion()
-{
-  const std::optional<u8> country = GetDefaultCountry();
-
-  if (country)
-  {
-    const DiscIO::Region region = DiscIO::SysConfCountryToRegion(GetDefaultCountry());
-    ASSERT(region != DiscIO::Region::Unknown);
-    return region;
-  }
-
-  switch (GetDefaultLanguage())
-  {
-  case DiscIO::Language::Japanese:
-    return DiscIO::Region::NTSC_J;
-  case DiscIO::Language::Korean:
-    return DiscIO::Region::NTSC_K;
-  default:
-    return DiscIO::Region::PAL;
-  }
-}
+// Used when the host's country can't be mapped: Switzerland.
+constexpr u8 COUNTRY_IF_UNKNOWN = 0x6c;
+}  // namespace
 
 DiscIO::Language GetDefaultLanguage()
 {
-  static const DiscIO::Language language = ComputeDefaultLanguage();
+  static const DiscIO::Language language = PickDefaultLanguage();
   return language;
 }
 
 std::optional<u8> GetOptionalDefaultCountry()
 {
-  static const std::optional<u8> country = ComputeDefaultCountry();
+  static const std::optional<u8> country = PickDefaultCountry();
   return country;
 }
 
 u8 GetDefaultCountry()
 {
-  constexpr u8 FALLBACK_COUNTRY = 0x6c;  // Switzerland, as per Dolphin tradition
-  return GetOptionalDefaultCountry().value_or(FALLBACK_COUNTRY);
+  return GetOptionalDefaultCountry().value_or(COUNTRY_IF_UNKNOWN);
 }
 
 DiscIO::Region GetDefaultRegion()
 {
-  static const DiscIO::Region region = ComputeDefaultRegion();
+  // The region follows the default country, which always exists (falling back to Switzerland),
+  // and every country code in the table belongs to a region.
+  static const DiscIO::Region region = [] {
+    const DiscIO::Region from_country = DiscIO::SysConfCountryToRegion(GetDefaultCountry());
+    ASSERT(from_country != DiscIO::Region::Unknown);
+    return from_country;
+  }();
   return region;
 }
 

@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,9 +10,10 @@
 
 namespace Config
 {
-// Note: some settings are actually u8s, but stored as u32 in the layer because of limitations.
+// Settings mirrored from the Wii's SYSCONF file. Byte-sized SYSCONF entries are held as u32
+// in the config layers.
 
-// SYSCONF.IPL
+// IPL.* entries
 
 extern const Info<bool> SYSCONF_SCREENSAVER;
 extern const Info<u32> SYSCONF_LANGUAGE;
@@ -23,7 +23,7 @@ extern const Info<bool> SYSCONF_PROGRESSIVE_SCAN;
 extern const Info<bool> SYSCONF_PAL60;
 extern const Info<u32> SYSCONF_SOUND_MODE;
 
-// SYSCONF.BT
+// BT.* entries
 
 extern const Info<u32> SYSCONF_SENSOR_BAR_POSITION;
 extern const Info<u32> SYSCONF_SENSOR_BAR_SENSITIVITY;

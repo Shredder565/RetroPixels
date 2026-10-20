@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/Config/WiimoteSettings.h"
 
@@ -7,24 +6,37 @@
 
 namespace Config
 {
-const Info<WiimoteSource> WIIMOTE_1_SOURCE{{System::WiiPad, "Wiimote1", "Source"},
-                                           WiimoteSource::Emulated};
-const Info<WiimoteSource> WIIMOTE_2_SOURCE{{System::WiiPad, "Wiimote2", "Source"},
-                                           WiimoteSource::None};
-const Info<WiimoteSource> WIIMOTE_3_SOURCE{{System::WiiPad, "Wiimote3", "Source"},
-                                           WiimoteSource::None};
-const Info<WiimoteSource> WIIMOTE_4_SOURCE{{System::WiiPad, "Wiimote4", "Source"},
-                                           WiimoteSource::None};
-const Info<WiimoteSource> WIIMOTE_BB_SOURCE{{System::WiiPad, "BalanceBoard", "Source"},
-                                            WiimoteSource::None};
+namespace
+{
+Location SourceKey(std::string_view section)
+{
+  return Location{System::WiiPad, std::string(section), "Source"};
+}
+}  // namespace
+
+// Only the first Wii Remote is connected (emulated) by default.
+const Info<WiimoteSource> WIIMOTE_1_SOURCE{SourceKey("Wiimote1"), WiimoteSource::Emulated};
+const Info<WiimoteSource> WIIMOTE_2_SOURCE{SourceKey("Wiimote2"), WiimoteSource::None};
+const Info<WiimoteSource> WIIMOTE_3_SOURCE{SourceKey("Wiimote3"), WiimoteSource::None};
+const Info<WiimoteSource> WIIMOTE_4_SOURCE{SourceKey("Wiimote4"), WiimoteSource::None};
+const Info<WiimoteSource> WIIMOTE_BB_SOURCE{SourceKey("BalanceBoard"), WiimoteSource::None};
 
 const Info<WiimoteSource>& GetInfoForWiimoteSource(int index)
 {
-  static const std::array<const Info<WiimoteSource>*, 5> infos{
-      &WIIMOTE_1_SOURCE, &WIIMOTE_2_SOURCE,  &WIIMOTE_3_SOURCE,
-      &WIIMOTE_4_SOURCE, &WIIMOTE_BB_SOURCE,
-  };
-  return *infos[index];
+  // Indices 0-3 are the four Wii Remote slots, index 4 is the balance board.
+  switch (index)
+  {
+  case 0:
+    return WIIMOTE_1_SOURCE;
+  case 1:
+    return WIIMOTE_2_SOURCE;
+  case 2:
+    return WIIMOTE_3_SOURCE;
+  case 3:
+    return WIIMOTE_4_SOURCE;
+  default:
+    return WIIMOTE_BB_SOURCE;
+  }
 }
 
 }  // namespace Config
