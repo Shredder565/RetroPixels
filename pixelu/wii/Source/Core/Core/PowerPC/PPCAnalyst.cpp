@@ -152,41 +152,44 @@ void AddCallTargets(const Core::CPUThreadGuard& guard, u32 begin, u32 end, PPCSy
   }
 }
 
-struct HandlerName
+// The exception vectors (MSR[IP] = 0) that get a symbol when they hold code. Each symbol is
+// named "<kind>_handler".
+struct ExceptionVector
 {
-  u32 address;
-  const char* name;
+  u32 offset;
+  std::string_view kind;
 };
 
-constexpr std::array<HandlerName, 16> s_exception_handlers{{
-    {0x80000100, "system_reset_exception_handler"},
-    {0x80000200, "machine_check_exception_handler"},
-    {0x80000300, "dsi_exception_handler"},
-    {0x80000400, "isi_exception_handler"},
-    {0x80000500, "external_interrupt_exception_handler"},
-    {0x80000600, "alignment_exception_handler"},
-    {0x80000700, "program_exception_handler"},
-    {0x80000800, "floating_point_unavailable_exception_handler"},
-    {0x80000900, "decrementer_exception_handler"},
-    {0x80000C00, "system_call_exception_handler"},
-    {0x80000D00, "trace_exception_handler"},
-    {0x80000E00, "floating_point_assist_exception_handler"},
-    {0x80000F00, "performance_monitor_interrupt_handler"},
-    {0x80001300, "instruction_address_breakpoint_exception_handler"},
-    {0x80001400, "system_management_interrupt_handler"},
-    {0x80001700, "thermal_management_interrupt_exception_handler"},
-}};
+constexpr ExceptionVector s_exception_vectors[] = {
+    {0x0100, "system_reset_exception"},
+    {0x0200, "machine_check_exception"},
+    {0x0300, "dsi_exception"},
+    {0x0400, "isi_exception"},
+    {0x0500, "external_interrupt_exception"},
+    {0x0600, "alignment_exception"},
+    {0x0700, "program_exception"},
+    {0x0800, "floating_point_unavailable_exception"},
+    {0x0900, "decrementer_exception"},
+    {0x0C00, "system_call_exception"},
+    {0x0D00, "trace_exception"},
+    {0x0E00, "floating_point_assist_exception"},
+    {0x0F00, "performance_monitor_interrupt"},
+    {0x1300, "instruction_address_breakpoint_exception"},
+    {0x1400, "system_management_interrupt"},
+    {0x1700, "thermal_management_interrupt_exception"},
+};
 
 void AddExceptionHandlers(const Core::CPUThreadGuard& guard, PPCSymbolDB* db)
 {
   auto& mmu = guard.GetSystem().GetMMU();
-  for (const HandlerName& handler : s_exception_handlers)
+  for (const ExceptionVector& vector : s_exception_vectors)
   {
-    const PowerPC::TryReadInstResult fetched = mmu.TryReadInstruction(handler.address);
-    if (!fetched.valid || !PPCTables::IsValidInstruction(fetched.hex, handler.address))
+    const u32 address = 0x80000000 | vector.offset;
+    const PowerPC::TryReadInstResult fetched = mmu.TryReadInstruction(address);
+    if (!fetched.valid || !PPCTables::IsValidInstruction(fetched.hex, address))
       continue;
-    if (const Common::Symbol* func = db->AddFunction(guard, handler.address))
-      db->RenameSymbol(*func, handler.name);
+    if (const Common::Symbol* func = db->AddFunction(guard, address))
+      db->RenameSymbol(*func, std::string(vector.kind) + "_handler");
   }
 }
 

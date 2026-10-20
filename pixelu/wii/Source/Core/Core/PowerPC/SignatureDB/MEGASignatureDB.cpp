@@ -161,6 +161,19 @@ bool MEGASignatureDB::Save(const std::string& file_path) const
   return false;
 }
 
+// Building a MEGA database is not supported; it is only ever read.
+void MEGASignatureDB::Populate(const PPCSymbolDB* func_db, const std::string& filter)
+{
+  ERROR_LOG_FMT(SYMBOLS, "MEGA database can't be populated yet.");
+}
+
+bool MEGASignatureDB::Add(const Core::CPUThreadGuard& guard, u32 startAddr, u32 size,
+                          const std::string& name)
+{
+  ERROR_LOG_FMT(SYMBOLS, "Can't add symbol to MEGA database yet.");
+  return false;
+}
+
 void MEGASignatureDB::Apply(const Core::CPUThreadGuard& guard, PPCSymbolDB* symbol_db) const
 {
   // The first matching signature names the symbol.
@@ -176,18 +189,6 @@ void MEGASignatureDB::Apply(const Core::CPUThreadGuard& guard, PPCSymbolDB* symb
     }
   });
   symbol_db->Index();
-}
-
-void MEGASignatureDB::Populate(const PPCSymbolDB* func_db, const std::string& filter)
-{
-  ERROR_LOG_FMT(SYMBOLS, "MEGA database can't be populated yet.");
-}
-
-bool MEGASignatureDB::Add(const Core::CPUThreadGuard& guard, u32 startAddr, u32 size,
-                          const std::string& name)
-{
-  ERROR_LOG_FMT(SYMBOLS, "Can't add symbol to MEGA database yet.");
-  return false;
 }
 
 void MEGASignatureDB::List() const

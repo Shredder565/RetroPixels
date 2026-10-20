@@ -93,11 +93,9 @@ SignatureDB::SignatureDB(const std::string& file_path) : SignatureDB(HandlerForP
 {
 }
 
-void SignatureDB::Clear()
-{
-  m_handler->Clear();
-}
+// Everything else is up to the format handler.
 
+// Reading and writing the database file.
 bool SignatureDB::Load(const std::string& file_path)
 {
   return m_handler->Load(file_path);
@@ -108,9 +106,11 @@ bool SignatureDB::Save(const std::string& file_path) const
   return m_handler->Save(file_path);
 }
 
-void SignatureDB::List() const
+// Building the database from known functions.
+bool SignatureDB::Add(const Core::CPUThreadGuard& guard, u32 start_addr, u32 size,
+                      const std::string& name)
 {
-  m_handler->List();
+  return m_handler->Add(guard, start_addr, size, name);
 }
 
 void SignatureDB::Populate(const PPCSymbolDB* func_db, const std::string& filter)
@@ -118,15 +118,20 @@ void SignatureDB::Populate(const PPCSymbolDB* func_db, const std::string& filter
   m_handler->Populate(func_db, filter);
 }
 
+void SignatureDB::Clear()
+{
+  m_handler->Clear();
+}
+
+// Using it: name the matching functions of the current game, or log the entries.
 void SignatureDB::Apply(const Core::CPUThreadGuard& guard, PPCSymbolDB* func_db) const
 {
   m_handler->Apply(guard, func_db);
 }
 
-bool SignatureDB::Add(const Core::CPUThreadGuard& guard, u32 start_addr, u32 size,
-                      const std::string& name)
+void SignatureDB::List() const
 {
-  return m_handler->Add(guard, start_addr, size, name);
+  m_handler->List();
 }
 
 SignatureDBFormatHandler::~SignatureDBFormatHandler() = default;
