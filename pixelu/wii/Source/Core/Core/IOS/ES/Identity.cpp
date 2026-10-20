@@ -1,5 +1,7 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// ES calls about the console's identity: device ID and certificate, signing, signature checks,
+// and AES with IOSC keys.
 
 #include "Core/IOS/ES/ES.h"
 
@@ -22,8 +24,9 @@ namespace IOS::HLE
 {
 ReturnCode ESCore::GetDeviceId(u32* device_id) const
 {
-  *device_id = m_ios.GetIOSC().GetDeviceId();
-  INFO_LOG_FMT(IOS_ES, "GetDeviceId: {:08X}", *device_id);
+  const u32 id = m_ios.GetIOSC().GetDeviceId();
+  INFO_LOG_FMT(IOS_ES, "GetDeviceId: {:08X}", id);
+  *device_id = id;
   return IPC_SUCCESS;
 }
 
@@ -33,54 +36,55 @@ IPCReply ESDevice::GetDeviceId(const IOCtlVRequest& request)
     return IPCReply(ES_EINVAL);
 
   u32 device_id;
-  const ReturnCode ret = m_core.GetDeviceId(&device_id);
-  if (ret != IPC_SUCCESS)
+  if (const ReturnCode ret = m_core.GetDeviceId(&device_id); ret != IPC_SUCCESS)
     return IPCReply(ret);
-
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
-  memory.Write_U32(device_id, request.io_vectors[0].address);
+  GetSystem().GetMemory().Write_U32(device_id, request.io_vectors[0].address);
   return IPCReply(IPC_SUCCESS);
 }
 
-IPCReply ESDevice::Encrypt(u32 uid, const IOCtlVRequest& request)
+namespace
+{
+// Encrypt and Decrypt take: in = {key handle, (unused), data}; io = {IV (updated), output}.
+// Whether the caller may use the key is left to IOSC's ownership check.
+struct CryptBuffers
+{
+  u32 key_handle;
+  u32 size;
+  const u8* input;
+  u8* iv;
+  u8* output;
+};
+
+CryptBuffers GetCryptBuffers(Memory::MemoryManager& memory, const IOCtlVRequest& request)
+{
+  CryptBuffers buffers;
+  buffers.key_handle = memory.Read_U32(request.in_vectors[0].address);
+  buffers.size = request.in_vectors[2].size;
+  buffers.input = memory.GetPointerForRange(request.in_vectors[2].address, buffers.size);
+  buffers.iv = memory.GetPointerForRange(request.io_vectors[0].address, 16);
+  buffers.output = memory.GetPointerForRange(request.io_vectors[1].address, buffers.size);
+  return buffers;
+}
+}  // namespace
+
+IPCReply ESDevice::Encrypt(u32 /*uid*/, const IOCtlVRequest& request)
 {
   if (!request.HasNumberOfValidVectors(3, 2))
     return IPCReply(ES_EINVAL);
 
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
-  u32 keyIndex = memory.Read_U32(request.in_vectors[0].address);
-  u32 size = request.in_vectors[2].size;
-  u8* source = memory.GetPointerForRange(request.in_vectors[2].address, size);
-  u8* iv = memory.GetPointerForRange(request.io_vectors[0].address, 16);
-  u8* destination = memory.GetPointerForRange(request.io_vectors[1].address, size);
-
-  // TODO: Check whether the active title is allowed to encrypt.
-
-  const ReturnCode ret =
-      GetEmulationKernel().GetIOSC().Encrypt(keyIndex, iv, source, size, destination, PID_ES);
-  return IPCReply(ret);
+  const CryptBuffers b = GetCryptBuffers(GetSystem().GetMemory(), request);
+  return IPCReply(GetEmulationKernel().GetIOSC().Encrypt(b.key_handle, b.iv, b.input, b.size,
+                                                         b.output, PID_ES));
 }
 
-IPCReply ESDevice::Decrypt(u32 uid, const IOCtlVRequest& request)
+IPCReply ESDevice::Decrypt(u32 /*uid*/, const IOCtlVRequest& request)
 {
   if (!request.HasNumberOfValidVectors(3, 2))
     return IPCReply(ES_EINVAL);
 
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
-  u32 keyIndex = memory.Read_U32(request.in_vectors[0].address);
-  u32 size = request.in_vectors[2].size;
-  u8* source = memory.GetPointerForRange(request.in_vectors[2].address, size);
-  u8* iv = memory.GetPointerForRange(request.io_vectors[0].address, 16);
-  u8* destination = memory.GetPointerForRange(request.io_vectors[1].address, size);
-
-  // TODO: Check whether the active title is allowed to decrypt.
-
-  const ReturnCode ret =
-      GetEmulationKernel().GetIOSC().Decrypt(keyIndex, iv, source, size, destination, PID_ES);
-  return IPCReply(ret);
+  const CryptBuffers b = GetCryptBuffers(GetSystem().GetMemory(), request);
+  return IPCReply(GetEmulationKernel().GetIOSC().Decrypt(b.key_handle, b.iv, b.input, b.size,
+                                                         b.output, PID_ES));
 }
 
 IPCReply ESDevice::CheckKoreaRegion(const IOCtlVRequest& request)
@@ -88,80 +92,86 @@ IPCReply ESDevice::CheckKoreaRegion(const IOCtlVRequest& request)
   if (!request.HasNumberOfValidVectors(0, 0))
     return IPCReply(ES_EINVAL);
 
-  // note by DacoTaco : name is unknown, I just tried to name it SOMETHING.
-  // IOS70 has this to let system menu 4.2 check if the console is region changed. it returns
-  // -1017
-  // if the IOS didn't find the Korean keys and 0 if it does. 0 leads to a error 003
+  // IOS70 provides this for system menu 4.2, which uses it to detect region-changed Korean
+  // consoles: success means the Korean key was found (and leads to error 003). Report that no
+  // Korean key is present.
   INFO_LOG_FMT(IOS_ES, "IOCTL_ES_CHECKKOREAREGION: Title checked for Korean keys.");
   return IPCReply(ES_EINVAL);
 }
 
 IPCReply ESDevice::GetDeviceCertificate(const IOCtlVRequest& request)
 {
-  if (!request.HasNumberOfValidVectors(0, 1) || request.io_vectors[0].size != 0x180)
+  if (!request.HasNumberOfValidVectors(0, 1) || request.io_vectors[0].size != sizeof(CertECC))
     return IPCReply(ES_EINVAL);
 
   INFO_LOG_FMT(IOS_ES, "IOCTL_ES_GETDEVICECERT");
-
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
-  const IOS::CertECC cert = GetEmulationKernel().GetIOSC().GetDeviceCertificate();
-  memory.CopyToEmu(request.io_vectors[0].address, &cert, sizeof(cert));
+  const CertECC cert = GetEmulationKernel().GetIOSC().GetDeviceCertificate();
+  GetSystem().GetMemory().CopyToEmu(request.io_vectors[0].address, &cert, sizeof(cert));
   return IPCReply(IPC_SUCCESS);
 }
 
 IPCReply ESDevice::Sign(const IOCtlVRequest& request)
 {
+  // in: data; io: signature, AP certificate
   if (!request.HasNumberOfValidVectors(1, 2))
     return IPCReply(ES_EINVAL);
 
   INFO_LOG_FMT(IOS_ES, "IOCTL_ES_SIGN");
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
-  u8* ap_cert_out = memory.GetPointerForRange(request.io_vectors[1].address, sizeof(CertECC));
-  u32 data_size = request.in_vectors[0].size;
-  u8* data = memory.GetPointerForRange(request.in_vectors[0].address, data_size);
-  u8* sig_out =
+  Memory::MemoryManager& memory = GetSystem().GetMemory();
+  u8* cert_out = memory.GetPointerForRange(request.io_vectors[1].address, sizeof(CertECC));
+  const u32 size = request.in_vectors[0].size;
+  const u8* data = memory.GetPointerForRange(request.in_vectors[0].address, size);
+  u8* signature_out =
       memory.GetPointerForRange(request.io_vectors[0].address, sizeof(Common::ec::Signature));
 
+  // The AP certificate is made for the running title, so there has to be one.
   if (!m_core.m_title_context.active)
     return IPCReply(ES_EINVAL);
 
-  GetEmulationKernel().GetIOSC().Sign(sig_out, ap_cert_out, m_core.m_title_context.tmd.GetTitleId(),
-                                      data, data_size);
+  GetEmulationKernel().GetIOSC().Sign(signature_out, cert_out,
+                                      m_core.m_title_context.tmd.GetTitleId(), data, size);
   return IPCReply(IPC_SUCCESS);
 }
 
 ReturnCode ESCore::VerifySign(const std::vector<u8>& hash, const std::vector<u8>& ecc_signature,
                               const std::vector<u8>& certs_bytes)
 {
+  // The chain must hold an AP certificate and the console (NG) certificate that signed it.
   const std::map<std::string, ES::CertReader> certs = ES::ParseCertChain(certs_bytes);
   if (certs.empty())
     return ES_EINVAL;
 
-  const auto ap_iterator = std::ranges::find_if(certs, [](const auto& entry) {
-    return entry.first.length() > 2 && entry.first.compare(0, 2, "AP") == 0;
-  });
-  if (ap_iterator == certs.end())
+  const ES::CertReader* ap = nullptr;
+  for (const auto& [name, cert] : certs)
+  {
+    if (name.size() > 2 && name.starts_with("AP"))
+    {
+      ap = &cert;
+      break;
+    }
+  }
+  if (ap == nullptr)
     return ES_UNKNOWN_ISSUER;
-  const ES::CertReader& ap = ap_iterator->second;
 
-  const auto ap_issuers = SplitString(ap.GetIssuer(), '-');
-  const auto ng_iterator = ap_issuers.size() > 1 ? certs.find(*ap_issuers.rbegin()) : certs.end();
-  if (ng_iterator == certs.end())
+  const std::vector<std::string> ap_chain = SplitString(ap->GetIssuer(), '-');
+  if (ap_chain.size() < 2)
     return ES_UNKNOWN_ISSUER;
-  const ES::CertReader& ng = ng_iterator->second;
+  const auto ng_it = certs.find(ap_chain.back());
+  if (ng_it == certs.end())
+    return ES_UNKNOWN_ISSUER;
+  const ES::CertReader& ng = ng_it->second;
 
   IOSC& iosc = m_ios.GetIOSC();
-  IOSC::Handle ng_cert;
+
+  // NG key, verified up to the root.
+  IOSC::Handle ng_key;
   ReturnCode ret =
-      iosc.CreateObject(&ng_cert, IOSC::TYPE_PUBLIC_KEY, IOSC::ObjectSubType::ECC233, PID_ES);
+      iosc.CreateObject(&ng_key, IOSC::TYPE_PUBLIC_KEY, IOSC::ObjectSubType::ECC233, PID_ES);
   if (ret != IPC_SUCCESS)
     return ret;
-  Common::ScopeGuard handle_guard{[&] { iosc.DeleteObject(ng_cert, PID_ES); }};
-
+  Common::ScopeGuard free_ng{[&] { iosc.DeleteObject(ng_key, PID_ES); }};
   ret = VerifyContainer(VerifyContainerType::Device, VerifyMode::DoNotUpdateCertStore, ng,
-                        certs_bytes, ng_cert);
+                        certs_bytes, ng_key);
   if (ret != IPC_SUCCESS)
   {
     ERROR_LOG_FMT(IOS_ES, "VerifySign: VerifyContainer(ng) failed with error {}",
@@ -169,7 +179,8 @@ ReturnCode ESCore::VerifySign(const std::vector<u8>& hash, const std::vector<u8>
     return ret;
   }
 
-  ret = iosc.VerifyPublicKeySign(ap.GetSha1(), ng_cert, ap.GetSignatureData(), PID_ES);
+  // The AP certificate, signed by the NG key.
+  ret = iosc.VerifyPublicKeySign(ap->GetSha1(), ng_key, ap->GetSignatureData(), PID_ES);
   if (ret != IPC_SUCCESS)
   {
     ERROR_LOG_FMT(IOS_ES, "VerifySign: IOSC_VerifyPublicKeySign(ap) failed with error {}",
@@ -177,13 +188,13 @@ ReturnCode ESCore::VerifySign(const std::vector<u8>& hash, const std::vector<u8>
     return ret;
   }
 
-  IOSC::Handle ap_cert;
-  ret = iosc.CreateObject(&ap_cert, IOSC::TYPE_PUBLIC_KEY, IOSC::ObjectSubType::ECC233, PID_ES);
+  // And the data, signed by the AP key.
+  IOSC::Handle ap_key;
+  ret = iosc.CreateObject(&ap_key, IOSC::TYPE_PUBLIC_KEY, IOSC::ObjectSubType::ECC233, PID_ES);
   if (ret != IPC_SUCCESS)
     return ret;
-  Common::ScopeGuard handle2_guard{[&] { iosc.DeleteObject(ap_cert, PID_ES); }};
-
-  ret = iosc.ImportPublicKey(ap_cert, ap.GetPublicKey().data(), nullptr, PID_ES);
+  Common::ScopeGuard free_ap{[&] { iosc.DeleteObject(ap_key, PID_ES); }};
+  ret = iosc.ImportPublicKey(ap_key, ap->GetPublicKey().data(), nullptr, PID_ES);
   if (ret != IPC_SUCCESS)
   {
     ERROR_LOG_FMT(IOS_ES, "VerifySign: IOSC_ImportPublicKey(ap) failed with error {}",
@@ -191,8 +202,8 @@ ReturnCode ESCore::VerifySign(const std::vector<u8>& hash, const std::vector<u8>
     return ret;
   }
 
-  const auto hash_digest = Common::SHA1::CalculateDigest(hash);
-  ret = iosc.VerifyPublicKeySign(hash_digest, ap_cert, ecc_signature, PID_ES);
+  ret =
+      iosc.VerifyPublicKeySign(Common::SHA1::CalculateDigest(hash), ap_key, ecc_signature, PID_ES);
   if (ret != IPC_SUCCESS)
   {
     ERROR_LOG_FMT(IOS_ES, "VerifySign: IOSC_VerifyPublicKeySign(data) failed with error {}",
@@ -206,23 +217,22 @@ ReturnCode ESCore::VerifySign(const std::vector<u8>& hash, const std::vector<u8>
 
 IPCReply ESDevice::VerifySign(const IOCtlVRequest& request)
 {
-  if (!request.HasNumberOfValidVectors(3, 0))
+  // in: data, ECC signature, certificate chain
+  if (!request.HasNumberOfValidVectors(3, 0) ||
+      request.in_vectors[1].size != sizeof(Common::ec::Signature))
+  {
     return IPCReply(ES_EINVAL);
-  if (request.in_vectors[1].size != sizeof(Common::ec::Signature))
-    return IPCReply(ES_EINVAL);
+  }
 
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
-
-  std::vector<u8> hash(request.in_vectors[0].size);
-  memory.CopyFromEmu(hash.data(), request.in_vectors[0].address, hash.size());
-
-  std::vector<u8> ecc_signature(request.in_vectors[1].size);
-  memory.CopyFromEmu(ecc_signature.data(), request.in_vectors[1].address, ecc_signature.size());
-
-  std::vector<u8> certs(request.in_vectors[2].size);
-  memory.CopyFromEmu(certs.data(), request.in_vectors[2].address, certs.size());
-
-  return IPCReply(m_core.VerifySign(hash, ecc_signature, certs));
+  Memory::MemoryManager& memory = GetSystem().GetMemory();
+  const auto copy_in = [&memory](const IOCtlVRequest::IOVector& vec) {
+    std::vector<u8> bytes(vec.size);
+    memory.CopyFromEmu(bytes.data(), vec.address, bytes.size());
+    return bytes;
+  };
+  const std::vector<u8> data = copy_in(request.in_vectors[0]);
+  const std::vector<u8> signature = copy_in(request.in_vectors[1]);
+  const std::vector<u8> certs = copy_in(request.in_vectors[2]);
+  return IPCReply(m_core.VerifySign(data, signature, certs));
 }
 }  // namespace IOS::HLE

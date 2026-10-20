@@ -1,5 +1,6 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// ES helpers for finding things on the NAND and managing the /title and /import trees.
 
 #include "Core/IOS/ES/ES.h"
 
@@ -22,156 +23,170 @@
 
 namespace IOS::HLE
 {
-static ES::TMDReader FindTMD(FSCore& fs, const std::string& tmd_path, Ticks ticks)
+namespace
 {
-  const auto fd = fs.Open(PID_KERNEL, PID_KERNEL, tmd_path, FS::Mode::Read, {}, ticks);
+constexpr FS::Modes TITLE_DIR_MODES{FS::Mode::ReadWrite, FS::Mode::ReadWrite, FS::Mode::Read};
+constexpr FS::Modes CONTENT_DIR_MODES{FS::Mode::ReadWrite, FS::Mode::ReadWrite, FS::Mode::None};
+constexpr FS::Modes DATA_DIR_MODES{FS::Mode::ReadWrite, FS::Mode::None, FS::Mode::None};
+
+// Reads a TMD through FSCore, so that the time it takes is accounted for.
+ES::TMDReader ReadTMD(FSCore& fs, const std::string& path, Ticks ticks)
+{
+  const auto fd = fs.Open(PID_KERNEL, PID_KERNEL, path, FS::Mode::Read, {}, ticks);
   if (fd.Get() < 0)
     return {};
+  const auto fd_value = static_cast<u64>(fd.Get());
 
-  std::vector<u8> tmd_bytes(fs.GetFileStatus(fd.Get(), ticks)->size);
-  if (!fs.Read(fd.Get(), tmd_bytes.data(), tmd_bytes.size(), ticks))
+  std::vector<u8> bytes(fs.GetFileStatus(fd_value, ticks)->size);
+  // Only a zero-byte result counts as a failure here.
+  if (fs.Read(fd_value, bytes.data(), static_cast<u32>(bytes.size()), {}, ticks) == 0)
     return {};
-
-  return ES::TMDReader{std::move(tmd_bytes)};
+  return ES::TMDReader{std::move(bytes)};
 }
+
+// Title ID halves appear in paths as exactly eight hex digits.
+bool IsTitleIdHalf(const std::string& name)
+{
+  return name.size() == 8 && std::ranges::all_of(name, Common::IsXDigit);
+}
+
+u64 MakeTitleId(const std::string& high, const std::string& low)
+{
+  const auto high_word = static_cast<u32>(std::stoul(high, nullptr, 16));
+  const auto low_word = static_cast<u32>(std::stoul(low, nullptr, 16));
+  return u64{high_word} << 32 | low_word;
+}
+
+bool IsDirectory(FS::FileSystem* fs, const std::string& path)
+{
+  return fs->ReadDirectory(PID_KERNEL, PID_KERNEL, path).has_value();
+}
+
+// /title and /import hold <high word>/<low word> directories.
+std::vector<u64> ListTitleDirectories(FS::FileSystem* fs, const std::string& root)
+{
+  const auto high_names = fs->ReadDirectory(PID_KERNEL, PID_KERNEL, root);
+  if (!high_names)
+  {
+    ERROR_LOG_FMT(IOS_ES, "{} is not a directory", root);
+    return {};
+  }
+
+  std::vector<u64> titles;
+  for (const std::string& high : *high_names)
+  {
+    if (!IsTitleIdHalf(high))
+      continue;
+    const std::string high_dir = fmt::format("{}/{}", root, high);
+    const auto low_names = fs->ReadDirectory(PID_KERNEL, PID_KERNEL, high_dir);
+    if (!low_names)
+      continue;
+    for (const std::string& low : *low_names)
+    {
+      if (IsTitleIdHalf(low) && IsDirectory(fs, fmt::format("{}/{}", high_dir, low)))
+        titles.push_back(MakeTitleId(high, low));
+    }
+  }
+  return titles;
+}
+
+// Deletes `path` and then each of its parents (but never the root) as long as they are empty
+// or unreadable for a reason other than not existing. Stops at the first failed deletion.
+bool DeleteDirectoriesIfEmpty(FS::FileSystem* fs, const std::string& path)
+{
+  std::string dir = path;
+  while (true)
+  {
+    const auto listing = fs->ReadDirectory(PID_KERNEL, PID_KERNEL, dir);
+    const bool remove = listing ? listing->empty() : listing.error() != FS::ResultCode::NotFound;
+    if (remove && fs->Delete(PID_KERNEL, PID_KERNEL, dir) != FS::ResultCode::Success)
+      return false;
+
+    const size_t slash = dir.rfind('/');
+    if (slash == 0 || slash == std::string::npos)
+      return true;
+    dir.resize(slash);
+  }
+}
+}  // namespace
+
+// -----------------------------------------------------------------------------------------------
+// Lookups
 
 ES::TMDReader ESCore::FindImportTMD(u64 title_id, Ticks ticks) const
 {
-  return FindTMD(m_ios.GetFSCore(), Common::GetImportTitlePath(title_id) + "/content/title.tmd",
-                 ticks);
+  const std::string path = Common::GetImportTitlePath(title_id) + "/content/title.tmd";
+  return ReadTMD(m_ios.GetFSCore(), path, ticks);
 }
 
 ES::TMDReader ESCore::FindInstalledTMD(u64 title_id, Ticks ticks) const
 {
-  return FindTMD(m_ios.GetFSCore(), Common::GetTMDFileName(title_id), ticks);
+  return ReadTMD(m_ios.GetFSCore(), Common::GetTMDFileName(title_id), ticks);
 }
 
 ES::TicketReader ESCore::FindSignedTicket(u64 title_id, std::optional<u8> desired_version) const
 {
-  std::string path = desired_version == 1 ? Common::GetV1TicketFileName(title_id) :
-                                            Common::GetTicketFileName(title_id);
-  auto ticket_file = m_ios.GetFS()->OpenFile(PID_KERNEL, PID_KERNEL, path, FS::Mode::Read);
-  if (!ticket_file)
+  const auto fs = m_ios.GetFS();
+  const bool want_v1 = desired_version.has_value() && *desired_version == 1;
+  auto file = fs->OpenFile(PID_KERNEL, PID_KERNEL,
+                           want_v1 ? Common::GetV1TicketFileName(title_id) :
+                                     Common::GetTicketFileName(title_id),
+                           FS::Mode::Read);
+  // Without a requested version, fall back to a v1 ticket file.
+  if (!file && !desired_version.has_value())
   {
-    if (desired_version)
-      // Desired ticket does not exist.
-      return {};
-
-    // Check if we are dealing with a v1 ticket
-    path = Common::GetV1TicketFileName(title_id);
-    ticket_file = m_ios.GetFS()->OpenFile(PID_KERNEL, PID_KERNEL, path, FS::Mode::Read);
-
-    if (!ticket_file)
-      return {};
+    file =
+        fs->OpenFile(PID_KERNEL, PID_KERNEL, Common::GetV1TicketFileName(title_id), FS::Mode::Read);
   }
-
-  std::vector<u8> signed_ticket(ticket_file->GetStatus()->size);
-  if (!ticket_file->Read(signed_ticket.data(), signed_ticket.size()))
+  if (!file)
     return {};
 
-  return ES::TicketReader{std::move(signed_ticket)};
-}
-
-static bool IsValidPartOfTitleID(const std::string& string)
-{
-  if (string.length() != 8)
-    return false;
-  return std::ranges::all_of(string, Common::IsXDigit);
-}
-
-static std::vector<u64> GetTitlesInTitleOrImport(FS::FileSystem* fs, const std::string& titles_dir)
-{
-  const auto entries = fs->ReadDirectory(PID_KERNEL, PID_KERNEL, titles_dir);
-  if (!entries)
-  {
-    ERROR_LOG_FMT(IOS_ES, "{} is not a directory", titles_dir);
+  std::vector<u8> bytes(file->GetStatus()->size);
+  if (!file->Read(bytes.data(), bytes.size()))
     return {};
-  }
-
-  std::vector<u64> title_ids;
-
-  // The /title and /import directories contain one directory per title type, and each of them has
-  // a directory per title (where the name is the low 32 bits of the title ID in %08x format).
-  for (const std::string& title_type : *entries)
-  {
-    if (!IsValidPartOfTitleID(title_type))
-      continue;
-
-    const std::string title_dir = fmt::format("{}/{}", titles_dir, title_type);
-    const auto title_entries = fs->ReadDirectory(PID_KERNEL, PID_KERNEL, title_dir);
-    if (!title_entries)
-      continue;
-
-    for (const std::string& title_identifier : *title_entries)
-    {
-      if (!IsValidPartOfTitleID(title_identifier))
-        continue;
-      if (!fs->ReadDirectory(PID_KERNEL, PID_KERNEL,
-                             fmt::format("{}/{}", title_dir, title_identifier)))
-      {
-        continue;
-      }
-
-      const u32 type = std::stoul(title_type, nullptr, 16);
-      const u32 identifier = std::stoul(title_identifier, nullptr, 16);
-      title_ids.push_back(static_cast<u64>(type) << 32 | identifier);
-    }
-  }
-
-  return title_ids;
+  return ES::TicketReader{std::move(bytes)};
 }
 
 std::vector<u64> ESCore::GetInstalledTitles() const
 {
-  return GetTitlesInTitleOrImport(m_ios.GetFS().get(), "/title");
+  return ListTitleDirectories(m_ios.GetFS().get(), "/title");
 }
 
 std::vector<u64> ESCore::GetTitleImports() const
 {
-  return GetTitlesInTitleOrImport(m_ios.GetFS().get(), "/import");
+  return ListTitleDirectories(m_ios.GetFS().get(), "/import");
 }
 
 std::vector<u64> ESCore::GetTitlesWithTickets() const
 {
   const auto fs = m_ios.GetFS();
-  const auto entries = fs->ReadDirectory(PID_KERNEL, PID_KERNEL, "/ticket");
-  if (!entries)
+  const auto high_names = fs->ReadDirectory(PID_KERNEL, PID_KERNEL, "/ticket");
+  if (!high_names)
   {
     ERROR_LOG_FMT(IOS_ES, "/ticket is not a directory");
     return {};
   }
 
-  std::vector<u64> title_ids;
-
-  // The /ticket directory contains one directory per title type, and each of them contains
-  // one ticket per title (where the name is the low 32 bits of the title ID in %08x format).
-  for (const std::string& title_type : *entries)
+  // /ticket/<high word>/<low word>.tik (or .tv1 for v1 tickets)
+  std::vector<u64> titles;
+  for (const std::string& high : *high_names)
   {
-    if (!IsValidPartOfTitleID(title_type))
+    if (!IsTitleIdHalf(high))
       continue;
-
-    const auto sub_entries = fs->ReadDirectory(PID_KERNEL, PID_KERNEL, "/ticket/" + title_type);
-    if (!sub_entries)
+    const auto files = fs->ReadDirectory(PID_KERNEL, PID_KERNEL, "/ticket/" + high);
+    if (!files)
       continue;
-
-    for (const std::string& file_name : *sub_entries)
+    for (const std::string& name : *files)
     {
-      const std::string name_without_ext = file_name.substr(0, 8);
-      if (fs->ReadDirectory(PID_KERNEL, PID_KERNEL,
-                            fmt::format("/ticket/{}/{}", title_type, file_name)) ||
-          !IsValidPartOfTitleID(name_without_ext) ||
-          (name_without_ext + ".tik" != file_name && name_without_ext + ".tv1" != file_name))
-      {
+      if (IsDirectory(fs.get(), fmt::format("/ticket/{}/{}", high, name)))
         continue;
-      }
-
-      const u32 type = std::stoul(title_type, nullptr, 16);
-      const u32 identifier = std::stoul(name_without_ext, nullptr, 16);
-      title_ids.push_back(static_cast<u64>(type) << 32 | identifier);
+      const std::string low = name.substr(0, 8);
+      if (!IsTitleIdHalf(low) || (name != low + ".tik" && name != low + ".tv1"))
+        continue;
+      titles.push_back(MakeTitleId(high, low));
     }
   }
-
-  return title_ids;
+  return titles;
 }
 
 std::vector<ES::Content>
@@ -181,138 +196,132 @@ ESCore::GetStoredContentsFromTMD(const ES::TMDReader& tmd,
   if (!tmd.IsValid())
     return {};
 
-  const std::vector<ES::Content> contents = tmd.GetContents();
+  const auto is_stored = [&](const ES::Content& content) {
+    const std::string path = GetContentPath(tmd.GetTitleId(), content);
+    if (path.empty())
+      return false;
+    const auto file = m_ios.GetFS()->OpenFile(PID_KERNEL, PID_KERNEL, path, FS::Mode::Read);
+    if (!file)
+      return false;
+    if (check_content_hashes == CheckContentHashes::No)
+      return true;
+    std::vector<u8> data(file->GetStatus()->size);
+    if (!file->Read(data.data(), data.size()))
+      return false;
+    return Common::SHA1::CalculateDigest(data) == content.sha1;
+  };
 
-  std::vector<ES::Content> stored_contents;
-
-  std::copy_if(contents.begin(), contents.end(), std::back_inserter(stored_contents),
-               [this, &tmd, check_content_hashes](const ES::Content& content) {
-                 const auto fs = m_ios.GetFS();
-
-                 const std::string path = GetContentPath(tmd.GetTitleId(), content);
-                 if (path.empty())
-                   return false;
-
-                 // Check whether the content file exists.
-                 const auto file = fs->OpenFile(PID_KERNEL, PID_KERNEL, path, FS::Mode::Read);
-                 if (!file.has_value())
-                   return false;
-
-                 // If content hash checks are disabled, all we have to do is check for existence.
-                 if (check_content_hashes == CheckContentHashes::No)
-                   return true;
-
-                 // Otherwise, check whether the installed content SHA1 matches the expected hash.
-                 std::vector<u8> content_data(file->GetStatus()->size);
-                 if (!file->Read(content_data.data(), content_data.size()))
-                   return false;
-                 return Common::SHA1::CalculateDigest(content_data) == content.sha1;
-               });
-
-  return stored_contents;
+  std::vector<ES::Content> stored;
+  for (const ES::Content& content : tmd.GetContents())
+  {
+    if (is_stored(content))
+      stored.push_back(content);
+  }
+  return stored;
 }
 
 u32 ESCore::GetSharedContentsCount() const
 {
-  const auto entries = m_ios.GetFS()->ReadDirectory(PID_KERNEL, PID_KERNEL, "/shared1");
-  return static_cast<u32>(std::ranges::count_if(*entries, [this](const std::string& entry) {
-    return !m_ios.GetFS()->ReadDirectory(PID_KERNEL, PID_KERNEL, "/shared1/" + entry) &&
-           entry.size() == 12 && entry.compare(8, 4, ".app") == 0;
-  }));
+  const auto fs = m_ios.GetFS();
+  const auto names = fs->ReadDirectory(PID_KERNEL, PID_KERNEL, "/shared1");
+  u32 count = 0;
+  for (const std::string& name : *names)
+  {
+    if (!IsDirectory(fs.get(), "/shared1/" + name) && name.size() == 12 && name.ends_with(".app"))
+      ++count;
+  }
+  return count;
 }
 
 std::vector<std::array<u8, 20>> ESCore::GetSharedContents() const
 {
-  const ES::SharedContentMap map{m_ios.GetFSCore()};
-  return map.GetHashes();
+  return ES::SharedContentMap{m_ios.GetFSCore()}.GetHashes();
 }
 
-static bool DeleteDirectoriesIfEmpty(FS::FileSystem* fs, const std::string& path)
+std::string ESCore::GetContentPath(const u64 title_id, const ES::Content& content,
+                                   Ticks ticks) const
 {
-  std::string::size_type position = std::string::npos;
-  do
-  {
-    const auto directory = fs->ReadDirectory(PID_KERNEL, PID_KERNEL, path.substr(0, position));
-    if ((directory && directory->empty()) ||
-        (!directory && directory.error() != FS::ResultCode::NotFound))
-    {
-      if (fs->Delete(PID_KERNEL, PID_KERNEL, path.substr(0, position)) != FS::ResultCode::Success)
-        return false;
-    }
-    position = path.find_last_of('/', position - 1);
-  } while (position != 0);
-  return true;
+  if (!content.IsShared())
+    return fmt::format("{}/{:08x}.app", Common::GetTitleContentPath(title_id), content.id);
+
+  const ES::SharedContentMap map{m_ios.GetFSCore()};
+  ticks.Add(map.GetTicks());
+  return map.GetFilenameFromSHA1(content.sha1).value_or("");
 }
 
-constexpr FS::Modes title_dir_modes{FS::Mode::ReadWrite, FS::Mode::ReadWrite, FS::Mode::Read};
-constexpr FS::Modes content_dir_modes{FS::Mode::ReadWrite, FS::Mode::ReadWrite, FS::Mode::None};
-constexpr FS::Modes data_dir_modes{FS::Mode::ReadWrite, FS::Mode::None, FS::Mode::None};
+// -----------------------------------------------------------------------------------------------
+// Imports
 
 bool ESCore::CreateTitleDirectories(u64 title_id, u16 group_id) const
 {
   const auto fs = m_ios.GetFS();
 
+  // Both steps run even when the first fails.
   const std::string content_dir = Common::GetTitleContentPath(title_id);
-  const auto result1 =
-      fs->CreateFullPath(PID_KERNEL, PID_KERNEL, content_dir + '/', 0, title_dir_modes);
-  const auto result2 =
-      fs->SetMetadata(PID_KERNEL, content_dir, PID_KERNEL, PID_KERNEL, 0, content_dir_modes);
-  if (result1 != FS::ResultCode::Success || result2 != FS::ResultCode::Success)
+  const FS::ResultCode created =
+      fs->CreateFullPath(PID_KERNEL, PID_KERNEL, content_dir + '/', 0, TITLE_DIR_MODES);
+  const FS::ResultCode owned =
+      fs->SetMetadata(PID_KERNEL, content_dir, PID_KERNEL, PID_KERNEL, 0, CONTENT_DIR_MODES);
+  if (created != FS::ResultCode::Success || owned != FS::ResultCode::Success)
   {
     ERROR_LOG_FMT(IOS_ES, "Failed to create or set metadata on content dir for {:016x}", title_id);
     return false;
   }
 
+  // An existing data directory is kept as it is.
   const std::string data_dir = Common::GetTitleDataPath(title_id);
-  const auto data_dir_contents = fs->ReadDirectory(PID_KERNEL, PID_KERNEL, data_dir);
-  if (!data_dir_contents && (data_dir_contents.error() != FS::ResultCode::NotFound ||
-                             fs->CreateDirectory(PID_KERNEL, PID_KERNEL, data_dir, 0,
-                                                 data_dir_modes) != FS::ResultCode::Success))
+  const auto listing = fs->ReadDirectory(PID_KERNEL, PID_KERNEL, data_dir);
+  if (!listing)
   {
-    ERROR_LOG_FMT(IOS_ES, "Failed to create data dir for {:016x}", title_id);
-    return false;
+    const bool made = listing.error() == FS::ResultCode::NotFound &&
+                      fs->CreateDirectory(PID_KERNEL, PID_KERNEL, data_dir, 0, DATA_DIR_MODES) ==
+                          FS::ResultCode::Success;
+    if (!made)
+    {
+      ERROR_LOG_FMT(IOS_ES, "Failed to create data dir for {:016x}", title_id);
+      return false;
+    }
   }
 
+  // The data directory belongs to the title.
   ES::UIDSys uid_sys{m_ios.GetFSCore()};
   const u32 uid = uid_sys.GetOrInsertUIDForTitle(title_id);
-  if (fs->SetMetadata(0, data_dir, uid, group_id, 0, data_dir_modes) != FS::ResultCode::Success)
+  if (fs->SetMetadata(0, data_dir, uid, group_id, 0, DATA_DIR_MODES) != FS::ResultCode::Success)
   {
     ERROR_LOG_FMT(IOS_ES, "Failed to set metadata on data dir for {:016x}", title_id);
     return false;
   }
-
   return true;
 }
 
 bool ESCore::InitImport(const ES::TMDReader& tmd)
 {
-  if (!CreateTitleDirectories(tmd.GetTitleId(), tmd.GetGroupId()))
+  const u64 title_id = tmd.GetTitleId();
+  if (!CreateTitleDirectories(title_id, tmd.GetGroupId()))
     return false;
 
   const auto fs = m_ios.GetFS();
-  const std::string import_content_dir = Common::GetImportTitlePath(tmd.GetTitleId()) + "/content";
-  const auto result =
-      fs->CreateFullPath(PID_KERNEL, PID_KERNEL, import_content_dir + '/', 0, content_dir_modes);
-  if (result != FS::ResultCode::Success)
+  const std::string import_dir = Common::GetImportTitlePath(title_id) + "/content";
+  if (fs->CreateFullPath(PID_KERNEL, PID_KERNEL, import_dir + '/', 0, CONTENT_DIR_MODES) !=
+      FS::ResultCode::Success)
   {
-    ERROR_LOG_FMT(IOS_ES, "InitImport: Failed to create content dir for {:016x}", tmd.GetTitleId());
+    ERROR_LOG_FMT(IOS_ES, "InitImport: Failed to create content dir for {:016x}", title_id);
     return false;
   }
 
-  // IOS moves the title content directory to /import if the TMD exists during an import.
-  const auto file_info =
-      fs->GetMetadata(PID_KERNEL, PID_KERNEL, Common::GetTMDFileName(tmd.GetTitleId()));
-  if (!file_info || !file_info->is_file)
+  // An update of an installed title starts from its current contents: IOS moves them into
+  // /import (only when the installed TMD exists).
+  const auto tmd_meta = fs->GetMetadata(PID_KERNEL, PID_KERNEL, Common::GetTMDFileName(title_id));
+  if (!tmd_meta || !tmd_meta->is_file)
     return true;
 
-  const std::string content_dir = Common::GetTitleContentPath(tmd.GetTitleId());
-  const auto rename_result = fs->Rename(PID_KERNEL, PID_KERNEL, content_dir, import_content_dir);
-  if (rename_result != FS::ResultCode::Success)
+  if (fs->Rename(PID_KERNEL, PID_KERNEL, Common::GetTitleContentPath(title_id), import_dir) !=
+      FS::ResultCode::Success)
   {
-    ERROR_LOG_FMT(IOS_ES, "InitImport: Failed to move content dir for {:016x}", tmd.GetTitleId());
+    ERROR_LOG_FMT(IOS_ES, "InitImport: Failed to move content dir for {:016x}", title_id);
     return false;
   }
-  DeleteDirectoriesIfEmpty(m_ios.GetFS().get(), import_content_dir);
+  DeleteDirectoriesIfEmpty(fs.get(), import_dir);
   return true;
 }
 
@@ -320,28 +329,25 @@ bool ESCore::FinishImport(const ES::TMDReader& tmd)
 {
   const auto fs = m_ios.GetFS();
   const u64 title_id = tmd.GetTitleId();
-  const std::string import_content_dir = Common::GetImportTitlePath(title_id) + "/content";
+  const std::string import_dir = Common::GetImportTitlePath(title_id) + "/content";
 
-  // Remove everything not listed in the TMD.
-  std::unordered_set<std::string> expected_entries = {"title.tmd"};
-  for (const auto& content_info : tmd.GetContents())
-    expected_entries.insert(fmt::format("{:08x}.app", content_info.id));
-  const auto entries = fs->ReadDirectory(PID_KERNEL, PID_KERNEL, import_content_dir);
-  if (!entries)
+  // Keep the TMD and the contents it lists; anything else (directories included) goes.
+  std::unordered_set<std::string> keep{"title.tmd"};
+  for (const ES::Content& content : tmd.GetContents())
+    keep.insert(fmt::format("{:08x}.app", content.id));
+
+  const auto names = fs->ReadDirectory(PID_KERNEL, PID_KERNEL, import_dir);
+  if (!names)
     return false;
-  for (const std::string& name : *entries)
+  for (const std::string& name : *names)
   {
-    const std::string absolute_path = fmt::format("{}/{}", import_content_dir, name);
-    // There should not be any directory in there. Remove it.
-    if (fs->ReadDirectory(PID_KERNEL, PID_KERNEL, absolute_path))
-      fs->Delete(PID_KERNEL, PID_KERNEL, absolute_path);
-    else if (!expected_entries.contains(name))
-      fs->Delete(PID_KERNEL, PID_KERNEL, absolute_path);
+    const std::string path = fmt::format("{}/{}", import_dir, name);
+    if (IsDirectory(fs.get(), path) || !keep.contains(name))
+      fs->Delete(PID_KERNEL, PID_KERNEL, path);
   }
 
   const std::string content_dir = Common::GetTitleContentPath(title_id);
-  if (fs->Rename(PID_KERNEL, PID_KERNEL, import_content_dir, content_dir) !=
-      FS::ResultCode::Success)
+  if (fs->Rename(PID_KERNEL, PID_KERNEL, import_dir, content_dir) != FS::ResultCode::Success)
   {
     ERROR_LOG_FMT(IOS_ES, "FinishImport: Failed to rename import directory to {}", content_dir);
     return false;
@@ -352,95 +358,90 @@ bool ESCore::FinishImport(const ES::TMDReader& tmd)
 bool ESCore::WriteImportTMD(const ES::TMDReader& tmd)
 {
   const auto fs = m_ios.GetFS();
-  const std::string tmd_path = "/tmp/title.tmd";
+  const std::string staging = "/tmp/title.tmd";
   {
-    const auto file = fs->CreateAndOpenFile(PID_KERNEL, PID_KERNEL, tmd_path, content_dir_modes);
-    if (!file || !file->Write(tmd.GetBytes().data(), tmd.GetBytes().size()))
+    const auto file = fs->CreateAndOpenFile(PID_KERNEL, PID_KERNEL, staging, CONTENT_DIR_MODES);
+    if (!file)
+      return false;
+    const std::vector<u8>& bytes = tmd.GetBytes();
+    if (!file->Write(bytes.data(), bytes.size()))
       return false;
   }
-
-  const std::string dest =
+  const std::string destination =
       fmt::format("{}/content/title.tmd", Common::GetImportTitlePath(tmd.GetTitleId()));
-  return fs->Rename(PID_KERNEL, PID_KERNEL, tmd_path, dest) == FS::ResultCode::Success;
+  return fs->Rename(PID_KERNEL, PID_KERNEL, staging, destination) == FS::ResultCode::Success;
 }
 
 void ESCore::FinishStaleImport(u64 title_id)
 {
-  const auto fs = m_ios.GetFS();
-  const auto import_tmd = FindImportTMD(title_id);
-  if (!import_tmd.IsValid())
-  {
-    fs->Delete(PID_KERNEL, PID_KERNEL, Common::GetImportTitlePath(title_id) + "/content");
-    DeleteDirectoriesIfEmpty(fs.get(), Common::GetImportTitlePath(title_id));
-    DeleteDirectoriesIfEmpty(fs.get(), Common::GetTitlePath(title_id));
-  }
-  else
+  // With a TMD in /import the import had got far enough to be completed; otherwise discard it.
+  const ES::TMDReader import_tmd = FindImportTMD(title_id);
+  if (import_tmd.IsValid())
   {
     FinishImport(import_tmd);
+    return;
   }
+
+  const auto fs = m_ios.GetFS();
+  const std::string import_root = Common::GetImportTitlePath(title_id);
+  fs->Delete(PID_KERNEL, PID_KERNEL, import_root + "/content");
+  DeleteDirectoriesIfEmpty(fs.get(), import_root);
+  DeleteDirectoriesIfEmpty(fs.get(), Common::GetTitlePath(title_id));
 }
 
 void ESCore::FinishAllStaleImports()
 {
-  const std::vector<u64> titles = GetTitleImports();
-  for (const u64& title_id : titles)
+  for (const u64 title_id : GetTitleImports())
     FinishStaleImport(title_id);
 }
 
-std::string ESCore::GetContentPath(const u64 title_id, const ES::Content& content,
-                                   Ticks ticks) const
-{
-  if (content.IsShared())
-  {
-    ES::SharedContentMap content_map{m_ios.GetFSCore()};
-    ticks.Add(content_map.GetTicks());
-    return content_map.GetFilenameFromSHA1(content.sha1).value_or("");
-  }
-  return fmt::format("{}/{:08x}.app", Common::GetTitleContentPath(title_id), content.id);
-}
+// -----------------------------------------------------------------------------------------------
+// System files
 
 s32 ESDevice::WriteSystemFile(const std::string& path, std::span<const u8> data, Ticks ticks)
 {
-  auto& fs = GetEmulationKernel().GetFSCore();
-  const std::string tmp_path = "/tmp/" + PathToFileName(path);
+  // Write a temporary file in /tmp with the same name, then move it into place.
+  FSCore& fs = GetEmulationKernel().GetFSCore();
+  const std::string staging = "/tmp/" + PathToFileName(path);
 
-  auto result = fs.CreateFile(PID_KERNEL, PID_KERNEL, tmp_path, {},
-                              {FS::Mode::ReadWrite, FS::Mode::ReadWrite, FS::Mode::None}, ticks);
+  FS::ResultCode result =
+      fs.CreateFile(PID_KERNEL, PID_KERNEL, staging, {},
+                    {FS::Mode::ReadWrite, FS::Mode::ReadWrite, FS::Mode::None}, ticks);
   if (result != FS::ResultCode::Success)
   {
-    ERROR_LOG_FMT(IOS_ES, "Failed to create temporary file {}: {}", tmp_path,
+    ERROR_LOG_FMT(IOS_ES, "Failed to create temporary file {}: {}", staging,
                   static_cast<int>(result));
     return FS::ConvertResult(result);
   }
 
-  auto fd = fs.Open(PID_KERNEL, PID_KERNEL, tmp_path, FS::Mode::ReadWrite, {}, ticks);
+  FSCore::ScopedFd fd = fs.Open(PID_KERNEL, PID_KERNEL, staging, FS::Mode::ReadWrite, {}, ticks);
   if (fd.Get() < 0)
   {
-    ERROR_LOG_FMT(IOS_ES, "Failed to open temporary file {}: {}", tmp_path, fd.Get());
-    return fd.Get();
+    ERROR_LOG_FMT(IOS_ES, "Failed to open temporary file {}: {}", staging, fd.Get());
+    return static_cast<s32>(fd.Get());
   }
 
-  if (fs.Write(fd.Get(), data.data(), u32(data.size()), {}, ticks) != s32(data.size()))
+  const auto size = static_cast<u32>(data.size());
+  if (fs.Write(static_cast<u64>(fd.Get()), data.data(), size, {}, ticks) != static_cast<s32>(size))
   {
-    ERROR_LOG_FMT(IOS_ES, "Failed to write to temporary file {}", tmp_path);
+    ERROR_LOG_FMT(IOS_ES, "Failed to write to temporary file {}", staging);
     return ES_EIO;
   }
 
-  if (const auto ret = fs.Close(fd.Release(), ticks); ret != IPC_SUCCESS)
+  const s32 closed = fs.Close(static_cast<u64>(fd.Release()), ticks);
+  if (closed != IPC_SUCCESS)
   {
-    ERROR_LOG_FMT(IOS_ES, "Failed to close temporary file {}", tmp_path);
-    return ret;
+    ERROR_LOG_FMT(IOS_ES, "Failed to close temporary file {}", staging);
+    return closed;
   }
 
-  result = fs.RenameFile(PID_KERNEL, PID_KERNEL, tmp_path, path, ticks);
+  result = fs.RenameFile(PID_KERNEL, PID_KERNEL, staging, path, ticks);
   if (result != FS::ResultCode::Success)
   {
     ERROR_LOG_FMT(IOS_ES, "Failed to move launch file to final destination ({}): {}", path,
                   static_cast<int>(result));
     return FS::ConvertResult(result);
   }
-
   return IPC_SUCCESS;
 }
-
 }  // namespace IOS::HLE

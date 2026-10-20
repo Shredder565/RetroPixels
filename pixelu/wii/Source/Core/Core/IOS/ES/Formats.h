@@ -1,8 +1,8 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-// Utilities to manipulate files and formats from the Wii's ES module: tickets,
-// TMD, and other title informations.
+// On-disc and on-NAND structures handled by ES (tickets, TMDs, certificates, content.map and
+// uid.sys), and small reader classes that pull fields out of them. Field layouts follow WiiBrew
+// ("Ticket", "Title metadata", "Certificate chain"); everything is big endian on disk.
 
 #pragma once
 
@@ -30,6 +30,7 @@ class FileSystem;
 
 namespace ES
 {
+// Upper 32 bits of a title ID.
 enum class TitleType : u32
 {
   System = 0x00000001,
@@ -45,19 +46,17 @@ bool IsTitleType(u64 title_id, TitleType title_type);
 bool IsDiscTitle(u64 title_id);
 bool IsChannel(u64 title_id);
 
+// Bits of the TMD title_flags word.
 enum TitleFlags : u32
 {
-  // All official titles have this flag set.
+  // Set on every official title.
   TITLE_TYPE_DEFAULT = 0x1,
-  // Unknown.
   TITLE_TYPE_0x4 = 0x4,
-  // Used for DLC titles.
+  // DLC
   TITLE_TYPE_DATA = 0x8,
-  // Unknown.
   TITLE_TYPE_0x10 = 0x10,
-  // Appears to be used for WFS titles.
+  // Seen on titles that use WFS
   TITLE_TYPE_WFS_MAYBE = 0x20,
-  // Unknown.
   TITLE_TYPE_CT = 0x40,
 };
 
@@ -68,7 +67,7 @@ struct TMDHeader
   u8 tmd_version;
   u8 ca_crl_version;
   u8 signer_crl_version;
-  // This is usually an always 0 padding byte, which is set to 1 on vWii TMDs
+  // Normally zero; 1 marks a vWii TMD.
   u8 is_vwii;
   u64 ios_id;
   u64 title_id;
@@ -89,6 +88,7 @@ struct TMDHeader
 static_assert(sizeof(TMDHeader) == 0x1e4, "TMDHeader has the wrong size");
 static_assert(offsetof(TMDHeader, ios_id) == 0x184);
 
+// One content record of a TMD.
 struct Content
 {
   bool IsShared() const;
@@ -108,6 +108,7 @@ struct TimeLimit
   u32 seconds;
 };
 
+// What ES hands out to titles instead of a full ticket.
 struct TicketView
 {
   u8 version;
@@ -125,9 +126,7 @@ struct TicketView
 };
 static_assert(sizeof(TicketView) == 0xd8, "TicketView has the wrong size");
 
-// This structure is used for (signed) tickets. Technically, there are other types of tickets
-// (RSA4096, ECDSA, ...). However, only RSA2048 tickets have ever been seen and these are also
-// the only ticket type that is supported by the Wii's IOS.
+// A signed ticket. IOS only accepts RSA-2048 signed tickets, so that is the only layout here.
 struct Ticket
 {
   SignatureRSA2048 signature;
@@ -151,6 +150,7 @@ struct Ticket
 };
 static_assert(sizeof(Ticket) == 0x2A4, "Ticket has the wrong size");
 
+// Follows the v0 part of a version 1 ticket.
 struct V1TicketHeader
 {
   u16 version;
@@ -166,6 +166,7 @@ static_assert(sizeof(V1TicketHeader) == 0x14, "V1TicketHeader has the wrong size
 
 constexpr u32 MAX_TMD_SIZE = 0x49e4;
 
+// Base for any blob that starts with a signature block.
 class SignedBlobReader
 {
 public:
@@ -175,17 +176,16 @@ public:
   const std::vector<u8>& GetBytes() const;
   void SetBytes(std::vector<u8> bytes);
 
-  /// Get the SHA1 hash for this signed blob (starting at the issuer).
+  // SHA-1 of everything from the issuer field to the end of the blob.
   std::array<u8, 20> GetSha1() const;
 
-  // Only checks whether the signature data could be parsed. The signature is not verified.
+  // True if the signature block is complete. This does not check the signature itself.
   bool IsSignatureValid() const;
 
   SignatureType GetSignatureType() const;
   std::vector<u8> GetSignatureData() const;
   size_t GetSignatureSize() const;
-  // Returns the whole issuer chain.
-  // Example: Root-CA00000001 if the blob was signed by CA00000001, which is signed by the Root.
+  // The full issuer chain, e.g. "Root-CA00000001-XS00000003".
   std::string GetIssuer() const;
 
   void DoState(PointerWrap& p);
@@ -204,7 +204,7 @@ public:
 
   bool IsValid() const;
 
-  // Returns parts of the TMD without any kind of parsing. Intended for use by ES.
+  // The TMD view returned by ES (header fields and content records without hashes), unswapped.
   std::vector<u8> GetRawView() const;
 
   u16 GetBootIndex() const;
@@ -216,15 +216,11 @@ public:
   DiscIO::Region GetRegion() const;
   bool IsvWii() const;
 
-  // Constructs a 6-character game ID in the format typically used by Dolphin.
-  // If the 6-character game ID would contain non-alphanumeric characters,
-  // the title ID converted to 16 hexadecimal digits is returned instead.
+  // Six-character game ID (title ID low word + group ID). Falls back to the title ID as 16 hex
+  // digits when those characters are not all alphanumeric.
   std::string GetGameID() const;
 
-  // Constructs a 4-character game ID in the format typically used by GameTDB.
-  // If the 4-character game ID would contain non-alphanumeric characters,
-  // the title ID converted to 16 hexadecimal digits is returned instead
-  // (a format which GameTDB does not actually use).
+  // Four-character GameTDB ID (title ID low word), with the same hex fallback.
   std::string GetGameTDBID() const;
 
   u16 GetNumContents() const;
@@ -245,10 +241,8 @@ public:
   std::vector<u8> GetRawTicket(u64 ticket_id) const;
   size_t GetNumberOfTickets() const;
 
-  // Returns a "raw" ticket view, without byte swapping. Intended for use from ES.
-  // Theoretically, a ticket file can contain one or more tickets. In practice, most (all?)
-  // official titles only have one ticket, but IOS *does* have code to handle ticket files with
-  // more than just one ticket and generate ticket views for them, so we implement it too.
+  // The unswapped ticket view for the ticket_num-th ticket in the file. A ticket file can hold
+  // several v0 tickets, and IOS builds a view for each of them.
   std::vector<u8> GetRawTicketView(u32 ticket_num) const;
 
   u8 GetVersion() const;
@@ -256,26 +250,26 @@ public:
   u32 GetTicketSize() const;
   u64 GetTitleId() const;
   u8 GetCommonKeyIndex() const;
-  // Get the decrypted title key.
+  // The title key, decrypted with the common key held by `iosc`.
   std::array<u8, 16> GetTitleKey(const HLE::IOSC& iosc) const;
-  // Same as the above version, but guesses the console type depending on the issuer
-  // and constructs a temporary IOSC instance.
+  // As above, with a temporary IOSC whose console type is taken from the issuer.
   std::array<u8, 16> GetTitleKey() const;
 
-  // Infers the console type (retail or devkit) based on the certificate issuer.
+  // Retail or development, judged from the issuer.
   HLE::IOSC::ConsoleType GetConsoleType() const;
 
-  // Deletes a ticket with the given ticket ID from the internal buffer.
+  // Removes every ticket with this ticket ID from the buffer.
   void DeleteTicket(u64 ticket_id);
 
-  // Decrypts the title key field for a "personalised" ticket -- one that is device-specific
-  // and has a title key that must be decrypted first.
+  // For a console-specific ticket: decrypts the title key in place using an ECDH key derived
+  // from the console key and the ticket's server public key.
   HLE::ReturnCode Unpersonalise(HLE::IOSC& iosc);
 
-  // Intended for use before importing fakesigned tickets, which tend to have a high bogus index.
+  // Fakesigned tickets often carry a nonsense common key index; this lets the importer fix it.
   void OverwriteCommonKeyIndex(u8 index);
 };
 
+// /shared1/content.map: maps the SHA-1 of shared contents to their /shared1 file names.
 class SharedContentMap final
 {
 public:
@@ -299,6 +293,7 @@ private:
   u64 m_ticks = 0;
 };
 
+// /sys/uid.sys: assigns a UID to every title that has been run.
 class UIDSys final
 {
 public:
@@ -324,11 +319,10 @@ public:
   bool IsValid() const;
 
   u32 GetId() const;
-  // Returns the certificate name. Examples: XS00000003, CA00000001
+  // e.g. "XS00000003" or "CA00000001"
   std::string GetName() const;
   PublicKeyType GetPublicKeyType() const;
-  // Returns the public key bytes + any other data associated with it.
-  // For RSA public keys, this includes 4 bytes for the exponent at the end.
+  // The key bytes; for RSA keys the 4-byte exponent is appended.
   std::vector<u8> GetPublicKey() const;
 
 private:

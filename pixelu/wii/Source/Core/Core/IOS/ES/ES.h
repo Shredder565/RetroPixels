@@ -1,5 +1,8 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// ES (the "e-ticket services" module): title installation and removal, tickets and TMDs,
+// content access, and title launching. ESCore holds the logic that kernel code (and WAD
+// installation outside of emulation) can use directly; ESDevice is /dev/es on top of it.
 
 #pragma once
 
@@ -28,6 +31,7 @@ enum class Platform;
 
 namespace IOS::HLE
 {
+// The title ES currently considers running (set on launch or DI verify).
 struct TitleContext
 {
   void Clear();
@@ -53,6 +57,7 @@ public:
   ESCore& operator=(ESCore&& other) = delete;
   ~ESCore();
 
+  // State of an import or export that is in progress on one ES handle.
   struct TitleImportExportContext
   {
     void DoState(PointerWrap& p);
@@ -70,6 +75,7 @@ public:
     ContentContext content;
   };
 
+  // Per-handle state.
   struct Context
   {
     void DoState(PointerWrap& p);
@@ -78,7 +84,7 @@ public:
     u32 uid = 0;
     TitleImportExportContext title_import_export;
     bool active = false;
-    // We use this to associate an IPC fd with an ES context.
+    // The IPC fd this context belongs to.
     s32 ipc_fd = -1;
   };
 
@@ -87,11 +93,11 @@ public:
   ES::TicketReader FindSignedTicket(u64 title_id,
                                     std::optional<u8> desired_version = std::nullopt) const;
 
-  // Get installed titles (in /title) without checking for TMDs at all.
+  // Title IDs that have a directory under /title (TMDs are not checked).
   std::vector<u64> GetInstalledTitles() const;
-  // Get titles which are being imported (in /import) without checking for TMDs at all.
+  // Title IDs that have a directory under /import (TMDs are not checked).
   std::vector<u64> GetTitleImports() const;
-  // Get titles for which there is a ticket (in /ticket).
+  // Title IDs that have a ticket under /ticket.
   std::vector<u64> GetTitlesWithTickets() const;
 
   enum class CheckContentHashes : bool
@@ -106,18 +112,18 @@ public:
   u32 GetSharedContentsCount() const;
   std::vector<std::array<u8, 20>> GetSharedContents() const;
 
-  // Title contents
+  // Reading title contents
   s32 OpenContent(const ES::TMDReader& tmd, u16 content_index, u32 uid, Ticks ticks = {});
   s32 CloseContent(u32 cfd, u32 uid, Ticks ticks = {});
   s32 ReadContent(u32 cfd, u8* buffer, u32 size, u32 uid, Ticks ticks = {});
   s32 SeekContent(u32 cfd, u32 offset, SeekMode mode, u32 uid, Ticks ticks = {});
 
-  // Title management
+  // Installing and removing titles
   enum class TicketImportType
   {
-    // Ticket may be personalised, so use console specific data for decryption if needed.
+    // Decrypt a console-specific title key with this console's key if the ticket needs it.
     PossiblyPersonalised,
-    // Ticket is unpersonalised, so ignore any console specific decryption data.
+    // Never treat the ticket as console-specific.
     Unpersonalised,
   };
   enum class VerifySignature
@@ -156,7 +162,7 @@ public:
   ReturnCode VerifySign(const std::vector<u8>& hash, const std::vector<u8>& ecc_signature,
                         const std::vector<u8>& certs);
 
-  // Views
+  // Tickets from views
   ReturnCode GetTicketFromView(const u8* ticket_view, u8* ticket, u32* ticket_size,
                                std::optional<u8> desired_version) const;
 
@@ -172,12 +178,12 @@ public:
   };
   enum class VerifyMode
   {
-    // Whether or not new certificates should be added to the certificate store (/sys/cert.sys).
+    // Whether certificates that were used get appended to /sys/cert.sys.
     DoNotUpdateCertStore,
     UpdateCertStore,
   };
-  // On success, if issuer_handle is non-null, the IOSC object for the issuer will be written to it.
-  // The caller is responsible for using IOSC_DeleteObject.
+  // Checks a signed blob against its issuer chain. When issuer_handle is given and the check
+  // passes, it receives the IOSC object holding the issuer's key; the caller must delete it.
   ReturnCode VerifyContainer(VerifyContainerType type, VerifyMode mode,
                              const ES::SignedBlobReader& signed_blob,
                              const std::vector<u8>& cert_chain, u32* issuer_handle = nullptr);
@@ -186,13 +192,13 @@ public:
                              u32 certificate_iosc_handle);
 
 private:
-  // Start a title import.
+  // Prepares /import for a title.
   bool InitImport(const ES::TMDReader& tmd);
-  // Clean up the import content directory and move it back to /title.
+  // Moves an import from /import back into /title.
   bool FinishImport(const ES::TMDReader& tmd);
-  // Write a TMD for a title in /import atomically.
+  // Writes the TMD of an import (atomically).
   bool WriteImportTMD(const ES::TMDReader& tmd);
-  // Finish stale imports and clear the import directory.
+  // Completes or discards imports left over from a previous run.
   void FinishStaleImport(u64 title_id);
   void FinishAllStaleImports();
 
@@ -251,6 +257,7 @@ public:
   ESCore& GetCore() const { return m_core; }
 
 private:
+  // ioctlv numbers (WiiBrew, "/dev/es").
   enum
   {
     IOCTL_ES_ADDTICKET = 0x01,
@@ -324,11 +331,11 @@ private:
     IOCTL_ES_CHECKKOREAREGION = 0x45,
   };
 
-  // ES can only have 3 contexts at one time.
+  // At most three ES handles can be open at once.
   using Context = ESCore::Context;
   using ContextArray = std::array<Context, 3>;
 
-  // Title management
+  // Installing and removing titles
   IPCReply ImportTicket(const IOCtlVRequest& request);
   IPCReply ImportTmd(Context& context, const IOCtlVRequest& request);
   IPCReply ImportTitleInit(Context& context, const IOCtlVRequest& request);
@@ -348,7 +355,7 @@ private:
   IPCReply DeleteSharedContent(const IOCtlVRequest& request);
   IPCReply DeleteContent(const IOCtlVRequest& request);
 
-  // Device identity and encryption
+  // Console identity and crypto
   IPCReply GetDeviceId(const IOCtlVRequest& request);
   IPCReply GetDeviceCertificate(const IOCtlVRequest& request);
   IPCReply CheckKoreaRegion(const IOCtlVRequest& request);
@@ -357,7 +364,7 @@ private:
   IPCReply Encrypt(u32 uid, const IOCtlVRequest& request);
   IPCReply Decrypt(u32 uid, const IOCtlVRequest& request);
 
-  // Misc
+  // Other
   IPCReply SetUID(u32 uid, const IOCtlVRequest& request);
   IPCReply GetTitleDirectory(const IOCtlVRequest& request);
   IPCReply GetTitleId(const IOCtlVRequest& request);
@@ -368,14 +375,14 @@ private:
   IPCReply SetUpStreamKey(const Context& context, const IOCtlVRequest& request);
   IPCReply DeleteStreamKey(const IOCtlVRequest& request);
 
-  // Title contents
+  // Reading title contents
   IPCReply OpenActiveTitleContent(u32 uid, const IOCtlVRequest& request);
   IPCReply OpenContent(u32 uid, const IOCtlVRequest& request);
   IPCReply ReadContent(u32 uid, const IOCtlVRequest& request);
   IPCReply CloseContent(u32 uid, const IOCtlVRequest& request);
   IPCReply SeekContent(u32 uid, const IOCtlVRequest& request);
 
-  // Title information
+  // Title listings
   IPCReply GetTitleCount(std::span<const u64> titles, const IOCtlVRequest& request);
   IPCReply GetTitles(std::span<const u64> titles, const IOCtlVRequest& request);
   IPCReply GetOwnedTitleCount(const IOCtlVRequest& request);
@@ -394,7 +401,7 @@ private:
   IPCReply GetSharedContentsCount(const IOCtlVRequest& request) const;
   IPCReply GetSharedContents(const IOCtlVRequest& request) const;
 
-  // Views for tickets and TMDs
+  // Ticket and TMD views
   IPCReply GetTicketViewCount(const IOCtlVRequest& request);
   IPCReply GetTicketViews(const IOCtlVRequest& request);
   IPCReply GetV0TicketFromView(const IOCtlVRequest& request);
