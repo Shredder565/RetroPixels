@@ -99,18 +99,18 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 29985 | 6.8% |
-| Dolphin, untouched | 400552 | 90.9% |
+| Original (RetroPixels) | 39464 | 9.0% |
+| Dolphin, untouched | 387178 | 88.7% |
 | Dolphin, with PixelU changes | 4224 | 1.0% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.3% |
-| **All** | **440524** | 100% |
+| **All** | **436629** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
 | Core/AudioCommon | 3219 | 0 | Dolphin |
-| Core/Common (top level) | 27061 | 19272 | mixed (71% original) |
-| Core/Common/Assembler | 5585 | 0 | Dolphin |
+| Core/Common (top level) | 24949 | 24949 | original |
+| Core/Common/Assembler | 3802 | 3802 | original |
 | Core/Common/Config | 909 | 909 | original |
 | Core/Common/Crypto | 1202 | 1202 | original |
 | Core/Common/Debug | 437 | 437 | original |
@@ -231,7 +231,7 @@ batch rewrites them.
 | W1 | Prune: delete code no Windows x64 build compiles (ARM64, Metal, macOS, Android, Linux/BSD) | 0 | 0 | done (no files left) |
 | W2 | Common: types, bits, containers, strings, files, threads, config, logging | 13403 | 13403 | original |
 | W3 | Common: platform, memory, network, crypto, file formats | 8998 | 8998 | original |
-| W4 | Common: x64 emitter, disassemblers, PowerPC assembler | 13374 | 0 | Dolphin |
+| W4 | Common: x64 emitter, disassemblers, PowerPC assembler | 9479 | 9479 | original |
 | W5 | DiscIO: blob formats and compression | 7584 | 7584 | original |
 | W6 | DiscIO: volumes, filesystems, verifier, Riivolution, NAND import | 8676 | 0 | Dolphin |
 | W7 | PowerPC: CPU state, MMU, caches, analyst, tables, symbols, breakpoints, GDB stub | 11905 | 0 | Dolphin |
@@ -647,3 +647,89 @@ the third-party Externals directly) before the submodule can go.
     came from those stubs. Every changed `.cpp` also compiles with
     x86_64-w64-mingw32-g++ 13 (`_WIN32` paths, including DirectoryBlob's
     `\` separators).
+
+- W4 log: rewrote all 25 files of Common's x64 code generation, host and
+  Gekko disassemblers and the Gekko assembler (9479 lines now, from
+  13374). Every file starts with the original-code header and has no
+  Dolphin copyright or SPDX line. File names and every public declaration
+  other code uses are unchanged.
+  - Emitter (`x64Emitter`, `x64Reg.h`, `x64ABI`, `CodeBlock.h`): encoders
+    written again from the Intel SDM and AMD APM encodings (ModRM/SIB/REX/
+    VEX building, operand classes, the SSE/AVX/BMI/FMA tables). The ABI
+    helpers keep the same push/pop order, shadow space and stack alignment
+    for the Windows x64 and System V conventions.
+  - `JitRegister` (perf map output, same format) and `HostDisassembler`
+    (Bochs and LLVM back ends and the hex-dump fallback, same text).
+  - `GekkoDisassembler`: table-driven decoder that keeps its state per call
+    instead of in static buffers (so it is thread-safe now). Same
+    `Disassemble`, `GetGPRName` and `GetFPRName`.
+  - Assembler (`Assembler/*`): lexer with lazy lookahead and the same three
+    identifier rules; recursive-descent parser with precedence climbing and
+    the same plugin callbacks in the same order (the syntax highlighter
+    depends on them); IR builder that evaluates directives at once and
+    instruction operands after the last label is known; encoder driven by
+    a table of instruction layouts plus rewrites for the simplified
+    mnemonics. Same error messages and positions. The GekkoMnemonic and
+    ExtendedGekkoMnemonic enums were internal and are gone.
+  - Deliberate differences (bug fixes, nothing a game sees):
+    - Emitter: `MOVQ_xmm(m64, xmm)` (66 0F D6) put REX before the 0x66
+      prefix, where the CPU ignores it; now 0x66 then REX. BT/BTS/BTR/BTC
+      with a register bit index and a RIP-relative operand, and
+      PEXTRW/PINSRW/PINSRD with a RIP-relative operand, encoded the wrong
+      displacement because they did not count the trailing byte.
+    - Assembler: an error on the first token of a line reported the
+      previous line as `error_line` (the debugger's error display could
+      then throw on `substr`). It is now the token's own line.
+    - Assembler: out-of-range `.float`/`.double` literals (e.g. 1e50) threw
+      `std::out_of_range` from stof/stod; they now give inf/0 like strtof/
+      strtod.
+    - Assembler: division by zero in an expression crashed with SIGFPE
+      (including when the divisor was an unresolved symbol); it is now the
+      error "Division by zero", reported at the token after the
+      expression.
+    - Assembler: `b<cond>lr`/`b<cond>ctr` (and their l/+/- forms) rejected
+      the optional CR field operand (`beqlr cr1` gave "Unexpected token
+      ... where line should have ended"); they now accept it and encode
+      the same word as the matching `bclr`/`bcctr`.
+    - Assembler: `Lexer::LookaheadTagRef` could loop forever or read past
+      its buffer when asked for a token not yet lexed; it now lexes ahead
+      as needed. `AssemblerError::FormatError` no longer calls `back()` on
+      an empty line.
+  - Checked:
+    - Emitter: old and new emitters linked into one harness, every public
+      method called with generated operands: 110,265,978 calls with all CPU
+      features on and all off, small-buffer runs (write failures) and
+      Windows-ABI runs. Bytes, alerts and write-failed flags identical,
+      apart from the three fixes above (34,304 MOVQ cases, exactly the
+      reordered prefix; 1,152 BT* cases; 864 PEXTRW/PINSRW/PINSRD cases).
+      `ABI_CallLambdaPC` differs only by build-specific addresses.
+      CodeBlock tests identical.
+    - JitRegister and HostDisassembler (Bochs real, LLVM mocked): identical
+      output.
+    - GekkoDisassembler: all 2^32 instruction words, random addresses,
+      both byte orders: identical text.
+    - Assembler: 3 million generated sources (valid programs for every
+      mnemonic and suffix, directives, labels, numeric labels, @ha/@l,
+      expressions, strings with escapes, floats, comments, CRLF, NUL bytes,
+      mutated and random text) through old and new: the assembled blocks,
+      errors (message, line, col, len, error line, FormatError), a full
+      trace of every parser callback with lexer positions, and lexer token
+      dumps under seven match-rule sequences. 450,112 sources assembled
+      without error. Every difference is one of the fixes above:
+      previous-line `error_line` (old) vs own line (new), old stof/stod
+      exceptions, old "where line should have ended" right after a
+      `b<cond>lr/ctr` mnemonic, and 25 old SIGFPE crashes (new: an error
+      each time). Targeted tests
+      check `b<cond>lr/ctr[l] crN` for all 12 conditions and 8 fields
+      against `bclr`/`bcctr`, float overflow results and div-by-zero
+      errors.
+    - Syntax: every W4 .cpp with -Wall -Wextra, and the files outside W4
+      that use W4 headers (Jit64, Jit64Common, JitCommon, DSP JIT,
+      CachedInterpreter, Interpreter, VertexLoaderX64, PPCDebugInterface,
+      and DolphinQt's GekkoSyntaxHighlight against a Qt stub plus the
+      assembler/disassembler calls of the other DolphinQt users), compiled
+      with g++ (Linux) and clang `-target x86_64-w64-windows-gnu` and
+      compared with the untouched tree: no new failures, and no warnings
+      from W4 code (MainSettings.cpp fails in both trees for lack of
+      mbedtls headers here).
+  - Not in W4: `x64CPUDetect.cpp` and `CPUDetect.h` belong to W2.
