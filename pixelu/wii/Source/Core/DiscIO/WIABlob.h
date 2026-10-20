@@ -8,14 +8,23 @@
 // as "hash exceptions". RVZ additionally stores the discs' pseudorandom padding as generator
 // seeds. The reading and writing code lives in WIABlob.cpp and WIACompression.cpp.
 
+#include <array>
+#include <limits>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 #include "Common/CommonTypes.h"
 #include "Common/DirectIOFile.h"
+#include "Common/Crypto/SHA1.h"
+#include "Common/Swap.h"
 #include "DiscIO/Blob.h"
+// Not needed here; kept so that files which relied on this header for them still build.
+#include "DiscIO/WiiEncryptionCache.h"
 
 namespace DiscIO
 {

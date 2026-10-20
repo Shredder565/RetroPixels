@@ -7,9 +7,13 @@
 // file system is rebuilt with changes (used by Riivolution patching). The disc is described as
 // a list of pieces, each of which says where its bytes come from.
 
+#include <array>
+#include <cstddef>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <variant>
 #include <vector>
@@ -18,6 +22,7 @@
 #include "DiscIO/Blob.h"
 #include "DiscIO/Volume.h"
 #include "DiscIO/VolumeWii.h"
+#include "DiscIO/WiiEncryptionCache.h"
 
 namespace DiscIO
 {
