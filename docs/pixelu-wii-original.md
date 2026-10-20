@@ -99,12 +99,12 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 166611 | 39.7% |
-| Dolphin, untouched | 243403 | 58.0% |
+| Original (RetroPixels) | 177662 | 42.4% |
+| Dolphin, untouched | 231326 | 55.2% |
 | Dolphin, with PixelU changes | 4224 | 1.0% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.4% |
-| **All** | **420001** | 100% |
+| **All** | **418975** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -199,7 +199,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/VideoBackends/OGL | 5742 | 0 | Dolphin |
 | Core/VideoBackends/Software | 6734 | 0 | Dolphin |
 | Core/VideoBackends/Vulkan | 10213 | 0 | Dolphin |
-| Core/VideoCommon (top level) | 50366 | 4192 | mixed (8% original) |
+| Core/VideoCommon (top level) | 49340 | 15243 | mixed (31% original) |
 | Core/VideoCommon/Assets | 4615 | 0 | Dolphin |
 | Core/VideoCommon/GraphicsModSystem | 2853 | 0 | Dolphin |
 | Core/VideoCommon/Resources | 2053 | 0 | Dolphin |
@@ -251,7 +251,7 @@ batch rewrites them.
 | W21 | Core: boot, config, config loaders, HLE, debugger, FIFO player | 13197 | 13197 | original |
 | W22 | Core: Core.cpp, System, state saves, movies, Wii root, title DB, hotkeys | 10095 | 0 | Dolphin + PixelU change |
 | W23 | Core: cheats, patches, NetPlay, achievements, analytics, USB utils | 14044 | 0 | Dolphin |
-| W24 | VideoCommon: GX state and command processing (BP/CP/XF, FIFO, PE, CPU cull) | 12077 | 0 | Dolphin |
+| W24 | VideoCommon: GX state and command processing (BP/CP/XF, FIFO, PE, CPU cull) | 11051 | 11051 | original |
 | W25 | VideoCommon: vertex loaders and vertex manager | 4192 | 4192 | original |
 | W26 | VideoCommon: texture cache and decoders | 9127 | 0 | Dolphin |
 | W27 | VideoCommon: shader generators and shader managers | 9946 | 0 | Dolphin |
@@ -2401,3 +2401,89 @@ Checks
       remaining runs are the BootMiiKeyDump struct and the key tables
       in IOSC.cpp (kept byte for byte), the ISFS request structs in
       FileSystemProxy.cpp, and declarations in headers.
+- W24 log: rewrote all 37 W24 files as original code (11051 lines now, from
+  12077): the VideoCommon command core in `VideoCommon` (`AsyncRequests`,
+  `BPFunctions`, `BPMemory`, `BPStructs`, `BoundingBox`, `CPMemory`,
+  `CPUCull` and `CPUCullImpl.h`, `CommandProcessor`, `Fifo`,
+  `OpcodeDecoding`, `PixelEngine`, `Statistics`, `VideoState`, `XFMemory`,
+  `XFStateManager`, `XFStructs`, plus `Constants.h`, `DataReader.h`,
+  `LookUpTables.h` and `VideoEvents.h`). Every file starts with the
+  original-code header and has no Dolphin copyright or SPDX line. File
+  names, public declarations, register unions and their layouts
+  (`BPMemory`, `CPState`/VAT, `XFMemory`, `SCPFifoStruct`), enum values,
+  savestate `DoState` order, config keys and every translatable and
+  debugger string (including the FIFO analyzer's register descriptions
+  and the "exponenential-sequared" typo) are unchanged.
+  - Command stream: `OpcodeDecoding` (the run-command template with
+    primitives first, then a switch; the same cycle costs and the same
+    display-list preprocess/execute rules), `Fifo` (single- and dual-core
+    run loops, the same sync points, wake-ups, idle skipping and
+    `SyncGPU` timing), `CommandProcessor` (MMIO registers, FIFO pointers,
+    watermark and breakpoint interrupts with the same timing, the
+    dual-core read/write distance handling), `PixelEngine` (registers,
+    token and finish interrupts with the same delivery events).
+  - Register files: `BPStructs` (dispatch split into command registers
+    that are never deduplicated, passive registers, fixed registers and
+    register blocks; EFB copies, TLUT loads and TMEM preloads with the
+    same renderer and texture-cache calls in the same order),
+    `BPFunctions` (scissor rectangles with the same candidates, sort and
+    best choice; blend, depth, generation mode, EFB clears and format
+    reinterpretation), `BPMemory` (register layout and formatters with
+    byte-identical output; the TEV equation views are built by one
+    template for color and alpha), `CPMemory` (VAT accessors, the same
+    register info text and the same checks on out-of-range writes),
+    `XFStructs` and `XFStateManager` (XF writes, indexed loads and the
+    same dirty ranges, including the position-matrix and post/light
+    range quirks).
+  - `CPUCull`, `BoundingBox`, `AsyncRequests`, `Statistics` (the same
+    ImGui calls with the same arguments and float arithmetic, including
+    the scissor overlay's layout quirks), `VideoState` (same savestate
+    order).
+  - Deliberate differences (no game sees these):
+    - `XFStructs`: `LoadIndexedXF` returns early when the source pointer
+      is null (the old code dereferenced it). `address` is marked
+      `[[maybe_unused]]` in `LoadIndexedXF` and `PreprocessIndexedXF`.
+    - `CPUCull`: the culling maths is plain scalar code; the decisions are
+      the same, but NaN payloads in transformed positions may differ. The
+      inline-asm barrier was dropped.
+    - `CommandProcessor`: a condition that was always true is simplified;
+      the dual-core distance check reads the distance once into a local
+      instead of twice.
+    - `BPMemory.h`: the `ScissorPos` and `ScissorOffset` formatters are
+      `const`; private parts were redesigned (the per-unit debugger views
+      in `AllTexUnits`, a private helper in `RAS1_IREF`). Public names and
+      layouts are unchanged.
+    - `Statistics.h`: the macros for builds without statistics expand to
+      `((void)0)`.
+    - Explicit casts replace implicit narrowing and int/float conversions
+      (same values); see the warning fixes below.
+  - Warning fixes (MSVC-relevant ones included):
+    - `IND_MTX::GetScale` (int to u8) and `FogRangeKElement::GetValue`
+      (u32 to float), the TEXSCALE and matrix formatters (int to float).
+    - `OpcodeDecoding`: sign conversions on the `LoadBPReg` cycle count
+      and the `RunVertices` result.
+    - `XFStateManager`: `BitSet` index (int to size_t).
+    - `Statistics`: int to float in `AddRectFilled` and the table helper;
+      a `const auto*` on a `std::ranges::find` result became `const auto`
+      (MSVC checked iterators).
+    - `if constexpr` early returns restructured to avoid MSVC C4702.
+  - Checked: old and new code side by side in a harness (same random
+    inputs, one hash per case streamed through `cmp`), all identical:
+    - Command decoding and display lists (4000), register info text for
+      every BP/CP/XF register and value pattern (10000), BP/CP/XF
+      formatters (10000), BP writes and BPFunctions (10000), XF writes and
+      indexed loads (3000), CP/PE MMIO in single- and dual-core mode
+      (3000), threaded FIFO runs with sync points (3000), bounding box
+      (3000), CPU culling (3000; also built for SSE2-only and AVX2/FMA),
+      statistics overlays (10000), async requests (3000), savestates
+      (3000), determinism runs (3000).
+    - clang `-Wall -Wextra -Wconversion -Wsign-compare -Wshadow-all
+      -Wshorten-64-to-32`, Linux and `x86_64-w64-windows-gnu`: no warnings
+      in W24 files, nor from W24 headers in the dependents checked
+      (`PixelShaderGen`, `VertexLoaderManager`, `VertexShaderManager`,
+      `PixelShaderManager`, `VideoBackendBase`, `TextureCacheBase`).
+      The missing glslang and xxhash headers on the Windows target are the
+      same on the base tree.
+    - `verbatim-audit.py wii 8`: no run of 8 or more lines in any W24
+      .cpp file. Remaining runs are in headers only (public declarations,
+      enum values and names, register layouts).
