@@ -1,11 +1,11 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -20,6 +20,8 @@ namespace IOS::HLE
 {
 namespace USB
 {
+// Key of an insertion hook. Ordering (and so lookup) only looks at the vendor ID, so hooks for
+// two products of one vendor share a slot. Saved raw in savestates.
 struct DeviceInfo
 {
   u16 vid;
@@ -28,7 +30,8 @@ struct DeviceInfo
 };
 }  // namespace USB
 
-// /dev/usb/oh0
+// /dev/usb/oh0: the old (USB interface version 0) host controller. Opened devices are reached
+// through OH0Device, which forwards to the Device* functions below.
 class OH0 final : public USBHost
 {
 public:
@@ -47,34 +50,29 @@ public:
   void DoState(PointerWrap& p) override;
 
 private:
-  IPCReply CancelInsertionHook(const IOCtlRequest& request);
-  IPCReply GetDeviceList(const IOCtlVRequest& request) const;
-  IPCReply GetRhDesca(const IOCtlRequest& request) const;
-  IPCReply GetRhPortStatus(const IOCtlVRequest& request) const;
-  IPCReply SetRhPortStatus(const IOCtlVRequest& request);
-  std::optional<IPCReply> RegisterRemovalHook(u64 device_id, const IOCtlRequest& request);
-  std::optional<IPCReply> RegisterInsertionHook(const IOCtlVRequest& request);
-  std::optional<IPCReply> RegisterInsertionHookWithID(const IOCtlVRequest& request);
-  std::optional<IPCReply> RegisterClassChangeHook(const IOCtlVRequest& request);
-  s32 SubmitTransfer(USB::Device& device, const IOCtlVRequest& request);
+  IPCReply RootHubDescriptorA(const IOCtlRequest& request) const;
+  IPCReply CancelInsertHook(const IOCtlRequest& request);
+  IPCReply ListDevices(const IOCtlVRequest& request) const;
+  IPCReply RootHubPortStatus(const IOCtlVRequest& request, bool set) const;
+  std::optional<IPCReply> AddInsertHook(const IOCtlVRequest& request);
+  std::optional<IPCReply> AddInsertHookWithId(const IOCtlVRequest& request);
+  std::optional<IPCReply> AddClassChangeHook(const IOCtlVRequest& request) const;
+  std::optional<IPCReply> AddRemovalHook(u64 device_id, const IOCtlRequest& request);
+  s32 StartTransfer(USB::Device& device, const IOCtlVRequest& ioctlv);
 
-  bool HasDeviceWithVidPid(u16 vid, u16 pid) const;
+  bool IsPresent(u16 vid, u16 pid) const;
   void OnDeviceChange(ChangeEvent event, std::shared_ptr<USB::Device> device) override;
-  template <typename T>
-  void TriggerHook(std::map<T, u32>& hooks, T value, ReturnCode return_value);
 
-  struct DeviceEntry
-  {
-    u32 unknown;
-    u16 vid;
-    u16 pid;
-  };
-  static_assert(sizeof(DeviceEntry) == 8, "sizeof(DeviceEntry) must be 8");
+  // Answers the request waiting in `hooks` under `key`, if any, and forgets it.
+  template <typename Key>
+  void FireHook(std::map<Key, u32>& hooks, const Key& key, ReturnCode result);
 
-  // Device info (VID, PID) → command address for pending hook requests
-  std::map<USB::DeviceInfo, u32> m_insertion_hooks;
+  // Guest request addresses of the pending hooks.
+  std::map<USB::DeviceInfo, u32> m_insert_hooks;
   std::map<u64, u32> m_removal_hooks;
-  std::set<u64> m_opened_devices;
-  std::mutex m_hooks_mutex;
+  std::mutex m_hook_mutex;
+
+  // Host IDs of the devices an OH0Device currently has open (guarded by m_devices_mutex).
+  std::set<u64> m_open_devices;
 };
 }  // namespace IOS::HLE

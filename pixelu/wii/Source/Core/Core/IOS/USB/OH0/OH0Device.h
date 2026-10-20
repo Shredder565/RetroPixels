@@ -1,9 +1,9 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "Common/CommonTypes.h"
@@ -14,6 +14,8 @@ class PointerWrap;
 namespace IOS::HLE
 {
 class OH0;
+
+// One /dev/usb/oh0/<vid>/<pid> node. Everything is handed on to /dev/usb/oh0.
 class OH0Device final : public EmulationDevice
 {
 public:
@@ -26,7 +28,9 @@ public:
   void DoState(PointerWrap& p) override;
 
 private:
-  std::shared_ptr<OH0> m_oh0;
+  void FindController();
+
+  std::shared_ptr<OH0> m_controller;
   u16 m_vid = 0;
   u16 m_pid = 0;
   u64 m_device_id = 0;

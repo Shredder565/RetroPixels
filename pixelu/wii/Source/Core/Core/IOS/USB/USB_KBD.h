@@ -1,9 +1,9 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <array>
+#include <optional>
 #include <queue>
 #include <string>
 #include <type_traits>
@@ -14,6 +14,8 @@
 
 namespace IOS::HLE
 {
+// /dev/usb/kbd: a USB keyboard fed from the host keyboard (Windows only for now). Each ioctl
+// hands the guest the oldest queued report, if there is one.
 class USB_KBD : public EmulationDevice
 {
 public:
@@ -25,42 +27,40 @@ public:
   void Update() override;
 
 private:
-  enum class MessageType : u32
+  enum class ReportKind : u32
   {
-    KeyboardConnect = 0,
-    KeyboardDisconnect = 1,
-    Event = 2
+    Connected = 0,
+    Disconnected = 1,
+    KeyChange = 2,
   };
 
-  using PressedKeyData = std::array<u8, 6>;
+  using NewKeys = std::array<u8, 6>;
 
+  // What the guest receives: 16 bytes, the kind stored big endian.
 #pragma pack(push, 1)
-  struct MessageData
+  struct Report
   {
-    MessageType msg_type{};
-    u32 unk1 = 0;
+    u32 kind_be = 0;
+    u32 reserved = 0;
     u8 modifiers = 0;
-    u8 unk2 = 0;
-    PressedKeyData pressed_keys{};
-
-    MessageData(MessageType msg_type, u8 modifiers, PressedKeyData pressed_keys);
+    u8 reserved2 = 0;
+    NewKeys keys{};
   };
-  static_assert(std::is_trivially_copyable_v<MessageData>,
-                "MessageData must be trivially copyable, as it's copied into emulated memory.");
 #pragma pack(pop)
-  std::queue<MessageData> m_message_queue;
+  static_assert(sizeof(Report) == 16);
+  static_assert(std::is_trivially_copyable_v<Report>);
 
-  std::array<bool, 256> m_old_key_buffer{};
-  u8 m_old_modifiers = 0;
+  static Report MakeReport(ReportKind kind, u8 modifiers, const NewKeys& keys);
+  static bool IsHostKeyDown(int virtual_key);
+  static u8 ReadHostModifiers();
 
-  bool IsKeyPressed(int key) const;
+  std::queue<Report> m_reports;
 
-  // This stuff should probably die
-  enum
-  {
-    KBD_LAYOUT_QWERTY = 0,
-    KBD_LAYOUT_AZERTY = 1
-  };
-  int m_keyboard_layout = KBD_LAYOUT_QWERTY;
+  // Host key state as of the last update, indexed by virtual key code.
+  std::array<bool, 256> m_was_down{};
+  u8 m_last_modifiers = 0;
+
+  // 0 = QWERTY, 1 = AZERTY ("USB Keyboard" / "Layout" in the main ini file).
+  int m_layout = 0;
 };
 }  // namespace IOS::HLE
