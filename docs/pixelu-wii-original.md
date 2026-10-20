@@ -99,21 +99,21 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 0 | 0.0% |
-| Dolphin, untouched | 435006 | 97.8% |
-| Dolphin, with PixelU changes | 4224 | 0.9% |
+| Original (RetroPixels) | 8998 | 2.0% |
+| Dolphin, untouched | 425224 | 95.7% |
+| Dolphin, with PixelU changes | 4224 | 1.0% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.3% |
-| **All** | **444993** | 100% |
+| **All** | **444209** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
 | Core/AudioCommon | 3219 | 0 | Dolphin |
-| Core/Common (top level) | 29936 | 0 | Dolphin |
+| Core/Common (top level) | 29392 | 7359 | mixed (25% original) |
 | Core/Common/Assembler | 5585 | 0 | Dolphin |
 | Core/Common/Config | 865 | 0 | Dolphin |
-| Core/Common/Crypto | 1459 | 0 | Dolphin |
-| Core/Common/Debug | 420 | 0 | Dolphin |
+| Core/Common/Crypto | 1202 | 1202 | original |
+| Core/Common/Debug | 437 | 437 | original |
 | Core/Common/GL | 9096 | 0 | Dolphin, 5672 lines third-party |
 | Core/Common/Logging | 620 | 0 | Dolphin |
 | Core/Core (top level) | 25099 | 0 | Dolphin + PixelU change |
@@ -230,7 +230,7 @@ batch rewrites them.
 |---|---|---:|---:|---|
 | W1 | Prune: delete code no Windows x64 build compiles (ARM64, Metal, macOS, Android, Linux/BSD) | 0 | 0 | done (no files left) |
 | W2 | Common: types, bits, containers, strings, files, threads, config, logging | 15729 | 0 | Dolphin |
-| W3 | Common: platform, memory, network, crypto, file formats | 9782 | 0 | Dolphin |
+| W3 | Common: platform, memory, network, crypto, file formats | 8998 | 8998 | original |
 | W4 | Common: x64 emitter, disassemblers, PowerPC assembler | 13374 | 0 | Dolphin |
 | W5 | DiscIO: blob formats and compression | 8943 | 0 | Dolphin |
 | W6 | DiscIO: volumes, filesystems, verifier, Riivolution, NAND import | 8676 | 0 | Dolphin |
@@ -336,3 +336,129 @@ the third-party Externals directly) before the submodule can go.
     `MemoryWatcher`, `Pipes`). Every file named in a `Source/` CMake list
     exists, except the generated `AchievementApprovedHash.h`. No deleted
     header is included outside a non-Windows `#if`.
+
+- W3 log: rewrote all 63 files of Common's platform, memory, network,
+  crypto and file-format code (8998 lines now, from 9782). Every file starts
+  with the original-code header and has no Dolphin copyright or SPDX line.
+  File names, public declarations, macros, enum values, file formats and
+  wire layouts are unchanged.
+  - Crypto (`Crypto/AES`, `SHA1`, `HMAC`, `bn`, `ec`): AES-128-CBC through
+    mbedtls, with an AES-NI path (own key expansion, 8-block decryption).
+    SHA-1 through mbedtls, with a SHA-NI path. HMAC-SHA1 written directly
+    on SHA1 (RFC 2104). Big-endian bignum mod arithmetic. sect233r1 over
+    GF(2^233) with 64-bit limbs: Itoh-Tsujii inversion, affine
+    double/add, ECDSA sign/verify, ECDH. The quirks callers depend on are
+    kept exactly (multiplication of unreduced inputs, point at infinity as
+    (0,0), 240-bit scalars, the same bn operand order in signing).
+  - Debug (`MemoryPatches`, `Threads.h`, `Watches`), `CWDemangler`
+    (CodeWarrior symbol demangler, new parser with the same output),
+    `SymbolDB`, `NandPaths` (one-pass escape/unescape), `Network` (Ethernet,
+    ARP, IPv4, TCP, UDP and DHCP headers, checksums, packet parsing and
+    building, MAC/BT/IP-range parsing).
+  - Memory: `MemArena.h` and `MemArenaWin.cpp` (fastmem). The placeholder
+    path (VirtualAlloc2FromApp / MapViewOfFile3FromApp / UnmapViewOfFileEx,
+    split with MEM_RELEASE|MEM_PRESERVE_PLACEHOLDER, merged with
+    MEM_COALESCE_PLACEHOLDERS) and the legacy MapViewOfFileEx fallback make
+    the same Win32 calls as before. Also `LazyMemoryRegion` (8 MiB blocks
+    over one shared read-only zero section) and `MemoryUtil`.
+  - Platform: `DynamicLibrary`, `HRWrap`, `LdrWatcher`, `WindowsRegistry`,
+    `WindowsDevice`.
+  - Network: `ENet`, `SFMLHelper`, `SocketContext`, `QoSSession`, `UPnP`,
+    `TraversalProto.h` (same packed layout, now static_asserted: 37-byte
+    packet, 19-byte address), `TraversalClient`, `HttpRequest`.
+  - Files: `SDCardUtil` (blank FAT32 image), `FatFsUtil` (SD folder <->
+    image sync through FatFs), `PcapFile`, `Image` (spng),
+    `FilesystemWatcher`, `MinizipUtil.h`.
+  - Strings kept on purpose because users' data or other programs see
+    them: the SD volume label `DOLPHINSD`, the hole-punch payload
+    `Hello from Dolphin Netplay...` and the UPnP mapping description
+    `dolphin-emu UDP on <ip>`.
+  - Deliberate differences (bug fixes, nothing a game sees):
+    - `StringToIPv4PortRange`: CIDR prefixes that are not a multiple of 8
+      now give the right range (the old mask was built in host order and
+      applied to network-order bytes).
+    - `PacketView` rejects an IPv4 IHL or TCP data offset below 5 (was
+      out-of-bounds reads). TCP/UDP packet building uses offsets instead
+      of raw pointers into the buffer.
+    - `SymbolDB::GetSymbolFromHash` returns null for a hash whose set is
+      empty (was undefined behaviour). `SHA1::StringToDigest` cannot read
+      past its input. `DecodeNetworkError` falls back to "Unknown error N".
+    - `CryptOFB` initialises and frees its mbedtls context. HMAC no longer
+      goes through mbedtls' md layer (same output).
+    - `Watches::LoadFromStrings`: a blank line gives a watch at address 0
+      (the address was uninitialised).
+    - `Common::RootUserPath` no longer pops the back of an empty user
+      path.
+    - `LazyMemoryRegion`: `EnsureMemoryPagesWritable` also covers the last
+      block when the range does not start on a block boundary; a failed
+      `Create` releases every block (it could leak mapped views and
+      address space); making a block writable creates the new section
+      before unmapping the zero view, and maps the zero view back if the
+      new mapping fails (the block was left unmapped). The legacy fastmem
+      mapping passes the high DWORD of the offset too.
+    - `DynamicLibrary::Open` frees the library it held (after loading the
+      new one, so reopening the same DLL does not unload it).
+    - `LdrWatcher` matches module names exactly (ignoring case). It used
+      to accept any loaded module whose name was a prefix of a watched
+      name, so a module with an empty name matched everything.
+    - `HRWrap`: `winrt::hresult` prints as unsigned hex like `HRWrap`
+      (was `-0x7fffbffb` style). The unused second `GetHResultMessage`
+      overload is gone.
+    - `WindowsDevice`: a zero-size property no longer underflows the
+      string length. `WindowsRegistry`: `RtlGetVersion` is null-checked.
+    - `ENet::SendPacket` frees a packet that `enet_peer_send` refused
+      (leaked). `QoSSession`: move-assignment releases the flow it already
+      held, and the Windows DSCP value is `tos >> 2` (EF = 46, the same
+      marking `IP_TOS` gives elsewhere) instead of `tos >> 3` (23).
+    - `TraversalClient`: checks `m_Client` before `OnTtlDetermined`, copies
+      server packets out of the receive buffer before reading them, and
+      the intercept hook copes with no client. The TTL-test reply filter
+      never had any effect (it compared an address with a port), so the
+      new code simply counts any datagram, which is what happened before.
+    - `HttpRequest`: curl options get `long`/`curl_off_t` values, a failed
+      `curl_easy_escape` returns an empty string (was a null
+      `std::string`), and the handle no longer points at the freed header
+      list after a request.
+    - `SDCardCreate` closes the file before deleting it on failure (on
+      Windows an open file cannot be deleted). `FatFsUtil`: a failed
+      `LocalTime` gives a zero timestamp (was a null dereference).
+      `ReadFileFromZip` fails when an entry ends early (looped forever).
+    - Dropped: MemoryUtil's and MemArena's macOS/BSD/Haiku branches
+      (Windows-only build; POSIX kept for tooling).
+  - Checked:
+    - Bit-exactness, old vs new code in the same harness (ASan+UBSan):
+      AES (3000 random CBC encrypt/decrypt cases on the mbedtls and AES-NI
+      paths, including bad lengths, zero IV and in-place use, plus 500 OFB
+      cases), SHA-1 (4000 random inputs on both paths, string round
+      trips) and 1500 HMAC cases, bn (20000 random add/sub/mul/exp/inv/
+      compare cases including edge values), ec (120 key pairs: public
+      keys, signatures, verification of good and corrupted signatures,
+      shared secrets): all identical. Network (2.1 million
+      lines of output from parsing, checksums, building and fuzzed
+      packets), NandPaths, CWDemangler (real symbol corpus plus token
+      fuzzing, all option sets), SymbolDB, MemoryPatches and Watches
+      operation sequences: identical, apart from the CIDR and blank-line
+      fixes above.
+    - MemArenaWin against a model of the Win32 placeholder API that
+      rejects illegal calls and injects failures: identical call traces
+      for 400 random map/unmap/protect/view sequences (placeholder and
+      legacy modes, API-set missing, libraries missing). LazyMemoryRegion
+      ends in the same state. With failures injected into section
+      creation, splitting and mapping (unmapping kept reliable), the new
+      code leaves nothing behind and makes no illegal call in 3000 runs;
+      the old code leaked in 242.
+    - SD images from `SDCardCreate`, 7 MiB to 32 GiB on every cluster-size
+      boundary: byte-identical with the volume serial masked. FatFs packs
+      in deterministic mode (auto and configured size): byte-identical
+      images; unpacking either image reproduces the source tree; cancelled
+      and too-small runs leave no files; a failed unpack restores the old
+      folder. pcap output identical apart from timestamps.
+    - Syntax: every W3 .cpp, and the 94 files outside W3 that include a
+      W3 header, compiled with g++ (Linux) and clang
+      `-target x86_64-w64-windows-gnu` and compared with the untouched
+      tree: no new failures. The files that fail in both trees fail only
+      because of this machine's headers (mingw lacks qos2.h, winrt, the
+      Windows 10 cfgmgr32 calls and Dolphin's patched ENet; SFML 2.6
+      instead of 3). `WindowsDevice`, `QoSSession` and `TraversalClient`
+      were also checked with -Wall against shims of the SDK declarations
+      and `HRWrap` against a winrt stub.
