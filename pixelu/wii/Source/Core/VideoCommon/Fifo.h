@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -24,9 +23,16 @@ namespace CoreTiming
 struct EventType;
 }
 
+// Moves GX command data from the emulated GP FIFO in RAM into a host-side staging buffer and
+// feeds it to the opcode decoder. Three schedules are supported:
+//  - single core: the CPU thread decodes in time slices driven by a CoreTiming event;
+//  - dual core: a GPU thread decodes on its own, optionally kept within a cycle distance of
+//    the CPU ("sync GPU");
+//  - deterministic dual core: the CPU thread copies and pre-parses the data (resolving display
+//    lists into an auxiliary buffer) and the GPU thread only decodes what it is handed.
 namespace Fifo
 {
-// Used for diagnostics.
+// Why a caller needed the GPU to catch up (diagnostics only).
 enum class SyncGPUReason
 {
   Other,
@@ -50,21 +56,22 @@ public:
 
   void Init();
   void Shutdown();
-  void Prepare();  // Must be called from the CPU thread.
+  void Prepare();  // CPU thread only.
   void DoState(PointerWrap& f);
   void PauseAndLock();
   void RestoreState(bool was_running);
   void UpdateWantDeterminism(bool want);
-  bool UseDeterministicGPUThread() const { return m_use_deterministic_gpu_thread; }
-  bool UseSyncGPU() const { return m_config_sync_gpu; }
+  bool UseDeterministicGPUThread() const { return m_deterministic; }
+  bool UseSyncGPU() const { return m_sync_gpu; }
 
-  // In deterministic GPU thread mode this waits for the GPU to be done with pending work.
+  // Deterministic mode: wait until the GPU thread has consumed everything handed to it.
   void SyncGPU(SyncGPUReason reason, bool may_move_read_ptr = true);
 
-  // In single core mode, this runs the GPU for a single slice.
-  // In dual core mode, this synchronizes with the GPU thread.
+  // Before the CPU reads or writes a CP register: run a slice of GPU work in single core, or
+  // honour the sync distance in dual core.
   void SyncGPUForRegisterAccess();
 
+  // Deterministic mode: display-list bytes resolved on the CPU, consumed in order by the GPU.
   void PushFifoAuxBuffer(const void* ptr, size_t size);
   void* PopFifoAuxBuffer(size_t size);
 
@@ -78,59 +85,56 @@ public:
 
 private:
   void RefreshConfig();
-  void ReadDataFromFifo(u32 read_ptr);
-  void ReadDataFromFifoOnCPU(u32 read_ptr);
+  void CopyBurstToStaging(u32 read_ptr);
+  void CopyAndPreprocessBurst(u32 read_ptr);
+  void DecodeOnGpuThread();
   int RunGpuOnCpu(int ticks);
   int WaitForGpuThread(int ticks);
   static void SyncGPUCallback(Core::System& system, u64 ticks, s64 cyclesLate);
 
   static constexpr u32 FIFO_SIZE = 2 * 1024 * 1024;
 
-  Common::BlockingLoop m_gpu_mainloop;
+  Common::BlockingLoop m_gpu_loop;
+  Common::Flag m_emulation_running;
 
-  Common::Flag m_emu_running_state;
+  // Large and mostly untouched; only deterministic mode uses it.
+  u8 m_aux[FIFO_SIZE]{};
+  u8* m_aux_write = nullptr;
+  u8* m_aux_read = nullptr;
 
-  // Most of this array is unlikely to be faulted in...
-  u8 m_fifo_aux_data[FIFO_SIZE]{};
-  u8* m_fifo_aux_write_ptr = nullptr;
-  u8* m_fifo_aux_read_ptr = nullptr;
+  // Derived from several settings and the core mode; changed only while paused.
+  bool m_deterministic = false;
 
-  // This could be in SConfig, but it depends on multiple settings
-  // and can change at runtime.
-  bool m_use_deterministic_gpu_thread = false;
+  CoreTiming::EventType* m_sync_event = nullptr;
 
-  CoreTiming::EventType* m_event_sync_gpu = nullptr;
+  // Staging buffer for command data, plus cursors into it (saved in savestates):
+  //  read  - next byte the decoder will consume (GPU side);
+  //  write - end of copied data;
+  //  seen  - deterministic mode: how far the GPU thread has got, which can trail `read` when a
+  //          command was cut off at the end of the data;
+  //  pp    - deterministic mode: the CPU-side preprocessing cursor.
+  // `write` is atomic because the CPU publishes it to the polling GPU thread in deterministic
+  // mode; in the other modes the GPU thread owns all cursors.
+  u8* m_staging = nullptr;
+  u8* m_staging_read = nullptr;
+  std::atomic<u8*> m_staging_write = nullptr;
+  std::atomic<u8*> m_staging_seen = nullptr;
+  u8* m_staging_pp = nullptr;
 
-  // STATE_TO_SAVE
-  u8* m_video_buffer = nullptr;
-  u8* m_video_buffer_read_ptr = nullptr;
-  std::atomic<u8*> m_video_buffer_write_ptr = nullptr;
-  std::atomic<u8*> m_video_buffer_seen_ptr = nullptr;
-  u8* m_video_buffer_pp_read_ptr = nullptr;
-  // The read_ptr is always owned by the GPU thread.  In normal mode, so is the
-  // write_ptr, despite it being atomic.  In deterministic GPU thread mode,
-  // things get a bit more complicated:
-  // - The seen_ptr is written by the GPU thread, and points to what it's already
-  // processed as much of as possible - in the case of a partial command which
-  // caused it to stop, not the same as the read ptr.  It's written by the GPU,
-  // under the lock, and updating the cond.
-  // - The write_ptr is written by the CPU thread after it copies data from the
-  // FIFO.  Maybe someday it will be under the lock.  For now, because RunGpuLoop
-  // polls, it's just atomic.
-  // - The pp_read_ptr is the CPU preprocessing version of the read_ptr.
-
+  // Sync-GPU credit: emulated CPU cycles the GPU may still spend (negative when it is ahead).
   std::atomic<int> m_sync_ticks = 0;
-  bool m_syncing_suspended = false;
-  Common::Event m_sync_wakeup_event;
+  bool m_sync_event_parked = false;
+  Common::Event m_gpu_caught_up;
 
-  std::optional<Config::ConfigChangedCallbackID> m_config_callback_id = std::nullopt;
-  bool m_config_sync_gpu = false;
-  int m_config_sync_gpu_max_distance = 0;
-  int m_config_sync_gpu_min_distance = 0;
-  float m_config_sync_gpu_overclock = 0.0f;
+  std::optional<Config::ConfigChangedCallbackID> m_config_hook = std::nullopt;
+  bool m_sync_gpu = false;
+  int m_sync_max_distance = 0;
+  int m_sync_min_distance = 0;
+  float m_sync_overclock = 0.0f;
 
   Core::System& m_system;
 };
 
+// True when the CP breakpoint is enabled and the read pointer sits on it.
 bool AtBreakpoint(Core::System& system);
 }  // namespace Fifo
