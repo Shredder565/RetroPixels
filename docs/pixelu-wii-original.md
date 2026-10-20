@@ -99,12 +99,12 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 22401 | 5.1% |
-| Dolphin, untouched | 409495 | 92.7% |
+| Original (RetroPixels) | 29985 | 6.8% |
+| Dolphin, untouched | 400552 | 90.9% |
 | Dolphin, with PixelU changes | 4224 | 1.0% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.3% |
-| **All** | **441883** | 100% |
+| **All** | **440524** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -161,7 +161,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/PowerPC/Jit64Common | 2549 | 0 | Dolphin |
 | Core/Core/PowerPC/JitCommon | 2294 | 0 | Dolphin |
 | Core/Core/PowerPC/SignatureDB | 755 | 0 | Dolphin |
-| Core/DiscIO | 17619 | 0 | Dolphin |
+| Core/DiscIO | 16260 | 7584 | mixed (47% original) |
 | Core/DolphinQt (top level) | 15076 | 0 | Dolphin + PixelU change |
 | Core/DolphinQt/Achievements | 1273 | 0 | Dolphin |
 | Core/DolphinQt/Config | 18978 | 0 | Dolphin |
@@ -232,7 +232,7 @@ batch rewrites them.
 | W2 | Common: types, bits, containers, strings, files, threads, config, logging | 13403 | 13403 | original |
 | W3 | Common: platform, memory, network, crypto, file formats | 8998 | 8998 | original |
 | W4 | Common: x64 emitter, disassemblers, PowerPC assembler | 13374 | 0 | Dolphin |
-| W5 | DiscIO: blob formats and compression | 8943 | 0 | Dolphin |
+| W5 | DiscIO: blob formats and compression | 7584 | 7584 | original |
 | W6 | DiscIO: volumes, filesystems, verifier, Riivolution, NAND import | 8676 | 0 | Dolphin |
 | W7 | PowerPC: CPU state, MMU, caches, analyst, tables, symbols, breakpoints, GDB stub | 11905 | 0 | Dolphin |
 | W8 | PowerPC: interpreter and cached interpreter | 7140 | 0 | Dolphin |
@@ -555,3 +555,95 @@ the third-party Externals directly) before the submodule can go.
     SFML, curl, spng, ...) or are outside W2. Six Common files that
     failed on mingw before now pass: CompatPatches, FileUtil, IOFile,
     Thread, TimeUtil and x64CPUDetect.
+
+- W5 log: rewrote DiscIO's blob readers, converters and their helpers as
+  original code: `Blob`, `FileBlob`, `CISOBlob`, `TGCBlob`, `SplitFileBlob`,
+  `WbfsBlob`, `NFSBlob`, `CompressedBlob` (GCZ), `WIABlob` and
+  `WIACompression` (WIA/RVZ), `LaggedFibonacciGenerator`,
+  `WiiEncryptionCache`, `DiscScrubber`, `ScrubbedBlob`, `CachedBlob`,
+  `VolumeFileBlobReader`, `DirectoryBlob` (each `.cpp` and `.h`) and
+  `MultithreadedCompressor.h`. 35 files, 8943 lines before, 7584 after. Each
+  starts with the "Original code for RetroPixels (PixelU-Wii)" line and has
+  no Dolphin copyright or SPDX header. Dolphin's code was read only for
+  interfaces and the behaviour other code relies on.
+  - Kept: file names, every declaration other files use (including
+    `FSTBuilderNode`, the `Content*` sources, `WIAFileReader` and
+    `RVZFileReader`, `ConversionResultCode`, the `Convert*` functions and
+    `GetAllowedCompressionLevels`), and every on-disk format. GCZ, WIA and
+    RVZ files written by the new code are byte-identical to the old code's,
+    and every reader returns the same bytes, except where noted below.
+    `WIABlob.h` and `DirectoryBlob.h` still include what they used to, since
+    other files (`DolphinTool/ConvertCommand.cpp`, for one) got headers such
+    as `VolumeDisc.h` through them.
+  - Changed inside DiscIO only: `SectorReader` (the base of the CISO, GCZ,
+    TGC and WBFS readers) is now a plain 32-entry LRU block cache, and
+    `SetChunkSize` is gone (no reader used it). `DiscContent`,
+    `DiscContentContainer` and `DirectoryBlobPartition` moved into
+    `DirectoryBlob.cpp`. `WIACompression.h` is a new internal decoder and
+    encoder interface used only by `WIABlob.cpp`. `MultithreadedCompressor`
+    keeps its API but now uses a job queue and a results map. Output still
+    goes out in submission order, at most twice as many jobs as threads are
+    in flight, and `Shutdown` can be called more than once.
+  - Old-code bugs fixed (these are the only intended behaviour changes):
+    - WIA/RVZ reading: within one `Read`, hash exceptions piled up across Wii
+      groups, and the check that skips an exception list already applied
+      dropped lists for chunks of 4 MiB or more. Reads of such files returned
+      wrong data (on the synthetic test discs, whole-disc reads of 4 MiB and
+      6 MiB WIA files didn't match the source). Exceptions are now cleared
+      once a group's are applied. Exceptions now apply up to and including
+      the last valid offset (the old `>` check could never be reached).
+    - WIA writing: a WIA (not RVZ) chunk over 2 MiB copied past the end of
+      the buffer for a last partial chunk. Only the in-bounds part is copied
+      now, so output is unchanged.
+    - WIA writing: chunks reused because their data is one repeated byte were
+      keyed on the first byte of the whole Wii group, so two chunks with
+      different bytes could share storage. The key now also includes the
+      chunk's own byte. Output is the same unless the old code would have
+      stored the wrong data.
+    - WIA/RVZ: a chunk size of 0 in the header is rejected.
+    - WBFS: `CopyReader` crashed for images split over several files. It now
+      copies every part.
+    - NFS: a block in a missing part file now fails the read; the old code
+      indexed past the end of its file list.
+    - GCZ: a block size of 0 is rejected, and the size check on the
+      compressed data can't overflow.
+    - CachedBlob: a read is served from the cache only if every cluster it
+      touches is loaded; the old code checked only the first cluster of an
+      unaligned read. Progress reporting can't divide by zero.
+    - VolumeFileBlobReader: it keeps its own copy of the partition (the old
+      one kept a reference that could dangle), and `CopyReader` works (the
+      old one asserted and returned null).
+    - DiscScrubber: a scrubber set up a second time starts from an empty
+      table (the old one kept the old marks).
+    - DirectoryBlob: `ShouldHideFromGameList` looped forever on a relative
+      path that starts with "files" (e.g. `files/sys/main.dol`). It stops at
+      the start of the path now. A `sys/main.dol` at the file system root
+      no longer makes it take a substring past the end of the path.
+    - MultithreadedCompressor: after an error or a cancel, no more output is
+      written.
+  - Checked with a test harness, built from both the old and the new
+    sources with ASan and UBSan, on synthetic discs only. No game images,
+    keys or firmware were used: test discs, tickets and partitions are
+    generated, and Wii partitions are encrypted with a made-up key. It
+    covers:
+    - the junk generator (seed recovery and output);
+    - plain, CISO, TGC, split, WBFS (one and several files) and NFS images;
+    - GCZ and every WIA/RVZ compression type, level and chunk size, as
+      conversion, whole and random reads, decrypted Wii reads, copies, and
+      corrupt files;
+    - scrubbing, the cached and volume-file readers;
+    - extracted GameCube and Wii discs (with update, channel, `P-XXXX` and
+      `Pn` partitions, missing and short files), `ShouldHideFromGameList`,
+      and rebuilt volumes with Riivolution-style callbacks.
+    Every log is identical between old and new. For WIA/RVZ reads the
+    baseline is the old code with only the exception fix applied; the old
+    code itself differs there only in read results.
+  - Also checked: every changed `.cpp`, and the files that include these
+    headers (DiscIO's volumes, verifier and Riivolution patcher,
+    DolphinTool, UICommon's game files, `WiiUtils`, `DVDInterface`,
+    `AchievementManager`), compile with g++ 13 (-Wall -Wextra, no new
+    warnings). Where an external was missing (minizip, cpp-optparse, SFML,
+    enet, picojson), the check used stub headers, and the only errors left
+    came from those stubs. Every changed `.cpp` also compiles with
+    x86_64-w64-mingw32-g++ 13 (`_WIN32` paths, including DirectoryBlob's
+    `\` separators).
