@@ -25,42 +25,41 @@
 
 namespace DiscIO
 {
+namespace
+{
+struct BlobTypeName
+{
+  BlobType type;
+  const char* name;
+  // Acronyms stay as they are; descriptive names go through the translation catalogue when
+  // the caller asks for it.
+  bool descriptive;
+};
+
+constexpr BlobTypeName s_blob_type_names[] = {
+    {BlobType::PLAIN, "ISO", false},
+    {BlobType::DIRECTORY, "Directory", true},
+    {BlobType::GCZ, "GCZ", false},
+    {BlobType::CISO, "CISO", false},
+    {BlobType::WBFS, "WBFS", false},
+    {BlobType::TGC, "TGC", false},
+    {BlobType::WIA, "WIA", false},
+    {BlobType::RVZ, "RVZ", false},
+    {BlobType::MOD_DESCRIPTOR, "Mod", true},
+    {BlobType::NFS, "NFS", false},
+    {BlobType::SPLIT_PLAIN, "Multi-part ISO", true},
+};
+}  // namespace
+
 std::string GetName(BlobType blob_type, bool translate)
 {
-  // Container names that are acronyms stay untranslated; the descriptive ones go through the
-  // translation catalogue when asked to.
-  const auto text = [translate](const char* s) {
-    return translate ? Common::GetStringT(s) : std::string(s);
-  };
-
-  switch (blob_type)
-  {
-  case BlobType::PLAIN:
-    return "ISO";
-  case BlobType::GCZ:
-    return "GCZ";
-  case BlobType::CISO:
-    return "CISO";
-  case BlobType::WBFS:
-    return "WBFS";
-  case BlobType::TGC:
-    return "TGC";
-  case BlobType::WIA:
-    return "WIA";
-  case BlobType::RVZ:
-    return "RVZ";
-  case BlobType::NFS:
-    return "NFS";
-  case BlobType::DIRECTORY:
-    return text("Directory");
-  case BlobType::MOD_DESCRIPTOR:
-    return text("Mod");
-  case BlobType::SPLIT_PLAIN:
-    return text("Multi-part ISO");
-  case BlobType::DRIVE:
-  default:
+  const auto it = std::ranges::find(s_blob_type_names, blob_type, &BlobTypeName::type);
+  // Physical drives (and anything unknown) have no name.
+  if (it == std::end(s_blob_type_names))
     return {};
-  }
+  if (it->descriptive && translate)
+    return Common::GetStringT(it->name);
+  return it->name;
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -240,22 +240,33 @@ struct BlockOut
 };
 }  // namespace
 
+namespace
+{
+// The converted image is written from scratch; a destination that cannot be opened is reported
+// to the user here.
+File::DirectIOFile OpenDestination(const std::string& path)
+{
+  File::DirectIOFile file(path, File::AccessMode::Write);
+  if (file.IsOpen())
+    return file;
+  PanicAlertFmtT(
+      "Failed to open the output file \"{0}\".\n"
+      "Check that you have permissions to write the target folder and that the media can "
+      "be written.",
+      path);
+  return file;
+}
+}  // namespace
+
 bool ConvertToGCZ(BlobReader* infile, const std::string& infile_path,
                   const std::string& outfile_path, u32 sub_type, int block_size,
                   const CompressCB& callback)
 {
   ASSERT(infile->GetDataSizeType() == DataSizeType::Accurate);
 
-  File::DirectIOFile outfile(outfile_path, File::AccessMode::Write);
+  File::DirectIOFile outfile = OpenDestination(outfile_path);
   if (!outfile.IsOpen())
-  {
-    PanicAlertFmtT(
-        "Failed to open the output file \"{0}\".\n"
-        "Check that you have permissions to write the target folder and that the media can "
-        "be written.",
-        outfile_path);
     return false;
-  }
 
   callback(Common::GetStringT("Files opened, ready to compress."), 0);
 

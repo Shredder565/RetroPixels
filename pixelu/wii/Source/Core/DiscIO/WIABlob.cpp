@@ -1973,21 +1973,32 @@ bool WIARVZFileReader<RVZ>::ReadWiiDecrypted(u64 offset, u64 size, u8* out_ptr,
 template class WIARVZFileReader<false>;
 template class WIARVZFileReader<true>;
 
+namespace
+{
+// The converted image is written from scratch; a destination that cannot be opened is reported
+// to the user here.
+File::DirectIOFile OpenDestination(const std::string& path)
+{
+  File::DirectIOFile file(path, File::AccessMode::Write);
+  if (file.IsOpen())
+    return file;
+  PanicAlertFmtT(
+      "Failed to open the output file \"{0}\".\n"
+      "Check that you have permissions to write the target folder and that the media can "
+      "be written.",
+      path);
+  return file;
+}
+}  // namespace
+
 bool ConvertToWIAOrRVZ(BlobReader* infile, const std::string& infile_path,
                        const std::string& outfile_path, bool rvz,
                        WIARVZCompressionType compression_type, int compression_level,
                        int chunk_size, const CompressCB& callback)
 {
-  File::DirectIOFile outfile(outfile_path, File::AccessMode::Write);
+  File::DirectIOFile outfile = OpenDestination(outfile_path);
   if (!outfile.IsOpen())
-  {
-    PanicAlertFmtT(
-        "Failed to open the output file \"{0}\".\n"
-        "Check that you have permissions to write the target folder and that the media can "
-        "be written.",
-        outfile_path);
     return false;
-  }
 
   const std::unique_ptr<VolumeDisc> infile_volume = CreateDisc(infile_path);
   ConversionResultCode result;
