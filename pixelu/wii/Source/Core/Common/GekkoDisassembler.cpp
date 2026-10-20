@@ -1,40 +1,13 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-
-/* $VER: ppc_disasm.c V1.5 (27.05.2009)
- *
- * Disassembler module for the PowerPC microprocessor family
- * Copyright (c) 1998-2001,2009,2011 Frank Wille
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice,
- * this list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- * this list of conditions and the following disclaimer in the documentation
- * and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- */
-
-// Modified for use with Dolphin
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/GekkoDisassembler.h"
 
 #include <array>
+#include <bit>
+#include <cstddef>
 #include <string>
+#include <string_view>
+#include <utility>
 
 #include <fmt/format.h>
 
@@ -42,2271 +15,1368 @@
 
 namespace Common
 {
-// version/revision
-#define PPCDISASM_VER 1
-#define PPCDISASM_REV 6
+namespace
+{
+// ---------------------------------------------------------------------------------------------
+// Instruction fields. Bit 0 is the least significant bit of the word.
 
-// general defines
-#define PPCIDXMASK 0xfc000000
-#define PPCIDX2MASK 0x000007fe
-#define PPCDMASK 0x03e00000
-#define PPCAMASK 0x001f0000
-#define PPCBMASK 0x0000f800
-#define PPCCMASK 0x000007c0
-#define PPCMMASK 0x0000003e
-#define PPCCRDMASK 0x03800000
-#define PPCCRAMASK 0x001c0000
-#define PPCLMASK 0x00600000
-#define PPCOE 0x00000400
-#define PPCVRC 0x00000400
-#define PPCDST 0x02000000
-#define PPCSTRM 0x00600000
+constexpr u32 Primary(u32 w)
+{
+  return w >> 26;
+}
+constexpr u32 FieldD(u32 w)
+{
+  return (w >> 21) & 31;
+}
+constexpr u32 FieldA(u32 w)
+{
+  return (w >> 16) & 31;
+}
+constexpr u32 FieldB(u32 w)
+{
+  return (w >> 11) & 31;
+}
+constexpr u32 FieldC(u32 w)
+{
+  return (w >> 6) & 31;
+}
+constexpr u32 FieldME(u32 w)
+{
+  return (w >> 1) & 31;
+}
+constexpr u32 CrDest(u32 w)
+{
+  return (w >> 23) & 7;
+}
+constexpr u32 CrSrc(u32 w)
+{
+  return (w >> 18) & 7;
+}
+constexpr u32 CmpL(u32 w)
+{
+  return (w >> 21) & 3;
+}
+constexpr u32 Ext10(u32 w)
+{
+  return (w >> 1) & 0x3ff;
+}
+constexpr u32 Ext5(u32 w)
+{
+  return (w >> 1) & 31;
+}
+constexpr bool RcBit(u32 w)
+{
+  return (w & 1) != 0;
+}
+constexpr bool OeBit(u32 w)
+{
+  return (w & 0x400) != 0;
+}
 
-#define PPCIDXSH 26
-#define PPCDSH 21
-#define PPCASH 16
-#define PPCBSH 11
-#define PPCCSH 6
-#define PPCMSH 1
-#define PPCCRDSH 23
-#define PPCCRASH 18
-#define PPCLSH 21
-#define PPCIDX2SH 1
+constexpr u32 kMaskD = 31u << 21;
+constexpr u32 kMaskA = 31u << 16;
+constexpr u32 kMaskB = 31u << 11;
 
-#define PPCGETIDX(x) (((x) & PPCIDXMASK) >> PPCIDXSH)
-#define PPCGETD(x) (((x) & PPCDMASK) >> PPCDSH)
-#define PPCGETA(x) (((x) & PPCAMASK) >> PPCASH)
-#define PPCGETB(x) (((x) & PPCBMASK) >> PPCBSH)
-#define PPCGETC(x) (((x) & PPCCMASK) >> PPCCSH)
-#define PPCGETM(x) (((x) & PPCMMASK) >> PPCMSH)
-#define PPCGETCRD(x) (((x) & PPCCRDMASK) >> PPCCRDSH)
-#define PPCGETCRA(x) (((x) & PPCCRAMASK) >> PPCCRASH)
-#define PPCGETL(x) (((x) & PPCLMASK) >> PPCLSH)
-#define PPCGETIDX2(x) (((x) & PPCIDX2MASK) >> PPCIDX2SH)
-#define PPCGETSTRM(x) (((x) & PPCSTRM) >> PPCDSH)
-
-constexpr std::array<const char*, 32> trap_condition{
-    nullptr, "lgt",   "llt",   nullptr, "eq",    "lge",   "lle",   nullptr,
-    "gt",    nullptr, nullptr, nullptr, "ge",    nullptr, nullptr, nullptr,
-    "lt",    nullptr, nullptr, nullptr, "le",    nullptr, nullptr, nullptr,
-    "ne",    nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-};
-
-constexpr std::array<const char*, 4> cmpname{
-    "cmpw",
-    "cmpd",
-    "cmplw",
-    "cmpld",
-};
-
-constexpr std::array<const char*, 4> ps_cmpname{
-    "ps_cmpu0",
-    "ps_cmpo0",
-    "ps_cmpu1",
-    "ps_cmpo1",
-};
-
-constexpr std::array<const char*, 4> b_ext{
-    "",
-    "l",
-    "a",
-    "la",
-};
-
-constexpr std::array<const char*, 8> b_condition{
-    "ge", "le", "ne", "ns", "lt", "gt", "eq", "so",
-};
-
-constexpr std::array<const char*, 16> b_decr{
-    "nzf", "zf", nullptr, nullptr, "nzt", "zt", nullptr, nullptr,
-    "nz",  "z",  nullptr, nullptr, "nz",  "z",  nullptr, nullptr,
-};
-
-constexpr std::array<const char*, 2> regsel{
-    "",
-    "r",
-};
-
-constexpr std::array<const char*, 2> oesel{
-    "",
-    "o",
-};
-
-constexpr std::array<const char*, 2> rcsel{
-    "",
-    ".",
-};
-
-constexpr std::array<const char*, 24> ldstnames{
-    "lwz", "lwzu", "lbz", "lbzu", "stw", "stwu", "stb", "stbu", "lhz",  "lhzu",  "lha",  "lhau",
-    "sth", "sthu", "lmw", "stmw", "lfs", "lfsu", "lfd", "lfdu", "stfs", "stfsu", "stfd", "stfdu",
-};
-
-constexpr std::array<const char*, 32> regnames{
+// Integer register names as the disassembly prints them.
+constexpr std::array<const char*, 32> kGpr = {
     "r0",  "sp",  "rtoc", "r3",  "r4",  "r5",  "r6",  "r7",  "r8",  "r9",  "r10",
     "r11", "r12", "r13",  "r14", "r15", "r16", "r17", "r18", "r19", "r20", "r21",
     "r22", "r23", "r24",  "r25", "r26", "r27", "r28", "r29", "r30", "r31",
 };
 
-// Initialize static class variables.
-u32* GekkoDisassembler::m_instr = nullptr;
-u32* GekkoDisassembler::m_iaddr = nullptr;
-std::string GekkoDisassembler::m_opcode;
-std::string GekkoDisassembler::m_operands;
-
-static u32 HelperRotateMask(int r, int mb, int me)
-{
-  // first make 001111111111111 part
-  unsigned int begin = 0xFFFFFFFF >> mb;
-  // then make 000000000001111 part, which is used to flip the bits of the first one
-  unsigned int end = me < 31 ? (0xFFFFFFFF >> (me + 1)) : 0;
-  // do the bitflip
-  unsigned int mask = begin ^ end;
-  // and invert if backwards
-  if (me < mb)
-    mask = ~mask;
-  // rotate the mask so it can be applied to source reg
-  // return _rotl(mask, 32 - r);
-  return (mask << (32 - r)) | (mask >> r);
-}
-
-static std::string ldst_offs(u32 val)
-{
-  if (val == 0)
-    return "0";
-
-  if (val & 0x8000)
-    return fmt::format("-0x{:04X}", ((~val) & 0xffff) + 1);
-
-  return fmt::format("0x{:04X}", val);
-}
-
-static std::string psq_offs(u32 val)
-{
-  if (val == 0)
-    return "0";
-
-  if ((val & 0x800) != 0)
-    return fmt::format("-0x{:04X}", ((~val) & 0xfff) + 1);
-
-  return fmt::format("0x{:04X}", val);
-}
-
-static std::string spr_name(int i)
-{
-  switch (i)
-  {
-  case 1:
-    return "XER";
-  case 8:
-    return "LR";
-  case 9:
-    return "CTR";
-  case 18:
-    return "DSISR";
-  case 19:
-    return "DAR";
-  case 22:
-    return "DEC";
-  case 25:
-    return "SDR1";
-  case 26:
-    return "SRR0";
-  case 27:
-    return "SRR1";
-  case 268:
-    return "TBLr";
-  case 269:
-    return "TBUr";
-  case 272:
-    return "SPRG0";
-  case 273:
-    return "SPRG1";
-  case 274:
-    return "SPRG2";
-  case 275:
-    return "SPRG3";
-  case 282:
-    return "EAR";
-  case 284:
-    return "TBLw";
-  case 285:
-    return "TBUw";
-  case 287:
-    return "PVR";
-  case 528:
-    return "IBAT0U";
-  case 529:
-    return "IBAT0L";
-  case 530:
-    return "IBAT1U";
-  case 531:
-    return "IBAT1L";
-  case 532:
-    return "IBAT2U";
-  case 533:
-    return "IBAT2L";
-  case 534:
-    return "IBAT3U";
-  case 535:
-    return "IBAT3L";
-  case 536:
-    return "DBAT0U";
-  case 537:
-    return "DBAT0L";
-  case 538:
-    return "DBAT1U";
-  case 539:
-    return "DBAT1L";
-  case 540:
-    return "DBAT2U";
-  case 541:
-    return "DBAT2L";
-  case 542:
-    return "DBAT3U";
-  case 543:
-    return "DBAT3L";
-  case 560:
-    return "IBAT4U";
-  case 561:
-    return "IBAT4L";
-  case 562:
-    return "IBAT5U";
-  case 563:
-    return "IBAT5L";
-  case 564:
-    return "IBAT6U";
-  case 565:
-    return "IBAT6L";
-  case 566:
-    return "IBAT7U";
-  case 567:
-    return "IBAT7L";
-  case 568:
-    return "DBAT4U";
-  case 569:
-    return "DBAT4L";
-  case 570:
-    return "DBAT5U";
-  case 571:
-    return "DBAT5L";
-  case 572:
-    return "DBAT6U";
-  case 573:
-    return "DBAT6L";
-  case 574:
-    return "DBAT7U";
-  case 575:
-    return "DBAT7L";
-  case 912:
-    return "GQR0";
-  case 913:
-    return "GQR1";
-  case 914:
-    return "GQR2";
-  case 915:
-    return "GQR3";
-  case 916:
-    return "GQR4";
-  case 917:
-    return "GQR5";
-  case 918:
-    return "GQR6";
-  case 919:
-    return "GQR7";
-  case 920:
-    return "HID2";
-  case 921:
-    return "WPAR";
-  case 922:
-    return "DMAU";
-  case 923:
-    return "DMAL";
-  case 924:
-    return "ECID_U";
-  case 925:
-    return "ECID_M";
-  case 926:
-    return "ECID_L";
-  case 936:
-    return "UMMCR0";
-  case 937:
-    return "UPMC1";
-  case 938:
-    return "UPMC2";
-  case 939:
-    return "USIA";
-  case 940:
-    return "UMMCR1";
-  case 941:
-    return "UPMC3";
-  case 942:
-    return "UPMC4";
-  case 943:
-    return "USDA";
-  case 952:
-    return "MMCR0";
-  case 953:
-    return "PMC1";
-  case 954:
-    return "PMC2";
-  case 955:
-    return "SIA";
-  case 956:
-    return "MMCR1";
-  case 957:
-    return "PMC3";
-  case 958:
-    return "PMC4";
-  case 959:
-    return "SDA";
-  case 1008:
-    return "HID0";
-  case 1009:
-    return "HID1";
-  case 1010:
-    return "IABR";
-  case 1011:
-    return "HID4";
-  case 1012:
-    return "TDCL";
-  case 1013:
-    return "DABR";
-  case 1017:
-    return "L2CR";
-  case 1018:
-    return "TDCH";
-  case 1019:
-    return "ICTC";
-  case 1020:
-    return "THRM1";
-  case 1021:
-    return "THRM2";
-  case 1022:
-    return "THRM3";
-  }
-
-  return std::to_string(i);
-}
-
-static u32 swapda(u32 w)
-{
-  return ((w & 0xfc00ffff) | ((w & PPCAMASK) << 5) | ((w & PPCDMASK) >> 5));
-}
-
-static u32 swapab(u32 w)
-{
-  return ((w & 0xffe007ff) | ((w & PPCBMASK) << 5) | ((w & PPCAMASK) >> 5));
-}
-
-void GekkoDisassembler::ill(u32 in)
-{
-  if (in == 0)
-  {
-    m_opcode = "";
-    m_operands = "---";
-  }
-  else
-  {
-    m_opcode = "(ill)";
-    m_operands = fmt::format("{:08x}", in);
-  }
-}
-
-// Generate immediate instruction operand.
-//
-// Type 0: D-mode, D,A,imm
-// Type 1: S-mode, A,S,imm
-// Type 2: S/D register is ignored (trap,cmpi)
-// Type 3: A register is ignored (li)
-std::string GekkoDisassembler::imm(u32 in, int uimm, int type, bool hex)
-{
-  int i = (int)(in & 0xffff);
-
-  if (uimm == 0)
-  {
-    if (i > 0x7fff)
-      i -= 0x10000;
-  }
-
-  switch (type)
-  {
-  case 0:
-    return fmt::format("{}, {}, {}", regnames[PPCGETD(in)], regnames[PPCGETA(in)], i);
-
-  case 1:
-    if (hex)
-      return fmt::format("{}, {}, 0x{:04X}", regnames[PPCGETA(in)], regnames[PPCGETD(in)], i);
-    else
-      return fmt::format("{}, {}, {}", regnames[PPCGETA(in)], regnames[PPCGETD(in)], i);
-
-  case 2:
-    return fmt::format("{}, {}", regnames[PPCGETA(in)], i);
-
-  case 3:
-    if (hex)
-      return fmt::format("{}, 0x{:04X}", regnames[PPCGETD(in)], i);
-    else
-      return fmt::format("{}, {}", regnames[PPCGETD(in)], i);
-
-  default:
-    return "imm(): Wrong type";
-  }
-}
-
-std::string GekkoDisassembler::ra_rb(u32 in)
-{
-  return fmt::format("{}, {}", regnames[PPCGETA(in)], regnames[PPCGETB(in)]);
-}
-
-std::string GekkoDisassembler::rd_ra_rb(u32 in, int mask)
-{
-  std::string result;
-
-  if (mask)
-  {
-    if (mask & 4)
-      result += fmt::format("{}, ", regnames[PPCGETD(in)]);
-    if (mask & 2)
-      result += fmt::format("{}, ", regnames[PPCGETA(in)]);
-    if (mask & 1)
-      result += fmt::format("{}, ", regnames[PPCGETB(in)]);
-
-    size_t pos = result.rfind(", ");
-    if (pos != std::string::npos)
-    {
-      result.erase(pos, result.length() - pos);
-    }
-  }
-
-  return result;
-}
-
-std::string GekkoDisassembler::fd_ra_rb(u32 in)
-{
-  return fmt::format("f{}, {}, {}", PPCGETD(in), regnames[PPCGETA(in)], regnames[PPCGETB(in)]);
-}
-
-void GekkoDisassembler::trapi(u32 in, unsigned char dmode)
-{
-  const char* cnd = trap_condition[PPCGETD(in)];
-
-  if (cnd != nullptr)
-  {
-    m_opcode = fmt::format("t{}{}i", dmode ? 'd' : 'w', cnd);
-  }
-  else
-  {
-    m_opcode = fmt::format("t{}i", dmode ? 'd' : 'w');
-    m_operands = fmt::format("{}, ", PPCGETD(in));
-  }
-  m_operands += imm(in, 0, 2, false);
-}
-
-void GekkoDisassembler::cmpi(u32 in, int uimm)
-{
-  int i = (int)PPCGETL(in);
-
-  if (i < 2)
-  {
-    m_opcode = fmt::format("{}i", cmpname[uimm * 2 + i]);
-
-    i = (int)PPCGETCRD(in);
-    if (i != 0)
-    {
-      m_operands += fmt::format("cr{}, ", i);
-    }
-
-    m_operands += imm(in, uimm, 2, false);
-  }
-  else
-  {
-    ill(in);
-  }
-}
-
-void GekkoDisassembler::addi(u32 in, std::string_view ext)
-{
-  if ((in & 0x08000000) && !PPCGETA(in))
-  {
-    // li, lis
-    m_opcode = fmt::format("l{}", ext);
-
-    if (ext == "i")
-      m_operands = imm(in, 0, 3, false);
-    else
-      m_operands = imm(in, 1, 3, true);
-  }
-  else
-  {
-    m_opcode = fmt::format("{}{}", (in & 0x8000) ? "sub" : "add", ext);
-
-    if (in & 0x8000)
-      in = (in ^ 0xffff) + 1;
-
-    m_operands = imm(in, 1, 0, false);
-  }
-}
-
-// Build a branch instr. and return number of chars written to operand.
-size_t GekkoDisassembler::branch(u32 in, std::string_view bname, int aform, int bdisp)
-{
-  int bo = (int)PPCGETD(in);
-  int bi = (int)PPCGETA(in);
-  char y = (char)(bo & 1);
-  const char* ext = b_ext[aform * 2 + (int)(in & 1)];
-
-  if (bdisp < 0)
-    y ^= 1;
-  y = (y != 0) ? '+' : '-';
-
-  if (bo & 4)
-  {
-    // standard case - no decrement
-    if (bo & 16)
-    {
-      // branch always
-      if (PPCGETIDX(in) != 16)
-      {
-        m_opcode = fmt::format("b{}{}", bname, ext);
-      }
-      else
-      {
-        m_opcode = fmt::format("bc{}", ext);
-        m_operands = fmt::format("{}, {}", bo, bi);
-      }
-    }
-    else  // Branch conditional
-    {
-      m_opcode = fmt::format("b{}{}{}{}", b_condition[((bo & 8) >> 1) + (bi & 3)], bname, ext, y);
-
-      if (bi >= 4)
-      {
-        m_operands = fmt::format("cr{}", bi >> 2);
-      }
-    }
-  }
-  else
-  {
-    // CTR is decremented and checked
-    m_opcode = fmt::format("bd{}{}{}{}", b_decr[bo >> 1], bname, ext, y);
-
-    if ((bo & 16) == 0)
-    {
-      m_operands = std::to_string(bi);
-    }
-  }
-
-  return m_operands.length();
-}
-
-void GekkoDisassembler::bc(u32 in)
-{
-  unsigned int d = (int)(in & 0xfffc);
-
-  if (d & 0x8000)
-    d |= 0xffff0000;
-
-  branch(in, "", (in & 2) ? 1 : 0, d);
-
-  if (in & 2)  // AA ?
-    m_operands = fmt::format("{} ->0x{:08X}", m_operands, d);
-  else
-    m_operands = fmt::format("{} ->0x{:08X}", m_operands, *m_iaddr + d);
-}
-
-void GekkoDisassembler::bli(u32 in)
-{
-  unsigned int d = (unsigned int)(in & 0x3fffffc);
-
-  if (d & 0x02000000)
-    d |= 0xfc000000;
-
-  m_opcode = fmt::format("b{}", b_ext[in & 3]);
-
-  if (in & 2)  // AA ?
-    m_operands = fmt::format("->0x{:08X}", d);
-  else
-    m_operands = fmt::format("->0x{:08X}", *m_iaddr + d);
-}
-
-void GekkoDisassembler::mcrf(u32 in, std::string_view suffix)
-{
-  if ((in & 0x0063f801) == 0)
-  {
-    m_opcode = fmt::format("mcrf{}", suffix);
-    m_operands = fmt::format("cr{}, cr{}", PPCGETCRD(in), PPCGETCRA(in));
-  }
-  else
-  {
-    ill(in);
-  }
-}
-
-void GekkoDisassembler::crop(u32 in, std::string_view n1, std::string_view n2)
-{
-  int crd = (int)PPCGETD(in);
-  int cra = (int)PPCGETA(in);
-  int crb = (int)PPCGETB(in);
-
-  if ((in & 1) == 0)
-  {
-    m_opcode = fmt::format("cr{}", (cra == crb && !n2.empty()) ? n2 : n1);
-    if (cra == crb && !n2.empty())
-      m_operands = fmt::format("{}, {}", crd, cra);
-    else
-      m_operands = fmt::format("{}, {}, {}", crd, cra, crb);
-  }
-  else
-  {
-    ill(in);
-  }
-}
-
-void GekkoDisassembler::nooper(u32 in, std::string_view name)
-{
-  if (in & (PPCDMASK | PPCAMASK | PPCBMASK | 1))
-  {
-    ill(in);
-  }
-  else
-  {
-    m_opcode = name;
-  }
-}
-
-void GekkoDisassembler::rlw(u32 in, std::string_view name, int i)
-{
-  int s = (int)PPCGETD(in);
-  int a = (int)PPCGETA(in);
-  int bsh = (int)PPCGETB(in);
-  int mb = (int)PPCGETC(in);
-  int me = (int)PPCGETM(in);
-
-  m_opcode = fmt::format("rlw{}{}", name, (in & 1) ? "." : "");
-  m_operands = fmt::format("{}, {}, {}{}, {}, {} ({:08x})", regnames[a], regnames[s], regsel[i],
-                           bsh, mb, me, HelperRotateMask(bsh, mb, me));
-}
-
-void GekkoDisassembler::ori(u32 in, std::string_view name)
-{
-  m_opcode = name;
-  m_operands = imm(in, 1, 1, true);
-}
-
-void GekkoDisassembler::rld(u32 in, std::string_view name, int i)
-{
-  int s = (int)PPCGETD(in);
-  int a = (int)PPCGETA(in);
-  int bsh = i ? (int)PPCGETB(in) : (int)(((in & 2) << 4) + PPCGETB(in));
-  int m = (int)(in & 0x7e0) >> 5;
-
-  m_opcode = fmt::format("rld{}{}", name, (in & 1) ? "." : "");
-  m_operands = fmt::format("{}, {}, {}{}, {}", regnames[a], regnames[s], regsel[i], bsh, m);
-}
-
-void GekkoDisassembler::cmp(u32 in)
-{
-  int i = (int)PPCGETL(in);
-
-  if (i < 2)
-  {
-    m_opcode = cmpname[((in & PPCIDX2MASK) ? 2 : 0) + i];
-
-    i = (int)PPCGETCRD(in);
-    if (i != 0)
-      m_operands += fmt::format("cr{},", i);
-
-    m_operands += ra_rb(in);
-  }
-  else
-  {
-    ill(in);
-  }
-}
-
-void GekkoDisassembler::trap(u32 in, unsigned char dmode)
-{
-  int to = (int)PPCGETD(in);
-  const char* cnd = trap_condition[to];
-
-  if (cnd != nullptr)
-  {
-    m_opcode = fmt::format("t{}{}", dmode ? 'd' : 'w', cnd);
-    m_operands = ra_rb(in);
-  }
-  else
-  {
-    if (to == 31)
-    {
-      if (dmode)
-      {
-        m_opcode = "td";
-        m_operands = "31,0,0";
-      }
-      else
-      {
-        m_opcode = "trap";
-      }
-    }
-    else
-    {
-      ill(in);
-    }
-  }
-}
-
-// Standard instruction: xxxx rD,rA,rB
-void GekkoDisassembler::dab(u32 in, std::string_view name, int mask, int smode, int chkoe,
-                            int chkrc)
-{
-  if (chkrc >= 0 && ((in & 1) != (unsigned int)chkrc))
-  {
-    ill(in);
-  }
-  else
-  {
-    // rA,rS,rB
-    if (smode)
-      in = swapda(in);
-
-    m_opcode =
-        fmt::format("{}{}{}", name, oesel[chkoe && (in & PPCOE)], rcsel[(chkrc < 0) && (in & 1)]);
-    m_operands = rd_ra_rb(in, mask);
-  }
-}
-
-// Last operand is no register: xxxx rD,rA,NB
-void GekkoDisassembler::rrn(u32 in, std::string_view name, int smode, int chkoe, int chkrc)
-{
-  if (chkrc >= 0 && ((in & 1) != (unsigned int)chkrc))
-  {
-    ill(in);
-  }
-  else
-  {
-    // rA,rS,NB
-    if (smode)
-      in = swapda(in);
-
-    m_opcode =
-        fmt::format("{}{}{}", name, oesel[chkoe && (in & PPCOE)], rcsel[(chkrc < 0) && (in & 1)]);
-    m_operands = rd_ra_rb(in, 6);
-    m_operands += fmt::format(",{}", PPCGETB(in));
-  }
-}
-
-void GekkoDisassembler::mtcr(u32 in)
-{
-  int s = (int)PPCGETD(in);
-  int crm = (int)(in & 0x000ff000) >> 12;
-
-  if (in & 0x00100801)
-  {
-    ill(in);
-  }
-  else
-  {
-    m_opcode = fmt::format("mtcr{}", crm == 0xff ? "" : "f");
-
-    if (crm != 0xff)
-      m_operands += fmt::format("0x{:02x},", crm);
-
-    m_operands += regnames[s];
-  }
-}
-
-void GekkoDisassembler::msr(u32 in, int smode)
-{
-  int s = (int)PPCGETD(in);
-  int sr = (int)(in & 0x000f0000) >> 16;
-
-  if (in & 0x0010f801)
-  {
-    ill(in);
-  }
-  else
-  {
-    m_opcode = fmt::format("m{}sr", smode ? 't' : 'f');
-
-    if (smode)
-      m_operands = fmt::format("{}, {}", sr, regnames[s]);
-    else
-      m_operands = fmt::format("{}, {}", regnames[s], sr);
-  }
-}
-
-void GekkoDisassembler::mspr(u32 in, int smode)
-{
-  int d = (int)PPCGETD(in);
-  int spr = (int)((PPCGETB(in) << 5) + PPCGETA(in));
-  int fmt = 0;
-
-  if (in & 1)
-  {
-    ill(in);
-  }
-  else
-  {
-    const char* x;
-    switch (spr)
-    {
-    case 1:
-      x = "xer";
-      break;
-
-    case 8:
-      x = "lr";
-      break;
-
-    case 9:
-      x = "ctr";
-      break;
-
-    default:
-      x = "spr";
-      fmt = 1;
-      break;
-    }
-
-    m_opcode = fmt::format("m{}{}", smode ? 't' : 'f', x);
-
-    if (fmt)
-    {
-      if (smode)
-        m_operands = fmt::format("{}, {}", spr_name(spr), regnames[d]);
-      else
-        m_operands = fmt::format("{}, {}", regnames[d], spr_name(spr));
-    }
-    else
-    {
-      m_operands = regnames[d];
-    }
-  }
-}
-
-void GekkoDisassembler::mtb(u32 in)
-{
-  int d = (int)PPCGETD(in);
-  int tbr = (int)((PPCGETB(in) << 5) + PPCGETA(in));
-
-  if (in & 1)
-  {
-    ill(in);
-  }
-  else
-  {
-    m_operands += regnames[d];
-
-    const char* x = "";
-    switch (tbr)
-    {
-    case 268:
-      x = "l";
-      break;
-
-    case 269:
-      x = "u";
-      break;
-
-    default:
-      m_operands += fmt::format(",{}", tbr);
-      break;
-    }
-
-    m_opcode = fmt::format("mftb{}", x);
-  }
-}
-
-void GekkoDisassembler::ldst(u32 in, std::string_view name, char reg)
-{
-  int s = (int)PPCGETD(in);
-  int a = (int)PPCGETA(in);
-  int d = (u32)(in & 0xffff);
-
-  m_opcode = name;
-
-  if (reg == 'r')
-  {
-    m_operands = fmt::format("{}, {} ({})", regnames[s], ldst_offs(d), regnames[a]);
-  }
-  else
-  {
-    m_operands = fmt::format("{}{}, {} ({})", reg, s, ldst_offs(d), regnames[a]);
-  }
-}
-
-// Standard floating point instruction: xxxx fD,fA,fC,fB
-void GekkoDisassembler::fdabc(u32 in, std::string_view name, int mask)
-{
-  int err = 0;
-
-  m_opcode = fmt::format("f{}{}", name, rcsel[in & 1]);
-  m_operands += fmt::format("f{}", PPCGETD(in));
-
-  if (mask & 4)
-    m_operands += fmt::format(", f{}", PPCGETA(in));
-  else if ((mask & 8) == 0)
-    err |= (int)PPCGETA(in);
-
-  if (mask & 2)
-    m_operands += fmt::format(", f{}", PPCGETC(in));
-  else if (PPCGETC(in) && (mask & 8) == 0)
-    err |= (int)PPCGETC(in);
-
-  if (mask & 1)
-    m_operands += fmt::format(", f{}", PPCGETB(in));
-  else if (!(mask & 8))
-    err |= (int)PPCGETB(in);
-
-  if (err)
-    ill(in);
-}
-
-void GekkoDisassembler::fmr(u32 in)
-{
-  m_opcode = fmt::format("fmr{}", rcsel[in & 1]);
-  m_operands = fmt::format("f{}, f{}", PPCGETD(in), PPCGETB(in));
-}
-
-// Indexed float instruction: xxxx fD,rA,rB
-void GekkoDisassembler::fdab(u32 in, std::string_view name)
-{
-  m_opcode = name;
-  m_operands = fd_ra_rb(in);
-}
-
-void GekkoDisassembler::fcmp(u32 in, char c)
-{
-  if (in & 0x00600001)
-  {
-    ill(in);
-  }
-  else
-  {
-    m_opcode = fmt::format("fcmp{}", c);
-    m_operands = fmt::format("cr{}, f{}, f{}", PPCGETCRD(in), PPCGETA(in), PPCGETB(in));
-  }
-}
-
-void GekkoDisassembler::mtfsb(u32 in, int n)
-{
-  if (in & (PPCAMASK | PPCBMASK))
-  {
-    ill(in);
-  }
-  else
-  {
-    m_opcode = fmt::format("mtfsb{}{}", n, rcsel[in & 1]);
-    m_operands = std::to_string(PPCGETD(in));
-  }
-}
-
-// Paired instructions
-
-#define RA ((inst >> 16) & 0x1f)
-#define RB ((inst >> 11) & 0x1f)
-#define RC ((inst >> 6) & 0x1f)
-#define RD ((inst >> 21) & 0x1f)
-#define RS ((inst >> 21) & 0x1f)
-#define FA ((inst >> 16) & 0x1f)
-#define FB ((inst >> 11) & 0x1f)
-#define FC ((inst >> 6) & 0x1f)
-#define FD ((inst >> 21) & 0x1f)
-#define FS ((inst >> 21) & 0x1f)
-#define IMM (inst & 0xffff)
-#define UIMM (inst & 0xffff)
-#define OFS (inst & 0xffff)
-#define OPCD ((inst >> 26) & 0x3f)
-#define XO_10 ((inst >> 1) & 0x3ff)
-#define XO_9 ((inst >> 1) & 0x1ff)
-#define XO_5 ((inst >> 1) & 0x1f)
-#define Rc (inst & 1)
-#define SH ((inst >> 11) & 0x1f)
-#define MB ((inst >> 6) & 0x1f)
-#define ME ((inst >> 1) & 0x1f)
-#define OE ((inst >> 10) & 1)
-#define TO ((inst >> 21) & 0x1f)
-#define CRFD ((inst >> 23) & 0x7)
-#define CRFS ((inst >> 18) & 0x7)
-#define CRBD ((inst >> 21) & 0x1f)
-#define CRBA ((inst >> 16) & 0x1f)
-#define CRBB ((inst >> 11) & 0x1f)
-#define L ((inst >> 21) & 1)
-#define NB ((inst >> 11) & 0x1f)
-#define AA ((inst >> 1) & 1)
-#define LK (inst & 1)
-#define LI ((inst >> 2) & 0xffffff)
-#define BO ((inst >> 21) & 0x1f)
-#define BI ((inst >> 16) & 0x1f)
-#define BD ((inst >> 2) & 0x3fff)
-
-#define MTFSFI_IMM ((inst >> 12) & 0xf)
-#define FM ((inst >> 17) & 0xff)
-#define SR ((inst >> 16) & 0xf)
-#define SPR ((inst >> 11) & 0x3ff)
-#define TBR ((inst >> 11) & 0x3ff)
-#define CRM ((inst >> 12) & 0xff)
-
-#define I ((inst >> 12) & 0x7)
-#define W ((inst >> 15) & 0x1)
-#define IX ((inst >> 7) & 0x7)
-#define WX ((inst >> 10) & 0x1)
-
-void GekkoDisassembler::ps(u32 inst)
-{
-  switch ((inst >> 1) & 0x1F)
-  {
-  case 6:
-    m_opcode = inst & 0x40 ? "psq_lux" : "psq_lx";
-    m_operands = fmt::format("p{}, r{}, r{}, {}, qr{}", FD, RA, RB, WX, IX);
-    return;
-
-  case 7:
-    m_opcode = inst & 0x40 ? "psq_stux" : "psq_stx";
-    m_operands = fmt::format("p{}, r{}, r{}, {}, qr{}", FS, RA, RB, WX, IX);
-    return;
-
-  case 18:
-    m_opcode = "ps_div";
-    m_operands = fmt::format("p{}, p{}/p{}", FD, FA, FB);
-    return;
-
-  case 20:
-    m_opcode = "ps_sub";
-    m_operands = fmt::format("p{}, p{}-p{}", FD, FA, FB);
-    return;
-
-  case 21:
-    m_opcode = "ps_add";
-    m_operands = fmt::format("p{}, p{}+p{}", FD, FA, FB);
-    return;
-
-  case 23:
-    m_opcode = "ps_sel";
-    m_operands = fmt::format("p{}, p{}>=0?p{}:p{}", FD, FA, FC, FB);
-    return;
-
-  case 24:
-    m_opcode = "ps_res";
-    m_operands = fmt::format("p{}, (1/p{})", FD, FB);
-    return;
-
-  case 25:
-    m_opcode = "ps_mul";
-    m_operands = fmt::format("p{}, p{}*p{}", FD, FA, FC);
-    return;
-
-  case 26:  // rsqrte
-    m_opcode = "ps_rsqrte";
-    m_operands = fmt::format("p{}, p{}", FD, FB);
-    return;
-
-  case 28:  // msub
-    m_opcode = "ps_msub";
-    m_operands = fmt::format("p{}, p{}*p{}-p{}", FD, FA, FC, FB);
-    return;
-
-  case 29:  // madd
-    m_opcode = "ps_madd";
-    m_operands = fmt::format("p{}, p{}*p{}+p{}", FD, FA, FC, FB);
-    return;
-
-  case 30:  // nmsub
-    m_opcode = "ps_nmsub";
-    m_operands = fmt::format("p{}, -(p{}*p{}-p{})", FD, FA, FC, FB);
-    return;
-
-  case 31:  // nmadd
-    m_opcode = "ps_nmadd";
-    m_operands = fmt::format("p{}, -(p{}*p{}+p{})", FD, FA, FC, FB);
-    return;
-
-  case 10:
-    m_opcode = "ps_sum0";
-    m_operands = fmt::format("p{}, 0=p{}+p{}, 1=p{}", FD, FA, FB, FC);
-    return;
-
-  case 11:
-    m_opcode = "ps_sum1";
-    m_operands = fmt::format("p{}, 0=p{}, 1=p{}+p{}", FD, FC, FA, FB);
-    return;
-
-  case 12:
-    m_opcode = "ps_muls0";
-    m_operands = fmt::format("p{}, p{}*p{}[0]", FD, FA, FC);
-    return;
-
-  case 13:
-    m_opcode = "ps_muls1";
-    m_operands = fmt::format("p{}, p{}*p{}[1]", FD, FA, FC);
-    return;
-
-  case 14:
-    m_opcode = "ps_madds0";
-    m_operands = fmt::format("p{}, p{}*p{}[0]+p{}", FD, FA, FC, FB);
-    return;
-
-  case 15:
-    m_opcode = "ps_madds1";
-    m_operands = fmt::format("p{}, p{}*p{}[1]+p{}", FD, FA, FC, FB);
-    return;
-  }
-
-  switch ((inst >> 1) & 0x3FF)
-  {
-  // 10-bit suckers  (?)
-  case 40:  // nmadd
-    m_opcode = "ps_neg";
-    m_operands = fmt::format("p{}, -p{}", FD, FB);
-    return;
-
-  case 72:  // nmadd
-    m_opcode = "ps_mr";
-    m_operands = fmt::format("p{}, p{}", FD, FB);
-    return;
-
-  case 136:
-    m_opcode = "ps_nabs";
-    m_operands = fmt::format("p{}, -|p{}|", FD, FB);
-    return;
-
-  case 264:
-    m_opcode = "ps_abs";
-    m_operands = fmt::format("p{}, |p{}|", FD, FB);
-    return;
-
-  case 0:
-  case 32:
-  case 64:
-  case 96:
-  {
-    m_opcode = ps_cmpname[(inst >> 6) & 0x3];
-
-    int i = (int)PPCGETCRD(inst);
-    if (i != 0)
-      m_operands += fmt::format("cr{}, ", i);
-    m_operands += fmt::format("p{}, p{}", FA, FB);
-    return;
-  }
-  case 528:
-    m_opcode = "ps_merge00";
-    m_operands = fmt::format("p{}, p{}[0], p{}[0]", FD, FA, FB);
-    return;
-
-  case 560:
-    m_opcode = "ps_merge01";
-    m_operands = fmt::format("p{}, p{}[0], p{}[1]", FD, FA, FB);
-    return;
-
-  case 592:
-    m_opcode = "ps_merge10";
-    m_operands = fmt::format("p{}, p{}[1], p{}[0]", FD, FA, FB);
-    return;
-
-  case 624:
-    m_opcode = "ps_merge11";
-    m_operands = fmt::format("p{}, p{}[1], p{}[1]", FD, FA, FB);
-    return;
-
-  case 1014:
-    if (inst & PPCDMASK)
-      ill(inst);
-    else
-      dab(inst, "dcbz_l", 3, 0, 0, 0);
-    return;
-  }
-
-  //	default:
-  m_opcode = fmt::format("ps_{}", ((inst >> 1) & 0x1f));
-  m_operands = "---";
-}
-
-void GekkoDisassembler::ps_mem(u32 inst)
-{
-  switch (PPCGETIDX(inst))
-  {
-  case 56:
-    m_opcode = "psq_l";
-    m_operands = fmt::format("p{}, {}(r{}), {}, qr{}", RS, psq_offs(inst & 0xFFF), RA, W, I);
-    break;
-
-  case 57:
-    m_opcode = "psq_lu";
-    m_operands = fmt::format("p{}, {}(r{}), {}, qr{}", RS, psq_offs(inst & 0xFFF), RA, W, I);
-    ;
-    break;
-
-  case 60:
-    m_opcode = "psq_st";
-    m_operands = fmt::format("p{}, {}(r{}), {}, qr{}", RS, psq_offs(inst & 0xFFF), RA, W, I);
-    break;
-
-  case 61:
-    m_opcode = "psq_stu";
-    m_operands = fmt::format("p{}, {}(r{}), {}, qr{}", RS, psq_offs(inst & 0xFFF), RA, W, I);
-    break;
-  }
-}
-
-// Disassemble PPC instruction and return a pointer to the next
-// instruction, or nullptr if an error occurred.
-u32* GekkoDisassembler::DoDisassembly(bool big_endian)
-{
-  u32 in = *m_instr;
-
-  if (!big_endian)
-  {
-    in = (in & 0xff) << 24 | (in & 0xff00) << 8 | (in & 0xff0000) >> 8 | (in & 0xff000000) >> 24;
-  }
-
-  m_opcode.clear();
-  m_operands.clear();
-
-  switch (PPCGETIDX(in))
-  {
-  case 2:
-    trapi(in, PPCF_64);  // tdi
-    break;
-
-  case 3:
-    trapi(in, 0);  // twi
-    break;
-
-  case 4:
-    ps(in);
-    break;
-
-  case 56:
-  case 57:
-  case 60:
-  case 61:
-    ps_mem(in);
-    break;
-
-  case 7:
-    m_opcode = "mulli";
-    m_operands = imm(in, 0, 0, false);
-    break;
-
-  case 8:
-    m_opcode = "subfic";
-    m_operands = imm(in, 0, 0, false);
-    break;
-
-  case 10:
-    cmpi(in, 1);  // cmpli
-    break;
-
-  case 11:
-    cmpi(in, 0);  // cmpi
-    break;
-
-  case 12:
-    addi(in, "ic");  // addic
-    break;
-
-  case 13:
-    addi(in, "ic.");  // addic.
-    break;
-
-  case 14:
-    addi(in, "i");  // addi
-    break;
-
-  case 15:
-    addi(in, "is");  // addis
-    break;
-
-  case 16:
-    bc(in);
-    break;
-
-  case 17:
-    if ((in & ~PPCIDXMASK) == 2)
-      m_opcode = "sc";
-    else
-      ill(in);
-    break;
-
-  case 18:
-    bli(in);
-    break;
-
-  case 19:
-    switch (PPCGETIDX2(in))
-    {
-    case 0:
-      mcrf(in, "");  // mcrf
-      break;
-
-    case 16:
-      branch(in, "lr", 0, 0);  // bclr
-      break;
-
-    case 33:
-      crop(in, "nor", "not");  // crnor
-      break;
-
-    case 50:
-      nooper(in, "rfi");
-      break;
-
-    case 129:
-      crop(in, "andc", {});  // crandc
-      break;
-
-    case 150:
-      nooper(in, "isync");
-      break;
-
-    case 193:
-      crop(in, "xor", "clr");  // crxor
-      break;
-
-    case 225:
-      crop(in, "nand", {});  // crnand
-      break;
-
-    case 257:
-      crop(in, "and", {});  // crand
-      break;
-
-    case 289:
-      crop(in, "eqv", "set");  // creqv
-      break;
-
-    case 417:
-      crop(in, "orc", {});  // crorc
-      break;
-
-    case 449:
-      crop(in, "or", "move");  // cror
-      break;
-
-    case 528:
-      branch(in, "ctr", 0, 0);  // bcctr
-      break;
-
-    default:
-      ill(in);
-      break;
-    }
-    break;
-
-  case 20:
-    rlw(in, "imi", 0);  // rlwimi
-    break;
-
-  case 21:
-    rlw(in, "inm", 0);  // rlwinm
-    break;
-
-  case 23:
-    rlw(in, "nm", 1);  // rlwnm
-    break;
-
-  case 24:
-    if (in & ~PPCIDXMASK)
-      ori(in, "ori");
-    else
-      m_opcode = "nop";
-    break;
-
-  case 25:
-    ori(in, "oris");
-    break;
-
-  case 26:
-    ori(in, "xori");
-    break;
-
-  case 27:
-    ori(in, "xoris");
-    break;
-
-  case 28:
-    ori(in, "andi.");
-    break;
-
-  case 29:
-    ori(in, "andis.");
-    break;
-
-  case 31:
-    switch (PPCGETIDX2(in))
-    {
-    case 0:
-    case 32:
-      if (in & 1)
-        ill(in);
-      else
-        cmp(in);  // cmp, cmpl
-      break;
-
-    case 4:
-      if (in & 1)
-        ill(in);
-      else
-        trap(in, 0);  // tw
-      break;
-
-    case 8:
-    case (PPCOE >> 1) + 8:
-      dab(swapab(in), "subc", 7, 0, 1, -1);
-      break;
-
-    case 9:
-      dab(in, "mulhdu", 7, 0, 0, -1);
-      break;
-
-    case 10:
-    case (PPCOE >> 1) + 10:
-      dab(in, "addc", 7, 0, 1, -1);
-      break;
-
-    case 11:
-      dab(in, "mulhwu", 7, 0, 0, -1);
-      break;
-
-    case 19:
-      if (in & (PPCAMASK | PPCBMASK))
-        ill(in);
-      else
-        dab(in, "mfcr", 4, 0, 0, 0);
-      break;
-
-    case 20:
-      dab(in, "lwarx", 7, 0, 0, 0);
-      break;
-
-    case 21:
-      dab(in, "ldx", 7, 0, 0, 0);
-      break;
-
-    case 23:
-      dab(in, "lwzx", 7, 0, 0, 0);
-      break;
-
-    case 24:
-      dab(in, "slw", 7, 1, 0, -1);
-      break;
-
-    case 26:
-      if (in & PPCBMASK)
-        ill(in);
-      else
-        dab(in, "cntlzw", 6, 1, 0, -1);
-      break;
-
-    case 27:
-      dab(in, "sld", 7, 1, 0, -1);
-      break;
-
-    case 28:
-      dab(in, "and", 7, 1, 0, -1);
-      break;
-
-    case 40:
-    case (PPCOE >> 1) + 40:
-      dab(swapab(in), "sub", 7, 0, 1, -1);
-      break;
-
-    case 53:
-      dab(in, "ldux", 7, 0, 0, 0);
-      break;
-
-    case 54:
-      if (in & PPCDMASK)
-        ill(in);
-      else
-        dab(in, "dcbst", 3, 0, 0, 0);
-      break;
-
-    case 55:
-      dab(in, "lwzux", 7, 0, 0, 0);
-      break;
-
-    case 58:
-      if (in & PPCBMASK)
-        ill(in);
-      else
-        dab(in, "cntlzd", 6, 1, 0, -1);
-      break;
-
-    case 60:
-      dab(in, "andc", 7, 1, 0, -1);
-      break;
-
-    case 68:
-      trap(in, PPCF_64);  // td
-      break;
-
-    case 73:
-      dab(in, "mulhd", 7, 0, 0, -1);
-      break;
-
-    case 75:
-      dab(in, "mulhw", 7, 0, 0, -1);
-      break;
-
-    case 83:
-      if (in & (PPCAMASK | PPCBMASK))
-        ill(in);
-      else
-        dab(in, "mfmsr", 4, 0, 0, 0);
-      break;
-
-    case 84:
-      dab(in, "ldarx", 7, 0, 0, 0);
-      break;
-
-    case 86:
-      if (in & PPCDMASK)
-        ill(in);
-      else
-        dab(in, "dcbf", 3, 0, 0, 0);
-      break;
-
-    case 87:
-      dab(in, "lbzx", 7, 0, 0, 0);
-      break;
-
-    case 104:
-    case (PPCOE >> 1) + 104:
-      if (in & PPCBMASK)
-        ill(in);
-      else
-        dab(in, "neg", 6, 0, 1, -1);
-      break;
-
-    case 119:
-      dab(in, "lbzux", 7, 0, 0, 0);
-      break;
-
-    case 124:
-      if (PPCGETD(in) == PPCGETB(in))
-        dab(in, "not", 6, 1, 0, -1);
-      else
-        dab(in, "nor", 7, 1, 0, -1);
-      break;
-
-    case 136:
-    case (PPCOE >> 1) + 136:
-      dab(in, "subfe", 7, 0, 1, -1);
-      break;
-
-    case 138:
-    case (PPCOE >> 1) + 138:
-      dab(in, "adde", 7, 0, 1, -1);
-      break;
-
-    case 144:
-      mtcr(in);
-      break;
-
-    case 146:
-      if (in & (PPCAMASK | PPCBMASK))
-        ill(in);
-      else
-        dab(in, "mtmsr", 4, 0, 0, 0);
-      break;
-
-    case 149:
-      dab(in, "stdx", 7, 0, 0, 0);
-      break;
-
-    case 150:
-      dab(in, "stwcx.", 7, 0, 0, 1);
-      break;
-
-    case 151:
-      dab(in, "stwx", 7, 0, 0, 0);
-      break;
-
-    case 181:
-      dab(in, "stdux", 7, 0, 0, 0);
-      break;
-
-    case 183:
-      dab(in, "stwux", 7, 0, 0, 0);
-      break;
-
-    case 200:
-    case (PPCOE >> 1) + 200:
-      if (in & PPCBMASK)
-        ill(in);
-      else
-        dab(in, "subfze", 6, 0, 1, -1);
-      break;
-
-    case 202:
-    case (PPCOE >> 1) + 202:
-      if (in & PPCBMASK)
-        ill(in);
-      else
-        dab(in, "addze", 6, 0, 1, -1);
-      break;
-
-    case 210:
-      msr(in, 1);  // mfsr
-      break;
-
-    case 214:
-      dab(in, "stdcx.", 7, 0, 0, 1);
-      break;
-
-    case 215:
-      dab(in, "stbx", 7, 0, 0, 0);
-      break;
-
-    case 232:
-    case (PPCOE >> 1) + 232:
-      if (in & PPCBMASK)
-        ill(in);
-      else
-        dab(in, "subfme", 6, 0, 1, -1);
-      break;
-
-    case 233:
-    case (PPCOE >> 1) + 233:
-      dab(in, "mulld", 7, 0, 1, -1);
-      break;
-
-    case 234:
-    case (PPCOE >> 1) + 234:
-      if (in & PPCBMASK)
-        ill(in);
-      else
-        dab(in, "addme", 6, 0, 1, -1);
-      break;
-
-    case 235:
-    case (PPCOE >> 1) + 235:
-      dab(in, "mullw", 7, 0, 1, -1);
-      break;
-
-    case 242:
-      if (in & PPCAMASK)
-        ill(in);
-      else
-        dab(in, "mtsrin", 5, 0, 0, 0);
-      break;
-
-    case 246:
-      if (in & PPCDMASK)
-        ill(in);
-      else
-        dab(in, "dcbtst", 3, 0, 0, 0);
-      break;
-
-    case 247:
-      dab(in, "stbux", 7, 0, 0, 0);
-      break;
-
-    case 266:
-    case (PPCOE >> 1) + 266:
-      dab(in, "add", 7, 0, 1, -1);
-      break;
-
-    case 278:
-      if (in & PPCDMASK)
-        ill(in);
-      else
-        dab(in, "dcbt", 3, 0, 0, 0);
-      break;
-
-    case 279:
-      dab(in, "lhzx", 7, 0, 0, 0);
-      break;
-
-    case 284:
-      dab(in, "eqv", 7, 1, 0, -1);
-      break;
-
-    case 306:
-      if (in & (PPCDMASK | PPCAMASK))
-        ill(in);
-      else
-        dab(in, "tlbie", 1, 0, 0, 0);
-      break;
-
-    case 310:
-      dab(in, "eciwx", 7, 0, 0, 0);
-      break;
-
-    case 311:
-      dab(in, "lhzux", 7, 0, 0, 0);
-      break;
-
-    case 316:
-      dab(in, "xor", 7, 1, 0, -1);
-      break;
-
-    case 339:
-      mspr(in, 0);  // mfspr
-      break;
-
-    case 341:
-      dab(in, "lwax", 7, 0, 0, 0);
-      break;
-
-    case 343:
-      dab(in, "lhax", 7, 0, 0, 0);
-      break;
-
-    case 370:
-      nooper(in, "tlbia");
-      break;
-
-    case 371:
-      mtb(in);  // mftb
-      break;
-
-    case 373:
-      dab(in, "lwaux", 7, 0, 0, 0);
-      break;
-
-    case 375:
-      dab(in, "lhaux", 7, 0, 0, 0);
-      break;
-
-    case 407:
-      dab(in, "sthx", 7, 0, 0, 0);
-      break;
-
-    case 412:
-      dab(in, "orc", 7, 1, 0, -1);
-      break;
-
-    case 434:
-      if (in & (PPCDMASK | PPCAMASK))
-        ill(in);
-      else
-        dab(in, "slbie", 1, 0, 0, 0);
-      break;
-
-    case 438:
-      dab(in, "ecowx", 7, 0, 0, 0);
-      break;
-
-    case 439:
-      dab(in, "sthux", 7, 0, 0, 0);
-      break;
-
-    case 444:
-      if (PPCGETD(in) == PPCGETB(in))
-        dab(in, "mr", 6, 1, 0, -1);
-      else
-        dab(in, "or", 7, 1, 0, -1);
-      break;
-
-    case 457:
-    case (PPCOE >> 1) + 457:
-      dab(in, "divdu", 7, 0, 1, -1);
-      break;
-
-    case 459:
-    case (PPCOE >> 1) + 459:
-      dab(in, "divwu", 7, 0, 1, -1);
-      break;
-
-    case 467:
-      mspr(in, 1);  // mtspr
-      break;
-
-    case 470:
-      if (in & PPCDMASK)
-        ill(in);
-      else
-        dab(in, "dcbi", 3, 0, 0, 0);
-      break;
-
-    case 476:
-      dab(in, "nand", 7, 1, 0, -1);
-      break;
-
-    case 489:
-    case (PPCOE >> 1) + 489:
-      dab(in, "divd", 7, 0, 1, -1);
-      break;
-
-    case 491:
-    case (PPCOE >> 1) + 491:
-      dab(in, "divw", 7, 0, 1, -1);
-      break;
-
-    case 498:
-      nooper(in, "slbia");
-      break;
-
-    case 512:
-      if (in & 0x007ff801)
-      {
-        ill(in);
-      }
-      else
-      {
-        m_opcode = "mcrxr";
-        m_operands = fmt::format("cr{}", PPCGETCRD(in));
-      }
-      break;
-
-    case 533:
-      dab(in, "lswx", 7, 0, 0, 0);
-      break;
-
-    case 534:
-      dab(in, "lwbrx", 7, 0, 0, 0);
-      break;
-
-    case 535:
-      fdab(in, "lfsx");
-      break;
-
-    case 536:
-      dab(in, "srw", 7, 1, 0, -1);
-      break;
-
-    case 539:
-      dab(in, "srd", 7, 1, 0, -1);
-      break;
-
-    case 566:
-      nooper(in, "tlbsync");
-      break;
-
-    case 567:
-      fdab(in, "lfsux");
-      break;
-
-    case 595:
-      msr(in, 0);  // mfsr
-      break;
-
-    case 597:
-      rrn(in, "lswi", 0, 0, 0);
-      break;
-
-    case 598:
-      nooper(in, "sync");
-      break;
-
-    case 599:
-      fdab(in, "lfdx");
-      break;
-
-    case 631:
-      fdab(in, "lfdux");
-      break;
-
-    case 659:
-      if (in & PPCAMASK)
-        ill(in);
-      else
-        dab(in, "mfsrin", 5, 0, 0, 0);
-      break;
-
-    case 661:
-      dab(in, "stswx", 7, 0, 0, 0);
-      break;
-
-    case 662:
-      dab(in, "stwbrx", 7, 0, 0, 0);
-      break;
-
-    case 663:
-      fdab(in, "stfsx");
-      break;
-
-    case 695:
-      fdab(in, "stfsux");
-      break;
-
-    case 725:
-      rrn(in, "stswi", 0, 0, 0);
-      break;
-
-    case 727:
-      fdab(in, "stfdx");
-      break;
-
-    case 759:
-      fdab(in, "stfdux");
-      break;
-
-    case 790:
-      dab(in, "lhbrx", 7, 0, 0, 0);
-      break;
-
-    case 792:
-      dab(in, "sraw", 7, 1, 0, -1);
-      break;
-
-    case 794:
-      dab(in, "srad", 7, 1, 0, -1);
-      break;
-
-    case 824:
-      rrn(in, "srawi", 1, 0, -1);
-      break;
-
-    case 854:
-      nooper(in, "eieio");
-      break;
-
-    case 918:
-      dab(in, "sthbrx", 7, 0, 0, 0);
-      break;
-
-    case 922:
-      if (in & PPCBMASK)
-        ill(in);
-      else
-        dab(in, "extsh", 6, 1, 0, -1);
-      break;
-
-    case 954:
-      if (in & PPCBMASK)
-        ill(in);
-      else
-        dab(in, "extsb", 6, 1, 0, -1);
-      break;
-
-    case 982:
-      if (in & PPCDMASK)
-        ill(in);
-      else
-        dab(in, "icbi", 3, 0, 0, 0);
-      break;
-
-    case 983:
-      fdab(in, "stfiwx");
-      break;
-
-    case 986:
-      if (in & PPCBMASK)
-        ill(in);
-      else
-        dab(in, "extsw", 6, 1, 0, -1);
-      break;
-
-    case 1014:
-      if (in & PPCDMASK)
-        ill(in);
-      else
-        dab(in, "dcbz", 3, 0, 0, 0);
-      break;
-
-    default:
-      ill(in);
-      break;
-    }
-    break;
-
-  case 32:
-  case 33:
-  case 34:
-  case 35:
-  case 36:
-  case 37:
-  case 38:
-  case 39:
-  case 40:
-  case 41:
-  case 42:
-  case 43:
-  case 44:
-  case 45:
-  case 46:
-  case 47:
-    ldst(in, ldstnames[PPCGETIDX(in) - 32], 'r');
-    break;
-
-  case 48:
-  case 49:
-  case 50:
-  case 51:
-  case 52:
-  case 53:
-  case 54:
-  case 55:
-    ldst(in, ldstnames[PPCGETIDX(in) - 32], 'f');
-    break;
-
-  case 58:
-    switch (in & 3)
-    {
-    case 0:
-      ldst(in & ~3, "ld", 'r');
-      break;
-    case 1:
-      ldst(in & ~3, "ldu", 'r');
-      break;
-    case 2:
-      ldst(in & ~3, "lwa", 'r');
-      break;
-    default:
-      ill(in);
-      break;
-    }
-    break;
-
-  case 59:
-    switch (in & 0x3e)
-    {
-    case 36:
-      fdabc(in, "divs", 5);
-      break;
-
-    case 40:
-      fdabc(in, "subs", 5);
-      break;
-
-    case 42:
-      fdabc(in, "adds", 5);
-      break;
-
-    case 44:
-      fdabc(in, "sqrts", 1);
-      break;
-
-    case 48:
-      fdabc(in, "res", 1);
-      break;
-
-    case 50:
-      fdabc(in, "muls", 6);
-      break;
-
-    case 56:
-      fdabc(in, "msubs", 7);
-      break;
-
-    case 58:
-      fdabc(in, "madds", 7);
-      break;
-
-    case 60:
-      fdabc(in, "nmsubs", 7);
-      break;
-
-    case 62:
-      fdabc(in, "nmadds", 7);
-      break;
-
-    default:
-      ill(in);
-      break;
-    }
-    break;
-
-  case 62:
-    switch (in & 3)
-    {
-    case 0:
-      ldst(in & ~3, "std", 'r');
-      break;
-    case 1:
-      ldst(in & ~3, "stdu", 'r');
-      break;
-    default:
-      ill(in);
-      break;
-    }
-    break;
-
-  case 63:
-    if (in & 32)
-    {
-      switch (in & 0x1e)
-      {
-      case 4:
-        fdabc(in, "div", 5);
-        break;
-
-      case 8:
-        fdabc(in, "sub", 5);
-        break;
-
-      case 10:
-        fdabc(in, "add", 5);
-        break;
-
-      case 12:
-        fdabc(in, "sqrt", 1);
-        break;
-
-      case 14:
-        fdabc(in, "sel", 7);
-        break;
-
-      case 18:
-        fdabc(in, "mul", 6);
-        break;
-
-      case 20:
-        fdabc(in, "rsqrte", 1);
-        break;
-
-      case 24:
-        fdabc(in, "msub", 7);
-        break;
-
-      case 26:
-        fdabc(in, "madd", 7);
-        break;
-
-      case 28:
-        fdabc(in, "nmsub", 7);
-        break;
-
-      case 30:
-        fdabc(in, "nmadd", 7);
-        break;
-
-      default:
-        ill(in);
-        break;
-      }
-    }
-    else
-    {
-      switch (PPCGETIDX2(in))
-      {
-      case 0:
-        fcmp(in, 'u');
-        break;
-
-      case 12:
-        fdabc(in, "rsp", 1);
-        break;
-
-      case 14:
-        fdabc(in, "ctiw", 1);
-        break;
-
-      case 15:
-        fdabc(in, "ctiwz", 1);
-        break;
-
-      case 32:
-        fcmp(in, 'o');
-        break;
-
-      case 38:
-        mtfsb(in, 1);
-        break;
-
-      case 40:
-        fdabc(in, "neg", 9);
-        break;
-
-      case 64:
-        mcrf(in, "s");  // mcrfs
-        break;
-
-      case 70:
-        mtfsb(in, 0);
-        break;
-
-      case 72:
-        fmr(in);
-        break;
-
-      case 134:
-        if ((in & 0x006f0800) == 0)
-        {
-          m_opcode = fmt::format("mtfsfi{}", rcsel[in & 1]);
-          m_operands = fmt::format("cr{},{}", PPCGETCRD(in), (in & 0xf000) >> 12);
-        }
-        else
-        {
-          ill(in);
-        }
-        break;
-
-      case 136:
-        fdabc(in, "nabs", 9);
-        break;
-
-      case 264:
-        fdabc(in, "abs", 9);
-        break;
-
-      case 583:
-        if (in & (PPCAMASK | PPCBMASK))
-          ill(in);
-        else
-          dab(in, "mffs", 4, 0, 0, -1);
-        break;
-
-      case 711:
-        if ((in & 0x02010000) == 0)
-        {
-          m_opcode = fmt::format("mtfsf{}", rcsel[in & 1]);
-          m_operands = fmt::format("0x{:x}, f{}", (in >> 17) & 0xff, PPCGETB(in));
-        }
-        else
-        {
-          ill(in);
-        }
-        break;
-
-      default:
-        ill(in);
-        break;
-      }
-    }
-    break;
-
-  default:
-    ill(in);
-    break;
-  }
-  return (m_instr + 1);
-}
-
-// simplified interface
-std::string GekkoDisassembler::Disassemble(u32 opcode, u32 current_instruction_address,
-                                           bool big_endian)
-{
-  u32 opc = opcode;
-  u32 addr = current_instruction_address;
-
-  m_instr = (u32*)&opc;
-  m_iaddr = (u32*)&addr;
-
-  DoDisassembly(big_endian);
-
-  return m_opcode.append("\t").append(m_operands);
-}
-
-constexpr std::array<const char*, 32> gpr_names{
+// Padded labels for the register views.
+constexpr std::array<const char*, 32> kGprLabels = {
     " r0", " r1 (sp)", " r2 (rtoc)", " r3", " r4", " r5", " r6", " r7", " r8", " r9", "r10",
     "r11", "r12",      "r13",        "r14", "r15", "r16", "r17", "r18", "r19", "r20", "r21",
     "r22", "r23",      "r24",        "r25", "r26", "r27", "r28", "r29", "r30", "r31",
 };
 
-const char* GekkoDisassembler::GetGPRName(u32 index)
-{
-  if (index < gpr_names.size())
-    return gpr_names[index];
-
-  return nullptr;
-}
-
-constexpr std::array<const char*, 32> fpr_names{
+constexpr std::array<const char*, 32> kFprLabels = {
     " f0", " f1", " f2", " f3", " f4", " f5", " f6", " f7", " f8", " f9", "f10",
     "f11", "f12", "f13", "f14", "f15", "f16", "f17", "f18", "f19", "f20", "f21",
     "f22", "f23", "f24", "f25", "f26", "f27", "f28", "f29", "f30", "f31",
 };
 
+// Simplified trap mnemonics, indexed by the TO field. Empty means "no short form".
+constexpr std::array<std::string_view, 32> kTrapSuffix = [] {
+  std::array<std::string_view, 32> t{};
+  t[1] = "lgt";
+  t[2] = "llt";
+  t[4] = "eq";
+  t[5] = "lge";
+  t[6] = "lle";
+  t[8] = "gt";
+  t[12] = "ge";
+  t[16] = "lt";
+  t[20] = "le";
+  t[24] = "ne";
+  return t;
+}();
+
+struct SprName
+{
+  u16 number;
+  const char* name;
+};
+
+// Special purpose register names, sorted by number.
+constexpr SprName kSprNames[] = {
+    {1, "XER"},       {8, "LR"},        {9, "CTR"},       {18, "DSISR"},    {19, "DAR"},
+    {22, "DEC"},      {25, "SDR1"},     {26, "SRR0"},     {27, "SRR1"},     {268, "TBLr"},
+    {269, "TBUr"},    {272, "SPRG0"},   {273, "SPRG1"},   {274, "SPRG2"},   {275, "SPRG3"},
+    {282, "EAR"},     {284, "TBLw"},    {285, "TBUw"},    {287, "PVR"},     {528, "IBAT0U"},
+    {529, "IBAT0L"},  {530, "IBAT1U"},  {531, "IBAT1L"},  {532, "IBAT2U"},  {533, "IBAT2L"},
+    {534, "IBAT3U"},  {535, "IBAT3L"},  {536, "DBAT0U"},  {537, "DBAT0L"},  {538, "DBAT1U"},
+    {539, "DBAT1L"},  {540, "DBAT2U"},  {541, "DBAT2L"},  {542, "DBAT3U"},  {543, "DBAT3L"},
+    {560, "IBAT4U"},  {561, "IBAT4L"},  {562, "IBAT5U"},  {563, "IBAT5L"},  {564, "IBAT6U"},
+    {565, "IBAT6L"},  {566, "IBAT7U"},  {567, "IBAT7L"},  {568, "DBAT4U"},  {569, "DBAT4L"},
+    {570, "DBAT5U"},  {571, "DBAT5L"},  {572, "DBAT6U"},  {573, "DBAT6L"},  {574, "DBAT7U"},
+    {575, "DBAT7L"},  {912, "GQR0"},    {913, "GQR1"},    {914, "GQR2"},    {915, "GQR3"},
+    {916, "GQR4"},    {917, "GQR5"},    {918, "GQR6"},    {919, "GQR7"},    {920, "HID2"},
+    {921, "WPAR"},    {922, "DMAU"},    {923, "DMAL"},    {924, "ECID_U"},  {925, "ECID_M"},
+    {926, "ECID_L"},  {936, "UMMCR0"},  {937, "UPMC1"},   {938, "UPMC2"},   {939, "USIA"},
+    {940, "UMMCR1"},  {941, "UPMC3"},   {942, "UPMC4"},   {943, "USDA"},    {952, "MMCR0"},
+    {953, "PMC1"},    {954, "PMC2"},    {955, "SIA"},     {956, "MMCR1"},   {957, "PMC3"},
+    {958, "PMC4"},    {959, "SDA"},     {1008, "HID0"},   {1009, "HID1"},   {1010, "IABR"},
+    {1011, "HID4"},   {1012, "TDCL"},   {1013, "DABR"},   {1017, "L2CR"},   {1018, "TDCH"},
+    {1019, "ICTC"},   {1020, "THRM1"},  {1021, "THRM2"},  {1022, "THRM3"},
+};
+
+std::string SprText(u32 number)
+{
+  std::size_t lo = 0;
+  std::size_t hi = std::size(kSprNames);
+  while (lo < hi)
+  {
+    const std::size_t mid = (lo + hi) / 2;
+    if (kSprNames[mid].number < number)
+      lo = mid + 1;
+    else
+      hi = mid;
+  }
+  if (lo < std::size(kSprNames) && kSprNames[lo].number == number)
+    return kSprNames[lo].name;
+  return std::to_string(number);
+}
+
+// Signed 16-bit displacement of a D-form load/store, as "0", "0x1234" or "-0x1234".
+std::string Disp16(u32 raw)
+{
+  raw &= 0xffff;
+  if (raw == 0)
+    return "0";
+  if (raw >= 0x8000)
+    return fmt::format("-0x{:04X}", 0x10000 - raw);
+  return fmt::format("0x{:04X}", raw);
+}
+
+// Same for the 12-bit displacement of the paired-single quantized loads/stores.
+std::string Disp12(u32 raw)
+{
+  raw &= 0xfff;
+  if (raw == 0)
+    return "0";
+  if (raw >= 0x800)
+    return fmt::format("-0x{:04X}", 0x1000 - raw);
+  return fmt::format("0x{:04X}", raw);
+}
+
+// The mask an rlwinm-style instruction applies, rotated right by the shift for display.
+u32 RotateMaskForDisplay(u32 shift, u32 mb, u32 me)
+{
+  const auto from = [](u32 bit) -> u32 { return bit > 31 ? 0u : (0xFFFFFFFFu >> bit); };
+  const u32 mask = mb <= me ? (from(mb) & ~from(me + 1)) : (from(mb) | ~from(me + 1));
+  return std::rotr(mask, static_cast<int>(shift));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Primary opcode 31 is decoded from a table indexed by the 10-bit extended opcode.
+
+enum class Kind : u8
+{
+  None,
+  Regs,       // registers chosen by `regs`, with the optional o/. suffixes
+  RegsShift,  // like Regs, but the last operand is the raw B field (lswi, srawi)
+  Compare,
+  Trap,
+  TrapDouble,
+  MoveToCr,
+  SegReg,
+  SprMove,
+  TimeBase,
+  NoOperands,
+  McrXer,
+  FloatIndexed,
+  OrOrMove,
+  NorOrNot,
+};
+
+// What happens to the record bit of a register-form instruction.
+enum class Rc : u8
+{
+  Optional,  // a set bit adds "."
+  MustBe0,
+  MustBe1,
+};
+
+enum : u8
+{
+  kRegD = 4,
+  kRegA = 2,
+  kRegB = 1,
+};
+
+struct Op31
+{
+  Kind kind = Kind::None;
+  const char* name = nullptr;
+  u8 regs = 0;          // kRegD | kRegA | kRegB: which of the three fields print
+  bool source_first = false;  // the "rS" field is printed after rA (logical/shift ops)
+  bool swap_ab = false;       // operands are printed as rD, rB, rA (sub/subc)
+  bool has_oe = false;        // "o" suffix when OE is set; also decoded at xo + 512
+  Rc rc = Rc::MustBe0;
+  u32 zero_bits = 0;          // bits that must be clear, otherwise the word is illegal
+  int param = 0;              // to/from direction for the move kinds
+};
+
+constexpr Op31 Load(const char* n)
+{
+  return {Kind::Regs, n, kRegD | kRegA | kRegB};
+}
+constexpr Op31 Cache(const char* n)
+{
+  return {Kind::Regs, n, kRegA | kRegB, false, false, false, Rc::MustBe0, kMaskD};
+}
+constexpr Op31 Arith(const char* n, bool oe, u8 regs = 7, u32 zero = 0)
+{
+  return {Kind::Regs, n, regs, false, false, oe, Rc::Optional, zero};
+}
+constexpr Op31 Logic(const char* n, u8 regs = 7, u32 zero = 0)
+{
+  return {Kind::Regs, n, regs, true, false, false, Rc::Optional, zero};
+}
+constexpr Op31 Special(Kind k, const char* n = nullptr, int param = 0, u32 zero = 0)
+{
+  Op31 op{k, n};
+  op.param = param;
+  op.zero_bits = zero;
+  return op;
+}
+
+constexpr std::array<Op31, 1024> kOp31 = [] {
+  std::array<Op31, 1024> t{};
+  const auto put = [&t](u32 xo, Op31 op) {
+    t[xo] = op;
+    if (op.has_oe)
+      t[xo + 512] = op;
+  };
+
+  put(0, Special(Kind::Compare, nullptr, 0, 1));
+  put(32, Special(Kind::Compare, nullptr, 0, 1));
+  put(4, Special(Kind::Trap, nullptr, 0, 1));
+  put(68, Special(Kind::TrapDouble));
+
+  Op31 subc = Arith("subc", true);
+  subc.swap_ab = true;
+  put(8, subc);
+  Op31 sub = Arith("sub", true);
+  sub.swap_ab = true;
+  put(40, sub);
+
+  put(9, Arith("mulhdu", false));
+  put(10, Arith("addc", true));
+  put(11, Arith("mulhwu", false));
+  put(73, Arith("mulhd", false));
+  put(75, Arith("mulhw", false));
+  put(104, Arith("neg", true, kRegD | kRegA, kMaskB));
+  put(136, Arith("subfe", true));
+  put(138, Arith("adde", true));
+  put(200, Arith("subfze", true, kRegD | kRegA, kMaskB));
+  put(202, Arith("addze", true, kRegD | kRegA, kMaskB));
+  put(232, Arith("subfme", true, kRegD | kRegA, kMaskB));
+  put(233, Arith("mulld", true));
+  put(234, Arith("addme", true, kRegD | kRegA, kMaskB));
+  put(235, Arith("mullw", true));
+  put(266, Arith("add", true));
+  put(457, Arith("divdu", true));
+  put(459, Arith("divwu", true));
+  put(489, Arith("divd", true));
+  put(491, Arith("divw", true));
+
+  put(24, Logic("slw"));
+  put(26, Logic("cntlzw", kRegD | kRegA, kMaskB));
+  put(27, Logic("sld"));
+  put(28, Logic("and"));
+  put(58, Logic("cntlzd", kRegD | kRegA, kMaskB));
+  put(60, Logic("andc"));
+  put(284, Logic("eqv"));
+  put(316, Logic("xor"));
+  put(412, Logic("orc"));
+  put(476, Logic("nand"));
+  put(536, Logic("srw"));
+  put(539, Logic("srd"));
+  put(792, Logic("sraw"));
+  put(794, Logic("srad"));
+  put(922, Logic("extsh", kRegD | kRegA, kMaskB));
+  put(954, Logic("extsb", kRegD | kRegA, kMaskB));
+  put(986, Logic("extsw", kRegD | kRegA, kMaskB));
+  put(124, Special(Kind::NorOrNot));
+  put(444, Special(Kind::OrOrMove));
+
+  using Named = std::pair<u32, const char*>;
+  const Named loads[] = {{20, "lwarx"},
+                              {21, "ldx"},     {23, "lwzx"},    {53, "ldux"},   {55, "lwzux"},
+                              {84, "ldarx"},   {87, "lbzx"},    {119, "lbzux"}, {149, "stdx"},
+                              {151, "stwx"},   {181, "stdux"},  {183, "stwux"}, {215, "stbx"},
+                              {247, "stbux"},  {279, "lhzx"},   {310, "eciwx"}, {311, "lhzux"},
+                              {341, "lwax"},   {343, "lhax"},   {373, "lwaux"}, {375, "lhaux"},
+                              {407, "sthx"},   {438, "ecowx"},  {439, "sthux"}, {533, "lswx"},
+                              {534, "lwbrx"},  {661, "stswx"},  {662, "stwbrx"},
+                              {790, "lhbrx"},  {918, "sthbrx"}};
+  for (const auto& [xo, n] : loads)
+  {
+    put(xo, Load(n));
+  }
+  Op31 stwcx = Load("stwcx.");
+  stwcx.rc = Rc::MustBe1;
+  put(150, stwcx);
+  Op31 stdcx = Load("stdcx.");
+  stdcx.rc = Rc::MustBe1;
+  put(214, stdcx);
+
+  const Named caches[] = {{54, "dcbst"}, {86, "dcbf"},  {246, "dcbtst"}, {278, "dcbt"},
+                          {470, "dcbi"},  {982, "icbi"}, {1014, "dcbz"}};
+  for (const auto& [xo, n] : caches)
+  {
+    put(xo, Cache(n));
+  }
+
+  put(19, {Kind::Regs, "mfcr", kRegD, false, false, false, Rc::MustBe0, kMaskA | kMaskB});
+  put(83, {Kind::Regs, "mfmsr", kRegD, false, false, false, Rc::MustBe0, kMaskA | kMaskB});
+  put(146, {Kind::Regs, "mtmsr", kRegD, false, false, false, Rc::MustBe0, kMaskA | kMaskB});
+  put(242, {Kind::Regs, "mtsrin", kRegD | kRegB, false, false, false, Rc::MustBe0, kMaskA});
+  put(659, {Kind::Regs, "mfsrin", kRegD | kRegB, false, false, false, Rc::MustBe0, kMaskA});
+  put(306, {Kind::Regs, "tlbie", kRegB, false, false, false, Rc::MustBe0, kMaskD | kMaskA});
+  put(434, {Kind::Regs, "slbie", kRegB, false, false, false, Rc::MustBe0, kMaskD | kMaskA});
+
+  put(597, {Kind::RegsShift, "lswi", kRegD | kRegA});
+  put(725, {Kind::RegsShift, "stswi", kRegD | kRegA});
+  put(824, {Kind::RegsShift, "srawi", kRegD | kRegA, true, false, false, Rc::Optional});
+
+  put(144, Special(Kind::MoveToCr));
+  put(210, Special(Kind::SegReg, nullptr, 1));
+  put(595, Special(Kind::SegReg, nullptr, 0));
+  put(339, Special(Kind::SprMove, nullptr, 0));
+  put(467, Special(Kind::SprMove, nullptr, 1));
+  put(371, Special(Kind::TimeBase));
+  put(512, Special(Kind::McrXer, nullptr, 0, 0x007ff801));
+
+  put(370, Special(Kind::NoOperands, "tlbia"));
+  put(498, Special(Kind::NoOperands, "slbia"));
+  put(566, Special(Kind::NoOperands, "tlbsync"));
+  put(598, Special(Kind::NoOperands, "sync"));
+  put(854, Special(Kind::NoOperands, "eieio"));
+
+  const Named float_indexed[] = {{535, "lfsx"},   {567, "lfsux"},  {599, "lfdx"},
+                                 {631, "lfdux"},  {663, "stfsx"},  {695, "stfsux"},
+                                 {727, "stfdx"},  {759, "stfdux"}, {983, "stfiwx"}};
+  for (const auto& [xo, n] : float_indexed)
+  {
+    put(xo, Special(Kind::FloatIndexed, n));
+  }
+  return t;
+}();
+
+// ---------------------------------------------------------------------------------------------
+// Floating-point arithmetic (primary opcodes 59 and 63).
+
+enum : u8
+{
+  kFprA = 4,
+  kFprC = 2,
+  kFprB = 1,
+  kIgnoreUnused = 8,  // fields that are not printed may hold anything
+};
+
+struct FloatOp
+{
+  const char* name = nullptr;
+  u8 fields = 0;
+};
+
+// A-form, indexed by the 5-bit extended opcode.
+constexpr std::array<FloatOp, 32> kSingleA = [] {
+  std::array<FloatOp, 32> t{};
+  t[18] = {"divs", kFprA | kFprB};
+  t[20] = {"subs", kFprA | kFprB};
+  t[21] = {"adds", kFprA | kFprB};
+  t[22] = {"sqrts", kFprB};
+  t[24] = {"res", kFprB};
+  t[25] = {"muls", kFprA | kFprC};
+  t[28] = {"msubs", kFprA | kFprC | kFprB};
+  t[29] = {"madds", kFprA | kFprC | kFprB};
+  t[30] = {"nmsubs", kFprA | kFprC | kFprB};
+  t[31] = {"nmadds", kFprA | kFprC | kFprB};
+  return t;
+}();
+
+constexpr std::array<FloatOp, 32> kDoubleA = [] {
+  std::array<FloatOp, 32> t{};
+  t[18] = {"div", kFprA | kFprB};
+  t[20] = {"sub", kFprA | kFprB};
+  t[21] = {"add", kFprA | kFprB};
+  t[22] = {"sqrt", kFprB};
+  t[23] = {"sel", kFprA | kFprC | kFprB};
+  t[25] = {"mul", kFprA | kFprC};
+  t[26] = {"rsqrte", kFprB};
+  t[28] = {"msub", kFprA | kFprC | kFprB};
+  t[29] = {"madd", kFprA | kFprC | kFprB};
+  t[30] = {"nmsub", kFprA | kFprC | kFprB};
+  t[31] = {"nmadd", kFprA | kFprC | kFprB};
+  return t;
+}();
+
+// ---------------------------------------------------------------------------------------------
+// Paired-single arithmetic (primary opcode 4). Operand templates use D, A, B and C as
+// placeholders for "p<field>".
+
+struct PairedOp
+{
+  const char* name = nullptr;
+  const char* operands = nullptr;
+};
+
+constexpr std::array<PairedOp, 32> kPaired5 = [] {
+  std::array<PairedOp, 32> t{};
+  t[10] = {"ps_sum0", "D, 0=A+B, 1=C"};
+  t[11] = {"ps_sum1", "D, 0=C, 1=A+B"};
+  t[12] = {"ps_muls0", "D, A*C[0]"};
+  t[13] = {"ps_muls1", "D, A*C[1]"};
+  t[14] = {"ps_madds0", "D, A*C[0]+B"};
+  t[15] = {"ps_madds1", "D, A*C[1]+B"};
+  t[18] = {"ps_div", "D, A/B"};
+  t[20] = {"ps_sub", "D, A-B"};
+  t[21] = {"ps_add", "D, A+B"};
+  t[23] = {"ps_sel", "D, A>=0?C:B"};
+  t[24] = {"ps_res", "D, (1/B)"};
+  t[25] = {"ps_mul", "D, A*C"};
+  t[26] = {"ps_rsqrte", "D, B"};
+  t[28] = {"ps_msub", "D, A*C-B"};
+  t[29] = {"ps_madd", "D, A*C+B"};
+  t[30] = {"ps_nmsub", "D, -(A*C-B)"};
+  t[31] = {"ps_nmadd", "D, -(A*C+B)"};
+  return t;
+}();
+
+struct Paired10
+{
+  u16 xo;
+  PairedOp op;
+};
+
+constexpr Paired10 kPaired10[] = {
+    {40, {"ps_neg", "D, -B"}},
+    {72, {"ps_mr", "D, B"}},
+    {136, {"ps_nabs", "D, -|B|"}},
+    {264, {"ps_abs", "D, |B|"}},
+    {528, {"ps_merge00", "D, A[0], B[0]"}},
+    {560, {"ps_merge01", "D, A[0], B[1]"}},
+    {592, {"ps_merge10", "D, A[1], B[0]"}},
+    {624, {"ps_merge11", "D, A[1], B[1]"}},
+};
+
+std::string ExpandPaired(u32 w, std::string_view pattern)
+{
+  std::string out;
+  for (const char c : pattern)
+  {
+    u32 field;
+    switch (c)
+    {
+    case 'D':
+      field = FieldD(w);
+      break;
+    case 'A':
+      field = FieldA(w);
+      break;
+    case 'B':
+      field = FieldB(w);
+      break;
+    case 'C':
+      field = FieldC(w);
+      break;
+    default:
+      out += c;
+      continue;
+    }
+    out += 'p';
+    out += std::to_string(field);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------------------------
+
+class Decoder
+{
+public:
+  Decoder(u32 word, u32 pc) : m_word(word), m_pc(pc) {}
+
+  std::string Run()
+  {
+    Decode();
+    std::string text = std::move(m_mnemonic);
+    text += '\t';
+    text += m_args;
+    return text;
+  }
+
+private:
+  void Illegal()
+  {
+    if (m_word == 0)
+    {
+      m_mnemonic.clear();
+      m_args = "---";
+    }
+    else
+    {
+      m_mnemonic = "(ill)";
+      m_args = fmt::format("{:08x}", m_word);
+    }
+  }
+
+  static const char* Gpr(u32 n) { return kGpr[n]; }
+
+  static s32 SImm(u32 w) { return static_cast<s16>(w & 0xffff); }
+  static u32 UImm(u32 w) { return w & 0xffff; }
+
+  void Decode()
+  {
+    const u32 w = m_word;
+    switch (Primary(w))
+    {
+    case 2:
+      TrapImmediate(true);
+      return;
+    case 3:
+      TrapImmediate(false);
+      return;
+    case 4:
+      Paired();
+      return;
+    case 7:
+      m_mnemonic = "mulli";
+      m_args = fmt::format("{}, {}, {}", Gpr(FieldD(w)), Gpr(FieldA(w)), SImm(w));
+      return;
+    case 8:
+      m_mnemonic = "subfic";
+      m_args = fmt::format("{}, {}, {}", Gpr(FieldD(w)), Gpr(FieldA(w)), SImm(w));
+      return;
+    case 10:
+      CompareImmediate(true);
+      return;
+    case 11:
+      CompareImmediate(false);
+      return;
+    case 12:
+      AddImmediate("ic", false);
+      return;
+    case 13:
+      AddImmediate("ic.", false);
+      return;
+    case 14:
+      AddImmediate("i", true);
+      return;
+    case 15:
+      AddImmediate("is", true);
+      return;
+    case 16:
+      ConditionalBranch();
+      return;
+    case 17:
+      if ((w & 0x03ffffff) == 2)
+        m_mnemonic = "sc";
+      else
+        Illegal();
+      return;
+    case 18:
+      Branch();
+      return;
+    case 19:
+      Opcode19();
+      return;
+    case 20:
+      Rotate("imi", false);
+      return;
+    case 21:
+      Rotate("inm", false);
+      return;
+    case 23:
+      Rotate("nm", true);
+      return;
+    case 24:
+      if ((w & 0x03ffffff) == 0)
+        m_mnemonic = "nop";
+      else
+        LogicalImmediate("ori");
+      return;
+    case 25:
+      LogicalImmediate("oris");
+      return;
+    case 26:
+      LogicalImmediate("xori");
+      return;
+    case 27:
+      LogicalImmediate("xoris");
+      return;
+    case 28:
+      LogicalImmediate("andi.");
+      return;
+    case 29:
+      LogicalImmediate("andis.");
+      return;
+    case 31:
+      Opcode31();
+      return;
+    case 56:
+      PairedMemory("psq_l");
+      return;
+    case 57:
+      PairedMemory("psq_lu");
+      return;
+    case 60:
+      PairedMemory("psq_st");
+      return;
+    case 61:
+      PairedMemory("psq_stu");
+      return;
+    case 58:
+    {
+      static constexpr const char* names[] = {"ld", "ldu", "lwa"};
+      if ((w & 3) == 3)
+        Illegal();
+      else
+        Memory(w & ~3u, names[w & 3], false);
+      return;
+    }
+    case 62:
+      if ((w & 3) > 1)
+        Illegal();
+      else
+        Memory(w & ~3u, (w & 1) ? "stdu" : "std", false);
+      return;
+    case 59:
+      FloatArith(kSingleA[Ext5(w)]);
+      return;
+    case 63:
+      Opcode63();
+      return;
+    default:
+      break;
+    }
+
+    const u32 primary = Primary(w);
+    if (primary >= 32 && primary <= 55)
+    {
+      static constexpr const char* names[] = {
+          "lwz",  "lwzu",  "lbz",  "lbzu",  "stw",  "stwu", "stb", "stbu",
+          "lhz",  "lhzu",  "lha",  "lhau",  "sth",  "sthu", "lmw", "stmw",
+          "lfs",  "lfsu",  "lfd",  "lfdu",  "stfs", "stfsu", "stfd", "stfdu",
+      };
+      Memory(w, names[primary - 32], primary >= 48);
+      return;
+    }
+    Illegal();
+  }
+
+  // --- immediates ----------------------------------------------------------------------------
+
+  void TrapImmediate(bool doubleword)
+  {
+    const u32 w = m_word;
+    const char width = doubleword ? 'd' : 'w';
+    const std::string_view cond = kTrapSuffix[FieldD(w)];
+    m_mnemonic = 't';
+    m_mnemonic += width;
+    if (!cond.empty())
+    {
+      m_mnemonic += cond;
+      m_mnemonic += 'i';
+    }
+    else
+    {
+      m_mnemonic += 'i';
+      m_args = fmt::format("{}, ", FieldD(w));
+    }
+    m_args += fmt::format("{}, {}", Gpr(FieldA(w)), SImm(w));
+  }
+
+  void CompareImmediate(bool logical)
+  {
+    const u32 w = m_word;
+    const u32 l = CmpL(w);
+    if (l > 1)
+    {
+      Illegal();
+      return;
+    }
+    m_mnemonic = logical ? "cmpl" : "cmp";
+    m_mnemonic += l ? "di" : "wi";
+    if (CrDest(w) != 0)
+      m_args = fmt::format("cr{}, ", CrDest(w));
+    if (logical)
+      m_args += fmt::format("{}, {}", Gpr(FieldA(w)), UImm(w));
+    else
+      m_args += fmt::format("{}, {}", Gpr(FieldA(w)), SImm(w));
+  }
+
+  // addic, addic., addi, addis and their simplified forms.
+  void AddImmediate(std::string_view suffix, bool load_form_allowed)
+  {
+    const u32 w = m_word;
+    if (load_form_allowed && FieldA(w) == 0)
+    {
+      m_mnemonic = 'l';
+      m_mnemonic += suffix;
+      if (suffix == "i")
+        m_args = fmt::format("{}, {}", Gpr(FieldD(w)), SImm(w));
+      else
+        m_args = fmt::format("{}, 0x{:04X}", Gpr(FieldD(w)), UImm(w));
+      return;
+    }
+    const bool negative = (w & 0x8000) != 0;
+    const u32 magnitude = negative ? 0x10000 - UImm(w) : UImm(w);
+    m_mnemonic = negative ? "sub" : "add";
+    m_mnemonic += suffix;
+    m_args = fmt::format("{}, {}, {}", Gpr(FieldD(w)), Gpr(FieldA(w)), magnitude);
+  }
+
+  void LogicalImmediate(const char* name)
+  {
+    const u32 w = m_word;
+    m_mnemonic = name;
+    m_args = fmt::format("{}, {}, 0x{:04X}", Gpr(FieldA(w)), Gpr(FieldD(w)), UImm(w));
+  }
+
+  // --- branches ------------------------------------------------------------------------------
+
+  // Builds the mnemonic (and BO/BI operands) of a conditional branch. `target` is a register
+  // name ("lr", "ctr") or empty for bc; `backward` flips the meaning of the prediction bit.
+  void BranchMnemonic(std::string_view target, bool absolute, bool backward)
+  {
+    static constexpr const char* link_suffix[] = {"", "l", "a", "la"};
+    static constexpr const char* cond_names[] = {"ge", "le", "ne", "ns", "lt", "gt", "eq", "so"};
+    static constexpr const char* ctr_names[] = {"nzf", "zf", "", "", "nzt", "zt", "", "",
+                                                "nz",  "z",  "", "", "nz",  "z",  "", ""};
+
+    const u32 w = m_word;
+    const u32 bo = FieldD(w);
+    const u32 bi = FieldA(w);
+    const char* suffix = link_suffix[(absolute ? 2 : 0) + (w & 1)];
+    const bool predict_flag = ((bo & 1) != 0) != backward;
+    const char hint = predict_flag ? '+' : '-';
+
+    if ((bo & 4) == 0)
+    {
+      m_mnemonic = fmt::format("bd{}{}{}{}", ctr_names[bo >> 1], target, suffix, hint);
+      if ((bo & 16) == 0)
+        m_args = std::to_string(bi);
+      return;
+    }
+
+    if ((bo & 16) == 0)
+    {
+      const u32 index = ((bo & 8) ? 4 : 0) + (bi & 3);
+      m_mnemonic = fmt::format("b{}{}{}{}", cond_names[index], target, suffix, hint);
+      if (bi >= 4)
+        m_args = fmt::format("cr{}", bi >> 2);
+      return;
+    }
+
+    // Unconditional.
+    if (Primary(w) == 16)
+    {
+      m_mnemonic = fmt::format("bc{}", suffix);
+      m_args = fmt::format("{}, {}", bo, bi);
+    }
+    else
+    {
+      m_mnemonic = fmt::format("b{}{}", target, suffix);
+    }
+  }
+
+  void ConditionalBranch()
+  {
+    const u32 w = m_word;
+    const bool absolute = (w & 2) != 0;
+    const u32 disp = static_cast<u32>(static_cast<s32>(static_cast<s16>(w & 0xfffc)));
+    BranchMnemonic("", absolute, static_cast<s32>(disp) < 0);
+    m_args += fmt::format(" ->0x{:08X}", absolute ? disp : m_pc + disp);
+  }
+
+  void Branch()
+  {
+    static constexpr const char* link_suffix[] = {"", "l", "a", "la"};
+    const u32 w = m_word;
+    const u32 disp = static_cast<u32>(static_cast<s32>(w << 6) >> 6) & ~3u;
+    m_mnemonic = 'b';
+    m_mnemonic += link_suffix[w & 3];
+    m_args = fmt::format("->0x{:08X}", (w & 2) ? disp : m_pc + disp);
+  }
+
+  // --- opcode 19 -----------------------------------------------------------------------------
+
+  void MoveCrField(std::string_view suffix)
+  {
+    const u32 w = m_word;
+    if ((w & 0x0063f801) != 0)
+    {
+      Illegal();
+      return;
+    }
+    m_mnemonic = "mcrf";
+    m_mnemonic += suffix;
+    m_args = fmt::format("cr{}, cr{}", CrDest(w), CrSrc(w));
+  }
+
+  // Condition register logic. `alias` is the two-operand form used when crbA == crbB.
+  void CrLogic(const char* name, const char* alias)
+  {
+    const u32 w = m_word;
+    if (RcBit(w))
+    {
+      Illegal();
+      return;
+    }
+    const u32 d = FieldD(w);
+    const u32 a = FieldA(w);
+    const u32 b = FieldB(w);
+    m_mnemonic = "cr";
+    if (alias != nullptr && a == b)
+    {
+      m_mnemonic += alias;
+      m_args = fmt::format("{}, {}", d, a);
+    }
+    else
+    {
+      m_mnemonic += name;
+      m_args = fmt::format("{}, {}, {}", d, a, b);
+    }
+  }
+
+  void NoOperands(const char* name)
+  {
+    if ((m_word & (kMaskD | kMaskA | kMaskB | 1)) != 0)
+      Illegal();
+    else
+      m_mnemonic = name;
+  }
+
+  void Opcode19()
+  {
+    switch (Ext10(m_word))
+    {
+    case 0:
+      MoveCrField("");
+      break;
+    case 16:
+      BranchMnemonic("lr", false, false);
+      break;
+    case 528:
+      BranchMnemonic("ctr", false, false);
+      break;
+    case 33:
+      CrLogic("nor", "not");
+      break;
+    case 129:
+      CrLogic("andc", nullptr);
+      break;
+    case 193:
+      CrLogic("xor", "clr");
+      break;
+    case 225:
+      CrLogic("nand", nullptr);
+      break;
+    case 257:
+      CrLogic("and", nullptr);
+      break;
+    case 289:
+      CrLogic("eqv", "set");
+      break;
+    case 417:
+      CrLogic("orc", nullptr);
+      break;
+    case 449:
+      CrLogic("or", "move");
+      break;
+    case 50:
+      NoOperands("rfi");
+      break;
+    case 150:
+      NoOperands("isync");
+      break;
+    default:
+      Illegal();
+      break;
+    }
+  }
+
+  // --- rotates -------------------------------------------------------------------------------
+
+  void Rotate(const char* form, bool by_register)
+  {
+    const u32 w = m_word;
+    const u32 shift = FieldB(w);
+    const u32 mb = FieldC(w);
+    const u32 me = FieldME(w);
+    m_mnemonic = fmt::format("rlw{}{}", form, RcBit(w) ? "." : "");
+    m_args = fmt::format("{}, {}, {}{}, {}, {} ({:08x})", Gpr(FieldA(w)), Gpr(FieldD(w)),
+                         by_register ? "r" : "", shift, mb, me,
+                         RotateMaskForDisplay(shift, mb, me));
+  }
+
+  // --- loads and stores ----------------------------------------------------------------------
+
+  void Memory(u32 w, const char* name, bool fpr)
+  {
+    m_mnemonic = name;
+    if (fpr)
+      m_args = fmt::format("f{}, {} ({})", FieldD(w), Disp16(w), Gpr(FieldA(w)));
+    else
+      m_args = fmt::format("{}, {} ({})", Gpr(FieldD(w)), Disp16(w), Gpr(FieldA(w)));
+  }
+
+  void PairedMemory(const char* name)
+  {
+    const u32 w = m_word;
+    m_mnemonic = name;
+    m_args = fmt::format("p{}, {}(r{}), {}, qr{}", FieldD(w), Disp12(w), FieldA(w),
+                         (w >> 15) & 1, (w >> 12) & 7);
+  }
+
+  // --- opcode 31 -----------------------------------------------------------------------------
+
+  // Prints the chosen integer register fields of `w`, comma separated.
+  static std::string RegList(u32 w, u8 regs)
+  {
+    std::string out;
+    const auto add = [&out](u32 reg) {
+      if (!out.empty())
+        out += ", ";
+      out += Gpr(reg);
+    };
+    if (regs & kRegD)
+      add(FieldD(w));
+    if (regs & kRegA)
+      add(FieldA(w));
+    if (regs & kRegB)
+      add(FieldB(w));
+    return out;
+  }
+
+  // Register-form instruction. Returns false (after marking the word illegal) when the record
+  // bit does not match what the instruction requires.
+  bool RegisterForm(const Op31& op, const char* name, u8 regs)
+  {
+    u32 w = m_word;
+    if ((op.rc == Rc::MustBe0 && RcBit(w)) || (op.rc == Rc::MustBe1 && !RcBit(w)))
+    {
+      Illegal();
+      return false;
+    }
+    // Shown as rA, rS, rB for logical ops and rD, rB, rA for the subtract aliases: swap the
+    // field contents so the generic D, A, B order prints them.
+    if (op.source_first)
+      w = (w & ~(kMaskD | kMaskA)) | (FieldA(w) << 21) | (FieldD(w) << 16);
+    if (op.swap_ab)
+      w = (w & ~(kMaskA | kMaskB)) | (FieldB(w) << 16) | (FieldA(w) << 11);
+
+    m_mnemonic = name;
+    if (op.has_oe && OeBit(w))
+      m_mnemonic += 'o';
+    if (op.rc == Rc::Optional && RcBit(w))
+      m_mnemonic += '.';
+    m_args = RegList(w, regs);
+    m_operand_word = w;
+    return true;
+  }
+
+  void Opcode31()
+  {
+    const u32 w = m_word;
+    const Op31& op = kOp31[Ext10(w)];
+    if (op.kind == Kind::None || (w & op.zero_bits) != 0)
+    {
+      Illegal();
+      return;
+    }
+
+    switch (op.kind)
+    {
+    case Kind::Regs:
+      RegisterForm(op, op.name, op.regs);
+      break;
+
+    case Kind::RegsShift:
+      if (RegisterForm(op, op.name, op.regs))
+        m_args += fmt::format(",{}", FieldB(m_operand_word));
+      break;
+
+    case Kind::NorOrNot:
+    case Kind::OrOrMove:
+    {
+      const bool alias = FieldD(w) == FieldB(w);
+      const char* name = op.kind == Kind::NorOrNot ? (alias ? "not" : "nor") : (alias ? "mr" : "or");
+      RegisterForm(Logic(name), name, alias ? (kRegD | kRegA) : (kRegD | kRegA | kRegB));
+      break;
+    }
+
+    case Kind::Compare:
+    {
+      const u32 l = CmpL(w);
+      if (l > 1)
+      {
+        Illegal();
+        break;
+      }
+      m_mnemonic = Ext10(w) != 0 ? "cmpl" : "cmp";
+      m_mnemonic += l ? 'd' : 'w';
+      if (CrDest(w) != 0)
+        m_args = fmt::format("cr{},", CrDest(w));
+      m_args += fmt::format("{}, {}", Gpr(FieldA(w)), Gpr(FieldB(w)));
+      break;
+    }
+
+    case Kind::Trap:
+    case Kind::TrapDouble:
+    {
+      const bool doubleword = op.kind == Kind::TrapDouble;
+      const u32 to = FieldD(w);
+      const std::string_view cond = kTrapSuffix[to];
+      if (!cond.empty())
+      {
+        m_mnemonic = fmt::format("t{}{}", doubleword ? 'd' : 'w', cond);
+        m_args = fmt::format("{}, {}", Gpr(FieldA(w)), Gpr(FieldB(w)));
+      }
+      else if (to != 31)
+      {
+        Illegal();
+      }
+      else if (doubleword)
+      {
+        m_mnemonic = "td";
+        m_args = "31,0,0";
+      }
+      else
+      {
+        m_mnemonic = "trap";
+      }
+      break;
+    }
+
+    case Kind::MoveToCr:
+    {
+      if ((w & 0x00100801) != 0)
+      {
+        Illegal();
+        break;
+      }
+      const u32 crm = (w >> 12) & 0xff;
+      if (crm == 0xff)
+      {
+        m_mnemonic = "mtcr";
+        m_args = Gpr(FieldD(w));
+      }
+      else
+      {
+        m_mnemonic = "mtcrf";
+        m_args = fmt::format("0x{:02x},{}", crm, Gpr(FieldD(w)));
+      }
+      break;
+    }
+
+    case Kind::SegReg:
+    {
+      if ((w & 0x0010f801) != 0)
+      {
+        Illegal();
+        break;
+      }
+      const u32 sr = (w >> 16) & 15;
+      if (op.param)
+      {
+        m_mnemonic = "mtsr";
+        m_args = fmt::format("{}, {}", sr, Gpr(FieldD(w)));
+      }
+      else
+      {
+        m_mnemonic = "mfsr";
+        m_args = fmt::format("{}, {}", Gpr(FieldD(w)), sr);
+      }
+      break;
+    }
+
+    case Kind::SprMove:
+    {
+      if (RcBit(w))
+      {
+        Illegal();
+        break;
+      }
+      const bool to_spr = op.param != 0;
+      const u32 spr = (FieldB(w) << 5) | FieldA(w);
+      const char* reg = Gpr(FieldD(w));
+      m_mnemonic = to_spr ? "mt" : "mf";
+      if (spr == 1 || spr == 8 || spr == 9)
+      {
+        m_mnemonic += spr == 1 ? "xer" : (spr == 8 ? "lr" : "ctr");
+        m_args = reg;
+      }
+      else
+      {
+        m_mnemonic += "spr";
+        const std::string name = SprText(spr);
+        m_args = to_spr ? fmt::format("{}, {}", name, reg) : fmt::format("{}, {}", reg, name);
+      }
+      break;
+    }
+
+    case Kind::TimeBase:
+    {
+      if (RcBit(w))
+      {
+        Illegal();
+        break;
+      }
+      const u32 tbr = (FieldB(w) << 5) | FieldA(w);
+      m_args = Gpr(FieldD(w));
+      m_mnemonic = "mftb";
+      if (tbr == 268)
+        m_mnemonic += 'l';
+      else if (tbr == 269)
+        m_mnemonic += 'u';
+      else
+        m_args += fmt::format(",{}", tbr);
+      break;
+    }
+
+    case Kind::NoOperands:
+      NoOperands(op.name);
+      break;
+
+    case Kind::McrXer:
+      m_mnemonic = "mcrxr";
+      m_args = fmt::format("cr{}", CrDest(w));
+      break;
+
+    case Kind::FloatIndexed:
+      m_mnemonic = op.name;
+      m_args = fmt::format("f{}, {}, {}", FieldD(w), Gpr(FieldA(w)), Gpr(FieldB(w)));
+      break;
+
+    case Kind::None:
+      break;
+    }
+  }
+
+  // --- floating point ------------------------------------------------------------------------
+
+  void FloatArith(const FloatOp& op)
+  {
+    if (op.name == nullptr)
+    {
+      Illegal();
+      return;
+    }
+    const u32 w = m_word;
+    m_mnemonic = fmt::format("f{}{}", op.name, RcBit(w) ? "." : "");
+    m_args = fmt::format("f{}", FieldD(w));
+
+    bool stray_bits = false;
+    const auto operand = [&](u8 flag, u32 value) {
+      if (op.fields & flag)
+        m_args += fmt::format(", f{}", value);
+      else if (!(op.fields & kIgnoreUnused) && value != 0)
+        stray_bits = true;
+    };
+    operand(kFprA, FieldA(w));
+    operand(kFprC, FieldC(w));
+    operand(kFprB, FieldB(w));
+    if (stray_bits)
+      Illegal();
+  }
+
+  void Opcode63()
+  {
+    const u32 w = m_word;
+    if (Ext5(w) & 16)
+    {
+      FloatArith(kDoubleA[Ext5(w)]);
+      return;
+    }
+
+    switch (Ext10(w))
+    {
+    case 0:
+    case 32:
+      if ((w & 0x00600001) != 0)
+      {
+        Illegal();
+        break;
+      }
+      m_mnemonic = Ext10(w) == 0 ? "fcmpu" : "fcmpo";
+      m_args = fmt::format("cr{}, f{}, f{}", CrDest(w), FieldA(w), FieldB(w));
+      break;
+    case 12:
+      FloatArith({"rsp", kFprB});
+      break;
+    case 14:
+      FloatArith({"ctiw", kFprB});
+      break;
+    case 15:
+      FloatArith({"ctiwz", kFprB});
+      break;
+    case 40:
+      FloatArith({"neg", kFprB | kIgnoreUnused});
+      break;
+    case 136:
+      FloatArith({"nabs", kFprB | kIgnoreUnused});
+      break;
+    case 264:
+      FloatArith({"abs", kFprB | kIgnoreUnused});
+      break;
+    case 72:
+      m_mnemonic = RcBit(w) ? "fmr." : "fmr";
+      m_args = fmt::format("f{}, f{}", FieldD(w), FieldB(w));
+      break;
+    case 38:
+    case 70:
+      if ((w & (kMaskA | kMaskB)) != 0)
+      {
+        Illegal();
+        break;
+      }
+      m_mnemonic = fmt::format("mtfsb{}{}", Ext10(w) == 38 ? 1 : 0, RcBit(w) ? "." : "");
+      m_args = std::to_string(FieldD(w));
+      break;
+    case 64:
+      MoveCrField("s");
+      break;
+    case 134:
+      if ((w & 0x006f0800) != 0)
+      {
+        Illegal();
+        break;
+      }
+      m_mnemonic = RcBit(w) ? "mtfsfi." : "mtfsfi";
+      m_args = fmt::format("cr{},{}", CrDest(w), (w >> 12) & 15);
+      break;
+    case 583:
+      if ((w & (kMaskA | kMaskB)) != 0)
+      {
+        Illegal();
+        break;
+      }
+      m_mnemonic = RcBit(w) ? "mffs." : "mffs";
+      m_args = Gpr(FieldD(w));
+      break;
+    case 711:
+      if ((w & 0x02010000) != 0)
+      {
+        Illegal();
+        break;
+      }
+      m_mnemonic = RcBit(w) ? "mtfsf." : "mtfsf";
+      m_args = fmt::format("0x{:x}, f{}", (w >> 17) & 0xff, FieldB(w));
+      break;
+    default:
+      Illegal();
+      break;
+    }
+  }
+
+  // --- paired singles ------------------------------------------------------------------------
+
+  void Paired()
+  {
+    const u32 w = m_word;
+    const u32 xo5 = Ext5(w);
+
+    if (xo5 == 6 || xo5 == 7)
+    {
+      const bool update = (w & 0x40) != 0;
+      m_mnemonic = xo5 == 6 ? (update ? "psq_lux" : "psq_lx") : (update ? "psq_stux" : "psq_stx");
+      m_args = fmt::format("p{}, r{}, r{}, {}, qr{}", FieldD(w), FieldA(w), FieldB(w),
+                           (w >> 10) & 1, (w >> 7) & 7);
+      return;
+    }
+    if (kPaired5[xo5].name != nullptr)
+    {
+      m_mnemonic = kPaired5[xo5].name;
+      m_args = ExpandPaired(w, kPaired5[xo5].operands);
+      return;
+    }
+
+    const u32 xo10 = Ext10(w);
+    if (xo10 == 0 || xo10 == 32 || xo10 == 64 || xo10 == 96)
+    {
+      static constexpr const char* names[] = {"ps_cmpu0", "ps_cmpo0", "ps_cmpu1", "ps_cmpo1"};
+      m_mnemonic = names[xo10 >> 5];
+      if (CrDest(w) != 0)
+        m_args = fmt::format("cr{}, ", CrDest(w));
+      m_args += fmt::format("p{}, p{}", FieldA(w), FieldB(w));
+      return;
+    }
+    for (const Paired10& entry : kPaired10)
+    {
+      if (entry.xo == xo10)
+      {
+        m_mnemonic = entry.op.name;
+        m_args = ExpandPaired(w, entry.op.operands);
+        return;
+      }
+    }
+    if (xo10 == 1014)
+    {
+      if ((w & kMaskD) != 0 || RcBit(w))
+      {
+        Illegal();
+        return;
+      }
+      m_mnemonic = "dcbz_l";
+      m_args = RegList(w, kRegA | kRegB);
+      return;
+    }
+
+    m_mnemonic = fmt::format("ps_{}", xo5);
+    m_args = "---";
+  }
+
+  u32 m_word;
+  u32 m_pc;
+  u32 m_operand_word = 0;
+  std::string m_mnemonic;
+  std::string m_args;
+};
+}  // namespace
+
+std::string GekkoDisassembler::Disassemble(u32 opcode, u32 current_instruction_address,
+                                           bool big_endian)
+{
+  const u32 word = big_endian ? opcode :
+                                (opcode >> 24) | ((opcode >> 8) & 0xff00) |
+                                    ((opcode << 8) & 0xff0000) | (opcode << 24);
+  return Decoder(word, current_instruction_address).Run();
+}
+
+const char* GekkoDisassembler::GetGPRName(u32 index)
+{
+  return index < kGprLabels.size() ? kGprLabels[index] : nullptr;
+}
+
 const char* GekkoDisassembler::GetFPRName(u32 index)
 {
-  if (index < fpr_names.size())
-    return fpr_names[index];
-
-  return nullptr;
+  return index < kFprLabels.size() ? kFprLabels[index] : nullptr;
 }
 }  // namespace Common
