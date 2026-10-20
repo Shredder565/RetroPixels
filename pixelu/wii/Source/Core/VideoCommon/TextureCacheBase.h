@@ -1,5 +1,4 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -44,11 +43,15 @@ class GameTextureAsset;
 class MaterialResource;
 }  // namespace VideoCommon
 
+// Name prefixes for dumped (and graphics-mod matched) EFB and XFB copies.
 constexpr std::string_view EFB_DUMP_PREFIX = "efb1";
 constexpr std::string_view XFB_DUMP_PREFIX = "xfb1";
 
+// frameCount value of an entry (or pooled texture) that was used during the current frame.
 static constexpr int FRAMECOUNT_INVALID = 0;
 
+// A texture format plus the palette format. The palette format only takes part in comparisons
+// when the texture format is a colour-indexed one.
 struct TextureAndTLUTFormat
 {
   TextureAndTLUTFormat(TextureFormat texfmt_ = TextureFormat::I4,
@@ -59,16 +62,17 @@ struct TextureAndTLUTFormat
 
   bool operator==(const TextureAndTLUTFormat& other) const
   {
-    if (IsColorIndexed(texfmt))
-      return texfmt == other.texfmt && tlutfmt == other.tlutfmt;
-
-    return texfmt == other.texfmt;
+    const bool same_texture_format = texfmt == other.texfmt;
+    if (!IsColorIndexed(texfmt))
+      return same_texture_format;
+    return same_texture_format && tlutfmt == other.tlutfmt;
   }
 
   TextureFormat texfmt;
   TLUTFormat tlutfmt;
 };
 
+// Everything that selects an EFB-to-RAM encoding pipeline.
 struct EFBCopyParams
 {
   EFBCopyParams(PixelFormat efb_format_, EFBCopyFormat copy_format_, bool depth_, bool yuv_,
@@ -80,15 +84,6 @@ struct EFBCopyParams
   {
   }
 
-  bool operator<(const EFBCopyParams& rhs) const
-  {
-    return std::tie(efb_format, copy_format, depth, yuv, all_copy_filter_coefs_needed,
-                    copy_filter_can_overflow,
-                    apply_gamma) < std::tie(rhs.efb_format, rhs.copy_format, rhs.depth, rhs.yuv,
-                                            rhs.all_copy_filter_coefs_needed,
-                                            rhs.copy_filter_can_overflow, rhs.apply_gamma);
-  }
-
   PixelFormat efb_format;
   EFBCopyFormat copy_format;
   bool depth;
@@ -96,6 +91,17 @@ struct EFBCopyParams
   bool all_copy_filter_coefs_needed;
   bool copy_filter_can_overflow;
   bool apply_gamma;
+
+private:
+  auto SortKey() const
+  {
+    return std::tie(efb_format, copy_format, depth, yuv, all_copy_filter_coefs_needed,
+                    copy_filter_can_overflow, apply_gamma);
+  }
+
+public:
+  // Ordered field by field, in declaration order.
+  bool operator<(const EFBCopyParams& rhs) const { return SortKey() < rhs.SortKey(); }
 };
 
 template <>
@@ -103,66 +109,67 @@ struct fmt::formatter<EFBCopyParams>
 {
   constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
   template <typename FormatContext>
-  auto format(const EFBCopyParams& uid, FormatContext& ctx) const
+  auto format(const EFBCopyParams& params, FormatContext& ctx) const
   {
-    std::string copy_format;
-    if (uid.copy_format == EFBCopyFormat::XFB)
-      copy_format = "XFB";
-    else
-      copy_format = fmt::to_string(uid.copy_format);
+    // XFB is outside the range the EFBCopyFormat formatter names.
+    const std::string copy_format = params.copy_format == EFBCopyFormat::XFB ?
+                                        std::string("XFB") :
+                                        fmt::to_string(params.copy_format);
     return fmt::format_to(ctx.out(),
                           "format: {}, copy format: {}, depth: {}, yuv: {}, apply_gamma: {}, "
                           "all_copy_filter_coefs_needed: {}, copy_filter_can_overflow: {}",
-                          uid.efb_format, copy_format, uid.depth, uid.yuv, uid.apply_gamma,
-                          uid.all_copy_filter_coefs_needed, uid.copy_filter_can_overflow);
+                          params.efb_format, copy_format, params.depth, params.yuv,
+                          params.apply_gamma, params.all_copy_filter_coefs_needed,
+                          params.copy_filter_can_overflow);
   }
 };
 
+// One texture known to the cache: a decoded RAM/TMEM texture, an EFB copy or an XFB copy.
 struct TCacheEntry
 {
-  // common members
+  // --- the host texture and where it came from
   std::unique_ptr<AbstractTexture> texture;
   std::unique_ptr<AbstractFramebuffer> framebuffer;
   u32 addr = 0;
   u32 size_in_bytes = 0;
   u64 base_hash = 0;
-  u64 hash = 0;  // for paletted textures, hash = base_hash ^ palette_hash
+  u64 hash = 0;  // base_hash, mixed with the palette hash for paletted textures
   TextureAndTLUTFormat format;
   u32 memory_stride = 0;
   bool is_efb_copy = false;
   bool is_custom_tex = false;
+  // Set while an EFB copy may still need to be applied as a partial update.
   bool may_have_overlapping_textures = true;
-  // indicates that the mips in this texture are arbitrary content, aren't just downscaled
+  // The mip levels hold their own artwork rather than downscaled copies of level 0.
   bool has_arbitrary_mips = false;
-  bool should_force_safe_hashing = false;  // for XFB
+  bool should_force_safe_hashing = false;  // XFB copies hash every byte
   bool is_xfb_copy = false;
   bool is_xfb_container = false;
   u64 id = 0;
-  u32 content_semaphore = 0;  // Counts up
+  u32 content_semaphore = 0;  // number of outstanding content locks
 
-  // Indicates that this TCacheEntry has been invalided from m_textures_by_address
+  // Removed from m_textures_by_address; other holders may still keep the object alive.
   bool invalidated = false;
 
-  bool reference_changed = false;  // used by xfb to determine when a reference xfb changed
+  // An XFB copy this one was stitched from has been replaced.
+  bool reference_changed = false;
 
-  // Texture dimensions from the GameCube's point of view
+  // Size as the console sees it (the host texture may be scaled).
   u32 native_width = 0;
   u32 native_height = 0;
   u32 native_levels = 0;
 
-  // used to delete textures which haven't been used for TEXTURE_KILL_THRESHOLD frames
+  // Frame of last use, for evicting entries idle for TEXTURE_KILL_THRESHOLD frames.
   int frameCount = FRAMECOUNT_INVALID;
 
-  // Keep an iterator to the entry in m_textures_by_hash, so it does not need to be searched when
-  // removing the cache entry
+  // This entry's slot in m_textures_by_hash (or that map's end()), for O(1) removal.
   std::multimap<u64, std::shared_ptr<TCacheEntry>>::iterator textures_by_hash_iter;
 
-  // This is used to keep track of both:
-  //   * efb copies used by this partially updated texture
-  //   * partially updated textures which refer to this efb copy
+  // Two-way links between EFB copies and the textures they were applied to (partial updates
+  // and XFB stitching), so the same update is not applied twice.
   std::unordered_set<TCacheEntry*> references;
 
-  // Pending EFB copy
+  // EFB-to-RAM copy whose readback has not been written to guest memory yet.
   std::unique_ptr<AbstractStagingTexture> pending_efb_copy;
   u32 pending_efb_copy_width = 0;
   u32 pending_efb_copy_height = 0;
@@ -180,42 +187,39 @@ struct TCacheEntry
   void SetGeneralParameters(u32 _addr, u32 _size, TextureAndTLUTFormat _format,
                             bool force_safe_hashing)
   {
+    format = _format;
     addr = _addr;
     size_in_bytes = _size;
-    format = _format;
     should_force_safe_hashing = force_safe_hashing;
   }
 
+  // Native dimensions; the row pitch defaults to the width until a copy sets its own.
   void SetDimensions(unsigned int _native_width, unsigned int _native_height,
                      unsigned int _native_levels)
   {
+    memory_stride = _native_width;
     native_width = _native_width;
     native_height = _native_height;
     native_levels = _native_levels;
-    memory_stride = _native_width;
   }
 
   void SetHashes(u64 _base_hash, u64 _hash)
   {
-    base_hash = _base_hash;
     hash = _hash;
+    base_hash = _base_hash;
   }
 
-  // This texture entry is used by the other entry as a sub-texture
+  // While locked, the cache must not overwrite the texture's contents in place.
+  void AcquireContentLock() { ++content_semaphore; }
+  void ReleaseContentLock() { --content_semaphore; }
+  bool IsLocked() const { return content_semaphore != 0; }
+
+  // Records that other_entry was built (partly) from this one, and the reverse.
   void CreateReference(TCacheEntry* other_entry)
   {
-    // References are two-way, so they can easily be destroyed later
-    this->references.emplace(other_entry);
+    references.emplace(other_entry);
     other_entry->references.emplace(this);
   }
-
-  // Acquiring a content lock will lock the current contents and prevent texture cache from
-  // reusing the same entry for a newer version of the texture.
-  void AcquireContentLock() { content_semaphore++; }
-  void ReleaseContentLock() { content_semaphore--; }
-
-  // Can this be mutated?
-  bool IsLocked() const { return content_semaphore > 0; }
 
   void SetXfbCopy(u32 stride);
   void SetEfbCopy(u32 stride);
@@ -224,7 +228,7 @@ struct TCacheEntry
   bool OverlapsMemoryRange(u32 range_address, u32 range_size) const;
 
   bool IsEfbCopy() const { return is_efb_copy; }
-  bool IsCopy() const { return is_xfb_copy || is_efb_copy; }
+  bool IsCopy() const { return is_efb_copy || is_xfb_copy; }
   u32 NumBlocksX() const;
   u32 NumBlocksY() const;
   u32 BytesPerRow() const;
@@ -245,7 +249,16 @@ using RcTcacheEntry = std::shared_ptr<TCacheEntry>;
 class TextureCacheBase
 {
 public:
-  // Minimal version of TCacheEntry just for TexPool
+  // Hashes and sizes GetTexture works out before creating an entry.
+  struct TextureCreationInfo
+  {
+    u64 base_hash;
+    u64 full_hash;
+    u32 bytes_per_block;
+    u32 palette_size;
+  };
+
+  // A host texture waiting in the reuse pool.
   struct TexPoolEntry
   {
     std::unique_ptr<AbstractTexture> texture;
@@ -255,34 +268,26 @@ public:
     TexPoolEntry(std::unique_ptr<AbstractTexture> tex, std::unique_ptr<AbstractFramebuffer> fb);
   };
 
-  struct TextureCreationInfo
-  {
-    u64 base_hash;
-    u64 full_hash;
-    u32 bytes_per_block;
-    u32 palette_size;
-  };
-
   TextureCacheBase();
   virtual ~TextureCacheBase();
+
+  // Texture for a texture unit (null if it can't be had), and the XFB at an address.
+  TCacheEntry* Load(u32 stage);
+  RcTcacheEntry GetTexture(const int textureCacheSafetyColorSampleSize,
+                           const TextureInfo& texture_info);
+  RcTcacheEntry GetXFBTexture(u32 address, u32 width, u32 height, u32 stride,
+                              MathUtil::Rectangle<int>* display_rect);
 
   bool Initialize();
   void Shutdown();
 
   void OnConfigChanged(const VideoConfig& config);
 
-  // Removes textures which aren't used for more than TEXTURE_KILL_THRESHOLD frames,
-  // frameCount is the current frame number.
+  // Evicts entries (and pooled textures) that have gone unused for too many frames.
   void Cleanup(int _frameCount);
 
   void Invalidate();
   void ReleaseToPool(TCacheEntry* entry);
-
-  TCacheEntry* Load(u32 stage);
-  RcTcacheEntry GetTexture(const int textureCacheSafetyColorSampleSize,
-                           const TextureInfo& texture_info);
-  RcTcacheEntry GetXFBTexture(u32 address, u32 width, u32 height, u32 stride,
-                              MathUtil::Rectangle<int>* display_rect);
 
   virtual void BindTextures(BitSet32 used_textures, const std::array<SamplerState, 8>& samplers);
   void CopyRenderTargetToTexture(u32 dstAddr, EFBCopyFormat dstFormat, u32 width, u32 height,
@@ -294,23 +299,22 @@ public:
 
   void ScaleTextureCacheEntryTo(RcTcacheEntry& entry, u32 new_width, u32 new_height);
 
-  // Flushes all pending EFB copies to emulated RAM.
+  // Writes every deferred EFB copy to guest RAM.
   void FlushEFBCopies();
 
-  // Flush any Bound textures that can't be reused
+  // Drops bindings whose texture can no longer be assumed to be in TMEM.
   void FlushStaleBinds();
 
-  // Texture Serialization
+  // Save-state helpers for a single host texture.
   void SerializeTexture(AbstractTexture* tex, const TextureConfig& config, PointerWrap& p);
   std::optional<TexPoolEntry> DeserializeTexture(PointerWrap& p);
 
-  // Save States
   void DoState(PointerWrap& p);
 
   static bool AllCopyFilterCoefsNeeded(const std::array<u32, 3>& coefficients);
   static bool CopyFilterCanOverflow(const std::array<u32, 3>& coefficients);
 
-  // Get a new sampler state
+  // Sampler state for a texture unit, with the user's filtering overrides applied.
   static SamplerState GetSamplerState(u32 index, float custom_tex_scale, bool custom_tex,
                                       bool has_arbitrary_mips);
 
@@ -320,16 +324,6 @@ public:
                                      TextureFormat old_format, TextureFormat new_format);
 
 protected:
-  // Decodes the specified data to the GPU texture specified by entry.
-  // Returns false if the configuration is not supported.
-  // width, height are the size of the image in pixels.
-  // aligned_width, aligned_height are the size of the image in pixels, aligned to the block size.
-  // row_stride is the number of bytes for a row of blocks, not pixels.
-  bool DecodeTextureOnGPU(RcTcacheEntry& entry, u32 dst_level, const u8* data, u32 data_size,
-                          TextureFormat format, u32 width, u32 height, u32 aligned_width,
-                          u32 aligned_height, u32 row_stride, const u8* palette,
-                          TLUTFormat palette_format);
-
   virtual void CopyEFB(AbstractStagingTexture* dst, const EFBCopyParams& params, u32 native_width,
                        u32 bytes_per_row, u32 num_blocks_y, u32 memory_stride,
                        const MathUtil::Rectangle<int>& src_rect, bool scale_by_half,
@@ -341,6 +335,14 @@ protected:
                                    float gamma, bool clamp_top, bool clamp_bottom,
                                    const std::array<u32, 3>& filter_coefficients);
 
+  // Decodes one level on the GPU into entry's texture. Returns false when the format or the
+  // backend cannot do it, in which case the caller decodes on the CPU instead. width/height
+  // are the texel size, aligned_* the block-aligned size, row_stride the bytes per block row.
+  bool DecodeTextureOnGPU(RcTcacheEntry& entry, u32 dst_level, const u8* data, u32 data_size,
+                          TextureFormat format, u32 width, u32 height, u32 aligned_width,
+                          u32 aligned_height, u32 row_stride, const u8* palette,
+                          TLUTFormat palette_format);
+
   alignas(16) u8* m_temp = nullptr;
   size_t m_temp_size = 0;
 
@@ -350,89 +352,82 @@ private:
 
   using TexPool = std::unordered_multimap<TextureConfig, TexPoolEntry>;
 
-  static bool DidLinkedAssetsChange(const TCacheEntry& entry);
-
+  // --- Lookup and creation ---
   TCacheEntry* LoadImpl(u32 stage, bool force_reload);
-
-  bool CreateUtilityTextures();
-
-  void SetBackupConfig(const VideoConfig& config);
-
+  // True when the custom texture behind an entry was reloaded since the entry was made.
+  static bool DidLinkedAssetsChange(const TCacheEntry& entry);
   RcTcacheEntry CreateTextureEntry(const TextureCreationInfo& creation_info,
                                    const TextureInfo& texture_info, int safety_color_sample_size,
                                    VideoCommon::CustomTextureData* custom_texture_data,
                                    bool custom_arbitrary_mipmaps, bool skip_texture_dump);
-
-  RcTcacheEntry GetXFBFromCache(u32 address, u32 width, u32 height, u32 stride);
-
-  std::pair<RcTcacheEntry, u32> CreatePaletteEntryWithOffset(const RcTcacheEntry& entry,
-                                                             const u8* palette);
-
-  RcTcacheEntry CreateReinterpretEntry(const RcTcacheEntry& existing_entry,
-                                       TextureFormat new_format);
-
   RcTcacheEntry DoPartialTextureUpdates(RcTcacheEntry& entry_to_update, const u8* palette,
                                         TLUTFormat tlutfmt);
+  RcTcacheEntry GetXFBFromCache(u32 address, u32 width, u32 height, u32 stride);
   void StitchXFBCopy(RcTcacheEntry& entry_to_update);
 
-  void CheckTempSize(size_t required_size);
+  // --- Entries made by a GPU pass from another entry ---
+  std::pair<RcTcacheEntry, u32> CreatePaletteEntryWithOffset(const RcTcacheEntry& entry,
+                                                             const u8* palette);
+  RcTcacheEntry CreateReinterpretEntry(const RcTcacheEntry& existing_entry,
+                                       TextureFormat new_format);
+  void ApplyMaterialToCacheEntry(const VideoCommon::MaterialResource& material, TCacheEntry* entry);
 
-  RcTcacheEntry AllocateCacheEntry(const TextureConfig& config);
-  std::optional<TexPoolEntry> AllocateTexture(const TextureConfig& config);
-  TexPool::iterator FindMatchingTextureFromPool(const TextureConfig& config);
+  // --- The address map ---
   TexAddrCache::iterator GetTexCacheIter(TCacheEntry* entry);
-
-  // Return all possible overlapping textures. As addr+size of the textures is not
-  // indexed, this may return false positives.
+  // Entries that may overlap [addr, addr + size_in_bytes). Only start addresses are indexed,
+  // so the range is widened by the largest possible texture and can contain non-overlapping
+  // entries; callers check OverlapsMemoryRange.
   std::pair<TexAddrCache::iterator, TexAddrCache::iterator>
   FindOverlappingTextures(u32 addr, u32 size_in_bytes);
-
-  // Removes and unlinks texture from texture cache and returns it to the pool
+  // Removes an entry from the cache, returning its texture to the pool where possible.
   TexAddrCache::iterator InvalidateTexture(TexAddrCache::iterator t_iter,
                                            bool discard_pending_efb_copy = false);
 
-  void UninitializeEFBMemory(u8* dst, u32 stride, u32 bytes_per_row, u32 num_blocks_y);
-  void UninitializeXFBMemory(u8* dst, u32 stride, u32 bytes_per_row, u32 num_blocks_y);
+  // --- Host textures ---
+  RcTcacheEntry AllocateCacheEntry(const TextureConfig& config);
+  std::optional<TexPoolEntry> AllocateTexture(const TextureConfig& config);
+  TexPool::iterator FindMatchingTextureFromPool(const TextureConfig& config);
+  bool CreateUtilityTextures();
+  void CheckTempSize(size_t required_size);
 
-  // Precomputing the coefficients for the previous, current, and next lines for the copy filter.
+  // --- EFB copies to RAM ---
+  // The seven copy filter taps folded into weights for the rows above, at and below.
   static std::array<u32, 3>
   GetRAMCopyFilterCoefficients(const CopyFilterCoefficients::Values& coefficients);
   static std::array<u32, 3>
   GetVRAMCopyFilterCoefficients(const CopyFilterCoefficients::Values& coefficients);
-
-  // Flushes a pending EFB copy to RAM from the host to the guest RAM.
+  // Staging textures sized for the largest EFB copy, reused between copies.
+  std::unique_ptr<AbstractStagingTexture> GetEFBCopyStagingTexture();
+  void ReleaseEFBCopyStagingTexture(std::unique_ptr<AbstractStagingTexture> tex);
+  // Moves a finished EFB-to-RAM readback into guest memory.
   void WriteEFBCopyToRAM(u8* dst_ptr, u32 width, u32 height, u32 stride,
                          std::unique_ptr<AbstractStagingTexture> staging_texture);
   void FlushEFBCopy(TCacheEntry* entry);
+  // Fill patterns for copies that skip the RAM write.
+  void UninitializeEFBMemory(u8* dst, u32 stride, u32 bytes_per_row, u32 num_blocks_y);
+  void UninitializeXFBMemory(u8* dst, u32 stride, u32 bytes_per_row, u32 num_blocks_y);
 
-  // Returns a staging texture of the maximum EFB copy size.
-  std::unique_ptr<AbstractStagingTexture> GetEFBCopyStagingTexture();
-
-  // Returns an EFB copy staging texture to the pool, so it can be re-used.
-  void ReleaseEFBCopyStagingTexture(std::unique_ptr<AbstractStagingTexture> tex);
-
-  bool CheckReadbackTexture(u32 width, u32 height, AbstractTextureFormat format);
+  // --- Save states and config ---
   void DoSaveState(PointerWrap& p);
   void DoLoadState(PointerWrap& p);
+  bool CheckReadbackTexture(u32 width, u32 height, AbstractTextureFormat format);
+  void SetBackupConfig(const VideoConfig& config);
 
-  void ApplyMaterialToCacheEntry(const VideoCommon::MaterialResource& material, TCacheEntry* entry);
-
-  // m_textures_by_address is the authoritive version of what's actually "in" the texture cache
-  // but it's possible for invalidated TCache entries to live on elsewhere
+  // The authoritative set of cached entries, keyed by guest address. Invalidated entries can
+  // live on elsewhere (bindings, pending copies) after leaving this map.
   TexAddrCache m_textures_by_address;
 
-  // m_textures_by_hash is an alternative view of the texture cache
-  // All textures in here will also be in m_textures_by_address
+  // Entries that were hashed in full, keyed by hash, for reuse at other addresses. Every entry
+  // here is also in m_textures_by_address.
   TexHashCache m_textures_by_hash;
 
-  // m_bound_textures are actually active in the current draw
-  // It's valid for textures to be in here after they've been invalidated
+  // Entries bound to the eight texture units; may include invalidated entries.
   std::array<RcTcacheEntry, 8> m_bound_textures{};
 
   TexPool m_texture_pool;
   u64 m_last_entry_id = 0;
 
-  // Backup configuration values
+  // The config values the cache depends on, as of the last OnConfigChanged.
   struct BackupConfig
   {
     int color_samples;
@@ -451,24 +446,21 @@ private:
   };
   BackupConfig m_backup_config = {};
 
-  // Encoding texture used for EFB copies to RAM.
+  // Render target the EFB-to-RAM encoders draw into.
   std::unique_ptr<AbstractTexture> m_efb_encoding_texture;
   std::unique_ptr<AbstractFramebuffer> m_efb_encoding_framebuffer;
 
-  // Decoding texture used for GPU texture decoding.
+  // Compute target for GPU texture decoding.
   std::unique_ptr<AbstractTexture> m_decoding_texture;
 
-  // Pool of readback textures used for deferred EFB copies.
+  // Readback textures free for deferred EFB copies.
   std::vector<std::unique_ptr<AbstractStagingTexture>> m_efb_copy_staging_texture_pool;
 
-  // List of pending EFB copies. It is important that the order is preserved for these,
-  // so that overlapping textures are written to guest RAM in the order they are issued.
-  // It's valid for textures to live be in here after they've been invalidated
+  // Deferred EFB copies in issue order, which is also the order they must reach guest RAM
+  // (later copies overwrite earlier ones). May include invalidated entries.
   std::vector<RcTcacheEntry> m_pending_efb_copies;
 
-  // Staging texture used for readbacks.
-  // We store this in the class so that the same staging texture can be used for multiple
-  // readbacks, saving the overhead of allocating a new buffer every time.
+  // Readback texture kept between save-state serialisations.
   std::unique_ptr<AbstractStagingTexture> m_readback_texture;
 
   void OnFrameEnd();
