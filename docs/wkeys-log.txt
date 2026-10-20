@@ -1,0 +1,110 @@
+- Wii keys log: removed every Nintendo key from PixelU-Wii. The engine now
+  reads the owner's own keys file, and RetroPixels Native asks for it
+  before a Wii game.
+  - Removed (now loaded from the owner's files):
+    - `IOSC.cpp`:
+      - retail and development common keys, Korean common key, SD key;
+      - the default console private key, its signature, key ID and device
+        ID;
+      - the root public keys (retail and development).
+    - `DolReader.cpp`: the Espresso ancast keys (retail and development)
+      and their IV.
+    - `WiiSave.cpp`: `SD_INITIAL_IV`.
+    - `NetKDRequest.h`: the WC24 mail-check HMAC key.
+    - `MotionPlus.cpp`: the secret square root used to answer the
+      MotionPlus challenge (`CHALLENGE_SQRT_V`). The public modulus `n` is
+      kept.
+  - Kept (not Nintendo secrets):
+    - `WiiSave.cpp` `MD5_BLANKER`: the fixed filler that replaces the MD5
+      while a save header is hashed. It is a format constant, not a key.
+    - `WiiSave.cpp` `NG_ID`: a placeholder console ID written into
+      exported backups.
+    - Wiimote extension encryption tables: the algorithm's tables; the key
+      comes from the game.
+    - Not Nintendo's:
+      - ARDecrypt tables (Datel's);
+      - Infinity and Skylanders constants (the toy makers');
+      - the updater's ed25519 public key (Dolphin's);
+      - the sect233r1 curve parameters (public);
+      - SSL.cpp's SHA-256 hashes of the user's own certificate dumps.
+    - `Data/Sys/Wii/shared2/wc24/nwc24msg.cfg`: Dolphin's default WC24
+      account values (password, mlchkid). They are service credentials,
+      not keys, so they are left as they were; flagged for review.
+  - Owner's files, in the Wii NAND root (`User/Wii`, or Dolphin.ini
+    `[General] NANDRootPath`):
+    - `keys.bin` (BootMii, 1 KiB) is read first, then `otp.bin`:
+      - a Wii's 128-byte OTP: retail MS/CA IDs, no NG signature, no Korean
+        key;
+      - a Wii U's 1 KiB OTP: bank 0, plus bank 6 at 0x300 for the MS/CA
+        IDs, NG key ID and signature, and the Korean key at 0x348
+        (WiiUBrew "Hardware/eFuse").
+    - `wii_keys.txt` (optional, `name = hex` lines) holds the keys a
+      console dump doesn't have:
+      - `sd_key`, `sd_iv`;
+      - `root_key`, `root_key_dev`;
+      - `espresso_ancast_key`, `espresso_ancast_key_dev`,
+        `espresso_ancast_iv`;
+      - `wc24_mail_check_key`;
+      - `motionplus_sqrt_v`.
+    - The Espresso ancast key is not in the Wii U's Latte OTP (it is in the
+      Espresso's own fuses), so vWii ancast images only load when it is
+      given in `wii_keys.txt`. Otherwise there is a clear message.
+    - Common keys load only when the dump's console type (CA ID 2 means
+      development) matches the IOSC console type.
+  - Without a keys file:
+    - GameCube is unchanged. Homebrew DOL/ELF still boots.
+    - Wii discs, WADs and NAND titles stop before boot with one message
+      ("RetroPixels needs a keys file from your own Wii...").
+    - Title keys can't be decrypted:
+      - VolumeWii reads fail;
+      - WAD content checks fail;
+      - WIA/RVZ conversion fails;
+      - DirectoryBlob won't encrypt;
+      - WFSI returns ENOTICKET.
+    - The game list still shows Wii discs: ID, maker, revision, country and
+      name fall back to the disc's own header. There is no banner.
+    - The verifier adds a "results may not be real" problem.
+    - SD save import/export says the SD keys are missing. It never opens
+      (or truncates) data.bin.
+  - Without the extra keys, even with a keys file:
+    - Root-to-CA certificate signatures are not checked (the rest of the
+      chain is).
+    - WC24 mail HMACs are not checked.
+    - MotionPlus "y1" challenge answers are wrong; games retry. This is a
+      possible gameplay regression for MotionPlus titles and is not
+      confirmed on hardware.
+  - RetroPixels Native: before a Wii/WiiWare game, if the Wii root has no
+    usable keys, a "Wii keys file" window offers:
+    - Find keys on this PC: a background search with a Stop button.
+      - It looks in Downloads, Desktop and Documents, then fixed drives and
+        memory cards (C: to Z:).
+      - It skips system, program, cache and VCS folders and symlinks; the
+        limits are 12 folders deep and 90 s.
+      - Names searched: `*keys*.bin`, `*otp*.bin`, `*nand*.bin`, by exact
+        size.
+      - Matches are checked by layout, copies are listed once, and the
+        list shows each console's ID.
+    - Choose file...
+    - How to get yours: opens wiibrew.org/wiki/BootMii, plus two lines
+      saying the file comes from the owner's own Wii.
+    - Cancel.
+    - The chosen file is converted to keys.bin (an old one is kept as
+      keys.bin.old) and the game starts. Nothing is downloaded.
+  - Checked:
+    - IOSC harness: an old build with the tables replaced by synthetic keys
+      vs the new build with the same synthetic keys.bin/otp.bin/
+      wii_keys.txt, with hash streams compared. Retail, development, Wii
+      otp.bin and Wii U otp.bin are identical. The no-keys, mismatch and
+      parser checks pass. A mutated sd_key gives DIFF (negative control).
+    - Go tests (synthetic dumps only) for:
+      - root lookup with NANDRootPath;
+      - HaveWiiKeys, matching the engine's checks;
+      - layout checks and conversions;
+      - nand.bin tail;
+      - install;
+      - scan (skips, depth, dedupe, cancel, timeout).
+    - `go vet`, `go test`, the `GOOS=windows` vet and the Windows build.
+    - clang `-Wall -Wextra -Wconversion -Wsign-compare -Wshadow-all
+      -Wshorten-64-to-32`, Linux and `x86_64-w64-windows-gnu`: diagnostics
+      are identical to the base tree for every changed file and every
+      includer of `IOSC.h` and `ES/Formats.h`. MSVC was not run.
