@@ -1,206 +1,101 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "wxgui/input/panels/VPADInputPanel.h"
 
-#include <wx/gbsizer.h>
-#include <wx/stattext.h>
-#include <wx/statline.h>
-#include <wx/textctrl.h>
-#include <wx/slider.h>
 #include <wx/checkbox.h>
+#include <wx/gbsizer.h>
+#include <wx/slider.h>
+#include <wx/stattext.h>
 
-
-#include "wxgui/helpers/wxControlObject.h"
-#include "wxgui/helpers/wxHelpers.h"
-#include "wxgui/components/wxInputDraw.h"
 #include "input/emulated/VPADController.h"
+#include "wxgui/components/wxInputDraw.h"
 
-constexpr VPADController::ButtonId g_kFirstColumnItems[] =
+namespace
 {
-	VPADController::kButtonId_A, VPADController::kButtonId_B, VPADController::kButtonId_X, VPADController::kButtonId_Y,
-	VPADController::kButtonId_L, VPADController::kButtonId_R, VPADController::kButtonId_ZL, VPADController::kButtonId_ZR,
-	VPADController::kButtonId_Plus, VPADController::kButtonId_Minus
-};
+	using Btn = VPADController::ButtonId;
 
-constexpr VPADController::ButtonId g_kSecondColumnItems[] =
-{
-	VPADController::kButtonId_StickL, VPADController::kButtonId_StickL_Up, VPADController::kButtonId_StickL_Down, VPADController::kButtonId_StickL_Left, VPADController::kButtonId_StickL_Right
-};
+	wxString Label(Btn id)
+	{
+		return wxGetTranslation(wxString::FromUTF8(VPADController::get_button_name(id)));
+	}
 
-constexpr VPADController::ButtonId g_kThirdColumnItems[] =
-{
-	VPADController::kButtonId_StickR, VPADController::kButtonId_StickR_Up, VPADController::kButtonId_StickR_Down, VPADController::kButtonId_StickR_Left, VPADController::kButtonId_StickR_Right
-};
+	constexpr Btn kFaceAndShoulder[] = {VPADController::kButtonId_A, VPADController::kButtonId_B, VPADController::kButtonId_X, VPADController::kButtonId_Y,
+										VPADController::kButtonId_L, VPADController::kButtonId_R, VPADController::kButtonId_ZL, VPADController::kButtonId_ZR,
+										VPADController::kButtonId_Plus, VPADController::kButtonId_Minus};
+	constexpr Btn kLeftStick[] = {VPADController::kButtonId_StickL, VPADController::kButtonId_StickL_Up, VPADController::kButtonId_StickL_Down,
+								  VPADController::kButtonId_StickL_Left, VPADController::kButtonId_StickL_Right};
+	constexpr Btn kRightStick[] = {VPADController::kButtonId_StickR, VPADController::kButtonId_StickR_Up, VPADController::kButtonId_StickR_Down,
+								   VPADController::kButtonId_StickR_Left, VPADController::kButtonId_StickR_Right};
+	constexpr Btn kDpad[] = {VPADController::kButtonId_Up, VPADController::kButtonId_Down, VPADController::kButtonId_Left, VPADController::kButtonId_Right};
 
-constexpr VPADController::ButtonId g_kFourthRowItems[] =
-{
-	VPADController::kButtonId_Up, VPADController::kButtonId_Down, VPADController::kButtonId_Left, VPADController::kButtonId_Right
-};
-
+	constexpr int kLastRow = 10;
+}
 
 VPADInputPanel::VPADInputPanel(wxWindow* parent)
 	: InputPanel(parent)
 {
-	auto bold_font = GetFont();
-	bold_font.MakeBold();
+	auto* grid = new wxGridBagSizer();
+	auto addColumn = [&](int column, const auto& ids) {
+		int row = 1;
+		for (Btn id : ids)
+			AddMappingRow(grid, row++, column, id, Label(id));
+		return row;
+	};
 
-	auto* main_sizer = new wxGridBagSizer();
+	addColumn(0, kFaceAndShoulder);
+	AddSeparator(grid, 2, wxALL | wxEXPAND);
 
-	sint32 row = 0;
-	sint32 column = 0;
-	for (const auto& id : g_kFirstColumnItems)
+	AddHeading(grid, 0, 3, _("Left Axis"));
+	m_leftStick = AddStickPreview(grid, addColumn(3, kLeftStick), 4);
+	AddSeparator(grid, 6, wxALL | wxEXPAND);
+
+	AddHeading(grid, 0, 7, _("Right Axis"));
+	m_rightStick = AddStickPreview(grid, addColumn(7, kRightStick), 8);
+
+	// gamepad speaker volume: shown for completeness, not emulated
 	{
-		row++;
-		add_button_row(main_sizer, row, column, id);
+		auto* caption = new wxStaticText(this, wxID_ANY, _("Volume"));
+		auto* slider = new wxSlider(this, wxID_ANY, 0, 0, 100);
+		auto* percent = new wxStaticText(this, wxID_ANY, wxString::Format("%d%%", 0));
+		caption->Disable();
+		slider->Disable();
+		percent->Disable();
+		grid->Add(caption, wxGBPosition(kLastRow, 7), wxDefaultSpan, wxALL, 5);
+		grid->Add(slider, wxGBPosition(kLastRow, 8), wxDefaultSpan, wxTOP | wxBOTTOM | wxEXPAND, 5);
+		grid->Add(percent, wxGBPosition(kLastRow, 9), wxDefaultSpan, wxALL, 5);
 	}
+	AddSeparator(grid, 10, wxALL | wxEXPAND);
 
-	//////////////////////////////////////////////////////////////////
+	AddHeading(grid, 0, 11, _("D-pad"));
+	addColumn(11, kDpad);
 
-	main_sizer->Add(new wxStaticLine(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxVERTICAL), wxGBPosition(0, column + 2), wxGBSpan(11, 1), wxALL | wxEXPAND, 5);
+	AddMappingRow(grid, kLastRow - 2, 11, VPADController::kButtonId_Mic, _("blow mic"));
+	AddMappingRow(grid, kLastRow - 1, 11, VPADController::kButtonId_Screen, _("show screen"));
 
-	row = 0;
-	column += 3;
+	const wxString toggleTip = _("Makes the \"show screen\" button toggle between the TV and gamepad screens");
+	auto* toggleCaption = new wxStaticText(this, wxID_ANY, _("toggle screen"));
+	toggleCaption->SetToolTip(toggleTip);
+	grid->Add(toggleCaption, wxGBPosition(kLastRow, 11), wxDefaultSpan, wxALL | wxALIGN_CENTER_VERTICAL, 5);
+	m_screenToggle = new wxCheckBox(this, wxID_ANY, {}, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
+	m_screenToggle->SetToolTip(toggleTip);
+	grid->Add(m_screenToggle, wxGBPosition(kLastRow, 12), wxDefaultSpan, wxALL | wxEXPAND, 5);
 
-	auto text = new wxStaticText(this, wxID_ANY, _("Left Axis"));
-	text->SetFont(bold_font);
-	main_sizer->Add(text, wxGBPosition(row, column), wxGBSpan(1, 3), wxALL | wxEXPAND, 5);
-
-	for (const auto& id : g_kSecondColumnItems)
-	{
-		row++;
-		add_button_row(main_sizer, row, column, id);
-	}
-
-	row++;
-	
-	// input drawer
-	m_left_draw = new wxInputDraw(this, wxID_ANY, wxDefaultPosition, { 60, 60 });
-	main_sizer->Add(m_left_draw, wxGBPosition(row, column + 1), wxGBSpan(2, 1), wxTOP | wxBOTTOM | wxEXPAND | wxALIGN_CENTER, 5);
-
-	main_sizer->Add(new wxStaticLine(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxVERTICAL), wxGBPosition(0, column + 3), wxGBSpan(11, 1), wxALL | wxEXPAND, 5);
-
-	//////////////////////////////////////////////////////////////////
-
-	row = 0;
-	column += 4;
-
-	text = new wxStaticText(this, wxID_ANY, _("Right Axis"));
-	text->SetFont(bold_font);
-	main_sizer->Add(text, wxGBPosition(row, column), wxGBSpan(1, 3), wxALL | wxEXPAND, 5);
-
-	for (const auto& id : g_kThirdColumnItems)
-	{
-		row++;
-		add_button_row(main_sizer, row, column, id);
-	}
-
-	row++;
-
-	// input drawer
-	m_right_draw = new wxInputDraw(this, wxID_ANY, wxDefaultPosition, { 60, 60 });
-	main_sizer->Add(m_right_draw, wxGBPosition(row, column + 1), wxGBSpan(2, 1), wxTOP | wxBOTTOM | wxEXPAND | wxALIGN_CENTER, 5);
-
-	// Volume
-	row = 10;
-
-	text = new wxStaticText(this, wxID_ANY, _("Volume"));
-	text->Disable();
-	main_sizer->Add(text, wxGBPosition(row, column), wxDefaultSpan, wxALL, 5);
-
-	auto*m_volume = new wxSlider(this, wxID_ANY, 0, 0, 100);
-	m_volume->Disable();
-	main_sizer->Add(m_volume, wxGBPosition(row, column + 1), wxDefaultSpan, wxTOP | wxBOTTOM | wxEXPAND, 5);
-
-	const auto volume_text = new wxStaticText(this, wxID_ANY, wxString::Format("%d%%", 0));
-	volume_text->Disable();
-	main_sizer->Add(volume_text, wxGBPosition(row, column + 2), wxDefaultSpan, wxALL, 5);
-	m_volume->Bind(wxEVT_SLIDER, &VPADInputPanel::OnVolumeChange, this, wxID_ANY, wxID_ANY, new wxControlObject(volume_text));
-
-	main_sizer->Add(new wxStaticLine(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxVERTICAL), wxGBPosition(0, column + 3), wxGBSpan(11, 1), wxALL | wxEXPAND, 5);
-
-	//////////////////////////////////////////////////////////////////
-
-	row = 0;
-	column += 4;
-
-	text = new wxStaticText(this, wxID_ANY, _("D-pad"));
-	text->SetFont(bold_font);
-	main_sizer->Add(text, wxGBPosition(row, column), wxGBSpan(1, 3), wxALL | wxEXPAND, 5);
-
-	for (const auto& id : g_kFourthRowItems)
-	{
-		row++;
-		add_button_row(main_sizer, row, column, id);
-	}
-
-	// Blow Mic
-	row = 8;
-	add_button_row(main_sizer, row, column, VPADController::kButtonId_Mic, _("blow mic"));
-	row++;
-
-	add_button_row(main_sizer, row, column, VPADController::kButtonId_Screen, _("show screen"));
-	row++;
-
-	auto toggleScreenText = new wxStaticText(this, wxID_ANY, _("toggle screen"));
-	main_sizer->Add(toggleScreenText,
-		wxGBPosition(row, column),
-		wxDefaultSpan,
-		wxALL | wxALIGN_CENTER_VERTICAL, 5);
-	m_togglePadViewCheckBox = new wxCheckBox(this, wxID_ANY, {}, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
-	wxString toggleScreenTT = _("Makes the \"show screen\" button toggle between the TV and gamepad screens");
-	m_togglePadViewCheckBox->SetToolTip(toggleScreenTT);
-	toggleScreenText->SetToolTip(toggleScreenTT);
-	main_sizer->Add(m_togglePadViewCheckBox, wxGBPosition(row,column+1), wxDefaultSpan, wxALL | wxEXPAND, 5);
-
-	//////////////////////////////////////////////////////////////////
-
-	SetSizer(main_sizer);
+	SetSizer(grid);
 	Layout();
 }
 
-void VPADInputPanel::add_button_row(wxGridBagSizer *sizer, sint32 row, sint32 column, const VPADController::ButtonId &button_id) {
-	add_button_row(sizer, row, column, button_id, wxGetTranslation(wxString::FromUTF8(VPADController::get_button_name(button_id))));
-}
-
-void VPADInputPanel::add_button_row(wxGridBagSizer *sizer, sint32 row, sint32 column,
-                                    const VPADController::ButtonId &button_id, const wxString &label) {
-	sizer->Add(
-		new wxStaticText(this, wxID_ANY, label),
-		wxGBPosition(row, column),
-		wxDefaultSpan,
-		wxALL | wxALIGN_CENTER_VERTICAL, 5);
-
-	auto* text_ctrl = new wxTextCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL | wxTE_PROCESS_ENTER | wxTE_PROCESS_TAB);
-	text_ctrl->SetClientData((void*)button_id);
-	text_ctrl->SetMinSize(wxSize(150, -1));
-	text_ctrl->SetEditable(false);
-	text_ctrl->SetBackgroundColour(kKeyColourNormalMode);
-	bind_hotkey_events(text_ctrl);
-	sizer->Add(text_ctrl, wxGBPosition(row, column + 1), wxDefaultSpan, wxALL | wxEXPAND, 5);
-}
-
-void VPADInputPanel::on_timer(const EmulatedControllerPtr& emulated_controller, const ControllerPtr& controller_base)
+void VPADInputPanel::on_timer(const EmulatedControllerPtr& emulated_controller, const ControllerPtr& controller)
 {
-	InputPanel::on_timer(emulated_controller, controller_base);
-
-	static_cast<VPADController*>(emulated_controller.get())->set_screen_toggle(m_togglePadViewCheckBox->GetValue());
-
-	if(emulated_controller)
-	{
-		const auto axis = emulated_controller->get_axis();
-		const auto rotation = emulated_controller->get_rotation();
-
-		m_left_draw->SetAxisValue(axis);
-		m_right_draw->SetAxisValue(rotation);
-	}
+	InputPanel::on_timer(emulated_controller, controller);
+	if (!emulated_controller)
+		return;
+	static_cast<VPADController*>(emulated_controller.get())->set_screen_toggle(m_screenToggle->GetValue());
+	m_leftStick->SetAxisValue(emulated_controller->get_axis());
+	m_rightStick->SetAxisValue(emulated_controller->get_rotation());
 }
 
-void VPADInputPanel::OnVolumeChange(wxCommandEvent& event)
-{
-
-}
 void VPADInputPanel::load_controller(const EmulatedControllerPtr& controller)
 {
 	InputPanel::load_controller(controller);
-
-	const bool isToggle = static_cast<VPADController*>(controller.get())->is_screen_active_toggle();
-	m_togglePadViewCheckBox->SetValue(isToggle);
+	if (controller)
+		m_screenToggle->SetValue(static_cast<VPADController*>(controller.get())->is_screen_active_toggle());
 }

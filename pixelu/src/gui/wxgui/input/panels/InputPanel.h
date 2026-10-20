@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include <wx/panel.h>
@@ -9,9 +10,16 @@
 #include "wxgui/wxHelper.h"
 
 class ControllerBase;
+class wxGridBagSizer;
+class wxInputDraw;
 class wxTextCtrl;
 class wxComboBox;
 
+// Base for the per-controller-type mapping pages of the input settings.
+// Each mapping is a read-only text field whose client data holds the emulated
+// button id. Focusing a field arms it; the next input from the selected
+// physical controller is bound to it and focus moves on to the next field.
+// Right click or Escape on an armed field clears its mapping.
 class InputPanel : public wxPanel
 {
 public:
@@ -21,28 +29,37 @@ public:
 
 	InputPanel(wxWindow* parent);
 
-	ControllerPtr get_active_controller() const;
-
+	// polled by the settings window while it is open
 	virtual void on_timer(const EmulatedControllerPtr& emulated_controller, const ControllerPtr& controller);
 	void on_left_click(wxMouseEvent& event);
 
+	// empties every field
 	void reset_configuration();
 	virtual void load_controller(const EmulatedControllerPtr& controller);
 
+	// highlights fields that are mapped to a controller other than the given one
 	void set_selected_controller(const EmulatedControllerPtr& emulated_controller, const ControllerPtr& controller_base);
 	void reset_colours();
 
 protected:
-	void bind_hotkey_events(wxTextCtrl* text_ctrl);
+	wxTextCtrl* AddMappingRow(wxGridBagSizer* sizer, int row, int column, uint64 mapping, const wxString& label);
+	void AddHeading(wxGridBagSizer* sizer, int row, int column, const wxString& text);
+	void AddSeparator(wxGridBagSizer* sizer, int column, int flags);
+	// 60x60 stick preview below a column of mappings
+	wxInputDraw* AddStickPreview(wxGridBagSizer* sizer, int row, int column);
+	void MakeMappingField(wxTextCtrl* field, uint64 mapping);
 
-	void on_edit_key_focus(wxFocusEvent& event);
-	void on_edit_key_kill_focus(wxFocusEvent& event);
-	void on_right_click(wxMouseEvent& event);
+private:
+	template<typename TFunc>
+	void ForEachField(TFunc&& func);
+	wxTextCtrl* ArmedField();
+	void Arm(wxFocusEvent& event);
+	void Disarm(wxFocusEvent& event);
+	void OnFieldRightDown(wxMouseEvent& event);
+	bool DisarmCurrent();
+	void PaintField(wxTextCtrl* field, const wxColour& colour);
 
-	bool reset_focused_element();
-
-	bool m_right_down = false;
-	int m_focused_element = wxID_NONE;
-	std::unordered_map<int, wxColour> m_color_backup;
+	int m_armedId = wxID_NONE;
+	bool m_clearRequested = false;
+	std::unordered_map<int, wxColour> m_savedColour; // colour a field returns to when disarmed
 };
-

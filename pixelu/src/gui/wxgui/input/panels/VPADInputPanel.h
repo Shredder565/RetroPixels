@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include <wx/gbsizer.h>
@@ -6,6 +7,7 @@
 class wxInputDraw;
 class wxCheckBox;
 
+// mapping page for the emulated Wii U GamePad
 class VPADInputPanel : public InputPanel
 {
 public:
@@ -15,11 +17,7 @@ public:
 	virtual void load_controller(const EmulatedControllerPtr& controller) override;
 
 private:
-	void OnVolumeChange(wxCommandEvent& event);
-
-	wxInputDraw* m_left_draw, * m_right_draw;
-	wxCheckBox* m_togglePadViewCheckBox;
-
-	void add_button_row(wxGridBagSizer *sizer, sint32 row, sint32 column, const VPADController::ButtonId &button_id);
-	void add_button_row(wxGridBagSizer *sizer, sint32 row, sint32 column, const VPADController::ButtonId &button_id, const wxString &label);
+	wxInputDraw* m_leftStick;
+	wxInputDraw* m_rightStick;
+	wxCheckBox* m_screenToggle; // "show screen" toggles instead of holding
 };

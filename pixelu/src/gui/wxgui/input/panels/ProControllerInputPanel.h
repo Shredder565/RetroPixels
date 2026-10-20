@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include <wx/gbsizer.h>
@@ -5,6 +6,7 @@
 #include "wxgui/input/panels/InputPanel.h"
 #include "wxgui/components/wxInputDraw.h"
 
+// mapping page for an emulated Wii U Pro Controller
 class ProControllerInputPanel : public InputPanel
 {
 public:
@@ -13,7 +15,6 @@ public:
 	void on_timer(const EmulatedControllerPtr& emulated_controller, const ControllerPtr& controller) override;
 
 private:
-	wxInputDraw* m_left_draw, * m_right_draw;
-
-	void add_button_row(wxGridBagSizer *sizer, sint32 row, sint32 column, const ProController::ButtonId &button_id);
+	wxInputDraw* m_leftStick;
+	wxInputDraw* m_rightStick;
 };
