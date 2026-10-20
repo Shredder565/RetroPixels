@@ -47,8 +47,14 @@ void NullStagingTexture::CopyToTexture(const MathUtil::Rectangle<int>&, Abstract
   m_needs_flush = true;
 }
 
+void NullStagingTexture::Flush()
+{
+  m_needs_flush = false;
+}
+
 bool NullStagingTexture::Map()
 {
+  // Always mapped.
   return true;
 }
 
@@ -56,40 +62,28 @@ void NullStagingTexture::Unmap()
 {
 }
 
-void NullStagingTexture::Flush()
+std::unique_ptr<NullFramebuffer> NullFramebuffer::Create(NullTexture* color, NullTexture* depth,
+                                                         std::vector<AbstractTexture*> extra_colors)
 {
-  m_needs_flush = false;
-}
-
-NullFramebuffer::NullFramebuffer(AbstractTexture* color_attachment,
-                                 AbstractTexture* depth_attachment,
-                                 std::vector<AbstractTexture*> additional_color_attachments,
-                                 AbstractTextureFormat color_format,
-                                 AbstractTextureFormat depth_format, u32 width, u32 height,
-                                 u32 layers, u32 samples)
-    : AbstractFramebuffer(color_attachment, depth_attachment,
-                          std::move(additional_color_attachments), color_format, depth_format,
-                          width, height, layers, samples)
-{
-}
-
-std::unique_ptr<NullFramebuffer>
-NullFramebuffer::Create(NullTexture* color_attachment, NullTexture* depth_attachment,
-                        std::vector<AbstractTexture*> additional_color_attachments)
-{
-  if (!ValidateConfig(color_attachment, depth_attachment, additional_color_attachments))
+  if (!ValidateConfig(color, depth, extra_colors))
     return nullptr;
 
   // The colour attachment, when present, decides the framebuffer's dimensions.
-  const NullTexture& sized_by = color_attachment ? *color_attachment : *depth_attachment;
-  const AbstractTextureFormat color_format =
-      color_attachment ? color_attachment->GetFormat() : AbstractTextureFormat::Undefined;
-  const AbstractTextureFormat depth_format =
-      depth_attachment ? depth_attachment->GetFormat() : AbstractTextureFormat::Undefined;
-  return std::make_unique<NullFramebuffer>(color_attachment, depth_attachment,
-                                           std::move(additional_color_attachments), color_format,
-                                           depth_format, sized_by.GetWidth(), sized_by.GetHeight(),
+  const NullTexture& sized_by = color ? *color : *depth;
+  const auto color_fmt = color ? color->GetFormat() : AbstractTextureFormat::Undefined;
+  const auto depth_fmt = depth ? depth->GetFormat() : AbstractTextureFormat::Undefined;
+  return std::make_unique<NullFramebuffer>(color, depth, std::move(extra_colors), color_fmt,
+                                           depth_fmt, sized_by.GetWidth(), sized_by.GetHeight(),
                                            sized_by.GetLayers(), sized_by.GetSamples());
+}
+
+NullFramebuffer::NullFramebuffer(AbstractTexture* color, AbstractTexture* depth,
+                                 std::vector<AbstractTexture*> extra_colors,
+                                 AbstractTextureFormat color_fmt, AbstractTextureFormat depth_fmt,
+                                 u32 w, u32 h, u32 layer_count, u32 sample_count)
+    : AbstractFramebuffer(color, depth, std::move(extra_colors), color_fmt, depth_fmt, w, h,
+                          layer_count, sample_count)
+{
 }
 
 }  // namespace Null

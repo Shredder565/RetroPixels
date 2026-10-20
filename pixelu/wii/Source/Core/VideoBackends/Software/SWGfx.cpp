@@ -64,19 +64,19 @@ std::unique_ptr<AbstractTexture> SWGfx::CreateTexture(const TextureConfig& confi
   return std::make_unique<SWTexture>(config);
 }
 
+std::unique_ptr<AbstractFramebuffer> SWGfx::CreateFramebuffer(AbstractTexture* color,
+                                                              AbstractTexture* depth,
+                                                              std::vector<AbstractTexture*> extra)
+{
+  // Every texture this device hands out is an SWTexture.
+  return SWFramebuffer::Create(static_cast<SWTexture*>(color), static_cast<SWTexture*>(depth),
+                               std::move(extra));
+}
+
 std::unique_ptr<AbstractStagingTexture> SWGfx::CreateStagingTexture(StagingTextureType type,
                                                                     const TextureConfig& config)
 {
   return std::make_unique<SWStagingTexture>(type, config);
-}
-
-std::unique_ptr<AbstractFramebuffer>
-SWGfx::CreateFramebuffer(AbstractTexture* color_attachment, AbstractTexture* depth_attachment,
-                         std::vector<AbstractTexture*> additional_color_attachments)
-{
-  return SWFramebuffer::Create(static_cast<SWTexture*>(color_attachment),
-                               static_cast<SWTexture*>(depth_attachment),
-                               std::move(additional_color_attachments));
 }
 
 bool SWGfx::BindBackbuffer(const ClearColor&)

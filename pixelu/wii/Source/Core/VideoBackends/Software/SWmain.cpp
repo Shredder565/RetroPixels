@@ -41,23 +41,6 @@ public:
 };
 }  // namespace
 
-std::string VideoSoftware::GetConfigName() const
-{
-  return CONFIG_NAME;
-}
-
-std::string VideoSoftware::GetDisplayName() const
-{
-  return _trans("Software Renderer");
-}
-
-std::optional<std::string> VideoSoftware::GetWarningMessage() const
-{
-  return _trans("The software renderer is significantly slower than other "
-                "backends and is only recommended for debugging purposes.\n\nDo you "
-                "really want to enable software rendering? If unsure, select 'No'.");
-}
-
 void VideoSoftware::InitBackendInfo(const WindowSystemInfo&)
 {
   BackendInfo& info = g_backend_info;
@@ -110,4 +93,22 @@ void VideoSoftware::Shutdown()
 {
   ShutdownShared();
 }
+
+std::string VideoSoftware::GetDisplayName() const
+{
+  return _trans("Software Renderer");
+}
+
+std::string VideoSoftware::GetConfigName() const
+{
+  return CONFIG_NAME;
+}
+
+std::optional<std::string> VideoSoftware::GetWarningMessage() const
+{
+  return _trans("The software renderer is significantly slower than other "
+                "backends and is only recommended for debugging purposes.\n\nDo you "
+                "really want to enable software rendering? If unsure, select 'No'.");
+}
+
 }  // namespace SW

@@ -132,9 +132,15 @@ void SWStagingTexture::CopyToTexture(const MathUtil::Rectangle<int>& src_rect, A
   m_needs_flush = true;
 }
 
+void SWStagingTexture::Flush()
+{
+  // Copies complete immediately, so there is never anything to wait for.
+  m_needs_flush = false;
+}
+
 bool SWStagingTexture::Map()
 {
-  // The memory is mapped for the texture's whole lifetime.
+  // The memory stays mapped for the texture's whole lifetime.
   return true;
 }
 
@@ -142,37 +148,29 @@ void SWStagingTexture::Unmap()
 {
 }
 
-void SWStagingTexture::Flush()
+std::unique_ptr<SWFramebuffer> SWFramebuffer::Create(SWTexture* color, SWTexture* depth,
+                                                     std::vector<AbstractTexture*> extra_colors)
 {
-  m_needs_flush = false;
-}
-
-SWFramebuffer::SWFramebuffer(AbstractTexture* color_attachment, AbstractTexture* depth_attachment,
-                             std::vector<AbstractTexture*> additional_color_attachments,
-                             AbstractTextureFormat color_format, AbstractTextureFormat depth_format,
-                             u32 width, u32 height, u32 layers, u32 samples)
-    : AbstractFramebuffer(color_attachment, depth_attachment,
-                          std::move(additional_color_attachments), color_format, depth_format,
-                          width, height, layers, samples)
-{
-}
-
-std::unique_ptr<SWFramebuffer>
-SWFramebuffer::Create(SWTexture* color_attachment, SWTexture* depth_attachment,
-                      std::vector<AbstractTexture*> additional_color_attachments)
-{
-  if (!ValidateConfig(color_attachment, depth_attachment, additional_color_attachments))
+  if (!ValidateConfig(color, depth, extra_colors))
     return nullptr;
 
   // Size, layer and sample counts come from the colour attachment when there is one.
-  const SWTexture& reference = color_attachment ? *color_attachment : *depth_attachment;
+  const SWTexture& reference = color ? *color : *depth;
   const auto format_of = [](const SWTexture* texture) {
     return texture ? texture->GetFormat() : AbstractTextureFormat::Undefined;
   };
   return std::make_unique<SWFramebuffer>(
-      color_attachment, depth_attachment, std::move(additional_color_attachments),
-      format_of(color_attachment), format_of(depth_attachment), reference.GetWidth(),
-      reference.GetHeight(), reference.GetLayers(), reference.GetSamples());
+      color, depth, std::move(extra_colors), format_of(color), format_of(depth),
+      reference.GetWidth(), reference.GetHeight(), reference.GetLayers(), reference.GetSamples());
+}
+
+SWFramebuffer::SWFramebuffer(AbstractTexture* color, AbstractTexture* depth,
+                             std::vector<AbstractTexture*> extra_colors,
+                             AbstractTextureFormat color_fmt, AbstractTextureFormat depth_fmt,
+                             u32 w, u32 h, u32 layer_count, u32 sample_count)
+    : AbstractFramebuffer(color, depth, std::move(extra_colors), color_fmt, depth_fmt, w, h,
+                          layer_count, sample_count)
+{
 }
 
 }  // namespace SW

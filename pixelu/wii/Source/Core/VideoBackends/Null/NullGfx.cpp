@@ -37,16 +37,6 @@ NullGfx::~NullGfx()
   UpdateActiveConfig();
 }
 
-bool NullGfx::IsHeadless() const
-{
-  return true;
-}
-
-bool NullGfx::SupportsUtilityDrawing() const
-{
-  return false;
-}
-
 std::unique_ptr<AbstractTexture> NullGfx::CreateTexture(const TextureConfig& config,
                                                         std::string_view)
 {
@@ -59,13 +49,12 @@ std::unique_ptr<AbstractStagingTexture> NullGfx::CreateStagingTexture(StagingTex
   return std::make_unique<NullStagingTexture>(type, config);
 }
 
-std::unique_ptr<AbstractFramebuffer>
-NullGfx::CreateFramebuffer(AbstractTexture* color_attachment, AbstractTexture* depth_attachment,
-                           std::vector<AbstractTexture*> additional_color_attachments)
+std::unique_ptr<AbstractFramebuffer> NullGfx::CreateFramebuffer(AbstractTexture* color,
+                                                                AbstractTexture* depth,
+                                                                std::vector<AbstractTexture*> extra)
 {
-  return NullFramebuffer::Create(static_cast<NullTexture*>(color_attachment),
-                                 static_cast<NullTexture*>(depth_attachment),
-                                 std::move(additional_color_attachments));
+  return NullFramebuffer::Create(static_cast<NullTexture*>(color), static_cast<NullTexture*>(depth),
+                                 std::move(extra));
 }
 
 std::unique_ptr<AbstractShader> NullGfx::CreateShaderFromSource(ShaderStage stage, std::string_view,
@@ -91,6 +80,17 @@ std::unique_ptr<AbstractPipeline> NullGfx::CreatePipeline(const AbstractPipeline
                                                           const void*, size_t)
 {
   return std::make_unique<PlaceholderPipeline>();
+}
+
+// No window: nothing is ever presented.
+bool NullGfx::IsHeadless() const
+{
+  return true;
+}
+
+bool NullGfx::SupportsUtilityDrawing() const
+{
+  return false;
 }
 
 void NullEFBInterface::ReinterpretPixelData(EFBReinterpretType)

@@ -16,10 +16,11 @@ void CopyRegion(const T* const source, const MathUtil::Rectangle<int>& srcrect, 
                 const int src_height, T* destination, const MathUtil::Rectangle<int>& dstrect,
                 const int dst_width, const int dst_height)
 {
-  ASSERT(srcrect.top >= 0 && srcrect.bottom <= src_height);
-  ASSERT(srcrect.left >= 0 && srcrect.right <= src_width);
-  ASSERT(dstrect.top >= 0 && dstrect.bottom <= dst_height);
-  ASSERT(dstrect.left >= 0 && dstrect.right <= dst_width);
+  // Both rectangles must lie inside their images.
+  ASSERT(0 <= srcrect.left && srcrect.right <= src_width);
+  ASSERT(0 <= srcrect.top && srcrect.bottom <= src_height);
+  ASSERT(0 <= dstrect.left && dstrect.right <= dst_width);
+  ASSERT(0 <= dstrect.top && dstrect.bottom <= dst_height);
 
   const int out_w = dstrect.GetWidth();
   const int out_h = dstrect.GetHeight();
