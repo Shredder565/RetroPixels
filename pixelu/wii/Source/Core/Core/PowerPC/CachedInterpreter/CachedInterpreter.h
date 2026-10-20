@@ -1,9 +1,15 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// The cached interpreter: a "JIT" that translates each guest block into a list of calls to the
+// interpreter's instruction handlers (see CachedInterpreterEmitter.h for the record format), plus
+// bookkeeping records for timing, exceptions, breakpoints and idle loops. This saves decoding
+// every instruction again each time it runs, and keeps the interpreter's exact semantics.
 
 #pragma once
 
 #include <cstddef>
+#include <iosfwd>
+#include <vector>
 
 #include "Common/CommonTypes.h"
 #include "Common/RangeSizeSet.h"
@@ -48,6 +54,7 @@ public:
   void EraseSingleBlock(const JitBlock& block) override;
   std::vector<MemoryStats> GetMemoryStats() const override;
 
+  // Prints the records of a block, one per line. Returns how many records were printed.
   static std::size_t Disassemble(const JitBlock& block, std::ostream& stream);
 
   std::size_t DisassembleNearCode(const JitBlock& block, std::ostream& stream) const override;
@@ -58,20 +65,7 @@ public:
   const CommonAsmRoutinesBase* GetAsmRoutines() override { return nullptr; }
 
 private:
-  void ExecuteOneBlock();
-
-  bool HandleFunctionHooking(u32 address);
-  void WriteEndBlock();
-
-  // Finds a free memory region and sets the code emitter to point at that region.
-  // Returns false if no free memory region can be found.
-  bool SetEmitterStateToFreeCodeRegion();
-
-  void FreeRanges();
-  void ResetFreeMemoryRanges();
-
-  void LogGeneratedCode() const;
-
+  // Operand structs for the record kinds. Each is padded to a multiple of the pointer size.
   struct StartProfiledBlockOperands;
   template <bool profiled>
   struct EndBlockOperands;
@@ -82,34 +76,65 @@ private:
   struct CheckHaltOperands;
   struct CheckIdleOperands;
 
+  // ---- record callbacks. Each kind has an execution overload and a printing overload.
   static s32 StartProfiledBlock(PowerPC::PowerPCState& ppc_state,
                                 const StartProfiledBlockOperands& operands);
   static s32 StartProfiledBlock(std::ostream& stream, const StartProfiledBlockOperands& operands);
+
+  // Leaves the block: commits npc, charges the cycles and updates the performance monitor.
   template <bool profiled>
   static s32 EndBlock(PowerPC::PowerPCState& ppc_state, const EndBlockOperands<profiled>& operands);
   template <bool profiled>
   static s32 EndBlock(std::ostream& stream, const EndBlockOperands<profiled>& operands);
+
+  // Runs one interpreter handler. write_pc is set for instructions that may end the block (they
+  // read pc/npc themselves).
   template <bool write_pc>
   static s32 Interpret(PowerPC::PowerPCState& ppc_state, const InterpretOperands& operands);
   template <bool write_pc>
   static s32 Interpret(std::ostream& stream, const InterpretOperands& operands);
+
+  // Like Interpret, then leaves the block if the handler raised a DSI or program exception.
   template <bool write_pc>
   static s32 InterpretAndCheckExceptions(PowerPC::PowerPCState& ppc_state,
                                          const InterpretAndCheckExceptionsOperands& operands);
   template <bool write_pc>
   static s32 InterpretAndCheckExceptions(std::ostream& stream,
                                          const InterpretAndCheckExceptionsOperands& operands);
+
   static s32 HLEFunction(PowerPC::PowerPCState& ppc_state, const HLEFunctionOperands& operands);
   static s32 HLEFunction(std::ostream& stream, const HLEFunctionOperands& operands);
+
+  // Sets npc for a block that was cut short (too long, or ended at an untranslatable address).
   static s32 WriteBrokenBlockNPC(PowerPC::PowerPCState& ppc_state,
                                  const WriteBrokenBlockNPCOperands& operands);
   static s32 WriteBrokenBlockNPC(std::ostream& stream, const WriteBrokenBlockNPCOperands& operands);
+
+  // Raises FPU-unavailable before the block's first FP instruction if MSR[FP] is clear.
   static s32 CheckFPU(PowerPC::PowerPCState& ppc_state, const CheckHaltOperands& operands);
   static s32 CheckFPU(std::ostream& stream, const CheckHaltOperands& operands);
+
   static s32 CheckBreakpoint(PowerPC::PowerPCState& ppc_state, const CheckHaltOperands& operands);
   static s32 CheckBreakpoint(std::ostream& stream, const CheckHaltOperands& operands);
+
+  // After an idle-loop branch back to the block start: lets the timing system skip ahead.
   static s32 CheckIdle(PowerPC::PowerPCState& ppc_state, const CheckIdleOperands& operands);
   static s32 CheckIdle(std::ostream& stream, const CheckIdleOperands& operands);
+
+  // ---- code generation helpers
+  void ExecuteOneBlock();
+  bool HandleFunctionHooking(u32 address);
+  void WriteEndBlock();
+  void WriteInstruction(const PPCAnalyst::CodeOp& op, Interpreter& interpreter,
+                        PowerPC::PowerPCManager& power_pc);
+
+  // Points the emitter at the largest free range. Returns false if no space is left.
+  bool SetEmitterStateToFreeCodeRegion();
+  // Makes the ranges of blocks destroyed since the last code generation free for reuse.
+  void FreeRanges();
+  void ResetFreeMemoryRanges();
+
+  void LogGeneratedCode() const;
 
   Common::RangeSizeSet<u8*> m_free_ranges;
   CachedInterpreterBlockCache m_block_cache;
@@ -138,7 +163,7 @@ struct CachedInterpreter::EndBlockOperands<true> : CachedInterpreter::EndBlockOp
 struct CachedInterpreter::InterpretOperands
 {
   Interpreter& interpreter;
-  void (*func)(Interpreter&, UGeckoInstruction);  // Interpreter::Instruction
+  void (*func)(Interpreter&, UGeckoInstruction);  // an Interpreter::Instruction
   u32 current_pc;
   UGeckoInstruction inst;
 };
@@ -146,7 +171,7 @@ struct CachedInterpreter::InterpretOperands
 struct CachedInterpreter::InterpretAndCheckExceptionsOperands : InterpretOperands
 {
   PowerPC::PowerPCManager& power_pc;
-  u32 downcount;
+  u32 downcount;  // cycles up to and including this instruction
 };
 
 struct CachedInterpreter::HLEFunctionOperands
@@ -166,7 +191,7 @@ struct CachedInterpreter::CheckHaltOperands
 {
   PowerPC::PowerPCManager& power_pc;
   u32 current_pc;
-  u32 downcount;
+  u32 downcount;  // cycles up to and including this instruction
 };
 
 struct CachedInterpreter::CheckIdleOperands

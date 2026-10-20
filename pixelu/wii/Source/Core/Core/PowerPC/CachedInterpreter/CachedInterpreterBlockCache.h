@@ -1,5 +1,4 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,6 +10,10 @@
 
 class JitBase;
 
+// Block cache for the cached interpreter. Blocks are never linked to each other. When a block is
+// destroyed, its code range is remembered so the interpreter can reuse it the next time it
+// generates code. It cannot be reused right away, because the destroyed block may still be
+// running.
 class CachedInterpreterBlockCache final : public JitBaseBlockCache
 {
 public:
@@ -20,16 +23,13 @@ public:
 
   void DestroyBlock(JitBlock& block) override;
 
+  // Code ranges of destroyed blocks, as [begin, end) pairs, not yet handed back for reuse.
+  const std::vector<std::pair<u8*, u8*>>& GetRangesToFree() const { return m_pending_free; }
   void ClearRangesToFree();
-
-  const std::vector<std::pair<u8*, u8*>>& GetRangesToFree() const
-  {
-    return m_ranges_to_free_on_next_codegen;
-  }
 
 private:
   void WriteLinkBlock(const JitBlock::LinkData& source, const JitBlock* dest) override;
   void WriteDestroyBlock(const JitBlock& block) override;
 
-  std::vector<std::pair<u8*, u8*>> m_ranges_to_free_on_next_codegen;
+  std::vector<std::pair<u8*, u8*>> m_pending_free;
 };

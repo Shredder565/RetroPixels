@@ -1,5 +1,4 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/PowerPC/CachedInterpreter/CachedInterpreterBlockCache.h"
 
@@ -13,29 +12,29 @@ CachedInterpreterBlockCache::CachedInterpreterBlockCache(JitBase& jit) : JitBase
 void CachedInterpreterBlockCache::Init()
 {
   JitBaseBlockCache::Init();
-  ClearRangesToFree();
+  m_pending_free.clear();
+}
+
+void CachedInterpreterBlockCache::ClearRangesToFree()
+{
+  m_pending_free.clear();
 }
 
 void CachedInterpreterBlockCache::DestroyBlock(JitBlock& block)
 {
   JitBaseBlockCache::DestroyBlock(block);
-
-  if (block.near_begin != block.near_end)
-    m_ranges_to_free_on_next_codegen.emplace_back(block.near_begin, block.near_end);
+  if (block.near_end != block.near_begin)
+    m_pending_free.emplace_back(block.near_begin, block.near_end);
 }
 
-void CachedInterpreterBlockCache::ClearRangesToFree()
+void CachedInterpreterBlockCache::WriteLinkBlock(const JitBlock::LinkData&, const JitBlock*)
 {
-  m_ranges_to_free_on_next_codegen.clear();
-}
-
-void CachedInterpreterBlockCache::WriteLinkBlock(const JitBlock::LinkData& source,
-                                                 const JitBlock* dest)
-{
+  // Blocks always return to the dispatcher, so there is nothing to patch.
 }
 
 void CachedInterpreterBlockCache::WriteDestroyBlock(const JitBlock& block)
 {
+  // Overwrite the entry so a stale pointer to the block traps instead of running old code.
   CachedInterpreterEmitter emitter(block.normalEntry, block.near_end);
   emitter.Write(CachedInterpreterEmitter::PoisonCallback);
 }
