@@ -280,6 +280,12 @@ and the CMake glue in `Externals/`. Those need their own steps (an original
 top-level build in `pixelu/wii`, original or dropped data files, fetching
 the third-party Externals directly) before the submodule can go.
 
+Next, once both engines and the app are 100% original: a Linux version of
+RetroPixels (asked for by the project owner on 2026-10-20). That needs
+Linux back ends for the Go app's window, sound, controllers and menus, and
+for PixelU and PixelU-Wii, whose non-Windows code was pruned for the rewrite
+(display via OpenGL/Vulkan, audio, input).
+
 ## Log
 
 - W0: Dolphin 2609a's `Source/` (with the old Source patches) vendored into
