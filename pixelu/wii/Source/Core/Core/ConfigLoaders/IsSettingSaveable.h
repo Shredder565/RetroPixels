@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,8 +9,7 @@ struct Location;
 
 namespace ConfigLoaders
 {
-// This is a temporary function that allows for both the new and old configuration
-// systems to co-exist without trampling on each other while saving.
-// This function shall be removed when the old configuration system retires.
+// Whether the config system may write a setting to its INI file. Controller settings are
+// written by the input configuration code instead, so the two don't overwrite each other.
 bool IsSettingSaveable(const Config::Location& config_location);
 }  // namespace ConfigLoaders

@@ -1,34 +1,29 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/ConfigLoaders/IsSettingSaveable.h"
 
-#include <algorithm>
-#include <array>
-
-#include "Common/Contains.h"
 #include "Core/Config/WiimoteSettings.h"
 
 namespace ConfigLoaders
 {
 bool IsSettingSaveable(const Config::Location& config_location)
 {
-  static constexpr std::array systems_not_saveable = {Config::System::GCPad, Config::System::WiiPad,
-                                                      Config::System::GCKeyboard};
-
-  if (!Common::Contains(systems_not_saveable, config_location.system))
+  // Controller systems are saved by the input code itself. The only exception are the Wii Remote
+  // sources, which live in the WiiPad file but are owned by the config system.
+  switch (config_location.system)
   {
+  case Config::System::GCPad:
+  case Config::System::GCKeyboard:
+    return false;
+  case Config::System::WiiPad:
+    for (int index = 0; index < 5; ++index)
+    {
+      if (Config::GetInfoForWiimoteSource(index).GetLocation() == config_location)
+        return true;
+    }
+    return false;
+  default:
     return true;
   }
-
-  static const auto s_setting_saveable = {
-      &Config::WIIMOTE_1_SOURCE.GetLocation(),  &Config::WIIMOTE_2_SOURCE.GetLocation(),
-      &Config::WIIMOTE_3_SOURCE.GetLocation(),  &Config::WIIMOTE_4_SOURCE.GetLocation(),
-      &Config::WIIMOTE_BB_SOURCE.GetLocation(),
-  };
-
-  return std::ranges::any_of(s_setting_saveable, [&config_location](const auto* location) {
-    return *location == config_location;
-  });
 }
 }  // namespace ConfigLoaders
