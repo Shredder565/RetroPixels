@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,12 +9,15 @@
 
 namespace DiscIO
 {
+// The banner.bin of a title's save data on the NAND: a "WIBN" header with the save's name and
+// description, a 192x64 banner image and one or more 48x48 icons (all RGB5A3).
 class WiiSaveBanner
 {
 public:
   static constexpr u32 BANNER_WIDTH = 192;
   static constexpr u32 BANNER_HEIGHT = 64;
 
+  // Looks in the configured NAND first, then in the banner cache.
   explicit WiiSaveBanner(u64 title_id);
 
   bool IsValid() const { return m_valid; }
@@ -26,9 +28,10 @@ public:
   std::vector<u32> GetBanner(u32* width, u32* height) const;
 
 private:
+  // Stored big-endian; only the UTF-16 strings are used.
   struct Header
   {
-    char magic[4];  // "WIBN"
+    char magic[4];
     u32 flags;
     u16 animation_speed;
     u8 unused[22];

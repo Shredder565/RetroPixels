@@ -1,5 +1,4 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DiscIO/WiiSaveBanner.h"
 
@@ -15,34 +14,34 @@
 
 namespace DiscIO
 {
-constexpr u32 ICON_WIDTH = 48;
-constexpr u32 ICON_HEIGHT = 48;
-constexpr u32 ICON_SIZE = ICON_WIDTH * ICON_HEIGHT * 2;
+namespace
+{
+constexpr u32 ICON_SIZE_BYTES = 48 * 48 * 2;
+constexpr u32 BANNER_SIZE_BYTES = WiiSaveBanner::BANNER_WIDTH * WiiSaveBanner::BANNER_HEIGHT * 2;
+}  // namespace
 
 WiiSaveBanner::WiiSaveBanner(u64 title_id)
 {
-  constexpr u32 BANNER_SIZE = BANNER_WIDTH * BANNER_HEIGHT * 2;
+  // A usable file has the header, the banner and at least one icon.
+  constexpr u64 minimum_size = sizeof(Header) + BANNER_SIZE_BYTES + ICON_SIZE_BYTES;
 
-  constexpr size_t MINIMUM_SIZE = sizeof(Header) + BANNER_SIZE + ICON_SIZE;
-
-  m_path = Common::GetTitleDataPath(title_id, Common::FromWhichRoot::Configured) + "/banner.bin";
-  File::IOFile file(m_path, "rb");
-
-  if (!file)
+  File::IOFile file;
+  for (const Common::FromWhichRoot root :
+       {Common::FromWhichRoot::Configured, Common::FromWhichRoot::Banners})
   {
-    m_path = Common::GetTitleDataPath(title_id, Common::FromWhichRoot::Banners) + "/banner.bin";
+    m_path = Common::GetTitleDataPath(title_id, root) + "/banner.bin";
     file = File::IOFile(m_path, "rb");
+    if (file)
+      break;
   }
 
   if (!file.ReadArray(&m_header, 1))
   {
     m_header = {};
     m_valid = false;
+    return;
   }
-  else if (file.GetSize() < MINIMUM_SIZE)
-  {
-    m_valid = false;
-  }
+  m_valid = file.GetSize() >= minimum_size;
 }
 
 std::string WiiSaveBanner::GetName() const
@@ -61,19 +60,18 @@ std::vector<u32> WiiSaveBanner::GetBanner(u32* width, u32* height) const
   *height = 0;
 
   File::IOFile file(m_path, "rb");
-  if (!file.Seek(sizeof(Header), File::SeekOrigin::Begin))
-    return std::vector<u32>();
+  std::vector<u16> pixels(BANNER_WIDTH * BANNER_HEIGHT);
+  if (!file.Seek(sizeof(Header), File::SeekOrigin::Begin) ||
+      !file.ReadArray(pixels.data(), pixels.size()))
+  {
+    return {};
+  }
 
-  std::vector<u16> banner_data(BANNER_WIDTH * BANNER_HEIGHT);
-  if (!file.ReadArray(banner_data.data(), banner_data.size()))
-    return std::vector<u32>();
-
-  std::vector<u32> image_buffer(BANNER_WIDTH * BANNER_HEIGHT);
-  Common::Decode5A3Image(image_buffer.data(), banner_data.data(), BANNER_WIDTH, BANNER_HEIGHT);
-
+  std::vector<u32> image(BANNER_WIDTH * BANNER_HEIGHT);
+  Common::Decode5A3Image(image.data(), pixels.data(), BANNER_WIDTH, BANNER_HEIGHT);
   *width = BANNER_WIDTH;
   *height = BANNER_HEIGHT;
-  return image_buffer;
+  return image;
 }
 
 }  // namespace DiscIO

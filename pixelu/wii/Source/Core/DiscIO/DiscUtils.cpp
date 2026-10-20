@@ -1,5 +1,4 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DiscIO/DiscUtils.h"
 
@@ -11,6 +10,7 @@
 
 #include <fmt/format.h>
 
+#include "Common/Assert.h"
 #include "Common/CommonTypes.h"
 #include "Common/MathUtil.h"
 #include "Common/StringUtil.h"
@@ -20,6 +20,46 @@
 
 namespace DiscIO
 {
+namespace
+{
+// Disc header fields (offsets are stored shifted on Wii).
+constexpr u64 DOL_OFFSET_FIELD = 0x420;
+constexpr u64 FST_OFFSET_FIELD = 0x424;
+constexpr u64 FST_SIZE_FIELD = 0x428;
+
+// The apploader header: date (0x10), entry point, then the sizes of the code and the trailer.
+constexpr u64 APPLOADER_HEADER_SIZE = 0x20;
+constexpr u64 APPLOADER_CODE_SIZE_FIELD = APPLOADER_ADDRESS + 0x14;
+constexpr u64 APPLOADER_TRAILER_SIZE_FIELD = APPLOADER_ADDRESS + 0x18;
+
+// A DOL header holds 7 text and 11 data sections: file offsets first, then load addresses, then
+// sizes.
+constexpr u32 DOL_TEXT_SECTIONS = 7;
+constexpr u32 DOL_DATA_SECTIONS = 11;
+constexpr u64 DOL_TEXT_OFFSETS = 0x00;
+constexpr u64 DOL_DATA_OFFSETS = 0x1c;
+constexpr u64 DOL_TEXT_SIZES = 0x90;
+constexpr u64 DOL_DATA_SIZES = 0xac;
+
+std::optional<u64> ReadHeaderOffset(const Volume& volume, const Partition& partition, u64 field)
+{
+  if (!IsDisc(volume.GetVolumeType()))
+    return std::nullopt;
+  return volume.ReadSwappedAndShifted(field, partition);
+}
+
+u64 BiggestOffsetInDirectory(const FileInfo& entry)
+{
+  if (!entry.IsDirectory())
+    return entry.GetOffset() + entry.GetSize();
+
+  u64 biggest = 0;
+  for (const FileInfo& child : entry)
+    biggest = std::max(biggest, BiggestOffsetInDirectory(child));
+  return biggest;
+}
+}  // namespace
+
 std::string NameForPartitionType(u32 partition_type, bool include_prefix)
 {
   switch (partition_type)
@@ -31,48 +71,40 @@ std::string NameForPartitionType(u32 partition_type, bool include_prefix)
   case PARTITION_CHANNEL:
     return "CHANNEL";
   case PARTITION_INSTALL:
-    // wit doesn't recognize the name "INSTALL", so we can't use it when naming partition folders
+    // With the prefix the name is used for folder names, and wit does not know "INSTALL" there.
     if (!include_prefix)
       return "INSTALL";
-    [[fallthrough]];
+    break;
   default:
-    const std::string type_as_game_id{static_cast<char>((partition_type >> 24) & 0xFF),
-                                      static_cast<char>((partition_type >> 16) & 0xFF),
-                                      static_cast<char>((partition_type >> 8) & 0xFF),
-                                      static_cast<char>(partition_type & 0xFF)};
-    if (std::ranges::all_of(type_as_game_id, Common::IsAlnum))
-    {
-      return include_prefix ? "P-" + type_as_game_id : type_as_game_id;
-    }
-
-    return fmt::format("{}{}", include_prefix ? "P" : "", partition_type);
+    break;
   }
+
+  // Other types are often four ASCII characters (like a game ID); otherwise use the number.
+  std::string as_text(4, '\0');
+  for (int i = 0; i < 4; ++i)
+    as_text[i] = static_cast<char>(partition_type >> (24 - 8 * i));
+  if (std::ranges::all_of(as_text, Common::IsAlnum))
+    return include_prefix ? "P-" + as_text : as_text;
+  return include_prefix ? fmt::format("P{}", partition_type) : fmt::format("{}", partition_type);
 }
 
 std::optional<u64> GetApploaderSize(const Volume& volume, const Partition& partition)
 {
-  constexpr u64 header_size = 0x20;
-  const std::optional<u32> apploader_size = volume.ReadSwapped<u32>(0x2440 + 0x14, partition);
-  const std::optional<u32> trailer_size = volume.ReadSwapped<u32>(0x2440 + 0x18, partition);
-  if (!apploader_size || !trailer_size)
+  const std::optional<u32> code_size = volume.ReadSwapped<u32>(APPLOADER_CODE_SIZE_FIELD, partition);
+  const std::optional<u32> trailer_size =
+      volume.ReadSwapped<u32>(APPLOADER_TRAILER_SIZE_FIELD, partition);
+  if (!code_size || !trailer_size)
     return std::nullopt;
-
-  return header_size + *apploader_size + *trailer_size;
+  return APPLOADER_HEADER_SIZE + *code_size + *trailer_size;
 }
 
 std::optional<u64> GetBootDOLOffset(const Volume& volume, const Partition& partition)
 {
-  const Platform volume_type = volume.GetVolumeType();
-  if (!IsDisc(volume_type))
+  // Datel discs have 0 here (their apploader does not use the field), which is never valid.
+  const std::optional<u64> offset = ReadHeaderOffset(volume, partition, DOL_OFFSET_FIELD);
+  if (offset == u64{0})
     return std::nullopt;
-
-  std::optional<u64> dol_offset = volume.ReadSwappedAndShifted(0x420, partition);
-
-  // Datel AR disc has 0x00000000 as the offset (invalid) and doesn't use it in the AppLoader.
-  if (dol_offset && *dol_offset == 0)
-    dol_offset.reset();
-
-  return dol_offset;
+  return offset;
 }
 
 std::optional<u32> GetBootDOLSize(const Volume& volume, const Partition& partition, u64 dol_offset)
@@ -80,131 +112,91 @@ std::optional<u32> GetBootDOLSize(const Volume& volume, const Partition& partiti
   if (!IsDisc(volume.GetVolumeType()))
     return std::nullopt;
 
-  u32 dol_size = 0;
-
-  // Iterate through the 7 code segments
-  for (size_t i = 0; i < 7; i++)
+  // The DOL ends where its furthest section ends (computed in u32, like the header fields).
+  u32 end = 0;
+  const auto scan = [&](u64 offsets, u64 sizes, u32 count) {
+    for (u32 i = 0; i < count; ++i)
+    {
+      const std::optional<u32> offset = volume.ReadSwapped<u32>(dol_offset + offsets + i * 4, partition);
+      const std::optional<u32> size = volume.ReadSwapped<u32>(dol_offset + sizes + i * 4, partition);
+      if (!offset || !size)
+        return false;
+      end = std::max<u32>(end, *offset + *size);
+    }
+    return true;
+  };
+  if (!scan(DOL_TEXT_OFFSETS, DOL_TEXT_SIZES, DOL_TEXT_SECTIONS) ||
+      !scan(DOL_DATA_OFFSETS, DOL_DATA_SIZES, DOL_DATA_SECTIONS))
   {
-    const std::optional<u32> offset = volume.ReadSwapped<u32>(dol_offset + 0x00 + i * 4, partition);
-    const std::optional<u32> size = volume.ReadSwapped<u32>(dol_offset + 0x90 + i * 4, partition);
-    if (!offset || !size)
-      return {};
-    dol_size = std::max(*offset + *size, dol_size);
+    return std::nullopt;
   }
-
-  // Iterate through the 11 data segments
-  for (size_t i = 0; i < 11; i++)
-  {
-    const std::optional<u32> offset = volume.ReadSwapped<u32>(dol_offset + 0x1c + i * 4, partition);
-    const std::optional<u32> size = volume.ReadSwapped<u32>(dol_offset + 0xac + i * 4, partition);
-    if (!offset || !size)
-      return {};
-    dol_size = std::max(*offset + *size, dol_size);
-  }
-
-  return dol_size;
+  return end;
 }
 
 std::optional<u64> GetFSTOffset(const Volume& volume, const Partition& partition)
 {
-  const Platform volume_type = volume.GetVolumeType();
-  if (!IsDisc(volume_type))
-    return std::nullopt;
-
-  return volume.ReadSwappedAndShifted(0x424, partition);
+  return ReadHeaderOffset(volume, partition, FST_OFFSET_FIELD);
 }
 
 std::optional<u64> GetFSTSize(const Volume& volume, const Partition& partition)
 {
-  const Platform volume_type = volume.GetVolumeType();
-  if (!IsDisc(volume_type))
-    return std::nullopt;
-
-  return volume.ReadSwappedAndShifted(0x428, partition);
+  return ReadHeaderOffset(volume, partition, FST_SIZE_FIELD);
 }
 
 u64 GetBiggestReferencedOffset(const Volume& volume)
 {
-  std::vector<Partition> partitions = volume.GetPartitions();
-
-  // If a partition doesn't seem to contain any valid data, skip it.
-  // This can happen when certain programs that create WBFS files scrub the entirety of
-  // the Masterpiece partitions in Super Smash Bros. Brawl without removing them from
-  // the partition table. https://bugs.dolphin-emu.org/issues/8733
-  std::erase_if(partitions, [&](const Partition& partition) {
-    return volume.ReadSwapped<u32>(0x18, partition) != WII_DISC_MAGIC;
-  });
-
+  // Partitions without a disc header are skipped. Some WBFS tools blank out Super Smash Bros.
+  // Brawl's Masterpiece partitions completely but leave them in the partition table.
+  std::vector<Partition> partitions;
+  for (const Partition& partition : volume.GetPartitions())
+  {
+    if (volume.ReadSwapped<u32>(0x18, partition) == WII_DISC_MAGIC)
+      partitions.push_back(partition);
+  }
   if (partitions.empty())
     partitions.push_back(PARTITION_NONE);
 
   return GetBiggestReferencedOffset(volume, partitions);
 }
 
-static u64 GetBiggestReferencedOffset(const Volume& volume, const FileInfo& file_info)
-{
-  if (file_info.IsDirectory())
-  {
-    u64 biggest_offset = 0;
-    for (const FileInfo& f : file_info)
-      biggest_offset = std::max(biggest_offset, GetBiggestReferencedOffset(volume, f));
-    return biggest_offset;
-  }
-  else
-  {
-    return file_info.GetOffset() + file_info.GetSize();
-  }
-}
-
 u64 GetBiggestReferencedOffset(const Volume& volume, std::span<const Partition> partitions)
 {
-  const u64 disc_header_size = volume.GetVolumeType() == Platform::GameCubeDisc ? 0x460 : 0x50000;
-  u64 biggest_offset = disc_header_size;
+  // A GameCube disc header with bi2.bin ends at 0x460; on Wii discs, the area up to the first
+  // partition (0x50000) is always used.
+  u64 biggest = volume.GetVolumeType() == Platform::GameCubeDisc ? 0x460 : 0x50000;
+  const auto take = [&](u64 offset_in_partition, const Partition& partition) {
+    biggest = std::max(biggest, volume.PartitionOffsetToRawOffset(offset_in_partition, partition));
+  };
+
   for (const Partition& partition : partitions)
   {
     if (partition != PARTITION_NONE)
-    {
-      const u64 offset = volume.PartitionOffsetToRawOffset(0x440, partition);
-      biggest_offset = std::max(biggest_offset, offset);
-    }
+      take(BI2_ADDRESS, partition);
 
-    const std::optional<u64> dol_offset = GetBootDOLOffset(volume, partition);
-    if (dol_offset)
+    if (const std::optional<u64> dol_offset = GetBootDOLOffset(volume, partition))
     {
-      const std::optional<u64> dol_size = GetBootDOLSize(volume, partition, *dol_offset);
-      if (dol_size)
-      {
-        const u64 offset = volume.PartitionOffsetToRawOffset(*dol_offset + *dol_size, partition);
-        biggest_offset = std::max(biggest_offset, offset);
-      }
+      if (const std::optional<u64> dol_size = GetBootDOLSize(volume, partition, *dol_offset))
+        take(*dol_offset + *dol_size, partition);
     }
 
     const std::optional<u64> fst_offset = GetFSTOffset(volume, partition);
     const std::optional<u64> fst_size = GetFSTSize(volume, partition);
     if (fst_offset && fst_size)
-    {
-      const u64 offset = volume.PartitionOffsetToRawOffset(*fst_offset + *fst_size, partition);
-      biggest_offset = std::max(biggest_offset, offset);
-    }
+      take(*fst_offset + *fst_size, partition);
 
-    const FileSystem* fs = volume.GetFileSystem(partition);
-    if (fs)
-    {
-      const u64 offset_in_partition = GetBiggestReferencedOffset(volume, fs->GetRoot());
-      const u64 offset = volume.PartitionOffsetToRawOffset(offset_in_partition, partition);
-      biggest_offset = std::max(biggest_offset, offset);
-    }
+    if (const FileSystem* file_system = volume.GetFileSystem(partition))
+      take(BiggestOffsetInDirectory(file_system->GetRoot()), partition);
   }
-  return biggest_offset;
+  return biggest;
 }
 
 bool IsGCZBlockSizeLegacyCompatible(int block_size, u64 file_size)
 {
-  // In order for versions of Dolphin prior to 5.0-11893 to be able to convert a GCZ file
-  // to ISO without messing up the final part of the file in some way, the file size
-  // must be an integer multiple of the block size (fixed in 3aa463c) and must not be
-  // an integer multiple of the block size multiplied by 32 (fixed in 26b21e3).
-  return file_size % block_size == 0 && file_size % (block_size * 32) != 0;
+  // Versions older than 5.0-11893 can only convert a GCZ back to ISO correctly when the file size
+  // is a multiple of the block size but not of 32 times the block size.
+  const bool whole_blocks = file_size % block_size == 0;
+  const bool multiple_of_32_blocks = file_size % (block_size * 32) == 0;
+  return whole_blocks && !multiple_of_32_blocks;
 }
 
 bool IsDiscImageBlockSizeValid(int block_size, BlobType format)
@@ -212,35 +204,19 @@ bool IsDiscImageBlockSizeValid(int block_size, BlobType format)
   switch (format)
   {
   case BlobType::GCZ:
-    // Block size "must" be a power of 2
-    if (!MathUtil::IsPow2(block_size))
-      return false;
-
-    break;
+    return MathUtil::IsPow2(block_size);
   case BlobType::WIA:
-    // Block size must not be less than the minimum, and must be a multiple of it
-    if (block_size < WIA_MIN_BLOCK_SIZE || block_size % WIA_MIN_BLOCK_SIZE != 0)
-      return false;
-
-    break;
+    return block_size >= WIA_MIN_BLOCK_SIZE && block_size % WIA_MIN_BLOCK_SIZE == 0;
   case BlobType::RVZ:
-    // Block size must not be smaller than the minimum
-    // Block sizes smaller than the large block size threshold must be a power of 2
-    // Block sizes larger than that threshold must be a multiple of the threshold
-    if (block_size < RVZ_MIN_BLOCK_SIZE ||
-        (block_size < RVZ_BIG_BLOCK_SIZE_LCM && !MathUtil::IsPow2(block_size)) ||
-        (block_size > RVZ_BIG_BLOCK_SIZE_LCM && block_size % RVZ_BIG_BLOCK_SIZE_LCM != 0))
-    {
+    if (block_size < RVZ_MIN_BLOCK_SIZE)
       return false;
-    }
-
-    break;
+    if (block_size < RVZ_BIG_BLOCK_SIZE_LCM)
+      return MathUtil::IsPow2(block_size);
+    return block_size % RVZ_BIG_BLOCK_SIZE_LCM == 0;
   default:
     ASSERT(false);
-    break;
+    return true;
   }
-
-  return true;
 }
 
 }  // namespace DiscIO

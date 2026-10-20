@@ -1,8 +1,8 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <array>
 #include <map>
 #include <memory>
 #include <optional>
@@ -24,6 +24,8 @@ enum class Language;
 enum class Region;
 enum class Platform;
 
+// A WAD file (an installable Wii title): a header followed by the certificate chain, ticket,
+// TMD, the encrypted contents and an optional banner, each aligned to 0x40 bytes.
 class VolumeWAD final : public Volume
 {
 public:
@@ -48,13 +50,13 @@ public:
   std::optional<u16> GetRevision(const Partition& partition = PARTITION_NONE) const override;
   std::string GetInternalName(const Partition& partition = PARTITION_NONE) const override
   {
-    return "";
+    return {};
   }
   std::map<Language, std::string> GetLongNames() const override;
   std::vector<u32> GetBanner(u32* width, u32* height) const override;
   std::string GetApploaderDate(const Partition& partition = PARTITION_NONE) const override
   {
-    return "";
+    return {};
   }
   Platform GetVolumeType() const override;
   bool IsDatelDisc() const override;
@@ -72,10 +74,16 @@ public:
   std::array<u8, 20> GetSyncHash() const override;
 
 private:
+  // Calls `visit(content, offset)` for each content in TMD order, with its offset in the file.
+  template <typename Visit>
+  void ForEachContent(const std::vector<IOS::ES::Content>& contents, Visit visit) const;
+
   std::unique_ptr<BlobReader> m_reader;
   IOS::ES::TicketReader m_ticket;
   IOS::ES::TMDReader m_tmd;
   std::vector<u8> m_cert_chain;
+
+  // Where each part starts in the file, and the sizes from the header.
   u32 m_cert_chain_offset = 0;
   u32 m_ticket_offset = 0;
   u32 m_tmd_offset = 0;

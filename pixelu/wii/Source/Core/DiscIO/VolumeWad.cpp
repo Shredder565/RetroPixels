@@ -1,9 +1,9 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DiscIO/VolumeWad.h"
 
 #include <algorithm>
+#include <array>
 #include <map>
 #include <memory>
 #include <optional>
@@ -27,61 +27,85 @@
 
 namespace DiscIO
 {
+namespace
+{
+// Everything in a WAD file starts on a 0x40-byte boundary.
+constexpr size_t WAD_ALIGNMENT = 0x40;
+
+// WAD header fields (big-endian u32 sizes).
+constexpr u64 HEADER_SIZE_FIELD = 0x00;
+constexpr u64 CERT_CHAIN_SIZE_FIELD = 0x08;
+constexpr u64 TICKET_SIZE_FIELD = 0x10;
+constexpr u64 TMD_SIZE_FIELD = 0x14;
+constexpr u64 DATA_SIZE_FIELD = 0x18;
+constexpr u64 OPENING_BNR_SIZE_FIELD = 0x1c;
+
+// Offsets inside the ticket, the TMD and the banner (IMET header). They are added to the u32
+// part offsets in u32 arithmetic, like the header fields themselves.
+constexpr u32 TICKET_TITLE_ID_OFFSET = 0x1dc;
+constexpr u32 TMD_GROUP_ID_OFFSET = 0x198;
+constexpr u32 OPENING_BNR_NAMES_OFFSET = 0x9c;
+
+u64 AlignedContentSize(const IOS::ES::Content& content)
+{
+  return Common::AlignUp(content.size, WAD_ALIGNMENT);
+}
+}  // namespace
+
 VolumeWAD::VolumeWAD(std::unique_ptr<BlobReader> reader) : m_reader(std::move(reader))
 {
   ASSERT(m_reader);
 
-  // Source: http://wiibrew.org/wiki/WAD_files
-  m_hdr_size = m_reader->ReadSwapped<u32>(0x00).value_or(0);
-  m_cert_chain_size = m_reader->ReadSwapped<u32>(0x08).value_or(0);
-  m_ticket_size = m_reader->ReadSwapped<u32>(0x10).value_or(0);
-  m_tmd_size = m_reader->ReadSwapped<u32>(0x14).value_or(0);
-  m_data_size = m_reader->ReadSwapped<u32>(0x18).value_or(0);
-  m_opening_bnr_size = m_reader->ReadSwapped<u32>(0x1C).value_or(0);
+  // The layout is described on WiiBrew ("WAD files").
+  const auto header_field = [this](u64 offset) {
+    return m_reader->ReadSwapped<u32>(offset).value_or(0);
+  };
+  m_hdr_size = header_field(HEADER_SIZE_FIELD);
+  m_cert_chain_size = header_field(CERT_CHAIN_SIZE_FIELD);
+  m_ticket_size = header_field(TICKET_SIZE_FIELD);
+  m_tmd_size = header_field(TMD_SIZE_FIELD);
+  m_data_size = header_field(DATA_SIZE_FIELD);
+  m_opening_bnr_size = header_field(OPENING_BNR_SIZE_FIELD);
 
-  m_cert_chain_offset = Common::AlignUp(m_hdr_size, 0x40);
-  m_ticket_offset = m_cert_chain_offset + Common::AlignUp(m_cert_chain_size, 0x40);
-  m_tmd_offset = m_ticket_offset + Common::AlignUp(m_ticket_size, 0x40);
-  m_data_offset = m_tmd_offset + Common::AlignUp(m_tmd_size, 0x40);
-  m_opening_bnr_offset = m_data_offset + Common::AlignUp(m_data_size, 0x40);
+  // Each part follows the previous one (all in u32, as in the header).
+  m_cert_chain_offset = Common::AlignUp(m_hdr_size, WAD_ALIGNMENT);
+  m_ticket_offset = m_cert_chain_offset + Common::AlignUp(m_cert_chain_size, WAD_ALIGNMENT);
+  m_tmd_offset = m_ticket_offset + Common::AlignUp(m_ticket_size, WAD_ALIGNMENT);
+  m_data_offset = m_tmd_offset + Common::AlignUp(m_tmd_size, WAD_ALIGNMENT);
+  m_opening_bnr_offset = m_data_offset + Common::AlignUp(m_data_size, WAD_ALIGNMENT);
 
-  std::vector<u8> ticket_buffer(m_ticket_size);
-  Read(m_ticket_offset, m_ticket_size, ticket_buffer.data());
-  m_ticket.SetBytes(std::move(ticket_buffer));
+  // A part that cannot be read in full is used as far as it was read.
+  const auto read_part = [this](u32 offset, u32 size) {
+    std::vector<u8> bytes(size);
+    Read(offset, size, bytes.data());
+    return bytes;
+  };
+
+  m_ticket.SetBytes(read_part(m_ticket_offset, m_ticket_size));
 
   if (!IOS::ES::IsValidTMDSize(m_tmd_size))
   {
     ERROR_LOG_FMT(DISCIO, "TMD has an invalid size: {} bytes", m_tmd_size);
     return;
   }
-
-  std::vector<u8> tmd_buffer(m_tmd_size);
-  Read(m_tmd_offset, m_tmd_size, tmd_buffer.data());
-  m_tmd.SetBytes(std::move(tmd_buffer));
-
-  m_cert_chain.resize(m_cert_chain_size);
-  Read(m_cert_chain_offset, m_cert_chain_size, m_cert_chain.data());
+  m_tmd.SetBytes(read_part(m_tmd_offset, m_tmd_size));
+  m_cert_chain = read_part(m_cert_chain_offset, m_cert_chain_size);
 }
 
 bool VolumeWAD::Read(u64 offset, u64 length, u8* buffer, const Partition& partition) const
 {
-  if (partition != PARTITION_NONE)
-    return false;
-
-  return m_reader->Read(offset, length, buffer);
+  return partition == PARTITION_NONE && m_reader->Read(offset, length, buffer);
 }
 
 const FileSystem* VolumeWAD::GetFileSystem(const Partition& partition) const
 {
-  // TODO: Implement this?
+  // The contents of a WAD are not exposed as a file system.
   return nullptr;
 }
 
 Region VolumeWAD::GetRegion() const
 {
-  if (!m_tmd.IsValid())
-    return Region::Unknown;
-  return m_tmd.GetRegion();
+  return m_tmd.IsValid() ? m_tmd.GetRegion() : Region::Unknown;
 }
 
 Country VolumeWAD::GetCountry(const Partition& partition) const
@@ -89,16 +113,16 @@ Country VolumeWAD::GetCountry(const Partition& partition) const
   if (!m_tmd.IsValid())
     return Country::Unknown;
 
-  const u8 country_byte = static_cast<u8>(m_tmd.GetTitleId() & 0xff);
-  if (country_byte == 2)  // SYSMENU
+  // The last byte of the title ID plays the role of a disc's country letter.
+  const u8 country_code = static_cast<u8>(m_tmd.GetTitleId() & 0xff);
+  if (country_code == 2)  // the Wii Menu, which is the same title in every region
     return TypicalCountryForRegion(GetSysMenuRegion(m_tmd.GetTitleVersion()));
 
   const Region region = GetRegion();
   const std::optional<u16> revision = GetRevision();
-  if (CountryCodeToRegion(country_byte, Platform::WiiWAD, region, revision) != region)
+  if (CountryCodeToRegion(country_code, Platform::WiiWAD, region, revision) != region)
     return TypicalCountryForRegion(region);
-
-  return CountryCodeToCountry(country_byte, Platform::WiiWAD, region, revision);
+  return CountryCodeToCountry(country_code, Platform::WiiWAD, region, revision);
 }
 
 const IOS::ES::TicketReader& VolumeWAD::GetTicket(const Partition& partition) const
@@ -116,56 +140,62 @@ const std::vector<u8>& VolumeWAD::GetCertificateChain(const Partition& partition
   return m_cert_chain;
 }
 
-std::vector<u8> VolumeWAD::GetContent(u16 index) const
+template <typename Visit>
+void VolumeWAD::ForEachContent(const std::vector<IOS::ES::Content>& contents, Visit visit) const
 {
   u64 offset = m_data_offset;
-  for (const IOS::ES::Content& content : m_tmd.GetContents())
+  for (const IOS::ES::Content& content : contents)
   {
-    const u64 aligned_size = Common::AlignUp(content.size, 0x40);
-    if (content.index == index)
-    {
-      std::vector<u8> data(aligned_size);
-      if (!m_reader->Read(offset, aligned_size, data.data()))
-        return {};
-      return data;
-    }
-    offset += aligned_size;
+    if (!visit(content, offset))
+      return;
+    offset += AlignedContentSize(content);
   }
-  return {};
+}
+
+std::vector<u8> VolumeWAD::GetContent(u16 index) const
+{
+  std::vector<u8> result;
+  ForEachContent(m_tmd.GetContents(), [&](const IOS::ES::Content& content, u64 offset) {
+    if (content.index != index)
+      return true;
+    std::vector<u8> data(AlignedContentSize(content));
+    if (m_reader->Read(offset, data.size(), data.data()))
+      result = std::move(data);
+    return false;
+  });
+  return result;
 }
 
 std::vector<u64> VolumeWAD::GetContentOffsets() const
 {
   const std::vector<IOS::ES::Content> contents = m_tmd.GetContents();
-  std::vector<u64> content_offsets;
-  content_offsets.reserve(contents.size());
-  u64 offset = m_data_offset;
-  for (const IOS::ES::Content& content : contents)
-  {
-    content_offsets.emplace_back(offset);
-    offset += Common::AlignUp(content.size, 0x40);
-  }
-
-  return content_offsets;
+  std::vector<u64> offsets;
+  offsets.reserve(contents.size());
+  ForEachContent(contents, [&](const IOS::ES::Content&, u64 offset) {
+    offsets.push_back(offset);
+    return true;
+  });
+  return offsets;
 }
 
 bool VolumeWAD::CheckContentIntegrity(const IOS::ES::Content& content,
                                       std::span<const u8> encrypted_data,
                                       const IOS::ES::TicketReader& ticket) const
 {
-  if (encrypted_data.size() != Common::AlignUp(content.size, 0x40))
+  if (encrypted_data.size() != AlignedContentSize(content))
     return false;
 
-  auto context = Common::AES::CreateContextDecrypt(ticket.GetTitleKey().data());
-
-  std::array<u8, 16> iv{};
+  // Contents are encrypted with the title key; the IV is the content index followed by zeros.
+  std::array<u8, Common::AES::Context::BLOCK_SIZE> iv{};
   iv[0] = static_cast<u8>(content.index >> 8);
-  iv[1] = static_cast<u8>(content.index & 0xFF);
+  iv[1] = static_cast<u8>(content.index);
 
-  std::vector<u8> decrypted_data(encrypted_data.size());
-  context->Crypt(iv.data(), encrypted_data.data(), decrypted_data.data(), decrypted_data.size());
+  const std::unique_ptr<Common::AES::Context> aes =
+      Common::AES::CreateContextDecrypt(ticket.GetTitleKey().data());
+  std::vector<u8> plain(encrypted_data.size());
+  aes->Crypt(iv.data(), encrypted_data.data(), plain.data(), plain.size());
 
-  return Common::SHA1::CalculateDigest(decrypted_data.data(), content.size) == content.sha1;
+  return Common::SHA1::CalculateDigest(plain.data(), content.size) == content.sha1;
 }
 
 IOS::ES::TicketReader VolumeWAD::GetTicketWithFixedCommonKey() const
@@ -173,100 +203,84 @@ IOS::ES::TicketReader VolumeWAD::GetTicketWithFixedCommonKey() const
   if (!m_ticket.IsValid() || !m_tmd.IsValid())
     return m_ticket;
 
-  const std::vector<u8> sig = m_ticket.GetSignatureData();
-  if (!std::ranges::all_of(sig, [](u8 a) { return a == 0; }))
-  {
-    // This does not look like a typical "invalid common key index" ticket, so let's assume
-    // the index is correct. This saves some time when reading properly signed titles.
+  // Fakesigned WADs (all-zero signature) often have a bogus common key index. A ticket with a
+  // real signature is assumed to be right, which also saves the decryption below.
+  const std::vector<u8> signature = m_ticket.GetSignatureData();
+  if (std::ranges::any_of(signature, [](u8 b) { return b != 0; }))
     return m_ticket;
-  }
 
   const std::vector<IOS::ES::Content> contents = m_tmd.GetContents();
   if (contents.empty())
     return m_ticket;
 
-  // Find the smallest content so that we spend as little time as possible in CheckContentIntegrity
-  IOS::ES::Content smallest_content = contents[0];
-  u64 offset_of_smallest_content = m_data_offset;
-
-  u64 offset = m_data_offset;
-  for (const IOS::ES::Content& content : contents)
-  {
-    if (content.size < smallest_content.size)
+  // Test the keys on the smallest content (the first one, if several are equally small).
+  const IOS::ES::Content* smallest = nullptr;
+  u64 smallest_offset = 0;
+  ForEachContent(contents, [&](const IOS::ES::Content& content, u64 offset) {
+    if (!smallest || content.size < smallest->size)
     {
-      smallest_content = content;
-      offset_of_smallest_content = offset;
+      smallest = &content;
+      smallest_offset = offset;
     }
-    offset += Common::AlignUp(content.size, 0x40);
-  }
+    return true;
+  });
 
-  std::vector<u8> content_data(Common::AlignUp(smallest_content.size, 0x40));
-  if (!m_reader->Read(offset_of_smallest_content, content_data.size(), content_data.data()))
+  std::vector<u8> encrypted(AlignedContentSize(*smallest));
+  if (!m_reader->Read(smallest_offset, encrypted.size(), encrypted.data()))
     return m_ticket;
 
-  const u8 specified_index = m_ticket.GetCommonKeyIndex();
-  if (specified_index < IOS::HLE::IOSC::COMMON_KEY_HANDLES.size() &&
-      CheckContentIntegrity(smallest_content, content_data, m_ticket))
+  constexpr size_t key_count = IOS::HLE::IOSC::COMMON_KEY_HANDLES.size();
+  const u8 specified = m_ticket.GetCommonKeyIndex();
+  if (specified < key_count && CheckContentIntegrity(*smallest, encrypted, m_ticket))
+    return m_ticket;
+
+  IOS::ES::TicketReader candidate = m_ticket;
+  for (size_t index = 0; index < key_count; ++index)
   {
-    return m_ticket;  // The common key index is already correct
+    if (index == specified)
+      continue;
+    candidate.OverwriteCommonKeyIndex(static_cast<u8>(index));
+    if (CheckContentIntegrity(*smallest, encrypted, candidate))
+      return candidate;
   }
 
-  // Try every common key index except the one we already tried
-  IOS::ES::TicketReader new_ticket = m_ticket;
-  for (u8 i = 0; i < IOS::HLE::IOSC::COMMON_KEY_HANDLES.size(); ++i)
-  {
-    if (i != specified_index)
-    {
-      new_ticket.OverwriteCommonKeyIndex(i);
-      if (CheckContentIntegrity(smallest_content, content_data, new_ticket))
-        return new_ticket;  // We've found the common key index that should be used
-    }
-  }
-
-  ERROR_LOG_FMT(DISCIO, "Couldn't find valid common key for WAD file ({} specified)",
-                specified_index);
+  ERROR_LOG_FMT(DISCIO, "Couldn't find valid common key for WAD file ({} specified)", specified);
   return m_ticket;
 }
 
 std::string VolumeWAD::GetGameID(const Partition& partition) const
 {
-  if (!m_tmd.IsValid())
-    return {};
-
-  return m_tmd.GetGameID();
+  return m_tmd.IsValid() ? m_tmd.GetGameID() : std::string{};
 }
 
 std::string VolumeWAD::GetGameTDBID(const Partition& partition) const
 {
-  if (!m_tmd.IsValid())
-    return {};
-
-  return m_tmd.GetGameTDBID();
+  return m_tmd.IsValid() ? m_tmd.GetGameTDBID() : std::string{};
 }
 
 std::string VolumeWAD::GetMakerID(const Partition& partition) const
 {
-  char temp[2];
-  if (!Read(0x198 + m_tmd_offset, 2, (u8*)temp, partition))
+  // The TMD's group ID holds the maker code. Some channels have 0x0000 there instead.
+  std::array<char, 2> maker;
+  if (!Read(u32{m_tmd_offset + TMD_GROUP_ID_OFFSET}, maker.size(), reinterpret_cast<u8*>(maker.data()),
+            partition))
+  {
     return "00";
-
-  // Some weird channels use 0x0000 in place of the MakerID, so we need a check here
-  if (!Common::IsPrintableCharacter(temp[0]) || !Common::IsPrintableCharacter(temp[1]))
+  }
+  if (!Common::IsPrintableCharacter(maker[0]) || !Common::IsPrintableCharacter(maker[1]))
     return "00";
-
-  return FilterGameID(temp);
+  return FilterGameID(maker);
 }
 
 std::optional<u64> VolumeWAD::GetTitleID(const Partition& partition) const
 {
-  return ReadSwapped<u64>(m_ticket_offset + 0x01DC, partition);
+  return ReadSwapped<u64>(u32{m_ticket_offset + TICKET_TITLE_ID_OFFSET}, partition);
 }
 
 std::optional<u16> VolumeWAD::GetRevision(const Partition& partition) const
 {
   if (!m_tmd.IsValid())
-    return {};
-
+    return std::nullopt;
   return m_tmd.GetTitleVersion();
 }
 
@@ -287,12 +301,16 @@ bool VolumeWAD::IsNKit() const
 
 std::map<Language, std::string> VolumeWAD::GetLongNames() const
 {
+  // Only channels have a banner with names.
   if (!m_tmd.IsValid() || !IOS::ES::IsChannel(m_tmd.GetTitleId()))
     return {};
 
   std::vector<char16_t> names(NAMES_TOTAL_CHARS);
-  if (!Read(m_opening_bnr_offset + 0x9C, NAMES_TOTAL_BYTES, reinterpret_cast<u8*>(names.data())))
-    return std::map<Language, std::string>();
+  if (!Read(u32{m_opening_bnr_offset + OPENING_BNR_NAMES_OFFSET}, NAMES_TOTAL_BYTES,
+            reinterpret_cast<u8*>(names.data())))
+  {
+    return {};
+  }
   return ReadWiiNames(names);
 }
 
@@ -303,8 +321,7 @@ std::vector<u32> VolumeWAD::GetBanner(u32* width, u32* height) const
 
   const std::optional<u64> title_id = GetTitleID();
   if (!title_id)
-    return std::vector<u32>();
-
+    return {};
   return WiiSaveBanner(*title_id).GetBanner(width, height);
 }
 
@@ -335,15 +352,11 @@ const BlobReader& VolumeWAD::GetBlobReader() const
 
 std::array<u8, 20> VolumeWAD::GetSyncHash() const
 {
-  // We can skip hashing the contents since the TMD contains hashes of the contents.
-  // We specifically don't hash the ticket, since its console ID can differ without any problems.
-
-  auto context = Common::SHA1::CreateContext();
-
+  // The TMD already covers the contents through their hashes. The ticket is left out because
+  // its console ID legitimately differs between copies.
+  const std::unique_ptr<Common::SHA1::Context> context = Common::SHA1::CreateContext();
   AddTMDToSyncHash(context.get(), PARTITION_NONE);
-
   ReadAndAddToSyncHash(context.get(), m_opening_bnr_offset, m_opening_bnr_size, PARTITION_NONE);
-
   return context->Finish();
 }
 

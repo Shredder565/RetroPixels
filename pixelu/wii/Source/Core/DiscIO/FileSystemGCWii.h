@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -17,18 +16,23 @@ namespace DiscIO
 class VolumeDisc;
 struct Partition;
 
+// An entry of a GameCube/Wii FST. The FST is an array of 12-byte entries (three big-endian
+// u32s) followed by a table of null-terminated names:
+//   word 0: name offset in the name table (low 24 bits); the top byte is nonzero for directories
+//   word 1: files: data offset (shifted right by 2 on Wii); directories: index of the parent
+//   word 2: files: size; directories: index of the first entry after the directory's contents
+// Entry 0 is the root directory, whose word 2 is the total number of entries.
 class FileInfoGCWii final : public FileInfo
 {
 public:
-  // None of the constructors take ownership of FST pointers
+  // None of these take ownership of the FST bytes.
 
-  // Set everything manually
+  // An arbitrary entry.
   FileInfoGCWii(const u8* fst, u8 offset_shift, u32 index, u32 total_file_infos);
-  // For the root object only
+  // The root entry (the entry count is read from it).
   FileInfoGCWii(const u8* fst, u8 offset_shift);
-  // Copy another object
   FileInfoGCWii(const FileInfoGCWii& file_info) = default;
-  // Copy data that is common to the whole file system
+  // Another entry of the same FST.
   FileInfoGCWii(const FileInfoGCWii& file_info, u32 index);
 
   ~FileInfoGCWii() override;
@@ -46,6 +50,8 @@ public:
   bool NameCaseInsensitiveEquals(std::string_view other) const override;
   std::string GetPath() const override;
 
+  // Checks this entry (and, for directories, everything inside) against the FST size and the
+  // given parent.
   bool IsValid(u64 fst_size, const FileInfoGCWii& parent_directory) const;
 
 protected:
@@ -53,28 +59,10 @@ protected:
   FileInfo& operator++() override;
 
 private:
-  enum class EntryProperty
-  {
-    // NAME_OFFSET's lower 3 bytes are the name's offset within the name table.
-    // NAME_OFFSET's upper 1 byte is 1 for directories and 0 for files.
-    NAME_OFFSET = 0,
-    // For files, FILE_OFFSET is the file offset in the partition,
-    // and for directories, it's the FST index of the parent directory.
-    // The root directory has its parent directory index set to 0.
-    FILE_OFFSET = 1,
-    // For files, FILE_SIZE is the file size, and for directories,
-    // it's the FST index of the next entry that isn't in the directory.
-    FILE_SIZE = 2
-  };
-
-  // For files, returns the index of the next item. For directories,
-  // returns the index of the next item that isn't inside it.
-  u32 GetNextIndex() const;
-  // Returns one of the three properties of this FST entry.
-  // Read the comments in EntryProperty for details.
-  u32 Get(EntryProperty entry_property) const;
-  // Returns the name offset, excluding the directory identification byte
-  u64 GetNameOffset() const;
+  u32 Word(size_t word) const;
+  u32 NextIndex() const;
+  u64 NameOffset() const;
+  const char* RawName() const;
 
   const u8* m_fst;
   u8 m_offset_shift;
@@ -94,13 +82,13 @@ public:
   std::unique_ptr<FileInfo> FindFileInfo(u64 disc_offset) const override;
 
 private:
-  bool m_valid;
-  std::vector<u8> m_file_system_table;
-  FileInfoGCWii m_root;
-  // Maps the end offset of files to FST indexes
-  mutable std::map<u64, u32> m_offset_file_info_cache;
+  std::unique_ptr<FileInfo> FindInDirectory(std::string_view path, const FileInfo& directory) const;
 
-  std::unique_ptr<FileInfo> FindFileInfo(std::string_view path, const FileInfo& file_info) const;
+  bool m_valid = false;
+  std::vector<u8> m_fst;
+  FileInfoGCWii m_root;
+  // End offset of each non-empty file -> its FST index. Built on first use.
+  mutable std::map<u64, u32> m_files_by_end_offset;
 };
 
 }  // namespace DiscIO
