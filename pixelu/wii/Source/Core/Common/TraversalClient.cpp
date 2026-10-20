@@ -68,16 +68,6 @@ TraversalClient::TraversalClient(ENetHost* netHost, std::string server, const u1
 
 TraversalClient::~TraversalClient() = default;
 
-TraversalHostId TraversalClient::GetHostID() const
-{
-  return m_HostId;
-}
-
-TraversalInetAddress TraversalClient::GetExternalAddress() const
-{
-  return m_external_address;
-}
-
 TraversalClient::State TraversalClient::GetState() const
 {
   return m_State;
@@ -86,6 +76,16 @@ TraversalClient::State TraversalClient::GetState() const
 TraversalClient::FailureReason TraversalClient::GetFailureReason() const
 {
   return m_FailureReason;
+}
+
+TraversalHostId TraversalClient::GetHostID() const
+{
+  return m_HostId;
+}
+
+TraversalInetAddress TraversalClient::GetExternalAddress() const
+{
+  return m_external_address;
 }
 
 void TraversalClient::Reset()
@@ -181,20 +181,26 @@ void TraversalClient::HandleServerPacket(TraversalPacket* packet)
   }
 
   case TraversalPacketType::HelloFromServer:
+  {
+    // Only meaningful while connecting; the server refuses clients that are too old.
     if (!IsConnecting())
       break;
-    if (!packet->helloFromServer.ok)
+    const auto& hello = packet->helloFromServer;
+    if (hello.ok)
+    {
+      m_HostId = hello.yourHostId;
+      m_external_address = hello.yourAddress;
+      NewTraversalTest();
+      m_State = State::Connected;
+      if (m_Client)
+        m_Client->OnTraversalStateChanged();
+    }
+    else
     {
       OnFailure(FailureReason::VersionTooOld);
-      break;
     }
-    m_HostId = packet->helloFromServer.yourHostId;
-    m_external_address = packet->helloFromServer.yourAddress;
-    NewTraversalTest();
-    m_State = State::Connected;
-    if (m_Client)
-      m_Client->OnTraversalStateChanged();
     break;
+  }
 
   case TraversalPacketType::PleaseSendPacket:
   {

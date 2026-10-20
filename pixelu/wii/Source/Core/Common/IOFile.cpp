@@ -19,18 +19,23 @@
 
 namespace File
 {
-IOFile::IOFile() : m_file(nullptr), m_good(true)
-{
-}
-
+// Every constructor starts from "no file, no error".
 IOFile::IOFile(std::FILE* file) : m_file(file), m_good(true)
 {
 }
 
-IOFile::IOFile(const std::string& filename, const char openmode[], SharedAccess sh)
-    : m_file(nullptr), m_good(true)
+IOFile::IOFile() : IOFile(static_cast<std::FILE*>(nullptr))
+{
+}
+
+IOFile::IOFile(const std::string& filename, const char openmode[], SharedAccess sh) : IOFile()
 {
   Open(filename, openmode, sh);
+}
+
+IOFile::IOFile(IOFile&& other) noexcept : IOFile()
+{
+  Swap(other);
 }
 
 IOFile::~IOFile()
@@ -38,9 +43,10 @@ IOFile::~IOFile()
   Close();
 }
 
-IOFile::IOFile(IOFile&& other) noexcept : m_file(nullptr), m_good(true)
+void IOFile::Swap(IOFile& other) noexcept
 {
-  Swap(other);
+  std::swap(m_good, other.m_good);
+  std::swap(m_file, other.m_file);
 }
 
 // Swapping hands our previous file to `other`, which closes it when it is destroyed.
@@ -48,12 +54,6 @@ IOFile& IOFile::operator=(IOFile&& other) noexcept
 {
   Swap(other);
   return *this;
-}
-
-void IOFile::Swap(IOFile& other) noexcept
-{
-  std::swap(m_file, other.m_file);
-  std::swap(m_good, other.m_good);
 }
 
 bool IOFile::Open(const std::string& filename, const char openmode[],
