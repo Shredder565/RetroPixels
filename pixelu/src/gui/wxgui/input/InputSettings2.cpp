@@ -1,953 +1,720 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "wxgui/input/InputSettings2.h"
 
-#include <wx/gbsizer.h>
-
-#include "input/InputManager.h"
-#include "wxgui/helpers/wxHelpers.h"
-#include "wxgui/helpers/wxControlObject.h"
-#include "wxgui/helpers/wxCustomData.h"
-
-#include <wx/sizer.h>
-#include <wx/notebook.h>
-#include <wx/wupdlock.h>
-#include <wx/stattext.h>
-#include <wx/combobox.h>
-#include <wx/button.h>
-#include <wx/statline.h>
 #include <wx/bmpbuttn.h>
+#include <wx/button.h>
+#include <wx/combobox.h>
+#include <wx/gbsizer.h>
+#include <wx/notebook.h>
 #include <wx/settings.h>
+#include <wx/sizer.h>
+#include <wx/statline.h>
+#include <wx/stattext.h>
+#include <wx/wupdlock.h>
 
 #include "config/ActiveSettings.h"
-#include "wxgui/input/InputAPIAddWindow.h"
 #include "input/ControllerFactory.h"
+#include "input/InputManager.h"
+#include "util/EventService.h"
+#include "wxgui/helpers/wxCustomData.h"
+#include "wxgui/helpers/wxHelpers.h"
+#include "wxgui/input/InputAPIAddWindow.h"
+#include "wxgui/input/panels/ClassicControllerInputPanel.h"
+#include "wxgui/input/panels/ProControllerInputPanel.h"
+#include "wxgui/input/panels/VPADInputPanel.h"
+#include "wxgui/input/panels/WiimoteInputPanel.h"
+#include "wxgui/input/settings/DefaultControllerSettings.h"
+#include "wxgui/input/settings/WiimoteControllerSettings.h"
 
 #ifdef HAS_BLUEZ
 #include "wxgui/input/PairingDialog.h"
 #endif
 
-#include "wxgui/input/panels/VPADInputPanel.h"
-#include "wxgui/input/panels/ProControllerInputPanel.h"
-
-#include "wxgui/input/settings/DefaultControllerSettings.h"
-#include "wxgui/input/panels/ClassicControllerInputPanel.h"
-#include "wxgui/input/panels/WiimoteInputPanel.h"
-#include "wxgui/input/settings/WiimoteControllerSettings.h"
-#include "util/EventService.h"
-
 #include "resource/embedded/resources.h"
 
+// read by the window system so game input is ignored while this dialog is open
 bool g_inputConfigWindowHasFocus = false;
 
-using wxTypeData = wxCustomData<EmulatedController::Type>;
-using wxControllerData = wxCustomData<ControllerPtr>;
-
+// widgets and state of one controller tab, stored as the tab's client object
 struct ControllerPage
 {
-	EmulatedControllerPtr m_controller;
+	EmulatedControllerPtr emulated;
 
-	// profiles
-	wxComboBox* m_profiles;
-	wxButton* m_profile_load, * m_profile_save, * m_profile_delete;
-	wxStaticText* m_profile_status;
+	wxComboBox* profiles;
+	wxButton* profileLoad;
+	wxButton* profileSave;
+	wxButton* profileDelete;
+	wxStaticText* profileStatus;
 
-	// emulated controller
-	wxComboBox* m_emulated_controller;
+	wxComboBox* emulatedType;
 
-	// controller api
-	wxComboBox* m_controllers;
-	wxButton* m_controller_api_add, *m_controller_api_remove;
+	wxComboBox* controllers;
+	wxButton* addController;
+	wxButton* removeController;
+	wxButton* settings;
+	wxButton* calibrate;
+	wxButton* clear;
+	wxBitmapButton* connection;
 
-	wxButton* m_controller_settings, * m_controller_calibrate, *m_controller_clear;
-	wxBitmapButton* m_controller_connected;
-
-	// panel
-	std::array<InputPanel*, EmulatedController::Type::MAX> m_panels{};
+	wxBoxSizer* panelArea;
+	std::array<InputPanel*, EmulatedController::Type::MAX> panels{};
 };
-using wxControllerPageData = wxCustomData<ControllerPage>;
 
+namespace
+{
+	using PageData = wxCustomData<ControllerPage>;
+	using ControllerItem = wxCustomData<ControllerPtr>;
+
+	ControllerPage* PageOf(wxWindow* page)
+	{
+		auto* data = static_cast<PageData*>(page->GetClientObject());
+		return data ? &data->ref() : nullptr;
+	}
+
+	ControllerPtr ItemController(wxComboBox* list, int index)
+	{
+		if (index == wxNOT_FOUND)
+			return {};
+		auto* item = static_cast<ControllerItem*>(list->GetClientObject(index));
+		return item ? item->ref() : ControllerPtr{};
+	}
+
+	ControllerPtr SelectedController(wxComboBox* list)
+	{
+		return ItemController(list, list->GetSelection());
+	}
+
+	wxString TypeName(EmulatedController::Type type)
+	{
+		return wxString::FromUTF8(EmulatedController::type_to_string(type));
+	}
+
+	// keyboards have nothing to tune
+	bool HasSettingsDialog(InputAPI::Type api)
+	{
+		return api != InputAPI::Keyboard;
+	}
+
+	InputPanel* CreatePanel(EmulatedController::Type type, wxWindow* parent)
+	{
+		switch (type)
+		{
+		case EmulatedController::Type::VPAD: return new VPADInputPanel(parent);
+		case EmulatedController::Pro: return new ProControllerInputPanel(parent);
+		case EmulatedController::Classic: return new ClassicControllerInputPanel(parent);
+		case EmulatedController::Wiimote: return new WiimoteInputPanel(parent);
+		default: return nullptr;
+		}
+	}
+
+	void ShowStatus(wxStaticText* status, const wxString& text, bool success)
+	{
+		status->SetLabelText(text);
+		status->SetForegroundColour(wxTheColourDatabase->Find(success ? "SUCCESS" : "ERROR"));
+	}
+
+	wxBitmap ThemedIcon(const uint8* png, size_t size)
+	{
+		return wxHelper::LoadThemedBitmapFromPNG(png, size, wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
+	}
+}
 
 InputSettings2::InputSettings2(wxWindow* parent)
 	: wxDialog(parent, wxID_ANY, _("Input settings"))
 {
-	this->SetSizeHints(wxDefaultSize, wxDefaultSize);
-
+	SetSizeHints(wxDefaultSize, wxDefaultSize);
 	g_inputConfigWindowHasFocus = true;
 
-	m_connected = wxHelper::LoadThemedBitmapFromPNG(INPUT_CONNECTED_png, sizeof(INPUT_CONNECTED_png), wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-	m_disconnected = wxHelper::LoadThemedBitmapFromPNG(INPUT_DISCONNECTED_png, sizeof(INPUT_DISCONNECTED_png), wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-	m_low_battery = wxHelper::LoadThemedBitmapFromPNG(INPUT_LOW_BATTERY_png, sizeof(INPUT_LOW_BATTERY_png), wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
+	m_connected = ThemedIcon(INPUT_CONNECTED_png, sizeof(INPUT_CONNECTED_png));
+	m_disconnected = ThemedIcon(INPUT_DISCONNECTED_png, sizeof(INPUT_DISCONNECTED_png));
+	m_low_battery = ThemedIcon(INPUT_LOW_BATTERY_png, sizeof(INPUT_LOW_BATTERY_png));
 
-	auto* sizer = new wxBoxSizer(wxVERTICAL);
-
+	// tabs are filled in when first shown
 	m_notebook = new wxNotebook(this, wxID_ANY);
-	for(size_t i = 0; i < InputManager::kMaxController; ++i)
+	for (size_t i = 0; i < InputManager::kMaxController; ++i)
 	{
-		auto* page = new wxPanel(m_notebook, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
-		page->SetClientObject(nullptr); // force internal type to client object
-		m_notebook->AddPage(page, formatWxString(_("Controller {}"), i + 1));
+		auto* tab = new wxPanel(m_notebook, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
+		tab->SetClientObject(nullptr); // makes the tab use client objects, not client data
+		m_notebook->AddPage(tab, formatWxString(_("Controller {}"), i + 1));
 	}
+	m_notebook->Bind(wxEVT_NOTEBOOK_PAGE_CHANGED, [this](wxBookCtrlEvent& event) {
+		initialize_page(event.GetSelection());
+		update_state();
+		event.Skip();
+	});
 
-	m_notebook->Bind(wxEVT_NOTEBOOK_PAGE_CHANGED, &InputSettings2::on_controller_page_changed, this);
-	sizer->Add(m_notebook, 1, wxEXPAND);
+	auto* layout = new wxBoxSizer(wxVERTICAL);
+	layout->Add(m_notebook, 1, wxEXPAND);
 
 	m_notebook->SetSelection(0);
-	auto* first_page = initialize_page(0);
+	wxWindow* firstTab = initialize_page(0);
 
-	// init first/default page for fitting size
-	auto* page_data = (wxControllerPageData*)first_page->GetClientObject();
-	auto* panel = new VPADInputPanel(first_page);
-	page_data->ref().m_panels[EmulatedController::Type::VPAD] = panel;
+	// size the dialog for the largest panel (the gamepad), then hide it again
+	ControllerPage& first = *PageOf(firstTab);
+	auto* sizingPanel = new VPADInputPanel(firstTab);
+	first.panels[EmulatedController::Type::VPAD] = sizingPanel;
+	first.panelArea->Add(sizingPanel, 0, wxEXPAND);
+	sizingPanel->Show();
+	firstTab->Layout();
 
-	auto* first_page_sizer = dynamic_cast<wxGridBagSizer*>(first_page->GetSizer());
-	auto* panel_sizer = first_page_sizer->FindItemAtPosition(wxGBPosition(7, 0))->GetSizer();
-	panel_sizer->Add(panel, 0, wxEXPAND);
-
-	panel->Show();
-	first_page->Layout();
-
-	SetSizer(sizer);
+	SetSizer(layout);
 	Layout();
 	Fit();
-
-    panel->Hide();
+	sizingPanel->Hide();
 
 	update_state();
 
-	Bind(wxEVT_TIMER, &InputSettings2::on_timer, this);
-
+	Bind(wxEVT_TIMER, [this](wxTimerEvent&) {
+		// feed the visible panel for binding and the stick previews
+		ControllerPage& page = get_current_page_data();
+		InputPanel* panel = CurrentPanel();
+		if (!page.emulated || !panel)
+			return;
+		if (const auto controller = get_active_controller())
+			panel->on_timer(page.emulated, controller);
+	});
 	m_timer = new wxTimer(this);
 	m_timer->Start(25);
 
-	m_controller_changed = EventService::instance().connect<Events::ControllerChanged>(&InputSettings2::on_controller_changed, this);
+	m_controller_changed = EventService::instance().connect<Events::ControllerChanged>(&InputSettings2::OnControllersChanged, this);
 }
 
 InputSettings2::~InputSettings2()
 {
 	m_controller_changed.disconnect();
-
 	g_inputConfigWindowHasFocus = false;
 	m_timer->Stop();
 	InputManager::instance().save();
 }
 
-
-wxWindow* InputSettings2::initialize_page(size_t index)
+ControllerPage& InputSettings2::get_current_page_data() const
 {
-	auto* page = m_notebook->GetPage(index);
-	if (page->GetClientObject()) // already initialized
-		return page;
-
-	page->Bind(wxEVT_LEFT_UP, &InputSettings2::on_left_click, this);
-
-	ControllerPage page_data{};
-	const auto emulated_controller = InputManager::instance().get_controller(index);
-	page_data.m_controller = emulated_controller;
-
-	wxWindowUpdateLocker lock(page);
-	auto* sizer = new wxGridBagSizer();
-
-	{
-		// profile
-		sizer->Add(new wxStaticText(page, wxID_ANY, _("Profile")), wxGBPosition(0, 0), wxDefaultSpan, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-		auto* profiles = new wxComboBox(page, wxID_ANY, kDefaultProfileName);
-		sizer->Add(profiles, wxGBPosition(0, 1), wxDefaultSpan, wxALIGN_CENTER_VERTICAL | wxALL | wxEXPAND, 5);
-
-#if BOOST_OS_LINUX || BOOST_OS_BSD
-		// We rely on the wxEVT_COMBOBOX_DROPDOWN event to trigger filling the profile list,
-		// but on wxGTK the dropdown button cannot be clicked if the list is empty
-		// so as a quick and dirty workaround we fill the list here
-		wxCommandEvent tmpCmdEvt;
-		tmpCmdEvt.SetEventObject(profiles);
-		on_profile_dropdown(tmpCmdEvt);
-#endif
-
-		if (emulated_controller && emulated_controller->has_profile_name())
-		{
-			profiles->SetValue(emulated_controller->get_profile_name());
-		}
-
-		auto* load_bttn = new wxButton(page, wxID_ANY, _("Load"));
-		load_bttn->Disable();
-		sizer->Add(load_bttn, wxGBPosition(0, 2), wxDefaultSpan, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-		auto* save_bttn = new wxButton(page, wxID_ANY, _("Save"));
-		save_bttn->Disable();
-		sizer->Add(save_bttn, wxGBPosition(0, 3), wxDefaultSpan, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-		auto* delete_bttn = new wxButton(page, wxID_ANY, _("Delete"));
-		delete_bttn->Disable();
-		sizer->Add(delete_bttn, wxGBPosition(0, 4), wxDefaultSpan, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-		auto* profile_status = new wxStaticText(page, wxID_ANY, _("controller set by gameprofile. changes won't be saved permanently!"));
-		profile_status->SetMinSize(wxSize(200, -1));
-		profile_status->Wrap(200);
-		sizer->Add(profile_status, wxGBPosition(0, 5), wxDefaultSpan, wxALIGN_CENTER_VERTICAL | wxALL | wxRESERVE_SPACE_EVEN_IF_HIDDEN, 5);
-
-		if(InputManager::instance().is_gameprofile_set(index))
-		{
-			profile_status->SetForegroundColour(wxTheColourDatabase->Find("ERROR"));
-		}
-		else
-		{
-			profile_status->Hide();
-		}
-
-		load_bttn->Bind(wxEVT_BUTTON, &InputSettings2::on_profile_load, this);
-		save_bttn->Bind(wxEVT_BUTTON, &InputSettings2::on_profile_save, this);
-		delete_bttn->Bind(wxEVT_BUTTON, &InputSettings2::on_profile_delete, this);
-
-		profiles->Bind(wxEVT_COMBOBOX_DROPDOWN, &InputSettings2::on_profile_dropdown, this);
-		profiles->Bind(wxEVT_TEXT, &InputSettings2::on_profile_text_changed, this);
-
-		page_data.m_profiles = profiles;
-		page_data.m_profile_load = load_bttn;
-		page_data.m_profile_save = save_bttn;
-		page_data.m_profile_delete = delete_bttn;
-		page_data.m_profile_status = profile_status;
-	}
-
-	sizer->Add(new wxStaticLine(page), wxGBPosition(1, 0), wxGBSpan(1, 6), wxEXPAND);
-
-	{
-		// emulated controller
-		sizer->Add(new wxStaticText(page, wxID_ANY, _("Emulated controller")), wxGBPosition(2, 0), wxDefaultSpan, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-		auto* econtroller_box = new wxComboBox(page, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, 0, nullptr, wxCB_READONLY);
-		econtroller_box->SetMinSize(wxSize(200, -1));
-		econtroller_box->Bind(wxEVT_COMBOBOX_DROPDOWN, &InputSettings2::on_emulated_controller_dropdown, this);
-		econtroller_box->Bind(wxEVT_COMBOBOX, &InputSettings2::on_emulated_controller_selected, this);
-
-		econtroller_box->AppendString(_("Disabled"));
-		econtroller_box->SetSelection(0);
-
-		sizer->Add(econtroller_box, wxGBPosition(2, 1), wxDefaultSpan, wxALIGN_CENTER_VERTICAL | wxALL | wxEXPAND, 5);
-		page_data.m_emulated_controller = econtroller_box;
-	}
-
-	sizer->Add(new wxStaticLine(page), wxGBPosition(3, 0), wxGBSpan(1, 6), wxEXPAND);
-
-	{
-		// controller api
-		sizer->Add(new wxStaticText(page, wxID_ANY, _("Controller")), wxGBPosition(4, 0), wxDefaultSpan, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-		auto* controllers = new wxComboBox(page, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, 0, nullptr, wxCB_READONLY);
-		controllers->Bind(wxEVT_COMBOBOX, &InputSettings2::on_controller_selected, this);
-		controllers->Bind(wxEVT_COMBOBOX_DROPDOWN, &InputSettings2::on_controller_dropdown, this);
-		controllers->SetMinSize(wxSize(300, -1));
-
-		page_data.m_controllers = controllers;
-
-		sizer->Add(controllers, wxGBPosition(4, 1), wxDefaultSpan, wxALIGN_CENTER_VERTICAL | wxALL | wxEXPAND, 5);
-
-		{
-			// add/remove buttons
-			auto* bttn_sizer = new wxBoxSizer(wxHORIZONTAL);
-
-			auto* add_api = new wxButton(page, wxID_ANY, " + ", wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-			add_api->Bind(wxEVT_BUTTON, &InputSettings2::on_controller_add, this);
-			bttn_sizer->Add(add_api, 0, wxALL, 5);
-
-			auto* remove_api = new wxButton(page, wxID_ANY, "  -  ", wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
-			remove_api->Bind(wxEVT_BUTTON, &InputSettings2::on_controller_remove, this);
-			bttn_sizer->Add(remove_api, 0, wxALL, 5);
-
-			sizer->Add(bttn_sizer, wxGBPosition(4, 2), wxDefaultSpan, wxEXPAND, 5);
-
-			page_data.m_controller_api_add = add_api;
-			page_data.m_controller_api_remove = remove_api;
-		}
-
-#ifdef HAS_BLUEZ
-		auto* pairingDialog = new wxButton(page, wxID_ANY, _("Pair Wii/Wii U Controller"));
-		pairingDialog->Bind(wxEVT_BUTTON, [this](wxEvent&) {
-			PairingDialog pairing_dialog(this);
-			pairing_dialog.ShowModal();
-		});
-		sizer->Add(pairingDialog, wxGBPosition(5, 0), wxDefaultSpan, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-#endif
-
-		// controller
-		auto* controller_bttns = new wxBoxSizer(wxHORIZONTAL);
-		auto* settings = new wxButton(page, wxID_ANY, _("Settings"));
-		settings->Bind(wxEVT_BUTTON, &InputSettings2::on_controller_settings, this);
-		settings->Disable();
-		controller_bttns->Add(settings, 0, wxALL, 5);
-
-		auto* calibrate = new wxButton(page, wxID_ANY, _("Calibrate"));
-		calibrate->Bind(wxEVT_BUTTON, &InputSettings2::on_controller_calibrate, this);
-		calibrate->Disable();
-		controller_bttns->Add(calibrate, 0, wxALL, 5);
-
-		auto* clear = new wxButton(page, wxID_ANY, _("Clear"));
-		clear->Bind(wxEVT_BUTTON, &InputSettings2::on_controller_clear, this);
-		controller_bttns->Add(clear, 0, wxALL, 5);
-
-		sizer->Add(controller_bttns, wxGBPosition(5, 1), wxDefaultSpan, wxALIGN_CENTER_VERTICAL);
-
-		auto* connected_button = new wxBitmapButton(page, wxID_ANY, m_disconnected);
-		connected_button->Bind(wxEVT_BUTTON, &InputSettings2::on_controller_connect, this);
-		connected_button->SetToolTip(_("Test if the controller is connected"));
-		sizer->Add(connected_button, wxGBPosition(5, 2), wxDefaultSpan, wxALIGN_CENTER_VERTICAL | wxALL, 5); // TODO replace with icon
-
-		page_data.m_controller_settings = settings;
-		page_data.m_controller_calibrate = calibrate;
-		page_data.m_controller_clear = clear;
-		page_data.m_controller_connected = connected_button;
-
-	}
-
-	sizer->Add(new wxStaticLine(page), wxGBPosition(6, 0), wxGBSpan(1, 6), wxEXPAND);
-
-	auto* panel_sizer = new wxBoxSizer(wxVERTICAL);
-	sizer->Add(panel_sizer, wxGBPosition(7, 0), wxGBSpan(1, 6), wxEXPAND | wxALL, 5);
-
-	page->SetSizer(sizer);
-	page->Layout();
-
-	page->SetClientObject(new wxCustomData(page_data));
-
-	return page;
+	ControllerPage* page = PageOf(m_notebook->GetCurrentPage());
+	wxASSERT(page);
+	return *page;
 }
 
 std::shared_ptr<ControllerBase> InputSettings2::get_active_controller() const
 {
-	auto& page_data = get_current_page_data();
-
-	const auto selection = page_data.m_controllers->GetSelection();
-	if(selection != wxNOT_FOUND)
-	{
-		if(auto* controller = (wxControllerData*)page_data.m_controllers->GetClientObject(selection))
-			return controller->ref();
-	}
-
-	return {};
+	return SelectedController(get_current_page_data().controllers);
 }
 
-bool InputSettings2::has_settings(InputAPI::Type type)
+InputPanel* InputSettings2::CurrentPanel() const
 {
-	switch(type)
-	{
-	case InputAPI::Keyboard:
-		return false;
-	default:
-		return true;
-	}
+	const ControllerPage& page = get_current_page_data();
+	if (!page.emulated)
+		return nullptr;
+	return page.panels[page.emulated->type()];
 }
 
+wxWindow* InputSettings2::initialize_page(size_t index)
+{
+	wxWindow* tab = m_notebook->GetPage(index);
+	if (PageOf(tab))
+		return tab;
+
+	// clicks on empty space end a pending binding
+	tab->Bind(wxEVT_LEFT_UP, [this](wxMouseEvent& event) {
+		event.Skip();
+		if (InputPanel* panel = CurrentPanel())
+			panel->on_left_click(event);
+	});
+
+	ControllerPage page{};
+	page.emulated = InputManager::instance().get_controller(index);
+
+	wxWindowUpdateLocker freeze(tab);
+	auto* grid = new wxGridBagSizer();
+	const int textFlags = wxALIGN_CENTER_VERTICAL | wxALL;
+	auto addLine = [&](int row) { grid->Add(new wxStaticLine(tab), wxGBPosition(row, 0), wxGBSpan(1, 6), wxEXPAND); };
+
+	// row 0: profile
+	{
+		grid->Add(new wxStaticText(tab, wxID_ANY, _("Profile")), wxGBPosition(0, 0), wxDefaultSpan, textFlags, 5);
+		page.profiles = new wxComboBox(tab, wxID_ANY, kDefaultProfileName);
+		grid->Add(page.profiles, wxGBPosition(0, 1), wxDefaultSpan, textFlags | wxEXPAND, 5);
+#if BOOST_OS_LINUX || BOOST_OS_BSD
+		// wxGTK cannot open the dropdown of an empty combo box, so fill it now
+		FillProfileList(page.profiles);
+#endif
+		if (page.emulated && page.emulated->has_profile_name())
+			page.profiles->SetValue(page.emulated->get_profile_name());
+
+		int column = 2;
+		for (auto [button, label] : {std::pair{&page.profileLoad, _("Load")}, std::pair{&page.profileSave, _("Save")}, std::pair{&page.profileDelete, _("Delete")}})
+		{
+			*button = new wxButton(tab, wxID_ANY, label);
+			(*button)->Disable();
+			grid->Add(*button, wxGBPosition(0, column++), wxDefaultSpan, textFlags, 5);
+		}
+
+		page.profileStatus = new wxStaticText(tab, wxID_ANY, _("controller set by gameprofile. changes won't be saved permanently!"));
+		page.profileStatus->SetMinSize(wxSize(200, -1));
+		page.profileStatus->Wrap(200);
+		grid->Add(page.profileStatus, wxGBPosition(0, 5), wxDefaultSpan, textFlags | wxRESERVE_SPACE_EVEN_IF_HIDDEN, 5);
+		if (InputManager::instance().is_gameprofile_set(index))
+			page.profileStatus->SetForegroundColour(wxTheColourDatabase->Find("ERROR"));
+		else
+			page.profileStatus->Hide();
+
+		page.profileLoad->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { LoadProfile(); });
+		page.profileSave->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { SaveProfile(); });
+		page.profileDelete->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { DeleteProfile(); });
+		wxComboBox* profiles = page.profiles;
+		profiles->Bind(wxEVT_COMBOBOX_DROPDOWN, [this, profiles](wxCommandEvent&) { FillProfileList(profiles); });
+		profiles->Bind(wxEVT_TEXT, &InputSettings2::OnProfileTextChanged, this);
+	}
+	addLine(1);
+
+	// row 2: emulated controller type
+	{
+		grid->Add(new wxStaticText(tab, wxID_ANY, _("Emulated controller")), wxGBPosition(2, 0), wxDefaultSpan, textFlags, 5);
+		wxComboBox* types = new wxComboBox(tab, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, 0, nullptr, wxCB_READONLY);
+		types->SetMinSize(wxSize(200, -1));
+		types->Bind(wxEVT_COMBOBOX_DROPDOWN, [this, types](wxCommandEvent&) { FillEmulatedTypeList(types); });
+		types->Bind(wxEVT_COMBOBOX, &InputSettings2::OnEmulatedTypeChosen, this);
+		types->AppendString(_("Disabled"));
+		types->SetSelection(0);
+		grid->Add(types, wxGBPosition(2, 1), wxDefaultSpan, textFlags | wxEXPAND, 5);
+		page.emulatedType = types;
+	}
+	addLine(3);
+
+	// rows 4-5: physical controllers
+	{
+		grid->Add(new wxStaticText(tab, wxID_ANY, _("Controller")), wxGBPosition(4, 0), wxDefaultSpan, textFlags, 5);
+		wxComboBox* list = new wxComboBox(tab, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, 0, nullptr, wxCB_READONLY);
+		list->Bind(wxEVT_COMBOBOX, &InputSettings2::OnControllerChosen, this);
+		// opening an empty list goes straight to adding one
+		list->Bind(wxEVT_COMBOBOX_DROPDOWN, [this, list](wxCommandEvent&) {
+			if (list->GetCount() != 0)
+				return;
+			AddController();
+			list->SetSelection(0);
+		});
+		list->SetMinSize(wxSize(300, -1));
+		grid->Add(list, wxGBPosition(4, 1), wxDefaultSpan, textFlags | wxEXPAND, 5);
+		page.controllers = list;
+
+		auto* addRemove = new wxBoxSizer(wxHORIZONTAL);
+		page.addController = new wxButton(tab, wxID_ANY, " + ", wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+		page.addController->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { AddController(); });
+		addRemove->Add(page.addController, 0, wxALL, 5);
+		page.removeController = new wxButton(tab, wxID_ANY, "  -  ", wxDefaultPosition, wxDefaultSize, wxBU_EXACTFIT);
+		page.removeController->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { RemoveController(); });
+		addRemove->Add(page.removeController, 0, wxALL, 5);
+		grid->Add(addRemove, wxGBPosition(4, 2), wxDefaultSpan, wxEXPAND, 5);
+
+#ifdef HAS_BLUEZ
+		auto* pair = new wxButton(tab, wxID_ANY, _("Pair Wii/Wii U Controller"));
+		pair->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+			PairingDialog dialog(this);
+			dialog.ShowModal();
+		});
+		grid->Add(pair, wxGBPosition(5, 0), wxDefaultSpan, textFlags, 5);
+#endif
+
+		auto* actions = new wxBoxSizer(wxHORIZONTAL);
+		page.settings = new wxButton(tab, wxID_ANY, _("Settings"));
+		page.settings->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { OpenControllerSettings(); });
+		page.settings->Disable();
+		actions->Add(page.settings, 0, wxALL, 5);
+
+		page.calibrate = new wxButton(tab, wxID_ANY, _("Calibrate"));
+		page.calibrate->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+			if (const auto controller = get_active_controller())
+				controller->calibrate();
+		});
+		page.calibrate->Disable();
+		actions->Add(page.calibrate, 0, wxALL, 5);
+
+		page.clear = new wxButton(tab, wxID_ANY, _("Clear"));
+		page.clear->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+			// drops every mapping of the emulated controller
+			ControllerPage& current = get_current_page_data();
+			if (!current.emulated)
+				return;
+			if (InputPanel* panel = CurrentPanel())
+				panel->reset_configuration();
+			current.emulated->clear_mappings();
+		});
+		actions->Add(page.clear, 0, wxALL, 5);
+		grid->Add(actions, wxGBPosition(5, 1), wxDefaultSpan, wxALIGN_CENTER_VERTICAL);
+
+		page.connection = new wxBitmapButton(tab, wxID_ANY, m_disconnected);
+		page.connection->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { TestConnection(); });
+		page.connection->SetToolTip(_("Test if the controller is connected"));
+		grid->Add(page.connection, wxGBPosition(5, 2), wxDefaultSpan, textFlags, 5);
+	}
+	addLine(6);
+
+	// row 7: mapping panel of the emulated type
+	page.panelArea = new wxBoxSizer(wxVERTICAL);
+	grid->Add(page.panelArea, wxGBPosition(7, 0), wxGBSpan(1, 6), wxEXPAND | wxALL, 5);
+
+	tab->SetSizer(grid);
+	tab->Layout();
+	tab->SetClientObject(new PageData(page));
+	return tab;
+}
+
+// Brings the current tab in line with its emulated controller: type, list of
+// physical controllers, button states and the mapping panel.
 void InputSettings2::update_state()
 {
-	auto* page = m_notebook->GetCurrentPage();
-	wxWindowUpdateLocker lock(page);
+	wxWindow* tab = m_notebook->GetCurrentPage();
+	wxWindowUpdateLocker freeze(tab);
+	ControllerPage& page = get_current_page_data();
+	page.profileStatus->Hide();
 
-	auto* page_data_ptr = (wxControllerPageData*)page->GetClientObject();
-	wxASSERT(page_data_ptr);
-	auto& page_data = page_data_ptr->ref();
-
-	page_data.m_profile_status->Hide();
-
-	EmulatedControllerPtr emulated_controller = page_data.m_controller;
-	auto has_controllers = false;
-
-	// update emulated
-	if(emulated_controller)
+	const EmulatedControllerPtr emulated = page.emulated;
+	bool hasControllers = false;
+	if (emulated)
 	{
-		has_controllers = !emulated_controller->get_controllers().empty();
+		const auto& devices = emulated->get_controllers();
+		hasControllers = !devices.empty();
+		page.emulatedType->SetSelection(page.emulatedType->Append(TypeName(emulated->type())));
 
-		const auto emulated_type = emulated_controller->type();
-		int index = page_data.m_emulated_controller->Append(wxString::FromUTF8(emulated_controller->type_to_string(emulated_type)));
-		page_data.m_emulated_controller->SetSelection(index);
-
-		const auto controller_selection = page_data.m_controllers->GetStringSelection();
-		page_data.m_controllers->Clear();
-		if (has_controllers)
+		// rebuild the list, keeping the selection by name
+		const wxString previous = page.controllers->GetStringSelection();
+		page.controllers->Clear();
+		for (const auto& device : devices)
+			page.controllers->Append(fmt::format("{} [{}]", device->display_name(), device->api_name()), new ControllerItem(device));
+		if (page.controllers->GetCount() > 0)
 		{
-			for (const auto& c : emulated_controller->get_controllers())
-			{
-				page_data.m_controllers->Append(fmt::format("{} [{}]", c->display_name(), c->api_name()), new wxCustomData(c));
-			}
-
-			if (page_data.m_controllers->GetCount() > 0)
-			{
-				page_data.m_controllers->SetSelection(0);
-				if (!controller_selection.empty())
-					page_data.m_controllers->SetStringSelection(controller_selection);
-			}
+			page.controllers->SetSelection(0);
+			if (!previous.empty())
+				page.controllers->SetStringSelection(previous);
 		}
 	}
 	else
 	{
-		page_data.m_emulated_controller->SetValue(_("Disabled"));
+		page.emulatedType->SetValue(_("Disabled"));
 	}
 
-	ControllerPtr controller;
-	if (page_data.m_controllers->GetSelection() != wxNOT_FOUND)
+	const ControllerPtr selected = SelectedController(page.controllers);
+	page.connection->SetBitmap(selected && selected->is_connected() ? m_connected : m_disconnected);
+	page.calibrate->Enable(hasControllers);
+	page.removeController->Enable(hasControllers);
+	page.settings->Enable(selected && HasSettingsDialog(selected->api()));
+
+	// which panel is showing now
+	std::optional<EmulatedController::Type> shown;
+	for (int type = 0; type < EmulatedController::Type::MAX; ++type)
 	{
-		if (const auto data = (wxControllerData*)page_data.m_controllers->GetClientObject(page_data.m_controllers->GetSelection()))
-			controller = data->ref();
-	}
-
-	if (controller && controller->is_connected())
-		page_data.m_controller_connected->SetBitmap(m_connected);
-	else
-		page_data.m_controller_connected->SetBitmap(m_disconnected);
-
-	// update controller
-	page_data.m_controller_calibrate->Enable(has_controllers);
-	page_data.m_controller_api_remove->Enable(has_controllers);
-	page_data.m_controller_settings->Enable(controller && has_settings(controller->api()));
-
-	// update settings
-	// update panel
-	// test if we need to update to correct panel
-	std::optional<EmulatedController::Type> active_api{};
-	for(auto i = 0; i < EmulatedController::Type::MAX; ++i)
-	{
-		if(page_data.m_panels[i] && page_data.m_panels[i]->IsShown())
+		if (page.panels[type] && page.panels[type]->IsShown())
 		{
-			active_api = (EmulatedController::Type)i;
+			shown = (EmulatedController::Type)type;
 			break;
 		}
 	}
-
-	// disabled and no emulated controller
-	if (!active_api && !emulated_controller)
+	if (!shown && !emulated)
 		return;
-
-	// enabled correct panel for active controller
-	if (active_api && emulated_controller && emulated_controller->type() == active_api.value())
+	if (shown && emulated && emulated->type() == *shown)
 	{
-		// same controller type panel already shown, refresh content of panels
-		for (auto* panel : page_data.m_panels)
+		// right panel already up, refresh what it displays
+		for (InputPanel* panel : page.panels)
 		{
 			if (panel)
-				panel->load_controller(page_data.m_controller);
+				panel->load_controller(page.emulated);
 		}
 		return;
 	}
 
-	// hide all panels
-	for (auto* panel : page_data.m_panels)
+	for (InputPanel* panel : page.panels)
 	{
 		if (panel)
 			panel->Hide();
 	}
+	if (!emulated)
+		return;
 
-	// show required panel
-	if (emulated_controller)
+	const auto type = emulated->type();
+	InputPanel*& panel = page.panels[type];
+	if (!panel)
 	{
-		auto* sizer = dynamic_cast<wxGridBagSizer*>(page->GetSizer());
-		wxASSERT(sizer);
-
-		const auto type = page_data.m_controller->type();
-		InputPanel* panel = page_data.m_panels[type];
+		panel = CreatePanel(type, tab);
 		if (!panel)
 		{
-			switch (type)
-			{
-			case EmulatedController::Type::VPAD:
-				panel = new VPADInputPanel(page);
-				break;
-			case EmulatedController::Pro:
-				panel = new ProControllerInputPanel(page);
-				break;
-			case EmulatedController::Classic:
-				panel = new ClassicControllerInputPanel(page);
-				break;
-			case EmulatedController::Wiimote:
-				panel = new WiimoteInputPanel(page);
-				break;
-			default:
-				cemu_assert_debug(false);
-				return;
-			}
-
-			page_data.m_panels[type] = panel;
-
-			auto* panel_sizer = sizer->FindItemAtPosition(wxGBPosition(7, 0))->GetSizer();
-			wxASSERT(panel_sizer);
-			panel_sizer->Add(panel, 0, wxEXPAND);
+			cemu_assert_debug(false);
+			return;
 		}
-
-		panel->load_controller(page_data.m_controller);
-		if (has_controllers)
-			panel->set_selected_controller(emulated_controller, emulated_controller->get_controllers()[0]);
-
-		panel->Show();
-		page->wxWindowBase::Layout();
-		page->wxWindow::Update();
+		page.panelArea->Add(panel, 0, wxEXPAND);
 	}
+	panel->load_controller(page.emulated);
+	if (hasControllers)
+		panel->set_selected_controller(emulated, emulated->get_controllers()[0]);
+	panel->Show();
+	tab->wxWindowBase::Layout();
+	tab->wxWindow::Update();
 }
 
-void InputSettings2::on_controller_changed()
+void InputSettings2::OnControllersChanged()
 {
-	for(auto i = 0 ; i < m_notebook->GetPageCount(); ++i)
+	// re-test the connection of the selected controller on every built tab
+	for (size_t i = 0; i < m_notebook->GetPageCount(); ++i)
 	{
-		auto* page = m_notebook->GetPage(i);
+		wxWindow* tab = m_notebook->GetPage(i);
+		const ControllerPage* page = tab ? PageOf(tab) : nullptr;
 		if (!page)
 			continue;
-
-		auto* page_data_ptr = (wxControllerPageData*)page->GetClientObject();
-		if (!page_data_ptr)
-			continue;
-
-		const auto& page_data = page_data_ptr->ref();
-		if (page_data.m_controllers->GetSelection() != wxNOT_FOUND)
-		{
-			if (const auto data = (wxControllerData*)page_data.m_controllers->GetClientObject(page_data.m_controllers->GetSelection()))
-			{
-				if (const auto controller = data->ref())
-				{
-					if (controller->connect())
-						page_data.m_controller_connected->SetBitmap(m_connected);
-					else
-						page_data.m_controller_connected->SetBitmap(m_disconnected);
-				}
-			}
-		}
+		if (const ControllerPtr controller = SelectedController(page->controllers))
+			page->connection->SetBitmap(controller->connect() ? m_connected : m_disconnected);
 	}
 }
 
-void InputSettings2::on_notebook_page_changed(wxBookCtrlEvent& event)
+void InputSettings2::TestConnection()
 {
-	initialize_page(event.GetSelection());
-	update_state();
-	event.Skip();
+	ControllerPage& page = get_current_page_data();
+	if (const ControllerPtr controller = SelectedController(page.controllers))
+		page.connection->SetBitmap(controller->connect() ? m_connected : m_disconnected);
 }
 
-void InputSettings2::on_timer(wxTimerEvent&)
+// ---- profiles ----
+
+void InputSettings2::FillProfileList(wxComboBox* profiles)
 {
-	auto& page_data = get_current_page_data();
-	if (!page_data.m_controller) {
-		return;
-	}
-
-	auto* panel = page_data.m_panels[page_data.m_controller->type()];
-	if (!panel)
-		return;
-
-	auto controller = get_active_controller();
-	if (controller) {
-		panel->on_timer(page_data.m_controller, controller);
-	}
+	wxWindowUpdateLocker freeze(profiles);
+	const wxString selected = profiles->GetStringSelection();
+	profiles->Clear();
+	for (const auto& name : InputManager::get_profiles())
+		profiles->Append(wxString::FromUTF8(name));
+	profiles->SetStringSelection(selected);
 }
 
-void InputSettings2::on_left_click(wxMouseEvent& event)
+void InputSettings2::OnProfileTextChanged(wxCommandEvent& event)
 {
-	event.Skip();
-
-	auto& page_data = get_current_page_data();
-	if (!page_data.m_controller) {
-		return;
-	}
-
-	auto* panel = page_data.m_panels[page_data.m_controller->type()];
-	if (!panel)
-		return;
-
-	panel->on_left_click(event);
+	auto* profiles = dynamic_cast<wxComboBox*>(event.GetEventObject());
+	wxASSERT(profiles);
+	ControllerPage& page = get_current_page_data();
+	const wxString text = event.GetString();
+	const bool known = profiles->FindString(text) != wxNOT_FOUND;
+	page.profileLoad->Enable(known);
+	page.profileSave->Enable(InputManager::is_valid_profilename(text.utf8_string()));
+	page.profileDelete->Enable(known);
+	page.profileStatus->Hide();
 }
 
-void InputSettings2::on_profile_dropdown(wxCommandEvent& event)
+void InputSettings2::LoadProfile()
 {
-	auto* profile_names = dynamic_cast<wxComboBox*>(event.GetEventObject());
-	wxASSERT(profile_names);
-	wxWindowUpdateLocker lock(profile_names);
-	
-	const auto selected_value = profile_names->GetStringSelection();
-	profile_names->Clear();
-
-	for(const auto& profile : InputManager::get_profiles())
+	ControllerPage& page = get_current_page_data();
+	const std::string name = page.profiles->GetValue().utf8_string();
+	page.profileStatus->Show();
+	if (name.empty() || !InputManager::is_valid_profilename(name))
 	{
-		profile_names->Append(wxString::FromUTF8(profile));
-	}
-
-	profile_names->SetStringSelection(selected_value);
-}
-
-void InputSettings2::on_profile_text_changed(wxCommandEvent& event)
-{
-	auto* profile_names = dynamic_cast<wxComboBox*>(event.GetEventObject());
-	wxASSERT(profile_names);
-
-	auto& page_data = get_current_page_data();
-
-	// load_bttn, save_bttn, delete_bttn, profile_status
-	const auto text = event.GetString();
-	const bool valid_name = InputManager::is_valid_profilename(text.utf8_string());
-	const bool name_exists = profile_names->FindString(text) != wxNOT_FOUND;
-
-	page_data.m_profile_load->Enable(name_exists);
-	page_data.m_profile_save->Enable(valid_name);
-	page_data.m_profile_delete->Enable(name_exists);
-	page_data.m_profile_status->Hide();
-}
-
-void InputSettings2::on_profile_load(wxCommandEvent& event)
-{
-	auto& page_data = get_current_page_data();
-
-	auto* profile_names = page_data.m_profiles;
-	auto* text = page_data.m_profile_status;
-
-	const auto selection = profile_names->GetValue().utf8_string();
-	text->Show();
-	if (selection.empty() || !InputManager::is_valid_profilename(selection))
-	{
-		text->SetLabelText(_("invalid profile name"));
-		text->SetForegroundColour(wxTheColourDatabase->Find("ERROR"));
-		text->Refresh();
+		ShowStatus(page.profileStatus, _("invalid profile name"), false);
+		page.profileStatus->Refresh();
 		return;
 	}
-
-	const auto page_index = m_notebook->GetSelection();
-	if (InputManager::instance().load(page_index, selection))
-	{
-		text->SetLabelText(_("profile loaded"));
-		text->SetForegroundColour(wxTheColourDatabase->Find("SUCCESS"));
-	}
+	const int slot = m_notebook->GetSelection();
+	if (InputManager::instance().load(slot, name))
+		ShowStatus(page.profileStatus, _("profile loaded"), true);
 	else
-	{
-		text->SetLabelText(_("couldn't load profile"));
-		text->SetForegroundColour(wxTheColourDatabase->Find("ERROR"));
-	}
+		ShowStatus(page.profileStatus, _("couldn't load profile"), false);
+	page.profileStatus->Refresh();
 
-	text->Refresh();
-
-	// update controller info
-	page_data.m_controller = InputManager::instance().get_controller(page_index);
+	// the profile may have replaced the emulated controller
+	page.emulated = InputManager::instance().get_controller(slot);
 	update_state();
 }
 
-void InputSettings2::on_profile_save(wxCommandEvent& event)
+void InputSettings2::SaveProfile()
 {
-	auto& page_data = get_current_page_data();
-
-	auto* profile_names = page_data.m_profiles;
-	auto* text = page_data.m_profile_status;
-
-	const auto selection = profile_names->GetValue().utf8_string();
-	text->Show();
-	if (selection.empty() || !InputManager::is_valid_profilename(selection))
-	{
-		text->SetLabelText(_("invalid profile name"));
-		text->SetForegroundColour(wxTheColourDatabase->Find("ERROR"));
-		text->Refresh();
-		return;
-	}
-
-	if(InputManager::instance().save(m_notebook->GetSelection(), selection))
-	{
-		text->SetLabelText(_("profile saved"));
-		text->SetForegroundColour(wxTheColourDatabase->Find("SUCCESS"));
-	}
+	ControllerPage& page = get_current_page_data();
+	const std::string name = page.profiles->GetValue().utf8_string();
+	page.profileStatus->Show();
+	if (name.empty() || !InputManager::is_valid_profilename(name))
+		ShowStatus(page.profileStatus, _("invalid profile name"), false);
+	else if (InputManager::instance().save(m_notebook->GetSelection(), name))
+		ShowStatus(page.profileStatus, _("profile saved"), true);
 	else
-	{
-		text->SetLabelText(_("couldn't save profile"));
-		text->SetForegroundColour(wxTheColourDatabase->Find("ERROR"));
-	}
-
-	text->Refresh();
+		ShowStatus(page.profileStatus, _("couldn't save profile"), false);
+	page.profileStatus->Refresh();
 }
 
-void InputSettings2::on_profile_delete(wxCommandEvent& event)
+void InputSettings2::DeleteProfile()
 {
-	auto& page_data = get_current_page_data();
-
-	auto* profile_names = page_data.m_profiles;
-	auto* text = page_data.m_profile_status;
-
-	const auto selection = profile_names->GetStringSelection().utf8_string();
-
-	text->Show();
-	if (selection.empty() || !InputManager::is_valid_profilename(selection))
+	ControllerPage& page = get_current_page_data();
+	// only a profile picked from the list can be deleted
+	const std::string name = page.profiles->GetStringSelection().utf8_string();
+	page.profileStatus->Show();
+	if (name.empty() || !InputManager::is_valid_profilename(name))
 	{
-		text->SetLabelText(_("invalid profile name"));
-		text->SetForegroundColour(wxTheColourDatabase->Find("ERROR"));
-		text->Refresh();
+		ShowStatus(page.profileStatus, _("invalid profile name"), false);
+		page.profileStatus->Refresh();
 		return;
 	}
 	try
 	{
-		const fs::path old_path = ActiveSettings::GetConfigPath("controllerProfiles/{}.txt", selection);
-		fs::remove(old_path);
-
-		const fs::path path = ActiveSettings::GetConfigPath("controllerProfiles/{}.xml", selection);
-		fs::remove(path);
-
-		profile_names->ChangeValue(kDefaultProfileName);
-		text->SetLabelText(_("profile deleted"));
-		text->SetForegroundColour(wxTheColourDatabase->Find("SUCCESS"));
-
-		page_data.m_profile_load->Disable();
-		page_data.m_profile_save->Disable();
-		page_data.m_profile_delete->Disable();
+		// older versions stored profiles as .txt
+		fs::remove(ActiveSettings::GetConfigPath("controllerProfiles/{}.txt", name));
+		fs::remove(ActiveSettings::GetConfigPath("controllerProfiles/{}.xml", name));
+		page.profiles->ChangeValue(kDefaultProfileName);
+		ShowStatus(page.profileStatus, _("profile deleted"), true);
+		page.profileLoad->Disable();
+		page.profileSave->Disable();
+		page.profileDelete->Disable();
 	}
 	catch (const std::exception&)
 	{
-		text->SetLabelText(_("can't delete profile"));
-		text->SetForegroundColour(wxTheColourDatabase->Find("ERROR"));
+		ShowStatus(page.profileStatus, _("can't delete profile"), false);
 	}
-	text->Refresh();
+	page.profileStatus->Refresh();
 }
 
+// ---- emulated controller ----
 
-void InputSettings2::on_controller_page_changed(wxBookCtrlEvent& event)
+void InputSettings2::OnEmulatedTypeChosen(wxCommandEvent& event)
 {
-	initialize_page(event.GetSelection());
-	update_state();
-	event.Skip();
-}
+	const int slot = m_notebook->GetSelection();
+	ControllerPage& page = get_current_page_data();
 
-void InputSettings2::on_emulated_controller_selected(wxCommandEvent& event)
-{
-	const auto page_index = m_notebook->GetSelection();
-	auto& page_data = get_current_page_data();
-
-	const auto selection = event.GetSelection();
-	if(selection == 0) // disabled selected
+	if (event.GetSelection() == 0) // "Disabled"
 	{
-		page_data.m_controller = {};
-		InputManager::instance().delete_controller(page_index, true);
-	}
-	else
-	{
-		try
-		{
-			const auto type = EmulatedController::type_from_string(event.GetString().utf8_string());
-			// same has already been selected
-			if (page_data.m_controller && page_data.m_controller->type() == type)
-				return;
-
-			// set new controller
-			const auto new_controller = InputManager::instance().set_controller(page_index, type);
-			page_data.m_controller = new_controller;
-
-			// append controllers if some were already added before
-			if (new_controller->get_controllers().empty())
-			{
-				// test if we had no emulated controller before but still assigned controllers we want to transfer now
-				for (uint32 i = 0; i < page_data.m_controllers->GetCount(); ++i)
-				{
-					if (auto* controller = (wxControllerData*)page_data.m_controllers->GetClientObject(i))
-					{
-						new_controller->add_controller(controller->ref());
-					}
-				}
-			}
-
-			// set default mappings if any controllers available
-			for(const auto& c: new_controller->get_controllers())
-			{
-				new_controller->set_default_mapping(c);
-			}
-		}
-		catch (const std::exception&)
-		{
-			cemu_assert_debug(false);
-		}
-		
-	}
-
-	update_state();
-}
-
-void InputSettings2::on_emulated_controller_dropdown(wxCommandEvent& event)
-{
-	auto* emulated_controllers = dynamic_cast<wxComboBox*>(event.GetEventObject());
-	wxASSERT(emulated_controllers);
-
-	wxWindowUpdateLocker lock(emulated_controllers);
-
-	bool is_gamepad_selected = false;
-	bool is_wpad_selected = false;
-	const auto selected = emulated_controllers->GetSelection();
-	const auto selected_value = emulated_controllers->GetStringSelection();
-	if(selected != wxNOT_FOUND)
-	{
-		is_gamepad_selected = selected_value == wxString::FromUTF8(EmulatedController::type_to_string(EmulatedController::Type::VPAD));
-		is_wpad_selected = !is_gamepad_selected && selected != 0;
-	}
-
-	const auto [vpad_count, wpad_count] = InputManager::instance().get_controller_count();
-
-	emulated_controllers->Clear();
-	emulated_controllers->AppendString(_("Disabled"));
-
-	if (vpad_count < InputManager::kMaxVPADControllers || is_gamepad_selected)
-		emulated_controllers->Append(wxString::FromUTF8(EmulatedController::type_to_string(EmulatedController::Type::VPAD)));
-
-	if (wpad_count < InputManager::kMaxWPADControllers || is_wpad_selected)
-	{
-		emulated_controllers->AppendString(wxString::FromUTF8(EmulatedController::type_to_string(EmulatedController::Type::Pro)));
-		emulated_controllers->AppendString(wxString::FromUTF8(EmulatedController::type_to_string(EmulatedController::Type::Classic)));
-		emulated_controllers->AppendString(wxString::FromUTF8(EmulatedController::type_to_string(EmulatedController::Type::Wiimote)));
-	}
-
-	emulated_controllers->SetStringSelection(selected_value);
-}
-
-void InputSettings2::on_controller_selected(wxCommandEvent& event)
-{
-	auto& page_data = get_current_page_data();
-
-	const auto enabled = event.GetSelection() != wxNOT_FOUND;
-	page_data.m_controller_api_remove->Enable(enabled);
-	// page_data->ref().m_controller_list->Clear();
-	if(enabled)
-	{
-		// get selected controller if any todo
-		if (auto* controller = (wxControllerData*)page_data.m_controllers->GetClientObject(event.GetSelection()))
-		{
-			page_data.m_controller_settings->Enable(has_settings(controller->ref()->api()));
-
-			if(page_data.m_controller)
-			{
-				page_data.m_panels[page_data.m_controller->type()]->set_selected_controller(page_data.m_controller, controller->ref());
-			}
-		}
-		
-	}
-}
-
-void InputSettings2::on_controller_dropdown(wxCommandEvent& event)
-{
-	if(auto* controllers = dynamic_cast<wxComboBox*>(event.GetEventObject()))
-	{
-		if(controllers->GetCount()== 0)
-		{
-			on_controller_add(event);
-			controllers->SetSelection(0);
-		}
-	}
-}
-
-ControllerPage& InputSettings2::get_current_page_data() const
-{
-	auto* page = m_notebook->GetCurrentPage();
-	auto* page_data_ptr = (wxControllerPageData*)page->GetClientObject();
-	wxASSERT(page_data_ptr);
-	return page_data_ptr->ref();
-}
-
-void InputSettings2::on_controller_connect(wxCommandEvent& event)
-{
-	auto& page_data = get_current_page_data();
-
-	if (page_data.m_controllers->GetSelection() != wxNOT_FOUND)
-	{
-		if (const auto data = (wxControllerData*)page_data.m_controllers->GetClientObject(page_data.m_controllers->GetSelection()))
-		{
-			if(const auto controller = data->ref())
-			{
-				if(controller->connect())
-					page_data.m_controller_connected->SetBitmap(m_connected);
-				else
-					page_data.m_controller_connected->SetBitmap(m_disconnected);
-			}
-		}
-	}
-}
-
-void InputSettings2::on_controller_add(wxCommandEvent& event)
-{
-	auto& page_data = get_current_page_data();
-
-	std::vector<ControllerPtr> controllers;
-	controllers.reserve(page_data.m_controllers->GetCount());
-	for(uint32 i = 0; i < page_data.m_controllers->GetCount(); ++i)
-	{
-		if (auto* controller = (wxControllerData*)page_data.m_controllers->GetClientObject(i))
-			controllers.emplace_back(controller->ref());
-	}
-
-	InputAPIAddWindow wnd(this, wxGetMousePosition() + wxSize(5, 5), controllers);
-	if (wnd.ShowModal() != wxID_OK)
+		page.emulated = {};
+		InputManager::instance().delete_controller(slot, true);
+		update_state();
 		return;
-
-	wxASSERT(wnd.is_valid());
-
-	const auto controller = wnd.get_controller();
-
-	const auto api_type = wnd.get_type();
-	controller->connect();
-	const int index = page_data.m_controllers->Append(fmt::format("{} [{}]", controller->display_name(), to_string(api_type)), new wxCustomData(controller));
-
-	page_data.m_controllers->Select(index);
-	
-	if(page_data.m_controller)
-	{
-		page_data.m_controller->add_controller(controller);
-
-		const auto type = page_data.m_controller->type();
-		// if first controller and we got no mappings, add default mappings
-		if(page_data.m_controller->set_default_mapping(controller))
-			page_data.m_panels[type]->load_controller(page_data.m_controller);
-		
-		page_data.m_panels[type]->set_selected_controller(page_data.m_controller, controller);
 	}
 
-	update_state();
-}
+	try
+	{
+		const auto type = EmulatedController::type_from_string(event.GetString().utf8_string());
+		if (page.emulated && page.emulated->type() == type)
+			return;
 
-void InputSettings2::on_controller_remove(wxCommandEvent& event)
-{
-	auto& page_data = get_current_page_data();
-
-	auto* api_box = page_data.m_controllers;
-	int selection = api_box->GetSelection();
-	if (selection == wxNOT_FOUND)
-		return;
-
-	if (page_data.m_controller) {
-		if (auto* controller = (wxControllerData*)page_data.m_controllers->GetClientObject(selection))
+		const auto created = InputManager::instance().set_controller(slot, type);
+		page.emulated = created;
+		// carry over controllers listed while the slot was disabled
+		if (created->get_controllers().empty())
 		{
-			page_data.m_controller->remove_controller(controller->ref());
-			page_data.m_panels[page_data.m_controller->type()]->load_controller(page_data.m_controller);
+			for (unsigned i = 0; i < page.controllers->GetCount(); ++i)
+			{
+				if (const ControllerPtr listed = ItemController(page.controllers, i))
+					created->add_controller(listed);
+			}
 		}
+		for (const auto& device : created->get_controllers())
+			created->set_default_mapping(device);
 	}
-
-	page_data.m_panels[page_data.m_controller->type()]->reset_colours();
-
-	api_box->Delete(selection);
-	api_box->Refresh();
-
-	update_state();
-
-	if (api_box->GetCount() > 0)
+	catch (const std::exception&)
 	{
-		selection = selection > 0 ? (selection - 1) : 0;
-		api_box->SetSelection(selection);
+		cemu_assert_debug(false);
 	}
-
 	update_state();
 }
 
-void InputSettings2::on_controller_calibrate(wxCommandEvent& event)
+void InputSettings2::FillEmulatedTypeList(wxComboBox* types)
 {
-	if(const auto controller = get_active_controller())
-		controller->calibrate();
-}
+	wxWindowUpdateLocker freeze(types);
 
-void InputSettings2::on_controller_clear(wxCommandEvent& event)
-{
-	auto& page_data = get_current_page_data();
-	if (page_data.m_controller) {
-		const auto type = page_data.m_controller->type();
+	// the slot's own type stays available even when its kind is at the limit
+	const int selectedIndex = types->GetSelection();
+	const wxString selected = types->GetStringSelection();
+	const bool holdsGamepad = selectedIndex != wxNOT_FOUND && selected == TypeName(EmulatedController::Type::VPAD);
+	const bool holdsWiiController = selectedIndex != wxNOT_FOUND && !holdsGamepad && selectedIndex != 0;
+	const auto [gamepads, wiiControllers] = InputManager::instance().get_controller_count();
 
-		page_data.m_panels[type]->reset_configuration();
-		page_data.m_controller->clear_mappings();
+	types->Clear();
+	types->AppendString(_("Disabled"));
+	if (gamepads < InputManager::kMaxVPADControllers || holdsGamepad)
+		types->Append(TypeName(EmulatedController::Type::VPAD));
+	if (wiiControllers < InputManager::kMaxWPADControllers || holdsWiiController)
+	{
+		for (auto type : {EmulatedController::Type::Pro, EmulatedController::Type::Classic, EmulatedController::Type::Wiimote})
+			types->AppendString(TypeName(type));
 	}
+	types->SetStringSelection(selected);
 }
 
-void InputSettings2::on_controller_settings(wxCommandEvent& event)
+// ---- physical controllers ----
+
+void InputSettings2::OnControllerChosen(wxCommandEvent& event)
 {
-	auto controller = get_active_controller();
+	ControllerPage& page = get_current_page_data();
+	const int index = event.GetSelection();
+	page.removeController->Enable(index != wxNOT_FOUND);
+	const ControllerPtr controller = ItemController(page.controllers, index);
 	if (!controller)
 		return;
+	page.settings->Enable(HasSettingsDialog(controller->api()));
+	if (InputPanel* panel = CurrentPanel())
+		panel->set_selected_controller(page.emulated, controller);
+}
 
-	switch(controller->api())
+void InputSettings2::AddController()
+{
+	ControllerPage& page = get_current_page_data();
+
+	std::vector<ControllerPtr> listed;
+	listed.reserve(page.controllers->GetCount());
+	for (unsigned i = 0; i < page.controllers->GetCount(); ++i)
 	{
-	
+		if (ControllerPtr controller = ItemController(page.controllers, i))
+			listed.emplace_back(std::move(controller));
+	}
+
+	InputAPIAddWindow picker(this, wxGetMousePosition() + wxSize(5, 5), listed);
+	if (picker.ShowModal() != wxID_OK)
+		return;
+	wxASSERT(picker.is_valid());
+
+	const ControllerPtr controller = picker.get_controller();
+	controller->connect();
+	const int index = page.controllers->Append(fmt::format("{} [{}]", controller->display_name(), to_string(picker.get_type())), new ControllerItem(controller));
+	page.controllers->Select(index);
+
+	if (page.emulated)
+	{
+		page.emulated->add_controller(controller);
+		InputPanel* panel = CurrentPanel();
+		// the first controller of an unmapped emulated controller gets the default mapping
+		if (page.emulated->set_default_mapping(controller) && panel)
+			panel->load_controller(page.emulated);
+		if (panel)
+			panel->set_selected_controller(page.emulated, controller);
+	}
+	update_state();
+}
+
+void InputSettings2::RemoveController()
+{
+	ControllerPage& page = get_current_page_data();
+	wxComboBox* list = page.controllers;
+	int index = list->GetSelection();
+	if (index == wxNOT_FOUND)
+		return;
+
+	if (page.emulated)
+	{
+		InputPanel* panel = CurrentPanel();
+		if (const ControllerPtr controller = ItemController(list, index))
+		{
+			page.emulated->remove_controller(controller);
+			if (panel)
+				panel->load_controller(page.emulated);
+		}
+		if (panel)
+			panel->reset_colours();
+	}
+
+	list->Delete(index);
+	list->Refresh();
+	update_state();
+	// select the neighbour of the removed entry
+	if (list->GetCount() > 0)
+		list->SetSelection(index > 0 ? index - 1 : 0);
+	update_state();
+}
+
+void InputSettings2::OpenControllerSettings()
+{
+	const ControllerPtr controller = get_active_controller();
+	if (!controller)
+		return;
+	const wxPoint where = wxGetMousePosition() + wxSize(5, 5);
+	switch (controller->api())
+	{
 	case InputAPI::DirectInput:
 	case InputAPI::XInput:
 	case InputAPI::GameCube:
@@ -956,21 +723,21 @@ void InputSettings2::on_controller_settings(wxCommandEvent& event)
 	case InputAPI::SDLController:
 	case InputAPI::DSUClient:
 	{
-		DefaultControllerSettings wnd(this, wxGetMousePosition() + wxSize(5, 5), controller);
-		wnd.ShowModal();
+		DefaultControllerSettings dialog(this, where, controller);
+		dialog.ShowModal();
 		break;
 	}
-
-	case InputAPI::Keyboard: break;
-
-	#ifdef SUPPORTS_WIIMOTE
-	case InputAPI::Wiimote: {
+#ifdef SUPPORTS_WIIMOTE
+	case InputAPI::Wiimote:
+	{
 		const auto wiimote = std::dynamic_pointer_cast<NativeWiimoteController>(controller);
 		wxASSERT(wiimote);
-		WiimoteControllerSettings wnd(this, wxGetMousePosition() + wxSize(5, 5), wiimote);
-		wnd.ShowModal();
+		WiimoteControllerSettings dialog(this, where, wiimote);
+		dialog.ShowModal();
 		break;
 	}
-	#endif
+#endif
+	default:
+		break;
 	}
 }
