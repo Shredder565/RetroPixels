@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <expected>
 #include <optional>
 #include <utility>
@@ -328,7 +329,18 @@ void FileSystem::DoStateWriteOrMeasure(PointerWrap& p, const std::string& direct
       q.SetVerifyMode();
       return;
     }
-    q.Do(*meta);
+    // The block is stored as raw bytes, so copy it into zeroed memory first to keep the
+    // padding bytes deterministic.
+    Metadata block;
+    std::memset(&block, 0, sizeof(block));
+    block.uid = meta->uid;
+    block.gid = meta->gid;
+    block.attribute = meta->attribute;
+    block.modes = meta->modes;
+    block.is_file = meta->is_file;
+    block.size = meta->size;
+    block.fst_index = meta->fst_index;
+    q.Do(block);
     q.Do(name);
 
     if (!meta->is_file)
