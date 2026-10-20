@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "wxgui/wxgui.h"
 #include "wxgui/debugger/DebuggerWindow2.h"
 
@@ -9,48 +10,22 @@
 #include "Cafe/OS/RPL/rpl_structs.h"
 #include "Cafe/OS/RPL/rpl_debug_symbols.h"
 #include "Cafe/OS/RPL/rpl_symbol_storage.h"
-
+#include "Cafe/HW/Espresso/Debugger/Debugger.h"
+#include "Cafe/HW/Espresso/Recompiler/PPCRecompiler.h"
+#include "Cafe/OS/RPL/rpl.h"
 #include "wxgui/debugger/RegisterWindow.h"
 #include "wxgui/debugger/DumpWindow.h"
-
-#include "Cafe/HW/Espresso/Debugger/Debugger.h"
-
-#include "Cafe/OS/RPL/rpl.h"
 #include "wxgui/debugger/DisasmCtrl.h"
 #include "wxgui/debugger/SymbolWindow.h"
 #include "wxgui/debugger/BreakpointWindow.h"
 #include "wxgui/debugger/ModuleWindow.h"
 #include "util/helpers/helpers.h"
 #include "util/helpers/StringHelpers.h"
-#include "Cafe/HW/Espresso/Recompiler/PPCRecompiler.h"
 #include "Cemu/Logging/CemuLogging.h"
 
 #include "resource/embedded/resources.h"
 
-enum
-{
-	// file
-	MENU_ID_FILE_EXIT = wxID_HIGHEST + 8000,
-	// settings
-	MENU_ID_OPTIONS_PIN_TO_MAINWINDOW,
-	MENU_ID_OPTIONS_BREAK_ON_START,
-	MENU_ID_OPTIONS_LOG_MEMORY_BREAKPOINTS,
-	MENU_ID_OPTIONS_SWITCH_CPU_MODE,
-	// window
-	MENU_ID_WINDOW_REGISTERS,
-	MENU_ID_WINDOW_DUMP,
-	MENU_ID_WINDOW_STACK,
-	MENU_ID_WINDOW_BREAKPOINTS,
-	MENU_ID_WINDOW_MODULE,
-	MENU_ID_WINDOW_SYMBOL,
-
-	// tool
-	TOOL_ID_GOTO,
-	TOOL_ID_BP,
-	TOOL_ID_PAUSE,
-	TOOL_ID_STEP_OVER,
-	TOOL_ID_STEP_INTO,
-};
+#include <charconv>
 
 wxDEFINE_EVENT(wxEVT_DEBUGGER_CLOSE, wxCloseEvent);
 wxDEFINE_EVENT(wxEVT_UPDATE_VIEW, wxCommandEvent);
@@ -62,103 +37,148 @@ wxDEFINE_EVENT(wxEVT_NOTIFY_MODULE_LOADED, wxCommandEvent);
 wxDEFINE_EVENT(wxEVT_NOTIFY_MODULE_UNLOADED, wxCommandEvent);
 wxDEFINE_EVENT(wxEVT_NOTIFY_GRAPHIC_PACKS_MODIFIED, wxCommandEvent);
 
-wxBEGIN_EVENT_TABLE(DebuggerWindow2, wxFrame)
-	EVT_SHOW(DebuggerWindow2::OnShow)
-	EVT_CLOSE(DebuggerWindow2::OnClose)
-	EVT_COMMAND(wxID_ANY, wxEVT_UPDATE_VIEW, DebuggerWindow2::OnUpdateView)
-	EVT_COMMAND(wxID_ANY, wxEVT_BREAKPOINT_CHANGE, DebuggerWindow2::OnBreakpointChange)
-	EVT_COMMAND(wxID_ANY, wxEVT_MOVE_TO_DISASM_ADDR, DebuggerWindow2::OnMoveToDisasmAddr)
-	EVT_COMMAND(wxID_ANY, wxEVT_TOOL, DebuggerWindow2::OnToolClicked)
-	EVT_COMMAND(wxID_ANY, wxEVT_BREAKPOINT_HIT, DebuggerWindow2::OnBreakpointHit)
-	EVT_COMMAND(wxID_ANY, wxEVT_RUN, DebuggerWindow2::OnRunProgram)
-	EVT_COMMAND(wxID_ANY, wxEVT_NOTIFY_MODULE_LOADED, DebuggerWindow2::OnNotifyModuleLoaded)
-	EVT_COMMAND(wxID_ANY, wxEVT_NOTIFY_MODULE_UNLOADED, DebuggerWindow2::OnNotifyModuleUnloaded)
-	EVT_COMMAND(wxID_ANY, wxEVT_NOTIFY_GRAPHIC_PACKS_MODIFIED, DebuggerWindow2::OnNotifyGraphicPacksModified)
-	EVT_COMMAND(wxID_ANY, wxEVT_DISASMCTRL_NOTIFY_GOTO_ADDRESS, DebuggerWindow2::OnDisasmCtrlGotoAddress)
-	// file menu
-	EVT_MENU(MENU_ID_FILE_EXIT, DebuggerWindow2::OnExit)
-	// window
-	EVT_MENU_RANGE(MENU_ID_WINDOW_REGISTERS, MENU_ID_WINDOW_MODULE, DebuggerWindow2::OnWindowMenu)
-wxEND_EVENT_TABLE()
-
-DebuggerModuleInfo::DebuggerModuleInfo(RPLModule* module)
-{
-	moduleName = module->moduleName;
-	patchCRC = module->patchCRC;
-	textArea.base = module->regionMappingBase_text.GetMPTR();
-	textArea.origBase = module->regionOrigAddr_text;
-	textArea.size = module->regionSize_text;
-	dataArea.base = module->regionMappingBase_data;
-	dataArea.origBase = module->regionOrigAddr_data;
-	dataArea.size = module->regionSize_data;
-}
-
-struct DebuggerModuleInfoNotify : public wxClientData
-{
-	DebuggerModuleInfo moduleInfo;
-
-	DebuggerModuleInfoNotify(RPLModule* module) : moduleInfo(module) {};
-};
-
 DebuggerWindow2* s_debuggerWindow;
 
-static bool TryParseMapAddress(std::string_view token, uint32& value)
+namespace
 {
-	trim(token, "\t\n\v\f\r ,:;()[]");
-	if (const auto colonIndex = token.find_last_of(':'); colonIndex != std::string_view::npos)
-		token = token.substr(colonIndex + 1);
-	trim(token, "\t\n\v\f\r ,:;()[]");
-	if (!token.empty() && (token.back() == 'h' || token.back() == 'H'))
-		token.remove_suffix(1);
-	if (token.size() > 2 && token[0] == '0' && (token[1] == 'x' || token[1] == 'X'))
-		token.remove_prefix(2);
-	if (token.empty())
-		return false;
+	enum
+	{
+		ID_EXIT = wxID_HIGHEST + 8000,
 
-	uint64 parsedValue = 0;
-	const auto result = std::from_chars(token.data(), token.data() + token.size(), parsedValue, 16);
-	if (result.ec != std::errc() || result.ptr != (token.data() + token.size()) || parsedValue > std::numeric_limits<uint32>::max())
-		return false;
+		ID_OPT_PIN,
+		ID_OPT_BREAK_ON_ENTRY,
+		ID_OPT_LOG_MEMORY_BPS,
+		ID_OPT_INTERPRETER,
 
-	value = static_cast<uint32>(parsedValue);
-	return true;
+		ID_WIN_REGISTERS,
+		ID_WIN_DUMP,
+		ID_WIN_BREAKPOINTS,
+		ID_WIN_MODULES,
+		ID_WIN_SYMBOLS,
+
+		ID_TOOL_GOTO,
+		ID_TOOL_BREAKPOINT,
+		ID_TOOL_RUN_BREAK,
+		ID_TOOL_STEP_OVER,
+		ID_TOOL_STEP_INTO,
+	};
+
+	// carries a copy of the module description across the thread hop
+	struct ModuleNotice : public wxClientData
+	{
+		explicit ModuleNotice(RPLModule* module) : info(module) {}
+		DebuggerModuleInfo info;
+	};
+
+	// ---- .map file parsing ----
+
+	constexpr const char* kMapPunctuation = "\t\n\v\f\r ,:;()[]";
+
+	// accepts "80001234", "0x80001234", "80001234h" and "0001:80001234"
+	bool ParseMapAddress(std::string_view text, uint32& out)
+	{
+		trim(text, kMapPunctuation);
+		const size_t colon = text.rfind(':');
+		if (colon != std::string_view::npos)
+			text.remove_prefix(colon + 1);
+		trim(text, kMapPunctuation);
+		if (!text.empty() && (text.back() == 'h' || text.back() == 'H'))
+			text.remove_suffix(1);
+		if (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
+			text.remove_prefix(2);
+		if (text.empty())
+			return false;
+		uint64 v = 0;
+		const char* last = text.data() + text.size();
+		const auto res = std::from_chars(text.data(), last, v, 16);
+		if (res.ec != std::errc() || res.ptr != last || v > 0xFFFFFFFFull)
+			return false;
+		out = (uint32)v;
+		return true;
+	}
+
+	// "<address> <symbol> [anything]" with blanks or tabs between the fields
+	bool ParseMapLine(std::string_view line, uint32& address, std::string& name)
+	{
+		constexpr const char* kBlank = " \t";
+		trim(line);
+		const size_t split = line.find_first_of(kBlank);
+		if (line.empty() || split == std::string_view::npos)
+			return false;
+		if (!ParseMapAddress(line.substr(0, split), address))
+			return false;
+		std::string_view rest = line.substr(split + 1);
+		trim(rest);
+		std::string_view symbol = rest.substr(0, rest.find_first_of(kBlank));
+		trim(symbol);
+		if (symbol.empty())
+			return false;
+		name.assign(symbol.data(), symbol.size());
+		return true;
+	}
+
+	// map files use the addresses of the unrelocated RPL
+	std::optional<MPTR> RelocateMapAddress(const DebuggerModuleInfo& info, uint32 addr)
+	{
+		for (const DebuggerModuleInfo::ModuleArea* area : {&info.textArea, &info.dataArea})
+		{
+			if (area->ContainsOriginalAddress(addr))
+				return area->base + (addr - area->origBase);
+		}
+		return std::nullopt;
+	}
+
+	bool IsCodeBreakpointType(sint32 type)
+	{
+		return type == DEBUGGER_BP_T_NORMAL || type == DEBUGGER_BP_T_LOGGING;
+	}
+
+	std::optional<uint32> ModuleRelative(const DebuggerModuleInfo::ModuleArea& area, uint32 addr)
+	{
+		if (!area.ContainsAddress(addr))
+			return std::nullopt;
+		return addr - area.base;
+	}
+
+	void SetInterpreterOnly(bool interpreter)
+	{
+		if (interpreter)
+		{
+			PPCRecompiler_Disable();
+			cemuLog_log(LogType::Force, "Debugger: Switched CPU mode to interpreter");
+		}
+		else
+		{
+			PPCRecompiler_Enable();
+			cemuLog_log(LogType::Force, "Debugger: Switched CPU mode to recompiler");
+		}
+	}
+
+	wxColour ToolTint()
+	{
+		return wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
+	}
+
+	template<size_t N>
+	wxBitmap Icon(const unsigned char (&png)[N], const wxColour& tint)
+	{
+		return wxHelper::LoadThemedBitmapFromPNG(png, N, tint);
+	}
+
+	wxString ModuleCaption(const char* name)
+	{
+		return wxString::Format("> %s", name);
+	}
 }
 
-static bool TryParseMapSymbolLine(std::string_view rawLine, uint32& address, std::string& symbolName)
+// ---------------------------------------------------------------------------
+// configuration
+
+DebuggerModuleInfo::DebuggerModuleInfo(RPLModule* module)
+	: moduleName(module->moduleName), patchCRC(module->patchCRC)
 {
-	auto line = rawLine;
-	trim(line);
-	if (line.empty())
-		return false;
-
-	const auto addressEnd = line.find_first_of(" \t");
-	if (addressEnd == std::string_view::npos)
-		return false;
-	if (!TryParseMapAddress(line.substr(0, addressEnd), address))
-		return false;
-
-	line = line.substr(addressEnd + 1);
-	trim(line);
-	if (line.empty())
-		return false;
-
-	const auto symbolEnd = line.find_first_of(" \t");
-	auto symbolToken = symbolEnd == std::string_view::npos ? line : line.substr(0, symbolEnd);
-	trim(symbolToken);
-	if (symbolToken.empty())
-		return false;
-
-	symbolName.assign(symbolToken);
-	return true;
-}
-
-static std::optional<MPTR> GetRelocatedMapAddress(const DebuggerModuleInfo& moduleInfo, uint32 mapAddress)
-{
-	if (moduleInfo.textArea.ContainsOriginalAddress(mapAddress))
-		return moduleInfo.textArea.base + (mapAddress - moduleInfo.textArea.origBase);
-	if (moduleInfo.dataArea.ContainsOriginalAddress(mapAddress))
-		return moduleInfo.dataArea.base + (mapAddress - moduleInfo.dataArea.origBase);
-	return std::nullopt;
+	textArea = {module->regionMappingBase_text.GetMPTR(), module->regionOrigAddr_text, module->regionSize_text};
+	dataArea = {module->regionMappingBase_data, module->regionOrigAddr_data, module->regionSize_data};
 }
 
 void DebuggerConfig::Load(XMLConfigParser& parser)
@@ -167,13 +187,13 @@ void DebuggerConfig::Load(XMLConfigParser& parser)
 	break_on_start = parser.get("break_on_start", true);
 	log_memory_breakpoints = parser.get("log_memory_breakpoints", false);
 
-	auto window_parser = parser.get("Windows");
-	show_register = window_parser.get("Registers", true);
-	show_dump = window_parser.get("MemoryDump", true);
-	show_stack = window_parser.get("Stack", true);
-	show_breakpoints = window_parser.get("Breakpoints", true);
-	show_modules = window_parser.get("Modules", true);
-	show_symbols = window_parser.get("Symbols", true);
+	auto windows = parser.get("Windows");
+	show_register = windows.get("Registers", true);
+	show_dump = windows.get("MemoryDump", true);
+	show_stack = windows.get("Stack", true);
+	show_breakpoints = windows.get("Breakpoints", true);
+	show_modules = windows.get("Modules", true);
+	show_symbols = windows.get("Symbols", true);
 }
 
 void DebuggerConfig::Save(XMLConfigParser& parser)
@@ -182,464 +202,562 @@ void DebuggerConfig::Save(XMLConfigParser& parser)
 	parser.set("break_on_start", break_on_start);
 	parser.set("log_memory_breakpoints", log_memory_breakpoints);
 
-	auto window_parser = parser.set("Windows");
-	window_parser.set("Registers", show_register);
-	window_parser.set("MemoryDump", show_dump);
-	window_parser.set("Stack", show_stack);
-	window_parser.set("Breakpoints", show_breakpoints);
-	window_parser.set("Modules", show_modules);
-	window_parser.set("Symbols", show_symbols);
+	auto windows = parser.set("Windows");
+	windows.set("Registers", show_register);
+	windows.set("MemoryDump", show_dump);
+	windows.set("Stack", show_stack);
+	windows.set("Breakpoints", show_breakpoints);
+	windows.set("Modules", show_modules);
+	windows.set("Symbols", show_symbols);
 }
 
 void DebuggerModuleStorage::Load(XMLConfigParser& parser)
 {
-	auto breakpoints_parser = parser.get("Breakpoints");
-	for (auto element = breakpoints_parser.get("Entry"); element.valid(); element = breakpoints_parser.get("Entry", element))
+	auto bpList = parser.get("Breakpoints");
+	for (auto entry = bpList.get("Entry"); entry.valid(); entry = bpList.get("Entry", entry))
 	{
-		const auto address_string = element.get("Address", "");
-		if (*address_string == '\0')
+		const uint32 offset = std::strtoul(entry.get("Address", ""), nullptr, 16);
+		if (offset == 0)
 			continue;
+		const sint32 type = entry.get("Type", 0);
+		const bool enabled = entry.get("Enabled", true);
+		const std::string comment = entry.get("Comment", "");
 
-		uint32 relative_address = std::strtoul(address_string, nullptr, 16);
-		if (relative_address == 0)
-			continue;
-
-		auto type = element.get("Type", 0);
-		auto enabled = element.get("Enabled", true);
-		const auto comment = element.get("Comment", "");
-
-		// calculate absolute address
-		uint32 module_base_address = (type == DEBUGGER_BP_T_NORMAL || type == DEBUGGER_BP_T_LOGGING) ? this->moduleInfo.textArea.base : this->moduleInfo.dataArea.base;
-		uint32 address = module_base_address + relative_address;
-
-		// don't change anything if there's already a breakpoint
+		const uint32 address = (IsCodeBreakpointType(type) ? moduleInfo.textArea.base : moduleInfo.dataArea.base) + offset;
+		// a breakpoint already set here wins over the stored one
 		if (debugger_getFirstBP(address) != nullptr)
 			continue;
 
-		// register breakpoints in debugger
-		if (type == DEBUGGER_BP_T_NORMAL)
-			debugger_createCodeBreakpoint(address, DEBUGGER_BP_T_NORMAL);
-		else if (type == DEBUGGER_BP_T_LOGGING)
-			debugger_createCodeBreakpoint(address, DEBUGGER_BP_T_LOGGING);
-		else if (type == DEBUGGER_BP_T_MEMORY_READ)
+		switch (type)
+		{
+		case DEBUGGER_BP_T_NORMAL:
+		case DEBUGGER_BP_T_LOGGING:
+			debugger_createCodeBreakpoint(address, (uint8)type);
+			break;
+		case DEBUGGER_BP_T_MEMORY_READ:
 			debugger_createMemoryBreakpoint(address, true, false);
-		else if (type == DEBUGGER_BP_T_MEMORY_WRITE)
+			break;
+		case DEBUGGER_BP_T_MEMORY_WRITE:
 			debugger_createMemoryBreakpoint(address, false, true);
-		else
+			break;
+		default:
 			continue;
+		}
 
-		DebuggerBreakpoint* debugBreakpoint = debugger_getFirstBP(address);
-
+		DebuggerBreakpoint* created = debugger_getFirstBP(address);
 		if (!enabled)
-			debugger_toggleBreakpoint(address, false, debugBreakpoint);
-
-		debugBreakpoint->comment = boost::nowide::widen(comment);
+			debugger_toggleBreakpoint(address, false, created);
+		created->comment = boost::nowide::widen(comment);
 	}
 
-	auto comments_parser = parser.get("Comments");
-	for (XMLConfigParser element = comments_parser.get("Entry"); element.valid(); element = comments_parser.get("Entry", element))
+	auto commentList = parser.get("Comments");
+	for (auto entry = commentList.get("Entry"); entry.valid(); entry = commentList.get("Entry", entry))
 	{
-		const auto address_string = element.get("Address", "");
-		if (*address_string == '\0')
+		const uint32 address = std::strtoul(entry.get("Address", ""), nullptr, 16);
+		const char* text = entry.get("Comment", "");
+		if (address == 0 || *text == '\0')
 			continue;
-
-		uint32 address = std::strtoul(address_string, nullptr, 16);
-		if (address == 0)
-			continue;
-
-		const auto comment = element.get("Comment", "");
-		if (*comment == '\0')
-			continue;
-
-		rplDebugSymbol_createComment(address, boost::nowide::widen(comment).c_str());
+		rplDebugSymbol_createComment(address, boost::nowide::widen(text).c_str());
 	}
 }
 
 void DebuggerModuleStorage::Save(XMLConfigParser& parser)
 {
-	auto breakpoints_parser = parser.set("Breakpoints");
-	auto& breakpoints = debugger_lockBreakpoints();
-	for (const auto& bp : breakpoints)
+	// breakpoints: the first one at each address, stored relative to its section
+	std::vector<BreakpointId> toDelete;
+	auto bpList = parser.set("Breakpoints");
+	for (DebuggerBreakpoint* bp : debugger_lockBreakpoints())
 	{
-		// check breakpoint type
 		if (bp->dbType != DEBUGGER_BP_T_DEBUGGER)
 			continue;
-
-		// check whether the breakpoint is part of the current module being saved
-		uint32 relativeAddress;
-		if (moduleInfo.textArea.ContainsAddress(bp->address))
-			relativeAddress = bp->address - moduleInfo.textArea.base;
-		else if (moduleInfo.dataArea.ContainsAddress(bp->address))
-			relativeAddress = bp->address - moduleInfo.dataArea.base;
-		else
+		std::optional<uint32> offset = ModuleRelative(moduleInfo.textArea, bp->address);
+		if (!offset)
+			offset = ModuleRelative(moduleInfo.dataArea, bp->address);
+		if (!offset)
 			continue;
 
-		auto entry = breakpoints_parser.set("Entry");
-		entry.set("Address", fmt::format("{:#10x}", relativeAddress));
+		auto entry = bpList.set("Entry");
+		entry.set("Address", fmt::format("{:#10x}", *offset));
 		entry.set("Comment", boost::nowide::narrow(bp->comment).c_str());
 		entry.set("Type", bp->bpType);
 		entry.set("Enabled", bp->enabled);
-
-		if (this->delete_breakpoints_after_saving)
-			debugger_deleteBreakpoint(bp->id);
-		this->delete_breakpoints_after_saving = false;
+		if (delete_breakpoints_after_saving)
+			toDelete.emplace_back(bp->id);
 	}
 	debugger_unlockBreakpoints();
+	// deleting reshapes the breakpoint list, so do it after walking it
+	for (BreakpointId id : toDelete)
+		debugger_deleteBreakpoint(id);
+	delete_breakpoints_after_saving = false;
 
-	auto comments_parser = parser.set("Comments");
-	for (const auto& comment_entry : rplDebugSymbol_getSymbols())
+	// comments inside this module's code
+	auto commentList = parser.set("Comments");
+	for (const auto& [address, symbol] : rplDebugSymbol_getSymbols())
 	{
-		// check comment type
-		const auto commentAddress = comment_entry.first;
-		const auto comment = static_cast<rplDebugSymbolComment*>(comment_entry.second);
-		if (!comment || comment->type != RplDebugSymbolComment)
+		const auto* comment = static_cast<rplDebugSymbolComment*>(symbol);
+		if (comment == nullptr || comment->type != RplDebugSymbolComment)
 			continue;
-
-		// check whether the comment is part of the current module being saved
-		uint32 relativeAddress;
-		if (moduleInfo.textArea.ContainsAddress(commentAddress))
-			relativeAddress = commentAddress - moduleInfo.textArea.base;
-		else
+		const std::optional<uint32> offset = ModuleRelative(moduleInfo.textArea, address);
+		if (!offset)
 			continue;
-
-		auto entry = comments_parser.set("Entry");
-		entry.set("Address", fmt::format("{:#10x}", relativeAddress));
+		auto entry = commentList.set("Entry");
+		entry.set("Address", fmt::format("{:#10x}", *offset));
 		entry.set("Comment", boost::nowide::narrow(comment->comment).c_str());
 	}
 }
 
-void DebuggerWindow2::CreateToolBar()
+// ---------------------------------------------------------------------------
+// module storage
+
+std::wstring DebuggerWindow2::GetModuleStoragePath(std::string module_name, uint32_t crc_hash) const
 {
-	m_toolbar = new wxToolBar(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
-		wxTB_HORIZONTAL | wxTB_NODIVIDER | wxTB_NOALIGN);
-	m_toolbar->SetToolBitmapSize(wxSize(16, 16));
-
-	wxBitmap goto_bitmap = wxHelper::LoadThemedBitmapFromPNG(DEBUGGER_GOTO_png, sizeof(DEBUGGER_GOTO_png), wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-	m_toolbar->AddTool(TOOL_ID_GOTO, wxEmptyString, goto_bitmap, wxNullBitmap, wxITEM_NORMAL, _("GoTo (CTRL + G)"), "test", NULL);
-	m_toolbar->AddSeparator();
-
-	wxBitmap bp_bitmap = wxHelper::LoadThemedBitmapFromPNG(DEBUGGER_BP_RED_png, sizeof(DEBUGGER_BP_RED_png), wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-	m_toolbar->AddTool(TOOL_ID_BP, wxEmptyString, bp_bitmap, wxNullBitmap, wxITEM_NORMAL, _("Toggle Breakpoint (F9)"), wxEmptyString, NULL);
-	m_toolbar->AddSeparator();
-
-	m_pause = wxHelper::LoadThemedBitmapFromPNG(DEBUGGER_PAUSE_png, sizeof(DEBUGGER_PAUSE_png), wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-	m_run = wxHelper::LoadThemedBitmapFromPNG(DEBUGGER_PLAY_png, sizeof(DEBUGGER_PLAY_png), wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-	m_toolbar->AddTool(TOOL_ID_PAUSE, wxEmptyString, m_pause, wxNullBitmap, wxITEM_NORMAL, _("Break (F5)"), wxEmptyString, NULL);
-
-	wxBitmap step_into_bitmap = wxHelper::LoadThemedBitmapFromPNG(DEBUGGER_STEP_INTO_png, sizeof(DEBUGGER_STEP_INTO_png), wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-	wxBitmap step_over_bitmap = wxHelper::LoadThemedBitmapFromPNG(DEBUGGER_STEP_OVER_png, sizeof(DEBUGGER_STEP_OVER_png), wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-	m_toolbar->AddTool(TOOL_ID_STEP_INTO, wxEmptyString, step_into_bitmap, wxNullBitmap, wxITEM_NORMAL, _("Step Into (F11)"), wxEmptyString, NULL);
-	m_toolbar->AddTool(TOOL_ID_STEP_OVER, wxEmptyString, step_over_bitmap, wxNullBitmap, wxITEM_NORMAL, _("Step Over (F10)"), wxEmptyString, NULL);
-	m_toolbar->AddSeparator();
-
-	m_toolbar->Realize();
-
-	m_toolbar->EnableTool(TOOL_ID_STEP_INTO, false);
-	m_toolbar->EnableTool(TOOL_ID_STEP_OVER, false);
-
+	if (module_name.empty() || crc_hash == 0)
+		return {};
+	return ActiveSettings::GetConfigPath("debugger/{}_{:#10x}.xml", module_name, crc_hash).generic_wstring();
 }
 
-void DebuggerWindow2::UpdateAppearance()
+std::wstring DebuggerWindow2::GetModuleMapPath(std::string module_name, uint32_t crc_hash) const
 {
-	const auto foreground = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
-	const auto disabled = wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT);
-	auto updateTool = [&](int id, const auto& png) {
-		m_toolbar->SetToolNormalBitmap(id, wxHelper::LoadThemedBitmapFromPNG(png, sizeof(png), foreground));
-		m_toolbar->SetToolDisabledBitmap(id, wxHelper::LoadThemedBitmapFromPNG(png, sizeof(png), disabled));
-	};
-	updateTool(TOOL_ID_GOTO, DEBUGGER_GOTO_png);
-	updateTool(TOOL_ID_BP, DEBUGGER_BP_RED_png);
-	updateTool(TOOL_ID_STEP_INTO, DEBUGGER_STEP_INTO_png);
-	updateTool(TOOL_ID_STEP_OVER, DEBUGGER_STEP_OVER_png);
-	m_pause = wxHelper::LoadThemedBitmapFromPNG(DEBUGGER_PAUSE_png, sizeof(DEBUGGER_PAUSE_png), foreground);
-	m_run = wxHelper::LoadThemedBitmapFromPNG(DEBUGGER_PLAY_png, sizeof(DEBUGGER_PLAY_png), foreground);
-	m_toolbar->SetToolNormalBitmap(TOOL_ID_PAUSE, debugger_isTrapped() ? m_run : m_pause);
-	m_module_label->SetForegroundColour(wxSystemSettings::SelectLightDark(wxColour(0x88, 0x27, 0xAA), wxColour(0xDC, 0xA0, 0xF0)));
-	m_toolbar->Refresh();
-	Refresh();
+	if (module_name.empty() || crc_hash == 0)
+		return {};
+	return ActiveSettings::GetConfigPath("debugger/{}_{:#10x}.map", module_name, crc_hash).generic_wstring();
 }
 
 void DebuggerWindow2::LoadModuleStorage(const DebuggerModuleInfo& moduleInfo)
 {
-	auto path = GetModuleStoragePath(moduleInfo.moduleName, moduleInfo.patchCRC);
-	bool already_loaded = std::any_of(m_modulesStorage.begin(), m_modulesStorage.end(), [path](const std::unique_ptr<XMLDebuggerModuleConfig>& debug) { return debug->GetFilename() == path; });
-	if (!path.empty() && !already_loaded)
+	const std::wstring path = GetModuleStoragePath(moduleInfo.moduleName, moduleInfo.patchCRC);
+	if (path.empty())
+		return;
+	for (const auto& existing : m_modulesStorage)
 	{
-		auto& moduleStorage = m_modulesStorage.emplace_back(new XMLDebuggerModuleConfig(path, { moduleInfo, false }));
-		moduleStorage->Load();
-		LoadModuleMap(moduleStorage->data());
+		if (existing->GetFilename() == path)
+			return;
 	}
+	m_modulesStorage.emplace_back(std::make_unique<XMLDebuggerModuleConfig>(path, DebuggerModuleStorage{moduleInfo, false}));
+	XMLDebuggerModuleConfig& storage = *m_modulesStorage.back();
+	storage.Load();
+	LoadModuleMap(storage.data());
 }
 
 void DebuggerWindow2::SaveModuleStorage(const DebuggerModuleInfo& moduleInfo, bool deleteModuleStorage)
 {
-	auto path = GetModuleStoragePath(moduleInfo.moduleName, moduleInfo.patchCRC);
-	for (auto it = m_modulesStorage.begin(); it != m_modulesStorage.end(); ++it)
-	{
-		auto& moduleStorage = *it;
-		if (moduleStorage->data().moduleInfo.moduleName == moduleInfo.moduleName && moduleStorage->data().moduleInfo.patchCRC == moduleInfo.patchCRC)
-		{
-			moduleStorage->data().delete_breakpoints_after_saving = deleteModuleStorage; // make sure breakpoints are deleted when the storage is removed
-			moduleStorage->Save(path);
-			if (deleteModuleStorage)
-			{
-				UnloadModuleMap(moduleStorage->data());
-				m_modulesStorage.erase(it);
-			}
-			return;
-		}
-	}
+	const std::wstring path = GetModuleStoragePath(moduleInfo.moduleName, moduleInfo.patchCRC);
+	auto match = std::find_if(m_modulesStorage.begin(), m_modulesStorage.end(), [&](const std::unique_ptr<XMLDebuggerModuleConfig>& s) {
+		const DebuggerModuleInfo& info = s->data().moduleInfo;
+		return info.moduleName == moduleInfo.moduleName && info.patchCRC == moduleInfo.patchCRC;
+	});
+	if (match == m_modulesStorage.end())
+		return;
+	// dropping the storage also drops the module's breakpoints
+	(*match)->data().delete_breakpoints_after_saving = deleteModuleStorage;
+	(*match)->Save(path);
+	if (!deleteModuleStorage)
+		return;
+	UnloadModuleMap((*match)->data());
+	m_modulesStorage.erase(match);
 }
 
-void DebuggerWindow2::LoadModuleMap(DebuggerModuleStorage& moduleStorage)
+void DebuggerWindow2::LoadModuleMap(DebuggerModuleStorage& storage)
 {
-	UnloadModuleMap(moduleStorage);
-
-	const auto mapPath = GetModuleMapPath(moduleStorage.moduleInfo.moduleName, moduleStorage.moduleInfo.patchCRC);
-	if (mapPath.empty())
+	UnloadModuleMap(storage);
+	const DebuggerModuleInfo& info = storage.moduleInfo;
+	const std::wstring path = GetModuleMapPath(info.moduleName, info.patchCRC);
+	if (path.empty())
+		return;
+	std::unique_ptr<FileStream> file(FileStream::openFile(path.c_str()));
+	if (!file)
+		return;
+	const uint64 size = file->GetSize();
+	if (size == 0 || size > 0xFFFFFFFFull)
+		return;
+	std::vector<char> text((size_t)size);
+	if (file->readData(text.data(), (uint32)size) != (uint32)size)
 		return;
 
-	std::unique_ptr<FileStream> fileStream(FileStream::openFile(mapPath.c_str()));
-	if (!fileStream)
-		return;
-
-	const auto fileSize = fileStream->GetSize();
-	if (fileSize == 0 || fileSize > std::numeric_limits<uint32>::max())
-		return;
-
-	const auto readSize = static_cast<uint32>(fileSize);
-	std::vector<char> fileData(readSize);
-	if (fileStream->readData(fileData.data(), readSize) != readSize)
-		return;
-
-	std::string_view fileView(fileData.data(), fileData.size());
-	for (const auto& line : StringHelpers::StringLineIterator(fileView))
+	for (std::string_view line : StringHelpers::StringLineIterator(std::string_view(text.data(), text.size())))
 	{
-		uint32 mapAddress = 0;
-		std::string symbolName;
-		if (TryParseMapSymbolLine(line, mapAddress, symbolName))
-		{
-			const auto relocatedAddress = GetRelocatedMapAddress(moduleStorage.moduleInfo, mapAddress);
-			if (relocatedAddress)
-			{
-				moduleStorage.loaded_map_symbols.emplace_back(rplSymbolStorage_store(moduleStorage.moduleInfo.moduleName.c_str(), symbolName.c_str(), *relocatedAddress, RPL_STORED_SYMBOL_MAP));
-			}
-		}
+		uint32 mapAddr = 0;
+		std::string name;
+		if (!ParseMapLine(line, mapAddr, name))
+			continue;
+		if (const std::optional<MPTR> addr = RelocateMapAddress(info, mapAddr))
+			storage.loaded_map_symbols.emplace_back(rplSymbolStorage_store(info.moduleName.c_str(), name.c_str(), *addr, RPL_STORED_SYMBOL_MAP));
 	}
 }
 
-void DebuggerWindow2::UnloadModuleMap(DebuggerModuleStorage& moduleStorage)
+void DebuggerWindow2::UnloadModuleMap(DebuggerModuleStorage& storage)
 {
-	for (auto* symbol : moduleStorage.loaded_map_symbols)
+	for (RPLStoredSymbol* sym : storage.loaded_map_symbols)
 	{
-		if (symbol)
-			rplSymbolStorage_remove(symbol);
+		if (sym != nullptr)
+			rplSymbolStorage_remove(sym);
 	}
-	moduleStorage.loaded_map_symbols.clear();
+	storage.loaded_map_symbols.clear();
 }
+
+// ---------------------------------------------------------------------------
+// window
 
 DebuggerWindow2::DebuggerWindow2(wxFrame& parent, const wxRect& display_size)
-	: wxFrame(&parent, wxID_ANY, _("PPC Debugger"), wxDefaultPosition, wxSize(1280, 300), wxMINIMIZE_BOX | wxMAXIMIZE_BOX | wxSYSTEM_MENU | wxCAPTION | wxCLOSE_BOX | wxCLIP_CHILDREN | wxRESIZE_BORDER | wxFRAME_FLOAT_ON_PARENT),
-		m_module_address(0)
+	: wxFrame(&parent, wxID_ANY, _("PPC Debugger"), wxDefaultPosition, wxSize(1280, 300), wxMINIMIZE_BOX | wxMAXIMIZE_BOX | wxSYSTEM_MENU | wxCAPTION | wxCLOSE_BOX | wxCLIP_CHILDREN | wxRESIZE_BORDER | wxFRAME_FLOAT_ON_PARENT)
 {
 	g_debuggerDispatcher.SetDebuggerCallbacks(this);
 
-	const auto file = ActiveSettings::GetConfigPath("debugger/config.xml");
-	m_config.SetFilename(file.generic_wstring());
+	m_config.SetFilename(ActiveSettings::GetConfigPath("debugger/config.xml").generic_wstring());
 	m_config.Load();
-
 	debugger_setOptionBreakOnEntry(m_config.data().break_on_start);
 	debugger_setOptionLogOnlyMemoryBreakpoints(m_config.data().log_memory_breakpoints);
 
-	m_main_position = parent.GetPosition();
-	m_main_size = parent.GetSize();
+	m_mainPos = parent.GetPosition();
+	m_mainSize = parent.GetSize();
+	// 80% of the screen height left over by the main window, at least 300px
+	const double spare = (display_size.GetHeight() - 800) * 0.8;
+	SetSize(1280, spare > 300.0 ? (int)spare : 300);
 
-	auto y = std::max<uint32>(300, (display_size.GetHeight() - 500 - 300) * 0.8);
-	this->SetSize(1280, y);
-
-	CreateMenuBar();
+	BuildMenus();
 	CreateToolBar();
 
-	wxBoxSizer* main_sizer = new wxBoxSizer(wxVERTICAL);
-	main_sizer->Add(m_toolbar, 0, wxEXPAND);
+	auto* layout = new wxBoxSizer(wxVERTICAL);
+	layout->Add(m_toolbar, 0, wxEXPAND);
 
-	// load configs and module storage for already loaded modules
-	const auto module_list = RPLLoader_GetModuleList();
-	for (sint32 i = 0; i < module_list.size(); i++)
-	{
-		const auto module = module_list[i];
-		DebuggerModuleInfo moduleInfo(module);
-		LoadModuleStorage(moduleInfo);
-	}
+	// modules that were loaded before the debugger opened
+	const auto modules = RPLLoader_GetModuleList();
+	for (RPLModule* mod : modules)
+		LoadModuleStorage(DebuggerModuleInfo(mod));
 
-	wxString label_text = _("> no modules loaded");
-	if (module_list.size() != 0)
+	wxString caption = _("> no modules loaded");
+	if (!modules.empty())
 	{
-		RPLModule* currentModule = RPLLoader_FindModuleByCodeAddr(MEMORY_CODEAREA_ADDR);
-		if (currentModule)
-			label_text = wxString::Format("> %s", currentModule->moduleName.c_str());
+		if (RPLModule* main = RPLLoader_FindModuleByCodeAddr(MEMORY_CODEAREA_ADDR))
+			caption = ModuleCaption(main->moduleName.c_str());
 		else
-			label_text = _("> unknown module");
+			caption = _("> unknown module");
 	}
+	m_moduleLabel = new wxStaticText(this, wxID_ANY, caption);
+	layout->Add(m_moduleLabel, 0, wxEXPAND | wxALL, 5);
 
-	m_module_label = new wxStaticText(this, wxID_ANY, label_text);
-	main_sizer->Add(m_module_label, 0, wxEXPAND | wxALL, 5);
+	m_disasm = new DisasmCtrl(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxScrolledWindowStyle);
+	layout->Add(m_disasm, 1, wxEXPAND);
+	SetSizer(layout);
+	wxWindowBase::Layout();
 
-	m_disasm_ctrl = new DisasmCtrl(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxScrolledWindowStyle);
-	main_sizer->Add(m_disasm_ctrl, 1, wxEXPAND);
+	m_registers = new RegisterWindow(*this, m_mainPos, m_mainSize);
+	m_dump = new DumpWindow(*this, m_mainPos, m_mainSize);
+	m_breakpoints = new BreakpointWindow(*this, m_mainPos, m_mainSize);
+	m_modules = new ModuleWindow(*this, m_mainPos, m_mainSize);
+	m_symbols = new SymbolWindow(*this, m_mainPos, m_mainSize);
 
-	this->SetSizer(main_sizer);
-	this->wxWindowBase::Layout();
-
-	m_register_window = new RegisterWindow(*this, m_main_position, m_main_size);
-	m_dump_window = new DumpWindow(*this, m_main_position, m_main_size);
-	m_breakpoint_window = new BreakpointWindow(*this, m_main_position, m_main_size);
-	m_module_window = new ModuleWindow(*this, m_main_position, m_main_size);
-	m_symbol_window = new SymbolWindow(*this, m_main_position, m_main_size);
-
-	const bool value = m_config.data().pin_to_main;
+	// the first layout always docks to the main window, whatever the pin option says
+	const bool pinned = m_config.data().pin_to_main;
 	m_config.data().pin_to_main = true;
-	OnParentMove(m_main_position, m_main_size);
-	m_config.data().pin_to_main = value;
+	OnParentMove(m_mainPos, m_mainSize);
+	m_config.data().pin_to_main = pinned;
+
+	Bind(wxEVT_SHOW, &DebuggerWindow2::OnShowEvent, this);
+	Bind(wxEVT_CLOSE_WINDOW, &DebuggerWindow2::OnCloseEvent, this);
+	Bind(wxEVT_MENU, &DebuggerWindow2::OnToolbar, this, ID_TOOL_GOTO, ID_TOOL_STEP_INTO);
+	Bind(wxEVT_MENU, [this](wxCommandEvent&) { Close(); }, ID_EXIT);
+	Bind(wxEVT_MENU, &DebuggerWindow2::OnOptionsMenu, this, ID_OPT_PIN, ID_OPT_INTERPRETER);
+	Bind(wxEVT_MENU, &DebuggerWindow2::OnWindowMenu, this, ID_WIN_REGISTERS, ID_WIN_SYMBOLS);
+
+	// views
+	Bind(wxEVT_UPDATE_VIEW, [this](wxCommandEvent&) {
+		ShowModuleOf();
+		m_disasm->OnUpdateView();
+		m_registers->OnUpdateView();
+		m_breakpoints->OnUpdateView();
+	});
+	Bind(wxEVT_BREAKPOINT_CHANGE, [this](wxCommandEvent&) {
+		m_breakpoints->OnUpdateView();
+		m_disasm->RefreshControl();
+		ShowModuleOf();
+	});
+	Bind(wxEVT_MOVE_TO_DISASM_ADDR, [this](wxCommandEvent& evt) {
+		const MPTR target = (MPTR)(uintptr_t)evt.GetClientData();
+		if (target == 0)
+			return;
+		ShowModuleOf(target);
+		m_disasm->CenterOffset(target);
+	});
+	Bind(wxEVT_DISASMCTRL_NOTIFY_GOTO_ADDRESS, [this](wxCommandEvent& evt) {
+		ShowModuleOf((uint32)evt.GetExtraLong());
+	});
+
+	// execution state
+	Bind(wxEVT_BREAKPOINT_HIT, [this](wxCommandEvent&) {
+		PPCInterpreter_t* cpu = debugger_lockDebugSession();
+		if (cpu == nullptr)
+			return;
+		const MPTR ip = cpu->instructionPointer;
+		debugger_unlockDebugSession(cpu);
+		ShowModuleOf(ip);
+		SetTrappedState(true);
+		m_disasm->CenterOffset(ip);
+	});
+	Bind(wxEVT_RUN, [this](wxCommandEvent&) { SetTrappedState(false); });
+
+	// module list changes
+	Bind(wxEVT_NOTIFY_MODULE_LOADED, [this](wxCommandEvent& evt) {
+		LoadModuleStorage(static_cast<ModuleNotice*>(evt.GetClientObject())->info);
+		ReloadModuleViews();
+	});
+	Bind(wxEVT_NOTIFY_MODULE_UNLOADED, [this](wxCommandEvent& evt) {
+		SaveModuleStorage(static_cast<ModuleNotice*>(evt.GetClientObject())->info, true);
+		ReloadModuleViews();
+	});
+	Bind(wxEVT_NOTIFY_GRAPHIC_PACKS_MODIFIED, [this](wxCommandEvent&) { ReloadModuleViews(); });
 
 	s_debuggerWindow = this;
-	UpdateAppearance();
-	Bind(wxEVT_SYS_COLOUR_CHANGED, [this](wxSysColourChangedEvent& event) {
-		event.Skip();
-		CallAfter(&DebuggerWindow2::UpdateAppearance);
+	ApplyTheme();
+	Bind(wxEVT_SYS_COLOUR_CHANGED, [this](wxSysColourChangedEvent& evt) {
+		evt.Skip();
+		CallAfter(&DebuggerWindow2::ApplyTheme);
 	});
 }
 
 DebuggerWindow2::~DebuggerWindow2()
 {
 	g_debuggerDispatcher.ClearDebuggerCallbacks();
-
 	s_debuggerWindow = nullptr;
-
 	CleanupForDestroy();
 
-	if (m_register_window && m_register_window->IsShown())
-		m_register_window->Close(true);
+	ForEachToolWindow([](wxFrame& w) {
+		if (w.IsShown())
+			w.Close(true);
+	});
 
-	if (m_dump_window && m_dump_window->IsShown())
-		m_dump_window->Close(true);
-
-	if (m_breakpoint_window && m_breakpoint_window->IsShown())
-		m_breakpoint_window->Close(true);
-
-	if (m_module_window && m_module_window->IsShown())
-		m_module_window->Close(true);
-
-	if (m_symbol_window && m_symbol_window->IsShown())
-		m_symbol_window->Close(true);
-
-	// reenable recompiler if force interpreter option was enabled
 	if (m_forceInterpreter)
 	{
-		PPCRecompiler_Enable();
 		m_forceInterpreter = false;
-		cemuLog_log(LogType::Force, "Debugger: Switched CPU mode to recompiler");
+		SetInterpreterOnly(false);
 	}
 }
 
-// note: Can be called twice in some circumstances where early cleanup is needed. Will also always be called from destructor
 void DebuggerWindow2::CleanupForDestroy()
 {
 	debugger_setOptionBreakOnEntry(false);
-	// save module storage
 	while (!m_modulesStorage.empty())
+		SaveModuleStorage(m_modulesStorage.front()->data().moduleInfo, true);
+	m_config.Save();
+}
+
+void DebuggerWindow2::ForEachToolWindow(const std::function<void(wxFrame&)>& fn)
+{
+	for (wxFrame* w : std::initializer_list<wxFrame*>{m_registers, m_dump, m_breakpoints, m_modules, m_symbols})
 	{
-		SaveModuleStorage(m_modulesStorage[0]->data().moduleInfo, true); // deleting the module storage will also delete breakpoints belonging to the module's data
+		if (w != nullptr)
+			fn(*w);
+	}
+}
+
+void DebuggerWindow2::CreateToolBar()
+{
+	m_toolbar = new wxToolBar(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTB_HORIZONTAL | wxTB_NODIVIDER | wxTB_NOALIGN);
+	m_toolbar->SetToolBitmapSize(wxSize(16, 16));
+	const wxColour tint = ToolTint();
+
+	m_toolbar->AddTool(ID_TOOL_GOTO, wxEmptyString, Icon(DEBUGGER_GOTO_png, tint), wxNullBitmap, wxITEM_NORMAL, _("GoTo (CTRL + G)"), "test", nullptr);
+	m_toolbar->AddSeparator();
+	m_toolbar->AddTool(ID_TOOL_BREAKPOINT, wxEmptyString, Icon(DEBUGGER_BP_RED_png, tint), wxNullBitmap, wxITEM_NORMAL, _("Toggle Breakpoint (F9)"), wxEmptyString, nullptr);
+	m_toolbar->AddSeparator();
+
+	m_breakIcon = Icon(DEBUGGER_PAUSE_png, tint);
+	m_runIcon = Icon(DEBUGGER_PLAY_png, tint);
+	m_toolbar->AddTool(ID_TOOL_RUN_BREAK, wxEmptyString, m_breakIcon, wxNullBitmap, wxITEM_NORMAL, _("Break (F5)"), wxEmptyString, nullptr);
+	m_toolbar->AddTool(ID_TOOL_STEP_INTO, wxEmptyString, Icon(DEBUGGER_STEP_INTO_png, tint), wxNullBitmap, wxITEM_NORMAL, _("Step Into (F11)"), wxEmptyString, nullptr);
+	m_toolbar->AddTool(ID_TOOL_STEP_OVER, wxEmptyString, Icon(DEBUGGER_STEP_OVER_png, tint), wxNullBitmap, wxITEM_NORMAL, _("Step Over (F10)"), wxEmptyString, nullptr);
+	m_toolbar->AddSeparator();
+	m_toolbar->Realize();
+
+	m_toolbar->EnableTool(ID_TOOL_STEP_INTO, false);
+	m_toolbar->EnableTool(ID_TOOL_STEP_OVER, false);
+}
+
+void DebuggerWindow2::ApplyTheme()
+{
+	const wxColour normal = ToolTint();
+	const wxColour greyed = wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT);
+	auto retint = [&](int tool, const auto& png) {
+		m_toolbar->SetToolNormalBitmap(tool, Icon(png, normal));
+		m_toolbar->SetToolDisabledBitmap(tool, Icon(png, greyed));
+	};
+	retint(ID_TOOL_GOTO, DEBUGGER_GOTO_png);
+	retint(ID_TOOL_BREAKPOINT, DEBUGGER_BP_RED_png);
+	retint(ID_TOOL_STEP_INTO, DEBUGGER_STEP_INTO_png);
+	retint(ID_TOOL_STEP_OVER, DEBUGGER_STEP_OVER_png);
+	m_breakIcon = Icon(DEBUGGER_PAUSE_png, normal);
+	m_runIcon = Icon(DEBUGGER_PLAY_png, normal);
+	m_toolbar->SetToolNormalBitmap(ID_TOOL_RUN_BREAK, debugger_isTrapped() ? m_runIcon : m_breakIcon);
+	m_moduleLabel->SetForegroundColour(wxSystemSettings::SelectLightDark(wxColour(0x88, 0x27, 0xAA), wxColour(0xDC, 0xA0, 0xF0)));
+	m_toolbar->Refresh();
+	Refresh();
+}
+
+void DebuggerWindow2::SetTrappedState(bool trapped)
+{
+	// while trapped the run/break tool resumes and stepping is possible
+	m_toolbar->SetToolShortHelp(ID_TOOL_RUN_BREAK, trapped ? _("Run (F5)") : _("Break (F5)"));
+	m_toolbar->SetToolNormalBitmap(ID_TOOL_RUN_BREAK, trapped ? m_runIcon : m_breakIcon);
+	m_toolbar->EnableTool(ID_TOOL_STEP_INTO, trapped);
+	m_toolbar->EnableTool(ID_TOOL_STEP_OVER, trapped);
+}
+
+void DebuggerWindow2::BuildMenus()
+{
+	const DebuggerConfig& cfg = m_config.data();
+	auto* bar = new wxMenuBar();
+
+	auto* fileMenu = new wxMenu();
+	fileMenu->Append(ID_EXIT, _("&Exit"));
+	bar->Append(fileMenu, _("&File"));
+
+	auto* optionsMenu = new wxMenu();
+	optionsMenu->AppendCheckItem(ID_OPT_PIN, _("&Pin to main window"))->Check(cfg.pin_to_main);
+	optionsMenu->AppendCheckItem(ID_OPT_BREAK_ON_ENTRY, _("Break on &entry point"))->Check(cfg.break_on_start);
+	optionsMenu->AppendCheckItem(ID_OPT_LOG_MEMORY_BPS, _("Log only memory breakpoints"))->Check(cfg.log_memory_breakpoints);
+	optionsMenu->AppendCheckItem(ID_OPT_INTERPRETER, _("Switch to &interpreter CPU mode"));
+	bar->Append(optionsMenu, _("&Options"));
+
+	auto* windowMenu = new wxMenu();
+	windowMenu->AppendCheckItem(ID_WIN_REGISTERS, _("&Registers"))->Check(cfg.show_register);
+	windowMenu->AppendCheckItem(ID_WIN_DUMP, _("&Memory Dump"))->Check(cfg.show_dump);
+	windowMenu->AppendCheckItem(ID_WIN_BREAKPOINTS, _("&Breakpoints"))->Check(cfg.show_breakpoints);
+	windowMenu->AppendCheckItem(ID_WIN_MODULES, _("Module&list"))->Check(cfg.show_modules);
+	windowMenu->AppendCheckItem(ID_WIN_SYMBOLS, _("&Symbols"))->Check(cfg.show_symbols);
+	bar->Append(windowMenu, _("&Window"));
+
+	SetMenuBar(bar);
+}
+
+void DebuggerWindow2::OnToolbar(wxCommandEvent& event)
+{
+	const int id = event.GetId();
+	if (id == ID_TOOL_GOTO)
+	{
+		m_disasm->GoToAddressDialog();
+		return;
+	}
+	if (id == ID_TOOL_RUN_BREAK)
+	{
+		if (debugger_isTrapped())
+			debugger_stepCommand(DebuggerStepCommand::Run);
+		else
+			debugger_requestBreak();
+		return;
+	}
+	if ((id == ID_TOOL_STEP_INTO || id == ID_TOOL_STEP_OVER) && debugger_isTrapped())
+		debugger_stepCommand(id == ID_TOOL_STEP_INTO ? DebuggerStepCommand::StepInto : DebuggerStepCommand::StepOver);
+}
+
+void DebuggerWindow2::OnOptionsMenu(wxCommandEvent& event)
+{
+	DebuggerConfig& cfg = m_config.data();
+	switch (event.GetId())
+	{
+	case ID_OPT_PIN:
+		cfg.pin_to_main = !cfg.pin_to_main;
+		if (cfg.pin_to_main)
+			OnParentMove(m_mainPos, m_mainSize);
+		break;
+	case ID_OPT_BREAK_ON_ENTRY:
+		cfg.break_on_start = !cfg.break_on_start;
+		debugger_setOptionBreakOnEntry(cfg.break_on_start);
+		break;
+	case ID_OPT_LOG_MEMORY_BPS:
+		cfg.log_memory_breakpoints = !cfg.log_memory_breakpoints;
+		debugger_setOptionLogOnlyMemoryBreakpoints(cfg.log_memory_breakpoints);
+		break;
+	case ID_OPT_INTERPRETER:
+		m_forceInterpreter = !m_forceInterpreter;
+		SetInterpreterOnly(m_forceInterpreter);
+		break;
+	default:
+		return;
 	}
 	m_config.Save();
 }
 
-void DebuggerWindow2::OnClose(wxCloseEvent& event)
+void DebuggerWindow2::OnWindowMenu(wxCommandEvent& event)
 {
-	debugger_setOptionBreakOnEntry(false);
-	
-	const wxCloseEvent parentEvent(wxEVT_DEBUGGER_CLOSE);
-	wxPostEvent(m_parent, parentEvent);
+	DebuggerConfig& cfg = m_config.data();
+	bool* flag = nullptr;
+	wxFrame* window = nullptr;
+	switch (event.GetId())
+	{
+	case ID_WIN_REGISTERS: flag = &cfg.show_register; window = m_registers; break;
+	case ID_WIN_DUMP: flag = &cfg.show_dump; window = m_dump; break;
+	case ID_WIN_BREAKPOINTS: flag = &cfg.show_breakpoints; window = m_breakpoints; break;
+	case ID_WIN_MODULES: flag = &cfg.show_modules; window = m_modules; break;
+	case ID_WIN_SYMBOLS: flag = &cfg.show_symbols; window = m_symbols; break;
+	default: return;
+	}
+	*flag = !*flag;
+	window->Show(*flag);
+	m_config.Save();
+}
 
+void DebuggerWindow2::OnShowEvent(wxShowEvent& event)
+{
+	ForEachToolWindow([](wxFrame& w) { w.Show(); });
 	event.Skip();
 }
 
-void DebuggerWindow2::OnMoveToDisasmAddr(wxCommandEvent& event)
+void DebuggerWindow2::OnCloseEvent(wxCloseEvent& event)
 {
-	MPTR address = (uint32)(uint64)event.GetClientData();
-	if (!address)
-		return;
-	UpdateModuleLabel(address);
-	m_disasm_ctrl->CenterOffset(address);
+	debugger_setOptionBreakOnEntry(false);
+	wxPostEvent(m_parent, wxCloseEvent(wxEVT_DEBUGGER_CLOSE));
+	event.Skip();
 }
 
-void DebuggerWindow2::OnDisasmCtrlGotoAddress(wxCommandEvent& event)
+bool DebuggerWindow2::Show(bool show)
 {
-	uint32 address = static_cast<uint32>(event.GetExtraLong());
-	UpdateModuleLabel(address);
+	const bool changed = wxFrame::Show(show);
+	const DebuggerConfig& cfg = m_config.data();
+	m_registers->Show(show && cfg.show_register);
+	m_dump->Show(show && cfg.show_dump);
+	m_breakpoints->Show(show && cfg.show_breakpoints);
+	m_modules->Show(show && cfg.show_modules);
+	m_symbols->Show(show && cfg.show_symbols);
+	return changed;
 }
 
 void DebuggerWindow2::OnParentMove(const wxPoint& main_position, const wxSize& main_size)
 {
-	m_main_position = main_position;
-	m_main_size = main_size;
-
+	m_mainPos = main_position;
+	m_mainSize = main_size;
 	if (!m_config.data().pin_to_main)
 		return;
 
-	wxSize size(m_main_size.x, GetSize().GetHeight());
-	SetSize(size);
+	// directly above the main window, same width
+	const int height = GetSize().GetHeight();
+	SetSize(wxSize(main_size.x, height));
+	SetPosition(wxPoint(main_position.x, main_position.y - height));
 
-	wxPoint position = m_main_position;
-	position.y -= size.y;
-	SetPosition(position);
-
-	m_register_window->OnMainMove(main_position, main_size);
-	m_dump_window->OnMainMove(main_position, main_size);
-	m_breakpoint_window->OnMainMove(main_position, main_size);
-	m_module_window->OnMainMove(main_position, main_size);
-	m_symbol_window->OnMainMove(main_position, main_size);
+	m_registers->OnMainMove(main_position, main_size);
+	m_dump->OnMainMove(main_position, main_size);
+	m_breakpoints->OnMainMove(main_position, main_size);
+	m_modules->OnMainMove(main_position, main_size);
+	m_symbols->OnMainMove(main_position, main_size);
 }
 
-void DebuggerWindow2::OnNotifyModuleLoaded(wxCommandEvent& event)
+void DebuggerWindow2::ReloadModuleViews()
 {
-	DebuggerModuleInfoNotify* moduleNotif = static_cast<DebuggerModuleInfoNotify*>(event.GetClientObject());
-	LoadModuleStorage(moduleNotif->moduleInfo);
-	m_module_window->OnGameLoaded();
-	m_symbol_window->OnGameLoaded();
-	m_disasm_ctrl->Init();
-}
-
-void DebuggerWindow2::OnNotifyModuleUnloaded(wxCommandEvent& event)
-{
-	DebuggerModuleInfoNotify* moduleNotif = static_cast<DebuggerModuleInfoNotify*>(event.GetClientObject());
-	SaveModuleStorage(moduleNotif->moduleInfo, true);
-	m_module_window->OnGameLoaded();
-	m_symbol_window->OnGameLoaded();
-	m_disasm_ctrl->Init();
-}
-
-void DebuggerWindow2::OnNotifyGraphicPacksModified(wxCommandEvent& event)
-{
-	m_module_window->OnGameLoaded();
-	m_symbol_window->OnGameLoaded();
-	m_disasm_ctrl->Init();
+	m_modules->OnGameLoaded();
+	m_symbols->OnGameLoaded();
+	m_disasm->Init();
 }
 
 void DebuggerWindow2::OnGameLoaded()
 {
-	m_disasm_ctrl->Init();
+	m_disasm->Init();
+	m_dump->OnGameLoaded();
+	m_modules->OnGameLoaded();
+	m_breakpoints->OnGameLoaded();
+	m_symbols->OnGameLoaded();
 
-	m_dump_window->OnGameLoaded();
-	m_module_window->OnGameLoaded();
-	m_breakpoint_window->OnGameLoaded();
-	m_symbol_window->OnGameLoaded();
-
-	RPLModule* current_rpl_module = RPLLoader_FindModuleByCodeAddr(MEMORY_CODEAREA_ADDR);
-	if(current_rpl_module)
-		m_module_label->SetLabel(wxString::Format("> %s", current_rpl_module->moduleName.c_str()));	
-
-	this->SendSizeEvent();
+	if (RPLModule* main = RPLLoader_FindModuleByCodeAddr(MEMORY_CODEAREA_ADDR))
+		m_moduleLabel->SetLabel(ModuleCaption(main->moduleName.c_str()));
+	SendSizeEvent();
 }
 
 XMLDebuggerConfig& DebuggerWindow2::GetConfig()
@@ -647,289 +765,40 @@ XMLDebuggerConfig& DebuggerWindow2::GetConfig()
 	return m_config;
 }
 
-bool DebuggerWindow2::Show(bool show)
-{
-	const bool result = wxFrame::Show(show);
-
-	if (show)
-	{
-		m_register_window->Show(m_config.data().show_register);
-		m_dump_window->Show(m_config.data().show_dump);
-		m_breakpoint_window->Show(m_config.data().show_breakpoints);
-		m_module_window->Show(m_config.data().show_modules);
-		m_symbol_window->Show(m_config.data().show_symbols);
-	}
-	else
-	{
-		m_register_window->Show(false);
-		m_dump_window->Show(false);
-		m_breakpoint_window->Show(false);
-		m_module_window->Show(false);
-		m_symbol_window->Show(false);
-	}
-
-	return result;
-}
-
-std::wstring DebuggerWindow2::GetModuleStoragePath(std::string module_name, uint32_t crc_hash) const
-{
-	if (module_name.empty() || crc_hash == 0) return {};
-	return ActiveSettings::GetConfigPath("debugger/{}_{:#10x}.xml", module_name, crc_hash).generic_wstring();
-}
-
-std::wstring DebuggerWindow2::GetModuleMapPath(std::string module_name, uint32_t crc_hash) const
-{
-	if (module_name.empty() || crc_hash == 0) return {};
-	return ActiveSettings::GetConfigPath("debugger/{}_{:#10x}.map", module_name, crc_hash).generic_wstring();
-}
-
-void DebuggerWindow2::OnBreakpointHit(wxCommandEvent& event)
-{
-	PPCInterpreter_t* hCPU = debugger_lockDebugSession();
-	if (!hCPU)
-		return;
-	MPTR ip = hCPU->instructionPointer;
-	debugger_unlockDebugSession(hCPU);
-
-	UpdateModuleLabel(ip);
-
-	m_toolbar->SetToolShortHelp(TOOL_ID_PAUSE, _("Run (F5)"));
-	m_toolbar->SetToolNormalBitmap(TOOL_ID_PAUSE, m_run);
-
-	m_toolbar->EnableTool(TOOL_ID_STEP_INTO, true);
-	m_toolbar->EnableTool(TOOL_ID_STEP_OVER, true);
-
-	m_disasm_ctrl->CenterOffset(ip);
-}
-
-void DebuggerWindow2::OnRunProgram(wxCommandEvent& event)
-{
-	m_toolbar->SetToolShortHelp(TOOL_ID_PAUSE, _("Break (F5)"));
-	m_toolbar->SetToolNormalBitmap(TOOL_ID_PAUSE, m_pause);
-
-	m_toolbar->EnableTool(TOOL_ID_STEP_INTO, false);
-	m_toolbar->EnableTool(TOOL_ID_STEP_OVER, false);
-}
-
-void DebuggerWindow2::OnToolClicked(wxCommandEvent& event)
-{
-	switch(event.GetId())
-	{
-	case TOOL_ID_GOTO:
-		m_disasm_ctrl->GoToAddressDialog();
-		break;
-	case TOOL_ID_PAUSE:
-		if (debugger_isTrapped())
-			debugger_stepCommand(DebuggerStepCommand::Run);
-		else
-			debugger_requestBreak();
-		break;
-	case TOOL_ID_STEP_INTO:
-		if (debugger_isTrapped())
-			debugger_stepCommand(DebuggerStepCommand::StepInto);
-		break;
-	case TOOL_ID_STEP_OVER:
-		if (debugger_isTrapped())
-			debugger_stepCommand(DebuggerStepCommand::StepOver);
-		break;
-	}
-}
-
-void DebuggerWindow2::OnBreakpointChange(wxCommandEvent& event)
-{
-	m_breakpoint_window->OnUpdateView();
-	m_disasm_ctrl->RefreshControl();
-	UpdateModuleLabel();
-}
-
-void DebuggerWindow2::OnOptionsInput(wxCommandEvent& event)
-{
-	switch (event.GetId())
-	{
-	case MENU_ID_OPTIONS_PIN_TO_MAINWINDOW:
-	{
-		const bool value = !m_config.data().pin_to_main;
-		m_config.data().pin_to_main = value;
-		if (value)
-			OnParentMove(m_main_position, m_main_size);
-
-		break;
-	}
-	case MENU_ID_OPTIONS_BREAK_ON_START:
-	{
-		const bool value = !m_config.data().break_on_start;
-		m_config.data().break_on_start = value;
-		debugger_setOptionBreakOnEntry(value);
-		break;
-	}
-	case MENU_ID_OPTIONS_LOG_MEMORY_BREAKPOINTS:
-	{
-		const bool value = !m_config.data().log_memory_breakpoints;
-		m_config.data().log_memory_breakpoints = value;
-		debugger_setOptionLogOnlyMemoryBreakpoints(value);
-		break;
-	}
-	case MENU_ID_OPTIONS_SWITCH_CPU_MODE:
-	{
-		if (m_forceInterpreter)
-		{
-			PPCRecompiler_Enable();
-			m_forceInterpreter = false;
-			cemuLog_log(LogType::Force, "Debugger: Switched CPU mode to recompiler");
-		}
-		else
-		{
-			PPCRecompiler_Disable();
-			m_forceInterpreter = true;
-			cemuLog_log(LogType::Force, "Debugger: Switched CPU mode to interpreter");
-		}
-		break;
-	}
-	default:
-		return;
-	}
-
-	m_config.Save();
-}
-
-void DebuggerWindow2::OnWindowMenu(wxCommandEvent& event)
-{
-	switch (event.GetId())
-	{
-	case MENU_ID_WINDOW_REGISTERS:
-	{
-		const bool value = !m_config.data().show_register;
-		m_config.data().show_register = value;
-		m_register_window->Show(value);
-		break;
-	}
-	case MENU_ID_WINDOW_DUMP:
-	{
-		const bool value = !m_config.data().show_dump;
-		m_config.data().show_dump = value;
-		m_dump_window->Show(value);
-		break;
-	}
-	case MENU_ID_WINDOW_BREAKPOINTS:
-	{
-		const bool value = !m_config.data().show_breakpoints;
-		m_config.data().show_breakpoints = value;
-		m_breakpoint_window->Show(value);
-		break;
-	}
-	case MENU_ID_WINDOW_MODULE:
-	{
-		const bool value = !m_config.data().show_modules;
-		m_config.data().show_modules = value;
-		m_module_window->Show(value);
-		break;
-	}
-	case MENU_ID_WINDOW_SYMBOL:
-	{
-		const bool value = !m_config.data().show_symbols;
-		m_config.data().show_symbols = value;
-		m_symbol_window->Show(value);
-		break;
-	}
-	default:
-		return;
-	}
-
-	m_config.Save();
-}
-
-void DebuggerWindow2::OnUpdateView(wxCommandEvent& event)
-{
-	UpdateModuleLabel();
-	m_disasm_ctrl->OnUpdateView();
-	m_register_window->OnUpdateView();
-	m_breakpoint_window->OnUpdateView();
-}
-
-void DebuggerWindow2::OnExit(wxCommandEvent& event)
-{
-	this->Close();
-}
-
-void DebuggerWindow2::OnShow(wxShowEvent& event)
-{
-	m_register_window->Show();
-	m_dump_window->Show();
-	m_breakpoint_window->Show();
-	m_module_window->Show();
-	m_symbol_window->Show();
-	event.Skip();
-}
-
-void DebuggerWindow2::CreateMenuBar()
-{
-	auto menu_bar = new wxMenuBar;
-	
-	// file
-	wxMenu* file_menu = new wxMenu;
-	file_menu->Append(MENU_ID_FILE_EXIT, _("&Exit"));
-	file_menu->Bind(wxEVT_MENU, &DebuggerWindow2::OnExit, this);
-
-	menu_bar->Append(file_menu, _("&File"));
-
-	// options
-	wxMenu* options_menu = new wxMenu;
-	options_menu->Append(MENU_ID_OPTIONS_PIN_TO_MAINWINDOW, _("&Pin to main window"), wxEmptyString, wxITEM_CHECK)->Check(m_config.data().pin_to_main);
-	options_menu->Append(MENU_ID_OPTIONS_BREAK_ON_START, _("Break on &entry point"), wxEmptyString, wxITEM_CHECK)->Check(m_config.data().break_on_start);
-	options_menu->Append(MENU_ID_OPTIONS_LOG_MEMORY_BREAKPOINTS, _("Log only memory breakpoints"), wxEmptyString, wxITEM_CHECK)->Check(m_config.data().log_memory_breakpoints);
-	options_menu->Append(MENU_ID_OPTIONS_SWITCH_CPU_MODE, _("Switch to &interpreter CPU mode"), wxEmptyString, wxITEM_CHECK);
-	menu_bar->Append(options_menu, _("&Options"));
-
-	// window
-	wxMenu* window_menu = new wxMenu;
-	window_menu->Append(MENU_ID_WINDOW_REGISTERS, _("&Registers"), wxEmptyString, wxITEM_CHECK)->Check(m_config.data().show_register);
-	window_menu->Append(MENU_ID_WINDOW_DUMP, _("&Memory Dump"), wxEmptyString, wxITEM_CHECK)->Check(m_config.data().show_dump);
-	window_menu->Append(MENU_ID_WINDOW_BREAKPOINTS, _("&Breakpoints"), wxEmptyString, wxITEM_CHECK)->Check(m_config.data().show_breakpoints);
-	window_menu->Append(MENU_ID_WINDOW_MODULE, _("Module&list"), wxEmptyString, wxITEM_CHECK)->Check(m_config.data().show_modules);
-	window_menu->Append(MENU_ID_WINDOW_SYMBOL, _("&Symbols"), wxEmptyString, wxITEM_CHECK)->Check(m_config.data().show_symbols);
-	
-	menu_bar->Append(window_menu, _("&Window"));
-
-	SetMenuBar(menu_bar);
-
-	options_menu->Bind(wxEVT_MENU, &DebuggerWindow2::OnOptionsInput, this);
-	window_menu->Bind(wxEVT_MENU, &DebuggerWindow2::OnWindowMenu, this);
-}
-
-void DebuggerWindow2::UpdateModuleLabel(uint32 address)
+void DebuggerWindow2::ShowModuleOf(uint32 address)
 {
 	if (address == 0)
-		address = m_disasm_ctrl->GetViewBaseAddress();
+		address = m_disasm->GetViewBaseAddress();
 
-	RPLModule* module = RPLLoader_FindModuleByCodeAddr(address);
-	if (module && m_module_address != module->regionMappingBase_text.GetMPTR())
+	RPLModule* mod = RPLLoader_FindModuleByCodeAddr(address);
+	if (mod != nullptr && mod->regionMappingBase_text.GetMPTR() != m_labelModuleBase)
 	{
-		m_module_label->SetLabel(wxString::Format("> %s", module->moduleName.c_str()));
-		m_module_address = module->regionMappingBase_text.GetMPTR();
+		m_moduleLabel->SetLabel(ModuleCaption(mod->moduleName.c_str()));
+		m_labelModuleBase = mod->regionMappingBase_text.GetMPTR();
 	}
 	else if (address >= mmuRange_CODECAVE.getBase() && address < mmuRange_CODECAVE.getEnd())
 	{
-		m_module_label->SetLabel(wxString::Format("> %s", "Cemu codecave"));
-		m_module_address = mmuRange_CODECAVE.getBase();
+		m_moduleLabel->SetLabel(ModuleCaption("PixelU codecave"));
+		m_labelModuleBase = mmuRange_CODECAVE.getBase();
 	}
 }
 
+// ---------------------------------------------------------------------------
+// DebuggerCallbacks: queue to the UI thread
+
 void DebuggerWindow2::UpdateViewThreadsafe()
 {
-	auto* evt = new wxCommandEvent(wxEVT_UPDATE_VIEW);
-	wxQueueEvent(this, evt);
+	wxQueueEvent(this, new wxCommandEvent(wxEVT_UPDATE_VIEW));
 }
 
 void DebuggerWindow2::NotifyDebugBreakpointHit()
 {
-	auto* evt = new wxCommandEvent(wxEVT_BREAKPOINT_HIT);
-	wxQueueEvent(this, evt);
+	wxQueueEvent(this, new wxCommandEvent(wxEVT_BREAKPOINT_HIT));
 }
 
 void DebuggerWindow2::NotifyRun()
 {
-	auto* evt = new wxCommandEvent(wxEVT_RUN);
-	wxQueueEvent(this, evt);
+	wxQueueEvent(this, new wxCommandEvent(wxEVT_RUN));
 }
 
 void DebuggerWindow2::MoveToAddressInDisassembly(MPTR address)
@@ -941,22 +810,19 @@ void DebuggerWindow2::MoveToAddressInDisassembly(MPTR address)
 
 void DebuggerWindow2::NotifyGraphicPacksModified()
 {
-	auto* evt = new wxCommandEvent(wxEVT_NOTIFY_GRAPHIC_PACKS_MODIFIED);
-	wxQueueEvent(this, evt);
+	wxQueueEvent(this, new wxCommandEvent(wxEVT_NOTIFY_GRAPHIC_PACKS_MODIFIED));
 }
 
 void DebuggerWindow2::NotifyModuleLoaded(RPLModule* module)
 {
-	DebuggerModuleInfoNotify* notifData = new DebuggerModuleInfoNotify(module);
 	auto* evt = new wxCommandEvent(wxEVT_NOTIFY_MODULE_LOADED);
-	evt->SetClientObject(notifData);
+	evt->SetClientObject(new ModuleNotice(module));
 	wxQueueEvent(this, evt);
 }
 
 void DebuggerWindow2::NotifyModuleUnloaded(RPLModule* module)
 {
-	DebuggerModuleInfoNotify* notifData = new DebuggerModuleInfoNotify(module);
 	auto* evt = new wxCommandEvent(wxEVT_NOTIFY_MODULE_UNLOADED);
-	evt->SetClientObject(notifData);
+	evt->SetClientObject(new ModuleNotice(module));
 	wxQueueEvent(this, evt);
 }

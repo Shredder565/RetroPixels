@@ -1,93 +1,90 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "wxgui/wxgui.h"
 #include "TextList.h"
-
-#include "debugger/DisasmCtrl.h"
 
 #include <wx/setup.h>
 #include <wx/tooltip.h>
 
-TextList::~TextList()
-{
-	m_tooltip_timer->Stop();
-
-	this->Unbind(wxEVT_MOTION, &TextList::OnMouseMoveEvent, this);
-	this->Unbind(wxEVT_KEY_DOWN, &TextList::OnKeyDownEvent, this);
-	this->Unbind(wxEVT_KEY_UP, &TextList::OnKeyUpEvent, this);
-	this->Unbind(wxEVT_PAINT, &TextList::OnPaintEvent, this);
-	this->Unbind(wxEVT_LEFT_DOWN, &TextList::OnMouseDownEvent, this);
-	this->Unbind(wxEVT_LEFT_UP, &TextList::OnMouseUpEvent, this);
-	this->Unbind(wxEVT_LEFT_DCLICK, &TextList::OnMouseDClickEvent, this);
-	this->Unbind(wxEVT_CONTEXT_MENU, &TextList::OnContextMenu, this);
-	this->Unbind(wxEVT_ERASE_BACKGROUND, &TextList::OnEraseBackground, this);
-}
-
 TextList::TextList(wxWindow* parent, wxWindowID id, const wxPoint& pos, const wxSize& size, long style)
-	: wxControl(parent, id, pos, size, style), wxScrollHelper(this)
+	: wxControl(parent, id, pos, size, style), wxScrollHelper(this), m_hoverTimer(this)
 {
-	m_font = wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
-	this->wxWindowBase::SetBackgroundStyle(wxBG_STYLE_PAINT);
+	m_textFont = wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
+	wxWindowBase::SetBackgroundStyle(wxBG_STYLE_PAINT);
 
-	wxInfoDC dc(this);
-	this->DoPrepareReadOnlyDC(dc);
-	dc.SetFont(m_font);
-	m_line_height = dc.GetCharHeight();
-	m_char_width = dc.GetCharWidth();
-
+	// line metrics come from the GUI font
+	{
+		wxInfoDC measure(this);
+		DoPrepareReadOnlyDC(measure);
+		measure.SetFont(m_textFont);
+		m_line_height = measure.GetCharHeight();
+		m_char_width = measure.GetCharWidth();
+	}
 	m_yScrollPixelsPerLine = m_line_height;
-
-	this->ShowScrollbars(wxSHOW_SB_DEFAULT, wxSHOW_SB_DEFAULT);
+	ShowScrollbars(wxSHOW_SB_DEFAULT, wxSHOW_SB_DEFAULT);
 
 	m_tooltip = new wxToolTip(wxEmptyString);
 
-	this->Bind(wxEVT_MOTION, &TextList::OnMouseMoveEvent, this);
-	this->Bind(wxEVT_KEY_DOWN, &TextList::OnKeyDownEvent, this);
-	this->Bind(wxEVT_KEY_UP, &TextList::OnKeyUpEvent, this);
-	this->Bind(wxEVT_PAINT, &TextList::OnPaintEvent, this);
-	this->Bind(wxEVT_LEFT_DOWN, &TextList::OnMouseDownEvent, this);
-	this->Bind(wxEVT_LEFT_UP, &TextList::OnMouseUpEvent, this);
-	this->Bind(wxEVT_LEFT_DCLICK, &TextList::OnMouseDClickEvent, this);
-	this->Bind(wxEVT_CONTEXT_MENU, &TextList::OnContextMenu, this);
-	this->Bind(wxEVT_ERASE_BACKGROUND, &TextList::OnEraseBackground, this);
+	Bind(wxEVT_PAINT, &TextList::HandlePaint, this);
+	Bind(wxEVT_ERASE_BACKGROUND, &TextList::OnEraseBackground, this);
+	Bind(wxEVT_MOTION, &TextList::HandleMotion, this);
+	Bind(wxEVT_KEY_DOWN, &TextList::HandleKeyDown, this);
+	Bind(wxEVT_KEY_UP, &TextList::HandleKeyUp, this);
+	Bind(wxEVT_LEFT_DOWN, &TextList::HandleLeftDown, this);
+	Bind(wxEVT_LEFT_UP, &TextList::HandleLeftUp, this);
+	Bind(wxEVT_LEFT_DCLICK, &TextList::HandleLeftDClick, this);
+	Bind(wxEVT_CONTEXT_MENU, &TextList::HandleContextMenu, this);
+	Bind(wxEVT_TIMER, &TextList::HandleHoverTimer, this);
 
 	m_tooltip_window = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxNO_BORDER);
 	m_tooltip_window->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_INFOBK));
 	m_tooltip_window->Hide();
+}
 
-	m_tooltip_timer = new wxTimer(this);
-	this->Bind(wxEVT_TIMER, &TextList::OnTooltipTimer, this);
+TextList::~TextList()
+{
+	m_hoverTimer.Stop();
+}
+
+wxPoint TextList::ToContent(const wxPoint& client) const
+{
+	wxPoint p;
+	CalcUnscrolledPosition(client.x, client.y, &p.x, &p.y);
+	return p;
+}
+
+uint32 TextList::LineAt(const wxPoint& content) const
+{
+	return (uint32)(content.y / m_line_height);
+}
+
+void TextList::BeginSelectionAt(const wxPoint& content)
+{
+	m_selection.SetPosition(content);
+	m_selection.SetBottomRight(content);
 }
 
 void TextList::RefreshControl(const wxRect* update_region)
 {
-	if(update_region)
-		Refresh(true, update_region);
-	else
-	{
-		wxRect region = GetClientRect();
-		update_region = &region;
-		Refresh(true, update_region);
-	}
+	const wxRect everything = GetClientRect();
+	Refresh(true, update_region ? update_region : &everything);
 }
 
 void TextList::RefreshLine(uint32 line)
 {
-	wxRect update_region = GetClientRect();
-	update_region.y = (sint32)line * m_line_height;
-	update_region.height = m_line_height;
-	CalcScrolledPosition(0, update_region.y, nullptr, &update_region.y);
-	// debug_printf("update: <%x, %x>\n", update_region.y, update_region.height);
-	Refresh(true, &update_region);
+	wxRect area = GetClientRect();
+	area.height = m_line_height;
+	CalcScrolledPosition(0, (sint32)line * m_line_height, nullptr, &area.y);
+	Refresh(true, &area);
 }
 
 wxSize TextList::DoGetVirtualSize() const
 {
-	return {wxDefaultCoord, (int)m_element_count * m_line_height};
+	return wxSize(wxDefaultCoord, (int)m_element_count * m_line_height);
 }
 
 void TextList::DoSetSize(int x, int y, int width, int height, int sizeFlags)
 {
 	wxControl::DoSetSize(x, y, width, height, sizeFlags);
-
 	m_elements_visible = (height + m_line_height - 1) / m_line_height;
 	Refresh();
 }
@@ -99,53 +96,38 @@ void TextList::SetScrollPos(int orient, int pos, bool refresh)
 
 void TextList::DrawLineBackground(wxDC& dc, uint32 line, const wxColour& colour, uint32 lines) const
 {
-	wxRect rect;
-	rect.x = GetPosition().x;
-	rect.y = line * m_line_height;
-	rect.width = GetSize().x;
-	rect.height = m_line_height * lines;
-
-	dc.SetBrush(colour);
-	dc.DrawRectangle(rect);
+	DrawLineBackground(dc, wxPoint(GetPosition().x, line * m_line_height), colour, lines);
 }
 
 void TextList::DrawLineBackground(wxDC& dc, const wxPoint& position, const wxColour& colour, uint32 lines) const
 {
-	wxRect rect;
-	rect.x = position.x;
-	rect.y = position.y;
-	rect.width = this->GetSize().x;
-	rect.height = m_line_height * lines;
-
 	dc.SetBrush(colour);
-	dc.DrawRectangle(rect);
+	dc.DrawRectangle(wxRect(position.x, position.y, GetSize().x, m_line_height * lines));
 }
 
 bool TextList::SetElementCount(size_t element_count)
 {
-	if (m_element_count == element_count)
+	if (element_count == m_element_count)
 		return false;
-
-	if (element_count > 0x7FFFFFFF)
-		element_count = 0x7FFFFFFF;
-
-	m_element_count = element_count;
-	this->AdjustScrollbars();
+	m_element_count = std::min<size_t>(element_count, 0x7FFFFFFF);
+	AdjustScrollbars();
 	return true;
 }
 
 uint32 TextList::GetElementCount() const
 {
-	return m_element_count;
+	return (uint32)m_element_count;
 }
 
 bool TextList::IsKeyDown(sint32 keycode)
 {
-	return m_key_states[keycode];
+	const auto it = m_heldKeys.find(keycode);
+	return it != m_heldKeys.end() && it->second;
 }
 
 void TextList::WriteText(wxDC& dc, const wxString& text, wxPoint& position) const
 {
+	// the drawn extent comes from the dc's bounding box
 	dc.ResetBoundingBox();
 	dc.DrawText(text, position);
 	position.x += dc.MaxX() - dc.MinX();
@@ -160,161 +142,119 @@ void TextList::WriteText(wxDC& dc, const wxString& text, wxPoint& position, cons
 void TextList::NextLine(wxPoint& position, const wxPoint* start_position) const
 {
 	position.y += m_line_height;
-
-	if (start_position)
+	if (start_position != nullptr)
 		position.x = start_position->x;
 }
 
-void TextList::OnMouseDown() {}
-void TextList::OnMouseUp() {}
+void TextList::OnMouseDown()
+{
+}
 
-bool TextList::OnShowTooltip(const wxPoint& position, uint32 line)
+void TextList::OnMouseUp()
+{
+}
+
+bool TextList::OnShowTooltip(const wxPoint& /*position*/, uint32 /*line*/)
 {
 	return false;
 }
 
-void TextList::OnMouseMoveEvent(wxMouseEvent& event)
+void TextList::HandleMotion(wxMouseEvent& event)
 {
-	m_tooltip_timer->Stop();
-	m_tooltip_timer->StartOnce(250);
-	
-	wxPoint position = event.GetPosition();
-	CalcUnscrolledPosition(position.x, position.y, &position.x, &position.y);
+	// the hover panel is offered once the mouse rests for 250 ms
+	m_hoverTimer.Stop();
+	m_hoverTimer.StartOnce(250);
 
-	m_mouse_position = position;
-
-	if(m_mouse_down)
-		m_selection.SetBottomRight(position);
-
-	const sint32 line = position.y / m_line_height;
-	OnMouseMove(position, line);
+	const wxPoint at = ToContent(event.GetPosition());
+	m_lastMouse = at;
+	if (m_mouse_down)
+		m_selection.SetBottomRight(at);
+	OnMouseMove(at, LineAt(at));
 }
 
-void TextList::OnKeyDownEvent(wxKeyEvent& event)
+void TextList::HandleKeyDown(wxKeyEvent& event)
 {
-	const auto key_code = event.GetKeyCode();
-	const auto it = m_key_states.find(key_code);
-	if(it == m_key_states.end() || !it->second)
+	// OnKeyPressed fires once per press, not for auto-repeat
+	const sint32 key = event.GetKeyCode();
+	bool& held = m_heldKeys[key];
+	if (!held)
 	{
-		m_key_states[key_code] = true;
-		OnKeyPressed(key_code, event.GetPosition());
+		held = true;
+		OnKeyPressed(key, event.GetPosition());
 	}
-
 	event.Skip();
 }
 
-void TextList::OnKeyUpEvent(wxKeyEvent& event)
+void TextList::HandleKeyUp(wxKeyEvent& event)
 {
-	m_key_states[event.GetKeyCode()] = false;
+	m_heldKeys[event.GetKeyCode()] = false;
 }
 
-void TextList::OnMouseDownEvent(wxMouseEvent& event)
+void TextList::HandleLeftDown(wxMouseEvent& event)
 {
 	m_mouse_down = true;
-
-	wxPoint position = event.GetPosition();
-	CalcUnscrolledPosition(position.x, position.y, &position.x, &position.y);
-	m_selection.SetPosition(position);
-	m_selection.SetBottomRight(position);
-
+	BeginSelectionAt(ToContent(event.GetPosition()));
 	OnMouseDown();
-
 	event.Skip();
 }
 
-void TextList::OnMouseUpEvent(wxMouseEvent& event)
+void TextList::HandleLeftUp(wxMouseEvent& event)
 {
 	m_mouse_down = false;
 	OnMouseUp();
-
 	event.Skip();
 }
 
-void TextList::OnMouseDClickEvent(wxMouseEvent& event)
+void TextList::HandleLeftDClick(wxMouseEvent& event)
 {
-	wxPoint position = event.GetPosition();
-	CalcUnscrolledPosition(position.x, position.y, &position.x, &position.y);
-	m_selection.SetPosition(position);
-	m_selection.SetBottomRight(position);
-
-	const uint32 line = position.y / m_line_height;
-	OnMouseDClick(position, line);
+	const wxPoint at = ToContent(event.GetPosition());
+	BeginSelectionAt(at);
+	OnMouseDClick(at, LineAt(at));
 }
 
-void TextList::OnContextMenu(wxContextMenuEvent& event)
+void TextList::HandleContextMenu(wxContextMenuEvent& event)
 {
-	wxPoint position = event.GetPosition();
-	if (position == wxDefaultPosition)
-		return;
-
-	wxPoint clientPosition = ScreenToClient(position);
-
-	CalcUnscrolledPosition(clientPosition.x, clientPosition.y, &clientPosition.x, &clientPosition.y);
-	m_selection.SetPosition(clientPosition);
-	m_selection.SetBottomRight(clientPosition);
-
-	const uint32 line = clientPosition.y / m_line_height;
-	OnContextMenu(clientPosition, line);
+	const wxPoint screen = event.GetPosition();
+	if (screen == wxDefaultPosition)
+		return; // keyboard-invoked menu: no position to act on
+	const wxPoint at = ToContent(ScreenToClient(screen));
+	BeginSelectionAt(at);
+	OnContextMenu(at, LineAt(at));
 }
 
-void TextList::OnTooltipTimer(wxTimerEvent& event)
+void TextList::HandleHoverTimer(wxTimerEvent& /*event*/)
 {
 	m_tooltip_window->Hide();
-
-	const auto cursor_position = wxGetMousePosition();
-
-	const auto position = GetScreenPosition();
-	if (cursor_position.x < position.x || cursor_position.y < position.y)
+	const wxRect screenArea(GetScreenPosition(), GetSize());
+	const wxPoint cursor = wxGetMousePosition();
+	if (cursor.x < screenArea.x || cursor.y < screenArea.y || cursor.x > screenArea.GetRight() + 1 || cursor.y > screenArea.GetBottom() + 1)
 		return;
-
-	const auto size = GetSize();
-	if (position.x + size.x < cursor_position.x || position.y + size.y < cursor_position.y)
+	if (!OnShowTooltip(m_lastMouse, LineAt(m_lastMouse)))
 		return;
-
-	const sint32 line = position.y / m_line_height;
-	if(OnShowTooltip(m_mouse_position, line))
-	{
-		m_tooltip_window->SetPosition(wxPoint(m_mouse_position.x + 15, m_mouse_position.y + 15));
-		m_tooltip_window->SendSizeEvent();
-		m_tooltip_window->Show();
-	}
+	m_tooltip_window->SetPosition(m_lastMouse + wxPoint(15, 15));
+	m_tooltip_window->SendSizeEvent();
+	m_tooltip_window->Show();
 }
 
-void TextList::OnPaintEvent(wxPaintEvent& event)
+void TextList::HandlePaint(wxPaintEvent& /*event*/)
 {
 	wxAutoBufferedPaintDC dc(m_targetWindow);
+	const wxRect dirty = GetUpdateRegion().GetBox();
 
-	// get window position
-	auto position = GetPosition();
-
-	// get current real position
-	wxRect rect_update = GetUpdateRegion().GetBox();
-	const auto count = (uint32)std::ceil((float)rect_update.GetHeight() / m_line_height);
-
-	position.y = (rect_update.y / m_line_height) * m_line_height;
-
-	// paint background
-	dc.SetFont(m_font);
-	const wxColour window_colour = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
+	dc.SetFont(m_textFont);
 	dc.SetBrush(GetBackgroundColour());
 	dc.SetPen(*wxTRANSPARENT_PEN);
-	dc.DrawRectangle(rect_update);
+	dc.DrawRectangle(dirty);
 
-	//// paint selection
-	//if (!m_selected_text.eof())
-	//{
-	//	dc.SetBrush(*wxBLUE_BRUSH);
-	//	dc.SetPen(*wxBLUE_PEN);
-	//	dc.DrawRectangle(m_selection);
-	//}
+	// whole lines covering the dirty area; drawing happens in device coordinates
+	const uint32 lineCount = (uint32)std::ceil((float)dirty.GetHeight() / m_line_height);
+	wxPoint origin = GetPosition();
+	origin.y = (dirty.y / m_line_height) * m_line_height;
 
-	sint32 start;
-	CalcUnscrolledPosition(rect_update.x, rect_update.y, nullptr, &start);
+	sint32 firstLine = 0;
+	CalcUnscrolledPosition(dirty.x, dirty.y, nullptr, &firstLine);
+	firstLine /= m_line_height;
+	m_scrolled_to_end = (firstLine + lineCount) >= m_element_count;
 
-	start /= m_line_height;
-	m_scrolled_to_end = (start + count) >= m_element_count;
-
-	OnDraw(dc, start, count, position);
-
-	// removed Update() here since all text is white
+	OnDraw(dc, firstLine, lineCount, origin);
 }

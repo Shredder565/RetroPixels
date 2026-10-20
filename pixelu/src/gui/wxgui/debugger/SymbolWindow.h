@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include "wxgui/debugger/SymbolCtrl.h"
@@ -5,6 +6,7 @@
 
 class DebuggerWindow2;
 
+// Floating debugger window: the symbol list with a filter box below it.
 class SymbolWindow : public wxFrame
 {
 public:
@@ -16,8 +18,8 @@ public:
 	void OnLeftDClick(wxListEvent& event);
 
 private:
-	wxTextCtrl* m_filter;
-	SymbolListCtrl* m_symbol_ctrl;
-
 	void OnFilterChanged(wxCommandEvent& event);
+
+	wxTextCtrl* m_filterBox;
+	SymbolListCtrl* m_list;
 };

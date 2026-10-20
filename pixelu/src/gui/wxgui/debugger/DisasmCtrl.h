@@ -1,21 +1,18 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "wxgui/components/TextList.h"
 
-wxDECLARE_EVENT(wxEVT_DISASMCTRL_NOTIFY_GOTO_ADDRESS, wxCommandEvent); // Notify parent that goto address operation completed. Event contains the address that was jumped to.
+// Sent to the parent after the goto dialog moved the view; GetExtraLong() is the target address.
+wxDECLARE_EVENT(wxEVT_DISASMCTRL_NOTIFY_GOTO_ADDRESS, wxCommandEvent);
 
+// Disassembly view of one MMU region, four bytes per line plus a label line
+// before every address that has a symbol. Columns: address | module offset |
+// instruction | comment. Double-click toggles a breakpoint (address columns),
+// patches the instruction or edits the comment. F9 toggles a breakpoint,
+// F5/F10/F11 run/step, Ctrl+G opens the goto dialog.
 class DisasmCtrl : public TextList
 {
-	enum
-	{
-		IDContextMenu_ToggleBreakpoint = wxID_HIGHEST + 1,
-		IDContextMenu_ToggleLoggingBreakpoint,
-		IDContextMenu_RestoreOriginalInstructions,
-		IDContextMenu_CopyAddress,
-		IDContextMenu_CopyUnrelocatedAddress,
-		IDContextMenu_Last
-	};
 public:
-
 	DisasmCtrl(wxWindow* parent, const wxWindowID& id, const wxPoint& pos, const wxSize& size, long style);
 
 	void Init();
@@ -24,6 +21,7 @@ public:
 	void OnUpdateView();
 
 	uint32 GetViewBaseAddress() const;
+	// address shown on the line at view-relative pixel row posY, if any
 	std::optional<MPTR> LinePixelPosToAddress(sint32 posY);
 
 	uint32 AddressToScrollPos(uint32 offset) const;
@@ -32,29 +30,25 @@ public:
 
 protected:
 	void OnDraw(wxDC& dc, sint32 start, sint32 count, const wxPoint& start_position) override;
-	void OnMouseMove(const wxPoint& position, uint32 line) override;
 	void OnKeyPressed(sint32 key_code, const wxPoint& position) override;
 	void OnMouseDClick(const wxPoint& position, uint32 line) override;
 	void OnContextMenu(const wxPoint& position, uint32 line) override;
-	void OnContextMenuEntryClicked(wxCommandEvent& event);
 	bool OnShowTooltip(const wxPoint& position, uint32 line) override;
 	void ScrollWindow(int dx, int dy, const wxRect* prect) override;
-
-	void DrawDisassemblyLine(wxDC& dc, const wxPoint& linePosition, MPTR virtualAddress, struct RPLModule* rplModule);
-	void DrawLabelName(wxDC& dc, const wxPoint& linePosition, MPTR virtualAddress, struct RPLStoredSymbol* storedSymbol);
 
 	void SelectCodeRegion(uint32 newAddress);
 
 private:
-	void CopyToClipboard(std::string text);
+	void DrawInstructionLine(wxDC& dc, const wxPoint& linePos, MPTR address, struct RPLModule* viewModule);
+	void DrawSymbolLine(wxDC& dc, const wxPoint& linePos, struct RPLStoredSymbol* symbol);
+	void OnMenuCommand(wxCommandEvent& event);
+	void NotifyBreakpointsChanged();
+	void JumpTo(uint32 address);
 
-	sint32 m_mouse_line, m_mouse_line_drawn;
-	sint32 m_active_line;
-	uint32 m_lastGotoTarget{};
-	uint32 m_contextMenuAddress{};
-	// code region info
-	uint32 currentCodeRegionStart;
-	uint32 currentCodeRegionEnd;
-	// line to address mapping
-	std::vector<std::optional<MPTR>> m_lineToAddress;
+	sint32 m_highlightLine = -1;  // line last centred on, repainted when it moves
+	uint32 m_gotoTarget = 0;      // address from the goto dialog, drawn highlighted
+	uint32 m_menuAddress = 0;     // address the context menu was opened on
+	uint32 m_regionBegin = 0;
+	uint32 m_regionEnd = 0;
+	std::vector<std::optional<MPTR>> m_visibleAddresses; // per view line, filled while drawing
 };

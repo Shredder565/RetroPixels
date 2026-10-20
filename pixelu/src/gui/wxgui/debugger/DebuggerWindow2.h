@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include "wxgui/debugger/DisasmCtrl.h"
@@ -18,6 +19,8 @@ class SymbolWindow;
 class wxStaticText;
 struct RPLStoredSymbol;
 
+// events the debugger windows exchange; the cross-thread ones are queued by
+// the DebuggerCallbacks overrides below
 wxDECLARE_EVENT(wxEVT_UPDATE_VIEW, wxCommandEvent);
 wxDECLARE_EVENT(wxEVT_BREAKPOINT_HIT, wxCommandEvent);
 wxDECLARE_EVENT(wxEVT_RUN, wxCommandEvent);
@@ -27,29 +30,30 @@ wxDECLARE_EVENT(wxEVT_NOTIFY_MODULE_LOADED, wxCommandEvent);
 wxDECLARE_EVENT(wxEVT_NOTIFY_MODULE_UNLOADED, wxCommandEvent);
 wxDECLARE_EVENT(wxEVT_NOTIFY_GRAPHIC_PACKS_MODIFIED, wxCommandEvent);
 
+// the open debugger, or null
 extern class DebuggerWindow2* s_debuggerWindow;
 
+// debugger/config.xml
 struct DebuggerConfig
 {
-	DebuggerConfig()
-	: pin_to_main(true), break_on_start(true), log_memory_breakpoints(false), show_register(true), show_dump(true), show_stack(true), show_breakpoints(true), show_modules(true), show_symbols(true) {}
+	bool pin_to_main = true;
+	bool break_on_start = true;
+	bool log_memory_breakpoints = false;
 
-	bool pin_to_main;
-	bool break_on_start;
-	bool log_memory_breakpoints;
-
-	bool show_register;
-	bool show_dump;
-	bool show_stack;
-	bool show_breakpoints;
-	bool show_modules;
-	bool show_symbols;
+	// which tool windows are visible
+	bool show_register = true;
+	bool show_dump = true;
+	bool show_stack = true;
+	bool show_breakpoints = true;
+	bool show_modules = true;
+	bool show_symbols = true;
 
 	void Load(XMLConfigParser& parser);
 	void Save(XMLConfigParser& parser);
 };
 typedef XMLDataConfig<DebuggerConfig> XMLDebuggerConfig;
 
+// where a module's text and data sections live now and in the original file
 struct DebuggerModuleInfo
 {
 	struct ModuleArea
@@ -58,15 +62,8 @@ struct DebuggerModuleInfo
 		MPTR origBase;
 		uint32 size;
 
-		bool ContainsAddress(MPTR addr) const
-		{
-			return addr >= base && (addr < (base+size));
-		}
-
-		bool ContainsOriginalAddress(MPTR addr) const
-		{
-			return addr >= origBase && (addr < (origBase + size));
-		}
+		bool ContainsAddress(MPTR addr) const { return addr >= base && addr - base < size; }
+		bool ContainsOriginalAddress(MPTR addr) const { return addr >= origBase && addr - origBase < size; }
 	};
 
 	std::string moduleName;
@@ -77,6 +74,8 @@ struct DebuggerModuleInfo
 	DebuggerModuleInfo(RPLModule* module);
 };
 
+// per-module breakpoints and comments, stored module-relative in
+// debugger/<module>_<crc>.xml, plus the symbols loaded from the .map file
 struct DebuggerModuleStorage
 {
 	DebuggerModuleInfo moduleInfo;
@@ -88,14 +87,17 @@ struct DebuggerModuleStorage
 };
 typedef XMLDataConfig<DebuggerModuleStorage> XMLDebuggerModuleConfig;
 
+// decodes an embedded PNG and recolours its black pixels
 static wxBitmap LoadThemedBitmapFromPNG(const uint8* data, size_t size, const wxColour& tint)
 {
-	wxMemoryInputStream strm(data, size);
-	wxImage img(strm, wxBITMAP_TYPE_PNG);
-	img.Replace(0x00, 0x00, 0x00, tint.Red(), tint.Green(), tint.Blue());
-	return wxBitmap(img);
+	wxMemoryInputStream input(data, size);
+	wxImage picture(input, wxBITMAP_TYPE_PNG);
+	picture.Replace(0, 0, 0, tint.Red(), tint.Green(), tint.Blue());
+	return wxBitmap(picture);
 }
 
+// The PPC debugger: toolbar, module label and disassembly, owning the floating
+// register, dump, breakpoint, module and symbol windows.
 class DebuggerWindow2 : public wxFrame, public DebuggerCallbacks
 {
 public:
@@ -104,6 +106,7 @@ public:
 	void SaveModuleStorage(const struct DebuggerModuleInfo& moduleInfo, bool deleteModuleStorage);
 	DebuggerWindow2(wxFrame& parent, const wxRect& display_size);
 	~DebuggerWindow2();
+	// saves and drops all module storage; safe to call more than once
 	void CleanupForDestroy();
 
 	void OnParentMove(const wxPoint& position, const wxSize& size);
@@ -115,29 +118,7 @@ public:
 	std::wstring GetModuleStoragePath(std::string module_name, uint32_t crc_hash) const;
 
 private:
-	void OnBreakpointHit(wxCommandEvent& event);
-	void OnRunProgram(wxCommandEvent& event);
-	void OnToolClicked(wxCommandEvent& event);
-	void OnBreakpointChange(wxCommandEvent& event);
-	void OnOptionsInput(wxCommandEvent& event);
-	void OnWindowMenu(wxCommandEvent& event);
-	void OnUpdateView(wxCommandEvent& event);
-	void OnExit(wxCommandEvent& event);
-	void OnShow(wxShowEvent& event);
-	void OnClose(wxCloseEvent& event);
-	void OnMoveToDisasmAddr(wxCommandEvent& event);
-	void OnNotifyModuleLoaded(wxCommandEvent& event);
-	void OnNotifyModuleUnloaded(wxCommandEvent& event);
-	void OnNotifyGraphicPacksModified(wxCommandEvent& event);
-	// events from DisasmCtrl
-	void OnDisasmCtrlGotoAddress(wxCommandEvent& event);
-
-	void CreateMenuBar();
-	void UpdateModuleLabel(uint32 address = 0);
-	void LoadModuleMap(DebuggerModuleStorage& moduleStorage);
-	void UnloadModuleMap(DebuggerModuleStorage& moduleStorage);
-	std::wstring GetModuleMapPath(std::string module_name, uint32_t crc_hash) const;
-
+	// DebuggerCallbacks, called from emulator threads
 	void UpdateViewThreadsafe() override;
 	void NotifyDebugBreakpointHit() override;
 	void NotifyRun() override;
@@ -146,29 +127,38 @@ private:
 	void NotifyModuleLoaded(struct RPLModule* module) override;
 	void NotifyModuleUnloaded(struct RPLModule* module) override;
 
+	void BuildMenus();
+	void ApplyTheme();
+	void SetTrappedState(bool trapped);
+	void ShowModuleOf(uint32 address = 0);
+	void ReloadModuleViews();
+	void ForEachToolWindow(const std::function<void(wxFrame&)>& fn);
+	std::wstring GetModuleMapPath(std::string module_name, uint32_t crc_hash) const;
+	void LoadModuleMap(DebuggerModuleStorage& storage);
+	void UnloadModuleMap(DebuggerModuleStorage& storage);
+
+	void OnToolbar(wxCommandEvent& event);
+	void OnOptionsMenu(wxCommandEvent& event);
+	void OnWindowMenu(wxCommandEvent& event);
+	void OnShowEvent(wxShowEvent& event);
+	void OnCloseEvent(wxCloseEvent& event);
+
 	XMLDebuggerConfig m_config;
 	std::vector<std::unique_ptr<XMLDebuggerModuleConfig>> m_modulesStorage;
 
-	wxPoint m_main_position;
-	wxSize m_main_size;
-	
-	RegisterWindow* m_register_window;
-	DumpWindow* m_dump_window;
-	BreakpointWindow* m_breakpoint_window;
-	ModuleWindow* m_module_window;
-	SymbolWindow* m_symbol_window;
+	wxPoint m_mainPos;
+	wxSize m_mainSize;
 
-	DisasmCtrl* m_disasm_ctrl;
+	RegisterWindow* m_registers = nullptr;
+	DumpWindow* m_dump = nullptr;
+	BreakpointWindow* m_breakpoints = nullptr;
+	ModuleWindow* m_modules = nullptr;
+	SymbolWindow* m_symbols = nullptr;
+	DisasmCtrl* m_disasm = nullptr;
 
-	void UpdateAppearance();
-	wxToolBar* m_toolbar;
-	wxBitmap m_run, m_pause;
-
-	uint32 m_module_address;
-	wxStaticText* m_module_label;
-
-	bool m_forceInterpreter{false};
-
-wxDECLARE_EVENT_TABLE();
+	wxToolBar* m_toolbar = nullptr;
+	wxBitmap m_runIcon, m_breakIcon;
+	wxStaticText* m_moduleLabel = nullptr;
+	uint32 m_labelModuleBase = 0;
+	bool m_forceInterpreter = false;
 };
-

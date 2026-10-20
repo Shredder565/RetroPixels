@@ -1,7 +1,6 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "wxgui/wxgui.h"
 #include "wxgui/debugger/ModuleWindow.h"
-
-#include <sstream>
 
 #include "wxgui/debugger/DebuggerWindow2.h"
 #include "Cafe/HW/Espresso/Debugger/Debugger.h"
@@ -11,122 +10,79 @@
 
 #include "Cafe/GraphicPack/GraphicPack2.h"
 
-enum ItemColumns
+namespace
 {
-	ColumnName = 0,
-	ColumnAddress,
-	ColumnSize,
-};
+	enum : long
+	{
+		COL_NAME,
+		COL_ADDRESS,
+		COL_SIZE,
+	};
+	const wxSize kModuleWindowSize(420, 250);
+}
 
 ModuleWindow::ModuleWindow(DebuggerWindow2& parent, const wxPoint& main_position, const wxSize& main_size)
-	: wxFrame(&parent, wxID_ANY, _("Modules"), wxDefaultPosition, wxSize(420, 250), wxSYSTEM_MENU | wxCAPTION | wxCLIP_CHILDREN | wxRESIZE_BORDER | wxFRAME_FLOAT_ON_PARENT)
+	: wxFrame(&parent, wxID_ANY, _("Modules"), wxDefaultPosition, kModuleWindowSize, wxSYSTEM_MENU | wxCAPTION | wxCLIP_CHILDREN | wxRESIZE_BORDER | wxFRAME_FLOAT_ON_PARENT)
 {
-	this->SetSizeHints(wxDefaultSize, wxDefaultSize);
+	SetSizeHints(wxDefaultSize, wxDefaultSize);
 
-	wxBoxSizer* main_sizer = new wxBoxSizer(wxVERTICAL);
-
-	m_modules = new wxListView(this, wxID_ANY);
-
-	wxListItem col0;
-	col0.SetId(ColumnName);
-	col0.SetText(_("Name"));
-	col0.SetWidth(125);
-	m_modules->InsertColumn(ColumnName, col0);
-
-	wxListItem col1;
-	col1.SetId(ColumnAddress);
-	col1.SetText(_("Address"));
-	col1.SetWidth(75);
-	col1.SetAlign(wxLIST_FORMAT_RIGHT);
-	m_modules->InsertColumn(ColumnAddress, col1);
-
-	wxListItem col2;
-	col2.SetId(ColumnSize);
-	col2.SetText(_("Size"));
-	col2.SetWidth(75);
-	col2.SetAlign(wxLIST_FORMAT_RIGHT);
-	m_modules->InsertColumn(ColumnSize, col2);
-
-	main_sizer->Add(m_modules, 1, wxEXPAND);
-
-	this->SetSizer(main_sizer);
-	this->wxWindowBase::Layout();
-
-	this->Centre(wxBOTH);
+	auto* layout = new wxBoxSizer(wxVERTICAL);
+	m_list = new wxListView(this, wxID_ANY);
+	m_list->InsertColumn(COL_NAME, _("Name"), wxLIST_FORMAT_LEFT, 125);
+	m_list->InsertColumn(COL_ADDRESS, _("Address"), wxLIST_FORMAT_RIGHT, 75);
+	m_list->InsertColumn(COL_SIZE, _("Size"), wxLIST_FORMAT_RIGHT, 75);
+	layout->Add(m_list, 1, wxEXPAND);
+	SetSizer(layout);
+	wxWindowBase::Layout();
+	Centre(wxBOTH);
 
 	if (parent.GetConfig().data().pin_to_main)
 		OnMainMove(main_position, main_size);
 
-	m_modules->Bind(wxEVT_LEFT_DCLICK, &ModuleWindow::OnLeftDClick, this);
-
+	m_list->Bind(wxEVT_LEFT_DCLICK, &ModuleWindow::OnLeftDClick, this);
 	OnGameLoaded();
 }
 
 void ModuleWindow::OnMainMove(const wxPoint& main_position, const wxSize& main_size)
 {
-	wxSize size(420, 250);
-	this->SetSize(size);
-
-	wxPoint position = main_position;
-	position.x -= 420;
-	position.y += main_size.y;
-	this->SetPosition(position);
+	// left of the main window, below its bottom edge
+	SetSize(kModuleWindowSize);
+	SetPosition(wxPoint(main_position.x - kModuleWindowSize.x, main_position.y + main_size.y));
 }
 
+void ModuleWindow::AddRow(const wxString& name, uint32 address, uint32 size)
+{
+	const long row = m_list->InsertItem(m_list->GetItemCount(), name);
+	m_list->SetItem(row, COL_ADDRESS, wxString::Format("%08x", address));
+	m_list->SetItem(row, COL_SIZE, wxString::Format("%x", size));
+}
 
 void ModuleWindow::OnGameLoaded()
 {
 	Freeze();
-
-	m_modules->DeleteAllItems();
-
-	const auto module_list = RPLLoader_GetModuleList();
-	for (size_t i = 0; i < module_list.size(); i++)
+	m_list->DeleteAllItems();
+	for (RPLModule* mod : RPLLoader_GetModuleList())
 	{
-		const auto module = module_list[i];
-		if (module)
+		if (mod != nullptr)
+			AddRow(mod->moduleName, mod->regionMappingBase_text.GetMPTR(), mod->regionSize_text);
+	}
+	for (auto& pack : GraphicPack2::GetGraphicPacks())
+	{
+		for (auto& group : pack->GetPatchGroups())
 		{
-			wxListItem item;
-			item.SetId(i);
-			item.SetText(module->moduleName);
-
-			const auto index = m_modules->InsertItem(item);
-			m_modules->SetItem(index, ColumnAddress, wxString::Format("%08x", module->regionMappingBase_text.GetMPTR()));
-			m_modules->SetItem(index, ColumnSize, wxString::Format("%x", module->regionSize_text));
+			if (group->isApplied())
+				AddRow(std::string(group->getName()), group->getCodeCaveBase(), group->getCodeCaveSize());
 		}
 	}
-
-	sint32 patch_count = 0;
-	for (auto& gfx_pack : GraphicPack2::GetGraphicPacks())
-	{
-		for (auto& patch_group : gfx_pack->GetPatchGroups())
-		{
-			if (patch_group->isApplied())
-			{
-				wxListItem item;
-				item.SetId(module_list.size() + patch_count);
-				item.SetText(std::string(patch_group->getName()));
-
-				const auto index = m_modules->InsertItem(item);
-				m_modules->SetItem(index, ColumnAddress, wxString::Format("%08x", patch_group->getCodeCaveBase()));
-				m_modules->SetItem(index, ColumnSize, wxString::Format("%x", patch_group->getCodeCaveSize()));
-				patch_count++;
-			}
-		}
-	}
-
 	Thaw();
 }
 
-
-void ModuleWindow::OnLeftDClick(wxMouseEvent& event)
+void ModuleWindow::OnLeftDClick(wxMouseEvent& /*event*/)
 {
-	long selected = m_modules->GetFirstSelected();
-	if (selected == wxNOT_FOUND)
+	const long row = m_list->GetFirstSelected();
+	if (row == wxNOT_FOUND)
 		return;
-	const auto text = m_modules->GetItemText(selected, ColumnAddress);
-	const auto address = std::stoul(text.ToStdString(), nullptr, 16);
-	if (address == 0)
-		return;
-	debugger_jumpToAddressInDisasm(address);
+	const uint32 address = (uint32)std::stoul(m_list->GetItemText(row, COL_ADDRESS).ToStdString(), nullptr, 16);
+	if (address != 0)
+		debugger_jumpToAddressInDisasm(address);
 }

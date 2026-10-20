@@ -1,9 +1,11 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include "wxgui/debugger/DumpCtrl.h"
 
 class DebuggerWindow2;
 
+// Floating debugger window holding the memory dump view; docks below the main window when pinned.
 class DumpWindow : public wxFrame
 {
 public:
@@ -13,6 +15,5 @@ public:
 	void OnGameLoaded();
 
 private:
-	wxScrolledWindow* m_scrolled_window;
-	DumpCtrl* m_dump_ctrl;
+	DumpCtrl* m_view;
 };

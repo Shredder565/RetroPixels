@@ -1,10 +1,16 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "Cafe/HW/Espresso/Debugger/Debugger.h"
 #include <wx/frame.h>
 
+#include <array>
+
 class DebuggerWindow2;
 class wxTextCtrl;
 
+// Floating debugger window showing the GPRs, LR, paired-single FPRs and CR
+// fields of the current debug session. Values that changed since the last
+// update are drawn red; double-clicking a GPR or FPR edits it.
 class RegisterWindow : public wxFrame
 {
 public:
@@ -14,16 +20,22 @@ public:
 	void OnUpdateView();
 
 private:
-	void OnMouseDClickEvent(wxMouseEvent& event);
-	void OnFPViewModePress(wxCommandEvent& event);
-	void OnValueContextMenu(wxContextMenuEvent& event);
-	void OnValueContextMenuSelected(wxCommandEvent& event);
+	void OnValueDoubleClick(wxMouseEvent& event);
+	void OnToggleFloatFormat(wxCommandEvent& event);
 
-	void UpdateIntegerRegister(wxTextCtrl* label, wxTextCtrl* value, uint32 registerValue, bool hasChanged);
+	void ShowGpr(size_t row, uint32 value, bool changed);
+	void ShowFpr(wxTextCtrl* field, double asDouble, uint64 asBits);
+	wxString DescribeAddress(uint32 value) const;
+	bool SetColourForChange(wxTextCtrl* field, bool changed) const;
 
-	PPCSnapshot m_prev_snapshot;
-	bool m_show_double_values;
-	wxColour m_changed_color = {0xFF0000FF};
+	// rows 0..31 are r0..r31, row 32 is LR
+	std::array<wxTextCtrl*, 33> m_gprValue{};
+	std::array<wxTextCtrl*, 33> m_gprHint{};
+	std::array<wxTextCtrl*, 32> m_fpr0{};
+	std::array<wxTextCtrl*, 32> m_fpr1{};
+	std::array<wxTextCtrl*, 8> m_cr{};
 
-	wxTextCtrl* m_context_ctrl;
+	PPCSnapshot m_last{};
+	bool m_floatsAsDouble = true;
+	wxColour m_highlight{0xFF0000FF};
 };

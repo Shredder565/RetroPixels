@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "wxgui/wxgui.h"
 #include "wxgui/debugger/DisasmCtrl.h"
 
@@ -18,116 +19,332 @@
 
 wxDEFINE_EVENT(wxEVT_DISASMCTRL_NOTIFY_GOTO_ADDRESS, wxCommandEvent);
 
-#define MAX_SYMBOL_LEN			(120)
-
-
-constexpr uint8 arrowRightPNG[] =
+// ==== disasm-text begin ====
+// Text of one disassembled instruction as coloured pieces (no wx types, so it can be tested on its own).
+namespace disasmtext
 {
-	0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
-	0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x0B,
-	0x08, 0x03, 0x00, 0x00, 0x00, 0x41, 0x3C, 0xFD, 0x0B, 0x00, 0x00, 0x00,
-	0x01, 0x73, 0x52, 0x47, 0x42, 0x00, 0xAE, 0xCE, 0x1C, 0xE9, 0x00, 0x00,
-	0x00, 0x04, 0x67, 0x41, 0x4D, 0x41, 0x00, 0x00, 0xB1, 0x8F, 0x0B, 0xFC,
-	0x61, 0x05, 0x00, 0x00, 0x00, 0x06, 0x50, 0x4C, 0x54, 0x45, 0x00, 0x00,
-	0x00, 0x00, 0x00, 0x00, 0xA5, 0x67, 0xB9, 0xCF, 0x00, 0x00, 0x00, 0x02,
-	0x74, 0x52, 0x4E, 0x53, 0xFF, 0x00, 0xE5, 0xB7, 0x30, 0x4A, 0x00, 0x00,
-	0x00, 0x09, 0x70, 0x48, 0x59, 0x73, 0x00, 0x00, 0x0E, 0xC3, 0x00, 0x00,
-	0x0E, 0xC3, 0x01, 0xC7, 0x6F, 0xA8, 0x64, 0x00, 0x00, 0x00, 0x2C, 0x49,
-	0x44, 0x41, 0x54, 0x18, 0x57, 0x63, 0x60, 0x84, 0x03, 0x08, 0x13, 0x59,
-	0x00, 0xCC, 0x46, 0x11, 0x00, 0x71, 0x80, 0x24, 0x32, 0xC0, 0x10, 0x60,
-	0xC0, 0x10, 0xC0, 0x00, 0x58, 0xCC, 0x80, 0xD8, 0x00, 0x02, 0x60, 0x3E,
-	0x7E, 0x77, 0x00, 0x31, 0x23, 0x23, 0x00, 0x21, 0x95, 0x00, 0x5B, 0x20,
-	0x73, 0x8D, 0x0B, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
-	0x42, 0x60, 0x82
-};
-std::optional<wxBitmap> g_ipArrowBitmap;
+	enum class Ink
+	{
+		Text,
+		Muted,
+		Gpr,
+		Fpr,
+		Spr,
+		Cr,
+		Imm,
+		ImmOffset,
+		CallTarget,
+		Unknown,
+		Todo,
+	};
 
+	struct Piece
+	{
+		std::string text;
+		Ink ink;
+	};
 
-static wxColour theme_textForeground;
-static wxColour theme_textForegroundMuted;
-static wxColour theme_background;
+	// rotate-and-mask forms; their immediates are shown in decimal and they get a C-like hint
+	inline bool IsRotateMaskForm(uint32 op)
+	{
+		switch (op)
+		{
+		case PPCASM_OP_RLWINM: case PPCASM_OP_RLWINM_:
+		case PPCASM_OP_CLRLWI: case PPCASM_OP_CLRLWI_:
+		case PPCASM_OP_CLRRWI: case PPCASM_OP_CLRRWI_:
+		case PPCASM_OP_EXTLWI: case PPCASM_OP_EXTLWI_:
+		case PPCASM_OP_EXTRWI: case PPCASM_OP_EXTRWI_:
+		case PPCASM_OP_SLWI: case PPCASM_OP_SLWI_:
+		case PPCASM_OP_SRWI: case PPCASM_OP_SRWI_:
+		case PPCASM_OP_ROTRWI: case PPCASM_OP_ROTRWI_:
+		case PPCASM_OP_ROTLWI: case PPCASM_OP_ROTLWI_:
+			return true;
+		default:
+			return false;
+		}
+	}
 
-// background colors for lines in the disassembly view
-static wxColour theme_lineBreakpointAndCurrentInstruction;
-static wxColour theme_lineCurrentInstruction;
-static wxColour theme_lineBreakpointSet;
-static wxColour theme_lineLoggingBreakpointSet;
-static wxColour theme_lineLastGotoAddress;
+	inline std::string Mnemonic(uint32 op)
+	{
+		std::string name = ppcAssembler_getInstructionName(op);
+		for (char& c : name)
+			c = (char)tolower((unsigned char)c);
+		return name;
+	}
 
-// text colors for addresses in the disassembly view
-static wxColour theme_syntaxGPR;
-static wxColour theme_syntaxFPR;
-static wxColour theme_syntaxSPR;
-static wxColour theme_syntaxCR;
-static wxColour theme_syntaxIMM;
-static wxColour theme_syntaxIMMOffset;
-static wxColour theme_syntaxCallIMM;
-static wxColour theme_syntaxPseudoOrUnknown;
-static wxColour theme_syntaxSymbol;
+	inline std::string ImmediateText(const PPCDisassemblerOperand& o, bool decimal)
+	{
+		if (o.isSignedImm)
+		{
+			sint32 v = o.immS32;
+			if (o.immWidth == 16 && (v & 0x8000) != 0)
+				v |= (sint32)0xFFFF0000; // sign-extend 16-bit fields
+			if (decimal || (v > -10 && v < 10))
+				return fmt::format("{}", v);
+			if (v < 0)
+				return fmt::format("-0x{:x}", 0u - (uint32)v);
+			return fmt::format("0x{:x}", (uint32)v);
+		}
+		const uint32 u = o.immU32;
+		if (decimal || u < 10)
+			return fmt::format("{}", u);
+		return fmt::format("0x{:x}", u);
+	}
 
-static wxColour theme_opCode;
-static wxColour theme_typeData;
-static wxColour theme_patchedOpCode;
-static wxColour theme_patchedData;
+	// callLabel: symbol text for a bl/bla target if one is known
+	inline void Operands(const PPCDisassembledInstruction& ins, uint32 opcode, uint32 address, const std::optional<std::string>& callLabel, std::vector<Piece>& out)
+	{
+		const bool decimal = IsRotateMaskForm(ins.ppcAsmCode);
+		if (ins.ppcAsmCode == PPCASM_OP_UKN)
+			out.push_back({fmt::format("{:02x} {:02x} {:02x} {:02x}", opcode >> 24, (opcode >> 16) & 0xFF, (opcode >> 8) & 0xFF, opcode & 0xFF), Ink::Unknown});
 
+		bool needComma = false;
+		for (sint32 i = 0; i < PPCASM_OPERAND_COUNT; i++)
+		{
+			if (((ins.operandMask >> i) & 1) == 0)
+				continue;
+			if (needComma)
+				out.push_back({", ", Ink::Text});
+			needComma = true;
 
-static void InitSyntaxColors()
+			const PPCDisassemblerOperand& o = ins.operand[i];
+			switch (o.type)
+			{
+			case PPCASM_OPERAND_TYPE_GPR: out.push_back({fmt::format("r{}", o.registerIndex), Ink::Gpr}); break;
+			case PPCASM_OPERAND_TYPE_FPR: out.push_back({fmt::format("f{}", o.registerIndex), Ink::Fpr}); break;
+			case PPCASM_OPERAND_TYPE_SPR: out.push_back({fmt::format("spr{}", o.registerIndex), Ink::Spr}); break;
+			case PPCASM_OPERAND_TYPE_CR: out.push_back({fmt::format("cr{}", o.registerIndex), Ink::Cr}); break;
+			case PPCASM_OPERAND_TYPE_IMM: out.push_back({ImmediateText(o, decimal), Ink::Imm}); break;
+			case PPCASM_OPERAND_TYPE_PSQMODE: out.push_back({o.immS32 != 0 ? "single" : "paired", Ink::Imm}); break;
+			case PPCASM_OPERAND_TYPE_CIMM:
+			{
+				const uint32 target = o.immU32;
+				std::string label;
+				if (callLabel)
+				{
+					label = *callLabel;
+					if (label.size() >= 36)
+						label = label.substr(0, 34) + "..";
+				}
+				else
+					label = fmt::format("0x{:08x}", target);
+				out.push_back({label, Ink::CallTarget});
+				if (ins.ppcAsmCode != PPCASM_OP_BL)
+					out.push_back({target <= address ? " \xE2\x86\x91" : " \xE2\x86\x93", Ink::Text}); // up / down arrow
+				break;
+			}
+			case PPCASM_OPERAND_TYPE_MEM:
+			{
+				std::string disp;
+				if (o.isSignedImm && o.immS32 >= 0)
+					disp = fmt::format("+0x{:x}", (uint32)o.immS32);
+				else
+					disp = fmt::format("-0x{:x}", 0u - o.immU32);
+				out.push_back({disp, Ink::ImmOffset});
+				out.push_back({"(", Ink::Text});
+				out.push_back({fmt::format("r{}", o.registerIndex), Ink::Gpr});
+				out.push_back({")", Ink::Text});
+				break;
+			}
+			default:
+				out.push_back({"<TODO>", Ink::Todo});
+				break;
+			}
+		}
+	}
+
+	// C-like explanation shown in the comment column when there is no user comment
+	inline std::string Hint(const PPCDisassembledInstruction& ins, uint32 opcode)
+	{
+		const uint32 f21 = (opcode >> 21) & 0x1F, f16 = (opcode >> 16) & 0x1F, f11 = (opcode >> 11) & 0x1F;
+		if (IsRotateMaskForm(ins.ppcAsmCode))
+		{
+			const uint32 mb = (opcode >> 6) & 0x1F, me = (opcode >> 1) & 0x1F;
+			const uint32 mask = ppcAssembler_generateMaskRLW(mb, me);
+			const uint32 sh = f11;
+			if (sh == 0)
+				return fmt::format("r{}=r{}&0x{:x}", f16, f21, mask);
+			if ((0xFFFFFFFFu << ((uint32)ins.operand[2].immS32 & 31)) == mask)
+				return fmt::format("r{}=r{}<<{}", f16, f21, sh);
+			if ((0xFFFFFFFFu >> (32 - sh)) == mask)
+				return fmt::format("r{}=r{}>>{}", f16, f21, 32 - sh);
+			return fmt::format("r{}=(r{}<<<{})&0x{:x}", f16, f21, sh, mask);
+		}
+		if (ins.ppcAsmCode == PPCASM_OP_SUBF || ins.ppcAsmCode == PPCASM_OP_SUBF_)
+			return fmt::format("r{}=r{}-r{}", f21, f11, f16);
+		return {};
+	}
+}
+// ==== disasm-text end ====
+
+namespace
 {
-	theme_textForeground = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
-	theme_textForegroundMuted = wxSystemSettings::SelectLightDark(wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT), wxColour(140, 142, 145));
-	theme_background = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
+	// column layout in pixels
+	constexpr sint32 kColAddress = 60;
+	constexpr sint32 kColModuleOffset = 90;
+	constexpr sint32 kColInstruction = 300;
+	constexpr sint32 kColOperands = 80;
+	constexpr size_t kMaxLabelLength = 120;
 
-	// line background highlights
-	theme_lineBreakpointSet = wxSystemSettings::SelectLightDark(wxColour(0xFF,0x80,0x80), wxColour(0x84,0x21,0x21)); // red for a non-current breakpoint
-	theme_lineBreakpointAndCurrentInstruction = wxSystemSettings::SelectLightDark(wxColour(0xD2,0x7E,0xD2), wxColour(0x91,0x44,0xA4)); // pink for a current breakpoint
-	theme_lineCurrentInstruction = wxSystemSettings::SelectLightDark(wxColour(0xFF,0xA0,0x80), wxColour(0x87,0x53,0x1A)); // light orange
-	theme_lineLoggingBreakpointSet = wxSystemSettings::SelectLightDark(wxColour(0xAB,0xED,0xEE), wxColour(0x25,0x5D,0x6D)); // light blue
-	theme_lineLastGotoAddress = wxSystemSettings::SelectLightDark(wxColour(0xE0,0xE0,0xE0), wxColour(0x40,0x40,0x40)); // very light gray to indicate the line that was last jumped to
+	enum
+	{
+		ID_MENU_TOGGLE_BP = wxID_HIGHEST + 1,
+		ID_MENU_TOGGLE_LOGPOINT,
+		ID_MENU_RESTORE_CODE,
+		ID_MENU_COPY_ADDRESS,
+		ID_MENU_COPY_IMAGE_ADDRESS,
+		ID_MENU_LAST
+	};
 
-	// disassembly syntax colors
-	theme_syntaxGPR = wxSystemSettings::SelectLightDark(wxColour(0x66,0x00,0x00), wxColour(0xE0,0x6C,0x75));
-	theme_syntaxFPR = wxSystemSettings::SelectLightDark(wxColour(0x66,0x66,0x00), wxColour(0xD1,0x9A,0x66));
-	theme_syntaxSPR = wxSystemSettings::SelectLightDark(wxColour(0x00,0x66,0x66), wxColour(0x56,0xB6,0xC2));
-	theme_syntaxCR = wxSystemSettings::SelectLightDark(wxColour(0x00,0x66,0x66), wxColour(0x56,0xB6,0xC2));
-	theme_syntaxIMM = wxSystemSettings::SelectLightDark(wxColour(0x00,0x66,0x00), wxColour(0x9D,0xDE,0x6F));
-	theme_syntaxIMMOffset = wxSystemSettings::SelectLightDark(wxColour(0x00,0x66,0x00), wxColour(0x9D,0xDE,0x6F));
-	theme_syntaxCallIMM = wxSystemSettings::SelectLightDark(wxColour(0x00,0x00,0x88), wxColour(0x61,0xAF,0xEF));
-	theme_syntaxPseudoOrUnknown = wxSystemSettings::SelectLightDark(wxColour(0xA0,0xA0,0xA0), wxColour(0x5C,0x63,0x70));
-	theme_syntaxSymbol = wxSystemSettings::SelectLightDark(wxColour(0xA0,0x00,0x00), wxColour(0xE0,0x6C,0x75));
+	struct DisasmColours
+	{
+		wxColour text, muted, background;
+		wxColour lineBpAndIp, lineIp, lineBp, lineLogpoint, lineGoto;
+		wxColour gpr, fpr, spr, cr, imm, immOffset, callTarget, unknown, symbol;
+		wxColour opcode, dataType, patchedOpcode, patchedData;
+	};
+	DisasmColours s_ink;
 
-	// opcode & data highlighting
-	theme_opCode = wxSystemSettings::SelectLightDark(wxColour(0xFF,0x00,0x40), wxColour(0xFF,0x70,0x7B));
-	theme_patchedOpCode = wxSystemSettings::SelectLightDark(wxColour(0xFF,0x20,0x20), wxColour(0xCC,0x52,0xF5));
-	theme_typeData = wxSystemSettings::SelectLightDark(wxColour(0xFF,0x20,0x20), wxColour(0xCE,0x91,0x78));
-	theme_patchedData = wxSystemSettings::SelectLightDark(wxColour(0xFF,0x20,0x20), wxColour(0xF4,0x43,0x36));
+	wxColour Pick(const wxColour& light, const wxColour& dark)
+	{
+		return wxSystemSettings::SelectLightDark(light, dark);
+	}
 
-	// theme the current instruction pointer arrow
-	g_ipArrowBitmap = wxHelper::LoadThemedBitmapFromPNG(arrowRightPNG, sizeof(arrowRightPNG), wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
+	void LoadColours()
+	{
+		s_ink.text = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
+		s_ink.muted = Pick(wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT), wxColour(140, 142, 145));
+		s_ink.background = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
+
+		s_ink.lineBp = Pick(wxColour(0xFF, 0x80, 0x80), wxColour(0x84, 0x21, 0x21));
+		s_ink.lineBpAndIp = Pick(wxColour(0xD2, 0x7E, 0xD2), wxColour(0x91, 0x44, 0xA4));
+		s_ink.lineIp = Pick(wxColour(0xFF, 0xA0, 0x80), wxColour(0x87, 0x53, 0x1A));
+		s_ink.lineLogpoint = Pick(wxColour(0xAB, 0xED, 0xEE), wxColour(0x25, 0x5D, 0x6D));
+		s_ink.lineGoto = Pick(wxColour(0xE0, 0xE0, 0xE0), wxColour(0x40, 0x40, 0x40));
+
+		s_ink.gpr = Pick(wxColour(0x66, 0x00, 0x00), wxColour(0xE0, 0x6C, 0x75));
+		s_ink.fpr = Pick(wxColour(0x66, 0x66, 0x00), wxColour(0xD1, 0x9A, 0x66));
+		s_ink.spr = Pick(wxColour(0x00, 0x66, 0x66), wxColour(0x56, 0xB6, 0xC2));
+		s_ink.cr = s_ink.spr;
+		s_ink.imm = Pick(wxColour(0x00, 0x66, 0x00), wxColour(0x9D, 0xDE, 0x6F));
+		s_ink.immOffset = s_ink.imm;
+		s_ink.callTarget = Pick(wxColour(0x00, 0x00, 0x88), wxColour(0x61, 0xAF, 0xEF));
+		s_ink.unknown = Pick(wxColour(0xA0, 0xA0, 0xA0), wxColour(0x5C, 0x63, 0x70));
+		s_ink.symbol = Pick(wxColour(0xA0, 0x00, 0x00), wxColour(0xE0, 0x6C, 0x75));
+
+		s_ink.opcode = Pick(wxColour(0xFF, 0x00, 0x40), wxColour(0xFF, 0x70, 0x7B));
+		s_ink.patchedOpcode = Pick(wxColour(0xFF, 0x20, 0x20), wxColour(0xCC, 0x52, 0xF5));
+		s_ink.dataType = Pick(wxColour(0xFF, 0x20, 0x20), wxColour(0xCE, 0x91, 0x78));
+		s_ink.patchedData = Pick(wxColour(0xFF, 0x20, 0x20), wxColour(0xF4, 0x43, 0x36));
+	}
+
+	const wxColour& InkColour(disasmtext::Ink ink)
+	{
+		using disasmtext::Ink;
+		static const wxColour todoGrey(0x44, 0x44, 0x44);
+		switch (ink)
+		{
+		case Ink::Muted: return s_ink.muted;
+		case Ink::Gpr: return s_ink.gpr;
+		case Ink::Fpr: return s_ink.fpr;
+		case Ink::Spr: return s_ink.spr;
+		case Ink::Cr: return s_ink.cr;
+		case Ink::Imm: return s_ink.imm;
+		case Ink::ImmOffset: return s_ink.immOffset;
+		case Ink::CallTarget: return s_ink.callTarget;
+		case Ink::Unknown: return s_ink.unknown;
+		case Ink::Todo: return todoGrey;
+		case Ink::Text:
+		default: return s_ink.text;
+		}
+	}
+
+	// small filled arrow in front of the instruction the CPU is stopped at
+	void DrawIpMarker(wxDC& dc, const wxPoint& at, sint32 lineHeight)
+	{
+		const sint32 h = std::max(6, std::min(11, lineHeight - 4));
+		const sint32 w = 14;
+		const wxPoint shape[] = {
+			wxPoint(0, h / 2 - 2), wxPoint(w - h / 2 - 1, h / 2 - 2), wxPoint(w - h / 2 - 1, 0), wxPoint(w - 1, h / 2),
+			wxPoint(w - h / 2 - 1, h - 1), wxPoint(w - h / 2 - 1, h - h / 2 + 1), wxPoint(0, h - h / 2 + 1),
+		};
+		const wxPen oldPen = dc.GetPen();
+		const wxBrush oldBrush = dc.GetBrush();
+		dc.SetPen(wxPen(s_ink.text));
+		dc.SetBrush(wxBrush(s_ink.text));
+		dc.DrawPolygon(WXSIZEOF(shape), shape, at.x, at.y);
+		dc.SetPen(oldPen);
+		dc.SetBrush(oldBrush);
+	}
+
+	// address as it appears in the module file (text section based at 0x02000000), 0 if unknown
+	uint32 ImageAddress(MPTR address)
+	{
+		RPLModule* mod = RPLLoader_FindModuleByCodeAddr(address);
+		if (mod == nullptr)
+			return 0;
+		const MPTR textBase = mod->regionMappingBase_text.GetMPTR();
+		if (address < textBase || address >= textBase + mod->regionSize_text)
+			return 0;
+		return 0x02000000 + (address - textBase);
+	}
+
+	// symbol text for a bl/bla target; the library prefix is left out inside the caller's own module
+	std::optional<std::string> CallTargetLabel(const PPCDisassembledInstruction& ins, MPTR address)
+	{
+		if (ins.ppcAsmCode != PPCASM_OP_BL && ins.ppcAsmCode != PPCASM_OP_BLA)
+			return std::nullopt;
+		uint32 target = 0;
+		for (sint32 i = 0; i < PPCASM_OPERAND_COUNT; i++)
+		{
+			if (((ins.operandMask >> i) & 1) && ins.operand[i].type == PPCASM_OPERAND_TYPE_CIMM)
+			{
+				target = ins.operand[i].immU32;
+				break;
+			}
+		}
+		RPLStoredSymbol* sym = rplSymbolStorage_getByAddress(target);
+		if (sym == nullptr)
+			return std::nullopt;
+		RPLModule* own = RPLLoader_FindModuleByCodeAddr(address);
+		if (own != nullptr)
+		{
+			const MPTR textBase = own->regionMappingBase_text.GetMPTR();
+			if (target >= textBase && target < textBase + own->regionSize_text)
+				return std::string((const char*)sym->symbolName);
+		}
+		return fmt::format("{}.{}", (const char*)sym->libName, (const char*)sym->symbolName);
+	}
+
+	void PutOnClipboard(const std::string& text)
+	{
+		wxClipboard* cb = wxClipboard::Get();
+		if (!cb->Open())
+			return;
+		cb->SetData(new wxTextDataObject(text));
+		cb->Close();
+	}
 }
 
-
-#define OFFSET_ADDRESS (60)
-#define OFFSET_ADDRESS_RELATIVE (90)
-#define OFFSET_DISASSEMBLY (300)
-
-#define OFFSET_DISASSEMBLY_OPERAND (80)
-
 DisasmCtrl::DisasmCtrl(wxWindow* parent, const wxWindowID& id, const wxPoint& pos, const wxSize& size, long style)
-	: TextList(parent, id, pos, size, style), m_mouse_line(-1), m_mouse_line_drawn(-1), m_active_line(-1)
+	: TextList(parent, id, pos, size, style)
 {
 	Init();
 
-	InitSyntaxColors();
-	Bind(wxEVT_SYS_COLOUR_CHANGED, [this](wxSysColourChangedEvent& event) {
-		event.Skip();
-		CallAfter([this] { InitSyntaxColors(); Refresh(); });
+	LoadColours();
+	Bind(wxEVT_SYS_COLOUR_CHANGED, [this](wxSysColourChangedEvent& evt) {
+		evt.Skip();
+		CallAfter([this] {
+			LoadColours();
+			Refresh();
+		});
 	});
 
-	auto tooltip_sizer = new wxBoxSizer(wxVERTICAL);
-	tooltip_sizer->Add(new wxStaticText(m_tooltip_window, wxID_ANY, wxEmptyString), 0, wxALL, 5);
-	m_tooltip_window->SetSizer(tooltip_sizer);
+	auto* tipLayout = new wxBoxSizer(wxVERTICAL);
+	tipLayout->Add(new wxStaticText(m_tooltip_window, wxID_ANY, wxEmptyString), 0, wxALL, 5);
+	m_tooltip_window->SetSizer(tipLayout);
 
-	Bind(wxEVT_MENU, &DisasmCtrl::OnContextMenuEntryClicked, this, IDContextMenu_ToggleBreakpoint, IDContextMenu_Last);
+	Bind(wxEVT_MENU, &DisasmCtrl::OnMenuCommand, this, ID_MENU_TOGGLE_BP, ID_MENU_LAST);
 }
 
 void DisasmCtrl::Init()
@@ -137,658 +354,303 @@ void DisasmCtrl::Init()
 
 void DisasmCtrl::SelectCodeRegion(uint32 newAddress)
 {
-	if (newAddress >= mmuRange_TEXT_AREA.getBase() && newAddress < mmuRange_TEXT_AREA.getEnd())
+	// the view always covers the whole MMU range the address lies in
+	if (MMURange* range = memory_getMMURangeByAddress(newAddress))
 	{
-		currentCodeRegionStart = MEMORY_CODEAREA_ADDR;
-		currentCodeRegionEnd = RPLLoader_GetMaxCodeOffset();
-		currentCodeRegionEnd = std::max(currentCodeRegionEnd, currentCodeRegionStart + 0x1000);
-	}
-	MMURange* mmuRange = memory_getMMURangeByAddress(newAddress);
-	if (mmuRange)
-	{
-		currentCodeRegionStart = mmuRange->getBase();
-		currentCodeRegionEnd = mmuRange->getEnd();
+		m_regionBegin = range->getBase();
+		m_regionEnd = range->getEnd();
 	}
 	else
 	{
-		currentCodeRegionStart = 0;
-		currentCodeRegionEnd = 0;
+		m_regionBegin = 0;
+		m_regionEnd = 0;
 	}
-
-	// update line tracking
-	sint32 element_count = currentCodeRegionEnd - currentCodeRegionStart;
-	// if (element_count <= 0x00010000)
-	// 	element_count = 0x00010000;
-
-	if (this->SetElementCount(element_count / 4))
+	const sint32 bytes = (sint32)(m_regionEnd - m_regionBegin);
+	if (SetElementCount(bytes / 4))
 	{
 		Scroll(0, 0);
 		RefreshControl();
 	}
 }
 
-void DisasmCtrl::DrawDisassemblyLine(wxDC& dc, const wxPoint& linePosition, MPTR virtualAddress, RPLModule* rplModule)
+void DisasmCtrl::DrawInstructionLine(wxDC& dc, const wxPoint& linePos, MPTR address, RPLModule* viewModule)
 {
-	wxPoint position = linePosition;
+	wxPoint at = linePos;
+	const bool patched = debugger_hasPatch(address);
 
-	bool hasPatch = debugger_hasPatch(virtualAddress);
-
-	PPCDisassembledInstruction disasmInstr;
-
-	const DebuggerBreakpoint* bp = debugger_getFirstBP(virtualAddress);
-	while (bp)
-	{
-		if (bp->isExecuteBP() && bp->enabled)
-			break;
+	// with an enabled execute breakpoint in place, memory holds the trap: show the original instruction
+	const DebuggerBreakpoint* bp = debugger_getFirstBP(address);
+	while (bp != nullptr && !(bp->isExecuteBP() && bp->enabled))
 		bp = bp->next;
+	const uint32 opcode = bp ? bp->originalOpcodeValue : memory_readU32(address);
+
+	bool isCurrentIp = false;
+	if (PPCInterpreter_t* cpu = debugger_lockDebugSession())
+	{
+		isCurrentIp = cpu->instructionPointer == address;
+		debugger_unlockDebugSession(cpu);
 	}
 
-	uint32 opcode;
+	const wxColour* lineColour = &s_ink.background;
+	if (isCurrentIp)
+		lineColour = bp ? &s_ink.lineBpAndIp : &s_ink.lineIp;
+	else if (bp)
+		lineColour = bp->bpType == DEBUGGER_BP_T_NORMAL ? &s_ink.lineBp : &s_ink.lineLogpoint;
+	else if (address == m_gotoTarget)
+		lineColour = &s_ink.lineGoto;
+	DrawLineBackground(dc, at, *lineColour);
 
-	if (bp)
-		opcode = bp->originalOpcodeValue;
-	else
-		opcode = memory_readU32(virtualAddress);
+	dc.SetTextForeground(s_ink.text);
+	dc.DrawText(wxString::Format("%08x", address), at);
+	at.x += kColAddress;
 
-	ppcAssembler_disassemble(virtualAddress, opcode, &disasmInstr);
+	dc.SetTextForeground(s_ink.muted);
+	dc.DrawText(viewModule ? wxString::Format("+0x%-8x", address - viewModule->regionMappingBase_text.GetMPTR()) : wxString("???"), at);
+	at.x += kColModuleOffset;
 
-	bool hasActiveBP = false;
-	PPCInterpreter_t* sessionCpu = debugger_lockDebugSession();
-	if (sessionCpu)
+	if (isCurrentIp)
+		DrawIpMarker(dc, wxPoint(at.x - 24, at.y + 2), m_line_height);
+
+	// addresses marked as data by debug symbols show their value instead of an instruction
+	const auto dataType = DebugSymbolStorage::GetDataType(address);
+	if (dataType == DEBUG_SYMBOL_TYPE::FLOAT || dataType == DEBUG_SYMBOL_TYPE::U32)
 	{
-		hasActiveBP = sessionCpu->instructionPointer == virtualAddress;
-		debugger_unlockDebugSession(sessionCpu);
-	}
-
-	// write virtual address
-	wxColour background_colour;
-	if (hasActiveBP && bp != nullptr)
-		background_colour = theme_lineBreakpointAndCurrentInstruction;
-	else if (hasActiveBP)
-		background_colour = theme_lineCurrentInstruction;
-	else if (bp != nullptr)
-		background_colour = bp->bpType == DEBUGGER_BP_T_NORMAL ? theme_lineBreakpointSet : theme_lineLoggingBreakpointSet;
-	else if(virtualAddress == m_lastGotoTarget)
-		background_colour = theme_lineLastGotoAddress;
-	else
-		background_colour = theme_background;
-
-	DrawLineBackground(dc, position, background_colour);
-
-	dc.SetTextForeground(theme_textForeground);
-	dc.DrawText(wxString::Format("%08x", virtualAddress), position);
-	position.x += OFFSET_ADDRESS;
-
-	dc.SetTextForeground(theme_textForegroundMuted);
-	if (rplModule)
-		dc.DrawText(wxString::Format("+0x%-8x", virtualAddress - rplModule->regionMappingBase_text.GetMPTR()), position);
-	else
-		dc.DrawText("???", position);
-
-	position.x += OFFSET_ADDRESS_RELATIVE;
-
-	// draw arrow to clearly indicate instruction pointer
-	if(hasActiveBP)
-		dc.DrawBitmap(*g_ipArrowBitmap, wxPoint(position.x - 24, position.y + 2), false);
-
-	// handle data symbols
-	auto debugSymbolDataType = DebugSymbolStorage::GetDataType(virtualAddress);
-	if (debugSymbolDataType == DEBUG_SYMBOL_TYPE::FLOAT)
-	{
-		dc.SetTextForeground(hasPatch ? theme_patchedData : theme_typeData);
-		dc.DrawText(fmt::format(".float"), position);
-
-		position.x += OFFSET_DISASSEMBLY_OPERAND;
-		dc.SetTextForeground(hasPatch ? theme_patchedData : theme_syntaxIMM);
-		dc.DrawText(fmt::format("{}", memory_readFloat(virtualAddress)), position);
-
-		return;
-	}
-	else if (debugSymbolDataType == DEBUG_SYMBOL_TYPE::U32)
-	{
-		dc.SetTextForeground(hasPatch ? theme_patchedData : theme_typeData);
-		dc.DrawText(fmt::format(".uint"), position);
-
-		position.x += OFFSET_DISASSEMBLY_OPERAND;
-		dc.SetTextForeground(hasPatch ? theme_patchedData : theme_syntaxIMM);
-		dc.DrawText(fmt::format("{}", memory_readU32(virtualAddress)), position);
-
+		const bool isFloat = dataType == DEBUG_SYMBOL_TYPE::FLOAT;
+		dc.SetTextForeground(patched ? s_ink.patchedData : s_ink.dataType);
+		dc.DrawText(isFloat ? ".float" : ".uint", at);
+		at.x += kColOperands;
+		dc.SetTextForeground(patched ? s_ink.patchedData : s_ink.imm);
+		dc.DrawText(isFloat ? fmt::format("{}", memory_readFloat(address)) : fmt::format("{}", memory_readU32(address)), at);
 		return;
 	}
 
-	sint32 start_width = position.x;
-	dc.SetTextForeground(hasPatch ? theme_patchedOpCode : theme_opCode);
-	std::string opName = ppcAssembler_getInstructionName(disasmInstr.ppcAsmCode);
-	std::transform(opName.begin(), opName.end(), opName.begin(), tolower);
-	dc.DrawText(wxString::Format("%-12s", opName.c_str()), position);
-	position.x += OFFSET_DISASSEMBLY_OPERAND;
+	PPCDisassembledInstruction ins;
+	ppcAssembler_disassemble(address, opcode, &ins);
 
-	bool isRLWINM = disasmInstr.ppcAsmCode == PPCASM_OP_RLWINM || disasmInstr.ppcAsmCode == PPCASM_OP_RLWINM_ ||
-		disasmInstr.ppcAsmCode == PPCASM_OP_CLRLWI || disasmInstr.ppcAsmCode == PPCASM_OP_CLRLWI_ ||
-		disasmInstr.ppcAsmCode == PPCASM_OP_CLRRWI || disasmInstr.ppcAsmCode == PPCASM_OP_CLRRWI_ ||
-		disasmInstr.ppcAsmCode == PPCASM_OP_EXTLWI || disasmInstr.ppcAsmCode == PPCASM_OP_EXTLWI_ ||
-		disasmInstr.ppcAsmCode == PPCASM_OP_EXTRWI || disasmInstr.ppcAsmCode == PPCASM_OP_EXTRWI_ ||
-		disasmInstr.ppcAsmCode == PPCASM_OP_SLWI || disasmInstr.ppcAsmCode == PPCASM_OP_SLWI_ ||
-		disasmInstr.ppcAsmCode == PPCASM_OP_SRWI || disasmInstr.ppcAsmCode == PPCASM_OP_SRWI_ ||
-		disasmInstr.ppcAsmCode == PPCASM_OP_ROTRWI || disasmInstr.ppcAsmCode == PPCASM_OP_ROTRWI_ ||
-		disasmInstr.ppcAsmCode == PPCASM_OP_ROTLWI || disasmInstr.ppcAsmCode == PPCASM_OP_ROTLWI_;
-	bool forceDecDisplay = isRLWINM;
+	const sint32 instructionX = at.x;
+	dc.SetTextForeground(patched ? s_ink.patchedOpcode : s_ink.opcode);
+	dc.DrawText(wxString::Format("%-12s", disasmtext::Mnemonic(ins.ppcAsmCode)), at);
+	at.x += kColOperands;
 
-	if (disasmInstr.ppcAsmCode == PPCASM_OP_UKN)
+	std::vector<disasmtext::Piece> pieces;
+	disasmtext::Operands(ins, opcode, address, CallTargetLabel(ins, address), pieces);
+	for (const disasmtext::Piece& p : pieces)
+		WriteText(dc, wxString::FromUTF8(p.text), at, InkColour(p.ink));
+
+	// comment column: the user's comment, else a hint for some instructions
+	at.x = instructionX + kColInstruction;
+	const auto* note = static_cast<rplDebugSymbolComment*>(rplDebugSymbol_getForAddress(address));
+	if (note != nullptr && note->type == RplDebugSymbolComment)
 	{
-		// show raw bytes
-		WriteText(dc, wxString::Format("%02x %02x %02x %02x", (opcode >> 24) & 0xFF, (opcode >> 16) & 0xFF, (opcode >> 8) & 0xFF, (opcode >> 0) & 0xFF), position, theme_syntaxPseudoOrUnknown);
+		WriteText(dc, note->comment, at, s_ink.text);
+		return;
 	}
-
-	bool is_first_operand = true;
-	for (sint32 o = 0; o < PPCASM_OPERAND_COUNT; o++)
-	{
-		if (((disasmInstr.operandMask >> o) & 1) == 0)
-			continue;
-
-		if (!is_first_operand)
-			WriteText(dc, ", ", position, theme_textForeground);
-
-		is_first_operand = false;
-		switch (disasmInstr.operand[o].type)
-		{
-		case PPCASM_OPERAND_TYPE_GPR:
-			WriteText(dc, wxString::Format("r%d", disasmInstr.operand[o].registerIndex), position, theme_syntaxGPR);
-			break;
-
-		case PPCASM_OPERAND_TYPE_FPR:
-			WriteText(dc, wxString::Format("f%d", disasmInstr.operand[o].registerIndex), position, theme_syntaxFPR);
-			break;
-
-		case PPCASM_OPERAND_TYPE_SPR:
-			WriteText(dc, wxString::Format("spr%d", disasmInstr.operand[o].registerIndex), position, theme_syntaxSPR);
-			break;
-
-		case PPCASM_OPERAND_TYPE_CR:
-			WriteText(dc, wxString::Format("cr%d", disasmInstr.operand[o].registerIndex), position, theme_syntaxCR);
-			break;
-
-		case PPCASM_OPERAND_TYPE_IMM:
-		{
-			wxString string;
-			if (disasmInstr.operand[o].isSignedImm)
-			{
-				sint32 sImm = disasmInstr.operand[o].immS32;
-				if (disasmInstr.operand[o].immWidth == 16 && (sImm & 0x8000))
-					sImm |= (sint32)0xFFFF0000;
-
-				if ((sImm > -10 && sImm < 10) || forceDecDisplay)
-					string = wxString::Format("%d", sImm);
-				else
-				{
-					if (sImm < 0)
-						string = wxString::Format("-0x%x", -sImm);
-					else
-						string = wxString::Format("0x%x", sImm);
-				}
-			}
-			else
-			{
-				uint32 uImm = disasmInstr.operand[o].immS32;
-				if ((uImm >= 0 && uImm < 10) || forceDecDisplay)
-					string = wxString::Format("%u", uImm);
-				else
-					string = wxString::Format("0x%x", uImm);
-			}
-
-			WriteText(dc, string, position, theme_syntaxIMM);
-			break;
-		}
-		case PPCASM_OPERAND_TYPE_PSQMODE:
-		{
-			if (disasmInstr.operand[o].immS32)
-				WriteText(dc, "single", position, theme_syntaxIMM);
-			else
-				WriteText(dc, "paired", position, theme_syntaxIMM);
-			break;
-		}
-		case PPCASM_OPERAND_TYPE_CIMM:
-		{
-			wxString string;
-			// use symbol for function calls if available 
-			uint32 callDest = disasmInstr.operand[o].immU32;
-			RPLStoredSymbol* storedSymbol = nullptr;
-			if (disasmInstr.ppcAsmCode == PPCASM_OP_BL || disasmInstr.ppcAsmCode == PPCASM_OP_BLA)
-				storedSymbol = rplSymbolStorage_getByAddress(callDest);
-
-			if (storedSymbol)
-			{
-				// if symbol is within same module then don't display libname prefix
-				RPLModule* rplModuleCurrent = RPLLoader_FindModuleByCodeAddr(virtualAddress); // cache this
-				if (rplModuleCurrent && callDest >= rplModuleCurrent->regionMappingBase_text.GetMPTR() && callDest < (rplModuleCurrent->regionMappingBase_text.GetMPTR() + rplModuleCurrent->regionSize_text))
-					string = wxString((char*)storedSymbol->symbolName);
-				else
-					string = wxString::Format("%s.%s", (char*)storedSymbol->libName, (char*)storedSymbol->symbolName);
-
-				// truncate name after 36 characters
-				if (string.Length() >= 36)
-				{
-					string.Truncate(34);
-					string.Append("..");
-				}
-			}
-			else
-			{
-				string = wxString::Format("0x%08x", disasmInstr.operand[o].immU32);
-			}
-
-			WriteText(dc, string, position, theme_syntaxCallIMM);
-
-			if (disasmInstr.ppcAsmCode != PPCASM_OP_BL)
-			{
-				wxString x = wxString(" ");
-				if (callDest <= virtualAddress)
-					x.Append(wxUniChar(0x2191)); // arrow up
-				else
-					x.Append(wxUniChar(0x2193)); // arrow down
-
-				WriteText(dc, x, position, theme_textForeground);
-			}
-
-			break;
-		}
-		case PPCASM_OPERAND_TYPE_MEM:
-		{
-			// offset
-			wxString string;
-			if (disasmInstr.operand[o].isSignedImm && disasmInstr.operand[o].immS32 >= 0)
-				string = wxString::Format("+0x%x", disasmInstr.operand[o].immS32);
-			else
-				string = wxString::Format("-0x%x", -disasmInstr.operand[o].immS32);
-
-			WriteText(dc, string, position, theme_syntaxIMMOffset);
-			WriteText(dc, "(", position, theme_textForeground);
-
-			// register
-			WriteText(dc, wxString::Format("r%d", disasmInstr.operand[o].registerIndex), position, theme_syntaxGPR);
-			WriteText(dc, ")", position, theme_textForeground);
-			break;
-		}
-		default:
-			// TODO
-			WriteText(dc, "<TODO>", position, wxColour(0xFF444444));
-		}
-	}
-
-	position.x = start_width + OFFSET_DISASSEMBLY;
-	const auto comment = static_cast<rplDebugSymbolComment*>(rplDebugSymbol_getForAddress(virtualAddress));
-	if (comment && comment->type == RplDebugSymbolComment)
-		WriteText(dc, comment->comment, position, theme_textForeground);
-	else if (isRLWINM)
-	{
-		sint32 rS, rA, SH, MB, ME;
-		rS = (opcode >> 21) & 0x1f;
-		rA = (opcode >> 16) & 0x1f;
-		SH = (opcode >> 11) & 0x1f;
-		MB = (opcode >> 6) & 0x1f;
-		ME = (opcode >> 1) & 0x1f;
-
-		uint32 mask = ppcAssembler_generateMaskRLW(MB, ME);
-
-		wxString string;
-		if (SH == 0)
-			string = wxString::Format("r%d=r%d&0x%x", rA, rS, mask);
-		else if ((0xFFFFFFFF << (uint32)disasmInstr.operand[2].immS32) == mask)
-			string = wxString::Format("r%d=r%d<<%d", rA, rS, SH);
-		else if ((0xFFFFFFFF >> (32 - SH) == mask))
-			string = wxString::Format("r%d=r%d>>%d", rA, rS, 32 - SH);
-		else
-			string = wxString::Format("r%d=(r%d<<<%d)&0x%x", rA, rS, SH, mask);
-		WriteText(dc, string, position, theme_textForegroundMuted);
-	}
-	else if (disasmInstr.ppcAsmCode == PPCASM_OP_SUBF || disasmInstr.ppcAsmCode == PPCASM_OP_SUBF_)
-	{
-		sint32 rD, rA, rB;
-		rD = (opcode >> 21) & 0x1f;
-		rA = (opcode >> 16) & 0x1f;
-		rB = (opcode >> 11) & 0x1f;
-
-		wxString string;
-		string = wxString::Format("r%d=r%d-r%d", rD, rB, rA);
-		WriteText(dc, string, position, theme_textForegroundMuted);
-	}
+	const std::string hint = disasmtext::Hint(ins, opcode);
+	if (!hint.empty())
+		WriteText(dc, hint, at, s_ink.muted);
 }
 
-void DisasmCtrl::DrawLabelName(wxDC& dc, const wxPoint& linePosition, MPTR virtualAddress, RPLStoredSymbol* storedSymbol)
+void DisasmCtrl::DrawSymbolLine(wxDC& dc, const wxPoint& linePos, RPLStoredSymbol* symbol)
 {
-	wxString symbol_string = wxString::Format("%s:", (char*)storedSymbol->symbolName);
-	if (symbol_string.Length() > MAX_SYMBOL_LEN)
-	{
-		symbol_string.Truncate(MAX_SYMBOL_LEN - 3);
-		symbol_string.Append("..:");
-	}
-	wxPoint tmpPos(linePosition);
-	WriteText(dc, symbol_string, tmpPos, theme_syntaxSymbol);
+	wxString label = wxString::Format("%s:", (const char*)symbol->symbolName);
+	if (label.Length() > kMaxLabelLength)
+		label = label.Left(kMaxLabelLength - 3) + "..:";
+	wxPoint at = linePos;
+	WriteText(dc, label, at, s_ink.symbol);
 }
 
 void DisasmCtrl::OnDraw(wxDC& dc, sint32 start, sint32 count, const wxPoint& start_position)
 {
-	wxPoint position(0, 0);
-
-	RPLModule* current_rpl_module = RPLLoader_FindModuleByCodeAddr(GetViewBaseAddress());
-	
-	if (currentCodeRegionStart == currentCodeRegionEnd)
+	RPLModule* viewModule = RPLLoader_FindModuleByCodeAddr(GetViewBaseAddress());
+	if (m_regionBegin == m_regionEnd)
 		return;
 
-	sint32 viewFirstLine = GetViewStart().y;
-	sint32 lineOffset = start - viewFirstLine;
+	// Lines are laid out from the top of the view, because symbol labels take a
+	// line of their own and shift every following address. Lines above the dirty
+	// area are only laid out, not painted.
+	const sint32 firstDirty = start - GetViewStart().y;
+	cemu_assert_debug(firstDirty >= 0);
+	const sint32 linesToLayout = std::min(firstDirty + count, (sint32)m_elements_visible);
+	if (m_visibleAddresses.size() != m_elements_visible)
+		m_visibleAddresses.resize(m_elements_visible);
 
-	cemu_assert_debug(lineOffset >= 0);
-
-	sint32 instructionIndex = 0;
-	sint32 numLinesToUpdate = lineOffset + count;
-	numLinesToUpdate = std::min(numLinesToUpdate, (sint32)m_elements_visible);
-
-	if(m_lineToAddress.size() != m_elements_visible)
-		m_lineToAddress.resize(m_elements_visible);
-
-	sint32 lineIndex = 0;
-	while(lineIndex < numLinesToUpdate)
+	wxPoint at(0, 0);
+	uint32 address = GetViewBaseAddress();
+	sint32 line = 0;
+	while (line < linesToLayout)
 	{
-		const uint32 virtualAddress = GetViewBaseAddress() + instructionIndex * 4;
-		instructionIndex++;
-
-		if (virtualAddress < currentCodeRegionStart ||
-			virtualAddress >= currentCodeRegionEnd)
+		const uint32 current = address;
+		address += 4;
+		if (current < m_regionBegin || current >= m_regionEnd || !memory_isAddressRangeAccessible(current, 4))
 		{
-			NextLine(position, &start_position);
-			m_lineToAddress[lineIndex] = std::nullopt;
-			lineIndex++;
-			continue;	
-		}
-
-		// check if valid memory address
-		if (!memory_isAddressRangeAccessible(virtualAddress, 4))
-		{
-			NextLine(position, &start_position);
-			m_lineToAddress[lineIndex] = std::nullopt;
-			lineIndex++;
+			m_visibleAddresses[line++] = std::nullopt;
+			NextLine(at, &start_position);
 			continue;
 		}
-
-		// draw symbol as label
-		RPLStoredSymbol* storedSymbol = rplSymbolStorage_getByAddress(virtualAddress);
-		if (storedSymbol)
+		if (RPLStoredSymbol* sym = rplSymbolStorage_getByAddress(current))
 		{
-			if(lineIndex >= lineOffset)
-				DrawLabelName(dc, position, virtualAddress, storedSymbol);
-			m_lineToAddress[lineIndex] = virtualAddress;
-			lineIndex++;
-			if (lineIndex >= numLinesToUpdate)
+			if (line >= firstDirty)
+				DrawSymbolLine(dc, at, sym);
+			m_visibleAddresses[line++] = current;
+			if (line >= linesToLayout)
 				break;
-			NextLine(position, &start_position);
+			NextLine(at, &start_position);
 		}
-		m_lineToAddress[lineIndex] = virtualAddress;
-		if (lineIndex >= lineOffset)
-			DrawDisassemblyLine(dc, position, virtualAddress, current_rpl_module);
-		NextLine(position, &start_position);
-		lineIndex++;
+		m_visibleAddresses[line] = current;
+		if (line >= firstDirty)
+			DrawInstructionLine(dc, at, current, viewModule);
+		NextLine(at, &start_position);
+		line++;
 	}
 
-	// draw vertical separator lines: offset | disassembly | comment
+	// column separators: offsets | instructions | comments
 	dc.SetPen(*wxLIGHT_GREY_PEN);
-
-	wxPoint line_from = start_position;
-	line_from.x = OFFSET_ADDRESS + OFFSET_ADDRESS_RELATIVE - 5;
-	wxPoint line_to = line_from;
-	line_to.y += (count + 1) * m_line_height;
-	dc.DrawLine(line_from, line_to);
-
-	line_from.x += OFFSET_DISASSEMBLY;
-	line_to.x += OFFSET_DISASSEMBLY;
-	dc.DrawLine(line_from, line_to);
+	const sint32 x1 = kColAddress + kColModuleOffset - 5;
+	const sint32 x2 = x1 + kColInstruction;
+	const sint32 yEnd = start_position.y + (count + 1) * m_line_height;
+	dc.DrawLine(x1, start_position.y, x1, yEnd);
+	dc.DrawLine(x2, start_position.y, x2, yEnd);
 }
 
-void DisasmCtrl::OnMouseMove(const wxPoint& start_position, uint32 line)
+void DisasmCtrl::NotifyBreakpointsChanged()
 {
-	/*m_mouse_line = line;
-	if (m_mouse_line_drawn != -1)
-		RefreshLine(m_mouse_line_drawn);
-	if (m_mouse_line != -1)
-		RefreshLine(m_mouse_line);*/
-
-	wxPoint position = start_position;
-
-	// address
-	if (position.x <= OFFSET_ADDRESS)
-	{
-		return;
-	}
-
-	position.x -= OFFSET_ADDRESS;
-
-	// relative offset
-	if (position.x <= OFFSET_ADDRESS_RELATIVE)
-	{
-		return;
-	}
-
-	position.x -= OFFSET_ADDRESS_RELATIVE;
-
-	// disassembly code
-	if (position.x <= OFFSET_DISASSEMBLY)
-	{
-		if(m_mouse_down)
-		{
-			
-		}
-
-		if (position.x <= OFFSET_DISASSEMBLY_OPERAND)
-		{
-			return;
-		}
-
-		position.x -= OFFSET_DISASSEMBLY_OPERAND;
-	}
+	wxCommandEvent evt(wxEVT_BREAKPOINT_CHANGE);
+	wxPostEvent(GetParent(), evt);
 }
 
 void DisasmCtrl::OnKeyPressed(sint32 key_code, const wxPoint& position)
 {
-	auto optVirtualAddress = LinePixelPosToAddress(position.y);
-	switch (key_code)
+	if (key_code == WXK_F9)
 	{
-		case WXK_F9:
+		if (const auto address = LinePixelPosToAddress(position.y))
 		{
-			if (optVirtualAddress)
-			{
-				debugger_toggleExecuteBreakpoint(*optVirtualAddress);
-
-				wxCommandEvent evt(wxEVT_BREAKPOINT_CHANGE);
-				wxPostEvent(this->GetParent(), evt);
-			}
-			return;
+			debugger_toggleExecuteBreakpoint(*address);
+			NotifyBreakpointsChanged();
 		}
-		case 'G':
-		{
-			if(IsKeyDown(WXK_CONTROL))
-			{
-				GoToAddressDialog();
-				return;
-			}
-		}
+		return;
+	}
+	if (key_code == 'G' && IsKeyDown(WXK_CONTROL))
+	{
+		GoToAddressDialog();
+		return;
 	}
 
-	// debugger currently in break state
-	PPCInterpreter_t* debugCpu = debugger_lockDebugSession();
-	if (debugCpu)
-	{
-		switch (key_code)
-		{
-			case WXK_F5:
-			{
-				debugger_stepCommand(DebuggerStepCommand::Run);
-				break;
-			}
-			case WXK_F10:
-			{
-				debugger_stepCommand(DebuggerStepCommand::StepOver);
-				break;
-			}
-			case WXK_F11:
-			{
-				debugger_stepCommand(DebuggerStepCommand::StepInto);
-				break;
-			}
-		}
-		debugger_unlockDebugSession(debugCpu);
-	}
-	else
+	// run / step keys
+	if (PPCInterpreter_t* cpu = debugger_lockDebugSession())
 	{
 		if (key_code == WXK_F5)
-		{
-			debugger_requestBreak();
-		}
+			debugger_stepCommand(DebuggerStepCommand::Run);
+		else if (key_code == WXK_F10)
+			debugger_stepCommand(DebuggerStepCommand::StepOver);
+		else if (key_code == WXK_F11)
+			debugger_stepCommand(DebuggerStepCommand::StepInto);
+		debugger_unlockDebugSession(cpu);
+	}
+	else if (key_code == WXK_F5)
+	{
+		debugger_requestBreak();
 	}
 }
 
 void DisasmCtrl::OnMouseDClick(const wxPoint& position, uint32 line)
 {
-	wxPoint pos = position;
-	auto optVirtualAddress = LinePixelPosToAddress(position.y - GetViewStart().y * m_line_height);
-	if (!optVirtualAddress)
+	const auto hit = LinePixelPosToAddress(position.y - GetViewStart().y * m_line_height);
+	if (!hit)
 		return;
-	MPTR virtualAddress = *optVirtualAddress;
+	const MPTR address = *hit;
 
-	// address
-	if (pos.x <= OFFSET_ADDRESS + OFFSET_ADDRESS_RELATIVE)
+	if (position.x <= kColAddress + kColModuleOffset)
 	{
-		// address + address relative
-		debugger_toggleExecuteBreakpoint(virtualAddress);
+		debugger_toggleExecuteBreakpoint(address);
 		RefreshLine(line);
-		wxCommandEvent evt(wxEVT_BREAKPOINT_CHANGE);
-		wxPostEvent(this->GetParent(), evt);
+		NotifyBreakpointsChanged();
 		return;
 	}
-	else if (pos.x <= OFFSET_ADDRESS + OFFSET_ADDRESS_RELATIVE + OFFSET_DISASSEMBLY)
-	{
-		// double-clicked on disassembly (operation and operand data)
-		wxString currentInstruction = wxEmptyString;
-		wxTextEntryDialog set_value_dialog(this, _("Enter a new instruction."), wxString::Format(_("Overwrite instruction at address %08x"), virtualAddress), currentInstruction);
-		if (set_value_dialog.ShowModal() == wxID_OK)
-		{
-			PPCAssemblerInOut ctx = { 0 };
-			ctx.virtualAddress = virtualAddress;
-			if (ppcAssembler_assembleSingleInstruction(set_value_dialog.GetValue().c_str(), &ctx))
-			{
-				debugger_createPatch(virtualAddress, { ctx.outputData.data(), ctx.outputData.size() });
-				RefreshLine(line);
-			}
-		}
-		return;
-	}
-	else
-	{
-		// comment
-		const auto comment = static_cast<rplDebugSymbolComment*>(rplDebugSymbol_getForAddress(virtualAddress));
 
-		wxString old_comment = wxEmptyString;
-		if (comment && comment->type == RplDebugSymbolComment)
-			old_comment = comment->comment;
-
-		wxTextEntryDialog set_value_dialog(this, _("Enter a new comment."), wxString::Format(_("Create comment at address %08x"), virtualAddress), old_comment);
-		if (set_value_dialog.ShowModal() == wxID_OK)
+	if (position.x <= kColAddress + kColModuleOffset + kColInstruction)
+	{
+		// replace the instruction with one typed in by the user
+		wxTextEntryDialog ask(this, _("Enter a new instruction."), wxString::Format(_("Overwrite instruction at address %08x"), address), wxEmptyString);
+		if (ask.ShowModal() != wxID_OK)
+			return;
+		PPCAssemblerInOut ctx = {0};
+		ctx.virtualAddress = address;
+		if (ppcAssembler_assembleSingleInstruction(ask.GetValue().c_str(), &ctx))
 		{
-			rplDebugSymbol_createComment(virtualAddress, set_value_dialog.GetValue().wc_str());
+			debugger_createPatch(address, {ctx.outputData.data(), ctx.outputData.size()});
 			RefreshLine(line);
 		}
 		return;
 	}
-}
 
-void DisasmCtrl::CopyToClipboard(std::string text)
-{
-	if (wxClipboard::Get()->Open())
+	// comment column
+	wxString current;
+	const auto* note = static_cast<rplDebugSymbolComment*>(rplDebugSymbol_getForAddress(address));
+	if (note != nullptr && note->type == RplDebugSymbolComment)
+		current = note->comment;
+	wxTextEntryDialog ask(this, _("Enter a new comment."), wxString::Format(_("Create comment at address %08x"), address), current);
+	if (ask.ShowModal() == wxID_OK)
 	{
-		wxClipboard::Get()->SetData(new wxTextDataObject(text));
-		wxClipboard::Get()->Close();
+		rplDebugSymbol_createComment(address, ask.GetValue().wc_str());
+		RefreshLine(line);
 	}
 }
 
-static uint32 GetUnrelocatedAddress(MPTR address)
+void DisasmCtrl::OnContextMenu(const wxPoint& position, uint32 /*line*/)
 {
-	RPLModule* rplModule = RPLLoader_FindModuleByCodeAddr(address);
-	if (!rplModule)
-		return 0;
-	if (address >= rplModule->regionMappingBase_text.GetMPTR() && address < (rplModule->regionMappingBase_text.GetMPTR() + rplModule->regionSize_text))
-		return 0x02000000 + (address - rplModule->regionMappingBase_text.GetMPTR());
-	return 0;
-}
-
-void DisasmCtrl::OnContextMenu(const wxPoint& position, uint32 line)
-{
-	auto optVirtualAddress = LinePixelPosToAddress(position.y - GetViewStart().y * m_line_height);
-	if (!optVirtualAddress)
+	const auto hit = LinePixelPosToAddress(position.y - GetViewStart().y * m_line_height);
+	if (!hit)
 		return;
-	MPTR virtualAddress = *optVirtualAddress;
-	m_contextMenuAddress = virtualAddress;
-	// show dialog
+	m_menuAddress = *hit;
+
 	wxMenu menu;
-	menu.Append(IDContextMenu_ToggleBreakpoint, _("Toggle breakpoint"));
-	menu.Append(IDContextMenu_ToggleLoggingBreakpoint, _("Toggle logging point"));
-	if(debugger_hasPatch(virtualAddress))
-		menu.Append(IDContextMenu_RestoreOriginalInstructions, _("Restore original instructions"));
+	menu.Append(ID_MENU_TOGGLE_BP, _("Toggle breakpoint"));
+	menu.Append(ID_MENU_TOGGLE_LOGPOINT, _("Toggle logging point"));
+	if (debugger_hasPatch(m_menuAddress))
+		menu.Append(ID_MENU_RESTORE_CODE, _("Restore original instructions"));
 	menu.AppendSeparator();
-	menu.Append(IDContextMenu_CopyAddress, _("Copy address"));
-	uint32 unrelocatedAddress = GetUnrelocatedAddress(virtualAddress);
-	if (unrelocatedAddress && unrelocatedAddress != virtualAddress)
-		menu.Append(IDContextMenu_CopyUnrelocatedAddress, _("Copy virtual address (for IDA/Ghidra)"));
+	menu.Append(ID_MENU_COPY_ADDRESS, _("Copy address"));
+	const uint32 imageAddress = ImageAddress(m_menuAddress);
+	if (imageAddress != 0 && imageAddress != m_menuAddress)
+		menu.Append(ID_MENU_COPY_IMAGE_ADDRESS, _("Copy virtual address (for IDA/Ghidra)"));
 	PopupMenu(&menu);
 }
 
-void DisasmCtrl::OnContextMenuEntryClicked(wxCommandEvent& event)
+void DisasmCtrl::OnMenuCommand(wxCommandEvent& event)
 {
-	switch(event.GetId())
+	switch (event.GetId())
 	{
-		case IDContextMenu_ToggleBreakpoint:
-		{
-			debugger_toggleExecuteBreakpoint(m_contextMenuAddress);
-			wxCommandEvent evt(wxEVT_BREAKPOINT_CHANGE);
-			wxPostEvent(this->GetParent(), evt);
-			break;
-		}
-		case IDContextMenu_ToggleLoggingBreakpoint:
-		{
-			debugger_toggleLoggingBreakpoint(m_contextMenuAddress);
-			wxCommandEvent evt(wxEVT_BREAKPOINT_CHANGE);
-			wxPostEvent(this->GetParent(), evt);
-			break;
-		}
-		case IDContextMenu_RestoreOriginalInstructions:
-		{
-			debugger_removePatch(m_contextMenuAddress);
-			wxCommandEvent evt(wxEVT_BREAKPOINT_CHANGE); // This also refreshes the disassembly view
-			wxPostEvent(this->GetParent(), evt);
-			break;
-		}
-		case IDContextMenu_CopyAddress:
-		{
-			CopyToClipboard(fmt::format("{:#10x}", m_contextMenuAddress));
-			break;
-		}
-		case IDContextMenu_CopyUnrelocatedAddress:
-		{
-			uint32 unrelocatedAddress = GetUnrelocatedAddress(m_contextMenuAddress);
-			CopyToClipboard(fmt::format("{:#10x}", unrelocatedAddress));
-			break;
-		}
-		default:
-			UNREACHABLE;
+	case ID_MENU_TOGGLE_BP:
+		debugger_toggleExecuteBreakpoint(m_menuAddress);
+		NotifyBreakpointsChanged();
+		break;
+	case ID_MENU_TOGGLE_LOGPOINT:
+		debugger_toggleLoggingBreakpoint(m_menuAddress);
+		NotifyBreakpointsChanged();
+		break;
+	case ID_MENU_RESTORE_CODE:
+		debugger_removePatch(m_menuAddress);
+		NotifyBreakpointsChanged(); // also repaints the disassembly
+		break;
+	case ID_MENU_COPY_ADDRESS:
+		PutOnClipboard(fmt::format("{:#10x}", m_menuAddress));
+		break;
+	case ID_MENU_COPY_IMAGE_ADDRESS:
+		PutOnClipboard(fmt::format("{:#10x}", ImageAddress(m_menuAddress)));
+		break;
+	default:
+		UNREACHABLE;
 	}
 }
 
-bool DisasmCtrl::OnShowTooltip(const wxPoint& position, uint32 line)
+bool DisasmCtrl::OnShowTooltip(const wxPoint& /*position*/, uint32 /*line*/)
 {
 	return false;
 }
 
-void DisasmCtrl::ScrollWindow(int dx, int dy, const wxRect* prect)
+void DisasmCtrl::ScrollWindow(int dx, int dy, const wxRect* /*prect*/)
 {
-	// scroll and repaint everything
+	// label lines shift addresses, so every scroll repaints the whole view
 	RefreshControl(nullptr);
 	TextList::ScrollWindow(dx, dy, nullptr);
 }
@@ -805,92 +667,83 @@ void DisasmCtrl::OnUpdateView()
 
 uint32 DisasmCtrl::GetViewBaseAddress() const
 {
-	if (GetViewStart().y < 0)
+	const sint32 topLine = GetViewStart().y;
+	if (topLine < 0)
 		return MPTR_NULL;
-	return currentCodeRegionStart + GetViewStart().y * 4;
+	return m_regionBegin + topLine * 4;
 }
 
 std::optional<MPTR> DisasmCtrl::LinePixelPosToAddress(sint32 posY)
 {
 	if (posY < 0)
 		return std::nullopt;
-
-	sint32 lineIndex = posY / m_line_height;
-	if (lineIndex >= m_lineToAddress.size())
+	const size_t row = (size_t)(posY / m_line_height);
+	if (row >= m_visibleAddresses.size())
 		return std::nullopt;
-
-	return m_lineToAddress[lineIndex];
+	return m_visibleAddresses[row];
 }
 
 uint32 DisasmCtrl::AddressToScrollPos(uint32 offset) const
 {
-	return (offset - currentCodeRegionStart) / 4;
+	return (offset - m_regionBegin) / 4;
 }
 
 void DisasmCtrl::CenterOffset(uint32 offset)
 {
-	if (offset < currentCodeRegionStart || offset >= currentCodeRegionEnd)
+	if (offset < m_regionBegin || offset >= m_regionEnd)
 		SelectCodeRegion(offset);
 
-	const sint32 line = AddressToScrollPos(offset);
+	const sint32 line = (sint32)AddressToScrollPos(offset);
 	if (line < 0 || line >= (sint32)m_element_count)
 		return;
 
-	if (m_active_line != -1)
-		RefreshLine(m_active_line);
-
+	if (m_highlightLine != -1)
+		RefreshLine(m_highlightLine);
 	DoScroll(0, std::max(0, line - (sint32)(m_elements_visible / 2)));
+	m_highlightLine = line;
+	RefreshLine(m_highlightLine);
+}
 
-	m_active_line = line;
-	RefreshLine(m_active_line);
+void DisasmCtrl::JumpTo(uint32 address)
+{
+	m_gotoTarget = address;
+	CenterOffset(address);
+	wxCommandEvent evt(wxEVT_DISASMCTRL_NOTIFY_GOTO_ADDRESS);
+	evt.SetExtraLong(static_cast<long>(address));
+	wxPostEvent(GetParent(), evt);
 }
 
 void DisasmCtrl::GoToAddressDialog()
 {
-	wxTextEntryDialog goto_dialog(this, _("Enter a target address."), _("GoTo address"), wxEmptyString);
-	if (goto_dialog.ShowModal() == wxID_OK)
+	wxTextEntryDialog ask(this, _("Enter a target address."), _("GoTo address"), wxEmptyString);
+	if (ask.ShowModal() != wxID_OK)
+		return;
+
+	std::string input = ask.GetValue().ToStdString();
+	std::transform(input.begin(), input.end(), input.begin(), tolower);
+	input.erase(0, input.find_first_not_of(' '));
+
+	ExpressionParser parser;
+	debugger_addParserSymbols(parser);
+	// a bare number is read as hex ("1234" means 0x1234); otherwise the text is an expression
+	const std::string asHex = "0x" + input;
+	if (parser.IsConstantExpression(asHex))
 	{
-		ExpressionParser parser;
-
-		auto value = goto_dialog.GetValue().ToStdString();
-		std::transform(value.begin(), value.end(), value.begin(), tolower);
-
-		// trim any leading spaces
-		while(!value.empty() && value[0] == ' ')
-			value.erase(value.begin());
-
-		debugger_addParserSymbols(parser);
-
-		// try to parse expression as hex value first (it should interpret 1234 as 0x1234, not 1234)
-		if (parser.IsConstantExpression("0x"+value))
-		{
-			const auto result = (uint32)parser.Evaluate("0x"+value);
-			m_lastGotoTarget = result;
-			CenterOffset(result);
-			wxCommandEvent evt(wxEVT_DISASMCTRL_NOTIFY_GOTO_ADDRESS);
-			evt.SetExtraLong(static_cast<long>(result));
-			wxPostEvent(GetParent(), evt);
-		}
-		else if (parser.IsConstantExpression(value))
-		{
-			const auto result = (uint32)parser.Evaluate(value);
-			m_lastGotoTarget = result;
-			CenterOffset(result);
-			wxCommandEvent evt(wxEVT_DISASMCTRL_NOTIFY_GOTO_ADDRESS);
-			evt.SetExtraLong(static_cast<long>(result));
-			wxPostEvent(GetParent(), evt);
-		}
-		else
-		{
-			try
-			{
-				// if not a constant expression (i.e. relying on unknown variables), then evaluating will throw an exception with a detailed error message
-				const auto _ = (uint32)parser.Evaluate(value);
-			}
-			catch (const std::exception& ex)
-			{
-				wxMessageBox(ex.what(), _("Error"), wxOK | wxCENTRE | wxICON_ERROR, this);
-			}
-		}
+		JumpTo((uint32)parser.Evaluate(asHex));
+		return;
+	}
+	if (parser.IsConstantExpression(input))
+	{
+		JumpTo((uint32)parser.Evaluate(input));
+		return;
+	}
+	// not constant: evaluating reports what is wrong with it
+	try
+	{
+		(void)parser.Evaluate(input);
+	}
+	catch (const std::exception& ex)
+	{
+		wxMessageBox(ex.what(), _("Error"), wxOK | wxCENTRE | wxICON_ERROR, this);
 	}
 }

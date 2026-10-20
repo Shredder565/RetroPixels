@@ -1,138 +1,120 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "wxgui/debugger/SymbolCtrl.h"
 #include "Cafe/OS/RPL/rpl_symbol_storage.h"
 #include "Cafe/HW/Espresso/Debugger/Debugger.h"
 #include <wx/listctrl.h>
 #include <wx/clipbrd.h>
 
-enum ItemColumns
+namespace
 {
-	ColumnName = 0,
-	ColumnAddress,
-	ColumnModule,
-};
+	enum : long
+	{
+		COL_NAME,
+		COL_ADDRESS,
+		COL_MODULE,
+	};
+}
 
-SymbolListCtrl::SymbolListCtrl(wxWindow* parent, const wxWindowID& id, const wxPoint& pos, const wxSize& size) : wxListView(parent, id, pos, size, wxLC_REPORT | wxLC_VIRTUAL)
-{    
-	wxListItem col0;
-	col0.SetId(ColumnName);
-	col0.SetText(_("Name"));
-	col0.SetWidth(200);
-	InsertColumn(ColumnName, col0);
+SymbolListCtrl::SymbolListCtrl(wxWindow* parent, const wxWindowID& id, const wxPoint& pos, const wxSize& size)
+	: wxListView(parent, id, pos, size, wxLC_REPORT | wxLC_VIRTUAL)
+{
+	InsertColumn(COL_NAME, _("Name"), wxLIST_FORMAT_LEFT, 200);
+	InsertColumn(COL_ADDRESS, _("Address"), wxLIST_FORMAT_RIGHT, 75);
+	InsertColumn(COL_MODULE, _("Module"), wxLIST_FORMAT_RIGHT, 75);
 
-	wxListItem col1;
-	col1.SetId(ColumnAddress);
-	col1.SetText(_("Address"));
-	col1.SetWidth(75);
-	col1.SetAlign(wxLIST_FORMAT_RIGHT);
-	InsertColumn(ColumnAddress, col1);
-
-	wxListItem col2;
-	col2.SetId(ColumnModule);
-	col2.SetText(_("Module"));
-	col2.SetWidth(75);
-	col2.SetAlign(wxLIST_FORMAT_RIGHT);
-	InsertColumn(ColumnModule, col2);
-
-	Bind(wxEVT_LIST_ITEM_ACTIVATED, &SymbolListCtrl::OnLeftDClick, this);
+	Bind(wxEVT_LIST_ITEM_ACTIVATED, &SymbolListCtrl::OnActivated, this);
 	Bind(wxEVT_LIST_ITEM_RIGHT_CLICK, &SymbolListCtrl::OnRightClick, this);
-
-	m_list_filter.Clear();
 
 	OnGameLoaded();
 }
 
 void SymbolListCtrl::OnGameLoaded()
 {
-	m_data.clear();
-	m_visible_items.clear();
-	const auto symbol_map = rplSymbolStorage_lockSymbolMap();
-	for (auto const& [address, symbol_info] : symbol_map)
+	m_rows.clear();
+	m_shownRows.clear();
+	// one symbol per address; the list shows them in address order
+	const auto& symbols = rplSymbolStorage_lockSymbolMap();
+	m_rows.reserve(symbols.size());
+	for (const auto& [address, sym] : symbols)
 	{
-		if (symbol_info == nullptr || symbol_info->symbolName == nullptr)
+		if (sym == nullptr || sym->symbolName == nullptr)
 			continue;
-
-		wxString libNameWX = wxString::FromAscii((const char*)symbol_info->libName);
-		wxString symbolNameWX = wxString::FromAscii((const char*)symbol_info->symbolName);
-		wxString searchNameWX = libNameWX + symbolNameWX;
-		searchNameWX.MakeLower();
-
-		m_data.try_emplace(
-			address,
-			symbolNameWX,
-			libNameWX,
-			searchNameWX
-		);
+		Row r;
+		r.address = address;
+		r.name = wxString::FromAscii((const char*)sym->symbolName);
+		r.module = wxString::FromAscii((const char*)sym->libName);
+		r.haystack = (r.module + r.name).Lower();
+		m_rows.push_back(std::move(r));
 	}
 	rplSymbolStorage_unlockSymbolMap();
+	std::sort(m_rows.begin(), m_rows.end(), [](const Row& a, const Row& b) { return a.address < b.address; });
+	ApplyFilter();
+}
 
-	RebuildVisibleItems();
+void SymbolListCtrl::ApplyFilter()
+{
+	m_shownRows.clear();
+	m_shownRows.reserve(m_rows.size());
+	for (size_t i = 0; i < m_rows.size(); i++)
+	{
+		if (m_filter.IsEmpty() || m_rows[i].haystack.Contains(m_filter))
+			m_shownRows.push_back(i);
+	}
+
+	const long shown = (long)m_shownRows.size();
+	SetItemCount(shown);
+	if (shown == 0)
+	{
+		Refresh();
+		return;
+	}
+	const long top = std::min<long>(GetTopItem(), shown - 1);
+	RefreshItems(top, std::min<long>(shown - 1, top + GetCountPerPage() + 1));
 }
 
 wxString SymbolListCtrl::OnGetItemText(long item, long column) const
 {
-	if (item < 0 || item >= static_cast<long>(m_visible_items.size()))
+	if (item < 0 || item >= (long)m_shownRows.size())
 		return wxEmptyString;
-
-	const auto& [address, symbol] = *m_visible_items[item];
-	if (column == ColumnName)
-		return symbol.name;
-	if (column == ColumnAddress)
-		return wxString::Format("%08x", address);
-	if (column == ColumnModule)
-		return symbol.libName;
-
-	return wxEmptyString;
-}
-
-
-void SymbolListCtrl::OnLeftDClick(wxListEvent& event)
-{
-	long selected = GetFirstSelected();
-	if (selected == wxNOT_FOUND || selected >= static_cast<long>(m_visible_items.size()))
-		return;
-	const auto address = m_visible_items[selected]->first;
-	if (address == 0)
-		return;
-	debugger_jumpToAddressInDisasm(address);
-}
-
-void SymbolListCtrl::OnRightClick(wxListEvent& event)
-{
-	long selected = GetFirstSelected();
-	if (selected == wxNOT_FOUND || selected >= static_cast<long>(m_visible_items.size()))
-		return;
-	if (wxClipboard::Get()->Open())
+	const Row& r = m_rows[m_shownRows[item]];
+	switch (column)
 	{
-		wxClipboard::Get()->SetData(new wxTextDataObject(wxString::Format("0x%08x", m_visible_items[selected]->first)));
-		wxClipboard::Get()->Close();
+	case COL_NAME: return r.name;
+	case COL_ADDRESS: return wxString::Format("%08x", r.address);
+	case COL_MODULE: return r.module;
+	default: return wxEmptyString;
 	}
 }
 
-void SymbolListCtrl::RebuildVisibleItems()
+const SymbolListCtrl::Row* SymbolListCtrl::SelectedRow() const
 {
-	m_visible_items.clear();
-	m_visible_items.reserve(m_data.size());
-	const bool has_filter = !m_list_filter.IsEmpty();
-	for (auto it = m_data.cbegin(); it != m_data.cend(); ++it)
-	{
-		if (has_filter && !it->second.searchName.Contains(m_list_filter))
-			continue;
+	const long sel = GetFirstSelected();
+	if (sel == wxNOT_FOUND || sel >= (long)m_shownRows.size())
+		return nullptr;
+	return &m_rows[m_shownRows[sel]];
+}
 
-		m_visible_items.emplace_back(it);
-	}
+void SymbolListCtrl::OnActivated(wxListEvent& /*event*/)
+{
+	const Row* r = SelectedRow();
+	if (r != nullptr && r->address != 0)
+		debugger_jumpToAddressInDisasm(r->address);
+}
 
-	SetItemCount(static_cast<long>(m_visible_items.size()));
-	if (!m_visible_items.empty())
-	{
-		const auto top_item = std::min<long>(GetTopItem(), static_cast<long>(m_visible_items.size() - 1));
-		RefreshItems(top_item, std::min<long>(static_cast<long>(m_visible_items.size() - 1), top_item + GetCountPerPage() + 1));
-	}
-	else
-		Refresh();
+void SymbolListCtrl::OnRightClick(wxListEvent& /*event*/)
+{
+	const Row* r = SelectedRow();
+	if (r == nullptr)
+		return;
+	wxClipboard* cb = wxClipboard::Get();
+	if (!cb->Open())
+		return;
+	cb->SetData(new wxTextDataObject(wxString::Format("0x%08x", r->address)));
+	cb->Close();
 }
 
 void SymbolListCtrl::ChangeListFilter(wxString filter)
 {
-	m_list_filter = filter.MakeLower();
-	RebuildVisibleItems();
+	m_filter = filter.MakeLower();
+	ApplyFilter();
 }

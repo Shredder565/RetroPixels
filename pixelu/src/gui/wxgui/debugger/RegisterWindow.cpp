@@ -1,7 +1,8 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "wxgui/wxgui.h"
 #include "wxgui/debugger/RegisterWindow.h"
 
-#include <sstream>
+#include <string>
 
 #include "wxgui/debugger/DebuggerWindow2.h"
 #include "Cafe/HW/Espresso/Debugger/Debugger.h"
@@ -10,476 +11,314 @@
 #include "Cafe/HW/Espresso/EspressoISA.h"
 #include "util/helpers/helpers.h"
 
-enum
+namespace
 {
-	// REGISTER
-	kRegisterValueR0 = wxID_HIGHEST + 8400,
-	kRegisterLabelR0 = kRegisterValueR0 + 32,
-	kRegisterLabelLR = kRegisterLabelR0 + 32,
-	kRegisterValueLR = kRegisterLabelLR + 1,
-	kRegisterValueFPR0_0 = kRegisterValueLR + 32,
-	kRegisterValueFPR1_0 = kRegisterValueFPR0_0 + 32,
-	kRegisterValueCR0 = kRegisterValueFPR1_0 + 32,
-	kContextMenuZero,
-	kContextMenuInc,
-	kContextMenuDec,
-	kContextMenuCopy,
-	kContextMenuGotoDisasm,
-	kContextMenuGotoDump,
-};
+	constexpr int kWidth = 400;
+	constexpr int kHeight = 975;
+
+	wxColour PlainText()
+	{
+		return wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
+	}
+
+	// borderless read-only text field that blends into the window background
+	wxTextCtrl* AddField(wxWindow* owner, wxSizer* grid, const wxString& text, int flags, int border)
+	{
+		auto* field = new wxTextCtrl(owner, wxID_ANY, text, wxDefaultPosition, wxDefaultSize, wxTE_READONLY | wxNO_BORDER | wxTE_RICH2);
+		field->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+		field->SetForegroundColour(PlainText());
+		grid->Add(field, 0, flags, border);
+		return field;
+	}
+
+	void AddCaption(wxWindow* owner, wxSizer* grid, const wxString& text)
+	{
+		grid->Add(new wxStaticText(owner, wxID_ANY, text), 0, wxLEFT, 5);
+	}
+
+	bool InDataArea(uint32 addr)
+	{
+		return addr >= MEMORY_DATA_AREA_ADDR && addr < MEMORY_DATA_AREA_ADDR + MEMORY_DATA_AREA_SIZE;
+	}
+
+	// a NUL terminated run of printable 8-bit characters starting at addr
+	bool ReadNarrowString(uint32 addr, std::string& out)
+	{
+		const uint32 end = MEMORY_DATA_AREA_ADDR + MEMORY_DATA_AREA_SIZE;
+		for (uint32 p = addr; p < end; p++)
+		{
+			const uint8 ch = memory_readU8(p);
+			if (ch == 0)
+				return !out.empty();
+			if (!isprint(ch))
+				return false;
+			out.push_back((char)ch);
+		}
+		return !out.empty();
+	}
+
+	// same for big-endian UTF-16
+	bool ReadWideString(uint32 addr, std::wstring& out)
+	{
+		const uint32 end = MEMORY_DATA_AREA_ADDR + MEMORY_DATA_AREA_SIZE - 1;
+		for (uint32 p = addr; p < end; p += 2)
+		{
+			const uint16 ch = memory_readU16(p);
+			if (ch == 0)
+				return !out.empty();
+			if (!iswprint(ch))
+				return false;
+			out.push_back((wchar_t)ch);
+		}
+		return !out.empty();
+	}
+
+	wxString FormatFloat(bool asDouble, double value, uint64 bits)
+	{
+		return asDouble ? wxString::Format("%lf", value) : wxString::Format("%016llx", (unsigned long long)bits);
+	}
+
+	wxString DescribeCrField(const uint8* bits)
+	{
+		std::vector<std::string> flags;
+		if (bits[Espresso::CR_BIT_INDEX_LT] != 0) flags.emplace_back("LT");
+		if (bits[Espresso::CR_BIT_INDEX_GT] != 0) flags.emplace_back("GT");
+		if (bits[Espresso::CR_BIT_INDEX_EQ] != 0) flags.emplace_back("EQ");
+		if (bits[Espresso::CR_BIT_INDEX_SO] != 0) flags.emplace_back("SO");
+		if (flags.empty())
+			return "-";
+		return fmt::format("{}", fmt::join(flags, ", "));
+	}
+
+	template<typename T, size_t N>
+	int IndexOf(const std::array<T*, N>& list, const wxObject* obj)
+	{
+		for (size_t i = 0; i < N; i++)
+		{
+			if (list[i] == obj)
+				return (int)i;
+		}
+		return -1;
+	}
+}
 
 RegisterWindow::RegisterWindow(DebuggerWindow2& parent, const wxPoint& main_position, const wxSize& main_size)
-	: wxFrame(&parent, wxID_ANY, _("Registers"), wxDefaultPosition, wxSize(400, 975), wxSYSTEM_MENU | wxCAPTION | wxCLIP_CHILDREN | wxRESIZE_BORDER | wxFRAME_FLOAT_ON_PARENT),
-	m_prev_snapshot({}), m_show_double_values(true), m_context_ctrl(nullptr)
+	: wxFrame(&parent, wxID_ANY, _("Registers"), wxDefaultPosition, wxSize(kWidth, kHeight), wxSYSTEM_MENU | wxCAPTION | wxCLIP_CHILDREN | wxRESIZE_BORDER | wxFRAME_FLOAT_ON_PARENT)
 {
 	SetSizeHints(wxDefaultSize, wxDefaultSize);
-	SetMaxSize({ 400, 975 });
-	this->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+	SetMaxSize(wxSize(kWidth, kHeight));
+	SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
 
-	wxBoxSizer* main_sizer = new wxBoxSizer(wxVERTICAL);
+	auto* scroller = new wxScrolledWindow(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxVSCROLL);
+	auto* column = new wxBoxSizer(wxVERTICAL);
 
-	auto scrolled_win = new wxScrolledWindow(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxVSCROLL);
-	wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
-
-	auto gpr_sizer = new wxFlexGridSizer(0, 3, 0, 0);
-	
-	// GPRs
-	for(sint32 i = 0; i < 32; ++i)
+	// integer registers: caption | value | what the value points at
+	auto* gprGrid = new wxFlexGridSizer(0, 3, 0, 0);
+	for (size_t row = 0; row < m_gprValue.size(); row++)
 	{
-		gpr_sizer->Add(new wxStaticText(scrolled_win, wxID_ANY, wxString::Format("R%d", i)), 0, wxLEFT, 5);
-
-		auto value = new wxTextCtrl(scrolled_win, kRegisterValueR0 + i, wxString::Format("%08x", 0), wxDefaultPosition, wxDefaultSize, wxTE_READONLY | wxNO_BORDER | wxTE_RICH2);
-		value->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
-		value->SetForegroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-		value->Bind(wxEVT_LEFT_DCLICK, &RegisterWindow::OnMouseDClickEvent, this);
-		//value->Bind(wxEVT_CONTEXT_MENU, &RegisterWindow::OnValueContextMenu, this);
-		gpr_sizer->Add(value, 0, wxLEFT|wxRIGHT, 5);
-
-		auto label = new wxTextCtrl(scrolled_win, kRegisterLabelR0 + i, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_READONLY | wxNO_BORDER | wxTE_RICH2);
-		label->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
-		label->SetForegroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-		label->SetMinSize(wxSize(500, -1));
-		gpr_sizer->Add(label, 0, wxEXPAND);
+		AddCaption(scroller, gprGrid, row < 32 ? wxString::Format("R%d", (int)row) : wxString("LR"));
+		m_gprValue[row] = AddField(scroller, gprGrid, wxString::Format("%08x", 0), wxLEFT | wxRIGHT, 5);
+		m_gprValue[row]->Bind(wxEVT_LEFT_DCLICK, &RegisterWindow::OnValueDoubleClick, this);
+		m_gprHint[row] = AddField(scroller, gprGrid, wxEmptyString, wxEXPAND, 0);
+		m_gprHint[row]->SetMinSize(wxSize(500, -1));
 	}
+	column->Add(gprGrid, 1, wxEXPAND);
 
+	auto* formatButton = new wxButton(scroller, wxID_ANY, _("FP view mode"));
+	formatButton->Bind(wxEVT_BUTTON, &RegisterWindow::OnToggleFloatFormat, this);
+	column->Add(formatButton, 0, wxALL, 5);
+
+	// paired singles: caption | ps0 | ps1
+	auto* fprGrid = new wxFlexGridSizer(0, 3, 0, 0);
+	for (size_t i = 0; i < m_fpr0.size(); i++)
 	{
-		// LR
-		gpr_sizer->Add(new wxStaticText(scrolled_win, wxID_ANY, wxString::Format("LR")), 0, wxLEFT, 5);
-		auto value = new wxTextCtrl(scrolled_win, kRegisterValueLR, wxString::Format("%08x", 0), wxDefaultPosition, wxDefaultSize, wxTE_READONLY | wxNO_BORDER | wxTE_RICH2);
-		value->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
-		value->SetForegroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-		value->Bind(wxEVT_LEFT_DCLICK, &RegisterWindow::OnMouseDClickEvent, this);
-		//value->Bind(wxEVT_CONTEXT_MENU, &RegisterWindow::OnValueContextMenu, this);
-		gpr_sizer->Add(value, 0, wxLEFT | wxRIGHT, 5);
-		auto label = new wxTextCtrl(scrolled_win, kRegisterLabelLR, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_READONLY | wxNO_BORDER | wxTE_RICH2);
-		label->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
-		label->SetForegroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-		label->SetMinSize(wxSize(500, -1));
-		gpr_sizer->Add(label, 0, wxEXPAND);
+		AddCaption(scroller, fprGrid, wxString::Format("FP%d", (int)i));
+		m_fpr0[i] = AddField(scroller, fprGrid, wxString::Format("%lf", 0.0), wxLEFT | wxRIGHT, 5);
+		m_fpr1[i] = AddField(scroller, fprGrid, wxString::Format("%lf", 0.0), wxLEFT | wxRIGHT, 5);
+		m_fpr0[i]->Bind(wxEVT_LEFT_DCLICK, &RegisterWindow::OnValueDoubleClick, this);
+		m_fpr1[i]->Bind(wxEVT_LEFT_DCLICK, &RegisterWindow::OnValueDoubleClick, this);
 	}
+	column->Add(fprGrid, 0, wxEXPAND);
 
-	sizer->Add(gpr_sizer, 1, wxEXPAND);
-
-	auto button = new wxButton(scrolled_win, wxID_ANY, _("FP view mode"));
-	button->Bind(wxEVT_BUTTON, &RegisterWindow::OnFPViewModePress, this);
-	sizer->Add(button, 0, wxALL, 5);
-
-	auto fp_sizer = new wxFlexGridSizer(0, 3, 0, 0);
-	for (sint32 i = 0; i < 32; ++i)
+	auto* crGrid = new wxFlexGridSizer(0, 2, 0, 0);
+	for (size_t i = 0; i < m_cr.size(); i++)
 	{
-		fp_sizer->Add(new wxStaticText(scrolled_win, wxID_ANY, wxString::Format("FP%d", i)), 0, wxLEFT, 5);
-
-		auto value0 = new wxTextCtrl(scrolled_win, kRegisterValueFPR0_0 + i, wxString::Format("%lf", 0.0), wxDefaultPosition, wxDefaultSize, wxTE_READONLY | wxNO_BORDER | wxTE_RICH2);
-		value0->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
-		value0->SetForegroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-		value0->Bind(wxEVT_LEFT_DCLICK, &RegisterWindow::OnMouseDClickEvent, this);
-		fp_sizer->Add(value0, 0, wxLEFT | wxRIGHT, 5);
-
-		auto value1 = new wxTextCtrl(scrolled_win, kRegisterValueFPR1_0 + i, wxString::Format("%lf", 0.0), wxDefaultPosition, wxDefaultSize, wxTE_READONLY | wxNO_BORDER | wxTE_RICH2);
-		value1->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
-		value1->SetForegroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-		value1->Bind(wxEVT_LEFT_DCLICK, &RegisterWindow::OnMouseDClickEvent, this);
-		fp_sizer->Add(value1, 0, wxLEFT | wxRIGHT, 5);
+		AddCaption(scroller, crGrid, wxString::Format("CR%d", (int)i));
+		m_cr[i] = AddField(scroller, crGrid, "-", wxRIGHT, 5);
 	}
+	column->Add(crGrid, 0, wxEXPAND);
 
-	sizer->Add(fp_sizer, 0, wxEXPAND);
-	auto cr_sizer = new wxFlexGridSizer(0, 2, 0, 0);
+	scroller->SetSizerAndFit(column);
+	scroller->SetScrollRate(-1, 10);
 
-	// CRs
-	for (sint32 i = 0; i < 8; ++i)
-	{
-		cr_sizer->Add(new wxStaticText(scrolled_win, wxID_ANY, wxString::Format("CR%d", i)), 0, wxLEFT, 5);
-		auto value = new wxTextCtrl(scrolled_win, kRegisterValueCR0 + i, "-", wxDefaultPosition, wxDefaultSize, wxTE_READONLY | wxNO_BORDER | wxTE_RICH2);
-		value->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
-		value->SetForegroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-		//value->Bind(wxEVT_CONTEXT_MENU, &RegisterWindow::OnValueContextMenu, this);
-		cr_sizer->Add(value, 0, wxRIGHT, 5);
-	}
-
-	sizer->Add(cr_sizer, 0, wxEXPAND);
-	scrolled_win->SetSizerAndFit(sizer);
-	scrolled_win->SetScrollRate(-1, 10);
-
-	main_sizer->Add(scrolled_win, 1, wxEXPAND);
-	SetSizer(main_sizer);
+	auto* outer = new wxBoxSizer(wxVERTICAL);
+	outer->Add(scroller, 1, wxEXPAND);
+	SetSizer(outer);
 	Layout();
 
 	if (parent.GetConfig().data().pin_to_main)
 		OnMainMove(main_position, main_size);
-
-	//Bind(wxEVT_MENU, &RegisterWindow::OnValueContextMenuSelected, this, kContextMenuZero, kContextMenuGotoDump);
 }
-
 
 void RegisterWindow::OnMainMove(const wxPoint& main_position, const wxSize& main_size)
 {
-	wxSize size(400, 255 + main_size.y + 250);
-	this->SetSize(size);
-
-	wxPoint position = main_position;
-	position.x += main_size.x;
-	position.y -= 255;
-	this->SetPosition(position);
+	// right of the main window, reaching 255px above and 250px below it
+	SetSize(wxSize(kWidth, main_size.y + 505));
+	SetPosition(wxPoint(main_position.x + main_size.x, main_position.y - 255));
 }
 
-void RegisterWindow::UpdateIntegerRegister(wxTextCtrl* label, wxTextCtrl* value, uint32 registerValue, bool hasChanged)
+bool RegisterWindow::SetColourForChange(wxTextCtrl* field, bool changed) const
 {
-	//const auto value = dynamic_cast<wxTextCtrl*>(GetWindowChild(kRegisterValueR0 + i));
-	//wxASSERT(value);
-
-	//const bool has_changed = register_value != m_prev_snapshot.gpr[i];
-	if (hasChanged)
-		value->SetForegroundColour(m_changed_color);
-	else if (value->GetForegroundColour() != wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT))
-		value->SetForegroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-
-	value->ChangeValue(wxString::Format("%08x", registerValue));
-
-	//const auto label = dynamic_cast<wxTextCtrl*>(GetWindowChild(kRegisterLabelR0 + i));
-	//wxASSERT(label);
-	label->SetForegroundColour(hasChanged ? m_changed_color : wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-
-	// check if address is a string
-	if (registerValue >= MEMORY_DATA_AREA_ADDR && registerValue < (MEMORY_DATA_AREA_ADDR + MEMORY_DATA_AREA_SIZE))
+	// returns false when the field is already up to date and needs no new text
+	if (changed)
 	{
-		bool is_valid_string = true;
-		std::stringstream buffer;
-
-		uint32 string_offset = registerValue;
-		while (string_offset < (MEMORY_DATA_AREA_ADDR + MEMORY_DATA_AREA_SIZE))
-		{
-			const uint8 c = memory_readU8(string_offset++);
-			if (isprint(c))
-				buffer << c;
-			else if (c == '\0')
-			{
-				buffer << c;
-				break;
-			}
-			else
-			{
-				is_valid_string = false;
-				break;
-			}
-		}
-
-		if (is_valid_string && buffer.tellp() > 1)
-		{
-			label->ChangeValue(wxString::Format("\"%s\"", buffer.str().c_str()));
-			return;
-		}
-
-		// check for widestring
-		is_valid_string = true;
-		string_offset = registerValue;
-		std::wstringstream wbuffer;
-		while (string_offset < (MEMORY_DATA_AREA_ADDR + MEMORY_DATA_AREA_SIZE - 1))
-		{
-			const uint16 c = memory_readU16(string_offset);
-			string_offset += 2;
-
-			if (iswprint(c))
-				wbuffer << c;
-			else if (c == L'\0')
-			{
-				wbuffer << c;
-				break;
-			}
-			else
-			{
-				is_valid_string = false;
-				break;
-			}
-		}
-
-		if (is_valid_string && buffer.tellp() > 1)
-		{
-			label->ChangeValue(wxString::Format(L"ws\"%s\"", wbuffer.str().c_str()));
-			return;
-		}
+		field->SetForegroundColour(m_highlight);
+		return true;
 	}
+	if (field->GetForegroundColour() == PlainText())
+		return false;
+	field->SetForegroundColour(PlainText());
+	return true;
+}
 
-	// check if address is a code offset
-	RPLModule* code_module = RPLLoader_FindModuleByCodeAddr(registerValue);
-	if (code_module)
+wxString RegisterWindow::DescribeAddress(uint32 value) const
+{
+	if (InDataArea(value))
 	{
-		label->ChangeValue(wxString::Format("<%s> + %x", code_module->moduleName.c_str(), registerValue - code_module->regionMappingBase_text.GetMPTR()));
-		return;
+		std::string narrow;
+		if (ReadNarrowString(value, narrow))
+			return wxString::Format("\"%s\"", narrow.c_str());
+		std::wstring wide;
+		if (ReadWideString(value, wide))
+			return wxString::Format(L"ws\"%s\"", wide.c_str());
 	}
+	if (RPLModule* mod = RPLLoader_FindModuleByCodeAddr(value))
+		return wxString::Format("<%s> + %x", mod->moduleName.c_str(), value - mod->regionMappingBase_text.GetMPTR());
+	return wxEmptyString;
+}
 
-	label->ChangeValue(wxEmptyString);
+void RegisterWindow::ShowGpr(size_t row, uint32 value, bool changed)
+{
+	wxTextCtrl* field = m_gprValue[row];
+	if (changed)
+		field->SetForegroundColour(m_highlight);
+	else if (field->GetForegroundColour() != PlainText())
+		field->SetForegroundColour(PlainText());
+	field->ChangeValue(wxString::Format("%08x", value));
+
+	m_gprHint[row]->SetForegroundColour(changed ? m_highlight : PlainText());
+	m_gprHint[row]->ChangeValue(DescribeAddress(value));
+}
+
+void RegisterWindow::ShowFpr(wxTextCtrl* field, double asDouble, uint64 asBits)
+{
+	field->ChangeValue(FormatFloat(m_floatsAsDouble, asDouble, asBits));
 }
 
 void RegisterWindow::OnUpdateView()
 {
-	PPCInterpreter_t* hCPU = debugger_lockDebugSession();
-	if (!hCPU)
+	PPCInterpreter_t* session = debugger_lockDebugSession();
+	if (session == nullptr)
 		return;
-	PPCSnapshot snapshot = debugger_getSnapshotFromSession(hCPU);
-	debugger_unlockDebugSession(hCPU);
-	for (int i = 0; i < 32; ++i)
-	{
-		const uint32 registerValue = snapshot.gpr[i];
-		const bool hasChanged = registerValue != m_prev_snapshot.gpr[i];
-		const auto value = dynamic_cast<wxTextCtrl*>(FindWindow(kRegisterValueR0 + i));
-		wxASSERT(value);
-		const auto label = dynamic_cast<wxTextCtrl*>(FindWindow(kRegisterLabelR0 + i));
-		wxASSERT(label);
+	const PPCSnapshot now = debugger_getSnapshotFromSession(session);
+	debugger_unlockDebugSession(session);
 
-		UpdateIntegerRegister(label, value, registerValue, hasChanged);
+	for (size_t r = 0; r < 32; r++)
+		ShowGpr(r, now.gpr[r], now.gpr[r] != m_last.gpr[r]);
+	ShowGpr(32, now.spr_lr, now.spr_lr != m_last.spr_lr);
+
+	for (size_t i = 0; i < 32; i++)
+	{
+		if (SetColourForChange(m_fpr0[i], now.fpr[i].fp0int != m_last.fpr[i].fp0int))
+			ShowFpr(m_fpr0[i], now.fpr[i].fp0, now.fpr[i].fp0int);
+	}
+	for (size_t i = 0; i < 32; i++)
+	{
+		if (SetColourForChange(m_fpr1[i], now.fpr[i].fp1int != m_last.fpr[i].fp1int))
+			ShowFpr(m_fpr1[i], now.fpr[i].fp1, now.fpr[i].fp1int);
 	}
 
-	// update LR
+	for (size_t i = 0; i < 8; i++)
 	{
-		const uint32 registerValue = snapshot.spr_lr;
-		const bool hasChanged = registerValue != m_prev_snapshot.spr_lr;
-		const auto value = dynamic_cast<wxTextCtrl*>(FindWindow(kRegisterValueLR));
-		wxASSERT(value);
-		const auto label = dynamic_cast<wxTextCtrl*>(FindWindow(kRegisterLabelLR));
-		wxASSERT(label);
-		UpdateIntegerRegister(label, value, registerValue, hasChanged);
+		const uint8* bits = now.cr + i * 4;
+		const bool changed = !std::equal(bits, bits + 4, m_last.cr + i * 4);
+		if (SetColourForChange(m_cr[i], changed))
+			m_cr[i]->ChangeValue(DescribeCrField(bits));
 	}
 
-	for (int i = 0; i < 32; ++i)
-	{
-		const uint64_t register_value = snapshot.fpr[i].fp0int;
-
-		const auto value = dynamic_cast<wxTextCtrl*>(FindWindow(kRegisterValueFPR0_0 + i));
-		wxASSERT(value);
-
-		const bool has_changed = register_value != m_prev_snapshot.fpr[i].fp0int;
-		if (has_changed)
-			value->SetForegroundColour(m_changed_color);
-		else if (value->GetForegroundColour() != wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT))
-			value->SetForegroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-		else
-			continue;
-
-		if(m_show_double_values)
-			value->ChangeValue(wxString::Format("%lf", snapshot.fpr[i].fp0));
-		else
-			value->ChangeValue(wxString::Format("%016llx", register_value));
-	}
-
-	for (int i = 0; i < 32; ++i)
-	{
-		const uint64_t register_value = snapshot.fpr[i].fp1int;
-
-		const auto value = dynamic_cast<wxTextCtrl*>(FindWindow(kRegisterValueFPR1_0 + i));
-		wxASSERT(value);
-
-		const bool has_changed = register_value != m_prev_snapshot.fpr[i].fp1int;
-		if (has_changed)
-			value->SetForegroundColour(m_changed_color);
-		else if (value->GetForegroundColour() != wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT))
-			value->SetForegroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-		else
-			continue;
-
-		if (m_show_double_values)
-			value->ChangeValue(wxString::Format("%lf", snapshot.fpr[i].fp1));
-		else
-			value->ChangeValue(wxString::Format("%016llx", register_value));
-	}
-
-	// update CRs
-	for (int i = 0; i < 8; ++i)
-	{
-		const auto value = dynamic_cast<wxTextCtrl*>(FindWindow(kRegisterValueCR0 + i));
-		wxASSERT(value);
-		
-		auto cr_bits_ptr = snapshot.cr + i * 4;
-		auto cr_bits_ptr_cmp = m_prev_snapshot.cr + i * 4;
-
-		const bool has_changed = !std::equal(cr_bits_ptr, cr_bits_ptr + 4, cr_bits_ptr_cmp);
-		if (has_changed)
-			value->SetForegroundColour(m_changed_color);
-		else if (value->GetForegroundColour() != wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT))
-			value->SetForegroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-		else
-			continue;
-
-		std::vector<std::string> joinArray = {};
-		if (cr_bits_ptr[Espresso::CR_BIT_INDEX_LT] != 0)
-			joinArray.emplace_back("LT");
-		if (cr_bits_ptr[Espresso::CR_BIT_INDEX_GT] != 0)
-			joinArray.emplace_back("GT");
-		if (cr_bits_ptr[Espresso::CR_BIT_INDEX_EQ] != 0)
-			joinArray.emplace_back("EQ");
-		if (cr_bits_ptr[Espresso::CR_BIT_INDEX_SO] != 0)
-			joinArray.emplace_back("SO");
-
-		if (joinArray.empty())
-			value->ChangeValue("-");
-		else
-			value->ChangeValue(fmt::format("{}", fmt::join(joinArray, ", ")));
-	}
-
-	m_prev_snapshot = snapshot;
+	m_last = now;
 }
 
-void RegisterWindow::OnMouseDClickEvent(wxMouseEvent& event)
+void RegisterWindow::OnValueDoubleClick(wxMouseEvent& event)
 {
-	PPCInterpreter_t* debugSession = debugger_lockDebugSession();
-	if (!debugSession)
+	PPCInterpreter_t* session = debugger_lockDebugSession();
+	if (session == nullptr)
 	{
 		event.Skip();
 		return;
 	}
-	PPCSnapshot ppcSnapshot = debugger_getSnapshotFromSession(debugSession);
-	debugger_unlockDebugSession(debugSession);
-	debugSession = nullptr;
+	const PPCSnapshot snap = debugger_getSnapshotFromSession(session);
+	debugger_unlockDebugSession(session);
 
-	const auto id = event.GetId();
-	if(kRegisterValueR0 <= id && id < kRegisterValueR0 + 32)
+	const wxObject* source = event.GetEventObject();
+	const int gpr = IndexOf(m_gprValue, source);
+	const int ps0 = IndexOf(m_fpr0, source);
+	const int ps1 = IndexOf(m_fpr1, source);
+
+	if (gpr >= 0 && gpr < 32)
 	{
-		const uint32 register_index = id - kRegisterValueR0;
-		const uint32 register_value = ppcSnapshot.gpr[register_index];
-		wxTextEntryDialog set_value_dialog(this, _("Enter a new value."), wxString::Format(_("Set R%d value"), register_index), wxString::Format("0x%08x", register_value));
-		if (set_value_dialog.ShowModal() == wxID_OK)
+		wxTextEntryDialog ask(this, _("Enter a new value."), wxString::Format(_("Set R%d value"), gpr), wxString::Format("0x%08x", snap.gpr[gpr]));
+		if (ask.ShowModal() != wxID_OK)
+			return;
+		const uint32 v = ConvertString<uint32>(ask.GetValue().ToStdString());
+		if (PPCInterpreter_t* s = debugger_lockDebugSession())
 		{
-			const uint32 value = ConvertString<uint32>(set_value_dialog.GetValue().ToStdString());
-
-			if (debugSession = debugger_lockDebugSession(); debugSession)
-			{
-				debugSession->gpr[register_index] = value;
-				debugger_unlockDebugSession(debugSession);
-			}
-			
-			OnUpdateView();
+			s->gpr[gpr] = v;
+			debugger_unlockDebugSession(s);
 		}
+		OnUpdateView();
 		return;
 	}
 
-	if (kRegisterValueFPR0_0 <= id && id < kRegisterValueFPR0_0 + 32)
+	if (ps0 >= 0 || ps1 >= 0)
 	{
-		const uint32 register_index = id - kRegisterValueFPR0_0;
-		const double register_value = ppcSnapshot.fpr[register_index].fp0;
-		wxTextEntryDialog set_value_dialog(this, _("Enter a new value."), wxString::Format(_("Set FP0_%d value"), register_index), wxString::Format("%lf", register_value));
-		if (set_value_dialog.ShowModal() == wxID_OK)
+		const bool second = ps1 >= 0;
+		const int reg = second ? ps1 : ps0;
+		const double current = second ? snap.fpr[reg].fp1 : snap.fpr[reg].fp0;
+		const wxString title = second ? wxString::Format(_("Set FP1_%d value"), reg) : wxString::Format(_("Set FP0_%d value"), reg);
+		wxTextEntryDialog ask(this, _("Enter a new value."), title, wxString::Format("%lf", current));
+		if (ask.ShowModal() != wxID_OK)
+			return;
+		const double v = ConvertString<double>(ask.GetValue().ToStdString());
+		if (PPCInterpreter_t* s = debugger_lockDebugSession())
 		{
-			const double value = ConvertString<double>(set_value_dialog.GetValue().ToStdString());
-
-			if (debugSession = debugger_lockDebugSession(); debugSession)
-			{
-				debugSession->fpr[register_index].fp0 = value;
-				debugger_unlockDebugSession(debugSession);
-			}
-			
-			OnUpdateView();
+			if (second)
+				s->fpr[reg].fp1 = v;
+			else
+				s->fpr[reg].fp0 = v;
+			debugger_unlockDebugSession(s);
 		}
-
+		OnUpdateView();
 		return;
 	}
 
-	if (kRegisterValueFPR1_0 <= id && id < kRegisterValueFPR1_0 + 32)
-	{
-		const uint32 register_index = id - kRegisterValueFPR1_0;
-		const double register_value = ppcSnapshot.fpr[register_index].fp1;
-		wxTextEntryDialog set_value_dialog(this, _("Enter a new value."), wxString::Format(_("Set FP1_%d value"), register_index), wxString::Format("%lf", register_value));
-		if (set_value_dialog.ShowModal() == wxID_OK)
-		{
-			const double value = ConvertString<double>(set_value_dialog.GetValue().ToStdString());
-
-			if (debugSession = debugger_lockDebugSession(); debugSession)
-			{
-				debugSession->fpr[register_index].fp1 = value;
-				debugger_unlockDebugSession(debugSession);
-			}
-			
-			OnUpdateView();
-		}
-		return;
-	}
-
+	// LR is display only
 	event.Skip();
 }
 
-void RegisterWindow::OnFPViewModePress(wxCommandEvent& event)
+void RegisterWindow::OnToggleFloatFormat(wxCommandEvent& /*event*/)
 {
-	m_show_double_values = !m_show_double_values;
+	m_floatsAsDouble = !m_floatsAsDouble;
 
-	PPCInterpreter_t* debugSession = debugger_lockDebugSession();
-	if (!debugSession)
+	PPCInterpreter_t* session = debugger_lockDebugSession();
+	if (session == nullptr)
 		return;
-	PPCSnapshot ppcSnapshot = debugger_getSnapshotFromSession(debugSession);
-	debugger_unlockDebugSession(debugSession);
+	const PPCSnapshot snap = debugger_getSnapshotFromSession(session);
+	debugger_unlockDebugSession(session);
 
-	for (int i = 0; i < 32; ++i)
+	for (size_t i = 0; i < 32; i++)
 	{
-		const auto value0 = dynamic_cast<wxTextCtrl*>(FindWindow(kRegisterValueFPR0_0 + i));
-		const auto value1 = dynamic_cast<wxTextCtrl*>(FindWindow(kRegisterValueFPR1_0 + i));
-		wxASSERT(value0);
-		wxASSERT(value1);
-
-		if (m_show_double_values)
-		{
-			value0->ChangeValue(wxString::Format("%lf", ppcSnapshot.fpr[i].fp0));
-			value1->ChangeValue(wxString::Format("%lf", ppcSnapshot.fpr[i].fp1));
-		}
-		else
-		{
-			value0->ChangeValue(wxString::Format("%016llx", ppcSnapshot.fpr[i].fp0int));
-			value1->ChangeValue(wxString::Format("%016llx", ppcSnapshot.fpr[i].fp1int));
-		}
-	}
-}
-
-void RegisterWindow::OnValueContextMenu(wxContextMenuEvent& event)
-{
-	wxMenu menu;
-
-	menu.Append(kContextMenuZero, _("&Zero"));
-	menu.Append(kContextMenuInc, _("&Increment"));
-	menu.Append(kContextMenuDec, _("&Decrement"));
-	menu.AppendSeparator();
-	menu.Append(kContextMenuCopy, _("&Copy"));
-	menu.AppendSeparator();
-	menu.Append(kContextMenuGotoDisasm, _("&Goto Disasm"));
-	menu.Append(kContextMenuGotoDump, _("G&oto Dump"));
-
-	m_context_ctrl = dynamic_cast<wxTextCtrl*>(event.GetEventObject());
-
-	PopupMenu(&menu);
-}
-
-void RegisterWindow::OnValueContextMenuSelected(wxCommandEvent& event)
-{
-	wxASSERT(m_context_ctrl);
-
-	switch (event.GetId()) 
-	{
-	case kContextMenuZero:
-		break;
-	case kContextMenuInc:
-		break;
-	case kContextMenuDec:
-		break;
-	case kContextMenuCopy:
-		break;
-	case kContextMenuGotoDisasm:
-		break;
-	case kContextMenuGotoDump:
-		break;
+		ShowFpr(m_fpr0[i], snap.fpr[i].fp0, snap.fpr[i].fp0int);
+		ShowFpr(m_fpr1[i], snap.fpr[i].fp1, snap.fpr[i].fp1int);
 	}
 }

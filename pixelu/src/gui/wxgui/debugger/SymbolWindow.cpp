@@ -1,52 +1,40 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "wxgui/wxgui.h"
 #include "wxgui/debugger/SymbolWindow.h"
 #include "wxgui/debugger/DebuggerWindow2.h"
 #include "Cafe/HW/Espresso/Debugger/Debugger.h"
 #include "Cafe/OS/RPL/rpl_symbol_storage.h"
 
-enum ItemColumns
-{
-	ColumnName = 0,
-	ColumnAddress,
-	ColumnModule,
-};
-
 SymbolWindow::SymbolWindow(DebuggerWindow2& parent, const wxPoint& main_position, const wxSize& main_size)
 	: wxFrame(&parent, wxID_ANY, _("Symbols"), wxDefaultPosition, wxSize(600, 250), wxSYSTEM_MENU | wxCAPTION | wxCLIP_CHILDREN | wxRESIZE_BORDER | wxFRAME_FLOAT_ON_PARENT)
 {
-	wxBoxSizer* main_sizer = new wxBoxSizer(wxVERTICAL);
-	m_symbol_ctrl = new SymbolListCtrl(this, wxID_ANY, wxDefaultPosition, wxDefaultSize);
-	main_sizer->Add(m_symbol_ctrl, 1, wxEXPAND);
-
-	m_filter = new wxTextCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_NO_VSCROLL);
-	m_filter->Bind(wxEVT_TEXT, &SymbolWindow::OnFilterChanged, this);
-	main_sizer->Add(m_filter, 0, wxALL | wxEXPAND, 5);
-
-	this->SetSizer(main_sizer);
-	this->wxWindowBase::Layout();
-
-	this->Centre(wxHORIZONTAL);
+	auto* layout = new wxBoxSizer(wxVERTICAL);
+	m_list = new SymbolListCtrl(this, wxID_ANY, wxDefaultPosition, wxDefaultSize);
+	layout->Add(m_list, 1, wxEXPAND);
+	m_filterBox = new wxTextCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_NO_VSCROLL);
+	m_filterBox->Bind(wxEVT_TEXT, &SymbolWindow::OnFilterChanged, this);
+	layout->Add(m_filterBox, 0, wxALL | wxEXPAND, 5);
+	SetSizer(layout);
+	wxWindowBase::Layout();
+	Centre(wxHORIZONTAL);
 
 	if (parent.GetConfig().data().pin_to_main)
 		OnMainMove(main_position, main_size);
 }
 
-void SymbolWindow::OnMainMove(const wxPoint& main_position, const wxSize& main_size)
+void SymbolWindow::OnMainMove(const wxPoint& main_position, const wxSize& /*main_size*/)
 {
-	wxSize size(420, 250);
-	this->SetSize(size);
-
-	wxPoint position = main_position;
-	position.x -= 420;
-	this->SetPosition(position);
+	// left of the main window, level with its top edge
+	SetSize(wxSize(420, 250));
+	SetPosition(wxPoint(main_position.x - 420, main_position.y));
 }
 
 void SymbolWindow::OnGameLoaded()
 {
-	m_symbol_ctrl->OnGameLoaded();
+	m_list->OnGameLoaded();
 }
 
-void SymbolWindow::OnFilterChanged(wxCommandEvent& event)
+void SymbolWindow::OnFilterChanged(wxCommandEvent& /*event*/)
 {
-	m_symbol_ctrl->ChangeListFilter(m_filter->GetValue());
+	m_list->ChangeListFilter(m_filterBox->GetValue());
 }

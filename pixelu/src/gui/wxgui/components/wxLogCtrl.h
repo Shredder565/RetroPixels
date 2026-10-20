@@ -1,6 +1,15 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include "TextList.h"
 
+#include <deque>
+
+// Log view: keeps every pushed (filter, message) entry and shows those matching
+// the active filter. An entry matches when no filter is set, when its filter
+// equals the active one, or (with "filter messages" on) when its message
+// contains the filter text, case-insensitively. Changing the filter rebuilds
+// the visible list on a worker thread. The view follows new entries while it is
+// scrolled to the end.
 class wxLogCtrl : public TextList
 {
 public:
@@ -13,40 +22,34 @@ public:
 	[[nodiscard]] bool GetFilterMessage() const;
 
 	void PushEntry(const wxString& filter, const wxString& message);
-	
+
 protected:
 	void OnDraw(wxDC& dc, sint32 start, sint32 count, const wxPoint& start_position);
 
 private:
-	void OnTimer(wxTimerEvent& event);
-	void OnActiveListUpdated(wxEvent& event);
-
-	wxTimer* m_timer;
-
-	bool m_alternateRowColoursEnabled = false;
-	wxColour m_alternateRowColour;
-
-	wxColour GetAlternateRowColour()
+	struct Entry
 	{
-		if (m_alternateRowColour.IsOk())
-			return m_alternateRowColour;
+		wxString filter;
+		wxString message;
+	};
 
-		// Depending on the background, alternate row colour should be a bit
-		// darker or brighter.
-		const wxColour bgColour = GetBackgroundColour();
-		int alpha = bgColour.GetRGB() > 0x808080 ? 97 : 110;
-		m_alternateRowColour = bgColour.ChangeLightness(alpha);
-		return m_alternateRowColour;
-	}
+	bool Matches(const Entry& e) const;
+	void RestartRebuild();
+	void RebuildVisible(); // worker thread
+	void OnPollTimer(wxTimerEvent& event);
+	void OnRebuildDone(wxThreadEvent& event);
+	wxColour StripeColour();
 
-	std::string m_active_filter;
-	std::thread m_update_worker;
-	bool m_filter_messages = false;
+	wxTimer m_pollTimer;
+	bool m_stripes = false;
+	wxColour m_stripeColour;
 
-	std::mutex m_mutex, m_active_mutex;
-	using ListEntry_t = std::pair<wxString, wxString>;
-	using ListIt_t = std::list<ListEntry_t>::const_reference;
-	std::list<ListEntry_t> m_log_entries;
-	std::list<std::reference_wrapper<const ListEntry_t>> m_active_entries;
-	void UpdateActiveEntries();
+	std::string m_filterText;
+	bool m_searchMessages = false;
+	std::thread m_rebuildThread;
+
+	std::mutex m_entriesLock;  // guards m_entries
+	std::mutex m_visibleLock;  // guards m_visible
+	std::deque<Entry> m_entries; // element addresses stay valid while appending
+	std::vector<const Entry*> m_visible;
 };
