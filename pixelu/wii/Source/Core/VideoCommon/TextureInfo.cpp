@@ -1,8 +1,8 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/TextureInfo.h"
 
+#include <algorithm>
 #include <span>
 
 #include <fmt/format.h>
@@ -11,50 +11,100 @@
 #include "Common/Align.h"
 #include "Common/Assert.h"
 #include "Common/Logging/Log.h"
+#include "Common/MathUtil.h"
 #include "Common/SpanUtils.h"
 #include "Core/HW/Memmap.h"
 #include "Core/System.h"
 #include "VideoCommon/BPMemory.h"
 #include "VideoCommon/TextureDecoder.h"
 
+namespace
+{
+// Byte count of a `width` x `height` image of `format`, both already whole blocks.
+u32 ImageBytes(u32 width, u32 height, TextureFormat format)
+{
+  return static_cast<u32>(TexDecoder_GetTextureSizeInBytes(static_cast<int>(width),
+                                                           static_cast<int>(height), format));
+}
+
+// The smallest and largest palette index a paletted texture actually uses. Only that part of
+// the palette contributes to the texture's name, so unused entries can differ freely.
+struct IndexRange
+{
+  u32 lowest = 0xffff;
+  u32 highest = 0;
+
+  void Include(u32 index)
+  {
+    lowest = std::min(lowest, index);
+    highest = std::max(highest, index);
+  }
+};
+
+IndexRange UsedPaletteIndices(std::span<const u8> texels, size_t texel_bytes, size_t palette_bytes)
+{
+  IndexRange range;
+  const std::span<const u8> used = texels.first(texel_bytes);
+  if (palette_bytes == 16 * 2)
+  {
+    // C4: two indices per byte.
+    for (const u8 byte : used)
+    {
+      range.Include(byte & 0xFu);
+      range.Include(static_cast<u32>(byte >> 4));
+    }
+  }
+  else if (palette_bytes == 256 * 2)
+  {
+    // C8: one index per byte.
+    for (const u8 byte : used)
+      range.Include(byte);
+  }
+  else if (palette_bytes == 16384 * 2)
+  {
+    // C14X2: one index per 16-bit texel. For compatibility with existing texture packs this
+    // reproduces the historical calculation, which byte-swaps only the first byte of each
+    // texel as if it were a whole 16-bit value. That leaves the index as the low six bits of
+    // that byte, shifted up by eight; the second byte is ignored.
+    for (size_t i = 0; i < used.size(); i += 2)
+      range.Include((static_cast<u32>(used[i]) << 8) & 0x3fffu);
+  }
+  return range;
+}
+}  // namespace
+
 TextureInfo TextureInfo::FromStage(u32 stage)
 {
-  const auto tex = bpmem.tex.GetUnit(stage);
+  const auto& unit = bpmem.tex.GetUnit(stage);
 
-  const auto texture_format = tex.texImage0.format;
-  const auto tlut_format = tex.texTlut.tlut_format;
+  const TextureFormat texture_format = unit.texImage0.format;
+  const TLUTFormat tlut_format = unit.texTlut.tlut_format;
+  const u32 width = unit.texImage0.width + 1u;
+  const u32 height = unit.texImage0.height + 1u;
+  // Image addresses are stored in 32-byte units, TLUT offsets in 512-byte units of TMEM.
+  const u32 address = unit.texImage3.image_base * 32u;
+  const std::span<const u8> tlut = TexDecoder_GetTmemSpan(unit.texTlut.tmem_offset * 512u);
 
-  const auto width = tex.texImage0.width + 1;
-  const auto height = tex.texImage0.height + 1;
-
-  const u32 address = (tex.texImage3.image_base /* & 0x1FFFFF*/) << 5;
-
-  const u32 tlutaddr = tex.texTlut.tmem_offset << 9;
-  std::span<const u8> tlut_data = TexDecoder_GetTmemSpan(tlutaddr);
-
+  // max_lod is in sixteenths of a level; a partial level still needs that level's data.
   std::optional<u32> mip_count;
-  const bool has_mipmaps = tex.texMode0.mipmap_filter != MipMode::None;
-  if (has_mipmaps)
+  if (unit.texMode0.mipmap_filter != MipMode::None)
+    mip_count = (unit.texMode1.max_lod + 15u) / 16u;
+
+  if (unit.texImage1.cache_manually_managed)
   {
-    mip_count = (tex.texMode1.max_lod + 0xf) / 0x10;
+    // Preloaded into TMEM: level 0 and the even levels sit in the even region, odd levels in
+    // the odd region.
+    const std::span<const u8> even =
+        TexDecoder_GetTmemSpan(unit.texImage1.tmem_even * u32{TMEM_LINE_SIZE});
+    const std::span<const u8> odd =
+        TexDecoder_GetTmemSpan(unit.texImage2.tmem_odd * u32{TMEM_LINE_SIZE});
+    return TextureInfo(stage, even, tlut, address, texture_format, tlut_format, width, height,
+                       true, odd, even, mip_count);
   }
 
-  const bool from_tmem = tex.texImage1.cache_manually_managed != 0;
-  const u32 tmem_address_even = from_tmem ? tex.texImage1.tmem_even * TMEM_LINE_SIZE : 0;
-  const u32 tmem_address_odd = from_tmem ? tex.texImage2.tmem_odd * TMEM_LINE_SIZE : 0;
-
-  if (from_tmem)
-  {
-    return TextureInfo(stage, TexDecoder_GetTmemSpan(tmem_address_even), tlut_data, address,
-                       texture_format, tlut_format, width, height, true,
-                       TexDecoder_GetTmemSpan(tmem_address_odd),
-                       TexDecoder_GetTmemSpan(tmem_address_even), mip_count);
-  }
-
-  auto& system = Core::System::GetInstance();
-  auto& memory = system.GetMemory();
-  return TextureInfo(stage, memory.GetSpanForAddress(address), tlut_data, address, texture_format,
-                     tlut_format, width, height, false, {}, {}, mip_count);
+  const std::span<const u8> ram = Core::System::GetInstance().GetMemory().GetSpanForAddress(address);
+  return TextureInfo(stage, ram, tlut, address, texture_format, tlut_format, width, height, false,
+                     {}, {}, mip_count);
 }
 
 TextureInfo::TextureInfo(u32 stage, std::span<const u8> data, std::span<const u8> tlut_data,
@@ -65,46 +115,33 @@ TextureInfo::TextureInfo(u32 stage, std::span<const u8> data, std::span<const u8
       m_tmem_even(tmem_even), m_tmem_odd(tmem_odd), m_texture_format(texture_format),
       m_tlut_format(tlut_format), m_raw_width(width), m_raw_height(height), m_stage(stage)
 {
-  const bool is_palette_texture = IsColorIndexed(m_texture_format);
-  if (is_palette_texture)
-    m_palette_size = TexDecoder_GetPaletteSize(m_texture_format);
+  if (IsColorIndexed(texture_format))
+    m_palette_size = static_cast<u32>(TexDecoder_GetPaletteSize(texture_format));
 
-  // TexelSizeInNibbles(format) * width * height / 16;
-  m_block_width = TexDecoder_GetBlockWidthInTexels(m_texture_format);
-  m_block_height = TexDecoder_GetBlockHeightInTexels(m_texture_format);
+  m_block_width = static_cast<u32>(TexDecoder_GetBlockWidthInTexels(texture_format));
+  m_block_height = static_cast<u32>(TexDecoder_GetBlockHeightInTexels(texture_format));
+  m_expanded_width = Common::AlignUp(width, m_block_width);
+  m_expanded_height = Common::AlignUp(height, m_block_height);
+  m_texture_size = ImageBytes(m_expanded_width, m_expanded_height, texture_format);
 
-  m_expanded_width = Common::AlignUp(m_raw_width, m_block_width);
-  m_expanded_height = Common::AlignUp(m_raw_height, m_block_height);
-
-  m_texture_size =
-      TexDecoder_GetTextureSizeInBytes(m_expanded_width, m_expanded_height, m_texture_format);
-
-  if (data.size() < m_texture_size)
-  {
+  const bool texels_readable = data.size() >= m_texture_size;
+  const bool palette_readable = !m_palette_size || tlut_data.size() >= *m_palette_size;
+  if (!texels_readable)
     ERROR_LOG_FMT(VIDEO, "Trying to use an invalid texture address {:#010x}", GetRawAddress());
-    m_data_valid = false;
-  }
-  else if (m_palette_size && tlut_data.size() < *m_palette_size)
-  {
+  else if (!palette_readable)
     ERROR_LOG_FMT(VIDEO, "Trying to use an invalid TLUT address {:#010x}", GetRawAddress());
-    m_data_valid = false;
-  }
-  else
-  {
-    m_data_valid = true;
-  }
+  m_data_valid = texels_readable && palette_readable;
 
   if (mip_count)
   {
     m_mipmaps_enabled = true;
-    const u32 raw_mip_count = *mip_count;
-
-    // GPUs don't like when the specified mipmap count would require more than one 1x1-sized LOD in
-    // the mipmap chain
-    // e.g. 64x64 with 7 LODs would have the mipmap chain 64x64,32x32,16x16,8x8,4x4,2x2,1x1,0x0, so
-    // we limit the mipmap count to 6 there
-    m_limited_mip_count =
-        std::min<u32>(MathUtil::IntLog2(std::max(width, height)) + 1, raw_mip_count + 1) - 1;
+    // Backends reject chains that would continue past a single 1x1 level (a 64x64 texture
+    // has at most six levels after level 0), so cap the count at what the size allows.
+    // Counted as chain lengths (level 0 included) so that the unsigned arithmetic matches
+    // the earlier implementation even for out-of-range requests.
+    const u32 longest_chain = static_cast<u32>(MathUtil::IntLog2(std::max(width, height))) + 1;
+    const u32 requested_chain = *mip_count + 1;
+    m_limited_mip_count = std::min(longest_chain, requested_chain) - 1;
   }
 }
 
@@ -118,88 +155,52 @@ TextureInfo::NameDetails TextureInfo::CalculateTextureName() const
   if (!IsDataValid())
     return NameDetails{};
 
-  const u8* tlut = m_tlut_data.data();
-  size_t tlut_size = m_palette_size ? *m_palette_size : 0;
-
-  // checking for min/max on paletted textures
-  u32 min = 0xffff;
-  u32 max = 0;
-  switch (tlut_size)
+  // For paletted textures only the span of palette entries the texels use is hashed.
+  std::span<const u8> palette;
+  if (m_palette_size.value_or(0) != 0)
   {
-  case 0:
-    break;
-  case 16 * 2:
-    for (size_t i = 0; i < m_texture_size; i++)
-    {
-      const u32 low_nibble = m_data[i] & 0xf;
-      const u32 high_nibble = m_data[i] >> 4;
-
-      min = std::min({min, low_nibble, high_nibble});
-      max = std::max({max, low_nibble, high_nibble});
-    }
-    break;
-  case 256 * 2:
-    for (size_t i = 0; i < m_texture_size; i++)
-    {
-      const u32 texture_byte = m_data[i];
-
-      min = std::min(min, texture_byte);
-      max = std::max(max, texture_byte);
-    }
-    break;
-  case 16384 * 2:
-    for (size_t i = 0; i < m_texture_size; i += sizeof(u16))
-    {
-      const u32 texture_halfword = Common::swap16(m_data[i]) & 0x3fff;
-
-      min = std::min(min, texture_halfword);
-      max = std::max(max, texture_halfword);
-    }
-    break;
+    const IndexRange range = UsedPaletteIndices(m_data, m_texture_size, *m_palette_size);
+    const u32 entries = range.highest + 1 - range.lowest;
+    palette = std::span<const u8>(m_tlut_data.data() + 2 * range.lowest, 2 * entries);
   }
-  if (tlut_size > 0)
-  {
-    tlut_size = 2 * (max + 1 - min);
-    tlut += 2 * min;
-  }
+  DEBUG_ASSERT(palette.size() <= m_palette_size.value_or(0));
 
-  DEBUG_ASSERT(tlut_size <= m_palette_size.value_or(0));
-
-  const u64 tex_hash = XXH64(m_data.data(), m_texture_size, 0);
-  const u64 tlut_hash = tlut_size ? XXH64(tlut, tlut_size, 0) : 0;
-
-  return {.base_name = fmt::format("{}{}x{}{}", format_prefix, m_raw_width, m_raw_height,
-                                   m_mipmaps_enabled ? "_m" : ""),
-          .texture_name = fmt::format("{:016x}", tex_hash),
-          .tlut_name = tlut_size ? fmt::format("_{:016x}", tlut_hash) : "",
-          .format_name = fmt::to_string(static_cast<int>(m_texture_format))};
+  NameDetails name;
+  name.base_name = fmt::format("{}{}x{}{}", format_prefix, m_raw_width, m_raw_height,
+                               m_mipmaps_enabled ? "_m" : "");
+  name.texture_name = fmt::format("{:016x}", XXH64(m_data.data(), m_texture_size, 0));
+  if (!palette.empty())
+    name.tlut_name = fmt::format("_{:016x}", XXH64(palette.data(), palette.size(), 0));
+  name.format_name = fmt::to_string(static_cast<int>(m_texture_format));
+  return name;
 }
 
 TextureInfo::MipLevels TextureInfo::GetMipMapLevels() const
 {
-  MipLevelIterator begin;
-  begin.m_parent = this;
-  begin.m_from_tmem = m_from_tmem;
-  begin.m_data = Common::SafeSubspan(m_data, GetTextureSize());
-  begin.m_tmem_even = Common::SafeSubspan(m_tmem_even, GetTextureSize());
-  begin.m_tmem_odd = m_tmem_odd;
-  begin.CreateMipLevel();
+  // Mip data follows level 0 directly, in RAM or in the even TMEM region; the odd region
+  // starts with level 1.
+  MipLevelIterator first;
+  first.m_parent = this;
+  first.m_from_tmem = m_from_tmem;
+  first.m_data = Common::SafeSubspan(m_data, m_texture_size);
+  first.m_tmem_even = Common::SafeSubspan(m_tmem_even, m_texture_size);
+  first.m_tmem_odd = m_tmem_odd;
+  first.CreateMipLevel();
 
-  MipLevelIterator end;
-  end.m_level_index = m_limited_mip_count;
-
-  return MipLevels(begin, end);
+  MipLevelIterator last;
+  last.m_level_index = m_limited_mip_count;
+  return MipLevels(first, last);
 }
 
 u32 TextureInfo::GetFullLevelSize() const
 {
-  u32 all_mips_size = 0;
-  for (const auto& mip_map : GetMipMapLevels())
+  u32 total = m_texture_size;
+  for (const MipLevel& level : GetMipMapLevels())
   {
-    if (mip_map.IsDataValid())
-      all_mips_size += mip_map.GetTextureSize();
+    if (level.IsDataValid())
+      total += level.GetTextureSize();
   }
-  return m_texture_size + all_mips_size;
+  return total;
 }
 
 TextureInfo::MipLevel::MipLevel(u32 level, const TextureInfo& parent, std::span<const u8>* data)
@@ -209,14 +210,12 @@ TextureInfo::MipLevel::MipLevel(u32 level, const TextureInfo& parent, std::span<
   m_raw_height = std::max(parent.GetRawHeight() >> level, 1u);
   m_expanded_width = Common::AlignUp(m_raw_width, parent.GetBlockWidth());
   m_expanded_height = Common::AlignUp(m_raw_height, parent.GetBlockHeight());
+  m_texture_size = ImageBytes(m_expanded_width, m_expanded_height, parent.GetTextureFormat());
 
-  m_texture_size = TexDecoder_GetTextureSizeInBytes(m_expanded_width, m_expanded_height,
-                                                    parent.GetTextureFormat());
-
-  m_ptr = data->data();
-  m_data_valid = data->size() >= m_texture_size;
-
-  *data = Common::SafeSubspan(*data, m_texture_size);
+  const std::span<const u8> remaining = *data;
+  m_ptr = remaining.data();
+  m_data_valid = remaining.size() >= m_texture_size;
+  *data = Common::SafeSubspan(remaining, m_texture_size);
 }
 
 TextureInfo::MipLevelIterator& TextureInfo::MipLevelIterator::operator++()
@@ -228,9 +227,10 @@ TextureInfo::MipLevelIterator& TextureInfo::MipLevelIterator::operator++()
 
 void TextureInfo::MipLevelIterator::CreateMipLevel()
 {
+  // Position n of the iterator is mip level n + 1.
   const u32 level = m_level_index + 1;
-  std::span<const u8>* data = m_from_tmem ? ((level % 2) ? &m_tmem_odd : &m_tmem_even) : &m_data;
-
-  // The MipLevel constructor mutates the data argument so the next MipLevel gets the right data
-  m_mip_level = MipLevel(level, *m_parent, data);
+  std::span<const u8>* source = &m_data;
+  if (m_from_tmem)
+    source = (level & 1) != 0 ? &m_tmem_odd : &m_tmem_even;
+  m_mip_level = MipLevel(level, *m_parent, source);
 }

@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,6 +9,8 @@
 #include "Common/EnumFormatter.h"
 #include "Common/MathUtil.h"
 
+// Pixel formats a backend texture can have. The numeric values are used as keys by the
+// texture pool, so append new formats only before Undefined.
 enum class AbstractTextureFormat : u32
 {
   RGBA8,
@@ -29,26 +30,29 @@ enum class AbstractTextureFormat : u32
   Undefined
 };
 
+// What a CPU-visible staging texture is for.
 enum class StagingTextureType
 {
-  Readback,  // Optimize for CPU reads, GPU writes, no CPU writes
-  Upload,    // Optimize for CPU writes, GPU reads, no CPU reads
-  Mutable    // Optimize for CPU reads, GPU writes, allow slow CPU reads
+  Readback,  // GPU writes, CPU reads
+  Upload,    // CPU writes, GPU reads
+  Mutable    // GPU writes, CPU may both read (slowly) and write
 };
 
+// Usage bits for TextureConfig::flags.
 enum AbstractTextureFlag : u32
 {
-  AbstractTextureFlag_RenderTarget = (1 << 0),  // Texture is used as a framebuffer.
-  AbstractTextureFlag_ComputeImage = (1 << 1),  // Texture is used as a compute image.
+  AbstractTextureFlag_RenderTarget = (1 << 0),  // can be bound as a framebuffer attachment
+  AbstractTextureFlag_ComputeImage = (1 << 1),  // can be bound as a compute shader image
 };
 
 enum class AbstractTextureType : u8
 {
-  Texture_2DArray = 0,  // Used as a 2D texture array
-  Texture_2D = 1,       // Used as a normal 2D texture
-  Texture_CubeMap = 2,  // Used as a cube map texture
+  Texture_2DArray = 0,
+  Texture_2D = 1,
+  Texture_CubeMap = 2,
 };
 
+// Everything a backend needs to know to create a texture.
 struct TextureConfig
 {
   constexpr TextureConfig() = default;
@@ -60,8 +64,11 @@ struct TextureConfig
   }
 
   bool operator==(const TextureConfig& o) const;
+  // Full-size rectangle at the origin.
   MathUtil::Rectangle<int> GetRect() const;
+  // Rectangle of one mip level; each dimension halves per level but never drops below 1.
   MathUtil::Rectangle<int> GetMipRect(u32 level) const;
+  // Bytes per row of level 0 (or of a block row, for compressed formats).
   size_t GetStride() const;
   size_t GetMipStride(u32 level) const;
 
@@ -79,6 +86,10 @@ struct TextureConfig
   AbstractTextureType type = AbstractTextureType::Texture_2DArray;
 };
 
+// The texture pool is keyed on this hash, and its value also decides the pool's iteration
+// order, so the packing below must not change. Width and height take 16 bits each, levels
+// sits at bit 32 and layers at bit 48 (overlapping fields simply OR together), the format at
+// bit 50 and the flags at bit 58. Sample count and texture type are not part of the key.
 template <>
 struct std::hash<TextureConfig>
 {
@@ -87,10 +98,10 @@ struct std::hash<TextureConfig>
 
   result_type operator()(const argument_type& c) const noexcept
   {
-    const u64 id = static_cast<u64>(c.flags) << 58 | static_cast<u64>(c.format) << 50 |
-                   static_cast<u64>(c.layers) << 48 | static_cast<u64>(c.levels) << 32 |
-                   static_cast<u64>(c.height) << 16 | static_cast<u64>(c.width);
-    return std::hash<u64>{}(id);
+    const auto at = [](auto field, int bit) { return static_cast<u64>(field) << bit; };
+    const u64 key = at(c.width, 0) | at(c.height, 16) | at(c.levels, 32) | at(c.layers, 48) |
+                    at(c.format, 50) | at(c.flags, 58);
+    return std::hash<u64>{}(key);
   }
 };
 
