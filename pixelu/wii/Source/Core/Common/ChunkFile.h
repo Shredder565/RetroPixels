@@ -115,16 +115,18 @@ public:
     }
   }
 
+  // Sequences: contiguous ones in one block when their elements allow it, the others element
+  // by element.
   template <typename T>
-  void Do(std::vector<T>& x)
+  void Do(std::basic_string<T>& x)
   {
     DoContiguousContainer(x);
   }
 
   template <typename T>
-  void Do(std::list<T>& x)
+  void Do(std::vector<T>& x)
   {
-    DoContainer(x);
+    DoContiguousContainer(x);
   }
 
   template <typename T>
@@ -134,9 +136,9 @@ public:
   }
 
   template <typename T>
-  void Do(std::basic_string<T>& x)
+  void Do(std::list<T>& x)
   {
-    DoContiguousContainer(x);
+    DoContainer(x);
   }
 
   template <typename T, typename U>
@@ -167,37 +169,38 @@ public:
 
   // ---- Fixed-size arrays (no count) ----------------------------------------------------------
 
+  // `count` elements at x: raw bytes when T is trivially copyable, else each element in turn.
+  template <typename T>
+  void DoArray(T* x, u32 count)
+  {
+    if constexpr (std::is_trivially_copyable_v<T>)
+    {
+      DoVoid(x, count * sizeof(T));
+    }
+    else
+    {
+      for (T* const end = x + count; x != end; ++x)
+        Do(*x);
+    }
+  }
+
+  // The fixed-size forms all reduce to the pointer form above.
+  template <typename T, std::size_t N>
+  void DoArray(T (&arr)[N])
+  {
+    DoArray(&arr[0], static_cast<u32>(N));
+  }
+
   template <typename T, std::size_t N>
   void DoArray(std::array<T, N>& x)
   {
-    DoArray(x.data(), static_cast<u32>(N));
+    DoArray(x.data(), static_cast<u32>(x.size()));
   }
 
   template <typename V, auto last_member, typename = decltype(last_member)>
   void DoArray(Common::EnumMap<V, last_member>& x)
   {
     DoArray(x.data(), static_cast<u32>(x.size()));
-  }
-
-  template <typename T>
-  requires(std::is_trivially_copyable_v<T>)
-  void DoArray(T* x, u32 count)
-  {
-    DoVoid(x, count * sizeof(T));
-  }
-
-  template <typename T>
-  requires(!std::is_trivially_copyable_v<T>)
-  void DoArray(T* x, u32 count)
-  {
-    for (u32 i = 0; i < count; ++i)
-      Do(x[i]);
-  }
-
-  template <typename T, std::size_t N>
-  void DoArray(T (&arr)[N])
-  {
-    DoArray(arr, static_cast<u32>(N));
   }
 
   // ---- Raw access ----------------------------------------------------------------------------
@@ -273,16 +276,15 @@ public:
   {
     ptrdiff_t offset = x - base;
     Do(offset);
-    if (IsReadMode())
-    {
-      if (offset < 0 || static_cast<size_t>(offset) > count)
-      {
-        SetMeasureMode();
-        return false;
-      }
+    if (!IsReadMode())
+      return true;
+
+    const bool in_range = offset >= 0 && static_cast<size_t>(offset) <= count;
+    if (in_range)
       x = base + offset;
-    }
-    return true;
+    else
+      SetMeasureMode();
+    return in_range;
   }
 
   bool DoPointer(void*& x, void* const base, size_t count)
