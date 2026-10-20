@@ -18,6 +18,7 @@
 !README.md
 !CHANGELOG.md
 !/docs/*.md
+!/pixelu/*.md
 !/.github/**/*.md
 *.sms
 *.a26
