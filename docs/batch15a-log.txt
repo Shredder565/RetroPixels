@@ -1,0 +1,84 @@
+- Batch 15a: the top-level wxWidgets GUI rewritten as original code (headers
+  and sources, 47 files): interface/WindowSystem.h, wxWindowSystem, wxgui.h,
+  wxHelper.h, wxCemuConfig, the OpenGL/Vulkan/Metal canvases and
+  IRenderCanvas, LoggingWindow, RPEmbed, CemuApp, MainWindow, PadViewFrame,
+  AudioDebuggerWindow, GettingStartedDialog, ChecksumTool, GameUpdateWindow,
+  GameProfileWindow, DownloadGraphicPacksWindow,
+  DownloadCustomGraphicPackWindow, GraphicPacksWindow2, CemuUpdateWindow,
+  TitleManager, MemorySearcherTool and GeneralSettings2. The wxgui
+  subfolders other than canvas (components, dialogs, helpers, input,
+  debugger, windows, wxcomponents, EmulatedUSBDevices) are unchanged. File names, public interfaces, every symbol other files use,
+  window classes and titles, menu and command ids, settings fields and file
+  formats are unchanged; the PixelU behaviour is kept exactly: --rp-embed /
+  --rp-parent embedding, off-screen waiting and docking (child window or
+  window owned by RetroPixels' window, 20 second fallback to a normal
+  window), messages shown through RPEmbed::ShowMessage, wxWidgets log output
+  routed to log.txt, the PixelU.Screen window message (0 TV, 1 GamePad,
+  2 toggle, returns the state), mouse/touch on the canvas as GamePad touch,
+  stopping the recorder, the "PixelU" titles and branding, the CemuApp
+  start-up and --rp-* handling and no first-run dialog when embedded.
+  MainWindow binds its events with Bind (BindEvents at the start of the
+  constructor) instead of a static event table, with the same handler order.
+  CemuUpdateWindow is now a notice that PixelU is updated together with
+  RetroPixels (PixelU never used Cemu's updater) and IsUpdateAvailableAsync
+  returns a finished "no update". Cemu branding in user-visible strings now
+  says PixelU; the About dialog thanks the Cemu team and contributors instead
+  of listing Cemu's Patreon supporters. Translations exist for the unchanged
+  strings only.
+  Checked with g++, clang++ and mingw clang (MSVC-style flags) against the
+  old sources: no new errors (the remaining mingw errors are environment
+  only: __uuidof, DirectInput and type_info::raw_name). Old-vs-new harnesses
+  (ASan/UBSan) give identical results: wxCemuConfig load/save 3000 random
+  configs; PixelU.Screen all messages and states; RPEmbed docking decisions
+  (child/owned/host detection, fill-parent moves, message box icons) on a
+  fake Win32 window table, 200k setups; ChecksumTool's JSON schema; graphic
+  pack filtering and version support 200k cases; TitleManager download list
+  entries (kind, status, progress markers), save persistent-id folder names
+  and account labels 700k cases; MemorySearcherTool value parsing (600k),
+  memory scans of random buffers for all six types, type names, stored
+  addresses and saved ini lines; GeneralSettings2 audio API names, text
+  scale choices, window remember markers, birthday splitting, country
+  filter, vsync/device choices and the missing-files report, plus identical
+  sets of stored (54) and applied config fields.
+  Fixes and defined behaviour: null checks on the game list and info bar in
+  MainWindow; file load paths are taken as UTF-8; PadViewFrame mouse moves
+  lock the mouse state's mutex instead of the touch state's. ChecksumTool:
+  commit.txt is written only after the checksum archive unpacked, a WUD
+  that cannot be opened shows a status text instead of throwing in the
+  worker, 30 or more missing files (and nothing damaged) offer the export
+  instead of reporting "valid", and the enable event is always sent. The
+  graphic pack downloads compute progress in floating point, the
+  "connection failed" message box has text and caption the right way
+  round, JSON fields are checked before use, an unreadable zip entry is
+  skipped, an oversized entry is closed, an unpacking exception becomes
+  "Failed to open downloaded ZIP", cancelling no longer shows a result and
+  the "cannot be updated while a game is running" box has a plain OK
+  button; the never-reachable "Updated graphic packs are available" prompt
+  is gone. GraphicPacksWindow2 skips unknown shader types and its hyperlink
+  no longer translates an empty string. TitleManager: a save export whose
+  folder cannot be listed logs it instead of throwing, a source file that
+  cannot be opened is reported once instead of twice, and the download
+  callbacks ignore a closed window. MemorySearcherTool: the search thread
+  no longer reads controls off the GUI thread, the gauge range is sent
+  before progress, filter progress comes in batches, each range's final
+  element is searched too, the scan stops when the window goes away,
+  invalid table text (address or frozen/edited value) is ignored instead of
+  throwing or writing 0, addresses at or above 0x80000000 work on Windows,
+  a cancelled edit writes nothing and the edited row is the event's row,
+  and the memorySearcher folder is created before saving. GeneralSettings2:
+  the "create a new MLC structure?" question is now actually asked,
+  deleting an account refreshes the main window's account list, a stored
+  vsync index the API does not offer is not passed to the choice, a
+  device that cannot be created no longer crashes, the portal device has
+  its own tooltip, the missing-files report ends in "..." only when files
+  were left out, and the Change/Clear MLC buttons are translatable. Log
+  texts differ throughout.
+  Kept on purpose: the GamePad view reports the right mouse button from the
+  left button's state; MainWindow::IsMenuHidden stays though nothing calls
+  it; TitleManager still binds its own (never sent) title-found event and
+  exported saves keep the "cemu_meta" marker the importer checks;
+  GeneralSettings2::MLCModified stays false (the restart follows anyway);
+  Int64 frozen values (decimal) and stored
+  addresses (hex) are read exactly as before; the memory searcher's result
+  list stops at 5000 hits and only frozen entries keep their value in the
+  ini file.
