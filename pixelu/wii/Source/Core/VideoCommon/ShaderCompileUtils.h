@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,12 +11,16 @@
 
 namespace VideoCommon
 {
+// Resolves #include directives for glslang from files on disk. Quoted includes start from
+// user_path, angle-bracket includes from system_path; nested includes are looked up relative to
+// the including file first, then outwards through the files that included it.
 class ShaderIncluder final : public glslang::TShader::Includer
 {
 public:
   ShaderIncluder(std::string user_path, std::string system_path);
   ~ShaderIncluder() override = default;
 
+  // Full paths of the includes glslang currently holds.
   std::vector<std::string> GetIncludes() const;
 
 private:
@@ -33,8 +36,10 @@ private:
 
   std::string m_root_user_path;
   std::string m_root_system_path;
+  // Search directories by include depth; the last entry belongs to the innermost file.
   std::vector<std::string> m_dirs;
 
+  // A loaded file. The result points into file_data, so file_data must not move afterwards.
   struct IncludeResultData
   {
     std::unique_ptr<IncludeResult> result;

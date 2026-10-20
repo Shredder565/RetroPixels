@@ -1,9 +1,7 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/ShaderCompileUtils.h"
 
-#include <ranges>
 #include <utility>
 
 #include "Common/FileUtil.h"
@@ -18,8 +16,11 @@ ShaderIncluder::ShaderIncluder(std::string user_path, std::string system_path)
 
 std::vector<std::string> ShaderIncluder::GetIncludes() const
 {
-  const auto keys = std::views::keys(m_include_results);
-  return {keys.begin(), keys.end()};
+  std::vector<std::string> paths;
+  paths.reserve(m_include_results.size());
+  for (const auto& entry : m_include_results)
+    paths.push_back(entry.first);
+  return paths;
 }
 
 ShaderIncluder::IncludeResult*
@@ -36,6 +37,10 @@ ShaderIncluder::includeSystem(const char* header_name, const char* includer_name
 
 void ShaderIncluder::releaseInclude(IncludeResult* result)
 {
+  // glslang also hands back the null result of a failed local lookup before it tries the
+  // system paths.
+  if (result == nullptr)
+    return;
   m_include_results.erase(result->headerName);
 }
 
@@ -44,50 +49,40 @@ ShaderIncluder::IncludeResult* ShaderIncluder::ProcessInclude(const std::string&
                                                               const char* includer_name,
                                                               std::size_t depth)
 {
+  // Forget the directories of files deeper than the one doing this include. A top-level include
+  // starts from the main source's directory, or from the root if it has none.
   m_dirs.resize(depth);
   if (depth == 1)
   {
-    const auto includer_dir = GetDirectory(includer_name);
-    if (includer_dir == ".")
-    {
-      m_dirs.push_back(root);
-    }
-    else
-    {
-      m_dirs.push_back(std::string{includer_dir});
-    }
+    const std::string_view source_dir = GetDirectory(includer_name);
+    m_dirs.emplace_back(source_dir == "." ? std::string_view{root} : source_dir);
   }
 
-  // Search through directories back to front
-  for (auto iter = m_dirs.rbegin(); iter != m_dirs.rend(); iter++)
+  // Innermost directory first.
+  for (std::size_t n = m_dirs.size(); n-- > 0;)
   {
-    const std::string full_path = WithUnifiedPathSeparators(*iter + '/' + header_name);
+    std::string full_path = WithUnifiedPathSeparators(m_dirs[n] + '/' + header_name);
+    std::string contents;
+    if (!File::ReadFileToString(full_path, contents))
+      continue;
 
-    std::string file_data;
-    if (File::ReadFileToString(full_path, file_data))
-    {
-      m_dirs.push_back(std::string{GetDirectory(full_path)});
+    // Files included from this one are searched next to it first.
+    m_dirs.emplace_back(GetDirectory(full_path));
 
-      const char* file_bytes = file_data.data();
-      const std::size_t file_size = file_data.size();
-      IncludeResultData result_data{
-          .result = std::make_unique<IncludeResult>(full_path, file_bytes, file_size, nullptr),
-          .file_data = std::move(file_data)};
-
-      auto ptr = result_data.result.get();
-      m_include_results[full_path] = std::move(result_data);
-      return ptr;
-    }
+    // Store the text before pointing the result at it, so the pointer stays valid (a moved
+    // short string would leave it dangling).
+    IncludeResultData& slot = m_include_results[full_path];
+    slot.file_data = std::move(contents);
+    slot.result = std::make_unique<IncludeResult>(full_path, slot.file_data.data(),
+                                                  slot.file_data.size(), nullptr);
+    return slot.result.get();
   }
   return nullptr;
 }
 
 std::string_view ShaderIncluder::GetDirectory(std::string_view path) const
 {
-  const auto last_pos = path.find_last_of('/');
-  if (last_pos == std::string_view::npos)
-    return ".";
-
-  return path.substr(0, last_pos);
+  const std::size_t slash = path.rfind('/');
+  return slash == std::string_view::npos ? std::string_view{"."} : path.substr(0, slash);
 }
 }  // namespace VideoCommon
