@@ -1,9 +1,11 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <cstdint>
+#include <cstdio>
 #include <filesystem>
+#include <ios>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -11,27 +13,18 @@
 #include <sys/stat.h>
 
 #include "Common/CommonTypes.h"
-
-#ifdef _WIN32
 #include "Common/StringUtil.h"
-#endif
 
-#ifdef ANDROID
-#include "Common/StringUtil.h"
-#include "jni/AndroidCommon/AndroidCommon.h"
-#endif
-
-// User directory indices for GetUserPath
+// Indices for GetUserPath()/SetUserPath(). Directory paths end in '/', file paths do not.
 enum
 {
   D_USER_IDX,
   D_GCUSER_IDX,
-  D_WIIROOT_IDX,  // always points to User/Wii or global user-configured directory
+  D_WIIROOT_IDX,          // the configured NAND root (User/Wii by default)
   D_TRIUSER_IDX,
-  D_SESSION_WIIROOT_IDX,  // may point to minimal temporary directory for determinism
-  D_CONFIG_IDX,           // global settings
-  D_GAMESETTINGS_IDX,     // user-specified settings which override both the global and the default
-                          // settings (per game)
+  D_SESSION_WIIROOT_IDX,  // NAND root of the running session (may be a temporary copy)
+  D_CONFIG_IDX,
+  D_GAMESETTINGS_IDX,     // per-game user settings
   D_SKYLANDERS_IDX,
 
   D_MAPS_IDX,
@@ -101,35 +94,32 @@ enum
   NUM_PATH_INDICES
 };
 
+// All paths taken and returned here are UTF-8 with '/' separators (backslashes are accepted on
+// Windows as input).
 namespace File
 {
-// FileSystem tree node
+// A file or directory found by ScanDirectoryTree().
 struct FSTEntry
 {
   bool isDirectory = false;
-  u64 size = 0;              // File length, or for directories, recursive count of children
-  std::string physicalName;  // Name on disk
-  std::string virtualName;   // Name in FST names table
+  u64 size = 0;              // file size; for directories, number of entries below it (recursive)
+  std::string physicalName;  // full path on disk
+  std::string virtualName;   // file name only
   std::vector<FSTEntry> children;
 };
 
-// The functions in this class are functionally identical to the standalone functions
-// below, but if you are going to be calling more than one of the functions using the
-// same path, creating a single FileInfo object and calling its functions multiple
-// times is faster than calling standalone functions multiple times.
+// One stat() of a path, for asking several questions about it.
 class FileInfo final
 {
 public:
   explicit FileInfo(const std::string& path);
   explicit FileInfo(const char* path);
 
-  // Returns true if the path exists
   bool Exists() const;
-  // Returns true if the path exists and is a directory
   bool IsDirectory() const;
-  // Returns true if the path exists and is a file
+  // Exists and is not a directory.
   bool IsFile() const;
-  // Returns the size of a file (or returns 0 if the path doesn't refer to a file)
+  // 0 unless IsFile().
   u64 GetSize() const;
 
 private:
@@ -138,30 +128,18 @@ private:
   bool m_exists;
 };
 
-// Returns true if the path exists
 bool Exists(const std::string& path);
-
-// Returns true if the path exists and is a directory
 bool IsDirectory(const std::string& path);
-
-// Returns true if the path exists and is a file
 bool IsFile(const std::string& path);
-
-// Returns the size of a file (or returns 0 if the path isn't a file that exists)
+// 0 unless `path` is an existing file.
 u64 GetSize(const std::string& path);
-
-// Overloaded GetSize, accepts FILE*
+// Size of an open file; the file position is preserved.
 u64 GetSize(FILE* f);
 
-// Creates a single directory. Returns true if successful or if the path already exists.
+// Each returns true on success or if the directory already exists.
 bool CreateDir(const std::string& filename);
-
-// Creates directories recursively. Returns true if successful or if the path already exists.
 bool CreateDirs(std::string_view filename);
-
-// Creates the full path to the file given in fullPath.
-// That is, for path '/a/b/c.bin', creates folders '/a' and '/a/b'.
-// Returns true if creation is successful or if the path already exists.
+// Creates every directory leading up to the file `fullPath` (not the file itself).
 bool CreateFullPath(std::string_view fullPath);
 
 enum class IfAbsentBehavior
@@ -170,70 +148,57 @@ enum class IfAbsentBehavior
   NoConsoleWarning
 };
 
-// Deletes a given filename, return true on success
-// Doesn't supports deleting a directory
+// Deletes a file (not a directory). A missing file counts as success.
 bool Delete(const std::string& filename,
             IfAbsentBehavior behavior = IfAbsentBehavior::ConsoleWarning);
 
-// Deletes a directory filename, returns true on success
+// Deletes an empty directory. A missing directory counts as success.
 bool DeleteDir(const std::string& filename,
                IfAbsentBehavior behavior = IfAbsentBehavior::ConsoleWarning);
 
-// renames file srcFilename to destFilename, returns true on success
 bool Rename(const std::string& srcFilename, const std::string& destFilename);
-
-// ditto, but syncs the source file and, on Unix, syncs the directories after rename
+// Rename(), then flush the file (and on POSIX the affected directories) to disk.
 bool RenameSync(const std::string& srcFilename, const std::string& destFilename);
 
-// Copies a file at source_path to destination_path, as if by std::filesystem::copy_file().
-// If a file already exists at destination_path it is overwritten. Returns true on success.
+// Copies a single file, replacing an existing destination.
 bool CopyRegularFile(std::string_view source_path, std::string_view destination_path);
 
-// creates an empty file filename, returns true on success
 bool CreateEmptyFile(const std::string& filename);
 
-// Recursive or non-recursive list of files and directories under directory.
+// The entries under `directory`, optionally recursing into subdirectories.
 FSTEntry ScanDirectoryTree(const std::string& directory, bool recursive);
 
-// deletes the given directory and anything under it. Returns true on success.
+// Deletes a directory and everything in it.
 bool DeleteDirRecursively(const std::string& directory);
 
-// Returns the current directory
 std::string GetCurrentDir();
 
-// Copies source_path to dest_path, as if by std::filesystem::copy(). Returns true on success or if
-// the source and destination are already the same (as determined by std::filesystem::equivalent()).
+// Recursive std::filesystem::copy(). Also succeeds if source and destination are the same file.
 bool Copy(std::string_view source_path, std::string_view dest_path,
           bool overwrite_existing = false);
 
-// Moves source_path to dest_path. On success, the source_path will no longer exist, and the
-// dest_path will contain the data previously in source_path. Files in dest_path will be overwritten
-// if they match files in source_path, but files that only exist in dest_path will be kept. No
-// guarantee on the state is given on failure; the move may have completely failed or partially
-// completed.
+// Moves source_path onto dest_path, merging directories: files that exist in both places are
+// replaced, files only in the destination are kept. On failure the move may be partial.
 bool MoveWithOverwrite(std::string_view source_path, std::string_view dest_path);
 
-// Set the current directory to given directory
 bool SetCurrentDir(const std::string& directory);
 
-// Creates and returns the path to a new temporary directory.
+// Creates a new, uniquely named directory in the system temp directory; "" on failure.
 std::string CreateTempDir();
 
-// Get a filename that can hopefully be atomically renamed to the given path.
+// A path next to `path` to write to before renaming it over `path`.
 std::string GetTempFilenameForAtomicWrite(std::string path);
 
-// Gets a set user directory path
-// Don't call prior to setting the base user directory
+// The path for a D_*/F_* index. D_USER_IDX must have been set first.
 const std::string& GetUserPath(unsigned int dir_index);
 
-// Sets a user directory path
-// Rebuilds internal directory structure to compensate for the new directory
+// Sets the path for an index and recomputes the paths derived from it.
 void SetUserPath(unsigned int dir_index, std::string path);
 
-// probably doesn't belong here
+// The directory of a UI theme: the user's copy, else the bundled one, else the default theme.
 std::string GetThemeDir(const std::string& theme_name);
 
-// Returns the path to where the sys file are
+// The bundled read-only data directory ("Sys"), ending in '/'.
 const std::string& GetSysDirectory();
 
 #ifdef ANDROID
@@ -246,27 +211,18 @@ const std::string GetGpuDriverDirectory(unsigned int dir_index);
 std::string GetBundleDirectory();
 #endif
 
+// Absolute path of the running executable, and its directory.
 std::string GetExePath();
 std::string GetExeDirectory();
 
 bool WriteStringToFile(const std::string& filename, std::string_view str);
 bool ReadFileToString(const std::string& filename, std::string& str);
 
-// To deal with Windows not fully supporting UTF-8 and Android not fully supporting paths.
+// Opens an fstream on a UTF-8 path (std::filesystem::path handles the conversion to the
+// platform's native encoding).
 template <typename T>
 void OpenFStream(T& fstream, const std::string& filename, std::ios_base::openmode openmode)
 {
-#ifdef _WIN32
-  fstream.open(UTF8ToTStr(filename).c_str(), openmode);
-#else
-#ifdef ANDROID
-  // Unfortunately it seems like the non-standard __open is the only way to use a file descriptor
-  if (IsPathAndroidContent(filename))
-    fstream.__open(OpenAndroidContent(filename, OpenModeToAndroid(openmode)), openmode);
-  else
-#endif
-    fstream.open(filename.c_str(), openmode);
-#endif
+  fstream.open(StringToPath(filename), openmode);
 }
-
 }  // namespace File

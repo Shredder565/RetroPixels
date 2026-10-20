@@ -1,84 +1,39 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/FileUtil.h"
 
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
+#include <algorithm>
+#include <array>
+#include <cstdlib>
 #include <cstring>
-#include <fcntl.h>
-#include <filesystem>
-#include <limits.h>
-#include <stack>
+#include <optional>
 #include <string>
 #include <system_error>
-#include <vector>
+#include <utility>
 
 #include "Common/CommonFuncs.h"
 #include "Common/CommonPaths.h"
-#include "Common/CommonTypes.h"
-#ifdef ANDROID
-#include "Common/Assert.h"
-#endif
-#ifdef __APPLE__
-#include "Common/DynamicLibrary.h"
-#endif
 #include "Common/IOFile.h"
 #include "Common/Logging/Log.h"
-#include "Common/StringUtil.h"
 
 #ifdef _WIN32
 #include <windows.h>
-#include <commdlg.h>  // for GetSaveFileName
-#include <direct.h>   // getcwd
+#include <fcntl.h>
 #include <io.h>
-#include <objbase.h>  // guid stuff
-#include <shellapi.h>
-#include <shlwapi.h>
+#include <objbase.h>
+#include <share.h>
+#include <sys/stat.h>
 #else
-#include <libgen.h>
-#include <stdlib.h>
+#include <climits>
+#include <fcntl.h>
 #include <unistd.h>
-#endif
-
-#if defined(__APPLE__)
-#include <CoreFoundation/CFBundle.h>
-#include <CoreFoundation/CFString.h>
-#include <CoreFoundation/CFURL.h>
-#include <mach-o/dyld.h>
-#include <sys/param.h>
-#endif
-
-#ifdef ANDROID
-#include "jni/AndroidCommon/AndroidCommon.h"
-#endif
-
-#if defined(__FreeBSD__)
-#include <sys/sysctl.h>
 #endif
 
 namespace fs = std::filesystem;
 
 namespace File
 {
-#ifdef ANDROID
-static std::string s_android_sys_directory;
-static std::string s_android_driver_directory;
-static std::string s_android_lib_directory;
-#endif
-
-#ifdef __APPLE__
-static Common::DynamicLibrary s_security_framework;
-
-using DolSecTranslocateIsTranslocatedURL = Boolean (*)(CFURLRef path, bool* isTranslocated,
-                                                       CFErrorRef* __nullable error);
-using DolSecTranslocateCreateOriginalPathForURL = CFURLRef
-__nullable (*)(CFURLRef translocatedPath, CFErrorRef* __nullable error);
-
-static DolSecTranslocateIsTranslocatedURL s_is_translocated_url;
-static DolSecTranslocateCreateOriginalPathForURL s_create_orig_path;
-#endif
+// ---- Queries ---------------------------------------------------------------------------------
 
 FileInfo::FileInfo(const std::string& path) : FileInfo(path.c_str())
 {
@@ -86,25 +41,13 @@ FileInfo::FileInfo(const std::string& path) : FileInfo(path.c_str())
 
 FileInfo::FileInfo(const char* path)
 {
-#ifdef ANDROID
-  if (IsPathAndroidContent(path))
-  {
-    const jlong result = GetAndroidContentSizeAndIsDirectory(path);
-    m_status.type((result == -2) ? fs::file_type::directory : fs::file_type::regular);
-    m_size = (result >= 0) ? result : 0;
-    m_exists = result != -1;
-  }
-  else
-#endif
-  {
-    const auto fs_path = StringToPath(path);
-    std::error_code error;
-    m_status = fs::status(fs_path, error);
-    m_size = fs::file_size(fs_path, error);
-    if (error)
-      m_size = 0;
-    m_exists = fs::exists(m_status);
-  }
+  const fs::path native = StringToPath(path);
+  std::error_code ec;
+  m_status = fs::status(native, ec);
+  m_exists = fs::exists(m_status);
+  m_size = fs::file_size(native, ec);
+  if (ec)
+    m_size = 0;
 }
 
 bool FileInfo::Exists() const
@@ -119,513 +62,418 @@ bool FileInfo::IsDirectory() const
 
 bool FileInfo::IsFile() const
 {
-  return Exists() ? !fs::is_directory(m_status) : false;
+  return m_exists && !fs::is_directory(m_status);
 }
 
 u64 FileInfo::GetSize() const
 {
-  if (!IsFile())
-    return 0;
-  return m_size;
+  return IsFile() ? m_size : 0;
 }
 
-// Returns true if the path exists
 bool Exists(const std::string& path)
 {
   return FileInfo(path).Exists();
 }
 
-// Returns true if the path exists and is a directory
 bool IsDirectory(const std::string& path)
 {
   return FileInfo(path).IsDirectory();
 }
 
-// Returns true if the path exists and is a file
 bool IsFile(const std::string& path)
 {
   return FileInfo(path).IsFile();
 }
 
-// Deletes a given filename, return true on success
-// Doesn't supports deleting a directory
-bool Delete(const std::string& filename, IfAbsentBehavior behavior)
+u64 GetSize(const std::string& path)
 {
-  DEBUG_LOG_FMT(COMMON, "{}: file {}", __func__, filename);
-
-#ifdef ANDROID
-  if (filename.starts_with("content://"))
-  {
-    const bool success = DeleteAndroidContent(filename);
-    if (!success)
-      WARN_LOG_FMT(COMMON, "{} failed on {}", __func__, filename);
-    return success;
-  }
-#endif
-
-  auto native_path = StringToPath(filename);
-  std::error_code error;
-  auto status = fs::status(native_path, error);
-
-  // Return true because we care about the file not being there, not the actual delete.
-  if (!fs::exists(status))
-  {
-    if (behavior == IfAbsentBehavior::ConsoleWarning)
-    {
-      WARN_LOG_FMT(COMMON, "{}: {} does not exist", __func__, filename);
-    }
-    return true;
-  }
-
-  // fs::remove can only delete an empty directory. Legacy dolphin behavior is just to bail.
-  if (fs::is_directory(status))
-  {
-    WARN_LOG_FMT(COMMON, "{} failed: {} is a directory", __func__, filename);
-    return false;
-  }
-
-  if (!fs::remove(native_path, error))
-  {
-    WARN_LOG_FMT(COMMON, "{}: failed on {}: {}", __func__, filename, error.message());
-    return false;
-  }
-
-  return true;
+  return FileInfo(path).GetSize();
 }
+
+u64 GetSize(FILE* f)
+{
+  const auto position = ftello(f);
+  if (fseeko(f, 0, SEEK_END) != 0)
+  {
+    ERROR_LOG_FMT(COMMON, "GetSize: seek failed {}: {}", fmt::ptr(f), Common::LastStrerrorString());
+    return 0;
+  }
+  const auto end = ftello(f);
+  if (end != position && fseeko(f, position, SEEK_SET) != 0)
+  {
+    ERROR_LOG_FMT(COMMON, "GetSize: seek failed {}: {}", fmt::ptr(f), Common::LastStrerrorString());
+    return 0;
+  }
+  return static_cast<u64>(end);
+}
+
+// ---- Creating and deleting -------------------------------------------------------------------
+
+namespace
+{
+// create_directory/create_directories report "nothing created" for an existing directory, which
+// callers treat as success.
+template <typename CreateFn>
+bool EnsureDirectory(const fs::path& path, CreateFn create, std::string_view what,
+                     std::string_view shown_path)
+{
+  std::error_code ec;
+  if (create(path, ec))
+    return true;
+  std::error_code ignored;
+  if (fs::is_directory(path, ignored))
+    return true;
+  ERROR_LOG_FMT(COMMON, "{}: failed on {}: {}", what, shown_path, ec.message());
+  return false;
+}
+
+bool CreateOne(const fs::path& path, std::error_code& ec)
+{
+  return fs::create_directory(path, ec);
+}
+
+bool CreateAll(const fs::path& path, std::error_code& ec)
+{
+  return fs::create_directories(path, ec);
+}
+}  // namespace
 
 bool CreateDir(const std::string& path)
 {
-  DEBUG_LOG_FMT(COMMON, "{}: directory {}", __func__, path);
-
-  std::error_code error;
-  auto native_path = StringToPath(path);
-  bool success = fs::create_directory(native_path, error);
-  // If the path was not created, check if it was a pre-existing directory
-  std::error_code error_ignored;
-  if (!success && fs::is_directory(native_path, error_ignored))
-    success = true;
-  if (!success)
-    ERROR_LOG_FMT(COMMON, "{}: failed on {}: {}", __func__, path, error.message());
-  return success;
+  DEBUG_LOG_FMT(COMMON, "CreateDir: directory {}", path);
+  return EnsureDirectory(StringToPath(path), CreateOne, "CreateDir", path);
 }
 
 bool CreateDirs(std::string_view path)
 {
-  DEBUG_LOG_FMT(COMMON, "{}: directory {}", __func__, path);
-
-  std::error_code error;
-  auto native_path = StringToPath(path);
-  bool success = fs::create_directories(native_path, error);
-  // If the path was not created, check if it was a pre-existing directory
-  std::error_code error_ignored;
-  if (!success && fs::is_directory(native_path, error_ignored))
-    success = true;
-  if (!success)
-    ERROR_LOG_FMT(COMMON, "{}: failed on {}: {}", __func__, path, error.message());
-  return success;
+  DEBUG_LOG_FMT(COMMON, "CreateDirs: directory {}", path);
+  return EnsureDirectory(StringToPath(path), CreateAll, "CreateDirs", path);
 }
 
 bool CreateFullPath(std::string_view fullPath)
 {
-  DEBUG_LOG_FMT(COMMON, "{}: path {}", __func__, fullPath);
-
-  std::error_code error;
-  auto native_path = StringToPath(fullPath).parent_path();
-  bool success = fs::create_directories(native_path, error);
-  // If the path was not created, check if it was a pre-existing directory
-  std::error_code error_ignored;
-  if (!success && fs::is_directory(native_path, error_ignored))
-    success = true;
-  if (!success)
-    ERROR_LOG_FMT(COMMON, "{}: failed on {}: {}", __func__, fullPath, error.message());
-  return success;
+  DEBUG_LOG_FMT(COMMON, "CreateFullPath: path {}", fullPath);
+  return EnsureDirectory(StringToPath(fullPath).parent_path(), CreateAll, "CreateFullPath",
+                         fullPath);
 }
 
-// Deletes a directory filename, returns true on success
-bool DeleteDir(const std::string& filename, IfAbsentBehavior behavior)
+bool Delete(const std::string& filename, IfAbsentBehavior behavior)
 {
-  DEBUG_LOG_FMT(COMMON, "{}: directory {}", __func__, filename);
+  DEBUG_LOG_FMT(COMMON, "Delete: file {}", filename);
 
-  auto native_path = StringToPath(filename);
-  std::error_code error;
-  auto status = fs::status(native_path, error);
+  const fs::path native = StringToPath(filename);
+  std::error_code ec;
+  const fs::file_status status = fs::status(native, ec);
 
-  // Return true because we care about the directory not being there, not the actual delete.
   if (!fs::exists(status))
   {
+    // The caller wants the file gone, and it is.
     if (behavior == IfAbsentBehavior::ConsoleWarning)
-    {
-      WARN_LOG_FMT(COMMON, "{}: {} does not exist", __func__, filename);
-    }
+      WARN_LOG_FMT(COMMON, "Delete: {} does not exist", filename);
     return true;
   }
-
-  // check if a directory
-  if (!fs::is_directory(status))
+  if (fs::is_directory(status))
   {
-    ERROR_LOG_FMT(COMMON, "{}: Not a directory {}", __func__, filename);
+    WARN_LOG_FMT(COMMON, "Delete failed: {} is a directory", filename);
     return false;
   }
-
-  if (!fs::remove(native_path, error))
+  if (!fs::remove(native, ec))
   {
-    WARN_LOG_FMT(COMMON, "{}: failed on {}: {}", __func__, filename, error.message());
+    WARN_LOG_FMT(COMMON, "Delete: failed on {}: {}", filename, ec.message());
     return false;
   }
-
   return true;
 }
 
-// renames file srcFilename to destFilename, returns true on success
-bool Rename(const std::string& srcFilename, const std::string& destFilename)
+bool DeleteDir(const std::string& filename, IfAbsentBehavior behavior)
 {
-  DEBUG_LOG_FMT(COMMON, "{}: {} --> {}", __func__, srcFilename, destFilename);
-  std::error_code error;
-  std::filesystem::rename(StringToPath(srcFilename), StringToPath(destFilename), error);
-  if (error)
+  DEBUG_LOG_FMT(COMMON, "DeleteDir: directory {}", filename);
+
+  const fs::path native = StringToPath(filename);
+  std::error_code ec;
+  const fs::file_status status = fs::status(native, ec);
+
+  if (!fs::exists(status))
   {
-    ERROR_LOG_FMT(COMMON, "{} failed: {} --> {}: {}", __func__, srcFilename, destFilename,
-                  error.message());
+    if (behavior == IfAbsentBehavior::ConsoleWarning)
+      WARN_LOG_FMT(COMMON, "DeleteDir: {} does not exist", filename);
+    return true;
   }
-  return !error;
+  if (!fs::is_directory(status))
+  {
+    ERROR_LOG_FMT(COMMON, "DeleteDir: Not a directory {}", filename);
+    return false;
+  }
+  if (!fs::remove(native, ec))
+  {
+    WARN_LOG_FMT(COMMON, "DeleteDir: failed on {}: {}", filename, ec.message());
+    return false;
+  }
+  return true;
 }
 
-#ifndef _WIN32
-static void FSyncPath(const char* path)
+bool DeleteDirRecursively(const std::string& directory)
 {
-  int fd = open(path, O_RDONLY);
-  if (fd != -1)
+  DEBUG_LOG_FMT(COMMON, "DeleteDirRecursively: {}", directory);
+
+  std::error_code ec;
+  const std::uintmax_t removed = fs::remove_all(StringToPath(directory), ec);
+  const bool ok = !ec && removed != static_cast<std::uintmax_t>(-1);
+  if (!ok)
+    ERROR_LOG_FMT(COMMON, "DeleteDirRecursively: {} failed. {}", directory, ec.message());
+  return ok;
+}
+
+bool CreateEmptyFile(const std::string& filename)
+{
+  DEBUG_LOG_FMT(COMMON, "CreateEmptyFile: {}", filename);
+  if (IOFile(filename, "wb"))
+    return true;
+  ERROR_LOG_FMT(COMMON, "CreateEmptyFile: failed {}: {}", filename, Common::LastStrerrorString());
+  return false;
+}
+
+// ---- Renaming, copying, moving ---------------------------------------------------------------
+
+bool Rename(const std::string& srcFilename, const std::string& destFilename)
+{
+  DEBUG_LOG_FMT(COMMON, "Rename: {} --> {}", srcFilename, destFilename);
+  std::error_code ec;
+  fs::rename(StringToPath(srcFilename), StringToPath(destFilename), ec);
+  if (ec)
   {
-    fsync(fd);
-    close(fd);
+    ERROR_LOG_FMT(COMMON, "Rename failed: {} --> {}: {}", srcFilename, destFilename,
+                  ec.message());
+    return false;
   }
+  return true;
+}
+
+namespace
+{
+#ifndef _WIN32
+void SyncToDisk(const fs::path& path)
+{
+  const int fd = open(path.c_str(), O_RDONLY);
+  if (fd < 0)
+    return;
+  fsync(fd);
+  close(fd);
 }
 #endif
+}  // namespace
 
 bool RenameSync(const std::string& srcFilename, const std::string& destFilename)
 {
   if (!Rename(srcFilename, destFilename))
     return false;
+
 #ifdef _WIN32
+  // Flush the file's data (opened under its old name, as before the rename).
   int fd = -1;
-  // XXX is this really needed?
-  errno_t err = _wsopen_s(&fd, UTF8ToWString(srcFilename).c_str(), _O_RDONLY, _SH_DENYNO,
-                          _S_IREAD | _S_IWRITE);
-  if (!err && fd >= 0)
+  const errno_t err = _wsopen_s(&fd, UTF8ToWString(srcFilename).c_str(), _O_RDONLY, _SH_DENYNO,
+                                _S_IREAD | _S_IWRITE);
+  if (err == 0 && fd >= 0)
   {
     if (_commit(fd) != 0)
-      ERROR_LOG_FMT(COMMON, "{} sync failed on {}: {}", __func__, srcFilename, err);
-    close(fd);
+      ERROR_LOG_FMT(COMMON, "RenameSync sync failed on {}: {}", srcFilename, err);
+    _close(fd);
   }
 #else
-  char* path = strdup(srcFilename.c_str());
-  FSyncPath(path);
-  FSyncPath(dirname(path));
-  free(path);
-  path = strdup(destFilename.c_str());
-  FSyncPath(dirname(path));
-  free(path);
+  // Make the file contents and both directory entries durable.
+  const fs::path source = StringToPath(srcFilename);
+  SyncToDisk(source);
+  SyncToDisk(source.parent_path().empty() ? fs::path(".") : source.parent_path());
+  const fs::path dest = StringToPath(destFilename);
+  SyncToDisk(dest.parent_path().empty() ? fs::path(".") : dest.parent_path());
 #endif
   return true;
 }
 
 bool CopyRegularFile(std::string_view source_path, std::string_view destination_path)
 {
-  DEBUG_LOG_FMT(COMMON, "{}: {} --> {}", __func__, source_path, destination_path);
-
-  auto src_path = StringToPath(source_path);
-  auto dst_path = StringToPath(destination_path);
-  std::error_code error;
-  bool copied = fs::copy_file(src_path, dst_path, fs::copy_options::overwrite_existing, error);
+  DEBUG_LOG_FMT(COMMON, "CopyRegularFile: {} --> {}", source_path, destination_path);
+  std::error_code ec;
+  const bool copied = fs::copy_file(StringToPath(source_path), StringToPath(destination_path),
+                                    fs::copy_options::overwrite_existing, ec);
   if (!copied)
   {
-    ERROR_LOG_FMT(COMMON, "{}: failed {} --> {}: {}", __func__, source_path, destination_path,
-                  error.message());
+    ERROR_LOG_FMT(COMMON, "CopyRegularFile: failed {} --> {}: {}", source_path, destination_path,
+                  ec.message());
   }
   return copied;
 }
 
-// Returns the size of a file (or returns 0 if the path isn't a file that exists)
-u64 GetSize(const std::string& path)
-{
-  return FileInfo(path).GetSize();
-}
-
-// Overloaded GetSize, accepts FILE*
-u64 GetSize(FILE* f)
-{
-  // can't use off_t here because it can be 32-bit
-  const u64 pos = ftello(f);
-  if (fseeko(f, 0, SEEK_END) != 0)
-  {
-    ERROR_LOG_FMT(COMMON, "GetSize: seek failed {}: {}", fmt::ptr(f), Common::LastStrerrorString());
-    return 0;
-  }
-
-  const u64 size = ftello(f);
-  if ((size != pos) && (fseeko(f, pos, SEEK_SET) != 0))
-  {
-    ERROR_LOG_FMT(COMMON, "GetSize: seek failed {}: {}", fmt::ptr(f), Common::LastStrerrorString());
-    return 0;
-  }
-
-  return size;
-}
-
-// creates an empty file filename, returns true on success
-bool CreateEmptyFile(const std::string& filename)
-{
-  DEBUG_LOG_FMT(COMMON, "CreateEmptyFile: {}", filename);
-
-  if (!File::IOFile(filename, "wb"))
-  {
-    ERROR_LOG_FMT(COMMON, "CreateEmptyFile: failed {}: {}", filename, Common::LastStrerrorString());
-    return false;
-  }
-
-  return true;
-}
-
-#ifdef ANDROID
-static FSTEntry ScanDirectoryTreeAndroidContent(std::string directory, bool recursive)
-{
-  FSTEntry parent_entry;
-  parent_entry.physicalName = directory;
-  parent_entry.isDirectory = true;
-  parent_entry.size = 0;
-
-  for (const auto& child_name : GetAndroidContentChildNames(directory))
-  {
-    const auto physical_name = directory + DIR_SEP + child_name;
-    const FileInfo file_info(physical_name);
-    FSTEntry entry;
-
-    entry.isDirectory = file_info.IsDirectory();
-    if (entry.isDirectory)
-    {
-      if (recursive)
-        entry = ScanDirectoryTreeAndroidContent(physical_name, true);
-      else
-        entry.size = 0;
-      parent_entry.size += entry.size;
-    }
-    else
-    {
-      entry.size = file_info.GetSize();
-    }
-    entry.virtualName = child_name;
-    entry.physicalName = physical_name;
-
-    ++parent_entry.size;
-    parent_entry.children.push_back(entry);
-  }
-
-  return parent_entry;
-}
-#endif
-
-// Recursive or non-recursive list of files and directories under directory.
-FSTEntry ScanDirectoryTree(const std::string& directory, bool recursive)
-{
-  DEBUG_LOG_FMT(COMMON, "{}: directory {}", __func__, directory);
-
-#ifdef ANDROID
-  if (IsPathAndroidContent(directory))
-    return ScanDirectoryTreeAndroidContent(directory, recursive);
-#endif
-
-  auto path_to_physical_name = [](const fs::path& path) {
-#ifdef _WIN32
-    return WStringToUTF8(path.generic_wstring());
-#else
-    return PathToString(path);
-#endif
-  };
-
-  auto dirent_to_fstent = [&](const fs::directory_entry& entry) {
-    return FSTEntry{
-        .isDirectory = entry.is_directory(),
-        .size = entry.is_directory() || entry.is_fifo() ? 0 : entry.file_size(),
-        .physicalName = path_to_physical_name(entry.path()),
-        .virtualName = PathToString(entry.path().filename()),
-    };
-  };
-
-  auto calc_dir_size = [](FSTEntry* dir) {
-    dir->size += dir->children.size();
-    for (auto& child : dir->children)
-      if (child.isDirectory)
-        dir->size += child.size;
-  };
-
-  const auto directory_path = StringToPath(directory);
-
-  FSTEntry parent_entry;
-  parent_entry.physicalName = path_to_physical_name(directory_path);
-  parent_entry.isDirectory = fs::is_directory(directory_path);
-  parent_entry.size = 0;
-
-  std::error_code error;
-  if (recursive)
-  {
-    int prev_depth = 0;
-    std::stack<FSTEntry*> dir_fsts;
-    dir_fsts.push(&parent_entry);
-    for (auto it = fs::recursive_directory_iterator(directory_path, error);
-         it != fs::recursive_directory_iterator(); it.increment(error))
-    {
-      const int cur_depth = it.depth();
-      if (cur_depth > prev_depth)
-      {
-        dir_fsts.push(&dir_fsts.top()->children.back());
-      }
-      else if (cur_depth < prev_depth)
-      {
-        while (dir_fsts.size() != static_cast<size_t>(cur_depth) + 1u)
-        {
-          calc_dir_size(dir_fsts.top());
-          dir_fsts.pop();
-        }
-      }
-      dir_fsts.top()->children.emplace_back(dirent_to_fstent(*it));
-      prev_depth = cur_depth;
-    }
-    while (dir_fsts.size())
-    {
-      calc_dir_size(dir_fsts.top());
-      dir_fsts.pop();
-    }
-  }
-  else
-  {
-    for (auto it = fs::directory_iterator(directory_path, error); it != fs::directory_iterator();
-         it.increment(error))
-    {
-      parent_entry.children.emplace_back(dirent_to_fstent(*it));
-    }
-    calc_dir_size(&parent_entry);
-  }
-
-  if (error)
-  {
-    // NOTE Possibly partial file list still returned
-    ERROR_LOG_FMT(COMMON, "{} error on {}: {}", __func__, directory, error.message());
-  }
-
-  return parent_entry;
-}
-
-// Deletes the given directory and anything under it. Returns true on success.
-bool DeleteDirRecursively(const std::string& directory)
-{
-  DEBUG_LOG_FMT(COMMON, "{}: {}", __func__, directory);
-
-  std::error_code error;
-  const std::uintmax_t num_removed = std::filesystem::remove_all(StringToPath(directory), error);
-  const bool success = num_removed != static_cast<std::uintmax_t>(-1) && !error;
-  if (!success)
-    ERROR_LOG_FMT(COMMON, "{}: {} failed. {}", __func__, directory, error.message());
-  return success;
-}
-
 bool Copy(std::string_view source_path, std::string_view dest_path, bool overwrite_existing)
 {
-  DEBUG_LOG_FMT(COMMON, "{}: {} --> {} ({})", __func__, source_path, dest_path,
-                overwrite_existing ? "overwrite" : "preserve");
+  const char* const mode = overwrite_existing ? "overwrite" : "preserve";
+  DEBUG_LOG_FMT(COMMON, "Copy: {} --> {} ({})", source_path, dest_path, mode);
 
-  auto src_path = StringToPath(source_path);
-  auto dst_path = StringToPath(dest_path);
-  std::error_code error;
-  auto options = fs::copy_options::recursive;
+  const fs::path source = StringToPath(source_path);
+  const fs::path dest = StringToPath(dest_path);
+  fs::copy_options options = fs::copy_options::recursive;
   if (overwrite_existing)
     options |= fs::copy_options::overwrite_existing;
-  fs::copy(src_path, dst_path, options, error);
-  if (error)
-  {
-    std::error_code error_ignored;
-    if (fs::equivalent(src_path, dst_path, error_ignored))
-      return true;
 
-    ERROR_LOG_FMT(COMMON, "{}: failed {} --> {} ({}): {}", __func__, source_path, dest_path,
-                  overwrite_existing ? "overwrite" : "preserve", error.message());
-    return false;
-  }
-  return true;
+  std::error_code ec;
+  fs::copy(source, dest, options, ec);
+  if (!ec)
+    return true;
+
+  // Copying something onto itself fails, but leaves the destination as wanted.
+  std::error_code ignored;
+  if (fs::equivalent(source, dest, ignored))
+    return true;
+
+  ERROR_LOG_FMT(COMMON, "Copy: failed {} --> {} ({}): {}", source_path, dest_path, mode,
+                ec.message());
+  return false;
 }
 
-static bool MoveWithOverwrite(const std::filesystem::path& src, const std::filesystem::path& dst,
-                              std::error_code& error)
+namespace
 {
-  fs::rename(src, dst, error);
-  if (!error)
+bool MergeMove(const fs::path& source, const fs::path& dest, std::error_code& ec)
+{
+  // The simple case: a rename (fails e.g. across volumes or onto a non-empty directory).
+  fs::rename(source, dest, ec);
+  if (!ec)
     return true;
 
-  // rename failed, try fallbacks
-
-  if (!fs::is_directory(src))
+  std::error_code status_ec;
+  if (!fs::is_directory(source, status_ec))
   {
-    // src is not a directory (ie, probably a file), try to copy file + delete
-    if (!fs::copy_file(src, dst, fs::copy_options::overwrite_existing, error))
-      return false;
-    if (!fs::remove(src, error))
-      return false;
-    return true;
+    // A file: copy it over the destination and remove the original.
+    return fs::copy_file(source, dest, fs::copy_options::overwrite_existing, ec) &&
+           fs::remove(source, ec);
   }
 
-  // src is a directory, recurse into it and try to move all sub-elements one by one
-  // this usually happens because the target is a non-empty directory
-  for (fs::directory_iterator it(src, error); it != fs::directory_iterator(); it.increment(error))
+  // A directory: move its entries one by one, then remove it.
+  ec.clear();
+  for (fs::directory_iterator it(source, ec), end; !ec && it != end; it.increment(ec))
   {
-    if (error)
-      return false;
-    if (!MoveWithOverwrite(it->path(), dst / it->path().filename(), error))
+    if (!MergeMove(it->path(), dest / it->path().filename(), ec))
       return false;
   }
-  if (error)
+  if (ec)
     return false;
-
-  // all sub-elements moved, remove top directory
-  if (!fs::remove(src, error))
-    return false;
-
-  return true;
+  return fs::remove(source, ec);
 }
+}  // namespace
 
 bool MoveWithOverwrite(std::string_view source_path, std::string_view dest_path)
 {
-  DEBUG_LOG_FMT(COMMON, "{}: {} --> {}", __func__, source_path, dest_path);
-  auto src_path = StringToPath(source_path);
-  auto dst_path = StringToPath(dest_path);
-  std::error_code error;
-  if (!MoveWithOverwrite(src_path, dst_path, error))
-  {
-    ERROR_LOG_FMT(COMMON, "{}: failed {} --> {}: {}", __func__, source_path, dest_path,
-                  error.message());
-  }
-  return true;
+  DEBUG_LOG_FMT(COMMON, "MoveWithOverwrite: {} --> {}", source_path, dest_path);
+  std::error_code ec;
+  if (MergeMove(StringToPath(source_path), StringToPath(dest_path), ec))
+    return true;
+  ERROR_LOG_FMT(COMMON, "MoveWithOverwrite: failed {} --> {}: {}", source_path, dest_path,
+                ec.message());
+  return false;
 }
 
-// Returns the current directory
+// ---- Directory listing -----------------------------------------------------------------------
+
+namespace
+{
+std::string PhysicalName(const fs::path& path)
+{
+#ifdef _WIN32
+  return WStringToUTF8(path.generic_wstring());  // '/' separators
+#else
+  return PathToString(path);
+#endif
+}
+
+FSTEntry EntryFor(const fs::directory_entry& dirent)
+{
+  std::error_code ec;
+  FSTEntry entry;
+  entry.isDirectory = dirent.is_directory(ec);
+  if (!entry.isDirectory && !dirent.is_fifo(ec))
+  {
+    entry.size = dirent.file_size(ec);
+    if (ec)
+      entry.size = 0;
+  }
+  entry.physicalName = PhysicalName(dirent.path());
+  entry.virtualName = PathToString(dirent.path().filename());
+  return entry;
+}
+
+// A directory's size counts its children plus everything below its child directories.
+void SumDirectorySize(FSTEntry& dir)
+{
+  dir.size += dir.children.size();
+  for (const FSTEntry& child : dir.children)
+  {
+    if (child.isDirectory)
+      dir.size += child.size;
+  }
+}
+
+// Fills dir.children; returns false (with ec set) when listing fails, which ends the scan.
+bool ListInto(FSTEntry& dir, const fs::path& path, bool recursive, std::error_code& ec)
+{
+  for (fs::directory_iterator it(path, ec), end; !ec && it != end; it.increment(ec))
+  {
+    dir.children.push_back(EntryFor(*it));
+    FSTEntry& child = dir.children.back();
+
+    // Like std::filesystem's recursive iteration, don't descend through directory symlinks.
+    std::error_code link_ec;
+    if (recursive && child.isDirectory && !it->is_symlink(link_ec))
+    {
+      const bool ok = ListInto(child, it->path(), true, ec);
+      SumDirectorySize(child);
+      if (!ok)
+        return false;
+    }
+  }
+  return !ec;
+}
+}  // namespace
+
+FSTEntry ScanDirectoryTree(const std::string& directory, bool recursive)
+{
+  DEBUG_LOG_FMT(COMMON, "ScanDirectoryTree: directory {}", directory);
+
+  const fs::path root = StringToPath(directory);
+  FSTEntry tree;
+  tree.physicalName = PhysicalName(root);
+  std::error_code dir_ec;
+  tree.isDirectory = fs::is_directory(root, dir_ec);
+
+  std::error_code ec;
+  ListInto(tree, root, recursive, ec);
+  SumDirectorySize(tree);
+
+  // The (possibly partial) listing is still returned.
+  if (ec)
+    ERROR_LOG_FMT(COMMON, "ScanDirectoryTree error on {}: {}", directory, ec.message());
+  return tree;
+}
+
+// ---- Process directories ---------------------------------------------------------------------
+
 std::string GetCurrentDir()
 {
-  std::error_code error;
-  auto directory = PathToString(fs::current_path(error));
-  if (error)
+  std::error_code ec;
+  const fs::path current = fs::current_path(ec);
+  if (ec)
   {
-    ERROR_LOG_FMT(COMMON, "{} failed: {}", __func__, error.message());
+    ERROR_LOG_FMT(COMMON, "GetCurrentDir failed: {}", ec.message());
     return {};
   }
-  return directory;
+  return PathToString(current);
 }
 
-// Sets the current directory to the given directory
 bool SetCurrentDir(const std::string& directory)
 {
-  std::error_code error;
-  fs::current_path(StringToPath(directory), error);
-  if (error)
+  std::error_code ec;
+  fs::current_path(StringToPath(directory), ec);
+  if (ec)
   {
-    ERROR_LOG_FMT(COMMON, "{} failed: {}", __func__, error.message());
+    ERROR_LOG_FMT(COMMON, "SetCurrentDir failed: {}", ec.message());
     return false;
   }
   return true;
@@ -634,121 +482,63 @@ bool SetCurrentDir(const std::string& directory)
 std::string CreateTempDir()
 {
 #ifdef _WIN32
-  TCHAR temp[MAX_PATH];
-  if (!GetTempPath(MAX_PATH, temp))
+  std::array<wchar_t, MAX_PATH + 1> temp_root{};
+  if (GetTempPathW(static_cast<DWORD>(temp_root.size()), temp_root.data()) == 0)
     return "";
 
   GUID guid;
   if (FAILED(CoCreateGuid(&guid)))
-  {
     return "";
-  }
-  OLECHAR tguid[40]{};
-  if (!StringFromGUID2(guid, tguid, _countof(tguid)))
-  {
+  std::array<wchar_t, 40> guid_text{};
+  if (StringFromGUID2(guid, guid_text.data(), static_cast<int>(guid_text.size())) == 0)
     return "";
-  }
-  std::string dir = TStrToUTF8(temp) + "/" + TStrToUTF8(tguid);
+
+  std::string dir = WStringToUTF8(temp_root.data());
+  std::ranges::replace(dir, '\\', '/');
+  while (dir.ends_with('/'))
+    dir.pop_back();
+  dir += '/';
+  dir += WStringToUTF8(guid_text.data());
   if (!CreateDir(dir))
     return "";
-  dir = ReplaceAll(dir, "\\", DIR_SEP);
   return dir;
 #else
-  const char* base = getenv("TMPDIR") ?: "/tmp";
-  std::string path = std::string(base) + "/DolphinWii.XXXXXX";
-  if (!mkdtemp(&path[0]))
+  const char* base = std::getenv("TMPDIR");
+  std::string dir = std::string(base ? base : "/tmp") + "/DolphinWii.XXXXXX";
+  if (!mkdtemp(dir.data()))
     return "";
-  return path;
+  return dir;
 #endif
 }
 
 std::string GetTempFilenameForAtomicWrite(std::string path)
 {
-  std::error_code error;
-  auto absolute_path = fs::absolute(StringToPath(path), error);
-  if (!error)
-    path = PathToString(absolute_path);
-  return std::move(path) + ".xxx";
+  std::error_code ec;
+  const fs::path absolute = fs::absolute(StringToPath(path), ec);
+  if (!ec)
+    path = PathToString(absolute);
+  path += ".xxx";
+  return path;
 }
-
-#if defined(__APPLE__)
-std::string GetBundleDirectory()
-{
-  CFURLRef bundle_ref = CFBundleCopyBundleURL(CFBundleGetMainBundle());
-
-  // Starting in macOS Sierra, apps downloaded from the Internet may be
-  // "translocated" to a read-only DMG and executed from there. This is
-  // done to prevent a scenario where an attacker can replace a trusted
-  // app's resources to load untrusted code.
-  //
-  // We should return Dolphin's actual location on the filesystem in
-  // this function, so bundle_ref will be untranslocated if necessary.
-  //
-  // More information: https://objective-see.com/blog/blog_0x15.html
-
-  // The APIs to deal with translocated paths are private, so we have
-  // to dynamically load them from the Security framework.
-  //
-  // The headers can be found under "Security" on opensource.apple.com:
-  // Security/OSX/libsecurity_translocate/lib/SecTranslocate.h
-  if (!s_security_framework.IsOpen())
-  {
-    s_security_framework.Open("/System/Library/Frameworks/Security.framework/Security");
-    s_security_framework.GetSymbol("SecTranslocateIsTranslocatedURL", &s_is_translocated_url);
-    s_security_framework.GetSymbol("SecTranslocateCreateOriginalPathForURL", &s_create_orig_path);
-  }
-
-  bool is_translocated = false;
-  s_is_translocated_url(bundle_ref, &is_translocated, nullptr);
-
-  if (is_translocated)
-  {
-    CFURLRef untranslocated_ref = s_create_orig_path(bundle_ref, nullptr);
-    CFRelease(bundle_ref);
-    bundle_ref = untranslocated_ref;
-  }
-
-  char app_bundle_path[MAXPATHLEN];
-  CFStringRef bundle_path = CFURLCopyFileSystemPath(bundle_ref, kCFURLPOSIXPathStyle);
-  CFStringGetFileSystemRepresentation(bundle_path, app_bundle_path, sizeof(app_bundle_path));
-  CFRelease(bundle_ref);
-  CFRelease(bundle_path);
-
-  return app_bundle_path;
-}
-#endif
 
 std::string GetExePath()
 {
 #ifdef _WIN32
-  auto exe_path = Common::GetModuleName(nullptr);
-  if (!exe_path)
+  const std::optional<std::wstring> module_path = Common::GetModuleName(nullptr);
+  if (!module_path)
     return {};
-  std::error_code error;
-  auto exe_path_absolute = fs::absolute(exe_path.value(), error);
-  if (error)
+  std::error_code ec;
+  const fs::path absolute = fs::absolute(*module_path, ec);
+  if (ec)
     return {};
-  return PathToString(exe_path_absolute);
-#elif defined(__APPLE__)
-  return GetBundleDirectory();
-#elif defined(__FreeBSD__)
-  int name[4]{CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1};
-  size_t length = 0;
-  if (sysctl(name, 4, nullptr, &length, nullptr, 0) != 0 || length == 0)
-    return {};
-  std::string dolphin_exe_path(length, '\0');
-  if (sysctl(name, 4, dolphin_exe_path.data(), &length, nullptr, 0) != 0)
-    return {};
-  return dolphin_exe_path;
+  return PathToString(absolute);
 #else
-  char dolphin_exe_path[PATH_MAX];
-  ssize_t len = ::readlink("/proc/self/exe", dolphin_exe_path, sizeof(dolphin_exe_path));
-  if (len == -1 || len == sizeof(dolphin_exe_path))
-  {
-    len = 0;
-  }
-  dolphin_exe_path[len] = '\0';
-  return dolphin_exe_path;
+  std::string target(PATH_MAX, '\0');
+  const ssize_t length = readlink("/proc/self/exe", target.data(), target.size());
+  if (length <= 0 || static_cast<std::size_t>(length) >= target.size())
+    return {};
+  target.resize(static_cast<std::size_t>(length));
+  return target;
 #endif
 }
 
@@ -757,289 +547,199 @@ std::string GetExeDirectory()
   return PathToString(StringToPath(GetExePath()).parent_path());
 }
 
-static std::string CreateSysDirectoryPath()
-{
-#define SYS_FOLDER_NAME "Sys"
-#if defined __APPLE__
-#define SYSDATA_DIR "Contents/Resources/" SYS_FOLDER_NAME
-#else
-#define SYSDATA_DIR DATA_DIR SYS_FOLDER_NAME
-#endif
-
-  std::string sys_directory;
-
-#if defined(__APPLE__)
-  sys_directory = GetBundleDirectory() + DIR_SEP SYSDATA_DIR DIR_SEP;
-#elif defined ANDROID
-  sys_directory = s_android_sys_directory + DIR_SEP;
-  ASSERT_MSG(COMMON, !s_android_sys_directory.empty(), "Sys directory has not been set");
-#else
-  const std::string local_sys_directory = GetExeDirectory() + DIR_SEP SYS_FOLDER_NAME DIR_SEP;
-  if (IsDirectory(local_sys_directory))
-    sys_directory = local_sys_directory;
-  else
-    sys_directory = SYSDATA_DIR DIR_SEP;
-
-#endif
-
-  INFO_LOG_FMT(COMMON, "CreateSysDirectoryPath: Setting to {}", sys_directory);
-  return sys_directory;
-}
-
 const std::string& GetSysDirectory()
 {
-  static const std::string sys_directory = CreateSysDirectoryPath();
+  static const std::string sys_directory = [] {
+    // Prefer a Sys folder next to the executable; otherwise the installed data directory.
+    std::string dir = GetExeDirectory() + DIR_SEP "Sys" DIR_SEP;
+#ifdef DATA_DIR
+    if (!IsDirectory(dir))
+      dir = DATA_DIR "Sys" DIR_SEP;
+#endif
+    INFO_LOG_FMT(COMMON, "CreateSysDirectoryPath: Setting to {}", dir);
+    return dir;
+  }();
   return sys_directory;
 }
 
-#ifdef ANDROID
-void SetSysDirectory(const std::string& path)
-{
-  INFO_LOG_FMT(COMMON, "Setting Sys directory to {}", path);
-  ASSERT_MSG(COMMON, s_android_sys_directory.empty(), "Sys directory already set to {}",
-             s_android_sys_directory);
-  s_android_sys_directory = path;
-}
+// ---- User paths ------------------------------------------------------------------------------
 
-void SetGpuDriverDirectories(const std::string& path, const std::string& lib_path)
+namespace
 {
-  INFO_LOG_FMT(COMMON, "Setting Driver directory to {} and library path to {}", path, lib_path);
-  ASSERT_MSG(COMMON, s_android_driver_directory.empty(), "Driver directory already set to {}",
-             s_android_driver_directory);
-  ASSERT_MSG(COMMON, s_android_lib_directory.empty(), "Library directory already set to {}",
-             s_android_lib_directory);
-  s_android_driver_directory = path;
-  s_android_lib_directory = lib_path;
-}
+std::array<std::string, NUM_PATH_INDICES> s_user_paths;
 
-const std::string GetGpuDriverDirectory(unsigned int dir_index)
+// How a path follows the one it is derived from.
+enum class Follows
 {
-  switch (dir_index)
+  // Recomputed whenever its base path is set or recomputed.
+  Base,
+  // Recomputed only when the whole user directory is set; setting the base alone leaves it
+  // alone (it typically has a separate configurable setting).
+  UserDirOnly,
+};
+
+struct DerivedPath
+{
+  int index;
+  int base;
+  const char* name;  // appended to the base path; directories get a trailing '/'
+  bool is_directory;
+  Follows follows;
+};
+
+// Ordered so that every base comes before the paths derived from it.
+constexpr DerivedPath DERIVED_PATHS[] = {
+    {D_GCUSER_IDX, D_USER_IDX, GC_USER_DIR, true, Follows::Base},
+    {D_WIIROOT_IDX, D_USER_IDX, WII_USER_DIR, true, Follows::Base},
+    {D_TRIUSER_IDX, D_USER_IDX, TRI_USER_DIR, true, Follows::Base},
+    {D_CONFIG_IDX, D_USER_IDX, CONFIG_DIR, true, Follows::Base},
+    {D_GAMESETTINGS_IDX, D_USER_IDX, GAMESETTINGS_DIR, true, Follows::Base},
+    {D_MAPS_IDX, D_USER_IDX, MAPS_DIR, true, Follows::Base},
+    {D_CACHE_IDX, D_USER_IDX, CACHE_DIR, true, Follows::Base},
+    {D_COVERCACHE_IDX, D_CACHE_IDX, COVERCACHE_DIR, true, Follows::Base},
+    {D_REDUMPCACHE_IDX, D_CACHE_IDX, REDUMPCACHE_DIR, true, Follows::Base},
+    {D_SHADERCACHE_IDX, D_CACHE_IDX, SHADERCACHE_DIR, true, Follows::Base},
+    {D_RETROACHIEVEMENTSCACHE_IDX, D_CACHE_IDX, RETROACHIEVEMENTSCACHE_DIR, true, Follows::Base},
+    {D_SHADERS_IDX, D_USER_IDX, SHADERS_DIR, true, Follows::Base},
+    {D_STATESAVES_IDX, D_USER_IDX, STATESAVES_DIR, true, Follows::Base},
+    {D_SCREENSHOTS_IDX, D_USER_IDX, SCREENSHOTS_DIR, true, Follows::Base},
+    {D_LOAD_IDX, D_USER_IDX, LOAD_DIR, true, Follows::Base},
+    {D_HIRESTEXTURES_IDX, D_LOAD_IDX, HIRES_TEXTURES_DIR, true, Follows::Base},
+    {D_RIIVOLUTION_IDX, D_LOAD_IDX, RIIVOLUTION_DIR, true, Follows::Base},
+    {D_DUMP_IDX, D_USER_IDX, DUMP_DIR, true, Follows::Base},
+    {D_DUMPFRAMES_IDX, D_DUMP_IDX, DUMP_FRAMES_DIR, true, Follows::Base},
+    {D_DUMPOBJECTS_IDX, D_DUMP_IDX, DUMP_OBJECTS_DIR, true, Follows::Base},
+    {D_DUMPAUDIO_IDX, D_DUMP_IDX, DUMP_AUDIO_DIR, true, Follows::Base},
+    {D_DUMPTEXTURES_IDX, D_DUMP_IDX, DUMP_TEXTURES_DIR, true, Follows::Base},
+    {D_DUMPDSP_IDX, D_DUMP_IDX, DUMP_DSP_DIR, true, Follows::Base},
+    {D_DUMPSSL_IDX, D_DUMP_IDX, DUMP_SSL_DIR, true, Follows::Base},
+    {D_DUMPDEBUG_IDX, D_DUMP_IDX, DUMP_DEBUG_DIR, true, Follows::Base},
+    {D_DUMPDEBUG_BRANCHWATCH_IDX, D_DUMPDEBUG_IDX, DUMP_DEBUG_BRANCHWATCH_DIR, true,
+     Follows::Base},
+    {D_DUMPDEBUG_JITBLOCKS_IDX, D_DUMPDEBUG_IDX, DUMP_DEBUG_JITBLOCKS_DIR, true, Follows::Base},
+    {D_LOGS_IDX, D_USER_IDX, LOGS_DIR, true, Follows::Base},
+    {D_THEMES_IDX, D_USER_IDX, THEMES_DIR, true, Follows::Base},
+    {D_STYLES_IDX, D_USER_IDX, STYLES_DIR, true, Follows::Base},
+    {D_PIPES_IDX, D_USER_IDX, PIPES_DIR, true, Follows::Base},
+    {D_WFSROOT_IDX, D_USER_IDX, WFSROOT_DIR, true, Follows::Base},
+    {D_BACKUP_IDX, D_USER_IDX, BACKUP_DIR, true, Follows::Base},
+    {D_RESOURCEPACK_IDX, D_USER_IDX, RESOURCEPACK_DIR, true, Follows::Base},
+    {D_DYNAMICINPUT_IDX, D_LOAD_IDX, DYNAMICINPUT_DIR, true, Follows::Base},
+    {D_GRAPHICSMOD_IDX, D_LOAD_IDX, GRAPHICSMOD_DIR, true, Follows::Base},
+    {D_BANNERS_WIIROOT_IDX, D_LOAD_IDX, WIIBANNERS_DIR, true, Follows::Base},
+    {D_FIRMWARE_IDX, D_LOAD_IDX, FIRMWARE_DIR, true, Follows::UserDirOnly},
+    {D_WIISYSCONF_IDX, D_WIIROOT_IDX, WII_SYSCONF_DIR, true, Follows::UserDirOnly},
+    {D_WIISDCARDSYNCFOLDER_IDX, D_LOAD_IDX, WIISDSYNC_DIR, true, Follows::UserDirOnly},
+
+    {F_DOLPHINCONFIG_IDX, D_CONFIG_IDX, DOLPHIN_CONFIG, false, Follows::Base},
+    {F_GCPADCONFIG_IDX, D_CONFIG_IDX, GCPAD_CONFIG, false, Follows::Base},
+    {F_WIIPADCONFIG_IDX, D_CONFIG_IDX, WIIPAD_CONFIG, false, Follows::Base},
+    {F_GCKEYBOARDCONFIG_IDX, D_CONFIG_IDX, GCKEYBOARD_CONFIG, false, Follows::Base},
+    {F_GFXCONFIG_IDX, D_CONFIG_IDX, GFX_CONFIG, false, Follows::Base},
+    {F_LOGGERCONFIG_IDX, D_CONFIG_IDX, LOGGER_CONFIG, false, Follows::Base},
+    {F_DUALSHOCKUDPCLIENTCONFIG_IDX, D_CONFIG_IDX, DUALSHOCKUDPCLIENT_CONFIG, false,
+     Follows::Base},
+    {F_FREELOOKCONFIG_IDX, D_CONFIG_IDX, FREELOOK_CONFIG, false, Follows::Base},
+    {F_RETROACHIEVEMENTSCONFIG_IDX, D_CONFIG_IDX, RETROACHIEVEMENTS_CONFIG, false, Follows::Base},
+    {F_MAINLOG_IDX, D_LOGS_IDX, MAIN_LOG, false, Follows::Base},
+    {F_MEM1DUMP_IDX, D_DUMP_IDX, MEM1_DUMP, false, Follows::Base},
+    {F_MEM2DUMP_IDX, D_DUMP_IDX, MEM2_DUMP, false, Follows::Base},
+    {F_ARAMDUMP_IDX, D_DUMP_IDX, ARAM_DUMP, false, Follows::Base},
+    {F_FAKEVMEMDUMP_IDX, D_DUMP_IDX, FAKEVMEM_DUMP, false, Follows::Base},
+    {F_GCSRAM_IDX, D_GCUSER_IDX, GC_SRAM, false, Follows::Base},
+    {F_WIISDCARDIMAGE_IDX, D_LOAD_IDX, WII_SD_CARD_IMAGE, false, Follows::UserDirOnly},
+    {F_WIISYSCONF_IDX, D_WIISYSCONF_IDX, WII_SYSCONF, false, Follows::UserDirOnly},
+
+    {D_MEMORYWATCHER_IDX, D_USER_IDX, MEMORYWATCHER_DIR, true, Follows::Base},
+    {F_MEMORYWATCHERLOCATIONS_IDX, D_MEMORYWATCHER_IDX, MEMORYWATCHER_LOCATIONS, false,
+     Follows::UserDirOnly},
+    {F_MEMORYWATCHERSOCKET_IDX, D_MEMORYWATCHER_IDX, MEMORYWATCHER_SOCKET, false,
+     Follows::UserDirOnly},
+
+    {D_GBAUSER_IDX, D_USER_IDX, GBA_USER_DIR, true, Follows::Base},
+    {D_GBASAVES_IDX, D_GBAUSER_IDX, GBASAVES_DIR, true, Follows::UserDirOnly},
+    {F_GBABIOS_IDX, D_GBAUSER_IDX, GBA_BIOS, false, Follows::UserDirOnly},
+
+    {D_ASM_ROOT_IDX, D_USER_IDX, ASSEMBLY_DIR, true, Follows::Base},
+};
+
+void RecomputeDerivedPaths(unsigned int changed)
+{
+  const bool whole_tree = changed == D_USER_IDX;
+  std::array<bool, NUM_PATH_INDICES> updated{};
+  updated[changed] = true;
+
+  for (const DerivedPath& rule : DERIVED_PATHS)
   {
-  case D_GPU_DRIVERS_EXTRACTED:
-    return s_android_driver_directory + DIR_SEP GPU_DRIVERS_EXTRACTED DIR_SEP;
-  case D_GPU_DRIVERS_TMP:
-    return s_android_driver_directory + DIR_SEP GPU_DRIVERS_TMP DIR_SEP;
-  case D_GPU_DRIVERS_HOOKS:
-    return s_android_lib_directory;
-  case D_GPU_DRIVERS_FILE_REDIRECT:
-    return s_android_driver_directory + DIR_SEP GPU_DRIVERS_FILE_REDIRECT DIR_SEP;
+    if (!updated[rule.base] || (!whole_tree && rule.follows != Follows::Base))
+      continue;
+    std::string path = s_user_paths[rule.base] + rule.name;
+    if (rule.is_directory)
+      path += DIR_SEP;
+    s_user_paths[rule.index] = std::move(path);
+    updated[rule.index] = true;
   }
-  return "";
-}
 
-#endif
-
-static std::string s_user_paths[NUM_PATH_INDICES];
-static void RebuildUserDirectories(unsigned int dir_index)
-{
-  switch (dir_index)
+  if (whole_tree)
   {
-  case D_USER_IDX:
-    s_user_paths[D_GCUSER_IDX] = s_user_paths[D_USER_IDX] + GC_USER_DIR DIR_SEP;
-    s_user_paths[D_WIIROOT_IDX] = s_user_paths[D_USER_IDX] + WII_USER_DIR DIR_SEP;
-    s_user_paths[D_TRIUSER_IDX] = s_user_paths[D_USER_IDX] + TRI_USER_DIR DIR_SEP;
-    s_user_paths[D_CONFIG_IDX] = s_user_paths[D_USER_IDX] + CONFIG_DIR DIR_SEP;
-    s_user_paths[D_GAMESETTINGS_IDX] = s_user_paths[D_USER_IDX] + GAMESETTINGS_DIR DIR_SEP;
-    s_user_paths[D_MAPS_IDX] = s_user_paths[D_USER_IDX] + MAPS_DIR DIR_SEP;
-    s_user_paths[D_CACHE_IDX] = s_user_paths[D_USER_IDX] + CACHE_DIR DIR_SEP;
-    s_user_paths[D_COVERCACHE_IDX] = s_user_paths[D_CACHE_IDX] + COVERCACHE_DIR DIR_SEP;
-    s_user_paths[D_REDUMPCACHE_IDX] = s_user_paths[D_CACHE_IDX] + REDUMPCACHE_DIR DIR_SEP;
-    s_user_paths[D_SHADERCACHE_IDX] = s_user_paths[D_CACHE_IDX] + SHADERCACHE_DIR DIR_SEP;
-    s_user_paths[D_RETROACHIEVEMENTSCACHE_IDX] =
-        s_user_paths[D_CACHE_IDX] + RETROACHIEVEMENTSCACHE_DIR DIR_SEP;
-    s_user_paths[D_SHADERS_IDX] = s_user_paths[D_USER_IDX] + SHADERS_DIR DIR_SEP;
-    s_user_paths[D_STATESAVES_IDX] = s_user_paths[D_USER_IDX] + STATESAVES_DIR DIR_SEP;
-    s_user_paths[D_SCREENSHOTS_IDX] = s_user_paths[D_USER_IDX] + SCREENSHOTS_DIR DIR_SEP;
-    s_user_paths[D_LOAD_IDX] = s_user_paths[D_USER_IDX] + LOAD_DIR DIR_SEP;
-    s_user_paths[D_HIRESTEXTURES_IDX] = s_user_paths[D_LOAD_IDX] + HIRES_TEXTURES_DIR DIR_SEP;
-    s_user_paths[D_RIIVOLUTION_IDX] = s_user_paths[D_LOAD_IDX] + RIIVOLUTION_DIR DIR_SEP;
-    s_user_paths[D_DUMP_IDX] = s_user_paths[D_USER_IDX] + DUMP_DIR DIR_SEP;
-    s_user_paths[D_DUMPFRAMES_IDX] = s_user_paths[D_DUMP_IDX] + DUMP_FRAMES_DIR DIR_SEP;
-    s_user_paths[D_DUMPOBJECTS_IDX] = s_user_paths[D_DUMP_IDX] + DUMP_OBJECTS_DIR DIR_SEP;
-    s_user_paths[D_DUMPAUDIO_IDX] = s_user_paths[D_DUMP_IDX] + DUMP_AUDIO_DIR DIR_SEP;
-    s_user_paths[D_DUMPTEXTURES_IDX] = s_user_paths[D_DUMP_IDX] + DUMP_TEXTURES_DIR DIR_SEP;
-    s_user_paths[D_DUMPDSP_IDX] = s_user_paths[D_DUMP_IDX] + DUMP_DSP_DIR DIR_SEP;
-    s_user_paths[D_DUMPSSL_IDX] = s_user_paths[D_DUMP_IDX] + DUMP_SSL_DIR DIR_SEP;
-    s_user_paths[D_DUMPDEBUG_IDX] = s_user_paths[D_DUMP_IDX] + DUMP_DEBUG_DIR DIR_SEP;
-    s_user_paths[D_DUMPDEBUG_BRANCHWATCH_IDX] =
-        s_user_paths[D_DUMPDEBUG_IDX] + DUMP_DEBUG_BRANCHWATCH_DIR DIR_SEP;
-    s_user_paths[D_DUMPDEBUG_JITBLOCKS_IDX] =
-        s_user_paths[D_DUMPDEBUG_IDX] + DUMP_DEBUG_JITBLOCKS_DIR DIR_SEP;
-    s_user_paths[D_LOGS_IDX] = s_user_paths[D_USER_IDX] + LOGS_DIR DIR_SEP;
-    s_user_paths[D_THEMES_IDX] = s_user_paths[D_USER_IDX] + THEMES_DIR DIR_SEP;
-    s_user_paths[D_STYLES_IDX] = s_user_paths[D_USER_IDX] + STYLES_DIR DIR_SEP;
-    s_user_paths[D_PIPES_IDX] = s_user_paths[D_USER_IDX] + PIPES_DIR DIR_SEP;
-    s_user_paths[D_WFSROOT_IDX] = s_user_paths[D_USER_IDX] + WFSROOT_DIR DIR_SEP;
-    s_user_paths[D_BACKUP_IDX] = s_user_paths[D_USER_IDX] + BACKUP_DIR DIR_SEP;
-    s_user_paths[D_RESOURCEPACK_IDX] = s_user_paths[D_USER_IDX] + RESOURCEPACK_DIR DIR_SEP;
-    s_user_paths[D_DYNAMICINPUT_IDX] = s_user_paths[D_LOAD_IDX] + DYNAMICINPUT_DIR DIR_SEP;
-    s_user_paths[D_GRAPHICSMOD_IDX] = s_user_paths[D_LOAD_IDX] + GRAPHICSMOD_DIR DIR_SEP;
-    s_user_paths[D_BANNERS_WIIROOT_IDX] = s_user_paths[D_LOAD_IDX] + WIIBANNERS_DIR DIR_SEP;
-    s_user_paths[D_FIRMWARE_IDX] = s_user_paths[D_LOAD_IDX] + FIRMWARE_DIR DIR_SEP;
-    s_user_paths[D_WIISYSCONF_IDX] = s_user_paths[D_WIIROOT_IDX] + WII_SYSCONF_DIR DIR_SEP;
-    s_user_paths[D_WIISDCARDSYNCFOLDER_IDX] = s_user_paths[D_LOAD_IDX] + WIISDSYNC_DIR DIR_SEP;
-    s_user_paths[F_DOLPHINCONFIG_IDX] = s_user_paths[D_CONFIG_IDX] + DOLPHIN_CONFIG;
-    s_user_paths[F_GCPADCONFIG_IDX] = s_user_paths[D_CONFIG_IDX] + GCPAD_CONFIG;
-    s_user_paths[F_WIIPADCONFIG_IDX] = s_user_paths[D_CONFIG_IDX] + WIIPAD_CONFIG;
-    s_user_paths[F_GCKEYBOARDCONFIG_IDX] = s_user_paths[D_CONFIG_IDX] + GCKEYBOARD_CONFIG;
-    s_user_paths[F_GFXCONFIG_IDX] = s_user_paths[D_CONFIG_IDX] + GFX_CONFIG;
-    s_user_paths[F_LOGGERCONFIG_IDX] = s_user_paths[D_CONFIG_IDX] + LOGGER_CONFIG;
-    s_user_paths[F_DUALSHOCKUDPCLIENTCONFIG_IDX] =
-        s_user_paths[D_CONFIG_IDX] + DUALSHOCKUDPCLIENT_CONFIG;
-    s_user_paths[F_FREELOOKCONFIG_IDX] = s_user_paths[D_CONFIG_IDX] + FREELOOK_CONFIG;
-    s_user_paths[F_RETROACHIEVEMENTSCONFIG_IDX] =
-        s_user_paths[D_CONFIG_IDX] + RETROACHIEVEMENTS_CONFIG;
-    s_user_paths[F_MAINLOG_IDX] = s_user_paths[D_LOGS_IDX] + MAIN_LOG;
-    s_user_paths[F_MEM1DUMP_IDX] = s_user_paths[D_DUMP_IDX] + MEM1_DUMP;
-    s_user_paths[F_MEM2DUMP_IDX] = s_user_paths[D_DUMP_IDX] + MEM2_DUMP;
-    s_user_paths[F_ARAMDUMP_IDX] = s_user_paths[D_DUMP_IDX] + ARAM_DUMP;
-    s_user_paths[F_FAKEVMEMDUMP_IDX] = s_user_paths[D_DUMP_IDX] + FAKEVMEM_DUMP;
-    s_user_paths[F_GCSRAM_IDX] = s_user_paths[D_GCUSER_IDX] + GC_SRAM;
-    s_user_paths[F_WIISDCARDIMAGE_IDX] = s_user_paths[D_LOAD_IDX] + WII_SD_CARD_IMAGE;
-    s_user_paths[F_WIISYSCONF_IDX] = s_user_paths[D_WIISYSCONF_IDX] + WII_SYSCONF;
-
-    s_user_paths[D_MEMORYWATCHER_IDX] = s_user_paths[D_USER_IDX] + MEMORYWATCHER_DIR DIR_SEP;
-    s_user_paths[F_MEMORYWATCHERLOCATIONS_IDX] =
-        s_user_paths[D_MEMORYWATCHER_IDX] + MEMORYWATCHER_LOCATIONS;
-    s_user_paths[F_MEMORYWATCHERSOCKET_IDX] =
-        s_user_paths[D_MEMORYWATCHER_IDX] + MEMORYWATCHER_SOCKET;
-
-    s_user_paths[D_GBAUSER_IDX] = s_user_paths[D_USER_IDX] + GBA_USER_DIR DIR_SEP;
-    s_user_paths[D_GBASAVES_IDX] = s_user_paths[D_GBAUSER_IDX] + GBASAVES_DIR DIR_SEP;
-    s_user_paths[F_GBABIOS_IDX] = s_user_paths[D_GBAUSER_IDX] + GBA_BIOS;
-
-    s_user_paths[D_ASM_ROOT_IDX] = s_user_paths[D_USER_IDX] + ASSEMBLY_DIR DIR_SEP;
-
-    // The shader cache has moved to the cache directory, so remove the old one.
-    // TODO: remove that someday.
-    File::DeleteDirRecursively(s_user_paths[D_USER_IDX] + SHADERCACHE_LEGACY_DIR DIR_SEP);
-    break;
-
-  case D_CONFIG_IDX:
-    s_user_paths[F_DOLPHINCONFIG_IDX] = s_user_paths[D_CONFIG_IDX] + DOLPHIN_CONFIG;
-    s_user_paths[F_GCPADCONFIG_IDX] = s_user_paths[D_CONFIG_IDX] + GCPAD_CONFIG;
-    s_user_paths[F_GCKEYBOARDCONFIG_IDX] = s_user_paths[D_CONFIG_IDX] + GCKEYBOARD_CONFIG;
-    s_user_paths[F_WIIPADCONFIG_IDX] = s_user_paths[D_CONFIG_IDX] + WIIPAD_CONFIG;
-    s_user_paths[F_GFXCONFIG_IDX] = s_user_paths[D_CONFIG_IDX] + GFX_CONFIG;
-    s_user_paths[F_LOGGERCONFIG_IDX] = s_user_paths[D_CONFIG_IDX] + LOGGER_CONFIG;
-    s_user_paths[F_DUALSHOCKUDPCLIENTCONFIG_IDX] =
-        s_user_paths[D_CONFIG_IDX] + DUALSHOCKUDPCLIENT_CONFIG;
-    s_user_paths[F_FREELOOKCONFIG_IDX] = s_user_paths[D_CONFIG_IDX] + FREELOOK_CONFIG;
-    s_user_paths[F_RETROACHIEVEMENTSCONFIG_IDX] =
-        s_user_paths[D_CONFIG_IDX] + RETROACHIEVEMENTS_CONFIG;
-    break;
-
-  case D_CACHE_IDX:
-    s_user_paths[D_COVERCACHE_IDX] = s_user_paths[D_CACHE_IDX] + COVERCACHE_DIR DIR_SEP;
-    s_user_paths[D_REDUMPCACHE_IDX] = s_user_paths[D_CACHE_IDX] + REDUMPCACHE_DIR DIR_SEP;
-    s_user_paths[D_SHADERCACHE_IDX] = s_user_paths[D_CACHE_IDX] + SHADERCACHE_DIR DIR_SEP;
-    s_user_paths[D_RETROACHIEVEMENTSCACHE_IDX] =
-        s_user_paths[D_CACHE_IDX] + RETROACHIEVEMENTSCACHE_DIR DIR_SEP;
-    break;
-
-  case D_GCUSER_IDX:
-    s_user_paths[F_GCSRAM_IDX] = s_user_paths[D_GCUSER_IDX] + GC_SRAM;
-    break;
-
-  case D_DUMP_IDX:
-    s_user_paths[D_DUMPFRAMES_IDX] = s_user_paths[D_DUMP_IDX] + DUMP_FRAMES_DIR DIR_SEP;
-    s_user_paths[D_DUMPOBJECTS_IDX] = s_user_paths[D_DUMP_IDX] + DUMP_OBJECTS_DIR DIR_SEP;
-    s_user_paths[D_DUMPAUDIO_IDX] = s_user_paths[D_DUMP_IDX] + DUMP_AUDIO_DIR DIR_SEP;
-    s_user_paths[D_DUMPTEXTURES_IDX] = s_user_paths[D_DUMP_IDX] + DUMP_TEXTURES_DIR DIR_SEP;
-    s_user_paths[D_DUMPDSP_IDX] = s_user_paths[D_DUMP_IDX] + DUMP_DSP_DIR DIR_SEP;
-    s_user_paths[D_DUMPSSL_IDX] = s_user_paths[D_DUMP_IDX] + DUMP_SSL_DIR DIR_SEP;
-    s_user_paths[D_DUMPDEBUG_IDX] = s_user_paths[D_DUMP_IDX] + DUMP_DEBUG_DIR DIR_SEP;
-    s_user_paths[D_DUMPDEBUG_BRANCHWATCH_IDX] =
-        s_user_paths[D_DUMPDEBUG_IDX] + DUMP_DEBUG_BRANCHWATCH_DIR DIR_SEP;
-    s_user_paths[D_DUMPDEBUG_JITBLOCKS_IDX] =
-        s_user_paths[D_DUMPDEBUG_IDX] + DUMP_DEBUG_JITBLOCKS_DIR DIR_SEP;
-    s_user_paths[F_MEM1DUMP_IDX] = s_user_paths[D_DUMP_IDX] + MEM1_DUMP;
-    s_user_paths[F_MEM2DUMP_IDX] = s_user_paths[D_DUMP_IDX] + MEM2_DUMP;
-    s_user_paths[F_ARAMDUMP_IDX] = s_user_paths[D_DUMP_IDX] + ARAM_DUMP;
-    s_user_paths[F_FAKEVMEMDUMP_IDX] = s_user_paths[D_DUMP_IDX] + FAKEVMEM_DUMP;
-    break;
-
-  case D_LOGS_IDX:
-    s_user_paths[F_MAINLOG_IDX] = s_user_paths[D_LOGS_IDX] + MAIN_LOG;
-    break;
-
-  case D_LOAD_IDX:
-    s_user_paths[D_HIRESTEXTURES_IDX] = s_user_paths[D_LOAD_IDX] + HIRES_TEXTURES_DIR DIR_SEP;
-    s_user_paths[D_RIIVOLUTION_IDX] = s_user_paths[D_LOAD_IDX] + RIIVOLUTION_DIR DIR_SEP;
-    s_user_paths[D_DYNAMICINPUT_IDX] = s_user_paths[D_LOAD_IDX] + DYNAMICINPUT_DIR DIR_SEP;
-    s_user_paths[D_GRAPHICSMOD_IDX] = s_user_paths[D_LOAD_IDX] + GRAPHICSMOD_DIR DIR_SEP;
-    s_user_paths[D_BANNERS_WIIROOT_IDX] = s_user_paths[D_LOAD_IDX] + WIIBANNERS_DIR DIR_SEP;
-    break;
+    // Shader caches used to live directly in the user directory; drop that old copy.
+    DeleteDirRecursively(s_user_paths[D_USER_IDX] + SHADERCACHE_LEGACY_DIR DIR_SEP);
   }
 }
+}  // namespace
 
-// Gets a set user directory path
-// Don't call prior to setting the base user directory
 const std::string& GetUserPath(unsigned int dir_index)
 {
   return s_user_paths[dir_index];
 }
 
-// Sets a user directory path
-// Rebuilds internal directory structure to compensate for the new directory
 void SetUserPath(unsigned int dir_index, std::string path)
 {
   if (path.empty())
     return;
 
 #ifdef _WIN32
-  // On Windows, replace all '\' with '/' since we assume the latter in various places in the
-  // codebase.
-  for (char& c : path)
-  {
-    if (c == '\\')
-      c = '/';
-  }
+  std::ranges::replace(path, '\\', '/');
 #endif
 
-  // Directories should end with a separator, files should not.
+  // Normalise the trailing separator: directories have exactly one, files none.
   while (path.ends_with('/'))
     path.pop_back();
   if (path.empty())
     return;
-  const bool is_directory = dir_index < FIRST_FILE_USER_PATH_IDX;
-  if (is_directory)
-    path.push_back('/');
+  if (dir_index < FIRST_FILE_USER_PATH_IDX)
+    path += '/';
 
   s_user_paths[dir_index] = std::move(path);
-  RebuildUserDirectories(dir_index);
+  RecomputeDerivedPaths(dir_index);
 }
 
 std::string GetThemeDir(const std::string& theme_name)
 {
-  std::string dir = File::GetUserPath(D_THEMES_IDX) + theme_name + "/";
-  if (Exists(dir))
-    return dir;
+  const std::string user_theme = GetUserPath(D_THEMES_IDX) + theme_name + "/";
+  if (Exists(user_theme))
+    return user_theme;
 
-  // If the theme doesn't exist in the user dir, load from shared directory
-  dir = GetSysDirectory() + THEMES_DIR "/" + theme_name + "/";
-  if (Exists(dir))
-    return dir;
+  const std::string bundled_theme = GetSysDirectory() + THEMES_DIR "/" + theme_name + "/";
+  if (Exists(bundled_theme))
+    return bundled_theme;
 
-  // If the theme doesn't exist at all, load the default theme
   return GetSysDirectory() + THEMES_DIR "/" DEFAULT_THEME_DIR "/";
 }
 
+// ---- Whole-file helpers ----------------------------------------------------------------------
+
 bool WriteStringToFile(const std::string& filename, std::string_view str)
 {
-  return File::IOFile(filename, "wb").WriteBytes(str.data(), str.size());
+  return IOFile(filename, "wb").WriteBytes(str.data(), str.size());
 }
 
 bool ReadFileToString(const std::string& filename, std::string& str)
 {
-  File::IOFile file(filename, "rb");
-
+  IOFile file(filename, "rb");
   if (!file)
     return false;
-
   str.resize(file.GetSize());
   return file.ReadArray(str.data(), str.size());
 }
-
 }  // namespace File

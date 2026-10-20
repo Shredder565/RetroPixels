@@ -1,27 +1,20 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/IOFile.h"
 
-#include <cstdio>
-#include <string>
+#include <cstdint>
+#include <utility>
 
 #ifdef _WIN32
 #include <io.h>
+#include <share.h>
 
-#include "Common/CommonFuncs.h"
 #include "Common/StringUtil.h"
 #else
 #include <unistd.h>
 #endif
 
-#ifdef ANDROID
-#include <algorithm>
-
-#include "jni/AndroidCommon/AndroidCommon.h"
-#endif
-
-#include "Common/CommonTypes.h"
+#include "Common/CommonFuncs.h"
 #include "Common/FileUtil.h"
 
 namespace File
@@ -50,6 +43,7 @@ IOFile::IOFile(IOFile&& other) noexcept : m_file(nullptr), m_good(true)
   Swap(other);
 }
 
+// Swapping hands our previous file to `other`, which closes it when it is destroyed.
 IOFile& IOFile::operator=(IOFile&& other) noexcept
 {
   Swap(other);
@@ -68,34 +62,30 @@ bool IOFile::Open(const std::string& filename, const char openmode[],
   Close();
 
 #ifdef _WIN32
-  if (sh == SharedAccess::Default)
+  const std::wstring wide_name = UTF8ToWString(filename);
+  const std::wstring wide_mode = UTF8ToWString(openmode);
+  if (sh == SharedAccess::Read)
   {
-    m_good = _tfopen_s(&m_file, UTF8ToTStr(filename).c_str(), UTF8ToTStr(openmode).c_str()) == 0;
+    m_file = _wfsopen(wide_name.c_str(), wide_mode.c_str(), _SH_DENYWR);
   }
-  else if (sh == SharedAccess::Read)
+  else
   {
-    m_file = _tfsopen(UTF8ToTStr(filename).c_str(), UTF8ToTStr(openmode).c_str(), SH_DENYWR);
-    m_good = m_file != nullptr;
+    if (_wfopen_s(&m_file, wide_name.c_str(), wide_mode.c_str()) != 0)
+      m_file = nullptr;
   }
 #else
-#ifdef ANDROID
-  if (IsPathAndroidContent(filename))
-    m_file = fdopen(OpenAndroidContent(filename, OpenModeToAndroid(openmode)), openmode);
-  else
+  m_file = std::fopen(filename.c_str(), openmode);
 #endif
-    m_file = std::fopen(filename.c_str(), openmode);
 
   m_good = m_file != nullptr;
-#endif
-
   return m_good;
 }
 
 bool IOFile::Close()
 {
-  if (!IsOpen() || 0 != std::fclose(m_file))
+  // Closing a file that is not open counts as a failure, like every other operation.
+  if (!IsOpen() || std::fclose(m_file) != 0)
     m_good = false;
-
   m_file = nullptr;
   return m_good;
 }
@@ -109,63 +99,58 @@ void IOFile::SetHandle(std::FILE* file)
 
 u64 IOFile::GetSize() const
 {
-  if (IsOpen())
-    return File::GetSize(m_file);
-  else
-    return 0;
+  return IsOpen() ? File::GetSize(m_file) : 0;
 }
 
 bool IOFile::Seek(s64 offset, SeekOrigin origin)
 {
-  int fseek_origin;
+  int whence;
   switch (origin)
   {
   case SeekOrigin::Begin:
-    fseek_origin = SEEK_SET;
+    whence = SEEK_SET;
     break;
   case SeekOrigin::Current:
-    fseek_origin = SEEK_CUR;
+    whence = SEEK_CUR;
     break;
   case SeekOrigin::End:
-    fseek_origin = SEEK_END;
+    whence = SEEK_END;
     break;
   default:
     return false;
   }
 
-  if (!IsOpen() || 0 != fseeko(m_file, offset, fseek_origin))
+  if (!IsOpen() || fseeko(m_file, offset, whence) != 0)
     m_good = false;
-
   return m_good;
 }
 
 u64 IOFile::Tell() const
 {
-  if (IsOpen())
-    return ftello(m_file);
-  else
-    return UINT64_MAX;
+  return IsOpen() ? static_cast<u64>(ftello(m_file)) : UINT64_MAX;
 }
 
 bool IOFile::Flush()
 {
-  if (!IsOpen() || 0 != std::fflush(m_file))
+  if (!IsOpen() || std::fflush(m_file) != 0)
     m_good = false;
-
   return m_good;
 }
 
 bool IOFile::Resize(u64 size)
 {
-#ifdef _WIN32
-  if (!IsOpen() || 0 != _chsize_s(_fileno(m_file), size))
-#else
-  // TODO: handle 64bit and growing
-  if (!IsOpen() || 0 != ftruncate(fileno(m_file), size))
-#endif
+  if (!IsOpen())
+  {
     m_good = false;
-
+    return false;
+  }
+#ifdef _WIN32
+  const bool ok = _chsize_s(_fileno(m_file), static_cast<__int64>(size)) == 0;
+#else
+  const bool ok = ftruncate(fileno(m_file), static_cast<off_t>(size)) == 0;
+#endif
+  if (!ok)
+    m_good = false;
   return m_good;
 }
-
 }  // namespace File
