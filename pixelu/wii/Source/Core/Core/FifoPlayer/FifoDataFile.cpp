@@ -347,15 +347,16 @@ std::unique_ptr<FifoDataFile> FifoDataFile::Load(const std::string& filename, bo
 
   // By the full load the sizes should match; playing back with different ones can't work.
   const Memory::MemoryManager& memory = Core::System::GetInstance().GetMemory();
-  if (header.mem1_size != memory.GetRamSizeReal() || header.mem2_size != memory.GetExRamSizeReal())
+  const u32 have_mem1 = memory.GetRamSizeReal();
+  const u32 have_mem2 = memory.GetExRamSizeReal();
+  if (header.mem1_size != have_mem1 || header.mem2_size != have_mem2)
   {
+    constexpr u32 MiB = 0x100000;
     CriticalAlertFmtT("Emulated memory size mismatch!\n"
                       "Current: MEM1 {0:08X} ({1} MiB), MEM2 {2:08X} ({3} MiB)\n"
                       "DFF: MEM1 {4:08X} ({5} MiB), MEM2 {6:08X} ({7} MiB)",
-                      memory.GetRamSizeReal(), memory.GetRamSizeReal() / 0x100000,
-                      memory.GetExRamSizeReal(), memory.GetExRamSizeReal() / 0x100000,
-                      header.mem1_size, header.mem1_size / 0x100000, header.mem2_size,
-                      header.mem2_size / 0x100000);
+                      have_mem1, have_mem1 / MiB, have_mem2, have_mem2 / MiB, header.mem1_size,
+                      header.mem1_size / MiB, header.mem2_size, header.mem2_size / MiB);
     return nullptr;
   }
 

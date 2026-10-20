@@ -330,11 +330,12 @@ void FifoPlayer::SetFrameRangeEnd(u32 end)
 
 CPU::State FifoPlayer::AdvanceFrame()
 {
-  if (m_CurrentFrame > m_FrameRangeEnd)
-  {
-    if (!m_Loop)
-      return CPU::State::PowerDown;
+  const bool past_end = m_CurrentFrame > m_FrameRangeEnd;
+  if (past_end && !m_Loop)
+    return CPU::State::PowerDown;
 
+  if (past_end)
+  {
     // Every pass over the range starts from the recorded GPU state, so all passes look alike.
     m_CurrentFrame = m_FrameRangeStart;
     LoadRegisters();
@@ -342,14 +343,16 @@ CPU::State FifoPlayer::AdvanceFrame()
     FlushWGP();
   }
 
-  if (m_FrameWrittenCb)
+  if (m_FrameWrittenCb != nullptr)
     m_FrameWrittenCb();
 
-  if (m_EarlyMemoryUpdates && m_CurrentFrame == m_FrameRangeStart)
+  const u32 frame = m_CurrentFrame;
+  const bool at_range_start = frame == m_FrameRangeStart;
+  if (at_range_start && m_EarlyMemoryUpdates)
     WriteAllMemoryUpdates();
 
-  WriteFrame(m_File->GetFrame(m_CurrentFrame), m_FrameInfo[m_CurrentFrame]);
-  ++m_CurrentFrame;
+  WriteFrame(m_File->GetFrame(frame), m_FrameInfo[frame]);
+  m_CurrentFrame = frame + 1;
   return CPU::State::Running;
 }
 
@@ -480,20 +483,31 @@ void FifoPlayer::LoadMemory()
   msr.DR = 1;
   ppc_state.msr.Hex = msr.Hex;
 
-  ppc_state.spr[SPR_IBAT0U] = 0x80001fff;
-  ppc_state.spr[SPR_IBAT0L] = 0x00000002;
-  ppc_state.spr[SPR_DBAT0U] = 0x80001fff;
-  ppc_state.spr[SPR_DBAT0L] = 0x00000002;
-  ppc_state.spr[SPR_DBAT1U] = 0xc0001fff;
-  ppc_state.spr[SPR_DBAT1L] = 0x0000002a;
+  struct BatValue
+  {
+    int spr;
+    u32 value;
+  };
+  // MEM1: cached at 0x80000000 (instruction and data), uncached at 0xC0000000 (data only).
+  static constexpr std::array<BatValue, 6> mem1_bats{{{SPR_IBAT0U, 0x80001fff},
+                                                      {SPR_IBAT0L, 0x00000002},
+                                                      {SPR_DBAT0U, 0x80001fff},
+                                                      {SPR_DBAT0L, 0x00000002},
+                                                      {SPR_DBAT1U, 0xc0001fff},
+                                                      {SPR_DBAT1L, 0x0000002a}}};
+  // MEM2: the same pair of views at 0x90000000 and 0xD0000000.
+  static constexpr std::array<BatValue, 6> mem2_bats{{{SPR_IBAT4U, 0x90001fff},
+                                                      {SPR_IBAT4L, 0x10000002},
+                                                      {SPR_DBAT4U, 0x90001fff},
+                                                      {SPR_DBAT4L, 0x10000002},
+                                                      {SPR_DBAT5U, 0xd0001fff},
+                                                      {SPR_DBAT5L, 0x1000002a}}};
+  for (const BatValue& bat : mem1_bats)
+    ppc_state.spr[bat.spr] = bat.value;
   if (m_File->GetIsWii())
   {
-    ppc_state.spr[SPR_IBAT4U] = 0x90001fff;
-    ppc_state.spr[SPR_IBAT4L] = 0x10000002;
-    ppc_state.spr[SPR_DBAT4U] = 0x90001fff;
-    ppc_state.spr[SPR_DBAT4L] = 0x10000002;
-    ppc_state.spr[SPR_DBAT5U] = 0xd0001fff;
-    ppc_state.spr[SPR_DBAT5L] = 0x1000002a;
+    for (const BatValue& bat : mem2_bats)
+      ppc_state.spr[bat.spr] = bat.value;
     // The upper BATs are only used with SBE set.
     HID4(ppc_state).SBE = 1;
   }
@@ -641,19 +655,15 @@ void FifoPlayer::ClearEfb()
 bool FifoPlayer::ShouldLoadBP(u8 address)
 {
   // Registers that trigger actions (or interrupts) rather than holding state.
-  switch (address)
-  {
-  case BPMEM_SETDRAWDONE:
-  case BPMEM_PE_TOKEN_ID:
-  case BPMEM_PE_TOKEN_INT_ID:
-  case BPMEM_TRIGGER_EFB_COPY:
-  case BPMEM_LOADTLUT1:
-  case BPMEM_PRELOAD_MODE:
-  case BPMEM_PERF1:
-    return false;
-  default:
-    return true;
-  }
+  static constexpr std::array<u8, 7> action_registers{BPMEM_SETDRAWDONE,
+                                                      BPMEM_PE_TOKEN_ID,
+                                                      BPMEM_PE_TOKEN_INT_ID,
+                                                      BPMEM_TRIGGER_EFB_COPY,
+                                                      BPMEM_LOADTLUT1,
+                                                      BPMEM_PRELOAD_MODE,
+                                                      BPMEM_PERF1};
+  return std::find(action_registers.begin(), action_registers.end(), address) ==
+         action_registers.end();
 }
 
 bool FifoPlayer::ShouldLoadXF(u8 reg)
