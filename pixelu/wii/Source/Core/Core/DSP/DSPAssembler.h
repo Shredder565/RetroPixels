@@ -1,9 +1,11 @@
-// Copyright 2009 Dolphin Emulator Project
-// Copyright 2005 Duddie
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// A two-pass assembler for the GameCube/Wii audio DSP. Pass one sizes the
+// program and collects labels; pass two emits the words.
 
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <map>
 #include <optional>
@@ -49,18 +51,16 @@ enum class AssemblerError
   PCOutOfRange,
 };
 
-// Unless you want labels to carry over between files, you probably
-// want to create a new DSPAssembler for every file you assemble.
+// Labels persist for the lifetime of the object (they are rebuilt at the start of
+// every Assemble call), as does the include directory set with INCDIR.
 class DSPAssembler
 {
 public:
   explicit DSPAssembler(const AssemblerSettings& settings);
   ~DSPAssembler();
 
-  // line_numbers is optional (and not yet implemented). It'll receive a list of ints,
-  // one for each word of code, indicating the source assembler code line number it came from.
-
-  // If returns false, call GetErrorString to get some text to present to the user.
+  // On failure, GetErrorString describes the last error. line_numbers, if given,
+  // is cleared; per-word line numbers are not produced.
   bool Assemble(const std::string& text, std::vector<u16>& code,
                 std::vector<int>* line_numbers = nullptr);
 
@@ -68,19 +68,23 @@ public:
   AssemblerError GetError() const { return m_last_error; }
 
 private:
-  struct param_t
-  {
-    u32 val;
-    partype_t type;
-    char* str;
-  };
+  static constexpr size_t MAX_OPERANDS = 10;
+  static constexpr size_t LINE_BUFFER_SIZE = 1024;
 
-  enum segment_t
+  struct Operand
   {
-    SEGMENT_CODE = 0,
-    SEGMENT_DATA,
-    SEGMENT_OVERLAY,
-    SEGMENT_MAX
+    u32 value = 0;
+    partype_t kind = P_NONE;
+    std::string text;  // for string operands
+  };
+  using OperandList = std::array<Operand, MAX_OPERANDS>;
+
+  enum class Segment
+  {
+    Code,
+    Data,
+    Overlay,
+    Count,
   };
 
   enum class OpcodeType
@@ -89,58 +93,58 @@ private:
     Extension
   };
 
-  struct LocationContext
+  // Where in the source the assembler is, for messages.
+  struct SourcePosition
   {
     u32 line_num = 0;
     std::string line_text;
     std::optional<OpcodeType> opcode_type;
-    std::optional<size_t> opcode_param_number;
-    std::optional<std::string> included_file_path;
+    std::optional<size_t> operand_number;
+    std::optional<std::string> include_path;
   };
 
-  friend struct ::fmt::formatter<DSP::DSPAssembler::LocationContext>;
+  bool RunPass(const std::string& text, int pass);
+  void StartPass(int pass);
+  bool HandleDirective(const char* name, const OperandList& operands, int pass);
 
-  // Utility functions
-  s32 ParseValue(const char* str);
-  u32 ParseExpression(const char* ptr);
+  u32 ParseOperands(char* text, OperandList& operands);
+  u32 EvaluateExpression(std::string expression);
+  u32 EvaluateTerm(const std::string& term);
+  std::optional<std::string> ExtractBracketGroup(std::string& expression, std::string& inner);
 
-  u32 GetParams(char* parstr, param_t* par);
+  const DSPOPCTemplate* LookUpOpcode(std::string name, size_t operand_count, OpcodeType type);
+  void CheckOperands(const DSPOPCTemplate& op, const OperandList& operands, size_t count);
+  void CheckRegisterOperand(const param2_t& field, const Operand& operand);
+  void CheckNumberRange(const param2_t& field, const Operand& operand);
+  void Encode(const DSPOPCTemplate& op, const OperandList& operands, size_t count);
 
-  void InitPass(int pass);
-  bool AssemblePass(const std::string& text, int pass);
-
-  void ShowError(AssemblerError err_code);
+  std::string DescribePosition() const;
+  void Fail(AssemblerError error);
   template <typename... Args>
-  void ShowError(AssemblerError err_code, fmt::format_string<Args...> format, Args&&... args);
+  void Fail(AssemblerError error, fmt::format_string<Args...> format, Args&&... args);
   template <typename... Args>
-  void ShowWarning(fmt::format_string<Args...> format, Args&&... args);
+  void Warn(fmt::format_string<Args...> format, Args&&... args);
+  void RecordError(AssemblerError error, const std::optional<std::string>& detail);
 
-  char* FindBrackets(char* src, char* dst);
-  const DSPOPCTemplate* FindOpcode(std::string name, size_t par_count, OpcodeType type);
-  bool VerifyParams(const DSPOPCTemplate* opc, param_t* par, size_t count, OpcodeType type);
-  void BuildCode(const DSPOPCTemplate* opc, param_t* par, u32 par_count, u16* outbuf);
+  const AssemblerSettings m_settings;
 
   std::vector<u16> m_output_buffer;
-
   std::string m_include_dir;
 
   u32 m_cur_addr = 0;
   int m_total_size = 0;
-  u8 m_cur_pass = 0;
+  int m_cur_pass = 0;
 
   LabelMap m_labels;
+  std::map<std::string, std::string> m_aliases;
+
+  Segment m_cur_segment = Segment::Code;
+  std::array<u32, static_cast<size_t>(Segment::Count)> m_segment_addr{};
 
   bool m_failed = false;
   std::string m_last_error_str;
   AssemblerError m_last_error = AssemblerError::OK;
 
-  using AliasMap = std::map<std::string, std::string>;
-  AliasMap m_aliases;
-
-  segment_t m_cur_segment = SEGMENT_CODE;
-  u32 m_segment_addr[SEGMENT_MAX] = {};
-  const AssemblerSettings m_settings;
-
-  LocationContext m_location;
+  SourcePosition m_position;
 };
 }  // namespace DSP

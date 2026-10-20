@@ -1,17 +1,16 @@
-// Copyright 2009 Dolphin Emulator Project
-// Copyright 2005 Duddie, wntrmute, Hermes
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/DSP/DSPAssembler.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
-#include <map>
+#include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -24,68 +23,202 @@
 #include "Core/DSP/DSPDisassembler.h"
 #include "Core/DSP/DSPTables.h"
 
-template <>
-struct fmt::formatter<DSP::DSPAssembler::LocationContext>
-{
-  constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
-  template <typename FormatContext>
-  auto format(const DSP::DSPAssembler::LocationContext& loc, FormatContext& ctx) const
-  {
-    // Trim trailing newlines
-    // TODO: Ideally, we shouldn't be getting any newlines at all here, but
-    // DSPTool uses File::ReadFileToString, which opens the file in binary mode,
-    // so we get \r endings on Windows.  This leads to bad results when printing the string.
-    std::string trimmed_line = loc.line_text;
-    // while (trimmed_line.ends_with('\r') || trimmed_line.ends_with('\n'))
-    while (!trimmed_line.empty() && (trimmed_line.back() == '\r' || trimmed_line.back() == '\n'))
-      trimmed_line.pop_back();
-
-    auto out = fmt::format_to(ctx.out(), "At line {}", loc.line_num);
-
-    if (loc.included_file_path.has_value())
-      out = fmt::format_to(out, " of included file {}", loc.included_file_path.value());
-
-    if (loc.opcode_type.has_value())
-    {
-      if (loc.opcode_type.value() == DSP::DSPAssembler::OpcodeType::Primary)
-        out = fmt::format_to(out, ", main opcode");
-      else if (loc.opcode_type.value() == DSP::DSPAssembler::OpcodeType::Extension)
-        out = fmt::format_to(out, ", extension opcode");
-
-      if (loc.opcode_param_number.has_value())
-        out = fmt::format_to(out, " parameter {}", loc.opcode_param_number.value());
-    }
-
-    return fmt::format_to(out, ":\n{}", trimmed_line);
-  }
-};
-
 namespace DSP
 {
-static const char* err_string[] = {"",
-                                   "Unknown Error",
-                                   "Unknown opcode",
-                                   "Not enough parameters",
-                                   "Too many parameters",
-                                   "Wrong parameter",
-                                   "Expected parameter of type 'string'",
-                                   "Expected parameter of type 'value'",
-                                   "Expected parameter of type 'register'",
-                                   "Expected parameter of type 'memory pointer'",
-                                   "Expected parameter of type 'immediate'",
-                                   "Incorrect binary value",
-                                   "Incorrect hexadecimal value",
-                                   "Incorrect decimal value",
-                                   "Label already exists",
-                                   "Label not defined",
-                                   "No matching brackets",
-                                   "This opcode cannot be extended",
-                                   "Given extending params for non extensible opcode",
-                                   "Wrong parameter: must be accumulator register",
-                                   "Wrong parameter: must be mid accumulator register",
-                                   "Invalid register",
-                                   "Number out of range",
-                                   "Program counter out of range"};
+namespace
+{
+// Indexed by AssemblerError.
+constexpr std::array<const char*, 24> ERROR_TEXT = {
+    "",
+    "Unknown Error",
+    "Unknown opcode",
+    "Not enough parameters",
+    "Too many parameters",
+    "Wrong parameter",
+    "Expected parameter of type 'string'",
+    "Expected parameter of type 'value'",
+    "Expected parameter of type 'register'",
+    "Expected parameter of type 'memory pointer'",
+    "Expected parameter of type 'immediate'",
+    "Incorrect binary value",
+    "Incorrect hexadecimal value",
+    "Incorrect decimal value",
+    "Label already exists",
+    "Label not defined",
+    "No matching brackets",
+    "This opcode cannot be extended",
+    "Given extending params for non extensible opcode",
+    "Wrong parameter: must be accumulator register",
+    "Wrong parameter: must be mid accumulator register",
+    "Invalid register",
+    "Number out of range",
+    "Program counter out of range",
+};
+
+// Splits a mutable C string into tokens the way the C library's strtok does: runs of
+// delimiters are skipped, the delimiter ending a token is overwritten with a NUL, and
+// an empty delimiter set yields the whole remainder. Restarting with a new string
+// abandons the old one.
+class Tokenizer
+{
+public:
+  char* Next(char* start, std::string_view delimiters)
+  {
+    char* p = start != nullptr ? start : m_rest;
+    if (p == nullptr)
+      return nullptr;
+
+    while (*p != '\0' && IsDelimiter(*p, delimiters))
+      ++p;
+    if (*p == '\0')
+    {
+      m_rest = p;
+      return nullptr;
+    }
+
+    char* const token = p;
+    while (*p != '\0' && !IsDelimiter(*p, delimiters))
+      ++p;
+    if (*p != '\0')
+      *p++ = '\0';
+    m_rest = p;
+    return token;
+  }
+
+private:
+  static bool IsDelimiter(char c, std::string_view delimiters)
+  {
+    return delimiters.find(c) != std::string_view::npos;
+  }
+
+  char* m_rest = nullptr;
+};
+
+char* SkipSpaces(char* text)
+{
+  while (*text == ' ')
+    ++text;
+  return text;
+}
+
+bool IsDecimalDigit(char c)
+{
+  return c >= '0' && c <= '9';
+}
+
+bool IsUpperOrUnderscore(char c)
+{
+  return (c >= 'A' && c <= 'Z') || c == '_';
+}
+
+// Label names (the text before a ':') are [A-Z_][0-9A-Z_]*. An empty one is
+// accepted; it simply defines nothing.
+bool IsLabelName(std::string_view name)
+{
+  if (!name.empty() && !IsUpperOrUnderscore(name.front()))
+    return false;
+  return std::ranges::all_of(name, [](char c) { return IsUpperOrUnderscore(c) || IsDecimalDigit(c); });
+}
+
+// The value of c as a digit of the given base, or -1.
+int DigitValue(char c, u32 base)
+{
+  int value = -1;
+  if (IsDecimalDigit(c))
+    value = c - '0';
+  else if (c >= 'a' && c <= 'f')
+    value = c - 'a' + 10;
+  else if (c >= 'A' && c <= 'F')
+    value = c - 'A' + 10;
+  return value >= 0 && static_cast<u32>(value) < base ? value : -1;
+}
+
+// Prepares one source line in place: strips // and /* */ comments (the latter may
+// span lines, tracked by in_comment), cuts the line at ';' or a line break, turns
+// tabs into spaces and upper-cases everything outside double quotes.
+void NormalizeLine(char* line, size_t size, bool& in_comment)
+{
+  bool upper = true;
+  for (size_t i = 0; i < size; ++i)
+  {
+    char c = line[i];
+    const char next = i + 1 < size ? line[i + 1] : '\0';
+
+    if (c == '/' && next == '/')
+    {
+      c = '\0';
+    }
+    else if (c == '/' && next == '*')
+    {
+      in_comment = !in_comment;
+    }
+    else if (c == '*' && next == '/' && in_comment)
+    {
+      in_comment = false;
+      c = ' ';
+      line[i + 1] = ' ';
+    }
+
+    if (in_comment && static_cast<unsigned char>(c) > ' ')
+      c = ' ';
+
+    switch (c)
+    {
+    case '\r':
+    case '\n':
+    case ';':
+      c = '\0';
+      break;
+    case '\t':
+      c = ' ';
+      break;
+    case '"':
+      upper = !upper;
+      break;
+    default:
+      break;
+    }
+    if (upper && c >= 'a' && c <= 'z')
+      c = static_cast<char>(c - 'a' + 'A');
+
+    line[i] = c;
+    if (c == '\0')
+      return;
+  }
+}
+
+// The field mask with its trailing zero bits removed: the largest value the field holds.
+int MaskShiftedDown(u16 mask)
+{
+  if (mask == 0)
+    return 0;
+  while ((mask & 1) == 0)
+    mask = static_cast<u16>(mask >> 1);
+  return mask;
+}
+
+enum class AccumulatorPart
+{
+  Whole,
+  Middle,
+  Low,
+  Other,
+};
+
+AccumulatorPart ClassifyAccumulator(int reg)
+{
+  if (reg >= DSP_REG_ACC0_FULL && reg <= DSP_REG_ACC1_FULL)
+    return AccumulatorPart::Whole;
+  if (reg >= DSP_REG_ACM0 && reg <= DSP_REG_ACM1)
+    return AccumulatorPart::Middle;
+  if (reg >= DSP_REG_ACL0 && reg <= DSP_REG_ACL1)
+    return AccumulatorPart::Low;
+  return AccumulatorPart::Other;
+}
+
+// Stands in for operand slots past the end of a template's parameter list.
+constexpr param2_t NO_FIELD{};
+}  // namespace
 
 DSPAssembler::DSPAssembler(const AssemblerSettings& settings) : m_settings(settings)
 {
@@ -96,956 +229,763 @@ DSPAssembler::~DSPAssembler() = default;
 bool DSPAssembler::Assemble(const std::string& text, std::vector<u16>& code,
                             std::vector<int>* line_numbers)
 {
-  if (line_numbers)
+  if (line_numbers != nullptr)
     line_numbers->clear();
-  InitPass(1);
-  if (!AssemblePass(text, 1))
-    return false;
 
-  // We now have the size of the output buffer
+  StartPass(1);
+  if (!RunPass(text, 1))
+    return false;
   if (m_total_size <= 0)
     return false;
 
-  m_output_buffer.resize(m_total_size);
+  // Words that no instruction writes keep whatever the buffer held.
+  m_output_buffer.resize(static_cast<size_t>(m_total_size));
 
-  InitPass(2);
-  if (!AssemblePass(text, 2))
+  StartPass(2);
+  if (!RunPass(text, 2))
     return false;
 
   code = std::move(m_output_buffer);
-  m_output_buffer.clear();
-  m_output_buffer.shrink_to_fit();
+  m_output_buffer = {};
 
   m_last_error_str = "(no errors)";
   m_last_error = AssemblerError::OK;
-
   return true;
 }
 
-void DSPAssembler::ShowError(AssemblerError err_code)
+// ---------------------------------------------------------------------------
+// Messages
+
+std::string DSPAssembler::DescribePosition() const
+{
+  std::string line = m_position.line_text;
+  while (!line.empty() && (line.back() == '\r' || line.back() == '\n'))
+    line.pop_back();
+
+  std::string text = fmt::format("At line {}", m_position.line_num);
+  if (m_position.include_path)
+    text += fmt::format(" of included file {}", *m_position.include_path);
+  if (m_position.opcode_type)
+  {
+    text += *m_position.opcode_type == OpcodeType::Primary ? ", main opcode" : ", extension opcode";
+    if (m_position.operand_number)
+      text += fmt::format(" parameter {}", *m_position.operand_number);
+  }
+  text += ":\n";
+  text += line;
+  return text;
+}
+
+void DSPAssembler::RecordError(AssemblerError error, const std::optional<std::string>& detail)
 {
   if (!m_settings.force)
     m_failed = true;
 
-  m_last_error_str =
-      fmt::format("{}\nERROR: {}\n\n", m_location, err_string[static_cast<size_t>(err_code)]);
+  const char* const what = ERROR_TEXT[static_cast<size_t>(error)];
+  m_last_error_str = detail ? fmt::format("{}\nERROR: {}: {}\n\n", DescribePosition(), what, *detail) :
+                              fmt::format("{}\nERROR: {}\n\n", DescribePosition(), what);
   fmt::print(stderr, "{}", m_last_error_str);
-  m_last_error = err_code;
+  m_last_error = error;
+}
+
+void DSPAssembler::Fail(AssemblerError error)
+{
+  RecordError(error, std::nullopt);
 }
 
 template <typename... Args>
-void DSPAssembler::ShowError(AssemblerError err_code, fmt::format_string<Args...> format,
-                             Args&&... args)
+void DSPAssembler::Fail(AssemblerError error, fmt::format_string<Args...> format, Args&&... args)
 {
-  if (!m_settings.force)
-    m_failed = true;
-
-  const auto msg = fmt::format(format, std::forward<Args>(args)...);
-
-  m_last_error_str = fmt::format("{}\nERROR: {}: {}\n\n", m_location,
-                                 err_string[static_cast<size_t>(err_code)], msg);
-  fmt::print(stderr, "{}", m_last_error_str);
-  m_last_error = err_code;
+  RecordError(error, fmt::format(format, std::forward<Args>(args)...));
 }
 
 template <typename... Args>
-void DSPAssembler::ShowWarning(fmt::format_string<Args...> format, Args&&... args)
+void DSPAssembler::Warn(fmt::format_string<Args...> format, Args&&... args)
 {
-  const auto msg = fmt::format(format, std::forward<Args>(args)...);
-  fmt::print(stderr, "{}\nWARNING: {}\n\n", m_location, msg);
+  fmt::print(stderr, "{}\nWARNING: {}\n\n", DescribePosition(),
+             fmt::format(format, std::forward<Args>(args)...));
 }
 
-static char* skip_spaces(char* ptr)
-{
-  while (*ptr == ' ')
-    ptr++;
-  return ptr;
-}
+// ---------------------------------------------------------------------------
+// Expressions
+//
+// The evaluator works on text. Parenthesised groups are evaluated first and
+// replaced by their decimal value; then the expression is split at the first
+// '+', or failing that the first '-', '*', '/', '|' or '&' (in that order), and
+// both sides are evaluated recursively, left side first. All arithmetic is on
+// 32-bit unsigned values.
 
-// Parse a standalone value - it can be a number in one of several formats or a label.
-s32 DSPAssembler::ParseValue(const char* str)
+u32 DSPAssembler::EvaluateTerm(const std::string& term)
 {
-  bool negative = false;
-  s32 val = 0;
-  const char* ptr = str;
+  const auto char_at = [&term](size_t i) { return i < term.size() ? term[i] : '\0'; };
 
-  if (ptr[0] == '#')
+  size_t pos = 0;
+  bool negate = false;
+  if (char_at(pos) == '#')
   {
-    ptr++;
-    negative = true;  // Wow! Double # (needed one to get in here) negates???
+    ++pos;
+    negate = true;
   }
-  if (ptr[0] == '-')
+  if (char_at(pos) == '-')
   {
-    ptr++;
-    negative = true;
+    ++pos;
+    negate = true;
   }
-  if (ptr[0] == '0')
+
+  u32 value = 0;
+  const auto read_digits = [&](size_t from, u32 base, AssemblerError error) {
+    for (size_t i = from; i < term.size(); ++i)
+    {
+      value *= base;
+      const int digit = DigitValue(term[i], base);
+      if (digit >= 0)
+        value += static_cast<u32>(digit);
+      else
+        Fail(error, "{}", term);
+    }
+  };
+
+  const char first = char_at(pos);
+  const char second = char_at(pos + 1);
+  if (first == '0' && !IsDecimalDigit(second))
   {
-    if (ptr[1] >= '0' && ptr[1] <= '9')
-    {
-      for (int i = 0; ptr[i] != 0; i++)
-      {
-        val *= 10;
-        if (ptr[i] >= '0' && ptr[i] <= '9')
-          val += ptr[i] - '0';
-        else
-          ShowError(AssemblerError::IncorrectDecimal, "{}", str);
-      }
-    }
-    else
-    {
-      switch (ptr[1])
-      {
-      case 'X':  // hex
-        for (int i = 2; ptr[i] != 0; i++)
-        {
-          val <<= 4;
-          if (ptr[i] >= 'a' && ptr[i] <= 'f')
-            val += (ptr[i] - 'a' + 10);
-          else if (ptr[i] >= 'A' && ptr[i] <= 'F')
-            val += (ptr[i] - 'A' + 10);
-          else if (ptr[i] >= '0' && ptr[i] <= '9')
-            val += (ptr[i] - '0');
-          else
-            ShowError(AssemblerError::IncorrectHex, "{}", str);
-        }
-        break;
-      case '\'':  // binary
-        for (int i = 2; ptr[i] != 0; i++)
-        {
-          val *= 2;
-          if (ptr[i] >= '0' && ptr[i] <= '1')
-            val += ptr[i] - '0';
-          else
-            ShowError(AssemblerError::IncorrectBinary, "{}", str);
-        }
-        break;
-      default:
-        // value is 0 or error
-        val = 0;
-        break;
-      }
-    }
+    // "0X..." is hexadecimal and "0'..." binary; any other "0..." is just zero.
+    if (second == 'X')
+      read_digits(pos + 2, 16, AssemblerError::IncorrectHex);
+    else if (second == '\'')
+      read_digits(pos + 2, 2, AssemblerError::IncorrectBinary);
+  }
+  else if (IsDecimalDigit(first))
+  {
+    read_digits(pos, 10, AssemblerError::IncorrectDecimal);
   }
   else
   {
-    // Symbol starts with a digit - it's a dec number.
-    if (ptr[0] >= '0' && ptr[0] <= '9')
+    // A label. Its value is used as is: a leading sign does not apply to it.
+    if (const std::optional<u16> label_value =
+            m_labels.GetLabelValue(std::string_view(term).substr(pos)))
     {
-      for (int i = 0; ptr[i] != 0; i++)
-      {
-        val *= 10;
-        if (ptr[i] >= '0' && ptr[i] <= '9')
-          val += ptr[i] - '0';
-        else
-          ShowError(AssemblerError::IncorrectDecimal, "{}", str);
-      }
+      return *label_value;
     }
-    else  // Everything else is a label.
-    {
-      // Lookup label
-      if (const std::optional<u16> value = m_labels.GetLabelValue(ptr))
-        return *value;
-
-      if (m_cur_pass == 2)
-        ShowError(AssemblerError::UnknownLabel, "{}", str);
-    }
+    // Forward references are fine in the first pass.
+    if (m_cur_pass == 2)
+      Fail(AssemblerError::UnknownLabel, "{}", term);
   }
-  if (negative)
-    return -val;
-  return val;
+
+  return negate ? 0u - value : value;
 }
 
-// This function splits the given src string into three parts:
-// - Text before the first opening ('(') parenthesis
-// - Text within the first and last opening ('(') and closing (')') parentheses.
-// - If text follows after these parentheses, then this is what is returned from the function.
-//
-// Note that the first opening parenthesis and the last closing parenthesis are discarded from the
-// string.
-// For example: Say "Test (string) 1234" is the string passed in as src.
-//
-// - src will become "Test "
-// - dst will become "string"
-// - Returned string from the function will be " 1234"
-//
-char* DSPAssembler::FindBrackets(char* src, char* dst)
+// Finds the first parenthesised group. When there is one, expression is cut down
+// to the text before it, inner receives the text inside and the text after it is
+// returned. A ')' seen before any '(' is kept as part of the group's text.
+std::optional<std::string> DSPAssembler::ExtractBracketGroup(std::string& expression,
+                                                             std::string& inner)
 {
-  s32 len = (s32)strlen(src);
-  s32 first = -1;
-  s32 count = 0;
-  s32 i, j;
-  j = 0;
-  for (i = 0; i < len; i++)
+  std::optional<size_t> open_at;
+  int depth = 0;
+  for (size_t i = 0; i < expression.size(); ++i)
   {
-    if (src[i] == '(')
+    const char c = expression[i];
+    if (c == '(' && !open_at)
     {
-      if (first < 0)
+      open_at = i;
+      depth = 1;
+      continue;
+    }
+    if (c == '(')
+    {
+      ++depth;
+    }
+    else if (c == ')')
+    {
+      if (--depth == 0)
       {
-        count = 1;
-        src[i] = 0x0;
-        first = i;
-      }
-      else
-      {
-        count++;
-        dst[j++] = src[i];
+        std::string after = expression.substr(i + 1);
+        expression.resize(*open_at);
+        return after;
       }
     }
-    else if (src[i] == ')')
+    else if (!open_at)
     {
-      if (--count == 0)
-      {
-        dst[j] = 0;
-        return &src[i + 1];
-      }
-      else
-      {
-        dst[j++] = src[i];
-      }
+      continue;
     }
-    else
-    {
-      if (first >= 0)
-        dst[j++] = src[i];
-    }
+    inner += c;
   }
-  if (count)
-    ShowError(AssemblerError::NoMatchingBrackets);
-  return nullptr;
+
+  // An unclosed group still cuts the expression short.
+  if (open_at)
+    expression.resize(*open_at);
+  if (depth != 0)
+    Fail(AssemblerError::NoMatchingBrackets);
+  return std::nullopt;
 }
 
-// Bizarre in-place expression evaluator.
-u32 DSPAssembler::ParseExpression(const char* ptr)
+u32 DSPAssembler::EvaluateExpression(std::string expression)
 {
-  char* pbuf;
-  s32 val = 0;
-
-  char* d_buffer = (char*)malloc(1024);
-  char* s_buffer = (char*)malloc(1024);
-  strcpy(s_buffer, ptr);
-
-  while ((pbuf = FindBrackets(s_buffer, d_buffer)) != nullptr)
+  std::string inner;
+  while (const std::optional<std::string> after = ExtractBracketGroup(expression, inner))
   {
-    val = ParseExpression(d_buffer);
-    sprintf(d_buffer, "%s%d%s", s_buffer, val, pbuf);
-    strcpy(s_buffer, d_buffer);
+    const u32 group_value = EvaluateExpression(inner);
+    expression += fmt::format("{}", static_cast<s32>(group_value));
+    expression += *after;
+    inner.clear();
   }
 
-  int j = 0;
-  for (int i = 0; i < ((s32)strlen(s_buffer) + 1); i++)
+  std::erase(expression, ' ');
+
+  // A '-' that cannot be a subtraction is a sign; mark it so the split below skips it.
+  for (size_t i = 0; i < expression.size(); ++i)
   {
-    char c = s_buffer[i];
-    if (c != ' ')
-      d_buffer[j++] = c;
+    if (expression[i] != '-')
+      continue;
+    const char before = i == 0 ? '\0' : expression[i - 1];
+    if (i == 0 || before == '/' || before == '%' || before == '*')
+      expression[i] = '#';
   }
 
-  for (int i = 0; i < ((s32)strlen(d_buffer) + 1); i++)
+  for (const char op : {'+', '-', '*', '/', '|', '&'})
   {
-    char c = d_buffer[i];
-    if (c == '-')
+    const size_t at = expression.find(op);
+    if (at == std::string::npos)
+      continue;
+
+    const u32 lhs = EvaluateExpression(expression.substr(0, at));
+    const u32 rhs = EvaluateExpression(expression.substr(at + 1));
+    u32 result = 0;
+    switch (op)
     {
-      if (i == 0)
-        c = '#';
-      else
+    case '+':
+      result = lhs + rhs;
+      break;
+    case '-':
+      result = lhs - rhs;
+      if (static_cast<s32>(result) < 0)
       {
-        switch (d_buffer[i - 1])
-        {
-        case '/':
-        case '%':
-        case '*':
-          c = '#';
-        }
+        Warn("Number Underflow: {}", static_cast<s32>(result));
+        // Folded into 17 bits so that no '-' appears in the text again.
+        result = 0x10000 + (result & 0xffff);
       }
+      break;
+    case '*':
+      result = lhs * rhs;
+      break;
+    case '/':
+      result = rhs != 0 ? lhs / rhs : 0;
+      break;
+    case '|':
+      result = lhs | rhs;
+      break;
+    default:
+      result = lhs & rhs;
+      break;
     }
-    d_buffer[i] = c;
+    expression = fmt::format("{}", static_cast<s32>(result));
   }
 
-  while ((pbuf = strstr(d_buffer, "+")) != nullptr)
-  {
-    *pbuf = 0x0;
-    val = ParseExpression(d_buffer) + ParseExpression(pbuf + 1);
-    sprintf(d_buffer, "%d", val);
-  }
-
-  while ((pbuf = strstr(d_buffer, "-")) != nullptr)
-  {
-    *pbuf = 0x0;
-    val = ParseExpression(d_buffer) - ParseExpression(pbuf + 1);
-    if (val < 0)
-    {
-      ShowWarning("Number Underflow: {}", val);
-      val = 0x10000 +
-            (val &
-             0xffff);  // ATTENTION: avoid a terrible bug!!! number cannot write with '-' in sprintf
-    }
-    sprintf(d_buffer, "%d", val);
-  }
-
-  while ((pbuf = strstr(d_buffer, "*")) != nullptr)
-  {
-    *pbuf = 0x0;
-    val = ParseExpression(d_buffer) * ParseExpression(pbuf + 1);
-    sprintf(d_buffer, "%d", val);
-  }
-
-  while ((pbuf = strstr(d_buffer, "/")) != nullptr)
-  {
-    *pbuf = 0x0;
-    val = ParseExpression(d_buffer) / ParseExpression(pbuf + 1);
-    sprintf(d_buffer, "%d", val);
-  }
-
-  while ((pbuf = strstr(d_buffer, "|")) != nullptr)
-  {
-    *pbuf = 0x0;
-    val = ParseExpression(d_buffer) | ParseExpression(pbuf + 1);
-    sprintf(d_buffer, "%d", val);
-  }
-
-  while ((pbuf = strstr(d_buffer, "&")) != nullptr)
-  {
-    *pbuf = 0x0;
-    val = ParseExpression(d_buffer) & ParseExpression(pbuf + 1);
-    sprintf(d_buffer, "%d", val);
-  }
-
-  val = ParseValue(d_buffer);
-  free(d_buffer);
-  free(s_buffer);
-  return val;
+  return EvaluateTerm(expression);
 }
 
-// Destroys parstr
-u32 DSPAssembler::GetParams(char* parstr, param_t* par)
+// ---------------------------------------------------------------------------
+// Operands
+
+// Reads up to MAX_OPERANDS comma separated operands from text (which is modified).
+// The first character picks the kind: '"' string, '#' immediate, "@$" register
+// pointer, '@' memory address, '$' register, anything else a value.
+u32 DSPAssembler::ParseOperands(char* text, OperandList& operands)
 {
+  Tokenizer tokens;
   u32 count = 0;
-  char* tmpstr = skip_spaces(parstr);
-  tmpstr = strtok(tmpstr, ",\x00");
-  for (int i = 0; i < 10; i++)
+  for (char* item = tokens.Next(SkipSpaces(text), ","); item != nullptr && count < MAX_OPERANDS;
+       item = tokens.Next(nullptr, ","))
   {
-    if (tmpstr == nullptr)
-      break;
-    tmpstr = skip_spaces(tmpstr);
-    if (strlen(tmpstr) == 0)
-      break;
-    if (tmpstr)
-      count++;
-    else
+    item = SkipSpaces(item);
+    if (*item == '\0')
       break;
 
-    par[i].type = P_NONE;
-    switch (tmpstr[0])
+    Operand& operand = operands[count++];
+    operand.kind = P_NONE;
+    switch (item[0])
     {
     case '"':
-      par[i].str = strtok(tmpstr, "\"");
-      par[i].type = P_STR;
+    {
+      // Re-tokenizing for the closing quote also ends the operand list unless text
+      // follows the string within the same operand.
+      const char* const quoted = tokens.Next(item, "\"");
+      operand.text = quoted != nullptr ? quoted : "";
+      operand.kind = P_STR;
       break;
+    }
     case '#':
-      par[i].val = ParseExpression(tmpstr + 1);
-      par[i].type = P_IMM;
+      operand.value = EvaluateExpression(item + 1);
+      operand.kind = P_IMM;
       break;
     case '@':
-      if (tmpstr[1] == '$')
+      if (item[1] == '$')
       {
-        par[i].val = ParseExpression(tmpstr + 2);
-        par[i].type = P_PRG;
+        operand.value = EvaluateExpression(item + 2);
+        operand.kind = P_PRG;
       }
       else
       {
-        par[i].val = ParseExpression(tmpstr + 1);
-        par[i].type = P_MEM;
+        operand.value = EvaluateExpression(item + 1);
+        operand.kind = P_MEM;
       }
       break;
     case '$':
-      par[i].val = ParseExpression(tmpstr + 1);
-      par[i].type = P_REG;
+      operand.value = EvaluateExpression(item + 1);
+      operand.kind = P_REG;
       break;
-
     default:
-      par[i].val = ParseExpression(tmpstr);
-      par[i].type = P_VAL;
+      operand.value = EvaluateExpression(item);
+      operand.kind = P_VAL;
       break;
     }
-    tmpstr = strtok(nullptr, ",\x00");
   }
   return count;
 }
 
-const DSPOPCTemplate* DSPAssembler::FindOpcode(std::string name, size_t par_count, OpcodeType type)
+const DSPOPCTemplate* DSPAssembler::LookUpOpcode(std::string name, size_t operand_count,
+                                                 OpcodeType type)
 {
-  if (name[0] == 'C' && name[1] == 'W')
+  // CW ("constant word") and anything else starting with those letters.
+  if (name.starts_with("CW"))
     return &cw;
 
-  const auto alias_iter = m_aliases.find(name);
-  if (alias_iter != m_aliases.end())
-    name = alias_iter->second;
+  if (const auto alias = m_aliases.find(name); alias != m_aliases.end())
+    name = alias->second;
 
-  const DSPOPCTemplate* const info =
+  const DSPOPCTemplate* const op =
       type == OpcodeType::Primary ? FindOpInfoByName(name) : FindExtOpInfoByName(name);
-  if (!info)
+  if (op == nullptr)
   {
-    ShowError(AssemblerError::UnknownOpcode);
+    Fail(AssemblerError::UnknownOpcode);
     return nullptr;
   }
 
-  if (par_count < info->param_count)
-  {
-    ShowError(AssemblerError::NotEnoughParameters);
-  }
-  else if (par_count > info->param_count)
-  {
-    ShowError(AssemblerError::TooManyParameters);
-  }
-
-  return info;
+  if (operand_count < op->param_count)
+    Fail(AssemblerError::NotEnoughParameters);
+  else if (operand_count > op->param_count)
+    Fail(AssemblerError::TooManyParameters);
+  return op;
 }
 
-// weird...
-static u16 get_mask_shifted_down(u16 mask)
+void DSPAssembler::CheckRegisterOperand(const param2_t& field, const Operand& operand)
 {
-  while (!(mask & 1))
-    mask >>= 1;
-  return mask;
-}
+  const int reg = static_cast<int>(operand.value);
+  const u32 index = operand.value & 1;
+  const AccumulatorPart part = ClassifyAccumulator(reg);
 
-bool DSPAssembler::VerifyParams(const DSPOPCTemplate* opc, param_t* par, size_t count,
-                                OpcodeType type)
-{
-  for (size_t i = 0; i < count; i++)
+  switch (field.type)
   {
-    m_location.opcode_param_number = i + 1;
-    if (opc->params[i].type != par[i].type || (par[i].type & P_REG))
-    {
-      if (par[i].type == P_VAL &&
-          (opc->params[i].type == P_ADDR_I || opc->params[i].type == P_ADDR_D))
-      {
-        // Data and instruction addresses are valid as VAL values.
-        continue;
-      }
-
-      if ((opc->params[i].type & P_REG) && (par[i].type & P_REG))
-      {
-        // modified by Hermes: test the register range
-        switch (opc->params[i].type)
-        {
-        case P_REG18:
-        case P_REG19:
-        case P_REG1A:
-        case P_REG1C:
-        {
-          int value = (opc->params[i].type >> 8) & 0x1f;
-          if ((int)par[i].val < value ||
-              (int)par[i].val > value + get_mask_shifted_down(opc->params[i].mask))
-          {
-            ShowError(AssemblerError::InvalidRegister);
-          }
-          break;
-        }
-        case P_PRG:
-          if ((int)par[i].val < DSP_REG_AR0 || (int)par[i].val > DSP_REG_AR3)
-          {
-            ShowError(AssemblerError::InvalidRegister);
-          }
-          break;
-        case P_ACC:
-          if ((int)par[i].val < DSP_REG_ACC0_FULL || (int)par[i].val > DSP_REG_ACC1_FULL)
-          {
-            if (par[i].val >= DSP_REG_ACM0 && par[i].val <= DSP_REG_ACM1)
-            {
-              ShowWarning("$ACM{0} register used instead of $ACC{0} register", (par[i].val & 1));
-            }
-            else if (par[i].val >= DSP_REG_ACL0 && par[i].val <= DSP_REG_ACL1)
-            {
-              ShowWarning("$ACL{0} register used instead of $ACC{0} register", (par[i].val & 1));
-            }
-            else
-            {
-              ShowError(AssemblerError::WrongParameterExpectedAccumulator);
-            }
-          }
-          break;
-        case P_ACCM:
-          if ((int)par[i].val < DSP_REG_ACM0 || (int)par[i].val > DSP_REG_ACM1)
-          {
-            if (par[i].val >= DSP_REG_ACL0 && par[i].val <= DSP_REG_ACL1)
-            {
-              ShowWarning("$ACL{0} register used instead of $ACCM{0} register", (par[i].val & 1));
-            }
-            else if (par[i].val >= DSP_REG_ACC0_FULL && par[i].val <= DSP_REG_ACC1_FULL)
-            {
-              ShowWarning("$ACC{0} register used instead of $ACM{0} register", (par[i].val & 1));
-            }
-            else
-            {
-              ShowError(AssemblerError::WrongParameterExpectedAccumulator);
-            }
-          }
-          break;
-        case P_ACCL:
-          if ((int)par[i].val < DSP_REG_ACL0 || (int)par[i].val > DSP_REG_ACL1)
-          {
-            if (par[i].val >= DSP_REG_ACM0 && par[i].val <= DSP_REG_ACM1)
-            {
-              ShowWarning("$ACM{0} register used instead of $ACL{0} register", (par[i].val & 1));
-            }
-            else if (par[i].val >= DSP_REG_ACC0_FULL && par[i].val <= DSP_REG_ACC1_FULL)
-            {
-              ShowWarning("$ACC{0} register used instead of $ACL{0} register", (par[i].val & 1));
-            }
-            else
-            {
-              ShowError(AssemblerError::WrongParameterExpectedAccumulator);
-            }
-          }
-          break;
-        default:
-          break;
-        }
-        continue;
-      }
-
-      switch (par[i].type & (P_REG | 7))
-      {
-      case P_REG:
-        ShowError(AssemblerError::ExpectedParamReg);
-        break;
-      case P_MEM:
-        ShowError(AssemblerError::ExpectedParamMem);
-        break;
-      case P_VAL:
-        ShowError(AssemblerError::ExpectedParamVal);
-        break;
-      case P_IMM:
-        ShowError(AssemblerError::ExpectedParamImm);
-        break;
-      }
-      ShowError(AssemblerError::WrongParameter);
-      break;
-    }
-    else if ((opc->params[i].type & 3) != 0 && (par[i].type & 3) != 0)
-    {
-      // modified by Hermes: test NUMBER range
-      int value = get_mask_shifted_down(opc->params[i].mask);
-      unsigned int valueu = 0xffff & ~(value >> 1);
-      if ((int)par[i].val < 0)
-      {
-        if (value == 7)  // value 7 for sbclr/sbset
-        {
-          ShowError(AssemblerError::NumberOutOfRange, "Value must be from 0x0 to {:#x}, was {:#x}",
-                    value, (int)par[i].val);
-        }
-        else if (opc->params[i].type == P_MEM)
-        {
-          if (value < 256)
-          {
-            ShowError(AssemblerError::NumberOutOfRange,
-                      "Address value must be from {:#x} to {:#x}, was {:#x}", valueu, (value >> 1),
-                      (int)par[i].val);
-          }
-          else
-          {
-            ShowError(AssemblerError::NumberOutOfRange,
-                      "Address value must be from 0x0 to {:#x}, was {:#x}", value, (int)par[i].val);
-          }
-        }
-        else if ((int)par[i].val < -((value >> 1) + 1))
-        {
-          if (value < 128)
-          {
-            ShowError(AssemblerError::NumberOutOfRange,
-                      "Value must be from {:#x} to {:#x}, was {:#x}", -((value >> 1) + 1),
-                      value >> 1, (int)par[i].val);
-          }
-          else
-          {
-            ShowError(AssemblerError::NumberOutOfRange,
-                      "Value must be from {:#x} to {:#x} or 0x0 to {:#x}, was {:#x}",
-                      -((value >> 1) + 1), value >> 1, value, (int)par[i].val);
-          }
-        }
-      }
-      else
-      {
-        if (value == 7)  // value 7 for sbclr/sbset
-        {
-          if (par[i].val > (unsigned)value)
-          {
-            ShowError(AssemblerError::NumberOutOfRange,
-                      "Value must be from {:#x} to {:#x}, was {:#x}\n", valueu, value, par[i].val);
-          }
-        }
-        else if (opc->params[i].type == P_MEM)
-        {
-          if (value < 256)
-            value >>= 1;  // addressing 8 bit with sign
-          if (par[i].val > (unsigned)value &&
-              (par[i].val < valueu || par[i].val > (unsigned)0xffff))
-          {
-            if (value < 256)
-            {
-              ShowError(AssemblerError::NumberOutOfRange,
-                        "Address value must be from {:#x} to {:#x}, was {:04x}\n", valueu, value,
-                        par[i].val);
-            }
-            else
-            {
-              ShowError(AssemblerError::NumberOutOfRange,
-                        "Address value must be less than {:#x}, was {:04x}\n", value + 1,
-                        par[i].val);
-            }
-          }
-        }
-        else
-        {
-          if (value < 128)
-            value >>= 1;  // special case ASL/ASR/LSL/LSR
-          if (par[i].val > (unsigned)value)
-          {
-            if (value < 64)
-            {
-              ShowError(AssemblerError::NumberOutOfRange,
-                        "Value must be from {:#x} to {:#x}, was {:#x}\n", -(value + 1), value,
-                        par[i].val);
-            }
-            else
-            {
-              ShowError(AssemblerError::NumberOutOfRange,
-                        "Value must be less than {:#x}, was {:#x}\n", value + 1, par[i].val);
-            }
-          }
-        }
-      }
-      continue;
-    }
+  case P_REG18:
+  case P_REG19:
+  case P_REG1A:
+  case P_REG1C:
+  {
+    const int lowest = (field.type >> 8) & 0x1f;
+    if (reg < lowest || reg > lowest + MaskShiftedDown(field.mask))
+      Fail(AssemblerError::InvalidRegister);
+    break;
   }
-  m_location.opcode_param_number = std::nullopt;
-  return true;
-}
 
-// Merge opcode with params.
-void DSPAssembler::BuildCode(const DSPOPCTemplate* opc, param_t* par, u32 par_count, u16* outbuf)
-{
-  outbuf[m_cur_addr] |= opc->opcode;
-  for (u32 i = 0; i < par_count; i++)
-  {
-    // Ignore the "reverse" parameters since they are implicit.
-    if (opc->params[i].type != P_ACC_D && opc->params[i].type != P_ACCM_D)
-    {
-      u16 t16 = outbuf[m_cur_addr + opc->params[i].loc];
-      u16 v16 = par[i].val;
-      if (opc->params[i].lshift > 0)
-        v16 <<= opc->params[i].lshift;
-      else
-        v16 >>= -opc->params[i].lshift;
-      v16 &= opc->params[i].mask;
-      outbuf[m_cur_addr + opc->params[i].loc] = t16 | v16;
-    }
+  case P_PRG:
+    if (reg < DSP_REG_AR0 || reg > DSP_REG_AR3)
+      Fail(AssemblerError::InvalidRegister);
+    break;
+
+  case P_ACC:
+    if (part == AccumulatorPart::Middle)
+      Warn("$ACM{0} register used instead of $ACC{0} register", index);
+    else if (part == AccumulatorPart::Low)
+      Warn("$ACL{0} register used instead of $ACC{0} register", index);
+    else if (part != AccumulatorPart::Whole)
+      Fail(AssemblerError::WrongParameterExpectedAccumulator);
+    break;
+
+  case P_ACCM:
+    if (part == AccumulatorPart::Low)
+      Warn("$ACL{0} register used instead of $ACCM{0} register", index);
+    else if (part == AccumulatorPart::Whole)
+      Warn("$ACC{0} register used instead of $ACM{0} register", index);
+    else if (part != AccumulatorPart::Middle)
+      Fail(AssemblerError::WrongParameterExpectedAccumulator);
+    break;
+
+  case P_ACCL:
+    if (part == AccumulatorPart::Middle)
+      Warn("$ACM{0} register used instead of $ACL{0} register", index);
+    else if (part == AccumulatorPart::Whole)
+      Warn("$ACC{0} register used instead of $ACL{0} register", index);
+    else if (part != AccumulatorPart::Low)
+      Fail(AssemblerError::WrongParameterExpectedAccumulator);
+    break;
+
+  default:
+    break;
   }
 }
 
-void DSPAssembler::InitPass(int pass)
+// Range checks for numeric operands. Fields are treated as signed or unsigned
+// depending on their width and kind, and the messages say which ranges would do.
+void DSPAssembler::CheckNumberRange(const param2_t& field, const Operand& operand)
 {
-  m_failed = false;
-  if (pass == 1)
+  const int largest = MaskShiftedDown(field.mask);
+  const unsigned int negative_floor = 0xffff & ~static_cast<unsigned int>(largest >> 1);
+  const u32 raw = operand.value;
+  const int value = static_cast<int>(raw);
+  constexpr AssemblerError error = AssemblerError::NumberOutOfRange;
+
+  if (value < 0)
   {
-    // Reset label table. Pre-populate with hw addresses and registers.
-    m_labels.Clear();
-    m_labels.RegisterDefaults();
-    m_aliases.clear();
-    m_aliases["S15"] = "SET15";
-    m_aliases["S16"] = "SET16";
-    m_aliases["S40"] = "SET40";
-  }
-  m_cur_addr = 0;
-  m_total_size = 0;
-  m_cur_segment = SEGMENT_CODE;
-  m_segment_addr[SEGMENT_CODE] = 0;
-  m_segment_addr[SEGMENT_DATA] = 0;
-  m_segment_addr[SEGMENT_OVERLAY] = 0;
-}
-
-bool DSPAssembler::AssemblePass(const std::string& text, int pass)
-{
-  bool disable_text = false;  // modified by Hermes
-
-  std::istringstream fsrc(text);
-
-  m_location.line_num = 0;
-  m_cur_pass = pass;
-
-  constexpr int LINEBUF_SIZE = 1024;
-  char line[LINEBUF_SIZE] = {};
-  while (!m_failed && fsrc.getline(line, LINEBUF_SIZE))
-  {
-    int opcode_size = 0;
-
-    m_location.line_text = line;
-    m_location.line_num++;
-
-    param_t params[10] = {{0, P_NONE, nullptr}};
-    param_t params_ext[10] = {{0, P_NONE, nullptr}};
-
-    bool upper = true;
-    for (int i = 0; i < LINEBUF_SIZE; i++)
+    if (largest == 7)  // SBCLR/SBSET bit numbers
     {
-      char c = line[i];
-      // This stuff handles /**/ and // comments.
-      // modified by Hermes : added // and /* */ for long commentaries
-      if (c == '/')
-      {
-        if (i + 1 < LINEBUF_SIZE)
-        {
-          if (line[i + 1] == '/')
-            c = '\0';
-          else if (line[i + 1] == '*')
-          {
-            // toggle comment mode.
-            disable_text = !disable_text;
-          }
-        }
-      }
-      else if (c == '*')
-      {
-        if (i + 1 < LINEBUF_SIZE && line[i + 1] == '/' && disable_text)
-        {
-          disable_text = false;
-          c = ' ';
-          line[i + 1] = ' ';
-        }
-      }
-
-      // turn text into spaces if disable_text is on (in a comment).
-      if (disable_text && ((unsigned char)c) > ' ')
-        c = ' ';
-
-      if (c == '\r' || c == '\n' || c == ';')
-        c = '\0';
-      if (c == '\t')  // tabs to spaces
-        c = ' ';
-      if (c == '"')
-        upper = !upper;
-      if (upper && c >= 'a' && c <= 'z')  // convert to uppercase
-        c = c - 'a' + 'A';
-      line[i] = c;
-      if (c == '\0')
-        break;  // modified by Hermes
+      Fail(error, "Value must be from 0x0 to {:#x}, was {:#x}", largest, value);
     }
-    char* ptr = line;
-
-    std::string label;
-
-    size_t col_pos = std::string(line).find(":");
-    if (col_pos != std::string::npos)
+    else if (field.type == P_MEM)
     {
-      bool valid = true;
-
-      for (int j = 0; j < (int)col_pos; j++)
+      if (largest < 256)
       {
-        if (j == 0)
-          if (!((ptr[j] >= 'A' && ptr[j] <= 'Z') || (ptr[j] == '_')))
-            valid = false;
-        if (!((ptr[j] >= '0' && ptr[j] <= '9') || (ptr[j] >= 'A' && ptr[j] <= 'Z') ||
-              (ptr[j] == '_')))
-          valid = false;
-      }
-      if (valid)
-      {
-        label = std::string(line).substr(0, col_pos);
-        ptr += col_pos + 1;
-      }
-    }
-
-    char* opcode = strtok(ptr, " ");
-    char* opcode_ext = nullptr;
-
-    u32 params_count = 0;
-    u32 params_count_ext = 0;
-    if (opcode)
-    {
-      if ((opcode_ext = strstr(opcode, "'")) != nullptr)
-      {
-        opcode_ext[0] = '\0';
-        opcode_ext++;
-        if (strlen(opcode_ext) == 0)
-          opcode_ext = nullptr;
-      }
-      // now we have opcode and label
-
-      params_count = 0;
-      params_count_ext = 0;
-
-      char* paramstr = strtok(nullptr, "\0");
-      char* paramstr_ext = nullptr;
-      // there is valid opcode so probably we have parameters
-
-      if (paramstr)
-      {
-        if ((paramstr_ext = strstr(paramstr, ":")) != nullptr)
-        {
-          paramstr_ext[0] = '\0';
-          paramstr_ext++;
-        }
-      }
-
-      if (paramstr)
-        params_count = GetParams(paramstr, params);
-      if (paramstr_ext)
-        params_count_ext = GetParams(paramstr_ext, params_ext);
-    }
-
-    if (!label.empty())
-    {
-      // there is a valid label so lets store it in labels table
-      u32 lval = m_cur_addr;
-      if (opcode)
-      {
-        if (strcmp(opcode, "EQU") == 0)
-        {
-          lval = params[0].val;
-          opcode = nullptr;
-        }
-      }
-      if (pass == 1)
-      {
-        if (!m_labels.RegisterLabel(label, lval))
-          ShowError(AssemblerError::LabelAlreadyExists);
-      }
-    }
-
-    if (opcode == nullptr)
-      continue;
-
-    // check if opcode is reserved compiler word
-    if (strcmp("INCLUDE", opcode) == 0)
-    {
-      if (params[0].type == P_STR)
-      {
-        const auto old_location = m_location;
-
-        if (m_include_dir.empty())
-        {
-          m_location.included_file_path = params[0].str;
-        }
-        else
-        {
-          m_location.included_file_path = m_include_dir + '/' + params[0].str;
-        }
-
-        std::string included_text;
-        File::ReadFileToString(m_location.included_file_path.value(), included_text);
-        AssemblePass(included_text, pass);
-
-        m_location = old_location;
+        Fail(error, "Address value must be from {:#x} to {:#x}, was {:#x}", negative_floor,
+             largest >> 1, value);
       }
       else
       {
-        ShowError(AssemblerError::ExpectedParamStr);
-      }
-      continue;
-    }
-
-    if (strcmp("INCDIR", opcode) == 0)
-    {
-      if (params[0].type == P_STR)
-        m_include_dir = params[0].str;
-      else
-        ShowError(AssemblerError::ExpectedParamStr);
-      continue;
-    }
-
-    if (strcmp("ORG", opcode) == 0)
-    {
-      if (params[0].type == P_VAL)
-      {
-        m_total_size = std::max(m_cur_addr, params[0].val);
-        m_cur_addr = params[0].val;
-      }
-      else
-      {
-        ShowError(AssemblerError::ExpectedParamVal);
-      }
-      continue;
-    }
-
-    if (strcmp("WARNPC", opcode) == 0)
-    {
-      if (params[0].type == P_VAL)
-      {
-        if (m_cur_addr > params[0].val)
-        {
-          ShowError(AssemblerError::PCOutOfRange, "WARNPC at 0x{:04x}, expected 0x{:04x} or less",
-                    m_cur_addr, params[0].val);
-        }
-      }
-      else
-      {
-        ShowError(AssemblerError::ExpectedParamVal);
-      }
-      continue;
-    }
-
-    if (strcmp("SEGMENT", opcode) == 0)
-    {
-      if (params[0].type == P_STR)
-      {
-        m_segment_addr[m_cur_segment] = m_cur_addr;
-        if (strcmp("DATA", params[0].str) == 0)
-          m_cur_segment = SEGMENT_DATA;
-        if (strcmp("CODE", params[0].str) == 0)
-          m_cur_segment = SEGMENT_CODE;
-        m_cur_addr = m_segment_addr[m_cur_segment];
-      }
-      else
-        ShowError(AssemblerError::ExpectedParamStr);
-      continue;
-    }
-
-    m_location.opcode_type = OpcodeType::Primary;
-    const DSPOPCTemplate* opc = FindOpcode(opcode, params_count, OpcodeType::Primary);
-    if (!opc)
-      opc = &cw;
-
-    opcode_size = opc->size;
-
-    VerifyParams(opc, params, params_count, OpcodeType::Primary);
-
-    const DSPOPCTemplate* opc_ext = nullptr;
-    // Check for opcode extensions.
-    m_location.opcode_type = OpcodeType::Extension;
-    if (opc->extended)
-    {
-      if (opcode_ext)
-      {
-        opc_ext = FindOpcode(opcode_ext, params_count_ext, OpcodeType::Extension);
-        VerifyParams(opc_ext, params_ext, params_count_ext, OpcodeType::Extension);
-      }
-      else if (params_count_ext)
-      {
-        ShowError(AssemblerError::ExtensionParamsOnNonExtendableOpcode);
+        Fail(error, "Address value must be from 0x0 to {:#x}, was {:#x}", largest, value);
       }
     }
     else
     {
-      if (opcode_ext)
-        ShowError(AssemblerError::CantExtendOpcode);
-      if (params_count_ext)
-        ShowError(AssemblerError::ExtensionParamsOnNonExtendableOpcode);
+      const int lowest = -((largest >> 1) + 1);
+      if (value < lowest && largest < 128)
+      {
+        Fail(error, "Value must be from {:#x} to {:#x}, was {:#x}", lowest, largest >> 1, value);
+      }
+      else if (value < lowest)
+      {
+        Fail(error, "Value must be from {:#x} to {:#x} or 0x0 to {:#x}, was {:#x}", lowest,
+             largest >> 1, largest, value);
+      }
     }
-    m_location.opcode_type = std::nullopt;
+    return;
+  }
+
+  if (largest == 7)
+  {
+    if (raw > 7u)
+      Fail(error, "Value must be from {:#x} to {:#x}, was {:#x}\n", negative_floor, largest, raw);
+    return;
+  }
+
+  if (field.type == P_MEM)
+  {
+    // Short addresses are sign extended bytes, so 0xff80-0xffff are fine as well.
+    const int limit = largest < 256 ? largest >> 1 : largest;
+    const bool fits = raw <= static_cast<u32>(limit) || (raw >= negative_floor && raw <= 0xffff);
+    if (fits)
+      return;
+    if (limit < 256)
+    {
+      Fail(error, "Address value must be from {:#x} to {:#x}, was {:04x}\n", negative_floor, limit,
+           raw);
+    }
+    else
+    {
+      Fail(error, "Address value must be less than {:#x}, was {:04x}\n", limit + 1, raw);
+    }
+    return;
+  }
+
+  // Narrow fields (shift amounts and the like) are signed.
+  const int limit = largest < 128 ? largest >> 1 : largest;
+  if (raw <= static_cast<u32>(limit))
+    return;
+  if (limit < 64)
+    Fail(error, "Value must be from {:#x} to {:#x}, was {:#x}\n", -(limit + 1), limit, raw);
+  else
+    Fail(error, "Value must be less than {:#x}, was {:#x}\n", limit + 1, raw);
+}
+
+void DSPAssembler::CheckOperands(const DSPOPCTemplate& op, const OperandList& operands,
+                                 size_t count)
+{
+  for (size_t i = 0; i < count; ++i)
+  {
+    m_position.operand_number = i + 1;
+    const param2_t& field = i < std::size(op.params) ? op.params[i] : NO_FIELD;
+    const Operand& operand = operands[i];
+    const bool is_register = (operand.kind & P_REG) != 0;
+
+    if (field.type == operand.kind && !is_register)
+    {
+      if ((field.type & 3) != 0 && (operand.kind & 3) != 0)
+        CheckNumberRange(field, operand);
+      continue;
+    }
+
+    // Plain values may name data or instruction addresses.
+    if (operand.kind == P_VAL && (field.type == P_ADDR_I || field.type == P_ADDR_D))
+      continue;
+
+    if ((field.type & P_REG) != 0 && is_register)
+    {
+      CheckRegisterOperand(field, operand);
+      continue;
+    }
+
+    // The operand is of the wrong kind: say what was given, then give up on the rest.
+    switch (operand.kind & (P_REG | 7))
+    {
+    case P_REG:
+      Fail(AssemblerError::ExpectedParamReg);
+      break;
+    case P_MEM:
+      Fail(AssemblerError::ExpectedParamMem);
+      break;
+    case P_VAL:
+      Fail(AssemblerError::ExpectedParamVal);
+      break;
+    case P_IMM:
+      Fail(AssemblerError::ExpectedParamImm);
+      break;
+    default:
+      break;
+    }
+    Fail(AssemblerError::WrongParameter);
+    break;
+  }
+  m_position.operand_number = std::nullopt;
+}
+
+// ORs the instruction and its operand fields into the output at the current address.
+void DSPAssembler::Encode(const DSPOPCTemplate& op, const OperandList& operands, size_t count)
+{
+  const auto merge = [this](u32 index, u16 bits) {
+    if (index < m_output_buffer.size())
+      m_output_buffer[index] |= bits;
+  };
+
+  merge(m_cur_addr, op.opcode);
+  for (size_t i = 0; i < count && i < std::size(op.params); ++i)
+  {
+    const param2_t& field = op.params[i];
+    // The "other accumulator" operands are implied by their partner and have no bits.
+    if (field.type == P_ACC_D || field.type == P_ACCM_D)
+      continue;
+
+    u16 bits = static_cast<u16>(operands[i].value);
+    if (field.lshift > 0)
+      bits = static_cast<u16>(bits << field.lshift);
+    else
+      bits = static_cast<u16>(bits >> -field.lshift);
+    merge(m_cur_addr + field.loc, static_cast<u16>(bits & field.mask));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Passes
+
+void DSPAssembler::StartPass(int pass)
+{
+  m_failed = false;
+  if (pass == 1)
+  {
+    m_labels.Clear();
+    m_labels.RegisterDefaults();
+    m_aliases = {{"S15", "SET15"}, {"S16", "SET16"}, {"S40", "SET40"}};
+  }
+  m_cur_addr = 0;
+  m_total_size = 0;
+  m_cur_segment = Segment::Code;
+  m_segment_addr.fill(0);
+}
+
+bool DSPAssembler::HandleDirective(const char* name, const OperandList& operands, int pass)
+{
+  const Operand& arg = operands[0];
+  const std::string_view directive = name;
+
+  if (directive == "INCLUDE")
+  {
+    if (arg.kind != P_STR)
+    {
+      Fail(AssemblerError::ExpectedParamStr);
+      return true;
+    }
+    const SourcePosition including = m_position;
+    m_position.include_path = m_include_dir.empty() ? arg.text : m_include_dir + '/' + arg.text;
+    std::string included_text;
+    File::ReadFileToString(*m_position.include_path, included_text);
+    RunPass(included_text, pass);
+    m_position = including;
+    return true;
+  }
+
+  if (directive == "INCDIR")
+  {
+    if (arg.kind == P_STR)
+      m_include_dir = arg.text;
+    else
+      Fail(AssemblerError::ExpectedParamStr);
+    return true;
+  }
+
+  if (directive == "ORG")
+  {
+    if (arg.kind == P_VAL)
+    {
+      m_total_size = static_cast<int>(std::max(m_cur_addr, arg.value));
+      m_cur_addr = arg.value;
+    }
+    else
+    {
+      Fail(AssemblerError::ExpectedParamVal);
+    }
+    return true;
+  }
+
+  if (directive == "WARNPC")
+  {
+    if (arg.kind != P_VAL)
+      Fail(AssemblerError::ExpectedParamVal);
+    else if (m_cur_addr > arg.value)
+      Fail(AssemblerError::PCOutOfRange, "WARNPC at 0x{:04x}, expected 0x{:04x} or less",
+           m_cur_addr, arg.value);
+    return true;
+  }
+
+  if (directive == "SEGMENT")
+  {
+    if (arg.kind != P_STR)
+    {
+      Fail(AssemblerError::ExpectedParamStr);
+      return true;
+    }
+    m_segment_addr[static_cast<size_t>(m_cur_segment)] = m_cur_addr;
+    if (arg.text == "DATA")
+      m_cur_segment = Segment::Data;
+    if (arg.text == "CODE")
+      m_cur_segment = Segment::Code;
+    m_cur_addr = m_segment_addr[static_cast<size_t>(m_cur_segment)];
+    return true;
+  }
+
+  return false;
+}
+
+bool DSPAssembler::RunPass(const std::string& text, int pass)
+{
+  std::istringstream source(text);
+  std::array<char, LINE_BUFFER_SIZE> line{};
+  bool in_comment = false;
+
+  m_position.line_num = 0;
+  m_cur_pass = pass;
+
+  while (!m_failed && source.getline(line.data(), static_cast<std::streamsize>(line.size())))
+  {
+    m_position.line_text = line.data();
+    ++m_position.line_num;
+    NormalizeLine(line.data(), line.size(), in_comment);
+
+    // "NAME:" at the very start defines a label.
+    char* cursor = line.data();
+    std::string label;
+    const std::string_view cleaned = line.data();
+    if (const size_t colon = cleaned.find(':');
+        colon != std::string_view::npos && IsLabelName(cleaned.substr(0, colon)))
+    {
+      label = cleaned.substr(0, colon);
+      cursor += colon + 1;
+    }
+
+    // MNEMONIC[ 'EXTENSION] operands[ : extension operands]
+    Tokenizer words;
+    char* mnemonic = words.Next(cursor, " ");
+    const char* extension = nullptr;
+    OperandList operands{};
+    OperandList ext_operands{};
+    u32 operand_count = 0;
+    u32 ext_operand_count = 0;
+    if (mnemonic != nullptr)
+    {
+      if (char* tick = std::strchr(mnemonic, '\''))
+      {
+        *tick = '\0';
+        if (tick[1] != '\0')
+          extension = tick + 1;
+      }
+
+      char* operand_text = words.Next(nullptr, "");
+      char* ext_operand_text = nullptr;
+      if (operand_text != nullptr)
+      {
+        if (char* colon = std::strchr(operand_text, ':'))
+        {
+          *colon = '\0';
+          ext_operand_text = colon + 1;
+        }
+        operand_count = ParseOperands(operand_text, operands);
+      }
+      if (ext_operand_text != nullptr)
+        ext_operand_count = ParseOperands(ext_operand_text, ext_operands);
+    }
+
+    if (!label.empty())
+    {
+      // "NAME: EQU value" binds a value; otherwise the label is the current address.
+      u32 value = m_cur_addr;
+      if (mnemonic != nullptr && std::strcmp(mnemonic, "EQU") == 0)
+      {
+        value = operands[0].value;
+        mnemonic = nullptr;
+      }
+      if (pass == 1 && !m_labels.RegisterLabel(label, static_cast<u16>(value)))
+        Fail(AssemblerError::LabelAlreadyExists);
+    }
+
+    if (mnemonic == nullptr || HandleDirective(mnemonic, operands, pass))
+      continue;
+
+    m_position.opcode_type = OpcodeType::Primary;
+    const DSPOPCTemplate* op = LookUpOpcode(mnemonic, operand_count, OpcodeType::Primary);
+    if (op == nullptr)
+      op = &cw;
+    const u32 size = op->size;
+    CheckOperands(*op, operands, operand_count);
+
+    const DSPOPCTemplate* ext_op = nullptr;
+    m_position.opcode_type = OpcodeType::Extension;
+    if (!op->extended)
+    {
+      if (extension != nullptr)
+        Fail(AssemblerError::CantExtendOpcode);
+      if (ext_operand_count != 0)
+        Fail(AssemblerError::ExtensionParamsOnNonExtendableOpcode);
+    }
+    else if (extension != nullptr)
+    {
+      ext_op = LookUpOpcode(extension, ext_operand_count, OpcodeType::Extension);
+      if (ext_op != nullptr)
+        CheckOperands(*ext_op, ext_operands, ext_operand_count);
+    }
+    else if (ext_operand_count != 0)
+    {
+      Fail(AssemblerError::ExtensionParamsOnNonExtendableOpcode);
+    }
+    m_position.opcode_type = std::nullopt;
 
     if (pass == 2)
     {
-      // generate binary
-      m_output_buffer[m_cur_addr] = 0x0000;
-      BuildCode(opc, params, params_count, m_output_buffer.data());
-      if (opc_ext)
-        BuildCode(opc_ext, params_ext, params_count_ext, m_output_buffer.data());
+      if (m_cur_addr < m_output_buffer.size())
+        m_output_buffer[m_cur_addr] = 0;
+      Encode(*op, operands, operand_count);
+      if (ext_op != nullptr)
+        Encode(*ext_op, ext_operands, ext_operand_count);
     }
 
-    m_cur_addr += opcode_size;
-    m_total_size += opcode_size;
-  };
+    m_cur_addr += size;
+    m_total_size += static_cast<int>(size);
+  }
 
   return !m_failed;
 }
