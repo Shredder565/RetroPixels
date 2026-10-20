@@ -1,5 +1,4 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,17 +6,22 @@
 
 namespace JitCommon
 {
+// Replacement for a signed division by a constant: the quotient is the high
+// word of dividend * multiplier, shifted right arithmetically by shift and
+// corrected by one for negative results.
 struct SignedMagic
 {
   s32 multiplier;
   u8 shift;
 };
 
-// Calculate the constants required to optimize a signed 32-bit integer division.
-// Taken from The PowerPC Compiler Writer's Guide and LLVM.
-// Divisor must not be -1, 0, 1 or INT_MIN.
+// Constants for dividing a s32 by `divisor`. The divisor must not be -1, 0, 1
+// or INT_MIN.
 SignedMagic SignedDivisionConstants(s32 divisor);
 
+// Replacement for an unsigned division by a constant, computed in 64 bits.
+// With `fast` set the quotient is (dividend * multiplier) >> (32 + shift);
+// otherwise ((dividend + 1) * multiplier) >> (32 + shift) is needed.
 struct UnsignedMagic
 {
   u32 multiplier;
@@ -25,18 +29,8 @@ struct UnsignedMagic
   bool fast;
 };
 
-/// Calculate the constants required to optimize an unsigned 32-bit integer
-/// division.
-/// Divisor must not be 0, 1, or a power of two.
-///
-/// Original implementation by calc84maniac.
-/// Results are the same as the approach laid out in Hacker's Delight, with an
-/// improvement for so-called uncooperative divisors (e.g. 7), as discovered by
-/// ridiculousfish.
-///
-/// See also:
-/// https://ridiculousfish.com/blog/posts/labor-of-division-episode-iii.html
-/// https://rubenvannieuwpoort.nl/posts/division-by-constant-unsigned-integers
+// Constants for dividing a u32 by `divisor`. The divisor must not be 0, 1 or a
+// power of two.
 UnsignedMagic UnsignedDivisionConstants(u32 divisor);
 
 }  // namespace JitCommon

@@ -1,538 +1,512 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/PowerPC/JitCommon/ConstantPropagation.h"
 
 #include <bit>
 
 #include "Core/PowerPC/Gekko.h"
-#include "Core/PowerPC/Interpreter/Interpreter.h"
 #include "Core/PowerPC/PPCTables.h"
 
 namespace JitCommon
 {
-static constexpr u32 BitOR(u32 a, u32 b)
+namespace
 {
-  return a | b;
+using Result = ConstantPropagationResult;
+
+// An instruction that writes `value` to `gpr` (and CR0 when `rc`).
+Result Writes(u32 gpr, u32 value, bool rc = false)
+{
+  return Result(static_cast<s8>(gpr), value, rc);
 }
 
-static constexpr u32 BitAND(u32 a, u32 b)
+bool AddCarries(u32 a, u32 b)
 {
-  return a & b;
+  return ((u64{a} + u64{b}) >> 32) != 0;
 }
 
-static constexpr u32 BitXOR(u32 a, u32 b)
+bool FitsS32(s64 value)
 {
-  return a ^ b;
+  return value >= -0x80000000LL && value <= 0x7FFFFFFFLL;
 }
+
+// Shifted-out bits of an algebraic right shift by n (0..63) of a negative value.
+bool ArithmeticShiftCarry(u32 value, u32 n)
+{
+  if ((value & 0x80000000) == 0 || n == 0)
+    return false;
+  if (n >= 32)
+    return true;
+  return (value & ((u32{1} << n) - 1)) != 0;
+}
+
+u32 ArithmeticShift(u32 value, u32 n)
+{
+  const s32 v = static_cast<s32>(value);
+  return static_cast<u32>(n >= 32 ? (v < 0 ? -1 : 0) : (v >> n));
+}
+
+// Extended opcodes (primary 31, 10-bit field including OE) of the a,b -> d group.
+enum : u32
+{
+  XO_SUBFC = 8,
+  XO_ADDC = 10,
+  XO_MULHWU = 11,
+  XO_SUBF = 40,
+  XO_MULHW = 75,
+  XO_NEG = 104,
+  XO_MULLW = 235,
+  XO_ADD = 266,
+  XO_DIVWU = 459,
+  XO_DIVW = 491,
+  XO_SUBFCO = 520,
+  XO_ADDCO = 522,
+  XO_SUBFO = 552,
+  XO_NEGO = 616,
+  XO_MULLWO = 747,
+  XO_ADDO = 778,
+  XO_DIVWUO = 971,
+  XO_DIVWO = 1003,
+};
+
+// The s,b -> a group.
+enum : u32
+{
+  XO_SLW = 24,
+  XO_CNTLZW = 26,
+  XO_AND = 28,
+  XO_ANDC = 60,
+  XO_NOR = 124,
+  XO_EQV = 284,
+  XO_XOR = 316,
+  XO_ORC = 412,
+  XO_OR = 444,
+  XO_NAND = 476,
+  XO_SRW = 536,
+  XO_SRAW = 792,
+  XO_SRAWI = 824,
+  XO_EXTSH = 922,
+  XO_EXTSB = 954,
+};
+
+bool IsSubtract(u32 xo)
+{
+  return xo == XO_SUBFC || xo == XO_SUBF || xo == XO_SUBFCO || xo == XO_SUBFO;
+}
+bool IsMultiply(u32 xo)
+{
+  return xo == XO_MULHWU || xo == XO_MULHW || xo == XO_MULLW || xo == XO_MULLWO;
+}
+}  // namespace
 
 ConstantPropagationResult ConstantPropagation::EvaluateInstruction(UGeckoInstruction inst,
                                                                    u64 flags) const
 {
+  if (inst.OPCD == 31)
+    return EvaluateExtended(inst, flags);
+  return EvaluatePrimary(inst);
+}
+
+ConstantPropagationResult ConstantPropagation::EvaluatePrimary(UGeckoInstruction inst) const
+{
+  const u32 simm = static_cast<u32>(static_cast<s32>(inst.SIMM_16));
+  const std::optional<u32> ra = Known(inst.RA);
+  const std::optional<u32> rs = Known(inst.RS);
+
   switch (inst.OPCD)
   {
-  case 7:  // mulli
-    return EvaluateMulImm(inst);
+  case 7:  // mulli: a zero immediate gives zero whatever rA holds
+    if (simm == 0)
+      return Writes(inst.RD, 0);
+    if (!ra)
+      return {};
+    return Writes(inst.RD, *ra * simm);
+
   case 8:  // subfic
-    return EvaluateSubImmCarry(inst);
+  {
+    if (!ra)
+      return {};
+    Result r = Writes(inst.RD, simm - *ra);
+    r.carry = simm >= *ra;
+    return r;
+  }
+
   case 12:  // addic
   case 13:  // addic.
-    return EvaluateAddImmCarry(inst);
+  {
+    if (!ra)
+      return {};
+    Result r = Writes(inst.RD, *ra + simm, inst.OPCD == 13);
+    r.carry = AddCarries(*ra, simm);
+    return r;
+  }
+
   case 14:  // addi
   case 15:  // addis
-    return EvaluateAddImm(inst);
-  case 20:  // rlwimix
-    return EvaluateRlwimix(inst);
-  case 21:  // rlwinmx
-    return EvaluateRlwinmxRlwnmx(inst, inst.SH);
-  case 23:  // rlwnmx
-    if (HasGPR(inst.RB))
-      return EvaluateRlwinmxRlwnmx(inst, GetGPR(inst.RB) & 0x1F);
-    else
+  {
+    const u32 imm = inst.OPCD == 15 ? simm << 16 : simm;
+    if (inst.RA == 0)
+      return Writes(inst.RD, imm);
+    if (!ra)
       return {};
+    return Writes(inst.RD, *ra + imm);
+  }
+
+  case 20:  // rlwimi
+  {
+    if (!rs)
+      return {};
+    const u32 mask = MakeRotationMask(inst.MB, inst.ME);
+    const u32 rotated = std::rotl(*rs, static_cast<int>(inst.SH));
+    if (mask == 0xFFFFFFFF)
+      return Writes(inst.RA, rotated, inst.Rc);
+    if (!ra)
+      return {};
+    return Writes(inst.RA, (*ra & ~mask) | (rotated & mask), inst.Rc);
+  }
+
+  case 21:  // rlwinm
+  case 23:  // rlwnm
+  {
+    u32 amount = inst.SH;
+    if (inst.OPCD == 23)
+    {
+      const std::optional<u32> rb = Known(inst.RB);
+      if (!rb)
+        return {};
+      amount = *rb & 0x1F;
+    }
+    if (!rs)
+      return {};
+    const u32 mask = MakeRotationMask(inst.MB, inst.ME);
+    return Writes(inst.RA, std::rotl(*rs, static_cast<int>(amount)) & mask, inst.Rc);
+  }
+
   case 24:  // ori
   case 25:  // oris
-    return EvaluateBitwiseImm(inst, BitOR);
   case 26:  // xori
   case 27:  // xoris
-    return EvaluateBitwiseImm(inst, BitXOR);
-  case 28:  // andi
-  case 29:  // andis
-    return EvaluateBitwiseImm(inst, BitAND);
-  case 31:
-    return EvaluateTable31(inst, flags);
+  case 28:  // andi.
+  case 29:  // andis.
+  {
+    const bool is_and = inst.OPCD >= 28;
+    // "ori rX, rX, 0" style no-ops (but never andi., which still sets CR0).
+    if (!is_and && inst.UIMM == 0 && inst.RA == inst.RS)
+    {
+      Result r;
+      r.instruction_fully_executed = true;
+      return r;
+    }
+    if (!rs)
+      return {};
+    const u32 imm = (inst.OPCD & 1) ? u32{inst.UIMM} << 16 : u32{inst.UIMM};
+    u32 value;
+    if (inst.OPCD <= 25)
+      value = *rs | imm;
+    else if (inst.OPCD <= 27)
+      value = *rs ^ imm;
+    else
+      value = *rs & imm;
+    return Writes(inst.RA, value, is_and);
+  }
+
   default:
     return {};
   }
 }
 
-ConstantPropagationResult ConstantPropagation::EvaluateMulImm(UGeckoInstruction inst) const
-{
-  if (inst.SIMM_16 == 0)
-    return ConstantPropagationResult(inst.RD, 0);
-
-  if (!HasGPR(inst.RA))
-    return {};
-
-  return ConstantPropagationResult(inst.RD, m_gpr_values[inst.RA] * inst.SIMM_16);
-}
-
-ConstantPropagationResult ConstantPropagation::EvaluateSubImmCarry(UGeckoInstruction inst) const
-{
-  if (!HasGPR(inst.RA))
-    return {};
-
-  const u32 a = GetGPR(inst.RA);
-  const u32 imm = s32(inst.SIMM_16);
-
-  ConstantPropagationResult result(inst.RD, imm - a);
-  result.carry = imm >= a;
-  return result;
-}
-
-ConstantPropagationResult ConstantPropagation::EvaluateAddImm(UGeckoInstruction inst) const
-{
-  const s32 immediate = inst.OPCD & 1 ? inst.SIMM_16 << 16 : inst.SIMM_16;
-
-  if (inst.RA == 0)
-    return ConstantPropagationResult(inst.RD, immediate);
-
-  if (!HasGPR(inst.RA))
-    return {};
-
-  return ConstantPropagationResult(inst.RD, m_gpr_values[inst.RA] + immediate);
-}
-
-ConstantPropagationResult ConstantPropagation::EvaluateAddImmCarry(UGeckoInstruction inst) const
-{
-  if (!HasGPR(inst.RA))
-    return {};
-
-  const u32 a = m_gpr_values[inst.RA];
-  const bool rc = inst.OPCD & 1;
-
-  ConstantPropagationResult result(inst.RD, a + inst.SIMM_16, rc);
-  result.carry = Interpreter::Helper_Carry(a, inst.SIMM_16);
-  return result;
-}
-
-ConstantPropagationResult ConstantPropagation::EvaluateRlwimix(UGeckoInstruction inst) const
-{
-  if (!HasGPR(inst.RS))
-    return {};
-
-  const u32 mask = MakeRotationMask(inst.MB, inst.ME);
-  if (mask == 0xFFFFFFFF)
-    return ConstantPropagationResult(inst.RA, std::rotl(GetGPR(inst.RS), inst.SH), inst.Rc);
-
-  if (!HasGPR(inst.RA))
-    return {};
-
-  return ConstantPropagationResult(
-      inst.RA, (GetGPR(inst.RA) & ~mask) | (std::rotl(GetGPR(inst.RS), inst.SH) & mask), inst.Rc);
-}
-
-ConstantPropagationResult ConstantPropagation::EvaluateRlwinmxRlwnmx(UGeckoInstruction inst,
-                                                                     u32 shift) const
-{
-  if (!HasGPR(inst.RS))
-    return {};
-
-  const u32 mask = MakeRotationMask(inst.MB, inst.ME);
-  return ConstantPropagationResult(inst.RA, std::rotl(GetGPR(inst.RS), shift) & mask, inst.Rc);
-}
-
-ConstantPropagationResult ConstantPropagation::EvaluateBitwiseImm(UGeckoInstruction inst,
-                                                                  u32 (*do_op)(u32, u32)) const
-{
-  const bool is_and = do_op == &BitAND;
-  const u32 immediate = inst.OPCD & 1 ? inst.UIMM << 16 : inst.UIMM;
-
-  if (inst.UIMM == 0 && !is_and && inst.RA == inst.RS)
-    return DO_NOTHING;
-
-  if (!HasGPR(inst.RS))
-    return {};
-
-  return ConstantPropagationResult(inst.RA, do_op(m_gpr_values[inst.RS], immediate), is_and);
-}
-
-ConstantPropagationResult ConstantPropagation::EvaluateTable31(UGeckoInstruction inst,
-                                                               u64 flags) const
+ConstantPropagationResult ConstantPropagation::EvaluateExtended(UGeckoInstruction inst,
+                                                                u64 flags) const
 {
   if (flags & FL_IN_B)
   {
     if (flags & FL_OUT_D)
-    {
-      // input a, b -> output d
-      return EvaluateTable31AB(inst, flags);
-    }
-    else
-    {
-      // input s, b -> output a
-      return EvaluateTable31SB(inst);
-    }
+      return EvaluateArithmetic(inst, flags);
+    return EvaluateLogical(inst);
   }
-  else
+  return EvaluateUnary(inst, flags);
+}
+
+// rD = f(rA, rB)
+ConstantPropagationResult ConstantPropagation::EvaluateArithmetic(UGeckoInstruction inst,
+                                                                  u64 flags) const
+{
+  const u32 xo = inst.SUBOP10;
+  const std::optional<u32> ka = Known(inst.RA);
+  const std::optional<u32> kb = Known(inst.RB);
+  const bool sets_ca = (flags & FL_SET_CA) != 0;
+  const bool sets_ov = (flags & FL_SET_OE) != 0;
+
+  if (ka && kb)
   {
-    switch (inst.SUBOP10)
+    const u32 a = *ka;
+    const u32 b = *kb;
+    u32 value;
+    bool carry = false;
+    bool overflow = false;
+    switch (xo)
     {
-    case 104:  // negx
-    case 616:  // negox
-      // input a -> output d
-      return EvaluateTable31Negx(inst, flags);
+    case XO_SUBFC:
+    case XO_SUBF:
+    case XO_SUBFCO:
+    case XO_SUBFO:
+      value = b - a;
+      carry = AddCarries(~a, b) || (~a + b) == 0xFFFFFFFF;
+      overflow = !FitsS32(s64{static_cast<s32>(b)} - s64{static_cast<s32>(a)});
+      break;
+    case XO_ADDC:
+    case XO_ADDCO:
+    case XO_ADD:
+    case XO_ADDO:
+      value = a + b;
+      carry = AddCarries(a, b);
+      overflow = !FitsS32(s64{static_cast<s32>(a)} + s64{static_cast<s32>(b)});
+      break;
+    case XO_MULHWU:
+      value = static_cast<u32>((u64{a} * u64{b}) >> 32);
+      break;
+    case XO_MULHW:
+      value = static_cast<u32>(
+          static_cast<u64>(s64{static_cast<s32>(a)} * s64{static_cast<s32>(b)}) >> 32);
+      break;
+    case XO_MULLW:
+    case XO_MULLWO:
+    {
+      const s64 product = s64{static_cast<s32>(a)} * s64{static_cast<s32>(b)};
+      value = static_cast<u32>(product);
+      carry = (static_cast<u64>(product) >> 32) != 0;
+      overflow = !FitsS32(product);
+      break;
+    }
+    case XO_DIVWU:
+    case XO_DIVWUO:
+      value = b == 0 ? 0 : a / b;
+      carry = b == 0;
+      overflow = b == 0;
+      break;
+    case XO_DIVW:
+    case XO_DIVWO:
+    {
+      const bool undefined = b == 0 || (a == 0x80000000 && b == 0xFFFFFFFF);
+      if (undefined)
+      {
+        value = (a & 0x80000000) ? 0xFFFFFFFF : 0;
+        carry = (a & 0x80000000) == 0;
+        overflow = true;
+      }
+      else
+      {
+        const s32 q = static_cast<s32>(a) / static_cast<s32>(b);
+        value = static_cast<u32>(q);
+        carry = q < 0;
+      }
+      break;
+    }
     default:
-      // input s -> output a
-      return EvaluateTable31S(inst);
-    }
-  }
-}
-
-ConstantPropagationResult ConstantPropagation::EvaluateTable31Negx(UGeckoInstruction inst,
-                                                                   u64 flags) const
-{
-  if (!HasGPR(inst.RA))
-    return {};
-
-  const s64 out = -s64(s32(GetGPR(inst.RA)));
-
-  ConstantPropagationResult result(inst.RD, u32(out), inst.Rc);
-  if (flags & FL_SET_OE)
-    result.overflow = (out != s64(s32(out)));
-  return result;
-}
-
-ConstantPropagationResult ConstantPropagation::EvaluateTable31S(UGeckoInstruction inst) const
-{
-  if (!HasGPR(inst.RS))
-    return {};
-
-  std::optional<bool> carry;
-  u32 a;
-  const u32 s = GetGPR(inst.RS);
-
-  switch (inst.SUBOP10)
-  {
-  case 26:  // cntlzwx
-    a = std::countl_zero(s);
-    break;
-  case 824:  // srawix
-    a = s32(s) >> inst.SH;
-    carry = inst.SH != 0 && s32(s) < 0 && (s << (32 - inst.SH));
-    break;
-  case 922:  // extshx
-    a = s32(s16(s));
-    break;
-  case 954:  // extsbx
-    a = s32(s8(s));
-    break;
-  default:
-    return {};
-  }
-
-  ConstantPropagationResult result(ConstantPropagationResult(inst.RA, a, inst.Rc));
-  result.carry = carry;
-  return result;
-}
-
-ConstantPropagationResult ConstantPropagation::EvaluateTable31AB(UGeckoInstruction inst,
-                                                                 u64 flags) const
-{
-  const bool has_a = HasGPR(inst.RA);
-  const bool has_b = HasGPR(inst.RB);
-  if (!has_a || !has_b)
-  {
-    if (has_a)
-      return EvaluateTable31ABOneRegisterKnown(inst, flags, GetGPR(inst.RA), false);
-    else if (has_b)
-      return EvaluateTable31ABOneRegisterKnown(inst, flags, GetGPR(inst.RB), true);
-    else if (inst.RA == inst.RB)
-      return EvaluateTable31ABIdenticalRegisters(inst, flags);
-    else
       return {};
+    }
+
+    Result r = Writes(inst.RD, value, inst.Rc);
+    if (sets_ca)
+      r.carry = carry;
+    if (sets_ov)
+      r.overflow = overflow;
+    return r;
   }
 
-  u64 d;
-  s64 d_overflow;
-  const u32 a = GetGPR(inst.RA);
-  const u32 b = GetGPR(inst.RB);
-
-  switch (inst.SUBOP10)
+  if (ka || kb)
   {
-  case 8:    // subfcx
-  case 40:   // subfx
-  case 520:  // subfcox
-  case 552:  // subfox
-    d = u64(u32(~a)) + u64(b) + 1;
-    d_overflow = s64(s32(b)) - s64(s32(a));
-    break;
-  case 10:   // addcx
-  case 522:  // addcox
-  case 266:  // addx
-  case 778:  // addox
-    d = u64(a) + u64(b);
-    d_overflow = s64(s32(a)) + s64(s32(b));
-    break;
-  case 11:  // mulhwux
-    d = d_overflow = (u64(a) * u64(b)) >> 32;
-    break;
-  case 75:  // mulhwx
-    d = d_overflow = u64(s64(s32(a)) * s64(s32(b))) >> 32;
-    break;
-  case 235:  // mullwx
-  case 747:  // mullwox
-    d = d_overflow = s64(s32(a)) * s64(s32(b));
-    break;
-  case 459:  // divwux
-  case 971:  // divwuox
-    d = d_overflow = b == 0 ? 0x1'0000'0000 : u64(a / b);
-    break;
-  case 491:   // divwx
-  case 1003:  // divwox
-    d = d_overflow = b == 0 || (a == 0x80000000 && b == 0xFFFFFFFF) ?
-                         (s32(a) < 0 ? 0xFFFFFFFF : 0x1'0000'0000) :
-                         s32(a) / s32(b);
-    break;
-  default:
+    const u32 known = ka ? *ka : *kb;
+    const bool known_is_b = !ka;
+
+    // A zero factor makes any product zero.
+    if (IsMultiply(xo) && known == 0)
+    {
+      Result r = Writes(inst.RD, 0, inst.Rc);
+      if (sets_ov)
+        r.overflow = false;
+      return r;
+    }
+    // Unsigned division by zero gives zero and sets OV.
+    if ((xo == XO_DIVWU || xo == XO_DIVWUO) && known_is_b && known == 0)
+    {
+      Result r = Writes(inst.RD, 0, inst.Rc);
+      if (sets_ov)
+        r.overflow = true;
+      return r;
+    }
+    // Zero divided by anything is zero, unless OV must report a zero divisor.
+    if ((xo == XO_DIVWU || xo == XO_DIVWUO || xo == XO_DIVW || xo == XO_DIVWO) && !known_is_b &&
+        known == 0 && !sets_ov)
+    {
+      return Writes(inst.RD, 0, inst.Rc);
+    }
     return {};
   }
 
-  ConstantPropagationResult result(inst.RD, u32(d), inst.Rc);
-  if (flags & FL_SET_CA)
-    result.carry = (d >> 32 != 0);
-  if (flags & FL_SET_OE)
-    result.overflow = (d_overflow != s64(s32(d_overflow)));
-  return result;
-}
-
-ConstantPropagationResult
-ConstantPropagation::EvaluateTable31ABOneRegisterKnown(UGeckoInstruction inst, u64 flags, u32 value,
-                                                       bool known_reg_is_b) const
-{
-  switch (inst.SUBOP10)
+  // x - x == 0 with the carry set and no overflow.
+  if (inst.RA == inst.RB && IsSubtract(xo))
   {
-  case 11:   // mulhwux
-  case 75:   // mulhwx
-  case 235:  // mullwx
-  case 747:  // mullwox
-    if (value == 0)
-    {
-      ConstantPropagationResult result(inst.RD, 0, inst.Rc);
-      if (flags & FL_SET_OE)
-        result.overflow = false;
-      return result;
-    }
-    break;
-  case 459:  // divwux
-  case 971:  // divwuox
-    if (known_reg_is_b && value == 0)
-    {
-      ConstantPropagationResult result(inst.RD, 0, inst.Rc);
-      if (flags & FL_SET_OE)
-        result.overflow = true;
-      return result;
-    }
-    [[fallthrough]];
-  case 491:   // divwx
-  case 1003:  // divwox
-    if (!known_reg_is_b && value == 0 && !(flags & FL_SET_OE))
-    {
-      return ConstantPropagationResult(inst.RD, 0, inst.Rc);
-    }
-    break;
+    Result r = Writes(inst.RD, 0, inst.Rc);
+    if (sets_ca)
+      r.carry = true;
+    if (sets_ov)
+      r.overflow = false;
+    return r;
   }
-
   return {};
 }
 
-ConstantPropagationResult
-ConstantPropagation::EvaluateTable31ABIdenticalRegisters(UGeckoInstruction inst, u64 flags) const
+// rA = f(rS, rB)
+ConstantPropagationResult ConstantPropagation::EvaluateLogical(UGeckoInstruction inst) const
 {
-  switch (inst.SUBOP10)
+  const u32 xo = inst.SUBOP10;
+  const std::optional<u32> ks = Known(inst.RS);
+  const std::optional<u32> kb = Known(inst.RB);
+
+  if (ks && kb)
   {
-  case 8:    // subfcx
-  case 40:   // subfx
-  case 520:  // subfcox
-  case 552:  // subfox
+    const u32 s = *ks;
+    const u32 b = *kb;
+    const u32 n = b & 0x3F;
+    switch (xo)
+    {
+    case XO_SLW:
+      return Writes(inst.RA, n >= 32 ? 0 : s << n, inst.Rc);
+    case XO_SRW:
+      return Writes(inst.RA, n >= 32 ? 0 : s >> n, inst.Rc);
+    case XO_AND:
+      return Writes(inst.RA, s & b, inst.Rc);
+    case XO_ANDC:
+      return Writes(inst.RA, s & ~b, inst.Rc);
+    case XO_NOR:
+      return Writes(inst.RA, ~(s | b), inst.Rc);
+    case XO_EQV:
+      return Writes(inst.RA, ~(s ^ b), inst.Rc);
+    case XO_XOR:
+      return Writes(inst.RA, s ^ b, inst.Rc);
+    case XO_ORC:
+      return Writes(inst.RA, s | ~b, inst.Rc);
+    case XO_OR:
+      return Writes(inst.RA, s | b, inst.Rc);
+    case XO_NAND:
+      return Writes(inst.RA, ~(s & b), inst.Rc);
+    case XO_SRAW:
+    {
+      Result r = Writes(inst.RA, ArithmeticShift(s, n), inst.Rc);
+      r.carry = ArithmeticShiftCarry(s, n);
+      return r;
+    }
+    default:
+      return {};
+    }
+  }
+
+  if (ks || kb)
   {
-    ConstantPropagationResult result(inst.RD, 0, inst.Rc);
-    if (flags & FL_SET_CA)
-      result.carry = true;
+    const bool known_is_b = !ks;
+    const u32 known = ks ? *ks : *kb;
+    // For the complemented forms, look at the operand as it enters the AND/OR.
+    const u32 effective = known_is_b && (xo == XO_ANDC || xo == XO_ORC) ? ~known : known;
+    switch (xo)
+    {
+    case XO_SLW:
+    case XO_SRW:
+      // Shifting zero, or shifting by 32..63, gives zero.
+      if ((!known_is_b && known == 0) || (known_is_b && (known & 0x20) != 0))
+        return Writes(inst.RA, 0, inst.Rc);
+      return {};
+    case XO_AND:
+    case XO_ANDC:
+      if (effective == 0)
+        return Writes(inst.RA, 0, inst.Rc);
+      return {};
+    case XO_NOR:
+      if (known == 0xFFFFFFFF)
+        return Writes(inst.RA, 0, inst.Rc);
+      return {};
+    case XO_OR:
+    case XO_ORC:
+      if (effective == 0xFFFFFFFF)
+        return Writes(inst.RA, 0xFFFFFFFF, inst.Rc);
+      return {};
+    case XO_NAND:
+      if (known == 0)
+        return Writes(inst.RA, 0xFFFFFFFF, inst.Rc);
+      return {};
+    case XO_SRAW:
+      if (!known_is_b && known == 0)
+      {
+        Result r = Writes(inst.RA, 0, inst.Rc);
+        r.carry = false;
+        return r;
+      }
+      return {};
+    default:
+      return {};
+    }
+  }
+
+  // Both operands are the same unknown register.
+  if (inst.RS == inst.RB)
+  {
+    switch (xo)
+    {
+    case XO_ANDC:
+    case XO_XOR:
+      return Writes(inst.RA, 0, inst.Rc);
+    case XO_EQV:
+    case XO_ORC:
+      return Writes(inst.RA, 0xFFFFFFFF, inst.Rc);
+    default:
+      return {};
+    }
+  }
+  return {};
+}
+
+// One register operand: neg (rA -> rD) or the rS -> rA group.
+ConstantPropagationResult ConstantPropagation::EvaluateUnary(UGeckoInstruction inst,
+                                                             u64 flags) const
+{
+  const u32 xo = inst.SUBOP10;
+  if (xo == XO_NEG || xo == XO_NEGO)
+  {
+    const std::optional<u32> ka = Known(inst.RA);
+    if (!ka)
+      return {};
+    Result r = Writes(inst.RD, u32{0} - *ka, inst.Rc);
     if (flags & FL_SET_OE)
-      result.overflow = false;
-    return result;
+      r.overflow = *ka == 0x80000000;
+    return r;
   }
+
+  const std::optional<u32> ks = Known(inst.RS);
+  if (!ks)
+    return {};
+  const u32 s = *ks;
+  switch (xo)
+  {
+  case XO_CNTLZW:
+    return Writes(inst.RA, static_cast<u32>(std::countl_zero(s)), inst.Rc);
+  case XO_SRAWI:
+  {
+    Result r = Writes(inst.RA, ArithmeticShift(s, inst.SH), inst.Rc);
+    r.carry = ArithmeticShiftCarry(s, inst.SH);
+    return r;
+  }
+  case XO_EXTSH:
+    return Writes(inst.RA, static_cast<u32>(static_cast<s32>(static_cast<s16>(s))), inst.Rc);
+  case XO_EXTSB:
+    return Writes(inst.RA, static_cast<u32>(static_cast<s32>(static_cast<s8>(s))), inst.Rc);
   default:
     return {};
   }
-}
-
-ConstantPropagationResult ConstantPropagation::EvaluateTable31SB(UGeckoInstruction inst) const
-{
-  const bool has_s = HasGPR(inst.RS);
-  const bool has_b = HasGPR(inst.RB);
-  if (!has_s || !has_b)
-  {
-    if (has_s)
-      return EvaluateTable31SBOneRegisterKnown(inst, GetGPR(inst.RS), false);
-    else if (has_b)
-      return EvaluateTable31SBOneRegisterKnown(inst, GetGPR(inst.RB), true);
-    else if (inst.RS == inst.RB)
-      return EvaluateTable31SBIdenticalRegisters(inst);
-    else
-      return {};
-  }
-
-  u32 a;
-  const u32 s = GetGPR(inst.RS);
-  const u32 b = GetGPR(inst.RB);
-
-  switch (inst.SUBOP10)
-  {
-  case 24:  // slwx
-    a = u32(u64(s) << (b & 0x3f));
-    break;
-  case 28:  // andx
-    a = s & b;
-    break;
-  case 60:  // andcx
-    a = s & (~b);
-    break;
-  case 124:  // norx
-    a = ~(s | b);
-    break;
-  case 284:  // eqvx
-    a = ~(s ^ b);
-    break;
-  case 316:  // xorx
-    a = s ^ b;
-    break;
-  case 412:  // orcx
-    a = s | (~b);
-    break;
-  case 444:  // orx
-    a = s | b;
-    break;
-  case 476:  // nandx
-    a = ~(s & b);
-    break;
-  case 536:  // srwx
-    a = u32(u64(s) >> (b & 0x3f));
-    break;
-  case 792:  // srawx
-  {
-    const u64 temp = (s64(s32(s)) << 32) >> (b & 0x3f);
-    a = u32(temp >> 32);
-
-    ConstantPropagationResult result(inst.RA, a, inst.Rc);
-    result.carry = (temp & a) != 0;
-    return result;
-  }
-  default:
-    return {};
-  }
-
-  return ConstantPropagationResult(inst.RA, a, inst.Rc);
-}
-
-ConstantPropagationResult
-ConstantPropagation::EvaluateTable31SBOneRegisterKnown(UGeckoInstruction inst, u32 value,
-                                                       bool known_reg_is_b) const
-{
-  u32 a;
-
-  switch (inst.SUBOP10)
-  {
-  case 24:   // slwx
-  case 536:  // srwx
-    if (!known_reg_is_b && value == 0)
-      a = 0;
-    else if (known_reg_is_b && (value & 0x20))
-      a = 0;
-    else
-      return {};
-    break;
-  case 60:  // andcx
-    if (known_reg_is_b)
-      value = ~value;
-    [[fallthrough]];
-  case 28:  // andx
-    if (value == 0)
-      a = 0;
-    else
-      return {};
-    break;
-  case 124:  // norx
-    if (value == 0xFFFFFFFF)
-      a = 0;
-    else
-      return {};
-    break;
-  case 412:  // orcx
-    if (known_reg_is_b)
-      value = ~value;
-    [[fallthrough]];
-  case 444:  // orx
-    if (value == 0xFFFFFFFF)
-      a = 0xFFFFFFFF;
-    else
-      return {};
-    break;
-  case 476:  // nandx
-    if (value == 0)
-      a = 0xFFFFFFFF;
-    else
-      return {};
-    break;
-  case 792:  // srawx
-    if (!known_reg_is_b && value == 0)
-    {
-      ConstantPropagationResult result(inst.RA, 0, inst.Rc);
-      result.carry = false;
-      return result;
-    }
-    else
-    {
-      return {};
-    }
-    break;
-  default:
-    return {};
-  }
-
-  return ConstantPropagationResult(inst.RA, a, inst.Rc);
-}
-
-ConstantPropagationResult
-ConstantPropagation::EvaluateTable31SBIdenticalRegisters(UGeckoInstruction inst) const
-{
-  u32 a;
-
-  switch (inst.SUBOP10)
-  {
-  case 60:  // andcx
-    a = 0;
-    break;
-  case 284:  // eqvx
-    a = 0xFFFFFFFF;
-    break;
-  case 316:  // xorx
-    a = 0;
-    break;
-  case 412:  // orcx
-    a = 0xFFFFFFFF;
-    break;
-  default:
-    return {};
-  }
-
-  return ConstantPropagationResult(inst.RA, a, inst.Rc);
 }
 
 void ConstantPropagation::Apply(ConstantPropagationResult result)
 {
   if (result.gpr >= 0)
-    SetGPR(result.gpr, result.gpr_value);
+    SetGPR(static_cast<size_t>(result.gpr), result.gpr_value);
 }
 
 }  // namespace JitCommon
