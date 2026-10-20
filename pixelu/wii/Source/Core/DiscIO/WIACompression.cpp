@@ -1,13 +1,15 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DiscIO/WIACompression.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 #include <bzlib.h>
@@ -16,797 +18,793 @@
 
 #include "Common/Assert.h"
 #include "Common/CommonTypes.h"
-#include "Common/MathUtil.h"
+#include "Common/Crypto/SHA1.h"
 #include "Common/Swap.h"
 #include "DiscIO/LaggedFibonacciGenerator.h"
+#include "DiscIO/WIABlob.h"
 
 namespace DiscIO
 {
-static u32 LZMA2DictionarySize(u8 p)
+namespace
 {
-  return (static_cast<u32>(2) | (p & 1)) << (p / 2 + 11);
+// Purge stores runs of data as (u32 BE offset, u32 BE size, bytes) records; everything not
+// covered is zero. A SHA-1 of everything before it ends the stream.
+constexpr size_t PURGE_RECORD_HEADER = 8;
+constexpr size_t PURGE_HASH = Common::SHA1::DIGEST_LEN;
+
+// RVZ packing: records of a u32 BE size, followed either by that many bytes of data or (when
+// bit 31 of the size is set) by a junk generator seed.
+constexpr size_t RVZ_SIZE_FIELD = sizeof(u32);
+constexpr size_t RVZ_SEED_BYTES = LaggedFibonacciGenerator::SEED_SIZE * sizeof(u32);
+constexpr u32 RVZ_JUNK_FLAG = 0x80000000;
+// The junk on a disc restarts its sequence at every 32 KiB sector.
+constexpr u64 JUNK_SECTOR = 0x8000;
+
+// LZMA2's one-byte dictionary size code (as in the .xz format), for codes 0 to 39.
+u32 Lzma2DictSize(u32 code)
+{
+  return (2 | (code & 1)) << (code / 2 + 11);
 }
 
-Decompressor::~Decompressor() = default;
-
-bool NoneDecompressor::Decompress(const DecompressionBuffer& in, DecompressionBuffer* out,
-                                  size_t* in_bytes_read)
+unsigned int ClampToUInt(size_t x)
 {
-  const size_t length =
-      std::min(in.bytes_written - *in_bytes_read, out->data.size() - out->bytes_written);
-
-  std::memcpy(out->data.data() + out->bytes_written, in.data.data() + *in_bytes_read, length);
-
-  *in_bytes_read += length;
-  out->bytes_written += length;
-
-  m_done = in.data.size() == *in_bytes_read;
-  return true;
+  return static_cast<unsigned int>(std::min<size_t>(x, std::numeric_limits<unsigned int>::max()));
 }
 
-PurgeDecompressor::PurgeDecompressor(u64 decompressed_size) : m_decompressed_size(decompressed_size)
-{
-}
+// ---------------------------------------------------------------------------------------------
 
-bool PurgeDecompressor::Decompress(const DecompressionBuffer& in, DecompressionBuffer* out,
-                                   size_t* in_bytes_read)
+class CopyDecoder final : public Decoder
 {
-  if (!m_started)
+public:
+  bool Step(DecodeInput& in, DecodeOutput& out) override
   {
-    m_sha1_context = Common::SHA1::CreateContext();
-
-    // Include the exception lists in the SHA-1 calculation (but not in the compression...)
-    m_sha1_context->Update(in.data.data(), *in_bytes_read);
-
-    m_started = true;
+    const size_t n = std::min(in.loaded - in.pos, out.capacity - out.pos);
+    std::memcpy(out.data + out.pos, in.data + in.pos, n);
+    in.pos += n;
+    out.pos += n;
+    m_finished = in.pos == in.total;
+    return true;
   }
+};
 
-  while (!m_done && in.bytes_written != *in_bytes_read &&
-         (m_segment_bytes_written < sizeof(m_segment) || out->data.size() != out->bytes_written))
+class PurgeDecoder final : public Decoder
+{
+public:
+  explicit PurgeDecoder(u64 output_size) : m_output_size(output_size) {}
+
+  bool Step(DecodeInput& in, DecodeOutput& out) override
   {
-    if (m_segment_bytes_written == 0 && *in_bytes_read == in.data.size() - Common::SHA1::DIGEST_LEN)
+    if (!m_hash)
     {
-      const size_t zeroes_to_write = std::min<size_t>(m_decompressed_size - m_out_bytes_written,
-                                                      out->data.size() - out->bytes_written);
+      // Whatever precedes the records (the hash exception lists) is covered by the hash too.
+      m_hash = Common::SHA1::CreateContext();
+      m_hash->Update(in.data, in.pos);
+    }
 
-      std::memset(out->data.data() + out->bytes_written, 0, zeroes_to_write);
+    while (!m_finished && in.pos != in.loaded &&
+           (m_header_fill < PURGE_RECORD_HEADER || out.pos != out.capacity))
+    {
+      if (m_header_fill == 0 && in.total >= PURGE_HASH && in.pos == in.total - PURGE_HASH)
+        return Trailer(in, out);
 
-      out->bytes_written += zeroes_to_write;
-      m_out_bytes_written += zeroes_to_write;
-
-      if (m_out_bytes_written == m_decompressed_size && in.bytes_written == in.data.size())
+      if (m_header_fill < PURGE_RECORD_HEADER)
       {
-        const auto actual_hash = m_sha1_context->Finish();
-
-        Common::SHA1::Digest expected_hash;
-        std::memcpy(expected_hash.data(), in.data.data() + *in_bytes_read, expected_hash.size());
-
-        *in_bytes_read += expected_hash.size();
-        m_done = true;
-
-        if (actual_hash != expected_hash)
-          return false;
-      }
-
-      return true;
-    }
-
-    if (m_segment_bytes_written < sizeof(m_segment))
-    {
-      const size_t bytes_to_copy =
-          std::min(in.bytes_written - *in_bytes_read, sizeof(m_segment) - m_segment_bytes_written);
-
-      std::memcpy(reinterpret_cast<u8*>(&m_segment) + m_segment_bytes_written,
-                  in.data.data() + *in_bytes_read, bytes_to_copy);
-      m_sha1_context->Update(in.data.data() + *in_bytes_read, bytes_to_copy);
-
-      *in_bytes_read += bytes_to_copy;
-      m_bytes_read += bytes_to_copy;
-      m_segment_bytes_written += bytes_to_copy;
-    }
-
-    if (m_segment_bytes_written < sizeof(m_segment))
-      return true;
-
-    const size_t offset = Common::swap32(m_segment.offset);
-    const size_t size = Common::swap32(m_segment.size);
-
-    if (m_out_bytes_written < offset)
-    {
-      const size_t zeroes_to_write =
-          std::min(offset - m_out_bytes_written, out->data.size() - out->bytes_written);
-
-      std::memset(out->data.data() + out->bytes_written, 0, zeroes_to_write);
-
-      out->bytes_written += zeroes_to_write;
-      m_out_bytes_written += zeroes_to_write;
-    }
-
-    if (m_out_bytes_written >= offset && m_out_bytes_written < offset + size)
-    {
-      const size_t bytes_to_copy = std::min(
-          std::min(offset + size - m_out_bytes_written, out->data.size() - out->bytes_written),
-          in.bytes_written - *in_bytes_read);
-
-      std::memcpy(out->data.data() + out->bytes_written, in.data.data() + *in_bytes_read,
-                  bytes_to_copy);
-      m_sha1_context->Update(in.data.data() + *in_bytes_read, bytes_to_copy);
-
-      *in_bytes_read += bytes_to_copy;
-      m_bytes_read += bytes_to_copy;
-      out->bytes_written += bytes_to_copy;
-      m_out_bytes_written += bytes_to_copy;
-    }
-
-    if (m_out_bytes_written >= offset + size)
-      m_segment_bytes_written = 0;
-  }
-
-  return true;
-}
-
-Bzip2Decompressor::~Bzip2Decompressor()
-{
-  if (m_started)
-    BZ2_bzDecompressEnd(&m_stream);
-}
-
-bool Bzip2Decompressor::Decompress(const DecompressionBuffer& in, DecompressionBuffer* out,
-                                   size_t* in_bytes_read)
-{
-  if (!m_started)
-  {
-    if (BZ2_bzDecompressInit(&m_stream, 0, 0) != BZ_OK)
-      return false;
-
-    m_started = true;
-  }
-
-  char* const in_ptr = reinterpret_cast<char*>(const_cast<u8*>(in.data.data() + *in_bytes_read));
-  m_stream.next_in = in_ptr;
-  m_stream.avail_in = MathUtil::SaturatingCast<u32>(in.bytes_written - *in_bytes_read);
-
-  char* const out_ptr = reinterpret_cast<char*>(out->data.data() + out->bytes_written);
-  m_stream.next_out = out_ptr;
-  m_stream.avail_out = MathUtil::SaturatingCast<u32>(out->data.size() - out->bytes_written);
-
-  const int result = BZ2_bzDecompress(&m_stream);
-
-  *in_bytes_read += m_stream.next_in - in_ptr;
-  out->bytes_written += m_stream.next_out - out_ptr;
-
-  m_done = result == BZ_STREAM_END;
-  return result == BZ_OK || result == BZ_STREAM_END;
-}
-
-LZMADecompressor::LZMADecompressor(bool lzma2, const u8* filter_options, size_t filter_options_size)
-{
-  m_options.preset_dict = nullptr;
-
-  if (!lzma2 && filter_options_size == 5)
-  {
-    // The dictionary size is stored as a 32-bit little endian unsigned integer
-    static_assert(sizeof(m_options.dict_size) == sizeof(u32));
-    std::memcpy(&m_options.dict_size, filter_options + 1, sizeof(u32));
-
-    const u8 d = filter_options[0];
-    if (d >= (9 * 5 * 5))
-    {
-      m_error_occurred = true;
-    }
-    else
-    {
-      m_options.lc = d % 9;
-      const u8 e = d / 9;
-      m_options.pb = e / 5;
-      m_options.lp = e % 5;
-    }
-  }
-  else if (lzma2 && filter_options_size == 1)
-  {
-    const u8 d = filter_options[0];
-    if (d > 40)
-      m_error_occurred = true;
-    else
-      m_options.dict_size = d == 40 ? 0xFFFFFFFF : LZMA2DictionarySize(d);
-  }
-  else
-  {
-    m_error_occurred = true;
-  }
-
-  m_filters[0].id = lzma2 ? LZMA_FILTER_LZMA2 : LZMA_FILTER_LZMA1;
-  m_filters[0].options = &m_options;
-  m_filters[1].id = LZMA_VLI_UNKNOWN;
-  m_filters[1].options = nullptr;
-}
-
-LZMADecompressor::~LZMADecompressor()
-{
-  if (m_started)
-    lzma_end(&m_stream);
-}
-
-bool LZMADecompressor::Decompress(const DecompressionBuffer& in, DecompressionBuffer* out,
-                                  size_t* in_bytes_read)
-{
-  if (!m_started)
-  {
-    if (m_error_occurred || lzma_raw_decoder(&m_stream, m_filters) != LZMA_OK)
-      return false;
-
-    m_started = true;
-  }
-
-  const u8* const in_ptr = in.data.data() + *in_bytes_read;
-  m_stream.next_in = in_ptr;
-  m_stream.avail_in = in.bytes_written - *in_bytes_read;
-
-  u8* const out_ptr = out->data.data() + out->bytes_written;
-  m_stream.next_out = out_ptr;
-  m_stream.avail_out = out->data.size() - out->bytes_written;
-
-  const lzma_ret result = lzma_code(&m_stream, LZMA_RUN);
-
-  *in_bytes_read += m_stream.next_in - in_ptr;
-  out->bytes_written += m_stream.next_out - out_ptr;
-
-  m_done = result == LZMA_STREAM_END;
-  return result == LZMA_OK || result == LZMA_STREAM_END;
-}
-
-ZstdDecompressor::ZstdDecompressor()
-{
-  m_stream = ZSTD_createDStream();
-}
-
-ZstdDecompressor::~ZstdDecompressor()
-{
-  ZSTD_freeDStream(m_stream);
-}
-
-bool ZstdDecompressor::Decompress(const DecompressionBuffer& in, DecompressionBuffer* out,
-                                  size_t* in_bytes_read)
-{
-  if (!m_stream)
-    return false;
-
-  ZSTD_inBuffer in_buffer{in.data.data(), in.bytes_written, *in_bytes_read};
-  ZSTD_outBuffer out_buffer{out->data.data(), out->data.size(), out->bytes_written};
-
-  const size_t result = ZSTD_decompressStream(m_stream, &out_buffer, &in_buffer);
-
-  *in_bytes_read = in_buffer.pos;
-  out->bytes_written = out_buffer.pos;
-
-  m_done = result == 0;
-  return !ZSTD_isError(result);
-}
-
-RVZPackDecompressor::RVZPackDecompressor(std::unique_ptr<Decompressor> decompressor,
-                                         DecompressionBuffer decompressed, u64 data_offset,
-                                         u32 rvz_packed_size)
-    : m_decompressor(std::move(decompressor)), m_decompressed(std::move(decompressed)),
-      m_data_offset(data_offset), m_rvz_packed_size(rvz_packed_size)
-{
-  m_bytes_read = m_decompressed.bytes_written;
-}
-
-bool RVZPackDecompressor::IncrementBytesRead(size_t x)
-{
-  m_bytes_read += x;
-  return m_bytes_read <= m_rvz_packed_size;
-}
-
-std::optional<bool> RVZPackDecompressor::ReadToDecompressed(const DecompressionBuffer& in,
-                                                            size_t* in_bytes_read,
-                                                            size_t decompressed_bytes_read,
-                                                            size_t bytes_to_read)
-{
-  if (m_decompressed.data.size() < decompressed_bytes_read + bytes_to_read)
-    m_decompressed.data.resize(decompressed_bytes_read + bytes_to_read);
-
-  if (m_decompressed.bytes_written < decompressed_bytes_read + bytes_to_read)
-  {
-    const size_t prev_bytes_written = m_decompressed.bytes_written;
-
-    if (!m_decompressor->Decompress(in, &m_decompressed, in_bytes_read))
-      return false;
-
-    if (!IncrementBytesRead(m_decompressed.bytes_written - prev_bytes_written))
-      return false;
-
-    if (m_decompressed.bytes_written < decompressed_bytes_read + bytes_to_read)
-      return true;
-  }
-
-  return std::nullopt;
-}
-
-bool RVZPackDecompressor::Decompress(const DecompressionBuffer& in, DecompressionBuffer* out,
-                                     size_t* in_bytes_read)
-{
-  while (out->data.size() != out->bytes_written && !Done())
-  {
-    if (m_size == 0)
-    {
-      if (m_decompressed.bytes_written == m_decompressed_bytes_read)
-      {
-        m_decompressed.data.resize(sizeof(u32));
-        m_decompressed.bytes_written = 0;
-        m_decompressed_bytes_read = 0;
-      }
-
-      std::optional<bool> result =
-          ReadToDecompressed(in, in_bytes_read, m_decompressed_bytes_read, sizeof(u32));
-      if (result)
-        return *result;
-
-      const u32 size = Common::swap32(m_decompressed.data.data() + m_decompressed_bytes_read);
-
-      m_junk = size & 0x80000000;
-      if (m_junk)
-      {
-        constexpr size_t SEED_SIZE = LaggedFibonacciGenerator::SEED_SIZE * sizeof(u32);
-        constexpr size_t BLOCK_SIZE = 0x8000;
-
-        result = ReadToDecompressed(in, in_bytes_read, m_decompressed_bytes_read + sizeof(u32),
-                                    SEED_SIZE);
-        if (result)
-          return *result;
-
-        m_lfg.SetSeed(m_decompressed.data.data() + m_decompressed_bytes_read + sizeof(u32));
-        m_lfg.Forward(m_data_offset % BLOCK_SIZE);
-
-        m_decompressed_bytes_read += SEED_SIZE;
-      }
-
-      m_decompressed_bytes_read += sizeof(u32);
-      m_size = size & 0x7FFFFFFF;
-    }
-
-    size_t bytes_to_write = std::min<size_t>(m_size, out->data.size() - out->bytes_written);
-    if (m_junk)
-    {
-      m_lfg.GetBytes(bytes_to_write, out->data.data() + out->bytes_written);
-      out->bytes_written += bytes_to_write;
-    }
-    else
-    {
-      if (m_decompressed.bytes_written != m_decompressed_bytes_read)
-      {
-        bytes_to_write =
-            std::min(bytes_to_write, m_decompressed.bytes_written - m_decompressed_bytes_read);
-
-        std::memcpy(out->data.data() + out->bytes_written,
-                    m_decompressed.data.data() + m_decompressed_bytes_read, bytes_to_write);
-
-        m_decompressed_bytes_read += bytes_to_write;
-        out->bytes_written += bytes_to_write;
-      }
-      else
-      {
-        const size_t prev_out_bytes_written = out->bytes_written;
-        const size_t old_out_size = out->data.size();
-        const size_t new_out_size = out->bytes_written + bytes_to_write;
-
-        if (new_out_size < old_out_size)
-          out->data.resize(new_out_size);
-
-        if (!m_decompressor->Decompress(in, out, in_bytes_read))
-          return false;
-
-        out->data.resize(old_out_size);
-
-        bytes_to_write = out->bytes_written - prev_out_bytes_written;
-
-        if (!IncrementBytesRead(bytes_to_write))
-          return false;
-
-        if (bytes_to_write == 0)
+        const size_t n = std::min(in.loaded - in.pos, PURGE_RECORD_HEADER - m_header_fill);
+        std::memcpy(m_header.data() + m_header_fill, in.data + in.pos, n);
+        m_hash->Update(in.data + in.pos, n);
+        in.pos += n;
+        m_header_fill += n;
+        if (m_header_fill < PURGE_RECORD_HEADER)
           return true;
       }
+
+      const u64 start = Common::swap32(m_header.data());
+      const u64 end = start + Common::swap32(m_header.data() + 4);
+
+      // Zeroes up to the record, then the record's bytes.
+      if (m_produced < start)
+        Zeroes(out, start - m_produced);
+      if (m_produced >= start && m_produced < end)
+      {
+        const size_t n = std::min<size_t>({end - m_produced, out.capacity - out.pos,
+                                           in.loaded - in.pos});
+        std::memcpy(out.data + out.pos, in.data + in.pos, n);
+        m_hash->Update(in.data + in.pos, n);
+        in.pos += n;
+        out.pos += n;
+        m_produced += n;
+      }
+      if (m_produced >= end)
+        m_header_fill = 0;  // on to the next record
+    }
+    return true;
+  }
+
+private:
+  void Zeroes(DecodeOutput& out, u64 count)
+  {
+    const size_t n = static_cast<size_t>(std::min<u64>(count, out.capacity - out.pos));
+    std::memset(out.data + out.pos, 0, n);
+    out.pos += n;
+    m_produced += n;
+  }
+
+  bool Trailer(DecodeInput& in, DecodeOutput& out)
+  {
+    // After the last record, the output is zero up to its full size.
+    Zeroes(out, m_output_size - m_produced);
+    if (m_produced != m_output_size || in.loaded != in.total)
+      return true;
+
+    const Common::SHA1::Digest actual = m_hash->Finish();
+    const bool good = std::memcmp(actual.data(), in.data + in.pos, PURGE_HASH) == 0;
+    in.pos += PURGE_HASH;
+    m_finished = true;
+    return good;
+  }
+
+  const u64 m_output_size;
+  std::unique_ptr<Common::SHA1::Context> m_hash;
+  std::array<u8, PURGE_RECORD_HEADER> m_header{};
+  size_t m_header_fill = 0;
+  u64 m_produced = 0;
+};
+
+class Bzip2Decoder final : public Decoder
+{
+public:
+  ~Bzip2Decoder() override
+  {
+    if (m_open)
+      BZ2_bzDecompressEnd(&m_stream);
+  }
+
+  bool Step(DecodeInput& in, DecodeOutput& out) override
+  {
+    if (!m_open)
+    {
+      if (BZ2_bzDecompressInit(&m_stream, 0, 0) != BZ_OK)
+        return false;
+      m_open = true;
     }
 
-    m_data_offset += bytes_to_write;
-    m_size -= static_cast<u32>(bytes_to_write);
+    char* const next_in = reinterpret_cast<char*>(const_cast<u8*>(in.data + in.pos));
+    char* const next_out = reinterpret_cast<char*>(out.data + out.pos);
+    m_stream.next_in = next_in;
+    m_stream.avail_in = ClampToUInt(in.loaded - in.pos);
+    m_stream.next_out = next_out;
+    m_stream.avail_out = ClampToUInt(out.capacity - out.pos);
+
+    const int result = BZ2_bzDecompress(&m_stream);
+    in.pos += m_stream.next_in - next_in;
+    out.pos += m_stream.next_out - next_out;
+
+    m_finished = result == BZ_STREAM_END;
+    return result == BZ_OK || result == BZ_STREAM_END;
   }
 
-  // If out is full but not all data has been read from in, give the decompressor a chance to read
-  // from in anyway. This is needed for the case where zstd has read everything except the checksum.
-  if (out->data.size() == out->bytes_written && in.bytes_written != *in_bytes_read)
+private:
+  bz_stream m_stream{};
+  bool m_open = false;
+};
+
+class LzmaDecoder final : public Decoder
+{
+public:
+  LzmaDecoder(bool lzma2, const u8* props, size_t props_size)
   {
-    if (!m_decompressor->Decompress(in, out, in_bytes_read))
-      return false;
-  }
-
-  return true;
-}
-
-bool RVZPackDecompressor::Done() const
-{
-  return m_size == 0 && m_rvz_packed_size == m_bytes_read &&
-         m_decompressed.bytes_written == m_decompressed_bytes_read && m_decompressor->Done();
-}
-
-Compressor::~Compressor() = default;
-
-PurgeCompressor::PurgeCompressor() = default;
-
-PurgeCompressor::~PurgeCompressor() = default;
-
-bool PurgeCompressor::Start(std::optional<u64> size)
-{
-  m_buffer.clear();
-  m_bytes_written = 0;
-
-  m_sha1_context = Common::SHA1::CreateContext();
-
-  return true;
-}
-
-bool PurgeCompressor::AddPrecedingDataOnlyForPurgeHashing(const u8* data, size_t size)
-{
-  m_sha1_context->Update(data, size);
-  return true;
-}
-
-bool PurgeCompressor::Compress(const u8* data, size_t size)
-{
-  // We could add support for calling this twice if we're fine with
-  // making the code more complicated, but there's no need to support it
-  ASSERT_MSG(DISCIO, m_bytes_written == 0,
-             "Calling PurgeCompressor::Compress() twice is not supported");
-
-  m_buffer.resize(size + sizeof(PurgeSegment) + Common::SHA1::DIGEST_LEN);
-
-  size_t bytes_read = 0;
-
-  while (true)
-  {
-    const auto first_non_zero =
-        std::find_if(data + bytes_read, data + size, [](u8 x) { return x != 0; });
-
-    const u32 non_zero_data_start = static_cast<u32>(first_non_zero - data);
-    if (non_zero_data_start == size)
-      break;
-
-    size_t non_zero_data_end = non_zero_data_start;
-    size_t sequence_length = 0;
-    for (size_t i = non_zero_data_start; i < size; ++i)
+    if (!lzma2 && props_size == 5)
     {
-      if (data[i] == 0)
+      // One byte packing lc/lp/pb, then the dictionary size (u32 LE).
+      const u8 packed = props[0];
+      std::memcpy(&m_options.dict_size, props + 1, sizeof(u32));
+      if (packed < 9 * 5 * 5)
       {
-        ++sequence_length;
+        m_options.lc = packed % 9;
+        m_options.lp = packed / 9 % 5;
+        m_options.pb = packed / 9 / 5;
+        m_usable = true;
+      }
+    }
+    else if (lzma2 && props_size == 1 && props[0] <= 40)
+    {
+      m_options.dict_size = props[0] == 40 ? 0xFFFFFFFF : Lzma2DictSize(props[0]);
+      m_usable = true;
+    }
+
+    m_filters[0] = {lzma2 ? LZMA_FILTER_LZMA2 : LZMA_FILTER_LZMA1, &m_options};
+    m_filters[1] = {LZMA_VLI_UNKNOWN, nullptr};
+  }
+
+  ~LzmaDecoder() override
+  {
+    if (m_open)
+      lzma_end(&m_stream);
+  }
+
+  bool Step(DecodeInput& in, DecodeOutput& out) override
+  {
+    if (!m_open)
+    {
+      if (!m_usable || lzma_raw_decoder(&m_stream, m_filters) != LZMA_OK)
+        return false;
+      m_open = true;
+    }
+
+    const u8* const next_in = in.data + in.pos;
+    u8* const next_out = out.data + out.pos;
+    m_stream.next_in = next_in;
+    m_stream.avail_in = in.loaded - in.pos;
+    m_stream.next_out = next_out;
+    m_stream.avail_out = out.capacity - out.pos;
+
+    const lzma_ret result = lzma_code(&m_stream, LZMA_RUN);
+    in.pos += m_stream.next_in - next_in;
+    out.pos += m_stream.next_out - next_out;
+
+    m_finished = result == LZMA_STREAM_END;
+    return result == LZMA_OK || result == LZMA_STREAM_END;
+  }
+
+private:
+  lzma_stream m_stream = LZMA_STREAM_INIT;
+  lzma_options_lzma m_options{};
+  lzma_filter m_filters[2];
+  bool m_usable = false;
+  bool m_open = false;
+};
+
+class ZstdDecoder final : public Decoder
+{
+public:
+  ZstdDecoder() : m_stream(ZSTD_createDStream()) {}
+  ~ZstdDecoder() override { ZSTD_freeDStream(m_stream); }
+
+  bool Step(DecodeInput& in, DecodeOutput& out) override
+  {
+    if (!m_stream)
+      return false;
+
+    ZSTD_inBuffer src{in.data, in.loaded, in.pos};
+    ZSTD_outBuffer dst{out.data, out.capacity, out.pos};
+    const size_t result = ZSTD_decompressStream(m_stream, &dst, &src);
+    in.pos = src.pos;
+    out.pos = dst.pos;
+
+    m_finished = result == 0;
+    return !ZSTD_isError(result);
+  }
+
+private:
+  ZSTD_DStream* m_stream;
+};
+
+// ---------------------------------------------------------------------------------------------
+
+class RVZUnpacker final : public Decoder
+{
+public:
+  RVZUnpacker(std::unique_ptr<Decoder> inner, std::vector<u8> already_decoded, u64 data_offset,
+              u32 packed_size)
+      : m_inner(std::move(inner)), m_packed(std::move(already_decoded)),
+        m_packed_filled(m_packed.size()), m_inner_produced(m_packed.size()),
+        m_data_offset(data_offset), m_packed_size(packed_size)
+  {
+  }
+
+  bool Finished() const override
+  {
+    return m_record_left == 0 && m_inner_produced == m_packed_size &&
+           m_packed_filled == m_packed_read && m_inner->Finished();
+  }
+
+  bool Step(DecodeInput& in, DecodeOutput& out) override
+  {
+    while (out.pos != out.capacity && !Finished())
+    {
+      if (m_record_left == 0)
+      {
+        // Start of a record: decode its header into m_packed.
+        if (m_packed_read == m_packed_filled)
+        {
+          m_packed.assign(RVZ_SIZE_FIELD, 0);
+          m_packed_filled = 0;
+          m_packed_read = 0;
+        }
+
+        if (const std::optional<bool> wait = NeedPacked(in, m_packed_read + RVZ_SIZE_FIELD))
+          return *wait;
+        const u32 field = Common::swap32(m_packed.data() + m_packed_read);
+
+        m_in_junk = (field & RVZ_JUNK_FLAG) != 0;
+        if (m_in_junk)
+        {
+          const size_t seed_at = m_packed_read + RVZ_SIZE_FIELD;
+          if (const std::optional<bool> wait = NeedPacked(in, seed_at + RVZ_SEED_BYTES))
+            return *wait;
+          m_junk.SetSeed(m_packed.data() + seed_at);
+          m_junk.Forward(m_data_offset % JUNK_SECTOR);
+          m_packed_read += RVZ_SEED_BYTES;
+        }
+        m_packed_read += RVZ_SIZE_FIELD;
+        m_record_left = field & ~RVZ_JUNK_FLAG;
+      }
+
+      size_t n = std::min<size_t>(m_record_left, out.capacity - out.pos);
+      if (m_in_junk)
+      {
+        m_junk.GetBytes(n, out.data + out.pos);
+        out.pos += n;
+      }
+      else if (m_packed_read != m_packed_filled)
+      {
+        // Data bytes that were decoded along with a header.
+        n = std::min(n, m_packed_filled - m_packed_read);
+        std::memcpy(out.data + out.pos, m_packed.data() + m_packed_read, n);
+        m_packed_read += n;
+        out.pos += n;
       }
       else
       {
-        sequence_length = 0;
-        non_zero_data_end = i + 1;
+        // Straight from the inner decoder into the output, but no further than this record.
+        DecodeOutput limited{out.data, out.pos + n, out.pos};
+        if (!m_inner->Step(in, limited))
+          return false;
+        n = limited.pos - out.pos;
+        out.pos = limited.pos;
+        if (!CountInner(n))
+          return false;
+        if (n == 0)
+          return true;  // needs more input
       }
 
-      // To avoid wasting space, only count runs of zeroes that are of a certain length
-      // (unless there is nothing after the run of zeroes, then we might as well always count it)
-      if (sequence_length > sizeof(PurgeSegment))
+      m_data_offset += n;
+      m_record_left -= static_cast<u32>(n);
+    }
+
+    // With the output full, let the inner decoder consume what's left of the input (zstd may
+    // still have to read its frame's end).
+    if (out.pos == out.capacity && in.loaded != in.pos)
+    {
+      if (!m_inner->Step(in, out))
+        return false;
+    }
+    return true;
+  }
+
+private:
+  // Makes sure m_packed holds `needed` bytes. nullopt: they're there. Otherwise the value to
+  // return from Step: true to wait for more input, false on an error.
+  std::optional<bool> NeedPacked(DecodeInput& in, size_t needed)
+  {
+    if (m_packed.size() < needed)
+      m_packed.resize(needed);
+    if (m_packed_filled >= needed)
+      return std::nullopt;
+
+    DecodeOutput into{m_packed.data(), m_packed.size(), m_packed_filled};
+    if (!m_inner->Step(in, into))
+      return false;
+    const size_t n = into.pos - m_packed_filled;
+    m_packed_filled = into.pos;
+    if (!CountInner(n))
+      return false;
+    if (m_packed_filled < needed)
+      return true;
+    return std::nullopt;
+  }
+
+  // The inner decoder may not produce more than the packed size the group entry claims.
+  bool CountInner(size_t n)
+  {
+    m_inner_produced += n;
+    return m_inner_produced <= m_packed_size;
+  }
+
+  std::unique_ptr<Decoder> m_inner;
+  std::vector<u8> m_packed;  // record headers (and sometimes data) decoded by m_inner
+  size_t m_packed_filled;
+  size_t m_packed_read = 0;
+  size_t m_inner_produced;
+  u64 m_data_offset;
+  const u32 m_packed_size;
+
+  u32 m_record_left = 0;
+  bool m_in_junk = false;
+  LaggedFibonacciGenerator m_junk;
+};
+
+// ---------------------------------------------------------------------------------------------
+
+// Output storage shared by the library-backed encoders: grows by the input size when input is
+// fed, and in small steps whenever the library runs out of room.
+class GrowingOutput
+{
+public:
+  void Reset() { m_bytes.clear(); }
+  // Grows the buffer; returns the new room after `used` bytes.
+  size_t Grow(size_t used, size_t extra)
+  {
+    m_bytes.resize(m_bytes.size() + extra);
+    return m_bytes.size() - used;
+  }
+  u8* At(size_t pos) { return m_bytes.data() + pos; }
+  const u8* Data() const { return m_bytes.data(); }
+
+  static constexpr size_t STEP = 0x100;
+
+private:
+  std::vector<u8> m_bytes;
+};
+
+class PurgeEncoder final : public Encoder
+{
+public:
+  bool Begin(std::optional<u64>) override
+  {
+    m_out.clear();
+    m_size = 0;
+    m_hash = Common::SHA1::CreateContext();
+    return true;
+  }
+
+  bool HashOnly(const u8* data, size_t size) override
+  {
+    m_hash->Update(data, size);
+    return true;
+  }
+
+  bool Feed(const u8* data, size_t size) override
+  {
+    ASSERT_MSG(DISCIO, m_size == 0, "PurgeEncoder takes its input in one piece");
+
+    // Records never take more room than the zeroes they leave out, so this always suffices.
+    m_out.resize(size + PURGE_RECORD_HEADER + PURGE_HASH);
+
+    size_t pos = 0;
+    while (true)
+    {
+      const size_t start = static_cast<size_t>(
+          std::find_if(data + pos, data + size, [](u8 b) { return b != 0; }) - data);
+      if (start == size)
         break;
+
+      // A record ends at its last non-zero byte before a run of more zeroes than a record
+      // header would cost (or at the end of the input).
+      size_t end = start;
+      size_t zero_run = 0;
+      for (size_t i = start; i < size && zero_run <= PURGE_RECORD_HEADER; ++i)
+      {
+        if (data[i] == 0)
+        {
+          ++zero_run;
+        }
+        else
+        {
+          zero_run = 0;
+          end = i + 1;
+        }
+      }
+
+      const u32 header[2] = {Common::swap32(static_cast<u32>(start)),
+                             Common::swap32(static_cast<u32>(end - start))};
+      std::memcpy(m_out.data() + m_size, header, sizeof(header));
+      m_size += sizeof(header);
+      std::memcpy(m_out.data() + m_size, data + start, end - start);
+      m_size += end - start;
+      pos = end;
     }
-
-    const u32 non_zero_data_length = static_cast<u32>(non_zero_data_end - non_zero_data_start);
-
-    const PurgeSegment segment{Common::swap32(non_zero_data_start),
-                               Common::swap32(non_zero_data_length)};
-    std::memcpy(m_buffer.data() + m_bytes_written, &segment, sizeof(segment));
-    m_bytes_written += sizeof(segment);
-
-    std::memcpy(m_buffer.data() + m_bytes_written, data + non_zero_data_start,
-                non_zero_data_length);
-    m_bytes_written += non_zero_data_length;
-
-    bytes_read = non_zero_data_end;
+    return true;
   }
 
-  return true;
-}
-
-bool PurgeCompressor::End()
-{
-  m_sha1_context->Update(m_buffer.data(), m_bytes_written);
-
-  const auto digest = m_sha1_context->Finish();
-  std::memcpy(m_buffer.data() + m_bytes_written, digest.data(), sizeof(digest));
-
-  m_bytes_written += sizeof(digest);
-
-  ASSERT(m_bytes_written <= m_buffer.size());
-
-  return true;
-}
-
-const u8* PurgeCompressor::GetData() const
-{
-  return m_buffer.data();
-}
-
-size_t PurgeCompressor::GetSize() const
-{
-  return m_bytes_written;
-}
-
-Bzip2Compressor::Bzip2Compressor(int compression_level) : m_compression_level(compression_level)
-{
-}
-
-Bzip2Compressor::~Bzip2Compressor()
-{
-  BZ2_bzCompressEnd(&m_stream);
-}
-
-bool Bzip2Compressor::Start(std::optional<u64> size)
-{
-  ASSERT_MSG(DISCIO, m_stream.state == nullptr,
-             "Called Bzip2Compressor::Start() twice without calling Bzip2Compressor::End()");
-
-  m_buffer.clear();
-  m_stream.next_out = reinterpret_cast<char*>(m_buffer.data());
-
-  return BZ2_bzCompressInit(&m_stream, m_compression_level, 0, 0) == BZ_OK;
-}
-
-bool Bzip2Compressor::Compress(const u8* data, size_t size)
-{
-  m_stream.next_in = reinterpret_cast<char*>(const_cast<u8*>(data));
-  m_stream.avail_in = static_cast<unsigned int>(size);
-
-  ExpandBuffer(size);
-
-  while (m_stream.avail_in != 0)
+  bool Finish() override
   {
-    if (m_stream.avail_out == 0)
-      ExpandBuffer(0x100);
-
-    if (BZ2_bzCompress(&m_stream, BZ_RUN) != BZ_RUN_OK)
-      return false;
+    m_hash->Update(m_out.data(), m_size);
+    const Common::SHA1::Digest digest = m_hash->Finish();
+    std::memcpy(m_out.data() + m_size, digest.data(), digest.size());
+    m_size += digest.size();
+    ASSERT(m_size <= m_out.size());
+    return true;
   }
 
-  return true;
-}
+  const u8* Data() const override { return m_out.data(); }
+  size_t Size() const override { return m_size; }
 
-bool Bzip2Compressor::End()
+private:
+  std::vector<u8> m_out;
+  size_t m_size = 0;
+  std::unique_ptr<Common::SHA1::Context> m_hash;
+};
+
+class Bzip2Encoder final : public Encoder
 {
-  bool success = true;
+public:
+  explicit Bzip2Encoder(int level) : m_level(level) {}
+  ~Bzip2Encoder() override { BZ2_bzCompressEnd(&m_stream); }
 
-  while (true)
+  bool Begin(std::optional<u64>) override
   {
-    if (m_stream.avail_out == 0)
-      ExpandBuffer(0x100);
-
-    const int result = BZ2_bzCompress(&m_stream, BZ_FINISH);
-    if (result != BZ_FINISH_OK && result != BZ_STREAM_END)
-      success = false;
-    if (result != BZ_FINISH_OK)
-      break;
+    ASSERT_MSG(DISCIO, m_stream.state == nullptr, "Bzip2Encoder::Begin called twice");
+    m_out.Reset();
+    m_stream.next_out = reinterpret_cast<char*>(m_out.At(0));
+    m_stream.avail_out = 0;
+    return BZ2_bzCompressInit(&m_stream, m_level, 0, 0) == BZ_OK;
   }
 
-  if (BZ2_bzCompressEnd(&m_stream) != BZ_OK)
-    success = false;
-
-  return success;
-}
-
-void Bzip2Compressor::ExpandBuffer(size_t bytes_to_add)
-{
-  const size_t bytes_written = GetSize();
-  m_buffer.resize(m_buffer.size() + bytes_to_add);
-  m_stream.next_out = reinterpret_cast<char*>(m_buffer.data()) + bytes_written;
-  m_stream.avail_out = static_cast<unsigned int>(m_buffer.size() - bytes_written);
-}
-
-const u8* Bzip2Compressor::GetData() const
-{
-  return m_buffer.data();
-}
-
-size_t Bzip2Compressor::GetSize() const
-{
-  return static_cast<size_t>(reinterpret_cast<u8*>(m_stream.next_out) - m_buffer.data());
-}
-
-LZMACompressor::LZMACompressor(bool lzma2, int compression_level, u8 compressor_data_out[7],
-                               u8* compressor_data_size_out)
-{
-  // lzma_lzma_preset returns false on success for some reason
-  if (lzma_lzma_preset(&m_options, static_cast<uint32_t>(compression_level)))
+  bool Feed(const u8* data, size_t size) override
   {
-    m_initialization_failed = true;
-    return;
-  }
-
-  if (!lzma2)
-  {
-    if (compressor_data_size_out)
-      *compressor_data_size_out = 5;
-
-    if (compressor_data_out)
+    m_stream.next_in = reinterpret_cast<char*>(const_cast<u8*>(data));
+    m_stream.avail_in = static_cast<unsigned int>(size);
+    Grow(size);
+    while (m_stream.avail_in != 0)
     {
-      ASSERT(m_options.lc < 9);
-      ASSERT(m_options.lp < 5);
-      ASSERT(m_options.pb < 5);
-      compressor_data_out[0] =
-          static_cast<u8>((m_options.pb * 5 + m_options.lp) * 9 + m_options.lc);
-
-      // The dictionary size is stored as a 32-bit little endian unsigned integer
-      static_assert(sizeof(m_options.dict_size) == sizeof(u32));
-      std::memcpy(compressor_data_out + 1, &m_options.dict_size, sizeof(u32));
+      if (m_stream.avail_out == 0)
+        Grow(GrowingOutput::STEP);
+      if (BZ2_bzCompress(&m_stream, BZ_RUN) != BZ_RUN_OK)
+        return false;
     }
+    return true;
   }
-  else
-  {
-    if (compressor_data_size_out)
-      *compressor_data_size_out = 1;
 
-    if (compressor_data_out)
+  bool Finish() override
+  {
+    bool ok = true;
+    int result;
+    do
     {
-      u8 encoded_dict_size = 0;
-      while (encoded_dict_size < 40 && m_options.dict_size > LZMA2DictionarySize(encoded_dict_size))
-        ++encoded_dict_size;
+      if (m_stream.avail_out == 0)
+        Grow(GrowingOutput::STEP);
+      result = BZ2_bzCompress(&m_stream, BZ_FINISH);
+      if (result != BZ_FINISH_OK && result != BZ_STREAM_END)
+        ok = false;
+    } while (result == BZ_FINISH_OK);
 
-      compressor_data_out[0] = encoded_dict_size;
-    }
+    if (BZ2_bzCompressEnd(&m_stream) != BZ_OK)
+      ok = false;
+    return ok;
   }
 
-  m_filters[0].id = lzma2 ? LZMA_FILTER_LZMA2 : LZMA_FILTER_LZMA1;
-  m_filters[0].options = &m_options;
-  m_filters[1].id = LZMA_VLI_UNKNOWN;
-  m_filters[1].options = nullptr;
-}
-
-LZMACompressor::~LZMACompressor()
-{
-  lzma_end(&m_stream);
-}
-
-bool LZMACompressor::Start(std::optional<u64> size)
-{
-  if (m_initialization_failed)
-    return false;
-
-  m_buffer.clear();
-  m_stream.next_out = m_buffer.data();
-
-  return lzma_raw_encoder(&m_stream, m_filters) == LZMA_OK;
-}
-
-bool LZMACompressor::Compress(const u8* data, size_t size)
-{
-  m_stream.next_in = data;
-  m_stream.avail_in = size;
-
-  ExpandBuffer(size);
-
-  while (m_stream.avail_in != 0)
+  const u8* Data() const override { return m_out.Data(); }
+  size_t Size() const override
   {
-    if (m_stream.avail_out == 0)
-      ExpandBuffer(0x100);
-
-    if (lzma_code(&m_stream, LZMA_RUN) != LZMA_OK)
-      return false;
+    return static_cast<size_t>(reinterpret_cast<const u8*>(m_stream.next_out) - m_out.Data());
   }
 
-  return true;
-}
-
-bool LZMACompressor::End()
-{
-  while (true)
+private:
+  void Grow(size_t extra)
   {
-    if (m_stream.avail_out == 0)
-      ExpandBuffer(0x100);
+    const size_t used = Size();
+    m_stream.avail_out = static_cast<unsigned int>(m_out.Grow(used, extra));
+    m_stream.next_out = reinterpret_cast<char*>(m_out.At(used));
+  }
 
-    switch (lzma_code(&m_stream, LZMA_FINISH))
+  bz_stream m_stream{};
+  GrowingOutput m_out;
+  int m_level;
+};
+
+class LzmaEncoder final : public Encoder
+{
+public:
+  LzmaEncoder(bool lzma2, int level, u8* props_out, u8* props_size_out)
+  {
+    // lzma_lzma_preset returns true on failure.
+    if (lzma_lzma_preset(&m_options, static_cast<uint32_t>(level)))
+      return;
+    m_usable = true;
+
+    if (lzma2)
     {
-    case LZMA_OK:
-      break;
-    case LZMA_STREAM_END:
-      return true;
-    default:
+      if (props_size_out)
+        *props_size_out = 1;
+      if (props_out)
+      {
+        // The smallest code whose dictionary is big enough.
+        u8 code = 0;
+        while (code < 40 && m_options.dict_size > Lzma2DictSize(code))
+          ++code;
+        props_out[0] = code;
+      }
+    }
+    else
+    {
+      if (props_size_out)
+        *props_size_out = 5;
+      if (props_out)
+      {
+        ASSERT(m_options.lc < 9 && m_options.lp < 5 && m_options.pb < 5);
+        props_out[0] = static_cast<u8>((m_options.pb * 5 + m_options.lp) * 9 + m_options.lc);
+        std::memcpy(props_out + 1, &m_options.dict_size, sizeof(u32));
+      }
+    }
+
+    m_filters[0] = {lzma2 ? LZMA_FILTER_LZMA2 : LZMA_FILTER_LZMA1, &m_options};
+    m_filters[1] = {LZMA_VLI_UNKNOWN, nullptr};
+  }
+
+  ~LzmaEncoder() override { lzma_end(&m_stream); }
+
+  bool Begin(std::optional<u64>) override
+  {
+    if (!m_usable)
       return false;
+    m_out.Reset();
+    m_stream.next_out = m_out.At(0);
+    m_stream.avail_out = 0;
+    return lzma_raw_encoder(&m_stream, m_filters) == LZMA_OK;
+  }
+
+  bool Feed(const u8* data, size_t size) override
+  {
+    m_stream.next_in = data;
+    m_stream.avail_in = size;
+    Grow(size);
+    while (m_stream.avail_in != 0)
+    {
+      if (m_stream.avail_out == 0)
+        Grow(GrowingOutput::STEP);
+      if (lzma_code(&m_stream, LZMA_RUN) != LZMA_OK)
+        return false;
+    }
+    return true;
+  }
+
+  bool Finish() override
+  {
+    while (true)
+    {
+      if (m_stream.avail_out == 0)
+        Grow(GrowingOutput::STEP);
+      const lzma_ret result = lzma_code(&m_stream, LZMA_FINISH);
+      if (result == LZMA_STREAM_END)
+        return true;
+      if (result != LZMA_OK)
+        return false;
     }
   }
-}
 
-void LZMACompressor::ExpandBuffer(size_t bytes_to_add)
-{
-  const size_t bytes_written = GetSize();
-  m_buffer.resize(m_buffer.size() + bytes_to_add);
-  m_stream.next_out = m_buffer.data() + bytes_written;
-  m_stream.avail_out = m_buffer.size() - bytes_written;
-}
+  const u8* Data() const override { return m_out.Data(); }
+  size_t Size() const override { return static_cast<size_t>(m_stream.next_out - m_out.Data()); }
 
-const u8* LZMACompressor::GetData() const
-{
-  return m_buffer.data();
-}
-
-size_t LZMACompressor::GetSize() const
-{
-  return static_cast<size_t>(m_stream.next_out - m_buffer.data());
-}
-
-ZstdCompressor::ZstdCompressor(int compression_level)
-{
-  m_stream = ZSTD_createCStream();
-
-  if (ZSTD_isError(ZSTD_CCtx_setParameter(m_stream, ZSTD_c_compressionLevel, compression_level)) ||
-      ZSTD_isError(ZSTD_CCtx_setParameter(m_stream, ZSTD_c_contentSizeFlag, 0)))
+private:
+  void Grow(size_t extra)
   {
-    m_stream = nullptr;
+    const size_t used = Size();
+    m_stream.avail_out = m_out.Grow(used, extra);
+    m_stream.next_out = m_out.At(used);
   }
-}
 
-ZstdCompressor::~ZstdCompressor()
+  lzma_stream m_stream = LZMA_STREAM_INIT;
+  lzma_options_lzma m_options{};
+  lzma_filter m_filters[2]{};
+  GrowingOutput m_out;
+  bool m_usable = false;
+};
+
+class ZstdEncoder final : public Encoder
 {
-  ZSTD_freeCStream(m_stream);
-}
-
-bool ZstdCompressor::Start(std::optional<u64> size)
-{
-  if (!m_stream)
-    return false;
-
-  m_buffer.clear();
-  m_out_buffer = {};
-
-  if (ZSTD_isError(ZSTD_CCtx_reset(m_stream, ZSTD_reset_session_only)))
-    return false;
-
-  if (size)
+public:
+  explicit ZstdEncoder(int level) : m_stream(ZSTD_createCStream())
   {
-    if (ZSTD_isError(ZSTD_CCtx_setPledgedSrcSize(m_stream, *size)))
+    // No content size in the frame header: the group entry already records it.
+    if (ZSTD_isError(ZSTD_CCtx_setParameter(m_stream, ZSTD_c_compressionLevel, level)) ||
+        ZSTD_isError(ZSTD_CCtx_setParameter(m_stream, ZSTD_c_contentSizeFlag, 0)))
+    {
+      ZSTD_freeCStream(m_stream);
+      m_stream = nullptr;
+    }
+  }
+
+  ~ZstdEncoder() override { ZSTD_freeCStream(m_stream); }
+
+  bool Begin(std::optional<u64> input_size) override
+  {
+    if (!m_stream)
       return false;
-  }
-
-  return true;
-}
-
-bool ZstdCompressor::Compress(const u8* data, size_t size)
-{
-  ZSTD_inBuffer in_buffer{data, size, 0};
-
-  ExpandBuffer(size);
-
-  while (in_buffer.size != in_buffer.pos)
-  {
-    if (m_out_buffer.size == m_out_buffer.pos)
-      ExpandBuffer(0x100);
-
-    if (ZSTD_isError(ZSTD_compressStream(m_stream, &m_out_buffer, &in_buffer)))
+    m_out.Reset();
+    m_dst = {};
+    if (ZSTD_isError(ZSTD_CCtx_reset(m_stream, ZSTD_reset_session_only)))
       return false;
-  }
-
-  return true;
-}
-
-bool ZstdCompressor::End()
-{
-  while (true)
-  {
-    if (m_out_buffer.size == m_out_buffer.pos)
-      ExpandBuffer(0x100);
-
-    const size_t result = ZSTD_endStream(m_stream, &m_out_buffer);
-    if (ZSTD_isError(result))
+    if (input_size && ZSTD_isError(ZSTD_CCtx_setPledgedSrcSize(m_stream, *input_size)))
       return false;
-    if (result == 0)
-      return true;
+    return true;
   }
+
+  bool Feed(const u8* data, size_t size) override
+  {
+    ZSTD_inBuffer src{data, size, 0};
+    Grow(size);
+    while (src.pos != src.size)
+    {
+      if (m_dst.pos == m_dst.size)
+        Grow(GrowingOutput::STEP);
+      if (ZSTD_isError(ZSTD_compressStream(m_stream, &m_dst, &src)))
+        return false;
+    }
+    return true;
+  }
+
+  bool Finish() override
+  {
+    while (true)
+    {
+      if (m_dst.pos == m_dst.size)
+        Grow(GrowingOutput::STEP);
+      const size_t left = ZSTD_endStream(m_stream, &m_dst);
+      if (ZSTD_isError(left))
+        return false;
+      if (left == 0)
+        return true;
+    }
+  }
+
+  const u8* Data() const override { return m_out.Data(); }
+  size_t Size() const override { return m_dst.pos; }
+
+private:
+  void Grow(size_t extra)
+  {
+    m_dst.size = m_dst.pos + m_out.Grow(m_dst.pos, extra);
+    m_dst.dst = m_out.At(0);
+  }
+
+  ZSTD_CStream* m_stream;
+  ZSTD_outBuffer m_dst{};
+  GrowingOutput m_out;
+};
+}  // namespace
+
+Decoder::~Decoder() = default;
+Encoder::~Encoder() = default;
+
+std::unique_ptr<Decoder> MakeDecoder(WIARVZCompressionType type, const u8* compressor_data,
+                                     size_t compressor_data_size, u64 purge_output_size)
+{
+  switch (type)
+  {
+  case WIARVZCompressionType::None:
+    return std::make_unique<CopyDecoder>();
+  case WIARVZCompressionType::Purge:
+    return std::make_unique<PurgeDecoder>(purge_output_size);
+  case WIARVZCompressionType::Bzip2:
+    return std::make_unique<Bzip2Decoder>();
+  case WIARVZCompressionType::LZMA:
+    return std::make_unique<LzmaDecoder>(false, compressor_data, compressor_data_size);
+  case WIARVZCompressionType::LZMA2:
+    return std::make_unique<LzmaDecoder>(true, compressor_data, compressor_data_size);
+  case WIARVZCompressionType::Zstd:
+    return std::make_unique<ZstdDecoder>();
+  }
+  return nullptr;
 }
 
-void ZstdCompressor::ExpandBuffer(size_t bytes_to_add)
+std::unique_ptr<Decoder> MakeRVZUnpacker(std::unique_ptr<Decoder> inner,
+                                         std::vector<u8> already_decoded, u64 data_offset,
+                                         u32 packed_size)
 {
-  m_buffer.resize(m_buffer.size() + bytes_to_add);
+  return std::make_unique<RVZUnpacker>(std::move(inner), std::move(already_decoded), data_offset,
+                                       packed_size);
+}
 
-  m_out_buffer.dst = m_buffer.data();
-  m_out_buffer.size = m_buffer.size();
+std::unique_ptr<Encoder> MakeEncoder(WIARVZCompressionType type, int level,
+                                     u8* compressor_data_out, u8* compressor_data_size_out)
+{
+  switch (type)
+  {
+  case WIARVZCompressionType::None:
+    return nullptr;
+  case WIARVZCompressionType::Purge:
+    return std::make_unique<PurgeEncoder>();
+  case WIARVZCompressionType::Bzip2:
+    return std::make_unique<Bzip2Encoder>(level);
+  case WIARVZCompressionType::LZMA:
+  case WIARVZCompressionType::LZMA2:
+    return std::make_unique<LzmaEncoder>(type == WIARVZCompressionType::LZMA2, level,
+                                         compressor_data_out, compressor_data_size_out);
+  case WIARVZCompressionType::Zstd:
+    return std::make_unique<ZstdEncoder>(level);
+  }
+  return nullptr;
 }
 
 }  // namespace DiscIO

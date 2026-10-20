@@ -1,14 +1,14 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DiscIO/WiiEncryptionCache.h"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
-#include <limits>
+#include <functional>
 #include <memory>
 
-#include "Common/Align.h"
+#include "Common/Assert.h"
 #include "Common/CommonTypes.h"
 #include "DiscIO/Blob.h"
 #include "DiscIO/VolumeWii.h"
@@ -26,67 +26,51 @@ WiiEncryptionCache::EncryptGroup(u64 offset, u64 partition_data_offset,
                                  u64 partition_data_decrypted_size, const Key& key,
                                  const HashExceptionCallback& hash_exception_callback)
 {
-  // Only allocate memory if this function actually ends up getting called
-  if (!m_cache)
-  {
-    m_cache = std::make_unique<std::array<u8, VolumeWii::GROUP_TOTAL_SIZE>>();
-    m_cached_offset = std::numeric_limits<u64>::max();
-  }
-
   ASSERT(offset % VolumeWii::GROUP_TOTAL_SIZE == 0);
-  const u64 group_offset_in_partition =
-      offset / VolumeWii::GROUP_TOTAL_SIZE * VolumeWii::GROUP_DATA_SIZE;
-  const u64 group_offset_on_disc = partition_data_offset + offset;
 
-  if (m_cached_offset != group_offset_on_disc)
+  const u64 disc_offset = partition_data_offset + offset;
+  if (m_group && m_group_valid && m_group_disc_offset == disc_offset)
+    return m_group.get();
+
+  if (!m_group)
+    m_group = std::make_unique<Group>();
+
+  // VolumeWii's callback doesn't take the offset; supply it here.
+  std::function<void(VolumeWii::HashBlock*)> patch_hashes;
+  if (hash_exception_callback)
   {
-    std::function<void(VolumeWii::HashBlock * hash_blocks)> hash_exception_callback_2;
-
-    if (hash_exception_callback)
-    {
-      hash_exception_callback_2 =
-          [offset, &hash_exception_callback](
-              VolumeWii::HashBlock hash_blocks[VolumeWii::BLOCKS_PER_GROUP]) {
-            return hash_exception_callback(hash_blocks, offset);
-          };
-    }
-
-    if (!VolumeWii::EncryptGroup(group_offset_in_partition, partition_data_offset,
-                                 partition_data_decrypted_size, key, m_blob, m_cache.get(),
-                                 hash_exception_callback_2))
-    {
-      m_cached_offset = std::numeric_limits<u64>::max();  // Invalidate the cache
-      return nullptr;
-    }
-
-    m_cached_offset = group_offset_on_disc;
+    patch_hashes = [&hash_exception_callback, offset](VolumeWii::HashBlock* hash_blocks) {
+      hash_exception_callback(hash_blocks, offset);
+    };
   }
 
-  return m_cache.get();
+  const u64 decrypted_offset = offset / VolumeWii::GROUP_TOTAL_SIZE * VolumeWii::GROUP_DATA_SIZE;
+  m_group_valid = VolumeWii::EncryptGroup(decrypted_offset, partition_data_offset,
+                                          partition_data_decrypted_size, key, m_blob,
+                                          m_group.get(), patch_hashes);
+  m_group_disc_offset = disc_offset;
+  return m_group_valid ? m_group.get() : nullptr;
 }
 
 bool WiiEncryptionCache::EncryptGroups(u64 offset, u64 size, u8* out_ptr, u64 partition_data_offset,
                                        u64 partition_data_decrypted_size, const Key& key,
                                        const HashExceptionCallback& hash_exception_callback)
 {
+  constexpr u64 GROUP = VolumeWii::GROUP_TOTAL_SIZE;
   while (size > 0)
   {
-    const std::array<u8, VolumeWii::GROUP_TOTAL_SIZE>* group =
-        EncryptGroup(Common::AlignDown(offset, VolumeWii::GROUP_TOTAL_SIZE), partition_data_offset,
-                     partition_data_decrypted_size, key, hash_exception_callback);
-
+    const u64 in_group = offset % GROUP;
+    const Group* group = EncryptGroup(offset - in_group, partition_data_offset,
+                                      partition_data_decrypted_size, key, hash_exception_callback);
     if (!group)
       return false;
 
-    const u64 offset_in_group = offset % VolumeWii::GROUP_TOTAL_SIZE;
-    const u64 bytes_to_read = std::min(VolumeWii::GROUP_TOTAL_SIZE - offset_in_group, size);
-    std::memcpy(out_ptr, group->data() + offset_in_group, bytes_to_read);
-
-    offset += bytes_to_read;
-    size -= bytes_to_read;
-    out_ptr += bytes_to_read;
+    const u64 n = std::min(GROUP - in_group, size);
+    std::memcpy(out_ptr, group->data() + in_group, n);
+    offset += n;
+    out_ptr += n;
+    size -= n;
   }
-
   return true;
 }
 

@@ -1,249 +1,88 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
+
+// The compression layers used inside WIA and RVZ files (an internal part of WIABlob).
 
 #include <cstddef>
 #include <memory>
 #include <optional>
 #include <vector>
 
-#include <bzlib.h>
-#include <lzma.h>
-#include <zstd.h>
-
 #include "Common/CommonTypes.h"
-#include "Common/Crypto/SHA1.h"
-#include "DiscIO/LaggedFibonacciGenerator.h"
 
 namespace DiscIO
 {
-struct DecompressionBuffer
+enum class WIARVZCompressionType : u32;
+
+// ---------------------------------------------------------------------------------------------
+// Decoding. A decoder is fed a group's compressed bytes as they're loaded from the file and
+// writes into a fixed output area; each Step() consumes and produces as much as it can.
+
+struct DecodeInput
 {
-  std::vector<u8> data;
-  size_t bytes_written = 0;
+  const u8* data = nullptr;
+  size_t loaded = 0;  // bytes of data available so far
+  size_t total = 0;   // bytes the group's compressed data has in all
+  size_t pos = 0;     // bytes consumed; advanced by the decoder
 };
 
-struct PurgeSegment
+struct DecodeOutput
 {
-  u32 offset;
-  u32 size;
+  u8* data = nullptr;
+  size_t capacity = 0;
+  size_t pos = 0;  // bytes produced; advanced by the decoder
 };
-static_assert(sizeof(PurgeSegment) == 0x08, "Wrong size for WIA purge segment");
 
-class Decompressor
+class Decoder
 {
 public:
-  virtual ~Decompressor();
+  virtual ~Decoder();
 
-  virtual bool Decompress(const DecompressionBuffer& in, DecompressionBuffer* out,
-                          size_t* in_bytes_read) = 0;
-  virtual bool Done() const { return m_done; }
+  // False on corrupt data.
+  virtual bool Step(DecodeInput& in, DecodeOutput& out) = 0;
+  // True once the end of the compressed stream has been reached.
+  virtual bool Finished() const { return m_finished; }
 
 protected:
-  bool m_done = false;
+  bool m_finished = false;
 };
 
-class NoneDecompressor final : public Decompressor
+// For Purge, `purge_output_size` is the size the data decompresses to. The compressor data is
+// what the file's header stores for LZMA and LZMA2.
+std::unique_ptr<Decoder> MakeDecoder(WIARVZCompressionType type, const u8* compressor_data,
+                                     size_t compressor_data_size, u64 purge_output_size);
+
+// Undoes RVZ packing on top of `inner`'s output. `already_decoded` holds output of `inner`
+// that was produced before packing was known to apply. `data_offset` is the offset of the
+// group's data in its partition (or on the disc), which the junk generator needs.
+std::unique_ptr<Decoder> MakeRVZUnpacker(std::unique_ptr<Decoder> inner,
+                                         std::vector<u8> already_decoded, u64 data_offset,
+                                         u32 packed_size);
+
+// ---------------------------------------------------------------------------------------------
+// Encoding. Call Begin, then optionally HashOnly, then Feed, then Finish; afterwards Data() and
+// Size() give the result.
+
+class Encoder
 {
 public:
-  bool Decompress(const DecompressionBuffer& in, DecompressionBuffer* out,
-                  size_t* in_bytes_read) override;
+  virtual ~Encoder();
+
+  virtual bool Begin(std::optional<u64> input_size) = 0;
+  // Purge includes data stored in front of the compressed data (the hash exception lists) in
+  // its checksum; other encoders ignore this.
+  virtual bool HashOnly(const u8* data, size_t size) { return true; }
+  virtual bool Feed(const u8* data, size_t size) = 0;
+  virtual bool Finish() = 0;
+
+  virtual const u8* Data() const = 0;
+  virtual size_t Size() const = 0;
 };
 
-// This class assumes that more bytes won't be added to in once in.bytes_written == in.data.size()
-// and that *in_bytes_read initially will be equal to the size of the exception lists
-class PurgeDecompressor final : public Decompressor
-{
-public:
-  PurgeDecompressor(u64 decompressed_size);
-  bool Decompress(const DecompressionBuffer& in, DecompressionBuffer* out,
-                  size_t* in_bytes_read) override;
-
-private:
-  const u64 m_decompressed_size;
-
-  PurgeSegment m_segment = {};
-  size_t m_bytes_read = 0;
-  size_t m_segment_bytes_written = 0;
-  size_t m_out_bytes_written = 0;
-  bool m_started = false;
-
-  std::unique_ptr<Common::SHA1::Context> m_sha1_context;
-};
-
-class Bzip2Decompressor final : public Decompressor
-{
-public:
-  ~Bzip2Decompressor() override;
-
-  bool Decompress(const DecompressionBuffer& in, DecompressionBuffer* out,
-                  size_t* in_bytes_read) override;
-
-private:
-  bz_stream m_stream = {};
-  bool m_started = false;
-};
-
-class LZMADecompressor final : public Decompressor
-{
-public:
-  LZMADecompressor(bool lzma2, const u8* filter_options, size_t filter_options_size);
-  ~LZMADecompressor() override;
-
-  bool Decompress(const DecompressionBuffer& in, DecompressionBuffer* out,
-                  size_t* in_bytes_read) override;
-
-private:
-  lzma_stream m_stream = LZMA_STREAM_INIT;
-  lzma_options_lzma m_options = {};
-  lzma_filter m_filters[2];
-  bool m_started = false;
-  bool m_error_occurred = false;
-};
-
-class ZstdDecompressor final : public Decompressor
-{
-public:
-  ZstdDecompressor();
-  ~ZstdDecompressor() override;
-
-  bool Decompress(const DecompressionBuffer& in, DecompressionBuffer* out,
-                  size_t* in_bytes_read) override;
-
-private:
-  ZSTD_DStream* m_stream;
-};
-
-class RVZPackDecompressor final : public Decompressor
-{
-public:
-  RVZPackDecompressor(std::unique_ptr<Decompressor> decompressor, DecompressionBuffer decompressed,
-                      u64 data_offset, u32 rvz_packed_size);
-
-  bool Decompress(const DecompressionBuffer& in, DecompressionBuffer* out,
-                  size_t* in_bytes_read) override;
-
-  bool Done() const override;
-
-private:
-  bool IncrementBytesRead(size_t x);
-  std::optional<bool> ReadToDecompressed(const DecompressionBuffer& in, size_t* in_bytes_read,
-                                         size_t decompressed_bytes_read, size_t bytes_to_read);
-
-  std::unique_ptr<Decompressor> m_decompressor;
-  DecompressionBuffer m_decompressed;
-  size_t m_decompressed_bytes_read = 0;
-  size_t m_bytes_read;
-  u64 m_data_offset;
-  u32 m_rvz_packed_size;
-
-  u32 m_size = 0;
-  bool m_junk = false;
-  LaggedFibonacciGenerator m_lfg;
-};
-
-class Compressor
-{
-public:
-  virtual ~Compressor();
-
-  // First call Start, then AddDataOnlyForPurgeHashing/Compress any number of times,
-  // then End, then GetData/GetSize any number of times.
-
-  virtual bool Start(std::optional<u64> size) = 0;
-  virtual bool AddPrecedingDataOnlyForPurgeHashing(const u8* data, size_t size) { return true; }
-  virtual bool Compress(const u8* data, size_t size) = 0;
-  virtual bool End() = 0;
-
-  virtual const u8* GetData() const = 0;
-  virtual size_t GetSize() const = 0;
-};
-
-class PurgeCompressor final : public Compressor
-{
-public:
-  PurgeCompressor();
-  ~PurgeCompressor() override;
-
-  bool Start(std::optional<u64> size) override;
-  bool AddPrecedingDataOnlyForPurgeHashing(const u8* data, size_t size) override;
-  bool Compress(const u8* data, size_t size) override;
-  bool End() override;
-
-  const u8* GetData() const override;
-  size_t GetSize() const override;
-
-private:
-  std::vector<u8> m_buffer;
-  size_t m_bytes_written = 0;
-  std::unique_ptr<Common::SHA1::Context> m_sha1_context;
-};
-
-class Bzip2Compressor final : public Compressor
-{
-public:
-  Bzip2Compressor(int compression_level);
-  ~Bzip2Compressor() override;
-
-  bool Start(std::optional<u64> size) override;
-  bool Compress(const u8* data, size_t size) override;
-  bool End() override;
-
-  const u8* GetData() const override;
-  size_t GetSize() const override;
-
-private:
-  void ExpandBuffer(size_t bytes_to_add);
-
-  bz_stream m_stream = {};
-  std::vector<u8> m_buffer;
-  int m_compression_level;
-};
-
-class LZMACompressor final : public Compressor
-{
-public:
-  LZMACompressor(bool lzma2, int compression_level, u8 compressor_data_out[7],
-                 u8* compressor_data_size_out);
-  ~LZMACompressor() override;
-
-  bool Start(std::optional<u64> size) override;
-  bool Compress(const u8* data, size_t size) override;
-  bool End() override;
-
-  const u8* GetData() const override;
-  size_t GetSize() const override;
-
-private:
-  void ExpandBuffer(size_t bytes_to_add);
-
-  lzma_stream m_stream = LZMA_STREAM_INIT;
-  lzma_options_lzma m_options = {};
-  lzma_filter m_filters[2];
-  std::vector<u8> m_buffer;
-  bool m_initialization_failed = false;
-};
-
-class ZstdCompressor final : public Compressor
-{
-public:
-  ZstdCompressor(int compression_level);
-  ~ZstdCompressor() override;
-
-  bool Start(std::optional<u64> size) override;
-  bool Compress(const u8* data, size_t size) override;
-  bool End() override;
-
-  const u8* GetData() const override { return m_buffer.data(); }
-  size_t GetSize() const override { return m_out_buffer.pos; }
-
-private:
-  void ExpandBuffer(size_t bytes_to_add);
-
-  ZSTD_CStream* m_stream;
-  ZSTD_outBuffer m_out_buffer{};
-  std::vector<u8> m_buffer;
-};
+// Null for WIARVZCompressionType::None. For LZMA and LZMA2, the compressor data the header
+// needs is written to the two out parameters if they are non-null (up to 7 bytes).
+std::unique_ptr<Encoder> MakeEncoder(WIARVZCompressionType type, int level,
+                                     u8* compressor_data_out, u8* compressor_data_size_out);
 
 }  // namespace DiscIO

@@ -1,18 +1,67 @@
-// SPDX-License-Identifier: CC0-1.0
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DiscIO/LaggedFibonacciGenerator.h"
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 
-#include "Common/Align.h"
 #include "Common/Assert.h"
 #include "Common/CommonTypes.h"
 #include "Common/Swap.h"
 
 namespace DiscIO
 {
+namespace
+{
+// State word -> output word (host order). Bits 16-17 of the state are dropped.
+constexpr u32 Twist(u32 x)
+{
+  return (x & 0xFF00FFFF) | ((x >> 2) & 0x00FF0000);
+}
+
+// Output word -> the state bits it determines (bits 16 and 17 come out as zero).
+constexpr u32 Untwist(u32 y)
+{
+  return (y & 0xFF00FFFF) | ((y << 2) & 0x00FC0000);
+}
+
+// Output bits 22-23 and 24-25 both come from state bits 24-25, so they must agree.
+constexpr bool CouldBeTwisted(u32 y)
+{
+  return ((y >> 2) & 0x00C00000) == (y & 0x00C00000);
+}
+
+u32 LoadBE(const u8* p)
+{
+  u32 value;
+  std::memcpy(&value, p, sizeof(value));
+  return Common::swap32(value);
+}
+}  // namespace
+
+bool LaggedFibonacciGenerator::Expand(Words& words, const Words* expected)
+{
+  for (size_t n = SEED_SIZE; n < LONG_LAG; ++n)
+  {
+    const u32 value = (words[n - 17] << 23) ^ (words[n - 16] >> 9) ^ words[n - 1];
+    if (expected && (value & ~u32(0x00030000)) != (*expected)[n])
+      return false;
+    words[n] = value;
+  }
+  return true;
+}
+
+void LaggedFibonacciGenerator::Start(const Words& words)
+{
+  for (size_t n = 0; n < LONG_LAG; ++n)
+    m_table[n] = Common::swap32(Twist(words[n]));
+  for (int n = 0; n < WARM_UP_ADVANCES; ++n)
+    Advance();
+  m_offset = 0;
+}
+
 void LaggedFibonacciGenerator::SetSeed(const u32 seed[SEED_SIZE])
 {
   SetSeed(reinterpret_cast<const u8*>(seed));
@@ -20,193 +69,132 @@ void LaggedFibonacciGenerator::SetSeed(const u32 seed[SEED_SIZE])
 
 void LaggedFibonacciGenerator::SetSeed(const u8 seed[SEED_SIZE * sizeof(u32)])
 {
-  m_position_bytes = 0;
-
-  for (size_t i = 0; i < SEED_SIZE; ++i)
-    m_buffer[i] = Common::swap32(seed + i * sizeof(u32));
-
-  Initialize(false);
+  Words words{};
+  for (size_t n = 0; n < SEED_SIZE; ++n)
+    words[n] = LoadBE(seed + n * sizeof(u32));
+  Expand(words, nullptr);
+  Start(words);
 }
 
-size_t LaggedFibonacciGenerator::GetSeed(const u8* data, size_t size, size_t data_offset,
-                                         u32 seed_out[SEED_SIZE])
+void LaggedFibonacciGenerator::Advance()
 {
-  if ((reinterpret_cast<uintptr_t>(data) - data_offset) % alignof(u32) != 0)
-  {
-    ASSERT(false);
-    return 0;
-  }
-
-  // For code simplicity, only include whole u32 words when regenerating the seed. It would be
-  // possible to get rid of this restriction and use a few additional bytes, but it's probably more
-  // effort than it's worth considering that junk data often starts or ends on 4-byte offsets.
-  const size_t bytes_to_skip = Common::AlignUp(data_offset, sizeof(u32)) - data_offset;
-  const u32* u32_data = reinterpret_cast<const u32*>(data + bytes_to_skip);
-  const size_t u32_size = (size - bytes_to_skip) / sizeof(u32);
-  const size_t u32_data_offset = (data_offset + bytes_to_skip) / sizeof(u32);
-
-  LaggedFibonacciGenerator lfg;
-  if (!GetSeed(u32_data, u32_size, u32_data_offset, &lfg, seed_out))
-    return false;
-
-  lfg.m_position_bytes = data_offset % (LFG_K * sizeof(u32));
-
-  const u8* end = data + size;
-  size_t reconstructed_bytes = 0;
-  while (data < end && lfg.GetByte() == *data)
-  {
-    ++reconstructed_bytes;
-    ++data;
-  }
-  return reconstructed_bytes;
+  // In place, front to back: the first 32 words use words from the end that haven't been
+  // advanced yet; every later word uses one that already has.
+  for (size_t n = 0; n < LONG_LAG; ++n)
+    m_table[n] ^= n < SHORT_LAG ? m_table[n + LONG_LAG - SHORT_LAG] : m_table[n - SHORT_LAG];
 }
 
-bool LaggedFibonacciGenerator::GetSeed(const u32* data, size_t size, size_t data_offset,
-                                       LaggedFibonacciGenerator* lfg, u32 seed_out[SEED_SIZE])
+void LaggedFibonacciGenerator::Unadvance(std::array<u32, LONG_LAG>& table, size_t begin,
+                                         size_t end)
 {
-  if (size < LFG_K)
-    return false;
-
-  // If the data doesn't look like something we can regenerate, return early to save time
-  if (!std::all_of(data, data + LFG_K, [](u32 x) {
-        return (Common::swap32(x) & 0x00C00000) == (Common::swap32(x) >> 2 & 0x00C00000);
-      }))
-  {
-    return false;
-  }
-
-  const size_t data_offset_mod_k = data_offset % LFG_K;
-  const size_t data_offset_div_k = data_offset / LFG_K;
-
-  std::copy_n(data, LFG_K - data_offset_mod_k, lfg->m_buffer.data() + data_offset_mod_k);
-  std::copy_n(data + LFG_K - data_offset_mod_k, data_offset_mod_k, lfg->m_buffer.data());
-
-  lfg->Backward(0, data_offset_mod_k);
-
-  for (size_t i = 0; i < data_offset_div_k; ++i)
-    lfg->Backward();
-
-  if (!lfg->Reinitialize(seed_out))
-    return false;
-
-  for (size_t i = 0; i < data_offset_div_k; ++i)
-    lfg->Forward();
-
-  return true;
+  // Back to front, so each word is undone while the word it was xored with still has the
+  // value it had at that moment.
+  for (size_t n = end; n-- > begin;)
+    table[n] ^= n < SHORT_LAG ? table[n + LONG_LAG - SHORT_LAG] : table[n - SHORT_LAG];
 }
 
 void LaggedFibonacciGenerator::GetBytes(size_t count, u8* out)
 {
+  const u8* table = reinterpret_cast<const u8*>(m_table.data());
   while (count > 0)
   {
-    const size_t length = std::min(count, LFG_K * sizeof(u32) - m_position_bytes);
-
-    std::memcpy(out, reinterpret_cast<u8*>(m_buffer.data()) + m_position_bytes, length);
-
-    m_position_bytes += length;
-    count -= length;
-    out += length;
-
-    if (m_position_bytes == LFG_K * sizeof(u32))
+    const size_t n = std::min(count, TABLE_BYTES - m_offset);
+    std::memcpy(out, table + m_offset, n);
+    out += n;
+    count -= n;
+    m_offset += n;
+    if (m_offset == TABLE_BYTES)
     {
-      Forward();
-      m_position_bytes = 0;
+      Advance();
+      m_offset = 0;
     }
   }
 }
 
 u8 LaggedFibonacciGenerator::GetByte()
 {
-  const u8 result = reinterpret_cast<u8*>(m_buffer.data())[m_position_bytes];
-
-  ++m_position_bytes;
-
-  if (m_position_bytes == LFG_K * sizeof(u32))
-  {
-    Forward();
-    m_position_bytes = 0;
-  }
-
-  return result;
+  u8 byte;
+  GetBytes(1, &byte);
+  return byte;
 }
 
 void LaggedFibonacciGenerator::Forward(size_t count)
 {
-  m_position_bytes += count;
-  while (m_position_bytes >= LFG_K * sizeof(u32))
+  m_offset += count;
+  for (; m_offset >= TABLE_BYTES; m_offset -= TABLE_BYTES)
+    Advance();
+}
+
+size_t LaggedFibonacciGenerator::GetSeed(const u8* data, size_t size, size_t data_offset,
+                                         u32 seed_out[SEED_SIZE])
+{
+  if ((reinterpret_cast<uintptr_t>(data) - data_offset) % sizeof(u32) != 0)
   {
-    Forward();
-    m_position_bytes -= LFG_K * sizeof(u32);
-  }
-}
-
-void LaggedFibonacciGenerator::Forward()
-{
-  for (size_t i = 0; i < LFG_J; ++i)
-    m_buffer[i] ^= m_buffer[i + LFG_K - LFG_J];
-
-  for (size_t i = LFG_J; i < LFG_K; ++i)
-    m_buffer[i] ^= m_buffer[i - LFG_J];
-}
-
-void LaggedFibonacciGenerator::Backward(size_t start_word, size_t end_word)
-{
-  const size_t loop_end = std::max(LFG_J, start_word);
-  for (size_t i = std::min(end_word, LFG_K); i > loop_end; --i)
-    m_buffer[i - 1] ^= m_buffer[i - 1 - LFG_J];
-
-  for (size_t i = std::min(end_word, LFG_J); i > start_word; --i)
-    m_buffer[i - 1] ^= m_buffer[i - 1 + LFG_K - LFG_J];
-}
-
-bool LaggedFibonacciGenerator::Reinitialize(u32 seed_out[SEED_SIZE])
-{
-  for (size_t i = 0; i < 4; ++i)
-    Backward();
-
-  for (u32& x : m_buffer)
-    x = Common::swap32(x);
-
-  // Reconstruct the bits which are missing due to the output code shifting by 18 instead of 16.
-  // Unfortunately we can't reconstruct bits 16 and 17 (counting LSB as 0) for the first word,
-  // but the observable result (when shifting by 18 instead of 16) is not affected by this.
-  for (size_t i = 0; i < SEED_SIZE; ++i)
-  {
-    m_buffer[i] = (m_buffer[i] & 0xFF00FFFF) | (m_buffer[i] << 2 & 0x00FC0000) |
-                  ((m_buffer[i + 16] ^ m_buffer[i + 15]) << 9 & 0x00030000);
+    ASSERT(false);
+    return 0;
   }
 
-  for (size_t i = 0; i < SEED_SIZE; ++i)
-    seed_out[i] = Common::swap32(m_buffer[i]);
+  // Work with whole stream words only.
+  const size_t lead = (sizeof(u32) - data_offset % sizeof(u32)) % sizeof(u32);
+  if (size < lead)
+    return 0;
+  const u8* words_in = data + lead;
+  const size_t word_count = (size - lead) / sizeof(u32);
+  const size_t first_word = (data_offset + lead) / sizeof(u32);
 
-  return Initialize(true);
-}
-
-bool LaggedFibonacciGenerator::Initialize(bool check_existing_data)
-{
-  for (size_t i = SEED_SIZE; i < LFG_K; ++i)
+  // One table's worth of output is needed, and every word must have the twist's fingerprint.
+  if (word_count < LONG_LAG)
+    return 0;
+  for (size_t n = 0; n < LONG_LAG; ++n)
   {
-    const u32 calculated = (m_buffer[i - 17] << 23) ^ (m_buffer[i - 16] >> 9) ^ m_buffer[i - 1];
-
-    if (check_existing_data)
-    {
-      const u32 actual = (m_buffer[i] & 0xFF00FFFF) | (m_buffer[i] << 2 & 0x00FC0000);
-      if ((calculated & 0xFFFCFFFF) != actual)
-        return false;
-    }
-
-    m_buffer[i] = calculated;
+    if (!CouldBeTwisted(LoadBE(words_in + n * sizeof(u32))))
+      return 0;
   }
 
-  // Instead of doing the "shift by 18 instead of 16" oddity when actually outputting the data,
-  // we can do the shifting (and byteswapping) at this point to make the output code simpler.
-  for (u32& x : m_buffer)
-    x = Common::swap32((x & 0xFF00FFFF) | ((x >> 2) & 0x00FF0000));
+  // Lay the words out by table position. They start at position `phase` of table number
+  // `round`; the ones that wrap around to positions below `phase` are from the next table.
+  const size_t round = first_word / LONG_LAG;
+  const size_t phase = first_word % LONG_LAG;
+  std::array<u32, LONG_LAG> table;
+  for (size_t n = 0; n < LONG_LAG; ++n)
+    std::memcpy(&table[(phase + n) % LONG_LAG], words_in + n * sizeof(u32), sizeof(u32));
 
-  for (size_t i = 0; i < 4; ++i)
-    Forward();
+  // Wind back to the table as it was straight after seeding.
+  Unadvance(table, 0, phase);
+  for (size_t n = 0; n < round + WARM_UP_ADVANCES; ++n)
+    Unadvance(table, 0, LONG_LAG);
 
-  return true;
+  Words output;
+  Words known;
+  for (size_t n = 0; n < LONG_LAG; ++n)
+  {
+    output[n] = Common::swap32(table[n]);
+    known[n] = Untwist(output[n]);
+  }
+
+  // Bits 16-17 of a seed word n can be recovered from words n+15 and n+16, as the recurrence
+  // makes word n+16 = (word n-1 << 23) ^ (word n >> 9) ^ word n+15. (For n = 0 the bits don't
+  // affect any output, but they're filled the same way.)
+  Words words{};
+  for (size_t n = 0; n < SEED_SIZE; ++n)
+    words[n] = known[n] | (((output[n + 16] ^ output[n + 15]) << 9) & 0x00030000);
+  for (size_t n = 0; n < SEED_SIZE; ++n)
+    seed_out[n] = Common::swap32(words[n]);
+
+  // The seed is right if it regenerates the rest of the table.
+  if (!Expand(words, &known))
+    return 0;
+
+  LaggedFibonacciGenerator generator;
+  generator.Start(words);
+  for (size_t n = 0; n < round; ++n)
+    generator.Advance();
+  generator.m_offset = data_offset % TABLE_BYTES;
+
+  size_t matched = 0;
+  while (matched < size && generator.GetByte() == data[matched])
+    ++matched;
+  return matched;
 }
 
 }  // namespace DiscIO
