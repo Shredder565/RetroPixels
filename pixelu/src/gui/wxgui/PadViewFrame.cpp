@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "interface/WindowSystem.h"
 #include "wxgui/wxgui.h"
 #include "wxgui/PadViewFrame.h"
@@ -5,7 +6,9 @@
 #include <wx/display.h>
 
 #include "config/ActiveSettings.h"
+#include "config/CemuConfig.h"
 #include "Cafe/OS/libs/swkbd/swkbd.h"
+#include "input/InputManager.h"
 #ifdef ENABLE_OPENGL
 #include "wxgui/canvas/OpenGLCanvas.h"
 #endif
@@ -15,37 +18,38 @@
 #ifdef ENABLE_METAL
 #include "wxgui/canvas/MetalCanvas.h"
 #endif
-#include "config/CemuConfig.h"
 #include "wxgui/MainWindow.h"
 #include "wxgui/helpers/wxHelpers.h"
-#include "input/InputManager.h"
+#include "wxHelper.h"
 
 #if BOOST_OS_LINUX || BOOST_OS_MACOS || BOOST_OS_BSD
 #include "resource/embedded/resources.h"
 #endif
-#include "wxHelper.h"
 
 extern WindowSystem::WindowInfo g_window_info;
 
-#define PAD_MIN_WIDTH  320
-#define PAD_MIN_HEIGHT 180
+namespace
+{
+	constexpr int kMinWidth = 320;
+	constexpr int kMinHeight = 180;
+	const wxSize kDefaultSize(854, 480);
+}
 
 PadViewFrame::PadViewFrame(wxFrame* parent)
-	: wxFrame(nullptr, wxID_ANY, _("GamePad View"), wxDefaultPosition, wxDefaultSize, wxMINIMIZE_BOX | wxMAXIMIZE_BOX | wxSYSTEM_MENU | wxCAPTION | wxCLIP_CHILDREN | wxRESIZE_BORDER | wxCLOSE_BOX | wxWANTS_CHARS)
+	: wxFrame(nullptr, wxID_ANY, _("GamePad View"), wxDefaultPosition, wxDefaultSize,
+			  wxMINIMIZE_BOX | wxMAXIMIZE_BOX | wxSYSTEM_MENU | wxCAPTION | wxCLIP_CHILDREN | wxRESIZE_BORDER | wxCLOSE_BOX | wxWANTS_CHARS)
 {
 	g_window_info.window_pad = initHandleContextFromWxWidgetsWindow(this);
 
 	SetIcon(wxICON(M_WND_ICON128));
-	wxWindow::EnableTouchEvents(wxTOUCH_PAN_GESTURES);
+	EnableTouchEvents(wxTOUCH_PAN_GESTURES);
+	SetMinClientSize({kMinWidth, kMinHeight});
 
-	SetMinClientSize({ PAD_MIN_WIDTH, PAD_MIN_HEIGHT });
-
-	SetPosition({ g_window_info.restored_pad_x, g_window_info.restored_pad_y });
-	if (g_window_info.restored_pad_width >= PAD_MIN_WIDTH && g_window_info.restored_pad_height >= PAD_MIN_HEIGHT)
-		SetClientSize({ g_window_info.restored_pad_width, g_window_info.restored_pad_height });
-	else
-		SetClientSize(wxSize(854, 480));
-
+	// where and how big it was last time (a remembered size below the minimum is ignored)
+	SetPosition({g_window_info.restored_pad_x, g_window_info.restored_pad_y});
+	const int w = g_window_info.restored_pad_width;
+	const int h = g_window_info.restored_pad_height;
+	SetClientSize(w >= kMinWidth && h >= kMinHeight ? wxSize(w, h) : kDefaultSize);
 	if (g_window_info.pad_maximized)
 		Maximize();
 
@@ -53,7 +57,6 @@ PadViewFrame::PadViewFrame(wxFrame* parent)
 	Bind(wxEVT_DPI_CHANGED, &PadViewFrame::OnDPIChangedEvent, this);
 	Bind(wxEVT_MOVE, &PadViewFrame::OnMoveEvent, this);
 	Bind(wxEVT_MOTION, &PadViewFrame::OnMouseMove, this);
-
 	Bind(wxEVT_SET_WINDOW_TITLE, &PadViewFrame::OnSetWindowTitle, this);
 
 	g_window_info.pad_open = true;
@@ -66,46 +69,42 @@ PadViewFrame::~PadViewFrame()
 
 bool PadViewFrame::Initialize()
 {
-	const wxSize client_size = GetClientSize();
-	g_window_info.pad_width = client_size.GetWidth();
-	g_window_info.pad_height = client_size.GetHeight();
-	g_window_info.phys_pad_width = ToPhys(client_size.GetWidth());
-	g_window_info.phys_pad_height = ToPhys(client_size.GetHeight());
-
+	const wxSize area = GetClientSize();
+	g_window_info.pad_width = area.GetWidth();
+	g_window_info.pad_height = area.GetHeight();
+	g_window_info.phys_pad_width = ToPhys(area.GetWidth());
+	g_window_info.phys_pad_height = ToPhys(area.GetHeight());
 	return true;
 }
 
 void PadViewFrame::InitializeRenderCanvas()
 {
-	auto sizer = new wxBoxSizer(wxVERTICAL);
-	{
-		#ifdef ENABLE_VULKAN
-		if (ActiveSettings::GetGraphicsAPI() == kVulkan)
-			m_render_canvas = new VulkanCanvas(this, wxSize(854, 480), false);
-		#endif
-		#ifdef ENABLE_OPENGL
-		if (ActiveSettings::GetGraphicsAPI() == kOpenGL)
-			m_render_canvas = GLCanvas_Create(this, wxSize(854, 480), false);
-		#endif
-		#ifdef ENABLE_METAL
-		if (ActiveSettings::GetGraphicsAPI() == kMetal)
-			m_render_canvas = new MetalCanvas(this, wxSize(854, 480), false);
-		#endif
-		sizer->Add(m_render_canvas, 1, wxEXPAND, 0, nullptr);
-	}
+	const auto api = ActiveSettings::GetGraphicsAPI();
+#ifdef ENABLE_VULKAN
+	if (api == kVulkan)
+		m_render_canvas = new VulkanCanvas(this, kDefaultSize, false);
+#endif
+#ifdef ENABLE_OPENGL
+	if (api == kOpenGL)
+		m_render_canvas = GLCanvas_Create(this, kDefaultSize, false);
+#endif
+#ifdef ENABLE_METAL
+	if (api == kMetal)
+		m_render_canvas = new MetalCanvas(this, kDefaultSize, false);
+#endif
+	auto* layout = new wxBoxSizer(wxVERTICAL);
+	layout->Add(m_render_canvas, 1, wxEXPAND);
 	cemu_assert(m_render_canvas != nullptr);
-	SetSizer(sizer);
+	SetSizer(layout);
 	Layout();
 
 	m_render_canvas->Bind(wxEVT_KEY_UP, &PadViewFrame::OnKeyUp, this);
 	m_render_canvas->Bind(wxEVT_CHAR, &PadViewFrame::OnChar, this);
-
 	m_render_canvas->Bind(wxEVT_MOTION, &PadViewFrame::OnMouseMove, this);
-	m_render_canvas->Bind(wxEVT_LEFT_DOWN, &PadViewFrame::OnMouseLeft, this);
-	m_render_canvas->Bind(wxEVT_LEFT_UP, &PadViewFrame::OnMouseLeft, this);
-	m_render_canvas->Bind(wxEVT_RIGHT_DOWN, &PadViewFrame::OnMouseRight, this);
-	m_render_canvas->Bind(wxEVT_RIGHT_UP, &PadViewFrame::OnMouseRight, this);
-
+	for (const auto& type : {wxEVT_LEFT_DOWN, wxEVT_LEFT_UP})
+		m_render_canvas->Bind(type, &PadViewFrame::OnMouseLeft, this);
+	for (const auto& type : {wxEVT_RIGHT_DOWN, wxEVT_RIGHT_UP})
+		m_render_canvas->Bind(type, &PadViewFrame::OnMouseRight, this);
 	m_render_canvas->Bind(wxEVT_GESTURE_PAN, &PadViewFrame::OnGesturePan, this);
 
 	m_render_canvas->SetFocus();
@@ -114,7 +113,7 @@ void PadViewFrame::InitializeRenderCanvas()
 
 void PadViewFrame::DestroyCanvas()
 {
-	if(!m_render_canvas)
+	if (!m_render_canvas)
 		return;
 	m_render_canvas->Destroy();
 	m_render_canvas = nullptr;
@@ -122,18 +121,20 @@ void PadViewFrame::DestroyCanvas()
 
 void PadViewFrame::OnSizeEvent(wxSizeEvent& event)
 {
-	if (!IsMaximized() && !IsFullScreen())
+	const bool fullscreen = IsFullScreen();
+	if (!IsMaximized() && !fullscreen)
 	{
-		g_window_info.restored_pad_width = GetSize().x;
-		g_window_info.restored_pad_height = GetSize().y;
+		const wxSize outer = GetSize();
+		g_window_info.restored_pad_width = outer.x;
+		g_window_info.restored_pad_height = outer.y;
 	}
-	g_window_info.pad_maximized = IsMaximized() && !IsFullScreen();
+	g_window_info.pad_maximized = IsMaximized() && !fullscreen;
 
-	const wxSize client_size = GetClientSize();
-	g_window_info.pad_width = client_size.GetWidth();
-	g_window_info.pad_height = client_size.GetHeight();
-	g_window_info.phys_pad_width = ToPhys(client_size.GetWidth());
-	g_window_info.phys_pad_height = ToPhys(client_size.GetHeight());
+	const wxSize area = GetClientSize();
+	g_window_info.pad_width = area.GetWidth();
+	g_window_info.pad_height = area.GetHeight();
+	g_window_info.phys_pad_width = ToPhys(area.GetWidth());
+	g_window_info.phys_pad_height = ToPhys(area.GetHeight());
 	g_window_info.pad_dpi_scale = GetDPIScaleFactor();
 
 	event.Skip();
@@ -142,101 +143,100 @@ void PadViewFrame::OnSizeEvent(wxSizeEvent& event)
 void PadViewFrame::OnDPIChangedEvent(wxDPIChangedEvent& event)
 {
 	event.Skip();
-	const wxSize client_size = GetClientSize();
-	g_window_info.pad_width = client_size.GetWidth();
-	g_window_info.pad_height = client_size.GetHeight();
-	g_window_info.phys_pad_width = ToPhys(client_size.GetWidth());
-	g_window_info.phys_pad_height = ToPhys(client_size.GetHeight());
+	const wxSize area = GetClientSize();
+	g_window_info.pad_width = area.GetWidth();
+	g_window_info.pad_height = area.GetHeight();
+	g_window_info.phys_pad_width = ToPhys(area.GetWidth());
+	g_window_info.phys_pad_height = ToPhys(area.GetHeight());
 	g_window_info.pad_dpi_scale = GetDPIScaleFactor();
 }
 
-void PadViewFrame::OnMoveEvent(wxMoveEvent& event)
+void PadViewFrame::OnMoveEvent(wxMoveEvent&)
 {
-	if (!IsMaximized() && !IsFullScreen())
-	{
-		g_window_info.restored_pad_x = GetPosition().x;
-		g_window_info.restored_pad_y = GetPosition().y;
-	}
+	if (IsMaximized() || IsFullScreen())
+		return;
+	const wxPoint where = GetPosition();
+	g_window_info.restored_pad_x = where.x;
+	g_window_info.restored_pad_y = where.y;
 }
 
 void PadViewFrame::OnKeyUp(wxKeyEvent& event)
 {
 	event.Skip();
-
 	if (swkbd_hasKeyboardInputHook())
 		return;
 
-	const auto code = event.GetKeyCode();
-	if (code == WXK_ESCAPE)
+	// Esc leaves fullscreen, F11 or Alt+Enter toggles it
+	const int key = event.GetKeyCode();
+	if (key == WXK_ESCAPE)
 		ShowFullScreen(false);
-	else if (code == WXK_RETURN && event.AltDown() || code == WXK_F11)
+	else if (key == WXK_F11 || (key == WXK_RETURN && event.AltDown()))
 		ShowFullScreen(!IsFullScreen());
-}
-
-void PadViewFrame::OnGesturePan(wxPanGestureEvent& event)
-{
-	auto& instance = InputManager::instance();
-
-	std::scoped_lock lock(instance.m_pad_touch.m_mutex);
-	auto physPos = ToPhys(event.GetPosition());
-	instance.m_pad_touch.position = { physPos.x, physPos.y };
-	instance.m_pad_touch.left_down = event.IsGestureStart() || !event.IsGestureEnd();
-	if (event.IsGestureStart() || !event.IsGestureEnd())
-		instance.m_pad_touch.left_down_toggle = true;
 }
 
 void PadViewFrame::OnChar(wxKeyEvent& event)
 {
 	if (swkbd_hasKeyboardInputHook())
 		swkbd_keyInput(event.GetUnicodeKey());
-
 	event.Skip();
+}
+
+void PadViewFrame::OnGesturePan(wxPanGestureEvent& event)
+{
+	auto& input = InputManager::instance();
+	std::scoped_lock guard(input.m_pad_touch.m_mutex);
+	const wxPoint phys = ToPhys(event.GetPosition());
+	const bool touching = event.IsGestureStart() || !event.IsGestureEnd();
+	input.m_pad_touch.position = {phys.x, phys.y};
+	input.m_pad_touch.left_down = touching;
+	if (touching)
+		input.m_pad_touch.left_down_toggle = true;
 }
 
 void PadViewFrame::OnMouseMove(wxMouseEvent& event)
 {
-	auto& instance = InputManager::instance();
-
-	std::scoped_lock lock(instance.m_pad_touch.m_mutex);
-	auto physPos = ToPhys(event.GetPosition());
-	instance.m_pad_mouse.position = { physPos.x, physPos.y };
-
+	auto& input = InputManager::instance();
+	{
+		std::scoped_lock guard(input.m_pad_mouse.m_mutex);
+		const wxPoint phys = ToPhys(event.GetPosition());
+		input.m_pad_mouse.position = {phys.x, phys.y};
+	}
 	event.Skip();
 }
 
 void PadViewFrame::OnMouseLeft(wxMouseEvent& event)
 {
-	auto& instance = InputManager::instance();
-
-	std::scoped_lock lock(instance.m_pad_mouse.m_mutex);
-	instance.m_pad_mouse.left_down = event.ButtonDown(wxMOUSE_BTN_LEFT);
-	auto physPos = ToPhys(event.GetPosition());
-	instance.m_pad_mouse.position = { physPos.x, physPos.y };
-	if (event.ButtonDown(wxMOUSE_BTN_LEFT))
-		instance.m_pad_mouse.left_down_toggle = true;
-
+	auto& input = InputManager::instance();
+	std::scoped_lock guard(input.m_pad_mouse.m_mutex);
+	const bool down = event.ButtonDown(wxMOUSE_BTN_LEFT);
+	const wxPoint phys = ToPhys(event.GetPosition());
+	input.m_pad_mouse.left_down = down;
+	input.m_pad_mouse.position = {phys.x, phys.y};
+	if (down)
+		input.m_pad_mouse.left_down_toggle = true;
 }
 
 void PadViewFrame::OnMouseRight(wxMouseEvent& event)
 {
-	auto& instance = InputManager::instance();
-
-	std::scoped_lock lock(instance.m_pad_mouse.m_mutex);
-	instance.m_pad_mouse.right_down = event.ButtonDown(wxMOUSE_BTN_LEFT);
-	auto physPos = ToPhys(event.GetPosition());
-	instance.m_pad_mouse.position = { physPos.x, physPos.y };
+	auto& input = InputManager::instance();
+	std::scoped_lock guard(input.m_pad_mouse.m_mutex);
+	const wxPoint phys = ToPhys(event.GetPosition());
+	// a right-button event never has the left button going down, so the held state stays off here
+	// and only the toggle reports the click (unchanged behaviour)
+	input.m_pad_mouse.right_down = event.ButtonDown(wxMOUSE_BTN_LEFT);
+	input.m_pad_mouse.position = {phys.x, phys.y};
 	if (event.ButtonDown(wxMOUSE_BTN_RIGHT))
-		instance.m_pad_mouse.right_down_toggle = true;
+		input.m_pad_mouse.right_down_toggle = true;
 }
 
 void PadViewFrame::OnSetWindowTitle(wxCommandEvent& event)
 {
-	this->SetTitle(event.GetString());
+	SetTitle(event.GetString());
 }
 
 void PadViewFrame::AsyncSetTitle(std::string_view windowTitle)
 {
-	wxCommandEvent set_title_event(wxEVT_SET_WINDOW_TITLE);
-	set_title_event.SetString(wxString::FromUTF8(windowTitle));
-	QueueEvent(set_title_event.Clone());
+	auto* request = new wxCommandEvent(wxEVT_SET_WINDOW_TITLE);
+	request->SetString(wxString::FromUTF8(windowTitle));
+	QueueEvent(request);
 }

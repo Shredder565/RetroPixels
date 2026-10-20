@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include <wx/dialog.h>
@@ -8,6 +9,8 @@
 #include <wx/stattext.h>
 #include <wx/panel.h>
 
+// First-run assistant (two pages: game folder and graphic packs, then input and a few options).
+// The choices are stored when the dialog closes.
 class GettingStartedDialog : public wxDialog
 {
 public:
@@ -25,24 +28,23 @@ private:
 
 	wxSimplebook* m_notebook;
 
+	// first page
 	struct
 	{
-		// header
 		wxStaticText* staticText11{};
 		wxStaticText* portableModeInfoText{};
 
-		// game path box
 		wxStaticBoxSizer* gamePathBoxSizer{};
 		wxStaticText* gamePathText{};
 		wxStaticText* gamePathText2{};
 		wxDirPickerCtrl* gamePathPicker{};
-	}m_page1;
+	} m_page1;
 
+	// second page
 	struct
 	{
 		wxCheckBox* fullscreenCheckbox;
 		wxCheckBox* separateCheckbox;
 		wxCheckBox* updateCheckbox;
-	}m_page2;
+	} m_page2;
 };
-

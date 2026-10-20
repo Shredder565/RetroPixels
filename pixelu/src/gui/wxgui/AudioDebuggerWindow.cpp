@@ -1,283 +1,174 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "wxgui.h"
 #include "AudioDebuggerWindow.h"
 
 #include "Cafe/OS/libs/snd_core/ax.h"
 #include "Cafe/OS/libs/snd_core/ax_internal.h"
 
-enum
+namespace
 {
-	// options
-	REFRESH_ID,
-	CLOSE_ID,
-	VOICELIST_ID,
-	REFRESH_TIMER_ID,
-};
+	struct Column
+	{
+		const char* title;
+		int width;
+	};
 
-wxBEGIN_EVENT_TABLE(AudioDebuggerWindow, wxFrame)
-EVT_BUTTON(CLOSE_ID, AudioDebuggerWindow::OnCloseButton)
-EVT_BUTTON(REFRESH_ID, AudioDebuggerWindow::OnRefreshButton)
-EVT_TIMER(REFRESH_TIMER_ID, AudioDebuggerWindow::OnRefreshTimer)
+	// one row per voice; the voice index column comes first
+	const Column kColumns[] = {
+		{"idx", 40}, {"state", 48}, {"fmt", 52},
+		{"base", 70}, {"current", 70}, {"loop", 70}, {"end", 70},
+		{"vol", 46}, {"volD", 46}, {"src", 70},
+		{"lpa0", 46}, {"lpb0", 46},
+		{"bqb0", 46}, {"bqb1", 46}, {"bqb2", 46}, {"bqa1", 46}, {"bqa2", 46},
+		{"deviceMix", 186},
+	};
+	constexpr int kColumnCount = (int)std::size(kColumns);
 
-EVT_CLOSE(AudioDebuggerWindow::OnClose)
-wxEND_EVENT_TABLE()
+	enum ColumnIndex
+	{
+		ColIndex, ColState, ColFormat,
+		ColBase, ColCurrent, ColLoop, ColEnd,
+		ColVolume, ColVolumeDelta, ColSrc,
+		ColLpfA0, ColLpfB0,
+		ColBiquadB0, ColBiquadB1, ColBiquadB2, ColBiquadA1, ColBiquadA2,
+		ColDeviceMix,
+	};
+
+	constexpr int kRefreshTimerId = 3;
+	constexpr int kRefreshMs = 100;
+
+	wxString Hex32(uint32 v) { return wxString::Format("%08x", v); }
+	wxString Hex16(uint16 v) { return wxString::Format("%04x", (unsigned)v); }
+
+	wxString FormatName(uint16 formatBE)
+	{
+		if (formatBE == _swapEndianU16(snd_core::AX_FORMAT_ADPCM))
+			return "adpcm";
+		if (formatBE == _swapEndianU16(snd_core::AX_FORMAT_PCM16))
+			return "pcm16";
+		if (formatBE == _swapEndianU16(snd_core::AX_FORMAT_PCM8))
+			return "pcm8";
+		return "ukn";
+	}
+}
 
 AudioDebuggerWindow::AudioDebuggerWindow(wxFrame& parent)
 	: wxFrame(&parent, wxID_ANY, _("AX voice viewer"), wxDefaultPosition, wxSize(1126, 580), wxCLOSE_BOX | wxCLIP_CHILDREN | wxCAPTION | wxRESIZE_BORDER)
 {
-	wxPanel* mainPane = new wxPanel(this);
-	wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
-	
-	voiceListbox = new wxListCtrl(mainPane, VOICELIST_ID, wxPoint(0, 0), wxSize(1126, 570), wxLC_REPORT);
+	auto* panel = new wxPanel(this);
+	auto* layout = new wxBoxSizer(wxVERTICAL);
+
+	voiceListbox = new wxListCtrl(panel, wxID_ANY, wxPoint(0, 0), wxSize(1126, 570), wxLC_REPORT);
 	voiceListbox->SetFont(wxFont(8, wxFONTFAMILY_MODERN, wxFONTSTYLE_NORMAL, wxFONTWEIGHT_NORMAL, false, "Courier New"));
-	// add columns
-	wxListItem col0;
-	col0.SetId(0);
-	col0.SetText("idx");
-	col0.SetWidth(40);
-	voiceListbox->InsertColumn(0, col0);
-	wxListItem col1;
-	col1.SetId(1);
-	col1.SetText("state");
-	col1.SetWidth(48);
-	voiceListbox->InsertColumn(1, col1);
-	//wxListItem col2;
-	// format
-	col1.SetId(2);
-	col1.SetText("fmt");
-	col1.SetWidth(52);
-	voiceListbox->InsertColumn(2, col1);
-	// sample base addr
-	col1.SetId(3);
-	col1.SetText("base");
-	col1.SetWidth(70);
-	voiceListbox->InsertColumn(3, col1);
-	// current offset
-	col1.SetId(4);
-	col1.SetText("current");
-	col1.SetWidth(70);
-	voiceListbox->InsertColumn(4, col1);
-	// loop offset
-	col1.SetId(5);
-	col1.SetText("loop");
-	col1.SetWidth(70);
-	voiceListbox->InsertColumn(5, col1);
-	// end offset
-	col1.SetId(6);
-	col1.SetText("end");
-	col1.SetWidth(70);
-	voiceListbox->InsertColumn(6, col1);
-	// volume
-	col1.SetId(7);
-	col1.SetText("vol");
-	col1.SetWidth(46);
-	voiceListbox->InsertColumn(7, col1);
-	// volume delta
-	col1.SetId(8);
-	col1.SetText("volD");
-	col1.SetWidth(46);
-	voiceListbox->InsertColumn(8, col1);
-	// src
-	col1.SetId(9);
-	col1.SetText("src");
-	col1.SetWidth(70);
-	voiceListbox->InsertColumn(9, col1);
-	// low-pass filter coef a0
-	col1.SetId(10);
-	col1.SetText("lpa0");
-	col1.SetWidth(46);
-	voiceListbox->InsertColumn(10, col1);
-	// low-pass filter coef b0
-	col1.SetId(11);
-	col1.SetText("lpb0");
-	col1.SetWidth(46);
-	voiceListbox->InsertColumn(11, col1);
-	// biquad filter coef b0
-	col1.SetId(12);
-	col1.SetText("bqb0");
-	col1.SetWidth(46);
-	voiceListbox->InsertColumn(12, col1);
-	// biquad filter coef b0
-	col1.SetId(13);
-	col1.SetText("bqb1");
-	col1.SetWidth(46);
-	voiceListbox->InsertColumn(13, col1);
-	// biquad filter coef b0
-	col1.SetId(14);
-	col1.SetText("bqb2");
-	col1.SetWidth(46);
-	voiceListbox->InsertColumn(14, col1);
-	// biquad filter coef a0
-	col1.SetId(15);
-	col1.SetText("bqa1");
-	col1.SetWidth(46);
-	voiceListbox->InsertColumn(15, col1);
-	// biquad filter coef a1
-	col1.SetId(16);
-	col1.SetText("bqa2");
-	col1.SetWidth(46);
-	voiceListbox->InsertColumn(16, col1);
-	// device mix
-	col1.SetId(17);
-	col1.SetText("deviceMix");
-	col1.SetWidth(186);
-	voiceListbox->InsertColumn(17, col1);
-
-	sizer->Add(voiceListbox, 1, wxEXPAND | wxBOTTOM, 0);
-
+	for (int c = 0; c < kColumnCount; ++c)
+	{
+		wxListItem column;
+		column.SetId(c);
+		column.SetText(kColumns[c].title);
+		column.SetWidth(kColumns[c].width);
+		voiceListbox->InsertColumn(c, column);
+	}
+	layout->Add(voiceListbox, 1, wxEXPAND | wxBOTTOM, 0);
 	voiceListbox->Bind(wxEVT_RIGHT_DOWN, &AudioDebuggerWindow::OnVoiceListRightClick, this);
+	panel->SetSizer(layout);
 
-	mainPane->SetSizer(sizer);
-
-	// add empty entries
-	for (sint32 i = 0; i < snd_core::AX_MAX_VOICES; i++)
+	// rows are listed from the highest voice index down
+	for (sint32 row = 0; row < snd_core::AX_MAX_VOICES; ++row)
 	{
 		wxListItem item;
-		item.SetId(i);
-		item.SetText(wxString::Format("%d", snd_core::AX_MAX_VOICES-i-1));
+		item.SetId(row);
+		item.SetText(wxString::Format("%d", snd_core::AX_MAX_VOICES - 1 - row));
 		voiceListbox->InsertItem(item);
 	}
 	RefreshVoiceList();
 
-	// start refresh timer
-	static const int INTERVAL = 100; // milliseconds
-	refreshTimer = new wxTimer(this, REFRESH_TIMER_ID);
-	refreshTimer->Start(INTERVAL);
+	Bind(wxEVT_TIMER, &AudioDebuggerWindow::OnRefreshTimer, this, kRefreshTimerId);
+	Bind(wxEVT_CLOSE_WINDOW, &AudioDebuggerWindow::OnClose, this);
+	refreshTimer = new wxTimer(this, kRefreshTimerId);
+	refreshTimer->Start(kRefreshMs);
 }
 
-void AudioDebuggerWindow::OnRefreshTimer(wxTimerEvent& event)
+void AudioDebuggerWindow::OnRefreshTimer(wxTimerEvent&)
 {
 	RefreshVoiceList();
 }
 
-void AudioDebuggerWindow::OnCloseButton(wxCommandEvent& event)
+void AudioDebuggerWindow::OnCloseButton(wxCommandEvent&)
 {
 	Close();
 }
 
-void AudioDebuggerWindow::OnRefreshButton(wxCommandEvent& event)
+void AudioDebuggerWindow::OnRefreshButton(wxCommandEvent&)
 {
 	RefreshVoiceList();
 }
 
-void AudioDebuggerWindow::OnClose(wxCloseEvent& event)
+void AudioDebuggerWindow::OnClose(wxCloseEvent&)
 {
 	Close();
 }
-
-#define _r(__idx) _swapEndianU32(threadItrBE->context.gpr[__idx])
 
 void AudioDebuggerWindow::RefreshVoiceList_sndgeneric()
 {
-	if (snd_core::__AXVPBInternalVoiceArray == nullptr || snd_core::__AXVPBArrayPtr == nullptr)
+	using namespace snd_core;
+	if (__AXVPBInternalVoiceArray == nullptr || __AXVPBArrayPtr == nullptr)
 		return;
 
-	snd_core::AXVPB tempVoiceArray[snd_core::AX_MAX_VOICES];
-	memcpy(tempVoiceArray, snd_core::__AXVPBArrayPtr, sizeof(snd_core::AXVPB)*snd_core::AX_MAX_VOICES);
+	// snapshot of the public voice blocks (the game keeps changing them)
+	AXVPB voices[AX_MAX_VOICES];
+	memcpy(voices, __AXVPBArrayPtr, sizeof(voices));
 
 	voiceListbox->Freeze();
-
-	for (sint32 i = 0; i < snd_core::AX_MAX_VOICES; i++)
+	for (sint32 row = 0; row < AX_MAX_VOICES; ++row)
 	{
-		sint32 voiceIndex = snd_core::AX_MAX_VOICES - 1 - i;
-		snd_core::AXVPBInternal_t* internal = snd_core::__AXVPBInternalVoiceArray + voiceIndex;
-		// index
-		voiceListbox->SetItem(i, 0, wxString::Format("%d", (sint32)tempVoiceArray[voiceIndex].index));
-		// state
-		uint16 playbackState = _swapEndianU16(internal->playbackState);
-		voiceListbox->SetItem(i, 1, playbackState ? "on" : "off");
-		// if voice index is invalid then stop updating here to prevent crashes
-		if (voiceIndex < 0 || playbackState == 0)
+		const sint32 voice = AX_MAX_VOICES - 1 - row;
+		const AXVPBInternal_t& state = __AXVPBInternalVoiceArray[voice];
+		auto set = [&](int column, const wxString& text) { voiceListbox->SetItem(row, column, text); };
+
+		const bool playing = _swapEndianU16(state.playbackState) != 0;
+		if (!playing)
 		{
-			voiceListbox->SetItem(i, 0, "");
-			voiceListbox->SetItem(i, 1, "");
-			voiceListbox->SetItem(i, 2, "");
-			voiceListbox->SetItem(i, 3, "");
-			voiceListbox->SetItem(i, 4, "");
-			voiceListbox->SetItem(i, 5, "");
-			voiceListbox->SetItem(i, 6, "");
-			voiceListbox->SetItem(i, 7, "");
-			voiceListbox->SetItem(i, 8, "");
-			voiceListbox->SetItem(i, 9, "");
-			voiceListbox->SetItem(i, 10, "");
-			voiceListbox->SetItem(i, 11, "");
-			voiceListbox->SetItem(i, 12, "");
-			voiceListbox->SetItem(i, 13, "");
-			voiceListbox->SetItem(i, 14, "");
-			voiceListbox->SetItem(i, 15, "");
-			voiceListbox->SetItem(i, 16, "");
-			voiceListbox->SetItem(i, 17, "");
+			for (int c = 0; c < kColumnCount; ++c)
+				set(c, "");
 			continue;
 		}
-		// format
-		wxString formatLabel;
-		if (tempVoiceArray[voiceIndex].offsets.format == _swapEndianU16(snd_core::AX_FORMAT_ADPCM))
-			formatLabel = "adpcm";
-		else if (tempVoiceArray[voiceIndex].offsets.format == _swapEndianU16(snd_core::AX_FORMAT_PCM16))
-			formatLabel = "pcm16";
-		else if (tempVoiceArray[voiceIndex].offsets.format == _swapEndianU16(snd_core::AX_FORMAT_PCM8))
-			formatLabel = "pcm8";
-		else
-			formatLabel = "ukn";
-		voiceListbox->SetItem(i, 2, formatLabel);
-		// update offsets
-		snd_core::AXPBOFFSET_t tempOffsets;
-		snd_core::AXGetVoiceOffsets(tempVoiceArray + voiceIndex, &tempOffsets);
-		// sample base
-		voiceListbox->SetItem(i, 3, wxString::Format("%08x", _swapEndianU32(tempOffsets.samples)));
-		// current offset
-		voiceListbox->SetItem(i, 4, wxString::Format("%08x", _swapEndianU32(tempOffsets.currentOffset)));
-		// loop offset
-		voiceListbox->SetItem(i, 5, tempOffsets.loopFlag ? wxString::Format("%08x", _swapEndianU32(tempOffsets.loopOffset)) : "");
-		// end offset
-		voiceListbox->SetItem(i, 6, wxString::Format("%08x", _swapEndianU32(tempOffsets.endOffset)));
-		// volume
-		voiceListbox->SetItem(i, 7, wxString::Format("%04x", (uint16)internal->veVolume));
-		// volume delta
-		voiceListbox->SetItem(i, 8, wxString::Format("%04x", (uint16)internal->veDelta));
-		// src
-		voiceListbox->SetItem(i, 9, wxString::Format("%04x%04x", _swapEndianU16(internal->src.ratioHigh), _swapEndianU16(internal->src.ratioLow)));
-		// lpf
-		if (internal->lpf.on)
-		{
-			voiceListbox->SetItem(i, 10, wxString::Format("%04x", _swapEndianU16(internal->lpf.a0)));
-			voiceListbox->SetItem(i, 11, wxString::Format("%04x", _swapEndianU16(internal->lpf.b0)));
-		}
-		else
-		{
-			voiceListbox->SetItem(i, 10, "");
-			voiceListbox->SetItem(i, 11, "");
-		}
-		// biquad
-		if (internal->biquad.on)
-		{
-			voiceListbox->SetItem(i, 12, wxString::Format("%04x", _swapEndianU16(internal->biquad.b0)));
-			voiceListbox->SetItem(i, 13, wxString::Format("%04x", _swapEndianU16(internal->biquad.b1)));
-			voiceListbox->SetItem(i, 14, wxString::Format("%04x", _swapEndianU16(internal->biquad.b2)));
-			voiceListbox->SetItem(i, 15, wxString::Format("%04x", _swapEndianU16(internal->biquad.a1)));
-			voiceListbox->SetItem(i, 16, wxString::Format("%04x", _swapEndianU16(internal->biquad.a2)));
-		}
-		else
-		{
-			voiceListbox->SetItem(i, 12, "");
-			voiceListbox->SetItem(i, 13, "");
-			voiceListbox->SetItem(i, 14, "");
-			voiceListbox->SetItem(i, 15, "");
-			voiceListbox->SetItem(i, 16, "");
-		}
-		wxString label;
-		// device mix
-		for (uint32 f = 0; f < snd_core::AX_TV_CHANNEL_COUNT*snd_core::AX_MAX_NUM_BUS; f++)
-		{
-			sint32 busIndex = f% snd_core::AX_MAX_NUM_BUS;
-			sint32 channelIndex = f / snd_core::AX_MAX_NUM_BUS;
+		set(ColIndex, wxString::Format("%d", (sint32)voices[voice].index));
+		set(ColState, "on");
+		set(ColFormat, FormatName(voices[voice].offsets.format));
 
-			//debug_printf("DeviceMix TV Voice %08x b%02d/c%02d vol %04x delta %04x\n", hCPU->gpr[3], busIndex, channelIndex, _swapEndianU16(mixArrayBE[f].vol), _swapEndianU16(mixArrayBE[f].volDelta));
-			uint32 mixVol = internal->deviceMixTV[channelIndex * 4 + busIndex].vol;
-			mixVol = (mixVol + 0x0FFF) >> (12);
-			label += wxString::Format("%x", mixVol);
-			//ax.voiceInternal[voiceIndex].deviceMixTVChannel[channelIndex].bus[busIndex].vol = _swapEndianU16(mixArrayBE[f].vol);
+		AXPBOFFSET_t offsets;
+		AXGetVoiceOffsets(voices + voice, &offsets);
+		set(ColBase, Hex32(_swapEndianU32(offsets.samples)));
+		set(ColCurrent, Hex32(_swapEndianU32(offsets.currentOffset)));
+		set(ColLoop, offsets.loopFlag ? Hex32(_swapEndianU32(offsets.loopOffset)) : wxString());
+		set(ColEnd, Hex32(_swapEndianU32(offsets.endOffset)));
+
+		set(ColVolume, Hex16((uint16)state.veVolume));
+		set(ColVolumeDelta, Hex16((uint16)state.veDelta));
+		set(ColSrc, Hex16(_swapEndianU16(state.src.ratioHigh)) + Hex16(_swapEndianU16(state.src.ratioLow)));
+
+		const bool lpf = state.lpf.on != 0;
+		set(ColLpfA0, lpf ? Hex16(_swapEndianU16(state.lpf.a0)) : wxString());
+		set(ColLpfB0, lpf ? Hex16(_swapEndianU16(state.lpf.b0)) : wxString());
+
+		const bool biquad = state.biquad.on != 0;
+		set(ColBiquadB0, biquad ? Hex16(_swapEndianU16(state.biquad.b0)) : wxString());
+		set(ColBiquadB1, biquad ? Hex16(_swapEndianU16(state.biquad.b1)) : wxString());
+		set(ColBiquadB2, biquad ? Hex16(_swapEndianU16(state.biquad.b2)) : wxString());
+		set(ColBiquadA1, biquad ? Hex16(_swapEndianU16(state.biquad.a1)) : wxString());
+		set(ColBiquadA2, biquad ? Hex16(_swapEndianU16(state.biquad.a2)) : wxString());
+
+		// TV mix: one hex digit (volume rounded up to 1/16 steps) per channel and bus
+		wxString mix;
+		for (uint32 channel = 0; channel < AX_TV_CHANNEL_COUNT; ++channel)
+		{
+			for (uint32 bus = 0; bus < AX_MAX_NUM_BUS; ++bus)
+			{
+				const uint32 volume = state.deviceMixTV[channel * 4 + bus].vol;
+				mix += wxString::Format("%x", (volume + 0x0FFF) >> 12);
+			}
 		}
-		voiceListbox->SetItem(i, 17, label);
+		set(ColDeviceMix, mix);
 	}
 	voiceListbox->Thaw();
 }
@@ -287,19 +178,16 @@ void AudioDebuggerWindow::RefreshVoiceList()
 	RefreshVoiceList_sndgeneric();
 }
 
-void AudioDebuggerWindow::OnVoiceListPopupClick(wxCommandEvent &evt)
+void AudioDebuggerWindow::OnVoiceListPopupClick(wxCommandEvent&)
 {
-
 }
 
-void AudioDebuggerWindow::OnVoiceListRightClick(wxMouseEvent& event)
+void AudioDebuggerWindow::OnVoiceListRightClick(wxMouseEvent&)
 {
-
 }
 
 void AudioDebuggerWindow::Close()
 {
-	// this->MakeModal(false);
 	refreshTimer->Stop();
-	this->Destroy();
+	Destroy();
 }
