@@ -1,5 +1,4 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -17,6 +16,9 @@ class ControlGroup;
 class MixedTriggers;
 }  // namespace ControllerEmu
 
+// The Classic Controller (and Classic Controller Pro): two sticks, two analog triggers, a d-pad
+// and eleven buttons (WiiBrew: "Wiimote/Extension Controllers/Classic Controller").
+
 namespace WiimoteEmu
 {
 enum class ClassicGroup
@@ -31,6 +33,7 @@ enum class ClassicGroup
 class Classic : public Extension1stParty
 {
 public:
+  // Bytes 4 and 5 of the report; every button is active low.
   union ButtonFormat
   {
     u16 hex;
@@ -38,11 +41,11 @@ public:
     struct
     {
       u8 : 1;
-      u8 rt : 1;  // right trigger
+      u8 rt : 1;
       u8 plus : 1;
       u8 home : 1;
       u8 minus : 1;
-      u8 lt : 1;  // left trigger
+      u8 lt : 1;
       u8 dpad_down : 1;
       u8 dpad_right : 1;
 
@@ -53,7 +56,7 @@ public:
       u8 a : 1;
       u8 y : 1;
       u8 b : 1;
-      u8 zl : 1;  // left z button
+      u8 zl : 1;
     };
   };
   static_assert(sizeof(ButtonFormat) == 2, "Wrong size");
@@ -62,6 +65,8 @@ public:
   static constexpr int RIGHT_STICK_BITS = 5;
   static constexpr int TRIGGER_BITS = 5;
 
+  // The six byte report. The right stick's X and the left trigger are split over several
+  // bytes.
   struct DataFormat
   {
     using StickType = Common::TVec2<u8>;
@@ -71,61 +76,61 @@ public:
     using TriggerType = u8;
     using TriggerRawValue = ControllerEmu::RawValue<TriggerType, TRIGGER_BITS>;
 
-    // 6-bit X and Y values (0-63)
+    // 0-63 per axis.
     auto GetLeftStick() const { return LeftStickRawValue{StickType(lx, ly)}; }
     void SetLeftStick(const StickType& value)
     {
-      lx = value.x;
-      ly = value.y;
+      lx = value.x & 0x3f;
+      ly = value.y & 0x3f;
     }
-    // 5-bit X and Y values (0-31)
+
+    // 0-31 per axis. X is stored as bit 0 (rx1), bits 1-2 (rx2) and bits 3-4 (rx3).
     auto GetRightStick() const
     {
-      return RightStickRawValue{StickType(rx1 | rx2 << 1 | rx3 << 3, ry)};
+      const auto x = static_cast<u8>(rx1 | (rx2 << 1) | (rx3 << 3));
+      return RightStickRawValue{StickType(x, ry)};
     }
     void SetRightStick(const StickType& value)
     {
       rx1 = value.x & 0b1;
       rx2 = (value.x >> 1) & 0b11;
       rx3 = (value.x >> 3) & 0b11;
-      ry = value.y;
+      ry = value.y & 0x1f;
     }
-    // 5-bit values (0-31)
-    auto GetLeftTrigger() const { return TriggerRawValue(lt1 | lt2 << 3); }
+
+    // 0-31. The left trigger keeps bits 0-2 in lt1 and bits 3-4 in lt2.
+    auto GetLeftTrigger() const { return TriggerRawValue(static_cast<u8>(lt1 | (lt2 << 3))); }
     void SetLeftTrigger(TriggerType value)
     {
       lt1 = value & 0b111;
       lt2 = (value >> 3) & 0b11;
     }
     auto GetRightTrigger() const { return TriggerRawValue(rt); }
-    void SetRightTrigger(TriggerType value) { rt = value; }
+    void SetRightTrigger(TriggerType value) { rt = value & 0x1f; }
 
-    u16 GetButtons() const
-    {
-      // 0 == pressed.
-      return ~bt.hex;
-    }
+    // A "pressed" mask; the report stores the inverse.
+    u16 GetButtons() const { return static_cast<u16>(~bt.hex); }
+    void SetButtons(u16 value) { bt.hex = static_cast<u16>(~value); }
 
-    void SetButtons(u16 value)
-    {
-      // 0 == pressed.
-      bt.hex = ~value;
-    }
-
-    u8 lx : 6;  // byte 0
+    // byte 0
+    u8 lx : 6;
     u8 rx3 : 2;
 
-    u8 ly : 6;  // byte 1
+    // byte 1
+    u8 ly : 6;
     u8 rx2 : 2;
 
+    // byte 2
     u8 ry : 5;
     u8 lt2 : 2;
     u8 rx1 : 1;
 
+    // byte 3
     u8 rt : 5;
     u8 lt1 : 3;
 
-    ButtonFormat bt;  // byte 4, 5
+    // bytes 4 and 5
+    ButtonFormat bt;
   };
   static_assert(sizeof(DataFormat) == 6, "Wrong size");
 
@@ -134,6 +139,7 @@ public:
   static constexpr int CAL_STICK_BITS = 8;
   static constexpr int CAL_TRIGGER_BITS = 8;
 
+  // The 16 calibration bytes at 0x20 (8 bit values).
   struct CalibrationData
   {
     using StickType = DataFormat::StickType;
@@ -151,18 +157,14 @@ public:
       u8 center;
     };
 
-    auto GetLeftStick() const
+    static StickCalibration MakeStick(const StickAxis& x, const StickAxis& y)
     {
-      return StickCalibration{StickType{left_stick_x.min, left_stick_y.min},
-                              StickType{left_stick_x.center, left_stick_y.center},
-                              StickType{left_stick_x.max, left_stick_y.max}};
+      return StickCalibration{StickType{x.min, y.min}, StickType{x.center, y.center},
+                              StickType{x.max, y.max}};
     }
-    auto GetRightStick() const
-    {
-      return StickCalibration{StickType{right_stick_x.min, right_stick_y.min},
-                              StickType{right_stick_x.center, right_stick_y.center},
-                              StickType{right_stick_x.max, right_stick_y.max}};
-    }
+
+    auto GetLeftStick() const { return MakeStick(left_stick_x, left_stick_y); }
+    auto GetRightStick() const { return MakeStick(right_stick_x, right_stick_y); }
     auto GetLeftTrigger() const { return TriggerCalibration{left_trigger_zero, TRIGGER_MAX}; }
     auto GetRightTrigger() const { return TriggerCalibration{right_trigger_zero, TRIGGER_MAX}; }
 
@@ -186,6 +188,7 @@ public:
 
   ControllerEmu::ControlGroup* GetGroup(ClassicGroup group);
 
+  // Button bits (of the "pressed" mask).
   static constexpr u16 PAD_RIGHT = 0x80;
   static constexpr u16 PAD_DOWN = 0x40;
   static constexpr u16 TRIGGER_L = 0x20;
@@ -203,7 +206,7 @@ public:
   static constexpr u16 PAD_LEFT = 0x0200;
   static constexpr u16 PAD_UP = 0x0100;
 
-  // Typical value pulled from physical Classic Controller.
+  // Measured on a real Classic Controller.
   static constexpr u8 STICK_GATE_RADIUS = 0x61;
 
   static constexpr u8 CAL_STICK_CENTER = 0x80;

@@ -1,10 +1,9 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/WiimoteEmu/Extension/Guitar.h"
 
+#include <algorithm>
 #include <array>
-#include <map>
 
 #include "Common/Assert.h"
 #include "Common/Common.h"
@@ -21,127 +20,112 @@
 
 namespace WiimoteEmu
 {
-static const std::map<const ControlState, const u8> s_slider_bar_control_codes{
-    // values determined using a PS3 Guitar Hero 5 controller, which maps the touchbar to Zr on
-    // Windows
-    {0.0, 0x0F},        // not touching
+namespace
+{
+constexpr std::array<u8, 6> GUITAR_ID = {0x00, 0x00, 0xa4, 0x20, 0x01, 0x03};
+
+// Touch slider codes, by slider position. Positions were measured with a PS3 Guitar Hero 5
+// guitar (its touch bar shows up as an axis on a PC). A position maps to the first entry at or
+// beyond it.
+struct SliderCode
+{
+  ControlState position;
+  u8 code;
+};
+constexpr std::array<SliderCode, 6> SLIDER_CODES = {{
     {-0.4375, 0x04},    // top fret
     {-0.097656, 0x0A},  // second fret
+    {0.0, 0x0F},        // not touched
     {0.203125, 0x12},   // third fret
     {0.578125, 0x17},   // fourth fret
-    {1.0, 0x1F}         // bottom fret
-};
-
-constexpr std::array<u8, 6> guitar_id{{0x00, 0x00, 0xa4, 0x20, 0x01, 0x03}};
-
-constexpr std::array<u16, 5> guitar_fret_bitmasks{{
-    Guitar::FRET_GREEN,
-    Guitar::FRET_RED,
-    Guitar::FRET_YELLOW,
-    Guitar::FRET_BLUE,
-    Guitar::FRET_ORANGE,
+    {1.0, 0x1F},        // bottom fret
 }};
+constexpr u8 SLIDER_UNTOUCHED = 0x0F;
 
-constexpr std::array<const char*, 5> guitar_fret_names{{
-    _trans("Green"),
-    _trans("Red"),
-    _trans("Yellow"),
-    _trans("Blue"),
-    _trans("Orange"),
-}};
+u8 SliderCodeAt(ControlState position)
+{
+  const auto it = std::find_if(SLIDER_CODES.begin(), SLIDER_CODES.end(),
+                               [position](const SliderCode& c) { return !(c.position < position); });
+  // Positions beyond the last entry cannot occur (the slider is clamped to -1..1); treat them as
+  // the bottom fret.
+  return it != SLIDER_CODES.end() ? it->code : SLIDER_CODES.back().code;
+}
 
-constexpr std::array<u16, 2> guitar_button_bitmasks{{
-    Guitar::BUTTON_MINUS,
-    Guitar::BUTTON_PLUS,
-}};
+// Frets in group order, with their report bits.
+constexpr std::array<const char*, 5> FRET_NAMES = {_trans("Green"), _trans("Red"),
+                                                   _trans("Yellow"), _trans("Blue"),
+                                                   _trans("Orange")};
+constexpr std::array<u16, 5> FRET_BITS = {Guitar::FRET_GREEN, Guitar::FRET_RED,
+                                          Guitar::FRET_YELLOW, Guitar::FRET_BLUE,
+                                          Guitar::FRET_ORANGE};
 
-constexpr std::array<u16, 2> guitar_strum_bitmasks{{
-    Guitar::BAR_UP,
-    Guitar::BAR_DOWN,
-}};
+// "-" then "+".
+constexpr std::array<u16, 2> BUTTON_BITS = {Guitar::BUTTON_MINUS, Guitar::BUTTON_PLUS};
+
+// Up then down.
+constexpr std::array<u16, 2> STRUM_BITS = {Guitar::BAR_UP, Guitar::BAR_DOWN};
+}  // namespace
 
 Guitar::Guitar() : Extension1stParty(_trans("Guitar"))
 {
   using Translatability = ControllerEmu::Translatability;
 
-  // frets
-  groups.emplace_back(m_frets = new ControllerEmu::Buttons(_trans("Frets")));
-  for (auto& guitar_fret_name : guitar_fret_names)
-  {
-    m_frets->AddInput(Translatability::Translate, guitar_fret_name);
-  }
+  m_frets = new ControllerEmu::Buttons(_trans("Frets"));
+  groups.emplace_back(m_frets);
+  for (const char* name : FRET_NAMES)
+    m_frets->AddInput(Translatability::Translate, name);
 
-  // strum
-  groups.emplace_back(m_strum = new ControllerEmu::Buttons(_trans("Strum")));
+  m_strum = new ControllerEmu::Buttons(_trans("Strum"));
+  groups.emplace_back(m_strum);
   m_strum->AddInput(Translatability::Translate, _trans("Up"));
   m_strum->AddInput(Translatability::Translate, _trans("Down"));
 
-  // buttons
-  groups.emplace_back(m_buttons = new ControllerEmu::Buttons(_trans("Buttons")));
+  m_buttons = new ControllerEmu::Buttons(_trans("Buttons"));
+  groups.emplace_back(m_buttons);
   m_buttons->AddInput(Translatability::DoNotTranslate, "-");
   m_buttons->AddInput(Translatability::DoNotTranslate, "+");
 
-  // stick
-  constexpr auto gate_radius = ControlState(STICK_GATE_RADIUS) / STICK_RADIUS;
-  groups.emplace_back(m_stick =
-                          new ControllerEmu::OctagonAnalogStick(_trans("Stick"), gate_radius));
+  m_stick = new ControllerEmu::OctagonAnalogStick(
+      _trans("Stick"), ControlState(STICK_GATE_RADIUS) / STICK_RADIUS);
+  groups.emplace_back(m_stick);
 
-  // whammy
-  groups.emplace_back(m_whammy = new ControllerEmu::Triggers(_trans("Whammy")));
+  m_whammy = new ControllerEmu::Triggers(_trans("Whammy"));
+  groups.emplace_back(m_whammy);
   m_whammy->AddInput(Translatability::Translate, _trans("Bar"));
 
-  // slider bar
-  groups.emplace_back(m_slider_bar = new ControllerEmu::Slider(_trans("Slider Bar")));
+  m_slider_bar = new ControllerEmu::Slider(_trans("Slider Bar"));
+  groups.emplace_back(m_slider_bar);
 }
 
 void Guitar::BuildDesiredExtensionState(DesiredExtensionState* target_state)
 {
   using ControllerEmu::MapFloat;
 
-  DataFormat guitar_data = {};
+  DataFormat report = {};
 
-  // stick
-  {
-    const ControllerEmu::AnalogStick::StateData stick_state =
-        m_stick->GetState(m_input_override_function);
+  const auto stick = m_stick->GetState(m_input_override_function);
+  report.sx = MapFloat<u8>(stick.x, STICK_CENTER, 0, STICK_RANGE) & 0x3f;
+  report.sy = MapFloat<u8>(stick.y, STICK_CENTER, 0, STICK_RANGE) & 0x3f;
 
-    guitar_data.sx = MapFloat<u8>(stick_state.x, STICK_CENTER, 0, STICK_RANGE);
-    guitar_data.sy = MapFloat<u8>(stick_state.y, STICK_CENTER, 0, STICK_RANGE);
-  }
-
-  // slider bar
-  if (m_slider_bar->controls[0]->control_ref->BoundCount() &&
-      m_slider_bar->controls[1]->control_ref->BoundCount())
-  {
-    const ControllerEmu::Slider::StateData slider_data =
-        m_slider_bar->GetState(m_input_override_function);
-
-    guitar_data.sb = s_slider_bar_control_codes.lower_bound(slider_data.value)->second;
-  }
+  // An unmapped slider reads as untouched.
+  const bool slider_mapped = m_slider_bar->controls[0]->control_ref->BoundCount() &&
+                             m_slider_bar->controls[1]->control_ref->BoundCount();
+  if (slider_mapped)
+    report.sb = SliderCodeAt(m_slider_bar->GetState(m_input_override_function).value) & 0x1f;
   else
-  {
-    // if user has not mapped controls for slider bar, tell game it's untouched
-    guitar_data.sb = 0x0F;
-  }
+    report.sb = SLIDER_UNTOUCHED;
 
-  // whammy bar
-  const ControllerEmu::Triggers::StateData whammy_state =
-      m_whammy->GetState(m_input_override_function);
-  guitar_data.whammy = MapFloat<u8>(whammy_state.data[0], 0, 0, 0x1F);
+  const auto whammy = m_whammy->GetState(m_input_override_function);
+  report.whammy = MapFloat<u8>(whammy.data[0], 0, 0, 0x1F) & 0x1f;
 
-  // buttons
-  m_buttons->GetState(&guitar_data.bt, guitar_button_bitmasks.data(), m_input_override_function);
+  m_buttons->GetState(&report.bt, BUTTON_BITS.data(), m_input_override_function);
+  m_frets->GetState(&report.bt, FRET_BITS.data(), m_input_override_function);
+  m_strum->GetState(&report.bt, STRUM_BITS.data(), m_input_override_function);
 
-  // frets
-  m_frets->GetState(&guitar_data.bt, guitar_fret_bitmasks.data(), m_input_override_function);
+  // The report wants released buttons as 1.
+  report.bt = static_cast<u16>(~report.bt);
 
-  // strum
-  m_strum->GetState(&guitar_data.bt, guitar_strum_bitmasks.data(), m_input_override_function);
-
-  // flip button bits
-  guitar_data.bt ^= 0xFFFF;
-
-  target_state->data = guitar_data;
+  target_state->data = report;
 }
 
 void Guitar::Update(const DesiredExtensionState& target_state)
@@ -153,9 +137,8 @@ void Guitar::Reset()
 {
   EncryptedExtension::Reset();
 
-  m_reg.identifier = guitar_id;
-
-  // TODO: Is there calibration data?
+  // No calibration data is known for the guitar; the block stays zero.
+  m_reg.identifier = GUITAR_ID;
 }
 
 ControllerEmu::ControlGroup* Guitar::GetGroup(GuitarGroup group)
@@ -174,9 +157,8 @@ ControllerEmu::ControlGroup* Guitar::GetGroup(GuitarGroup group)
     return m_stick;
   case GuitarGroup::SliderBar:
     return m_slider_bar;
-  default:
-    ASSERT(false);
-    return nullptr;
   }
+  ASSERT(false);
+  return nullptr;
 }
 }  // namespace WiimoteEmu

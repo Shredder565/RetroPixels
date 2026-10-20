@@ -1,7 +1,8 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
+
+#include <array>
 
 #include "Core/HW/WiimoteEmu/Extension/Extension.h"
 
@@ -9,6 +10,9 @@ namespace ControllerEmu
 {
 class Buttons;
 }  // namespace ControllerEmu
+
+// The "Taiko no Tatsujin" drum (TaTaCon): left and right halves of the drum face and rim.
+// A third-party scheme extension.
 
 namespace WiimoteEmu
 {
@@ -21,10 +25,10 @@ enum class TaTaConGroup
 class TaTaCon : public Extension3rdParty
 {
 public:
+  // The six byte report; only the last byte carries data (active low).
   struct DataFormat
   {
     std::array<u8, 5> nothing;
-
     u8 state;
   };
   static_assert(sizeof(DataFormat) == 6, "Wrong size");

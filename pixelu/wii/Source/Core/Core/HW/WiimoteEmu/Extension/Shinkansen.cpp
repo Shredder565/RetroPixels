@@ -1,11 +1,12 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/WiimoteEmu/Extension/Shinkansen.h"
 
 #include <array>
+#include <variant>
 
 #include "Common/Assert.h"
+#include "Common/BitUtils.h"
 #include "Common/Common.h"
 #include "Common/CommonTypes.h"
 
@@ -17,95 +18,96 @@
 
 namespace WiimoteEmu
 {
-// TODO: check this (only the last byte is known good)
-constexpr std::array<u8, 6> shinkansen_id{{0x00, 0x00, 0xa4, 0x20, 0x01, 0x10}};
+namespace
+{
+// Only the final byte has been confirmed on hardware.
+constexpr std::array<u8, 6> SHINKANSEN_ID = {0x00, 0x00, 0xa4, 0x20, 0x01, 0x10};
+
+// The lever notches the game recognizes; anything else counts as fully released (brake 0,
+// power 255), which is a guess.
+constexpr std::array<u8, 9> BRAKE_NOTCHES = {0, 53, 79, 105, 132, 159, 187, 217, 250};
+constexpr std::array<u8, 14> POWER_NOTCHES = {255, 229, 208, 189, 170, 153, 135,
+                                              118, 101, 85,  68,  51,  35,  17};
+
+// Report bits of the Buttons group entries (as a little endian u16), in group order.
+constexpr std::array<u16, 10> BUTTON_BITS = {
+    0x0100,  // Up
+    0x0040,  // Down
+    0x0200,  // Left
+    0x0080,  // Right
+    0x2000,  // A
+    0x4000,  // B
+    0x1000,  // C
+    0x0800,  // D
+    0x0010,  // Select
+    0x0004,  // Start
+};
+
+// Picks one of `notches` for a 0..1 lever position.
+template <std::size_t N>
+u8 Notch(const std::array<u8, N>& notches, ControlState position)
+{
+  const int index = ControllerEmu::MapFloat(position, 0, 0, static_cast<int>(N - 1));
+  return notches[static_cast<std::size_t>(index)];
+}
+}  // namespace
 
 Shinkansen::Shinkansen() : Extension3rdParty("Shinkansen", _trans("Shinkansen Controller"))
 {
   using Translatability = ControllerEmu::Translatability;
 
-  // Button layout on the controller:
-  //
-  //    Up      Select Start   D
-  // Left Right              A   C
-  //   Down                    B
-  //
-  groups.emplace_back(m_buttons = new ControllerEmu::Buttons(_trans("Buttons")));
-  m_buttons->AddInput(Translatability::Translate, _trans("Up"));
-  m_buttons->AddInput(Translatability::Translate, _trans("Down"));
-  m_buttons->AddInput(Translatability::Translate, _trans("Left"));
-  m_buttons->AddInput(Translatability::Translate, _trans("Right"));
-  m_buttons->AddInput(Translatability::DoNotTranslate, "A");
-  m_buttons->AddInput(Translatability::DoNotTranslate, "B");
-  m_buttons->AddInput(Translatability::DoNotTranslate, "C");
-  m_buttons->AddInput(Translatability::DoNotTranslate, "D");
+  // Physical layout: a d-pad on the left, Select and Start in the middle, and A-D arranged in a
+  // diamond on the right (D top, B bottom, A left, C right).
+  m_buttons = new ControllerEmu::Buttons(_trans("Buttons"));
+  groups.emplace_back(m_buttons);
+  for (const char* direction : {_trans("Up"), _trans("Down"), _trans("Left"), _trans("Right")})
+    m_buttons->AddInput(Translatability::Translate, direction);
+  for (const char* letter : {"A", "B", "C", "D"})
+    m_buttons->AddInput(Translatability::DoNotTranslate, letter);
   m_buttons->AddInput(Translatability::Translate, _trans("SELECT"));
   m_buttons->AddInput(Translatability::Translate, _trans("START"));
 
-  // For easier axis mapping the right lever is inverted in Dolphin,
-  // so that the train coasts when no trigger is squeezed.
-  groups.emplace_back(m_levers = new ControllerEmu::Triggers(_trans("Levers")));
+  // The power lever is mapped inverted so that with no trigger pulled the train coasts.
+  m_levers = new ControllerEmu::Triggers(_trans("Levers"));
+  groups.emplace_back(m_levers);
   m_levers->AddInput(Translatability::Translate, _trans("L"));
   m_levers->AddInput(Translatability::Translate, _trans("R"));
 
   // i18n: Noun. This is used as a label for a control group that represents lights on controllers.
-  groups.emplace_back(m_led = new ControllerEmu::ControlGroup(_trans("Light")));
+  m_led = new ControllerEmu::ControlGroup(_trans("Light"));
+  groups.emplace_back(m_led);
   // i18n: A light on the Shinkansen controller that lights up when the train doors are locked.
   // Labeled 戸じめ (in Japanese) on the actual controller.
   m_led->AddOutput(Translatability::Translate, _trans("Doors Locked"));
 }
 
+// Note: the levers and buttons are read without the input override function, as they always
+// have been.
 void Shinkansen::BuildDesiredExtensionState(DesiredExtensionState* target_state)
 {
-  using ControllerEmu::MapFloat;
+  DesiredState& desired = target_state->data.emplace<DesiredState>();
 
-  DesiredState& state = target_state->data.emplace<DesiredState>();
+  const auto levers = m_levers->GetState().data;
+  desired.brake = Notch(BRAKE_NOTCHES, levers[0]);
+  desired.power = Notch(POWER_NOTCHES, levers[1]);
 
-  const auto analog = m_levers->GetState().data;
-  // The game requires these specific values, all other values are treated like 0/255 (which are
-  // guesses).
-  const u8 brake_values[] = {0, 53, 79, 105, 132, 159, 187, 217, 250};
-  const u8 power_values[] = {255, 229, 208, 189, 170, 153, 135, 118, 101, 85, 68, 51, 35, 17};
-  // Not casting from size_t would trigger a static assert in MapFloat due to its use of llround
-  state.brake = brake_values[MapFloat(analog[0], 0, 0, static_cast<int>(sizeof(brake_values) - 1))];
-  state.power = power_values[MapFloat(analog[1], 0, 0, static_cast<int>(sizeof(power_values) - 1))];
-
-  // Note: This currently assumes a little-endian host.
-  const u16 button_bitmasks[] = {
-      0x0100,  // Up
-      0x0040,  // Down
-      0x0200,  // Left
-      0x0080,  // Right
-      0x2000,  // A
-      0x4000,  // B
-      0x1000,  // C
-      0x0800,  // D
-      0x0010,  // Select
-      0x0004,  // Start
-  };
-  m_buttons->GetState(&state.buttons, button_bitmasks);
+  m_buttons->GetState(&desired.buttons, BUTTON_BITS.data());
 }
 
 void Shinkansen::Update(const DesiredExtensionState& target_state)
 {
-  DesiredState desired_state;
-  if (std::holds_alternative<DesiredState>(target_state.data))
-  {
-    desired_state = std::get<DesiredState>(target_state.data);
-  }
-  else
-  {
-    desired_state.brake = 0;
-    desired_state.power = 255;
-    desired_state.buttons = 0;
-  }
+  // Without input: brake released, no power, nothing pressed.
+  DesiredState desired{0, 255, 0};
+  if (const auto* const state = std::get_if<DesiredState>(&target_state.data))
+    desired = *state;
 
-  DataFormat ext_data = {};
-  ext_data.brake = desired_state.brake;
-  ext_data.power = desired_state.power;
-  ext_data.buttons = desired_state.buttons ^ 0xFFFF;
-  Common::BitCastPtr<DataFormat>(&m_reg.controller_data) = ext_data;
+  DataFormat report = {};
+  report.brake = desired.brake;
+  report.power = desired.power;
+  report.buttons = static_cast<u16>(~desired.buttons);
+  Common::BitCastPtr<DataFormat>(m_reg.controller_data) = report;
 
+  // Drive the light from identifier byte 1, as established.
   const auto lock = ControllerEmu::EmulatedController::GetStateLock();
   m_led->controls[0]->control_ref->State(m_reg.identifier[1]);
 }
@@ -115,7 +117,7 @@ void Shinkansen::Reset()
   EncryptedExtension::Reset();
 
   m_reg = {};
-  m_reg.identifier = shinkansen_id;
+  m_reg.identifier = SHINKANSEN_ID;
   m_reg.calibration.fill(0xff);
 }
 
@@ -129,10 +131,8 @@ ControllerEmu::ControlGroup* Shinkansen::GetGroup(ShinkansenGroup group)
     return m_buttons;
   case ShinkansenGroup::Light:
     return m_led;
-  default:
-    ASSERT(false);
-    return nullptr;
   }
+  ASSERT(false);
+  return nullptr;
 }
-
 }  // namespace WiimoteEmu

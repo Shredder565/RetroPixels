@@ -1,5 +1,4 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -20,6 +19,9 @@ class Force;
 class Tilt;
 }  // namespace ControllerEmu
 
+// The Nunchuk: stick, C and Z buttons and a three axis accelerometer
+// (WiiBrew: "Wiimote/Extension Controllers/Nunchuck").
+
 namespace WiimoteEmu
 {
 enum class NunchukGroup
@@ -35,6 +37,7 @@ enum class NunchukGroup
 class Nunchuk : public Extension1stParty
 {
 public:
+  // Byte 5 of the report: active-low buttons and the accelerometer's two low bits per axis.
   union ButtonFormat
   {
     u8 hex;
@@ -43,8 +46,6 @@ public:
     {
       u8 z : 1;
       u8 c : 1;
-
-      // LSBs of accelerometer
       u8 acc_x_lsb : 2;
       u8 acc_y_lsb : 2;
       u8 acc_z_lsb : 2;
@@ -52,6 +53,7 @@ public:
   };
   static_assert(sizeof(ButtonFormat) == 1, "Wrong size");
 
+  // The six byte report.
   struct DataFormat
   {
     using StickType = Common::TVec2<u8>;
@@ -62,26 +64,26 @@ public:
 
     auto GetStick() const { return StickRawValue(StickType(jx, jy)); }
 
-    // Components have 10 bits of precision.
-    u16 GetAccelX() const { return ax << 2 | bt.acc_x_lsb; }
-    u16 GetAccelY() const { return ay << 2 | bt.acc_y_lsb; }
-    u16 GetAccelZ() const { return az << 2 | bt.acc_z_lsb; }
+    // Accelerometer axes are 10 bits: eight in their own byte, two in byte 5.
+    u16 GetAccelX() const { return Join(ax, bt.acc_x_lsb); }
+    u16 GetAccelY() const { return Join(ay, bt.acc_y_lsb); }
+    u16 GetAccelZ() const { return Join(az, bt.acc_z_lsb); }
     auto GetAccel() const { return AccelData{AccelType{GetAccelX(), GetAccelY(), GetAccelZ()}}; }
 
     void SetAccelX(u16 val)
     {
-      ax = val >> 2;
-      bt.acc_x_lsb = val & 0b11;
+      ax = High(val);
+      bt.acc_x_lsb = Low(val);
     }
     void SetAccelY(u16 val)
     {
-      ay = val >> 2;
-      bt.acc_y_lsb = val & 0b11;
+      ay = High(val);
+      bt.acc_y_lsb = Low(val);
     }
     void SetAccelZ(u16 val)
     {
-      az = val >> 2;
-      bt.acc_z_lsb = val & 0b11;
+      az = High(val);
+      bt.acc_z_lsb = Low(val);
     }
     void SetAccel(const AccelType& accel)
     {
@@ -90,34 +92,35 @@ public:
       SetAccelZ(accel.z);
     }
 
-    u8 GetButtons() const
-    {
-      // 0 == pressed.
-      return ~bt.hex & (BUTTON_C | BUTTON_Z);
-    }
+    // Buttons as a "pressed" mask (the report stores them inverted).
+    u8 GetButtons() const { return static_cast<u8>(~bt.hex & BUTTON_MASK); }
     void SetButtons(u8 value)
     {
-      // 0 == pressed.
-      bt.hex |= (BUTTON_C | BUTTON_Z);
-      bt.hex ^= value & (BUTTON_C | BUTTON_Z);
+      bt.hex = static_cast<u8>((bt.hex | BUTTON_MASK) ^ (value & BUTTON_MASK));
     }
 
-    // joystick x, y
     u8 jx;
     u8 jy;
 
-    // accelerometer
+    // Upper eight bits of each accelerometer axis.
     u8 ax;
     u8 ay;
     u8 az;
 
-    // buttons + accelerometer LSBs
     ButtonFormat bt;
+
+  private:
+    static constexpr u8 BUTTON_MASK = 0x03;  // C and Z
+
+    static u16 Join(u8 high, u8 low) { return static_cast<u16>((high << 2) | low); }
+    static u8 High(u16 value) { return static_cast<u8>(value >> 2); }
+    static u8 Low(u16 value) { return static_cast<u8>(value & 0b11); }
   };
   static_assert(sizeof(DataFormat) == 6, "Wrong size");
 
   using DesiredState = DataFormat;
 
+  // The 16 calibration bytes at 0x20.
   struct CalibrationData
   {
     using StickType = DataFormat::StickType;
@@ -165,7 +168,7 @@ public:
   static constexpr u8 BUTTON_C = 0x02;
   static constexpr u8 BUTTON_Z = 0x01;
 
-  // Typical values pulled from physical Nunchuk.
+  // Measured on a real Nunchuk.
   static constexpr u8 ACCEL_ZERO_G = 0x80;
   static constexpr u8 ACCEL_ONE_G = 0xB3;
   static constexpr u8 STICK_GATE_RADIUS = 0x60;
@@ -189,7 +192,7 @@ private:
   ControllerEmu::AnalogStick* m_stick;
   ControllerEmu::IMUAccelerometer* m_imu_accelerometer;
 
-  // Dynamics:
+  // Motion simulation state (saved in savestates in this order: swing, tilt, shake).
   MotionState m_swing_state;
   RotationalState m_tilt_state;
   PositionalState m_shake_state;

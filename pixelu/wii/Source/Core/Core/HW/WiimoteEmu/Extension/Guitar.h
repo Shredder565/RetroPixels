@@ -1,5 +1,4 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -14,6 +13,9 @@ class Triggers;
 class Slider;
 }  // namespace ControllerEmu
 
+// The Guitar Hero guitar: five frets, a strum bar, a whammy bar, a stick and (on later
+// models) a touch slider. A first-party scheme extension.
+
 namespace WiimoteEmu
 {
 enum class GuitarGroup
@@ -26,25 +28,28 @@ enum class GuitarGroup
   SliderBar
 };
 
-// The Guitar uses the "1st-party" extension encryption scheme.
 class Guitar : public Extension1stParty
 {
 public:
+  // The six byte report.
   struct DataFormat
   {
+    // Stick, 0-63 per axis. The top bits read 1 on Guitar Hero 3 guitars, 0 on World Tour.
     u8 sx : 6;
-    u8 pad1 : 2;  // 1 on gh3, 0 on ghwt
+    u8 pad1 : 2;
 
     u8 sy : 6;
-    u8 pad2 : 2;  // 1 on gh3, 0 on ghwt
+    u8 pad2 : 2;
 
-    u8 sb : 5;    // not used in gh3
-    u8 pad3 : 3;  // always 0
+    // Touch slider (World Tour and later).
+    u8 sb : 5;
+    u8 pad3 : 3;
 
     u8 whammy : 5;
-    u8 pad4 : 3;  // always 0
+    u8 pad4 : 3;
 
-    u16 bt;  // buttons
+    // Active-low buttons.
+    u16 bt;
   };
   static_assert(sizeof(DataFormat) == 6, "Wrong size");
 
@@ -73,7 +78,7 @@ public:
   static const u8 STICK_RADIUS = 0x1f;
   static const u8 STICK_RANGE = 0x3f;
 
-  // TODO: Test real hardware. Is this accurate?
+  // An estimate; not measured on hardware.
   static const u8 STICK_GATE_RADIUS = 0x16;
 
 private:

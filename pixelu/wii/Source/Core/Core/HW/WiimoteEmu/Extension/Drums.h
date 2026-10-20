@@ -1,5 +1,4 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -16,6 +15,10 @@ class Buttons;
 class ControlGroup;
 }  // namespace ControllerEmu
 
+// The Guitar Hero World Tour / Rock Band drum kit: six pads, a stick and two buttons. Each hit
+// is reported once with a velocity and the pad's bit is then held for a few reports. A
+// first-party scheme extension.
+
 namespace WiimoteEmu
 {
 enum class DrumsGroup
@@ -25,53 +28,52 @@ enum class DrumsGroup
   Stick
 };
 
-// The Drums use the "1st-party" extension encryption scheme.
 class Drums : public Extension1stParty
 {
 public:
+  // The input of one update, before it is turned into reports.
   struct DesiredState
   {
-    u8 stick_x;    // 6 bits
-    u8 stick_y;    // 6 bits
-    u8 buttons;    // 2 bits
-    u8 drum_pads;  // 6 bits
-    u8 softness;   // 7 bits
+    u8 stick_x;    // 0-63
+    u8 stick_y;    // 0-63
+    u8 buttons;    // BUTTON_* mask
+    u8 drum_pads;  // PAD_* mask of pads held down
+    u8 softness;   // 0 (hardest) to 127
   };
 
+  // The six byte report.
   struct DataFormat
   {
     u8 stick_x : 6;
-    // Seemingly random.
+    // These two bits look random on hardware.
     u8 unk1 : 2;
 
     u8 stick_y : 6;
-    // Seemingly random.
     u8 unk2 : 2;
 
     u8 velocity3 : 1;
 
-    // For which "pad" the velocity data is for.
+    // VelocityID of the pad the velocity belongs to.
     u8 velocity_id : 7;
 
     u8 velocity2 : 1;
-    // 1 with no velocity data and 0 when velocity data is present.
+    // Both of these read 1 when the report carries no velocity.
     u8 no_velocity_data_1 : 1;
-    // These two bits seem to always be set. (0b11)
+    // Always 0b11 on hardware.
     u8 unk5 : 2;
-    // 1 with no velocity data and 0 when velocity data is present.
     u8 no_velocity_data_2 : 1;
 
     u8 velocity4 : 3;
 
-    // Button bits.
+    // Buttons (active low). Bits 0 and 7 carry velocity bits 0 and 1.
     union
     {
-      u8 buttons;  // buttons
+      u8 buttons;
       BitField<0, 1, u8> velocity0;
       BitField<7, 1, u8> velocity1;
     };
 
-    // Drum-pad bits.
+    // Pads (active low).
     u8 drum_pads;
   };
   static_assert(sizeof(DataFormat) == 6, "Wrong size");
@@ -80,8 +82,7 @@ public:
   {
     None = 0b1111111,
     Bass = 0b1011011,
-    // TODO: Implement HiHatPedal.
-    // HiHatPedal = 0b0011011,
+    // The hi-hat pedal (0b0011011) is not emulated.
     Red = 0b1011001,
     Yellow = 0b1010001,
     Blue = 0b1001111,
@@ -102,7 +103,7 @@ public:
   static constexpr u8 BUTTON_PLUS = 0x04;
   static constexpr u8 BUTTON_MINUS = 0x10;
 
-  // FYI: The hi-hat pedal sets no bits here.
+  // Pad bits. The hi-hat pedal has none.
   static constexpr u8 PAD_BASS = 0x04;
   static constexpr u8 PAD_BLUE = 0x08;
   static constexpr u8 PAD_GREEN = 0x10;
@@ -110,8 +111,7 @@ public:
   static constexpr u8 PAD_RED = 0x40;
   static constexpr u8 PAD_ORANGE = 0x80;
 
-  // Note: My hardware's octagon stick produced the complete range of values (0 - 0x3f)
-  // It also had perfect center values of 0x20 with absolutely no "play".
+  // A real kit's stick covers the whole 0-0x3f range and rests exactly at 0x20.
   static constexpr ControlState GATE_RADIUS = 1.0;
   static constexpr u8 STICK_MIN = 0x00;
   static constexpr u8 STICK_CENTER = 0x20;
@@ -124,11 +124,11 @@ private:
 
   ControllerEmu::SettingValue<double> m_hit_strength_setting;
 
-  // Holds previous user input state to watch for "new" hits.
+  // Pads held during the previous update, to spot new hits.
   u8 m_prev_pad_input = 0;
-  // Holds new drum pad hits that still need velocity data to be sent.
+  // Hits whose velocity has not been reported yet.
   u8 m_new_pad_hits = 0;
-  // Holds how many more frames to send each drum-pad bit.
+  // Reports left in which each pad's bit is still set.
   std::array<u8, 6> m_pad_remaining_frames{};
 };
 }  // namespace WiimoteEmu

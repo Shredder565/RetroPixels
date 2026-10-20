@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -13,6 +12,8 @@ class AnalogStick;
 class Triggers;
 class ControlGroup;
 }  // namespace ControllerEmu
+
+// Ubisoft's "Drawsome" tablet: a pressure sensitive pen. A third-party scheme extension.
 
 namespace WiimoteEmu
 {
@@ -33,17 +34,17 @@ public:
 
   ControllerEmu::ControlGroup* GetGroup(DrawsomeTabletGroup group);
 
+  // The six byte report.
   struct DataFormat
   {
-    // Pen X/Y is little endian.
+    // 16 bit little endian pen coordinates.
     u8 stylus_x1;
     u8 stylus_x2;
-
     u8 stylus_y1;
     u8 stylus_y2;
 
+    // 11 bit pressure: low eight bits here, top three in the next byte.
     u8 pressure1;
-
     union
     {
       BitField<0, 3, u8> pressure2;

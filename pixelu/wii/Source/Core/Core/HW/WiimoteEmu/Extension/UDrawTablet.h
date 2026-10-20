@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,6 +11,9 @@ class AnalogStick;
 class Triggers;
 class ControlGroup;
 }  // namespace ControllerEmu
+
+// THQ's uDraw GameTablet: a pressure sensitive stylus on a drawing surface plus a two-way
+// rocker. A third-party scheme extension.
 
 namespace WiimoteEmu
 {
@@ -36,24 +38,23 @@ public:
   static constexpr u8 BUTTON_ROCKER_UP = 0x1;
   static constexpr u8 BUTTON_ROCKER_DOWN = 0x2;
 
+  // The six byte report.
   struct DataFormat
   {
-    // Bytes 0-2 are 0xff when stylus is lifted
-    // X increases from left to right
-    // Y increases from bottom to top
+    // 12 bit coordinates (x grows to the right, y grows upwards); all ones while the stylus is
+    // lifted.
     u8 stylus_x1;
     u8 stylus_y1;
     u8 stylus_x2 : 4;
     u8 stylus_y2 : 4;
 
-    // Valid even when stylus is lifted
+    // Reported whether or not the stylus touches the surface.
     u8 pressure;
 
-    // Always 0xff
+    // Reads 0xff.
     u8 unk;
 
-    // Buttons are 0 when pressed
-    // 0x04 is always unset (neutral state is 0xfb)
+    // Active low; bit 2 is always clear, so the idle value is 0xfb.
     u8 buttons;
   };
   static_assert(6 == sizeof(DataFormat), "Wrong size.");

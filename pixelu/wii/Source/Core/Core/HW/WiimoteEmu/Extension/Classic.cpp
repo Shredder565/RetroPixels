@@ -1,5 +1,4 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/WiimoteEmu/Extension/Classic.h"
 
@@ -18,120 +17,86 @@
 
 namespace WiimoteEmu
 {
-constexpr std::array<u8, 6> classic_id{{0x00, 0x00, 0xa4, 0x20, 0x01, 0x01}};
+namespace
+{
+constexpr std::array<u8, 6> CLASSIC_ID = {0x00, 0x00, 0xa4, 0x20, 0x01, 0x01};
 
-constexpr std::array<u16, 9> classic_button_bitmasks{{
-    Classic::BUTTON_A,
-    Classic::BUTTON_B,
-    Classic::BUTTON_X,
-    Classic::BUTTON_Y,
+// Report bits of the Buttons group entries, in the order they are added below.
+constexpr std::array<u16, 9> BUTTON_BITS = {
+    Classic::BUTTON_A,     Classic::BUTTON_B,    Classic::BUTTON_X,
+    Classic::BUTTON_Y,     Classic::BUTTON_ZL,   Classic::BUTTON_ZR,
+    Classic::BUTTON_MINUS, Classic::BUTTON_PLUS, Classic::BUTTON_HOME,
+};
 
-    Classic::BUTTON_ZL,
-    Classic::BUTTON_ZR,
+// Digital L and R of the Triggers group.
+constexpr std::array<u16, 2> TRIGGER_CLICK_BITS = {Classic::TRIGGER_L, Classic::TRIGGER_R};
 
-    Classic::BUTTON_MINUS,
-    Classic::BUTTON_PLUS,
+// Up, down, left, right.
+constexpr std::array<u16, 4> DPAD_BITS = {Classic::PAD_UP, Classic::PAD_DOWN, Classic::PAD_LEFT,
+                                          Classic::PAD_RIGHT};
 
-    Classic::BUTTON_HOME,
-}};
-
-constexpr std::array<u16, 2> classic_trigger_bitmasks{{
-    Classic::TRIGGER_L,
-    Classic::TRIGGER_R,
-}};
-
-constexpr std::array<u16, 4> classic_dpad_bitmasks{{
-    Classic::PAD_UP,
-    Classic::PAD_DOWN,
-    Classic::PAD_LEFT,
-    Classic::PAD_RIGHT,
-}};
+// Maps a -1..1 stick axis onto 0..range around center.
+u8 StickAxis(ControlState value, u8 center, u8 range)
+{
+  return ControllerEmu::MapFloat<u8>(value, center, 0, range);
+}
+}  // namespace
 
 Classic::Classic() : Extension1stParty("Classic", _trans("Classic Controller"))
 {
   using Translatability = ControllerEmu::Translatability;
 
-  // buttons
-  groups.emplace_back(m_buttons = new ControllerEmu::Buttons(BUTTONS_GROUP));
-  for (auto& button_name :
-       {A_BUTTON, B_BUTTON, X_BUTTON, Y_BUTTON, ZL_BUTTON, ZR_BUTTON, MINUS_BUTTON, PLUS_BUTTON})
+  m_buttons = new ControllerEmu::Buttons(BUTTONS_GROUP);
+  groups.emplace_back(m_buttons);
+  for (const char* name : {A_BUTTON, B_BUTTON, X_BUTTON, Y_BUTTON, ZL_BUTTON, ZR_BUTTON,
+                           MINUS_BUTTON, PLUS_BUTTON})
   {
-    m_buttons->AddInput(Translatability::DoNotTranslate, button_name);
+    m_buttons->AddInput(Translatability::DoNotTranslate, name);
   }
   m_buttons->AddInput(Translatability::DoNotTranslate, HOME_BUTTON, "HOME");
 
-  // sticks
-  constexpr auto gate_radius = ControlState(STICK_GATE_RADIUS) / CAL_STICK_RADIUS;
-  groups.emplace_back(m_left_stick =
-                          new ControllerEmu::OctagonAnalogStick(LEFT_STICK_GROUP, gate_radius));
-  groups.emplace_back(m_right_stick =
-                          new ControllerEmu::OctagonAnalogStick(RIGHT_STICK_GROUP, gate_radius));
+  const ControlState gate = ControlState(STICK_GATE_RADIUS) / CAL_STICK_RADIUS;
+  m_left_stick = new ControllerEmu::OctagonAnalogStick(LEFT_STICK_GROUP, gate);
+  groups.emplace_back(m_left_stick);
+  m_right_stick = new ControllerEmu::OctagonAnalogStick(RIGHT_STICK_GROUP, gate);
+  groups.emplace_back(m_right_stick);
 
-  // triggers
-  groups.emplace_back(m_triggers = new ControllerEmu::MixedTriggers(TRIGGERS_GROUP));
-  for (const char* trigger_name : {L_DIGITAL, R_DIGITAL, L_ANALOG, R_ANALOG})
-  {
-    m_triggers->AddInput(Translatability::Translate, trigger_name);
-  }
+  m_triggers = new ControllerEmu::MixedTriggers(TRIGGERS_GROUP);
+  groups.emplace_back(m_triggers);
+  for (const char* name : {L_DIGITAL, R_DIGITAL, L_ANALOG, R_ANALOG})
+    m_triggers->AddInput(Translatability::Translate, name);
 
-  // dpad
-  groups.emplace_back(m_dpad = new ControllerEmu::Buttons(DPAD_GROUP));
-  for (const char* named_direction : named_directions)
-  {
-    m_dpad->AddInput(Translatability::Translate, named_direction);
-  }
+  m_dpad = new ControllerEmu::Buttons(DPAD_GROUP);
+  groups.emplace_back(m_dpad);
+  for (const char* direction : named_directions)
+    m_dpad->AddInput(Translatability::Translate, direction);
 }
 
 void Classic::BuildDesiredExtensionState(DesiredExtensionState* target_state)
 {
-  using ControllerEmu::MapFloat;
+  DataFormat report = {};
 
-  DataFormat classic_data = {};
+  const auto left = m_left_stick->GetState(m_input_override_function);
+  report.SetLeftStick({StickAxis(left.x, LEFT_STICK_CENTER, LEFT_STICK_RANGE),
+                       StickAxis(left.y, LEFT_STICK_CENTER, LEFT_STICK_RANGE)});
 
-  // left stick
-  {
-    const ControllerEmu::AnalogStick::StateData left_stick_state =
-        m_left_stick->GetState(m_input_override_function);
+  const auto right = m_right_stick->GetState(m_input_override_function);
+  report.SetRightStick({StickAxis(right.x, RIGHT_STICK_CENTER, RIGHT_STICK_RANGE),
+                        StickAxis(right.y, RIGHT_STICK_CENTER, RIGHT_STICK_RANGE)});
 
-    const u8 x = MapFloat<u8>(left_stick_state.x, LEFT_STICK_CENTER, 0, LEFT_STICK_RANGE);
-    const u8 y = MapFloat<u8>(left_stick_state.y, LEFT_STICK_CENTER, 0, LEFT_STICK_RANGE);
+  // The digital trigger clicks, buttons and d-pad all go into one mask.
+  u16 pressed = 0;
 
-    classic_data.SetLeftStick({x, y});
-  }
+  ControlState analog[2] = {0, 0};
+  m_triggers->GetState(&pressed, TRIGGER_CLICK_BITS.data(), analog, m_input_override_function);
+  report.SetLeftTrigger(ControllerEmu::MapFloat<u8>(analog[0], 0, 0, TRIGGER_RANGE));
+  report.SetRightTrigger(ControllerEmu::MapFloat<u8>(analog[1], 0, 0, TRIGGER_RANGE));
 
-  // right stick
-  {
-    const ControllerEmu::AnalogStick::StateData right_stick_data =
-        m_right_stick->GetState(m_input_override_function);
+  m_buttons->GetState(&pressed, BUTTON_BITS.data(), m_input_override_function);
+  m_dpad->GetState(&pressed, DPAD_BITS.data(), m_input_override_function);
+  report.SetButtons(pressed);
 
-    const u8 x = MapFloat<u8>(right_stick_data.x, RIGHT_STICK_CENTER, 0, RIGHT_STICK_RANGE);
-    const u8 y = MapFloat<u8>(right_stick_data.y, RIGHT_STICK_CENTER, 0, RIGHT_STICK_RANGE);
-
-    classic_data.SetRightStick({x, y});
-  }
-
-  u16 buttons = 0;
-
-  // triggers
-  {
-    ControlState triggers[2] = {0, 0};
-    m_triggers->GetState(&buttons, classic_trigger_bitmasks.data(), triggers,
-                         m_input_override_function);
-
-    const u8 lt = MapFloat<u8>(triggers[0], 0, 0, TRIGGER_RANGE);
-    const u8 rt = MapFloat<u8>(triggers[1], 0, 0, TRIGGER_RANGE);
-
-    classic_data.SetLeftTrigger(lt);
-    classic_data.SetRightTrigger(rt);
-  }
-
-  // buttons and dpad
-  m_buttons->GetState(&buttons, classic_button_bitmasks.data(), m_input_override_function);
-  m_dpad->GetState(&buttons, classic_dpad_bitmasks.data(), m_input_override_function);
-
-  classic_data.SetButtons(buttons);
-
-  target_state->data = classic_data;
+  target_state->data = report;
 }
 
 void Classic::Update(const DesiredExtensionState& target_state)
@@ -143,34 +108,15 @@ void Classic::Reset()
 {
   EncryptedExtension::Reset();
 
-  m_reg.identifier = classic_id;
+  m_reg.identifier = CLASSIC_ID;
 
-  // Build calibration data:
-  // All values are to 8 bits of precision.
-  m_reg.calibration = {{
-      // Left Stick X max,min,center:
-      CAL_STICK_CENTER + STICK_GATE_RADIUS,
-      CAL_STICK_CENTER - STICK_GATE_RADIUS,
-      CAL_STICK_CENTER,
-      // Left Stick Y max,min,center:
-      CAL_STICK_CENTER + STICK_GATE_RADIUS,
-      CAL_STICK_CENTER - STICK_GATE_RADIUS,
-      CAL_STICK_CENTER,
-      // Right Stick X max,min,center:
-      CAL_STICK_CENTER + STICK_GATE_RADIUS,
-      CAL_STICK_CENTER - STICK_GATE_RADIUS,
-      CAL_STICK_CENTER,
-      // Right Stick Y max,min,center:
-      CAL_STICK_CENTER + STICK_GATE_RADIUS,
-      CAL_STICK_CENTER - STICK_GATE_RADIUS,
-      CAL_STICK_CENTER,
-      // Left/Right trigger neutrals.
-      0,
-      0,
-      // 2 checksum bytes calculated below:
-      0x00,
-      0x00,
-  }};
+  // Four stick axes (left x, left y, right x, right y) as max/min/center, both trigger
+  // neutral points at zero, then the checksum.
+  constexpr u8 HIGH = CAL_STICK_CENTER + STICK_GATE_RADIUS;
+  constexpr u8 LOW = CAL_STICK_CENTER - STICK_GATE_RADIUS;
+  constexpr u8 MID = CAL_STICK_CENTER;
+  m_reg.calibration = {HIGH, LOW, MID, HIGH, LOW, MID, HIGH, LOW,
+                       MID,  HIGH, LOW, MID, 0,   0,   0,   0};
 
   UpdateCalibrationDataChecksum(m_reg.calibration, CALIBRATION_CHECKSUM_BYTES);
 }
@@ -189,9 +135,8 @@ ControllerEmu::ControlGroup* Classic::GetGroup(ClassicGroup group)
     return m_left_stick;
   case ClassicGroup::RightStick:
     return m_right_stick;
-  default:
-    ASSERT(false);
-    return nullptr;
   }
+  ASSERT(false);
+  return nullptr;
 }
 }  // namespace WiimoteEmu

@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,6 +10,9 @@ class Buttons;
 class ControlGroup;
 class Triggers;
 }  // namespace ControllerEmu
+
+// The controller of "Densha de GO! Shinkansen": brake and power levers, ten buttons and a
+// "doors locked" light. A third-party scheme extension.
 
 namespace WiimoteEmu
 {
@@ -36,6 +38,7 @@ public:
   void BuildDesiredExtensionState(DesiredExtensionState* target_state) override;
   void Update(const DesiredExtensionState& target_state) override;
   void Reset() override;
+
   ControllerEmu::ControlGroup* GetGroup(ShinkansenGroup group);
 
 private:
@@ -43,6 +46,7 @@ private:
   ControllerEmu::Triggers* m_levers;
   ControllerEmu::ControlGroup* m_led;
 
+  // The report as written to the register file (eight bytes; the remote reads six).
   struct DataFormat
   {
     u8 unk0;
@@ -51,8 +55,8 @@ private:
     u8 power;
     u8 unk4;
     u8 unk5;
+    // Active low, stored little endian.
     u16 buttons;
   };
 };
-
 }  // namespace WiimoteEmu

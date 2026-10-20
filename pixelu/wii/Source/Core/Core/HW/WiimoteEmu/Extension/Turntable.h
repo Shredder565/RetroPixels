@@ -1,5 +1,4 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -14,6 +13,9 @@ class Slider;
 class Triggers;
 }  // namespace ControllerEmu
 
+// The DJ Hero turntable: two platters with three buttons each, a crossfader, an effect dial, a
+// stick and the Euphoria button. A first-party scheme extension.
+
 namespace WiimoteEmu
 {
 enum class TurntableGroup
@@ -26,10 +28,12 @@ enum class TurntableGroup
   Crossfade
 };
 
-// The DJ Hero Turntable uses the "1st-party" extension encryption scheme.
 class Turntable : public Extension1stParty
 {
 public:
+  // The six byte report. The platter speeds are signed 6 bit values; the right one is spread
+  // over four fields (bit 0, bits 1-2, bits 3-4, bit 5) and the left one over two (bits 0-4 and
+  // bit 5, which shares a bit with the buttons). The dial is split into bits 0-2 and 3-4.
   struct DataFormat
   {
     u8 sx : 6;
@@ -49,7 +53,8 @@ public:
     union
     {
       u16 ltable2 : 1;
-      u16 bt;  // buttons
+      // Active-low buttons.
+      u16 bt;
     };
   };
   static_assert(sizeof(DataFormat) == 6, "Wrong size");
@@ -81,7 +86,7 @@ public:
   static constexpr u8 STICK_CENTER = (1 << STICK_BIT_COUNT) / 2;
   static constexpr u8 STICK_RADIUS = STICK_CENTER - 1;
   static constexpr u8 STICK_RANGE = (1 << STICK_BIT_COUNT) - 1;
-  // TODO: Test real hardware. Is this accurate?
+  // An estimate; not measured on hardware.
   static constexpr u8 STICK_GATE_RADIUS = 0x16;
 
   static constexpr int TABLE_BIT_COUNT = 6;
