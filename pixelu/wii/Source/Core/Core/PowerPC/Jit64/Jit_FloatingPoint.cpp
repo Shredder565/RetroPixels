@@ -891,17 +891,18 @@ void Jit64::fselx(UGeckoInstruction inst)
   }
   else
   {
-    // XMM1 = (mask & b) | (~mask & c)
+    // No blend instruction: XMM1 = (~mask & c) | (mask & b).
     MOVAPD(XMM1, R(XMM0));
-    ANDPD(XMM0, Rb);
     ANDNPD(XMM1, Rc);
+    ANDPD(XMM0, Rb);
     ORPD(XMM1, R(XMM0));
   }
 
-  if (packed)
-    MOVAPD(Rd, R(XMM1));
-  else
+  // The scalar form leaves ps1 of frD alone.
+  if (!packed)
     MOVSD(Rd, R(XMM1));
+  else
+    MOVAPD(Rd, R(XMM1));
 }
 
 void Jit64::fmrx(UGeckoInstruction inst)
@@ -910,24 +911,25 @@ void Jit64::fmrx(UGeckoInstruction inst)
   JITDISABLE(bJITFloatingPointOff);
   FALLBACK_IF(inst.Rc);
 
-  const u32 d = inst.FD;
-  const u32 b = inst.FB;
-  if (d == b)
+  const u32 dst = inst.FD;
+  const u32 src = inst.FB;
+  // Copying a register onto itself changes nothing.
+  if (src == dst)
     return;
 
   // Only ps0 is copied; ps1 of frD stays.
-  RCOpArg Rd = fpr.Use(d, RCMode::Write);
+  RCOpArg Rd = fpr.Use(dst, RCMode::Write);
   RegCache::Realize(Rd);
   if (!Rd.IsSimpleReg())
   {
     // frD lives in memory: store b's low lane over it.
-    RCOpArg Rb = fpr.Bind(b, RCMode::Read);
+    RCOpArg Rb = fpr.Bind(src, RCMode::Read);
     RegCache::Realize(Rb);
     MOVSD(Rd, Rb.GetSimpleReg());
     return;
   }
 
-  RCOpArg Rb = fpr.Use(b, RCMode::Read);
+  RCOpArg Rb = fpr.Use(src, RCMode::Read);
   RegCache::Realize(Rb);
   // A load with MOVSD would zero the high lane; MOVLPD does not.
   if (Rb.IsSimpleReg())
@@ -1024,12 +1026,13 @@ void Jit64::FloatCompare(UGeckoInstruction inst, bool upper)
     emit_outcome(PowerPC::CR_LT_BIT, PowerPC::CR_LT);
   }
 
-  SetJumpTarget(done_eq);
+  // Every outcome path converges here.
   if (distinct)
   {
-    SetJumpTarget(done_unordered);
     SetJumpTarget(done_greater);
+    SetJumpTarget(done_unordered);
   }
+  SetJumpTarget(done_eq);
 
   MOV(64, PPCSTATE_CR(crf), R(RSCRATCH));
 }
@@ -1038,8 +1041,8 @@ void Jit64::fcmpX(UGeckoInstruction inst)
 {
   INSTRUCTION_START
   JITDISABLE(bJITFloatingPointOff);
+  // Signalling compares would need to raise VXSNAN/VXVC precisely.
   FALLBACK_IF(jo.fp_exceptions);
-
   FloatCompare(inst);
 }
 
@@ -1047,25 +1050,32 @@ void Jit64::fctiwx(UGeckoInstruction inst)
 {
   INSTRUCTION_START
   JITDISABLE(bJITFloatingPointOff);
-  FALLBACK_IF(inst.Rc);
   FALLBACK_IF(jo.fp_exceptions);
+  FALLBACK_IF(inst.Rc);
 
-  RCOpArg Rb = fpr.Use(inst.RB, RCMode::Read);
-  RCX64Reg Rd = fpr.Bind(inst.RD, RCMode::Write);
-  RegCache::Realize(Rb, Rd);
+  RCOpArg source = fpr.Use(inst.RB, RCMode::Read);
+  RCX64Reg dest = fpr.Bind(inst.RD, RCMode::Write);
+  RegCache::Realize(source, dest);
 
   // CVT(T)PD2DQ returns 0x80000000 for anything out of range or NaN, which
   // is already right for large negative inputs and NaN. Large positive
   // inputs must give 0x7FFFFFFF, hence the MINSD with 2^31 - 1 first.
   // (fctiw of -0.0 should set the upper word to 0xFFF80001; not done.)
   MOVAPD(XMM0, MConst(FCTIW_BOUNDS));
-  MINSD(XMM0, Rb);
-  if (inst.SUBOP10 == 14)  // fctiw: current rounding mode
+  MINSD(XMM0, source);
+  switch (inst.SUBOP10)
+  {
+  case 14:  // fctiw: current rounding mode
     CVTPD2DQ(XMM0, R(XMM0));
-  else if (inst.SUBOP10 == 15)  // fctiwz: toward zero
+    break;
+  case 15:  // fctiwz: toward zero
     CVTTPD2DQ(XMM0, R(XMM0));
+    break;
+  default:
+    break;
+  }
   // ps1 of frD is kept.
-  MOVSD(Rd, XMM0);
+  MOVSD(dest, XMM0);
 }
 
 void Jit64::frspx(UGeckoInstruction inst)
@@ -1093,31 +1103,32 @@ void Jit64::frsqrtex(UGeckoInstruction inst)
   FALLBACK_IF(jo.fp_exceptions || jo.div_by_zero_exceptions);
 
   // The routine works on XMM0 and uses RSCRATCH_EXTRA.
-  RCX64Reg extra = gpr.Scratch(RSCRATCH_EXTRA);
-  RCOpArg Rb = fpr.Use(inst.FB, RCMode::Read);
-  RCX64Reg Rd = fpr.Bind(inst.FD, RCMode::Write);
-  RegCache::Realize(extra, Rb, Rd);
+  RCX64Reg routine_tmp = gpr.Scratch(RSCRATCH_EXTRA);
+  RCOpArg operand = fpr.Use(inst.FB, RCMode::Read);
+  RCX64Reg estimate = fpr.Bind(inst.FD, RCMode::Write);
+  RegCache::Realize(routine_tmp, operand, estimate);
 
-  MOVAPD(XMM0, Rb);
+  MOVAPD(XMM0, operand);
   CALL(asm_routines.frsqrte);
-  FinalizeDoubleResult(Rd, R(XMM0));
+  FinalizeDoubleResult(estimate, R(XMM0));
 }
 
 void Jit64::fresx(UGeckoInstruction inst)
 {
   INSTRUCTION_START
   JITDISABLE(bJITFloatingPointOff);
-  FALLBACK_IF(inst.Rc);
   FALLBACK_IF(jo.fp_exceptions || jo.div_by_zero_exceptions);
+  FALLBACK_IF(inst.Rc);
 
-  RCX64Reg extra = gpr.Scratch(RSCRATCH_EXTRA);
-  RCOpArg Rb = fpr.Use(inst.FB, RCMode::Read);
-  RCX64Reg Rd = fpr.Bind(inst.FD, RCMode::Write);
-  RegCache::Realize(extra, Rb, Rd);
+  // Same register contract as frsqrte's routine.
+  RCX64Reg clobbered = gpr.Scratch(RSCRATCH_EXTRA);
+  RCOpArg divisor = fpr.Use(inst.FB, RCMode::Read);
+  RCX64Reg result = fpr.Bind(inst.FD, RCMode::Write);
+  RegCache::Realize(clobbered, divisor, result);
 
   // fres is a single-precision result written to both lanes.
-  MOVAPD(XMM0, Rb);
+  MOVAPD(XMM0, divisor);
   CALL(asm_routines.fres);
-  MOVDDUP(Rd, R(XMM0));
+  MOVDDUP(result, R(XMM0));
   SetFPRFIfNeeded(R(XMM0), true);
 }

@@ -1381,23 +1381,21 @@ void Jit64::mullwx(UGeckoInstruction inst)
 
   if (!gpr.IsImm(a) && !gpr.IsImm(b))
   {
-    RCOpArg Ra = gpr.Use(a, RCMode::Read);
-    RCOpArg Rb = gpr.Use(b, RCMode::Read);
-    RCX64Reg Rd = gpr.Bind(d, RCMode::Write);
-    RegCache::Realize(Ra, Rb, Rd);
+    RCOpArg lhs = gpr.Use(a, RCMode::Read);
+    RCOpArg rhs = gpr.Use(b, RCMode::Read);
+    RCX64Reg product = gpr.Bind(d, RCMode::Write);
+    RegCache::Realize(lhs, rhs, product);
 
-    if (d == a)
+    // Two-operand IMUL: multiply into whichever source already is rD.
+    if (d != a)
     {
-      IMUL(32, Rd, Rb);
-    }
-    else if (d == b)
-    {
-      IMUL(32, Rd, Ra);
+      if (d != b)
+        MOV(32, product, rhs);
+      IMUL(32, product, lhs);
     }
     else
     {
-      MOV(32, Rd, Rb);
-      IMUL(32, Rd, Ra);
+      IMUL(32, product, rhs);
     }
   }
   else
@@ -2355,18 +2353,20 @@ void Jit64::srawx(UGeckoInstruction inst)
     }
     else
     {
-      RCX64Reg ecx = gpr.Scratch(ECX);
-      RCX64Reg Ra = gpr.Bind(a, RCMode::Write);
-      RCOpArg Rb = gpr.Use(b, RCMode::Read);
-      RCOpArg Rs = gpr.Use(s, RCMode::Read);
-      RegCache::Realize(ecx, Ra, Rb, Rs);
+      // Legacy shifts take their count in CL.
+      RCX64Reg count = gpr.Scratch(ECX);
+      RCX64Reg target = gpr.Bind(a, RCMode::Write);
+      RCOpArg amount = gpr.Use(b, RCMode::Read);
+      RCOpArg value = gpr.Use(s, RCMode::Read);
+      RegCache::Realize(count, target, amount, value);
 
-      MOV(32, ecx, Rb);
+      MOV(32, count, amount);
       if (a != s)
-        MOV(32, Ra, Rs);
-      SHL(64, Ra, Imm8(32));
-      SAR(64, Ra, ecx);
-      finish(Ra);
+        MOV(32, target, value);
+      // Place rS in the high half so the carry-out bits land in the low half.
+      SHL(64, target, Imm8(32));
+      SAR(64, target, count);
+      finish(target);
     }
   }
 

@@ -211,19 +211,29 @@ void Jit64AsmRoutineManager::Generate()
 
 void Jit64AsmRoutineManager::GenerateCommon()
 {
-  frsqrte = AlignCode4();
-  GenFrsqrte();
-  fres = AlignCode4();
-  GenFres();
-  mfcr = AlignCode4();
-  GenMfcr();
-  cdts = AlignCode4();
-  GenConvertDoubleToSingle();
-  fmadds_eft = AlignCode4();
-  GenerateFmaddsEft();
-  ps_madd_eft = AlignCode4();
-  GeneratePsMaddEft();
+  // Each standalone helper starts on a 4-byte boundary and its entry point is
+  // published through the matching routine pointer.
+  using Generator = void (Jit64AsmRoutineManager::*)();
+  struct AlignedHelper
+  {
+    const u8** entry;
+    Generator emit;
+  };
+  const AlignedHelper helpers[] = {
+      {&frsqrte, &Jit64AsmRoutineManager::GenFrsqrte},
+      {&fres, &Jit64AsmRoutineManager::GenFres},
+      {&mfcr, &Jit64AsmRoutineManager::GenMfcr},
+      {&cdts, &Jit64AsmRoutineManager::GenConvertDoubleToSingle},
+      {&fmadds_eft, &Jit64AsmRoutineManager::GenerateFmaddsEft},
+      {&ps_madd_eft, &Jit64AsmRoutineManager::GeneratePsMaddEft},
+  };
+  for (const AlignedHelper& helper : helpers)
+  {
+    *helper.entry = AlignCode4();
+    (this->*helper.emit)();
+  }
 
+  // The quantized load/store tables fill themselves in.
   GenQuantizedLoads();
   GenQuantizedSingleLoads();
   GenQuantizedStores();

@@ -213,23 +213,24 @@ void Jit64::Init()
   InitBLROptimization();
   m_stack_guard = nullptr;
 
+  // The emitter helpers report into the per-block analysis state.
+  code_block.m_fpa = &js.fpa;
+  code_block.m_gpa = &js.gpa;
+  code_block.m_stats = &js.st;
+
   blocks.Init();
-  // The shared routines must not use far code, which is wiped on every
-  // cache clear, so far code is only switched on after generating them.
+  // Far code is wiped by every cache clear, so it may only be switched on
+  // once the shared routines (which must live in near code) exist.
   asm_routines.Init();
   m_far_code.Init();
   Clear();
-
-  code_block.m_stats = &js.st;
-  code_block.m_gpa = &js.gpa;
-  code_block.m_fpa = &js.fpa;
   EnableOptimization();
-
   ResetFreeMemoryRanges();
 }
 
 void Jit64::ClearCache()
 {
+  // Forget every block first, then empty each code region.
   blocks.Clear();
   blocks.ClearRangesToFree();
   trampolines.ClearCodeSpace();
@@ -237,6 +238,8 @@ void Jit64::ClearCache()
   m_const_pool.Clear();
   ClearCodeSpace();
   Clear();
+
+  // Settings may have changed while the cache was live.
   RefreshConfig();
   asm_routines.Regenerate();
   ResetFreeMemoryRanges();
@@ -245,12 +248,12 @@ void Jit64::ClearCache()
 
 void Jit64::Shutdown()
 {
-  FreeCodeSpace();
-  m_system.GetMemory().ShutdownFastmemArena();
-
-  blocks.Shutdown();
-  m_far_code.Shutdown();
   m_const_pool.Shutdown();
+  m_far_code.Shutdown();
+  blocks.Shutdown();
+
+  m_system.GetMemory().ShutdownFastmemArena();
+  FreeCodeSpace();
 }
 
 // Hands the code ranges of blocks destroyed since the last compile back to
@@ -266,21 +269,27 @@ void Jit64::FreeRanges()
 
 void Jit64::ResetFreeMemoryRanges()
 {
+  // After a reset each region is one single free span from start to end.
+  u8* const far_begin = m_far_code.GetWritableCodePtr();
+  u8* const far_end = m_far_code.GetWritableCodeEnd();
+  m_free_ranges_far.clear();
+  m_free_ranges_far.insert(far_begin, far_end);
   m_free_ranges_near.clear();
   m_free_ranges_near.insert(region, region + region_size);
-  m_free_ranges_far.clear();
-  m_free_ranges_far.insert(m_far_code.GetWritableCodePtr(), m_far_code.GetWritableCodeEnd());
+}
+
+std::vector<JitBase::MemoryStats> Jit64::GetMemoryStats() const
+{
+  std::vector<MemoryStats> stats;
+  stats.emplace_back("near", m_free_ranges_near.get_stats());
+  stats.emplace_back("far", m_free_ranges_far.get_stats());
+  return stats;
 }
 
 void Jit64::EraseSingleBlock(const JitBlock& block)
 {
   blocks.EraseSingleBlock(block);
   FreeRanges();
-}
-
-std::vector<JitBase::MemoryStats> Jit64::GetMemoryStats() const
-{
-  return {{"near", m_free_ranges_near.get_stats()}, {"far", m_free_ranges_far.get_stats()}};
 }
 
 std::size_t Jit64::DisassembleNearCode(const JitBlock& block, std::ostream& stream) const
@@ -620,13 +629,16 @@ void Jit64::WriteBLRExit()
   if (Cleanup())
     MOV(32, R(RSCRATCH), PPCSTATE(pc));
 
-  if (m_ppc_state.feature_flags != 0)
+  // The predicted return slot holds (feature_flags << 32) | pc.
+  const u32 flags = m_ppc_state.feature_flags;
+  if (flags != 0)
   {
-    MOV(32, R(RSCRATCH2), Imm32(m_ppc_state.feature_flags));
+    MOV(32, R(RSCRATCH2), Imm32(flags));
     SHL(64, R(RSCRATCH2), Imm8(32));
     OR(64, R(RSCRATCH), R(RSCRATCH2));
   }
-  MOV(32, R(RSCRATCH2), Imm32(js.downcountAmount));
+  const u32 cycles = js.downcountAmount;
+  MOV(32, R(RSCRATCH2), Imm32(cycles));
   CMP(64, R(RSCRATCH), MDisp(RSP, 8));
   J_CC(CC_NE, asm_routines.dispatcher_mispredicted_blr);
   SUB(32, PPCSTATE(downcount), R(RSCRATCH2));
@@ -652,6 +664,16 @@ void Jit64::WriteRfiExitDestInRSCRATCH()
   EmitCheckExceptionsAndDispatch(PowerPC::CheckExceptionsFromJIT);
 }
 
+void Jit64::WriteExceptionExit()
+{
+  Cleanup();
+  MOV(32, R(RSCRATCH), PPCSTATE(pc));
+  MOV(32, PPCSTATE(npc), R(RSCRATCH));
+  EmitCheckExceptionsAndDispatch(PowerPC::CheckExceptionsFromJIT);
+}
+
+// An idle loop was detected: skip ahead to the next scheduled event, then
+// leave through the exception path with pc at the loop head.
 void Jit64::WriteIdleExit(u32 destination)
 {
   ABI_PushRegistersAndAdjustStack({}, 0);
@@ -659,14 +681,6 @@ void Jit64::WriteIdleExit(u32 destination)
   ABI_PopRegistersAndAdjustStack({}, 0);
   MOV(32, PPCSTATE(pc), Imm32(destination));
   WriteExceptionExit();
-}
-
-void Jit64::WriteExceptionExit()
-{
-  Cleanup();
-  MOV(32, R(RSCRATCH), PPCSTATE(pc));
-  MOV(32, PPCSTATE(npc), R(RSCRATCH));
-  EmitCheckExceptionsAndDispatch(PowerPC::CheckExceptionsFromJIT);
 }
 
 void Jit64::WriteExternalExceptionExit()
@@ -1100,14 +1114,15 @@ void Jit64::FlushAfterInstruction(const PPCAnalyst::CodeOp& op)
 
 bool Jit64::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
 {
-  js.firstFPInstructionFound = false;
-  js.isLastInstruction = false;
+  // Per-block compiler state.
   js.blockStart = em_address;
-  js.fifoBytesSinceCheck = 0;
-  js.mustCheckFifo = false;
   js.curBlock = b;
-  js.numLoadStoreInst = 0;
+  js.isLastInstruction = false;
+  js.firstFPInstructionFound = false;
   js.numFloatingPointInst = 0;
+  js.numLoadStoreInst = 0;
+  js.mustCheckFifo = false;
+  js.fifoBytesSinceCheck = 0;
 
   b->normalEntry = AlignCode4();
 

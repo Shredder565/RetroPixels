@@ -105,17 +105,19 @@ bool MfsprNeedsInterpreter(u32 index)
 {
   switch (index)
   {
-  case SPR_WPAR:
-  case SPR_DEC:
+  // Performance counters, in both their supervisor and user aliases.
   case SPR_PMC1:
-  case SPR_PMC2:
-  case SPR_PMC3:
-  case SPR_PMC4:
   case SPR_UPMC1:
+  case SPR_PMC2:
   case SPR_UPMC2:
+  case SPR_PMC3:
   case SPR_UPMC3:
+  case SPR_PMC4:
   case SPR_UPMC4:
+  // Timer, breakpoint and gather-pipe registers.
+  case SPR_DEC:
   case SPR_IABR:
+  case SPR_WPAR:
     return true;
   default:
     return false;
@@ -480,13 +482,15 @@ void Jit64::mtfsb1x(UGeckoInstruction inst)
 
   if ((bit & SUMMARY_INPUTS) != 0)
   {
-    RCX64Reg scratch = gpr.Scratch();
-    RegCache::Realize(scratch);
-    UpdateFPExceptionSummary(RSCRATCH, RSCRATCH2, scratch);
+    RCX64Reg summary_tmp = gpr.Scratch();
+    RegCache::Realize(summary_tmp);
+    UpdateFPExceptionSummary(RSCRATCH, RSCRATCH2, summary_tmp);
   }
 
   MOV(32, PPCSTATE(fpscr), R(RSCRATCH));
-  if (inst.CRBD >= 29)
+  // Bits 29..31 (NI and RN) are mirrored into the host MXCSR.
+  const bool touches_rounding = inst.CRBD >= 29;
+  if (touches_rounding)
     UpdateMXCSR();
 }
 
@@ -494,8 +498,8 @@ void Jit64::mtfsfix(UGeckoInstruction inst)
 {
   INSTRUCTION_START
   JITDISABLE(bJITSystemRegistersOff);
-  FALLBACK_IF(inst.Rc);
   FALLBACK_IF(jo.fp_exceptions);
+  FALLBACK_IF(inst.Rc);
 
   const u32 field = inst.CRFD;
   const u32 imm = (inst.hex >> 12) & 0xF;

@@ -141,14 +141,14 @@ void RCOpArg::Unlock()
 
 RCX64Reg::RCX64Reg() = default;
 
-RCX64Reg::RCX64Reg(RegCache* rc_, preg_t preg) : rc(rc_), contents(preg)
+RCX64Reg::RCX64Reg(RegCache* cache, preg_t guest) : rc(cache), contents(guest)
 {
-  rc->Lock(preg);
+  rc->Lock(guest);
 }
 
-RCX64Reg::RCX64Reg(RegCache* rc_, X64Reg xr) : rc(rc_), contents(xr)
+RCX64Reg::RCX64Reg(RegCache* cache, X64Reg host) : rc(cache), contents(host)
 {
-  rc->LockX(xr);
+  rc->LockX(host);
 }
 
 RCX64Reg::~RCX64Reg()
@@ -156,17 +156,17 @@ RCX64Reg::~RCX64Reg()
   Unlock();
 }
 
-RCX64Reg::RCX64Reg(RCX64Reg&& other) noexcept
-    : rc(std::exchange(other.rc, nullptr)),
-      contents(std::exchange(other.contents, std::monostate{}))
+RCX64Reg::RCX64Reg(RCX64Reg&& donor) noexcept
+    : rc(std::exchange(donor.rc, nullptr)),
+      contents(std::exchange(donor.contents, std::monostate{}))
 {
 }
 
-RCX64Reg& RCX64Reg::operator=(RCX64Reg&& other) noexcept
+RCX64Reg& RCX64Reg::operator=(RCX64Reg&& donor) noexcept
 {
   Unlock();
-  contents = std::exchange(other.contents, std::monostate{});
-  rc = std::exchange(other.rc, nullptr);
+  contents = std::exchange(donor.contents, std::monostate{});
+  rc = std::exchange(donor.rc, nullptr);
   return *this;
 }
 
@@ -280,34 +280,34 @@ bool RegCache::SanityCheck() const
   return true;
 }
 
-RCOpArg RegCache::Use(preg_t preg, RCMode mode)
+RCOpArg RegCache::Use(preg_t guest, RCMode mode)
 {
-  m_constraints[preg].AddUse(mode);
-  return RCOpArg{this, preg};
+  m_constraints[guest].AddUse(mode);
+  return RCOpArg{this, guest};
 }
 
-RCOpArg RegCache::UseNoImm(preg_t preg, RCMode mode)
+RCOpArg RegCache::UseNoImm(preg_t guest, RCMode mode)
 {
-  m_constraints[preg].AddUseNoImm(mode);
-  return RCOpArg{this, preg};
+  m_constraints[guest].AddUseNoImm(mode);
+  return RCOpArg{this, guest};
 }
 
-RCOpArg RegCache::BindOrImm(preg_t preg, RCMode mode)
+RCOpArg RegCache::BindOrImm(preg_t guest, RCMode mode)
 {
-  m_constraints[preg].AddBindOrImm(mode);
-  return RCOpArg{this, preg};
+  m_constraints[guest].AddBindOrImm(mode);
+  return RCOpArg{this, guest};
 }
 
-RCX64Reg RegCache::Bind(preg_t preg, RCMode mode)
+RCX64Reg RegCache::Bind(preg_t guest, RCMode mode)
 {
-  m_constraints[preg].AddBind(mode);
-  return RCX64Reg{this, preg};
+  m_constraints[guest].AddBind(mode);
+  return RCX64Reg{this, guest};
 }
 
-RCX64Reg RegCache::RevertableBind(preg_t preg, RCMode mode)
+RCX64Reg RegCache::RevertableBind(preg_t guest, RCMode mode)
 {
-  m_constraints[preg].AddRevertableBind(mode);
-  return RCX64Reg{this, preg};
+  m_constraints[guest].AddRevertableBind(mode);
+  return RCX64Reg{this, guest};
 }
 
 RCX64Reg RegCache::Scratch()

@@ -56,10 +56,11 @@ void Jit64::sc(UGeckoInstruction inst)
   INSTRUCTION_START
   JITDISABLE(bJITBranchOff);
 
+  // The syscall exception returns to the next instruction.
+  const u32 resume_at = js.compilerPC + 4;
   gpr.Flush();
   fpr.Flush();
-  // The syscall exception returns to the next instruction.
-  MOV(32, PPCSTATE(pc), Imm32(js.compilerPC + 4));
+  MOV(32, PPCSTATE(pc), Imm32(resume_at));
   LOCK();
   OR(32, PPCSTATE(Exceptions), Imm32(EXCEPTION_SYSCALL));
   WriteExceptionExit();
@@ -70,11 +71,11 @@ void Jit64::rfi(UGeckoInstruction inst)
   INSTRUCTION_START
   JITDISABLE(bJITBranchOff);
 
+  constexpr u32 from_srr1 = RFI_SRR1_BITS & ~RFI_CLEARED_BITS;
+  constexpr u32 kept = ~RFI_SRR1_BITS & ~RFI_CLEARED_BITS;
   gpr.Flush();
   fpr.Flush();
 
-  constexpr u32 from_srr1 = RFI_SRR1_BITS & ~RFI_CLEARED_BITS;
-  constexpr u32 kept = ~RFI_SRR1_BITS & ~RFI_CLEARED_BITS;
   AND(32, PPCSTATE(msr), Imm32(kept));
   MOV(32, R(RSCRATCH), PPCSTATE_SRR1);
   AND(32, R(RSCRATCH), Imm32(from_srr1));
@@ -307,20 +308,25 @@ void Jit64::bclrx(UGeckoInstruction inst)
     MOV(32, PPCSTATE_LR, Imm32(js.compilerPC + 4));
 
   {
-    RCForkGuard gpr_guard = gpr.Fork();
-    RCForkGuard fpr_guard = fpr.Fork();
+    // The taken path leaves the block; the fork keeps the not-taken path's
+    // cache state intact.
+    RCForkGuard taken_gprs = gpr.Fork();
+    RCForkGuard taken_fprs = fpr.Fork();
     gpr.Flush();
     fpr.Flush();
 
-    if (js.op->branchIsIdleLoop)
+    const u32 here = js.compilerPC;
+    if (!js.op->branchIsIdleLoop)
     {
-      WriteBranchWatch<true>(js.compilerPC, js.op->branchTo, inst, {});
-      WriteIdleExit(js.op->branchTo);
+      // Destination is already in RSCRATCH, which the watch must not clobber.
+      WriteBranchWatchDestInRSCRATCH(here, inst, BitSet32{RSCRATCH});
+      WriteBLRExit();
     }
     else
     {
-      WriteBranchWatchDestInRSCRATCH(js.compilerPC, inst, BitSet32{RSCRATCH});
-      WriteBLRExit();
+      const u32 loop_head = js.op->branchTo;
+      WriteBranchWatch<true>(here, loop_head, inst, {});
+      WriteIdleExit(loop_head);
     }
   }
 
