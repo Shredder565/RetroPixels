@@ -99,21 +99,21 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 69357 | 16.0% |
-| Dolphin, untouched | 353211 | 81.7% |
+| Original (RetroPixels) | 69439 | 16.1% |
+| Dolphin, untouched | 353211 | 81.6% |
 | Dolphin, with PixelU changes | 4224 | 1.0% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.3% |
-| **All** | **432555** | 100% |
+| **All** | **432637** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
 | Core/AudioCommon | 3219 | 0 | Dolphin |
-| Core/Common (top level) | 24949 | 24949 | original |
-| Core/Common/Assembler | 3802 | 3802 | original |
-| Core/Common/Config | 909 | 909 | original |
+| Core/Common (top level) | 25007 | 25007 | original |
+| Core/Common/Assembler | 3757 | 3757 | original |
+| Core/Common/Config | 915 | 915 | original |
 | Core/Common/Crypto | 1202 | 1202 | original |
-| Core/Common/Debug | 437 | 437 | original |
+| Core/Common/Debug | 436 | 436 | original |
 | Core/Common/GL | 9096 | 0 | Dolphin, 5672 lines third-party |
 | Core/Common/Logging | 581 | 581 | original |
 | Core/Core (top level) | 25099 | 0 | Dolphin + PixelU change |
@@ -154,14 +154,14 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/IOS/USB/USB_HID | 584 | 0 | Dolphin |
 | Core/Core/IOS/USB/USB_VEN | 194 | 0 | Dolphin |
 | Core/Core/IOS/WFS | 1346 | 0 | Dolphin |
-| Core/Core/PowerPC (top level) | 9959 | 9959 | original |
+| Core/Core/PowerPC (top level) | 9982 | 9982 | original |
 | Core/Core/PowerPC/CachedInterpreter | 1083 | 1083 | original |
 | Core/Core/PowerPC/Interpreter | 4391 | 4391 | original |
 | Core/Core/PowerPC/Jit64 | 10326 | 0 | Dolphin |
 | Core/Core/PowerPC/Jit64Common | 2549 | 0 | Dolphin |
 | Core/Core/PowerPC/JitCommon | 2294 | 0 | Dolphin |
-| Core/Core/PowerPC/SignatureDB | 781 | 781 | original |
-| Core/DiscIO | 15874 | 15874 | original |
+| Core/Core/PowerPC/SignatureDB | 787 | 787 | original |
+| Core/DiscIO | 15909 | 15909 | original |
 | Core/DolphinQt (top level) | 15076 | 0 | Dolphin + PixelU change |
 | Core/DolphinQt/Achievements | 1273 | 0 | Dolphin |
 | Core/DolphinQt/Config | 18978 | 0 | Dolphin |
@@ -229,12 +229,12 @@ batch rewrites them.
 | Batch | Scope | Lines | Original lines | Status |
 |---|---|---:|---:|---|
 | W1 | Prune: delete code no Windows x64 build compiles (ARM64, Metal, macOS, Android, Linux/BSD) | 0 | 0 | done (no files left) |
-| W2 | Common: types, bits, containers, strings, files, threads, config, logging | 13403 | 13403 | original |
-| W3 | Common: platform, memory, network, crypto, file formats | 8998 | 8998 | original |
-| W4 | Common: x64 emitter, disassemblers, PowerPC assembler | 9479 | 9479 | original |
-| W5 | DiscIO: blob formats and compression | 7584 | 7584 | original |
-| W6 | DiscIO: volumes, filesystems, verifier, Riivolution, NAND import | 8290 | 8290 | original |
-| W7 | PowerPC: CPU state, MMU, caches, analyst, tables, symbols, breakpoints, GDB stub | 10740 | 10740 | original |
+| W2 | Common: types, bits, containers, strings, files, threads, config, logging | 13455 | 13455 | original |
+| W3 | Common: platform, memory, network, crypto, file formats | 9026 | 9026 | original |
+| W4 | Common: x64 emitter, disassemblers, PowerPC assembler | 9417 | 9417 | original |
+| W5 | DiscIO: blob formats and compression | 7618 | 7618 | original |
+| W6 | DiscIO: volumes, filesystems, verifier, Riivolution, NAND import | 8291 | 8291 | original |
+| W7 | PowerPC: CPU state, MMU, caches, analyst, tables, symbols, breakpoints, GDB stub | 10769 | 10769 | original |
 | W8 | PowerPC: interpreter and cached interpreter | 5474 | 5474 | original |
 | W9 | PowerPC: JIT common and Jit64 | 15169 | 0 | Dolphin |
 | W10 | HW: memory map, MMIO, CPU/PI/MI/VI/AI/DSP interfaces, timers, IPC, CoreTiming | 9898 | 0 | Dolphin |
@@ -1097,3 +1097,62 @@ the third-party Externals directly) before the submodule can go.
     only description of its behaviour is the existing code, so it can't be
     rewritten clean-room, and it can't be tested here without Triforce
     software. It is unchanged and keeps its original header.
+
+PixelU-Wii, vwii pass: verbatim-run clean-up of the rewritten files
+=====================================================================
+
+Scope: files whose header already read "Original code for RetroPixels (PixelU-Wii)" at 94a5c2f.
+Tool: python3 tools/verbatim-audit.py wii 8 (runs of 8+ counted lines identical to Dolphin 6da5148).
+
+Audit counts (runs of 8+ lines)
+  before (94a5c2f): 244 total = 60 in .cpp + 184 in .h
+  after:            155 total =  6 in .cpp + 149 in .h
+  function bodies only (.cpp runs, plus header runs containing a statement such as a return,
+  a branch or an assignment):
+  before 91 (60 .cpp + 31 .h), after 10 (6 .cpp + 4 .h)
+
+What was reworked (behaviour unchanged, checked by old-vs-new harnesses)
+  - .cpp files: GekkoLexer (punctuator and type-name tables, digit-form table),
+    PowerPC.cpp (DoState field helper with the same Do order, SPR reset table, Init/Reset),
+    JitInterface, DirectIOFile, FileBlob/CompressedBlob/WIABlob output opening, PPCAnalyst
+    exception-vector table, SignatureDB/MEGASignatureDB, VolumeGC/Wii/WAD getters, MMU (DSI alert
+    helper, explicit instantiations), Blob type-name table, HttpRequest, FatFsUtil, DiscIO Enums
+    region helpers, Timer, StringUtil ValueToString, Watches, VolumeVerifier, IOFile,
+    TraversalClient, DiscUtils partition names and JoinPath, SymbolDB, VolumeFileBlobReader,
+    DiscExtractor (H3 export), RiivolutionPatcher, FileSystemGCWii, WiiSaveBanner, Network.
+  - Header inline code: Matrix.h vector operators, PowerPC.h PairedSingle, x64Emitter.h ABI call
+    helpers, ChunkFile.h (PointerWrap arrays and pointers), BitField.h formatters,
+    AssemblerShared.h, DirectIOFile.h, Contains.h, FileSearch.h, MathUtil.h Rectangle,
+    StringUtil.h, CodeBlock.h, Profiler.h, MMU.h host access wrappers, Gekko.h FPSCR operators,
+    BreakPoints.h, Config.h, Layer.h, IniFile.h.
+  - Order-sensitive code (DoState field order, CoreTiming and config registration, side effects)
+    was kept in its original order.
+
+What was left, and why
+  - Data tables (6 .cpp runs): the DiscIO/Enums.cpp publisher table (3 runs),
+    the AssemblerTables.cpp SPR name table, and the FloatUtils.cpp frsqrte/fres expected-value
+    tables. These are facts about the hardware or data formats, not code.
+  - Interface defaults (4 header runs): the Volume.h default virtual bodies (return nullopt,
+    INVALID_TICKET, 0, false and so on) and SymbolDB.h's default GetSymbolFromAddr and
+    AddFunction. They are part of the public interface.
+  - Interface declarations (the remaining 145 header runs): public class declarations,
+    enums and struct layouts. This covers the Gekko.h register bitfields, PowerPCState and
+    PowerPC.h layout and macros, the Network.h packet structs (which have static_asserts), the
+    x64Emitter declarations, the FileUtil.h and Log.h enums, CommonPaths macros, Volume*,
+    Blob and VolumeVerifier class declarations, Config enums, MMU and BreakPoints declarations,
+    and the include/forward-declaration blocks. These were kept as the task allows.
+
+Checks
+  - Old-vs-new harnesses (stdout or hash compared) for each logic change, including: the lexer,
+    PowerPC save/load/reset, Blob names, Enums, Timer, IOFile, partition names and JoinPath
+    (740k inputs), Matrix, x64Emitter (1.49 MB of emitted code), ChunkFile, BitField and
+    Contains. All were identical.
+  - Exported symbols compared (symcmp) for the MMU explicit instantiations: identical.
+  - Syntax checks of the changed .cpp files and their dependents, base vs new, on Linux (g++)
+    and Windows (clang -target x86_64-w64-windows-gnu), with
+    -Wall -Wextra -Wconversion -Wsign-compare. That was 101 translation units and 202 jobs.
+    Pass/fail matched base in every one, and no warning appeared in a changed file that base
+    did not already have. The files that fail on both sides fail for reasons outside this work:
+    Qt and imgui headers are missing, windows.h is missing on Linux, and the MinGW library has
+    no std::expected (MultithreadedCompressor.h, FileSystem.h, CheatSearch.h). The Linux build
+    covers those files.
