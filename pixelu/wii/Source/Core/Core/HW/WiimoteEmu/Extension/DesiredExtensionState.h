@@ -1,8 +1,8 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <type_traits>
 #include <variant>
 
 #include "Common/BitUtils.h"
@@ -21,53 +21,41 @@
 
 namespace WiimoteEmu
 {
+// The input of whichever extension is selected, as gathered for one update.
 struct DesiredExtensionState
 {
-private:
-  template <ExtensionNumber N, typename T>
-  struct ExtNumTypePair
-  {
-    static constexpr ExtensionNumber ext_num = N;
-    using ext_type = T;
-  };
-
-  template <typename... Ts>
-  struct ExtDataImpl
-  {
-    using type = std::variant<std::monostate, typename Ts::ext_type::DesiredState...>;
-
-    static_assert((std::is_same_v<std::variant_alternative_t<Ts::ext_num, type>,
-                                  typename Ts::ext_type::DesiredState> &&
-                   ...),
-                  "Please use ExtensionNumber enum order for DTM file index consistency.");
-  };
-
-public:
+  // The alternative index is the ExtensionNumber; movies and netplay store it.
   using ExtensionData =
-      ExtDataImpl<ExtNumTypePair<ExtensionNumber::NUNCHUK, Nunchuk>,
-                  ExtNumTypePair<ExtensionNumber::CLASSIC, Classic>,
-                  ExtNumTypePair<ExtensionNumber::GUITAR, Guitar>,
-                  ExtNumTypePair<ExtensionNumber::DRUMS, Drums>,
-                  ExtNumTypePair<ExtensionNumber::TURNTABLE, Turntable>,
-                  ExtNumTypePair<ExtensionNumber::UDRAW_TABLET, UDrawTablet>,
-                  ExtNumTypePair<ExtensionNumber::DRAWSOME_TABLET, DrawsomeTablet>,
-                  ExtNumTypePair<ExtensionNumber::TATACON, TaTaCon>,
-                  ExtNumTypePair<ExtensionNumber::SHINKANSEN, Shinkansen>>::type;
+      std::variant<std::monostate, Nunchuk::DesiredState, Classic::DesiredState,
+                   Guitar::DesiredState, Drums::DesiredState, Turntable::DesiredState,
+                   UDrawTablet::DesiredState, DrawsomeTablet::DesiredState,
+                   TaTaCon::DesiredState, Shinkansen::DesiredState>;
 
   ExtensionData data = std::monostate{};
+
+private:
+  template <ExtensionNumber N, typename T>
+  static constexpr bool IsAt = std::is_same_v<std::variant_alternative_t<N, ExtensionData>, T>;
+
+  static_assert(std::variant_size_v<ExtensionData> == ExtensionNumber::MAX);
+  static_assert(IsAt<ExtensionNumber::NUNCHUK, Nunchuk::DesiredState>);
+  static_assert(IsAt<ExtensionNumber::CLASSIC, Classic::DesiredState>);
+  static_assert(IsAt<ExtensionNumber::GUITAR, Guitar::DesiredState>);
+  static_assert(IsAt<ExtensionNumber::DRUMS, Drums::DesiredState>);
+  static_assert(IsAt<ExtensionNumber::TURNTABLE, Turntable::DesiredState>);
+  static_assert(IsAt<ExtensionNumber::UDRAW_TABLET, UDrawTablet::DesiredState>);
+  static_assert(IsAt<ExtensionNumber::DRAWSOME_TABLET, DrawsomeTablet::DesiredState>);
+  static_assert(IsAt<ExtensionNumber::TATACON, TaTaCon::DesiredState>);
+  static_assert(IsAt<ExtensionNumber::SHINKANSEN, Shinkansen::DesiredState>);
 };
 
+// Copies the extension's desired input to the start of its register file, or zeros when the
+// state holds a different extension's input.
 template <typename T>
 void DefaultExtensionUpdate(EncryptedExtension::Register* reg,
                             const DesiredExtensionState& target_state)
 {
-  if (std::holds_alternative<T>(target_state.data))
-  {
-    Common::BitCastPtr<T>(&reg->controller_data) = std::get<T>(target_state.data);
-  }
-  else
-  {
-    Common::BitCastPtr<T>(&reg->controller_data) = T{};
-  }
+  const T* desired = std::get_if<T>(&target_state.data);
+  Common::BitCastPtr<T>(&reg->controller_data) = desired ? *desired : T{};
 }
 }  // namespace WiimoteEmu

@@ -1,10 +1,13 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <array>
+#include <cstddef>
+
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
+#include "Common/MathUtil.h"
 #include "Common/Matrix.h"
 #include "Core/HW/WiimoteEmu/I2CBus.h"
 
@@ -13,25 +16,29 @@ namespace Common
 class Matrix44;
 }
 
+// The remote's IR camera: an i2c device (slave 0x58) that tracks up to four bright spots and
+// reports them in one of three formats (WiiBrew: "Wiimote", IR Camera).
+
 namespace WiimoteEmu
 {
 using IRObject = Common::TVec2<u16>;
 
+// One tracked spot. All bits set means "nothing seen".
 struct CameraPoint
 {
-  IRObject position;
-  u8 size;
-
-  // 0xFFFFs are interpreted as "not visible".
   constexpr CameraPoint() : position({0xffff, 0xffff}), size(0xff) {}
   constexpr CameraPoint(IRObject position_, u8 size_) : position(position_), size(size_) {}
+
   constexpr bool operator==(const CameraPoint& other) const
   {
-    return this->position == other.position && this->size == other.size;
+    return position == other.position && size == other.size;
   }
+
+  IRObject position;
+  u8 size;
 };
 
-// Four bytes for two objects. Filled with 0xFF if empty
+// Basic format: two objects in five bytes (10 bit coordinates, no size).
 struct IRBasic
 {
   u8 x1;
@@ -43,27 +50,31 @@ struct IRBasic
   u8 x2;
   u8 y2;
 
-  auto GetObject1() const { return IRObject(x1hi << 8 | x1, y1hi << 8 | y1); }
-  auto GetObject2() const { return IRObject(x2hi << 8 | x2, y2hi << 8 | y2); }
+  auto GetObject1() const { return IRObject(Join(x1hi, x1), Join(y1hi, y1)); }
+  auto GetObject2() const { return IRObject(Join(x2hi, x2), Join(y2hi, y2)); }
 
   void SetObject1(const IRObject& obj)
   {
-    x1 = obj.x;
-    x1hi = obj.x >> 8;
-    y1 = obj.y;
-    y1hi = obj.y >> 8;
+    x1 = Low(obj.x);
+    x1hi = High(obj.x);
+    y1 = Low(obj.y);
+    y1hi = High(obj.y);
   }
   void SetObject2(const IRObject& obj)
   {
-    x2 = obj.x;
-    x2hi = obj.x >> 8;
-    y2 = obj.y;
-    y2hi = obj.y >> 8;
+    x2 = Low(obj.x);
+    x2hi = High(obj.x);
+    y2 = Low(obj.y);
+    y2hi = High(obj.y);
   }
+
+  static u16 Join(u8 high, u8 low) { return static_cast<u16>((high << 8) | low); }
+  static u8 Low(u16 value) { return static_cast<u8>(value); }
+  static u8 High(u16 value) { return static_cast<u8>((value >> 8) & 0b11); }
 };
 static_assert(sizeof(IRBasic) == 5, "Wrong size");
 
-// Three bytes for one object
+// Extended format: one object in three bytes, with a 4 bit size.
 struct IRExtended
 {
   u8 x;
@@ -72,19 +83,18 @@ struct IRExtended
   u8 xhi : 2;
   u8 yhi : 2;
 
-  auto GetPosition() const { return IRObject(xhi << 8 | x, yhi << 8 | y); }
+  auto GetPosition() const { return IRObject(IRBasic::Join(xhi, x), IRBasic::Join(yhi, y)); }
   void SetPosition(const IRObject& obj)
   {
-    x = obj.x;
-    xhi = obj.x >> 8;
-    y = obj.y;
-    yhi = obj.y >> 8;
+    x = IRBasic::Low(obj.x);
+    xhi = IRBasic::High(obj.x);
+    y = IRBasic::Low(obj.y);
+    yhi = IRBasic::High(obj.y);
   }
 };
 static_assert(sizeof(IRExtended) == 3, "Wrong size");
 
-// Nine bytes for one object
-// first 3 bytes are the same as extended
+// Full format: the extended bytes plus a bounding box and an intensity (nine bytes).
 struct IRFull : IRExtended
 {
   u8 xmin : 7;
@@ -103,18 +113,21 @@ static_assert(sizeof(IRFull) == 9, "Wrong size");
 class CameraLogic : public I2CSlave
 {
 public:
-  // OEM sensor bar distance between LED clusters in meters.
-  static constexpr float SENSOR_BAR_LED_SEPARATION = 0.2f;
+  static constexpr u8 I2C_ADDR = 0x58;
 
+  // Camera resolution in the reported coordinates.
   static constexpr int CAMERA_RES_X = 1024;
   static constexpr int CAMERA_RES_Y = 768;
 
-  // Jordan: I calculate the FOV at 42 degrees horizontally and having a 4:3 aspect ratio.
-  // This is 31.5 degrees vertically.
+  // 42 degrees across, 4:3 aspect ratio.
   static constexpr float CAMERA_AR = 4.f / 3;
   static constexpr float CAMERA_FOV_X = 42 * float(MathUtil::TAU) / 360;
   static constexpr float CAMERA_FOV_Y = CAMERA_FOV_X / CAMERA_AR;
 
+  // Distance between the two LED groups of a Nintendo sensor bar, in meters.
+  static constexpr float SENSOR_BAR_LED_SEPARATION = 0.2f;
+
+  // Values of the mode register (0x33).
   enum : u8
   {
     IR_MODE_BASIC = 1,
@@ -122,47 +135,48 @@ public:
     IR_MODE_FULL = 5,
   };
 
-  // FYI: A real wiimote normally only returns 1 point for each LED cluster (2 total).
-  // Sending all 4 points can actually cause some stuttering issues.
+  // The camera can track four spots. A sensor bar normally shows up as two of them.
   static constexpr int NUM_POINTS = 4;
 
-  // Range from 0-15. Small values (2-4) seem to be very typical.
-  // This is reduced based on distance from sensor bar.
+  // Spot sizes go from 0 to 15; nearby LEDs show up as about 2-4.
   static constexpr int MAX_POINT_SIZE = 15;
+
+  static constexpr int CAMERA_DATA_BYTES = 36;
 
   void Reset();
   void DoState(PointerWrap& p);
+
+  // Where the two sensor bar LED groups appear for a given view of the world.
   static std::array<CameraPoint, NUM_POINTS> GetCameraPoints(const Common::Matrix44& transform,
                                                              Common::Vec2 field_of_view);
+
+  // Writes the points into the object data registers in the configured format.
   void Update(const std::array<CameraPoint, NUM_POINTS>& camera_points);
+
+  // Output report 0x13. A disabled camera does not answer on the bus.
   void SetEnabled(bool is_enabled);
 
-  static constexpr u8 I2C_ADDR = 0x58;
-  static constexpr int CAMERA_DATA_BYTES = 36;
-
 private:
-  // TODO: some of this memory is write-only and should return error 7.
 #pragma pack(push, 1)
   struct Register
   {
-    // Contains sensitivity and other unknown data
-    // TODO: Does disabling the camera peripheral reset the mode or sensitivity?
+    // 0x00: sensitivity block 1 (written by the Wii), then registers of unknown use.
     std::array<u8, 9> sensitivity_block1;
     std::array<u8, 17> unk_0x09;
 
-    // addr: 0x1a
+    // 0x1a: sensitivity block 2.
     std::array<u8, 2> sensitivity_block2;
     std::array<u8, 20> unk_0x1c;
 
-    // addr: 0x30
+    // 0x30: must be 0x08 for the camera to track objects.
     u8 enable_object_tracking;
     std::array<u8, 2> unk_0x31;
 
-    // addr: 0x33
+    // 0x33: report format.
     u8 mode;
     std::array<u8, 3> unk_0x34;
 
-    // addr: 0x37
+    // 0x37: object data, read by the remote for its data reports.
     std::array<u8, CAMERA_DATA_BYTES> camera_data;
     std::array<u8, 165> unk_0x5b;
   };
@@ -171,7 +185,7 @@ private:
   static_assert(0x100 == sizeof(Register));
 
 public:
-  // The real wiimote reads camera data from the i2c bus at offset 0x37:
+  // Start of the object data on the bus.
   static const u8 REPORT_DATA_OFFSET = offsetof(Register, camera_data);
 
 private:
@@ -180,8 +194,6 @@ private:
 
   Register m_reg_data{};
 
-  // When disabled the camera does not respond on the bus.
-  // Change is triggered by wiimote report 0x13.
   bool m_is_enabled = false;
 };
 }  // namespace WiimoteEmu

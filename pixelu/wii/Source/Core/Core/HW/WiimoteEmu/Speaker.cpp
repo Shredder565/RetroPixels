@@ -1,9 +1,9 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/WiimoteEmu/Speaker.h"
 
-#include <cassert>
+#include <algorithm>
+#include <array>
 
 #include "AudioCommon/AudioCommon.h"
 
@@ -19,85 +19,71 @@
 
 namespace WiimoteEmu
 {
-// Yamaha ADPCM decoder code based on The ffmpeg Project (Copyright (s) 2001-2003)
-
-static const s32 yamaha_difflookup[] = {1,  3,  5,  7,  9,  11,  13,  15,
-                                        -1, -3, -5, -7, -9, -11, -13, -15};
-
-static const s32 yamaha_indexscale[] = {230, 230, 230, 230, 307, 409, 512, 614,
-                                        230, 230, 230, 230, 307, 409, 512, 614};
-
-static s16 av_clip16(s32 a)
+namespace
 {
-  if ((a + 32768) & ~65535)
-    return (a >> 31) ^ 32767;
-  else
-    return a;
+// Yamaha ADPCM (the 4-bit format also used by the Dreamcast AICA): each nibble is a sign bit
+// and a 3 bit magnitude m. The sample moves by (2m + 1) / 8 of the current step, and the step
+// is then scaled by a factor that grows with m.
+constexpr std::array<s32, 8> STEP_SCALE = {230, 230, 230, 230, 307, 409, 512, 614};
+
+constexpr s32 MIN_STEP = 127;
+constexpr s32 MAX_STEP = 24576;
+
+s16 DecodeNibble(ADPCMState& state, u8 nibble)
+{
+  const s32 magnitude = nibble & 7;
+  const bool negative = (nibble & 8) != 0;
+
+  // Divide before applying the sign so the result truncates towards zero either way.
+  const s32 delta = state.step * (2 * magnitude + 1) / 8;
+  state.predictor = std::clamp(state.predictor + (negative ? -delta : delta), -32768, 32767);
+
+  state.step = std::clamp((state.step * STEP_SCALE[magnitude]) >> 8, MIN_STEP, MAX_STEP);
+
+  return static_cast<s16>(state.predictor);
 }
 
-static s32 av_clip(s32 a, s32 amin, s32 amax)
+// Format parameters, from WiiBrew's speaker documentation.
+struct FormatInfo
 {
-  if (a < amin)
-    return amin;
-  else if (a > amax)
-    return amax;
-  else
-    return a;
-}
+  u32 rate_dividend;
+  u8 full_volume;
+  u32 samples_per_byte;
+};
 
-static s16 adpcm_yamaha_expand_nibble(ADPCMState& s, u8 nibble)
-{
-  s.predictor += (s.step * yamaha_difflookup[nibble]) / 8;
-  s.predictor = av_clip16(s.predictor);
-  s.step = (s.step * yamaha_indexscale[nibble]) >> 8;
-  s.step = av_clip(s.step, 127, 24576);
-  return s.predictor;
-}
+constexpr FormatInfo PCM_FORMAT = {12000000, 0xff, 1};
+constexpr FormatInfo ADPCM_FORMAT = {6000000, 0x7f, 2};
+}  // namespace
 
 void SpeakerLogic::SpeakerData(const u8* data, int length, float speaker_pan)
 {
-  // TODO: should we still process samples for the decoder state?
   if (!m_speaker_enabled)
     return;
 
   if (reg_data.sample_rate == 0 || length == 0)
     return;
 
-  // Even if volume is zero we process samples to maintain proper decoder state.
-
-  // Potentially 40 resulting samples.
+  // A report holds at most 20 bytes, so at most 40 samples. Samples are decoded even at zero
+  // volume so the ADPCM state stays right.
   std::array<s16, WiimoteCommon::OutputReportSpeakerData::DATA_SIZE * 2> samples;
-  assert(length * 2 <= static_cast<int>(samples.size()));
+  const auto byte_count = static_cast<size_t>(length);
 
-  unsigned int sample_rate_dividend, sample_length;
-  u8 volume_divisor;
-
-  if (reg_data.format == SpeakerLogic::DATA_FORMAT_PCM)
+  const FormatInfo* format = nullptr;
+  if (reg_data.format == DATA_FORMAT_PCM)
   {
-    // 8 bit PCM
-    for (int i = 0; i < length; ++i)
-    {
-      samples[i] = ((s16)(s8)data[i]) * 0x100;
-    }
-
-    // Following details from http://wiibrew.org/wiki/Wiimote#Speaker
-    sample_rate_dividend = 12000000;
-    volume_divisor = 0xff;
-    sample_length = (unsigned int)length;
+    format = &PCM_FORMAT;
+    for (size_t i = 0; i != byte_count; ++i)
+      samples[i] = static_cast<s16>(static_cast<s8>(data[i]) * 0x100);
   }
-  else if (reg_data.format == SpeakerLogic::DATA_FORMAT_ADPCM)
+  else if (reg_data.format == DATA_FORMAT_ADPCM)
   {
-    // 4 bit Yamaha ADPCM (same as dreamcast)
-    for (int i = 0; i < length; ++i)
+    format = &ADPCM_FORMAT;
+    for (size_t i = 0; i != byte_count; ++i)
     {
-      samples[i * 2] = adpcm_yamaha_expand_nibble(adpcm_state, (data[i] >> 4) & 0xf);
-      samples[i * 2 + 1] = adpcm_yamaha_expand_nibble(adpcm_state, data[i] & 0xf);
+      // High nibble first.
+      samples[i * 2] = DecodeNibble(adpcm_state, static_cast<u8>(data[i] >> 4));
+      samples[i * 2 + 1] = DecodeNibble(adpcm_state, static_cast<u8>(data[i] & 0xf));
     }
-
-    // Following details from http://wiibrew.org/wiki/Wiimote#Speaker
-    sample_rate_dividend = 6000000;
-    volume_divisor = 0x7F;
-    sample_length = (unsigned int)length * 2;
   }
   else
   {
@@ -105,46 +91,37 @@ void SpeakerLogic::SpeakerData(const u8* data, int length, float speaker_pan)
     return;
   }
 
-  if (reg_data.volume > volume_divisor)
+  u8 full_volume = format->full_volume;
+  if (reg_data.volume > full_volume)
   {
-    DEBUG_LOG_FMT(IOS_WIIMOTE, "Wiimote volume is higher than suspected maximum!");
-    volume_divisor = reg_data.volume;
+    DEBUG_LOG_FMT(IOS_WIIMOTE, "Speaker volume {} is above the expected maximum", reg_data.volume);
+    full_volume = reg_data.volume;
   }
 
-  // SetWiimoteSpeakerVolume expects values from 0 to 255.
-  // Multiply by 256, floor to int, and clamp to 255 for a uniformly mapped conversion.
-  const double volume = float(reg_data.volume) * 256.f / volume_divisor;
+  // The mixer takes 0-255 per channel: scale by 256, truncate and cap at 255.
+  const double volume = float(reg_data.volume) * 256.f / full_volume;
 
-  // This used the "Constant Power Pan Law", but it is undesirable
-  // if the pan is 0, and it implied that the loudness of a wiimote speaker
-  // is equal to the loudness of your device speakers, which isn't true at all.
-  // This way, if the pan is 0, it's like if it is not there.
-  // We should play the samples from the wiimote at the native volume they came with,
-  // because you can lower their volume from the Wii settings and because they are
-  // already extremely low quality, so any additional quality loss isn't welcome.
-  speaker_pan = std::clamp(speaker_pan, -1.f, 1.f);
-  const u32 l_volume = std::min(u32(std::min(1.f - speaker_pan, 1.f) * volume), 255u);
-  const u32 r_volume = std::min(u32(std::min(1.f + speaker_pan, 1.f) * volume), 255u);
+  // Panning only ever lowers one side, so a centered remote plays at its own volume.
+  const float pan = std::clamp(speaker_pan, -1.f, 1.f);
+  const u32 left = std::min(u32(std::min(1.f - pan, 1.f) * volume), 255u);
+  const u32 right = std::min(u32(std::min(1.f + pan, 1.f) * volume), 255u);
 
-  auto& system = Core::System::GetInstance();
-  SoundStream* sound_stream = system.GetSoundStream();
+  Mixer* const mixer = Core::System::GetInstance().GetSoundStream()->GetMixer();
+  mixer->SetWiimoteSpeakerVolume(m_wiimote_index, left, right);
 
-  sound_stream->GetMixer()->SetWiimoteSpeakerVolume(m_wiimote_index, l_volume, r_volume);
-
-  // ADPCM sample rate is thought to be x2.(3000 x2 = 6000).
-  const unsigned int sample_rate = sample_rate_dividend / reg_data.sample_rate;
-  sound_stream->GetMixer()->PushWiimoteSpeakerSamples(
-      m_wiimote_index, samples.data(), sample_length,
-      Mixer::FIXED_SAMPLE_RATE_DIVIDEND / (sample_rate * 2));
+  // The ADPCM rate appears to be twice the nominal one (3000 Hz data plays at 6000 Hz).
+  const u32 sample_rate = format->rate_dividend / reg_data.sample_rate;
+  const auto divisor = static_cast<u32>(Mixer::FIXED_SAMPLE_RATE_DIVIDEND / (sample_rate * 2));
+  mixer->PushWiimoteSpeakerSamples(m_wiimote_index, samples.data(),
+                                   byte_count * format->samples_per_byte, divisor);
 }
 
 void SpeakerLogic::Reset()
 {
   reg_data = {};
 
-  // Yamaha ADPCM state initialize
   adpcm_state.predictor = 0;
-  adpcm_state.step = 127;
+  adpcm_state.step = MIN_STEP;
 }
 
 void SpeakerLogic::DoState(PointerWrap& p)
@@ -160,28 +137,24 @@ void SpeakerLogic::SetSpeakerEnabled(bool enabled)
 
 int SpeakerLogic::BusRead(u8 slave_addr, u8 addr, int count, u8* data_out)
 {
-  if (I2C_ADDR != slave_addr)
+  if (slave_addr != I2C_ADDR)
     return 0;
-
   return RawRead(&reg_data, addr, count, data_out);
 }
 
 int SpeakerLogic::BusWrite(u8 slave_addr, u8 addr, int count, const u8* data_in)
 {
-  if (I2C_ADDR != slave_addr)
+  if (slave_addr != I2C_ADDR)
     return 0;
 
+  // Writes to the data register are played, not stored.
   if (addr == SPEAKER_DATA_OFFSET)
   {
-    SpeakerData(data_in, count, m_speaker_pan_setting.GetValue() / 100);
+    SpeakerData(data_in, count, static_cast<float>(m_speaker_pan_setting.GetValue() / 100));
     return count;
   }
-  else
-  {
-    // TODO: Does writing immediately change the decoder config even when active
-    // or does a write to 0x08 activate the new configuration or something?
-    return RawWrite(&reg_data, addr, count, data_in);
-  }
+
+  return RawWrite(&reg_data, addr, count, data_in);
 }
 
 }  // namespace WiimoteEmu

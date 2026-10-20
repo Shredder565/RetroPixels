@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/WiimoteEmu/ExtensionPort.h"
 
@@ -16,10 +15,11 @@ bool ExtensionPort::IsDeviceConnected() const
 
 void ExtensionPort::AttachExtension(Extension* ext)
 {
-  m_i2c_bus.RemoveSlave(m_extension);
+  if (m_extension != nullptr)
+    m_i2c_bus.RemoveSlave(m_extension);
 
   m_extension = ext;
-  m_i2c_bus.AddSlave(m_extension);
+  m_i2c_bus.AddSlave(ext);
 }
 
 }  // namespace WiimoteEmu

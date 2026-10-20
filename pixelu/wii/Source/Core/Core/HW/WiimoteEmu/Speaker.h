@@ -1,5 +1,4 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,8 +7,13 @@
 #include "Core/HW/WiimoteEmu/I2CBus.h"
 #include "InputCommon/ControllerEmu/Setting/NumericSetting.h"
 
+// The remote's speaker: an i2c device (slave 0x51). Sound arrives as speaker data reports, which
+// the remote writes to register 0x00. The samples are 4-bit Yamaha ADPCM or 8-bit signed PCM
+// (WiiBrew: "Wiimote", Speaker).
+
 namespace WiimoteEmu
 {
+// Decoder state of the Yamaha ADPCM stream. Saved in savestates.
 struct ADPCMState
 {
   s32 predictor, step;
@@ -33,29 +37,25 @@ public:
   void SetWiimoteIndex(u8 index) { m_wiimote_index = index; }
 
 private:
-  // Pan is -1.0 to +1.0
-  void SpeakerData(const u8* data, int length, float speaker_pan);
-
-  // TODO: enum class
+  // Values of the format register (0x02).
   static const u8 DATA_FORMAT_ADPCM = 0x00;
   static const u8 DATA_FORMAT_PCM = 0x40;
 
-  // TODO: It seems reading address 0x00 should always return 0xff.
 #pragma pack(push, 1)
   struct Register
   {
-    // Speaker reports result in a write of samples to addr 0x00 (which also plays sound)
+    // 0x00: sample data is written here (and played, not stored).
     u8 speaker_data;
     u8 unk_1;
+    // 0x02
     u8 format;
-    // seems to always play at 6khz no matter what this is set to?
-    // or maybe it only applies to pcm input
-    // Little-endian:
+    // 0x03: little endian. Seems not to change the ADPCM playback rate on hardware.
     u16 sample_rate;
+    // 0x05
     u8 volume;
     u8 unk_5;
     u8 unk_6;
-    // Reading this byte on real hardware seems to return 0x09:
+    // Real hardware returns 0x09 when this is read.
     u8 unk_7;
     u8 unk_8;
     u8 unknown[0xf6];
@@ -64,15 +64,17 @@ private:
 
   static_assert(0x100 == sizeof(Register));
 
+  // Decodes one data write and hands the samples to the mixer. speaker_pan is -1 to +1.
+  void SpeakerData(const u8* data, int length, float speaker_pan);
+
   int BusRead(u8 slave_addr, u8 addr, int count, u8* data_out) override;
   int BusWrite(u8 slave_addr, u8 addr, int count, const u8* data_in) override;
 
   Register reg_data{};
 
-  // TODO: What actions reset this state?
-  // Is this actually in the register somewhere?
   ADPCMState adpcm_state{};
 
+  // Owned here, shown in the remote's Options group.
   ControllerEmu::SettingValue<double> m_speaker_pan_setting;
 
   bool m_speaker_enabled = false;

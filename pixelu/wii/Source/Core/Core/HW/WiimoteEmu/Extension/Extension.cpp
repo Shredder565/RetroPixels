@@ -1,7 +1,8 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/WiimoteEmu/Extension/Extension.h"
+
+#include <cstddef>
 
 #include "Common/CommonTypes.h"
 
@@ -30,6 +31,8 @@ std::string Extension::GetDisplayName() const
   return m_display_name;
 }
 
+// ---- None
+
 None::None() : Extension("None")
 {
 }
@@ -44,29 +47,41 @@ void None::BuildDesiredExtensionState(DesiredExtensionState* target_state)
   target_state->data.emplace<std::monostate>();
 }
 
-void None::Update(const DesiredExtensionState& target_state)
+void None::Update(const DesiredExtensionState&)
 {
-  // Nothing needed.
 }
 
 void None::Reset()
 {
-  // Nothing needed.
 }
 
-void None::DoState(PointerWrap& p)
+void None::DoState(PointerWrap&)
 {
-  // Nothing needed.
 }
 
-int None::BusRead(u8 slave_addr, u8 addr, int count, u8* data_out)
+int None::BusRead(u8, u8, int, u8*)
 {
   return 0;
 }
 
-int None::BusWrite(u8 slave_addr, u8 addr, int count, const u8* data_in)
+int None::BusWrite(u8, u8, int, const u8*)
 {
   return 0;
+}
+
+// ---- EncryptedExtension
+
+namespace
+{
+constexpr u8 SCRAMBLE_ON = 0xaa;
+constexpr int KEY_FIRST = offsetof(EncryptedExtension::Register, encryption_key_data);
+constexpr int KEY_END = KEY_FIRST + 0x10;
+}  // namespace
+
+EncryptedExtension::EncryptedExtension(ExtensionKeyScheme scheme, const char* config_name,
+                                       const char* display_name)
+    : Extension(config_name, display_name), m_key_scheme(scheme)
+{
 }
 
 bool EncryptedExtension::ReadDeviceDetectPin() const
@@ -76,80 +91,74 @@ bool EncryptedExtension::ReadDeviceDetectPin() const
 
 int EncryptedExtension::BusRead(u8 slave_addr, u8 addr, int count, u8* data_out)
 {
-  if (I2C_ADDR != slave_addr)
+  if (slave_addr != I2C_ADDR)
     return 0;
 
-  if (offsetof(Register, controller_data) == addr)
+  const int transferred = RawRead(&m_reg, addr, count, data_out);
+
+  if (m_reg.encryption == SCRAMBLE_ON)
   {
-    // This is where real hardware would update controller data
+    if (!m_key.has_value())
+      m_key = GenerateExtensionKey(m_key_scheme, m_reg.encryption_key_data);
+
+    // The whole requested length is scrambled, even past the end of the register file.
+    m_key->Encrypt(data_out, addr, static_cast<u32>(count));
   }
 
-  auto const result = RawRead(&m_reg, addr, count, data_out);
-
-  // Encrypt data read from extension register.
-  if (ENCRYPTION_ENABLED == m_reg.encryption)
-  {
-    if (m_is_key_dirty)
-    {
-      UpdateEncryptionKey();
-      m_is_key_dirty = false;
-    }
-
-    ext_key.Encrypt(data_out, addr, count);
-  }
-
-  return result;
+  return transferred;
 }
 
 int EncryptedExtension::BusWrite(u8 slave_addr, u8 addr, int count, const u8* data_in)
 {
-  if (I2C_ADDR != slave_addr)
+  if (slave_addr != I2C_ADDR)
     return 0;
 
-  auto const result = RawWrite(&m_reg, addr, count, data_in);
+  const int transferred = RawWrite(&m_reg, addr, count, data_in);
 
-  constexpr u8 ENCRYPTION_KEY_DATA_BEGIN = offsetof(Register, encryption_key_data);
-  constexpr u8 ENCRYPTION_KEY_DATA_END = ENCRYPTION_KEY_DATA_BEGIN + 0x10;
+  // Any write that touches the key area invalidates the derived key. (Real extensions want the
+  // key in particular chunk sizes; accepting any write is good enough.)
+  const int write_end = addr + count;
+  if (write_end > KEY_FIRST && addr < KEY_END)
+    m_key.reset();
 
-  if (addr + count > ENCRYPTION_KEY_DATA_BEGIN && addr < ENCRYPTION_KEY_DATA_END)
-  {
-    // FYI: Real extensions seem to require the key data written in specifically sized chunks.
-    // We just run the key generation on all writes to the key area.
-    m_is_key_dirty = true;
-  }
-
-  return result;
+  return transferred;
 }
 
 void EncryptedExtension::Reset()
 {
-  // Clear register state.
   m_reg = {};
-
-  // Clear encryption key state.
-  ext_key = {};
-  m_is_key_dirty = true;
+  m_key.reset();
 }
 
 void EncryptedExtension::DoState(PointerWrap& p)
 {
   p.Do(m_reg);
 
+  // The key is not saved; it is derived again from the loaded registers.
   if (p.IsReadMode())
-  {
-    // No need to sync the key when we can just regenerate it.
-    m_is_key_dirty = true;
-  }
+    m_key.reset();
 }
 
-void Extension1stParty::UpdateEncryptionKey()
+// ---- Key schemes
+
+Extension1stParty::Extension1stParty(const char* name)
+    : EncryptedExtension(ExtensionKeyScheme::FirstParty, name, name)
 {
-  ext_key = KeyGen1stParty().GenerateFromExtensionKeyData(m_reg.encryption_key_data);
 }
 
-void Extension3rdParty::UpdateEncryptionKey()
+Extension1stParty::Extension1stParty(const char* config_name, const char* display_name)
+    : EncryptedExtension(ExtensionKeyScheme::FirstParty, config_name, display_name)
 {
-  ext_key = KeyGen3rdParty().GenerateFromExtensionKeyData(m_reg.encryption_key_data);
+}
+
+Extension3rdParty::Extension3rdParty(const char* name)
+    : EncryptedExtension(ExtensionKeyScheme::ThirdParty, name, name)
+{
+}
+
+Extension3rdParty::Extension3rdParty(const char* config_name, const char* display_name)
+    : EncryptedExtension(ExtensionKeyScheme::ThirdParty, config_name, display_name)
+{
 }
 
 }  // namespace WiimoteEmu

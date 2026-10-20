@@ -1,18 +1,19 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/WiimoteEmu/I2CBus.h"
+
+#include <algorithm>
 
 namespace WiimoteEmu
 {
 void I2CBus::AddSlave(I2CSlave* slave)
 {
-  m_slaves.emplace_back(slave);
+  m_slaves.push_back(slave);
 }
 
 void I2CBus::RemoveSlave(I2CSlave* slave)
 {
-  std::erase(m_slaves, slave);
+  m_slaves.erase(std::remove(m_slaves.begin(), m_slaves.end(), slave), m_slaves.end());
 }
 
 void I2CBus::Reset()
@@ -22,30 +23,18 @@ void I2CBus::Reset()
 
 int I2CBus::BusRead(u8 slave_addr, u8 addr, int count, u8* data_out)
 {
-  for (auto& slave : m_slaves)
-  {
-    auto const bytes_read = slave->BusRead(slave_addr, addr, count, data_out);
-
-    // A slave responded, we are done.
-    if (bytes_read)
-      return bytes_read;
-  }
-
-  return 0;
+  int transferred = 0;
+  for (auto it = m_slaves.begin(); it != m_slaves.end() && transferred == 0; ++it)
+    transferred = (*it)->BusRead(slave_addr, addr, count, data_out);
+  return transferred;
 }
 
 int I2CBus::BusWrite(u8 slave_addr, u8 addr, int count, const u8* data_in)
 {
-  for (auto& slave : m_slaves)
-  {
-    auto const bytes_written = slave->BusWrite(slave_addr, addr, count, data_in);
-
-    // A slave responded, we are done.
-    if (bytes_written)
-      return bytes_written;
-  }
-
-  return 0;
+  int transferred = 0;
+  for (auto it = m_slaves.begin(); it != m_slaves.end() && transferred == 0; ++it)
+    transferred = (*it)->BusWrite(slave_addr, addr, count, data_in);
+  return transferred;
 }
 
 }  // namespace WiimoteEmu
