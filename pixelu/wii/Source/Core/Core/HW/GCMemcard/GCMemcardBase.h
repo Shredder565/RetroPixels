@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,6 +8,8 @@
 
 class PointerWrap;
 
+// Interface shared by every backing store that can sit behind an EXI memory
+// card device: a single raw image file, or a folder of GCI saves.
 class MemoryCardBase
 {
 public:
@@ -18,11 +19,19 @@ public:
   {
   }
   virtual ~MemoryCardBase() = default;
+
+  // Byte-addressed access to the card's flash. Both return the number of
+  // bytes handled.
   virtual s32 Read(u32 src_address, s32 length, u8* dest_address) = 0;
   virtual s32 Write(u32 dest_address, s32 length, const u8* src_address) = 0;
+
+  // Erase one sector (sets it to 0xFF) or the whole card.
   virtual void ClearBlock(u32 address) = 0;
   virtual void ClearAll() = 0;
+
   virtual void DoState(PointerWrap& p) = 0;
+
+  // The card ID reported over EXI is the capacity in megabits.
   u32 GetCardId() const { return m_nintendo_card_id; }
 
 protected:

@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -13,9 +12,11 @@
 
 namespace Memcard
 {
+// Two saves "are the same file" when game code, maker code and the
+// NUL-terminated file name all match.
 bool HasSameIdentity(const DEntry& lhs, const DEntry& rhs);
 
-// Check if any two given savefiles have the same identity.
+// True if at least two of the given saves share an identity.
 bool HasDuplicateIdentity(std::span<const Savefile> savefiles);
 
 enum class ReadSavefileErrorCode
@@ -25,8 +26,8 @@ enum class ReadSavefileErrorCode
   DataCorrupted,
 };
 
-// Reads a GameCube memory card savefile from a file.
-// Supported formats are GCI, GCS (GameShark), and SAV (MaxDrive).
+// Loads a single exported save. The container (GCI, GameShark GCS or
+// MaxDrive SAV) is recognised from the file size.
 std::variant<ReadSavefileErrorCode, Savefile> ReadSavefile(const std::string& filename);
 
 enum class SavefileFormat
@@ -36,18 +37,18 @@ enum class SavefileFormat
   SAV,
 };
 
-// Writes a GameCube memory card savefile to a file.
+// Stores a save in the chosen container. Returns false on any I/O failure.
 bool WriteSavefile(const std::string& filename, const Savefile& savefile, SavefileFormat format);
 
-// Generates a filename (without extension) for the given directory entry.
+// "<maker>-<game>-<name>", escaped for use as a file name; no extension.
 std::string GenerateFilename(const DEntry& entry);
 
-// Returns the expected extension for a filename in the given format. Includes the leading dot.
+// File extension for a container, including the dot.
 std::string GetDefaultExtension(SavefileFormat format);
 
-// Reads multiple savefiles from a card. Returns empty vector if even a single file can't be read.
+// Exports the listed saves from a card. Any failure yields an empty list.
 std::vector<Savefile> GetSavefiles(const GCMemcard& card, std::span<const u8> file_indices);
 
-// Gets the total amount of blocks the given saves use.
+// Sum of the block counts of the given saves.
 size_t GetBlockCount(std::span<const Savefile> savefiles);
 }  // namespace Memcard

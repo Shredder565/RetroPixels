@@ -1,5 +1,4 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -14,6 +13,8 @@
 
 class PointerWrap;
 
+// A memory card backed by one raw image file holding the whole flash. The
+// image lives in memory; a background thread writes it back to disk.
 class MemoryCard : public MemoryCardBase
 {
 public:
@@ -30,10 +31,10 @@ public:
   void DoState(PointerWrap& p) override;
 
 private:
+  // Whether [address, address + length) lies inside the card image.
   bool IsAddressInBounds(u32 address, u32 length) const
   {
-    const u64 end_address = static_cast<u64>(address) + static_cast<u64>(length);
-    return end_address <= static_cast<u64>(m_memory_card_size);
+    return u64{address} + u64{length} <= u64{m_memory_card_size};
   }
 
   std::string m_filename;

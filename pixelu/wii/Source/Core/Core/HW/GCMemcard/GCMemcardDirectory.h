@@ -1,5 +1,4 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -14,11 +13,15 @@
 #include "Core/HW/GCMemcard/GCMemcardBase.h"
 #include "DiscIO/Enums.h"
 
-// Uncomment this to write the system data of the memorycard from directory to disc
-// #define _WRITE_MC_HEADER 1
+// Exports every save of the configured raw card image for this slot/region
+// into a GCI folder (used when switching a slot from raw card to folder).
 void MigrateFromMemcardFile(const std::string& directory_name, ExpansionInterface::Slot card_slot,
                             DiscIO::Region region);
 
+// A memory card synthesised from a folder of .gci files. The system area
+// (header, directories, BATs) is built in memory when the card is created;
+// each loaded save keeps its own blocks, and the game's writes to the
+// directory are mirrored back onto the individual GCI files.
 class GCMemcardDirectory : public MemoryCardBase
 {
 public:
@@ -31,6 +34,7 @@ public:
   GCMemcardDirectory(GCMemcardDirectory&&) = delete;
   GCMemcardDirectory& operator=(GCMemcardDirectory&&) = delete;
 
+  // The .gci files in a folder that belong to one game (for NetPlay sync).
   static std::vector<std::string> GetFileNamesForGameID(const std::string& directory,
                                                         const std::string& game_id);
   void FlushToFile();
@@ -44,10 +48,13 @@ public:
 private:
   bool LoadGCI(Memcard::GCIFile gci);
   inline s32 SaveAreaRW(u32 block, bool writing = false);
-  // s32 DirectoryRead(u32 offset, u32 length, u8* dest_address);
   s32 DirectoryWrite(u32 dest_address, u32 length, const u8* src_address);
   inline void SyncSaves();
   bool SetUsedBlocks(int save_index);
+
+  // Points m_last_block_address at the storage behind a card block. Returns
+  // false for a data block that no save owns.
+  bool MapBlock(s32 block, bool writing);
 
   u32 m_game_id;
   s32 m_last_block;

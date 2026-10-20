@@ -1,7 +1,10 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/GCMemcard/GCIFile.h"
+
+#include <algorithm>
+#include <cstring>
+#include <string_view>
 
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
@@ -10,83 +13,89 @@
 
 namespace Memcard
 {
+namespace
+{
+// The directory entry's file name as a C string (it may fill all 32 bytes).
+std::string_view SaveName(const DEntry& entry)
+{
+  const char* text = reinterpret_cast<const char*>(entry.m_filename.data());
+  return std::string_view(text, strnlen(text, entry.m_filename.size()));
+}
+}  // namespace
+
 bool GCIFile::LoadHeader()
 {
   if (m_filename.empty())
     return false;
 
-  File::IOFile save_file(m_filename, "rb");
-  if (!save_file)
+  File::IOFile gci(m_filename, "rb");
+  if (!gci)
     return false;
 
   INFO_LOG_FMT(EXPANSIONINTERFACE, "Reading header from disk for {}", m_filename);
-  if (!save_file.ReadBytes(&m_gci_header, sizeof(m_gci_header)))
-  {
-    ERROR_LOG_FMT(EXPANSIONINTERFACE, "Failed to read header for {}", m_filename);
-    return false;
-  }
+  if (gci.ReadBytes(&m_gci_header, sizeof(m_gci_header)))
+    return true;
 
-  return true;
+  ERROR_LOG_FMT(EXPANSIONINTERFACE, "Failed to read header for {}", m_filename);
+  return false;
 }
 
 bool GCIFile::LoadSaveBlocks()
 {
-  if (m_save_data.empty())
+  // Already resident (either loaded earlier or written by the game).
+  if (!m_save_data.empty())
+    return true;
+
+  if (m_filename.empty())
+    return false;
+
+  File::IOFile gci(m_filename, "rb");
+  if (!gci)
+    return false;
+
+  INFO_LOG_FMT(EXPANSIONINTERFACE, "Reading savedata from disk for {}", m_filename);
+
+  // A GCI is exactly one directory entry followed by the blocks it declares.
+  const u16 blocks = m_gci_header.m_block_count;
+  const u32 data_bytes = blocks * BLOCK_SIZE;
+  const u32 expected_size = data_bytes + DENTRY_SIZE;
+  const u64 actual_size = gci.GetSize();
+  if (actual_size != expected_size)
   {
-    if (m_filename.empty())
-      return false;
-
-    File::IOFile save_file(m_filename, "rb");
-    if (!save_file)
-      return false;
-
-    INFO_LOG_FMT(EXPANSIONINTERFACE, "Reading savedata from disk for {}", m_filename);
-    const u16 num_blocks = m_gci_header.m_block_count;
-
-    const u32 size = num_blocks * BLOCK_SIZE;
-    const u64 file_size = save_file.GetSize();
-    if (file_size != size + DENTRY_SIZE)
-    {
-      ERROR_LOG_FMT(EXPANSIONINTERFACE,
-                    "{}\nwas not loaded because it is an invalid GCI.\n File size ({:#x}) does not "
-                    "match the size recorded in the header ({:#x})",
-                    m_filename.c_str(), file_size, size + DENTRY_SIZE);
-      return false;
-    }
-
-    m_save_data.resize(num_blocks);
-    save_file.Seek(DENTRY_SIZE, File::SeekOrigin::Begin);
-    if (!save_file.ReadBytes(m_save_data.data(), size))
-    {
-      ERROR_LOG_FMT(EXPANSIONINTERFACE, "Failed to read data from GCI file {}", m_filename);
-      m_save_data.clear();
-      return false;
-    }
+    ERROR_LOG_FMT(EXPANSIONINTERFACE,
+                  "{}\nwas not loaded because it is an invalid GCI.\n File size ({:#x}) does not "
+                  "match the size recorded in the header ({:#x})",
+                  m_filename, actual_size, expected_size);
+    return false;
   }
-  return true;
+
+  m_save_data.resize(blocks);
+  gci.Seek(DENTRY_SIZE, File::SeekOrigin::Begin);
+  if (gci.ReadBytes(m_save_data.data(), data_bytes))
+    return true;
+
+  ERROR_LOG_FMT(EXPANSIONINTERFACE, "Failed to read data from GCI file {}", m_filename);
+  m_save_data.clear();
+  return false;
 }
 
 bool GCIFile::HasCopyProtection() const
 {
-  if ((strcmp(reinterpret_cast<const char*>(m_gci_header.m_filename.data()), "PSO_SYSTEM") == 0) ||
-      (strcmp(reinterpret_cast<const char*>(m_gci_header.m_filename.data()), "PSO3_SYSTEM") == 0) ||
-      (strcmp(reinterpret_cast<const char*>(m_gci_header.m_filename.data()), "f_zero.dat") == 0))
-    return true;
-  return false;
+  const std::string_view name = SaveName(m_gci_header);
+  return name == "PSO_SYSTEM" || name == "PSO3_SYSTEM" || name == "f_zero.dat";
 }
 
-int GCIFile::UsesBlock(u16 block_num)
+int GCIFile::UsesBlock(u16 blocknum)
 {
-  for (u16 i = 0; i < m_used_blocks.size(); ++i)
-  {
-    if (m_used_blocks[i] == block_num)
-      return i;
-  }
-  return -1;
+  const auto it = std::find(m_used_blocks.begin(), m_used_blocks.end(), blocknum);
+  if (it == m_used_blocks.end())
+    return -1;
+  return static_cast<int>(it - m_used_blocks.begin());
 }
 
 void GCIFile::DoState(PointerWrap& p)
 {
+  // Savestate order: entry, dirty flag, path, blocks, block list.
   p.Do(m_gci_header);
   p.Do(m_dirty);
   p.Do(m_filename);
