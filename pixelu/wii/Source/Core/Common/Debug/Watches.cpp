@@ -45,28 +45,6 @@ void Watches::UnsetWatch(u32 address)
   std::erase_if(m_watches, [address](const Watch& w) { return w.address == address; });
 }
 
-void Watches::UpdateWatch(std::size_t index, u32 address, std::string name)
-{
-  Watch& watch = m_watches[index];
-  watch.address = address;
-  watch.name = std::move(name);
-}
-
-void Watches::UpdateWatchAddress(std::size_t index, u32 address)
-{
-  m_watches[index].address = address;
-}
-
-void Watches::UpdateWatchName(std::size_t index, std::string name)
-{
-  m_watches[index].name = std::move(name);
-}
-
-void Watches::UpdateWatchLockedState(std::size_t index, bool locked)
-{
-  m_watches[index].locked = locked;
-}
-
 void Watches::EnableWatch(std::size_t index)
 {
   m_watches[index].is_enabled = Watch::State::Enabled;
@@ -75,6 +53,27 @@ void Watches::EnableWatch(std::size_t index)
 void Watches::DisableWatch(std::size_t index)
 {
   m_watches[index].is_enabled = Watch::State::Disabled;
+}
+
+void Watches::UpdateWatchLockedState(std::size_t index, bool locked)
+{
+  m_watches[index].locked = locked;
+}
+
+void Watches::UpdateWatchName(std::size_t index, std::string name)
+{
+  m_watches[index].name = std::move(name);
+}
+
+void Watches::UpdateWatchAddress(std::size_t index, u32 address)
+{
+  m_watches[index].address = address;
+}
+
+void Watches::UpdateWatch(std::size_t index, u32 address, std::string name)
+{
+  UpdateWatchAddress(index, address);
+  UpdateWatchName(index, std::move(name));
 }
 
 bool Watches::HasEnabledWatch(u32 address) const

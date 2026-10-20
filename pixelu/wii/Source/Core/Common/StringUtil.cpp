@@ -261,44 +261,61 @@ bool TryParse(const std::string& str, bool* const output)
   return false;
 }
 
-std::string ValueToString(u16 value)
+namespace
 {
-  return fmt::format("0x{:04x}", value);
+// Unsigned values are written as zero-padded hex with every digit of their width; floating
+// point values always keep their decimal point; signed values are plain decimal.
+template <typename T>
+std::string HexWithAllDigits(T value)
+{
+  return fmt::format("0x{:0{}x}", value, sizeof(T) * 2);
 }
 
-std::string ValueToString(u32 value)
-{
-  return fmt::format("0x{:08x}", value);
-}
-
-std::string ValueToString(u64 value)
-{
-  return fmt::format("0x{:016x}", value);
-}
-
-std::string ValueToString(float value)
+template <typename T>
+std::string FloatWithPoint(T value)
 {
   return fmt::format("{:#}", value);
 }
-
-std::string ValueToString(double value)
-{
-  return fmt::format("{:#}", value);
-}
-
-std::string ValueToString(int value)
-{
-  return fmt::format("{}", value);
-}
-
-std::string ValueToString(s64 value)
-{
-  return fmt::format("{}", value);
-}
+}  // namespace
 
 std::string ValueToString(bool value)
 {
   return value ? "True" : "False";
+}
+
+std::string ValueToString(int value)
+{
+  return fmt::to_string(value);
+}
+
+std::string ValueToString(s64 value)
+{
+  return fmt::to_string(value);
+}
+
+std::string ValueToString(u16 value)
+{
+  return HexWithAllDigits(value);
+}
+
+std::string ValueToString(u32 value)
+{
+  return HexWithAllDigits(value);
+}
+
+std::string ValueToString(u64 value)
+{
+  return HexWithAllDigits(value);
+}
+
+std::string ValueToString(float value)
+{
+  return FloatWithPoint(value);
+}
+
+std::string ValueToString(double value)
+{
+  return FloatWithPoint(value);
 }
 
 // ---------------------------------------------------------------------------------------------

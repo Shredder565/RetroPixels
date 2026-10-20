@@ -45,23 +45,23 @@ u64 Timer::NowMs()
   return SteadyNow<std::chrono::milliseconds>();
 }
 
-void Timer::Start()
-{
-  m_start_ms = NowMs();
-  m_end_ms = 0;
-  m_running = true;
-}
-
-void Timer::StartWithOffset(u64 offset)
-{
-  Start();
-  m_start_ms -= offset;
-}
-
 void Timer::Stop()
 {
-  m_end_ms = NowMs();
   m_running = false;
+  m_end_ms = NowMs();
+}
+
+// Starting with an offset makes the timer read as if it had been started `offset` ms earlier.
+void Timer::StartWithOffset(u64 offset)
+{
+  m_running = true;
+  m_end_ms = 0;
+  m_start_ms = NowMs() - offset;
+}
+
+void Timer::Start()
+{
+  StartWithOffset(0);
 }
 
 u64 Timer::ElapsedMs() const
