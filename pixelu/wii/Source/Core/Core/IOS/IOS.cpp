@@ -359,7 +359,7 @@ Kernel::Kernel(IOSC::ConsoleType console_type) : m_iosc(console_type)
     Core::InitializeWiiRoot(false);
   }
 
-  m_fs = FS::MakeFileSystem(IOS::HLE::FS::Location::Session, Core::GetActiveNandRedirects());
+  m_fs = FS::MakeFileSystem(FS::Location::Session, Core::GetActiveNandRedirects());
   ASSERT(m_fs);
 
   m_fs_core = std::make_unique<FSCore>(*this);
@@ -372,7 +372,7 @@ Kernel::~Kernel()
     Core::ShutdownWiiRoot();
 }
 
-Kernel::Kernel(u64 title_id) : m_title_id(title_id)
+Kernel::Kernel(u64 title_id) : m_title_id{title_id}
 {
 }
 
@@ -391,16 +391,17 @@ EmulationKernel::EmulationKernel(Core::System& system, u64 title_id)
     return;
   }
 
-  m_fs = FS::MakeFileSystem(IOS::HLE::FS::Location::Session, Core::GetActiveNandRedirects());
+  m_fs = FS::MakeFileSystem(FS::Location::Session, Core::GetActiveNandRedirects());
   ASSERT(m_fs);
 
-  AddDevice(std::make_unique<AesDevice>(*this, "/dev/aes"));
-  AddDevice(std::make_unique<ShaDevice>(*this, "/dev/sha"));
-
+  // The order of registration decides the fixed fds (0x10000 and up) for the first two.
+  const auto add = [this](std::unique_ptr<Device> device) { AddDevice(std::move(device)); };
+  add(std::make_unique<AesDevice>(*this, "/dev/aes"));
+  add(std::make_unique<ShaDevice>(*this, "/dev/sha"));
   m_fs_core = std::make_unique<FSCore>(*this);
-  AddDevice(std::make_unique<FSDevice>(*this, *m_fs_core, "/dev/fs"));
+  add(std::make_unique<FSDevice>(*this, *m_fs_core, "/dev/fs"));
   m_es_core = std::make_unique<ESCore>(*this);
-  AddDevice(std::make_unique<ESDevice>(*this, *m_es_core, "/dev/es"));
+  add(std::make_unique<ESDevice>(*this, *m_es_core, "/dev/es"));
 
   AddStaticDevices();
 }
@@ -456,24 +457,25 @@ std::shared_ptr<WiiSockMan> EmulationKernel::GetSocketManager()
 
 // Only the PPC's credentials are tracked, since there are no real IOS processes. These stand in
 // for the set/get UID and GID syscalls.
-void EmulationKernel::SetUidForPPC(u32 uid)
-{
-  m_ppc_uid = uid;
-}
-
+// The UID and GID that PPC-side requests run as (set by ES when a title starts).
 u32 EmulationKernel::GetUidForPPC() const
 {
   return m_ppc_uid;
 }
 
-void EmulationKernel::SetGidForPPC(u16 gid)
-{
-  m_ppc_gid = gid;
-}
-
 u16 EmulationKernel::GetGidForPPC() const
 {
   return m_ppc_gid;
+}
+
+void EmulationKernel::SetUidForPPC(u32 uid)
+{
+  m_ppc_uid = uid;
+}
+
+void EmulationKernel::SetGidForPPC(u16 gid)
+{
+  m_ppc_gid = gid;
 }
 
 // Loads a DOL (or Ancast image) from the NAND, publishes the low memory values and lets the PPC
@@ -859,13 +861,10 @@ void EmulationKernel::UpdateWantDeterminism(const bool new_want_determinism)
 
 void EmulationKernel::DoState(PointerWrap& p)
 {
-  p.Do(m_request_queue);
-  p.Do(m_reply_queue);
-  p.Do(m_last_reply_time);
-  p.Do(m_ipc_paused);
-  p.Do(m_title_id);
-  p.Do(m_ppc_uid);
-  p.Do(m_ppc_gid);
+  // Kernel state first, in this order.
+  const auto save = [&p](auto&... fields) { (p.Do(fields), ...); };
+  save(m_request_queue, m_reply_queue, m_last_reply_time, m_ipc_paused, m_title_id, m_ppc_uid,
+       m_ppc_gid);
 
   m_iosc.DoState(p);
   m_fs->DoState(p);

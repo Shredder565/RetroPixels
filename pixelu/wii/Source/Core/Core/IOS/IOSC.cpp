@@ -491,16 +491,19 @@ ReturnCode IOSC::DecryptEncrypt(Common::AES::Mode mode, Handle key_handle, u8* i
   return IPC_SUCCESS;
 }
 
-ReturnCode IOSC::Encrypt(Handle key_handle, u8* iv, const u8* input, size_t size, u8* output,
-                         u32 pid) const
-{
-  return DecryptEncrypt(Common::AES::Mode::Encrypt, key_handle, iv, input, size, output, pid);
-}
-
+// Both directions share one implementation; only the AES mode differs.
 ReturnCode IOSC::Decrypt(Handle key_handle, u8* iv, const u8* input, size_t size, u8* output,
                          u32 pid) const
 {
-  return DecryptEncrypt(Common::AES::Mode::Decrypt, key_handle, iv, input, size, output, pid);
+  constexpr auto mode = Common::AES::Mode::Decrypt;
+  return DecryptEncrypt(mode, key_handle, iv, input, size, output, pid);
+}
+
+ReturnCode IOSC::Encrypt(Handle key_handle, u8* iv, const u8* input, size_t size, u8* output,
+                         u32 pid) const
+{
+  constexpr auto mode = Common::AES::Mode::Encrypt;
+  return DecryptEncrypt(mode, key_handle, iv, input, size, output, pid);
 }
 
 ReturnCode IOSC::VerifyPublicKeySign(const std::array<u8, 20>& sha1, Handle signer_handle,

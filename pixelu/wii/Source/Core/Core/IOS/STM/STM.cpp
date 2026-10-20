@@ -57,14 +57,15 @@ std::optional<IPCReply> STMImmediateDevice::IOCtl(const IOCtlRequest& request)
     INFO_LOG_FMT(IOS_STM, "{}: ignoring ioctl {:#x}", GetDeviceName(), command);
     return IPCReply(IPC_SUCCESS);
 
-  case IOCTL_STM_HOTRESET_FOR_PD:
+  // Known, but not emulated.
   case IOCTL_STM_WAKEUP:
-  case IOCTL_STM_GET_IDLEMODE:
-  case IOCTL_STM_READDDRREG:
-  case IOCTL_STM_READDDRREG2:
+  case IOCTL_STM_HOTRESET_FOR_PD:
   case IOCTL_STM_LEDFLASH:
   case IOCTL_STM_READVER:
+  case IOCTL_STM_GET_IDLEMODE:
   case IOCTL_STM_WRITEDMCU:
+  case IOCTL_STM_READDDRREG:
+  case IOCTL_STM_READDDRREG2:
     ERROR_LOG_FMT(IOS_STM, "{}: ioctl {:#x} is not implemented", GetDeviceName(), command);
     return IPCReply(IPC_SUCCESS);
 

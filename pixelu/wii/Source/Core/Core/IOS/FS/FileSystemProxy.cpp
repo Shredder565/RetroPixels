@@ -556,14 +556,16 @@ IPCReply FSDevice::GetStats(const Handle&, const IOCtlRequest& request)
   if (!stats)
     return IPCReply(ConvertResult(stats.error()));
 
+  // Same fields, stored big endian.
+  const NandStats& s = *stats;
   ISFSNandStats out;
-  out.cluster_size = stats->cluster_size;
-  out.free_clusters = stats->free_clusters;
-  out.used_clusters = stats->used_clusters;
-  out.bad_clusters = stats->bad_clusters;
-  out.reserved_clusters = stats->reserved_clusters;
-  out.free_inodes = stats->free_inodes;
-  out.used_inodes = stats->used_inodes;
+  out.cluster_size = s.cluster_size;
+  out.free_clusters = s.free_clusters;
+  out.used_clusters = s.used_clusters;
+  out.bad_clusters = s.bad_clusters;
+  out.reserved_clusters = s.reserved_clusters;
+  out.free_inodes = s.free_inodes;
+  out.used_inodes = s.used_inodes;
   GetSystem().GetMemory().CopyToEmu(request.buffer_out, &out, sizeof(out));
   return IPCReply(IPC_SUCCESS);
 }

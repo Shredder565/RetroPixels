@@ -165,7 +165,8 @@ HostFileSystem::~HostFileSystem() = default;
 
 std::string HostFileSystem::GetFstFilePath() const
 {
-  return fmt::format("{}/fst.bin", m_root_path);
+  // The metadata of the whole tree lives in one file at the NAND root.
+  return m_root_path + "/fst.bin";
 }
 
 void HostFileSystem::ResetFst()
@@ -358,14 +359,15 @@ void HostFileSystem::DoState(PointerWrap& p)
     m_handles = std::move(parked);
   }
 
-  for (Handle& handle : m_handles)
+  // Open handles get their host file reopened after loading.
+  for (Handle& h : m_handles)
   {
-    p.Do(handle.opened);
-    p.Do(handle.mode);
-    p.Do(handle.wii_path);
-    p.Do(handle.file_offset);
-    if (handle.opened)
-      handle.host_file = OpenHostFile(BuildFilename(handle.wii_path).host_path);
+    p.Do(h.opened);
+    p.Do(h.mode);
+    p.Do(h.wii_path);
+    p.Do(h.file_offset);
+    if (h.opened)
+      h.host_file = OpenHostFile(BuildFilename(h.wii_path).host_path);
   }
 }
 
@@ -426,16 +428,18 @@ ResultCode HostFileSystem::CreateFileOrDirectory(Uid uid, Gid gid, const std::st
   return ResultCode::Success;
 }
 
-ResultCode HostFileSystem::CreateFile(Uid uid, Gid gid, const std::string& path, FileAttribute attr,
-                                      Modes modes)
-{
-  return CreateFileOrDirectory(uid, gid, path, attr, modes, true);
-}
-
 ResultCode HostFileSystem::CreateDirectory(Uid uid, Gid gid, const std::string& path,
                                            FileAttribute attr, Modes modes)
 {
-  return CreateFileOrDirectory(uid, gid, path, attr, modes, false);
+  constexpr bool is_file = false;
+  return CreateFileOrDirectory(uid, gid, path, attr, modes, is_file);
+}
+
+ResultCode HostFileSystem::CreateFile(Uid uid, Gid gid, const std::string& path, FileAttribute attr,
+                                      Modes modes)
+{
+  constexpr bool is_file = true;
+  return CreateFileOrDirectory(uid, gid, path, attr, modes, is_file);
 }
 
 bool HostFileSystem::IsFileOpened(const std::string& path) const
