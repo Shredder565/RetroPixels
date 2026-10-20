@@ -1,13 +1,16 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <array>
+
 #include "Common/CommonTypes.h"
 
 namespace PowerPC
 {
+// Bits of one 4-bit CR field as the architecture numbers them (LT is the most
+// significant bit of the field), plus the bit positions the emulated form
+// below uses for SO and LT.
 enum CRBits
 {
   CR_SO = 1,
@@ -24,69 +27,86 @@ enum CRBits
   CR_EMU_LT_BIT = 62,
 };
 
-// Optimized CR implementation. Instead of storing CR in its PowerPC format
-// (4 bit value, SO/EQ/LT/GT), we store instead a 64 bit value for each of
-// the 8 CR register parts. This 64 bit value follows this format:
-//   - SO iff. bit 59 is set
-//   - EQ iff. lower 32 bits == 0
-//   - GT iff. (s64)cr_val > 0
-//   - LT iff. bit 62 is set
+// The eight CR fields are kept as one 64-bit word each, laid out so that a
+// compare result can be produced cheaply by the JITs:
 //
-// This has the interesting property that sign-extending the result of an
-// operation from 32 to 64 bits results in a 64 bit value that works as a
-// CR value. Checking each part of CR is also fast, as it is equivalent to
-// testing one bit or the low 32 bit part of a register. And CR can still
-// be manipulated bit by bit fairly easily.
+//   EQ is set  <=>  the low 32 bits are all zero
+//   GT is set  <=>  the word, read as signed, is greater than zero
+//   LT is set  <=>  bit 62 is one
+//   SO is set  <=>  bit 59 is one
+//
+// A 32-bit result sign-extended to 64 bits is therefore directly a valid
+// field for a signed compare against zero (LT comes from the sign copies in
+// bit 62, EQ and GT follow from the value). The JITs rely on this encoding
+// and on the bit numbers above, and savestates store the words as they are.
 struct ConditionRegister
 {
-  // convert flags into 64-bit CR values with a lookup table
+  // Emulated word for each of the 16 possible 4-bit field values.
   static const std::array<u64, 16> s_crTable;
 
   u64 fields[8];
 
-  // Convert between PPC and internal representation of CR.
+  // Builds the emulated word for a 4-bit field value. Bit 32 is always set so
+  // the word is never zero, and bit 0 carries "not EQ" (so the low half is
+  // zero exactly when EQ is wanted). When GT is clear the sign bit is set so
+  // the word reads as negative; when GT is set the word is positive because
+  // bit 32 is set.
   static constexpr u64 PPCToInternal(u8 value)
   {
-    u64 cr_val = 0x100000000;
-    cr_val |= (u64) !!(value & CR_SO) << CR_EMU_SO_BIT;
-    cr_val |= (u64) !(value & CR_EQ);
-    cr_val |= (u64) !(value & CR_GT) << 63;
-    cr_val |= (u64) !!(value & CR_LT) << CR_EMU_LT_BIT;
+    const bool so = (value & CR_SO) != 0;
+    const bool eq = (value & CR_EQ) != 0;
+    const bool gt = (value & CR_GT) != 0;
+    const bool lt = (value & CR_LT) != 0;
 
-    return cr_val;
+    u64 word = u64{1} << 32;
+    if (!eq)
+      word |= 1;
+    if (!gt)
+      word |= u64{1} << 63;
+    if (lt)
+      word |= u64{1} << CR_EMU_LT_BIT;
+    if (so)
+      word |= u64{1} << CR_EMU_SO_BIT;
+    return word;
   }
 
-  // Warning: these CR operations are fairly slow since they need to convert from
-  // PowerPC format (4 bit) to our internal 64 bit format.
+  // Field access goes through the conversion, so it is slower than working
+  // on the words directly.
   void SetField(u32 cr_field, u32 value) { fields[cr_field] = s_crTable[value]; }
 
   u32 GetField(u32 cr_field) const
   {
-    const u64 cr_val = fields[cr_field];
-    u32 ppc_cr = 0;
-
-    // LT/SO
-    static_assert(CR_EMU_LT_BIT - CR_EMU_SO_BIT == CR_LT_BIT - CR_SO_BIT);
-    ppc_cr |= (cr_val >> CR_EMU_SO_BIT) & (PowerPC::CR_LT | PowerPC::CR_SO);
-    // EQ
-    ppc_cr |= ((cr_val & 0xFFFFFFFF) == 0) << PowerPC::CR_EQ_BIT;
-    // GT
-    ppc_cr |= (static_cast<s64>(cr_val) > 0) << PowerPC::CR_GT_BIT;
-
-    return ppc_cr;
+    const u64 word = fields[cr_field];
+    u32 result = 0;
+    if (word & (u64{1} << CR_EMU_SO_BIT))
+      result |= CR_SO;
+    if (static_cast<u32>(word) == 0)
+      result |= CR_EQ;
+    if (static_cast<s64>(word) > 0)
+      result |= CR_GT;
+    if (word & (u64{1} << CR_EMU_LT_BIT))
+      result |= CR_LT;
+    return result;
   }
 
-  u32 GetBit(u32 bit) const { return (GetField(bit >> 2) >> (3 - (bit & 3))) & 1; }
+  // CR bit numbers count from the most significant bit of CR0 (bit 0 = CR0
+  // LT), as in the crxxx instructions.
+  u32 GetBit(u32 bit) const
+  {
+    const u32 mask = 8u >> (bit & 3);
+    return (GetField(bit >> 2) & mask) != 0 ? 1 : 0;
+  }
 
   void SetBit(u32 bit, u32 value)
   {
-    if (value & 1)
-      SetField(bit >> 2, GetField(bit >> 2) | (0x8 >> (bit & 3)));
-    else
-      SetField(bit >> 2, GetField(bit >> 2) & ~(0x8 >> (bit & 3)));
+    const u32 field = bit >> 2;
+    const u32 mask = 8u >> (bit & 3);
+    const u32 old_value = GetField(field);
+    SetField(field, (value & 1) != 0 ? (old_value | mask) : (old_value & ~mask));
   }
 
-  // Set and Get are fairly slow. Should be avoided if possible.
+  // Whole-register conversion (CR0 in the top nibble). Slow; avoid in hot
+  // paths.
   void Set(u32 new_cr);
   u32 Get() const;
 };

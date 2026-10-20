@@ -1,44 +1,38 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/PowerPC/ConditionRegister.h"
 
+#include <cstddef>
+#include <utility>
+
 namespace PowerPC
 {
-const std::array<u64, 16> ConditionRegister::s_crTable = {{
-    ConditionRegister::PPCToInternal(0x0),
-    ConditionRegister::PPCToInternal(0x1),
-    ConditionRegister::PPCToInternal(0x2),
-    ConditionRegister::PPCToInternal(0x3),
-    ConditionRegister::PPCToInternal(0x4),
-    ConditionRegister::PPCToInternal(0x5),
-    ConditionRegister::PPCToInternal(0x6),
-    ConditionRegister::PPCToInternal(0x7),
-    ConditionRegister::PPCToInternal(0x8),
-    ConditionRegister::PPCToInternal(0x9),
-    ConditionRegister::PPCToInternal(0xA),
-    ConditionRegister::PPCToInternal(0xB),
-    ConditionRegister::PPCToInternal(0xC),
-    ConditionRegister::PPCToInternal(0xD),
-    ConditionRegister::PPCToInternal(0xE),
-    ConditionRegister::PPCToInternal(0xF),
-}};
+namespace
+{
+template <std::size_t... I>
+constexpr std::array<u64, 16> BuildFieldTable(std::index_sequence<I...>)
+{
+  return {ConditionRegister::PPCToInternal(static_cast<u8>(I))...};
+}
+}  // namespace
+
+const std::array<u64, 16> ConditionRegister::s_crTable =
+    BuildFieldTable(std::make_index_sequence<16>());
 
 u32 ConditionRegister::Get() const
 {
-  u32 new_cr = 0;
-  for (u32 i = 0; i < 8; i++)
-  {
-    new_cr |= GetField(i) << (28 - i * 4);
-  }
-  return new_cr;
+  u32 cr = 0;
+  for (u32 field = 0; field < 8; ++field)
+    cr = (cr << 4) | GetField(field);
+  return cr;
 }
 
 void ConditionRegister::Set(u32 cr)
 {
-  for (u32 i = 0; i < 8; i++)
+  for (u32 field = 8; field-- > 0;)
   {
-    SetField(i, (cr >> (28 - i * 4)) & 0xF);
+    SetField(field, cr & 0xF);
+    cr >>= 4;
   }
 }
 
