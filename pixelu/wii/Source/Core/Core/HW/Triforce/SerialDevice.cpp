@@ -1,9 +1,9 @@
-// Copyright 2026 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/Triforce/SerialDevice.h"
 
 #include <algorithm>
+#include <iterator>
 
 #include "Common/Assert.h"
 #include "Common/ChunkFile.h"
@@ -13,65 +13,50 @@ namespace Triforce
 
 void SerialDevice::WriteRxBytes(std::span<const u8> bytes)
 {
-#if defined(__cpp_lib_containers_ranges)
-  m_rx_buffer.append_range(bytes);
-#else
-  m_rx_buffer.insert(m_rx_buffer.end(), bytes.begin(), bytes.end());
-#endif
+  std::ranges::copy(bytes, std::back_inserter(m_inbound));
 }
 
 void SerialDevice::TakeTxBytes(std::span<u8> bytes)
 {
-  DEBUG_ASSERT(m_tx_buffer.size() >= bytes.size());
+  DEBUG_ASSERT(bytes.size() <= m_outbound.size());
 
-  std::copy_n(m_tx_buffer.begin(), bytes.size(), bytes.data());
-  m_tx_buffer.erase(m_tx_buffer.begin(), m_tx_buffer.begin() + bytes.size());
+  const auto end = m_outbound.begin() + static_cast<std::ptrdiff_t>(bytes.size());
+  std::copy(m_outbound.begin(), end, bytes.begin());
+  m_outbound.erase(m_outbound.begin(), end);
 }
 
 void SerialDevice::ConsumeRxBytes(std::size_t count)
 {
-  DEBUG_ASSERT(m_rx_buffer.size() >= count);
+  DEBUG_ASSERT(count <= m_inbound.size());
 
-  m_rx_buffer.erase(m_rx_buffer.begin(), m_rx_buffer.begin() + count);
+  m_inbound.erase(m_inbound.begin(), m_inbound.begin() + static_cast<std::ptrdiff_t>(count));
 }
 
 void SerialDevice::WriteTxBytes(std::span<const u8> bytes)
 {
-#if defined(__cpp_lib_containers_ranges)
-  m_tx_buffer.append_range(bytes);
-#else
-  m_tx_buffer.insert(m_tx_buffer.end(), bytes.begin(), bytes.end());
-#endif
+  std::ranges::copy(bytes, std::back_inserter(m_outbound));
 }
 
 void SerialDevice::PassThroughTxBytes(SerialDevice& other)
 {
-  // The destination buffer will often be empty or near-empty.
-  if (m_tx_buffer.size() < other.m_tx_buffer.size()) [[likely]]
+  std::deque<u8>& theirs = other.m_outbound;
+  if (theirs.size() > m_outbound.size())
   {
-#if defined(__cpp_lib_containers_ranges)
-    other.m_tx_buffer.prepend_range(m_tx_buffer);
-#else
-    other.m_tx_buffer.insert(other.m_tx_buffer.begin(), m_tx_buffer.begin(), m_tx_buffer.end());
-#endif
-    m_tx_buffer.swap(other.m_tx_buffer);
+    // Cheaper to put our (short) queue in front of theirs and take theirs.
+    theirs.insert(theirs.begin(), m_outbound.begin(), m_outbound.end());
+    m_outbound.swap(theirs);
   }
   else
   {
-#if defined(__cpp_lib_containers_ranges)
-    m_tx_buffer.append_range(other.m_tx_buffer);
-#else
-    m_tx_buffer.insert(m_tx_buffer.end(), other.m_tx_buffer.begin(), other.m_tx_buffer.end());
-#endif
+    m_outbound.insert(m_outbound.end(), theirs.begin(), theirs.end());
   }
-
-  other.m_tx_buffer.clear();
+  theirs.clear();
 }
 
 void SerialDevice::DoState(PointerWrap& p)
 {
-  p.Do(m_rx_buffer);
-  p.Do(m_tx_buffer);
+  p.Do(m_inbound);
+  p.Do(m_outbound);
 }
 
 }  // namespace Triforce

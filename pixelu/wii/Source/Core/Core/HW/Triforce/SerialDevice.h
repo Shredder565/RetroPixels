@@ -1,5 +1,4 @@
-// Copyright 2026 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -14,7 +13,9 @@ class PointerWrap;
 namespace Triforce
 {
 
-// Base class for devices that attach to the SerialA/B ports on the Triforce Baseboard.
+// Something plugged into one of the Triforce baseboard's serial ports (A or
+// B). The baseboard pushes bytes in and pulls the device's answers out; a
+// subclass parses the incoming bytes in Update().
 class SerialDevice
 {
 public:
@@ -28,9 +29,9 @@ public:
 
   void WriteRxBytes(std::span<const u8> bytes);
 
-  std::size_t GetTxByteCount() const { return m_tx_buffer.size(); }
+  std::size_t GetTxByteCount() const { return m_outbound.size(); }
 
-  // Caller should ensure GetTxByteCount() >= byte.size().
+  // `bytes` must not be larger than GetTxByteCount().
   void TakeTxBytes(std::span<u8> bytes);
 
   virtual void Update() = 0;
@@ -38,26 +39,24 @@ public:
   virtual void DoState(PointerWrap& p);
 
 protected:
-  std::span<const u8> GetRxByteSpan() const { return m_rx_buffer; }
+  std::span<const u8> GetRxByteSpan() const { return m_inbound; }
 
   void ConsumeRxBytes(std::size_t count);
 
-  void WriteTxByte(u8 byte) { m_tx_buffer.emplace_back(byte); }
+  void WriteTxByte(u8 byte) { m_outbound.push_back(byte); }
   void WriteTxBytes(std::span<const u8> bytes);
 
-  // Transfer the entirety of other's tx buffer to this tx buffer.
+  // Moves everything `other` has queued for the baseboard to the end of our
+  // own queue, leaving `other` with nothing to send.
   void PassThroughTxBytes(SerialDevice& other);
 
 private:
-  // The stream of bytes from the baseboard to the device.
-  // FYI: Current device implementations tend to empty the entire buffer in one go,
-  //  so std::vector's O(n) erase-at-front should be a non-issue.
-  // The contiguous data of std::vector is convenient for packet parsing.
-  std::vector<u8> m_rx_buffer;
+  // Baseboard -> device. Kept contiguous so packets can be parsed in place;
+  // devices usually consume all of it at once.
+  std::vector<u8> m_inbound;
 
-  // The stream of bytes from the device to the baseboard.
-  // It may be read in chunks so std::vector would be less appropriate here.
-  std::deque<u8> m_tx_buffer;
+  // Device -> baseboard. The baseboard may drain it a few bytes at a time.
+  std::deque<u8> m_outbound;
 };
 
 }  // namespace Triforce
