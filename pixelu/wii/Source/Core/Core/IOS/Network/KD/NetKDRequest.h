@@ -1,12 +1,16 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <array>
+#include <functional>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <queue>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "Common/CommonTypes.h"
 #include "Common/Event.h"
@@ -21,9 +25,9 @@
 
 namespace IOS::HLE
 {
-// KD is the IOS module responsible for implementing WiiConnect24 functionality.
-// It can perform HTTPS downloads, send and receive mail via SMTP, and execute a
-// JavaScript-like language while the Wii is in standby mode.
+// /dev/net/kd/request: KD, the WiiConnect24 daemon. It registers the console with the mail
+// server, checks for and sends mail, and downloads channel content into VFFs, both when asked
+// and from a background scheduler.
 class NetKDRequestDevice : public EmulationDevice
 {
 public:
@@ -38,6 +42,7 @@ public:
   void Update() override;
 
 private:
+  // Slow requests run on a worker thread; their results are handed back in Update().
   struct AsyncTask
   {
     IOS::HLE::Request request;
@@ -50,13 +55,10 @@ private:
     s32 return_value;
   };
 
-  template <typename Method, typename Request>
-  std::optional<IPCReply> LaunchAsyncTask(Method method, const Request& request)
-  {
-    m_work_queue.EmplaceItem(AsyncTask{request, std::bind(method, this, request)});
-    return std::nullopt;
-  }
+  std::optional<IPCReply> RunLater(const IOCtlRequest& request,
+                                   IPCReply (NetKDRequestDevice::*handler)(const IOCtlRequest&));
 
+  // Value of scheduler status word 4 while a job runs (stored big endian).
   enum class CurrentFunction : u32
   {
     None = 0,
@@ -68,6 +70,7 @@ private:
     Download = 7,
   };
 
+  // Decides how an error is turned into the code KD records.
   enum class ErrorType
   {
     Account,
@@ -87,11 +90,15 @@ private:
   };
 
   IPCReply HandleNWC24SendMailNow(const IOCtlRequest& request);
-  NWC24::ErrorCode KDCheckMail(u32* mail_flag, u32* interval);
   IPCReply HandleRequestRegisterUserId(const IOCtlRequest& request);
+  void HandleRequestGeneratedUserId(const IOCtlRequest& request);
+  NWC24::ErrorCode KDCheckMail(u32* mail_flag, u32* interval);
   NWC24::ErrorCode KDSendMail();
+  NWC24::ErrorCode FetchDownload(u16 entry_index, std::optional<u8> subtask_id);
+  void FinishSentMail(const std::string& response, const std::vector<u32>& sent);
 
   void LogError(ErrorType error_type, s32 error_code);
+  void SetCurrentFunction(CurrentFunction function);
   void SchedulerTimer();
   void SchedulerWorker(SchedulerEvent event);
   NWC24::ErrorCode DetermineDownloadTask(u16* entry_index, std::optional<u8>* subtask_id) const;
@@ -106,21 +113,28 @@ private:
   NWC24::NWC24Dl m_dl_list;
   NWC24::Mail::WC24SendList m_send_list;
   NWC24::Mail::WC24FriendList m_friend_list;
+
   Common::WorkQueueThreadSP<AsyncTask> m_work_queue;
   Common::AsyncWorkThreadSP m_scheduler_work_queue;
   std::mutex m_async_reply_lock;
-  std::mutex m_scheduler_buffer_lock;
   std::queue<AsyncReply> m_async_replies;
+
+  // What GET_SCHEDULER_STAT reports (big endian words): [1] permissions, [2] last error,
+  // [4] current function, [5] error count, [11] mail checks, [14] mail sends, [32..63] the
+  // last 32 errors.
+  std::mutex m_scheduler_buffer_lock;
   u32 m_error_count = 0;
   std::array<u32, 256> m_scheduler_buffer{};
+
   std::shared_ptr<NetKDTimeDevice> m_time_device;
-  // TODO: Maybe move away from Common::HttpRequest?
   Common::HttpRequest m_http{std::chrono::minutes{1}};
+
+  // Scheduler periods in minutes, guarded by m_scheduler_lock.
+  std::mutex m_scheduler_lock;
   u32 m_download_span = 2;
   u32 m_mail_span = 1;
   bool m_handle_mail;
   Common::Event m_shutdown_event;
-  std::mutex m_scheduler_lock;
   std::thread m_scheduler_timer_thread;
 };
 }  // namespace IOS::HLE

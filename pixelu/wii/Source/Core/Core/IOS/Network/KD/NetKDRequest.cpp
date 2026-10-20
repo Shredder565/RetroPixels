@@ -1,34 +1,40 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/IOS/Network/KD/NetKDRequest.h"
 
 #include <algorithm>
 #include <array>
+#include <cstring>
+#include <limits>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
-#include "Common/BitUtils.h"
+#include <fmt/format.h>
+
 #include "Common/CommonPaths.h"
 #include "Common/CommonTypes.h"
+#include "Common/Crypto/AES.h"
 #include "Common/Crypto/HMAC.h"
 #include "Common/Logging/Log.h"
 #include "Common/NandPaths.h"
-#include "Common/Projection.h"
-#include "Common/SettingsHandler.h"
-#include "Common/StringUtil.h"
-
 #include "Common/Random.h"
 #include "Common/ScopeGuard.h"
+#include "Common/SettingsHandler.h"
+#include "Common/StringUtil.h"
+#include "Common/Swap.h"
+#include "Common/Thread.h"
 #include "Core/CommonTitles.h"
 #include "Core/HW/Memmap.h"
 #include "Core/IOS/FS/FileSystem.h"
+#include "Core/IOS/IOS.h"
 #include "Core/IOS/IOSC.h"
 #include "Core/IOS/Network/KD/NetKDTime.h"
 #include "Core/IOS/Network/KD/VFF/VFFUtil.h"
+#include "Core/IOS/Network/KD/WC24File.h"
 #include "Core/IOS/Network/Socket.h"
 #include "Core/IOS/Uids.h"
 #include "Core/System.h"
@@ -38,6 +44,47 @@ namespace IOS::HLE
 {
 namespace
 {
+enum : u32
+{
+  IOCTL_NWC24_SUSPEND_SCHEDULER = 0x01,
+  IOCTL_NWC24_EXEC_TRY_SUSPEND_SCHEDULER = 0x02,
+  IOCTL_NWC24_EXEC_RESUME_SCHEDULER = 0x03,
+  IOCTL_NWC24_KD_GET_TIME_TRIGGERS = 0x04,
+  IOCTL_NWC24_SET_SCHEDULE_SPAN = 0x05,
+  IOCTL_NWC24_STARTUP_SOCKET = 0x06,
+  IOCTL_NWC24_CLEANUP_SOCKET = 0x07,
+  IOCTL_NWC24_LOCK_SOCKET = 0x08,
+  IOCTL_NWC24_UNLOCK_SOCKET = 0x09,
+  IOCTL_NWC24_CHECK_MAIL_NOW = 0x0A,
+  IOCTL_NWC24_SEND_MAIL_NOW = 0x0B,
+  IOCTL_NWC24_RECEIVE_MAIL_NOW = 0x0C,
+  IOCTL_NWC24_SAVE_MAIL_NOW = 0x0D,
+  IOCTL_NWC24_DOWNLOAD_NOW_EX = 0x0E,
+  IOCTL_NWC24_REQUEST_GENERATED_USER_ID = 0x0F,
+  IOCTL_NWC24_REQUEST_REGISTER_USER_ID = 0x10,
+  IOCTL_NWC24_GET_SCHEDULER_STAT = 0x1E,
+  IOCTL_NWC24_SET_FILTER_MODE = 0x1F,
+  IOCTL_NWC24_SET_DEBUG_MODE = 0x20,
+  IOCTL_NWC24_KD_SET_NEXT_WAKEUP = 0x21,
+  IOCTL_NWC24_SET_SCRIPT_MODE = 0x22,
+  IOCTL_NWC24_REQUEST_SHUTDOWN = 0x28,
+};
+
+// Indices into the scheduler status buffer.
+constexpr size_t STAT_PERMISSIONS = 1;
+constexpr size_t STAT_LAST_ERROR = 2;
+constexpr size_t STAT_CURRENT_FUNCTION = 4;
+constexpr size_t STAT_ERROR_COUNT = 5;
+constexpr size_t STAT_MAIL_CHECKS = 11;
+constexpr size_t STAT_MAIL_SENDS = 14;
+constexpr size_t STAT_ERROR_HISTORY = 32;
+constexpr u32 ERROR_HISTORY_LENGTH = 32;
+// GET_SCHEDULER_STAT copies at most this many bytes of the buffer.
+constexpr u32 MAX_STAT_BYTES = 256;
+
+constexpr std::string_view CGI_SUCCESS = "100";
+
+// Values of the "hardware model" field mixed into the WiiConnect24 ID.
 enum class HardwareModel : u8
 {
   RVT = 0,
@@ -47,750 +94,643 @@ enum class HardwareModel : u8
   Unknown = 7
 };
 
-u8 GetAreaCode(std::string_view area)
+u8 AreaToCode(std::string_view area)
 {
-  static constexpr std::array<std::pair<std::string_view, u8>, 13> regions{{
-      {"JPN", 0},
-      {"USA", 1},
-      {"EUR", 2},
-      {"AUS", 2},
-      {"BRA", 1},
-      {"TWN", 3},
-      {"ROC", 3},
-      {"KOR", 4},
-      {"HKG", 5},
-      {"ASI", 5},
-      {"LTN", 1},
-      {"SAF", 2},
-      {"CHN", 6},
-  }};
-
-  const auto entry_pos = std::ranges::find(regions, area, Common::Projection::Key{});
-  if (entry_pos != regions.end())
-    return entry_pos->second;
-
-  return 7;  // Unknown
+  struct AreaCode
+  {
+    std::string_view area;
+    u8 code;
+  };
+  static constexpr AreaCode AREAS[] = {
+      {"JPN", 0}, {"USA", 1}, {"EUR", 2}, {"AUS", 2}, {"BRA", 1}, {"TWN", 3}, {"ROC", 3},
+      {"KOR", 4}, {"HKG", 5}, {"ASI", 5}, {"LTN", 1}, {"SAF", 2}, {"CHN", 6},
+  };
+  for (const AreaCode& entry : AREAS)
+  {
+    if (entry.area == area)
+      return entry.code;
+  }
+  return 7;
 }
 
-HardwareModel GetHardwareModel(std::string_view model)
+HardwareModel ModelFromName(std::string_view model)
 {
-  static constexpr std::array<std::pair<std::string_view, HardwareModel>, 4> models{{
-      {"RVL", HardwareModel::RVL},
-      {"RVT", HardwareModel::RVT},
-      {"RVV", HardwareModel::RVV},
-      {"RVD", HardwareModel::RVD},
-  }};
-
-  const auto entry_pos = std::ranges::find(models, model, Common::Projection::Key{});
-  if (entry_pos != models.cend())
-    return entry_pos->second;
-
+  if (model == "RVL")
+    return HardwareModel::RVL;
+  if (model == "RVT")
+    return HardwareModel::RVT;
+  if (model == "RVV")
+    return HardwareModel::RVV;
+  if (model == "RVD")
+    return HardwareModel::RVD;
   return HardwareModel::Unknown;
 }
 
-s32 NWC24MakeUserID(u64* nwc24_id, u32 hollywood_id, u16 id_ctr, HardwareModel hardware_model,
-                    u8 area_code)
+constexpr u8 ByteOf(u64 value, u32 index)
 {
-  static constexpr std::array<u8, 8> table2{
-      0x1, 0x5, 0x0, 0x4, 0x2, 0x3, 0x6, 0x7,
-  };
-  static constexpr std::array<u8, 16> table1{
-      0x4, 0xB, 0x7, 0x9, 0xF, 0x1, 0xD, 0x3, 0xC, 0x2, 0x6, 0xE, 0x8, 0x0, 0xA, 0x5,
-  };
-
-  constexpr auto u64_get_byte = [](u64 value, u32 shift) -> u8 { return u8(value >> (shift * 8)); };
-
-  constexpr auto u64_insert_byte = [](u64 value, u32 shift, u8 byte) -> u64 {
-    const u64 mask = 0x00000000000000FFULL << (shift * 8);
-    const u64 inst = u64{byte} << (shift * 8);
-    return (value & ~mask) | inst;
-  };
-
-  u64 mix_id = (u64{area_code} << 50) | (u64(hardware_model) << 47) | (u64{hollywood_id} << 15) |
-               (u64{id_ctr} << 10);
-  const u64 mix_id_copy1 = mix_id;
-
-  u32 ctr = 0;
-  for (ctr = 0; ctr <= 42; ctr++)
-  {
-    u64 value = mix_id >> (52 - ctr);
-    if ((value & 1) != 0)
-    {
-      value = 0x0000000000000635ULL << (42 - ctr);
-      mix_id ^= value;
-    }
-  }
-
-  mix_id = (mix_id_copy1 | (mix_id & 0xFFFFFFFFUL)) ^ 0x0000B3B3B3B3B3B3ULL;
-  mix_id = (mix_id >> 10) | ((mix_id & 0x3FF) << (11 + 32));
-
-  for (ctr = 0; ctr <= 5; ctr++)
-  {
-    const u8 ret = u64_get_byte(mix_id, ctr);
-    const u8 foobar = u8((u32{table1[(ret >> 4) & 0xF]} << 4) | table1[ret & 0xF]);
-    mix_id = u64_insert_byte(mix_id, ctr, foobar & 0xff);
-  }
-
-  const u64 mix_id_copy2 = mix_id;
-
-  for (ctr = 0; ctr <= 5; ctr++)
-  {
-    const u8 ret = u64_get_byte(mix_id_copy2, ctr);
-    mix_id = u64_insert_byte(mix_id, table2[ctr], ret);
-  }
-
-  mix_id &= 0x001FFFFFFFFFFFFFULL;
-  mix_id = (mix_id << 1) | ((mix_id >> 52) & 1);
-
-  mix_id ^= 0x00005E5E5E5E5E5EULL;
-  mix_id &= 0x001FFFFFFFFFFFFFULL;
-
-  *nwc24_id = mix_id;
-
-  if (mix_id > 9999999999999999ULL)
-    return NWC24::WC24_ERR_FATAL;
-
-  return NWC24::WC24_OK;
+  return static_cast<u8>(value >> (8 * index));
 }
-}  // Anonymous namespace
+
+constexpr u64 WithByte(u64 value, u32 index, u8 byte)
+{
+  const u32 shift = 8 * index;
+  return (value & ~(u64{0xff} << shift)) | (u64{byte} << shift);
+}
+
+// Builds the 16-digit WiiConnect24 ID from the console ID, the ID counter, the hardware model
+// and the area, the way KD does: a 53-bit value with a 10-bit check field, scrambled by a
+// nibble substitution, a byte permutation, a rotation and two XOR masks.
+s32 MakeWiiNumber(u64* out, u32 console_id, u16 counter, HardwareModel model, u8 area)
+{
+  static constexpr u8 NIBBLE_MAP[16] = {0x4, 0xB, 0x7, 0x9, 0xF, 0x1, 0xD, 0x3,
+                                        0xC, 0x2, 0x6, 0xE, 0x8, 0x0, 0xA, 0x5};
+  static constexpr u8 BYTE_DESTINATION[6] = {1, 5, 0, 4, 2, 3};
+  constexpr u64 MASK_53 = 0x001FFFFFFFFFFFFFULL;
+
+  const u64 fields = (u64{area} << 50) | (u64{static_cast<u8>(model)} << 47) |
+                     (u64{console_id} << 15) | (u64{counter} << 10);
+
+  // Polynomial remainder (generator 0x635) of the fields, worked from bit 52 down to bit 10.
+  u64 remainder = fields;
+  for (u32 bit = 52; bit >= 10; --bit)
+  {
+    if ((remainder >> bit) & 1)
+      remainder ^= u64{0x635} << (bit - 10);
+  }
+
+  u64 id = (fields | (remainder & 0xFFFFFFFFULL)) ^ 0x0000B3B3B3B3B3B3ULL;
+  // Move the low 10 bits up to bits 43..52.
+  id = (id >> 10) | ((id & 0x3FF) << 43);
+
+  for (u32 index = 0; index < 6; ++index)
+  {
+    const u8 byte = ByteOf(id, index);
+    id = WithByte(id, index, static_cast<u8>((NIBBLE_MAP[byte >> 4] << 4) | NIBBLE_MAP[byte & 0xF]));
+  }
+
+  const u64 substituted = id;
+  for (u32 index = 0; index < 6; ++index)
+    id = WithByte(id, BYTE_DESTINATION[index], ByteOf(substituted, index));
+
+  id &= MASK_53;
+  id = (id << 1) | ((id >> 52) & 1);
+  id = (id ^ 0x00005E5E5E5E5E5EULL) & MASK_53;
+
+  *out = id;
+  // Must fit in 16 decimal digits.
+  return id > 9999999999999999ULL ? NWC24::WC24_ERR_FATAL : NWC24::WC24_OK;
+}
+
+std::string SettingsFilePath()
+{
+  return Common::GetTitleDataPath(Titles::SYSTEM_MENU) + "/" WII_SETTING;
+}
+
+std::span<const u8> AsBytes(const std::string& text)
+{
+  return {reinterpret_cast<const u8*>(text.data()), text.size()};
+}
+}  // namespace
 
 NetKDRequestDevice::NetKDRequestDevice(EmulationKernel& ios, const std::string& device_name,
                                        const std::shared_ptr<NetKDTimeDevice>& time_device)
     : EmulationDevice(ios, device_name), m_config{ios.GetFS()}, m_dl_list{ios.GetFS()},
       m_send_list{ios.GetFS()}, m_friend_list{ios.GetFS()}, m_time_device{time_device}
 {
-  // Enable all NWC24 permissions
-  m_scheduler_buffer[1] = Common::swap32(-1);
+  // All WiiConnect24 permissions granted.
+  m_scheduler_buffer[STAT_PERMISSIONS] = 0xffffffff;
 
   m_work_queue.Reset("WiiConnect24 Worker", [this](const AsyncTask& task) {
-    const IPCReply reply = task.handler();
-    {
-      std::lock_guard lg(m_async_reply_lock);
-      m_async_replies.emplace(AsyncReply{task.request, reply.return_value});
-    }
+    const s32 result = task.handler().return_value;
+    std::lock_guard lock(m_async_reply_lock);
+    m_async_replies.push(AsyncReply{task.request, result});
   });
 
+  // Mail needs a real console ID (a shared default one could never register) and a usable
+  // send list.
   m_handle_mail = !ios.GetIOSC().IsUsingDefaultId() && !m_send_list.IsDisabled();
   m_scheduler_work_queue.Reset("WiiConnect24 Scheduler Worker");
-
   m_scheduler_timer_thread = std::thread([this] { SchedulerTimer(); });
 }
 
 NetKDRequestDevice::~NetKDRequestDevice()
 {
-  auto socket_manager = GetEmulationKernel().GetSocketManager();
-  if (socket_manager)
-    socket_manager->Clean();
+  if (const auto sockets = GetEmulationKernel().GetSocketManager())
+    sockets->Clean();
 
   {
-    std::lock_guard lg(m_scheduler_lock);
+    std::lock_guard lock(m_scheduler_lock);
     if (!m_scheduler_timer_thread.joinable())
       return;
-
     m_shutdown_event.Set();
   }
-
   m_scheduler_timer_thread.join();
   m_scheduler_work_queue.Shutdown();
   m_work_queue.Shutdown();
 }
 
+std::optional<IPCReply>
+NetKDRequestDevice::RunLater(const IOCtlRequest& request,
+                             IPCReply (NetKDRequestDevice::*handler)(const IOCtlRequest&))
+{
+  m_work_queue.EmplaceItem(
+      AsyncTask{request, [this, handler, request] { return (this->*handler)(request); }});
+  return std::nullopt;
+}
+
 void NetKDRequestDevice::Update()
 {
+  std::lock_guard lock(m_async_reply_lock);
+  for (; !m_async_replies.empty(); m_async_replies.pop())
   {
-    std::lock_guard lg(m_async_reply_lock);
-    while (!m_async_replies.empty())
-    {
-      const auto& reply = m_async_replies.front();
-      GetEmulationKernel().EnqueueIPCReply(reply.request, reply.return_value);
-      m_async_replies.pop();
-    }
+    const AsyncReply& reply = m_async_replies.front();
+    GetEmulationKernel().EnqueueIPCReply(reply.request, reply.return_value);
   }
 }
 
 void NetKDRequestDevice::SchedulerTimer()
 {
-  u32 mail_time_state = 0;
-  u32 download_time_state = 0;
   Common::SetCurrentThreadName("KD Scheduler Timer");
-  while (true)
+  // Minutes since each job last ran.
+  u32 minutes_since_mail = 0;
+  u32 minutes_since_download = 0;
+  for (;;)
   {
     {
-      std::lock_guard lg(m_scheduler_lock);
-      if (m_mail_span <= mail_time_state && m_handle_mail)
+      std::lock_guard lock(m_scheduler_lock);
+      if (m_handle_mail && minutes_since_mail >= m_mail_span)
       {
+        INFO_LOG_FMT(IOS_WC24, "KD scheduler: starting the mail job");
         m_scheduler_work_queue.Push([this] { SchedulerWorker(SchedulerEvent::Mail); });
-        INFO_LOG_FMT(IOS_WC24, "NET_KD_REQ: Dispatching Mail Task from Scheduler");
-        mail_time_state = 0;
+        minutes_since_mail = 0;
       }
-
-      if (m_download_span <= download_time_state && !m_dl_list.IsDisabled())
+      if (!m_dl_list.IsDisabled() && minutes_since_download >= m_download_span)
       {
-        INFO_LOG_FMT(IOS_WC24, "NET_KD_REQ: Dispatching Download Task from Scheduler");
+        INFO_LOG_FMT(IOS_WC24, "KD scheduler: starting the download job");
         m_scheduler_work_queue.Push([this] { SchedulerWorker(SchedulerEvent::Download); });
-        download_time_state = 0;
+        minutes_since_download = 0;
       }
     }
 
     if (m_shutdown_event.WaitFor(std::chrono::minutes{1}))
       return;
-
-    mail_time_state++;
-    download_time_state++;
+    ++minutes_since_mail;
+    ++minutes_since_download;
   }
 }
 
 void NetKDRequestDevice::SchedulerWorker(const SchedulerEvent event)
 {
-  if (event == SchedulerEvent::Download)
-  {
-    u16 entry_index{};
-    std::optional<u8> subtask_id{};
-    NWC24::ErrorCode code = DetermineDownloadTask(&entry_index, &subtask_id);
-    if (code != NWC24::WC24_OK)
-    {
-      if (code == NWC24::WC24_ERR_NOT_FOUND)
-      {
-        std::lock_guard lg(m_scheduler_lock);
-        m_download_span = DEFAULT_SCHEDULER_SPAN_MINUTES;
-      }
-
-      LogError(ErrorType::KD_Download, code);
-      return;
-    }
-
-    code = KDDownload(entry_index, subtask_id);
-    if (code != NWC24::WC24_OK)
-    {
-      LogError(ErrorType::KD_Download, code);
-    }
-  }
-  else
+  if (event == SchedulerEvent::Mail)
   {
     if (!m_config.IsRegistered())
       return;
 
-    u32 mail_flag{};
-    u32 interval{};
-
-    NWC24::ErrorCode code = KDCheckMail(&mail_flag, &interval);
-    if (code != NWC24::WC24_OK)
-    {
+    u32 mail_flag = 0;
+    u32 interval = 0;
+    if (const NWC24::ErrorCode code = KDCheckMail(&mail_flag, &interval); code != NWC24::WC24_OK)
       LogError(ErrorType::CheckMail, code);
-    }
-
-    code = KDSendMail();
-    if (code != NWC24::WC24_OK)
-    {
+    if (const NWC24::ErrorCode code = KDSendMail(); code != NWC24::WC24_OK)
       LogError(ErrorType::SendMail, code);
-    }
+    return;
   }
+
+  u16 entry_index = 0;
+  std::optional<u8> subtask_id;
+  NWC24::ErrorCode code = DetermineDownloadTask(&entry_index, &subtask_id);
+  if (code == NWC24::WC24_OK)
+    code = KDDownload(entry_index, subtask_id);
+  else if (code == NWC24::WC24_ERR_NOT_FOUND)
+  {
+    // Nothing is due: look again less often.
+    std::lock_guard lock(m_scheduler_lock);
+    m_download_span = DEFAULT_SCHEDULER_SPAN_MINUTES;
+  }
+
+  if (code != NWC24::WC24_OK)
+    LogError(ErrorType::KD_Download, code);
 }
 
 std::string NetKDRequestDevice::GetValueFromCGIResponse(const std::string& response,
                                                         const std::string& key)
 {
-  const std::vector<std::string> raw_fields = SplitString(response, '\n');
-  for (const std::string& field : raw_fields)
+  // The server answers with "key=value" lines. Lines that do not split into exactly two parts
+  // at '=' are ignored.
+  for (const std::string& line : SplitString(response, '\n'))
   {
-    const std::vector<std::string> key_value = SplitString(field, '=');
-    if (key_value.size() != 2)
-      continue;
-
-    if (key_value[0] == key)
-      return std::string{StripWhitespace(key_value[1])};
+    const std::vector<std::string> parts = SplitString(line, '=');
+    if (parts.size() == 2 && parts[0] == key)
+      return std::string(StripWhitespace(parts[1]));
   }
-
   return {};
 }
 
 void NetKDRequestDevice::LogError(ErrorType error_type, s32 error_code)
 {
-  s32 new_code{};
+  // Each kind of failure has its own range of six-digit codes, shown negated.
+  s32 recorded = 0;
   switch (error_type)
   {
   case ErrorType::Account:
-    new_code = -(101200 - error_code);
+    recorded = error_code - 101200;
     break;
   case ErrorType::Client:
-    new_code = -(107300 - error_code);
+    recorded = error_code - 107300;
     break;
   case ErrorType::KD_Download:
-    new_code = -(107200 - error_code);
+    recorded = error_code - 107200;
     break;
   case ErrorType::Server:
-    new_code = -(117000 + error_code);
+    recorded = -117000 - error_code;
     break;
   case ErrorType::CheckMail:
-    new_code = -(102200 - error_code);
+    recorded = error_code - 102200;
     break;
   case ErrorType::SendMail:
-    new_code = -(105000 - error_code);
+    recorded = error_code - 105000;
     break;
   case ErrorType::ReceiveMail:
-    new_code = -(100300 - error_code);
+    recorded = error_code - 100300;
     break;
   case ErrorType::CGI:
-    new_code = -(error_code + 110000);
+    recorded = -110000 - error_code;
     break;
   }
 
-  std::lock_guard lg(m_scheduler_buffer_lock);
+  const u32 recorded_be = Common::swap32(static_cast<u32>(recorded));
+  std::lock_guard lock(m_scheduler_buffer_lock);
+  m_scheduler_buffer[STAT_ERROR_HISTORY + m_error_count % ERROR_HISTORY_LENGTH] = recorded_be;
+  ++m_error_count;
+  m_scheduler_buffer[STAT_ERROR_COUNT] = Common::swap32(m_error_count);
+  m_scheduler_buffer[STAT_LAST_ERROR] = recorded_be;
+}
 
-  m_scheduler_buffer[32 + (m_error_count % 32)] = Common::swap32(new_code);
-  m_error_count++;
-
-  m_scheduler_buffer[5] = Common::swap32(m_error_count);
-  m_scheduler_buffer[2] = Common::swap32(new_code);
+void NetKDRequestDevice::SetCurrentFunction(CurrentFunction function)
+{
+  std::lock_guard lock(m_scheduler_buffer_lock);
+  m_scheduler_buffer[STAT_CURRENT_FUNCTION] = Common::swap32(static_cast<u32>(function));
 }
 
 NWC24::ErrorCode NetKDRequestDevice::KDCheckMail(u32* mail_flag, u32* interval)
 {
-  bool success = false;
-  Common::ScopeGuard state_guard([&] {
-    std::lock_guard lg(m_scheduler_buffer_lock);
-    if (success)
+  bool succeeded = false;
+  Common::ScopeGuard finish([&] {
+    std::lock_guard lock(m_scheduler_buffer_lock);
+    if (succeeded)
     {
-      // m_scheduler_buffer[11] contains the amount of times we have checked for mail this IOS
-      // session.
-      m_scheduler_buffer[11] = Common::swap32(Common::swap32(m_scheduler_buffer[11]) + 1);
+      m_scheduler_buffer[STAT_MAIL_CHECKS] =
+          Common::swap32(Common::swap32(m_scheduler_buffer[STAT_MAIL_CHECKS]) + 1);
     }
-    m_scheduler_buffer[4] = static_cast<u32>(CurrentFunction::None);
+    m_scheduler_buffer[STAT_CURRENT_FUNCTION] = 0;
   });
+  SetCurrentFunction(CurrentFunction::Check);
 
-  {
-    std::lock_guard lg(m_scheduler_buffer_lock);
-    m_scheduler_buffer[4] = Common::swap32(static_cast<u32>(CurrentFunction::Check));
-  }
-
-  u64 random_number{};
-  Common::Random::Generate(&random_number, sizeof(u64));
-  const std::string form_data(
-      fmt::format("mlchkid={}&chlng={}", m_config.GetMlchkid(), random_number));
-  const Common::HttpRequest::Response response = m_http.Post(m_config.GetCheckURL(), form_data);
-
+  // The server proves itself by answering a random challenge with an HMAC.
+  u64 challenge = 0;
+  Common::Random::Generate(&challenge, sizeof(challenge));
+  const std::string check_url = m_config.GetCheckURL();
+  const Common::HttpRequest::Response response =
+      m_http.Post(check_url, fmt::format("mlchkid={}&chlng={}", m_config.GetMlchkid(), challenge));
   if (!response)
   {
-    ERROR_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_CHECK_MAIL_NOW: Failed to request data at {}.",
-                  m_config.GetCheckURL());
+    ERROR_LOG_FMT(IOS_WC24, "KD mail check: no answer from {}", check_url);
     return NWC24::WC24_ERR_SERVER;
   }
 
-  const std::string response_str = {response->begin(), response->end()};
-  const std::string code = GetValueFromCGIResponse(response_str, "cd");
-  if (code != "100")
+  const std::string body(response->begin(), response->end());
+  const std::string code = GetValueFromCGIResponse(body, "cd");
+  if (code != CGI_SUCCESS)
   {
-    ERROR_LOG_FMT(
-        IOS_WC24,
-        "NET_KD_REQ: IOCTL_NWC24_CHECK_MAIL_NOW: Mail server returned non-success code: {}", code);
+    ERROR_LOG_FMT(IOS_WC24, "KD mail check: server answered with code {}", code);
     return NWC24::WC24_ERR_SERVER;
   }
 
-  const std::string server_hmac = GetValueFromCGIResponse(response_str, "res");
-  const std::string str_mail_flag = GetValueFromCGIResponse(response_str, "mail.flag");
-  const std::string str_interval = GetValueFromCGIResponse(response_str, "interval");
-  DEBUG_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_CHECK_MAIL_NOW: Server HMAC: {}", server_hmac);
+  const std::string server_hmac = GetValueFromCGIResponse(body, "res");
+  const std::string server_mail_flag = GetValueFromCGIResponse(body, "mail.flag");
+  const std::string server_interval = GetValueFromCGIResponse(body, "interval");
 
-  // On a real Wii, a response to a challenge is expected and would be verified by KD. The HMAC
-  // key is Nintendo's (it lives in KD) and is not included; the owner can give it as
-  // wc24_mail_check_key in wii_keys.txt. Without it the server's answer is not checked.
+  // The answer must be HMAC-SHA1(challenge, ID, flag, interval) as lowercase hex (compared
+  // case-sensitively, like KD does). The HMAC key is Nintendo's and is not included; the owner
+  // can give it as wc24_mail_check_key in wii_keys.txt. Without it the answer is not checked.
   const std::optional<std::vector<u8>> mail_check_key =
       IOS::HLE::IOSC::LoadOwnerKey("wc24_mail_check_key", 20);
   if (mail_check_key)
   {
-    const std::string hmac_message = fmt::format("{}\nw{:016}\n{}\n{}", random_number,
-                                                 m_config.Id(), str_mail_flag, str_interval);
-    std::array<u8, 20> hashed{};
-    Common::HMAC::HMACWithSHA1(
-        *mail_check_key,
-        std::span<const u8>(reinterpret_cast<const u8*>(hmac_message.data()), hmac_message.size()),
-        hashed.data());
-
-    // On a real Wii, strncmp is used to compare both hashes. This means that it is a
-    // case-sensitive comparison. KD will generate a lowercase hash as well as expect a lowercase
-    // hash from the server.
-    if (Common::BytesToHexString(hashed) != server_hmac)
+    const std::string signed_text = fmt::format("{}\nw{:016}\n{}\n{}", challenge,
+                                                m_config.Id(), server_mail_flag, server_interval);
+    std::array<u8, 20> expected{};
+    Common::HMAC::HMACWithSHA1(*mail_check_key, AsBytes(signed_text), expected.data());
+    if (Common::BytesToHexString(expected) != server_hmac)
     {
-      ERROR_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_CHECK_MAIL_NOW: Server HMAC is invalid.");
+      ERROR_LOG_FMT(IOS_WC24, "KD mail check: the server's HMAC does not match");
       return NWC24::WC24_ERR_SERVER;
     }
   }
   else
   {
-    WARN_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_CHECK_MAIL_NOW: no mail check key, so the "
-                           "server HMAC is not checked");
+    WARN_LOG_FMT(IOS_WC24, "KD mail check: no mail check key, so the server's HMAC is not checked");
   }
 
-  *mail_flag = std::strncmp(str_mail_flag.data(), m_send_list.GetMailFlag().data(), 22) != 0;
+  // New mail is waiting when the server's flag differs from the one in the send list.
+  *mail_flag = std::strncmp(server_mail_flag.data(), m_send_list.GetMailFlag().data(), 22) != 0;
 
   {
-    std::lock_guard scheduler_lg(m_scheduler_lock);
-    bool did_parse = TryParse(m_http.GetHeaderValue("X-Wii-Mail-Check-Span"), interval);
-    if (did_parse)
+    std::lock_guard lock(m_scheduler_lock);
+    // The server may also change how often the scheduler runs; 0 counts as 1.
+    if (TryParse(m_http.GetHeaderValue("X-Wii-Mail-Check-Span"), interval))
     {
-      if (*interval == 0)
-      {
-        *interval = 1;
-      }
-
+      *interval = std::max(*interval, 1u);
       m_mail_span = *interval;
     }
-
-    did_parse = TryParse(m_http.GetHeaderValue("X-Wii-Download-Span"), &m_download_span);
-    if (did_parse)
-    {
-      if (m_download_span == 0)
-      {
-        m_download_span = 1;
-      }
-    }
+    if (TryParse(m_http.GetHeaderValue("X-Wii-Download-Span"), &m_download_span))
+      m_download_span = std::max(m_download_span, 1u);
   }
 
-  success = true;
+  succeeded = true;
   return NWC24::WC24_OK;
 }
 
 NWC24::ErrorCode NetKDRequestDevice::DetermineDownloadTask(u16* entry_index,
                                                            std::optional<u8>* subtask_id) const
 {
-  // As the scheduler does not tell us which entry to download, we must determine that.
-  // A correct entry is one that hasn't been downloaded the longest compared to other entries.
-  // We first need current UTC.
-  const u64 current_utc = m_time_device->GetAdjustedUTC();
-  u64 lowest_timestamp = std::numeric_limits<u64>::max();
+  // The scheduler picks the due entry (not skipped by the scheduler) that has waited longest.
+  // An entry with subtasks only counts if one of its subtasks is due; checking one stores that
+  // subtask in `subtask_id`, even if a later entry is picked in the end.
+  constexpr u64 NONE_FOUND = std::numeric_limits<u64>::max();
+  const u64 now = m_time_device->GetAdjustedUTC();
+  u64 oldest_due = NONE_FOUND;
 
-  for (u16 i = 0; i < static_cast<u16>(NWC24::NWC24Dl::MAX_ENTRIES); i++)
+  for (u16 index = 0; index < NWC24::NWC24Dl::MAX_ENTRIES; ++index)
   {
-    if (!m_dl_list.DoesEntryExist(i))
+    if (!m_dl_list.DoesEntryExist(index) || m_dl_list.SkipSchedulerDownload(index))
       continue;
 
-    if (m_dl_list.SkipSchedulerDownload(i))
+    const u64 due = m_dl_list.GetNextDownloadTime(index);
+    if (now < due || due >= oldest_due)
       continue;
 
-    const u64 next_dl_time = m_dl_list.GetNextDownloadTime(i);
-
-    // First determine if UTC is greater than the next download time.
-    if (current_utc < next_dl_time)
+    if (m_dl_list.HasSubtask(index) && DetermineSubtask(index, subtask_id) != NWC24::WC24_OK)
       continue;
 
-    // If this task's next download time is less than the lowest_timestamp, this is the task we
-    // want. However, we must determine if this has a subtask and wants to be downloaded.
-    if (next_dl_time < lowest_timestamp)
-    {
-      if (m_dl_list.HasSubtask(i))
-      {
-        NWC24::ErrorCode code = DetermineSubtask(i, subtask_id);
-        if (code != NWC24::WC24_OK)
-        {
-          // No valid subtask found or downloading is disabled.
-          continue;
-        }
-      }
-
-      lowest_timestamp = next_dl_time;
-      *entry_index = i;
-    }
+    oldest_due = due;
+    *entry_index = index;
   }
 
-  // Determine if we actually found an entry to download.
-  if (lowest_timestamp == std::numeric_limits<u64>::max())
-    return NWC24::WC24_ERR_NOT_FOUND;
-
-  return NWC24::WC24_OK;
+  return oldest_due == NONE_FOUND ? NWC24::WC24_ERR_NOT_FOUND : NWC24::WC24_OK;
 }
 
 NWC24::ErrorCode NetKDRequestDevice::DetermineSubtask(u16 entry_index,
                                                       std::optional<u8>* subtask_id) const
 {
-  // Before we do anything, determine if this task wants to be downloaded
   if (m_dl_list.IsSubtaskDownloadDisabled(entry_index))
     return NWC24::WC24_ERR_DISABLED;
 
-  const u64 current_utc = m_time_device->GetAdjustedUTC();
-  for (u8 i = 0; i < 32; i++)
+  // The first valid subtask whose next download time has passed.
+  const u64 now = m_time_device->GetAdjustedUTC();
+  for (u8 subtask = 0; subtask < 32; ++subtask)
   {
-    if (!m_dl_list.IsValidSubtask(entry_index, i))
-      continue;
-
-    // Unlike DetermineDownloadTask, DetermineSubtask gets the first download time lower than UTC.
-    const u64 last_download_time = m_dl_list.GetLastSubtaskDownloadTime(entry_index, i);
-    if (last_download_time < current_utc)
+    if (m_dl_list.IsValidSubtask(entry_index, subtask) &&
+        m_dl_list.GetLastSubtaskDownloadTime(entry_index, subtask) < now)
     {
-      *subtask_id = i;
+      *subtask_id = subtask;
       return NWC24::WC24_OK;
     }
   }
-
   return NWC24::WC24_ERR_INVALID_VALUE;
 }
 
 NWC24::ErrorCode NetKDRequestDevice::KDSendMail()
 {
-  bool success = false;
-  Common::ScopeGuard exit_guard([&] {
-    std::lock_guard lg(m_scheduler_buffer_lock);
-    if (success)
+  bool succeeded = false;
+  Common::ScopeGuard finish([&] {
+    std::lock_guard lock(m_scheduler_buffer_lock);
+    if (succeeded)
     {
-      // m_scheduler_buffer[11] contains the amount of times we have sent for mail this IOS
-      // session.
-      m_scheduler_buffer[14] = Common::swap32(Common::swap32(m_scheduler_buffer[14]) + 1);
+      m_scheduler_buffer[STAT_MAIL_SENDS] =
+          Common::swap32(Common::swap32(m_scheduler_buffer[STAT_MAIL_SENDS]) + 1);
     }
-    m_scheduler_buffer[4] = static_cast<u32>(CurrentFunction::None);
-
+    m_scheduler_buffer[STAT_CURRENT_FUNCTION] = 0;
+    // The list is saved whatever happened.
     m_send_list.WriteSendList();
   });
-
-  {
-    std::lock_guard lg(m_scheduler_buffer_lock);
-    m_scheduler_buffer[4] = Common::swap32(static_cast<u32>(CurrentFunction::Send));
-  }
+  SetCurrentFunction(CurrentFunction::Send);
 
   m_send_list.ReadSendList();
-  const std::string auth =
-      fmt::format("mlid=w{:016}\r\npasswd={}", m_config.Id(), m_config.GetPassword());
-  std::vector<Common::HttpRequest::Multiform> multiform = {{"mlid", auth}};
+  std::vector<Common::HttpRequest::Multiform> form{
+      {"mlid", fmt::format("mlid=w{:016}\r\npasswd={}", m_config.Id(), m_config.GetPassword())}};
 
-  std::vector<u32> mails = m_send_list.GetMailToSend();
-  for (const u32 file_index : mails)
+  // Messages that are too big or unreadable are dropped from the list (and the pass). The pass
+  // keeps walking the original number of slots of the shrinking list, so the message after a
+  // dropped one is skipped and the last slots are visited again, as they always have been.
+  std::vector<u32> slots = m_send_list.GetMailToSend();
+  const size_t pass_length = slots.size();
+  size_t kept = slots.size();
+  const auto drop = [&](u32 index, NWC24::ErrorCode reason) {
+    LogError(ErrorType::SendMail, reason);
+    if (const NWC24::ErrorCode deleted = m_send_list.DeleteMessage(index);
+        deleted != NWC24::WC24_OK)
+    {
+      LogError(ErrorType::SendMail, deleted);
+    }
+    const auto end = slots.begin() + static_cast<std::ptrdiff_t>(kept);
+    const auto found = std::find(slots.begin(), end, index);
+    if (found != end)
+    {
+      std::copy(found + 1, end, found);
+      --kept;
+    }
+  };
+
+  for (size_t position = 0; position < pass_length; ++position)
   {
-    const u32 entry_id = m_send_list.GetEntryId(file_index);
-    const u32 mail_size = m_send_list.GetMailSize(file_index);
-    if (mail_size > MAX_MAIL_SIZE)
+    const u32 index = slots[position];
+    const u32 entry_id = m_send_list.GetEntryId(index);
+    const u32 size = m_send_list.GetMailSize(index);
+    if (size > MAX_MAIL_SIZE)
     {
-      WARN_LOG_FMT(IOS_WC24,
-                   "NET_KD_REQ: IOCTL_NWC24_SEND_MAIL_NOW: Mail at index {} was too large to send.",
-                   entry_id);
-      LogError(ErrorType::SendMail, NWC24::WC24_MSG_TOO_BIG);
-
-      NWC24::ErrorCode res = m_send_list.DeleteMessage(file_index);
-      if (res != NWC24::WC24_OK)
-      {
-        LogError(ErrorType::SendMail, res);
-      }
-      std::erase(mails, file_index);
+      WARN_LOG_FMT(IOS_WC24, "KD send mail: message {} is too large to send", entry_id);
+      drop(index, NWC24::WC24_MSG_TOO_BIG);
       continue;
     }
 
-    std::vector<u8> mail_data(mail_size);
-    NWC24::ErrorCode res = NWC24::ReadFromVFF(
-        NWC24::Mail::SEND_BOX_PATH, m_send_list.GetMailPath(file_index), m_ios.GetFS(), mail_data);
-    if (res != NWC24::WC24_OK)
+    std::vector<u8> message(size);
+    const NWC24::ErrorCode read = NWC24::ReadFromVFF(
+        NWC24::Mail::SEND_BOX_PATH, m_send_list.GetMailPath(index), m_ios.GetFS(), message);
+    if (read != NWC24::WC24_OK)
     {
-      ERROR_LOG_FMT(IOS_WC24, "Reading mail at index {} failed with error code {}.", entry_id,
-                    static_cast<s32>(res));
-      LogError(ErrorType::SendMail, NWC24::WC24_MSG_DAMAGED);
-      res = m_send_list.DeleteMessage(file_index);
-      if (res != NWC24::WC24_OK)
-      {
-        LogError(ErrorType::SendMail, res);
-      }
-
-      std::erase(mails, file_index);
+      ERROR_LOG_FMT(IOS_WC24, "KD send mail: reading message {} failed ({})", entry_id,
+                    static_cast<s32>(read));
+      drop(index, NWC24::WC24_MSG_DAMAGED);
       continue;
     }
-
-    const std::string mail_str = {mail_data.begin(), mail_data.end()};
-
-    multiform.push_back({fmt::format("m{}", entry_id), mail_str});
+    form.push_back({fmt::format("m{}", entry_id), std::string(message.begin(), message.end())});
   }
+  slots.resize(kept);
 
-  const Common::HttpRequest::Response response =
-      m_http.PostMultiform(m_config.GetSendURL(), multiform);
-
+  const std::string send_url = m_config.GetSendURL();
+  const Common::HttpRequest::Response response = m_http.PostMultiform(send_url, form);
   if (!response)
   {
-    ERROR_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_SEND_MAIL_NOW: Failed to request data at {}.",
-                  m_config.GetSendURL());
+    ERROR_LOG_FMT(IOS_WC24, "KD send mail: no answer from {}", send_url);
     return NWC24::WC24_ERR_SERVER;
   }
 
-  // Now check if any mail failed to save to the server.
-  const std::string response_str = {response->begin(), response->end()};
-  const std::string code = GetValueFromCGIResponse(response_str, "cd");
-  if (code != "100")
+  const std::string body(response->begin(), response->end());
+  const std::string code = GetValueFromCGIResponse(body, "cd");
+  if (code != CGI_SUCCESS)
   {
-    ERROR_LOG_FMT(
-        IOS_WC24,
-        "NET_KD_REQ: IOCTL_NWC24_CHECK_MAIL_NOW: Mail server returned non-success code: {}", code);
+    ERROR_LOG_FMT(IOS_WC24, "KD send mail: server answered with code {}", code);
     return NWC24::WC24_ERR_SERVER;
   }
 
-  // Reverse in order to delete from bottom to top of the send list.
-  // We do this to ensure that new entries can be written as close to the beginning of the file as
-  // possible.
-  for (auto it = mails.rbegin(); it != mails.rend(); ++it)
+  FinishSentMail(body, slots);
+  succeeded = true;
+  return NWC24::WC24_OK;
+}
+
+void NetKDRequestDevice::FinishSentMail(const std::string& response, const std::vector<u32>& sent)
+{
+  // Every message that went out is removed, last first, so that new messages fill the list
+  // from the front. Per-message codes are only logged; an unreadable one ends the loop (after
+  // its message is removed too).
+  for (auto it = sent.rbegin(); it != sent.rend(); ++it)
   {
-    const u32 entry_id = m_send_list.GetEntryId(*it);
-    Common::ScopeGuard delete_guard([&] {
-      NWC24::ErrorCode res = m_send_list.DeleteMessage(*it);
-      if (res != NWC24::WC24_OK)
-      {
-        LogError(ErrorType::SendMail, res);
-      }
-    });
+    const u32 index = *it;
+    const u32 entry_id = m_send_list.GetEntryId(index);
+    const std::string value = GetValueFromCGIResponse(response, fmt::format("cd{}", entry_id));
 
-    const std::string value = GetValueFromCGIResponse(response_str, fmt::format("cd{}", entry_id));
-
-    s32 cgi_code{};
-    const bool did_parse = TryParse(value, &cgi_code);
-    if (!did_parse)
+    s32 cgi_code = 0;
+    const bool parsed = TryParse(value, &cgi_code);
+    if (!parsed)
     {
-      ERROR_LOG_FMT(IOS_WC24, "Mail server returned invalid CGI response code.");
+      ERROR_LOG_FMT(IOS_WC24, "KD send mail: unreadable result for message {}", entry_id);
       LogError(ErrorType::CGI, NWC24::WC24_ERR_SERVER);
-      break;
     }
-
-    if (cgi_code != 100)
+    else if (cgi_code != 100)
     {
-      ERROR_LOG_FMT(IOS_WC24, "Mail server failed to save mail at index {}", entry_id);
+      ERROR_LOG_FMT(IOS_WC24, "KD send mail: the server did not take message {}", entry_id);
       LogError(ErrorType::CGI, cgi_code);
     }
-  }
 
-  success = true;
-  return NWC24::WC24_OK;
+    if (const NWC24::ErrorCode deleted = m_send_list.DeleteMessage(index);
+        deleted != NWC24::WC24_OK)
+    {
+      LogError(ErrorType::SendMail, deleted);
+    }
+    if (!parsed)
+      break;
+  }
 }
 
 NWC24::ErrorCode NetKDRequestDevice::KDDownload(const u16 entry_index,
                                                 const std::optional<u8> subtask_id)
 {
-  bool success = false;
-  Common::ScopeGuard state_guard([&] {
-    const u64 current_utc = m_time_device->GetAdjustedUTC();
-    if (success)
-    {
-      // Set the next download time to the dl_margin
-      m_dl_list.SetNextDownloadTime(
-          entry_index, current_utc + m_dl_list.GetDownloadMargin(entry_index), subtask_id);
-    }
-    else
-    {
-      // Else set it to the retry margin
-      m_dl_list.SetNextDownloadTime(entry_index, current_utc + m_dl_list.GetRetryTime(entry_index),
-                                    subtask_id);
-    }
+  const NWC24::ErrorCode result = FetchDownload(entry_index, subtask_id);
 
-    // Finally flush
-    m_dl_list.WriteDlList();
-  });
+  // Whatever happened, schedule the next attempt (after the entry's margin on success, after
+  // its retry time on failure) and save the list.
+  const u64 now = m_time_device->GetAdjustedUTC();
+  const u64 wait = result == NWC24::WC24_OK ? m_dl_list.GetDownloadMargin(entry_index) :
+                                              m_dl_list.GetRetryTime(entry_index);
+  m_dl_list.SetNextDownloadTime(entry_index, now + wait, subtask_id);
+  m_dl_list.WriteDlList();
+  return result;
+}
 
-  std::vector<u8> file_data;
-
-  // Content metadata
+NWC24::ErrorCode NetKDRequestDevice::FetchDownload(u16 entry_index, std::optional<u8> subtask_id)
+{
   const std::string content_name = m_dl_list.GetVFFContentName(entry_index, subtask_id);
   std::string url = m_dl_list.GetDownloadURL(entry_index, subtask_id);
 
+  // Content without a name belongs in the mailbox, which is not supported; it counts as done.
   if (content_name.empty())
-  {
-    // If a content has an empty name it is meant to be saved to the mailbox. We do not support
-    // saving mail to the mailbox yet and as a result must skip these entries.
-    success = true;
     return NWC24::WC24_OK;
-  }
 
-  // Reroute to custom server if enabled.
   const std::vector<std::string> parts = SplitString(url, '/');
   if (parts.size() < 3)
   {
-    // Invalid URL
     LogError(ErrorType::KD_Download, NWC24::WC24_ERR_SERVER);
     return NWC24::WC24_ERR_SERVER;
   }
 
-  if (std::optional<std::string> patch =
-          WC24PatchEngine::GetNetworkPatch(parts[2], WC24PatchEngine::IsKD{true}))
+  // parts[2] is the host; a network patch may send it elsewhere.
+  const std::string& host = parts[2];
+  if (const std::optional<std::string> replacement =
+          WC24PatchEngine::GetNetworkPatch(host, WC24PatchEngine::IsKD{true}))
   {
-    const size_t index = url.find(parts[2]);
-    url.replace(index, parts[2].size(), patch.value());
+    url.replace(url.find(host), host.size(), *replacement);
   }
-
-  INFO_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_DOWNLOAD_NOW_EX - NI - URL: {}", url);
-
-  INFO_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_DOWNLOAD_NOW_EX - NI - Name: {}", content_name);
+  INFO_LOG_FMT(IOS_WC24, "KD download: {} -> {}", url, content_name);
 
   const Common::HttpRequest::Response response = m_http.Get(url);
-
   if (!response)
   {
-    const s32 last_response_code = m_http.GetLastResponseCode();
-    ERROR_LOG_FMT(IOS_WC24, "Failed to request data at {}. HTTP Status Code: {}", url,
-                  last_response_code);
-
-    // On a real Wii, KD throws 107305 if it cannot connect to the host. While other issues other
-    // than invalid host may arise, this code is essentially a catch-all for HTTP client failure.
-    LogError(last_response_code ? ErrorType::Server : ErrorType::Client,
-             last_response_code ? last_response_code : NWC24::WC24_ERR_NULL);
+    // An HTTP status is a server error; no status at all (no connection) is a client error.
+    const s32 status = m_http.GetLastResponseCode();
+    ERROR_LOG_FMT(IOS_WC24, "Failed to request data at {}. HTTP Status Code: {}", url, status);
+    if (status != 0)
+      LogError(ErrorType::Server, status);
+    else
+      LogError(ErrorType::Client, NWC24::WC24_ERR_NULL);
     return NWC24::WC24_ERR_SERVER;
   }
 
+  std::vector<u8> content;
   if (!m_dl_list.IsRSASigned(entry_index))
   {
-    // Data that is not signed with an RSA key will not have the WC24 header or 320 bytes before the
-    // actual data. We just have to make sure that the response is not empty.
+    // Unsigned content has no WC24 header.
     if (response->empty())
     {
       ERROR_LOG_FMT(IOS_WC24, "File at {} is empty.", url);
       LogError(ErrorType::KD_Download, NWC24::WC24_ERR_BROKEN);
       return NWC24::WC24_ERR_BROKEN;
     }
-
-    file_data = *response;
+    content = *response;
   }
   else
   {
-    // Check if the filesize is smaller than the header size.
-    if (response->size() < sizeof(NWC24::WC24File))
+    constexpr size_t HEADER_SIZE = sizeof(NWC24::WC24File);
+    if (response->size() < HEADER_SIZE)
     {
       ERROR_LOG_FMT(IOS_WC24, "File at {} is too small to be a valid file.", url);
       LogError(ErrorType::KD_Download, NWC24::WC24_ERR_BROKEN);
       return NWC24::WC24_ERR_BROKEN;
     }
 
-    // Now we read the file
-    NWC24::WC24File wc24_file;
-    std::memcpy(&wc24_file, response->data(), sizeof(NWC24::WC24File));
+    NWC24::WC24File header;
+    std::memcpy(&header, response->data(), HEADER_SIZE);
+    std::vector<u8> payload(response->begin() + HEADER_SIZE, response->end());
 
-    std::vector<u8> temp_buffer(response->begin() + 320, response->end());
-
-    if (m_dl_list.IsEncrypted(entry_index))
+    if (!m_dl_list.IsEncrypted(entry_index))
     {
-      std::optional<NWC24::WC24PubkMod> pubk_mod = m_dl_list.GetWC24PubkMod(entry_index);
-      if (!pubk_mod)
+      content = std::move(payload);
+    }
+    else
+    {
+      // Encrypted with the title's own key (from its wc24pubk.mod) in OFB mode.
+      const std::optional<NWC24::WC24PubkMod> title_keys = m_dl_list.GetWC24PubkMod(entry_index);
+      if (!title_keys)
       {
         ERROR_LOG_FMT(IOS_WC24, "Failed to get wc24pubk.mod for the current task.");
         LogError(ErrorType::KD_Download, NWC24::WC24_ERR_FILE_OPEN);
         return NWC24::WC24_ERR_FILE_OPEN;
       }
-
-      file_data = std::vector<u8>(response->size() - 320);
-
-      Common::AES::CryptOFB(pubk_mod->aes_key, wc24_file.iv, wc24_file.iv, temp_buffer.data(),
-                            file_data.data(), temp_buffer.size());
-    }
-    else
-    {
-      file_data = std::move(temp_buffer);
+      content.resize(payload.size());
+      Common::AES::CryptOFB(title_keys->aes_key, header.iv, header.iv, payload.data(),
+                            content.data(), payload.size());
     }
   }
 
-  NWC24::ErrorCode reply = IOS::HLE::NWC24::WriteToVFF(m_dl_list.GetVFFPath(entry_index),
-                                                       content_name, m_ios.GetFS(), file_data);
-
-  if (reply != NWC24::WC24_OK)
-  {
-    LogError(ErrorType::KD_Download, reply);
-    return reply;
-  }
-
-  success = true;
-  return reply;
+  const NWC24::ErrorCode written =
+      NWC24::WriteToVFF(m_dl_list.GetVFFPath(entry_index), content_name, m_ios.GetFS(), content);
+  if (written != NWC24::WC24_OK)
+    LogError(ErrorType::KD_Download, written);
+  return written;
 }
 
 IPCReply NetKDRequestDevice::HandleNWC24CheckMailNow(const IOCtlRequest& request)
 {
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
-
+  Memory::MemoryManager& memory = GetSystem().GetMemory();
   if (!m_handle_mail)
   {
     LogError(ErrorType::CheckMail, NWC24::WC24_ERR_BROKEN);
@@ -798,11 +738,10 @@ IPCReply NetKDRequestDevice::HandleNWC24CheckMailNow(const IOCtlRequest& request
     return IPCReply(IPC_SUCCESS);
   }
 
-  u32 mail_flag{};
-  u32 interval{};
-  const NWC24::ErrorCode reply = KDCheckMail(&mail_flag, &interval);
-
-  WriteReturnValue(memory, reply, request.buffer_out);
+  u32 mail_flag = 0;
+  u32 interval = 0;
+  const NWC24::ErrorCode result = KDCheckMail(&mail_flag, &interval);
+  WriteReturnValue(memory, result, request.buffer_out);
   memory.Write_U32(mail_flag, request.buffer_out + 4);
   memory.Write_U32(interval, request.buffer_out + 8);
   return IPCReply(IPC_SUCCESS);
@@ -810,413 +749,284 @@ IPCReply NetKDRequestDevice::HandleNWC24CheckMailNow(const IOCtlRequest& request
 
 IPCReply NetKDRequestDevice::HandleNWC24SendMailNow(const IOCtlRequest& request)
 {
-  auto& memory = GetSystem().GetMemory();
-
-  const NWC24::ErrorCode reply = KDSendMail();
-  WriteReturnValue(memory, reply, request.buffer_out);
+  const NWC24::ErrorCode result = KDSendMail();
+  WriteReturnValue(GetSystem().GetMemory(), result, request.buffer_out);
   return IPCReply(IPC_SUCCESS);
 }
 
 IPCReply NetKDRequestDevice::HandleNWC24DownloadNowEx(const IOCtlRequest& request)
 {
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
-
-  if (m_dl_list.IsDisabled() || !m_dl_list.ReadDlList())
-  {
-    // Signal that the DL List is broken.
-    LogError(ErrorType::KD_Download, NWC24::WC24_ERR_BROKEN);
-    WriteReturnValue(memory, NWC24::WC24_ERR_BROKEN, request.buffer_out);
+  Memory::MemoryManager& memory = GetSystem().GetMemory();
+  const auto fail = [&](NWC24::ErrorCode code) {
+    LogError(ErrorType::KD_Download, code);
+    WriteReturnValue(memory, code, request.buffer_out);
     return IPCReply(IPC_SUCCESS);
-  }
+  };
 
+  // The list is reloaded, as the title may just have changed it.
+  if (m_dl_list.IsDisabled() || !m_dl_list.ReadDlList())
+    return fail(NWC24::WC24_ERR_BROKEN);
+
+  // in: flags (u32), entry index (u16 at offset 6), subtask mask (u32).
   const u32 flags = memory.Read_U32(request.buffer_in);
-  // Nintendo converts the entry ID between a u32 and u16
-  // several times, presumably for alignment purposes.
-  // We'll skip past buffer_in+4 and keep the entry index as a u16.
   const u16 entry_index = memory.Read_U16(request.buffer_in + 6);
-  const u32 subtask_bitmask = memory.Read_U32(request.buffer_in + 8);
-
-  INFO_LOG_FMT(IOS_WC24,
-               "NET_KD_REQ: IOCTL_NWC24_DOWNLOAD_NOW_EX - NI - flags: {}, index: {}, bitmask: {}",
-               flags, entry_index, subtask_bitmask);
+  const u32 subtasks = memory.Read_U32(request.buffer_in + 8);
+  INFO_LOG_FMT(IOS_WC24, "KD download now: flags {}, entry {}, subtasks {}", flags, entry_index,
+               subtasks);
 
   if (entry_index >= NWC24::NWC24Dl::MAX_ENTRIES)
-  {
-    ERROR_LOG_FMT(IOS_WC24, "NET_KD_REQ: Entry index out of range.");
-    LogError(ErrorType::KD_Download, NWC24::WC24_ERR_INVALID_VALUE);
-    WriteReturnValue(memory, NWC24::WC24_ERR_INVALID_VALUE, request.buffer_out);
-    return IPCReply(IPC_SUCCESS);
-  }
-
+    return fail(NWC24::WC24_ERR_INVALID_VALUE);
   if (!m_dl_list.DoesEntryExist(entry_index))
-  {
-    ERROR_LOG_FMT(IOS_WC24, "NET_KD_REQ: Requested entry does not exist in download list!");
-    LogError(ErrorType::KD_Download, NWC24::WC24_ERR_NOT_FOUND);
-    WriteReturnValue(memory, NWC24::WC24_ERR_NOT_FOUND, request.buffer_out);
-    return IPCReply(IPC_SUCCESS);
-  }
+    return fail(NWC24::WC24_ERR_NOT_FOUND);
 
-  // While in theory reply will always get initialized by KDDownload, things happen.
-  // Returning NWC24::WC24_ERR_BROKEN or anything that isn't OK will prompt the channel to fix the
-  // entry's data.
-  NWC24::ErrorCode reply = NWC24::WC24_ERR_BROKEN;
-
-  // Determine if we have subtasks to handle
-  if (Common::ExtractBit(flags, 2))
+  NWC24::ErrorCode result;
+  if ((flags & (1u << 2)) == 0)
   {
-    for (u8 subtask_id = 0; subtask_id < 32; subtask_id++)
-    {
-      if (Common::ExtractBit(subtask_bitmask, subtask_id))
-      {
-        reply = KDDownload(entry_index, subtask_id);
-        if (reply != NWC24::WC24_OK)
-        {
-          // An error has occurred, break out and return error.
-          break;
-        }
-      }
-    }
+    result = KDDownload(entry_index, std::nullopt);
   }
   else
   {
-    reply = KDDownload(entry_index, std::nullopt);
+    // Every subtask in the mask, stopping at the first failure. An empty mask leaves the
+    // result at "broken", which makes the title repair the entry.
+    result = NWC24::WC24_ERR_BROKEN;
+    for (u8 subtask = 0; subtask < 32; ++subtask)
+    {
+      if (((subtasks >> subtask) & 1) == 0)
+        continue;
+      result = KDDownload(entry_index, subtask);
+      if (result != NWC24::WC24_OK)
+        break;
+    }
   }
 
-  WriteReturnValue(memory, reply, request.buffer_out);
+  WriteReturnValue(memory, result, request.buffer_out);
   return IPCReply(IPC_SUCCESS);
 }
 
 IPCReply NetKDRequestDevice::HandleRequestRegisterUserId(const IOS::HLE::IOCtlRequest& request)
 {
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
-
-  INFO_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_REQUEST_REGISTER_USER_ID");
-  // Always 0 for some reason, never modified anywhere else
-  memory.Write_U32(0, request.buffer_out + 4);
-
-  if (m_ios.GetIOSC().IsUsingDefaultId())
-  {
-    // If the user is using the default console ID, the below will always throw an error if it needs
-    // to be registered. Due to the high likelihood of multiple users having the same Wii Number,
-    // Nintendo's register endpoint will most likely return a duplicate registration error.
+  Memory::MemoryManager& memory = GetSystem().GetMemory();
+  const auto finish = [&](NWC24::ErrorCode code) {
+    WriteReturnValue(memory, code, request.buffer_out);
+    return IPCReply{IPC_SUCCESS};
+  };
+  const auto fail = [&](ErrorType type, s32 logged, NWC24::ErrorCode code) {
+    WriteReturnValue(memory, code, request.buffer_out);
+    LogError(type, logged);
+    return IPCReply{IPC_SUCCESS};
+  };
+  const auto save_registered = [&] {
     m_config.SetCreationStage(NWC24::NWC24CreationStage::Registered);
     m_config.SetChecksum(m_config.CalculateNwc24ConfigChecksum());
     m_config.WriteConfig();
     m_config.WriteCBK();
+  };
 
-    WriteReturnValue(memory, NWC24::WC24_OK, request.buffer_out);
-    return IPCReply{IPC_SUCCESS};
-  }
+  // The second word of the reply is always 0.
+  memory.Write_U32(0, request.buffer_out + 4);
 
-  // First check if the message config file is in the correct state to handle this.
-  if (m_config.IsRegistered())
+  if (m_ios.GetIOSC().IsUsingDefaultId())
   {
-    WriteReturnValue(memory, NWC24::WC24_ERR_ID_REGISTERED, request.buffer_out);
-    LogError(ErrorType::Account, NWC24::WC24_ERR_ID_REGISTERED);
-    return IPCReply{IPC_SUCCESS};
+    // Everybody with the default console ID has the same Wii Number, which the server would
+    // refuse as already registered, so registration is just assumed.
+    save_registered();
+    return finish(NWC24::WC24_OK);
   }
 
+  if (m_config.IsRegistered())
+    return fail(ErrorType::Account, NWC24::WC24_ERR_ID_REGISTERED, NWC24::WC24_ERR_ID_REGISTERED);
   if (!m_config.IsGenerated())
   {
-    WriteReturnValue(memory, NWC24::WC24_ERR_ID_NOT_GENERATED, request.buffer_out);
-    LogError(ErrorType::Account, NWC24::WC24_ERR_ID_NOT_GENERATED);
-    return IPCReply{IPC_SUCCESS};
+    return fail(ErrorType::Account, NWC24::WC24_ERR_ID_NOT_GENERATED,
+                NWC24::WC24_ERR_ID_NOT_GENERATED);
   }
 
-  // We require the user's serial number.
-  const std::string settings_file_path =
-      Common::GetTitleDataPath(Titles::SYSTEM_MENU) + "/" WII_SETTING;
-  const auto file = m_ios.GetFS()->OpenFile(PID_KD, PID_KD, settings_file_path, FS::Mode::Read);
+  // The request includes the console's serial number from setting.txt.
+  const auto file = m_ios.GetFS()->OpenFile(PID_KD, PID_KD, SettingsFilePath(), FS::Mode::Read);
   if (!file)
-  {
-    WriteReturnValue(memory, NWC24::WC24_ERR_FILE_OPEN, request.buffer_out);
-    LogError(ErrorType::Account, NWC24::WC24_ERR_FILE_OPEN);
-    return IPCReply{IPC_SUCCESS};
-  }
+    return fail(ErrorType::Account, NWC24::WC24_ERR_FILE_OPEN, NWC24::WC24_ERR_FILE_OPEN);
+  Common::SettingsBuffer settings;
+  if (!file->Read(settings.data(), settings.size()))
+    return fail(ErrorType::Account, NWC24::WC24_ERR_FILE_READ, NWC24::WC24_ERR_FILE_READ);
+  const std::string serial = Common::SettingsReader{settings}.GetValue("SERNO");
 
-  Common::SettingsBuffer data;
-  if (!file->Read(data.data(), data.size()))
-  {
-    WriteReturnValue(memory, NWC24::WC24_ERR_FILE_READ, request.buffer_out);
-    LogError(ErrorType::Account, NWC24::WC24_ERR_FILE_READ);
-    return IPCReply{IPC_SUCCESS};
-  }
-
-  const Common::SettingsReader settings_reader{data};
-  const std::string serno = settings_reader.GetValue("SERNO");
-  const std::string form_data = fmt::format("mlid=w{:016}&hdid={}&rgncd={}", m_config.Id(),
-                                            m_ios.GetIOSC().GetDeviceId(), serno);
-  const Common::HttpRequest::Response response = m_http.Post(m_config.GetAccountURL(), form_data);
-
+  const std::string account_url = m_config.GetAccountURL();
+  const Common::HttpRequest::Response response = m_http.Post(
+      account_url, fmt::format("mlid=w{:016}&hdid={}&rgncd={}", m_config.Id(),
+                               m_ios.GetIOSC().GetDeviceId(), serial));
   if (!response)
   {
-    ERROR_LOG_FMT(IOS_WC24,
-                  "NET_KD_REQ: IOCTL_NWC24_REQUEST_REGISTER_USER_ID: Failed to request data at {}.",
-                  m_config.GetAccountURL());
-    WriteReturnValue(memory, NWC24::WC24_ERR_SERVER, request.buffer_out);
-    LogError(ErrorType::Account, NWC24::WC24_ERR_SERVER);
-    return IPCReply{IPC_SUCCESS};
+    ERROR_LOG_FMT(IOS_WC24, "KD registration: no answer from {}", account_url);
+    return fail(ErrorType::Account, NWC24::WC24_ERR_SERVER, NWC24::WC24_ERR_SERVER);
   }
 
-  const std::string response_str = {response->begin(), response->end()};
-  const std::string code = GetValueFromCGIResponse(response_str, "cd");
-  s32 cgi_code{};
-  const bool did_parse = TryParse(code, &cgi_code);
-  if (!did_parse)
+  const std::string body(response->begin(), response->end());
+  s32 cgi_code = 0;
+  if (!TryParse(GetValueFromCGIResponse(body, "cd"), &cgi_code))
   {
-    ERROR_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_REQUEST_REGISTER_USER_ID: Mail server "
-                            "returned invalid CGI response code.");
+    // Logged, then handled as code 0.
+    ERROR_LOG_FMT(IOS_WC24, "KD registration: unreadable result code");
     LogError(ErrorType::Account, NWC24::WC24_ERR_SERVER);
   }
-
   if (cgi_code != 100)
   {
-    ERROR_LOG_FMT(IOS_WC24,
-                  "NET_KD_REQ: IOCTL_NWC24_REQUEST_REGISTER_USER_ID: Mail server returned "
-                  "non-success code: {}",
-                  cgi_code);
-    WriteReturnValue(memory, NWC24::WC24_ERR_SERVER, request.buffer_out);
-    LogError(ErrorType::CGI, cgi_code);
-    return IPCReply{IPC_SUCCESS};
+    ERROR_LOG_FMT(IOS_WC24, "KD registration: server answered with code {}", cgi_code);
+    return fail(ErrorType::CGI, cgi_code, NWC24::WC24_ERR_SERVER);
   }
 
-  const std::string password = GetValueFromCGIResponse(response_str, "passwd");
-  const std::string mail_check_id = GetValueFromCGIResponse(response_str, "mlchkid");
+  const std::string password = GetValueFromCGIResponse(body, "passwd");
+  const std::string mail_check_id = GetValueFromCGIResponse(body, "mlchkid");
   if (mail_check_id.size() != 32)
   {
-    ERROR_LOG_FMT(IOS_WC24,
-                  "NET_KD_REQ: IOCTL_NWC24_REQUEST_REGISTER_USER_ID: Mail server returned invalid "
-                  "mlchkid: {}",
-                  mail_check_id);
-    WriteReturnValue(memory, NWC24::WC24_ERR_SERVER, request.buffer_out);
-    LogError(ErrorType::Account, NWC24::WC24_ERR_SERVER);
-    return IPCReply{IPC_SUCCESS};
+    ERROR_LOG_FMT(IOS_WC24, "KD registration: invalid mail check ID {}", mail_check_id);
+    return fail(ErrorType::Account, NWC24::WC24_ERR_SERVER, NWC24::WC24_ERR_SERVER);
   }
 
-  // Now write to the config.
-  m_config.SetCreationStage(NWC24::NWC24CreationStage::Registered);
   m_config.SetPassword(password);
   m_config.SetMailCheckID(mail_check_id);
-  m_config.SetChecksum(m_config.CalculateNwc24ConfigChecksum());
-  m_config.WriteConfig();
-  m_config.WriteCBK();
+  save_registered();
+  return finish(NWC24::WC24_OK);
+}
 
-  WriteReturnValue(memory, NWC24::WC24_OK, request.buffer_out);
+void NetKDRequestDevice::HandleRequestGeneratedUserId(const IOCtlRequest& request)
+{
+  Memory::MemoryManager& memory = GetSystem().GetMemory();
 
-  return IPCReply{IPC_SUCCESS};
+  if (m_config.IsCreated())
+  {
+    // A new ID needs the area and model from setting.txt.
+    std::string area;
+    std::string model;
+    if (const auto file =
+            m_ios.GetFS()->OpenFile(PID_KD, PID_KD, SettingsFilePath(), FS::Mode::Read))
+    {
+      Common::SettingsBuffer settings;
+      if (file->Read(settings.data(), settings.size()))
+      {
+        const Common::SettingsReader reader{settings};
+        area = reader.GetValue("AREA");
+        model = reader.GetValue("MODEL");
+      }
+    }
+
+    if (area.empty() || model.empty())
+    {
+      LogError(ErrorType::Account, NWC24::WC24_ERR_INVALID_VALUE);
+      WriteReturnValue(memory, NWC24::WC24_ERR_FATAL, request.buffer_out);
+    }
+    else
+    {
+      u64 id = 0;
+      // Only the low 8 bits of the counter are used.
+      const s32 made =
+          MakeWiiNumber(&id, m_ios.GetIOSC().GetDeviceId(), static_cast<u8>(m_config.IdGen()),
+                        ModelFromName(model), AreaToCode(area));
+      m_config.SetId(id);
+      m_config.IncrementIdGen();
+      m_config.SetCreationStage(NWC24::NWC24CreationStage::Generated);
+      m_config.SetChecksum(m_config.CalculateNwc24ConfigChecksum());
+      m_config.WriteConfig();
+      m_config.WriteCBK();
+      WriteReturnValue(memory, made, request.buffer_out);
+    }
+  }
+  else if (m_config.IsGenerated())
+  {
+    WriteReturnValue(memory, NWC24::WC24_ERR_ID_GENERATED, request.buffer_out);
+  }
+  else if (m_config.IsRegistered())
+  {
+    WriteReturnValue(memory, NWC24::WC24_ERR_ID_REGISTERED, request.buffer_out);
+  }
+
+  // out: result, ID (u64), creation stage.
+  memory.Write_U64(m_config.Id(), request.buffer_out + 4);
+  memory.Write_U32(static_cast<u32>(m_config.CreationStage()), request.buffer_out + 12);
 }
 
 std::optional<IPCReply> NetKDRequestDevice::IOCtl(const IOCtlRequest& request)
 {
-  enum : u32
-  {
-    IOCTL_NWC24_SUSPEND_SCHEDULER = 0x01,
-    IOCTL_NWC24_EXEC_TRY_SUSPEND_SCHEDULER = 0x02,
-    IOCTL_NWC24_EXEC_RESUME_SCHEDULER = 0x03,
-    IOCTL_NWC24_KD_GET_TIME_TRIGGERS = 0x04,
-    IOCTL_NWC24_SET_SCHEDULE_SPAN = 0x05,
-    IOCTL_NWC24_STARTUP_SOCKET = 0x06,
-    IOCTL_NWC24_CLEANUP_SOCKET = 0x07,
-    IOCTL_NWC24_LOCK_SOCKET = 0x08,
-    IOCTL_NWC24_UNLOCK_SOCKET = 0x09,
-    IOCTL_NWC24_CHECK_MAIL_NOW = 0x0A,
-    IOCTL_NWC24_SEND_MAIL_NOW = 0x0B,
-    IOCTL_NWC24_RECEIVE_MAIL_NOW = 0x0C,
-    IOCTL_NWC24_SAVE_MAIL_NOW = 0x0D,
-    IOCTL_NWC24_DOWNLOAD_NOW_EX = 0x0E,
-    IOCTL_NWC24_REQUEST_GENERATED_USER_ID = 0x0F,
-    IOCTL_NWC24_REQUEST_REGISTER_USER_ID = 0x10,
-    IOCTL_NWC24_GET_SCHEDULER_STAT = 0x1E,
-    IOCTL_NWC24_SET_FILTER_MODE = 0x1F,
-    IOCTL_NWC24_SET_DEBUG_MODE = 0x20,
-    IOCTL_NWC24_KD_SET_NEXT_WAKEUP = 0x21,
-    IOCTL_NWC24_SET_SCRIPT_MODE = 0x22,
-    IOCTL_NWC24_REQUEST_SHUTDOWN = 0x28,
+  Memory::MemoryManager& memory = GetSystem().GetMemory();
+  // Output buffers must be present and word aligned.
+  const auto bad_out = [&](u32 min_size) {
+    return request.buffer_out == 0 || request.buffer_out % 4 != 0 ||
+           request.buffer_out_size < min_size;
   };
 
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
-  s32 return_value = 0;
   switch (request.request)
   {
+  // Slow requests are answered from the worker thread.
+  case IOCTL_NWC24_REQUEST_REGISTER_USER_ID:
+    return RunLater(request, &NetKDRequestDevice::HandleRequestRegisterUserId);
+  case IOCTL_NWC24_CHECK_MAIL_NOW:
+    return RunLater(request, &NetKDRequestDevice::HandleNWC24CheckMailNow);
+  case IOCTL_NWC24_DOWNLOAD_NOW_EX:
+    return RunLater(request, &NetKDRequestDevice::HandleNWC24DownloadNowEx);
+  case IOCTL_NWC24_SEND_MAIL_NOW:
+    return RunLater(request, &NetKDRequestDevice::HandleNWC24SendMailNow);
+
   case IOCTL_NWC24_SUSPEND_SCHEDULER:
-    // NWC24iResumeForCloseLib  from NWC24SuspendScheduler (Input: none, Output: 32 bytes)
-    INFO_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_SUSPEND_SCHEDULER - NI");
-    WriteReturnValue(memory, 0, request.buffer_out);  // no error
-    break;
+  case IOCTL_NWC24_EXEC_RESUME_SCHEDULER:
+    // The scheduler keeps running; report success.
+    WriteReturnValue(memory, 0, request.buffer_out);
+    return IPCReply(IPC_SUCCESS);
 
-  case IOCTL_NWC24_EXEC_TRY_SUSPEND_SCHEDULER:  // NWC24iResumeForCloseLib
-    INFO_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_EXEC_TRY_SUSPEND_SCHEDULER - NI");
-    break;
-
-  case IOCTL_NWC24_EXEC_RESUME_SCHEDULER:  // NWC24iResumeForCloseLib
-    INFO_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_EXEC_RESUME_SCHEDULER - NI");
-    WriteReturnValue(memory, 0, request.buffer_out);  // no error
-    break;
-
-  case IOCTL_NWC24_STARTUP_SOCKET:  // NWC24iStartupSocket
+  case IOCTL_NWC24_STARTUP_SOCKET:
     WriteReturnValue(memory, 0, request.buffer_out);
     memory.Write_U32(0, request.buffer_out + 4);
-    return_value = 0;
-    INFO_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_STARTUP_SOCKET - NI");
-    break;
+    return IPCReply(IPC_SUCCESS);
 
   case IOCTL_NWC24_CLEANUP_SOCKET:
-    INFO_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_CLEANUP_SOCKET");
     GetEmulationKernel().GetSocketManager()->Clean();
-    break;
+    return IPCReply(IPC_SUCCESS);
 
-  case IOCTL_NWC24_LOCK_SOCKET:  // WiiMenu
-    INFO_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_LOCK_SOCKET - NI");
-    break;
-
+  case IOCTL_NWC24_EXEC_TRY_SUSPEND_SCHEDULER:
+  case IOCTL_NWC24_LOCK_SOCKET:
   case IOCTL_NWC24_UNLOCK_SOCKET:
-    INFO_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_UNLOCK_SOCKET - NI");
-    break;
+  case IOCTL_NWC24_SAVE_MAIL_NOW:
+    INFO_LOG_FMT(IOS_WC24, "KD: ioctl {:#x} accepted without effect", request.request);
+    return IPCReply(IPC_SUCCESS);
 
-  case IOCTL_NWC24_REQUEST_REGISTER_USER_ID:
-    return LaunchAsyncTask(&NetKDRequestDevice::HandleRequestRegisterUserId, request);
-
-  case IOCTL_NWC24_REQUEST_GENERATED_USER_ID:  // (Input: none, Output: 32 bytes)
-    INFO_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_REQUEST_GENERATED_USER_ID");
-    if (m_config.IsCreated())
-    {
-      const std::string settings_file_path =
-          Common::GetTitleDataPath(Titles::SYSTEM_MENU) + "/" WII_SETTING;
-      std::string area, model;
-
-      const auto fs = m_ios.GetFS();
-      if (const auto file = fs->OpenFile(PID_KD, PID_KD, settings_file_path, FS::Mode::Read))
-      {
-        Common::SettingsBuffer data;
-        if (file->Read(data.data(), data.size()))
-        {
-          const Common::SettingsReader settings_reader{data};
-          area = settings_reader.GetValue("AREA");
-          model = settings_reader.GetValue("MODEL");
-        }
-      }
-
-      if (!area.empty() && !model.empty())
-      {
-        const u8 area_code = GetAreaCode(area);
-        const u8 id_ctr = u8(m_config.IdGen());
-        const HardwareModel hardware_model = GetHardwareModel(model);
-
-        const u32 hollywood_id = m_ios.GetIOSC().GetDeviceId();
-        u64 user_id = 0;
-
-        const s32 ret = NWC24MakeUserID(&user_id, hollywood_id, id_ctr, hardware_model, area_code);
-        m_config.SetId(user_id);
-        m_config.IncrementIdGen();
-        m_config.SetCreationStage(NWC24::NWC24CreationStage::Generated);
-        m_config.SetChecksum(m_config.CalculateNwc24ConfigChecksum());
-        m_config.WriteConfig();
-        m_config.WriteCBK();
-
-        WriteReturnValue(memory, ret, request.buffer_out);
-      }
-      else
-      {
-        LogError(ErrorType::Account, NWC24::WC24_ERR_INVALID_VALUE);
-        WriteReturnValue(memory, NWC24::WC24_ERR_FATAL, request.buffer_out);
-      }
-    }
-    else if (m_config.IsGenerated())
-    {
-      WriteReturnValue(memory, NWC24::WC24_ERR_ID_GENERATED, request.buffer_out);
-    }
-    else if (m_config.IsRegistered())
-    {
-      WriteReturnValue(memory, NWC24::WC24_ERR_ID_REGISTERED, request.buffer_out);
-    }
-    memory.Write_U64(m_config.Id(), request.buffer_out + 4);
-    memory.Write_U32(u32(m_config.CreationStage()), request.buffer_out + 0xC);
-    break;
+  case IOCTL_NWC24_REQUEST_GENERATED_USER_ID:
+    HandleRequestGeneratedUserId(request);
+    return IPCReply(IPC_SUCCESS);
 
   case IOCTL_NWC24_GET_SCHEDULER_STAT:
   {
-    if (request.buffer_out == 0 || request.buffer_out % 4 != 0 || request.buffer_out_size < 16)
-    {
-      return_value = IPC_EINVAL;
-      ERROR_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_GET_SCHEDULER_STAT = IPC_EINVAL");
-      break;
-    }
-
-    INFO_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_GET_SCHEDULER_STAT - buffer out size: {}",
-                 request.buffer_out_size);
-
-    // On a real Wii, GetSchedulerStat copies memory containing a list of error codes recorded by
-    // KD among other things.
-    std::lock_guard lg(m_scheduler_buffer_lock);
-    const u32 out_size = std::min(request.buffer_out_size, 256U);
-    memory.CopyToEmu(request.buffer_out, m_scheduler_buffer.data(), out_size);
-    break;
+    if (bad_out(16))
+      return IPCReply(IPC_EINVAL);
+    std::lock_guard lock(m_scheduler_buffer_lock);
+    memory.CopyToEmu(request.buffer_out, m_scheduler_buffer.data(),
+                     std::min(request.buffer_out_size, MAX_STAT_BYTES));
+    return IPCReply(IPC_SUCCESS);
   }
-
-  case IOCTL_NWC24_SAVE_MAIL_NOW:
-    INFO_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_SAVE_MAIL_NOW - NI");
-    break;
-
-  case IOCTL_NWC24_CHECK_MAIL_NOW:
-    return LaunchAsyncTask(&NetKDRequestDevice::HandleNWC24CheckMailNow, request);
-
-  case IOCTL_NWC24_DOWNLOAD_NOW_EX:
-    return LaunchAsyncTask(&NetKDRequestDevice::HandleNWC24DownloadNowEx, request);
-
-  case IOCTL_NWC24_SEND_MAIL_NOW:
-    return LaunchAsyncTask(&NetKDRequestDevice::HandleNWC24SendMailNow, request);
 
   case IOCTL_NWC24_REQUEST_SHUTDOWN:
   {
-    if (request.buffer_in == 0 || request.buffer_in % 4 != 0 || request.buffer_in_size < 8 ||
-        request.buffer_out == 0 || request.buffer_out % 4 != 0 || request.buffer_out_size < 4)
-    {
-      return_value = IPC_EINVAL;
-      ERROR_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_REQUEST_SHUTDOWN = IPC_EINVAL");
-      break;
-    }
-
-    INFO_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_REQUEST_SHUTDOWN");
-    [[maybe_unused]] const u32 event = memory.Read_U32(request.buffer_in);
-    // TODO: Advertise shutdown event
-    // TODO: Shutdown USB keyboard LEDs if event == 3
-    // TODO: IOCTLV_NCD_SETCONFIG
-    // TODO: DHCP related features
-    // SOGetInterfaceOpt(0xfffe,0x4003);  // IP settings
-    // SOGetInterfaceOpt(0xfffe,0xc001);  // DHCP lease time remaining?
-    // SOGetInterfaceOpt(0xfffe,0x1003);  // Error
-    // Call /dev/net/ip/top 0x1b (SOCleanup), it closes all sockets
+    const bool bad_in =
+        request.buffer_in == 0 || request.buffer_in % 4 != 0 || request.buffer_in_size < 8;
+    if (bad_in || bad_out(4))
+      return IPCReply(IPC_EINVAL);
+    // The shutdown kind (first input word) does not matter here: all sockets get closed.
+    [[maybe_unused]] const u32 kind = memory.Read_U32(request.buffer_in);
     GetEmulationKernel().GetSocketManager()->Clean();
-    return_value = IPC_SUCCESS;
-    break;
+    return IPCReply(IPC_SUCCESS);
   }
+
   case IOCTL_NWC24_KD_GET_TIME_TRIGGERS:
   {
-    if (request.buffer_out == 0 || request.buffer_out % 4 != 0 || request.buffer_out_size < 12)
-    {
-      return_value = IPC_EINVAL;
-      ERROR_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_KD_GET_TIME_TRIGGERS = IPC_EINVAL");
-      break;
-    }
-
-    INFO_LOG_FMT(IOS_WC24, "NET_KD_REQ: IOCTL_NWC24_KD_GET_TIME_TRIGGERS");
-
-    std::lock_guard lg(m_scheduler_buffer_lock);
+    if (bad_out(12))
+      return IPCReply(IPC_EINVAL);
+    std::lock_guard lock(m_scheduler_buffer_lock);
     memory.Write_U32(m_mail_span, request.buffer_out + 4);
     memory.Write_U32(m_download_span, request.buffer_out + 8);
     WriteReturnValue(memory, NWC24::WC24_OK, request.buffer_out);
-
-    return_value = IPC_SUCCESS;
-    break;
+    return IPCReply(IPC_SUCCESS);
   }
 
   default:
     request.Log(GetDeviceName(), Common::Log::LogType::IOS_WC24);
+    return IPCReply(IPC_SUCCESS);
   }
-
-  return IPCReply(return_value);
 }
 }  // namespace IOS::HLE
