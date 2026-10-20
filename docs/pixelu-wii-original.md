@@ -99,12 +99,12 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 109453 | 25.5% |
-| Dolphin, untouched | 309700 | 72.2% |
+| Original (RetroPixels) | 115947 | 27.0% |
+| Dolphin, untouched | 302722 | 70.6% |
 | Dolphin, with PixelU changes | 4224 | 1.0% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.3% |
-| **All** | **429140** | 100% |
+| **All** | **428656** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -130,7 +130,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/HW/DSPHLE | 7731 | 0 | Dolphin |
 | Core/Core/HW/DSPLLE | 573 | 0 | Dolphin |
 | Core/Core/HW/DVD | 4942 | 2244 | mixed (45% original) |
-| Core/Core/HW/EXI | 8449 | 0 | Dolphin, 91 lines third-party |
+| Core/Core/HW/EXI | 7965 | 6494 | mixed (82% original), 91 lines third-party |
 | Core/Core/HW/GCMemcard | 3145 | 3145 | original |
 | Core/Core/HW/HSP | 964 | 964 | original |
 | Core/Core/HW/MagCard | 1368 | 0 | Dolphin |
@@ -239,7 +239,7 @@ batch rewrites them.
 | W9 | PowerPC: JIT common and Jit64 | 14792 | 14792 | original |
 | W10 | HW: memory map, MMIO, CPU/PI/MI/VI/AI/DSP interfaces, timers, IPC, CoreTiming | 8491 | 8491 | original |
 | W11 | HW: DVD and GameCube memory cards | 8087 | 5389 | mixed (67% original) |
-| W12 | HW: EXI devices (memory card slots, BBA, mic, modem, IPL) | 8358 | 0 | Dolphin |
+| W12 | HW: EXI devices (memory card slots, BBA, mic, modem, IPL) | 7874 | 6494 | mixed (82% original) |
 | W13 | HW: SI, pads, keyboard, GBA link, HSP, Triforce, MagCard | 10990 | 5487 | mixed (50% original) |
 | W14 | HW: Wii Remote (common, emulated, real) | 11244 | 11244 | original |
 | W15 | DSP: core, interpreter, LLE glue | 10311 | 0 | Dolphin |
@@ -1602,3 +1602,117 @@ Checks
       JitAsmCommon.h, Jit64AsmCommon.h, FPURegCache.h, GPRRegCache.h,
       EmuCodeBlock.h, JitCache.h, BlockCache.h, ConstantPool.h and
       CachedReg.h).
+- W12 log: rewrote 29 of the 35 W12 files, the EXI bus and its devices
+  (6494 lines now, from 6978): `EXI`, `EXI_Channel`, `EXI_Device`,
+  `EXI_DeviceDummy`, `EXI_DeviceIPL`, `EXI_DeviceMemoryCard`,
+  `EXI_DeviceAD16`, `EXI_DeviceGecko`, `EXI_DeviceMic`,
+  `EXI_DeviceEthernet`, `BBA/BuiltIn`, `BBA/IPC`, `BBA/TAPServerBBA`,
+  `BBA/TAPServerConnection`, `BBA/TAP_Win32.cpp`, `BBA/XLINK_KAI_BBA` and
+  `Modem/TAPServerModem`. Every rewritten file starts with the original-code
+  header and has no Dolphin copyright or SPDX line. File names, public
+  declarations, the EXI register layout (channels 0x14 apart: status, DMA
+  address, DMA length, control, immediate data), register and interrupt
+  behaviour, transfer timing, the CoreTiming event names and their
+  registration order, savestate `DoState` order and bytes, the IPL font and
+  SRAM handling and checksums, the RTC, the BBA/tapserver/XLink packet
+  formats and all translatable strings are unchanged.
+  - `EXI`, `EXI_Channel`, `EXI_Device`, `EXI_DeviceDummy`: the expansion
+    interface manager (device creation per slot, hot-swap with the
+    delay between removal and insertion, update and interrupt events, memory card slot
+    changes), the channel registers (chip select, EXT/TC/EXI interrupt bits
+    and masks, immediate and DMA transfers, the readwrite path) and the
+    device base (byte-wise immediate and DMA defaults).
+  - `EXI_DeviceIPL`: the IPL ROM (the user's own dump if present, otherwise
+    the font files from Sys/GC), descrambling, SRAM and RTC reads and writes, UART
+    text output, the ROM/SRAM/RTC address decoding and the savestate.
+  - `EXI_DeviceMemoryCard`: the card command set (ID, status, read array,
+    page program, sector and chip erase, interrupt enable, wake up),
+    transfer timing and completion events, raw image and GCI folder cards,
+    the slot's savestate and folder-card setup.
+  - `EXI_DeviceAD16`, `EXI_DeviceGecko`, `EXI_DeviceMic`: the AD16 debug
+    register; the USB Gecko (one shared TCP listener on 55020 and up, a pump
+    thread per adapter, the LED, identify, send/receive and FIFO-status
+    commands); the microphone (ID, status, buffer commands, cubeb capture
+    into a ring, sample-rate and period handling, button state, interrupts).
+  - `EXI_DeviceEthernet`: the MX98728 controller (register and memory
+    access, the page ring with BP/RWP/RRP/RHBP, receive and transmit
+    descriptors, interrupts, MAC handling), plus the network backends:
+    `BuiltIn` (HLE stack: ARP, DHCP, DNS, UDP, TCP with retransmit and
+    window handling, IGMP echo, UPnP/SSDP, 10 connection slots),
+    `TAPServerConnection`/`TAPServerBBA`/`TAPServerModem` (2-byte
+    little-endian length then the frame), `XLINK_KAI_BBA` (control
+    messages, chat OSD, "e;e;" frames), `IPC` and `TAP_Win32.cpp`.
+  - Deliberate differences (bug fixes, nothing a game sees):
+    - Mic: the ring buffer is 256 bytes, so ring-size field 3 (256 bytes),
+      which overflowed the old 128-byte buffer, works. ID reads past 5 bytes
+      and status reads past 2 bytes return 0 (the old code read out of
+      bounds); status writes past 2 bytes are ignored (the old code wrote
+      out of bounds).
+    - Gecko: the listener is reference counted and stops when the last
+      adapter goes. The old code counted clients instead, so it could stop
+      the listener while another adapter still existed, or keep it running
+      with none. The old race where a new PC connection was handed over
+      before the previous pump thread was stopped is gone. As before, a
+      replacement connection starts with empty FIFOs and bytes queued before
+      the first connection go to it.
+    - Ethernet: controller memory accesses wrap at 0x1000, DMA reads past
+      the end are clamped, zero-length frames are dropped and out-of-range
+      page pointers no longer overflow the receive buffer.
+    - TAPServerConnection: zero-length frames are dropped (the old reader
+      hung). IPC: oversized frames are dropped.
+    - TAP_Win32: an adapter registry subkey that can't be opened is skipped
+      instead of ending the scan.
+    - XLink: short "message"/"chat"/"directmessage" commands no longer
+      throw, the command buffer is clamped and zero-length "e;e;" frames
+      are dropped.
+    - BuiltIn: no null-slot crash when all 10 connection slots are in use; a
+      DHCP request whose first option is 2 bytes is handled; oversized
+      frames are dropped instead of calling std::exit; the stop flag is
+      cleared on Activate, so a reactivated adapter reads again;
+      Deactivate joins the reader before closing sockets; the reader sleeps
+      when the console can't take a frame instead of spinning; queue access
+      in RecvStart/RecvStop is locked.
+    - Log and debug messages that users don't see are reworded.
+  - Checked: old and new code side by side against a mocked system (CoreTiming
+    queue, PI interrupts, 32 MB RAM, MMIO, fake sockets, fake cubeb), using
+    the untouched W10 files from the base on both sides, comparing streamed
+    hashes of registers, interrupts, scheduled events, DMA bytes, files
+    written, packets and savestate bytes:
+    - EXI bus, IPL and memory cards: random register/DMA/immediate traffic
+      on all channels, hot-swaps, SRAM/RTC/UART/ROM access with made-up IPL
+      data, raw and GCI folder cards (read-only commands on folder cards),
+      savestates; 60 seeds x 400 steps (300 x 700 earlier).
+    - Ethernet controller with the tapserver backend: 100 seeds x 400 steps.
+    - BuiltIn HLE stack with a scripted fake network and clock (single-pass
+      reader in harness-only copies of both versions): 60 seeds x 2500
+      steps, plus a new-only stress run filling all 10 slots.
+    - XLink Kai: 150 seeds x 800 steps. Tapserver modem: 12 seeds x 30
+      steps over real local sockets.
+    - Microphone: 80 seeds x 600 steps with scripted capture callbacks.
+    - USB Gecko: one or two adapters, scripted PC connections, data both
+      ways and closes, listen failures; the harness waits for the helper
+      threads before each traced step. 400 seeds x 400 steps. 6 seeds
+      differed once while the machine was heavily loaded; each matched on
+      three reruns, so these were harness timing.
+    Not run: IPC (no cpp-ipc library here), TAP_Win32 (Windows only) and
+    the invalid-MAC regeneration path (needs the config layer).
+  - Compile check: the rewritten .cpp files and their dependents, with clang
+    `-Wall -Wextra -Wconversion -Wsign-compare` on Linux and for
+    x86_64-w64-windows-gnu. The rewritten EXI files are clean; narrowing,
+    sign changes and complement/negation of unsigned values are explicit
+    casts (MSVC /W4 with warnings as errors). The modem warnings are in the
+    unchanged Dolphin files. Other failures match the base tree exactly
+    (missing enet and glslang headers here).
+  - Verbatim audit (`verbatim-audit.py wii 8`): no run is left in any W12
+    .cpp file. The runs left in W12 headers are includes, forward
+    declarations, enums and class declarations other files depend on.
+  - Not rewritten:
+    - `EXI_DeviceModem.cpp/.h`: the GameCube modem adapter. Its behaviour
+      comes from reverse engineering of PSO and the existing code is the
+      only description, so it can't be rewritten clean-room.
+    - `EXI_DeviceBaseboard.cpp/.h`: the Triforce baseboard, undocumented and
+      tied to the unrewritten `AMMediaboard`.
+    - `EXI_DeviceAGP.cpp/.h`: the Advance Game Port (GBA cartridge reader),
+      whose AE command protocol is undocumented.
+    These keep their original headers. `BBA/TAP_Win32.h` is third-party
+    (OpenVPN) and is unchanged.
