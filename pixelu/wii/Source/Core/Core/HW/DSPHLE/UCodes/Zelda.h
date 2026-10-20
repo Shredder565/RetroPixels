@@ -1,13 +1,18 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// HLE of the "DAC" audio ucode family used by Nintendo's first-party games (Zelda, Mario,
+// Pikmin and others, plus the GameCube IPL). Each frame mixes up to 4096 voices into 0x50-sample
+// buffers that live at fixed DSP addresses, which games refer to directly.
 
 #pragma once
 
-#include <algorithm>
 #include <array>
+#include <cstddef>
 
 #include "Common/CommonTypes.h"
 #include "Core/HW/DSPHLE/UCodes/UCodes.h"
+
+class PointerWrap;
 
 namespace Core
 {
@@ -18,185 +23,111 @@ namespace DSP::HLE
 {
 class DSPHLE;
 
-class ZeldaAudioRenderer
+// The mixing engine: voice parameter blocks (VPBs) in RAM, sample sources in ARAM (or in MRAM
+// on the Wii), mixing buffers, reverb and the final output.
+class ZeldaMixer
 {
 public:
-  explicit ZeldaAudioRenderer(Core::System& system);
-  ZeldaAudioRenderer(const ZeldaAudioRenderer&) = delete;
-  ZeldaAudioRenderer(ZeldaAudioRenderer&&) = delete;
-  ZeldaAudioRenderer& operator=(const ZeldaAudioRenderer&) = delete;
-  ZeldaAudioRenderer& operator=(ZeldaAudioRenderer&&) = delete;
-  ~ZeldaAudioRenderer();
-
-  void PrepareFrame();
-  void AddVoice(u16 voice_id);
-  void FinalizeFrame();
+  explicit ZeldaMixer(Core::System& system);
+  ZeldaMixer(const ZeldaMixer&) = delete;
+  ZeldaMixer& operator=(const ZeldaMixer&) = delete;
 
   void SetFlags(u32 flags) { m_flags = flags; }
-  void SetSineTable(std::array<s16, 0x80>&& sine_table) { m_sine_table = sine_table; }
-  void SetConstPatterns(std::array<s16, 0x100>&& patterns) { m_const_patterns = patterns; }
-  void SetResamplingCoeffs(std::array<s16, 0x100>&& coeffs) { m_resampling_coeffs = coeffs; }
-  void SetAfcCoeffs(std::array<s16, 0x20>&& coeffs) { m_afc_coeffs = coeffs; }
-  void SetVPBBaseAddress(u32 addr) { m_vpb_base_addr = addr; }
-  void SetReverbPBBaseAddress(u32 addr) { m_reverb_pb_base_addr = addr; }
-  void SetOutputVolume(u16 volume) { m_output_volume = volume; }
-  void SetOutputLeftBufferAddr(u32 addr) { m_output_lbuf_addr = addr; }
-  void SetOutputRightBufferAddr(u32 addr) { m_output_rbuf_addr = addr; }
-  void SetARAMBaseAddr(u32 addr) { m_aram_base_addr = addr; }
+
+  // Command 01's tables: resampling filter, constant patterns and sine table in one block at
+  // `tables_addr`, the AFC predictor pairs at `afc_addr`.
+  void LoadTables(u32 tables_addr, u32 afc_addr, bool with_sine_table);
+  void SetVoiceBlocksAddress(u32 addr) { m_vpb_base = addr; }
+  void SetReverbBlocksAddress(u32 addr) { m_reverb_base = addr; }
+  void SetARAMBaseAddress(u32 addr) { m_aram_base = addr; }
+  void SetOutput(u32 left_addr, u32 right_addr, u16 volume)
+  {
+    m_out_left = left_addr;
+    m_out_right = right_addr;
+    m_out_volume = volume;
+  }
+
+  // A frame is BeginFrame, the voices, then EndFrame (which uploads the output).
+  void BeginFrame();
+  void RenderVoice(u16 voice_id);
+  void EndFrame();
+
   void DoState(PointerWrap& p);
 
 private:
-  struct VPB;
+  class Voice;
 
-  // See Zelda.cpp for the list of possible flags.
-  u32 m_flags;
+  static constexpr size_t FRAME_SAMPLES = 0x50;
+  using MixBuffer = std::array<s16, FRAME_SAMPLES>;
 
-  // Utility functions for audio operations.
-
-  // Apply volume to a buffer. The volume is a fixed point integer, usually
-  // 1.15 or 4.12 in the DAC UCode.
-  template <size_t N, size_t B>
-  static void ApplyVolumeInPlace(std::array<s16, N>* buf, u16 vol)
+  // The mixing buffers, in savestate order.
+  enum Buffer : size_t
   {
-    for (size_t i = 0; i < N; ++i)
-    {
-      s32 tmp = (u32)(*buf)[i] * (u32)vol;
-      tmp >>= 16 - B;
+    FRONT_LEFT,
+    FRONT_RIGHT,
+    BACK_LEFT,
+    BACK_RIGHT,
+    FRONT_LEFT_REVERB,
+    FRONT_RIGHT_REVERB,
+    BACK_LEFT_REVERB,
+    BACK_RIGHT_REVERB,
+    UNK0_REVERB,
+    UNK1_REVERB,
+    UNK0,
+    UNK1,
+    UNK2,
+    NUM_BUFFERS,
+  };
+  MixBuffer& Buf(Buffer which) { return m_buffers[which]; }
+  // Games name buffers by their DSP address; unknown addresses give nullptr.
+  MixBuffer* FindBuffer(u16 dsp_address);
 
-      (*buf)[i] = (s16)std::clamp(tmp, -0x8000, 0x7FFF);
-    }
-  }
-  template <size_t N>
-  void ApplyVolumeInPlace_1_15(std::array<s16, N>* buf, u16 vol)
-  {
-    ApplyVolumeInPlace<N, 1>(buf, vol);
-  }
-  template <size_t N>
-  void ApplyVolumeInPlace_4_12(std::array<s16, N>* buf, u16 vol)
-  {
-    ApplyVolumeInPlace<N, 4>(buf, vol);
-  }
+  void ReadVoice(u16 voice_id, Voice& voice) const;
+  void WriteVoice(u16 voice_id, Voice& voice);
 
-  // Mixes two buffers together while applying a volume to one of them. The
-  // volume ramps up/down in N steps using the provided step delta value.
-  //
-  // Note: On a real GC, the stepping happens in 32 steps instead. But hey,
-  // we can do better here with very low risk. Why not? :)
-  template <size_t N>
-  static s32 AddBuffersWithVolumeRamp(std::array<s16, N>* dst, const std::array<s16, N>& src,
-                                      s32 vol, s32 step)
-  {
-    if (!vol && !step)
-      return vol;
+  void GenerateInput(Voice& voice, MixBuffer& out);
+  void Interpolate(Voice& voice, const s16* raw, MixBuffer& out) const;
+  void MixDolby(Voice& voice, const MixBuffer& input);
+  void MixChannels(Voice& voice, const MixBuffer& input);
 
-    for (size_t i = 0; i < N; ++i)
-    {
-      (*dst)[i] += ((vol >> 16) * src[i]) >> 16;
-      vol += step;
-    }
+  const u8* ARAMRange(u32 offset, size_t size) const;
+  template <size_t BYTES>
+  void FetchPCM(Voice& voice, s16* dst, u16 count);
+  void FetchAFC(Voice& voice, s16* dst, u16 count);
+  void DecodeAFC(Voice& voice, s16* dst, size_t blocks);
+  void FetchFromMRAM(Voice& voice, s16* dst, u16 count);
 
-    return vol;
-  }
+  // The four reverb blocks: before mixing, the delayed signal is read back from its RAM ring
+  // buffer, filtered and sent; after the frame, the reverb buffer is written to the ring.
+  void ReverbInput();
+  void ReverbOutput();
 
-  // Does not use std::array because it needs to be able to process partial
-  // buffers. Volume is in 1.15 format.
-  static void AddBuffersWithVolume(s16* dst, const s16* src, size_t count, u16 vol)
-  {
-    while (count--)
-    {
-      s32 vol_src = ((s32)*src++ * (s32)vol) >> 15;
-      *dst++ += std::clamp(vol_src, -0x8000, 0x7FFF);
-    }
-  }
+  u32 m_flags = 0;
+  bool m_frame_prepared = false;
 
-  // Whether the frame needs to be prepared or not.
-  bool m_prepared = false;
+  u32 m_out_left = 0;
+  u32 m_out_right = 0;
+  u16 m_out_volume = 0;
 
-  // MRAM addresses where output samples should be copied.
-  u32 m_output_lbuf_addr = 0;
-  u32 m_output_rbuf_addr = 0;
+  std::array<MixBuffer, NUM_BUFFERS> m_buffers{};
 
-  // Output volume applied to buffers before being uploaded to RAM.
-  u16 m_output_volume = 0;
+  // 64 phases of 4 taps.
+  std::array<s16, 0x100> m_resample_coefs{};
+  // Four 0x40-sample patterns; 2 and 3 are regenerated every frame.
+  std::array<s16, 0x100> m_patterns{};
+  // sin(x) over a quarter period, in 1.15, for Dolby panning.
+  std::array<s16, 0x80> m_sine{};
+  // 16 pairs of AFC predictor coefficients.
+  std::array<s16, 0x20> m_afc_coefs{};
 
-  // Mixing buffers.
-  typedef std::array<s16, 0x50> MixingBuffer;
-  MixingBuffer m_buf_front_left{};
-  MixingBuffer m_buf_front_right{};
-  MixingBuffer m_buf_back_left{};
-  MixingBuffer m_buf_back_right{};
-  MixingBuffer m_buf_front_left_reverb{};
-  MixingBuffer m_buf_front_right_reverb{};
-  MixingBuffer m_buf_back_left_reverb{};
-  MixingBuffer m_buf_back_right_reverb{};
-  MixingBuffer m_buf_unk0_reverb{};
-  MixingBuffer m_buf_unk1_reverb{};
-  MixingBuffer m_buf_unk0{};
-  MixingBuffer m_buf_unk1{};
-  MixingBuffer m_buf_unk2{};
+  u32 m_aram_base = 0;
+  u32 m_vpb_base = 0;
+  u32 m_reverb_base = 0;
 
-  // Maps a buffer "ID" (really, their address in the DSP DRAM...) to our
-  // buffers. Returns nullptr if no match is found.
-  MixingBuffer* BufferForID(u16 buffer_id);
-
-  // Base address where VPBs are stored linearly in RAM.
-  u32 m_vpb_base_addr;
-  void FetchVPB(u16 voice_id, VPB* vpb);
-  void StoreVPB(u16 voice_id, VPB* vpb);
-
-  // Sine table transferred from MRAM. Contains sin(x) values for x in
-  // [0.0;pi/4] (sin(x) in [1.0;0.0]), in 1.15 fixed format.
-  std::array<s16, 0x80> m_sine_table{};
-
-  // Const patterns used for some voice samples source. 4 x 0x40 samples.
-  std::array<s16, 0x100> m_const_patterns{};
-
-  // Fills up a buffer with the input samples for a voice, represented by its
-  // VPB.
-  void LoadInputSamples(MixingBuffer* buffer, VPB* vpb);
-
-  // Raw samples (pre-resampling) that need to be generated to result in 0x50
-  // post-resampling input samples.
-  static u16 NeededRawSamplesCount(const VPB& vpb);
-
-  // Resamples raw samples to 0x50 input samples, using the resampling ratio
-  // and current position information from the VPB.
-  void Resample(VPB* vpb, const s16* src, MixingBuffer* dst);
-
-  // Coefficients used for resampling.
-  std::array<s16, 0x100> m_resampling_coeffs{};
-
-  // On the Wii, base address of the MRAM or ExRAM region replacing ARAM.
-  u32 m_aram_base_addr = 0;
-
-  // Downloads PCM encoded samples from ARAM. Handles looping and other
-  // parameters appropriately.
-  template <typename T>
-  void DownloadPCMSamplesFromARAM(s16* dst, VPB* vpb, u16 requested_samples_count);
-
-  // Downloads AFC encoded samples from ARAM and decode them. Handles looping
-  // and other parameters appropriately.
-  void DownloadAFCSamplesFromARAM(s16* dst, VPB* vpb, u16 requested_samples_count);
-  void DecodeAFC(VPB* vpb, s16* dst, size_t block_count);
-  std::array<s16, 0x20> m_afc_coeffs{};
-
-  // Downloads samples from MRAM while handling appropriate length / looping
-  // behavior.
-  void DownloadRawSamplesFromMRAM(s16* dst, VPB* vpb, u16 requested_samples_count);
-
-  static void ApplyLowPassFilter(MixingBuffer* buf, VPB* vpb);
-  static void ApplyBiquadFilter(MixingBuffer* buf, VPB* vpb);
-
-  // Applies the reverb effect to Dolby mixed voices based on a set of
-  // per-buffer parameters. Is called twice: once before frame rendering and
-  // once after.
-  void ApplyReverb(bool post_rendering);
-  std::array<u16, 4> m_reverb_pb_frames_count{};
-  std::array<s16, 8> m_buf_unk0_reverb_last8{};
-  std::array<s16, 8> m_buf_unk1_reverb_last8{};
-  std::array<s16, 8> m_buf_front_left_reverb_last8{};
-  std::array<s16, 8> m_buf_front_right_reverb_last8{};
-  u32 m_reverb_pb_base_addr = 0;
+  // Per reverb block: the current slot in its ring buffer, and the last 8 input samples of the
+  // previous frame (the filter's history).
+  std::array<u16, 4> m_reverb_slot{};
+  std::array<std::array<s16, 8>, 4> m_reverb_tail{};
 
   Core::System& m_system;
 };
@@ -209,91 +140,60 @@ public:
   void Initialize() override;
   void HandleMail(u32 mail) override;
   void Update() override;
-
   void DoState(PointerWrap& p) override;
 
 private:
-  // Flags that alter the behavior of the UCode. See Zelda.cpp for complete
-  // list and explanation.
-  u32 m_flags;
-
-  // Different mail handlers for different protocols.
-  void HandleMailDefault(u32 mail);
-  void HandleMailLight(u32 mail);
-
-  // UCode state machine. The control flow in the Zelda UCode family is quite
-  // complex, using interrupt handlers heavily to handle incoming messages
-  // which, depending on the type, get handled immediately or are queued in a
-  // command buffer. In this implementation, the synchronous+interrupts flow
-  // of the original DSP implementation is rewritten in an asynchronous/coro
-  // + state machine style. It is less readable, but the best we can do given
-  // our constraints.
+  // Where the incoming mail stream is. The real ucode handles mails in interrupt handlers while
+  // it renders; here rendering is resumed from mail handling instead.
   enum class MailState : u32
   {
-    WAITING,
-    RENDERING,
-    WRITING_CMD,
-    HALTED,
+    Idle,
+    Rendering,
+    ReceivingCommand,
+    Halted,
   };
-  MailState m_mail_current_state = MailState::WAITING;
-  u32 m_mail_expected_cmd_mails = 0;
 
-  // Utility function to set the current state. Useful for debugging and
-  // logging as a hook point.
-  void SetMailState(MailState new_state);
+  void OnMail(u32 mail);
+  void OnLightMail(u32 mail);
+  void OnTaskMail(u32 mail);
 
-  // Voice synchronization / audio rendering flow control. When rendering an
-  // audio frame, only voices up to max_voice_id will be rendered until a
-  // sync mail arrives, increasing the value of max_voice_id. Additionally,
-  // these sync mails contain 16 bit values that are used as bitfields to
-  // control voice skipping on a voice per voice level.
-  u32 m_sync_max_voice_id = 0;
-  std::array<u16, 256> m_sync_voice_skip_flags{};
-  bool m_sync_flags_second_half = false;
+  void QueuePush(u32 word);
+  u32 QueuePop();
 
-  // Command buffer (circular queue with r/w indices). Filled by HandleMail
-  // when the state machine is in WRITING_CMD state. Commands get executed
-  // when entering WAITING state and we are not rendering audio.
-  std::array<u32, 64> m_cmd_buffer{};
-  u32 m_read_offset = 0;
-  u32 m_write_offset = 0;
-  u32 m_pending_commands_count = 0;
-  bool m_cmd_can_execute = true;
+  // Runs queued commands until the queue is empty or a command takes over the mail flow.
+  void ExecuteQueued();
+  // Returns false when execution must stop (rendering started, or the ucode halted).
+  bool Execute(u32 header);
 
-  // Reads a 32 bit value from the command buffer. Advances the read pointer.
-  u32 Read32();
+  void SendSync(u16 sync);
+  void SendFrameEnd();
 
-  // Writes a 32 bit value to the command buffer. Advances the write pointer.
-  void Write32(u32 val);
+  bool Rendering() const { return m_frame != m_frames_requested; }
+  void ContinueRendering();
 
-  // Tries to run as many commands as possible until either the command
-  // buffer is empty (pending_commands == 0) or we reached a long lived
-  // command that needs to hijack the mail control flow.
-  //
-  // Might change the current state to indicate crashy commands.
-  void RunPendingCommands();
+  u32 m_flags = 0;
+  MailState m_mail_state = MailState::Idle;
+  u32 m_expected_mails = 0;
 
-  // Sends the two mails from DSP to CPU to ack the command execution.
-  enum class CommandAck : u32
-  {
-    STANDARD,
-    DONE_RENDERING,
-  };
-  void SendCommandAck(CommandAck ack_type, u16 sync_value);
+  // Voices below m_voice_limit may be rendered; the rest wait for the next sync mail. Each bit
+  // of m_voice_mask (MSB first, 16 voices per entry) enables one voice.
+  u32 m_voice_limit = 0;
+  std::array<u16, 256> m_voice_mask{};
+  bool m_sync_second_half = false;
 
-  // Audio rendering flow control state.
-  u32 m_rendering_requested_frames = 0;
-  u16 m_rendering_voices_per_frame = 0;
-  u32 m_rendering_curr_frame = 0;
-  u32 m_rendering_curr_voice = 0;
+  // Command queue: a ring of 64 words.
+  std::array<u32, 64> m_queue{};
+  u32 m_queue_read = 0;
+  u32 m_queue_write = 0;
+  u32 m_queued_commands = 0;
+  // Cleared after a rendering pass until the CPU answers DSP_FRAME_END.
+  bool m_commands_enabled = true;
 
-  bool RenderingInProgress() const
-  {
-    return m_rendering_curr_frame != m_rendering_requested_frames;
-  }
-  void RenderAudio();
+  u32 m_frames_requested = 0;
+  u16 m_voices_per_frame = 0;
+  u32 m_frame = 0;
+  u32 m_voice = 0;
 
-  // Main object handling audio rendering logic and state.
-  ZeldaAudioRenderer m_renderer;
+  ZeldaMixer m_mixer;
 };
 }  // namespace DSP::HLE
