@@ -235,20 +235,16 @@ namespace coreinit
 
 	void InitializeDynLoad()
 	{
-		cafeExportRegister("coreinit", OSDynLoad_SetAllocator, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSDynLoad_SetTLSAllocator, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSDynLoad_GetAllocator, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSDynLoad_GetTLSAllocator, LogType::Placeholder);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("coreinit", fn, LogType::Placeholder)
+		EXPORT_FN(OSDynLoad_SetAllocator); EXPORT_FN(OSDynLoad_SetTLSAllocator); EXPORT_FN(OSDynLoad_GetAllocator);
+		EXPORT_FN(OSDynLoad_GetTLSAllocator);
 
-		cafeExportRegister("coreinit", OSDynLoad_Acquire, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSDynLoad_Release, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSDynLoad_IsModuleLoaded, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSDynLoad_FindExport, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSDynLoad_GetModuleName, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSDynLoad_GetNumberOfRPLs, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSDynLoad_GetRPLInfo, LogType::Placeholder);
+		EXPORT_FN(OSDynLoad_Acquire); EXPORT_FN(OSDynLoad_Release); EXPORT_FN(OSDynLoad_IsModuleLoaded);
+		EXPORT_FN(OSDynLoad_FindExport); EXPORT_FN(OSDynLoad_GetModuleName); EXPORT_FN(OSDynLoad_GetNumberOfRPLs);
+		EXPORT_FN(OSDynLoad_GetRPLInfo);
 
-		cafeExportRegister("coreinit", OSDynLoad_AddNotifyCallback, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSDynLoad_DelNotifyCallback, LogType::Placeholder);
+		EXPORT_FN(OSDynLoad_AddNotifyCallback); EXPORT_FN(OSDynLoad_DelNotifyCallback);
+#undef EXPORT_FN
 	}
 }

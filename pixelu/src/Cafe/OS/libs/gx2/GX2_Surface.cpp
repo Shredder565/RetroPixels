@@ -248,16 +248,12 @@ namespace GX2
 
 	void GX2SurfaceInit()
 	{
-		cafeExportRegister("gx2", GX2GetSurfaceMipPitch, LogType::GX2);
-		cafeExportRegister("gx2", GX2GetSurfaceFormatBits, LogType::GX2);
-		cafeExportRegister("gx2", GX2GetSurfaceMipSliceSize, LogType::GX2);
-		cafeExportRegister("gx2", GX2GetSurfaceSwizzleOffset, LogType::GX2);
-		cafeExportRegister("gx2", GX2GetSurfaceSwizzle, LogType::GX2);
-		cafeExportRegister("gx2", GX2SurfaceIsCompressed, LogType::GX2);
-		cafeExportRegister("gx2", GX2CalcDepthBufferHiZInfo, LogType::GX2);
-		cafeExportRegister("gx2", GX2CalcColorBufferAuxInfo, LogType::GX2);
-		cafeExportRegister("gx2", GX2CalcSurfaceSizeAndAlignment, LogType::GX2);
-		cafeExportRegister("gx2", GX2CheckSurfaceUseVsFormat, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetSurfaceSwizzle, LogType::GX2);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("gx2", fn, LogType::GX2)
+		EXPORT_FN(GX2GetSurfaceMipPitch); EXPORT_FN(GX2GetSurfaceFormatBits); EXPORT_FN(GX2GetSurfaceMipSliceSize);
+		EXPORT_FN(GX2GetSurfaceSwizzleOffset); EXPORT_FN(GX2GetSurfaceSwizzle); EXPORT_FN(GX2SurfaceIsCompressed);
+		EXPORT_FN(GX2CalcDepthBufferHiZInfo); EXPORT_FN(GX2CalcColorBufferAuxInfo); EXPORT_FN(GX2CalcSurfaceSizeAndAlignment);
+		EXPORT_FN(GX2CheckSurfaceUseVsFormat); EXPORT_FN(GX2SetSurfaceSwizzle);
+#undef EXPORT_FN
 	}
 };

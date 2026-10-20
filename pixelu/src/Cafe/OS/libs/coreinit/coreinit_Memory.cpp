@@ -175,23 +175,23 @@ namespace coreinit
 
 	void InitializeMemory()
 	{
-		cafeExportRegister("coreinit", DCInvalidateRange, LogType::Placeholder);
-		cafeExportRegister("coreinit", DCFlushRange, LogType::Placeholder);
-		cafeExportRegister("coreinit", DCFlushRangeNoSync, LogType::Placeholder);
-		cafeExportRegister("coreinit", DCStoreRange, LogType::Placeholder);
-		cafeExportRegister("coreinit", DCStoreRangeNoSync, LogType::Placeholder);
-		cafeExportRegister("coreinit", DCZeroRange, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSIsAddressRangeDCValid, LogType::Placeholder);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("coreinit", fn, LogType::Placeholder)
+		EXPORT_FN(DCInvalidateRange); EXPORT_FN(DCFlushRange); EXPORT_FN(DCFlushRangeNoSync);
+		EXPORT_FN(DCStoreRange); EXPORT_FN(DCStoreRangeNoSync); EXPORT_FN(DCZeroRange);
+		EXPORT_FN(OSIsAddressRangeDCValid);
+#undef EXPORT_FN
 
 		cafeExportRegisterFunc(coreinit_memcpy, "coreinit", "memcpy", LogType::Placeholder);
 		cafeExportRegisterFunc(coreinit_memset, "coreinit", "memset", LogType::Placeholder);
 		cafeExportRegisterFunc(coreinit_memmove, "coreinit", "memmove", LogType::Placeholder);
-		cafeExportRegister("coreinit", OSBlockMove, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSBlockSet, LogType::Placeholder);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("coreinit", fn, LogType::Placeholder)
+		EXPORT_FN(OSBlockMove); EXPORT_FN(OSBlockSet);
 
-		cafeExportRegister("coreinit", OSEffectiveToPhysical, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSMemoryBarrier, LogType::Placeholder);
+		EXPORT_FN(OSEffectiveToPhysical); EXPORT_FN(OSMemoryBarrier);
 
-		cafeExportRegister("coreinit", OSGetMemBound, LogType::Placeholder);
+		EXPORT_FN(OSGetMemBound);
+#undef EXPORT_FN
 	}
 }

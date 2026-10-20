@@ -260,14 +260,12 @@ namespace coreinit
 
 	void InitializeCore()
 	{
-		cafeExportRegister("coreinit", OSGetCoreId, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSGetCoreCount, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSIsDebuggerInitialized, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSIsDebuggerPresent, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSGetConsoleType, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSGetMainCoreId, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSIsMainCore, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSGetStackPointer, LogType::CoreinitThread);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("coreinit", fn, LogType::CoreinitThread)
+		EXPORT_FN(OSGetCoreId); EXPORT_FN(OSGetCoreCount); EXPORT_FN(OSIsDebuggerInitialized);
+		EXPORT_FN(OSIsDebuggerPresent); EXPORT_FN(OSGetConsoleType); EXPORT_FN(OSGetMainCoreId);
+		EXPORT_FN(OSIsMainCore); EXPORT_FN(OSGetStackPointer);
+#undef EXPORT_FN
 
 		osLib_addFunction("coreinit", "ENVGetEnvironmentVariable", export_ENVGetEnvironmentVariable);
 

@@ -1722,113 +1722,65 @@ namespace coreinit
 	{
 		OSInitMutex(&s_fsMutex);
 
-		cafeExportRegister("coreinit", FSInit, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSShutdown, LogType::CoreinitFile);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("coreinit", fn, LogType::CoreinitFile)
+		EXPORT_FN(FSInit); EXPORT_FN(FSShutdown);
 
-		cafeExportRegister("coreinit", FSGetMountSource, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSGetMountSourceNext, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSMount, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSBindMount, LogType::CoreinitFile);
+		EXPORT_FN(FSGetMountSource); EXPORT_FN(FSGetMountSourceNext); EXPORT_FN(FSMount);
+		EXPORT_FN(FSBindMount);
 
-		cafeExportRegister("coreinit", FSAddClientEx, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSAddClient, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSDelClient, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSGetClientNum, LogType::CoreinitFile);
+		EXPORT_FN(FSAddClientEx); EXPORT_FN(FSAddClient); EXPORT_FN(FSDelClient);
+		EXPORT_FN(FSGetClientNum);
 
-		cafeExportRegister("coreinit", FSInitCmdBlock, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSGetAsyncResult, LogType::CoreinitFile);
+		EXPORT_FN(FSInitCmdBlock); EXPORT_FN(FSGetAsyncResult);
 
-		cafeExportRegister("coreinit", FSOpenFileAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSOpenFile, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSOpenFileExAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSOpenFileEx, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSCloseFileAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSCloseFile, LogType::CoreinitFile);
+		EXPORT_FN(FSOpenFileAsync); EXPORT_FN(FSOpenFile); EXPORT_FN(FSOpenFileExAsync);
+		EXPORT_FN(FSOpenFileEx); EXPORT_FN(FSCloseFileAsync); EXPORT_FN(FSCloseFile);
 
-		cafeExportRegister("coreinit", FSReadFileAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSReadFile, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSReadFileWithPosAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSReadFileWithPos, LogType::CoreinitFile);
+		EXPORT_FN(FSReadFileAsync); EXPORT_FN(FSReadFile); EXPORT_FN(FSReadFileWithPosAsync);
+		EXPORT_FN(FSReadFileWithPos);
 
-		cafeExportRegister("coreinit", FSWriteFileAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSWriteFile, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSWriteFileWithPosAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSWriteFileWithPos, LogType::CoreinitFile);
+		EXPORT_FN(FSWriteFileAsync); EXPORT_FN(FSWriteFile); EXPORT_FN(FSWriteFileWithPosAsync);
+		EXPORT_FN(FSWriteFileWithPos);
 
-		cafeExportRegister("coreinit", FSSetPosFileAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSSetPosFile, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSGetPosFileAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSGetPosFile, LogType::CoreinitFile);
+		EXPORT_FN(FSSetPosFileAsync); EXPORT_FN(FSSetPosFile); EXPORT_FN(FSGetPosFileAsync);
+		EXPORT_FN(FSGetPosFile);
 
-		cafeExportRegister("coreinit", FSAppendFileAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSAppendFile, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSTruncateFileAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSTruncateFile, LogType::CoreinitFile);
+		EXPORT_FN(FSAppendFileAsync); EXPORT_FN(FSAppendFile); EXPORT_FN(FSTruncateFileAsync);
+		EXPORT_FN(FSTruncateFile);
 
-		cafeExportRegister("coreinit", FSRenameAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSRename, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSRemoveAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSRemove, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSMakeDirAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSMakeDir, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSChangeDirAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSChangeDir, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSGetCwdAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSGetCwd, LogType::CoreinitFile);
+		EXPORT_FN(FSRenameAsync); EXPORT_FN(FSRename); EXPORT_FN(FSRemoveAsync);
+		EXPORT_FN(FSRemove); EXPORT_FN(FSMakeDirAsync); EXPORT_FN(FSMakeDir);
+		EXPORT_FN(FSChangeDirAsync); EXPORT_FN(FSChangeDir); EXPORT_FN(FSGetCwdAsync);
+		EXPORT_FN(FSGetCwd);
 
-		cafeExportRegister("coreinit", FSIsEofAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSIsEof, LogType::CoreinitFile);
+		EXPORT_FN(FSIsEofAsync); EXPORT_FN(FSIsEof);
 
-		cafeExportRegister("coreinit", FSOpenDirAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSOpenDir, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSReadDirAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSReadDir, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSCloseDirAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSCloseDir, LogType::CoreinitFile);
+		EXPORT_FN(FSOpenDirAsync); EXPORT_FN(FSOpenDir); EXPORT_FN(FSReadDirAsync);
+		EXPORT_FN(FSReadDir); EXPORT_FN(FSCloseDirAsync); EXPORT_FN(FSCloseDir);
 
-		cafeExportRegister("coreinit", FSGetFreeSpaceSizeAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSGetFreeSpaceSize, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSGetStatAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSGetStat, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSGetStatFileAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSGetStatFile, LogType::CoreinitFile);
+		EXPORT_FN(FSGetFreeSpaceSizeAsync); EXPORT_FN(FSGetFreeSpaceSize); EXPORT_FN(FSGetStatAsync);
+		EXPORT_FN(FSGetStat); EXPORT_FN(FSGetStatFileAsync); EXPORT_FN(FSGetStatFile);
 
-		cafeExportRegister("coreinit", FSFlushQuotaAsync, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSFlushQuota, LogType::CoreinitFile);
+		EXPORT_FN(FSFlushQuotaAsync); EXPORT_FN(FSFlushQuota);
 
-		cafeExportRegister("coreinit", FSSetUserData, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSGetUserData, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSGetCurrentCmdBlock, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSGetVolumeState, LogType::CoreinitFile);
-		cafeExportRegister("coreinit", FSGetErrorCodeForViewer, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSGetLastErrorCodeForViewer, LogType::Placeholder);
+		EXPORT_FN(FSSetUserData); EXPORT_FN(FSGetUserData); EXPORT_FN(FSGetCurrentCmdBlock);
+		EXPORT_FN(FSGetVolumeState);
+#undef EXPORT_FN
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("coreinit", fn, LogType::Placeholder)
+		EXPORT_FN(FSGetErrorCodeForViewer); EXPORT_FN(FSGetLastErrorCodeForViewer);
 
-		cafeExportRegister("coreinit", FSAMakeDir, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSAInit, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSAAddClient, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSADelClient, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSARewindDir, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSAGetDeviceInfo, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSARename, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSAChangeDir, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSAMount, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSAUnmount, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSAChangeMode, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSAReadDir, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSAOpenDir, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSACloseDir, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSACloseFile, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSAFlushFile, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSAOpenFileEx, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSAGetStatFile, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSAGetFreeSpaceSize, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSASetPosFile, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSATruncateFile, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSARemove, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSAReadFile, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSAWriteFile, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSAGetStat, LogType::Placeholder);
-		cafeExportRegister("coreinit", FSAGetStatusStr, LogType::Placeholder);
+		EXPORT_FN(FSAMakeDir); EXPORT_FN(FSAInit); EXPORT_FN(FSAAddClient);
+		EXPORT_FN(FSADelClient); EXPORT_FN(FSARewindDir); EXPORT_FN(FSAGetDeviceInfo);
+		EXPORT_FN(FSARename); EXPORT_FN(FSAChangeDir); EXPORT_FN(FSAMount);
+		EXPORT_FN(FSAUnmount); EXPORT_FN(FSAChangeMode); EXPORT_FN(FSAReadDir);
+		EXPORT_FN(FSAOpenDir); EXPORT_FN(FSACloseDir); EXPORT_FN(FSACloseFile);
+		EXPORT_FN(FSAFlushFile); EXPORT_FN(FSAOpenFileEx); EXPORT_FN(FSAGetStatFile);
+		EXPORT_FN(FSAGetFreeSpaceSize); EXPORT_FN(FSASetPosFile); EXPORT_FN(FSATruncateFile);
+		EXPORT_FN(FSARemove); EXPORT_FN(FSAReadFile); EXPORT_FN(FSAWriteFile);
+		EXPORT_FN(FSAGetStat); EXPORT_FN(FSAGetStatusStr);
+#undef EXPORT_FN
 
 		s_clientList = nullptr;
 	}

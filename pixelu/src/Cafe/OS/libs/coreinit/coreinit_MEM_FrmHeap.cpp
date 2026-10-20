@@ -199,14 +199,11 @@ namespace coreinit
 
 	void InitializeMEMFrmHeap()
 	{
-		cafeExportRegister("coreinit", MEMCreateFrmHeapEx, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMDestroyFrmHeap, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMGetAllocatableSizeForFrmHeapEx, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMiGetFreeStartForFrmHeap, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMiGetFreeEndForFrmHeap, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMAllocFromFrmHeapEx, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMFreeToFrmHeap, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMRecordStateForFrmHeap, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMFreeByStateToFrmHeap, LogType::CoreinitMem);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("coreinit", fn, LogType::CoreinitMem)
+		EXPORT_FN(MEMCreateFrmHeapEx); EXPORT_FN(MEMDestroyFrmHeap); EXPORT_FN(MEMGetAllocatableSizeForFrmHeapEx);
+		EXPORT_FN(MEMiGetFreeStartForFrmHeap); EXPORT_FN(MEMiGetFreeEndForFrmHeap); EXPORT_FN(MEMAllocFromFrmHeapEx);
+		EXPORT_FN(MEMFreeToFrmHeap); EXPORT_FN(MEMRecordStateForFrmHeap); EXPORT_FN(MEMFreeByStateToFrmHeap);
+#undef EXPORT_FN
 	}
 }

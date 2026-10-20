@@ -100,18 +100,14 @@ namespace coreinit
 
 	void InitializeAtomic()
 	{
-		cafeExportRegister("coreinit", OSSwapAtomic, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSCompareAndSwapAtomic, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSCompareAndSwapAtomicEx, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSAddAtomic, LogType::Placeholder);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("coreinit", fn, LogType::Placeholder)
+		EXPORT_FN(OSSwapAtomic); EXPORT_FN(OSCompareAndSwapAtomic); EXPORT_FN(OSCompareAndSwapAtomicEx);
+		EXPORT_FN(OSAddAtomic);
 
-		cafeExportRegister("coreinit", OSSetAtomic64, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSGetAtomic64, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSSwapAtomic64, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSAddAtomic64, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSAndAtomic64, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSOrAtomic64, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSCompareAndSwapAtomic64, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSCompareAndSwapAtomicEx64, LogType::Placeholder);
+		EXPORT_FN(OSSetAtomic64); EXPORT_FN(OSGetAtomic64); EXPORT_FN(OSSwapAtomic64);
+		EXPORT_FN(OSAddAtomic64); EXPORT_FN(OSAndAtomic64); EXPORT_FN(OSOrAtomic64);
+		EXPORT_FN(OSCompareAndSwapAtomic64); EXPORT_FN(OSCompareAndSwapAtomicEx64);
+#undef EXPORT_FN
 	}
 }

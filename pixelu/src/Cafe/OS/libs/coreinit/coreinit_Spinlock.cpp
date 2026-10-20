@@ -194,15 +194,13 @@ namespace coreinit
 
 	void InitializeSpinlock()
 	{
-		cafeExportRegister("coreinit", OSInitSpinLock, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSAcquireSpinLock, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSTryAcquireSpinLock, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSTryAcquireSpinLockWithTimeout, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSReleaseSpinLock, LogType::Placeholder);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("coreinit", fn, LogType::Placeholder)
+		EXPORT_FN(OSInitSpinLock); EXPORT_FN(OSAcquireSpinLock); EXPORT_FN(OSTryAcquireSpinLock);
+		EXPORT_FN(OSTryAcquireSpinLockWithTimeout); EXPORT_FN(OSReleaseSpinLock);
 
-		cafeExportRegister("coreinit", OSUninterruptibleSpinLock_Acquire, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSUninterruptibleSpinLock_TryAcquire, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSUninterruptibleSpinLock_TryAcquireWithTimeout, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSUninterruptibleSpinLock_Release, LogType::Placeholder);
+		EXPORT_FN(OSUninterruptibleSpinLock_Acquire); EXPORT_FN(OSUninterruptibleSpinLock_TryAcquire);
+		EXPORT_FN(OSUninterruptibleSpinLock_TryAcquireWithTimeout); EXPORT_FN(OSUninterruptibleSpinLock_Release);
+#undef EXPORT_FN
 	}
 }

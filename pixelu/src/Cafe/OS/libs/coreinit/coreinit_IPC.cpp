@@ -410,12 +410,11 @@ namespace coreinit
 
 	void MapIPCExports()
 	{
-		cafeExportRegister("coreinit", IOS_Open, LogType::PPC_IPC);
-		cafeExportRegister("coreinit", IOS_Close, LogType::PPC_IPC);
-		cafeExportRegister("coreinit", IOS_Ioctl, LogType::PPC_IPC);
-		cafeExportRegister("coreinit", IOS_IoctlAsync, LogType::PPC_IPC);
-		cafeExportRegister("coreinit", IOS_Ioctlv, LogType::PPC_IPC);
-		cafeExportRegister("coreinit", IOS_IoctlvAsync, LogType::PPC_IPC);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("coreinit", fn, LogType::PPC_IPC)
+		EXPORT_FN(IOS_Open); EXPORT_FN(IOS_Close); EXPORT_FN(IOS_Ioctl);
+		EXPORT_FN(IOS_IoctlAsync); EXPORT_FN(IOS_Ioctlv); EXPORT_FN(IOS_IoctlvAsync);
+#undef EXPORT_FN
 	}
 
 	void InitializeIPC()

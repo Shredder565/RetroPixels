@@ -1383,47 +1383,31 @@ namespace coreinit
 
 	void MapThreadExports()
 	{
-		cafeExportRegister("coreinit", OSCreateThreadType, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSCreateThread, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", __OSCreateThreadType, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSExitThread, LogType::CoreinitThread);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("coreinit", fn, LogType::CoreinitThread)
+		EXPORT_FN(OSCreateThreadType); EXPORT_FN(OSCreateThread); EXPORT_FN(__OSCreateThreadType);
+		EXPORT_FN(OSExitThread);
 
-		cafeExportRegister("coreinit", OSGetCurrentThread, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSSetThreadSpecific, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSGetThreadSpecific, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSSetThreadName, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSGetThreadName, LogType::CoreinitThread);
+		EXPORT_FN(OSGetCurrentThread); EXPORT_FN(OSSetThreadSpecific); EXPORT_FN(OSGetThreadSpecific);
+		EXPORT_FN(OSSetThreadName); EXPORT_FN(OSGetThreadName);
 
-		cafeExportRegister("coreinit", OSRunThread, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSDetachThread, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSJoinThread, LogType::CoreinitThread);
+		EXPORT_FN(OSRunThread); EXPORT_FN(OSDetachThread); EXPORT_FN(OSJoinThread);
 
-		cafeExportRegister("coreinit", OSResumeThread, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSContinueThread, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSSuspendThread, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", __OSSuspendThreadNolock, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSSleepThread, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSWakeupThread, LogType::CoreinitThread);
+		EXPORT_FN(OSResumeThread); EXPORT_FN(OSContinueThread); EXPORT_FN(OSSuspendThread);
+		EXPORT_FN(__OSSuspendThreadNolock); EXPORT_FN(OSSleepThread); EXPORT_FN(OSWakeupThread);
 
-		cafeExportRegister("coreinit", OSYieldThread, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSSleepTicks, LogType::CoreinitThread);
+		EXPORT_FN(OSYieldThread); EXPORT_FN(OSSleepTicks);
 
-		cafeExportRegister("coreinit", OSSetThreadDeallocator, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSSetThreadCleanupCallback, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSSetThreadPriority, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSGetThreadPriority, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSSetThreadAffinity, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSGetThreadAffinity, LogType::CoreinitThread);
+		EXPORT_FN(OSSetThreadDeallocator); EXPORT_FN(OSSetThreadCleanupCallback); EXPORT_FN(OSSetThreadPriority);
+		EXPORT_FN(OSGetThreadPriority); EXPORT_FN(OSSetThreadAffinity); EXPORT_FN(OSGetThreadAffinity);
 
-		cafeExportRegister("coreinit", OSIsThreadTerminated, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSIsThreadSuspended, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSCancelThread, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSTestThreadCancel, LogType::CoreinitThread);
+		EXPORT_FN(OSIsThreadTerminated); EXPORT_FN(OSIsThreadSuspended); EXPORT_FN(OSCancelThread);
+		EXPORT_FN(OSTestThreadCancel);
 
-		cafeExportRegister("coreinit", OSGetDefaultThread, LogType::CoreinitThread);
+		EXPORT_FN(OSGetDefaultThread);
 
-		cafeExportRegister("coreinit", OSInitThreadQueue, LogType::CoreinitThread);
-		cafeExportRegister("coreinit", OSInitThreadQueueEx, LogType::CoreinitThread);
+		EXPORT_FN(OSInitThreadQueue); EXPORT_FN(OSInitThreadQueueEx);
+#undef EXPORT_FN
 	}
 
 	void InitializeThread()

@@ -777,20 +777,17 @@ namespace coreinit
 		s_pendingReleaseForeground = false;
 		s_pendingAcquireForeground = false;
 
-		cafeExportRegister("coreinit", __os_snprintf, LogType::Placeholder);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("coreinit", fn, LogType::Placeholder)
+		EXPORT_FN(__os_snprintf);
 
-		cafeExportRegister("coreinit", COSVReport, LogType::Placeholder);
-		cafeExportRegister("coreinit", COSWarn, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSReport, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSVReport, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSLogPrintf, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSConsoleWrite, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSFatal, LogType::Placeholder);
+		EXPORT_FN(COSVReport); EXPORT_FN(COSWarn); EXPORT_FN(OSReport);
+		EXPORT_FN(OSVReport); EXPORT_FN(OSLogPrintf); EXPORT_FN(OSConsoleWrite);
+		EXPORT_FN(OSFatal);
 
-		cafeExportRegister("coreinit", OSGetPFID, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSGetUPID, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSGetTitleID, LogType::Placeholder);
-		cafeExportRegister("coreinit", __OSGetProcessSDKVersion, LogType::Placeholder);
+		EXPORT_FN(OSGetPFID); EXPORT_FN(OSGetUPID); EXPORT_FN(OSGetTitleID);
+		EXPORT_FN(__OSGetProcessSDKVersion);
+#undef EXPORT_FN
 
 		// the HOME menu starts out allowed; some titles (Disney Infinity 2.0) query erreula state
 		// through it before setting erreula up and crash if it is off
@@ -798,13 +795,14 @@ namespace coreinit
 		cafeExportRegister("coreinit", OSIsHomeButtonMenuEnabled, LogType::CoreinitThread);
 		cafeExportRegister("coreinit", OSEnableHomeButtonMenu, LogType::CoreinitThread);
 
-		cafeExportRegister("coreinit", OSLaunchTitleByPathl, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSRestartGame, LogType::Placeholder);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("coreinit", fn, LogType::Placeholder)
+		EXPORT_FN(OSLaunchTitleByPathl); EXPORT_FN(OSRestartGame);
 
-		cafeExportRegister("coreinit", OSReleaseForeground, LogType::Placeholder);
+		EXPORT_FN(OSReleaseForeground);
 
-		cafeExportRegister("coreinit", OSDriver_Register, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSDriver_Deregister, LogType::Placeholder);
+		EXPORT_FN(OSDriver_Register); EXPORT_FN(OSDriver_Deregister);
+#undef EXPORT_FN
 
 		cafeExportRegisterFunc(coreinit_exit, "coreinit", "exit", LogType::CoreinitThread);
 		cafeExportRegister("coreinit", __PPCExit, LogType::CoreinitThread);

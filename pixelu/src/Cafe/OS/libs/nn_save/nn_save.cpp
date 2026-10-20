@@ -488,50 +488,29 @@ namespace nn::save
 
 		void RPLMapped() override
 		{
-			cafeExportRegister("nn_save", SAVEInit, LogType::Save);
-			cafeExportRegister("nn_save", SAVEInitSaveDir, LogType::Save);
-			cafeExportRegister("nn_save", SAVEGetSharedDataTitlePath, LogType::Save);
-			cafeExportRegister("nn_save", SAVEGetSharedSaveDataPath, LogType::Save);
+			// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("nn_save", fn, LogType::Save)
+			EXPORT_FN(SAVEInit); EXPORT_FN(SAVEInitSaveDir); EXPORT_FN(SAVEGetSharedDataTitlePath);
+			EXPORT_FN(SAVEGetSharedSaveDataPath);
 
-			cafeExportRegister("nn_save", SAVEOpenFile, LogType::Save);
-			cafeExportRegister("nn_save", SAVEOpenFileAsync, LogType::Save);
-			cafeExportRegister("nn_save", SAVEOpenDir, LogType::Save);
-			cafeExportRegister("nn_save", SAVEOpenDirAsync, LogType::Save);
-			cafeExportRegister("nn_save", SAVEGetStat, LogType::Save);
-			cafeExportRegister("nn_save", SAVEGetStatAsync, LogType::Save);
-			cafeExportRegister("nn_save", SAVEGetFreeSpaceSize, LogType::Save);
-			cafeExportRegister("nn_save", SAVEGetFreeSpaceSizeAsync, LogType::Save);
-			cafeExportRegister("nn_save", SAVEMakeDir, LogType::Save);
-			cafeExportRegister("nn_save", SAVEMakeDirAsync, LogType::Save);
-			cafeExportRegister("nn_save", SAVERemove, LogType::Save);
-			cafeExportRegister("nn_save", SAVERemoveAsync, LogType::Save);
-			cafeExportRegister("nn_save", SAVEChangeDir, LogType::Save);
-			cafeExportRegister("nn_save", SAVEChangeDirAsync, LogType::Save);
-			cafeExportRegister("nn_save", SAVERename, LogType::Save);
-			cafeExportRegister("nn_save", SAVERenameAsync, LogType::Save);
-			cafeExportRegister("nn_save", SAVEFlushQuota, LogType::Save);
-			cafeExportRegister("nn_save", SAVEFlushQuotaAsync, LogType::Save);
+			EXPORT_FN(SAVEOpenFile); EXPORT_FN(SAVEOpenFileAsync); EXPORT_FN(SAVEOpenDir);
+			EXPORT_FN(SAVEOpenDirAsync); EXPORT_FN(SAVEGetStat); EXPORT_FN(SAVEGetStatAsync);
+			EXPORT_FN(SAVEGetFreeSpaceSize); EXPORT_FN(SAVEGetFreeSpaceSizeAsync); EXPORT_FN(SAVEMakeDir);
+			EXPORT_FN(SAVEMakeDirAsync); EXPORT_FN(SAVERemove); EXPORT_FN(SAVERemoveAsync);
+			EXPORT_FN(SAVEChangeDir); EXPORT_FN(SAVEChangeDirAsync); EXPORT_FN(SAVERename);
+			EXPORT_FN(SAVERenameAsync); EXPORT_FN(SAVEFlushQuota); EXPORT_FN(SAVEFlushQuotaAsync);
 
-			cafeExportRegister("nn_save", SAVEOpenFileOtherApplication, LogType::Save);
-			cafeExportRegister("nn_save", SAVEOpenFileOtherApplicationAsync, LogType::Save);
-			cafeExportRegister("nn_save", SAVEOpenFileOtherNormalApplication, LogType::Save);
-			cafeExportRegister("nn_save", SAVEOpenFileOtherNormalApplicationAsync, LogType::Save);
-			cafeExportRegister("nn_save", SAVEOpenFileOtherNormalApplicationVariation, LogType::Save);
-			cafeExportRegister("nn_save", SAVEOpenFileOtherNormalApplicationVariationAsync, LogType::Save);
-			cafeExportRegister("nn_save", SAVEOpenDirOtherApplication, LogType::Save);
-			cafeExportRegister("nn_save", SAVEOpenDirOtherApplicationAsync, LogType::Save);
-			cafeExportRegister("nn_save", SAVEOpenDirOtherNormalApplication, LogType::Save);
-			cafeExportRegister("nn_save", SAVEOpenDirOtherNormalApplicationAsync, LogType::Save);
-			cafeExportRegister("nn_save", SAVEOpenDirOtherNormalApplicationVariation, LogType::Save);
-			cafeExportRegister("nn_save", SAVEOpenDirOtherNormalApplicationVariationAsync, LogType::Save);
-			cafeExportRegister("nn_save", SAVEGetStatOtherApplication, LogType::Save);
-			cafeExportRegister("nn_save", SAVEGetStatOtherApplicationAsync, LogType::Save);
-			cafeExportRegister("nn_save", SAVEGetStatOtherNormalApplication, LogType::Save);
-			cafeExportRegister("nn_save", SAVEGetStatOtherNormalApplicationAsync, LogType::Save);
-			cafeExportRegister("nn_save", SAVEGetStatOtherNormalApplicationVariation, LogType::Save);
-			cafeExportRegister("nn_save", SAVEGetStatOtherNormalApplicationVariationAsync, LogType::Save);
-			cafeExportRegister("nn_save", SAVEGetStatOtherDemoApplicationAsync, LogType::Save);
-			cafeExportRegister("nn_save", SAVEGetStatOtherDemoApplicationVariationAsync, LogType::Save);
+			EXPORT_FN(SAVEOpenFileOtherApplication); EXPORT_FN(SAVEOpenFileOtherApplicationAsync);
+			EXPORT_FN(SAVEOpenFileOtherNormalApplication); EXPORT_FN(SAVEOpenFileOtherNormalApplicationAsync);
+			EXPORT_FN(SAVEOpenFileOtherNormalApplicationVariation); EXPORT_FN(SAVEOpenFileOtherNormalApplicationVariationAsync);
+			EXPORT_FN(SAVEOpenDirOtherApplication); EXPORT_FN(SAVEOpenDirOtherApplicationAsync);
+			EXPORT_FN(SAVEOpenDirOtherNormalApplication); EXPORT_FN(SAVEOpenDirOtherNormalApplicationAsync);
+			EXPORT_FN(SAVEOpenDirOtherNormalApplicationVariation); EXPORT_FN(SAVEOpenDirOtherNormalApplicationVariationAsync);
+			EXPORT_FN(SAVEGetStatOtherApplication); EXPORT_FN(SAVEGetStatOtherApplicationAsync);
+			EXPORT_FN(SAVEGetStatOtherNormalApplication); EXPORT_FN(SAVEGetStatOtherNormalApplicationAsync);
+			EXPORT_FN(SAVEGetStatOtherNormalApplicationVariation); EXPORT_FN(SAVEGetStatOtherNormalApplicationVariationAsync);
+			EXPORT_FN(SAVEGetStatOtherDemoApplicationAsync); EXPORT_FN(SAVEGetStatOtherDemoApplicationVariationAsync);
+#undef EXPORT_FN
 		}
 
 		void rpl_entry(uint32 moduleHandle, coreinit::RplEntryReason reason) override

@@ -145,13 +145,11 @@ namespace coreinit
 
 	void InitializeOSScreen()
 	{
-		cafeExportRegister("coreinit", OSScreenInit, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSScreenGetBufferSizeEx, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSScreenSetBufferEx, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSScreenEnableEx, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSScreenClearBufferEx, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSScreenFlipBuffersEx, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSScreenPutPixelEx, LogType::Placeholder);
-		cafeExportRegister("coreinit", OSScreenPutFontEx, LogType::Placeholder);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("coreinit", fn, LogType::Placeholder)
+		EXPORT_FN(OSScreenInit); EXPORT_FN(OSScreenGetBufferSizeEx); EXPORT_FN(OSScreenSetBufferEx);
+		EXPORT_FN(OSScreenEnableEx); EXPORT_FN(OSScreenClearBufferEx); EXPORT_FN(OSScreenFlipBuffersEx);
+		EXPORT_FN(OSScreenPutPixelEx); EXPORT_FN(OSScreenPutFontEx);
+#undef EXPORT_FN
 	}
 }

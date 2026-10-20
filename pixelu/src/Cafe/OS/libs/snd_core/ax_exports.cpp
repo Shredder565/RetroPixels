@@ -270,20 +270,14 @@ namespace snd_core
 				cafeExportRegisterFunc(AXInit<true>, "sndcore2", "AXInit", LogType::SoundAPI);
 				cafeExportRegisterFunc(AXInitEx<true>, "sndcore2", "AXInitEx", LogType::SoundAPI);
 				AX_REGISTER_COMMON("sndcore2");
-				cafeExportRegister("sndcore2", AXAcquireMultiVoice, LogType::SoundAPI);
-				cafeExportRegister("sndcore2", AXFreeMultiVoice, LogType::SoundAPI);
-				cafeExportRegister("sndcore2", AXGetMultiVoiceReformatBufferSize, LogType::SoundAPI);
-				cafeExportRegister("sndcore2", AXSetMultiVoiceType, LogType::SoundAPI);
-				cafeExportRegister("sndcore2", AXSetMultiVoiceAdpcm, LogType::SoundAPI);
-				cafeExportRegister("sndcore2", AXSetMultiVoiceSrcType, LogType::SoundAPI);
-				cafeExportRegister("sndcore2", AXSetMultiVoiceOffsets, LogType::SoundAPI);
-				cafeExportRegister("sndcore2", AXSetMultiVoiceVe, LogType::SoundAPI);
-				cafeExportRegister("sndcore2", AXSetMultiVoiceSrcRatio, LogType::SoundAPI);
-				cafeExportRegister("sndcore2", AXSetMultiVoiceSrc, LogType::SoundAPI);
-				cafeExportRegister("sndcore2", AXSetMultiVoiceLoop, LogType::SoundAPI);
-				cafeExportRegister("sndcore2", AXSetMultiVoiceState, LogType::SoundAPI);
-				cafeExportRegister("sndcore2", AXSetMultiVoiceAdpcmLoop, LogType::SoundAPI);
-				cafeExportRegister("sndcore2", AXIsMultiVoiceRunning, LogType::SoundAPI);
+				// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("sndcore2", fn, LogType::SoundAPI)
+				EXPORT_FN(AXAcquireMultiVoice); EXPORT_FN(AXFreeMultiVoice); EXPORT_FN(AXGetMultiVoiceReformatBufferSize);
+				EXPORT_FN(AXSetMultiVoiceType); EXPORT_FN(AXSetMultiVoiceAdpcm); EXPORT_FN(AXSetMultiVoiceSrcType);
+				EXPORT_FN(AXSetMultiVoiceOffsets); EXPORT_FN(AXSetMultiVoiceVe); EXPORT_FN(AXSetMultiVoiceSrcRatio);
+				EXPORT_FN(AXSetMultiVoiceSrc); EXPORT_FN(AXSetMultiVoiceLoop); EXPORT_FN(AXSetMultiVoiceState);
+				EXPORT_FN(AXSetMultiVoiceAdpcmLoop); EXPORT_FN(AXIsMultiVoiceRunning);
+#undef EXPORT_FN
 			}
 
 			void rpl_entry(uint32 moduleHandle, coreinit::RplEntryReason reason) override { ModuleEvent(reason); }

@@ -287,28 +287,20 @@ namespace coreinit
 
 	void InitializeGHS()
 	{
-		cafeExportRegister("coreinit", __ghs_flock_create, LogType::Placeholder);
-		cafeExportRegister("coreinit", __ghs_flock_destroy, LogType::Placeholder);
-		cafeExportRegister("coreinit", __ghs_flock_ptr, LogType::Placeholder);
-		cafeExportRegister("coreinit", __ghs_flock_file, LogType::Placeholder);
-		cafeExportRegister("coreinit", __ghs_funlock_file, LogType::Placeholder);
-		cafeExportRegister("coreinit", __ghsLock, LogType::Placeholder);
-		cafeExportRegister("coreinit", __ghsUnlock, LogType::Placeholder);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("coreinit", fn, LogType::Placeholder)
+		EXPORT_FN(__ghs_flock_create); EXPORT_FN(__ghs_flock_destroy); EXPORT_FN(__ghs_flock_ptr);
+		EXPORT_FN(__ghs_flock_file); EXPORT_FN(__ghs_funlock_file); EXPORT_FN(__ghsLock);
+		EXPORT_FN(__ghsUnlock);
 
-		cafeExportRegister("coreinit", __get_eh_init_block, LogType::Placeholder);
-		cafeExportRegister("coreinit", __get_eh_globals, LogType::Placeholder);
-		cafeExportRegister("coreinit", __get_eh_mem_manage, LogType::Placeholder);
-		cafeExportRegister("coreinit", __gh_errno_ptr, LogType::Placeholder);
-		cafeExportRegister("coreinit", __gh_set_errno, LogType::Placeholder);
-		cafeExportRegister("coreinit", __gh_get_errno, LogType::Placeholder);
-		cafeExportRegister("coreinit", __get_eh_store_globals, LogType::Placeholder);
-		cafeExportRegister("coreinit", __get_eh_store_globals_tdeh, LogType::Placeholder);
+		EXPORT_FN(__get_eh_init_block); EXPORT_FN(__get_eh_globals); EXPORT_FN(__get_eh_mem_manage);
+		EXPORT_FN(__gh_errno_ptr); EXPORT_FN(__gh_set_errno); EXPORT_FN(__gh_get_errno);
+		EXPORT_FN(__get_eh_store_globals); EXPORT_FN(__get_eh_store_globals_tdeh);
 
-		cafeExportRegister("coreinit", __ghs_mtx_init, LogType::Placeholder);
-		cafeExportRegister("coreinit", __ghs_mtx_dst, LogType::Placeholder);
-		cafeExportRegister("coreinit", __ghs_mtx_lock, LogType::Placeholder);
-		cafeExportRegister("coreinit", __ghs_mtx_unlock, LogType::Placeholder);
+		EXPORT_FN(__ghs_mtx_init); EXPORT_FN(__ghs_mtx_dst); EXPORT_FN(__ghs_mtx_lock);
+		EXPORT_FN(__ghs_mtx_unlock);
 
-		cafeExportRegister("coreinit", __tls_get_addr, LogType::Placeholder);
+		EXPORT_FN(__tls_get_addr);
+#undef EXPORT_FN
 	}
 };

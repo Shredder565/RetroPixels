@@ -388,21 +388,17 @@ namespace GX2
 
 	void GX2CommandInit()
 	{
-		cafeExportRegister("gx2", GX2Flush, LogType::GX2);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("gx2", fn, LogType::GX2)
+		EXPORT_FN(GX2Flush);
 
-		cafeExportRegister("gx2", GX2GetLastSubmittedTimeStamp, LogType::GX2);
-		cafeExportRegister("gx2", GX2GetRetiredTimeStamp, LogType::GX2);
-		cafeExportRegister("gx2", GX2WaitTimeStamp, LogType::GX2);
+		EXPORT_FN(GX2GetLastSubmittedTimeStamp); EXPORT_FN(GX2GetRetiredTimeStamp); EXPORT_FN(GX2WaitTimeStamp);
 
-		cafeExportRegister("gx2", GX2BeginDisplayList, LogType::GX2);
-		cafeExportRegister("gx2", GX2BeginDisplayListEx, LogType::GX2);
-		cafeExportRegister("gx2", GX2EndDisplayList, LogType::GX2);
-		cafeExportRegister("gx2", GX2GetCurrentDisplayList, LogType::GX2);
-		cafeExportRegister("gx2", GX2GetDisplayListWriteStatus, LogType::GX2);
+		EXPORT_FN(GX2BeginDisplayList); EXPORT_FN(GX2BeginDisplayListEx); EXPORT_FN(GX2EndDisplayList);
+		EXPORT_FN(GX2GetCurrentDisplayList); EXPORT_FN(GX2GetDisplayListWriteStatus);
 
-		cafeExportRegister("gx2", GX2CallDisplayList, LogType::GX2);
-		cafeExportRegister("gx2", GX2DirectCallDisplayList, LogType::GX2);
-		cafeExportRegister("gx2", GX2CopyDisplayList, LogType::GX2);
-		cafeExportRegister("gx2", GX2PatchDisplayList, LogType::GX2);
+		EXPORT_FN(GX2CallDisplayList); EXPORT_FN(GX2DirectCallDisplayList); EXPORT_FN(GX2CopyDisplayList);
+		EXPORT_FN(GX2PatchDisplayList);
+#undef EXPORT_FN
 	}
 }

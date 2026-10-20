@@ -458,19 +458,14 @@ namespace nfc
 
 		void RPLMapped() override
 		{
-			cafeExportRegister("nfc", NFCInit, LogType::NFC);
-			cafeExportRegister("nfc", NFCInitEx, LogType::NFC);
-			cafeExportRegister("nfc", NFCShutdown, LogType::NFC);
-			cafeExportRegister("nfc", NFCIsInit, LogType::NFC);
-			cafeExportRegister("nfc", NFCProc, LogType::NFC);
-			cafeExportRegister("nfc", NFCGetMode, LogType::NFC);
-			cafeExportRegister("nfc", NFCSetMode, LogType::NFC);
-			cafeExportRegister("nfc", NFCSetTagDetectCallback, LogType::NFC);
-			cafeExportRegister("nfc", NFCGetTagInfo, LogType::NFC);
-			cafeExportRegister("nfc", NFCSendRawData, LogType::NFC);
-			cafeExportRegister("nfc", NFCAbort, LogType::NFC);
-			cafeExportRegister("nfc", NFCRead, LogType::NFC);
-			cafeExportRegister("nfc", NFCWrite, LogType::NFC);
+			// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("nfc", fn, LogType::NFC)
+			EXPORT_FN(NFCInit); EXPORT_FN(NFCInitEx); EXPORT_FN(NFCShutdown);
+			EXPORT_FN(NFCIsInit); EXPORT_FN(NFCProc); EXPORT_FN(NFCGetMode);
+			EXPORT_FN(NFCSetMode); EXPORT_FN(NFCSetTagDetectCallback); EXPORT_FN(NFCGetTagInfo);
+			EXPORT_FN(NFCSendRawData); EXPORT_FN(NFCAbort); EXPORT_FN(NFCRead);
+			EXPORT_FN(NFCWrite);
+#undef EXPORT_FN
 		}
 	} s_nfcModule;
 

@@ -370,27 +370,19 @@ namespace coreinit
 
 	void InitializeMP()
 	{
-		cafeExportRegister("coreinit", MPInitTask, LogType::CoreinitMP);
-		cafeExportRegister("coreinit", MPTermTask, LogType::CoreinitMP);
-		cafeExportRegister("coreinit", MPRunTask, LogType::CoreinitMP);
-		cafeExportRegister("coreinit", MPGetTaskInfo, LogType::CoreinitMP);
-		cafeExportRegister("coreinit", MPGetTaskUserData, LogType::CoreinitMP);
-		cafeExportRegister("coreinit", MPSetTaskUserData, LogType::CoreinitMP);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("coreinit", fn, LogType::CoreinitMP)
+		EXPORT_FN(MPInitTask); EXPORT_FN(MPTermTask); EXPORT_FN(MPRunTask);
+		EXPORT_FN(MPGetTaskInfo); EXPORT_FN(MPGetTaskUserData); EXPORT_FN(MPSetTaskUserData);
 
-		cafeExportRegister("coreinit", MPInitTaskQ, LogType::CoreinitMP);
-		cafeExportRegister("coreinit", MPResetTaskQ, LogType::CoreinitMP);
+		EXPORT_FN(MPInitTaskQ); EXPORT_FN(MPResetTaskQ);
 
-		cafeExportRegister("coreinit", MPEnqueTask, LogType::CoreinitMP);
-		cafeExportRegister("coreinit", MPDequeTask, LogType::CoreinitMP);
-		cafeExportRegister("coreinit", MPDequeTasks, LogType::CoreinitMP);
+		EXPORT_FN(MPEnqueTask); EXPORT_FN(MPDequeTask); EXPORT_FN(MPDequeTasks);
 
-		cafeExportRegister("coreinit", MPRunTasksFromTaskQ, LogType::CoreinitMP);
-		cafeExportRegister("coreinit", MPStartTaskQ, LogType::CoreinitMP);
-		cafeExportRegister("coreinit", MPWaitTaskQ, LogType::CoreinitMP);
-		cafeExportRegister("coreinit", MPWaitTaskQWithTimeout, LogType::CoreinitMP);
-		cafeExportRegister("coreinit", MPStopTaskQ, LogType::CoreinitMP);
+		EXPORT_FN(MPRunTasksFromTaskQ); EXPORT_FN(MPStartTaskQ); EXPORT_FN(MPWaitTaskQ);
+		EXPORT_FN(MPWaitTaskQWithTimeout); EXPORT_FN(MPStopTaskQ);
 
-		cafeExportRegister("coreinit", MPTermTaskQ, LogType::CoreinitMP);
-		cafeExportRegister("coreinit", MPGetTaskQInfo, LogType::CoreinitMP);
+		EXPORT_FN(MPTermTaskQ); EXPORT_FN(MPGetTaskQInfo);
+#undef EXPORT_FN
 	}
 }

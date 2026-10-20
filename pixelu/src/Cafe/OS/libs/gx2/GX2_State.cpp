@@ -527,69 +527,44 @@ namespace GX2
 
 	void GX2StateInit()
 	{
-		cafeExportRegister("gx2", GX2InitAlphaTestReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetAlphaTestReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetAlphaTest, LogType::GX2);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("gx2", fn, LogType::GX2)
+		EXPORT_FN(GX2InitAlphaTestReg); EXPORT_FN(GX2SetAlphaTestReg); EXPORT_FN(GX2SetAlphaTest);
 
-		cafeExportRegister("gx2", GX2InitColorControlReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetColorControl, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetColorControlReg, LogType::GX2);
+		EXPORT_FN(GX2InitColorControlReg); EXPORT_FN(GX2SetColorControl); EXPORT_FN(GX2SetColorControlReg);
 
-		cafeExportRegister("gx2", GX2InitPolygonControlReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetPolygonControlReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetPolygonControl, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetCullOnlyControl, LogType::GX2);
+		EXPORT_FN(GX2InitPolygonControlReg); EXPORT_FN(GX2SetPolygonControlReg); EXPORT_FN(GX2SetPolygonControl);
+		EXPORT_FN(GX2SetCullOnlyControl);
 
-		cafeExportRegister("gx2", GX2InitPolygonOffsetReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetPolygonOffsetReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetPolygonOffset, LogType::GX2);
+		EXPORT_FN(GX2InitPolygonOffsetReg); EXPORT_FN(GX2SetPolygonOffsetReg); EXPORT_FN(GX2SetPolygonOffset);
 
-		cafeExportRegister("gx2", GX2SetRasterizerClipControl, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetRasterizerClipControlHalfZ, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetRasterizerClipControlEx, LogType::GX2);
+		EXPORT_FN(GX2SetRasterizerClipControl); EXPORT_FN(GX2SetRasterizerClipControlHalfZ);
+		EXPORT_FN(GX2SetRasterizerClipControlEx);
 
-		cafeExportRegister("gx2", GX2InitViewportReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetViewportReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetViewport, LogType::GX2);
+		EXPORT_FN(GX2InitViewportReg); EXPORT_FN(GX2SetViewportReg); EXPORT_FN(GX2SetViewport);
 
-		cafeExportRegister("gx2", GX2InitScissorReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetScissorReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2GetScissorReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetScissor, LogType::GX2);
+		EXPORT_FN(GX2InitScissorReg); EXPORT_FN(GX2SetScissorReg); EXPORT_FN(GX2GetScissorReg);
+		EXPORT_FN(GX2SetScissor);
 
-		cafeExportRegister("gx2", GX2InitDepthStencilControlReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetDepthStencilControlReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2GetDepthStencilControlReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetDepthOnlyControl, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetDepthStencilControl, LogType::GX2);
+		EXPORT_FN(GX2InitDepthStencilControlReg); EXPORT_FN(GX2SetDepthStencilControlReg);
+		EXPORT_FN(GX2GetDepthStencilControlReg); EXPORT_FN(GX2SetDepthOnlyControl); EXPORT_FN(GX2SetDepthStencilControl);
 
-		cafeExportRegister("gx2", GX2InitStencilMaskReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetStencilMask, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetStencilMaskReg, LogType::GX2);
+		EXPORT_FN(GX2InitStencilMaskReg); EXPORT_FN(GX2SetStencilMask); EXPORT_FN(GX2SetStencilMaskReg);
 
-		cafeExportRegister("gx2", GX2SetPrimitiveRestartIndex, LogType::GX2);
+		EXPORT_FN(GX2SetPrimitiveRestartIndex);
 
-		cafeExportRegister("gx2", GX2InitTargetChannelMasksReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetTargetChannelMasksReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetTargetChannelMasks, LogType::GX2);
-		cafeExportRegister("gx2", GX2GetTargetChannelMasksReg, LogType::GX2);
+		EXPORT_FN(GX2InitTargetChannelMasksReg); EXPORT_FN(GX2SetTargetChannelMasksReg); EXPORT_FN(GX2SetTargetChannelMasks);
+		EXPORT_FN(GX2GetTargetChannelMasksReg);
 
-		cafeExportRegister("gx2", GX2InitBlendControlReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetBlendControlReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetBlendControl, LogType::GX2);
+		EXPORT_FN(GX2InitBlendControlReg); EXPORT_FN(GX2SetBlendControlReg); EXPORT_FN(GX2SetBlendControl);
 
-		cafeExportRegister("gx2", GX2InitBlendConstantColorReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetBlendConstantColorReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetBlendConstantColor, LogType::GX2);
-		cafeExportRegister("gx2", GX2InitHiStencilInfoRegs, LogType::GX2);
+		EXPORT_FN(GX2InitBlendConstantColorReg); EXPORT_FN(GX2SetBlendConstantColorReg); EXPORT_FN(GX2SetBlendConstantColor);
+		EXPORT_FN(GX2InitHiStencilInfoRegs);
 
-		cafeExportRegister("gx2", GX2InitPointSizeReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetPointSizeReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetPointSize, LogType::GX2);
-		cafeExportRegister("gx2", GX2InitPointLimitsReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetPointLimitsReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetPointLimits, LogType::GX2);
+		EXPORT_FN(GX2InitPointSizeReg); EXPORT_FN(GX2SetPointSizeReg); EXPORT_FN(GX2SetPointSize);
+		EXPORT_FN(GX2InitPointLimitsReg); EXPORT_FN(GX2SetPointLimitsReg); EXPORT_FN(GX2SetPointLimits);
 
-		cafeExportRegister("gx2", GX2SetSpecialState, LogType::GX2);
+		EXPORT_FN(GX2SetSpecialState);
+#undef EXPORT_FN
 	}
 }

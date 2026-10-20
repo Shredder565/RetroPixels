@@ -647,27 +647,21 @@ namespace H264
 
 		void RPLMapped() override
 		{
-			cafeExportRegister("h264", H264DECCheckMemSegmentation, LogType::H264);
-			cafeExportRegister("h264", H264DECMemoryRequirement, LogType::H264);
-			cafeExportRegister("h264", H264DECFindDecstartpoint, LogType::H264);
-			cafeExportRegister("h264", H264DECFindIdrpoint, LogType::H264);
-			cafeExportRegister("h264", H264DECGetImageSize, LogType::H264);
+			// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("h264", fn, LogType::H264)
+			EXPORT_FN(H264DECCheckMemSegmentation); EXPORT_FN(H264DECMemoryRequirement); EXPORT_FN(H264DECFindDecstartpoint);
+			EXPORT_FN(H264DECFindIdrpoint); EXPORT_FN(H264DECGetImageSize);
 
-			cafeExportRegister("h264", H264DECInitParam, LogType::H264);
-			cafeExportRegister("h264", H264DECOpen, LogType::H264);
-			cafeExportRegister("h264", H264DECClose, LogType::H264);
-			cafeExportRegister("h264", H264DECBegin, LogType::H264);
-			cafeExportRegister("h264", H264DECEnd, LogType::H264);
+			EXPORT_FN(H264DECInitParam); EXPORT_FN(H264DECOpen); EXPORT_FN(H264DECClose);
+			EXPORT_FN(H264DECBegin); EXPORT_FN(H264DECEnd);
 
-			cafeExportRegister("h264", H264DECSetParam_FPTR_OUTPUT, LogType::H264);
-			cafeExportRegister("h264", H264DECSetParam_OUTPUT_PER_FRAME, LogType::H264);
-			cafeExportRegister("h264", H264DECSetParam_USER_MEMORY, LogType::H264);
-			cafeExportRegister("h264", H264DECSetParam, LogType::H264);
+			EXPORT_FN(H264DECSetParam_FPTR_OUTPUT); EXPORT_FN(H264DECSetParam_OUTPUT_PER_FRAME);
+			EXPORT_FN(H264DECSetParam_USER_MEMORY); EXPORT_FN(H264DECSetParam);
 
-			cafeExportRegister("h264", H264DECSetBitstream, LogType::H264);
-			cafeExportRegister("h264", H264DECExecute, LogType::H264);
+			EXPORT_FN(H264DECSetBitstream); EXPORT_FN(H264DECExecute);
 
-			cafeExportRegister("h264", H264DECCheckDecunitLength, LogType::H264);
+			EXPORT_FN(H264DECCheckDecunitLength);
+#undef EXPORT_FN
 		};
 	}s_h264Module;
 

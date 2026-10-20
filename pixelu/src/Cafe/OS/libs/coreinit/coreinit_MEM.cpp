@@ -475,23 +475,20 @@ namespace coreinit
 		osLib_addFunction("coreinit", "MEMAllocFromAllocator", GuestAllocFromAllocator);
 		osLib_addFunction("coreinit", "MEMFreeToAllocator", GuestFreeToAllocator);
 
-		cafeExportRegister("coreinit", MEMGetBaseHeapHandle, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMSetBaseHeapHandle, LogType::CoreinitMem);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("coreinit", fn, LogType::CoreinitMem)
+		EXPORT_FN(MEMGetBaseHeapHandle); EXPORT_FN(MEMSetBaseHeapHandle);
 
-		cafeExportRegister("coreinit", MEMFindContainHeap, LogType::CoreinitMem);
+		EXPORT_FN(MEMFindContainHeap);
 
-		cafeExportRegister("coreinit", MEMGetFillValForHeap, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMSetFillValForHeap, LogType::CoreinitMem);
+		EXPORT_FN(MEMGetFillValForHeap); EXPORT_FN(MEMSetFillValForHeap);
 
-		cafeExportRegister("coreinit", MEMCreateUserHeapHandle, LogType::CoreinitMem);
+		EXPORT_FN(MEMCreateUserHeapHandle);
 
-		cafeExportRegister("coreinit", MEMInitList, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMPrependListObject, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMAppendListObject, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMRemoveListObject, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMGetNextListObject, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMGetNthListObject, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMGetPrevListObject, LogType::CoreinitMem);
+		EXPORT_FN(MEMInitList); EXPORT_FN(MEMPrependListObject); EXPORT_FN(MEMAppendListObject);
+		EXPORT_FN(MEMRemoveListObject); EXPORT_FN(MEMGetNextListObject); EXPORT_FN(MEMGetNthListObject);
+		EXPORT_FN(MEMGetPrevListObject);
+#undef EXPORT_FN
 	}
 }
 

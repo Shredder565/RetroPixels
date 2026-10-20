@@ -419,19 +419,16 @@ namespace GX2
 
 	void GX2ShaderInit()
 	{
-		cafeExportRegister("gx2", GX2CalcFetchShaderSizeEx, LogType::GX2);
-		cafeExportRegister("gx2", GX2InitFetchShaderEx, LogType::GX2);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("gx2", fn, LogType::GX2)
+		EXPORT_FN(GX2CalcFetchShaderSizeEx); EXPORT_FN(GX2InitFetchShaderEx);
 
-		cafeExportRegister("gx2", GX2GetVertexShaderGPRs, LogType::GX2);
-		cafeExportRegister("gx2", GX2GetVertexShaderStackEntries, LogType::GX2);
-		cafeExportRegister("gx2", GX2GetPixelShaderGPRs, LogType::GX2);
-		cafeExportRegister("gx2", GX2GetPixelShaderStackEntries, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetFetchShader, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetVertexShader, LogType::GX2);
+		EXPORT_FN(GX2GetVertexShaderGPRs); EXPORT_FN(GX2GetVertexShaderStackEntries); EXPORT_FN(GX2GetPixelShaderGPRs);
+		EXPORT_FN(GX2GetPixelShaderStackEntries); EXPORT_FN(GX2SetFetchShader); EXPORT_FN(GX2SetVertexShader);
 
-		cafeExportRegister("gx2", GX2SetVertexUniformReg, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetPixelUniformReg, LogType::GX2);
+		EXPORT_FN(GX2SetVertexUniformReg); EXPORT_FN(GX2SetPixelUniformReg);
 
-		cafeExportRegister("gx2", GX2SetShaderModeEx, LogType::GX2);
+		EXPORT_FN(GX2SetShaderModeEx);
+#undef EXPORT_FN
 	}
 }

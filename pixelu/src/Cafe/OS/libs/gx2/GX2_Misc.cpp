@@ -306,24 +306,19 @@ namespace GX2
 
 	void GX2MiscInit()
 	{
-		cafeExportRegister("gx2", GX2Init, LogType::GX2);
-		cafeExportRegister("gx2", GX2Shutdown, LogType::GX2);
-		cafeExportRegister("gx2", GX2GetMainCoreId, LogType::GX2);
-		cafeExportRegister("gx2", GX2ResetGPU, LogType::GX2);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("gx2", fn, LogType::GX2)
+		EXPORT_FN(GX2Init); EXPORT_FN(GX2Shutdown); EXPORT_FN(GX2GetMainCoreId);
+		EXPORT_FN(GX2ResetGPU);
 
-		cafeExportRegister("gx2", GX2SetTVBuffer, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetTVGamma, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetDRCGamma, LogType::GX2);
+		EXPORT_FN(GX2SetTVBuffer); EXPORT_FN(GX2SetTVGamma); EXPORT_FN(GX2SetDRCGamma);
 
-		cafeExportRegister("gx2", GX2GetLastFrame, LogType::GX2);
-		cafeExportRegister("gx2", GX2GetLastFrameGammaA, LogType::GX2);
-		cafeExportRegister("gx2", GX2GetLastFrameGammaB, LogType::GX2);
+		EXPORT_FN(GX2GetLastFrame); EXPORT_FN(GX2GetLastFrameGammaA); EXPORT_FN(GX2GetLastFrameGammaB);
 
-		cafeExportRegister("gx2", GX2GPUTimeToCPUTime, LogType::GX2);
-		cafeExportRegister("gx2", GX2GetSystemDRCMode, LogType::GX2);
-		cafeExportRegister("gx2", GX2IsVideoOutReady, LogType::GX2);
+		EXPORT_FN(GX2GPUTimeToCPUTime); EXPORT_FN(GX2GetSystemDRCMode); EXPORT_FN(GX2IsVideoOutReady);
 
-		cafeExportRegister("gx2", GX2Invalidate, LogType::GX2);
+		EXPORT_FN(GX2Invalidate);
+#undef EXPORT_FN
 
 		sGX2MainCoreIndex = 0;
 	}

@@ -122,11 +122,10 @@ namespace coreinit
 
 	void InitializeMEMUnitHeap()
 	{
-		cafeExportRegister("coreinit", MEMCreateUnitHeapEx, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMDestroyUnitHeap, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMCalcHeapSizeForUnitHeap, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMCountFreeBlockForUnitHeap, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMAllocFromUnitHeap, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMFreeToUnitHeap, LogType::CoreinitMem);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("coreinit", fn, LogType::CoreinitMem)
+		EXPORT_FN(MEMCreateUnitHeapEx); EXPORT_FN(MEMDestroyUnitHeap); EXPORT_FN(MEMCalcHeapSizeForUnitHeap);
+		EXPORT_FN(MEMCountFreeBlockForUnitHeap); EXPORT_FN(MEMAllocFromUnitHeap); EXPORT_FN(MEMFreeToUnitHeap);
+#undef EXPORT_FN
 	}
 }

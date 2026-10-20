@@ -201,35 +201,24 @@ namespace GX2
 
 	void GX2ResourceInit()
 	{
-		cafeExportRegister("gx2", GX2RSetAllocator, LogType::GX2);
-		cafeExportRegister("gx2", GX2RGetBufferAllocationSize, LogType::GX2);
-		cafeExportRegister("gx2", GX2RGetBufferAlignment, LogType::GX2);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("gx2", fn, LogType::GX2)
+		EXPORT_FN(GX2RSetAllocator); EXPORT_FN(GX2RGetBufferAllocationSize); EXPORT_FN(GX2RGetBufferAlignment);
 
-		cafeExportRegister("gx2", GX2RCreateBuffer, LogType::GX2);
-		cafeExportRegister("gx2", GX2RCreateBufferUserMemory, LogType::GX2);
-		cafeExportRegister("gx2", GX2RDestroyBufferEx, LogType::GX2);
-		cafeExportRegister("gx2", GX2RBufferExists, LogType::GX2);
-		cafeExportRegister("gx2", GX2RSetBufferName, LogType::GX2);
-		cafeExportRegister("gx2", GX2RLockBufferEx, LogType::GX2);
-		cafeExportRegister("gx2", GX2RUnlockBufferEx, LogType::GX2);
-		cafeExportRegister("gx2", GX2RInvalidateBuffer, LogType::GX2);
+		EXPORT_FN(GX2RCreateBuffer); EXPORT_FN(GX2RCreateBufferUserMemory); EXPORT_FN(GX2RDestroyBufferEx);
+		EXPORT_FN(GX2RBufferExists); EXPORT_FN(GX2RSetBufferName); EXPORT_FN(GX2RLockBufferEx);
+		EXPORT_FN(GX2RUnlockBufferEx); EXPORT_FN(GX2RInvalidateBuffer);
 
-		cafeExportRegister("gx2", GX2RSetAttributeBuffer, LogType::GX2);
-		cafeExportRegister("gx2", GX2RSetStreamOutBuffer, LogType::GX2);
+		EXPORT_FN(GX2RSetAttributeBuffer); EXPORT_FN(GX2RSetStreamOutBuffer);
 
-		cafeExportRegister("gx2", GX2RCreateSurface, LogType::GX2);
-		cafeExportRegister("gx2", GX2RCreateSurfaceUserMemory, LogType::GX2);
-		cafeExportRegister("gx2", GX2RDestroySurfaceEx, LogType::GX2);
-		cafeExportRegister("gx2", GX2RSurfaceExists, LogType::GX2);
-		cafeExportRegister("gx2", GX2RLockSurfaceEx, LogType::GX2);
-		cafeExportRegister("gx2", GX2RUnlockSurfaceEx, LogType::GX2);
+		EXPORT_FN(GX2RCreateSurface); EXPORT_FN(GX2RCreateSurfaceUserMemory); EXPORT_FN(GX2RDestroySurfaceEx);
+		EXPORT_FN(GX2RSurfaceExists); EXPORT_FN(GX2RLockSurfaceEx); EXPORT_FN(GX2RUnlockSurfaceEx);
 
-		cafeExportRegister("gx2", GX2RBeginDisplayListEx, LogType::GX2);
-		cafeExportRegister("gx2", GX2REndDisplayList, LogType::GX2);
-		cafeExportRegister("gx2", GX2RCallDisplayList, LogType::GX2);
-		cafeExportRegister("gx2", GX2RDirectCallDisplayList, LogType::GX2);
+		EXPORT_FN(GX2RBeginDisplayListEx); EXPORT_FN(GX2REndDisplayList); EXPORT_FN(GX2RCallDisplayList);
+		EXPORT_FN(GX2RDirectCallDisplayList);
 
-		cafeExportRegister("gx2", GX2RDrawIndexed, LogType::GX2);
+		EXPORT_FN(GX2RDrawIndexed);
+#undef EXPORT_FN
 
 		s_gx2rAlloc = MPTR_NULL;
 		s_gx2rFree = MPTR_NULL;

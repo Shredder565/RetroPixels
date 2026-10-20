@@ -320,14 +320,12 @@ namespace coreinit
 
 	void InitializeMEMBlockHeap()
 	{
-		cafeExportRegister("coreinit", MEMInitBlockHeap, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMDestroyBlockHeap, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMGetAllocatableSizeForBlockHeapEx, LogType::CoreinitMem);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("coreinit", fn, LogType::CoreinitMem)
+		EXPORT_FN(MEMInitBlockHeap); EXPORT_FN(MEMDestroyBlockHeap); EXPORT_FN(MEMGetAllocatableSizeForBlockHeapEx);
 
-		cafeExportRegister("coreinit", MEMAddBlockHeapTracking, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMGetTrackingLeftInBlockHeap, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMAllocFromBlockHeapEx, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMFreeToBlockHeap, LogType::CoreinitMem);
-		cafeExportRegister("coreinit", MEMGetTotalFreeSizeForBlockHeap, LogType::CoreinitMem);
+		EXPORT_FN(MEMAddBlockHeapTracking); EXPORT_FN(MEMGetTrackingLeftInBlockHeap); EXPORT_FN(MEMAllocFromBlockHeapEx);
+		EXPORT_FN(MEMFreeToBlockHeap); EXPORT_FN(MEMGetTotalFreeSizeForBlockHeap);
+#undef EXPORT_FN
 	}
 }

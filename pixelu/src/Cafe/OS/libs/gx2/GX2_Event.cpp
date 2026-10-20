@@ -225,15 +225,14 @@ namespace GX2
 
 	void GX2EventInit()
 	{
-		cafeExportRegister("gx2", GX2SetGPUFence, LogType::GX2);
-		cafeExportRegister("gx2", GX2SubmitUserTimeStamp, LogType::GX2);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("gx2", fn, LogType::GX2)
+		EXPORT_FN(GX2SetGPUFence); EXPORT_FN(GX2SubmitUserTimeStamp);
 
-		cafeExportRegister("gx2", GX2SetEventCallback, LogType::GX2);
-		cafeExportRegister("gx2", GX2GetEventCallback, LogType::GX2);
+		EXPORT_FN(GX2SetEventCallback); EXPORT_FN(GX2GetEventCallback);
 
-		cafeExportRegister("gx2", GX2WaitForVsync, LogType::GX2);
-		cafeExportRegister("gx2", GX2WaitForFlip, LogType::GX2);
-		cafeExportRegister("gx2", GX2DrawDone, LogType::GX2);
+		EXPORT_FN(GX2WaitForVsync); EXPORT_FN(GX2WaitForFlip); EXPORT_FN(GX2DrawDone);
+#undef EXPORT_FN
 
 		coreinit::OSInitThreadQueue(s_vsyncWaiters.GetPtr());
 		coreinit::OSInitThreadQueue(s_flipWaiters.GetPtr());

@@ -438,20 +438,14 @@ namespace coreinit
 
 	void MapAlarmExports()
 	{
-		cafeExportRegister("coreinit", OSCreateAlarm, LogType::CoreinitAlarm);
-		cafeExportRegister("coreinit", OSCreateAlarmEx, LogType::CoreinitAlarm);
-		cafeExportRegister("coreinit", OSCancelAlarm, LogType::CoreinitAlarm);
-		cafeExportRegister("coreinit", OSCancelAlarms, LogType::CoreinitAlarm);
-		cafeExportRegister("coreinit", OSSetAlarmTag, LogType::CoreinitAlarm);
-		cafeExportRegister("coreinit", OSSetAlarm, LogType::CoreinitAlarm);
-		cafeExportRegister("coreinit", OSSetPeriodicAlarm, LogType::CoreinitAlarm);
-		cafeExportRegister("coreinit", OSSetAlarmEx, LogType::CoreinitAlarm);
-		cafeExportRegister("coreinit", OSSetPeriodicAlarmEx, LogType::CoreinitAlarm);
-		cafeExportRegister("coreinit", OSInitAlarmQueue, LogType::CoreinitAlarm);
-		cafeExportRegister("coreinit", OSInitAlarmQueueEx, LogType::CoreinitAlarm);
-		cafeExportRegister("coreinit", OSGetAlarmFromQueue, LogType::CoreinitAlarm);
-		cafeExportRegister("coreinit", OSSetAlarmUserData, LogType::CoreinitAlarm);
-		cafeExportRegister("coreinit", OSGetAlarmUserData, LogType::CoreinitAlarm);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("coreinit", fn, LogType::CoreinitAlarm)
+		EXPORT_FN(OSCreateAlarm); EXPORT_FN(OSCreateAlarmEx); EXPORT_FN(OSCancelAlarm);
+		EXPORT_FN(OSCancelAlarms); EXPORT_FN(OSSetAlarmTag); EXPORT_FN(OSSetAlarm);
+		EXPORT_FN(OSSetPeriodicAlarm); EXPORT_FN(OSSetAlarmEx); EXPORT_FN(OSSetPeriodicAlarmEx);
+		EXPORT_FN(OSInitAlarmQueue); EXPORT_FN(OSInitAlarmQueueEx); EXPORT_FN(OSGetAlarmFromQueue);
+		EXPORT_FN(OSSetAlarmUserData); EXPORT_FN(OSGetAlarmUserData);
+#undef EXPORT_FN
 	}
 
 	void InitializeAlarm()

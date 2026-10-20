@@ -307,25 +307,16 @@ namespace GX2
 
 	void GX2TextureInit()
 	{
-		cafeExportRegister("gx2", GX2InitTextureRegs, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetPixelTexture, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetVertexTexture, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetGeometryTexture, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetComputeTexture, LogType::GX2);
+		// one HLE index per export, handed out in this order
+#define EXPORT_FN(fn) cafeExportRegister("gx2", fn, LogType::GX2)
+		EXPORT_FN(GX2InitTextureRegs); EXPORT_FN(GX2SetPixelTexture); EXPORT_FN(GX2SetVertexTexture);
+		EXPORT_FN(GX2SetGeometryTexture); EXPORT_FN(GX2SetComputeTexture);
 
-		cafeExportRegister("gx2", GX2InitSampler, LogType::GX2);
-		cafeExportRegister("gx2", GX2InitSamplerXYFilter, LogType::GX2);
-		cafeExportRegister("gx2", GX2InitSamplerZMFilter, LogType::GX2);
-		cafeExportRegister("gx2", GX2InitSamplerLOD, LogType::GX2);
-		cafeExportRegister("gx2", GX2InitSamplerClamping, LogType::GX2);
-		cafeExportRegister("gx2", GX2InitSamplerBorderType, LogType::GX2);
-		cafeExportRegister("gx2", GX2InitSamplerDepthCompare, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetPixelSampler, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetVertexSampler, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetGeometrySampler, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetComputeSampler, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetPixelSamplerBorderColor, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetVertexSamplerBorderColor, LogType::GX2);
-		cafeExportRegister("gx2", GX2SetGeometrySamplerBorderColor, LogType::GX2);
+		EXPORT_FN(GX2InitSampler); EXPORT_FN(GX2InitSamplerXYFilter); EXPORT_FN(GX2InitSamplerZMFilter);
+		EXPORT_FN(GX2InitSamplerLOD); EXPORT_FN(GX2InitSamplerClamping); EXPORT_FN(GX2InitSamplerBorderType);
+		EXPORT_FN(GX2InitSamplerDepthCompare); EXPORT_FN(GX2SetPixelSampler); EXPORT_FN(GX2SetVertexSampler);
+		EXPORT_FN(GX2SetGeometrySampler); EXPORT_FN(GX2SetComputeSampler); EXPORT_FN(GX2SetPixelSamplerBorderColor);
+		EXPORT_FN(GX2SetVertexSamplerBorderColor); EXPORT_FN(GX2SetGeometrySamplerBorderColor);
+#undef EXPORT_FN
 	}
 };
