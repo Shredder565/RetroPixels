@@ -105,23 +105,18 @@ set_target_properties(CemuBin PROPERTIES
 
 # ---- macOS: optional .app bundle with MoltenVK (and libusb) inside, else plain rpaths ----
 if(APPLE AND MACOS_BUNDLE)
-	set(PIXELU_ICNS "${CMAKE_SOURCE_DIR}/src/resource/cemu.icns")
+	set(PIXELU_ICNS "${CMAKE_SOURCE_DIR}/src/resource/pixelu.icns")
 	target_sources(CemuBin PRIVATE "${PIXELU_ICNS}")
-	string(TIMESTAMP PIXELU_YEAR "%Y" UTC)
 	set(PIXELU_VERSION_STRING "${EMULATOR_VERSION_MAJOR}.${EMULATOR_VERSION_MINOR}.${EMULATOR_VERSION_PATCH}")
-	# values for resource/MacOSXBundleInfo.plist.in
-	set(MACOSX_BUNDLE_ICON_FILE "cemu.icns")
-	set(MACOSX_BUNDLE_GUI_IDENTIFIER "info.cemu.Cemu")
-	set(MACOSX_BUNDLE_BUNDLE_NAME "Cemu")
+	# values for CMake's own Info.plist template
+	set(MACOSX_BUNDLE_ICON_FILE "pixelu.icns")
+	set(MACOSX_BUNDLE_GUI_IDENTIFIER "io.github.shredder565.PixelU")
+	set(MACOSX_BUNDLE_BUNDLE_NAME "PixelU")
 	set(MACOSX_BUNDLE_SHORT_VERSION_STRING "${PIXELU_VERSION_STRING}")
 	set(MACOSX_BUNDLE_BUNDLE_VERSION "${PIXELU_VERSION_STRING}")
-	set(MACOSX_BUNDLE_COPYRIGHT "Copyright © ${PIXELU_YEAR} Cemu Project")
-	set(MACOSX_BUNDLE_CATEGORY "public.app-category.games")
-	set(MACOSX_MINIMUM_SYSTEM_VERSION "13.4")
-	set(MACOSX_BUNDLE_TYPE_EXTENSION "wua")
+	set(MACOSX_BUNDLE_COPYRIGHT "RetroPixels project")
 	set_target_properties(CemuBin PROPERTIES
 		MACOSX_BUNDLE true
-		MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/resource/MacOSXBundleInfo.plist.in"
 		RESOURCE "${PIXELU_ICNS}"
 		BUILD_WITH_INSTALL_RPATH TRUE
 		INSTALL_RPATH "@executable_path/../Frameworks"
