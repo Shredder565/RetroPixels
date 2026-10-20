@@ -1,45 +1,44 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/Profiler.h"
 
 #include <algorithm>
 #include <cmath>
-#include <iomanip>
-#include <ios>
-#include <sstream>
+#include <iterator>
 #include <utility>
+
+#include <fmt/format.h>
 
 #include "Common/Timer.h"
 
 namespace Common
 {
-static const u32 PROFILER_FIELD_LENGTH = 8;
-static const u32 PROFILER_FIELD_LENGTH_FP = PROFILER_FIELD_LENGTH + 3;
-static const int PROFILER_LAZY_DELAY = 60;  // in frames
+namespace
+{
+constexpr int INT_COLUMN = 8;     // calls, sum, min, max
+constexpr int FLOAT_COLUMN = 11;  // rel, avg, stdev
+constexpr int REBUILD_INTERVAL = 60;
+constexpr u64 NO_MIN = ~u64{0};
+}  // namespace
 
 std::list<Profiler*> Profiler::s_all_profilers;
 std::mutex Profiler::s_mutex;
 u32 Profiler::s_max_length = 0;
-u64 Profiler::s_frame_time;
-u64 Profiler::s_usecs_frame;
-
+u64 Profiler::s_frame_time = 0;
+u64 Profiler::s_usecs_frame = 0;
 std::string Profiler::s_lazy_result;
 int Profiler::s_lazy_delay = 0;
 
-Profiler::Profiler(std::string name)
-    : m_name(std::move(name)), m_usecs(0), m_usecs_min(UINT64_MAX), m_usecs_max(0), m_usecs_quad(0),
-      m_calls(0)
+Profiler::Profiler(std::string name) : m_name(std::move(name))
 {
-  s_max_length = std::max<u32>(s_max_length, u32(m_name.length()));
-
-  std::lock_guard<std::mutex> lk(s_mutex);
+  std::lock_guard guard(s_mutex);
+  s_max_length = std::max(s_max_length, static_cast<u32>(m_name.size()));
   s_all_profilers.push_back(this);
 }
 
 Profiler::~Profiler()
 {
-  std::lock_guard<std::mutex> lk(s_mutex);
+  std::lock_guard guard(s_mutex);
   s_all_profilers.remove(this);
 }
 
@@ -52,114 +51,84 @@ std::string Profiler::ToString()
 {
   if (s_lazy_delay > 0)
   {
-    s_lazy_delay--;
+    --s_lazy_delay;
     return s_lazy_result;
   }
-  s_lazy_delay = PROFILER_LAZY_DELAY - 1;
+  s_lazy_delay = REBUILD_INTERVAL - 1;
 
-  // don't write anything if no profilation is enabled
-  std::lock_guard<std::mutex> lk(s_mutex);
+  std::lock_guard guard(s_mutex);
   if (s_all_profilers.empty())
     return "";
 
-  u64 end = Common::Timer::NowUs();
-  s_usecs_frame = end - s_frame_time;
-  s_frame_time = end;
+  const u64 now = Timer::NowUs();
+  s_usecs_frame = now - s_frame_time;
+  s_frame_time = now;
 
-  std::ostringstream buffer;
-  buffer << std::setw(s_max_length) << std::left << ""
-         << " ";
-  buffer << std::setw(PROFILER_FIELD_LENGTH) << std::right << "calls"
-         << " ";
-  buffer << std::setw(PROFILER_FIELD_LENGTH) << std::right << "sum"
-         << " ";
-  buffer << std::setw(PROFILER_FIELD_LENGTH_FP) << std::right << "rel"
-         << " ";
-  buffer << std::setw(PROFILER_FIELD_LENGTH) << std::right << "min"
-         << " ";
-  buffer << std::setw(PROFILER_FIELD_LENGTH_FP) << std::right << "avg"
-         << " ";
-  buffer << std::setw(PROFILER_FIELD_LENGTH_FP) << std::right << "stdev"
-         << " ";
-  buffer << std::setw(PROFILER_FIELD_LENGTH) << std::right << "max"
-         << " ";
-  buffer << "/ usec" << std::endl;
+  std::string table;
+  auto out = std::back_inserter(table);
+  fmt::format_to(out, "{:<{}} {:>{}} {:>{}} {:>{}} {:>{}} {:>{}} {:>{}} {:>{}} / usec\n", "",
+                 s_max_length, "calls", INT_COLUMN, "sum", INT_COLUMN, "rel", FLOAT_COLUMN, "min",
+                 INT_COLUMN, "avg", FLOAT_COLUMN, "stdev", FLOAT_COLUMN, "max", INT_COLUMN);
 
-  s_all_profilers.sort([](Profiler* a, Profiler* b) { return *b < *a; });
-
-  for (auto profiler : s_all_profilers)
+  // Most expensive first.
+  s_all_profilers.sort([](const Profiler* a, const Profiler* b) { return *b < *a; });
+  for (Profiler* profiler : s_all_profilers)
   {
-    buffer << profiler->Read() << std::endl;
+    table += profiler->Read();
+    table += '\n';
   }
-  s_lazy_result = buffer.str();
+
+  s_lazy_result = std::move(table);
   return s_lazy_result;
 }
 
 void Profiler::Start(u64* time, int* depth)
 {
   if ((*depth)++ == 0)
-  {
-    *time = Common::Timer::NowUs();
-  }
+    *time = Timer::NowUs();
 }
 
 void Profiler::Stop(u64* time, int* depth)
 {
-  if (--(*depth) == 0)
-  {
-    u64 end = Common::Timer::NowUs();
+  if (--(*depth) != 0)
+    return;
 
-    u64 diff = end - *time;
-
-    std::lock_guard lk(m_mutex);
-    m_usecs += diff;
-    m_usecs_min = std::min(m_usecs_min, diff);
-    m_usecs_max = std::max(m_usecs_max, diff);
-    m_usecs_quad += diff * diff;
-    m_calls++;
-  }
+  const u64 elapsed = Timer::NowUs() - *time;
+  std::lock_guard guard(m_mutex);
+  m_usecs += elapsed;
+  m_usecs_min = std::min(m_usecs_min, elapsed);
+  m_usecs_max = std::max(m_usecs_max, elapsed);
+  m_usecs_quad += elapsed * elapsed;
+  ++m_calls;
 }
 
 std::string Profiler::Read()
 {
-  std::lock_guard lk(m_mutex);
+  std::lock_guard guard(m_mutex);
 
-  double avg = 0;
-  double stdev = 0;
-  double time_rel = 0;
-  if (m_calls)
+  double average = 0;
+  double deviation = 0;
+  if (m_calls != 0)
   {
-    avg = double(m_usecs) / m_calls;
-    stdev = std::sqrt(double(m_usecs_quad) / m_calls - avg * avg);
+    const double n = static_cast<double>(m_calls);
+    average = static_cast<double>(m_usecs) / n;
+    deviation = std::sqrt(static_cast<double>(m_usecs_quad) / n - average * average);
   }
-  else
-  {
-    m_usecs_min = 0;
-  }
-  if (s_usecs_frame)
-  {
-    time_rel = double(m_usecs) * 100 / s_usecs_frame;
-  }
+  const u64 minimum = m_calls != 0 ? m_usecs_min : 0;
+  const double share =
+      s_usecs_frame != 0 ? static_cast<double>(m_usecs) * 100 / static_cast<double>(s_usecs_frame) :
+                           0.0;
 
-  std::ostringstream buffer;
-
-  buffer << std::setw(s_max_length) << std::left << m_name << " ";
-  buffer << std::setw(PROFILER_FIELD_LENGTH) << std::right << m_calls << " ";
-  buffer << std::setw(PROFILER_FIELD_LENGTH) << std::right << m_usecs << " ";
-  buffer << std::setw(PROFILER_FIELD_LENGTH_FP) << std::right << time_rel << " ";
-  buffer << std::setw(PROFILER_FIELD_LENGTH) << std::right << m_usecs_min << " ";
-  buffer << std::setw(PROFILER_FIELD_LENGTH_FP) << std::right << std::fixed << std::setprecision(2)
-         << avg << " ";
-  buffer << std::setw(PROFILER_FIELD_LENGTH_FP) << std::right << std::fixed << std::setprecision(2)
-         << stdev << " ";
-  buffer << std::setw(PROFILER_FIELD_LENGTH) << std::right << m_usecs_max;
+  std::string row = fmt::format("{:<{}} {:>{}} {:>{}} {:>{}.6g} {:>{}} {:>{}.2f} {:>{}.2f} {:>{}}",
+                                m_name, s_max_length, m_calls, INT_COLUMN, m_usecs, INT_COLUMN,
+                                share, FLOAT_COLUMN, minimum, INT_COLUMN, average, FLOAT_COLUMN,
+                                deviation, FLOAT_COLUMN, m_usecs_max, INT_COLUMN);
 
   m_usecs = 0;
-  m_usecs_min = UINT64_MAX;
+  m_usecs_min = NO_MIN;
   m_usecs_max = 0;
   m_usecs_quad = 0;
   m_calls = 0;
-
-  return buffer.str();
+  return row;
 }
 }  // namespace Common

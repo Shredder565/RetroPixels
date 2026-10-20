@@ -1,42 +1,48 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/Timer.h"
 
-#include <chrono>
+#include <algorithm>
+#include <ctime>
 #include <thread>
-#include "Common/CommonFuncs.h"
 
 #ifdef _WIN32
 #include <windows.h>
 #include <timeapi.h>
+#ifdef _MSC_VER
+#pragma comment(lib, "winmm.lib")
+#endif
+#else
+#include <time.h>
 #endif
 
-#include "Common/CommonTypes.h"
+#include "Common/CommonFuncs.h"
 #include "Common/Logging/Log.h"
+#include "Common/TimeUtil.h"
 
 namespace Common
 {
-template <typename Clock, typename Duration>
-static typename Clock::rep time_now()
+namespace
 {
-  return std::chrono::time_point_cast<Duration>(Clock::now()).time_since_epoch().count();
-}
+// The scheduler granularity IncreaseResolution() asks for, and what SleepUntil() assumes.
+constexpr int SCHEDULER_PERIOD_MS = 1;
 
-template <typename Duration>
-static auto steady_time_now()
+template <typename Unit>
+u64 SteadyNow()
 {
-  return time_now<std::chrono::steady_clock, Duration>();
+  using namespace std::chrono;
+  return static_cast<u64>(duration_cast<Unit>(steady_clock::now().time_since_epoch()).count());
 }
+}  // namespace
 
 u64 Timer::NowUs()
 {
-  return steady_time_now<std::chrono::microseconds>();
+  return SteadyNow<std::chrono::microseconds>();
 }
 
 u64 Timer::NowMs()
 {
-  return steady_time_now<std::chrono::milliseconds>();
+  return SteadyNow<std::chrono::milliseconds>();
 }
 
 void Timer::Start()
@@ -60,86 +66,64 @@ void Timer::Stop()
 
 u64 Timer::ElapsedMs() const
 {
+  // Unsigned subtraction also gives the right answer across one wrap-around; a timer that was
+  // never started has start == end == 0.
   const u64 end = m_running ? NowMs() : m_end_ms;
-  // Can handle up to 1 rollover event (underflow produces correct result)
-  // If Start() has never been called, will return 0
   return end - m_start_ms;
 }
 
 u64 Timer::GetLocalTimeSinceJan1970()
 {
-#ifdef _MSC_VER
-  std::chrono::zoned_seconds seconds(
-      std::chrono::current_zone(),
-      std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now()));
-  return seconds.get_local_time().time_since_epoch().count();
-#else
-  time_t sysTime, tzDiff, tzDST;
-  time(&sysTime);
-  tm* gmTime = localtime(&sysTime);
+  using namespace std::chrono;
+  const std::time_t now = system_clock::to_time_t(system_clock::now());
+  const std::optional<std::tm> local = LocalTime(now);
+  if (!local)
+    return static_cast<u64>(now);
 
-  // Account for DST where needed
-  if (gmTime->tm_isdst == 1)
-    tzDST = 3600;
-  else
-    tzDST = 0;
-
-  // Lazy way to get local time in sec
-  gmTime = gmtime(&sysTime);
-  tzDiff = sysTime - mktime(gmTime);
-
-  return static_cast<u64>(sysTime + tzDiff + tzDST);
-#endif
+  // Read the local calendar date and time back as if it were UTC.
+  const year_month_day date{year{local->tm_year + 1900},
+                            month{static_cast<unsigned>(local->tm_mon + 1)},
+                            day{static_cast<unsigned>(local->tm_mday)}};
+  const seconds since_epoch = sys_days{date}.time_since_epoch() + hours{local->tm_hour} +
+                              minutes{local->tm_min} + seconds{local->tm_sec};
+  return static_cast<u64>(since_epoch.count());
 }
-
-// This is requested by Timer::IncreaseResolution on Windows.
-// On Linux/other we hope/assume we already have 1ms scheduling granularity.
-static constexpr int TIMER_RESOLUTION_MS = 1;
 
 void Timer::IncreaseResolution()
 {
 #ifdef _WIN32
-  // Disable execution speed and timer resolution throttling process-wide.
-  // This mainly will keep Dolphin marked as high performance if it's in the background. The OS
-  // should make it high performance if it's in the foreground anyway (or for some specific
-  // threads e.g. audio).
-  // This is best-effort (i.e. the call may fail on older versions of Windows, where such throttling
-  // doesn't exist, anyway), and we don't bother reverting once set.
-  // This adjusts behavior on CPUs with "performance" and "efficiency" cores
-  PROCESS_POWER_THROTTLING_STATE PowerThrottling{};
-  PowerThrottling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
-  PowerThrottling.ControlMask =
+  // Opt out of EcoQoS: without this, Windows may slow the process down and coarsen its timers
+  // while it is in the background or on efficiency cores. Best effort; never undone.
+  PROCESS_POWER_THROTTLING_STATE throttling{};
+  throttling.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+  throttling.ControlMask =
       PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
-  PowerThrottling.StateMask = 0;
-  SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &PowerThrottling,
-                        sizeof(PowerThrottling));
+  throttling.StateMask = 0;  // i.e. throttling off for the bits in ControlMask
+  SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &throttling,
+                        sizeof(throttling));
 
-  // Not actually sure how useful this is these days.. :')
-  timeBeginPeriod(TIMER_RESOLUTION_MS);
+  timeBeginPeriod(SCHEDULER_PERIOD_MS);
 #endif
 }
 
 void Timer::RestoreResolution()
 {
 #ifdef _WIN32
-  timeEndPeriod(TIMER_RESOLUTION_MS);
+  timeEndPeriod(SCHEDULER_PERIOD_MS);
 #endif
 }
 
 PrecisionTimer::PrecisionTimer()
 {
-#if defined(_WIN32)
-  // "TIMER_HIGH_RESOLUTION" requires Windows 10, version 1803, and later.
-  m_timer_handle =
-      CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
-
-  if (m_timer_handle == NULL)
+#ifdef _WIN32
+  // High-resolution waitable timers exist since Windows 10 1803; fall back to a normal one.
+  m_timer_handle = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                          TIMER_ALL_ACCESS);
+  if (!m_timer_handle)
   {
     ERROR_LOG_FMT(COMMON, "CREATE_WAITABLE_TIMER_HIGH_RESOLUTION: Error:{}", GetLastError());
-
-    // Create a normal timer if "HIGH_RESOLUTION" isn't available.
-    m_timer_handle = CreateWaitableTimerExW(NULL, NULL, 0, TIMER_ALL_ACCESS);
-    if (m_timer_handle == NULL)
+    m_timer_handle = CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_ALL_ACCESS);
+    if (!m_timer_handle)
       ERROR_LOG_FMT(COMMON, "CreateWaitableTimerExW: Error:{}", GetLastError());
   }
 #endif
@@ -147,45 +131,44 @@ PrecisionTimer::PrecisionTimer()
 
 PrecisionTimer::~PrecisionTimer()
 {
-#if defined(_WIN32)
-  CloseHandle(m_timer_handle);
+#ifdef _WIN32
+  if (m_timer_handle)
+    CloseHandle(m_timer_handle);
 #endif
 }
 
 void PrecisionTimer::SleepUntil(Clock::time_point target)
 {
-  constexpr auto SPIN_TIME =
-      std::chrono::milliseconds{TIMER_RESOLUTION_MS} + std::chrono::microseconds{20};
+  using namespace std::chrono;
 
-#if defined(_WIN32)
-  while (true)
+  // The last stretch (a scheduler period plus a little) is spun, since a sleep may overshoot by
+  // about that much.
+  constexpr auto spin_window = milliseconds{SCHEDULER_PERIOD_MS} + microseconds{20};
+
+#ifdef _WIN32
+  // Waitable timer due times are in 100 ns units. Long single waits turned out to be inaccurate,
+  // so wait in slices of at most 95% of a scheduler period.
+  using Ticks100ns = duration<LONGLONG, std::ratio<1, 10'000'000>>;
+  constexpr Ticks100ns max_slice = duration_cast<Ticks100ns>(milliseconds{SCHEDULER_PERIOD_MS}) *
+                                   95 / 100;
+  for (;;)
   {
-    // SetWaitableTimerEx takes time in "100 nanosecond intervals".
-    using TimerDuration = std::chrono::duration<LONGLONG, std::ratio<100, std::nano::den>::type>;
-
-    // Apparently waiting longer than the timer resolution gives terrible accuracy.
-    // We'll wait in steps of 95% of the time period.
-    constexpr auto MAX_TICKS =
-        duration_cast<TimerDuration>(std::chrono::milliseconds{TIMER_RESOLUTION_MS}) * 95 / 100;
-
-    const auto wait_time = target - Clock::now() - SPIN_TIME;
-    const auto ticks = std::min(duration_cast<TimerDuration>(wait_time), MAX_TICKS).count();
+    const Ticks100ns remaining = duration_cast<Ticks100ns>(target - Clock::now() - spin_window);
+    const LONGLONG ticks = std::min(remaining, max_slice).count();
     if (ticks <= 0)
       break;
-
-    const LARGE_INTEGER due_time{.QuadPart = -ticks};
-    SetWaitableTimerEx(m_timer_handle, &due_time, 0, NULL, NULL, NULL, 0);
+    LARGE_INTEGER due{};
+    due.QuadPart = -ticks;  // negative = relative to now
+    SetWaitableTimerEx(m_timer_handle, &due, 0, nullptr, nullptr, nullptr, 0);
     WaitForSingleObject(m_timer_handle, INFINITE);
   }
 #else
-  // Sleeping on Linux generally isn't as terrible as it is on Windows.
-  std::this_thread::sleep_until(target - SPIN_TIME);
+  std::this_thread::sleep_until(target - spin_window);
 #endif
 
-  // Spin for the remaining time.
   while (Clock::now() < target)
   {
-#if defined(_WIN32)
+#ifdef _WIN32
     YieldProcessor();
 #else
     std::this_thread::yield();
@@ -193,37 +176,20 @@ void PrecisionTimer::SleepUntil(Clock::time_point target)
   }
 }
 
-// Results are appropriately slewed on Linux, but not on Windows, macOS, or FreeBSD.
-// Clocks with that functionality seem to not be available there.
 auto SteadyAwakeClock::now() -> time_point
 {
-#if defined(_WIN32)
-  // The count is system time "in units of 100 nanoseconds".
-  using InterruptDuration = std::chrono::duration<ULONGLONG, std::ratio<100, std::nano::den>::type>;
-
-  ULONGLONG interrupt_time{};
-  if (!QueryUnbiasedInterruptTime(&interrupt_time))
+#ifdef _WIN32
+  // Unbiased interrupt time excludes time spent asleep or hibernating; 100 ns units.
+  ULONGLONG ticks = 0;
+  if (!QueryUnbiasedInterruptTime(&ticks))
     ERROR_LOG_FMT(COMMON, "QueryUnbiasedInterruptTime");
-
-  return time_point{InterruptDuration{interrupt_time}};
+  return time_point{duration{static_cast<rep>(ticks) * 100}};
 #else
-  // Note that Linux's CLOCK_MONOTONIC "does not count time that the system is suspended".
-  // This is in contrast to the behavior on macOS and FreeBSD.
-  static constexpr auto clock_id =
-#if defined(__linux__)
-      CLOCK_MONOTONIC;
-#elif defined(__APPLE__)
-      CLOCK_UPTIME_RAW;
-#else
-      CLOCK_UPTIME;
-#endif
-
+  // Linux's CLOCK_MONOTONIC does not advance during suspend.
   timespec ts{};
-  if (clock_gettime(clock_id, &ts) != 0)
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
     ERROR_LOG_FMT(COMMON, "clock_gettime: {}", LastStrerrorString());
-
   return time_point{std::chrono::seconds{ts.tv_sec} + std::chrono::nanoseconds{ts.tv_nsec}};
 #endif
 }
-
-}  // Namespace Common
+}  // namespace Common

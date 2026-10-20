@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,12 +10,15 @@
 namespace Common
 {
 u32 HashAdler32(const u8* data, size_t len);
-// JUNK. DO NOT USE FOR NEW THINGS
+// Legacy checksum; only for compatibility with values computed by older versions.
 u32 HashEctor(const u8* data, size_t len);
 
-// Specialized hash function used for the texture cache
+// Fast 64-bit hash for the texture cache. With samples != 0, only about that many 8-byte words
+// spread over the data are hashed (plus the tail). The result depends on the CPU (CRC32
+// instructions or not), so it must not be stored.
 u64 GetHash64(const u8* src, u32 len, u32 samples);
 
+// zlib-compatible CRC-32.
 u32 StartCRC32();
 u32 UpdateCRC32(u32 crc, const u8* data, size_t len);
 u32 ComputeCRC32(const u8* data, size_t len);

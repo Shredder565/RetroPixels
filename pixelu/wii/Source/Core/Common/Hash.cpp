@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/Hash.h"
 
@@ -12,435 +11,157 @@
 #include "Common/CPUDetect.h"
 #include "Common/Intrinsics.h"
 
-#ifdef _M_ARM_64
-#ifdef _MSC_VER
-#include <intrin.h>
-#else
-#include <arm_acle.h>
-#endif
-#endif
-
 namespace Common
 {
 u32 HashAdler32(const u8* data, size_t len)
 {
-  // Use fast implementation from zlib-ng
   return adler32_z(1, data, len);
 }
 
-// Stupid hash - but can't go back now :)
-// Don't use for new things. At least it's reasonably fast.
+// A weak rotate-and-xor checksum. Kept only because existing stored values depend on it.
 u32 HashEctor(const u8* data, size_t len)
 {
-  u32 crc = 0;
-
-  for (size_t i = 0; i < len; i++)
-  {
-    crc ^= data[i];
-    crc = (crc << 3) | (crc >> 29);
-  }
-
-  return crc;
+  u32 hash = 0;
+  for (size_t i = 0; i < len; ++i)
+    hash = std::rotl(hash ^ data[i], 3);
+  return hash;
 }
 
-#ifdef _ARCH_64
-
-//-----------------------------------------------------------------------------
-// Block read - if your platform needs to do endian-swapping or can only
-// handle aligned reads, do the conversion here
-
-static u64 getblock(const u64* p, int i)
+namespace
 {
-  return p[i];
+u64 LoadU64(const u8* p)
+{
+  u64 value;
+  std::memcpy(&value, p, sizeof(value));
+  return value;
 }
 
-//----------
-// Block mix - combine the key bits with the hash bits and scramble everything
-
-static void bmix64(u64& h1, u64& h2, u64& k1, u64& k2, u64& c1, u64& c2)
+// Up to 8 trailing bytes as a little-endian integer (missing bytes are zero).
+u64 LoadPartialU64(const u8* p, u32 count)
 {
-  k1 *= c1;
-  k1 = std::rotl(k1, 23);
-  k1 *= c2;
-  h1 ^= k1;
-  h1 += h2;
-
-  h2 = std::rotl(h2, 41);
-
-  k2 *= c2;
-  k2 = std::rotl(k2, 23);
-  k2 *= c1;
-  h2 ^= k2;
-  h2 += h1;
-
-  h1 = h1 * 3 + 0x52dce729;
-  h2 = h2 * 3 + 0x38495ab5;
-
-  c1 = c1 * 5 + 0x7b7d159c;
-  c2 = c2 * 5 + 0x6bce6396;
+  u64 value = 0;
+  std::memcpy(&value, p, count);
+  return value;
 }
 
-//----------
-// Finalization mix - avalanches all bits to within 0.05% bias
-
-static u64 fmix64(u64 k)
+// Distance between sampled 8-byte words: `words / samples`, where samples == 0 means "all", and
+// at least 1.
+u32 SampleStride(u32 words, u32 samples)
 {
-  k ^= k >> 33;
-  k *= 0xff51afd7ed558ccd;
-  k ^= k >> 33;
-  k *= 0xc4ceb9fe1a85ec53;
-  k ^= k >> 33;
-
-  return k;
-}
-
-static u64 GetMurmurHash3(const u8* src, u32 len, u32 samples)
-{
-  const u8* data = (const u8*)src;
-  const int nblocks = len / 16;
-  u32 Step = (len / 8);
   if (samples == 0)
-    samples = std::max(Step, 1u);
-  Step = Step / samples;
-  if (Step < 1)
-    Step = 1;
+    samples = std::max(words, 1u);
+  return std::max(words / samples, 1u);
+}
 
+// --- Texture hash without CRC32 instructions --------------------------------------------------
+// A MurmurHash3-x64-128-style mix over (a sample of) the 16-byte blocks, returning the low half.
+// The block mixing uses evolving multipliers, so it is NOT the reference MurmurHash3 output; the
+// constants below define the hash values texture caches have been keyed by.
+
+struct MurmurState
+{
   u64 h1 = 0x9368e53c2f6af274;
   u64 h2 = 0x586dcd208f7cd3fd;
-
   u64 c1 = 0x87c37b91114253d5;
   u64 c2 = 0x4cf5ad432745937f;
 
-  //----------
-  // body
-
-  const u64* blocks = (const u64*)(data);
-
-  for (int i = 0; i < nblocks; i += Step)
+  void Mix(u64 k1, u64 k2)
   {
-    u64 k1 = getblock(blocks, i * 2 + 0);
-    u64 k2 = getblock(blocks, i * 2 + 1);
+    h1 ^= std::rotl(k1 * c1, 23) * c2;
+    h1 += h2;
+    h2 = std::rotl(h2, 41);
+    h2 ^= std::rotl(k2 * c2, 23) * c1;
+    h2 += h1;
 
-    bmix64(h1, h2, k1, k2, c1, c2);
+    h1 = h1 * 3 + 0x52dce729;
+    h2 = h2 * 3 + 0x38495ab5;
+    c1 = c1 * 5 + 0x7b7d159c;
+    c2 = c2 * 5 + 0x6bce6396;
+  }
+};
+
+u64 Avalanche64(u64 k)
+{
+  k = (k ^ (k >> 33)) * 0xff51afd7ed558ccd;
+  k = (k ^ (k >> 33)) * 0xc4ceb9fe1a85ec53;
+  return k ^ (k >> 33);
+}
+
+u64 TextureHashGeneric(const u8* src, u32 len, u32 samples)
+{
+  const u32 block_count = len / 16;
+  const u32 stride = SampleStride(len / 8, samples);
+
+  MurmurState state;
+  for (u32 block = 0; block < block_count; block += stride)
+    state.Mix(LoadU64(src + block * 16), LoadU64(src + block * 16 + 8));
+
+  if (const u32 rest = len % 16; rest != 0)
+  {
+    const u8* tail = src + block_count * 16;
+    const u64 k1 = LoadPartialU64(tail, std::min(rest, 8u));
+    const u64 k2 = rest > 8 ? LoadPartialU64(tail + 8, rest - 8) : 0;
+    state.Mix(k1, k2);
   }
 
-  //----------
-  // tail
-
-  const u8* tail = (const u8*)(data + nblocks * 16);
-
-  u64 k1 = 0;
-  u64 k2 = 0;
-
-  switch (len & 15)
-  {
-  case 15:
-    k2 ^= u64(tail[14]) << 48;
-    [[fallthrough]];
-  case 14:
-    k2 ^= u64(tail[13]) << 40;
-    [[fallthrough]];
-  case 13:
-    k2 ^= u64(tail[12]) << 32;
-    [[fallthrough]];
-  case 12:
-    k2 ^= u64(tail[11]) << 24;
-    [[fallthrough]];
-  case 11:
-    k2 ^= u64(tail[10]) << 16;
-    [[fallthrough]];
-  case 10:
-    k2 ^= u64(tail[9]) << 8;
-    [[fallthrough]];
-  case 9:
-    k2 ^= u64(tail[8]) << 0;
-    [[fallthrough]];
-  case 8:
-    k1 ^= u64(tail[7]) << 56;
-    [[fallthrough]];
-  case 7:
-    k1 ^= u64(tail[6]) << 48;
-    [[fallthrough]];
-  case 6:
-    k1 ^= u64(tail[5]) << 40;
-    [[fallthrough]];
-  case 5:
-    k1 ^= u64(tail[4]) << 32;
-    [[fallthrough]];
-  case 4:
-    k1 ^= u64(tail[3]) << 24;
-    [[fallthrough]];
-  case 3:
-    k1 ^= u64(tail[2]) << 16;
-    [[fallthrough]];
-  case 2:
-    k1 ^= u64(tail[1]) << 8;
-    [[fallthrough]];
-  case 1:
-    k1 ^= u64(tail[0]) << 0;
-    bmix64(h1, h2, k1, k2, c1, c2);
-  };
-
-  //----------
-  // finalization
-
-  h2 ^= len;
-
+  u64 h1 = state.h1;
+  u64 h2 = state.h2 ^ len;
   h1 += h2;
   h2 += h1;
-
-  h1 = fmix64(h1);
-  h2 = fmix64(h2);
-
-  h1 += h2;
-
-  return h1;
+  h1 = Avalanche64(h1);
+  h2 = Avalanche64(h2);
+  return h1 + h2;
 }
 
-#else
-
-//-----------------------------------------------------------------------------
-// Block read - if your platform needs to do endian-swapping or can only
-// handle aligned reads, do the conversion here
-
-static u32 getblock(const u32* p, int i)
-{
-  return p[i];
-}
-
-//----------
-// Finalization mix - force all bits of a hash block to avalanche
-
-// avalanches all bits to within 0.25% bias
-
-static u32 fmix32(u32 h)
-{
-  h ^= h >> 16;
-  h *= 0x85ebca6b;
-  h ^= h >> 13;
-  h *= 0xc2b2ae35;
-  h ^= h >> 16;
-
-  return h;
-}
-
-static void bmix32(u32& h1, u32& h2, u32& k1, u32& k2, u32& c1, u32& c2)
-{
-  k1 *= c1;
-  k1 = std::rotl(k1, 11);
-  k1 *= c2;
-  h1 ^= k1;
-  h1 += h2;
-
-  h2 = std::rotl(h2, 17);
-
-  k2 *= c2;
-  k2 = std::rotl(k2, 11);
-  k2 *= c1;
-  h2 ^= k2;
-  h2 += h1;
-
-  h1 = h1 * 3 + 0x52dce729;
-  h2 = h2 * 3 + 0x38495ab5;
-
-  c1 = c1 * 5 + 0x7b7d159c;
-  c2 = c2 * 5 + 0x6bce6396;
-}
-
-//----------
-
-static u64 GetMurmurHash3(const u8* src, u32 len, u32 samples)
-{
-  const u8* data = (const u8*)src;
-  u32 out[2];
-  const int nblocks = len / 8;
-  u32 Step = (len / 4);
-  if (samples == 0)
-    samples = std::max(Step, 1u);
-  Step = Step / samples;
-  if (Step < 1)
-    Step = 1;
-
-  u32 h1 = 0x8de1c3ac;
-  u32 h2 = 0xbab98226;
-
-  u32 c1 = 0x95543787;
-  u32 c2 = 0x2ad7eb25;
-
-  //----------
-  // body
-
-  const u32* blocks = (const u32*)(data + nblocks * 8);
-
-  for (int i = -nblocks; i < 0; i += Step)
-  {
-    u32 k1 = getblock(blocks, i * 2 + 0);
-    u32 k2 = getblock(blocks, i * 2 + 1);
-
-    bmix32(h1, h2, k1, k2, c1, c2);
-  }
-
-  //----------
-  // tail
-
-  const u8* tail = (const u8*)(data + nblocks * 8);
-
-  u32 k1 = 0;
-  u32 k2 = 0;
-
-  switch (len & 7)
-  {
-  case 7:
-    k2 ^= tail[6] << 16;
-  case 6:
-    k2 ^= tail[5] << 8;
-  case 5:
-    k2 ^= tail[4] << 0;
-  case 4:
-    k1 ^= tail[3] << 24;
-  case 3:
-    k1 ^= tail[2] << 16;
-  case 2:
-    k1 ^= tail[1] << 8;
-  case 1:
-    k1 ^= tail[0] << 0;
-    bmix32(h1, h2, k1, k2, c1, c2);
-  };
-
-  //----------
-  // finalization
-
-  h2 ^= len;
-
-  h1 += h2;
-  h2 += h1;
-
-  h1 = fmix32(h1);
-  h2 = fmix32(h2);
-
-  h1 += h2;
-  h2 += h1;
-
-  out[0] = h1;
-  out[1] = h2;
-
-  return *((u64*)&out);
-}
-
-#endif
-
-#if defined(_M_X86_64)
+// --- Texture hash with SSE4.2 CRC32 ---------------------------------------------------------
+// Four CRC32C lanes, each fed every fourth sampled 8-byte word; lane 0 starts from the length
+// and also takes the trailing bytes. The lanes are combined with shifted adds.
 
 FUNCTION_TARGET_SSE42
-static u64 GetHash64_SSE42_CRC32(const u8* src, u32 len, u32 samples)
+u64 TextureHashCRC32(const u8* src, u32 len, u32 samples)
 {
-  u64 h[4] = {len, 0, 0, 0};
-  u32 Step = (len / 8);
-  const u64* data = (const u64*)src;
-  const u64* end = data + Step;
-  if (samples == 0)
-    samples = std::max(Step, 1u);
-  Step = Step / samples;
-  if (Step < 1)
-    Step = 1;
+  const u32 words = len / 8;
+  const u32 stride = SampleStride(words, samples);
+  u64 lane[4] = {len, 0, 0, 0};
 
-  while (data < end - Step * 3)
+  // Word indices are computed in 64 bits: idx + 3 * stride must not wrap.
+  u64 idx = 0;
+  for (; idx + 3 * u64{stride} < words; idx += 4 * u64{stride})
   {
-    h[0] = _mm_crc32_u64(h[0], data[Step * 0]);
-    h[1] = _mm_crc32_u64(h[1], data[Step * 1]);
-    h[2] = _mm_crc32_u64(h[2], data[Step * 2]);
-    h[3] = _mm_crc32_u64(h[3], data[Step * 3]);
-    data += Step * 4;
+    for (int l = 0; l < 4; ++l)
+      lane[l] = _mm_crc32_u64(lane[l], LoadU64(src + (idx + l * u64{stride}) * 8));
   }
-  if (data < end - Step * 0)
-    h[0] = _mm_crc32_u64(h[0], data[Step * 0]);
-  if (data < end - Step * 1)
-    h[1] = _mm_crc32_u64(h[1], data[Step * 1]);
-  if (data < end - Step * 2)
-    h[2] = _mm_crc32_u64(h[2], data[Step * 2]);
-
-  if (len & 7)
+  // Fewer than four sampled words left.
+  for (int l = 0; l < 3; ++l)
   {
-    u64 temp = 0;
-    memcpy(&temp, end, len & 7);
-    h[0] = _mm_crc32_u64(h[0], temp);
+    if (idx + l * u64{stride} < words)
+      lane[l] = _mm_crc32_u64(lane[l], LoadU64(src + (idx + l * u64{stride}) * 8));
   }
 
-  // FIXME: is there a better way to combine these partial hashes?
-  return h[0] + (h[1] << 10) + (h[2] << 21) + (h[3] << 32);
+  if (const u32 rest = len % 8; rest != 0)
+    lane[0] = _mm_crc32_u64(lane[0], LoadPartialU64(src + u64{words} * 8, rest));
+
+  return lane[0] + (lane[1] << 10) + (lane[2] << 21) + (lane[3] << 32);
 }
 
-#elif defined(_M_ARM_64)
+using TextureHashFn = u64 (*)(const u8*, u32, u32);
 
-static u64 GetHash64_ARMv8_CRC32(const u8* src, u32 len, u32 samples)
+TextureHashFn PickTextureHash()
 {
-  u64 h[4] = {len, 0, 0, 0};
-  u32 Step = (len / 8);
-  const u64* data = (const u64*)src;
-  const u64* end = data + Step;
-  if (samples == 0)
-    samples = std::max(Step, 1u);
-  Step = Step / samples;
-  if (Step < 1)
-    Step = 1;
-
-  while (data < end - Step * 3)
-  {
-    h[0] = __crc32d(h[0], data[Step * 0]);
-    h[1] = __crc32d(h[1], data[Step * 1]);
-    h[2] = __crc32d(h[2], data[Step * 2]);
-    h[3] = __crc32d(h[3], data[Step * 3]);
-    data += Step * 4;
-  }
-  if (data < end - Step * 0)
-    h[0] = __crc32d(h[0], data[Step * 0]);
-  if (data < end - Step * 1)
-    h[1] = __crc32d(h[1], data[Step * 1]);
-  if (data < end - Step * 2)
-    h[2] = __crc32d(h[2], data[Step * 2]);
-
-  if (len & 7)
-  {
-    u64 temp = 0;
-    memcpy(&temp, end, len & 7);
-    h[0] = __crc32d(h[0], temp);
-  }
-
-  // FIXME: is there a better way to combine these partial hashes?
-  return h[0] + (h[1] << 10) + (h[2] << 21) + (h[3] << 32);
+  return cpu_info.bCRC32 ? &TextureHashCRC32 : &TextureHashGeneric;
 }
-
-#endif
-
-using TextureHashFunction = u64 (*)(const u8* src, u32 len, u32 samples);
-static u64 SetHash64Function(const u8* src, u32 len, u32 samples);
-static TextureHashFunction s_texture_hash_func = SetHash64Function;
-
-static u64 SetHash64Function(const u8* src, u32 len, u32 samples)
-{
-  if (cpu_info.bCRC32)
-  {
-#if defined(_M_X86_64)
-    s_texture_hash_func = &GetHash64_SSE42_CRC32;
-#elif defined(_M_ARM_64)
-    s_texture_hash_func = &GetHash64_ARMv8_CRC32;
-#endif
-  }
-  else
-  {
-    s_texture_hash_func = &GetMurmurHash3;
-  }
-  return s_texture_hash_func(src, len, samples);
-}
+}  // namespace
 
 u64 GetHash64(const u8* src, u32 len, u32 samples)
 {
-  return s_texture_hash_func(src, len, samples);
+  // Resolved on first use, after cpu_info has been initialised.
+  static const TextureHashFn hash = PickTextureHash();
+  return hash(src, len, samples);
 }
 
 u32 StartCRC32()
 {
-  return crc32_z(0L, nullptr, 0);
+  return crc32_z(0, nullptr, 0);
 }
 
 u32 UpdateCRC32(u32 crc, const u8* data, size_t len)

@@ -1,5 +1,4 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,10 +6,13 @@
 #include <mutex>
 #include <string>
 
-#include "CommonTypes.h"
+#include "Common/CommonTypes.h"
 
 namespace Common
 {
+// A named wall-clock accumulator for PROFILE() scopes. ToString() renders a table of all live
+// profilers (calls, total, share of the frame, min/avg/stdev/max in microseconds) and resets
+// their counters; the table is only rebuilt every 60 calls.
 class Profiler
 {
 public:
@@ -19,10 +21,14 @@ public:
 
   static std::string ToString();
 
+  // Nested Start/Stop pairs on the same thread (same *depth) count as one measurement.
   void Start(u64* time, int* depth);
   void Stop(u64* time, int* depth);
+
+  // This profiler's table row; resets its counters.
   std::string Read();
 
+  // Orders by accumulated time.
   bool operator<(const Profiler& b) const;
 
 private:
@@ -37,13 +43,14 @@ private:
 
   std::mutex m_mutex;
   std::string m_name;
-  u64 m_usecs;
-  u64 m_usecs_min;
-  u64 m_usecs_max;
-  u64 m_usecs_quad;
-  u64 m_calls;
+  u64 m_usecs = 0;
+  u64 m_usecs_min = ~u64{0};
+  u64 m_usecs_max = 0;
+  u64 m_usecs_quad = 0;
+  u64 m_calls = 0;
 };
 
+// Starts a measurement on construction and ends it on destruction.
 class ProfilerExecuter
 {
 public:
@@ -61,6 +68,7 @@ private:
 };
 }  // namespace Common
 
+// Profiles the rest of the enclosing scope under `name`.
 #define PROFILE(name)                                                                              \
   static Common::Profiler prof_gen(name);                                                          \
   static thread_local u64 prof_time;                                                               \
