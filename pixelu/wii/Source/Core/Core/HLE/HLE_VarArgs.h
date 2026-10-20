@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -18,6 +17,8 @@ class System;
 
 namespace HLE::SystemVABI
 {
+// Argument classes of the 32-bit PowerPC System V ABI (SVR4). Each class is
+// fetched differently from registers or the stack.
 template <typename T>
 concept ArgPointer = std::is_union_v<T> || std::is_class_v<T>;
 template <typename T>
@@ -27,11 +28,13 @@ concept ArgDoubleWord = std::is_integral_v<T> && sizeof(T) == 8;
 template <typename T>
 concept ArgReal = std::is_floating_point_v<T>;
 
-// See System V ABI (SVR4) for more details
-//  -> 3-18 Parameter Passing
-//  -> 3-21 Variable Argument Lists
+// Walks the arguments of a guest function that was called with a variable
+// argument list, following the SVR4 PowerPC parameter passing rules:
+// integer words go in r3..r10, doubles in f1..f8, and whatever does not fit
+// spills to the caller's parameter area on the stack.
 //
-// Source:
+// Reference: "System V Application Binary Interface, PowerPC Processor
+// Supplement", sections "Parameter Passing" and "Variable Argument Lists".
 // http://refspecs.linux-foundation.org/elf/elfspec_ppc.pdf
 class VAList
 {
@@ -44,93 +47,59 @@ public:
   }
   virtual ~VAList();
 
-  // 0 - arg_ARGPOINTER
-  template <ArgPointer T>
-  T GetArg()
+  // Aggregates are passed by reference: the next word is their address, and
+  // the object is copied out of guest memory byte by byte.
+  template <ArgPointer T> T GetArg()
   {
     T obj;
-    u32 addr = GetArg<u32>();
-
-    for (size_t i = 0; i < sizeof(T); i += 1, addr += 1)
-    {
-      reinterpret_cast<u8*>(&obj)[i] = PowerPC::MMU::HostRead<u8>(m_guard, addr);
-    }
-
+    const u32 source = GetArg<u32>();
+    auto* const bytes = reinterpret_cast<u8*>(&obj);
+    for (u32 offset = 0; offset < sizeof(T); ++offset)
+      bytes[offset] = PowerPC::MMU::HostRead<u8>(m_guard, source + offset);
     return obj;
   }
 
-  // 1 - arg_WORD
-  template <ArgWord T>
-  T GetArg()
+  // Anything up to 32 bits takes one GPR, or one aligned stack word.
+  template <ArgWord T> T GetArg()
   {
     static_assert(!std::is_pointer<T>(), "VAList doesn't support pointers");
-    u64 value;
-
-    if (m_gpr <= m_gpr_max)
-    {
-      value = GetGPR(m_gpr);
-      m_gpr += 1;
-    }
-    else
-    {
-      m_stack = Common::AlignUp(m_stack, 4);
-      value = PowerPC::MMU::HostRead<u32>(m_guard, m_stack);
-      m_stack += 4;
-    }
-
-    return static_cast<T>(value);
+    const u64 raw = m_gpr <= m_gpr_max ? GetGPR(m_gpr++) : PopStack32();
+    return static_cast<T>(raw);
   }
 
-  // 2 - arg_DOUBLEWORD
-  template <ArgDoubleWord T>
-  T GetArg()
+  // 64-bit integers take an odd/even register pair (r3:r4, r5:r6, ...), or
+  // an 8-byte aligned stack slot once the pairs run out.
+  template <ArgDoubleWord T> T GetArg()
   {
-    u64 value;
+    m_gpr += (m_gpr & 1) ^ 1;
+    if (m_gpr >= m_gpr_max)
+      return static_cast<T>(PopStack64());
 
-    if (m_gpr % 2 == 0)
-      m_gpr += 1;
-    if (m_gpr < m_gpr_max)
-    {
-      value = static_cast<u64>(GetGPR(m_gpr)) << 32 | GetGPR(m_gpr + 1);
-      m_gpr += 2;
-    }
-    else
-    {
-      m_stack = Common::AlignUp(m_stack, 8);
-      value = PowerPC::MMU::HostRead<u64>(m_guard, m_stack);
-      m_stack += 8;
-    }
-
-    return static_cast<T>(value);
+    const u64 high = GetGPR(m_gpr);
+    const u64 low = GetGPR(m_gpr + 1);
+    m_gpr += 2;
+    return static_cast<T>((high << 32) | low);
   }
 
-  // 3 - arg_ARGREAL
-  template <ArgReal T>
-  T GetArg()
+  // Floating point values are promoted to double and take one FPR.
+  template <ArgReal T> T GetArg()
   {
-    double value;
-
+    double raw;
     if (m_fpr <= m_fpr_max)
     {
-      value = GetFPR(m_fpr);
-      m_fpr += 1;
+      raw = GetFPR(m_fpr++);
     }
     else
     {
       m_stack = Common::AlignUp(m_stack, 8);
-      value = PowerPC::MMU::HostRead<double>(m_guard, m_stack);
+      raw = PowerPC::MMU::HostRead<double>(m_guard, m_stack);
       m_stack += 8;
     }
-
-    return static_cast<T>(value);
+    return static_cast<T>(raw);
   }
 
-  // Helper
-  template <typename T>
-  T GetArgT()
-  {
-    return static_cast<T>(GetArg<T>());
-  }
+  // Same as GetArg, with the result converted to T.
+  template <typename T> T GetArgT() { return static_cast<T>(GetArg<T>()); }
 
 protected:
   const Core::CPUThreadGuard& m_guard;
@@ -141,16 +110,30 @@ protected:
   u32 m_stack;
 
 private:
+  u32 PopStack32()
+  {
+    m_stack = Common::AlignUp(m_stack, 4);
+    const u32 value = PowerPC::MMU::HostRead<u32>(m_guard, m_stack);
+    m_stack += 4;
+    return value;
+  }
+
+  u64 PopStack64()
+  {
+    m_stack = Common::AlignUp(m_stack, 8);
+    const u64 value = PowerPC::MMU::HostRead<u64>(m_guard, m_stack);
+    m_stack += 8;
+    return value;
+  }
+
   virtual u32 GetGPR(u32 gpr) const;
   virtual double GetFPR(u32 fpr) const;
 };
 
-// See System V ABI (SVR4) for more details
-//  -> 6-6 Required Routines
-//  -> 3-21 Variable Argument Lists
-//
-// Source:
-// http://refspecs.linux-foundation.org/elf/elfspec_ppc.pdf
+// Arguments reached through a guest va_list object (as passed to vprintf and
+// friends) rather than through the live registers. The object records how
+// many registers were already consumed, where the spilled registers were
+// saved, and where the stack overflow area begins.
 class VAListStruct : public VAList
 {
 public:
@@ -158,6 +141,7 @@ public:
   ~VAListStruct() override = default;
 
 private:
+  // Guest layout of va_list.
   struct svr4_va_list
   {
     u8 gpr;

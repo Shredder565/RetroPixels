@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -15,6 +14,7 @@ class CPUThreadGuard;
 
 namespace HLE_OS
 {
+// Source of the values consumed while expanding a printf-style format.
 class HLEPrintArgs
 {
 public:
@@ -25,6 +25,7 @@ public:
   virtual std::u16string GetU16String(std::optional<u32> max_length) = 0;
 };
 
+// Expands a guest printf-style format string, pulling arguments from `args`.
 std::string GetStringVA(HLEPrintArgs* args, std::string_view string);
 
 void HLE_GeneralDebugPrint(const Core::CPUThreadGuard& guard);

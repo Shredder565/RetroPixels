@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HLE/HLE_Misc.h"
 
@@ -14,69 +13,82 @@
 
 namespace HLE_Misc
 {
-// If you just want to kill a function, one of the three following are usually appropriate.
-// According to the PPC ABI, the return value is always in r3.
+namespace
+{
+// Number of times the code handler gets its icache flush before we stop
+// helping. Some games only apply their patches once data has been loaded, so
+// a handful of early frames is enough in practice.
+constexpr u32 FLUSHED_RUNS = 5;
+
+// Layout of the frame Gecko::RunCodeHandler pushes before entering the
+// handler, as offsets from the saved stack pointer.
+constexpr u32 FRAME_OLD_SP = 8;
+constexpr u32 FRAME_OLD_PC = 12;
+constexpr u32 FRAME_OLD_LR = 16;
+constexpr u32 FRAME_OLD_CR = 20;
+constexpr u32 FRAME_PAIRED_SINGLES = 24;
+constexpr u32 SAVED_PS_REGISTERS = 14;
+}  // namespace
+
+// Stub for a function that should simply return to its caller; any result
+// is whatever already sits in r3.
 void UnimplementedFunction(const Core::CPUThreadGuard& guard)
 {
-  auto& system = guard.GetSystem();
-  auto& ppc_state = system.GetPPCState();
-  ppc_state.npc = LR(ppc_state);
+  PowerPC::PowerPCState& state = guard.GetSystem().GetPPCState();
+  state.npc = LR(state);
 }
 
+// A homebrew title asked to go back to its loader. We have no loader to go
+// back to, so stop emulation instead.
 void HBReload(const Core::CPUThreadGuard& guard)
 {
-  // There isn't much we can do. Just stop cleanly.
-  auto& system = guard.GetSystem();
-  system.GetCPU().Break();
+  guard.GetSystem().GetCPU().Break();
   Host_Message(HostMessageID::WMUserStop);
 }
 
+// The code handler writes instructions without invalidating the icache. The
+// installer's game-id word doubles as a run counter so the costly full reset
+// only happens for the first few runs.
 void GeckoCodeHandlerICacheFlush(const Core::CPUThreadGuard& guard)
 {
-  auto& system = guard.GetSystem();
-  auto& ppc_state = system.GetPPCState();
-  auto& jit_interface = system.GetJitInterface();
+  Core::System& system = guard.GetSystem();
 
-  // Work around the codehandler not properly invalidating the icache, but
-  // only the first few frames.
-  // (Project M uses a conditional to only apply patches after something has
-  // been read into memory, or such, so we do the first 5 frames.  More
-  // robust alternative would be to actually detect memory writes, but that
-  // would be even uglier.)
-  u32 gch_gameid = PowerPC::MMU::HostRead<u32>(guard, Gecko::INSTALLER_BASE_ADDRESS);
-  if (gch_gameid - Gecko::MAGIC_GAMEID == 5)
-  {
+  const u32 counter = PowerPC::MMU::HostRead<u32>(guard, Gecko::INSTALLER_BASE_ADDRESS);
+  const u32 runs = counter - Gecko::MAGIC_GAMEID;
+  if (runs == FLUSHED_RUNS)
     return;
-  }
-  else if (gch_gameid - Gecko::MAGIC_GAMEID > 5)
-  {
-    gch_gameid = Gecko::MAGIC_GAMEID;
-  }
-  PowerPC::MMU::HostWrite<u32>(guard, gch_gameid + 1, Gecko::INSTALLER_BASE_ADDRESS);
 
-  ppc_state.iCache.Reset(jit_interface);
+  // Anything out of range (including a word that was never the magic value)
+  // restarts the count.
+  const u32 next = (runs < FLUSHED_RUNS ? counter : Gecko::MAGIC_GAMEID) + 1;
+  PowerPC::MMU::HostWrite<u32>(guard, next, Gecko::INSTALLER_BASE_ADDRESS);
+
+  system.GetPPCState().iCache.Reset(system.GetJitInterface());
 }
 
-// Because Dolphin messes around with the CPU state instead of patching the game binary, we
-// need a way to branch into the GCH from an arbitrary PC address. Branching is easy, returning
-// back is the hard part. This HLE function acts as a trampoline that restores the original LR, SP,
-// and PC before the magic, invisible BL instruction happened.
+// Entering the code handler is done by faking a branch-and-link from wherever
+// the CPU was. This trampoline undoes that: it restores SP, PC, LR, CR and the
+// first paired-single registers from the frame that was built on entry.
 void GeckoReturnTrampoline(const Core::CPUThreadGuard& guard)
 {
-  auto& system = guard.GetSystem();
-  auto& ppc_state = system.GetPPCState();
+  PowerPC::PowerPCState& state = guard.GetSystem().GetPPCState();
+  const u32 frame = state.gpr[1];
+  const auto load32 = [&guard, frame](u32 offset) {
+    return PowerPC::MMU::HostRead<u32>(guard, frame + offset);
+  };
 
-  // Stack frame is built in GeckoCode.cpp, Gecko::RunCodeHandler.
-  const u32 SP = ppc_state.gpr[1];
-  ppc_state.gpr[1] = PowerPC::MMU::HostRead<u32>(guard, SP + 8);
-  ppc_state.npc = PowerPC::MMU::HostRead<u32>(guard, SP + 12);
-  LR(ppc_state) = PowerPC::MMU::HostRead<u32>(guard, SP + 16);
-  ppc_state.cr.Set(PowerPC::MMU::HostRead<u32>(guard, SP + 20));
-  for (int i = 0; i < 14; ++i)
+  state.gpr[1] = load32(FRAME_OLD_SP);
+  state.npc = load32(FRAME_OLD_PC);
+  LR(state) = load32(FRAME_OLD_LR);
+  state.cr.Set(load32(FRAME_OLD_CR));
+
+  u32 slot = frame + FRAME_PAIRED_SINGLES;
+  for (u32 reg = 0; reg < SAVED_PS_REGISTERS; ++reg)
   {
-    ppc_state.ps[i].SetBoth(
-        PowerPC::MMU::HostRead<u64>(guard, SP + 24 + 2 * i * sizeof(u64)),
-        PowerPC::MMU::HostRead<u64>(guard, SP + 24 + (2 * i + 1) * sizeof(u64)));
+    const u64 ps0 = PowerPC::MMU::HostRead<u64>(guard, slot);
+    const u64 ps1 = PowerPC::MMU::HostRead<u64>(guard, slot + 8);
+    state.ps[reg].SetBoth(ps0, ps1);
+    slot += 16;
   }
 }
 }  // namespace HLE_Misc

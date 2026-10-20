@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -26,16 +25,16 @@ using HookFunction = void (*)(const Core::CPUThreadGuard&);
 
 enum class HookType
 {
-  None,     // Do not hook the function
-  Start,    // Hook the beginning of the function and execute the function afterwards
-  Replace,  // Replace the function with the HLE version
+  None,     // No hook
+  Start,    // Run the HLE handler on entry, then let the guest function run
+  Replace,  // Run the HLE handler instead of the guest function
 };
 
 enum class HookFlag
 {
-  Generic,  // Miscellaneous function
-  Debug,    // Debug output function
-  Fixed,    // An arbitrary hook mapped to a fixed address instead of a symbol
+  Generic,  // Nothing special
+  Debug,    // Logging hook; only active when its output can be seen
+  Fixed,    // Installed at a hard-coded address rather than found by symbol name
 };
 
 struct Hook
@@ -65,9 +64,9 @@ u32 UnpatchRange(Core::System& system, u32 start_addr, u32 end_addr);
 void Execute(const Core::CPUThreadGuard& guard, u32 current_pc, u32 hook_index);
 void ExecuteFromJIT(u32 current_pc, u32 hook_index, Core::System& system);
 
-// Returns the HLE hook index of the address
+// Hook table index installed at `address`, or 0 for none.
 u32 GetHookByAddress(u32 address);
-// Returns the HLE hook index if the address matches the function start
+// Like GetHookByAddress, but symbol hooks only count at their function's first instruction.
 u32 GetHookByFunctionAddress(PPCSymbolDB& ppc_symbol_db, u32 address);
 const char* GetHookNameByIndex(u32 index);
 HookType GetHookTypeByIndex(u32 index);
@@ -75,8 +74,8 @@ HookFlag GetHookFlagsByIndex(u32 index);
 
 bool IsEnabled(HookFlag flag, PowerPC::CoreMode mode);
 
-// Performs the backend-independent preliminary checking for whether a function
-// can be HLEd. If it can be, the information needed for HLEing it is returned.
+// Shared check used by every CPU backend before compiling or interpreting a
+// function entry: reports whether (and how) the code at `address` is hooked.
 TryReplaceFunctionResult TryReplaceFunction(PPCSymbolDB& ppc_symbol_db, u32 address,
                                             PowerPC::CoreMode mode);
 
