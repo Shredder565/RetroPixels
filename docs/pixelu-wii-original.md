@@ -99,12 +99,12 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 77930 | 18.1% |
-| Dolphin, untouched | 343313 | 79.6% |
+| Original (RetroPixels) | 83417 | 19.4% |
+| Dolphin, untouched | 336977 | 78.3% |
 | Dolphin, with PixelU changes | 4224 | 1.0% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.3% |
-| **All** | **431230** | 100% |
+| **All** | **430381** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -126,16 +126,16 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/DSP/Jit | 7632 | 0 | Dolphin |
 | Core/Core/FifoPlayer | 2133 | 0 | Dolphin |
 | Core/Core/HLE | 1350 | 0 | Dolphin |
-| Core/Core/HW (top level) | 10215 | 7668 | mixed (75% original) |
+| Core/Core/HW (top level) | 9923 | 9563 | mixed (96% original) |
 | Core/Core/HW/DSPHLE | 7731 | 0 | Dolphin |
 | Core/Core/HW/DSPLLE | 573 | 0 | Dolphin |
 | Core/Core/HW/DVD | 4942 | 2244 | mixed (45% original) |
 | Core/Core/HW/EXI | 8449 | 0 | Dolphin, 91 lines third-party |
 | Core/Core/HW/GCMemcard | 3145 | 3145 | original |
-| Core/Core/HW/HSP | 1053 | 0 | Dolphin |
+| Core/Core/HW/HSP | 964 | 964 | original |
 | Core/Core/HW/MagCard | 1368 | 0 | Dolphin |
-| Core/Core/HW/SI | 3611 | 0 | Dolphin |
-| Core/Core/HW/Triforce | 3620 | 0 | Dolphin |
+| Core/Core/HW/SI | 3159 | 2504 | mixed (79% original) |
+| Core/Core/HW/Triforce | 3604 | 124 | mixed (3% original) |
 | Core/Core/HW/WiimoteCommon | 1052 | 0 | Dolphin |
 | Core/Core/HW/WiimoteEmu | 8117 | 0 | Dolphin |
 | Core/Core/HW/WiimoteReal | 2579 | 0 | Dolphin |
@@ -240,7 +240,7 @@ batch rewrites them.
 | W10 | HW: memory map, MMIO, CPU/PI/MI/VI/AI/DSP interfaces, timers, IPC, CoreTiming | 8491 | 8491 | original |
 | W11 | HW: DVD and GameCube memory cards | 8087 | 5389 | mixed (67% original) |
 | W12 | HW: EXI devices (memory card slots, BBA, mic, modem, IPL) | 8358 | 0 | Dolphin |
-| W13 | HW: SI, pads, keyboard, GBA link, HSP, Triforce, MagCard | 11839 | 0 | Dolphin |
+| W13 | HW: SI, pads, keyboard, GBA link, HSP, Triforce, MagCard | 10990 | 5487 | mixed (50% original) |
 | W14 | HW: Wii Remote (common, emulated, real) | 12108 | 0 | Dolphin |
 | W15 | DSP: core, interpreter, LLE glue | 10311 | 0 | Dolphin |
 | W16 | DSP: x64 JIT | 7632 | 0 | Dolphin |
@@ -1256,3 +1256,125 @@ Checks
       remaining runs are register and enum tables, struct layouts and
       class declarations in the headers, and one register address table
       in DSP.cpp.
+- W13 log: rewrote 46 of the 68 W13 files: serial interface, controller
+  devices, pad/keyboard/GBA input, the high speed port, the Game Boy
+  Player, the mGBA core wrapper and the Triforce serial base class (5487
+  lines now, from 6336). The batch is 10990 lines, half of it original now.
+  Rewritten:
+  - `SI/SI`, `SI_Device`, `SI_DeviceNull`, `SI_DeviceGCController`,
+    `SI_DeviceGCSteeringWheel`, `SI_DeviceDanceMat`, `SI_DeviceGCAdapter`,
+    `SI_DeviceKeyboard`, `SI_DeviceGBA`, `SI_DeviceGBAEmu`.
+  - `GCPad`, `GCPadEmu`, `GCKeyboard`, `GCKeyboardEmu`, `GBAPad`,
+    `GBAPadEmu`.
+  - `HSP/HSP`, `HSP_Device`, `HSP_DeviceNull`, `HSP_DeviceARAMExpansion`,
+    `HSP_DeviceGBPlayer`, `GBACore`, `Triforce/SerialDevice`.
+
+  Every rewritten file starts with the original-code header and has no
+  Dolphin copyright or SPDX line. These are unchanged:
+  - File names, public declarations and enum values.
+  - SI register behaviour (SICOMCSR, SISR, SIPOLL, the port words, the
+    128-byte buffer), the poll and transfer timing, interrupts, and the
+    CoreTiming event names and their registration order.
+  - Every device's command responses: status/origin/recalibrate/direct
+    polls, all analog modes, rumble and the steering-wheel force command,
+    the X+Y+Start and B+X+Start combos, the bongo masking, the dance mat
+    panel bits, the keyboard scancodes, counter and checksum, the GBA
+    link protocol and transfer times, and the GBA emulator sync.
+  - Netplay and movie hooks.
+  - Savestate `DoState` order and bytes, including the HSP device-type
+    switch, the "Have mGBA" marker and the mGBA core state blob.
+  - Input config names, control groups and controls (order, names, UI
+    names, settings) and all translatable strings.
+  - The Game Boy Player register map: test inversion, control power edges,
+    the IRQ read/acknowledge format, keypad bit swizzle, video and audio
+    block layout, PWM conversion, the 4096 Hz update and the video pacing.
+  - The mGBA wrapper: ROM/zip/archive opening, mGBA config values, BIOS and
+    save loading, SIO joybus driver, AV stream, frame buffer placement for
+    the GB Player, clock conversion with remainder, import/export, the
+    ROM-mismatch check on state load, `GetRomInfo` and `GetSavePath`.
+  - Deliberate differences (bug fixes, nothing a game sees):
+    - `CSIDevice_GCController` CMD_DIRECT starts from zeroed hi/lo, so a
+      pad that drops out between polls no longer sends uninitialised stack
+      words.
+    - `CSIDevice_GBA` zero-fills the reply bytes the peer did not send.
+      The connection waiter sets its running flag before starting its
+      thread (the old code raced on it), and drops an unused counter.
+    - The Game Boy Player PWM ring wraps per byte. The old code wrapped
+      once per sample and could write past the end of the ring if mGBA
+      raised the PWM width mid-stream. When the old code stayed in bounds,
+      positions and bytes are the same.
+    - `GCPadEmu`, `GCKeyboardEmu` and `GBAPadEmu` keep only the Windows
+      default key mappings. The Android, macOS and Linux branches are gone
+      (Windows-only build, as in W1).
+    - `GBACore.h` includes `<atomic>` itself instead of relying on
+      `WorkQueueThread.h`.
+    - Debug/log messages users don't see are reworded. Translator (i18n)
+      comments are reworded; the strings are not.
+  - Checked: old and new code side by side, with identical hashed output
+    streams. Both sides use the untouched EXI and InputCommon files from
+    c4ddb95. Both are built with `-ftrivial-auto-var-init=zero`, so the
+    old uninitialised locals don't make the runs differ.
+    - SI: a fake system (CoreTiming queue, PI, timers, pads, keyboard,
+      Wii U adapter, movie, netplay, config, SFML sockets with a scripted
+      GBA peer, a fake GBA core). Random u16/u32 MMIO sequences on every
+      SI register and buffer word, random device choices per port, polls,
+      transfers, device swaps with cooldown, reset button, rumble, adapter
+      output, savestate saves and loads (with device swaps). The trace
+      covers registers, interrupts, event cycles, response bytes and
+      savestate bytes. Seeds 1-150, 100-699, 5000-5099, up to 10000
+      steps; about 18M lines.
+    - Input: GCPad/GCKeyboard/GBAPad against the real ControllerEmu,
+      ControlReference and IniFile code. The old Emu files are compiled
+      with their Windows branches selected. The trace covers group/control/
+      setting structure, defaults written by SaveConfig, random INI
+      settings and expressions loaded back, random input override
+      functions (every group/control read and its order), GetInput,
+      GetMicButton, rumble, GBA reset, group lookups and the
+      Pad/Keyboard/GBA glue. 305 seeds, about 4M lines.
+    - HSP: HSPManager with all three devices. Random block reads and
+      writes (including addresses with bits above the register field),
+      device swaps, Init/Shutdown, savestate loads across device types,
+      the ARAM expansion with power-of-two and odd sizes, and the GB
+      Player driven by a fake mGBA (scripted audio buffers, frame-end and
+      rate callbacks, update events). 540 seeds, about 5M lines.
+    - GBACore: a scripted, tracing mGBA, VFS and minizip (ROM found or not
+      in archives/zips/plain files, failure at every step, GB and GBA
+      cores, e-Reader flag), a synchronous stand-in for the work queue
+      thread, and real files for state/save import/export. The trace
+      covers every mGBA call and argument, joybus commands and replies,
+      clock conversion, SIO driver callbacks, AV stream and host
+      callbacks, mixer pushes, frame buffer contents and position, and
+      savestate bytes and loads (including ROM mismatches). 300 seeds,
+      5M lines. Changing the GB Player frame offset by one pixel made 3
+      of 30 seeds differ, so the harness catches that kind of change.
+    - Triforce `SerialDevice`: random rx/tx/pass-through/consume/state
+      sequences on two devices. 300 seeds, 1.1M lines.
+  - Compile check: the W13 .cpp files, plus the non-Qt files that include
+    W13 headers (DSP, HW, System, MainSettings, NetPlayClient/Server,
+    Core, ConfigManager, DolphinAnalytics, EXI_DeviceMic, UICommon,
+    SystemTimers, ProcessorInterface, Movie, State, EXI). Built with clang
+    on Linux and with `-target x86_64-w64-windows-gnu`. The rewritten
+    files are clean under `-Wall -Wextra -Wconversion -Wsign-compare`.
+    Narrowing and sign changes are written as explicit casts with the same
+    values (for MSVC /W4 with warnings as errors). The only failures are
+    in State, System and UICommon, and they match the base tree exactly
+    (missing glslang and similar headers here). The DolphinQt users (GBA
+    widget/host, TAS windows, mapping pages, NetPlay dialog) can't be
+    compiled here because there are no Qt headers. They only use
+    declarations that are unchanged.
+  - Verbatim audit (`verbatim-audit.py wii 8`): the runs left in W13 files
+    are all public declarations in headers (class declarations, enums,
+    constant lists, member function lists). No run is left inside a .cpp
+    function body.
+  - Not rewritten (unchanged, original headers kept, as AMMediaboard in
+    W11):
+    - `Triforce/DeckReader`, `FZeroAX`, `ICCardReader`, `IOPorts`,
+      `JVSIO`, `MarioKartGP`, `Touchscreen`.
+    - `MagCard/C1231BR`, `C1231LR`, `MagneticCardReader`.
+    - `SI/SI_DeviceAMBaseboard`.
+
+    These emulate undocumented, reverse-engineered Triforce hardware: the
+    baseboard's SI command set, the card reader and deck protocols, the
+    per-board JVS identities and quirks, and the cabinet I/O maps. The
+    existing code is the only description of how they behave, and they
+    can't be tested here without Triforce software. That is 5503 lines.
