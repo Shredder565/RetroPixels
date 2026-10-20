@@ -912,103 +912,67 @@ public:
 
   // The suffix letters give the arguments in order: C = a 32-bit (or 16-bit) constant,
   // P = a pointer constant, R = a register, A = an OpArg of the given width.
-  template <typename FunctionPointer>
-  void ABI_CallFunctionC16(FunctionPointer func, u16 param1)
-  {
-    MOV(32, R(ABI_PARAM1), Imm32(param1));
-    ABI_CallFunction(func);
-  }
-
-  template <typename FunctionPointer>
-  void ABI_CallFunctionCC16(FunctionPointer func, u32 param1, u16 param2)
-  {
-    MOV(32, R(ABI_PARAM1), Imm32(param1));
-    MOV(32, R(ABI_PARAM2), Imm32(param2));
-    ABI_CallFunction(func);
-  }
-
+  // The all-constant forms load ABI_PARAM1, ABI_PARAM2, ... from left to right.
   template <typename FunctionPointer>
   void ABI_CallFunctionC(FunctionPointer func, u32 param1)
   {
-    MOV(32, R(ABI_PARAM1), Imm32(param1));
-    ABI_CallFunction(func);
+    CallWithConstantArgs(func, param1);
   }
-
+  template <typename FunctionPointer>
+  void ABI_CallFunctionC16(FunctionPointer func, u16 param1)
+  {
+    CallWithConstantArgs(func, param1);
+  }
+  template <typename FunctionPointer>
+  void ABI_CallFunctionP(FunctionPointer func, const void* param1)
+  {
+    CallWithConstantArgs(func, param1);
+  }
   template <typename FunctionPointer>
   void ABI_CallFunctionCC(FunctionPointer func, u32 param1, u32 param2)
   {
-    MOV(32, R(ABI_PARAM1), Imm32(param1));
-    MOV(32, R(ABI_PARAM2), Imm32(param2));
-    ABI_CallFunction(func);
+    CallWithConstantArgs(func, param1, param2);
   }
-
+  template <typename FunctionPointer>
+  void ABI_CallFunctionCC16(FunctionPointer func, u32 param1, u16 param2)
+  {
+    CallWithConstantArgs(func, param1, param2);
+  }
   template <typename FunctionPointer>
   void ABI_CallFunctionCP(FunctionPointer func, u32 param1, const void* param2)
   {
-    MOV(32, R(ABI_PARAM1), Imm32(param1));
-    MOV(64, R(ABI_PARAM2), ImmPtr(param2));
-    ABI_CallFunction(func);
+    CallWithConstantArgs(func, param1, param2);
   }
-
+  template <typename FunctionPointer>
+  void ABI_CallFunctionPC(FunctionPointer func, const void* param1, u32 param2)
+  {
+    CallWithConstantArgs(func, param1, param2);
+  }
+  template <typename FunctionPointer>
+  void ABI_CallFunctionPP(FunctionPointer func, const void* param1, const void* param2)
+  {
+    CallWithConstantArgs(func, param1, param2);
+  }
   template <typename FunctionPointer>
   void ABI_CallFunctionCCC(FunctionPointer func, u32 param1, u32 param2, u32 param3)
   {
-    MOV(32, R(ABI_PARAM1), Imm32(param1));
-    MOV(32, R(ABI_PARAM2), Imm32(param2));
-    MOV(32, R(ABI_PARAM3), Imm32(param3));
-    ABI_CallFunction(func);
+    CallWithConstantArgs(func, param1, param2, param3);
   }
-
   template <typename FunctionPointer>
   void ABI_CallFunctionCCP(FunctionPointer func, u32 param1, u32 param2, const void* param3)
   {
-    MOV(32, R(ABI_PARAM1), Imm32(param1));
-    MOV(32, R(ABI_PARAM2), Imm32(param2));
-    MOV(64, R(ABI_PARAM3), ImmPtr(param3));
-    ABI_CallFunction(func);
+    CallWithConstantArgs(func, param1, param2, param3);
   }
-
+  template <typename FunctionPointer>
+  void ABI_CallFunctionPPC(FunctionPointer func, const void* param1, const void* param2, u32 param3)
+  {
+    CallWithConstantArgs(func, param1, param2, param3);
+  }
   template <typename FunctionPointer>
   void ABI_CallFunctionCCCP(FunctionPointer func, u32 param1, u32 param2, u32 param3,
                             const void* param4)
   {
-    MOV(32, R(ABI_PARAM1), Imm32(param1));
-    MOV(32, R(ABI_PARAM2), Imm32(param2));
-    MOV(32, R(ABI_PARAM3), Imm32(param3));
-    MOV(64, R(ABI_PARAM4), ImmPtr(param4));
-    ABI_CallFunction(func);
-  }
-
-  template <typename FunctionPointer>
-  void ABI_CallFunctionP(FunctionPointer func, const void* param1)
-  {
-    MOV(64, R(ABI_PARAM1), ImmPtr(param1));
-    ABI_CallFunction(func);
-  }
-
-  template <typename FunctionPointer>
-  void ABI_CallFunctionPP(FunctionPointer func, const void* param1, const void* param2)
-  {
-    MOV(64, R(ABI_PARAM1), ImmPtr(param1));
-    MOV(64, R(ABI_PARAM2), ImmPtr(param2));
-    ABI_CallFunction(func);
-  }
-
-  template <typename FunctionPointer>
-  void ABI_CallFunctionPC(FunctionPointer func, const void* param1, u32 param2)
-  {
-    MOV(64, R(ABI_PARAM1), ImmPtr(param1));
-    MOV(32, R(ABI_PARAM2), Imm32(param2));
-    ABI_CallFunction(func);
-  }
-
-  template <typename FunctionPointer>
-  void ABI_CallFunctionPPC(FunctionPointer func, const void* param1, const void* param2, u32 param3)
-  {
-    MOV(64, R(ABI_PARAM1), ImmPtr(param1));
-    MOV(64, R(ABI_PARAM2), ImmPtr(param2));
-    MOV(32, R(ABI_PARAM3), Imm32(param3));
-    ABI_CallFunction(func);
+    CallWithConstantArgs(func, param1, param2, param3, param4);
   }
 
   template <typename FunctionPointer>
@@ -1043,12 +1007,20 @@ public:
     ABI_CallFunction(func);
   }
 
+  // The OpArg is moved first, so it may live in any of the argument registers the constants
+  // go to afterwards.
+  template <typename FunctionPointer>
+  void ABI_CallFunctionA(int bits, FunctionPointer func, const Gen::OpArg& arg1)
+  {
+    LoadOpArg(bits, ABI_PARAM1, arg1);
+    ABI_CallFunction(func);
+  }
+
   template <typename FunctionPointer>
   void ABI_CallFunctionAC(int bits, FunctionPointer func, const Gen::OpArg& arg1, u32 param2)
   {
-    if (!arg1.IsSimpleReg(ABI_PARAM1))
-      MOV(bits, R(ABI_PARAM1), arg1);
-    MOV(32, R(ABI_PARAM2), Imm32(param2));
+    LoadOpArg(bits, ABI_PARAM1, arg1);
+    LoadConstantArg(ABI_PARAM2, param2);
     ABI_CallFunction(func);
   }
 
@@ -1056,18 +1028,9 @@ public:
   void ABI_CallFunctionPAC(int bits, FunctionPointer func, const void* ptr1, const Gen::OpArg& arg2,
                            u32 param3)
   {
-    if (!arg2.IsSimpleReg(ABI_PARAM2))
-      MOV(bits, R(ABI_PARAM2), arg2);
-    MOV(32, R(ABI_PARAM3), Imm32(param3));
-    MOV(64, R(ABI_PARAM1), ImmPtr(ptr1));
-    ABI_CallFunction(func);
-  }
-
-  template <typename FunctionPointer>
-  void ABI_CallFunctionA(int bits, FunctionPointer func, const Gen::OpArg& arg1)
-  {
-    if (!arg1.IsSimpleReg(ABI_PARAM1))
-      MOV(bits, R(ABI_PARAM1), arg1);
+    LoadOpArg(bits, ABI_PARAM2, arg2);
+    LoadConstantArg(ABI_PARAM3, param3);
+    LoadConstantArg(ABI_PARAM1, ptr1);
     ABI_CallFunction(func);
   }
 
@@ -1098,6 +1061,27 @@ public:
     T (*const trampoline)(const std::function<T(Args...)>*, Args...) =
         &XEmitter::CallLambdaTrampoline<T, Args...>;
     ABI_CallFunctionPPC(trampoline, static_cast<const void*>(f), p1, p2);
+  }
+
+private:
+  // One constant call argument: a 32-bit move for integers, a 64-bit one for pointers.
+  void LoadConstantArg(X64Reg reg, u32 value) { MOV(32, R(reg), Imm32(value)); }
+  void LoadConstantArg(X64Reg reg, const void* value) { MOV(64, R(reg), ImmPtr(value)); }
+  // An OpArg argument, unless it already is that register.
+  void LoadOpArg(int bits, X64Reg reg, const OpArg& arg)
+  {
+    if (!arg.IsSimpleReg(reg))
+      MOV(bits, R(reg), arg);
+  }
+
+  template <typename FunctionPointer, typename... Args>
+  void CallWithConstantArgs(FunctionPointer func, Args... args)
+  {
+    static_assert(sizeof...(Args) >= 1 && sizeof...(Args) <= 4);
+    const X64Reg arg_regs[] = {ABI_PARAM1, ABI_PARAM2, ABI_PARAM3, ABI_PARAM4};
+    size_t next = 0;
+    (LoadConstantArg(arg_regs[next++], args), ...);
+    ABI_CallFunction(func);
   }
 };
 
