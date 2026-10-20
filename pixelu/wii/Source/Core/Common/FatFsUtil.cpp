@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -467,6 +468,34 @@ bool Unpack(const std::function<bool()>& cancelled, const std::string& path, boo
     return false;
   return Succeeded(f_chdir(".."), "leaving directory", path);
 }
+// The folder tree to put on the card, or nothing when it is missing or cannot be stored on FAT.
+std::optional<File::FSTEntry> ScanSyncFolder(const std::string& dir, bool deterministic)
+{
+  if (!File::IsDirectory(dir))
+  {
+    ERROR_LOG_FMT(COMMON, "{} is not a directory, not converting", dir);
+    return std::nullopt;
+  }
+  File::FSTEntry root = File::ScanDirectoryTree(dir, true);
+  if (deterministic)
+    SortByName(&root);
+  if (!IsFatCompatible(root))
+    return std::nullopt;
+  return root;
+}
+
+// The configured card size; with none configured, the contents plus half as much again (that
+// extra between 512 MiB and 8 GiB). Always whole clusters.
+u64 ImageSizeFor(const File::FSTEntry& root)
+{
+  u64 size = Config::Get(Config::MAIN_WII_SD_CARD_FILESIZE);
+  if (size == 0)
+  {
+    const u64 contents = EstimateSize(root);
+    size = contents + std::clamp(contents / 2, MiB(512), GiB(8));
+  }
+  return Common::AlignUp(size, MAX_CLUSTER_SIZE);
+}
 }  // namespace
 
 namespace Common
@@ -474,9 +503,11 @@ namespace Common
 FatFsCallbacks::FatFsCallbacks() = default;
 FatFsCallbacks::~FatFsCallbacks() = default;
 
-u8 FatFsCallbacks::DiskInitialize(u8 pdrv)
+// Defaults: the clock is the host's, and the disk is always ready (status and initialisation
+// both report no error flags).
+u32 FatFsCallbacks::GetCurrentTimeFAT()
 {
-  return 0;
+  return GetSystemTimeFAT();
 }
 
 u8 FatFsCallbacks::DiskStatus(u8 pdrv)
@@ -484,9 +515,9 @@ u8 FatFsCallbacks::DiskStatus(u8 pdrv)
   return 0;
 }
 
-u32 FatFsCallbacks::GetCurrentTimeFAT()
+u8 FatFsCallbacks::DiskInitialize(u8 pdrv)
 {
-  return GetSystemTimeFAT();
+  return 0;
 }
 
 bool SyncSDFolderToSDImage(const std::function<bool()>& cancelled, bool deterministic)
@@ -499,26 +530,11 @@ bool SyncSDFolderToSDImage(const std::function<bool()>& cancelled, bool determin
   INFO_LOG_FMT(COMMON, "Starting SD card conversion from folder {} to file {}", source_dir,
                image_path);
 
-  if (!File::IsDirectory(source_dir))
-  {
-    ERROR_LOG_FMT(COMMON, "{} is not a directory, not converting", source_dir);
+  std::optional<File::FSTEntry> scanned = ScanSyncFolder(source_dir, deterministic);
+  if (!scanned)
     return false;
-  }
-
-  File::FSTEntry root = File::ScanDirectoryTree(source_dir, true);
-  if (deterministic)
-    SortByName(&root);
-  if (!IsFatCompatible(root))
-    return false;
-
-  // A configured size, or the contents plus half as much again (within 512 MiB to 8 GiB).
-  u64 image_size = Config::Get(Config::MAIN_WII_SD_CARD_FILESIZE);
-  if (image_size == 0)
-  {
-    image_size = EstimateSize(root);
-    image_size += std::clamp(image_size / 2, MiB(512), GiB(8));
-  }
-  image_size = AlignUp(image_size, MAX_CLUSTER_SIZE);
+  File::FSTEntry& root = *scanned;
+  const u64 image_size = ImageSizeFor(root);
 
   std::lock_guard lock(s_fatfs_mutex);
   File::IOFile image;
@@ -658,36 +674,41 @@ void RunInFatFsContext(FatFsCallbacks& callbacks, const std::function<void()>& f
 }
 }  // namespace Common
 
-// FatFs disk and clock hooks.
-
-extern "C" DSTATUS disk_status(BYTE pdrv)
+// FatFs disk and clock hooks. They only run inside RunInFatFsContext, which installs the
+// callbacks for the duration of the call.
+static Common::FatFsCallbacks& Hooks()
 {
-  return static_cast<DSTATUS>(s_callbacks->DiskStatus(pdrv));
-}
-
-extern "C" DSTATUS disk_initialize(BYTE pdrv)
-{
-  return static_cast<DSTATUS>(s_callbacks->DiskInitialize(pdrv));
-}
-
-extern "C" DRESULT disk_read(BYTE pdrv, BYTE* buff, LBA_t sector, UINT count)
-{
-  return static_cast<DRESULT>(s_callbacks->DiskRead(pdrv, buff, sector, count));
-}
-
-extern "C" DRESULT disk_write(BYTE pdrv, const BYTE* buff, LBA_t sector, UINT count)
-{
-  return static_cast<DRESULT>(s_callbacks->DiskWrite(pdrv, buff, sector, count));
-}
-
-extern "C" DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void* buff)
-{
-  return static_cast<DRESULT>(s_callbacks->DiskIOCtl(pdrv, cmd, buff));
+  return *s_callbacks;
 }
 
 extern "C" DWORD get_fattime(void)
 {
-  return static_cast<DWORD>(s_callbacks->GetCurrentTimeFAT());
+  return static_cast<DWORD>(Hooks().GetCurrentTimeFAT());
+}
+
+extern "C" DSTATUS disk_initialize(BYTE pdrv)
+{
+  return static_cast<DSTATUS>(Hooks().DiskInitialize(pdrv));
+}
+
+extern "C" DSTATUS disk_status(BYTE pdrv)
+{
+  return static_cast<DSTATUS>(Hooks().DiskStatus(pdrv));
+}
+
+extern "C" DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void* buff)
+{
+  return static_cast<DRESULT>(Hooks().DiskIOCtl(pdrv, cmd, buff));
+}
+
+extern "C" DRESULT disk_read(BYTE pdrv, BYTE* buff, LBA_t sector, UINT count)
+{
+  return static_cast<DRESULT>(Hooks().DiskRead(pdrv, buff, sector, count));
+}
+
+extern "C" DRESULT disk_write(BYTE pdrv, const BYTE* buff, LBA_t sector, UINT count)
+{
+  return static_cast<DRESULT>(Hooks().DiskWrite(pdrv, buff, sector, count));
 }
 
 #if FF_USE_LFN == 3  // LFN buffers on the heap (not the current configuration)

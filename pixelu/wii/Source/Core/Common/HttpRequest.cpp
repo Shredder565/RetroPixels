@@ -267,9 +267,9 @@ bool HttpRequest::IsValid() const
   return m_impl->IsValid();
 }
 
-void HttpRequest::SetCookies(const std::string& cookies)
+void HttpRequest::FollowRedirects(long max)
 {
-  m_impl->SetCookies(cookies);
+  m_impl->FollowRedirects(max);
 }
 
 void HttpRequest::UseIPv4()
@@ -277,9 +277,9 @@ void HttpRequest::UseIPv4()
   m_impl->UseIPv4();
 }
 
-void HttpRequest::FollowRedirects(long max)
+void HttpRequest::SetCookies(const std::string& cookies)
 {
-  m_impl->FollowRedirects(max);
+  m_impl->SetCookies(cookies);
 }
 
 s32 HttpRequest::GetLastResponseCode() const
@@ -287,20 +287,14 @@ s32 HttpRequest::GetLastResponseCode() const
   return m_impl->GetLastResponseCode();
 }
 
-std::string HttpRequest::EscapeComponent(const std::string& string)
-{
-  return m_impl->EscapeComponent(string);
-}
-
 std::string HttpRequest::GetHeaderValue(std::string_view name) const
 {
   return m_impl->GetHeaderValue(name);
 }
 
-HttpRequest::Response HttpRequest::Get(const std::string& url, const Headers& headers,
-                                       AllowedReturnCodes codes)
+std::string HttpRequest::EscapeComponent(const std::string& string)
 {
-  return m_impl->Fetch(url, Impl::Method::GET, headers, nullptr, 0, codes);
+  return m_impl->EscapeComponent(string);
 }
 
 HttpRequest::Response HttpRequest::Post(const std::string& url, std::span<const u8> payload,
@@ -312,8 +306,9 @@ HttpRequest::Response HttpRequest::Post(const std::string& url, std::span<const 
 HttpRequest::Response HttpRequest::Post(const std::string& url, std::string_view payload,
                                         const Headers& headers, AllowedReturnCodes codes)
 {
-  return m_impl->Fetch(url, Impl::Method::POST, headers,
-                       reinterpret_cast<const u8*>(payload.data()), payload.size(), codes);
+  // Text payloads are sent as their bytes.
+  const std::span<const u8> bytes(reinterpret_cast<const u8*>(payload.data()), payload.size());
+  return Post(url, bytes, headers, codes);
 }
 
 HttpRequest::Response HttpRequest::PostMultiform(const std::string& url,
@@ -321,5 +316,11 @@ HttpRequest::Response HttpRequest::PostMultiform(const std::string& url,
                                                  const Headers& headers, AllowedReturnCodes codes)
 {
   return m_impl->Fetch(url, Impl::Method::POST, headers, nullptr, 0, codes, multiform);
+}
+
+HttpRequest::Response HttpRequest::Get(const std::string& url, const Headers& headers,
+                                       AllowedReturnCodes codes)
+{
+  return m_impl->Fetch(url, Impl::Method::GET, headers, nullptr, 0, codes);
 }
 }  // namespace Common
