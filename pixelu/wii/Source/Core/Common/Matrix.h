@@ -43,22 +43,26 @@ union TVec3
   constexpr TVec3 operator-() const { return {-x, -y, -z}; }
 
   // Component-wise f(component), f(component, other component) or f(component, scalar).
+  // f is called for x, then y, then z.
   template <typename F>
   auto Map(F&& f) const -> TVec3<decltype(f(T{}))>
   {
-    return {f(x), f(y), f(z)};
+    using R = decltype(f(T{}));
+    return TVec3<R>{f(x), f(y), f(z)};
   }
 
   template <typename F, typename T2>
   auto Map(F&& f, const TVec3<T2>& t) const -> TVec3<decltype(f(T{}, t.x))>
   {
-    return {f(x, t.x), f(y, t.y), f(z, t.z)};
+    using R = decltype(f(T{}, t.x));
+    return TVec3<R>{f(x, t.x), f(y, t.y), f(z, t.z)};
   }
 
   template <typename F, typename T2>
   auto Map(F&& f, T2 scalar) const -> TVec3<decltype(f(T{}, scalar))>
   {
-    return {f(x, scalar), f(y, scalar), f(z, scalar)};
+    using R = decltype(f(T{}, scalar));
+    return TVec3<R>{f(x, scalar), f(y, scalar), f(z, scalar)};
   }
 
   std::array<T, 3> data = {};
@@ -81,51 +85,75 @@ private:
   }
 };
 
+namespace VecDetail
+{
+// The right operand's x component, or the right operand itself when it is a scalar.
+template <typename B>
+constexpr const auto& RightComponent(const B& b)
+{
+  if constexpr (requires { b.x; })
+    return b.x;
+  else
+    return b;
+}
+
+// lhs op rhs per component, computed the way the built-in operator would compute
+// `lhs.x op rhs.x` (both operands converted to that result type first).
+template <template <typename> class Op, typename A, typename B>
+auto Zip(const TVec3<A>& lhs, const B& rhs)
+{
+  using R = decltype(Op<void>{}(lhs.x, RightComponent(rhs)));
+  return lhs.Map(Op<R>{}, rhs);
+}
+}  // namespace VecDetail
+
 template <typename T>
 TVec3<bool> operator<(const TVec3<T>& lhs, const TVec3<T>& rhs)
 {
-  return lhs.Map(std::less<T>{}, rhs);
+  return TVec3<bool>{lhs.x < rhs.x, lhs.y < rhs.y, lhs.z < rhs.z};
 }
 
 constexpr TVec3<bool> operator!(const TVec3<bool>& vec)
 {
-  return {!vec.x, !vec.y, !vec.z};
+  return TVec3<bool>{vec.x == false, vec.y == false, vec.z == false};
 }
 
+// Sums, differences and quotients need two vectors of the same type; products and the scalar
+// forms may mix types.
 template <typename T>
 auto operator+(const TVec3<T>& lhs, const TVec3<T>& rhs) -> TVec3<decltype(lhs.x + rhs.x)>
 {
-  return lhs.Map(std::plus<decltype(lhs.x + rhs.x)>{}, rhs);
+  return VecDetail::Zip<std::plus>(lhs, rhs);
 }
 
 template <typename T>
 auto operator-(const TVec3<T>& lhs, const TVec3<T>& rhs) -> TVec3<decltype(lhs.x - rhs.x)>
 {
-  return lhs.Map(std::minus<decltype(lhs.x - rhs.x)>{}, rhs);
-}
-
-template <typename T1, typename T2>
-auto operator*(const TVec3<T1>& lhs, const TVec3<T2>& rhs) -> TVec3<decltype(lhs.x * rhs.x)>
-{
-  return lhs.Map(std::multiplies<decltype(lhs.x * rhs.x)>{}, rhs);
+  return VecDetail::Zip<std::minus>(lhs, rhs);
 }
 
 template <typename T>
 auto operator/(const TVec3<T>& lhs, const TVec3<T>& rhs) -> TVec3<decltype(lhs.x / rhs.x)>
 {
-  return lhs.Map(std::divides<decltype(lhs.x / rhs.x)>{}, rhs);
+  return VecDetail::Zip<std::divides>(lhs, rhs);
 }
 
 template <typename T1, typename T2>
-auto operator*(const TVec3<T1>& lhs, T2 scalar) -> TVec3<decltype(lhs.x * scalar)>
+auto operator*(const TVec3<T1>& lhs, const TVec3<T2>& rhs) -> TVec3<decltype(lhs.x * rhs.x)>
 {
-  return lhs.Map(std::multiplies<decltype(lhs.x * scalar)>{}, scalar);
+  return VecDetail::Zip<std::multiplies>(lhs, rhs);
 }
 
 template <typename T1, typename T2>
 auto operator/(const TVec3<T1>& lhs, T2 scalar) -> TVec3<decltype(lhs.x / scalar)>
 {
-  return lhs.Map(std::divides<decltype(lhs.x / scalar)>{}, scalar);
+  return VecDetail::Zip<std::divides>(lhs, scalar);
+}
+
+template <typename T1, typename T2>
+auto operator*(const TVec3<T1>& lhs, T2 scalar) -> TVec3<decltype(lhs.x * scalar)>
+{
+  return VecDetail::Zip<std::multiplies>(lhs, scalar);
 }
 
 using Vec3 = TVec3<float>;
@@ -175,15 +203,17 @@ union TVec4
 
 // The scalar parameter is a non-deduced context so e.g. Vec4 * 2.0 works.
 template <typename T>
-constexpr TVec4<T> operator*(TVec4<T> lhs, std::common_type_t<T> scalar)
+constexpr TVec4<T> operator/(TVec4<T> lhs, std::common_type_t<T> scalar)
 {
-  return lhs *= scalar;
+  lhs /= scalar;
+  return lhs;
 }
 
 template <typename T>
-constexpr TVec4<T> operator/(TVec4<T> lhs, std::common_type_t<T> scalar)
+constexpr TVec4<T> operator*(TVec4<T> lhs, std::common_type_t<T> scalar)
 {
-  return lhs /= scalar;
+  lhs *= scalar;
+  return lhs;
 }
 
 using Vec4 = TVec4<float>;
@@ -239,36 +269,41 @@ private:
 template <typename T>
 constexpr TVec2<bool> operator<(const TVec2<T>& lhs, const TVec2<T>& rhs)
 {
-  return {lhs.x < rhs.x, lhs.y < rhs.y};
+  return TVec2<bool>(lhs.x < rhs.x, lhs.y < rhs.y);
 }
 
 constexpr TVec2<bool> operator!(const TVec2<bool>& vec)
 {
-  return {!vec.x, !vec.y};
+  return TVec2<bool>(vec.x == false, vec.y == false);
 }
 
+// Vector-vector arithmetic stays in T: each is the matching compound assignment on a copy.
 template <typename T>
 constexpr TVec2<T> operator+(TVec2<T> lhs, const TVec2<T>& rhs)
 {
-  return lhs += rhs;
+  lhs += rhs;
+  return lhs;
 }
 
 template <typename T>
 constexpr TVec2<T> operator-(TVec2<T> lhs, const TVec2<T>& rhs)
 {
-  return lhs -= rhs;
+  lhs -= rhs;
+  return lhs;
 }
 
 template <typename T>
 constexpr TVec2<T> operator*(TVec2<T> lhs, const TVec2<T>& rhs)
 {
-  return lhs *= rhs;
+  lhs *= rhs;
+  return lhs;
 }
 
 template <typename T>
 constexpr TVec2<T> operator/(TVec2<T> lhs, const TVec2<T>& rhs)
 {
-  return lhs /= rhs;
+  lhs /= rhs;
+  return lhs;
 }
 
 // Vector-scalar arithmetic is done in the promoted type (e.g. Vec2 * double gives DVec2).
@@ -356,7 +391,7 @@ public:
 
   Matrix33& operator*=(const Matrix33& rhs)
   {
-    Multiply(*this, rhs, this);
+    Matrix33::Multiply(*this, rhs, this);
     return *this;
   }
 
@@ -365,7 +400,8 @@ public:
 
 inline Matrix33 operator*(Matrix33 lhs, const Matrix33& rhs)
 {
-  return lhs *= rhs;
+  Matrix33::Multiply(lhs, rhs, &lhs);
+  return lhs;
 }
 
 inline Vec3 operator*(const Matrix33& lhs, Vec3 rhs)
