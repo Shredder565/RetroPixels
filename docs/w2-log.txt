@@ -1,0 +1,92 @@
+- W2 log: rewrote all 100 W2 files in `Core/Common` (types, bits,
+  containers, strings, files, threads, config, logging) as original code.
+  They now have 13402 lines (from 15729). Each starts with the RetroPixels
+  original-code line and has no Dolphin copyright or SPDX header.
+  - Kept unchanged: file names, public declarations (names, signatures,
+    namespaces, enum values, macros), config and INI key names, and
+    every file format and on-disk layout. That covers the savestate
+    (`PointerWrap`) layout, the `LinearDiskCache` header ("DCAC", key and
+    value sizes, 40-byte revision) and entries, the `setting.txt`
+    encoding, the analytics wire format, the texture hashes (CRC32 and
+    Murmur paths), the `CommonPaths` strings, INI parse and save rules,
+    the user-path rebuild rules, translated strings and the "Dolphin"
+    name and version strings.
+  - Dropped: the Apple, Android and BSD code paths. Their declarations
+    stay in the headers (`GetMacOSVersion`, `GetBundleDirectory`,
+    `SetSysDirectory` and so on). Windows code is complete; Linux/POSIX
+    keeps minimal fallbacks so the tree still syntax-checks there.
+  - Deliberate differences (genuine bugs, harmless fixes):
+    - `TryParse` for enums with a u64 underlying type rejects negative
+      input.
+    - `OnConfigChanged` goes by index and copies each callback, so a
+      callback can add or remove callbacks safely.
+    - `GetSystemName`/`GetLayerName` return an empty string for unknown
+      values instead of throwing.
+    - LogManager: the source-path cut-off is guarded, mixed separators
+      are handled, and a code-page error still shows the message text.
+    - `StringToPath`/`PathToString` test `_WIN32`.
+    - `TStrToUTF8` builds without UNICODE.
+    - `StringFromFormatV` uses `va_copy`.
+    - `UTF16BEToUTF8`'s iconv path is fixed (non-Windows only).
+    - `ExtractBits` is correct for u8 and u16.
+    - A moved-from `Buffer` is null.
+    - `HookableEvent`: a nested `Trigger` no longer erases hooks before
+      the outer `Trigger` is done.
+    - `ScopeGuard` works with lambdas that can't be assigned.
+    - Random uses the OS CSPRNG (BCryptGenRandom, getrandom) instead of
+      an mbedtls HMAC-DRBG.
+    - `GetLocalTimeSinceJan1970` comes from `LocalTime()` on every
+      platform.
+    - TimeUtil uses `localtime_s` on all `_WIN32` builds (fixes mingw).
+    - The Matrix44 inverse and determinant are computed in double
+      precision. Results differ from the old ones only around the 4th
+      significant digit.
+    - Analytics: the s64 magnitude has no undefined behaviour for
+      INT64_MIN, and the reporter thread starts only after every member
+      exists.
+    - `MoveWithOverwrite` returns false on failure; it always returned
+      true, and callers ignore the value.
+    - `ScanDirectoryTree` doesn't throw on broken symlinks.
+    - `CreateTempDir` on Windows no longer makes a double slash.
+    - `SetUserPath(D_DUMPDEBUG_IDX)` also updates its BranchWatch and
+      JitBlocks subdirectories (nothing calls it).
+    - DirectIOFile's Windows read at end of file fails instead of
+      looping forever.
+    - `FileUtil.h` always includes `StringUtil.h`.
+    - CompatPatches: on non-MSVC compilers it runs from a static
+      initialiser, and it scans in 64 KiB steps (same result).
+    - CPUDetect, Thread, IOFile, FileUtil, TimeUtil and CompatPatches
+      now compile with mingw.
+    - Thread names use `SetThreadDescription`; the exception trick
+      runs only under MSVC.
+    - Timer links `winmm.lib` and Random links `bcrypt.lib` with
+      `#pragma comment` (MSVC).
+    - Dropped: unused `Common.h` macros, and ConsoleListener's
+      non-Windows `m_use_color`. Assert wording changed.
+      `Projection.h` gained `#pragma once`.
+  - Checked: harnesses ran the old and new code on the same inputs.
+    Outputs are identical for:
+    - threading (the events, BlockingLoop, WorkQueueThread);
+    - Version, including an empty and a set commits-ahead count;
+    - JSON;
+    - Hash (CRC32 and Murmur paths), SettingsHandler, Timer and
+      Profiler;
+    - CPUDetect;
+    - FileUtil and IOFile;
+    - DirectIOFile and FileSearch;
+    - IniFile (1500 random files, parse and save);
+    - LinearDiskCache, including corrupt and truncated files;
+    - ChunkFile, with random states, truncation and corruption;
+    - Analytics (the wire bytes);
+    - StringUtil, BitField and ranges;
+    - Matrix, except the Matrix44 inverse noted above.
+  - Checked: every changed `.cpp` passes a syntax check (fmt 12, C++23)
+    with g++ on Linux and with mingw for Windows (NOMINMAX, UNICODE,
+    WIN32_LEAN_AND_MEAN).
+  - Checked: the whole-tree checks have no new failures against the W2
+    base. The Linux check covered 712 files. The mingw check covered
+    Common's `.cpp` files and the 141 files that fail on Linux only.
+    The files still failing are missing a third-party header (enet,
+    SFML, curl, spng, ...) or are outside W2. Six Common files that
+    failed on mingw before now pass: CompatPatches, FileUtil, IOFile,
+    Thread, TimeUtil and x64CPUDetect.
