@@ -1,5 +1,4 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -20,33 +19,34 @@ namespace MMIO
 class Mapping;
 }
 
-// Holds statuses of things like the write gatherer used for fifos, and interrupts from various
-// sources
-
+// The processor interface (PI, 0x0C003000): the interrupt controller in front
+// of the CPU's external interrupt line, the CPU-side FIFO pointers used by the
+// write gatherer, the reset code and a few board registers.
 namespace ProcessorInterface
 {
+// Interrupt cause / mask bits.
 enum InterruptCause
 {
-  INT_CAUSE_PI = 0x1,           // YAGCD says: GP runtime error
-  INT_CAUSE_RSW = 0x2,          // Reset Switch
-  INT_CAUSE_DI = 0x4,           // DVD interrupt
+  INT_CAUSE_PI = 0x1,           // GP runtime error
+  INT_CAUSE_RSW = 0x2,          // Reset switch
+  INT_CAUSE_DI = 0x4,           // DVD interface
   INT_CAUSE_SI = 0x8,           // Serial interface
   INT_CAUSE_EXI = 0x10,         // Expansion interface
-  INT_CAUSE_AI = 0x20,          // Audio Interface Streaming
+  INT_CAUSE_AI = 0x20,          // Audio interface (streaming)
   INT_CAUSE_DSP = 0x40,         // DSP interface
   INT_CAUSE_MEMORY = 0x80,      // Memory interface
   INT_CAUSE_VI = 0x100,         // Video interface
-  INT_CAUSE_PE_TOKEN = 0x200,   // GP Token
-  INT_CAUSE_PE_FINISH = 0x400,  // GP Finished
-  INT_CAUSE_CP = 0x800,         // Command Fifo
-  INT_CAUSE_DEBUG = 0x1000,     // Debugger (from devkit)
-  INT_CAUSE_HSP = 0x2000,       // High Speed Port (from sdram controller)
+  INT_CAUSE_PE_TOKEN = 0x200,   // Pixel engine token
+  INT_CAUSE_PE_FINISH = 0x400,  // Pixel engine finish
+  INT_CAUSE_CP = 0x800,         // Command processor FIFO
+  INT_CAUSE_DEBUG = 0x1000,     // Devkit debugger
+  INT_CAUSE_HSP = 0x2000,       // High speed port
   INT_CAUSE_WII_IPC = 0x4000,   // Wii IPC
-  INT_CAUSE_RST_BUTTON =
-      0x10000  // ResetButtonState (1 = unpressed, 0 = pressed) it's a state, not maskable
+  // Level of the reset button (1 = released). A state bit, not an interrupt.
+  INT_CAUSE_RST_BUTTON = 0x10000
 };
 
-// Internal hardware addresses
+// Register offsets.
 enum
 {
   PI_INTERRUPT_CAUSE = 0x00,
@@ -54,16 +54,14 @@ enum
   PI_FIFO_BASE = 0x0C,
   PI_FIFO_END = 0x10,
   PI_FIFO_WPTR = 0x14,
-  PI_FIFO_RESET = 0x18,  // Used by GXAbortFrame
+  PI_FIFO_RESET = 0x18,
   PI_ERROR_CAUSE = 0x1C,
   PI_ERROR_ADDRESS = 0x20,
   PI_RESET_CODE = 0x24,
   PI_UNKNOWN = 0x28,
   PI_FLIPPER_REV = 0x2C,
-  PI_FLIPPER_BUS_STRENGTH = 0x30  // BS1 writes 0x0245248A to it - controls the strength of the
-                                  // signal on the bus.  0 means the bus is dead and Flipper will
-                                  // not respond any longer, increasing it from the default value
-                                  // can reduce the noise in the Game Boy Player.
+  // Bus drive strength; written by the boot ROM.
+  PI_FLIPPER_BUS_STRENGTH = 0x30
 };
 
 enum ErrorCause : u32
@@ -96,16 +94,18 @@ public:
   u32 GetMask() const { return m_interrupt_mask; }
   u32 GetCause() const { return m_interrupt_cause; }
 
+  // Raises (or lowers) the given cause bits and updates the CPU's external
+  // interrupt line. CPU thread only.
   void SetInterrupt(u32 cause_mask, bool set = true);
 
-  // Thread-safe func which sets and clears reset button state automagically
+  // Press-and-release of the console buttons; may be called from any thread.
   void ResetButton_Tap();
   void PowerButton_Tap();
 
   u32 m_interrupt_cause = 0;
   u32 m_interrupt_mask = 0;
 
-  // addresses for CPU fifo accesses
+  // CPU-side FIFO window (the write gatherer's destination).
   u32 m_fifo_cpu_base = 0;
   u32 m_fifo_cpu_end = 0;
   u32 m_fifo_cpu_write_pointer = 0;
@@ -116,12 +116,9 @@ public:
   u32 m_flipper_bus_strength = 0x02492492;
 
 private:
-  // Let the PPC know that an external exception is set/cleared
   void UpdateException();
-
   void SetResetButton(bool set);
 
-  // ID and callback for scheduling reset button presses/releases
   static void ToggleResetButtonCallback(Core::System& system, u64 userdata, s64 cyclesLate);
   static void IOSNotifyResetButtonCallback(Core::System& system, u64 userdata, s64 cyclesLate);
   static void IOSNotifyPowerButtonCallback(Core::System& system, u64 userdata, s64 cyclesLate);
