@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -17,6 +16,7 @@
 
 namespace IOS::HLE
 {
+// Collects a U8 archive (as found in WFS title contents) and writes out the files in it.
 class ARCUnpacker
 {
 public:
@@ -32,6 +32,7 @@ private:
   std::vector<u8> m_whole_file;
 };
 
+// /dev/wfsi: installs vWii titles onto WFS storage, and loads their executables.
 class WFSIDevice : public EmulationDevice
 {
 public:
@@ -51,12 +52,15 @@ private:
 
   std::string m_device_name;
 
+  // Content decryption state for the import in progress.
   std::unique_ptr<Common::AES::Context> m_aes_ctx{};
   u8 m_aes_iv[0x10] = {};
 
   ES::TMDReader m_tmd;
+  // Where extracted archive files go.
   std::string m_base_extract_path;
 
+  // The running title, and the title being imported (with their path forms).
   u64 m_current_title_id = 0;
   std::string m_current_title_id_str;
   u16 m_current_group_id = 0;
@@ -66,12 +70,10 @@ private:
   u16 m_import_group_id = 0;
   std::string m_import_group_id_str;
 
-  // Set on IMPORT_TITLE_INIT when the next profile application should not delete
-  // temporary install files.
+  // From IMPORT_TITLE_INIT: keep the temporary install files of an earlier attempt.
   bool m_continue_install = false;
 
-  // Set on IMPORT_TITLE_INIT to indicate that the install is a patch and not a
-  // standalone title.
+  // From IMPORT_TITLE_INIT: what kind of install this is.
   enum PatchType
   {
     NOT_A_PATCH,

@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -16,18 +15,22 @@ namespace IOS::HLE
 {
 namespace WFS
 {
+// Where a WFS path lives on the host (under the user's WFS root).
 std::string NativePath(const std::string& wfs_path);
-}
+}  // namespace WFS
 
+// WFS error codes.
 enum
 {
-  WFS_EINVAL = -10003,          // Invalid argument.
-  WFS_EBADFD = -10026,          // Invalid file descriptor.
-  WFS_EEXIST = -10027,          // File already exists.
-  WFS_ENOENT = -10028,          // No such file or directory.
-  WFS_FILE_IS_OPENED = -10032,  // Cannot perform operation on an opened file.
+  WFS_EINVAL = -10003,
+  WFS_EBADFD = -10026,
+  WFS_EEXIST = -10027,
+  WFS_ENOENT = -10028,
+  WFS_FILE_IS_OPENED = -10032,  // the operation needs the file to be closed
 };
 
+// /dev/usb/wfssrv: the file server for the WFS-formatted USB storage used by the Wii U's vWii.
+// Volumes are emulated as host directories.
 class WFSSRVDevice : public EmulationDevice
 {
 public:
@@ -39,13 +42,13 @@ public:
   void SetHomeDir(const std::string& home_dir);
 
 private:
-  // WFS device name, e.g. msc01/msc02.
+  // Name of the storage device (msc01, msc02, ...).
   std::string m_device_name;
 
-  // Home / current directories.
   std::string m_home_directory;
   std::string m_current_directory;
 
+  // Makes a path absolute (resolving ~, the current directory, "." and "..").
   std::string NormalizePath(const std::string& path) const;
 
   enum
@@ -92,14 +95,14 @@ private:
 
     bool Open();
   };
+  // Indexed by WFS file descriptor; trailing unused entries are trimmed.
   std::vector<FileDescriptor> m_fds;
 
   FileDescriptor* FindFileDescriptor(u16 fd);
   u16 GetNewFileDescriptor();
   void ReleaseFileDescriptor(u16 fd);
 
-  // List of addresses of IPC requests left hanging that need closing at
-  // shutdown time.
+  // Attach/detach requests that are only answered on shutdown.
   std::vector<u32> m_hanging;
 };
 }  // namespace IOS::HLE
