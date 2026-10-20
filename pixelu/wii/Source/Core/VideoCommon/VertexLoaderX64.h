@@ -46,8 +46,6 @@ private:
     Cache cache;
   };
 
-  using Constant = std::array<u8, 16>;
-
   void Generate();
   Gen::OpArg AttributeData(CPArray array, VertexComponentFormat source, bool may_drop);
   void ConvertVector(Gen::OpArg data, const VectorJob& job, AttributeFormat* attr);
@@ -56,7 +54,6 @@ private:
   void StoreToCache(Cache cache);
   void ConvertColor(Gen::OpArg data, VertexComponentFormat source, ColorFormat format);
   void WriteTexMatrix(u32 index_offset, bool coordinate_present);
-  const void* PoolConstant(const Constant& value);
   Gen::OpArg Global(const void* address) const;
 
   // Read and write positions within the current vertex while generating.
@@ -64,8 +61,5 @@ private:
   u32 m_out = 0;
   // Branches taken when an indexed position reads an all-ones index.
   std::vector<Gen::FixupBranch> m_drop_jumps;
-  // 16-byte constants used by the generated code, at the start of the code space.
-  u8* m_pool = nullptr;
-  u32 m_pool_used = 0;
   const u8* m_entry = nullptr;
 };

@@ -4,8 +4,6 @@
 
 #include <array>
 #include <bit>
-#include <cmath>
-#include <cstring>
 
 #include "Common/Assert.h"
 #include "Common/CPUDetect.h"
@@ -38,7 +36,6 @@ constexpr int kSlotCount = 0;
 constexpr int kSlotDropped = 4;
 
 constexpr size_t kCodeBytes = 4096;
-constexpr u32 kPoolBytes = 512;
 
 // Globals are reached as [kAnchor + disp32]; they all live in the same image as this one.
 const u8* AnchorAddress()
@@ -94,13 +91,13 @@ bool IsFloatFormat(ComponentFormat format)
 // PSHUFB control that moves `count` big-endian elements to the 32-bit lanes: unsigned values
 // end up zero-extended, signed ones in the top of the lane (for an arithmetic shift down),
 // floats byte-reversed. Every other byte becomes zero.
-std::array<u8, 16> ElementShuffle(ComponentFormat format, int count)
+constexpr std::array<u8, 16> ElementShuffle(ComponentFormat format, u32 count)
 {
-  std::array<u8, 16> control;
+  std::array<u8, 16> control{};
   control.fill(0x80);
   const u32 size = GetElementSize(format);
   const bool high = format == ComponentFormat::Byte || format == ComponentFormat::Short;
-  for (u32 lane = 0; lane < static_cast<u32>(count); lane++)
+  for (u32 lane = 0; lane < count; lane++)
   {
     const u32 first = lane * size;
     const u32 top = lane * 4 + (high ? 3u : size - 1);
@@ -110,14 +107,38 @@ std::array<u8, 16> ElementShuffle(ComponentFormat format, int count)
   return control;
 }
 
-std::array<u8, 16> ScaleVector(u32 frac)
+// Vector constants of the generated code, reached like the other globals. Shuffles are indexed
+// by format and element count, scales (2^-frac in every lane) by the fraction.
+constexpr u32 kMaxShuffleCount = 4;
+constexpr u32 kScaleCount = 32;
+
+struct VectorConstants
 {
-  const float scale = std::ldexp(1.0f, -static_cast<int>(frac));
-  std::array<u8, 16> bytes;
-  for (u32 i = 0; i < 4; i++)
-    std::memcpy(&bytes[i * 4], &scale, sizeof(scale));
-  return bytes;
+  alignas(16) std::array<std::array<u8, 16>, 8 * (kMaxShuffleCount + 1)> shuffles;
+  alignas(16) std::array<std::array<float, 4>, kScaleCount> scales;
+};
+
+constexpr VectorConstants BuildVectorConstants()
+{
+  VectorConstants c{};
+  for (u32 format = 0; format < 8; format++)
+  {
+    for (u32 count = 0; count <= kMaxShuffleCount; count++)
+    {
+      c.shuffles[format * (kMaxShuffleCount + 1) + count] =
+          ElementShuffle(static_cast<ComponentFormat>(format), count);
+    }
+  }
+  for (u32 frac = 0; frac < kScaleCount; frac++)
+  {
+    // Exact: both sides are powers of two.
+    const float scale = 1.0f / static_cast<float>(1u << frac);
+    c.scales[frac] = {scale, scale, scale, scale};
+  }
+  return c;
 }
+
+alignas(16) const VectorConstants s_vector_constants = BuildVectorConstants();
 
 // Normals are fixed-point with a fixed fraction per format.
 u32 NormalFrac(ComponentFormat format)
@@ -142,9 +163,6 @@ VertexLoaderX64::VertexLoaderX64(const TVtxDesc& vtx_desc, const VAT& vtx_att)
     : VertexLoaderBase(vtx_desc, vtx_att)
 {
   AllocCodeSpace(kCodeBytes);
-  ClearCodeSpace();
-  m_pool = region;
-  SetCodePtr(region + kPoolBytes, region + kCodeBytes);
   Generate();
   WriteProtect(true);
 
@@ -155,20 +173,6 @@ VertexLoaderX64::VertexLoaderX64(const TVtxDesc& vtx_desc, const VAT& vtx_att)
 OpArg VertexLoaderX64::Global(const void* address) const
 {
   return MDisp(kAnchor, static_cast<int>(PtrOffset(address, AnchorAddress())));
-}
-
-const void* VertexLoaderX64::PoolConstant(const Constant& value)
-{
-  for (u32 at = 0; at < m_pool_used; at += 16)
-  {
-    if (std::memcmp(m_pool + at, value.data(), value.size()) == 0)
-      return m_pool + at;
-  }
-  ASSERT(m_pool_used + 16 <= kPoolBytes);
-  u8* const slot = m_pool + m_pool_used;
-  std::memcpy(slot, value.data(), value.size());
-  m_pool_used += 16;
-  return slot;
 }
 
 OpArg VertexLoaderX64::AttributeData(CPArray array, VertexComponentFormat source, bool may_drop)
@@ -199,7 +203,11 @@ void VertexLoaderX64::LoadVectorSSSE3(OpArg data, const VectorJob& job)
   else
     MOVDQU(kVec, data);
 
-  PSHUFB(kVec, M(PoolConstant(ElementShuffle(job.format, job.count_in))));
+  const auto count = static_cast<u32>(job.count_in);
+  ASSERT(count <= kMaxShuffleCount);
+  PSHUFB(kVec, Global(&s_vector_constants.shuffles[static_cast<u32>(job.format) *
+                                                       (kMaxShuffleCount + 1) +
+                                                   count]));
   if (job.format == ComponentFormat::Byte)
     PSRAD(kVec, 24);
   else if (job.format == ComponentFormat::Short)
@@ -347,7 +355,10 @@ void VertexLoaderX64::ConvertVector(OpArg data, const VectorJob& job, AttributeF
   {
     CVTDQ2PS(kVec, R(kVec));
     if (job.frac != 0)
-      MULPS(kVec, M(PoolConstant(ScaleVector(job.frac))));
+    {
+      ASSERT(job.frac < kScaleCount);
+      MULPS(kVec, Global(&s_vector_constants.scales[job.frac]));
+    }
   }
 
   if (job.count_out == 1)
@@ -462,6 +473,10 @@ void VertexLoaderX64::Generate()
   MOV(32, MDisp(RSP, kSlotDropped), Imm32(0));
   LEA(32, kLeft, MDisp(ABI_PARAM3, -1));
 
+  // Start the vertex loop on a 16-byte boundary (padding with NOPs, as execution runs into it).
+  const size_t misalignment = reinterpret_cast<uintptr_t>(GetCodePtr()) & 15;
+  if (misalignment != 0)
+    NOP(16 - misalignment);
   const u8* const vertex_start = GetCodePtr();
 
   if (desc.low.PosMatIdx)
