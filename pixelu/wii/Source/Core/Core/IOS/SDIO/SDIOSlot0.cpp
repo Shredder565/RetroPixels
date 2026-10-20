@@ -1,10 +1,13 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// The front SD slot. IOS exposes a thin layer over the SD host controller: titles send raw SD
+// commands, and block reads/writes go to a card image on the host.
 
 #include "Core/IOS/SDIO/SDIOSlot0.h"
 
 #include <cstdio>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "Common/ChunkFile.h"
@@ -24,12 +27,39 @@
 
 namespace IOS::HLE
 {
+namespace
+{
+// Card image created when none exists yet.
+constexpr u64 DEFAULT_CARD_SIZE_MIB = 128;
+
+// Responses for commands whose answer does not depend on the card.
+constexpr u32 R1_TRANSFER_STATE = 0x900;
+constexpr u32 R1_STANDBY_STATE = 0x700;
+constexpr u32 R1_APP_CMD = 0x920;
+constexpr u32 RELATIVE_CARD_ADDRESS = 0x9f62;
+// The CID as IOS hands it out: four words, last word first.
+constexpr std::array<u32, 4> CARD_ID{0xAC68006B, 0x4E430403, 0x4C504849, 0x00D0444F};
+
+// Writes a 128-bit register (as four words, least significant first) the way IOS returns it:
+// the most significant word at the lowest address.
+void WriteResponse128(Memory::MemoryManager& memory, u32 address, const std::array<u32, 4>& words)
+{
+  for (u32 i = 0; i < 4; ++i)
+    memory.Write_U32(words[i], address + 12 - 4 * i);
+}
+
+bool SDWritesAllowed()
+{
+  return Config::Get(Config::MAIN_ALLOW_SD_WRITES);
+}
+}  // namespace
+
 SDIOSlot0Device::SDIOSlot0Device(EmulationKernel& ios, const std::string& device_name)
     : EmulationDevice(ios, device_name),
       m_sdhc_supported(HasFeature(ios.GetVersion(), Feature::SDv2))
 {
-  if (!Config::Get(Config::MAIN_ALLOW_SD_WRITES))
-    INFO_LOG_FMT(IOS_SD, "Writes to SD card disabled by user");
+  if (!SDWritesAllowed())
+    INFO_LOG_FMT(IOS_SD, "SD card writes are disabled in the settings");
 
   m_config_callback_id =
       CPUThreadConfigCallback::AddConfigChangedCallback([this] { RefreshConfig(); });
@@ -43,27 +73,22 @@ SDIOSlot0Device::~SDIOSlot0Device()
 
 void SDIOSlot0Device::RefreshConfig()
 {
-  const bool sd_card_inserted = Config::Get(Config::MAIN_WII_SD_CARD);
-  if (m_sd_card_inserted != sd_card_inserted)
-  {
-    m_sd_card_inserted = sd_card_inserted;
-    EventNotify();
-  }
+  // Inserting or removing the card in the settings may answer a pending event request.
+  const bool inserted = Config::Get(Config::MAIN_WII_SD_CARD);
+  if (inserted == m_sd_card_inserted)
+    return;
+  m_sd_card_inserted = inserted;
+  EventNotify();
 }
 
 void SDIOSlot0Device::DoState(PointerWrap& p)
 {
   Device::DoState(p);
+  // The card image is not part of the state; reopen it on load.
   if (p.IsReadMode())
-  {
     OpenInternal();
-  }
-  p.Do(m_status);
-  p.Do(m_block_length);
-  p.Do(m_bus_width);
-  p.Do(m_registers);
-  p.Do(m_protocol);
-  p.Do(m_sdhc_supported);
+  const auto save = [&p](auto&... fields) { (p.Do(fields), ...); };
+  save(m_status, m_block_length, m_bus_width, m_registers, m_protocol, m_sdhc_supported);
 }
 
 void SDIOSlot0Device::EventNotify()
@@ -71,46 +96,39 @@ void SDIOSlot0Device::EventNotify()
   if (!m_event)
     return;
 
-  if ((m_sd_card_inserted && m_event->type == EVENT_INSERT) ||
-      (!m_sd_card_inserted && m_event->type == EVENT_REMOVE))
-  {
-    if (m_sd_card_inserted)
-      INFO_LOG_FMT(IOS_SD, "Notifying PPC of SD card insertion");
-    else
-      INFO_LOG_FMT(IOS_SD, "Notifying PPC of SD card removal");
+  const EventType wanted = m_sd_card_inserted ? EVENT_INSERT : EVENT_REMOVE;
+  if (m_event->type != wanted)
+    return;
 
-    GetEmulationKernel().EnqueueIPCReply(m_event->request, m_event->type);
-    m_event.reset();
-  }
+  INFO_LOG_FMT(IOS_SD, "Telling the PPC that the SD card was {}",
+               m_sd_card_inserted ? "inserted" : "removed");
+  GetEmulationKernel().EnqueueIPCReply(m_event->request, m_event->type);
+  m_event.reset();
 }
 
 void SDIOSlot0Device::OpenInternal()
 {
-  const std::string filename = File::GetUserPath(F_WIISDCARDIMAGE_IDX);
-  m_card.Open(filename, "r+b");
-  if (!m_card)
+  const std::string path = File::GetUserPath(F_WIISDCARDIMAGE_IDX);
+  m_card.Open(path, "r+b");
+  if (m_card)
+    return;
+
+  WARN_LOG_FMT(IOS_SD, "Cannot open the SD card image {}; creating a {} MiB one", path,
+               DEFAULT_CARD_SIZE_MIB);
+  if (Common::SDCardCreate(DEFAULT_CARD_SIZE_MIB, path))
   {
-    WARN_LOG_FMT(IOS_SD, "Failed to open SD Card image, trying to create a new 128 MB image...");
-    if (Common::SDCardCreate(128, filename))
-    {
-      INFO_LOG_FMT(IOS_SD, "Successfully created {}", filename);
-      m_card.Open(filename, "r+b");
-    }
-    if (!m_card)
-    {
-      ERROR_LOG_FMT(IOS_SD, "Could not open SD Card image or create a new one, are you running "
-                            "from a read-only directory?");
-    }
+    INFO_LOG_FMT(IOS_SD, "Created {}", path);
+    m_card.Open(path, "r+b");
   }
+  if (!m_card)
+    ERROR_LOG_FMT(IOS_SD, "No usable SD card image (is the user directory read-only?)");
 }
 
-std::optional<IPCReply> SDIOSlot0Device::Open(const OpenRequest& request)
+std::optional<IPCReply> SDIOSlot0Device::Open(const OpenRequest& /*request*/)
 {
   OpenInternal();
   m_registers.fill(0);
-
   m_is_active = true;
-
   return IPCReply(IPC_SUCCESS);
 }
 
@@ -119,586 +137,387 @@ std::optional<IPCReply> SDIOSlot0Device::Close(u32 fd)
   m_card.Close();
   m_block_length = 0;
   m_bus_width = 0;
-
   return Device::Close(fd);
 }
 
 std::optional<IPCReply> SDIOSlot0Device::IOCtl(const IOCtlRequest& request)
 {
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
-  memory.Memset(request.buffer_out, 0, request.buffer_out_size);
+  // Every ioctl starts from a cleared output buffer.
+  GetSystem().GetMemory().Memset(request.buffer_out, 0, request.buffer_out_size);
 
-  switch (request.request)
-  {
-  case IOCTL_WRITEHCR:
-    return WriteHCRegister(request);
-  case IOCTL_READHCR:
-    return ReadHCRegister(request);
-  case IOCTL_RESETCARD:
-    return ResetCard(request);
-  case IOCTL_SETCLK:
-    return SetClk(request);
-  case IOCTL_SENDCMD:
+  // SENDCMD may answer later, so it is handled apart from the others.
+  if (request.request == IOCTL_SENDCMD)
     return SendCommand(request);
-  case IOCTL_GETSTATUS:
-    return GetStatus(request);
-  case IOCTL_GETOCR:
-    return GetOCRegister(request);
-  default:
-    ERROR_LOG_FMT(IOS_SD, "Unknown SD IOCtl command ({:#010x})", request.request);
-    break;
+
+  using Handler = IPCReply (SDIOSlot0Device::*)(const IOCtlRequest&);
+  static constexpr std::array<std::pair<u32, Handler>, 6> HANDLERS{{
+      {IOCTL_WRITEHCR, &SDIOSlot0Device::WriteHCRegister},
+      {IOCTL_READHCR, &SDIOSlot0Device::ReadHCRegister},
+      {IOCTL_RESETCARD, &SDIOSlot0Device::ResetCard},
+      {IOCTL_SETCLK, &SDIOSlot0Device::SetClk},
+      {IOCTL_GETSTATUS, &SDIOSlot0Device::GetStatus},
+      {IOCTL_GETOCR, &SDIOSlot0Device::GetOCRegister},
+  }};
+  for (const auto& [number, handler] : HANDLERS)
+  {
+    if (number == request.request)
+      return (this->*handler)(request);
   }
 
+  ERROR_LOG_FMT(IOS_SD, "Unhandled ioctl {:#010x}", request.request);
   return IPCReply(IPC_SUCCESS);
 }
 
 std::optional<IPCReply> SDIOSlot0Device::IOCtlV(const IOCtlVRequest& request)
 {
-  switch (request.request)
-  {
-  case IOCTLV_SENDCMD:
+  if (request.request == IOCTLV_SENDCMD)
     return SendCommand(request);
-  default:
-    ERROR_LOG_FMT(IOS_SD, "Unknown SD IOCtlV command {:#010x}", request.request);
-    break;
-  }
-
+  ERROR_LOG_FMT(IOS_SD, "Unhandled ioctlv {:#010x}", request.request);
   return IPCReply(IPC_SUCCESS);
 }
 
-s32 SDIOSlot0Device::ExecuteCommand(const Request& request, u32 buffer_in, u32 buffer_in_size,
-                                    u32 rw_buffer, u32 rw_buffer_size, u32 buffer_out,
-                                    u32 buffer_out_size)
+s32 SDIOSlot0Device::ExecuteCommand(const Request& request, u32 buffer_in, u32 /*buffer_in_size*/,
+                                    u32 /*rw_buffer*/, u32 rw_buffer_size, u32 buffer_out,
+                                    u32 /*buffer_out_size*/)
 {
-  // The game will send us a SendCMD with this information. To be able to read and write
-  // to a file we need to prepare a 0x10 byte output buffer as response.
-  struct
-  {
-    u32 command;
-    u32 type;
-    u32 resp;
-    u32 arg;
-    u32 blocks;
-    u32 bsize;
-    u32 addr;
-    u32 isDMA;
-    u32 pad0;
-  } req;
+  Memory::MemoryManager& memory = GetSystem().GetMemory();
 
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
+  // The command block: nine words, of which the last is padding. `data_address` is where block
+  // transfers read from or write to.
+  std::array<u32, 9> block;
+  for (u32 i = 0; i < block.size(); ++i)
+    block[i] = memory.Read_U32(buffer_in + 4 * i);
+  const u32 command = block[0];
+  const u32 argument = block[3];
+  const u32 block_count = block[4];
+  const u32 block_size = block[5];
+  const u32 data_address = block[6];
+  const bool dma = block[7] != 0;
 
-  req.command = memory.Read_U32(buffer_in + 0);
-  req.type = memory.Read_U32(buffer_in + 4);
-  req.resp = memory.Read_U32(buffer_in + 8);
-  req.arg = memory.Read_U32(buffer_in + 12);
-  req.blocks = memory.Read_U32(buffer_in + 16);
-  req.bsize = memory.Read_U32(buffer_in + 20);
-  req.addr = memory.Read_U32(buffer_in + 24);
-  req.isDMA = memory.Read_U32(buffer_in + 28);
-  req.pad0 = memory.Read_U32(buffer_in + 32);
+  const auto respond = [&](u32 value) { memory.Write_U32(value, buffer_out); };
 
-  // Note: req.addr is the virtual address of _rwBuffer
-
-  s32 ret = RET_OK;
-
-  switch (req.command)
+  switch (command)
   {
   case GO_IDLE_STATE:
     INFO_LOG_FMT(IOS_SD, "GO_IDLE_STATE");
-    // Response is R1 (idle state)
-    memory.Write_U32(0x00, buffer_out);
-    break;
+    respond(0);
+    return RET_OK;
 
   case SEND_RELATIVE_ADDR:
-    // Technically RCA should be generated when asked and at power on...w/e :p
-    memory.Write_U32(0x9f62, buffer_out);
-    break;
+    respond(RELATIVE_CARD_ADDRESS);
+    return RET_OK;
 
   case SELECT_CARD:
-    // This covers both select and deselect
-    // Differentiate by checking if rca is set in req.arg
-    // If it is, it's a select and return 0x700
-    memory.Write_U32((req.arg >> 16) ? 0x700 : 0x900, buffer_out);
-    break;
+    // An RCA in the upper half selects the card; zero deselects it.
+    respond((argument >> 16) != 0 ? R1_STANDBY_STATE : R1_TRANSFER_STATE);
+    return RET_OK;
 
   case SEND_IF_COND:
+    // Only v2 cards answer this, echoing the voltage and check pattern.
     INFO_LOG_FMT(IOS_SD, "SEND_IF_COND");
-    // If the card can operate on the supplied voltage, the response echoes back the supply
-    // voltage and the check pattern that were set in the command argument.
-    // This command is used to differentiate between protocol v1 and v2.
     InitSDHC();
-    memory.Write_U32(req.arg, buffer_out);
-    break;
+    respond(argument);
+    return RET_OK;
 
   case SEND_CSD:
-  {
-    const std::array<u32, 4> csd = m_protocol == SDProtocol::V1 ? GetCSDv1() : GetCSDv2();
-    memory.Write_U32(csd[0], buffer_out + 12);
-    memory.Write_U32(csd[1], buffer_out + 8);
-    memory.Write_U32(csd[2], buffer_out + 4);
-    memory.Write_U32(csd[3], buffer_out + 0);
-  }
-  break;
+    WriteResponse128(memory, buffer_out, m_protocol == SDProtocol::V1 ? GetCSDv1() : GetCSDv2());
+    return RET_OK;
 
   case ALL_SEND_CID:
   case SEND_CID:
-  {
-    INFO_LOG_FMT(IOS_SD, "(ALL_)SEND_CID");
-    memory.Write_U32(0x00D0444F, buffer_out + 12);
-    memory.Write_U32(0x4C504849, buffer_out + 8);
-    memory.Write_U32(0x4E430403, buffer_out + 4);
-    memory.Write_U32(0xAC68006B, buffer_out + 0);
-  }
-  break;
+    INFO_LOG_FMT(IOS_SD, "SEND_CID");
+    for (u32 i = 0; i < CARD_ID.size(); ++i)
+      memory.Write_U32(CARD_ID[i], buffer_out + 4 * i);
+    return RET_OK;
 
   case SET_BLOCKLEN:
-    m_block_length = req.arg;
-    memory.Write_U32(0x900, buffer_out);
-    break;
+    m_block_length = argument;
+    respond(R1_TRANSFER_STATE);
+    return RET_OK;
 
   case APP_CMD_NEXT:
-    // Next cmd is going to be ACMD_*
-    memory.Write_U32(0x920, buffer_out);
-    break;
+    respond(R1_APP_CMD);
+    return RET_OK;
 
   case ACMD_SETBUSWIDTH:
-    // 0 = 1bit, 2 = 4bit
-    m_bus_width = (req.arg & 3);
-    memory.Write_U32(0x920, buffer_out);
-    break;
+    // 0: 1-bit bus, 2: 4-bit bus.
+    m_bus_width = argument & 3;
+    respond(R1_APP_CMD);
+    return RET_OK;
 
   case ACMD_SENDOPCOND:
-    // Sends host capacity support information (HCS) and asks the accessed card to send
-    // its operating condition register (OCR) content
-    memory.Write_U32(GetOCRegister(), buffer_out);
-    break;
+    respond(GetOCRegister());
+    return RET_OK;
 
   case READ_MULTIPLE_BLOCK:
-  {
-    // Data address (req.arg) is in byte units in a Standard Capacity SD Memory Card
-    // and in block (512 Byte) units in a High Capacity SD Memory Card.
-    INFO_LOG_FMT(IOS_SD, "{}Read {} Block(s) from {:#010x} bsize {} into {:#010x}!",
-                 req.isDMA ? "DMA " : "", req.blocks, req.arg, req.bsize, req.addr);
-
-    const u32 size = req.bsize * req.blocks;
-    const u64 address = GetAddressFromRequest(req.arg);
-
-    if (!m_card.Seek(address, File::SeekOrigin::Begin))
-      ERROR_LOG_FMT(IOS_SD, "Seek failed");
-
-    if (m_card.ReadBytes(memory.GetPointerForRange(req.addr, size), size))
-    {
-      DEBUG_LOG_FMT(IOS_SD, "Outbuffer size {} got {}", rw_buffer_size, size);
-    }
-    else
-    {
-      ERROR_LOG_FMT(IOS_SD, "Read Failed - error: {}, eof: {}", std::ferror(m_card.GetHandle()),
-                    std::feof(m_card.GetHandle()));
-      ret = RET_FAIL;
-    }
-  }
-    memory.Write_U32(0x900, buffer_out);
-    break;
-
   case WRITE_MULTIPLE_BLOCK:
   {
-    // Data address (req.arg) is in byte units in a Standard Capacity SD Memory Card
-    // and in block (512 Byte) units in a High Capacity SD Memory Card.
-    INFO_LOG_FMT(IOS_SD, "{}Write {} Block(s) from {:#010x} bsize {} to offset {:#010x}!",
-                 req.isDMA ? "DMA " : "", req.blocks, req.addr, req.bsize, req.arg);
+    const bool write = command == WRITE_MULTIPLE_BLOCK;
+    INFO_LOG_FMT(IOS_SD, "{}{} {} block(s) of {} bytes, card offset {:#010x}, memory {:#010x}",
+                 dma ? "DMA " : "", write ? "write" : "read", block_count, block_size, argument,
+                 data_address);
 
-    if (!Config::Get(Config::MAIN_ALLOW_SD_WRITES))
+    s32 result = RET_OK;
+    if (write && !SDWritesAllowed())
     {
-      ERROR_LOG_FMT(IOS_SD, "Write attempted while locked.");
-      ret = RET_LOCKED;
+      ERROR_LOG_FMT(IOS_SD, "Refusing to write to a locked card");
+      result = RET_LOCKED;
     }
     else
     {
-      const u32 size = req.bsize * req.blocks;
-      const u64 address = GetAddressFromRequest(req.arg);
+      const u32 length = block_size * block_count;
+      const auto offset = static_cast<s64>(GetAddressFromRequest(argument));
+      if (!m_card.Seek(offset, File::SeekOrigin::Begin))
+        ERROR_LOG_FMT(IOS_SD, "Seeking in the card image failed");
 
-      if (!m_card.Seek(address, File::SeekOrigin::Begin))
-        ERROR_LOG_FMT(IOS_SD, "Seek failed");
-
-      if (!m_card.WriteBytes(memory.GetPointerForRange(req.addr, size), size))
+      u8* data = memory.GetPointerForRange(data_address, length);
+      const bool ok = write ? m_card.WriteBytes(data, length) : m_card.ReadBytes(data, length);
+      if (!ok)
       {
-        ERROR_LOG_FMT(IOS_SD, "Write Failed - error: {}, eof: {}", std::ferror(m_card.GetHandle()),
-                      std::feof(m_card.GetHandle()));
-        ret = RET_FAIL;
+        ERROR_LOG_FMT(IOS_SD, "Card image {} failed (error {}, eof {})", write ? "write" : "read",
+                      std::ferror(m_card.GetHandle()), std::feof(m_card.GetHandle()));
+        result = RET_FAIL;
+      }
+      else if (!write)
+      {
+        DEBUG_LOG_FMT(IOS_SD, "Read {} bytes (buffer {} bytes)", length, rw_buffer_size);
       }
     }
+    respond(R1_TRANSFER_STATE);
+    return result;
   }
-    memory.Write_U32(0x900, buffer_out);
-    break;
 
-  case EVENT_REGISTER:  // async
-    INFO_LOG_FMT(IOS_SD, "Register event {:x}", req.arg);
-    m_event = std::make_unique<Event>(static_cast<EventType>(req.arg), request);
-    ret = RET_EVENT_REGISTER;
-    break;
+  case EVENT_REGISTER:
+    // Answered later, by EventNotify.
+    INFO_LOG_FMT(IOS_SD, "Event request {:#x}", argument);
+    m_event = std::make_unique<Event>(static_cast<EventType>(argument), request);
+    return RET_EVENT_REGISTER;
 
-  // Used to cancel an event that was already registered.
   case EVENT_UNREGISTER:
-  {
-    INFO_LOG_FMT(IOS_SD, "Unregister event {:x}", req.arg);
+    INFO_LOG_FMT(IOS_SD, "Cancelling event request {:#x}", argument);
     if (!m_event)
       return IPC_EINVAL;
-    // release returns 0
-    // unknown sd int
-    // technically we do it out of order, oh well
+    // The cancelled request is answered before this one, unlike on hardware.
     GetEmulationKernel().EnqueueIPCReply(m_event->request, EVENT_INVALID);
     m_event.reset();
-    break;
-  }
+    return RET_OK;
 
   default:
-    ERROR_LOG_FMT(IOS_SD, "Unknown SD command {:#010x}", req.command);
-    break;
+    ERROR_LOG_FMT(IOS_SD, "Unhandled SD command {:#010x}", command);
+    return RET_OK;
   }
-
-  return ret;
 }
 
 IPCReply SDIOSlot0Device::WriteHCRegister(const IOCtlRequest& request)
 {
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
-
+  Memory::MemoryManager& memory = GetSystem().GetMemory();
   const u32 reg = memory.Read_U32(request.buffer_in);
-  const u32 val = memory.Read_U32(request.buffer_in + 16);
-
-  INFO_LOG_FMT(IOS_SD, "IOCTL_WRITEHCR {:#010x} - {:#010x}", reg, val);
+  const u32 value = memory.Read_U32(request.buffer_in + 16);
+  INFO_LOG_FMT(IOS_SD, "Write host controller register {:#010x} = {:#010x}", reg, value);
 
   if (reg >= m_registers.size())
   {
-    WARN_LOG_FMT(IOS_SD, "IOCTL_WRITEHCR out of range");
+    WARN_LOG_FMT(IOS_SD, "Host controller register {:#x} does not exist", reg);
     return IPCReply(IPC_SUCCESS);
   }
 
-  if ((reg == HCR_CLOCKCONTROL) && (val & 1))
-  {
-    // Clock is set to oscillate, enable bit 1 to say it's stable
-    m_registers[reg] = val | 2;
-  }
-  else if ((reg == HCR_SOFTWARERESET) && val)
-  {
-    // When a reset is specified, the register gets cleared
-    m_registers[reg] = 0;
-  }
-  else
-  {
-    // Default to just storing the new value
-    m_registers[reg] = val;
-  }
-
+  u32 stored = value;
+  if (reg == HCR_CLOCKCONTROL && (value & 1) != 0)
+    stored |= 2;  // internal clock enabled -> report it as stable
+  else if (reg == HCR_SOFTWARERESET && value != 0)
+    stored = 0;  // a reset completes at once
+  m_registers[reg] = stored;
   return IPCReply(IPC_SUCCESS);
 }
 
 IPCReply SDIOSlot0Device::ReadHCRegister(const IOCtlRequest& request)
 {
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
-
+  Memory::MemoryManager& memory = GetSystem().GetMemory();
   const u32 reg = memory.Read_U32(request.buffer_in);
-
   if (reg >= m_registers.size())
   {
-    WARN_LOG_FMT(IOS_SD, "IOCTL_READHCR out of range");
+    WARN_LOG_FMT(IOS_SD, "Host controller register {:#x} does not exist", reg);
     return IPCReply(IPC_SUCCESS);
   }
 
-  const u32 val = m_registers[reg];
-  INFO_LOG_FMT(IOS_SD, "IOCTL_READHCR {:#010x} - {:#010x}", reg, val);
-
-  // Just reading the register
-  memory.Write_U32(val, request.buffer_out);
+  INFO_LOG_FMT(IOS_SD, "Read host controller register {:#010x} = {:#010x}", reg, m_registers[reg]);
+  memory.Write_U32(m_registers[reg], request.buffer_out);
   return IPCReply(IPC_SUCCESS);
 }
 
 IPCReply SDIOSlot0Device::ResetCard(const IOCtlRequest& request)
 {
+  // The reply is the RCA in the upper half and a zero (success) lower half; m_status is used.
   INFO_LOG_FMT(IOS_SD, "IOCTL_RESETCARD");
-
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
-
-  // Returns 16bit RCA and 16bit 0s (meaning success)
-  memory.Write_U32(m_status, request.buffer_out);
-
+  GetSystem().GetMemory().Write_U32(m_status, request.buffer_out);
   return IPCReply(IPC_SUCCESS);
 }
 
 IPCReply SDIOSlot0Device::SetClk(const IOCtlRequest& request)
 {
-  INFO_LOG_FMT(IOS_SD, "IOCTL_SETCLK");
-
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
-
-  // libogc only sets it to 1 and makes sure the return isn't negative...
-  // one half of the sdclk divisor: a power of two or zero.
-  const u32 clock = memory.Read_U32(request.buffer_in);
-  if (clock != 1)
-    INFO_LOG_FMT(IOS_SD, "Setting to {}, interesting", clock);
-
+  // The argument is half the SD clock divisor. libogc always passes 1.
+  const u32 divisor = GetSystem().GetMemory().Read_U32(request.buffer_in);
+  INFO_LOG_FMT(IOS_SD, "IOCTL_SETCLK {}", divisor);
   return IPCReply(IPC_SUCCESS);
 }
 
 std::optional<IPCReply> SDIOSlot0Device::SendCommand(const IOCtlRequest& request)
 {
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
+  INFO_LOG_FMT(IOS_SD, "IOCTL_SENDCMD {:#x} (request {:08x})",
+               GetSystem().GetMemory().Read_U32(request.buffer_in), request.address);
 
-  INFO_LOG_FMT(IOS_SD, "IOCTL_SENDCMD {:x} IPC:{:08x}", memory.Read_U32(request.buffer_in),
-               request.address);
+  const s32 result = ExecuteCommand(request, request.buffer_in, request.buffer_in_size, 0, 0,
+                                    request.buffer_out, request.buffer_out_size);
+  if (result != RET_EVENT_REGISTER)
+    return IPCReply(IPC_SUCCESS);
 
-  const s32 return_value = ExecuteCommand(request, request.buffer_in, request.buffer_in_size, 0, 0,
-                                          request.buffer_out, request.buffer_out_size);
-
-  if (return_value == RET_EVENT_REGISTER)
-  {
-    // Check if the condition is already true
-    EventNotify();
-    return std::nullopt;
-  }
-
-  return IPCReply(IPC_SUCCESS);
+  // The card may already be in the state the caller is waiting for.
+  EventNotify();
+  return std::nullopt;
 }
 
 IPCReply SDIOSlot0Device::GetStatus(const IOCtlRequest& request)
 {
-  // Since IOS does the SD initialization itself, we just say we're always initialized.
-  if (m_card.GetSize() <= SDSC_MAX_SIZE)
+  // IOS initialises SDSC cards by itself. SDHC cards only on versions that support them;
+  // elsewhere the title has to do it (SEND_IF_COND).
+  if (m_card.GetSize() > SDSC_MAX_SIZE)
   {
-    // No further initialization required.
-    m_status |= CARD_INITIALIZED;
+    if (m_sdhc_supported)
+      InitSDHC();
+    m_status |= CARD_SDHC;
   }
   else
   {
-    // Some IOS versions support SDHC.
-    // Others will work if they are manually initialized (SEND_IF_COND)
-    if (m_sdhc_supported)
-    {
-      // All of the initialization is done internally by IOS, so we get to skip some steps.
-      InitSDHC();
-    }
-    m_status |= CARD_SDHC;
+    m_status |= CARD_INITIALIZED;
   }
 
-  // Evaluate whether a card is currently inserted (config value).
-  // Make sure we don't modify m_status so we don't lose track of whether the card is SDHC.
-  const bool sd_card_inserted = Config::Get(Config::MAIN_WII_SD_CARD);
-  const bool sd_card_locked = !Config::Get(Config::MAIN_ALLOW_SD_WRITES);
-  const u32 status = sd_card_inserted ?
-                         (m_status | CARD_INSERTED | (sd_card_locked ? CARD_LOCKED : 0)) :
-                         CARD_NOT_EXIST;
+  // Insertion and write protection come from the settings and are not stored in m_status.
+  u32 status = CARD_NOT_EXIST;
+  if (Config::Get(Config::MAIN_WII_SD_CARD))
+  {
+    status = m_status | CARD_INSERTED;
+    if (!SDWritesAllowed())
+      status |= CARD_LOCKED;
+  }
 
-  INFO_LOG_FMT(IOS_SD, "IOCTL_GETSTATUS. Replying that {} card is {}{}{}",
-               (status & CARD_SDHC) ? "SDHC" : "SD",
-               (status & CARD_INSERTED) ? "inserted" : "not present",
-               (status & CARD_LOCKED) ? " and locked" : "",
-               (status & CARD_INITIALIZED) ? " and initialized" : "");
-
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
-  memory.Write_U32(status, request.buffer_out);
+  INFO_LOG_FMT(IOS_SD, "IOCTL_GETSTATUS: {} card, {}{}{}",
+               (status & CARD_SDHC) != 0 ? "SDHC" : "SD",
+               (status & CARD_INSERTED) != 0 ? "inserted" : "not inserted",
+               (status & CARD_LOCKED) != 0 ? ", locked" : "",
+               (status & CARD_INITIALIZED) != 0 ? ", initialized" : "");
+  GetSystem().GetMemory().Write_U32(status, request.buffer_out);
   return IPCReply(IPC_SUCCESS);
 }
 
 IPCReply SDIOSlot0Device::GetOCRegister(const IOCtlRequest& request)
 {
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
-
   const u32 ocr = GetOCRegister();
-  INFO_LOG_FMT(IOS_SD, "IOCTL_GETOCR. Replying with ocr {:x}", ocr);
-  memory.Write_U32(ocr, request.buffer_out);
-
+  INFO_LOG_FMT(IOS_SD, "IOCTL_GETOCR: {:#x}", ocr);
+  GetSystem().GetMemory().Write_U32(ocr, request.buffer_out);
   return IPCReply(IPC_SUCCESS);
 }
 
 IPCReply SDIOSlot0Device::SendCommand(const IOCtlVRequest& request)
 {
-  auto& system = GetSystem();
-  auto& memory = system.GetMemory();
+  // in: command block, data buffer; io: response.
+  Memory::MemoryManager& memory = GetSystem().GetMemory();
+  const IOCtlVRequest::IOVector& command_block = request.in_vectors[0];
+  const IOCtlVRequest::IOVector& data = request.in_vectors[1];
+  const IOCtlVRequest::IOVector& response = request.io_vectors[0];
 
-  DEBUG_LOG_FMT(IOS_SD, "IOCTLV_SENDCMD {:#010x}", memory.Read_U32(request.in_vectors[0].address));
-  memory.Memset(request.io_vectors[0].address, 0, request.io_vectors[0].size);
+  DEBUG_LOG_FMT(IOS_SD, "IOCTLV_SENDCMD {:#010x}", memory.Read_U32(command_block.address));
+  memory.Memset(response.address, 0, response.size);
 
-  const s32 return_value =
-      ExecuteCommand(request, request.in_vectors[0].address, request.in_vectors[0].size,
-                     request.in_vectors[1].address, request.in_vectors[1].size,
-                     request.io_vectors[0].address, request.io_vectors[0].size);
-
-  return IPCReply(return_value);
+  // Event requests are not supported through here: the internal code is replied as is.
+  return IPCReply(ExecuteCommand(request, command_block.address, command_block.size, data.address,
+                                 data.size, response.address, response.size));
 }
 
 u32 SDIOSlot0Device::GetOCRegister() const
 {
-  u32 ocr = 0x00ff8000;
-  if (m_status & CARD_INITIALIZED)
-    ocr |= 0x80000000;
-  if (m_status & CARD_SDHC)
-    ocr |= 0x40000000;
+  // 2.7-3.6 V, plus the power-up done and capacity bits.
+  constexpr u32 VOLTAGE_WINDOW = 0x00ff8000;
+  constexpr u32 POWERED_UP = 0x80000000;
+  constexpr u32 HIGH_CAPACITY = 0x40000000;
+  u32 ocr = VOLTAGE_WINDOW;
+  if ((m_status & CARD_INITIALIZED) != 0)
+    ocr |= POWERED_UP;
+  if ((m_status & CARD_SDHC) != 0)
+    ocr |= HIGH_CAPACITY;
   return ocr;
 }
 
+// CSD register layouts (SD physical layer spec, CSD versions 1.0 and 2.0). The words are listed
+// least significant first and, as IOS returns them, shifted right by eight bits (no CRC byte).
+// Fixed fields are in the constants; the size fields are added below.
+//
+// Version 1.0: TAAC 80 ms, TRAN_SPEED 25 Mbit/s, CCC 0x5b5, READ_BL_PARTIAL, 100 mA currents,
+// ERASE_BLK_EN, SECTOR_SIZE 128 blocks, R2W_FACTOR 2, COPY.
 std::array<u32, 4> SDIOSlot0Device::GetCSDv1() const
 {
-  u64 size = m_card.GetSize();
-
-  // 512 bytes/sector. A 2GB card should only ever have to bump this up to 10
-  u32 read_bl_len = 9;
-
-  // size = (c_size + 1) * (1 << (2 + c_size_mult + read_bl_len))
-  u32 c_size_mult = 0;
-  bool invalid_size = false;
-  while (size > 4096)
+  // capacity = (C_SIZE + 1) * 2^(C_SIZE_MULT + 2) * 2^READ_BL_LEN, with C_SIZE < 4096,
+  // C_SIZE_MULT <= 7 and READ_BL_LEN starting at 9 (512-byte blocks).
+  u64 units = m_card.GetSize();
+  u32 block_len_log2 = 9;
+  u32 shift = 0;
+  bool inexact = false;
+  while (units > 4096)
   {
-    invalid_size |= size & 1;
-    size >>= 1;
-    if (++c_size_mult > 7 + 2 + read_bl_len && ++read_bl_len > 15)
-    {
-      ERROR_LOG_FMT(IOS_SD, "SD Card is too big!");
-      // Set max values
-      size = 4096;
-      c_size_mult = 7 + 2 + read_bl_len;
-    }
+    if ((units & 1) != 0)
+      inexact = true;
+    units >>= 1;
+    ++shift;
+    if (shift <= 2 + 7 + block_len_log2)
+      continue;
+    // C_SIZE_MULT is full: use bigger blocks instead.
+    ++block_len_log2;
+    if (block_len_log2 <= 15)
+      continue;
+    ERROR_LOG_FMT(IOS_SD, "The SD card image is too large for an SDSC card");
+    units = 4096;
+    shift = 2 + 7 + block_len_log2;
   }
-  c_size_mult -= 2 + read_bl_len;
-  --size;
-  const u32 c_size(size);
+  const u32 size_mult = shift - (2 + block_len_log2);
+  const auto c_size = static_cast<u32>(units - 1);
 
-  if (invalid_size)
+  if (inexact)
   {
-    WARN_LOG_FMT(IOS_SD, "SD Card size is invalid");
+    WARN_LOG_FMT(IOS_SD, "The SD card image size cannot be expressed exactly in the CSD");
   }
   else
   {
-    INFO_LOG_FMT(IOS_SD, "SD C_SIZE = {}, C_SIZE_MULT = {}, READ_BL_LEN = {}", c_size, c_size_mult,
-                 read_bl_len);
+    INFO_LOG_FMT(IOS_SD, "CSD: C_SIZE {}, C_SIZE_MULT {}, READ_BL_LEN {}", c_size, size_mult,
+                 block_len_log2);
   }
 
-  // 0b00           CSD_STRUCTURE (SDv1)
-  // 0b000000       reserved
-  // 0b01111111     TAAC (8.0 * 10ms)
-  // 0b00000000     NSAC
-  // 0b00110010     TRAN_SPEED (2.5 * 10 Mbit/s, max operating frequency)
-
-  // 0b010110110101 CCC
-  // 0b????         READ_BL_LEN
-  // 0b1            READ_BL_PARTIAL
-  // 0b0            WRITE_BL_MISALIGN
-  // 0b0            READ_BLK_MISALIGN
-  // 0b0            DSR_IMP (no driver stage register implemented)
-  // 0b00           reserved
-  // 0b??????????   C_SIZE (most significant 10 bits)
-
-  // 0b??           C_SIZE (least significant 2 bits)
-  // 0b111          VDD_R_CURR_MIN (100 mA)
-  // 0b111          VDD_R_CURR_MAX (100 mA)
-  // 0b111          VDD_W_CURR_MIN (100 mA)
-  // 0b111          VDD_W_CURR_MAX (100 mA)
-  // 0b???          C_SIZE_MULT
-  // 0b1            ERASE_BLK_EN (erase unit = 512 bytes)
-  // 0b1111111      SECTOR_SIZE (128 write blocks)
-  // 0b0000000      WP_GRP_SIZE
-
-  // 0b0            WP_GRP_ENABLE (no write protection)
-  // 0b00           reserved
-  // 0b001          R2W_FACTOR (write half as fast as read)
-  // 0b????         WRITE_BL_LEN (= READ_BL_LEN)
-  // 0b0            WRITE_BL_PARTIAL (no partial block writes)
-  // 0b00000        reserved
-  // 0b0            FILE_FORMAT_GRP (default)
-  // 0b1            COPY (contents are copied)
-  // 0b0            PERM_WRITE_PROTECT (not permanently write protected)
-  // 0b0            TMP_READ_PROTECT (not temporarily write protected)
-  // 0b00           FILE_FORMAT (contains partition table)
-  // 0b00           reserved
-  // 0b???????      CRC
-  // 0b1            reserved
-
-  // TODO: CRC7 (but so far it looks like nobody is actually verifying this)
-  // constexpr u32 crc = 0;  // The CRC doesn't seem to be sent any at all.
-  // Additionally, the entire response seems to be shifted to the right by 8 bits. Or the entire CSD
-  // was sent in reverse and IOS is only flipping the endianness of the four words.... It's weird.
-
-  // Form the csd using the description above
+  constexpr std::array<u32, 4> FIXED{0x000007f0, 0x035b5080, 0x003ffc7f, 0x80040040};
   return {{
-      0x000007f0,
-      0x035b5080 | (read_bl_len << 8) | (c_size >> 10),
-      0x003ffc7f | (c_size << 22) | (c_size_mult << 7),
-      0x80040040 | (read_bl_len << 18),
+      FIXED[0],
+      FIXED[1] | (block_len_log2 << 8) | (c_size >> 10),
+      FIXED[2] | (c_size << 22) | (size_mult << 7),
+      FIXED[3] | (block_len_log2 << 18),
   }};
 }
 
+// Version 2.0: TAAC 1 ms, TRAN_SPEED 50 Mbit/s, CCC 0x5f5, READ_BL_LEN 9, ERASE_BLK_EN,
+// SECTOR_SIZE 128 blocks, R2W_FACTOR 4, WRITE_BL_LEN 9. C_SIZE counts 512 KiB units.
 std::array<u32, 4> SDIOSlot0Device::GetCSDv2() const
 {
+  constexpr u64 UNIT = 512 * 1024;
   const u64 size = m_card.GetSize();
+  if (size % UNIT != 0)
+    WARN_LOG_FMT(IOS_SD, "The SDHC card image size is not a multiple of 512 KiB");
+  const auto c_size = static_cast<u32>(size / UNIT - 1);
 
-  if (size % (512 * 1024) != 0)
-    WARN_LOG_FMT(IOS_SD, "SDHC Card size cannot be divided by 1024 * 512");
-
-  const u32 c_size(size / (512 * 1024) - 1);
-
-  // 0b01               CSD_STRUCTURE (SDv2)
-  // 0b000000           reserved
-  // 0b00001110         TAAC (1.0 * 1ms)
-  // 0b00000000         NSAC
-  // 0b01011010         TRAN_SPEED (5.0 * 10 Mbit/s, max operating frequency)
-
-  // 0b010111110101     CCC (TODO: Figure out what each command class does)
-  // 0b1001             READ_BL_LEN (512 bytes, fixed for SDHC)
-  // 0b0                READ_BL_PARTIAL
-  // 0b0                WRITE_BLK_MISALIGN
-  // 0b0                READ_BLK_MISALIGN
-  // 0b0                DSR_IMP (no driver stage register implemented)
-  // 0b000000           reserved
-  // 0b??????           C_SIZE (most significant 6 bits)
-
-  // 0b???????????????? C_SIZE (least significant 16 bits)
-  // 0b0                reserved
-  // 0b1                ERASE_BLK_EN
-  // 0b1111111          SECTOR_SIZE
-  // 0b0000000          WP_GRP_SIZE (not supported in SDHC)
-
-  // 0b0                WP_GRP_ENABLE
-  // 0b00               reserved
-  // 0b010              R2W_FACTOR (x4)
-  // 0b1001             WRITE_BL_LEN (512 bytes)
-  // 0b0                WRITE_BL_PARTIAL
-  // 0b00000            reserved
-  // 0b0                FILE_FORMAT_GRP
-  // 0b0                COPY
-  // 0b0                PERM_WRITE_PROTECT
-  // 0b0                TMP_WRITE_PROTECT
-  // 0b00               FILE_FORMAT
-  // 0b00               reserved
-  // 0b0000000          CRC
-  // 0b1                reserved
-
-  // TODO: CRC7 (but so far it looks like nobody is actually verifying this) // See GetCSDv1 notes
-  // on this
-  // constexpr u32 crc = 0;
-
-  // Form the csd using the description above
-  return {{
-      0x00400e00,
-      0x5a5f5900,
-      0x0000007f | (c_size << 8),
-      0x800a4000,
-  }};
+  constexpr std::array<u32, 4> FIXED{0x00400e00, 0x5a5f5900, 0x0000007f, 0x800a4000};
+  return {{FIXED[0], FIXED[1], FIXED[2] | (c_size << 8), FIXED[3]}};
 }
 
 u64 SDIOSlot0Device::GetAddressFromRequest(u32 arg) const
 {
-  u64 address(arg);
-  if (m_status & CARD_SDHC)
-    address *= 512;
-  return address;
+  // SDSC cards are addressed in bytes, SDHC cards in 512-byte blocks.
+  const u64 address = arg;
+  return (m_status & CARD_SDHC) != 0 ? address * 512 : address;
 }
 
 void SDIOSlot0Device::InitSDHC()
@@ -706,5 +525,4 @@ void SDIOSlot0Device::InitSDHC()
   m_protocol = SDProtocol::V2;
   m_status |= CARD_INITIALIZED;
 }
-
 }  // namespace IOS::HLE

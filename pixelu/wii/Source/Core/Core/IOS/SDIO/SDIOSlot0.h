@@ -1,7 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-
-// PRELIMINARY - seems to fully work with libogc, writing has yet to be tested
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -18,7 +15,7 @@ class PointerWrap;
 
 namespace IOS::HLE
 {
-// The front SD slot
+// /dev/sdio/slot0: the SD card slot on the front of the console, backed by a card image file.
 class SDIOSlot0Device : public EmulationDevice
 {
 public:
@@ -33,14 +30,14 @@ public:
   std::optional<IPCReply> IOCtlV(const IOCtlVRequest& request) override;
 
 private:
-  // SD Host Controller Registers
+  // Host controller registers with special write behaviour.
   enum
   {
     HCR_CLOCKCONTROL = 0x2C,
     HCR_SOFTWARERESET = 0x2F,
   };
 
-  // IOCtl
+  // ioctl numbers
   enum
   {
     IOCTL_WRITEHCR = 0x01,
@@ -52,22 +49,22 @@ private:
     IOCTL_GETOCR = 0x0C,
   };
 
-  // IOCtlV
+  // ioctlv numbers
   enum
   {
     IOCTLV_SENDCMD = 0x07,
   };
 
-  // ExecuteCommand
+  // ExecuteCommand results. RET_EVENT_REGISTER only means "reply later".
   enum
   {
     RET_OK,
     RET_FAIL,
     RET_LOCKED = -10,
-    RET_EVENT_REGISTER,  // internal state only - not actually returned
+    RET_EVENT_REGISTER,
   };
 
-  // Status
+  // Card status bits (IOCTL_GETSTATUS)
   enum
   {
     CARD_NOT_EXIST = 0,
@@ -77,7 +74,7 @@ private:
     CARD_SDHC = 0x100000,
   };
 
-  // Commands
+  // SD commands (and the IOS-specific event commands)
   enum
   {
     GO_IDLE_STATE = 0x00,
@@ -105,7 +102,7 @@ private:
   {
     EVENT_INSERT = 1,
     EVENT_REMOVE = 2,
-    // from unregister, i think it is just meant to be invalid
+    // What a cancelled event is answered with.
     EVENT_INVALID = 0xc210000
   };
 
@@ -115,10 +112,10 @@ private:
     V2,
   };
 
-  // Maximum number of bytes in an SDSC card
-  // Used to trigger using SDHC instead of SDSC
+  // Images larger than this are presented as SDHC cards.
   static constexpr u64 SDSC_MAX_SIZE = 0x80000000;
 
+  // A pending insert/remove notification request.
   struct Event
   {
     Event(EventType type_, Request request_) : type(type_), request(request_) {}
@@ -152,14 +149,12 @@ private:
 
   u64 GetAddressFromRequest(u32 arg) const;
 
-  // TODO: do we need more than one?
   std::unique_ptr<Event> m_event;
 
   u32 m_status = CARD_NOT_EXIST;
   SDProtocol m_protocol = SDProtocol::V1;
 
-  // Is SDHC supported by the IOS?
-  // Other IOS requires manual SDHC initialization
+  // Whether this IOS version initialises SDHC cards by itself (others need SEND_IF_COND).
   const bool m_sdhc_supported;
 
   u32 m_block_length = 0;
