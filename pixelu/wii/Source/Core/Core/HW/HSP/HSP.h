@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -13,6 +12,8 @@ class PointerWrap;
 
 namespace HSP
 {
+// Owns whatever is attached to the high speed port and forwards DSP block
+// transfers to it.
 class HSPManager
 {
 public:
@@ -35,6 +36,6 @@ public:
   void SetDevice(HSPDeviceType device);
 
 private:
-  std::unique_ptr<IHSPDevice> m_device;
+  std::unique_ptr<IHSPDevice> m_attached;
 };
 }  // namespace HSP

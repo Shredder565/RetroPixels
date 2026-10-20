@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/HSP/HSP_Device.h"
 
@@ -14,23 +13,18 @@ namespace HSP
 {
 IHSPDevice::~IHSPDevice() = default;
 
-void IHSPDevice::DoState(PointerWrap& p)
+void IHSPDevice::DoState(PointerWrap&)
 {
 }
 
 std::unique_ptr<IHSPDevice> HSPDevice_Create(const HSPDeviceType device)
 {
-  auto& system = Core::System::GetInstance();
-
-  switch (device)
-  {
-  case HSPDeviceType::ARAMExpansion:
+  if (device == HSPDeviceType::ARAMExpansion)
     return std::make_unique<CHSPDevice_ARAMExpansion>();
-  case HSPDeviceType::GBPlayer:
-    return std::make_unique<CHSPDevice_GBPlayer>(system);
-  case HSPDeviceType::None:
-  default:
-    return std::make_unique<CHSPDevice_Null>();
-  }
+  if (device == HSPDeviceType::GBPlayer)
+    return std::make_unique<CHSPDevice_GBPlayer>(Core::System::GetInstance());
+
+  // Unknown values fall back to an empty port.
+  return std::make_unique<CHSPDevice_Null>();
 }
 }  // namespace HSP

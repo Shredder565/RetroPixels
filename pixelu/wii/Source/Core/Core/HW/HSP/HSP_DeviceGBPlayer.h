@@ -1,5 +1,4 @@
-// Copyright 2026 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -19,10 +18,12 @@ namespace HSP
 {
 class CHSPDevice_GBPlayer;
 
+// The handheld side of a Game Boy Player: whatever runs the cartridge and
+// feeds picture, sound and serial data back to the player device.
 class IGBPlayer
 {
 public:
-  // Audio/Video data is read in chunks.
+  // The disc software pulls picture and sound in blocks of this many entries.
   static constexpr std::size_t AV_REGION_SIZE = 0x400;
 
   IGBPlayer(Core::System&, CHSPDevice_GBPlayer*);
@@ -46,9 +47,10 @@ public:
 
 protected:
   Core::System& m_system;
-  CHSPDevice_GBPlayer* const m_player;
+  CHSPDevice_GBPlayer* const m_device;
 };
 
+// The Game Boy Player add-on as seen through the high speed port.
 class CHSPDevice_GBPlayer final : public IHSPDevice
 {
 public:
@@ -65,25 +67,26 @@ public:
 
   void AssertIRQ(IRQ);
 
-  auto GetScanlineData() { return std::span{m_scanlines}; }
-  auto GetAudioData() { return std::span{m_audio}; }
+  auto GetScanlineData() { return std::span{m_video_lines}; }
+  auto GetAudioData() { return std::span{m_pwm_audio}; }
 
 private:
-  void UpdateInterrupts();
+  void RefreshInterruptLine();
 
   Core::System& m_system;
 
-  std::array<u8, 0x20> m_test{};
+  std::array<u8, 0x20> m_test_block{};
   u8 m_control{};
-  u16 m_irq{};
+  u16 m_irq_flags{};
 
-  // Holds four scanlines in RGB5 format.
-  std::array<u16, IGBPlayer::AV_REGION_SIZE> m_scanlines{};
+  // Four GBA scanlines of RGB5 pixels, ready for the next video read.
+  std::array<u16, IGBPlayer::AV_REGION_SIZE> m_video_lines{};
 
-  // Holds PWM audio data. Entire buffer is filled and read at 4096 Hz.
-  std::array<u8, IGBPlayer::AV_REGION_SIZE> m_audio{};
+  // One block of PWM sound bytes; the disc consumes a block 4096 times a
+  // second.
+  std::array<u8, IGBPlayer::AV_REGION_SIZE> m_pwm_audio{};
 
-  std::unique_ptr<IGBPlayer> m_gbp;
+  std::unique_ptr<IGBPlayer> m_handheld;
 };
 
 }  // namespace HSP

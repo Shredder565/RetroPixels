@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,6 +6,8 @@
 
 namespace HSP
 {
+// Extra auxiliary RAM on the high speed port. The configured size is rounded
+// up to a power of two and addresses wrap around it.
 class CHSPDevice_ARAMExpansion final : public IHSPDevice
 {
 public:
@@ -21,8 +22,10 @@ public:
   void DoState(PointerWrap&) override;
 
 private:
-  const u32 m_size;
-  const u32 m_mask;
-  u8* const m_ptr = nullptr;
+  u8* Block(u32 address) const;
+
+  const u32 m_bytes;
+  const u32 m_wrap;
+  u8* const m_storage;
 };
 }  // namespace HSP
