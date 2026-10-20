@@ -1,7 +1,7 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-// WARNING - THIS LIBRARY IS NOT THREAD SAFE!!!
+// An x86-64 machine code emitter for the JITs. Not thread safe: one emitter writes to one buffer
+// from one thread.
 
 #pragma once
 
@@ -19,38 +19,39 @@
 
 namespace Gen
 {
+// Condition codes, numbered as in the Jcc/SETcc/CMOVcc opcodes.
 enum CCFlags
 {
-  CC_O = 0,
-  CC_NO = 1,
-  CC_B = 2,
-  CC_C = 2,
-  CC_NAE = 2,
-  CC_NB = 3,
-  CC_NC = 3,
-  CC_AE = 3,
-  CC_Z = 4,
-  CC_E = 4,
-  CC_NZ = 5,
-  CC_NE = 5,
-  CC_BE = 6,
-  CC_NA = 6,
-  CC_NBE = 7,
-  CC_A = 7,
-  CC_S = 8,
-  CC_NS = 9,
+  CC_O = 0x0,
+  CC_NO = 0x1,
+  CC_B = 0x2,
+  CC_C = CC_B,
+  CC_NAE = CC_B,
+  CC_NB = 0x3,
+  CC_NC = CC_NB,
+  CC_AE = CC_NB,
+  CC_Z = 0x4,
+  CC_E = CC_Z,
+  CC_NZ = 0x5,
+  CC_NE = CC_NZ,
+  CC_BE = 0x6,
+  CC_NA = CC_BE,
+  CC_NBE = 0x7,
+  CC_A = CC_NBE,
+  CC_S = 0x8,
+  CC_NS = 0x9,
   CC_P = 0xA,
-  CC_PE = 0xA,
+  CC_PE = CC_P,
   CC_NP = 0xB,
-  CC_PO = 0xB,
+  CC_PO = CC_NP,
   CC_L = 0xC,
-  CC_NGE = 0xC,
+  CC_NGE = CC_L,
   CC_NL = 0xD,
-  CC_GE = 0xD,
+  CC_GE = CC_NL,
   CC_LE = 0xE,
-  CC_NG = 0xE,
+  CC_NG = CC_LE,
   CC_NLE = 0xF,
-  CC_G = 0xF
+  CC_G = CC_NLE,
 };
 
 enum
@@ -59,25 +60,27 @@ enum
   NUMXMMs = 16,
 };
 
+// The kind of an OpArg. 1, 2, 4 and 8 are base + index * scale addressing.
 enum
 {
-  SCALE_NONE = 0,
+  SCALE_NONE = 0,  // a register
   SCALE_1 = 1,
   SCALE_2 = 2,
   SCALE_4 = 4,
   SCALE_8 = 8,
-  SCALE_ATREG = 16,
-  // SCALE_NOBASE_1 is not supported and can be replaced with SCALE_ATREG
-  SCALE_NOBASE_2 = 34,
-  SCALE_NOBASE_4 = 36,
-  SCALE_NOBASE_8 = 40,
-  SCALE_RIP = 0xFF,
+  SCALE_ATREG = 16,  // [base + displacement]
+  // [index * scale + disp32] without a base register. A scale of 1 is just SCALE_ATREG.
+  SCALE_NOBASE_2 = 0x20 | SCALE_2,
+  SCALE_NOBASE_4 = 0x20 | SCALE_4,
+  SCALE_NOBASE_8 = 0x20 | SCALE_8,
+  SCALE_RIP = 0xFF,  // an absolute address reached RIP-relative
   SCALE_IMM8 = 0xF0,
   SCALE_IMM16 = 0xF1,
   SCALE_IMM32 = 0xF2,
   SCALE_IMM64 = 0xF3,
 };
 
+// Predicates of CMPSS/CMPSD/CMPPS/CMPPD.
 enum SSECompare
 {
   CMP_EQ = 0,
@@ -91,160 +94,112 @@ enum SSECompare
 };
 
 class XEmitter;
-enum class FloatOp;
-enum class NormalOp;
 
-// Information about a generated MOV op
+// Where a byte-swapping load or store was emitted, so a fault in it can be traced back.
 struct MovInfo final
 {
   u8* address;
+  // The store is a BSWAP of the source register followed by a plain MOV.
   bool nonAtomicSwapStore;
-  // valid iff nonAtomicSwapStore is true
+  // The register that BSWAP changed; only meaningful when nonAtomicSwapStore is set.
   X64Reg nonAtomicSwapStoreSrc;
 };
 
-// RIP addressing does not benefit from micro op fusion on Core arch
+// One operand: a register, a memory reference or an immediate.
 struct OpArg
 {
-  // For accessing offset and operandReg.
-  // This also allows us to keep the op writing functions private.
   friend class XEmitter;
 
-  // dummy op arg, used for storage
   constexpr OpArg() = default;
   constexpr OpArg(u64 offset_, int scale_, X64Reg rm_reg = RAX, X64Reg scaled_reg = RAX)
-      : offset{offset_}, offsetOrBaseReg{static_cast<u16>(rm_reg)},
-        indexReg{static_cast<u16>(scaled_reg)}, scale{static_cast<u8>(scale_)}
+      : m_value{offset_}, m_base{static_cast<u16>(rm_reg)},
+        m_index{static_cast<u16>(scaled_reg)}, m_kind{static_cast<u8>(scale_)}
   {
   }
-  constexpr bool operator==(const OpArg& b) const
+
+  constexpr bool operator==(const OpArg& other) const
   {
-    return std::tie(scale, offsetOrBaseReg, indexReg, offset, operandReg) ==
-           std::tie(b.scale, b.offsetOrBaseReg, b.indexReg, b.offset, b.operandReg);
+    return std::tie(m_kind, m_base, m_index, m_value) ==
+           std::tie(other.m_kind, other.m_base, other.m_index, other.m_value);
   }
+
   u64 Imm64() const
   {
-    DEBUG_ASSERT(scale == SCALE_IMM64);
-    return (u64)offset;
+    DEBUG_ASSERT(m_kind == SCALE_IMM64);
+    return m_value;
   }
   u32 Imm32() const
   {
-    DEBUG_ASSERT(scale == SCALE_IMM32);
-    return (u32)offset;
+    DEBUG_ASSERT(m_kind == SCALE_IMM32);
+    return static_cast<u32>(m_value);
   }
   u16 Imm16() const
   {
-    DEBUG_ASSERT(scale == SCALE_IMM16);
-    return (u16)offset;
+    DEBUG_ASSERT(m_kind == SCALE_IMM16);
+    return static_cast<u16>(m_value);
   }
   u8 Imm8() const
   {
-    DEBUG_ASSERT(scale == SCALE_IMM8);
-    return (u8)offset;
+    DEBUG_ASSERT(m_kind == SCALE_IMM8);
+    return static_cast<u8>(m_value);
   }
 
-  s64 SImm64() const
-  {
-    DEBUG_ASSERT(scale == SCALE_IMM64);
-    return (s64)offset;
-  }
-  s32 SImm32() const
-  {
-    DEBUG_ASSERT(scale == SCALE_IMM32);
-    return (s32)offset;
-  }
-  s16 SImm16() const
-  {
-    DEBUG_ASSERT(scale == SCALE_IMM16);
-    return (s16)offset;
-  }
-  s8 SImm8() const
-  {
-    DEBUG_ASSERT(scale == SCALE_IMM8);
-    return (s8)offset;
-  }
+  s64 SImm64() const { return static_cast<s64>(Imm64()); }
+  s32 SImm32() const { return static_cast<s32>(Imm32()); }
+  s16 SImm16() const { return static_cast<s16>(Imm16()); }
+  s8 SImm8() const { return static_cast<s8>(Imm8()); }
 
-  OpArg AsImm64() const
-  {
-    DEBUG_ASSERT(IsImm());
-    return OpArg((u64)offset, SCALE_IMM64);
-  }
-  OpArg AsImm32() const
-  {
-    DEBUG_ASSERT(IsImm());
-    return OpArg((u32)offset, SCALE_IMM32);
-  }
-  OpArg AsImm16() const
-  {
-    DEBUG_ASSERT(IsImm());
-    return OpArg((u16)offset, SCALE_IMM16);
-  }
-  OpArg AsImm8() const
-  {
-    DEBUG_ASSERT(IsImm());
-    return OpArg((u8)offset, SCALE_IMM8);
-  }
+  // The same immediate value, truncated to another width.
+  OpArg AsImm64() const { return Resized(SCALE_IMM64, ~0ULL); }
+  OpArg AsImm32() const { return Resized(SCALE_IMM32, 0xFFFFFFFFULL); }
+  OpArg AsImm16() const { return Resized(SCALE_IMM16, 0xFFFFULL); }
+  OpArg AsImm8() const { return Resized(SCALE_IMM8, 0xFFULL); }
 
-  constexpr bool IsImm() const
+  constexpr bool IsImm() const { return m_kind >= SCALE_IMM8 && m_kind <= SCALE_IMM64; }
+  constexpr bool IsSimpleReg() const { return m_kind == SCALE_NONE; }
+  constexpr bool IsSimpleReg(X64Reg reg) const
   {
-    return scale == SCALE_IMM8 || scale == SCALE_IMM16 || scale == SCALE_IMM32 ||
-           scale == SCALE_IMM64;
+    return IsSimpleReg() && GetSimpleReg() == reg;
   }
-  constexpr bool IsSimpleReg() const { return scale == SCALE_NONE; }
-  constexpr bool IsSimpleReg(X64Reg reg) const { return IsSimpleReg() && GetSimpleReg() == reg; }
-  constexpr bool IsZero() const { return IsImm() && offset == 0; }
-  constexpr int GetImmBits() const
-  {
-    switch (scale)
-    {
-    case SCALE_IMM8:
-      return 8;
-    case SCALE_IMM16:
-      return 16;
-    case SCALE_IMM32:
-      return 32;
-    case SCALE_IMM64:
-      return 64;
-    default:
-      return -1;
-    }
-  }
+  constexpr bool IsZero() const { return IsImm() && m_value == 0; }
+
+  // 8, 16, 32 or 64 for an immediate, -1 for anything else.
+  constexpr int GetImmBits() const { return IsImm() ? 8 << (m_kind - SCALE_IMM8) : -1; }
 
   constexpr X64Reg GetSimpleReg() const
   {
-    if (scale == SCALE_NONE)
-      return static_cast<X64Reg>(offsetOrBaseReg);
-
-    return INVALID_REG;
+    return IsSimpleReg() ? static_cast<X64Reg>(m_base) : INVALID_REG;
   }
 
+  // Moves a memory operand's displacement (or a RIP operand's address) by val bytes.
   void AddMemOffset(int val)
   {
-    DEBUG_ASSERT_MSG(DYNA_REC, scale == SCALE_RIP || (scale <= SCALE_ATREG && scale > SCALE_NONE),
-                     "Tried to increment an OpArg which doesn't have an offset");
-    offset += val;
+    DEBUG_ASSERT_MSG(DYNA_REC,
+                     m_kind == SCALE_RIP || (m_kind != SCALE_NONE && m_kind <= SCALE_ATREG),
+                     "AddMemOffset needs a memory operand with a displacement");
+    m_value += val;
   }
 
 private:
-  void WriteREX(XEmitter* emit, int opBits, int bits, int customOp = -1) const;
-  void WriteVEX(XEmitter* emit, X64Reg regOp1, X64Reg regOp2, int L, int pp, int mmmmm,
-                int W = 0) const;
-  void WriteRest(XEmitter* emit, int extraBytes = 0, X64Reg operandReg = INVALID_REG,
-                 bool warn_64bit_offset = true) const;
-  void WriteSingleByteOp(XEmitter* emit, u8 op, X64Reg operandReg, int bits);
-  void WriteNormalOp(XEmitter* emit, bool toRM, NormalOp op, const OpArg& operand, int bits) const;
+  OpArg Resized(int kind, u64 mask) const
+  {
+    DEBUG_ASSERT(IsImm());
+    return OpArg(m_value & mask, kind);
+  }
 
-  u64 offset = 0;  // Also used to store immediates.
-  u16 offsetOrBaseReg = 0;
-  u16 indexReg = 0;
-  u16 operandReg = 0;
-  u8 scale = 0;
+  // Immediate value, displacement, or the absolute address of a SCALE_RIP operand.
+  u64 m_value = 0;
+  // Register (SCALE_NONE) or base register.
+  u16 m_base = 0;
+  u16 m_index = 0;
+  // One of the SCALE_* values.
+  u8 m_kind = 0;
 };
 
 template <typename T>
 inline OpArg M(const T* ptr)
 {
-  return OpArg((u64)(const void*)ptr, (int)SCALE_RIP);
+  return OpArg(reinterpret_cast<u64>(static_cast<const void*>(ptr)), SCALE_RIP);
 }
 constexpr OpArg R(X64Reg value)
 {
@@ -254,28 +209,23 @@ constexpr OpArg MatR(X64Reg value)
 {
   return OpArg(0, SCALE_ATREG, value);
 }
-
 constexpr OpArg MDisp(X64Reg value, int offset)
 {
   return OpArg(static_cast<u32>(offset), SCALE_ATREG, value);
 }
-
 constexpr OpArg MComplex(X64Reg base, X64Reg scaled, int scale, int offset)
 {
   return OpArg(offset, scale, base, scaled);
 }
-
 constexpr OpArg MScaled(X64Reg scaled, int scale, int offset)
 {
-  if (scale == SCALE_1)
-    return OpArg(offset, SCALE_ATREG, scaled);
-
-  return OpArg(offset, scale | 0x20, RAX, scaled);
+  // index * 1 needs no SIB scale: it is the same as [index + offset].
+  return scale == SCALE_1 ? OpArg(offset, SCALE_ATREG, scaled) :
+                            OpArg(offset, 0x20 | scale, RAX, scaled);
 }
-
 constexpr OpArg MRegSum(X64Reg base, X64Reg offset)
 {
-  return MComplex(base, offset, 1, 0);
+  return MComplex(base, offset, SCALE_1, 0);
 }
 
 constexpr OpArg Imm8(u8 imm)
@@ -285,7 +235,7 @@ constexpr OpArg Imm8(u8 imm)
 constexpr OpArg Imm16(u16 imm)
 {
   return OpArg(imm, SCALE_IMM16);
-}  // rarely used
+}
 constexpr OpArg Imm32(u32 imm)
 {
   return OpArg(imm, SCALE_IMM32);
@@ -299,18 +249,19 @@ inline OpArg ImmPtr(const void* imm)
   return Imm64(reinterpret_cast<u64>(imm));
 }
 
+// ptr - base as a 32-bit offset; asserts (and returns 0) when it does not fit.
 inline u32 PtrOffset(const void* ptr, const void* base = nullptr)
 {
-  s64 distance = (s64)ptr - (s64)base;
-  if (distance >= 0x80000000LL || distance < -0x80000000LL)
+  const s64 distance = reinterpret_cast<s64>(ptr) - reinterpret_cast<s64>(base);
+  if (distance != static_cast<s32>(distance))
   {
-    ASSERT_MSG(DYNA_REC, 0, "pointer offset out of range");
+    ASSERT_MSG(DYNA_REC, 0, "PtrOffset: distance does not fit in 32 bits");
     return 0;
   }
-
-  return (u32)distance;
+  return static_cast<u32>(distance);
 }
 
+// A forward jump or call whose target is filled in later with SetJumpTarget.
 struct FixupBranch
 {
   enum class Type
@@ -319,63 +270,62 @@ struct FixupBranch
     Branch32Bit
   };
 
+  // Points just past the instruction (the end of its displacement), or is null when the
+  // instruction could not be written.
   u8* ptr;
   Type type;
 };
 
 class XEmitter
 {
-  friend struct OpArg;  // for Write8 etc
 private:
-  // Pointer to memory where code will be emitted to.
   u8* code = nullptr;
-
-  // Pointer past the end of the memory region we're allowed to emit to.
-  // Writes that would reach this memory are refused and will set the m_write_failed flag instead.
+  // Writes that would go past this are dropped and set m_write_failed.
   u8* m_code_end = nullptr;
-
   bool flags_locked = false;
-
-  // Set to true when a write request happens that would write past m_code_end.
-  // Must be cleared with SetCodePtr() afterwards.
   bool m_write_failed = false;
 
+  // Instruction encoding helpers (x64Emitter.cpp).
   void CheckFlags();
+  bool Fits(size_t bytes);
+  void EmitRex(const OpArg& rm, u32 reg, bool wide, bool rm_is_byte, bool reg_is_byte);
+  void EmitOperand(const OpArg& rm, u32 reg, int trailing_bytes = 0, bool check_rip = true);
+  void EmitRegOp(int bits, const OpArg& rm, u32 reg, bool rm_is_byte, bool reg_is_byte, u8 op0,
+                 int op1 = -1, int op2 = -1, int trailing_bytes = 0);
+  void EmitUnaryGroup(int bits, const OpArg& rm, int ext);
+  void EmitBitScan(int bits, X64Reg dest, const OpArg& src, u8 op, bool f3_prefix);
+  void EmitShift(int bits, const OpArg& dest, const OpArg& shift, int ext);
+  void EmitBitTest(int bits, const OpArg& dest, const OpArg& index, int ext);
+  void EmitDoubleShift(int bits, const OpArg& dest, const OpArg& src, const OpArg& shift,
+                       u8 op_imm);
+  void EmitArith(int bits, int op, const OpArg& a1, const OpArg& a2);
+  void EmitArithImm(int bits, int op, const OpArg& rm, const OpArg& imm);
+  void EmitMovbe(int bits, bool store, X64Reg reg, const OpArg& mem);
+  void EmitMxcsr(const OpArg& mem, int ext);
+  void EmitSSE(u8 prefix, u16 op, X64Reg reg, const OpArg& rm, int trailing_bytes = 0);
+  void EmitSSE_SSSE3(u8 prefix, u16 op, X64Reg reg, const OpArg& rm, int trailing_bytes = 0);
+  void EmitSSE_SSE41(u8 prefix, u16 op, X64Reg reg, const OpArg& rm, int trailing_bytes = 0);
+  void EmitVEX(u8 prefix, u16 op, X64Reg reg, X64Reg vvvv, const OpArg& rm, bool w = false,
+               int trailing_bytes = 0);
+  void EmitVEX4(u8 prefix, u16 op, X64Reg reg, X64Reg vvvv, const OpArg& rm, X64Reg is4,
+                bool w = false);
+  void EmitAVX(u8 prefix, u16 op, X64Reg reg, X64Reg vvvv, const OpArg& rm, int trailing_bytes = 0);
+  void EmitFMA3(u8 op, X64Reg reg, X64Reg vvvv, const OpArg& rm, bool w);
+  void EmitFMA4(u8 op, X64Reg dest, X64Reg src1, X64Reg reg_src, const OpArg& rm, bool w);
+  void EmitBMI(int bits, u8 prefix, u16 op, X64Reg reg, X64Reg vvvv, const OpArg& rm,
+               int trailing_bytes = 0);
+  void EmitBMI1(int bits, u8 prefix, u16 op, X64Reg reg, X64Reg vvvv, const OpArg& rm);
+  void EmitBMI2(int bits, u8 prefix, u16 op, X64Reg reg, X64Reg vvvv, const OpArg& rm,
+                int trailing_bytes = 0);
 
-  void Rex(int w, int r, int x, int b);
-  void WriteModRM(int mod, int reg, int rm);
-  void WriteSIB(int scale, int index, int base);
-  void WriteSimple1Byte(int bits, u8 byte, X64Reg reg);
-  void WriteSimple2Byte(int bits, u8 byte1, u8 byte2, X64Reg reg);
-  void WriteMulDivType(int bits, OpArg src, int ext);
-  void WriteBitSearchType(int bits, X64Reg dest, OpArg src, u8 byte2, bool rep = false);
-  void WriteShift(int bits, OpArg dest, const OpArg& shift, int ext);
-  void WriteBitTest(int bits, const OpArg& dest, const OpArg& index, int ext);
-  void WriteMXCSR(OpArg arg, int ext);
-  void WriteSSEOp(u8 opPrefix, u16 op, X64Reg regOp, OpArg arg, int extrabytes = 0);
-  void WriteSSSE3Op(u8 opPrefix, u16 op, X64Reg regOp, const OpArg& arg, int extrabytes = 0);
-  void WriteSSE41Op(u8 opPrefix, u16 op, X64Reg regOp, const OpArg& arg, int extrabytes = 0);
-  void WriteVEXOp(u8 opPrefix, u16 op, X64Reg regOp1, X64Reg regOp2, const OpArg& arg, int W = 0,
-                  int extrabytes = 0);
-  void WriteVEXOp4(u8 opPrefix, u16 op, X64Reg regOp1, X64Reg regOp2, const OpArg& arg,
-                   X64Reg regOp3, int W = 0);
-  void WriteAVXOp(u8 opPrefix, u16 op, X64Reg regOp1, X64Reg regOp2, const OpArg& arg, int W = 0,
-                  int extrabytes = 0);
-  void WriteAVXOp4(u8 opPrefix, u16 op, X64Reg regOp1, X64Reg regOp2, const OpArg& arg,
-                   X64Reg regOp3, int W = 0);
-  void WriteFMA3Op(u8 op, X64Reg regOp1, X64Reg regOp2, const OpArg& arg, int W = 0);
-  void WriteFMA4Op(u8 op, X64Reg dest, X64Reg regOp1, X64Reg regOp2, const OpArg& arg, int W = 0);
-  void WriteBMIOp(int size, u8 opPrefix, u16 op, X64Reg regOp1, X64Reg regOp2, const OpArg& arg,
-                  int extrabytes = 0);
-  void WriteBMI1Op(int size, u8 opPrefix, u16 op, X64Reg regOp1, X64Reg regOp2, const OpArg& arg,
-                   int extrabytes = 0);
-  void WriteBMI2Op(int size, u8 opPrefix, u16 op, X64Reg regOp1, X64Reg regOp2, const OpArg& arg,
-                   int extrabytes = 0);
-  void WriteMOVBE(int bits, u8 op, X64Reg regOp, const OpArg& arg);
-  void WriteNormalOp(int bits, NormalOp op, const OpArg& a1, const OpArg& a2);
-
-  void ABI_CalculateFrameSize(BitSet32 mask, size_t rsp_alignment, size_t needed_frame_size,
-                              size_t* shadowp, size_t* subtractionp, size_t* xmm_offsetp);
+  // Stack frame layout for ABI_Push/PopRegistersAndAdjustStack (x64ABI.cpp).
+  struct FrameLayout
+  {
+    size_t shadow;       // shadow space the callee may use, at [rsp]
+    size_t subtraction;  // bytes taken off rsp after the pushes
+    size_t xmm_offset;   // rsp offset of the first saved XMM register
+  };
+  static FrameLayout CalculateFrame(BitSet32 mask, size_t rsp_alignment, size_t needed_frame_size);
 
 protected:
   void Write8(u8 value);
@@ -387,7 +337,9 @@ public:
   XEmitter() = default;
   explicit XEmitter(u8* code_ptr, u8* code_end) : code(code_ptr), m_code_end(code_end) {}
   virtual ~XEmitter() = default;
+
   void SetCodePtr(u8* ptr, u8* end, bool write_failed = false);
+  // Skips bytes bytes, filling them with INT3.
   void ReserveCodeSpace(int bytes);
   u8* AlignCodeTo(size_t alignment);
   u8* AlignCode4();
@@ -398,40 +350,24 @@ public:
   const u8* GetCodeEnd() const { return m_code_end; }
   u8* GetWritableCodeEnd() { return m_code_end; }
 
+  // While the flags are locked, emitting an instruction that changes them asserts.
   void LockFlags() { flags_locked = true; }
   void UnlockFlags() { flags_locked = false; }
 
-  // Should be checked after a block of code has been generated to see if the code has been
-  // successfully written to memory. Do not call the generated code when this returns true!
+  // True once a write did not fit. The code emitted since the last SetCodePtr must not be run.
   bool HasWriteFailed() const { return m_write_failed; }
 
-  // Looking for one of these? It's BANNED!! Some instructions are slow on modern CPU
-  // INC, DEC, LOOP, LOOPNE, LOOPE, ENTER, LEAVE, XCHG, XLAT, REP MOVSB/MOVSD, REP SCASD + other
-  // string instr.,
-  // INC and DEC are slow on Intel Core, but not on AMD. They create a
-  // false flag dependency because they only update a subset of the flags.
-  // XCHG is SLOW and should be avoided.
-
-  // Debug breakpoint
+  // Single-byte and system instructions
   void INT3();
-
-  // Do nothing
-  void NOP(size_t count = 1);
-
-  // Save energy in wait-loops on P4 only. Probably not too useful.
+  void NOP(size_t count = 1);  // count bytes of recommended multi-byte NOPs
   void PAUSE();
-
-  // Flag control
   void STC();
   void CLC();
   void CMC();
+  void LAHF();
+  void SAHF();
 
-  // These two can not be executed in 64-bit mode on early Intel 64-bit CPU:s, only on Core2 and
-  // AMD!
-  void LAHF();  // 3 cycle vector path
-  void SAHF();  // direct path fast
-
-  // Stack control
+  // Stack
   void PUSH(X64Reg reg);
   void POP(X64Reg reg);
   void PUSH(int bits, const OpArg& reg);
@@ -439,6 +375,7 @@ public:
   void PUSHF();
   void POPF();
 
+  // Control flow
   enum class Jump
   {
     Short,
@@ -447,15 +384,16 @@ public:
   static const int SHORT_JMP_LEN = 2;
   static const int NEAR_JMP_LEN = 5;
 
-  // Flow control
   void RET();
-  void RET_FAST();
+  void RET_FAST();  // REP RET
   void UD2();
   [[nodiscard]] FixupBranch J(Jump jump = Jump::Short);
 
+  // Picks the short form when the target is in range; force_near_padding then pads the
+  // instruction to NEAR_JMP_LEN bytes so it can be patched to a near jump later.
   void JMP(const u8* addr, bool force_near_padding = false);
   void JMPptr(const OpArg& arg);
-  void JMPself();  // infinite loop!
+  void JMPself();
 #ifdef CALL
 #undef CALL
 #endif
@@ -466,10 +404,10 @@ public:
   [[nodiscard]] FixupBranch J_CC(CCFlags conditionCode, Jump jump = Jump::Short);
   void J_CC(CCFlags conditionCode, const u8* addr);
 
+  // Points branch at the current code pointer.
   void SetJumpTarget(const FixupBranch& branch);
 
   void SETcc(CCFlags flag, OpArg dest);
-  // Note: CMOV brings small if any benefit on current CPUs.
   void CMOVcc(int bits, X64Reg dest, OpArg src, CCFlags flag);
 
   // Fences
@@ -477,17 +415,17 @@ public:
   void MFENCE();
   void SFENCE();
 
-  // Bit scan
-  void BSF(int bits, X64Reg dest, const OpArg& src);  // Bottom bit to top bit
-  void BSR(int bits, X64Reg dest, const OpArg& src);  // Top bit to bottom bit
+  // Bit scans
+  void BSF(int bits, X64Reg dest, const OpArg& src);
+  void BSR(int bits, X64Reg dest, const OpArg& src);
 
   // Cache control
   enum class PrefetchLevel : u8
   {
-    NTA = 0,  // Non-temporal (data used once and only once)
-    T0 = 1,   // All cache levels
-    T1 = 2,   // Levels 2+ (aliased to T0 on AMD)
-    T2 = 3,   // Levels 3+ (aliased to T0 on AMD)
+    NTA = 0,
+    T0 = 1,
+    T1 = 2,
+    T2 = 3,
   };
   void PREFETCH(PrefetchLevel level, OpArg arg);
   void MOVNTI(int bits, const OpArg& dest, X64Reg src);
@@ -495,15 +433,15 @@ public:
   void MOVNTPS(const OpArg& arg, X64Reg regOp);
   void MOVNTPD(const OpArg& arg, X64Reg regOp);
 
-  // Multiplication / division
-  void MUL(int bits, const OpArg& src);   // UNSIGNED
-  void IMUL(int bits, const OpArg& src);  // SIGNED
+  // Multiplication and division
+  void MUL(int bits, const OpArg& src);
+  void IMUL(int bits, const OpArg& src);
   void IMUL(int bits, X64Reg regOp, const OpArg& src);
   void IMUL(int bits, X64Reg regOp, const OpArg& src, const OpArg& imm);
   void DIV(int bits, const OpArg& src);
   void IDIV(int bits, const OpArg& src);
 
-  // Shift
+  // Shifts and rotates; shift is Imm8 or R(ECX)
   void ROL(int bits, const OpArg& dest, const OpArg& shift);
   void ROR(int bits, const OpArg& dest, const OpArg& shift);
   void RCL(int bits, const OpArg& dest, const OpArg& shift);
@@ -512,27 +450,28 @@ public:
   void SHR(int bits, const OpArg& dest, const OpArg& shift);
   void SAR(int bits, const OpArg& dest, const OpArg& shift);
 
-  // Bit Test
+  // Bit tests; index is Imm8 or a register
   void BT(int bits, const OpArg& dest, const OpArg& index);
   void BTS(int bits, const OpArg& dest, const OpArg& index);
   void BTR(int bits, const OpArg& dest, const OpArg& index);
   void BTC(int bits, const OpArg& dest, const OpArg& index);
 
-  // Double-Precision Shift
+  // Double-precision shifts; src is a register, shift is Imm8 or R(ECX)
   void SHRD(int bits, const OpArg& dest, const OpArg& src, const OpArg& shift);
   void SHLD(int bits, const OpArg& dest, const OpArg& src, const OpArg& shift);
 
-  // Extend EAX into EDX in various ways
+  // Sign extension of the accumulator. CWD/CDQ/CQO fill DX/EDX/RDX, CBW/CWDE/CDQE widen AL/AX/EAX
+  // (CBW's bits is the source width).
   void CWD(int bits = 16);
   inline void CDQ() { CWD(32); }
   inline void CQO() { CWD(64); }
   void CBW(int bits = 8);
   inline void CWDE() { CBW(16); }
   inline void CDQE() { CBW(32); }
-  // Load effective address
+
   void LEA(int bits, X64Reg dest, OpArg src);
 
-  // Integer arithmetic
+  // Integer arithmetic and logic
   void NEG(int bits, const OpArg& src);
   void ADD(int bits, const OpArg& a1, const OpArg& a2);
   void ADC(int bits, const OpArg& a1, const OpArg& a2);
@@ -540,53 +479,49 @@ public:
   void SBB(int bits, const OpArg& a1, const OpArg& a2);
   void AND(int bits, const OpArg& a1, const OpArg& a2);
   void CMP(int bits, const OpArg& a1, const OpArg& a2);
-
-  // Bit operations
   void NOT(int bits, const OpArg& src);
   void OR(int bits, const OpArg& a1, const OpArg& a2);
   void XOR(int bits, const OpArg& a1, const OpArg& a2);
   void MOV(int bits, const OpArg& a1, const OpArg& a2);
   void TEST(int bits, const OpArg& a1, const OpArg& a2);
 
+  // CMP, or the shorter TEST reg, reg when comparing a register with zero.
   void CMP_or_TEST(int bits, const OpArg& a1, const OpArg& a2);
+  // dest = a1 + a2, using LEA or nothing at all where possible. Changes the flags.
   void MOV_sum(int bits, X64Reg dest, const OpArg& a1, const OpArg& a2);
 
-  // Are these useful at all? Consider removing.
   void XCHG(int bits, const OpArg& a1, const OpArg& a2);
   void XCHG_AHAL();
 
-  // Byte swapping (32 and 64-bit only).
+  // 32 and 64 bits use BSWAP, 16 bits a rotate by 8, 8 bits nothing.
   void BSWAP(int bits, X64Reg reg);
 
-  // Sign/zero extension
-  void MOVSX(int dbits, int sbits, X64Reg dest,
-             OpArg src);  // automatically uses MOVSXD if necessary
+  // Sign/zero extension; equal sizes give a plain MOV, 32 to 64 bits MOVSXD / a 32-bit MOV.
+  void MOVSX(int dbits, int sbits, X64Reg dest, OpArg src);
   void MOVZX(int dbits, int sbits, X64Reg dest, OpArg src);
 
-  // Available only on Atom or >= Haswell so far. Test with cpu_info.bMOVBE.
+  // MOVBE needs cpu_info.bMOVBE. LoadAndSwap/SwapAndStore fall back to MOV + BSWAP.
   void MOVBE(int bits, X64Reg dest, const OpArg& src);
   void MOVBE(int bits, const OpArg& dest, X64Reg src);
   void LoadAndSwap(int size, X64Reg dst, const OpArg& src, bool sign_extend = false,
                    MovInfo* info = nullptr);
   void SwapAndStore(int size, const OpArg& dst, X64Reg src, MovInfo* info = nullptr);
 
-  // Available only on AMD >= Phenom or Intel >= Haswell
+  // LZCNT needs cpu_info.bLZCNT, TZCNT cpu_info.bBMI1.
   void LZCNT(int bits, X64Reg dest, const OpArg& src);
-  // Note: this one is actually part of BMI1
   void TZCNT(int bits, X64Reg dest, const OpArg& src);
 
-  // WARNING - These two take 11-13 cycles and are VectorPath! (AMD64)
   void STMXCSR(const OpArg& memloc);
   void LDMXCSR(const OpArg& memloc);
 
-  // Prefixes
+  // Prefixes for the next instruction
   void LOCK();
   void REP();
   void REPNE();
   void FSOverride();
   void GSOverride();
 
-  // SSE/SSE2: Floating point arithmetic
+  // SSE/SSE2 scalar arithmetic
   void ADDSS(X64Reg regOp, const OpArg& arg);
   void ADDSD(X64Reg regOp, const OpArg& arg);
   void SUBSS(X64Reg regOp, const OpArg& arg);
@@ -604,11 +539,10 @@ public:
   void RCPSS(X64Reg regOp, const OpArg& arg);
   void RSQRTSS(X64Reg regOp, const OpArg& arg);
 
-  // SSE/SSE2: Floating point bitwise (yes)
   void CMPSS(X64Reg regOp, const OpArg& arg, u8 compare);
   void CMPSD(X64Reg regOp, const OpArg& arg, u8 compare);
 
-  // SSE/SSE2: Floating point packed arithmetic (x4 for float, x2 for double)
+  // SSE/SSE2 packed arithmetic
   void ADDPS(X64Reg regOp, const OpArg& arg);
   void ADDPD(X64Reg regOp, const OpArg& arg);
   void SUBPS(X64Reg regOp, const OpArg& arg);
@@ -628,7 +562,7 @@ public:
   void RCPPS(X64Reg regOp, const OpArg& arg);
   void RSQRTPS(X64Reg regOp, const OpArg& arg);
 
-  // SSE/SSE2: Floating point packed bitwise (x4 for float, x2 for double)
+  // SSE/SSE2 packed logic
   void ANDPS(X64Reg regOp, const OpArg& arg);
   void ANDPD(X64Reg regOp, const OpArg& arg);
   void ANDNPS(X64Reg regOp, const OpArg& arg);
@@ -638,28 +572,28 @@ public:
   void XORPS(X64Reg regOp, const OpArg& arg);
   void XORPD(X64Reg regOp, const OpArg& arg);
 
-  // SSE/SSE2: Shuffle components. These are tricky - see Intel documentation.
+  // Shuffles
   void SHUFPS(X64Reg regOp, const OpArg& arg, u8 shuffle);
   void SHUFPD(X64Reg regOp, const OpArg& arg, u8 shuffle);
 
-  // SSE3
+  // SSE3 duplicating moves (with SSE2 fallbacks)
   void MOVSLDUP(X64Reg regOp, const OpArg& arg);
   void MOVSHDUP(X64Reg regOp, const OpArg& arg);
   void MOVDDUP(X64Reg regOp, const OpArg& arg);
 
-  // SSE/SSE2: Useful alternative to shuffle in some cases.
+  // Interleaves
   void UNPCKLPS(X64Reg dest, const OpArg& src);
   void UNPCKHPS(X64Reg dest, const OpArg& src);
   void UNPCKLPD(X64Reg dest, const OpArg& src);
   void UNPCKHPD(X64Reg dest, const OpArg& src);
 
-  // SSE/SSE2: Compares.
+  // Scalar compares setting EFLAGS
   void COMISS(X64Reg regOp, const OpArg& arg);
   void COMISD(X64Reg regOp, const OpArg& arg);
   void UCOMISS(X64Reg regOp, const OpArg& arg);
   void UCOMISD(X64Reg regOp, const OpArg& arg);
 
-  // SSE/SSE2: Moves. Use the right data type for your data, in most cases.
+  // Vector moves. The PD forms of MOVAP emit MOVAPS, which does the same and is shorter.
   void MOVAPS(X64Reg regOp, const OpArg& arg);
   void MOVAPD(X64Reg regOp, const OpArg& arg);
   void MOVAPS(const OpArg& arg, X64Reg regOp);
@@ -693,27 +627,22 @@ public:
   void MOVHLPS(X64Reg regOp1, X64Reg regOp2);
   void MOVLHPS(X64Reg regOp1, X64Reg regOp2);
 
-  // Be careful when using these overloads for reg <--> xmm moves.
-  // The one you cast to OpArg with R(reg) is the x86 reg, the other
-  // one is the xmm reg.
-  // ie: "MOVD_xmm(eax, R(xmm1))" generates incorrect code (movd xmm0, rcx)
-  //     use "MOVD_xmm(R(eax), xmm1)" instead.
+  // GPR <-> XMM moves. The X64Reg parameter is always the XMM register and the OpArg the general
+  // purpose register or memory: MOVD_xmm(R(EAX), XMM1) is "movd eax, xmm1".
   void MOVD_xmm(X64Reg dest, const OpArg& arg);
   void MOVQ_xmm(X64Reg dest, OpArg arg);
   void MOVD_xmm(const OpArg& arg, X64Reg src);
   void MOVQ_xmm(OpArg arg, X64Reg src);
 
-  // SSE/SSE2: Generates a mask from the high bits of the components of the packed register in
-  // question.
+  // Sign masks into a general purpose register
   void MOVMSKPS(X64Reg dest, const OpArg& arg);
   void MOVMSKPD(X64Reg dest, const OpArg& arg);
 
-  // SSE2: Selective byte store, mask in src register. EDI/RDI specifies store address. This is a
-  // weird one.
+  // Byte-masked store to [rdi]
   void MASKMOVDQU(X64Reg dest, X64Reg src);
   void LDDQU(X64Reg dest, const OpArg& src);
 
-  // SSE/SSE2: Data type conversions.
+  // Conversions
   void CVTPS2PD(X64Reg dest, const OpArg& src);
   void CVTPD2PS(X64Reg dest, const OpArg& src);
   void CVTSS2SD(X64Reg dest, const OpArg& src);
@@ -728,13 +657,13 @@ public:
   void CVTTPS2DQ(X64Reg regOp, const OpArg& arg);
   void CVTTPD2DQ(X64Reg regOp, const OpArg& arg);
 
-  // Destinations are X64 regs (rax, rbx, ...) for these instructions.
+  // These write a 32-bit general purpose register.
   void CVTSS2SI(X64Reg xregdest, const OpArg& src);
   void CVTSD2SI(X64Reg xregdest, const OpArg& src);
   void CVTTSS2SI(X64Reg xregdest, const OpArg& arg);
   void CVTTSD2SI(X64Reg xregdest, const OpArg& arg);
 
-  // SSE2: Packed integer instructions
+  // Packed integer
   void PACKSSDW(X64Reg dest, const OpArg& arg);
   void PACKSSWB(X64Reg dest, const OpArg& arg);
   void PACKUSDW(X64Reg dest, const OpArg& arg);
@@ -801,6 +730,7 @@ public:
   void PSHUFLW(X64Reg dest, const OpArg& arg, u8 shuffle);
   void PSHUFHW(X64Reg dest, const OpArg& arg, u8 shuffle);
 
+  // Immediate shifts of a whole register
   void PSRLW(X64Reg reg, u8 shift);
   void PSRLD(X64Reg reg, u8 shift);
   void PSRLQ(X64Reg reg, u8 shift);
@@ -812,10 +742,11 @@ public:
   void PSLLQ(X64Reg reg, u8 shift);
   void PSLLDQ(X64Reg reg, u8 shift);
 
+  // XMM0-XMM7 only
   void PSRAW(X64Reg reg, u8 shift);
   void PSRAD(X64Reg reg, u8 shift);
 
-  // SSE4: data type conversions
+  // SSE4.1 widening moves
   void PMOVSXBW(X64Reg dest, const OpArg& arg);
   void PMOVSXBD(X64Reg dest, const OpArg& arg);
   void PMOVSXBQ(X64Reg dest, const OpArg& arg);
@@ -829,17 +760,16 @@ public:
   void PMOVZXWQ(X64Reg dest, const OpArg& arg);
   void PMOVZXDQ(X64Reg dest, const OpArg& arg);
 
-  // SSE4: blend instructions
+  // SSE4.1 blends (the V forms without a mask operand use XMM0)
   void PBLENDVB(X64Reg dest, const OpArg& arg);
   void BLENDVPS(X64Reg dest, const OpArg& arg);
   void BLENDVPD(X64Reg dest, const OpArg& arg);
   void BLENDPS(X64Reg dest, const OpArg& arg, u8 blend);
   void BLENDPD(X64Reg dest, const OpArg& arg, u8 blend);
 
-  // SSE4: compare instructions
   void PCMPEQQ(X64Reg dest, const OpArg& arg);
 
-  // AVX
+  // AVX (three-operand: regOp1 = regOp2 op arg)
   void VADDSS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
   void VSUBSS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
   void VMULSS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
@@ -887,95 +817,61 @@ public:
 
   void VZEROUPPER();
 
-  // FMA3
-  void VFMADD132PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMADD213PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMADD231PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMADD132PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMADD213PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMADD231PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMADD132SS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMADD213SS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMADD231SS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMADD132SD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMADD213SD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMADD231SD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMSUB132PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMSUB213PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMSUB231PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMSUB132PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMSUB213PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMSUB231PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMSUB132SS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMSUB213SS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMSUB231SS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMSUB132SD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMSUB213SD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMSUB231SD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMADD132PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMADD213PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMADD231PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMADD132PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMADD213PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMADD231PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMADD132SS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMADD213SS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMADD231SS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMADD132SD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMADD213SD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMADD231SD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMSUB132PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMSUB213PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMSUB231PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMSUB132PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMSUB213PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMSUB231PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMSUB132SS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMSUB213SS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMSUB231SS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMSUB132SD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMSUB213SD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFNMSUB231SD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMADDSUB132PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMADDSUB213PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMADDSUB231PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMADDSUB132PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMADDSUB213PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMADDSUB231PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMSUBADD132PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMSUBADD213PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMSUBADD231PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMSUBADD132PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMSUBADD213PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
-  void VFMSUBADD231PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
+  // FMA3. 132: r1 = r1 * arg + r2; 213: r1 = r2 * r1 + arg; 231: r1 = r2 * arg + r1.
+#define PIXELU_FMA3_DECL(form)                                                                     \
+  void VFMADD##form##PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);                           \
+  void VFMADD##form##PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);                           \
+  void VFMADD##form##SS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);                           \
+  void VFMADD##form##SD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);                           \
+  void VFMSUB##form##PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);                           \
+  void VFMSUB##form##PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);                           \
+  void VFMSUB##form##SS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);                           \
+  void VFMSUB##form##SD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);                           \
+  void VFNMADD##form##PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);                          \
+  void VFNMADD##form##PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);                          \
+  void VFNMADD##form##SS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);                          \
+  void VFNMADD##form##SD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);                          \
+  void VFNMSUB##form##PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);                          \
+  void VFNMSUB##form##PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);                          \
+  void VFNMSUB##form##SS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);                          \
+  void VFNMSUB##form##SD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);                          \
+  void VFMADDSUB##form##PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);                        \
+  void VFMADDSUB##form##PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);                        \
+  void VFMSUBADD##form##PS(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);                        \
+  void VFMSUBADD##form##PD(X64Reg regOp1, X64Reg regOp2, const OpArg& arg);
+  PIXELU_FMA3_DECL(132)
+  PIXELU_FMA3_DECL(213)
+  PIXELU_FMA3_DECL(231)
+#undef PIXELU_FMA3_DECL
 
-#define FMA4(name)                                                                                 \
+  // FMA4 (AMD). dest = regOp1 * (second source) +/- (third source); either the second or the
+  // third source may be the memory operand.
+#define PIXELU_FMA4_DECL(name)                                                                     \
   void name(X64Reg dest, X64Reg regOp1, X64Reg regOp2, const OpArg& arg);                          \
   void name(X64Reg dest, X64Reg regOp1, const OpArg& arg, X64Reg regOp2);
+  PIXELU_FMA4_DECL(VFMADDSUBPS)
+  PIXELU_FMA4_DECL(VFMADDSUBPD)
+  PIXELU_FMA4_DECL(VFMSUBADDPS)
+  PIXELU_FMA4_DECL(VFMSUBADDPD)
+  PIXELU_FMA4_DECL(VFMADDPS)
+  PIXELU_FMA4_DECL(VFMADDPD)
+  PIXELU_FMA4_DECL(VFMADDSS)
+  PIXELU_FMA4_DECL(VFMADDSD)
+  PIXELU_FMA4_DECL(VFMSUBPS)
+  PIXELU_FMA4_DECL(VFMSUBPD)
+  PIXELU_FMA4_DECL(VFMSUBSS)
+  PIXELU_FMA4_DECL(VFMSUBSD)
+  PIXELU_FMA4_DECL(VFNMADDPS)
+  PIXELU_FMA4_DECL(VFNMADDPD)
+  PIXELU_FMA4_DECL(VFNMADDSS)
+  PIXELU_FMA4_DECL(VFNMADDSD)
+  PIXELU_FMA4_DECL(VFNMSUBPS)
+  PIXELU_FMA4_DECL(VFNMSUBPD)
+  PIXELU_FMA4_DECL(VFNMSUBSS)
+  PIXELU_FMA4_DECL(VFNMSUBSD)
+#undef PIXELU_FMA4_DECL
 
-  FMA4(VFMADDSUBPS)
-  FMA4(VFMADDSUBPD)
-  FMA4(VFMSUBADDPS)
-  FMA4(VFMSUBADDPD)
-  FMA4(VFMADDPS)
-  FMA4(VFMADDPD)
-  FMA4(VFMADDSS)
-  FMA4(VFMADDSD)
-  FMA4(VFMSUBPS)
-  FMA4(VFMSUBPD)
-  FMA4(VFMSUBSS)
-  FMA4(VFMSUBSD)
-  FMA4(VFNMADDPS)
-  FMA4(VFNMADDPD)
-  FMA4(VFNMADDSS)
-  FMA4(VFNMADDSD)
-  FMA4(VFNMSUBPS)
-  FMA4(VFNMSUBPD)
-  FMA4(VFNMSUBSS)
-  FMA4(VFNMSUBSD)
-#undef FMA4
-
-  // VEX GPR instructions
+  // BMI1/BMI2 (VEX-encoded general purpose instructions)
   void SARX(int bits, X64Reg regOp1, const OpArg& arg, X64Reg regOp2);
   void SHLX(int bits, X64Reg regOp1, const OpArg& arg, X64Reg regOp2);
   void SHRX(int bits, X64Reg regOp1, const OpArg& arg, X64Reg regOp2);
@@ -992,32 +888,30 @@ public:
 
   void RDTSC();
 
-  // Utility functions
-  // The difference between this and CALL is that this aligns the stack
-  // where appropriate.
+  // Calls func, directly when it is within a rel32 of the call, otherwise through RAX.
   template <typename FunctionPointer>
   void ABI_CallFunction(FunctionPointer func)
   {
-    static_assert(std::is_pointer<FunctionPointer>() &&
-                      std::is_function<std::remove_pointer_t<FunctionPointer>>(),
-                  "Supplied type must be a function pointer.");
+    static_assert(std::is_pointer_v<FunctionPointer> &&
+                      std::is_function_v<std::remove_pointer_t<FunctionPointer>>,
+                  "ABI_CallFunction needs a function pointer");
 
-    const void* ptr = reinterpret_cast<const void*>(func);
-    const u64 address = reinterpret_cast<u64>(ptr);
-    const u64 distance = address - (reinterpret_cast<u64>(code) + 5);
-
-    if (distance >= 0x0000000080000000ULL && distance < 0xFFFFFFFF80000000ULL)
+    const void* const target = reinterpret_cast<const void*>(func);
+    const s64 rel = static_cast<s64>(reinterpret_cast<u64>(target) -
+                                     (reinterpret_cast<u64>(code) + NEAR_JMP_LEN));
+    if (rel == static_cast<s32>(rel))
     {
-      // Far call
-      MOV(64, R(RAX), Imm64(address));
-      CALLptr(R(RAX));
+      CALL(target);
     }
     else
     {
-      CALL(ptr);
+      MOV(64, R(RAX), Imm64(reinterpret_cast<u64>(target)));
+      CALLptr(R(RAX));
     }
   }
 
+  // The suffix letters give the arguments in order: C = a 32-bit (or 16-bit) constant,
+  // P = a pointer constant, R = a register, A = an OpArg of the given width.
   template <typename FunctionPointer>
   void ABI_CallFunctionC16(FunctionPointer func, u16 param1)
   {
@@ -1052,7 +946,7 @@ public:
   void ABI_CallFunctionCP(FunctionPointer func, u32 param1, const void* param2)
   {
     MOV(32, R(ABI_PARAM1), Imm32(param1));
-    MOV(64, R(ABI_PARAM2), Imm64(reinterpret_cast<u64>(param2)));
+    MOV(64, R(ABI_PARAM2), ImmPtr(param2));
     ABI_CallFunction(func);
   }
 
@@ -1070,7 +964,7 @@ public:
   {
     MOV(32, R(ABI_PARAM1), Imm32(param1));
     MOV(32, R(ABI_PARAM2), Imm32(param2));
-    MOV(64, R(ABI_PARAM3), Imm64(reinterpret_cast<u64>(param3)));
+    MOV(64, R(ABI_PARAM3), ImmPtr(param3));
     ABI_CallFunction(func);
   }
 
@@ -1081,29 +975,29 @@ public:
     MOV(32, R(ABI_PARAM1), Imm32(param1));
     MOV(32, R(ABI_PARAM2), Imm32(param2));
     MOV(32, R(ABI_PARAM3), Imm32(param3));
-    MOV(64, R(ABI_PARAM4), Imm64(reinterpret_cast<u64>(param4)));
+    MOV(64, R(ABI_PARAM4), ImmPtr(param4));
     ABI_CallFunction(func);
   }
 
   template <typename FunctionPointer>
   void ABI_CallFunctionP(FunctionPointer func, const void* param1)
   {
-    MOV(64, R(ABI_PARAM1), Imm64(reinterpret_cast<u64>(param1)));
+    MOV(64, R(ABI_PARAM1), ImmPtr(param1));
     ABI_CallFunction(func);
   }
 
   template <typename FunctionPointer>
   void ABI_CallFunctionPP(FunctionPointer func, const void* param1, const void* param2)
   {
-    MOV(64, R(ABI_PARAM1), Imm64(reinterpret_cast<u64>(param1)));
-    MOV(64, R(ABI_PARAM2), Imm64(reinterpret_cast<u64>(param2)));
+    MOV(64, R(ABI_PARAM1), ImmPtr(param1));
+    MOV(64, R(ABI_PARAM2), ImmPtr(param2));
     ABI_CallFunction(func);
   }
 
   template <typename FunctionPointer>
   void ABI_CallFunctionPC(FunctionPointer func, const void* param1, u32 param2)
   {
-    MOV(64, R(ABI_PARAM1), Imm64(reinterpret_cast<u64>(param1)));
+    MOV(64, R(ABI_PARAM1), ImmPtr(param1));
     MOV(32, R(ABI_PARAM2), Imm32(param2));
     ABI_CallFunction(func);
   }
@@ -1111,13 +1005,12 @@ public:
   template <typename FunctionPointer>
   void ABI_CallFunctionPPC(FunctionPointer func, const void* param1, const void* param2, u32 param3)
   {
-    MOV(64, R(ABI_PARAM1), Imm64(reinterpret_cast<u64>(param1)));
-    MOV(64, R(ABI_PARAM2), Imm64(reinterpret_cast<u64>(param2)));
+    MOV(64, R(ABI_PARAM1), ImmPtr(param1));
+    MOV(64, R(ABI_PARAM2), ImmPtr(param2));
     MOV(32, R(ABI_PARAM3), Imm32(param3));
     ABI_CallFunction(func);
   }
 
-  // Pass a register as a parameter.
   template <typename FunctionPointer>
   void ABI_CallFunctionR(FunctionPointer func, X64Reg reg1)
   {
@@ -1126,17 +1019,15 @@ public:
     ABI_CallFunction(func);
   }
 
-  // Pass a pointer and register as a parameter.
   template <typename FunctionPointer>
   void ABI_CallFunctionPR(FunctionPointer func, const void* ptr, X64Reg reg1)
   {
     if (reg1 != ABI_PARAM2)
       MOV(64, R(ABI_PARAM2), R(reg1));
-    MOV(64, R(ABI_PARAM1), Imm64(reinterpret_cast<u64>(ptr)));
+    MOV(64, R(ABI_PARAM1), ImmPtr(ptr));
     ABI_CallFunction(func);
   }
 
-  // Pass two registers as parameters.
   template <typename FunctionPointer>
   void ABI_CallFunctionRR(FunctionPointer func, X64Reg reg1, X64Reg reg2)
   {
@@ -1144,12 +1035,11 @@ public:
     ABI_CallFunction(func);
   }
 
-  // Pass a pointer and two registers as parameters.
   template <typename FunctionPointer>
   void ABI_CallFunctionPRR(FunctionPointer func, const void* ptr, X64Reg reg1, X64Reg reg2)
   {
     MOVTwo(64, ABI_PARAM2, reg1, 0, ABI_PARAM3, reg2);
-    MOV(64, R(ABI_PARAM1), Imm64(reinterpret_cast<u64>(ptr)));
+    MOV(64, R(ABI_PARAM1), ImmPtr(ptr));
     ABI_CallFunction(func);
   }
 
@@ -1169,7 +1059,7 @@ public:
     if (!arg2.IsSimpleReg(ABI_PARAM2))
       MOV(bits, R(ABI_PARAM2), arg2);
     MOV(32, R(ABI_PARAM3), Imm32(param3));
-    MOV(64, R(ABI_PARAM1), Imm64(reinterpret_cast<u64>(ptr1)));
+    MOV(64, R(ABI_PARAM1), ImmPtr(ptr1));
     ABI_CallFunction(func);
   }
 
@@ -1181,22 +1071,21 @@ public:
     ABI_CallFunction(func);
   }
 
-  // Helper method for ABI functions related to calling functions. May be used by itself as well.
+  // dst1 = src1 + offset, dst2 = src2, in an order (or with an XCHG) that works whichever
+  // registers overlap.
   void MOVTwo(int bits, X64Reg dst1, X64Reg src1, s32 offset, X64Reg dst2, X64Reg src2);
 
-  // Saves/restores the registers and adjusts the stack to be aligned as
-  // required by the ABI, where the previous alignment was as specified.
-  // Push returns the size of the shadow space, i.e. the offset of the frame.
+  // Saves the registers in mask and moves RSP so that it is 16-byte aligned for a call, given
+  // that RSP % 16 == rsp_alignment % 16 on entry, and leaves needed_frame_size bytes (above the
+  // shadow space) free for the caller. Returns the size of the shadow space, i.e. the RSP offset
+  // of that free area. Pop with the same arguments.
   size_t ABI_PushRegistersAndAdjustStack(BitSet32 mask, size_t rsp_alignment,
                                          size_t needed_frame_size = 0);
   void ABI_PopRegistersAndAdjustStack(BitSet32 mask, size_t rsp_alignment,
                                       size_t needed_frame_size = 0);
 
-  // Utility to generate a call to a std::function object.
-  //
-  // Unfortunately, calling operator() directly is undefined behavior in C++
-  // (this method might be a thunk in the case of multi-inheritance) so we
-  // have to go through a trampoline function.
+  // Calling a std::function's operator() directly from generated code is not possible (it may be
+  // a thunk), so generated code calls this static trampoline instead.
   template <typename T, typename... Args>
   static T CallLambdaTrampoline(const std::function<T(Args...)>* f, Args... args)
   {
@@ -1206,19 +1095,17 @@ public:
   template <typename T, typename... Args>
   void ABI_CallLambdaPC(const std::function<T(Args...)>* f, void* p1, u32 p2)
   {
-    auto trampoline = &XEmitter::CallLambdaTrampoline<T, Args...>;
-    ABI_CallFunctionPPC(trampoline, reinterpret_cast<const void*>(f), p1, p2);
+    T (*const trampoline)(const std::function<T(Args...)>*, Args...) =
+        &XEmitter::CallLambdaTrampoline<T, Args...>;
+    ABI_CallFunctionPPC(trampoline, static_cast<const void*>(f), p1, p2);
   }
-};  // class XEmitter
+};
 
 class X64CodeBlock : public Common::CodeBlock<XEmitter>
 {
 private:
-  void PoisonMemory() override
-  {
-    // x86/64: 0xCC = breakpoint
-    memset(region, 0xCC, region_size);
-  }
+  // INT3 everywhere
+  void PoisonMemory() override { std::memset(region, 0xCC, region_size); }
 };
 
 }  // namespace Gen

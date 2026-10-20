@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/x64ABI.h"
 
@@ -8,123 +7,141 @@
 
 using namespace Gen;
 
-// Shared code between Win64 and Unix64
-
-void XEmitter::ABI_CalculateFrameSize(BitSet32 mask, size_t rsp_alignment, size_t needed_frame_size,
-                                      size_t* shadowp, size_t* subtractionp, size_t* xmm_offsetp)
+// Frame built by ABI_PushRegistersAndAdjustStack, from high to low addresses:
+//
+//   return address / caller's frame      (RSP % 16 == rsp_alignment % 16 here)
+//   pushed general purpose registers     (RBP first, then the others in ascending order)
+//   padding to 16 bytes                  (only when XMM registers are saved)
+//   saved XMM registers, 16 bytes each   (at RSP + xmm_offset)
+//   needed_frame_size bytes for the caller
+//   shadow space                         (32 bytes on Windows, at RSP)
+//   padding so that the final RSP is 16-byte aligned
+//
+// "subtraction" is everything below the pushes.
+XEmitter::FrameLayout XEmitter::CalculateFrame(BitSet32 mask, size_t rsp_alignment,
+                                               size_t needed_frame_size)
 {
-  size_t shadow = 0;
-#if defined(_WIN32)
-  shadow = 0x20;
+#ifdef _WIN32
+  constexpr size_t shadow = 0x20;
+#else
+  constexpr size_t shadow = 0;
 #endif
 
-  int count = (mask & ABI_ALL_GPRS).Count();
-  rsp_alignment -= count * 8;
-  size_t subtraction = 0;
-  int fpr_count = (mask & ABI_ALL_FPRS).Count();
-  if (fpr_count)
-  {
-    // If we have any XMMs to save, we must align the stack here.
-    subtraction = rsp_alignment & 0xf;
-  }
-  subtraction += 16 * fpr_count;
-  size_t xmm_base_subtraction = subtraction;
-  subtraction += needed_frame_size;
-  subtraction += shadow;
-  // Final alignment.
-  rsp_alignment -= subtraction;
-  subtraction += rsp_alignment & 0xf;
+  const size_t gpr_bytes = 8 * static_cast<size_t>((mask & ABI_ALL_GPRS).Count());
+  const size_t xmm_count = static_cast<size_t>((mask & ABI_ALL_FPRS).Count());
 
-  *shadowp = shadow;
-  *subtractionp = subtraction;
-  *xmm_offsetp = subtraction - xmm_base_subtraction;
+  // The alignment (mod 16) of RSP after the pushes.
+  const size_t misalign_after_pushes = rsp_alignment - gpr_bytes;
+
+  // MOVAPS needs the XMM save area 16-byte aligned.
+  const size_t xmm_pad = xmm_count != 0 ? (misalign_after_pushes & 0xF) : 0;
+  const size_t xmm_area_end = xmm_pad + 16 * xmm_count;
+
+  size_t subtraction = xmm_area_end + needed_frame_size + shadow;
+  subtraction += (misalign_after_pushes - subtraction) & 0xF;
+
+  return FrameLayout{shadow, subtraction, subtraction - xmm_area_end};
 }
 
 size_t XEmitter::ABI_PushRegistersAndAdjustStack(BitSet32 mask, size_t rsp_alignment,
                                                  size_t needed_frame_size)
 {
-  mask[RSP] = false;  // Stack pointer is never pushed
-  size_t shadow, subtraction, xmm_offset;
-  ABI_CalculateFrameSize(mask, rsp_alignment, needed_frame_size, &shadow, &subtraction,
-                         &xmm_offset);
+  mask[RSP] = false;
+  const FrameLayout frame = CalculateFrame(mask, rsp_alignment, needed_frame_size);
 
+  // RBP goes first and is made a frame pointer, which debuggers and profilers like.
   if (mask[RBP])
   {
-    // Make a nice stack frame for any debuggers or profilers that might be looking at this
     PUSH(RBP);
     MOV(64, R(RBP), R(RSP));
   }
-  for (int r : (mask & ABI_ALL_GPRS & ~BitSet32{RBP}))
-    PUSH((X64Reg)r);
-
-  if (subtraction)
-    SUB(64, R(RSP), subtraction >= 0x80 ? Imm32((u32)subtraction) : Imm8((u8)subtraction));
-
-  for (int x : (mask & ABI_ALL_FPRS))
+  for (int reg = 0; reg < 16; reg++)
   {
-    MOVAPD(MDisp(RSP, (int)xmm_offset), (X64Reg)(x - 16));
-    xmm_offset += 16;
+    if (reg != RBP && mask[reg])
+      PUSH(static_cast<X64Reg>(reg));
   }
 
-  return shadow;
+  if (frame.subtraction != 0)
+    SUB(64, R(RSP), Imm32(static_cast<u32>(frame.subtraction)));
+
+  size_t offset = frame.xmm_offset;
+  for (int xmm = 0; xmm < 16; xmm++)
+  {
+    if (!mask[16 + xmm])
+      continue;
+    MOVAPD(MDisp(RSP, static_cast<int>(offset)), static_cast<X64Reg>(xmm));
+    offset += 16;
+  }
+
+  return frame.shadow;
 }
 
 void XEmitter::ABI_PopRegistersAndAdjustStack(BitSet32 mask, size_t rsp_alignment,
                                               size_t needed_frame_size)
 {
-  mask[RSP] = false;  // Stack pointer is never pushed
-  size_t shadow, subtraction, xmm_offset;
-  ABI_CalculateFrameSize(mask, rsp_alignment, needed_frame_size, &shadow, &subtraction,
-                         &xmm_offset);
+  mask[RSP] = false;
+  const FrameLayout frame = CalculateFrame(mask, rsp_alignment, needed_frame_size);
 
-  for (int x : (mask & ABI_ALL_FPRS))
+  size_t offset = frame.xmm_offset;
+  for (int xmm = 0; xmm < 16; xmm++)
   {
-    MOVAPD((X64Reg)(x - 16), MDisp(RSP, (int)xmm_offset));
-    xmm_offset += 16;
+    if (!mask[16 + xmm])
+      continue;
+    MOVAPD(static_cast<X64Reg>(xmm), MDisp(RSP, static_cast<int>(offset)));
+    offset += 16;
   }
 
-  if (subtraction)
-    ADD(64, R(RSP), subtraction >= 0x80 ? Imm32((u32)subtraction) : Imm8((u8)subtraction));
+  if (frame.subtraction != 0)
+    ADD(64, R(RSP), Imm32(static_cast<u32>(frame.subtraction)));
 
-  for (int r = 15; r >= 0; r--)
+  // Reverse order of the pushes; RBP last.
+  for (int reg = 15; reg >= 0; reg--)
   {
-    if (r != RBP && mask[r])
-      POP((X64Reg)r);
+    if (reg != RBP && mask[reg])
+      POP(static_cast<X64Reg>(reg));
   }
-  // RSP is pushed first and popped last to make debuggers/profilers happy
   if (mask[RBP])
     POP(RBP);
 }
 
-void XEmitter::MOVTwo(int bits, Gen::X64Reg dst1, Gen::X64Reg src1, s32 offset1, Gen::X64Reg dst2,
-                      Gen::X64Reg src2)
+void XEmitter::MOVTwo(int bits, X64Reg dst1, X64Reg src1, s32 offset, X64Reg dst2, X64Reg src2)
 {
-  if (dst1 == src2 && dst2 == src1)
-  {
-    XCHG(bits, R(src1), R(src2));
-    if (offset1)
-      ADD(bits, R(dst1), Imm32(offset1));
-  }
-  else if (src2 != dst1)
-  {
-    if (dst1 != src1 && offset1)
-      LEA(bits, dst1, MDisp(src1, offset1));
-    else if (dst1 != src1)
-      MOV(bits, R(dst1), R(src1));
-    else if (offset1)
-      ADD(bits, R(dst1), Imm32(offset1));
+  // dst1 = src1 + offset
+  const auto first = [&] {
+    if (dst1 != src1)
+    {
+      if (offset != 0)
+        LEA(bits, dst1, MDisp(src1, offset));
+      else
+        MOV(bits, R(dst1), R(src1));
+    }
+    else if (offset != 0)
+    {
+      ADD(bits, R(dst1), Imm32(static_cast<u32>(offset)));
+    }
+  };
+  // dst2 = src2
+  const auto second = [&] {
     if (dst2 != src2)
       MOV(bits, R(dst2), R(src2));
+  };
+
+  if (dst1 == src2 && dst2 == src1)
+  {
+    // A swap: neither move can go first.
+    XCHG(bits, R(src1), R(src2));
+    if (offset != 0)
+      ADD(bits, R(dst1), Imm32(static_cast<u32>(offset)));
+  }
+  else if (src2 == dst1)
+  {
+    // Writing dst1 first would destroy src2.
+    second();
+    first();
   }
   else
   {
-    if (dst2 != src2)
-      MOV(bits, R(dst2), R(src2));
-    if (dst1 != src1 && offset1)
-      LEA(bits, dst1, MDisp(src1, offset1));
-    else if (dst1 != src1)
-      MOV(bits, R(dst1), R(src1));
-    else if (offset1)
-      ADD(bits, R(dst1), Imm32(offset1));
+    first();
+    second();
   }
 }
