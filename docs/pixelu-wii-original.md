@@ -99,12 +99,12 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 130967 | 30.8% |
-| Dolphin, untouched | 284680 | 66.9% |
+| Original (RetroPixels) | 134608 | 31.9% |
+| Dolphin, untouched | 277048 | 65.7% |
 | Dolphin, with PixelU changes | 4224 | 1.0% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.4% |
-| **All** | **425634** | 100% |
+| **All** | **421643** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -121,9 +121,9 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/Config | 2427 | 0 | Dolphin |
 | Core/Core/ConfigLoaders | 1202 | 0 | Dolphin |
 | Core/Core/Debugger | 3402 | 0 | Dolphin |
-| Core/Core/DSP (top level) | 4922 | 4922 | original |
+| Core/Core/DSP (top level) | 4938 | 4938 | original |
 | Core/Core/DSP/Interpreter | 2883 | 2883 | original |
-| Core/Core/DSP/Jit | 7632 | 0 | Dolphin |
+| Core/Core/DSP/Jit | 3625 | 3625 | original |
 | Core/Core/FifoPlayer | 2133 | 0 | Dolphin |
 | Core/Core/HLE | 1350 | 0 | Dolphin |
 | Core/Core/HW (top level) | 9909 | 9909 | original |
@@ -242,8 +242,8 @@ batch rewrites them.
 | W12 | HW: EXI devices (memory card slots, BBA, mic, modem, IPL) | 7874 | 6494 | mixed (82% original) |
 | W13 | HW: SI, pads, keyboard, GBA link, HSP, Triforce, MagCard | 10990 | 5487 | mixed (50% original) |
 | W14 | HW: Wii Remote (common, emulated, real) | 11244 | 11244 | original |
-| W15 | DSP: core, interpreter, LLE glue | 8445 | 8445 | original |
-| W16 | DSP: x64 JIT | 7632 | 0 | Dolphin |
+| W15 | DSP: core, interpreter, LLE glue | 8461 | 8461 | original |
+| W16 | DSP: x64 JIT | 3625 | 3625 | original |
 | W17 | DSP: HLE (AX, Zelda, GBA, CARD, ROM ucodes) | 6575 | 6575 | original |
 | W18 | IOS: kernel, ES, FS, DI, SDIO, STM, WFS, crypto | 15395 | 0 | Dolphin |
 | W19 | IOS: network (SO, KD/WC24, NCD, WD, SSL) and USB host devices | 12334 | 0 | Dolphin |
@@ -1928,3 +1928,135 @@ Checks
       in W17 .cpp files shares 8 or more lines with the old code. The
       remaining runs are the PB structs in AXStructs.h and class
       declarations in DSPHLE.h and AESnd.h.
+- W16 log: rewrote all 16 W16 files, the x86-64 DSP JIT in `Core/DSP/Jit`
+  (3625 lines now, from 7632): `DSPEmitterBase`, `x64/DSPEmitter`,
+  `x64/DSPJitRegCache`, `x64/DSPJitTables`, `x64/DSPJitUtil`,
+  `x64/DSPJitCCUtil` and the instruction files `x64/DSPJitArithmetic`,
+  `Branch`, `ExtOps`, `LoadStore`, `Misc` and `Multiplier`. Every file starts
+  with the original-code header and has no Dolphin copyright or SPDX line.
+  File names, the `DSP::JIT::DSPEmitter` interface (`RunCycles`, `ClearIRAM`,
+  `DoState`, `CreateDSPEmitter`, `DSPEmitterNull`) and the savestate bytes
+  (`m_cycles_left`) are unchanged. The W16 files have no config keys or
+  translatable strings; a few log texts (logging only) changed.
+  - Design: a new structure, not a port. Guest registers stay in `SDSP`
+    memory, so there is no register cache. Generated code keeps only fixed
+    host registers (state pointer, block entry table, cycle counter, and two
+    callee-saved registers for pending extension values). The value of
+    every instruction is computed in scratch registers and stored back
+    before the next instruction. Nothing caller-saved survives a call into
+    C++. `DSPJitRegCache` keeps its name but now holds the register layout
+    (offsets from the live `SDSP`) and the normalizing loads and stores. The
+    handler tables are first-match pattern lists. They classify every
+    opcode word (main and extended part) the same way as the old tables.
+  - Kept as before: every instruction's result (registers, flags,
+    saturation, sign extension, loop and call stacks, memory and IFX
+    accesses, cycle counts), block building and linking, idle skip and the
+    dispatcher. Details:
+    - Blocks end at 250 instructions, at a branch, or before an idle-skip
+      address. A block costs its instruction count in cycles, or 0x1000 at
+      an idle skip off the DSP thread. A taken branch exit costs the count
+      before the branch; the exception-check exit costs the count before
+      the instruction. A zero-length block counts as 1.
+    - The dispatcher subtracts in 16 bits and loops while cycles are left.
+      It checks HALT, and the external-interrupt flag when the block was
+      built on the DSP thread.
+    - Only unconditional jumps and calls link. Targets inside the block
+      being built don't link. A linked jump is taken only when the cycles
+      left exceed both block lengths. An unbuilt target puts the block on
+      the target's waiting list, and it is rebuilt when the target is
+      built. `ClearIRAM` resets blocks 0..0xfff.
+  - Quirks kept on purpose (the old JIT did these, so games and states see
+    the same):
+    - `lsr` immediate counts of 40 or more wrap (the shift count is taken
+      mod 64).
+    - The logical variable-shift ops set flags from the zero-extended
+      value.
+    - `mulmvz` sets flags from the sign of the new product.
+    - `addpaxz` sets no carry or overflow.
+    - Many ops set flags from the raw unwrapped value.
+    - Every `$sr` write clears bit 8.
+    - Data writes above 0x0fff all go to `WriteIFX`; IMEM reads above 0x0fff
+      come from IROM.
+    - HALT pops the call stack into `pc`; the interpreter steps `pc` back
+      instead.
+    - No stack-overflow exception.
+    - A jump to itself at a block start costs 0 cycles and can spin.
+  - Deliberate differences (no game sees these; they remove crashes,
+    hangs and undefined behaviour):
+    - The r8/r9 bug found in W15 is gone by design. The old JIT kept
+      `$ac0`/`$ac1` in r8/r9 across the call to `CheckExceptions` and didn't
+      reload them, so results depended on the compiler. Now no guest value
+      lives in a caller-saved register across any call.
+    - `$acX.h` is stored canonically: the 32-bit `h` field is sign-extended
+      from bit 7. The old JIT could leave stale upper bits; the 40-bit value
+      is the same.
+    - `lr` from an unmapped data bank returns 0. The old JIT returned
+      whatever was left in EAX.
+    - `clrp` always clears the product. The old JIT wrote it straight to
+      memory past its register cache, so a product cached in a host register
+      in the same block overwrote it, or was lost.
+    - Endless rebuilding stops. When blocks wait for each other in a cycle,
+      the old `CompileCurrent` retry loop never finished. Case 2163 below
+      hangs the old code. The new code notices the repeated waiting state,
+      logs a warning and stops retrying; the blocks still run.
+    - Code space: the old JIT had 2 MB with no overflow check and ran off
+      the end. Final-mode case 435 below crashes the old code. The new JIT
+      has 16 MB with a 1 MB reserve. When the reserve is reached, the
+      compile stub leaves the dispatcher and the buffer is cleared after
+      `RunCycles`. The new JIT emits about 0.69 times the old code size
+      (over 979 cases: median 0.71, maximum 1.19).
+  - Found and not fixed (W15, `SDSP::RunDMA`): a DRAM DMA whose length is
+    accepted but runs past the 8 KB DRAM (lengths seen: 9624 and 14554
+    bytes at DSP address 0) copies past the end of `dram`. The harness
+    segfaults there on old and new alike (the "crash" cases below, reached
+    through the JIT's data-write-to-IFX quirk). The bounds check belongs in
+    W15's DMA code.
+  - Checked:
+    - Harness: old and new JIT side by side, with the W15 DSP core and
+      interpreter on both sides. Each case is a random IRAM/IROM program
+      (idle-loop patterns, loops, calls, branches back and out) with random
+      registers, stacks, DRAM, mailboxes, interrupts, exceptions, code
+      reloads and run budgets from 0 to 3000 cycles. Each case is hashed
+      over every register, stack, IFX register, mailbox, accelerator state,
+      DRAM and IRAM word, host memory and ARAM byte, interrupt count and
+      leftover cycle count.
+    - Harness adjustments for the old side:
+      - `CheckExceptions` is wrapped to keep r8/r9.
+      - `clrp` is patched to write through its register cache.
+      - `lr` addresses in unmapped banks are kept out of the inputs.
+      - A bad DMA length (which calls `exit(0)` in `SDSP`) and hangs are
+        reported per case.
+    - Results:
+      - Opcode tables identical.
+      - Old vs new, 12000 random cases: all identical, including the same
+        hang and exit cases on both sides. The one exception is case 2163,
+        where the old code hangs in `CompileCurrent` (above).
+      - Final mode: up to 400000 cycles until HALT, hashing without the
+        step counter. Old vs new over 5000 cases: identical; the only
+        exception is case 435, where the old JIT overflows its code space.
+      - New JIT with every caller-saved register clobbered after each call
+        into C++ (`CheckExceptions`, `ReadIFX`, `WriteIFX`,
+        `ApplyWriteBackLog`), vs the unclobbered new JIT, 5000 cases:
+        identical.
+    - New JIT vs the W15 interpreter (final mode, 1000 cases): they differ
+      only by the old JIT's own behaviour. The new JIT gives the old JIT's
+      hashes on all of these cases. Known causes:
+      - HALT pops the call stack instead of stepping `pc` back.
+      - `$sr` bit 8 is cleared.
+      - Data writes to 0x1000..0xefff reach the IFX registers; the
+        interpreter drops them.
+      With the first two masked, 638 of the 792 cases where both halt
+      match. The other 154 differ, and in 54 more only one side halts,
+      hangs or exits. Only a few were traced; the old JIT gives the same
+      results on all of them, so they are old JIT behaviour, not new.
+    - clang `-Wall -Wextra -Wconversion -Wsign-compare -Wshadow-all
+      -Wshorten-64-to-32 -Wimplicit-fallthrough -Wunused -Wextra-semi`,
+      Linux and `x86_64-w64-windows-gnu`: no warnings in W16 files, nor in
+      `DSPCore.cpp`. The remaining warnings come from shared headers
+      (`MsgHandler.h`, `x64Emitter.h`) and show the same on the base tree.
+      The code avoids the MSVC /W4 patterns C4319, C4805, C4458 and C4267.
+    - `verbatim-audit.py wii 8`: no run of 8 or more lines in any W16 file.
+  - Follow-up (merge): `SDSP::RunDMA` now cuts a DMA that would run past
+    the end of the 8 KB IRAM or DRAM at the end, and drops one that starts
+    past it, with an error log. W16's harness found DRAM lengths of 9624 and
+    14554 bytes overrunning `dram` (old and new alike); no real ucode does it.

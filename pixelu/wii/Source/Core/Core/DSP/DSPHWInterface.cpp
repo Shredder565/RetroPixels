@@ -321,7 +321,7 @@ void SDSP::RunDMA()
   const u32 main_addr = (u32{m_ifx_regs[DSP_DSMAH]} << 16) | m_ifx_regs[DSP_DSMAL];
   const u16 control = m_ifx_regs[DSP_DSCR];
   const u16 byte_offset = static_cast<u16>(m_ifx_regs[DSP_DSPA] * 2);
-  const u16 length = m_ifx_regs[DSP_DSBL];
+  u16 length = m_ifx_regs[DSP_DSBL];
 
   if (length > 0x4000)
   {
@@ -341,6 +341,22 @@ void SDSP::RunDMA()
 
   const bool to_cpu = (control & DSP_CR_TO_CPU) != 0;
   const bool instruction_memory = (control & DSP_CR_IMEM) != 0;
+
+  // IRAM and DRAM are 8 KB each: a transfer that would run past the end is
+  // cut short there (real ucodes never ask for one; a runaway program can).
+  const u32 mem_bytes =
+      (instruction_memory ? static_cast<u32>(DSP_IRAM_SIZE) : static_cast<u32>(DSP_DRAM_SIZE)) * 2;
+  if (byte_offset >= mem_bytes)
+  {
+    ERROR_LOG_FMT(DSPLLE, "DMA starts past the end of DSP memory: {:04x}", byte_offset);
+    return;
+  }
+  if (u32{byte_offset} + length > mem_bytes)
+  {
+    ERROR_LOG_FMT(DSPLLE, "DMA runs past the end of DSP memory: {:04x} + {:04x}", byte_offset,
+                  length);
+    length = static_cast<u16>(mem_bytes - byte_offset);
+  }
 
   const u8* touched;
   if (instruction_memory)
