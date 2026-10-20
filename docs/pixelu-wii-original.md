@@ -99,12 +99,12 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 151997 | 36.1% |
-| Dolphin, untouched | 258798 | 61.5% |
+| Original (RetroPixels) | 166611 | 39.7% |
+| Dolphin, untouched | 243403 | 58.0% |
 | Dolphin, with PixelU changes | 4224 | 1.0% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.4% |
-| **All** | **420782** | 100% |
+| **All** | **420001** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -139,21 +139,21 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/HW/WiimoteCommon | 1006 | 1006 | original |
 | Core/Core/HW/WiimoteEmu | 7530 | 7530 | original |
 | Core/Core/HW/WiimoteReal | 2362 | 2362 | original |
-| Core/Core/IOS (top level) | 3685 | 0 | Dolphin |
-| Core/Core/IOS/Crypto | 250 | 0 | Dolphin |
-| Core/Core/IOS/DI | 975 | 0 | Dolphin |
-| Core/Core/IOS/ES | 5238 | 0 | Dolphin |
-| Core/Core/IOS/FS | 2808 | 0 | Dolphin |
+| Core/Core/IOS (top level) | 3447 | 3447 | original |
+| Core/Core/IOS/Crypto | 275 | 275 | original |
+| Core/Core/IOS/DI | 915 | 915 | original |
+| Core/Core/IOS/ES | 5107 | 5107 | original |
+| Core/Core/IOS/FS | 2744 | 2744 | original |
 | Core/Core/IOS/Network | 8383 | 0 | Dolphin |
-| Core/Core/IOS/SDIO | 885 | 0 | Dolphin |
-| Core/Core/IOS/STM | 208 | 0 | Dolphin |
+| Core/Core/IOS/SDIO | 698 | 698 | original |
+| Core/Core/IOS/STM | 199 | 199 | original |
 | Core/Core/IOS/USB (top level) | 2597 | 0 | Dolphin |
 | Core/Core/IOS/USB/Bluetooth | 8741 | 0 | Dolphin |
 | Core/Core/IOS/USB/Emulated | 5232 | 0 | Dolphin |
 | Core/Core/IOS/USB/OH0 | 576 | 0 | Dolphin |
 | Core/Core/IOS/USB/USB_HID | 584 | 0 | Dolphin |
 | Core/Core/IOS/USB/USB_VEN | 194 | 0 | Dolphin |
-| Core/Core/IOS/WFS | 1346 | 0 | Dolphin |
+| Core/Core/IOS/WFS | 1229 | 1229 | original |
 | Core/Core/PowerPC (top level) | 9982 | 9982 | original |
 | Core/Core/PowerPC/CachedInterpreter | 1083 | 1083 | original |
 | Core/Core/PowerPC/Interpreter | 4391 | 4391 | original |
@@ -245,7 +245,7 @@ batch rewrites them.
 | W15 | DSP: core, interpreter, LLE glue | 8461 | 8461 | original |
 | W16 | DSP: x64 JIT | 3625 | 3625 | original |
 | W17 | DSP: HLE (AX, Zelda, GBA, CARD, ROM ucodes) | 6575 | 6575 | original |
-| W18 | IOS: kernel, ES, FS, DI, SDIO, STM, WFS, crypto | 15395 | 0 | Dolphin |
+| W18 | IOS: kernel, ES, FS, DI, SDIO, STM, WFS, crypto | 14614 | 14614 | original |
 | W19 | IOS: network (SO, KD/WC24, NCD, WD, SSL) and USB host devices | 12334 | 0 | Dolphin |
 | W20 | IOS: Bluetooth and emulated USB devices (Skylanders, Infinity, keyboard, mic) | 13973 | 0 | Dolphin |
 | W21 | Core: boot, config, config loaders, HLE, debugger, FIFO player | 13197 | 13197 | original |
@@ -2296,3 +2296,108 @@ Checks
     - `verbatim-audit.py wii 8`: no run of 8 or more lines in any W25 .cpp.
       The headers keep some 8-12 line runs of declarations (the
       `VertexManagerBase` interface and member layout).
+- W18 log: rewrote all 46 W18 files (the IOS kernel and its core
+  devices under `Core/IOS`) as original code. They now have 14614 lines
+  (from 15395). Each starts with the RetroPixels original-code line and
+  has no Dolphin copyright or SPDX header. The files are IOS, IOSC,
+  MIOS, Device, DeviceStub, DolphinDevice, Uids.h, VersionInfo, the AES
+  and SHA devices, /dev/di, the SD slot, STM, every ES file (ES,
+  Formats, Identity, NandUtils, TitleContents, TitleInformation,
+  TitleManagement, Views), the FS layer (FileSystem.h,
+  FileSystemCommon, FileSystemProxy and the host backend FS and File)
+  and the WFS server and installer.
+  - Kept unchanged: file names, and every public declaration that other
+    files use (names, signatures, namespaces, enum values, constants,
+    the TMD/ticket/certificate and ISFS request layouts, the FS
+    Metadata and handle structs). The IOSC key and certificate tables
+    are byte for byte the same; no key, certificate or firmware was
+    added. Everything that affects emulation also stays the same:
+    - every ioctl and ioctlv result, reply buffer and reply length of
+      ES, FS, AES, SHA, STM, /dev/dolphin, the stub devices, DI, SD and
+      WFS, with the same CoreTiming ticks for each reply;
+    - IOS boot and reload (version table, memory setup, RAM override,
+      device lists per version, the PPC uid/gid, the title context
+      switch), the IPC event queue and its ordering;
+    - ES and IOSC results: title import and export, ticket and TMD
+      checks, content decryption, signatures, the console identity and
+      the device certificate; every NAND file written, with the same
+      names, contents, owners and modes;
+    - FS metadata and error codes, the FST and its host file, the
+      handle table, and the SD card (CID/CSD values, SDHC detection,
+      block reads and writes);
+    - the savestate layout and order of the kernel and every device,
+      every config key, the netplay and movie NAND hooks, and every
+      translatable string.
+  - Kept quirks: WFSSRV GET_ATTRIBUTES still clears its reply with the
+    old length; ARCUnpacker::Extract still reads past a malformed
+    archive; ExportTitleInit and ADDTMD with no active title still read
+    an empty TMD; the FS handle padding is still saved raw; and after a
+    host FS state load the FST children change order, so a save, load,
+    save is not byte identical (as before). In the host FS, deleting
+    "//a" still skips the directory-in-use check, a rename onto an open
+    file still goes ahead, and a rename that grows an FST child list can
+    still leave a stale parent pointer (the FS harness avoids these last
+    two cases). Three guest-reachable null or out-of-bounds accesses are
+    also unchanged: ImportContentEnd hashes the TMD's content size even
+    when less data was imported, GetSharedContentsCount uses the
+    /shared1 listing even when it cannot be read, and any read, write,
+    seek or file ioctl on a file opened with no access mode uses its
+    missing host file.
+  - Deliberate differences (genuine bugs, harmless fixes, cleanups):
+    - Device::Unsupported names an unknown command "an unknown command"
+      in its log (the old code's map lookup threw for one).
+    - LoadNandFile checks the file status before using it (the old code
+      dereferenced a failed GetFileStatus for "/dev/fs").
+    - The SHA context and the FST Metadata padding are zeroed (the same
+      savestate bytes, now always zero instead of indeterminate).
+    - FileHandle's move assignment releases the old handle correctly.
+    - SetUpStreamKey's handle and WFSI GET_TMD's size start at 0
+      instead of uninitialised.
+    - LaunchPPCTitle closes its ScopedFd earlier and BootstrapPPC clears
+      the boot path before the call; neither changes any result.
+    - OpenContent looks up the content before the title ID (same
+      results), and DeleteDirectoriesIfEmpty stops on a path with no
+      slash instead of looping.
+    - The SD CID/CSD words are written in a different order (same final
+      bytes).
+    - Some DI, SD and WFS log messages are worded differently. Panic
+      messages and translatable strings are unchanged.
+  - Checked: harnesses linked the old and the new code against the same
+    untouched code outside W18 (Common, Config, PointerWrap, crypto)
+    with fake memory, timing, IPC and system objects and a zeroing
+    allocator. No Nintendo keys, BIOS, firmware, DSP ROMs or games were
+    used: all titles, tickets, TMDs and certificate chains were
+    synthetic, built and signed by the harness.
+    - VersionInfo: every table and lookup identical.
+    - FS host backend: random FS operations and state saves, 40 seeds x
+      3000 steps, identical.
+    - ES formats, ES core and IOSC: random synthetic titles, tickets,
+      imports, signatures and key operations, 40 seeds x 500 steps,
+      identical.
+    - Devices (DI, SD, WFSSRV, WFSI): 40 seeds x 3000 steps, identical.
+      A guard skips feeding malformed archives to WFSI, which reads out
+      of bounds on both sides.
+    - Kernel: the full IOS kernel with ES, FS, STM, AES, SHA,
+      /dev/dolphin and the stubs, driving every ES ioctlv 0x00-0x46,
+      composite imports and exports, FS and file ops, IPC events,
+      memory setup, RAM override, NAND file loads, device updates, the
+      title context, setting.txt and savestate save and reload. 40
+      seeds x 3000 steps, KERNEL_RESULT. The harness keeps the three
+      shared crashes listed under kept quirks out of the stream (both
+      sides crashed at the same step before the guards).
+    - Not covered by a harness: MIOS and the boot paths (BootIOS,
+      BootstrapPPC, Launch) were checked by reading only; DI, SD and WFS
+      were covered by the device harness rather than the kernel one.
+    - Compile check: the W18 .cpp files and all 47 other .cpp files that
+      include W18 headers build with clang on Linux and with `-target
+      x86_64-w64-windows-gnu` (apart from Socket.cpp and UICommon, which
+      fail the same way on the base commit with mingw). Under `-Wall
+      -Wextra -Wconversion -Wsign-compare` the W18 files give no new
+      warnings in any dependent (the base code gave some, for example
+      9 in ES.cpp). A scan found no bool mixed with an integer under `|`
+      or `&` (MSVC C4805).
+    - Verbatim audit (`tools/verbatim-audit.py wii 8`): no function body
+      in W18 .cpp files shares 8 or more lines with the old code. The
+      remaining runs are the BootMiiKeyDump struct and the key tables
+      in IOSC.cpp (kept byte for byte), the ISFS request structs in
+      FileSystemProxy.cpp, and declarations in headers.
