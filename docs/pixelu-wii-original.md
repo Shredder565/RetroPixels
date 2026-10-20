@@ -286,6 +286,11 @@ built-in console key and signature). Wii discs, WADs and SD saves then use a
 keys file dumped from the owner's own Wii (BootMii keys.bin / otp.bin),
 chosen once in RetroPixels. GameCube is unaffected. Done as its own step
 after W18 (IOSC) merges.
+The keys step offers "Find keys on this PC" (scan drives for keys.bin /
+otp.bin / keys.txt the owner already has) and a short guide to dumping them
+from the owner's own consoles (BootMii for Wii, dumpling for Wii U). It does
+not download keys or firmware from the internet (owner asked; declined,
+since that would distribute Nintendo's files).
 
 Queued after the rewrite and before Linux (project owner, 2026-10-20):
 analyse and improve Supermodel (Sega Model 3; the owner's upload of
