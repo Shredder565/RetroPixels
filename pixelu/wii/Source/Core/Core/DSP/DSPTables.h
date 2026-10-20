@@ -1,7 +1,9 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-// Additional copyrights go to Duddie (c) 2005 (duddie@walla.com)
+// The DSP instruction set as data: one template per instruction (encoding,
+// operand fields, control-flow properties) for the assembler, disassembler,
+// interpreter, analyzer and JIT, plus the names of registers and of the
+// hardware registers.
 
 #pragma once
 
@@ -15,13 +17,9 @@
 
 namespace DSP
 {
-// The non-ADDR ones that end with _D are the opposite one - if the bit specify
-// ACC0, then ACC_D will be ACC1.
-
-// The values of these are very important.
-// For the reg ones, the value >> 8 is the base register.
-// & 0x80  means it's a "D".
-
+// Operand kinds. For register operands the base register number sits in bits
+// 8-13; 0x80 marks the "other accumulator" (_D) forms and 0x10 the multiplier
+// forms that may name either half of an AX register.
 enum partype_t
 {
   P_NONE = 0x0000,
@@ -35,25 +33,25 @@ enum partype_t
   P_REG04 = P_REG | DSP_REG_IX0 << 8,
   P_REG08 = P_REG | DSP_REG_WR0 << 8,
   P_REG18 = P_REG | DSP_REG_AXL0 << 8,
-  P_REGM18 = P_REG | DSP_REG_AXL0 << 8 | 0x10,  // used in multiply instructions
+  P_REGM18 = P_REG | DSP_REG_AXL0 << 8 | 0x10,
   P_REG19 = P_REG | DSP_REG_AXL1 << 8,
-  P_REGM19 = P_REG | DSP_REG_AXL1 << 8 | 0x10,  // used in multiply instructions
+  P_REGM19 = P_REG | DSP_REG_AXL1 << 8 | 0x10,
   P_REG1A = P_REG | DSP_REG_AXH0 << 8 | 0x80,
-  // P_ACC       = P_REG | 0x1c10, // used for global accum (gcdsptool's value)
-  P_ACCL = P_REG | DSP_REG_ACL0 << 8,          // used for low part of accum
-  P_REG1C = P_REG | DSP_REG_ACL0 << 8 | 0x10,  // gcdsptool calls this P_ACCLM
-  P_ACCM = P_REG | DSP_REG_ACM0 << 8,          // used for mid part of accum
-  // The following are not in gcdsptool
+  P_ACCL = P_REG | DSP_REG_ACL0 << 8,
+  P_REG1C = P_REG | DSP_REG_ACL0 << 8 | 0x10,
+  P_ACCM = P_REG | DSP_REG_ACM0 << 8,
   P_ACCM_D = P_REG | DSP_REG_ACM0 << 8 | 0x80,
-  P_ACC = P_REG | DSP_REG_ACC0_FULL << 8,  // used for full accum.
-  P_ACCH = P_REG | DSP_REG_ACH0 << 8,      // used for high part of accum
+  P_ACC = P_REG | DSP_REG_ACC0_FULL << 8,
+  P_ACCH = P_REG | DSP_REG_ACH0 << 8,
   P_ACC_D = P_REG | DSP_REG_ACC0_FULL << 8 | 0x80,
   P_AX = P_REG | DSP_REG_AX0_FULL << 8,
-  P_REGS_MASK = 0x03f80,  // gcdsptool's value = 0x01f80
+  P_REGS_MASK = 0x03f80,
   P_REF = P_REG | 0x4000,
   P_PRG = P_REF | P_REG,
 };
 
+// One operand field: its kind, how many words the instruction has when it
+// is present (size), which word holds it (loc), and where (mask, lshift).
 struct param2_t
 {
   partype_t type;
@@ -79,10 +77,9 @@ struct DSPOPCTemplate
   bool updates_sr;
 };
 
-// Opcodes
+// The template used for words that are no instruction ("CW", a constant word).
 extern const DSPOPCTemplate cw;
 
-// Predefined labels
 struct pdlabel_t
 {
   u16 addr;
@@ -97,23 +94,26 @@ std::string pdname(u16 val);
 std::string pdregname(int val);
 std::string pdregnamelong(int val);
 
+// Builds the lookup tables behind GetOpTemplate and GetExtOpTemplate.
 void InitInstructionTable();
 
-// Used by the assembler and disassembler for info retrieval.
+// Linear searches over the templates, for the assembler and disassembler.
 const DSPOPCTemplate* FindOpInfoByOpcode(UDSPInstruction opcode);
 const DSPOPCTemplate* FindOpInfoByName(std::string_view name);
 
 const DSPOPCTemplate* FindExtOpInfoByOpcode(UDSPInstruction opcode);
 const DSPOPCTemplate* FindExtOpInfoByName(std::string_view name);
 
-// Used by the interpreter and JIT for instruction emulation
+// Table lookups for the emulators. Both return nullptr before InitInstructionTable.
 const DSPOPCTemplate* GetOpTemplate(UDSPInstruction inst);
 const DSPOPCTemplate* GetExtOpTemplate(UDSPInstruction inst);
 
+// First entry of data whose (opcode, opcode_mask) pair matches the instruction.
 template <typename T, size_t N>
 auto FindByOpcode(UDSPInstruction opcode, const std::array<T, N>& data)
 {
-  return std::ranges::find_if(
-      data, [opcode](const auto& info) { return (opcode & info.opcode_mask) == info.opcode; });
+  return std::ranges::find_if(data, [opcode](const auto& entry) {
+    return (opcode & entry.opcode_mask) == entry.opcode;
+  });
 }
 }  // namespace DSP

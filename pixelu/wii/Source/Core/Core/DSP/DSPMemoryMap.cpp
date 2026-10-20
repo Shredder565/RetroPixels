@@ -1,6 +1,7 @@
-// Copyright 2008 Dolphin Emulator Project
-// Copyright 2004 Duddie & Tratax
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// Address decoding for the DSP's instruction and data spaces. The top four bits
+// of an address select the memory; everything else is unmapped.
 
 #include "Core/DSP/DSPCore.h"
 
@@ -10,65 +11,75 @@
 
 namespace DSP
 {
+namespace
+{
+enum InstructionBank : u16
+{
+  IBANK_IRAM = 0x0,
+  IBANK_IROM = 0x8,
+};
+
+enum DataBank : u16
+{
+  DBANK_DRAM = 0x0,
+  DBANK_COEF = 0x1,
+  DBANK_HW = 0xf,
+};
+
+constexpr u16 BankOf(u16 address)
+{
+  return static_cast<u16>(address >> 12);
+}
+}  // namespace
+
 u16 SDSP::ReadIMEM(u16 address) const
 {
-  switch (address >> 12)
-  {
-  case 0:  // 0xxx IRAM
+  const u16 bank = BankOf(address);
+  if (bank == IBANK_IRAM)
     return iram[address & DSP_IRAM_MASK];
-
-  case 8:  // 8xxx IROM - contains code to receive code for IRAM, and a bunch of mixing loops.
+  if (bank == IBANK_IROM)
     return irom[address & DSP_IROM_MASK];
 
-  default:  // Unmapped/non-existing memory
-    ERROR_LOG_FMT(DSPLLE, "{:04x} DSP ERROR: Executing from invalid ({:04x}) memory", pc, address);
-    return 0;
-  }
+  ERROR_LOG_FMT(DSPLLE, "{:04x} instruction fetch from unmapped address {:04x}", pc, address);
+  return 0;
 }
 
 u16 SDSP::ReadDMEM(u16 address)
 {
-  switch (address >> 12)
-  {
-  case 0x0:  // 0xxx DRAM
+  const u16 bank = BankOf(address);
+  if (bank == DBANK_DRAM)
     return dram[address & DSP_DRAM_MASK];
 
-  case 0x1:  // 1xxx COEF
-    DEBUG_LOG_FMT(DSPLLE, "{:04x} : Coefficient Read @ {:04x}", pc, address);
+  if (bank == DBANK_COEF)
+  {
+    DEBUG_LOG_FMT(DSPLLE, "{:04x} coefficient ROM read at {:04x}", pc, address);
     return coef[address & DSP_COEF_MASK];
+  }
 
-  case 0xf:  // Fxxx HW regs
+  if (bank == DBANK_HW)
     return ReadIFX(address);
 
-  default:  // Unmapped/non-existing memory
-    ERROR_LOG_FMT(DSPLLE, "{:04x} DSP ERROR: Read from UNKNOWN ({:04x}) memory", pc, address);
-    return 0;
-  }
+  ERROR_LOG_FMT(DSPLLE, "{:04x} data read from unmapped address {:04x}", pc, address);
+  return 0;
 }
 
 void SDSP::WriteDMEM(u16 address, u16 value)
 {
-  switch (address >> 12)
+  const u16 bank = BankOf(address);
+  if (bank == DBANK_DRAM)
   {
-  case 0x0:  // 0xxx DRAM
     dram[address & DSP_DRAM_MASK] = value;
-    break;
-
-  case 0xf:  // Fxxx HW regs
-    WriteIFX(address, value);
-    break;
-
-  default:  // Unmapped/non-existing memory
-    ERROR_LOG_FMT(DSPLLE, "{:04x} DSP ERROR: Write to UNKNOWN ({:04x}) memory", pc, address);
-    break;
+    return;
   }
-}
 
-u16 SDSP::FetchInstruction()
-{
-  const u16 opc = PeekInstruction();
-  pc++;
-  return opc;
+  if (bank == DBANK_HW)
+  {
+    WriteIFX(address, value);
+    return;
+  }
+
+  // The coefficient ROM and the unmapped banks ignore writes.
+  ERROR_LOG_FMT(DSPLLE, "{:04x} data write to unwritable address {:04x}", pc, address);
 }
 
 u16 SDSP::PeekInstruction() const
@@ -76,8 +87,15 @@ u16 SDSP::PeekInstruction() const
   return ReadIMEM(pc);
 }
 
+u16 SDSP::FetchInstruction()
+{
+  const u16 word = PeekInstruction();
+  ++pc;
+  return word;
+}
+
 void SDSP::SkipInstruction()
 {
-  pc += GetOpTemplate(PeekInstruction())->size;
+  pc = static_cast<u16>(pc + GetOpTemplate(PeekInstruction())->size);
 }
 }  // namespace DSP

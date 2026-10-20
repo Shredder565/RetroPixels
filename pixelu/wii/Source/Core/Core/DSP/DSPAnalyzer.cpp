@@ -1,5 +1,4 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/DSP/DSPAnalyzer.h"
 
@@ -13,162 +12,149 @@
 
 namespace DSP
 {
-// Good candidates for idle skipping is mail wait loops. If we're time slicing
-// between the main CPU and the DSP, if the DSP runs into one of these, it might
-// as well give up its time slice immediately, after executing once.
-
-// Max signature length is 6. A 0 in a signature is ignored.
-constexpr size_t NUM_IDLE_SIGS = 8;
-constexpr size_t MAX_IDLE_SIG_SIZE = 6;
-
-// 0xFFFF means ignore.
-constexpr u16 idle_skip_sigs[NUM_IDLE_SIGS][MAX_IDLE_SIG_SIZE + 1] = {
-    // From AX:
-    {0x26fc,          // LRS   $30, @DMBH
-     0x02c0, 0x8000,  // ANDCF $30, #0x8000
-     0x029d, 0xFFFF,  // JLZ 0x027a
-     0, 0},           // RET
-    {0x27fc,          // LRS   $31, @DMBH
-     0x03c0, 0x8000,  // ANDCF $31, #0x8000
-     0x029d, 0xFFFF,  // JLZ 0x027a
-     0, 0},           // RET
-    {0x26fe,          // LRS   $30, @CMBH
-     0x02c0, 0x8000,  // ANDCF $30, #0x8000
-     0x029c, 0xFFFF,  // JLNZ 0x0280
-     0, 0},           // RET
-    {0x27fe,          // LRS   $31, @CMBH
-     0x03c0, 0x8000,  // ANDCF $31, #0x8000
-     0x029c, 0xFFFF,  // JLNZ 0x0280
-     0, 0},           // RET
-    {0x26fc,          // LRS  $AC0.M, @DMBH
-     0x02a0, 0x8000,  // ANDF $AC0.M, #0x8000
-     0x029c, 0xFFFF,  // JLNZ 0x????
-     0, 0},
-    {0x27fc,          // LRS  $AC1.M, @DMBH
-     0x03a0, 0x8000,  // ANDF $AC1.M, #0x8000
-     0x029c, 0xFFFF,  // JLNZ 0x????
-     0, 0},
-    // From Zelda:
-    {0x00de, 0xFFFE,  // LR    $AC0.M, @CMBH
-     0x02c0, 0x8000,  // ANDCF $AC0.M, #0x8000
-     0x029c, 0xFFFF,  // JLNZ 0x05cf
-     0},
-    // From Zelda - experimental
-    {0x00da, 0x0352,  // LR     $AX0.H, @0x0352
-     0x8600,          // TSTAXH $AX0.H
-     0x0295, 0xFFFF,  // JZ    0x????
-     0, 0},
+namespace
+{
+// One word of an idle-loop pattern; "any" matches every value (a branch target).
+struct PatternWord
+{
+  u16 value;
+  bool any;
 };
+
+constexpr PatternWord W(u16 value)
+{
+  return {value, false};
+}
+
+constexpr PatternWord ANY{0, true};
+
+struct IdlePattern
+{
+  std::array<PatternWord, 6> words;
+  size_t length;
+};
+
+// Loops that do nothing but poll a mailbox (or a flag in DRAM) until something
+// changes. Once the DSP is inside one it can give up the rest of its time slice.
+constexpr std::array<IdlePattern, 8> IDLE_PATTERNS{{
+    // AX: wait until the DSP mailbox is read (LRS $acX.m, @DMBH; ANDCF; JLZ)
+    {{W(0x26fc), W(0x02c0), W(0x8000), W(0x029d), ANY}, 5},
+    {{W(0x27fc), W(0x03c0), W(0x8000), W(0x029d), ANY}, 5},
+    // AX: wait for mail from the CPU (LRS $acX.m, @CMBH; ANDCF; JLNZ)
+    {{W(0x26fe), W(0x02c0), W(0x8000), W(0x029c), ANY}, 5},
+    {{W(0x27fe), W(0x03c0), W(0x8000), W(0x029c), ANY}, 5},
+    // AX variant with ANDF
+    {{W(0x26fc), W(0x02a0), W(0x8000), W(0x029c), ANY}, 5},
+    {{W(0x27fc), W(0x03a0), W(0x8000), W(0x029c), ANY}, 5},
+    // Zelda: LR $ac0.m, @CMBH; ANDCF; JLNZ
+    {{W(0x00de), W(0xfffe), W(0x02c0), W(0x8000), W(0x029c), ANY}, 6},
+    // Zelda: LR $ax0.h, @0x0352; TSTAXH; JZ
+    {{W(0x00da), W(0x0352), W(0x8600), W(0x0295), ANY}, 5},
+}};
+
+// Main opcodes whose effects (memory accesses that may reach the accelerator or
+// the mailboxes) can raise an exception, so the next instruction must check.
+constexpr std::array<u16, 14> MAY_RAISE_EXCEPTION{
+    0x00c0, 0x00e0, 0x1600,                          // LR, SR, SI
+    0x1800, 0x1880, 0x1900, 0x1980,                  // LRR family
+    0x1a00, 0x1a80, 0x1b00, 0x1b80,                  // SRR family
+    0x2000, 0x2800, 0x2c00,                          // LRS, SRSH, SRS
+};
+
+bool MayRaiseException(const DSPOPCTemplate& op)
+{
+  if (op.extended)
+    return true;
+  for (const u16 opcode : MAY_RAISE_EXCEPTION)
+  {
+    if (op.opcode == opcode)
+      return true;
+  }
+  return false;
+}
+
+bool PatternMatches(const SDSP& dsp, const IdlePattern& pattern, u16 address)
+{
+  for (size_t i = 0; i < pattern.length; ++i)
+  {
+    const PatternWord& word = pattern.words[i];
+    if (!word.any && dsp.ReadIMEM(static_cast<u16>(address + i)) != word.value)
+      return false;
+  }
+  return true;
+}
+}  // namespace
 
 Analyzer::Analyzer() = default;
 Analyzer::~Analyzer() = default;
 
 void Analyzer::Analyze(const SDSP& dsp)
 {
-  Reset();
-  AnalyzeRange(dsp, 0x0000, 0x1000);  // IRAM
-  AnalyzeRange(dsp, 0x8000, 0x9000);  // IROM
-}
+  m_flags.fill(0);
 
-void Analyzer::Reset()
-{
-  m_code_flags.fill(0);
-}
+  constexpr std::array<std::array<u16, 2>, 2> regions{{
+      {0x0000, 0x1000},  // IRAM
+      {0x8000, 0x9000},  // IROM
+  }};
 
-void Analyzer::AnalyzeRange(const SDSP& dsp, u16 start_addr, u16 end_addr)
-{
-  // First we run an extremely simplified version of a disassembler to find
-  // where all instructions start.
-  FindInstructionStarts(dsp, start_addr, end_addr);
-
-  // Next, we'll scan for potential idle skips.
-  FindIdleSkips(dsp, start_addr, end_addr);
-
-  INFO_LOG_FMT(DSPLLE, "Finished analysis.");
-}
-
-void Analyzer::FindInstructionStarts(const SDSP& dsp, u16 start_addr, u16 end_addr)
-{
-  // This may not be 100% accurate in case of jump tables!
-  // It could get desynced, which would be bad. We'll see if that's an issue.
-#ifndef DISABLE_UPDATE_SR_ANALYSIS
-  u16 last_arithmetic = 0;
-#endif
-  for (u16 addr = start_addr; addr < end_addr;)
+  for (const auto& [first, last] : regions)
   {
-    const UDSPInstruction inst = dsp.ReadIMEM(addr);
-    const DSPOPCTemplate* opcode = GetOpTemplate(inst);
-    if (!opcode)
-    {
-      addr++;
-      continue;
-    }
-    m_code_flags[addr] |= CODE_START_OF_INST;
-    // Look for loops.
-    if ((inst & 0xffe0) == 0x0060 || (inst & 0xff00) == 0x1100)
-    {
-      // BLOOP, BLOOPI
-      const u16 loop_end = dsp.ReadIMEM(addr + 1);
-      m_code_flags[addr] |= CODE_LOOP_START;
-      m_code_flags[loop_end] |= CODE_LOOP_END;
-    }
-    else if ((inst & 0xffe0) == 0x0040 || (inst & 0xff00) == 0x1000)
-    {
-      // LOOP, LOOPI
-      m_code_flags[addr] |= CODE_LOOP_START;
-      m_code_flags[static_cast<u16>(addr + 1u)] |= CODE_LOOP_END;
-    }
-
-#ifndef DISABLE_UPDATE_SR_ANALYSIS
-    // Mark the last arithmetic/multiplier instruction before a branch.
-    // We must update the SR reg at these instructions
-    if (opcode->updates_sr)
-    {
-      last_arithmetic = addr;
-    }
-
-    if (opcode->branch && !opcode->uncond_branch)
-    {
-      m_code_flags[last_arithmetic] |= CODE_UPDATE_SR;
-    }
-#endif
-
-    // If an instruction potentially raises exceptions, mark the following
-    // instruction as needing to check for exceptions
-    if (opcode->opcode == 0x00c0 || opcode->opcode == 0x00e0 || opcode->opcode == 0x1600 ||
-        opcode->opcode == 0x1800 || opcode->opcode == 0x1880 || opcode->opcode == 0x1900 ||
-        opcode->opcode == 0x1980 || opcode->opcode == 0x1a00 || opcode->opcode == 0x1a80 ||
-        opcode->opcode == 0x1b00 || opcode->opcode == 0x1b80 || opcode->opcode == 0x2000 ||
-        opcode->opcode == 0x2800 || opcode->opcode == 0x2c00 || opcode->extended)
-    {
-      m_code_flags[static_cast<u16>(addr + opcode->size)] |= CODE_CHECK_EXC;
-    }
-
-    addr += opcode->size;
+    ScanInstructions(dsp, first, last);
+    ScanIdleLoops(dsp, first, last);
+    INFO_LOG_FMT(DSPLLE, "Analyzed DSP code {:04x}-{:04x}", first, last - 1);
   }
 }
 
-void Analyzer::FindIdleSkips(const SDSP& dsp, u16 start_addr, u16 end_addr)
+void Analyzer::ScanInstructions(const SDSP& dsp, u16 first, u16 last)
 {
-  for (size_t s = 0; s < NUM_IDLE_SIGS; s++)
+  // A linear sweep: data embedded in code (jump tables) can throw it off, but the
+  // ucodes in use do not do that.
+  u16 address = first;
+  while (address < last)
   {
-    for (u16 addr = start_addr; addr < end_addr; addr++)
+    const UDSPInstruction word = dsp.ReadIMEM(address);
+    const DSPOPCTemplate* const op = GetOpTemplate(word);
+    if (op == nullptr)
     {
-      bool found = false;
-      for (size_t i = 0; i < MAX_IDLE_SIG_SIZE + 1; i++)
-      {
-        if (idle_skip_sigs[s][i] == 0)
-          found = true;
-        if (idle_skip_sigs[s][i] == 0xFFFF)
-          continue;
-        if (idle_skip_sigs[s][i] != dsp.ReadIMEM(static_cast<u16>(addr + i)))
-          break;
-      }
-      if (found)
-      {
-        INFO_LOG_FMT(DSPLLE, "Idle skip location found at {:02x} (sigNum:{})", addr, s + 1);
-        m_code_flags[addr] |= CODE_IDLE_SKIP;
-      }
+      // The opcode tables are not set up yet.
+      ++address;
+      continue;
+    }
+
+    Mark(address, FLAG_INSTRUCTION_START);
+
+    const bool block_loop = (word & 0xffe0) == 0x0060 || (word & 0xff00) == 0x1100;
+    const bool single_loop = (word & 0xffe0) == 0x0040 || (word & 0xff00) == 0x1000;
+    if (block_loop)
+    {
+      // BLOOP/BLOOPI: the second word is the address of the last instruction.
+      Mark(address, FLAG_LOOP_BEGIN);
+      Mark(dsp.ReadIMEM(static_cast<u16>(address + 1)), FLAG_LOOP_LAST);
+    }
+    else if (single_loop)
+    {
+      // LOOP/LOOPI repeat just the next instruction.
+      Mark(address, FLAG_LOOP_BEGIN);
+      Mark(static_cast<u16>(address + 1), FLAG_LOOP_LAST);
+    }
+
+    if (MayRaiseException(*op))
+      Mark(static_cast<u16>(address + op->size), FLAG_CHECK_EXCEPTIONS);
+
+    address = static_cast<u16>(address + op->size);
+  }
+}
+
+void Analyzer::ScanIdleLoops(const SDSP& dsp, u16 first, u16 last)
+{
+  for (size_t index = 0; index < IDLE_PATTERNS.size(); ++index)
+  {
+    for (u16 address = first; address < last; ++address)
+    {
+      if (!PatternMatches(dsp, IDLE_PATTERNS[index], address))
+        continue;
+      INFO_LOG_FMT(DSPLLE, "Idle loop (pattern {}) at {:04x}", index + 1, address);
+      Mark(address, FLAG_IDLE_LOOP);
     }
   }
 }

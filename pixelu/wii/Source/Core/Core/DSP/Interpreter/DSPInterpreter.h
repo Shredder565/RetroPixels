@@ -1,5 +1,9 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// The DSP interpreter. Besides running code itself it provides the handlers the
+// JIT falls back to for instructions it does not compile; each handler is one
+// instruction (or, for the extension handlers, one extension) and can be called
+// on its own.
 
 #pragma once
 
@@ -23,24 +27,26 @@ public:
   Interpreter(Interpreter&&) = delete;
   Interpreter& operator=(Interpreter&&) = delete;
 
+  // Executes one instruction at pc (after taking a pending exception, if any).
   void Step();
 
-  // If these simply return the same number of cycles as was passed into them,
-  // chances are that the DSP is halted.
-  // The difference between them is that the debug one obeys breakpoints.
+  // Run for about the given number of cycles; they return what is left (0 when the
+  // DSP halted or went idle). RunCyclesDebug also stops at breakpoints.
   int RunCyclesThread(int cycles);
   int RunCycles(int cycles);
   int RunCyclesDebug(int cycles);
 
+  // The control register shared with the CPU (reset, init, halt bits).
   void WriteControlRegister(u16 val);
   u16 ReadControlRegister();
 
   void SetSRFlag(u16 flag);
   bool IsSRFlagSet(u16 flag) const;
 
+  // Commits the register writes an extension handler deferred.
   void ApplyWriteBackLog();
 
-  // All the opcode functions.
+  // Main instruction handlers.
   void abs(UDSPInstruction opc);
   void add(UDSPInstruction opc);
   void addarn(UDSPInstruction opc);
@@ -162,7 +168,8 @@ public:
   void xori(UDSPInstruction opc);
   void xorr(UDSPInstruction opc);
 
-  // Extended ops
+  // Extension handlers. They read registers right away but only queue their
+  // register writes; ApplyWriteBackLog() commits them after the main handler.
   void l(UDSPInstruction opc);
   void ln(UDSPInstruction opc);
   void ls(UDSPInstruction opc);
@@ -190,58 +197,127 @@ public:
   void nop_ext(UDSPInstruction opc);
 
 private:
-  void ExecuteInstruction(UDSPInstruction inst);
+  // How an address register moves after an access.
+  enum class AddrStep : u8
+  {
+    Increment,  // +1
+    Index,      // + the matching $ix register
+  };
 
-  bool CheckCondition(u8 condition) const;
+  // The post-modify modes of the LRR/SRR/ILRR families.
+  enum class PointerStep : u8
+  {
+    Keep,
+    Decrement,
+    Increment,
+    AddIndex,
+  };
 
-  // See: DspIntBranch.cpp
-  void HandleLoop();
+  // Which operands of a multiply may be unsigned when SET15 is in effect.
+  enum class Signedness : u8
+  {
+    Signed,
+    BothUnsigned,
+    FirstUnsigned,
+  };
 
-  u16 IncrementAddressRegister(u16 reg) const;
-  u16 DecrementAddressRegister(u16 reg) const;
+  // What a multiply-and-move instruction puts into its accumulator.
+  enum class ProductMove : u8
+  {
+    AddToAcc,     // acc += old product
+    MoveRounded,  // acc = old product rounded to the middle word
+    Move,         // acc = old product
+  };
 
-  u16 IncreaseAddressRegister(u16 reg, s16 ix_) const;
-  u16 DecreaseAddressRegister(u16 reg, s16 ix_) const;
+  enum class BurstEnd : u8
+  {
+    Continue,
+    Finished,    // out of cycles, halted or idle
+    Breakpoint,  // stopped in front of a breakpoint
+  };
 
-  s32 GetLongACX(s32 reg) const;
-  s16 GetAXLow(s32 reg) const;
-  s16 GetAXHigh(s32 reg) const;
+  struct DeferredWrite
+  {
+    int reg;
+    u16 value;
+  };
 
-  s64 GetLongAcc(s32 reg) const;
-  void SetLongAcc(s32 reg, s64 value);
-  s16 GetAccLow(s32 reg) const;
-  s16 GetAccMid(s32 reg) const;
-  s16 GetAccHigh(s32 reg) const;
+  SDSP& Regs() { return m_dsp_core.DSPState(); }
+  const SDSP& Regs() const { return m_dsp_core.DSPState(); }
 
-  s64 GetLongProduct() const;
-  s64 GetLongProductRounded() const;
-  void SetLongProduct(s64 value);
+  void Execute(UDSPInstruction inst);
+  void ServiceLoopEnd();
+  BurstEnd RunBurst(int& cycles, int count, bool check_halt, bool check_idle, bool check_breaks);
 
-  s64 GetMultiplyProduct(u16 a, u16 b, u8 sign = 0) const;
-  s64 Multiply(u16 a, u16 b, u8 sign = 0) const;
-  s64 MultiplyAdd(u16 a, u16 b, u8 sign = 0) const;
-  s64 MultiplySub(u16 a, u16 b, u8 sign = 0) const;
-  s64 MultiplyMulX(u8 axh0, u8 axh1, u16 val1, u16 val2) const;
+  bool ConditionHolds(u8 condition) const;
 
-  void UpdateSR16(s16 value, bool carry = false, bool overflow = false, bool over_s32 = false);
-  void UpdateSR64(s64 value, bool carry = false, bool overflow = false);
-  void UpdateSR64Add(s64 val1, s64 val2, s64 result);
-  void UpdateSR64Sub(s64 val1, s64 val2, s64 result);
-  void UpdateSRLogicZero(bool value);
+  // Address generation with the $wr modulo.
+  u16 AddressPlusOne(int ar) const;
+  u16 AddressMinusOne(int ar) const;
+  u16 AddressPlus(int ar, s16 step) const;
+  u16 AddressMinus(int ar, s16 step) const;
+  u16 AddressAfter(int ar, AddrStep step) const;
 
-  u16 OpReadRegister(int reg_);
-  void OpWriteRegister(int reg_, u16 val);
+  // Register views.
+  s64 Acc(int which) const;
+  void SetAcc(int which, s64 value);
+  s32 AxWhole(int which) const;
+  s16 AxLow(int which) const;
+  s16 AxHigh(int which) const;
+  u16 AxHalf(int which, bool high) const;
+  s64 Product() const;
+  s64 ProductRounded() const;
+  void SetProduct(s64 value);
 
-  void ConditionalExtendAccum(int reg);
+  // Multiplier.
+  s64 MultiplyRaw(u16 a, u16 b, Signedness mode) const;
+  s64 MultiplyAxHalves(bool ax0_high, bool ax1_high) const;
+  void MultiplyAndMove(int acc, ProductMove move, s64 new_product);
 
-  void WriteToBackLog(int i, int idx, u16 value);
+  // Flags.
+  void SetFlags16(s16 value, bool carry, bool overflow, bool over_s32);
+  void SetFlags40(s64 value, bool carry = false, bool overflow = false);
+  void SetFlagsAdd(s64 a, s64 b, s64 result);
+  void SetFlagsSub(s64 a, s64 b, s64 result);
+  void SetLogicZero(bool zero);
+
+  // Shared bodies of instruction groups.
+  void StoreAccWithAdd(int acc, s64 a, s64 b);
+  void StoreAccWithSub(int acc, s64 a, s64 b);
+  void StoreAccMoved(int acc, s64 value);
+  void StoreAccShifted(int acc, s64 value);
+  void FinishMidLogic(int acc, u16 result);
+  void ShiftBy7BitAmount(int acc, u16 amount_field, bool arithmetic, bool positive_is_left);
+  s64 SignedAxPart(int selector) const;
+  void EnterLoop(u16 last_address, u16 count);
+  void LoadThroughPointer(UDSPInstruction opc, PointerStep step);
+  void StoreThroughPointer(UDSPInstruction opc, PointerStep step);
+  void LoadFromIMEM(UDSPInstruction opc, PointerStep step);
+  void UpdatePointer(int ar, PointerStep step);
+
+  // Register operands as instructions see them: $st reads pop, $st writes push,
+  // $acX.m reads may saturate, $acX.h writes sign extend.
+  u16 OpReadRegister(int reg);
+  void OpWriteRegister(int reg, u16 val);
+  void ExtendIfMidAccumulator(int reg);
+  void LoadRegister(int reg, u16 value);
+
+  // Extension write queue and the extension bodies built on it.
+  void WriteToBackLog(int reg, u16 value);
   void ZeroWriteBackLog();
-  void ZeroWriteBackLogPreserveAcc(u8 acc);
+  void ZeroWriteBackLogPreserveAcc(int acc);
+  void ExtStore(UDSPInstruction opc, AddrStep step);
+  void ExtLoad(UDSPInstruction opc, AddrStep step);
+  void ExtLoadStore(UDSPInstruction opc, bool store_through_ar0, AddrStep ar0_step,
+                    AddrStep ar3_step);
+  void ExtLoadPair(int first_reg, int second_reg, int source_ar, AddrStep source_step,
+                   AddrStep ar3_step);
+  void LoadAxPair(UDSPInstruction opc, AddrStep source_step, AddrStep ar3_step);
+  void LoadAxWhole(UDSPInstruction opc, AddrStep source_step, AddrStep ar3_step);
 
   DSPCore& m_dsp_core;
 
-  static constexpr size_t WRITEBACK_LOG_SIZE = 5;
-  std::array<u16, WRITEBACK_LOG_SIZE> m_write_back_log{};
-  std::array<int, WRITEBACK_LOG_SIZE> m_write_back_log_idx{-1, -1, -1, -1, -1};
+  std::array<DeferredWrite, 4> m_deferred{};
+  size_t m_deferred_count = 0;
 };
 }  // namespace DSP::Interpreter

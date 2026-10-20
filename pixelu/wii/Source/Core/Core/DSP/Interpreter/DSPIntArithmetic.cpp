@@ -1,1165 +1,500 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// Accumulator arithmetic, logic, comparisons and shifts.
 //
-// Additional copyrights go to Duddie and Tratax (c) 2004
+// Field layout reminders (see the instruction templates): the destination
+// accumulator is usually bit 8 (bit 11 for the short 0x8xxx forms), an $axS
+// source is bit 9, and the 0x3xxx logic forms use bits 8/9 the same way.
 
 #include "Core/DSP/Interpreter/DSPInterpreter.h"
 
+#include "Common/CommonTypes.h"
+
+#include "Core/DSP/DSPCore.h"
 #include "Core/DSP/Interpreter/DSPIntCCUtil.h"
 #include "Core/DSP/Interpreter/DSPIntUtil.h"
 
-// Arithmetic and accumulator control.
-
 namespace DSP::Interpreter
 {
+namespace
+{
+constexpr int Bit(UDSPInstruction opc, int position)
+{
+  return (opc >> position) & 1;
+}
+
+// A shift count held in a register: bits 0-5 are the magnitude field and bit 6
+// the sign of a 7-bit two's complement number (a zero magnitude means no shift).
+int RegisterShiftAmount(u16 field)
+{
+  const int magnitude = field & 0x3f;
+  if (magnitude == 0)
+    return 0;
+  return (field & 0x40) != 0 ? magnitude - 64 : magnitude;
+}
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// Shared bodies
+// ---------------------------------------------------------------------------
+
+void Interpreter::StoreAccWithAdd(int acc, s64 a, s64 b)
+{
+  ZeroWriteBackLog();
+  SetAcc(acc, a + b);
+  SetFlagsAdd(a, b, Acc(acc));
+}
+
+void Interpreter::StoreAccWithSub(int acc, s64 a, s64 b)
+{
+  ZeroWriteBackLog();
+  SetAcc(acc, a - b);
+  SetFlagsSub(a, b, Acc(acc));
+}
+
+// The flags describe the value as computed, before it is cut to 40 bits.
+void Interpreter::StoreAccMoved(int acc, s64 value)
+{
+  ZeroWriteBackLog();
+  SetAcc(acc, value);
+  SetFlags40(value);
+}
+
+// The flags describe what ended up in the accumulator.
+void Interpreter::StoreAccShifted(int acc, s64 value)
+{
+  ZeroWriteBackLog();
+  SetAcc(acc, value);
+  SetFlags40(Acc(acc));
+}
+
+void Interpreter::FinishMidLogic(int acc, u16 result)
+{
+  ZeroWriteBackLogPreserveAcc(acc);
+  Regs().r.ac[acc].m = result;
+  SetFlags16(static_cast<s16>(result), false, false, ExceedsS32(Acc(acc)));
+}
+
+s64 Interpreter::SignedAxPart(int selector) const
+{
+  // 0/1: $ax0.l/$ax1.l, 2/3: $ax0.h/$ax1.h, as a value in the middle word.
+  const s16 part = selector < 2 ? AxLow(selector) : AxHigh(selector - 2);
+  return static_cast<s64>(part) * 0x10000;
+}
+
+void Interpreter::ShiftBy7BitAmount(int acc, u16 amount_field, bool arithmetic,
+                                    bool positive_is_left)
+{
+  int left = RegisterShiftAmount(amount_field);
+  if (!positive_is_left)
+    left = -left;
+
+  s64 result;
+  if (arithmetic)
+  {
+    const s64 value = Acc(acc);
+    result = left >= 0 ? static_cast<s64>(static_cast<u64>(value) << left) : value >> -left;
+  }
+  else
+  {
+    const u64 value = static_cast<u64>(Acc(acc)) & ACC40_BITS;
+    result = static_cast<s64>(left >= 0 ? value << left : value >> -left);
+  }
+  StoreAccShifted(acc, result);
+}
+
+// ---------------------------------------------------------------------------
+// Clearing and testing
+// ---------------------------------------------------------------------------
+
 // CLR $acR
-// 1000 r001 xxxx xxxx
-// Clears accumulator $acR
-//
-// flags out: --10 0100
 void Interpreter::clr(const UDSPInstruction opc)
 {
-  const u8 reg = (opc >> 11) & 0x1;
-
-  SetLongAcc(reg, 0);
-  UpdateSR64(0);
+  SetAcc(Bit(opc, 11), 0);
+  SetFlags40(0);
   ZeroWriteBackLog();
 }
 
-// CLRL $acR.l
-// 1111 110r xxxx xxxx
-// Clears (and rounds!) $acR.l - low 16 bits of accumulator $acR.
-//
-// flags out: --xx xx00
+// CLRL $acR.l: round to the middle word.
 void Interpreter::clrl(const UDSPInstruction opc)
 {
-  const u8 reg = (opc >> 8) & 0x1;
-  const s64 acc = dsp_round_long_acc(GetLongAcc(reg));
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(reg, acc);
-  UpdateSR64(acc);
+  const int acc = Bit(opc, 8);
+  StoreAccMoved(acc, RoundToMiddleWord(Acc(acc)));
 }
 
-//----
-
-// ANDCF $acD.m, #I
-// 0000 001d 1100 0000
-// iiii iiii iiii iiii
-// Set logic zero (LZ) flag in status register $sr if result of logic AND of
-// accumulator mid part $acD.m with immediate value I is equal to I.
-//
-// flags out: -x-- ----
+// ANDCF $acD.m, #I: LZ = all bits of I are set in $acD.m
 void Interpreter::andcf(const UDSPInstruction opc)
 {
-  const u8 reg = (opc >> 8) & 0x1;
-  const u16 imm = m_dsp_core.DSPState().FetchInstruction();
-  const u16 val = GetAccMid(reg);
-
-  UpdateSRLogicZero((val & imm) == imm);
+  const u16 mask = Regs().FetchInstruction();
+  const u16 mid = Regs().r.ac[Bit(opc, 8)].m;
+  SetLogicZero((mid & mask) == mask);
 }
 
-// ANDF $acD.m, #I
-// 0000 001d 1010 0000
-// iiii iiii iiii iiii
-// Set logic zero (LZ) flag in status register $sr if result of logical AND
-// operation of accumulator mid part $acD.m with immediate value I is equal
-// to immediate value 0.
-//
-// flags out: -x-- ----
+// ANDF $acD.m, #I: LZ = no bit of I is set in $acD.m
 void Interpreter::andf(const UDSPInstruction opc)
 {
-  const u8 reg = (opc >> 8) & 0x1;
-  const u16 imm = m_dsp_core.DSPState().FetchInstruction();
-  const u16 val = GetAccMid(reg);
-
-  UpdateSRLogicZero((val & imm) == 0);
+  const u16 mask = Regs().FetchInstruction();
+  const u16 mid = Regs().r.ac[Bit(opc, 8)].m;
+  SetLogicZero((mid & mask) == 0);
 }
 
-//----
-
-// TST
-// 1011 r001 xxxx xxxx
-// Test accumulator $acR.
-//
-// flags out: --xx xx00
+// TST $acR
 void Interpreter::tst(const UDSPInstruction opc)
 {
-  const u8 reg = (opc >> 11) & 0x1;
-  const s64 acc = GetLongAcc(reg);
-
-  UpdateSR64(acc);
+  SetFlags40(Acc(Bit(opc, 11)));
   ZeroWriteBackLog();
 }
 
 // TSTAXH $axR.h
-// 1000 011r xxxx xxxx
-// Test high part of secondary accumulator $axR.h.
-//
-// flags out: --x0 xx00
 void Interpreter::tstaxh(const UDSPInstruction opc)
 {
-  const u8 reg = (opc >> 8) & 0x1;
-  const s16 val = GetAXHigh(reg);
-
-  UpdateSR16(val);
+  SetFlags16(AxHigh(Bit(opc, 8)), false, false, false);
   ZeroWriteBackLog();
 }
 
-//----
+// ---------------------------------------------------------------------------
+// Comparisons (subtractions that only set flags)
+// ---------------------------------------------------------------------------
 
-// CMP
-// 1000 0010 xxxx xxxx
-// Compares accumulator $ac0 with accumulator $ac1.
-//
-// flags out: x-xx xxxx
+// CMP: $ac0 - $ac1
 void Interpreter::cmp(const UDSPInstruction)
 {
-  const s64 acc0 = GetLongAcc(0);
-  const s64 acc1 = GetLongAcc(1);
-  const s64 res = dsp_convert_long_acc(acc0 - acc1);
-
-  UpdateSR64Sub(acc0, acc1, res);
+  const s64 first = Acc(0);
+  const s64 second = Acc(1);
+  SetFlagsSub(first, second, WrapTo40Bits(first - second));
   ZeroWriteBackLog();
 }
 
 // CMPAXH $acS, $axR.h
-// 110r s001 xxxx xxxx
-// Compares accumulator $acS with high part of secondary accumulator $axR.h.
-//
-// flags out: x-xx xxxx
 void Interpreter::cmpaxh(const UDSPInstruction opc)
 {
-  const u8 rreg = (opc >> 12) & 0x1;
-  const u8 sreg = (opc >> 11) & 0x1;
-
-  const s64 acc = GetLongAcc(sreg);
-  s64 ax = GetAXHigh(rreg);
-  ax <<= 16;
-  const s64 res = dsp_convert_long_acc(acc - ax);
-
-  UpdateSR64Sub(acc, ax, res);
+  const s64 value = Acc(Bit(opc, 11));
+  const s64 operand = SignedAxPart(2 + Bit(opc, 12));
+  SetFlagsSub(value, operand, WrapTo40Bits(value - operand));
   ZeroWriteBackLog();
 }
 
-// CMPI $acD, #I
-// 0000 001d 1000 0000
-// iiii iiii iiii iiii
-// Compares accumulator with immediate. Comparison is executed
-// by subtracting the immediate (16-bit sign extended) from mid accumulator
-// $acD.hm and computing flags based on whole accumulator $acD.
-//
-// flags out: x-xx xxxx
+// CMPI $acD, #I (I is the middle word)
 void Interpreter::cmpi(const UDSPInstruction opc)
 {
-  const u8 reg = (opc >> 8) & 0x1;
-  auto& state = m_dsp_core.DSPState();
-
-  const s64 val = GetLongAcc(reg);
-  // Immediate is considered to be at M level in the 40-bit accumulator.
-  s64 imm = static_cast<s16>(state.FetchInstruction());
-  imm <<= 16;
-  const s64 res = dsp_convert_long_acc(val - imm);
-
-  UpdateSR64Sub(val, imm, res);
+  const s64 value = Acc(Bit(opc, 8));
+  const s64 operand = static_cast<s64>(static_cast<s16>(Regs().FetchInstruction())) * 0x10000;
+  SetFlagsSub(value, operand, WrapTo40Bits(value - operand));
 }
 
-// CMPIS $acD, #I
-// 0000 011d iiii iiii
-// Compares accumulator with short immediate. Comparison is executed
-// by subtracting the short immediate (8-bit sign extended) from mid accumulator
-// $acD.hm and computing flags based on whole accumulator $acD.
-//
-// flags out: x-xx xxxx
+// CMPIS $acD, #I (8-bit I)
 void Interpreter::cmpis(const UDSPInstruction opc)
 {
-  const u8 areg = (opc >> 8) & 0x1;
-
-  const s64 acc = GetLongAcc(areg);
-  s64 imm = static_cast<s8>(opc);
-  imm <<= 16;
-  const s64 res = dsp_convert_long_acc(acc - imm);
-
-  UpdateSR64Sub(acc, imm, res);
+  const s64 value = Acc(Bit(opc, 8));
+  const s64 operand = static_cast<s64>(static_cast<s8>(opc & 0xff)) * 0x10000;
+  SetFlagsSub(value, operand, WrapTo40Bits(value - operand));
 }
 
-//----
+// ---------------------------------------------------------------------------
+// Logic on the middle word
+// ---------------------------------------------------------------------------
 
-// XORR $acD.m, $axS.h
-// 0011 00sd 0xxx xxxx
-// Logic XOR (exclusive or) middle part of accumulator $acD.m with
-// high part of secondary accumulator $axS.h.
-// x = extension (7 bits!!)
-//
-// flags out: --xx xx00
+// XORR / ANDR / ORR $acD.m, $axS.h
 void Interpreter::xorr(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x1;
-  const u8 sreg = (opc >> 9) & 0x1;
-  auto& state = m_dsp_core.DSPState();
-
-  const u16 accm = state.r.ac[dreg].m ^ state.r.ax[sreg].h;
-  ZeroWriteBackLogPreserveAcc(dreg);
-
-  state.r.ac[dreg].m = accm;
-  UpdateSR16(static_cast<s16>(accm), false, false, isOverS32(GetLongAcc(dreg)));
+  const int acc = Bit(opc, 8);
+  FinishMidLogic(acc, Regs().r.ac[acc].m ^ Regs().r.ax[Bit(opc, 9)].h);
 }
 
-// ANDR $acD.m, $axS.h
-// 0011 01sd 0xxx xxxx
-// Logic AND middle part of accumulator $acD.m with high part of
-// secondary accumulator $axS.h.
-// x = extension (7 bits!!)
-//
-// flags out: --xx xx00
 void Interpreter::andr(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x1;
-  const u8 sreg = (opc >> 9) & 0x1;
-  auto& state = m_dsp_core.DSPState();
-
-  const u16 accm = state.r.ac[dreg].m & state.r.ax[sreg].h;
-  ZeroWriteBackLogPreserveAcc(dreg);
-
-  state.r.ac[dreg].m = accm;
-  UpdateSR16(static_cast<s16>(accm), false, false, isOverS32(GetLongAcc(dreg)));
+  const int acc = Bit(opc, 8);
+  FinishMidLogic(acc, Regs().r.ac[acc].m & Regs().r.ax[Bit(opc, 9)].h);
 }
 
-// ORR $acD.m, $axS.h
-// 0011 10sd 0xxx xxxx
-// Logic OR middle part of accumulator $acD.m with high part of
-// secondary accumulator $axS.h.
-// x = extension (7 bits!!)
-//
-// flags out: --xx xx00
 void Interpreter::orr(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x1;
-  const u8 sreg = (opc >> 9) & 0x1;
-  auto& state = m_dsp_core.DSPState();
-
-  const u16 accm = state.r.ac[dreg].m | state.r.ax[sreg].h;
-  ZeroWriteBackLogPreserveAcc(dreg);
-
-  state.r.ac[dreg].m = accm;
-  UpdateSR16(static_cast<s16>(accm), false, false, isOverS32(GetLongAcc(dreg)));
+  const int acc = Bit(opc, 8);
+  FinishMidLogic(acc, Regs().r.ac[acc].m | Regs().r.ax[Bit(opc, 9)].h);
 }
 
-// ANDC $acD.m, $ac(1-D).m
-// 0011 110d 0xxx xxxx
-// Logic AND middle part of accumulator $acD.m with middle part of
-// accumulator $ac(1-D).m
-// x = extension (7 bits!!)
-//
-// flags out: --xx xx00
+// ANDC / ORC / XORC $acD.m, $ac(1-D).m
 void Interpreter::andc(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u8 dreg = (opc >> 8) & 0x1;
-  const u16 accm = state.r.ac[dreg].m & state.r.ac[1 - dreg].m;
-
-  ZeroWriteBackLogPreserveAcc(dreg);
-
-  state.r.ac[dreg].m = accm;
-  UpdateSR16(static_cast<s16>(accm), false, false, isOverS32(GetLongAcc(dreg)));
+  const int acc = Bit(opc, 8);
+  FinishMidLogic(acc, Regs().r.ac[acc].m & Regs().r.ac[1 - acc].m);
 }
 
-// ORC $acD.m, $ac(1-D).m
-// 0011 111d 0xxx xxxx
-// Logic OR middle part of accumulator $acD.m with middle part of
-// accumulator $ac(1-D).m.
-// x = extension (7 bits!!)
-//
-// flags out: --xx xx00
 void Interpreter::orc(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u8 dreg = (opc >> 8) & 0x1;
-  const u16 accm = state.r.ac[dreg].m | state.r.ac[1 - dreg].m;
-
-  ZeroWriteBackLogPreserveAcc(dreg);
-
-  state.r.ac[dreg].m = accm;
-  UpdateSR16(static_cast<s16>(accm), false, false, isOverS32(GetLongAcc(dreg)));
+  const int acc = Bit(opc, 8);
+  FinishMidLogic(acc, Regs().r.ac[acc].m | Regs().r.ac[1 - acc].m);
 }
 
-// XORC $acD.m
-// 0011 000d 1xxx xxxx
-// Logic XOR (exclusive or) middle part of accumulator $acD.m with $ac(1-D).m
-// x = extension (7 bits!!)
-//
-// flags out: --xx xx00
 void Interpreter::xorc(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u8 dreg = (opc >> 8) & 0x1;
-  const u16 accm = state.r.ac[dreg].m ^ state.r.ac[1 - dreg].m;
-
-  ZeroWriteBackLogPreserveAcc(dreg);
-
-  state.r.ac[dreg].m = accm;
-  UpdateSR16(static_cast<s16>(accm), false, false, isOverS32(GetLongAcc(dreg)));
+  const int acc = Bit(opc, 8);
+  FinishMidLogic(acc, Regs().r.ac[acc].m ^ Regs().r.ac[1 - acc].m);
 }
 
 // NOT $acD.m
-// 0011 001d 1xxx xxxx
-// Invert all bits in dest reg, aka xor with 0xffff
-// x = extension (7 bits!!)
-//
-// flags out: --xx xx00
 void Interpreter::notc(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u8 dreg = (opc >> 8) & 0x1;
-  const u16 accm = state.r.ac[dreg].m ^ 0xffff;
-
-  ZeroWriteBackLogPreserveAcc(dreg);
-
-  state.r.ac[dreg].m = accm;
-  UpdateSR16(static_cast<s16>(accm), false, false, isOverS32(GetLongAcc(dreg)));
+  const int acc = Bit(opc, 8);
+  FinishMidLogic(acc, static_cast<u16>(~Regs().r.ac[acc].m));
 }
 
-// XORI $acD.m, #I
-// 0000 001d 0010 0000
-// iiii iiii iiii iiii
-// Logic exclusive or (XOR) of accumulator mid part $acD.m with
-// immediate value I.
-//
-// flags out: --xx xx00
+// XORI / ANDI / ORI $acD.m, #I
 void Interpreter::xori(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u8 reg = (opc >> 8) & 0x1;
-  const u16 imm = state.FetchInstruction();
-  state.r.ac[reg].m ^= imm;
-
-  UpdateSR16(static_cast<s16>(state.r.ac[reg].m), false, false, isOverS32(GetLongAcc(reg)));
+  const int acc = Bit(opc, 8);
+  const u16 imm = Regs().FetchInstruction();
+  FinishMidLogic(acc, Regs().r.ac[acc].m ^ imm);
 }
 
-// ANDI $acD.m, #I
-// 0000 001d 0100 0000
-// iiii iiii iiii iiii
-// Logic AND of accumulator mid part $acD.m with immediate value I.
-//
-// flags out: --xx xx00
 void Interpreter::andi(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u8 reg = (opc >> 8) & 0x1;
-  const u16 imm = state.FetchInstruction();
-
-  state.r.ac[reg].m &= imm;
-
-  UpdateSR16(static_cast<s16>(state.r.ac[reg].m), false, false, isOverS32(GetLongAcc(reg)));
+  const int acc = Bit(opc, 8);
+  const u16 imm = Regs().FetchInstruction();
+  FinishMidLogic(acc, Regs().r.ac[acc].m & imm);
 }
 
-// ORI $acD.m, #I
-// 0000 001d 0110 0000
-// iiii iiii iiii iiii
-// Logic OR of accumulator mid part $acD.m with immediate value I.
-//
-// flags out: --xx xx00
 void Interpreter::ori(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u8 reg = (opc >> 8) & 0x1;
-  const u16 imm = state.FetchInstruction();
-
-  state.r.ac[reg].m |= imm;
-
-  UpdateSR16(static_cast<s16>(state.r.ac[reg].m), false, false, isOverS32(GetLongAcc(reg)));
+  const int acc = Bit(opc, 8);
+  const u16 imm = Regs().FetchInstruction();
+  FinishMidLogic(acc, Regs().r.ac[acc].m | imm);
 }
 
-//----
+// ---------------------------------------------------------------------------
+// Additions
+// ---------------------------------------------------------------------------
 
-// ADDR $acD.M, $axS.L
-// 0100 0ssd xxxx xxxx
-// Adds register $axS.L to accumulator $acD.M register.
-//
-// flags out: x-xx xxxx
+// ADDR $acD, $(0x18+S)
 void Interpreter::addr(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u8 dreg = (opc >> 8) & 0x1;
-  const u8 sreg = ((opc >> 9) & 0x3) + DSP_REG_AXL0;
-
-  const s64 acc = GetLongAcc(dreg);
-  s64 ax = 0;
-
-  switch (sreg)
-  {
-  case DSP_REG_AXL0:
-  case DSP_REG_AXL1:
-    ax = static_cast<s16>(state.r.ax[sreg - DSP_REG_AXL0].l);
-    break;
-  case DSP_REG_AXH0:
-  case DSP_REG_AXH1:
-    ax = static_cast<s16>(state.r.ax[sreg - DSP_REG_AXH0].h);
-    break;
-  default:
-    ax = 0;
-    break;
-  }
-
-  ax <<= 16;
-  const s64 res = acc + ax;
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, res);
-  UpdateSR64Add(acc, ax, GetLongAcc(dreg));
+  const int acc = Bit(opc, 8);
+  StoreAccWithAdd(acc, Acc(acc), SignedAxPart((opc >> 9) & 3));
 }
 
 // ADDAX $acD, $axS
-// 0100 10sd xxxx xxxx
-// Adds secondary accumulator $axS to accumulator register $acD.
-//
-// flags out: x-xx xxxx
 void Interpreter::addax(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x1;
-  const u8 sreg = (opc >> 9) & 0x1;
-
-  const s64 acc = GetLongAcc(dreg);
-  const s64 ax = GetLongACX(sreg);
-  const s64 res = acc + ax;
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, res);
-  UpdateSR64Add(acc, ax, GetLongAcc(dreg));
+  const int acc = Bit(opc, 8);
+  StoreAccWithAdd(acc, Acc(acc), AxWhole(Bit(opc, 9)));
 }
 
 // ADD $acD, $ac(1-D)
-// 0100 110d xxxx xxxx
-// Adds accumulator $ac(1-D) to accumulator register $acD.
-//
-// flags out: x-xx xxxx
 void Interpreter::add(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x1;
-
-  const s64 acc0 = GetLongAcc(dreg);
-  const s64 acc1 = GetLongAcc(1 - dreg);
-  const s64 res = acc0 + acc1;
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, res);
-  UpdateSR64Add(acc0, acc1, GetLongAcc(dreg));
+  const int acc = Bit(opc, 8);
+  StoreAccWithAdd(acc, Acc(acc), Acc(1 - acc));
 }
 
 // ADDP $acD
-// 0100 111d xxxx xxxx
-// Adds product register to accumulator register.
-//
-// flags out: x-xx xxxx
 void Interpreter::addp(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x1;
-
-  const s64 acc = GetLongAcc(dreg);
-  const s64 prod = GetLongProduct();
-  const s64 res = acc + prod;
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, res);
-  UpdateSR64Add(acc, prod, GetLongAcc(dreg));
+  const int acc = Bit(opc, 8);
+  StoreAccWithAdd(acc, Acc(acc), Product());
 }
 
-// ADDAXL $acD, $axS.l
-// 0111 00sd xxxx xxxx
-// Adds secondary accumulator $axS.l to accumulator register $acD.
-// should be unsigned values!!
-//
-// flags out: x-xx xxxx
+// ADDAXL $acD, $axS.l (unsigned, into the low word)
 void Interpreter::addaxl(const UDSPInstruction opc)
 {
-  const u8 sreg = (opc >> 9) & 0x1;
-  const u8 dreg = (opc >> 8) & 0x1;
-
-  const u64 acc = GetLongAcc(dreg);
-  const u16 acx = static_cast<u16>(GetAXLow(sreg));
-  const u64 res = acc + acx;
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, static_cast<s64>(res));
-  UpdateSR64Add(acc, acx, GetLongAcc(dreg));
+  const int acc = Bit(opc, 8);
+  StoreAccWithAdd(acc, Acc(acc), s64{Regs().r.ax[Bit(opc, 9)].l});
 }
 
-// ADDI $acD, #I
-// 0000 001d 0000 0000
-// iiii iiii iiii iiii
-// Adds immediate (16-bit sign extended) to mid accumulator $acD.hm.
-//
-// flags out: x-xx xxxx
+// ADDI $acD, #I (I is the middle word)
 void Interpreter::addi(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u8 areg = (opc >> 8) & 0x1;
-
-  const s64 acc = GetLongAcc(areg);
-  s64 imm = static_cast<s16>(state.FetchInstruction());
-  imm <<= 16;
-  const s64 res = acc + imm;
-
-  SetLongAcc(areg, res);
-  UpdateSR64Add(acc, imm, GetLongAcc(areg));
+  const int acc = Bit(opc, 8);
+  const s64 value = Acc(acc);
+  const s64 imm = static_cast<s64>(static_cast<s16>(Regs().FetchInstruction())) * 0x10000;
+  StoreAccWithAdd(acc, value, imm);
 }
 
-// ADDIS $acD, #I
-// 0000 010d iiii iiii
-// Adds short immediate (8-bit sign extended) to mid accumulator $acD.hm.
-//
-// flags out: x-xx xxxx
+// ADDIS $acD, #I (8-bit I)
 void Interpreter::addis(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x1;
-
-  const s64 acc = GetLongAcc(dreg);
-  s64 imm = static_cast<s8>(opc);
-  imm <<= 16;
-  const s64 res = acc + imm;
-
-  SetLongAcc(dreg, res);
-  UpdateSR64Add(acc, imm, GetLongAcc(dreg));
+  const int acc = Bit(opc, 8);
+  StoreAccWithAdd(acc, Acc(acc), static_cast<s64>(static_cast<s8>(opc & 0xff)) * 0x10000);
 }
 
-// INCM $acsD
-// 0111 010d xxxx xxxx
-// Increment 24-bit mid-accumulator $acsD.
-//
-// flags out: x-xx xxxx
+// INCM / INC $acD
 void Interpreter::incm(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x1;
-
-  const s64 sub = 0x10000;
-  const s64 acc = GetLongAcc(dreg);
-  const s64 res = acc + sub;
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, res);
-  UpdateSR64Add(acc, sub, GetLongAcc(dreg));
+  const int acc = Bit(opc, 8);
+  StoreAccWithAdd(acc, Acc(acc), 0x10000);
 }
 
-// INC $acD
-// 0111 011d xxxx xxxx
-// Increment accumulator $acD.
-//
-// flags out: x-xx xxxx
 void Interpreter::inc(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x1;
-
-  const s64 acc = GetLongAcc(dreg);
-  const s64 res = acc + 1;
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, res);
-  UpdateSR64Add(acc, 1, GetLongAcc(dreg));
+  const int acc = Bit(opc, 8);
+  StoreAccWithAdd(acc, Acc(acc), 1);
 }
 
-//----
+// ---------------------------------------------------------------------------
+// Subtractions
+// ---------------------------------------------------------------------------
 
-// SUBR $acD.M, $axS.L
-// 0101 0ssd xxxx xxxx
-// Subtracts register $axS.L from accumulator $acD.M register.
-//
-// flags out: x-xx xxxx
+// SUBR $acD, $(0x18+S)
 void Interpreter::subr(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u8 dreg = (opc >> 8) & 0x1;
-  const u8 sreg = ((opc >> 9) & 0x3) + DSP_REG_AXL0;
-
-  const s64 acc = GetLongAcc(dreg);
-  s64 ax = 0;
-
-  switch (sreg)
-  {
-  case DSP_REG_AXL0:
-  case DSP_REG_AXL1:
-    ax = static_cast<s16>(state.r.ax[sreg - DSP_REG_AXL0].l);
-    break;
-  case DSP_REG_AXH0:
-  case DSP_REG_AXH1:
-    ax = static_cast<s16>(state.r.ax[sreg - DSP_REG_AXH0].h);
-    break;
-  default:
-    ax = 0;
-    break;
-  }
-
-  ax <<= 16;
-  const s64 res = acc - ax;
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, res);
-  UpdateSR64Sub(acc, ax, GetLongAcc(dreg));
+  const int acc = Bit(opc, 8);
+  StoreAccWithSub(acc, Acc(acc), SignedAxPart((opc >> 9) & 3));
 }
 
 // SUBAX $acD, $axS
-// 0101 10sd xxxx xxxx
-// Subtracts secondary accumulator $axS from accumulator register $acD.
-//
-// flags out: x-xx xxxx
 void Interpreter::subax(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x1;
-  const u8 sreg = (opc >> 9) & 0x1;
-
-  const s64 acc = GetLongAcc(dreg);
-  const s64 acx = GetLongACX(sreg);
-  const s64 res = acc - acx;
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, res);
-  UpdateSR64Sub(acc, acx, GetLongAcc(dreg));
+  const int acc = Bit(opc, 8);
+  StoreAccWithSub(acc, Acc(acc), AxWhole(Bit(opc, 9)));
 }
 
 // SUB $acD, $ac(1-D)
-// 0101 110d xxxx xxxx
-// Subtracts accumulator $ac(1-D) from accumulator register $acD.
-//
-// flags out: x-xx xxxx
 void Interpreter::sub(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x1;
-
-  const s64 acc1 = GetLongAcc(dreg);
-  const s64 acc2 = GetLongAcc(1 - dreg);
-  const s64 res = acc1 - acc2;
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, res);
-  UpdateSR64Sub(acc1, acc2, GetLongAcc(dreg));
+  const int acc = Bit(opc, 8);
+  StoreAccWithSub(acc, Acc(acc), Acc(1 - acc));
 }
 
 // SUBP $acD
-// 0101 111d xxxx xxxx
-// Subtracts product register from accumulator register.
-//
-// flags out: x-xx xxxx
 void Interpreter::subp(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x1;
-
-  const s64 acc = GetLongAcc(dreg);
-  const s64 prod = GetLongProduct();
-  const s64 res = acc - prod;
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, res);
-  UpdateSR64Sub(acc, prod, GetLongAcc(dreg));
+  const int acc = Bit(opc, 8);
+  StoreAccWithSub(acc, Acc(acc), Product());
 }
 
-// DECM $acsD
-// 0111 100d xxxx xxxx
-// Decrement 24-bit mid-accumulator $acsD.
-//
-// flags out: x-xx xxxx
+// DECM / DEC $acD
 void Interpreter::decm(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x01;
-
-  const s64 sub = 0x10000;
-  const s64 acc = GetLongAcc(dreg);
-  const s64 res = acc - sub;
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, res);
-  UpdateSR64Sub(acc, sub, GetLongAcc(dreg));
+  const int acc = Bit(opc, 8);
+  StoreAccWithSub(acc, Acc(acc), 0x10000);
 }
 
-// DEC $acD
-// 0111 101d xxxx xxxx
-// Decrement accumulator $acD.
-//
-// flags out: x-xx xxxx
 void Interpreter::dec(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x01;
-
-  const s64 acc = GetLongAcc(dreg);
-  const s64 res = acc - 1;
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, res);
-  UpdateSR64Sub(acc, 1, GetLongAcc(dreg));
+  const int acc = Bit(opc, 8);
+  StoreAccWithSub(acc, Acc(acc), 1);
 }
 
-//----
-
-// NEG $acD
-// 0111 110d xxxx xxxx
-// Negate accumulator $acD.
-//
-// flags out: x-xx xxxx
-//
-// The carry flag is set only if $acD was zero.
-// The overflow flag is set only if $acD was 0x8000000000 (the minimum value),
-// as -INT_MIN is INT_MIN in two's complement. In both of these cases,
-// the value of $acD after the operation is the same as it was before.
+// NEG $acD (flags as for 0 - $acD)
 void Interpreter::neg(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x1;
-
-  const s64 acc = GetLongAcc(dreg);
-  const s64 res = 0 - acc;
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, res);
-  UpdateSR64Sub(0, acc, GetLongAcc(dreg));
+  const int acc = Bit(opc, 8);
+  StoreAccWithSub(acc, 0, Acc(acc));
 }
 
-// ABS  $acD
-// 1010 d001 xxxx xxxx
-// absolute value of $acD
-//
-// flags out: --xx xx00
+// ABS $acD
 void Interpreter::abs(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 11) & 0x1;
-
-  s64 acc = GetLongAcc(dreg);
-
-  if (acc < 0)
-    acc = 0 - acc;
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, acc);
-  UpdateSR64(GetLongAcc(dreg));  // TODO: Is this right?
+  const int acc = Bit(opc, 11);
+  const s64 value = Acc(acc);
+  StoreAccShifted(acc, value < 0 ? -value : value);
 }
-//----
 
-// MOVR $acD, $axS.R
-// 0110 0srd xxxx xxxx
-// Moves register $axS.R (sign extended) to middle accumulator $acD.hm.
-// Sets $acD.l to 0.
-//
-// flags out: --xx xx00
+// ---------------------------------------------------------------------------
+// Moves
+// ---------------------------------------------------------------------------
+
+// MOVR $acD, $(0x18+S)
 void Interpreter::movr(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u8 areg = (opc >> 8) & 0x1;
-  const u8 sreg = ((opc >> 9) & 0x3) + DSP_REG_AXL0;
-
-  s64 ax = 0;
-  switch (sreg)
-  {
-  case DSP_REG_AXL0:
-  case DSP_REG_AXL1:
-    ax = static_cast<s16>(state.r.ax[sreg - DSP_REG_AXL0].l);
-    break;
-  case DSP_REG_AXH0:
-  case DSP_REG_AXH1:
-    ax = static_cast<s16>(state.r.ax[sreg - DSP_REG_AXH0].h);
-    break;
-  default:
-    ax = 0;
-    break;
-  }
-  ax <<= 16;
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(areg, ax);
-  UpdateSR64(ax);
+  StoreAccMoved(Bit(opc, 8), SignedAxPart((opc >> 9) & 3));
 }
 
 // MOVAX $acD, $axS
-// 0110 10sd xxxx xxxx
-// Moves secondary accumulator $axS to accumulator $acD.
-//
-// flags out: --xx xx00
 void Interpreter::movax(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x1;
-  const u8 sreg = (opc >> 9) & 0x1;
-
-  const s64 acx = GetLongACX(sreg);
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, acx);
-  UpdateSR64(acx);
+  StoreAccMoved(Bit(opc, 8), AxWhole(Bit(opc, 9)));
 }
 
 // MOV $acD, $ac(1-D)
-// 0110 110d xxxx xxxx
-// Moves accumulator $ac(1-D) to accumulator $acD.
-//
-// flags out: --x0 xx00
 void Interpreter::mov(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x1;
-  const u64 acc = GetLongAcc(1 - dreg);
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, acc);
-  UpdateSR64(acc);
+  const int acc = Bit(opc, 8);
+  StoreAccMoved(acc, Acc(1 - acc));
 }
 
-//----
+// ---------------------------------------------------------------------------
+// Shifts
+// ---------------------------------------------------------------------------
 
-// LSL16 $acR
-// 1111 000r xxxx xxxx
-// Logically shifts left accumulator $acR by 16.
-//
-// flags out: --xx xx00
+// LSL16 / LSR16 $acR: by 16, LSR16 shifting zeros in at bit 39
 void Interpreter::lsl16(const UDSPInstruction opc)
 {
-  const u8 areg = (opc >> 8) & 0x1;
-
-  s64 acc = GetLongAcc(areg);
-  acc <<= 16;
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(areg, acc);
-  UpdateSR64(GetLongAcc(areg));
+  const int acc = Bit(opc, 8);
+  StoreAccShifted(acc, static_cast<s64>(static_cast<u64>(Acc(acc)) << 16));
 }
 
-// LSR16 $acR
-// 1111 010r xxxx xxxx
-// Logically shifts right accumulator $acR by 16.
-//
-// flags out: --xx xx00
 void Interpreter::lsr16(const UDSPInstruction opc)
 {
-  const u8 areg = (opc >> 8) & 0x1;
-
-  u64 acc = GetLongAcc(areg);
-  // Lop off the extraneous sign extension our 64-bit fake accum causes
-  acc &= 0x0000'00FF'FFFF'FFFFULL;
-  acc >>= 16;
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(areg, static_cast<s64>(acc));
-  UpdateSR64(GetLongAcc(areg));
+  const int acc = Bit(opc, 8);
+  StoreAccShifted(acc, static_cast<s64>((static_cast<u64>(Acc(acc)) & ACC40_BITS) >> 16));
 }
 
 // ASR16 $acR
-// 1001 r001 xxxx xxxx
-// Arithmetically shifts right accumulator $acR by 16.
-//
-// flags out: --xx xx00
 void Interpreter::asr16(const UDSPInstruction opc)
 {
-  const u8 areg = (opc >> 11) & 0x1;
-
-  s64 acc = GetLongAcc(areg);
-  acc >>= 16;
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(areg, acc);
-  UpdateSR64(GetLongAcc(areg));
+  const int acc = Bit(opc, 11);
+  StoreAccShifted(acc, Acc(acc) >> 16);
 }
 
-// LSL $acR, #I
-// 0001 010r 00ii iiii
-// Logically shifts left accumulator $acR by number specified by value I.
-//
-// flags out: --xx xx00
+// LSL / ASL $acR, #I: left by the 6-bit I (the same operation)
 void Interpreter::lsl(const UDSPInstruction opc)
 {
-  const u8 rreg = (opc >> 8) & 0x01;
-  const u16 shift = opc & 0x3f;
-  u64 acc = GetLongAcc(rreg);
-
-  acc <<= shift;
-
-  SetLongAcc(rreg, acc);
-  UpdateSR64(GetLongAcc(rreg));
+  const int acc = Bit(opc, 8);
+  StoreAccShifted(acc, static_cast<s64>(static_cast<u64>(Acc(acc)) << (opc & 0x3f)));
 }
 
-// LSR $acR, #I
-// 0001 010r 01ii iiii
-// Logically shifts right accumulator $acR by number specified by value
-// calculated by negating sign extended bits 0-6.
-//
-// flags out: --xx xx00
-void Interpreter::lsr(const UDSPInstruction opc)
-{
-  const u8 rreg = (opc >> 8) & 0x01;
-  u16 shift;
-  u64 acc = GetLongAcc(rreg);
-  // Lop off the extraneous sign extension our 64-bit fake accum causes
-  acc &= 0x0000'00FF'FFFF'FFFFULL;
-
-  if ((opc & 0x3f) == 0)
-    shift = 0;
-  else
-    shift = 0x40 - (opc & 0x3f);
-
-  acc >>= shift;
-
-  SetLongAcc(rreg, static_cast<s64>(acc));
-  UpdateSR64(GetLongAcc(rreg));
-}
-
-// ASL $acR, #I
-// 0001 010r 10ii iiii
-// Logically shifts left accumulator $acR by number specified by value I.
-//
-// flags out: --xx xx00
 void Interpreter::asl(const UDSPInstruction opc)
 {
-  const u8 rreg = (opc >> 8) & 0x01;
-  const u16 shift = opc & 0x3f;
-  u64 acc = GetLongAcc(rreg);
-
-  acc <<= shift;
-
-  SetLongAcc(rreg, acc);
-  UpdateSR64(GetLongAcc(rreg));
+  lsl(opc);
 }
 
-// ASR $acR, #I
-// 0001 010r 11ii iiii
-// Arithmetically shifts right accumulator $acR by number specified by
-// value calculated by negating sign extended bits 0-6.
-//
-// flags out: --xx xx00
+// LSR / ASR $acR, #-I: the 6-bit field holds the negated right shift count
+void Interpreter::lsr(const UDSPInstruction opc)
+{
+  const int acc = Bit(opc, 8);
+  const int count = (64 - (opc & 0x3f)) & 0x3f;
+  StoreAccShifted(acc, static_cast<s64>((static_cast<u64>(Acc(acc)) & ACC40_BITS) >> count));
+}
+
 void Interpreter::asr(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x01;
-  u16 shift;
-
-  if ((opc & 0x3f) == 0)
-    shift = 0;
-  else
-    shift = 0x40 - (opc & 0x3f);
-
-  // arithmetic shift
-  s64 acc = GetLongAcc(dreg);
-  acc >>= shift;
-
-  SetLongAcc(dreg, acc);
-  UpdateSR64(GetLongAcc(dreg));
+  const int acc = Bit(opc, 8);
+  const int count = (64 - (opc & 0x3f)) & 0x3f;
+  StoreAccShifted(acc, Acc(acc) >> count);
 }
 
-// LSRN  (fixed parameters)
-// 0000 0010 1100 1010
-// Logically shifts right accumulator $ACC0 by lower 7-bit (signed) value in $AC1.M
-// (if value negative, becomes left shift).
-//
-// flags out: --xx xx00
-void Interpreter::lsrn(const UDSPInstruction opc)
+// LSRN / ASRN: $ac0 by $ac1.m, a positive count shifting right
+void Interpreter::lsrn(const UDSPInstruction)
 {
-  s16 shift;
-  const u16 accm = static_cast<u16>(GetAccMid(1));
-  u64 acc = GetLongAcc(0);
-  acc &= 0x0000'00FF'FFFF'FFFFULL;
-
-  if ((accm & 0x3f) == 0)
-    shift = 0;
-  else if ((accm & 0x40) != 0)
-    shift = -0x40 + (accm & 0x3f);
-  else
-    shift = accm & 0x3f;
-
-  if (shift > 0)
-  {
-    acc >>= shift;
-  }
-  else if (shift < 0)
-  {
-    acc <<= -shift;
-  }
-
-  SetLongAcc(0, static_cast<s64>(acc));
-  UpdateSR64(GetLongAcc(0));
+  ShiftBy7BitAmount(0, Regs().r.ac[1].m, false, false);
 }
 
-// ASRN  (fixed parameters)
-// 0000 0010 1100 1011
-// Arithmetically shifts right accumulator $ACC0 by lower 7-bit (signed) value in $AC1.M
-// (if value negative, becomes left shift).
-//
-// flags out: --xx xx00
-void Interpreter::asrn(const UDSPInstruction opc)
+void Interpreter::asrn(const UDSPInstruction)
 {
-  s16 shift;
-  const u16 accm = static_cast<u16>(GetAccMid(1));
-  s64 acc = GetLongAcc(0);
-
-  if ((accm & 0x3f) == 0)
-    shift = 0;
-  else if ((accm & 0x40) != 0)
-    shift = -0x40 + (accm & 0x3f);
-  else
-    shift = accm & 0x3f;
-
-  if (shift > 0)
-  {
-    acc >>= shift;
-  }
-  else if (shift < 0)
-  {
-    acc <<= -shift;
-  }
-
-  SetLongAcc(0, acc);
-  UpdateSR64(GetLongAcc(0));
+  ShiftBy7BitAmount(0, Regs().r.ac[1].m, true, false);
 }
 
-// LSRNRX $acD, $axS.h
-// 0011 01sd 1xxx xxxx
-// Logically shifts left/right accumulator $ACC[D] by lower 7-bit (signed) value in $AX[S].H
-// x = extension (7 bits!!)
-//
-// flags out: --xx xx00
+// LSRNRX / ASRNRX $acD, $axS.h: a positive count shifting left
 void Interpreter::lsrnrx(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u8 dreg = (opc >> 8) & 0x1;
-  const u8 sreg = (opc >> 9) & 0x1;
-
-  s16 shift;
-  const u16 axh = state.r.ax[sreg].h;
-  u64 acc = GetLongAcc(dreg);
-  acc &= 0x0000'00FF'FFFF'FFFFULL;
-
-  if ((axh & 0x3f) == 0)
-    shift = 0;
-  else if ((axh & 0x40) != 0)
-    shift = -0x40 + (axh & 0x3f);
-  else
-    shift = axh & 0x3f;
-
-  if (shift > 0)
-  {
-    acc <<= shift;
-  }
-  else if (shift < 0)
-  {
-    acc >>= -shift;
-  }
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, static_cast<s64>(acc));
-  UpdateSR64(GetLongAcc(dreg));
+  ShiftBy7BitAmount(Bit(opc, 8), Regs().r.ax[Bit(opc, 9)].h, false, true);
 }
 
-// ASRNRX $acD, $axS.h
-// 0011 10sd 1xxx xxxx
-// Arithmetically shifts left/right accumulator $ACC[D] by lower 7-bit (signed) value in $AX[S].H
-// x = extension (7 bits!!)
-//
-// flags out: --xx xx00
 void Interpreter::asrnrx(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u8 dreg = (opc >> 8) & 0x1;
-  const u8 sreg = (opc >> 9) & 0x1;
-
-  s16 shift;
-  const u16 axh = state.r.ax[sreg].h;
-  s64 acc = GetLongAcc(dreg);
-
-  if ((axh & 0x3f) == 0)
-    shift = 0;
-  else if ((axh & 0x40) != 0)
-    shift = -0x40 + (axh & 0x3f);
-  else
-    shift = axh & 0x3f;
-
-  if (shift > 0)
-  {
-    acc <<= shift;
-  }
-  else if (shift < 0)
-  {
-    acc >>= -shift;
-  }
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, acc);
-  UpdateSR64(GetLongAcc(dreg));
+  ShiftBy7BitAmount(Bit(opc, 8), Regs().r.ax[Bit(opc, 9)].h, true, true);
 }
 
-// LSRNR  $acD
-// 0011 110d 1xxx xxxx
-// Logically shifts left/right accumulator $ACC[D] by lower 7-bit (signed) value in $AC[1-D].M
-// x = extension (7 bits!!)
-//
-// flags out: --xx xx00
+// LSRNR / ASRNR $acD, $ac(1-D).m: a positive count shifting left
 void Interpreter::lsrnr(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x1;
-
-  s16 shift;
-  const u16 accm = static_cast<u16>(GetAccMid(1 - dreg));
-  u64 acc = GetLongAcc(dreg);
-  acc &= 0x0000'00FF'FFFF'FFFFULL;
-
-  if ((accm & 0x3f) == 0)
-    shift = 0;
-  else if ((accm & 0x40) != 0)
-    shift = -0x40 + (accm & 0x3f);
-  else
-    shift = accm & 0x3f;
-
-  if (shift > 0)
-    acc <<= shift;
-  else if (shift < 0)
-    acc >>= -shift;
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, static_cast<s64>(acc));
-  UpdateSR64(GetLongAcc(dreg));
+  const int acc = Bit(opc, 8);
+  ShiftBy7BitAmount(acc, Regs().r.ac[1 - acc].m, false, true);
 }
 
-// ASRNR  $acD
-// 0011 111d 1xxx xxxx
-// Arithmetically shift left/right accumulator $ACC[D] by lower 7-bit (signed) value in $AC[1-D].M
-// x = extension (7 bits!!)
-//
-// flags out: --xx xx00
 void Interpreter::asrnr(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x1;
-
-  s16 shift;
-  const u16 accm = static_cast<u16>(GetAccMid(1 - dreg));
-  s64 acc = GetLongAcc(dreg);
-
-  if ((accm & 0x3f) == 0)
-    shift = 0;
-  else if ((accm & 0x40) != 0)
-    shift = -0x40 + (accm & 0x3f);
-  else
-    shift = accm & 0x3f;
-
-  if (shift > 0)
-    acc <<= shift;
-  else if (shift < 0)
-    acc >>= -shift;
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, acc);
-  UpdateSR64(GetLongAcc(dreg));
+  const int acc = Bit(opc, 8);
+  ShiftBy7BitAmount(acc, Regs().r.ac[1 - acc].m, true, true);
 }
 }  // namespace DSP::Interpreter

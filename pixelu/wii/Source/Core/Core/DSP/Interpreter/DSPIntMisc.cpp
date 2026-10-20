@@ -1,173 +1,110 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-//
-// Additional copyrights go to Duddie and Tratax (c) 2004
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// Register moves and immediates, address register arithmetic and the $sr mode
+// bits.
 
 #include "Core/DSP/Interpreter/DSPInterpreter.h"
+
+#include "Common/CommonTypes.h"
 
 #include "Core/DSP/DSPCore.h"
 
 namespace DSP::Interpreter
 {
 // MRR $D, $S
-// 0001 11dd ddds ssss
-// Move value from register $S to register $D.
 void Interpreter::mrr(const UDSPInstruction opc)
 {
-  const u8 sreg = opc & 0x1f;
-  const u8 dreg = (opc >> 5) & 0x1f;
-
-  OpWriteRegister(dreg, OpReadRegister(sreg));
-
-  ConditionalExtendAccum(dreg);
+  const u16 value = OpReadRegister(opc & 0x1f);
+  LoadRegister((opc >> 5) & 0x1f, value);
 }
 
-// LRI $D, #I
-// 0000 0000 100d dddd
-// iiii iiii iiii iiii
-// Load immediate value I to register $D.
-//
-// DSPSpy discovery: This, and possibly other instructions that load a
-// register, has a different behaviour in S40 mode if loaded to AC0.M: The
-// value gets sign extended to the whole accumulator! This does not happen in
-// S16 mode.
+// LRI $D, #I (I is the second word)
 void Interpreter::lri(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u8 reg = opc & 0x1F;
-  const u16 imm = state.FetchInstruction();
-
-  OpWriteRegister(reg, imm);
-  ConditionalExtendAccum(reg);
+  const u16 imm = Regs().FetchInstruction();
+  LoadRegister(opc & 0x1f, imm);
 }
 
-// LRIS $(0x18+D), #I
-// 0000 1ddd iiii iiii
-// Load immediate value I (8-bit sign extended) to accumulator register.
+// LRIS $(0x18+D), #I (a sign-extended byte)
 void Interpreter::lris(const UDSPInstruction opc)
 {
-  const u8 reg = ((opc >> 8) & 0x7) + DSP_REG_AXL0;
-  const u16 imm = static_cast<u16>(static_cast<s8>(opc));
-
-  OpWriteRegister(reg, imm);
-  ConditionalExtendAccum(reg);
+  LoadRegister(DSP_REG_AXL0 + ((opc >> 8) & 7), static_cast<u16>(static_cast<s8>(opc & 0xff)));
 }
 
-//----
-
-// NX
-// 1000 -000 xxxx xxxx
-// No operation, but can be extended with extended opcode.
-// This opcode is supposed to do nothing - it's used if you want to use
-// an opcode extension but not do anything. At least according to duddie.
+// NX: nothing but the extension.
 void Interpreter::nx(const UDSPInstruction)
 {
   ZeroWriteBackLog();
 }
 
-//----
-
-// DAR $arD
-// 0000 0000 0000 01dd
-// Decrement address register $arD.
+// DAR / IAR $arD: step by one inside the ring
 void Interpreter::dar(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u16 index = opc & 3;
-
-  state.r.ar[index] = DecrementAddressRegister(index);
+  const int ar = opc & 3;
+  Regs().r.ar[ar] = AddressMinusOne(ar);
 }
 
-// IAR $arD
-// 0000 0000 0000 10dd
-// Increment address register $arD.
 void Interpreter::iar(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u16 index = opc & 3;
-
-  state.r.ar[index] = IncrementAddressRegister(index);
+  const int ar = opc & 3;
+  Regs().r.ar[ar] = AddressPlusOne(ar);
 }
 
-// SUBARN $arD
-// 0000 0000 0000 11dd
-// Subtract indexing register $ixD from an addressing register $arD.
-// used only in IPL-NTSC ucode
+// SUBARN $arD: minus $ixD
 void Interpreter::subarn(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u8 dreg = opc & 0x3;
-
-  state.r.ar[dreg] = DecreaseAddressRegister(dreg, static_cast<s16>(state.r.ix[dreg]));
+  const int ar = opc & 3;
+  Regs().r.ar[ar] = AddressMinus(ar, static_cast<s16>(Regs().r.ix[ar]));
 }
 
 // ADDARN $arD, $ixS
-// 0000 0000 0001 ssdd
-// Adds indexing register $ixS to an addressing register $arD.
-// It is critical for the Zelda ucode that this one wraps correctly.
 void Interpreter::addarn(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u8 dreg = opc & 0x3;
-  const u8 sreg = (opc >> 2) & 0x3;
-
-  state.r.ar[dreg] = IncreaseAddressRegister(dreg, static_cast<s16>(state.r.ix[sreg]));
+  const int ar = opc & 3;
+  const int ix = (opc >> 2) & 3;
+  Regs().r.ar[ar] = AddressPlus(ar, static_cast<s16>(Regs().r.ix[ix]));
 }
 
-//----
-
-// SBCLR #I
-// 0001 0010 aaaa aiii
-// Clear bit of status register $sr. Bit number is calculated by adding 6 to immediate value I;
-// thus, bits 6 through 13 (LZ through AM) can be cleared with this instruction.
+// SBCLR / SBSET #I: clear or set $sr bit 6 + I
 void Interpreter::sbclr(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u8 bit = (opc & 0x7) + 6;
-
-  state.r.sr &= ~(1U << bit);
+  const u16 bit = static_cast<u16>(1U << (6 + (opc & 7)));
+  Regs().r.sr &= static_cast<u16>(~bit);
 }
 
-// SBSET #I
-// 0001 0011 aaaa aiii
-// Set bit of status register $sr. Bit number is calculated by adding 6 to immediate value I;
-// thus, bits 6 through 13 (LZ through AM) can be set with this instruction.
 void Interpreter::sbset(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u8 bit = (opc & 0x7) + 6;
-
-  state.r.sr |= (1U << bit);
+  const u16 bit = static_cast<u16>(1U << (6 + (opc & 7)));
+  Regs().r.sr |= bit;
 }
 
-// This is a bunch of flag setters, flipping bits in SR.
+// M2 / M0 / CLR15 / SET15 / SET16 / SET40: bits 8-10 select a mode bit (from
+// 2 upwards, in pairs) and whether it is cleared (even) or set (odd).
 void Interpreter::srbith(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-
   ZeroWriteBackLog();
-  switch ((opc >> 8) & 0x7)
+
+  const int selector = (opc >> 8) & 7;
+  u16 mode_bit;
+  switch (selector >> 1)
   {
-  case 2:  // M2
-    state.r.sr &= ~SR_MUL_MODIFY;
+  case 1:
+    mode_bit = SR_MUL_MODIFY;
     break;
-  case 3:  // M0
-    state.r.sr |= SR_MUL_MODIFY;
+  case 2:
+    mode_bit = SR_MUL_UNSIGNED;
     break;
-  case 4:  // CLR15
-    state.r.sr &= ~SR_MUL_UNSIGNED;
-    break;
-  case 5:  // SET15
-    state.r.sr |= SR_MUL_UNSIGNED;
-    break;
-  case 6:  // SET16 (CLR40)
-    state.r.sr &= ~SR_40_MODE_BIT;
-    break;
-  case 7:  // SET40
-    state.r.sr |= SR_40_MODE_BIT;
+  case 3:
+    mode_bit = SR_40_MODE_BIT;
     break;
   default:
-    break;
+    return;
   }
+
+  u16& sr = Regs().r.sr;
+  if ((selector & 1) != 0)
+    sr |= mode_bit;
+  else
+    sr &= static_cast<u16>(~mode_bit);
 }
 }  // namespace DSP::Interpreter

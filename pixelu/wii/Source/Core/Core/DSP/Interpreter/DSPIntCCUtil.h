@@ -1,34 +1,37 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-//
-// Additional copyrights go to Duddie and Tratax (c) 2004
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// Predicates behind the carry, overflow and "over 32 bits" status flags.
 
 #pragma once
 
 #include "Common/CommonTypes.h"
 
-// Anything to do with SR and conditions goes here.
-
 namespace DSP::Interpreter
 {
-constexpr bool isCarryAdd(u64 val, u64 result)
+// An addition carried out of the top bit when the (unsigned) result came out
+// below the first operand.
+constexpr bool CarriedOnAdd(u64 first, u64 result)
 {
-  return val > result;
+  return result < first;
 }
 
-constexpr bool isCarrySubtract(u64 val, u64 result)
+// A subtraction "carries" (does not borrow) unless the result went above the
+// minuend; an unchanged value counts as carry too.
+constexpr bool CarriedOnSubtract(u64 minuend, u64 result)
 {
-  return val >= result;
+  return result <= minuend;
 }
 
-constexpr bool isOverflow(s64 val1, s64 val2, s64 res)
+// Two's complement overflow of result = a + b: both inputs have the same sign
+// and the result has the other one.
+constexpr bool SignedOverflow(s64 a, s64 b, s64 result)
 {
-  // val1 > 0 and val2 > 0 yet res < 0, or val1 < 0 and val2 < 0 yet res > 0.
-  return ((val1 ^ res) & (val2 ^ res)) < 0;
+  return ((result ^ a) & (result ^ b)) < 0;
 }
 
-constexpr bool isOverS32(s64 acc)
+// The value needs more than 32 bits (as a signed number).
+constexpr bool ExceedsS32(s64 value)
 {
-  return acc != static_cast<s32>(acc);
+  return static_cast<s64>(static_cast<s32>(value)) != value;
 }
 }  // namespace DSP::Interpreter

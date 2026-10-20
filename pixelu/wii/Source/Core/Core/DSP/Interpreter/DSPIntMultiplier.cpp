@@ -1,531 +1,295 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-//
-// Additional copyrights go to Duddie and Tratax (c) 2004
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-// Multiplier and product register control
+// The multiplier: 16x16 products into $prod, optionally moving or adding the
+// previous product into an accumulator in the same instruction.
 
 #include "Core/DSP/Interpreter/DSPInterpreter.h"
 
+#include "Common/CommonTypes.h"
+
+#include "Core/DSP/DSPCore.h"
 #include "Core/DSP/Interpreter/DSPIntCCUtil.h"
 
 namespace DSP::Interpreter
 {
-// CLRP
-// 1000 0100 xxxx xxxx
-// Clears product register $prod.
-// Magic numbers taken from duddie's doc
-//
-// 00ff_(fff0 + 0010)_0000 = 0100_0000_0000, conveniently, lower 40bits = 0
-//
-// It's not ok, to just zero all of them, correct values should be set because of
-// direct use of prod regs by AX/AXWII (look @that part of ucode).
+namespace
+{
+constexpr int Bit(UDSPInstruction opc, int position)
+{
+  return (opc >> position) & 1;
+}
+}  // namespace
+
+// a * b as the multiplier computes it. Operands are signed unless SET15 is in
+// effect and the instruction allows an unsigned operand; unless M0 is in
+// effect the product is doubled (fractional multiply).
+s64 Interpreter::MultiplyRaw(u16 a, u16 b, Signedness mode) const
+{
+  s64 product;
+  const bool unsigned_allowed = IsSRFlagSet(SR_MUL_UNSIGNED);
+  if (unsigned_allowed && mode == Signedness::BothUnsigned)
+    product = static_cast<s64>(u32{a} * u32{b});
+  else if (unsigned_allowed && mode == Signedness::FirstUnsigned)
+    product = s64{a} * s64{static_cast<s16>(b)};
+  else
+    product = s64{static_cast<s16>(a)} * s64{static_cast<s16>(b)};
+
+  if (!IsSRFlagSet(SR_MUL_MODIFY))
+    product *= 2;
+  return product;
+}
+
+// The MULX family multiplies a half of $ax0 by a half of $ax1. With SET15, a low
+// half counts as unsigned: two low halves give an unsigned product, one low and
+// one high half a mixed one (the low half being the unsigned operand).
+s64 Interpreter::MultiplyAxHalves(bool ax0_high, bool ax1_high) const
+{
+  const u16 first = AxHalf(0, ax0_high);
+  const u16 second = AxHalf(1, ax1_high);
+
+  if (ax0_high == ax1_high)
+    return MultiplyRaw(first, second, ax0_high ? Signedness::Signed : Signedness::BothUnsigned);
+  if (!ax0_high)
+    return MultiplyRaw(first, second, Signedness::FirstUnsigned);
+  return MultiplyRaw(second, first, Signedness::FirstUnsigned);
+}
+
+// The ...AC, ...MV and ...MVZ forms: the accumulator gets a value derived from
+// the old product while the new product is stored.
+void Interpreter::MultiplyAndMove(int acc, ProductMove move, s64 new_product)
+{
+  s64 acc_value;
+  switch (move)
+  {
+  case ProductMove::AddToAcc:
+    acc_value = Acc(acc) + Product();
+    break;
+  case ProductMove::MoveRounded:
+    acc_value = ProductRounded();
+    break;
+  default:
+    acc_value = Product();
+    break;
+  }
+
+  ZeroWriteBackLog();
+  SetProduct(new_product);
+  SetAcc(acc, acc_value);
+  SetFlags40(Acc(acc));
+}
+
+// ---------------------------------------------------------------------------
+// Product register
+// ---------------------------------------------------------------------------
+
+// CLRP: the hardware's "zero" product, as a non-zero pair of partial products.
 void Interpreter::clrp(const UDSPInstruction)
 {
   ZeroWriteBackLog();
-
-  auto& state = m_dsp_core.DSPState();
-  state.r.prod.l = 0x0000;
-  state.r.prod.m = 0xfff0;
-  state.r.prod.h = 0x00ff;
-  state.r.prod.m2 = 0x0010;
+  auto& prod = Regs().r.prod;
+  prod.l = 0x0000;
+  prod.m = 0xfff0;
+  prod.h = 0x00ff;
+  prod.m2 = 0x0010;
 }
 
 // TSTPROD
-// 1000 0101 xxxx xxxx
-// Test prod regs value.
-//
-// flags out: --xx xx0x
 void Interpreter::tstprod(const UDSPInstruction)
 {
-  const s64 prod = GetLongProduct();
-  UpdateSR64(prod);
+  SetFlags40(Product());
   ZeroWriteBackLog();
 }
 
-//----
-
-// MOVP $acD
-// 0110 111d xxxx xxxx
-// Moves multiply product from $prod register to accumulator $acD register.
-//
-// flags out: --xx xx0x
+// MOVP / MOVNP / MOVPZ $acD: the product, its negation, or it rounded
 void Interpreter::movp(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x1;
-  const s64 acc = GetLongProduct();
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, acc);
-  UpdateSR64(acc);
+  StoreAccMoved(Bit(opc, 8), Product());
 }
 
-// MOVNP $acD
-// 0111 111d xxxx xxxx
-// Moves negative of multiply product from $prod register to accumulator
-// $acD register.
-//
-// flags out: --xx xx0x
 void Interpreter::movnp(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x1;
-  const s64 acc = -GetLongProduct();
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, acc);
-  UpdateSR64(acc);
+  StoreAccMoved(Bit(opc, 8), -Product());
 }
 
-// MOVPZ $acD
-// 1111 111d xxxx xxxx
-// Moves multiply product from $prod register to accumulator $acD
-// register and sets (rounds) $acD.l to 0
-//
-// flags out: --xx xx0x
 void Interpreter::movpz(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x01;
-  const s64 acc = GetLongProductRounded();
-
-  ZeroWriteBackLog();
-
-  SetLongAcc(dreg, acc);
-  UpdateSR64(acc);
+  StoreAccMoved(Bit(opc, 8), ProductRounded());
 }
 
-// ADDPAXZ $acD, $axS
-// 1111 10sd xxxx xxxx
-// Adds secondary accumulator $axS to product register and stores result
-// in accumulator register. Low 16-bits of $acD ($acD.l) are set (round) to 0.
-//
-// TODO: ugly code and still small error here (+/- 1 in .m - randomly)
-// flags out: --xx xx0x
+// ADDPAXZ $acD, $axS: rounded product plus $axS with its low word cleared.
+// The overflow flag is not computed.
 void Interpreter::addpaxz(const UDSPInstruction opc)
 {
-  const u8 dreg = (opc >> 8) & 0x1;
-  const u8 sreg = (opc >> 9) & 0x1;
-
-  const s64 oldprod = GetLongProduct();
-  const s64 prod = GetLongProductRounded();
-  const s64 ax = GetLongACX(sreg);
-  s64 res = prod + (ax & ~0xffff);
+  const int acc = Bit(opc, 8);
+  const s64 product = Product();
+  const s64 ax_high = s64{AxWhole(Bit(opc, 9))} & ~s64{0xffff};
 
   ZeroWriteBackLog();
-
-  SetLongAcc(dreg, res);
-  res = GetLongAcc(dreg);
-  UpdateSR64(res, isCarryAdd(oldprod, res), false);  // TODO: Why doesn't this set the overflow bit?
+  SetAcc(acc, ProductRounded() + ax_high);
+  const s64 stored = Acc(acc);
+  SetFlags40(stored, CarriedOnAdd(static_cast<u64>(product), static_cast<u64>(stored)), false);
 }
 
-//----
+// ---------------------------------------------------------------------------
+// Plain multiplies
+// ---------------------------------------------------------------------------
 
-// MULAXH
-// 1000 0011 xxxx xxxx
-// Multiply $ax0.h by $ax0.h
+// MULAXH: $ax0.h squared
 void Interpreter::mulaxh(const UDSPInstruction)
 {
-  const s16 value = GetAXHigh(0);
-  const s64 prod = Multiply(value, value);
-
+  const u16 value = Regs().r.ax[0].h;
+  const s64 product = MultiplyRaw(value, value, Signedness::Signed);
   ZeroWriteBackLog();
-
-  SetLongProduct(prod);
+  SetProduct(product);
 }
-
-//----
 
 // MUL $axS.l, $axS.h
-// 1001 s000 xxxx xxxx
-// Multiply low part $axS.l of secondary accumulator $axS by high part
-// $axS.h of secondary accumulator $axS (treat them both as signed).
 void Interpreter::mul(const UDSPInstruction opc)
 {
-  const u8 sreg = (opc >> 11) & 0x1;
-  const u16 axl = GetAXLow(sreg);
-  const u16 axh = GetAXHigh(sreg);
-  const s64 prod = Multiply(axh, axl);
-
+  const auto& ax = Regs().r.ax[Bit(opc, 11)];
+  const s64 product = MultiplyRaw(ax.h, ax.l, Signedness::Signed);
   ZeroWriteBackLog();
-
-  SetLongProduct(prod);
+  SetProduct(product);
 }
 
-// MULAC $axS.l, $axS.h, $acR
-// 1001 s10r xxxx xxxx
-// Add product register to accumulator register $acR. Multiply low part
-// $axS.l of secondary accumulator $axS by high part $axS.h of secondary
-// accumulator $axS (treat them both as signed).
-//
-// flags out: --xx xx0x
+// MULAC / MULMV / MULMVZ $axS.l, $axS.h, $acR
 void Interpreter::mulac(const UDSPInstruction opc)
 {
-  const u8 rreg = (opc >> 8) & 0x1;
-  const u8 sreg = (opc >> 11) & 0x1;
-
-  const s64 acc = GetLongAcc(rreg) + GetLongProduct();
-  const u16 axl = GetAXLow(sreg);
-  const u16 axh = GetAXHigh(sreg);
-  const s64 prod = Multiply(axl, axh);
-
-  ZeroWriteBackLog();
-
-  SetLongProduct(prod);
-  SetLongAcc(rreg, acc);
-  UpdateSR64(GetLongAcc(rreg));
+  const auto& ax = Regs().r.ax[Bit(opc, 11)];
+  MultiplyAndMove(Bit(opc, 8), ProductMove::AddToAcc, MultiplyRaw(ax.l, ax.h, Signedness::Signed));
 }
 
-// MULMV $axS.l, $axS.h, $acR
-// 1001 s11r xxxx xxxx
-// Move product register to accumulator register $acR. Multiply low part
-// $axS.l of secondary accumulator $axS by high part $axS.h of secondary
-// accumulator $axS (treat them both as signed).
-//
-// flags out: --xx xx0x
 void Interpreter::mulmv(const UDSPInstruction opc)
 {
-  const u8 rreg = (opc >> 8) & 0x1;
-  const u8 sreg = ((opc >> 11) & 0x1);
-
-  const s64 acc = GetLongProduct();
-  const u16 axl = GetAXLow(sreg);
-  const u16 axh = GetAXHigh(sreg);
-  const s64 prod = Multiply(axl, axh);
-
-  ZeroWriteBackLog();
-
-  SetLongProduct(prod);
-  SetLongAcc(rreg, acc);
-  UpdateSR64(GetLongAcc(rreg));
+  const auto& ax = Regs().r.ax[Bit(opc, 11)];
+  MultiplyAndMove(Bit(opc, 8), ProductMove::Move, MultiplyRaw(ax.l, ax.h, Signedness::Signed));
 }
 
-// MULMVZ $axS.l, $axS.h, $acR
-// 1001 s01r xxxx xxxx
-// Move product register to accumulator register $acR and clear (round) low part
-// of accumulator register $acR.l. Multiply low part $axS.l of secondary
-// accumulator $axS by high part $axS.h of secondary accumulator $axS (treat
-// them both as signed).
-//
-// flags out: --xx xx0x
 void Interpreter::mulmvz(const UDSPInstruction opc)
 {
-  const u8 rreg = (opc >> 8) & 0x1;
-  const u8 sreg = (opc >> 11) & 0x1;
-
-  const s64 acc = GetLongProductRounded();
-  const u16 axl = GetAXLow(sreg);
-  const u16 axh = GetAXHigh(sreg);
-  const s64 prod = Multiply(axl, axh);
-
-  ZeroWriteBackLog();
-
-  SetLongProduct(prod);
-  SetLongAcc(rreg, acc);
-  UpdateSR64(GetLongAcc(rreg));
+  const auto& ax = Regs().r.ax[Bit(opc, 11)];
+  MultiplyAndMove(Bit(opc, 8), ProductMove::MoveRounded,
+                  MultiplyRaw(ax.l, ax.h, Signedness::Signed));
 }
 
-//----
+// ---------------------------------------------------------------------------
+// $ax0 half times $ax1 half (bit 12 picks the $ax0 half, bit 11 the $ax1 half)
+// ---------------------------------------------------------------------------
 
-// MULX $ax0.S, $ax1.T
-// 101s t000 xxxx xxxx
-// Multiply one part $ax0 by one part $ax1.
-// Part is selected by S and T bits. Zero selects low part, one selects high part.
 void Interpreter::mulx(const UDSPInstruction opc)
 {
-  const u8 treg = ((opc >> 11) & 0x1);
-  const u8 sreg = ((opc >> 12) & 0x1);
-
-  const u16 val1 = (sreg == 0) ? GetAXLow(0) : GetAXHigh(0);
-  const u16 val2 = (treg == 0) ? GetAXLow(1) : GetAXHigh(1);
-  const s64 prod = MultiplyMulX(sreg, treg, val1, val2);
-
+  const s64 product = MultiplyAxHalves(Bit(opc, 12) != 0, Bit(opc, 11) != 0);
   ZeroWriteBackLog();
-
-  SetLongProduct(prod);
+  SetProduct(product);
 }
 
-// MULXAC $ax0.S, $ax1.T, $acR
-// 101s t10r xxxx xxxx
-// Add product register to accumulator register $acR. Multiply one part
-// $ax0 by one part $ax1. Part is selected by S and
-// T bits. Zero selects low part, one selects high part.
-//
-// flags out: --xx xx0x
 void Interpreter::mulxac(const UDSPInstruction opc)
 {
-  const u8 rreg = (opc >> 8) & 0x1;
-  const u8 treg = (opc >> 11) & 0x1;
-  const u8 sreg = (opc >> 12) & 0x1;
-
-  const s64 acc = GetLongAcc(rreg) + GetLongProduct();
-  const u16 val1 = (sreg == 0) ? GetAXLow(0) : GetAXHigh(0);
-  const u16 val2 = (treg == 0) ? GetAXLow(1) : GetAXHigh(1);
-  const s64 prod = MultiplyMulX(sreg, treg, val1, val2);
-
-  ZeroWriteBackLog();
-
-  SetLongProduct(prod);
-  SetLongAcc(rreg, acc);
-  UpdateSR64(GetLongAcc(rreg));
+  MultiplyAndMove(Bit(opc, 8), ProductMove::AddToAcc,
+                  MultiplyAxHalves(Bit(opc, 12) != 0, Bit(opc, 11) != 0));
 }
 
-// MULXMV $ax0.S, $ax1.T, $acR
-// 101s t11r xxxx xxxx
-// Move product register to accumulator register $acR. Multiply one part
-// $ax0 by one part $ax1. Part is selected by S and
-// T bits. Zero selects low part, one selects high part.
-//
-// flags out: --xx xx0x
 void Interpreter::mulxmv(const UDSPInstruction opc)
 {
-  const u8 rreg = ((opc >> 8) & 0x1);
-  const u8 treg = (opc >> 11) & 0x1;
-  const u8 sreg = (opc >> 12) & 0x1;
-
-  const s64 acc = GetLongProduct();
-  const u16 val1 = (sreg == 0) ? GetAXLow(0) : GetAXHigh(0);
-  const u16 val2 = (treg == 0) ? GetAXLow(1) : GetAXHigh(1);
-  const s64 prod = MultiplyMulX(sreg, treg, val1, val2);
-
-  ZeroWriteBackLog();
-
-  SetLongProduct(prod);
-  SetLongAcc(rreg, acc);
-  UpdateSR64(GetLongAcc(rreg));
+  MultiplyAndMove(Bit(opc, 8), ProductMove::Move,
+                  MultiplyAxHalves(Bit(opc, 12) != 0, Bit(opc, 11) != 0));
 }
 
-// MULXMVZ $ax0.S, $ax1.T, $acR
-// 101s t01r xxxx xxxx
-// Move product register to accumulator register $acR and clear (round) low part
-// of accumulator register $acR.l. Multiply one part $ax0 by one part $ax1
-// Part is selected by S and T bits. Zero selects low part,
-// one selects high part.
-//
-// flags out: --xx xx0x
 void Interpreter::mulxmvz(const UDSPInstruction opc)
 {
-  const u8 rreg = (opc >> 8) & 0x1;
-  const u8 treg = (opc >> 11) & 0x1;
-  const u8 sreg = (opc >> 12) & 0x1;
-
-  const s64 acc = GetLongProductRounded();
-  const u16 val1 = (sreg == 0) ? GetAXLow(0) : GetAXHigh(0);
-  const u16 val2 = (treg == 0) ? GetAXLow(1) : GetAXHigh(1);
-  const s64 prod = MultiplyMulX(sreg, treg, val1, val2);
-
-  ZeroWriteBackLog();
-
-  SetLongProduct(prod);
-  SetLongAcc(rreg, acc);
-  UpdateSR64(GetLongAcc(rreg));
+  MultiplyAndMove(Bit(opc, 8), ProductMove::MoveRounded,
+                  MultiplyAxHalves(Bit(opc, 12) != 0, Bit(opc, 11) != 0));
 }
 
-//----
+// ---------------------------------------------------------------------------
+// $acS.m times $axT.h (bit 12 is S, bit 11 is T)
+// ---------------------------------------------------------------------------
 
-// MULC $acS.m, $axT.h
-// 110s t000 xxxx xxxx
-// Multiply mid part of accumulator register $acS.m by high part $axS.h of
-// secondary accumulator $axS (treat them both as signed).
 void Interpreter::mulc(const UDSPInstruction opc)
 {
-  const u8 treg = (opc >> 11) & 0x1;
-  const u8 sreg = (opc >> 12) & 0x1;
-
-  const u16 accm = GetAccMid(sreg);
-  const u16 axh = GetAXHigh(treg);
-  const s64 prod = Multiply(accm, axh);
-
+  const s64 product = MultiplyRaw(Regs().r.ac[Bit(opc, 12)].m, Regs().r.ax[Bit(opc, 11)].h,
+                                  Signedness::Signed);
   ZeroWriteBackLog();
-
-  SetLongProduct(prod);
+  SetProduct(product);
 }
 
-// MULCAC $acS.m, $axT.h, $acR
-// 110s t10r xxxx xxxx
-// Multiply mid part of accumulator register $acS.m by high part $axS.h of
-// secondary accumulator $axS  (treat them both as signed). Add product
-// register before multiplication to accumulator $acR.
-//
-// flags out: --xx xx0x
 void Interpreter::mulcac(const UDSPInstruction opc)
 {
-  const u8 rreg = (opc >> 8) & 0x1;
-  const u8 treg = (opc >> 11) & 0x1;
-  const u8 sreg = (opc >> 12) & 0x1;
-
-  const s64 acc = GetLongAcc(rreg) + GetLongProduct();
-  const u16 accm = GetAccMid(sreg);
-  const u16 axh = GetAXHigh(treg);
-  const s64 prod = Multiply(accm, axh);
-
-  ZeroWriteBackLog();
-
-  SetLongProduct(prod);
-  SetLongAcc(rreg, acc);
-  UpdateSR64(GetLongAcc(rreg));
+  MultiplyAndMove(Bit(opc, 8), ProductMove::AddToAcc,
+                  MultiplyRaw(Regs().r.ac[Bit(opc, 12)].m, Regs().r.ax[Bit(opc, 11)].h,
+                              Signedness::Signed));
 }
 
-// MULCMV $acS.m, $axT.h, $acR
-// 110s t11r xxxx xxxx
-// Multiply mid part of accumulator register $acS.m by high part $axT.h of
-// secondary accumulator $axT  (treat them both as signed). Move product
-// register before multiplication to accumulator $acR.
-//
-// flags out: --xx xx0x
 void Interpreter::mulcmv(const UDSPInstruction opc)
 {
-  const u8 rreg = (opc >> 8) & 0x1;
-  const u8 treg = (opc >> 11) & 0x1;
-  const u8 sreg = (opc >> 12) & 0x1;
-
-  const s64 acc = GetLongProduct();
-  const u16 accm = GetAccMid(sreg);
-  const u16 axh = GetAXHigh(treg);
-  const s64 prod = Multiply(accm, axh);
-
-  ZeroWriteBackLog();
-
-  SetLongProduct(prod);
-  SetLongAcc(rreg, acc);
-  UpdateSR64(GetLongAcc(rreg));
+  MultiplyAndMove(Bit(opc, 8), ProductMove::Move,
+                  MultiplyRaw(Regs().r.ac[Bit(opc, 12)].m, Regs().r.ax[Bit(opc, 11)].h,
+                              Signedness::Signed));
 }
 
-// MULCMVZ $acS.m, $axT.h, $acR
-// 110s t01r xxxx xxxx
-// Multiply mid part of accumulator register $acS.m by high part $axT.h of
-// secondary accumulator $axT  (treat them both as signed). Move product
-// register before multiplication to accumulator $acR, set (round) low part of
-// accumulator $acR.l to zero.
-//
-// flags out: --xx xx0x
 void Interpreter::mulcmvz(const UDSPInstruction opc)
 {
-  const u8 rreg = (opc >> 8) & 0x1;
-  const u8 treg = (opc >> 11) & 0x1;
-  const u8 sreg = (opc >> 12) & 0x1;
-
-  const s64 acc = GetLongProductRounded();
-  const u16 accm = GetAccMid(sreg);
-  const u16 axh = GetAXHigh(treg);
-  const s64 prod = Multiply(accm, axh);
-
-  ZeroWriteBackLog();
-
-  SetLongProduct(prod);
-  SetLongAcc(rreg, acc);
-  UpdateSR64(GetLongAcc(rreg));
+  MultiplyAndMove(Bit(opc, 8), ProductMove::MoveRounded,
+                  MultiplyRaw(Regs().r.ac[Bit(opc, 12)].m, Regs().r.ax[Bit(opc, 11)].h,
+                              Signedness::Signed));
 }
 
-//----
+// ---------------------------------------------------------------------------
+// Multiply-accumulate into $prod (always signed)
+// ---------------------------------------------------------------------------
 
-// MADDX ax0.S ax1.T
-// 1110 00st xxxx xxxx
-// Multiply one part of secondary accumulator $ax0 (selected by S) by
-// one part of secondary accumulator $ax1 (selected by T) (treat them both as
-// signed) and add result to product register.
+// MADDX / MSUBX: bit 9 picks the $ax0 half, bit 8 the $ax1 half
 void Interpreter::maddx(const UDSPInstruction opc)
 {
-  const u8 treg = (opc >> 8) & 0x1;
-  const u8 sreg = (opc >> 9) & 0x1;
-
-  const u16 val1 = (sreg == 0) ? GetAXLow(0) : GetAXHigh(0);
-  const u16 val2 = (treg == 0) ? GetAXLow(1) : GetAXHigh(1);
-  const s64 prod = MultiplyAdd(val1, val2);
-
+  const s64 term = MultiplyRaw(AxHalf(0, Bit(opc, 9) != 0), AxHalf(1, Bit(opc, 8) != 0),
+                               Signedness::Signed);
+  const s64 product = Product() + term;
   ZeroWriteBackLog();
-
-  SetLongProduct(prod);
+  SetProduct(product);
 }
 
-// MSUBX $(0x18+S*2), $(0x19+T*2)
-// 1110 01st xxxx xxxx
-// Multiply one part of secondary accumulator $ax0 (selected by S) by
-// one part of secondary accumulator $ax1 (selected by T) (treat them both as
-// signed) and subtract result from product register.
 void Interpreter::msubx(const UDSPInstruction opc)
 {
-  const u8 treg = (opc >> 8) & 0x1;
-  const u8 sreg = (opc >> 9) & 0x1;
-
-  const u16 val1 = (sreg == 0) ? GetAXLow(0) : GetAXHigh(0);
-  const u16 val2 = (treg == 0) ? GetAXLow(1) : GetAXHigh(1);
-  const s64 prod = MultiplySub(val1, val2);
-
+  const s64 term = MultiplyRaw(AxHalf(0, Bit(opc, 9) != 0), AxHalf(1, Bit(opc, 8) != 0),
+                               Signedness::Signed);
+  const s64 product = Product() - term;
   ZeroWriteBackLog();
-
-  SetLongProduct(prod);
+  SetProduct(product);
 }
 
-// MADDC $acS.m, $axT.h
-// 1110 10st xxxx xxxx
-// Multiply middle part of accumulator $acS.m by high part of secondary
-// accumulator $axT.h (treat them both as signed) and add result to product
-// register.
+// MADDC / MSUBC $acS.m, $axT.h: bit 9 is S, bit 8 is T
 void Interpreter::maddc(const UDSPInstruction opc)
 {
-  const u8 treg = (opc >> 8) & 0x1;
-  const u8 sreg = (opc >> 9) & 0x1;
-
-  const u16 accm = GetAccMid(sreg);
-  const u16 axh = GetAXHigh(treg);
-  const s64 prod = MultiplyAdd(accm, axh);
-
+  const s64 term = MultiplyRaw(Regs().r.ac[Bit(opc, 9)].m, Regs().r.ax[Bit(opc, 8)].h,
+                               Signedness::Signed);
+  const s64 product = Product() + term;
   ZeroWriteBackLog();
-
-  SetLongProduct(prod);
+  SetProduct(product);
 }
 
-// MSUBC $acS.m, $axT.h
-// 1110 11st xxxx xxxx
-// Multiply middle part of accumulator $acS.m by high part of secondary
-// accumulator $axT.h (treat them both as signed) and subtract result from
-// product register.
 void Interpreter::msubc(const UDSPInstruction opc)
 {
-  const u8 treg = (opc >> 8) & 0x1;
-  const u8 sreg = (opc >> 9) & 0x1;
-
-  const u16 accm = GetAccMid(sreg);
-  const u16 axh = GetAXHigh(treg);
-  const s64 prod = MultiplySub(accm, axh);
-
+  const s64 term = MultiplyRaw(Regs().r.ac[Bit(opc, 9)].m, Regs().r.ax[Bit(opc, 8)].h,
+                               Signedness::Signed);
+  const s64 product = Product() - term;
   ZeroWriteBackLog();
-
-  SetLongProduct(prod);
+  SetProduct(product);
 }
 
-// MADD $axS.l, $axS.h
-// 1111 001s xxxx xxxx
-// Multiply low part $axS.l of secondary accumulator $axS by high part
-// $axS.h of secondary accumulator $axS (treat them both as signed) and add
-// result to product register.
+// MADD / MSUB $axS.l, $axS.h
 void Interpreter::madd(const UDSPInstruction opc)
 {
-  const u8 sreg = (opc >> 8) & 0x1;
-  const u16 axl = GetAXLow(sreg);
-  const u16 axh = GetAXHigh(sreg);
-  const s64 prod = MultiplyAdd(axl, axh);
-
+  const auto& ax = Regs().r.ax[Bit(opc, 8)];
+  const s64 product = Product() + MultiplyRaw(ax.l, ax.h, Signedness::Signed);
   ZeroWriteBackLog();
-
-  SetLongProduct(prod);
+  SetProduct(product);
 }
 
-// MSUB $axS.l, $axS.h
-// 1111 011s xxxx xxxx
-// Multiply low part $axS.l of secondary accumulator $axS by high part
-// $axS.h of secondary accumulator $axS (treat them both as signed) and
-// subtract result from product register.
 void Interpreter::msub(const UDSPInstruction opc)
 {
-  const u8 sreg = (opc >> 8) & 0x1;
-  const u16 axl = GetAXLow(sreg);
-  const u16 axh = GetAXHigh(sreg);
-  const s64 prod = MultiplySub(axl, axh);
-
+  const auto& ax = Regs().r.ax[Bit(opc, 8)];
+  const s64 product = Product() - MultiplyRaw(ax.l, ax.h, Signedness::Signed);
   ZeroWriteBackLog();
-
-  SetLongProduct(prod);
+  SetProduct(product);
 }
 }  // namespace DSP::Interpreter

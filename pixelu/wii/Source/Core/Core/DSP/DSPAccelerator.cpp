@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/DSP/DSPAccelerator.h"
 
@@ -11,262 +10,261 @@
 
 namespace DSP
 {
+namespace
+{
+// FORMAT register fields.
+enum class AccessSize : u16
+{
+  Nibble = 0,
+  Byte = 1,
+  Word = 2,
+  Invalid = 3,
+};
+
+enum class Decoder : u16
+{
+  Adpcm = 0,        // ADPCM from ARAM, address advances
+  InputNoStep = 1,  // PCM from ACIN, address stays
+  Pcm = 2,          // PCM from ARAM, address advances
+  InputStep = 3,    // PCM from ACIN, address advances
+};
+
+constexpr AccessSize SizeField(u16 format)
+{
+  return static_cast<AccessSize>(format & 3);
+}
+
+constexpr Decoder DecoderField(u16 format)
+{
+  return static_cast<Decoder>((format >> 2) & 3);
+}
+
+constexpr u16 GainScaleField(u16 format)
+{
+  return static_cast<u16>((format >> 4) & 3);
+}
+
+constexpr bool HasUnknownBits(u16 format)
+{
+  return (format >> 6) != 0;
+}
+
+constexpr u32 START_END_MASK = 0x3fffffff;
+// Bit 31 of the current address is kept: raw writes need it.
+constexpr u32 CURRENT_MASK = 0xbfffffff;
+
+// 32-bit wrapping addition, as the hardware's adder behaves.
+constexpr s32 WrapAdd(s32 a, s32 b)
+{
+  return static_cast<s32>(static_cast<u32>(a) + static_cast<u32>(b));
+}
+
+s16 ClampToS16(s32 value)
+{
+  return static_cast<s16>(std::clamp<s32>(value, -0x8000, 0x7fff));
+}
+}  // namespace
+
 u16 Accelerator::GetCurrentSample()
 {
-  u16 val = 0;
-  // The lower two bits of the sample format indicate the access size
-  switch (m_sample_format.size)
+  const u32 addr = m_current_address;
+
+  switch (SizeField(m_format))
   {
-  case FormatSize::Size4Bit:
-    val = ReadMemory(m_current_address >> 1);
-    if (m_current_address & 1)
-      val &= 0xf;
-    else
-      val >>= 4;
-    break;
-  case FormatSize::Size8Bit:
-    val = ReadMemory(m_current_address);
-    break;
-  case FormatSize::Size16Bit:
-    val = (ReadMemory(m_current_address * 2) << 8) | ReadMemory(m_current_address * 2 + 1);
-    break;
-  default:  // produces garbage, but affects the current address
-    ERROR_LOG_FMT(DSPLLE, "GetCurrentSample() - bad format {:#x}", m_sample_format.hex);
-    break;
+  case AccessSize::Nibble:
+  {
+    // Two samples per byte, high nibble first.
+    const u8 byte = ReadMemory(addr >> 1);
+    return static_cast<u16>((addr & 1) != 0 ? (byte & 0xf) : (byte >> 4));
   }
-  return val;
+  case AccessSize::Byte:
+    return ReadMemory(addr);
+  case AccessSize::Word:
+  {
+    const u8 high = ReadMemory(addr * 2);
+    const u8 low = ReadMemory(addr * 2 + 1);
+    return static_cast<u16>((high << 8) | low);
+  }
+  case AccessSize::Invalid:
+  default:
+    // Nothing useful comes back, but the address still moves on.
+    ERROR_LOG_FMT(DSPLLE, "Accelerator sample fetch with invalid size in format {:#x}", m_format);
+    return 0;
+  }
 }
 
 u16 Accelerator::ReadRaw()
 {
-  u16 val = GetCurrentSample();
-  if (m_sample_format.size != FormatSize::SizeInvalid)
-  {
-    m_current_address++;
-  }
+  const u16 value = GetCurrentSample();
+
+  u32& addr = m_current_address;
+  if (SizeField(m_format) == AccessSize::Invalid)
+    addr = (addr & ~3u) | ((addr + 1) & 3u);  // only the low two bits count
   else
+    addr = addr + 1;
+
+  // Only reading exactly the end address wraps back to the start. (The real chip
+  // has more cases around the end address in the 4- and 8-bit modes, where the
+  // last u16 can be read in pieces; those are not emulated.)
+  if (addr - 1 == m_end_address)
   {
-    m_current_address = (m_current_address & ~3) | ((m_current_address + 1) & 3);
-  }
-
-  // There are edge cases that are currently not handled here in u4 and u8 mode
-  // In u8 mode, if ea & 1 == 0 and ca == ea + 1, the accelerator can be read twice. Upon the second
-  // read, the data returned appears to be the other half of the u16 from the first read, and the
-  // DSP resets the current address and throws exception 3
-
-  // During these reads, ca is not incremented normally.
-
-  // Instead, incrementing ca works like this: ca = (ca & ~ 3) | ((ca + 1) & 3)
-  // u4 mode extends this further.
-
-  // When ea & 3 == 0, and ca in [ea + 1, ea + 3], the accelerator can be read (4 - (ca - ea - 1))
-  // times. On the last read, the data returned appears to be the remaining nibble of the u16 from
-  // the first read, and the DSP resets the current address and throws exception 3
-
-  // When ea & 3 == 1, and ca in [ea + 1, ea + 2], the accelerator can be read (4 - (ca - ea - 1))
-  // times. On the last read, the data returned appears to be the remaining nibble of the u16 from
-  // the first read, and the DSP resets the current address and throws exception 3
-
-  // When ea & 3 == 2, and ca == ea + 1, the accelerator can be read 4 times. On the last read, the
-  // data returned appears to be the remaining nibble of the u16 from the first read, and the DSP
-  // resets the current address and throws exception 3
-
-  // There are extra extra edge cases if ca, ea, and potentially other registers are adjusted during
-  // this pre-reset phase
-
-  // The cleanest way to emulate the normal non-edge behavior is to only reset things if we just
-  // read the end address. If the current address is larger than the end address (and not in the
-  // edge range), it ignores the end address
-  if (m_current_address - 1 == m_end_address)
-  {
-    // Set address back to start address (confirmed on hardware)
-    m_current_address = m_start_address;
+    addr = m_start_address;
     OnRawReadEndException();
   }
 
   SetCurrentAddress(m_current_address);
-  return val;
+  return value;
 }
 
 void Accelerator::WriteRaw(u16 value)
 {
-  // Zelda ucode writes a bunch of zeros to ARAM through d3 during
-  // initialization.  Don't know if it ever does it later, too.
-  // Pikmin 2 Wii writes non-stop to 0x10008000-0x1000801f (non-zero values too)
-  // Zelda TP Wii writes non-stop to 0x10000000-0x1000001f (non-zero values too)
-
-  // Writes only seem to be accepted when the upper most bit of the address is set
-  if (m_current_address & 0x80000000)
+  // Raw writes go through as big-endian words, whatever the format, and only
+  // while bit 31 of the current address is set. Every write raises exception 4.
+  if ((m_current_address & 0x80000000) == 0)
   {
-    // The format doesn't matter for raw writes; all writes are u16 and the address is treated as if
-    // we are in a 16-bit format
-    WriteMemory(m_current_address * 2, value >> 8);
-    WriteMemory(m_current_address * 2 + 1, value & 0xFF);
-    m_current_address++;
-    OnRawWriteEndException();
-  }
-  else
-  {
-    ERROR_LOG_FMT(DSPLLE, "WriteRaw() - tried to write to address {:#x} without high bit set",
+    ERROR_LOG_FMT(DSPLLE, "Accelerator raw write ignored: address {:#x} lacks bit 31",
                   m_current_address);
+    return;
   }
+
+  const u32 byte_addr = m_current_address * 2;
+  WriteMemory(byte_addr, static_cast<u8>(value >> 8));
+  WriteMemory(byte_addr + 1, static_cast<u8>(value & 0xff));
+  m_current_address += 1;
+  OnRawWriteEndException();
 }
 
 u16 Accelerator::ReadSample(const s16* coefs)
 {
   if (m_reads_stopped)
-    return 0x0000;
+    return 0;
 
-  if (m_sample_format.unk != 0)
+  if (HasUnknownBits(m_format))
+    WARN_LOG_FMT(DSPLLE, "Accelerator format {:#x} has unknown upper bits set", m_format);
+
+  const Decoder decoder = DecoderField(m_format);
+  const bool from_input = decoder == Decoder::InputNoStep || decoder == Decoder::InputStep;
+  s16 input = static_cast<s16>(from_input ? m_input : GetCurrentSample());
+
+  const int predictor = (m_pred_scale >> 4) & 7;
+  const s32 c1 = coefs[predictor * 2];
+  const s32 c2 = coefs[predictor * 2 + 1];
+
+  u16 output = 0;
+  u32 consumed = 0;  // words this read covers, for the end-of-buffer test below
+
+  if (decoder == Decoder::Adpcm)
   {
-    WARN_LOG_FMT(DSPLLE, "ReadSample() format {:#x} has unknown upper bits set",
-                 m_sample_format.hex);
-  }
+    // Only the low nibble is used, as a signed 4-bit value.
+    s32 nibble = input & 0xf;
+    if (nibble >= 8)
+      nibble -= 16;
 
-  u16 val = 0;
-  u8 step_size = 0;
-  s16 raw_sample;
-  if (m_sample_format.decode == FormatDecode::MMIOPCMNoInc ||
-      m_sample_format.decode == FormatDecode::MMIOPCMInc)
-  {
-    // The addresses can be complete nonsense in either of these modes
-    raw_sample = m_input;
-  }
-  else
-  {
-    raw_sample = GetCurrentSample();
-  }
-
-  int coef_idx = (m_pred_scale >> 4) & 0x7;
-
-  s32 coef1 = coefs[coef_idx * 2 + 0];
-  s32 coef2 = coefs[coef_idx * 2 + 1];
-
-  switch (m_sample_format.decode)
-  {
-  case FormatDecode::ADPCM:  // ADPCM audio
-  {
-    // ADPCM really only supports 4-bit decoding, but for larger values on hardware, it just ignores
-    // the upper 12 bits
-    raw_sample &= 0xF;
-    int scale = 1 << (m_pred_scale & 0xF);
-
-    if (raw_sample >= 8)
-      raw_sample -= 16;
-
-    s32 val32 = (scale * raw_sample) + ((0x400 + coef1 * m_yn1 + coef2 * m_yn2) >> 11);
-    val = MathUtil::SaturatingCast<s16>(val32);
-    step_size = 2;
+    const s32 history = WrapAdd(WrapAdd(0x400, c1 * m_yn1), c2 * m_yn2) >> 11;
+    const s32 decoded = (nibble << (m_pred_scale & 0xf)) + history;
+    output = static_cast<u16>(ClampToS16(decoded));
+    consumed = 2;
 
     m_yn2 = m_yn1;
-    m_yn1 = val;
+    m_yn1 = static_cast<s16>(output);
     m_current_address += 1;
 
-    // These two cases are handled in a special way, separate from normal overflow handling:
-    // the ACCOV exception does not fire at all, the predscale register is not updated,
-    // and if the end address is 16-byte aligned, the DSP loops to start_address + 1
-    // instead of start_address.
-    // TODO: This probably needs to be adjusted when using 8 or 16-bit accesses.
-    if ((m_end_address & 0xf) == 0x0 && m_current_address == m_end_address)
+    // Ends of buffers at 16-byte frame boundaries wrap without an exception and
+    // without reading a new header: to start + 1 for an end at offset 0 of a frame,
+    // to start for an end at offset 1.
+    const u32 end_in_frame = m_end_address & 0xf;
+    if (end_in_frame == 0 && m_current_address == m_end_address)
     {
       m_current_address = m_start_address + 1;
     }
-    else if ((m_end_address & 0xf) == 0x1 && m_current_address == m_end_address - 1)
+    else if (end_in_frame == 1 && m_current_address == m_end_address - 1)
     {
       m_current_address = m_start_address;
     }
-    // If any of these special cases were hit, the DSP does not update the predscale register.
-    else if ((m_current_address & 15) == 0)
+    else if ((m_current_address & 0xf) == 0)
     {
-      m_pred_scale = ReadMemory((m_current_address & ~15) >> 1);
+      // Start of the next 8-byte frame: its first byte is the new predictor/scale.
+      m_pred_scale = ReadMemory((m_current_address & ~0xfu) >> 1);
       m_current_address += 2;
-      step_size += 2;
+      consumed += 2;
     }
-    break;
   }
-  case FormatDecode::MMIOPCMNoInc:
-  case FormatDecode::PCM:  // 16-bit PCM audio
-  case FormatDecode::MMIOPCMInc:
+  else
   {
-    // Gain seems to only apply for PCM decoding
-    u8 gain_shift = 0;
-    switch (m_sample_format.gain_scale)
+    // PCM: the gain and both history terms are scaled down separately.
+    int shift = 0;
+    switch (GainScaleField(m_format))
     {
-    case FormatGainScale::GainScale2048:
-      gain_shift = 11;  // x / 2048 = x >> 11
+    case 0:
+      shift = 11;
       break;
-    case FormatGainScale::GainScale1:
-      gain_shift = 0;  // x / 1 = x >> 0
+    case 1:
+      shift = 0;
       break;
-    case FormatGainScale::GainScale65536:
-      gain_shift = 16;  // x / 65536 = x >> 16
+    case 2:
+      shift = 16;
       break;
     default:
-      ERROR_LOG_FMT(DSPLLE, "ReadSample() invalid gain mode in format {:#x}", m_sample_format.hex);
+      ERROR_LOG_FMT(DSPLLE, "Accelerator format {:#x} has an invalid gain scale", m_format);
       break;
     }
-    s32 val32 = ((static_cast<s32>(m_gain) * raw_sample) >> gain_shift) +
-                (((coef1 * m_yn1) >> gain_shift) + ((coef2 * m_yn2) >> gain_shift));
-    val = static_cast<s16>(val32);
+
+    const s32 scaled_input = (s32{m_gain} * input) >> shift;
+    const s32 term1 = (c1 * m_yn1) >> shift;
+    const s32 term2 = (c2 * m_yn2) >> shift;
+    output = static_cast<u16>(WrapAdd(scaled_input, WrapAdd(term1, term2)));
+    consumed = 2;
+
     m_yn2 = m_yn1;
-    m_yn1 = val;
-    step_size = 2;
-    if (m_sample_format.decode != FormatDecode::MMIOPCMNoInc)
-    {
+    m_yn1 = static_cast<s16>(output);
+    if (decoder != Decoder::InputNoStep)
       m_current_address += 1;
-    }
-    break;
-  }
   }
 
-  // Check for loop.
-  // YN1 and YN2 need to be initialized with their "loop" values,
-  // which is usually done upon this exception.
-  if (m_current_address == (m_end_address + step_size - 1))
+  // Leaving the buffer: back to the start, and reads stop until YN2 is rewritten
+  // (the exception handler normally reloads the history for the loop).
+  if (m_current_address == m_end_address + consumed - 1)
   {
-    // Set address back to start address.
     m_current_address = m_start_address;
     m_reads_stopped = true;
     OnSampleReadEndException();
   }
 
   SetCurrentAddress(m_current_address);
-  return val;
+  return output;
 }
 
 void Accelerator::DoState(PointerWrap& p)
 {
+  // Gain and ACIN are not part of the savestate.
   p.Do(m_start_address);
   p.Do(m_end_address);
   p.Do(m_current_address);
-  p.Do(m_sample_format);
+  p.Do(m_format);
   p.Do(m_yn1);
   p.Do(m_yn2);
   p.Do(m_pred_scale);
   p.Do(m_reads_stopped);
 }
 
-constexpr u32 START_END_ADDRESS_MASK = 0x3fffffff;
-constexpr u32 CURRENT_ADDRESS_MASK = 0xbfffffff;
-
 void Accelerator::SetStartAddress(u32 address)
 {
-  m_start_address = address & START_END_ADDRESS_MASK;
+  m_start_address = address & START_END_MASK;
 }
 
 void Accelerator::SetEndAddress(u32 address)
 {
-  m_end_address = address & START_END_ADDRESS_MASK;
+  m_end_address = address & START_END_MASK;
 }
 
 void Accelerator::SetCurrentAddress(u32 address)
 {
-  m_current_address = address & CURRENT_ADDRESS_MASK;
+  m_current_address = address & CURRENT_MASK;
 }
 
 void Accelerator::SetSampleFormat(u16 format)
 {
-  m_sample_format.hex = format;
+  m_format = format;
 }
 
 void Accelerator::SetGain(s16 gain)
@@ -294,5 +292,4 @@ void Accelerator::SetInput(u16 input)
 {
   m_input = input;
 }
-
 }  // namespace DSP

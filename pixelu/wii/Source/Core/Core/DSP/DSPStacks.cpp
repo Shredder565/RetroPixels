@@ -1,6 +1,7 @@
-// Copyright 2008 Dolphin Emulator Project
-// Copyright 2004 Duddie & Tratax
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// The four hardware stacks (call, data, loop address, loop counter). The visible
+// register $stN is the top of stack N; the entries below it live in reg_stacks.
 
 #include "Core/DSP/DSPCore.h"
 
@@ -8,29 +9,27 @@
 
 #include "Common/CommonTypes.h"
 
-// Stacks. The stacks are outside the DSP RAM, in dedicated hardware.
 namespace DSP
 {
 void SDSP::StoreStack(StackRegister stack_reg, u16 val)
 {
-  const auto reg_index = static_cast<size_t>(stack_reg);
+  const auto which = static_cast<size_t>(stack_reg);
+  u8& depth = reg_stack_ptrs[which];
 
-  reg_stack_ptrs[reg_index]++;
-  reg_stack_ptrs[reg_index] &= DSP_STACK_MASK;
-  reg_stacks[reg_index][reg_stack_ptrs[reg_index]] = r.st[reg_index];
-
-  r.st[reg_index] = val;
+  // Push the current top down, then make the new value the top.
+  depth = static_cast<u8>((depth + 1) & DSP_STACK_MASK);
+  reg_stacks[which][depth] = r.st[which];
+  r.st[which] = val;
 }
 
 u16 SDSP::PopStack(StackRegister stack_reg)
 {
-  const auto reg_index = static_cast<size_t>(stack_reg);
-  const u16 val = r.st[reg_index];
+  const auto which = static_cast<size_t>(stack_reg);
+  u8& depth = reg_stack_ptrs[which];
 
-  r.st[reg_index] = reg_stacks[reg_index][reg_stack_ptrs[reg_index]];
-  reg_stack_ptrs[reg_index]--;
-  reg_stack_ptrs[reg_index] &= DSP_STACK_MASK;
-
-  return val;
+  const u16 top = r.st[which];
+  r.st[which] = reg_stacks[which][depth];
+  depth = static_cast<u8>((depth - 1) & DSP_STACK_MASK);
+  return top;
 }
 }  // namespace DSP

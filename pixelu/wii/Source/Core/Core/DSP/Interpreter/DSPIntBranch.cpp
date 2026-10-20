@@ -1,279 +1,160 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-//
-// Additional copyrights go to Duddie and Tratax (c) 2004
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// Jumps, calls, returns, conditional execution, HALT and the hardware loops.
+// The conditional forms carry their condition code in the low four bits.
 
 #include "Core/DSP/Interpreter/DSPInterpreter.h"
+
+#include "Common/CommonTypes.h"
 
 #include "Core/DSP/DSPCore.h"
 
 namespace DSP::Interpreter
 {
-// Generic call implementation
-// CALLcc addressA
-// 0000 0010 1011 cccc
-// aaaa aaaa aaaa aaaa
-// Call function if condition cc has been met. Push program counter of
-// instruction following "call" to $st0. Set program counter to address
-// represented by value that follows this "call" instruction.
+namespace
+{
+constexpr u8 ConditionOf(UDSPInstruction opc)
+{
+  return static_cast<u8>(opc & 0xf);
+}
+
+// The register operand of JMPR/CALLR (bits 5-7).
+constexpr int TargetRegister(UDSPInstruction opc)
+{
+  return (opc >> 5) & 7;
+}
+}  // namespace
+
+// CALLcc addr (the address is the second word; it is consumed either way)
 void Interpreter::call(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-
-  // must be outside the if.
-  const u16 dest = state.FetchInstruction();
-  if (CheckCondition(opc & 0xf))
-  {
-    state.StoreStack(StackRegister::Call, state.pc);
-    state.pc = dest;
-  }
+  SDSP& dsp = Regs();
+  const u16 target = dsp.FetchInstruction();
+  if (!ConditionHolds(ConditionOf(opc)))
+    return;
+  dsp.StoreStack(StackRegister::Call, dsp.pc);
+  dsp.pc = target;
 }
 
-// Generic callr implementation
 // CALLRcc $R
-// 0001 0111 rrr1 cccc
-// Call function if condition cc has been met. Push program counter of
-// instruction following "call" to call stack $st0. Set program counter to
-// register $R.
 void Interpreter::callr(const UDSPInstruction opc)
 {
-  if (!CheckCondition(opc & 0xf))
+  if (!ConditionHolds(ConditionOf(opc)))
     return;
-
-  auto& state = m_dsp_core.DSPState();
-  const u8 reg = (opc >> 5) & 0x7;
-  const u16 addr = OpReadRegister(reg);
-  state.StoreStack(StackRegister::Call, state.pc);
-  state.pc = addr;
+  SDSP& dsp = Regs();
+  const u16 target = OpReadRegister(TargetRegister(opc));
+  dsp.StoreStack(StackRegister::Call, dsp.pc);
+  dsp.pc = target;
 }
 
-// Generic if implementation
-// IFcc
-// 0000 0010 0111 cccc
-// Execute following opcode if the condition has been met.
+// IFcc: skips the next instruction unless the condition holds
 void Interpreter::ifcc(const UDSPInstruction opc)
 {
-  if (CheckCondition(opc & 0xf))
-    return;
-
-  // skip the next opcode - we have to lookup its size.
-  m_dsp_core.DSPState().SkipInstruction();
+  if (!ConditionHolds(ConditionOf(opc)))
+    Regs().SkipInstruction();
 }
 
-// Generic jmp implementation
-// Jcc addressA
-// 0000 0010 1001 cccc
-// aaaa aaaa aaaa aaaa
-// Jump to addressA if condition cc has been met. Set program counter to
-// address represented by value that follows this "jmp" instruction.
+// Jcc addr
 void Interpreter::jcc(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u16 dest = state.FetchInstruction();
-  if (CheckCondition(opc & 0xf))
-  {
-    state.pc = dest;
-  }
+  SDSP& dsp = Regs();
+  const u16 target = dsp.FetchInstruction();
+  if (ConditionHolds(ConditionOf(opc)))
+    dsp.pc = target;
 }
 
-// Generic jmpr implementation
-// JRcc $R
-// 0001 0111 rrr0 cccc
-// Jump to address if condition cc has been met. Set program counter to
-// a value from register $R.
+// JMPRcc $R
 void Interpreter::jmprcc(const UDSPInstruction opc)
 {
-  if (!CheckCondition(opc & 0xf))
-    return;
-
-  auto& state = m_dsp_core.DSPState();
-  const u8 reg = (opc >> 5) & 0x7;
-  state.pc = OpReadRegister(reg);
+  if (ConditionHolds(ConditionOf(opc)))
+    Regs().pc = OpReadRegister(TargetRegister(opc));
 }
 
-// Generic ret implementation
 // RETcc
-// 0000 0010 1101 cccc
-// Return from subroutine if condition cc has been met. Pops stored PC
-// from call stack $st0 and sets $pc to this location.
 void Interpreter::ret(const UDSPInstruction opc)
 {
-  if (!CheckCondition(opc & 0xf))
-    return;
-
-  auto& state = m_dsp_core.DSPState();
-  state.pc = state.PopStack(StackRegister::Call);
+  if (ConditionHolds(ConditionOf(opc)))
+    Regs().pc = Regs().PopStack(StackRegister::Call);
 }
 
-// RTIcc
-// 0000 0010 1111 1111
-// Return from exception. Pops stored status register $sr from data stack
-// $st1 and program counter PC from call stack $st0 and sets $pc to this
-// location.
-// This instruction has a conditional form, but it is not used by any official ucode.
+// RTIcc: restores $sr from the data stack, then returns
 void Interpreter::rti(const UDSPInstruction opc)
 {
-  if (!CheckCondition(opc & 0xf))
+  if (!ConditionHolds(ConditionOf(opc)))
     return;
-
-  auto& state = m_dsp_core.DSPState();
-  state.r.sr = state.PopStack(StackRegister::Data);
-  state.pc = state.PopStack(StackRegister::Call);
+  SDSP& dsp = Regs();
+  dsp.r.sr = dsp.PopStack(StackRegister::Data);
+  dsp.pc = dsp.PopStack(StackRegister::Call);
 }
 
-// HALT
-// 0000 0000 0010 0001
-// Stops execution of DSP code. Sets bit DSP_CR_HALT in register DREG_CR.
+// HALT: stops the DSP on itself; the run loops notice the bit.
 void Interpreter::halt(const UDSPInstruction)
 {
-  auto& state = m_dsp_core.DSPState();
-  state.control_reg |= CR_HALT;
-  state.pc--;
+  SDSP& dsp = Regs();
+  dsp.control_reg |= CR_HALT;
+  --dsp.pc;
 }
 
-// LOOP handling: Loop stack is used to control execution of repeated blocks of
-// instructions. Whenever there is value on stack $st2 and current PC is equal
-// value at $st2, then value at stack $st3 is decremented. If value is not zero
-// then PC is modified with value from call stack $st0. Otherwise values from
-// call stack $st0 and both loop stacks $st2 and $st3 are popped and execution
-// continues at next opcode.
-void Interpreter::HandleLoop()
+// ---------------------------------------------------------------------------
+// Hardware loops
+//
+// A loop pushes the address of its first body instruction (call stack), of its
+// last body instruction (loop address stack) and the iteration count (loop
+// counter stack). Step() sees the end through the analyzer's loop-end marks.
+// A count of zero skips the body.
+// ---------------------------------------------------------------------------
+
+void Interpreter::EnterLoop(u16 last_address, u16 count)
 {
-  auto& state = m_dsp_core.DSPState();
-
-  // Handle looping hardware.
-  const u16 rCallAddress = state.r.st[0];
-  const u16 rLoopAddress = state.r.st[2];
-  u16& rLoopCounter = state.r.st[3];
-
-  if (rLoopAddress > 0 && rLoopCounter > 0)
-  {
-    // FIXME: why -1? because we just read past it.
-    if (state.pc - 1 == rLoopAddress)
-    {
-      rLoopCounter--;
-      if (rLoopCounter > 0)
-      {
-        state.pc = rCallAddress;
-      }
-      else
-      {
-        // end of loop
-        state.PopStack(StackRegister::Call);
-        state.PopStack(StackRegister::LoopAddress);
-        state.PopStack(StackRegister::LoopCounter);
-      }
-    }
-  }
+  SDSP& dsp = Regs();
+  dsp.StoreStack(StackRegister::Call, dsp.pc);
+  dsp.StoreStack(StackRegister::LoopAddress, last_address);
+  dsp.StoreStack(StackRegister::LoopCounter, count);
 }
 
-// LOOP $R
-// 0000 0000 010r rrrr
-// Repeatedly execute following opcode until counter specified by value
-// from register $R reaches zero. Each execution decrement counter. Register
-// $R remains unchanged. If register $R is set to zero at the beginning of loop
-// then looped instruction will not get executed.
-// Actually, this instruction simply prepares the loop stacks for the above.
-// The looping hardware takes care of the rest.
+// LOOP $R / LOOPI #I: repeat the next instruction
 void Interpreter::loop(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u16 reg = opc & 0x1f;
-  const u16 cnt = OpReadRegister(reg);
-  const u16 loop_pc = state.pc;
-
-  if (cnt != 0)
-  {
-    state.StoreStack(StackRegister::Call, state.pc);
-    state.StoreStack(StackRegister::LoopAddress, loop_pc);
-    state.StoreStack(StackRegister::LoopCounter, cnt);
-  }
+  const u16 count = OpReadRegister(opc & 0x1f);
+  if (count != 0)
+    EnterLoop(Regs().pc, count);
   else
-  {
-    state.SkipInstruction();
-  }
+    Regs().SkipInstruction();
 }
 
-// LOOPI #I
-// 0001 0000 iiii iiii
-// Repeatedly execute following opcode until counter specified by
-// immediate value I reaches zero. Each execution decrement counter. If
-// immediate value I is set to zero at the beginning of loop then looped
-// instruction will not get executed.
-// Actually, this instruction simply prepares the loop stacks for the above.
-// The looping hardware takes care of the rest.
 void Interpreter::loopi(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u16 cnt = opc & 0xff;
-  const u16 loop_pc = state.pc;
-
-  if (cnt != 0)
-  {
-    state.StoreStack(StackRegister::Call, state.pc);
-    state.StoreStack(StackRegister::LoopAddress, loop_pc);
-    state.StoreStack(StackRegister::LoopCounter, cnt);
-  }
+  const u16 count = opc & 0xff;
+  if (count != 0)
+    EnterLoop(Regs().pc, count);
   else
-  {
-    state.SkipInstruction();
-  }
+    Regs().SkipInstruction();
 }
 
-// BLOOP $R, addrA
-// 0000 0000 011r rrrr
-// aaaa aaaa aaaa aaaa
-// Repeatedly execute block of code starting at following opcode until
-// counter specified by value from register $R reaches zero. Block ends at
-// specified address addrA inclusive, ie. opcode at addrA is the last opcode
-// included in loop. Counter is pushed on loop stack $st3, end of block address
-// is pushed on loop stack $st2 and repeat address is pushed on call stack $st0.
-// Up to 4 nested loops are allowed.
+// BLOOP $R, addr / BLOOPI #I, addr: repeat everything up to and including addr
 void Interpreter::bloop(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u16 reg = opc & 0x1f;
-  const u16 cnt = OpReadRegister(reg);
-  const u16 loop_pc = state.FetchInstruction();
-
-  if (cnt != 0)
+  const u16 count = OpReadRegister(opc & 0x1f);
+  const u16 last_address = Regs().FetchInstruction();
+  if (count != 0)
   {
-    state.StoreStack(StackRegister::Call, state.pc);
-    state.StoreStack(StackRegister::LoopAddress, loop_pc);
-    state.StoreStack(StackRegister::LoopCounter, cnt);
+    EnterLoop(last_address, count);
+    return;
   }
-  else
-  {
-    state.pc = loop_pc;
-    state.SkipInstruction();
-  }
+  Regs().pc = last_address;
+  Regs().SkipInstruction();
 }
 
-// BLOOPI #I, addrA
-// 0001 0001 iiii iiii
-// aaaa aaaa aaaa aaaa
-// Repeatedly execute block of code starting at following opcode until
-// counter specified by immediate value I reaches zero. Block ends at specified
-// address addrA inclusive, ie. opcode at addrA is the last opcode included in
-// loop. Counter is pushed on loop stack $st3, end of block address is pushed
-// on loop stack $st2 and repeat address is pushed on call stack $st0. Up to 4
-// nested loops are allowed.
 void Interpreter::bloopi(const UDSPInstruction opc)
 {
-  auto& state = m_dsp_core.DSPState();
-  const u16 cnt = opc & 0xff;
-  const u16 loop_pc = state.FetchInstruction();
-
-  if (cnt != 0)
+  const u16 count = opc & 0xff;
+  const u16 last_address = Regs().FetchInstruction();
+  if (count != 0)
   {
-    state.StoreStack(StackRegister::Call, state.pc);
-    state.StoreStack(StackRegister::LoopAddress, loop_pc);
-    state.StoreStack(StackRegister::LoopCounter, cnt);
+    EnterLoop(last_address, count);
+    return;
   }
-  else
-  {
-    state.pc = loop_pc;
-    state.SkipInstruction();
-  }
+  Regs().pc = last_address;
+  Regs().SkipInstruction();
 }
 }  // namespace DSP::Interpreter
