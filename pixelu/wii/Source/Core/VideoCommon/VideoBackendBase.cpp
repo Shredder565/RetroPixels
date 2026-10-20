@@ -260,17 +260,19 @@ bool VideoBackendBase::InitializeShared(std::unique_ptr<AbstractGfx> gfx,
                                         std::unique_ptr<PerfQueryBase> perf_query,
                                         std::unique_ptr<BoundingBox> bounding_box)
 {
+  // Hardware EFB access and the common texture cache.
+  auto efb = std::make_unique<HardwareEFBInterface>();
+  auto textures = std::make_unique<TextureCacheBase>();
   return InitializeShared(std::move(gfx), std::move(vertex_manager), std::move(perf_query),
-                          std::move(bounding_box), std::make_unique<HardwareEFBInterface>(),
-                          std::make_unique<TextureCacheBase>());
+                          std::move(bounding_box), std::move(efb), std::move(textures));
 }
 
 bool VideoBackendBase::InitializeShared(std::unique_ptr<AbstractGfx> gfx,
                                         std::unique_ptr<VertexManagerBase> vertex_manager,
                                         std::unique_ptr<PerfQueryBase> perf_query,
                                         std::unique_ptr<BoundingBox> bounding_box,
-                                        std::unique_ptr<EFBInterfaceBase> efb_interface,
-                                        std::unique_ptr<TextureCacheBase> texture_cache)
+                                        std::unique_ptr<EFBInterfaceBase> efb,
+                                        std::unique_ptr<TextureCacheBase> textures)
 {
   std::memset(reinterpret_cast<u8*>(&g_main_cp_state), 0, sizeof(g_main_cp_state));
   std::memset(reinterpret_cast<u8*>(&g_preprocess_cp_state), 0, sizeof(g_preprocess_cp_state));
@@ -279,19 +281,20 @@ bool VideoBackendBase::InitializeShared(std::unique_ptr<AbstractGfx> gfx,
   // Marks the backend as running (the config dialog checks this).
   m_initialized = true;
 
-  g_gfx = std::move(gfx);
-  g_vertex_manager = std::move(vertex_manager);
-  g_perf_query = std::move(perf_query);
-  g_bounding_box = std::move(bounding_box);
-  g_texture_cache = std::move(texture_cache);
-  g_efb_interface = std::move(efb_interface);
+  // Take over the backend's objects, then create the common ones.
+  g_gfx.reset(gfx.release());
+  g_vertex_manager.reset(vertex_manager.release());
+  g_perf_query.reset(perf_query.release());
+  g_bounding_box.reset(bounding_box.release());
+  g_texture_cache.reset(textures.release());
+  g_efb_interface.reset(efb.release());
 
-  g_presenter = std::make_unique<VideoCommon::Presenter>();
-  g_frame_dumper = std::make_unique<FrameDumper>();
-  g_framebuffer_manager = std::make_unique<FramebufferManager>();
-  g_shader_cache = std::make_unique<VideoCommon::ShaderCache>();
-  g_graphics_mod_manager = std::make_unique<GraphicsModManager>();
-  g_widescreen = std::make_unique<WidescreenManager>();
+  g_presenter.reset(new VideoCommon::Presenter());
+  g_frame_dumper.reset(new FrameDumper());
+  g_framebuffer_manager.reset(new FramebufferManager());
+  g_shader_cache.reset(new VideoCommon::ShaderCache());
+  g_graphics_mod_manager.reset(new GraphicsModManager());
+  g_widescreen.reset(new WidescreenManager());
 
   // Initialised in this order; the first failure stops the rest.
   const bool ok = g_vertex_manager->Initialize() && g_shader_cache->Initialize() &&
@@ -307,16 +310,17 @@ bool VideoBackendBase::InitializeShared(std::unique_ptr<AbstractGfx> gfx,
     return false;
   }
 
-  auto& system = Core::System::GetInstance();
-  system.GetCommandProcessor().Init();
-  system.GetFifo().Init();
-  system.GetPixelEngine().Init();
+  // Emulated GPU state.
+  Core::System& sys = Core::System::GetInstance();
+  sys.GetCommandProcessor().Init();
+  sys.GetFifo().Init();
+  sys.GetPixelEngine().Init();
   BPInit();
   VertexLoaderManager::Init();
-  system.GetVertexShaderManager().Init();
-  system.GetGeometryShaderManager().Init();
-  system.GetPixelShaderManager().Init();
-  system.GetXFStateManager().Init();
+  sys.GetVertexShaderManager().Init();
+  sys.GetGeometryShaderManager().Init();
+  sys.GetPixelShaderManager().Init();
+  sys.GetXFStateManager().Init();
   TMEM::Init();
 
   g_Config.VerifyValidity();
@@ -329,17 +333,18 @@ bool VideoBackendBase::InitializeShared(std::unique_ptr<AbstractGfx> gfx,
   }
 
   g_shader_cache->InitializeShaderCache();
-  system.GetCustomResourceManager().Initialize();
+  sys.GetCustomResourceManager().Initialize();
   return true;
 }
 
 void VideoBackendBase::ShutdownShared()
 {
-  auto& system = Core::System::GetInstance();
-  system.GetCustomResourceManager().Shutdown();
+  Core::System& sys = Core::System::GetInstance();
+  sys.GetCustomResourceManager().Shutdown();
 
-  g_frame_dumper.reset();
-  g_presenter.reset();
+  // Presentation first, so nothing is drawn while the rest goes away.
+  g_frame_dumper = nullptr;
+  g_presenter = nullptr;
 
   if (g_shader_cache)
     g_shader_cache->Shutdown();
@@ -347,19 +352,19 @@ void VideoBackendBase::ShutdownShared()
     g_texture_cache->Shutdown();
 
   // Released in dependency order, the device last.
-  g_bounding_box.reset();
-  g_perf_query.reset();
-  g_graphics_mod_manager.reset();
-  g_texture_cache.reset();
-  g_framebuffer_manager.reset();
-  g_shader_cache.reset();
-  g_vertex_manager.reset();
-  g_efb_interface.reset();
-  g_widescreen.reset();
-  g_gfx.reset();
+  g_bounding_box = nullptr;
+  g_perf_query = nullptr;
+  g_graphics_mod_manager = nullptr;
+  g_texture_cache = nullptr;
+  g_framebuffer_manager = nullptr;
+  g_shader_cache = nullptr;
+  g_vertex_manager = nullptr;
+  g_efb_interface = nullptr;
+  g_widescreen = nullptr;
+  g_gfx = nullptr;
 
   m_initialized = false;
 
   VertexLoaderManager::Clear();
-  system.GetFifo().Shutdown();
+  sys.GetFifo().Shutdown();
 }

@@ -526,8 +526,9 @@ void ShaderCache::LoadShaderCache(T& cache, APIType api_type, const char* type, 
 template <typename T>
 void ShaderCache::ClearShaderCache(T& cache)
 {
-  cache.disk_cache.Sync();
-  cache.disk_cache.Close();
+  auto& file = cache.disk_cache;
+  file.Sync();
+  file.Close();
   cache.shader_map.clear();
 }
 
@@ -753,17 +754,17 @@ AbstractPipelineConfig ShaderCache::GetGXPipelineConfig(
     const RasterizationState& rasterization_state, const DepthState& depth_state,
     const BlendingState& blending_state, AbstractPipelineUsage usage)
 {
-  AbstractPipelineConfig config = {};
-  config.vertex_format = vertex_format;
-  config.vertex_shader = vertex_shader;
-  config.geometry_shader = geometry_shader;
-  config.pixel_shader = pixel_shader;
-  config.rasterization_state = rasterization_state;
-  config.depth_state = depth_state;
-  config.blending_state = blending_state;
-  config.framebuffer_state = g_framebuffer_manager->GetEFBFramebufferState();
-  config.usage = usage;
-  return config;
+  return AbstractPipelineConfig{
+      .vertex_format = vertex_format,
+      .vertex_shader = vertex_shader,
+      .geometry_shader = geometry_shader,
+      .pixel_shader = pixel_shader,
+      .rasterization_state = rasterization_state,
+      .depth_state = depth_state,
+      .blending_state = blending_state,
+      .framebuffer_state = g_framebuffer_manager->GetEFBFramebufferState(),
+      .usage = usage,
+  };
 }
 
 std::optional<AbstractPipelineConfig> ShaderCache::GetGXPipelineConfig(const GXPipelineUid& in)

@@ -242,11 +242,11 @@ bool BlendingState::LogicOpApproximationWantsShaderHelp()
   // (0, all ones, the inverted source), or keeps the destination (no-op).
   switch (logic_mode.Value())
   {
-  case LogicOp::Clear:
-  case LogicOp::Set:
-  case LogicOp::NoOp:
-  case LogicOp::Invert:
-  case LogicOp::CopyInverted:
+  case LogicOp::NoOp:          // destination
+  case LogicOp::Clear:         // 0
+  case LogicOp::Set:           // all ones
+  case LogicOp::CopyInverted:  // ~source
+  case LogicOp::Invert:        // ~destination
     return true;
   default:
     return false;

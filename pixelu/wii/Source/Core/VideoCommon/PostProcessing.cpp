@@ -198,26 +198,18 @@ constexpr std::array<std::string_view, 20> BUILTIN_UNIFORMS = {
 // the shader but takes a full vec4 slot here, which is where std140 puts src_rect anyway.
 struct BuiltinBlock
 {
-  std::array<float, 4> source_resolution;
-  std::array<float, 4> target_resolution;
-  std::array<float, 4> window_resolution;
-  std::array<float, 4> stereo_views;
-  std::array<float, 4> src_rect;
-  s32 src_layer;
-  u32 time;
-  s32 graphics_api;
-  s32 intermediary_buffer;
-  s32 resampling_method;
-  s32 correct_color_space;
-  s32 game_color_space;
-  s32 correct_gamma;
-  float game_gamma;
-  s32 sdr_display_gamma_sRGB;
-  float sdr_display_custom_gamma;
-  s32 linear_space_output;
-  s32 hdr_output;
-  float hdr_paper_white_nits;
-  float hdr_sdr_white_nits;
+  std::array<float, 4> source_size, target_size, window_size;
+  std::array<float, 4> stereo_views;  // never written by us
+  std::array<float, 4> source_rect;
+  s32 source_layer;
+  u32 elapsed_ms;
+  s32 api, is_intermediate, resampling;
+  s32 fix_color_space, color_space, fix_gamma;
+  float gamma;
+  s32 srgb_display;
+  float display_gamma;
+  s32 linear_output, hdr;
+  float paper_white_nits, sdr_white_nits;
 };
 
 // Accessors offered to user shaders: return type, name, expression.
@@ -793,31 +785,31 @@ void PostProcessing::FillUniformBuffer(const MathUtil::Rectangle<int>& src,
   const bool scrgb_output = m_framebuffer_format == AbstractTextureFormat::RGBA16F;
 
   BuiltinBlock block{};
-  block.source_resolution = {tex_w, tex_h, inv_tex_w, inv_tex_h};
-  block.target_resolution = size_and_reciprocal(dst.GetWidth(), dst.GetHeight());
-  block.window_resolution = size_and_reciprocal(wnd.GetWidth(), wnd.GetHeight());
-  block.src_rect = {static_cast<float>(src.left) * inv_tex_w,
+  block.source_size = {tex_w, tex_h, inv_tex_w, inv_tex_h};
+  block.target_size = size_and_reciprocal(dst.GetWidth(), dst.GetHeight());
+  block.window_size = size_and_reciprocal(wnd.GetWidth(), wnd.GetHeight());
+  block.source_rect = {static_cast<float>(src.left) * inv_tex_w,
                     static_cast<float>(src.top) * inv_tex_h,
                     static_cast<float>(src.GetWidth()) * inv_tex_w,
                     static_cast<float>(src.GetHeight()) * inv_tex_h};
-  block.src_layer = static_cast<s32>(src_layer);
-  block.time = static_cast<u32>(m_timer.ElapsedMs());
-  block.graphics_api = static_cast<s32>(g_backend_info.api_type);
-  block.intermediary_buffer = static_cast<s32>(intermediary_buffer);
-  block.resampling_method = static_cast<s32>(g_ActiveConfig.output_resampling_mode);
+  block.source_layer = static_cast<s32>(src_layer);
+  block.elapsed_ms = static_cast<u32>(m_timer.ElapsedMs());
+  block.api = static_cast<s32>(g_backend_info.api_type);
+  block.is_intermediate = static_cast<s32>(intermediary_buffer);
+  block.resampling = static_cast<s32>(g_ActiveConfig.output_resampling_mode);
   // Colour handling; mostly for the built-in pass, but every shader can read it.
-  block.correct_color_space = correction.bCorrectColorSpace;
-  block.game_color_space = static_cast<s32>(correction.game_color_space);
-  block.correct_gamma = correction.bCorrectGamma;
-  block.game_gamma = correction.fGameGamma;
-  block.sdr_display_gamma_sRGB = correction.bSDRDisplayGammaSRGB;
-  block.sdr_display_custom_gamma = correction.fSDRDisplayCustomGamma;
+  block.fix_color_space = correction.bCorrectColorSpace;
+  block.color_space = static_cast<s32>(correction.game_color_space);
+  block.fix_gamma = correction.bCorrectGamma;
+  block.gamma = correction.fGameGamma;
+  block.srgb_display = correction.bSDRDisplayGammaSRGB;
+  block.display_gamma = correction.fSDRDisplayCustomGamma;
   // scRGB output is linear and may exceed 1.
-  block.linear_space_output = scrgb_output;
-  block.hdr_output = scrgb_output;
-  block.hdr_paper_white_nits = correction.fHDRPaperWhiteNits;
+  block.linear_output = scrgb_output;
+  block.hdr = scrgb_output;
+  block.paper_white_nits = correction.fHDRPaperWhiteNits;
   // 1.0 in scRGB is 80 nits.
-  block.hdr_sdr_white_nits = 80.f;
+  block.sdr_white_nits = 80.f;
 
   std::memcpy(buffer, &block, sizeof(block));
   buffer += sizeof(block);
@@ -876,29 +868,27 @@ bool PostProcessing::CompilePixelShader()
     m_default_uniform_staging_buffer.resize(0);
   }
 
+  const auto build_user_shader = [this](ShaderIncluder* includer, const std::string& name) {
+    return g_gfx->CreateShaderFromSource(
+        ShaderStage::Pixel, GetHeader(true) + m_config.GetShaderCode() + GetFooter(), includer,
+        name);
+  };
+
   m_config.LoadShader(g_ActiveConfig.sPostProcessingShader);
-  m_pixel_shader = g_gfx->CreateShaderFromSource(
-      ShaderStage::Pixel, GetHeader(true) + m_config.GetShaderCode() + GetFooter(),
+  m_pixel_shader = build_user_shader(
       m_config.GetShaderIncluder(),
       fmt::format("User post-processing pixel shader: {}", m_config.GetShader()));
-
   if (!m_pixel_shader)
   {
     // Fall back to the pass-through shader.
     PanicAlertFmt("Failed to compile user post-processing shader {}", m_config.GetShader());
     m_config.LoadDefaultShader();
-    m_pixel_shader = g_gfx->CreateShaderFromSource(
-        ShaderStage::Pixel, GetHeader(true) + m_config.GetShaderCode() + GetFooter(), nullptr,
-        "Default user post-processing pixel shader");
-    if (!m_pixel_shader)
-    {
-      m_uniform_staging_buffer.resize(0);
-      return false;
-    }
+    m_pixel_shader = build_user_shader(nullptr, "Default user post-processing pixel shader");
   }
 
-  m_uniform_staging_buffer.resize(CalculateUniformsSize(true));
-  return true;
+  const bool built = m_pixel_shader != nullptr;
+  m_uniform_staging_buffer.resize(built ? CalculateUniformsSize(true) : 0);
+  return built;
 }
 
 bool PostProcessing::CompilePipeline()

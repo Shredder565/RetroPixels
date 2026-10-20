@@ -62,24 +62,26 @@ void MoveBlendingToShader(pixel_shader_uid_data* ps, BlendingState& blend)
   if (!in_shader)
     return;
 
-  ps->no_dual_src = true;
+  // Hand the logic op and blend equation to the shader and turn them off in the pipeline.
   if (blend.logic_op_enable)
   {
-    ps->logic_op_enable = true;
-    ps->logic_op_mode = static_cast<u32>(blend.logic_mode.Value());
     blend.logic_op_enable = false;
+    ps->logic_op_mode = static_cast<u32>(blend.logic_mode.Value());
+    ps->logic_op_enable = true;
   }
   if (blend.blend_enable)
   {
-    ps->blend_enable = true;
-    ps->blend_src_factor = blend.src_factor;
-    ps->blend_src_factor_alpha = blend.src_factor_alpha;
-    ps->blend_dst_factor = blend.dst_factor;
-    ps->blend_dst_factor_alpha = blend.dst_factor_alpha;
-    ps->blend_subtract = blend.subtract;
-    ps->blend_subtract_alpha = blend.subtract_alpha;
     blend.blend_enable = false;
+    // Colour equation, then alpha equation.
+    ps->blend_src_factor = blend.src_factor;
+    ps->blend_dst_factor = blend.dst_factor;
+    ps->blend_subtract = blend.subtract;
+    ps->blend_src_factor_alpha = blend.src_factor_alpha;
+    ps->blend_dst_factor_alpha = blend.dst_factor_alpha;
+    ps->blend_subtract_alpha = blend.subtract_alpha;
+    ps->blend_enable = true;
   }
+  ps->no_dual_src = true;
 }
 
 // Lines and points drawn as triangles generated in the vertex shader: the shader needs the
