@@ -1,7 +1,58 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "wxgui/components/wxInputDraw.h"
 
 #include <wx/dcbuffer.h>
 #include <wx/settings.h>
+
+#include <glm/geometric.hpp>
+
+namespace
+{
+	wxColour Sys(wxSystemColour c)
+	{
+		return wxSystemSettings::GetColour(c);
+	}
+
+	wxColour Faded(wxColour c)
+	{
+		c.MakeDisabled();
+		return c;
+	}
+
+	// pen and brush colours for one state of the control
+	struct StickInk
+	{
+		wxColour ring;                 // outer range circle
+		wxColour zonePen, zoneFill;    // deadzone disc
+		wxColour idlePen, idleFill;    // dot inside the deadzone
+		wxColour activePen, activeFill; // dot outside the deadzone
+		wxColour edgePen, edgeFill;    // dot at full deflection
+	};
+
+	StickInk MakeInk(bool enabled)
+	{
+		const wxColour accent = wxSystemSettings::SelectLightDark(0x336600, 0x99FF99);
+		StickInk ink;
+		ink.edgePen = ink.edgeFill = accent;
+		if (enabled)
+		{
+			ink.ring = accent;
+			ink.zonePen = ink.zoneFill = Sys(wxSYS_COLOUR_GRAYTEXT);
+			ink.idlePen = ink.idleFill = Sys(wxSYS_COLOUR_WINDOWTEXT);
+			ink.activePen = ink.activeFill = *wxRED;
+		}
+		else
+		{
+			ink.ring = Faded(Sys(wxSYS_COLOUR_GRAYTEXT));
+			ink.zonePen = ink.zoneFill = Faded(Sys(wxSYS_COLOUR_GRAYTEXT));
+			ink.idlePen = Sys(wxSYS_COLOUR_WINDOWTEXT);
+			ink.idleFill = Sys(wxSYS_COLOUR_GRAYTEXT);
+			ink.activePen = Sys(wxSYS_COLOUR_GRAYTEXT);
+			ink.activeFill = Faded(Sys(wxSYS_COLOUR_GRAYTEXT));
+		}
+		return ink;
+	}
+}
 
 wxInputDraw::wxInputDraw(wxWindow* parent, wxWindowID id, const wxPoint& pos, const wxSize& size)
 	: wxWindow(parent, id, pos, size, 0, wxPanelNameStr)
@@ -10,9 +61,12 @@ wxInputDraw::wxInputDraw(wxWindow* parent, wxWindowID id, const wxPoint& pos, co
 	Bind(wxEVT_PAINT, &wxInputDraw::OnPaintEvent, this);
 }
 
-wxInputDraw::~wxInputDraw() { Unbind(wxEVT_PAINT, &wxInputDraw::OnPaintEvent, this); }
+wxInputDraw::~wxInputDraw()
+{
+	Unbind(wxEVT_PAINT, &wxInputDraw::OnPaintEvent, this);
+}
 
-void wxInputDraw::OnPaintEvent(wxPaintEvent& event)
+void wxInputDraw::OnPaintEvent(wxPaintEvent& /*event*/)
 {
 	wxAutoBufferedPaintDC dc(this);
 	OnRender(dc);
@@ -20,90 +74,51 @@ void wxInputDraw::OnPaintEvent(wxPaintEvent& event)
 
 void wxInputDraw::OnRender(wxDC& dc)
 {
-	dc.Clear();
+	const bool enabled = IsEnabled();
+	const StickInk ink = MakeInk(enabled);
+	// a disabled preview always shows the stick centred
+	const glm::vec2 stick = enabled ? m_position : glm::vec2{};
 
-	glm::vec2 position = m_position;
-
-	wxPen black = wxPen(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-	wxPen red = *wxRED_PEN;
-	wxPen grey = wxPen(wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT));
-	wxPen green = wxSystemSettings::SelectLightDark(0x336600, 0x99FF99);
-
-	wxBrush black_brush = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
-	wxBrush red_brush = *wxRED_BRUSH;
-	wxBrush grey_brush = wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT);
-	wxBrush green_brush = wxSystemSettings::SelectLightDark(0x336600, 0x99FF99);
-
-	if(!IsEnabled())
-	{
-		position = {};
-		black.SetColour(black.GetColour());
-		red.SetColour(wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT));
-		grey.SetColour(wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT).MakeDisabled());
-
-		black_brush = wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT);
-		red_brush = wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT).MakeDisabled();
-		grey_brush = wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT).MakeDisabled();
-	}
-
+	const wxColour window = Sys(wxSYS_COLOUR_WINDOW);
 	dc.SetBackgroundMode(wxSOLID);
-	dc.SetBackground(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
-	dc.SetPen(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
-	dc.SetBrush(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+	dc.SetBackground(wxBrush(window));
+	dc.SetPen(wxPen(window));
+	dc.SetBrush(wxBrush(window));
 	dc.Clear();
 
-	const auto size = GetSize();
-	const auto min_size = (float)std::min(size.GetWidth(), size.GetHeight()) - 1.0f;
-	const Vector2f middle{min_size / 2.0f, min_size / 2.0f};
+	const wxSize client = GetSize();
+	const float side = (float)std::min(client.GetWidth(), client.GetHeight()) - 1.0f;
+	const float half = side / 2.0f;
+	const int cx = (int)half;
 
-	// border
-	const wxRect border{0, 0, (int)min_size, (int)min_size};
-	dc.SetPen(wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT));
-	dc.DrawRectangle(border);
+	dc.SetPen(wxPen(Sys(wxSYS_COLOUR_GRAYTEXT)));
+	dc.DrawRectangle(wxRect(0, 0, (int)side, (int)side));
 
-	dc.SetPen(IsEnabled() ? green.GetColour() : grey.GetColour());
-	dc.DrawCircle((int)middle.x, (int)middle.y, (int)middle.x);
+	dc.SetPen(wxPen(ink.ring));
+	dc.DrawCircle(cx, cx, cx);
 
+	wxColour dotPen = ink.activePen, dotFill = ink.activeFill;
 	if (m_deadzone > 0)
 	{
-		dc.SetPen(grey);
-		dc.SetBrush(grey_brush);
-		const auto deadzone_size = m_deadzone * min_size / 2.0f;
-		dc.DrawCircle(
-			static_cast<int>(middle.x),
-			static_cast<int>(middle.x),
-			(int)deadzone_size);
+		dc.SetPen(wxPen(ink.zonePen));
+		dc.SetBrush(wxBrush(ink.zoneFill));
+		dc.DrawCircle(cx, cx, (int)(m_deadzone * side / 2.0f));
 
-		if (length(position) >= m_deadzone)
+		const float deflection = glm::length(stick);
+		if (deflection < m_deadzone)
 		{
-			dc.SetPen(red);
-			dc.SetBrush(red_brush);
-
-			if (std::abs(1.0f - length(position)) < 0.05f)
-			{
-				dc.SetPen(green);
-				dc.SetBrush(green_brush);
-			}
+			dotPen = ink.idlePen;
+			dotFill = ink.idleFill;
 		}
-		else
+		else if (std::abs(1.0f - deflection) < 0.05f)
 		{
-			dc.SetPen(black);
-			dc.SetBrush(black_brush);
+			dotPen = ink.edgePen;
+			dotFill = ink.edgeFill;
 		}
 	}
-	else
-	{
-		dc.SetPen(red);
-		dc.SetBrush(red_brush);
-	}
-
-	// draw axis
-	const wxPoint pos
-	{
-		static_cast<int>(middle.x + position.x * middle.x),
-		static_cast<int>(middle.y - position.y * middle.y)
-	};
-	dc.DrawCircle(pos.x, pos.y, 2);
+	dc.SetPen(wxPen(dotPen));
+	dc.SetBrush(wxBrush(dotFill));
+	dc.DrawCircle((int)(half + stick.x * half), (int)(half - stick.y * half), 2);
 
 	dc.SetBrush(*wxTRANSPARENT_BRUSH);
 }

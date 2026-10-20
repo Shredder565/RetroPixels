@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include "config/CemuConfig.h"
@@ -12,6 +13,7 @@
 #include "wxHelper.h"
 #include "util/helpers/Semaphore.h"
 
+// command event that names a title
 class wxTitleIdEvent : public wxCommandEvent
 {
 public:
@@ -29,6 +31,8 @@ wxDECLARE_EVENT(wxEVT_OPEN_GRAPHIC_PACK, wxTitleIdEvent);
 wxDECLARE_EVENT(wxEVT_GAMELIST_BEGIN_UPDATE, wxCommandEvent);
 wxDECLARE_EVENT(wxEVT_GAMELIST_END_UPDATE, wxCommandEvent);
 
+// The main window's list of installed games. Rows follow the CafeTitleList
+// callbacks (batched by a short timer); icons are decoded on a worker thread.
 class wxGameList : public wxListView
 {
 	friend class MainWindow;
@@ -47,117 +51,98 @@ public:
 
 	void LoadConfig();
 	void SaveConfig(bool flush = false);
-	bool IsVisible(long item) const; // only available in wxwidgets 3.1.3
+	bool IsVisible(long item) const;
 
 	void ReloadGameEntries();
 	void DeleteCachedStrings();
 
-    void CreateShortcut(GameInfo2& gameInfo);
+	void CreateShortcut(GameInfo2& gameInfo);
 
 	long FindListItemByTitleId(uint64 title_id) const;
 
 	void OnClose(wxCloseEvent& event);
 
 private:
-	std::atomic_bool m_exit = false;
-	Style m_style;
-	std::optional<TitleId> m_pendingSelection;
-	long GetStyleFlags(Style style) const;
-
-	void UpdateItemColors(sint32 startIndex = 0);
-
-	enum ItemColumns : int
+	enum Column : int
 	{
-		ColumnHiddenName = 0,
-		ColumnIcon,
-		ColumnName,
-		ColumnVersion,
-		ColumnDLC,
-		ColumnGameTime,
-		ColumnGameStarted,
-		ColumnRegion,
-        ColumnTitleID,
-        //ColumnFavorite,
-		ColumnCounts,
+		kColHidden = 0, // keeps column 0 (which cannot hold an image on every platform) out of sight
+		kColIcon,
+		kColName,
+		kColVersion,
+		kColDlc,
+		kColPlayTime,
+		kColLastPlayed,
+		kColRegion,
+		kColTitleId,
+		kColCount,
 	};
 
-	void SortEntries(int column = -1);
-	struct SortData
+	struct DecodedIcon
 	{
-		wxGameList* thisptr;
-		ItemColumns column;
-		int dir;
+		TitleId titleId;
+		wxImage largeImage;
+		wxImage smallImage; // ("small" is a macro in the Windows headers)
 	};
 
-	int FindInsertPosition(TitleId titleId, bool& entryAlreadyExists);
-	std::weak_ordering SortComparator(uint64 titleId1, uint64 titleId2, SortData* sortData);
-	static int SortFunction(wxIntPtr item1, wxIntPtr item2, wxIntPtr sortData);
+	static long StyleFlags(Style style);
+	static int DefaultColumnWidth(int column);
 
-	wxTimer* m_tooltip_timer;
-	wxToolTip* m_tool_tip;
-	wxPanel* m_tooltip_window;
-	wxPoint m_mouse_position;
+	// rows
+	void RegisterTitleListCallback();
+	void OnTitleListChanged(wxTitleIdEvent& event);
+	void FlushPendingTitles(wxTimerEvent& event);
+	void FillRow(long row, GameInfo2& game, TitleId baseId, bool newRow, int icon, int iconSmall);
+	long InsertPosition(TitleId titleId);
+	std::string TitleName(uint64 titleId);
+	void RecolourRows();
+	void SortRows(int column = -1);
+	std::weak_ordering CompareTitles(int column, uint64 a, uint64 b);
 
-	std::mutex m_async_worker_mutex;
-	std::thread m_async_worker_thread;
-	CounterSemaphore m_async_task_count;
-	std::atomic_bool m_async_worker_active{false};
-
-	std::vector<TitleId> m_icon_load_queue;
-
-	uint64 m_callbackIdTitleList;
-
-	std::string GetNameByTitleId(uint64 titleId);
-
-	void HandleTitleListCallback(struct CafeTitleListCallbackEvent* evt);
-
-	void RemoveCache(const std::vector<fs::path>& cachePath, const std::string& titleName);
-
-	void AsyncWorkerThread();
-	void RequestLoadIconAsync(TitleId titleId);
+	// icons
+	void IconWorker();
+	void TakeDecodedIcons();
 	bool QueryIconForTitle(TitleId titleId, int& icon, int& iconSmall);
+
+	// columns
+	int LastVisibleColumn() const;
+	void ApplyGameListColumnWidths();
+	void AdjustLastColumnWidth();
+	void OnColumnClick(wxListEvent& event);
+	void OnColumnRightClick(wxListEvent& event);
+	void OnColumnBeginResize(wxListEvent& event);
+	void OnColumnResize(wxListEvent& event);
+	void OnSize(wxSizeEvent& event);
+
+	// interaction
+	void OnKeyDown(wxListEvent& event);
+	void OnItemActivated(wxListEvent& event);
+	void OnContextMenu(wxContextMenuEvent& event);
+	void OnGameCommand(int id, uint64 titleId);
+	void RemoveShaderCaches(const std::vector<fs::path>& files, const std::string& titleName);
+
+	std::atomic_bool m_exit = false;
+	Style m_style = Style::kList;
+	std::optional<TitleId> m_pendingSelection;
+	uint64 m_callbackIdTitleList = 0;
+
+	// titles reported by the title list, waiting for the batch timer
+	std::vector<TitleId> m_pendingTitles;
+	wxTimer m_batchTimer;
+
+	std::map<TitleId, std::string> m_nameCache;
 
 	inline static constexpr int kListIconWidth = 64;
 	inline static constexpr int kIconWidth = 128;
-	wxImageList m_image_list_data = wxImageList(kIconWidth, kIconWidth, false, 1);
-	wxImageList m_image_list_small_data = wxImageList(kListIconWidth, kListIconWidth, false, 1);
+	wxImageList m_largeIcons = wxImageList(kIconWidth, kIconWidth, false, 1);
+	wxImageList m_smallIcons = wxImageList(kListIconWidth, kListIconWidth, false, 1);
+	std::map<TitleId, std::pair<int, int>> m_iconIndex; // UI thread only: large and small image list index
 
-	std::mutex m_icon_cache_mtx;
-	std::set<TitleId> m_icon_loaded;
-	std::map<TitleId, std::pair<int, int>> m_icon_cache; // pair contains icon and small icon
-
-	std::map<TitleId, std::string> m_name_cache;
-
-	// bulk update handling
-	std::vector<TitleId> m_bulkTitlesToAdd;
-	wxTimer m_bulkUpdateTimer;
-
-	// list mode
-	void CreateListColumns();
-
-	void OnColumnClick(wxListEvent& event);
-	void OnColumnRightClick(wxListEvent& event);
-	void ApplyGameListColumnWidths();
-	void OnColumnBeginResize(wxListEvent& event);
-	void OnColumnResize(wxListEvent& event);
-	void OnColumnDrag(wxListEvent& event);
-	
-	// generic events
-	void OnKeyDown(wxListEvent& event);
-	void OnContextMenu(wxContextMenuEvent& event);
-	void OnContextMenuSelected(wxCommandEvent& event);
-	void OnGameEntryUpdatedByTitleId(wxTitleIdEvent& event);
-	void OnItemActivated(wxListEvent& event);
-	void OnTimer(wxTimerEvent& event);
-	void OnMouseMove(wxMouseEvent& event);
-	void OnLeaveWindow(wxMouseEvent& event);
-
-	void OnGameListSize(wxSizeEvent& event);
-	void AdjustLastColumnWidth();
-	int GetColumnDefaultWidth(int column);
-
-	void OnTimerBulkAddEntriesToGameList(wxTimerEvent& event);
-
-	static inline std::once_flag s_launch_file_once;
+	// icon worker
+	std::thread m_iconThread;
+	std::atomic_bool m_iconThreadRun{false};
+	CounterSemaphore m_iconRequests;
+	std::mutex m_iconMutex;
+	std::deque<TitleId> m_iconQueue;            // guarded by m_iconMutex
+	std::vector<DecodedIcon> m_decodedIcons;    // guarded by m_iconMutex
+	std::set<TitleId> m_iconAttempted;          // worker thread only
 };
-

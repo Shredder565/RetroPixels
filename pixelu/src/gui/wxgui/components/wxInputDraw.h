@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include "input/api/ControllerState.h"
@@ -5,7 +6,8 @@
 
 #include <wx/window.h>
 
-
+// Small square preview of a stick: outer range circle, the deadzone (filled)
+// and a dot at the current axis position.
 class wxInputDraw : public wxWindow
 {
 public:
