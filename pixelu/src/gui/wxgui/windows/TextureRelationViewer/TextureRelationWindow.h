@@ -1,9 +1,12 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include <wx/wx.h>
 
 class wxListCtrl;
 
+// Debug window listing the GPU texture cache: one row per texture (sorted by
+// physical address), optionally followed by one row per view of it.
 class TextureRelationViewerWindow : public wxFrame
 {
 public:
@@ -20,14 +23,13 @@ public:
 	void Close();
 
 private:
+	void AddTextureRow(long row, const struct LatteTextureInformation& tex);
+	void AddViewRow(long row, const struct LatteTextureViewInformation& view);
 
-	wxDECLARE_EVENT_TABLE();
-
-	void _setTextureRelationListItemTexture(wxListCtrl* uiList, sint32 rowIndex, struct LatteTextureInformation* texInfo);
-	void _setTextureRelationListItemView(wxListCtrl* uiList, sint32 rowIndex, struct LatteTextureInformation* texInfo, struct LatteTextureViewInformation* viewInfo);
-
-	bool showOnlyActive;
-	bool showTextureViews;
+	wxListCtrl* m_list;
+	bool m_onlyRecent = false;
+	bool m_withViews = true;
 };
 
+// opens the window unless one is already open
 void openTextureViewer(wxFrame& parentFrame);

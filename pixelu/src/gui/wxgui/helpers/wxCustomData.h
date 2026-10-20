@@ -1,49 +1,27 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include <wx/clntdata.h>
 
+// Client data holding a value of any type (for SetClientObject / list item data).
 template <typename T>
 class wxCustomData : public wxClientData
 {
 public:
-	wxCustomData()
-		:  m_data({}) {}
+	wxCustomData() : m_value({}) {}
+	wxCustomData(T data) : m_value(std::move(data)) {}
 
-	wxCustomData(T data)
-		:  m_data(std::move(data)) { }
-	
-	const T& GetData() const { return m_data; }
+	const T& GetData() const { return m_value; }
 
-	/// <summary>
-	/// obtains ownership of the data
-	/// </summary>
-	/// <returns>returns the stored data</returns>
-	T get() { return std::move(m_data); }
+	// moves the value out of the container
+	T get() { return std::move(m_value); }
 
-	/// <summary>
-	/// access to the data without obtaining ownership
-	/// </summary>
-	/// <returns>returns a reference to the stored data</returns>
-	T& ref() { return m_data; }
+	// direct access, the value stays owned by the container
+	T& ref() { return m_value; }
 
-	bool operator==(const T& o) const { return m_data == o.m_data; }
+	bool operator==(const T& o) const { return m_value == o.m_value; }
 	bool operator!=(const T& o) const { return !(*this == o); }
 
 private:
-	T m_data;
+	T m_value;
 };
-
-//template <typename T>
-//class wxCustomObject : public wxObject
-//{
-//public:
-//	wxCustomObject(T data)
-//		:  m_data(std::move(data)) { }
-//
-//	const T& GetData() const { return m_data; }
-//
-//	bool operator==(const T& o) const { return m_data == o.m_data; }
-//	bool operator!=(const T& o) const { return !(*this == o); }
-//private:
-//	T m_data;
-//};

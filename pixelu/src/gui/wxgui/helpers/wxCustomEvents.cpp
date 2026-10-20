@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "wxgui/helpers/wxCustomEvents.h"
 
 wxDEFINE_EVENT(wxEVT_SET_STATUS_BAR_TEXT, wxSetStatusBarTextEvent);

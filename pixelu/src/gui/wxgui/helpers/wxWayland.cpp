@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "wxgui/helpers/wxWayland.h"
 
 #if ( BOOST_OS_LINUX || BOOST_OS_BSD ) && HAS_WAYLAND
@@ -6,19 +7,19 @@
 
 bool wxWlIsWaylandWindow(wxWindow* window)
 {
-	GtkWidget* gtkWindow = static_cast<GtkWidget*>(window->GetHandle());
-	GdkWindow* gdkWindow = gtk_widget_get_window(gtkWindow);
-	return GDK_IS_WAYLAND_WINDOW(gdkWindow);
+	auto* widget = static_cast<GtkWidget*>(window->GetHandle());
+	return GDK_IS_WAYLAND_WINDOW(gtk_widget_get_window(widget));
 }
 
 void wxWlSetAppId(wxFrame* frame, const char* applicationId)
 {
-	GtkWidget* gtkWindow = static_cast<GtkWidget*>(frame->GetHandle());
-	gtk_widget_realize(gtkWindow);
-	GdkWindow* gdkWindow = gtk_widget_get_window(gtkWindow);
-	static auto gdk_wl_set_app_id = reinterpret_cast<void (*) (GdkWindow*, const char*)>(dlsym(nullptr, "gdk_wayland_window_set_application_id"));
-	if (gdk_wl_set_app_id)
-		gdk_wl_set_app_id(gdkWindow, applicationId);
+	auto* widget = static_cast<GtkWidget*>(frame->GetHandle());
+	gtk_widget_realize(widget);
+	// only newer GTK versions export this, so look it up at run time
+	using SetAppIdFn = void (*)(GdkWindow*, const char*);
+	static const SetAppIdFn setAppId = reinterpret_cast<SetAppIdFn>(dlsym(nullptr, "gdk_wayland_window_set_application_id"));
+	if (setAppId != nullptr)
+		setAppId(gtk_widget_get_window(widget), applicationId);
 }
 
-#endif	// BOOST_OS_LINUX && HAS_WAYLAND
+#endif // ( BOOST_OS_LINUX || BOOST_OS_BSD ) && HAS_WAYLAND

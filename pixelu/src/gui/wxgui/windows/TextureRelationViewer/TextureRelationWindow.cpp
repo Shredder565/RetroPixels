@@ -1,377 +1,232 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "wxgui/wxgui.h"
 #include "wxHelper.h"
 #include "TextureRelationWindow.h"
 #include "Cafe/HW/Latte/Core/LatteTexture.h"
 
-enum
+namespace
 {
-	// options
-	REFRESH_ID,
-	CLOSE_ID,
-	TEX_LIST_A_ID,
-	TEX_LIST_B_ID,
-	CHECKBOX_SHOW_ONLY_ACTIVE,
-	CHECKBOX_SHOW_VIEWS,
-};
+	enum : int
+	{
+		ID_REFRESH = wxID_HIGHEST + 1,
+		ID_CLOSE,
+		ID_TEXTURE_LIST,
+		ID_ONLY_ACTIVE,
+		ID_SHOW_VIEWS,
+	};
 
-wxBEGIN_EVENT_TABLE(TextureRelationViewerWindow, wxFrame)
-EVT_BUTTON(CLOSE_ID, TextureRelationViewerWindow::OnCloseButton)
-EVT_BUTTON(REFRESH_ID, TextureRelationViewerWindow::OnRefreshButton)
-EVT_CHECKBOX(CHECKBOX_SHOW_ONLY_ACTIVE, TextureRelationViewerWindow::OnCheckbox)
-EVT_CHECKBOX(CHECKBOX_SHOW_VIEWS, TextureRelationViewerWindow::OnCheckbox)
+	enum Column : long
+	{
+		COL_TYPE,
+		COL_PHYS,
+		COL_MIP_PHYS,
+		COL_DIM,
+		COL_SIZE,
+		COL_FORMAT,
+		COL_PITCH,
+		COL_TILEMODE,
+		COL_SLICES,
+		COL_MIPS,
+		COL_LAST_ACCESS,
+		COL_OVERWRITE,
+		COL_COUNT
+	};
 
-EVT_CLOSE(TextureRelationViewerWindow::OnClose)
-wxEND_EVENT_TABLE()
+	struct ColumnSpec
+	{
+		const char* title;
+		int width;
+	};
+	constexpr ColumnSpec kColumns[COL_COUNT] = {
+		{"Type", 85}, {"PhysAddr", 80}, {"MipPAddr", 80}, {"Dim", 80}, {"Resolution", 110}, {"Format", 70},
+		{"Pitch", 80}, {"Tilemode", 80}, {"SliceRange", 90}, {"MipRange", 90}, {"Last access", 90}, {"OverwriteRes", 110},
+	};
 
-wxListCtrl* textureRelationListA;
-bool isTextureViewerOpen = false;
+	// textures not touched for longer than this are hidden by "Show only active"
+	constexpr uint32 kActiveWindowMs = 3000;
+
+	// the texture rows and the view rows spell the array MSAA dimension differently
+	wxString DimLabel(Latte::E_DIM dim, bool isView)
+	{
+		switch (dim)
+		{
+		case Latte::E_DIM::DIM_1D: return "1D";
+		case Latte::E_DIM::DIM_2D: return "2D";
+		case Latte::E_DIM::DIM_2D_ARRAY: return "2D_ARRAY";
+		case Latte::E_DIM::DIM_3D: return "3D";
+		case Latte::E_DIM::DIM_CUBEMAP: return "CUBEMAP";
+		case Latte::E_DIM::DIM_2D_MSAA: return "2D_MSAA";
+		case Latte::E_DIM::DIM_2D_ARRAY_MSAA: return isView ? "2D_ARRAY_MSAA" : "2D_MS_ARRAY";
+		default: return "UKN";
+		}
+	}
+
+	wxString SizeLabel(sint32 w, sint32 h, sint32 d, bool forceDepth)
+	{
+		if (d == 1 && !forceDepth)
+			return wxString::Format("%dx%d", w, h);
+		return wxString::Format("%dx%dx%d", w, h, d);
+	}
+
+	bool s_viewerOpen = false;
+}
 
 void openTextureViewer(wxFrame& parentFrame)
 {
-	if (isTextureViewerOpen)
+	if (s_viewerOpen)
 		return;
-	auto frame = new TextureRelationViewerWindow(parentFrame);
-	frame->Show(true);
+	auto* window = new TextureRelationViewerWindow(parentFrame);
+	window->Show(true);
 }
 
 TextureRelationViewerWindow::TextureRelationViewerWindow(wxFrame& parent)
 	: wxFrame(&parent, wxID_ANY, _("Texture cache"), wxDefaultPosition, wxSize(1000, 480), wxCLOSE_BOX | wxCLIP_CHILDREN | wxCAPTION | wxRESIZE_BORDER)
 {
-	isTextureViewerOpen = true;
+	s_viewerOpen = true;
 
-	this->showOnlyActive = false;
-	this->showTextureViews = true;
+	auto* pane = new wxPanel(this);
+	auto* layout = new wxBoxSizer(wxVERTICAL);
 
-	wxPanel* mainPane = new wxPanel(this);
-	wxBoxSizer* sizer = new wxBoxSizer(wxVERTICAL);
-	textureRelationListA = new wxListCtrl(mainPane, TEX_LIST_A_ID, wxPoint(0, 0), wxSize(1008, 440), wxLC_REPORT);
+	m_list = new wxListCtrl(pane, ID_TEXTURE_LIST, wxPoint(0, 0), wxSize(1008, 440), wxLC_REPORT);
+	m_list->SetFont(wxFont(8, wxFONTFAMILY_MODERN, wxFONTSTYLE_NORMAL, wxFONTWEIGHT_NORMAL, false, "Courier New"));
+	for (long c = 0; c < COL_COUNT; c++)
+		m_list->InsertColumn(c, kColumns[c].title, wxLIST_FORMAT_LEFT, kColumns[c].width);
+	layout->Add(m_list, 1, wxEXPAND | wxBOTTOM, 0);
 
-	textureRelationListA->SetFont(wxFont(8, wxFONTFAMILY_MODERN, wxFONTSTYLE_NORMAL, wxFONTWEIGHT_NORMAL, false, "Courier New"));//wxSystemSettings::GetFont(wxSYS_OEM_FIXED_FONT));
+	auto* bottom = new wxBoxSizer(wxHORIZONTAL);
+	const int rowFlags = wxALIGN_CENTER_VERTICAL | wxBOTTOM | wxTOP | wxLEFT;
+	bottom->Add(new wxButton(pane, ID_REFRESH, _("Refresh")), 0, rowFlags, 10);
+	bottom->Add(new wxCheckBox(pane, ID_ONLY_ACTIVE, _("Show only active")), 0, rowFlags, 10);
+	auto* showViews = new wxCheckBox(pane, ID_SHOW_VIEWS, _("Show views"));
+	showViews->SetValue(true);
+	bottom->Add(showViews, 0, rowFlags, 10);
+	layout->Add(bottom, 0, wxALIGN_LEFT);
+	pane->SetSizer(layout);
 
-	// add columns
-	wxListItem colType;
-	sint32 columnIndex = 0;
-	colType.SetId(columnIndex); columnIndex++;
-	colType.SetText("Type");
-	colType.SetWidth(85);
-	textureRelationListA->InsertColumn(columnIndex-1, colType);
-    wxListItem colPhysAddr;
-    colPhysAddr.SetId(columnIndex); columnIndex++;
-    colPhysAddr.SetText("PhysAddr");
-    colPhysAddr.SetWidth(80);
-    textureRelationListA->InsertColumn(columnIndex-1, colPhysAddr);
-    wxListItem colPhysMipAddr;
-    colPhysMipAddr.SetId(columnIndex); columnIndex++;
-    colPhysMipAddr.SetText("MipPAddr");
-    colPhysMipAddr.SetWidth(80);
-    textureRelationListA->InsertColumn(columnIndex-1, colPhysMipAddr);
-	wxListItem colDim;
-	colDim.SetId(columnIndex); columnIndex++;
-	colDim.SetText("Dim");
-	colDim.SetWidth(80);
-	textureRelationListA->InsertColumn(columnIndex-1, colDim);
-	wxListItem colResolution;
-	colResolution.SetId(columnIndex); columnIndex++;
-	colResolution.SetText("Resolution");
-	colResolution.SetWidth(110);
-	textureRelationListA->InsertColumn(columnIndex-1, colResolution);
-	wxListItem colFormat;
-	colFormat.SetId(columnIndex); columnIndex++;
-	colFormat.SetText("Format");
-	colFormat.SetWidth(70);
-	textureRelationListA->InsertColumn(columnIndex-1, colFormat);
-	wxListItem colPitch;
-	colPitch.SetId(columnIndex); columnIndex++;
-	colPitch.SetText("Pitch");
-	colPitch.SetWidth(80);
-	textureRelationListA->InsertColumn(columnIndex-1, colPitch);
-	wxListItem colTilemode;
-	colTilemode.SetId(columnIndex); columnIndex++;
-	colTilemode.SetText("Tilemode");
-	colTilemode.SetWidth(80);
-	textureRelationListA->InsertColumn(columnIndex-1, colTilemode);
-	wxListItem colSliceRange;
-	colSliceRange.SetId(columnIndex); columnIndex++;
-	colSliceRange.SetText("SliceRange");
-	colSliceRange.SetWidth(90);
-	textureRelationListA->InsertColumn(columnIndex-1, colSliceRange);
-	wxListItem colMipRange;
-	colMipRange.SetId(columnIndex); columnIndex++;
-	colMipRange.SetText("MipRange");
-	colMipRange.SetWidth(90);
-	textureRelationListA->InsertColumn(columnIndex-1, colMipRange);
-	wxListItem colAge;
-	colAge.SetId(columnIndex); columnIndex++;
-	colAge.SetText("Last access");
-	colAge.SetWidth(90);
-	textureRelationListA->InsertColumn(columnIndex - 1, colAge);
-	wxListItem colOverwriteRes;
-	colOverwriteRes.SetId(columnIndex); columnIndex++;
-	colOverwriteRes.SetText("OverwriteRes");
-	colOverwriteRes.SetWidth(110);
-	textureRelationListA->InsertColumn(columnIndex - 1, colOverwriteRes);
-
-	wxBoxSizer* sizerBottom = new wxBoxSizer(wxHORIZONTAL);
-
-	sizer->Add(textureRelationListA, 1, wxEXPAND | wxBOTTOM, 0);
-	wxButton* button = new wxButton(mainPane, REFRESH_ID, _("Refresh"));
-	sizerBottom->Add(button, 0, wxALIGN_CENTER_VERTICAL | wxBOTTOM | wxTOP | wxLEFT, 10);
-
-	wxCheckBox* checkboxShowOnlyActive = new wxCheckBox(mainPane, CHECKBOX_SHOW_ONLY_ACTIVE, _("Show only active"));
-	sizerBottom->Add(checkboxShowOnlyActive, 0, wxALIGN_CENTER_VERTICAL | wxBOTTOM | wxTOP | wxLEFT, 10);
-
-	wxCheckBox* checkboxShowViews = new wxCheckBox(mainPane, CHECKBOX_SHOW_VIEWS, _("Show views"));
-	sizerBottom->Add(checkboxShowViews, 0, wxALIGN_CENTER_VERTICAL | wxBOTTOM | wxTOP | wxLEFT, 10);
-	checkboxShowViews->SetValue(true);
-
-	textureRelationListA->Bind(wxEVT_RIGHT_DOWN, &TextureRelationViewerWindow::OnTextureListRightClick, this);
-
-	sizer->Add(
-		sizerBottom,
-		0,                // vertically unstretchable
-		wxALIGN_LEFT);
-	mainPane->SetSizer(sizer);
+	Bind(wxEVT_BUTTON, &TextureRelationViewerWindow::OnCloseButton, this, ID_CLOSE);
+	Bind(wxEVT_BUTTON, &TextureRelationViewerWindow::OnRefreshButton, this, ID_REFRESH);
+	Bind(wxEVT_CHECKBOX, &TextureRelationViewerWindow::OnCheckbox, this, ID_ONLY_ACTIVE);
+	Bind(wxEVT_CHECKBOX, &TextureRelationViewerWindow::OnCheckbox, this, ID_SHOW_VIEWS);
+	Bind(wxEVT_CLOSE_WINDOW, &TextureRelationViewerWindow::OnClose, this);
+	m_list->Bind(wxEVT_RIGHT_DOWN, &TextureRelationViewerWindow::OnTextureListRightClick, this);
 
 	RefreshTextureList();
 }
 
 TextureRelationViewerWindow::~TextureRelationViewerWindow()
 {
-	isTextureViewerOpen = false;
+	s_viewerOpen = false;
 }
 
-void TextureRelationViewerWindow::OnCloseButton(wxCommandEvent& event)
+void TextureRelationViewerWindow::OnCloseButton(wxCommandEvent& /*event*/)
 {
 	Close();
 }
 
-void TextureRelationViewerWindow::OnRefreshButton(wxCommandEvent& event)
+void TextureRelationViewerWindow::OnRefreshButton(wxCommandEvent& /*event*/)
 {
 	RefreshTextureList();
 }
 
 void TextureRelationViewerWindow::OnCheckbox(wxCommandEvent& event)
 {
-	if (event.GetId() == CHECKBOX_SHOW_ONLY_ACTIVE)
+	switch (event.GetId())
 	{
-		showOnlyActive = event.IsChecked();
-		RefreshTextureList();
+	case ID_ONLY_ACTIVE: m_onlyRecent = event.IsChecked(); break;
+	case ID_SHOW_VIEWS: m_withViews = event.IsChecked(); break;
+	default: return;
 	}
-	else if (event.GetId() == CHECKBOX_SHOW_VIEWS)
-	{
-		showTextureViews = event.IsChecked();
-		RefreshTextureList();
-	}
+	RefreshTextureList();
 }
 
-void TextureRelationViewerWindow::OnClose(wxCloseEvent& event)
+void TextureRelationViewerWindow::OnClose(wxCloseEvent& /*event*/)
 {
 	Close();
 }
 
-void TextureRelationViewerWindow::_setTextureRelationListItemTexture(wxListCtrl* uiList, sint32 rowIndex, struct LatteTextureInformation* texInfo)
+void TextureRelationViewerWindow::AddTextureRow(long row, const LatteTextureInformation& tex)
 {
-	wxString typeLabel;
-	// count number of alternative views for base view
-	sint32 alternativeViewCount = texInfo->alternativeViewCount;
-	if (texInfo->isUpdatedOnGPU)
-		typeLabel = "TEXTURE*";
-	else
-		typeLabel = "TEXTURE";
-	if (alternativeViewCount > 0)
-	{
-		typeLabel += wxString::Format("(%d)", alternativeViewCount + 1);
-	}
+	wxString type = tex.isUpdatedOnGPU ? "TEXTURE*" : "TEXTURE";
+	if (tex.alternativeViewCount > 0)
+		type << wxString::Format("(%d)", (sint32)tex.alternativeViewCount + 1);
 	wxListItem item;
-	item.SetId(rowIndex);
-	item.SetText(typeLabel);
+	item.SetId(row);
+	item.SetText(type);
 	item.SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
-	uiList->InsertItem(item);
+	m_list->InsertItem(item);
 
-	sint32 columnIndex = 1;
-    // phys address
-    uiList->SetItem(rowIndex, columnIndex, wxString::Format("%08X", texInfo->physAddress));
-    columnIndex++;
-    // phys mip address
-    uiList->SetItem(rowIndex, columnIndex, wxString::Format("%08X", texInfo->physMipAddress));
-    columnIndex++;
-	// dim
-	wxString dimLabel;
-	if (texInfo->dim == Latte::E_DIM::DIM_2D)
-		dimLabel = "2D";
-	else if (texInfo->dim == Latte::E_DIM::DIM_2D_ARRAY)
-		dimLabel = "2D_ARRAY";
-	else if (texInfo->dim == Latte::E_DIM::DIM_3D)
-		dimLabel = "3D";
-	else if (texInfo->dim == Latte::E_DIM::DIM_CUBEMAP)
-		dimLabel = "CUBEMAP";
-	else if (texInfo->dim == Latte::E_DIM::DIM_1D)
-		dimLabel = "1D";
-	else if (texInfo->dim == Latte::E_DIM::DIM_2D_MSAA)
-		dimLabel = "2D_MSAA";
-	else if (texInfo->dim == Latte::E_DIM::DIM_2D_ARRAY_MSAA)
-		dimLabel = "2D_MS_ARRAY";
-	else
-		dimLabel = "UKN";
-	uiList->SetItem(rowIndex, columnIndex, dimLabel);
-	columnIndex++;
-	// resolution
-	wxString resolutionLabel;
-	if (texInfo->depth == 1)
-		resolutionLabel = wxString::Format("%dx%d", texInfo->width, texInfo->height);
-	else
-		resolutionLabel = wxString::Format("%dx%dx%d", texInfo->width, texInfo->height, texInfo->depth);
-	uiList->SetItem(rowIndex, columnIndex, resolutionLabel);
-	columnIndex++;
-	// format
-	wxString formatLabel;
-	if(texInfo->isDepth)
-		formatLabel = wxString::Format("%04x(d)", (uint32)texInfo->format);
-	else
-		formatLabel = wxString::Format("%04x", (uint32)texInfo->format);
-	uiList->SetItem(rowIndex, columnIndex, formatLabel);
-	columnIndex++;
-	// pitch
-	uiList->SetItem(rowIndex, columnIndex, wxString::Format("%d", texInfo->pitch));
-	columnIndex++;
-	// tilemode
-	uiList->SetItem(rowIndex, columnIndex, wxString::Format("%d", (int)texInfo->tileMode));
-	columnIndex++;
-	// sliceRange
-	uiList->SetItem(rowIndex, columnIndex, "");
-	columnIndex++;
-	// mipRange
-	uiList->SetItem(rowIndex, columnIndex, texInfo->mipLevels == 1 ? "1 mip" : wxString::Format("%d mips", texInfo->mipLevels));
-	columnIndex++;
-	// last access
-	uiList->SetItem(rowIndex, columnIndex, wxString::Format("%uus", (GetTickCount() - texInfo->lastAccessTick + 499) / 1000));
-	columnIndex++;
-	// overwrite resolution
-	wxString overwriteResLabel;
-	if (texInfo->overwriteInfo.hasResolutionOverwrite)
-	{
-		if(texInfo->overwriteInfo.depth != 1 || texInfo->depth != 1)
-			overwriteResLabel = wxString::Format("%dx%dx%d", texInfo->overwriteInfo.width, texInfo->overwriteInfo.height, texInfo->overwriteInfo.depth);
-		else
-			overwriteResLabel = wxString::Format("%dx%d", texInfo->overwriteInfo.width, texInfo->overwriteInfo.height);
-	}
-	uiList->SetItem(rowIndex, columnIndex, overwriteResLabel);
-	columnIndex++;
+	m_list->SetItem(row, COL_PHYS, wxString::Format("%08X", tex.physAddress));
+	m_list->SetItem(row, COL_MIP_PHYS, wxString::Format("%08X", tex.physMipAddress));
+	m_list->SetItem(row, COL_DIM, DimLabel(tex.dim, false));
+	m_list->SetItem(row, COL_SIZE, SizeLabel(tex.width, tex.height, tex.depth, false));
+	m_list->SetItem(row, COL_FORMAT, wxString::Format(tex.isDepth ? "%04x(d)" : "%04x", (uint32)tex.format));
+	m_list->SetItem(row, COL_PITCH, wxString::Format("%d", tex.pitch));
+	m_list->SetItem(row, COL_TILEMODE, wxString::Format("%d", (int)tex.tileMode));
+	m_list->SetItem(row, COL_SLICES, "");
+	m_list->SetItem(row, COL_MIPS, tex.mipLevels == 1 ? wxString("1 mip") : wxString::Format("%d mips", tex.mipLevels));
+	// tick values are milliseconds; the column has always shown them rounded to seconds with a "us" suffix
+	m_list->SetItem(row, COL_LAST_ACCESS, wxString::Format("%uus", (GetTickCount() - tex.lastAccessTick + 499) / 1000));
+	wxString overwrite;
+	if (tex.overwriteInfo.hasResolutionOverwrite)
+		overwrite = SizeLabel(tex.overwriteInfo.width, tex.overwriteInfo.height, tex.overwriteInfo.depth, tex.depth != 1);
+	m_list->SetItem(row, COL_OVERWRITE, overwrite);
 }
 
-void TextureRelationViewerWindow::_setTextureRelationListItemView(wxListCtrl* uiList, sint32 rowIndex, struct LatteTextureInformation* texInfo, struct LatteTextureViewInformation* viewInfo)
+void TextureRelationViewerWindow::AddViewRow(long row, const LatteTextureViewInformation& view)
 {
-	// count number of alternative views
-	sint32 alternativeViewCount = 0; // todo
-	// set type string
-	// find and handle highlight entry
 	wxListItem item;
-	item.SetId(rowIndex);
-	item.SetText(alternativeViewCount == 0 ? "> VIEW" : wxString::Format("> VIEW(%d)", alternativeViewCount+1));
+	item.SetId(row);
+	item.SetText("> VIEW");
 	item.SetBackgroundColour(wxHelper::CalculateAccentColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW)));
-	uiList->InsertItem(item);
-	//uiList->SetItemPtrData(item, (wxUIntPtr)viewInfo);
-	sint32 columnIndex = 1;
-    // phys address
-    uiList->SetItem(rowIndex, columnIndex, "");
-    columnIndex++;
-    // phys mip address
-    uiList->SetItem(rowIndex, columnIndex, "");
-    columnIndex++;
-	// dim
-	wxString dimLabel;
-	if (viewInfo->dim == Latte::E_DIM::DIM_2D)
-		dimLabel = "2D";
-	else if (viewInfo->dim == Latte::E_DIM::DIM_2D_ARRAY)
-		dimLabel = "2D_ARRAY";
-	else if (viewInfo->dim == Latte::E_DIM::DIM_3D)
-		dimLabel = "3D";
-	else if (viewInfo->dim == Latte::E_DIM::DIM_CUBEMAP)
-		dimLabel = "CUBEMAP";
-	else if (viewInfo->dim == Latte::E_DIM::DIM_1D)
-		dimLabel = "1D";
-	else if (viewInfo->dim == Latte::E_DIM::DIM_2D_MSAA)
-		dimLabel = "2D_MSAA";
-	else if (viewInfo->dim == Latte::E_DIM::DIM_2D_ARRAY_MSAA)
-		dimLabel = "2D_ARRAY_MSAA";
-	else
-		dimLabel = "UKN";
-	uiList->SetItem(rowIndex, columnIndex, dimLabel);
-	columnIndex++;
-	// resolution
-	uiList->SetItem(rowIndex, columnIndex, "");
-	columnIndex++;
-	// format
-	uiList->SetItem(rowIndex, columnIndex, wxString::Format("%04x", (uint32)viewInfo->format));
-	columnIndex++;
-	// pitch
-	uiList->SetItem(rowIndex, columnIndex, "");
-	columnIndex++;
-	// tilemode
-	uiList->SetItem(rowIndex, columnIndex, "");
-	columnIndex++;
-	// sliceRange
-	uiList->SetItem(rowIndex, columnIndex, wxString::Format("%d-%d", viewInfo->firstSlice, viewInfo->firstSlice+ viewInfo->numSlice-1));
-	columnIndex++;
-	// mipRange
-	uiList->SetItem(rowIndex, columnIndex, wxString::Format("%d-%d", viewInfo->firstMip, viewInfo->firstMip + viewInfo->numMip - 1));
-	columnIndex++;
-	// last access
-	uiList->SetItem(rowIndex, columnIndex, "");
-	columnIndex++;
+	m_list->InsertItem(item);
+
+	m_list->SetItem(row, COL_PHYS, "");
+	m_list->SetItem(row, COL_MIP_PHYS, "");
+	m_list->SetItem(row, COL_DIM, DimLabel(view.dim, true));
+	m_list->SetItem(row, COL_SIZE, "");
+	m_list->SetItem(row, COL_FORMAT, wxString::Format("%04x", (uint32)view.format));
+	m_list->SetItem(row, COL_PITCH, "");
+	m_list->SetItem(row, COL_TILEMODE, "");
+	m_list->SetItem(row, COL_SLICES, wxString::Format("%d-%d", view.firstSlice, view.firstSlice + view.numSlice - 1));
+	m_list->SetItem(row, COL_MIPS, wxString::Format("%d-%d", view.firstMip, view.firstMip + view.numMip - 1));
+	m_list->SetItem(row, COL_LAST_ACCESS, "");
 }
 
 void TextureRelationViewerWindow::RefreshTextureList()
 {
-	int scrollPos = textureRelationListA->GetScrollPos(wxVERTICAL);
-	textureRelationListA->DeleteAllItems();
+	const int scrollPos = m_list->GetScrollPos(wxVERTICAL);
+	m_list->DeleteAllItems();
 
-	std::vector<LatteTextureInformation> texCache = LatteTexture_QueryCacheInfo();
+	std::vector<LatteTextureInformation> textures = LatteTexture_QueryCacheInfo();
+	std::stable_sort(textures.begin(), textures.end(), [](const LatteTextureInformation& a, const LatteTextureInformation& b) {
+		return a.physAddress < b.physAddress;
+	});
 
-	// sort by physAddr in ascending order
-	for (sint32 i1 = 0; i1 < texCache.size(); i1++)
+	m_list->Freeze();
+	long row = 0;
+	const uint32 now = GetTickCount();
+	for (const LatteTextureInformation& tex : textures)
 	{
-		for (sint32 i2 = i1+1; i2 < texCache.size(); i2++)
-		{
-			if (texCache[i1].physAddress > texCache[i2].physAddress)
-			{
-				std::swap(texCache[i1], texCache[i2]);
-			}
-		}
+		if (m_onlyRecent && now - tex.lastAccessTick > kActiveWindowMs)
+			continue;
+		AddTextureRow(row++, tex);
+		if (!m_withViews)
+			continue;
+		for (const LatteTextureViewInformation& view : tex.views)
+			AddViewRow(row++, view);
 	}
+	m_list->Thaw();
 
-	textureRelationListA->Freeze();
-
-	sint32 rowIndex = 0;
-	uint32 currentTick = GetTickCount();
-	for (auto& tex : texCache)
-	{
-		uint32 timeSinceLastAccess = currentTick - tex.lastAccessTick;
-		if (showOnlyActive && timeSinceLastAccess > 3000)
-			continue; // hide textures which haven't been updated in more than 3 seconds
-
-		_setTextureRelationListItemTexture(textureRelationListA, rowIndex, &tex);
-		rowIndex++;
-		if (showTextureViews)
-		{
-			for (auto& view : tex.views)
-			{
-				_setTextureRelationListItemView(textureRelationListA, rowIndex, &tex, &view);
-				rowIndex++;
-			}
-		}
-	}
-	textureRelationListA->Thaw();
-	long itemCount = textureRelationListA->GetItemCount();
-	if (itemCount > 0)
-		textureRelationListA->EnsureVisible(std::min<long>(itemCount - 1, scrollPos + textureRelationListA->GetCountPerPage() - 1));
+	const long rows = m_list->GetItemCount();
+	if (rows > 0)
+		m_list->EnsureVisible(std::min<long>(rows - 1, scrollPos + m_list->GetCountPerPage() - 1));
 }
 
-void TextureRelationViewerWindow::OnTextureListRightClick(wxMouseEvent& event)
+void TextureRelationViewerWindow::OnTextureListRightClick(wxMouseEvent& /*event*/)
 {
 }
 
 void TextureRelationViewerWindow::Close()
 {
-	this->Destroy();
+	Destroy();
 }

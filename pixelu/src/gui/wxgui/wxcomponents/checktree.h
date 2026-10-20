@@ -1,107 +1,95 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #ifndef checktree_H_INCLUDED
 #define checktree_H_INCLUDED
-
-// credits to: https://forums.wxwidgets.org/viewtopic.php?t=39582
 
 #include "wx/treectrl.h"
 #include <map>
 
+// The tree is compiled into the executable, so the export macro is plain WXEXPORT
+// (kept so the event declarations below stay the same as before).
 #define WXMAKINGDLL_CHECKTREE
+#define WXDLLIMPEXP_CHECKTREE WXEXPORT
 
-// dll export macros
-#ifdef WXMAKINGDLL_CHECKTREE
-    #define WXDLLIMPEXP_CHECKTREE WXEXPORT
-#elif defined(WXUSING_CHECKTREE_SOURCE)
-    #define WXDLLIMPEXP_CHECKTREE
-#elif defined(WXUSINGDLL)
-    #define WXDLLIMPEXP_CHECKTREE WXIMPORT
-#else // not making nor using DLL
-    #define WXDLLIMPEXP_CHECKTREE
-#endif
+#include <wx/object.h>
 
-#include <wx/object.h> 
-// wxDECLARE_CLASS, wxIMPLEMENT_CLASS  for sorting?
-
+// A wxTreeCtrl whose items can carry a check box, drawn through the tree's state
+// images. An item's state image index is its check box state (see the enum);
+// items without a check box have no state image (state < 0).
+//
+// Toggling a box with the mouse or the space key sends wxEVT_CHECKTREE_CHOICE
+// with the item and GetExtraLong() == 1 when the box became checked.
+// Keyboard focus entering the tree sends wxEVT_CHECKTREE_FOCUS.
+// Sort() orders children with branches before leaves, then by text (case-insensitive).
 class WXDLLIMPEXP_CHECKTREE wxCheckTree : public wxTreeCtrl
 {
 	wxDECLARE_ABSTRACT_CLASS(wxCheckTree);
 
-    public:
-		wxCheckTree();
-        wxCheckTree(wxWindow *parent, const wxWindowID id,
-                   const wxPoint& pos, const wxSize& size,
-                   long style);
-		
+public:
+	wxCheckTree();
+	wxCheckTree(wxWindow* parent, const wxWindowID id, const wxPoint& pos, const wxSize& size, long style);
 
-        void Init();
-		void Sort(const wxTreeItemId& node, bool recursive);
+	void Init();
+	void Sort(const wxTreeItemId& node, bool recursive);
 
-		int OnCompareItems(const wxTreeItemId& item1, const wxTreeItemId& item2) override;
+	int OnCompareItems(const wxTreeItemId& item1, const wxTreeItemId& item2) override;
 
-        //methods overriden from base class:
-        void SetFocusFromKbd() override;
-        void SetItemTextColour(const wxTreeItemId &item, const wxColour &col) override;
+	void SetFocusFromKbd() override;
+	void SetItemTextColour(const wxTreeItemId& item, const wxColour& col) override;
 
-        //interaction with the check boxes:
-        bool EnableCheckBox(const wxTreeItemId &item, bool enable = true );
-        bool DisableCheckBox(const wxTreeItemId &item);
-        void Check(const wxTreeItemId &item,bool state=true);
-        void Uncheck(const wxTreeItemId &item);
-		void MakeCheckable(const wxTreeItemId &item, bool state = false);
-		bool IsCheckable(const wxTreeItemId& item);
+	bool EnableCheckBox(const wxTreeItemId& item, bool enable = true);
+	bool DisableCheckBox(const wxTreeItemId& item);
+	void Check(const wxTreeItemId& item, bool state = true);
+	void Uncheck(const wxTreeItemId& item);
+	void MakeCheckable(const wxTreeItemId& item, bool state = false);
+	bool IsCheckable(const wxTreeItemId& item);
 
-		enum
-		{
-		    UNCHECKED,
-		    UNCHECKED_MOUSE_OVER,
-		    UNCHECKED_LEFT_DOWN,
-		    UNCHECKED_DISABLED,
-            CHECKED,
-		    CHECKED_MOUSE_OVER,
-		    CHECKED_LEFT_DOWN,
-		    CHECKED_DISABLED
-		};
+	// check box states (= state image indices)
+	enum
+	{
+		UNCHECKED,
+		UNCHECKED_MOUSE_OVER,
+		UNCHECKED_LEFT_DOWN,
+		UNCHECKED_DISABLED,
+		CHECKED,
+		CHECKED_MOUSE_OVER,
+		CHECKED_LEFT_DOWN,
+		CHECKED_DISABLED
+	};
 
-    private:
-        void UpdateCheckBoxImages();
+private:
+	void UpdateCheckBoxImages();
 
-        //event handlers
-		void On_Tree_Sel_Changed( wxTreeEvent& event );
+	// state transitions of one item's box
+	void ShowNormal(const wxTreeItemId& item);
+	void ShowHover(const wxTreeItemId& item, bool toggle);
+	void ShowPressed(const wxTreeItemId& item);
+	void ForgetPointer();
 
-        void On_Char( wxKeyEvent& event );
-        void On_KeyDown( wxKeyEvent& event );
-        void On_KeyUp( wxKeyEvent& event );
+	void OnSelChanging(wxTreeEvent& event);
+	void OnChar(wxKeyEvent& event);
+	void OnKeyDown(wxKeyEvent& event);
+	void OnKeyUp(wxKeyEvent& event);
+	void OnEnterWindow(wxMouseEvent& event);
+	void OnLeaveWindow(wxMouseEvent& event);
+	void OnLeftDClick(wxMouseEvent& event);
+	void OnLeftDown(wxMouseEvent& event);
+	void OnLeftUp(wxMouseEvent& event);
+	void OnMotion(wxMouseEvent& event);
+	void OnWheel(wxMouseEvent& event);
+	void OnFocusGained(wxFocusEvent& event);
+	void OnFocusLost(wxFocusEvent& event);
 
-        void On_Mouse_Enter_Tree( wxMouseEvent& event );
-        void On_Mouse_Leave_Tree( wxMouseEvent& event );
-        void On_Left_DClick( wxMouseEvent& event );
-        void On_Left_Down( wxMouseEvent& event );
-        void On_Left_Up( wxMouseEvent& event );
-        void On_Mouse_Motion( wxMouseEvent& event );
-        void On_Mouse_Wheel( wxMouseEvent& event );
+	// text colour of each item as set by the owner; while a box is disabled its
+	// text is greyed and the owner's colour is restored from here on enable
+	std::map<wxTreeItemId, wxColour> m_ownerColours;
 
-        void On_Tree_Focus_Set( wxFocusEvent& event );
-        void On_Tree_Focus_Lost( wxFocusEvent& event );
-
-        //private data:
-        std::map<wxTreeItemId,wxColour> m_colors;
-
-        bool mouse_entered_tree_with_left_down = false;
-
-        wxTreeItemId last_mouse_over{};
-		wxTreeItemId last_left_down{};
-		wxTreeItemId last_kf{};
-
-
-    // NB: due to an ugly wxMSW hack you _must_ use DECLARE_DYNAMIC_CLASS()
-    //     if you want your overloaded OnCompareItems() to be called.
-    //     OTOH, if you don't want it you may omit the next line - this will
-    //     make default (alphabetical) sorting much faster under wxMSW.
-    //DECLARE_DYNAMIC_CLASS(wxCheckTree)
+	bool m_dragEnteredPressed = false; // pointer came in with the left button already held
+	wxTreeItemId m_hoverItem{};
+	wxTreeItemId m_pressedItem{};
+	wxTreeItemId m_keyItem{};
 };
 
 wxDECLARE_EXPORTED_EVENT(WXDLLIMPEXP_CHECKTREE, wxEVT_CHECKTREE_CHOICE, wxTreeEvent);
 wxDECLARE_EXPORTED_EVENT(WXDLLIMPEXP_CHECKTREE, wxEVT_CHECKTREE_FOCUS, wxTreeEvent);
-
 
 #endif // checktree_H_INCLUDED

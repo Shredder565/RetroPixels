@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "wxgui/wxcomponents/checktree.h"
 
 #include <wx/dcmemory.h>
@@ -8,86 +9,21 @@
 wxDEFINE_EVENT(wxEVT_CHECKTREE_FOCUS, wxTreeEvent);
 wxDEFINE_EVENT(wxEVT_CHECKTREE_CHOICE, wxTreeEvent);
 
-//IMPLEMENT_DYNAMIC_CLASS(wxCheckTree, wxTreeCtrl)
-
-bool on_check_or_label(int flags)
-{
-	return flags & (wxTREE_HITTEST_ONITEMSTATEICON | wxTREE_HITTEST_ONITEMLABEL) ? true : false;
-}
-
-bool on_check(int flags)
-{
-	return flags & (wxTREE_HITTEST_ONITEMSTATEICON) ? true : false;
-}
-
-bool on_label(int flags)
-{
-	return flags & (wxTREE_HITTEST_ONITEMLABEL) ? true : false;
-}
-
-void unhighlight(wxTreeCtrl* m_treeCtrl1, wxTreeItemId& id)
-{
-	if (!id.IsOk())
-		return;
-
-	const int state = m_treeCtrl1->GetItemState(id);
-	if (wxCheckTree::UNCHECKED <= state && state < wxCheckTree::UNCHECKED_DISABLED)
-	{
-		m_treeCtrl1->SetItemState(id, wxCheckTree::UNCHECKED);
-	}
-	else if (wxCheckTree::CHECKED <= state && state < wxCheckTree::CHECKED_DISABLED)
-	{
-		m_treeCtrl1->SetItemState(id, wxCheckTree::CHECKED);
-	}
-}
-
-
-void mohighlight(wxTreeCtrl* m_treeCtrl1, wxTreeItemId& id, bool toggle)
-{
-	if (!id.IsOk())
-		return;
-
-	const int i = m_treeCtrl1->GetItemState(id);
-	if (i < 0)
-		return;
-
-	bool is_checked = false;
-	if (wxCheckTree::UNCHECKED <= i && i < wxCheckTree::UNCHECKED_DISABLED)
-	{
-		m_treeCtrl1->SetItemState(id, toggle ? wxCheckTree::CHECKED_MOUSE_OVER : wxCheckTree::UNCHECKED_MOUSE_OVER);
-		is_checked = true;
-	}
-	else if (wxCheckTree::CHECKED <= i && i < wxCheckTree::CHECKED_DISABLED)
-	{
-		m_treeCtrl1->SetItemState(id, toggle ? wxCheckTree::UNCHECKED_MOUSE_OVER : wxCheckTree::CHECKED_MOUSE_OVER);
-		is_checked = false;
-	}
-
-	if (toggle)
-	{
-		wxTreeEvent event2(wxEVT_CHECKTREE_CHOICE, m_treeCtrl1, id);
-		event2.SetExtraLong(is_checked ? 1 : 0);
-		m_treeCtrl1->ProcessWindowEvent(event2);
-	}
-}
-
-void ldhighlight(wxTreeCtrl* m_treeCtrl1, wxTreeItemId& id)
-{
-	if (!id.IsOk())
-		return;
-
-	const int i = m_treeCtrl1->GetItemState(id);
-	if (wxCheckTree::UNCHECKED <= i && i < wxCheckTree::UNCHECKED_DISABLED)
-	{
-		m_treeCtrl1->SetItemState(id, wxCheckTree::UNCHECKED_LEFT_DOWN);
-	}
-	else if (wxCheckTree::CHECKED <= i && i < wxCheckTree::CHECKED_DISABLED)
-	{
-		m_treeCtrl1->SetItemState(id, wxCheckTree::CHECKED_LEFT_DOWN);
-	}
-}
-
 wxIMPLEMENT_CLASS(wxCheckTree, wxTreeCtrl);
+
+namespace
+{
+	constexpr bool HitsBox(int hitFlags) { return (hitFlags & wxTREE_HITTEST_ONITEMSTATEICON) != 0; }
+	constexpr bool HitsLabel(int hitFlags) { return (hitFlags & wxTREE_HITTEST_ONITEMLABEL) != 0; }
+
+	// enabled boxes only: the three visual variants of each value
+	constexpr bool IsLiveUnchecked(int s) { return s >= wxCheckTree::UNCHECKED && s < wxCheckTree::UNCHECKED_DISABLED; }
+	constexpr bool IsLiveChecked(int s) { return s >= wxCheckTree::CHECKED && s < wxCheckTree::CHECKED_DISABLED; }
+	constexpr bool IsBoxState(int s) { return s >= wxCheckTree::UNCHECKED && s <= wxCheckTree::CHECKED_DISABLED; }
+	constexpr bool IsDisabledState(int s) { return s == wxCheckTree::UNCHECKED_DISABLED || s == wxCheckTree::CHECKED_DISABLED; }
+
+	const wxColour kDisabledText(161, 161, 146);
+}
 
 wxCheckTree::wxCheckTree()
 {
@@ -100,42 +36,38 @@ wxCheckTree::wxCheckTree(wxWindow* parent, const wxWindowID id, const wxPoint& p
 	Init();
 }
 
-
 void wxCheckTree::Init()
 {
 	UpdateCheckBoxImages();
-	Bind(wxEVT_SYS_COLOUR_CHANGED, [this](wxSysColourChangedEvent& event) {
-		event.Skip();
+	// the box bitmaps depend on the theme and the DPI, redraw them when either changes
+	Bind(wxEVT_SYS_COLOUR_CHANGED, [this](wxSysColourChangedEvent& evt) {
+		evt.Skip();
 		CallAfter(&wxCheckTree::UpdateCheckBoxImages);
 	});
-	Bind(wxEVT_DPI_CHANGED, [this](wxDPIChangedEvent& event) {
-		event.Skip();
+	Bind(wxEVT_DPI_CHANGED, [this](wxDPIChangedEvent& evt) {
+		evt.Skip();
 		CallAfter(&wxCheckTree::UpdateCheckBoxImages);
 	});
 
-	Connect(wxEVT_TREE_SEL_CHANGING, wxTreeEventHandler( wxCheckTree::On_Tree_Sel_Changed ), nullptr, this);
-
-	Connect(wxEVT_CHAR, wxKeyEventHandler( wxCheckTree::On_Char ), nullptr, this);
-	Connect(wxEVT_KEY_DOWN, wxKeyEventHandler( wxCheckTree::On_KeyDown ), nullptr, this);
-	Connect(wxEVT_KEY_UP, wxKeyEventHandler( wxCheckTree::On_KeyUp ), nullptr, this);
-
-	Connect(wxEVT_ENTER_WINDOW, wxMouseEventHandler( wxCheckTree::On_Mouse_Enter_Tree ), nullptr, this);
-	Connect(wxEVT_LEAVE_WINDOW, wxMouseEventHandler( wxCheckTree::On_Mouse_Leave_Tree ), nullptr, this);
-	Connect(wxEVT_LEFT_DCLICK, wxMouseEventHandler( wxCheckTree::On_Left_DClick ), nullptr, this);
-	Connect(wxEVT_LEFT_DOWN, wxMouseEventHandler( wxCheckTree::On_Left_Down ), nullptr, this);
-	Connect(wxEVT_LEFT_UP, wxMouseEventHandler( wxCheckTree::On_Left_Up ), nullptr, this);
-	Connect(wxEVT_MOTION, wxMouseEventHandler( wxCheckTree::On_Mouse_Motion ), nullptr, this);
-	Connect(wxEVT_MOUSEWHEEL, wxMouseEventHandler( wxCheckTree::On_Mouse_Wheel ), nullptr, this);
-
-	Connect(wxEVT_SET_FOCUS, wxFocusEventHandler( wxCheckTree::On_Tree_Focus_Set ), nullptr, this);
-	Connect(wxEVT_KILL_FOCUS, wxFocusEventHandler( wxCheckTree::On_Tree_Focus_Lost ), nullptr, this);
+	Bind(wxEVT_TREE_SEL_CHANGING, &wxCheckTree::OnSelChanging, this);
+	Bind(wxEVT_CHAR, &wxCheckTree::OnChar, this);
+	Bind(wxEVT_KEY_DOWN, &wxCheckTree::OnKeyDown, this);
+	Bind(wxEVT_KEY_UP, &wxCheckTree::OnKeyUp, this);
+	Bind(wxEVT_ENTER_WINDOW, &wxCheckTree::OnEnterWindow, this);
+	Bind(wxEVT_LEAVE_WINDOW, &wxCheckTree::OnLeaveWindow, this);
+	Bind(wxEVT_LEFT_DCLICK, &wxCheckTree::OnLeftDClick, this);
+	Bind(wxEVT_LEFT_DOWN, &wxCheckTree::OnLeftDown, this);
+	Bind(wxEVT_LEFT_UP, &wxCheckTree::OnLeftUp, this);
+	Bind(wxEVT_MOTION, &wxCheckTree::OnMotion, this);
+	Bind(wxEVT_MOUSEWHEEL, &wxCheckTree::OnWheel, this);
+	Bind(wxEVT_SET_FOCUS, &wxCheckTree::OnFocusGained, this);
+	Bind(wxEVT_KILL_FOCUS, &wxCheckTree::OnFocusLost, this);
 }
 
 void wxCheckTree::UpdateCheckBoxImages()
 {
-	const wxSize size = wxRendererNative::Get().GetCheckBoxSize(this);
-	wxVector<wxBitmapBundle> states;
-	const int flags[] = {
+	// one native check box rendering per state, in enum order
+	static constexpr int kRenderFlags[] = {
 		wxCONTROL_NONE,
 		wxCONTROL_CURRENT,
 		wxCONTROL_CURRENT | wxCONTROL_PRESSED,
@@ -145,27 +77,32 @@ void wxCheckTree::UpdateCheckBoxImages()
 		wxCONTROL_CHECKED | wxCONTROL_CURRENT | wxCONTROL_PRESSED,
 		wxCONTROL_CHECKED | wxCONTROL_DISABLED,
 	};
-	for (const int stateFlags : flags)
+	wxRendererNative& renderer = wxRendererNative::Get();
+	const wxSize boxSize = renderer.GetCheckBoxSize(this);
+	wxVector<wxBitmapBundle> images;
+	for (int flags : kRenderFlags)
 	{
-		wxBitmap bitmap;
+		wxBitmap bmp;
 #ifdef __WXOSX__
-		bitmap.CreateWithDIPSize(size, GetDPIScaleFactor(), 32);
-		bitmap.UseAlpha();
+		bmp.CreateWithDIPSize(boxSize, GetDPIScaleFactor(), 32);
+		bmp.UseAlpha();
 #else
-		bitmap.Create(size.x, size.y);
+		bmp.Create(boxSize.x, boxSize.y);
 #endif
-		wxMemoryDC dc(bitmap);
+		{
+			wxMemoryDC dc(bmp);
 #ifdef __WXOSX__
-		dc.SetBackground(wxBrush(wxColour(0, 0, 0, 0)));
+			dc.SetBackground(wxBrush(wxColour(0, 0, 0, 0)));
 #else
-		dc.SetBackground(wxBrush(GetBackgroundColour()));
+			dc.SetBackground(wxBrush(GetBackgroundColour()));
 #endif
-		dc.Clear();
-		wxRendererNative::Get().DrawCheckBox(this, dc, wxRect(wxPoint(0, 0), size), stateFlags);
-		dc.SelectObject(wxNullBitmap);
-		states.push_back(wxBitmapBundle::FromBitmap(bitmap));
+			dc.Clear();
+			renderer.DrawCheckBox(this, dc, wxRect(wxPoint(0, 0), boxSize), flags);
+			dc.SelectObject(wxNullBitmap);
+		}
+		images.push_back(wxBitmapBundle::FromBitmap(bmp));
 	}
-	SetStateImages(states);
+	SetStateImages(images);
 	Refresh();
 }
 
@@ -174,39 +111,29 @@ void wxCheckTree::Sort(const wxTreeItemId& node, bool recursive)
 	if (recursive)
 	{
 		wxTreeItemIdValue cookie;
-		for(auto it = GetFirstChild(node, cookie); it.IsOk(); it = GetNextChild(it, cookie))
+		wxTreeItemId child = GetFirstChild(node, cookie);
+		while (child.IsOk())
 		{
-			Sort(it, true);
+			Sort(child, true);
+			child = GetNextChild(child, cookie);
 		}
 	}
-
-	if(GetChildrenCount(node, false) > 0)
-		this->SortChildren(node);
+	if (GetChildrenCount(node, false) != 0)
+		SortChildren(node);
 }
 
 int wxCheckTree::OnCompareItems(const wxTreeItemId& item1, const wxTreeItemId& item2)
 {
-	const bool check1 = GetChildrenCount(item1, false) == 0;
-	const bool check2 = GetChildrenCount(item2, false) == 0;
-
-	if (!check1 && check2)
-		return -1;
-
-	if (check1 && !check2)
-		return 1;
-
+	const bool leaf1 = GetChildrenCount(item1, false) == 0;
+	const bool leaf2 = GetChildrenCount(item2, false) == 0;
+	if (leaf1 != leaf2)
+		return leaf1 ? 1 : -1; // folders first
 	return GetItemText(item1).Lower().compare(GetItemText(item2).Lower());
 }
 
-
 void wxCheckTree::SetItemTextColour(const wxTreeItemId& item, const wxColour& col)
 {
-	const auto it = m_colors.find(item);
-	if (it == m_colors.end())
-		m_colors.emplace(std::pair<wxTreeItemId,wxColour>(item, col));
-	else
-		m_colors[item] = col;
-
+	m_ownerColours[item] = col;
 	wxTreeCtrl::SetItemTextColour(item, col);
 }
 
@@ -214,43 +141,33 @@ bool wxCheckTree::EnableCheckBox(const wxTreeItemId& item, bool enable)
 {
 	if (!item.IsOk())
 		return false;
-	
-	const int state = GetItemState(item);
-
-	if (state < 0 || state > CHECKED_DISABLED)
+	const int s = GetItemState(item);
+	if (!IsBoxState(s))
 		return false;
 
 	if (enable)
 	{
-		if (state == UNCHECKED_DISABLED)
+		if (s == UNCHECKED_DISABLED)
 			SetItemState(item, UNCHECKED);
-		else if (state == CHECKED_DISABLED)
+		else if (s == CHECKED_DISABLED)
 			SetItemState(item, CHECKED);
-
-		const auto it = m_colors.find(item);
-		if (it != m_colors.end())
+		auto saved = m_ownerColours.find(item);
+		if (saved != m_ownerColours.end())
 		{
-			SetItemTextColour(item, it->second);
-			m_colors.erase(it);
+			const wxColour original = saved->second;
+			wxTreeCtrl::SetItemTextColour(item, original);
+			m_ownerColours.erase(item);
 		}
-
-		return true;
-	}
-	if (state == UNCHECKED_DISABLED || state == CHECKED_DISABLED)
-	{
-		//don't disable a second time or we'll lose the
-		//text color information.
 		return true;
 	}
 
-	if (state == UNCHECKED || state == UNCHECKED_MOUSE_OVER || state == UNCHECKED_LEFT_DOWN)
-		SetItemState(item, UNCHECKED_DISABLED);
-	else if (state == CHECKED || state == CHECKED_MOUSE_OVER || state == CHECKED_LEFT_DOWN)
-		SetItemState(item, CHECKED_DISABLED);
+	if (IsDisabledState(s))
+		return true; // already disabled, the saved colour must not be overwritten with the grey one
 
-	const wxColour col = GetItemTextColour(item);
-	SetItemTextColour(item, wxColour(161, 161, 146));
-	m_colors[item] = col;
+	SetItemState(item, IsLiveUnchecked(s) ? UNCHECKED_DISABLED : CHECKED_DISABLED);
+	const wxColour original = GetItemTextColour(item);
+	wxTreeCtrl::SetItemTextColour(item, kDisabledText);
+	m_ownerColours[item] = original;
 	return true;
 }
 
@@ -263,39 +180,30 @@ void wxCheckTree::MakeCheckable(const wxTreeItemId& item, bool state)
 {
 	if (!item.IsOk())
 		return;
-
-	const int i = GetItemState(item);
-	if (i < 0 || i > CHECKED_DISABLED)
+	if (!IsBoxState(GetItemState(item)))
 		SetItemState(item, state ? CHECKED : UNCHECKED);
 }
 
 bool wxCheckTree::IsCheckable(const wxTreeItemId& item)
 {
-	if (!item.IsOk())
-		return false;
-
-	const int i = GetItemState(item);
-	return i >= 0 && i <= CHECKED_DISABLED;
+	return item.IsOk() && IsBoxState(GetItemState(item));
 }
 
 void wxCheckTree::Check(const wxTreeItemId& item, bool state)
 {
 	if (!item.IsOk())
 		return;
-
-	const int old_state = GetItemState(item);
-	if (UNCHECKED <= old_state && old_state <= CHECKED_DISABLED)
-	{
-		const bool enable = !(old_state == UNCHECKED_DISABLED || old_state == CHECKED_DISABLED);
-		int check = enable ? CHECKED : CHECKED_DISABLED;
-		int uncheck = enable ? UNCHECKED : UNCHECKED_DISABLED;
-		const int new_state = state ? check : uncheck;
-
-		if (new_state != old_state)
-		{
-			SetItemState(item, new_state);
-		}
-	}
+	const int s = GetItemState(item);
+	if (!IsBoxState(s))
+		return;
+	const bool disabled = IsDisabledState(s);
+	int wanted;
+	if (state)
+		wanted = disabled ? CHECKED_DISABLED : CHECKED;
+	else
+		wanted = disabled ? UNCHECKED_DISABLED : UNCHECKED;
+	if (wanted != s)
+		SetItemState(item, wanted);
 }
 
 void wxCheckTree::Uncheck(const wxTreeItemId& item)
@@ -303,282 +211,276 @@ void wxCheckTree::Uncheck(const wxTreeItemId& item)
 	Check(item, false);
 }
 
-void wxCheckTree::On_Tree_Sel_Changed(wxTreeEvent& event)
+// --- box visuals -------------------------------------------------------------
+
+void wxCheckTree::ShowNormal(const wxTreeItemId& item)
 {
-	wxTreeItemId id = event.GetItem();
+	if (!item.IsOk())
+		return;
+	const int s = GetItemState(item);
+	if (IsLiveUnchecked(s))
+		SetItemState(item, UNCHECKED);
+	else if (IsLiveChecked(s))
+		SetItemState(item, CHECKED);
+}
 
-	unhighlight(this, last_kf);
-	mohighlight(this, id, false);
-	last_kf = id;
+void wxCheckTree::ShowPressed(const wxTreeItemId& item)
+{
+	if (!item.IsOk())
+		return;
+	const int s = GetItemState(item);
+	if (IsLiveUnchecked(s))
+		SetItemState(item, UNCHECKED_LEFT_DOWN);
+	else if (IsLiveChecked(s))
+		SetItemState(item, CHECKED_LEFT_DOWN);
+}
 
+// Shows the hover look; with toggle the value flips first and the owner is told
+// (GetExtraLong() == 1 means the box is now checked; a disabled box reports 0).
+void wxCheckTree::ShowHover(const wxTreeItemId& item, bool toggle)
+{
+	if (!item.IsOk())
+		return;
+	const int s = GetItemState(item);
+	if (s < 0)
+		return;
+	const bool wasUnchecked = IsLiveUnchecked(s);
+	if (wasUnchecked)
+		SetItemState(item, toggle ? CHECKED_MOUSE_OVER : UNCHECKED_MOUSE_OVER);
+	else if (IsLiveChecked(s))
+		SetItemState(item, toggle ? UNCHECKED_MOUSE_OVER : CHECKED_MOUSE_OVER);
+	if (!toggle)
+		return;
+	wxTreeEvent notify(wxEVT_CHECKTREE_CHOICE, this, item);
+	notify.SetExtraLong(wasUnchecked ? 1 : 0);
+	ProcessWindowEvent(notify);
+}
+
+void wxCheckTree::ForgetPointer()
+{
+	ShowNormal(m_pressedItem);
+	ShowNormal(m_hoverItem);
+	m_pressedItem = wxTreeItemId();
+	m_hoverItem = wxTreeItemId();
+}
+
+// --- keyboard ------------------------------------------------------------------
+
+void wxCheckTree::OnSelChanging(wxTreeEvent& event)
+{
+	const wxTreeItemId next = event.GetItem();
+	ShowNormal(m_keyItem);
+	ShowHover(next, false);
+	m_keyItem = next;
 	event.Skip();
 }
 
-void wxCheckTree::On_Char(wxKeyEvent& event)
+void wxCheckTree::OnChar(wxKeyEvent& event)
 {
-	if (!GetSelection().IsOk() && GetCount() > 0)
+	if (GetSelection().IsOk() || GetCount() == 0)
 	{
-		//If there is no selection, any keypress should just select the first item
-		wxTreeItemIdValue cookie;
-		const auto new_item = HasFlag(wxTR_HIDE_ROOT) ? GetFirstChild(GetRootItem(), cookie) : GetRootItem();
-		SelectItem(new_item);
-		last_kf = new_item;
+		event.Skip();
 		return;
 	}
-
-	event.Skip();
+	// nothing selected yet: the first key press only selects the first item
+	wxTreeItemId first = GetRootItem();
+	if (HasFlag(wxTR_HIDE_ROOT))
+	{
+		wxTreeItemIdValue cookie;
+		first = GetFirstChild(first, cookie);
+	}
+	SelectItem(first);
+	m_keyItem = first;
 }
 
-void wxCheckTree::On_KeyDown(wxKeyEvent& event)
+void wxCheckTree::OnKeyDown(wxKeyEvent& event)
 {
 	if (event.GetKeyCode() == WXK_SPACE)
 	{
-		last_kf = this->GetSelection();
-		ldhighlight(this, last_kf);
+		m_keyItem = GetSelection();
+		ShowPressed(m_keyItem);
 	}
-
 	event.Skip();
 }
 
-void wxCheckTree::On_KeyUp(wxKeyEvent& event)
+void wxCheckTree::OnKeyUp(wxKeyEvent& event)
 {
-	if (event.GetKeyCode() == WXK_SPACE)
+	const int key = event.GetKeyCode();
+	if (key == WXK_SPACE)
 	{
-		//last_kf = this->GetSelection();
- 		mohighlight(this, last_kf, true);
+		ShowHover(m_keyItem, true);
 	}
-	else if (event.GetKeyCode() == WXK_ESCAPE)
+	else if (key == WXK_ESCAPE)
 	{
-		unhighlight(this, last_kf);
-		last_kf = {};
+		ShowNormal(m_keyItem);
+		m_keyItem = wxTreeItemId();
 		Unselect();
 	}
-
 	event.Skip();
 }
 
+// --- mouse ---------------------------------------------------------------------
 
-void wxCheckTree::On_Mouse_Enter_Tree(wxMouseEvent& event)
+void wxCheckTree::OnEnterWindow(wxMouseEvent& event)
 {
 	if (event.LeftIsDown())
-	{
-		mouse_entered_tree_with_left_down = true;
-	}
+		m_dragEnteredPressed = true;
 }
 
-void wxCheckTree::On_Mouse_Leave_Tree(wxMouseEvent& event)
+void wxCheckTree::OnLeaveWindow(wxMouseEvent& /*event*/)
 {
-	unhighlight(this, last_mouse_over);
-	unhighlight(this, last_left_down);
-	last_mouse_over = {};
-	last_left_down = {};
+	ShowNormal(m_hoverItem);
+	ShowNormal(m_pressedItem);
+	m_hoverItem = wxTreeItemId();
+	m_pressedItem = wxTreeItemId();
 }
 
-void wxCheckTree::On_Left_DClick(wxMouseEvent& event)
+void wxCheckTree::OnLeftDClick(wxMouseEvent& event)
 {
-	int flags;
-
-	HitTest(event.GetPosition(), flags);
-
-	//double clicks on buttons can be annoying, so we'll ignore those
-	//but all other double clicks will just have 1 more click added to them
-
-	//without this, the check boxes are not as responsive as they should be
-	if (!(flags & wxTREE_HITTEST_ONITEMBUTTON))
-	{
-		On_Left_Down(event);
-		On_Left_Up(event);
-	}
-}
-
-void wxCheckTree::On_Left_Down(wxMouseEvent& event)
-{
-	int flags;
-	wxTreeItemId id = HitTest(event.GetPosition(), flags);
-	if (!id.IsOk())
+	// a double click counts as one more click, except on the expand button
+	int hit = 0;
+	HitTest(event.GetPosition(), hit);
+	if (hit & wxTREE_HITTEST_ONITEMBUTTON)
 		return;
-
-	int i = GetItemState(id);
-
-	if (id.IsOk() && i >= 0 && on_check(flags))
-	{
-		last_left_down = id;
-		ldhighlight(this, id);
-	}
-	else if (on_label(flags))
-		event.Skip();
+	OnLeftDown(event);
+	OnLeftUp(event);
 }
 
-void wxCheckTree::On_Left_Up(wxMouseEvent& event)
+void wxCheckTree::OnLeftDown(wxMouseEvent& event)
+{
+	int hit = 0;
+	const wxTreeItemId item = HitTest(event.GetPosition(), hit);
+	if (!item.IsOk())
+		return;
+	if (GetItemState(item) >= 0 && HitsBox(hit))
+	{
+		m_pressedItem = item;
+		ShowPressed(item);
+	}
+	else if (HitsLabel(hit))
+	{
+		event.Skip();
+	}
+}
+
+void wxCheckTree::OnLeftUp(wxMouseEvent& event)
 {
 	SetFocus();
-
-	int flags;
-	wxTreeItemId id = HitTest(event.GetPosition(), flags);
-	if (!id.IsOk())
+	int hit = 0;
+	const wxTreeItemId item = HitTest(event.GetPosition(), hit);
+	if (!item.IsOk())
 		return;
+	const bool onBox = GetItemState(item) >= 0 && HitsBox(hit);
 
-	int i = GetItemState(id);
-
-	if (mouse_entered_tree_with_left_down)
+	if (m_dragEnteredPressed)
 	{
-		mouse_entered_tree_with_left_down = false;
-
-		if (i >= 0 && on_check(flags))
+		// the press started outside the tree: no toggle, just hover
+		m_dragEnteredPressed = false;
+		if (onBox)
 		{
-			mohighlight(this, id, false);
-			last_mouse_over = id;
+			ShowHover(item, false);
+			m_hoverItem = item;
 		}
+		return;
 	}
-	else if (id.IsOk())
-	{
-		if (flags & wxTREE_HITTEST_ONITEMBUTTON && ItemHasChildren(id))
-		{
-			if (IsExpanded(id))
-			{
-				Collapse(id);
-			}
-			else
-			{
-				Expand(id);
-			}
-		}
-		else if (i >= 0 && on_check(flags))
-		{
-			if (id != last_left_down)
-			{
-				unhighlight(this, last_left_down);
-				mohighlight(this, id, false);
-			}
-			else
-			{
-				mohighlight(this, id, true);
-			}
 
-			last_left_down = wxTreeItemId();
-			last_mouse_over = id;
-		}
-		else if (on_label(flags))
+	if ((hit & wxTREE_HITTEST_ONITEMBUTTON) && ItemHasChildren(item))
+	{
+		if (IsExpanded(item))
+			Collapse(item);
+		else
+			Expand(item);
+	}
+	else if (onBox)
+	{
+		if (item == m_pressedItem)
 		{
-			event.Skip();
+			ShowHover(item, true); // press and release on the same box toggles it
 		}
 		else
 		{
-			unhighlight(this, last_left_down);
-			unhighlight(this, last_mouse_over);
-			last_left_down = wxTreeItemId();
-			last_mouse_over = wxTreeItemId();
+			ShowNormal(m_pressedItem);
+			ShowHover(item, false);
 		}
+		m_pressedItem = wxTreeItemId();
+		m_hoverItem = item;
+	}
+	else if (HitsLabel(hit))
+	{
+		event.Skip();
 	}
 	else
 	{
-		//id is not ok
-		unhighlight(this, last_left_down);
-		unhighlight(this, last_mouse_over);
-		last_left_down = wxTreeItemId();
-		last_mouse_over = wxTreeItemId();
+		ForgetPointer();
 	}
 }
 
-void wxCheckTree::On_Mouse_Motion(wxMouseEvent& event)
+void wxCheckTree::OnMotion(wxMouseEvent& event)
 {
-	if (mouse_entered_tree_with_left_down)
+	if (m_dragEnteredPressed)
+		return; // wait for the button to be released
+
+	int hit = 0;
+	const wxTreeItemId item = HitTest(event.GetPosition(), hit);
+	if (!item.IsOk())
 	{
-		//just ignore everything until the left button is released
+		ShowNormal(m_hoverItem);
+		m_hoverItem = wxTreeItemId();
 		return;
 	}
 
-	int flags;
-	wxTreeItemId id = HitTest(event.GetPosition(), flags);
-
-	if (!id.IsOk())
+	if (event.LeftIsDown() && m_pressedItem.IsOk())
 	{
-		unhighlight(this, last_mouse_over);
-		last_mouse_over = {};
+		// like a normal check box: pressed look only while over the box that was pressed
+		if (item != m_pressedItem)
+		{
+			ShowHover(m_pressedItem, false);
+			return;
+		}
+		const int s = GetItemState(m_pressedItem);
+		if (s != UNCHECKED_LEFT_DOWN && s != CHECKED_LEFT_DOWN)
+			ShowPressed(m_pressedItem);
+		return;
 	}
-	else if (event.LeftIsDown() && last_left_down.IsOk())
+
+	if (GetItemState(item) < 0 || !HitsBox(hit))
 	{
-		//to match the behavior of ordinary check boxes,
-		//if we've moved to a new item while holding the mouse button down
-		//we want to set the item where the left down click occured to have
-		//mouse over highlight.  And if we return to the box where the
-		//left down occured, we want to return it to the having the left down highlight
-
-		//I don't understand why this is the behavior
-		//of ordinary check boxes, but I'm goin to match it anyway.
-
-		if (id == last_left_down)
-		{
-			const auto state = GetItemState(last_left_down);
-			if (state != UNCHECKED_LEFT_DOWN && state != CHECKED_LEFT_DOWN)
-			{
-				ldhighlight(this, last_left_down);
-			}
-		}
-		else
-			mohighlight(this, last_left_down, false);
+		ShowNormal(m_hoverItem);
+		m_hoverItem = wxTreeItemId();
 	}
-	else
+	else if (item != m_hoverItem)
 	{
-		//4 cases 1 we're still on the same item, but we've moved off the state icon or label
-		//        2 we're still on the same item and on the state icon or label - do nothing
-		//        3 we're on a new item but not on its state icon or label (or the new item has no state)
-		//        4 we're on a new item, it has a state icon, and we're on the state icon or label
-
-		const int state = GetItemState(id);
-		if (id == last_mouse_over)
-		{
-			if (state < 0 || !on_check(flags))
-			{
-				unhighlight(this, last_mouse_over);
-				last_mouse_over = {};
-			}
-		}
-		else
-		{
-			if (state < 0 || !on_check(flags))
-			{
-				unhighlight(this, last_mouse_over);
-				last_mouse_over = {};
-			}
-			else
-			{
-				unhighlight(this, last_mouse_over);
-				mohighlight(this, id, false);
-				last_mouse_over = id;
-			}
-		}
+		ShowNormal(m_hoverItem);
+		ShowHover(item, false);
+		m_hoverItem = item;
 	}
 }
 
-void wxCheckTree::On_Mouse_Wheel(wxMouseEvent& event)
+void wxCheckTree::OnWheel(wxMouseEvent& event)
 {
 	event.Skip();
 }
 
-void wxCheckTree::On_Tree_Focus_Set(wxFocusEvent& event)
-{
-	//event.Skip();
+// --- focus ---------------------------------------------------------------------
 
-	//skipping this event will set the last selected item
-	//to be highlighted and I want the tree items to only be
-	//highlighted by keyboard actions.
+void wxCheckTree::OnFocusGained(wxFocusEvent& /*event*/)
+{
+	// not skipped: the default handler would highlight the last selection, items
+	// should only light up through keyboard navigation
 }
 
-void wxCheckTree::On_Tree_Focus_Lost(wxFocusEvent& event)
+void wxCheckTree::OnFocusLost(wxFocusEvent& event)
 {
-	unhighlight(this, last_kf);
+	ShowNormal(m_keyItem);
 	Unselect();
 	event.Skip();
 }
 
 void wxCheckTree::SetFocusFromKbd()
 {
-	if (last_kf.IsOk())
-		SelectItem(last_kf);
-
-	wxTreeEvent event2(wxEVT_CHECKTREE_FOCUS, this, wxTreeItemId());
-	ProcessWindowEvent(event2);
-
+	if (m_keyItem.IsOk())
+		SelectItem(m_keyItem);
+	wxTreeEvent notify(wxEVT_CHECKTREE_FOCUS, this, wxTreeItemId());
+	ProcessWindowEvent(notify);
 	wxWindow::SetFocusFromKbd();
 }
