@@ -58,6 +58,30 @@ double PerRun(double total, u64 runs)
 {
   return runs == 0 ? 0.0 : total / runs;
 }
+// The recompilers this build has. Anything else (the plain interpreter, or a core for
+// another host architecture) gives nullptr.
+std::unique_ptr<JitBase> MakeRecompiler(PowerPC::CPUCore core, Core::System& system)
+{
+  using PowerPC::CPUCore;
+  if (core == CPUCore::CachedInterpreter)
+    return std::make_unique<CachedInterpreter>(system);
+#ifdef _M_X86_64
+  if (core == CPUCore::JIT64)
+    return std::make_unique<Jit64>(system);
+#endif
+#ifdef _M_ARM_64
+  if (core == CPUCore::JITARM64)
+    return std::make_unique<JitArm64>(system);
+#endif
+  return nullptr;
+}
+
+template <typename F>
+void WithBlockCache(JitBase* jit, F&& f)
+{
+  if (jit != nullptr)
+    f(*jit->GetBlockCache());
+}
 }  // namespace
 
 JitInterface::JitInterface(Core::System& system) : m_system(system)
@@ -66,39 +90,12 @@ JitInterface::JitInterface(Core::System& system) : m_system(system)
 
 JitInterface::~JitInterface() = default;
 
-void JitInterface::SetJit(std::unique_ptr<JitBase> jit)
-{
-  m_jit = std::move(jit);
-}
-
-void JitInterface::DoState(PointerWrap& p)
-{
-  if (m_jit && p.IsReadMode())
-    m_jit->ClearCache();
-}
-
 CPUCoreBase* JitInterface::InitJitCore(PowerPC::CPUCore core)
 {
-  switch (core)
-  {
-#ifdef _M_X86_64
-  case PowerPC::CPUCore::JIT64:
-    m_jit = std::make_unique<Jit64>(m_system);
-    break;
-#endif
-#ifdef _M_ARM_64
-  case PowerPC::CPUCore::JITARM64:
-    m_jit = std::make_unique<JitArm64>(m_system);
-    break;
-#endif
-  case PowerPC::CPUCore::CachedInterpreter:
-    m_jit = std::make_unique<CachedInterpreter>(m_system);
-    break;
-  default:
-    // Not a recompiler; the caller falls back to its default core.
-    m_jit.reset();
+  // An unsupported core leaves no recompiler behind; the caller falls back to its default.
+  m_jit = MakeRecompiler(core, m_system);
+  if (m_jit == nullptr)
     return nullptr;
-  }
   m_jit->Init();
   return m_jit.get();
 }
@@ -106,6 +103,18 @@ CPUCoreBase* JitInterface::InitJitCore(PowerPC::CPUCore core)
 CPUCoreBase* JitInterface::GetCore() const
 {
   return m_jit.get();
+}
+
+void JitInterface::SetJit(std::unique_ptr<JitBase> jit)
+{
+  m_jit = std::move(jit);
+}
+
+void JitInterface::DoState(PointerWrap& p)
+{
+  // Nothing of the recompiler is saved; loading a state just drops the compiled code.
+  if (p.IsReadMode() && m_jit)
+    m_jit->ClearCache();
 }
 
 #ifndef _ARCH_32
@@ -192,51 +201,50 @@ void JitInterface::JitBlockLogDump(const Core::CPUThreadGuard& guard, std::FILE*
   });
 }
 
-void JitInterface::WipeBlockProfilingData(const Core::CPUThreadGuard& guard)
-{
-  if (m_jit)
-    m_jit->GetBlockCache()->WipeBlockProfilingData(guard);
-}
-
-void JitInterface::RunOnBlocks(const Core::CPUThreadGuard& guard,
-                               const std::function<void(const JitBlock&)>& f) const
-{
-  if (m_jit)
-    m_jit->GetBlockCache()->RunOnBlocks(guard, f);
-}
-
-std::size_t JitInterface::GetBlockCount() const
-{
-  return m_jit ? m_jit->GetBlockCache()->GetBlockCount() : 0;
-}
-
-bool JitInterface::HandleFault(uintptr_t access_address, SContext* ctx)
-{
-  // A fault with no recompiler is not ours to handle.
-  return m_jit && m_jit->HandleFault(access_address, ctx);
-}
-
+// Fault handling: with no recompiler loaded, no fault is ours.
 bool JitInterface::HandleStackFault()
 {
   return m_jit && m_jit->HandleStackFault();
 }
 
-void JitInterface::ClearCache(const Core::CPUThreadGuard&)
+bool JitInterface::HandleFault(uintptr_t access_address, SContext* ctx)
 {
-  if (m_jit)
-    m_jit->ClearCache();
+  return m_jit && m_jit->HandleFault(access_address, ctx);
+}
+
+// Block cache access. Everything here is a no-op without a recompiler.
+std::size_t JitInterface::GetBlockCount() const
+{
+  return m_jit ? m_jit->GetBlockCache()->GetBlockCount() : 0;
+}
+
+void JitInterface::RunOnBlocks(const Core::CPUThreadGuard& guard,
+                               const std::function<void(const JitBlock&)>& f) const
+{
+  WithBlockCache(m_jit.get(), [&](JitBaseBlockCache& cache) { cache.RunOnBlocks(guard, f); });
+}
+
+void JitInterface::WipeBlockProfilingData(const Core::CPUThreadGuard& guard)
+{
+  WithBlockCache(m_jit.get(),
+                 [&](JitBaseBlockCache& cache) { cache.WipeBlockProfilingData(guard); });
 }
 
 void JitInterface::ClearSafe()
 {
-  if (m_jit)
-    m_jit->GetBlockCache()->Clear();
+  WithBlockCache(m_jit.get(), [](JitBaseBlockCache& cache) { cache.Clear(); });
 }
 
 void JitInterface::EraseSingleBlock(const JitBlock& block)
 {
-  if (m_jit)
-    m_jit->EraseSingleBlock(block);
+  if (JitBase* jit = m_jit.get())
+    jit->EraseSingleBlock(block);
+}
+
+void JitInterface::ClearCache(const Core::CPUThreadGuard&)
+{
+  if (JitBase* jit = m_jit.get())
+    jit->ClearCache();
 }
 
 std::vector<JitInterface::MemoryStats> JitInterface::GetMemoryStats() const
