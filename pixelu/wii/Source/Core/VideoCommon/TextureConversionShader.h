@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -16,13 +15,16 @@ enum class TLUTFormat;
 enum TexelBufferFormat : u32;
 struct EFBCopyParams;
 
+// GPU shaders that convert between the console's tiled texture formats and RGBA8.
 namespace TextureConversionShaderTiled
 {
+// How many EFB texels one RGBA8 pixel of an EFB-to-RAM encoder output holds.
 u16 GetEncodedSampleCount(EFBCopyFormat format);
 
+// Fragment shader encoding an EFB copy into the tiled memory layout of its copy format.
 std::string GenerateEncodingShader(const EFBCopyParams& params, APIType api_type);
 
-// Information required to compile and dispatch a texture decoding shader.
+// What is needed to compile and dispatch the compute shader that decodes one texture format.
 struct DecodingShaderInfo
 {
   TexelBufferFormat buffer_format;
@@ -33,19 +35,19 @@ struct DecodingShaderInfo
   const char* shader_body;
 };
 
-// Obtain shader information for the specified texture format.
-// If this format does not have a shader written for it, returns nullptr.
+// The decoder for a format, or nullptr for formats that have no GPU decoder.
 const DecodingShaderInfo* GetDecodingShaderInfo(TextureFormat format);
 
-// Determine how many thread groups should be dispatched for an image of the specified width/height.
-// First is the number of X groups, second is the number of Y groups, Z is always one.
+// Thread groups to dispatch for a width x height image, as (x, y); z is always 1.
 std::pair<u32, u32> GetDispatchCount(const DecodingShaderInfo* info, u32 width, u32 height);
 
-// Returns the GLSL string containing the texture decoding shader for the specified format.
+// Full GLSL source of the decoder for `format` (empty if there is none), set up for the given
+// palette format when the texture is paletted.
 std::string GenerateDecodingShader(TextureFormat format, std::optional<TLUTFormat> palette_format,
                                    APIType api_type);
 
-// Returns the GLSL string containing the palette conversion shader for the specified format.
+// GLSL source of the fragment shader that applies a palette of `palette_format` to an index
+// texture.
 std::string GeneratePaletteConversionShader(TLUTFormat palette_format, APIType api_type);
 
 }  // namespace TextureConversionShaderTiled

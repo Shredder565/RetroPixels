@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -13,8 +12,11 @@
 
 enum class APIType;
 
+// Shaders for EFB copies that are kept on the GPU as textures.
 namespace TextureConversionShaderGen
 {
+// Everything the pixel shader depends on. Stored byte for byte in shader caches: the layout
+// (packed, field order and bit widths) must not change.
 #pragma pack(1)
 struct UidData
 {
@@ -36,6 +38,8 @@ using TCShaderUid = ShaderUid<UidData>;
 ShaderCode GenerateVertexShader(APIType api_type);
 ShaderCode GeneratePixelShader(APIType api_type, const UidData* uid_data);
 
+// Builds the uid for a copy, reading the EFB pixel format from BP memory and the true-colour
+// setting from the active config.
 TCShaderUid GetShaderUid(EFBCopyFormat dst_format, bool is_depth_copy, bool is_intensity,
                          bool scale_by_half, float gamma_rcp,
                          const std::array<u32, 3>& filter_coefficients);
@@ -49,11 +53,9 @@ struct fmt::formatter<TextureConversionShaderGen::UidData>
   template <typename FormatContext>
   auto format(const TextureConversionShaderGen::UidData& uid, FormatContext& ctx) const
   {
-    std::string dst_format;
-    if (uid.dst_format == EFBCopyFormat::XFB)
-      dst_format = "XFB";
-    else
-      dst_format = fmt::to_string(uid.dst_format);
+    // XFB is not one of the named EFB copy formats, so it is spelled out here.
+    const std::string dst_format =
+        uid.dst_format == EFBCopyFormat::XFB ? std::string("XFB") : fmt::to_string(uid.dst_format);
     return fmt::format_to(ctx.out(),
                           "dst_format: {}, efb_has_alpha: {}, is_depth_copy: {}, is_intensity: {}, "
                           "scale_by_half: {}, all_copy_filter_coefs_needed: {}, "
