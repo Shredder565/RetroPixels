@@ -1,5 +1,4 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,14 +7,14 @@
 
 namespace Common::Random
 {
-/// Fill `buffer` with random bytes using a cryptographically secure pseudo-random number generator.
+// Fills `buffer` with `size` cryptographically secure random bytes. Thread-safe.
 void Generate(void* buffer, std::size_t size);
 
-/// Generates a random value of arithmetic type `T`
+// A random value of arithmetic type T (every bit pattern equally likely).
 template <typename T>
 T GenerateValue()
 {
-  static_assert(std::is_arithmetic<T>(), "T must be an arithmetic type in GenerateValue.");
+  static_assert(std::is_arithmetic_v<T>, "GenerateValue needs an arithmetic type");
   T value;
   Generate(&value, sizeof(value));
   return value;

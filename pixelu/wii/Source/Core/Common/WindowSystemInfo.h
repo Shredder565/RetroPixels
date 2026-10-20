@@ -1,8 +1,9 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+// Which native windowing system the handles in WindowSystemInfo belong to. Picks the GL context
+// type / Vulkan surface extension in the video backends.
 enum class WindowSystemType
 {
   Headless,
@@ -15,6 +16,7 @@ enum class WindowSystemType
   Haiku,
 };
 
+// Native handles the frontend passes to the video backend and input code.
 struct WindowSystemInfo
 {
   WindowSystemInfo() = default;
@@ -25,22 +27,18 @@ struct WindowSystemInfo
   {
   }
 
-  // Window system type. Determines which GL context or Vulkan WSI is used.
   WindowSystemType type = WindowSystemType::Headless;
 
-  // Connection to a display server. This is used on X11 and Wayland platforms.
+  // Display server connection (X11 Display*, wl_display*); unused on Windows.
   void* display_connection = nullptr;
 
-  // Render window. This is a pointer to the native window handle, which depends
-  // on the platform. e.g. HWND for Windows, Window for X11. If the surface is
-  // set to nullptr, the video backend will run in headless mode.
+  // Top-level native window (an HWND on Windows). nullptr means render headless.
   void* render_window = nullptr;
 
-  // Render surface. Depending on the host platform, this may differ from the window.
-  // This is kept separate as input may require a different handle to rendering, and
-  // during video backend startup the surface pointer may change (MoltenVK).
+  // The native surface rendering goes to. Usually the same as render_window, but kept separate
+  // because input wants the window while the backend may swap the surface during startup.
   void* render_surface = nullptr;
 
-  // Scale of the render surface. For hidpi systems, this will be >1.
+  // Surface DPI scale factor (1.0 = 96 DPI).
   float render_surface_scale = 1.0f;
 };

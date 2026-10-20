@@ -1,44 +1,58 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/Matrix.h"
 
 #include <cmath>
+#include <cstddef>
 
 #include "Common/MathUtil.h"
 
 namespace
 {
-// Multiply a NxM matrix by a MxP matrix.
-template <int N, int M, int P, typename T>
-auto MatrixMultiply(const std::array<T, N * M>& a, const std::array<T, M * P>& b)
-    -> std::array<T, N * P>
+// Row-major (Rows x Inner) * (Inner x Cols) product.
+template <std::size_t Rows, std::size_t Inner, std::size_t Cols>
+std::array<float, Rows * Cols> Product(const std::array<float, Rows * Inner>& lhs,
+                                       const std::array<float, Inner * Cols>& rhs)
 {
-  std::array<T, N * P> result;
-
-  for (int n = 0; n != N; ++n)
+  std::array<float, Rows * Cols> out;
+  for (std::size_t row = 0; row < Rows; ++row)
   {
-    for (int p = 0; p != P; ++p)
+    for (std::size_t col = 0; col < Cols; ++col)
     {
-      T temp = {};
-      for (int m = 0; m != M; ++m)
-      {
-        temp += a[n * M + m] * b[m * P + p];
-      }
-      result[n * P + p] = temp;
+      float sum = 0.0f;
+      for (std::size_t k = 0; k < Inner; ++k)
+        sum += lhs[row * Inner + k] * rhs[k * Cols + col];
+      out[row * Cols + col] = sum;
     }
   }
-
-  return result;
+  return out;
 }
 
+// Determinant of the 2x2 matrix [[a, b], [c, d]].
+constexpr float Det2(float a, float b, float c, float d)
+{
+  return a * d - b * c;
+}
 }  // namespace
 
 namespace Common
 {
+// ---- Quaternion -------------------------------------------------------------------------------
+
+Quaternion::Quaternion(float w, float x, float y, float z) : data(x, y, z, w)
+{
+}
+
 Quaternion Quaternion::Identity()
 {
   return Quaternion(1, 0, 0, 0);
+}
+
+Quaternion Quaternion::Rotate(float rad, const Vec3& axis)
+{
+  const float half = rad / 2;
+  const float s = std::sin(half);
+  return Quaternion(std::cos(half), axis.x * s, axis.y * s, axis.z * s);
 }
 
 Quaternion Quaternion::RotateX(float rad)
@@ -58,21 +72,10 @@ Quaternion Quaternion::RotateZ(float rad)
 
 Quaternion Quaternion::RotateXYZ(const Vec3& rads)
 {
-  const auto length = rads.Length();
-  return length ? Common::Quaternion::Rotate(length, rads / length) :
-                  Common::Quaternion::Identity();
-}
-
-Quaternion Quaternion::Rotate(float rad, const Vec3& axis)
-{
-  const auto sin_angle_2 = std::sin(rad / 2);
-
-  return Quaternion(std::cos(rad / 2), axis.x * sin_angle_2, axis.y * sin_angle_2,
-                    axis.z * sin_angle_2);
-}
-
-Quaternion::Quaternion(float w, float x, float y, float z) : data(x, y, z, w)
-{
+  const float angle = rads.Length();
+  if (angle == 0)
+    return Identity();
+  return Rotate(angle, rads / angle);
 }
 
 float Quaternion::Norm() const
@@ -82,31 +85,31 @@ float Quaternion::Norm() const
 
 Quaternion Quaternion::Normalized() const
 {
-  Quaternion result(*this);
-  result.data /= Norm();
-  return result;
+  Quaternion unit = *this;
+  unit.data /= Norm();
+  return unit;
 }
 
 Quaternion Quaternion::Conjugate() const
 {
-  return Quaternion(data.w, -1 * data.x, -1 * data.y, -1 * data.z);
+  return Quaternion(data.w, -data.x, -data.y, -data.z);
 }
 
 Quaternion Quaternion::Inverted() const
 {
+  // For a unit quaternion the inverse is the conjugate.
   return Normalized().Conjugate();
 }
 
 Quaternion& Quaternion::operator*=(const Quaternion& rhs)
 {
-  auto& a = data;
-  auto& b = rhs.data;
-
-  data = Vec4{a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
-              a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
-              a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
-              // W
-              a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
+  const Vec4 p = data;
+  const Vec4& q = rhs.data;
+  // (pw + pv)(qw + qv) = pw*qw - pv.qv + pw*qv + qw*pv + pv x qv
+  data = Vec4{p.w * q.x + p.x * q.w + p.y * q.z - p.z * q.y,
+              p.w * q.y - p.x * q.z + p.y * q.w + p.z * q.x,
+              p.w * q.z + p.x * q.y - p.y * q.x + p.z * q.w,
+              p.w * q.w - p.x * q.x - p.y * q.y - p.z * q.z};
   return *this;
 }
 
@@ -117,211 +120,177 @@ Quaternion operator*(Quaternion lhs, const Quaternion& rhs)
 
 Vec3 operator*(const Quaternion& lhs, const Vec3& rhs)
 {
-  const auto result = lhs * Quaternion(0, rhs.x, rhs.y, rhs.z) * lhs.Conjugate();
-  return Vec3(result.data.x, result.data.y, result.data.z);
+  // v' = q * (0, v) * q^-1, with q assumed to be unit length.
+  const Quaternion rotated = lhs * Quaternion(0, rhs.x, rhs.y, rhs.z) * lhs.Conjugate();
+  return {rotated.data.x, rotated.data.y, rotated.data.z};
 }
 
 Vec3 FromQuaternionToEuler(const Quaternion& q)
 {
-  Vec3 result;
+  const float x = q.data.x;
+  const float y = q.data.y;
+  const float z = q.data.z;
+  const float w = q.data.w;
 
-  const float qx = q.data.x;
-  const float qy = q.data.y;
-  const float qz = q.data.z;
-  const float qw = q.data.w;
+  Vec3 euler;
 
-  const float sinr_cosp = 2 * (qw * qx + qy * qz);
-  const float cosr_cosp = 1 - 2 * (qx * qx + qy * qy);
-  result.x = std::atan2(sinr_cosp, cosr_cosp);
+  // Roll
+  euler.x = std::atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y));
 
-  const float sinp = 2 * (qw * qy - qz * qx);
-  if (std::abs(sinp) >= 1)
-    result.y = std::copysign(MathUtil::PI / 2, sinp);  // use 90 degrees if out of range
-  else
-    result.y = std::asin(sinp);
+  // Pitch, clamped to +-90 degrees where rounding pushes the sine out of range.
+  const float sin_pitch = 2 * (w * y - z * x);
+  euler.y = std::abs(sin_pitch) >= 1 ? std::copysign(MathUtil::PI / 2, sin_pitch) :
+                                       std::asin(sin_pitch);
 
-  const float siny_cosp = 2 * (qw * qz + qx * qy);
-  const float cosy_cosp = 1 - 2 * (qy * qy + qz * qz);
-  result.z = std::atan2(siny_cosp, cosy_cosp);
+  // Yaw
+  euler.z = std::atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z));
 
-  return result;
+  return euler;
 }
+
+// ---- Matrix33 ---------------------------------------------------------------------------------
 
 Matrix33 Matrix33::Identity()
 {
-  Matrix33 mtx = {};
-  mtx.data[0] = 1.0f;
-  mtx.data[4] = 1.0f;
-  mtx.data[8] = 1.0f;
-  return mtx;
+  return Scale(Vec3(1, 1, 1));
+}
+
+Matrix33 Matrix33::Scale(const Vec3& vec)
+{
+  Matrix33 m{};
+  m.data[0] = vec.x;
+  m.data[4] = vec.y;
+  m.data[8] = vec.z;
+  return m;
 }
 
 Matrix33 Matrix33::FromQuaternion(const Quaternion& q)
 {
-  const auto qx = q.data.x;
-  const auto qy = q.data.y;
-  const auto qz = q.data.z;
-  const auto qw = q.data.w;
+  const float x = q.data.x;
+  const float y = q.data.y;
+  const float z = q.data.z;
+  const float w = q.data.w;
 
-  return {
-      1 - 2 * qy * qy - 2 * qz * qz, 2 * qx * qy - 2 * qz * qw,     2 * qx * qz + 2 * qy * qw,
-      2 * qx * qy + 2 * qz * qw,     1 - 2 * qx * qx - 2 * qz * qz, 2 * qy * qz - 2 * qx * qw,
-      2 * qx * qz - 2 * qy * qw,     2 * qy * qz + 2 * qx * qw,     1 - 2 * qx * qx - 2 * qy * qy,
+  Matrix33 m;
+  m.data = {
+      1 - 2 * y * y - 2 * z * z, 2 * x * y - 2 * z * w,     2 * x * z + 2 * y * w,
+      2 * x * y + 2 * z * w,     1 - 2 * x * x - 2 * z * z, 2 * y * z - 2 * x * w,
+      2 * x * z - 2 * y * w,     2 * y * z + 2 * x * w,     1 - 2 * x * x - 2 * y * y,
   };
+  return m;
 }
 
 Matrix33 Matrix33::RotateX(float rad)
 {
   const float s = std::sin(rad);
   const float c = std::cos(rad);
-  Matrix33 mtx = {};
-  mtx.data[0] = 1;
-  mtx.data[4] = c;
-  mtx.data[5] = -s;
-  mtx.data[7] = s;
-  mtx.data[8] = c;
-  return mtx;
+  Matrix33 m;
+  m.data = {1, 0, 0, 0, c, -s, 0, s, c};
+  return m;
 }
 
 Matrix33 Matrix33::RotateY(float rad)
 {
   const float s = std::sin(rad);
   const float c = std::cos(rad);
-  Matrix33 mtx = {};
-  mtx.data[0] = c;
-  mtx.data[2] = s;
-  mtx.data[4] = 1;
-  mtx.data[6] = -s;
-  mtx.data[8] = c;
-  return mtx;
+  Matrix33 m;
+  m.data = {c, 0, s, 0, 1, 0, -s, 0, c};
+  return m;
 }
 
 Matrix33 Matrix33::RotateZ(float rad)
 {
   const float s = std::sin(rad);
   const float c = std::cos(rad);
-  Matrix33 mtx = {};
-  mtx.data[0] = c;
-  mtx.data[1] = -s;
-  mtx.data[3] = s;
-  mtx.data[4] = c;
-  mtx.data[8] = 1;
-  return mtx;
+  Matrix33 m;
+  m.data = {c, -s, 0, s, c, 0, 0, 0, 1};
+  return m;
 }
 
 Matrix33 Matrix33::Rotate(float rad, const Vec3& axis)
 {
+  // Rodrigues' formula: R = c*I + (1-c)*a*a^T + s*[a]x
   const float s = std::sin(rad);
   const float c = std::cos(rad);
-  Matrix33 mtx;
-  mtx.data[0] = axis.x * axis.x * (1 - c) + c;
-  mtx.data[1] = axis.x * axis.y * (1 - c) - axis.z * s;
-  mtx.data[2] = axis.x * axis.z * (1 - c) + axis.y * s;
-  mtx.data[3] = axis.y * axis.x * (1 - c) + axis.z * s;
-  mtx.data[4] = axis.y * axis.y * (1 - c) + c;
-  mtx.data[5] = axis.y * axis.z * (1 - c) - axis.x * s;
-  mtx.data[6] = axis.z * axis.x * (1 - c) - axis.y * s;
-  mtx.data[7] = axis.z * axis.y * (1 - c) + axis.x * s;
-  mtx.data[8] = axis.z * axis.z * (1 - c) + c;
-  return mtx;
-}
+  const float t = 1 - c;
+  const float x = axis.x;
+  const float y = axis.y;
+  const float z = axis.z;
 
-Matrix33 Matrix33::Scale(const Vec3& vec)
-{
-  Matrix33 mtx = {};
-  mtx.data[0] = vec.x;
-  mtx.data[4] = vec.y;
-  mtx.data[8] = vec.z;
-  return mtx;
+  Matrix33 m;
+  m.data = {
+      x * x * t + c,     x * y * t - z * s, x * z * t + y * s,
+      y * x * t + z * s, y * y * t + c,     y * z * t - x * s,
+      z * x * t - y * s, z * y * t + x * s, z * z * t + c,
+  };
+  return m;
 }
 
 void Matrix33::Multiply(const Matrix33& a, const Matrix33& b, Matrix33* result)
 {
-  result->data = MatrixMultiply<3, 3, 3>(a.data, b.data);
+  result->data = Product<3, 3, 3>(a.data, b.data);
 }
 
 void Matrix33::Multiply(const Matrix33& a, const Vec3& vec, Vec3* result)
 {
-  result->data = MatrixMultiply<3, 3, 1>(a.data, vec.data);
+  result->data = Product<3, 3, 1>(a.data, vec.data);
 }
 
 float Matrix33::Determinant() const
 {
-  const auto m = [this](int x, int y) { return data[y + x * 3]; };
-
-  return m(0, 0) * (m(1, 1) * m(2, 2) - m(2, 1) * m(1, 2)) -
-         m(0, 1) * (m(1, 0) * m(2, 2) - m(1, 2) * m(2, 0)) +
-         m(0, 2) * (m(1, 0) * m(2, 1) - m(1, 1) * m(2, 0));
+  const auto& m = data;
+  // Expansion along the first row.
+  return m[0] * Det2(m[4], m[5], m[7], m[8]) - m[1] * Det2(m[3], m[5], m[6], m[8]) +
+         m[2] * Det2(m[3], m[4], m[6], m[7]);
 }
 
 Matrix33 Matrix33::Inverted() const
 {
-  const auto m = [this](int x, int y) { return data[y + x * 3]; };
+  // inverse = adjugate / determinant; the adjugate is the transposed cofactor matrix.
+  const auto& m = data;
+  const float inv_det = 1 / Determinant();
 
-  const auto invdet = 1 / Determinant();
-
-  Matrix33 result;
-
-  const auto minv = [&result](int x, int y) -> auto& { return result.data[y + x * 3]; };
-
-  minv(0, 0) = (m(1, 1) * m(2, 2) - m(2, 1) * m(1, 2)) * invdet;
-  minv(0, 1) = (m(0, 2) * m(2, 1) - m(0, 1) * m(2, 2)) * invdet;
-  minv(0, 2) = (m(0, 1) * m(1, 2) - m(0, 2) * m(1, 1)) * invdet;
-  minv(1, 0) = (m(1, 2) * m(2, 0) - m(1, 0) * m(2, 2)) * invdet;
-  minv(1, 1) = (m(0, 0) * m(2, 2) - m(0, 2) * m(2, 0)) * invdet;
-  minv(1, 2) = (m(1, 0) * m(0, 2) - m(0, 0) * m(1, 2)) * invdet;
-  minv(2, 0) = (m(1, 0) * m(2, 1) - m(2, 0) * m(1, 1)) * invdet;
-  minv(2, 1) = (m(2, 0) * m(0, 1) - m(0, 0) * m(2, 1)) * invdet;
-  minv(2, 2) = (m(0, 0) * m(1, 1) - m(1, 0) * m(0, 1)) * invdet;
-
-  return result;
+  Matrix33 inv;
+  inv.data = {
+      Det2(m[4], m[5], m[7], m[8]),  -Det2(m[1], m[2], m[7], m[8]), Det2(m[1], m[2], m[4], m[5]),
+      -Det2(m[3], m[5], m[6], m[8]), Det2(m[0], m[2], m[6], m[8]),  -Det2(m[0], m[2], m[3], m[5]),
+      Det2(m[3], m[4], m[6], m[7]),  -Det2(m[0], m[1], m[6], m[7]), Det2(m[0], m[1], m[3], m[4]),
+  };
+  for (float& value : inv.data)
+    value *= inv_det;
+  return inv;
 }
 
 Matrix33 Matrix33::Transposed() const
 {
-  Matrix33 result;
-
-  result.data[0] = data[0];
-  result.data[1] = data[3];
-  result.data[2] = data[6];
-  result.data[3] = data[1];
-  result.data[4] = data[4];
-  result.data[5] = data[7];
-  result.data[6] = data[2];
-  result.data[7] = data[5];
-  result.data[8] = data[8];
-
-  return result;
+  Matrix33 t;
+  for (int row = 0; row < 3; ++row)
+  {
+    for (int col = 0; col < 3; ++col)
+      t.data[col * 3 + row] = data[row * 3 + col];
+  }
+  return t;
 }
+
+// ---- Matrix44 ---------------------------------------------------------------------------------
 
 Matrix44 Matrix44::Identity()
 {
-  Matrix44 mtx = {};
-  mtx.data[0] = 1.0f;
-  mtx.data[5] = 1.0f;
-  mtx.data[10] = 1.0f;
-  mtx.data[15] = 1.0f;
-  return mtx;
+  Matrix44 m{};
+  for (int i = 0; i < 4; ++i)
+    m.data[i * 5] = 1.0f;
+  return m;
 }
 
 Matrix44 Matrix44::FromMatrix33(const Matrix33& m33)
 {
-  Matrix44 mtx;
-  for (int i = 0; i < 3; ++i)
+  Matrix44 m = Identity();
+  for (int row = 0; row < 3; ++row)
   {
-    for (int j = 0; j < 3; ++j)
-    {
-      mtx.data[i * 4 + j] = m33.data[i * 3 + j];
-    }
+    for (int col = 0; col < 3; ++col)
+      m.data[row * 4 + col] = m33.data[row * 3 + col];
   }
-
-  for (int i = 0; i < 3; ++i)
-  {
-    mtx.data[i * 4 + 3] = 0;
-    mtx.data[i + 12] = 0;
-  }
-  mtx.data[15] = 1.0f;
-  return mtx;
+  return m;
 }
 
 Matrix44 Matrix44::FromQuaternion(const Quaternion& q)
@@ -331,138 +300,143 @@ Matrix44 Matrix44::FromQuaternion(const Quaternion& q)
 
 Matrix44 Matrix44::FromArray(const std::array<float, 16>& arr)
 {
-  Matrix44 mtx;
-  mtx.data = arr;
-  return mtx;
+  Matrix44 m;
+  m.data = arr;
+  return m;
 }
 
 Matrix44 Matrix44::Translate(const Vec3& vec)
 {
-  Matrix44 mtx = Matrix44::Identity();
-  mtx.data[3] = vec.x;
-  mtx.data[7] = vec.y;
-  mtx.data[11] = vec.z;
-  return mtx;
+  Matrix44 m = Identity();
+  m.data[3] = vec.x;
+  m.data[7] = vec.y;
+  m.data[11] = vec.z;
+  return m;
 }
 
 Matrix44 Matrix44::Shear(const float a, const float b)
 {
-  Matrix44 mtx = Matrix44::Identity();
-  mtx.data[2] = a;
-  mtx.data[6] = b;
-  return mtx;
+  Matrix44 m = Identity();
+  m.data[2] = a;
+  m.data[6] = b;
+  return m;
 }
 
 Matrix44 Matrix44::Perspective(float fov_y, float aspect_ratio, float z_near, float z_far)
 {
-  Matrix44 mtx{};
-  const float tan_half_fov_y = std::tan(fov_y / 2);
-  mtx.data[0] = 1 / (aspect_ratio * tan_half_fov_y);
-  mtx.data[5] = 1 / tan_half_fov_y;
-  mtx.data[10] = -(z_far + z_near) / (z_far - z_near);
-  mtx.data[11] = -(2 * z_far * z_near) / (z_far - z_near);
-  mtx.data[14] = -1;
-  return mtx;
+  const float tan_half_fov = std::tan(fov_y / 2);
+  const float depth = z_far - z_near;
+
+  Matrix44 m{};
+  m.data[0] = 1 / (aspect_ratio * tan_half_fov);
+  m.data[5] = 1 / tan_half_fov;
+  m.data[10] = -(z_far + z_near) / depth;
+  m.data[11] = -(2 * z_far * z_near) / depth;
+  m.data[14] = -1;
+  return m;
 }
 
 void Matrix44::Multiply(const Matrix44& a, const Matrix44& b, Matrix44* result)
 {
-  result->data = MatrixMultiply<4, 4, 4>(a.data, b.data);
-}
-
-Vec3 Matrix44::Transform(const Vec3& v, float w) const
-{
-  const auto result = MatrixMultiply<4, 4, 1>(data, {v.x, v.y, v.z, w});
-  return Vec3{result[0], result[1], result[2]};
+  result->data = Product<4, 4, 4>(a.data, b.data);
 }
 
 void Matrix44::Multiply(const Matrix44& a, const Vec4& vec, Vec4* result)
 {
-  result->data = MatrixMultiply<4, 4, 1>(a.data, vec.data);
+  result->data = Product<4, 4, 1>(a.data, vec.data);
 }
+
+Vec3 Matrix44::Transform(const Vec3& point, float w) const
+{
+  const std::array<float, 4> out = Product<4, 4, 1>(data, {point.x, point.y, point.z, w});
+  return {out[0], out[1], out[2]};
+}
+
+namespace
+{
+// The 2x2 minors of the lower two rows (s) and upper two rows (c) of a 4x4 matrix; the Laplace
+// expansion along those row pairs gives both the determinant and the adjugate. Computed in double
+// for a little extra precision.
+struct Minors44
+{
+  explicit Minors44(const std::array<float, 16>& m)
+  {
+    const auto e = [&m](int i) { return static_cast<double>(m[i]); };
+    // Rows 0 and 1.
+    c[0] = e(0) * e(5) - e(1) * e(4);
+    c[1] = e(0) * e(6) - e(2) * e(4);
+    c[2] = e(0) * e(7) - e(3) * e(4);
+    c[3] = e(1) * e(6) - e(2) * e(5);
+    c[4] = e(1) * e(7) - e(3) * e(5);
+    c[5] = e(2) * e(7) - e(3) * e(6);
+    // Rows 2 and 3.
+    s[0] = e(8) * e(13) - e(9) * e(12);
+    s[1] = e(8) * e(14) - e(10) * e(12);
+    s[2] = e(8) * e(15) - e(11) * e(12);
+    s[3] = e(9) * e(14) - e(10) * e(13);
+    s[4] = e(9) * e(15) - e(11) * e(13);
+    s[5] = e(10) * e(15) - e(11) * e(14);
+  }
+
+  double Determinant() const
+  {
+    return c[0] * s[5] - c[1] * s[4] + c[2] * s[3] + c[3] * s[2] - c[4] * s[1] + c[5] * s[0];
+  }
+
+  double c[6];
+  double s[6];
+};
+}  // namespace
 
 float Matrix44::Determinant() const
 {
-  const auto& m = data;
-  return m[12] * m[9] * m[6] * m[3] - m[8] * m[13] * m[6] * m[3] - m[12] * m[5] * m[10] * m[3] +
-         m[4] * m[13] * m[10] * m[3] + m[8] * m[5] * m[14] * m[3] - m[4] * m[9] * m[14] * m[3] -
-         m[12] * m[9] * m[2] * m[7] + m[8] * m[13] * m[2] * m[7] + m[12] * m[1] * m[10] * m[7] -
-         m[0] * m[13] * m[10] * m[7] - m[8] * m[1] * m[14] * m[7] + m[0] * m[9] * m[14] * m[7] +
-         m[12] * m[5] * m[2] * m[11] - m[4] * m[13] * m[2] * m[11] - m[12] * m[1] * m[6] * m[11] +
-         m[0] * m[13] * m[6] * m[11] + m[4] * m[1] * m[14] * m[11] - m[0] * m[5] * m[14] * m[11] -
-         m[8] * m[5] * m[2] * m[15] + m[4] * m[9] * m[2] * m[15] + m[8] * m[1] * m[6] * m[15] -
-         m[0] * m[9] * m[6] * m[15] - m[4] * m[1] * m[10] * m[15] + m[0] * m[5] * m[10] * m[15];
+  return static_cast<float>(Minors44(data).Determinant());
 }
 
 Matrix44 Matrix44::Inverted() const
 {
-  const auto m = [this](int x, int y) { return data[y + x * 4]; };
+  const Minors44 k(data);
+  const double inv_det = 1 / static_cast<double>(Determinant());
+  const auto e = [this](int i) { return static_cast<double>(data[i]); };
+  const double* c = k.c;
+  const double* s = k.s;
 
-  const auto invdet = 1 / Determinant();
+  const double adj[16] = {
+      e(5) * s[5] - e(6) * s[4] + e(7) * s[3],
+      -e(1) * s[5] + e(2) * s[4] - e(3) * s[3],
+      e(13) * c[5] - e(14) * c[4] + e(15) * c[3],
+      -e(9) * c[5] + e(10) * c[4] - e(11) * c[3],
 
-  Matrix44 result;
+      -e(4) * s[5] + e(6) * s[2] - e(7) * s[1],
+      e(0) * s[5] - e(2) * s[2] + e(3) * s[1],
+      -e(12) * c[5] + e(14) * c[2] - e(15) * c[1],
+      e(8) * c[5] - e(10) * c[2] + e(11) * c[1],
 
-  const auto minv = [&result](int x, int y) -> auto& { return result.data[y + x * 4]; };
+      e(4) * s[4] - e(5) * s[2] + e(7) * s[0],
+      -e(0) * s[4] + e(1) * s[2] - e(3) * s[0],
+      e(12) * c[4] - e(13) * c[2] + e(15) * c[0],
+      -e(8) * c[4] + e(9) * c[2] - e(11) * c[0],
 
-  const double A2323 = m(2, 2) * m(3, 3) - m(2, 3) * m(3, 2);
-  const double A1323 = m(2, 1) * m(3, 3) - m(2, 3) * m(3, 1);
-  const double A1223 = m(2, 1) * m(3, 2) - m(2, 2) * m(3, 1);
-  const double A0323 = m(2, 0) * m(3, 3) - m(2, 3) * m(3, 0);
-  const double A0223 = m(2, 0) * m(3, 2) - m(2, 2) * m(3, 0);
-  const double A0123 = m(2, 0) * m(3, 1) - m(2, 1) * m(3, 0);
-  const double A2313 = m(1, 2) * m(3, 3) - m(1, 3) * m(3, 2);
-  const double A1313 = m(1, 1) * m(3, 3) - m(1, 3) * m(3, 1);
-  const double A1213 = m(1, 1) * m(3, 2) - m(1, 2) * m(3, 1);
-  const double A2312 = m(1, 2) * m(2, 3) - m(1, 3) * m(2, 2);
-  const double A1312 = m(1, 1) * m(2, 3) - m(1, 3) * m(2, 1);
-  const double A1212 = m(1, 1) * m(2, 2) - m(1, 2) * m(2, 1);
-  const double A0313 = m(1, 0) * m(3, 3) - m(1, 3) * m(3, 0);
-  const double A0213 = m(1, 0) * m(3, 2) - m(1, 2) * m(3, 0);
-  const double A0312 = m(1, 0) * m(2, 3) - m(1, 3) * m(2, 0);
-  const double A0212 = m(1, 0) * m(2, 2) - m(1, 2) * m(2, 0);
-  const double A0113 = m(1, 0) * m(3, 1) - m(1, 1) * m(3, 0);
-  const double A0112 = m(1, 0) * m(2, 1) - m(1, 1) * m(2, 0);
+      -e(4) * s[3] + e(5) * s[1] - e(6) * s[0],
+      e(0) * s[3] - e(1) * s[1] + e(2) * s[0],
+      -e(12) * c[3] + e(13) * c[1] - e(14) * c[0],
+      e(8) * c[3] - e(9) * c[1] + e(10) * c[0],
+  };
 
-  minv(0, 0) = invdet * (m(1, 1) * A2323 - m(1, 2) * A1323 + m(1, 3) * A1223);
-  minv(0, 1) = invdet * -(m(0, 1) * A2323 - m(0, 2) * A1323 + m(0, 3) * A1223);
-  minv(0, 2) = invdet * (m(0, 1) * A2313 - m(0, 2) * A1313 + m(0, 3) * A1213);
-  minv(0, 3) = invdet * -(m(0, 1) * A2312 - m(0, 2) * A1312 + m(0, 3) * A1212);
-  minv(1, 0) = invdet * -(m(1, 0) * A2323 - m(1, 2) * A0323 + m(1, 3) * A0223);
-  minv(1, 1) = invdet * (m(0, 0) * A2323 - m(0, 2) * A0323 + m(0, 3) * A0223);
-  minv(1, 2) = invdet * -(m(0, 0) * A2313 - m(0, 2) * A0313 + m(0, 3) * A0213);
-  minv(1, 3) = invdet * (m(0, 0) * A2312 - m(0, 2) * A0312 + m(0, 3) * A0212);
-  minv(2, 0) = invdet * (m(1, 0) * A1323 - m(1, 1) * A0323 + m(1, 3) * A0123);
-  minv(2, 1) = invdet * -(m(0, 0) * A1323 - m(0, 1) * A0323 + m(0, 3) * A0123);
-  minv(2, 2) = invdet * (m(0, 0) * A1313 - m(0, 1) * A0313 + m(0, 3) * A0113);
-  minv(2, 3) = invdet * -(m(0, 0) * A1312 - m(0, 1) * A0312 + m(0, 3) * A0112);
-  minv(3, 0) = invdet * -(m(1, 0) * A1223 - m(1, 1) * A0223 + m(1, 2) * A0123);
-  minv(3, 1) = invdet * (m(0, 0) * A1223 - m(0, 1) * A0223 + m(0, 2) * A0123);
-  minv(3, 2) = invdet * -(m(0, 0) * A1213 - m(0, 1) * A0213 + m(0, 2) * A0113);
-  minv(3, 3) = invdet * (m(0, 0) * A1212 - m(0, 1) * A0212 + m(0, 2) * A0112);
-
-  return result;
+  Matrix44 inv;
+  for (int i = 0; i < 16; ++i)
+    inv.data[i] = static_cast<float>(adj[i] * inv_det);
+  return inv;
 }
 
 Matrix44 Matrix44::Transposed() const
 {
-  Matrix44 result;
-  result.data[0] = data[0];
-  result.data[1] = data[4];
-  result.data[2] = data[8];
-  result.data[3] = data[12];
-  result.data[4] = data[1];
-  result.data[5] = data[5];
-  result.data[6] = data[9];
-  result.data[7] = data[13];
-  result.data[8] = data[2];
-  result.data[9] = data[6];
-  result.data[10] = data[10];
-  result.data[11] = data[14];
-  result.data[12] = data[3];
-  result.data[13] = data[7];
-  result.data[14] = data[11];
-  result.data[15] = data[15];
-  return result;
+  Matrix44 t;
+  for (int row = 0; row < 4; ++row)
+  {
+    for (int col = 0; col < 4; ++col)
+      t.data[col * 4 + row] = data[row * 4 + col];
+  }
+  return t;
 }
-
 }  // namespace Common

@@ -1,49 +1,58 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/Random.h"
 
-#include <mbedtls/entropy.h>
-#include <mbedtls/hmac_drbg.h>
+#include <algorithm>
+#include <cstdint>
 
 #include "Common/Assert.h"
-#include "Common/CommonTypes.h"
+
+#ifdef _WIN32
+#include <windows.h>
+#include <bcrypt.h>
+#ifdef _MSC_VER
+#pragma comment(lib, "bcrypt.lib")
+#endif
+#else
+#include <cerrno>
+#include <sys/random.h>
+#endif
 
 namespace Common::Random
 {
-class EntropySeededPRNG final
-{
-public:
-  EntropySeededPRNG()
-  {
-    mbedtls_entropy_init(&m_entropy);
-    mbedtls_hmac_drbg_init(&m_context);
-    const int ret = mbedtls_hmac_drbg_seed(&m_context, mbedtls_md_info_from_type(MBEDTLS_MD_SHA256),
-                                           mbedtls_entropy_func, &m_entropy, nullptr, 0);
-    ASSERT(ret == 0);
-  }
-
-  ~EntropySeededPRNG()
-  {
-    mbedtls_hmac_drbg_free(&m_context);
-    mbedtls_entropy_free(&m_entropy);
-  }
-
-  void Generate(void* buffer, std::size_t size)
-  {
-    const int ret = mbedtls_hmac_drbg_random(&m_context, static_cast<u8*>(buffer), size);
-    ASSERT(ret == 0);
-  }
-
-private:
-  mbedtls_entropy_context m_entropy;
-  mbedtls_hmac_drbg_context m_context;
-};
-
-static thread_local EntropySeededPRNG s_esprng;
-
+// Bytes come straight from the operating system's cryptographically secure generator
+// (BCryptGenRandom on Windows, getrandom() elsewhere), which is thread-safe and needs no seeding.
 void Generate(void* buffer, std::size_t size)
 {
-  s_esprng.Generate(buffer, size);
+  auto* out = static_cast<std::uint8_t*>(buffer);
+
+#ifdef _WIN32
+  // BCryptGenRandom takes a ULONG length, so feed large requests in pieces.
+  constexpr std::size_t MAX_CHUNK = 0x10000000;
+  while (size != 0)
+  {
+    const std::size_t chunk = std::min(size, MAX_CHUNK);
+    const NTSTATUS status = BCryptGenRandom(nullptr, out, static_cast<ULONG>(chunk),
+                                            BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    ASSERT_MSG(COMMON, BCRYPT_SUCCESS(status), "BCryptGenRandom failed: {:#x}",
+               static_cast<std::uint32_t>(status));
+    out += chunk;
+    size -= chunk;
+  }
+#else
+  while (size != 0)
+  {
+    const ssize_t got = getrandom(out, size, 0);
+    if (got < 0)
+    {
+      if (errno == EINTR)
+        continue;
+      ASSERT_MSG(COMMON, false, "getrandom failed: errno {}", errno);
+      return;
+    }
+    out += got;
+    size -= static_cast<std::size_t>(got);
+  }
+#endif
 }
 }  // namespace Common::Random

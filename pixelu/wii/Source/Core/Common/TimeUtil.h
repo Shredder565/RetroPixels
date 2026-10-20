@@ -1,5 +1,4 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,6 +7,7 @@
 
 namespace Common
 {
-// Threadsafe and error-checking variant of std::localtime()
+// Converts `time` to the local calendar time without std::localtime's shared static buffer.
+// Returns nullopt (and logs) if the conversion fails.
 std::optional<std::tm> LocalTime(std::time_t time);
-}  // Namespace Common
+}  // namespace Common

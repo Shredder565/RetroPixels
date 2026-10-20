@@ -1,5 +1,4 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/JsonUtil.h"
 
@@ -7,13 +6,25 @@
 
 #include "Common/FileUtil.h"
 
+namespace
+{
+template <typename T>
+std::optional<T> ReadTyped(const picojson::object& obj, const std::string& key)
+{
+  const auto found = obj.find(key);
+  if (found == obj.end() || !found->second.is<T>())
+    return std::nullopt;
+  return found->second.get<T>();
+}
+}  // namespace
+
 picojson::object ToJsonObject(const Common::Vec3& vec)
 {
-  picojson::object obj;
-  obj.emplace("x", vec.x);
-  obj.emplace("y", vec.y);
-  obj.emplace("z", vec.z);
-  return obj;
+  return picojson::object{
+      {"x", picojson::value(static_cast<double>(vec.x))},
+      {"y", picojson::value(static_cast<double>(vec.y))},
+      {"z", picojson::value(static_cast<double>(vec.z))},
+  };
 }
 
 void FromJson(const picojson::object& obj, Common::Vec3& vec)
@@ -25,44 +36,29 @@ void FromJson(const picojson::object& obj, Common::Vec3& vec)
 
 std::optional<std::string> ReadStringFromJson(const picojson::object& obj, const std::string& key)
 {
-  const auto it = obj.find(key);
-  if (it == obj.end())
-    return std::nullopt;
-  if (!it->second.is<std::string>())
-    return std::nullopt;
-  return it->second.to_str();
+  return ReadTyped<std::string>(obj, key);
 }
 
 std::optional<bool> ReadBoolFromJson(const picojson::object& obj, const std::string& key)
 {
-  const auto it = obj.find(key);
-  if (it == obj.end())
-    return std::nullopt;
-  if (!it->second.is<bool>())
-    return std::nullopt;
-  return it->second.get<bool>();
+  return ReadTyped<bool>(obj, key);
 }
 
 bool JsonToFile(const std::string& filename, const picojson::value& root, bool prettify)
 {
-  std::ofstream json_stream;
-  File::OpenFStream(json_stream, filename, std::ios_base::out);
-  if (!json_stream.is_open())
-  {
+  std::ofstream out;
+  File::OpenFStream(out, filename, std::ios_base::out);
+  if (!out.is_open())
     return false;
-  }
-  json_stream << root.serialize(prettify);
+  out << root.serialize(prettify);
   return true;
 }
 
 bool JsonFromFile(const std::string& filename, picojson::value* root, std::string* error)
 {
-  std::string json_data;
-  if (!File::ReadFileToString(filename, json_data))
-  {
+  std::string text;
+  if (!File::ReadFileToString(filename, text))
     return false;
-  }
-
-  *error = picojson::parse(*root, json_data);
+  *error = picojson::parse(*root, text);
   return error->empty();
 }

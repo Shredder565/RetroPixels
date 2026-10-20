@@ -1,102 +1,120 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/Version.h"
 
+#include <initializer_list>
 #include <string>
+#include <string_view>
 
 #include "Common/scmrev.h"
 
 namespace Common
 {
-#define EMULATOR_NAME "Dolphin"
+namespace
+{
+// The emulator name is part of the user agent, the window title and the netplay handshake, so it
+// stays what existing servers and peers expect.
+constexpr std::string_view EMULATOR_NAME = "Dolphin";
 
-#ifdef _DEBUG
-#define BUILD_TYPE_STR "Debug "
-#elif defined DEBUGFAST
-#define BUILD_TYPE_STR "DebugFast "
+#if defined(_DEBUG)
+constexpr std::string_view BUILD_TYPE_PREFIX = "Debug ";
+#elif defined(DEBUGFAST)
+constexpr std::string_view BUILD_TYPE_PREFIX = "DebugFast ";
 #else
-#define BUILD_TYPE_STR ""
+constexpr std::string_view BUILD_TYPE_PREFIX = "";
 #endif
+
+#ifdef _WIN32
+constexpr std::string_view NETPLAY_PLATFORM_SUFFIX = " Windows";
+#elif defined(__linux__)
+constexpr std::string_view NETPLAY_PLATFORM_SUFFIX = " Linux";
+#else
+constexpr std::string_view NETPLAY_PLATFORM_SUFFIX = "";
+#endif
+
+#define PIXELU_VERSION_STRINGIZE_IMPL(x) #x
+#define PIXELU_VERSION_STRINGIZE(x) PIXELU_VERSION_STRINGIZE_IMPL(x)
+// The build system leaves this empty when it could not find the master branch.
+constexpr std::string_view COMMITS_AHEAD_TEXT = PIXELU_VERSION_STRINGIZE(SCM_COMMITS_AHEAD_MASTER);
+#undef PIXELU_VERSION_STRINGIZE
+#undef PIXELU_VERSION_STRINGIZE_IMPL
+
+std::string Concat(std::initializer_list<std::string_view> parts)
+{
+  std::string result;
+  for (const std::string_view part : parts)
+    result += part;
+  return result;
+}
+
+std::string BuildRevisionString()
+{
+  // Builds that are not exactly on master show their branch.
+  const bool on_master = COMMITS_AHEAD_TEXT == "0";
+  std::string branch_part;
+  if (!on_master)
+    branch_part = Concat({"[", SCM_BRANCH_STR, "] "});
+  return Concat({EMULATOR_NAME, " ", branch_part, BUILD_TYPE_PREFIX, SCM_DESC_STR});
+}
+}  // namespace
 
 const std::string& GetEmulatorName()
 {
-  static const std::string emulator_name = EMULATOR_NAME;
-  return emulator_name;
+  static const std::string value(EMULATOR_NAME);
+  return value;
 }
 
 const std::string& GetScmRevStr()
 {
-  static const std::string scm_rev_str = EMULATOR_NAME " "
-  // Note this macro can be empty if the master branch does not exist.
-#if 1 - SCM_COMMITS_AHEAD_MASTER - 1 != 0
-                                                       "[" SCM_BRANCH_STR "] "
-#endif
-
-#ifdef __INTEL_COMPILER
-      BUILD_TYPE_STR SCM_DESC_STR "-ICC";
-#else
-      BUILD_TYPE_STR SCM_DESC_STR;
-#endif
-  return scm_rev_str;
+  static const std::string value = BuildRevisionString();
+  return value;
 }
 
 const std::string& GetScmRevGitStr()
 {
-  static const std::string scm_rev_git_str = SCM_REV_STR;
-  return scm_rev_git_str;
+  static const std::string value = SCM_REV_STR;
+  return value;
 }
 
 const std::string& GetScmDescStr()
 {
-  static const std::string scm_desc_str = SCM_DESC_STR;
-  return scm_desc_str;
+  static const std::string value = SCM_DESC_STR;
+  return value;
 }
 
 const std::string& GetScmBranchStr()
 {
-  static const std::string scm_branch_str = SCM_BRANCH_STR;
-  return scm_branch_str;
+  static const std::string value = SCM_BRANCH_STR;
+  return value;
 }
 
 const std::string& GetUserAgentStr()
 {
-  static const std::string user_agent_str = EMULATOR_NAME "/" SCM_DESC_STR;
-  return user_agent_str;
+  static const std::string value = Concat({EMULATOR_NAME, "/", SCM_DESC_STR});
+  return value;
 }
 
 const std::string& GetScmDistributorStr()
 {
-  static const std::string scm_distributor_str = SCM_DISTRIBUTOR_STR;
-  return scm_distributor_str;
+  static const std::string value = SCM_DISTRIBUTOR_STR;
+  return value;
 }
 
 const std::string& GetScmUpdateTrackStr()
 {
-  static const std::string scm_update_track_str = SCM_UPDATE_TRACK_STR;
-  return scm_update_track_str;
+  static const std::string value = SCM_UPDATE_TRACK_STR;
+  return value;
 }
 
 const std::string& GetNetplayDolphinVer()
 {
-#ifdef _WIN32
-  static const std::string netplay_dolphin_ver = SCM_DESC_STR " Windows";
-#elif __APPLE__
-  static const std::string netplay_dolphin_ver = SCM_DESC_STR " macOS";
-#elif ANDROID
-  static const std::string netplay_dolphin_ver = SCM_DESC_STR " Android";
-#elif __linux__
-  static const std::string netplay_dolphin_ver = SCM_DESC_STR " Linux";
-#else
-  static const std::string netplay_dolphin_ver = SCM_DESC_STR;
-#endif
-  return netplay_dolphin_ver;
+  static const std::string value = Concat({SCM_DESC_STR, NETPLAY_PLATFORM_SUFFIX});
+  return value;
 }
 
 int GetScmCommitsAheadMaster()
 {
-  // Note this macro can be empty if the master branch does not exist.
+  // "+ 0" turns an empty macro into 0.
   return SCM_COMMITS_AHEAD_MASTER + 0;
 }
-
 }  // namespace Common
