@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/GPFifo.h"
 
@@ -18,20 +17,21 @@
 
 namespace GPFifo
 {
+namespace
+{
+// Appends a value to the pipe in guest (big-endian) byte order.
+template <typename T>
+void Append(PowerPC::PowerPCState& ppc_state, T value)
+{
+  const T big_endian = Common::FromBigEndian(value);
+  std::memcpy(ppc_state.gather_pipe_ptr, &big_endian, sizeof(T));
+  ppc_state.gather_pipe_ptr += sizeof(T);
+}
+}  // namespace
+
 GPFifoManager::GPFifoManager(Core::System& system) : m_system(system)
 {
 }
-
-// 32 Byte gather pipe with extra space
-// Overfilling is no problem (up to the real limit), CheckGatherPipe will blast the
-// contents in nicely sized chunks
-//
-// Other optimizations to think about:
-// - If the GP is NOT linked to the FIFO, just blast to memory byte by word
-// - If the GP IS linked to the FIFO, use a fast wrapping buffer and skip writing to memory
-//
-// Both of these should actually work! Only problem is that we have to decide at run time,
-// the same function could use both methods. Compile 2 different versions of each such block?
 
 size_t GPFifoManager::GetGatherPipeCount()
 {
@@ -45,35 +45,24 @@ void GPFifoManager::SetGatherPipeCount(size_t size)
 
 void GPFifoManager::DoState(PointerWrap& p)
 {
-  p.Do(m_gather_pipe);
-  u32 pipe_count = static_cast<u32>(GetGatherPipeCount());
-  p.Do(pipe_count);
-  SetGatherPipeCount(pipe_count);
+  p.DoArray(m_gather_pipe);
+  u32 count = static_cast<u32>(GetGatherPipeCount());
+  p.Do(count);
+  SetGatherPipeCount(count);
 }
 
 void GPFifoManager::Init()
 {
   ResetGatherPipe();
   m_system.GetPPCState().gather_pipe_base_ptr = m_gather_pipe;
-  memset(m_gather_pipe, 0, sizeof(m_gather_pipe));
+  std::memset(m_gather_pipe, 0, sizeof(m_gather_pipe));
 }
 
 bool GPFifoManager::IsBNE() const
 {
-  // TODO: It's not clear exactly when the BNE (buffer not empty) bit is set.
-  // The PPC 750cl manual says in section 2.1.2.12 "Write Pipe Address Register (WPAR)" (page 78):
-  // "A mfspr WPAR is used to read the BNE bit to check for any outstanding data transfers."
-  // In section 9.4.2 "Write Gather Pipe Operation" (page 327) it says:
-  // "Software can check WPAR[BNE] to determine if the buffer is empty or not."
-  // On page 327, it also says "The only way for software to flush out a partially full 32 byte
-  // block is to fill up the block with dummy data,."
-  // On page 328, it says: "Before disabling the write gather pipe, the WPAR[BNE] bit should be
-  // tested to insure that all outstanding transfers from the buffer to the bus have completed."
-  //
-  // GXRedirectWriteGatherPipe and GXRestoreWriteGatherPipe (used for display lists) wait for
-  // the bit to be 0 before continuing, so it can't be a case of any data existing in the FIFO;
-  // it might be a case of over 32 bytes being stored pending transfer to memory? For now, always
-  // return false since that prevents hangs in games that use display lists.
+  // When the hardware sets BNE is not known. Display list code
+  // (GXRedirectWriteGatherPipe and friends) waits for it to clear, so
+  // reporting an empty buffer avoids hangs.
   return false;
 }
 
@@ -84,50 +73,45 @@ void GPFifoManager::ResetGatherPipe()
 
 void GPFifoManager::UpdateGatherPipe()
 {
-  auto& system = m_system;
-  auto& memory = system.GetMemory();
-  auto& processor_interface = system.GetProcessorInterface();
+  auto& memory = m_system.GetMemory();
+  auto& pi = m_system.GetProcessorInterface();
+  auto& command_processor = m_system.GetCommandProcessor();
 
-  size_t pipe_count = GetGatherPipeCount();
-  size_t processed;
-  for (processed = 0; pipe_count >= GATHER_PIPE_SIZE; processed += GATHER_PIPE_SIZE)
+  const size_t count = GetGatherPipeCount();
+  size_t sent = 0;
+  while (count - sent >= GATHER_PIPE_SIZE)
   {
-    // copy the GatherPipe
-    memory.CopyToEmu(processor_interface.m_fifo_cpu_write_pointer, m_gather_pipe + processed,
-                     GATHER_PIPE_SIZE);
-    pipe_count -= GATHER_PIPE_SIZE;
+    memory.CopyToEmu(pi.m_fifo_cpu_write_pointer, m_gather_pipe + sent, GATHER_PIPE_SIZE);
+    sent += GATHER_PIPE_SIZE;
 
-    // increase the CPUWritePointer
-    if (processor_interface.m_fifo_cpu_write_pointer == processor_interface.m_fifo_cpu_end)
-      processor_interface.m_fifo_cpu_write_pointer = processor_interface.m_fifo_cpu_base;
+    // The write pointer wraps from the FIFO end back to its base.
+    if (pi.m_fifo_cpu_write_pointer == pi.m_fifo_cpu_end)
+      pi.m_fifo_cpu_write_pointer = pi.m_fifo_cpu_base;
     else
-      processor_interface.m_fifo_cpu_write_pointer += GATHER_PIPE_SIZE;
+      pi.m_fifo_cpu_write_pointer += GATHER_PIPE_SIZE;
 
-    system.GetCommandProcessor().GatherPipeBursted();
+    command_processor.GatherPipeBursted();
   }
 
-  // move back the spill bytes
-  memmove(m_gather_pipe, m_gather_pipe + processed, pipe_count);
-  SetGatherPipeCount(pipe_count);
+  // Keep the incomplete rest at the start of the buffer.
+  const size_t rest = count - sent;
+  std::memmove(m_gather_pipe, m_gather_pipe + sent, rest);
+  SetGatherPipeCount(rest);
 }
 
 void GPFifoManager::FastCheckGatherPipe()
 {
   if (GetGatherPipeCount() >= GATHER_PIPE_SIZE)
-  {
     UpdateGatherPipe();
-  }
 }
 
 void GPFifoManager::CheckGatherPipe()
 {
-  if (GetGatherPipeCount() >= GATHER_PIPE_SIZE)
-  {
-    UpdateGatherPipe();
-
-    // Profile where slow FIFO writes are occurring.
-    m_system.GetJitInterface().CompileExceptionCheck(JitInterface::ExceptionType::FIFOWrite);
-  }
+  if (GetGatherPipeCount() < GATHER_PIPE_SIZE)
+    return;
+  UpdateGatherPipe();
+  // Lets the JIT recompile this code with FIFO checks inlined.
+  m_system.GetJitInterface().CompileExceptionCheck(JitInterface::ExceptionType::FIFOWrite);
 }
 
 void GPFifoManager::Write8(const u8 value)
@@ -156,33 +140,22 @@ void GPFifoManager::Write64(const u64 value)
 
 void GPFifoManager::FastWrite8(const u8 value)
 {
-  auto& ppc_state = m_system.GetPPCState();
-  *ppc_state.gather_pipe_ptr = value;
-  ppc_state.gather_pipe_ptr += sizeof(u8);
+  Append(m_system.GetPPCState(), value);
 }
 
 void GPFifoManager::FastWrite16(u16 value)
 {
-  value = Common::swap16(value);
-  auto& ppc_state = m_system.GetPPCState();
-  std::memcpy(ppc_state.gather_pipe_ptr, &value, sizeof(u16));
-  ppc_state.gather_pipe_ptr += sizeof(u16);
+  Append(m_system.GetPPCState(), value);
 }
 
 void GPFifoManager::FastWrite32(u32 value)
 {
-  value = Common::swap32(value);
-  auto& ppc_state = m_system.GetPPCState();
-  std::memcpy(ppc_state.gather_pipe_ptr, &value, sizeof(u32));
-  ppc_state.gather_pipe_ptr += sizeof(u32);
+  Append(m_system.GetPPCState(), value);
 }
 
 void GPFifoManager::FastWrite64(u64 value)
 {
-  value = Common::swap64(value);
-  auto& ppc_state = m_system.GetPPCState();
-  std::memcpy(ppc_state.gather_pipe_ptr, &value, sizeof(u64));
-  ppc_state.gather_pipe_ptr += sizeof(u64);
+  Append(m_system.GetPPCState(), value);
 }
 
 void UpdateGatherPipe(GPFifoManager& gpfifo)
