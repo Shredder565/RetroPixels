@@ -1,0 +1,149 @@
+- W27 log: rewrote all 29 W27 files in `VideoCommon` as original code (8650
+  lines now, from 9950): the shader generators (`ShaderGenCommon`,
+  `PixelShaderGen`, `VertexShaderGen`, `GeometryShaderGen`,
+  `LightingShaderGen`, `FramebufferShaderGen`), the ubershaders
+  (`UberShaderCommon`, `UberShaderPixel`, `UberShaderVertex`), the constant
+  managers (`PixelShaderManager`, `VertexShaderManager`,
+  `GeometryShaderManager`, `ConstantManager.h`) and the glslang glue
+  (`Spirv`, `ShaderCompileUtils`). Every file starts with the original-code
+  header and has no Dolphin copyright or SPDX line. The public names,
+  signatures and layouts used outside W27 are kept: every UID struct
+  (`pixel_shader_uid_data`, `vertex_shader_uid_data`,
+  `geometry_shader_uid_data`, `LightingUidData`, the ubershader UIDs) bit
+  for bit, `ShaderUid`, `ShaderCode`, `ShaderHostConfig`, `WriteSwitch`, the
+  `I_*` uniform names, `ShaderAttrib`, the three constant structs in
+  `ConstantManager.h` (declarations unchanged, comments new), every manager
+  method and public member, `SPIRV::Compile*` and `ShaderIncluder`.
+  Removed from the headers, with no user outside W27: the
+  `s_shader_uniforms`, `s_geometry_shader_uniforms` and `s_lighting_struct`
+  strings (now `WriteVertexUniformMembers`, `WriteGeometryUniformMembers` and
+  a writer in `LightingShaderGen.cpp`), the `LIGHT_*` format macros, and the
+  constant-usage interface (`ShaderGeneratorInterface`,
+  `ShaderConstantProfile`, `SetConstantsUsed`, `ConstantIsUsed`), which had
+  been a no-op.
+  - Design:
+    - Generators: each shader is written by a small writer class
+      (`PixelShaderWriter`, `VertexShaderWriter`, `GeometryShaderWriter`,
+      `UberPixelWriter`, `UberVertexWriter`) holding the UID, API and host
+      config, with one method per section (interface, uniforms, texgens,
+      TEV stages, alpha test, fog, logic op, blending, depth, output).
+      Repeated text comes from tables (TEV inputs, konst selections, logic
+      ops, blend factors, light fields, primitive layouts, the uniform
+      block members) and loops instead of literal runs. Text without format
+      fields goes through a `Put` helper so braces stay single. The UID
+      builders read the registers in helpers per area
+      (`FillTexGenKey`, `SetTevindref`/`GetTevindref` as a switch, the
+      lighting key per channel).
+    - `UberShaderPixel`: switches built at run time from string tables
+      (`WriteCases`), the index-select trees (`WriteIndexSelect`, a D3D
+      switch or nested pairs), the combiner fields as one template for
+      colour and alpha.
+    - `FramebufferShaderGen`: shared helpers for samplers, varyings (as a
+      block or loose), vertex and pixel `main` openings and the fetch
+      preamble; texture reinterpretation is a decode step into `raw_value`
+      and an encode step, each a switch over the formats.
+    - Managers: register reads grouped per constant, a `Store` helper that
+      reports a change, light conversion, colour unpacking and matrix row
+      copies as helpers in `VertexShaderManager.cpp`; the stereo, VS-expand
+      and viewport parts of `GeometryShaderManager::SetConstants` reduced to
+      single assignments.
+    - `Spirv`: a `SpirvCompile` object per compile (parse, link, convert,
+      log, failure dump); the resource limits are built by named field
+      assignment.
+  - Kept as before (outputs, quirks):
+    - Every generated shader text for every UID, API (D3D, OpenGL, Vulkan,
+      Metal, Nothing) and host-config bit, byte for byte, including the
+      odd spacing and the lines with trailing spaces; the disk shader cache
+      file names.
+    - Every UID byte and how it is built: pixel UIDs (including
+      `ClearUnusedPixelShaderUidBits`), vertex UIDs, geometry and lighting
+      UIDs, ubershader UIDs and their enumeration order.
+    - `VertexShaderGen`: in the expanded line/point path the cached
+      "binormal" is tied to `VB_HAS_TANGENT` and "tangent" to
+      `VB_HAS_BINORMAL`, as before.
+    - `PixelShaderGen`: frag_input texture coordinates past 8 are still
+      copied, with the zero fill only for numtexgens..8; channel 1 is lit in
+      the fragment body only with two colour channels.
+    - `FramebufferShaderGen`: loose colour varyings are placed after the
+      *input* texcoord count; `GS_OUTPUT` has no newline after its brace; the
+      per-sample (SSAA) format conversion line has no newline; RGB565
+      reinterpretation output reads the value as 5:5:5 (`>> 10`); an
+      unsupported reinterpret format logs and returns the text "{}\n".
+    - Managers: every uploaded value and dirty flag. The destination-alpha
+      flag is never cleared once set (the value is recomputed on every
+      `SetConstants`); `SetBoundingBoxActive` compares against the effective
+      state but stores the requested one; the line/point texture offsets
+      {0, 16, 8, 4, 2, 1, 1, 1}; light directions normalised in double and
+      NaN/inf sanitised; the viewport height scaled with the horizontal EFB
+      scale; the fog range centre bias 342 and the four-times K factors;
+      the indirect reference bit 16; fog colour untouched with fog disabled;
+      the fixed konst rows; the savestate order of every manager.
+    - `Spirv`: the glslang messages (SPIR-V rules, Vulkan rules for Vulkan
+      and Metal), version 450 core, the resource limits (compared field by
+      field), the debug-info/validate and optimise/strip option sets, the
+      info-log thresholds (108 and 25), the warning, panic and bad-shader
+      dump texts and the dump counter.
+  - Deliberate differences:
+    - `GetVertexShaderUid` stops the texgen loop at 8; with more texgens
+      set the old loop wrote past `texGenInfo[8]` (undefined behaviour).
+    - `GetPixelShaderUid` stops the texture-matrix projection loop at 8
+      (the old one read past the array; the result is the same).
+    - `ShaderIncluder` stores the file text in its map entry before
+      pointing the glslang result at it. The old code took the pointer
+      first and then moved the string twice, so for a short file (inline
+      string storage) the pointer dangled.
+    - `ShaderIncluder::releaseInclude` ignores a null result. glslang
+      releases the null result of a failed local lookup before trying the
+      system paths, which crashed the old code.
+    - A dead branch in the pixel shader blend writer and the no-op
+      constant-usage calls are gone (no text change).
+    - `api_type` is `[[maybe_unused]]` where it is unused; bitfield and
+      index conversions are explicit casts; `bool | bool` and `u32 &= bool`
+      are written as plain conditions.
+  - Checked:
+    - Generator harness, old vs new with the untouched non-W27 files on
+      both sides, one hash per case streamed through `cmp`: random pixel,
+      vertex, geometry, uber pixel, uber vertex and framebuffer shaders,
+      the common pieces (headers, VS output members and assignment, line
+      and point expansion, interpolation qualifiers, lighting) and UIDs
+      built from random register states, for all five API types, random
+      host-config bits, driver-bug masks and custom shader contents.
+      Hashes the shader text, UID bytes and log/alert events. 12000 to
+      40000 cases per kind over several seeds, plus 40000 mixed: all
+      identical.
+    - Manager harness: random sequences (1-200 steps) of register writes,
+      XF invalidations, config changes, every manager setter,
+      `SetConstants`, `Dirty`, `Init`, savestate loads from random data,
+      clip-space transforms and vertex formats, with free-look and
+      graphics-mod projection actions stubbed the same on both sides.
+      Hashes all three constant blocks, the dirty flags, the savestate
+      images (so the private flags too), the projection statistics and
+      every side effect. About 90000 sequences over 12 seeds: identical.
+      The only difference seen: when several NaN inputs meet in
+      `TransformToClipSpace`, the NaN payload of the result can differ (the
+      compiler orders the operands), so the harness compares NaN-ness
+      there.
+    - SPIR-V harness (system glslang 15.1): generated shaders and small
+      hand-written ones for every stage, all API types, three SPIR-V
+      versions, the validation option, broken sources (truncated or with
+      junk) and #include through the includer (nested local includes and
+      system includes), plus direct includer sequences with random depths,
+      lookups and releases. Hashes the SPIR-V words, the includes held,
+      the logs, alerts and dump file names. About 11000 cases: identical.
+      The resource limit tables compared field by field: identical.
+    - clang `-Wall -Wextra -Wconversion -Wsign-compare -Wshadow-all
+      -Wshorten-64-to-32`, Linux and `x86_64-w64-windows-gnu`, for the W27
+      .cpp files and every .cpp that includes a W27 header directly or
+      through other headers (77 files on Linux, 85 on Windows): no warnings
+      in W27 files or from W27 headers (the old files gave 139), no new
+      errors. Missing third-party headers were fetched into scratch
+      (xxHash, VulkanMemoryAllocator, Vulkan-Headers, SPIRV-Cross, imgui,
+      implot, a stand-in `winrt/base.h`). Still failing on both trees:
+      `Boot_BS2Emu.cpp` (`std::expected` in `FileSystem.h`) and, on the
+      Windows target, two D3D12 files (`ID3D12Debug` missing from MinGW).
+      No `bool` mixed with an integer under `|` or `&` (MSVC C4805), no
+      `~` with widening, no unary minus on unsigned values.
+    - `verbatim-audit.py wii 8`: no run of 8 or more lines in any W27
+      .cpp file. Remaining runs are in headers only (UID and constant
+      struct layouts, `ShaderHostConfig`, manager and generator
+      declarations).
