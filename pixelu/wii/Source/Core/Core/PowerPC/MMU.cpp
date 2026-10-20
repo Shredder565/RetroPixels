@@ -731,12 +731,10 @@ void MMU::HostWrite(const Core::CPUThreadGuard& guard, const Common::MakeAtLeast
 {
   guard.GetSystem().GetMMU().WriteToHardware<XCheckTLBFlag::NoException>(address, var, sizeof(T));
 }
-template void MMU::HostWrite<u8>(const Core::CPUThreadGuard& guard, const u32 var,
-                                 const u32 address);
-template void MMU::HostWrite<u16>(const Core::CPUThreadGuard& guard, const u32 var,
-                                  const u32 address);
-template void MMU::HostWrite<u32>(const Core::CPUThreadGuard& guard, const u32 var,
-                                  const u32 address);
+// HostWrite<u64> is specialised below as two u32 writes.
+template void MMU::HostWrite<u32>(const Core::CPUThreadGuard&, u32, u32);
+template void MMU::HostWrite<u16>(const Core::CPUThreadGuard&, u32, u32);
+template void MMU::HostWrite<u8>(const Core::CPUThreadGuard&, u32, u32);
 template <>
 void MMU::HostWrite<u64>(const Core::CPUThreadGuard& guard, const u64 var, const u32 address)
 {
@@ -761,18 +759,15 @@ std::optional<ReadResult<T>> MMU::HostTryRead(const Core::CPUThreadGuard& guard,
     return std::nullopt;
   return ReadResult<T>(translated, mmu.ReadFromHardware<XCheckTLBFlag::NoException, T>(address));
 }
-template std::optional<ReadResult<u8>> MMU::HostTryRead<u8>(const Core::CPUThreadGuard& guard,
-                                                            const u32 address,
-                                                            RequestedAddressSpace space);
-template std::optional<ReadResult<u16>> MMU::HostTryRead<u16>(const Core::CPUThreadGuard& guard,
-                                                              const u32 address,
-                                                              RequestedAddressSpace space);
-template std::optional<ReadResult<u32>> MMU::HostTryRead<u32>(const Core::CPUThreadGuard& guard,
-                                                              const u32 address,
-                                                              RequestedAddressSpace space);
-template std::optional<ReadResult<u64>> MMU::HostTryRead<u64>(const Core::CPUThreadGuard& guard,
-                                                              const u32 address,
-                                                              RequestedAddressSpace space);
+// Every width the debugger and other host code read with.
+template std::optional<ReadResult<u64>> MMU::HostTryRead<u64>(const Core::CPUThreadGuard&, u32,
+                                                         RequestedAddressSpace);
+template std::optional<ReadResult<u32>> MMU::HostTryRead<u32>(const Core::CPUThreadGuard&, u32,
+                                                         RequestedAddressSpace);
+template std::optional<ReadResult<u16>> MMU::HostTryRead<u16>(const Core::CPUThreadGuard&, u32,
+                                                         RequestedAddressSpace);
+template std::optional<ReadResult<u8>> MMU::HostTryRead<u8>(const Core::CPUThreadGuard&, u32,
+                                                        RequestedAddressSpace);
 
 std::optional<ReadResult<u32>> MMU::HostTryReadInstruction(const Core::CPUThreadGuard& guard,
                                                            const u32 address,
@@ -816,15 +811,14 @@ std::optional<WriteResult> MMU::HostTryWrite(const Core::CPUThreadGuard& guard,
   mmu.WriteToHardware<XCheckTLBFlag::NoException>(address, var, sizeof(T));
   return WriteResult(translated);
 }
-template std::optional<WriteResult> MMU::HostTryWrite<u8>(const Core::CPUThreadGuard& guard,
-                                                          const u32 var, const u32 address,
-                                                          RequestedAddressSpace space);
-template std::optional<WriteResult> MMU::HostTryWrite<u16>(const Core::CPUThreadGuard& guard,
-                                                           const u32 var, const u32 address,
-                                                           RequestedAddressSpace space);
-template std::optional<WriteResult> MMU::HostTryWrite<u32>(const Core::CPUThreadGuard& guard,
-                                                           const u32 var, const u32 address,
-                                                           RequestedAddressSpace space);
+// u64 is split into two u32 writes below; the other widths use the template.
+template std::optional<WriteResult> MMU::HostTryWrite<u32>(const Core::CPUThreadGuard&, u32, u32,
+                                                           RequestedAddressSpace);
+template std::optional<WriteResult> MMU::HostTryWrite<u16>(const Core::CPUThreadGuard&, u32, u32,
+                                                           RequestedAddressSpace);
+template std::optional<WriteResult> MMU::HostTryWrite<u8>(const Core::CPUThreadGuard&, u32, u32,
+                                                          RequestedAddressSpace);
+
 template <>
 std::optional<WriteResult> MMU::HostTryWrite<u64>(const Core::CPUThreadGuard& guard, const u64 var,
                                                   const u32 address, RequestedAddressSpace space)
@@ -1137,37 +1131,45 @@ std::optional<u32> MMU::GetTranslatedAddress(u32 address)
 // Exceptions
 // ---------------------------------------------------------------------------
 
+namespace
+{
+// Shown when a translation fails without MMU emulation: the game went wrong, and raising an
+// exception it has no handler for would not help.
+void AlertInvalidAccess(bool write, u32 effective_address, u32 pc)
+{
+  if (!write)
+  {
+    PanicAlertFmtT(
+        "Invalid read from {0:#010x}, PC = {1:#010x}.\n\nThe game probably would have crashed on "
+        "real hardware. Enable MMU in advanced settings to accurately emulate game crashes.",
+        effective_address, pc);
+    return;
+  }
+  PanicAlertFmtT(
+      "Invalid write to {0:#010x}, PC = {1:#010x}.\n\nThe game probably would have crashed on "
+      "real hardware. Enable MMU in advanced settings to accurately emulate game crashes.",
+      effective_address, pc);
+}
+}  // namespace
+
 void MMU::GenerateDSIException(u32 effective_address, bool write)
 {
-  // Without MMU emulation a failed translation means the game went wrong;
-  // tell the user instead of raising an exception the game cannot handle.
-  if (!m_system.IsMMUMode())
+  if (m_system.IsMMUMode())
   {
-    if (write)
-    {
-      PanicAlertFmtT(
-          "Invalid write to {0:#010x}, PC = {1:#010x}.\n\nThe game probably would have crashed on "
-          "real hardware. Enable MMU in advanced settings to accurately emulate game crashes.",
-          effective_address, m_ppc_state.pc);
-    }
-    else
-    {
-      PanicAlertFmtT(
-          "Invalid read from {0:#010x}, PC = {1:#010x}.\n\nThe game probably would have crashed on "
-          "real hardware. Enable MMU in advanced settings to accurately emulate game crashes.",
-          effective_address, m_ppc_state.pc);
-    }
-    if (m_system.IsPauseOnPanicMode())
-    {
-      m_system.GetCPU().Break();
-      m_ppc_state.Exceptions |= EXCEPTION_DSI | EXCEPTION_FAKE_MEMCHECK_HIT;
-    }
+    m_ppc_state.spr[SPR_DSISR] = DSISR_PAGE_FAULT | (write ? DSISR_STORE : 0);
+    m_ppc_state.spr[SPR_DAR] = effective_address;
+    m_ppc_state.Exceptions |= EXCEPTION_DSI;
     return;
   }
 
-  m_ppc_state.spr[SPR_DSISR] = DSISR_PAGE_FAULT | (write ? DSISR_STORE : 0);
-  m_ppc_state.spr[SPR_DAR] = effective_address;
-  m_ppc_state.Exceptions |= EXCEPTION_DSI;
+  AlertInvalidAccess(write, effective_address, m_ppc_state.pc);
+  // With pause-on-panic the CPU stops, and the access is treated like a memcheck hit so the
+  // instruction does not complete.
+  if (m_system.IsPauseOnPanicMode())
+  {
+    m_system.GetCPU().Break();
+    m_ppc_state.Exceptions |= EXCEPTION_DSI | EXCEPTION_FAKE_MEMCHECK_HIT;
+  }
 }
 
 void MMU::GenerateISIException(u32 effective_address)
@@ -1767,20 +1769,22 @@ Common::MakeAtLeastU32<T> ReadFromJit(MMU& mmu, u32 address)
 {
   return mmu.Read<T>(address);
 }
-template u32 ReadFromJit<u8>(MMU& mmu, u32 address);
-template u32 ReadFromJit<u16>(MMU& mmu, u32 address);
-template u32 ReadFromJit<u32>(MMU& mmu, u32 address);
-template u64 ReadFromJit<u64>(MMU& mmu, u32 address);
 
 template <std::unsigned_integral T>
 void WriteFromJit(MMU& mmu, Common::MakeAtLeastU32<T> var, u32 address)
 {
   mmu.Write<T>(var, address);
 }
-template void WriteFromJit<u8>(MMU& mmu, u32 var, u32 address);
-template void WriteFromJit<u16>(MMU& mmu, u32 var, u32 address);
-template void WriteFromJit<u32>(MMU& mmu, u32 var, u32 address);
-template void WriteFromJit<u64>(MMU& mmu, u64 var, u32 address);
+
+// The JIT emits calls for every access width.
+template u32 ReadFromJit<u8>(MMU&, u32);
+template void WriteFromJit<u8>(MMU&, u32, u32);
+template u32 ReadFromJit<u16>(MMU&, u32);
+template void WriteFromJit<u16>(MMU&, u32, u32);
+template u32 ReadFromJit<u32>(MMU&, u32);
+template void WriteFromJit<u32>(MMU&, u32, u32);
+template u64 ReadFromJit<u64>(MMU&, u32);
+template void WriteFromJit<u64>(MMU&, u64, u32);
 
 void WriteU16SwapFromJit(MMU& mmu, u32 var, u32 address)
 {
