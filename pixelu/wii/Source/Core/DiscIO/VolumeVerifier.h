@@ -1,12 +1,13 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <future>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -18,18 +19,18 @@
 #include "DiscIO/DiscScrubber.h"
 #include "DiscIO/Volume.h"
 
-// To be used as follows:
+// Checks a game image for problems and optionally hashes it and looks it up in the Redump.info
+// database. Usage:
 //
-// VolumeVerifier verifier(volume, redump_verification, hashes_to_calculate);
-// verifier.Start();
-// while (verifier.GetBytesProcessed() != verifier.GetTotalBytes())
-//   verifier.Process();
-// verifier.Finish();
-// auto result = verifier.GetResult();
+//   VolumeVerifier verifier(volume, redump_verification, hashes_to_calculate);
+//   verifier.Start();
+//   while (verifier.GetBytesProcessed() != verifier.GetTotalBytes())
+//     verifier.Process();
+//   verifier.Finish();
+//   const VolumeVerifier::Result& result = verifier.GetResult();
 //
-// Start, Process and Finish may take some time to run.
-//
-// GetResult() can be called before the processing is finished, but the result will be incomplete.
+// Each call may take a while. GetResult() may be called at any time, but only holds everything
+// after Finish().
 
 namespace DiscIO
 {
@@ -41,6 +42,8 @@ struct Hashes
   T sha1;
 };
 
+// Compares the image's hashes against the Redump.info datfile for its platform. The datfile is
+// downloaded (or the cached copy used) in the background as soon as Start() is called.
 class RedumpVerifier final
 {
 public:
@@ -70,32 +73,37 @@ private:
     FailButOldCacheAvailable,
   };
 
+  // Shared by every verifier of one platform, so that the datfile is downloaded once per session.
   struct DownloadState
   {
     std::mutex mutex;
     DownloadStatus status = DownloadStatus::NotAttempted;
   };
 
-  struct PotentialMatch
+  // A datfile entry for this game (ID, revision and disc number match).
+  struct Candidate
   {
     u64 size = 0;
     Hashes<std::vector<u8>> hashes;
   };
 
-  static DownloadStatus DownloadDatfile(const std::string& system, DownloadStatus old_status);
-  static std::vector<u8> ReadDatfile(const std::string& system);
-  std::vector<PotentialMatch> ScanDatfile(std::span<const u8> data, const std::string& system);
+  std::vector<Candidate> LoadCandidates(const std::string& system, DownloadState* state);
+  std::vector<Candidate> FindCandidates(std::span<const u8> datfile, const std::string& system);
+  bool SerialListMatches(const std::string& serials) const;
 
-  std::string m_game_id;
+  static DownloadStatus Download(const std::string& system, DownloadStatus previous);
+  static std::vector<u8> ReadCachedDatfile(const std::string& system);
+
+  std::string m_game_id;  // first four characters; empty for Datel discs
   u16 m_revision = 0;
   u8 m_disc_number = 0;
   u64 m_size = 0;
 
-  std::future<std::vector<PotentialMatch>> m_future;
-  Result m_result;
+  std::future<std::vector<Candidate>> m_candidates;
+  Result m_result;  // set by the background task when it fails
 
-  static DownloadState m_gc_download_state;
-  static DownloadState m_wii_download_state;
+  static DownloadState s_gc_download;
+  static DownloadState s_wii_download;
 };
 
 class VolumeVerifier final
@@ -135,28 +143,51 @@ public:
   const Result& GetResult() const;
 
 private:
-  struct GroupToVerify
+  // One hash group (or the tail of one) of a Wii partition, checked as a unit.
+  struct HashGroupJob
   {
     Partition partition;
-    u64 offset;
-    size_t block_index_start;
-    size_t block_index_end;
+    u64 raw_offset;
+    size_t first_block;
+    size_t end_block;
+  };
+
+  // What the next Process() call reads.
+  struct Chunk
+  {
+    u64 length = 0;
+    u64 overlap = 0;  // bytes at the end that belong to the next chunk as well
+    bool is_content = false;  // a whole WAD content, to be checked against the TMD
+    bool is_group = false;    // a whole hash group, to be checked against the H3 table
+    IOS::ES::Content content{};
   };
 
   std::vector<Partition> CheckPartitions();
-  bool CheckPartition(const Partition& partition);  // Returns false if partition should be ignored
+  void CheckPartitionTable(const std::vector<Partition>& partitions);
+  bool CheckPartition(const Partition& partition);  // false: leave the partition out
+  void CheckUpdatePartitionIOS(const FileSystem& update_filesystem);
+  void CheckGameID();
+  void CheckIOS();
+  void CheckTicketAndTMD();
+  void CheckMisc();
+  void CheckSuperPaperMario();
+  void CheckVolumeSize();
+  void ReportBlockErrors();
+  void WriteSummary();
   std::string GetPartitionName(std::optional<u32> type) const;
   bool IsDebugSigned() const;
   bool ShouldHaveChannelPartition() const;
   bool ShouldHaveInstallPartition() const;
   bool ShouldHaveMasterpiecePartitions() const;
   bool ShouldBeDualLayer() const;
-  void CheckVolumeSize();
-  void CheckMisc();
-  void CheckSuperPaperMario();
+
   void SetUpHashing();
+  Chunk PlanChunk() const;
+  void StartHashing(u64 length);
+  void StartContentCheck(const IOS::ES::Content& content, bool read_failed);
+  void StartGroupCheck(size_t job_index, bool read_failed);
   void WaitForAsyncOperations() const;
-  bool ReadChunkAndWaitForAsyncOperations(u64 bytes_to_read);
+  bool ReadChunkAndWaitForAsyncOperations(u64 length);
 
   void AddProblem(Severity severity, std::string text);
 
@@ -178,8 +209,10 @@ private:
   mbedtls_md5_context m_md5_context{};
   std::unique_ptr<Common::SHA1::Context> m_sha1_context;
 
-  u64 m_excess_bytes = 0;
+  // The last chunk read. Its final m_carried_over bytes start the next chunk.
   std::vector<u8> m_data;
+  u64 m_carried_over = 0;
+
   std::future<void> m_crc32_future;
   std::future<void> m_md5_future;
   std::future<void> m_sha1_future;
@@ -188,10 +221,10 @@ private:
 
   DiscScrubber m_scrubber;
   IOS::ES::TicketReader m_ticket;
-  std::vector<u64> m_content_offsets;
+  std::vector<u64> m_content_offsets;  // WADs only
   u16 m_content_index = 0;
-  std::vector<GroupToVerify> m_groups;
-  size_t m_group_index = 0;  // Index in m_groups, not index in a specific partition
+  std::vector<HashGroupJob> m_groups;  // sorted by raw_offset
+  size_t m_group_index = 0;
   std::map<Partition, size_t> m_block_errors;
   std::map<Partition, size_t> m_unused_block_errors;
 
