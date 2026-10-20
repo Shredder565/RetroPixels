@@ -99,12 +99,12 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 192044 | 46.1% |
-| Dolphin, untouched | 212753 | 51.1% |
+| Original (RetroPixels) | 199571 | 48.1% |
+| Dolphin, untouched | 203626 | 49.1% |
 | Dolphin, with PixelU changes | 5572 | 1.3% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.4% |
-| **All** | **416132** | 100% |
+| **All** | **414532** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -199,7 +199,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/VideoBackends/OGL | 5742 | 0 | Dolphin |
 | Core/VideoBackends/Software | 4785 | 4785 | original |
 | Core/VideoBackends/Vulkan | 10213 | 0 | Dolphin |
-| Core/VideoCommon (top level) | 48043 | 23892 | mixed (50% original) |
+| Core/VideoCommon (top level) | 46443 | 31419 | mixed (68% original) |
 | Core/VideoCommon/Assets | 4615 | 0 | Dolphin |
 | Core/VideoCommon/GraphicsModSystem | 2853 | 0 | Dolphin |
 | Core/VideoCommon/Resources | 2053 | 0 | Dolphin |
@@ -253,7 +253,7 @@ batch rewrites them.
 | W23 | Core: cheats, patches, NetPlay, achievements, analytics, USB utils | 14044 | 0 | Dolphin |
 | W24 | VideoCommon: GX state and command processing (BP/CP/XF, FIFO, PE, CPU cull) | 11051 | 11051 | original |
 | W25 | VideoCommon: vertex loaders and vertex manager | 4192 | 4192 | original |
-| W26 | VideoCommon: texture cache and decoders | 9127 | 0 | Dolphin |
+| W26 | VideoCommon: texture cache and decoders | 7527 | 7527 | original |
 | W27 | VideoCommon: shader generators and shader managers | 8649 | 8649 | original |
 | W28 | VideoCommon: renderer abstraction, framebuffers, shader cache, present, post-processing | 11210 | 0 | Dolphin |
 | W29 | VideoCommon: OSD, frame dumping, performance, assets, graphics mods, resources | 13335 | 0 | Dolphin |
@@ -2875,3 +2875,129 @@ Checks
       .cpp file. Remaining runs are in headers only (UID and constant
       struct layouts, `ShaderHostConfig`, manager and generator
       declarations).
+
+- W26 log: rewrote all 20 W26 files in `VideoCommon` as original code (9127
+  lines before, 7527 now): the texture cache (`TextureCacheBase`, with
+  EFB/XFB copies to texture and RAM), `TMEM`, `TextureInfo`,
+  `TextureConfig`, `TextureUtils`, the texture decoders
+  (`TextureDecoder.h`, `TextureDecoder_Util.h`, `TextureDecoder_Common`,
+  `TextureDecoder_x64`), the conversion shader generators
+  (`TextureConversionShader`, `TextureConverterShaderGen`) and
+  `HiresTextures`. Every file starts with the original-code header and has
+  no Dolphin copyright or SPDX line. Public names, signatures, enum values
+  and layouts used outside W26 are kept, including every
+  `TextureCacheBase` virtual, data member (name, order, type) and the
+  `TCacheEntry` layout. Config keys, savestate layout, log/panic texts and
+  dump file names are unchanged.
+  - Design:
+    - Decoders: block shapes come from one `ShapeOf` table (texture and
+      EFB copy formats, including the copy base format); a tile walker
+      drives the SSE2/SSSE3 per-format block decoders instead of the old
+      hand-unrolled loops; single-texel decoding goes through shared
+      locate/palette/CMPR/YUV helpers.
+    - TMEM: each unit has two regions and a three-state residency
+      (invalid / valid / cached) recomputed from region overlap at bind.
+    - TextureInfo/TextureConfig/TextureUtils/HiresTextures: rewritten around
+      helpers for level walking, name building, pack discovery and id /
+      wildcard matching.
+    - Shader generators: new emitter code; the fixed GLSL bodies of the
+      compute decoders are kept as data (they are the output).
+    - Texture cache: file-local helpers for the shared parts (single-level
+      render-target configs, the palette/reinterpret conversion pass, copy
+      naming and dumping, host copy rectangles and clamp rows, save-state
+      level extents, the full-hash test, scaled coordinates); the mip-chain
+      check is a small class; uniform blocks are declared as arrays with
+      `static_assert`ed sizes; `TCacheEntry::DoState` is one fold over the
+      fields; `OnConfigChanged` compares `std::tie` tuples;
+      `EFBCopyParams::operator<` orders a `std::tie` key.
+  - Kept as before (outputs, quirks):
+    - Every decoded texel for every format, palette format and size; TMEM
+      residency answers and savestate bytes; texture names (including the
+      C14X2 palette-range calculation) and the pool hash.
+    - Emitted shader text byte for byte.
+    - Texture cache: every backend call in order with its arguments, cache
+      hits/misses/invalidations, pool reuse, savestate bytes. Quirks kept:
+      a deferred XFB copy's flush stores the overlapping copy's hash on
+      itself; the arbitrary-mipmap check steps rows by `row_length` bytes
+      (not texels) and reads scratch it may not have written; an XFB copy
+      with only EFB dumping on is dumped (and named) as an EFB copy; the
+      map slot of an EFB copy is replaced by its reinterpreted/palette
+      version during partial updates; `CopyEFB` keeps its unused stride
+      parameter and the "Skipping EFB copy to VRAM" text on the RAM path.
+  - Deliberate differences:
+    - `CreatePaletteEntryWithOffset` returns offset 0 when the texel upload
+      fails (was uninitialised).
+    - Uniform padding is zeroed: the `CopyEFB` and `CopyEFBToCacheEntry`
+      pad words and the 12-byte pads in the material built-ins (were
+      uninitialised).
+    - Loading a state whose entry has no texture data builds an empty entry
+      (the old code dereferenced an empty optional).
+    - `UninitializeXFBMemory` writes the {1,254} pattern with memcpy instead
+      of SSE stores (same bytes).
+    - Assert source lines differ.
+  - Found and not fixed (old and new alike): a failed host texture
+    allocation in texture creation, EFB/XFB copies, XFB fetches or
+    material passes leads to a null dereference; a failed texel upload
+    during GPU decoding of one mip level makes the CPU fallback write
+    through a null buffer; the RGBA8 odd-bank TMEM read can run past TMEM
+    for large bank offsets; a loaded state's bound-texture unit index is
+    not range-checked. The harness keeps clear of these.
+  - Checked:
+    - Decoder harness: random formats, palette formats, sizes and data,
+      SSE2 and SSSE3 paths, old vs new: identical; mutation checks
+      detected.
+    - TMEM, TextureInfo/TextureConfig, HiresTextures (synthetic packs on
+      disk, 800 seeds, every file, asset, resource and OSD call logged) and
+      shader generator (exhaustive over uids, parameters, APIs and backend
+      flags) harnesses: identical, all mutations detected.
+    - Texture cache harness: the real `TextureCacheBase` against recording
+      fakes for the gfx backend, textures, framebuffers, staging textures,
+      the vertex manager (uniforms hashed with pads masked, texel buffers),
+      shader cache, framebuffer manager, presenter, graphics mods
+      (materials, skips, names), hires packs, memory, FIFO recorder,
+      statistics, config and alerts. Random walks of guest RAM writes and
+      clones, TMEM writes, texture unit setup, loads and binds, EFB/XFB
+      copies (partial-update copies at texture pitch), XFB fetches, frame
+      ends, config changes, invalidations, save/measure/load round trips,
+      EFB scale and backend flag changes, injected allocation, staging,
+      pipeline and texel-upload failures. Every fake call and the full cache
+      state after each step are logged; assert messages have their source
+      line masked. 300 seeds x 1000 steps and 120 seeds x 1500 steps: all
+      identical except three seeds whose save blobs differ only in the
+      order of a linked pair's ids (the pair order follows heap addresses;
+      two builds of the old code differ on the same seeds the same way).
+      40 mutations of the new cache code: 32 detected. Of the 8 missed,
+      four cannot change behaviour here (the XFB fill loop bound, the
+      `m_temp` size estimate while the 16 MiB start size is never
+      exceeded, a reset of the pending palette copy that is always
+      overwritten, the overlap window for textures under 2 MiB); four
+      touch paths the walk rarely reaches and were checked by reading:
+      the mip-reduction rounding (moves the mean difference only
+      slightly), the reinterpreted entry's frame count, the
+      same-texels-other-palette rule in recycling and the stitch order
+      of mutually overlapping XFB pieces.
+      Valgrind on the old code: clean apart from the arbitrary-mipmap
+      scratch reads above. Coverage (gcov, 300 seeds x 1500 steps): all
+      but 61 old lines run; the rest are allocation-failure paths, measure
+      overflow, locked entries, the reinterpret-plus-palette combination
+      (unreachable), plus two reachable but unhit lines (a partial update
+      from a copy onto a copy, and the scaled XFB stitch).
+    - Performance: decoders the same or faster for most formats (IA4 about
+      4x, RGB5A3 about 2x, C4 about 3x); RGBA8 at the smallest sizes is
+      about 1.1x slower per call (tens of ns), equal from 256x256 up. The
+      cache does the same work in the same order; the cache harness runs
+      in the same time old and new (3.1-3.4 s per 30 seeds, noise).
+    - clang `-Wall -Wextra -Wconversion -Wsign-compare -Wshadow-all
+      -Wshorten-64-to-32`, Linux and `x86_64-w64-windows-gnu`: no warnings
+      in W26 files. The code avoids the MSVC /W4 patterns C4319, C4805,
+      C4458, C4267, C4100 and signed/unsigned compares.
+      The files that include the changed headers compile as on the base
+      tree; the ones that fail, fail the same way on base for missing
+      third-party headers (xxhash, implot, Qt, D3D, VMA).
+    - `verbatim-audit.py wii 8`: no run of 8 or more lines in any W26
+      .cpp except `TextureConversionShader.cpp`, whose runs are the GLSL
+      text of the compute decoders (shader output, kept as data). The
+      headers keep 8-17 line runs of declarations and layout
+      (`TextureInfo` accessors, `TextureDecoder.h` prototypes,
+      `TextureConfig`, the `TCacheEntry` members and accessors and the
+      `BackupConfig` fields).
