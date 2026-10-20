@@ -1,11 +1,11 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/DSP/DSPCaptureLogger.h"
 
 #include <cstring>
 #include <memory>
 #include <string>
+#include <utility>
 
 #include "Common/CommonTypes.h"
 #include "Common/IOFile.h"
@@ -13,33 +13,42 @@
 
 namespace DSP
 {
-// Definition of the packet structures stored in PCAP capture files.
-
-const u8 IFX_ACCESS_PACKET_MAGIC = 0;
-const u8 DMA_PACKET_MAGIC = 1;
+namespace
+{
+// Packet layouts of the capture file (little endian, no padding). The first byte
+// tells the two kinds apart.
+enum PacketKind : u8
+{
+  REGISTER_ACCESS = 0,
+  DMA_TRANSFER = 1,
+};
 
 #pragma pack(push, 1)
-struct IFXAccessPacket
+struct RegisterAccessPacket
 {
-  u8 magic;    // IFX_ACCESS_PACKET_MAGIC
-  u8 is_read;  // 0 for writes, 1 for reads.
+  u8 kind;
+  u8 is_read;  // 1 for a read, 0 for a write
   u16 address;
   u16 value;
 };
 
-// Followed by the bytes of the DMA.
-struct DMAPacket
+// The transferred bytes follow this header.
+struct DMAPacketHeader
 {
-  u8 magic;         // DMA_PACKET_MAGIC
-  u16 dma_control;  // Value of the DMA control register.
-  u32 gc_address;   // Address in the GC RAM.
-  u16 dsp_address;  // Address in the DSP RAM.
-  u16 length;       // Length in bytes.
+  u8 kind;
+  u16 control;
+  u32 gc_address;
+  u16 dsp_address;
+  u16 length;  // bytes
 };
 #pragma pack(pop)
 
+static_assert(sizeof(RegisterAccessPacket) == 6);
+static_assert(sizeof(DMAPacketHeader) == 11);
+}  // namespace
+
 PCAPDSPCaptureLogger::PCAPDSPCaptureLogger(const std::string& pcap_filename)
-    : m_pcap(new Common::PCAP(new File::IOFile(pcap_filename, "wb")))
+    : m_pcap(std::make_unique<Common::PCAP>(new File::IOFile(pcap_filename, "wb")))
 {
 }
 
@@ -52,32 +61,33 @@ PCAPDSPCaptureLogger::PCAPDSPCaptureLogger(std::unique_ptr<Common::PCAP>&& pcap)
 {
 }
 
-void PCAPDSPCaptureLogger::LogIFXAccess(bool read, u16 address, u16 value)
-{
-  IFXAccessPacket pkt;
-  pkt.magic = IFX_ACCESS_PACKET_MAGIC;
-  pkt.is_read = !!read;  // Make sure we actually have 0/1.
-  pkt.address = address;
-  pkt.value = value;
+PCAPDSPCaptureLogger::~PCAPDSPCaptureLogger() = default;
 
-  m_pcap->AddPacket(pkt);
+void PCAPDSPCaptureLogger::LogIFXRead(u16 address, u16 read_value)
+{
+  WriteRegisterAccess(true, address, read_value);
+}
+
+void PCAPDSPCaptureLogger::LogIFXWrite(u16 address, u16 written_value)
+{
+  WriteRegisterAccess(false, address, written_value);
+}
+
+void PCAPDSPCaptureLogger::WriteRegisterAccess(bool is_read, u16 address, u16 value)
+{
+  const RegisterAccessPacket packet{REGISTER_ACCESS, static_cast<u8>(is_read ? 1 : 0), address,
+                                    value};
+  m_pcap->AddPacket(packet);
 }
 
 void PCAPDSPCaptureLogger::LogDMA(u16 control, u32 gc_address, u16 dsp_address, u16 length,
                                   const u8* data)
 {
-  // The length of a DMA cannot be above 64K, so we use a static buffer for
-  // the construction of the packet.
-  static u8 buffer[0x10000];
-
-  DMAPacket* pkt = reinterpret_cast<DMAPacket*>(&buffer[0]);
-  pkt->magic = DMA_PACKET_MAGIC;
-  pkt->dma_control = control;
-  pkt->gc_address = gc_address;
-  pkt->dsp_address = dsp_address;
-  pkt->length = length;
-  memcpy(&buffer[sizeof(DMAPacket)], data, length);
-
-  m_pcap->AddPacket(buffer, sizeof(DMAPacket) + length);
+  const DMAPacketHeader header{DMA_TRANSFER, control, gc_address, dsp_address, length};
+  m_packet.resize(sizeof(header) + length);
+  std::memcpy(m_packet.data(), &header, sizeof(header));
+  if (length != 0)
+    std::memcpy(m_packet.data() + sizeof(header), data, length);
+  m_pcap->AddPacket(m_packet.data(), m_packet.size());
 }
 }  // namespace DSP

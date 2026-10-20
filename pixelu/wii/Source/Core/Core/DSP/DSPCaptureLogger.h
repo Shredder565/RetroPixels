@@ -1,10 +1,13 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// Hooks through which the DSP reports its hardware register traffic and DMA
+// transfers, so that they can be recorded for later analysis.
 
 #pragma once
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "Common/CommonTypes.h"
 
@@ -15,62 +18,49 @@ class PCAP;
 
 namespace DSP
 {
-// An interface used to capture and log structured data about internal DSP
-// data transfers.
-//
-// Note: these calls are done within the DSP emulator in critical paths and at
-// a high frequency. Implementations must try and avoid blocking for too long.
+// Called from the DSP's hottest paths: implementations should be quick.
 class DSPCaptureLogger
 {
 public:
-  virtual ~DSPCaptureLogger() {}
-  // Accesses (reads or writes) to memory mapped registers (external
-  // interface, also known as IFX). These are always 16 bits accesses.
+  virtual ~DSPCaptureLogger() = default;
+
+  // 16-bit accesses to the hardware registers at 0xffxx.
   virtual void LogIFXRead(u16 address, u16 read_value) = 0;
   virtual void LogIFXWrite(u16 address, u16 written_value) = 0;
 
-  // DMAs to/from main memory from/to DSP memory. We let the interpretation
-  // of the "control" field to the layer that analyze the logs and do not
-  // perform our own interpretation of it. Thus there is only one call which
-  // is used for DRAM/IRAM in any direction (to/from DSP).
-  //
-  // Length is expressed in bytes, not DSP words.
+  // One DMA between main memory and DSP memory, in either direction and for
+  // either DSP memory. control is the raw DMA control register; length is in bytes.
   virtual void LogDMA(u16 control, u32 gc_address, u16 dsp_address, u16 length, const u8* data) = 0;
 };
 
-// A dummy implementation of a capture logger that does nothing. This is the
-// default implementation used by the DSP emulator.
-//
-// Can also be inherited from if you want to only override part of the methods.
+// Records nothing. Also a convenient base for loggers interested in only some events.
 class DefaultDSPCaptureLogger : public DSPCaptureLogger
 {
 public:
-  void LogIFXRead(u16 address, u16 read_value) override {}
-  void LogIFXWrite(u16 address, u16 written_value) override {}
-  void LogDMA(u16 control, u32 gc_address, u16 dsp_address, u16 length, const u8* data) override {}
+  void LogIFXRead(u16, u16) override {}
+  void LogIFXWrite(u16, u16) override {}
+  void LogDMA(u16, u32, u16, u16, const u8*) override {}
 };
 
-// A capture logger implementation that logs to PCAP files in a custom
-// packet-based format.
+// Writes every event as one packet of a PCAP capture file.
 class PCAPDSPCaptureLogger final : public DSPCaptureLogger
 {
 public:
-  // Automatically creates a writeable file (truncate existing file).
-  PCAPDSPCaptureLogger(const std::string& pcap_filename);
-  // Takes ownership of pcap.
-  PCAPDSPCaptureLogger(Common::PCAP* pcap);
-  PCAPDSPCaptureLogger(std::unique_ptr<Common::PCAP>&& pcap);
+  // Creates (or truncates) the named file.
+  explicit PCAPDSPCaptureLogger(const std::string& pcap_filename);
+  // Both of these take ownership of the capture.
+  explicit PCAPDSPCaptureLogger(Common::PCAP* pcap);
+  explicit PCAPDSPCaptureLogger(std::unique_ptr<Common::PCAP>&& pcap);
+  ~PCAPDSPCaptureLogger() override;
 
-  void LogIFXRead(u16 address, u16 read_value) override { LogIFXAccess(true, address, read_value); }
-  void LogIFXWrite(u16 address, u16 written_value) override
-  {
-    LogIFXAccess(false, address, written_value);
-  }
+  void LogIFXRead(u16 address, u16 read_value) override;
+  void LogIFXWrite(u16 address, u16 written_value) override;
   void LogDMA(u16 control, u32 gc_address, u16 dsp_address, u16 length, const u8* data) override;
 
 private:
-  void LogIFXAccess(bool read, u16 address, u16 value);
+  void WriteRegisterAccess(bool is_read, u16 address, u16 value);
 
   std::unique_ptr<Common::PCAP> m_pcap;
+  std::vector<u8> m_packet;  // reused for DMA packets
 };
 }  // namespace DSP
