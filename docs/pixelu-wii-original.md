@@ -280,6 +280,13 @@ and the CMake glue in `Externals/`. Those need their own steps (an original
 top-level build in `pixelu/wii`, original or dropped data files, fetching
 the third-party Externals directly) before the submodule can go.
 
+Decided 2026-10-20 (project owner, decision card): remove Nintendo's keys
+from PixelU-Wii (Wii common, Korean, SD and vWii ancast keys, and the
+built-in console key and signature). Wii discs, WADs and SD saves then use a
+keys file dumped from the owner's own Wii (BootMii keys.bin / otp.bin),
+chosen once in RetroPixels. GameCube is unaffected. Done as its own step
+after W18 (IOSC) merges.
+
 Queued after the rewrite and before Linux (project owner, 2026-10-20):
 analyse and improve Supermodel (Sega Model 3; the owner's upload of
 supermodel-0.3a-20260726-git-24d2ffc-windows.zip) and add it to RetroPixels
