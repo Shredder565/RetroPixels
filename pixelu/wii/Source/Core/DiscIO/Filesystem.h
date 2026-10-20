@@ -1,8 +1,9 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
 #include <iterator>
 #include <memory>
 #include <string>
@@ -13,12 +14,16 @@
 
 namespace DiscIO
 {
-// file info of an FST entry
+// One entry (file or directory) of a disc's file system table. Subclasses implement it for a
+// concrete FST format; iterating a directory yields its direct children.
 class FileInfo
 {
   friend class const_iterator;
 
 public:
+  // A forward iterator that owns its own FileInfo object. Advancing it changes that object in
+  // place, so references obtained through it are only good until the next increment, but copies
+  // of the iterator (or of the FileInfo) are independent.
   class const_iterator final
   {
   public:
@@ -28,21 +33,20 @@ public:
     using pointer = value_type*;
     using reference = value_type&;
 
-    const_iterator() : m_file_info(nullptr) {}
+    const_iterator() = default;
     const_iterator(std::unique_ptr<FileInfo> file_info) : m_file_info(std::move(file_info)) {}
-    const_iterator(const const_iterator& it) : m_file_info(it.m_file_info->clone()) {}
-    const_iterator(const_iterator&& it) noexcept : m_file_info(std::move(it.m_file_info)) {}
+    const_iterator(const const_iterator& other) : m_file_info(CloneOf(other)) {}
+    const_iterator(const_iterator&& other) noexcept = default;
     ~const_iterator() = default;
-    const_iterator& operator=(const const_iterator& it)
+
+    const_iterator& operator=(const const_iterator& other)
     {
-      m_file_info = it.m_file_info ? it.m_file_info->clone() : nullptr;
+      if (this != &other)
+        m_file_info = CloneOf(other);
       return *this;
     }
-    const_iterator& operator=(const_iterator&& it) noexcept
-    {
-      m_file_info = std::move(it.m_file_info);
-      return *this;
-    }
+    const_iterator& operator=(const_iterator&& other) noexcept = default;
+
     const_iterator& operator++()
     {
       ++*m_file_info;
@@ -50,57 +54,65 @@ public:
     }
     const_iterator operator++(int)
     {
-      const_iterator old = *this;
+      const_iterator before(*this);
       ++*m_file_info;
-      return old;
+      return before;
     }
-    bool operator==(const const_iterator& it) const
+
+    // Two iterators are equal when they point at the same entry, or are both empty.
+    bool operator==(const const_iterator& other) const
     {
-      return m_file_info ? (it.m_file_info && *m_file_info == *it.m_file_info) : (!it.m_file_info);
+      if (!m_file_info || !other.m_file_info)
+        return !m_file_info && !other.m_file_info;
+      return *m_file_info == *other.m_file_info;
     }
-    // Incrementing or destroying an iterator will invalidate its returned references and
-    // pointers, but will not invalidate copies of the iterator or file info object.
-    const FileInfo& operator*() const { return *m_file_info.get(); }
+
+    const FileInfo& operator*() const { return *m_file_info; }
     const FileInfo* operator->() const { return m_file_info.get(); }
 
   private:
+    static std::unique_ptr<FileInfo> CloneOf(const const_iterator& it)
+    {
+      return it.m_file_info ? it.m_file_info->clone() : nullptr;
+    }
+
     std::unique_ptr<FileInfo> m_file_info;
   };
 
   virtual ~FileInfo();
 
+  // Entries are the same when they refer to the same place in the same table.
   bool operator==(const FileInfo& other) const { return GetAddress() == other.GetAddress(); }
+
   virtual std::unique_ptr<FileInfo> clone() const = 0;
   virtual const_iterator cbegin() const { return begin(); }
   virtual const_iterator cend() const { return end(); }
   virtual const_iterator begin() const = 0;
   virtual const_iterator end() const = 0;
 
-  // The offset of a file on the disc (inside the partition, if there is one).
-  // Not guaranteed to return a meaningful value for directories.
+  // Where the file's data starts (relative to the partition, for Wii discs). Meaningless for
+  // directories.
   virtual u64 GetOffset() const = 0;
-  // The size of a file.
-  // Not guaranteed to return a meaningful value for directories.
+  // The file's length. Meaningless for directories.
   virtual u32 GetSize() const = 0;
-  // For a file, returns its size. For a directory, returns the total size of its contents.
+  // A file's length, or the summed length of everything inside a directory.
   u64 GetTotalSize() const;
   virtual bool IsRoot() const = 0;
   virtual bool IsDirectory() const = 0;
-  // The number of files and directories in a directory, including those in subdirectories.
-  // Not guaranteed to return a meaningful value for files.
+  // How many entries a directory contains, counting the contents of its subdirectories.
+  // Meaningless for files.
   virtual u32 GetTotalChildren() const = 0;
   virtual std::string GetName() const = 0;
   virtual bool NameCaseInsensitiveEquals(std::string_view other) const = 0;
-  // GetPath will find the parents of the current object and call GetName on them,
-  // so it's slower than other functions. If you're traversing through folders
-  // to get a file and its path, building the path while traversing is faster.
+  // The full path, built by walking up to the root. When walking down a tree it is cheaper to
+  // build the path along the way.
   virtual std::string GetPath() const = 0;
 
 protected:
-  // Only used for comparisons with other file info objects
+  // Identifies the entry for operator==.
   virtual uintptr_t GetAddress() const = 0;
 
-  // Called by iterators
+  // Moves to the next entry at the same level (used by const_iterator).
   virtual FileInfo& operator++() = 0;
 };
 
@@ -109,19 +121,17 @@ class FileSystem
 public:
   virtual ~FileSystem();
 
-  // If IsValid is false, GetRoot must not be called.
+  // GetRoot may only be called on a valid file system.
   virtual bool IsValid() const = 0;
-  // The object returned by GetRoot and all objects created from it
-  // are only valid for as long as the file system object is valid.
+  // The root directory. It and every FileInfo derived from it live as long as the file system.
   virtual const FileInfo& GetRoot() const = 0;
-  // Returns nullptr if not found
+  // Looks up an entry by path; nullptr if there is none.
   virtual std::unique_ptr<FileInfo> FindFileInfo(std::string_view path) const = 0;
-  // Returns nullptr if not found
+  // Looks up the file containing the given offset; nullptr if there is none.
   virtual std::unique_ptr<FileInfo> FindFileInfo(u64 disc_offset) const = 0;
 };
 
-// Calling Volume::GetFileSystem instead of manually constructing a filesystem is recommended,
-// because it will check IsValid for you, will automatically pick the right type of filesystem,
-// and will cache the filesystem in case it's needed again later.
+// Prefer Volume::GetFileSystem to constructing a file system directly: it picks the right
+// implementation, checks IsValid and keeps the result for later calls.
 
 }  // namespace DiscIO

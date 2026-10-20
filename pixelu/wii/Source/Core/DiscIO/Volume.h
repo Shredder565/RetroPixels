@@ -1,8 +1,8 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <array>
 #include <limits>
 #include <map>
 #include <memory>
@@ -26,6 +26,7 @@ class FileSystem;
 class VolumeDisc;
 class VolumeWAD;
 
+// A Wii partition, identified by where its header starts on the disc.
 struct Partition final
 {
   constexpr Partition() = default;
@@ -35,28 +36,38 @@ struct Partition final
   u64 offset{std::numeric_limits<u64>::max()};
 };
 
+// Stands for "the raw disc" (no partition): GameCube discs, WADs and the unencrypted areas of
+// Wii discs.
 constexpr Partition PARTITION_NONE(std::numeric_limits<u64>::max() - 1);
 
+// A GameCube or Wii disc image, or a WAD file. Offsets passed to the read functions are relative
+// to the given partition's decrypted data (or to the start of the image for PARTITION_NONE).
 class Volume
 {
 public:
   Volume() {}
   virtual ~Volume() {}
+
   virtual bool Read(u64 offset, u64 length, u8* buffer, const Partition& partition) const = 0;
+
+  // Reads a big-endian value.
   template <typename T>
   std::optional<T> ReadSwapped(u64 offset, const Partition& partition) const
   {
-    T temp;
-    if (!Read(offset, sizeof(T), reinterpret_cast<u8*>(&temp), partition))
+    T value;
+    if (!Read(offset, sizeof(T), reinterpret_cast<u8*>(&value), partition))
       return std::nullopt;
-    return Common::FromBigEndian(temp);
+    return Common::FromBigEndian(value);
   }
+
+  // Reads a big-endian u32 that holds an offset, scaled by the format's shift (Wii discs store
+  // offsets divided by 4).
   std::optional<u64> ReadSwappedAndShifted(u64 offset, const Partition& partition) const
   {
-    const std::optional<u32> temp = ReadSwapped<u32>(offset, partition);
-    if (!temp)
+    const std::optional<u32> stored = ReadSwapped<u32>(offset, partition);
+    if (!stored)
       return std::nullopt;
-    return static_cast<u64>(*temp) << GetOffsetShift();
+    return u64{*stored} << GetOffsetShift();
   }
 
   virtual bool HasWiiHashes() const { return false; }
@@ -87,7 +98,7 @@ public:
     return false;
   }
   virtual IOS::ES::TicketReader GetTicketWithFixedCommonKey() const { return {}; }
-  // Returns a non-owning pointer. Returns nullptr if the file system couldn't be read.
+  // The volume keeps ownership. nullptr if there is no readable file system.
   virtual const FileSystem* GetFileSystem(const Partition& partition) const = 0;
   virtual u64 PartitionOffsetToRawOffset(u64 offset, const Partition& partition) const
   {
@@ -106,7 +117,7 @@ public:
   virtual std::vector<u32> GetBanner(u32* width, u32* height) const = 0;
   std::string GetApploaderDate() const { return GetApploaderDate(GetGamePartition()); }
   virtual std::string GetApploaderDate(const Partition& partition) const = 0;
-  // 0 is the first disc, 1 is the second disc
+  // Counted from 0 (the first disc of a set is 0).
   virtual std::optional<u8> GetDiscNumber(const Partition& partition = PARTITION_NONE) const
   {
     return 0;
@@ -128,22 +139,23 @@ public:
   virtual Country GetCountry(const Partition& partition = PARTITION_NONE) const = 0;
   virtual u32 GetSimulatedMemorySize() const = 0;
   virtual BlobType GetBlobType() const = 0;
-  // Size of virtual disc (may be inaccurate depending on the blob type)
+  // The size of the image's contents. Some formats only know it approximately.
   virtual u64 GetDataSize() const = 0;
   virtual DataSizeType GetDataSizeType() const = 0;
-  // Size on disc (compressed size)
+  // The size of the image file itself (after compression).
   virtual u64 GetRawSize() const = 0;
   virtual const BlobReader& GetBlobReader() const = 0;
 
-  // This hash is intended to be (but is not guaranteed to be):
-  // 1. Identical for discs with no differences that affect netplay/TAS sync
-  // 2. Different for discs with differences that affect netplay/TAS sync
-  // 3. Much faster than hashing the entire disc
-  // The way the hash is calculated may change with updates to Dolphin.
+  // A quick fingerprint of what matters for NetPlay and input recordings: it should match between
+  // dumps that behave the same and differ between ones that do not, without hashing everything.
+  // It is not stable across emulator versions.
   virtual std::array<u8, 20> GetSyncHash() const = 0;
 
 protected:
+  // Text in disc headers and GameCube banners: Shift-JIS on NTSC-J discs, Windows-1252
+  // elsewhere, ending at the first null byte.
   std::string DecodeString(std::span<const char> data) const;
+  // Turns every character that is not an ASCII letter or digit into '-'.
   static std::string FilterGameID(std::span<const char> data);
 
   void ReadAndAddToSyncHash(Common::SHA1::Context* context, u64 offset, u64 length,
@@ -151,6 +163,7 @@ protected:
   void AddTMDToSyncHash(Common::SHA1::Context* context, const Partition& partition) const;
 
   virtual u32 GetOffsetShift() const { return 0; }
+  // Splits the ten 42-character UTF-16BE title fields of a Wii banner.
   static std::map<Language, std::string> ReadWiiNames(std::span<const char16_t> data);
 
   static constexpr size_t NUMBER_OF_LANGUAGES = 10;
@@ -166,7 +179,7 @@ protected:
 
 std::unique_ptr<VolumeDisc> CreateDisc(std::unique_ptr<BlobReader> reader);
 std::unique_ptr<VolumeDisc> CreateDisc(const std::string& path);
-// This version enables caching when the "Load Games into Memory" setting is enabled.
+// Like CreateDisc, but honours the "Load Games into Memory" setting.
 std::unique_ptr<VolumeDisc> CreateDiscForCore(const std::string& path);
 
 std::unique_ptr<VolumeWAD> CreateWAD(std::unique_ptr<BlobReader> reader);

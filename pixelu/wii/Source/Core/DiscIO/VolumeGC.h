@@ -1,8 +1,8 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <array>
 #include <map>
 #include <memory>
 #include <optional>
@@ -25,6 +25,8 @@ enum class Language;
 enum class Region;
 enum class Platform;
 
+// A GameCube disc image (including Triforce arcade discs, which are GameCube discs with a
+// boot.id file).
 class VolumeGC final : public VolumeDisc
 {
 public:
@@ -51,36 +53,41 @@ public:
   const BlobReader& GetBlobReader() const override;
   std::array<u8, 20> GetSyncHash() const override;
 
+  // The boot.id contents. Only meaningful when GetVolumeType() is Platform::Triforce.
   const BootID* GetTriforceBootID() const { return &m_triforce_header; }
 
 private:
-  static constexpr u32 GC_BANNER_WIDTH = 96;
-  static constexpr u32 GC_BANNER_HEIGHT = 32;
+  // opening.bnr: "BNR1" (one language, NTSC) or "BNR2" (six languages, PAL), a 96x32 RGB5A3
+  // image and the text fields.
+  static constexpr u32 BANNER_WIDTH = 96;
+  static constexpr u32 BANNER_HEIGHT = 32;
+  static constexpr size_t BANNER_LANGUAGES = 6;
 
-  struct GCBannerInformation
+  struct BannerText
   {
-    char short_name[32];    // Short game title shown in IPL menu
-    char short_maker[32];   // Short developer, publisher names shown in IPL menu
-    char long_name[64];     // Long game title shown in IPL game start screen
-    char long_maker[64];    // Long developer, publisher names shown in IPL game
-                            // start screen
-    char description[128];  // Game description shown in IPL game start screen in
-                            // two lines.
+    char short_name[32];
+    char short_maker[32];
+    char long_name[64];
+    char long_maker[64];
+    char description[128];
   };
 
-  struct GCBanner
+  struct BannerFile
   {
-    u32 id;  // "BNR1" for NTSC, "BNR2" for PAL
-    u32 padding[7];
-    u16 image[GC_BANNER_WIDTH * GC_BANNER_HEIGHT];  // RGB5A3 96x32 image
-    GCBannerInformation information[6];             // information comes in six languages
-                                                    // (only one for BNR1 type)
+    u32 magic;
+    u32 reserved[7];
+    u16 pixels[BANNER_WIDTH * BANNER_HEIGHT];
+    BannerText text[BANNER_LANGUAGES];
   };
 
-  struct ConvertedGCBanner
+  static constexpr size_t BNR1_SIZE = sizeof(BannerFile) - sizeof(BannerText) * 5;
+  static constexpr size_t BNR2_SIZE = sizeof(BannerFile);
+
+  // The banner after decoding.
+  struct DecodedBanner
   {
-    ConvertedGCBanner();
-    ~ConvertedGCBanner();
+    DecodedBanner();
+    ~DecodedBanner();
 
     std::map<Language, std::string> short_names;
     std::map<Language, std::string> long_names;
@@ -88,26 +95,19 @@ private:
     std::map<Language, std::string> long_makers;
     std::map<Language, std::string> descriptions;
 
-    std::vector<u32> image_buffer;
-    u32 image_height = 0;
-    u32 image_width = 0;
+    std::vector<u32> pixels;
+    u32 width = 0;
+    u32 height = 0;
   };
 
-  ConvertedGCBanner LoadBannerFile() const;
-  ConvertedGCBanner ExtractBannerInformation(const GCBanner& banner_file, bool is_bnr1) const;
-
-  static constexpr size_t BNR1_SIZE = sizeof(GCBanner) - sizeof(GCBannerInformation) * 5;
-  static constexpr size_t BNR2_SIZE = sizeof(GCBanner);
-
-  Common::Lazy<ConvertedGCBanner> m_converted_banner;
-
-  Common::Lazy<std::unique_ptr<FileSystem>> m_file_system;
+  DecodedBanner ReadBanner() const;
+  DecodedBanner DecodeBanner(const BannerFile& file, size_t languages) const;
 
   std::unique_ptr<BlobReader> m_reader;
-
-  BootID m_triforce_header;
-
-  bool m_is_triforce;
+  Common::Lazy<std::unique_ptr<FileSystem>> m_file_system;
+  Common::Lazy<DecodedBanner> m_banner;
+  BootID m_triforce_header{};
+  bool m_is_triforce = false;
 };
 
 }  // namespace DiscIO

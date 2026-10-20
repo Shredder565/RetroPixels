@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DiscIO/VolumeGC.h"
 
@@ -26,42 +25,46 @@
 
 namespace DiscIO
 {
-VolumeGC::VolumeGC(std::unique_ptr<BlobReader> reader)
-    : m_reader(std::move(reader)), m_is_triforce(false)
+namespace
+{
+// Magic words as they appear when the first four bytes are loaded into a little-endian u32.
+constexpr u32 BOOT_ID_MAGIC = 0x44495442;  // "BTID"
+constexpr u32 BNR1_MAGIC = 0x31524e42;     // "BNR1"
+constexpr u32 BNR2_MAGIC = 0x32524e42;     // "BNR2"
+
+// The disc header's region field (in bi2.bin).
+constexpr u64 REGION_CODE_OFFSET = 0x458;
+}  // namespace
+
+VolumeGC::VolumeGC(std::unique_ptr<BlobReader> reader) : m_reader(std::move(reader))
 {
   ASSERT(m_reader);
 
   m_file_system = [this]() -> std::unique_ptr<FileSystem> {
     auto file_system = std::make_unique<FileSystemGCWii>(this, PARTITION_NONE);
-    return file_system->IsValid() ? std::move(file_system) : nullptr;
+    if (!file_system->IsValid())
+      return nullptr;
+    return file_system;
   };
+  m_banner = [this] { return ReadBanner(); };
 
-  m_converted_banner = [this] { return LoadBannerFile(); };
-
-  constexpr u32 BTID_MAGIC = 0x44495442;
-  auto tmp_fs = GetFileSystem(PARTITION_NONE);
-  if (tmp_fs)
-  {
-    std::unique_ptr<FileInfo> file_info = tmp_fs->FindFileInfo("boot.id");
-    if (!file_info)
-      return;
-    const u64 file_size = ReadFile(*this, PARTITION_NONE, file_info.get(),
-                                   reinterpret_cast<u8*>(&m_triforce_header), sizeof(BootID));
-    if (file_size >= 4 && m_triforce_header.magic == BTID_MAGIC)
-    {
-      m_is_triforce = true;
-    }
-  }
+  // A disc with a boot.id file whose magic is right is a Triforce disc.
+  const FileSystem* file_system = GetFileSystem(PARTITION_NONE);
+  if (!file_system)
+    return;
+  const std::unique_ptr<FileInfo> boot_id = file_system->FindFileInfo("boot.id");
+  if (!boot_id)
+    return;
+  const u64 bytes_read = ReadFile(*this, PARTITION_NONE, boot_id.get(),
+                                  reinterpret_cast<u8*>(&m_triforce_header), sizeof(BootID));
+  m_is_triforce = bytes_read >= sizeof(u32) && m_triforce_header.magic == BOOT_ID_MAGIC;
 }
 
 VolumeGC::~VolumeGC() = default;
 
 bool VolumeGC::Read(u64 offset, u64 length, u8* buffer, const Partition& partition) const
 {
-  if (partition != PARTITION_NONE)
-    return false;
-
-  return m_reader->Read(offset, length, buffer);
+  return partition == PARTITION_NONE && m_reader->Read(offset, length, buffer);
 }
 
 const FileSystem* VolumeGC::GetFileSystem(const Partition& partition) const
@@ -71,73 +74,62 @@ const FileSystem* VolumeGC::GetFileSystem(const Partition& partition) const
 
 std::string VolumeGC::GetGameTDBID(const Partition& partition) const
 {
-  // Datel discs for the GameCube can have one of two different game IDs:
-  //
-  // 1: GNHE5d. (Yes, with a lowercase d.) This game ID is used not only for
-  // all kinds of Datel discs, but also for the licensed release NHL Hitz 2002.
-  //
-  // 2: DTLX01. This game ID is used for a few late Datel releases. Both Action Replay
-  // and FreeLoader are known to have been released under this game ID.
-  //
-  // Since no game ID used for Datel discs uniquely represents one product,
-  // never use the game ID of a Datel disc for looking up the title or cover art.
+  // Datel used GNHE5d (which the licensed NHL Hitz 2002 also has) and DTLX01 for many different
+  // products, so their IDs say nothing about which title or cover to show.
   if (IsDatelDisc())
-    return "";
-
-  // Normal case. Just return the usual game ID.
+    return {};
   return GetGameID(partition);
 }
 
 Region VolumeGC::GetRegion() const
 {
-  if (m_is_triforce)
-  {
-    switch (m_triforce_header.region_flags & 0x000000FF)
-    {
-    default:
-    case 0x02:  // JAPAN
-    case 0x08:  // ASIA
-      return Region::NTSC_J;
-    case 0x0E:  // USA
-      return Region::NTSC_U;
-    case 0x0C:  // EXPORT
-      return Region::PAL;
-    }
-  }
+  if (!m_is_triforce)
+    return RegionCodeToRegion(m_reader->ReadSwapped<u32>(REGION_CODE_OFFSET));
 
-  return RegionCodeToRegion(m_reader->ReadSwapped<u32>(0x458));
+  switch (m_triforce_header.region_flags & 0xff)
+  {
+  case 0x0e:  // USA
+    return Region::NTSC_U;
+  case 0x0c:  // export
+    return Region::PAL;
+  case 0x02:  // Japan
+  case 0x08:  // Asia
+  default:
+    return Region::NTSC_J;
+  }
 }
 
 std::map<Language, std::string> VolumeGC::GetShortNames() const
 {
-  return m_converted_banner->short_names;
+  return m_banner->short_names;
 }
 
 std::map<Language, std::string> VolumeGC::GetLongNames() const
 {
-  return m_converted_banner->long_names;
+  return m_banner->long_names;
 }
 
 std::map<Language, std::string> VolumeGC::GetShortMakers() const
 {
-  return m_converted_banner->short_makers;
+  return m_banner->short_makers;
 }
 
 std::map<Language, std::string> VolumeGC::GetLongMakers() const
 {
-  return m_converted_banner->long_makers;
+  return m_banner->long_makers;
 }
 
 std::map<Language, std::string> VolumeGC::GetDescriptions() const
 {
-  return m_converted_banner->descriptions;
+  return m_banner->descriptions;
 }
 
 std::vector<u32> VolumeGC::GetBanner(u32* width, u32* height) const
 {
-  *width = m_converted_banner->image_width;
-  *height = m_converted_banner->image_height;
-  return m_converted_banner->image_buffer;
+  const DecodedBanner& banner = *m_banner;
+  *width = banner.width;
+  *height = banner.height;
+  return banner.pixels;
 }
 
 BlobType VolumeGC::GetBlobType() const
@@ -167,118 +159,85 @@ const BlobReader& VolumeGC::GetBlobReader() const
 
 Platform VolumeGC::GetVolumeType() const
 {
-  if (m_is_triforce)
-    return Platform::Triforce;
-  else
-    return Platform::GameCubeDisc;
+  return m_is_triforce ? Platform::Triforce : Platform::GameCubeDisc;
 }
 
 bool VolumeGC::IsDatelDisc() const
 {
-  return GetGameID() == "DTLX01" || !GetBootDOLOffset(*this, PARTITION_NONE).has_value();
+  // Datel discs either use DTLX01 or have no boot DOL offset in the header.
+  if (GetGameID() == "DTLX01")
+    return true;
+  return !GetBootDOLOffset(*this, PARTITION_NONE).has_value();
 }
 
 std::array<u8, 20> VolumeGC::GetSyncHash() const
 {
-  auto context = Common::SHA1::CreateContext();
-
+  const std::unique_ptr<Common::SHA1::Context> context = Common::SHA1::CreateContext();
   AddGamePartitionToSyncHash(context.get());
-
   return context->Finish();
 }
 
-VolumeGC::ConvertedGCBanner VolumeGC::LoadBannerFile() const
+VolumeGC::DecodedBanner VolumeGC::ReadBanner() const
 {
-  // There is at least one Triforce game that has an opening.bnr file but from a different game.
+  // At least one Triforce disc ships another game's opening.bnr, so Triforce banners are ignored.
   if (m_is_triforce)
-  {
     return {};
-  }
 
-  GCBanner banner_file;
-  const u64 file_size = ReadFile(*this, PARTITION_NONE, "opening.bnr",
-                                 reinterpret_cast<u8*>(&banner_file), sizeof(GCBanner));
-  if (file_size < 4)
+  // Large (about 6 KiB), so it lives on the heap.
+  auto file = std::make_unique<BannerFile>();
+  const u64 size = ReadFile(*this, PARTITION_NONE, "opening.bnr", reinterpret_cast<u8*>(file.get()),
+                            sizeof(BannerFile));
+  if (size < sizeof(u32))
   {
     WARN_LOG_FMT(DISCIO, "Could not read opening.bnr.");
-    return {};  // Return early so that we don't access the uninitialized banner_file.id
-  }
-
-  constexpr u32 BNR1_MAGIC = 0x31524e42;
-  constexpr u32 BNR2_MAGIC = 0x32524e42;
-  bool is_bnr1;
-  if (banner_file.id == BNR1_MAGIC && file_size == BNR1_SIZE)
-  {
-    is_bnr1 = true;
-  }
-  else if (banner_file.id == BNR2_MAGIC && file_size == BNR2_SIZE)
-  {
-    is_bnr1 = false;
-  }
-  else
-  {
-    WARN_LOG_FMT(DISCIO, "Invalid opening.bnr. Type: {:#0x} Size: {:#0x}", banner_file.id,
-                 file_size);
     return {};
   }
 
-  return ExtractBannerInformation(banner_file, is_bnr1);
+  if (file->magic == BNR1_MAGIC && size == BNR1_SIZE)
+    return DecodeBanner(*file, 1);
+  if (file->magic == BNR2_MAGIC && size == BNR2_SIZE)
+    return DecodeBanner(*file, BANNER_LANGUAGES);
+
+  WARN_LOG_FMT(DISCIO, "Invalid opening.bnr. Type: {:#0x} Size: {:#0x}", file->magic, size);
+  return {};
 }
 
-VolumeGC::ConvertedGCBanner VolumeGC::ExtractBannerInformation(const GCBanner& banner_file,
-                                                               bool is_bnr1) const
+VolumeGC::DecodedBanner VolumeGC::DecodeBanner(const BannerFile& file, size_t languages) const
 {
-  ConvertedGCBanner banner;
+  DecodedBanner banner;
 
-  u32 number_of_languages = 0;
-  Language start_language = Language::Unknown;
+  banner.width = BANNER_WIDTH;
+  banner.height = BANNER_HEIGHT;
+  banner.pixels.resize(BANNER_WIDTH * BANNER_HEIGHT);
+  Common::Decode5A3Image(banner.pixels.data(), file.pixels, BANNER_WIDTH, BANNER_HEIGHT);
 
-  if (is_bnr1)  // NTSC
+  // A BNR1 banner has one language: Japanese on Japanese discs, English otherwise. BNR2 banners
+  // have the six PAL GameCube languages, starting with English.
+  Language first = Language::English;
+  if (languages == 1 && GetRegion() == Region::NTSC_J)
+    first = Language::Japanese;
+
+  const auto add = [this](std::map<Language, std::string>* map, Language language,
+                          std::span<const char> field) {
+    std::string text = DecodeString(field);
+    if (!text.empty())
+      map->emplace(language, std::move(text));
+  };
+
+  for (size_t i = 0; i < languages; ++i)
   {
-    number_of_languages = 1;
-    start_language = GetRegion() == Region::NTSC_J ? Language::Japanese : Language::English;
-  }
-  else  // PAL
-  {
-    number_of_languages = 6;
-    start_language = Language::English;
-  }
-
-  banner.image_width = GC_BANNER_WIDTH;
-  banner.image_height = GC_BANNER_HEIGHT;
-  banner.image_buffer = std::vector<u32>(GC_BANNER_WIDTH * GC_BANNER_HEIGHT);
-  Common::Decode5A3Image(banner.image_buffer.data(), banner_file.image, GC_BANNER_WIDTH,
-                         GC_BANNER_HEIGHT);
-
-  for (u32 i = 0; i < number_of_languages; ++i)
-  {
-    const GCBannerInformation& info = banner_file.information[i];
-    Language language = static_cast<Language>(static_cast<int>(start_language) + i);
-
-    std::string description = DecodeString(info.description);
-    if (!description.empty())
-      banner.descriptions.emplace(language, description);
-
-    std::string short_name = DecodeString(info.short_name);
-    if (!short_name.empty())
-      banner.short_names.emplace(language, short_name);
-
-    std::string long_name = DecodeString(info.long_name);
-    if (!long_name.empty())
-      banner.long_names.emplace(language, long_name);
-
-    std::string short_maker = DecodeString(info.short_maker);
-    if (!short_maker.empty())
-      banner.short_makers.emplace(language, short_maker);
-
-    std::string long_maker = DecodeString(info.long_maker);
-    if (!long_maker.empty())
-      banner.long_makers.emplace(language, long_maker);
+    const BannerText& text = file.text[i];
+    const Language language = static_cast<Language>(static_cast<int>(first) + static_cast<int>(i));
+    add(&banner.descriptions, language, text.description);
+    add(&banner.short_names, language, text.short_name);
+    add(&banner.long_names, language, text.long_name);
+    add(&banner.short_makers, language, text.short_maker);
+    add(&banner.long_makers, language, text.long_maker);
   }
 
   return banner;
 }
 
-VolumeGC::ConvertedGCBanner::ConvertedGCBanner() = default;
-VolumeGC::ConvertedGCBanner::~ConvertedGCBanner() = default;
+VolumeGC::DecodedBanner::DecodedBanner() = default;
+VolumeGC::DecodedBanner::~DecodedBanner() = default;
 }  // namespace DiscIO

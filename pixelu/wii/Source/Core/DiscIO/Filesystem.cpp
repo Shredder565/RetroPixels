@@ -1,7 +1,8 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DiscIO/Filesystem.h"
+
+#include <numeric>
 
 namespace DiscIO
 {
@@ -12,12 +13,9 @@ u64 FileInfo::GetTotalSize() const
   if (!IsDirectory())
     return GetSize();
 
-  u64 size = 0;
-
-  for (const auto& entry : *this)
-    size += entry.GetTotalSize();
-
-  return size;
+  return std::accumulate(begin(), end(), u64{0}, [](u64 total, const FileInfo& child) {
+    return total + child.GetTotalSize();
+  });
 }
 
 FileSystem::~FileSystem() = default;

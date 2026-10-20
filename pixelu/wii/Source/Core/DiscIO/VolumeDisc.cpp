@@ -1,8 +1,8 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DiscIO/VolumeDisc.h"
 
+#include <array>
 #include <memory>
 #include <optional>
 #include <string>
@@ -16,211 +16,204 @@
 
 namespace DiscIO
 {
+// Disc header layout (the first bytes of a GameCube disc or of a Wii partition):
+//   0x00 game code (4) + maker code (2), 0x06 disc number, 0x07 revision,
+//   0x20 internal name (0x60 bytes). The apploader starts at 0x2440 with its build date.
+namespace
+{
+constexpr u64 HEADER_MAKER_OFFSET = 0x04;
+constexpr u64 HEADER_DISC_NUMBER_OFFSET = 0x06;
+constexpr u64 HEADER_REVISION_OFFSET = 0x07;
+constexpr u64 HEADER_NAME_OFFSET = 0x20;
+constexpr size_t HEADER_NAME_SIZE = 0x60;
+constexpr size_t APPLOADER_DATE_SIZE = 0x10;
+constexpr u64 NKIT_MAGIC_OFFSET = 0x200;
+constexpr u32 NKIT_MAGIC = 0x4E4B4954;  // "NKIT"
+
+const VolumeDisc::BootID& TriforceBootID(const VolumeDisc& volume)
+{
+  // Only VolumeGC reports Platform::Triforce.
+  return *static_cast<const VolumeGC&>(volume).GetTriforceBootID();
+}
+
+// The first byte of boot.id's region flags says which market a Triforce board was sold in.
+char TriforceCountryLetter(const VolumeDisc::BootID& boot_id)
+{
+  switch (boot_id.region_flags & 0xff)
+  {
+  case 0x08:  // Asia
+    return 'W';
+  case 0x0e:  // USA
+    return 'E';
+  case 0x0c:  // export
+    return 'P';
+  case 0x02:  // Japan
+  default:
+    return 'J';
+  }
+}
+}  // namespace
+
 std::string VolumeDisc::GetGameID(const Partition& partition) const
 {
-  char id[6]{};
+  std::array<char, 6> id{};
 
-  if (GetVolumeType() == Platform::Triforce)
+  if (GetVolumeType() != Platform::Triforce)
   {
-    // Triforce games have their Game ID stored in the boot.id file
-    const BootID* boot_id = static_cast<const VolumeGC*>(this)->GetTriforceBootID();
-
-    // Construct game ID from the BTID
-    id[0] = 'G';
-
-    memcpy(id + 1, boot_id->game_id.data() + 2, 2);
-
-    switch (GetCountry())
-    {
-    default:
-    case Country::Japan:
-      id[3] = 'J';
-      break;
-    case Country::Taiwan:
-      id[3] = 'W';
-      break;
-    case Country::USA:
-      id[3] = 'E';
-      break;
-    case Country::Europe:
-      id[3] = 'P';
-      break;
-    }
-
-    const std::string maker_id{GetMakerID()};
-    memcpy(id + 4, maker_id.c_str(), std::min<std::size_t>(maker_id.size(), 2));
-
+    if (!Read(0, id.size(), reinterpret_cast<u8*>(id.data()), partition))
+      return {};
     return FilterGameID(id);
   }
 
-  if (!Read(0, sizeof(id), reinterpret_cast<u8*>(id), partition))
-    return std::string();
-
+  // Triforce discs have no game ID in the usual sense, so one is put together in the same shape:
+  // 'G', two characters of boot.id's game ID, a country letter and the maker code.
+  const BootID& boot_id = TriforceBootID(*this);
+  id[0] = 'G';
+  id[1] = boot_id.game_id[2];
+  id[2] = boot_id.game_id[3];
+  switch (GetCountry())
+  {
+  case Country::Taiwan:
+    id[3] = 'W';
+    break;
+  case Country::USA:
+    id[3] = 'E';
+    break;
+  case Country::Europe:
+    id[3] = 'P';
+    break;
+  case Country::Japan:
+  default:
+    id[3] = 'J';
+    break;
+  }
+  const std::string maker = GetMakerID();
+  for (size_t i = 0; i < 2 && i < maker.size(); ++i)
+    id[4 + i] = maker[i];
   return FilterGameID(id);
 }
 
 Country VolumeDisc::GetCountry(const Partition& partition) const
 {
-  u8 country_byte = 0;
+  // A missing byte reads as 0, which means an unknown country.
+  const u8 country_code = GetVolumeType() == Platform::Triforce ?
+                              static_cast<u8>(TriforceCountryLetter(TriforceBootID(*this))) :
+                              ReadSwapped<u8>(3, partition).value_or(0);
 
-  if (GetVolumeType() == Platform::Triforce)
-  {
-    const BootID* boot_id = static_cast<const VolumeGC*>(this)->GetTriforceBootID();
-
-    switch (boot_id->region_flags & 0x000000FF)
-    {
-    default:
-    case 0x02:  // JAPAN
-      country_byte = 'J';
-      break;
-    case 0x08:  // ASIA
-      country_byte = 'W';
-      break;
-    case 0x0E:  // USA
-      country_byte = 'E';
-      break;
-    case 0x0C:  // EXPORT
-      country_byte = 'P';
-      break;
-    }
-  }
-  else
-  {
-    // The 0 that we use as a default value is mapped to Country::Unknown and Region::Unknown
-    country_byte = ReadSwapped<u8>(3, partition).value_or(0);
-  }
-
+  const Platform platform = GetVolumeType();
   const Region region = GetRegion();
   const std::optional<u16> revision = GetRevision();
 
-  if (CountryCodeToRegion(country_byte, GetVolumeType(), region, revision) != region)
+  // When the game ID letter disagrees with the region field, trust the region field.
+  if (CountryCodeToRegion(country_code, platform, region, revision) != region)
     return TypicalCountryForRegion(region);
-
-  return CountryCodeToCountry(country_byte, GetVolumeType(), region, revision);
+  return CountryCodeToCountry(country_code, platform, region, revision);
 }
 
 Region VolumeDisc::RegionCodeToRegion(std::optional<u32> region_code) const
 {
-  if (!region_code)
+  if (!region_code || *region_code > static_cast<u32>(Region::NTSC_K))
     return Region::Unknown;
-
-  const Region region = static_cast<Region>(*region_code);
-  return region <= Region::NTSC_K ? region : Region::Unknown;
+  return static_cast<Region>(*region_code);
 }
 
 std::string VolumeDisc::GetMakerID(const Partition& partition) const
 {
-  char maker_id[2];
-
-  // Triforce games have their maker stored in the boot.id file as an actual string
   if (GetVolumeType() == Platform::Triforce)
   {
-    const BootID* boot_id = static_cast<const VolumeGC*>(this)->GetTriforceBootID();
-
-    // There only seem to be three different makers here,
-    // so we can just check the first char to difference between them.
-    //
-    // NAMCO CORPORATION, SEGA CORPORATION and Hitmaker co,ltd.
-
-    switch (boot_id->manufacturer[0])
+    // boot.id names the maker in full. Only three makers are known (SEGA CORPORATION,
+    // Hitmaker co,ltd and NAMCO CORPORATION), so the first letter is enough. Anything else
+    // falls back to the disc header.
+    switch (TriforceBootID(*this).manufacturer[0])
     {
-    case 'S':  // SEGA CORPORATION
-    case 'H':  // Hitmaker co,ltd
+    case 'S':
+    case 'H':
       return "6E";
-    case 'N':  // NAMCO CORPORATION
+    case 'N':
       return "82";
     default:
       break;
     }
-    // Fall back to normal maker from header
   }
 
-  if (!Read(0x4, sizeof(maker_id), reinterpret_cast<u8*>(&maker_id), partition))
-    return std::string();
-
-  return FilterGameID(maker_id);
+  std::array<char, 2> maker;
+  if (!Read(HEADER_MAKER_OFFSET, maker.size(), reinterpret_cast<u8*>(maker.data()), partition))
+    return {};
+  return FilterGameID(maker);
 }
 
 std::optional<u16> VolumeDisc::GetRevision(const Partition& partition) const
 {
-  std::optional<u8> revision = ReadSwapped<u8>(7, partition);
-  return revision ? *revision : std::optional<u16>();
+  const std::optional<u8> revision = ReadSwapped<u8>(HEADER_REVISION_OFFSET, partition);
+  if (!revision)
+    return std::nullopt;
+  return *revision;
 }
 
 std::string VolumeDisc::GetInternalName(const Partition& partition) const
 {
-  char name[0x60];
-
-  // Triforce games have their Title stored in the boot.id file
   if (GetVolumeType() == Platform::Triforce)
-  {
-    const BootID* boot_id = static_cast<const VolumeGC*>(this)->GetTriforceBootID();
-    return DecodeString(boot_id->game_name);
-  }
+    return DecodeString(TriforceBootID(*this).game_name);
 
-  if (!Read(0x20, sizeof(name), reinterpret_cast<u8*>(&name), partition))
-    return std::string();
-
+  std::array<char, HEADER_NAME_SIZE> name;
+  if (!Read(HEADER_NAME_OFFSET, name.size(), reinterpret_cast<u8*>(name.data()), partition))
+    return {};
   return DecodeString(name);
 }
 
 std::string VolumeDisc::GetApploaderDate(const Partition& partition) const
 {
-  char date[16];
-
-  if (!Read(0x2440, sizeof(date), reinterpret_cast<u8*>(&date), partition))
-    return std::string();
-
+  std::array<char, APPLOADER_DATE_SIZE> date;
+  if (!Read(APPLOADER_ADDRESS, date.size(), reinterpret_cast<u8*>(date.data()), partition))
+    return {};
   return DecodeString(date);
 }
 
 std::optional<u8> VolumeDisc::GetDiscNumber(const Partition& partition) const
 {
-  return ReadSwapped<u8>(6, partition);
+  return ReadSwapped<u8>(HEADER_DISC_NUMBER_OFFSET, partition);
 }
 
 u32 VolumeDisc::GetSimulatedMemorySize() const
 {
-  // Simulated memory size is a 32-bit unsigned integer in the `bi2.bin` file at offset `0x04`.
-  // Apploader reads this and "simulates" a smaller memory size. Originally useful for simulating
-  // 24 MiB of memory on devkits with 48 MiB.
+  // bi2.bin + 4: the memory size the apploader pretends the console has (debug units with more
+  // RAM used it to behave like retail units).
   return ReadSwapped<u32>(BI2_ADDRESS + 0x04, GetGamePartition()).value_or(0);
 }
 
 bool VolumeDisc::IsNKit() const
 {
-  constexpr u32 NKIT_MAGIC = 0x4E4B4954;  // "NKIT"
-  return ReadSwapped<u32>(0x200, PARTITION_NONE) == NKIT_MAGIC;
+  return ReadSwapped<u32>(NKIT_MAGIC_OFFSET, PARTITION_NONE) == NKIT_MAGIC;
 }
 
 void VolumeDisc::AddGamePartitionToSyncHash(Common::SHA1::Context* context) const
 {
   const Partition partition = GetGamePartition();
 
-  // All headers at the beginning of the partition, plus the apploader
-  ReadAndAddToSyncHash(context, 0, 0x2440 + GetApploaderSize(*this, partition).value_or(0),
-                       partition);
+  // Disc header, bi2.bin and the apploader.
+  const u64 apploader_size = GetApploaderSize(*this, partition).value_or(0);
+  ReadAndAddToSyncHash(context, 0, APPLOADER_ADDRESS + apploader_size, partition);
 
-  // Boot DOL (may be missing if this is a Datel disc)
-  const std::optional<u64> dol_offset = GetBootDOLOffset(*this, partition);
-  if (dol_offset)
+  // The boot DOL, which Datel discs may lack.
+  if (const std::optional<u64> dol_offset = GetBootDOLOffset(*this, partition))
   {
-    ReadAndAddToSyncHash(context, *dol_offset,
-                         GetBootDOLSize(*this, partition, *dol_offset).value_or(0), partition);
+    const u64 dol_size = GetBootDOLSize(*this, partition, *dol_offset).value_or(0);
+    ReadAndAddToSyncHash(context, *dol_offset, dol_size, partition);
   }
 
-  // File system
-  const std::optional<u64> fst_offset = GetFSTOffset(*this, partition);
-  if (fst_offset)
-    ReadAndAddToSyncHash(context, *fst_offset, GetFSTSize(*this, partition).value_or(0), partition);
-
-  // opening.bnr (name and banner)
-  const FileSystem* file_system = GetFileSystem(partition);
-  if (file_system)
+  // The file system table.
+  if (const std::optional<u64> fst_offset = GetFSTOffset(*this, partition))
   {
-    std::unique_ptr<FileInfo> file_info = file_system->FindFileInfo("opening.bnr");
-    if (file_info && !file_info->IsDirectory())
-      ReadAndAddToSyncHash(context, file_info->GetOffset(), file_info->GetSize(), partition);
+    const u64 fst_size = GetFSTSize(*this, partition).value_or(0);
+    ReadAndAddToSyncHash(context, *fst_offset, fst_size, partition);
+  }
+
+  // opening.bnr, which holds the title and banner.
+  if (const FileSystem* file_system = GetFileSystem(partition))
+  {
+    const std::unique_ptr<FileInfo> banner = file_system->FindFileInfo("opening.bnr");
+    if (banner && !banner->IsDirectory())
+      ReadAndAddToSyncHash(context, banner->GetOffset(), banner->GetSize(), partition);
   }
 }
 

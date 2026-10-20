@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,8 +9,10 @@
 
 namespace DiscIO
 {
-// Increment CACHE_REVISION (GameFileCache.cpp) if these enums are modified
+// The numeric values below are stored in the game list cache (GameFileCache.cpp). Changing them
+// means bumping that cache's revision.
 
+// What kind of title a volume holds.
 enum class Platform
 {
   GameCubeDisc = 0,
@@ -22,6 +23,7 @@ enum class Platform
   NumberOfPlatforms,
 };
 
+// The country a release was made for, as far as we can tell.
 enum class Country
 {
   Europe = 0,
@@ -41,20 +43,20 @@ enum class Country
   NumberOfCountries,
 };
 
-// This numbering matches Nintendo's GameCube/Wii region numbering.
+// Console regions. 0-2 are the values the disc header's region field (and the Wii's own
+// settings) use; 3 is "region free" on real hardware and doubles as "unknown" here.
 enum class Region
 {
-  NTSC_J = 0,   // Japan and Taiwan (and South Korea for GameCube only)
-  NTSC_U = 1,   // Mainly North America
-  PAL = 2,      // Mainly Europe and Oceania
-  Unknown = 3,  // Nintendo uses this to mean region free, but we also use it for unknown regions
-  NTSC_K = 4,   // South Korea (Wii only)
-  DEV = 5,      // Triforce has no regions
+  NTSC_J = 0,   // Japan, Taiwan; also Korea on the GameCube
+  NTSC_U = 1,   // The Americas
+  PAL = 2,      // Europe, Oceania
+  Unknown = 3,  // Region free, or not known
+  NTSC_K = 4,   // Korea (Wii)
+  DEV = 5,      // Triforce boards have no region
 };
 
-// Languages 0 - 9 match Nintendo's Wii language numbering.
-// Languages 1 - 6 match Nintendo's PAL GameCube languages 0 - 5.
-// NTSC GameCubes only support one language and thus don't number languages.
+// 0-9 are the Wii's language numbers. PAL GameCube banners number their six languages from 0,
+// starting at English (see ToGameCubeLanguage). NTSC GameCube games have a single language.
 enum class Language
 {
   Japanese = 0,
@@ -64,8 +66,8 @@ enum class Language
   Spanish = 4,
   Italian = 5,
   Dutch = 6,
-  SimplifiedChinese = 7,   // Not selectable on any unmodded retail Wii
-  TraditionalChinese = 8,  // Not selectable on any unmodded retail Wii
+  SimplifiedChinese = 7,   // no retail Wii offers it
+  TraditionalChinese = 8,  // no retail Wii offers it
   Korean = 9,
   Unknown,
 };
@@ -83,7 +85,8 @@ Language FromGameCubeLanguage(int language);
 
 Country TypicalCountryForRegion(Region region);
 Region SysConfCountryToRegion(u8 country_code);
-// Avoid using this function if you can. Country codes aren't always reliable region indicators.
+// The fourth game ID character is only a hint about the region; prefer the region field of a
+// disc or TMD when there is one.
 Region CountryCodeToRegion(u8 country_code, Platform platform,
                            Region expected_region = Region::Unknown,
                            std::optional<u16> revision = {});
