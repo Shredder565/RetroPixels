@@ -1,0 +1,68 @@
+- Batch 15b: the wxWidgets UI below the top level (gui/wxgui/components,
+  debugger, dialogs, EmulatedUSBDevices, helpers, input, windows and
+  wxcomponents), the imgui overlay support in src/imgui (imgui_extension and
+  the OpenGL and Vulkan renderers) and Cemu/Tools/DownloadManager rewritten
+  as original code. Covered: the wx helpers, checktree, the CreateAccount and
+  SaveImport dialogs, the PPC thread and texture relation viewers, the
+  progress dialog manager; the PPC debugger windows (disassembly, dump,
+  registers, breakpoints, modules, symbols), TextList and the log control;
+  the game list, stick preview, title manager and download manager lists;
+  the Skylanders / Infinity / Dimensions window; the input mapping panels
+  (VPAD, Pro, Classic, Wiimote), the controller settings dialogs, the
+  Bluetooth pairing dialog, the add-controller window, the hotkey settings
+  and the input settings dialog; the overlay's vertex rotation, font cache
+  and input feed; both overlay renderers with their own shaders; the
+  download manager. Not rewritten: imgui_impl_metal.h/.mm (Objective-C++,
+  macOS only; it cannot be compiled or run here, so a rewrite could not be
+  checked) and the Dear ImGui library itself in dependencies/imgui.
+  File names, public interfaces, _()/_tr() strings, config keys, XML and
+  .map formats, the g_skyportal/g_infinitybase/g_dimensionstoypad calls, the
+  input module API calls, the PixelU RPEmbed hotkey block, the NUP cache
+  entries (token_info, eticket_cache v1, idbe/) and the download and install
+  folder layout (usr/packages/title/cemu_<id>_v<ver>/,
+  usr|sys/title/<hi>/<lo>/{code,content,meta}, DLC code/title.tik) are
+  unchanged. Syntax-checked with g++ and clang++ (GTK) and clang for
+  mingw (MSW) against the untouched tree, with no new errors. Old-vs-new
+  harnesses: list sort comparators, disassembly text and .map parsing;
+  binding pick (3M cases) and screenshot naming (1M names); the vertex
+  rotation (200k centres exact, rotations within 0.0011 px); the OpenGL
+  renderer on llvmpipe (5 frames pixel-identical, restored GL state
+  identical); the Vulkan renderer on lavapipe (9 frames pixel-identical,
+  same command stream over 64 draws, same objects created and freed across
+  font rebuild, texture delete/regenerate and Shutdown+Init); the download
+  manager against a fake title server (fake NAPI, tickets, TMDs, FST and
+  file cache behind the real headers, deterministic task queue: 846-event
+  log, installed tree and cache contents identical except one extra
+  FSTVolume destructor).
+  Fixes and defined behaviour: game list rows are matched by title id
+  (games with the same name no longer share a row), icons are added on the
+  UI thread and the Title ID column width is saved; the title manager's
+  delete confirmation and error run on the UI thread; the column filter
+  prefixes of both title lists match and count rows correctly; sorting the
+  download list by Status falls back to the default order. Infinity and
+  Dimensions share one "nothing selected" sentinel and cancelling the
+  Infinity load dialog no longer shows an error. The Classic Controller
+  page animates its stick previews; panels null-check their controller;
+  removing a controller from a disabled slot no longer crashes. The pairing
+  dialog's stop flag is atomic, the BlueZ worker updates the Cancel button
+  through CallAfter, the Windows radio handle is closed and the worker is
+  joined. Add-controller search results arrive through CallAfter (the
+  posted event leaked) and switching the API clears the previously picked
+  controller. The _GamePad screenshot suffix goes on GamePad shots (it was
+  on TV shots), cancelling a controller hotkey capture stops its timer and
+  restores the label, and the clipboard gets its own copy of the picture.
+  The OpenGL overlay renderer reports "pixelu_opengl3" and the Vulkan one
+  "pixelu_vulkan" as backend names; the unreachable upper-left scissor path
+  passes width/height. The download manager no longer leaks the FST volume
+  when an install fails; internal-only members are private.
+  Kept on purpose: the Vulkan backend's DeleteTexture clears the texture
+  record without freeing it, Shutdown does not free descriptor sets (the
+  renderer destroys the pool) and the old font descriptor is not freed on a
+  Shutdown/Init pair; blending is left disabled after the OpenGL overlay.
+  The download manager still verifies freshly downloaded files in "check"
+  mode (a bad file is downloaded again rather than reported), ignores a
+  failure inside a nested folder during install (the error is recorded, the
+  install continues), reports the update ticket counter from 0, treats
+  any ticket of a title as the download ticket, does not free download
+  records on reset, and keeps the cemu_ prefix of download folders so
+  unfinished downloads from older versions are still found.
