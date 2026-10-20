@@ -6,6 +6,7 @@
 #include <array>
 #include <bit>
 #include <cstring>
+#include <type_traits>
 
 #include "Common/Assert.h"
 #include "Common/ChunkFile.h"
@@ -98,26 +99,100 @@ bool PerformanceMonitorActive(const PowerPCState& state)
 {
   return state.spr[SPR_MMCR0] != 0 || state.spr[SPR_MMCR1] != 0;
 }
+
+// Savestate helpers: arrays (plain or std::array) go through DoArray, everything else
+// through Do, in the order the arguments are given.
+template <typename T>
+struct IsStdArray : std::false_type
+{
+};
+template <typename T, size_t N>
+struct IsStdArray<std::array<T, N>> : std::true_type
+{
+};
+
+template <typename... Fields>
+void DoFields(PointerWrap& p, Fields&... fields)
+{
+  const auto one = [&p]<typename F>(F& field) {
+    if constexpr (std::is_array_v<F> || IsStdArray<F>::value)
+      p.DoArray(field);
+    else
+      p.Do(field);
+  };
+  (one(fields), ...);
+}
+
+// The register file as savestates hold it. The decrementer and time base are not
+// part of it: CoreTiming and SystemTimers save those.
+void DoRegisterFile(PointerWrap& p, PowerPCState& s)
+{
+  DoFields(p, s.gpr, s.pc, s.npc, s.cr.fields, s.msr, s.fpscr, s.Exceptions, s.downcount,
+           s.xer_ca, s.xer_so_ov, s.xer_stringctrl, s.ps, s.sr, s.spr, s.tlb, s.pagetable_base,
+           s.pagetable_mask, s.pagetable_update_pending, s.reserve, s.reserve_address);
+}
+
+// SPRs with a non-zero value out of reset (PVR is set separately: it depends on the console).
+struct SprResetValue
+{
+  u32 index;
+  u32 value;
+};
+constexpr SprResetValue kSprResetValues[] = {
+    // PLL configuration: core clock at three times the bus.
+    {SPR_HID1, 0x80000000},
+    // The chip ID (ECID) of one real console.
+    {SPR_ECID_U, 0x0d96e200},
+    {SPR_ECID_M, 0x1840c00d},
+    {SPR_ECID_L, 0x82bb08e8},
+};
+
+// Every CR field starts out with LT, GT, EQ and SO clear: negative (not GT), low half
+// non-zero (not EQ), bits 62 and 59 clear.
+constexpr u64 CR_FIELD_RESET = 0x8000000000000001;
+
+void ClearArchitectedRegisters(PowerPCState& s, bool is_wii)
+{
+  std::ranges::fill(s.gpr, 0u);
+  std::ranges::fill(s.ps, PairedSingle{});
+  std::ranges::fill(s.sr, 0u);
+  std::ranges::fill(s.cr.fields, CR_FIELD_RESET);
+  std::ranges::fill(s.spr, 0u);
+  for (const SprResetValue& r : kSprResetValues)
+    s.spr[r.index] = r.value;
+  s.spr[SPR_PVR] = is_wii ? PVR_BROADWAY : PVR_GEKKO;
+  s.SetXER({});
+  s.fpscr.Hex = 0;
+  s.pc = s.npc = 0;
+  s.Exceptions = 0;
+  s.reserve_address = 0;
+  s.reserve = false;
+}
 }  // namespace
 
-double PairedSingle::PS0AsDouble() const
-{
-  return std::bit_cast<double>(ps0);
-}
-
-double PairedSingle::PS1AsDouble() const
-{
-  return std::bit_cast<double>(ps1);
-}
-
+// A paired single keeps both halves as raw IEEE double bits.
 void PairedSingle::SetPS0(double value)
 {
-  ps0 = std::bit_cast<u64>(value);
+  std::memcpy(&ps0, &value, sizeof(ps0));
 }
 
 void PairedSingle::SetPS1(double value)
 {
-  ps1 = std::bit_cast<u64>(value);
+  std::memcpy(&ps1, &value, sizeof(ps1));
+}
+
+double PairedSingle::PS0AsDouble() const
+{
+  double d;
+  std::memcpy(&d, &ps0, sizeof(d));
+  return d;
+}
+
+double PairedSingle::PS1AsDouble() const
+{
+  double d;
+  std::memcpy(&d, &ps1, sizeof(d));
+  return d;
 }
 
 PowerPCManager::PowerPCManager(Core::System& system)
@@ -130,54 +205,29 @@ PowerPCManager::~PowerPCManager() = default;
 
 void PowerPCManager::DoState(PointerWrap& p)
 {
-  // The decrementer and time base are saved by CoreTiming/SystemTimers, not
-  // here.
-  const std::array<u32, 16> segments_before = m_ppc_state.sr;
-
-  p.DoArray(m_ppc_state.gpr);
-  p.Do(m_ppc_state.pc);
-  p.Do(m_ppc_state.npc);
-  p.DoArray(m_ppc_state.cr.fields);
-  p.Do(m_ppc_state.msr);
-  p.Do(m_ppc_state.fpscr);
-  p.Do(m_ppc_state.Exceptions);
-  p.Do(m_ppc_state.downcount);
-  p.Do(m_ppc_state.xer_ca);
-  p.Do(m_ppc_state.xer_so_ov);
-  p.Do(m_ppc_state.xer_stringctrl);
-  p.DoArray(m_ppc_state.ps);
-  p.DoArray(m_ppc_state.sr);
-  p.DoArray(m_ppc_state.spr);
-  p.DoArray(m_ppc_state.tlb);
-  p.Do(m_ppc_state.pagetable_base);
-  p.Do(m_ppc_state.pagetable_mask);
-  p.Do(m_ppc_state.pagetable_update_pending);
-  p.Do(m_ppc_state.reserve);
-  p.Do(m_ppc_state.reserve_address);
+  // Loading a state only has to rebuild the segment-derived fastmem mappings when the
+  // segment registers actually change.
+  const auto old_segments = m_ppc_state.sr;
+  DoRegisterFile(p, m_ppc_state);
 
   auto& memory = m_system.GetMemory();
-  m_ppc_state.iCache.DoState(memory, p);
-  m_ppc_state.dCache.DoState(memory, p);
+  for (Cache* cache : std::array<Cache*, 2>{&m_ppc_state.iCache, &m_ppc_state.dCache})
+    cache->DoState(memory, p);
 
+  // Checked only now: a failed read above switches the wrapper out of read mode.
+  const bool loading = p.IsReadMode();
   auto& mmu = m_system.GetMMU();
-  if (!p.IsReadMode())
+  mmu.DoState(p, loading && old_segments != m_ppc_state.sr);
+  if (loading)
   {
-    mmu.DoState(p, false);
-  }
-  else
-  {
-    mmu.DoState(p, segments_before != m_ppc_state.sr);
-
-    // A state saved with the data cache on may be loaded with it off.
+    // The state may have been saved with the data cache on and be loaded with it off.
     if (!m_ppc_state.m_enable_dcache)
     {
       INFO_LOG_FMT(POWERPC, "Flushing data cache");
       m_ppc_state.dCache.FlushAll(memory);
     }
-
     RoundingModeUpdated(m_ppc_state);
     RecalculateAllFeatureFlags(m_ppc_state);
-
     mmu.IBATUpdated();
     mmu.DBATUpdated();
   }
@@ -187,46 +237,23 @@ void PowerPCManager::DoState(PointerWrap& p)
 
 void PowerPCManager::ResetRegisters()
 {
-  std::ranges::fill(m_ppc_state.ps, PairedSingle{});
-  std::ranges::fill(m_ppc_state.sr, 0u);
-  std::ranges::fill(m_ppc_state.gpr, 0u);
-  std::ranges::fill(m_ppc_state.spr, 0u);
+  ClearArchitectedRegisters(m_ppc_state, m_system.IsWii());
 
-  m_ppc_state.spr[SPR_PVR] = m_system.IsWii() ? PVR_BROADWAY : PVR_GEKKO;
-  // HID1 reports the PLL configuration: core clock at three times the bus.
-  m_ppc_state.spr[SPR_HID1] = 0x80000000;
-  // The chip ID (ECID) of one real console.
-  m_ppc_state.spr[SPR_ECID_U] = 0x0d96e200;
-  m_ppc_state.spr[SPR_ECID_M] = 0x1840c00d;
-  m_ppc_state.spr[SPR_ECID_L] = 0x82bb08e8;
-
-  m_ppc_state.fpscr.Hex = 0;
-  m_ppc_state.pc = 0;
-  m_ppc_state.npc = 0;
-  m_ppc_state.Exceptions = 0;
-
-  m_ppc_state.reserve = false;
-  m_ppc_state.reserve_address = 0;
-
-  // Every CR field starts out with LT, GT, EQ and SO clear: negative (not
-  // GT), low half non-zero (not EQ), bits 62 and 59 clear.
-  std::ranges::fill(m_ppc_state.cr.fields, u64{0x8000000000000001});
-  m_ppc_state.SetXER({});
-
+  // The MMU's BAT lookup tables follow the (now cleared) BAT SPRs.
   auto& mmu = m_system.GetMMU();
   mmu.DBATUpdated();
   mmu.IBATUpdated();
 
-  auto& system_timers = m_system.GetSystemTimers();
-  TL(m_ppc_state) = 0;
-  TU(m_ppc_state) = 0;
-  system_timers.TimeBaseSet();
+  auto& timers = m_system.GetSystemTimers();
+  TU(m_ppc_state) = TL(m_ppc_state) = 0;
+  timers.TimeBaseSet();
 
-  // Real hardware comes out of reset with MSR[IP] set, but the boot ROM that
-  // would clear it is not run, so start with 0.
+  // MSR[IP] is set on real hardware after reset and the boot ROM clears it. That ROM
+  // code is skipped here, so MSR starts at zero.
   m_ppc_state.msr.Hex = 0;
-  m_ppc_state.spr[SPR_DEC] = 0xFFFFFFFF;
-  system_timers.DecrementerSet();
+  // The decrementer starts at its maximum and counts down from there.
+  m_ppc_state.spr[SPR_DEC] = ~0u;
+  timers.DecrementerSet();
 
   RoundingModeUpdated(m_ppc_state);
   RecalculateAllFeatureFlags(m_ppc_state);
@@ -294,31 +321,36 @@ void PowerPCManager::RefreshConfig()
 
 void PowerPCManager::Init(CPUCore cpu_core)
 {
+  // Follow the accurate-cache setting from the start and whenever it changes.
   m_registered_config_callback_id =
       CPUThreadConfigCallback::AddConfigChangedCallback([this] { RefreshConfig(); });
   RefreshConfig();
 
+  auto& core_timing = m_system.GetCoreTiming();
   m_invalidate_cache_thread_safe =
-      m_system.GetCoreTiming().RegisterEvent("invalidateEmulatedCache", InvalidateCacheThreadSafe);
+      core_timing.RegisterEvent("invalidateEmulatedCache", InvalidateCacheThreadSafe);
 
   Reset();
-
   InitializeCPUCore(cpu_core);
-  auto& memory = m_system.GetMemory();
+
+  // Both caches are sized for the memory layout of the console being emulated.
+  Memory::MemoryManager& memory = m_system.GetMemory();
   m_ppc_state.iCache.Init(memory);
   m_ppc_state.dCache.Init(memory);
 }
 
 void PowerPCManager::Reset()
 {
-  m_ppc_state.pagetable_base = 0;
-  m_ppc_state.pagetable_mask = 0;
-  m_ppc_state.pagetable_update_pending = false;
-  m_ppc_state.tlb = {};
+  // Translation state first: no page table, empty TLB.
+  PowerPCState& s = m_ppc_state;
+  s.pagetable_base = s.pagetable_mask = 0;
+  s.pagetable_update_pending = false;
+  s.tlb = {};
 
   ResetRegisters();
-  m_ppc_state.iCache.Reset(m_system.GetJitInterface());
-  m_ppc_state.dCache.Reset();
+
+  s.iCache.Reset(m_system.GetJitInterface());
+  s.dCache.Reset();
   m_system.GetMMU().Reset();
 }
 
@@ -385,33 +417,34 @@ const char* PowerPCManager::GetCPUName() const
 
 void PowerPCManager::InjectExternalCPUCore(CPUCoreBase* new_cpu)
 {
-  if (m_cpu_core_base_is_injected)
+  // Whatever was injected before goes away first.
+  const bool replacing = m_cpu_core_base_is_injected;
+  if (replacing)
     m_cpu_core_base->Shutdown();
 
-  if (new_cpu == nullptr)
+  if (new_cpu != nullptr)
   {
-    if (m_cpu_core_base_is_injected)
-    {
-      m_cpu_core_base_is_injected = false;
-      ApplyMode();
-    }
-    return;
+    new_cpu->Init();
+    m_cpu_core_base = new_cpu;
+    m_cpu_core_base_is_injected = true;
   }
-
-  new_cpu->Init();
-  m_cpu_core_base = new_cpu;
-  m_cpu_core_base_is_injected = true;
-}
-
-void PowerPCManager::SingleStep()
-{
-  m_cpu_core_base->SingleStep();
+  else if (replacing)
+  {
+    // Back to the core the current mode asks for.
+    m_cpu_core_base_is_injected = false;
+    ApplyMode();
+  }
 }
 
 void PowerPCManager::RunLoop()
 {
   m_cpu_core_base->Run();
   Host_UpdateDisasmDialog();
+}
+
+void PowerPCManager::SingleStep()
+{
+  m_cpu_core_base->SingleStep();
 }
 
 u64 PowerPCManager::ReadFullTimeBaseValue() const
