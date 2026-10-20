@@ -1,7 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-
-// Adapted from in_cube by hcs & destop
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,6 +6,10 @@
 
 class PointerWrap;
 
+// Decoder for the 4-bit ADPCM of streamed disc audio. A 32-byte block holds
+// one header byte per channel (filter in the high nibble, shift in the low
+// nibble), two unused bytes and 28 bytes of samples: left in the low nibble,
+// right in the high nibble.
 namespace StreamADPCM
 {
 enum
@@ -22,12 +23,18 @@ class ADPCMDecoder
 public:
   void ResetFilter();
   void DoState(PointerWrap& p);
+  // Writes SAMPLES_PER_BLOCK interleaved stereo frames to `pcm`.
   void DecodeBlock(s16* pcm, const u8* adpcm);
 
 private:
-  s32 m_histl1 = 0;
-  s32 m_histl2 = 0;
-  s32 m_histr1 = 0;
-  s32 m_histr2 = 0;
+  // The previous two outputs of one channel's prediction filter.
+  struct History
+  {
+    s32 last = 0;
+    s32 before_last = 0;
+  };
+
+  History m_left;
+  History m_right;
 };
 }  // namespace StreamADPCM

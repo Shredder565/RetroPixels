@@ -1,7 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-
-// Adapted from in_cube by hcs & destop
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/StreamADPCM.h"
 
@@ -12,61 +9,64 @@
 
 namespace StreamADPCM
 {
-static s16 ADPDecodeSample(s32 bits, s32 q, s32& hist1, s32& hist2)
+namespace
 {
-  s32 hist = 0;
-  switch (q >> 4)
-  {
-  case 0:
-    hist = 0;
-    break;
-  case 1:
-    hist = (hist1 * 0x3c);
-    break;
-  case 2:
-    hist = (hist1 * 0x73) - (hist2 * 0x34);
-    break;
-  case 3:
-    hist = (hist1 * 0x62) - (hist2 * 0x37);
-    break;
-  }
-  hist = std::clamp((hist + 0x20) >> 6, -0x200000, 0x1fffff);
+// Prediction weights (in 1/64ths) for the last and second-to-last output.
+// Filter numbers above 3 predict nothing.
+struct Weights
+{
+  s32 last;
+  s32 before_last;
+};
+constexpr Weights FILTERS[4] = {{0, 0}, {0x3c, 0}, {0x73, -0x34}, {0x62, -0x37}};
 
-  s32 cur = (((s16)(bits << 12) >> (q & 0xf)) << 6) + hist;
+// The history holds outputs with six fractional bits.
+s16 DecodeNibble(u32 nibble, u8 header, s32& last, s32& before_last)
+{
+  const u32 filter = header >> 4;
+  const u32 shift = header & 0xf;
 
-  hist2 = hist1;
-  hist1 = cur;
+  s32 prediction = 0;
+  if (filter < 4)
+    prediction = last * FILTERS[filter].last + before_last * FILTERS[filter].before_last;
+  prediction = std::clamp((prediction + 0x20) >> 6, -0x200000, 0x1fffff);
 
-  cur >>= 6;
-  cur = std::clamp(cur, -0x8000, 0x7fff);
+  // The nibble is a signed value in the top four bits of a 16-bit word.
+  const s32 sample = static_cast<s16>(nibble << 12);
+  const s32 value = ((sample >> shift) << 6) + prediction;
 
-  return (s16)cur;
+  before_last = last;
+  last = value;
+
+  return static_cast<s16>(std::clamp(value >> 6, -0x8000, 0x7fff));
 }
+}  // namespace
 
 void ADPCMDecoder::ResetFilter()
 {
-  m_histl1 = 0;
-  m_histl2 = 0;
-  m_histr1 = 0;
-  m_histr2 = 0;
+  m_left = {};
+  m_right = {};
 }
 
 void ADPCMDecoder::DoState(PointerWrap& p)
 {
-  p.Do(m_histl1);
-  p.Do(m_histl2);
-  p.Do(m_histr1);
-  p.Do(m_histr2);
+  p.Do(m_left.last);
+  p.Do(m_left.before_last);
+  p.Do(m_right.last);
+  p.Do(m_right.before_last);
 }
 
 void ADPCMDecoder::DecodeBlock(s16* pcm, const u8* adpcm)
 {
-  for (int i = 0; i < SAMPLES_PER_BLOCK; i++)
+  const u8 left_header = adpcm[0];
+  const u8 right_header = adpcm[1];
+  const u8* samples = adpcm + (ONE_BLOCK_SIZE - SAMPLES_PER_BLOCK);
+
+  for (int frame = 0; frame < SAMPLES_PER_BLOCK; ++frame)
   {
-    pcm[i * 2] = ADPDecodeSample(adpcm[i + (ONE_BLOCK_SIZE - SAMPLES_PER_BLOCK)] & 0xf, adpcm[0],
-                                 m_histl1, m_histl2);
-    pcm[i * 2 + 1] = ADPDecodeSample(adpcm[i + (ONE_BLOCK_SIZE - SAMPLES_PER_BLOCK)] >> 4, adpcm[1],
-                                     m_histr1, m_histr2);
+    const u8 byte = samples[frame];
+    *pcm++ = DecodeNibble(byte & 0xf, left_header, m_left.last, m_left.before_last);
+    *pcm++ = DecodeNibble(byte >> 4, right_header, m_right.last, m_right.before_last);
   }
 }
 }  // namespace StreamADPCM
