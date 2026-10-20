@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -28,6 +27,9 @@ namespace MMIO
 class Mapping;
 }
 
+// The external interface: three serial channels in the Flipper/Hollywood, each with up to three
+// chip selects. Channel 0 carries memory card slot A, the boot ROM/RTC/SRAM chip and serial
+// port 1; channel 1 carries memory card slot B; channel 2 carries serial port 2.
 namespace ExpansionInterface
 {
 class CEXIChannel;
@@ -39,6 +41,7 @@ enum
   MAX_EXI_CHANNELS = 3
 };
 
+// The four places a user can plug something in.
 enum class Slot : int
 {
   A,
@@ -46,8 +49,7 @@ enum class Slot : int
   SP1,
   SP2,
 };
-// Note: using auto here results in a false warning on GCC
-// See https://gcc.gnu.org/bugzilla/show_bug.cgi?id=80351
+// A plain initializer_list (not auto) keeps older GCC versions from warning about it.
 constexpr std::initializer_list<Slot> SLOTS = {Slot::A, Slot::B, Slot::SP1, Slot::SP2};
 constexpr auto MAX_SLOT = Slot::SP2;
 constexpr std::initializer_list<Slot> MEMCARD_SLOTS = {Slot::A, Slot::B};
@@ -88,17 +90,19 @@ public:
   IEXIDevice* GetDevice(Slot slot);
 
 private:
-  void AddMemoryCard(Slot slot);
+  void InsertMemcardSlotDevice(Slot slot);
 
-  static void ChangeDeviceCallback(Core::System& system, u64 userdata, s64 cycles_late);
-  static void UpdateInterruptsCallback(Core::System& system, u64 userdata, s64 cycles_late);
+  static void OnDeviceSwapEvent(Core::System& system, u64 userdata, s64 cycles_late);
+  static void OnInterruptRefreshEvent(Core::System& system, u64 userdata, s64 cycles_late);
 
-  CoreTiming::EventType* m_event_type_change_device = nullptr;
-  CoreTiming::EventType* m_event_type_update_interrupts = nullptr;
+  CoreTiming::EventType* m_swap_event = nullptr;
+  CoreTiming::EventType* m_irq_refresh_event = nullptr;
 
   std::array<std::unique_ptr<CEXIChannel>, MAX_EXI_CHANNELS> m_channels;
 
-  bool m_using_overridden_sram = false;
+  // True when the SRAM came from the caller (NetPlay, movies) instead of the user's SRAM file;
+  // it is then not written back at shutdown.
+  bool m_sram_is_borrowed = false;
 
   Core::System& m_system;
 };

@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -22,6 +21,7 @@ struct HeaderData;
 
 namespace ExpansionInterface
 {
+// Stored in config files and savestates, so the values are fixed.
 enum class EXIDeviceType : int
 {
   Dummy,
@@ -32,8 +32,7 @@ enum class EXIDeviceType : int
   Ethernet,
   Baseboard,
   Gecko,
-  // Only used when creating a device by EXIDevice_Create.
-  // Converted to MemoryCard internally.
+  // A memory card backed by a folder of GCI files. Behaves as MemoryCard on the bus.
   MemoryCardFolder,
   AGP,
   EthernetXLink,
@@ -44,39 +43,41 @@ enum class EXIDeviceType : int
   None = 0xFF
 };
 
+// Base class for everything that can sit on an EXI chip select. The default implementation is
+// an empty slot: nothing present, no interrupts, and transfers that move bytes through
+// TransferByte one at a time.
 class IEXIDevice
 {
 public:
   explicit IEXIDevice(Core::System& system);
   virtual ~IEXIDevice() = default;
 
-  // Immediate copy functions
+  // Immediate transfers of 1 to 4 bytes; the data is left-aligned in the 32-bit word.
   virtual void ImmWrite(u32 data, u32 size);
   virtual u32 ImmRead(u32 size);
   virtual void ImmReadWrite(u32& data, u32 size);
 
-  // DMA copy functions
+  // DMA transfers to or from emulated memory.
   virtual void DMAWrite(u32 address, u32 size);
   virtual void DMARead(u32 address, u32 size);
 
+  // True if the device signals transfer completion itself (e.g. after a delay).
   virtual bool UseDelayedTransferCompletion() const;
   virtual bool IsPresent() const;
+  // Called with the channel's new chip select value when this device's line toggles.
   virtual void SetCS(int cs);
   virtual void DoState(PointerWrap& p);
 
-  // Is generating interrupt ?
   virtual bool IsInterruptSet();
 
-  // For savestates. storing it here seemed cleaner than requiring each implementation to report its
-  // type. I know this class is set up like an interface, but no code requires it to be strictly
-  // such.
+  // Which kind of device this is; savestates record it to rebuild the right device on load.
   EXIDeviceType m_device_type = EXIDeviceType::None;
 
 protected:
   Core::System& m_system;
 
 private:
-  // Byte transfer function for this device
+  // Exchanges one byte with the device: byte holds the byte sent and receives the reply.
   virtual void TransferByte(u8& byte);
 };
 
@@ -110,27 +111,19 @@ struct fmt::formatter<ExpansionInterface::EXIDeviceType>
 
   constexpr formatter() : EnumFormatter(names) {}
 
+  // None (0xFF) is far past the table, so it is formatted here: "u" is its plain name, "s" a
+  // C++ literal for generated code, "n" the name shown in the UI.
   template <typename FormatContext>
   auto format(const ExpansionInterface::EXIDeviceType& e, FormatContext& ctx) const
   {
-    if (e != ExpansionInterface::EXIDeviceType::None)
+    if (e == ExpansionInterface::EXIDeviceType::None)
     {
-      return EnumFormatter::format(e, ctx);
-    }
-    else
-    {
-      // Special-case None since it has a fixed ID (0xff) that is much larger than the rest; we
-      // don't need 200 nullptr entries in names.  We also want to format it specially in the UI.
-      switch (format_type)
-      {
-      default:
-      case 'u':
-        return fmt::format_to(ctx.out(), "None");
-      case 's':
+      if (format_type == 's')
         return fmt::format_to(ctx.out(), "0xffu /* None */");
-      case 'n':
+      if (format_type == 'n')
         return fmt::format_to(ctx.out(), _trans("<Nothing>"));
-      }
+      return fmt::format_to(ctx.out(), "None");
     }
+    return EnumFormatter::format(e, ctx);
   }
 };

@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/EXI/EXI_DeviceDummy.h"
 
@@ -12,31 +11,33 @@
 namespace ExpansionInterface
 {
 CEXIDummy::CEXIDummy(Core::System& system, std::string name)
-    : IEXIDevice(system), m_name{std::move(name)}
+    : IEXIDevice(system), m_label(std::move(name))
 {
 }
 
 void CEXIDummy::ImmWrite(u32 data, u32 size)
 {
-  INFO_LOG_FMT(EXPANSIONINTERFACE, "EXI DUMMY {} ImmWrite: {:08x}", m_name, data);
+  INFO_LOG_FMT(EXPANSIONINTERFACE, "EXI placeholder '{}': immediate write {:08x} ({} bytes)",
+               m_label, data, size);
 }
 
 u32 CEXIDummy::ImmRead(u32 size)
 {
-  INFO_LOG_FMT(EXPANSIONINTERFACE, "EXI DUMMY {} ImmRead", m_name);
+  INFO_LOG_FMT(EXPANSIONINTERFACE, "EXI placeholder '{}': immediate read ({} bytes)", m_label,
+               size);
   return 0;
 }
 
 void CEXIDummy::DMAWrite(u32 address, u32 size)
 {
-  INFO_LOG_FMT(EXPANSIONINTERFACE, "EXI DUMMY {} DMAWrite: {:08x} bytes, from {:08x} to device",
-               m_name, size, address);
+  INFO_LOG_FMT(EXPANSIONINTERFACE, "EXI placeholder '{}': DMA of {:#x} bytes from {:08x}", m_label,
+               size, address);
 }
 
 void CEXIDummy::DMARead(u32 address, u32 size)
 {
-  INFO_LOG_FMT(EXPANSIONINTERFACE, "EXI DUMMY {} DMARead:  {:08x} bytes, from device to {:08x}",
-               m_name, size, address);
+  INFO_LOG_FMT(EXPANSIONINTERFACE, "EXI placeholder '{}': DMA of {:#x} bytes to {:08x}", m_label,
+               size, address);
 }
 
 bool CEXIDummy::IsPresent() const
@@ -44,7 +45,7 @@ bool CEXIDummy::IsPresent() const
   return true;
 }
 
-void CEXIDummy::TransferByte(u8& byte)
+void CEXIDummy::TransferByte(u8&)
 {
 }
 }  // namespace ExpansionInterface

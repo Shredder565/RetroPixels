@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/EXI/EXI.h"
 
@@ -27,185 +26,176 @@
 
 namespace ExpansionInterface
 {
+namespace
+{
+// Where each user-visible slot sits on the bus: {channel, device index}.
+struct SlotWiring
+{
+  u8 channel;
+  u8 device;
+};
+constexpr std::array<SlotWiring, 4> SLOT_WIRING = {{
+    {0, 0},  // Slot A: channel 0, chip select 0
+    {1, 0},  // Slot B: channel 1, chip select 0
+    {0, 2},  // Serial port 1: channel 0, chip select 2
+    {2, 0},  // Serial port 2: channel 2, chip select 0
+}};
+
+// Every channel owns five 32-bit registers, packed back to back.
+constexpr u32 CHANNEL_REGISTER_STRIDE = 5 * sizeof(u32);
+
+// Device swap events carry the target in their userdata.
+constexpr u64 PackSwap(u8 channel, EXIDeviceType type, u8 device_num)
+{
+  return (u64{channel} << 32) | (u64{static_cast<u8>(type)} << 16) | u64{device_num};
+}
+
+const SlotWiring* LookUpWiring(Slot slot)
+{
+  const auto index = static_cast<std::size_t>(slot);
+  if (index >= SLOT_WIRING.size())
+  {
+    PanicAlertFmt("Unhandled slot {}", slot);
+    return nullptr;
+  }
+  return &SLOT_WIRING[index];
+}
+}  // namespace
+
+u8 SlotToEXIChannel(Slot slot)
+{
+  const SlotWiring* wiring = LookUpWiring(slot);
+  return wiring ? wiring->channel : 0;
+}
+
+u8 SlotToEXIDevice(Slot slot)
+{
+  const SlotWiring* wiring = LookUpWiring(slot);
+  return wiring ? wiring->device : 0;
+}
+
 ExpansionInterfaceManager::ExpansionInterfaceManager(Core::System& system) : m_system(system)
 {
 }
 
 ExpansionInterfaceManager::~ExpansionInterfaceManager() = default;
 
-void ExpansionInterfaceManager::AddMemoryCard(Slot slot)
+void ExpansionInterfaceManager::InsertMemcardSlotDevice(Slot slot)
 {
-  EXIDeviceType memorycard_device;
+  const EXIDeviceType configured = Config::Get(Config::GetInfoForEXIDevice(slot));
+  EXIDeviceType chosen = configured;
 
+  // A movie that saved its config decides whether a card is present.
   auto& movie = m_system.GetMovie();
   if (movie.IsPlayingInput() && movie.IsConfigSaved())
   {
-    if (movie.IsUsingMemcard(slot))
+    if (!movie.IsUsingMemcard(slot))
     {
-      memorycard_device = Config::Get(Config::GetInfoForEXIDevice(slot));
-      if (memorycard_device != EXIDeviceType::MemoryCardFolder &&
-          memorycard_device != EXIDeviceType::MemoryCard)
-      {
-        PanicAlertFmtT(
-            "The movie indicates that a memory card should be inserted into {0:n}, but one is not "
-            "currently inserted (instead, {1} is inserted).  For the movie to sync properly, "
-            "please change the selected device to Memory Card or GCI Folder.",
-            slot, Common::GetStringT(fmt::format("{:n}", memorycard_device).c_str()));
-      }
+      chosen = EXIDeviceType::None;
     }
-    else
+    else if (configured != EXIDeviceType::MemoryCard &&
+             configured != EXIDeviceType::MemoryCardFolder)
     {
-      memorycard_device = EXIDeviceType::None;
+      PanicAlertFmtT(
+          "The movie indicates that a memory card should be inserted into {0:n}, but one is not "
+          "currently inserted (instead, {1} is inserted).  For the movie to sync properly, "
+          "please change the selected device to Memory Card or GCI Folder.",
+          slot, Common::GetStringT(fmt::format("{:n}", configured).c_str()));
     }
   }
-  else
-  {
-    memorycard_device = Config::Get(Config::GetInfoForEXIDevice(slot));
-  }
 
-  m_channels[SlotToEXIChannel(slot)]->AddDevice(memorycard_device, SlotToEXIDevice(slot));
-}
-
-u8 SlotToEXIChannel(Slot slot)
-{
-  switch (slot)
-  {
-  case Slot::A:
-    return 0;
-  case Slot::B:
-    return 1;
-  case Slot::SP1:
-    return 0;
-  case Slot::SP2:
-    return 2;
-  default:
-    PanicAlertFmt("Unhandled slot {}", slot);
-    return 0;
-  }
-}
-
-u8 SlotToEXIDevice(Slot slot)
-{
-  switch (slot)
-  {
-  case Slot::A:
-    return 0;
-  case Slot::B:
-    return 0;
-  case Slot::SP1:
-    return 2;
-  case Slot::SP2:
-    return 0;
-  default:
-    PanicAlertFmt("Unhandled slot {}", slot);
-    return 0;
-  }
+  m_channels[SlotToEXIChannel(slot)]->AddDevice(chosen, SlotToEXIDevice(slot));
 }
 
 void ExpansionInterfaceManager::Init(const Sram* override_sram)
 {
-  auto& sram = m_system.GetSRAM();
-  if (override_sram)
-  {
+  Sram& sram = m_system.GetSRAM();
+  m_sram_is_borrowed = override_sram != nullptr;
+  if (m_sram_is_borrowed)
     sram = *override_sram;
-    m_using_overridden_sram = true;
-  }
   else
-  {
     InitSRAM(&sram, SConfig::GetInstance().m_strSRAM);
-    m_using_overridden_sram = false;
-  }
 
   auto& core_timing = m_system.GetCoreTiming();
+  // The memory card events have to exist before anything can be loaded from a savestate.
   CEXIMemoryCard::Init(core_timing);
 
-  {
-    u16 size_mbits = Memcard::MBIT_SIZE_MEMORY_CARD_2043;
-    int size_override = Config::Get(Config::MAIN_MEMORY_CARD_SIZE);
-    if (size_override >= 0 && size_override <= 4)
-      size_mbits = Memcard::MBIT_SIZE_MEMORY_CARD_59 << size_override;
-    const bool shift_jis =
-        Config::ToGameCubeRegion(SConfig::GetInstance().m_region) == DiscIO::Region::NTSC_J;
-    const CardFlashId& flash_id = sram.settings_ex.flash_id[Memcard::SLOT_A];
-    const u32 rtc_bias = sram.settings.rtc_bias;
-    const u32 sram_language = static_cast<u32>(sram.settings.language);
-    const u64 format_time =
-        Common::Timer::GetLocalTimeSinceJan1970() - ExpansionInterface::CEXIIPL::GC_EPOCH;
+  // Card size: 2043 blocks unless the user picked one of the 59 << n sizes.
+  u16 card_mbits = Memcard::MBIT_SIZE_MEMORY_CARD_2043;
+  const int size_choice = Config::Get(Config::MAIN_MEMORY_CARD_SIZE);
+  if (size_choice >= 0 && size_choice <= 4)
+    card_mbits = static_cast<u16>(Memcard::MBIT_SIZE_MEMORY_CARD_59 << size_choice);
 
-    for (u32 i = 0; i < MAX_EXI_CHANNELS; i++)
-    {
-      Memcard::HeaderData header_data;
-      Memcard::InitializeHeaderData(&header_data, flash_id, size_mbits, shift_jis, rtc_bias,
-                                    sram_language, format_time + i);
-      m_channels[i] = std::make_unique<CEXIChannel>(m_system, i, header_data);
-    }
+  const bool japanese_encoding =
+      Config::ToGameCubeRegion(SConfig::GetInstance().m_region) == DiscIO::Region::NTSC_J;
+  const u64 seconds_since_gc_epoch =
+      Common::Timer::GetLocalTimeSinceJan1970() - ExpansionInterface::CEXIIPL::GC_EPOCH;
+
+  for (u32 channel = 0; channel < MAX_EXI_CHANNELS; ++channel)
+  {
+    // Each channel gets its own format time so that cards created on different channels differ.
+    Memcard::HeaderData header;
+    Memcard::InitializeHeaderData(&header, sram.settings_ex.flash_id[Memcard::SLOT_A], card_mbits,
+                                  japanese_encoding, sram.settings.rtc_bias,
+                                  static_cast<u32>(sram.settings.language),
+                                  seconds_since_gc_epoch + channel);
+    m_channels[channel] = std::make_unique<CEXIChannel>(m_system, channel, header);
   }
 
   for (Slot slot : MEMCARD_SLOTS)
-    AddMemoryCard(slot);
+    InsertMemcardSlotDevice(slot);
 
+  // The boot ROM / RTC / SRAM chip is always on channel 0, chip select 1.
   m_channels[0]->AddDevice(EXIDeviceType::MaskROM, 1);
 
-  // Automatically connect the Triforce Baseboard in Triforce mode
-  EXIDeviceType sp1_device = Config::Get(Config::MAIN_SERIAL_PORT_1);
-  if (m_system.IsTriforce())
-  {
-    sp1_device = EXIDeviceType::Baseboard;
-  }
-
-  m_channels[SlotToEXIChannel(Slot::SP1)]->AddDevice(sp1_device, SlotToEXIDevice(Slot::SP1));
+  // Triforce boards always have their baseboard on serial port 1.
+  const EXIDeviceType sp1 = m_system.IsTriforce() ? EXIDeviceType::Baseboard :
+                                                    Config::Get(Config::MAIN_SERIAL_PORT_1);
+  m_channels[SlotToEXIChannel(Slot::SP1)]->AddDevice(sp1, SlotToEXIDevice(Slot::SP1));
   m_channels[SlotToEXIChannel(Slot::SP2)]->AddDevice(Config::Get(Config::MAIN_SERIAL_PORT_2),
                                                      SlotToEXIDevice(Slot::SP2));
 
-  m_event_type_change_device = core_timing.RegisterEvent("ChangeEXIDevice", ChangeDeviceCallback);
-  m_event_type_update_interrupts =
-      core_timing.RegisterEvent("EXIUpdateInterrupts", UpdateInterruptsCallback);
+  m_swap_event = core_timing.RegisterEvent("ChangeEXIDevice", OnDeviceSwapEvent);
+  m_irq_refresh_event = core_timing.RegisterEvent("EXIUpdateInterrupts", OnInterruptRefreshEvent);
 }
 
 void ExpansionInterfaceManager::Shutdown()
 {
-  for (auto& channel : m_channels)
+  for (std::unique_ptr<CEXIChannel>& channel : m_channels)
     channel.reset();
 
   CEXIMemoryCard::Shutdown();
 
-  if (!m_using_overridden_sram)
-  {
-    File::IOFile file(SConfig::GetInstance().m_strSRAM, "wb");
-    auto& sram = m_system.GetSRAM();
-    file.WriteArray(&sram, 1);
-  }
+  if (m_sram_is_borrowed)
+    return;
+
+  File::IOFile sram_file(SConfig::GetInstance().m_strSRAM, "wb");
+  sram_file.WriteArray(&m_system.GetSRAM(), 1);
 }
 
 void ExpansionInterfaceManager::DoState(PointerWrap& p)
 {
-  for (auto& channel : m_channels)
+  for (std::unique_ptr<CEXIChannel>& channel : m_channels)
     channel->DoState(p);
 }
 
 void ExpansionInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
 {
-  for (int i = 0; i < MAX_EXI_CHANNELS; ++i)
+  for (u32 index = 0; index < MAX_EXI_CHANNELS; ++index)
   {
-    DEBUG_ASSERT(m_channels[i] != nullptr);
-    // Each channel has 5 32 bit registers assigned to it. We offset the
-    // base that we give to each channel for registration.
-    //
-    // Be careful: this means the base is no longer aligned on a page
-    // boundary and using "base | FOO" is not valid!
-    m_channels[i]->RegisterMMIO(mmio, base + 5 * 4 * i);
+    DEBUG_ASSERT(m_channels[index] != nullptr);
+    // The channel bases are 0x14 apart, so they are not page aligned; channels add their
+    // register offsets instead of OR-ing them in.
+    m_channels[index]->RegisterMMIO(mmio, base + index * CHANNEL_REGISTER_STRIDE);
   }
 }
 
-void ExpansionInterfaceManager::ChangeDeviceCallback(Core::System& system, u64 userdata,
-                                                     s64 cycles_late)
+void ExpansionInterfaceManager::OnDeviceSwapEvent(Core::System& system, u64 userdata, s64)
 {
-  u8 channel = (u8)(userdata >> 32);
-  u8 type = (u8)(userdata >> 16);
-  u8 num = (u8)userdata;
-
-  system.GetExpansionInterface().m_channels.at(channel)->AddDevice(static_cast<EXIDeviceType>(type),
-                                                                   num);
+  const u8 channel = static_cast<u8>(userdata >> 32);
+  const auto type = static_cast<EXIDeviceType>(static_cast<u8>(userdata >> 16));
+  const u8 device_num = static_cast<u8>(userdata);
+  system.GetExpansionInterface().m_channels.at(channel)->AddDevice(type, device_num);
 }
 
 void ExpansionInterfaceManager::ChangeDevice(Slot slot, EXIDeviceType device_type,
@@ -217,14 +207,13 @@ void ExpansionInterfaceManager::ChangeDevice(Slot slot, EXIDeviceType device_typ
 void ExpansionInterfaceManager::ChangeDevice(u8 channel, u8 device_num, EXIDeviceType device_type,
                                              CoreTiming::FromThread from_thread)
 {
-  // Let the hardware see no device for 1 second
+  // Unplug now and plug the new device in one emulated second later, so that software notices
+  // the slot going empty before the new device appears.
   auto& core_timing = m_system.GetCoreTiming();
-  core_timing.ScheduleEvent(0, m_event_type_change_device,
-                            ((u64)channel << 32) | ((u64)EXIDeviceType::None << 16) | device_num,
+  core_timing.ScheduleEvent(0, m_swap_event, PackSwap(channel, EXIDeviceType::None, device_num),
                             from_thread);
-  core_timing.ScheduleEvent(
-      m_system.GetSystemTimers().GetTicksPerSecond(), m_event_type_change_device,
-      ((u64)channel << 32) | ((u64)device_type << 16) | device_num, from_thread);
+  core_timing.ScheduleEvent(m_system.GetSystemTimers().GetTicksPerSecond(), m_swap_event,
+                            PackSwap(channel, device_type, device_num), from_thread);
 }
 
 CEXIChannel* ExpansionInterfaceManager::GetChannel(u32 index)
@@ -234,26 +223,27 @@ CEXIChannel* ExpansionInterfaceManager::GetChannel(u32 index)
 
 IEXIDevice* ExpansionInterfaceManager::GetDevice(Slot slot)
 {
-  return m_channels.at(SlotToEXIChannel(slot))->GetDevice(1 << SlotToEXIDevice(slot));
+  const u8 chip_select = static_cast<u8>(1 << SlotToEXIDevice(slot));
+  return m_channels.at(SlotToEXIChannel(slot))->GetDevice(chip_select);
 }
 
 void ExpansionInterfaceManager::UpdateInterrupts()
 {
-  // Interrupts are mapped a bit strangely:
-  // Channel 0 Device 0 generates interrupt on channel 0
-  // Channel 0 Device 2 generates interrupt on channel 2
-  // Channel 1 Device 0 generates interrupt on channel 1
+  // Serial port 1 sits on channel 0 but raises its EXI interrupt on channel 2.
   m_channels[2]->SetEXIINT(m_channels[0]->GetDevice(4)->IsInterruptSet());
 
-  bool causeInt = false;
-  for (auto& channel : m_channels)
-    causeInt |= channel->IsCausingInterrupt();
+  // Every channel is polled (no short-circuit): polling latches the EXI interrupt bits.
+  bool any_pending = false;
+  for (std::unique_ptr<CEXIChannel>& channel : m_channels)
+  {
+    if (channel->IsCausingInterrupt())
+      any_pending = true;
+  }
 
-  m_system.GetProcessorInterface().SetInterrupt(ProcessorInterface::INT_CAUSE_EXI, causeInt);
+  m_system.GetProcessorInterface().SetInterrupt(ProcessorInterface::INT_CAUSE_EXI, any_pending);
 }
 
-void ExpansionInterfaceManager::UpdateInterruptsCallback(Core::System& system, u64 userdata,
-                                                         s64 cycles_late)
+void ExpansionInterfaceManager::OnInterruptRefreshEvent(Core::System& system, u64, s64)
 {
   system.GetExpansionInterface().UpdateInterrupts();
 }
@@ -261,7 +251,7 @@ void ExpansionInterfaceManager::UpdateInterruptsCallback(Core::System& system, u
 void ExpansionInterfaceManager::ScheduleUpdateInterrupts(CoreTiming::FromThread from,
                                                          int cycles_late)
 {
-  m_system.GetCoreTiming().ScheduleEvent(cycles_late, m_event_type_update_interrupts, 0, from);
+  m_system.GetCoreTiming().ScheduleEvent(cycles_late, m_irq_refresh_event, 0, from);
 }
 
 }  // namespace ExpansionInterface

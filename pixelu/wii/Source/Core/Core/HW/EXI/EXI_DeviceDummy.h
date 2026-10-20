@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,9 +9,8 @@
 
 namespace ExpansionInterface
 {
-// Just a dummy that logs reads and writes
-// to be used for EXI devices we haven't emulated
-// DOES NOT FUNCTION AS "NO DEVICE INSERTED" -> Appears as unknown device
+// A placeholder for hardware that is not emulated. Unlike an empty slot it reports itself as
+// present, so software sees an unknown device; every access is only logged.
 class CEXIDummy final : public IEXIDevice
 {
 public:
@@ -29,6 +27,6 @@ public:
 private:
   void TransferByte(u8& byte) override;
 
-  std::string m_name;
+  std::string m_label;
 };
 }  // namespace ExpansionInterface

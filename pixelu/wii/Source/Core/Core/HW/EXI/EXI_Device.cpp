@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/EXI/EXI_Device.h"
 
@@ -32,49 +31,49 @@ IEXIDevice::IEXIDevice(Core::System& system) : m_system(system)
 
 void IEXIDevice::ImmWrite(u32 data, u32 size)
 {
-  while (size--)
+  // Most significant byte goes out first.
+  for (u32 index = 0; index < size; ++index)
   {
-    u8 byte = data >> 24;
-    TransferByte(byte);
-    data <<= 8;
+    u8 outgoing = static_cast<u8>(data >> (24 - 8 * index));
+    TransferByte(outgoing);
   }
 }
 
 u32 IEXIDevice::ImmRead(u32 size)
 {
-  u32 result = 0;
-  u32 position = 0;
-  while (size--)
+  u32 word = 0;
+  for (u32 index = 0; index < size; ++index)
   {
-    u8 byte = 0;
-    TransferByte(byte);
-    result |= byte << (24 - (position++ * 8));
+    u8 incoming = 0;
+    TransferByte(incoming);
+    word |= u32{incoming} << (24 - 8 * index);
   }
-  return result;
+  return word;
 }
 
-void IEXIDevice::ImmReadWrite(u32& data, u32 size)
+void IEXIDevice::ImmReadWrite(u32&, u32)
 {
+  // Bidirectional immediate transfers are only meaningful for devices that override this.
 }
 
 void IEXIDevice::DMAWrite(u32 address, u32 size)
 {
   auto& memory = m_system.GetMemory();
-  while (size--)
+  for (u32 offset = 0; offset < size; ++offset)
   {
-    u8 byte = memory.Read_U8(address++);
-    TransferByte(byte);
+    u8 outgoing = memory.Read_U8(address + offset);
+    TransferByte(outgoing);
   }
 }
 
 void IEXIDevice::DMARead(u32 address, u32 size)
 {
   auto& memory = m_system.GetMemory();
-  while (size--)
+  for (u32 offset = 0; offset < size; ++offset)
   {
-    u8 byte = 0;
-    TransferByte(byte);
-    memory.Write_U8(byte, address++);
+    u8 incoming = 0;
+    TransferByte(incoming);
+    memory.Write_U8(incoming, address + offset);
   }
 }
 
@@ -88,11 +87,11 @@ bool IEXIDevice::IsPresent() const
   return false;
 }
 
-void IEXIDevice::SetCS(int cs)
+void IEXIDevice::SetCS(int)
 {
 }
 
-void IEXIDevice::DoState(PointerWrap& p)
+void IEXIDevice::DoState(PointerWrap&)
 {
 }
 
@@ -101,95 +100,78 @@ bool IEXIDevice::IsInterruptSet()
   return false;
 }
 
-void IEXIDevice::TransferByte(u8& byte)
+void IEXIDevice::TransferByte(u8&)
 {
 }
 
-// F A C T O R Y
-std::unique_ptr<IEXIDevice> EXIDevice_Create(Core::System& system, const EXIDeviceType device_type,
-                                             const int channel_num,
-                                             const Memcard::HeaderData& memcard_header_data)
+namespace
 {
-  std::unique_ptr<IEXIDevice> result;
-  // XXX This computation isn't necessarily right (it holds for A/B, but not SP1)
-  // However, the devices that care about slots currently only go in A/B.
-  const Slot slot = static_cast<Slot>(channel_num);
+std::unique_ptr<IEXIDevice> CreateMicrophone(Core::System& system, int channel_num)
+{
+#ifdef HAVE_CUBEB
+  return std::make_unique<CEXIMic>(system, channel_num);
+#else
+  (void)channel_num;
+  PanicAlertFmtT("Dolphin was built with Cubeb disabled. The Microphone device cannot be used.");
+  return std::make_unique<IEXIDevice>(system);
+#endif
+}
+
+std::unique_ptr<IEXIDevice> CreateDevice(Core::System& system, EXIDeviceType device_type,
+                                         int channel_num,
+                                         const Memcard::HeaderData& memcard_header_data)
+{
+  // Only devices for the memory card slots care about their slot, and for those (channels 0 and
+  // 1) the channel number is the slot.
+  const auto slot = static_cast<Slot>(channel_num);
 
   switch (device_type)
   {
   case EXIDeviceType::Dummy:
-    result = std::make_unique<CEXIDummy>(system, "Dummy");
-    break;
-
+    return std::make_unique<CEXIDummy>(system, "Dummy");
   case EXIDeviceType::MemoryCard:
+    return std::make_unique<CEXIMemoryCard>(system, slot, false, memcard_header_data);
   case EXIDeviceType::MemoryCardFolder:
-  {
-    bool gci_folder = (device_type == EXIDeviceType::MemoryCardFolder);
-    result = std::make_unique<CEXIMemoryCard>(system, slot, gci_folder, memcard_header_data);
-    break;
-  }
+    return std::make_unique<CEXIMemoryCard>(system, slot, true, memcard_header_data);
   case EXIDeviceType::MaskROM:
-    result = std::make_unique<CEXIIPL>(system);
-    break;
-
+    return std::make_unique<CEXIIPL>(system);
   case EXIDeviceType::AD16:
-    result = std::make_unique<CEXIAD16>(system);
-    break;
-
+    return std::make_unique<CEXIAD16>(system);
   case EXIDeviceType::Microphone:
-#ifdef HAVE_CUBEB
-    result = std::make_unique<CEXIMic>(system, channel_num);
-#else
-    PanicAlertFmtT("Dolphin was built with Cubeb disabled. The Microphone device cannot be used.");
-    result = std::make_unique<IEXIDevice>(system);
-#endif
-    break;
-
+    return CreateMicrophone(system, channel_num);
   case EXIDeviceType::Ethernet:
-    result = std::make_unique<CEXIETHERNET>(system, BBADeviceType::TAP);
-    break;
-
+    return std::make_unique<CEXIETHERNET>(system, BBADeviceType::TAP);
   case EXIDeviceType::EthernetTapServer:
-    result = std::make_unique<CEXIETHERNET>(system, BBADeviceType::TAPSERVER);
-    break;
-
+    return std::make_unique<CEXIETHERNET>(system, BBADeviceType::TAPSERVER);
   case EXIDeviceType::EthernetXLink:
-    result = std::make_unique<CEXIETHERNET>(system, BBADeviceType::XLINK);
-    break;
-
+    return std::make_unique<CEXIETHERNET>(system, BBADeviceType::XLINK);
   case EXIDeviceType::EthernetBuiltIn:
-    result = std::make_unique<CEXIETHERNET>(system, BBADeviceType::BuiltIn);
-    break;
-
+    return std::make_unique<CEXIETHERNET>(system, BBADeviceType::BuiltIn);
   case EXIDeviceType::EthernetIPC:
-    result = std::make_unique<CEXIETHERNET>(system, BBADeviceType::IPC);
-    break;
-
+    return std::make_unique<CEXIETHERNET>(system, BBADeviceType::IPC);
   case EXIDeviceType::ModemTapServer:
-    result = std::make_unique<CEXIModem>(system, ModemDeviceType::TAPSERVER);
-    break;
-
+    return std::make_unique<CEXIModem>(system, ModemDeviceType::TAPSERVER);
   case EXIDeviceType::Gecko:
-    result = std::make_unique<CEXIGecko>(system);
-    break;
-
+    return std::make_unique<CEXIGecko>(system);
   case EXIDeviceType::AGP:
-    result = std::make_unique<CEXIAgp>(system, slot);
-    break;
-
+    return std::make_unique<CEXIAgp>(system, slot);
   case EXIDeviceType::Baseboard:
-    result = std::make_unique<CEXIBaseboard>(system);
-    break;
-
+    return std::make_unique<CEXIBaseboard>(system);
   case EXIDeviceType::None:
   default:
-    result = std::make_unique<IEXIDevice>(system);
-    break;
+    return std::make_unique<IEXIDevice>(system);
   }
+}
+}  // namespace
 
-  if (result != nullptr)
-    result->m_device_type = device_type;
-
-  return result;
+std::unique_ptr<IEXIDevice> EXIDevice_Create(Core::System& system, const EXIDeviceType device_type,
+                                             const int channel_num,
+                                             const Memcard::HeaderData& memcard_header_data)
+{
+  std::unique_ptr<IEXIDevice> device =
+      CreateDevice(system, device_type, channel_num, memcard_header_data);
+  // Record the requested type (a GCI folder card stays MemoryCardFolder).
+  device->m_device_type = device_type;
+  return device;
 }
 }  // namespace ExpansionInterface

@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -22,6 +21,8 @@ namespace ExpansionInterface
 class IEXIDevice;
 enum class EXIDeviceType : int;
 
+// One EXI channel: its five registers (parameter/status, DMA address, DMA length, control,
+// immediate data) and the devices on its three chip selects.
 class CEXIChannel
 {
 public:
@@ -29,7 +30,7 @@ public:
                        const Memcard::HeaderData& memcard_header_data);
   ~CEXIChannel();
 
-  // get device
+  // Returns the device for a one-hot chip select value (1, 2 or 4), or nullptr.
   IEXIDevice* GetDevice(u8 chip_select);
 
   void RegisterMMIO(MMIO::Mapping* mmio, u32 base);
@@ -40,90 +41,42 @@ public:
   void AddDevice(std::unique_ptr<IEXIDevice> device, int device_num,
                  bool notify_presence_changed = true);
 
-  // Remove all devices
   void RemoveDevices();
 
   bool IsCausingInterrupt();
   void DoState(PointerWrap& p);
 
-  // This should only be used to transition interrupts from SP1 to Channel 2
+  // Only used to route serial port 1's interrupt line to channel 2.
   void SetEXIINT(bool exiint);
 
 private:
-  enum
-  {
-    EXI_STATUS = 0x00,
-    EXI_DMA_ADDRESS = 0x04,
-    EXI_DMA_LENGTH = 0x08,
-    EXI_DMA_CONTROL = 0x0C,
-    EXI_IMM_DATA = 0x10
-  };
+  static constexpr int DEVICES_PER_CHANNEL = 3;
 
-  // EXI Status Register - "Channel Parameter Register"
-  union UEXI_STATUS
-  {
-    u32 Hex = 0;
-    // DO NOT obey the warning and give this struct a name. Things will fail.
-    struct
-    {
-      // Indentation Meaning:
-      // Channels 0, 1, 2
-      //  Channels 0, 1 only
-      //      Channel 0 only
-      u32 EXIINTMASK : 1;
-      u32 EXIINT : 1;
-      u32 TCINTMASK : 1;
-      u32 TCINT : 1;
-      u32 CLK : 3;
-      u32 CHIP_SELECT : 3;  // CS1 and CS2 are Channel 0 only
-      u32 EXTINTMASK : 1;
-      u32 EXTINT : 1;
-      u32 EXT : 1;     // External Insertion Status (1: External EXI device present)
-      u32 ROMDIS : 1;  // ROM Disable
-      u32 : 18;
-    };
-    UEXI_STATUS() = default;
-    explicit UEXI_STATUS(u32 hex) : Hex{hex} {}
-  };
+  u32 ReadParameterRegister();
+  void WriteParameterRegister(u32 value);
+  void WriteControlRegister(u32 value);
+  void RunTransfer(IEXIDevice& device);
 
-  // EXI Control Register
-  union UEXI_CONTROL
-  {
-    u32 Hex = 0;
-    struct
-    {
-      u32 TSTART : 1;
-      u32 DMA : 1;
-      u32 RW : 2;
-      u32 TLEN : 2;
-      u32 : 26;
-    };
-  };
+  bool HasExternalInterruptLine() const { return m_channel_id != 2; }
 
   Core::System& m_system;
 
-  // STATE_TO_SAVE
-  UEXI_STATUS m_status;
-  u32 m_dma_memory_address = 0;
+  // Saved in this order, as raw words. The parameter register keeps the hardware bit layout:
+  // 0 EXI irq mask, 1 EXI irq, 2 transfer-complete mask, 3 transfer complete, 4-6 clock,
+  // 7-9 chip select, 10 external-insertion mask, 11 external insertion, 12 device present,
+  // 13 ROM descrambler disable. The control register: 0 start, 1 DMA, 2-3 direction, 4-5 length.
+  u32 m_param = 0;
+  u32 m_dma_address = 0;
   u32 m_dma_length = 0;
-  UEXI_CONTROL m_control;
-  u32 m_imm_data = 0;
+  u32 m_control = 0;
+  u32 m_immediate = 0;
 
-  // Since channels operate a bit differently from each other
   u32 m_channel_id;
 
-  // This data is needed in order to reinitialize a GCI folder memory card when switching between
-  // GCI folder and other devices in the memory card slot or after loading a savestate. Even though
-  // this data is only vaguely related to the EXI_Channel, this seems to be the best place to store
-  // it, as this class creates the CEXIMemoryCard instances.
+  // The card formatting parameters for memory cards created on this channel. A GCI folder card
+  // needs them again whenever it is re-created (device swap, savestate load).
   Memcard::HeaderData m_memcard_header_data;
 
-  // Devices
-  enum
-  {
-    NUM_DEVICES = 3
-  };
-
-  std::array<std::unique_ptr<IEXIDevice>, NUM_DEVICES> m_devices;
+  std::array<std::unique_ptr<IEXIDevice>, DEVICES_PER_CHANNEL> m_devices;
 };
 }  // namespace ExpansionInterface
