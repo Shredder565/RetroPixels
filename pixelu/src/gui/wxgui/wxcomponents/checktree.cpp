@@ -67,15 +67,10 @@ void wxCheckTree::Init()
 void wxCheckTree::UpdateCheckBoxImages()
 {
 	// one native check box rendering per state, in enum order
+	// unchecked states first, then the same four with wxCONTROL_CHECKED added
 	static constexpr int kRenderFlags[] = {
-		wxCONTROL_NONE,
-		wxCONTROL_CURRENT,
-		wxCONTROL_CURRENT | wxCONTROL_PRESSED,
-		wxCONTROL_DISABLED,
-		wxCONTROL_CHECKED,
-		wxCONTROL_CHECKED | wxCONTROL_CURRENT,
-		wxCONTROL_CHECKED | wxCONTROL_CURRENT | wxCONTROL_PRESSED,
-		wxCONTROL_CHECKED | wxCONTROL_DISABLED,
+		wxCONTROL_NONE, wxCONTROL_CURRENT, wxCONTROL_CURRENT | wxCONTROL_PRESSED, wxCONTROL_DISABLED,
+		wxCONTROL_CHECKED, wxCONTROL_CHECKED | wxCONTROL_CURRENT, wxCONTROL_CHECKED | wxCONTROL_CURRENT | wxCONTROL_PRESSED, wxCONTROL_CHECKED | wxCONTROL_DISABLED,
 	};
 	wxRendererNative& renderer = wxRendererNative::Get();
 	const wxSize boxSize = renderer.GetCheckBoxSize(this);

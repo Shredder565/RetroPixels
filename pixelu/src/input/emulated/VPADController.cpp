@@ -361,42 +361,30 @@ std::string_view VPADController::get_button_name(ButtonId id)
 {
 	switch (id)
 	{
-	case kButtonId_A: return "A";
-	case kButtonId_B: return "B";
-	case kButtonId_X: return "X";
-	case kButtonId_Y: return "Y";
-	case kButtonId_L: return "L";
-	case kButtonId_R: return "R";
-	case kButtonId_ZL: return "ZL";
-	case kButtonId_ZR: return "ZR";
-	case kButtonId_Plus: return "+";
-	case kButtonId_Minus: return "-";
-	case kButtonId_Up:
-	case kButtonId_StickL_Up:
-	case kButtonId_StickR_Up: return TR_NOOP("up");
-	case kButtonId_Down:
-	case kButtonId_StickL_Down:
-	case kButtonId_StickR_Down: return TR_NOOP("down");
-	case kButtonId_Left:
-	case kButtonId_StickL_Left:
-	case kButtonId_StickR_Left: return TR_NOOP("left");
-	case kButtonId_Right:
-	case kButtonId_StickL_Right:
-	case kButtonId_StickR_Right: return TR_NOOP("right");
-	case kButtonId_StickL:
-	case kButtonId_StickR: return TR_NOOP("click");
+	// the d-pad and both sticks share direction names, the stick buttons are "click"
+	case kButtonId_Up: case kButtonId_StickL_Up: case kButtonId_StickR_Up: return TR_NOOP("up");
+	case kButtonId_Down: case kButtonId_StickL_Down: case kButtonId_StickR_Down: return TR_NOOP("down");
+	case kButtonId_Left: case kButtonId_StickL_Left: case kButtonId_StickR_Left: return TR_NOOP("left");
+	case kButtonId_Right: case kButtonId_StickL_Right: case kButtonId_StickR_Right: return TR_NOOP("right");
+	case kButtonId_StickL: case kButtonId_StickR: return TR_NOOP("click");
 	case kButtonId_Home: return TR_NOOP("home");
-	default:
-		cemu_assert_debug(false);
-		return "";
+	// face, shoulder and menu buttons are named as printed on the GamePad
+	case kButtonId_A: return "A"; case kButtonId_B: return "B";
+	case kButtonId_X: return "X"; case kButtonId_Y: return "Y";
+	case kButtonId_L: return "L"; case kButtonId_R: return "R";
+	case kButtonId_ZL: return "ZL"; case kButtonId_ZR: return "ZR";
+	case kButtonId_Plus: return "+"; case kButtonId_Minus: return "-";
+	default: break;
 	}
+	cemu_assert_debug(false);
+	return "";
 }
 
 void VPADController::clear_rumble()
 {
 	std::scoped_lock lock(m_rumble_mutex);
-	m_rumble_queue = {};
 	m_rumble_step = 0;
+	m_rumble_queue = {};
 }
 
 bool VPADController::push_rumble(uint8* pattern, uint8 length)

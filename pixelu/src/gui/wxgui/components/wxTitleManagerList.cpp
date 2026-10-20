@@ -603,15 +603,17 @@ wxItemAttr* wxTitleManagerList::OnGetItemAttr(long item) const
 void wxTitleManagerList::SortEntries(int column)
 {
 	bool ascending;
-	if (column == -1)
+	if (column != -1)
 	{
-		column = GetSortIndicator();
-		if (column == -1)
-			column = ColumnTitleId;
-		ascending = IsAscendingSortIndicator();
+		ascending = GetUpdatedAscendingSortIndicator(column); // a header click toggles the direction
 	}
 	else
-		ascending = GetUpdatedAscendingSortIndicator(column);
+	{
+		// re-sort by the current indicator, by title id when there is none
+		const int current = GetSortIndicator();
+		column = current != -1 ? current : ColumnTitleId;
+		ascending = IsAscendingSortIndicator();
+	}
 
 	if (column < ColumnTitleId || column > ColumnFormat)
 		return; // location is not sortable

@@ -23,19 +23,20 @@ GameCubeController::GameCubeController(uint32 adapter, uint32 index)
 		m_display_name = fmt::format("Controller {} ({})", index + 1, adapter);
 
 	// GameCube sticks don't reach the edge of the unit range
-	m_settings.axis.range = 1.20f;
-	m_settings.rotation.range = 1.25f;
 	m_settings.trigger.range = 1.07f;
+	m_settings.axis.range = 1.20f; // main stick
+	m_settings.rotation.range = 1.25f; // C stick
+}
+
+// connection and rumble are properties of the adapter port, kept by the provider
+bool GameCubeController::has_rumble()
+{
+	return m_provider->has_rumble_connected(m_adapter);
 }
 
 bool GameCubeController::is_connected()
 {
 	return m_provider->is_connected(m_adapter);
-}
-
-bool GameCubeController::has_rumble()
-{
-	return m_provider->has_rumble_connected(m_adapter);
 }
 
 void GameCubeController::start_rumble()

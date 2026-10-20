@@ -341,22 +341,22 @@ MemorySearcherTool::MemorySearcherTool(wxFrame* parent)
 
 MemorySearcherTool::~MemorySearcherTool()
 {
+	m_running = false; // tells the worker to stop
 	m_refresh_timer->Stop();
-	m_running = false;
 	if (m_worker.joinable())
 		m_worker.join();
+}
+
+void MemorySearcherTool::OnClose(wxCloseEvent& event)
+{
+	event.Skip();
+	Save();
 }
 
 void MemorySearcherTool::OnTimerTick(wxTimerEvent& event)
 {
 	RefreshResultList();
 	RefreshStashList();
-}
-
-void MemorySearcherTool::OnClose(wxCloseEvent& event)
-{
-	Save();
-	event.Skip();
 }
 
 void MemorySearcherTool::OnUpdateGauge(wxSetGaugeValue& event)
@@ -530,14 +530,15 @@ void MemorySearcherTool::OnSearchFinished(wxCommandEvent&)
 
 void MemorySearcherTool::Reset()
 {
-	m_searchBuffer.clear();
-	m_buttonStart->SetLabelText(_("Search"));
-	m_textEntryTable->SetLabelText(_("Results"));
-	m_buttonFilter->Disable();
-	m_cbDataType->Enable();
-	m_textValue->SetValue("");
-	m_listResults->DeleteAllItems();
 	m_clear_state = false;
+	m_searchBuffer.clear();
+	m_listResults->DeleteAllItems();
+	m_textEntryTable->SetLabelText(_("Results"));
+	m_textValue->SetValue("");
+	// a new search may use any data type; filtering needs results first
+	m_cbDataType->Enable();
+	m_buttonFilter->Disable();
+	m_buttonStart->SetLabelText(_("Search"));
 }
 
 void MemorySearcherTool::FillResultList()

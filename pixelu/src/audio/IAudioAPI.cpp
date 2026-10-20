@@ -11,14 +11,13 @@
 #include "CubebAPI.h"
 #endif
 
-std::shared_mutex g_audioMutex;
-AudioAPIPtr g_tvAudio;
-AudioAPIPtr g_padAudio;
-AudioAPIPtr g_portalAudio;
-std::atomic_int32_t g_padVolume = 0;
-
-uint32 IAudioAPI::s_audioDelay = 2;
 std::array<bool, IAudioAPI::AudioAPIEnd> IAudioAPI::s_availableApis{};
+uint32 IAudioAPI::s_audioDelay = 2;
+
+// one output per device, all guarded by g_audioMutex
+AudioAPIPtr g_tvAudio, g_padAudio, g_portalAudio;
+std::shared_mutex g_audioMutex;
+std::atomic_int32_t g_padVolume = 0;
 
 namespace
 {

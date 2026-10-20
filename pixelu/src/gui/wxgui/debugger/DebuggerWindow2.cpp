@@ -27,14 +27,11 @@
 
 #include <charconv>
 
-wxDEFINE_EVENT(wxEVT_DEBUGGER_CLOSE, wxCloseEvent);
-wxDEFINE_EVENT(wxEVT_UPDATE_VIEW, wxCommandEvent);
-wxDEFINE_EVENT(wxEVT_BREAKPOINT_CHANGE, wxCommandEvent);
-wxDEFINE_EVENT(wxEVT_BREAKPOINT_HIT, wxCommandEvent);
-wxDEFINE_EVENT(wxEVT_MOVE_TO_DISASM_ADDR, wxCommandEvent);
-wxDEFINE_EVENT(wxEVT_RUN, wxCommandEvent);
-wxDEFINE_EVENT(wxEVT_NOTIFY_MODULE_LOADED, wxCommandEvent);
-wxDEFINE_EVENT(wxEVT_NOTIFY_MODULE_UNLOADED, wxCommandEvent);
+// debugger events; window close, view refresh, breakpoints, execution, module and pack changes
+wxDEFINE_EVENT(wxEVT_DEBUGGER_CLOSE, wxCloseEvent); wxDEFINE_EVENT(wxEVT_UPDATE_VIEW, wxCommandEvent);
+wxDEFINE_EVENT(wxEVT_BREAKPOINT_CHANGE, wxCommandEvent); wxDEFINE_EVENT(wxEVT_BREAKPOINT_HIT, wxCommandEvent);
+wxDEFINE_EVENT(wxEVT_MOVE_TO_DISASM_ADDR, wxCommandEvent); wxDEFINE_EVENT(wxEVT_RUN, wxCommandEvent);
+wxDEFINE_EVENT(wxEVT_NOTIFY_MODULE_LOADED, wxCommandEvent); wxDEFINE_EVENT(wxEVT_NOTIFY_MODULE_UNLOADED, wxCommandEvent);
 wxDEFINE_EVENT(wxEVT_NOTIFY_GRAPHIC_PACKS_MODIFIED, wxCommandEvent);
 
 DebuggerWindow2* s_debuggerWindow;

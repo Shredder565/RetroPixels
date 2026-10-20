@@ -189,16 +189,16 @@ std::string NativeWiimoteController::get_button_name(uint64 button) const
 	return base_type::get_button_name(button);
 }
 
-uint32 NativeWiimoteController::get_packet_delay()
-{
-	m_packet_delay = m_provider->get_packet_delay(m_index);
-	return m_packet_delay;
-}
-
+// the provider owns the delay; the controller keeps a copy for its settings
 void NativeWiimoteController::set_packet_delay(uint32 delay)
 {
-	m_packet_delay = delay;
 	m_provider->set_packet_delay(m_index, delay);
+	m_packet_delay = delay;
+}
+
+uint32 NativeWiimoteController::get_packet_delay()
+{
+	return m_packet_delay = m_provider->get_packet_delay(m_index);
 }
 
 ControllerState NativeWiimoteController::raw_state()

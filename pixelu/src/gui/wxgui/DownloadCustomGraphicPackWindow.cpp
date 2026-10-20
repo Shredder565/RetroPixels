@@ -144,12 +144,12 @@ int DownloadCustomGraphicPackWindow::ShowModal()
 
 void DownloadCustomGraphicPackWindow::OnClose(wxCloseEvent& event)
 {
+	event.Skip(); // let the dialog close once the download has stopped
+	m_timer->Stop();
 	if (m_downloadState)
 		m_downloadState->isCanceled = true;
-	m_timer->Stop();
 	if (m_thread.joinable())
 		m_thread.join();
-	event.Skip();
 }
 
 void DownloadCustomGraphicPackWindow::OnUpdate(const wxTimerEvent&)

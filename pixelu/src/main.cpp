@@ -157,19 +157,19 @@ void CemuCommonInit()
 	CafeTitleList::Refresh();
 
 	CafeSaveList::Initialize();
-	if (!mlcPath.empty())
-	{
-		CafeSaveList::SetMLCPath(mlcPath);
-		CafeSaveList::Refresh();
-	}
+	if (mlcPath.empty())
+		return; // saves live in the MLC only
+	CafeSaveList::SetMLCPath(mlcPath);
+	CafeSaveList::Refresh();
 }
 
-void mainEmulatorLLE();
-void ppcAsmTest();
-void gx2CopySurfaceTest();
+// component self tests, defined next to the code they test
+void CRCTest();
 void ExpressionParser_test();
 void FSTVolumeTest();
-void CRCTest();
+void gx2CopySurfaceTest();
+void ppcAsmTest();
+void mainEmulatorLLE();
 
 // self tests of various components (debug builds)
 void UnitTests()

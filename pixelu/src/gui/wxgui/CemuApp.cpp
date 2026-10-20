@@ -324,9 +324,11 @@ bool CemuApp::OnInit()
 	CemuCommonInit();
 
 #if BOOST_OS_MACOS
-	m_sdlEventPumpTimer = new wxTimer(this);
+	// SDL events have to be pumped from the main thread here
+	constexpr int kSdlPumpIntervalMs = 5;
 	Bind(wxEVT_TIMER, &CemuApp::OnSDLEventPumpTimer, this);
-	m_sdlEventPumpTimer->Start(5, wxTIMER_CONTINUOUS);
+	m_sdlEventPumpTimer = new wxTimer(this);
+	m_sdlEventPumpTimer->Start(kSdlPumpIntervalMs, wxTIMER_CONTINUOUS);
 #endif
 
 	wxInitAllImageHandlers();
@@ -384,10 +386,9 @@ int CemuApp::OnExit()
 	LatteRecorder::Stop(); // PixelU: finish the recording, ExitProcess below skips static destructors
 
 	// a game started from the command line hands its exit code on
-	int exitCode = 0;
+	const bool launchedFromCommandLine = LaunchSettings::GetLoadFile() || LaunchSettings::GetLoadTitleID();
 	const auto titleResult = CafeSystem::GetForegroundTitleReturnStatus();
-	if (titleResult && (LaunchSettings::GetLoadFile() || LaunchSettings::GetLoadTitleID()))
-		exitCode = *titleResult;
+	const int exitCode = (launchedFromCommandLine && titleResult) ? *titleResult : 0;
 #if BOOST_OS_MACOS
 	SDLControllerProvider::ShutdownSDL();
 #endif
@@ -426,11 +427,12 @@ void DumpThreadStackTrace();
 
 void CemuApp::OnAssertFailure(const wxChar* file, int line, const wxChar* func, const wxChar* cond, const wxChar* msg)
 {
+	auto utf8 = [](const wxChar* s) { return wxString(s).utf8_string(); };
 	cemuLog_createLogFile(false);
 	cemuLog_log(LogType::Force, "Encountered wxWidgets assert!");
-	cemuLog_log(LogType::Force, "File: {0} Line: {1}", wxString(file).utf8_string(), line);
-	cemuLog_log(LogType::Force, "Func: {0} Cond: {1}", wxString(func).utf8_string(), wxString(cond).utf8_string());
-	cemuLog_log(LogType::Force, "Message: {}", wxString(msg).utf8_string());
+	cemuLog_log(LogType::Force, "File: {0} Line: {1}", utf8(file), line);
+	cemuLog_log(LogType::Force, "Func: {0} Cond: {1}", utf8(func), utf8(cond));
+	cemuLog_log(LogType::Force, "Message: {}", utf8(msg));
 #if BOOST_OS_WINDOWS
 	DumpThreadStackTrace();
 #endif

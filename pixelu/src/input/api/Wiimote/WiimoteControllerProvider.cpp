@@ -211,16 +211,19 @@ std::vector<std::shared_ptr<ControllerBase>> WiimoteControllerProvider::get_cont
 	return result;
 }
 
-bool WiimoteControllerProvider::is_connected(size_t index)
-{
-	std::shared_lock lock(m_device_mutex);
-	return index < m_wiimotes.size() && m_wiimotes[index].device;
-}
-
 bool WiimoteControllerProvider::is_registered_device(size_t index)
 {
 	std::shared_lock lock(m_device_mutex);
 	return index < m_wiimotes.size();
+}
+
+// registered and its device is currently open
+bool WiimoteControllerProvider::is_connected(size_t index)
+{
+	std::shared_lock lock(m_device_mutex);
+	if (index >= m_wiimotes.size())
+		return false;
+	return static_cast<bool>(m_wiimotes[index].device);
 }
 
 void WiimoteControllerProvider::set_rumble(size_t index, bool state)

@@ -272,16 +272,17 @@ DownloadGraphicPacksWindow::DownloadGraphicPacksWindow(wxWindow* parent)
 	m_downloadState = std::make_unique<curlDownloadFileState_t>();
 }
 
-DownloadGraphicPacksWindow::~DownloadGraphicPacksWindow()
-{
-	m_timer->Stop();
-	if (m_thread.joinable())
-		m_thread.join();
-}
-
 const std::string& DownloadGraphicPacksWindow::GetException() const
 {
 	return m_threadException;
+}
+
+DownloadGraphicPacksWindow::~DownloadGraphicPacksWindow()
+{
+	m_timer->Stop();
+	// the worker only ends by itself; wait for it
+	if (m_thread.joinable())
+		m_thread.join();
 }
 
 int DownloadGraphicPacksWindow::ShowModal()

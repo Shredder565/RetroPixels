@@ -166,38 +166,43 @@ ControllerBase::Settings ControllerBase::get_settings() const
 	return m_settings;
 }
 
+namespace
+{
+	// assigns one field of the settings while holding their mutex
+	template<typename TField, typename TValue>
+	void StoreLocked(std::mutex& mutex, TField& field, const TValue& value)
+	{
+		std::scoped_lock lock(mutex);
+		field = value;
+	}
+}
+
 void ControllerBase::set_settings(const Settings& settings)
 {
-	std::scoped_lock lock(m_settings_mutex);
-	m_settings = settings;
+	StoreLocked(m_settings_mutex, m_settings, settings);
 }
 
 void ControllerBase::set_axis_settings(const AxisSetting& settings)
 {
-	std::scoped_lock lock(m_settings_mutex);
-	m_settings.axis = settings;
+	StoreLocked(m_settings_mutex, m_settings.axis, settings);
 }
 
 void ControllerBase::set_rotation_settings(const AxisSetting& settings)
 {
-	std::scoped_lock lock(m_settings_mutex);
-	m_settings.rotation = settings;
+	StoreLocked(m_settings_mutex, m_settings.rotation, settings);
 }
 
 void ControllerBase::set_trigger_settings(const AxisSetting& settings)
 {
-	std::scoped_lock lock(m_settings_mutex);
-	m_settings.trigger = settings;
+	StoreLocked(m_settings_mutex, m_settings.trigger, settings);
 }
 
 void ControllerBase::set_rumble(float rumble)
 {
-	std::scoped_lock lock(m_settings_mutex);
-	m_settings.rumble = rumble;
+	StoreLocked(m_settings_mutex, m_settings.rumble, rumble);
 }
 
 void ControllerBase::set_use_motion(bool state)
 {
-	std::scoped_lock lock(m_settings_mutex);
-	m_settings.motion = state;
+	StoreLocked(m_settings_mutex, m_settings.motion, state);
 }

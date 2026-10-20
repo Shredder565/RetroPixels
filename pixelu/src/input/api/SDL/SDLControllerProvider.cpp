@@ -156,8 +156,8 @@ void SDLControllerProvider::ShutdownSDL()
 #if BOOST_OS_MACOS
 void SDLControllerProvider::PumpSDLEvents()
 {
-	SDL_Event event;
-	while (SDL_PollEvent(&event))
+	// drain everything queued since the last timer tick
+	for (SDL_Event event; SDL_PollEvent(&event);)
 		HandleSDLEvent(event);
 }
 #endif
@@ -252,9 +252,11 @@ void SDLControllerProvider::event_thread()
 #endif
 	SetThreadName("SDL_events");
 	InitSDL();
+	// SDL_EVENT_QUIT (sent by the destructor) clears s_running
+	SDL_Event event;
 	while (s_running.load(std::memory_order_relaxed))
 	{
-		SDL_Event event{};
+		event = {};
 		SDL_WaitEvent(&event);
 		HandleSDLEvent(event);
 	}

@@ -66,6 +66,26 @@ namespace
 		node.set<sint32>("x", value.x);
 		node.set<sint32>("y", value.y);
 	}
+
+	// on/off settings stored directly under the root, in the order settings.xml
+	// has always had them; a missing element loads as the declared default
+	struct RootFlag
+	{
+		const char* element;
+		ConfigValue<bool> wxCemuConfig::*value;
+	};
+	constexpr RootFlag kRootFlags[] = {
+		{"use_discord_presence", &wxCemuConfig::use_discord_presence},
+		{"fullscreen_menubar", &wxCemuConfig::fullscreen_menubar},
+		{"feral_gamemode", &wxCemuConfig::feral_gamemode},
+		{"check_update", &wxCemuConfig::check_update},
+		{"receive_untested_updates", &wxCemuConfig::receive_untested_updates},
+		{"save_screenshot", &wxCemuConfig::save_screenshot},
+		{"vk_warning", &wxCemuConfig::did_show_vulkan_warning},
+		{"gp_download", &wxCemuConfig::did_show_graphic_pack_download},
+		{"macos_disclaimer", &wxCemuConfig::did_show_macos_disclaimer},
+		{"fullscreen", &wxCemuConfig::fullscreen},
+	};
 }
 
 void wxCemuConfig::AddRecentlyLaunchedFile(std::string_view file)
@@ -83,16 +103,8 @@ void wxCemuConfig::Load(XMLConfigParser& parser)
 	// defaults come from each value's initial value
 	language = parser.get<sint32>("language", wxLANGUAGE_DEFAULT);
 	msw_theme = parser.get<sint32>("msw_theme", msw_theme);
-	use_discord_presence = parser.get("use_discord_presence", true);
-	fullscreen_menubar = parser.get("fullscreen_menubar", false);
-	feral_gamemode = parser.get("feral_gamemode", false);
-	check_update = parser.get("check_update", check_update);
-	receive_untested_updates = parser.get("receive_untested_updates", receive_untested_updates);
-	save_screenshot = parser.get("save_screenshot", save_screenshot);
-	did_show_vulkan_warning = parser.get("vk_warning", did_show_vulkan_warning);
-	did_show_graphic_pack_download = parser.get("gp_download", did_show_graphic_pack_download);
-	did_show_macos_disclaimer = parser.get("macos_disclaimer", did_show_macos_disclaimer);
-	fullscreen = parser.get("fullscreen", fullscreen);
+	for (const RootFlag& flag : kRootFlags)
+		this->*flag.value = parser.get(flag.element, this->*flag.value);
 
 	LoadXY(parser, "window_position", window_position);
 	LoadXY(parser, "window_size", window_size);
@@ -145,16 +157,8 @@ void wxCemuConfig::Save(XMLConfigParser& config)
 	// the element order is the order settings.xml has always had
 	config.set<sint32>("language", language);
 	config.set<sint32>("msw_theme", msw_theme);
-	config.set<bool>("use_discord_presence", use_discord_presence);
-	config.set<bool>("fullscreen_menubar", fullscreen_menubar);
-	config.set<bool>("feral_gamemode", feral_gamemode);
-	config.set<bool>("check_update", check_update);
-	config.set<bool>("receive_untested_updates", receive_untested_updates);
-	config.set<bool>("save_screenshot", save_screenshot);
-	config.set<bool>("vk_warning", did_show_vulkan_warning);
-	config.set<bool>("gp_download", did_show_graphic_pack_download);
-	config.set<bool>("macos_disclaimer", did_show_macos_disclaimer);
-	config.set<bool>("fullscreen", fullscreen);
+	for (const RootFlag& flag : kRootFlags)
+		config.set<bool>(flag.element, this->*flag.value);
 
 	SaveXY(config, "window_position", window_position);
 	SaveXY(config, "window_size", window_size);

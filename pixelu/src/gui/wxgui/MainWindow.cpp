@@ -628,9 +628,10 @@ bool MainWindow::FileLoad(const fs::path launchPath, wxLaunchGameEvent::INITIATE
 	DestroyGameListAndStatusBar();
 
 	m_game_launched = true;
-	m_loadMenuItem->Enable(false);
-	m_installUpdateMenuItem->Enable(false);
+	// loading and installing are only possible while no game runs
 	m_memorySearcherMenuItem->Enable(true);
+	m_installUpdateMenuItem->Enable(false);
+	m_loadMenuItem->Enable(false);
 
 	m_launched_game_name = CafeSystem::GetForegroundTitleName();
 #ifdef ENABLE_DISCORD_RPC
@@ -638,10 +639,10 @@ bool MainWindow::FileLoad(const fs::path launchPath, wxLaunchGameEvent::INITIATE
 		m_discord->UpdatePresence(DiscordPresence::Playing, m_launched_game_name);
 #endif
 
-	if (GetConfig().disable_screensaver)
-		ScreenSaver::SetInhibit(true);
 	if (FullscreenEnabled())
 		SetFullScreen(true);
+	if (GetConfig().disable_screensaver)
+		ScreenSaver::SetInhibit(true);
 
 #if BOOST_OS_LINUX && defined(ENABLE_FERAL_GAMEMODE)
 	if (GetWxGUIConfig().feral_gamemode)
@@ -1332,21 +1333,28 @@ void MainWindow::OnFileMenu(wxCommandEvent& event)
 	const int id = event.GetId();
 	if (id == Cmd::Load)
 	{
-		const wxString filter = formatWxString(
-			"{}|*.wud;*.wux;*.wua;*.wuhb;*.iso;*.rpx;*.elf;title.tmd"
-			"|{}|*.wud;*.wux;*.iso"
-			"|{}|title.tmd"
-			"|{}|*.wua"
-			"|{}|*.wuhb"
-			"|{}|*.rpx;*.elf"
-			"|{}|*",
-			_("All Wii U files (*.wud, *.wux, *.wua, *.wuhb, *.iso, *.rpx, *.elf)"),
-			_("Wii U image (*.wud, *.wux, *.iso, *.wad)"),
-			_("Wii U NUS content"),
-			_("Wii U archive (*.wua)"),
-			_("Wii U homebrew bundle (*.wuhb)"),
-			_("Wii U executable (*.rpx, *.elf)"),
-			_("All files (*.*)"));
+		// wx filter syntax: label|patterns|label|patterns...
+		struct FileKind
+		{
+			wxString label;
+			const char* patterns;
+		};
+		const FileKind kinds[] = {
+			{_("All Wii U files (*.wud, *.wux, *.wua, *.wuhb, *.iso, *.rpx, *.elf)"), "*.wud;*.wux;*.wua;*.wuhb;*.iso;*.rpx;*.elf;title.tmd"},
+			{_("Wii U image (*.wud, *.wux, *.iso, *.wad)"), "*.wud;*.wux;*.iso"},
+			{_("Wii U NUS content"), "title.tmd"},
+			{_("Wii U archive (*.wua)"), "*.wua"},
+			{_("Wii U homebrew bundle (*.wuhb)"), "*.wuhb"},
+			{_("Wii U executable (*.rpx, *.elf)"), "*.rpx;*.elf"},
+			{_("All files (*.*)"), "*"},
+		};
+		wxString filter;
+		for (const FileKind& kind : kinds)
+		{
+			if (!filter.empty())
+				filter << '|';
+			filter << kind.label << '|' << wxString::FromUTF8(kind.patterns);
+		}
 		wxFileDialog picker(this, _("Open file to launch"), wxEmptyString, wxEmptyString, filter, wxFD_OPEN | wxFD_FILE_MUST_EXIST);
 		if (picker.ShowModal() == wxID_CANCEL || picker.GetPath().IsEmpty())
 			return;

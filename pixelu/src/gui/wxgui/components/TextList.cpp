@@ -133,17 +133,17 @@ void TextList::WriteText(wxDC& dc, const wxString& text, wxPoint& position) cons
 	position.x += dc.MaxX() - dc.MinX();
 }
 
+void TextList::NextLine(wxPoint& position, const wxPoint* start_position) const
+{
+	if (start_position)
+		position.x = start_position->x; // carriage return
+	position.y += m_line_height;
+}
+
 void TextList::WriteText(wxDC& dc, const wxString& text, wxPoint& position, const wxColour& color) const
 {
 	dc.SetTextForeground(color);
 	WriteText(dc, text, position);
-}
-
-void TextList::NextLine(wxPoint& position, const wxPoint* start_position) const
-{
-	position.y += m_line_height;
-	if (start_position != nullptr)
-		position.x = start_position->x;
 }
 
 void TextList::OnMouseDown()

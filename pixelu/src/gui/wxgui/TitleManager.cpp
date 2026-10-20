@@ -423,15 +423,16 @@ void TitleManager::OnTitleSearchComplete(wxCommandEvent& event)
 	m_refresh_button->Enable();
 }
 
-void TitleManager::OnSetStatusBarText(wxSetStatusBarTextEvent& event)
-{
-	m_status_bar->SetStatusText(event.GetText(), event.GetNumber());
-}
-
 void TitleManager::OnFilterChanged(wxCommandEvent& event)
 {
 	event.Skip();
 	m_title_list->Filter(m_filter->GetValue());
+}
+
+void TitleManager::OnSetStatusBarText(wxSetStatusBarTextEvent& event)
+{
+	const int field = event.GetNumber();
+	m_status_bar->SetStatusText(event.GetText(), field);
 }
 
 void TitleManager::OnRefreshButton(wxCommandEvent& event)

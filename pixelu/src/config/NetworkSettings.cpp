@@ -26,16 +26,21 @@ void NetworkConfig::Load(XMLConfigParser& parser)
 	disablesslver = content.get("disablesslverification", disablesslver);
 	// URLs that are not set fall back to the official servers
 	XMLConfigParser u = content.get("urls");
-	urls.ACT = u.get("act", NintendoURLs::ACTURL);
-	urls.ECS = u.get("ecs", NintendoURLs::ECSURL);
-	urls.NUS = u.get("nus", NintendoURLs::NUSURL);
-	urls.IAS = u.get("ias", NintendoURLs::IASURL);
-	urls.CCSU = u.get("ccsu", NintendoURLs::CCSUURL);
-	urls.CCS = u.get("ccs", NintendoURLs::CCSURL);
-	urls.IDBE = u.get("idbe", NintendoURLs::IDBEURL);
-	urls.BOSS = u.get("boss", NintendoURLs::BOSSURL);
-	urls.TAGAYA = u.get("tagaya", NintendoURLs::TAGAYAURL);
-	urls.OLV = u.get("olv", NintendoURLs::OLVURL);
+	struct UrlField
+	{
+		const char* element;
+		ConfigValue<std::string>& value;
+		const std::string& fallback;
+	};
+	const UrlField fields[] = {
+		{"act", urls.ACT, NintendoURLs::ACTURL}, {"ecs", urls.ECS, NintendoURLs::ECSURL},
+		{"nus", urls.NUS, NintendoURLs::NUSURL}, {"ias", urls.IAS, NintendoURLs::IASURL},
+		{"ccsu", urls.CCSU, NintendoURLs::CCSUURL}, {"ccs", urls.CCS, NintendoURLs::CCSURL},
+		{"idbe", urls.IDBE, NintendoURLs::IDBEURL}, {"boss", urls.BOSS, NintendoURLs::BOSSURL},
+		{"tagaya", urls.TAGAYA, NintendoURLs::TAGAYAURL}, {"olv", urls.OLV, NintendoURLs::OLVURL},
+	};
+	for (const UrlField& f : fields)
+		f.value = u.get(f.element, f.fallback);
 }
 
 bool NetworkConfig::XMLExists()

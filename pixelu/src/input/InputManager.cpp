@@ -185,18 +185,22 @@ namespace
 
 InputManager::InputManager()
 {
+	// one provider per compiled-in API, started in API order.
+	// local devices first: keyboard, then the gamepad libraries
 #if HAS_KEYBOARD
 	create_provider<KeyboardControllerProvider>();
 #endif
 #ifdef HAS_SDL
 	create_provider<SDLControllerProvider>();
 #endif
+	// Windows-only gamepad APIs
 #if HAS_XINPUT
 	create_provider<XInputControllerProvider>();
 #endif
 #if HAS_DIRECTINPUT
 	create_provider<DirectInputControllerProvider>();
 #endif
+	// network, USB adapter and Bluetooth sources
 #if HAS_DSU
 	create_provider<DSUControllerProvider>();
 #endif
@@ -207,7 +211,8 @@ InputManager::InputManager()
 	create_provider<WiimoteControllerProvider>();
 #endif
 
-	m_update_thread_shutdown.store(false);
+	// polling starts once every provider exists
+	m_update_thread_shutdown = false;
 	m_update_thread = std::thread(&InputManager::update_thread, this);
 }
 

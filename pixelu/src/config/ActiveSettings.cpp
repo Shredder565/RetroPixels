@@ -269,10 +269,9 @@ fs::path ActiveSettings::GetMlcPath()
 	return GetDefaultMLCPath();
 }
 
-bool ActiveSettings::IsCustomMlcPath()
+fs::path ActiveSettings::GetDefaultMLCPath()
 {
-	cemu_assert_debug(s_setPathsCalled);
-	return !GetConfig().mlc_path.GetValue().empty();
+	return GetUserDataPath("mlc01");
 }
 
 bool ActiveSettings::IsCommandLineMlcPath()
@@ -280,7 +279,9 @@ bool ActiveSettings::IsCommandLineMlcPath()
 	return LaunchSettings::GetMLCPath().has_value();
 }
 
-fs::path ActiveSettings::GetDefaultMLCPath()
+bool ActiveSettings::IsCustomMlcPath()
 {
-	return GetUserDataPath("mlc01");
+	cemu_assert_debug(s_setPathsCalled);
+	const std::string configured = GetConfig().mlc_path.GetValue();
+	return !configured.empty();
 }

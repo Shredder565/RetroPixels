@@ -126,40 +126,41 @@ ControllerProviderPtr ControllerFactory::CreateControllerProvider(InputAPI::Type
 {
 	switch (api)
 	{
-#if HAS_KEYBOARD
-	case InputAPI::Keyboard:
-		return std::make_shared<KeyboardControllerProvider>();
-#endif
-#ifdef HAS_SDL
-	case InputAPI::SDLController:
-		return std::make_shared<SDLControllerProvider>();
-#endif
-#if HAS_XINPUT
-	case InputAPI::XInput:
-		return std::make_shared<XInputControllerProvider>();
-#endif
-#if HAS_DIRECTINPUT
-	case InputAPI::DirectInput:
-		return std::make_shared<DirectInputControllerProvider>();
-#endif
 #if HAS_DSU
 	case InputAPI::DSUClient:
-		// a DSU provider is per server address
-		if (const auto* dsu = dynamic_cast<const DSUProviderSettings*>(&settings))
-			return std::make_shared<DSUControllerProvider>(*dsu);
-		cemuLog_log(LogType::Force, "failing to cast ControllerProviderSettings class to DSUControllerProvider");
-		return std::make_shared<DSUControllerProvider>();
+	{
+		// the only provider with settings: one instance per server address
+		const auto* dsu = dynamic_cast<const DSUProviderSettings*>(&settings);
+		if (!dsu)
+		{
+			cemuLog_log(LogType::Force, "failing to cast ControllerProviderSettings class to DSUControllerProvider");
+			return std::make_shared<DSUControllerProvider>();
+		}
+		return std::make_shared<DSUControllerProvider>(*dsu);
+	}
 #endif
-#if defined(HAS_GAMECUBE) && HAS_GAMECUBE && defined(HAS_LIBUSB)
-	case InputAPI::GameCube:
-		return std::make_shared<GameCubeControllerProvider>();
+	// the others are stateless singletons
+#if HAS_KEYBOARD
+	case InputAPI::Keyboard: return std::make_shared<KeyboardControllerProvider>();
 #endif
 #if HAS_WIIMOTE
-	case InputAPI::Wiimote:
-		return std::make_shared<WiimoteControllerProvider>();
+	case InputAPI::Wiimote: return std::make_shared<WiimoteControllerProvider>();
+#endif
+#ifdef HAS_SDL
+	case InputAPI::SDLController: return std::make_shared<SDLControllerProvider>();
+#endif
+#if defined(HAS_GAMECUBE) && HAS_GAMECUBE && defined(HAS_LIBUSB)
+	case InputAPI::GameCube: return std::make_shared<GameCubeControllerProvider>();
+#endif
+#if HAS_XINPUT
+	case InputAPI::XInput: return std::make_shared<XInputControllerProvider>();
+#endif
+#if HAS_DIRECTINPUT
+	case InputAPI::DirectInput: return std::make_shared<DirectInputControllerProvider>();
 #endif
 	default:
-		cemu_assert_debug(false);
-		return {};
+		break;
 	}
+	cemu_assert_debug(false);
+	return {};
 }

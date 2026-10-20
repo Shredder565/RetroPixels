@@ -79,8 +79,8 @@ void LoggingWindow::Log(std::string_view filter, std::string_view message)
 
 void LoggingWindow::Log(std::string_view filter, std::wstring_view message)
 {
-	wxLogEvent line{std::string(filter), std::wstring(message)};
-	OnLogMessage(line);
+	wxLogEvent entry{std::string(filter), std::wstring(message)};
+	OnLogMessage(entry); // same path as a message posted from another thread
 }
 
 void LoggingWindow::OnLogMessage(wxLogEvent& event)
@@ -88,14 +88,14 @@ void LoggingWindow::OnLogMessage(wxLogEvent& event)
 	m_log_list->PushEntry(event.GetFilter(), event.GetMessage());
 }
 
-void LoggingWindow::OnFilterChange(wxCommandEvent& event)
-{
-	m_log_list->SetActiveFilter(m_filter->GetValue().utf8_string());
-	event.Skip();
-}
-
 void LoggingWindow::OnFilterMessageChange(wxCommandEvent& event)
 {
-	m_log_list->SetFilterMessage(m_filter_message->GetValue());
 	event.Skip();
+	m_log_list->SetFilterMessage(m_filter_message->GetValue());
+}
+
+void LoggingWindow::OnFilterChange(wxCommandEvent& event)
+{
+	event.Skip();
+	m_log_list->SetActiveFilter(m_filter->GetValue().utf8_string());
 }

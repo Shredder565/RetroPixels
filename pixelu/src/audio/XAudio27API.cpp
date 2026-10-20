@@ -136,16 +136,17 @@ std::vector<XAudio27API::DeviceDescriptionPtr> XAudio27API::GetDevices()
 	return result;
 }
 
-void XAudio27API::XAudioDeleter::operator()(IXAudio2* ptr) const
-{
-	if (ptr)
-		ptr->Release();
-}
-
+// voices are destroyed, the engine itself is a COM object
 void XAudio27API::VoiceDeleter::operator()(IXAudio2Voice* ptr) const
 {
-	if (ptr)
+	if (ptr != nullptr)
 		ptr->DestroyVoice();
+}
+
+void XAudio27API::XAudioDeleter::operator()(IXAudio2* ptr) const
+{
+	if (ptr != nullptr)
+		ptr->Release();
 }
 
 bool XAudio27API::FeedBlock(sint16* data)

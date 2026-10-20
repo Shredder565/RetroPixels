@@ -342,18 +342,19 @@ void GraphicPacksWindow2::UpdateAppearance()
 	Refresh();
 }
 
-void GraphicPacksWindow2::OnFilterUpdate(wxEvent& event)
-{
-	m_filter = m_filter_text->GetValue().utf8_string();
-	FillGraphicPackList();
-	event.Skip();
-}
-
+// both filters rebuild the pack list from scratch
 void GraphicPacksWindow2::OnInstalledGamesChanged(wxCommandEvent& event)
 {
+	event.Skip();
 	m_filter_installed_games = m_installed_games_only->GetValue();
 	FillGraphicPackList();
+}
+
+void GraphicPacksWindow2::OnFilterUpdate(wxEvent& event)
+{
 	event.Skip();
+	m_filter = m_filter_text->GetValue().utf8_string();
+	FillGraphicPackList();
 }
 
 // ---- selected pack -------------------------------------------------------------------------------
