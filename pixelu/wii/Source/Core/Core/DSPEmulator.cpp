@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/DSPEmulator.h"
 
@@ -12,8 +11,10 @@ DSPEmulator::~DSPEmulator() = default;
 
 std::unique_ptr<DSPEmulator> CreateDSPEmulator(Core::System& system, bool hle)
 {
+  std::unique_ptr<DSPEmulator> emulator;
   if (hle)
-    return std::make_unique<DSP::HLE::DSPHLE>(system);
-
-  return std::make_unique<DSP::LLE::DSPLLE>();
+    emulator = std::make_unique<DSP::HLE::DSPHLE>(system);
+  else
+    emulator = std::make_unique<DSP::LLE::DSPLLE>();
+  return emulator;
 }

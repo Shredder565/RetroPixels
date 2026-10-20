@@ -1,9 +1,12 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// The emulator's side of DSP/DSPHost.h: memory, interrupts and code-load hooks
+// for the LLE DSP.
 
 #include "Core/DSP/DSPHost.h"
 
 #include <string>
+#include <utility>
 
 #include "Common/CommonTypes.h"
 #include "Common/Hash.h"
@@ -17,11 +20,6 @@
 #include "Core/HW/Memmap.h"
 #include "Core/System.h"
 #include "VideoCommon/OnScreenDisplay.h"
-
-// The user of the DSPCore library must supply a few functions so that the
-// emulation core can access the environment it runs in. If the emulation
-// core isn't used, for example in an asm/disasm tool, then most of these
-// can be stubbed out.
 
 namespace DSP::Host
 {
@@ -37,16 +35,12 @@ void WriteHostMemory(u8 value, u32 addr)
 
 void DMAToDSP(u16* dst, u32 addr, u32 size)
 {
-  auto& system = Core::System::GetInstance();
-  auto& memory = system.GetMemory();
-  memory.CopyFromEmuSwapped(dst, addr, size);
+  Core::System::GetInstance().GetMemory().CopyFromEmuSwapped(dst, addr, size);
 }
 
 void DMAFromDSP(const u16* src, u32 addr, u32 size)
 {
-  auto& system = Core::System::GetInstance();
-  auto& memory = system.GetMemory();
-  memory.CopyToEmuSwapped(addr, src, size);
+  Core::System::GetInstance().GetMemory().CopyToEmuSwapped(addr, src, size);
 }
 
 void OSD_AddMessage(std::string str, u32 ms)
@@ -66,34 +60,32 @@ bool IsWiiHost()
 
 void InterruptRequest()
 {
-  // Fire an interrupt on the PPC ASAP.
   Core::System::GetInstance().GetDSP().GenerateDSPInterruptFromDSPEmu(DSP::INT_DSP);
 }
 
 void CodeLoaded(DSPCore& dsp, u32 addr, size_t size)
 {
-  auto& system = Core::System::GetInstance();
-  auto& memory = system.GetMemory();
-  CodeLoaded(dsp, memory.GetPointerForRange(addr, size), size);
+  const u8* const code = Core::System::GetInstance().GetMemory().GetPointerForRange(addr, size);
+  CodeLoaded(dsp, code, size);
 }
 
 void CodeLoaded(DSPCore& dsp, const u8* ptr, size_t size)
 {
-  auto& state = dsp.DSPState();
-  const u32 iram_crc = Common::HashEctor(ptr, size);
-  state.SetIRAMCRC(iram_crc);
+  SDSP& state = dsp.DSPState();
 
+  // The checksum identifies the microcode (for HLE matching and for dumps).
+  const u32 crc = Common::HashEctor(ptr, size);
+  state.SetIRAMCRC(crc);
   if (Config::Get(Config::MAIN_DUMP_UCODE))
-  {
-    DSP::DumpDSPCode(ptr, size, iram_crc);
-  }
+    DumpDSPCode(ptr, size, crc);
+  NOTICE_LOG_FMT(DSPLLE, "IRAM code checksum: {:08x}", crc);
 
-  NOTICE_LOG_FMT(DSPLLE, "g_dsp.iram_crc: {:08x}", iram_crc);
-
+  // Refresh the debugger listing of IRAM and IROM.
   Symbols::Clear();
-  Symbols::AutoDisassembly(state, 0x0, 0x1000);
+  Symbols::AutoDisassembly(state, 0x0000, 0x1000);
   Symbols::AutoDisassembly(state, 0x8000, 0x9000);
 
+  // Drop compiled blocks of the old code and re-analyze.
   dsp.ClearIRAM();
   state.GetAnalyzer().Analyze(state);
 }

@@ -1,5 +1,4 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/DSPLLE/DSPSymbols.h"
 
@@ -15,74 +14,78 @@
 
 namespace DSP::Symbols
 {
-static std::map<u16, int> addr_to_line;
-static std::map<int, u16> line_to_addr;
-static std::vector<std::string> lines;
-static int line_counter = 0;
-
-int Addr2Line(u16 address)  // -1 for not found
+namespace
 {
-  std::map<u16, int>::iterator iter = addr_to_line.find(address);
-  if (iter != addr_to_line.end())
-    return iter->second;
-  else
-    return -1;
+struct Listing
+{
+  std::vector<std::string> text;
+  std::map<u16, int> line_of_address;
+  std::map<int, u16> address_of_line;
+  // Numbers the lines; a failed instruction gets a number but no text.
+  int next_line = 0;
+};
+
+Listing& TheListing()
+{
+  static Listing listing;
+  return listing;
+}
+}  // namespace
+
+int Addr2Line(u16 address)
+{
+  const Listing& listing = TheListing();
+  const auto it = listing.line_of_address.find(address);
+  return it != listing.line_of_address.end() ? it->second : -1;
 }
 
-int Line2Addr(int line)  // -1 for not found
+int Line2Addr(int line)
 {
-  std::map<int, u16>::iterator iter = line_to_addr.find(line);
-  if (iter != line_to_addr.end())
-    return iter->second;
-  else
-    return -1;
+  const Listing& listing = TheListing();
+  const auto it = listing.address_of_line.find(line);
+  return it != listing.address_of_line.end() ? it->second : -1;
 }
 
 const char* GetLineText(int line)
 {
-  if (line >= 0 && line < (int)lines.size())
-  {
-    return lines[line].c_str();
-  }
-  else
-  {
+  const Listing& listing = TheListing();
+  if (line < 0 || static_cast<size_t>(line) >= listing.text.size())
     return "----";
-  }
+  return listing.text[static_cast<size_t>(line)].c_str();
 }
 
 void AutoDisassembly(const SDSP& dsp, u16 start_addr, u16 end_addr)
 {
+  constexpr size_t MEMORY_WORDS = DSP_IRAM_SIZE;
+  static_assert(MEMORY_WORDS == DSP_IROM_SIZE);
+
   AssemblerSettings settings;
   settings.show_pc = true;
   settings.show_hex = true;
-  DSPDisassembler disasm(settings);
+  DSPDisassembler disassembler(settings);
 
-  u16 addr = start_addr;
-  const u16* ptr = (start_addr >> 15) != 0 ? dsp.irom : dsp.iram;
-  constexpr size_t size = DSP_IROM_SIZE;
-  static_assert(size == DSP_IRAM_SIZE);
-  while (addr < end_addr)
+  const bool rom = (start_addr & 0x8000) != 0;
+  const u16* const memory = rom ? dsp.irom : dsp.iram;
+
+  Listing& listing = TheListing();
+  for (u16 addr = start_addr; addr < end_addr;)
   {
-    line_to_addr[line_counter] = addr;
-    addr_to_line[addr] = line_counter;
+    listing.address_of_line[listing.next_line] = addr;
+    listing.line_of_address[addr] = listing.next_line;
 
-    std::string buf;
-    if (!disasm.DisassembleOpcode(ptr, size, &addr, buf))
+    std::string line;
+    if (!disassembler.DisassembleOpcode(memory, MEMORY_WORDS, &addr, line))
     {
       ERROR_LOG_FMT(DSPLLE, "disasm failed at {:04x}", addr);
-      break;
+      return;
     }
-
-    lines.push_back(buf);
-    line_counter++;
+    listing.text.push_back(std::move(line));
+    ++listing.next_line;
   }
 }
 
 void Clear()
 {
-  addr_to_line.clear();
-  line_to_addr.clear();
-  lines.clear();
-  line_counter = 0;
+  TheListing() = Listing{};
 }
 }  // namespace DSP::Symbols

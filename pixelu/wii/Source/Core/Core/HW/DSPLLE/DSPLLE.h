@@ -1,5 +1,4 @@
-// Copyright 2011 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,6 +7,7 @@
 #include <thread>
 
 #include "Common/CommonTypes.h"
+#include "Common/Event.h"
 #include "Common/Flag.h"
 #include "Core/DSP/DSPCore.h"
 #include "Core/DSPEmulator.h"
@@ -16,6 +16,8 @@ class PointerWrap;
 
 namespace DSP::LLE
 {
+// Low-level DSP emulation: runs the real microcode on the interpreter or the JIT,
+// either inline from DSP_Update or on a thread of its own.
 class DSPLLE : public DSPEmulator
 {
 public:
@@ -40,17 +42,20 @@ public:
   u32 DSP_UpdateRate() override;
 
 private:
-  static void DSPThread(DSPLLE* dsp_lle);
+  void ThreadLoop();
+  void StopThread();
 
   DSPCore m_dsp_core;
-  std::thread m_dsp_thread;
-  std::mutex m_dsp_thread_mutex;
-  bool m_is_dsp_on_thread = false;
-  Common::Flag m_is_running;
-  std::atomic<u32> m_cycle_count{};
 
-  Common::Event m_dsp_event;
-  Common::Event m_ppc_event;
-  bool m_request_disable_thread = false;
+  // Threaded mode: the CPU side adds to m_pending_cycles and wakes the thread
+  // (m_wake_dsp); the thread signals m_dsp_idle once it has run them.
+  std::thread m_thread;
+  std::mutex m_core_lock;
+  bool m_threaded = false;
+  bool m_stop_threading_requested = false;
+  Common::Flag m_thread_running;
+  std::atomic<u32> m_pending_cycles{};
+  Common::Event m_wake_dsp;
+  Common::Event m_dsp_idle;
 };
 }  // namespace DSP::LLE
