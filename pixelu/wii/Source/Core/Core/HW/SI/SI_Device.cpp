@@ -29,21 +29,11 @@
 
 namespace SerialInterface
 {
+ISIDevice::~ISIDevice() = default;
+
 ISIDevice::ISIDevice(Core::System& system, SIDevices device_type, int device_number)
     : m_system(system), m_device_number(device_number), m_device_type(device_type)
 {
-}
-
-ISIDevice::~ISIDevice() = default;
-
-int ISIDevice::GetDeviceNumber() const
-{
-  return m_device_number;
-}
-
-SIDevices ISIDevice::GetDeviceType() const
-{
-  return m_device_type;
 }
 
 int ISIDevice::RunBuffer(u8* buffer, int request_length)
@@ -71,6 +61,16 @@ void ISIDevice::DoState(PointerWrap&)
 
 void ISIDevice::OnEvent(u64, s64)
 {
+}
+
+SIDevices ISIDevice::GetDeviceType() const
+{
+  return m_device_type;
+}
+
+int ISIDevice::GetDeviceNumber() const
+{
+  return m_device_number;
 }
 
 int ISIDevice::CreateStatusResponse(u32 si_device_id, u8* buffer)

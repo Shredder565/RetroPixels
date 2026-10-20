@@ -153,6 +153,15 @@ CSIDevice_GCController::CSIDevice_GCController(Core::System& system, SIDevices d
   m_origin.substick_y = GCPadStatus::C_STICK_CENTER_Y;
 }
 
+void CSIDevice_GCController::DoState(PointerWrap& p)
+{
+  // Savestate layout: origin, mode, combo timer start, combo.
+  p.Do(m_origin);
+  p.Do(m_mode);
+  p.Do(m_timer_button_combo_start);
+  p.Do(m_last_button_combo);
+}
+
 int CSIDevice_GCController::RunBuffer(u8* buffer, int request_length)
 {
   ISIDevice::RunBuffer(buffer, request_length);
@@ -350,14 +359,6 @@ void CSIDevice_GCController::SendCommand(u32 command, u8 poll)
     m_mode = static_cast<u8>(word.parameter2);
     INFO_LOG_FMT(SERIALINTERFACE, "Pad {}: analog mode {}", m_device_number, m_mode);
   }
-}
-
-void CSIDevice_GCController::DoState(PointerWrap& p)
-{
-  p.Do(m_origin);
-  p.Do(m_mode);
-  p.Do(m_timer_button_combo_start);
-  p.Do(m_last_button_combo);
 }
 
 CSIDevice_TaruKonga::CSIDevice_TaruKonga(Core::System& system, SIDevices device, int device_number)

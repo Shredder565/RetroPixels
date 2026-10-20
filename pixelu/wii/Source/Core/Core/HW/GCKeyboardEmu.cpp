@@ -76,36 +76,23 @@ GCKeyboard::GCKeyboard(const unsigned int index) : m_index(index)
   }
 }
 
-std::string GCKeyboard::GetName() const
-{
-  std::string name = "GCKeyboard";
-  name += static_cast<char>('1' + m_index);
-  return name;
-}
-
 InputConfig* GCKeyboard::GetConfig() const
 {
   return Keyboard::GetConfig();
 }
 
+std::string GCKeyboard::GetName() const
+{
+  // "GCKeyboard1" .. "GCKeyboard4"
+  return std::string("GCKeyboard") + static_cast<char>('1' + m_index);
+}
+
 ControllerEmu::ControlGroup* GCKeyboard::GetGroup(KeyboardGroup group)
 {
-  switch (group)
-  {
-  case KeyboardGroup::Kb0x:
-    return m_keys0x;
-  case KeyboardGroup::Kb1x:
-    return m_keys1x;
-  case KeyboardGroup::Kb2x:
-    return m_keys2x;
-  case KeyboardGroup::Kb3x:
-    return m_keys3x;
-  case KeyboardGroup::Kb4x:
-    return m_keys4x;
-  case KeyboardGroup::Kb5x:
-    return m_keys5x;
-  }
-  return nullptr;
+  ControllerEmu::Buttons* const by_word[WORD_COUNT] = {m_keys0x, m_keys1x, m_keys2x,
+                                                       m_keys3x, m_keys4x, m_keys5x};
+  const auto word = static_cast<std::size_t>(group);
+  return word < WORD_COUNT ? by_word[word] : nullptr;
 }
 
 KeyboardStatus GCKeyboard::GetInput() const

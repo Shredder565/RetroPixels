@@ -114,42 +114,26 @@ GCPad::GCPad(const unsigned int index) : m_index(index)
       false);
 }
 
-std::string GCPad::GetName() const
-{
-  std::string name = "GCPad";
-  name += static_cast<char>('1' + m_index);
-  return name;
-}
-
 InputConfig* GCPad::GetConfig() const
 {
   return Pad::GetConfig();
 }
 
+std::string GCPad::GetName() const
+{
+  // "GCPad1" .. "GCPad4"
+  return std::string("GCPad") + static_cast<char>('1' + m_index);
+}
+
 ControllerEmu::ControlGroup* GCPad::GetGroup(PadGroup group)
 {
-  switch (group)
-  {
-  case PadGroup::Buttons:
-    return m_buttons;
-  case PadGroup::MainStick:
-    return m_main_stick;
-  case PadGroup::CStick:
-    return m_c_stick;
-  case PadGroup::DPad:
-    return m_dpad;
-  case PadGroup::Triggers:
-    return m_triggers;
-  case PadGroup::Rumble:
-    return m_rumble;
-  case PadGroup::Mic:
-    return m_mic;
-  case PadGroup::Options:
-    return m_options;
-  case PadGroup::Triforce:
-    return m_triforce;
-  }
-  return nullptr;
+  // In PadGroup order.
+  ControllerEmu::ControlGroup* const by_id[] = {
+      m_buttons, m_main_stick, m_c_stick, m_dpad, m_triggers,
+      m_rumble,  m_mic,        m_options, m_triforce,
+  };
+  const auto id = static_cast<std::size_t>(group);
+  return id < std::size(by_id) ? by_id[id] : nullptr;
 }
 
 GCPadStatus GCPad::GetInput() const

@@ -87,16 +87,8 @@ public:
 namespace HSP
 {
 
-// Each source owns bit 2 * n of the IRQ register.
-enum class CHSPDevice_GBPlayer::IRQ : int
-{
-  Link = 0,
-  GamePak = 1,
-  Sleep = 2,
-  Serial = 3,
-  Video = 4,
-  Audio = 5,
-};
+// Interrupt sources, numbered 0-5; source n owns bit 2 * n of the IRQ register.
+enum class CHSPDevice_GBPlayer::IRQ : int { Link, GamePak, Sleep, Serial, Video, Audio };
 
 #if defined(HAS_LIBMGBA)
 
