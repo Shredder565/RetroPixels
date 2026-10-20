@@ -1,8 +1,10 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/UberShaderVertex.h"
 
+#include <array>
+#include <string>
+#include <string_view>
 #include <utility>
 
 #include "VideoCommon/ConstantManager.h"
@@ -14,723 +16,629 @@
 
 namespace UberShader
 {
-VertexShaderUid GetVertexShaderUid()
+namespace
 {
-  VertexShaderUid out;
-
-  vertex_ubershader_uid_data* const uid_data = out.GetUidData();
-  uid_data->num_texgens = xfmem.numTexGen.numTexGens;
-
-  return out;
+void Put(ShaderCode& out, std::string_view text)
+{
+  out.Write("{}", text);
 }
 
-static void GenVertexShaderTexGens(APIType api_type, const ShaderHostConfig& host_config,
-                                   u32 num_texgen, ShaderCode& out);
-static void LoadVertexAttribute(ShaderCode& code, const ShaderHostConfig& host_config, u32 indent,
-                                std::string_view name, std::string_view shader_type,
-                                std::string_view stored_type, std::string_view offset_name = {});
+// "uintBitsToFloat(vertex_buffer[offset + 0]),\n<indent>uintBitsToFloat(...)" for `count` words.
+std::string BufferFloats(u32 count, u32 indent)
+{
+  std::string result;
+  for (u32 k = 0; k < count; ++k)
+  {
+    if (k != 0)
+      result += fmt::format(",\n{:{}}", "", indent);
+    result += fmt::format("uintBitsToFloat(vertex_buffer[offset + {}])", k);
+  }
+  return result;
+}
+
+// Loader functions for the dynamic vertex loader: vertices are read from a storage buffer
+// instead of vertex attributes, using per-attribute offsets from the uniforms. Position and
+// texture coordinate offsets carry their component count in the upper 16 bits.
+void WriteBufferLoaders(ShaderCode& out, APIType api_type)
+{
+  Put(out, "\nSSBO_BINDING(1) readonly restrict buffer Vertices {\n  uint vertex_buffer[];\n};\n");
+  // OpenGL and Vulkan count gl_VertexID from the base vertex, D3D's SV_VertexID starts at 0, so
+  // D3D (12; 11 has no dynamic vertex loader) adds the base vertex from a root constant.
+  if (api_type == APIType::D3D)
+  {
+    Put(out, "UBO_BINDING(std140, 5) uniform DX_Constants {\n  uint base_vertex;\n};\n\n");
+  }
+  out.Write("uint GetVertexBaseOffset(uint vertex_id) {{\n  return {} * vertex_stride;\n}}\n",
+            api_type == APIType::D3D ? "(vertex_id + base_vertex)" : "vertex_id");
+
+  Put(out, R"(
+uint4 load_input_uint4_ubyte4(uint vtx_offset, uint attr_offset) {
+  uint value = vertex_buffer[vtx_offset + attr_offset];
+  return uint4(value & 0xffu, (value >> 8) & 0xffu, (value >> 16) & 0xffu, value >> 24);
+}
+
+float4 load_input_float4_ubyte4(uint vtx_offset, uint attr_offset) {
+  return float4(load_input_uint4_ubyte4(vtx_offset, attr_offset)) / 255.0f;
+}
+
+float3 load_input_float3_float3(uint vtx_offset, uint attr_offset) {
+  uint offset = vtx_offset + attr_offset;
+)");
+  out.Write("  return float3({});\n}}\n\n", BufferFloats(3, 16));
+
+  constexpr std::string_view sized_offset = "  uint components = attr_offset >> 16;\n"
+                                            "  uint offset = vtx_offset + (attr_offset & 0xffff);\n";
+  const std::string pad(18, ' ');
+
+  Put(out, "float4 load_input_float4_rawpos(uint vtx_offset, uint attr_offset) {\n");
+  Put(out, sized_offset);
+  out.Write("  if (components < 3)\n    return float4({},\n{}0.0f, 1.0f);\n", BufferFloats(2, 18),
+            pad);
+  out.Write("  else\n    return float4({},\n{}1.0f);\n}}\n\n", BufferFloats(3, 18), pad);
+
+  Put(out, "float3 load_input_float3_rawtex(uint vtx_offset, uint attr_offset) {\n");
+  Put(out, sized_offset);
+  out.Write("  if (components < 2)\n    return float3({}, 0.0f, 0.0f);\n", BufferFloats(1, 18));
+  out.Write("  else if (components < 3)\n    return float3({},\n{}0.0f);\n", BufferFloats(2, 18),
+            pad);
+  out.Write("  else\n    return float3({});\n}}\n\n", BufferFloats(3, 18));
+}
+
+class UberVertexWriter
+{
+public:
+  UberVertexWriter(APIType api, const ShaderHostConfig& host, u32 texgens, ShaderCode& out)
+      : m_api(api), m_host(host), m_texgens(texgens), m_out(out),
+        m_loader(host.backend_dynamic_vertex_loader || host.backend_vs_point_line_expand)
+  {
+  }
+
+  void Write(const vertex_ubershader_uid_data& uid)
+  {
+    m_out.Write("// {}\n\n", uid);
+    WriteLightStruct(m_out);
+    Put(m_out, "UBO_BINDING(std140, 2) uniform VSBlock {\n");
+    WriteVertexUniformMembers(m_out);
+    Put(m_out, "};\n");
+    if (m_loader)
+    {
+      Put(m_out, "UBO_BINDING(std140, 4) uniform GSBlock {\n");
+      WriteGeometryUniformMembers(m_out);
+      Put(m_out, "};\n");
+    }
+
+    Put(m_out, "struct VS_OUTPUT {\n");
+    GenerateVSOutputMembers(m_out, m_api, m_texgens, m_host, "", ShaderStage::Vertex);
+    Put(m_out, "};\n\n");
+
+    WriteIsNanHeader(m_out, m_api);
+    WriteBitfieldExtractHeader(m_out, m_api, m_host);
+    WriteLightingFunction(m_out);
+
+    if (m_loader)
+      WriteBufferLoaders(m_out, m_api);
+    else
+      WriteAttributes();
+    WriteOutputs();
+
+    Put(m_out, "void main()\n{\nVS_OUTPUT o;\n\n");
+    if (m_host.backend_vs_point_line_expand)
+    {
+      // Expanded primitives use four shader invocations per input vertex.
+      Put(m_out, R"(uint vertex_id = gl_VertexID;
+if (vs_expand != 0u) {
+  vertex_id = vertex_id >> 2;
+}
+uint vertex_base_offset = GetVertexBaseOffset(vertex_id);
+)");
+    }
+    else if (m_host.backend_dynamic_vertex_loader)
+    {
+      Put(m_out, "uint vertex_base_offset = GetVertexBaseOffset(gl_VertexID);\n");
+    }
+
+    Load(0, "rawpos", "float4", "rawpos");
+    WriteTransforms();
+    WriteVertexColors();
+    WriteVertexLighting(m_out, m_api, "pos.xyz", "_normal", "vertex_color_0", "vertex_color_1",
+                        "o.colors_0", "o.colors_1");
+    if (m_texgens > 0)
+      WriteTexGens();
+    if (m_host.backend_vs_point_line_expand)
+      WriteExpansion();
+    WriteFinish();
+  }
+
+private:
+  // Declares and loads an attribute from the vertex buffer; with ordinary vertex attributes the
+  // variable already exists.
+  void Load(u32 indent, std::string_view name, std::string_view type, std::string_view stored,
+            std::string_view offset_name = {})
+  {
+    if (!m_loader)
+      return;
+    m_out.Write("{:{}}{} {} = load_input_{}_{}(vertex_base_offset, vertex_offset_{});\n", "",
+                indent, type, name, type, stored, offset_name.empty() ? name : offset_name);
+  }
+
+  void WriteAttributes()
+  {
+    struct Attribute
+    {
+      ShaderAttrib slot;
+      std::string_view decl;
+    };
+    static constexpr std::array<Attribute, 7> attributes = {{
+        {ShaderAttrib::Position, "float4 rawpos"},
+        {ShaderAttrib::PositionMatrix, "uint4 posmtx"},
+        {ShaderAttrib::Normal, "float3 rawnormal"},
+        {ShaderAttrib::Tangent, "float3 rawtangent"},
+        {ShaderAttrib::Binormal, "float3 rawbinormal"},
+        {ShaderAttrib::Color0, "float4 rawcolor0"},
+        {ShaderAttrib::Color1, "float4 rawcolor1"},
+    }};
+    for (const Attribute& a : attributes)
+      m_out.Write("ATTRIBUTE_LOCATION({:s}) in {};\n", a.slot, a.decl);
+    for (u32 i = 0; i < 8; ++i)
+    {
+      m_out.Write("ATTRIBUTE_LOCATION({:s}) in float3 rawtex{};\n",
+                  ShaderAttrib::TexCoord0 + static_cast<int>(i), i);
+    }
+  }
+
+  void WriteOutputs()
+  {
+    const bool msaa = m_host.msaa;
+    const bool ssaa = m_host.ssaa;
+    if (m_host.backend_geometry_shaders)
+    {
+      Put(m_out, "VARYING_LOCATION(0) out VertexData {\n");
+      GenerateVSOutputMembers(m_out, m_api, m_texgens, m_host,
+                              GetInterpolationQualifier(msaa, ssaa, true, false),
+                              ShaderStage::Vertex);
+      Put(m_out, "} vs;\n");
+      return;
+    }
+    const char* qualifier = GetInterpolationQualifier(msaa, ssaa);
+    u32 location = 0;
+    const auto varying = [&](std::string_view type, std::string_view name) {
+      m_out.Write("VARYING_LOCATION({}) {} out {} {};\n", location++, qualifier, type, name);
+    };
+    varying("float4", "colors_0");
+    varying("float4", "colors_1");
+    for (u32 i = 0; i < m_texgens; ++i)
+      varying("float3", fmt::format("tex{}", i));
+    if (!m_host.fast_depth_calc)
+      varying("float4", "clipPos");
+    if (m_host.per_pixel_lighting)
+    {
+      varying("float3", "Normal");
+      varying("float3", "WorldPos");
+    }
+  }
+
+  // Position/normal matrices (per vertex or shared), projection, and the normal, tangent and
+  // binormal with their cached fallbacks.
+  void WriteTransforms()
+  {
+    Put(m_out, "// Position matrix\nfloat4 P0;\nfloat4 P1;\nfloat4 P2;\n\n"
+               "// Normal matrix\nfloat3 N0;\nfloat3 N1;\nfloat3 N2;\n\n");
+    m_out.Write("if ((components & {}u) != 0u) {{ // VB_HAS_POSMTXIDX\n",
+                std::to_underlying(VB_HAS_POSMTXIDX));
+    Load(2, "posmtx", "uint4", "ubyte4");
+    Put(m_out, "  // Vertex format has a per-vertex matrix\n  int posidx = int(posmtx.r);\n");
+    for (u32 row = 0; row < 3; ++row)
+    {
+      m_out.Write("  P{} = {}[posidx{}];\n", row, I_TRANSFORMMATRICES,
+                  row == 0 ? std::string() : fmt::format("+{}", row));
+    }
+    // Normal matrices are stored after the 32 position rows of the same index.
+    Put(m_out, "\n  int normidx = posidx >= 32 ? (posidx - 32) : posidx;\n");
+    for (u32 row = 0; row < 3; ++row)
+    {
+      m_out.Write("  N{} = {}[normidx{}].xyz;\n", row, I_NORMALMATRICES,
+                  row == 0 ? std::string() : fmt::format("+{}", row));
+    }
+    Put(m_out, "} else {\n  // One shared matrix\n");
+    for (u32 row = 0; row < 3; ++row)
+      m_out.Write("  P{} = {}[{}];\n", row, I_POSNORMALMATRIX, row);
+    for (u32 row = 0; row < 3; ++row)
+      m_out.Write("  N{} = {}[{}].xyz;\n", row, I_POSNORMALMATRIX, row + 3);
+    Put(m_out, "}\n\n// Multiply the position vector by the position matrix\n"
+               "float4 pos = float4(dot(P0, rawpos), dot(P1, rawpos), dot(P2, rawpos), 1.0);\n");
+    m_out.Write("o.pos = float4(dot({0}[0], pos), dot({0}[1], pos), dot({0}[2], pos), "
+                "dot({0}[3], pos));\n\n",
+                I_PROJECTION);
+
+    struct Vector
+    {
+      std::string_view name;
+      u32 mask;
+      std::string_view flag;
+      std::string_view cached;
+    };
+    const std::array<Vector, 3> vectors = {{
+        {"normal", std::to_underlying(VB_HAS_NORMAL), "NORMAL", I_CACHED_NORMAL},
+        {"tangent", std::to_underlying(VB_HAS_TANGENT), "TANGENT", I_CACHED_TANGENT},
+        {"binormal", std::to_underlying(VB_HAS_BINORMAL), "BINORMAL", I_CACHED_BINORMAL},
+    }};
+    for (const Vector& v : vectors)
+      m_out.Write("float3 _raw{};\n", v.name);
+    for (const Vector& v : vectors)
+    {
+      m_out.Write("if ((components & {}u) != 0u) // VB_HAS_{}\n{{\n", v.mask, v.flag);
+      Load(2, fmt::format("raw{}", v.name), "float3", "float3");
+      m_out.Write("  _raw{0} = raw{0};\n}}\nelse\n{{\n  _raw{0} = {1}.xyz;\n}}\n\n", v.name,
+                  v.cached);
+    }
+
+    Put(m_out, R"(// The scale of the transform matrix is used to control the size of the emboss map
+// effect by changing the scale of the transformed binormals (which only get used by
+// emboss map texgens). By normalising the first transformed normal (which is used
+// by lighting calculations and needs to be unit length), the same transform matrix
+// can do double duty, scaling for emboss mapping, and not scaling for lighting.
+)");
+    for (const Vector& v : vectors)
+    {
+      const std::string product =
+          fmt::format("float3(dot(N0, _raw{0}), dot(N1, _raw{0}), dot(N2, _raw{0}))", v.name);
+      if (v.name == "normal")
+        m_out.Write("float3 _{} = normalize({});\n", v.name, product);
+      else
+        m_out.Write("float3 _{} = {};\n", v.name, product);
+    }
+  }
+
+  // Colour 1 needs both vertex colours; a single colour feeds both channels.
+  void WriteVertexColors()
+  {
+    const u32 col0 = std::to_underlying(VB_HAS_COL0);
+    const u32 col1 = std::to_underlying(VB_HAS_COL1);
+    const u32 both = col0 | col1;
+    Put(m_out, R"(// xfmem.numColorChans controls the number of color channels available to TEV,
+// but we still need to generate all channels here, as it can be used in texgen.
+// Cel-damage is an example of this.
+float4 vertex_color_0, vertex_color_1;
+
+// To use color 1, the vertex descriptor must have color 0 and 1.
+// If color 1 is present but not color 0, it is used for lighting channel 0.
+)");
+    m_out.Write("bool use_color_1 = ((components & {0}u) == {0}u); // VB_HAS_COL0 | VB_HAS_COL1\n",
+                both);
+
+    m_out.Write("if ((components & {0}u) == {0}u) // VB_HAS_COL0 | VB_HAS_COL1\n{{\n", both);
+    Load(2, "rawcolor0", "float4", "ubyte4");
+    Load(2, "rawcolor1", "float4", "ubyte4");
+    WriteColorPair("rawcolor0", "rawcolor1");
+    for (u32 c = 0; c < 2; ++c)
+    {
+      m_out.Write("else if ((components & {}u) != 0u) // VB_HAS_COL{}\n{{\n", c == 0 ? col0 : col1,
+                  c);
+      const std::string name = fmt::format("rawcolor{}", c);
+      Load(2, name, "float4", "ubyte4");
+      WriteColorPair(name, name);
+    }
+    Put(m_out, "else\n{\n");
+    WriteColorPair("missing_color_value", "missing_color_value");
+  }
+
+  void WriteColorPair(std::string_view first, std::string_view second)
+  {
+    m_out.Write("  vertex_color_0 = {};\n  vertex_color_1 = {};\n}}\n", first, second);
+  }
+
+  // The texture matrix product, for either the STQ (three rows) or ST (two rows plus 1) form.
+  void WriteTexMatrixProduct(std::string_view array, const std::array<std::string_view, 3>& rows)
+  {
+    const auto row = [&](u32 k) { return fmt::format("dot(coord, {}[{}])", array, rows[k]); };
+    const std::string indent(34, ' ');
+    m_out.Write("        if ({} == {:s}) {{\n",
+                BitfieldExtract<&TexMtxInfo::projection>("texMtxInfo"), TexSize::STQ);
+    m_out.Write("          output_tex.xyz = float3({},\n{}{},\n{}{});\n", row(0), indent, row(1),
+                indent, row(2));
+    m_out.Write("        }} else {{\n          output_tex.xyz = float3({},\n{}{},\n{}1.0);\n"
+                "        }}\n",
+                row(0), indent, row(1), indent);
+  }
+
+  void WriteTexGens()
+  {
+    // HLSL rejects dynamically indexed outputs that might be uninitialised.
+    for (u32 i = 0; i < m_texgens; ++i)
+      m_out.Write("o.tex{} = float3(0.0, 0.0, 0.0);\n", i);
+
+    Put(m_out, "// Texture coordinate generation\n");
+    if (m_texgens == 1)
+      Put(m_out, "{ const uint texgen = 0u;\n");
+    else
+      m_out.Write("for (uint texgen = 0u; texgen < {}u; texgen++) {{\n", m_texgens);
+
+    Put(m_out, "  // Texcoord transforms\n  float4 coord = float4(0.0, 0.0, 1.0, 1.0);\n"
+               "  uint texMtxInfo = xfmem_texMtxInfo(texgen);\n");
+    m_out.Write("  switch ({}) {{\n", BitfieldExtract<&TexMtxInfo::sourcerow>("texMtxInfo"));
+    m_out.Write("  case {:s}:\n    coord.xyz = rawpos.xyz;\n    break;\n\n", SourceRow::Geom);
+
+    struct Row
+    {
+      SourceRow row;
+      u32 mask;
+      std::string_view flag;
+      std::string_view name;
+    };
+    const std::array<Row, 3> vector_rows = {{
+        {SourceRow::Normal, std::to_underlying(VB_HAS_NORMAL), "NORMAL", "rawnormal"},
+        {SourceRow::BinormalT, std::to_underlying(VB_HAS_TANGENT), "TANGENT", "rawtangent"},
+        {SourceRow::BinormalB, std::to_underlying(VB_HAS_BINORMAL), "BINORMAL", "rawbinormal"},
+    }};
+    for (const Row& r : vector_rows)
+    {
+      m_out.Write("  case {:s}:\n    if ((components & {}u) != 0u) // VB_HAS_{}\n    {{\n", r.row,
+                  r.mask, r.flag);
+      Load(6, r.name, "float3", "float3");
+      m_out.Write("      coord.xyz = {}.xyz;\n    }}\n    break;\n\n", r.name);
+    }
+    for (u32 t = 0; t < 8; ++t)
+    {
+      const auto row = static_cast<SourceRow>(std::to_underlying(SourceRow::Tex0) + t);
+      const u32 mask = std::to_underlying(VB_HAS_UV0) << t;
+      m_out.Write("  case {:s}:\n    if ((components & {}u) != 0u) // VB_HAS_UV{}\n    {{\n", row,
+                  mask, t);
+      Load(6, fmt::format("rawtex{}", t), "float3", "rawtex",
+           fmt::format("rawtex[{}][{}]", t / 4, t % 4));
+      m_out.Write("      coord = float4(rawtex{0}.x, rawtex{0}.y, 1.0f, 1.0f);\n    }}\n"
+                  "    break;\n\n",
+                  t);
+    }
+    Put(m_out, "  }\n\n  // Input form of AB11 sets z element to 1.0\n");
+    m_out.Write("  if ({} == {:s}) // inputform == AB11\n    coord.z = 1.0f;\n\n",
+                BitfieldExtract<&TexMtxInfo::inputform>("texMtxInfo"), TexInputForm::AB11);
+
+    // NaN inputs become 1 (Shadow the Hedgehog's eyelids, Dolphin issue 11458).
+    Put(m_out, "  // Convert NaN to 1\n");
+    for (const char c : {'x', 'y', 'z'})
+      m_out.Write("  if (dolphin_isnan(coord.{0})) coord.{0} = 1.0;\n", c);
+
+    m_out.Write("  // first transformation\n  uint texgentype = {};\n",
+                BitfieldExtract<&TexMtxInfo::texgentype>("texMtxInfo"));
+    Put(m_out, "  float3 output_tex;\n  switch (texgentype)\n  {\n");
+
+    // Emboss: offset an earlier texgen's result by the light direction in tangent space.
+    m_out.Write("  case {:s}:\n    {{\n", TexGenType::EmbossMap);
+    m_out.Write("      uint light = {};\n      uint source = {};\n      switch (source) {{\n",
+                BitfieldExtract<&TexMtxInfo::embosslightshift>("texMtxInfo"),
+                BitfieldExtract<&TexMtxInfo::embosssourceshift>("texMtxInfo"));
+    for (u32 i = 0; i < m_texgens; ++i)
+      m_out.Write("      case {0}u: output_tex.xyz = o.tex{0}; break;\n", i);
+    Put(m_out, "      default: output_tex.xyz = float3(0.0, 0.0, 0.0); break;\n      }\n");
+    m_out.Write("      float3 ldir = normalize({}[light].pos.xyz - pos.xyz);\n", I_LIGHTS);
+    Put(m_out, "      output_tex.xyz += float3(dot(ldir, _tangent), dot(ldir, _binormal), 0.0);\n"
+               "    }\n    break;\n\n");
+
+    for (u32 c = 0; c < 2; ++c)
+    {
+      m_out.Write("  case {0:s}:\n    output_tex.xyz = float3(o.colors_{1}.x, o.colors_{1}.y, 1.0);\n"
+                  "    break;\n\n",
+                  c == 0 ? TexGenType::Color0 : TexGenType::Color1, c);
+    }
+
+    m_out.Write("  case {:s}:\n  default:\n    {{\n", TexGenType::Regular);
+    m_out.Write("      if ((components & ({}u /* VB_HAS_TEXMTXIDX0 */ << texgen)) != 0u) {{\n",
+                std::to_underlying(VB_HAS_TEXMTXIDX0));
+    // The matrix index travels in the z component of the texture coordinate.
+    if (m_loader)
+    {
+      Put(m_out, "        int tmp = int(load_input_float3_rawtex(vertex_base_offset, "
+                 "vertex_offset_rawtex[texgen / 4][texgen % 4]).z);\n\n");
+    }
+    else
+    {
+      Put(m_out, R"(        // This is messy, due to dynamic indexing of the input texture coordinates.
+        // Hopefully the compiler will unroll this whole loop anyway and the switch.
+        int tmp = 0;
+        switch (texgen) {
+)");
+      for (u32 i = 0; i < m_texgens; ++i)
+        m_out.Write("        case {0}u: tmp = int(rawtex{0}.z); break;\n", i);
+      Put(m_out, "        }\n\n");
+    }
+    WriteTexMatrixProduct(I_TRANSFORMMATRICES, {"tmp", "tmp + 1", "tmp + 2"});
+    Put(m_out, "      } else {\n");
+    WriteTexMatrixProduct(I_TEXMATRICES, {"3u * texgen", "3u * texgen + 1u", "3u * texgen + 2u"});
+    Put(m_out, "      }\n    }\n    break;\n\n  }\n\n");
+
+    // Post-transform matrices (dual texture transform).
+    Put(m_out, "  if (xfmem_dualTexInfo != 0u) {\n"
+               "    uint postMtxInfo = xfmem_postMtxInfo(texgen);");
+    m_out.Write("    uint base_index = {};\n", BitfieldExtract<&PostMtxInfo::index>("postMtxInfo"));
+    for (u32 row = 0; row < 3; ++row)
+    {
+      const std::string index =
+          row == 0 ? std::string("base_index") : fmt::format("(base_index + {}u)", row);
+      m_out.Write("    float4 P{} = {}[{} & 0x3fu];\n", row, I_POSTTRANSFORMMATRICES, index);
+    }
+    m_out.Write("\n    if ({} != 0u)\n      output_tex.xyz = normalize(output_tex.xyz);\n\n",
+                BitfieldExtract<&PostMtxInfo::normalize>("postMtxInfo"));
+    Put(m_out, "    // multiply by postmatrix\n    output_tex.xyz = float3(");
+    for (u32 row = 0; row < 3; ++row)
+    {
+      m_out.Write("{}dot(P{}.xyz, output_tex.xyz) + P{}.w", row == 0 ? "" : ",\n" + std::string(28, ' '),
+                  row, row);
+    }
+    Put(m_out, ");\n  }\n\n");
+
+    // A zero q makes the console halve and clamp regular texgen coordinates.
+    m_out.Write("  if (texgentype == {:s} && output_tex.z == 0.0)\n", TexGenType::Regular);
+    Put(m_out, "    output_tex.xy = clamp(output_tex.xy / 2.0f, float2(-1.0f,-1.0f), "
+               "float2(1.0f,1.0f));\n\n");
+
+    Put(m_out, "  // Hopefully GPUs that can support dynamic indexing will optimize this.\n"
+               "  switch (texgen) {\n");
+    for (u32 i = 0; i < m_texgens; ++i)
+      m_out.Write("  case {0}u: o.tex{0} = output_tex; break;\n", i);
+    Put(m_out, "  }\n}\n");
+  }
+
+  void WriteExpansion()
+  {
+    m_out.Write("if (vs_expand == {}u) {{ // Line\n", std::to_underlying(VSExpand::Line));
+    // The other end of the line is the neighbouring vertex in the buffer.
+    Put(m_out, R"(  bool is_bottom = (gl_VertexID & 2) != 0;
+  bool is_right = (gl_VertexID & 1) != 0;
+  uint other_base_offset = vertex_base_offset;
+  if (is_bottom) {
+    other_base_offset -= vertex_stride;
+  } else {
+    other_base_offset += vertex_stride;
+  }
+  float4 other_rawpos = load_input_float4_rawpos(other_base_offset, vertex_offset_rawpos);
+)");
+    for (u32 row = 0; row < 3; ++row)
+      m_out.Write("  float4 other_p{0} = P{0};\n", row);
+    m_out.Write("  if ((components & {}u) != 0u) {{ // VB_HAS_POSMTXIDX\n",
+                std::to_underlying(VB_HAS_POSMTXIDX));
+    Put(m_out, "    uint other_posidx = load_input_uint4_ubyte4(other_base_offset, "
+               "vertex_offset_posmtx).r;\n");
+    for (u32 row = 0; row < 3; ++row)
+    {
+      m_out.Write("    other_p{} = {}[other_posidx{}];\n", row, I_TRANSFORMMATRICES,
+                  row == 0 ? std::string() : fmt::format("+{}", row));
+    }
+    Put(m_out, "  }\n  float4 other_pos = float4(dot(other_p0, other_rawpos), "
+               "dot(other_p1, other_rawpos), dot(other_p2, other_rawpos), 1.0);\n");
+    GenerateVSLineExpansion(m_out, "  ", m_texgens);
+    m_out.Write("}} else if (vs_expand == {}u) {{ // Point\n", std::to_underlying(VSExpand::Point));
+    Put(m_out, "  bool is_bottom = (gl_VertexID & 2) != 0;\n"
+               "  bool is_right = (gl_VertexID & 1) != 0;\n");
+    GenerateVSPointExpansion(m_out, "  ", m_texgens);
+    Put(m_out, "}\n");
+  }
+
+  void WriteFinish()
+  {
+    const bool pixel_lighting = m_host.per_pixel_lighting;
+    if (pixel_lighting)
+    {
+      Put(m_out, R"(// When per-pixel lighting is enabled, the vertex colors are passed through
+// unmodified so we can evaluate the lighting in the pixel shader.
+// Lighting is also still computed in the vertex shader since it can be used to
+// generate texture coordinates. We generated them above, so now the colors can
+// be reverted to their previous stage.
+o.colors_0 = vertex_color_0;
+o.colors_1 = vertex_color_1;
+// Note that the numColorChans logic should be (but currently isn't)
+// performed in the pixel shader.
+)");
+    }
+    else
+    {
+      Put(m_out, R"(// The number of colors available to TEV is determined by numColorChans.
+// We have to provide the fields to match the interface, so set to zero
+// if it's not enabled.
+if (xfmem_numColorChans == 0u)
+  o.colors_0 = float4(0.0, 0.0, 0.0, 0.0);
+if (xfmem_numColorChans <= 1u)
+  o.colors_1 = float4(0.0, 0.0, 0.0, 0.0);
+)");
+    }
+
+    if (!m_host.fast_depth_calc)
+      Put(m_out, "o.clipPos = o.pos;\n");
+    if (pixel_lighting)
+      Put(m_out, "o.Normal = _normal;\no.WorldPos = pos.xyz;\n");
+
+    // Own depth clipping when depth clamping is available (with the Sonic 1e-7 tweak); unlike
+    // the specialised shader there is no tweak without it.
+    if (m_host.backend_depth_clamp)
+    {
+      Put(m_out, R"(float clipDepth = o.pos.z * (1.0 - 1e-7);
+float clipDist0 = clipDepth + o.pos.w;
+float clipDist1 = -clipDepth;
+)");
+      if (m_host.backend_geometry_shaders)
+        Put(m_out, "o.clipDist0 = clipDist0;\no.clipDist1 = clipDist1;\n");
+    }
+
+    // Console depth range (inverted) mapped before the divide, negative-viewport mirroring and the
+    // 7/12 pixel centre, as in the specialised shader.
+    m_out.Write("o.pos.z = o.pos.w * {0}.w - o.pos.z * {0}.z;\n", I_PIXELCENTERCORRECTION);
+    if (!m_host.backend_clip_control)
+      Put(m_out, "o.pos.z = o.pos.z * 2.0 - o.pos.w;\n");
+    m_out.Write("o.pos.xy *= sign({0}.xy * float2(1.0, -1.0));\n"
+                "o.pos.xy = o.pos.xy - o.pos.w * {0}.xy;\n",
+                I_PIXELCENTERCORRECTION);
+
+    if (m_host.vertex_rounding)
+    {
+      Put(m_out, "if (o.pos.w == 1.0f)\n{\n");
+      for (const char c : {'x', 'y'})
+      {
+        m_out.Write("\tfloat ss_pixel_{0} = ((o.pos.{0} + 1.0f) * ({1}.{0} * 0.5f));\n", c,
+                    I_VIEWPORT_SIZE);
+      }
+      for (const char c : {'x', 'y'})
+        m_out.Write("\tss_pixel_{0} = round(ss_pixel_{0});\n", c);
+      for (const char c : {'x', 'y'})
+      {
+        m_out.Write("\to.pos.{0} = ((ss_pixel_{0} / ({1}.{0} * 0.5f)) - 1.0f);\n", c,
+                    I_VIEWPORT_SIZE);
+      }
+      Put(m_out, "}\n");
+    }
+
+    if (m_host.backend_geometry_shaders)
+    {
+      AssignVSOutputMembers(m_out, "vs", "o", m_texgens, m_host);
+    }
+    else
+    {
+      for (u32 i = 0; i < m_texgens; ++i)
+        m_out.Write("tex{0}.xyz = o.tex{0};\n", i);
+      if (!m_host.fast_depth_calc)
+        Put(m_out, "clipPos = o.clipPos;\n");
+      if (pixel_lighting)
+        Put(m_out, "Normal = o.Normal;\nWorldPos = o.WorldPos;\n");
+      Put(m_out, "colors_0 = o.colors_0;\ncolors_1 = o.colors_1;\n");
+    }
+
+    if (m_host.backend_depth_clamp)
+      Put(m_out, "gl_ClipDistance[0] = clipDist0;\ngl_ClipDistance[1] = clipDist1;\n");
+
+    // Vulkan's clip space has y pointing down.
+    Put(m_out, m_api == APIType::Vulkan ?
+                   "gl_Position = float4(o.pos.x, -o.pos.y, o.pos.z, o.pos.w);\n" :
+                   "gl_Position = o.pos;\n");
+    Put(m_out, "}\n");
+  }
+
+  const APIType m_api;
+  const ShaderHostConfig& m_host;
+  const u32 m_texgens;
+  ShaderCode& m_out;
+  const bool m_loader;
+};
+}  // namespace
+
+VertexShaderUid GetVertexShaderUid()
+{
+  VertexShaderUid uid;
+  uid.GetUidData()->num_texgens = xfmem.numTexGen.numTexGens;
+  return uid;
+}
 
 ShaderCode GenVertexShader(APIType api_type, const ShaderHostConfig& host_config,
                            const vertex_ubershader_uid_data* uid_data)
 {
-  const bool msaa = host_config.msaa;
-  const bool ssaa = host_config.ssaa;
-  const bool per_pixel_lighting = host_config.per_pixel_lighting;
-  const bool vertex_rounding = host_config.vertex_rounding;
-  const bool vertex_loader =
-      host_config.backend_dynamic_vertex_loader || host_config.backend_vs_point_line_expand;
-  const u32 num_texgen = uid_data->num_texgens;
   ShaderCode out;
-
-  out.Write("// {}\n\n", *uid_data);
-  out.Write("{}", s_lighting_struct);
-
-  // uniforms
-  out.Write("UBO_BINDING(std140, 2) uniform VSBlock {{\n");
-  out.Write("{}", s_shader_uniforms);
-  out.Write("}};\n");
-
-  if (vertex_loader)
-  {
-    out.Write("UBO_BINDING(std140, 4) uniform GSBlock {{\n");
-    out.Write("{}", s_geometry_shader_uniforms);
-    out.Write("}};\n");
-  }
-
-  out.Write("struct VS_OUTPUT {{\n");
-  GenerateVSOutputMembers(out, api_type, num_texgen, host_config, "", ShaderStage::Vertex);
-  out.Write("}};\n\n");
-
-  WriteIsNanHeader(out, api_type);
-  WriteBitfieldExtractHeader(out, api_type, host_config);
-  WriteLightingFunction(out);
-
-  if (vertex_loader)
-  {
-    out.Write(R"(
-SSBO_BINDING(1) readonly restrict buffer Vertices {{
-  uint vertex_buffer[];
-}};
-)");
-    if (api_type == APIType::D3D)
-    {
-      // Write a function to get an offset into vertex_buffer corresponding to this vertex.
-      // This must be done differently for D3D compared to OpenGL/Vulkan/Metal, as on OpenGL, etc.,
-      // gl_VertexID starts counting at the base vertex specified in glDrawElementsBaseVertex,
-      // while on D3D, SV_VertexID (which spirv-cross translates gl_VertexID into) starts counting
-      // at 0 regardless of the BaseVertexLocation value passed to DrawIndexed.  In both cases,
-      // offset 0 of vertex_buffer corresponds to index 0 with basevertex set to 0, so we have to
-      // manually apply the basevertex offset for D3D
-      // D3D12 uses a root constant for this uniform, since it changes with every draw.
-      // D3D11 doesn't currently support dynamic vertex loader, and we'll have to figure something
-      // out for it if we want to support it in the future.
-      out.Write("UBO_BINDING(std140, 5) uniform DX_Constants {{\n"
-                "  uint base_vertex;\n"
-                "}};\n\n"
-                "uint GetVertexBaseOffset(uint vertex_id) {{\n"
-                "  return (vertex_id + base_vertex) * vertex_stride;\n"
-                "}}\n");
-    }
-    else
-    {
-      out.Write("uint GetVertexBaseOffset(uint vertex_id) {{\n"
-                "  return vertex_id * vertex_stride;\n"
-                "}}\n");
-    }
-
-    out.Write(R"(
-uint4 load_input_uint4_ubyte4(uint vtx_offset, uint attr_offset) {{
-  uint value = vertex_buffer[vtx_offset + attr_offset];
-  return uint4(value & 0xffu, (value >> 8) & 0xffu, (value >> 16) & 0xffu, value >> 24);
-}}
-
-float4 load_input_float4_ubyte4(uint vtx_offset, uint attr_offset) {{
-  return float4(load_input_uint4_ubyte4(vtx_offset, attr_offset)) / 255.0f;
-}}
-
-float3 load_input_float3_float3(uint vtx_offset, uint attr_offset) {{
-  uint offset = vtx_offset + attr_offset;
-  return float3(uintBitsToFloat(vertex_buffer[offset + 0]),
-                uintBitsToFloat(vertex_buffer[offset + 1]),
-                uintBitsToFloat(vertex_buffer[offset + 2]));
-}}
-
-float4 load_input_float4_rawpos(uint vtx_offset, uint attr_offset) {{
-  uint components = attr_offset >> 16;
-  uint offset = vtx_offset + (attr_offset & 0xffff);
-  if (components < 3)
-    return float4(uintBitsToFloat(vertex_buffer[offset + 0]),
-                  uintBitsToFloat(vertex_buffer[offset + 1]),
-                  0.0f, 1.0f);
-  else
-    return float4(uintBitsToFloat(vertex_buffer[offset + 0]),
-                  uintBitsToFloat(vertex_buffer[offset + 1]),
-                  uintBitsToFloat(vertex_buffer[offset + 2]),
-                  1.0f);
-}}
-
-float3 load_input_float3_rawtex(uint vtx_offset, uint attr_offset) {{
-  uint components = attr_offset >> 16;
-  uint offset = vtx_offset + (attr_offset & 0xffff);
-  if (components < 2)
-    return float3(uintBitsToFloat(vertex_buffer[offset + 0]), 0.0f, 0.0f);
-  else if (components < 3)
-    return float3(uintBitsToFloat(vertex_buffer[offset + 0]),
-                  uintBitsToFloat(vertex_buffer[offset + 1]),
-                  0.0f);
-  else
-    return float3(uintBitsToFloat(vertex_buffer[offset + 0]),
-                  uintBitsToFloat(vertex_buffer[offset + 1]),
-                  uintBitsToFloat(vertex_buffer[offset + 2]));
-}}
-
-)");
-  }
-  else
-  {
-    out.Write("ATTRIBUTE_LOCATION({:s}) in float4 rawpos;\n", ShaderAttrib::Position);
-    out.Write("ATTRIBUTE_LOCATION({:s}) in uint4 posmtx;\n", ShaderAttrib::PositionMatrix);
-    out.Write("ATTRIBUTE_LOCATION({:s}) in float3 rawnormal;\n", ShaderAttrib::Normal);
-    out.Write("ATTRIBUTE_LOCATION({:s}) in float3 rawtangent;\n", ShaderAttrib::Tangent);
-    out.Write("ATTRIBUTE_LOCATION({:s}) in float3 rawbinormal;\n", ShaderAttrib::Binormal);
-    out.Write("ATTRIBUTE_LOCATION({:s}) in float4 rawcolor0;\n", ShaderAttrib::Color0);
-    out.Write("ATTRIBUTE_LOCATION({:s}) in float4 rawcolor1;\n", ShaderAttrib::Color1);
-    for (u32 i = 0; i < 8; ++i)
-      out.Write("ATTRIBUTE_LOCATION({:s}) in float3 rawtex{};\n", ShaderAttrib::TexCoord0 + i, i);
-  }
-
-  if (host_config.backend_geometry_shaders)
-  {
-    out.Write("VARYING_LOCATION(0) out VertexData {{\n");
-    GenerateVSOutputMembers(out, api_type, num_texgen, host_config,
-                            GetInterpolationQualifier(msaa, ssaa, true, false),
-                            ShaderStage::Vertex);
-    out.Write("}} vs;\n");
-  }
-  else
-  {
-    // Let's set up attributes
-    u32 counter = 0;
-    out.Write("VARYING_LOCATION({}) {} out float4 colors_0;\n", counter++,
-              GetInterpolationQualifier(msaa, ssaa));
-    out.Write("VARYING_LOCATION({}) {} out float4 colors_1;\n", counter++,
-              GetInterpolationQualifier(msaa, ssaa));
-    for (u32 i = 0; i < num_texgen; ++i)
-    {
-      out.Write("VARYING_LOCATION({}) {} out float3 tex{};\n", counter++,
-                GetInterpolationQualifier(msaa, ssaa), i);
-    }
-    if (!host_config.fast_depth_calc)
-    {
-      out.Write("VARYING_LOCATION({}) {} out float4 clipPos;\n", counter++,
-                GetInterpolationQualifier(msaa, ssaa));
-    }
-    if (per_pixel_lighting)
-    {
-      out.Write("VARYING_LOCATION({}) {} out float3 Normal;\n", counter++,
-                GetInterpolationQualifier(msaa, ssaa));
-      out.Write("VARYING_LOCATION({}) {} out float3 WorldPos;\n", counter++,
-                GetInterpolationQualifier(msaa, ssaa));
-    }
-  }
-
-  out.Write("void main()\n{{\n");
-
-  out.Write("VS_OUTPUT o;\n"
-            "\n");
-  if (host_config.backend_vs_point_line_expand)
-  {
-    out.Write("uint vertex_id = gl_VertexID;\n"
-              "if (vs_expand != 0u) {{\n"
-              "  vertex_id = vertex_id >> 2;\n"
-              "}}\n"
-              "uint vertex_base_offset = GetVertexBaseOffset(vertex_id);\n");
-  }
-  else if (host_config.backend_dynamic_vertex_loader)
-  {
-    out.Write("uint vertex_base_offset = GetVertexBaseOffset(gl_VertexID);\n");
-  }
-  // rawpos is always needed
-  LoadVertexAttribute(out, host_config, 0, "rawpos", "float4", "rawpos");
-  // Transforms
-  out.Write("// Position matrix\n"
-            "float4 P0;\n"
-            "float4 P1;\n"
-            "float4 P2;\n"
-            "\n"
-            "// Normal matrix\n"
-            "float3 N0;\n"
-            "float3 N1;\n"
-            "float3 N2;\n"
-            "\n"
-            "if ((components & {}u) != 0u) {{ // VB_HAS_POSMTXIDX\n",
-            std::to_underlying(VB_HAS_POSMTXIDX));
-  LoadVertexAttribute(out, host_config, 2, "posmtx", "uint4", "ubyte4");
-  out.Write("  // Vertex format has a per-vertex matrix\n"
-            "  int posidx = int(posmtx.r);\n"
-            "  P0 = " I_TRANSFORMMATRICES "[posidx];\n"
-            "  P1 = " I_TRANSFORMMATRICES "[posidx+1];\n"
-            "  P2 = " I_TRANSFORMMATRICES "[posidx+2];\n"
-            "\n"
-            "  int normidx = posidx >= 32 ? (posidx - 32) : posidx;\n"
-            "  N0 = " I_NORMALMATRICES "[normidx].xyz;\n"
-            "  N1 = " I_NORMALMATRICES "[normidx+1].xyz;\n"
-            "  N2 = " I_NORMALMATRICES "[normidx+2].xyz;\n"
-            "}} else {{\n"
-            "  // One shared matrix\n"
-            "  P0 = " I_POSNORMALMATRIX "[0];\n"
-            "  P1 = " I_POSNORMALMATRIX "[1];\n"
-            "  P2 = " I_POSNORMALMATRIX "[2];\n"
-            "  N0 = " I_POSNORMALMATRIX "[3].xyz;\n"
-            "  N1 = " I_POSNORMALMATRIX "[4].xyz;\n"
-            "  N2 = " I_POSNORMALMATRIX "[5].xyz;\n"
-            "}}\n"
-            "\n"
-            "// Multiply the position vector by the position matrix\n"
-            "float4 pos = float4(dot(P0, rawpos), dot(P1, rawpos), dot(P2, rawpos), 1.0);\n"
-            "o.pos = float4(dot(" I_PROJECTION "[0], pos), dot(" I_PROJECTION
-            "[1], pos), dot(" I_PROJECTION "[2], pos), dot(" I_PROJECTION "[3], pos));\n"
-            "\n"
-            "float3 _rawnormal;\n"
-            "float3 _rawtangent;\n"
-            "float3 _rawbinormal;\n"
-            "if ((components & {}u) != 0u) // VB_HAS_NORMAL\n"
-            "{{\n",
-            std::to_underlying(VB_HAS_NORMAL));
-  LoadVertexAttribute(out, host_config, 2, "rawnormal", "float3", "float3");
-  out.Write("  _rawnormal = rawnormal;\n"
-            "}}\n"
-            "else\n"
-            "{{\n"
-            "  _rawnormal = " I_CACHED_NORMAL ".xyz;\n"
-            "}}\n"
-            "\n"
-            "if ((components & {}u) != 0u) // VB_HAS_TANGENT\n"
-            "{{\n",
-            std::to_underlying(VB_HAS_TANGENT));
-  LoadVertexAttribute(out, host_config, 2, "rawtangent", "float3", "float3");
-  out.Write("  _rawtangent = rawtangent;\n"
-            "}}\n"
-            "else\n"
-            "{{\n"
-            "  _rawtangent = " I_CACHED_TANGENT ".xyz;\n"
-            "}}\n"
-            "\n"
-            "if ((components & {}u) != 0u) // VB_HAS_BINORMAL\n"
-            "{{\n",
-            std::to_underlying(VB_HAS_BINORMAL));
-  LoadVertexAttribute(out, host_config, 2, "rawbinormal", "float3", "float3");
-  out.Write("  _rawbinormal = rawbinormal;\n"
-            "}}\n"
-            "else\n"
-            "{{\n"
-            "  _rawbinormal = " I_CACHED_BINORMAL ".xyz;\n"
-            "}}\n"
-            "\n"
-            "// The scale of the transform matrix is used to control the size of the emboss map\n"
-            "// effect by changing the scale of the transformed binormals (which only get used by\n"
-            "// emboss map texgens). By normalising the first transformed normal (which is used\n"
-            "// by lighting calculations and needs to be unit length), the same transform matrix\n"
-            "// can do double duty, scaling for emboss mapping, and not scaling for lighting.\n"
-            "float3 _normal = normalize(float3(dot(N0, _rawnormal), dot(N1, _rawnormal), dot(N2, "
-            "_rawnormal)));\n"
-            "float3 _tangent = float3(dot(N0, _rawtangent), dot(N1, _rawtangent), dot(N2, "
-            "_rawtangent));\n"
-            "float3 _binormal = float3(dot(N0, _rawbinormal), dot(N1, _rawbinormal), dot(N2, "
-            "_rawbinormal));\n");
-
-  // Hardware Lighting
-  out.Write("// xfmem.numColorChans controls the number of color channels available to TEV,\n"
-            "// but we still need to generate all channels here, as it can be used in texgen.\n"
-            "// Cel-damage is an example of this.\n"
-            "float4 vertex_color_0, vertex_color_1;\n"
-            "\n");
-  out.Write("// To use color 1, the vertex descriptor must have color 0 and 1.\n"
-            "// If color 1 is present but not color 0, it is used for lighting channel 0.\n"
-            "bool use_color_1 = ((components & {0}u) == {0}u); // VB_HAS_COL0 | VB_HAS_COL1\n",
-            static_cast<u32>(VB_HAS_COL0 | VB_HAS_COL1));
-
-  out.Write("if ((components & {0}u) == {0}u) // VB_HAS_COL0 | VB_HAS_COL1\n"
-            "{{\n",
-            static_cast<u32>(VB_HAS_COL0 | VB_HAS_COL1));
-  LoadVertexAttribute(out, host_config, 2, "rawcolor0", "float4", "ubyte4");
-  LoadVertexAttribute(out, host_config, 2, "rawcolor1", "float4", "ubyte4");
-  out.Write("  vertex_color_0 = rawcolor0;\n"
-            "  vertex_color_1 = rawcolor1;\n"
-            "}}\n"
-            "else if ((components & {}u) != 0u) // VB_HAS_COL0\n"
-            "{{\n",
-            std::to_underlying(VB_HAS_COL0));
-  LoadVertexAttribute(out, host_config, 2, "rawcolor0", "float4", "ubyte4");
-  out.Write("  vertex_color_0 = rawcolor0;\n"
-            "  vertex_color_1 = rawcolor0;\n"
-            "}}\n"
-            "else if ((components & {}u) != 0u) // VB_HAS_COL1\n"
-            "{{\n",
-            std::to_underlying(VB_HAS_COL1));
-  LoadVertexAttribute(out, host_config, 2, "rawcolor1", "float4", "ubyte4");
-  out.Write("  vertex_color_0 = rawcolor1;\n"
-            "  vertex_color_1 = rawcolor1;\n"
-            "}}\n"
-            "else\n"
-            "{{\n"
-            "  vertex_color_0 = missing_color_value;\n"
-            "  vertex_color_1 = missing_color_value;\n"
-            "}}\n");
-
-  WriteVertexLighting(out, api_type, "pos.xyz", "_normal", "vertex_color_0", "vertex_color_1",
-                      "o.colors_0", "o.colors_1");
-
-  // Texture Coordinates
-  if (num_texgen > 0)
-    GenVertexShaderTexGens(api_type, host_config, num_texgen, out);
-
-  if (host_config.backend_vs_point_line_expand)
-  {
-    out.Write("if (vs_expand == {}u) {{ // Line\n", std::to_underlying(VSExpand::Line));
-    out.Write("  bool is_bottom = (gl_VertexID & 2) != 0;\n"
-              "  bool is_right = (gl_VertexID & 1) != 0;\n"
-              "  uint other_base_offset = vertex_base_offset;\n"
-              "  if (is_bottom) {{\n"
-              "    other_base_offset -= vertex_stride;\n"
-              "  }} else {{\n"
-              "    other_base_offset += vertex_stride;\n"
-              "  }}\n"
-              "  float4 other_rawpos = load_input_float4_rawpos(other_base_offset, "
-              "vertex_offset_rawpos);\n"
-              "  float4 other_p0 = P0;\n"
-              "  float4 other_p1 = P1;\n"
-              "  float4 other_p2 = P2;\n"
-              "  if ((components & {}u) != 0u) {{ // VB_HAS_POSMTXIDX\n",
-              std::to_underlying(VB_HAS_POSMTXIDX));
-    out.Write("    uint other_posidx = load_input_uint4_ubyte4(other_base_offset, "
-              "vertex_offset_posmtx).r;\n"
-              "    other_p0 = " I_TRANSFORMMATRICES "[other_posidx];\n"
-              "    other_p1 = " I_TRANSFORMMATRICES "[other_posidx+1];\n"
-              "    other_p2 = " I_TRANSFORMMATRICES "[other_posidx+2];\n"
-              "  }}\n"
-              "  float4 other_pos = float4(dot(other_p0, other_rawpos), "
-              "dot(other_p1, other_rawpos), dot(other_p2, other_rawpos), 1.0);\n");
-    GenerateVSLineExpansion(out, "  ", num_texgen);
-    out.Write("}} else if (vs_expand == {}u) {{ // Point\n", std::to_underlying(VSExpand::Point));
-    out.Write("  bool is_bottom = (gl_VertexID & 2) != 0;\n"
-              "  bool is_right = (gl_VertexID & 1) != 0;\n");
-    GenerateVSPointExpansion(out, "  ", num_texgen);
-    out.Write("}}\n");
-  }
-
-  if (per_pixel_lighting)
-  {
-    out.Write("// When per-pixel lighting is enabled, the vertex colors are passed through\n"
-              "// unmodified so we can evaluate the lighting in the pixel shader.\n"
-              "// Lighting is also still computed in the vertex shader since it can be used to\n"
-              "// generate texture coordinates. We generated them above, so now the colors can\n"
-              "// be reverted to their previous stage.\n"
-              "o.colors_0 = vertex_color_0;\n"
-              "o.colors_1 = vertex_color_1;\n"
-              "// Note that the numColorChans logic should be (but currently isn't)\n"
-              "// performed in the pixel shader.\n");
-  }
-  else
-  {
-    out.Write("// The number of colors available to TEV is determined by numColorChans.\n"
-              "// We have to provide the fields to match the interface, so set to zero\n"
-              "// if it's not enabled.\n"
-              "if (xfmem_numColorChans == 0u)\n"
-              "  o.colors_0 = float4(0.0, 0.0, 0.0, 0.0);\n"
-              "if (xfmem_numColorChans <= 1u)\n"
-              "  o.colors_1 = float4(0.0, 0.0, 0.0, 0.0);\n");
-  }
-
-  if (!host_config.fast_depth_calc)
-  {
-    // clipPos/w needs to be done in pixel shader, not here
-    out.Write("o.clipPos = o.pos;\n");
-  }
-
-  if (per_pixel_lighting)
-  {
-    out.Write("o.Normal = _normal;\n"
-              "o.WorldPos = pos.xyz;\n");
-  }
-
-  // If we can disable the incorrect depth clipping planes using depth clamping, then we can do
-  // our own depth clipping and calculate the depth range before the perspective divide if
-  // necessary.
-  if (host_config.backend_depth_clamp)
-  {
-    // Since we're adjusting z for the depth range before the perspective divide, we have to do our
-    // own clipping. We want to clip so that -w <= z <= 0, which matches the console -1..0 range.
-    // We adjust our depth value for clipping purposes to match the perspective projection in the
-    // software backend, which is a hack to fix Sonic Adventure and Unleashed games.
-    out.Write("float clipDepth = o.pos.z * (1.0 - 1e-7);\n"
-              "float clipDist0 = clipDepth + o.pos.w;\n"  // Near: z < -w
-              "float clipDist1 = -clipDepth;\n");         // Far: z > 0
-    if (host_config.backend_geometry_shaders)
-    {
-      out.Write("o.clipDist0 = clipDist0;\n"
-                "o.clipDist1 = clipDist1;\n");
-    }
-  }
-
-  // Write the true depth value. If the game uses depth textures, then the pixel shader will
-  // override it with the correct values if not then early z culling will improve speed.
-  // There are two different ways to do this, when the depth range is oversized, we process
-  // the depth range in the vertex shader, if not we let the host driver handle it.
-  //
-  // Adjust z for the depth range. We're using an equation which incorporates a depth inversion,
-  // so we can map the console -1..0 range to the 0..1 range used in the depth buffer.
-  // We have to handle the depth range in the vertex shader instead of after the perspective
-  // divide, because some games will use a depth range larger than what is allowed by the
-  // graphics API. These large depth ranges will still be clipped to the 0..1 range, so these
-  // games effectively add a depth bias to the values written to the depth buffer.
-  out.Write("o.pos.z = o.pos.w * " I_PIXELCENTERCORRECTION ".w - "
-            "o.pos.z * " I_PIXELCENTERCORRECTION ".z;\n");
-
-  if (!host_config.backend_clip_control)
-  {
-    // If the graphics API doesn't support a depth range of 0..1, then we need to map z to
-    // the -1..1 range. Unfortunately we have to use a subtraction, which is a lossy floating-point
-    // operation that can introduce a round-trip error.
-    out.Write("o.pos.z = o.pos.z * 2.0 - o.pos.w;\n");
-  }
-
-  // Correct for negative viewports by mirroring all vertices. We need to negate the height here,
-  // since the viewport height is already negated by the render backend.
-  out.Write("o.pos.xy *= sign(" I_PIXELCENTERCORRECTION ".xy * float2(1.0, -1.0));\n");
-
-  // The console GPU places the pixel center at 7/12 in screen space unless
-  // antialiasing is enabled, while D3D and OpenGL place it at 0.5. This results
-  // in some primitives being placed one pixel too far to the bottom-right,
-  // which in turn can be critical if it happens for clear quads.
-  // Hence, we compensate for this pixel center difference so that primitives
-  // get rasterized correctly.
-  out.Write("o.pos.xy = o.pos.xy - o.pos.w * " I_PIXELCENTERCORRECTION ".xy;\n");
-
-  if (vertex_rounding)
-  {
-    // By now our position is in clip space. However, higher resolutions than the Wii outputs
-    // cause an additional pixel offset. Due to a higher pixel density we need to correct this
-    // by converting our clip-space position into the Wii's screen-space.
-    // Acquire the right pixel and then convert it back.
-    out.Write("if (o.pos.w == 1.0f)\n"
-              "{{\n");
-
-    out.Write("\tfloat ss_pixel_x = ((o.pos.x + 1.0f) * (" I_VIEWPORT_SIZE ".x * 0.5f));\n"
-              "\tfloat ss_pixel_y = ((o.pos.y + 1.0f) * (" I_VIEWPORT_SIZE ".y * 0.5f));\n");
-
-    out.Write("\tss_pixel_x = round(ss_pixel_x);\n"
-              "\tss_pixel_y = round(ss_pixel_y);\n");
-
-    out.Write("\to.pos.x = ((ss_pixel_x / (" I_VIEWPORT_SIZE ".x * 0.5f)) - 1.0f);\n"
-              "\to.pos.y = ((ss_pixel_y / (" I_VIEWPORT_SIZE ".y * 0.5f)) - 1.0f);\n"
-              "}}\n");
-  }
-
-  if (host_config.backend_geometry_shaders)
-  {
-    AssignVSOutputMembers(out, "vs", "o", num_texgen, host_config);
-  }
-  else
-  {
-    // TODO: Pass interface blocks between shader stages even if geometry shaders
-    // are not supported, however that will require at least OpenGL 3.2 support.
-    for (u32 i = 0; i < num_texgen; ++i)
-      out.Write("tex{}.xyz = o.tex{};\n", i, i);
-    if (!host_config.fast_depth_calc)
-      out.Write("clipPos = o.clipPos;\n");
-    if (per_pixel_lighting)
-    {
-      out.Write("Normal = o.Normal;\n"
-                "WorldPos = o.WorldPos;\n");
-    }
-    out.Write("colors_0 = o.colors_0;\n"
-              "colors_1 = o.colors_1;\n");
-  }
-
-  if (host_config.backend_depth_clamp)
-  {
-    out.Write("gl_ClipDistance[0] = clipDist0;\n"
-              "gl_ClipDistance[1] = clipDist1;\n");
-  }
-
-  // Vulkan NDC space has Y pointing down (right-handed NDC space).
-  if (api_type == APIType::Vulkan)
-    out.Write("gl_Position = float4(o.pos.x, -o.pos.y, o.pos.z, o.pos.w);\n");
-  else
-    out.Write("gl_Position = o.pos;\n");
-  out.Write("}}\n");
-
+  UberVertexWriter(api_type, host_config, uid_data->num_texgens, out).Write(*uid_data);
   return out;
-}
-
-static void GenVertexShaderTexGens(APIType api_type, const ShaderHostConfig& host_config,
-                                   u32 num_texgen, ShaderCode& out)
-{
-  // The HLSL compiler complains that the output texture coordinates are uninitialized when trying
-  // to dynamically index them.
-  for (u32 i = 0; i < num_texgen; i++)
-    out.Write("o.tex{} = float3(0.0, 0.0, 0.0);\n", i);
-
-  out.Write("// Texture coordinate generation\n");
-  if (num_texgen == 1)
-  {
-    out.Write("{{ const uint texgen = 0u;\n");
-  }
-  else
-  {
-    out.Write("for (uint texgen = 0u; texgen < {}u; texgen++) {{\n", num_texgen);
-  }
-
-  out.Write("  // Texcoord transforms\n");
-  out.Write("  float4 coord = float4(0.0, 0.0, 1.0, 1.0);\n"
-            "  uint texMtxInfo = xfmem_texMtxInfo(texgen);\n");
-  out.Write("  switch ({}) {{\n", BitfieldExtract<&TexMtxInfo::sourcerow>("texMtxInfo"));
-  out.Write("  case {:s}:\n", SourceRow::Geom);
-  out.Write("    coord.xyz = rawpos.xyz;\n");
-  out.Write("    break;\n\n");
-  out.Write("  case {:s}:\n", SourceRow::Normal);
-  out.Write("    if ((components & {}u) != 0u) // VB_HAS_NORMAL\n"
-            "    {{\n",
-            std::to_underlying(VB_HAS_NORMAL));
-  LoadVertexAttribute(out, host_config, 6, "rawnormal", "float3", "float3");
-  out.Write("      coord.xyz = rawnormal.xyz;\n"
-            "    }}\n"
-            "    break;\n\n");
-  out.Write("  case {:s}:\n", SourceRow::BinormalT);
-  out.Write("    if ((components & {}u) != 0u) // VB_HAS_TANGENT\n"
-            "    {{\n",
-            std::to_underlying(VB_HAS_TANGENT));
-  LoadVertexAttribute(out, host_config, 6, "rawtangent", "float3", "float3");
-  out.Write("      coord.xyz = rawtangent.xyz;\n"
-            "    }}\n"
-            "    break;\n\n");
-  out.Write("  case {:s}:\n", SourceRow::BinormalB);
-  out.Write("    if ((components & {}u) != 0u) // VB_HAS_BINORMAL\n"
-            "    {{\n",
-            std::to_underlying(VB_HAS_BINORMAL));
-  LoadVertexAttribute(out, host_config, 6, "rawbinormal", "float3", "float3");
-  out.Write("      coord.xyz = rawbinormal.xyz;\n"
-            "    }}\n"
-            "    break;\n\n");
-  for (u32 i = 0; i < 8; i++)
-  {
-    out.Write("  case {:s}:\n", static_cast<SourceRow>(std::to_underlying(SourceRow::Tex0) + i));
-    out.Write("    if ((components & {}u) != 0u) // VB_HAS_UV{}\n"
-              "    {{\n",
-              VB_HAS_UV0 << i, i);
-    LoadVertexAttribute(out, host_config, 6, fmt::format("rawtex{}", i), "float3", "rawtex",
-                        fmt::format("rawtex[{}][{}]", i / 4, i % 4));
-    out.Write("      coord = float4(rawtex{}.x, rawtex{}.y, 1.0f, 1.0f);\n"
-              "    }}\n",
-              i, i);
-    out.Write("    break;\n\n");
-  }
-  out.Write("  }}\n"
-            "\n");
-
-  out.Write("  // Input form of AB11 sets z element to 1.0\n");
-  out.Write("  if ({} == {:s}) // inputform == AB11\n",
-            BitfieldExtract<&TexMtxInfo::inputform>("texMtxInfo"), TexInputForm::AB11);
-  out.Write("    coord.z = 1.0f;\n"
-            "\n");
-
-  // Convert NaNs to 1 - needed to fix eyelids in Shadow the Hedgehog during cutscenes
-  // See https://bugs.dolphin-emu.org/issues/11458
-  out.Write("  // Convert NaN to 1\n");
-  out.Write("  if (dolphin_isnan(coord.x)) coord.x = 1.0;\n");
-  out.Write("  if (dolphin_isnan(coord.y)) coord.y = 1.0;\n");
-  out.Write("  if (dolphin_isnan(coord.z)) coord.z = 1.0;\n");
-
-  out.Write("  // first transformation\n");
-  out.Write("  uint texgentype = {};\n", BitfieldExtract<&TexMtxInfo::texgentype>("texMtxInfo"));
-  out.Write("  float3 output_tex;\n"
-            "  switch (texgentype)\n"
-            "  {{\n");
-  out.Write("  case {:s}:\n", TexGenType::EmbossMap);
-  out.Write("    {{\n");
-  out.Write("      uint light = {};\n",
-            BitfieldExtract<&TexMtxInfo::embosslightshift>("texMtxInfo"));
-  out.Write("      uint source = {};\n",
-            BitfieldExtract<&TexMtxInfo::embosssourceshift>("texMtxInfo"));
-  out.Write("      switch (source) {{\n");
-  for (u32 i = 0; i < num_texgen; i++)
-    out.Write("      case {}u: output_tex.xyz = o.tex{}; break;\n", i, i);
-  out.Write("      default: output_tex.xyz = float3(0.0, 0.0, 0.0); break;\n"
-            "      }}\n"
-            "      float3 ldir = normalize(" I_LIGHTS "[light].pos.xyz - pos.xyz);\n"
-            "      output_tex.xyz += float3(dot(ldir, _tangent), dot(ldir, _binormal), 0.0);\n"
-            "    }}\n"
-            "    break;\n\n");
-  out.Write("  case {:s}:\n", TexGenType::Color0);
-  out.Write("    output_tex.xyz = float3(o.colors_0.x, o.colors_0.y, 1.0);\n"
-            "    break;\n\n");
-  out.Write("  case {:s}:\n", TexGenType::Color1);
-  out.Write("    output_tex.xyz = float3(o.colors_1.x, o.colors_1.y, 1.0);\n"
-            "    break;\n\n");
-  out.Write("  case {:s}:\n", TexGenType::Regular);
-  out.Write("  default:\n"
-            "    {{\n");
-  out.Write("      if ((components & ({}u /* VB_HAS_TEXMTXIDX0 */ << texgen)) != 0u) {{\n",
-            std::to_underlying(VB_HAS_TEXMTXIDX0));
-  if (host_config.backend_dynamic_vertex_loader || host_config.backend_vs_point_line_expand)
-  {
-    out.Write("        int tmp = int(load_input_float3_rawtex(vertex_base_offset, "
-              "vertex_offset_rawtex[texgen / 4][texgen % 4]).z);\n"
-              "\n");
-  }
-  else
-  {
-    out.Write(
-        "        // This is messy, due to dynamic indexing of the input texture coordinates.\n"
-        "        // Hopefully the compiler will unroll this whole loop anyway and the switch.\n"
-        "        int tmp = 0;\n"
-        "        switch (texgen) {{\n");
-    for (u32 i = 0; i < num_texgen; i++)
-      out.Write("        case {}u: tmp = int(rawtex{}.z); break;\n", i, i);
-    out.Write("        }}\n"
-              "\n");
-  }
-  out.Write("        if ({} == {:s}) {{\n", BitfieldExtract<&TexMtxInfo::projection>("texMtxInfo"),
-            TexSize::STQ);
-  out.Write("          output_tex.xyz = float3(dot(coord, " I_TRANSFORMMATRICES "[tmp]),\n"
-            "                                  dot(coord, " I_TRANSFORMMATRICES "[tmp + 1]),\n"
-            "                                  dot(coord, " I_TRANSFORMMATRICES "[tmp + 2]));\n"
-            "        }} else {{\n"
-            "          output_tex.xyz = float3(dot(coord, " I_TRANSFORMMATRICES "[tmp]),\n"
-            "                                  dot(coord, " I_TRANSFORMMATRICES "[tmp + 1]),\n"
-            "                                  1.0);\n"
-            "        }}\n"
-            "      }} else {{\n");
-  out.Write("        if ({} == {:s}) {{\n", BitfieldExtract<&TexMtxInfo::projection>("texMtxInfo"),
-            TexSize::STQ);
-  out.Write("          output_tex.xyz = float3(dot(coord, " I_TEXMATRICES "[3u * texgen]),\n"
-            "                                  dot(coord, " I_TEXMATRICES "[3u * texgen + 1u]),\n"
-            "                                  dot(coord, " I_TEXMATRICES "[3u * texgen + 2u]));\n"
-            "        }} else {{\n"
-            "          output_tex.xyz = float3(dot(coord, " I_TEXMATRICES "[3u * texgen]),\n"
-            "                                  dot(coord, " I_TEXMATRICES "[3u * texgen + 1u]),\n"
-            "                                  1.0);\n"
-            "        }}\n"
-            "      }}\n"
-            "    }}\n"
-            "    break;\n\n"
-            "  }}\n"
-            "\n");
-
-  out.Write("  if (xfmem_dualTexInfo != 0u) {{\n");
-  out.Write("    uint postMtxInfo = xfmem_postMtxInfo(texgen);");
-  out.Write("    uint base_index = {};\n", BitfieldExtract<&PostMtxInfo::index>("postMtxInfo"));
-  out.Write("    float4 P0 = " I_POSTTRANSFORMMATRICES "[base_index & 0x3fu];\n"
-            "    float4 P1 = " I_POSTTRANSFORMMATRICES "[(base_index + 1u) & 0x3fu];\n"
-            "    float4 P2 = " I_POSTTRANSFORMMATRICES "[(base_index + 2u) & 0x3fu];\n"
-            "\n");
-  out.Write("    if ({} != 0u)\n", BitfieldExtract<&PostMtxInfo::normalize>("postMtxInfo"));
-  out.Write("      output_tex.xyz = normalize(output_tex.xyz);\n"
-            "\n"
-            "    // multiply by postmatrix\n"
-            "    output_tex.xyz = float3(dot(P0.xyz, output_tex.xyz) + P0.w,\n"
-            "                            dot(P1.xyz, output_tex.xyz) + P1.w,\n"
-            "                            dot(P2.xyz, output_tex.xyz) + P2.w);\n"
-            "  }}\n\n");
-
-  // When q is 0, the GameCube appears to have a special case
-  // This can be seen in devkitPro's neheGX Lesson08 example for Wii
-  // Makes differences in Rogue Squadron 3 (Hoth sky) and The Last Story (shadow culling)
-  out.Write("  if (texgentype == {:s} && output_tex.z == 0.0)\n", TexGenType::Regular);
-  out.Write(
-      "    output_tex.xy = clamp(output_tex.xy / 2.0f, float2(-1.0f,-1.0f), float2(1.0f,1.0f));\n"
-      "\n");
-
-  out.Write("  // Hopefully GPUs that can support dynamic indexing will optimize this.\n");
-  out.Write("  switch (texgen) {{\n");
-  for (u32 i = 0; i < num_texgen; i++)
-    out.Write("  case {}u: o.tex{} = output_tex; break;\n", i, i);
-  out.Write("  }}\n"
-            "}}\n");
-}
-
-static void LoadVertexAttribute(ShaderCode& code, const ShaderHostConfig& host_config, u32 indent,
-                                std::string_view name, std::string_view shader_type,
-                                std::string_view stored_type, std::string_view offset_name)
-{
-  if (host_config.backend_dynamic_vertex_loader || host_config.backend_vs_point_line_expand)
-  {
-    code.Write("{:{}}{} {} = load_input_{}_{}(vertex_base_offset, vertex_offset_{});\n", "", indent,
-               shader_type, name, shader_type, stored_type,
-               offset_name.empty() ? name : offset_name);
-  }
-  // else inputs are always available
 }
 
 void EnumerateVertexShaderUids(const std::function<void(const VertexShaderUid&)>& callback)
 {
   VertexShaderUid uid;
-
-  for (u32 texgens = 0; texgens <= 8; texgens++)
+  for (u32 texgens = 0; texgens <= 8; ++texgens)
   {
-    vertex_ubershader_uid_data* const vuid = uid.GetUidData();
-    vuid->num_texgens = texgens;
+    uid.GetUidData()->num_texgens = texgens;
     callback(uid);
   }
 }
