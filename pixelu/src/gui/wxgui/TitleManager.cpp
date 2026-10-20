@@ -1,299 +1,288 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "wxgui/TitleManager.h"
 
 #include "wxgui/helpers/wxCustomEvents.h"
 #include "wxgui/helpers/wxCustomData.h"
-#include "Cafe/TitleList/GameInfo.h"
-#include "util/helpers/helpers.h"
 #include "wxgui/helpers/wxHelpers.h"
 #include "wxgui/wxHelper.h"
 #include "wxgui/components/wxTitleManagerList.h"
 #include "wxgui/components/wxDownloadManagerList.h"
 #include "wxgui/GameUpdateWindow.h"
 #include "wxgui/dialogs/SaveImport/SaveTransfer.h"
+#include "wxgui/dialogs/SaveImport/SaveImportWindow.h"
+#include "wxgui/CemuApp.h"
+
+#include "Cafe/TitleList/GameInfo.h"
+#include "Cafe/TitleList/TitleList.h"
+#include "Cafe/TitleList/SaveList.h"
+#include "Cafe/IOSU/legacy/iosu_crypto.h"
+#include "Cafe/Account/Account.h"
+#include "Cemu/Tools/DownloadManager/DownloadManager.h"
+#include "config/ActiveSettings.h"
+#include "util/helpers/helpers.h"
+#include "resource/embedded/resources.h"
 
 #include <wx/listbase.h>
-#include <wx/sizer.h>
 #include <wx/listctrl.h>
+#include <wx/sizer.h>
 #include <wx/statline.h>
 #include <wx/stattext.h>
-#include <wx/textctrl.h>
 #include <wx/statbmp.h>
+#include <wx/textctrl.h>
 #include <wx/panel.h>
 #include <wx/bmpbuttn.h>
 #include <wx/choice.h>
+#include <wx/checkbox.h>
 #include <wx/msgdlg.h>
 #include <wx/filedlg.h>
-#include <wx/combobox.h>
-#include <wx/checkbox.h>
-
-#include <pugixml.hpp>
-#include <zip.h>
-#include <wx/dirdlg.h>
 #include <wx/notebook.h>
 #include <wx/settings.h>
 
-#include "Cafe/IOSU/legacy/iosu_crypto.h"
-#include "config/ActiveSettings.h"
-#include "wxgui/dialogs/SaveImport/SaveImportWindow.h"
-#include "Cafe/Account/Account.h"
-#include "Cemu/Tools/DownloadManager/DownloadManager.h"
-#include "wxgui/CemuApp.h"
-#include "Cafe/TitleList/TitleList.h"
-#include "Cafe/TitleList/SaveList.h"
-#include "resource/embedded/resources.h"
+#include <pugixml.hpp>
+#include <zip.h>
 
+#include <cctype>
+#include <cstdlib>
+
+// This window's own "title found" event. The title list announces new titles to itself with an
+// event of the same name that is local to wxTitleManagerList.cpp, so this one is never sent today.
 wxDEFINE_EVENT(wxEVT_TITLE_FOUND, wxCommandEvent);
 wxDEFINE_EVENT(wxEVT_TITLE_SEARCH_COMPLETE, wxCommandEvent);
 wxDEFINE_EVENT(wxEVT_DL_TITLE_UPDATE, wxCommandEvent);
 wxDEFINE_EVENT(wxEVT_DL_DISCONNECT_COMPLETE, wxCommandEvent);
 
-wxPanel* TitleManager::CreateTitleManagerPage()
+namespace
 {
-	auto* panel = new wxPanel(m_notebook);
-	auto* sizer = new wxBoxSizer(wxVERTICAL);
+	using DlEntry = wxDownloadManagerList::TitleEntry;
+	using DlKind = wxDownloadManagerList::EntryType;
+	using DlStatus = wxDownloadManagerList::TitleDownloadStatus;
+	using ReportStatus = DlMgrTitleReport::STATUS;
+
+	// ---- pure helpers (TM_PURE_BEGIN)
+
+	// a save's per-account folder is named by the 8 hex digit persistent id
+	bool IsPersistentIdFolderName(const std::string& name)
 	{
-		auto* row = new wxFlexGridSizer(0, 4, 0, 0);
-		row->AddGrowableCol(1);
-
-		row->Add(new wxStaticText(panel, wxID_ANY, _("Filter")), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-		m_filter = new wxTextCtrl(panel, wxID_ANY);
-		m_filter->Bind(wxEVT_TEXT, &TitleManager::OnFilterChanged, this);
-		row->Add(m_filter, 1, wxALL | wxEXPAND, 5);
-
-		const wxImage refresh = wxHelper::LoadThemedBitmapFromPNG(PNG_REFRESH_png, sizeof(PNG_REFRESH_png), wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT)).ConvertToImage();
-		m_refresh_button = new wxBitmapButton(panel, wxID_ANY, refresh.Scale(16, 16));
-		m_refresh_button->Disable();
-		m_refresh_button->Bind(wxEVT_BUTTON, &TitleManager::OnRefreshButton, this);
-		m_refresh_button->SetToolTip(_("Refresh"));
-		row->Add(m_refresh_button, 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-		const wxBitmap help_bitmap = wxHelper::LoadThemedBitmapFromPNG(PNG_HELP_png, sizeof(PNG_HELP_png), wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-		auto* help_button = new wxStaticBitmap(panel, wxID_ANY, help_bitmap);
-		help_button->SetToolTip(formatWxString(_("The following prefixes are supported:\n{0}\n{1}\n{2}\n{3}\n{4}"),
-			"titleid:", "name:", "type:", "version:", "region:"));
-		row->Add(help_button, 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-		sizer->Add(row, 0, wxEXPAND, 5);
-	}
-
-	sizer->Add(new wxStaticLine(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLI_HORIZONTAL), 0, wxEXPAND | wxALL, 5);
-
-	m_title_list = new wxTitleManagerList(panel);
-	m_title_list->SetSizeHints(800, 600);
-	m_title_list->Bind(wxEVT_LIST_ITEM_SELECTED, &TitleManager::OnTitleSelected, this);
-	sizer->Add(m_title_list, 1, wxALL | wxEXPAND, 5);
-
-	sizer->Add(new wxStaticLine(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLI_HORIZONTAL), 0, wxEXPAND | wxALL, 5);
-
-	{
-		auto* row = new wxFlexGridSizer(0, 3, 0, 0);
-		row->AddGrowableCol(2);
-
-		auto* install_button = new wxButton(panel, wxID_ANY, _("Install title"));
-		install_button->Bind(wxEVT_BUTTON, &TitleManager::OnInstallTitle, this);
-		row->Add(install_button, 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-		row->Add(new wxStaticLine(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLI_VERTICAL), 0, wxEXPAND | wxALL, 5);
-
+		if (name.size() != 8)
+			return false;
+		for (const char c : name)
 		{
-			m_save_panel = new wxPanel(panel);
-			auto* save_sizer = new wxFlexGridSizer(0, 7, 0, 0);
-
-			save_sizer->Add(new wxStaticText(m_save_panel, wxID_ANY, _("Account")), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-			m_save_account_list = new wxChoice(m_save_panel, wxID_ANY);
-			m_save_account_list->SetMinSize({ 170, -1 });
-			m_save_account_list->Bind(wxEVT_CHOICE, &TitleManager::OnSaveAccountSelected, this);
-			save_sizer->Add(m_save_account_list, 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-			auto* save_open = new wxButton(m_save_panel, wxID_ANY, _("Open directory"));
-			save_open->Bind(wxEVT_BUTTON, &TitleManager::OnSaveOpenDirectory, this);
-			save_open->SetToolTip(_("Open the directory of the save entry"));
-			save_open->Disable();
-			save_sizer->Add(save_open, 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-			auto* save_transfer = new wxButton(m_save_panel, wxID_ANY, _("Transfer"));
-			save_transfer->Bind(wxEVT_BUTTON, &TitleManager::OnSaveTransfer, this);
-			save_transfer->SetToolTip(_("Transfers the save entry to another persistent account id"));
-			save_transfer->Disable();
-			save_sizer->Add(save_transfer, 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-			auto* save_delete = new wxButton(m_save_panel, wxID_ANY, _("Delete"));
-			save_delete->Bind(wxEVT_BUTTON, &TitleManager::OnSaveDelete, this);
-			save_delete->SetToolTip(_("Permanently delete the save entry"));
-			save_delete->Disable();
-			save_sizer->Add(save_delete, 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
-
-			m_save_import = new wxButton(m_save_panel, wxID_ANY, _("Import"));
-			m_save_import->Bind(wxEVT_BUTTON, &TitleManager::OnSaveImport, this);
-			m_save_import->SetToolTip(_("Imports a zipped save entry"));
-			save_sizer->Add(m_save_import, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxTOP | wxBOTTOM, 5);
-
-			auto* export_bttn = new wxButton(m_save_panel, wxID_ANY, _("Export"));
-			export_bttn->Bind(wxEVT_BUTTON, &TitleManager::OnSaveExport, this);
-			export_bttn->SetToolTip(_("Exports the selected save entry as zip file"));
-			export_bttn->Disable();
-			save_sizer->Add(export_bttn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT | wxTOP | wxBOTTOM, 5);
-
-			m_save_panel->SetSizerAndFit(save_sizer);
-			row->Add(m_save_panel, 1, wxRESERVE_SPACE_EVEN_IF_HIDDEN | wxALIGN_CENTER_VERTICAL, 0);
-			m_save_panel->Hide(); // hide by default
+			if (!std::isxdigit((unsigned char)c))
+				return false;
 		}
-
-		sizer->Add(row, 0, wxEXPAND, 5);
+		return true;
 	}
 
-	panel->SetSizerAndFit(sizer);
-	return panel;
-}
-
-wxPanel* TitleManager::CreateDownloadManagerPage()
-{
-	auto* panel = new wxPanel(m_notebook);
-	auto* sizer = new wxBoxSizer(wxVERTICAL);
+	// the upper word's low nibble tells the title kind: E = update, C = DLC, anything else = game
+	DlKind DownloadKindOf(uint64 titleId)
 	{
-		auto* row = new wxBoxSizer(wxHORIZONTAL);
-
-#if DOWNLOADMGR_HAS_ACCOUNT_DROPDOWN
-		m_account = new wxChoice(panel, wxID_ANY);
-		m_account->SetMinSize({ 250,-1 });
-		auto accounts = Account::GetAccounts();
-		if (!accounts.empty())
+		switch ((titleId >> 32) & 0xF)
 		{
-			const auto id = GetConfig().account.m_persistent_id.GetValue();
-			for (const auto& a : accounts)
+		case 0xE: return DlKind::Update;
+		case 0xC: return DlKind::DLC;
+		default: return DlKind::Base;
+		}
+	}
+
+	bool IsInstallableReport(ReportStatus status)
+	{
+		return status == ReportStatus::INSTALLABLE || status == ReportStatus::INSTALLABLE_UNFINISHED || status == ReportStatus::INSTALLABLE_UPDATE;
+	}
+
+	// for installable titles the list draws "progress" as a marker: 1 = resume unfinished download, 2 = update
+	uint32 InstallableMarker(ReportStatus status)
+	{
+		if (status == ReportStatus::INSTALLABLE_UNFINISHED)
+			return 1;
+		if (status == ReportStatus::INSTALLABLE_UPDATE)
+			return 2;
+		return 0;
+	}
+
+	DlStatus PackageStatusOf(ReportStatus status)
+	{
+		switch (status)
+		{
+		case ReportStatus::INITIALIZING: return DlStatus::Initializing;
+		case ReportStatus::QUEUED: return DlStatus::Queued;
+		case ReportStatus::CHECKING: return DlStatus::Checking;
+		case ReportStatus::DOWNLOADING: return DlStatus::Downloading;
+		case ReportStatus::VERIFYING: return DlStatus::Verifying;
+		case ReportStatus::INSTALLING: return DlStatus::Installing;
+		case ReportStatus::INSTALLED: return DlStatus::Installed;
+		case ReportStatus::HAS_ERROR: return DlStatus::Error;
+		default: return DlStatus::None; // includes PAUSED
+		}
+	}
+
+	// the save account picker's text: hex id, plus the Mii name when the account exists here
+	std::string SaveAccountLabel(uint32 persistentId, const std::wstring_view* miiName)
+	{
+		if (!miiName)
+			return fmt::format("{:x}", persistentId);
+		return fmt::format("{:x} ({})", persistentId, boost::nowide::narrow(miiName->data(), miiName->size()));
+	}
+
+	// ---- TM_PURE_END
+
+	DlEntry MakeDownloadEntry(const DlMgrTitleReport& report)
+	{
+		const bool installable = IsInstallableReport(report.status);
+		DlEntry entry(DownloadKindOf(report.titleId), !installable, report.titleId, report.version, report.isPaused);
+		entry.name = wxString::FromUTF8(report.name);
+		if (installable)
+		{
+			entry.status = DlStatus::Available;
+			entry.progress = InstallableMarker(report.status);
+		}
+		else
+		{
+			entry.status = PackageStatusOf(report.status);
+			entry.progress = report.progress;
+			entry.progressMax = report.progressMax;
+			if (entry.status == DlStatus::Error)
+				entry.errorMsg = report.errorMsg;
+		}
+		return entry;
+	}
+
+	std::string AccountLabel(uint32 persistentId)
+	{
+		for (const Account& account : Account::GetAccounts())
+		{
+			if (account.GetPersistentId() == persistentId)
 			{
-				m_account->Append(a.ToString(), (void*)static_cast<uintptr_t>(a.GetPersistentId()));
-				if(a.GetPersistentId() == id)
-				{
-					m_account->SetSelection(m_account->GetCount() - 1);
-				}
+				const std::wstring_view mii = account.GetMiiName();
+				return SaveAccountLabel(persistentId, &mii);
 			}
 		}
-	
-		row->Add(m_account, 0, wxALL, 5);
-#endif
-
-		m_connect = new wxButton(panel, wxID_ANY, _("Connect"));
-		m_connect->Bind(wxEVT_BUTTON, &TitleManager::OnConnect, this);
-		row->Add(m_connect, 0, wxALL, 5);
-
-		sizer->Add(row, 0, wxEXPAND, 5);
+		return SaveAccountLabel(persistentId, nullptr);
 	}
 
-#if DOWNLOADMGR_HAS_ACCOUNT_DROPDOWN
-	m_status_text = new wxStaticText(panel, wxID_ANY, _("Select an account and press Connect"));
-#else
-	if(!NCrypto::HasDataForConsoleCert())
+	fs::path SaveAccountFolder(uint64 titleId, uint32 persistentId)
 	{
-		m_status_text = new wxStaticText(panel, wxID_ANY, _("Valid online files are required to download eShop titles. For more information, go to the Account tab in the General Settings."));
-		m_connect->Enable(false);
+		return ActiveSettings::GetMlcPath("usr/save/{:08x}/{:08x}/user/{:08x}", (uint32)(titleId >> 32), (uint32)(titleId & 0xFFFFFFFF), persistentId);
 	}
-	else
-		m_status_text = new wxStaticText(panel, wxID_ANY, _("Click on Connect to load the list of downloadable titles"));
-#endif
-	this->Bind(wxEVT_SET_TEXT, &TitleManager::OnSetStatusText, this);
-	sizer->Add(m_status_text, 0, wxALL, 5);
-	
-	sizer->Add(new wxStaticLine(panel, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLI_HORIZONTAL), 0, wxEXPAND | wxALL, 5);
 
+	fs::path SaveInfoFile(uint64 titleId)
 	{
-		auto* row = new wxFlexGridSizer(0, 3, 0, 0);
-		m_show_titles = new wxCheckBox(panel, wxID_ANY, _("Show available titles"));
-		m_show_titles->SetValue(true);
-		m_show_titles->Enable(false);
-		row->Add(m_show_titles, 0, wxALL, 5);
-		m_show_titles->Bind(wxEVT_CHECKBOX, &TitleManager::OnDlFilterCheckbox, this);
-
-		m_show_updates = new wxCheckBox(panel, wxID_ANY, _("Show available updates"));
-		m_show_updates->SetValue(true);
-		m_show_updates->Enable(false);
-		row->Add(m_show_updates, 0, wxALL, 5);
-		m_show_updates->Bind(wxEVT_CHECKBOX, &TitleManager::OnDlFilterCheckbox, this);
-
-		m_show_installed = new wxCheckBox(panel, wxID_ANY, _("Show installed"));
-		m_show_installed->SetValue(true);
-		m_show_installed->Enable(false);
-		row->Add(m_show_installed, 0, wxALL, 5);
-		m_show_installed->Bind(wxEVT_CHECKBOX, &TitleManager::OnDlFilterCheckbox, this);
-
-		sizer->Add(row, 0, wxEXPAND, 5);
+		return ActiveSettings::GetMlcPath("usr/save/{:08x}/{:08x}/meta/saveinfo.xml", (uint32)(titleId >> 32), (uint32)(titleId & 0xFFFFFFFF));
 	}
-	
-	m_download_list = new wxDownloadManagerList(panel);
-	m_download_list->SetSizeHints(800, 600);
-	m_download_list->Bind(wxEVT_LIST_ITEM_SELECTED, &TitleManager::OnTitleSelected, this);
-	sizer->Add(m_download_list, 1, wxALL | wxEXPAND, 5);
 
-	panel->SetSizerAndFit(sizer);
-	return panel;
+	bool IsExistingFolder(const fs::path& path)
+	{
+		std::error_code ec;
+		return fs::is_directory(path, ec);
+	}
+
+	// fills the account ids of a save entry from its non-empty user/<id> folders (once)
+	void LoadSavePersistentIds(wxTitleManagerList::TitleEntry& entry)
+	{
+		if (!entry.persistent_ids.empty())
+			return;
+		cemu_assert(entry.type == wxTitleManagerList::EntryType::Save);
+		const SaveInfo save = CafeSaveList::GetSaveByTitleId(entry.title_id);
+		if (!save.IsValid())
+			return;
+		std::error_code ec;
+		for (const auto& child : fs::directory_iterator(save.GetPath() / "user", ec))
+		{
+			if (!child.is_directory(ec) || fs::is_empty(child.path()))
+				continue;
+			const std::string name = child.path().filename().string();
+			if (IsPersistentIdFolderName(name))
+				entry.persistent_ids.emplace_back((uint32)std::strtoul(name.c_str(), nullptr, 16));
+		}
+	}
+
+	// removes the account's <info> child from the save's saveinfo.xml; true when the file was rewritten
+	bool RemoveFromSaveInfo(const fs::path& saveInfo, uint32 persistentId)
+	{
+		pugi::xml_document doc;
+		if (!doc.load_file(saveInfo.c_str()))
+			return false;
+		pugi::xml_node info = doc.child("info");
+		if (!info)
+			return false;
+		const std::wstring wanted = fmt::format(L"{:08x}", persistentId);
+		const pugi::xml_node match = info.find_child([&wanted](const pugi::xml_node& node) {
+			return boost::iequals(node.attribute("persistentId").as_string(), wanted);
+		});
+		if (!match)
+			return false;
+		info.remove_child(match);
+		return doc.save_file(saveInfo.c_str());
+	}
+
+	std::string GenericUtf8(const fs::path& path)
+	{
+		const auto text = path.generic_u8string();
+		return std::string((const char*)text.data(), text.size());
+	}
+
+	void ShowZipError(wxWindow* parent, const wxString& what, const char* detail)
+	{
+		wxMessageBox(formatWxString(what, detail), _("Error"), wxOK | wxCENTRE | wxICON_ERROR, parent);
+	}
+
+	TitleManager* CallbackOwner()
+	{
+		return static_cast<TitleManager*>(DownloadManager::GetInstance()->getUserData());
+	}
 }
 
 TitleManager::TitleManager(wxWindow* parent, TitleManagerPage default_page)
 	: wxFrame(parent, wxID_ANY, _("Title Manager"), wxDefaultPosition, wxDefaultSize, wxDEFAULT_FRAME_STYLE | wxTAB_TRAVERSAL)
 {
 	SetIcon(wxICON(X_BOX));
-	
-	auto* sizer = new wxBoxSizer(wxVERTICAL);
-	m_notebook = new wxNotebook(this, wxID_ANY);
 
+	m_notebook = new wxNotebook(this, wxID_ANY);
 	m_notebook->AddPage(CreateTitleManagerPage(), _("Title Manager"), default_page == TitleManagerPage::TitleManager);
 	m_notebook->AddPage(CreateDownloadManagerPage(), _("Download Manager"), default_page == TitleManagerPage::DownloadManager);
 
-	sizer->Add(m_notebook, 1, wxEXPAND);
+	auto* layout = new wxBoxSizer(wxVERTICAL);
+	layout->Add(m_notebook, 1, wxEXPAND);
 
 	m_status_bar = CreateStatusBar(2, wxSTB_SIZEGRIP);
 	m_status_bar->SetStatusText(_("Searching for titles..."));
 
-	this->SetSizerAndFit(sizer);
-	this->Centre(wxBOTH);
+	SetSizerAndFit(layout);
+	Centre(wxBOTH);
 
-	this->Bind(wxEVT_SET_STATUS_BAR_TEXT, &TitleManager::OnSetStatusBarText, this);
-	this->Bind(wxEVT_TITLE_FOUND, &TitleManager::OnTitleFound, this);
-	this->Bind(wxEVT_TITLE_SEARCH_COMPLETE, &TitleManager::OnTitleSearchComplete, this);
-	this->Bind(wxEVT_DL_TITLE_UPDATE, &TitleManager::OnDownloadableTitleUpdate, this);
-	this->Bind(wxEVT_DL_DISCONNECT_COMPLETE, &TitleManager::OnDisconnect, this);
-	
-	// TODO typing on title list should change filter text and filter!
+	Bind(wxEVT_SET_STATUS_BAR_TEXT, &TitleManager::OnSetStatusBarText, this);
+	Bind(wxEVT_TITLE_FOUND, &TitleManager::OnTitleFound, this);
+	Bind(wxEVT_TITLE_SEARCH_COMPLETE, &TitleManager::OnTitleSearchComplete, this);
+	Bind(wxEVT_DL_TITLE_UPDATE, &TitleManager::OnDownloadableTitleUpdate, this);
+	Bind(wxEVT_DL_DISCONNECT_COMPLETE, &TitleManager::OnDisconnect, this);
 
-	// if download manager is already active then restore state
-	DownloadManager* dlMgr = DownloadManager::GetInstance(false);
-	if (dlMgr && dlMgr->IsConnected())
+	// reopening the window while the download manager is still connected picks the session back up
+	if (DownloadManager* downloads = DownloadManager::GetInstance(false); downloads && downloads->IsConnected())
 	{
-		dlMgr->setUserData(this);
-		dlMgr->registerCallbacks(
-			TitleManager::Callback_ConnectStatusUpdate,
-			TitleManager::Callback_AddDownloadableTitle,
-			TitleManager::Callback_RemoveDownloadableTitle);
+		downloads->setUserData(this);
+		downloads->registerCallbacks(Callback_ConnectStatusUpdate, Callback_AddDownloadableTitle, Callback_RemoveDownloadableTitle);
 		SetConnected(true);
 	}
 
-	m_callbackId = CafeTitleList::RegisterCallback([](CafeTitleListCallbackEvent* evt, void* ctx) { ((TitleManager*)ctx)->HandleTitleListCallback(evt); }, this);
+	m_callbackId = CafeTitleList::RegisterCallback([](CafeTitleListCallbackEvent* evt, void* self) {
+		static_cast<TitleManager*>(self)->HandleTitleListCallback(evt);
+	}, this);
 }
 
 TitleManager::~TitleManager()
 {
 	CafeTitleList::UnregisterCallback(m_callbackId);
 
-	// unregister callbacks for download manager
-	DownloadManager* dlMgr = DownloadManager::GetInstance(false);
-	if (dlMgr)
+	if (DownloadManager* downloads = DownloadManager::GetInstance(false))
 	{
-		dlMgr->setUserData(nullptr);
-		dlMgr->registerCallbacks(
-			nullptr,
-			nullptr,
-			nullptr);
-		// if download manager is still downloading / installing then show a warning
-		if (dlMgr->hasActiveDownloads())
+		downloads->setUserData(nullptr);
+		downloads->registerCallbacks(nullptr, nullptr, nullptr);
+
+		// said once per run: closing the window does not stop downloads
+		static bool s_toldAboutBackgroundDownloads = false;
+		if (downloads->hasActiveDownloads() && !s_toldAboutBackgroundDownloads)
 		{
-			static bool s_showedBGDownloadWarning = false;
-			if (!s_showedBGDownloadWarning)
-			{
-				wxMessageBox(_("Currently active downloads will continue in the background."), _("Information"), wxOK | wxCENTRE, this);
-				s_showedBGDownloadWarning = true;
-			}
+			s_toldAboutBackgroundDownloads = true;
+			wxMessageBox(_("Currently active downloads will continue in the background."), _("Information"), wxOK | wxCENTRE, this);
 		}
 	}
 
@@ -303,31 +292,110 @@ TitleManager::~TitleManager()
 void TitleManager::SetFocusAndTab(TitleManagerPage page)
 {
 	m_notebook->SetSelection((int)page);
-	this->SetFocus();
+	SetFocus();
 }
 
 void TitleManager::SetDownloadStatusText(const wxString& text)
 {
-	auto* evt = new wxCommandEvent(wxEVT_SET_TEXT);
-	evt->SetEventObject(m_status_text);
-	evt->SetString(text);
-	wxQueueEvent(this, evt);
+	auto* event = new wxCommandEvent(wxEVT_SET_TEXT);
+	event->SetEventObject(m_status_text);
+	event->SetString(text);
+	wxQueueEvent(this, event);
+}
+
+// ---------------------------------------------------------------- installed titles tab
+
+wxPanel* TitleManager::CreateTitleManagerPage()
+{
+	auto* page = new wxPanel(m_notebook);
+	auto* column = new wxBoxSizer(wxVERTICAL);
+	const wxColour iconColour = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
+
+	// filter row: label, text, refresh, prefix help
+	auto* filterRow = new wxFlexGridSizer(0, 4, 0, 0);
+	filterRow->AddGrowableCol(1);
+	filterRow->Add(new wxStaticText(page, wxID_ANY, _("Filter")), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
+
+	m_filter = new wxTextCtrl(page, wxID_ANY);
+	m_filter->Bind(wxEVT_TEXT, &TitleManager::OnFilterChanged, this);
+	filterRow->Add(m_filter, 1, wxALL | wxEXPAND, 5);
+
+	const wxImage refreshIcon = wxHelper::LoadThemedBitmapFromPNG(PNG_REFRESH_png, sizeof(PNG_REFRESH_png), iconColour).ConvertToImage();
+	m_refresh_button = new wxBitmapButton(page, wxID_ANY, refreshIcon.Scale(16, 16));
+	m_refresh_button->SetToolTip(_("Refresh"));
+	m_refresh_button->Disable(); // until the first scan is done
+	m_refresh_button->Bind(wxEVT_BUTTON, &TitleManager::OnRefreshButton, this);
+	filterRow->Add(m_refresh_button, 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
+
+	auto* prefixHelp = new wxStaticBitmap(page, wxID_ANY, wxHelper::LoadThemedBitmapFromPNG(PNG_HELP_png, sizeof(PNG_HELP_png), iconColour));
+	prefixHelp->SetToolTip(formatWxString(_("The following prefixes are supported:\n{0}\n{1}\n{2}\n{3}\n{4}"),
+		"titleid:", "name:", "type:", "version:", "region:"));
+	filterRow->Add(prefixHelp, 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
+	column->Add(filterRow, 0, wxEXPAND, 5);
+
+	column->Add(new wxStaticLine(page, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLI_HORIZONTAL), 0, wxEXPAND | wxALL, 5);
+
+	m_title_list = new wxTitleManagerList(page);
+	m_title_list->SetSizeHints(800, 600);
+	m_title_list->Bind(wxEVT_LIST_ITEM_SELECTED, &TitleManager::OnTitleSelected, this);
+	column->Add(m_title_list, 1, wxALL | wxEXPAND, 5);
+
+	column->Add(new wxStaticLine(page, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLI_HORIZONTAL), 0, wxEXPAND | wxALL, 5);
+
+	// bottom row: install button | save tools (only shown for save entries)
+	auto* bottomRow = new wxFlexGridSizer(0, 3, 0, 0);
+	bottomRow->AddGrowableCol(2);
+
+	auto* install = new wxButton(page, wxID_ANY, _("Install title"));
+	install->Bind(wxEVT_BUTTON, &TitleManager::OnInstallTitle, this);
+	bottomRow->Add(install, 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
+	bottomRow->Add(new wxStaticLine(page, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLI_VERTICAL), 0, wxEXPAND | wxALL, 5);
+
+	m_save_panel = new wxPanel(page);
+	auto* saveRow = new wxFlexGridSizer(0, 7, 0, 0);
+	saveRow->Add(new wxStaticText(m_save_panel, wxID_ANY, _("Account")), 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
+
+	m_save_account_list = new wxChoice(m_save_panel, wxID_ANY);
+	m_save_account_list->SetMinSize({ 170, -1 });
+	m_save_account_list->Bind(wxEVT_CHOICE, &TitleManager::OnSaveAccountSelected, this);
+	saveRow->Add(m_save_account_list, 0, wxALIGN_CENTER_VERTICAL | wxALL, 5);
+
+	// the account dependent buttons start disabled; Import works without an account
+	auto addSaveButton = [&](const wxString& label, const wxString& tip, void (TitleManager::*handler)(wxCommandEvent&), bool needsAccount, int border) {
+		auto* button = new wxButton(m_save_panel, wxID_ANY, label);
+		button->Bind(wxEVT_BUTTON, handler, this);
+		button->SetToolTip(tip);
+		if (needsAccount)
+			button->Disable();
+		saveRow->Add(button, 0, wxALIGN_CENTER_VERTICAL | border, 5);
+		return button;
+	};
+	addSaveButton(_("Open directory"), _("Open the directory of the save entry"), &TitleManager::OnSaveOpenDirectory, true, wxALL);
+	addSaveButton(_("Transfer"), _("Transfers the save entry to another persistent account id"), &TitleManager::OnSaveTransfer, true, wxALL);
+	addSaveButton(_("Delete"), _("Permanently delete the save entry"), &TitleManager::OnSaveDelete, true, wxALL);
+	m_save_import = addSaveButton(_("Import"), _("Imports a zipped save entry"), &TitleManager::OnSaveImport, false, wxLEFT | wxTOP | wxBOTTOM);
+	addSaveButton(_("Export"), _("Exports the selected save entry as zip file"), &TitleManager::OnSaveExport, true, wxRIGHT | wxTOP | wxBOTTOM);
+
+	m_save_panel->SetSizerAndFit(saveRow);
+	m_save_panel->Hide();
+	bottomRow->Add(m_save_panel, 1, wxRESERVE_SPACE_EVEN_IF_HIDDEN | wxALIGN_CENTER_VERTICAL, 0);
+	column->Add(bottomRow, 0, wxEXPAND, 5);
+
+	page->SetSizerAndFit(column);
+	return page;
 }
 
 void TitleManager::HandleTitleListCallback(CafeTitleListCallbackEvent* evt)
 {
 	if (evt->eventType == CafeTitleListCallbackEvent::TYPE::SCAN_FINISHED)
-	{
-		auto* evt = new wxCommandEvent(wxEVT_TITLE_SEARCH_COMPLETE);
-		wxQueueEvent(this, evt);
-	}
+		wxQueueEvent(this, new wxCommandEvent(wxEVT_TITLE_SEARCH_COMPLETE));
 }
 
 void TitleManager::OnTitleFound(wxCommandEvent& event)
 {
-	auto* obj = dynamic_cast<wxTitleManagerList::TitleEntryData_t*>(event.GetClientObject());
-	wxASSERT(obj);
-	m_title_list->AddTitle(obj);
+	auto* data = dynamic_cast<wxTitleManagerList::TitleEntryData_t*>(event.GetClientObject());
+	wxASSERT(data);
+	m_title_list->AddTitle(data);
 }
 
 void TitleManager::OnTitleSearchComplete(wxCommandEvent& event)
@@ -335,22 +403,21 @@ void TitleManager::OnTitleSearchComplete(wxCommandEvent& event)
 	m_isScanning = false;
 	if (m_connectRequested)
 	{
-		InitiateConnect();
 		m_connectRequested = false;
+		InitiateConnect();
 	}
-	// update status bar text
-	m_title_list->SortEntries(-1);
-	m_status_bar->SetStatusText(formatWxString(_("Found {0} games, {1} updates, {2} DLCs and {3} save entries"),
-		m_title_list->GetCountByType(wxTitleManagerList::EntryType::Base) + m_title_list->GetCountByType(wxTitleManagerList::EntryType::System),
-		m_title_list->GetCountByType(wxTitleManagerList::EntryType::Update),
-		m_title_list->GetCountByType(wxTitleManagerList::EntryType::Dlc),
-		m_title_list->GetCountByType(wxTitleManagerList::EntryType::Save)
-	));
 
-	// re-filter if any filter is set
-	const auto filter = m_filter->GetValue();
+	m_title_list->SortEntries(-1);
+	const auto count = [this](wxTitleManagerList::EntryType type) { return m_title_list->GetCountByType(type); };
+	m_status_bar->SetStatusText(formatWxString(_("Found {0} games, {1} updates, {2} DLCs and {3} save entries"),
+		count(wxTitleManagerList::EntryType::Base) + count(wxTitleManagerList::EntryType::System),
+		count(wxTitleManagerList::EntryType::Update),
+		count(wxTitleManagerList::EntryType::Dlc),
+		count(wxTitleManagerList::EntryType::Save)));
+
+	const wxString filter = m_filter->GetValue();
 	if (!filter.IsEmpty())
-		m_title_list->Filter(m_filter->GetValue());
+		m_title_list->Filter(filter);
 
 	m_title_list->AutosizeColumns();
 	m_refresh_button->Enable();
@@ -369,72 +436,40 @@ void TitleManager::OnFilterChanged(wxCommandEvent& event)
 
 void TitleManager::OnRefreshButton(wxCommandEvent& event)
 {
+	// the list is kept: the rescan reports changes one by one
 	m_refresh_button->Disable();
 	m_isScanning = true;
-	// m_title_list->ClearItems(); -> Dont clear. Refresh() triggers incremental updates via notifications
 	m_status_bar->SetStatusText(_("Searching for titles..."));
 	CafeTitleList::Refresh();
 }
 
 void TitleManager::OnInstallTitle(wxCommandEvent& event)
 {
-	wxFileDialog openFileDialog(this, _("Select title to install"), "", "", "meta.xml|meta.xml", wxFD_OPEN | wxFD_FILE_MUST_EXIST);
-	if (openFileDialog.ShowModal() == wxID_CANCEL || openFileDialog.GetPath().IsEmpty())
+	wxFileDialog picker(this, _("Select title to install"), "", "", "meta.xml|meta.xml", wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+	if (picker.ShowModal() == wxID_CANCEL || picker.GetPath().IsEmpty())
 		return;
 
-	fs::path filePath(openFileDialog.GetPath().wc_string());
+	// <title>/meta/meta.xml -> <title>
+	const fs::path titleFolder = fs::path(picker.GetPath().wc_string()).parent_path().parent_path();
 	try
 	{
-		filePath = filePath.parent_path();
-		filePath = filePath.parent_path();
-		GameUpdateWindow frame(*this, filePath);
-		const int updateResult = frame.ShowModal();
-
-		if (updateResult == wxID_OK)
+		GameUpdateWindow installer(*this, titleFolder);
+		if (installer.ShowModal() == wxID_OK)
 		{
-			CafeTitleList::AddTitleFromPath(frame.GetTargetPath());
+			CafeTitleList::AddTitleFromPath(installer.GetTargetPath());
+			return;
 		}
-		else
-		{
-			if (frame.GetExceptionMessage().empty())
-				wxMessageBox(_("Update installation has been canceled!"));
-			else
-			{
-				throw std::runtime_error(frame.GetExceptionMessage());
-			}
-		}
+		if (!installer.GetExceptionMessage().empty())
+			throw std::runtime_error(installer.GetExceptionMessage());
+		wxMessageBox(_("Update installation has been canceled!"));
 	}
 	catch (const AbortException&)
 	{
-		// ignored
+		// the user backed out of the window
 	}
 	catch (const std::exception& ex)
 	{
 		wxMessageBox(ex.what(), _("Update error"));
-	}
-}
-
-static void PopulateSavePersistentIds(wxTitleManagerList::TitleEntry& entry)
-{
-	if (!entry.persistent_ids.empty())
-		return;
-	cemu_assert(entry.type == wxTitleManagerList::EntryType::Save);
-	SaveInfo saveInfo = CafeSaveList::GetSaveByTitleId(entry.title_id);
-	if (!saveInfo.IsValid())
-		return;
-	fs::path savePath = saveInfo.GetPath();
-	savePath /= "user";
-	std::error_code ec;
-	for (auto it : fs::directory_iterator(savePath, ec))
-	{
-		if(!it.is_directory(ec))
-			continue;
-		if(fs::is_empty(it.path()))
-			continue;
-		std::string dirName = it.path().filename().string();
-		if(!std::regex_match(dirName, std::regex("[0-9a-fA-F]{8}")))
-			continue;
-		entry.persistent_ids.emplace_back(ConvertString<uint32>(dirName, 16));
 	}
 }
 
@@ -443,261 +478,186 @@ void TitleManager::OnTitleSelected(wxListEvent& event)
 	event.Skip();
 
 	const auto entry = m_title_list->GetSelectedTitleEntry();
-	if(entry.has_value() && entry->type == wxTitleManagerList::EntryType::Save)
-	{
-		m_save_panel->Show();
-		m_save_account_list->Clear();
-
-		PopulateSavePersistentIds(*entry);
-
-		// an account must be selected before any of the control buttons can be used
-		for(auto&& v : m_save_panel->GetChildren())
-		{
-			if (dynamic_cast<wxButton*>(v) && v->GetId() != m_save_import->GetId()) // import is always enabled
-				v->Disable();
-		}
-
-		const auto& accounts = Account::GetAccounts();
-		for (const auto& id : entry->persistent_ids)
-		{
-			const auto it = std::find_if(accounts.cbegin(), accounts.cend(), [id](const auto& acc) { return acc.GetPersistentId() == id; });
-			if(it != accounts.cend())
-			{
-				m_save_account_list->Append(fmt::format("{:x} ({})", id, 
-					boost::nowide::narrow(it->GetMiiName().data(), it->GetMiiName().size())), 
-					(void*)(uintptr_t)id);
-			}
-			else
-				m_save_account_list->Append(fmt::format("{:x}", id), (void*)(uintptr_t)id);
-		}
-	}
-	else
+	if (!entry.has_value() || entry->type != wxTitleManagerList::EntryType::Save)
 	{
 		m_save_panel->Hide();
+		return;
 	}
+
+	m_save_panel->Show();
+	m_save_account_list->Clear();
+	LoadSavePersistentIds(*entry);
+
+	// nothing but Import works before an account is picked
+	for (wxWindow* child : m_save_panel->GetChildren())
+	{
+		if (dynamic_cast<wxButton*>(child) && child->GetId() != m_save_import->GetId())
+			child->Disable();
+	}
+
+	for (const uint32 id : entry->persistent_ids)
+		AddSaveAccount(id);
 }
 
-void TitleManager::OnSaveOpenDirectory(wxCommandEvent& event)
+void TitleManager::AddSaveAccount(uint32 persistentId)
 {
-	const auto selection=  m_save_account_list->GetSelection();
-	if (selection == wxNOT_FOUND)
-		return;
-
-	const auto entry = m_title_list->GetSelectedTitleEntry();
-	if (!entry.has_value())
-		return;
-
-	const auto persistent_id = (uint32)(uintptr_t)m_save_account_list->GetClientData(selection);
-
-	const fs::path target = ActiveSettings::GetMlcPath("usr/save/{:08x}/{:08x}/user/{:08x}", (uint32)(entry->title_id >> 32), (uint32)(entry->title_id & 0xFFFFFFFF), persistent_id);
-	if (!fs::exists(target) || !fs::is_directory(target))
-		return;
-
-	wxLaunchDefaultApplication(wxHelper::FromPath(target));
-}
-
-void TitleManager::OnSaveDelete(wxCommandEvent& event)
-{
-	const auto selection_index = m_save_account_list->GetSelection();
-	if (selection_index == wxNOT_FOUND)
-		return;
-	
-	const auto selection = m_save_account_list->GetStringSelection();
-	if (selection.IsEmpty())
-		return;
-	
-	const auto msg = formatWxString(_("Are you really sure that you want to delete the save entry for {}"), selection);
-	const auto result = wxMessageBox(msg, _("Warning"), wxYES_NO | wxCENTRE | wxICON_EXCLAMATION, this);
-	if (result == wxNO)
-		return;
-
-	auto entry = m_title_list->GetSelectedTitleEntry();
-	if (!entry.has_value())
-		return;
-
-	const auto persistent_id = (uint32)(uintptr_t)m_save_account_list->GetClientData(selection_index);
-
-	const fs::path target = ActiveSettings::GetMlcPath("usr/save/{:08x}/{:08x}/user/{:08x}", (uint32)(entry->title_id >> 32), (uint32)(entry->title_id & 0xFFFFFFFF), persistent_id);
-	if (!fs::exists(target) || !fs::is_directory(target))
-		return;
-
-	// edit meta saveinfo.xml
-	bool meta_file_edited = false;
-	const fs::path saveinfo = ActiveSettings::GetMlcPath("usr/save/{:08x}/{:08x}/meta/saveinfo.xml", (uint32)(entry->title_id >> 32), (uint32)(entry->title_id & 0xFFFFFFFF));
-	if (fs::exists(saveinfo) || fs::is_regular_file(saveinfo))
-	{
-		pugi::xml_document doc;
-		if (doc.load_file(saveinfo.c_str()))
-		{
-			auto info_node = doc.child("info");
-			if(info_node)
-			{
-				auto persistend_id_string = fmt::format(L"{:08x}", persistent_id);
-				const auto delete_entry = info_node.find_child([&persistend_id_string](const pugi::xml_node& node)
-				{
-						return boost::iequals(node.attribute("persistentId").as_string(), persistend_id_string);
-				});
-				if (delete_entry)
-				{
-					info_node.remove_child(delete_entry);
-					meta_file_edited = doc.save_file(saveinfo.c_str());
-				}
-			}
-		}
-	}
-
-	if (!meta_file_edited)
-		cemuLog_log(LogType::Force, "TitleManager::OnSaveDelete: couldn't delete save entry in saveinfo.xml: {}", _pathToUtf8(saveinfo));
-
-	// remove from title entry
-	auto& persistent_ids = entry->persistent_ids;
-	persistent_ids.erase(std::remove(persistent_ids.begin(), persistent_ids.end(), persistent_id), persistent_ids.end());
-
-	std::error_code ec;
-	fs::remove_all(target, ec);
-	if (ec)
-	{
-		const auto error_msg = formatWxString(_("Error when trying to delete the save directory:\n{}"), GetSystemErrorMessage(ec));
-		wxMessageBox(error_msg, _("Error"), wxOK | wxCENTRE, this);
-		return;
-	}
-
-	m_save_account_list->Delete(selection_index);
-}
-
-
-void TitleManager::OnSaveTransfer(wxCommandEvent& event)
-{
-	const auto selection_index = m_save_account_list->GetSelection();
-	if (selection_index == wxNOT_FOUND)
-		return;
-	
-	const auto selection = m_save_account_list->GetStringSelection();
-	if (selection.IsEmpty())
-		return;
-
-	auto entry = m_title_list->GetSelectedTitleEntry();
-	if (!entry.has_value())
-		return;
-
-	const auto persistent_id = (uint32)(uintptr_t)m_save_account_list->GetClientData(selection_index);
-	
-	SaveTransfer transfer(this, entry->title_id, selection, persistent_id);
-	if (transfer.ShowModal() == wxCANCEL)
-		return;
-
-	// remove old id entry
-	auto& persistent_ids = entry->persistent_ids;
-	persistent_ids.erase(std::remove(persistent_ids.begin(), persistent_ids.end(), persistent_id), persistent_ids.end());
-
-	// add new id if not added yet
-	const auto new_id = transfer.GetTargetPersistentId();
-	if (new_id != 0 && std::find(persistent_ids.cbegin(), persistent_ids.cend(), new_id) == persistent_ids.cend())
-	{
-		persistent_ids.emplace_back(new_id);
-
-		const auto& account = Account::GetAccount(new_id);
-		if(account.GetPersistentId() == new_id)
-			m_save_account_list->Append(fmt::format("{:x} ({})", new_id,
-				boost::nowide::narrow(account.GetMiiName().data(), account.GetMiiName().size())),
-				(void*)(uintptr_t)new_id);
-		else
-			m_save_account_list->Append(fmt::format("{:x}", new_id), (void*)(uintptr_t)new_id);
-	}
-
-	m_save_account_list->Delete(selection_index);
+	m_save_account_list->Append(AccountLabel(persistentId), (void*)(uintptr_t)persistentId);
 }
 
 void TitleManager::OnSaveAccountSelected(wxCommandEvent& event)
 {
 	event.Skip();
-	for (auto&& v : m_save_panel->GetChildren())
+	for (wxWindow* child : m_save_panel->GetChildren())
 	{
-		if (!v->IsEnabled())
-			v->Enable();
+		if (!child->IsEnabled())
+			child->Enable();
 	}
 }
 
-void TitleManager::OnSaveExport(wxCommandEvent& event)
+void TitleManager::OnSaveOpenDirectory(wxCommandEvent& event)
 {
-	const auto selection_index = m_save_account_list->GetSelection();
-	if (selection_index == wxNOT_FOUND)
+	const int selected = m_save_account_list->GetSelection();
+	if (selected == wxNOT_FOUND)
 		return;
-
-	const auto selection = m_save_account_list->GetStringSelection();
-	if (selection.IsEmpty())
-		return;
-
 	const auto entry = m_title_list->GetSelectedTitleEntry();
 	if (!entry.has_value())
 		return;
 
-	const auto persistent_id = (uint32)(uintptr_t)m_save_account_list->GetClientData(selection_index);
+	const fs::path folder = SaveAccountFolder(entry->title_id, (uint32)(uintptr_t)m_save_account_list->GetClientData(selected));
+	if (IsExistingFolder(folder))
+		wxLaunchDefaultApplication(wxHelper::FromPath(folder));
+}
 
-	wxFileDialog path_dialog(this, _("Select a target file to export the save entry"), wxHelper::FromPath(entry->path), wxEmptyString,
-		fmt::format("{}|*.zip", _("Exported save entry (*.zip)")), wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
-	if (path_dialog.ShowModal() != wxID_OK || path_dialog.GetPath().IsEmpty())
+void TitleManager::OnSaveDelete(wxCommandEvent& event)
+{
+	const int selected = m_save_account_list->GetSelection();
+	if (selected == wxNOT_FOUND)
+		return;
+	const wxString accountText = m_save_account_list->GetStringSelection();
+	if (accountText.IsEmpty())
 		return;
 
-	const auto path = path_dialog.GetPath();
-	int ze;
-	auto* zip = zip_open(path.ToUTF8().data(), ZIP_CREATE | ZIP_TRUNCATE, &ze);
+	const wxString question = formatWxString(_("Are you really sure that you want to delete the save entry for {}"), accountText);
+	if (wxMessageBox(question, _("Warning"), wxYES_NO | wxCENTRE | wxICON_EXCLAMATION, this) == wxNO)
+		return;
+
+	auto entry = m_title_list->GetSelectedTitleEntry();
+	if (!entry.has_value())
+		return;
+	const uint32 persistentId = (uint32)(uintptr_t)m_save_account_list->GetClientData(selected);
+	const fs::path folder = SaveAccountFolder(entry->title_id, persistentId);
+	if (!IsExistingFolder(folder))
+		return;
+
+	const fs::path saveInfo = SaveInfoFile(entry->title_id);
+	std::error_code ec;
+	if (!fs::exists(saveInfo, ec) || !RemoveFromSaveInfo(saveInfo, persistentId))
+		cemuLog_log(LogType::Force, "TitleManager::OnSaveDelete: couldn't delete save entry in saveinfo.xml: {}", _pathToUtf8(saveInfo));
+
+	std::erase(entry->persistent_ids, persistentId);
+
+	fs::remove_all(folder, ec);
+	if (ec)
+	{
+		wxMessageBox(formatWxString(_("Error when trying to delete the save directory:\n{}"), GetSystemErrorMessage(ec)), _("Error"), wxOK | wxCENTRE, this);
+		return;
+	}
+	m_save_account_list->Delete(selected);
+}
+
+void TitleManager::OnSaveTransfer(wxCommandEvent& event)
+{
+	const int selected = m_save_account_list->GetSelection();
+	if (selected == wxNOT_FOUND)
+		return;
+	const wxString accountText = m_save_account_list->GetStringSelection();
+	if (accountText.IsEmpty())
+		return;
+	auto entry = m_title_list->GetSelectedTitleEntry();
+	if (!entry.has_value())
+		return;
+
+	const uint32 fromId = (uint32)(uintptr_t)m_save_account_list->GetClientData(selected);
+	SaveTransfer transfer(this, entry->title_id, accountText, fromId);
+	if (transfer.ShowModal() == wxCANCEL)
+		return;
+
+	auto& ids = entry->persistent_ids;
+	std::erase(ids, fromId);
+	const uint32 toId = transfer.GetTargetPersistentId();
+	if (toId != 0 && std::find(ids.cbegin(), ids.cend(), toId) == ids.cend())
+	{
+		ids.emplace_back(toId);
+		AddSaveAccount(toId);
+	}
+	m_save_account_list->Delete(selected);
+}
+
+void TitleManager::OnSaveExport(wxCommandEvent& event)
+{
+	const int selected = m_save_account_list->GetSelection();
+	if (selected == wxNOT_FOUND || m_save_account_list->GetStringSelection().IsEmpty())
+		return;
+	const auto entry = m_title_list->GetSelectedTitleEntry();
+	if (!entry.has_value())
+		return;
+	const uint32 persistentId = (uint32)(uintptr_t)m_save_account_list->GetClientData(selected);
+
+	wxFileDialog picker(this, _("Select a target file to export the save entry"), wxHelper::FromPath(entry->path), wxEmptyString,
+		fmt::format("{}|*.zip", _("Exported save entry (*.zip)")), wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
+	if (picker.ShowModal() != wxID_OK || picker.GetPath().IsEmpty())
+		return;
+
+	int openError;
+	zip_t* zip = zip_open(picker.GetPath().ToUTF8().data(), ZIP_CREATE | ZIP_TRUNCATE, &openError);
 	if (!zip)
 	{
-		zip_error_t ziperror;
-		zip_error_init_with_code(&ziperror, ze);
-		const auto error_msg = formatWxString(_("Error when creating the zip for the save entry:\n{}"), zip_error_strerror(&ziperror));
-		wxMessageBox(error_msg, _("Error"), wxOK | wxCENTRE | wxICON_ERROR, this);
+		zip_error_t error;
+		zip_error_init_with_code(&error, openError);
+		ShowZipError(this, _("Error when creating the zip for the save entry:\n{}"), zip_error_strerror(&error));
+		zip_error_fini(&error);
 		return;
 	}
 
-	// grab all files to zip
-	const auto savedir = fs::path(entry->path).append(fmt::format("user/{:08x}", persistent_id));
-	const auto savedir_str = savedir.generic_u8string();
-	for(const auto& it : fs::recursive_directory_iterator(savedir))
+	// every file and folder below user/<id>, stored relative to it
+	const fs::path accountFolder = fs::path(entry->path) / fmt::format("user/{:08x}", persistentId);
+	const std::string prefix = GenericUtf8(accountFolder);
+	std::error_code ec;
+	for (auto it = fs::recursive_directory_iterator(accountFolder, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec))
 	{
-		if (it.path() == "." || it.path() == "..")
+		const std::string fullName = GenericUtf8(it->path());
+		const std::string zipName = fullName.substr(prefix.size() + 1);
+		if (it->is_directory(ec))
+		{
+			if (zip_dir_add(zip, zipName.c_str(), ZIP_FL_ENC_UTF_8) < 0)
+				ShowZipError(this, _("Error when trying to add a directory to the zip:\n{}"), zip_strerror(zip));
 			continue;
-
-		const auto entryname = it.path().generic_u8string();
-		if(fs::is_directory(it.path()))
-		{
-			if(zip_dir_add(zip, (const char*)entryname.substr(savedir_str.size() + 1).c_str(), ZIP_FL_ENC_UTF_8) < 0 )
-			{
-				const auto error_msg = formatWxString(_("Error when trying to add a directory to the zip:\n{}"), zip_strerror(zip));
-				wxMessageBox(error_msg, _("Error"), wxOK | wxCENTRE | wxICON_ERROR, this);
-			}
 		}
-		else
+		zip_source_t* source = zip_source_file(zip, fullName.c_str(), 0, 0);
+		if (!source)
 		{
-			auto* source = zip_source_file(zip, (const char*)entryname.c_str(), 0, 0);
-			if(!source)
-			{
-				const auto error_msg = formatWxString(_("Error when trying to add a file to the zip:\n{}"), zip_strerror(zip));
-				wxMessageBox(error_msg, _("Error"), wxOK | wxCENTRE | wxICON_ERROR, this);
-			}
-
-			if (zip_file_add(zip, (const char*)entryname.substr(savedir_str.size() + 1).c_str(), source, ZIP_FL_ENC_UTF_8) < 0)
-			{
-				const auto error_msg = formatWxString(_("Error when trying to add a file to the zip:\n{}"), zip_strerror(zip));
-				wxMessageBox(error_msg, _("Error"), wxOK | wxCENTRE | wxICON_ERROR, this);
-				
-				zip_source_free(source);
-			}
+			ShowZipError(this, _("Error when trying to add a file to the zip:\n{}"), zip_strerror(zip));
+			continue;
+		}
+		if (zip_file_add(zip, zipName.c_str(), source, ZIP_FL_ENC_UTF_8) < 0)
+		{
+			ShowZipError(this, _("Error when trying to add a file to the zip:\n{}"), zip_strerror(zip));
+			zip_source_free(source);
 		}
 	}
 
-	// add own metainfo like file and store title id for verification later
-	std::string metacontent = fmt::format("titleId = {:#016x}", entry->title_id);
-	auto* metabuff = zip_source_buffer(zip, metacontent.data(), metacontent.size(), 0);
-	if(zip_file_add(zip, "cemu_meta", metabuff, ZIP_FL_ENC_UTF_8) < 0)
+	if (ec)
+		cemuLog_log(LogType::Force, "TitleManager: save export could not list {}: {}", _pathToUtf8(accountFolder), ec.message());
+
+	// the import side checks this marker against the title it is imported into
+	const std::string marker = fmt::format("titleId = {:#016x}", entry->title_id);
+	zip_source_t* markerSource = zip_source_buffer(zip, marker.data(), marker.size(), 0);
+	if (zip_file_add(zip, "cemu_meta", markerSource, ZIP_FL_ENC_UTF_8) < 0)
 	{
-		const auto error_msg = formatWxString(_("Error when trying to add cemu_meta file to the zip:\n{}"), zip_strerror(zip));
-		wxMessageBox(error_msg, _("Error"), wxOK | wxCENTRE | wxICON_ERROR, this);
-
-		zip_source_free(metabuff);
+		ShowZipError(this, _("Error when trying to add cemu_meta file to the zip:\n{}"), zip_strerror(zip));
+		zip_source_free(markerSource);
 	}
-
+	// writes the archive; the marker buffer must still be alive here
 	zip_close(zip);
 }
 
@@ -706,42 +666,97 @@ void TitleManager::OnSaveImport(wxCommandEvent& event)
 	auto entry = m_title_list->GetSelectedTitleEntry();
 	if (!entry.has_value())
 		return;
-	
-	SaveImportWindow save_import(this, entry->title_id);
-	if (save_import.ShowModal() == wxCANCEL)
+
+	SaveImportWindow import(this, entry->title_id);
+	if (import.ShowModal() == wxCANCEL)
 		return;
 
-	// add new id if not added yet
-	auto& persistent_ids = entry->persistent_ids;
-	const auto new_id = save_import.GetTargetPersistentId();
-	if (new_id != 0 && std::find(persistent_ids.cbegin(), persistent_ids.cend(), new_id) == persistent_ids.cend())
+	auto& ids = entry->persistent_ids;
+	const uint32 newId = import.GetTargetPersistentId();
+	if (newId != 0 && std::find(ids.cbegin(), ids.cend(), newId) == ids.cend())
 	{
-		persistent_ids.emplace_back(new_id);
-
-		const auto& account = Account::GetAccount(new_id);
-		if (account.GetPersistentId() == new_id)
-			m_save_account_list->Append(fmt::format("{:x} ({})", new_id,
-				boost::nowide::narrow(account.GetMiiName().data(), account.GetMiiName().size())),
-				(void*)(uintptr_t)new_id);
-		else
-			m_save_account_list->Append(fmt::format("{:x}", new_id), (void*)(uintptr_t)new_id);
+		ids.emplace_back(newId);
+		AddSaveAccount(newId);
 	}
-	
+}
+
+// ---------------------------------------------------------------- download manager tab
+
+wxPanel* TitleManager::CreateDownloadManagerPage()
+{
+	auto* page = new wxPanel(m_notebook);
+	auto* column = new wxBoxSizer(wxVERTICAL);
+
+	auto* connectRow = new wxBoxSizer(wxHORIZONTAL);
+#if DOWNLOADMGR_HAS_ACCOUNT_DROPDOWN
+	m_account = new wxChoice(page, wxID_ANY);
+	m_account->SetMinSize({ 250, -1 });
+	const uint32 activeId = GetConfig().account.m_persistent_id.GetValue();
+	for (const Account& account : Account::GetAccounts())
+	{
+		m_account->Append(account.ToString(), (void*)(uintptr_t)account.GetPersistentId());
+		if (account.GetPersistentId() == activeId)
+			m_account->SetSelection(m_account->GetCount() - 1);
+	}
+	connectRow->Add(m_account, 0, wxALL, 5);
+#endif
+	m_connect = new wxButton(page, wxID_ANY, _("Connect"));
+	m_connect->Bind(wxEVT_BUTTON, &TitleManager::OnConnect, this);
+	connectRow->Add(m_connect, 0, wxALL, 5);
+	column->Add(connectRow, 0, wxEXPAND, 5);
+
+#if DOWNLOADMGR_HAS_ACCOUNT_DROPDOWN
+	m_status_text = new wxStaticText(page, wxID_ANY, _("Select an account and press Connect"));
+#else
+	if (NCrypto::HasDataForConsoleCert())
+	{
+		m_status_text = new wxStaticText(page, wxID_ANY, _("Click on Connect to load the list of downloadable titles"));
+	}
+	else
+	{
+		m_status_text = new wxStaticText(page, wxID_ANY, _("Valid online files are required to download eShop titles. For more information, go to the Account tab in the General Settings."));
+		m_connect->Enable(false);
+	}
+#endif
+	Bind(wxEVT_SET_TEXT, &TitleManager::OnSetStatusText, this);
+	column->Add(m_status_text, 0, wxALL, 5);
+
+	column->Add(new wxStaticLine(page, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxLI_HORIZONTAL), 0, wxEXPAND | wxALL, 5);
+
+	// list filters, usable once connected
+	auto* filterRow = new wxFlexGridSizer(0, 3, 0, 0);
+	auto addFilter = [&](const wxString& label) {
+		auto* box = new wxCheckBox(page, wxID_ANY, label);
+		box->SetValue(true);
+		box->Enable(false);
+		box->Bind(wxEVT_CHECKBOX, &TitleManager::OnDlFilterCheckbox, this);
+		filterRow->Add(box, 0, wxALL, 5);
+		return box;
+	};
+	m_show_titles = addFilter(_("Show available titles"));
+	m_show_updates = addFilter(_("Show available updates"));
+	m_show_installed = addFilter(_("Show installed"));
+	column->Add(filterRow, 0, wxEXPAND, 5);
+
+	m_download_list = new wxDownloadManagerList(page);
+	m_download_list->SetSizeHints(800, 600);
+	m_download_list->Bind(wxEVT_LIST_ITEM_SELECTED, &TitleManager::OnTitleSelected, this);
+	column->Add(m_download_list, 1, wxALL | wxEXPAND, 5);
+
+	page->SetSizerAndFit(column);
+	return page;
 }
 
 void TitleManager::InitiateConnect()
 {
-	// init connection to download manager if queued
 #if DOWNLOADMGR_HAS_ACCOUNT_DROPDOWN
-	uint32 persistentId = (uint32)(uintptr_t)m_account->GetClientData(m_account->GetSelection());
-	auto& account = Account::GetAccount(persistentId);
+	const Account& account = Account::GetAccount((uint32)(uintptr_t)m_account->GetClientData(m_account->GetSelection()));
 #endif
-	DownloadManager* dlMgr = DownloadManager::GetInstance();
-	dlMgr->reset();
-	m_download_list->SetCurrentDownloadMgr(dlMgr);
+	DownloadManager* downloads = DownloadManager::GetInstance();
+	downloads->reset();
+	m_download_list->SetCurrentDownloadMgr(downloads);
 
-	std::string deviceCertBase64 = NCrypto::CertECC::GetDeviceCertificate().encodeToBase64();
-
+	const std::string deviceCert = NCrypto::CertECC::GetDeviceCertificate().encodeToBase64();
 	if (!NCrypto::SEEPROM_IsPresent())
 	{
 		SetDownloadStatusText(_("Dumped online files not found"));
@@ -749,12 +764,9 @@ void TitleManager::InitiateConnect()
 	}
 
 	SetDownloadStatusText(_("Connecting..."));
-	// begin async connect
-	dlMgr->setUserData(this);
-	dlMgr->registerCallbacks(
-		TitleManager::Callback_ConnectStatusUpdate,
-		TitleManager::Callback_AddDownloadableTitle,
-		TitleManager::Callback_RemoveDownloadableTitle);
+	downloads->setUserData(this);
+	downloads->registerCallbacks(Callback_ConnectStatusUpdate, Callback_AddDownloadableTitle, Callback_RemoveDownloadableTitle);
+
 	std::string accountName;
 	std::array<uint8, 32> accountPassword;
 	std::string accountCountry;
@@ -763,22 +775,30 @@ void TitleManager::InitiateConnect()
 	accountPassword = account.GetAccountPasswordCache();
 	accountCountry.assign(NCrypto::GetCountryAsString(account.GetCountry()));
 #endif
-	dlMgr->connect(accountName, accountPassword, NCrypto::SEEPROM_GetRegion(), accountCountry, NCrypto::GetDeviceId(), NCrypto::GetSerial(), deviceCertBase64);
+	downloads->connect(accountName, accountPassword, NCrypto::SEEPROM_GetRegion(), accountCountry, NCrypto::GetDeviceId(), NCrypto::GetSerial(), deviceCert);
 }
 
 void TitleManager::OnConnect(wxCommandEvent& event)
 {
-	if (!m_isScanning)
+	if (m_isScanning)
 	{
-		InitiateConnect();
-		SetConnected(true);
-	}
-	else
-	{
+		// installed state is needed for the list; connect once the scan reports back
 		SetDownloadStatusText(_("Getting installed title information..."));
-		SetConnected(true);
 		m_connectRequested = true;
 	}
+	else
+		InitiateConnect();
+	SetConnected(true);
+}
+
+void TitleManager::SetConnected(bool state)
+{
+#if DOWNLOADMGR_HAS_ACCOUNT_DROPDOWN
+	m_account->Enable(!state);
+#endif
+	m_connect->Enable(!state);
+	for (wxWindow* control : { (wxWindow*)m_show_titles, (wxWindow*)m_show_updates, (wxWindow*)m_show_installed, (wxWindow*)m_download_list })
+		control->Enable(state);
 }
 
 void TitleManager::OnDlFilterCheckbox(wxCommandEvent& event)
@@ -789,16 +809,15 @@ void TitleManager::OnDlFilterCheckbox(wxCommandEvent& event)
 
 void TitleManager::OnSetStatusText(wxCommandEvent& event)
 {
-	auto* text = wxDynamicCast(event.GetEventObject(), wxControl);
-	wxASSERT(text);
-	text->SetLabel(event.GetString());
+	auto* control = wxDynamicCast(event.GetEventObject(), wxControl);
+	wxASSERT(control);
+	control->SetLabel(event.GetString());
 }
 
 void TitleManager::OnDownloadableTitleUpdate(wxCommandEvent& event)
 {
-	auto* obj = dynamic_cast<wxDownloadManagerList::TitleEntryData_t*>(event.GetClientObject());
-	auto entry = obj->GetData();
-	m_download_list->AddOrUpdateTitle(obj);
+	if (auto* data = dynamic_cast<wxDownloadManagerList::TitleEntryData_t*>(event.GetClientObject()))
+		m_download_list->AddOrUpdateTitle(data); // copies the entry; the event keeps ownership
 }
 
 void TitleManager::OnDisconnect(wxCommandEvent& event)
@@ -806,102 +825,28 @@ void TitleManager::OnDisconnect(wxCommandEvent& event)
 	SetConnected(false);
 }
 
-void TitleManager::SetConnected(bool state)
-{
-#if DOWNLOADMGR_HAS_ACCOUNT_DROPDOWN
-	m_account->Enable(!state);
-#endif
-	m_connect->Enable(!state);
-
-	m_show_titles->Enable(state);
-	m_show_updates->Enable(state);
-	m_show_installed->Enable(state);
-	m_download_list->Enable(state);
-}
-
 void TitleManager::Callback_ConnectStatusUpdate(std::string statusText, DLMGR_STATUS_CODE statusCode)
 {
-	TitleManager* titleManager = static_cast<TitleManager*>(DownloadManager::GetInstance()->getUserData());
-	titleManager->SetDownloadStatusText(wxString::FromUTF8(statusText));
-	if (statusCode == DLMGR_STATUS_CODE::FAILED)
-	{
-		auto* evt = new wxCommandEvent(wxEVT_DL_DISCONNECT_COMPLETE);
-		wxQueueEvent(titleManager, evt); // this will set SetConnected() to false
+	TitleManager* window = CallbackOwner();
+	if (!window)
 		return;
-	}
+	window->SetDownloadStatusText(wxString::FromUTF8(statusText));
+	if (statusCode == DLMGR_STATUS_CODE::FAILED)
+		wxQueueEvent(window, new wxCommandEvent(wxEVT_DL_DISCONNECT_COMPLETE)); // re-enables Connect
 }
 
 void TitleManager::Callback_AddDownloadableTitle(const DlMgrTitleReport& titleInfo)
 {
-	TitleManager* titleManager = static_cast<TitleManager*>(DownloadManager::GetInstance()->getUserData());
-	wxDownloadManagerList::EntryType type = wxDownloadManagerList::EntryType::Base;
-	if (((titleInfo.titleId >> 32) & 0xF) == 0xE)
-		type = wxDownloadManagerList::EntryType::Update;
-	else if (((titleInfo.titleId >> 32) & 0xF) == 0xC)
-		type = wxDownloadManagerList::EntryType::DLC;
-	if (titleInfo.status == DlMgrTitleReport::STATUS::INSTALLABLE || titleInfo.status == DlMgrTitleReport::STATUS::INSTALLABLE_UNFINISHED || titleInfo.status == DlMgrTitleReport::STATUS::INSTALLABLE_UPDATE)
-	{
-		// installable title
-		wxDownloadManagerList::TitleEntry titleEntry(type, false, titleInfo.titleId, titleInfo.version, titleInfo.isPaused);
-		titleEntry.name = wxString::FromUTF8(titleInfo.name);
-		titleEntry.status = wxDownloadManagerList::TitleDownloadStatus::Available;
-		titleEntry.progress = 0;
-		if (titleInfo.status == DlMgrTitleReport::STATUS::INSTALLABLE_UNFINISHED)
-			titleEntry.progress = 1;
-		if (titleInfo.status == DlMgrTitleReport::STATUS::INSTALLABLE_UPDATE)
-			titleEntry.progress = 2;
-		auto* evt = new wxCommandEvent(wxEVT_DL_TITLE_UPDATE);
-		evt->SetClientObject(new wxCustomData(titleEntry));
-		wxQueueEvent(titleManager, evt);
-	}
-	else
-	{
-		// package
-		wxDownloadManagerList::TitleEntry titleEntry(type, true, titleInfo.titleId, titleInfo.version, titleInfo.isPaused);
-		titleEntry.name = wxString::FromUTF8(titleInfo.name);
-		titleEntry.progress = titleInfo.progress;
-		titleEntry.progressMax = titleInfo.progressMax;
-		switch (titleInfo.status)
-		{
-		case DlMgrTitleReport::STATUS::INITIALIZING:
-			titleEntry.status = wxDownloadManagerList::TitleDownloadStatus::Initializing;
-			break;
-		case DlMgrTitleReport::STATUS::QUEUED:
-			titleEntry.status = wxDownloadManagerList::TitleDownloadStatus::Queued;
-			break;
-		case DlMgrTitleReport::STATUS::CHECKING:
-			titleEntry.status = wxDownloadManagerList::TitleDownloadStatus::Checking;
-			break;
-		case DlMgrTitleReport::STATUS::DOWNLOADING:
-			titleEntry.status = wxDownloadManagerList::TitleDownloadStatus::Downloading;
-			titleEntry.progress = titleInfo.progress;
-			break;
-		case DlMgrTitleReport::STATUS::VERIFYING:
-			titleEntry.status = wxDownloadManagerList::TitleDownloadStatus::Verifying;
-			break;
-		case DlMgrTitleReport::STATUS::INSTALLING:
-			titleEntry.status = wxDownloadManagerList::TitleDownloadStatus::Installing;
-			break;
-		case DlMgrTitleReport::STATUS::INSTALLED:
-			titleEntry.status = wxDownloadManagerList::TitleDownloadStatus::Installed;
-			break;
-		case DlMgrTitleReport::STATUS::HAS_ERROR:
-			titleEntry.status = wxDownloadManagerList::TitleDownloadStatus::Error;
-			titleEntry.errorMsg = titleInfo.errorMsg;
-			break;
-		default:
-			titleEntry.status = wxDownloadManagerList::TitleDownloadStatus::None;
-			break;
-		}
-
-		auto* evt = new wxCommandEvent(wxEVT_DL_TITLE_UPDATE);
-		evt->SetClientObject(new wxCustomData(titleEntry));
-		wxQueueEvent(titleManager, evt);
-	}
+	TitleManager* window = CallbackOwner();
+	if (!window)
+		return;
+	auto* event = new wxCommandEvent(wxEVT_DL_TITLE_UPDATE);
+	event->SetClientObject(new wxDownloadManagerList::TitleEntryData_t(MakeDownloadEntry(titleInfo)));
+	wxQueueEvent(window, event);
 }
 
 void TitleManager::Callback_RemoveDownloadableTitle(uint64 titleId, uint16 version)
 {
-	TitleManager* titleManager = static_cast<TitleManager*>(DownloadManager::GetInstance()->getUserData());
+	// the download manager never removes titles from the list
 	assert_dbg();
 }
