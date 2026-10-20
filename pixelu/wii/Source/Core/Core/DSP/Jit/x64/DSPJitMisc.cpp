@@ -1,5 +1,7 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// Register moves, immediate loads, address register steps and the $sr
+// control bits.
 
 #include "Core/DSP/Jit/x64/DSPEmitter.h"
 
@@ -11,183 +13,100 @@ using namespace Gen;
 
 namespace DSP::JIT::x64
 {
-// MRR $D, $S
-// 0001 11dd ddds ssss
-// Move value from register $S to register $D.
-void DSPEmitter::mrr(const UDSPInstruction opc)
-{
-  u8 sreg = opc & 0x1f;
-  u8 dreg = (opc >> 5) & 0x1f;
-
-  dsp_op_read_reg(sreg, EDX);
-  dsp_op_write_reg(dreg, EDX);
-  dsp_conditional_extend_accum(dreg);
-}
-
-// LRI $D, #I
-// 0000 0000 100d dddd
-// iiii iiii iiii iiii
-// Load immediate value I to register $D.
-//
-// DSPSpy discovery: This, and possibly other instructions that load a
-// register, has a different behaviour in S40 mode if loaded to AC0.M: The
-// value gets sign extended to the whole accumulator! This does not happen in
-// S16 mode.
-void DSPEmitter::lri(const UDSPInstruction opc)
-{
-  const u8 reg = opc & 0x1F;
-  const u16 imm = m_dsp_core.DSPState().ReadIMEM(m_compile_pc + 1);
-  dsp_op_write_reg_imm(reg, imm);
-  dsp_conditional_extend_accum_imm(reg, imm);
-}
-
-// LRIS $(0x18+D), #I
-// 0000 1ddd iiii iiii
-// Load immediate value I (8-bit sign extended) to accumulator register.
-void DSPEmitter::lris(const UDSPInstruction opc)
-{
-  u8 reg = ((opc >> 8) & 0x7) + DSP_REG_AXL0;
-  u16 imm = (s8)opc;
-  dsp_op_write_reg_imm(reg, imm);
-  dsp_conditional_extend_accum_imm(reg, imm);
-}
-
-//----
-
-// NX
-// 1000 -000 xxxx xxxx
-// No operation, but can be extended with extended opcode.
-// This opcode is supposed to do nothing - it's used if you want to use
-// an opcode extension but not do anything. At least according to duddie.
-void DSPEmitter::nx(const UDSPInstruction opc)
+// NOP, NX: nothing (NX exists for its extension).
+void DSPEmitter::OpNop(UDSPInstruction)
 {
 }
 
-//----
-
-// DAR $arD
-// 0000 0000 0000 01dd
-// Decrement address register $arD.
-void DSPEmitter::dar(const UDSPInstruction opc)
+// DAR, IAR, SUBARN $arD (bits 2-3 = 1, 2, 3).
+void DSPEmitter::OpModifyAr(UDSPInstruction opc)
 {
-  //	g_dsp.r[opc & 0x3] = dsp_decrement_addr_reg(opc & 0x3);
-  decrement_addr_reg(opc & 0x3);
-}
-
-// IAR $arD
-// 0000 0000 0000 10dd
-// Increment address register $arD.
-void DSPEmitter::iar(const UDSPInstruction opc)
-{
-  //	g_dsp.r[opc & 0x3] = dsp_increment_addr_reg(opc & 0x3);
-  increment_addr_reg(opc & 0x3);
-}
-
-// SUBARN $arD
-// 0000 0000 0000 11dd
-// Subtract indexing register $ixD from an addressing register $arD.
-// used only in IPL-NTSC ucode
-void DSPEmitter::subarn(const UDSPInstruction opc)
-{
-  //	u8 dreg = opc & 0x3;
-  //	g_dsp.r[dreg] = dsp_decrease_addr_reg(dreg, (s16)g_dsp.r[DSP_REG_IX0 + dreg]);
-  decrease_addr_reg(opc & 0x3);
+  const int ar = opc & 0x3;
+  switch ((opc >> 2) & 0x3)
+  {
+  case 1:
+    EmitArDecrement(ar);
+    break;
+  case 2:
+    EmitArIncrement(ar);
+    break;
+  default:
+    EmitArSubIndex(ar);
+    break;
+  }
 }
 
 // ADDARN $arD, $ixS
-// 0000 0000 0001 ssdd
-// Adds indexing register $ixS to an addressing register $arD.
-// It is critical for the Zelda ucode that this one wraps correctly.
-void DSPEmitter::addarn(const UDSPInstruction opc)
+void DSPEmitter::OpAddarn(UDSPInstruction opc)
 {
-  //	u8 dreg = opc & 0x3;
-  //	u8 sreg = (opc >> 2) & 0x3;
-  //	g_dsp.r[dreg] = dsp_increase_addr_reg(dreg, (s16)g_dsp.r[DSP_REG_IX0 + sreg]);
-
-  // From looking around it is always called with the matching index register
-  increase_addr_reg(opc & 0x3, (opc >> 2) & 0x3);
+  EmitArAddIndex(opc & 0x3, (opc >> 2) & 0x3);
 }
 
-//----
-
-void DSPEmitter::setCompileSR(u16 bit)
+// MRR $D, $S
+void DSPEmitter::OpMrr(UDSPInstruction opc)
 {
-  //	g_dsp.r[DSP_REG_SR] |= bit
-  const OpArg sr_reg = m_gpr.GetReg(DSP_REG_SR);
-  OR(16, sr_reg, Imm16(bit));
-  m_gpr.PutReg(DSP_REG_SR);
-
-  m_compile_status_register |= bit;
+  const int src = opc & 0x1f;
+  const int dst = (opc >> 5) & 0x1f;
+  ReadOperand(src, RDX, RegisterExtension::None);
+  WriteOperand(dst, RDX);
+  ExtendMid(dst);
 }
 
-void DSPEmitter::clrCompileSR(u16 bit)
+// LRI $D, #imm16
+void DSPEmitter::OpLri(UDSPInstruction opc)
 {
-  //	g_dsp.r[DSP_REG_SR] &= bit
-  const OpArg sr_reg = m_gpr.GetReg(DSP_REG_SR);
-  AND(16, sr_reg, Imm16(~bit));
-  m_gpr.PutReg(DSP_REG_SR);
-
-  m_compile_status_register &= ~bit;
-}
-// SBCLR #I
-// 0001 0011 aaaa aiii
-// Clear bit of status register $sr. Bit number is calculated by adding 6 to immediate value I;
-// thus, bits 6 through 13 (LZ through AM) can be cleared with this instruction.
-void DSPEmitter::sbclr(const UDSPInstruction opc)
-{
-  u8 bit = (opc & 0x7) + 6;
-
-  clrCompileSR(1 << bit);
+  const int dst = opc & 0x1f;
+  const u16 value = m_dsp_core.DSPState().ReadIMEM(static_cast<u16>(m_pc + 1));
+  WriteOperandImm(dst, value);
+  ExtendMidImm(dst, value);
 }
 
-// SBSET #I
-// 0001 0010 aaaa aiii
-// Set bit of status register $sr. Bit number is calculated by adding 6 to immediate value I;
-// thus, bits 6 through 13 (LZ through AM) can be set with this instruction.
-void DSPEmitter::sbset(const UDSPInstruction opc)
+// LRIS $(0x18+D), #imm8 (sign extended)
+void DSPEmitter::OpLris(UDSPInstruction opc)
 {
-  u8 bit = (opc & 0x7) + 6;
-
-  setCompileSR(1 << bit);
+  const int dst = DSP_REG_AXL0 + ((opc >> 8) & 0x7);
+  const u16 value = static_cast<u16>(static_cast<s8>(opc & 0xff));
+  WriteOperandImm(dst, value);
+  ExtendMidImm(dst, value);
 }
 
-// 1000 1bbb xxxx xxxx, bbb >= 010
-// This is a bunch of flag setters, flipping bits in SR. So far so good,
-// but it's harder to know exactly what effect they have.
-void DSPEmitter::srbith(const UDSPInstruction opc)
+// SBCLR / SBSET #bit: clear or set bit (6 + bit) of $sr.
+void DSPEmitter::OpSrBit(UDSPInstruction opc)
 {
+  const u16 bit = static_cast<u16>(1u << ((opc & 0x7) + 6));
+  MOVZX(32, 16, EAX, m_regs.Word(DSP_REG_SR));
+  if ((opc & 0x0100) != 0)
+    OR(32, R(EAX), Imm32(bit));
+  else
+    AND(32, R(EAX), Imm32(static_cast<u16>(~bit)));
+  m_regs.StoreWord(DSP_REG_SR, RAX);
+}
+
+// M2/M0, CLR15/SET15, SET16/SET40 (bits 8-11 = a..f): even ones clear an $sr
+// mode bit, odd ones set it.
+void DSPEmitter::OpModeBit(UDSPInstruction opc)
+{
+  u16 bit;
   switch ((opc >> 8) & 0xf)
   {
-  // M0/M2 change the multiplier mode (it can multiply by 2 for free).
-  case 0xa:  // M2
-    clrCompileSR(SR_MUL_MODIFY);
+  case 0xa:
+  case 0xb:
+    bit = SR_MUL_MODIFY;
     break;
-  case 0xb:  // M0
-    setCompileSR(SR_MUL_MODIFY);
+  case 0xc:
+  case 0xd:
+    bit = SR_MUL_UNSIGNED;
     break;
-
-  // If set, treat multiplicands as unsigned.
-  // If clear, treat them as signed.
-  case 0xc:  // CLR15
-    clrCompileSR(SR_MUL_UNSIGNED);
-    break;
-  case 0xd:  // SET15
-    setCompileSR(SR_MUL_UNSIGNED);
-    break;
-
-  // Automatic 40-bit sign extension when loading ACx.M.
-  // SET40 changes something very important: see the LRI instruction above.
-  case 0xe:  // SET16 (CLR40)
-    clrCompileSR(SR_40_MODE_BIT);
-    break;
-
-  case 0xf:  // SET40
-    setCompileSR(SR_40_MODE_BIT);
-    break;
-
   default:
+    bit = SR_40_MODE_BIT;
     break;
   }
+  MOVZX(32, 16, EAX, m_regs.Word(DSP_REG_SR));
+  if ((opc & 0x0100) != 0)
+    OR(32, R(EAX), Imm32(bit));
+  else
+    AND(32, R(EAX), Imm32(static_cast<u16>(~bit)));
+  m_regs.StoreWord(DSP_REG_SR, RAX);
 }
 
 }  // namespace DSP::JIT::x64

@@ -1,15 +1,26 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// The x86-64 recompiler for the GameCube/Wii DSP.
+//
+// Code is translated one block at a time. A block starts where the DSP's pc
+// was when no code existed for it, and ends at an unconditional branch, at the
+// instruction before an idle loop, or after MAX_BLOCK_INSTRUCTIONS
+// instructions. Every block returns the number of cycles it used (one per
+// instruction, or IDLE_SKIP_CYCLES for an idle loop) to a small dispatcher,
+// which looks up the block for the new pc and keeps going until the cycle
+// budget is spent or the DSP halts.
+//
+// Unconditional jumps and calls to blocks that are complete may chain
+// straight into the target while the budget lasts ("linking"). A block whose
+// own unconditional branches could not be linked yet is not a link target; it
+// waits for its targets to be compiled, and is translated again once they are.
 
 #pragma once
 
-#include <array>
-#include <cstddef>
-#include <list>
+#include <set>
 #include <vector>
 
 #include "Common/CommonTypes.h"
-#include "Common/x64ABI.h"
 #include "Common/x64Emitter.h"
 
 #include "Core/DSP/DSPCommon.h"
@@ -20,9 +31,11 @@ class PointerWrap;
 
 namespace DSP
 {
+class DSPCore;
 enum class StackRegister;
+}  // namespace DSP
 
-namespace JIT::x64
+namespace DSP::JIT::x64
 {
 class DSPEmitter final : public JIT::DSPEmitter, public Gen::X64CodeBlock
 {
@@ -30,312 +43,270 @@ public:
   explicit DSPEmitter(DSPCore& dsp);
   ~DSPEmitter() override;
 
+  DSPEmitter(const DSPEmitter&) = delete;
+  DSPEmitter& operator=(const DSPEmitter&) = delete;
+  DSPEmitter(DSPEmitter&&) = delete;
+  DSPEmitter& operator=(DSPEmitter&&) = delete;
+
+  // What an address register does after an access.
+  enum class ArStep
+  {
+    None,
+    Decrement,
+    Increment,
+    AddIndex,  // + the $ix register of the same number
+  };
+
   u16 RunCycles(u16 cycles) override;
-  void DoState(PointerWrap& p) override;
   void ClearIRAM() override;
+  void DoState(PointerWrap& p) override;
 
-  // Ext commands
-  void l(UDSPInstruction opc);
-  void ln(UDSPInstruction opc);
-  void ls(UDSPInstruction opc);
-  void lsn(UDSPInstruction opc);
-  void lsm(UDSPInstruction opc);
-  void lsnm(UDSPInstruction opc);
-  void sl(UDSPInstruction opc);
-  void sln(UDSPInstruction opc);
-  void slm(UDSPInstruction opc);
-  void slnm(UDSPInstruction opc);
-  void s(UDSPInstruction opc);
-  void sn(UDSPInstruction opc);
-  void ld(UDSPInstruction opc);
-  void ldax(UDSPInstruction opc);
-  void ldn(UDSPInstruction opc);
-  void ldaxn(UDSPInstruction opc);
-  void ldm(UDSPInstruction opc);
-  void ldaxm(UDSPInstruction opc);
-  void ldnm(UDSPInstruction opc);
-  void ldaxnm(UDSPInstruction opc);
-  void mv(UDSPInstruction opc);
-  void dr(UDSPInstruction opc);
-  void ir(UDSPInstruction opc);
-  void nr(UDSPInstruction opc);
-  void nop(const UDSPInstruction opc) {}
-  // Commands
-  void dar(UDSPInstruction opc);
-  void iar(UDSPInstruction opc);
-  void subarn(UDSPInstruction opc);
-  void addarn(UDSPInstruction opc);
-  void sbclr(UDSPInstruction opc);
-  void sbset(UDSPInstruction opc);
-  void srbith(UDSPInstruction opc);
-  void lri(UDSPInstruction opc);
-  void lris(UDSPInstruction opc);
-  void mrr(UDSPInstruction opc);
-  void nx(UDSPInstruction opc);
+  // Instruction translators, found through DSPJitTables. Each emits the code of
+  // one instruction (or of the extension in its low bits) at m_pc.
 
-  // Branch
-  void jcc(UDSPInstruction opc);
-  void jmprcc(UDSPInstruction opc);
-  void call(UDSPInstruction opc);
-  void callr(UDSPInstruction opc);
-  void ifcc(UDSPInstruction opc);
-  void ret(UDSPInstruction opc);
-  void rti(UDSPInstruction opc);
-  void halt(UDSPInstruction opc);
-  void loop(UDSPInstruction opc);
-  void loopi(UDSPInstruction opc);
-  void bloop(UDSPInstruction opc);
-  void bloopi(UDSPInstruction opc);
+  // Control flow (DSPJitBranch.cpp)
+  void OpJump(UDSPInstruction opc);
+  void OpCall(UDSPInstruction opc);
+  void OpJumpReg(UDSPInstruction opc);
+  void OpCallReg(UDSPInstruction opc);
+  void OpIf(UDSPInstruction opc);
+  void OpRet(UDSPInstruction opc);
+  void OpRti(UDSPInstruction opc);
+  void OpHalt(UDSPInstruction opc);
+  void OpLoop(UDSPInstruction opc);
+  void OpBloop(UDSPInstruction opc);
+  void OpLoopi(UDSPInstruction opc);
+  void OpBloopi(UDSPInstruction opc);
 
-  // Load/Store
-  void srsh(UDSPInstruction opc);
-  void srs(UDSPInstruction opc);
-  void lrs(UDSPInstruction opc);
-  void lr(UDSPInstruction opc);
-  void sr(UDSPInstruction opc);
-  void si(UDSPInstruction opc);
-  void lrr(UDSPInstruction opc);
-  void lrrd(UDSPInstruction opc);
-  void lrri(UDSPInstruction opc);
-  void lrrn(UDSPInstruction opc);
-  void srr(UDSPInstruction opc);
-  void srrd(UDSPInstruction opc);
-  void srri(UDSPInstruction opc);
-  void srrn(UDSPInstruction opc);
-  void ilrr(UDSPInstruction opc);
-  void ilrrd(UDSPInstruction opc);
-  void ilrri(UDSPInstruction opc);
-  void ilrrn(UDSPInstruction opc);
+  // Register moves, immediates, address registers, status bits (DSPJitMisc.cpp)
+  void OpNop(UDSPInstruction opc);
+  void OpModifyAr(UDSPInstruction opc);
+  void OpAddarn(UDSPInstruction opc);
+  void OpMrr(UDSPInstruction opc);
+  void OpLri(UDSPInstruction opc);
+  void OpLris(UDSPInstruction opc);
+  void OpSrBit(UDSPInstruction opc);
+  void OpModeBit(UDSPInstruction opc);
 
-  // Arithmetic
-  void clr(UDSPInstruction opc);
-  void clrl(UDSPInstruction opc);
-  void andcf(UDSPInstruction opc);
-  void andf(UDSPInstruction opc);
-  void tst(UDSPInstruction opc);
-  void tstaxh(UDSPInstruction opc);
-  void cmp(UDSPInstruction opc);
-  void cmpaxh(UDSPInstruction opc);
-  void cmpi(UDSPInstruction opc);
-  void cmpis(UDSPInstruction opc);
-  void xorr(UDSPInstruction opc);
-  void andr(UDSPInstruction opc);
-  void orr(UDSPInstruction opc);
-  void andc(UDSPInstruction opc);
-  void orc(UDSPInstruction opc);
-  void xorc(UDSPInstruction opc);
-  void notc(UDSPInstruction opc);
-  void xori(UDSPInstruction opc);
-  void andi(UDSPInstruction opc);
-  void ori(UDSPInstruction opc);
-  void addr(UDSPInstruction opc);
-  void addax(UDSPInstruction opc);
-  void add(UDSPInstruction opc);
-  void addp(UDSPInstruction opc);
-  void addaxl(UDSPInstruction opc);
-  void addi(UDSPInstruction opc);
-  void addis(UDSPInstruction opc);
-  void incm(UDSPInstruction opc);
-  void inc(UDSPInstruction opc);
-  void subr(UDSPInstruction opc);
-  void subax(UDSPInstruction opc);
-  void sub(UDSPInstruction opc);
-  void subp(UDSPInstruction opc);
-  void decm(UDSPInstruction opc);
-  void dec(UDSPInstruction opc);
-  void neg(UDSPInstruction opc);
-  void abs(UDSPInstruction opc);
-  void movr(UDSPInstruction opc);
-  void movax(UDSPInstruction opc);
-  void mov(UDSPInstruction opc);
-  void lsl16(UDSPInstruction opc);
-  void lsr16(UDSPInstruction opc);
-  void asr16(UDSPInstruction opc);
-  void lsl(UDSPInstruction opc);
-  void lsr(UDSPInstruction opc);
-  void asl(UDSPInstruction opc);
-  void asr(UDSPInstruction opc);
-  void lsrn(UDSPInstruction opc);
-  void asrn(UDSPInstruction opc);
-  void lsrnrx(UDSPInstruction opc);
-  void asrnrx(UDSPInstruction opc);
-  void lsrnr(UDSPInstruction opc);
-  void asrnr(UDSPInstruction opc);
+  // Memory (DSPJitLoadStore.cpp)
+  void OpLr(UDSPInstruction opc);
+  void OpSr(UDSPInstruction opc);
+  void OpSi(UDSPInstruction opc);
+  void OpLrr(UDSPInstruction opc);
+  void OpSrr(UDSPInstruction opc);
+  void OpIlrr(UDSPInstruction opc);
+  void OpLrs(UDSPInstruction opc);
+  void OpSrs(UDSPInstruction opc);
+  void OpSrsh(UDSPInstruction opc);
 
-  // Multipliers
-  void clrp(UDSPInstruction opc);
-  void tstprod(UDSPInstruction opc);
-  void movp(UDSPInstruction opc);
-  void movnp(UDSPInstruction opc);
-  void movpz(UDSPInstruction opc);
-  void addpaxz(UDSPInstruction opc);
-  void mulaxh(UDSPInstruction opc);
-  void mul(UDSPInstruction opc);
-  void mulac(UDSPInstruction opc);
-  void mulmv(UDSPInstruction opc);
-  void mulmvz(UDSPInstruction opc);
-  void mulx(UDSPInstruction opc);
-  void mulxac(UDSPInstruction opc);
-  void mulxmv(UDSPInstruction opc);
-  void mulxmvz(UDSPInstruction opc);
-  void mulc(UDSPInstruction opc);
-  void mulcac(UDSPInstruction opc);
-  void mulcmv(UDSPInstruction opc);
-  void mulcmvz(UDSPInstruction opc);
-  void maddx(UDSPInstruction opc);
-  void msubx(UDSPInstruction opc);
-  void maddc(UDSPInstruction opc);
-  void msubc(UDSPInstruction opc);
-  void madd(UDSPInstruction opc);
-  void msub(UDSPInstruction opc);
+  // Accumulator arithmetic, logic and shifts (DSPJitArithmetic.cpp)
+  void OpClr(UDSPInstruction opc);
+  void OpClrl(UDSPInstruction opc);
+  void OpTestBits(UDSPInstruction opc);
+  void OpTst(UDSPInstruction opc);
+  void OpTstaxh(UDSPInstruction opc);
+  void OpCmp(UDSPInstruction opc);
+  void OpCmpaxh(UDSPInstruction opc);
+  void OpCmpi(UDSPInstruction opc);
+  void OpCmpis(UDSPInstruction opc);
+  void OpLogicAx(UDSPInstruction opc);
+  void OpLogicAcc(UDSPInstruction opc);
+  void OpNotc(UDSPInstruction opc);
+  void OpLogicImm(UDSPInstruction opc);
+  void OpAddSubAxPart(UDSPInstruction opc);
+  void OpAddSubAx(UDSPInstruction opc);
+  void OpAddSubAcc(UDSPInstruction opc);
+  void OpAddSubProd(UDSPInstruction opc);
+  void OpAddaxl(UDSPInstruction opc);
+  void OpAddi(UDSPInstruction opc);
+  void OpAddis(UDSPInstruction opc);
+  void OpIncDec(UDSPInstruction opc);
+  void OpNeg(UDSPInstruction opc);
+  void OpAbs(UDSPInstruction opc);
+  void OpMovr(UDSPInstruction opc);
+  void OpMovax(UDSPInstruction opc);
+  void OpMov(UDSPInstruction opc);
+  void OpLsl16(UDSPInstruction opc);
+  void OpLsr16(UDSPInstruction opc);
+  void OpAsr16(UDSPInstruction opc);
+  void OpShiftImm(UDSPInstruction opc);
+  void OpShiftByAcm1(UDSPInstruction opc);
+  void OpShiftByAx(UDSPInstruction opc);
+  void OpShiftByAcm(UDSPInstruction opc);
+
+  // Product register and multiplies (DSPJitMultiplier.cpp)
+  void OpClrp(UDSPInstruction opc);
+  void OpTstprod(UDSPInstruction opc);
+  void OpMovp(UDSPInstruction opc);
+  void OpMovnp(UDSPInstruction opc);
+  void OpMovpz(UDSPInstruction opc);
+  void OpAddpaxz(UDSPInstruction opc);
+  void OpMulaxh(UDSPInstruction opc);
+  void OpMul(UDSPInstruction opc);
+  void OpMulx(UDSPInstruction opc);
+  void OpMulc(UDSPInstruction opc);
+  void OpMaddxc(UDSPInstruction opc);
+  void OpMadd(UDSPInstruction opc);
+
+  // Extensions (DSPJitExtOps.cpp)
+  void ExtModifyAr(UDSPInstruction opc);
+  void ExtMove(UDSPInstruction opc);
+  void ExtStore(UDSPInstruction opc);
+  void ExtLoad(UDSPInstruction opc);
+  void ExtLoadStore(UDSPInstruction opc);
+  void ExtLoadDual(UDSPInstruction opc);
+  void ExtLoadDualAx(UDSPInstruction opc);
 
 private:
-  using DSPCompiledCode = u32 (*)();
-  using Block = const u8*;
+  // Per-block bookkeeping, indexed by start address.
+  struct BlockTable
+  {
+    std::vector<const u8*> entry;   // what the dispatcher jumps to (the stub if not compiled)
+    std::vector<const u8*> link;    // where linked branches enter, or null if not linkable
+    std::vector<u16> length;        // instructions in the block
+    std::vector<std::vector<u16>> waiting;  // link targets that were not linkable yet
+    std::set<u16> waiting_blocks;   // the blocks whose waiting list is not empty
+  };
 
-  // The emitter emits calls to this function. It's present here
-  // within the class itself to allow access to member variables.
-  static void CompileCurrent(DSPEmitter& emitter);
-
-  static u16 ReadIFXRegisterHelper(DSPEmitter& emitter, u16 address);
-  static void WriteIFXRegisterHelper(DSPEmitter& emitter, u16 address, u16 value);
-
+  // --- DSPEmitter.cpp: block management ---
+  void BuildDispatcher();
+  void BuildStub();
+  void ResetAllBlocks();
+  void ResetBlock(u16 start);
+  bool CompileCurrent();
+  void CompileBlock(u16 start);
   void EmitInstruction(UDSPInstruction inst);
-  void ClearIRAMandDSPJITCodespaceReset();
+  void EmitInterpreterCall(UDSPInstruction inst);
+  void EmitExceptionCheck(u16 cycles);
+  void EmitLoopEnd(bool after_branch);
+  void EmitExit(u16 cycles);
+  u16 BlockEndCycles() const;
+  void AddWaiting(u16 block, u16 target);
+  void RemoveWaiting(u16 block, u16 target);
+  void ClearWaiting(u16 block);
+  static u32 CompileCurrentThunk(DSPEmitter& emitter);
 
-  void CompileDispatcher();
-  Block CompileStub();
-  void Compile(u16 start_addr);
+  // --- DSPJitBranch.cpp ---
+  // Emits body(opc) so that it runs only if condition (opc & 0xf) holds.
+  void EmitConditional(UDSPInstruction opc, void (DSPEmitter::*body)(UDSPInstruction));
+  void EmitBranchExit();
+  void EmitBlockLink(u16 target);
+  void EmitLoopCounterStep();
+  void EmitLoopSkip(u16 last_address);
+  void JumpBody(UDSPInstruction opc);
+  void CallBody(UDSPInstruction opc);
+  void JumpRegBody(UDSPInstruction opc);
+  void CallRegBody(UDSPInstruction opc);
+  void IfBody(UDSPInstruction opc);
+  void RetBody(UDSPInstruction opc);
+  void RtiBody(UDSPInstruction opc);
 
-  bool FlagsNeeded() const;
+  // --- DSPJitCCUtil.cpp: status register ---
+  // Whether the flags an instruction sets can be seen by anything (the
+  // analyzer decides; with its SR analysis disabled, always).
+  bool WantFlags() const;
+  // Branches to the returned fixup when condition `cond` (0-15) does NOT hold.
+  Gen::FixupBranch EmitSkipUnless(u8 cond);
+  // Adds the zero, sign, over-s32 and top-two-bits flags of the 64-bit value to `flags`.
+  void CollectFlags40(Gen::X64Reg value, Gen::X64Reg flags);
+  // Replaces the six result flags of $sr with those of a 64-bit value.
+  void SetFlags40(Gen::X64Reg value);
+  // The same after an addition (subtract = false) or subtraction a - b; result is
+  // the stored (sign-extended) value. Adds carry and overflow.
+  void SetFlagsAddSub(Gen::X64Reg a, Gen::X64Reg b, Gen::X64Reg result, bool subtract);
+  // The six result flags of a 16-bit $acX.m result; with full_acc != INVALID_REG the
+  // over-s32 flag comes from the whole accumulator instead.
+  void SetFlags16(Gen::X64Reg value, Gen::X64Reg full_acc);
+  // Writes `flags` into the result bits (SR_CMP_MASK) of $sr.
+  void CommitFlags(Gen::X64Reg flags);
 
-  void FallBackToInterpreter(UDSPInstruction inst);
+  // --- DSPJitUtil.cpp: operands, memory, stacks, address registers, product ---
+  // Reads a register as an instruction operand: $st0-$st3 pop their stack, and
+  // $acX.m saturates in 40-bit mode. Zero and None give the 16 bits zero extended.
+  void ReadOperand(int reg, Gen::X64Reg dst, RegisterExtension ext);
+  // Writes a register as an instruction result: $st0-$st3 push their stack.
+  void WriteOperand(int reg, Gen::X64Reg src);
+  void WriteOperandImm(int reg, u16 value);
+  // After a load into $acX.m in 40-bit mode: $acX.h takes the sign, $acX.l is cleared.
+  void ExtendMid(int reg);
+  void ExtendMidImm(int reg, u16 value);
 
-  void WriteBranchExit();
-  void WriteBlockLink(u16 dest);
+  void PushStack(int stack, Gen::X64Reg value);
+  void PushStackImm(int stack, u16 value);
+  void PopStack(int stack, Gen::X64Reg dst);
 
-  void ReJitConditional(UDSPInstruction opc, void (DSPEmitter::*conditional_fn)(UDSPInstruction));
-  void r_jcc(UDSPInstruction opc);
-  void r_jmprcc(UDSPInstruction opc);
-  void r_call(UDSPInstruction opc);
-  void r_callr(UDSPInstruction opc);
-  void r_ifcc(UDSPInstruction opc);
-  void r_ret(UDSPInstruction opc);
-  void r_rti(UDSPInstruction opc);
+  // Data memory with the address in a register; the value read ends up zero
+  // extended in RAX. Both clobber every caller-saved register.
+  void EmitDataRead(Gen::X64Reg address);
+  void EmitDataWrite(Gen::X64Reg address, Gen::X64Reg value);
+  // Data memory at an address known while compiling.
+  void EmitDataReadImm(u16 address);
+  void EmitDataWriteImm(u16 address, Gen::X64Reg value);
+  // Instruction memory; the value ends up zero extended in RAX.
+  void EmitCodeRead(Gen::X64Reg address);
 
-  void Update_SR_Register(Gen::X64Reg val = Gen::EAX, Gen::X64Reg scratch = Gen::EDX);
+  // Address register updates; they use the helper registers only.
+  void EmitArIncrement(int ar);
+  void EmitArDecrement(int ar);
+  void EmitArAddIndex(int ar, int ix);
+  void EmitArSubIndex(int ar);
+  void EmitArStep(int ar, ArStep step);
+  // Shared tail of the index updates; see DSPJitUtil.cpp.
+  void EmitArIndexWrap(int ar, const Gen::FixupBranch& to_backward);
 
-  void get_long_prod(Gen::X64Reg long_prod = Gen::RAX);
-  void get_long_prod_round_prodl(Gen::X64Reg long_prod = Gen::RAX);
-  void set_long_prod();
-  void dsp_convert_long_acc(Gen::X64Reg long_acc);  // s64 -> s40
-  void round_long_acc(Gen::X64Reg long_acc = Gen::EAX);
-  void set_long_acc(int _reg, Gen::X64Reg acc = Gen::EAX);
-  void get_acc_h(int _reg, Gen::X64Reg acc = Gen::EAX, bool sign = true);
-  void set_acc_h(int _reg, const Gen::OpArg& arg = R(Gen::EAX));
-  void get_acc_m(int _reg, Gen::X64Reg acc = Gen::EAX, bool sign = true);
-  void set_acc_m(int _reg, const Gen::OpArg& arg = R(Gen::EAX));
-  void get_acc_l(int _reg, Gen::X64Reg acc = Gen::EAX, bool sign = true);
-  void set_acc_l(int _reg, const Gen::OpArg& arg = R(Gen::EAX));
-  void get_long_acx(int _reg, Gen::X64Reg acx = Gen::EAX);
-  void get_ax_l(int _reg, Gen::X64Reg acx = Gen::EAX);
-  void get_ax_h(int _reg, Gen::X64Reg acc = Gen::EAX);
-  void get_long_acc(int _reg, Gen::X64Reg acc = Gen::EAX);
+  // The 40-bit value of the product register (with its second middle part added).
+  void LoadProduct(Gen::X64Reg dst);
+  // Stores the low 40 bits of src into the product register.
+  void StoreProduct(Gen::X64Reg src);
+  // Rounds a 64-bit accumulator value to its middle word (round half to even).
+  void RoundToMid(Gen::X64Reg value);
 
-  // Branch helpers
-  void HandleLoop();
+  // --- DSPJitArithmetic.cpp ---
+  // Sign extends a value from bit 39.
+  void EmitSext40(Gen::X64Reg value);
+  // acc = acc + RDX (or - RDX), with the flags of an addition or subtraction.
+  void EmitAccAddSub(int acc, bool subtract);
+  // Shifts accumulator acc by the count in the low bits of EAX (see the file).
+  void EmitVariableShift(int acc, bool arithmetic, bool bit6_shifts_left);
+  // Flags of a comparison a - b (a in RAX, b in RDX).
+  void EmitCompare();
 
-  // CC helpers
-  void Update_SR_Register64(Gen::X64Reg val = Gen::EAX, Gen::X64Reg scratch = Gen::EDX);
-  void UpdateSR64AddSub(Gen::X64Reg val1, Gen::X64Reg val2, Gen::X64Reg result, Gen::X64Reg scratch,
-                        bool subtract);
-  void UpdateSR64Add(Gen::X64Reg val1, Gen::X64Reg val2, Gen::X64Reg result, Gen::X64Reg scratch)
-  {
-    UpdateSR64AddSub(val1, val2, result, scratch, false);
-  }
-  void UpdateSR64Sub(Gen::X64Reg val1, Gen::X64Reg val2, Gen::X64Reg result, Gen::X64Reg scratch)
-  {
-    UpdateSR64AddSub(val1, val2, result, scratch, true);
-  }
-  void Update_SR_Register16(Gen::X64Reg val);
-  void Update_SR_Register16_OverS32(Gen::X64Reg val, Gen::X64Reg full_val, Gen::X64Reg scratch);
+  // --- DSPJitMultiplier.cpp ---
+  // lhs = lhs * rhs, doubled unless $sr says otherwise.
+  void EmitMultiply(Gen::X64Reg lhs, Gen::X64Reg rhs);
+  // The MULX-family product of the two 16-bit halves selected by the opcode.
+  void EmitMultiplyAx(Gen::X64Reg lhs, Gen::X64Reg rhs, int lhs_high, int rhs_high);
+  void LoadMulxOperands(UDSPInstruction opc, Gen::X64Reg lhs, Gen::X64Reg rhs);
 
-  // Register helpers
-  void setCompileSR(u16 bit);
-  void clrCompileSR(u16 bit);
-  void checkExceptions(u32 retval);
+  // --- DSPJitExtOps.cpp ---
+  // Puts the deferred register writes of the extension into effect.
+  void CommitExtension();
+  // Loads the extension's (first) value from @$arN; keep_sr also saves $sr with it.
+  void EmitExtLoadFirst(int dst_reg, int ar, bool keep_sr);
+  // Loads the second value of the LD family: from @$arN again if $arN and $ar3
+  // point into the same 1K page, otherwise from @$ar3.
+  void EmitExtLoadSecond(int dst_reg, int ar);
 
-  // Memory helper functions
-  void increment_addr_reg(int reg);
-  void decrement_addr_reg(int reg);
-  void increase_addr_reg(int reg, int ix_reg);
-  void decrease_addr_reg(int reg);
-  void imem_read(Gen::X64Reg address);
-  void dmem_read(Gen::X64Reg address);
-  void dmem_read_imm(u16 addr);
-  void dmem_write(Gen::X64Reg value);
-  void dmem_write_imm(u16 addr, Gen::X64Reg value);
+  // What a block that ends in an idle loop reports as used, so the caller moves on.
+  static constexpr u16 IDLE_SKIP_CYCLES = 0x1000;
 
-  // Command helpers
-  void dsp_reg_stack_push(StackRegister stack_reg);
-  void dsp_reg_stack_pop(StackRegister stack_reg);
-  void dsp_reg_store_stack(StackRegister stack_reg, Gen::X64Reg host_sreg = Gen::EDX);
-  void dsp_reg_load_stack(StackRegister stack_reg, Gen::X64Reg host_dreg = Gen::EDX);
-  void dsp_reg_store_stack_imm(StackRegister stack_reg, u16 val);
-  void dsp_op_write_reg(int reg, Gen::X64Reg host_sreg);
-  void dsp_op_write_reg_imm(int reg, u16 val);
-  void dsp_conditional_extend_accum(int reg);
-  void dsp_conditional_extend_accum_imm(int reg, u16 val);
-  void dsp_op_read_reg(int reg, Gen::X64Reg host_dreg,
-                       RegisterExtension extend = RegisterExtension::None);
-
-  // SDSP memory offset helpers
-  Gen::OpArg M_SDSP_pc();
-  Gen::OpArg M_SDSP_exceptions();
-  Gen::OpArg M_SDSP_control_reg();
-  Gen::OpArg M_SDSP_external_interrupt_waiting();
-  Gen::OpArg M_SDSP_r_st(size_t index);
-  Gen::OpArg M_SDSP_reg_stack_ptrs(size_t index);
-
-  // Ext command helpers
-  void popExtValueToReg();
-  void pushExtValueFromMem(u16 dreg, u16 sreg);
-  void pushExtValueFromMem2(u16 dreg, u16 sreg);
-
-  // Multiplier helpers
-  void multiply();
-  void multiply_add();
-  void multiply_sub();
-  void multiply_mulx(u8 axh0, u8 axh1);
-
-  static constexpr size_t MAX_BLOCKS = 0x10000;
-
-  DSPJitRegCache m_gpr{*this};
-
-  u16 m_compile_pc;
-  u16 m_compile_status_register;
-  u16 m_start_address;
-
-  std::vector<DSPCompiledCode> m_blocks;
-  std::vector<u16> m_block_size;
-  std::vector<Block> m_block_links;
-  Block m_block_link_entry;
-
-  std::array<std::list<u16>, MAX_BLOCKS> m_unresolved_jumps;
+  DSPCore& m_dsp_core;
+  RegisterFile m_regs;
+  BlockTable m_blocks;
 
   u16 m_cycles_left = 0;
 
-  // The index of the last stored ext value (compile time).
-  int m_store_index = -1;
-  int m_store_index2 = -1;
+  // Translation state.
+  u16 m_block_start = 0;
+  u16 m_pc = 0;
+  int m_ext_first_reg = -1;   // destination of the value in EXT_FIRST
+  int m_ext_second_reg = -1;  // destination of the value in EXT_SECOND
+  bool m_ext_first_has_sr = false;  // bits 16-31 of EXT_FIRST hold $sr
 
-  // CALL this to start the dispatcher
-  const u8* m_enter_dispatcher;
-  const u8* m_return_dispatcher;
-  const u8* m_stub_entry_point;
-
-  DSPCore& m_dsp_core;
+  const u8* m_enter = nullptr;
+  const u8* m_return = nullptr;
+  const u8* m_leave = nullptr;
+  const u8* m_stub = nullptr;
 };
 
-}  // namespace JIT::x64
-}  // namespace DSP
+}  // namespace DSP::JIT::x64

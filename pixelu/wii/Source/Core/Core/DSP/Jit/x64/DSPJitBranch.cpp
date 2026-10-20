@@ -1,5 +1,10 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// Jumps, calls, returns, conditional execution, HALT and the hardware loops.
+//
+// Every branch first sets pc to the instruction after itself, so a branch not
+// taken just falls through. A taken branch stores its target in pc and leaves
+// the block (or, for unconditional ones, may chain into the target block).
 
 #include "Core/DSP/Jit/x64/DSPEmitter.h"
 
@@ -13,480 +18,272 @@ using namespace Gen;
 
 namespace DSP::JIT::x64
 {
-void DSPEmitter::ReJitConditional(const UDSPInstruction opc,
-                                  void (DSPEmitter::*conditional_fn)(UDSPInstruction))
+namespace
 {
-  u8 cond = opc & 0xf;
-  if (cond == 0xf)  // Always true.
+constexpr int CALL_STACK = static_cast<int>(StackRegister::Call);
+constexpr int DATA_STACK = static_cast<int>(StackRegister::Data);
+constexpr int LOOP_ADDRESS_STACK = static_cast<int>(StackRegister::LoopAddress);
+constexpr int LOOP_COUNTER_STACK = static_cast<int>(StackRegister::LoopCounter);
+}  // namespace
+
+void DSPEmitter::EmitConditional(UDSPInstruction opc, void (DSPEmitter::*body)(UDSPInstruction))
+{
+  const u8 cond = opc & 0xf;
+  if (cond == 0xf)
   {
-    (this->*conditional_fn)(opc);
+    (this->*body)(opc);
+    return;
+  }
+  const FixupBranch skip = EmitSkipUnless(cond);
+  (this->*body)(opc);
+  SetJumpTarget(skip);
+}
+
+// A taken branch reports the instructions before it (the branch itself is
+// counted only once the block's translation goes on past it).
+void DSPEmitter::EmitBranchExit()
+{
+  const auto& analyzer = m_dsp_core.DSPState().GetAnalyzer();
+  EmitExit(analyzer.IsIdleSkip(m_block_start) ? IDLE_SKIP_CYCLES :
+                                                m_blocks.length[m_block_start]);
+}
+
+// Chains straight into a finished target block if the budget covers this block
+// and that one. Branches into the part of this block translated so far stay
+// unlinked; targets not ready yet are remembered.
+void DSPEmitter::EmitBlockLink(u16 target)
+{
+  if (target >= m_block_start && target <= m_pc)
+    return;
+
+  const u8* const target_code = m_blocks.link[target];
+  if (target_code == nullptr)
+  {
+    AddWaiting(m_block_start, target);
     return;
   }
 
-  dsp_op_read_reg(DSP_REG_SR, EAX);
-
-  switch (cond)
-  {
-  case 0x0:  // GE - Greater Equal
-  case 0x1:  // L - Less
-    LEA(16, EDX, MScaled(EAX, SCALE_4, 0));
-    XOR(16, R(EAX), R(EDX));
-    TEST(16, R(EAX), Imm16(8));
-    break;
-  case 0x2:  // G - Greater
-  case 0x3:  // LE - Less Equal
-    LEA(16, EDX, MScaled(EAX, SCALE_4, 0));
-    XOR(16, R(EAX), R(EDX));
-    ADD(16, R(EAX), R(EAX));
-    OR(16, R(EAX), R(EDX));
-    TEST(16, R(EAX), Imm16(0x10));
-    break;
-  case 0x4:  // NZ - Not Zero
-  case 0x5:  // Z - Zero
-    TEST(16, R(EAX), Imm16(SR_ARITH_ZERO));
-    break;
-  case 0x6:  // NC - Not carry
-  case 0x7:  // C - Carry
-    TEST(16, R(EAX), Imm16(SR_CARRY));
-    break;
-  case 0x8:  // ? - Not over s32
-  case 0x9:  // ? - Over s32
-    TEST(16, R(EAX), Imm16(SR_OVER_S32));
-    break;
-  case 0xa:  // ?
-  case 0xb:  // ?
-    // We want to test this expression, which corresponds to xB:
-    // (!(IsSRFlagSet(SR_OVER_S32) || IsSRFlagSet(SR_TOP2BITS))) || IsSRFlagSet(SR_ARITH_ZERO)
-    // The xB expression is used due to even instructions (i.e. xA) looking for the expression to
-    // evaluate to false, while odd ones look for it to be true.
-
-    // Since SR_OVER_S32 is bit 4 (0x10) and SR_TOP2BITS is bit 5 (0x20),
-    // set EDX to 2*EAX, so that SR_OVER_S32 is in bit 5 of EDX.
-    LEA(16, EDX, MRegSum(EAX, EAX));
-    // Now OR them together, so bit 5 of EDX is
-    // (IsSRFlagSet(SR_OVER_S32) || IsSRFlagSet(SR_TOP2BITS))
-    OR(16, R(EDX), R(EAX));
-    // EDX bit 5 is !(IsSRFlagSet(SR_OVER_S32) || IsSRFlagSet(SR_TOP2BITS))
-    NOT(16, R(EDX));
-    // SR_ARITH_ZERO is bit 2 (0x04).  We want that in bit 5, so shift left by 3.
-    SHL(16, R(EAX), Imm8(3));
-    // Bit 5 of EAX is IsSRFlagSet(SR_OVER_S32), so or-ing EDX with EAX gives our target expression.
-    OR(16, R(EDX), R(EAX));
-    // Test bit 5
-    TEST(16, R(EDX), Imm16(0x20));
-    break;
-  case 0xc:  // LNZ  - Logic Not Zero
-  case 0xd:  // LZ - Logic Zero
-    TEST(16, R(EAX), Imm16(SR_LOGIC_ZERO));
-    break;
-  case 0xe:  // O - Overflow
-    TEST(16, R(EAX), Imm16(SR_OVERFLOW));
-    break;
-  }
-  DSPJitRegCache c1(m_gpr);
-  CCFlags flag;
-  if (cond == 0xe)  // Overflow, special case as there is no inverse case
-    flag = CC_Z;
-  else if ((cond & 1) == 0)  // Even conditions run if the bit is zero, so jump if it IS NOT zero
-    flag = CC_NZ;
-  else  // Odd conditions run if the bit IS NOT zero, so jump if it IS zero
-    flag = CC_Z;
-  FixupBranch skip_code = J_CC(flag, Jump::Near);
-  (this->*conditional_fn)(opc);
-  m_gpr.FlushRegs(c1);
-  SetJumpTarget(skip_code);
+  const u16 used = m_blocks.length[m_block_start];
+  const u16 needed = static_cast<u16>(used + m_blocks.length[target]);
+  CMP(16, MatR(CYCLE_COUNTER), Imm16(needed));
+  FixupBranch short_budget = J_CC(CC_BE, Jump::Near);
+  SUB(16, MatR(CYCLE_COUNTER), Imm16(used));
+  JMP(target_code, true);
+  SetJumpTarget(short_budget);
 }
 
-void DSPEmitter::WriteBranchExit()
+void DSPEmitter::JumpBody(UDSPInstruction opc)
 {
-  DSPJitRegCache c(m_gpr);
-  m_gpr.SaveRegs();
-  if (m_dsp_core.DSPState().GetAnalyzer().IsIdleSkip(m_start_address))
-  {
-    MOV(16, R(EAX), Imm16(0x1000));
-  }
-  else
-  {
-    MOV(16, R(EAX), Imm16(m_block_size[m_start_address]));
-  }
-  JMP(m_return_dispatcher);
-  m_gpr.LoadRegs(false);
-  m_gpr.FlushRegs(c, false);
+  const u16 target = m_dsp_core.DSPState().ReadIMEM(static_cast<u16>(m_pc + 1));
+  if (GetOpTemplate(opc)->uncond_branch)
+    EmitBlockLink(target);
+  MOV(16, m_regs.Pc(), Imm16(target));
+  EmitBranchExit();
 }
 
-void DSPEmitter::WriteBlockLink(u16 dest)
+void DSPEmitter::OpJump(UDSPInstruction opc)
 {
-  // Jump directly to the called block if it has already been compiled.
-  if (!(dest >= m_start_address && dest <= m_compile_pc))
-  {
-    if (m_block_links[dest] != nullptr)
-    {
-      m_gpr.FlushRegs();
-      // Check if we have enough cycles to execute the next block
-      MOV(64, R(RAX), ImmPtr(&m_cycles_left));
-      MOV(16, R(ECX), MatR(RAX));
-      CMP(16, R(ECX), Imm16(m_block_size[m_start_address] + m_block_size[dest]));
-      FixupBranch notEnoughCycles = J_CC(CC_BE);
-
-      SUB(16, R(ECX), Imm16(m_block_size[m_start_address]));
-      MOV(16, MatR(RAX), R(ECX));
-      JMP(m_block_links[dest]);
-      SetJumpTarget(notEnoughCycles);
-    }
-    else
-    {
-      // The destination has not been compiled yet.  Add it to the list
-      // of blocks that this block is waiting on.
-      m_unresolved_jumps[m_start_address].push_back(dest);
-    }
-  }
+  MOV(16, m_regs.Pc(), Imm16(static_cast<u16>(m_pc + 2)));
+  EmitConditional(opc, &DSPEmitter::JumpBody);
 }
 
-void DSPEmitter::r_jcc(const UDSPInstruction opc)
+void DSPEmitter::CallBody(UDSPInstruction opc)
 {
-  const u16 dest = m_dsp_core.DSPState().ReadIMEM(m_compile_pc + 1);
-  const DSPOPCTemplate* opcode = GetOpTemplate(opc);
-
-  // If the block is unconditional, attempt to link block
-  if (opcode->uncond_branch)
-    WriteBlockLink(dest);
-  MOV(16, M_SDSP_pc(), Imm16(dest));
-  WriteBranchExit();
-}
-// Generic jmp implementation
-// Jcc addressA
-// 0000 0010 1001 cccc
-// aaaa aaaa aaaa aaaa
-// Jump to addressA if condition cc has been met. Set program counter to
-// address represented by value that follows this "jmp" instruction.
-// NOTE: Cannot use FallBackToInterpreter(opc) here because of the need to write branch exit
-void DSPEmitter::jcc(const UDSPInstruction opc)
-{
-  MOV(16, M_SDSP_pc(), Imm16(m_compile_pc + 2));
-  ReJitConditional(opc, &DSPEmitter::r_jcc);
+  PushStackImm(CALL_STACK, static_cast<u16>(m_pc + 2));
+  const u16 target = m_dsp_core.DSPState().ReadIMEM(static_cast<u16>(m_pc + 1));
+  if (GetOpTemplate(opc)->uncond_branch)
+    EmitBlockLink(target);
+  MOV(16, m_regs.Pc(), Imm16(target));
+  EmitBranchExit();
 }
 
-void DSPEmitter::r_jmprcc(const UDSPInstruction opc)
+void DSPEmitter::OpCall(UDSPInstruction opc)
 {
-  u8 reg = (opc >> 5) & 0x7;
-  // reg can only be DSP_REG_ARx and DSP_REG_IXx now,
-  // no need to handle DSP_REG_STx.
-  dsp_op_read_reg(reg, RAX);
-  MOV(16, M_SDSP_pc(), R(EAX));
-  WriteBranchExit();
-}
-// Generic jmpr implementation
-// JRcc $R
-// 0001 0111 rrr0 cccc
-// Jump to address if condition cc has been met. Set program counter to
-// a value from register $R.
-// NOTE: Cannot use FallBackToInterpreter(opc) here because of the need to write branch exit
-void DSPEmitter::jmprcc(const UDSPInstruction opc)
-{
-  MOV(16, M_SDSP_pc(), Imm16(m_compile_pc + 1));
-  ReJitConditional(opc, &DSPEmitter::r_jmprcc);
+  MOV(16, m_regs.Pc(), Imm16(static_cast<u16>(m_pc + 2)));
+  EmitConditional(opc, &DSPEmitter::CallBody);
 }
 
-void DSPEmitter::r_call(const UDSPInstruction opc)
+void DSPEmitter::JumpRegBody(UDSPInstruction opc)
 {
-  MOV(16, R(DX), Imm16(m_compile_pc + 2));
-  dsp_reg_store_stack(StackRegister::Call);
-  const u16 dest = m_dsp_core.DSPState().ReadIMEM(m_compile_pc + 1);
-  const DSPOPCTemplate* opcode = GetOpTemplate(opc);
-
-  // If the block is unconditional, attempt to link block
-  if (opcode->uncond_branch)
-    WriteBlockLink(dest);
-  MOV(16, M_SDSP_pc(), Imm16(dest));
-  WriteBranchExit();
-}
-// Generic call implementation
-// CALLcc addressA
-// 0000 0010 1011 cccc
-// aaaa aaaa aaaa aaaa
-// Call function if condition cc has been met. Push program counter of
-// instruction following "call" to $st0. Set program counter to address
-// represented by value that follows this "call" instruction.
-// NOTE: Cannot use FallBackToInterpreter(opc) here because of the need to write branch exit
-void DSPEmitter::call(const UDSPInstruction opc)
-{
-  MOV(16, M_SDSP_pc(), Imm16(m_compile_pc + 2));
-  ReJitConditional(opc, &DSPEmitter::r_call);
+  ReadOperand((opc >> 5) & 0x7, RAX, RegisterExtension::None);
+  MOV(16, m_regs.Pc(), R(EAX));
+  EmitBranchExit();
 }
 
-void DSPEmitter::r_callr(const UDSPInstruction opc)
+void DSPEmitter::OpJumpReg(UDSPInstruction opc)
 {
-  u8 reg = (opc >> 5) & 0x7;
-  MOV(16, R(DX), Imm16(m_compile_pc + 1));
-  dsp_reg_store_stack(StackRegister::Call);
-  dsp_op_read_reg(reg, RAX);
-  MOV(16, M_SDSP_pc(), R(EAX));
-  WriteBranchExit();
-}
-// Generic callr implementation
-// CALLRcc $R
-// 0001 0111 rrr1 cccc
-// Call function if condition cc has been met. Push program counter of
-// instruction following "call" to call stack $st0. Set program counter to
-// register $R.
-// NOTE: Cannot use FallBackToInterpreter(opc) here because of the need to write branch exit
-void DSPEmitter::callr(const UDSPInstruction opc)
-{
-  MOV(16, M_SDSP_pc(), Imm16(m_compile_pc + 1));
-  ReJitConditional(opc, &DSPEmitter::r_callr);
+  MOV(16, m_regs.Pc(), Imm16(static_cast<u16>(m_pc + 1)));
+  EmitConditional(opc, &DSPEmitter::JumpRegBody);
 }
 
-void DSPEmitter::r_ifcc(const UDSPInstruction opc)
+void DSPEmitter::CallRegBody(UDSPInstruction opc)
 {
-  MOV(16, M_SDSP_pc(), Imm16(m_compile_pc + 1));
-}
-// Generic if implementation
-// IFcc
-// 0000 0010 0111 cccc
-// Execute following opcode if the condition has been met.
-// NOTE: Cannot use FallBackToInterpreter(opc) here because of the need to write branch exit
-void DSPEmitter::ifcc(const UDSPInstruction opc)
-{
-  const auto& state = m_dsp_core.DSPState();
-  const u16 address = m_compile_pc + 1;
-  const DSPOPCTemplate* const op_template = GetOpTemplate(state.ReadIMEM(address));
-
-  MOV(16, M_SDSP_pc(), Imm16(address + op_template->size));
-  ReJitConditional(opc, &DSPEmitter::r_ifcc);
-  WriteBranchExit();
+  PushStackImm(CALL_STACK, static_cast<u16>(m_pc + 1));
+  ReadOperand((opc >> 5) & 0x7, RAX, RegisterExtension::None);
+  MOV(16, m_regs.Pc(), R(EAX));
+  EmitBranchExit();
 }
 
-void DSPEmitter::r_ret(const UDSPInstruction opc)
+void DSPEmitter::OpCallReg(UDSPInstruction opc)
 {
-  dsp_reg_load_stack(StackRegister::Call);
-  MOV(16, M_SDSP_pc(), R(DX));
-  WriteBranchExit();
+  MOV(16, m_regs.Pc(), Imm16(static_cast<u16>(m_pc + 1)));
+  EmitConditional(opc, &DSPEmitter::CallRegBody);
 }
 
-// Generic ret implementation
-// RETcc
-// 0000 0010 1101 cccc
-// Return from subroutine if condition cc has been met. Pops stored PC
-// from call stack $st0 and sets $pc to this location.
-// NOTE: Cannot use FallBackToInterpreter(opc) here because of the need to write branch exit
-void DSPEmitter::ret(const UDSPInstruction opc)
+void DSPEmitter::IfBody(UDSPInstruction)
 {
-  MOV(16, M_SDSP_pc(), Imm16(m_compile_pc + 1));
-  ReJitConditional(opc, &DSPEmitter::r_ret);
+  MOV(16, m_regs.Pc(), Imm16(static_cast<u16>(m_pc + 1)));
 }
 
-void DSPEmitter::r_rti(const UDSPInstruction opc)
+// IFcc: run the next instruction only if the condition holds. Either way the
+// block ends here; the next instruction starts a block of its own.
+void DSPEmitter::OpIf(UDSPInstruction opc)
 {
-  //	g_dsp.r[DSP_REG_SR] = dsp_reg_load_stack(StackRegister::Data);
-  dsp_reg_load_stack(StackRegister::Data);
-  dsp_op_write_reg(DSP_REG_SR, RDX);
-  //	g_dsp.pc = dsp_reg_load_stack(StackRegister::Call);
-  dsp_reg_load_stack(StackRegister::Call);
-  MOV(16, M_SDSP_pc(), R(DX));
-  WriteBranchExit();
+  const u16 next = static_cast<u16>(m_pc + 1);
+  const u16 next_size = GetOpTemplate(m_dsp_core.DSPState().ReadIMEM(next))->size;
+  MOV(16, m_regs.Pc(), Imm16(static_cast<u16>(next + next_size)));
+  EmitConditional(opc, &DSPEmitter::IfBody);
+  EmitBranchExit();
 }
 
-// RTIcc
-// 0000 0010 1111 1111
-// Return from exception. Pops stored status register $sr from data stack
-// $st1 and program counter PC from call stack $st0 and sets $pc to this
-// location.
-// This instruction has a conditional form, but it is not used by any official ucode.
-// NOTE: Cannot use FallBackToInterpreter(opc) here because of the need to write branch exit
-void DSPEmitter::rti(const UDSPInstruction opc)
+void DSPEmitter::RetBody(UDSPInstruction)
 {
-  MOV(16, M_SDSP_pc(), Imm16(m_compile_pc + 1));
-  ReJitConditional(opc, &DSPEmitter::r_rti);
+  PopStack(CALL_STACK, RAX);
+  MOV(16, m_regs.Pc(), R(EAX));
+  EmitBranchExit();
 }
 
-// HALT
-// 0000 0000 0010 0001
-// Stops execution of DSP code. Sets bit DSP_CR_HALT in register DREG_CR.
-void DSPEmitter::halt(const UDSPInstruction)
+void DSPEmitter::OpRet(UDSPInstruction opc)
 {
-  OR(16, M_SDSP_control_reg(), Imm16(CR_HALT));
-  //	g_dsp.pc = dsp_reg_load_stack(StackRegister::Call);
-  dsp_reg_load_stack(StackRegister::Call);
-  MOV(16, M_SDSP_pc(), R(DX));
+  MOV(16, m_regs.Pc(), Imm16(static_cast<u16>(m_pc + 1)));
+  EmitConditional(opc, &DSPEmitter::RetBody);
 }
 
-// LOOP handling: Loop stack is used to control execution of repeated blocks of
-// instructions. Whenever there is value on stack $st2 and current PC is equal
-// value at $st2, then value at stack $st3 is decremented. If value is not zero
-// then PC is modified with value from call stack $st0. Otherwise values from
-// call stack $st0 and both loop stacks $st2 and $st3 are popped and execution
-// continues at next opcode.
-void DSPEmitter::HandleLoop()
+void DSPEmitter::RtiBody(UDSPInstruction)
 {
-  MOVZX(32, 16, EAX, M_SDSP_r_st(2));
-  MOVZX(32, 16, ECX, M_SDSP_r_st(3));
-
-  TEST(32, R(RCX), R(RCX));
-  FixupBranch rLoopCntG = J_CC(CC_E, Jump::Near);
-  CMP(16, R(RAX), Imm16(m_compile_pc - 1));
-  FixupBranch rLoopAddrG = J_CC(CC_NE, Jump::Near);
-
-  SUB(16, M_SDSP_r_st(3), Imm16(1));
-  CMP(16, M_SDSP_r_st(3), Imm16(0));
-
-  FixupBranch loadStack = J_CC(CC_E, Jump::Near);
-  MOVZX(32, 16, ECX, M_SDSP_r_st(0));
-  MOV(16, M_SDSP_pc(), R(RCX));
-  FixupBranch loopUpdated = J(Jump::Near);
-
-  SetJumpTarget(loadStack);
-  DSPJitRegCache c(m_gpr);
-  dsp_reg_load_stack(StackRegister::Call);
-  dsp_reg_load_stack(StackRegister::LoopAddress);
-  dsp_reg_load_stack(StackRegister::LoopCounter);
-  m_gpr.FlushRegs(c);
-
-  SetJumpTarget(loopUpdated);
-  SetJumpTarget(rLoopAddrG);
-  SetJumpTarget(rLoopCntG);
+  PopStack(DATA_STACK, RAX);
+  m_regs.StoreWord(DSP_REG_SR, RAX);
+  PopStack(CALL_STACK, RAX);
+  MOV(16, m_regs.Pc(), R(EAX));
+  EmitBranchExit();
 }
 
-// LOOP $R
-// 0000 0000 010r rrrr
-// Repeatedly execute following opcode until counter specified by value
-// from register $R reaches zero. Each execution decrement counter. Register
-// $R remains unchanged. If register $R is set to zero at the beginning of loop
-// then looped instruction will not get executed.
-// Actually, this instruction simply prepares the loop stacks for the above.
-// The looping hardware takes care of the rest.
-void DSPEmitter::loop(const UDSPInstruction opc)
+void DSPEmitter::OpRti(UDSPInstruction opc)
 {
-  u16 reg = opc & 0x1f;
-  //	u16 cnt = g_dsp.r[reg];
-  dsp_op_read_reg(reg, RDX, RegisterExtension::Zero);
-  u16 loop_pc = m_compile_pc + 1;
+  MOV(16, m_regs.Pc(), Imm16(static_cast<u16>(m_pc + 1)));
+  EmitConditional(opc, &DSPEmitter::RtiBody);
+}
 
+void DSPEmitter::OpHalt(UDSPInstruction)
+{
+  OR(16, m_regs.ControlReg(), Imm16(CR_HALT));
+  PopStack(CALL_STACK, RAX);
+  MOV(16, m_regs.Pc(), R(EAX));
+}
+
+// ---------------------------------------------------------------------------
+// Hardware loops. A loop pushes its return address (Call), the address of its
+// last instruction (LoopAddress) and its count (LoopCounter); the block
+// translator calls EmitLoopCounterStep after that last instruction.
+
+void DSPEmitter::EmitLoopCounterStep()
+{
+  CMP(16, m_regs.StackTop(LOOP_COUNTER_STACK), Imm16(0));
+  FixupBranch no_count = J_CC(CC_E, Jump::Near);
+  CMP(16, m_regs.StackTop(LOOP_ADDRESS_STACK), Imm16(static_cast<u16>(m_pc - 1)));
+  FixupBranch other_loop = J_CC(CC_NE, Jump::Near);
+
+  SUB(16, m_regs.StackTop(LOOP_COUNTER_STACK), Imm16(1));
+  FixupBranch finished = J_CC(CC_Z, Jump::Near);
+  // Back to the first instruction of the loop.
+  MOVZX(32, 16, EAX, m_regs.StackTop(CALL_STACK));
+  MOV(16, m_regs.Pc(), R(EAX));
+  FixupBranch repeated = J(Jump::Near);
+
+  SetJumpTarget(finished);
+  PopStack(CALL_STACK, HELPER_C);
+  PopStack(LOOP_ADDRESS_STACK, HELPER_C);
+  PopStack(LOOP_COUNTER_STACK, HELPER_C);
+
+  SetJumpTarget(repeated);
+  SetJumpTarget(other_loop);
+  SetJumpTarget(no_count);
+}
+
+// A loop with a count of zero skips its body, up to and including last_address.
+void DSPEmitter::EmitLoopSkip(u16 last_address)
+{
+  const u16 last_size = GetOpTemplate(m_dsp_core.DSPState().ReadIMEM(last_address))->size;
+  MOV(16, m_regs.Pc(), Imm16(static_cast<u16>(last_address + last_size)));
+  EmitBranchExit();
+}
+
+// LOOP $reg: repeat the next instruction.
+void DSPEmitter::OpLoop(UDSPInstruction opc)
+{
+  const u16 body = static_cast<u16>(m_pc + 1);
+  ReadOperand(opc & 0x1f, RDX, RegisterExtension::Zero);
   TEST(16, R(EDX), R(EDX));
-  DSPJitRegCache c(m_gpr);
-  FixupBranch cnt = J_CC(CC_Z, Jump::Near);
-  dsp_reg_store_stack(StackRegister::LoopCounter);
-  MOV(16, R(RDX), Imm16(m_compile_pc + 1));
-  dsp_reg_store_stack(StackRegister::Call);
-  MOV(16, R(RDX), Imm16(loop_pc));
-  dsp_reg_store_stack(StackRegister::LoopAddress);
-  m_gpr.FlushRegs(c);
-  MOV(16, M_SDSP_pc(), Imm16(m_compile_pc + 1));
-  FixupBranch exit = J(Jump::Near);
-
-  SetJumpTarget(cnt);
-  // dsp_skip_inst();
-  const auto& state = m_dsp_core.DSPState();
-  MOV(16, M_SDSP_pc(), Imm16(loop_pc + GetOpTemplate(state.ReadIMEM(loop_pc))->size));
-  WriteBranchExit();
-  m_gpr.FlushRegs(c, false);
-  SetJumpTarget(exit);
+  FixupBranch empty = J_CC(CC_Z, Jump::Near);
+  PushStack(LOOP_COUNTER_STACK, RDX);
+  PushStackImm(CALL_STACK, body);
+  PushStackImm(LOOP_ADDRESS_STACK, body);
+  MOV(16, m_regs.Pc(), Imm16(body));
+  FixupBranch started = J(Jump::Near);
+  SetJumpTarget(empty);
+  EmitLoopSkip(body);
+  SetJumpTarget(started);
 }
 
-// LOOPI #I
-// 0001 0000 iiii iiii
-// Repeatedly execute following opcode until counter specified by
-// immediate value I reaches zero. Each execution decrement counter. If
-// immediate value I is set to zero at the beginning of loop then looped
-// instruction will not get executed.
-// Actually, this instruction simply prepares the loop stacks for the above.
-// The looping hardware takes care of the rest.
-void DSPEmitter::loopi(const UDSPInstruction opc)
+// BLOOP $reg, end: repeat the instructions from the next one up to end.
+void DSPEmitter::OpBloop(UDSPInstruction opc)
 {
-  u16 cnt = opc & 0xff;
-  u16 loop_pc = m_compile_pc + 1;
-
-  if (cnt)
-  {
-    MOV(16, R(RDX), Imm16(m_compile_pc + 1));
-    dsp_reg_store_stack(StackRegister::Call);
-    MOV(16, R(RDX), Imm16(loop_pc));
-    dsp_reg_store_stack(StackRegister::LoopAddress);
-    MOV(16, R(RDX), Imm16(cnt));
-    dsp_reg_store_stack(StackRegister::LoopCounter);
-
-    MOV(16, M_SDSP_pc(), Imm16(m_compile_pc + 1));
-  }
-  else
-  {
-    // dsp_skip_inst();
-    const auto& state = m_dsp_core.DSPState();
-    MOV(16, M_SDSP_pc(), Imm16(loop_pc + GetOpTemplate(state.ReadIMEM(loop_pc))->size));
-    WriteBranchExit();
-  }
-}
-
-// BLOOP $R, addrA
-// 0000 0000 011r rrrr
-// aaaa aaaa aaaa aaaa
-// Repeatedly execute block of code starting at following opcode until
-// counter specified by value from register $R reaches zero. Block ends at
-// specified address addrA inclusive, ie. opcode at addrA is the last opcode
-// included in loop. Counter is pushed on loop stack $st3, end of block address
-// is pushed on loop stack $st2 and repeat address is pushed on call stack $st0.
-// Up to 4 nested loops are allowed.
-void DSPEmitter::bloop(const UDSPInstruction opc)
-{
-  const u16 reg = opc & 0x1f;
-  //	u16 cnt = g_dsp.r[reg];
-  dsp_op_read_reg(reg, RDX, RegisterExtension::Zero);
-  const u16 loop_pc = m_dsp_core.DSPState().ReadIMEM(m_compile_pc + 1);
-
+  const u16 body = static_cast<u16>(m_pc + 2);
+  const u16 last = m_dsp_core.DSPState().ReadIMEM(static_cast<u16>(m_pc + 1));
+  ReadOperand(opc & 0x1f, RDX, RegisterExtension::Zero);
   TEST(16, R(EDX), R(EDX));
-  DSPJitRegCache c(m_gpr);
-  FixupBranch cnt = J_CC(CC_Z, Jump::Near);
-  dsp_reg_store_stack(StackRegister::LoopCounter);
-  MOV(16, R(RDX), Imm16(m_compile_pc + 2));
-  dsp_reg_store_stack(StackRegister::Call);
-  MOV(16, R(RDX), Imm16(loop_pc));
-  dsp_reg_store_stack(StackRegister::LoopAddress);
-  MOV(16, M_SDSP_pc(), Imm16(m_compile_pc + 2));
-  m_gpr.FlushRegs(c, true);
-  FixupBranch exit = J(Jump::Near);
-
-  SetJumpTarget(cnt);
-  // g_dsp.pc = loop_pc;
-  // dsp_skip_inst();
-  const auto& state = m_dsp_core.DSPState();
-  MOV(16, M_SDSP_pc(), Imm16(loop_pc + GetOpTemplate(state.ReadIMEM(loop_pc))->size));
-  WriteBranchExit();
-  m_gpr.FlushRegs(c, false);
-  SetJumpTarget(exit);
+  FixupBranch empty = J_CC(CC_Z, Jump::Near);
+  PushStack(LOOP_COUNTER_STACK, RDX);
+  PushStackImm(CALL_STACK, body);
+  PushStackImm(LOOP_ADDRESS_STACK, last);
+  MOV(16, m_regs.Pc(), Imm16(body));
+  FixupBranch started = J(Jump::Near);
+  SetJumpTarget(empty);
+  EmitLoopSkip(last);
+  SetJumpTarget(started);
 }
 
-// BLOOPI #I, addrA
-// 0001 0001 iiii iiii
-// aaaa aaaa aaaa aaaa
-// Repeatedly execute block of code starting at following opcode until
-// counter specified by immediate value I reaches zero. Block ends at specified
-// address addrA inclusive, ie. opcode at addrA is the last opcode included in
-// loop. Counter is pushed on loop stack $st3, end of block address is pushed
-// on loop stack $st2 and repeat address is pushed on call stack $st0. Up to 4
-// nested loops are allowed.
-void DSPEmitter::bloopi(const UDSPInstruction opc)
+// LOOPI #count: as LOOP with a count known now.
+void DSPEmitter::OpLoopi(UDSPInstruction opc)
 {
-  const auto& state = m_dsp_core.DSPState();
-  const u16 cnt = opc & 0xff;
-  //	u16 loop_pc = dsp_fetch_code();
-  const u16 loop_pc = state.ReadIMEM(m_compile_pc + 1);
-
-  if (cnt != 0)
+  const u16 count = opc & 0xff;
+  const u16 body = static_cast<u16>(m_pc + 1);
+  if (count == 0)
   {
-    MOV(16, R(RDX), Imm16(m_compile_pc + 2));
-    dsp_reg_store_stack(StackRegister::Call);
-    MOV(16, R(RDX), Imm16(loop_pc));
-    dsp_reg_store_stack(StackRegister::LoopAddress);
-    MOV(16, R(RDX), Imm16(cnt));
-    dsp_reg_store_stack(StackRegister::LoopCounter);
+    EmitLoopSkip(body);
+    return;
+  }
+  PushStackImm(CALL_STACK, body);
+  PushStackImm(LOOP_ADDRESS_STACK, body);
+  PushStackImm(LOOP_COUNTER_STACK, count);
+  MOV(16, m_regs.Pc(), Imm16(body));
+}
 
-    MOV(16, M_SDSP_pc(), Imm16(m_compile_pc + 2));
-  }
-  else
+// BLOOPI #count, end: as BLOOP with a count known now.
+void DSPEmitter::OpBloopi(UDSPInstruction opc)
+{
+  const u16 count = opc & 0xff;
+  const u16 body = static_cast<u16>(m_pc + 2);
+  const u16 last = m_dsp_core.DSPState().ReadIMEM(static_cast<u16>(m_pc + 1));
+  if (count == 0)
   {
-    // g_dsp.pc = loop_pc;
-    // dsp_skip_inst();
-    MOV(16, M_SDSP_pc(), Imm16(loop_pc + GetOpTemplate(state.ReadIMEM(loop_pc))->size));
-    WriteBranchExit();
+    EmitLoopSkip(last);
+    return;
   }
+  PushStackImm(CALL_STACK, body);
+  PushStackImm(LOOP_ADDRESS_STACK, last);
+  PushStackImm(LOOP_COUNTER_STACK, count);
+  MOV(16, m_regs.Pc(), Imm16(body));
 }
 
 }  // namespace DSP::JIT::x64

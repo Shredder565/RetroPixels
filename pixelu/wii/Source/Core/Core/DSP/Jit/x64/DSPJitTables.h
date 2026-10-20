@@ -1,5 +1,7 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// Which recompiler routine translates an instruction word. A null handler
+// means the instruction (or extension) is left to the interpreter.
 
 #pragma once
 
@@ -9,9 +11,14 @@ namespace DSP::JIT::x64
 {
 class DSPEmitter;
 
-using JITFunction = void (DSPEmitter::*)(UDSPInstruction);
+using JITHandler = void (DSPEmitter::*)(UDSPInstruction);
 
-JITFunction GetOp(UDSPInstruction inst);
-JITFunction GetExtOp(UDSPInstruction inst);
-void InitInstructionTables();
+// The translator of the main instruction in inst.
+JITHandler MainHandler(UDSPInstruction inst);
+// The translator of the extension in the low bits of inst (seven bits in the
+// 0x3xxx group, eight elsewhere).
+JITHandler ExtHandler(UDSPInstruction inst);
+
+// Fills the lookup tables; later calls do nothing.
+void InitHandlerTables();
 }  // namespace DSP::JIT::x64

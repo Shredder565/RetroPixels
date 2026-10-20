@@ -1,173 +1,218 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-// Additional copyrights go to Duddie and Tratax (c) 2004
+// Condition codes and the result flags in $sr.
 
 #include "Core/DSP/Jit/x64/DSPEmitter.h"
 
+#include "Common/Assert.h"
+#include "Common/CommonTypes.h"
+
+#include "Core/DSP/DSPAnalyzer.h"
 #include "Core/DSP/DSPCore.h"
 
 using namespace Gen;
 
 namespace DSP::JIT::x64
 {
-// In: val: s64 _Value
-// Clobbers scratch
-void DSPEmitter::Update_SR_Register(Gen::X64Reg val, Gen::X64Reg scratch)
+namespace
 {
-  ASSERT(val != scratch);
+// The flag bits of $sr an arithmetic result replaces; bit 8 always reads as 0
+// and is dropped with them.
+constexpr u32 RESULT_FLAGS_AND_BIT8 = SR_CMP_MASK | SR_100;
+}  // namespace
 
-  const OpArg sr_reg = m_gpr.GetReg(DSP_REG_SR);
-  //	// 0x04
-  //	if (_Value == 0) g_dsp.r[DSP_REG_SR] |= SR_ARITH_ZERO;
-  TEST(64, R(val), R(val));
-  FixupBranch notZero = J_CC(CC_NZ);
-  OR(16, sr_reg, Imm16(SR_ARITH_ZERO | SR_TOP2BITS));
-  FixupBranch end = J();
-  SetJumpTarget(notZero);
-
-  //	// 0x08
-  //	if (_Value < 0) g_dsp.r[DSP_REG_SR] |= SR_SIGN;
-  FixupBranch greaterThanEqual = J_CC(CC_GE);
-  OR(16, sr_reg, Imm16(SR_SIGN));
-  SetJumpTarget(greaterThanEqual);
-
-  //	// 0x10
-  //	if (_Value != (s32)_Value) g_dsp.r[DSP_REG_SR] |= SR_OVER_S32;
-  MOVSX(64, 32, scratch, R(val));
-  CMP(64, R(scratch), R(val));
-  FixupBranch noOverS32 = J_CC(CC_E);
-  OR(16, sr_reg, Imm16(SR_OVER_S32));
-  SetJumpTarget(noOverS32);
-
-  //	// 0x20 - Checks if top bits of m are equal
-  //	if (((_Value & 0xc0000000) == 0) || ((_Value & 0xc0000000) == 0xc0000000))
-  MOV(32, R(scratch), Imm32(0xc0000000));
-  AND(32, R(val), R(scratch));
-  FixupBranch zeroC = J_CC(CC_Z);
-  CMP(32, R(val), R(scratch));
-  FixupBranch cC = J_CC(CC_NE);
-  SetJumpTarget(zeroC);
-  //		g_dsp.r[DSP_REG_SR] |= SR_TOP2BITS;
-  OR(16, sr_reg, Imm16(SR_TOP2BITS));
-  SetJumpTarget(cC);
-  SetJumpTarget(end);
-  m_gpr.PutReg(DSP_REG_SR);
+bool DSPEmitter::WantFlags() const
+{
+  const auto& analyzer = m_dsp_core.DSPState().GetAnalyzer();
+  return !analyzer.IsStartOfInstruction(m_pc) || analyzer.IsUpdateSR(m_pc);
 }
 
-// In: val: s64 _Value
-// Clobbers scratch
-void DSPEmitter::Update_SR_Register64(Gen::X64Reg val, Gen::X64Reg scratch)
+// Conditions (S sign, O overflow, Z zero, C carry):
+//   0 GE  S == O          1 L   S != O
+//   2 G   S == O and !Z   3 LE  S != O or Z
+//   4 NZ  !Z              5 Z   Z
+//   6 NC  !C              7 C   C
+//   8     !over-s32       9     over-s32
+//   a     (over-s32 or top-two-bits) and !Z
+//   b     !(over-s32 or top-two-bits) or Z
+//   c LNZ !logic-zero     d LZ  logic-zero
+//   e O   O               f     always
+FixupBranch DSPEmitter::EmitSkipUnless(u8 cond)
 {
-  //	g_dsp.r[DSP_REG_SR] &= ~SR_CMP_MASK;
-  const OpArg sr_reg = m_gpr.GetReg(DSP_REG_SR);
-  AND(16, sr_reg, Imm16(~SR_CMP_MASK));
-  m_gpr.PutReg(DSP_REG_SR);
-  Update_SR_Register(val, scratch);
+  ASSERT(cond < 0xf);
+  MOVZX(32, 16, HELPER_A, m_regs.Word(DSP_REG_SR));
+
+  u32 mask;
+  bool holds_when_set;  // the condition holds when the tested bit is set
+  switch (cond)
+  {
+  case 0x0:
+  case 0x1:
+    // bit 1 of sr ^ (sr >> 2) is O ^ S
+    MOV(32, R(HELPER_B), R(HELPER_A));
+    SHR(32, R(HELPER_B), Imm8(2));
+    XOR(32, R(HELPER_A), R(HELPER_B));
+    mask = 0x2;
+    holds_when_set = cond == 0x1;
+    break;
+  case 0x2:
+  case 0x3:
+    // bit 1 of (sr ^ (sr >> 2)) | (sr >> 1) is (O ^ S) | Z
+    MOV(32, R(HELPER_B), R(HELPER_A));
+    SHR(32, R(HELPER_B), Imm8(2));
+    XOR(32, R(HELPER_B), R(HELPER_A));
+    SHR(32, R(HELPER_A), Imm8(1));
+    OR(32, R(HELPER_A), R(HELPER_B));
+    mask = 0x2;
+    holds_when_set = cond == 0x3;
+    break;
+  case 0x4:
+  case 0x5:
+    mask = SR_ARITH_ZERO;
+    holds_when_set = cond == 0x5;
+    break;
+  case 0x6:
+  case 0x7:
+    mask = SR_CARRY;
+    holds_when_set = cond == 0x7;
+    break;
+  case 0x8:
+  case 0x9:
+    mask = SR_OVER_S32;
+    holds_when_set = cond == 0x9;
+    break;
+  case 0xa:
+  case 0xb:
+    // bit 0 of ((sr >> 4) | (sr >> 5)) & ~(sr >> 2) is (over-s32 | top2) & !Z
+    MOV(32, R(HELPER_B), R(HELPER_A));
+    SHR(32, R(HELPER_B), Imm8(2));
+    NOT(32, R(HELPER_B));
+    MOV(32, R(HELPER_C), R(HELPER_A));
+    SHR(32, R(HELPER_C), Imm8(5));
+    SHR(32, R(HELPER_A), Imm8(4));
+    OR(32, R(HELPER_A), R(HELPER_C));
+    AND(32, R(HELPER_A), R(HELPER_B));
+    mask = 0x1;
+    holds_when_set = cond == 0xa;
+    break;
+  case 0xc:
+  case 0xd:
+    mask = SR_LOGIC_ZERO;
+    holds_when_set = cond == 0xd;
+    break;
+  default:  // 0xe
+    mask = SR_OVERFLOW;
+    holds_when_set = true;
+    break;
+  }
+
+  TEST(32, R(HELPER_A), Imm32(mask));
+  return J_CC(holds_when_set ? CC_Z : CC_NZ, Jump::Near);
 }
 
-// Updates SR based on a 64-bit value computed by result = val1 + val2 or result = val1 - val2
-// Clobbers scratch
-void DSPEmitter::UpdateSR64AddSub(Gen::X64Reg val1, Gen::X64Reg val2, Gen::X64Reg result,
-                                  Gen::X64Reg scratch, bool subtract)
+void DSPEmitter::CollectFlags40(X64Reg value, X64Reg flags)
 {
-  const OpArg sr_reg = m_gpr.GetReg(DSP_REG_SR);
-  // g_dsp.r[DSP_REG_SR] &= ~SR_CMP_MASK;
-  AND(16, sr_reg, Imm16(~SR_CMP_MASK));
+  ASSERT(value != HELPER_A && flags != HELPER_A);
 
-  CMP(64, R(val1), R(result));
-  // x86 ZF set if val1 == result
-  // x86 CF set if val1 < result
-  // Note that x86 uses a different definition of carry than the DSP
+  TEST(64, R(value), R(value));
+  FixupBranch non_zero = J_CC(CC_NZ);
+  OR(32, R(flags), Imm32(SR_ARITH_ZERO));
+  SetJumpTarget(non_zero);
 
-  // 0x01
-  // g_dsp.r[DSP_REG_SR] |= SR_CARRY;
-  // isCarryAdd = (val1 > result) => skip setting if (val <= result) => jump if ZF or CF => use JBE
-  // isCarrySubtract = (val1 >= result) => skip setting if (val < result) => jump if CF => use JB
-  FixupBranch noCarry = J_CC(subtract ? CC_B : CC_BE);
-  OR(16, sr_reg, Imm16(SR_CARRY));
-  SetJumpTarget(noCarry);
+  TEST(64, R(value), R(value));
+  FixupBranch non_negative = J_CC(CC_NS);
+  OR(32, R(flags), Imm32(SR_SIGN));
+  SetJumpTarget(non_negative);
 
-  // 0x02 and 0x80
-  // g_dsp.r[DSP_REG_SR] |= SR_OVERFLOW;
-  // g_dsp.r[DSP_REG_SR] |= SR_OVERFLOW_STICKY;
-  // Overflow (add) = ((val1 ^ res) & (val2 ^ res)) < 0
-  // Overflow (sub) = ((val1 ^ res) & (-val2 ^ res)) < 0
-  MOV(64, R(scratch), R(val1));
-  XOR(64, R(scratch), R(result));
+  MOVSX(64, 32, HELPER_A, R(value));
+  CMP(64, R(HELPER_A), R(value));
+  FixupBranch fits_s32 = J_CC(CC_E);
+  OR(32, R(flags), Imm32(SR_OVER_S32));
+  SetJumpTarget(fits_s32);
 
+  // Bits 31 and 30 are equal exactly when adding 0x40000000 leaves bit 31 clear.
+  LEA(32, HELPER_A, MDisp(value, 0x40000000));
+  TEST(32, R(HELPER_A), R(HELPER_A));
+  FixupBranch differ = J_CC(CC_S);
+  OR(32, R(flags), Imm32(SR_TOP2BITS));
+  SetJumpTarget(differ);
+}
+
+void DSPEmitter::CommitFlags(X64Reg flags)
+{
+  AND(16, m_regs.Word(DSP_REG_SR), Imm16(static_cast<u16>(~RESULT_FLAGS_AND_BIT8)));
+  OR(16, m_regs.Word(DSP_REG_SR), R(flags));
+}
+
+void DSPEmitter::SetFlags40(X64Reg value)
+{
+  ASSERT(value != HELPER_B);
+  XOR(32, R(HELPER_B), R(HELPER_B));
+  CollectFlags40(value, HELPER_B);
+  CommitFlags(HELPER_B);
+}
+
+void DSPEmitter::SetFlagsAddSub(X64Reg a, X64Reg b, X64Reg result, bool subtract)
+{
+  ASSERT(a != HELPER_B && b != HELPER_B && result != HELPER_B);
+  XOR(32, R(HELPER_B), R(HELPER_B));
+
+  // Carry: the unsigned 64-bit result wrapped (for a subtraction: did not borrow).
+  CMP(64, R(a), R(result));
+  FixupBranch no_carry = J_CC(subtract ? CC_B : CC_BE);
+  OR(32, R(HELPER_B), Imm32(SR_CARRY));
+  SetJumpTarget(no_carry);
+
+  // Overflow: both operands (b negated for a subtraction) differ in sign from the result.
+  MOV(64, R(HELPER_C), R(a));
+  XOR(64, R(HELPER_C), R(result));
+  MOV(64, R(HELPER_D), R(b));
   if (subtract)
-    NEG(64, R(val2));
-  XOR(64, R(result), R(val2));
+    NEG(64, R(HELPER_D));
+  XOR(64, R(HELPER_D), R(result));
+  TEST(64, R(HELPER_C), R(HELPER_D));
+  FixupBranch no_overflow = J_CC(CC_NS);
+  OR(32, R(HELPER_B), Imm32(SR_OVERFLOW | SR_OVERFLOW_STICKY));
+  SetJumpTarget(no_overflow);
 
-  TEST(64, R(scratch), R(result));  // Test scratch & value
-  FixupBranch noOverflow = J_CC(CC_GE);
-  OR(16, sr_reg, Imm16(SR_OVERFLOW | SR_OVERFLOW_STICKY));
-  SetJumpTarget(noOverflow);
-
-  // Restore result and val2 -- TODO: does this really matter?
-  XOR(64, R(result), R(val2));
-  if (subtract)
-    NEG(64, R(val2));
-
-  m_gpr.PutReg(DSP_REG_SR);
-  Update_SR_Register(result, scratch);
+  CollectFlags40(result, HELPER_B);
+  CommitFlags(HELPER_B);
 }
 
-// In: RAX: s16 _Value (middle)
-void DSPEmitter::Update_SR_Register16(X64Reg val)
+void DSPEmitter::SetFlags16(X64Reg value, X64Reg full_acc)
 {
-  const OpArg sr_reg = m_gpr.GetReg(DSP_REG_SR);
-  AND(16, sr_reg, Imm16(~SR_CMP_MASK));
+  ASSERT(value != HELPER_B && value != HELPER_C);
+  XOR(32, R(HELPER_B), R(HELPER_B));
+  MOVZX(32, 16, HELPER_C, R(value));
 
-  //	// 0x04
-  //	if (_Value == 0) g_dsp.r[DSP_REG_SR] |= SR_ARITH_ZERO;
-  TEST(16, R(val), R(val));
-  FixupBranch notZero = J_CC(CC_NZ);
-  OR(16, sr_reg, Imm16(SR_ARITH_ZERO | SR_TOP2BITS));
-  FixupBranch end = J();
-  SetJumpTarget(notZero);
+  TEST(32, R(HELPER_C), R(HELPER_C));
+  FixupBranch non_zero = J_CC(CC_NZ);
+  OR(32, R(HELPER_B), Imm32(SR_ARITH_ZERO));
+  SetJumpTarget(non_zero);
 
-  //	// 0x08
-  //	if (_Value < 0) g_dsp.r[DSP_REG_SR] |= SR_SIGN;
-  FixupBranch greaterThanEqual = J_CC(CC_GE);
-  OR(16, sr_reg, Imm16(SR_SIGN));
-  SetJumpTarget(greaterThanEqual);
+  TEST(32, R(HELPER_C), Imm32(0x8000));
+  FixupBranch non_negative = J_CC(CC_Z);
+  OR(32, R(HELPER_B), Imm32(SR_SIGN));
+  SetJumpTarget(non_negative);
 
-  //	// 0x20 - Checks if top bits of m are equal
-  //	if ((((u16)_Value >> 14) == 0) || (((u16)_Value >> 14) == 3))
-  SHR(16, R(val), Imm8(14));
-  TEST(16, R(val), R(val));
-  FixupBranch isZero = J_CC(CC_Z);
-  CMP(16, R(val), Imm16(3));
-  FixupBranch notThree = J_CC(CC_NE);
-  SetJumpTarget(isZero);
-  //		g_dsp.r[DSP_REG_SR] |= SR_TOP2BITS;
-  OR(16, sr_reg, Imm16(SR_TOP2BITS));
-  SetJumpTarget(notThree);
-  SetJumpTarget(end);
-  m_gpr.PutReg(DSP_REG_SR);
-}
+  // Bits 15 and 14 are equal exactly when adding 0x4000 leaves bit 15 clear.
+  ADD(32, R(HELPER_C), Imm32(0x4000));
+  TEST(32, R(HELPER_C), Imm32(0x8000));
+  FixupBranch differ = J_CC(CC_NZ);
+  OR(32, R(HELPER_B), Imm32(SR_TOP2BITS));
+  SetJumpTarget(differ);
 
-// In: RAX: s16 _Value (middle)
-// In: RDX: s64 _FullValue
-// Clobbers scratch
-void DSPEmitter::Update_SR_Register16_OverS32(Gen::X64Reg val, Gen::X64Reg full_val,
-                                              Gen::X64Reg scratch)
-{
-  Update_SR_Register16(val);
+  if (full_acc != INVALID_REG)
+  {
+    ASSERT(full_acc != HELPER_A && full_acc != HELPER_B);
+    MOVSX(64, 32, HELPER_A, R(full_acc));
+    CMP(64, R(HELPER_A), R(full_acc));
+    FixupBranch fits_s32 = J_CC(CC_E);
+    OR(32, R(HELPER_B), Imm32(SR_OVER_S32));
+    SetJumpTarget(fits_s32);
+  }
 
-  const OpArg sr_reg = m_gpr.GetReg(DSP_REG_SR);
-
-  //	// 0x10
-  //	if (_FullValue != (s32)_FullValue) g_dsp.r[DSP_REG_SR] |= SR_OVER_S32;
-  MOVSX(64, 32, scratch, R(full_val));
-  CMP(64, R(scratch), R(full_val));
-  FixupBranch noOverS32 = J_CC(CC_E);
-  OR(16, sr_reg, Imm16(SR_OVER_S32));
-  SetJumpTarget(noOverS32);
-
-  m_gpr.PutReg(DSP_REG_SR);
+  CommitFlags(HELPER_B);
 }
 
 }  // namespace DSP::JIT::x64
