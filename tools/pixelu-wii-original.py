@@ -78,17 +78,24 @@ V = "Core/VideoCommon/"
 I = "Core/InputCommon/ControllerInterface/"
 Q = "Core/DolphinQt/"
 BATCHES = [
-    ("W1", "Prune: code no Windows x64 build compiles (ARM64 JIT, Metal, Android, macOS, Linux backends)", [
+    # W1 deleted these instead of rewriting them (docs/pixelu-wii-original.md, "W1 log"); the
+    # patterns stay so that a file of this kind added back by mistake shows up under W1. Headers that
+    # Windows-compiled files still include (IOAndroid.h, IOLinux.h, AlsaSoundStream.h,
+    # PulseAudioStream.h, OpenSLESStream.h) were kept and belong to W14 and W36.
+    ("W1", "Prune: delete code no Windows x64 build compiles (ARM64, Metal, macOS, Android, Linux/BSD)", [
         K + "PowerPC/JitArm64/*", K + "PowerPC/JitArmCommon/*", C + "Arm64Emitter*", C + "ArmCPUDetect*",
         C + "ArmFPURoundMode*", C + "ArmCommon*", C + "GenericCPUDetect*", C + "GenericFPURoundMode*",
-        C + "MemArenaAndroid*", C + "MemArenaDarwin*", C + "MemArenaUnix*", C + "CommonFuncsObjC*", C + "UnixUtil*",
-        C + "GL/GLX11Window*", C + "GL/GLInterface/AGL*", C + "GL/GLInterface/EGL*", C + "GL/GLInterface/GLX*",
-        C + "GL/GLInterface/BGL*", V + "VertexLoaderARM64*", "Core/VideoBackends/Metal/*",
-        I + "Android/*", I + "evdev/*", I + "Quartz/*", I + "Xlib/*", I + "Touch/*", I + "Pipes/*",
-        K + "HW/WiimoteReal/IOAndroid*", K + "HW/WiimoteReal/IOLinux*", K + "HW/WiimoteReal/IOdarwin*",
-        K + "HW/WiimoteReal/IOBluez*", K + "HW/EXI/BBA/TAPServer_Apple*", K + "HW/EXI/BBA/TAP_Apple*",
-        K + "HW/EXI/BBA/TAP_Unix*", "Core/AudioCommon/AlsaSoundStream*", "Core/AudioCommon/PulseAudioStream*",
-        "Core/AudioCommon/OpenSLESStream*", "Core/UICommon/X11Utils*"]),
+        V + "VertexLoaderARM64*", V + "TextureDecoder_Generic*", "Core/VideoBackends/Metal/*",
+        C + "CommonFuncsObjC*", C + "MemArenaDarwin*", C + "GL/GLInterface/AGL*", I + "Quartz/*",
+        K + "HW/EXI/BBA/TAP_Apple*",
+        C + "MemArenaAndroid*", C + "Logging/ConsoleListenerDroid*", C + "GL/GLInterface/EGLAndroid*",
+        K + "HW/WiimoteReal/IOAndroid.cpp", I + "Android/*", I + "Touch/*", "Core/AudioCommon/OpenSLESStream.cpp",
+        C + "MemArenaUnix*", C + "Logging/ConsoleListenerNix*", C + "UnixUtil*", C + "GL/GLInterface/EGL*",
+        C + "GL/GLX11Window*", C + "GL/GLInterface/BGL*", C + "TraversalServer.cpp", K + "HW/EXI/BBA/TAP_Unix*",
+        K + "HW/WiimoteReal/IOLinux.cpp", K + "MemoryWatcher*", I + "evdev/*", I + "Xlib/*", I + "Pipes/*",
+        "Core/AudioCommon/AlsaSoundStream.cpp", "Core/AudioCommon/PulseAudioStream.cpp",
+        "Core/UICommon/X11Utils*", "Core/UICommon/DBusUtils*", Q + "QtUtils/SignalDaemon*",
+        K + "IOS/Network/ICMPWin*", Q + "pch_qt*"]),
     ("W2", "Common: types, bits, containers, strings, files, threads, config, logging", [
         C + "Align*", C + "Assert*", C + "BitField*", C + "BitSet*", C + "BitUtils*", C + "BlockingLoop*", C + "Buffer*",
         C + "ChunkFile*", C + "ColorUtil*", C + "Common.*", C + "CommonFuncs*", C + "CommonPaths*", C + "CommonTypes*",
@@ -147,7 +154,7 @@ BATCHES = [
     ("W22", "Core: Core.cpp, System, state saves, movies, Wii root, title DB, hotkeys", [
         K + "Core.*", K + "System*", K + "State*", K + "Movie*", K + "MachineContext*", K + "BootManager*",
         K + "ConfigManager*", K + "SysConf*", K + "WiiRoot*", K + "WiiUtils*", K + "TitleDatabase*", K + "CommonTitles*",
-        K + "HotkeyManager*", K + "FreeLookManager*", K + "MemTools*", K + "MemoryWatcher*", K + "Host*",
+        K + "HotkeyManager*", K + "FreeLookManager*", K + "MemTools*", K + "Host*",
         K + "TimePlayed*", K + "CPUThreadConfigCallback*", K + "SyncIdentifier*"]),
     ("W23", "Core: cheats, patches, NetPlay, achievements, analytics, USB utils", [K + "*"]),
     ("W24", "VideoCommon: GX state and command processing (BP/CP/XF, FIFO, PE, CPU cull)", [
@@ -180,7 +187,7 @@ BATCHES = [
     ("W37", "DolphinQt: main window, menus, host, settings, render widget, hotkeys, Qt utils", [
         Q + "MainWindow*", Q + "MenuBar*", Q + "Main.*", Q + "Host*", Q + "Settings.*", Q + "RenderWidget*",
         Q + "HotkeyScheduler*", Q + "Resources*", Q + "Translation*", Q + "ToolBar*", Q + "AboutDialog*",
-        Q + "SearchBar*", Q + "resource*", Q + "pch_qt*", Q + "GameCount*", Q + "QtUtils/*"]),
+        Q + "SearchBar*", Q + "resource*", Q + "GameCount*", Q + "QtUtils/*"]),
     ("W38", "DolphinQt: game list and the other top-level dialogs (cheats, memcards, GBA, convert, NAND)",
         [Q + "GameList/*", Q + "*.*"]),
     ("W39", "DolphinQt: config dialogs (general, graphics, controls, tooltips, SDL hints)", [

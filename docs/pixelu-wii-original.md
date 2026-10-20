@@ -79,7 +79,10 @@ and its Externals fetched and `pixelu/wii/Source` copied over its `Source/`,
 -DENABLE_LLVM=OFF -DENCODE_FRAMEDUMPS=OFF -DENABLE_X11=OFF -DENABLE_EGL=OFF`.
 In W0 this configured with our `Source/` and produced the same
 `build.ninja` as with Dolphin's own `Source/`. After it, `ninja common`,
-`ninja core` and so on compile one library at a time.
+`ninja core` and so on compile one library at a time. Since W1 removed
+the Unix memory arena, console listener and other Linux sources, a Linux
+tree still configures but no longer links; compiling single files and
+libraries that do not need them still works.
 
 ## Status
 
@@ -97,23 +100,23 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Kind | Lines | Share |
 |---|---:|---:|
 | Original (RetroPixels) | 0 | 0.0% |
-| Dolphin, untouched | 468212 | 97.9% |
+| Dolphin, untouched | 435006 | 97.8% |
 | Dolphin, with PixelU changes | 4224 | 0.9% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
-| Third-party | 5763 | 1.2% |
-| **All** | **478199** | 100% |
+| Third-party | 5763 | 1.3% |
+| **All** | **444993** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
-| Core/AudioCommon | 3833 | 0 | Dolphin |
-| Core/Common (top level) | 37655 | 0 | Dolphin |
+| Core/AudioCommon | 3219 | 0 | Dolphin |
+| Core/Common (top level) | 29936 | 0 | Dolphin |
 | Core/Common/Assembler | 5585 | 0 | Dolphin |
 | Core/Common/Config | 865 | 0 | Dolphin |
 | Core/Common/Crypto | 1459 | 0 | Dolphin |
 | Core/Common/Debug | 420 | 0 | Dolphin |
-| Core/Common/GL | 10079 | 0 | Dolphin, 5672 lines third-party |
-| Core/Common/Logging | 713 | 0 | Dolphin |
-| Core/Core (top level) | 25261 | 0 | Dolphin + PixelU change |
+| Core/Common/GL | 9096 | 0 | Dolphin, 5672 lines third-party |
+| Core/Common/Logging | 620 | 0 | Dolphin |
+| Core/Core (top level) | 25099 | 0 | Dolphin + PixelU change |
 | Core/Core/Boot | 2768 | 0 | Dolphin |
 | Core/Core/Config | 2427 | 0 | Dolphin |
 | Core/Core/ConfigLoaders | 1202 | 0 | Dolphin |
@@ -127,7 +130,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/HW/DSPHLE | 7731 | 0 | Dolphin |
 | Core/Core/HW/DSPLLE | 573 | 0 | Dolphin |
 | Core/Core/HW/DVD | 5354 | 0 | Dolphin |
-| Core/Core/HW/EXI | 8744 | 0 | Dolphin, 91 lines third-party |
+| Core/Core/HW/EXI | 8449 | 0 | Dolphin, 91 lines third-party |
 | Core/Core/HW/GCMemcard | 3590 | 0 | Dolphin |
 | Core/Core/HW/HSP | 1053 | 0 | Dolphin |
 | Core/Core/HW/MagCard | 1368 | 0 | Dolphin |
@@ -135,13 +138,13 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/HW/Triforce | 3620 | 0 | Dolphin |
 | Core/Core/HW/WiimoteCommon | 1052 | 0 | Dolphin |
 | Core/Core/HW/WiimoteEmu | 8117 | 0 | Dolphin |
-| Core/Core/HW/WiimoteReal | 3145 | 0 | Dolphin |
+| Core/Core/HW/WiimoteReal | 2579 | 0 | Dolphin |
 | Core/Core/IOS (top level) | 3685 | 0 | Dolphin |
 | Core/Core/IOS/Crypto | 250 | 0 | Dolphin |
 | Core/Core/IOS/DI | 975 | 0 | Dolphin |
 | Core/Core/IOS/ES | 5238 | 0 | Dolphin |
 | Core/Core/IOS/FS | 2808 | 0 | Dolphin |
-| Core/Core/IOS/Network | 8483 | 0 | Dolphin |
+| Core/Core/IOS/Network | 8383 | 0 | Dolphin |
 | Core/Core/IOS/SDIO | 885 | 0 | Dolphin |
 | Core/Core/IOS/STM | 208 | 0 | Dolphin |
 | Core/Core/IOS/USB (top level) | 2597 | 0 | Dolphin |
@@ -156,12 +159,10 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/PowerPC/Interpreter | 6120 | 0 | Dolphin |
 | Core/Core/PowerPC/Jit64 | 10326 | 0 | Dolphin |
 | Core/Core/PowerPC/Jit64Common | 2549 | 0 | Dolphin |
-| Core/Core/PowerPC/JitArm64 | 12529 | 0 | Dolphin |
-| Core/Core/PowerPC/JitArmCommon | 44 | 0 | Dolphin |
 | Core/Core/PowerPC/JitCommon | 2294 | 0 | Dolphin |
 | Core/Core/PowerPC/SignatureDB | 755 | 0 | Dolphin |
 | Core/DiscIO | 17619 | 0 | Dolphin |
-| Core/DolphinQt (top level) | 15091 | 0 | Dolphin + PixelU change |
+| Core/DolphinQt (top level) | 15076 | 0 | Dolphin + PixelU change |
 | Core/DolphinQt/Achievements | 1273 | 0 | Dolphin |
 | Core/DolphinQt/Config | 18978 | 0 | Dolphin |
 | Core/DolphinQt/Debugger | 14683 | 0 | Dolphin |
@@ -170,7 +171,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/DolphinQt/GameList | 2605 | 0 | Dolphin |
 | Core/DolphinQt/InfinityBase | 403 | 0 | Dolphin |
 | Core/DolphinQt/NetPlay | 3201 | 0 | Dolphin |
-| Core/DolphinQt/QtUtils | 1493 | 0 | Dolphin |
+| Core/DolphinQt/QtUtils | 1405 | 0 | Dolphin |
 | Core/DolphinQt/Settings | 4742 | 0 | Dolphin |
 | Core/DolphinQt/SkylanderPortal | 1499 | 0 | Dolphin |
 | Core/DolphinQt/TAS | 1979 | 0 | Dolphin |
@@ -178,34 +179,27 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/InputCommon (top level) | 2259 | 0 | Dolphin |
 | Core/InputCommon/ControllerEmu | 3592 | 0 | Dolphin |
 | Core/InputCommon/ControllerInterface (top level) | 1863 | 0 | Dolphin |
-| Core/InputCommon/ControllerInterface/Android | 1242 | 0 | Dolphin |
 | Core/InputCommon/ControllerInterface/DInput | 1112 | 0 | Dolphin |
 | Core/InputCommon/ControllerInterface/DualShockUDPClient | 978 | 0 | Dolphin |
-| Core/InputCommon/ControllerInterface/evdev | 982 | 0 | Dolphin |
 | Core/InputCommon/ControllerInterface/ForceFeedback | 337 | 0 | Dolphin |
-| Core/InputCommon/ControllerInterface/Pipes | 235 | 0 | Dolphin |
-| Core/InputCommon/ControllerInterface/Quartz | 468 | 0 | Dolphin |
 | Core/InputCommon/ControllerInterface/SDL | 1311 | 0 | Dolphin |
 | Core/InputCommon/ControllerInterface/SteamDeck | 335 | 0 | Dolphin |
-| Core/InputCommon/ControllerInterface/Touch | 361 | 0 | Dolphin |
 | Core/InputCommon/ControllerInterface/WGInput | 807 | 0 | Dolphin |
 | Core/InputCommon/ControllerInterface/Wiimote | 2020 | 0 | Dolphin |
 | Core/InputCommon/ControllerInterface/Win32 | 139 | 0 | Dolphin |
 | Core/InputCommon/ControllerInterface/XInput | 350 | 0 | Dolphin |
-| Core/InputCommon/ControllerInterface/Xlib | 665 | 0 | Dolphin |
 | Core/InputCommon/ControlReference | 2333 | 0 | Dolphin |
 | Core/InputCommon/DynamicInputTextures | 477 | 0 | Dolphin |
-| Core/UICommon | 4641 | 0 | Dolphin |
+| Core/UICommon | 4121 | 0 | Dolphin |
 | Core/UpdaterCommon | 903 | 0 | Dolphin |
 | Core/VideoBackends/D3D | 3633 | 0 | Dolphin |
 | Core/VideoBackends/D3D12 | 5320 | 0 | Dolphin |
 | Core/VideoBackends/D3DCommon | 1094 | 0 | Dolphin |
-| Core/VideoBackends/Metal | 4618 | 0 | Dolphin |
 | Core/VideoBackends/Null | 557 | 0 | Dolphin |
 | Core/VideoBackends/OGL | 5742 | 0 | Dolphin |
 | Core/VideoBackends/Software | 6734 | 0 | Dolphin |
 | Core/VideoBackends/Vulkan | 10213 | 0 | Dolphin |
-| Core/VideoCommon (top level) | 52049 | 0 | Dolphin |
+| Core/VideoCommon (top level) | 51142 | 0 | Dolphin |
 | Core/VideoCommon/Assets | 4615 | 0 | Dolphin |
 | Core/VideoCommon/GraphicsModSystem | 2853 | 0 | Dolphin |
 | Core/VideoCommon/Resources | 2053 | 0 | Dolphin |
@@ -221,21 +215,22 @@ InputCommon, AudioCommon/UICommon, DolphinQt last. Lines are Dolphin lines
 left in each batch (third-party files are not counted); the exact file
 lists are in `tools/pixelu-wii-original.py` (`BATCHES`).
 
-W1 is different: it **deletes** code no Windows x64 build compiles (the
-ARM64 JIT and emitter, Metal, and the Android, macOS, Linux and BSD
+W1 was different: it **deleted** code no Windows x64 build compiles (the
+ARM64 JIT and emitter, Metal, and the Android, macOS, Linux, BSD and Haiku
 platform backends) together with their entries in the CMake lists, instead
-of rewriting it. That gives up building PixelU-Wii for those platforms,
-which CI does not do; if that is not wanted, those files become batches of
-their own instead. Each removal must be checked against the CMake
-conditions (for example `IOhidapi` and `SteamDeck` are built on Windows
-too, so they are not in W1).
+of rewriting it (see the W1 log below). PixelU-Wii now builds only for
+Windows x64, which is all RetroPixels ships. Each removal was checked
+against the CMake conditions (for example `IOhidapi` and `SteamDeck` are
+built on Windows too, so they stayed). Shared files that still have
+`__APPLE__`, `ANDROID` or `_M_ARM_64` branches keep them until their own
+batch rewrites them.
 
 <!-- batches:start -->
 | Batch | Scope | Lines | Original lines | Status |
 |---|---|---:|---:|---|
-| W1 | Prune: code no Windows x64 build compiles (ARM64 JIT, Metal, Android, macOS, Linux backends) | 31970 | 0 | Dolphin |
-| W2 | Common: types, bits, containers, strings, files, threads, config, logging | 15822 | 0 | Dolphin |
-| W3 | Common: platform, memory, network, crypto, file formats | 10308 | 0 | Dolphin |
+| W1 | Prune: delete code no Windows x64 build compiles (ARM64, Metal, macOS, Android, Linux/BSD) | 0 | 0 | done (no files left) |
+| W2 | Common: types, bits, containers, strings, files, threads, config, logging | 15729 | 0 | Dolphin |
+| W3 | Common: platform, memory, network, crypto, file formats | 9782 | 0 | Dolphin |
 | W4 | Common: x64 emitter, disassemblers, PowerPC assembler | 13374 | 0 | Dolphin |
 | W5 | DiscIO: blob formats and compression | 8943 | 0 | Dolphin |
 | W6 | DiscIO: volumes, filesystems, verifier, Riivolution, NAND import | 8676 | 0 | Dolphin |
@@ -246,19 +241,19 @@ too, so they are not in W1).
 | W11 | HW: DVD and GameCube memory cards | 8944 | 0 | Dolphin |
 | W12 | HW: EXI devices (memory card slots, BBA, mic, modem, IPL) | 8358 | 0 | Dolphin |
 | W13 | HW: SI, pads, keyboard, GBA link, HSP, Triforce, MagCard | 11839 | 0 | Dolphin |
-| W14 | HW: Wii Remote (common, emulated, real) | 11973 | 0 | Dolphin |
+| W14 | HW: Wii Remote (common, emulated, real) | 12108 | 0 | Dolphin |
 | W15 | DSP: core, interpreter, LLE glue | 10311 | 0 | Dolphin |
 | W16 | DSP: x64 JIT | 7632 | 0 | Dolphin |
 | W17 | DSP: HLE (AX, Zelda, GBA, CARD, ROM ucodes) | 7731 | 0 | Dolphin |
 | W18 | IOS: kernel, ES, FS, DI, SDIO, STM, WFS, crypto | 15395 | 0 | Dolphin |
-| W19 | IOS: network (SO, KD/WC24, NCD, WD, SSL) and USB host devices | 12434 | 0 | Dolphin |
+| W19 | IOS: network (SO, KD/WC24, NCD, WD, SSL) and USB host devices | 12334 | 0 | Dolphin |
 | W20 | IOS: Bluetooth and emulated USB devices (Skylanders, Infinity, keyboard, mic) | 13973 | 0 | Dolphin |
 | W21 | Core: boot, config, config loaders, HLE, debugger, FIFO player | 13282 | 0 | Dolphin |
-| W22 | Core: Core.cpp, System, state saves, movies, Wii root, title DB, hotkeys | 10257 | 0 | Dolphin + PixelU change |
+| W22 | Core: Core.cpp, System, state saves, movies, Wii root, title DB, hotkeys | 10095 | 0 | Dolphin + PixelU change |
 | W23 | Core: cheats, patches, NetPlay, achievements, analytics, USB utils | 14044 | 0 | Dolphin |
 | W24 | VideoCommon: GX state and command processing (BP/CP/XF, FIFO, PE, CPU cull) | 12077 | 0 | Dolphin |
 | W25 | VideoCommon: vertex loaders and vertex manager | 4968 | 0 | Dolphin |
-| W26 | VideoCommon: texture cache and decoders | 9463 | 0 | Dolphin |
+| W26 | VideoCommon: texture cache and decoders | 9127 | 0 | Dolphin |
 | W27 | VideoCommon: shader generators and shader managers | 9946 | 0 | Dolphin |
 | W28 | VideoCommon: renderer abstraction, framebuffers, shader cache, present, post-processing | 11210 | 0 | Dolphin |
 | W29 | VideoCommon: OSD, frame dumping, performance, assets, graphics mods, resources | 13335 | 0 | Dolphin |
@@ -268,8 +263,8 @@ too, so they are not in W1).
 | W33 | Video backends: D3D11, D3D12, D3DCommon | 10047 | 0 | Dolphin |
 | W34 | InputCommon: controller emulation, control references, dynamic input textures | 8661 | 0 | Dolphin |
 | W35 | InputCommon: ControllerInterface (DInput, XInput, WGInput, SDL, DSU, Wii Remote, Steam Deck) | 9252 | 0 | Dolphin |
-| W36 | AudioCommon, UICommon, UpdaterCommon, DolphinTool, PCH | 9744 | 0 | Dolphin |
-| W37 | DolphinQt: main window, menus, host, settings, render widget, hotkeys, Qt utils | 11063 | 0 | Dolphin + PixelU change |
+| W36 | AudioCommon, UICommon, UpdaterCommon, DolphinTool, PCH | 9693 | 0 | Dolphin |
+| W37 | DolphinQt: main window, menus, host, settings, render widget, hotkeys, Qt utils | 10960 | 0 | Dolphin + PixelU change |
 | W38 | DolphinQt: game list and the other top-level dialogs (cheats, memcards, GBA, convert, NAND) | 8126 | 0 | Dolphin |
 | W39 | DolphinQt: config dialogs (general, graphics, controls, tooltips, SDL hints) | 12387 | 0 | Dolphin |
 | W40 | DolphinQt: controller mapping and settings panes | 11333 | 0 | Dolphin |
@@ -289,3 +284,55 @@ the third-party Externals directly) before the submodule can go.
 
 - W0: Dolphin 2609a's `Source/` (with the old Source patches) vendored into
   `pixelu/wii/Source`; CI builds with it; the tracker and this plan added.
+- W1 log: deleted 107 source files (33206 lines) that no Windows x64 build
+  compiles, plus 6 other files and about 470 lines of CMake.
+  Source now has 444993 lines (from 478199).
+  - ARM64 and other non-x86 CPUs (19957 lines): `PowerPC/JitArm64`,
+    `PowerPC/JitArmCommon`, Common's `Arm64Emitter`, `ArmCommon.h`,
+    `ArmCPUDetect.cpp`, `ArmFPURoundMode.cpp`, `GenericCPUDetect.cpp`,
+    `GenericFPURoundMode.cpp`, VideoCommon's `VertexLoaderARM64` and
+    `TextureDecoder_Generic.cpp`. Also removed: the `elf_aux_info` check
+    and the Windows ARM64 Qt target selection.
+  - Metal (4618 lines): `VideoBackends/Metal` and its CMake list.
+  - macOS (1039 lines): `CommonFuncsObjC.mm`, `MemArenaDarwin.cpp`, the AGL
+    GL interface, the Quartz input backend, `TAP_Apple.cpp`; also the app
+    bundle files (`Info.plist.in`, entitlements, the mac `qt.conf`,
+    `Core/VersionInfo.plist.in`). Also removed: the MacUpdater
+    subdirectory, the `Dolphin.app` bundle target and DolphinQt's bundle
+    block. `UpdaterCommon` is now added on Windows only.
+  - Android (2210 lines): `MemArenaAndroid.cpp`, `ConsoleListenerDroid.cpp`,
+    the EGLAndroid GL interface, `IOAndroid.cpp`, the Android and Touch
+    input backends, `OpenSLESStream.cpp`. Also removed: the `Android/jni`
+    subdirectory, the `androidcommon` links, and Vulkan's adrenotools
+    link and include path.
+  - Linux, BSD and Haiku (5267 lines): `MemArenaUnix.cpp`,
+    `ConsoleListenerNix.cpp`, `UnixUtil.h`, the EGL, EGLX11, GLX11Window
+    and BGL GL interfaces, `TraversalServer.cpp` (the Unix-only
+    `traversal_server` tool), `TAP_Unix.cpp`, `IOLinux.cpp` (BlueZ),
+    `MemoryWatcher`, the evdev, Xlib and Pipes input backends,
+    `AlsaSoundStream.cpp`, `PulseAudioStream.cpp`, UICommon's `X11Utils`
+    and `DBusUtils`, DolphinQt's `SignalDaemon`. Also removed: Source's
+    `ENABLE_BLUEZ` option. `ENABLE_ALSA`, `ENABLE_PULSEAUDIO`,
+    `ENABLE_X11`, `ENABLE_EGL`, `ENABLE_EVDEV` and `ENABLE_HWDB` are
+    options of the submodule's top-level CMake, so they stay. They now
+    turn on nothing in `Source/`, and on Windows they never did.
+  - Not built by any CMake list (115 lines): `IOS/Network/ICMPWin.cpp`
+    (every platform builds the `ICMPLin.cpp` stubs) and DolphinQt's
+    `pch_qt.h`/`.cpp`.
+  - Kept, because Windows-compiled files include them for their
+    non-platform stand-ins: `IOAndroid.h` and `IOLinux.h` (from
+    `WiimoteReal.cpp`), and `AlsaSoundStream.h`, `PulseAudioStream.h` and
+    `OpenSLESStream.h` (from `AudioCommon.cpp`). They moved to W14 and
+    W36. Includes of deleted headers are left as they are when they sit
+    inside non-Windows `#if` branches of shared files (`GLContext.cpp`,
+    `ControllerInterface.cpp`, `JitInterface.cpp`, `VertexLoaderBase.cpp`,
+    `VideoBackendBase.cpp`, `Core.cpp`, `AMMediaboard.cpp`,
+    `MainWindow.cpp`, `UICommon.cpp`), so those files are still unchanged
+    Dolphin files. The same goes for the Apple/Haiku link libraries
+    that shared code uses.
+  - Checked: the Linux configure-only run (flags above) succeeds. Its
+    `build.ninja` differs from W0's only by the Unix-only sources removed
+    (`ConsoleListenerNix`, `MemArenaUnix`, `TraversalServer`, `TAP_Unix`,
+    `MemoryWatcher`, `Pipes`). Every file named in a `Source/` CMake list
+    exists, except the generated `AchievementApprovedHash.h`. No deleted
+    header is included outside a non-Windows `#if`.
