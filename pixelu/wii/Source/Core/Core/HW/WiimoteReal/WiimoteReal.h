@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -25,31 +24,36 @@
 
 class PointerWrap;
 
+// Real Wii Remotes connected to the PC: platform I/O backends find them, each connected remote
+// runs its own reader and writer threads, and remotes are handed to the emulated Bluetooth
+// slots, to ControllerInterface, or kept briefly in a pool.
+
 namespace WiimoteReal
 {
 using WiimoteCommon::MAX_PAYLOAD;
 
-// Includes HID "type" header byte.
+// A raw HID report, starting with the HID transaction header byte.
 using Report = std::vector<u8>;
 constexpr int REPORT_HID_HEADER_SIZE = 1;
 
 constexpr u32 WIIMOTE_DEFAULT_TIMEOUT = 1000;
 
-// Multiple of 1.28 seconds. Wii games use a value of 3.
+// In units of 1.28 s; Wii games use 3.
 constexpr u8 BLUETOOTH_INQUIRY_LENGTH = 3;
 
-// The 4 most significant bits of the first byte of an outgoing command must be
-// 0x50 if sending on the command channel and 0xA0 if sending on the interrupt
-// channel. On Mac and Linux we use interrupt channel; on Windows, command.
+// Upper nibble of the header byte of outgoing reports: SET_REPORT (0x50) for the control channel,
+// used on Windows, or DATA (0xA0) for the interrupt channel elsewhere.
 #ifdef _WIN32
 constexpr u8 WR_SET_REPORT = 0x50;
 #else
 constexpr u8 WR_SET_REPORT = 0xA0;
 #endif
 
+// Lower nibble: the report type.
 constexpr u8 BT_INPUT = 0x01;
 constexpr u8 BT_OUTPUT = 0x02;
 
+// A real remote. Platform backends derive from this and provide the raw I/O.
 class Wiimote : public WiimoteCommon::HIDWiimote
 {
 public:
@@ -60,10 +64,13 @@ public:
 
   ~Wiimote() override;
 
+  // Identifies the physical device (e.g. its device path), to avoid connecting it twice.
   virtual std::string GetId() const = 0;
 
+  // Takes the oldest report received from the remote.
   bool GetNextReport(Report* report);
 
+  // Connects and asks the remote whether it carries a balance board extension.
   bool IsBalanceBoard();
 
   void InterruptDataOutput(const u8* data, const u32 size) override;
@@ -83,7 +90,11 @@ public:
   void EmuResume();
   void EmuPause();
 
+  // Starts the I/O threads (connecting the device) and reports whether that worked. `index` is
+  // the slot, used for the balance board check and logging.
   bool Connect(int index);
+
+  // Sends the initial reports of a newly assigned remote.
   void Prepare();
 
   virtual bool IsConnected() const = 0;
@@ -99,7 +110,7 @@ public:
   int GetIndex() const;
 
 protected:
-  // This needs to be called in derived destructors!
+  // Derived classes must call this from their destructor, while their I/O still works.
   void Shutdown();
 
   Wiimote();
@@ -107,14 +118,14 @@ protected:
   int m_index = 0;
   Report m_last_input_report;
 
-  // If true, the Wiimote will be really disconnected when it is disconnected by Dolphin.
-  // In any other case, data reporting is not paused to allow reconnecting on any button press.
-  // This is not enabled on all platforms as connecting a Wiimote can be a pain on some platforms.
+  // Whether unlinking the remote closes the connection. Otherwise only reporting is reset, so a
+  // button press can link it again (connecting is cumbersome on some platforms).
   bool m_really_disconnect = false;
 
   u8 m_bt_device_index = 0;
 
 private:
+  // An outgoing report and when to send it.
   struct TimedReport
   {
     TimePoint time;
@@ -139,10 +150,11 @@ private:
   void ClearReadQueue();
   void WriteReport(Report rpt);
 
+  // Platform I/O. IORead returns the length read, 0 on failure or -1 when nothing was read.
   virtual int IORead(u8* buf) = 0;
   virtual int IOWrite(u8 const* buf, size_t len) = 0;
 
-  // Make a blocking IORead call immediately return.
+  // Makes a blocked IORead return.
   virtual void IOWakeup() = 0;
 
   void ReadThreadFunc();
@@ -152,22 +164,23 @@ private:
 
   std::atomic<bool> m_is_linked = false;
 
-  // We track the speaker state to convert unnecessary speaker data into rumble reports.
+  // Speaker state as last set by the game; speaker data that cannot play is turned into
+  // (shorter) rumble reports.
   bool m_speaker_enable = false;
   bool m_speaker_mute = false;
 
-  // And we track the rumble state to drop unnecessary rumble reports.
+  // Last rumble state sent, to drop rumble reports that change nothing.
   bool m_rumble_state = false;
 
+  // The writer thread (which also connects and runs the reader thread).
   std::thread m_write_thread;
-  // Whether to keep running the thread.
   Common::Flag m_run_thread;
-  // Triggered when the thread has finished ConnectInternal.
+  // Set once the writer thread has tried to connect.
   Common::Event m_thread_ready_event;
 
   Common::SPSCQueue<Report> m_read_reports;
   Common::SPSCQueue<TimedReport> m_write_reports;
-  // Kick the write thread.
+  // Wakes the writer thread.
   Common::Event m_write_event;
 
   bool m_speaker_enabled_in_dolphin_config = false;
@@ -176,14 +189,15 @@ private:
   Config::ConfigChangedCallbackID m_config_changed_callback_id;
 };
 
+// A platform's way of finding remotes.
 class WiimoteScannerBackend
 {
 public:
   virtual ~WiimoteScannerBackend() = default;
 
-  // function called when not looking for more Wiimotes
+  // Called on each scanner iteration.
   virtual void Update() = 0;
-  // requests the backend to stop scanning if FindWiimotes is blocking
+  // Asks a blocking search to return early.
   virtual void RequestStopSearching() = 0;
 
   struct FindResults
@@ -192,12 +206,12 @@ public:
     std::vector<std::unique_ptr<Wiimote>> balance_boards;
   };
 
-  // Implementations are expected to perform a new inquiry if possible.
-  // Only not-yet-in-use remotes shall be returned.
+  // Searches for new remotes (with a Bluetooth inquiry where the platform can). Returns only
+  // remotes not already in use.
   virtual FindResults FindNewWiimotes() { return FindAttachedWiimotes(); }
 
-  // Implementations shall return not-not-in-use already connected remotes.
-  // e.g. DolphinBar interfaces would be found here.
+  // Returns remotes that are already connected to the PC but not in use (DolphinBar
+  // interfaces, for instance).
   virtual FindResults FindAttachedWiimotes() { return {}; }
 };
 
@@ -208,6 +222,7 @@ enum class WiimoteScanMode
   SCAN_ONCE
 };
 
+// Runs the backends on a scanning thread, plus a thread that maintains the pool.
 class WiimoteScanner
 {
 public:
@@ -231,8 +246,9 @@ private:
   std::atomic<WiimoteScanMode> m_scan_mode{WiimoteScanMode::DO_NOT_SCAN};
 };
 
-// Mutex is recursive as ControllerInterface may call AddWiimoteToPool within ProcessWiimotePool.
+// Recursive because ControllerInterface may call AddWiimoteToPool from ProcessWiimotePool.
 extern std::recursive_mutex g_wiimotes_mutex;
+// The real remotes assigned to the emulated slots.
 extern std::unique_ptr<Wiimote> g_wiimotes[MAX_BBMOTES];
 
 void AddWiimoteToPool(std::unique_ptr<Wiimote>);
