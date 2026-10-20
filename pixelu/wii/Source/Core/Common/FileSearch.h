@@ -16,22 +16,27 @@ std::vector<std::string> DoFileSearch(std::span<const std::string_view> director
                                       std::span<const std::string_view> exts = {},
                                       bool recursive = false);
 
-inline std::vector<std::string> DoFileSearch(std::span<const std::string_view> directories,
-                                             std::string_view ext, bool recursive = false)
+// Single directory and/or single extension forms of the above.
+inline std::vector<std::string> DoFileSearch(std::string_view directory, std::string_view ext,
+                                             bool recursive = false)
 {
-  return DoFileSearch(directories, std::span(&ext, 1), recursive);
+  const std::string_view directories[] = {directory};
+  const std::string_view exts[] = {ext};
+  return DoFileSearch(directories, exts, recursive);
 }
 
 inline std::vector<std::string> DoFileSearch(std::string_view directory,
                                              std::span<const std::string_view> exts = {},
                                              bool recursive = false)
 {
-  return DoFileSearch(std::span(&directory, 1), exts, recursive);
+  const std::string_view directories[] = {directory};
+  return DoFileSearch(directories, exts, recursive);
 }
 
-inline std::vector<std::string> DoFileSearch(std::string_view directory, std::string_view ext,
-                                             bool recursive = false)
+inline std::vector<std::string> DoFileSearch(std::span<const std::string_view> directories,
+                                             std::string_view ext, bool recursive = false)
 {
-  return DoFileSearch(std::span(&directory, 1), std::span(&ext, 1), recursive);
+  const std::string_view exts[] = {ext};
+  return DoFileSearch(directories, exts, recursive);
 }
 }  // namespace Common

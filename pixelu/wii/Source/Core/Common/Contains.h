@@ -26,12 +26,9 @@ struct ContainsFn
   requires std::indirect_binary_predicate<std::ranges::equal_to, std::projected<I, Proj>, const T*>
   constexpr bool operator()(I first, S last, const T& value, Proj proj = {}) const
   {
-    for (; first != last; ++first)
-    {
-      if (std::invoke(proj, *first) == value)
-        return true;
-    }
-    return false;
+    // Same constraints as ranges::find, so it can do the search.
+    const auto found = std::ranges::find(std::move(first), last, value, std::move(proj));
+    return found != last;
   }
 
   template <std::ranges::input_range R, class T, class Proj = std::identity>
@@ -39,7 +36,8 @@ struct ContainsFn
       std::ranges::equal_to, std::projected<std::ranges::iterator_t<R>, Proj>, const T*>
   constexpr bool operator()(R&& r, const T& value, Proj proj = {}) const
   {
-    return (*this)(std::ranges::begin(r), std::ranges::end(r), value, std::move(proj));
+    auto first = std::ranges::begin(r);
+    return (*this)(std::move(first), std::ranges::end(r), value, std::move(proj));
   }
 };
 
@@ -69,7 +67,9 @@ struct ContainsSubrangeFn
   constexpr bool operator()(R1&& r1, R2&& r2, Pred pred = {}, Proj1 proj1 = {},
                             Proj2 proj2 = {}) const
   {
-    return (*this)(std::ranges::begin(r1), std::ranges::end(r1), std::ranges::begin(r2),
+    auto haystack = std::ranges::begin(r1);
+    auto needle = std::ranges::begin(r2);
+    return (*this)(std::move(haystack), std::ranges::end(r1), std::move(needle),
                    std::ranges::end(r2), std::move(pred), std::move(proj1), std::move(proj2));
   }
 };
