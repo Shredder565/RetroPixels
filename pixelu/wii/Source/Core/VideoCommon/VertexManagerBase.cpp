@@ -9,6 +9,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "Common/Assert.h"
@@ -145,23 +146,6 @@ bool VertexManagerBase::Initialize()
   return true;
 }
 
-u32 VertexManagerBase::GetRemainingSize() const
-{
-  return static_cast<u32>(m_end_buffer_pointer - m_cur_buffer_pointer);
-}
-
-void VertexManagerBase::AddIndices(OpcodeDecoder::Primitive primitive, u32 num_vertices)
-{
-  m_index_generator.AddIndices(primitive, num_vertices);
-}
-
-bool VertexManagerBase::AreAllVerticesCulled(VertexLoaderBase* loader,
-                                             OpcodeDecoder::Primitive primitive, const u8* src,
-                                             u32 count)
-{
-  return m_cpu_cull.AreAllVerticesCulled(loader, primitive, src, count);
-}
-
 DataReader VertexManagerBase::PrepareForAdditionalData(OpcodeDecoder::Primitive primitive,
                                                        u32 count, u32 stride, bool cullall)
 {
@@ -229,19 +213,10 @@ DataReader VertexManagerBase::PrepareForAdditionalData(OpcodeDecoder::Primitive 
   return DataReader(m_cur_buffer_pointer, m_end_buffer_pointer);
 }
 
-DataReader VertexManagerBase::DisableCullAll(u32 stride)
+// Free vertex bytes in the current buffer.
+u32 VertexManagerBase::GetRemainingSize() const
 {
-  if (m_cull_all)
-  {
-    m_cull_all = false;
-    ResetBuffer(stride);
-  }
-  return DataReader(m_cur_buffer_pointer, m_end_buffer_pointer);
-}
-
-void VertexManagerBase::FlushData(u32 count, u32 stride)
-{
-  m_cur_buffer_pointer += count * stride;
+  return static_cast<u32>(m_end_buffer_pointer - m_cur_buffer_pointer);
 }
 
 u32 VertexManagerBase::GetRemainingIndices(OpcodeDecoder::Primitive primitive) const
@@ -776,6 +751,33 @@ void VertexManagerBase::UpdatePipelineObject()
     break;
   }
   }
+}
+
+// The loader wrote `count` vertices at the current position; keep them.
+void VertexManagerBase::FlushData(u32 count, u32 stride)
+{
+  m_cur_buffer_pointer += count * stride;
+}
+
+void VertexManagerBase::AddIndices(OpcodeDecoder::Primitive primitive, u32 num_vertices)
+{
+  m_index_generator.AddIndices(primitive, num_vertices);
+}
+
+// Vertices loaded into the CPU-only buffer turned out to be visible: switch to a drawable
+// buffer (the caller copies them over).
+DataReader VertexManagerBase::DisableCullAll(u32 stride)
+{
+  if (std::exchange(m_cull_all, false))
+    ResetBuffer(stride);
+  return DataReader(m_cur_buffer_pointer, m_end_buffer_pointer);
+}
+
+bool VertexManagerBase::AreAllVerticesCulled(VertexLoaderBase* loader,
+                                             OpcodeDecoder::Primitive primitive, const u8* src,
+                                             u32 count)
+{
+  return m_cpu_cull.AreAllVerticesCulled(loader, primitive, src, count);
 }
 
 void VertexManagerBase::OnConfigChange()
