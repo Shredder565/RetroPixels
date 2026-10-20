@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -17,7 +16,6 @@
 #include "Common/Swap.h"
 #include "Core/PowerPC/MMU.h"
 
-// Global declarations
 class PointerWrap;
 namespace Core
 {
@@ -39,6 +37,7 @@ constexpr u32 MEM2_SIZE_RETAIL = 0x04000000U;
 constexpr u32 MEM2_SIZE_NDEV = 0x08000000U;
 constexpr u32 MEM2_SIZE_MAX = 0x08000000U;
 
+// One block of emulated memory backed by the shared memory segment.
 struct PhysicalMemoryRegion
 {
   u8** out_pointer;
@@ -54,12 +53,28 @@ struct PhysicalMemoryRegion
   bool active;
 };
 
+// A view mapped into the logical half of the fastmem arena.
 struct LogicalMemoryView
 {
   void* mapped_pointer;
   u32 mapped_size;
 };
 
+// Owns emulated RAM and the fastmem arena.
+//
+// Backing memory: MEM1 (24 MiB retail, allocated as the next power of two),
+// MEM2 (Wii only), the locked-L1 scratch area at 0xE0000000 and, on GameCube
+// without MMU emulation, a 32 MiB "fake VMEM" at 0x7E000000 that stands in
+// for ARAM paging done by some games' libraries.
+//
+// Fastmem: two 4 GiB windows, each with 2 GiB of guard space on both sides
+// (JIT address arithmetic can overshoot by up to 2 GiB). The physical window
+// mirrors the console's physical map; the logical window follows the DBATs
+// and, with MMU emulation, the page table. Unmapped addresses fault and the
+// JIT falls back to the slow path.
+//
+// Without fastmem the JITs use the page-mapping tables instead: one host
+// pointer per 128 KiB BAT page, or null.
 class MemoryManager
 {
 public:
@@ -89,7 +104,7 @@ public:
 
   u32 GetHostPageSize() const { return m_page_size; }
 
-  // FIXME: these should not return their address, but AddressSpace wants that
+  // References, because AddressSpace keeps pointers to these pointers.
   u8*& GetRAM() { return m_ram; }
   u8*& GetEXRAM() { return m_exram; }
   u8* GetL1Cache() { return m_l1_cache; }
@@ -97,7 +112,6 @@ public:
 
   MMIO::Mapping* GetMMIOMapping() const { return m_mmio_mapping.get(); }
 
-  // Init and Shutdown
   bool IsInitialized() const { return m_is_initialized; }
   void InitMMIO(Core::System& system);
   void Init();
@@ -113,17 +127,16 @@ public:
 
   void Clear();
 
-  // Routines to access physically addressed memory, designed for use by
-  // emulated hardware outside the CPU. Use "Device_" prefix.
+  // Access by physical address, for emulated hardware (DMA engines and the
+  // like) and emulator code. Addresses are taken modulo 1 GiB.
   std::string GetString(u32 em_address, size_t size = 0);
 
-  // If the specified guest address is within a valid memory region, returns a span starting at the
-  // host address corresponding to the specified address and ending where the memory region ends.
-  // Otherwise, returns a 0-length span starting at nullptr.
+  // The rest of the memory block that contains `address`, or an empty span
+  // (and a panic alert) if it is not memory.
   std::span<u8> GetSpanForAddress(u32 address) const;
 
-  // If the specified range is within a single valid memory region, returns a pointer to the start
-  // of the corresponding range in host memory. Otherwise, returns nullptr.
+  // Host pointer for [address, address + size), or null unless the whole
+  // range lies in one memory block.
   u8* GetPointerForRange(u32 address, size_t size) const;
   void CopyFromEmu(void* data, u32 address, size_t size) const;
   void CopyToEmu(u32 address, const void* data, size_t size);
@@ -140,153 +153,41 @@ public:
   void Write_U32_Swap(u32 var, u32 address);
   void Write_U64_Swap(u64 var, u32 address);
 
-  // Templated functions for byteswapped copies.
+  // Copies of big-endian arrays, swapping each element.
   template <typename T>
   void CopyFromEmuSwapped(T* data, u32 address, size_t size) const
   {
-    const T* src = reinterpret_cast<T*>(GetPointerForRange(address, size));
-
-    if (src == nullptr)
+    const T* source = reinterpret_cast<const T*>(GetPointerForRange(address, size));
+    if (source == nullptr)
       return;
-
     for (size_t i = 0; i < size / sizeof(T); i++)
-      data[i] = Common::FromBigEndian(src[i]);
+      data[i] = Common::FromBigEndian(source[i]);
   }
 
   template <typename T>
   void CopyToEmuSwapped(u32 address, const T* data, size_t size)
   {
-    T* dest = reinterpret_cast<T*>(GetPointerForRange(address, size));
-
-    if (dest == nullptr)
+    T* target = reinterpret_cast<T*>(GetPointerForRange(address, size));
+    if (target == nullptr)
       return;
-
     for (size_t i = 0; i < size / sizeof(T); i++)
-      dest[i] = Common::FromBigEndian(data[i]);
+      target[i] = Common::FromBigEndian(data[i]);
   }
 
 private:
   enum class HostPageType
   {
-    // 4K or smaller
+    // Host pages of 4 KiB or less: guest pages map one to one.
     SmallPages,
-    // 8K or larger
+    // Larger host pages: a host page is mapped once all its guest pages agree.
     LargePages,
-    // Required APIs aren't available, or the page size isn't a power of 2
+    // Page size not a power of two, or the needed APIs are missing.
     Unsupported,
   };
 
-  // Base is a pointer to the base of the memory map. Yes, some MMU tricks
-  // are used to set up a full GC or Wii memory map in process memory.
-  // In 64-bit, this might point to "high memory" (above the 32-bit limit),
-  // so be sure to load it into a 64-bit register.
-  u8* m_fastmem_arena = nullptr;
-  size_t m_fastmem_arena_size = 0;
-  u8* m_physical_base = nullptr;
-  u8* m_logical_base = nullptr;
-
-  // This page table is used for a "soft MMU" implementation when
-  // setting up the full memory map in process memory isn't possible.
-  u8* m_physical_page_mappings_base = nullptr;
-  u8* m_logical_page_mappings_base = nullptr;
-
-  // The actual memory used for backing the memory map.
-  u8* m_ram = nullptr;
-  u8* m_exram = nullptr;
-  u8* m_l1_cache = nullptr;
-  u8* m_fake_vmem = nullptr;
-
-  // m_ram_size is the amount allocated by the emulator, whereas m_ram_size_real
-  // is what will be reported in lowmem, and thus used by emulated software.
-  // Note: Writing to lowmem is done by IPL. If using retail IPL, it will
-  // always be set to 24MB.
-  u32 m_ram_size_real = 0;
-  u32 m_ram_size = 0;
-  u32 m_ram_mask = 0;
-  u32 m_fakevmem_size = 0;
-  u32 m_fakevmem_mask = 0;
-  u32 m_l1_cache_size = 0;
-  u32 m_l1_cache_mask = 0;
-  // m_exram_size is the amount allocated by the emulator, whereas m_exram_size_real
-  // is what gets used by emulated software.  If using retail IOS, it will
-  // always be set to 64MB.
-  u32 m_exram_size_real = 0;
-  u32 m_exram_size = 0;
-  u32 m_exram_mask = 0;
-
-  bool m_is_fastmem_arena_initialized = false;
-
-  // STATE_TO_SAVE
-  // Save the Init(), Shutdown() state
-  bool m_is_initialized = false;
-  // END STATE_TO_SAVE
-
-  // MMIO mapping object.
-  std::unique_ptr<MMIO::Mapping> m_mmio_mapping;
-
-  // The MemArena class
-  Common::MemArena m_arena;
-
-  const u32 m_page_size;
-  const u32 m_guest_pages_per_host_page;
-  const HostPageType m_host_page_type;
-
-  // Dolphin allocates memory to represent four regions:
-  // - 32MB RAM (actually 24MB on hardware), available on GameCube and Wii
-  // - 64MB "EXRAM", RAM only available on Wii
-  // - 32MB FakeVMem, allocated in GameCube mode when MMU support is turned off.
-  //   This is used to approximate the behavior of a common library which pages
-  //   memory to and from the DSP's dedicated RAM. The DSP's RAM (ARAM) isn't
-  //   directly addressable on GameCube.
-  // - 256KB Locked L1, to represent cache lines allocated out of the L1 data
-  //   cache in Locked L1 mode.  Dolphin does not emulate this hardware feature
-  //   accurately; it just pretends there is extra memory at 0xE0000000.
-  //
-  // The 4GB starting at m_physical_base represents access from the CPU
-  // with address translation turned off. (This is only used by the CPU;
-  // other devices, like the GPU, use other rules, approximated by
-  // Memory::GetPointer.) This memory is laid out as follows:
-  // [0x00000000, 0x02000000) - 32MB RAM
-  // [0x02000000, 0x08000000) - Mirrors of 32MB RAM (not handled here)
-  // [0x08000000, 0x0C000000) - EFB "mapping" (not handled here)
-  // [0x0C000000, 0x0E000000) - MMIO etc. (not handled here)
-  // [0x10000000, 0x14000000) - 64MB RAM (Wii-only; slightly slower)
-  // [0x7E000000, 0x80000000) - FakeVMEM
-  // [0xE0000000, 0xE0040000) - 256KB locked L1
-  //
-  // The 4GB starting at m_logical_base represents access from the CPU
-  // with address translation turned on.  This mapping is computed based
-  // on the BAT registers.
-  //
-  // Each of these 4GB regions is surrounded by 2GB of empty space so overflows
-  // in address computation in the JIT don't access unrelated memory.
-  //
-  // The neighboring mirrors of RAM ([0x02000000, 0x08000000), etc.) exist because
-  // the bus masks off the bits in question for RAM accesses; using them is a
-  // terrible idea because the CPU cache won't handle them correctly, but a
-  // few buggy games (notably Rogue Squadron 2) use them by accident. They
-  // aren't backed by memory mappings because they are used very rarely.
-  //
-  // TODO: The actual size of RAM is 24MB; the other 8MB shouldn't be backed by actual memory.
-  // TODO: Do we want to handle the mirrors of the GC RAM?
-  std::array<PhysicalMemoryRegion, 4> m_physical_regions{};
-
-  // The key is the logical address
-  std::map<u32, LogicalMemoryView> m_dbat_mapped_entries;
-  std::map<u32, LogicalMemoryView> m_page_table_mapped_entries;
-
-  std::array<void*, PowerPC::BAT_PAGE_COUNT> m_physical_page_mappings{};
-  std::array<void*, PowerPC::BAT_PAGE_COUNT> m_logical_page_mappings{};
-
-  // If the host page size is larger than the guest page size, these two maps are used
-  // to keep track of which guest pages can be combined and mapped as one host page.
-  static constexpr u32 INVALID_MAPPING = 0xFFFFFFFF;
-  std::map<u32, std::vector<u32>> m_large_readable_pages;
-  std::map<u32, std::vector<u32>> m_large_writeable_pages;
-
-  Core::System& m_system;
-
   static HostPageType GetHostPageTypeForPageSize(u32 page_size);
+
+  void UnmapViews(std::map<u32, LogicalMemoryView>& views);
 
   void TryAddLargePageTableMapping(u32 logical_address, u32 translated_address, bool writeable);
   bool TryAddLargePageTableMapping(u32 logical_address, u32 translated_address,
@@ -297,5 +198,64 @@ private:
   void RemoveLargePageTableMapping(u32 logical_address);
   void RemoveLargePageTableMapping(u32 logical_address, std::map<u32, std::vector<u32>>& map);
   void RemoveHostPageTableMapping(u32 logical_address);
+
+  // Fastmem arena: [guard][physical 4 GiB][guard][logical 4 GiB][guard].
+  u8* m_fastmem_arena = nullptr;
+  size_t m_fastmem_arena_size = 0;
+  u8* m_physical_base = nullptr;
+  u8* m_logical_base = nullptr;
+
+  // Pointer tables used when fastmem is not available (see the class comment).
+  u8* m_physical_page_mappings_base = nullptr;
+  u8* m_logical_page_mappings_base = nullptr;
+
+  // Host views of the backing memory.
+  u8* m_ram = nullptr;
+  u8* m_exram = nullptr;
+  u8* m_l1_cache = nullptr;
+  u8* m_fake_vmem = nullptr;
+
+  // *_size is what is allocated (a power of two), *_size_real what the
+  // emulated software is told it has.
+  u32 m_ram_size_real = 0;
+  u32 m_ram_size = 0;
+  u32 m_ram_mask = 0;
+  u32 m_fakevmem_size = 0;
+  u32 m_fakevmem_mask = 0;
+  u32 m_l1_cache_size = 0;
+  u32 m_l1_cache_mask = 0;
+  u32 m_exram_size_real = 0;
+  u32 m_exram_size = 0;
+  u32 m_exram_mask = 0;
+
+  bool m_is_fastmem_arena_initialized = false;
+  bool m_is_initialized = false;
+
+  std::unique_ptr<MMIO::Mapping> m_mmio_mapping;
+
+  Common::MemArena m_arena;
+
+  const u32 m_page_size;
+  const u32 m_guest_pages_per_host_page;
+  const HostPageType m_host_page_type;
+
+  // RAM, locked L1, fake VMEM, MEM2 (in this order; it decides the layout of
+  // the shared memory segment).
+  std::array<PhysicalMemoryRegion, 4> m_physical_regions{};
+
+  // Views in the logical window, keyed by the logical address they start at.
+  std::map<u32, LogicalMemoryView> m_dbat_mapped_entries;
+  std::map<u32, LogicalMemoryView> m_page_table_mapped_entries;
+
+  std::array<void*, PowerPC::BAT_PAGE_COUNT> m_physical_page_mappings{};
+  std::array<void*, PowerPC::BAT_PAGE_COUNT> m_logical_page_mappings{};
+
+  // LargePages only: per host page, the translation of each guest page in it
+  // (INVALID_MAPPING if none), separately for readable and writeable pages.
+  static constexpr u32 INVALID_MAPPING = 0xFFFFFFFF;
+  std::map<u32, std::vector<u32>> m_large_readable_pages;
+  std::map<u32, std::vector<u32>> m_large_writeable_pages;
+
+  Core::System& m_system;
 };
 }  // namespace Memory
