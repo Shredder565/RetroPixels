@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -16,11 +15,13 @@
 struct CPState;
 class DataReader;
 
+// Splits a GX command stream into commands and hands each one to a callback object.
 namespace OpcodeDecoder
 {
-// Global flag to signal if FifoRecorder is active.
+// Set while the FIFO recorder is capturing; the main decode pass then forwards every command.
 extern bool g_record_fifo_data;
 
+// First byte of each GX command.
 enum class Opcode
 {
   GX_NOP = 0x00,
@@ -41,13 +42,13 @@ enum class Opcode
   GX_PRIMITIVE_END = 0xbf,
 };
 
+// A primitive opcode is 1ppppvvv: p selects the primitive type, v the vertex attribute table.
 constexpr u8 GX_PRIMITIVE_MASK = 0x78;
 constexpr u32 GX_PRIMITIVE_SHIFT = 3;
 constexpr u8 GX_VAT_MASK = 0x07;
 
-// These values are the values extracted using GX_PRIMITIVE_MASK
-// and GX_PRIMITIVE_SHIFT.
-// GX_DRAW_QUADS_2 behaves the same way as GX_DRAW_QUADS.
+// Primitive type field of a primitive opcode (the opcode byte is given alongside each).
+// QUADS_2 is not used by the SDK but draws like QUADS.
 enum class Primitive : u8
 {
   GX_DRAW_QUADS = 0x0,           // 0x80
@@ -60,14 +61,11 @@ enum class Primitive : u8
   GX_DRAW_POINTS = 0x7           // 0xB8
 };
 
-// Interface for the Run and RunCommand functions below.
-// The functions themselves are templates so that the compiler generates separate versions for each
-// callback (with the callback functions inlined), so the callback doesn't actually need to be
-// publicly inherited.
-// Compilers don't generate warnings for failed inlining with virtual functions, so this define
-// allows disabling the use of virtual functions to generate those warnings.  However, this means
-// that missing functions will generate errors on their use in RunCommand, instead of in the
-// subclass, which can be confusing.
+// Callback objects implement the interface below. Run/RunCommand are templates over the concrete
+// callback type, so calls are resolved statically and can be inlined; the virtual base mainly
+// documents and enforces the required set of handlers. Undefining
+// OPCODE_CALLBACK_USE_INHERITANCE drops the virtual functions (useful to get inlining
+// diagnostics), at the cost of less helpful errors for a missing handler.
 #define OPCODE_CALLBACK_USE_INHERITANCE
 
 #ifdef OPCODE_CALLBACK_USE_INHERITANCE
@@ -83,119 +81,122 @@ class Callback
 public:
   virtual ~Callback() = default;
 
-  // Called on any XF command.
+  // An XF register block write: `count` big-endian words starting at `address`.
   virtual void OnXF(u16 address, u8 count, const u8* data) = 0;
-  // Called on any CP command.
-  // Subclasses should update the CP state with GetCPState().LoadCPReg(command, value) so that
-  // primitive commands decode properly.
+  // A CP register write. Implementations must apply it to GetCPState() (LoadCPReg) or later
+  // primitives will be sized wrongly.
   virtual void OnCP(u8 command, u32 value) = 0;
-  // Called on any BP command.
+  // A BP register write (24-bit value).
   virtual void OnBP(u8 command, u32 value) = 0;
-  // Called on any indexed XF load command.
+  // An indexed XF load from one of the XF_A..XF_D arrays.
   virtual void OnIndexedLoad(CPArray array, u32 index, u16 address, u8 size) = 0;
-  // Called on any primitive command.
+  // A draw command together with its vertex data.
   virtual void OnPrimitiveCommand(OpcodeDecoder::Primitive primitive, u8 vat, u32 vertex_size,
                                   u16 num_vertices, const u8* vertex_data) = 0;
-  // Called on a display list.
+  // A display list call (address and size already rounded down to 32 bytes).
   virtual void OnDisplayList(u32 address, u32 size) = 0;
-  // Called on any NOP commands (which are all merged into a single call).
+  // A run of NOP bytes, reported once for the whole run.
   virtual void OnNop(u32 count) = 0;
-  // Called on an unknown opcode, or an opcode that is known but not implemented.
-  // data[0] is opcode.
+  // Any opcode not handled above; data[0] is the opcode byte.
   virtual void OnUnknown(u8 opcode, const u8* data) = 0;
 
-  // Called on ANY command.  The first byte of data is the opcode.  Size will be at least 1.
-  // This function is called after one of the above functions is called.
+  // Follows every successfully decoded command, whatever its kind. data[0] is the opcode and
+  // size is the full command length (always at least 1).
   virtual void OnCommand(const u8* data, u32 size) = 0;
 
-  // Get the current CP state.  Needed for vertex decoding; will also be mutated for CP commands.
+  // CP state used to size vertices; CP commands update it.
   virtual CPState& GetCPState() = 0;
 
   virtual u32 GetVertexSize(u8 vat)
   {
-    const CPState& cpmem = GetCPState();
-    return VertexLoaderBase::GetVertexSize(cpmem.vtx_desc, cpmem.vtx_attr[vat]);
+    const CPState& state = GetCPState();
+    return VertexLoaderBase::GetVertexSize(state.vtx_desc, state.vtx_attr[vat]);
   }
 #endif
 };
 
 namespace detail
 {
-// Main logic; split so that the main RunCommand can call OnCommand with the returned size.
+// Decodes the command at `data` and returns its length, or 0 when `available` bytes are not
+// enough to hold all of it (nothing is reported in that case). OnCommand is left to the caller.
 static DOLPHIN_FORCE_INLINE u32 RunCommand(const u8* data, u32 available,
                                            std::derived_from<Callback> auto& callback)
 {
-  if (available < 1)
+  if (available == 0)
     return 0;
 
-  const Opcode cmd = static_cast<Opcode>(data[0]);
+  const u8 opcode = data[0];
 
-  switch (cmd)
+  if (opcode >= static_cast<u8>(Opcode::GX_PRIMITIVE_START) &&
+      opcode <= static_cast<u8>(Opcode::GX_PRIMITIVE_END))
+  {
+    constexpr u32 header = 3;  // opcode + 16-bit vertex count
+    if (available < header)
+      return 0;
+    const auto type = static_cast<Primitive>((opcode & GX_PRIMITIVE_MASK) >> GX_PRIMITIVE_SHIFT);
+    const u8 vat = opcode & GX_VAT_MASK;
+    // The vertex size is needed (and queried) before knowing whether the data is all here.
+    const u32 stride = callback.GetVertexSize(vat);
+    const u16 vertex_count = Common::swap16(data + 1);
+    const u32 total = header + vertex_count * stride;
+    if (available < total)
+      return 0;
+    callback.OnPrimitiveCommand(type, vat, stride, vertex_count, data + header);
+    return total;
+  }
+
+  switch (static_cast<Opcode>(opcode))
   {
   case Opcode::GX_NOP:
   {
-    u32 count = 1;
-    while (count < available && static_cast<Opcode>(data[count]) == Opcode::GX_NOP)
-      count++;
-    callback.OnNop(count);
-    return count;
+    u32 run = 1;
+    while (run != available && data[run] == static_cast<u8>(Opcode::GX_NOP))
+      ++run;
+    callback.OnNop(run);
+    return run;
   }
+
+  case Opcode::GX_LOAD_BP_REG:
+    if (available < 5)
+      return 0;
+    callback.OnBP(data[1], Common::swap24(data + 2));
+    return 5;
 
   case Opcode::GX_LOAD_CP_REG:
-  {
     if (available < 6)
       return 0;
-
-    const u8 cmd2 = data[1];
-    const u32 value = Common::swap32(&data[2]);
-
-    callback.OnCP(cmd2, value);
-
+    callback.OnCP(data[1], Common::swap32(data + 2));
     return 6;
-  }
 
   case Opcode::GX_LOAD_XF_REG:
   {
     if (available < 5)
       return 0;
-
-    const u32 cmd2 = Common::swap32(&data[1]);
-    const u16 base_address = cmd2 & 0xffff;
-
-    const u16 stream_size_temp = cmd2 >> 16;
-    ASSERT_MSG(VIDEO, stream_size_temp < 16, "cmd2 = 0x{:08X}", cmd2);
-    const u8 stream_size = (stream_size_temp & 0xf) + 1;
-
-    if (available < u32(5 + stream_size * 4))
+    // Header word: high half is (word count - 1), low half the first register.
+    const u32 header = Common::swap32(data + 1);
+    const u16 count_field = static_cast<u16>(header >> 16);
+    ASSERT_MSG(VIDEO, count_field < 16, "cmd2 = 0x{:08X}", header);
+    const u8 words = static_cast<u8>((count_field & 0xf) + 1);
+    const u32 total = 5 + u32{words} * 4;
+    if (available < total)
       return 0;
-
-    callback.OnXF(base_address, stream_size, &data[5]);
-
-    return 5 + stream_size * 4;
+    callback.OnXF(static_cast<u16>(header & 0xffff), words, data + 5);
+    return total;
   }
 
-  case Opcode::GX_LOAD_INDX_A:  // Used for position matrices
-  case Opcode::GX_LOAD_INDX_B:  // Used for normal matrices
-  case Opcode::GX_LOAD_INDX_C:  // Used for postmatrices
-  case Opcode::GX_LOAD_INDX_D:  // Used for lights
+  case Opcode::GX_LOAD_INDX_A:
+  case Opcode::GX_LOAD_INDX_B:
+  case Opcode::GX_LOAD_INDX_C:
+  case Opcode::GX_LOAD_INDX_D:
   {
     if (available < 5)
       return 0;
-
-    const u32 value = Common::swap32(&data[1]);
-
-    const u32 index = value >> 16;
-    const u16 address = value & 0xFFF;  // TODO: check mask
-    const u8 size = ((value >> 12) & 0xF) + 1;
-
-    // Map the command byte to its ref array.
-    // GX_LOAD_INDX_A (32 = 8*4) . CPArray::XF_A (4+8 = 12)
-    // GX_LOAD_INDX_B (40 = 8*5) . CPArray::XF_B (5+8 = 13)
-    // GX_LOAD_INDX_C (48 = 8*6) . CPArray::XF_C (6+8 = 14)
-    // GX_LOAD_INDX_D (56 = 8*7) . CPArray::XF_D (7+8 = 15)
-    const auto ref_array = static_cast<CPArray>((static_cast<u8>(cmd) / 8) + 8);
-
-    callback.OnIndexedLoad(ref_array, index, address, size);
+    // Word layout: index (16 bits) | length - 1 (4 bits) | XF address (12 bits).
+    const u32 word = Common::swap32(data + 1);
+    // 0x20, 0x28, 0x30, 0x38 select arrays 12..15 (XF_A..XF_D).
+    const auto array = static_cast<CPArray>(8 + (opcode >> 3));
+    callback.OnIndexedLoad(array, word >> 16, static_cast<u16>(word & 0xFFF),
+                           static_cast<u8>(((word >> 12) & 0xF) + 1));
     return 5;
   }
 
@@ -203,81 +204,52 @@ static DOLPHIN_FORCE_INLINE u32 RunCommand(const u8* data, u32 available,
   {
     if (available < 9)
       return 0;
-
-    const u32 address = Common::swap32(&data[1]);
-    const u32 size = Common::swap32(&data[5]);
-
-    // Force 32-byte alignment for both the address and the size.
-    callback.OnDisplayList(address & ~31, size & ~31);
+    // The hardware ignores the low five bits of both fields.
+    constexpr u32 align = ~u32{31};
+    callback.OnDisplayList(Common::swap32(data + 1) & align, Common::swap32(data + 5) & align);
     return 9;
   }
 
-  case Opcode::GX_LOAD_BP_REG:
-  {
-    if (available < 5)
-      return 0;
-
-    const u8 cmd2 = data[1];
-    const u32 value = Common::swap24(&data[2]);
-
-    callback.OnBP(cmd2, value);
-
-    return 5;
-  }
-
   default:
-    if (cmd >= Opcode::GX_PRIMITIVE_START && cmd <= Opcode::GX_PRIMITIVE_END)
-    {
-      if (available < 3)
-        return 0;
-
-      const u8 cmdbyte = static_cast<u8>(cmd);
-      const OpcodeDecoder::Primitive primitive = static_cast<OpcodeDecoder::Primitive>(
-          (cmdbyte & OpcodeDecoder::GX_PRIMITIVE_MASK) >> OpcodeDecoder::GX_PRIMITIVE_SHIFT);
-      const u8 vat = cmdbyte & OpcodeDecoder::GX_VAT_MASK;
-
-      const u32 vertex_size = callback.GetVertexSize(vat);
-      const u16 num_vertices = Common::swap16(&data[1]);
-
-      if (available < 3 + num_vertices * vertex_size)
-        return 0;
-
-      callback.OnPrimitiveCommand(primitive, vat, vertex_size, num_vertices, &data[3]);
-
-      return 3 + num_vertices * vertex_size;
-    }
+    break;
   }
 
-  callback.OnUnknown(static_cast<u8>(cmd), data);
+  callback.OnUnknown(opcode, data);
   return 1;
 }
 }  // namespace detail
 
+// Decodes one command, then reports it through OnCommand. Returns its length, or 0 if it is
+// incomplete.
 DOLPHIN_FORCE_INLINE u32 RunCommand(const u8* data, u32 available,
                                     std::derived_from<Callback> auto& callback)
 {
-  const u32 size = detail::RunCommand(data, available, callback);
-  if (size > 0)
-  {
-    callback.OnCommand(data, size);
-  }
-  return size;
+  const u32 length = detail::RunCommand(data, available, callback);
+  if (length != 0)
+    callback.OnCommand(data, length);
+  return length;
 }
 
+// Decodes commands until the data runs out or the next command is incomplete. Returns the
+// number of bytes consumed.
 DOLPHIN_FORCE_INLINE u32 Run(const u8* data, u32 available,
                              std::derived_from<Callback> auto& callback)
 {
-  u32 size = 0;
-  while (size < available)
+  u32 done = 0;
+  for (;;)
   {
-    const u32 command_size = RunCommand(&data[size], available - size, callback);
-    if (command_size == 0)
+    if (done >= available)
       break;
-    size += command_size;
+    const u32 length = RunCommand(data + done, available - done, callback);
+    if (length == 0)
+      break;
+    done += length;
   }
-  return size;
+  return done;
 }
 
+// Executes (or, with is_preprocess, only pre-parses) the commands in `src`. Returns a pointer just
+// past the last complete command; the cycle estimate goes to `cycles` when it is non-null.
 template <bool is_preprocess = false>
 u8* RunFifo(DataReader src, u32* cycles);
 
@@ -288,10 +260,14 @@ struct fmt::formatter<OpcodeDecoder::Primitive>
     : EnumFormatter<OpcodeDecoder::Primitive::GX_DRAW_POINTS>
 {
   static constexpr array_type names = {
-      "GX_DRAW_QUADS",        "GX_DRAW_QUADS_2 (nonstandard)",
-      "GX_DRAW_TRIANGLES",    "GX_DRAW_TRIANGLE_STRIP",
-      "GX_DRAW_TRIANGLE_FAN", "GX_DRAW_LINES",
-      "GX_DRAW_LINE_STRIP",   "GX_DRAW_POINTS",
+      "GX_DRAW_QUADS",
+      "GX_DRAW_QUADS_2 (nonstandard)",
+      "GX_DRAW_TRIANGLES",
+      "GX_DRAW_TRIANGLE_STRIP",
+      "GX_DRAW_TRIANGLE_FAN",
+      "GX_DRAW_LINES",
+      "GX_DRAW_LINE_STRIP",
+      "GX_DRAW_POINTS",
   };
   constexpr formatter() : EnumFormatter(names) {}
 };
