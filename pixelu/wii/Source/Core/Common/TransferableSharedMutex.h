@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,84 +8,82 @@
 
 namespace Common
 {
-// Behaves like `std::shared_mutex` but locks and unlocks may come from different threads.
+// A reader/writer lock with the std::shared_mutex interface whose locks may be released by a
+// different thread than the one that took them.
+//
+// The whole state is one counter: 0 = free, 1..WRITER-1 = that many readers, WRITER = held
+// exclusively. Waiters sleep on the counter with std::atomic::wait.
 class TransferableSharedMutex
 {
 public:
   void lock()
   {
-    while (true)
+    for (;;)
     {
-      CounterType old_value{};
-      if (m_counter.compare_exchange_strong(old_value, EXCLUSIVE_LOCK_VALUE,
-                                            std::memory_order_acquire, std::memory_order_relaxed))
+      State seen = FREE;
+      if (m_state.compare_exchange_strong(seen, WRITER, std::memory_order_acquire,
+                                          std::memory_order_relaxed))
       {
         return;
       }
-
-      // lock() or lock_shared() is already held.
-      // Wait for an unlock notification and try again.
-      m_counter.wait(old_value, std::memory_order_relaxed);
+      m_state.wait(seen, std::memory_order_relaxed);
     }
   }
 
   bool try_lock()
   {
-    CounterType old_value{};
-    return m_counter.compare_exchange_weak(old_value, EXCLUSIVE_LOCK_VALUE,
-                                           std::memory_order_acquire, std::memory_order_relaxed);
+    State expected = FREE;
+    return m_state.compare_exchange_weak(expected, WRITER, std::memory_order_acquire,
+                                         std::memory_order_relaxed);
   }
 
   void unlock()
   {
-    m_counter.store(0, std::memory_order_release);
-    m_counter.notify_all();  // Notify potentially multiple wait()ers in lock_shared().
+    m_state.store(FREE, std::memory_order_release);
+    m_state.notify_all();  // both readers and writers may be waiting
   }
 
   void lock_shared()
   {
-    while (true)
+    for (;;)
     {
-      auto old_value = m_counter.load(std::memory_order_relaxed);
-      while (old_value < LAST_SHARED_LOCK_VALUE)
+      State seen = m_state.load(std::memory_order_relaxed);
+      while (seen < MAX_READERS)
       {
-        if (m_counter.compare_exchange_strong(old_value, old_value + 1, std::memory_order_acquire,
-                                              std::memory_order_relaxed))
+        if (m_state.compare_exchange_weak(seen, seen + 1, std::memory_order_acquire,
+                                          std::memory_order_relaxed))
         {
           return;
         }
       }
-
-      // Something has gone very wrong if m_counter is nearly saturated with shared_lock().
-      assert(old_value != LAST_SHARED_LOCK_VALUE);
-
-      // lock() is already held.
-      // Wait for an unlock notification and try again.
-      m_counter.wait(old_value, std::memory_order_relaxed);
+      assert(seen == WRITER);  // otherwise the reader count overflowed
+      m_state.wait(seen, std::memory_order_relaxed);
     }
   }
 
   bool try_lock_shared()
   {
-    auto old_value = m_counter.load(std::memory_order_relaxed);
-    return (old_value < LAST_SHARED_LOCK_VALUE) &&
-           m_counter.compare_exchange_weak(old_value, old_value + 1, std::memory_order_acquire,
-                                           std::memory_order_relaxed);
+    State seen = m_state.load(std::memory_order_relaxed);
+    if (seen >= MAX_READERS)
+      return false;
+    return m_state.compare_exchange_weak(seen, seen + 1, std::memory_order_acquire,
+                                         std::memory_order_relaxed);
   }
 
   void unlock_shared()
   {
-    if (m_counter.fetch_sub(1, std::memory_order_release) == 1)
-      m_counter.notify_one();  // Notify one of the wait()ers in lock().
+    // The last reader out wakes a writer.
+    if (m_state.fetch_sub(1, std::memory_order_release) == 1)
+      m_state.notify_one();
   }
 
 private:
-  using CounterType = std::uintptr_t;
+  using State = std::uintptr_t;
 
-  static constexpr auto EXCLUSIVE_LOCK_VALUE = CounterType(-1);
-  static constexpr auto LAST_SHARED_LOCK_VALUE = EXCLUSIVE_LOCK_VALUE - 1;
+  static constexpr State FREE = 0;
+  static constexpr State WRITER = ~State{0};
+  static constexpr State MAX_READERS = WRITER - 1;
 
-  std::atomic<CounterType> m_counter{};
+  std::atomic<State> m_state{FREE};
 };
-
 }  // namespace Common

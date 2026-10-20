@@ -1,24 +1,17 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/Thread.h"
 
+#include <string>
+
 #ifdef _WIN32
 #include <windows.h>
-#include <processthreadsapi.h>
+
+#include "Common/StringUtil.h"
 #else
 #include <pthread.h>
-#include <unistd.h>
-#endif
-
-#ifdef __APPLE__
-#include <mach/mach.h>
-#elif defined BSD4_4 || defined __FreeBSD__ || defined __OpenBSD__
-#include <pthread_np.h>
-#elif defined __NetBSD__
 #include <sched.h>
-#elif defined __HAIKU__
-#include <OS.h>
+#include <unistd.h>
 #endif
 
 #ifdef USE_VTUNE
@@ -26,29 +19,18 @@
 #pragma comment(lib, "libittnotify.lib")
 #endif
 
-#include "Common/CommonTypes.h"
-#ifdef _WIN32
-#include "Common/StringUtil.h"
-#endif
-
 namespace Common
 {
+#ifdef _WIN32
+
 int CurrentThreadId()
 {
-#ifdef _WIN32
-  return GetCurrentThreadId();
-#elif defined __APPLE__
-  return mach_thread_self();
-#else
-  return 0;
-#endif
+  return static_cast<int>(GetCurrentThreadId());
 }
-
-#ifdef _WIN32
 
 void SetThreadAffinity(std::thread::native_handle_type thread, u32 mask)
 {
-  SetThreadAffinityMask(thread, mask);
+  SetThreadAffinityMask(reinterpret_cast<HANDLE>(thread), mask);
 }
 
 void SetCurrentThreadAffinity(u32 mask)
@@ -56,10 +38,9 @@ void SetCurrentThreadAffinity(u32 mask)
   SetThreadAffinityMask(GetCurrentThread(), mask);
 }
 
-// Supporting functions
 void SleepCurrentThread(int ms)
 {
-  Sleep(ms);
+  Sleep(static_cast<DWORD>(ms));
 }
 
 void SwitchCurrentThread()
@@ -67,87 +48,78 @@ void SwitchCurrentThread()
   SwitchToThread();
 }
 
-// Sets the debugger-visible name of the current thread.
-// Uses trick documented in:
-// https://docs.microsoft.com/en-us/visualstudio/debugger/how-to-set-a-thread-name-in-native-code
-static void SetCurrentThreadNameViaException(const char* name)
+namespace
 {
-  static const DWORD MS_VC_EXCEPTION = 0x406D1388;
-
+#ifdef _MSC_VER
+// Older debuggers learn thread names from a special exception (code 0x406D1388) that carries a
+// THREADNAME_INFO record; see "How to: Set a thread name in native code" in the MSVC docs.
+void NameThreadForOldDebuggers(const char* name)
+{
 #pragma pack(push, 8)
-  struct THREADNAME_INFO
+  struct
   {
-    DWORD dwType;      // must be 0x1000
-    LPCSTR szName;     // pointer to name (in user addr space)
-    DWORD dwThreadID;  // thread ID (-1=caller thread)
-    DWORD dwFlags;     // reserved for future use, must be zero
-  } info;
+    DWORD type;       // always 0x1000
+    LPCSTR name;
+    DWORD thread_id;  // -1 = calling thread
+    DWORD flags;      // reserved, 0
+  } record{0x1000, name, static_cast<DWORD>(-1), 0};
 #pragma pack(pop)
-
-  info.dwType = 0x1000;
-  info.szName = name;
-  info.dwThreadID = static_cast<DWORD>(-1);
-  info.dwFlags = 0;
 
   __try
   {
-    RaiseException(MS_VC_EXCEPTION, 0, sizeof(info) / sizeof(ULONG_PTR), (ULONG_PTR*)&info);
+    RaiseException(0x406D1388, 0, sizeof(record) / sizeof(ULONG_PTR),
+                   reinterpret_cast<const ULONG_PTR*>(&record));
   }
   __except (EXCEPTION_CONTINUE_EXECUTION)
   {
   }
 }
+#endif
 
-static void SetCurrentThreadNameViaApi(const char* name)
+// SetThreadDescription (Windows 10 1607+) keeps the name even for debuggers attached later. It
+// is looked up at run time because some Windows Server builds lack the export.
+void NameThreadViaDescription(const char* name)
 {
-  // If possible, also set via the newer API. On some versions of Server it needs to be manually
-  // resolved. This API allows being able to observe the thread name even if a debugger wasn't
-  // attached when the name was set (see above link for more info).
-  static auto pSetThreadDescription = (decltype(&SetThreadDescription))GetProcAddress(
-      GetModuleHandleA("kernel32"), "SetThreadDescription");
-  if (pSetThreadDescription)
-  {
-    pSetThreadDescription(GetCurrentThread(), UTF8ToWString(name).c_str());
-  }
+  using SetDescriptionFn = HRESULT(WINAPI*)(HANDLE, PCWSTR);
+  static const auto set_description = reinterpret_cast<SetDescriptionFn>(reinterpret_cast<void*>(
+      GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription")));
+  if (set_description)
+    set_description(GetCurrentThread(), UTF8ToWString(name).c_str());
 }
+}  // namespace
 
 void SetCurrentThreadName(const char* name)
 {
-  SetCurrentThreadNameViaException(name);
-  SetCurrentThreadNameViaApi(name);
+#ifdef _MSC_VER
+  NameThreadForOldDebuggers(name);
+#endif
+  NameThreadViaDescription(name);
+#ifdef USE_VTUNE
+  __itt_thread_set_name(name);
+#endif
 }
 
-#else  // !WIN32, so must be POSIX threads
+#else  // POSIX (Linux) fallback, used for development builds and tests only
+
+int CurrentThreadId()
+{
+  return 0;
+}
 
 void SetThreadAffinity(std::thread::native_handle_type thread, u32 mask)
 {
-#ifdef __APPLE__
-  thread_policy_set(pthread_mach_thread_np(thread), THREAD_AFFINITY_POLICY, (integer_t*)&mask, 1);
-#elif (defined __linux__ || defined BSD4_4 || defined __FreeBSD__ || defined __NetBSD__) &&        \
-    !(defined ANDROID)
-#ifndef __NetBSD__
-#ifdef __FreeBSD__
-  cpuset_t cpu_set;
+#if defined(__linux__) && !defined(__ANDROID__)
+  cpu_set_t cpus;
+  CPU_ZERO(&cpus);
+  for (u32 cpu = 0; cpu < 32; ++cpu)
+  {
+    if (mask & (1u << cpu))
+      CPU_SET(cpu, &cpus);
+  }
+  pthread_setaffinity_np(thread, sizeof(cpus), &cpus);
 #else
-  cpu_set_t cpu_set;
-#endif
-  CPU_ZERO(&cpu_set);
-
-  for (int i = 0; i != sizeof(mask) * 8; ++i)
-    if ((mask >> i) & 1)
-      CPU_SET(i, &cpu_set);
-
-  pthread_setaffinity_np(thread, sizeof(cpu_set), &cpu_set);
-#else
-  cpuset_t* cpu_set = cpuset_create();
-
-  for (int i = 0; i != sizeof(mask) * 8; ++i)
-    if ((mask >> i) & 1)
-      cpuset_set(i, cpu_set);
-
-  pthread_setaffinity_np(thread, cpuset_size(cpu_set), cpu_set);
-  cpuset_destroy(cpu_set);
-#endif
+  static_cast<void>(thread);
+  static_cast<void>(mask);
 #endif
 }
 
@@ -158,70 +130,36 @@ void SetCurrentThreadAffinity(u32 mask)
 
 void SleepCurrentThread(int ms)
 {
-  usleep(1000 * ms);
+  usleep(static_cast<useconds_t>(ms) * 1000);
 }
 
 void SwitchCurrentThread()
 {
-  usleep(1000 * 1);
+  usleep(1000);
 }
 
 void SetCurrentThreadName(const char* name)
 {
-#ifdef __APPLE__
-  pthread_setname_np(name);
-#elif defined __FreeBSD__ || defined __OpenBSD__
-  pthread_set_name_np(pthread_self(), name);
-#elif defined(__NetBSD__)
-  pthread_setname_np(pthread_self(), "%s", const_cast<char*>(name));
-#elif defined __HAIKU__
-  rename_thread(find_thread(nullptr), name);
-#else
-  // linux doesn't allow to set more than 16 bytes, including \0.
-  pthread_setname_np(pthread_self(), std::string(name).substr(0, 15).c_str());
-#endif
+  // Linux limits names to 15 characters plus the terminator.
+  const std::string truncated = std::string(name).substr(0, 15);
+  pthread_setname_np(pthread_self(), truncated.c_str());
 #ifdef USE_VTUNE
-  // VTune uses OS thread names by default but probably supports longer names when set via its own
-  // API.
   __itt_thread_set_name(name);
 #endif
 }
 
 std::tuple<void*, size_t> GetCurrentThreadStack()
 {
-  void* stack_addr;
-  size_t stack_size;
-
-  pthread_t self = pthread_self();
-
-#ifdef __APPLE__
-  stack_size = pthread_get_stacksize_np(self);
-  stack_addr = reinterpret_cast<u8*>(pthread_get_stackaddr_np(self)) - stack_size;
-#elif defined __OpenBSD__
-  stack_t stack;
-  pthread_stackseg_np(self, &stack);
-
-  stack_addr = reinterpret_cast<u8*>(stack.ss_sp) - stack.ss_size;
-  stack_size = stack.ss_size;
-#else
+  void* low = nullptr;
+  size_t size = 0;
   pthread_attr_t attr;
-
-#ifdef __FreeBSD__
-  pthread_attr_init(&attr);
-  pthread_attr_get_np(self, &attr);
-#else
-  // Linux and NetBSD
-  pthread_getattr_np(self, &attr);
-#endif
-
-  pthread_attr_getstack(&attr, &stack_addr, &stack_size);
-
-  pthread_attr_destroy(&attr);
-#endif
-
-  return std::make_tuple(stack_addr, stack_size);
+  if (pthread_getattr_np(pthread_self(), &attr) == 0)
+  {
+    pthread_attr_getstack(&attr, &low, &size);
+    pthread_attr_destroy(&attr);
+  }
+  return {low, size};
 }
 
 #endif
-
 }  // namespace Common

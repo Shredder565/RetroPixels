@@ -1,47 +1,45 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <thread>
 
 #ifndef _WIN32
+#include <cstddef>
 #include <tuple>
 #endif
 
-// Don't include Common.h here as it will break LogManager
+// Only CommonTypes.h here: LogManager includes this header and Common.h would get in the way.
 #include "Common/CommonTypes.h"
 
-// This may not be defined outside _WIN32
-#ifndef _WIN32
-#ifndef INFINITE
+#if !defined(_WIN32) && !defined(INFINITE)
 #define INFINITE 0xffffffff
-#endif
 #endif
 
 namespace Common
 {
+// OS thread id of the calling thread (0 where the platform has no cheap equivalent).
 int CurrentThreadId();
 
+// `mask` bit n allows CPU n.
 void SetThreadAffinity(std::thread::native_handle_type thread, u32 mask);
 void SetCurrentThreadAffinity(u32 mask);
 
 void SleepCurrentThread(int ms);
-void SwitchCurrentThread();  // On Linux, this is equal to sleep 1ms
+// Gives up the rest of the time slice (on POSIX: sleeps for 1 ms).
+void SwitchCurrentThread();
 
-// Use this function during a spin-wait to make the current thread
-// relax while another thread is working. This may be more efficient
-// than using events because event functions use kernel calls.
+// For spin-waits: lets other threads run without a kernel wait.
 inline void YieldCPU()
 {
   std::this_thread::yield();
 }
 
+// Names the calling thread for debuggers and profilers.
 void SetCurrentThreadName(const char* name);
 
 #ifndef _WIN32
-// Returns the lowest address of the stack and the size of the stack
+// The lowest address of the calling thread's stack, and its size.
 std::tuple<void*, size_t> GetCurrentThreadStack();
 #endif
-
 }  // namespace Common

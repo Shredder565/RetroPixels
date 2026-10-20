@@ -1,9 +1,8 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
-#include <algorithm>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -13,132 +12,102 @@
 
 namespace Common
 {
+// Handle type for a registered event listener. Destroying the handle unregisters the listener.
+// The base is abstract (pure virtual destructor) so it can only be used through the pointer.
 struct HookBase
 {
-  // A pure virtual destructor makes this class abstract to prevent accidental "slicing".
   virtual ~HookBase() = 0;
 };
 inline HookBase::~HookBase() = default;
 
-// EventHook is a handle a registered listener holds.
-// When the handle is destroyed, the HookableEvent will automatically remove the listener.
-// If the handle outlives the HookableEvent, the link will be properly disconnected.
 using EventHook = std::unique_ptr<HookBase>;
 
-// A hookable event system.
+// An event that any number of listeners can subscribe to:
 //
-// Define Events as:
+//   HookableEvent<int> on_value;
+//   EventHook hook = on_value.Register([](int v) { ... });
+//   on_value.Trigger(5);
 //
-//   HookableEvent<std::string, u32> my_lovely_event;
-//
-// Register listeners anywhere you need them as:
-//
-//   EventHook my_hook = my_lovely_event.Register([](std::string foo, u32 bar) {
-//       fmt::print("I've been triggered with {} and {}", foo, bar)
-//   });
-//
-// The hook will be automatically unregistered when the EventHook object goes out of scope.
-// Trigger events by calling Trigger as:
-//
-//   my_lovely_event.Trigger("Hello world", 42);
-//
-
+// A listener registered while the event is being triggered is called during that trigger; one
+// unregistered while it is being triggered is skipped and freed once the trigger is over.
+// Handles may outlive the event.
 template <typename... CallbackArgs>
 class HookableEvent
 {
 public:
   using CallbackType = std::function<void(CallbackArgs...)>;
 
-  // Returns a handle that will unregister the listener when destroyed.
   [[nodiscard]] EventHook Register(CallbackType callback)
   {
     DEBUG_LOG_FMT(COMMON, "Registering event hook handler");
-    std::lock_guard lg(m_storage->listeners_mutex);
-
-    auto& new_listener =
-        m_storage->listeners.emplace_back(std::make_unique<Listener>(std::move(callback)));
-
-    return std::make_unique<HookImpl>(m_storage, new_listener.get());
+    std::lock_guard guard(m_shared->mutex);
+    auto entry = std::make_unique<Entry>(std::move(callback));
+    Entry* const raw = entry.get();
+    m_shared->entries.push_back(std::move(entry));
+    return std::make_unique<Handle>(m_shared, raw);
   }
 
-  // Invokes all registered callbacks.
-  // Hooks added from within a callback will be invoked.
-  // Hooks removed from within a callback will be skipped,
-  //  but destruction of the hook's callback will be delayed until Trigger() completes.
   void Trigger(const CallbackArgs&... args)
   {
-    std::lock_guard lg(m_storage->listeners_mutex);
-    m_storage->is_triggering = true;
+    std::lock_guard guard(m_shared->mutex);
+    ++m_shared->trigger_depth;
 
-    // Avoiding an actual iterator because the container may be modified.
-    for (std::size_t i = 0; i != m_storage->listeners.size(); ++i)
+    // Index loop: callbacks may append entries while we iterate.
+    for (std::size_t i = 0; i < m_shared->entries.size(); ++i)
     {
-      auto& listener = m_storage->listeners[i];
-
-      if (listener->is_pending_removal)
-        continue;
-
-      std::invoke(listener->callback, args...);
+      Entry& entry = *m_shared->entries[i];
+      if (!entry.removed)
+        entry.callback(args...);
     }
 
-    m_storage->is_triggering = false;
-    std::erase_if(m_storage->listeners, std::mem_fn(&Listener::is_pending_removal));
+    if (--m_shared->trigger_depth == 0)
+      std::erase_if(m_shared->entries, [](const auto& e) { return e->removed; });
   }
 
 private:
-  struct Listener
+  struct Entry
   {
+    explicit Entry(CallbackType cb) : callback(std::move(cb)) {}
     const CallbackType callback;
-    bool is_pending_removal{};
+    bool removed = false;
   };
 
-  struct Storage
+  struct Shared
   {
-    std::recursive_mutex listeners_mutex;
-    std::vector<std::unique_ptr<Listener>> listeners;
-    bool is_triggering{};
+    std::recursive_mutex mutex;  // recursive: callbacks may register, unregister or trigger
+    std::vector<std::unique_ptr<Entry>> entries;
+    int trigger_depth = 0;
   };
 
-  struct HookImpl final : HookBase
+  struct Handle final : HookBase
   {
-    HookImpl(std::weak_ptr<Storage> storage, Listener* listener)
-        : weak_storage{std::move(storage)}, listener_ptr{listener}
+    Handle(const std::shared_ptr<Shared>& shared, Entry* entry) : m_shared(shared), m_entry(entry)
     {
     }
 
-    ~HookImpl() override
+    ~Handle() override
     {
-      const auto storage = weak_storage.lock();
-      if (storage == nullptr)
+      const std::shared_ptr<Shared> shared = m_shared.lock();
+      if (!shared)
       {
         DEBUG_LOG_FMT(COMMON, "Handler outlived event hook");
         return;
       }
 
       DEBUG_LOG_FMT(COMMON, "Removing event hook handler");
-
-      std::lock_guard lg(storage->listeners_mutex);
-
-      if (storage->is_triggering)
+      std::lock_guard guard(shared->mutex);
+      if (shared->trigger_depth > 0)
       {
-        // Just mark our listener for removal.
-        // Trigger() will erase it for us.
-        listener_ptr->is_pending_removal = true;
+        m_entry->removed = true;  // Trigger() frees it when done
+        return;
       }
-      else
-      {
-        // Remove our listener.
-        storage->listeners.erase(std::ranges::find_if(
-            storage->listeners, [&](auto& ptr) { return ptr.get() == listener_ptr; }));
-      }
+      std::erase_if(shared->entries, [this](const auto& e) { return e.get() == m_entry; });
     }
 
-    const std::weak_ptr<Storage> weak_storage;
-    Listener* const listener_ptr;  // "owned" by the above Storage.
+    const std::weak_ptr<Shared> m_shared;
+    Entry* const m_entry;
   };
 
-  // shared_ptr storage allows hooks to forget their connection if they outlive the event itself.
-  std::shared_ptr<Storage> m_storage{std::make_shared<Storage>()};
+  std::shared_ptr<Shared> m_shared = std::make_shared<Shared>();
 };
-
 }  // namespace Common

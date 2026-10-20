@@ -1,100 +1,90 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/CommonFuncs.h"
 
-#include <cstddef>
+#include <cerrno>
 #include <cstring>
-#include <errno.h>
 
 #ifdef _WIN32
 #include <windows.h>
-#include <setupapi.h>
-
-#define strerror_r(err, buf, len) strerror_s(buf, len, err)
 
 #include "Common/StringUtil.h"
 #endif
 
 namespace Common
 {
-constexpr size_t BUFFER_SIZE = 256;
+namespace
+{
+constexpr std::size_t MESSAGE_CAPACITY = 256;
 
-// There are two variants of strerror_r. The XSI version stores the message to the passed-in
-// buffer and returns an int (0 on success). The GNU version returns a pointer to the message,
-// which might have been stored in the passed-in buffer or might be a static string.
-//
-// This function might change the errno value.
-//
-// References:
-// https://www.gnu.org/software/gnulib/manual/html_node/strerror_005fr.html
-// https://pubs.opengroup.org/onlinepubs/9699919799/functions/strerror_r.html
-// https://refspecs.linuxbase.org/LSB_5.0.0/LSB-Core-generic/LSB-Core-generic/baselib-strerror-r.html
+#ifndef _WIN32
+// glibc's strerror_r may be the GNU flavour (returns char*) or the POSIX one (returns int,
+// 0 on success) depending on feature macros; these overloads accept either result.
+[[maybe_unused]] const char* StrerrorResult(const char* message, const char*)
+{
+  return message;
+}
+[[maybe_unused]] const char* StrerrorResult(int status, const char* buffer)
+{
+  return status == 0 ? buffer : "";
+}
+#endif
+}  // namespace
+
 const char* StrErrorWrapper(int error, char* buffer, std::size_t length)
 {
-  // We check defines in order to figure out which variant is in use.
-#if (defined(__GLIBC__) || __ANDROID_API__ >= 23) &&                                               \
-    (_GNU_SOURCE || (_POSIX_C_SOURCE < 200112L && _XOPEN_SOURCE < 600))
-  return strerror_r(error, buffer, length);
+#ifdef _WIN32
+  return strerror_s(buffer, length, error) == 0 ? buffer : "";
 #else
-  const int error_code = strerror_r(error, buffer, length);
-  return error_code == 0 ? buffer : "";
+  return StrerrorResult(strerror_r(error, buffer, length), buffer);
 #endif
 }
 
 std::string StrerrorString(int error)
 {
-  char error_message[BUFFER_SIZE];
-
-  return StrErrorWrapper(error, error_message, BUFFER_SIZE);
+  char buffer[MESSAGE_CAPACITY];
+  return StrErrorWrapper(error, buffer, sizeof(buffer));
 }
 
-// Wrapper function to get last strerror(errno) string.
-// This function might change the error code.
 std::string LastStrerrorString()
 {
   return StrerrorString(errno);
 }
 
 #ifdef _WIN32
-// Wrapper function to get GetLastError() string.
-// This function might change the error code.
 std::string GetLastErrorString()
 {
   return GetWin32ErrorString(GetLastError());
 }
 
-// Like GetLastErrorString() but if you have already queried the error code.
-std::string GetWin32ErrorString(DWORD error_code)
+std::string GetWin32ErrorString(unsigned long error_code)
 {
-  wchar_t error_message[BUFFER_SIZE];
-
+  wchar_t buffer[MESSAGE_CAPACITY] = {};
   FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM, nullptr, error_code,
-                 MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), error_message, BUFFER_SIZE, nullptr);
-  return WStringToUTF8(error_message);
+                 MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), buffer,
+                 static_cast<DWORD>(MESSAGE_CAPACITY), nullptr);
+  return WStringToUTF8(buffer);
 }
 
-// Obtains a full path to the specified module.
 std::optional<std::wstring> GetModuleName(void* hInstance)
 {
-  DWORD max_size = 50;  // Start with space for 50 characters and grow if needed
-  std::wstring name(max_size, L'\0');
-
-  DWORD size;
-  while ((size = GetModuleFileNameW(static_cast<HMODULE>(hInstance), name.data(), max_size)) ==
-             max_size &&
-         GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+  // GetModuleFileNameW truncates (and returns the buffer size) when the buffer is too small, so
+  // keep doubling until the whole path fits.
+  std::wstring path(64, L'\0');
+  for (;;)
   {
-    max_size *= 2;
-    name.resize(max_size);
+    const DWORD capacity = static_cast<DWORD>(path.size());
+    const DWORD written =
+        GetModuleFileNameW(static_cast<HMODULE>(hInstance), path.data(), capacity);
+    if (written == 0)
+      return std::nullopt;
+    if (written < capacity)
+    {
+      path.resize(written);
+      return path;
+    }
+    path.resize(path.size() * 2);
   }
-
-  if (size == 0)
-  {
-    return std::nullopt;
-  }
-  name.resize(size);
-  return name;
 }
 #endif
 }  // namespace Common

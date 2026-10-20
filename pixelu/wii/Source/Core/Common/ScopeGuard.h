@@ -26,9 +26,11 @@ public:
   {
     if (!m_action.has_value())
       return;
-    std::optional<Callable> action;
-    action.swap(m_action);
-    (*action)();
+    // Disarm before calling, so a re-entrant Exit() does nothing. (Lambdas are not assignable,
+    // hence move-construct + reset instead of swap.)
+    Callable action(std::move(*m_action));
+    m_action.reset();
+    action();
   }
 
 private:

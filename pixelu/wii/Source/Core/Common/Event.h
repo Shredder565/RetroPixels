@@ -1,13 +1,4 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-
-// Multithreaded event class. This allows waiting in a thread for an event to
-// be triggered in another thread. While waiting, the CPU will be available for
-// other tasks.
-// * Set(): triggers the event and wakes up the waiting thread.
-// * Wait(): waits for the event to be triggered.
-// * Reset(): tries to reset the event before the waiting thread sees it was
-//            triggered. Usually a bad idea.
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -19,62 +10,48 @@
 
 namespace Common
 {
+// An auto-reset event: Set() signals it and wakes one waiter; a successful Wait() consumes the
+// signal. A Set() with nobody waiting is remembered for the next Wait().
 class Event final
 {
 public:
   void Set()
   {
-    if (m_flag.TestAndSet())
+    if (!m_signaled.TestAndSet())
+      return;  // already signalled
+
+    // Taking the mutex once after changing the flag guarantees that a waiter is either before
+    // its predicate check (and will see the flag) or already blocked (and will get the notify).
     {
-      // Lock and immediately unlock m_mutex.
-      {
-        // Holding the lock at any time between the change of our flag and notify call
-        // is sufficient to prevent a race where both of these actions
-        // happen between the other thread's predicate test and wait call
-        // which would cause wait to block until the next spurious wakeup or timeout.
-
-        // Unlocking before notification is a micro-optimization to prevent
-        // the notified thread from immediately blocking on the mutex.
-        std::lock_guard<std::mutex> lk(m_mutex);
-      }
-
-      m_condvar.notify_one();
+      std::lock_guard guard(m_mutex);
     }
+    m_wakeup.notify_one();
   }
 
   void Wait()
   {
-    if (m_flag.TestAndClear())
+    if (m_signaled.TestAndClear())
       return;
-
-    std::unique_lock<std::mutex> lk(m_mutex);
-    m_condvar.wait(lk, [&] { return m_flag.TestAndClear(); });
+    std::unique_lock lock(m_mutex);
+    m_wakeup.wait(lock, [this] { return m_signaled.TestAndClear(); });
   }
 
+  // Returns false if the time ran out without a signal.
   template <class Rep, class Period>
   bool WaitFor(const std::chrono::duration<Rep, Period>& rel_time)
   {
-    if (m_flag.TestAndClear())
+    if (m_signaled.TestAndClear())
       return true;
-
-    std::unique_lock<std::mutex> lk(m_mutex);
-    bool signaled = m_condvar.wait_for(lk, rel_time, [&] { return m_flag.TestAndClear(); });
-
-    return signaled;
+    std::unique_lock lock(m_mutex);
+    return m_wakeup.wait_for(lock, rel_time, [this] { return m_signaled.TestAndClear(); });
   }
 
-  void Reset()
-  {
-    // no other action required, since wait loops on
-    // the predicate and any lingering signal will get
-    // cleared on the first iteration
-    m_flag.Clear();
-  }
+  // Drops a pending signal. Rarely what you want: it races with waiters.
+  void Reset() { m_signaled.Clear(); }
 
 private:
-  Flag m_flag;
-  std::condition_variable m_condvar;
+  Flag m_signaled;
+  std::condition_variable m_wakeup;
   std::mutex m_mutex;
 };
-
 }  // namespace Common

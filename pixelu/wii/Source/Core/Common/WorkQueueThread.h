@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,6 +7,8 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <type_traits>
+#include <utility>
 
 #include "Common/Event.h"
 #include "Common/SPSCQueue.h"
@@ -17,6 +18,14 @@ namespace Common
 {
 namespace detail
 {
+// A worker thread that feeds queued items to a function, one at a time, in order.
+//
+// The item queue is single-producer/single-consumer. With IsSingleProducer == false, a recursive
+// mutex serialises all public calls so any number of threads may use them; with true, the caller
+// promises only one thread ever does and no locking happens.
+//
+// Control requests (clear the queue, quit) are sent to the worker through a second queue so
+// that only the worker ever pops from the item queue.
 template <typename T, bool IsSingleProducer>
 class WorkQueueThreadBase final
 {
@@ -30,70 +39,62 @@ public:
   }
   ~WorkQueueThreadBase() { Shutdown(); }
 
-  // Shuts the current work thread down (if any) and starts a new thread with the given function
-  // Note: Some consumers of this API push items to the queue before starting the thread.
+  // Finishes the current worker (if any), then starts a new one. Items pushed before the first
+  // Reset() are kept and processed by the new worker.
   void Reset(std::string name, FunctionType function)
   {
-    auto lg = GetLockGuard();
+    const auto lock = Lock();
     Shutdown();
-    m_thread = std::thread(std::bind_front(&WorkQueueThreadBase::ThreadLoop, this), std::move(name),
-                           std::move(function));
+    m_thread = std::thread([this, name = std::move(name), function = std::move(function)] {
+      WorkerMain(name, function);
+    });
   }
 
-  // Adds an item to the work queue
   template <typename... Args>
   void EmplaceItem(Args&&... args)
   {
-    auto lg = GetLockGuard();
+    const auto lock = Lock();
     m_items.Emplace(std::forward<Args>(args)...);
-    m_event.Set();
+    m_wake.Set();
   }
   void Push(T&& item) { EmplaceItem(std::move(item)); }
   void Push(const T& item) { EmplaceItem(item); }
 
-  // Empties the queue, skipping all work.
-  // Blocks until the current work is cancelled.
+  // Drops every queued item that has not started yet; returns once the worker has done so.
   void Cancel()
   {
-    auto lg = GetLockGuard();
-
-    // Fast path avoids round trip thread communication and saves ~20us.
+    const auto lock = Lock();
     if (m_items.Empty())
-      return;
-
-    RunCommand([&] { m_items.Clear(); });
+      return;  // nothing to drop, no need to bother the worker
+    SendControl([this] { m_items.Clear(); });
   }
 
-  // Tells the worker thread to stop when its queue is empty.
-  // Blocks until the worker thread exits. Does nothing if thread isn't running.
+  // Processes what is queued, then ends the worker. No-op without a worker.
   void Shutdown()
   {
-    auto lg = GetLockGuard();
+    const auto lock = Lock();
     WaitForCompletion();
-    StopThread();
+    EndWorker();
   }
 
-  // Tells the worker thread to stop immediately, potentially leaving work in the queue.
-  // Blocks until the worker thread exits. Does nothing if thread isn't running.
+  // Ends the worker after its current item; anything still queued stays queued.
   void Stop()
   {
-    auto lg = GetLockGuard();
-    StopThread();
+    const auto lock = Lock();
+    EndWorker();
   }
 
-  // Stops the worker thread ASAP and empties the queue.
   void StopAndCancel()
   {
-    auto lg = GetLockGuard();
+    const auto lock = Lock();
     Stop();
     Cancel();
   }
 
-  // Blocks until all items in the queue have been processed (or cancelled)
-  // Does nothing if thread isn't running.
+  // Blocks until the queue is empty. No-op without a worker.
   void WaitForCompletion()
   {
-    auto lg = GetLockGuard();
+    const auto lock = Lock();
     if (IsRunning())
       m_items.WaitForEmpty();
   }
@@ -101,69 +102,64 @@ public:
   bool IsRunning() { return m_thread.joinable(); }
 
 private:
-  using CommandFunction = std::function<void()>;
+  // An empty Control means "quit".
+  using Control = std::function<void()>;
 
-  // Blocking.
-  void RunCommand(CommandFunction cmd)
+  struct NoLock
+  {
+  };
+  using MutexType = std::conditional_t<IsSingleProducer, NoLock, std::recursive_mutex>;
+
+  auto Lock()
+  {
+    if constexpr (IsSingleProducer)
+      return NoLock{};
+    else
+      return std::lock_guard<std::recursive_mutex>(m_mutex);
+  }
+
+  // Runs `fn` on the worker (or right here if there is none) and waits for it.
+  void SendControl(Control fn)
   {
     if (!IsRunning())
     {
-      std::invoke(cmd);
+      fn();
       return;
     }
-
-    m_commands.Emplace(std::move(cmd));
-    m_event.Set();
-    m_commands.WaitForEmpty();
+    m_control.Emplace(std::move(fn));
+    m_wake.Set();
+    m_control.WaitForEmpty();
   }
 
-  // Stop immediately.
-  void StopThread()
+  void EndWorker()
   {
-    if (!m_thread.joinable())
+    if (!IsRunning())
       return;
-
-    // empty-function shutdown signal.
-    m_commands.Emplace(CommandFunction{});
-    m_event.Set();
+    m_control.Emplace(Control{});
+    m_wake.Set();
     m_thread.join();
-    m_commands.Clear();
+    m_control.Clear();  // the quit request itself
   }
 
-  auto GetLockGuard()
+  void WorkerMain(const std::string& name, const FunctionType& function)
   {
-    struct DummyLockGuard
+    SetCurrentThreadName(name.c_str());
+
+    for (;;)
     {
-      // Silences unused variable warning.
-      ~DummyLockGuard() { void(); }
-    };
-
-    if constexpr (IsSingleProducer)
-      return DummyLockGuard{};
-    else
-      return std::lock_guard{m_mutex};
-  }
-
-  void ThreadLoop(const std::string& thread_name, const FunctionType& function)
-  {
-    Common::SetCurrentThreadName(thread_name.c_str());
-
-    while (true)
-    {
-      while (!m_commands.Empty())
+      // Control requests come first.
+      while (!m_control.Empty())
       {
-        CommandFunction& command = m_commands.Front();
-        // empty-function shutdown signal.
-        if (!command)
+        Control& request = m_control.Front();
+        if (!request)
           return;
-
-        std::invoke(command);
-        m_commands.Pop();
+        request();
+        m_control.Pop();  // only now does SendControl() return
       }
 
       if (m_items.Empty())
       {
-        m_event.Wait();
+        m_wake.Wait();
         continue;
       }
 
@@ -173,16 +169,13 @@ private:
   }
 
   std::thread m_thread;
-  Common::WaitableSPSCQueue<T> m_items;
-  Common::WaitableSPSCQueue<CommandFunction> m_commands;
-  Common::Event m_event;
-
-  using DummyMutex = std::type_identity<void>;
-  using ProducerMutex = std::conditional_t<IsSingleProducer, DummyMutex, std::recursive_mutex>;
-  ProducerMutex m_mutex;
+  WaitableSPSCQueue<T> m_items;
+  WaitableSPSCQueue<Control> m_control;
+  Event m_wake;
+  [[no_unique_address]] MutexType m_mutex;
 };
 
-// A WorkQueueThread-like class that takes functions to invoke.
+// Runs pushed functions on a worker thread.
 template <template <typename> typename WorkThread>
 class AsyncWorkThreadBase
 {
@@ -194,16 +187,18 @@ public:
 
   void Reset(std::string thread_name)
   {
-    m_worker.Reset(std::move(thread_name), std::invoke<FuncType>);
+    m_worker.Reset(std::move(thread_name), [](FuncType func) { func(); });
   }
 
   void Push(FuncType func) { m_worker.Push(std::move(func)); }
 
+  // Runs `func` on the worker and waits for it to finish.
   auto PushBlocking(FuncType func)
   {
-    std::packaged_task task{std::move(func)};
-    m_worker.EmplaceItem([&] { task(); });
-    return task.get_future().get();
+    std::packaged_task<void()> task(std::move(func));
+    auto done = task.get_future();
+    m_worker.EmplaceItem([&task] { task(); });
+    return done.get();
   }
 
   void Cancel() { m_worker.Cancel(); }
@@ -215,16 +210,14 @@ private:
 };
 }  // namespace detail
 
-// Multiple threads may use the public interface.
+// Any thread may use the public interface.
 template <typename T>
 using WorkQueueThread = detail::WorkQueueThreadBase<T, false>;
 
-// A "Single Producer" WorkQueueThread.
-// It uses no mutex but only one thread can safely manipulate the queue.
+// Only one thread may use the public interface; no locking.
 template <typename T>
 using WorkQueueThreadSP = detail::WorkQueueThreadBase<T, true>;
 
 using AsyncWorkThread = detail::AsyncWorkThreadBase<WorkQueueThread>;
 using AsyncWorkThreadSP = detail::AsyncWorkThreadBase<WorkQueueThreadSP>;
-
 }  // namespace Common

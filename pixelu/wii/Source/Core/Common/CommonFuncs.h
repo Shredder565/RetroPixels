@@ -1,33 +1,25 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
+
+#include <cstddef>
+#include <string>
 
 #ifdef _WIN32
 #include <optional>
 #endif
-#include <string>
 
 #ifdef __APPLE__
 #include "Common/CommonTypes.h"
 #endif
 
-#ifndef _WIN32
-
-// go to debugger mode
-#define Crash()                                                                                    \
-  {                                                                                                \
-    __builtin_trap();                                                                              \
-  }
-
-#else  // WIN32
-// Function Cross-Compatibility
+#ifdef _WIN32
+// POSIX names used throughout the code base, mapped to their MSVC CRT equivalents (64-bit file
+// offsets and sizes where there is a choice).
 #define strcasecmp _stricmp
 #define strncasecmp _strnicmp
 #define unlink _unlink
 #define vscprintf _vscprintf
-
-// 64 bit offsets for Windows
 #define fseeko _fseeki64
 #define ftello _ftelli64
 #define atoll _atoi64
@@ -38,44 +30,48 @@
 extern "C" {
 __declspec(dllimport) void __stdcall DebugBreak(void);
 }
+
+// Stops in the debugger (or terminates the process when none is attached).
 #define Crash()                                                                                    \
   {                                                                                                \
     DebugBreak();                                                                                  \
   }
-#endif  // _WIN32
+#else
+#define Crash()                                                                                    \
+  {                                                                                                \
+    __builtin_trap();                                                                              \
+  }
+#endif
 
 namespace Common
 {
-// strerror_r wrapper to handle XSI and GNU versions.
+// Thread-safe strerror(): writes the message for `error` into `buffer` if needed and returns a
+// pointer to it (which may be a static string instead). May change errno.
 const char* StrErrorWrapper(int error, char* buffer, std::size_t length);
 
-// Wrapper functions to get strerror(errno) string, which itself is not threadsafe.
-// These functions might change the error code.
+// Message text for an errno value / for the current errno. May change errno.
 std::string StrerrorString(int error);
 std::string LastStrerrorString();
 
 #ifdef _WIN32
-// Wrapper function to get GetLastError() string.
-// This function might change the error code.
+// Message text for GetLastError(). May change the last-error value.
 std::string GetLastErrorString();
 
-// Like GetLastErrorString() but if you have already queried the error code.
+// Message text for a Win32 error code.
 std::string GetWin32ErrorString(unsigned long error_code);
 
-// Obtains a full path to the specified module.
+// Full path of the module (DLL or EXE) with the given handle, or nullopt on failure.
 std::optional<std::wstring> GetModuleName(void* hInstance);
 #endif
 
 #ifdef __APPLE__
-struct MacOSVersion  // NSOperatingSystemVersion
+struct MacOSVersion
 {
-  s64 major;  // NSInteger majorVersion
-  s64 minor;  // NSInteger minorVersion
-  s64 patch;  // NSInteger patchVersion
+  s64 major;
+  s64 minor;
+  s64 patch;
 };
 
-// Helper function to get the current macOS version, which is easy to do with
-// from Objective-C code, but a little harder from C++.
 MacOSVersion GetMacOSVersion();
 #endif
 }  // namespace Common
