@@ -1,5 +1,4 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <tuple>
+#include <vector>
 
 #include "Common/CommonTypes.h"
 #include "Common/EnumFormatter.h"
@@ -22,6 +22,7 @@
 class NativeVertexFormat;
 class PointerWrap;
 
+// EFB pixel format changes that need the colour buffer converted.
 enum class EFBReinterpretType
 {
   RGB8ToRGB565 = 0,
@@ -40,81 +41,81 @@ struct fmt::formatter<EFBReinterpretType> : EnumFormatter<EFBReinterpretType::RG
   constexpr formatter() : EnumFormatter(names) {}
 };
 
+// True when the half-open ranges [aLower, aUpper) and [bLower, bUpper) intersect.
 inline bool AddressRangesOverlap(u32 aLower, u32 aUpper, u32 bLower, u32 bUpper)
 {
-  return !((aLower >= bUpper) || (bLower >= aUpper));
+  return aLower < bUpper && bLower < aUpper;
 }
 
+// Owns the host copy of the embedded framebuffer (colour and depth at internal resolution, with
+// MSAA and stereo layers as configured) and everything that works on it directly: resolves,
+// pixel format conversion, clears, savestates, and the CPU peek/poke path with its readback
+// cache.
 class FramebufferManager final
 {
 public:
   FramebufferManager();
   ~FramebufferManager();
 
-  // Does not require the framebuffer to be created. Slower than direct queries.
+  // Formats and configs of the EFB textures; usable before the EFB exists.
   static AbstractTextureFormat GetEFBColorFormat();
   static AbstractTextureFormat GetEFBDepthFormat();
   static AbstractTextureFormat GetEFBDepthCopyFormat();
   static TextureConfig GetEFBColorTextureConfig(u32 width, u32 height);
   static TextureConfig GetEFBDepthTextureConfig(u32 width, u32 height);
 
-  // Accessors.
-  AbstractTexture* GetEFBColorTexture() const { return m_efb_color_texture.get(); }
-  AbstractTexture* GetEFBDepthTexture() const { return m_efb_depth_texture.get(); }
-  AbstractFramebuffer* GetEFBFramebuffer() const { return m_efb_framebuffer.get(); }
-  u32 GetEFBWidth() const { return m_efb_color_texture->GetWidth(); }
-  u32 GetEFBHeight() const { return m_efb_color_texture->GetHeight(); }
-  u32 GetEFBLayers() const { return m_efb_color_texture->GetLayers(); }
-  u32 GetEFBSamples() const { return m_efb_color_texture->GetSamples(); }
-  bool IsEFBMultisampled() const { return m_efb_color_texture->IsMultisampled(); }
-  bool IsEFBStereo() const { return m_efb_color_texture->GetLayers() > 1; }
+  AbstractTexture* GetEFBColorTexture() const { return m_color.get(); }
+  AbstractTexture* GetEFBDepthTexture() const { return m_depth.get(); }
+  AbstractFramebuffer* GetEFBFramebuffer() const { return m_framebuffer.get(); }
+  u32 GetEFBWidth() const { return m_color->GetWidth(); }
+  u32 GetEFBHeight() const { return m_color->GetHeight(); }
+  u32 GetEFBLayers() const { return m_color->GetLayers(); }
+  u32 GetEFBSamples() const { return m_color->GetSamples(); }
+  bool IsEFBMultisampled() const { return m_color->IsMultisampled(); }
+  bool IsEFBStereo() const { return m_color->GetLayers() > 1; }
   FramebufferState GetEFBFramebufferState() const;
 
-  // EFB coordinate conversion functions
-  // Use this to convert a whole native EFB rect to backbuffer coordinates
+  // Native EFB rectangle -> internal resolution rectangle.
   MathUtil::Rectangle<int> ConvertEFBRectangle(const MathUtil::Rectangle<int>& rc) const;
 
   unsigned int GetEFBScale() const;
 
-  // Use this to upscale native EFB coordinates to IDEAL internal resolution
+  // Native EFB coordinate -> internal resolution coordinate.
   int EFBToScaledX(int x) const;
   int EFBToScaledY(int y) const;
 
-  // Floating point versions of the above - only use them if really necessary
+  // The same in floating point, from the actual EFB texture size.
   float EFBToScaledXf(float x) const;
   float EFBToScaledYf(float y) const;
 
-  // First-time setup.
   bool Initialize(int efb_scale);
 
-  // Recreate EFB framebuffers, call when the EFB size (IR) changes.
+  // Rebuilds the EFB at a new scale (or after MSAA/stereo/HDR changes).
   void RecreateEFBFramebuffer(int efb_scale);
 
-  // Recompile shaders, use when MSAA mode changes.
+  // Rebuilds the pipelines (after host shader config or MSAA changes).
   void RecompileShaders();
 
-  // This is virtual, because D3D has both normalized and integer framebuffers.
   void BindEFBFramebuffer();
 
-  // Resolve color/depth textures to a non-msaa texture, and return it.
+  // Single-sampled versions of the EFB for reading. The region bounds the work done.
   AbstractTexture* ResolveEFBColorTexture(const MathUtil::Rectangle<int>& region);
   AbstractTexture* ResolveEFBDepthTexture(const MathUtil::Rectangle<int>& region,
                                           bool force_r32f = false);
 
-  // Reinterpret pixel format of EFB color texture.
-  // Assumes no render pass is currently in progress.
-  // Swaps EFB framebuffers, so re-bind afterwards.
+  // Converts the colour buffer for a pixel format change. Must be called outside a render pass;
+  // the EFB framebuffer object changes, so rebind afterwards.
   bool ReinterpretPixelData(EFBReinterpretType convtype);
-  PixelFormat GetPrevPixelFormat() const { return m_prev_efb_format; }
-  void StorePixelFormat(PixelFormat new_format) { m_prev_efb_format = new_format; }
+  PixelFormat GetPrevPixelFormat() const { return m_last_pixel_format; }
+  void StorePixelFormat(PixelFormat new_format) { m_last_pixel_format = new_format; }
 
-  // Clears the EFB using shaders.
+  // Clears a native EFB rectangle.
   void ClearEFB(const MathUtil::Rectangle<int>& rc, bool clear_color, bool clear_alpha,
                 bool clear_z, u32 color, u32 z, PixelFormat pixel_format);
 
   AbstractPipeline* GetClearPipeline(bool clear_color, bool clear_alpha, bool clear_z) const;
 
-  // Reads a framebuffer value back from the GPU. This may block if the cache is not current.
+  // CPU reads at native resolution. Blocks while the needed part of the cache is refilled.
   u32 PeekEFBColor(u32 x, u32 y);
   float PeekEFBDepth(u32 x, u32 y);
   void SetEFBCacheTileSize(u32 size);
@@ -123,122 +124,119 @@ public:
   void FlagPeekCacheAsOutOfDate();
   void EndOfFrame();
 
-  // Writes a value to the framebuffer. This will never block, and writes will be batched.
+  // CPU writes. Queued and drawn in batches; never blocks.
   void PokeEFBColor(u32 x, u32 y, u32 color);
   void PokeEFBDepth(u32 x, u32 y, float depth);
   void FlushEFBPokes();
 
-  // Save state load/save.
   void DoState(PointerWrap& p);
 
-protected:
-  struct EFBPokeVertex
+private:
+  // A poke vertex: clip-space position (w holds the point size with large points) and RGBA8.
+  struct PokeVertex
   {
     float position[4];
     u32 color;
   };
-  static_assert(std::is_standard_layout<EFBPokeVertex>::value, "EFBPokeVertex is standard-layout");
+  static_assert(std::is_standard_layout_v<PokeVertex>);
 
-  struct EFBCacheTile
+  struct PeekTile
   {
-    bool present;
-    u8 frame_access_mask;
+    bool valid;
+    // Bit 0 = read this frame; shifted left at the end of each frame.
+    u8 reads;
   };
 
-  // EFB cache - for CPU EFB access
-  // Tiles are ordered left-to-right, then top-to-bottom
-  struct EFBCacheData
+  // Native-resolution copy of the EFB colour or depth, read by the CPU. Either one tile for the
+  // whole EFB or a grid of tiles, left to right then top to bottom.
+  struct PeekCache
   {
+    // Native-resolution render target for downscaling or depth conversion (only when needed).
     std::unique_ptr<AbstractTexture> texture;
     std::unique_ptr<AbstractFramebuffer> framebuffer;
-    std::unique_ptr<AbstractStagingTexture> readback_texture;
+    // Full EFB-sized staging texture.
+    std::unique_ptr<AbstractStagingTexture> staging;
     std::unique_ptr<AbstractPipeline> copy_pipeline;
-    std::vector<EFBCacheTile> tiles;
-    bool out_of_date;
-    bool has_active_tiles;
-    bool needs_refresh;
-    bool needs_flush;
+    std::vector<PeekTile> tiles;
+    bool stale;            // the EFB was drawn to since the tiles were read
+    bool any_valid;        // at least one tile has been read since the last invalidation
+    bool wants_refill;     // invalidated tiles that were being read should be read again
+    bool pending_readback; // an async copy has been issued but not waited for
   };
 
-  bool CreateEFBFramebuffer(int efb_scale);
-  void DestroyEFBFramebuffer();
+  bool CreateEFB(int efb_scale);
+  void DestroyEFB();
+  std::tuple<u32, u32> ComputeEFBSize(int efb_scale);
 
-  bool CompileConversionPipelines();
-  void DestroyConversionPipelines();
+  bool BuildConversionPipelines();
+  void DropConversionPipelines();
+  bool BuildCopyPipelines();
+  void DropCopyPipelines();
+  bool CreatePeekCaches();
+  void DestroyPeekCaches();
+  bool BuildClearPipelines();
+  void DropClearPipelines();
+  bool BuildPokePipelines();
+  void DropPokePipelines();
 
-  bool CompileReadbackPipelines();
-  void DestroyReadbackPipelines();
+  PeekCache& Cache(bool depth) { return depth ? m_peek_depth : m_peek_color; }
+  bool Tiled() const { return m_tile_size > 0; }
+  // Whether depth peeks have to go through a colour render target first.
+  bool DepthPeeksNeedIntermediate() const;
+  u32 TileIndexAt(u32 x, u32 y) const;
+  MathUtil::Rectangle<int> TileRect(u32 tile) const;
+  void FillTile(bool depth, u32 tile, bool async);
+  void InvalidateCache(PeekCache& cache, bool forced);
+  template <typename T>
+  T ReadCached(bool depth, u32 x, u32 y);
+  template <typename T>
+  void UpdateCached(bool depth, u32 x, u32 y, const T& value);
 
-  bool CreateReadbackFramebuffer();
-  void DestroyReadbackFramebuffer();
+  void QueuePoke(std::vector<PokeVertex>& queue, u32 x, u32 y, float z, u32 color);
+  void DrawPokes(std::vector<PokeVertex>& queue, const AbstractPipeline* pipeline);
 
-  bool CompileClearPipelines();
-  void DestroyClearPipelines();
+  void SaveEFB(PointerWrap& p);
+  void LoadEFB(PointerWrap& p);
 
-  bool CompilePokePipelines();
-  void DestroyPokePipelines();
+  float m_scale = 1.0f;
+  PixelFormat m_last_pixel_format;
 
-  bool IsUsingTiledEFBCache() const;
-  bool IsEFBCacheTilePresent(bool depth, u32 x, u32 y, u32* tile_index) const;
-  MathUtil::Rectangle<int> GetEFBCacheTileRect(u32 tile_index) const;
-  void PopulateEFBCache(bool depth, u32 tile_index, bool async = false);
+  // The EFB, and the second colour buffer that pixel format conversions draw into.
+  std::unique_ptr<AbstractTexture> m_color;
+  std::unique_ptr<AbstractTexture> m_color_spare;
+  std::unique_ptr<AbstractTexture> m_depth;
+  std::unique_ptr<AbstractFramebuffer> m_framebuffer;
+  std::unique_ptr<AbstractFramebuffer> m_framebuffer_spare;
 
-  void CreatePokeVertices(std::vector<EFBPokeVertex>* destination_list, u32 x, u32 y, float z,
-                          u32 color);
+  // Single-sampled (and, for depth, R32F) copies for reading the EFB.
+  std::unique_ptr<AbstractTexture> m_color_resolved;
+  std::unique_ptr<AbstractFramebuffer> m_color_resolve_target;
+  std::unique_ptr<AbstractPipeline> m_color_resolve_pipeline;
+  std::unique_ptr<AbstractTexture> m_depth_resolved;
+  std::unique_ptr<AbstractFramebuffer> m_depth_resolve_target;
+  std::unique_ptr<AbstractPipeline> m_depth_resolve_pipeline;
 
-  void DrawPokeVertices(const EFBPokeVertex* vertices, u32 vertex_count,
-                        const AbstractPipeline* pipeline);
+  // Draws savestate EFB contents back.
+  std::unique_ptr<AbstractPipeline> m_restore_pipeline;
 
-  std::tuple<u32, u32> CalculateTargetSize(int efb_scale);
+  std::array<std::unique_ptr<AbstractPipeline>, NUM_EFB_REINTERPRET_TYPES> m_conversion_pipelines;
 
-  void DoLoadState(PointerWrap& p);
-  void DoSaveState(PointerWrap& p);
+  // Peek cache tile edge in native pixels (0 = one tile), and tiles per row.
+  u32 m_tile_size = 0;
+  u32 m_tiles_per_row = 1;
+  PeekCache m_peek_color = {};
+  PeekCache m_peek_depth = {};
 
-  float m_efb_scale = 1.0f;
-  PixelFormat m_prev_efb_format;
+  // Clear pipelines, indexed by colour write << 2 | alpha write << 1 | depth write.
+  std::array<std::unique_ptr<AbstractPipeline>, 8> m_clear_pipelines;
 
-  std::unique_ptr<AbstractTexture> m_efb_color_texture;
-  std::unique_ptr<AbstractTexture> m_efb_convert_color_texture;
-  std::unique_ptr<AbstractTexture> m_efb_depth_texture;
-  std::unique_ptr<AbstractTexture> m_efb_resolve_color_texture;
-  std::unique_ptr<AbstractTexture> m_efb_depth_resolve_texture;
-
-  std::unique_ptr<AbstractFramebuffer> m_efb_framebuffer;
-  std::unique_ptr<AbstractFramebuffer> m_efb_convert_framebuffer;
-  std::unique_ptr<AbstractFramebuffer> m_efb_color_resolve_framebuffer;
-  std::unique_ptr<AbstractFramebuffer> m_efb_depth_resolve_framebuffer;
-  std::unique_ptr<AbstractPipeline> m_efb_color_resolve_pipeline;
-  std::unique_ptr<AbstractPipeline> m_efb_depth_resolve_pipeline;
-
-  // Pipeline for restoring the contents of the EFB from a save state
-  std::unique_ptr<AbstractPipeline> m_efb_restore_pipeline;
-
-  // Format conversion shaders
-  std::array<std::unique_ptr<AbstractPipeline>, 6> m_format_conversion_pipelines;
-
-  // EFB cache - for CPU EFB access (EFB peeks/pokes), not for EFB copies
-
-  // Width and height of a tile in pixels at 1x IR. 0 indicates non-tiled, in which case a single
-  // tile is used for the entire EFB.
-  // Note that as EFB peeks and pokes are a CPU feature, they always operate at 1x IR.
-  u32 m_efb_cache_tile_size = 0;
-  // Number of tiles that make up a row in m_efb_color_cache.tiles / m_efb_depth_cache.tiles.
-  u32 m_efb_cache_tile_row_stride = 1;
-  EFBCacheData m_efb_color_cache = {};
-  EFBCacheData m_efb_depth_cache = {};
-
-  // EFB clear pipelines
-  // Indexed by [color_write_enabled][alpha_write_enabled][depth_write_enabled]
-  std::array<std::array<std::array<std::unique_ptr<AbstractPipeline>, 2>, 2>, 2> m_clear_pipelines;
-
-  // EFB poke drawing setup
-  std::unique_ptr<NativeVertexFormat> m_poke_vertex_format;
+  std::unique_ptr<NativeVertexFormat> m_poke_format;
   std::unique_ptr<AbstractPipeline> m_color_poke_pipeline;
   std::unique_ptr<AbstractPipeline> m_depth_poke_pipeline;
-  std::vector<EFBPokeVertex> m_color_poke_vertices;
-  std::vector<EFBPokeVertex> m_depth_poke_vertices;
+  std::vector<PokeVertex> m_color_pokes;
+  std::vector<PokeVertex> m_depth_pokes;
 
-  Common::EventHook m_end_of_frame_event;
+  Common::EventHook m_frame_end_hook;
 };
 
 extern std::unique_ptr<FramebufferManager> g_framebuffer_manager;
