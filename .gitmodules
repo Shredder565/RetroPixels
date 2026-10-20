@@ -18,10 +18,6 @@
 	path = pixelu/dependencies/imgui
 	url = https://github.com/ocornut/imgui
 	shallow = true
-[submodule "pixelu/dependencies/metal-cpp"]
-	path = pixelu/dependencies/metal-cpp
-	url = https://github.com/bkaradzic/metal-cpp.git
-	shallow = true
 [submodule "pixelu/dependencies/xbyak_aarch64"]
 	path = pixelu/dependencies/xbyak_aarch64
 	url = https://github.com/fujitsu/xbyak_aarch64
