@@ -1,81 +1,58 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "prudp.h"
 #include "nex.h"
 #include "nexThread.h"
 
-std::mutex mtx_queuedServices;
-std::vector<nexService*> list_queuedServices;
-
-std::vector<nexService*> list_activeNexServices;
-
-void nexThread_run()
+namespace
 {
-	while (true)
+	std::mutex s_incomingMutex;
+	std::vector<nexService*> s_incoming; // registered, not yet picked up by the thread
+	std::atomic<bool> s_started{false};
+	std::thread::id s_threadId;
+
+	void ServiceLoop()
 	{
-		// check for new services
-		mtx_queuedServices.lock();
-		for(auto& it : list_queuedServices)
-			list_activeNexServices.push_back(it);
-		list_queuedServices.clear();
-		mtx_queuedServices.unlock();
-		// if service list is empty then pause
-		if (list_activeNexServices.empty())
+		std::vector<nexService*> services; // only touched by this thread
+		while (true)
 		{
-			std::this_thread::sleep_for(std::chrono::milliseconds(200));
-			continue;
-		}
-		// update
-		for (auto& it : list_activeNexServices)
-		{
-			it->update();
-		}
-		// delete services marked for destruction
-		sint32 idx = 0;
-		sint32 listSize = (sint32)list_activeNexServices.size();
-		while (idx < listSize)
-		{
-			if (list_activeNexServices[idx]->isMarkedForDestruction())
 			{
-				list_activeNexServices[idx]->destroy();
-				listSize--;
-				list_activeNexServices[idx] = list_activeNexServices[listSize];
+				// also makes sure s_threadId is set before any service runs
+				std::lock_guard lock(s_incomingMutex);
+				services.insert(services.end(), s_incoming.begin(), s_incoming.end());
+				s_incoming.clear();
 			}
-			idx++;
+			if (services.empty())
+			{
+				std::this_thread::sleep_for(std::chrono::milliseconds(200));
+				continue;
+			}
+			for (nexService* service : services)
+				service->update();
+			std::erase_if(services, [](nexService* service) {
+				if (!service->isMarkedForDestruction())
+					return false;
+				service->destroy(); // deletes it since we are the nex thread
+				return true;
+			});
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
 		}
-		if (listSize != list_activeNexServices.size())
-		{
-			list_activeNexServices.resize(listSize);
-		}
-		// idle for short time
-		// todo - find a better way to handle this with lower latency. Maybe using select() with loopback socket for interrupting the select on service change
-		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
-}
-
-bool _nexThreadLaunched = false;
-
-std::thread::id nexThreadId;
-
-void nexThread_init()
-{
-	if (_nexThreadLaunched)
-		return;
-	std::thread t(nexThread_run);
-	nexThreadId = t.get_id();
-	t.detach();
-	_nexThreadLaunched = true;
 }
 
 void nexThread_registerService(nexService* service)
 {
-	mtx_queuedServices.lock();
-	nexThread_init();
-	list_queuedServices.push_back(service);
-	mtx_queuedServices.unlock();
+	std::lock_guard lock(s_incomingMutex);
+	if (!s_started)
+	{
+		std::thread worker(ServiceLoop);
+		s_threadId = worker.get_id();
+		worker.detach();
+		s_started = true;
+	}
+	s_incoming.push_back(service);
 }
 
 bool nexThread_isCurrentThread()
 {
-	if (_nexThreadLaunched == false)
-		return false;
-	return std::this_thread::get_id() == nexThreadId;
+	return s_started && std::this_thread::get_id() == s_threadId;
 }

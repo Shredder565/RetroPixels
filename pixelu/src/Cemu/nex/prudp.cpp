@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "prudp.h"
 #include "util/crypto/md5.h"
 
@@ -6,1026 +7,770 @@
 
 #include <boost/random/uniform_int.hpp>
 
-static void KSA(unsigned char* key, int keyLen, unsigned char* S)
-{
-	for (int i = 0; i < RC4_N; i++)
-		S[i] = i;
-	int j = 0;
-	for (int i = 0; i < RC4_N; i++)
-	{
-		j = (j + S[i] + key[i % keyLen]) % RC4_N;
-		std::swap(S[i], S[j]);
-	}
-}
+// Packet layout (PRUDP v0, little endian):
+//   0  u8  source vport        1  u8  destination vport
+//   2  u16 type | flags << 4   4  u8  session id
+//   5  u32 signature           9  u16 sequence id
+//   11 type specific fields: SYN u32 connection signature (0), CON u32 signature
+//      plus optional login data, DATA u8 fragment index and payload, PING nothing
+//   last byte: checksum
+// With FLAG_HAS_SIZE a u16 payload size follows the type specific fields.
 
-static void PRGA(unsigned char* S, unsigned char* input, int len, unsigned char* output)
-{
-	for (size_t n = 0; n < len; n++)
-	{
-		int i = (i + 1) % RC4_N;
-		int j = (j + S[i]) % RC4_N;
-		std::swap(S[i], S[j]);
-		int rnd = S[(S[i] + S[j]) % RC4_N];
-		output[n] = rnd ^ input[n];
-	}
-}
+// --- RC4 ---
 
-static void RC4(char* key, unsigned char* input, int len, unsigned char* output)
+void RC4_initCtx(RC4Ctx* rc4Ctx, unsigned char* key, int keyLen)
 {
-	unsigned char S[RC4_N];
-	KSA((unsigned char*)key, (int)strlen(key), S);
-	PRGA(S, input, len, output);
+	unsigned char* S = rc4Ctx->S;
+	for (int n = 0; n < RC4_N; n++)
+		S[n] = (unsigned char)n;
+	unsigned char k = 0;
+	for (int n = 0; n < RC4_N; n++)
+	{
+		k = (unsigned char)(k + S[n] + key[n % keyLen]);
+		std::swap(S[n], S[k]);
+	}
+	rc4Ctx->i = 0;
+	rc4Ctx->j = 0;
 }
 
 void RC4_initCtx(RC4Ctx* rc4Ctx, const char* key)
 {
-	rc4Ctx->i = 0;
-	rc4Ctx->j = 0;
-	KSA((unsigned char*)key, (int)strlen(key), rc4Ctx->S);
-}
-
-void RC4_initCtx(RC4Ctx* rc4Ctx, unsigned char* key, int keyLen)
-{
-	rc4Ctx->i = 0;
-	rc4Ctx->j = 0;
-	KSA(key, keyLen, rc4Ctx->S);
+	RC4_initCtx(rc4Ctx, (unsigned char*)key, (int)strlen(key));
 }
 
 void RC4_transform(RC4Ctx* rc4Ctx, unsigned char* input, int len, unsigned char* output)
 {
-	int i = rc4Ctx->i;
-	int j = rc4Ctx->j;
-
-	for (size_t n = 0; n < len; n++)
+	unsigned char* S = rc4Ctx->S;
+	unsigned char a = (unsigned char)rc4Ctx->i;
+	unsigned char b = (unsigned char)rc4Ctx->j;
+	for (int n = 0; n < len; n++)
 	{
-		i = (i + 1) % RC4_N;
-		j = (j + rc4Ctx->S[i]) % RC4_N;
-		std::swap(rc4Ctx->S[i], rc4Ctx->S[j]);
-		int rnd = rc4Ctx->S[(rc4Ctx->S[i] + rc4Ctx->S[j]) % RC4_N];
-		output[n] = rnd ^ input[n];
+		a++;
+		b = (unsigned char)(b + S[a]);
+		std::swap(S[a], S[b]);
+		output[n] = input[n] ^ S[(unsigned char)(S[a] + S[b])];
 	}
-	rc4Ctx->i = i;
-	rc4Ctx->j = j;
+	rc4Ctx->i = a;
+	rc4Ctx->j = b;
 }
+
+// --- shared helpers ---
 
 uint32 prudpGetMSTimestamp()
 {
 	return GetTickCount();
 }
 
-std::mt19937_64 prudpRG(GetTickCount());
-// workaround for static asserts when using uniform_int_distribution (see https://github.com/cemu-project/Cemu/issues/48)
-boost::random::uniform_int_distribution<int> prudpRandomDistribution8(0, 0xFF);
-boost::random::uniform_int_distribution<int> prudpRandomDistributionPortGen(0, 10000);
-
-uint8 prudp_generateRandomU8()
+namespace
 {
-	return prudpRandomDistribution8(prudpRG);
-}
+	constexpr uint32 kAckTimeoutMs = 2300;
+	constexpr sint32 kMaxResends = 7;
+	constexpr uint32 kHandshakeTimeoutMs = 1200;
+	constexpr uint8 kMaxHandshakeSends = 5;
+	constexpr uint32 kPingIntervalMs = 20000;
+	constexpr uint32 kPingRetryMs = 1500;
+	constexpr uint8 kMaxUnansweredPings = 10;
+	constexpr sint32 kHeaderSize = 0xB;
+	constexpr uint16 kLocalPortBase = 40000;
+	constexpr int kLocalPortRange = 10000;
 
-uint32 prudp_generateRandomU32()
-{
-	uint32 v = prudp_generateRandomU8();
-	v <<= 8;
-	v |= prudp_generateRandomU8();
-	v <<= 8;
-	v |= prudp_generateRandomU8();
-	v <<= 8;
-	v |= prudp_generateRandomU8();
-	return v;
-}
+	std::mt19937_64 s_random(prudpGetMSTimestamp());
+	boost::random::uniform_int_distribution<int> s_byteDist(0, 0xFF);
+	boost::random::uniform_int_distribution<int> s_portDist(0, kLocalPortRange);
+	std::bitset<kLocalPortRange + 1> s_portsInUse;
 
-std::bitset<10000> _portUsageMask;
-
-static uint16 AllocateRandomSrcPRUDPPort()
-{
-	while (true)
+	uint8 RandomU8()
 	{
-		sint32 p = prudpRandomDistributionPortGen(prudpRG);
-		if (_portUsageMask.test(p))
-			continue;
-		_portUsageMask.set(p);
-		return 40000 + p;
+		return (uint8)s_byteDist(s_random);
+	}
+
+	uint32 RandomU32()
+	{
+		uint32 v = 0;
+		for (int n = 0; n < 4; n++)
+			v = (v << 8) | RandomU8();
+		return v;
+	}
+
+	uint16 ReservePort()
+	{
+		while (true)
+		{
+			const int slot = s_portDist(s_random);
+			if (s_portsInUse.test(slot))
+				continue;
+			s_portsInUse.set(slot);
+			return (uint16)(kLocalPortBase + slot);
+		}
+	}
+
+	void ReleasePort(uint16 port)
+	{
+		cemu_assert_debug(port >= kLocalPortBase && s_portsInUse.test(port - kLocalPortBase));
+		s_portsInUse.reset(port - kLocalPortBase);
+	}
+
+	template<typename T>
+	T LoadLE(const uint8* p)
+	{
+		T v;
+		memcpy(&v, p, sizeof(T));
+		return v;
+	}
+
+	template<typename T>
+	void StoreLE(uint8* p, T v)
+	{
+		memcpy(p, &v, sizeof(T));
+	}
+
+	// the base plus every byte, except that whole 32 bit words are first
+	// summed as words and the four bytes of that sum are added
+	uint8 Checksum(uint8 base, const uint8* data, sint32 length)
+	{
+		const sint32 wordBytes = length & ~3;
+		uint32 wordSum = 0;
+		for (sint32 n = 0; n < wordBytes; n += 4)
+			wordSum += LoadLE<uint32>(data + n);
+		uint8 sum = base;
+		for (sint32 n = wordBytes; n < length; n++)
+			sum += data[n];
+		for (int shift = 0; shift < 32; shift += 8)
+			sum += (uint8)(wordSum >> shift);
+		return sum;
+	}
+
+	constexpr uint8 VPort(uint8 streamType, uint8 port)
+	{
+		return (uint8)((streamType << 4) | port);
 	}
 }
 
-static void ReleasePRUDPSrcPort(uint16 port)
-{
-	cemu_assert_debug(port >= 40000);
-	uint32 bitIndex = port - 40000;
-	cemu_assert_debug(_portUsageMask.test(bitIndex));
-	_portUsageMask.reset(bitIndex);
-}
+// --- outgoing packets ---
 
-static uint8 prudp_calculateChecksum(uint8 checksumBase, uint8* data, sint32 length)
-{
-	uint32 checksum32 = 0;
-	for (sint32 i = 0; i < length / 4; i++)
-	{
-		checksum32 += *(uint32*)(data + i * 4);
-	}
-	uint8 checksum = checksumBase;
-	for (sint32 i = length & (~3); i < length; i++)
-	{
-		checksum += data[i];
-	}
-	checksum += (uint8)((checksum32 >> 0) & 0xFF);
-	checksum += (uint8)((checksum32 >> 8) & 0xFF);
-	checksum += (uint8)((checksum32 >> 16) & 0xFF);
-	checksum += (uint8)((checksum32 >> 24) & 0xFF);
-	return checksum;
-}
-
-// calculate the actual size of the packet from the unprocessed raw data
-// returns 0 on error
 sint32 prudpPacket::calculateSizeFromPacketData(uint8* data, sint32 length)
 {
-	// check if packet is long enough to hold basic header
-	if (length < 0xB)
+	if (length < kHeaderSize)
 		return 0;
-	// get flags fields
-	uint16 typeAndFlags = *(uint16*)(data + 0x02);
-	uint16 type = (typeAndFlags & 0xF);
-	uint16 flags = (typeAndFlags >> 4);
-	if ((flags & FLAG_HAS_SIZE) == 0)
-		return length; // without a size field, we cant calculate the length
-	sint32 calculatedSize;
-	if (type == TYPE_SYN)
+	const uint16 typeAndFlags = LoadLE<uint16>(data + 2);
+	if (((typeAndFlags >> 4) & FLAG_HAS_SIZE) == 0)
+		return length; // no size field, the packet fills the datagram
+	// offset of the size field
+	sint32 sizeOffset;
+	switch (typeAndFlags & 0xF)
 	{
-		if (length < (0xB + 0x4 + 2))
-			return 0;
-		uint16 payloadSize = *(uint16*)(data + 0xB + 0x4);
-		calculatedSize = 0xB + 0x4 + 2 + (sint32)payloadSize + 1; // base header + connection signature (SYN param) + payloadSize field + checksum after payload
-		if (calculatedSize > length)
-			return 0;
-		return calculatedSize;
+	case TYPE_SYN:
+	case TYPE_CON:
+		sizeOffset = kHeaderSize + 4;
+		break;
+	case TYPE_DATA:
+		sizeOffset = kHeaderSize + 1;
+		break;
+	case TYPE_PING:
+		sizeOffset = kHeaderSize;
+		break;
+	default:
+		return length; // size field position unknown for this type
 	}
-	else if (type == TYPE_CON)
-	{
-		if (length < (0xB + 0x4 + 2))
-			return 0;
-		uint16 payloadSize = *(uint16*)(data + 0xB + 0x4);
-		calculatedSize = 0xB + 0x4 + 2 + (sint32)payloadSize + 1; // base header + connection signature (CON param) + payloadSize field + checksum after payload
-		// note: For secure connections the extra data is part of the payload
-		if (calculatedSize > length)
-			return 0;
-		return calculatedSize;
-	}
-	else if (type == TYPE_DATA)
-	{
-		if (length < (0xB + 1 + 2))
-			return 0;
-		uint16 payloadSize = *(uint16*)(data + 0xB + 1);
-		calculatedSize = 0xB + 1 + 2 + (sint32)payloadSize + 1; // base header + fragmentIndex (DATA param) + payloadSize field + checksum after payload
-		if (calculatedSize > length)
-			return 0;
-		return calculatedSize;
-	}
-	else if (type == TYPE_PING)
-	{
-		if (length < (0xB + 2))
-			return 0;
-		uint16 payloadSize = *(uint16*)(data + 0xB);
-		calculatedSize = 0xB + 2 + (sint32)payloadSize + 1; // base header + payloadSize field + checksum after payload
-		if (calculatedSize > length)
-			return 0;
-		return calculatedSize;
-	}
-	else
-		assert_dbg(); // unknown packet type (todo - add disconnect and ping packet, then make this function return 0 for all unknown types)
-	return length;
+	if (length < sizeOffset + 2)
+		return 0;
+	const sint32 total = sizeOffset + 2 + LoadLE<uint16>(data + sizeOffset) + 1;
+	return total <= length ? total : 0;
 }
 
 prudpPacket::prudpPacket(prudpStreamSettings* streamSettings, uint8 src, uint8 dst, uint8 type, uint16 flags, uint8 sessionId, uint16 sequenceId, uint32 packetSignature)
+	: m_settings(streamSettings), m_src(src), m_dst(dst), m_type(type), m_flags(flags), m_sessionId(sessionId), m_sequenceId(sequenceId), m_signature(packetSignature)
 {
-	this->src = src;
-	this->dst = dst;
-	this->type = type;
-	this->flags = flags;
-	this->sessionId = sessionId;
-	this->m_sequenceId = sequenceId;
-	this->specifiedPacketSignature = packetSignature;
-	this->streamSettings = streamSettings;
-	this->fragmentIndex = 0;
-	this->isEncrypted = false;
 }
 
 bool prudpPacket::requiresAck()
 {
-	return (flags & FLAG_NEED_ACK) != 0;
-}
-
-sint32 prudpPacket::buildData(uint8* output, sint32 maxLength)
-{
-	// PRUDP V0
-	// encrypt packet data
-	if (this->type == prudpPacket::TYPE_DATA)
-	{
-		// dont save new rc4 state if the packet is not reliable or requires no ack?
-		if (packetData.size() > 0)
-		{
-			if (isEncrypted == false) // only encrypt once
-			{
-				RC4_transform(&streamSettings->rc4Client, &packetData.front(), (int)packetData.size(), &packetData.front());
-				isEncrypted = true;
-			}
-		}
-	}
-	// build packet
-	uint8* packetBuffer = output;
-	sint32 writeIndex = 0;
-	// write constant header
-	cemu_assert(maxLength >= 0xB);
-	*(uint8*)(packetBuffer + 0x00) = src;
-	*(uint8*)(packetBuffer + 0x01) = dst;
-	uint16 typeAndFlags = (this->flags << 4) | (this->type);
-	*(uint16*)(packetBuffer + 0x02) = typeAndFlags;
-	*(uint8*)(packetBuffer + 0x04) = sessionId;
-	*(uint32*)(packetBuffer + 0x05) = packetSignature();
-	*(uint16*)(packetBuffer + 0x09) = m_sequenceId;
-	writeIndex = 0xB;
-	// variable fields
-	if (this->type == TYPE_SYN)
-	{
-		cemu_assert(maxLength >= (0xB + 4));
-		*(uint32*)(packetBuffer + writeIndex) = 0; // connection signature (always 0 for SYN packet)
-		writeIndex += 4;
-	}
-	else if (this->type == TYPE_CON)
-	{
-		// connection signature (+ kerberos data if secure connection)
-		cemu_assert(maxLength >= (0xB + packetData.size()));
-		memcpy(packetBuffer + writeIndex, &packetData.front(), packetData.size());
-		writeIndex += (int)packetData.size();
-	}
-	else if (this->type == TYPE_DATA)
-	{
-		cemu_assert(maxLength >= (0xB + 1 + packetData.size()));
-		*(uint8*)(packetBuffer + writeIndex) = fragmentIndex; // fragment index
-		writeIndex += 1;
-		if (packetData.empty() == false)
-		{
-			memcpy(packetBuffer + writeIndex, &packetData.front(), packetData.size());
-			writeIndex += (int)packetData.size();
-		}
-	}
-	else if (this->type == TYPE_PING)
-	{
-		// no data
-	}
-	else
-	{
-		cemu_assert_suspicious();
-	}
-	// checksum
-	cemu_assert(maxLength >= (writeIndex + 1));
-	*(uint8*)(packetBuffer + writeIndex) = calculateChecksum(packetBuffer, writeIndex);
-	writeIndex++;
-
-	return writeIndex;
-}
-
-uint32 prudpPacket::packetSignature()
-{
-	if (type == TYPE_SYN)
-		return 0;
-	else if (type == TYPE_CON || type == TYPE_PING)
-		return specifiedPacketSignature;
-	else if (type == TYPE_DATA)
-	{
-		if (packetData.empty())
-			return 0x12345678;
-
-		HMACMD5Ctx ctx;
-		hmacMD5_init_limK_to_64(streamSettings->accessKeyDigest, 16, &ctx);
-		hmacMD5_update(&packetData.front(), (int)packetData.size(), &ctx);
-
-		uint8 digest[16];
-		hmacMD5_final(digest, &ctx);
-		uint32 pSig = *(uint32*)digest;
-		return pSig;
-	}
-
-	assert_dbg();
-	return 0;
+	return (m_flags & FLAG_NEED_ACK) != 0;
 }
 
 void prudpPacket::setData(uint8* data, sint32 length)
 {
-	packetData.assign(data, data + length);
+	m_payload.assign(data, data + length);
 }
 
 void prudpPacket::setFragmentIndex(uint8 fragmentIndex)
 {
-	this->fragmentIndex = fragmentIndex;
+	m_fragmentIndex = fragmentIndex;
 }
 
-uint8 prudpPacket::calculateChecksum(uint8* data, sint32 length)
+uint32 prudpPacket::Signature() const
 {
-	return prudp_calculateChecksum(streamSettings->checksumBase, data, length);
+	switch (m_type)
+	{
+	case TYPE_CON:
+	case TYPE_PING:
+		return m_signature;
+	case TYPE_DATA:
+	{
+		if (m_payload.empty())
+			return 0x12345678;
+		// first four bytes of hmac-md5(md5(access key), encrypted payload)
+		uint8 mac[16];
+		hmacMD5(m_settings->accessKeyDigest, 16, m_payload.data(), (int)m_payload.size(), mac);
+		return LoadLE<uint32>(mac);
+	}
+	default:
+		return 0;
+	}
 }
 
-prudpIncomingPacket::prudpIncomingPacket()
+sint32 prudpPacket::buildData(uint8* output, sint32 maxLength)
 {
-	src = 0;
-	dst = 0;
-	flags = 0;
-	type = 0;
-	sessionId = 0;
-	packetSignature = 0;
-	sequenceId = 0;
-	fragmentIndex = 0;
-	hasData = false;
-	isInvalid = false;
-	streamSettings = nullptr;
-}
-
-prudpIncomingPacket::prudpIncomingPacket(prudpStreamSettings* streamSettings, uint8* data, sint32 length)
-	: prudpIncomingPacket()
-{
-	if (length < 0xB + 1)
+	sint32 bodySize = 0;
+	if (m_type == TYPE_SYN)
+		bodySize = 4;
+	else if (m_type == TYPE_CON)
+		bodySize = (sint32)m_payload.size();
+	else if (m_type == TYPE_DATA)
+		bodySize = 1 + (sint32)m_payload.size();
+	const sint32 total = kHeaderSize + bodySize + 1;
+	if (total > maxLength)
+		return total;
+	// data payloads are encrypted once, resends reuse the result
+	if (m_type == TYPE_DATA && !m_payload.empty() && !m_payloadEncrypted)
 	{
-		isInvalid = true;
-		return;
+		RC4_transform(&m_settings->rc4Client, m_payload.data(), (int)m_payload.size(), m_payload.data());
+		m_payloadEncrypted = true;
 	}
-	this->streamSettings = streamSettings;
-	// verify checksum first
-	uint8 actualChecksum = calculateChecksum(data, length - 1);
-	uint8 packetChecksum = *(uint8*)(data + length - 1);
-	if (actualChecksum != packetChecksum)
+	output[0] = m_src;
+	output[1] = m_dst;
+	StoreLE<uint16>(output + 2, (uint16)((m_flags << 4) | m_type));
+	output[4] = m_sessionId;
+	StoreLE<uint32>(output + 5, Signature());
+	StoreLE<uint16>(output + 9, m_sequenceId);
+	uint8* body = output + kHeaderSize;
+	if (m_type == TYPE_SYN)
 	{
-		isInvalid = true;
-		return;
+		StoreLE<uint32>(body, 0);
 	}
-	length--; // remove checksum from length
-	// verify constant header
-	this->src = *(uint8*)(data + 0x00);
-	this->dst = *(uint8*)(data + 0x01);
-	uint16 typeAndFlags = *(uint16*)(data + 0x02);
-	this->flags = (typeAndFlags >> 4) & 0xFFF;
-	this->type = (typeAndFlags & 0xF);
-	this->sessionId = *(uint8*)(data + 0x4);
-	this->packetSignature = *(uint32*)(data + 0x5);
-	this->sequenceId = *(uint16*)(data + 0x9);
-	// read dynamic fields
-	sint32 readIndex = 0xB;
-	if (this->type == prudpPacket::TYPE_SYN)
+	else if (m_type == TYPE_CON)
 	{
-		// SYN packet
-		if ((length - readIndex) < 4)
-		{
-			isInvalid = true;
-			return;
-		}
-		packetData.resize(4);
-		*(uint32*)(&packetData.front()) = *(uint32*)(data + readIndex);
-		hasData = true;
-		readIndex += 4;
-		// ignore FLAG_HAS_SIZE (would come here, usually with a value of 0)
-		return;
+		if (!m_payload.empty())
+			memcpy(body, m_payload.data(), m_payload.size());
 	}
-	else if (this->type == prudpPacket::TYPE_CON)
+	else if (m_type == TYPE_DATA)
 	{
-		// CON packet
-		if (readIndex < 4)
-		{
-			isInvalid = true;
-			return;
-		}
-		// this packet has another 4 byte signature but it's always zero? (value is ignored for now)
-		// ignore FLAG_HAS_SIZE
+		body[0] = m_fragmentIndex;
+		if (!m_payload.empty())
+			memcpy(body + 1, m_payload.data(), m_payload.size());
 	}
-	else if (this->type == prudpPacket::TYPE_PING)
-	{
-		// PING packet
-		// ignore payload
-	}
-	else if (this->type == prudpPacket::TYPE_DATA)
-	{
-		// can we assume that reliable data packets always need to have a unique sequence id? (Even if it's a multi-fragment frame)
-		// unreliable packets must have a sequence id too or how else would we know when to decrypt it?
-
-		bool hasPayloadSize = (this->flags & prudpPacket::FLAG_HAS_SIZE) != 0;
-		// verify length
-		if ((length - readIndex) < 1 + (hasPayloadSize ? 2 : 0))
-		{
-			// too short
-			isInvalid = true;
-			return;
-		}
-		// read fragment index
-		this->fragmentIndex = *(uint8*)(data + readIndex);
-		readIndex += sizeof(uint8);
-		// read payload size (optional)
-		if (hasPayloadSize)
-		{
-			uint16 payloadSize = *(uint16*)(data + readIndex);
-			readIndex += sizeof(uint16);
-			// verify payload size
-			if ((length - readIndex) != payloadSize)
-			{
-				assert_dbg(); // mismatch, ignore packet or use specified payload size?
-			}
-		}
-		// read payload
-		if (readIndex < length)
-		{
-			sint32 dataSize = length - readIndex;
-			packetData.resize(dataSize);
-			memcpy(&packetData.front(), data + readIndex, dataSize);
-		}
-		return;
-	}
-	else if (this->type == prudpPacket::TYPE_DISCONNECT)
-	{
-		// DISCONNECT packet
-		// ignore payload
-	}
-	else
+	else if (m_type != TYPE_PING)
 	{
 		cemu_assert_suspicious();
 	}
+	output[total - 1] = Checksum(m_settings->checksumBase, output, total - 1);
+	return total;
+}
+
+// --- incoming packets ---
+
+prudpIncomingPacket::prudpIncomingPacket(prudpStreamSettings* streamSettings, uint8* data, sint32 length)
+{
+	if (length < kHeaderSize + 1)
+	{
+		m_invalid = true;
+		return;
+	}
+	m_settings = streamSettings;
+	const sint32 end = length - 1; // without the checksum
+	if (calculateChecksum(data, end) != data[end])
+	{
+		m_invalid = true;
+		return;
+	}
+	src = data[0];
+	dst = data[1];
+	const uint16 typeAndFlags = LoadLE<uint16>(data + 2);
+	type = typeAndFlags & 0xF;
+	flags = (typeAndFlags >> 4) & 0xFFF;
+	sessionId = data[4];
+	packetSignature = LoadLE<uint32>(data + 5);
+	sequenceId = LoadLE<uint16>(data + 9);
+	sint32 pos = kHeaderSize;
+	if (type == prudpPacket::TYPE_SYN)
+	{
+		// the server's connection signature; a size field is ignored
+		if (end - pos < 4)
+		{
+			m_invalid = true;
+			return;
+		}
+		packetData.assign(data + pos, data + pos + 4);
+		hasData = true;
+	}
+	else if (type == prudpPacket::TYPE_DATA)
+	{
+		const bool sized = (flags & prudpPacket::FLAG_HAS_SIZE) != 0;
+		if (end - pos < (sized ? 3 : 1))
+		{
+			m_invalid = true;
+			return;
+		}
+		fragmentIndex = data[pos];
+		pos += sized ? 3 : 1; // the size field always matches since it was used to split the datagram
+		if (pos < end)
+			packetData.assign(data + pos, data + end);
+	}
+	else if (type != prudpPacket::TYPE_CON && type != prudpPacket::TYPE_PING && type != prudpPacket::TYPE_DISCONNECT)
+	{
+		cemu_assert_suspicious();
+	}
+	// CON, PING and DISCONNECT carry nothing we need
 }
 
 bool prudpIncomingPacket::hasError()
 {
-	return isInvalid;
+	return m_invalid;
 }
 
 uint8 prudpIncomingPacket::calculateChecksum(uint8* data, sint32 length)
 {
-	return prudp_calculateChecksum(streamSettings->checksumBase, data, length);
+	return Checksum(m_settings->checksumBase, data, length);
 }
 
 void prudpIncomingPacket::decrypt()
 {
-	if (packetData.empty())
-		return;
-	RC4_transform(&streamSettings->rc4Server, &packetData.front(), (int)packetData.size(), &packetData.front());
+	if (!packetData.empty())
+		RC4_transform(&m_settings->rc4Server, packetData.data(), (int)packetData.size(), packetData.data());
 }
 
-#define PRUDP_VPORT(__streamType, __port) (((__streamType) << 4) | (__port))
-
-prudpClient::prudpClient()
-{
-	m_currentConnectionState = ConnectionState::Connecting;
-	m_serverConnectionSignature = 0;
-	m_clientConnectionSignature = 0;
-	m_incomingSequenceId = 0;
-
-	m_clientSessionId = 0;
-	m_serverSessionId = 0;
-}
+// --- connection ---
 
 prudpClient::prudpClient(uint32 dstIp, uint16 dstPort, const char* key)
-	: prudpClient()
+	: m_serverIp(dstIp), m_serverPort(dstPort)
 {
-	m_dstIp = dstIp;
-	m_dstPort = dstPort;
-	// get unused random source port
-	for (sint32 tries = 0; tries < 5; tries++)
+	if (!OpenSocket())
 	{
-		m_srcPort = AllocateRandomSrcPRUDPPort();
-		// create and bind udp socket
-		m_socketUdp = socket(AF_INET, SOCK_DGRAM, 0);
-		struct sockaddr_in udpServer;
-		udpServer.sin_family = AF_INET;
-		udpServer.sin_addr.s_addr = INADDR_ANY;
-		udpServer.sin_port = htons(m_srcPort);
-		if (bind(m_socketUdp, (struct sockaddr*)&udpServer, sizeof(udpServer)) == SOCKET_ERROR)
-		{
-			ReleasePRUDPSrcPort(m_srcPort);
-			m_srcPort = 0;
-			if (tries == 4)
-			{
-				cemuLog_log(LogType::Force, "PRUDP: Failed to bind UDP socket");
-				m_currentConnectionState = ConnectionState::Disconnected;
-				return;
-			}
-			closesocket(m_socketUdp);
-			continue;
-		}
-		else
-			break;
+		cemuLog_log(LogType::Force, "PRUDP: Failed to bind UDP socket");
+		m_state = ConnectionState::Disconnected;
+		return;
 	}
-	// set socket to non-blocking mode
-#if BOOST_OS_WINDOWS
-	u_long nonBlockingMode = 1; // 1 to enable non-blocking socket
-	ioctlsocket(m_socketUdp, FIONBIO, &nonBlockingMode);
-#else
-	int flags = fcntl(m_socketUdp, F_GETFL);
-	fcntl(m_socketUdp, F_SETFL, flags | O_NONBLOCK);
-#endif
-	// generate frequently used parameters
-	m_srcVPort = PRUDP_VPORT(prudpPacket::STREAM_TYPE_SECURE, 0xF);
-	m_dstVPort = PRUDP_VPORT(prudpPacket::STREAM_TYPE_SECURE, 0x1);
-	// set stream settings
-	uint8 checksumBase = 0;
-	for (sint32 i = 0; key[i] != '\0'; i++)
-	{
-		checksumBase += key[i];
-	}
-	m_streamSettings.checksumBase = checksumBase;
-	MD5_CTX md5Ctx;
-	MD5_Init(&md5Ctx);
-	MD5_Update(&md5Ctx, key, (int)strlen(key));
-	MD5_Final(m_streamSettings.accessKeyDigest, &md5Ctx);
-	// init stream ciphers
-	RC4_initCtx(&m_streamSettings.rc4Server, "CD&ML");
-	RC4_initCtx(&m_streamSettings.rc4Client, "CD&ML");
-	// send syn packet
-	SendCurrentHandshakePacket();
-	// set incoming sequence id to 1
-	m_incomingSequenceId = 1;
+	m_localVPort = VPort(prudpPacket::STREAM_TYPE_SECURE, 0xF);
+	m_serverVPort = VPort(prudpPacket::STREAM_TYPE_SECURE, 0x1);
+	uint8 keySum = 0;
+	for (const char* c = key; *c; c++)
+		keySum += (uint8)*c;
+	m_settings.checksumBase = keySum;
+	MD5_CTX md5;
+	MD5_Init(&md5);
+	MD5_Update(&md5, key, (int)strlen(key));
+	MD5_Final(m_settings.accessKeyDigest, &md5);
+	RC4_initCtx(&m_settings.rc4Client, "CD&ML");
+	RC4_initCtx(&m_settings.rc4Server, "CD&ML");
+	SendHandshake();
+	m_nextRecvSeq = 1;
 }
 
 prudpClient::prudpClient(uint32 dstIp, uint16 dstPort, const char* key, prudpAuthServerInfo* authInfo)
 	: prudpClient(dstIp, dstPort, key)
 {
-	RC4_initCtx(&m_streamSettings.rc4Server, authInfo->secureKey, 16);
-	RC4_initCtx(&m_streamSettings.rc4Client, authInfo->secureKey, 16);
-	m_isSecureConnection = true;
-	memcpy(&m_authInfo, authInfo, sizeof(prudpAuthServerInfo));
+	// the secure server uses the session key from the ticket for both directions
+	RC4_initCtx(&m_settings.rc4Client, authInfo->secureKey, 16);
+	RC4_initCtx(&m_settings.rc4Server, authInfo->secureKey, 16);
+	m_secure = true;
+	m_auth = *authInfo;
 }
 
 prudpClient::~prudpClient()
 {
-	if (m_srcPort != 0)
-	{
-		ReleasePRUDPSrcPort(m_srcPort);
-		closesocket(m_socketUdp);
-	}
+	if (m_localPort == 0)
+		return;
+	ReleasePort(m_localPort);
+	closesocket(m_socket);
 }
 
-void prudpClient::AcknowledgePacket(uint16 sequenceId)
+bool prudpClient::OpenSocket()
 {
-	auto it = std::begin(m_dataPacketsWithAckReq);
-	while (it != std::end(m_dataPacketsWithAckReq))
+	for (int attempt = 0; attempt < 5; attempt++)
 	{
-		if (it->packet->GetSequenceId() == sequenceId)
+		const uint16 port = ReservePort();
+		SOCKET s = socket(AF_INET, SOCK_DGRAM, 0);
+		sockaddr_in local{};
+		local.sin_family = AF_INET;
+		local.sin_addr.s_addr = INADDR_ANY;
+		local.sin_port = htons(port);
+		if (bind(s, (sockaddr*)&local, sizeof(local)) == SOCKET_ERROR)
 		{
-			delete it->packet;
-			m_dataPacketsWithAckReq.erase(it);
-			return;
+			ReleasePort(port);
+			closesocket(s);
+			continue;
 		}
-		it++;
-	}
-}
-
-void prudpClient::SortIncomingDataPacket(std::unique_ptr<prudpIncomingPacket> incomingPacket)
-{
-	uint16 sequenceIdIncomingPacket = incomingPacket->sequenceId;
-	// find insert index
-	sint32 insertIndex = 0;
-	while (insertIndex < m_incomingPacketQueue.size())
-	{
-		uint16 seqDif = sequenceIdIncomingPacket - m_incomingPacketQueue[insertIndex]->sequenceId;
-		if (seqDif & 0x8000)
-			break; // negative seqDif -> insert before current element
-#ifdef CEMU_DEBUG_ASSERT
-		if (seqDif == 0)
-			assert_dbg(); // same sequence id, sort by fragment index?
+#if BOOST_OS_WINDOWS
+		u_long nonBlocking = 1;
+		ioctlsocket(s, FIONBIO, &nonBlocking);
+#else
+		fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK);
 #endif
-		insertIndex++;
-	}
-	m_incomingPacketQueue.insert(m_incomingPacketQueue.begin() + insertIndex, std::move(incomingPacket));
-	// debug check if packets are really ordered by sequence id
-#ifdef CEMU_DEBUG_ASSERT
-	for (sint32 i = 1; i < m_incomingPacketQueue.size(); i++)
-	{
-		uint16 seqDif = m_incomingPacketQueue[i]->sequenceId - m_incomingPacketQueue[i - 1]->sequenceId;
-		if (seqDif & 0x8000)
-			seqDif = -seqDif;
-		if (seqDif >= 0x8000)
-			assert_dbg();
-	}
-#endif
-}
-
-sint32 prudpClient::KerberosEncryptData(uint8* input, sint32 length, uint8* output)
-{
-	RC4Ctx rc4Kerberos;
-	RC4_initCtx(&rc4Kerberos, m_authInfo.secureKey, 16);
-	memcpy(output, input, length);
-	RC4_transform(&rc4Kerberos, output, length, output);
-	// calculate and append hmac
-	hmacMD5(this->m_authInfo.secureKey, 16, output, length, output + length);
-	return length + 16;
-}
-
-// (re)sends either CON or SYN based on what stage of the login we are at
-// the sequenceId for both is hardcoded for both because we'll never send anything in between
-void prudpClient::SendCurrentHandshakePacket()
-{
-	if (!m_hasSynAck)
-	{
-		// send syn (with a fixed sequenceId of 0)
-		prudpPacket synPacket(&m_streamSettings, m_srcVPort, m_dstVPort, prudpPacket::TYPE_SYN, prudpPacket::FLAG_NEED_ACK, 0, 0, 0);
-		DirectSendPacket(&synPacket);
-	}
-	else
-	{
-		// send con (with a fixed sequenceId of 1)
-		prudpPacket conPacket(&m_streamSettings, m_srcVPort, m_dstVPort, prudpPacket::TYPE_CON, prudpPacket::FLAG_NEED_ACK | prudpPacket::FLAG_RELIABLE, this->m_clientSessionId, 1, m_serverConnectionSignature);
-		if (this->m_isSecureConnection)
-		{
-			uint8 tempBuffer[512];
-			nexPacketBuffer conData(tempBuffer, sizeof(tempBuffer), true);
-			conData.writeU32(m_clientConnectionSignature);
-			conData.writeBuffer(m_authInfo.secureTicket, m_authInfo.secureTicketLength);
-			// encrypted request data
-			uint8 requestData[4 * 3];
-			uint8 requestDataEncrypted[4 * 3 + 0x10];
-			*(uint32*)(requestData + 0x0) = m_authInfo.userPid;
-			*(uint32*)(requestData + 0x4) = m_authInfo.server.cid;
-			*(uint32*)(requestData + 0x8) = prudp_generateRandomU32(); // todo - check value
-			sint32 encryptedSize = KerberosEncryptData(requestData, sizeof(requestData), requestDataEncrypted);
-			conData.writeBuffer(requestDataEncrypted, encryptedSize);
-			conPacket.setData(conData.getDataPtr(), conData.getWriteIndex());
-		}
-		else
-		{
-			conPacket.setData((uint8*)&m_clientConnectionSignature, sizeof(uint32));
-		}
-		DirectSendPacket(&conPacket);
-	}
-	m_lastHandshakeTimestamp = prudpGetMSTimestamp();
-	m_handshakeRetryCount++;
-}
-
-void prudpClient::HandleIncomingPacket(std::unique_ptr<prudpIncomingPacket> incomingPacket)
-{
-	if (incomingPacket->type == prudpPacket::TYPE_PING)
-	{
-		if (incomingPacket->flags & prudpPacket::FLAG_ACK)
-		{
-			// ack for our ping packet
-			if (incomingPacket->flags & prudpPacket::FLAG_NEED_ACK)
-				cemuLog_log(LogType::PRUDP, "[PRUDP] Received unexpected ping packet with both ACK and NEED_ACK set");
-			if (m_unacknowledgedPingCount > 0)
-			{
-				if (incomingPacket->sequenceId == m_outgoingSequenceId_ping)
-				{
-					cemuLog_log(LogType::PRUDP, "[PRUDP] Received ping packet ACK (unacknowledged count: {})", m_unacknowledgedPingCount);
-					m_unacknowledgedPingCount = 0;
-				}
-				else
-				{
-					cemuLog_log(LogType::PRUDP, "[PRUDP] Received ping packet ACK with wrong sequenceId (expected: {}, received: {})", m_outgoingSequenceId_ping, incomingPacket->sequenceId);
-				}
-			}
-			else
-			{
-				cemuLog_log(LogType::PRUDP, "[PRUDP] Received ping packet ACK which we dont need");
-			}
-		}
-		else if (incomingPacket->flags & prudpPacket::FLAG_NEED_ACK)
-		{
-			// other side is asking for ping ack
-			cemuLog_log(LogType::PRUDP, "[PRUDP] Received ping packet with NEED_ACK set. Sending ACK back");
-			prudpPacket ackPacket(&m_streamSettings, m_srcVPort, m_dstVPort, prudpPacket::TYPE_PING, prudpPacket::FLAG_ACK, this->m_clientSessionId, incomingPacket->sequenceId, 0);
-			if(!incomingPacket->packetData.empty())
-				ackPacket.setData(incomingPacket->packetData.data(), incomingPacket->packetData.size());
-			DirectSendPacket(&ackPacket);
-		}
-		return;
-	}
-	else if (incomingPacket->type == prudpPacket::TYPE_SYN)
-	{
-		// syn packet from server is expected to have ACK set
-		if (!(incomingPacket->flags & prudpPacket::FLAG_ACK))
-		{
-			cemuLog_log(LogType::Force, "[PRUDP] Received SYN packet without ACK flag set"); // always log this
-			return;
-		}
-		if (m_hasSynAck || !incomingPacket->hasData || incomingPacket->packetData.size() != 4)
-		{
-			// syn already acked or not a valid syn packet
-			cemuLog_log(LogType::PRUDP, "[PRUDP] Received unexpected SYN packet");
-			return;
-		}
-		m_hasSynAck = true;
-		this->m_serverConnectionSignature = *(uint32*)&incomingPacket->packetData.front();
-		// generate client session id and connection signature
-		this->m_clientSessionId = prudp_generateRandomU8();
-		this->m_clientConnectionSignature = prudp_generateRandomU32();
-		// send con packet
-		m_handshakeRetryCount = 0;
-		SendCurrentHandshakePacket();
-		return;
-	}
-	else if (incomingPacket->type == prudpPacket::TYPE_CON)
-	{
-		if (!m_hasSynAck || m_hasConAck)
-		{
-			cemuLog_log(LogType::PRUDP, "[PRUDP] Received unexpected CON packet");
-			return;
-		}
-		// make sure the packet has the ACK flag set
-		if (!(incomingPacket->flags & prudpPacket::FLAG_ACK))
-		{
-			cemuLog_log(LogType::Force, "[PRUDP] Received CON packet without ACK flag set");
-			return;
-		}
-		m_hasConAck = true;
-		m_handshakeRetryCount = 0;
-		cemu_assert_debug(m_currentConnectionState == ConnectionState::Connecting);
-		// connected!
-		m_lastPingTimestamp = prudpGetMSTimestamp();
-		cemu_assert_debug(m_serverSessionId == 0);
-		m_serverSessionId = incomingPacket->sessionId;
-		m_currentConnectionState = ConnectionState::Connected;
-		cemuLog_log(LogType::PRUDP, "[PRUDP] Connection established. ClientSession {:02x} ServerSession {:02x}", m_clientSessionId, m_serverSessionId);
-		return;
-	}
-	else if (incomingPacket->type == prudpPacket::TYPE_DATA)
-	{
-		// handle ACK
-		if (incomingPacket->flags & prudpPacket::FLAG_ACK)
-		{
-			AcknowledgePacket(incomingPacket->sequenceId);
-			if(!incomingPacket->packetData.empty())
-				cemuLog_log(LogType::PRUDP, "[PRUDP] Received ACK data packet with payload");
-			return;
-		}
-		// send ack back if requested
-		if (incomingPacket->flags & prudpPacket::FLAG_NEED_ACK)
-		{
-			prudpPacket ackPacket(&m_streamSettings, m_srcVPort, m_dstVPort, prudpPacket::TYPE_DATA, prudpPacket::FLAG_ACK, this->m_clientSessionId, incomingPacket->sequenceId, 0);
-			DirectSendPacket(&ackPacket);
-		}
-		// skip data packets without payload
-		if (incomingPacket->packetData.empty())
-			return;
-		// verify sequence id
-		uint16 seqDist = incomingPacket->sequenceId - m_incomingSequenceId;
-		if (seqDist >= 0xC000)
-		{
-			// outdated
-			return;
-		}
-		// check if packet is already queued
-		for (auto& it : m_incomingPacketQueue)
-		{
-			if (it->sequenceId == incomingPacket->sequenceId)
-			{
-				// already queued (should check other values too, like packet type?)
-				cemuLog_log(LogType::PRUDP, "Duplicate PRUDP packet received");
-				return;
-			}
-		}
-		// put into ordered receive queue
-		SortIncomingDataPacket(std::move(incomingPacket));
-	}
-	else if (incomingPacket->type == prudpPacket::TYPE_DISCONNECT)
-	{
-		m_currentConnectionState = ConnectionState::Disconnected;
-		return;
-	}
-	else
-	{
-		cemuLog_log(LogType::PRUDP, "[PRUDP] Received unknown packet type");
-	}
-}
-
-bool prudpClient::Update()
-{
-	if (m_currentConnectionState == ConnectionState::Disconnected)
-		return false;
-	uint32 currentTimestamp = prudpGetMSTimestamp();
-	// check for incoming packets
-	uint8 receiveBuffer[4096];
-	while (true)
-	{
-		sockaddr receiveFrom = {0};
-		socklen_t receiveFromLen = sizeof(receiveFrom);
-		sint32 r = recvfrom(m_socketUdp, (char*)receiveBuffer, sizeof(receiveBuffer), 0, &receiveFrom, &receiveFromLen);
-		if (r >= 0)
-		{
-			// todo: Verify sender (receiveFrom)
-			// calculate packet size
-			sint32 pIdx = 0;
-			while (pIdx < r)
-			{
-				sint32 packetLength = prudpPacket::calculateSizeFromPacketData(receiveBuffer + pIdx, r - pIdx);
-				if (packetLength <= 0 || (pIdx + packetLength) > r)
-				{
-					cemuLog_log(LogType::Force, "[PRUDP] Invalid packet length");
-					break;
-				}
-				auto incomingPacket = std::make_unique<prudpIncomingPacket>(&m_streamSettings, receiveBuffer + pIdx, packetLength);
-				pIdx += packetLength;
-				if (incomingPacket->hasError())
-				{
-					cemuLog_log(LogType::Force, "[PRUDP] Packet error");
-					break;
-				}
-				if (incomingPacket->type != prudpPacket::TYPE_CON && incomingPacket->sessionId != m_serverSessionId)
-				{
-					cemuLog_log(LogType::PRUDP, "[PRUDP] Invalid session id");
-					continue; // different session
-				}
-				HandleIncomingPacket(std::move(incomingPacket));
-			}
-		}
-		else
-			break;
-	}
-	// check for ack timeouts
-	for (auto& it : m_dataPacketsWithAckReq)
-	{
-		if ((currentTimestamp - it.lastRetryTimestamp) >= 2300)
-		{
-			if (it.retryCount >= 7)
-			{
-				// after too many retries consider the connection dead
-				m_currentConnectionState = ConnectionState::Disconnected;
-			}
-			// resend
-			DirectSendPacket(it.packet);
-			it.lastRetryTimestamp = currentTimestamp;
-			it.retryCount++;
-		}
-	}
-	if (m_currentConnectionState == ConnectionState::Connecting)
-	{
-		// check if we need to resend SYN or CON
-		uint32 timeSinceLastHandshake = currentTimestamp - m_lastHandshakeTimestamp;
-		if (timeSinceLastHandshake >= 1200)
-		{
-			if (m_handshakeRetryCount >= 5)
-			{
-				// too many retries, assume the other side doesn't listen
-				m_currentConnectionState = ConnectionState::Disconnected;
-				cemuLog_log(LogType::PRUDP, "PRUDP: Failed to connect");
-				return false;
-			}
-			SendCurrentHandshakePacket();
-		}
-	}
-	else if (m_currentConnectionState == ConnectionState::Connected)
-	{
-		// handle pings
-		if (m_unacknowledgedPingCount != 0) // counts how many times we sent a ping packet (for the current sequenceId) without receiving an ack
-		{
-			// we are waiting for the ack of the previous ping, but it hasn't arrived yet so send another ping packet
-			if ((currentTimestamp - m_lastPingTimestamp) >= 1500)
-			{
-				cemuLog_log(LogType::PRUDP, "[PRUDP] Resending ping packet (no ack received)");
-				if (m_unacknowledgedPingCount >= 10)
-				{
-					// too many unacknowledged pings, assume the connection is dead
-					m_currentConnectionState = ConnectionState::Disconnected;
-					cemuLog_log(LogType::PRUDP, "PRUDP: Connection did not receive a ping response in a while. Assuming disconnect");
-					return false;
-				}
-				// resend the ping packet
-				prudpPacket pingPacket(&m_streamSettings, m_srcVPort, m_dstVPort, prudpPacket::TYPE_PING, prudpPacket::FLAG_NEED_ACK, this->m_clientSessionId, this->m_outgoingSequenceId_ping, m_serverConnectionSignature);
-				DirectSendPacket(&pingPacket);
-				m_unacknowledgedPingCount++;
-				m_lastPingTimestamp = currentTimestamp;
-			}
-		}
-		else
-		{
-			if ((currentTimestamp - m_lastPingTimestamp) >= 20000)
-			{
-				cemuLog_log(LogType::PRUDP, "[PRUDP] Sending new ping packet with sequenceId {}", this->m_outgoingSequenceId_ping + 1);
-				// start a new ping packet with a new sequenceId. Note that ping packets have their own sequenceId and acknowledgement happens by manually comparing the incoming ping ACK against the last sent sequenceId
-				// only one unacknowledged ping packet can be in flight at a time. We will resend the same ping packet until we receive an ack
-				m_outgoingSequenceId_ping++; // increment before sending. The first ping has a sequenceId of 1
-				prudpPacket pingPacket(&m_streamSettings, m_srcVPort, m_dstVPort, prudpPacket::TYPE_PING, prudpPacket::FLAG_NEED_ACK, this->m_clientSessionId, this->m_outgoingSequenceId_ping, m_serverConnectionSignature);
-				DirectSendPacket(&pingPacket);
-				m_unacknowledgedPingCount++;
-				m_lastPingTimestamp = currentTimestamp;
-			}
-		}
+		m_socket = s;
+		m_localPort = port;
+		return true;
 	}
 	return false;
 }
 
-void prudpClient::DirectSendPacket(prudpPacket* packet)
+void prudpClient::Transmit(prudpPacket& packet)
 {
-	uint8 packetBuffer[prudpPacket::PACKET_RAW_SIZE_MAX];
-	sint32 len = packet->buildData(packetBuffer, prudpPacket::PACKET_RAW_SIZE_MAX);
-	if (len > prudpPacket::PACKET_RAW_SIZE_MAX)
+	uint8 raw[prudpPacket::PACKET_RAW_SIZE_MAX];
+	const sint32 size = packet.buildData(raw, sizeof(raw));
+	if (size > (sint32)sizeof(raw))
 	{
 		cemuLog_log(LogType::Force, "PRUDP: Packet exceeds maximum size");
 		return;
 	}
-	sockaddr_in destAddr;
-	destAddr.sin_family = AF_INET;
-	destAddr.sin_port = htons(m_dstPort);
-	destAddr.sin_addr.s_addr = m_dstIp;
-	sendto(m_socketUdp, (const char*)packetBuffer, len, 0, (const sockaddr*)&destAddr, sizeof(destAddr));
+	sockaddr_in to{};
+	to.sin_family = AF_INET;
+	to.sin_port = htons(m_serverPort);
+	to.sin_addr.s_addr = m_serverIp;
+	sendto(m_socket, (const char*)raw, size, 0, (const sockaddr*)&to, sizeof(to));
 }
 
-void prudpClient::QueuePacket(prudpPacket* packet)
+std::vector<uint8> prudpClient::BuildConnectPayload()
 {
-	cemu_assert_debug(packet->GetType() == prudpPacket::TYPE_DATA); // only data packets should be queued
-	if (packet->requiresAck())
+	std::vector<uint8> payload(4);
+	StoreLE<uint32>(payload.data(), m_clientSignature);
+	if (!m_secure)
+		return payload;
+	// secure servers also want the ticket and a proof that we know the session key:
+	// rc4(key, pid, cid, nonce) followed by hmac-md5(key, encrypted part)
+	uint8 storage[512];
+	nexPacketBuffer pb(storage, sizeof(storage), true);
+	pb.writeU32(m_clientSignature);
+	pb.writeBuffer(m_auth.secureTicket, m_auth.secureTicketLength);
+	uint8 proof[12 + 16];
+	StoreLE<uint32>(proof + 0, m_auth.userPid);
+	StoreLE<uint32>(proof + 4, (uint32)m_auth.server.cid);
+	StoreLE<uint32>(proof + 8, RandomU32());
+	RC4Ctx rc4;
+	RC4_initCtx(&rc4, m_auth.secureKey, 16);
+	RC4_transform(&rc4, proof, 12, proof);
+	hmacMD5(m_auth.secureKey, 16, proof, 12, proof + 12);
+	pb.writeBuffer(proof, sizeof(proof));
+	payload.assign(storage, storage + pb.getWriteIndex());
+	return payload;
+}
+
+// sends SYN until it is acknowledged, then CON
+void prudpClient::SendHandshake()
+{
+	if (!m_gotSynAck)
 	{
-		// remember this packet until we receive the ack
-		m_dataPacketsWithAckReq.emplace_back(packet, prudpGetMSTimestamp());
-		DirectSendPacket(packet);
+		prudpPacket syn(&m_settings, m_localVPort, m_serverVPort, prudpPacket::TYPE_SYN, prudpPacket::FLAG_NEED_ACK, 0, 0, 0);
+		Transmit(syn);
 	}
 	else
 	{
-		DirectSendPacket(packet);
-		delete packet;
+		prudpPacket con(&m_settings, m_localVPort, m_serverVPort, prudpPacket::TYPE_CON, prudpPacket::FLAG_NEED_ACK | prudpPacket::FLAG_RELIABLE, m_clientSession, 1, m_serverSignature);
+		std::vector<uint8> payload = BuildConnectPayload();
+		con.setData(payload.data(), (sint32)payload.size());
+		Transmit(con);
 	}
+	m_lastHandshakeSent = prudpGetMSTimestamp();
+	m_handshakeSends++;
+}
+
+void prudpClient::OnPing(const prudpIncomingPacket& packet)
+{
+	if (packet.flags & prudpPacket::FLAG_ACK)
+	{
+		if (packet.flags & prudpPacket::FLAG_NEED_ACK)
+			cemuLog_log(LogType::PRUDP, "[PRUDP] Received unexpected ping packet with both ACK and NEED_ACK set");
+		if (m_pingsUnanswered == 0)
+			cemuLog_log(LogType::PRUDP, "[PRUDP] Received ping packet ACK which we dont need");
+		else if (packet.sequenceId != m_pingSeq)
+			cemuLog_log(LogType::PRUDP, "[PRUDP] Received ping packet ACK with wrong sequenceId (expected: {}, received: {})", m_pingSeq, packet.sequenceId);
+		else
+		{
+			cemuLog_log(LogType::PRUDP, "[PRUDP] Received ping packet ACK (unacknowledged count: {})", m_pingsUnanswered);
+			m_pingsUnanswered = 0;
+		}
+		return;
+	}
+	if (packet.flags & prudpPacket::FLAG_NEED_ACK)
+	{
+		cemuLog_log(LogType::PRUDP, "[PRUDP] Received ping packet with NEED_ACK set. Sending ACK back");
+		prudpPacket ack(&m_settings, m_localVPort, m_serverVPort, prudpPacket::TYPE_PING, prudpPacket::FLAG_ACK, m_clientSession, packet.sequenceId, 0);
+		Transmit(ack);
+	}
+}
+
+void prudpClient::OnSynAck(const prudpIncomingPacket& packet)
+{
+	if (!(packet.flags & prudpPacket::FLAG_ACK))
+	{
+		cemuLog_log(LogType::Force, "[PRUDP] Received SYN packet without ACK flag set");
+		return;
+	}
+	if (m_gotSynAck || !packet.hasData || packet.packetData.size() != 4)
+	{
+		cemuLog_log(LogType::PRUDP, "[PRUDP] Received unexpected SYN packet");
+		return;
+	}
+	m_gotSynAck = true;
+	m_serverSignature = LoadLE<uint32>(packet.packetData.data());
+	m_clientSession = RandomU8();
+	m_clientSignature = RandomU32();
+	m_handshakeSends = 0;
+	SendHandshake();
+}
+
+void prudpClient::OnConAck(const prudpIncomingPacket& packet)
+{
+	if (!m_gotSynAck || m_gotConAck)
+	{
+		cemuLog_log(LogType::PRUDP, "[PRUDP] Received unexpected CON packet");
+		return;
+	}
+	if (!(packet.flags & prudpPacket::FLAG_ACK))
+	{
+		cemuLog_log(LogType::Force, "[PRUDP] Received CON packet without ACK flag set");
+		return;
+	}
+	m_gotConAck = true;
+	m_handshakeSends = 0;
+	m_lastPingSent = prudpGetMSTimestamp(); // the ping interval starts now
+	m_serverSession = packet.sessionId;
+	m_state = ConnectionState::Connected;
+	cemuLog_log(LogType::PRUDP, "[PRUDP] Connection established. ClientSession {:02x} ServerSession {:02x}", m_clientSession, m_serverSession);
+}
+
+void prudpClient::OnData(std::unique_ptr<prudpIncomingPacket> packet)
+{
+	if (packet->flags & prudpPacket::FLAG_ACK)
+	{
+		// the server confirms one of our packets
+		auto it = std::find_if(m_unacked.begin(), m_unacked.end(), [&](const Unacked& u) { return u.packet->GetSequenceId() == packet->sequenceId; });
+		if (it != m_unacked.end())
+			m_unacked.erase(it);
+		if (!packet->packetData.empty())
+			cemuLog_log(LogType::PRUDP, "[PRUDP] Received ACK data packet with payload");
+		return;
+	}
+	if (packet->flags & prudpPacket::FLAG_NEED_ACK)
+	{
+		prudpPacket ack(&m_settings, m_localVPort, m_serverVPort, prudpPacket::TYPE_DATA, prudpPacket::FLAG_ACK, m_clientSession, packet->sequenceId, 0);
+		Transmit(ack);
+	}
+	if (packet->packetData.empty())
+		return;
+	// sequence ids up to 0x4000 behind the next expected one are old duplicates
+	const uint16 ahead = (uint16)(packet->sequenceId - m_nextRecvSeq);
+	if (ahead >= 0xC000)
+		return;
+	for (const auto& queued : m_recvQueue)
+	{
+		if (queued->sequenceId == packet->sequenceId)
+		{
+			cemuLog_log(LogType::PRUDP, "Duplicate PRUDP packet received");
+			return;
+		}
+	}
+	// keep the queue ordered: insert before the first entry that comes later
+	auto pos = m_recvQueue.begin();
+	while (pos != m_recvQueue.end() && ((uint16)(packet->sequenceId - (*pos)->sequenceId) & 0x8000) == 0)
+		++pos;
+	m_recvQueue.insert(pos, std::move(packet));
+}
+
+void prudpClient::OnPacket(std::unique_ptr<prudpIncomingPacket> packet)
+{
+	switch (packet->type)
+	{
+	case prudpPacket::TYPE_PING:
+		OnPing(*packet);
+		break;
+	case prudpPacket::TYPE_SYN:
+		OnSynAck(*packet);
+		break;
+	case prudpPacket::TYPE_CON:
+		OnConAck(*packet);
+		break;
+	case prudpPacket::TYPE_DATA:
+		OnData(std::move(packet));
+		break;
+	case prudpPacket::TYPE_DISCONNECT:
+		m_state = ConnectionState::Disconnected;
+		break;
+	default:
+		cemuLog_log(LogType::PRUDP, "[PRUDP] Received unknown packet type");
+		break;
+	}
+}
+
+void prudpClient::CheckRetransmits(uint32 now)
+{
+	for (Unacked& u : m_unacked)
+	{
+		if ((uint32)(now - u.lastSent) < kAckTimeoutMs)
+			continue;
+		if (u.resends >= kMaxResends)
+			m_state = ConnectionState::Disconnected; // the server stopped answering
+		Transmit(*u.packet);
+		u.lastSent = now;
+		u.resends++;
+	}
+}
+
+// returns false once the handshake gave up
+bool prudpClient::CheckHandshakeTimeout(uint32 now)
+{
+	if ((uint32)(now - m_lastHandshakeSent) < kHandshakeTimeoutMs)
+		return true;
+	if (m_handshakeSends >= kMaxHandshakeSends)
+	{
+		m_state = ConnectionState::Disconnected;
+		cemuLog_log(LogType::PRUDP, "PRUDP: Failed to connect");
+		return false;
+	}
+	SendHandshake();
+	return true;
+}
+
+void prudpClient::SendPing()
+{
+	prudpPacket ping(&m_settings, m_localVPort, m_serverVPort, prudpPacket::TYPE_PING, prudpPacket::FLAG_NEED_ACK, m_clientSession, m_pingSeq, m_serverSignature);
+	Transmit(ping);
+	m_pingsUnanswered++;
+}
+
+// Only one ping is in flight: a new one (with the next sequence id) is started
+// every 20 seconds, an unanswered one is repeated every 1.5 seconds.
+bool prudpClient::CheckPing(uint32 now)
+{
+	const uint32 sinceLast = now - m_lastPingSent;
+	if (m_pingsUnanswered == 0)
+	{
+		if (sinceLast < kPingIntervalMs)
+			return true;
+		cemuLog_log(LogType::PRUDP, "[PRUDP] Sending new ping packet with sequenceId {}", m_pingSeq + 1);
+		m_pingSeq++;
+	}
+	else
+	{
+		if (sinceLast < kPingRetryMs)
+			return true;
+		cemuLog_log(LogType::PRUDP, "[PRUDP] Resending ping packet (no ack received)");
+		if (m_pingsUnanswered >= kMaxUnansweredPings)
+		{
+			m_state = ConnectionState::Disconnected;
+			cemuLog_log(LogType::PRUDP, "PRUDP: Connection did not receive a ping response in a while. Assuming disconnect");
+			return false;
+		}
+	}
+	SendPing();
+	m_lastPingSent = now;
+	return true;
+}
+
+bool prudpClient::Update()
+{
+	if (m_state == ConnectionState::Disconnected)
+		return false;
+	const uint32 now = prudpGetMSTimestamp();
+	uint8 datagram[4096];
+	while (true)
+	{
+		sockaddr from{};
+		socklen_t fromLen = sizeof(from);
+		const sint32 received = recvfrom(m_socket, (char*)datagram, sizeof(datagram), 0, &from, &fromLen);
+		if (received < 0)
+			break;
+		// a datagram can hold several packets
+		sint32 pos = 0;
+		while (pos < received)
+		{
+			const sint32 size = prudpPacket::calculateSizeFromPacketData(datagram + pos, received - pos);
+			if (size <= 0 || pos + size > received)
+			{
+				cemuLog_log(LogType::Force, "[PRUDP] Invalid packet length");
+				break;
+			}
+			auto packet = std::make_unique<prudpIncomingPacket>(&m_settings, datagram + pos, size);
+			pos += size;
+			if (packet->hasError())
+			{
+				cemuLog_log(LogType::Force, "[PRUDP] Packet error");
+				break;
+			}
+			if (packet->type != prudpPacket::TYPE_CON && packet->sessionId != m_serverSession)
+			{
+				cemuLog_log(LogType::PRUDP, "[PRUDP] Invalid session id");
+				continue;
+			}
+			OnPacket(std::move(packet));
+		}
+	}
+	CheckRetransmits(now);
+	if (m_state == ConnectionState::Connecting)
+		CheckHandshakeTimeout(now);
+	else if (m_state == ConnectionState::Connected)
+		CheckPing(now);
+	return false;
 }
 
 void prudpClient::SendDatagram(uint8* input, sint32 length, bool reliable)
 {
-	cemu_assert_debug(reliable); // non-reliable packets require correct sequenceId handling and testing
-	cemu_assert_debug(m_hasSynAck && m_hasConAck); // cant send data packets before we are connected
+	cemu_assert_debug(reliable); // unreliable packets would need their own sequence ids
+	cemu_assert_debug(m_gotSynAck && m_gotConAck);
 	if (length > prudpPacket::PACKET_RAW_SIZE_MAX - 13)
 	{
 		cemuLog_logOnce(LogType::Force, "PRUDP: Datagram too long. Fragmentation not implemented yet");
 		return;
 	}
-	// single fragment data packet
-	uint16 flags = prudpPacket::FLAG_NEED_ACK;
+	const uint16 flags = prudpPacket::FLAG_NEED_ACK | (reliable ? prudpPacket::FLAG_RELIABLE : 0);
+	std::unique_ptr<prudpPacket> packet(new prudpPacket(&m_settings, m_localVPort, m_serverVPort, prudpPacket::TYPE_DATA, flags, m_clientSession, m_nextSendSeq, 0));
 	if (reliable)
-		flags |= prudpPacket::FLAG_RELIABLE;
-	prudpPacket* packet = new prudpPacket(&m_streamSettings, m_srcVPort, m_dstVPort, prudpPacket::TYPE_DATA, flags, m_clientSessionId, m_outgoingReliableSequenceId, 0);
-	if (reliable)
-		m_outgoingReliableSequenceId++;
+		m_nextSendSeq++;
 	packet->setFragmentIndex(0);
 	packet->setData(input, length);
-	QueuePacket(packet);
+	// every data packet asks for an ack, keep it until the ack arrives
+	const uint32 now = prudpGetMSTimestamp();
+	m_unacked.push_back({ std::move(packet), now, 0 });
+	Transmit(*m_unacked.back().packet);
 }
 
 sint32 prudpClient::ReceiveDatagram(std::vector<uint8>& outputBuffer)
 {
 	outputBuffer.clear();
-	if (m_incomingPacketQueue.empty())
+	if (m_recvQueue.empty() || m_recvQueue.front()->sequenceId != m_nextRecvSeq)
 		return -1;
-	prudpIncomingPacket* frontPacket = m_incomingPacketQueue[0].get();
-	if (frontPacket->sequenceId != this->m_incomingSequenceId)
-		return -1;
-	if (frontPacket->fragmentIndex == 0)
-	{
-		// single-fragment packet
-		// decrypt
-		frontPacket->decrypt();
-		// read data
-		if (!frontPacket->packetData.empty())
-		{
-			// to conserve memory we will also shrink the buffer if it was previously extended beyond 32KB
-			constexpr size_t BUFFER_TARGET_SIZE = 1024 * 32;
-			if (frontPacket->packetData.size() < BUFFER_TARGET_SIZE && outputBuffer.capacity() > BUFFER_TARGET_SIZE)
-			{
-				outputBuffer.resize(BUFFER_TARGET_SIZE);
-				outputBuffer.shrink_to_fit();
-				outputBuffer.clear();
-			}
-			// write packet data to output buffer
-			cemu_assert_debug(outputBuffer.empty());
-			outputBuffer.insert(outputBuffer.end(), frontPacket->packetData.begin(), frontPacket->packetData.end());
-		}
-		m_incomingPacketQueue.erase(m_incomingPacketQueue.begin());
-		// advance expected sequence id
-		this->m_incomingSequenceId++;
-		return (sint32)outputBuffer.size();
-	}
+	// a message is either one packet with fragment index 0, or packets with
+	// fragment indices 1, 2, ... and a final 0, with consecutive sequence ids
+	size_t count = 0;
+	if (m_recvQueue.front()->fragmentIndex == 0)
+		count = 1;
 	else
 	{
-		// multi-fragment packet
-		if (frontPacket->fragmentIndex != 1)
-			return -1; // first packet of the chain not received yet
-		// verify chain
-		sint32 packetIndex = 1;
-		sint32 chainLength = -1; // if full chain found, set to count of packets
-		for (sint32 i = 1; i < m_incomingPacketQueue.size(); i++)
+		if (m_recvQueue.front()->fragmentIndex != 1)
+			return -1;
+		for (size_t n = 1; n < m_recvQueue.size(); n++)
 		{
-			uint8 itFragmentIndex = m_incomingPacketQueue[packetIndex]->fragmentIndex;
-			// sequence id must increase by 1 for every packet
-			if (m_incomingPacketQueue[packetIndex]->sequenceId != (m_incomingSequenceId + i))
-				return -1; // missing packets
-			// last fragment in chain is marked by fragment index 0
-			if (itFragmentIndex == 0)
+			if (m_recvQueue[n]->sequenceId != (uint16)(m_nextRecvSeq + n))
+				return -1;
+			if (m_recvQueue[n]->fragmentIndex == 0)
 			{
-				chainLength = i + 1;
+				count = n + 1;
 				break;
 			}
-			packetIndex++;
 		}
-		if (chainLength < 1)
-			return -1; // chain not complete
-		// extract data from packet chain
-		cemu_assert_debug(outputBuffer.empty());
-		for (sint32 i = 0; i < chainLength; i++)
-		{
-			prudpIncomingPacket* incomingPacket = m_incomingPacketQueue[i].get();
-			incomingPacket->decrypt();
-			outputBuffer.insert(outputBuffer.end(), incomingPacket->packetData.begin(), incomingPacket->packetData.end());
-		}
-		// remove packets from queue
-		m_incomingPacketQueue.erase(m_incomingPacketQueue.begin(), m_incomingPacketQueue.begin() + chainLength);
-		m_incomingSequenceId += chainLength;
-		return (sint32)outputBuffer.size();
+		if (count == 0)
+			return -1;
 	}
-	return -1;
+	// release memory left over from an unusually large message
+	constexpr size_t kKeepCapacity = 32 * 1024;
+	if (outputBuffer.capacity() > kKeepCapacity)
+		std::vector<uint8>().swap(outputBuffer);
+	for (size_t n = 0; n < count; n++)
+	{
+		prudpIncomingPacket& p = *m_recvQueue[n];
+		p.decrypt();
+		outputBuffer.insert(outputBuffer.end(), p.packetData.begin(), p.packetData.end());
+	}
+	m_recvQueue.erase(m_recvQueue.begin(), m_recvQueue.begin() + count);
+	m_nextRecvSeq = (uint16)(m_nextRecvSeq + count);
+	return (sint32)outputBuffer.size();
 }

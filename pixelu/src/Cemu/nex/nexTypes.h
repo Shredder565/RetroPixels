@@ -1,5 +1,11 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
-#include<string>
+#include <string>
+#include <cstring>
+
+// Serialisation primitives of the NEX RPC protocol. Everything on the wire is
+// little endian; strings carry a u16 length that counts the terminating NUL
+// and byte buffers carry a u32 length.
 
 #ifndef FFL_SIZE
 #define FFL_SIZE	(0x60)
@@ -7,17 +13,20 @@
 
 class nexPacketBuffer;
 
+// a structure sent inside an "any data holder": name, two lengths, payload
 class nexMetaType
 {
 public:
+	virtual ~nexMetaType() = default;
 	virtual const char* getMetaName() const = 0;
 	virtual void writeData(nexPacketBuffer* pb) const = 0;
 };
 
+// a structure that can be read from and written to a packet
 class nexType
 {
-  public:
-	virtual ~nexType(){};
+public:
+	virtual ~nexType() {}
 
 	virtual const char* getMetaName()
 	{
@@ -28,294 +37,208 @@ class nexType
 	virtual void readData(nexPacketBuffer* pb) = 0;
 };
 
+// Cursor over a caller owned byte array. Writes that do not fit are dropped
+// as a whole. Reads past the end yield zero and set a sticky error flag.
 class nexPacketBuffer
 {
 public:
 	nexPacketBuffer(uint8* data, sint32 size, bool isWrite)
-	{
-		this->buffer = data;
-		this->size = size;
-		this->currentIndex = 0;
-		this->isWrite = isWrite;
-		this->readOutOfBounds = false;
-	}
+		: m_data(data), m_size(size), m_pos(0) { (void)isWrite; } // direction is implied by use
 
-	nexPacketBuffer()
-	{
-		this->buffer = 0;
-		this->size = 0;
-		this->currentIndex = 0;
-	}
+	nexPacketBuffer() = default;
 
 	void writeData(const uint8* data, sint32 len)
 	{
-		if (this->currentIndex + len > this->size)
+		if (!HasRoom(len))
 			return;
-		memcpy(this->buffer + this->currentIndex, data, len);
-		this->currentIndex += len;
+		if (len > 0)
+			memcpy(m_data + m_pos, data, len);
+		m_pos += len;
 	}
 
-	void writeU8(uint8 v)
-	{
-		if (this->currentIndex + sizeof(uint8) > this->size)
-			return;
-		*(uint8*)(this->buffer + this->currentIndex) = v;
-		this->currentIndex += sizeof(uint8);
-	}
-
-	void writeU16(uint16 v)
-	{
-		if (this->currentIndex + sizeof(uint16) > this->size)
-			return;
-		*(uint16*)(this->buffer + this->currentIndex) = v;
-		this->currentIndex += sizeof(uint16);
-	}
-
-	void writeU32(uint32 v)
-	{
-		if (this->currentIndex + sizeof(uint32) > this->size)
-			return;
-		*(uint32*)(this->buffer + this->currentIndex) = v;
-		this->currentIndex += sizeof(uint32);
-	}
-
-	void writeU64(uint64 v)
-	{
-		if (this->currentIndex + sizeof(uint64) > this->size)
-			return;
-		*(uint64*)(this->buffer + this->currentIndex) = v;
-		this->currentIndex += sizeof(uint64);
-	}
+	void writeU8(uint8 v) { Put(v); }
+	void writeU16(uint16 v) { Put(v); }
+	void writeU32(uint32 v) { Put(v); }
+	void writeU64(uint64 v) { Put(v); }
 
 	void writeString(const char* v)
 	{
-		sint32 len = (sint32)strlen(v) + 1;
-		writeU16(len);
-		writeData((uint8*)v, len);
+		const sint32 lenWithNul = (sint32)strlen(v) + 1;
+		writeU16((uint16)lenWithNul);
+		writeData((const uint8*)v, lenWithNul);
 	}
 
 	void writeBuffer(const uint8* v, sint32 len)
 	{
-		writeU32(len);
+		writeU32((uint32)len);
 		writeData(v, len);
 	}
 
 	void writeCustomType(const nexMetaType& v)
 	{
-		// write meta name
 		writeString(v.getMetaName());
-		// write length 0 placeholder
-		uint32* lengthPtr0 = (uint32*)(this->buffer + this->currentIndex);
+		// outer length (payload + 4) followed by the inner length (payload)
+		const sint32 outerLenPos = m_pos;
 		writeU32(0);
-		// write length 1 placeholder
-		uint32* lengthPtr1 = (uint32*)(this->buffer + this->currentIndex);
+		const sint32 innerLenPos = m_pos;
 		writeU32(0);
-		// write data
-		uint32 preWriteIndex = this->currentIndex;
+		const sint32 payloadStart = m_pos;
 		v.writeData(this);
-		uint32 writeSize = this->currentIndex - preWriteIndex;
-		// update lengths
-		*lengthPtr1 = writeSize;
-		*lengthPtr0 = writeSize + 4;
+		const uint32 payloadSize = (uint32)(m_pos - payloadStart);
+		PatchU32(innerLenPos, payloadSize);
+		PatchU32(outerLenPos, payloadSize + 4);
 	}
 
-	uint64 readU64()
-	{
-		if (this->currentIndex + sizeof(uint64) > this->size)
-		{
-			readOutOfBounds = true;
-			return 0;
-		}
-		uint64 v = *(uint64*)(this->buffer + this->currentIndex);
-		this->currentIndex += sizeof(uint64);
-		return v;
-	}
-
-	uint32 readU32()
-	{
-		if (this->currentIndex + sizeof(uint32) > this->size)
-		{
-			readOutOfBounds = true;
-			return 0;
-		}
-		uint32 v = *(uint32*)(this->buffer + this->currentIndex);
-		this->currentIndex += sizeof(uint32);
-		return v;
-	}
-
-	uint16 readU16()
-	{
-		if (this->currentIndex + sizeof(uint16) > this->size)
-		{
-			readOutOfBounds = true;
-			return 0;
-		}
-		uint16 v = *(uint16*)(this->buffer + this->currentIndex);
-		this->currentIndex += sizeof(uint16);
-		return v;
-	}
-
-	uint8 readU8()
-	{
-		if (this->currentIndex + sizeof(uint8) > this->size)
-		{
-			readOutOfBounds = true;
-			return 0;
-		}
-		uint8 v = *(uint8*)(this->buffer + this->currentIndex);
-		this->currentIndex += sizeof(uint8);
-		return v;
-	}
+	uint64 readU64() { return Get<uint64>(); }
+	uint32 readU32() { return Get<uint32>(); }
+	uint16 readU16() { return Get<uint16>(); }
+	uint8 readU8() { return Get<uint8>(); }
 
 	sint32 readData(void* buffer, sint32 length)
 	{
-		if (this->currentIndex + length > this->size)
+		if (!HasRoom(length))
 		{
-			readOutOfBounds = true;
+			m_readFailed = true;
 			return 0;
 		}
-		memcpy(buffer, (this->buffer + this->currentIndex), length);
-		this->currentIndex += length;
+		if (length > 0)
+			memcpy(buffer, m_data + m_pos, length);
+		m_pos += length;
 		return length;
 	}
 
-	// reads buffer data from packet and returns amount of bytes copied into buffer
-	// if buffer is larger than maxLength, the read data is silently truncated
+	// Reads a u32 length prefixed blob. At most maxLength bytes are stored but
+	// the whole blob is consumed. Returns the number of bytes stored.
 	sint32 readBuffer(void* buffer, sint32 maxLength)
 	{
-		sint32 bufferLength = (sint32)readU32();
-		if (bufferLength < 0 || bufferLength >= 0x10000000)
+		const sint32 blobLen = (sint32)readU32();
+		if (blobLen < 0 || blobLen >= 0x10000000 || !HasRoom(blobLen))
 		{
-			readOutOfBounds = true;
+			m_readFailed = true;
 			return 0;
 		}
-		if (this->currentIndex + bufferLength > this->size)
-		{
-			readOutOfBounds = true;
-			return 0;
-		}
-		uint32 copiedLength = std::min(bufferLength, maxLength);
-
-		memcpy(buffer, (this->buffer + this->currentIndex), copiedLength);
-		this->currentIndex += bufferLength;
-		return copiedLength;
+		const sint32 stored = blobLen < maxLength ? blobLen : maxLength;
+		if (stored > 0)
+			memcpy(buffer, m_data + m_pos, stored);
+		m_pos += blobLen;
+		return stored;
 	}
 
+	// Reads a u16 length prefixed string into a char array of maxLength bytes,
+	// always NUL terminating it. Returns the number of characters stored.
 	sint32 readString(char* buffer, sint32 maxLength)
 	{
-		sint32 bufferLength = readU16();
-		if (this->currentIndex + bufferLength > this->size)
+		const sint32 strLen = readU16();
+		if (!HasRoom(strLen))
 		{
-			readOutOfBounds = true;
+			m_readFailed = true;
 			buffer[0] = '\0';
 			return 0;
 		}
-		uint32 copiedLength = std::min(bufferLength, maxLength - 1);
-
-		memcpy(buffer, (this->buffer + this->currentIndex), copiedLength);
-		buffer[copiedLength] = '\0';
-		this->currentIndex += bufferLength;
-		return copiedLength;
+		const sint32 stored = strLen < (maxLength - 1) ? strLen : (maxLength - 1);
+		if (stored > 0)
+			memcpy(buffer, m_data + m_pos, stored);
+		buffer[stored] = '\0';
+		m_pos += strLen;
+		return stored;
 	}
 
+	// Reads a u16 length prefixed string, dropping one trailing NUL if present.
 	sint32 readStdString(std::string& outputStr)
 	{
-		sint32 bufferLength = readU16();
-		if (this->currentIndex + bufferLength > this->size)
+		const sint32 strLen = readU16();
+		if (!HasRoom(strLen))
 		{
-			readOutOfBounds = true;
+			m_readFailed = true;
 			outputStr.clear();
 			return 0;
 		}
-		sint32 copiedLength = bufferLength;
-		if (bufferLength > 0 && this->buffer[this->currentIndex+bufferLength-1] == '\0')
-		{
-			// cut off trailing '\0'
-			copiedLength--;
-		}
-		outputStr = std::string((char*)(this->buffer + this->currentIndex), copiedLength);
-		this->currentIndex += bufferLength;
-		return copiedLength;
+		sint32 keep = strLen;
+		if (keep > 0 && m_data[m_pos + keep - 1] == '\0')
+			keep--;
+		outputStr.assign((const char*)(m_data + m_pos), keep);
+		m_pos += strLen;
+		return keep;
 	}
 
+	// Reads an "any data holder" whose type name has to match v's name.
 	bool readPlaceholderType(nexType& v)
 	{
-		char name[128];
-		readString(name, sizeof(name));
-		name[sizeof(name)-1] = '\0';
-		if (hasReadOutOfBounds())
+		char typeName[128];
+		readString(typeName, sizeof(typeName));
+		if (m_readFailed || strcmp(typeName, v.getMetaName()) != 0)
 			return false;
-		if (strcmp(name, v.getMetaName()) != 0)
+		const uint32 outerLen = readU32();
+		const uint32 innerLen = readU32();
+		if (m_readFailed || innerLen != outerLen - 4)
 			return false;
-		// read sizes
-		uint32 len0 = readU32();
-		uint32 len1 = readU32();
-		if (hasReadOutOfBounds())
-			return false;
-		if (len1 != (len0 - 4))
-			return false;
-		// parse type data
 		v.readData(this);
-		if (hasReadOutOfBounds())
-			return false;
-		return true;
-		//// write meta name
-		//writeString(v.getMetaName());
-		//// write length 0 placeholder
-		//uint32* lengthPtr0 = (uint32*)(this->buffer + this->currentIndex);
-		//writeU32(0);
-		//// write length 1 placeholder
-		//uint32* lengthPtr1 = (uint32*)(this->buffer + this->currentIndex);
-		//writeU32(0);
-		//// write data
-		//uint32 preWriteIndex = this->currentIndex;
-		//v.writeData(this);
-		//uint32 writeSize = this->currentIndex - preWriteIndex;
-		//// update lengths
-		//*lengthPtr1 = writeSize;
-		//*lengthPtr0 = writeSize + 4;
+		return !m_readFailed;
 	}
 
-	bool hasReadOutOfBounds()
-	{
-		return readOutOfBounds;
-	}
-
-	uint8* getDataPtr()
-	{
-		return buffer;
-	}
-
-	sint32 getWriteIndex()
-	{
-		return currentIndex;
-	}
-
-	sint32 getSize()
-	{
-		return size;
-	}
-
-	void setSize(sint32 length)
-	{
-		size = length;
-	}
+	bool hasReadOutOfBounds() { return m_readFailed; }
+	uint8* getDataPtr() { return m_data; }
+	sint32 getWriteIndex() { return m_pos; }
+	sint32 getSize() { return m_size; }
+	void setSize(sint32 length) { m_size = length; }
 
 private:
-	uint8* buffer;
-	sint32 size;
-	sint32 currentIndex;
-	bool isWrite;
-	bool readOutOfBounds; // set if any read operation failed because it exceeded the buffer
+	bool HasRoom(sint32 n) const
+	{
+		return m_pos + n <= m_size;
+	}
+
+	template<typename T>
+	void Put(T v)
+	{
+		if (!HasRoom((sint32)sizeof(T)))
+			return;
+		memcpy(m_data + m_pos, &v, sizeof(T));
+		m_pos += (sint32)sizeof(T);
+	}
+
+	template<typename T>
+	T Get()
+	{
+		T v{};
+		if (!HasRoom((sint32)sizeof(T)))
+		{
+			m_readFailed = true;
+			return v;
+		}
+		memcpy(&v, m_data + m_pos, sizeof(T));
+		m_pos += (sint32)sizeof(T);
+		return v;
+	}
+
+	// a length field that did not fit is still filled as far as the buffer goes
+	void PatchU32(sint32 pos, uint32 v)
+	{
+		const sint32 n = std::min<sint32>(4, m_size - pos);
+		if (pos >= 0 && n > 0)
+			memcpy(m_data + pos, &v, n);
+	}
+
+	uint8* m_data{nullptr};
+	sint32 m_size{0};
+	sint32 m_pos{0};
+	bool m_readFailed{false};
 };
+
+// Reads a string the way the friend structures store it: through a char array
+// of the given capacity, so it is cut at capacity-1 characters and at the first NUL.
+inline std::string nexReadBoundedString(nexPacketBuffer* pb, sint32 capacity)
+{
+	std::string tmp(capacity, '\0');
+	pb->readString(tmp.data(), capacity);
+	tmp.resize(strlen(tmp.c_str()));
+	return tmp;
+}
 
 class nexNintendoLoginData : public nexMetaType
 {
 public:
-	nexNintendoLoginData(const char* nexToken)
-	{
-		this->nexToken = new std::string(nexToken);
-	}
+	nexNintendoLoginData(const char* nexToken) : m_token(nexToken) {}
 
 	const char* getMetaName() const override
 	{
@@ -324,19 +247,17 @@ public:
 
 	void writeData(nexPacketBuffer* pb) const override
 	{
-		pb->writeString(nexToken->c_str());
+		pb->writeString(m_token.c_str());
 	}
+
 private:
-	std::string* nexToken;
+	std::string m_token;
 };
 
 class nexNotificationEventGeneral : public nexType
 {
 public:
-	nexNotificationEventGeneral()
-	{
-
-	}
+	nexNotificationEventGeneral() = default;
 
 	nexNotificationEventGeneral(nexPacketBuffer* pb)
 	{
@@ -360,9 +281,10 @@ public:
 		param3 = pb->readU64();
 		pb->readStdString(paramStr);
 	}
+
 public:
-	uint32 param1;
-	uint64 param2;
-	uint64 param3;
+	uint32 param1{};
+	uint64 param2{};
+	uint64 param3{};
 	std::string paramStr;
 };
