@@ -79,34 +79,24 @@ struct TLBEntry
 // second paired-single slot, also kept as a double.
 struct PairedSingle
 {
-  u64 PS0AsU64() const { return ps0; }
-  u64 PS1AsU64() const { return ps1; }
-
-  u32 PS0AsU32() const { return static_cast<u32>(ps0); }
-  u32 PS1AsU32() const { return static_cast<u32>(ps1); }
-
-  double PS0AsDouble() const;
-  double PS1AsDouble() const;
-
+  // Raw bits (u64 overloads) or a double value (stored as its bits).
   void SetPS0(u64 value) { ps0 = value; }
-  void SetPS0(double value);
-
   void SetPS1(u64 value) { ps1 = value; }
+  void SetPS0(double value);
   void SetPS1(double value);
 
-  void SetBoth(u64 lhs, u64 rhs)
-  {
-    SetPS0(lhs);
-    SetPS1(rhs);
-  }
-  void SetBoth(double lhs, double rhs)
-  {
-    SetPS0(lhs);
-    SetPS1(rhs);
-  }
-
-  void Fill(u64 value) { SetBoth(value, value); }
+  void SetBoth(u64 lhs, u64 rhs) { ps0 = lhs, ps1 = rhs; }
+  void SetBoth(double lhs, double rhs) { SetPS0(lhs), SetPS1(rhs); }
+  void Fill(u64 value) { ps0 = ps1 = value; }
   void Fill(double value) { SetBoth(value, value); }
+
+  u64 PS0AsU64() const { return ps0; }
+  u64 PS1AsU64() const { return ps1; }
+  // The low word of each slot.
+  u32 PS0AsU32() const { return static_cast<u32>(ps0); }
+  u32 PS1AsU32() const { return static_cast<u32>(ps1); }
+  double PS0AsDouble() const;
+  double PS1AsDouble() const;
 
   u64 ps0 = 0;
   u64 ps1 = 0;
@@ -334,10 +324,12 @@ public:
   const Core::BranchWatch& GetBranchWatch() const { return m_branch_watch; }
 
 private:
-  void InitializeCPUCore(CPUCore cpu_core);
+  // Picks m_cpu_core_base for m_mode (unless a core is injected).
   void ApplyMode();
-  void ResetRegisters();
+  void InitializeCPUCore(CPUCore cpu_core);
+  // Re-reads the accurate-cache setting.
   void RefreshConfig();
+  void ResetRegisters();
 
   PowerPCState m_ppc_state;
 
