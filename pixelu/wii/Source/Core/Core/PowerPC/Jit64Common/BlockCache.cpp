@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/PowerPC/Jit64Common/BlockCache.h"
 
@@ -7,47 +6,24 @@
 #include "Common/x64Emitter.h"
 #include "Core/PowerPC/JitCommon/JitBase.h"
 
+namespace
+{
+// Byte length of CALL rel32.
+constexpr int CALL_LEN = 5;
+
+// When the target starts this close after the exit, the exit is padded with
+// NOPs and falls through. The slack covers block-entry alignment padding.
+constexpr s64 FALLTHROUGH_LIMIT = Gen::XEmitter::NEAR_JMP_LEN + 3;
+
+void RecordRange(std::vector<std::pair<u8*, u8*>>& ranges, u8* begin, u8* end)
+{
+  if (begin != end)
+    ranges.emplace_back(begin, end);
+}
+}  // namespace
+
 JitBlockCache::JitBlockCache(JitBase& jit) : JitBaseBlockCache{jit}
 {
-}
-
-void JitBlockCache::WriteLinkBlock(const JitBlock::LinkData& source, const JitBlock* dest)
-{
-  u8* location = source.exitPtrs;
-  const u8* address = dest ? dest->normalEntry : m_jit.GetAsmRoutines()->dispatcher_no_timing_check;
-  if (source.call)
-  {
-    Gen::XEmitter emit(location, location + 5);
-    emit.CALL(address);
-  }
-  else
-  {
-    // If we're going to link with the next block, there is no need
-    // to emit JMP. So just NOP out the gap to the next block.
-    // Support up to 3 additional bytes because of alignment.
-    s64 offset = address - location;
-    if (offset > 0 && offset <= Gen::XEmitter::NEAR_JMP_LEN + 3)
-    {
-      Gen::XEmitter emit(location, location + offset);
-      emit.NOP(offset);
-    }
-    else
-    {
-      // Length forced to Near because JMP length might differ between dispatcher and linked block.
-      // Technically this isn't necessary, as this is executed after Jit64::JustWriteExit (which
-      // also pads), and a Short JMP written on top of a Near JMP isn't incorrect since the garbage
-      // bytes are skipped. But they confuse the disassembler, and probably the CPU speculation too.
-      Gen::XEmitter emit(location, location + Gen::XEmitter::NEAR_JMP_LEN);
-      emit.JMP(address, true);
-    }
-  }
-}
-
-void JitBlockCache::WriteDestroyBlock(const JitBlock& block)
-{
-  // Only clear the entry point as we might still be within this block.
-  Gen::XEmitter emit(block.normalEntry, block.normalEntry + 1);
-  emit.INT3();
 }
 
 void JitBlockCache::Init()
@@ -56,28 +32,61 @@ void JitBlockCache::Init()
   ClearRangesToFree();
 }
 
+void JitBlockCache::WriteLinkBlock(const JitBlock::LinkData& source, const JitBlock* dest)
+{
+  u8* const exit = source.exitPtrs;
+  const u8* const target =
+      dest != nullptr ? dest->normalEntry : m_jit.GetAsmRoutines()->dispatcher_no_timing_check;
+
+  if (source.call)
+  {
+    Gen::XEmitter emitter(exit, exit + CALL_LEN);
+    emitter.CALL(target);
+    return;
+  }
+
+  const s64 distance = target - exit;
+  if (distance > 0 && distance <= FALLTHROUGH_LIMIT)
+  {
+    const int gap = static_cast<int>(distance);
+    Gen::XEmitter emitter(exit, exit + gap);
+    emitter.NOP(static_cast<size_t>(gap));
+    return;
+  }
+
+  // Always the 5-byte form: the exit was reserved at that size, and a short
+  // JMP would leave stale bytes behind that confuse disassemblers.
+  Gen::XEmitter emitter(exit, exit + Gen::XEmitter::NEAR_JMP_LEN);
+  emitter.JMP(target, true);
+}
+
+void JitBlockCache::WriteDestroyBlock(const JitBlock& block)
+{
+  // Code may still be running further inside the block, so only the entry is
+  // poisoned; a later jump to it traps.
+  Gen::XEmitter emitter(block.normalEntry, block.normalEntry + 1);
+  emitter.INT3();
+}
+
 void JitBlockCache::DestroyBlock(JitBlock& block)
 {
   JitBaseBlockCache::DestroyBlock(block);
-
-  if (block.near_begin != block.near_end)
-    m_ranges_to_free_on_next_codegen_near.emplace_back(block.near_begin, block.near_end);
-  if (block.far_begin != block.far_end)
-    m_ranges_to_free_on_next_codegen_far.emplace_back(block.far_begin, block.far_end);
+  RecordRange(m_freed_near, block.near_begin, block.near_end);
+  RecordRange(m_freed_far, block.far_begin, block.far_end);
 }
 
 const std::vector<std::pair<u8*, u8*>>& JitBlockCache::GetRangesToFreeNear() const
 {
-  return m_ranges_to_free_on_next_codegen_near;
+  return m_freed_near;
 }
 
 const std::vector<std::pair<u8*, u8*>>& JitBlockCache::GetRangesToFreeFar() const
 {
-  return m_ranges_to_free_on_next_codegen_far;
+  return m_freed_far;
 }
 
 void JitBlockCache::ClearRangesToFree()
 {
-  m_ranges_to_free_on_next_codegen_near.clear();
-  m_ranges_to_free_on_next_codegen_far.clear();
+  m_freed_near.clear();
+  m_freed_far.clear();
 }

@@ -1,5 +1,4 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/PowerPC/Jit64Common/TrampolineCache.h"
 
@@ -9,58 +8,49 @@
 #include "Common/x64Emitter.h"
 #include "Core/PowerPC/Jit64Common/TrampolineInfo.h"
 
-#ifdef _WIN32
-#include <windows.h>
-#endif
-
-using namespace Gen;
+namespace
+{
+// A single trampoline never comes close to this; checking it up front keeps
+// emission from running off the end of the region.
+constexpr size_t TRAMPOLINE_HEADROOM = 1024;
+}  // namespace
 
 void TrampolineCache::ClearCodeSpace()
 {
-  X64CodeBlock::ClearCodeSpace();
+  Gen::X64CodeBlock::ClearCodeSpace();
 }
 
 const u8* TrampolineCache::GenerateTrampoline(const TrampolineInfo& info)
 {
-  if (info.read)
-  {
-    return GenerateReadTrampoline(info);
-  }
-
-  return GenerateWriteTrampoline(info);
+  return info.read ? GenerateReadTrampoline(info) : GenerateWriteTrampoline(info);
 }
 
 const u8* TrampolineCache::GenerateReadTrampoline(const TrampolineInfo& info)
 {
-  if (GetSpaceLeft() < 1024)
+  if (GetSpaceLeft() < TRAMPOLINE_HEADROOM)
     PanicAlertFmt("Trampoline cache full");
 
-  const u8* trampoline = GetCodePtr();
-
-  SafeLoadToReg(info.op_reg, info.op_arg, info.accessSize << 3, info.offset, info.registersInUse,
-                info.signExtend, info.flags | SAFE_LOADSTORE_FORCE_SLOW_ACCESS);
-
+  const u8* const entry = GetCodePtr();
+  const int bits = info.accessSize * 8;
+  SafeLoadToReg(info.op_reg, info.op_arg, bits, info.offset, info.registersInUse, info.signExtend,
+                info.flags | SAFE_LOADSTORE_FORCE_SLOW_ACCESS);
   JMP(info.start + info.len);
-
-  Common::JitRegister::Register(trampoline, GetCodePtr(), "JIT_ReadTrampoline_{:x}", info.pc);
-  return trampoline;
+  Common::JitRegister::Register(entry, GetCodePtr(), "JIT_ReadTrampoline_{:x}", info.pc);
+  return entry;
 }
 
 const u8* TrampolineCache::GenerateWriteTrampoline(const TrampolineInfo& info)
 {
-  if (GetSpaceLeft() < 1024)
+  if (GetSpaceLeft() < TRAMPOLINE_HEADROOM)
     PanicAlertFmt("Trampoline cache full");
 
-  const u8* trampoline = GetCodePtr();
-
-  // Don't treat FIFO writes specially for now because they require a burst
-  // check anyway.
-
-  SafeWriteRegToReg(info.op_arg, info.op_reg, info.accessSize << 3, info.offset,
-                    info.registersInUse, info.flags | SAFE_LOADSTORE_FORCE_SLOW_ACCESS);
-
+  // Gather-pipe stores take the generic slow path here too; it already does
+  // the burst check.
+  const u8* const entry = GetCodePtr();
+  const int bits = info.accessSize * 8;
+  SafeWriteRegToReg(info.op_arg, info.op_reg, bits, info.offset, info.registersInUse,
+                    info.flags | SAFE_LOADSTORE_FORCE_SLOW_ACCESS);
   JMP(info.start + info.len);
-
-  Common::JitRegister::Register(trampoline, GetCodePtr(), "JIT_WriteTrampoline_{:x}", info.pc);
-  return trampoline;
+  Common::JitRegister::Register(entry, GetCodePtr(), "JIT_WriteTrampoline_{:x}", info.pc);
+  return entry;
 }

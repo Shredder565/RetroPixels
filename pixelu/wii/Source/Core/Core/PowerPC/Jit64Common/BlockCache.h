@@ -1,14 +1,16 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <utility>
 #include <vector>
 
 #include "Core/PowerPC/JitCommon/JitCache.h"
 
 class JitBase;
 
+// Jit64's block cache: knows how to patch x86 exits and entry points, and
+// remembers the code ranges of destroyed blocks so the JIT can reuse them.
 class JitBlockCache : public JitBaseBlockCache
 {
 public:
@@ -27,6 +29,6 @@ private:
   void WriteLinkBlock(const JitBlock::LinkData& source, const JitBlock* dest) override;
   void WriteDestroyBlock(const JitBlock& block) override;
 
-  std::vector<std::pair<u8*, u8*>> m_ranges_to_free_on_next_codegen_near;
-  std::vector<std::pair<u8*, u8*>> m_ranges_to_free_on_next_codegen_far;
+  std::vector<std::pair<u8*, u8*>> m_freed_near;
+  std::vector<std::pair<u8*, u8*>> m_freed_far;
 };

@@ -1,26 +1,29 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <cstddef>
+
 #include "Common/CommonTypes.h"
 #include "Core/PowerPC/Jit64Common/EmuCodeBlock.h"
 
 struct TrampolineInfo;
 
-// a bit of a hack; the MMU results in more code ending up in the trampoline cache,
-// because fastmem results in far more backpatches in MMU mode
+// Trampolines are slow-path copies of fastmem accesses that faulted. With the
+// MMU on far more accesses fault, so the region is larger.
 constexpr size_t TRAMPOLINE_CODE_SIZE = 1024 * 1024 * 8;
 constexpr size_t TRAMPOLINE_CODE_SIZE_MMU = 1024 * 1024 * 32;
 
-// We need at least this many bytes for backpatching.
+// Minimum length of a fastmem access: room for the patched-in JMP rel32.
 constexpr int BACKPATCH_SIZE = 5;
 
 class TrampolineCache : public EmuCodeBlock
 {
 public:
   explicit TrampolineCache(Jit64& jit) : EmuCodeBlock(jit) {}
+
+  // Emits a slow-path version of the access described by `info` that jumps
+  // back to the instruction after it, and returns its entry point.
   const u8* GenerateTrampoline(const TrampolineInfo& info);
   void ClearCodeSpace();
 

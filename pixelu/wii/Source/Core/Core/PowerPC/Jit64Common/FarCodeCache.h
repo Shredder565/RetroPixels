@@ -1,25 +1,24 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <cstddef>
+
 #include "Common/x64Emitter.h"
 
-// a bit of a hack; the MMU results in a vast amount more code ending up in the far cache,
-// mostly exception handling, so give it a whole bunch more space if the MMU is on.
+// Far code holds the rarely executed paths (slow memory accesses, exception
+// exits) so the hot code stays dense. With the MMU on, most loads and stores
+// get such a path, hence the larger size.
 constexpr size_t FARCODE_SIZE = 1024 * 1024 * 64;
 constexpr size_t FARCODE_SIZE_MMU = 1024 * 1024 * 128;
 
-// A place to throw blocks of code we don't want polluting the cache, e.g. rarely taken
-// exception branches.
 class FarCodeCache : public Gen::X64CodeBlock
 {
 public:
-  void Init();
-  void Shutdown();
+  void Init() { m_enabled = true; }
+  void Shutdown() { m_enabled = false; }
 
-  bool Enabled() const;
+  bool Enabled() const { return m_enabled; }
 
 private:
   bool m_enabled = false;

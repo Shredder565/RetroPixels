@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,42 +6,43 @@
 #include "Common/CommonTypes.h"
 #include "Common/x64Emitter.h"
 
-// Stores information we need to batch-patch a MOV with a call to the slow read/write path after
-// it faults. There will be 10s of thousands of these structs live, so be wary of making this too
-// big.
+// Everything needed to replace a faulting fastmem access with a jump to a
+// slow-path trampoline. One of these exists per fastmem access in the code
+// cache, which can be tens of thousands, so the struct is kept small.
 struct TrampolineInfo final
 {
-  // The start of the store operation that failed -- we will patch a JMP here
+  // First byte of the fastmem access; the patch JMP is written here.
   u8* start = nullptr;
 
-  // The start + len = end of the store operation (points to the next instruction)
+  // Byte length of the access, so start + len is where execution resumes.
   u16 len = 0;
 
-  // Original SafeLoadXXX/SafeStoreXXX flags
+  // SafeLoadStoreFlags the access was emitted with.
   u8 flags = 0;
 
-  // Memory access size (in bytes)
+  // Access width in bytes.
   u8 accessSize : 4 = 0;
 
-  // true if this is a read op vs a write
+  // Load (true) or store (false).
   bool read : 1 = false;
 
-  // for read operations, true if needs sign-extension after load
+  // Loads only: whether the value is sign-extended.
   bool signExtend : 1 = false;
 
-  // Set to true if we added the offset to the address and need to undo it
+  // The offset was folded into the address register before the access and
+  // must be subtracted again by the handler.
   bool offsetAddedToAddress : 1 = false;
 
-  // The PPC PC for the current load/store block
+  // Guest address of the instruction being emulated.
   u32 pc = 0;
 
-  // Saved because we need these to make the ABI call in the trampoline
+  // Host registers live across the access; the slow path preserves them.
   BitSet32 registersInUse{};
 
-  // The MOV operation
+  // Stores without MOVBE: the register that was byte-swapped in place.
   Gen::X64Reg nonAtomicSwapStoreSrc{};
 
-  // src/dest for load/store
+  // Operands of the access, replayed by the trampoline.
   s32 offset = 0;
   Gen::X64Reg op_reg{};
   Gen::OpArg op_arg{};

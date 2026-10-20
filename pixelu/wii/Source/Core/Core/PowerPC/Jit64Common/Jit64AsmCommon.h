@@ -1,5 +1,4 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,6 +10,9 @@ enum EQuantizeType : u32;
 
 class Jit64;
 
+// Emits the conversion between paired singles in XMM0 and a GQR-quantized
+// memory representation. Used both for the shared routines (quantize == -1,
+// scale passed in RSCRATCH2) and inline when the GQR is known at compile time.
 class QuantizedMemoryRoutines : public EmuCodeBlock
 {
 public:
@@ -21,8 +23,13 @@ public:
 private:
   void GenQuantizedLoadFloat(bool single, bool isInline);
   void GenQuantizedStoreFloat(bool single, bool isInline);
+
+  // Multiplies XMM0 by the scale factor for `quantize`, read from the
+  // quantize (store) or dequantize (load) table.
+  void ApplyQuantizeScale(bool single, int quantize, bool load);
 };
 
+// Shared assembly routines called from Jit64 blocks.
 class CommonAsmRoutines : public CommonAsmRoutinesBase, public QuantizedMemoryRoutines
 {
 public:
@@ -41,4 +48,10 @@ protected:
   void GenQuantizedSingleLoads();
   void GenQuantizedStores();
   void GenQuantizedSingleStores();
+
+private:
+  // Emits one routine per quantize type plus the table pointing at them.
+  const u8** GenQuantizedTable(bool load, bool single);
+  // Sets an FPSCR exception bit, and FX if the bit was clear before.
+  void RaiseFPSCRException(u32 exception_bit);
 };

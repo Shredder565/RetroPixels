@@ -1,14 +1,11 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/PowerPC/Jit64Common/ConstantPool.h"
 
+#include <cstdint>
 #include <cstring>
-#include <memory>
-#include <utility>
 
 #include "Common/Assert.h"
-#include "Common/CommonTypes.h"
 
 ConstantPool::ConstantPool() = default;
 
@@ -16,47 +13,47 @@ ConstantPool::~ConstantPool() = default;
 
 void ConstantPool::Init(void* memory, size_t size)
 {
-  m_region = memory;
-  m_region_size = size;
+  m_begin = static_cast<u8*>(memory);
+  m_end = m_begin + size;
   Clear();
 }
 
 void ConstantPool::Clear()
 {
-  m_current_ptr = m_region;
-  m_remaining_size = m_region_size;
-  m_const_info.clear();
+  m_next = m_begin;
+  m_copies.clear();
 }
 
 void ConstantPool::Shutdown()
 {
-  m_region = nullptr;
-  m_region_size = 0;
-  m_current_ptr = nullptr;
-  m_remaining_size = 0;
-  m_const_info.clear();
+  m_begin = nullptr;
+  m_end = nullptr;
+  m_next = nullptr;
+  m_copies.clear();
 }
 
 const void* ConstantPool::GetConstant(const void* value, size_t element_size, size_t num_elements,
                                       size_t index)
 {
-  const size_t value_size = element_size * num_elements;
-  const auto [iter, inserted] = m_const_info.emplace(value, ConstantInfo{});
-  ConstantInfo& info = iter->second;
+  const size_t bytes = element_size * num_elements;
 
-  if (inserted)
+  auto it = m_copies.find(value);
+  if (it == m_copies.end())
   {
-    void* ptr = std::align(ALIGNMENT, value_size, m_current_ptr, m_remaining_size);
-    ASSERT_MSG(DYNA_REC, ptr, "Constant pool has run out of space.");
+    const uintptr_t next = reinterpret_cast<uintptr_t>(m_next);
+    const uintptr_t aligned = (next + (ALIGNMENT - 1)) & ~uintptr_t{ALIGNMENT - 1};
+    u8* where = m_next + (aligned - next);
+    const bool fits = m_next != nullptr && where <= m_end &&
+                      static_cast<size_t>(m_end - where) >= bytes;
+    ASSERT_MSG(DYNA_REC, fits, "Constant pool has run out of space.");
+    if (!fits)
+      return nullptr;
 
-    m_current_ptr = static_cast<u8*>(m_current_ptr) + value_size;
-    m_remaining_size -= value_size;
-
-    std::memcpy(ptr, value, value_size);
-    info = ConstantInfo{ptr, value_size};
+    std::memcpy(where, value, bytes);
+    m_next = where + bytes;
+    it = m_copies.emplace(value, Copy{where, bytes}).first;
   }
 
-  ASSERT_MSG(DYNA_REC, info.m_size == value_size, "Constant has incorrect size in constant pool.");
-  u8* location = static_cast<u8*>(info.m_location);
-  return location + element_size * index;
+  ASSERT_MSG(DYNA_REC, it->second.bytes == bytes, "Constant has incorrect size in constant pool.");
+  return it->second.data + element_size * index;
 }

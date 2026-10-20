@@ -1,15 +1,14 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/PowerPC/Jit64Common/Jit64AsmCommon.h"
 
 #include <array>
+#include <cstddef>
 #include <utility>
 
 #include "Common/CPUDetect.h"
 #include "Common/CommonTypes.h"
 #include "Common/FloatUtils.h"
-#include "Common/Intrinsics.h"
 #include "Common/JitRegister.h"
 #include "Common/x64ABI.h"
 #include "Common/x64Emitter.h"
@@ -17,374 +16,429 @@
 #include "Core/PowerPC/Jit64Common/Jit64Constants.h"
 #include "Core/PowerPC/Jit64Common/Jit64PowerPCState.h"
 
-#define QUANTIZED_REGS_TO_SAVE                                                                     \
-  (ABI_ALL_CALLER_SAVED & ~BitSet32{RSCRATCH, RSCRATCH2, RSCRATCH_EXTRA, XMM0 + 16, XMM1 + 16})
-
-#define QUANTIZED_REGS_TO_SAVE_LOAD (QUANTIZED_REGS_TO_SAVE | BitSet32{RSCRATCH2})
-
 using namespace Gen;
 
-alignas(16) static const __m128i double_fraction = _mm_set_epi64x(0, 0x000fffffffffffff);
-alignas(16) static const __m128i double_explicit_top_bit = _mm_set_epi64x(0, 0x0010000000000000);
-alignas(16) static const __m128i double_top_two_bits = _mm_set_epi64x(0, 0xc000000000000000);
-alignas(16) static const __m128i double_bottom_bits = _mm_set_epi64x(0, 0x07ffffffe0000000);
+namespace
+{
+// Host registers the quantized routines may clobber without saving: the
+// three scratch registers plus XMM0 and XMM1, which carry the operands.
+BitSet32 QuantizedSaveSet()
+{
+  return ABI_ALL_CALLER_SAVED &
+         ~BitSet32{RSCRATCH, RSCRATCH2, RSCRATCH_EXTRA, XMM0 + 16, XMM1 + 16};
+}
 
-// Since the following float conversion functions are used in non-arithmetic PPC float
-// instructions, they must convert floats bitexact and never flush denormals to zero or turn SNaNs
-// into QNaNs. This means we can't use CVTSS2SD/CVTSD2SS.
+// Loads additionally keep RSCRATCH2, which holds the scale for the multiply
+// that follows the access.
+BitSet32 QuantizedLoadSaveSet()
+{
+  return QuantizedSaveSet() | BitSet32{RSCRATCH2};
+}
 
-// Another problem is that officially, converting doubles to single format results in undefined
-// behavior.  Relying on undefined behavior is a bug so no software should ever do this.
-// Super Mario 64 (on Wii VC) accidentally relies on this behavior.  See issue #11173
+bool IsReservedQuantizeType(EQuantizeType type)
+{
+  return type == QUANTIZE_INVALID1 || type == QUANTIZE_INVALID2 || type == QUANTIZE_INVALID3;
+}
 
-// This is the same algorithm used in the interpreter (and actual hardware)
-// The documentation states that the conversion of a double with an outside the
-// valid range for a single (or a single denormal) is undefined.
-// But testing on actual hardware shows it always picks bits 0..1 and 5..34
-// unless the exponent is in the range of 874 to 896.
+// Width in bits of one quantized element.
+int QuantizedElementBits(EQuantizeType type)
+{
+  switch (type)
+  {
+  case QUANTIZE_FLOAT:
+    return 32;
+  case QUANTIZE_U8:
+  case QUANTIZE_S8:
+    return 8;
+  case QUANTIZE_U16:
+  case QUANTIZE_S16:
+    return 16;
+  default:
+    return 0;
+  }
+}
 
+// Shared routines receive the address in a register, run with the guest's
+// data translation on, and have no instruction PC of their own.
+int QuantizedAccessFlags(bool is_inline)
+{
+  if (is_inline)
+    return 0;
+  return EmuCodeBlock::SAFE_LOADSTORE_NO_FASTMEM | EmuCodeBlock::SAFE_LOADSTORE_NO_PROLOG |
+         EmuCodeBlock::SAFE_LOADSTORE_DR_ON | EmuCodeBlock::SAFE_LOADSTORE_NO_UPDATE_PC;
+}
+
+// Bit fields of a double, for the bit-exact double -> single narrowing.
+constexpr u64 DOUBLE_SIGN_AND_TOP_EXP = 0xC000000000000000ULL;   // single bits 31-30
+constexpr u64 DOUBLE_LOW_EXP_AND_FRAC = 0x07FFFFFFE0000000ULL;   // single bits 29-0
+constexpr u64 DOUBLE_FRACTION = 0x000FFFFFFFFFFFFFULL;
+constexpr u64 DOUBLE_IMPLICIT_ONE = 0x0010000000000000ULL;
+
+alignas(16) constexpr std::array<u64, 2> NARROW_HIGH_MASK = {DOUBLE_SIGN_AND_TOP_EXP, 0};
+alignas(16) constexpr std::array<u64, 2> NARROW_LOW_MASK = {DOUBLE_LOW_EXP_AND_FRAC, 0};
+alignas(16) constexpr std::array<u64, 2> FRACTION_MASK = {DOUBLE_FRACTION, 0};
+alignas(16) constexpr std::array<u64, 2> IMPLICIT_ONE_BIT = {DOUBLE_IMPLICIT_ONE, 0};
+
+// Per-lane constants for the paired-single rounding fix.
+alignas(16) constexpr std::array<u64, 2> LANE_SIGN_BITS = {0x8000000000000000ULL,
+                                                           0x8000000000000000ULL};
+alignas(16) constexpr std::array<u64, 2> LANE_ONES = {1, 1};
+
+// Clamp bounds for quantized stores.
+alignas(16) constexpr std::array<float, 4> CLAMP_U16_MAX = {65535.0f, 65535.0f, 65535.0f,
+                                                            65535.0f};
+alignas(16) constexpr float CLAMP_S16_MAX = 32767.0f;
+alignas(16) constexpr float CLAMP_S16_MIN = -32768.0f;
+alignas(16) constexpr float CLAMP_U8_MAX = 255.0f;
+alignas(16) constexpr float CLAMP_S8_MAX = 127.0f;
+alignas(16) constexpr float CLAMP_S8_MIN = -128.0f;
+}  // namespace
+
+// Narrows the double in XMM0 to single-precision bits in RSCRATCH exactly as
+// the Gekko does, without CVTSD2SS (which would quiet SNaNs and flush
+// denormals). The Gekko always takes double bits 63-62 and 58-29, except when
+// the exponent is in [874, 896], where the result is a single denormal: the
+// significand with its implicit one shifted right by (905 - exponent) + 21.
+// Out-of-range values that the documentation calls undefined therefore
+// produce the same bits as on hardware.
+//
+// Clobbers RSCRATCH, RSCRATCH2, XMM0 and XMM1.
 void CommonAsmRoutines::GenConvertDoubleToSingle()
 {
-  // Input in XMM0, output to RSCRATCH
-  // Clobbers RSCRATCH/RSCRATCH2/XMM0/XMM1
+  constexpr u16 DENORMAL_EXP_FIRST = 874;
+  constexpr u16 DENORMAL_EXP_LAST = 896;
+  constexpr u16 DENORMAL_SHIFT_BASE = 905 + 21;
 
-  const void* start = GetCodePtr();
+  const u8* const entry = GetCodePtr();
+  const X64Reg result = RSCRATCH;
+  const X64Reg raw = RSCRATCH2;
 
-  // Grab Exponent
-  MOVQ_xmm(R(RSCRATCH), XMM0);
-  MOV(64, R(RSCRATCH2), R(RSCRATCH));
-  SHR(64, R(RSCRATCH), Imm8(52));
-  AND(16, R(RSCRATCH), Imm16(0x7ff));
-
-  // Check if the double is in the range of valid single subnormal
-  SUB(16, R(RSCRATCH), Imm16(874));
-  CMP(16, R(RSCRATCH), Imm16(896 - 874));
-  FixupBranch Denormalize = J_CC(CC_NA);
-
-  // Don't Denormalize
+  MOVQ_xmm(R(result), XMM0);
+  MOV(64, R(raw), R(result));
+  SHR(64, R(result), Imm8(52));
+  AND(16, R(result), Imm16(0x7FF));
+  // result = exponent - first; unsigned <= range means a denormal result.
+  SUB(16, R(result), Imm16(DENORMAL_EXP_FIRST));
+  CMP(16, R(result), Imm16(static_cast<u16>(DENORMAL_EXP_LAST - DENORMAL_EXP_FIRST)));
+  const FixupBranch to_denormal = J_CC(CC_NA);
 
   if (cpu_info.bBMI2FastParallelBitOps)
   {
-    // Extract bits 0-1 and 5-34
-    MOV(64, R(RSCRATCH), Imm64(0xc7ffffffe0000000));
-    PEXT(64, RSCRATCH, RSCRATCH2, R(RSCRATCH));
+    MOV(64, R(result), Imm64(DOUBLE_SIGN_AND_TOP_EXP | DOUBLE_LOW_EXP_AND_FRAC));
+    PEXT(64, result, raw, R(result));
   }
   else
   {
-    // We want bits 0, 1
-    avx_op(&XEmitter::VPAND, &XEmitter::PAND, XMM1, R(XMM0), MConst(double_top_two_bits));
+    // High two bits land in bits 31-30 after >> 32, the rest after >> 29.
+    avx_op(&XEmitter::VPAND, &XEmitter::PAND, XMM1, R(XMM0), MConst(NARROW_HIGH_MASK));
     PSRLQ(XMM1, 32);
-
-    // And 5 through to 34
-    PAND(XMM0, MConst(double_bottom_bits));
+    PAND(XMM0, MConst(NARROW_LOW_MASK));
     PSRLQ(XMM0, 29);
-
-    // OR them together
     POR(XMM0, R(XMM1));
-    MOVD_xmm(R(RSCRATCH), XMM0);
+    MOVD_xmm(R(result), XMM0);
   }
   RET();
 
-  // Denormalise
-  SetJumpTarget(Denormalize);
-
-  // shift = (905 - Exponent) plus the 21 bit double to single shift
-  NEG(16, R(RSCRATCH));
-  ADD(16, R(RSCRATCH), Imm16((905 + 21) - 874));
-  MOVQ_xmm(XMM1, R(RSCRATCH));
-
-  // XMM0 = fraction | 0x0010000000000000
-  PAND(XMM0, MConst(double_fraction));
-  POR(XMM0, MConst(double_explicit_top_bit));
-
-  // fraction >> shift
+  SetJumpTarget(to_denormal);
+  // shift = DENORMAL_SHIFT_BASE - exponent = (DENORMAL_SHIFT_BASE - first) - result
+  NEG(16, R(result));
+  ADD(16, R(result), Imm16(static_cast<u16>(DENORMAL_SHIFT_BASE - DENORMAL_EXP_FIRST)));
+  MOVQ_xmm(XMM1, R(result));
+  PAND(XMM0, MConst(FRACTION_MASK));
+  POR(XMM0, MConst(IMPLICIT_ONE_BIT));
   PSRLQ(XMM0, R(XMM1));
-  MOVD_xmm(R(RSCRATCH), XMM0);
-
-  // OR the sign bit in.
-  SHR(64, R(RSCRATCH2), Imm8(32));
-  AND(32, R(RSCRATCH2), Imm32(0x80000000));
-
-  OR(32, R(RSCRATCH), R(RSCRATCH2));
+  MOVD_xmm(R(result), XMM0);
+  // Bring the sign over from bit 63.
+  SHR(64, R(raw), Imm8(32));
+  AND(32, R(raw), Imm32(0x80000000));
+  OR(32, R(result), R(raw));
   RET();
 
-  Common::JitRegister::Register(start, GetCodePtr(), "JIT_cdts");
+  Common::JitRegister::Register(entry, GetCodePtr(), "JIT_cdts");
 }
 
+void CommonAsmRoutines::RaiseFPSCRException(u32 exception_bit)
+{
+  // FX only goes up on a 0 -> 1 transition of an exception bit.
+  TEST(32, PPCSTATE(fpscr), Imm32(exception_bit));
+  const FixupBranch already_set = J_CC(CC_NZ);
+  OR(32, PPCSTATE(fpscr), Imm32(FPSCR_FX | exception_bit));
+  SetJumpTarget(already_set);
+}
+
+// frsqrte: XMM0 = estimate of 1/sqrt(XMM0), matching the Gekko's lookup
+// table. Positive normal inputs are handled inline; everything else either
+// has a fixed answer or goes to Common::ApproximateReciprocalSquareRoot.
+// Clobbers all three scratch registers.
 void CommonAsmRoutines::GenFrsqrte()
 {
-  const void* start = GetCodePtr();
+  static_assert(sizeof(Common::BaseAndDec) == 8, "table lookups below use SCALE_8");
+  constexpr int dec_offset = static_cast<int>(offsetof(Common::BaseAndDec, m_dec));
+  constexpr int base_offset = static_cast<int>(offsetof(Common::BaseAndDec, m_base));
 
-  // Assume input in XMM0.
-  // This function clobbers all three RSCRATCH.
-  MOVQ_xmm(R(RSCRATCH), XMM0);
+  const u8* const entry = GetCodePtr();
+  const X64Reg bits = RSCRATCH;
+  const X64Reg tmp = RSCRATCH2;
+  const X64Reg top = RSCRATCH_EXTRA;  // sign and exponent, later the table index
 
-  // Extract exponent
-  MOV(64, R(RSCRATCH_EXTRA), R(RSCRATCH));
-  SHR(64, R(RSCRATCH_EXTRA), Imm8(52));
+  MOVQ_xmm(R(bits), XMM0);
+  MOV(64, R(top), R(bits));
+  SHR(64, R(top), Imm8(52));
 
-  // Negatives, zeros, denormals, infinities and NaNs take the complex path.
-  LEA(32, RSCRATCH2, MDisp(RSCRATCH_EXTRA, -1));
-  CMP(32, R(RSCRATCH2), Imm32(0x7FE));
-  FixupBranch complex = J_CC(CC_AE, Jump::Near);
+  // A positive normal number has sign:exponent in [1, 0x7FE].
+  LEA(32, tmp, MDisp(top, -1));
+  CMP(32, R(tmp), Imm32(0x7FE));
+  const FixupBranch special = J_CC(CC_AE, Jump::Near);
 
-  SUB(32, R(RSCRATCH_EXTRA), Imm32(0x3FD));
-  SAR(32, R(RSCRATCH_EXTRA), Imm8(1));
-  MOV(32, R(RSCRATCH2), Imm32(0x3FF));
-  SUB(32, R(RSCRATCH2), R(RSCRATCH_EXTRA));
-  SHL(64, R(RSCRATCH2), Imm8(52));  // exponent = ((0x3FFLL << 52) - ((exponent - (0x3FELL << 52)) /
-                                    // 2)) & (0x7FFLL << 52);
+  // Result exponent: 0x3FF - ((exponent - 0x3FD) >> 1), placed at bit 52.
+  SUB(32, R(top), Imm32(0x3FD));
+  SAR(32, R(top), Imm8(1));
+  MOV(32, R(tmp), Imm32(0x3FF));
+  SUB(32, R(tmp), R(top));
+  SHL(64, R(tmp), Imm8(52));
 
-  MOV(64, R(RSCRATCH_EXTRA), R(RSCRATCH));
-  SHR(64, R(RSCRATCH_EXTRA), Imm8(48));
-  AND(32, R(RSCRATCH_EXTRA), Imm8(0x1F));
+  // Index: exponent parity and the top four fraction bits (input bits 52-48).
+  MOV(64, R(top), R(bits));
+  SHR(64, R(top), Imm8(48));
+  AND(32, R(top), Imm8(0x1F));
 
-  PUSH(RSCRATCH2);
-  MOV(64, R(RSCRATCH2), ImmPtr(GetConstantFromPool(Common::frsqrte_expected)));
-  static_assert(sizeof(Common::BaseAndDec) == 8, "Unable to use SCALE_8; incorrect size");
+  // Fraction: base + dec * (next eleven fraction bits), placed at bit 26.
+  PUSH(tmp);
+  MOV(64, R(tmp), ImmPtr(GetConstantFromPool(Common::frsqrte_expected)));
+  SHR(64, R(bits), Imm8(37));
+  AND(32, R(bits), Imm32(0x7FF));
+  IMUL(32, bits, MComplex(tmp, top, SCALE_8, dec_offset));
+  ADD(32, R(bits), MComplex(tmp, top, SCALE_8, base_offset));
+  SHL(64, R(bits), Imm8(26));
+  POP(tmp);
 
-  SHR(64, R(RSCRATCH), Imm8(37));
-  AND(32, R(RSCRATCH), Imm32(0x7FF));
-  IMUL(32, RSCRATCH,
-       MComplex(RSCRATCH2, RSCRATCH_EXTRA, SCALE_8, offsetof(Common::BaseAndDec, m_dec)));
-  ADD(32, R(RSCRATCH),
-      MComplex(RSCRATCH2, RSCRATCH_EXTRA, SCALE_8, offsetof(Common::BaseAndDec, m_base)));
-  SHL(64, R(RSCRATCH), Imm8(26));
-
-  POP(RSCRATCH2);
-  OR(64, R(RSCRATCH2), R(RSCRATCH));  // vali |= (s64)(frsqrte_expected_base[index] +
-                                      // frsqrte_expected_dec[index] * (i % 2048)) << 26;
-  MOVQ_xmm(XMM0, R(RSCRATCH2));
+  OR(64, R(tmp), R(bits));
+  MOVQ_xmm(XMM0, R(tmp));
   RET();
 
-  SetJumpTarget(complex);
-  AND(32, R(RSCRATCH_EXTRA), Imm32(0x7FF));
-  CMP(32, R(RSCRATCH_EXTRA), Imm32(0x7FF));
-  FixupBranch nan_or_inf = J_CC(CC_E);
+  SetJumpTarget(special);
+  AND(32, R(top), Imm32(0x7FF));
+  CMP(32, R(top), Imm32(0x7FF));
+  const FixupBranch nan_or_infinity = J_CC(CC_E);
 
-  MOV(64, R(RSCRATCH2), R(RSCRATCH));
-  SHL(64, R(RSCRATCH2), Imm8(1));
-  FixupBranch nonzero = J_CC(CC_NZ);
+  // Shifting out the sign leaves ZF = zero and CF = negative.
+  MOV(64, R(tmp), R(bits));
+  SHL(64, R(tmp), Imm8(1));
+  const FixupBranch not_zero = J_CC(CC_NZ);
 
-  // +0.0 or -0.0
-  TEST(32, PPCSTATE(fpscr), Imm32(FPSCR_ZX));
-  FixupBranch skip_set_fx1 = J_CC(CC_NZ);
-  OR(32, PPCSTATE(fpscr), Imm32(FPSCR_FX | FPSCR_ZX));
-  SetJumpTarget(skip_set_fx1);
-  MOV(64, R(RSCRATCH2), Imm64(0x7FF0'0000'0000'0000));
-  OR(64, R(RSCRATCH2), R(RSCRATCH));
-  MOVQ_xmm(XMM0, R(RSCRATCH2));
+  // +-0: divide-by-zero, result is infinity of the same sign.
+  RaiseFPSCRException(FPSCR_ZX);
+  MOV(64, R(tmp), Imm64(0x7FF0'0000'0000'0000));
+  OR(64, R(tmp), R(bits));
+  MOVQ_xmm(XMM0, R(tmp));
   RET();
 
-  // SNaN or QNaN or +Inf or -Inf
-  SetJumpTarget(nan_or_inf);
-  MOV(64, R(RSCRATCH2), R(RSCRATCH));
-  SHL(64, R(RSCRATCH2), Imm8(12));
-  FixupBranch inf = J_CC(CC_Z);
-  BTS(64, R(RSCRATCH), Imm8(51));
-  MOVQ_xmm(XMM0, R(RSCRATCH));
+  SetJumpTarget(nan_or_infinity);
+  MOV(64, R(tmp), R(bits));
+  SHL(64, R(tmp), Imm8(12));
+  const FixupBranch infinity = J_CC(CC_Z);
+  // NaN: returned quieted.
+  BTS(64, R(bits), Imm8(51));
+  MOVQ_xmm(XMM0, R(bits));
   RET();
-  SetJumpTarget(inf);
-  TEST(64, R(RSCRATCH), R(RSCRATCH));
-  FixupBranch negative = J_CC(CC_S);
+
+  SetJumpTarget(infinity);
+  TEST(64, R(bits), R(bits));
+  const FixupBranch negative_infinity = J_CC(CC_S);
+  // +inf: result +0.
   XORPD(XMM0, R(XMM0));
   RET();
 
-  SetJumpTarget(nonzero);
-  FixupBranch denormal = J_CC(CC_NC);
+  // Flags still come from the SHL above.
+  SetJumpTarget(not_zero);
+  const FixupBranch positive_denormal = J_CC(CC_NC);
 
-  // Negative sign
-  SetJumpTarget(negative);
-  TEST(32, PPCSTATE(fpscr), Imm32(FPSCR_VXSQRT));
-  FixupBranch skip_set_fx2 = J_CC(CC_NZ);
-  OR(32, PPCSTATE(fpscr), Imm32(FPSCR_FX | FPSCR_VXSQRT));
-  SetJumpTarget(skip_set_fx2);
-  MOV(64, R(RSCRATCH2), Imm64(0x7FF8'0000'0000'0000));
-  MOVQ_xmm(XMM0, R(RSCRATCH2));
+  // Negative input: invalid operation, default QNaN.
+  SetJumpTarget(negative_infinity);
+  RaiseFPSCRException(FPSCR_VXSQRT);
+  MOV(64, R(tmp), Imm64(0x7FF8'0000'0000'0000));
+  MOVQ_xmm(XMM0, R(tmp));
   RET();
 
-  SetJumpTarget(denormal);
-  ABI_PushRegistersAndAdjustStack(QUANTIZED_REGS_TO_SAVE, 8);
+  SetJumpTarget(positive_denormal);
+  ABI_PushRegistersAndAdjustStack(QuantizedSaveSet(), 8);
   ABI_CallFunction(Common::ApproximateReciprocalSquareRoot);
-  ABI_PopRegistersAndAdjustStack(QUANTIZED_REGS_TO_SAVE, 8);
+  ABI_PopRegistersAndAdjustStack(QuantizedSaveSet(), 8);
   RET();
 
-  Common::JitRegister::Register(start, GetCodePtr(), "JIT_Frsqrte");
+  Common::JitRegister::Register(entry, GetCodePtr(), "JIT_Frsqrte");
 }
 
+// fres: XMM0 = estimate of 1/XMM0 from the Gekko's table. Inputs whose
+// exponent lies in [895, 1149) are handled inline; the rest, and zero (after
+// raising ZX), go to Common::ApproximateReciprocal.
+// Clobbers all three scratch registers.
 void CommonAsmRoutines::GenFres()
 {
-  const void* start = GetCodePtr();
+  static_assert(sizeof(Common::BaseAndDec) == 8, "table lookups below use SCALE_8");
+  constexpr int dec_offset = static_cast<int>(offsetof(Common::BaseAndDec, m_dec));
+  constexpr int base_offset = static_cast<int>(offsetof(Common::BaseAndDec, m_base));
+  constexpr u32 INLINE_EXP_FIRST = 895;
+  constexpr u32 INLINE_EXP_END = 1149;
 
-  // Assume input in XMM0.
-  // This function clobbers all three RSCRATCH.
-  MOVQ_xmm(R(RSCRATCH), XMM0);
+  const u8* const entry = GetCodePtr();
+  const X64Reg bits = RSCRATCH;
+  const X64Reg tmp = RSCRATCH2;
+  const X64Reg high = RSCRATCH_EXTRA;  // exponent, then sign | exponent
 
-  // Zero inputs set an exception and take the complex path.
-  TEST(64, R(RSCRATCH), R(RSCRATCH));
-  FixupBranch zero = J_CC(CC_Z);
+  MOVQ_xmm(R(bits), XMM0);
+  TEST(64, R(bits), R(bits));
+  const FixupBranch zero = J_CC(CC_Z);
 
-  MOV(64, R(RSCRATCH_EXTRA), R(RSCRATCH));
-  SHR(64, R(RSCRATCH_EXTRA), Imm8(52));
-  MOV(32, R(RSCRATCH2), R(RSCRATCH_EXTRA));
-  AND(32, R(RSCRATCH_EXTRA), Imm32(0x7FF));  // exp
-  AND(32, R(RSCRATCH2), Imm32(0x800));       // sign
-  SUB(32, R(RSCRATCH_EXTRA), Imm32(895));
-  CMP(32, R(RSCRATCH_EXTRA), Imm32(1149 - 895));
-  // Take the complex path for very large/small exponents.
-  FixupBranch complex = J_CC(CC_AE);  // if (exp < 895 || exp >= 1149)
+  MOV(64, R(high), R(bits));
+  SHR(64, R(high), Imm8(52));
+  MOV(32, R(tmp), R(high));
+  AND(32, R(high), Imm32(0x7FF));
+  AND(32, R(tmp), Imm32(0x800));
+  SUB(32, R(high), Imm32(INLINE_EXP_FIRST));
+  CMP(32, R(high), Imm32(INLINE_EXP_END - INLINE_EXP_FIRST));
+  const FixupBranch out_of_range = J_CC(CC_AE);
 
-  SUB(32, R(RSCRATCH_EXTRA), Imm32(0x7FD - 895));
-  NEG(32, R(RSCRATCH_EXTRA));
-  OR(32, R(RSCRATCH_EXTRA), R(RSCRATCH2));
-  SHL(64, R(RSCRATCH_EXTRA), Imm8(52));  // vali = sign | exponent
+  // Result exponent 0x7FD - exponent, with the sign kept, placed at bit 52.
+  SUB(32, R(high), Imm32(0x7FD - INLINE_EXP_FIRST));
+  NEG(32, R(high));
+  OR(32, R(high), R(tmp));
+  SHL(64, R(high), Imm8(52));
 
-  MOV(64, R(RSCRATCH2), R(RSCRATCH));
-  SHR(64, R(RSCRATCH), Imm8(37));
-  SHR(64, R(RSCRATCH2), Imm8(47));
-  AND(32, R(RSCRATCH), Imm32(0x3FF));  // i % 1024
-  AND(32, R(RSCRATCH2), Imm8(0x1F));   // i / 1024
+  // tmp = table index (fraction bits 51-47), bits = next ten fraction bits.
+  MOV(64, R(tmp), R(bits));
+  SHR(64, R(bits), Imm8(37));
+  SHR(64, R(tmp), Imm8(47));
+  AND(32, R(bits), Imm32(0x3FF));
+  AND(32, R(tmp), Imm8(0x1F));
 
-  PUSH(RSCRATCH_EXTRA);
-  MOV(64, R(RSCRATCH_EXTRA), ImmPtr(GetConstantFromPool(Common::fres_expected)));
-  static_assert(sizeof(Common::BaseAndDec) == 8, "Unable to use SCALE_8; incorrect size");
+  // Fraction: base - (dec * bits + 1) / 2, placed at bit 29.
+  PUSH(high);
+  MOV(64, R(high), ImmPtr(GetConstantFromPool(Common::fres_expected)));
+  IMUL(32, bits, MComplex(high, tmp, SCALE_8, dec_offset));
+  ADD(32, R(bits), Imm8(1));
+  SHR(32, R(bits), Imm8(1));
+  MOV(32, R(tmp), MComplex(high, tmp, SCALE_8, base_offset));
+  SUB(32, R(tmp), R(bits));
+  SHL(64, R(tmp), Imm8(29));
+  POP(high);
 
-  IMUL(32, RSCRATCH,
-       MComplex(RSCRATCH_EXTRA, RSCRATCH2, SCALE_8, offsetof(Common::BaseAndDec, m_dec)));
-  ADD(32, R(RSCRATCH), Imm8(1));
-  SHR(32, R(RSCRATCH), Imm8(1));
-
-  MOV(32, R(RSCRATCH2),
-      MComplex(RSCRATCH_EXTRA, RSCRATCH2, SCALE_8, offsetof(Common::BaseAndDec, m_base)));
-  SUB(32, R(RSCRATCH2), R(RSCRATCH));
-  SHL(64, R(RSCRATCH2), Imm8(29));
-
-  POP(RSCRATCH_EXTRA);
-
-  OR(64, R(RSCRATCH2), R(RSCRATCH_EXTRA));  // vali |= (s64)(fres_expected_base[i / 1024] -
-                                            // (fres_expected_dec[i / 1024] * (i % 1024) + 1) / 2)
-                                            // << 29
-  MOVQ_xmm(XMM0, R(RSCRATCH2));
+  OR(64, R(tmp), R(high));
+  MOVQ_xmm(XMM0, R(tmp));
   RET();
 
-  // Exception flags for zero input.
   SetJumpTarget(zero);
-  TEST(32, PPCSTATE(fpscr), Imm32(FPSCR_ZX));
-  FixupBranch skip_set_fx1 = J_CC(CC_NZ);
-  OR(32, PPCSTATE(fpscr), Imm32(FPSCR_FX | FPSCR_ZX));
-  SetJumpTarget(skip_set_fx1);
+  RaiseFPSCRException(FPSCR_ZX);
 
-  SetJumpTarget(complex);
-  ABI_PushRegistersAndAdjustStack(QUANTIZED_REGS_TO_SAVE, 8);
+  SetJumpTarget(out_of_range);
+  ABI_PushRegistersAndAdjustStack(QuantizedSaveSet(), 8);
   ABI_CallFunction(Common::ApproximateReciprocal);
-  ABI_PopRegistersAndAdjustStack(QUANTIZED_REGS_TO_SAVE, 8);
+  ABI_PopRegistersAndAdjustStack(QuantizedSaveSet(), 8);
   RET();
 
-  Common::JitRegister::Register(start, GetCodePtr(), "JIT_Fres");
+  Common::JitRegister::Register(entry, GetCodePtr(), "JIT_Fres");
 }
 
+// mfcr: builds the 32-bit CR in RSCRATCH from the eight 64-bit emulated CR
+// fields, field 0 ending up in the top nibble.
+// Clobbers all three scratch registers.
 void CommonAsmRoutines::GenMfcr()
 {
-  const void* start = GetCodePtr();
+  const u8* const entry = GetCodePtr();
+  const X64Reg cr = RSCRATCH;
+  const X64Reg flag = RSCRATCH2;
+  const X64Reg field = RSCRATCH_EXTRA;
 
-  // Input: none
-  // Output: RSCRATCH
-  // This function clobbers all three RSCRATCH.
-  X64Reg dst = RSCRATCH;
-  X64Reg tmp = RSCRATCH2;
-  X64Reg cr_val = RSCRATCH_EXTRA;
-  XOR(32, R(dst), R(dst));
-  // Upper bits of tmp need to be zeroed.
-  XOR(32, R(tmp), R(tmp));
-  for (int i = 0; i < 8; i++)
+  XOR(32, R(cr), R(cr));
+  // SETcc only writes the low byte; the LEAs read all of `flag`.
+  XOR(32, R(flag), R(flag));
+
+  for (int index = 0; index < 8; ++index)
   {
-    if (i != 0)
-      SHL(32, R(dst), Imm8(4));
+    if (index > 0)
+      SHL(32, R(cr), Imm8(4));
+    MOV(64, R(field), PPCSTATE_CR(index));
 
-    MOV(64, R(cr_val), PPCSTATE_CR(i));
+    // EQ (bit 1): the low 32 bits are zero.
+    TEST(32, R(field), R(field));
+    SETcc(CC_Z, R(flag));
+    LEA(32, cr, MComplex(cr, flag, SCALE_2, 0));
 
-    // EQ: Bits 31-0 == 0; set flag bit 1
-    TEST(32, R(cr_val), R(cr_val));
-    SETcc(CC_Z, R(tmp));
-    LEA(32, dst, MComplex(dst, tmp, SCALE_2, 0));
+    // GT (bit 2): the value is positive.
+    TEST(64, R(field), R(field));
+    SETcc(CC_G, R(flag));
+    LEA(32, cr, MComplex(cr, flag, SCALE_4, 0));
 
-    // GT: Value > 0; set flag bit 2
-    TEST(64, R(cr_val), R(cr_val));
-    SETcc(CC_G, R(tmp));
-    LEA(32, dst, MComplex(dst, tmp, SCALE_4, 0));
-
-    // SO: Bit 59 set; set flag bit 0
-    // LT: Bit 62 set; set flag bit 3
-    SHR(64, R(cr_val), Imm8(PowerPC::CR_EMU_SO_BIT));
-    AND(32, R(cr_val), Imm8(PowerPC::CR_LT | PowerPC::CR_SO));
-    OR(32, R(dst), R(cr_val));
+    // SO (bit 0) and LT (bit 3) are stored at bits 59 and 62.
+    SHR(64, R(field), Imm8(PowerPC::CR_EMU_SO_BIT));
+    AND(32, R(field), Imm8(PowerPC::CR_LT | PowerPC::CR_SO));
+    OR(32, R(cr), R(field));
   }
   RET();
 
-  Common::JitRegister::Register(start, GetCodePtr(), "JIT_Mfcr");
+  Common::JitRegister::Register(entry, GetCodePtr(), "JIT_Mfcr");
 }
 
-// Inputs:
-// XMM0: First error term
-// XMM1: Result with potentially incorrect rounding
-// XMM2: Second error term, negated
+// Corrects the rounding of an fmadds result computed with an error-free
+// transformation. A single-rounded result can only be wrong when it sits
+// exactly halfway between two singles (as a double: low 29 bits ==
+// 0x10000000) and the residual error is non-zero; it is then stepped one ulp
+// towards the error's sign.
 //
-// Outputs result with corrected rounding in XMM1.
-// Clobbers RSCRATCH, RSCRATCH2, XMM0, XMM2, and flags.
+// In: XMM0 = first error term, XMM1 = result, XMM2 = negated second error
+// term. Out: XMM1. Clobbers RSCRATCH, RSCRATCH2, XMM0, XMM2 and flags.
 void CommonAsmRoutines::GenerateFmaddsEft()
 {
-  // Check if XMM1 is an even tie, i.e. check (input & 0x1fffffff) == 0x10000000
-  MOVQ_xmm(R(RSCRATCH), XMM1);
-  MOV(32, R(RSCRATCH2), Imm32(0x80000000));
-  LEA(32, RSCRATCH2, MComplex(RSCRATCH2, RSCRATCH, SCALE_8, 0));
-  TEST(32, R(RSCRATCH2), R(RSCRATCH2));
-  FixupBranch even_tie = J_CC(CCFlags::CC_Z);
+  const X64Reg result_bits = RSCRATCH;
+  const X64Reg probe = RSCRATCH2;
 
-  const u8* ret = GetCodePtr();
+  // (bits << 3) + 0x80000000 is zero in its low 32 bits exactly at a tie.
+  MOVQ_xmm(R(result_bits), XMM1);
+  MOV(32, R(probe), Imm32(0x80000000));
+  LEA(32, probe, MComplex(probe, result_bits, SCALE_8, 0));
+  TEST(32, R(probe), R(probe));
+  const FixupBranch tie = J_CC(CCFlags::CC_Z);
+
+  const u8* const done = GetCodePtr();
   RET();
 
-  // Check if the error is 0
-  SetJumpTarget(even_tie);
+  SetJumpTarget(tie);
   SUBSD(XMM0, R(XMM2));
   XORPD(XMM2, R(XMM2));
   UCOMISD(XMM0, R(XMM2));
-  J_CC(CCFlags::CC_E, ret);
+  J_CC(CCFlags::CC_E, done);
 
-  // Round XMM1 up or down
-  MOVQ_xmm(R(RSCRATCH2), XMM0);
-  XOR(64, R(RSCRATCH2), R(RSCRATCH));
-  SAR(64, R(RSCRATCH2), Imm8(63));
-  OR(64, R(RSCRATCH2), Imm8(1));
-  ADD(64, R(RSCRATCH), R(RSCRATCH2));
-  MOVQ_xmm(XMM1, R(RSCRATCH));
+  // step = (error ^ result) < 0 ? -1 : +1, applied to the bit pattern.
+  MOVQ_xmm(R(probe), XMM0);
+  XOR(64, R(probe), R(result_bits));
+  SAR(64, R(probe), Imm8(63));
+  OR(64, R(probe), Imm8(1));
+  ADD(64, R(result_bits), R(probe));
+  MOVQ_xmm(XMM1, R(result_bits));
   RET();
 }
 
-alignas(16) static const __m128i double_msb = _mm_set_epi64x(0x8000000000000000,
-                                                             0x8000000000000000);
-alignas(16) static const __m128i double_lsb = _mm_set_epi64x(1, 1);
-
-// Inputs:
-// XMM0: First error terms
-// XMM1: Results with potentially incorrect rounding
-// XMM2: Second error terms, negated
+// The two-lane version of GenerateFmaddsEft for ps_madd and friends.
 //
-// Outputs results with corrected rounding in XMM1. Clobbers RSCRATCH, XMM0-XMM3, and flags.
+// In: XMM0 = first error terms, XMM1 = results, XMM2 = negated second error
+// terms. Out: XMM1. Clobbers RSCRATCH, XMM0-XMM3 and flags.
 void CommonAsmRoutines::GeneratePsMaddEft()
 {
-  // Check if XMM1 has an even tie, i.e. check (input & 0x1fffffff) == 0x10000000
+  // XMM3 = all-ones in each lane whose result is at a tie.
   avx_op(&XEmitter::VPSLLQ, &XEmitter::PSLLQ, XMM3, XMM1, 35);
   if (cpu_info.bSSE4_1)
   {
-    PCMPEQQ(XMM3, MConst(double_msb));
+    PCMPEQQ(XMM3, MConst(LANE_SIGN_BITS));
   }
   else
   {
-    PCMPEQW(XMM3, MConst(double_msb));
+    // Compare 16-bit pieces, then spread the result of the top dword's high
+    // half over the whole lane.
+    PCMPEQW(XMM3, MConst(LANE_SIGN_BITS));
     PSHUFD(XMM3, R(XMM3), 0xF5);
   }
 
-  // Just for performance, exit early if there is no even tie
+  // Most of the time neither lane is a tie.
   if (cpu_info.bSSE4_1)
   {
     PTEST(XMM3, R(XMM3));
@@ -394,222 +448,216 @@ void CommonAsmRoutines::GeneratePsMaddEft()
     PMOVMSKB(RSCRATCH, R(XMM3));
     TEST(32, R(RSCRATCH), R(RSCRATCH));
   }
-  FixupBranch even_tie = J_CC(CCFlags::CC_NZ);
+  const FixupBranch any_tie = J_CC(CCFlags::CC_NZ);
   RET();
-  SetJumpTarget(even_tie);
+  SetJumpTarget(any_tie);
 
-  // Check if the error is zero
+  // XMM2 = lanes whose error is exactly zero.
   SUBPD(XMM0, R(XMM2));
   XORPD(XMM2, R(XMM2));
   CMPPD(XMM2, R(XMM0), CMP_EQ);
 
-  // Store -1 or 1 in XMM0 depending on whether we're rounding down or up
+  // XMM0 = per-lane step of -1 or +1 from the sign of error ^ result.
   PXOR(XMM0, R(XMM1));
   PSRAD(XMM0, 31);
   PSHUFD(XMM0, R(XMM0), 0xF5);
-  POR(XMM0, MConst(double_lsb));
+  POR(XMM0, MConst(LANE_ONES));
 
-  // Round the elements that have both a non-zero error and an even tie
+  // Step only lanes that are at a tie and have a non-zero error.
   PANDN(XMM2, R(XMM3));
   PAND(XMM0, R(XMM2));
   PADDQ(XMM1, R(XMM0));
   RET();
 }
 
-// Safe + Fast Quantizers, originally from JITIL by magumagu
-alignas(16) static const float m_65535[4] = {65535.0f, 65535.0f, 65535.0f, 65535.0f};
-alignas(16) static const float m_32767 = 32767.0f;
-alignas(16) static const float m_m32768 = -32768.0f;
-alignas(16) static const float m_255 = 255.0f;
-alignas(16) static const float m_127 = 127.0f;
-alignas(16) static const float m_m128 = -128.0f;
-
-// Sizes of the various quantized store types
-constexpr std::array<u8, 8> sizes{{32, 0, 0, 0, 8, 16, 8, 16}};
-
-void CommonAsmRoutines::GenQuantizedStores()
+const u8** CommonAsmRoutines::GenQuantizedTable(bool load, bool single)
 {
-  // Aligned to 256 bytes as least significant byte needs to be zero (See: Jit64::psq_stXX).
-  paired_store_quantized = reinterpret_cast<const u8**>(AlignCodeTo(256));
+  // Jit64's psq_l/psq_st index the table with the GQR type already in a
+  // byte position, so the table must start on a 256-byte boundary.
+  const u8** const table = reinterpret_cast<const u8**>(AlignCodeTo(256));
   ReserveCodeSpace(8 * sizeof(u8*));
 
-  for (int type = 0; type < 8; type++)
+  for (u32 index = 0; index < 8; ++index)
   {
-    paired_store_quantized[type] =
-        GenQuantizedStoreRuntime(false, static_cast<EQuantizeType>(type));
+    const auto type = static_cast<EQuantizeType>(index);
+    table[index] =
+        load ? GenQuantizedLoadRuntime(single, type) : GenQuantizedStoreRuntime(single, type);
   }
-}
-
-// See comment in header for in/outs.
-void CommonAsmRoutines::GenQuantizedSingleStores()
-{
-  // Aligned to 256 bytes as least significant byte needs to be zero (See: Jit64::psq_stXX).
-  single_store_quantized = reinterpret_cast<const u8**>(AlignCodeTo(256));
-  ReserveCodeSpace(8 * sizeof(u8*));
-
-  for (int type = 0; type < 8; type++)
-    single_store_quantized[type] = GenQuantizedStoreRuntime(true, static_cast<EQuantizeType>(type));
-}
-
-const u8* CommonAsmRoutines::GenQuantizedStoreRuntime(bool single, EQuantizeType type)
-{
-  const void* start = GetCodePtr();
-  const u8* load = AlignCode4();
-  GenQuantizedStore(single, type, -1);
-  RET();
-  Common::JitRegister::Register(start, GetCodePtr(), "JIT_QuantizedStore_{}_{}",
-                                std::to_underlying(type), single);
-
-  return load;
+  return table;
 }
 
 void CommonAsmRoutines::GenQuantizedLoads()
 {
-  // Aligned to 256 bytes as least significant byte needs to be zero (See: Jit64::psq_lXX).
-  paired_load_quantized = reinterpret_cast<const u8**>(AlignCodeTo(256));
-  ReserveCodeSpace(8 * sizeof(u8*));
-
-  for (int type = 0; type < 8; type++)
-    paired_load_quantized[type] = GenQuantizedLoadRuntime(false, static_cast<EQuantizeType>(type));
+  paired_load_quantized = GenQuantizedTable(true, false);
 }
 
 void CommonAsmRoutines::GenQuantizedSingleLoads()
 {
-  // Aligned to 256 bytes as least significant byte needs to be zero (See: Jit64::psq_lXX).
-  single_load_quantized = reinterpret_cast<const u8**>(AlignCodeTo(256));
-  ReserveCodeSpace(8 * sizeof(u8*));
+  single_load_quantized = GenQuantizedTable(true, true);
+}
 
-  for (int type = 0; type < 8; type++)
-    single_load_quantized[type] = GenQuantizedLoadRuntime(true, static_cast<EQuantizeType>(type));
+void CommonAsmRoutines::GenQuantizedStores()
+{
+  paired_store_quantized = GenQuantizedTable(false, false);
+}
+
+void CommonAsmRoutines::GenQuantizedSingleStores()
+{
+  single_store_quantized = GenQuantizedTable(false, true);
 }
 
 const u8* CommonAsmRoutines::GenQuantizedLoadRuntime(bool single, EQuantizeType type)
 {
-  const void* start = GetCodePtr();
-  const u8* load = AlignCode4();
+  const u8* const region = GetCodePtr();
+  const u8* const entry = AlignCode4();
   GenQuantizedLoad(single, type, -1);
   RET();
-  Common::JitRegister::Register(start, GetCodePtr(), "JIT_QuantizedLoad_{}_{}",
+  Common::JitRegister::Register(region, GetCodePtr(), "JIT_QuantizedLoad_{}_{}",
                                 std::to_underlying(type), single);
-
-  return load;
+  return entry;
 }
 
+const u8* CommonAsmRoutines::GenQuantizedStoreRuntime(bool single, EQuantizeType type)
+{
+  const u8* const region = GetCodePtr();
+  const u8* const entry = AlignCode4();
+  GenQuantizedStore(single, type, -1);
+  RET();
+  Common::JitRegister::Register(region, GetCodePtr(), "JIT_QuantizedStore_{}_{}",
+                                std::to_underlying(type), single);
+  return entry;
+}
+
+void QuantizedMemoryRoutines::ApplyQuantizeScale(bool single, int quantize, bool load)
+{
+  const auto& table = load ? m_dequantizeTableS : m_quantizeTableS;
+
+  // The table holds each scale twice (one per lane), so scale s is at float
+  // index 2 * s. The shared routines get the GQR scale field as s << 8 in
+  // RSCRATCH2; >> 5 turns that into the byte offset 8 * s.
+  OpArg factor;
+  if (quantize == -1)
+  {
+    SHR(32, R(RSCRATCH2), Imm8(5));
+    LEA(64, RSCRATCH, MConst(table));
+    factor = MRegSum(RSCRATCH2, RSCRATCH);
+  }
+  else if (quantize > 0)
+  {
+    factor = MConst(table, static_cast<size_t>(quantize) * 2);
+  }
+  else
+  {
+    // Scale 0 is a factor of one.
+    return;
+  }
+
+  if (single)
+  {
+    MULSS(XMM0, factor);
+  }
+  else
+  {
+    MOVQ_xmm(XMM1, factor);
+    MULPS(XMM0, R(XMM1));
+  }
+}
+
+// In: one (single) or two singles in XMM0 and the address in RSCRATCH_EXTRA;
+// for the shared routines (quantize == -1) also the scale field in RSCRATCH2.
 void QuantizedMemoryRoutines::GenQuantizedStore(bool single, EQuantizeType type, int quantize)
 {
-  // In: one or two single floats in XMM0, if quantize is -1, a quantization factor in RSCRATCH2
-
-  int size = sizes[type] * (single ? 1 : 2);
-  bool isInline = quantize != -1;
-
-  // illegal
-  if (type == QUANTIZE_INVALID1 || type == QUANTIZE_INVALID2 || type == QUANTIZE_INVALID3)
+  // Reserved GQR types trap, as in the old JIT.
+  if (IsReservedQuantizeType(type))
   {
     UD2();
     return;
   }
 
+  const bool is_inline = quantize != -1;
+  const int access_bits = QuantizedElementBits(type) * (single ? 1 : 2);
+
   if (type == QUANTIZE_FLOAT)
   {
-    GenQuantizedStoreFloat(single, isInline);
+    GenQuantizedStoreFloat(single, is_inline);
   }
   else if (single)
   {
-    if (quantize == -1)
-    {
-      SHR(32, R(RSCRATCH2), Imm8(5));
-      LEA(64, RSCRATCH, MConst(m_quantizeTableS));
-      MULSS(XMM0, MRegSum(RSCRATCH2, RSCRATCH));
-    }
-    else if (quantize > 0)
-    {
-      MULSS(XMM0, MConst(m_quantizeTableS, quantize * 2));
-    }
+    ApplyQuantizeScale(true, quantize, false);
 
+    // Saturate to the integer range before the truncating conversion.
+    const auto clamp_from_zero = [&](const OpArg& max) {
+      XORPS(XMM1, R(XMM1));
+      MAXSS(XMM0, R(XMM1));
+      MINSS(XMM0, max);
+    };
+    const auto clamp = [&](const OpArg& min, const OpArg& max) {
+      MAXSS(XMM0, min);
+      MINSS(XMM0, max);
+    };
     switch (type)
     {
     case QUANTIZE_U8:
-      XORPS(XMM1, R(XMM1));
-      MAXSS(XMM0, R(XMM1));
-      MINSS(XMM0, MConst(m_255));
+      clamp_from_zero(MConst(CLAMP_U8_MAX));
       break;
     case QUANTIZE_S8:
-      MAXSS(XMM0, MConst(m_m128));
-      MINSS(XMM0, MConst(m_127));
+      clamp(MConst(CLAMP_S8_MIN), MConst(CLAMP_S8_MAX));
       break;
     case QUANTIZE_U16:
-      XORPS(XMM1, R(XMM1));
-      MAXSS(XMM0, R(XMM1));
-      MINSS(XMM0, MConst(m_65535));
+      clamp_from_zero(MConst(CLAMP_U16_MAX));
       break;
     case QUANTIZE_S16:
-      MAXSS(XMM0, MConst(m_m32768));
-      MINSS(XMM0, MConst(m_32767));
+      clamp(MConst(CLAMP_S16_MIN), MConst(CLAMP_S16_MAX));
       break;
     default:
       break;
     }
-
     CVTTSS2SI(RSCRATCH, R(XMM0));
   }
   else
   {
-    if (quantize == -1)
-    {
-      SHR(32, R(RSCRATCH2), Imm8(5));
-      LEA(64, RSCRATCH, MConst(m_quantizeTableS));
-      MOVQ_xmm(XMM1, MRegSum(RSCRATCH2, RSCRATCH));
-      MULPS(XMM0, R(XMM1));
-    }
-    else if (quantize > 0)
-    {
-      MOVQ_xmm(XMM1, MConst(m_quantizeTableS, quantize * 2));
-      MULPS(XMM0, R(XMM1));
-    }
+    ApplyQuantizeScale(false, quantize, false);
 
-    bool hasPACKUSDW = cpu_info.bSSE4_1;
-
-    // Special case: if we don't have PACKUSDW we need to clamp to zero as well so the shuffle
-    // below can work
-    if (type == QUANTIZE_U16 && !hasPACKUSDW)
+    // PACKUSDW saturates unsigned 16-bit directly; the shuffle fallback below
+    // needs non-negative inputs.
+    const bool has_packusdw = cpu_info.bSSE4_1;
+    if (type == QUANTIZE_U16 && !has_packusdw)
     {
       XORPS(XMM1, R(XMM1));
       MAXPS(XMM0, R(XMM1));
     }
 
-    // According to Intel Docs CVTPS2DQ writes 0x80000000 if the source floating point value
-    // is out of int32 range while it's OK for large negatives, it isn't for positives
-    // I don't know whether the overflow actually happens in any games but it potentially can
-    // cause problems, so we need some clamping
-    MINPS(XMM0, MConst(m_65535));
+    // CVTTPS2DQ turns positive overflow into 0x80000000, so clip from above
+    // first; the packing below does the rest of the saturation.
+    MINPS(XMM0, MConst(CLAMP_U16_MAX));
     CVTTPS2DQ(XMM0, R(XMM0));
 
+    // Pack both lanes into RSCRATCH in guest order.
     switch (type)
     {
     case QUANTIZE_U8:
-      PACKSSDW(XMM0, R(XMM0));
-      PACKUSWB(XMM0, R(XMM0));
-      MOVD_xmm(R(RSCRATCH), XMM0);
-      break;
     case QUANTIZE_S8:
       PACKSSDW(XMM0, R(XMM0));
-      PACKSSWB(XMM0, R(XMM0));
+      if (type == QUANTIZE_U8)
+        PACKUSWB(XMM0, R(XMM0));
+      else
+        PACKSSWB(XMM0, R(XMM0));
       MOVD_xmm(R(RSCRATCH), XMM0);
       break;
     case QUANTIZE_U16:
-      if (hasPACKUSDW)
+      if (has_packusdw)
       {
-        PACKUSDW(XMM0, R(XMM0));         // AAAABBBB CCCCDDDD ... -> AABBCCDD ...
-        MOVD_xmm(R(RSCRATCH), XMM0);     // AABBCCDD ... -> AABBCCDD
-        BSWAP(32, RSCRATCH);             // AABBCCDD -> DDCCBBAA
-        ROL(32, R(RSCRATCH), Imm8(16));  // DDCCBBAA -> BBAADDCC
+        PACKUSDW(XMM0, R(XMM0));
+        MOVD_xmm(R(RSCRATCH), XMM0);
+        BSWAP(32, RSCRATCH);
+        ROL(32, R(RSCRATCH), Imm8(16));
       }
       else
       {
-        // We don't have PACKUSDW so we'll shuffle instead (assumes 32-bit values >= 0 and < 65536)
-        PSHUFLW(XMM0, R(XMM0), 2);    // AABB0000 CCDD0000 ... -> CCDDAABB ...
-        MOVD_xmm(R(RSCRATCH), XMM0);  // CCDDAABB ... -> CCDDAABB
-        BSWAP(32, RSCRATCH);          // CCDDAABB -> BBAADDCC
+        // Values are in [0, 65535], so moving words 0 and 2 together packs them.
+        PSHUFLW(XMM0, R(XMM0), 2);
+        MOVD_xmm(R(RSCRATCH), XMM0);
+        BSWAP(32, RSCRATCH);
       }
       break;
     case QUANTIZE_S16:
@@ -623,176 +671,120 @@ void QuantizedMemoryRoutines::GenQuantizedStore(bool single, EQuantizeType type,
     }
   }
 
-  int flags = isInline ? 0 :
-                         SAFE_LOADSTORE_NO_FASTMEM | SAFE_LOADSTORE_NO_PROLOG |
-                             SAFE_LOADSTORE_DR_ON | SAFE_LOADSTORE_NO_UPDATE_PC;
+  // Paired values were put in guest byte order above.
+  int flags = QuantizedAccessFlags(is_inline);
   if (!single)
     flags |= SAFE_LOADSTORE_NO_SWAP;
-
-  SafeWriteRegToReg(RSCRATCH, RSCRATCH_EXTRA, size, 0, QUANTIZED_REGS_TO_SAVE, flags);
+  SafeWriteRegToReg(RSCRATCH, RSCRATCH_EXTRA, access_bits, 0, QuantizedSaveSet(), flags);
 }
 
-void QuantizedMemoryRoutines::GenQuantizedStoreFloat(bool single, bool isInline)
+void QuantizedMemoryRoutines::GenQuantizedStoreFloat(bool single, bool /*isInline*/)
 {
   if (single)
   {
-    // Easy!
     MOVD_xmm(R(RSCRATCH), XMM0);
+    return;
+  }
+
+  // Swap each single into guest order while keeping lane 0 first.
+  if (cpu_info.bSSSE3)
+  {
+    PSHUFB(XMM0, MConst(pbswapShuffle2x4));
+    MOVQ_xmm(R(RSCRATCH), XMM0);
   }
   else
   {
-    if (cpu_info.bSSSE3)
-    {
-      PSHUFB(XMM0, MConst(pbswapShuffle2x4));
-      MOVQ_xmm(R(RSCRATCH), XMM0);
-    }
-    else
-    {
-      MOVQ_xmm(R(RSCRATCH), XMM0);
-      ROL(64, R(RSCRATCH), Imm8(32));
-      BSWAP(64, RSCRATCH);
-    }
+    MOVQ_xmm(R(RSCRATCH), XMM0);
+    ROL(64, R(RSCRATCH), Imm8(32));
+    BSWAP(64, RSCRATCH);
   }
 }
 
+// In: the address in RSCRATCH_EXTRA; for the shared routines (quantize == -1)
+// the scale field in RSCRATCH2 (as 0x0000ss00). Out: XMM0, with lane 1 set to
+// 1.0 for single loads.
 void QuantizedMemoryRoutines::GenQuantizedLoad(bool single, EQuantizeType type, int quantize)
 {
-  // Note that this method assumes that inline methods know the value of quantize ahead of
-  // time. The methods generated AOT assume that the quantize flag is placed in RSCRATCH in
-  // the second lowest byte, ie: 0x0000xx00
-
-  int size = sizes[type] * (single ? 1 : 2);
-  bool isInline = quantize != -1;
-
-  // illegal
-  if (type == QUANTIZE_INVALID1 || type == QUANTIZE_INVALID2 || type == QUANTIZE_INVALID3)
+  if (IsReservedQuantizeType(type))
   {
     UD2();
     return;
   }
 
-  // Floats don't use quantization and can generate more optimal code
+  const bool is_inline = quantize != -1;
   if (type == QUANTIZE_FLOAT)
   {
-    GenQuantizedLoadFloat(single, isInline);
+    GenQuantizedLoadFloat(single, is_inline);
     return;
   }
 
-  bool extend = single && (type == QUANTIZE_S8 || type == QUANTIZE_S16);
+  const int access_bits = QuantizedElementBits(type) * (single ? 1 : 2);
+  const bool is_signed = type == QUANTIZE_S8 || type == QUANTIZE_S16;
+  const bool is_byte = type == QUANTIZE_U8 || type == QUANTIZE_S8;
 
-  BitSet32 regsToSave = QUANTIZED_REGS_TO_SAVE_LOAD;
-  int flags = isInline ? 0 :
-                         SAFE_LOADSTORE_NO_FASTMEM | SAFE_LOADSTORE_NO_PROLOG |
-                             SAFE_LOADSTORE_DR_ON | SAFE_LOADSTORE_NO_UPDATE_PC;
-  SafeLoadToReg(RSCRATCH_EXTRA, R(RSCRATCH_EXTRA), size, 0, regsToSave, extend, flags);
-  if (!single && (type == QUANTIZE_U8 || type == QUANTIZE_S8))
-  {
-    // TODO: Support not swapping in safeLoadToReg to avoid bswapping twice
+  // Single values are sign-extended by the load; paired values are unpacked
+  // below.
+  SafeLoadToReg(RSCRATCH_EXTRA, R(RSCRATCH_EXTRA), access_bits, 0, QuantizedLoadSaveSet(),
+                single && is_signed, QuantizedAccessFlags(is_inline));
+  // A paired byte load comes back as a byte-swapped halfword; undo that.
+  if (!single && is_byte)
     ROR(16, R(RSCRATCH_EXTRA), Imm8(8));
-  }
 
   if (single)
   {
     CVTSI2SS(XMM0, R(RSCRATCH_EXTRA));
-
-    if (quantize == -1)
-    {
-      SHR(32, R(RSCRATCH2), Imm8(5));
-      LEA(64, RSCRATCH, MConst(m_dequantizeTableS));
-      MULSS(XMM0, MRegSum(RSCRATCH2, RSCRATCH));
-    }
-    else if (quantize > 0)
-    {
-      MULSS(XMM0, MConst(m_dequantizeTableS, quantize * 2));
-    }
+    ApplyQuantizeScale(true, quantize, true);
     UNPCKLPS(XMM0, MConst(m_one));
+    return;
   }
-  else
+
+  // Widen the two elements to 32-bit integers in lanes 0 and 1.
+  if (!is_byte)
+    ROL(32, R(RSCRATCH_EXTRA), Imm8(16));
+  MOVD_xmm(XMM0, R(RSCRATCH_EXTRA));
+  if (cpu_info.bSSE4_1)
   {
     switch (type)
     {
     case QUANTIZE_U8:
-      MOVD_xmm(XMM0, R(RSCRATCH_EXTRA));
-      if (cpu_info.bSSE4_1)
-      {
-        PMOVZXBD(XMM0, R(XMM0));
-      }
-      else
-      {
-        PXOR(XMM1, R(XMM1));
-        PUNPCKLBW(XMM0, R(XMM1));
-        PUNPCKLWD(XMM0, R(XMM1));
-      }
+      PMOVZXBD(XMM0, R(XMM0));
       break;
     case QUANTIZE_S8:
-      MOVD_xmm(XMM0, R(RSCRATCH_EXTRA));
-      if (cpu_info.bSSE4_1)
-      {
-        PMOVSXBD(XMM0, R(XMM0));
-      }
-      else
-      {
-        PUNPCKLBW(XMM0, R(XMM0));
-        PUNPCKLWD(XMM0, R(XMM0));
-        PSRAD(XMM0, 24);
-      }
+      PMOVSXBD(XMM0, R(XMM0));
       break;
     case QUANTIZE_U16:
-      ROL(32, R(RSCRATCH_EXTRA), Imm8(16));
-      MOVD_xmm(XMM0, R(RSCRATCH_EXTRA));
-      if (cpu_info.bSSE4_1)
-      {
-        PMOVZXWD(XMM0, R(XMM0));
-      }
-      else
-      {
-        PXOR(XMM1, R(XMM1));
-        PUNPCKLWD(XMM0, R(XMM1));
-      }
-      break;
-    case QUANTIZE_S16:
-      ROL(32, R(RSCRATCH_EXTRA), Imm8(16));
-      MOVD_xmm(XMM0, R(RSCRATCH_EXTRA));
-      if (cpu_info.bSSE4_1)
-      {
-        PMOVSXWD(XMM0, R(XMM0));
-      }
-      else
-      {
-        PUNPCKLWD(XMM0, R(XMM0));
-        PSRAD(XMM0, 16);
-      }
+      PMOVZXWD(XMM0, R(XMM0));
       break;
     default:
+      PMOVSXWD(XMM0, R(XMM0));
       break;
     }
-    CVTDQ2PS(XMM0, R(XMM0));
-
-    if (quantize == -1)
-    {
-      SHR(32, R(RSCRATCH2), Imm8(5));
-      LEA(64, RSCRATCH, MConst(m_dequantizeTableS));
-      MOVQ_xmm(XMM1, MRegSum(RSCRATCH2, RSCRATCH));
-      MULPS(XMM0, R(XMM1));
-    }
-    else if (quantize > 0)
-    {
-      MOVQ_xmm(XMM1, MConst(m_dequantizeTableS, quantize * 2));
-      MULPS(XMM0, R(XMM1));
-    }
   }
+  else if (is_signed)
+  {
+    // Interleave each element with itself, then shift the copy down.
+    if (is_byte)
+      PUNPCKLBW(XMM0, R(XMM0));
+    PUNPCKLWD(XMM0, R(XMM0));
+    PSRAD(XMM0, is_byte ? 24 : 16);
+  }
+  else
+  {
+    // Interleave with zeros.
+    PXOR(XMM1, R(XMM1));
+    if (is_byte)
+      PUNPCKLBW(XMM0, R(XMM1));
+    PUNPCKLWD(XMM0, R(XMM1));
+  }
+  CVTDQ2PS(XMM0, R(XMM0));
+  ApplyQuantizeScale(false, quantize, true);
 }
 
 void QuantizedMemoryRoutines::GenQuantizedLoadFloat(bool single, bool isInline)
 {
-  int size = single ? 32 : 64;
-  bool extend = false;
-
-  BitSet32 regsToSave = QUANTIZED_REGS_TO_SAVE;
-  int flags = isInline ? 0 :
-                         SAFE_LOADSTORE_NO_FASTMEM | SAFE_LOADSTORE_NO_PROLOG |
-                             SAFE_LOADSTORE_DR_ON | SAFE_LOADSTORE_NO_UPDATE_PC;
-  SafeLoadToReg(RSCRATCH_EXTRA, R(RSCRATCH_EXTRA), size, 0, regsToSave, extend, flags);
+  // Float loads need no scale, so RSCRATCH2 is not preserved here.
+  SafeLoadToReg(RSCRATCH_EXTRA, R(RSCRATCH_EXTRA), single ? 32 : 64, 0, QuantizedSaveSet(), false,
+                QuantizedAccessFlags(isInline));
 
   if (single)
   {
@@ -801,6 +793,7 @@ void QuantizedMemoryRoutines::GenQuantizedLoadFloat(bool single, bool isInline)
   }
   else
   {
+    // The 64-bit load swapped the pair as a whole; put lane 0 back first.
     ROL(64, R(RSCRATCH_EXTRA), Imm8(32));
     MOVQ_xmm(XMM0, R(RSCRATCH_EXTRA));
   }
