@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -22,11 +21,14 @@ namespace CoreTiming
 struct EventType;
 }
 
+// The command processor's CPU-visible side (0x0C000000 on the console): the GP FIFO window in
+// main memory, its read/write pointers and watermarks, plus status/control/interrupt handling.
 namespace CommandProcessor
 {
+// FIFO bookkeeping shared between the CPU thread (gather pipe, MMIO) and the GPU thread.
+// The field order is the savestate order.
 struct SCPFifoStruct
 {
-  // fifo registers
   std::atomic<u32> CPBase = 0;
   std::atomic<u32> CPEnd = 0;
   u32 CPHiWatermark = 0;
@@ -35,6 +37,7 @@ struct SCPFifoStruct
   std::atomic<u32> CPWritePointer = 0;
   std::atomic<u32> CPReadPointer = 0;
   std::atomic<u32> CPBreakpoint = 0;
+  // Read pointer as last published by the GPU thread; what the CPU sees in dual-core mode.
   std::atomic<u32> SafeCPReadPointer = 0;
 
   std::atomic<u32> bFF_GPLinkEnable = 0;
@@ -53,7 +56,7 @@ struct SCPFifoStruct
   void DoState(PointerWrap& p);
 };
 
-// internal hardware addresses
+// Register offsets within the CP block.
 enum
 {
   STATUS_REGISTER = 0x00,
@@ -96,12 +99,12 @@ enum
   CLKS_PER_VTX_OUT = 0x64,
 };
 
+// Processor interface interrupt line of the CP.
 enum
 {
   INT_CAUSE_CP = 0x800
 };
 
-// Fifo Status Register
 union UCPStatusReg
 {
   struct
@@ -118,7 +121,6 @@ union UCPStatusReg
   UCPStatusReg(u16 _hex) { Hex = _hex; }
 };
 
-// Fifo Control Register
 union UCPCtrlReg
 {
   struct
@@ -136,15 +138,13 @@ union UCPCtrlReg
   UCPCtrlReg(u16 _hex) { Hex = _hex; }
 };
 
-// Fifo Clear Register
 union UCPClearReg
 {
   struct
   {
     u16 ClearFifoOverflow : 1;
     u16 ClearFifoUnderflow : 1;
-    // set by GXClearGPMetric
-    u16 ClearMetrics : 1;
+    u16 ClearMetrics : 1;  // written by GXClearGPMetric
     u16 : 13;
   };
   u16 Hex;
@@ -152,10 +152,10 @@ union UCPClearReg
   UCPClearReg(u16 _hex) { Hex = _hex; }
 };
 
+// The CP only decodes part of the physical address: writing all ones to a FIFO pointer register
+// reads back as this mask (wider on the Wii).
 constexpr u32 GetPhysicalAddressMask(bool is_wii)
 {
-  // Physical addresses in CP seem to ignore some of the upper bits (depending on platform)
-  // This can be observed in CP MMIO registers by setting to 0xffffffff and then reading back.
   return is_wii ? 0x1fffffff : 0x03ffffff;
 }
 
@@ -184,26 +184,35 @@ public:
 
   void HandleUnknownOpcode(u8 cmd_byte, const u8* buffer, bool preprocess);
 
-  // This one is shared between gfx thread and emulator thread.
-  // It is only used by the Fifo and by the CommandProcessor.
+  // Shared by the FIFO code on both threads.
   SCPFifoStruct& GetFifo() { return m_fifo; }
 
 private:
+  struct InterruptSources
+  {
+    bool breakpoint;
+    bool overflow;
+    bool underflow;
+    bool any_enabled;  // some source is active and FIFO reads are enabled
+  };
+  InterruptSources RefreshWatermarks();
+
   SCPFifoStruct m_fifo;
 
-  CoreTiming::EventType* m_event_type_update_interrupts = nullptr;
+  CoreTiming::EventType* m_interrupt_event = nullptr;
 
-  // STATE_TO_SAVE
-  UCPStatusReg m_cp_status_reg;
-  UCPCtrlReg m_cp_ctrl_reg;
-  UCPClearReg m_cp_clear_reg;
+  // Savestate fields.
+  UCPStatusReg m_status;
+  UCPCtrlReg m_control;
+  UCPClearReg m_clear;
   u16 m_perf_select = 0;
-  u16 m_unk_0a_reg = 0;
+  u16 m_unknown_0a = 0;
 
-  Common::Flag m_interrupt_set;
-  Common::Flag m_interrupt_waiting;
+  Common::Flag m_irq_asserted;
+  Common::Flag m_irq_update_pending;
 
-  bool m_is_fifo_error_seen = false;
+  // Only the first unexpected opcode raises a panic alert.
+  bool m_reported_bad_opcode = false;
 
   Core::System& m_system;
 };
