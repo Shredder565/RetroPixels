@@ -26,7 +26,7 @@ namespace
 		0,
 	};
 
-	class OpenGLCanvas;
+	class GLWindowCanvas;
 
 	// One GL context shared by the TV canvas and the GamePad canvas. The OpenGL renderer reaches
 	// the canvases through these callbacks (installed for the lifetime of the program).
@@ -36,7 +36,7 @@ namespace
 		SharedGLContext() { SetOpenGLCanvasCallbacks(this); }
 		~SharedGLContext() override { ClearOpenGLCanvasCallbacks(); }
 
-		void Attach(OpenGLCanvas* canvas, bool isTV)
+		void Attach(GLWindowCanvas* canvas, bool isTV)
 		{
 			(isTV ? m_tv : m_pad) = canvas;
 		}
@@ -63,16 +63,16 @@ namespace
 
 	  private:
 		wxGLContext* m_context = nullptr;
-		OpenGLCanvas* m_tv = nullptr;
-		OpenGLCanvas* m_pad = nullptr;
+		GLWindowCanvas* m_tv = nullptr;
+		GLWindowCanvas* m_pad = nullptr;
 	};
 
 	SharedGLContext s_sharedContext;
 
-	class OpenGLCanvas : public IRenderCanvas, public wxGLCanvas
+	class GLWindowCanvas : public IRenderCanvas, public wxGLCanvas
 	{
 	  public:
-		OpenGLCanvas(wxWindow* parent, const wxSize& size, bool is_main_window)
+		GLWindowCanvas(wxWindow* parent, const wxSize& size, bool is_main_window)
 			: IRenderCanvas(is_main_window),
 			  wxGLCanvas(parent, wxID_ANY, kPixelFormat, wxDefaultPosition, size, wxFULL_REPAINT_ON_RESIZE | wxWANTS_CHARS)
 		{
@@ -86,7 +86,7 @@ namespace
 			wxWindow::EnableTouchEvents(wxTOUCH_PAN_GESTURES);
 		}
 
-		~OpenGLCanvas() override
+		~GLWindowCanvas() override
 		{
 			s_sharedContext.Detach(m_is_main_window);
 		}
@@ -115,7 +115,7 @@ namespace
 
 	bool SharedGLContext::MakeCurrent(bool padView)
 	{
-		OpenGLCanvas* target = padView ? m_pad : m_tv;
+		GLWindowCanvas* target = padView ? m_pad : m_tv;
 		if (target == nullptr)
 			return false;
 		m_context->SetCurrent(*target);
@@ -124,7 +124,7 @@ namespace
 
 	void SharedGLContext::SwapBuffers(bool swapTV, bool swapDRC)
 	{
-		const std::pair<bool, OpenGLCanvas*> targets[] = {{swapTV, m_tv}, {swapDRC, m_pad}};
+		const std::pair<bool, GLWindowCanvas*> targets[] = {{swapTV, m_tv}, {swapDRC, m_pad}};
 		for (size_t i = 0; i < std::size(targets); i++)
 		{
 			auto [wanted, canvas] = targets[i];
@@ -140,5 +140,5 @@ namespace
 
 wxWindow* GLCanvas_Create(wxWindow* parent, const wxSize& size, bool is_main_window)
 {
-	return new OpenGLCanvas(parent, size, is_main_window);
+	return new GLWindowCanvas(parent, size, is_main_window);
 }
