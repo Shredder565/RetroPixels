@@ -1,15 +1,10 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <cstddef>
 #include <string_view>
 #include <vector>
-
-#ifdef __APPLE__
-#include <mach/mach.h>
-#endif
 
 #include "Common/CommonTypes.h"
 #include "Common/DynamicLibrary.h"
@@ -19,6 +14,8 @@ namespace Common
 #ifdef _WIN32
 struct WindowsMemoryRegion;
 
+// The placeholder-capable memory APIs (Windows 10 1803+). They are looked up at runtime; when any
+// is missing every pointer stays null and the arena uses plain MapViewOfFileEx instead.
 struct WindowsMemoryFunctions
 {
   Common::DynamicLibrary m_kernel32_handle;
@@ -29,9 +26,10 @@ struct WindowsMemoryFunctions
 };
 #endif
 
-// This class lets you create a block of anonymous RAM, and then arbitrarily map views into it.
-// Multiple views can mirror the same section of the block, which makes it very convenient for
-// emulating memory mirrors.
+// Emulated physical memory. One shared-memory segment is the backing store; any part of it can be
+// mapped as a view any number of times, which is how mirrored address ranges are emulated. A
+// reserved address range (the fastmem area) can have pieces of the segment mapped into it at
+// fixed addresses.
 class MemArena final
 {
 public:
@@ -42,98 +40,45 @@ public:
   MemArena& operator=(const MemArena&) = delete;
   MemArena& operator=(MemArena&&) = delete;
 
-  ///
-  /// Allocate the singular memory segment handled by this MemArena. This will be the actual
-  /// 'physical' available memory for this arena. After allocation, it can be interacted with using
-  /// CreateView() and ReleaseView(). Used to make a mappable region for emulated memory.
-  ///
-  /// @param size The amount of bytes that should be allocated in this region.
-  /// @param base_name A base name for the shared memory region, if applicable for this platform.
-  /// Will be extended with the process ID.
-  ///
+  // Creates the backing segment of `size` bytes. `base_name` names it (where the platform names
+  // shared memory) and is suffixed with the process id.
   void GrabSHMSegment(size_t size, std::string_view base_name);
 
-  ///
-  /// Release the memory segment previously allocated with GrabSHMSegment().
-  /// Should not be called before all views have been released.
-  ///
+  // Destroys the backing segment. Release every view first.
   void ReleaseSHMSegment();
 
-  ///
-  /// Map a memory region in the memory segment previously allocated with GrabSHMSegment().
-  ///
-  /// @param offset Offset within the memory segment to map at.
-  /// @param size Size of the region to map.
-  ///
-  /// @return Pointer to the memory region, or nullptr on failure.
-  ///
+  // Maps `size` bytes of the segment, starting at `offset`, at an address of the system's choice.
+  // Returns nullptr on failure.
   void* CreateView(s64 offset, size_t size);
 
-  ///
-  /// Unmap a memory region previously mapped with CreateView().
-  /// Should not be called on a view that is still mapped into the virtual memory region.
-  ///
-  /// @param view Pointer returned by CreateView().
-  /// @param size Size passed to the corresponding CreateView() call.
-  ///
+  // Unmaps a view returned by CreateView(); `size` is the size it was created with.
   void ReleaseView(void* view, size_t size);
 
-  ///
-  /// Reserve the singular 'virtual' memory region handled by this MemArena. This is used to create
-  /// our 'fastmem' memory area for the emulated game code to access directly.
-  ///
-  /// @param memory_size Size in bytes of the memory region to reserve.
-  ///
-  /// @return Pointer to the memory region, or nullptr on failure.
-  ///
+  // Reserves `memory_size` bytes of address space for fastmem. Only one region per arena.
+  // Returns the start of the region, or nullptr on failure.
   u8* ReserveMemoryRegion(size_t memory_size);
 
-  ///
-  /// Release the memory region previously reserved with ReserveMemoryRegion().
-  /// Should not be called while any memory region is still mapped.
-  ///
+  // Gives back the region reserved by ReserveMemoryRegion(). Unmap everything first.
   void ReleaseMemoryRegion();
 
-  ///
-  /// Map a section from the memory segment previously allocated with GrabSHMSegment()
-  /// into the region previously reserved with ReserveMemoryRegion().
-  ///
-  /// @param offset Offset within the memory segment previous allocated by GrabSHMSegment() to map
-  /// from.
-  /// @param size Size of the region to map.
-  /// @param base Address within the memory region from ReserveMemoryRegion() where to map it.
-  /// @param writeable Whether the region should be both readable and writeable, or just readable.
-  ///
-  /// @return The address we actually ended up mapping, which should be the given 'base'.
-  ///
+  // Maps `size` bytes of the segment, starting at `offset`, at address `base` inside the reserved
+  // region, read-write or read-only. Returns the mapped address (`base`), or nullptr on failure.
   void* MapInMemoryRegion(s64 offset, size_t size, void* base, bool writeable);
 
-  ///
-  /// Changes whether a section mapped by MapInMemoryRegion is writeable.
-  ///
-  /// @param view The address returned by MapInMemoryRegion.
-  /// @param size The size passed to MapInMemoryRegion.
-  /// @param writeable Whether the region should be both readable and writeable, or just readable.
-  ///
-  /// @return Whether the operation succeeded.
-  ///
+  // Switches a mapping made by MapInMemoryRegion() between read-write and read-only.
+  // Returns false on failure.
   bool ChangeMappingProtection(void* view, size_t size, bool writeable);
 
-  ///
-  /// Unmap a memory region previously mapped with MapInMemoryRegion().
-  ///
-  /// @param view Pointer returned by MapInMemoryRegion().
-  /// @param size Size passed to the corresponding MapInMemoryRegion() call.
-  ///
+  // Undoes MapInMemoryRegion(); `view` and `size` are what was mapped.
   void UnmapFromMemoryRegion(void* view, size_t size);
 
-  ///
-  /// Return the system's page size or required page alignment, whichever is larger.
-  ///
+  // The granularity mappings must respect: the page size, or the allocation granularity when
+  // that is what mapping requires.
   size_t GetPageSize() const;
 
 private:
 #ifdef _WIN32
+  // Placeholder bookkeeping for the reserved region (see MemArenaWin.cpp).
   WindowsMemoryRegion* EnsureSplitRegionForMapping(void* address, size_t size);
   bool JoinRegionsAfterUnmap(void* address, size_t size);
 
@@ -141,21 +86,13 @@ private:
   void* m_reserved_region = nullptr;
   void* m_memory_handle = nullptr;
   WindowsMemoryFunctions m_memory_functions;
-#elif defined(__APPLE__)
-  vm_address_t m_shm_address = 0;
-  vm_size_t m_shm_size = 0;
-
-  vm_address_t m_region_address = 0;
-  vm_size_t m_region_size = 0;
-#else
-  int m_shm_fd = 0;
-  void* m_reserved_region = nullptr;
-  std::size_t m_reserved_region_size = 0;
 #endif
 };
 
-// This class represents a single fixed-size memory region where the individual memory pages are
-// only actually allocated on first access. The memory will be zero on first access.
+// A fixed-size region that reads as zero and only gets real memory where it is written. On
+// Windows that is done block by block: every block starts as a read-only view of one shared zero
+// block and must be made writable (EnsureMemoryPage(s)Writable) before it is written. Elsewhere
+// the OS does it on its own and those calls do nothing.
 class LazyMemoryRegion final
 {
 public:
@@ -166,48 +103,38 @@ public:
   LazyMemoryRegion& operator=(const LazyMemoryRegion&) = delete;
   LazyMemoryRegion& operator=(LazyMemoryRegion&&) = delete;
 
-  ///
-  /// Reserve a memory region.
-  ///
-  /// @param size The size of the region.
-  ///
-  /// @return The address the region was mapped at. Returns nullptr on failure.
-  ///
+  // Reserves a zeroed region of at least `size` bytes. Returns its address, or nullptr.
   void* Create(size_t size);
 
-  ///
-  /// Reset the memory region back to zero, throwing away any mapped pages.
-  /// This can only be called after a successful call to Create().
-  ///
+  // Makes the whole region zero again and drops the memory behind written blocks. Only valid
+  // after a successful Create().
   void Clear();
 
-  ///
-  /// Release the memory previously reserved with Create(). After this call the pointer that was
-  /// returned by Create() will become invalid.
-  ///
+  // Frees the region; the pointer returned by Create() becomes invalid.
   void Release();
 
-  ///
-  /// Ensure that the memory page at the given byte offset from the start of the memory region is
-  /// writable. We use this on Windows as a workaround to only actually commit pages as they are
-  /// written to. On other OSes this does nothing.
-  ///
-  /// @param offset The offset into the memory region that should be made writable if it isn't.
-  ///
+  // Makes the block containing byte `offset` writable if it is not yet.
   void EnsureMemoryPageWritable(size_t offset)
   {
 #ifdef _WIN32
-    const size_t block_index = offset / BLOCK_SIZE;
-    if (m_writable_block_handles[block_index] == nullptr)
-      MakeMemoryBlockWritable(block_index);
+    const size_t block = offset / BLOCK_SIZE;
+    if (!m_writable_block_handles[block])
+      MakeMemoryBlockWritable(block);
 #endif
   }
 
+  // Makes every block touched by bytes [offset, offset + size) writable.
   void EnsureMemoryPagesWritable(size_t offset, size_t size)
   {
 #ifdef _WIN32
-    for (const auto end_offset = offset + size; offset < end_offset; offset += BLOCK_SIZE)
-      EnsureMemoryPageWritable(offset);
+    if (size == 0)
+      return;
+    const size_t last_block = (offset + size - 1) / BLOCK_SIZE;
+    for (size_t block = offset / BLOCK_SIZE; block <= last_block; ++block)
+    {
+      if (!m_writable_block_handles[block])
+        MakeMemoryBlockWritable(block);
+    }
 #endif
   }
 
@@ -216,12 +143,13 @@ private:
   size_t m_size = 0;
 
 #ifdef _WIN32
-  void* m_zero_block = nullptr;
-  constexpr static size_t BLOCK_SIZE = 8 * 1024 * 1024;  // size of allocated memory blocks
-  WindowsMemoryFunctions m_memory_functions;
-  std::vector<void*> m_writable_block_handles;
+  constexpr static size_t BLOCK_SIZE = 8 * 1024 * 1024;
 
-  void MakeMemoryBlockWritable(size_t offset);
+  void* m_zero_block = nullptr;  // section handle of the shared zero block
+  WindowsMemoryFunctions m_memory_functions;
+  std::vector<void*> m_writable_block_handles;  // per block: its own section, or null
+
+  void MakeMemoryBlockWritable(size_t block_index);
 #endif
 };
 

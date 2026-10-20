@@ -1,11 +1,9 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/MemArena.h"
 
 #include <algorithm>
 #include <cstddef>
-#include <cstdlib>
 #include <string>
 
 #include <fmt/format.h>
@@ -21,20 +19,20 @@
 #include "Common/MsgHandler.h"
 #include "Common/StringUtil.h"
 
-using PVirtualAlloc2 = PVOID(WINAPI*)(HANDLE Process, PVOID BaseAddress, SIZE_T Size,
-                                      ULONG AllocationType, ULONG PageProtection,
-                                      MEM_EXTENDED_PARAMETER* ExtendedParameters,
-                                      ULONG ParameterCount);
-
-using PMapViewOfFile3 = PVOID(WINAPI*)(HANDLE FileMapping, HANDLE Process, PVOID BaseAddress,
-                                       ULONG64 Offset, SIZE_T ViewSize, ULONG AllocationType,
-                                       ULONG PageProtection,
-                                       MEM_EXTENDED_PARAMETER* ExtendedParameters,
-                                       ULONG ParameterCount);
-
-using PUnmapViewOfFileEx = BOOL(WINAPI*)(PVOID BaseAddress, ULONG UnmapFlags);
-
-using PIsApiSetImplemented = BOOL(APIENTRY*)(PCSTR Contract);
+// Fastmem on Windows.
+//
+// With the placeholder APIs (VirtualAlloc2 / MapViewOfFile3 / UnmapViewOfFileEx) the reserved
+// region is one address-space placeholder that nothing else in the process can allocate into.
+// Mapping a view at a fixed address first carves an exactly sized placeholder out of a free one
+// (VirtualFree + MEM_PRESERVE_PLACEHOLDER) and then replaces it with the view
+// (MEM_REPLACE_PLACEHOLDER). Unmapping turns the view back into a placeholder
+// (MEM_PRESERVE_PLACEHOLDER) and merges it with free neighbours (MEM_COALESCE_PLACEHOLDERS).
+// m_regions tracks the placeholders and views covering the region, sorted by address, with no
+// gaps.
+//
+// Without those APIs (old Windows) the region is only probed: an address range is reserved and
+// released again, and views are later mapped there with MapViewOfFileEx, hoping nothing else has
+// taken the space meanwhile.
 
 namespace Common
 {
@@ -48,58 +46,113 @@ struct WindowsMemoryRegion
       : m_start(start), m_size(size), m_is_mapped(is_mapped)
   {
   }
+
+  u8* End() const { return m_start + m_size; }
 };
 
-static bool InitWindowsMemoryFunctions(WindowsMemoryFunctions* functions)
+namespace
 {
-  DynamicLibrary kernelBase{"KernelBase.dll"};
-  if (!kernelBase.IsOpen())
-    return false;
+using VirtualAlloc2Fn = PVOID(WINAPI*)(HANDLE process, PVOID base_address, SIZE_T size,
+                                       ULONG allocation_type, ULONG page_protection,
+                                       MEM_EXTENDED_PARAMETER* extended_parameters,
+                                       ULONG parameter_count);
+using MapViewOfFile3Fn = PVOID(WINAPI*)(HANDLE file_mapping, HANDLE process, PVOID base_address,
+                                        ULONG64 offset, SIZE_T view_size, ULONG allocation_type,
+                                        ULONG page_protection,
+                                        MEM_EXTENDED_PARAMETER* extended_parameters,
+                                        ULONG parameter_count);
+using UnmapViewOfFileExFn = BOOL(WINAPI*)(PVOID base_address, ULONG unmap_flags);
+using IsApiSetImplementedFn = BOOL(APIENTRY*)(PCSTR contract);
 
-  void* const ptr_IsApiSetImplemented = kernelBase.GetSymbolAddress("IsApiSetImplemented");
-  if (!ptr_IsApiSetImplemented)
-    return false;
-  if (!reinterpret_cast<PIsApiSetImplemented>(ptr_IsApiSetImplemented)(
-          "api-ms-win-core-memory-l1-1-6"))
-    return false;
+constexpr char MEMORY_API_SET[] = "api-ms-win-core-memory-l1-1-6";
 
-  functions->m_api_ms_win_core_memory_l1_1_6_handle.Open("api-ms-win-core-memory-l1-1-6.dll");
-  functions->m_kernel32_handle.Open("Kernel32.dll");
-  if (!functions->m_api_ms_win_core_memory_l1_1_6_handle.IsOpen() ||
-      !functions->m_kernel32_handle.IsOpen())
-  {
-    functions->m_api_ms_win_core_memory_l1_1_6_handle.Close();
-    functions->m_kernel32_handle.Close();
-    return false;
-  }
-
-  void* const address_VirtualAlloc2 =
-      functions->m_api_ms_win_core_memory_l1_1_6_handle.GetSymbolAddress("VirtualAlloc2FromApp");
-  void* const address_MapViewOfFile3 =
-      functions->m_api_ms_win_core_memory_l1_1_6_handle.GetSymbolAddress("MapViewOfFile3FromApp");
-  void* const address_UnmapViewOfFileEx =
-      functions->m_kernel32_handle.GetSymbolAddress("UnmapViewOfFileEx");
-  if (address_VirtualAlloc2 && address_MapViewOfFile3 && address_UnmapViewOfFileEx)
-  {
-    functions->m_address_VirtualAlloc2 = address_VirtualAlloc2;
-    functions->m_address_MapViewOfFile3 = address_MapViewOfFile3;
-    functions->m_address_UnmapViewOfFileEx = address_UnmapViewOfFileEx;
-    return true;
-  }
-
-  // at least one function is not available, use legacy logic
-  functions->m_api_ms_win_core_memory_l1_1_6_handle.Close();
-  functions->m_kernel32_handle.Close();
-  return false;
+bool HasPlaceholderApi(const WindowsMemoryFunctions& fns)
+{
+  return fns.m_address_MapViewOfFile3 != nullptr;
 }
+
+void* ReservePlaceholder(const WindowsMemoryFunctions& fns, size_t size)
+{
+  return reinterpret_cast<VirtualAlloc2Fn>(fns.m_address_VirtualAlloc2)(
+      nullptr, nullptr, size, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, nullptr, 0);
+}
+
+// Replaces the placeholder at `address` (exactly `size` bytes) with a view of `section`.
+void* MapOverPlaceholder(const WindowsMemoryFunctions& fns, HANDLE section, void* address,
+                         u64 offset, size_t size, ULONG protection)
+{
+  return reinterpret_cast<MapViewOfFile3Fn>(fns.m_address_MapViewOfFile3)(
+      section, nullptr, address, offset, size, MEM_REPLACE_PLACEHOLDER, protection, nullptr, 0);
+}
+
+// Unmaps the view at `address`, leaving a placeholder behind.
+bool UnmapToPlaceholder(const WindowsMemoryFunctions& fns, void* address)
+{
+  return reinterpret_cast<UnmapViewOfFileExFn>(fns.m_address_UnmapViewOfFileEx)(
+             address, MEM_PRESERVE_PLACEHOLDER) != FALSE;
+}
+
+// Splits [address, address + size) off as its own placeholder.
+bool SplitPlaceholder(void* address, size_t size)
+{
+  return VirtualFree(address, size, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER) != FALSE;
+}
+
+// Merges the adjacent placeholders exactly covering [address, address + size) into one.
+bool CoalescePlaceholders(void* address, size_t size)
+{
+  return VirtualFree(address, size, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS) != FALSE;
+}
+
+// A page-file-backed section of `size` bytes (zero-filled).
+HANDLE CreateAnonymousSection(size_t size, DWORD protection, LPCTSTR name)
+{
+  const u64 size64 = static_cast<u64>(size);
+  return CreateFileMapping(INVALID_HANDLE_VALUE, nullptr, protection,
+                           static_cast<DWORD>(size64 >> 32), static_cast<DWORD>(size64), name);
+}
+
+// Looks up the placeholder APIs. Fills in all three pointers (and keeps the libraries open) or
+// none.
+void LoadWindowsMemoryFunctions(WindowsMemoryFunctions* fns)
+{
+  // The api-set may resolve to a stub on systems that lack it, so ask whether it is really there.
+  DynamicLibrary kernel_base{"KernelBase.dll"};
+  if (!kernel_base.IsOpen())
+    return;
+  const auto is_api_set_implemented =
+      reinterpret_cast<IsApiSetImplementedFn>(kernel_base.GetSymbolAddress("IsApiSetImplemented"));
+  if (!is_api_set_implemented || !is_api_set_implemented(MEMORY_API_SET))
+    return;
+
+  DynamicLibrary& memory_lib = fns->m_api_ms_win_core_memory_l1_1_6_handle;
+  DynamicLibrary& kernel32 = fns->m_kernel32_handle;
+  memory_lib.Open("api-ms-win-core-memory-l1-1-6.dll");
+  kernel32.Open("Kernel32.dll");
+
+  void* const virtual_alloc2 =
+      memory_lib.IsOpen() ? memory_lib.GetSymbolAddress("VirtualAlloc2FromApp") : nullptr;
+  void* const map_view3 =
+      memory_lib.IsOpen() ? memory_lib.GetSymbolAddress("MapViewOfFile3FromApp") : nullptr;
+  void* const unmap_view_ex =
+      kernel32.IsOpen() ? kernel32.GetSymbolAddress("UnmapViewOfFileEx") : nullptr;
+
+  if (!virtual_alloc2 || !map_view3 || !unmap_view_ex)
+  {
+    memory_lib.Close();
+    kernel32.Close();
+    return;
+  }
+
+  fns->m_address_VirtualAlloc2 = virtual_alloc2;
+  fns->m_address_MapViewOfFile3 = map_view3;
+  fns->m_address_UnmapViewOfFileEx = unmap_view_ex;
+}
+}  // namespace
 
 MemArena::MemArena()
 {
-  // Check if VirtualAlloc2 and MapViewOfFile3 are available, which provide functionality to reserve
-  // a memory region no other allocation may occupy while still allowing us to allocate and map
-  // stuff within it. If they're not available we'll instead fall back to the 'legacy' logic and
-  // just hope that nothing allocates in our address range.
-  InitWindowsMemoryFunctions(&m_memory_functions);
+  LoadWindowsMemoryFunctions(&m_memory_functions);
 }
 
 MemArena::~MemArena()
@@ -108,27 +161,15 @@ MemArena::~MemArena()
   ReleaseSHMSegment();
 }
 
-static DWORD GetHighDWORD(u64 value)
-{
-  return static_cast<DWORD>(value >> 32);
-}
-
-static DWORD GetLowDWORD(u64 value)
-{
-  return static_cast<DWORD>(value);
-}
-
 void MemArena::GrabSHMSegment(size_t size, std::string_view base_name)
 {
   const std::string name = fmt::format("{}.{}", base_name, GetCurrentProcessId());
-  m_memory_handle =
-      CreateFileMapping(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, GetHighDWORD(size),
-                        GetLowDWORD(size), UTF8ToTStr(name).c_str());
+  m_memory_handle = CreateAnonymousSection(size, PAGE_READWRITE, UTF8ToTStr(name).c_str());
 }
 
 void MemArena::ReleaseSHMSegment()
 {
-  if (!m_memory_handle)
+  if (m_memory_handle == nullptr)
     return;
   CloseHandle(m_memory_handle);
   m_memory_handle = nullptr;
@@ -136,9 +177,9 @@ void MemArena::ReleaseSHMSegment()
 
 void* MemArena::CreateView(s64 offset, size_t size)
 {
-  const u64 off = static_cast<u64>(offset);
-  return MapViewOfFileEx(m_memory_handle, FILE_MAP_ALL_ACCESS, GetHighDWORD(off), GetLowDWORD(off),
-                         size, nullptr);
+  const u64 offset64 = static_cast<u64>(offset);
+  return MapViewOfFileEx(m_memory_handle, FILE_MAP_ALL_ACCESS, static_cast<DWORD>(offset64 >> 32),
+                         static_cast<DWORD>(offset64), size, nullptr);
 }
 
 void MemArena::ReleaseView(void* view, size_t size)
@@ -148,344 +189,251 @@ void MemArena::ReleaseView(void* view, size_t size)
 
 u8* MemArena::ReserveMemoryRegion(size_t memory_size)
 {
-  if (m_reserved_region)
+  if (m_reserved_region != nullptr)
   {
-    PanicAlertFmt("Tried to reserve a second memory region from the same MemArena.");
+    PanicAlertFmt("This MemArena has already reserved its memory region.");
     return nullptr;
   }
 
-  u8* base;
-  if (m_memory_functions.m_api_ms_win_core_memory_l1_1_6_handle.IsOpen())
+  if (!HasPlaceholderApi(m_memory_functions))
   {
-    base = static_cast<u8*>(reinterpret_cast<PVirtualAlloc2>(
-        m_memory_functions.m_address_VirtualAlloc2)(nullptr, nullptr, memory_size,
-                                                    MEM_RESERVE | MEM_RESERVE_PLACEHOLDER,
-                                                    PAGE_NOACCESS, nullptr, 0));
-    if (base)
+    NOTICE_LOG_FMT(MEMMAP, "Placeholder memory APIs are not available; using legacy fastmem "
+                           "mapping.");
+    // Find a free range big enough and give it straight back; views go there later.
+    void* const probe = VirtualAlloc(nullptr, memory_size, MEM_RESERVE, PAGE_READWRITE);
+    if (probe == nullptr)
     {
-      m_reserved_region = base;
-      m_regions.emplace_back(base, memory_size, false);
+      PanicAlertFmt("Could not find {} bytes of free address space: {}", memory_size,
+                    GetLastErrorString());
+      return nullptr;
     }
-    else
-    {
-      PanicAlertFmt("Failed to map enough memory space: {}", GetLastErrorString());
-    }
-  }
-  else
-  {
-    NOTICE_LOG_FMT(MEMMAP, "VirtualAlloc2 and/or MapViewFromFile3 unavailable. "
-                           "Falling back to legacy memory mapping.");
-    base = static_cast<u8*>(VirtualAlloc(nullptr, memory_size, MEM_RESERVE, PAGE_READWRITE));
-    if (base)
-      VirtualFree(base, 0, MEM_RELEASE);
-    else
-      PanicAlertFmt("Failed to find enough memory space: {}", GetLastErrorString());
+    VirtualFree(probe, 0, MEM_RELEASE);
+    return static_cast<u8*>(probe);
   }
 
+  u8* const base = static_cast<u8*>(ReservePlaceholder(m_memory_functions, memory_size));
+  if (base == nullptr)
+  {
+    PanicAlertFmt("Could not reserve {} bytes of address space: {}", memory_size,
+                  GetLastErrorString());
+    return nullptr;
+  }
+
+  m_reserved_region = base;
+  m_regions.emplace_back(base, memory_size, false);
   return base;
 }
 
 void MemArena::ReleaseMemoryRegion()
 {
-  if (m_memory_functions.m_api_ms_win_core_memory_l1_1_6_handle.IsOpen() && m_reserved_region)
+  if (!HasPlaceholderApi(m_memory_functions) || m_reserved_region == nullptr)
+    return;
+
+  // Anything still mapped here is a bug in the caller's mapping logic.
+  const auto still_mapped = std::ranges::count_if(
+      m_regions, [](const WindowsMemoryRegion& region) { return region.m_is_mapped; });
+  if (still_mapped != 0)
   {
-    // user should have unmapped everything by this point, check if that's true and yell if not
-    // (it indicates a bug in the emulated memory mapping logic)
-    size_t mapped_region_count = 0;
-    for (const auto& r : m_regions)
-    {
-      if (r.m_is_mapped)
-        ++mapped_region_count;
-    }
-
-    if (mapped_region_count > 0)
-    {
-      PanicAlertFmt("Error while releasing fastmem region: {} regions are still mapped!",
-                    mapped_region_count);
-    }
-
-    // then free memory
-    VirtualFree(m_reserved_region, 0, MEM_RELEASE);
-    m_reserved_region = nullptr;
-    m_regions.clear();
+    PanicAlertFmt("Releasing the fastmem region while {} mapping(s) are still in place.",
+                  still_mapped);
   }
+
+  VirtualFree(m_reserved_region, 0, MEM_RELEASE);
+  m_reserved_region = nullptr;
+  m_regions.clear();
 }
 
 WindowsMemoryRegion* MemArena::EnsureSplitRegionForMapping(void* start_address, size_t size)
 {
   u8* const address = static_cast<u8*>(start_address);
-  auto& regions = m_regions;
-  if (regions.empty())
+  if (m_regions.empty())
   {
-    NOTICE_LOG_FMT(MEMMAP, "Tried to map a memory region without reserving a memory block first.");
+    NOTICE_LOG_FMT(MEMMAP, "Cannot map at {}: no memory region has been reserved.",
+                   fmt::ptr(address));
     return nullptr;
   }
 
-  // find closest region that is <= the given address by using upper bound and decrementing
-  auto it = std::ranges::upper_bound(regions, address, {}, &WindowsMemoryRegion::m_start);
-  if (it == regions.begin())
+  // The region containing `address` is the last one starting at or before it.
+  auto next = std::ranges::upper_bound(m_regions, address, {}, &WindowsMemoryRegion::m_start);
+  if (next == m_regions.begin())
   {
-    // this should never happen, implies that the given address is before the start of the
-    // reserved memory block
-    NOTICE_LOG_FMT(MEMMAP, "Invalid address {} given to map.", fmt::ptr(address));
+    NOTICE_LOG_FMT(MEMMAP, "Cannot map at {}: below the reserved memory region.",
+                   fmt::ptr(address));
     return nullptr;
   }
-  --it;
+  const size_t index = static_cast<size_t>(next - m_regions.begin()) - 1;
+  const WindowsMemoryRegion free_region = m_regions[index];
 
-  if (it->m_is_mapped)
+  if (free_region.m_is_mapped)
+  {
+    NOTICE_LOG_FMT(MEMMAP, "Cannot map 0x{:x} bytes at {}: overlaps the mapping at {}.", size,
+                   fmt::ptr(address), fmt::ptr(free_region.m_start));
+    return nullptr;
+  }
+
+  const size_t head = static_cast<size_t>(address - free_region.m_start);
+  if (head > free_region.m_size || free_region.m_size - head < size)
   {
     NOTICE_LOG_FMT(MEMMAP,
-                   "Address to map {} with a size of 0x{:x} overlaps with existing mapping "
-                   "at {}.",
-                   fmt::ptr(address), size, fmt::ptr(it->m_start));
+                   "Cannot map 0x{:x} bytes at {}: the free space starting at {} is only 0x{:x} "
+                   "bytes.",
+                   size, fmt::ptr(address), fmt::ptr(free_region.m_start), free_region.m_size);
+    return nullptr;
+  }
+  const size_t tail = free_region.m_size - head - size;
+
+  // Already exactly the requested placeholder.
+  if (head == 0 && tail == 0)
+    return &m_regions[index];
+
+  if (!SplitPlaceholder(address, size))
+  {
+    NOTICE_LOG_FMT(MEMMAP, "Splitting the placeholder at {} failed: {}", fmt::ptr(address),
+                   GetLastErrorString());
     return nullptr;
   }
 
-  const size_t mapping_index = it - regions.begin();
-  u8* const mapping_address = it->m_start;
-  const size_t mapping_size = it->m_size;
-  if (mapping_address == address)
-  {
-    // if this region is already split up correctly we don't have to do anything
-    if (mapping_size == size)
-      return &*it;
+  // Replace the free region by up to three pieces: [head][requested][tail].
+  std::vector<WindowsMemoryRegion> pieces;
+  if (head != 0)
+    pieces.emplace_back(free_region.m_start, head, false);
+  const size_t requested_index = index + pieces.size();
+  pieces.emplace_back(address, size, false);
+  if (tail != 0)
+    pieces.emplace_back(address + size, tail, false);
 
-    // if this region is smaller than the requested size we can't map
-    if (mapping_size < size)
-    {
-      NOTICE_LOG_FMT(MEMMAP,
-                     "Not enough free space at address {} to map 0x{:x} bytes (0x{:x} available).",
-                     fmt::ptr(mapping_address), size, mapping_size);
-      return nullptr;
-    }
-
-    // split region
-    if (!VirtualFree(address, size, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER))
-    {
-      NOTICE_LOG_FMT(MEMMAP, "Region splitting failed: {}", GetLastErrorString());
-      return nullptr;
-    }
-
-    // update tracked mappings and return the first of the two
-    it->m_size = size;
-    u8* const new_mapping_start = address + size;
-    const size_t new_mapping_size = mapping_size - size;
-    regions.insert(it + 1, WindowsMemoryRegion(new_mapping_start, new_mapping_size, false));
-    return &regions[mapping_index];
-  }
-
-  ASSERT(mapping_address < address);
-
-  // is there enough space to map this?
-  const size_t size_before = static_cast<size_t>(address - mapping_address);
-  const size_t minimum_size = size + size_before;
-  if (mapping_size < minimum_size)
-  {
-    NOTICE_LOG_FMT(MEMMAP,
-                   "Not enough free space at address {} to map memory region (need 0x{:x} "
-                   "bytes, but only 0x{:x} available).",
-                   fmt::ptr(address), minimum_size, mapping_size);
-    return nullptr;
-  }
-
-  // split region
-  if (!VirtualFree(address, size, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER))
-  {
-    NOTICE_LOG_FMT(MEMMAP, "Region splitting failed: {}", GetLastErrorString());
-    return nullptr;
-  }
-
-  // do we now have two regions or three regions?
-  if (mapping_size == minimum_size)
-  {
-    // split into two; update tracked mappings and return the second one
-    it->m_size = size_before;
-    u8* const new_mapping_start = address;
-    const size_t new_mapping_size = size;
-    regions.insert(it + 1, WindowsMemoryRegion(new_mapping_start, new_mapping_size, false));
-    return &regions[mapping_index + 1];
-  }
-  else
-  {
-    // split into three; update tracked mappings and return the middle one
-    it->m_size = size_before;
-    u8* const middle_mapping_start = address;
-    const size_t middle_mapping_size = size;
-    u8* const after_mapping_start = address + size;
-    const size_t after_mapping_size = mapping_size - minimum_size;
-    regions.insert(it + 1, WindowsMemoryRegion(after_mapping_start, after_mapping_size, false));
-    regions.insert(regions.begin() + mapping_index + 1,
-                   WindowsMemoryRegion(middle_mapping_start, middle_mapping_size, false));
-    return &regions[mapping_index + 1];
-  }
-}
-
-void* MemArena::MapInMemoryRegion(s64 offset, size_t size, void* base, bool writeable)
-{
-  void* result;
-
-  if (m_memory_functions.m_api_ms_win_core_memory_l1_1_6_handle.IsOpen())
-  {
-    WindowsMemoryRegion* const region = EnsureSplitRegionForMapping(base, size);
-    if (!region)
-    {
-      PanicAlertFmt("Splitting memory region failed.");
-      return nullptr;
-    }
-
-    result = reinterpret_cast<PMapViewOfFile3>(m_memory_functions.m_address_MapViewOfFile3)(
-        m_memory_handle, nullptr, base, offset, size, MEM_REPLACE_PLACEHOLDER, PAGE_READWRITE,
-        nullptr, 0);
-    if (result)
-    {
-      region->m_is_mapped = true;
-    }
-    else
-    {
-      PanicAlertFmt("Mapping memory region failed: {}", GetLastErrorString());
-
-      // revert the split, if any
-      JoinRegionsAfterUnmap(base, size);
-
-      return nullptr;
-    }
-  }
-  else
-  {
-    result =
-        MapViewOfFileEx(m_memory_handle, FILE_MAP_ALL_ACCESS, 0, (DWORD)((u64)offset), size, base);
-
-    if (!result)
-      return nullptr;
-  }
-
-  if (!writeable)
-  {
-    // If we want to use PAGE_READONLY for now while still being able to switch to PAGE_READWRITE
-    // later, we have to call MapViewOfFile with PAGE_READWRITE and then switch to PAGE_READONLY.
-    ChangeMappingProtection(base, size, writeable);
-  }
-
-  return result;
-}
-
-bool MemArena::ChangeMappingProtection(void* view, size_t size, bool writeable)
-{
-  DWORD old_protect;
-  const int retval =
-      VirtualProtect(view, size, writeable ? PAGE_READWRITE : PAGE_READONLY, &old_protect);
-  if (retval == 0)
-    PanicAlertFmt("VirtualProtect failed: {}", GetLastErrorString());
-  return retval != 0;
+  const auto at = m_regions.erase(m_regions.begin() + index);
+  m_regions.insert(at, pieces.begin(), pieces.end());
+  return &m_regions[requested_index];
 }
 
 bool MemArena::JoinRegionsAfterUnmap(void* start_address, size_t size)
 {
   u8* const address = static_cast<u8*>(start_address);
-  auto& regions = m_regions;
-  if (regions.empty())
+  if (m_regions.empty())
   {
-    NOTICE_LOG_FMT(MEMMAP,
-                   "Tried to unmap a memory region without reserving a memory block first.");
+    NOTICE_LOG_FMT(MEMMAP, "Cannot unmap at {}: no memory region has been reserved.",
+                   fmt::ptr(address));
     return false;
   }
 
-  // there should be a mapping that matches the request exactly, find it
-  auto it = std::ranges::lower_bound(regions, address, {}, &WindowsMemoryRegion::m_start);
-  if (it == regions.end() || it->m_start != address || it->m_size != size)
+  const auto found =
+      std::ranges::lower_bound(m_regions, address, {}, &WindowsMemoryRegion::m_start);
+  if (found == m_regions.end() || found->m_start != address || found->m_size != size)
   {
-    // didn't find it, we were given bogus input
-    NOTICE_LOG_FMT(MEMMAP, "Invalid address/size given to unmap.");
+    NOTICE_LOG_FMT(MEMMAP, "Cannot unmap 0x{:x} bytes at {}: no such mapping.", size,
+                   fmt::ptr(address));
     return false;
   }
-  it->m_is_mapped = false;
+  found->m_is_mapped = false;
 
-  const bool can_join_with_preceding = it != regions.begin() && !(it - 1)->m_is_mapped;
-  const bool can_join_with_succeeding = (it + 1) != regions.end() && !(it + 1)->m_is_mapped;
-  if (can_join_with_preceding && can_join_with_succeeding)
+  // Merge with whichever neighbours are free placeholders too.
+  auto first = found;
+  auto last = found;
+  if (first != m_regions.begin() && !std::prev(first)->m_is_mapped)
+    --first;
+  if (std::next(last) != m_regions.end() && !std::next(last)->m_is_mapped)
+    ++last;
+  if (first == last)
+    return true;
+
+  const size_t merged_size = static_cast<size_t>(last->End() - first->m_start);
+  if (!CoalescePlaceholders(first->m_start, merged_size))
   {
-    // join three mappings to one
-    auto it_preceding = it - 1;
-    auto it_succeeding = it + 1;
-    const size_t total_size = it_preceding->m_size + size + it_succeeding->m_size;
-    if (!VirtualFree(it_preceding->m_start, total_size, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS))
-    {
-      NOTICE_LOG_FMT(MEMMAP, "Region coalescing failed: {}", GetLastErrorString());
-      return false;
-    }
-
-    it_preceding->m_size = total_size;
-    regions.erase(it, it + 2);
+    NOTICE_LOG_FMT(MEMMAP, "Merging the placeholders at {} failed: {}", fmt::ptr(first->m_start),
+                   GetLastErrorString());
+    return false;
   }
-  else if (can_join_with_preceding && !can_join_with_succeeding)
+
+  first->m_size = merged_size;
+  m_regions.erase(std::next(first), std::next(last));
+  return true;
+}
+
+void* MemArena::MapInMemoryRegion(s64 offset, size_t size, void* base, bool writeable)
+{
+  void* mapped;
+  if (HasPlaceholderApi(m_memory_functions))
   {
-    // join two mappings to one
-    auto it_preceding = it - 1;
-    const size_t total_size = it_preceding->m_size + size;
-    if (!VirtualFree(it_preceding->m_start, total_size, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS))
+    WindowsMemoryRegion* const region = EnsureSplitRegionForMapping(base, size);
+    if (region == nullptr)
     {
-      NOTICE_LOG_FMT(MEMMAP, "Region coalescing failed: {}", GetLastErrorString());
-      return false;
+      PanicAlertFmt("Could not prepare the fastmem region for a mapping at {}.", fmt::ptr(base));
+      return nullptr;
     }
 
-    it_preceding->m_size = total_size;
-    regions.erase(it);
+    // Always map read-write; read-only is applied afterwards so it can be lifted again later.
+    mapped = MapOverPlaceholder(m_memory_functions, m_memory_handle, base,
+                                static_cast<u64>(offset), size, PAGE_READWRITE);
+    if (mapped == nullptr)
+    {
+      PanicAlertFmt("Mapping into the fastmem region failed: {}", GetLastErrorString());
+      JoinRegionsAfterUnmap(base, size);  // undo the split
+      return nullptr;
+    }
+    region->m_is_mapped = true;
   }
-  else if (!can_join_with_preceding && can_join_with_succeeding)
+  else
   {
-    // join two mappings to one
-    auto it_succeeding = it + 1;
-    const size_t total_size = size + it_succeeding->m_size;
-    if (!VirtualFree(it->m_start, total_size, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS))
-    {
-      NOTICE_LOG_FMT(MEMMAP, "Region coalescing failed: {}", GetLastErrorString());
-      return false;
-    }
+    const u64 offset64 = static_cast<u64>(offset);
+    mapped =
+        MapViewOfFileEx(m_memory_handle, FILE_MAP_ALL_ACCESS, static_cast<DWORD>(offset64 >> 32),
+                        static_cast<DWORD>(offset64), size, base);
+    if (mapped == nullptr)
+      return nullptr;
+  }
 
-    it->m_size = total_size;
-    regions.erase(it_succeeding);
+  if (!writeable)
+    ChangeMappingProtection(base, size, false);
+
+  return mapped;
+}
+
+bool MemArena::ChangeMappingProtection(void* view, size_t size, bool writeable)
+{
+  DWORD previous_protection;
+  if (!VirtualProtect(view, size, writeable ? PAGE_READWRITE : PAGE_READONLY,
+                      &previous_protection))
+  {
+    PanicAlertFmt("Changing the protection of a fastmem mapping failed: {}",
+                  GetLastErrorString());
+    return false;
   }
   return true;
 }
 
 void MemArena::UnmapFromMemoryRegion(void* view, size_t size)
 {
-  if (m_memory_functions.m_api_ms_win_core_memory_l1_1_6_handle.IsOpen())
+  if (!HasPlaceholderApi(m_memory_functions))
   {
-    if (reinterpret_cast<PUnmapViewOfFileEx>(m_memory_functions.m_address_UnmapViewOfFileEx)(
-            view, MEM_PRESERVE_PLACEHOLDER))
-    {
-      if (!JoinRegionsAfterUnmap(view, size))
-        PanicAlertFmt("Joining memory region failed.");
-    }
-    else
-    {
-      PanicAlertFmt("Unmapping memory region failed: {}", GetLastErrorString());
-    }
+    UnmapViewOfFile(view);
     return;
   }
 
-  UnmapViewOfFile(view);
+  if (!UnmapToPlaceholder(m_memory_functions, view))
+  {
+    PanicAlertFmt("Unmapping from the fastmem region failed: {}", GetLastErrorString());
+    return;
+  }
+  if (!JoinRegionsAfterUnmap(view, size))
+    PanicAlertFmt("Could not merge the fastmem region after unmapping.");
 }
 
 size_t MemArena::GetPageSize() const
 {
-  SYSTEM_INFO si;
-  GetSystemInfo(&si);
+  SYSTEM_INFO info;
+  GetSystemInfo(&info);
 
-  if (!m_memory_functions.m_address_MapViewOfFile3)
-  {
-    // In this case, we can only map pages that are 64K aligned.
-    // See https://devblogs.microsoft.com/oldnewthing/20031008-00/?p=42223
-    return std::max<size_t>(si.dwPageSize, 64 * 1024);
-  }
+  // Plain MapViewOfFileEx can only place views on allocation-granularity (64 KiB) boundaries.
+  if (!HasPlaceholderApi(m_memory_functions))
+    return std::max<size_t>(info.dwPageSize, 64 * 1024);
 
-  return si.dwPageSize;
+  return info.dwPageSize;
 }
 
 LazyMemoryRegion::LazyMemoryRegion()
 {
-  InitWindowsMemoryFunctions(&m_memory_functions);
+  LoadWindowsMemoryFunctions(&m_memory_functions);
 }
 
 LazyMemoryRegion::~LazyMemoryRegion()
@@ -497,70 +445,57 @@ void* LazyMemoryRegion::Create(size_t size)
 {
   ASSERT(!m_memory);
 
-  if (size == 0)
+  if (size == 0 || !HasPlaceholderApi(m_memory_functions))
     return nullptr;
 
-  if (!m_memory_functions.m_api_ms_win_core_memory_l1_1_6_handle.IsOpen())
-    return nullptr;
+  const size_t total_size = Common::AlignUp(size, BLOCK_SIZE);
+  const size_t block_count = total_size / BLOCK_SIZE;
 
-  // reserve block of memory
-  const size_t memory_size = Common::AlignUp(size, BLOCK_SIZE);
-  const size_t block_count = memory_size / BLOCK_SIZE;
-  u8* memory =
-      static_cast<u8*>(reinterpret_cast<PVirtualAlloc2>(m_memory_functions.m_address_VirtualAlloc2)(
-          nullptr, nullptr, memory_size, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS,
-          nullptr, 0));
-  if (!memory)
+  u8* const memory = static_cast<u8*>(ReservePlaceholder(m_memory_functions, total_size));
+  if (memory == nullptr)
   {
-    NOTICE_LOG_FMT(MEMMAP, "Memory reservation of {} bytes failed.", size);
+    NOTICE_LOG_FMT(MEMMAP, "Reserving {} bytes for a lazy memory region failed: {}", size,
+                   GetLastErrorString());
     return nullptr;
   }
 
-  // split into individual block-sized regions
-  for (size_t i = 0; i < block_count - 1; ++i)
+  // One placeholder per block. Splitting off each block but the last leaves the last one as the
+  // remainder.
+  for (size_t i = 0; i + 1 < block_count; ++i)
   {
-    if (!VirtualFree(memory + i * BLOCK_SIZE, BLOCK_SIZE, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER))
+    if (!SplitPlaceholder(memory + i * BLOCK_SIZE, BLOCK_SIZE))
     {
-      NOTICE_LOG_FMT(MEMMAP, "Region splitting failed: {}", GetLastErrorString());
-
-      // release every split block as well as the remaining unsplit one
-      for (size_t j = 0; j < i + 1; ++j)
+      NOTICE_LOG_FMT(MEMMAP, "Splitting a lazy memory region failed: {}", GetLastErrorString());
+      // Blocks 0..i-1 are separate placeholders now; block i is the start of the rest.
+      for (size_t j = 0; j <= i; ++j)
         VirtualFree(memory + j * BLOCK_SIZE, 0, MEM_RELEASE);
-
       return nullptr;
     }
   }
 
+  // From here on Release() can undo everything, whatever state the blocks are in.
   m_memory = memory;
-  m_size = memory_size;
+  m_size = total_size;
+  m_writable_block_handles.assign(block_count, nullptr);
 
-  // allocate a single block of real memory in the page file
-  HANDLE zero_block = CreateFileMapping(INVALID_HANDLE_VALUE, nullptr, PAGE_READONLY,
-                                        GetHighDWORD(BLOCK_SIZE), GetLowDWORD(BLOCK_SIZE), nullptr);
-  if (zero_block == nullptr)
+  m_zero_block = CreateAnonymousSection(BLOCK_SIZE, PAGE_READONLY, nullptr);
+  if (m_zero_block == nullptr)
   {
-    NOTICE_LOG_FMT(MEMMAP, "CreateFileMapping() failed for zero block: {}", GetLastErrorString());
+    NOTICE_LOG_FMT(MEMMAP, "Creating the zero block failed: {}", GetLastErrorString());
     Release();
     return nullptr;
   }
 
-  m_zero_block = zero_block;
-
-  // map the zero page into every block
   for (size_t i = 0; i < block_count; ++i)
   {
-    void* result = reinterpret_cast<PMapViewOfFile3>(m_memory_functions.m_address_MapViewOfFile3)(
-        zero_block, nullptr, memory + i * BLOCK_SIZE, 0, BLOCK_SIZE, MEM_REPLACE_PLACEHOLDER,
-        PAGE_READONLY, nullptr, 0);
-    if (!result)
+    if (!MapOverPlaceholder(m_memory_functions, m_zero_block, memory + i * BLOCK_SIZE, 0,
+                            BLOCK_SIZE, PAGE_READONLY))
     {
       NOTICE_LOG_FMT(MEMMAP, "Mapping the zero block failed: {}", GetLastErrorString());
       Release();
       return nullptr;
     }
   }
-
-  m_writable_block_handles.resize(block_count, nullptr);
 
   return memory;
 }
@@ -570,100 +505,87 @@ void LazyMemoryRegion::Clear()
   ASSERT(m_memory);
   u8* const memory = static_cast<u8*>(m_memory);
 
-  // reset every writable block back to the zero block
   for (size_t i = 0; i < m_writable_block_handles.size(); ++i)
   {
-    if (m_writable_block_handles[i] == nullptr)
+    HANDLE& block = m_writable_block_handles[i];
+    if (block == nullptr)
       continue;
 
-    // unmap the writable block
-    if (!reinterpret_cast<PUnmapViewOfFileEx>(m_memory_functions.m_address_UnmapViewOfFileEx)(
-            memory + i * BLOCK_SIZE, MEM_PRESERVE_PLACEHOLDER))
-    {
-      PanicAlertFmt("Failed to unmap the writable block: {}", GetLastErrorString());
-    }
+    u8* const address = memory + i * BLOCK_SIZE;
+    if (!UnmapToPlaceholder(m_memory_functions, address))
+      PanicAlertFmt("Unmapping a written block failed: {}", GetLastErrorString());
+    if (!CloseHandle(block))
+      PanicAlertFmt("Freeing a written block failed: {}", GetLastErrorString());
+    block = nullptr;
 
-    // free the writable block
-    if (!CloseHandle(m_writable_block_handles[i]))
+    if (!MapOverPlaceholder(m_memory_functions, m_zero_block, address, 0, BLOCK_SIZE,
+                            PAGE_READONLY))
     {
-      PanicAlertFmt("Failed to free the writable block: {}", GetLastErrorString());
-    }
-    m_writable_block_handles[i] = nullptr;
-
-    // map the zero block
-    void* map_result =
-        reinterpret_cast<PMapViewOfFile3>(m_memory_functions.m_address_MapViewOfFile3)(
-            m_zero_block, nullptr, memory + i * BLOCK_SIZE, 0, BLOCK_SIZE, MEM_REPLACE_PLACEHOLDER,
-            PAGE_READONLY, nullptr, 0);
-    if (!map_result)
-    {
-      PanicAlertFmt("Failed to re-map the zero block: {}", GetLastErrorString());
+      PanicAlertFmt("Mapping the zero block back failed: {}", GetLastErrorString());
     }
   }
 }
 
 void LazyMemoryRegion::Release()
 {
-  if (m_memory)
+  u8* const memory = static_cast<u8*>(m_memory);
+
+  // Unmap every block (zero or written; unmapping a bare placeholder just fails) and free the
+  // written blocks' sections.
+  if (memory != nullptr)
   {
-    // unmap all pages and release the not-zero block handles
-    u8* const memory = static_cast<u8*>(m_memory);
     for (size_t i = 0; i < m_writable_block_handles.size(); ++i)
     {
-      reinterpret_cast<PUnmapViewOfFileEx>(m_memory_functions.m_address_UnmapViewOfFileEx)(
-          memory + i * BLOCK_SIZE, MEM_PRESERVE_PLACEHOLDER);
-      if (m_writable_block_handles[i])
+      UnmapToPlaceholder(m_memory_functions, memory + i * BLOCK_SIZE);
+      if (m_writable_block_handles[i] != nullptr)
       {
         CloseHandle(m_writable_block_handles[i]);
         m_writable_block_handles[i] = nullptr;
       }
     }
   }
-  if (m_zero_block)
+
+  if (m_zero_block != nullptr)
   {
     CloseHandle(m_zero_block);
     m_zero_block = nullptr;
   }
-  if (m_memory)
+
+  if (memory != nullptr)
   {
-    u8* const memory = static_cast<u8*>(m_memory);
-    const size_t block_count = m_size / BLOCK_SIZE;
-    for (size_t i = 0; i < block_count; ++i)
+    for (size_t i = 0; i < m_size / BLOCK_SIZE; ++i)
       VirtualFree(memory + i * BLOCK_SIZE, 0, MEM_RELEASE);
     m_memory = nullptr;
     m_size = 0;
   }
+  m_writable_block_handles.clear();
 }
 
 void LazyMemoryRegion::MakeMemoryBlockWritable(size_t block_index)
 {
-  u8* const memory = static_cast<u8*>(m_memory);
+  u8* const address = static_cast<u8*>(m_memory) + block_index * BLOCK_SIZE;
 
-  // unmap the zero block
-  if (!reinterpret_cast<PUnmapViewOfFileEx>(m_memory_functions.m_address_UnmapViewOfFileEx)(
-          memory + block_index * BLOCK_SIZE, MEM_PRESERVE_PLACEHOLDER))
-  {
-    PanicAlertFmt("Failed to unmap the zero block: {}", GetLastErrorString());
-    return;
-  }
-
-  // allocate a fresh block to map
-  HANDLE block = CreateFileMapping(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
-                                   GetHighDWORD(BLOCK_SIZE), GetLowDWORD(BLOCK_SIZE), nullptr);
+  // Get the block's own memory first, so a failure leaves the zero block in place.
+  const HANDLE block = CreateAnonymousSection(BLOCK_SIZE, PAGE_READWRITE, nullptr);
   if (block == nullptr)
   {
-    PanicAlertFmt("CreateFileMapping() failed for writable block: {}", GetLastErrorString());
+    PanicAlertFmt("Creating a writable block failed: {}", GetLastErrorString());
     return;
   }
 
-  // map the new block
-  void* map_result = reinterpret_cast<PMapViewOfFile3>(m_memory_functions.m_address_MapViewOfFile3)(
-      block, nullptr, memory + block_index * BLOCK_SIZE, 0, BLOCK_SIZE, MEM_REPLACE_PLACEHOLDER,
-      PAGE_READWRITE, nullptr, 0);
-  if (!map_result)
+  if (!UnmapToPlaceholder(m_memory_functions, address))
   {
-    PanicAlertFmt("Failed to map the writable block: {}", GetLastErrorString());
+    PanicAlertFmt("Unmapping the zero block failed: {}", GetLastErrorString());
     CloseHandle(block);
+    return;
+  }
+
+  if (!MapOverPlaceholder(m_memory_functions, block, address, 0, BLOCK_SIZE, PAGE_READWRITE))
+  {
+    PanicAlertFmt("Mapping a writable block failed: {}", GetLastErrorString());
+    CloseHandle(block);
+    // Keep the block readable.
+    MapOverPlaceholder(m_memory_functions, m_zero_block, address, 0, BLOCK_SIZE, PAGE_READONLY);
     return;
   }
 
