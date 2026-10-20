@@ -404,21 +404,22 @@ void OpenGLRenderer::GetVendorInformation()
 		m_vendor = GfxVendor::Intel;
 }
 
-bool OpenGLRenderer::IsPadWindowActive()
+void OpenGLRenderer::NotifyLatteCommandProcessorIdle()
 {
-	return GLCanvas_HasPadViewOpen();
+	// GL has no batching of our own; just push what is queued to the driver
+	glFlush();
 }
 
 void OpenGLRenderer::Flush(bool waitIdle)
 {
 	glFlush();
 	if (waitIdle)
-		glFinish();
+		glFinish(); // block until the GPU has drained
 }
 
-void OpenGLRenderer::NotifyLatteCommandProcessorIdle()
+bool OpenGLRenderer::IsPadWindowActive()
 {
-	glFlush();
+	return GLCanvas_HasPadViewOpen();
 }
 
 void OpenGLRenderer::EnableDebugMode()
@@ -579,10 +580,8 @@ void OpenGLRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutpu
 	if (clearBackground)
 	{
 		int windowWidth, windowHeight;
-		if (padView)
-			WindowSystem::GetPadWindowPhysSize(windowWidth, windowHeight);
-		else
-			WindowSystem::GetWindowPhysSize(windowWidth, windowHeight);
+		auto* const querySize = padView ? &WindowSystem::GetPadWindowPhysSize : &WindowSystem::GetWindowPhysSize;
+		querySize(windowWidth, windowHeight);
 		g_renderer->renderTarget_setViewport(0, 0, windowWidth, windowHeight, 0.0f, 1.0f);
 		g_renderer->ClearColorbuffer(padView);
 	}
@@ -1441,20 +1440,24 @@ void OpenGLRenderer::bufferCache_init(const sint32 bufferSize)
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
 }
 
+// GL_ARRAY_BUFFER binding with a shadow copy to skip redundant binds
+static void BindArrayBufferIfChanged(GLuint& shadow, GLuint buffer)
+{
+	if (shadow != buffer)
+	{
+		glBindBuffer(GL_ARRAY_BUFFER, buffer);
+		shadow = buffer;
+	}
+}
+
 void OpenGLRenderer::attributeStream_bindVertexCacheBuffer()
 {
-	if (_boundArrayBuffer == glAttributeCacheAB)
-		return;
-	_boundArrayBuffer = glAttributeCacheAB;
-	glBindBuffer(GL_ARRAY_BUFFER, glAttributeCacheAB);
+	BindArrayBufferIfChanged(_boundArrayBuffer, glAttributeCacheAB);
 }
 
 void OpenGLRenderer::attributeStream_unbindVertexBuffer()
 {
-	if (_boundArrayBuffer == 0)
-		return;
-	_boundArrayBuffer = 0;
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	BindArrayBufferIfChanged(_boundArrayBuffer, 0);
 }
 
 // ---- shaders ----

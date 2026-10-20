@@ -716,18 +716,15 @@ namespace CafeSystem
 		SysAllocatorContainer::GetInstance().Initialize();
 		for (IOSUModule* module : s_iosuModules)
 			module->SystemLaunch();
-		// services not yet converted to IOSU modules
-		iosuCrypto_init();
-		iosu::fsa::Initialize();
-		iosuIoctl_init();
-		iosuAct_init_depr();
-		iosu::act::Initialize();
-		iosu::iosuMcp_init();
-		iosu::mcp::Init();
-		iosu::iosuAcp_init();
-		iosu::nim::Initialize();
-		iosu::odm::Initialize();
-		HW_SI::Initialize();
+		// services not yet converted to IOSU modules, started in this order
+		using StartFn = void (*)();
+		static constexpr StartFn s_legacyServices[] = {
+			iosuCrypto_init, iosu::fsa::Initialize, iosuIoctl_init, iosuAct_init_depr,
+			iosu::act::Initialize, iosu::iosuMcp_init, iosu::mcp::Init, iosu::iosuAcp_init,
+			iosu::nim::Initialize, iosu::odm::Initialize, HW_SI::Initialize,
+		};
+		for (StartFn start : s_legacyServices)
+			start();
 	}
 
 	void SetImplementation(SystemImplementation* impl)

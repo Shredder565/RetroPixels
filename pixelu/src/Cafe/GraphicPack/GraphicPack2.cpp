@@ -259,20 +259,26 @@ void GraphicPack2::ActivateForCurrentTitle()
 
 void GraphicPack2::Reset()
 {
-	s_active_graphic_packs.clear();
 	s_isReady = false;
+	s_active_graphic_packs.clear();
 }
 
 void GraphicPack2::ClearGraphicPacks()
 {
-	s_graphic_packs.clear();
+	// the active list only references entries of the full list
 	s_active_graphic_packs.clear();
+	s_graphic_packs.clear();
 }
 
 void GraphicPack2::WaitUntilReady()
 {
-	while (!s_isReady)
-		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	constexpr auto kPollInterval = std::chrono::milliseconds(5);
+	for (;;)
+	{
+		if (s_isReady)
+			return;
+		std::this_thread::sleep_for(kPollInterval);
+	}
 }
 
 // ---------------------------------------------------------------- reading rules.txt

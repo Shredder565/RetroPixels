@@ -670,10 +670,9 @@ VulkanRenderer::VulkanRenderer() : Renderer(RendererAPI::Vulkan)
 		cemuLog_log(LogType::Force, "Debug: Detected tool capable of using debug markers, will use vkDebugMarkerSetObjectNameEXT to identify Vulkan objects");
 
 	// placeholder viewport and scissor until the first draw sets real ones
-	m_state.currentViewport.width = 4;
-	m_state.currentViewport.height = 4;
-	m_state.currentScissorRect.extent.width = 4;
-	m_state.currentScissorRect.extent.height = 4;
+	constexpr uint32 kPlaceholderSize = 4;
+	m_state.currentScissorRect.extent = {kPlaceholderSize, kPlaceholderSize};
+	m_state.currentViewport.width = m_state.currentViewport.height = (float)kPlaceholderSize;
 
 	QueryMemoryInfo();
 	QueryAvailableFormats();
@@ -1512,6 +1511,27 @@ void VulkanRenderer::ImguiInit()
 		vkDestroyRenderPass(GetLogicalDevice(), oldPass, nullptr);
 }
 
+void VulkanRenderer::UnrecoverableError(const char* errMsg) const
+{
+	cemuLog_log(LogType::Force, "Unrecoverable error in Vulkan renderer");
+	cemuLog_log(LogType::Force, "Msg: {}", errMsg);
+	throw std::runtime_error(errMsg);
+}
+
+void VulkanRenderer::Shutdown()
+{
+	// drain queued work before anything is torn down
+	SubmitCommandBuffer();
+	WaitDeviceIdle();
+	RendererShaderVk::Shutdown();
+	PipelineCompiler::CompileThreadPool_Stop();
+	DeleteFontTextures();
+	Renderer::Shutdown();
+	if (const VkRenderPass imguiPass = std::exchange(m_imguiRenderPass, VK_NULL_HANDLE); imguiPass != VK_NULL_HANDLE)
+		vkDestroyRenderPass(m_logicalDevice, imguiPass, nullptr);
+	RendererShaderVk::Shutdown();
+}
+
 void VulkanRenderer::Initialize()
 {
 	Renderer::Initialize();
@@ -1519,29 +1539,6 @@ void VulkanRenderer::Initialize()
 	CreatePipelineCache();
 	ImguiInit();
 	CreateNullObjects();
-}
-
-void VulkanRenderer::Shutdown()
-{
-	SubmitCommandBuffer();
-	WaitDeviceIdle();
-	RendererShaderVk::Shutdown();
-	PipelineCompiler::CompileThreadPool_Stop();
-	DeleteFontTextures();
-	Renderer::Shutdown();
-	if (m_imguiRenderPass != VK_NULL_HANDLE)
-	{
-		vkDestroyRenderPass(m_logicalDevice, m_imguiRenderPass, nullptr);
-		m_imguiRenderPass = VK_NULL_HANDLE;
-	}
-	RendererShaderVk::Shutdown();
-}
-
-void VulkanRenderer::UnrecoverableError(const char* errMsg) const
-{
-	cemuLog_log(LogType::Force, "Unrecoverable error in Vulkan renderer");
-	cemuLog_log(LogType::Force, "Msg: {}", errMsg);
-	throw std::runtime_error(errMsg);
 }
 
 namespace
@@ -1699,16 +1696,17 @@ ImTextureID VulkanRenderer::GenerateTexture(const std::vector<uint8>& data, cons
 	}
 }
 
-void VulkanRenderer::DeleteTexture(ImTextureID id)
-{
-	WaitDeviceIdle();
-	ImGui_ImplVulkan_DeleteTexture(id);
-}
-
+// both deletions wait for the device: the texture may still be in flight
 void VulkanRenderer::DeleteFontTextures()
 {
 	WaitDeviceIdle();
 	ImGui_ImplVulkan_DestroyFontsTexture();
+}
+
+void VulkanRenderer::DeleteTexture(ImTextureID id)
+{
+	WaitDeviceIdle();
+	ImGui_ImplVulkan_DeleteTexture(id);
 }
 
 bool VulkanRenderer::BeginFrame(bool mainWindow)
@@ -2433,18 +2431,19 @@ void VulkanRenderer::SwapBuffer(bool mainWindow)
 	chain.swapchainImageIndex = -1;
 }
 
-void VulkanRenderer::Flush(bool waitIdle)
-{
-	if (m_recordedDrawcalls > 0 || m_submitOnIdle)
-		SubmitCommandBuffer();
-	if (waitIdle)
-		WaitCommandBufferFinished(GetCurrentCommandBufferId());
-}
-
 void VulkanRenderer::NotifyLatteCommandProcessorIdle()
 {
 	if (m_submitOnIdle)
 		SubmitCommandBuffer();
+}
+
+void VulkanRenderer::Flush(bool waitIdle)
+{
+	const bool haveWork = m_submitOnIdle || m_recordedDrawcalls > 0;
+	if (haveWork)
+		SubmitCommandBuffer();
+	if (waitIdle)
+		WaitCommandBufferFinished(GetCurrentCommandBufferId());
 }
 
 void VulkanBenchmarkPrintResults(); // VulkanAPI.cpp
@@ -2534,13 +2533,10 @@ void VulkanRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutpu
 	const VkExtent2D extent = chain.getExtent();
 
 	// the image rectangle inside the window; the scissor covers the whole window
-	VkViewport viewport{};
-	viewport.x = imageX;
-	viewport.y = imageY;
-	viewport.width = imageWidth;
-	viewport.height = imageHeight;
-	viewport.minDepth = 0.0f;
-	viewport.maxDepth = 1.0f;
+	const VkViewport viewport{
+		static_cast<float>(imageX), static_cast<float>(imageY),
+		static_cast<float>(imageWidth), static_cast<float>(imageHeight),
+		0.0f, 1.0f}; // x, y, width, height, minDepth, maxDepth
 	vkCmdSetViewport(m_state.currentCommandBuffer, 0, 1, &viewport);
 	VkRect2D scissor{};
 	scissor.extent = extent;
@@ -2681,17 +2677,6 @@ LatteCachedFBO* VulkanRenderer::rendertarget_createCachedFBO(uint64 key)
 	return new CachedFBOVk(key, m_logicalDevice);
 }
 
-void VulkanRenderer::rendertarget_deleteCachedFBO(LatteCachedFBO* cfbo)
-{
-	if (m_state.activeFBO == cfbo)
-		m_state.activeFBO = nullptr;
-}
-
-void VulkanRenderer::rendertarget_bindFramebufferObject(LatteCachedFBO* cfbo)
-{
-	m_state.activeFBO = (CachedFBOVk*)cfbo;
-}
-
 void* VulkanRenderer::texture_acquireTextureUploadBuffer(uint32 size)
 {
 	return memoryManager->TextureUploadBufferAcquire(size);
@@ -2700,6 +2685,18 @@ void* VulkanRenderer::texture_acquireTextureUploadBuffer(uint32 size)
 void VulkanRenderer::texture_releaseTextureUploadBuffer(uint8* mem)
 {
 	memoryManager->TextureUploadBufferRelease(mem);
+}
+
+void VulkanRenderer::rendertarget_bindFramebufferObject(LatteCachedFBO* cfbo)
+{
+	m_state.activeFBO = (CachedFBOVk*)cfbo;
+}
+
+void VulkanRenderer::rendertarget_deleteCachedFBO(LatteCachedFBO* cfbo)
+{
+	// forget the FBO if it is the bound one
+	if (cfbo == m_state.activeFBO)
+		m_state.activeFBO = nullptr;
 }
 
 TextureDecoder* VulkanRenderer::texture_chooseDecodedFormat(Latte::E_GX2SURFFMT format, bool isDepth, Latte::E_DIM dim, uint32 width, uint32 height)
@@ -2857,7 +2854,8 @@ LatteTexture* VulkanRenderer::texture_createTextureEx(Latte::E_DIM dim, MPTR phy
 
 void VulkanRenderer::texture_setLatteTexture(LatteTextureView* textureView, uint32 textureUnit)
 {
-	m_state.boundTexture[textureUnit] = static_cast<LatteTextureViewVk*>(textureView);
+	auto* const viewVk = static_cast<LatteTextureViewVk*>(textureView);
+	m_state.boundTexture[textureUnit] = viewVk;
 }
 
 void VulkanRenderer::texture_copyImageSubData(LatteTexture* src, sint32 srcMip, sint32 effectiveSrcX, sint32 effectiveSrcY, sint32 srcSlice, LatteTexture* dst, sint32 dstMip, sint32 effectiveDstX, sint32 effectiveDstY, sint32 dstSlice, sint32 effectiveCopyWidth, sint32 effectiveCopyHeight, sint32 srcDepth)
@@ -3152,11 +3150,8 @@ VKRObjectTexture::VKRObjectTexture()
 VKRObjectTexture::~VKRObjectTexture()
 {
 	VulkanRenderer* vkr = VulkanRenderer::GetInstance();
-	if (m_allocation)
-	{
-		vkr->GetMemoryManager()->imageMemoryFree(m_allocation);
-		m_allocation = nullptr;
-	}
+	if (VkImageMemAllocation* memory = std::exchange(m_allocation, nullptr))
+		vkr->GetMemoryManager()->imageMemoryFree(memory);
 	if (m_image)
 		vkDestroyImage(vkr->GetLogicalDevice(), m_image, nullptr);
 	performanceMonitor.vk.numImages.decrement();
@@ -3164,8 +3159,8 @@ VKRObjectTexture::~VKRObjectTexture()
 
 VKRObjectTextureView::VKRObjectTextureView(VKRObjectTexture* tex, VkImageView view)
 {
+	addRef(tex); // the view keeps its image alive
 	m_textureImageView = view;
-	addRef(tex);
 	performanceMonitor.vk.numImageViews.increment();
 }
 
@@ -3397,20 +3392,23 @@ VKRObjectRenderPass::VKRObjectRenderPass(AttachmentInfo_t& attachmentInfo, sint3
 	}
 
 	// keep the attachment views alive as long as this pass
-	for (int i = 0; i < Latte::GPU_LIMITS::NUM_COLOR_ATTACHMENTS; i++)
+	for (const auto& color : attachmentInfo.colorAttachment)
 	{
-		if (attachmentInfo.colorAttachment[i].viewObj)
-			addRef(attachmentInfo.colorAttachment[i].viewObj);
+		if (color.viewObj)
+			addRef(color.viewObj);
 	}
-	if (attachmentInfo.depthAttachment.viewObj)
-		addRef(attachmentInfo.depthAttachment.viewObj);
+	if (auto* depthView = attachmentInfo.depthAttachment.viewObj)
+		addRef(depthView);
 	performanceMonitor.vk.numRenderPass.increment();
 }
 
 VKRObjectRenderPass::~VKRObjectRenderPass()
 {
 	if (m_renderPass != VK_NULL_HANDLE)
-		vkDestroyRenderPass(VulkanRenderer::GetInstance()->GetLogicalDevice(), m_renderPass, nullptr);
+	{
+		VkDevice device = VulkanRenderer::GetInstance()->GetLogicalDevice();
+		vkDestroyRenderPass(device, m_renderPass, nullptr);
+	}
 	performanceMonitor.vk.numRenderPass.decrement();
 }
 

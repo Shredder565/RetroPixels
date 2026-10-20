@@ -907,13 +907,15 @@ void VulkanRenderer::draw_setRenderPass()
 
 void VulkanRenderer::draw_endRenderPass()
 {
-	if (!m_state.activeRenderpassFBO)
+	CachedFBOVk* const openFbo = m_state.activeRenderpassFBO;
+	if (openFbo == nullptr)
 		return;
+	const VkCommandBuffer cmd = m_state.currentCommandBuffer;
 	if (m_featureControl.deviceExtensions.dynamic_rendering)
-		vkCmdEndRenderingKHR(m_state.currentCommandBuffer);
+		vkCmdEndRenderingKHR(cmd);
 	else
-		vkCmdEndRenderPass(m_state.currentCommandBuffer);
-	sync_RenderPassStoreTextures(m_state.activeRenderpassFBO);
+		vkCmdEndRenderPass(cmd);
+	sync_RenderPassStoreTextures(openFbo);
 	m_state.activeRenderpassFBO = nullptr;
 }
 

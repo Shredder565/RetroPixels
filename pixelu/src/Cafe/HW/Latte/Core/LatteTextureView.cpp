@@ -38,19 +38,16 @@ void LatteTextureView::CreateLookupForSubTexture(uint32 mipStart, uint32 sliceSt
 
 namespace
 {
+	// what a view was registered with, so lookups need not dereference it
 	struct ViewRegistration
 	{
-		sint32 width;
-		sint32 height;
-		sint32 pitch;
-		sint32 firstMip;
-		sint32 numMip;
-		sint32 firstSlice;
-		sint32 numSlice;
+		LatteTextureView* view;
 		Latte::E_GX2SURFFMT format;
 		Latte::E_DIM dim;
+		sint32 width, height, pitch;
+		sint32 firstMip, numMip;
+		sint32 firstSlice, numSlice;
 		bool isDepth;
-		LatteTextureView* view;
 	};
 
 	std::unordered_map<MPTR, std::vector<ViewRegistration>>& RegistrationsByAddress()

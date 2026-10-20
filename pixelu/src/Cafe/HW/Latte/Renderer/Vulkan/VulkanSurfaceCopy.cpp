@@ -168,16 +168,14 @@ struct CopySurfacePipelineInfo
 	std::unordered_map<LatteTextureVk*, PerSubresource<DescriptorValue>> map_descriptors;
 };
 
+// one surface copy: source and destination subresources plus the copied size
 struct VkCopySurfaceState_t
 {
 	LatteTextureVk* sourceTexture;
-	sint32 srcMip;
-	sint32 srcSlice;
 	LatteTextureVk* destinationTexture;
-	sint32 dstMip;
-	sint32 dstSlice;
-	sint32 width;
-	sint32 height;
+	sint32 srcMip, srcSlice;
+	sint32 dstMip, dstSlice;
+	sint32 width, height;
 };
 
 extern std::atomic_int g_compiling_pipelines;

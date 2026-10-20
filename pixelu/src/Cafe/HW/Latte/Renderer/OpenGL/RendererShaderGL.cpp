@@ -193,8 +193,8 @@ bool RendererShaderGL::WaitForCompiled()
 		}
 		return ReportCompileFailure();
 	}
+	CleanupShaderObj(); // the linked program no longer needs the shader object
 	m_isCompiled = true;
-	CleanupShaderObj();
 	return true;
 }
 
@@ -203,14 +203,14 @@ sint32 RendererShaderGL::GetUniformLocation(const char* name)
 	return glGetUniformLocation(m_program, name);
 }
 
-void RendererShaderGL::SetUniform1i(sint32 location, sint32 value)
-{
-	glProgramUniform1i(m_program, location, value);
-}
-
 void RendererShaderGL::SetUniform1f(sint32 location, float value)
 {
 	glProgramUniform1f(m_program, location, value);
+}
+
+void RendererShaderGL::SetUniform1i(sint32 location, sint32 value)
+{
+	glProgramUniform1i(m_program, location, value);
 }
 
 void RendererShaderGL::SetUniform2fv(sint32 location, void* data, sint32 count)

@@ -2446,45 +2446,56 @@ namespace
 		// prologue
 		// ---------------------------------------------------------------
 
+		// writes each line followed by the CRLF the generated sources use
+		void emitLines(std::initializer_list<const char*> lines)
+		{
+			for (const char* line : lines)
+				out << line << "\r\n";
+		}
+
 		void emitHelperFunctions()
 		{
 			if (facts().hasRedcCUBE)
 			{
-				out << "void redcCUBE(vec4 src0, vec4 src1, out vec3 stm, out int faceId)\r\n"
-					"{\r\n"
-					"float x = src1.y, y = src1.x, z = src0.x;\r\n"
-					"float ax = abs(x);\r\n"
-					"float ay = abs(y);\r\n"
-					"float az = abs(z);\r\n"
-					"if (az >= ax && az >= ay)\r\n"
-					"{\r\n"
-					"stm = vec3(-y, z < 0.0 ? -x : x, z * 2.0);\r\n"
-					"faceId = z < 0.0 ? 5 : 4;\r\n"
-					"}\r\n"
-					"else if (ay >= ax)\r\n"
-					"{\r\n"
-					"stm = vec3(y < 0.0 ? -z : z, x, y * 2.0);\r\n"
-					"faceId = y < 0.0 ? 3 : 2;\r\n"
-					"}\r\n"
-					"else\r\n"
-					"{\r\n"
-					"stm = vec3(-y, x < 0.0 ? z : -z, x * 2.0);\r\n"
-					"faceId = x < 0.0 ? 1 : 0;\r\n"
-					"}\r\n"
-					"}\r\n";
+				emitLines({
+					"void redcCUBE(vec4 src0, vec4 src1, out vec3 stm, out int faceId)",
+					"{",
+					"float x = src1.y, y = src1.x, z = src0.x;",
+					"float ax = abs(x);",
+					"float ay = abs(y);",
+					"float az = abs(z);",
+					"if (az >= ax && az >= ay)",
+					"{",
+					"stm = vec3(-y, z < 0.0 ? -x : x, z * 2.0);",
+					"faceId = z < 0.0 ? 5 : 4;",
+					"}",
+					"else if (ay >= ax)",
+					"{",
+					"stm = vec3(y < 0.0 ? -z : z, x, y * 2.0);",
+					"faceId = y < 0.0 ? 3 : 2;",
+					"}",
+					"else",
+					"{",
+					"stm = vec3(-y, x < 0.0 ? z : -z, x * 2.0);",
+					"faceId = x < 0.0 ? 1 : 0;",
+					"}",
+					"}",
+				});
 			}
 			if (facts().hasCubeMapTexture)
 			{
-				out << "vec3 redcCUBEReverse(vec2 st, int faceId)\r\n"
-					"{\r\n"
-					"vec2 tc = (st - vec2(1.5)) * 2.0;\r\n"
-					"if (faceId == 0) return vec3(1.0, -tc.y, -tc.x);\r\n"
-					"if (faceId == 1) return vec3(-1.0, -tc.y, tc.x);\r\n"
-					"if (faceId == 2) return vec3(tc.x, 1.0, tc.y);\r\n"
-					"if (faceId == 3) return vec3(tc.x, -1.0, -tc.y);\r\n"
-					"if (faceId == 4) return vec3(tc.x, -tc.y, 1.0);\r\n"
-					"return vec3(-tc.x, -tc.y, -1.0);\r\n"
-					"}\r\n";
+				emitLines({
+					"vec3 redcCUBEReverse(vec2 st, int faceId)",
+					"{",
+					"vec2 tc = (st - vec2(1.5)) * 2.0;",
+					"if (faceId == 0) return vec3(1.0, -tc.y, -tc.x);",
+					"if (faceId == 1) return vec3(-1.0, -tc.y, tc.x);",
+					"if (faceId == 2) return vec3(tc.x, 1.0, tc.y);",
+					"if (faceId == 3) return vec3(tc.x, -1.0, -tc.y);",
+					"if (faceId == 4) return vec3(tc.x, -tc.y, 1.0);",
+					"return vec3(-tc.x, -tc.y, -1.0);",
+					"}",
+				});
 			}
 			// clamp of a float stored in an int register; the integer all-ones and
 			// INT_MAX patterns behave as boolean results

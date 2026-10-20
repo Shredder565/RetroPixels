@@ -48,21 +48,15 @@ namespace
 	{
 		switch (dim)
 		{
-		case Latte::E_DIM::DIM_1D:
-			return VK_IMAGE_VIEW_TYPE_1D;
-		case Latte::E_DIM::DIM_2D:
-		case Latte::E_DIM::DIM_2D_MSAA:
-			return VK_IMAGE_VIEW_TYPE_2D;
-		case Latte::E_DIM::DIM_2D_ARRAY:
-			return VK_IMAGE_VIEW_TYPE_2D_ARRAY;
-		case Latte::E_DIM::DIM_3D:
-			return VK_IMAGE_VIEW_TYPE_3D;
-		case Latte::E_DIM::DIM_CUBEMAP:
-			return VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
-		default:
-			cemu_assert_unimplemented();
-			return VK_IMAGE_VIEW_TYPE_2D;
+		case Latte::E_DIM::DIM_2D: case Latte::E_DIM::DIM_2D_MSAA: return VK_IMAGE_VIEW_TYPE_2D;
+		case Latte::E_DIM::DIM_2D_ARRAY: return VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+		case Latte::E_DIM::DIM_CUBEMAP: return VK_IMAGE_VIEW_TYPE_CUBE_ARRAY; // cube maps are always viewed as arrays
+		case Latte::E_DIM::DIM_3D: return VK_IMAGE_VIEW_TYPE_3D;
+		case Latte::E_DIM::DIM_1D: return VK_IMAGE_VIEW_TYPE_1D;
+		default: break;
 		}
+		cemu_assert_unimplemented();
+		return VK_IMAGE_VIEW_TYPE_2D;
 	}
 
 	// the 3-bit component select of the sampler word, 6 and 7 behave like 4 (zero)

@@ -198,20 +198,22 @@ namespace LatteAddrLib
 	void SetupCachedSurfaceAddrInfo(CachedSurfaceAddrInfo* info, uint32 slice, uint32 sample, uint32 bpp, uint32 pitch, uint32 height, uint32 depth, uint32 numSamples, E_HWTILEMODE tileMode, int isDepth, uint32 pipeSwizzle, uint32 bankSwizzle)
 	{
 		cemu_assert_debug(sample == 0); // the cached path addresses sample 0 only
-		info->slice = slice;
-		info->sample = sample;
-		info->bpp = bpp;
+		// tiling parameters
+		info->tileMode = tileMode;
+		info->isDepth = isDepth;
+		info->microTileType = isDepth ? 1 : 0;
+		info->microTileThickness = TM_GetThickness(tileMode);
+		info->pipeSwizzle = pipeSwizzle;
+		info->bankSwizzle = bankSwizzle;
+		// surface geometry and the addressed slice/sample
 		info->pitch = pitch;
 		info->height = height;
 		info->depth = depth;
+		info->bpp = bpp;
 		info->numSamples = numSamples;
-		info->tileMode = tileMode;
-		info->isDepth = isDepth;
-		info->pipeSwizzle = pipeSwizzle;
-		info->bankSwizzle = bankSwizzle;
+		info->slice = slice;
+		info->sample = sample;
 
-		info->microTileType = isDepth ? 1 : 0;
-		info->microTileThickness = TM_GetThickness(tileMode);
 		info->microTileBits = numSamples * bpp * info->microTileThickness * 64;
 		info->microTileBytes = info->microTileBits >> 3;
 		info->elementBits = isDepth ? numSamples * bpp : bpp;

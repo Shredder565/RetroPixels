@@ -80,12 +80,19 @@ void LatteTextureViewGL::InitAliasView()
 
 	if (glTextureParameteri)
 	{
-		glTextureParameteri(glTexId, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-		glTextureParameteri(glTexId, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-		glTextureParameteri(glTexId, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-		glTextureParameteri(glTexId, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-		glTextureParameteri(glTexId, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-		glTextureParameteri(glTexId, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+		// view object defaults: linear filtering, clamped, no depth compare
+		struct TexParam
+		{
+			GLenum pname;
+			GLint value;
+		};
+		static constexpr TexParam kViewDefaults[] = {
+			{GL_TEXTURE_MAG_FILTER, GL_LINEAR}, {GL_TEXTURE_MIN_FILTER, GL_LINEAR},
+			{GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE}, {GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE},
+			{GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE}, {GL_TEXTURE_COMPARE_MODE, GL_NONE},
+		};
+		for (const TexParam& p : kViewDefaults)
+			glTextureParameteri(glTexId, p.pname, p.value);
 	}
 
 	bool debugNames = LaunchSettings::NSightModeEnabled();
