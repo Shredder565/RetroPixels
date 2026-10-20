@@ -1,45 +1,43 @@
-add_library(videosoftware
-  Clipper.cpp
-  Clipper.h
-  CopyRegion.h
-  EfbCopy.cpp
-  EfbCopy.h
+# Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+#
+# The software renderer: a CPU implementation of the GX pipeline (transform, clipping,
+# rasterization, TEV, EFB and EFB copies) that presents through a small OpenGL window.
+
+set(VIDEOSOFTWARE_PIPELINE_SOURCES
   NativeVertexFormat.h
-  Rasterizer.cpp
-  Rasterizer.h
-  SetupUnit.cpp
-  SetupUnit.h
-  SWmain.cpp
-  SWBoundingBox.cpp
-  SWBoundingBox.h
-  SWEfbInterface.cpp
-  SWEfbInterface.h
-  SWGfx.cpp
-  SWGfx.h
-  SWOGLWindow.cpp
-  SWOGLWindow.h
-  SWTexture.cpp
-  SWTexture.h
-  SWVertexLoader.cpp
-  SWVertexLoader.h
-  Tev.cpp
-  Tev.h
-  TextureEncoder.cpp
-  TextureEncoder.h
-  TextureSampler.cpp
-  TextureSampler.h
-  TransformUnit.cpp
-  TransformUnit.h
-  VideoBackend.h
+  SWVertexLoader.cpp SWVertexLoader.h
+  TransformUnit.cpp TransformUnit.h
+  SetupUnit.cpp SetupUnit.h
+  Clipper.cpp Clipper.h
+  Rasterizer.cpp Rasterizer.h
+  Tev.cpp Tev.h
+  TextureSampler.cpp TextureSampler.h
 )
 
-target_link_libraries(videosoftware
-PUBLIC
-  common
-  videocommon
+set(VIDEOSOFTWARE_EFB_SOURCES
+  SWEfbInterface.cpp SWEfbInterface.h
+  SWBoundingBox.cpp SWBoundingBox.h
+  EfbCopy.cpp EfbCopy.h
+  TextureEncoder.cpp TextureEncoder.h
+  CopyRegion.h
 )
 
+set(VIDEOSOFTWARE_DEVICE_SOURCES
+  SWmain.cpp VideoBackend.h
+  SWGfx.cpp SWGfx.h
+  SWTexture.cpp SWTexture.h
+  SWOGLWindow.cpp SWOGLWindow.h
+)
+
+add_library(videosoftware
+  ${VIDEOSOFTWARE_PIPELINE_SOURCES}
+  ${VIDEOSOFTWARE_EFB_SOURCES}
+  ${VIDEOSOFTWARE_DEVICE_SOURCES}
+)
+
+target_link_libraries(videosoftware PUBLIC common videocommon)
+
+# MSVC builds share the precompiled header target.
 if(MSVC)
-  # Add precompiled header
   target_link_libraries(videosoftware PRIVATE use_pch)
 endif()

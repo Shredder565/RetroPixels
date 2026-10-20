@@ -1,42 +1,11 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-
-/*
-Portions of this file are based off work by Markus Trenkwalder.
-Copyright (c) 2007, 2008 Markus Trenkwalder
-
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
-* Redistributions of source code must retain the above copyright notice,
-  this list of conditions and the following disclaimer.
-
-* Redistributions in binary form must reproduce the above copyright notice,
-  this list of conditions and the following disclaimer in the documentation
-  and/or other materials provided with the distribution.
-
-* Neither the name of the library's copyright owner nor the names of its
-  contributors may be used to endorse or promote products derived from this
-  software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR
-CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
-EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
-PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
-PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
-LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
-NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-*/
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/Software/Clipper.h"
 
-#include "Common/Assert.h"
+#include <array>
+#include <cmath>
+
+#include "Common/CommonTypes.h"
 
 #include "VideoBackends/Software/NativeVertexFormat.h"
 #include "VideoBackends/Software/Rasterizer.h"
@@ -47,242 +16,276 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 namespace Clipper
 {
-enum
+namespace
 {
-  NUM_CLIPPED_VERTICES = 33,
-  NUM_INDICES = NUM_CLIPPED_VERTICES + 3
+using Vertex = OutputVertexData;
+
+// Outcode bits, one per side of the view volume.
+enum : u32
+{
+  OUT_RIGHT = 1u << 0,
+  OUT_LEFT = 1u << 1,
+  OUT_TOP = 1u << 2,
+  OUT_BOTTOM = 1u << 3,
+  OUT_NEAR = 1u << 4,
+  OUT_FAR = 1u << 5,
 };
 
-static OutputVertexData ClippedVertices[NUM_CLIPPED_VERTICES];
-static OutputVertexData* Vertices[NUM_INDICES];
+// A clip plane as the coefficients of x, y, z and w. A point is inside when the dot product
+// with its clip-space position is not negative.
+struct ClipPlane
+{
+  u32 outcode;
+  float cx, cy, cz, cw;
+};
+
+// Triangles and lines use the same planes except for the near side: triangles test w alone,
+// lines test w - z.
+constexpr std::array<ClipPlane, 6> TRIANGLE_PLANES{{
+    {OUT_RIGHT, -1.0f, 0.0f, 0.0f, 1.0f},
+    {OUT_LEFT, 1.0f, 0.0f, 0.0f, 1.0f},
+    {OUT_TOP, 0.0f, -1.0f, 0.0f, 1.0f},
+    {OUT_BOTTOM, 0.0f, 1.0f, 0.0f, 1.0f},
+    {OUT_NEAR, 0.0f, 0.0f, 0.0f, 1.0f},
+    {OUT_FAR, 0.0f, 0.0f, 1.0f, 1.0f},
+}};
+
+constexpr std::array<ClipPlane, 6> LINE_PLANES{{
+    {OUT_RIGHT, -1.0f, 0.0f, 0.0f, 1.0f},
+    {OUT_LEFT, 1.0f, 0.0f, 0.0f, 1.0f},
+    {OUT_TOP, 0.0f, -1.0f, 0.0f, 1.0f},
+    {OUT_BOTTOM, 0.0f, 1.0f, 0.0f, 1.0f},
+    {OUT_NEAR, 0.0f, 0.0f, -1.0f, 1.0f},
+    {OUT_FAR, 0.0f, 0.0f, 1.0f, 1.0f},
+}};
+
+// Texture coordinate offsets selected by the line/point offset fields of BP LPSIZE.
+constexpr std::array<float, 8> TEXCOORD_OFFSETS{0.0f, 0.0625f, 0.125f, 0.25f,
+                                                0.5f, 1.0f,    1.0f,   1.0f};
+
+// Storage for vertices made by clipping. Six planes add at most two vertices each to a convex
+// polygon; the sizes leave room for rounding making it slightly non-convex.
+constexpr int SCRATCH_SIZE = 64;
+std::array<Vertex, SCRATCH_SIZE> s_scratch;
+int s_scratch_used = 0;
+
+Vertex* NewScratchVertex()
+{
+  // Only a degenerate polygon could run out; it then reuses the last slot.
+  if (s_scratch_used == SCRATCH_SIZE)
+    return &s_scratch.back();
+  return &s_scratch[static_cast<size_t>(s_scratch_used++)];
+}
+
+float PlaneDistance(const Vertex& v, const ClipPlane& plane)
+{
+  const Common::Vec4& p = v.projectedPosition;
+  return p.x * plane.cx + p.y * plane.cy + p.z * plane.cz + p.w * plane.cw;
+}
+
+u32 OutCode(const Vertex& v)
+{
+  const Common::Vec4& p = v.projectedPosition;
+  u32 code = 0;
+  if (p.w - p.x < 0)
+    code |= OUT_RIGHT;
+  if (p.x + p.w < 0)
+    code |= OUT_LEFT;
+  if (p.w - p.y < 0)
+    code |= OUT_TOP;
+  if (p.y + p.w < 0)
+    code |= OUT_BOTTOM;
+  if (p.w * p.z > 0)
+    code |= OUT_NEAR;
+  if (p.z + p.w < 0)
+    code |= OUT_FAR;
+  return code;
+}
+
+// Fills every attribute the later stages read with the point at t on the way from a to b.
+// The window position is left alone; the perspective divide computes it.
+void Interpolate(Vertex* out, float t, const Vertex& a, const Vertex& b)
+{
+  const auto mix = [t](float from, float to) { return from + (to - from) * t; };
+  const auto mix3 = [&mix](Common::Vec3& dst, const Common::Vec3& from, const Common::Vec3& to) {
+    dst.x = mix(from.x, to.x);
+    dst.y = mix(from.y, to.y);
+    dst.z = mix(from.z, to.z);
+  };
+
+  mix3(out->mvPosition, a.mvPosition, b.mvPosition);
+
+  out->projectedPosition.x = mix(a.projectedPosition.x, b.projectedPosition.x);
+  out->projectedPosition.y = mix(a.projectedPosition.y, b.projectedPosition.y);
+  out->projectedPosition.z = mix(a.projectedPosition.z, b.projectedPosition.z);
+  out->projectedPosition.w = mix(a.projectedPosition.w, b.projectedPosition.w);
+
+  for (size_t n = 0; n < out->normal.size(); ++n)
+    mix3(out->normal[n], a.normal[n], b.normal[n]);
+
+  // Colours blend in 8-bit fixed point.
+  const int weight = static_cast<u16>(t * 256.0f);
+  for (size_t chan = 0; chan < out->color.size(); ++chan)
+  {
+    for (size_t comp = 0; comp < 4; ++comp)
+    {
+      const int from = a.color[chan][comp];
+      const int to = b.color[chan][comp];
+      out->color[chan][comp] = static_cast<u8>(from + (((to - from) * weight) >> 8));
+    }
+  }
+
+  for (size_t n = 0; n < out->texCoords.size(); ++n)
+    mix3(out->texCoords[n], a.texCoords[n], b.texCoords[n]);
+}
+
+// A triangle clipped by six planes has at most nine vertices.
+constexpr size_t MAX_POLYGON = 32;
+
+struct Polygon
+{
+  std::array<Vertex*, MAX_POLYGON> v{};
+  size_t count = 0;
+};
+
+// Sutherland-Hodgman step against one plane. The walk starts with the edge from the first vertex
+// to the second, which decides the order of the output and with it the fan triangulation.
+void ClipAgainstPlane(const ClipPlane& plane, const Polygon& in, Polygon& out)
+{
+  out.count = 0;
+  Vertex* start = in.v[0];
+  float start_dist = PlaneDistance(*start, plane);
+
+  for (size_t i = 1; i <= in.count && out.count + 2 <= MAX_POLYGON; ++i)
+  {
+    Vertex* end = in.v[i == in.count ? 0 : i];
+    const float end_dist = PlaneDistance(*end, plane);
+
+    if (start_dist >= 0)
+      out.v[out.count++] = start;
+
+    // The edge crosses the plane when one end is above zero and the other is not.
+    const bool crosses = (end_dist <= 0 && start_dist > 0) || (end_dist > 0 && start_dist <= 0);
+    if (crosses)
+    {
+      Vertex* cut = NewScratchVertex();
+      if (end_dist < 0)
+        Interpolate(cut, end_dist / (end_dist - start_dist), *end, *start);
+      else
+        Interpolate(cut, start_dist / (start_dist - end_dist), *start, *end);
+      out.v[out.count++] = cut;
+    }
+
+    start = end;
+    start_dist = end_dist;
+  }
+}
+
+void DivideAndDraw(Vertex* a, Vertex* b, Vertex* c)
+{
+  PerspectiveDivide(a);
+  PerspectiveDivide(b);
+  PerspectiveDivide(c);
+  Rasterizer::DrawTriangleFrontFace(a, b, c);
+}
+
+// Clips a front-facing triangle and draws what is left as a fan around its first vertex.
+void ClipAndDraw(Vertex* a, Vertex* b, Vertex* c)
+{
+  const u32 outside = OutCode(*a) | OutCode(*b) | OutCode(*c);
+  if (outside == 0)
+  {
+    DivideAndDraw(a, b, c);
+    return;
+  }
+
+  s_scratch_used = 0;
+  std::array<Polygon, 2> buffers;
+  buffers[0].v[0] = a;
+  buffers[0].v[1] = b;
+  buffers[0].v[2] = c;
+  buffers[0].count = 3;
+  size_t current = 0;
+
+  for (const ClipPlane& plane : TRIANGLE_PLANES)
+  {
+    if ((outside & plane.outcode) == 0)
+      continue;
+    Polygon& next = buffers[current ^ 1];
+    ClipAgainstPlane(plane, buffers[current], next);
+    if (next.count < 3)
+      return;  // nothing visible remains
+    current ^= 1;
+  }
+
+  INCSTAT(g_stats.this_frame.num_triangles_clipped);
+
+  const Polygon& poly = buffers[current];
+  for (size_t i = 2; i < poly.count; ++i)
+    DivideAndDraw(poly.v[0], poly.v[i - 1], poly.v[i]);
+}
+
+// Copies a vertex for the triangles that make up a wide line or a point, moving its window
+// position by (sign_x, sign_y) times half_size.
+void CopyOffset(Vertex* dst, const Vertex& src, float sign_x, float sign_y, float half_size)
+{
+  dst->projectedPosition = src.projectedPosition;
+  dst->screenPosition.x = src.screenPosition.x + sign_x * half_size;
+  dst->screenPosition.y = src.screenPosition.y + sign_y * half_size;
+  dst->screenPosition.z = src.screenPosition.z;
+  dst->normal = src.normal;
+  dst->color = src.color;
+  dst->texCoords = src.texCoords;
+}
+
+float TexScaleS(u32 coord)
+{
+  return static_cast<float>(bpmem.texcoords[coord].s.scale_minus_1 + 1);
+}
+
+float TexScaleT(u32 coord)
+{
+  return static_cast<float>(bpmem.texcoords[coord].t.scale_minus_1 + 1);
+}
+
+void MakeLineVertex(Vertex* dst, const Vertex& src, int px, int py, bool far_side)
+{
+  CopyOffset(dst, src, static_cast<float>(px), static_cast<float>(py),
+             static_cast<float>(bpmem.lineptwidth.linesize) / 12.0f);
+
+  const float offset = TEXCOORD_OFFSETS[bpmem.lineptwidth.lineoff];
+  if (!far_side || offset == 0)
+    return;
+  for (u32 coord = 0; coord < xfmem.numTexGen.numTexGens; ++coord)
+  {
+    if (bpmem.texcoords[coord].s.line_offset)
+      dst->texCoords[coord].x += TexScaleS(coord) * offset;
+  }
+}
+
+void MakePointVertex(Vertex* dst, const Vertex& src, bool right, bool up)
+{
+  CopyOffset(dst, src, right ? 1.0f : -1.0f, up ? 1.0f : -1.0f,
+             static_cast<float>(bpmem.lineptwidth.pointsize) / 12.0f);
+
+  const float offset = TEXCOORD_OFFSETS[bpmem.lineptwidth.pointoff];
+  if (offset == 0)
+    return;
+  for (u32 coord = 0; coord < xfmem.numTexGen.numTexGens; ++coord)
+  {
+    if (!bpmem.texcoords[coord].s.point_offset)
+      continue;
+    if (right)
+      dst->texCoords[coord].x += TexScaleS(coord) * offset;
+    if (up)
+      dst->texCoords[coord].y += TexScaleT(coord) * offset;
+  }
+}
+}  // namespace
 
 void Init()
 {
-  for (int i = 0; i < NUM_CLIPPED_VERTICES; ++i)
-    Vertices[i + 3] = &ClippedVertices[i];
-}
-
-enum
-{
-  SKIP_FLAG = -1,
-  CLIP_POS_X_BIT = 0x01,
-  CLIP_NEG_X_BIT = 0x02,
-  CLIP_POS_Y_BIT = 0x04,
-  CLIP_NEG_Y_BIT = 0x08,
-  CLIP_POS_Z_BIT = 0x10,
-  CLIP_NEG_Z_BIT = 0x20
-};
-
-static inline int CalcClipMask(const OutputVertexData* v)
-{
-  int cmask = 0;
-  Common::Vec4 pos = v->projectedPosition;
-
-  if (pos.w - pos.x < 0)
-    cmask |= CLIP_POS_X_BIT;
-
-  if (pos.x + pos.w < 0)
-    cmask |= CLIP_NEG_X_BIT;
-
-  if (pos.w - pos.y < 0)
-    cmask |= CLIP_POS_Y_BIT;
-
-  if (pos.y + pos.w < 0)
-    cmask |= CLIP_NEG_Y_BIT;
-
-  if (pos.w * pos.z > 0)
-    cmask |= CLIP_POS_Z_BIT;
-
-  if (pos.z + pos.w < 0)
-    cmask |= CLIP_NEG_Z_BIT;
-
-  return cmask;
-}
-
-static inline void AddInterpolatedVertex(float t, int out, int in, int* numVertices)
-{
-  Vertices[(*numVertices)++]->Lerp(t, Vertices[out], Vertices[in]);
-}
-
-#define DIFFERENT_SIGNS(x, y) ((x <= 0 && y > 0) || (x > 0 && y <= 0))
-
-#define CLIP_DOTPROD(I, A, B, C, D)                                                                \
-  (Vertices[I]->projectedPosition.x * A + Vertices[I]->projectedPosition.y * B +                   \
-   Vertices[I]->projectedPosition.z * C + Vertices[I]->projectedPosition.w * D)
-
-#define POLY_CLIP(PLANE_BIT, A, B, C, D)                                                           \
-  {                                                                                                \
-    if (mask & PLANE_BIT)                                                                          \
-    {                                                                                              \
-      int idxPrev = inlist[0];                                                                     \
-      float dpPrev = CLIP_DOTPROD(idxPrev, A, B, C, D);                                            \
-      int outcount = 0;                                                                            \
-                                                                                                   \
-      inlist[n] = inlist[0];                                                                       \
-      for (int j = 1; j <= n; j++)                                                                 \
-      {                                                                                            \
-        int idx = inlist[j];                                                                       \
-        float dp = CLIP_DOTPROD(idx, A, B, C, D);                                                  \
-        if (dpPrev >= 0)                                                                           \
-        {                                                                                          \
-          outlist[outcount++] = idxPrev;                                                           \
-        }                                                                                          \
-                                                                                                   \
-        if (DIFFERENT_SIGNS(dp, dpPrev))                                                           \
-        {                                                                                          \
-          if (dp < 0)                                                                              \
-          {                                                                                        \
-            float t = dp / (dp - dpPrev);                                                          \
-            AddInterpolatedVertex(t, idx, idxPrev, &numVertices);                                  \
-          }                                                                                        \
-          else                                                                                     \
-          {                                                                                        \
-            float t = dpPrev / (dpPrev - dp);                                                      \
-            AddInterpolatedVertex(t, idxPrev, idx, &numVertices);                                  \
-          }                                                                                        \
-          outlist[outcount++] = numVertices - 1;                                                   \
-        }                                                                                          \
-                                                                                                   \
-        idxPrev = idx;                                                                             \
-        dpPrev = dp;                                                                               \
-      }                                                                                            \
-                                                                                                   \
-      if (outcount < 3)                                                                            \
-        continue;                                                                                  \
-                                                                                                   \
-      {                                                                                            \
-        int* tmp = inlist;                                                                         \
-        inlist = outlist;                                                                          \
-        outlist = tmp;                                                                             \
-        n = outcount;                                                                              \
-      }                                                                                            \
-    }                                                                                              \
-  }
-
-#define LINE_CLIP(PLANE_BIT, A, B, C, D)                                                           \
-  {                                                                                                \
-    if (mask & PLANE_BIT)                                                                          \
-    {                                                                                              \
-      const float dp0 = CLIP_DOTPROD(0, A, B, C, D);                                               \
-      const float dp1 = CLIP_DOTPROD(1, A, B, C, D);                                               \
-      const bool neg_dp0 = dp0 < 0;                                                                \
-      const bool neg_dp1 = dp1 < 0;                                                                \
-                                                                                                   \
-      if (neg_dp0 && neg_dp1)                                                                      \
-        return;                                                                                    \
-                                                                                                   \
-      if (neg_dp1)                                                                                 \
-      {                                                                                            \
-        float t = dp1 / (dp1 - dp0);                                                               \
-        if (t > t1)                                                                                \
-          t1 = t;                                                                                  \
-      }                                                                                            \
-      else if (neg_dp0)                                                                            \
-      {                                                                                            \
-        float t = dp0 / (dp0 - dp1);                                                               \
-        if (t > t0)                                                                                \
-          t0 = t;                                                                                  \
-      }                                                                                            \
-    }                                                                                              \
-  }
-
-static void ClipTriangle(int* indices, int* numIndices)
-{
-  int mask = 0;
-
-  mask |= CalcClipMask(Vertices[0]);
-  mask |= CalcClipMask(Vertices[1]);
-  mask |= CalcClipMask(Vertices[2]);
-
-  if (mask != 0)
-  {
-    for (int i = 0; i < 3; i += 3)
-    {
-      int vlist[2][2 * 6 + 1];
-      int *inlist = vlist[0], *outlist = vlist[1];
-      int n = 3;
-      int numVertices = 3;
-
-      inlist[0] = 0;
-      inlist[1] = 1;
-      inlist[2] = 2;
-
-      // mark this triangle as unused in case it should be completely
-      // clipped
-      indices[0] = SKIP_FLAG;
-      indices[1] = SKIP_FLAG;
-      indices[2] = SKIP_FLAG;
-
-      POLY_CLIP(CLIP_POS_X_BIT, -1, 0, 0, 1);
-      POLY_CLIP(CLIP_NEG_X_BIT, 1, 0, 0, 1);
-      POLY_CLIP(CLIP_POS_Y_BIT, 0, -1, 0, 1);
-      POLY_CLIP(CLIP_NEG_Y_BIT, 0, 1, 0, 1);
-      POLY_CLIP(CLIP_POS_Z_BIT, 0, 0, 0, 1);
-      POLY_CLIP(CLIP_NEG_Z_BIT, 0, 0, 1, 1);
-
-      INCSTAT(g_stats.this_frame.num_triangles_clipped);
-
-      // transform the poly in inlist into triangles
-      indices[0] = inlist[0];
-      indices[1] = inlist[1];
-      indices[2] = inlist[2];
-      for (int j = 3; j < n; ++j)
-      {
-        indices[(*numIndices)++] = inlist[0];
-        indices[(*numIndices)++] = inlist[j - 1];
-        indices[(*numIndices)++] = inlist[j];
-      }
-    }
-  }
-}
-
-static void ClipLine(int* indices)
-{
-  int mask = 0;
-  int clip_mask[2] = {0, 0};
-
-  for (int i = 0; i < 2; ++i)
-  {
-    clip_mask[i] = CalcClipMask(Vertices[i]);
-    mask |= clip_mask[i];
-  }
-
-  if (mask == 0)
-    return;
-
-  float t0 = 0;
-  float t1 = 0;
-
-  // Mark unused in case of early termination
-  // of the macros below. (When fully clipped)
-  indices[0] = SKIP_FLAG;
-  indices[1] = SKIP_FLAG;
-
-  LINE_CLIP(CLIP_POS_X_BIT, -1, 0, 0, 1);
-  LINE_CLIP(CLIP_NEG_X_BIT, 1, 0, 0, 1);
-  LINE_CLIP(CLIP_POS_Y_BIT, 0, -1, 0, 1);
-  LINE_CLIP(CLIP_NEG_Y_BIT, 0, 1, 0, 1);
-  LINE_CLIP(CLIP_POS_Z_BIT, 0, 0, -1, 1);
-  LINE_CLIP(CLIP_NEG_Z_BIT, 0, 0, 1, 1);
-
-  // Restore the old values as this line
-  // was not fully clipped.
-  indices[0] = 0;
-  indices[1] = 1;
-
-  int numVertices = 2;
-
-  if (clip_mask[0])
-  {
-    indices[0] = numVertices;
-    AddInterpolatedVertex(t0, 0, 1, &numVertices);
-  }
-
-  if (clip_mask[1])
-  {
-    indices[1] = numVertices;
-    AddInterpolatedVertex(t1, 1, 0, &numVertices);
-  }
+  s_scratch_used = 0;
 }
 
 void ProcessTriangle(OutputVertexData* v0, OutputVertexData* v1, OutputVertexData* v2)
@@ -291,267 +294,164 @@ void ProcessTriangle(OutputVertexData* v0, OutputVertexData* v1, OutputVertexDat
 
   if (IsTriviallyRejected(v0, v1, v2))
   {
+    // A rejected triangle does not touch the depth slope that z-freeze uses.
     INCSTAT(g_stats.this_frame.num_triangles_rejected);
-    // NOTE: The slope used by zfreeze shouldn't be updated if the triangle is
-    // trivially rejected during clipping
     return;
   }
 
-  bool backface = IsBackface(v0, v1, v2);
+  const bool back = IsBackface(v0, v1, v2);
+  // Back faces are drawn with their winding reversed so that the rasterizer only sees front faces.
+  Vertex* const first = v0;
+  Vertex* const second = back ? v2 : v1;
+  Vertex* const third = back ? v1 : v2;
 
-  if (!backface)
+  const CullMode cull = bpmem.genMode.cull_mode;
+  const bool culled =
+      cull == CullMode::All || (back ? cull == CullMode::Front : cull == CullMode::Back);
+  if (culled)
   {
-    if (bpmem.genMode.cull_mode == CullMode::Back || bpmem.genMode.cull_mode == CullMode::All)
-    {
-      // cull frontfacing - we still need to update the slope for zfreeze
-      PerspectiveDivide(v0);
-      PerspectiveDivide(v1);
-      PerspectiveDivide(v2);
-      Rasterizer::UpdateZSlope(v0, v1, v2, bpmem.scissorOffset.x * 2, bpmem.scissorOffset.y * 2);
-      INCSTAT(g_stats.this_frame.num_triangles_culled);
-      return;
-    }
-  }
-  else
-  {
-    if (bpmem.genMode.cull_mode == CullMode::Front || bpmem.genMode.cull_mode == CullMode::All)
-    {
-      // cull backfacing - we still need to update the slope for zfreeze
-      PerspectiveDivide(v0);
-      PerspectiveDivide(v2);
-      PerspectiveDivide(v1);
-      Rasterizer::UpdateZSlope(v0, v2, v1, bpmem.scissorOffset.x * 2, bpmem.scissorOffset.y * 2);
-      INCSTAT(g_stats.this_frame.num_triangles_culled);
-      return;
-    }
+    // Culled triangles still set the depth slope for z-freeze.
+    PerspectiveDivide(first);
+    PerspectiveDivide(second);
+    PerspectiveDivide(third);
+    Rasterizer::UpdateZSlope(first, second, third, static_cast<s32>(bpmem.scissorOffset.x * 2),
+                             static_cast<s32>(bpmem.scissorOffset.y * 2));
+    INCSTAT(g_stats.this_frame.num_triangles_culled);
+    return;
   }
 
-  int indices[NUM_INDICES] = {0,         1,         2,         SKIP_FLAG, SKIP_FLAG, SKIP_FLAG,
-                              SKIP_FLAG, SKIP_FLAG, SKIP_FLAG, SKIP_FLAG, SKIP_FLAG, SKIP_FLAG,
-                              SKIP_FLAG, SKIP_FLAG, SKIP_FLAG, SKIP_FLAG, SKIP_FLAG, SKIP_FLAG,
-                              SKIP_FLAG, SKIP_FLAG, SKIP_FLAG};
-  int numIndices = 3;
-
-  if (backface)
+  // With clipping detection disabled the triangle is drawn unclipped, unless a vertex is behind
+  // the eye (negative w); the divide would mirror it, so that case is still clipped.
+  // Hardware has some guard band limit even then, which is not modelled.
+  if (xfmem.clipDisable.disable_clipping_detection && first->projectedPosition.w >= 0 &&
+      second->projectedPosition.w >= 0 && third->projectedPosition.w >= 0)
   {
-    Vertices[0] = v0;
-    Vertices[1] = v2;
-    Vertices[2] = v1;
-  }
-  else
-  {
-    Vertices[0] = v0;
-    Vertices[1] = v1;
-    Vertices[2] = v2;
+    DivideAndDraw(first, second, third);
+    return;
   }
 
-  // TODO: behavior when disable_clipping_detection is set doesn't quite match actual hardware;
-  // there does still seem to be a maximum size after which things are clipped.  Also, currently
-  // when clipping is enabled triangles are clipped to exactly the viewport, but on hardware there
-  // is a guardband (and with certain scissor configurations, things can show up in it)
-  // Mario Party 8 in widescreen breaks without this: https://bugs.dolphin-emu.org/issues/12769
-  bool skip_clipping = false;
-  if (xfmem.clipDisable.disable_clipping_detection)
-  {
-    // If any w coordinate is negative, then the perspective divide will flip coordinates, breaking
-    // various assumptions (including backface).  So, we still need to do clipping in that case.
-    // This isn't the actual condition hardware uses.
-    if (Vertices[0]->projectedPosition.w >= 0 && Vertices[1]->projectedPosition.w >= 0 &&
-        Vertices[2]->projectedPosition.w >= 0)
-      skip_clipping = true;
-  }
-
-  if (!skip_clipping)
-    ClipTriangle(indices, &numIndices);
-
-  for (int i = 0; i + 3 <= numIndices; i += 3)
-  {
-    ASSERT(i < NUM_INDICES);
-    if (indices[i] != SKIP_FLAG)
-    {
-      PerspectiveDivide(Vertices[indices[i]]);
-      PerspectiveDivide(Vertices[indices[i + 1]]);
-      PerspectiveDivide(Vertices[indices[i + 2]]);
-
-      Rasterizer::DrawTriangleFrontFace(Vertices[indices[i]], Vertices[indices[i + 1]],
-                                        Vertices[indices[i + 2]]);
-    }
-  }
+  ClipAndDraw(first, second, third);
 }
 
-constexpr std::array<float, 8> LINE_PT_TEX_OFFSETS = {
-    0, 1 / 16.f, 1 / 8.f, 1 / 4.f, 1 / 2.f, 1, 1, 1,
-};
-
-static void CopyLineVertex(OutputVertexData* dst, const OutputVertexData* src, int px, int py,
-                           bool apply_line_offset)
+void ProcessLine(OutputVertexData* v0, OutputVertexData* v1)
 {
-  const float line_half_width = bpmem.lineptwidth.linesize / 12.0f;
+  Vertex* start = v0;
+  Vertex* end = v1;
 
-  dst->projectedPosition = src->projectedPosition;
-  dst->screenPosition.x = src->screenPosition.x + px * line_half_width;
-  dst->screenPosition.y = src->screenPosition.y + py * line_half_width;
-  dst->screenPosition.z = src->screenPosition.z;
-
-  dst->normal = src->normal;
-  dst->color = src->color;
-
-  dst->texCoords = src->texCoords;
-
-  if (apply_line_offset && LINE_PT_TEX_OFFSETS[bpmem.lineptwidth.lineoff] != 0)
+  const u32 code0 = OutCode(*v0);
+  const u32 code1 = OutCode(*v1);
+  if ((code0 | code1) != 0)
   {
-    for (u32 coord_num = 0; coord_num < xfmem.numTexGen.numTexGens; coord_num++)
+    // Parametric clipping: t_start and t_end are how far each end moves towards the other.
+    float t_start = 0;
+    float t_end = 0;
+    for (const ClipPlane& plane : LINE_PLANES)
     {
-      if (bpmem.texcoords[coord_num].s.line_offset)
+      if (((code0 | code1) & plane.outcode) == 0)
+        continue;
+      const float d0 = PlaneDistance(*v0, plane);
+      const float d1 = PlaneDistance(*v1, plane);
+      const bool out0 = d0 < 0;
+      const bool out1 = d1 < 0;
+      if (out0 && out1)
+        return;
+      if (out1)
       {
-        dst->texCoords[coord_num].x += (bpmem.texcoords[coord_num].s.scale_minus_1 + 1) *
-                                       LINE_PT_TEX_OFFSETS[bpmem.lineptwidth.lineoff];
+        const float t = d1 / (d1 - d0);
+        if (t > t_end)
+          t_end = t;
+      }
+      else if (out0)
+      {
+        const float t = d0 / (d0 - d1);
+        if (t > t_start)
+          t_start = t;
       }
     }
-  }
-}
 
-void ProcessLine(OutputVertexData* lineV0, OutputVertexData* lineV1)
-{
-  int indices[4] = {0, 1, SKIP_FLAG, SKIP_FLAG};
-
-  Vertices[0] = lineV0;
-  Vertices[1] = lineV1;
-
-  // point to a valid vertex to store to when clipping
-  Vertices[2] = &ClippedVertices[17];
-
-  ClipLine(indices);
-
-  if (indices[0] != SKIP_FLAG)
-  {
-    OutputVertexData* v0 = Vertices[indices[0]];
-    OutputVertexData* v1 = Vertices[indices[1]];
-
-    PerspectiveDivide(v0);
-    PerspectiveDivide(v1);
-
-    const float dx = v1->screenPosition.x - v0->screenPosition.x;
-    const float dy = v1->screenPosition.y - v0->screenPosition.y;
-
-    int px = 0;
-    int py = 0;
-
-    // GameCube/Wii's line drawing algorithm is a little quirky. It does not
-    // use the correct line caps. Instead, the line caps are vertical or
-    // horizontal depending the slope of the line.
-    // FIXME: What does real hardware do when line is at a 45-degree angle?
-
-    // Note that py or px are set positive or negative to ensure that the triangles are drawn ccw.
-    if (fabsf(dx) > fabsf(dy))
-      py = (dx > 0) ? -1 : 1;
-    else
-      px = (dy > 0) ? 1 : -1;
-
-    OutputVertexData triangle[3];
-
-    CopyLineVertex(&triangle[0], v0, px, py, false);
-    CopyLineVertex(&triangle[1], v1, px, py, false);
-    CopyLineVertex(&triangle[2], v1, -px, -py, true);
-
-    // ccw winding
-    Rasterizer::DrawTriangleFrontFace(&triangle[2], &triangle[1], &triangle[0]);
-
-    CopyLineVertex(&triangle[1], v0, -px, -py, true);
-
-    Rasterizer::DrawTriangleFrontFace(&triangle[0], &triangle[1], &triangle[2]);
-  }
-}
-
-static void CopyPointVertex(OutputVertexData* dst, const OutputVertexData* src, bool px, bool py)
-{
-  const float point_radius = bpmem.lineptwidth.pointsize / 12.0f;
-
-  dst->projectedPosition = src->projectedPosition;
-  dst->screenPosition.x = src->screenPosition.x + (px ? 1 : -1) * point_radius;
-  dst->screenPosition.y = src->screenPosition.y + (py ? 1 : -1) * point_radius;
-  dst->screenPosition.z = src->screenPosition.z;
-
-  dst->normal = src->normal;
-  dst->color = src->color;
-
-  dst->texCoords = src->texCoords;
-
-  const float point_offset = LINE_PT_TEX_OFFSETS[bpmem.lineptwidth.pointoff];
-  if (point_offset != 0)
-  {
-    for (u32 coord_num = 0; coord_num < xfmem.numTexGen.numTexGens; coord_num++)
+    s_scratch_used = 0;
+    if (code0 != 0)
     {
-      const auto coord_info = bpmem.texcoords[coord_num];
-      if (coord_info.s.point_offset)
-      {
-        if (px)
-          dst->texCoords[coord_num].x += (coord_info.s.scale_minus_1 + 1) * point_offset;
-        if (py)
-          dst->texCoords[coord_num].y += (coord_info.t.scale_minus_1 + 1) * point_offset;
-      }
+      start = NewScratchVertex();
+      Interpolate(start, t_start, *v0, *v1);
+    }
+    if (code1 != 0)
+    {
+      end = NewScratchVertex();
+      Interpolate(end, t_end, *v1, *v0);
     }
   }
+
+  PerspectiveDivide(start);
+  PerspectiveDivide(end);
+
+  // Lines are drawn as quads whose short sides are vertical or horizontal, depending on which
+  // way the line is steeper, rather than perpendicular to the line. The signs keep the two
+  // triangles counter-clockwise.
+  const float dx = end->screenPosition.x - start->screenPosition.x;
+  const float dy = end->screenPosition.y - start->screenPosition.y;
+  int px = 0;
+  int py = 0;
+  if (std::fabs(dx) > std::fabs(dy))
+    py = dx > 0 ? -1 : 1;
+  else
+    px = dy > 0 ? 1 : -1;
+
+  std::array<Vertex, 3> quad;
+  MakeLineVertex(&quad[0], *start, px, py, false);
+  MakeLineVertex(&quad[1], *end, px, py, false);
+  MakeLineVertex(&quad[2], *end, -px, -py, true);
+  Rasterizer::DrawTriangleFrontFace(&quad[2], &quad[1], &quad[0]);
+
+  MakeLineVertex(&quad[1], *start, -px, -py, true);
+  Rasterizer::DrawTriangleFrontFace(&quad[0], &quad[1], &quad[2]);
 }
 
 void ProcessPoint(OutputVertexData* center)
 {
-  // TODO: This isn't actually doing any clipping
+  // Points are not clipped.
   PerspectiveDivide(center);
 
-  OutputVertexData ll, lr, ul, ur;
+  Vertex lower_left, lower_right, upper_left, upper_right;
+  MakePointVertex(&lower_left, *center, false, false);
+  MakePointVertex(&lower_right, *center, true, false);
+  MakePointVertex(&upper_right, *center, true, true);
+  MakePointVertex(&upper_left, *center, false, true);
 
-  CopyPointVertex(&ll, center, false, false);
-  CopyPointVertex(&lr, center, true, false);
-  CopyPointVertex(&ur, center, true, true);
-  CopyPointVertex(&ul, center, false, true);
-
-  Rasterizer::DrawTriangleFrontFace(&ll, &ul, &lr);
-  Rasterizer::DrawTriangleFrontFace(&ur, &lr, &ul);
+  Rasterizer::DrawTriangleFrontFace(&lower_left, &upper_left, &lower_right);
+  Rasterizer::DrawTriangleFrontFace(&upper_right, &lower_right, &upper_left);
 }
 
 bool IsTriviallyRejected(const OutputVertexData* v0, const OutputVertexData* v1,
                          const OutputVertexData* v2)
 {
-  int mask = CalcClipMask(v0);
-  mask &= CalcClipMask(v1);
-  mask &= CalcClipMask(v2);
-
-  return mask != 0;
+  return (OutCode(*v0) & OutCode(*v1) & OutCode(*v2)) != 0;
 }
 
 bool IsBackface(const OutputVertexData* v0, const OutputVertexData* v1, const OutputVertexData* v2)
 {
-  float x0 = v0->projectedPosition.x;
-  float x1 = v1->projectedPosition.x;
-  float x2 = v2->projectedPosition.x;
-  float y1 = v1->projectedPosition.y;
-  float y0 = v0->projectedPosition.y;
-  float y2 = v2->projectedPosition.y;
-  float w0 = v0->projectedPosition.w;
-  float w1 = v1->projectedPosition.w;
-  float w2 = v2->projectedPosition.w;
+  // Sign of the triangle's orientation in homogeneous coordinates (the determinant of the x, y, w
+  // columns), expanded along the second vertex.
+  const Common::Vec4& a = v0->projectedPosition;
+  const Common::Vec4& b = v1->projectedPosition;
+  const Common::Vec4& c = v2->projectedPosition;
+  const float minor_y = a.x * c.w - c.x * a.w;
+  const float minor_w = c.x * a.y - a.x * c.y;
+  const float minor_x = c.y * a.w - a.y * c.w;
+  const float orientation = minor_y * b.y + minor_w * b.w + minor_x * b.x;
 
-  float normalZDir = (x0 * w2 - x2 * w0) * y1 + (x2 * y0 - x0 * y2) * w1 + (y2 * w0 - y0 * w2) * x1;
-
-  bool backface = normalZDir <= 0.0f;
-  // Jimmie Johnson's Anything with an Engine has a positive viewport, while other games have a
-  // negative viewport.  The positive viewport does not require vertices to be vertically mirrored,
-  // but the backface test does need to be inverted for things to be drawn.
-  if (xfmem.viewport.ht > 0)
-    backface = !backface;
-
-  return backface;
+  // Most games use a negative viewport height, which mirrors y. A positive one (for example
+  // Jimmie Johnson's Anything with an Engine) flips the meaning of the sign.
+  const bool facing_away = orientation <= 0.0f;
+  return xfmem.viewport.ht > 0 ? !facing_away : facing_away;
 }
 
 void PerspectiveDivide(OutputVertexData* vertex)
 {
-  Common::Vec4& projected = vertex->projectedPosition;
-  Common::Vec3& screen = vertex->screenPosition;
-
-  float wInverse = 1.0f / projected.w;
-  screen.x = projected.x * wInverse * xfmem.viewport.wd + xfmem.viewport.xOrig;
-  screen.y = projected.y * wInverse * xfmem.viewport.ht + xfmem.viewport.yOrig;
-  screen.z = projected.z * wInverse * xfmem.viewport.zRange + xfmem.viewport.farZ;
+  const Common::Vec4& clip = vertex->projectedPosition;
+  const float inv_w = 1.0f / clip.w;
+  vertex->screenPosition.x = clip.x * inv_w * xfmem.viewport.wd + xfmem.viewport.xOrig;
+  vertex->screenPosition.y = clip.y * inv_w * xfmem.viewport.ht + xfmem.viewport.yOrig;
+  vertex->screenPosition.z = clip.z * inv_w * xfmem.viewport.zRange + xfmem.viewport.farZ;
 }
 }  // namespace Clipper

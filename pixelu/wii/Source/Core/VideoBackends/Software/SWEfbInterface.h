@@ -1,5 +1,4 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,9 +7,11 @@
 #include "VideoCommon/EFBInterface.h"
 #include "VideoCommon/PerfQueryBase.h"
 
+// The software renderer's embedded framebuffer: a 640x528 colour plane followed by a 640x528
+// depth plane, each pixel 24 bits packed in three bytes, as the pixel engine stores them.
 namespace EfbInterface
 {
-// xfb color format - packed so the compiler doesn't mess with alignment
+// One XFB pixel: luma and alternately Cb or Cr.
 #pragma pack(push, 1)
 struct yuv422_packed
 {
@@ -19,38 +20,23 @@ struct yuv422_packed
 };
 #pragma pack(pop)
 
-// But this struct is only used internally, so we could optimise alignment
-struct yuv444
-{
-  u8 Y;
-  s8 U;
-  s8 V;
-};
+// Colours passed to and from these functions are four bytes in the order A, B, G, R (a
+// little-endian RGBA8 word).
 
-enum
-{
-  ALP_C,
-  BLU_C,
-  GRN_C,
-  RED_C
-};
-
-// color order is ABGR in order to emulate RGBA on little-endian hardware
-
-// does full blending of an incoming pixel
+// Blends a shaded pixel into the EFB with the current blend, logic op, dither and write masks.
 void BlendTev(u16 x, u16 y, u8* color);
 
-// compare z at location x,y
-// writes it if it passes
-// returns result of compare.
+// Depth test against the stored value; a passing z is written when depth updates are enabled.
 bool ZCompare(u16 x, u16 y, u32 z);
 
-// sets the color and alpha
+// Raw writes, honouring the write masks and the pixel format (used by EFB clears).
 void SetColor(u16 x, u16 y, u8* color);
 void SetDepth(u16 x, u16 y, u32 depth);
 
+// Address of a pixel's three bytes in the colour or depth plane.
 u8* GetPixelPointer(u16 x, u16 y, bool depth);
 
+// Copies an EFB rectangle to the XFB in YUV 4:2:2, applying the copy filter and gamma.
 void EncodeXFB(u8* xfb_in_ram, u32 memory_stride, const MathUtil::Rectangle<int>& source_rect,
                float y_scale, float gamma);
 

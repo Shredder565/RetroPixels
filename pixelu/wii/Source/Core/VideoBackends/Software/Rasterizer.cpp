@@ -1,10 +1,12 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/Software/Rasterizer.h"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 #include "Common/Assert.h"
@@ -13,6 +15,7 @@
 #include "VideoBackends/Software/NativeVertexFormat.h"
 #include "VideoBackends/Software/SWEfbInterface.h"
 #include "VideoBackends/Software/Tev.h"
+
 #include "VideoCommon/BPFunctions.h"
 #include "VideoCommon/BPMemory.h"
 #include "VideoCommon/PerfQueryBase.h"
@@ -22,493 +25,430 @@
 
 namespace Rasterizer
 {
-static constexpr int BLOCK_SIZE = 2;
-
-struct SlopeContext
+namespace
 {
-  SlopeContext(const OutputVertexData* v0, const OutputVertexData* v1, const OutputVertexData* v2,
-               s32 x0_, s32 y0_, s32 x_off, s32 y_off)
-      : x0(x0_), y0(y0_)
+// Pixels are shaded in square blocks of this many pixels per side, so that texture LODs can be
+// taken from screen-space differences inside the block.
+constexpr s32 QUAD = 2;
+
+// Rounds to the nearest integer, halves away from the truncation.
+s32 RoundNearest(float value)
+{
+  const s32 truncated = static_cast<s32>(value);
+  return value - static_cast<float>(truncated) >= 0.5 ? truncated + 1 : truncated;
+}
+
+// Converts a screen coordinate to the 28.4 fixed point the edge functions use, including the
+// hardware's sub-pixel bias.
+s32 ToFixed(float coordinate, s32 offset)
+{
+  return RoundNearest(16.0f * (coordinate - static_cast<float>(offset))) - 9;
+}
+
+// Turns a 28.4 fixed point coordinate into the first pixel at or after it.
+s32 PixelCeil(s32 fixed)
+{
+  return (fixed + 0xF) >> 4;
+}
+
+// Where interpolation starts for a triangle: its first vertex, snapped to a pixel, plus the
+// sub-pixel distance from that pixel's sample point to the real vertex.
+struct Origin
+{
+  Origin(const OutputVertexData& v0, const OutputVertexData& v1, const OutputVertexData& v2,
+         s32 pixel_x, s32 pixel_y, s32 x_off, s32 y_off)
+      : px(pixel_x), py(pixel_y)
   {
-    // adjust a little less than 0.5
-    const float adjust = 0.495f;
+    // Sample a little short of the pixel centre.
+    constexpr float SAMPLE_BIAS = 0.495f;
+    const float vertex_x = v0.screenPosition.x - static_cast<float>(x_off);
+    fx = (static_cast<float>(pixel_x) - vertex_x) + SAMPLE_BIAS;
+    const float vertex_y = v0.screenPosition.y - static_cast<float>(y_off);
+    fy = (static_cast<float>(pixel_y) - vertex_y) + SAMPLE_BIAS;
 
-    xOff = ((float)x0_ - (v0->screenPosition.x - x_off)) + adjust;
-    yOff = ((float)y0_ - (v0->screenPosition.y - y_off)) + adjust;
-
-    dx10 = v1->screenPosition.x - v0->screenPosition.x;
-    dx20 = v2->screenPosition.x - v0->screenPosition.x;
-    dy10 = v1->screenPosition.y - v0->screenPosition.y;
-    dy20 = v2->screenPosition.y - v0->screenPosition.y;
+    ex1 = v1.screenPosition.x - v0.screenPosition.x;
+    ex2 = v2.screenPosition.x - v0.screenPosition.x;
+    ey1 = v1.screenPosition.y - v0.screenPosition.y;
+    ey2 = v2.screenPosition.y - v0.screenPosition.y;
   }
-  s32 x0;
-  s32 y0;
-  float xOff;
-  float yOff;
-  float dx10;
-  float dx20;
-  float dy10;
-  float dy20;
+
+  s32 px, py;                // the starting pixel
+  float fx, fy;              // fractional offset of the sample from vertex 0
+  float ex1, ex2, ey1, ey2;  // edges v0->v1 and v0->v2
 };
 
-struct Slope
+// A linear function of screen position, set up from its values at the triangle's vertices.
+struct Plane
 {
-  Slope() = default;
-  Slope(float f0_, float f1, float f2, const SlopeContext& ctx) : f0(f0_)
+  Plane() = default;
+  Plane(float at0, float at1, float at2, const Origin& origin)
+      : base(at0), px(origin.px), py(origin.py), fx(origin.fx), fy(origin.fy)
   {
-    float delta_20 = f2 - f0_;
-    float delta_10 = f1 - f0_;
-
-    //        x2 - x0    y1 - y0    x1 - x0    y2 - y0
-    float a = delta_20 * ctx.dy10 - delta_10 * ctx.dy20;
-    float b = ctx.dx20 * delta_10 - ctx.dx10 * delta_20;
-    float c = ctx.dx20 * ctx.dy10 - ctx.dx10 * ctx.dy20;
-
-    dfdx = a / c;
-    dfdy = b / c;
-
-    x0 = ctx.x0;
-    y0 = ctx.y0;
-    xOff = ctx.xOff;
-    yOff = ctx.yOff;
+    const float d1 = at1 - at0;
+    const float d2 = at2 - at0;
+    const float num_x = d2 * origin.ey1 - d1 * origin.ey2;
+    const float num_y = origin.ex2 * d1 - origin.ex1 * d2;
+    const float area = origin.ex2 * origin.ey1 - origin.ex1 * origin.ey2;
+    step_x = num_x / area;
+    step_y = num_y / area;
   }
 
-  // These default values are used in the unlikely case that zfreeze is enabled when drawing the
-  // first primitive.
-  // TODO: This is just a guess!
-  float dfdx = 0.0f;
-  float dfdy = 0.0f;
-  float f0 = 1.0f;
-
-  // Both an s32 value and a float value are used to minimize rounding error
-  // TODO: is this really needed?
-  s32 x0 = 0;
-  s32 y0 = 0;
-  float xOff = 0.0f;
-  float yOff = 0.0f;
-
-  float GetValue(s32 x, s32 y) const
+  float At(s32 x, s32 y) const
   {
-    float dx = xOff + (float)(x - x0);
-    float dy = yOff + (float)(y - y0);
-    return f0 + (dfdx * dx) + (dfdy * dy);
+    const float dx = fx + static_cast<float>(x - px);
+    const float dy = fy + static_cast<float>(y - py);
+    return base + (step_x * dx) + (step_y * dy);
   }
+
+  // The defaults only matter when z-freeze is already on for the very first primitive; what the
+  // hardware does there is unknown.
+  float step_x = 0.0f;
+  float step_y = 0.0f;
+  float base = 1.0f;
+  s32 px = 0;
+  s32 py = 0;
+  float fx = 0.0f;
+  float fy = 0.0f;
 };
 
-static Slope ZSlope;
-static Slope WSlope;
-static Slope ColorSlopes[2][4];
-static Slope TexSlopes[8][3];
-
-static Tev tev;
-static RasterBlock rasterBlock;
-
-static std::vector<BPFunctions::ScissorRect> scissors;
-
-void Init()
+// One half-plane of a triangle in 28.4 fixed point: Eval() > 0 means inside. Evaluated with
+// wrapping arithmetic so that extreme coordinates cannot overflow.
+struct HalfPlane
 {
-  // The other slopes are set each for each primitive drawn, but zfreeze means that the z slope
-  // needs to be set to an (untested) default value.
-  ZSlope = Slope();
-}
-
-void ScissorChanged()
-{
-  auto scissor_result = BPFunctions::ComputeScissorRects(bpmem.scissorTL, bpmem.scissorBR,
-                                                         bpmem.scissorOffset, xfmem.viewport);
-  scissors = std::move(scissor_result.rectangles);
-}
-
-// Returns approximation of log2(f) in s28.4
-// results are close enough to use for LOD
-static s32 FixedLog2(float f)
-{
-  u32 x;
-  std::memcpy(&x, &f, sizeof(u32));
-
-  s32 logInt = ((x & 0x7F800000) >> 19) - 2032;  // integer part
-  s32 logFract = (x & 0x007fffff) >> 19;         // approximate fractional part
-
-  return logInt + logFract;
-}
-
-static inline int iround(float x)
-{
-  int t = (int)x;
-  if ((x - t) >= 0.5)
-    return t + 1;
-
-  return t;
-}
-
-void SetTevKonstColors()
-{
-  tev.SetKonstColors();
-}
-
-static void Draw(s32 x, s32 y, s32 xi, s32 yi)
-{
-  INCSTAT(g_stats.this_frame.rasterized_pixels);
-
-  s32 z = (s32)std::clamp<float>(ZSlope.GetValue(x, y), 0.0f, 16777215.0f);
-
-  if (bpmem.GetEmulatedZ() == EmulatedZ::Early)
+  HalfPlane(s32 from_x, s32 from_y, s32 to_x, s32 to_y)
+      : dx(static_cast<u32>(from_x) - static_cast<u32>(to_x)),
+        dy(static_cast<u32>(from_y) - static_cast<u32>(to_y))
   {
-    // TODO: Test if perf regs are incremented even if test is disabled
-    EfbInterface::IncPerfCounterQuadCount(PQ_ZCOMP_INPUT_ZCOMPLOC);
-    if (bpmem.zmode.test_enable)
-    {
-      // early z
-      if (!EfbInterface::ZCompare(x, y, z))
-        return;
-    }
-    EfbInterface::IncPerfCounterQuadCount(PQ_ZCOMP_OUTPUT_ZCOMPLOC);
+    bias = dy * static_cast<u32>(from_x) - dx * static_cast<u32>(from_y);
+    // Top-left fill rule: pixels exactly on a top or left edge belong to the triangle.
+    const s32 sdx = static_cast<s32>(dx);
+    const s32 sdy = static_cast<s32>(dy);
+    if (sdy < 0 || (sdy == 0 && sdx > 0))
+      ++bias;
   }
 
-  RasterBlockPixel& pixel = rasterBlock.Pixel[xi][yi];
-
-  tev.Position[0] = x;
-  tev.Position[1] = y;
-  tev.Position[2] = z;
-
-  //  colors
-  for (unsigned int i = 0; i < bpmem.genMode.numcolchans; i++)
+  bool Inside(s32 pixel_x, s32 pixel_y) const
   {
-    for (int comp = 0; comp < 4; comp++)
-    {
-      const float color = ColorSlopes[i][comp].GetValue(x, y);
-      tev.Color[i][comp] = (u8)std::clamp<float>(color, 0.0f, 255.0f);
-    }
+    const u32 fixed_x = static_cast<u32>(pixel_x) << 4;
+    const u32 fixed_y = static_cast<u32>(pixel_y) << 4;
+    return static_cast<s32>(bias + dx * fixed_y - dy * fixed_x) > 0;
   }
 
-  // tex coords
-  for (unsigned int i = 0; i < bpmem.genMode.numtexgens; i++)
+  // Bit n set when corner n of the block at (x, y) is inside (0 top-left, 1 top-right,
+  // 2 bottom-left, 3 bottom-right).
+  u32 BlockMask(s32 x, s32 y) const
   {
-    // multiply by 128 because TEV stores UVs as s17.7
-    tev.Uv[i].s = (s32)(pixel.Uv[i][0] * 128);
-    tev.Uv[i].t = (s32)(pixel.Uv[i][1] * 128);
+    const s32 x_last = x + QUAD - 1;
+    const s32 y_last = y + QUAD - 1;
+    return (Inside(x, y) ? 1u : 0u) | (Inside(x_last, y) ? 2u : 0u) |
+           (Inside(x, y_last) ? 4u : 0u) | (Inside(x_last, y_last) ? 8u : 0u);
   }
 
-  for (unsigned int i = 0; i < bpmem.genMode.numindstages; i++)
-  {
-    tev.IndirectLod[i] = rasterBlock.IndirectLod[i];
-    tev.IndirectLinear[i] = rasterBlock.IndirectLinear[i];
-  }
+  u32 dx;
+  u32 dy;
+  u32 bias = 0;
+};
 
-  for (unsigned int i = 0; i <= bpmem.genMode.numtevstages; i++)
-  {
-    tev.TextureLod[i] = rasterBlock.TextureLod[i];
-    tev.TextureLinear[i] = rasterBlock.TextureLinear[i];
-  }
+// Per-pixel texture coordinates of the block being shaded, plus the per-block texture LODs.
+// Entries past the active counts keep whatever an earlier block left in them.
+struct Block
+{
+  std::array<std::array<std::array<std::array<float, 2>, 8>, QUAD>, QUAD> uv{};  // [x][y][coord]
+  std::array<s32, 4> indirect_lod{};
+  std::array<bool, 4> indirect_linear{};
+  std::array<s32, 16> lod{};
+  std::array<bool, 16> linear{};
+};
 
-  tev.Draw();
+Plane s_depth;
+Plane s_inv_w;
+std::array<std::array<Plane, 4>, 2> s_color;
+std::array<std::array<Plane, 3>, 8> s_texcoord;
+
+Tev s_tev;
+Block s_block;
+
+std::vector<BPFunctions::ScissorRect> s_scissors;
+
+// log2(value) in s28.4, from the float's exponent and the top bits of its mantissa. Accurate
+// enough for picking mip levels.
+s32 ApproxLog2(float value)
+{
+  u32 bits;
+  std::memcpy(&bits, &value, sizeof(bits));
+  const s32 whole = static_cast<s32>(((bits & 0x7F800000) >> 19) - 2032);
+  const s32 fraction = static_cast<s32>((bits & 0x007fffff) >> 19);
+  return whole + fraction;
 }
 
-static inline void CalculateLOD(s32* lodp, bool* linear, u32 texmap, u32 texcoord)
+// The LOD and filter for texture map `texmap` sampled with coordinate `texcoord`, from the
+// coordinate's change across the current block. Only the mode registers matter, not the size
+// of the texture.
+void ComputeLod(s32& lod_out, bool& linear_out, u32 texmap, u32 texcoord)
 {
-  auto texUnit = bpmem.tex.GetUnit(texmap);
+  const auto unit = bpmem.tex.GetUnit(texmap);
+  const TexMode0& mode = unit.texMode0;
+  const TexMode1& limits = unit.texMode1;
 
-  // LOD calculation requires data from the texture mode for bias, etc.
-  // it does not seem to use the actual texture size
-  const TexMode0& tm0 = texUnit.texMode0;
-  const TexMode1& tm1 = texUnit.texMode1;
+  const auto& here = s_block.uv[0][0][texcoord];
+  const auto& right = s_block.uv[1][0][texcoord];
+  const auto& below = s_block.uv[0][1][texcoord];
+  const float du_x = std::fabs(here[0] - right[0]);
+  const float dv_x = std::fabs(here[1] - right[1]);
+  const float du_y = std::fabs(here[0] - below[0]);
+  const float dv_y = std::fabs(here[1] - below[1]);
 
-  float sDelta, tDelta;
-
-  float* uv00 = rasterBlock.Pixel[0][0].Uv[texcoord];
-  float* uv10 = rasterBlock.Pixel[1][0].Uv[texcoord];
-  float* uv01 = rasterBlock.Pixel[0][1].Uv[texcoord];
-
-  float dudx = fabsf(uv00[0] - uv10[0]);
-  float dvdx = fabsf(uv00[1] - uv10[1]);
-  float dudy = fabsf(uv00[0] - uv01[0]);
-  float dvdy = fabsf(uv00[1] - uv01[1]);
-
-  if (tm0.diag_lod == LODType::Diagonal)
+  float s_change;
+  float t_change;
+  if (mode.diag_lod == LODType::Diagonal)
   {
-    sDelta = dudx + dudy;
-    tDelta = dvdx + dvdy;
+    s_change = du_x + du_y;
+    t_change = dv_x + dv_y;
   }
   else
   {
-    sDelta = std::max(dudx, dudy);
-    tDelta = std::max(dvdx, dvdy);
+    s_change = std::max(du_x, du_y);
+    t_change = std::max(dv_x, dv_y);
   }
 
-  // get LOD in s28.4
-  s32 lod = FixedLog2(std::max(sDelta, tDelta));
+  // The bias register is s2.5; the LOD is s28.4.
+  const s32 bias = mode.lod_bias;
+  s32 lod = ApproxLog2(std::max(s_change, t_change)) + (bias >> 1);
 
-  // bias is s2.5
-  int bias = tm0.lod_bias;
-  bias >>= 1;
-  lod += bias;
+  linear_out =
+      lod > 0 ? mode.min_filter == FilterMode::Linear : mode.mag_filter == FilterMode::Linear;
 
-  *linear = ((lod > 0 && tm0.min_filter == FilterMode::Linear) ||
-             (lod <= 0 && tm0.mag_filter == FilterMode::Linear));
-
-  // NOTE: The order of comparisons for this clamp check matters.
-  if (lod > static_cast<s32>(tm1.max_lod))
-    lod = static_cast<s32>(tm1.max_lod);
-  else if (lod < static_cast<s32>(tm1.min_lod))
-    lod = static_cast<s32>(tm1.min_lod);
-
-  *lodp = lod;
+  // The maximum wins when min > max, so it has to be checked first.
+  const s32 max_lod = static_cast<s32>(limits.max_lod);
+  const s32 min_lod = static_cast<s32>(limits.min_lod);
+  if (lod > max_lod)
+    lod = max_lod;
+  else if (lod < min_lod)
+    lod = min_lod;
+  lod_out = lod;
 }
 
-static void BuildBlock(s32 blockX, s32 blockY)
+// Interpolates the perspective-correct texture coordinates of the block at (x, y), then the
+// LODs of every indirect and TEV stage lookup.
+void PrepareBlock(s32 x, s32 y)
 {
-  for (s32 yi = 0; yi < BLOCK_SIZE; yi++)
+  const u32 texgens = bpmem.genMode.numtexgens;
+  for (s32 by = 0; by < QUAD; ++by)
   {
-    for (s32 xi = 0; xi < BLOCK_SIZE; xi++)
+    for (s32 bx = 0; bx < QUAD; ++bx)
     {
-      RasterBlockPixel& pixel = rasterBlock.Pixel[xi][yi];
-
-      s32 x = xi + blockX;
-      s32 y = yi + blockY;
-
-      float invW = 1.0f / WSlope.GetValue(x, y);
-      pixel.InvW = invW;
-
-      // tex coords
-      for (unsigned int i = 0; i < bpmem.genMode.numtexgens; i++)
+      const s32 px = x + bx;
+      const s32 py = y + by;
+      const float inv_w = 1.0f / s_inv_w.At(px, py);
+      auto& uvs = s_block.uv[static_cast<size_t>(bx)][static_cast<size_t>(by)];
+      for (u32 i = 0; i < texgens; ++i)
       {
-        float projection = invW;
-        float q = TexSlopes[i][2].GetValue(x, y) * invW;
-        if (q != 0.0f)
-          projection = invW / q;
-
-        pixel.Uv[i][0] = TexSlopes[i][0].GetValue(x, y) * projection;
-        pixel.Uv[i][1] = TexSlopes[i][1].GetValue(x, y) * projection;
+        const auto& planes = s_texcoord[i];
+        const float q = planes[2].At(px, py) * inv_w;
+        const float scale = q != 0.0f ? inv_w / q : inv_w;
+        uvs[i][0] = planes[0].At(px, py) * scale;
+        uvs[i][1] = planes[1].At(px, py) * scale;
       }
     }
   }
 
-  for (unsigned int i = 0; i < bpmem.genMode.numindstages; i++)
+  for (u32 i = 0; i < bpmem.genMode.numindstages; ++i)
   {
-    u32 texmap = bpmem.tevindref.getTexMap(i);
-    u32 texcoord = bpmem.tevindref.getTexCoord(i);
-
-    CalculateLOD(&rasterBlock.IndirectLod[i], &rasterBlock.IndirectLinear[i], texmap, texcoord);
+    const int stage = static_cast<int>(i);
+    ComputeLod(s_block.indirect_lod[i], s_block.indirect_linear[i],
+               bpmem.tevindref.getTexMap(stage), bpmem.tevindref.getTexCoord(stage));
   }
 
-  for (unsigned int i = 0; i <= bpmem.genMode.numtevstages; i++)
+  for (u32 stage = 0; stage <= bpmem.genMode.numtevstages; ++stage)
   {
-    int stageOdd = i & 1;
-    const TwoTevStageOrders& order = bpmem.tevorders[i >> 1];
-    if (order.getEnable(stageOdd))
-    {
-      u32 texmap = order.getTexMap(stageOdd);
-      u32 texcoord = order.getTexCoord(stageOdd);
+    const TwoTevStageOrders& orders = bpmem.tevorders[stage / 2];
+    const int odd = static_cast<int>(stage & 1);
+    if (!orders.getEnable(odd))
+      continue;
+    ComputeLod(s_block.lod[stage], s_block.linear[stage], orders.getTexMap(odd),
+               orders.getTexCoord(odd));
+  }
+}
 
-      CalculateLOD(&rasterBlock.TextureLod[i], &rasterBlock.TextureLinear[i], texmap, texcoord);
+// Shades pixel (x, y), which is pixel (bx, by) of the current block.
+void ShadePixel(s32 x, s32 y, s32 bx, s32 by)
+{
+  INCSTAT(g_stats.this_frame.rasterized_pixels);
+
+  const s32 depth = static_cast<s32>(std::clamp<float>(s_depth.At(x, y), 0.0f, 16777215.0f));
+
+  if (bpmem.GetEmulatedZ() == EmulatedZ::Early)
+  {
+    // The counters run whether or not the test is enabled (unverified).
+    EfbInterface::IncPerfCounterQuadCount(PQ_ZCOMP_INPUT_ZCOMPLOC);
+    if (bpmem.zmode.test_enable &&
+        !EfbInterface::ZCompare(static_cast<u16>(x), static_cast<u16>(y), static_cast<u32>(depth)))
+    {
+      return;
+    }
+    EfbInterface::IncPerfCounterQuadCount(PQ_ZCOMP_OUTPUT_ZCOMPLOC);
+  }
+
+  s_tev.Position = {x, y, depth};
+
+  for (u32 chan = 0; chan < bpmem.genMode.numcolchans; ++chan)
+  {
+    for (size_t comp = 0; comp < 4; ++comp)
+    {
+      const float value = s_color[chan][comp].At(x, y);
+      s_tev.Color[chan][comp] = static_cast<u8>(std::clamp<float>(value, 0.0f, 255.0f));
     }
   }
-}
 
-void UpdateZSlope(const OutputVertexData* v0, const OutputVertexData* v1,
-                  const OutputVertexData* v2, s32 x_off, s32 y_off)
-{
-  if (!bpmem.genMode.zfreeze)
+  // The TEV takes coordinates in s17.7, truncated to 24 bits.
+  const auto& uvs = s_block.uv[static_cast<size_t>(bx)][static_cast<size_t>(by)];
+  for (u32 i = 0; i < bpmem.genMode.numtexgens; ++i)
   {
-    const s32 X1 = iround(16.0f * (v0->screenPosition.x - x_off)) - 9;
-    const s32 Y1 = iround(16.0f * (v0->screenPosition.y - y_off)) - 9;
-    const SlopeContext ctx(v0, v1, v2, (X1 + 0xF) >> 4, (Y1 + 0xF) >> 4, x_off, y_off);
-    ZSlope = Slope(v0->screenPosition.z, v1->screenPosition.z, v2->screenPosition.z, ctx);
+    const s32 s = static_cast<s32>(uvs[i][0] * 128);
+    const s32 t = static_cast<s32>(uvs[i][1] * 128);
+    s_tev.Uv[i].s = static_cast<s32>(static_cast<u32>(s) << 8) >> 8;
+    s_tev.Uv[i].t = static_cast<s32>(static_cast<u32>(t) << 8) >> 8;
   }
+
+  for (u32 i = 0; i < bpmem.genMode.numindstages; ++i)
+  {
+    s_tev.IndirectLod[i] = s_block.indirect_lod[i];
+    s_tev.IndirectLinear[i] = s_block.indirect_linear[i];
+  }
+
+  for (u32 stage = 0; stage <= bpmem.genMode.numtevstages; ++stage)
+  {
+    s_tev.TextureLod[stage] = s_block.lod[stage];
+    s_tev.TextureLinear[stage] = s_block.linear[stage];
+  }
+
+  s_tev.Draw();
 }
 
-static void DrawTriangleFrontFace(const OutputVertexData* v0, const OutputVertexData* v1,
-                                  const OutputVertexData* v2,
-                                  const BPFunctions::ScissorRect& scissor)
+void Rasterize(const OutputVertexData& v0, const OutputVertexData& v1, const OutputVertexData& v2,
+               const BPFunctions::ScissorRect& scissor)
 {
-  // The zslope should be updated now, even if the triangle is rejected by the scissor test, as
-  // zfreeze depends on it
-  UpdateZSlope(v0, v1, v2, scissor.x_off, scissor.y_off);
+  // z-freeze needs the slope of every triangle, including ones the scissor throws away.
+  UpdateZSlope(&v0, &v1, &v2, scissor.x_off, scissor.y_off);
 
-  // adapted from http://devmaster.net/posts/6145/advanced-rasterization
+  const s32 x0 = ToFixed(v0.screenPosition.x, scissor.x_off);
+  const s32 x1 = ToFixed(v1.screenPosition.x, scissor.x_off);
+  const s32 x2 = ToFixed(v2.screenPosition.x, scissor.x_off);
+  const s32 y0 = ToFixed(v0.screenPosition.y, scissor.y_off);
+  const s32 y1 = ToFixed(v1.screenPosition.y, scissor.y_off);
+  const s32 y2 = ToFixed(v2.screenPosition.y, scissor.y_off);
 
-  // 28.4 fixed-point coordinates. rounded to nearest and adjusted to match hardware output
-  // could also take floor and adjust -8
-  const s32 Y1 = iround(16.0f * (v0->screenPosition.y - scissor.y_off)) - 9;
-  const s32 Y2 = iround(16.0f * (v1->screenPosition.y - scissor.y_off)) - 9;
-  const s32 Y3 = iround(16.0f * (v2->screenPosition.y - scissor.y_off)) - 9;
-
-  const s32 X1 = iround(16.0f * (v0->screenPosition.x - scissor.x_off)) - 9;
-  const s32 X2 = iround(16.0f * (v1->screenPosition.x - scissor.x_off)) - 9;
-  const s32 X3 = iround(16.0f * (v2->screenPosition.x - scissor.x_off)) - 9;
-
-  // Deltas
-  const s32 DX12 = X1 - X2;
-  const s32 DX23 = X2 - X3;
-  const s32 DX31 = X3 - X1;
-
-  const s32 DY12 = Y1 - Y2;
-  const s32 DY23 = Y2 - Y3;
-  const s32 DY31 = Y3 - Y1;
-
-  // Fixed-point deltas
-  const s32 FDX12 = DX12 * 16;
-  const s32 FDX23 = DX23 * 16;
-  const s32 FDX31 = DX31 * 16;
-
-  const s32 FDY12 = DY12 * 16;
-  const s32 FDY23 = DY23 * 16;
-  const s32 FDY31 = DY31 * 16;
-
-  // Bounding rectangle
-  s32 minx = (std::min(std::min(X1, X2), X3) + 0xF) >> 4;
-  s32 maxx = (std::max(std::max(X1, X2), X3) + 0xF) >> 4;
-  s32 miny = (std::min(std::min(Y1, Y2), Y3) + 0xF) >> 4;
-  s32 maxy = (std::max(std::max(Y1, Y2), Y3) + 0xF) >> 4;
-
-  // scissor
   ASSERT(scissor.rect.left >= 0);
   ASSERT(scissor.rect.right <= static_cast<int>(EFB_WIDTH));
   ASSERT(scissor.rect.top >= 0);
   ASSERT(scissor.rect.bottom <= static_cast<int>(EFB_HEIGHT));
 
-  minx = std::max(minx, scissor.rect.left);
-  maxx = std::min(maxx, scissor.rect.right);
-  miny = std::max(miny, scissor.rect.top);
-  maxy = std::min(maxy, scissor.rect.bottom);
-
-  if (minx >= maxx || miny >= maxy)
+  // Pixel bounds of the triangle, limited to the scissor rectangle (end exclusive).
+  const s32 left = std::max(PixelCeil(std::min({x0, x1, x2})), scissor.rect.left);
+  const s32 right = std::min(PixelCeil(std::max({x0, x1, x2})), scissor.rect.right);
+  const s32 top = std::max(PixelCeil(std::min({y0, y1, y2})), scissor.rect.top);
+  const s32 bottom = std::min(PixelCeil(std::max({y0, y1, y2})), scissor.rect.bottom);
+  if (left >= right || top >= bottom)
     return;
 
-  // Set up the remaining slopes
-  const SlopeContext ctx(v0, v1, v2, (X1 + 0xF) >> 4, (Y1 + 0xF) >> 4, scissor.x_off,
-                         scissor.y_off);
+  const Origin origin(v0, v1, v2, PixelCeil(x0), PixelCeil(y0), scissor.x_off, scissor.y_off);
 
-  float w[3] = {1.0f / v0->projectedPosition.w, 1.0f / v1->projectedPosition.w,
-                1.0f / v2->projectedPosition.w};
-  WSlope = Slope(w[0], w[1], w[2], ctx);
+  const std::array<float, 3> w = {1.0f / v0.projectedPosition.w, 1.0f / v1.projectedPosition.w,
+                                  1.0f / v2.projectedPosition.w};
+  s_inv_w = Plane(w[0], w[1], w[2], origin);
 
-  for (unsigned int i = 0; i < bpmem.genMode.numcolchans; i++)
+  for (u32 chan = 0; chan < bpmem.genMode.numcolchans; ++chan)
   {
-    for (int comp = 0; comp < 4; comp++)
-      ColorSlopes[i][comp] = Slope(v0->color[i][comp], v1->color[i][comp], v2->color[i][comp], ctx);
-  }
-
-  for (unsigned int i = 0; i < bpmem.genMode.numtexgens; i++)
-  {
-    TexSlopes[i][0] =
-        Slope(v0->texCoords[i].x * w[0], v1->texCoords[i].x * w[1], v2->texCoords[i].x * w[2], ctx);
-    TexSlopes[i][1] =
-        Slope(v0->texCoords[i].y * w[0], v1->texCoords[i].y * w[1], v2->texCoords[i].y * w[2], ctx);
-    TexSlopes[i][2] =
-        Slope(v0->texCoords[i].z * w[0], v1->texCoords[i].z * w[1], v2->texCoords[i].z * w[2], ctx);
-  }
-
-  // Half-edge constants
-  s32 C1 = DY12 * X1 - DX12 * Y1;
-  s32 C2 = DY23 * X2 - DX23 * Y2;
-  s32 C3 = DY31 * X3 - DX31 * Y3;
-
-  // Correct for fill convention
-  if (DY12 < 0 || (DY12 == 0 && DX12 > 0))
-    C1++;
-  if (DY23 < 0 || (DY23 == 0 && DX23 > 0))
-    C2++;
-  if (DY31 < 0 || (DY31 == 0 && DX31 > 0))
-    C3++;
-
-  // Start in corner of 2x2 block
-  s32 block_minx = minx & ~(BLOCK_SIZE - 1);
-  s32 block_miny = miny & ~(BLOCK_SIZE - 1);
-
-  // Loop through blocks
-  for (s32 y = block_miny & ~(BLOCK_SIZE - 1); y < maxy; y += BLOCK_SIZE)
-  {
-    for (s32 x = block_minx; x < maxx; x += BLOCK_SIZE)
+    for (size_t comp = 0; comp < 4; ++comp)
     {
-      s32 x1_ = (x + BLOCK_SIZE - 1);
-      s32 y1_ = (y + BLOCK_SIZE - 1);
+      s_color[chan][comp] =
+          Plane(v0.color[chan][comp], v1.color[chan][comp], v2.color[chan][comp], origin);
+    }
+  }
 
-      // Corners of block
-      s32 x0 = x << 4;
-      s32 x1 = x1_ << 4;
-      s32 y0 = y << 4;
-      s32 y1 = y1_ << 4;
+  for (u32 i = 0; i < bpmem.genMode.numtexgens; ++i)
+  {
+    const auto& t0 = v0.texCoords[i];
+    const auto& t1 = v1.texCoords[i];
+    const auto& t2 = v2.texCoords[i];
+    s_texcoord[i][0] = Plane(t0.x * w[0], t1.x * w[1], t2.x * w[2], origin);
+    s_texcoord[i][1] = Plane(t0.y * w[0], t1.y * w[1], t2.y * w[2], origin);
+    s_texcoord[i][2] = Plane(t0.z * w[0], t1.z * w[1], t2.z * w[2], origin);
+  }
 
-      // Evaluate half-space functions
-      bool a00 = C1 + DX12 * y0 - DY12 * x0 > 0;
-      bool a10 = C1 + DX12 * y0 - DY12 * x1 > 0;
-      bool a01 = C1 + DX12 * y1 - DY12 * x0 > 0;
-      bool a11 = C1 + DX12 * y1 - DY12 * x1 > 0;
-      int a = (a00 << 0) | (a10 << 1) | (a01 << 2) | (a11 << 3);
+  const std::array<HalfPlane, 3> edges = {HalfPlane(x0, y0, x1, y1), HalfPlane(x1, y1, x2, y2),
+                                          HalfPlane(x2, y2, x0, y0)};
+  const auto covered = [&edges](s32 x, s32 y) {
+    return edges[0].Inside(x, y) && edges[1].Inside(x, y) && edges[2].Inside(x, y);
+  };
 
-      bool b00 = C2 + DX23 * y0 - DY23 * x0 > 0;
-      bool b10 = C2 + DX23 * y0 - DY23 * x1 > 0;
-      bool b01 = C2 + DX23 * y1 - DY23 * x0 > 0;
-      bool b11 = C2 + DX23 * y1 - DY23 * x1 > 0;
-      int b = (b00 << 0) | (b10 << 1) | (b01 << 2) | (b11 << 3);
-
-      bool c00 = C3 + DX31 * y0 - DY31 * x0 > 0;
-      bool c10 = C3 + DX31 * y0 - DY31 * x1 > 0;
-      bool c01 = C3 + DX31 * y1 - DY31 * x0 > 0;
-      bool c11 = C3 + DX31 * y1 - DY31 * x1 > 0;
-      int c = (c00 << 0) | (c10 << 1) | (c01 << 2) | (c11 << 3);
-
-      // Skip block when outside an edge
-      if (a == 0x0 || b == 0x0 || c == 0x0)
+  for (s32 y = top & ~(QUAD - 1); y < bottom; y += QUAD)
+  {
+    for (s32 x = left & ~(QUAD - 1); x < right; x += QUAD)
+    {
+      const u32 m0 = edges[0].BlockMask(x, y);
+      const u32 m1 = edges[1].BlockMask(x, y);
+      const u32 m2 = edges[2].BlockMask(x, y);
+      // Some edge has every corner of the block outside it.
+      if (m0 == 0 || m1 == 0 || m2 == 0)
         continue;
 
-      BuildBlock(x, y);
+      PrepareBlock(x, y);
 
-      // Accept whole block when totally covered
-      // We still need to check min/max x/y because of the scissor
-      if (a == 0xF && b == 0xF && c == 0xF && x >= minx && x1_ < maxx && y >= miny && y1_ < maxy)
+      // A block with every corner inside every edge, and inside the scissor bounds, needs no
+      // per-pixel tests.
+      const bool whole = (m0 & m1 & m2) == 0xF && x >= left && x + QUAD - 1 < right && y >= top &&
+                         y + QUAD - 1 < bottom;
+      for (s32 by = 0; by < QUAD; ++by)
       {
-        for (s32 iy = 0; iy < BLOCK_SIZE; iy++)
+        const s32 py = y + by;
+        for (s32 bx = 0; bx < QUAD; ++bx)
         {
-          for (s32 ix = 0; ix < BLOCK_SIZE; ix++)
-          {
-            Draw(x + ix, y + iy, ix, iy);
-          }
-        }
-      }
-      else  // Partially covered block
-      {
-        s32 CY1 = C1 + DX12 * y0 - DY12 * x0;
-        s32 CY2 = C2 + DX23 * y0 - DY23 * x0;
-        s32 CY3 = C3 + DX31 * y0 - DY31 * x0;
-
-        for (s32 iy = 0; iy < BLOCK_SIZE; iy++)
-        {
-          s32 CX1 = CY1;
-          s32 CX2 = CY2;
-          s32 CX3 = CY3;
-
-          for (s32 ix = 0; ix < BLOCK_SIZE; ix++)
-          {
-            if (CX1 > 0 && CX2 > 0 && CX3 > 0)
-            {
-              // This check enforces the scissor rectangle, since it might not be aligned with the
-              // blocks
-              if (x + ix >= minx && x + ix < maxx && y + iy >= miny && y + iy < maxy)
-                Draw(x + ix, y + iy, ix, iy);
-            }
-
-            CX1 -= FDY12;
-            CX2 -= FDY23;
-            CX3 -= FDY31;
-          }
-
-          CY1 += FDX12;
-          CY2 += FDX23;
-          CY3 += FDX31;
+          const s32 px = x + bx;
+          if (!whole && !(covered(px, py) && px >= left && px < right && py >= top && py < bottom))
+            continue;
+          ShadePixel(px, py, bx, by);
         }
       }
     }
   }
+}
+}  // namespace
+
+void Init()
+{
+  // Every other plane is rebuilt for each triangle, but z-freeze can read the depth plane
+  // before any triangle has set it.
+  s_depth = Plane();
+}
+
+void ScissorChanged()
+{
+  s_scissors = BPFunctions::ComputeScissorRects(bpmem.scissorTL, bpmem.scissorBR,
+                                                bpmem.scissorOffset, xfmem.viewport)
+                   .rectangles;
+}
+
+void UpdateZSlope(const OutputVertexData* v0, const OutputVertexData* v1,
+                  const OutputVertexData* v2, s32 x_off, s32 y_off)
+{
+  if (bpmem.genMode.zfreeze)
+    return;
+  const Origin origin(*v0, *v1, *v2, PixelCeil(ToFixed(v0->screenPosition.x, x_off)),
+                      PixelCeil(ToFixed(v0->screenPosition.y, y_off)), x_off, y_off);
+  s_depth = Plane(v0->screenPosition.z, v1->screenPosition.z, v2->screenPosition.z, origin);
 }
 
 void DrawTriangleFrontFace(const OutputVertexData* v0, const OutputVertexData* v1,
                            const OutputVertexData* v2)
 {
   INCSTAT(g_stats.this_frame.num_triangles_drawn);
+  for (const BPFunctions::ScissorRect& scissor : s_scissors)
+    Rasterize(*v0, *v1, *v2, scissor);
+}
 
-  for (const auto& scissor : scissors)
-    DrawTriangleFrontFace(v0, v1, v2, scissor);
+void SetTevKonstColors()
+{
+  s_tev.SetKonstColors();
 }
 }  // namespace Rasterizer

@@ -1,5 +1,4 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/Software/SWBoundingBox.h"
 
@@ -12,55 +11,44 @@ namespace BBoxManager
 {
 namespace
 {
-// Current bounding box coordinates.
-std::array<u16, 4> s_coordinates{};
-}  // Anonymous namespace
+std::array<u16, 4> s_box{};  // indexed by Coordinate
+}
 
 u16 GetCoordinate(Coordinate coordinate)
 {
-  return s_coordinates[static_cast<u32>(coordinate)];
+  return s_box[static_cast<size_t>(coordinate)];
 }
 
 void SetCoordinate(Coordinate coordinate, u16 value)
 {
-  s_coordinates[static_cast<u32>(coordinate)] = value;
+  s_box[static_cast<size_t>(coordinate)] = value;
 }
 
 void Update(u16 left, u16 right, u16 top, u16 bottom)
 {
-  const u16 new_left = std::min(left, GetCoordinate(Coordinate::Left));
-  const u16 new_right = std::max(right, GetCoordinate(Coordinate::Right));
-  const u16 new_top = std::min(top, GetCoordinate(Coordinate::Top));
-  const u16 new_bottom = std::max(bottom, GetCoordinate(Coordinate::Bottom));
-
-  SetCoordinate(Coordinate::Left, new_left);
-  SetCoordinate(Coordinate::Right, new_right);
-  SetCoordinate(Coordinate::Top, new_top);
-  SetCoordinate(Coordinate::Bottom, new_bottom);
+  auto& box = s_box;
+  box[size_t(Coordinate::Left)] = std::min(box[size_t(Coordinate::Left)], left);
+  box[size_t(Coordinate::Right)] = std::max(box[size_t(Coordinate::Right)], right);
+  box[size_t(Coordinate::Top)] = std::min(box[size_t(Coordinate::Top)], top);
+  box[size_t(Coordinate::Bottom)] = std::max(box[size_t(Coordinate::Bottom)], bottom);
 }
-
 }  // namespace BBoxManager
 
 namespace SW
 {
 std::vector<BBoxType> SWBoundingBox::Read(u32 index, u32 length)
 {
-  std::vector<BBoxType> values(length);
-
-  for (u32 i = 0; i < length; i++)
-  {
-    values[i] = BBoxManager::GetCoordinate(static_cast<BBoxManager::Coordinate>(index + i));
-  }
-
-  return values;
+  std::vector<BBoxType> out;
+  out.reserve(length);
+  for (u32 n = index; n < index + length; ++n)
+    out.push_back(BBoxManager::GetCoordinate(static_cast<BBoxManager::Coordinate>(n)));
+  return out;
 }
 
 void SWBoundingBox::Write(u32 index, std::span<const BBoxType> values)
 {
-  for (size_t i = 0; i < values.size(); i++)
-  {
-    BBoxManager::SetCoordinate(static_cast<BBoxManager::Coordinate>(index + i), values[i]);
-  }
+  u32 n = index;
+  for (const BBoxType value : values)
+    BBoxManager::SetCoordinate(static_cast<BBoxManager::Coordinate>(n++), static_cast<u16>(value));
 }
-
 }  // namespace SW

@@ -1,10 +1,6 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
-
-#include <memory>
-#include <vector>
 
 #include "Common/CommonTypes.h"
 
@@ -13,6 +9,10 @@
 
 #include "VideoCommon/VertexManagerBase.h"
 
+struct PortableVertexDeclaration;
+
+// The software renderer's vertex manager: takes the batches VideoCommon's vertex loaders build
+// and runs each indexed vertex through the transform unit and primitive setup.
 class SWVertexLoader final : public VertexManagerBase
 {
 public:
@@ -25,7 +25,9 @@ public:
 protected:
   void DrawCurrentBatch(u32 base_index, u32 num_indices, u32 base_vertex) override;
 
+  // Loads the XF matrix indices into m_vertex (vertex data may override them).
   void SetFormat();
+  // Decodes vertex number `index` of the batch into m_vertex.
   void ParseVertex(const PortableVertexDeclaration& vdec, int index);
 
   InputVertexData m_vertex{};

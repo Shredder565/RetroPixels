@@ -1,9 +1,10 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/Software/EfbCopy.h"
 
 #include <algorithm>
+#include <array>
+#include <cstring>
 
 #include "Common/CommonTypes.h"
 #include "VideoBackends/Software/SWEfbInterface.h"
@@ -15,20 +16,24 @@ namespace EfbCopy
 {
 void ClearEfb()
 {
-  u32 clearColor = (bpmem.clearcolorAR & 0xff) << 24 | bpmem.clearcolorGB << 8 |
-                   (bpmem.clearcolorAR & 0xff00) >> 8;
+  // The clear registers hold alpha:red and green:blue; the EFB interface wants A, B, G, R bytes.
+  const u32 ar = bpmem.clearcolorAR;
+  const u32 word = ((ar & 0xff00) >> 8) | (bpmem.clearcolorGB << 8) | ((ar & 0xff) << 24);
+  std::array<u8, 4> color;
+  std::memcpy(color.data(), &word, sizeof(word));
 
-  int left = bpmem.copyTexSrcXY.x;
-  int top = bpmem.copyTexSrcXY.y;
-  int right = std::min(left + bpmem.copyTexSrcWH.x, EFB_WIDTH - 1);
-  int bottom = std::min(top + bpmem.copyTexSrcWH.y, EFB_HEIGHT - 1);
+  // The rectangle includes its right and bottom edges, cut off at the EFB's last pixel.
+  const u32 x0 = bpmem.copyTexSrcXY.x;
+  const u32 y0 = bpmem.copyTexSrcXY.y;
+  const u32 x1 = std::min(x0 + bpmem.copyTexSrcWH.x, EFB_WIDTH - 1);
+  const u32 y1 = std::min(y0 + bpmem.copyTexSrcWH.y, EFB_HEIGHT - 1);
 
-  for (u16 y = top; y <= bottom; y++)
+  for (u32 y = y0; y <= y1; ++y)
   {
-    for (u16 x = left; x <= right; x++)
+    for (u32 x = x0; x <= x1; ++x)
     {
-      EfbInterface::SetColor(x, y, (u8*)(&clearColor));
-      EfbInterface::SetDepth(x, y, bpmem.clearZValue);
+      EfbInterface::SetColor(static_cast<u16>(x), static_cast<u16>(y), color.data());
+      EfbInterface::SetDepth(static_cast<u16>(x), static_cast<u16>(y), bpmem.clearZValue);
     }
   }
 }

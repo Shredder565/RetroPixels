@@ -1,7 +1,9 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
+
+#include <array>
+#include <cstddef>
 
 #include "Common/CommonTypes.h"
 #include "VideoBackends/Software/NativeVertexFormat.h"
@@ -11,27 +13,24 @@ namespace OpcodeDecoder
 enum class Primitive : u8;
 }
 
+// Primitive assembly: collects transformed vertices and hands complete points, lines and
+// triangles to the clipper, in the vertex order the GX primitive type defines.
 class SetupUnit
 {
-  OpcodeDecoder::Primitive m_PrimType{};
-  int m_VertexCounter = 0;
-
-  OutputVertexData m_Vertices[3];
-  OutputVertexData* m_VertPointer[3]{};
-  OutputVertexData* m_VertWritePointer{};
-
-  void SetupQuad();
-  void SetupTriangle();
-  void SetupTriStrip();
-  void SetupTriFan();
-  void SetupLine();
-  void SetupLineStrip();
-  void SetupPoint();
-
 public:
   void Init(OpcodeDecoder::Primitive primitive_type);
 
+  // Returns a cleared vertex for the transform unit to fill in.
   OutputVertexData* GetVertex();
 
+  // Accepts the vertex last returned by GetVertex.
   void SetupVertex();
+
+private:
+  std::size_t SlotFor(u32 index) const;
+  OutputVertexData* Slot(u32 index) { return &m_slots[SlotFor(index)]; }
+
+  OpcodeDecoder::Primitive m_primitive{};
+  u32 m_received = 0;  // vertices accepted since Init
+  std::array<OutputVertexData, 3> m_slots;
 };

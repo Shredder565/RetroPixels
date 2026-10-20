@@ -1,10 +1,12 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoBackends/Software/SWVertexLoader.h"
 
+#include <algorithm>
 #include <cstddef>
+#include <cstring>
 #include <limits>
+#include <type_traits>
 
 #include "Common/Assert.h"
 #include "Common/CommonTypes.h"
@@ -13,13 +15,13 @@
 
 #include "VideoBackends/Software/NativeVertexFormat.h"
 #include "VideoBackends/Software/Rasterizer.h"
-#include "VideoBackends/Software/Tev.h"
 #include "VideoBackends/Software/TransformUnit.h"
 
 #include "VideoCommon/BoundingBox.h"
 #include "VideoCommon/CPMemory.h"
 #include "VideoCommon/DataReader.h"
 #include "VideoCommon/IndexGenerator.h"
+#include "VideoCommon/NativeVertexFormat.h"
 #include "VideoCommon/OpcodeDecoding.h"
 #include "VideoCommon/Statistics.h"
 #include "VideoCommon/VertexLoaderManager.h"
@@ -27,63 +29,154 @@
 #include "VideoCommon/VideoConfig.h"
 #include "VideoCommon/XFMemory.h"
 
+namespace
+{
+// Converts one stored component. Integers converted to float are normalised by their type's
+// maximum value.
+template <typename Out, typename In>
+Out ConvertComponent(In raw)
+{
+  Out value = static_cast<Out>(raw);
+  if constexpr (std::is_floating_point_v<Out> && std::is_integral_v<In>)
+    value *= static_cast<Out>(1.0 / std::numeric_limits<In>::max());
+  return value;
+}
+
+template <typename Out>
+Out ReadComponent(DataReader& src, ComponentFormat type)
+{
+  switch (type)
+  {
+  case ComponentFormat::UByte:
+    return ConvertComponent<Out>(src.Read<u8, false>());
+  case ComponentFormat::Byte:
+    return ConvertComponent<Out>(src.Read<s8, false>());
+  case ComponentFormat::UShort:
+    return ConvertComponent<Out>(src.Read<u16, false>());
+  case ComponentFormat::Short:
+    return ConvertComponent<Out>(src.Read<s16, false>());
+  default:  // float, including the undefined float encodings 5-7
+    return ConvertComponent<Out>(src.Read<float, false>());
+  }
+}
+
+// Reads up to `count` components of an attribute, starting at component `first`, into dst
+// (backwards when `reversed`). Components the attribute doesn't have read as 0, except a
+// missing fourth component, which reads as 1. A disabled attribute leaves dst alone.
+template <typename Out>
+void ReadAttribute(Out* dst, DataReader vertex, const AttributeFormat& format, int first, int count,
+                   bool reversed)
+{
+  if (!format.enable)
+    return;
+
+  vertex.Skip(static_cast<size_t>(format.offset));
+  vertex.Skip(static_cast<size_t>(first) * GetElementSize(format.type));
+
+  const int present = std::min(format.components - first, count);
+  int i = 0;
+  for (; i < present; ++i)
+  {
+    dst[reversed ? count - 1 - i : i] = ReadComponent<Out>(vertex, format.type);
+    ASSERT_MSG(VIDEO, !format.integer || (format.type < ComponentFormat::Float),
+               "only non-float values are allowed to be streamed as integer");
+  }
+  for (; i < count; ++i)
+    dst[reversed ? count - 1 - i : i] = static_cast<Out>(i == 3 ? 1 : 0);
+}
+
+// The missing-colour value is RGBA with red in the top byte; vertex colours are stored A, B, G, R.
+void SetMissingColor(std::array<u8, 4>& color)
+{
+  const u32 value = g_ActiveConfig.iMissingColorValue;
+  for (size_t i = 0; i < 4; ++i)
+    color[i] = static_cast<u8>(value >> (8 * i));
+}
+
+void ReadColors(InputVertexData& out, const DataReader& vertex,
+                const PortableVertexDeclaration& vdec)
+{
+  // Colours fill the channels in order: with only one colour attribute (either of them), it goes
+  // to channel 0. Missing channels get the configured placeholder colour.
+  const AttributeFormat* present[2] = {nullptr, nullptr};
+  size_t used = 0;
+  for (const AttributeFormat& format : vdec.colors)
+  {
+    if (format.enable)
+      present[used++] = &format;
+  }
+  for (size_t chan = 0; chan < 2; ++chan)
+  {
+    if (present[chan])
+      ReadAttribute<u8>(out.color[chan].data(), vertex, *present[chan], 0, 4, true);
+    else
+      SetMissingColor(out.color[chan]);
+  }
+}
+
+void LoadCached(Common::Vec3& dst, const float4& cached)
+{
+  dst.x = cached[0];
+  dst.y = cached[1];
+  dst.z = cached[2];
+}
+}  // namespace
+
 SWVertexLoader::SWVertexLoader() = default;
 
 SWVertexLoader::~SWVertexLoader() = default;
 
 DataReader SWVertexLoader::PrepareForAdditionalData(OpcodeDecoder::Primitive primitive, u32 count,
-                                                    u32 stride, bool cullall)
+                                                    u32 stride, bool)
 {
-  // The software renderer needs cullall to be false for zfreeze to work
+  // Never cull everything here: culled batches still have to reach the rasterizer so that
+  // z-freeze sees their depth slope.
   return VertexManagerBase::PrepareForAdditionalData(primitive, count, stride, false);
 }
 
-void SWVertexLoader::DrawCurrentBatch(u32 base_index, u32 num_indices, u32 base_vertex)
+void SWVertexLoader::DrawCurrentBatch(u32, u32, u32)
 {
   using OpcodeDecoder::Primitive;
-  Primitive primitive_type = Primitive::GX_DRAW_QUADS;
+  Primitive primitive = Primitive::GX_DRAW_QUADS;
   switch (m_current_primitive_type)
   {
   case PrimitiveType::Points:
-    primitive_type = Primitive::GX_DRAW_POINTS;
+    primitive = Primitive::GX_DRAW_POINTS;
     break;
   case PrimitiveType::Lines:
-    primitive_type = Primitive::GX_DRAW_LINES;
+    primitive = Primitive::GX_DRAW_LINES;
     break;
   case PrimitiveType::Triangles:
-    primitive_type = Primitive::GX_DRAW_TRIANGLES;
+    primitive = Primitive::GX_DRAW_TRIANGLES;
     break;
   case PrimitiveType::TriangleStrip:
-    primitive_type = Primitive::GX_DRAW_TRIANGLE_STRIP;
+    primitive = Primitive::GX_DRAW_TRIANGLE_STRIP;
     break;
   }
 
-  // Flush bounding box here because software overrides the base function
+  // The base class's flush is bypassed here, so the bounding box is flushed by hand.
   if (g_bounding_box->IsEnabled())
     g_bounding_box->Flush();
 
-  m_setup_unit.Init(primitive_type);
+  m_setup_unit.Init(primitive);
   Rasterizer::SetTevKonstColors();
 
-  for (u32 i = 0; i < m_index_generator.GetIndexLen(); i++)
+  const PortableVertexDeclaration& vdec =
+      VertexLoaderManager::GetCurrentVertexFormat()->GetVertexDeclaration();
+  const u32 index_count = m_index_generator.GetIndexLen();
+  for (u32 i = 0; i < index_count; ++i)
   {
-    const u16 index = m_cpu_index_buffer[i];
-    memset(static_cast<void*>(&m_vertex), 0, sizeof(m_vertex));
-
-    // parse the videocommon format to our own struct format (m_vertex)
+    m_vertex = InputVertexData{};
     SetFormat();
-    ParseVertex(VertexLoaderManager::GetCurrentVertexFormat()->GetVertexDeclaration(), index);
+    ParseVertex(vdec, m_cpu_index_buffer[i]);
 
-    // transform this vertex so that it can be used for rasterization (outVertex)
-    OutputVertexData* outVertex = m_setup_unit.GetVertex();
-    TransformUnit::TransformPosition(&m_vertex, outVertex);
-    TransformUnit::TransformNormal(&m_vertex, outVertex);
-    TransformUnit::TransformColor(&m_vertex, outVertex);
-    TransformUnit::TransformTexCoord(&m_vertex, outVertex);
+    OutputVertexData* out = m_setup_unit.GetVertex();
+    TransformUnit::TransformPosition(&m_vertex, out);
+    TransformUnit::TransformNormal(&m_vertex, out);
+    TransformUnit::TransformColor(&m_vertex, out);
+    TransformUnit::TransformTexCoord(&m_vertex, out);
 
-    // assemble and rasterize the primitive
     m_setup_unit.SetupVertex();
-
     INCSTAT(g_stats.this_frame.num_vertices_loaded);
   }
 
@@ -92,154 +185,44 @@ void SWVertexLoader::DrawCurrentBatch(u32 base_index, u32 num_indices, u32 base_
 
 void SWVertexLoader::SetFormat()
 {
-  m_vertex.posMtx = xfmem.MatrixIndexA.PosNormalMtxIdx;
-  m_vertex.texMtx[0] = xfmem.MatrixIndexA.Tex0MtxIdx;
-  m_vertex.texMtx[1] = xfmem.MatrixIndexA.Tex1MtxIdx;
-  m_vertex.texMtx[2] = xfmem.MatrixIndexA.Tex2MtxIdx;
-  m_vertex.texMtx[3] = xfmem.MatrixIndexA.Tex3MtxIdx;
-  m_vertex.texMtx[4] = xfmem.MatrixIndexB.Tex4MtxIdx;
-  m_vertex.texMtx[5] = xfmem.MatrixIndexB.Tex5MtxIdx;
-  m_vertex.texMtx[6] = xfmem.MatrixIndexB.Tex6MtxIdx;
-  m_vertex.texMtx[7] = xfmem.MatrixIndexB.Tex7MtxIdx;
-}
-
-template <typename T, typename I>
-static T ReadNormalized(I value)
-{
-  T casted = (T)value;
-  if (!std::numeric_limits<T>::is_integer && std::numeric_limits<I>::is_integer)
-  {
-    // normalize if non-float is converted to a float
-    casted *= (T)(1.0 / std::numeric_limits<I>::max());
-  }
-  return casted;
-}
-
-template <typename T, bool swap = false>
-static void ReadVertexAttribute(T* dst, DataReader src, const AttributeFormat& format,
-                                int base_component, int components, bool reverse)
-{
-  if (format.enable)
-  {
-    src.Skip(format.offset);
-    src.Skip(base_component * GetElementSize(format.type));
-
-    int i;
-    for (i = 0; i < std::min(format.components - base_component, components); i++)
-    {
-      int i_dst = reverse ? components - i - 1 : i;
-      switch (format.type)
-      {
-      case ComponentFormat::UByte:
-        dst[i_dst] = ReadNormalized<T, u8>(src.Read<u8, swap>());
-        break;
-      case ComponentFormat::Byte:
-        dst[i_dst] = ReadNormalized<T, s8>(src.Read<s8, swap>());
-        break;
-      case ComponentFormat::UShort:
-        dst[i_dst] = ReadNormalized<T, u16>(src.Read<u16, swap>());
-        break;
-      case ComponentFormat::Short:
-        dst[i_dst] = ReadNormalized<T, s16>(src.Read<s16, swap>());
-        break;
-      case ComponentFormat::Float:
-      case ComponentFormat::InvalidFloat5:
-      case ComponentFormat::InvalidFloat6:
-      case ComponentFormat::InvalidFloat7:
-        dst[i_dst] = ReadNormalized<T, float>(src.Read<float, swap>());
-        break;
-      }
-
-      ASSERT_MSG(VIDEO, !format.integer || (format.type < ComponentFormat::Float),
-                 "only non-float values are allowed to be streamed as integer");
-    }
-    for (; i < components; i++)
-    {
-      int i_dst = reverse ? components - i - 1 : i;
-      dst[i_dst] = i == 3;
-    }
-  }
-}
-
-static void ParseColorAttributes(InputVertexData* dst, DataReader& src,
-                                 const PortableVertexDeclaration& vdec)
-{
-  const auto set_default_color = [](std::array<u8, 4>& color) {
-    color[Tev::ALP_C] = g_ActiveConfig.iMissingColorValue & 0xFF;
-    color[Tev::BLU_C] = (g_ActiveConfig.iMissingColorValue >> 8) & 0xFF;
-    color[Tev::GRN_C] = (g_ActiveConfig.iMissingColorValue >> 16) & 0xFF;
-    color[Tev::RED_C] = (g_ActiveConfig.iMissingColorValue >> 24) & 0xFF;
-  };
-
-  if (vdec.colors[0].enable)
-  {
-    // Use color0 for channel 0, and color1 for channel 1 if both colors 0 and 1 are present.
-    ReadVertexAttribute<u8>(dst->color[0].data(), src, vdec.colors[0], 0, 4, true);
-    if (vdec.colors[1].enable)
-      ReadVertexAttribute<u8>(dst->color[1].data(), src, vdec.colors[1], 0, 4, true);
-    else
-      set_default_color(dst->color[1]);
-  }
-  else
-  {
-    // If only one of the color attributes is enabled, it is directed to color 0.
-    if (vdec.colors[1].enable)
-      ReadVertexAttribute<u8>(dst->color[0].data(), src, vdec.colors[1], 0, 4, true);
-    else
-      set_default_color(dst->color[0]);
-    set_default_color(dst->color[1]);
-  }
+  const auto& a = xfmem.MatrixIndexA;
+  const auto& b = xfmem.MatrixIndexB;
+  m_vertex.posMtx = static_cast<u8>(a.PosNormalMtxIdx);
+  m_vertex.texMtx = {static_cast<u8>(a.Tex0MtxIdx), static_cast<u8>(a.Tex1MtxIdx),
+                     static_cast<u8>(a.Tex2MtxIdx), static_cast<u8>(a.Tex3MtxIdx),
+                     static_cast<u8>(b.Tex4MtxIdx), static_cast<u8>(b.Tex5MtxIdx),
+                     static_cast<u8>(b.Tex6MtxIdx), static_cast<u8>(b.Tex7MtxIdx)};
 }
 
 void SWVertexLoader::ParseVertex(const PortableVertexDeclaration& vdec, int index)
 {
-  DataReader src(m_cpu_vertex_buffer.data(),
-                 m_cpu_vertex_buffer.data() + m_cpu_vertex_buffer.size());
-  src.Skip(index * vdec.stride);
+  DataReader vertex(m_cpu_vertex_buffer.data(),
+                    m_cpu_vertex_buffer.data() + m_cpu_vertex_buffer.size());
+  vertex.Skip(static_cast<size_t>(index) * static_cast<size_t>(vdec.stride));
 
-  ReadVertexAttribute<float>(&m_vertex.position.x, src, vdec.position, 0, 3, false);
+  ReadAttribute<float>(&m_vertex.position.x, vertex, vdec.position, 0, 3, false);
 
-  for (std::size_t i = 0; i < m_vertex.normal.size(); i++)
-  {
-    ReadVertexAttribute<float>(&m_vertex.normal[i].x, src, vdec.normals[i], 0, 3, false);
-  }
+  // Normal, tangent and binormal; absent ones keep the last values the game loaded into XF.
+  for (size_t i = 0; i < m_vertex.normal.size(); ++i)
+    ReadAttribute<float>(&m_vertex.normal[i].x, vertex, vdec.normals[i], 0, 3, false);
+  const auto& vs_constants = Core::System::GetInstance().GetVertexShaderManager().constants;
   if (!vdec.normals[0].enable)
-  {
-    auto& system = Core::System::GetInstance();
-    auto& vertex_shader_manager = system.GetVertexShaderManager();
-    m_vertex.normal[0].x = vertex_shader_manager.constants.cached_normal[0];
-    m_vertex.normal[0].y = vertex_shader_manager.constants.cached_normal[1];
-    m_vertex.normal[0].z = vertex_shader_manager.constants.cached_normal[2];
-  }
+    LoadCached(m_vertex.normal[0], vs_constants.cached_normal);
   if (!vdec.normals[1].enable)
-  {
-    auto& system = Core::System::GetInstance();
-    auto& vertex_shader_manager = system.GetVertexShaderManager();
-    m_vertex.normal[1].x = vertex_shader_manager.constants.cached_tangent[0];
-    m_vertex.normal[1].y = vertex_shader_manager.constants.cached_tangent[1];
-    m_vertex.normal[1].z = vertex_shader_manager.constants.cached_tangent[2];
-  }
+    LoadCached(m_vertex.normal[1], vs_constants.cached_tangent);
   if (!vdec.normals[2].enable)
+    LoadCached(m_vertex.normal[2], vs_constants.cached_binormal);
+
+  ReadColors(m_vertex, vertex, vdec);
+
+  for (size_t i = 0; i < m_vertex.texCoords.size(); ++i)
   {
-    auto& system = Core::System::GetInstance();
-    auto& vertex_shader_manager = system.GetVertexShaderManager();
-    m_vertex.normal[2].x = vertex_shader_manager.constants.cached_binormal[0];
-    m_vertex.normal[2].y = vertex_shader_manager.constants.cached_binormal[1];
-    m_vertex.normal[2].z = vertex_shader_manager.constants.cached_binormal[2];
+    const AttributeFormat& format = vdec.texcoords[i];
+    ReadAttribute<float>(&m_vertex.texCoords[i].x, vertex, format, 0, 2, false);
+    // A third component carries the texture matrix index.
+    if (format.components >= 3)
+      ReadAttribute<u8>(&m_vertex.texMtx[i], vertex, format, 2, 1, false);
   }
 
-  ParseColorAttributes(&m_vertex, src, vdec);
-
-  for (std::size_t i = 0; i < m_vertex.texCoords.size(); i++)
-  {
-    ReadVertexAttribute<float>(&m_vertex.texCoords[i].x, src, vdec.texcoords[i], 0, 2, false);
-
-    // the texmtr is stored as third component of the texCoord
-    if (vdec.texcoords[i].components >= 3)
-    {
-      ReadVertexAttribute<u8>(&m_vertex.texMtx[i], src, vdec.texcoords[i], 2, 1, false);
-    }
-  }
-
-  ReadVertexAttribute<u8>(&m_vertex.posMtx, src, vdec.posmtx, 0, 1, false);
+  ReadAttribute<u8>(&m_vertex.posMtx, vertex, vdec.posmtx, 0, 1, false);
 }

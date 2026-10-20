@@ -1,11 +1,12 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 struct InputVertexData;
 struct OutputVertexData;
 
+// The XF stage of the software pipeline: position and normal transforms, per-vertex lighting
+// and texture coordinate generation, driven by XF memory.
 namespace TransformUnit
 {
 void TransformPosition(const InputVertexData* src, OutputVertexData* dst);
