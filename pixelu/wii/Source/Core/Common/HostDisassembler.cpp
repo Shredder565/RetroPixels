@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/HostDisassembler.h"
 
@@ -16,143 +15,131 @@
 #include <disasm.h>  // Bochs
 #endif
 
+namespace
+{
+// Address of an instruction, then a tab and the bytes in hex.
+void PrintHex(std::ostream& stream, const u8* at, std::span<const u8> bytes, const char* prefix)
+{
+  fmt::println(stream, "{}\t{}{:02x}", fmt::ptr(at), prefix, fmt::join(bytes, ""));
+}
+
 #if defined(HAVE_LLVM)
-class HostDisassemblerLLVM final : public HostDisassembler
+// Disassembly through LLVM's C API, for any target LLVM was built with.
+class LLVMDisassembler final : public HostDisassembler
 {
 public:
-  explicit HostDisassemblerLLVM(const char* host_disasm, const char* cpu = "",
-                                std::size_t inst_size = 0);
-  ~HostDisassemblerLLVM();
+  // fixed_size is the instruction size of a fixed-width ISA (0 for x86), which lets the output
+  // continue after an undecodable instruction.
+  LLVMDisassembler(const char* triple, const char* cpu, std::size_t fixed_size)
+      : m_fixed_size(fixed_size)
+  {
+    LLVMInitializeAllTargetInfos();
+    LLVMInitializeAllTargetMCs();
+    LLVMInitializeAllDisassemblers();
+
+    m_context = LLVMCreateDisasmCPU(triple, cpu, nullptr, 0, nullptr, nullptr);
+    if (m_context != nullptr)
+    {
+      LLVMSetDisasmOptions(m_context, LLVMDisassembler_Option_AsmPrinterVariant |
+                                          LLVMDisassembler_Option_PrintLatency);
+    }
+  }
+
+  ~LLVMDisassembler() override
+  {
+    if (m_context != nullptr)
+      LLVMDisasmDispose(m_context);
+  }
+
+  LLVMDisassembler(const LLVMDisassembler&) = delete;
+  LLVMDisassembler& operator=(const LLVMDisassembler&) = delete;
 
 private:
-  LLVMDisasmContextRef m_llvm_context;
-  std::size_t m_instruction_size;
-
-  std::size_t Disassemble(const u8* begin, const u8* end, std::ostream& stream) override;
-};
-
-HostDisassemblerLLVM::HostDisassemblerLLVM(const char* host_disasm, const char* cpu,
-                                           std::size_t inst_size)
-    : m_instruction_size(inst_size)
-{
-  LLVMInitializeAllTargetInfos();
-  LLVMInitializeAllTargetMCs();
-  LLVMInitializeAllDisassemblers();
-
-  m_llvm_context = LLVMCreateDisasmCPU(host_disasm, cpu, nullptr, 0, nullptr, nullptr);
-
-  // Couldn't create llvm context
-  if (!m_llvm_context)
-    return;
-
-  LLVMSetDisasmOptions(m_llvm_context, LLVMDisassembler_Option_AsmPrinterVariant |
-                                           LLVMDisassembler_Option_PrintLatency);
-}
-
-HostDisassemblerLLVM::~HostDisassemblerLLVM()
-{
-  if (m_llvm_context)
-    LLVMDisasmDispose(m_llvm_context);
-}
-
-std::size_t HostDisassemblerLLVM::Disassemble(const u8* begin, const u8* end, std::ostream& stream)
-{
-  std::size_t instruction_count = 0;
-  if (!m_llvm_context)
-    return instruction_count;
-
-  while (begin < end)
+  std::size_t Disassemble(const u8* begin, const u8* end, std::ostream& stream) override
   {
-    char inst_disasm[256];
+    if (m_context == nullptr)
+      return 0;
 
-    const auto inst_size =
-        LLVMDisasmInstruction(m_llvm_context, const_cast<u8*>(begin), static_cast<u64>(end - begin),
-                              reinterpret_cast<u64>(begin), inst_disasm, sizeof(inst_disasm));
-    if (inst_size == 0)
+    std::size_t count = 0;
+    const u8* at = begin;
+    while (at < end)
     {
-      if (m_instruction_size != 0)
+      char text[256];
+      const std::size_t size = LLVMDisasmInstruction(
+          m_context, const_cast<u8*>(at), static_cast<u64>(end - at), reinterpret_cast<u64>(at),
+          text, sizeof(text));
+
+      if (size != 0)
       {
-        // If we are on an architecture that has a fixed instruction
-        // size, we can continue onward past this bad instruction.
-        fmt::println(stream, "{}\tInvalid inst: {:02x}", fmt::ptr(begin),
-                     fmt::join(std::span{begin, m_instruction_size}, ""));
-        begin += m_instruction_size;
+        // LLVM's text starts with a tab.
+        fmt::println(stream, "{}{}", fmt::ptr(at), text);
+        at += size;
+      }
+      else if (m_fixed_size != 0)
+      {
+        PrintHex(stream, at, std::span{at, m_fixed_size}, "Invalid inst: ");
+        at += m_fixed_size;
       }
       else
       {
-        // We can't continue if we are on an architecture that has flexible
-        // instruction sizes. Dump the rest of the block instead.
-        fmt::println(stream, "{}\tInvalid inst: {:02x}", fmt::ptr(begin),
-                     fmt::join(std::span{begin, end}, ""));
+        // With variable-length instructions there is no telling where the next one starts.
+        // (The dump is not counted as an instruction.)
+        PrintHex(stream, at, std::span{at, end}, "Invalid inst: ");
         break;
       }
+      count++;
     }
-    else
-    {
-      fmt::println(stream, "{}{}", fmt::ptr(begin), inst_disasm);
-      begin += inst_size;
-    }
-    ++instruction_count;
+    return count;
   }
-  return instruction_count;
-}
-#elif defined(_M_X86_64)
-class HostDisassemblerBochs final : public HostDisassembler
-{
-public:
-  explicit HostDisassemblerBochs();
-  ~HostDisassemblerBochs() override = default;
 
-private:
-  disassembler m_disasm;
-
-  std::size_t Disassemble(const u8* begin, const u8* end, std::ostream& stream) override;
+  LLVMDisasmContextRef m_context = nullptr;
+  std::size_t m_fixed_size;
 };
 
-HostDisassemblerBochs::HostDisassemblerBochs()
+#elif defined(_M_X86_64)
+// The bundled Bochs x86 disassembler, in Intel syntax.
+class BochsDisassembler final : public HostDisassembler
 {
-  m_disasm.set_syntax_intel();
-}
+public:
+  BochsDisassembler() { m_disasm.set_syntax_intel(); }
 
-std::size_t HostDisassemblerBochs::Disassemble(const u8* begin, const u8* end, std::ostream& stream)
-{
-  std::size_t instruction_count = 0;
-  while (begin < end)
+private:
+  std::size_t Disassemble(const u8* begin, const u8* end, std::ostream& stream) override
   {
-    char inst_disasm[256];
-
-    const auto inst_size =
-        m_disasm.disasm64(0, reinterpret_cast<bx_address>(begin), begin, inst_disasm);
-    fmt::println(stream, "{}\t{}", fmt::ptr(begin), inst_disasm);
-    begin += inst_size;
-    ++instruction_count;
+    std::size_t count = 0;
+    for (const u8* at = begin; at < end; count++)
+    {
+      char text[256];
+      const unsigned size = m_disasm.disasm64(0, reinterpret_cast<bx_address>(at), at, text);
+      fmt::println(stream, "{}\t{}", fmt::ptr(at), text);
+      at += size;
+    }
+    return count;
   }
-  return instruction_count;
-}
+
+  disassembler m_disasm;
+};
 #endif
+}  // namespace
 
 std::unique_ptr<HostDisassembler> HostDisassembler::Factory(Platform arch)
 {
-  switch (arch)
-  {
 #if defined(HAVE_LLVM)
-  case Platform::x86_64:
-    return std::make_unique<HostDisassemblerLLVM>("x86_64-none-unknown");
-  case Platform::aarch64:
-    return std::make_unique<HostDisassemblerLLVM>("aarch64-none-unknown", "cortex-a57", 4);
+  if (arch == Platform::x86_64)
+    return std::make_unique<LLVMDisassembler>("x86_64-none-unknown", "", 0);
+  if (arch == Platform::aarch64)
+    return std::make_unique<LLVMDisassembler>("aarch64-none-unknown", "cortex-a57", 4);
 #elif defined(_M_X86_64)
-  case Platform::x86_64:
-    return std::make_unique<HostDisassemblerBochs>();
+  if (arch == Platform::x86_64)
+    return std::make_unique<BochsDisassembler>();
 #else
-  case Platform{}:  // warning C4065: "switch statement contains 'default' but no 'case' labels"
+  (void)arch;
 #endif
-  default:
-    return std::make_unique<HostDisassembler>();
-  }
+  return std::make_unique<HostDisassembler>();
 }
 
 std::size_t HostDisassembler::Disassemble(const u8* begin, const u8* end, std::ostream& stream)
 {
-  fmt::println(stream, "{}\t{:02x}", fmt::ptr(begin), fmt::join(std::span{begin, end}, ""));
+  PrintHex(stream, begin, std::span{begin, end}, "");
   return 0;
 }

@@ -1,5 +1,4 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/JitRegister.h"
 
@@ -18,35 +17,38 @@
 #include <unistd.h>
 #endif
 
-#if defined USE_VTUNE
+#ifdef USE_VTUNE
 #include <jitprofiling.h>
 #pragma comment(lib, "jitprofiling.lib")
 #endif
 
-static File::IOFile s_perf_map_file;
-
 namespace Common::JitRegister
 {
-static bool s_is_enabled = false;
+namespace
+{
+// perf's map file format: one "<start address hex> <size hex> <symbol name>" line per symbol.
+File::IOFile s_perf_map;
+bool s_enabled = false;
+}  // namespace
 
 void Init(const std::string& perf_dir)
 {
 #ifdef USE_VTUNE
-  s_is_enabled = true;
+  s_enabled = true;
 #endif
 
-  if (!perf_dir.empty() || getenv("PERF_BUILDID_DIR"))
-  {
-    const std::string dir = perf_dir.empty() ? "/tmp" : perf_dir;
-    const std::string filename = fmt::format("{}/perf-{}.map", dir, getpid());
-    if (s_perf_map_file.Open(filename, "w"))
-    {
-      // Disable buffering in order to avoid missing some mappings
-      // in the event of a crash:
-      std::setvbuf(s_perf_map_file.GetHandle(), nullptr, _IONBF, 0);
-      s_is_enabled = true;
-    }
-  }
+  const bool want_perf_map = !perf_dir.empty() || std::getenv("PERF_BUILDID_DIR") != nullptr;
+  if (!want_perf_map)
+    return;
+
+  const std::string path =
+      fmt::format("{}/perf-{}.map", perf_dir.empty() ? std::string("/tmp") : perf_dir, getpid());
+  if (!s_perf_map.Open(path, "w"))
+    return;
+
+  // Unbuffered, so that the entries written so far survive a crash.
+  std::setvbuf(s_perf_map.GetHandle(), nullptr, _IONBF, 0);
+  s_enabled = true;
 }
 
 void Shutdown()
@@ -55,33 +57,33 @@ void Shutdown()
   iJIT_NotifyEvent(iJVM_EVENT_TYPE_SHUTDOWN, nullptr);
 #endif
 
-  if (s_perf_map_file.IsOpen())
-    s_perf_map_file.Close();
-
-  s_is_enabled = false;
+  if (s_perf_map.IsOpen())
+    s_perf_map.Close();
+  s_enabled = false;
 }
 
 bool IsEnabled()
 {
-  return s_is_enabled;
+  return s_enabled;
 }
 
 void Register(const void* base_address, u32 code_size, const std::string& symbol_name)
 {
 #ifdef USE_VTUNE
-  iJIT_Method_Load jmethod = {0};
-  jmethod.method_id = iJIT_GetNewMethodID();
-  jmethod.method_load_address = const_cast<void*>(base_address);
-  jmethod.method_size = code_size;
-  jmethod.method_name = const_cast<char*>(symbol_name.c_str());
-  iJIT_NotifyEvent(iJVM_EVENT_TYPE_METHOD_LOAD_FINISHED, (void*)&jmethod);
+  iJIT_Method_Load method{};
+  method.method_id = iJIT_GetNewMethodID();
+  method.method_load_address = const_cast<void*>(base_address);
+  method.method_size = code_size;
+  method.method_name = const_cast<char*>(symbol_name.c_str());
+  iJIT_NotifyEvent(iJVM_EVENT_TYPE_METHOD_LOAD_FINISHED, &method);
 #endif
 
-  // Linux perf /tmp/perf-$pid.map:
-  if (!s_perf_map_file)
+  // Stop at the first write error.
+  if (!s_perf_map)
     return;
 
-  const auto entry = fmt::format("{} {:x} {}\n", fmt::ptr(base_address), code_size, symbol_name);
-  s_perf_map_file.WriteBytes(entry.data(), entry.size());
+  const std::string line =
+      fmt::format("{} {:x} {}\n", fmt::ptr(base_address), code_size, symbol_name);
+  s_perf_map.WriteBytes(line.data(), line.size());
 }
 }  // namespace Common::JitRegister
