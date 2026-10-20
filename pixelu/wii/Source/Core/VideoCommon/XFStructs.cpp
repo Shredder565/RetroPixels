@@ -1,9 +1,15 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// XF (transform unit) loads: plain register-block writes, indexed loads from CP arrays, and the
+// text descriptions the FIFO tools show for them.
 
 #include "VideoCommon/XFStructs.h"
 
+#include <array>
 #include <bit>
+#include <iterator>
+#include <string>
+#include <utility>
 
 #include "Common/CommonTypes.h"
 #include "Common/Logging/Log.h"
@@ -22,181 +28,204 @@
 #include "VideoCommon/XFMemory.h"
 #include "VideoCommon/XFStateManager.h"
 
-static void XFMemWritten(XFStateManager& xf_state_manager, u32 transferSize, u32 baseAddress)
+namespace
+{
+constexpr u32 VIEWPORT_WORDS = 6;
+constexpr u32 PROJECTION_WORDS = 7;
+constexpr u32 TEXGEN_SLOTS = 8;
+
+// XF memory viewed as its 32-bit address space.
+u32* XFWords()
+{
+  return reinterpret_cast<u32*>(&xfmem);
+}
+
+bool InBlock(u32 address, u32 first, u32 count)
+{
+  return address >= first && address < first + count;
+}
+
+bool IsMatrixMemory(u32 address)
+{
+  return InBlock(address, XFMEM_POSMATRICES, XFMEM_POSMATRICES_END - XFMEM_POSMATRICES) ||
+         InBlock(address, XFMEM_NORMALMATRICES, XFMEM_NORMALMATRICES_END - XFMEM_NORMALMATRICES) ||
+         InBlock(address, XFMEM_POSTMATRICES, XFMEM_POSTMATRICES_END - XFMEM_POSTMATRICES);
+}
+
+void ReportUnknownXFRegister()
+{
+  DolphinAnalytics::Instance().ReportGameQuirk(GameQuirk::UsesUnknownXFCommand);
+}
+
+// Any write into the matrix/light memory: draw what is queued, then mark the words dirty.
+void NoteMemoryWrite(XFStateManager& tracker, u32 first, u32 count)
 {
   g_vertex_manager->Flush();
-  xf_state_manager.InvalidateXFRange(baseAddress, baseAddress + transferSize);
+  tracker.InvalidateXFRange(static_cast<int>(first), static_cast<int>(first + count));
 }
 
-static void XFRegWritten(Core::System& system, XFStateManager& xf_state_manager, u32 address,
-                         u32 value)
+// Reacts to a register write before the new value is stored, so handlers can still compare
+// against the old value.
+void BeforeRegisterWrite(Core::System& system, XFStateManager& tracker, u32 address, u32 value)
 {
-  if (address >= XFMEM_REGISTERS_START && address < XFMEM_REGISTERS_END)
+  if (InBlock(address, XFMEM_SETVIEWPORT, VIEWPORT_WORDS))
   {
-    switch (address)
-    {
-    case XFMEM_ERROR:
-    case XFMEM_DIAG:
-    case XFMEM_STATE0:  // internal state 0
-    case XFMEM_STATE1:  // internal state 1
-    case XFMEM_CLOCK:
-    case XFMEM_SETGPMETRIC:
-      // Not implemented
-      break;
+    g_vertex_manager->Flush();
+    tracker.SetViewportChanged();
+    system.GetPixelShaderManager().SetViewportChanged();
+    system.GetGeometryShaderManager().SetViewportChanged();
+    return;
+  }
+  if (InBlock(address, XFMEM_SETPROJECTION, PROJECTION_WORDS))
+  {
+    g_vertex_manager->Flush();
+    tracker.SetProjectionChanged();
+    system.GetGeometryShaderManager().SetProjectionChanged();
+    return;
+  }
+  if (InBlock(address, XFMEM_SETTEXMTXINFO, TEXGEN_SLOTS))
+  {
+    g_vertex_manager->Flush();
+    tracker.SetTexMatrixInfoChanged(static_cast<int>(address - XFMEM_SETTEXMTXINFO));
+    return;
+  }
+  if (InBlock(address, XFMEM_SETPOSTMTXINFO, TEXGEN_SLOTS))
+  {
+    g_vertex_manager->Flush();
+    tracker.SetTexMatrixInfoChanged(static_cast<int>(address - XFMEM_SETPOSTMTXINFO));
+    return;
+  }
+  if (InBlock(address, XFMEM_UNKNOWN_GROUP_3_START, 8))
+  {
+    // Possibly per-texgen normal matrix info; never seen used.
+    ReportUnknownXFRegister();
+    DEBUG_LOG_FMT(VIDEO, "Possible Normal Mtx XF reg?: {:x}={:x}", address, value);
+    return;
+  }
 
-    case XFMEM_CLIPDISABLE:
-    {
-      ClipDisable setting{.hex = value};
-      if (setting.disable_clipping_detection)
-        DolphinAnalytics::Instance().ReportGameQuirk(GameQuirk::SetsXFClipDisableBit0);
-      if (setting.disable_trivial_rejection)
-        DolphinAnalytics::Instance().ReportGameQuirk(GameQuirk::SetsXFClipDisableBit1);
-      if (setting.disable_cpoly_clipping_acceleration)
-        DolphinAnalytics::Instance().ReportGameQuirk(GameQuirk::SetsXFClipDisableBit2);
-      break;
-    }
+  switch (address)
+  {
+  // Status, diagnostics and performance registers: nothing to emulate.
+  case XFMEM_ERROR:
+  case XFMEM_DIAG:
+  case XFMEM_STATE0:
+  case XFMEM_STATE1:
+  case XFMEM_CLOCK:
+  case XFMEM_SETGPMETRIC:
+    return;
 
-    case XFMEM_VTXSPECS:  //__GXXfVtxSpecs, wrote 0004
-      VertexLoaderManager::g_needs_cp_xf_consistency_check = true;
-      break;
+  case XFMEM_CLIPDISABLE:
+  {
+    // Clipping is not configurable here; just note which games touch the bits.
+    const ClipDisable bits{.hex = value};
+    auto& analytics = DolphinAnalytics::Instance();
+    if (bits.disable_clipping_detection)
+      analytics.ReportGameQuirk(GameQuirk::SetsXFClipDisableBit0);
+    if (bits.disable_trivial_rejection)
+      analytics.ReportGameQuirk(GameQuirk::SetsXFClipDisableBit1);
+    if (bits.disable_cpoly_clipping_acceleration)
+      analytics.ReportGameQuirk(GameQuirk::SetsXFClipDisableBit2);
+    return;
+  }
 
-    case XFMEM_SETNUMCHAN:
-      if (xfmem.numChan.numColorChans != (value & 3))
-        g_vertex_manager->Flush();
-      xf_state_manager.SetLightingConfigChanged();
-      break;
+  case XFMEM_VTXSPECS:
+    VertexLoaderManager::g_needs_cp_xf_consistency_check = true;
+    return;
 
-    case XFMEM_SETCHAN0_AMBCOLOR:  // Channel Ambient Color
-    case XFMEM_SETCHAN1_AMBCOLOR:
-    {
-      u8 chan = address - XFMEM_SETCHAN0_AMBCOLOR;
-      if (xfmem.ambColor[chan] != value)
-      {
-        g_vertex_manager->Flush();
-        xf_state_manager.SetMaterialColorChanged(chan);
-      }
-      break;
-    }
-
-    case XFMEM_SETCHAN0_MATCOLOR:  // Channel Material Color
-    case XFMEM_SETCHAN1_MATCOLOR:
-    {
-      u8 chan = address - XFMEM_SETCHAN0_MATCOLOR;
-      if (xfmem.matColor[chan] != value)
-      {
-        g_vertex_manager->Flush();
-        xf_state_manager.SetMaterialColorChanged(chan + 2);
-      }
-      break;
-    }
-
-    case XFMEM_SETCHAN0_COLOR:  // Channel Color
-    case XFMEM_SETCHAN1_COLOR:
-    case XFMEM_SETCHAN0_ALPHA:  // Channel Alpha
-    case XFMEM_SETCHAN1_ALPHA:
-      if (((u32*)&xfmem)[address] != (value & 0x7fff))
-        g_vertex_manager->Flush();
-      xf_state_manager.SetLightingConfigChanged();
-      break;
-
-    case XFMEM_DUALTEX:
-      if (xfmem.dualTexTrans.enabled != bool(value & 1))
-        g_vertex_manager->Flush();
-      xf_state_manager.SetTexMatrixInfoChanged(-1);
-      break;
-
-    case XFMEM_SETMATRIXINDA:
-      xf_state_manager.SetTexMatrixChangedA(value);
-      VertexLoaderManager::g_needs_cp_xf_consistency_check = true;
-      break;
-    case XFMEM_SETMATRIXINDB:
-      xf_state_manager.SetTexMatrixChangedB(value);
-      VertexLoaderManager::g_needs_cp_xf_consistency_check = true;
-      break;
-
-    case XFMEM_SETVIEWPORT:
-    case XFMEM_SETVIEWPORT + 1:
-    case XFMEM_SETVIEWPORT + 2:
-    case XFMEM_SETVIEWPORT + 3:
-    case XFMEM_SETVIEWPORT + 4:
-    case XFMEM_SETVIEWPORT + 5:
+  case XFMEM_SETNUMCHAN:
+    if (xfmem.numChan.numColorChans != (value & 3))
       g_vertex_manager->Flush();
-      xf_state_manager.SetViewportChanged();
-      system.GetPixelShaderManager().SetViewportChanged();
-      system.GetGeometryShaderManager().SetViewportChanged();
-      break;
+    tracker.SetLightingConfigChanged();
+    return;
 
-    case XFMEM_SETPROJECTION:
-    case XFMEM_SETPROJECTION + 1:
-    case XFMEM_SETPROJECTION + 2:
-    case XFMEM_SETPROJECTION + 3:
-    case XFMEM_SETPROJECTION + 4:
-    case XFMEM_SETPROJECTION + 5:
-    case XFMEM_SETPROJECTION + 6:
+  case XFMEM_SETCHAN0_AMBCOLOR:
+  case XFMEM_SETCHAN1_AMBCOLOR:
+  case XFMEM_SETCHAN0_MATCOLOR:
+  case XFMEM_SETCHAN1_MATCOLOR:
+  {
+    // Material change bits: 0-1 ambient, 2-3 material colour, indexed by channel.
+    const u32 slot = address - XFMEM_SETCHAN0_AMBCOLOR;
+    if (XFWords()[address] != value)
+    {
       g_vertex_manager->Flush();
-      xf_state_manager.SetProjectionChanged();
-      system.GetGeometryShaderManager().SetProjectionChanged();
-      break;
-
-    case XFMEM_SETNUMTEXGENS:  // GXSetNumTexGens
-      if (xfmem.numTexGen.numTexGens != (value & 15))
-        g_vertex_manager->Flush();
-      break;
-
-    case XFMEM_SETTEXMTXINFO:
-    case XFMEM_SETTEXMTXINFO + 1:
-    case XFMEM_SETTEXMTXINFO + 2:
-    case XFMEM_SETTEXMTXINFO + 3:
-    case XFMEM_SETTEXMTXINFO + 4:
-    case XFMEM_SETTEXMTXINFO + 5:
-    case XFMEM_SETTEXMTXINFO + 6:
-    case XFMEM_SETTEXMTXINFO + 7:
-      g_vertex_manager->Flush();
-      xf_state_manager.SetTexMatrixInfoChanged(address - XFMEM_SETTEXMTXINFO);
-      break;
-
-    case XFMEM_SETPOSTMTXINFO:
-    case XFMEM_SETPOSTMTXINFO + 1:
-    case XFMEM_SETPOSTMTXINFO + 2:
-    case XFMEM_SETPOSTMTXINFO + 3:
-    case XFMEM_SETPOSTMTXINFO + 4:
-    case XFMEM_SETPOSTMTXINFO + 5:
-    case XFMEM_SETPOSTMTXINFO + 6:
-    case XFMEM_SETPOSTMTXINFO + 7:
-      g_vertex_manager->Flush();
-      xf_state_manager.SetTexMatrixInfoChanged(address - XFMEM_SETPOSTMTXINFO);
-      break;
-
-    // --------------
-    // Unknown Regs
-    // --------------
-
-    // Maybe these are for Normals?
-    case 0x1048:  // xfmem.texcoords[0].nrmmtxinfo.hex = data; break; ??
-    case 0x1049:
-    case 0x104a:
-    case 0x104b:
-    case 0x104c:
-    case 0x104d:
-    case 0x104e:
-    case 0x104f:
-      DolphinAnalytics::Instance().ReportGameQuirk(GameQuirk::UsesUnknownXFCommand);
-      DEBUG_LOG_FMT(VIDEO, "Possible Normal Mtx XF reg?: {:x}={:x}", address, value);
-      break;
-
-    case 0x1013:
-    case 0x1014:
-    case 0x1015:
-    case 0x1016:
-    case 0x1017:
-
-    default:
-      DolphinAnalytics::Instance().ReportGameQuirk(GameQuirk::UsesUnknownXFCommand);
-      WARN_LOG_FMT(VIDEO, "Unknown XF Reg: {:x}={:x}", address, value);
-      break;
+      tracker.SetMaterialColorChanged(static_cast<int>(slot));
     }
+    return;
+  }
+
+  case XFMEM_SETCHAN0_COLOR:
+  case XFMEM_SETCHAN1_COLOR:
+  case XFMEM_SETCHAN0_ALPHA:
+  case XFMEM_SETCHAN1_ALPHA:
+    if (XFWords()[address] != (value & 0x7fff))
+      g_vertex_manager->Flush();
+    tracker.SetLightingConfigChanged();
+    return;
+
+  case XFMEM_DUALTEX:
+    if (xfmem.dualTexTrans.enabled != ((value & 1) != 0))
+      g_vertex_manager->Flush();
+    tracker.SetTexMatrixInfoChanged(-1);
+    return;
+
+  case XFMEM_SETMATRIXINDA:
+    tracker.SetTexMatrixChangedA(value);
+    VertexLoaderManager::g_needs_cp_xf_consistency_check = true;
+    return;
+
+  case XFMEM_SETMATRIXINDB:
+    tracker.SetTexMatrixChangedB(value);
+    VertexLoaderManager::g_needs_cp_xf_consistency_check = true;
+    return;
+
+  case XFMEM_SETNUMTEXGENS:
+    if (xfmem.numTexGen.numTexGens != (value & 15))
+      g_vertex_manager->Flush();
+    return;
+
+  default:
+    ReportUnknownXFRegister();
+    WARN_LOG_FMT(VIDEO, "Unknown XF Reg: {:x}={:x}", address, value);
+    return;
   }
 }
+
+// Where a block write lands: the part below the register file goes to matrix/light memory,
+// the rest to registers. `regs_end` is already clamped to the end of the register file.
+struct TransferSplit
+{
+  u32 memory_words;  // words written to memory, starting at the base address
+  u32 regs_first;    // first register written (== regs_end when none)
+  u32 regs_end;
+};
+
+TransferSplit SplitTransfer(u32 base, u32 count, u32 clamped_end)
+{
+  if (base >= XFMEM_REGISTERS_START)
+    return {0, base, clamped_end};
+  if (clamped_end > XFMEM_REGISTERS_START)
+    return {XFMEM_REGISTERS_START - base, XFMEM_REGISTERS_START, clamped_end};
+  return {count, clamped_end, clamped_end};
+}
+
+// True if any of the `count` big-endian words at `src` differs from XF memory at `address`.
+bool DiffersFromXF(u32 address, const u8* src, u32 count)
+{
+  const u32* const current = XFWords() + address;
+  for (u32 i = 0; i < count; ++i)
+  {
+    if (current[i] != Common::swap32(src + i * 4))
+      return true;
+  }
+  return false;
+}
+
+// Indexed loads read from main memory at array base + stride * index.
+u32 IndexedSource(const CPState& state, CPArray array, u32 index)
+{
+  return state.array_bases[array] + state.array_strides[array] * index;
+}
+}  // namespace
 
 void LoadXFReg(u16 base_address, u8 transfer_size, const u8* data)
 {
@@ -207,452 +236,310 @@ void LoadXFReg(u16 base_address, u8 transfer_size, const u8* data)
     return;
   }
 
-  u32 end_address = base_address + transfer_size;  // exclusive
-
-  // do not allow writes past registers
-  if (end_address > XFMEM_REGISTERS_END)
+  u32 end = u32{base_address} + transfer_size;
+  if (end > XFMEM_REGISTERS_END)
   {
     WARN_LOG_FMT(VIDEO, "XF load ends past end of address space: {:x} {} bytes", base_address,
                  transfer_size);
-    end_address = XFMEM_REGISTERS_END;
+    end = XFMEM_REGISTERS_END;
   }
 
   auto& system = Core::System::GetInstance();
-  auto& xf_state_manager = system.GetXFStateManager();
+  auto& tracker = system.GetXFStateManager();
+  const TransferSplit split = SplitTransfer(base_address, transfer_size, end);
 
-  // write to XF mem
+  const u8* src = data;
   if (base_address < XFMEM_REGISTERS_START)
   {
-    const u32 xf_mem_base = base_address;
-    u32 xf_mem_transfer_size = transfer_size;
-
-    if (end_address > XFMEM_REGISTERS_START)
-    {
-      xf_mem_transfer_size = XFMEM_REGISTERS_START - base_address;
-      base_address = XFMEM_REGISTERS_START;
-    }
-
-    XFMemWritten(xf_state_manager, xf_mem_transfer_size, xf_mem_base);
-    for (u32 i = 0; i < xf_mem_transfer_size; i++)
-    {
-      ((u32*)&xfmem)[xf_mem_base + i] = Common::swap32(data);
-      data += 4;
-    }
+    NoteMemoryWrite(tracker, base_address, split.memory_words);
+    u32* const dest = XFWords() + base_address;
+    for (u32 i = 0; i < split.memory_words; ++i, src += 4)
+      dest[i] = Common::swap32(src);
   }
 
-  // write to XF regs
-  if (base_address >= XFMEM_REGISTERS_START)
+  for (u32 address = split.regs_first; address < split.regs_end; ++address, src += 4)
   {
-    for (u32 address = base_address; address < end_address; address++)
-    {
-      const u32 value = Common::swap32(data);
-
-      XFRegWritten(system, xf_state_manager, address, value);
-      ((u32*)&xfmem)[address] = value;
-
-      data += 4;
-    }
+    const u32 value = Common::swap32(src);
+    BeforeRegisterWrite(system, tracker, address, value);
+    XFWords()[address] = value;
   }
 }
 
-// TODO - verify that it is correct. Seems to work, though.
 void LoadIndexedXF(CPArray array, u32 index, u16 address, u8 size)
 {
-  // load stuff from array to address in xf mem
-
-  const u32 buf_size = size * sizeof(u32);
-  u32* currData = reinterpret_cast<u32*>(&xfmem) + address;
-  u32* newData;
+  const u32 byte_count = u32{size} * sizeof(u32);
   auto& system = Core::System::GetInstance();
   auto& fifo = system.GetFifo();
-  if (fifo.UseDeterministicGPUThread())
-  {
-    newData = static_cast<u32*>(fifo.PopFifoAuxBuffer(buf_size));
-  }
-  else
-  {
-    auto& memory = system.GetMemory();
-    newData = reinterpret_cast<u32*>(memory.GetPointerForRange(
-        g_main_cp_state.array_bases[array] + g_main_cp_state.array_strides[array] * index,
-        buf_size));
-  }
 
-  auto& xf_state_manager = system.GetXFStateManager();
-  bool changed = false;
+  // In deterministic mode the CPU thread already captured the source words.
+  const u8* const src =
+      fifo.UseDeterministicGPUThread() ?
+          static_cast<const u8*>(fifo.PopFifoAuxBuffer(byte_count)) :
+          system.GetMemory().GetPointerForRange(IndexedSource(g_main_cp_state, array, index),
+                                                byte_count);
+  // An unmapped source would otherwise be dereferenced; ignore the load instead.
+  if (src == nullptr)
+    return;
+
+  if (!DiffersFromXF(address, src, size))
+    return;
+
+  NoteMemoryWrite(system.GetXFStateManager(), address, size);
+  u32* const dest = XFWords() + address;
   for (u32 i = 0; i < size; ++i)
-  {
-    if (currData[i] != Common::swap32(newData[i]))
-    {
-      changed = true;
-      XFMemWritten(xf_state_manager, size, address);
-      break;
-    }
-  }
-  if (changed)
-  {
-    for (u32 i = 0; i < size; ++i)
-      currData[i] = Common::swap32(newData[i]);
-  }
+    dest[i] = Common::swap32(src + i * 4);
 }
 
-void PreprocessIndexedXF(CPArray array, u32 index, u16 address, u8 size)
+void PreprocessIndexedXF(CPArray array, u32 index, [[maybe_unused]] u16 address, u8 size)
 {
-  const size_t buf_size = size * sizeof(u32);
-
+  const size_t byte_count = size_t{size} * sizeof(u32);
   auto& system = Core::System::GetInstance();
-  auto& memory = system.GetMemory();
-  const u8* new_data = memory.GetPointerForRange(
-      g_preprocess_cp_state.array_bases[array] + g_preprocess_cp_state.array_strides[array] * index,
-      buf_size);
-
-  system.GetFifo().PushFifoAuxBuffer(new_data, buf_size);
+  const u8* const src = system.GetMemory().GetPointerForRange(
+      IndexedSource(g_preprocess_cp_state, array, index), byte_count);
+  system.GetFifo().PushFifoAuxBuffer(src, byte_count);
 }
 
-std::pair<std::string, std::string> GetXFRegInfo(u32 address, u32 value)
+namespace
 {
-// Macro to set the register name and make sure it was written correctly via compile time assertion
-#define RegName(reg) ((void)(reg), #reg)
-#define DescriptionlessReg(reg) std::make_pair(RegName(reg), "");
+// Fixed register names (registers 0x1000-0x103f); nullptr where the register has none.
+constexpr std::array<const char*, 0x40> MakeRegisterNames()
+{
+  std::array<const char*, 0x40> names{};
+  const auto set = [&names](u32 address, const char* name) {
+    names[address - XFMEM_REGISTERS_START] = name;
+  };
+  set(XFMEM_ERROR, "XFMEM_ERROR");
+  set(XFMEM_DIAG, "XFMEM_DIAG");
+  set(XFMEM_STATE0, "XFMEM_STATE0");
+  set(XFMEM_STATE1, "XFMEM_STATE1");
+  set(XFMEM_CLOCK, "XFMEM_CLOCK");
+  set(XFMEM_CLIPDISABLE, "XFMEM_CLIPDISABLE");
+  set(XFMEM_SETGPMETRIC, "XFMEM_SETGPMETRIC");
+  set(XFMEM_VTXSPECS, "XFMEM_VTXSPECS");
+  set(XFMEM_SETNUMCHAN, "XFMEM_SETNUMCHAN");
+  set(XFMEM_SETCHAN0_AMBCOLOR, "XFMEM_SETCHAN0_AMBCOLOR");
+  set(XFMEM_SETCHAN1_AMBCOLOR, "XFMEM_SETCHAN1_AMBCOLOR");
+  set(XFMEM_SETCHAN0_MATCOLOR, "XFMEM_SETCHAN0_MATCOLOR");
+  set(XFMEM_SETCHAN1_MATCOLOR, "XFMEM_SETCHAN1_MATCOLOR");
+  set(XFMEM_SETCHAN0_COLOR, "XFMEM_SETCHAN0_COLOR");
+  set(XFMEM_SETCHAN1_COLOR, "XFMEM_SETCHAN1_COLOR");
+  set(XFMEM_SETCHAN0_ALPHA, "XFMEM_SETCHAN0_ALPHA");
+  set(XFMEM_SETCHAN1_ALPHA, "XFMEM_SETCHAN1_ALPHA");
+  set(XFMEM_DUALTEX, "XFMEM_DUALTEX");
+  set(XFMEM_SETMATRIXINDA, "XFMEM_SETMATRIXINDA");
+  set(XFMEM_SETMATRIXINDB, "XFMEM_SETMATRIXINDB");
+  constexpr std::array<const char*, VIEWPORT_WORDS> viewport = {
+      "XFMEM_SETVIEWPORT + 0", "XFMEM_SETVIEWPORT + 1", "XFMEM_SETVIEWPORT + 2",
+      "XFMEM_SETVIEWPORT + 3", "XFMEM_SETVIEWPORT + 4", "XFMEM_SETVIEWPORT + 5"};
+  for (u32 i = 0; i < VIEWPORT_WORDS; ++i)
+    set(XFMEM_SETVIEWPORT + i, viewport[i]);
+  constexpr std::array<const char*, PROJECTION_WORDS> projection = {
+      "XFMEM_SETPROJECTION + 0", "XFMEM_SETPROJECTION + 1", "XFMEM_SETPROJECTION + 2",
+      "XFMEM_SETPROJECTION + 3", "XFMEM_SETPROJECTION + 4", "XFMEM_SETPROJECTION + 5",
+      "XFMEM_SETPROJECTION + 6"};
+  for (u32 i = 0; i < PROJECTION_WORDS; ++i)
+    set(XFMEM_SETPROJECTION + i, projection[i]);
+  set(XFMEM_SETNUMTEXGENS, "XFMEM_SETNUMTEXGENS");
+  return names;
+}
+constexpr auto REGISTER_NAMES = MakeRegisterNames();
+
+// Description for a register that has a fixed name.
+std::string DescribeNamedRegister(u32 address, u32 value)
+{
+  const float as_float = std::bit_cast<float>(value);
+
+  if (InBlock(address, XFMEM_SETVIEWPORT, VIEWPORT_WORDS))
+  {
+    static constexpr std::array<const char*, VIEWPORT_WORDS> fields = {
+        "width", "height", "z range", "x origin", "y origin", "far z"};
+    return fmt::format("Viewport {}: {}", fields[address - XFMEM_SETVIEWPORT], as_float);
+  }
+  if (address == XFMEM_SETPROJECTION + PROJECTION_WORDS - 1)
+    return fmt::to_string(static_cast<ProjectionType>(value));
+  if (InBlock(address, XFMEM_SETPROJECTION, PROJECTION_WORDS))
+    return fmt::format("Projection[{}]: {}", address - XFMEM_SETPROJECTION, as_float);
 
   switch (address)
   {
-  case XFMEM_ERROR:
-    return DescriptionlessReg(XFMEM_ERROR);
-  case XFMEM_DIAG:
-    return DescriptionlessReg(XFMEM_DIAG);
-  case XFMEM_STATE0:  // internal state 0
-    return std::make_pair(RegName(XFMEM_STATE0), "internal state 0");
-  case XFMEM_STATE1:  // internal state 1
-    return std::make_pair(RegName(XFMEM_STATE1), "internal state 1");
-  case XFMEM_CLOCK:
-    return DescriptionlessReg(XFMEM_CLOCK);
-  case XFMEM_SETGPMETRIC:
-    return DescriptionlessReg(XFMEM_SETGPMETRIC);
-
+  case XFMEM_STATE0:
+    return "internal state 0";
+  case XFMEM_STATE1:
+    return "internal state 1";
   case XFMEM_CLIPDISABLE:
-    return std::make_pair(RegName(XFMEM_CLIPDISABLE), fmt::to_string(ClipDisable{.hex = value}));
-
+    return fmt::to_string(ClipDisable{.hex = value});
   case XFMEM_VTXSPECS:
-    return std::make_pair(RegName(XFMEM_VTXSPECS), fmt::to_string(INVTXSPEC{.hex = value}));
-
+    return fmt::to_string(INVTXSPEC{.hex = value});
   case XFMEM_SETNUMCHAN:
-    return std::make_pair(RegName(XFMEM_SETNUMCHAN),
-                          fmt::format("Number of color channels: {}", value & 3));
-    break;
-
+    return fmt::format("Number of color channels: {}", value & 3);
   case XFMEM_SETCHAN0_AMBCOLOR:
-    return std::make_pair(RegName(XFMEM_SETCHAN0_AMBCOLOR),
-                          fmt::format("Channel 0 Ambient Color: {:08x}", value));
   case XFMEM_SETCHAN1_AMBCOLOR:
-    return std::make_pair(RegName(XFMEM_SETCHAN1_AMBCOLOR),
-                          fmt::format("Channel 1 Ambient Color: {:08x}", value));
-
+    return fmt::format("Channel {} Ambient Color: {:08x}", address - XFMEM_SETCHAN0_AMBCOLOR,
+                       value);
   case XFMEM_SETCHAN0_MATCOLOR:
-    return std::make_pair(RegName(XFMEM_SETCHAN0_MATCOLOR),
-                          fmt::format("Channel 0 Material Color: {:08x}", value));
   case XFMEM_SETCHAN1_MATCOLOR:
-    return std::make_pair(RegName(XFMEM_SETCHAN1_MATCOLOR),
-                          fmt::format("Channel 1 Material Color: {:08x}", value));
-
-  case XFMEM_SETCHAN0_COLOR:  // Channel Color
-    return std::make_pair(RegName(XFMEM_SETCHAN0_COLOR),
-                          fmt::format("Channel 0 Color config:\n{}", LitChannel{.hex = value}));
+    return fmt::format("Channel {} Material Color: {:08x}", address - XFMEM_SETCHAN0_MATCOLOR,
+                       value);
+  case XFMEM_SETCHAN0_COLOR:
   case XFMEM_SETCHAN1_COLOR:
-    return std::make_pair(RegName(XFMEM_SETCHAN1_COLOR),
-                          fmt::format("Channel 1 Color config:\n{}", LitChannel{.hex = value}));
-  case XFMEM_SETCHAN0_ALPHA:  // Channel Alpha
-    return std::make_pair(RegName(XFMEM_SETCHAN0_ALPHA),
-                          fmt::format("Channel 0 Alpha config:\n{}", LitChannel{.hex = value}));
+    return fmt::format("Channel {} Color config:\n{}", address - XFMEM_SETCHAN0_COLOR,
+                       LitChannel{.hex = value});
+  case XFMEM_SETCHAN0_ALPHA:
   case XFMEM_SETCHAN1_ALPHA:
-    return std::make_pair(RegName(XFMEM_SETCHAN1_ALPHA),
-                          fmt::format("Channel 1 Alpha config:\n{}", LitChannel{.hex = value}));
-
+    return fmt::format("Channel {} Alpha config:\n{}", address - XFMEM_SETCHAN0_ALPHA,
+                       LitChannel{.hex = value});
   case XFMEM_DUALTEX:
-    return std::make_pair(RegName(XFMEM_DUALTEX),
-                          fmt::format("Dual Tex Trans {}", (value & 1) ? "enabled" : "disabled"));
-
+    return fmt::format("Dual Tex Trans {}", (value & 1) != 0 ? "enabled" : "disabled");
   case XFMEM_SETMATRIXINDA:
-    return std::make_pair(RegName(XFMEM_SETMATRIXINDA),
-                          fmt::format("Matrix index A:\n{}", TMatrixIndexA{.Hex = value}));
+    return fmt::format("Matrix index A:\n{}", TMatrixIndexA{.Hex = value});
   case XFMEM_SETMATRIXINDB:
-    return std::make_pair(RegName(XFMEM_SETMATRIXINDB),
-                          fmt::format("Matrix index B:\n{}", TMatrixIndexB{.Hex = value}));
-
-  case XFMEM_SETVIEWPORT:
-    return std::make_pair(RegName(XFMEM_SETVIEWPORT + 0),
-                          fmt::format("Viewport width: {}", std::bit_cast<float>(value)));
-  case XFMEM_SETVIEWPORT + 1:
-    return std::make_pair(RegName(XFMEM_SETVIEWPORT + 1),
-                          fmt::format("Viewport height: {}", std::bit_cast<float>(value)));
-  case XFMEM_SETVIEWPORT + 2:
-    return std::make_pair(RegName(XFMEM_SETVIEWPORT + 2),
-                          fmt::format("Viewport z range: {}", std::bit_cast<float>(value)));
-  case XFMEM_SETVIEWPORT + 3:
-    return std::make_pair(RegName(XFMEM_SETVIEWPORT + 3),
-                          fmt::format("Viewport x origin: {}", std::bit_cast<float>(value)));
-  case XFMEM_SETVIEWPORT + 4:
-    return std::make_pair(RegName(XFMEM_SETVIEWPORT + 4),
-                          fmt::format("Viewport y origin: {}", std::bit_cast<float>(value)));
-  case XFMEM_SETVIEWPORT + 5:
-    return std::make_pair(RegName(XFMEM_SETVIEWPORT + 5),
-                          fmt::format("Viewport far z: {}", std::bit_cast<float>(value)));
-    break;
-
-  case XFMEM_SETPROJECTION:
-    return std::make_pair(RegName(XFMEM_SETPROJECTION + 0),
-                          fmt::format("Projection[0]: {}", std::bit_cast<float>(value)));
-  case XFMEM_SETPROJECTION + 1:
-    return std::make_pair(RegName(XFMEM_SETPROJECTION + 1),
-                          fmt::format("Projection[1]: {}", std::bit_cast<float>(value)));
-  case XFMEM_SETPROJECTION + 2:
-    return std::make_pair(RegName(XFMEM_SETPROJECTION + 2),
-                          fmt::format("Projection[2]: {}", std::bit_cast<float>(value)));
-  case XFMEM_SETPROJECTION + 3:
-    return std::make_pair(RegName(XFMEM_SETPROJECTION + 3),
-                          fmt::format("Projection[3]: {}", std::bit_cast<float>(value)));
-  case XFMEM_SETPROJECTION + 4:
-    return std::make_pair(RegName(XFMEM_SETPROJECTION + 4),
-                          fmt::format("Projection[4]: {}", std::bit_cast<float>(value)));
-  case XFMEM_SETPROJECTION + 5:
-    return std::make_pair(RegName(XFMEM_SETPROJECTION + 5),
-                          fmt::format("Projection[5]: {}", std::bit_cast<float>(value)));
-  case XFMEM_SETPROJECTION + 6:
-    return std::make_pair(RegName(XFMEM_SETPROJECTION + 6),
-                          fmt::to_string(static_cast<ProjectionType>(value)));
-
+    return fmt::format("Matrix index B:\n{}", TMatrixIndexB{.Hex = value});
   case XFMEM_SETNUMTEXGENS:
-    return std::make_pair(RegName(XFMEM_SETNUMTEXGENS),
-                          fmt::format("Number of tex gens: {}", value & 15));
-
-  case XFMEM_SETTEXMTXINFO:
-  case XFMEM_SETTEXMTXINFO + 1:
-  case XFMEM_SETTEXMTXINFO + 2:
-  case XFMEM_SETTEXMTXINFO + 3:
-  case XFMEM_SETTEXMTXINFO + 4:
-  case XFMEM_SETTEXMTXINFO + 5:
-  case XFMEM_SETTEXMTXINFO + 6:
-  case XFMEM_SETTEXMTXINFO + 7:
-    return std::make_pair(
-        fmt::format("XFMEM_SETTEXMTXINFO Matrix {}", address - XFMEM_SETTEXMTXINFO),
-        fmt::to_string(TexMtxInfo{.hex = value}));
-
-  case XFMEM_SETPOSTMTXINFO:
-  case XFMEM_SETPOSTMTXINFO + 1:
-  case XFMEM_SETPOSTMTXINFO + 2:
-  case XFMEM_SETPOSTMTXINFO + 3:
-  case XFMEM_SETPOSTMTXINFO + 4:
-  case XFMEM_SETPOSTMTXINFO + 5:
-  case XFMEM_SETPOSTMTXINFO + 6:
-  case XFMEM_SETPOSTMTXINFO + 7:
-    return std::make_pair(
-        fmt::format("XFMEM_SETPOSTMTXINFO Matrix {}", address - XFMEM_SETPOSTMTXINFO),
-        fmt::to_string(PostMtxInfo{.hex = value}));
-
-  // --------------
-  // Unknown Regs
-  // --------------
-
-  // Maybe these are for Normals?
-  case 0x1048:  // xfmem.texcoords[0].nrmmtxinfo.hex = data; break; ??
-  case 0x1049:
-  case 0x104a:
-  case 0x104b:
-  case 0x104c:
-  case 0x104d:
-  case 0x104e:
-  case 0x104f:
-    return std::make_pair(
-        fmt::format("Possible Normal Mtx XF reg?: {:x}={:x}", address, value),
-        "Maybe these are for Normals? xfmem.texcoords[0].nrmmtxinfo.hex = data; break; ??");
-    break;
-
-  case 0x1013:
-  case 0x1014:
-  case 0x1015:
-  case 0x1016:
-  case 0x1017:
-
+    return fmt::format("Number of tex gens: {}", value & 15);
   default:
-    return std::make_pair(fmt::format("Unknown XF Reg: {:x}={:x}", address, value), "");
+    // Error, diag, clock and metric registers.
+    return "";
   }
-#undef RegName
-#undef DescriptionlessReg
+}
+}  // namespace
+
+std::pair<std::string, std::string> GetXFRegInfo(u32 address, u32 value)
+{
+  if (InBlock(address, XFMEM_SETTEXMTXINFO, TEXGEN_SLOTS))
+  {
+    return {fmt::format("XFMEM_SETTEXMTXINFO Matrix {}", address - XFMEM_SETTEXMTXINFO),
+            fmt::to_string(TexMtxInfo{.hex = value})};
+  }
+  if (InBlock(address, XFMEM_SETPOSTMTXINFO, TEXGEN_SLOTS))
+  {
+    return {fmt::format("XFMEM_SETPOSTMTXINFO Matrix {}", address - XFMEM_SETPOSTMTXINFO),
+            fmt::to_string(PostMtxInfo{.hex = value})};
+  }
+  if (InBlock(address, XFMEM_UNKNOWN_GROUP_3_START, 8))
+  {
+    return {fmt::format("Possible Normal Mtx XF reg?: {:x}={:x}", address, value),
+            "Maybe these are for Normals? xfmem.texcoords[0].nrmmtxinfo.hex = data; break; ??"};
+  }
+  if (InBlock(address, XFMEM_REGISTERS_START, static_cast<u32>(REGISTER_NAMES.size())))
+  {
+    const char* const name = REGISTER_NAMES[address - XFMEM_REGISTERS_START];
+    if (name != nullptr)
+      return {name, DescribeNamedRegister(address, value)};
+  }
+  return {fmt::format("Unknown XF Reg: {:x}={:x}", address, value), ""};
 }
 
 std::string GetXFMemName(u32 address)
 {
-  if (address >= XFMEM_POSMATRICES && address < XFMEM_POSMATRICES_END)
-  {
-    const u32 row = (address - XFMEM_POSMATRICES) / 4;
-    const u32 col = (address - XFMEM_POSMATRICES) % 4;
-    return fmt::format("Position matrix row {:2d} col {:2d}", row, col);
-  }
-  else if (address >= XFMEM_NORMALMATRICES && address < XFMEM_NORMALMATRICES_END)
-  {
-    const u32 row = (address - XFMEM_NORMALMATRICES) / 3;
-    const u32 col = (address - XFMEM_NORMALMATRICES) % 3;
-    return fmt::format("Normal matrix row {:2d} col {:2d}", row, col);
-  }
-  else if (address >= XFMEM_POSTMATRICES && address < XFMEM_POSTMATRICES_END)
-  {
-    const u32 row = (address - XFMEM_POSTMATRICES) / 4;
-    const u32 col = (address - XFMEM_POSTMATRICES) % 4;
-    return fmt::format("Post matrix row {:2d} col {:2d}", row, col);
-  }
-  else if (address >= XFMEM_LIGHTS && address < XFMEM_LIGHTS_END)
-  {
-    const u32 light = (address - XFMEM_LIGHTS) / 16;
-    const u32 offset = (address - XFMEM_LIGHTS) % 16;
-    switch (offset)
-    {
-    default:
-      return fmt::format("Light {} unused param {}", light, offset);
-    case 3:
-      return fmt::format("Light {} color", light);
-    case 4:
-    case 5:
-    case 6:
-      return fmt::format("Light {} cosine attenuation {}", light, offset - 4);
-    case 7:
-    case 8:
-    case 9:
-      return fmt::format("Light {} distance attenuation {}", light, offset - 7);
-    case 10:
-    case 11:
-    case 12:
-      // Yagcd says light pos or "inf ldir", while dolphin has a union for dpos and sdir with only
-      // dpos being used nowadays. As far as I can tell only the DX9 engine once at
-      // Source/Plugins/Plugin_VideoDX9/Src/TransformEngine.cpp used sdir directly...
-      return fmt::format("Light {0} {1} position or inf ldir {1}", light, "xyz"[offset - 10]);
-    case 13:
-    case 14:
-    case 15:
-      // Yagcd says light dir or "1/2 angle", dolphin has union for ddir or shalfangle.
-      // It would make sense if d stood for direction and s for specular, but it's ddir and
-      // shalfangle that have the comment "specular lights only", both at the same offset,
-      // while dpos and sdir have none...
-      return fmt::format("Light {0} {1} direction or half angle {1}", light, "xyz"[offset - 13]);
-    }
-  }
-  else
-  {
+  // Matrices are named by row and column (four columns, three for normal matrices).
+  const auto matrix = [address](const char* kind, u32 base, u32 columns) {
+    const u32 offset = address - base;
+    return fmt::format("{} matrix row {:2d} col {:2d}", kind, offset / columns, offset % columns);
+  };
+
+  if (InBlock(address, XFMEM_POSMATRICES, XFMEM_POSMATRICES_END - XFMEM_POSMATRICES))
+    return matrix("Position", XFMEM_POSMATRICES, 4);
+  if (InBlock(address, XFMEM_NORMALMATRICES, XFMEM_NORMALMATRICES_END - XFMEM_NORMALMATRICES))
+    return matrix("Normal", XFMEM_NORMALMATRICES, 3);
+  if (InBlock(address, XFMEM_POSTMATRICES, XFMEM_POSTMATRICES_END - XFMEM_POSTMATRICES))
+    return matrix("Post", XFMEM_POSTMATRICES, 4);
+  if (!InBlock(address, XFMEM_LIGHTS, XFMEM_LIGHTS_END - XFMEM_LIGHTS))
     return fmt::format("Unknown memory {:04x}", address);
-  }
+
+  // Lights are 16 words each: 3 unused, colour, 3 cosine and 3 distance attenuation factors,
+  // then two xyz vectors whose meaning depends on the light type.
+  const u32 light = (address - XFMEM_LIGHTS) / 16;
+  const u32 word = (address - XFMEM_LIGHTS) % 16;
+  if (word < 3)
+    return fmt::format("Light {} unused param {}", light, word);
+  if (word == 3)
+    return fmt::format("Light {} color", light);
+  if (word < 7)
+    return fmt::format("Light {} cosine attenuation {}", light, word - 4);
+  if (word < 10)
+    return fmt::format("Light {} distance attenuation {}", light, word - 7);
+  if (word < 13)
+    return fmt::format("Light {0} {1} position or inf ldir {1}", light, "xyz"[word - 10]);
+  return fmt::format("Light {0} {1} direction or half angle {1}", light, "xyz"[word - 13]);
 }
 
 std::string GetXFMemDescription(u32 address, u32 value)
 {
-  if ((address >= XFMEM_POSMATRICES && address < XFMEM_POSMATRICES_END) ||
-      (address >= XFMEM_NORMALMATRICES && address < XFMEM_NORMALMATRICES_END) ||
-      (address >= XFMEM_POSTMATRICES && address < XFMEM_POSTMATRICES_END))
-  {
-    // The matrices all use floats
+  // Matrix words and light parameters from the attenuation factors on are floats; light
+  // colours, the unused light words and anything unknown are shown as hex.
+  bool is_float = IsMatrixMemory(address);
+  if (InBlock(address, XFMEM_LIGHTS, XFMEM_LIGHTS_END - XFMEM_LIGHTS))
+    is_float = (address - XFMEM_LIGHTS) % 16 > 3;
+
+  if (is_float)
     return fmt::format("{} = {}", GetXFMemName(address), std::bit_cast<float>(value));
-  }
-  else if (address >= XFMEM_LIGHTS && address < XFMEM_LIGHTS_END)
-  {
-    // Each light is 16 words; for this function we don't care which light it is
-    const u32 offset = (address - XFMEM_LIGHTS) % 16;
-    if (offset <= 3)
-    {
-      // The unused parameters (0, 1, 2) and the color (3) should be hex-formatted
-      return fmt::format("{} = {:08x}", GetXFMemName(address), value);
-    }
-    else
-    {
-      // Everything else is a float
-      return fmt::format("{} = {}", GetXFMemName(address), std::bit_cast<float>(value));
-    }
-  }
-  else
-  {
-    // Unknown address
-    return fmt::format("{} = {:08x}", GetXFMemName(address), value);
-  }
+  return fmt::format("{} = {:08x}", GetXFMemName(address), value);
 }
 
 std::pair<std::string, std::string> GetXFTransferInfo(u16 base_address, u8 transfer_size,
                                                       const u8* data)
 {
   if (base_address > XFMEM_REGISTERS_END)
-  {
-    return std::make_pair("Invalid XF Transfer", "Base address past end of address space");
-  }
-  else if (transfer_size == 1 && base_address >= XFMEM_REGISTERS_START)
-  {
-    // Write directly to a single register
-    const u32 value = Common::swap32(data);
-    return GetXFRegInfo(base_address, value);
-  }
+    return {"Invalid XF Transfer", "Base address past end of address space"};
 
-  // More complicated cases
-  fmt::memory_buffer name, desc;
-  u32 end_address = base_address + transfer_size;  // exclusive
+  // A single register write is described just like the register itself.
+  if (transfer_size == 1 && base_address >= XFMEM_REGISTERS_START)
+    return GetXFRegInfo(base_address, Common::swap32(data));
 
-  // do not allow writes past registers
-  if (end_address > XFMEM_REGISTERS_END)
+  std::string name;
+  std::string desc;
+  auto name_out = std::back_inserter(name);
+  auto desc_out = std::back_inserter(desc);
+
+  u32 end = u32{base_address} + transfer_size;
+  if (end > XFMEM_REGISTERS_END)
   {
-    fmt::format_to(std::back_inserter(name), "Invalid XF Transfer ");
-    fmt::format_to(std::back_inserter(desc), "Transfer ends past end of address space\n\n");
-    end_address = XFMEM_REGISTERS_END;
+    name += "Invalid XF Transfer ";
+    desc += "Transfer ends past end of address space\n\n";
+    end = XFMEM_REGISTERS_END;
   }
 
-  // write to XF mem
+  const TransferSplit split = SplitTransfer(base_address, transfer_size, end);
+  const u8* src = data;
+
   if (base_address < XFMEM_REGISTERS_START)
   {
-    const u32 xf_mem_base = base_address;
-    u32 xf_mem_transfer_size = transfer_size;
-
-    if (end_address > XFMEM_REGISTERS_START)
+    fmt::format_to(name_out, "Write {} XF mem words at {:04x}", split.memory_words, base_address);
+    for (u32 i = 0; i < split.memory_words; ++i, src += 4)
     {
-      xf_mem_transfer_size = XFMEM_REGISTERS_START - base_address;
-      base_address = XFMEM_REGISTERS_START;
+      if (i != 0)
+        desc += '\n';
+      desc += GetXFMemDescription(base_address + i, Common::swap32(src));
     }
-
-    fmt::format_to(std::back_inserter(name), "Write {} XF mem words at {:04x}",
-                   xf_mem_transfer_size, xf_mem_base);
-
-    for (u32 i = 0; i < xf_mem_transfer_size; i++)
-    {
-      const auto mem_desc = GetXFMemDescription(xf_mem_base + i, Common::swap32(data));
-      fmt::format_to(std::back_inserter(desc), "{}{}", i != 0 ? "\n" : "", mem_desc);
-      data += 4;
-    }
-
-    if (end_address > XFMEM_REGISTERS_START)
-      fmt::format_to(std::back_inserter(name), "; ");
+    if (end > XFMEM_REGISTERS_START)
+      name += "; ";
   }
 
-  // write to XF regs
-  if (base_address >= XFMEM_REGISTERS_START)
+  // Registers are listed (even zero of them) unless the whole transfer stayed in memory.
+  if (base_address >= XFMEM_REGISTERS_START || end > XFMEM_REGISTERS_START)
   {
-    fmt::format_to(std::back_inserter(name), "Write {} XF regs at {:04x}",
-                   end_address - base_address, base_address);
-
-    for (u32 address = base_address; address < end_address; address++)
+    fmt::format_to(name_out, "Write {} XF regs at {:04x}", split.regs_end - split.regs_first,
+                   split.regs_first);
+    for (u32 address = split.regs_first; address < split.regs_end; ++address, src += 4)
     {
-      const u32 value = Common::swap32(data);
-
-      const auto [regname, regdesc] = GetXFRegInfo(address, value);
-      fmt::format_to(std::back_inserter(desc), "{}\n{}\n", regname, regdesc);
-
-      data += 4;
+      const auto [reg_name, reg_desc] = GetXFRegInfo(address, Common::swap32(src));
+      fmt::format_to(desc_out, "{}\n{}\n", reg_name, reg_desc);
     }
   }
 
-  return std::make_pair(fmt::to_string(name), fmt::to_string(desc));
+  return {std::move(name), std::move(desc)};
 }
 
 std::pair<std::string, std::string> GetXFIndexedLoadInfo(CPArray array, u32 index, u16 address,
                                                          u8 size)
 {
-  const auto desc = fmt::format("Load {} words to XF address {:03x} from CP array {} row {}", size,
-                                address, array, index);
-  fmt::memory_buffer written;
-  for (u32 i = 0; i < size; i++)
+  std::string targets;
+  for (u32 i = 0; i < size; ++i)
   {
-    fmt::format_to(std::back_inserter(written), "{}\n", GetXFMemName(address + i));
+    targets += GetXFMemName(address + i);
+    targets += '\n';
   }
-
-  return std::make_pair(desc, fmt::to_string(written));
+  return {fmt::format("Load {} words to XF address {:03x} from CP array {} row {}", size, address,
+                      array, index),
+          std::move(targets)};
 }
