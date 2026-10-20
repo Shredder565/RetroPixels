@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -41,6 +40,8 @@ enum class AllowMovieFolder
   No,
 };
 
+// A GameCube memory card on slot A or B: the card's flash command set over EXI, backed by a raw
+// card image or a folder of GCI files.
 class CEXIMemoryCard : public IEXIDevice
 {
 public:
@@ -55,72 +56,50 @@ public:
   void DMARead(u32 addr, u32 size) override;
   void DMAWrite(u32 addr, u32 size) override;
 
-  // CoreTiming events need to be registered during boot since CoreTiming is DoState()-ed
-  // before ExpansionInterface so we'll lose the save stated events if the callbacks are
-  // not already registered first.
+  // Registers the per-slot CoreTiming events. Has to run at boot: CoreTiming's savestate is
+  // loaded before the EXI devices exist, and pending card events must find their callbacks.
   static void Init(CoreTiming::CoreTimingManager& core_timing);
   static void Shutdown();
 
   static std::pair<std::string /* path */, bool /* migrate */>
   GetGCIFolderPath(Slot card_slot, AllowMovieFolder allow_movie_folder, Movie::MovieManager& movie);
 
-private:
-  void SetupGciFolder(const Memcard::HeaderData& header_data);
-  void SetupRawMemcard(u16 size_mb);
-  static void EventCompleteFindInstance(Core::System& system, u64 userdata,
-                                        const std::function<void(CEXIMemoryCard*)>& callback);
-
-  // Scheduled when a command that required delayed end signaling is done.
-  static void CmdDoneCallback(Core::System& system, u64 userdata, s64 cyclesLate);
-
-  // Scheduled when memory card is done transferring data
-  static void TransferCompleteCallback(Core::System& system, u64 userdata, s64 cyclesLate);
-
-  // Signals that the command that was previously executed is now done.
-  void CmdDone();
-
-  // Signals that the transfer that was previously executed is now done.
-  void TransferComplete();
-
-  // Variant of CmdDone which schedules an event later in the future to complete the command.
-  void CmdDoneLater(u64 cycles);
-
-  enum class Command
-  {
-    NintendoID = 0x00,
-    ReadArray = 0x52,
-    ArrayToBuffer = 0x53,
-    SetInterrupt = 0x81,
-    WriteBuffer = 0x82,
-    ReadStatus = 0x83,
-    ReadID = 0x85,
-    ReadErrorBuffer = 0x86,
-    WakeUp = 0x87,
-    Sleep = 0x88,
-    ClearStatus = 0x89,
-    SectorErase = 0xF1,
-    PageProgram = 0xF2,
-    ExtraByteProgram = 0xF3,
-    ChipErase = 0xF4,
-  };
-
-  Slot m_card_slot;
-  //! memory card state
-
-  // STATE_TO_SAVE
-  int m_interrupt_switch;
-  bool m_interrupt_set;
-  Command m_command;
-  int m_status;
-  u32 m_position;
-  std::array<u8, 128> m_programming_buffer;
-  //! memory card parameters
-  unsigned int m_card_id;
-  unsigned int m_address;
-  u32 m_memory_card_size;
-  std::unique_ptr<MemoryCardBase> m_memory_card;
-
 protected:
   void TransferByte(u8& byte) override;
+
+private:
+  void OpenFolderCard(const Memcard::HeaderData& header_data);
+  void OpenImageCard(u16 size_mbits);
+
+  static void OnCommandDone(Core::System& system, u64 userdata, s64 cycles_late);
+  static void OnTransferDone(Core::System& system, u64 userdata, s64 cycles_late);
+  static CEXIMemoryCard* FindCard(Core::System& system, u64 userdata);
+
+  void FinishCommand();
+  void FinishCommandAfter(u64 cycles);
+  void ScheduleTransferDone(u32 size, u32 bytes_per_second);
+
+  void FinishErase();
+  void FinishProgram();
+
+  u32 ClampedAddress() const;
+
+  Slot m_card_slot;
+
+  // Card state, saved in this order (only while a movie is active, see DoState).
+  int m_irq_enabled = 0;
+  bool m_irq_pending = false;
+  // The current command byte, kept as an int because savestates store it in 4 bytes.
+  int m_opcode = 0;
+  int m_status = 0;
+  u32 m_position = 0;
+  std::array<u8, 128> m_page_buffer{};
+  u32 m_address = 0;
+
+  // The two bytes the card returns for the "read ID" command.
+  u16 m_chip_id = 0;
+  // Capacity in bytes; a power of two, used to wrap addresses.
+  u32 m_capacity = 0;
+  std::unique_ptr<MemoryCardBase> m_backing;
 };
 }  // namespace ExpansionInterface
