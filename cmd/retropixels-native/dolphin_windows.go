@@ -98,6 +98,7 @@ type dolState struct {
 
 	lib  *dolLibrary
 	sdlg *dolSettingsDlg
+	kdlg *wiiKeysDlg // the "keys file" step before a Wii game
 }
 
 type dolFound struct {
@@ -354,6 +355,9 @@ func (a *app) dolPlay(g dolphin.Game) {
 	user := dolphin.UserDir(exe)
 	d.importOld(exe)                       // the first time: the old Dolphin's settings and saves
 	_ = dolphin.SetupXboxPads(user, false) // only fills in controllers that aren't set up yet
+	if a.dolNeedsWiiKeys(g, user) {        // Wii games need the keys file from the player's own Wii
+		return
+	}
 
 	// Recorded from the start (the engine can't start later); ffmpeg is
 	// only needed to make the video once the game ends.
@@ -585,6 +589,8 @@ func (a *app) dolMaybeClose() {
 
 func (a *app) dolEvent(name, detail string) {
 	switch name {
+	case wiiKeysScanEventPrefix + "progress", wiiKeysScanEventPrefix + "done":
+		a.wiiKeysEvent(name)
 	case "dol-exited":
 		a.dolEnded()
 	case "dol-docked":
