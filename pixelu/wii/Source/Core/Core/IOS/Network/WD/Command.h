@@ -1,9 +1,10 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <array>
 #include <deque>
+#include <optional>
 #include <string>
 
 #include "Common/CommonTypes.h"
@@ -15,16 +16,13 @@
 
 namespace IOS::HLE::WD
 {
-// Values 2, 4, 5, 6 exist as well but are not known to be used by games, the Mii Channel
-// or the system menu.
+// Operating mode, chosen with the open flags. Only 1 and 3 are known to be used (by games for
+// DS communication, and by the system menu for AOSS set-up).
 enum class Mode
 {
   NotInitialized = 0,
-  // Used by games to broadcast DS programs or to communicate with a DS more generally.
   DSCommunications = 1,
   Unknown2 = 2,
-  // AOSS (https://en.wikipedia.org/wiki/AOSS) is a WPS-like feature.
-  // This is only known to be used by the system menu.
   AOSSAccessPointScan = 3,
   Unknown4 = 4,
   Unknown5 = 5,
@@ -39,6 +37,8 @@ constexpr bool IsValidMode(Mode mode)
 
 namespace IOS::HLE
 {
+// /dev/net/wd/command: the wireless driver for local (DS and AOSS) communication. No radio is
+// emulated: links come up at once, scans find one fake station and no frames ever arrive.
 class NetWDCommandDevice : public EmulationDevice
 {
 public:
@@ -63,72 +63,28 @@ private:
   enum
   {
     IOCTLV_WD_INVALID = 0x1000,
-    IOCTLV_WD_GET_MODE = 0x1001,          // WD_GetMode
-    IOCTLV_WD_SET_LINKSTATE = 0x1002,     // WD_SetLinkState
-    IOCTLV_WD_GET_LINKSTATE = 0x1003,     // WD_GetLinkState
-    IOCTLV_WD_SET_CONFIG = 0x1004,        // WD_SetConfig
-    IOCTLV_WD_GET_CONFIG = 0x1005,        // WD_GetConfig
-    IOCTLV_WD_CHANGE_BEACON = 0x1006,     // WD_ChangeBeacon
-    IOCTLV_WD_DISASSOC = 0x1007,          // WD_DisAssoc
-    IOCTLV_WD_MP_SEND_FRAME = 0x1008,     // WD_MpSendFrame
-    IOCTLV_WD_SEND_FRAME = 0x1009,        // WD_SendFrame
-    IOCTLV_WD_SCAN = 0x100a,              // WD_Scan
-    IOCTLV_WD_CALL_WL = 0x100c,           // WD_CallWL
-    IOCTLV_WD_MEASURE_CHANNEL = 0x100b,   // WD_MeasureChannel
-    IOCTLV_WD_GET_LASTERROR = 0x100d,     // WD_GetLastError
-    IOCTLV_WD_GET_INFO = 0x100e,          // WD_GetInfo
-    IOCTLV_WD_CHANGE_GAMEINFO = 0x100f,   // WD_ChangeGameInfo
-    IOCTLV_WD_CHANGE_VTSF = 0x1010,       // WD_ChangeVTSF
-    IOCTLV_WD_RECV_FRAME = 0x8000,        // WD_ReceiveFrame
-    IOCTLV_WD_RECV_NOTIFICATION = 0x8001  // WD_ReceiveNotification
+    IOCTLV_WD_GET_MODE = 0x1001,
+    IOCTLV_WD_SET_LINKSTATE = 0x1002,
+    IOCTLV_WD_GET_LINKSTATE = 0x1003,
+    IOCTLV_WD_SET_CONFIG = 0x1004,
+    IOCTLV_WD_GET_CONFIG = 0x1005,
+    IOCTLV_WD_CHANGE_BEACON = 0x1006,
+    IOCTLV_WD_DISASSOC = 0x1007,
+    IOCTLV_WD_MP_SEND_FRAME = 0x1008,
+    IOCTLV_WD_SEND_FRAME = 0x1009,
+    IOCTLV_WD_SCAN = 0x100a,
+    IOCTLV_WD_MEASURE_CHANNEL = 0x100b,
+    IOCTLV_WD_CALL_WL = 0x100c,
+    IOCTLV_WD_GET_LASTERROR = 0x100d,
+    IOCTLV_WD_GET_INFO = 0x100e,
+    IOCTLV_WD_CHANGE_GAMEINFO = 0x100f,
+    IOCTLV_WD_CHANGE_VTSF = 0x1010,
+    IOCTLV_WD_RECV_FRAME = 0x8000,
+    IOCTLV_WD_RECV_NOTIFICATION = 0x8001,
   };
 
-  enum
-  {
-    BSSID_SIZE = 6,
-    SSID_SIZE = 32
-  };
-
-  enum
-  {
-    SCAN_ACTIVE,
-    SCAN_PASSIVE
-  };
-
+  // Driver information returned by GET_INFO (and saved raw in savestates).
 #pragma pack(push, 1)
-  struct ScanInfo
-  {
-    u16 channel_bitmap;
-    u16 max_channel_time;
-    u8 bssid[BSSID_SIZE];
-    u16 scan_type;
-    u16 ssid_length;
-    u8 ssid[SSID_SIZE];
-    u8 ssid_match_mask[SSID_SIZE];
-  };
-
-  struct BSSInfo
-  {
-    u16 length;
-    u16 rssi;
-    u8 bssid[BSSID_SIZE];
-    u16 ssid_length;
-    u8 ssid[SSID_SIZE];
-    u16 capabilities;
-    struct rate
-    {
-      u16 basic;
-      u16 support;
-    };
-    u16 beacon_period;
-    u16 DTIM_period;
-    u16 channel;
-    u16 CF_period;
-    u16 CF_max_duration;
-    u16 element_info_length;
-    u16 element_info[1];
-  };
-
   struct Info
   {
     Common::MACAddress mac{};
@@ -139,8 +95,8 @@ private:
     bool initialised{};
     std::array<char, 0x80> wl_version{};
   };
-  static_assert(sizeof(Info) == 0x90);
 #pragma pack(pop)
+  static_assert(sizeof(Info) == 0x90);
 
   enum class Status
   {
@@ -150,15 +106,19 @@ private:
   };
   friend struct fmt::formatter<IOS::HLE::NetWDCommandDevice::Status>;
 
-  void ProcessRecvRequests();
-  void HandleStateChange();
-  static Status GetTargetStatusForMode(WD::Mode mode);
+  // The status a link in the given mode is brought up to.
+  static Status LinkUpStatus(WD::Mode mode);
+
+  void AnswerPendingReceives();
+  void StepTowardsTargetStatus();
 
   IPCReply SetLinkState(const IOCtlVRequest& request);
-  IPCReply GetLinkState(const IOCtlVRequest& request) const;
-  IPCReply Disassociate(const IOCtlVRequest& request);
+  IPCReply GetLinkState() const;
+  IPCReply Disassociate(const IOCtlVRequest& request) const;
   IPCReply GetInfo(const IOCtlVRequest& request) const;
+  void WriteScanResult(const IOCtlVRequest& request) const;
 
+  // fd of the handle that set the mode, or -1.
   s32 m_ipc_owner_fd = -1;
   WD::Mode m_mode = WD::Mode::NotInitialized;
   u32 m_buffer_flags{};
@@ -169,6 +129,7 @@ private:
   u16 m_nitro_enabled_channels{};
   Info m_info;
 
+  // Set on close: every pending receive request is then answered on the next update.
   Common::Flag m_clear_all_requests;
   std::deque<u32> m_recv_frame_requests;
   std::deque<u32> m_recv_notification_requests;

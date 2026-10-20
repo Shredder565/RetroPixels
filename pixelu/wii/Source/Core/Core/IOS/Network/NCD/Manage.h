@@ -1,8 +1,8 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <optional>
 #include <string>
 
 #include "Common/CommonTypes.h"
@@ -11,7 +11,7 @@
 
 namespace IOS::HLE
 {
-// Interface for reading and changing network configuration (probably some other stuff as well)
+// /dev/net/ncd/manage: the network settings, the link state and the wireless driver lock.
 class NetNCDManageDevice : public EmulationDevice
 {
 public:
@@ -24,17 +24,18 @@ public:
 private:
   enum
   {
-    IOCTLV_NCD_LOCKWIRELESSDRIVER = 0x1,    // NCDLockWirelessDriver
-    IOCTLV_NCD_UNLOCKWIRELESSDRIVER = 0x2,  // NCDUnlockWirelessDriver
-    IOCTLV_NCD_GETCONFIG = 0x3,             // NCDiGetConfig
-    IOCTLV_NCD_SETCONFIG = 0x4,             // NCDiSetConfig
+    IOCTLV_NCD_LOCKWIRELESSDRIVER = 0x1,
+    IOCTLV_NCD_UNLOCKWIRELESSDRIVER = 0x2,
+    IOCTLV_NCD_GETCONFIG = 0x3,
+    IOCTLV_NCD_SETCONFIG = 0x4,
     IOCTLV_NCD_READCONFIG = 0x5,
     IOCTLV_NCD_WRITECONFIG = 0x6,
-    IOCTLV_NCD_GETLINKSTATUS = 0x7,          // NCDGetLinkStatus
-    IOCTLV_NCD_GETWIRELESSMACADDRESS = 0x8,  // NCDGetWirelessMacAddress
+    IOCTLV_NCD_GETLINKSTATUS = 0x7,
+    IOCTLV_NCD_GETWIRELESSMACADDRESS = 0x8,
   };
 
-  Net::WiiNetConfig config;
+  Net::WiiNetConfig m_config;
+  // The fd that holds the wireless driver lock, or 0.
   u32 m_ipc_fd = 0;
 };
 }  // namespace IOS::HLE
