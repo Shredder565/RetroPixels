@@ -91,27 +91,12 @@ void SCPFifoStruct::Init()
 
 void SCPFifoStruct::DoState(PointerWrap& p)
 {
-  p.Do(CPBase);
-  p.Do(CPEnd);
-  p.Do(CPHiWatermark);
-  p.Do(CPLoWatermark);
-  p.Do(CPReadWriteDistance);
-  p.Do(CPWritePointer);
-  p.Do(CPReadPointer);
-  p.Do(CPBreakpoint);
-  p.Do(SafeCPReadPointer);
-
-  p.Do(bFF_GPLinkEnable);
-  p.Do(bFF_GPReadEnable);
-  p.Do(bFF_BPEnable);
-  p.Do(bFF_BPInt);
-  p.Do(bFF_Breakpoint);
-
-  p.Do(bFF_LoWatermarkInt);
-  p.Do(bFF_HiWatermarkInt);
-
-  p.Do(bFF_LoWatermark);
-  p.Do(bFF_HiWatermark);
+  // Savestate order (fixed): FIFO pointers and watermarks, then the control and status flags.
+  const auto save_in_order = [&p](auto&... fields) { (p.Do(fields), ...); };
+  save_in_order(CPBase, CPEnd, CPHiWatermark, CPLoWatermark, CPReadWriteDistance, CPWritePointer,
+                CPReadPointer, CPBreakpoint, SafeCPReadPointer);
+  save_in_order(bFF_GPLinkEnable, bFF_GPReadEnable, bFF_BPEnable, bFF_BPInt, bFF_Breakpoint,
+                bFF_LoWatermarkInt, bFF_HiWatermarkInt, bFF_LoWatermark, bFF_HiWatermark);
 }
 
 CommandProcessorManager::CommandProcessorManager(Core::System& system) : m_system{system}

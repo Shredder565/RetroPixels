@@ -58,21 +58,12 @@ PixelEngineManager::PixelEngineManager(Core::System& system) : m_system{system}
 
 void PixelEngineManager::DoState(PointerWrap& p)
 {
-  p.Do(m_z_conf);
-  p.Do(m_alpha_conf);
-  p.Do(m_dst_alpha_conf);
-  p.Do(m_alpha_mode_conf);
-  p.Do(m_alpha_read);
-  p.Do(m_control);
-
-  p.Do(m_token);
-  p.Do(m_queued_token);
-  p.Do(m_queued_token_irq);
-  p.Do(m_queued_finish_irq);
-  p.Do(m_delivery_scheduled);
-
-  p.Do(m_token_irq_asserted);
-  p.Do(m_finish_irq_asserted);
+  // Savestate order (fixed): the registers, then the token/interrupt delivery state.
+  const auto save_in_order = [&p](auto&... fields) { (p.Do(fields), ...); };
+  save_in_order(m_z_conf, m_alpha_conf, m_dst_alpha_conf, m_alpha_mode_conf, m_alpha_read,
+                m_control);
+  save_in_order(m_token, m_queued_token, m_queued_token_irq, m_queued_finish_irq,
+                m_delivery_scheduled, m_token_irq_asserted, m_finish_irq_asserted);
 }
 
 void PixelEngineManager::Init()
