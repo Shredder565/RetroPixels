@@ -1,58 +1,72 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/WiimoteEmu/Dynamics.h"
 
 #include <algorithm>
 #include <cmath>
-#include <optional>
+#include <cstddef>
 
 #include "Common/MathUtil.h"
 #include "Core/Config/SYSCONFSettings.h"
 #include "Core/HW/WiimoteEmu/WiimoteEmu.h"
-#include "InputCommon/ControllerEmu/ControlGroup/Cursor.h"
-#include "InputCommon/ControllerEmu/ControlGroup/Force.h"
-#include "InputCommon/ControllerEmu/ControlGroup/IMUAccelerometer.h"
-#include "InputCommon/ControllerEmu/ControlGroup/IMUCursor.h"
-#include "InputCommon/ControllerEmu/ControlGroup/IMUGyroscope.h"
-#include "InputCommon/ControllerEmu/ControlGroup/Tilt.h"
+
+// Note on precision: these results feed savestates, movies and netplay, so every expression
+// keeps the float/double mix of the established behaviour. Where a double is produced and
+// stored into a float, the narrowing is spelled out with float(...).
 
 namespace
 {
-// Given a velocity, acceleration, and maximum jerk value,
-// calculate change in position after a stop in the shortest possible time.
-// Used to smoothly adjust acceleration and come to complete stops at precise positions.
-// Based on equations for motion with constant jerk.
-// s = s0 + v0 t + a0 t^2 / 2 + j t^3 / 6
-double CalculateStopDistance(double velocity, double acceleration, double max_jerk)
+// Distance covered while braking to a standstill with a jerk of at most `jerk`, starting at
+// speed v and acceleration a: first the acceleration is ramped to zero, then the remaining
+// speed is removed by a symmetric jerk profile (constant-jerk motion:
+// x = v t + a t^2 / 2 + j t^3 / 6).
+double BrakingDistance(double v, double a, double jerk)
 {
-  // Math below expects velocity to be non-negative.
-  const auto velocity_flip = (velocity < 0 ? -1 : 1);
+  // Work with a non-negative speed and undo the mirroring at the end.
+  const int mirror = v < 0 ? -1 : 1;
+  const double speed = v * mirror;
+  const double accel = a * mirror;
 
-  const auto v_0 = velocity * velocity_flip;
-  const auto a_0 = acceleration * velocity_flip;
-  const auto j = max_jerk;
+  const double ramp_time = accel / jerk;
+  const double ramp_distance =
+      std::pow(accel, 3) / (3 * jerk * jerk) + (accel * speed) / jerk;
 
-  // Time to reach zero acceleration.
-  const auto t_0 = a_0 / j;
+  const double speed_after_ramp = speed + accel * std::abs(ramp_time) -
+                                  std::copysign(jerk * ramp_time * ramp_time / 2, ramp_time);
 
-  // Distance to reach zero acceleration.
-  const auto d_0 = std::pow(a_0, 3) / (3 * j * j) + (a_0 * v_0) / j;
+  const double stop_distance =
+      std::copysign(std::pow(std::abs(speed_after_ramp), 3.0 / 2), speed_after_ramp) /
+      std::sqrt(jerk);
 
-  // Velocity at zero acceleration.
-  const auto v_1 = v_0 + a_0 * std::abs(t_0) - std::copysign(j * t_0 * t_0 / 2, t_0);
-
-  // Distance to complete stop.
-  const auto d_1 = std::copysign(std::pow(std::abs(v_1), 3.0 / 2), v_1) / std::sqrt(j);
-
-  return (d_0 + d_1) * velocity_flip;
+  return (ramp_distance + stop_distance) * mirror;
 }
 
-double CalculateStopDistance(double velocity, double max_accel)
+// Distance covered while braking from speed v with a constant deceleration of max_accel.
+double BrakingDistance(double v, double max_accel)
 {
-  return velocity * velocity / (2 * std::copysign(max_accel, velocity));
+  return v * v / (2 * std::copysign(max_accel, v));
 }
 
+Common::Vec3 BrakingDistances(const Common::Vec3& speed, float max_accel)
+{
+  return Common::Vec3(float(BrakingDistance(speed.x, max_accel)),
+                      float(BrakingDistance(speed.y, max_accel)),
+                      float(BrakingDistance(speed.z, max_accel)));
+}
+
+Common::Vec3 BrakingDistances(const Common::Vec3& speed, const Common::Vec3& accel,
+                              const Common::Vec3& jerk)
+{
+  return Common::Vec3(float(BrakingDistance(speed.x, accel.x, jerk.x)),
+                      float(BrakingDistance(speed.y, accel.y, jerk.y)),
+                      float(BrakingDistance(speed.z, accel.z, jerk.z)));
+}
+
+// Where a world-space direction ends up for a device rotated by `world_rotation`.
+Common::Vec3 DeviceUp(const Common::Quaternion& world_rotation)
+{
+  return world_rotation * Common::Vec3{0, 0, 1};
+}
 }  // namespace
 
 namespace WiimoteEmu
@@ -61,164 +75,154 @@ Common::Quaternion ComplementaryFilter(const Common::Quaternion& gyroscope,
                                        const Common::Vec3& accelerometer, float accel_weight,
                                        const Common::Vec3& accelerometer_normal)
 {
-  const auto gyro_vec = gyroscope * accelerometer_normal;
-  const auto normalized_accel = accelerometer.Normalized();
+  const Common::Vec3 expected = gyroscope * accelerometer_normal;
+  const Common::Vec3 measured = accelerometer.Normalized();
 
-  const auto cos_angle = normalized_accel.Dot(gyro_vec);
+  const float cos_error = measured.Dot(expected);
 
-  // If gyro to accel angle difference is between 0 and 180 degrees we make an adjustment.
-  const auto abs_cos_angle = std::abs(cos_angle);
-  if (abs_cos_angle > 0 && abs_cos_angle < 1)
-  {
-    const auto axis = gyro_vec.Cross(normalized_accel).Normalized();
-    return Common::Quaternion::Rotate(std::acos(cos_angle) * accel_weight, axis) * gyroscope;
-  }
-  else
-  {
+  // Nothing to correct when both agree exactly, and no defined axis when they are opposite.
+  const float abs_cos_error = std::abs(cos_error);
+  if (!(abs_cos_error > 0 && abs_cos_error < 1))
     return gyroscope;
-  }
+
+  const Common::Vec3 correction_axis = expected.Cross(measured).Normalized();
+  const float correction = std::acos(cos_error) * accel_weight;
+  return Common::Quaternion::Rotate(correction, correction_axis) * gyroscope;
 }
 
 void EmulateShake(PositionalState* state, ControllerEmu::Shake* const shake_group,
                   float time_elapsed)
 {
-  auto target_position = shake_group->GetState() * float(shake_group->GetIntensity() / 2);
-  for (std::size_t i = 0; i != target_position.data.size(); ++i)
+  // The remote oscillates between +target and -target.
+  Common::Vec3 goal = shake_group->GetState() * float(shake_group->GetIntensity() / 2);
+
+  // Head for the opposite extreme once moving away from this one or halfway there.
+  for (std::size_t axis = 0; axis != goal.data.size(); ++axis)
   {
-    if (state->velocity.data[i] * std::copysign(1.f, target_position.data[i]) < 0 ||
-        state->position.data[i] / target_position.data[i] > 0.5)
-    {
-      target_position.data[i] *= -1;
-    }
+    const bool moving_away = state->velocity.data[axis] * std::copysign(1.f, goal.data[axis]) < 0;
+    const bool past_half = state->position.data[axis] / goal.data[axis] > 0.5;
+    if (moving_away || past_half)
+      goal.data[axis] *= -1;
   }
 
-  // Time from "top" to "bottom" of one shake.
-  const auto travel_time = 1 / shake_group->GetFrequency() / 2;
+  // One half period goes from one extreme to the other.
+  const double half_period = 1 / shake_group->GetFrequency() / 2;
+  const double quarter_period_cubed = std::pow(half_period / 2, 3);
 
-  Common::Vec3 jerk;
-  for (std::size_t i = 0; i != target_position.data.size(); ++i)
+  Common::Vec3 jerk_limit;
+  for (std::size_t axis = 0; axis != goal.data.size(); ++axis)
   {
-    const auto half_distance =
-        std::max(std::abs(target_position.data[i]), std::abs(state->position.data[i]));
-
-    jerk.data[i] = half_distance / std::pow(travel_time / 2, 3);
+    const float reach =
+        std::max(std::abs(goal.data[axis]), std::abs(state->position.data[axis]));
+    jerk_limit.data[axis] = float(reach / quarter_period_cubed);
   }
 
-  ApproachPositionWithJerk(state, target_position, jerk, time_elapsed);
+  ApproachPositionWithJerk(state, goal, jerk_limit, time_elapsed);
 }
 
 void EmulateTilt(RotationalState* state, ControllerEmu::Tilt* const tilt_group, float time_elapsed)
 {
-  const auto target = tilt_group->GetState();
+  const auto stick = tilt_group->GetState();
 
-  // 180 degrees is currently the max tilt value.
-  const ControlState roll = target.x * MathUtil::PI;
-  const ControlState pitch = target.y * MathUtil::PI;
+  // Full deflection is a half turn.
+  const double roll = stick.x * MathUtil::PI;
+  const double pitch = stick.y * MathUtil::PI;
+  const Common::Vec3 goal(float(pitch), float(-roll), 0);
 
-  const auto target_angle = Common::Vec3(pitch, -roll, 0);
-
-  // For each axis, wrap around current angle if target is farther than 180 degrees.
-  for (std::size_t i = 0; i != target_angle.data.size(); ++i)
+  // Take the short way round: unwrap the current angle when the goal is over half a turn away.
+  for (std::size_t axis = 0; axis != goal.data.size(); ++axis)
   {
-    auto& angle = state->angle.data[i];
-    if (std::abs(angle - target_angle.data[i]) > float(MathUtil::PI))
-      angle -= std::copysign(MathUtil::TAU, angle);
+    float& current = state->angle.data[axis];
+    if (std::abs(current - goal.data[axis]) > float(MathUtil::PI))
+      current = float(current - std::copysign(MathUtil::TAU, double(current)));
   }
 
-  const auto max_accel = std::pow(tilt_group->GetMaxRotationalVelocity(), 2) / MathUtil::TAU;
+  const double rate = tilt_group->GetMaxRotationalVelocity();
+  const double accel_limit = std::pow(rate, 2) / MathUtil::TAU;
 
-  ApproachAngleWithAccel(state, target_angle, max_accel, time_elapsed);
+  ApproachAngleWithAccel(state, goal, float(accel_limit), time_elapsed);
 }
 
 void EmulateSwing(MotionState* state, ControllerEmu::Force* swing_group, float time_elapsed)
 {
-  const auto input_state = swing_group->GetState();
-  const float max_distance = swing_group->GetMaxDistance();
-  const float max_angle = swing_group->GetTwistAngle();
+  const Common::Vec3 input = swing_group->GetState();
+  const float reach = float(swing_group->GetMaxDistance());
+  const float twist = float(swing_group->GetTwistAngle());
 
-  // Note: Y/Z swapped because X/Y axis to the swing_group is X/Z to the wiimote.
-  // X is negated because Wiimote X+ is to the left.
-  const auto target_position = Common::Vec3{-input_state.x, -input_state.z, input_state.y};
+  // The group's X/Y plane is the remote's X/Z plane, and remote +X points left.
+  const Common::Vec3 goal{-input.x, -input.z, input.y};
 
-  // Jerk is scaled based on input distance from center.
-  // X and Z scale is connected for sane movement about the circle.
-  const auto xz_target_dist = Common::Vec2{target_position.x, target_position.z}.Length();
-  const auto y_target_dist = std::abs(target_position.y);
-  const auto target_dist = Common::Vec3{xz_target_dist, y_target_dist, xz_target_dist};
-  const auto speed = MathUtil::Lerp(Common::Vec3{1, 1, 1} * float(swing_group->GetReturnSpeed()),
-                                    Common::Vec3{1, 1, 1} * float(swing_group->GetSpeed()),
-                                    target_dist / max_distance);
+  // Speeds blend from the return speed (at rest) to the swing speed (at full reach). X and Z
+  // share one blend so movement around the circle stays even.
+  const float sideways = Common::Vec2{goal.x, goal.z}.Length();
+  const float forwards = std::abs(goal.y);
+  const Common::Vec3 progress = Common::Vec3{sideways, forwards, sideways} / reach;
 
-  // Convert our m/s "speed" to the jerk required to reach this speed when traveling 1 meter.
-  const auto max_jerk = speed * speed * speed * 4;
+  const float return_speed = float(swing_group->GetReturnSpeed());
+  const float swing_speed = float(swing_group->GetSpeed());
+  const Common::Vec3 speed =
+      MathUtil::Lerp(Common::Vec3{1, 1, 1} * return_speed, Common::Vec3{1, 1, 1} * swing_speed,
+                     progress);
 
-  // Rotational acceleration to approximately match the completion time of our swing.
-  const auto max_accel = max_angle * speed.x * speed.x;
+  // The jerk that reaches `speed` over a one meter move.
+  const Common::Vec3 jerk_limit = speed * speed * speed * 4;
 
-  // Apply rotation based on amount of swing.
-  const auto target_angle =
-      Common::Vec3{-target_position.z, 0, target_position.x} / max_distance * max_angle;
+  // Twisting finishes in about the same time as the move.
+  const float twist_accel = twist * speed.x * speed.x;
 
-  // Angular acceleration * 2 seems to reduce "spurious stabs" in ZSS.
-  // TODO: Fix properly.
-  ApproachAngleWithAccel(state, target_angle, max_accel * 2, time_elapsed);
+  const Common::Vec3 twist_goal = Common::Vec3{-goal.z, 0, goal.x} / reach * twist;
 
-  // Clamp X and Z rotation.
-  for (const int c : {0, 2})
+  // Twice the acceleration avoids unwanted stabs in Skyward Sword.
+  ApproachAngleWithAccel(state, twist_goal, twist_accel * 2, time_elapsed);
+
+  // Stop twisting further once X or Z is past the limit.
+  for (const std::size_t axis : {std::size_t{0}, std::size_t{2}})
   {
-    if (std::abs(state->angle.data[c] / max_angle) > 1 &&
-        MathUtil::Sign(state->angular_velocity.data[c]) == MathUtil::Sign(state->angle.data[c]))
+    const float angle = state->angle.data[axis];
+    const bool past_limit = std::abs(angle / twist) > 1;
+    if (past_limit && MathUtil::Sign(state->angular_velocity.data[axis]) == MathUtil::Sign(angle))
+      state->angular_velocity.data[axis] = 0;
+  }
+
+  // An outstretched arm pulls the remote back as it twists.
+  const float lean = std::max(std::abs(state->angle.x), std::abs(state->angle.z));
+  const float pull_back = (1 - std::cos(lean)) * reach;
+
+  ApproachPositionWithJerk(state, goal + Common::Vec3{0, pull_back, 0}, jerk_limit, time_elapsed);
+
+  // Keep the sideways position inside the configured circle.
+  const float radial = Common::Vec2{state->position.x, state->position.z}.Length() / reach;
+  if (radial > 1)
+  {
+    for (const std::size_t axis : {std::size_t{0}, std::size_t{2}})
     {
-      state->angular_velocity.data[c] = 0;
+      state->position.data[axis] /= radial;
+      state->velocity.data[axis] = 0;
+      state->acceleration.data[axis] = 0;
     }
   }
 
-  // Adjust target position backwards based on swing progress and max angle
-  // to simulate a swing with an outstretched arm.
-  const auto backwards_angle = std::max(std::abs(state->angle.x), std::abs(state->angle.z));
-  const auto backwards_movement = (1 - std::cos(backwards_angle)) * max_distance;
-
-  // TODO: Backswing jerk should be based on x/z speed.
-
-  ApproachPositionWithJerk(state, target_position + Common::Vec3{0, backwards_movement, 0},
-                           max_jerk, time_elapsed);
-
-  // Clamp Left/Right/Up/Down movement within the configured circle.
-  const auto xz_progress =
-      Common::Vec2{state->position.x, state->position.z}.Length() / max_distance;
-  if (xz_progress > 1)
+  // Forward/backward is limited to the reach, with extra room behind for the back swing.
+  const float depth = state->position.y / reach;
+  const float max_depth = 2 - std::cos(twist);
+  if (depth < -1 || depth > max_depth)
   {
-    state->position.x /= xz_progress;
-    state->position.z /= xz_progress;
-
-    state->acceleration.x = state->acceleration.z = 0;
-    state->velocity.x = state->velocity.z = 0;
-  }
-
-  // Clamp Forward/Backward movement within the configured distance.
-  // We allow additional backwards movement for the back swing.
-  const auto y_progress = state->position.y / max_distance;
-  const auto max_y_progress = 2 - std::cos(max_angle);
-  if (y_progress > max_y_progress || y_progress < -1)
-  {
-    state->position.y =
-        std::clamp(state->position.y, -1.f * max_distance, max_y_progress * max_distance);
-    state->velocity.y = 0;
+    state->position.y = std::clamp(state->position.y, -1.f * reach, max_depth * reach);
     state->acceleration.y = 0;
+    state->velocity.y = 0;
   }
 }
 
 WiimoteCommon::AccelData ConvertAccelData(const Common::Vec3& accel, u16 zero_g, u16 one_g)
 {
-  const auto scaled_accel = accel * (one_g - zero_g) / float(GRAVITY_ACCELERATION);
+  const Common::Vec3 counts = accel * (one_g - zero_g) / float(GRAVITY_ACCELERATION);
 
-  // 10-bit integers.
-  constexpr long MAX_VALUE = (1 << 10) - 1;
+  // The sensors report 10 bit unsigned values.
+  const auto to_sensor = [zero_g](float value) {
+    return u16(std::clamp(std::lround(value + zero_g), 0l, long{0x3ff}));
+  };
 
-  return WiimoteCommon::AccelData(
-      {u16(std::clamp(std::lround(scaled_accel.x + zero_g), 0l, MAX_VALUE)),
-       u16(std::clamp(std::lround(scaled_accel.y + zero_g), 0l, MAX_VALUE)),
-       u16(std::clamp(std::lround(scaled_accel.z + zero_g), 0l, MAX_VALUE))});
+  return WiimoteCommon::AccelData({to_sensor(counts.x), to_sensor(counts.y), to_sensor(counts.z)});
 }
 
 void EmulatePoint(MotionState* state, ControllerEmu::Cursor* ir_group,
@@ -228,78 +232,63 @@ void EmulatePoint(MotionState* state, ControllerEmu::Cursor* ir_group,
 
   if (!cursor.IsVisible())
   {
-    // Move the wiimote a kilometer forward so the sensor bar is always behind it.
+    // Put the sensor bar far behind the remote so the camera sees nothing.
     *state = {};
     state->position = {0, -1000, 0};
     return;
   }
 
-  // Nintendo recommends a distance of 1-3 meters.
-  constexpr float NEUTRAL_DISTANCE = 2.f;
+  // Two meters from the bar (Nintendo suggests one to three).
+  constexpr float VIEWING_DISTANCE = 2.f;
 
-  // When the sensor bar position is on bottom, apply the "offset" setting negatively.
-  // This is kinda odd but it does seem to maintain consistent cursor behavior.
-  const bool sensor_bar_on_top = Config::Get(Config::SYSCONF_SENSOR_BAR_POSITION) != 0;
+  // With the bar below the screen the vertical offset applies the other way round, which
+  // keeps the cursor behaving the same.
+  const bool bar_above = Config::Get(Config::SYSCONF_SENSOR_BAR_POSITION) != 0;
+  const float elevation = float(ir_group->GetVerticalOffset() * (bar_above ? 1 : -1));
 
-  const float height = ir_group->GetVerticalOffset() * (sensor_bar_on_top ? 1 : -1);
+  const float half_yaw = float(ir_group->GetTotalYaw() / 2);
+  const float half_pitch = float(ir_group->GetTotalPitch() / 2);
 
-  const float yaw_scale = ir_group->GetTotalYaw() / 2;
-  const float pitch_scale = ir_group->GetTotalPitch() / 2;
-
-  // Just jump to the target position.
-  state->position = {0, NEUTRAL_DISTANCE, -height};
+  // The position is set directly; only the aim is smoothed.
+  state->position = {0, VIEWING_DISTANCE, -elevation};
   state->velocity = {};
   state->acceleration = {};
 
-  const auto target_angle = Common::Vec3(pitch_scale * -cursor.y, 0, yaw_scale * -cursor.x);
+  const Common::Vec3 aim(float(half_pitch * -cursor.y), 0, float(half_yaw * -cursor.x));
 
-  // If cursor was hidden, jump to the target angle immediately.
-  if (state->position.y < 0)
-  {
-    state->angle = target_angle;
-    state->angular_velocity = {};
+  // Fast enough to look instant, slow enough to keep MotionPlus data in step.
+  constexpr float AIM_ACCEL = float(MathUtil::TAU * 8);
 
-    return;
-  }
-
-  // Higher values will be more responsive but increase rate of M+ "desync".
-  // I'd rather not expose this value in the UI if not needed.
-  // At this value, sync is very good and responsiveness still appears instant.
-  constexpr auto MAX_ACCEL = float(MathUtil::TAU * 8);
-
-  ApproachAngleWithAccel(state, target_angle, MAX_ACCEL, time_elapsed);
+  ApproachAngleWithAccel(state, aim, AIM_ACCEL, time_elapsed);
 }
 
 void ApproachAngleWithAccel(RotationalState* state, const Common::Vec3& angle_target,
                             float max_accel, float time_elapsed)
 {
-  const auto stop_distance =
-      Common::Vec3(CalculateStopDistance(state->angular_velocity.x, max_accel),
-                   CalculateStopDistance(state->angular_velocity.y, max_accel),
-                   CalculateStopDistance(state->angular_velocity.z, max_accel));
+  const Common::Vec3 braking = BrakingDistances(state->angular_velocity, max_accel);
 
-  const auto offset = angle_target - state->angle;
-  const auto stop_offset = offset - stop_distance;
-  const auto accel = MathUtil::Sign(stop_offset) * max_accel;
+  const Common::Vec3 remaining = angle_target - state->angle;
+  // Speed up while braking would still fall short, slow down otherwise.
+  const Common::Vec3 accel = MathUtil::Sign(remaining - braking) * max_accel;
 
-  state->angular_velocity += accel * time_elapsed;
+  const float dt = time_elapsed;
+  state->angular_velocity += accel * dt;
+  const Common::Vec3 step = state->angular_velocity * dt + accel * dt * dt / 2;
 
-  const auto change_in_angle =
-      state->angular_velocity * time_elapsed + accel * time_elapsed * time_elapsed / 2;
-
-  for (std::size_t i = 0; i != offset.data.size(); ++i)
+  for (std::size_t axis = 0; axis != remaining.data.size(); ++axis)
   {
-    // If new angle will overshoot stop right on target.
-    if (std::abs(offset.data[i]) < 0.0001 || (change_in_angle.data[i] / offset.data[i] > 1.0))
+    const bool arrived = std::abs(remaining.data[axis]) < 0.0001;
+    const bool overshoot = step.data[axis] / remaining.data[axis] > 1.0;
+    if (!arrived && !overshoot)
     {
-      state->angular_velocity.data[i] =
-          (angle_target.data[i] - state->angle.data[i]) / time_elapsed;
-      state->angle.data[i] = angle_target.data[i];
+      state->angle.data[axis] += step.data[axis];
+      continue;
     }
-    else
-    {
-      state->angle.data[i] += change_in_angle.data[i];
-    }
+
+    // Land exactly on the target with the speed that gets there in this step.
+    state->angular_velocity.data[axis] =
+        (angle_target.data[axis] - state->angle.data[axis]) / dt;
+    state->angle.data[axis] = angle_target.data[axis];
   }
 }
 
@@ -307,123 +296,120 @@ void EmulateIMUCursor(IMUCursorState* state, ControllerEmu::IMUCursor* imu_ir_gr
                       ControllerEmu::IMUAccelerometer* imu_accelerometer_group,
                       ControllerEmu::IMUGyroscope* imu_gyroscope_group, float time_elapsed)
 {
-  const auto ang_vel = imu_gyroscope_group->GetState();
+  const auto gyro = imu_gyroscope_group->GetState();
 
-  // Reset if pointing is disabled or we have no gyro data.
-  if (!imu_ir_group->enabled.GetValue() || !ang_vel.has_value())
+  // Settings are read first: their expressions may have side effects.
+  if (!imu_ir_group->enabled.GetValue() || !gyro.has_value())
   {
     *state = {};
     return;
   }
 
-  // Apply rotation from gyro data.
-  const auto gyro_rotation = GetRotationFromGyroscope(*ang_vel * -1 * time_elapsed);
-  state->rotation = gyro_rotation * state->rotation;
+  // Integrate the gyroscope (the state rotates the world, hence the negation).
+  state->rotation = GetRotationFromGyroscope(*gyro * -1 * time_elapsed) * state->rotation;
 
-  // If we have some non-zero accel data use it to adjust gyro drift.
-  const auto accel_weight = imu_ir_group->GetAccelWeight();
-  auto const accel = imu_accelerometer_group->GetState().value_or(Common::Vec3{});
-  if (accel.LengthSquared())
-    state->rotation = ComplementaryFilter(state->rotation, accel, accel_weight);
+  // Pull towards the accelerometer's idea of "down" to cancel drift.
+  const float weight = float(imu_ir_group->GetAccelWeight());
+  const Common::Vec3 accel = imu_accelerometer_group->GetState().value_or(Common::Vec3{});
+  if (accel.LengthSquared() != 0)
+    state->rotation = ComplementaryFilter(state->rotation, accel, weight);
 
-  // Clamp yaw within configured bounds.
-  const auto yaw = GetYaw(state->rotation);
-  const auto max_yaw = float(imu_ir_group->GetTotalYaw() / 2);
-  auto target_yaw = std::clamp(yaw, -max_yaw, max_yaw);
+  const float yaw = GetYaw(state->rotation);
+  const float yaw_limit = float(imu_ir_group->GetTotalYaw() / 2);
+  float wanted_yaw = std::clamp(yaw, -yaw_limit, yaw_limit);
 
-  // Handle the "Recenter" button being pressed.
+  // The first control of the group is "Recenter".
   if (imu_ir_group->controls[0]->GetState<bool>())
   {
+    wanted_yaw = 0;
     state->recentered_pitch = GetPitch(state->rotation);
-    target_yaw = 0;
   }
 
-  // Adjust yaw as needed.
-  if (yaw != target_yaw)
-    state->rotation *= Common::Quaternion::RotateZ(target_yaw - yaw);
+  if (wanted_yaw != yaw)
+    state->rotation *= Common::Quaternion::RotateZ(wanted_yaw - yaw);
 
-  // Normalize for floating point inaccuracies.
+  // Keep the quaternion unit length despite rounding.
   state->rotation = state->rotation.Normalized();
 }
 
 void ApproachPositionWithJerk(PositionalState* state, const Common::Vec3& position_target,
                               const Common::Vec3& max_jerk, float time_elapsed)
 {
-  const auto stop_distance =
-      Common::Vec3(CalculateStopDistance(state->velocity.x, state->acceleration.x, max_jerk.x),
-                   CalculateStopDistance(state->velocity.y, state->acceleration.y, max_jerk.y),
-                   CalculateStopDistance(state->velocity.z, state->acceleration.z, max_jerk.z));
+  const Common::Vec3 braking =
+      BrakingDistances(state->velocity, state->acceleration, max_jerk);
 
-  const auto offset = position_target - state->position;
-  const auto stop_offset = offset - stop_distance;
-  const auto jerk = MathUtil::Sign(stop_offset) * max_jerk;
+  const Common::Vec3 remaining = position_target - state->position;
+  const Common::Vec3 jerk = MathUtil::Sign(remaining - braking) * max_jerk;
 
-  state->acceleration += jerk * time_elapsed;
+  const float dt = time_elapsed;
+  state->acceleration += jerk * dt;
+  state->velocity += state->acceleration * dt + jerk * dt * dt / 2;
 
-  state->velocity += state->acceleration * time_elapsed + jerk * time_elapsed * time_elapsed / 2;
+  const Common::Vec3 step =
+      state->velocity * dt + state->acceleration * dt * dt / 2 + jerk * dt * dt * dt / 6;
 
-  const auto change_in_position = state->velocity * time_elapsed +
-                                  state->acceleration * time_elapsed * time_elapsed / 2 +
-                                  jerk * time_elapsed * time_elapsed * time_elapsed / 6;
-
-  for (std::size_t i = 0; i != offset.data.size(); ++i)
+  for (std::size_t axis = 0; axis != remaining.data.size(); ++axis)
   {
-    // If new velocity will overshoot assume we would have stopped right on target.
-    // TODO: Improve check to see if less jerk would have caused undershoot.
-    if ((change_in_position.data[i] / offset.data[i]) > 1.0)
+    // Snap to the target instead of overshooting it.
+    if (step.data[axis] / remaining.data[axis] > 1.0)
     {
-      state->acceleration.data[i] = 0;
-      state->velocity.data[i] = 0;
-      state->position.data[i] = position_target.data[i];
+      state->position.data[axis] = position_target.data[axis];
+      state->velocity.data[axis] = 0;
+      state->acceleration.data[axis] = 0;
     }
     else
     {
-      state->position.data[i] += change_in_position.data[i];
+      state->position.data[axis] += step.data[axis];
     }
   }
 }
 
 Common::Quaternion GetRotationFromAcceleration(const Common::Vec3& accel)
 {
-  const auto normalized_accel = accel.Normalized();
+  constexpr Common::Vec3 UP{0, 0, 1};
+  const Common::Vec3 down = accel.Normalized();
 
-  const auto angle = std::acos(normalized_accel.Dot({0, 0, 1}));
-  const auto axis = normalized_accel.Cross({0, 0, 1});
+  const Common::Vec3 axis = down.Cross(UP);
+  const float angle = std::acos(down.Dot(UP));
 
-  // Check that axis is non-zero to handle perfect up/down orientations.
-  return Common::Quaternion::Rotate(angle, axis.LengthSquared() ? axis.Normalized() :
-                                                                  Common::Vec3{0, 1, 0});
+  // Straight up or down has no cross product; any horizontal axis will do.
+  const Common::Vec3 safe_axis = axis.LengthSquared() != 0 ? axis.Normalized() :
+                                                             Common::Vec3{0, 1, 0};
+  return Common::Quaternion::Rotate(angle, safe_axis);
 }
 
 Common::Quaternion GetRotationFromGyroscope(const Common::Vec3& gyro)
 {
-  const auto length = gyro.Length();
-  return (length != 0) ? Common::Quaternion::Rotate(length, gyro / length) :
-                         Common::Quaternion::Identity();
+  const float turn = gyro.Length();
+  if (turn == 0)
+    return Common::Quaternion::Identity();
+  return Common::Quaternion::Rotate(turn, gyro / turn);
 }
 
 Common::Matrix33 GetRotationalMatrix(const Common::Vec3& angle)
 {
-  return Common::Matrix33::RotateZ(angle.z) * Common::Matrix33::RotateY(angle.y) *
-         Common::Matrix33::RotateX(angle.x);
+  const Common::Matrix33 about_x = Common::Matrix33::RotateX(angle.x);
+  const Common::Matrix33 about_y = Common::Matrix33::RotateY(angle.y);
+  const Common::Matrix33 about_z = Common::Matrix33::RotateZ(angle.z);
+  return about_z * about_y * about_x;
 }
 
 float GetPitch(const Common::Quaternion& world_rotation)
 {
-  const auto vec = world_rotation * Common::Vec3{0, 0, 1};
-  return std::atan2(vec.y, Common::Vec2(vec.x, vec.z).Length());
+  const Common::Vec3 up = DeviceUp(world_rotation);
+  return std::atan2(up.y, Common::Vec2(up.x, up.z).Length());
 }
 
 float GetRoll(const Common::Quaternion& world_rotation)
 {
-  const auto vec = world_rotation * Common::Vec3{0, 0, 1};
-  return std::atan2(vec.x, vec.z);
+  const Common::Vec3 up = DeviceUp(world_rotation);
+  return std::atan2(up.x, up.z);
 }
 
 float GetYaw(const Common::Quaternion& world_rotation)
 {
-  const auto vec = world_rotation.Inverted() * Common::Vec3{0, 1, 0};
-  return std::atan2(vec.x, vec.y);
+  const Common::Vec3 forward = world_rotation.Inverted() * Common::Vec3{0, 1, 0};
+  return std::atan2(forward.x, forward.y);
 }
 
 }  // namespace WiimoteEmu

@@ -38,7 +38,8 @@ s16 DecodeNibble(ADPCMState& state, u8 nibble)
   const s32 delta = state.step * (2 * magnitude + 1) / 8;
   state.predictor = std::clamp(state.predictor + (negative ? -delta : delta), -32768, 32767);
 
-  state.step = std::clamp((state.step * STEP_SCALE[magnitude]) >> 8, MIN_STEP, MAX_STEP);
+  const s32 scale = STEP_SCALE[static_cast<size_t>(magnitude)];
+  state.step = std::clamp((state.step * scale) >> 8, MIN_STEP, MAX_STEP);
 
   return static_cast<s16>(state.predictor);
 }
