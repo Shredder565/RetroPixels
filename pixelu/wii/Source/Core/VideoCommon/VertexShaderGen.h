@@ -1,7 +1,9 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
+
+#include <cstddef>
+#include <string_view>
 
 #include "Common/CommonTypes.h"
 #include "Common/EnumFormatter.h"
@@ -16,7 +18,8 @@ enum class SourceRow : u8;
 enum class TexSize : u8;
 enum class VSExpand : u32;
 
-// TODO should be reordered
+// Vertex attribute slots shared by every backend (input locations / D3D TEXCOORD indices).
+// Slot 7 is unused.
 enum class ShaderAttrib : u32
 {
   Position = 0,
@@ -36,6 +39,7 @@ enum class ShaderAttrib : u32
   TexCoord6 = 14,
   TexCoord7 = 15
 };
+
 template <>
 struct fmt::formatter<ShaderAttrib> : EnumFormatter<ShaderAttrib::TexCoord7>
 {
@@ -45,36 +49,34 @@ struct fmt::formatter<ShaderAttrib> : EnumFormatter<ShaderAttrib::TexCoord7>
       "Tex Coord 4", "Tex Coord 5",     "Tex Coord 6", "Tex Coord 7"};
   constexpr formatter() : EnumFormatter(names) {}
 };
-// Intended for offsetting from Color0/TexCoord0
+
+// Steps from Color0 or TexCoord0 to the n-th colour or texture coordinate slot.
 constexpr ShaderAttrib operator+(ShaderAttrib attrib, int offset)
 {
   return static_cast<ShaderAttrib>(static_cast<u8>(attrib) + offset);
 }
 
-// Currently optimized to 28 bytes (with 8 bits spare)
-// The smaller (and less redundant) this is, the better.
-// Though, it probably does like to be somewhat aligned.
+// Specialised vertex shader key, 28 bytes. The layout is part of the disk shader caches.
 struct alignas(4) vertex_shader_uid_data
 {
   u32 NumValues() const { return sizeof(vertex_shader_uid_data); }
-  u32 components : 14;
-  u32 position_has_3_elems : 1;
-  u32 dualTexTrans_enabled : 1;
-  u32 numTexGens : 4;  // if more bits are needed, this could be eliminated by somehow marking the
-                       // first unused texGen as empty.
-  u32 numColorChans : 2;  // Output color channels.
-  VSExpand vs_expand : 2;
+
+  u32 components : 14;             // VB_HAS_* bits of the vertex format that affect the shader
+  u32 position_has_3_elems : 1;    // only used with VS line/point expansion
+  u32 dualTexTrans_enabled : 1;    // post-transform matrices (only with a regular texgen)
+  u32 numTexGens : 4;              // 0-8
+  u32 numColorChans : 2;           // colour channels passed on to TEV
+  VSExpand vs_expand : 2;          // point/line expansion in the vertex shader
 
   u32 pad : 8;
 
-  // texInfo is optimized to fit all per-texgen config into just 16-bits.
-  // But it did require a union
+  // Per-texgen state packed into 16 bits; is_regular_texgen selects the union member.
   struct
   {
-    u8 texcoord_elem_count : 2;
+    u8 texcoord_elem_count : 2;  // components of the matching vertex texcoord (0 = absent)
     TexInputForm inputform : 1;
     SourceRow sourcerow : 4;
-    bool is_regular_texgen : 1;  // union tag
+    bool is_regular_texgen : 1;
     union
     {
       struct
@@ -86,9 +88,8 @@ struct alignas(4) vertex_shader_uid_data
       struct
       {
         TexGenType texgentype : 2;
-        // these are only used by EmbossMap texgen.
-        u8 emboss_sourceshift : 3;
-        u8 emboss_lightshift : 3;
+        u8 emboss_sourceshift : 3;  // emboss only
+        u8 emboss_lightshift : 3;   // emboss only
       } other;
     };
   } texGenInfo[8];
@@ -98,22 +99,24 @@ struct alignas(4) vertex_shader_uid_data
   LightingUidData lighting;
 };
 
-// We do need to make sure lighting is correctly aligned
 static_assert(offsetof(vertex_shader_uid_data, lighting) % alignof(LightingUidData) == 0);
 static_assert(offsetof(vertex_shader_uid_data, texGenInfo) % alignof(u32) == 0);
 static_assert(sizeof(vertex_shader_uid_data) == 28, "vertex_shader_uid_data should be 28 bytes");
 
 using VertexShaderUid = ShaderUid<vertex_shader_uid_data>;
 
+// Graphics-mod replacement for process_vertex() and its uniform block.
 struct CustomVertexContents
 {
   std::string_view shader = "";
   std::string_view uniforms = "";
 };
 
+// Builds the key from the current XF state and vertex format.
 VertexShaderUid GetVertexShaderUid();
 ShaderCode GenerateVertexShaderCode(APIType api_type, const ShaderHostConfig& host_config,
                                     const vertex_shader_uid_data* uid_data,
                                     CustomVertexContents custom_contents);
+// The body of dolphin_process_emulated_vertex(): transform, lighting and texgen.
 void WriteVertexBody(APIType api_type, const ShaderHostConfig& host_config,
                      const vertex_shader_uid_data* uid_data, ShaderCode& out);
