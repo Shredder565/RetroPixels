@@ -1,17 +1,21 @@
-// Copyright 2019 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <string>
+
 #include "Common/CommonTypes.h"
 
 enum class EFBReinterpretType;
 enum class TextureFormat;
 
+// Small utility shaders used by the framebuffer manager, the texture cache and the UI overlay.
+// All of them are written in the shared GLSL-like dialect the backends translate.
 namespace FramebufferShaderGen
 {
+// Fullscreen triangle, texture coordinate in v_tex0.
 std::string GenerateScreenQuadVertexShader();
+// Duplicates each triangle into both stereo layers.
 std::string GeneratePassthroughGeometryShader(u32 num_tex, u32 num_colors);
 std::string GenerateTextureCopyVertexShader();
 std::string GenerateTextureCopyPixelShader();
