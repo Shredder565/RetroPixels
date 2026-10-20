@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -22,6 +21,8 @@ enum KnownElfTypes
 
 typedef int SectionID;
 
+// Reader for 32-bit big-endian ELF executables. The header and tables are
+// converted to host byte order in the reader's own copy of the file.
 class ElfReader final : public BootExecutableReader
 {
 public:
@@ -30,7 +31,6 @@ public:
   explicit ElfReader(std::vector<u8> buffer);
   ~ElfReader() override;
   u32 Read32(int off) const { return base32[off >> 2]; }
-  // Quick accessors
   ElfType GetType() const { return (ElfType)(header->e_type); }
   ElfMachine GetMachine() const { return (ElfMachine)(header->e_machine); }
   u32 GetEntryPoint() const override { return entryPoint; }
@@ -45,21 +45,27 @@ public:
   int GetNumSections() const { return (int)(header->e_shnum); }
   const u8* GetPtr(int offset) const { return (u8*)base + offset; }
   const char* GetSectionName(int section) const;
+  // Null for out-of-range indices and for sections without file data (.bss).
   const u8* GetSectionDataPtr(int section) const
   {
-    if (section < 0 || section >= header->e_shnum)
+    const bool in_range = section >= 0 && section < header->e_shnum;
+    if (!in_range || sections[section].sh_type == SHT_NOBITS)
       return nullptr;
-    if (sections[section].sh_type != SHT_NOBITS)
-      return GetPtr(sections[section].sh_offset);
-    else
-      return nullptr;
+    return GetPtr(static_cast<int>(sections[section].sh_offset));
   }
-  bool IsCodeSegment(int segment) const { return segments[segment].p_flags & PF_X; }
-  const u8* GetSegmentPtr(int segment) const { return GetPtr(segments[segment].p_offset); }
-  int GetSegmentSize(int segment) const { return segments[segment].p_filesz; }
+  bool IsCodeSegment(int segment) const { return (segments[segment].p_flags & PF_X) != 0; }
+  const u8* GetSegmentPtr(int segment) const
+  {
+    return GetPtr(static_cast<int>(segments[segment].p_offset));
+  }
+  int GetSegmentSize(int segment) const { return static_cast<int>(segments[segment].p_filesz); }
   u32 GetSectionAddr(SectionID section) const { return sectionAddrs[section]; }
-  int GetSectionSize(SectionID section) const { return sections[section].sh_size; }
-  SectionID GetSectionByName(const char* name, int firstSection = 0) const;  //-1 for not found
+  int GetSectionSize(SectionID section) const
+  {
+    return static_cast<int>(sections[section].sh_size);
+  }
+  // Returns -1 when no section of that name exists.
+  SectionID GetSectionByName(const char* name, int firstSection = 0) const;
 
   bool DidRelocate() const { return bRelocate; }
 

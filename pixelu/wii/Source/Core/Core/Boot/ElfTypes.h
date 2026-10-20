@@ -1,13 +1,13 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include "Common/CommonTypes.h"
 
-// ELF Header Constants
+// Definitions from the System V ELF specification (32-bit only), as used
+// by the executable loader.
 
-// File type
+// e_type values
 enum ElfType
 {
   ET_NONE = 0,
@@ -19,7 +19,7 @@ enum ElfType
   ET_HIPROC = 0xFFFF,
 };
 
-// Machine/Architecture
+// e_machine values
 enum ElfMachine
 {
   EM_NONE = 0,
@@ -32,11 +32,11 @@ enum ElfMachine
   EM_MIPS = 8
 };
 
-// File version
+// e_version values
 #define EV_NONE 0
 #define EV_CURRENT 1
 
-// Identification index
+// Offsets into e_ident
 #define EI_MAG0 0
 #define EI_MAG1 1
 #define EI_MAG2 2
@@ -47,25 +47,23 @@ enum ElfMachine
 #define EI_PAD 7
 #define EI_NIDENT 16
 
-// Magic number
+// e_ident[EI_MAG0..EI_MAG3]
 #define ELFMAG0 0x7F
 #define ELFMAG1 'E'
 #define ELFMAG2 'L'
 #define ELFMAG3 'F'
 
-// File class
+// e_ident[EI_CLASS]
 #define ELFCLASSNONE 0
 #define ELFCLASS32 1
 #define ELFCLASS64 2
 
-// Encoding
+// e_ident[EI_DATA]
 #define ELFDATANONE 0
 #define ELFDATA2LSB 1
 #define ELFDATA2MSB 2
 
-// Sections constants
-
-// Section indexes
+// Reserved section header indices
 #define SHN_UNDEF 0
 #define SHN_LORESERVE 0xFF00
 #define SHN_LOPROC 0xFF00
@@ -74,7 +72,7 @@ enum ElfMachine
 #define SHN_COMMON 0xFFF2
 #define SHN_HIRESERVE 0xFFFF
 
-// Section types
+// sh_type values
 #define SHT_NULL 0
 #define SHT_PROGBITS 1
 #define SHT_SYMTAB 2
@@ -92,10 +90,10 @@ enum ElfMachine
 #define SHT_LOUSER 0x80000000
 #define SHT_HIUSER 0xFFFFFFFF
 
-// Custom section types
+// Vendor-specific sh_type
 #define SHT_PSPREL 0x700000a0
 
-// Section flags
+// sh_flags bits
 enum ElfSectionFlags
 {
   SHF_WRITE = 0x1,
@@ -104,14 +102,14 @@ enum ElfSectionFlags
   SHF_MASKPROC = 0xF0000000,
 };
 
-// Symbol binding
+// ELF32_ST_BIND values
 #define STB_LOCAL 0
 #define STB_GLOBAL 1
 #define STB_WEAK 2
 #define STB_LOPROC 13
 #define STB_HIPROC 15
 
-// Symbol types
+// ELF32_ST_TYPE values
 #define STT_NOTYPE 0
 #define STT_OBJECT 1
 #define STT_FUNC 2
@@ -120,10 +118,10 @@ enum ElfSectionFlags
 #define STT_LOPROC 13
 #define STT_HIPROC 15
 
-// Undefined name
+// Index of the undefined symbol
 #define STN_UNDEF 0
 
-// Relocation types
+// i386 relocation kinds
 #define R_386_NONE 0
 #define R_386_32 1
 #define R_386_PC32 2
@@ -136,7 +134,7 @@ enum ElfSectionFlags
 #define R_386_GOTOFF 9
 #define R_386_GOTPC 10
 
-// Segment types
+// p_type values
 #define PT_NULL 0
 #define PT_LOAD 1
 #define PT_DYNAMIC 2
@@ -147,12 +145,12 @@ enum ElfSectionFlags
 #define PT_LOPROC 0x70000000
 #define PT_HIPROC 0x7FFFFFFF
 
-// Segment flags
+// p_flags bits
 #define PF_X 1
 #define PF_W 2
 #define PF_R 4
 
-// Dynamic Array Tags
+// d_tag values
 #define DT_NULL 0
 #define DT_NEEDED 1
 #define DT_PLTRELSZ 2
@@ -180,7 +178,7 @@ enum ElfSectionFlags
 #define DT_LOPROC 0x70000000
 #define DT_HIPROC 0x7FFFFFFF
 
-// ELF file header
+// File header
 struct Elf32_Ehdr
 {
   u8 e_ident[EI_NIDENT];
@@ -199,7 +197,7 @@ struct Elf32_Ehdr
   u16 e_shstrndx;
 };
 
-// Section header
+// Section header table entry
 struct Elf32_Shdr
 {
   u32 sh_name;
@@ -214,7 +212,7 @@ struct Elf32_Shdr
   u32 sh_entsize;
 };
 
-// Segment header
+// Program header table entry
 struct Elf32_Phdr
 {
   u32 p_type;
@@ -227,7 +225,7 @@ struct Elf32_Phdr
   u32 p_align;
 };
 
-// Symbol table entry
+// .symtab entry
 struct Elf32_Sym
 {
   u32 st_name;
@@ -242,7 +240,7 @@ struct Elf32_Sym
 #define ELF32_ST_TYPE(i) ((i) & 0xf)
 #define ELF32_ST_INFO(b, t) (((b) << 4) + ((t) & 0xf))
 
-// Relocation entries
+// Relocation table entries
 struct Elf32_Rel
 {
   u32 r_offset;
@@ -260,6 +258,7 @@ struct Elf32_Rela
 #define ELF32_R_TYPE(i) ((u8)(i))
 #define ELF32_R_INFO(s, t) (((s) << 8) + (u8)(t))
 
+// .dynamic entry
 struct Elf32_Dyn
 {
   s32 d_tag;

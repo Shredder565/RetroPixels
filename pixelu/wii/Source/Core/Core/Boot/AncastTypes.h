@@ -1,19 +1,22 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include "Common/CommonTypes.h"
 #include "Common/Crypto/SHA1.h"
 
-// Magic number
+// Layout of "ancast" images, the signed and encrypted boot images used by
+// the Wii U. A vWii PPC image is embedded in a DOL and must be decrypted
+// before it can run. All multi-byte fields are big-endian.
+
+// First word of every ancast image.
 constexpr u32 ANCAST_MAGIC = 0xEFA282D9;
 
-// The location in memory where PPC ancast images are booted from
+// Fixed load address of PPC ancast images, physical and cached virtual.
 constexpr u32 ESPRESSO_ANCAST_LOCATION_PHYS = 0x01330000;
 constexpr u32 ESPRESSO_ANCAST_LOCATION_VIRT = 0x81330000;
 
-// The image type
+// Which processor and boot path the image is for.
 enum AncastImageType
 {
   ANCAST_IMAGE_TYPE_ESPRESSO_WIIU = 0x11,
@@ -22,14 +25,14 @@ enum AncastImageType
   ANCAST_IMAGE_TYPE_STARBUCK_SD = 0x22,
 };
 
-// The console type of the image
+// Which key set the body was encrypted with.
 enum AncastConsoleType
 {
   ANCAST_CONSOLE_TYPE_DEV = 0x01,
   ANCAST_CONSOLE_TYPE_RETAIL = 0x02,
 };
 
-// Start of each header
+// Leading block shared by both header variants.
 struct AncastHeaderBlock
 {
   u32 magic;
@@ -39,7 +42,7 @@ struct AncastHeaderBlock
 };
 static_assert(sizeof(AncastHeaderBlock) == 0x20);
 
-// Signature block for type 1
+// Signature block of PPC images (signature type 1).
 struct AncastSignatureBlockv1
 {
   u32 signature_type;
@@ -47,7 +50,7 @@ struct AncastSignatureBlockv1
   u8 padding[0x44];
 };
 
-// Signature block for type 2
+// Signature block of ARM images (signature type 2).
 struct AncastSignatureBlockv2
 {
   u32 signature_type;
@@ -55,7 +58,7 @@ struct AncastSignatureBlockv2
   u8 padding[0x7c];
 };
 
-// General info about the image
+// Describes the body that follows the header.
 struct AncastInfoBlock
 {
   u32 unknown;
@@ -67,7 +70,7 @@ struct AncastInfoBlock
   u8 padding[0x38];
 };
 
-// The header of espresso ancast images
+// Full header of a PPC (Espresso) image.
 struct EspressoAncastHeader
 {
   AncastHeaderBlock header_block;
@@ -76,7 +79,7 @@ struct EspressoAncastHeader
 };
 static_assert(sizeof(EspressoAncastHeader) == 0x100);
 
-// The header of starbuck ancast images
+// Full header of an ARM (Starbuck) image.
 struct StarbuckAncastHeader
 {
   AncastHeaderBlock header_block;

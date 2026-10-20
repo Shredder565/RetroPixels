@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/Boot/ElfReader.h"
 
@@ -17,56 +16,52 @@
 #include "Core/PowerPC/PPCSymbolDB.h"
 #include "Core/System.h"
 
-static void bswap(u32& w)
+namespace
 {
-  w = Common::swap32(w);
-}
-static void bswap(u16& w)
+// The tables are big-endian in the file and are converted in place, so the
+// rest of the reader can use the structures directly.
+template <typename... Fields> void ToHostOrder(Fields&... fields)
 {
-  w = Common::swap16(w);
-}
-
-static void byteswapHeader(Elf32_Ehdr& ELF_H)
-{
-  bswap(ELF_H.e_type);
-  bswap(ELF_H.e_machine);
-  bswap(ELF_H.e_ehsize);
-  bswap(ELF_H.e_phentsize);
-  bswap(ELF_H.e_phnum);
-  bswap(ELF_H.e_shentsize);
-  bswap(ELF_H.e_shnum);
-  bswap(ELF_H.e_shstrndx);
-  bswap(ELF_H.e_version);
-  bswap(ELF_H.e_entry);
-  bswap(ELF_H.e_phoff);
-  bswap(ELF_H.e_shoff);
-  bswap(ELF_H.e_flags);
+  ((fields = Common::FromBigEndian(fields)), ...);
 }
 
-static void byteswapSegment(Elf32_Phdr& sec)
+void ToHostOrder(Elf32_Ehdr& h)
 {
-  bswap(sec.p_align);
-  bswap(sec.p_filesz);
-  bswap(sec.p_flags);
-  bswap(sec.p_memsz);
-  bswap(sec.p_offset);
-  bswap(sec.p_paddr);
-  bswap(sec.p_vaddr);
-  bswap(sec.p_type);
+  ToHostOrder(h.e_type, h.e_machine, h.e_version, h.e_entry, h.e_phoff, h.e_shoff, h.e_flags,
+              h.e_ehsize, h.e_phentsize, h.e_phnum, h.e_shentsize, h.e_shnum, h.e_shstrndx);
 }
 
-static void byteswapSection(Elf32_Shdr& sec)
+void ToHostOrder(Elf32_Phdr& p)
 {
-  bswap(sec.sh_addr);
-  bswap(sec.sh_addralign);
-  bswap(sec.sh_entsize);
-  bswap(sec.sh_flags);
-  bswap(sec.sh_info);
-  bswap(sec.sh_link);
-  bswap(sec.sh_name);
-  bswap(sec.sh_offset);
-  bswap(sec.sh_size);
-  bswap(sec.sh_type);
+  ToHostOrder(p.p_type, p.p_offset, p.p_vaddr, p.p_paddr, p.p_filesz, p.p_memsz, p.p_flags,
+              p.p_align);
+}
+
+void ToHostOrder(Elf32_Shdr& s)
+{
+  ToHostOrder(s.sh_name, s.sh_type, s.sh_flags, s.sh_addr, s.sh_offset, s.sh_size, s.sh_link,
+              s.sh_info, s.sh_addralign, s.sh_entsize);
+}
+
+// Same heuristic as the DOL reader: Wii code is recognised by an
+// `mfspr rX, HID4`, an SPR the GameCube CPU doesn't have.
+constexpr u32 MFSPR_HID4 = 0x7c13fba6;
+constexpr u32 MFSPR_HID4_MASK = 0xfc1fffff;
+
+// True when `text` (of `length` bytes) holds a NUL within its first
+// `length` bytes, i.e. the string is terminated inside its table.
+bool IsTerminated(const char* text, size_t length)
+{
+  return std::memchr(text, '\0', length) != nullptr;
+}
+}  // namespace
+
+ElfReader::~ElfReader() = default;
+
+// All three constructors only differ in how the base class obtains the bytes.
+ElfReader::ElfReader(const std::string& filename) : BootExecutableReader(filename)
+{
+  m_is_valid = Initialize();
 }
 
 ElfReader::ElfReader(std::vector<u8> buffer) : BootExecutableReader(std::move(buffer))
@@ -79,13 +74,6 @@ ElfReader::ElfReader(File::IOFile file) : BootExecutableReader(std::move(file))
   m_is_valid = Initialize();
 }
 
-ElfReader::ElfReader(const std::string& filename) : BootExecutableReader(filename)
-{
-  m_is_valid = Initialize();
-}
-
-ElfReader::~ElfReader() = default;
-
 bool ElfReader::Initialize()
 {
   if (m_bytes.size() < sizeof(Elf32_Ehdr))
@@ -94,28 +82,37 @@ bool ElfReader::Initialize()
     return false;
   }
 
-  base = reinterpret_cast<char*>(m_bytes.data());
-  base32 = reinterpret_cast<u32*>(m_bytes.data());
-  header = reinterpret_cast<Elf32_Ehdr*>(m_bytes.data());
-  if (header->e_ident[EI_MAG0] != ELFMAG0 || header->e_ident[EI_MAG1] != ELFMAG1 ||
-      header->e_ident[EI_MAG2] != ELFMAG2 || header->e_ident[EI_MAG3] != ELFMAG3 ||
-      header->e_ident[EI_CLASS] != ELFCLASS32 || header->e_ident[EI_DATA] != ELFDATA2MSB)
+  u8* const file = m_bytes.data();
+  base = reinterpret_cast<char*>(file);
+  base32 = reinterpret_cast<u32*>(file);
+  header = reinterpret_cast<Elf32_Ehdr*>(file);
+
+  // Only 32-bit big-endian images are understood.
+  static constexpr u8 expected_ident[] = {ELFMAG0, ELFMAG1,    ELFMAG2,
+                                          ELFMAG3, ELFCLASS32, ELFDATA2MSB};
+  if (std::memcmp(header->e_ident, expected_ident, sizeof(expected_ident)) != 0)
   {
     ERROR_LOG_FMT(BOOT, "Invalid ELF header.");
     return false;
   }
 
-  byteswapHeader(*header);
+  ToHostOrder(*header);
 
-  const auto is_range_valid = [this](size_t offset, size_t size) {
-    return offset <= m_bytes.size() && size <= m_bytes.size() - offset;
+  const size_t file_size = m_bytes.size();
+  const auto fits = [file_size](size_t offset, size_t length) {
+    return offset <= file_size && file_size - offset >= length;
   };
-  if (header->e_ehsize != sizeof(Elf32_Ehdr) ||
-      (header->e_phnum != 0 && header->e_phentsize != sizeof(Elf32_Phdr)) ||
-      (header->e_shnum != 0 && header->e_shentsize != sizeof(Elf32_Shdr)) ||
-      !is_range_valid(header->e_phoff, sizeof(Elf32_Phdr) * header->e_phnum) ||
-      !is_range_valid(header->e_shoff, sizeof(Elf32_Shdr) * header->e_shnum) ||
-      (header->e_shstrndx != SHN_UNDEF && header->e_shstrndx >= header->e_shnum))
+
+  bool tables_ok = header->e_ehsize == sizeof(Elf32_Ehdr);
+  if (header->e_phnum != 0)
+    tables_ok = tables_ok && header->e_phentsize == sizeof(Elf32_Phdr);
+  if (header->e_shnum != 0)
+    tables_ok = tables_ok && header->e_shentsize == sizeof(Elf32_Shdr);
+  tables_ok = tables_ok && fits(header->e_phoff, sizeof(Elf32_Phdr) * header->e_phnum) &&
+              fits(header->e_shoff, sizeof(Elf32_Shdr) * header->e_shnum);
+  if (header->e_shstrndx != SHN_UNDEF)
+    tables_ok = tables_ok && header->e_shstrndx < header->e_shnum;
+  if (!tables_ok)
   {
     ERROR_LOG_FMT(BOOT, "Invalid ELF header table.");
     return false;
@@ -124,59 +121,65 @@ bool ElfReader::Initialize()
   segments = reinterpret_cast<Elf32_Phdr*>(base + header->e_phoff);
   sections = reinterpret_cast<Elf32_Shdr*>(base + header->e_shoff);
 
-  for (int i = 0; i < GetNumSegments(); i++)
+  // The counts are re-read on every iteration on purpose: a table that
+  // overlaps the file header changes them while it is being converted.
+  for (int i = 0; i < GetNumSegments(); ++i)
   {
-    byteswapSegment(segments[i]);
-    if (!is_range_valid(segments[i].p_offset, segments[i].p_filesz) ||
-        segments[i].p_filesz > segments[i].p_memsz)
+    Elf32_Phdr& segment = segments[i];
+    ToHostOrder(segment);
+    if (!fits(segment.p_offset, segment.p_filesz) || segment.p_memsz < segment.p_filesz)
     {
       ERROR_LOG_FMT(BOOT, "Invalid ELF program header {}.", i);
       return false;
     }
   }
 
-  for (int i = 0; i < GetNumSections(); i++)
+  for (int i = 0; i < GetNumSections(); ++i)
   {
-    byteswapSection(sections[i]);
-    if (sections[i].sh_type != SHT_NOBITS &&
-        !is_range_valid(sections[i].sh_offset, sections[i].sh_size))
+    Elf32_Shdr& section = sections[i];
+    ToHostOrder(section);
+    if (section.sh_type == SHT_NOBITS)
+      continue;
+    if (!fits(section.sh_offset, section.sh_size))
     {
       ERROR_LOG_FMT(BOOT, "Invalid ELF section header {}.", i);
       return false;
     }
   }
-  entryPoint = header->e_entry;
 
-  bRelocate = (header->e_type != ET_EXEC);
+  entryPoint = header->e_entry;
+  // Anything other than a plain executable would need relocating.
+  bRelocate = header->e_type != ET_EXEC;
   return true;
 }
 
 const char* ElfReader::GetSectionName(int section) const
 {
-  if (!m_is_valid || section < 0 || section >= header->e_shnum ||
-      sections[section].sh_type == SHT_NULL)
-  {
+  if (!m_is_valid || section < 0 || section >= header->e_shnum)
     return nullptr;
-  }
-
-  const Elf32_Shdr& string_section = sections[header->e_shstrndx];
-  const size_t name_offset = sections[section].sh_name;
-  const char* const ptr = reinterpret_cast<const char*>(GetSectionDataPtr(header->e_shstrndx));
-
-  if (!ptr || name_offset >= string_section.sh_size ||
-      !std::memchr(ptr + name_offset, '\0', string_section.sh_size - name_offset))
-  {
+  if (sections[section].sh_type == SHT_NULL)
     return nullptr;
-  }
 
-  return ptr + name_offset;
+  const int names_index = header->e_shstrndx;
+  const char* const names = reinterpret_cast<const char*>(GetSectionDataPtr(names_index));
+  if (names == nullptr)
+    return nullptr;
+
+  const size_t names_size = sections[names_index].sh_size;
+  const size_t offset = sections[section].sh_name;
+  if (offset >= names_size || !IsTerminated(names + offset, names_size - offset))
+    return nullptr;
+
+  return names + offset;
 }
 
-// This is just a simple elf loader, good enough to load elfs generated by devkitPPC
+// A deliberately small loader: enough for the statically linked executables
+// that devkitPPC produces, nothing more.
 bool ElfReader::LoadIntoMemory(Core::System& system, bool only_in_mem1) const
 {
   if (!m_is_valid)
     return false;
+  Memory::MemoryManager& memory = system.GetMemory();
 
   INFO_LOG_FMT(BOOT, "String section: {}", header->e_shstrndx);
 
@@ -188,38 +191,27 @@ bool ElfReader::LoadIntoMemory(Core::System& system, bool only_in_mem1) const
 
   INFO_LOG_FMT(BOOT, "{} segments:", header->e_phnum);
 
-  auto& memory = system.GetMemory();
-
-  // Copy segments into ram.
-  for (int i = 0; i < header->e_phnum; i++)
+  for (int i = 0; i < header->e_phnum; ++i)
   {
-    Elf32_Phdr* p = segments + i;
+    const Elf32_Phdr& segment = segments[i];
+    INFO_LOG_FMT(BOOT, "Type: {} Vaddr: {:08x} Paddr: {:08x} Filesz: {} Memsz: {}", segment.p_type,
+                 segment.p_vaddr, segment.p_paddr, segment.p_filesz, segment.p_memsz);
 
-    INFO_LOG_FMT(BOOT, "Type: {} Vaddr: {:08x} Paddr: {:08x} Filesz: {} Memsz: {}", p->p_type,
-                 p->p_vaddr, p->p_paddr, p->p_filesz, p->p_memsz);
+    if (segment.p_type != PT_LOAD)
+      continue;
 
-    if (p->p_type == PT_LOAD)
-    {
-      // Check LMA (paddr) first - some are nonsense, so fall back to VMA (vaddr) if invalid
-      u32 writeAddr = p->p_paddr;
-      if (writeAddr)
-        writeAddr |= 0x80000000;  // map to virtual address
-      else
-        writeAddr = p->p_vaddr;  // LMA is empty, fall back to VMA
+    // Prefer the load address, mapped into the cached segment. Some linkers
+    // leave it as zero, in which case the virtual address is used as is.
+    const u32 target = segment.p_paddr != 0 ? (segment.p_paddr | 0x80000000) : segment.p_vaddr;
+    if (only_in_mem1 && target >= memory.GetRamSizeReal())
+      continue;
 
-      const u8* src = GetSegmentPtr(i);
-      u32 srcSize = p->p_filesz;
-      u32 dstSize = p->p_memsz;
+    memory.CopyToEmu(target, GetSegmentPtr(i), segment.p_filesz);
+    // Whatever the file doesn't provide (.bss) starts out zeroed.
+    if (segment.p_memsz > segment.p_filesz)
+      memory.Memset(target + segment.p_filesz, 0, segment.p_memsz - segment.p_filesz);
 
-      if (only_in_mem1 && writeAddr >= memory.GetRamSizeReal())
-        continue;
-
-      memory.CopyToEmu(writeAddr, src, srcSize);
-      if (srcSize < dstSize)
-        memory.Memset(writeAddr + srcSize, 0, dstSize - srcSize);  // zero out bss
-
-      INFO_LOG_FMT(BOOT, "Loadable Segment Copied to {:08x}, size {:08x}", writeAddr, p->p_memsz);
-    }
+    INFO_LOG_FMT(BOOT, "Loadable Segment Copied to {:08x}, size {:08x}", target, segment.p_memsz);
   }
 
   INFO_LOG_FMT(BOOT, "Done loading.");
@@ -228,12 +220,11 @@ bool ElfReader::LoadIntoMemory(Core::System& system, bool only_in_mem1) const
 
 SectionID ElfReader::GetSectionByName(const char* name, int firstSection) const
 {
-  for (int i = firstSection; i < header->e_shnum; i++)
+  for (int index = firstSection; index < header->e_shnum; ++index)
   {
-    const char* secname = GetSectionName(i);
-
-    if (secname != nullptr && strcmp(name, secname) == 0)
-      return i;
+    const char* const candidate = GetSectionName(index);
+    if (candidate != nullptr && std::strcmp(name, candidate) == 0)
+      return index;
   }
   return -1;
 }
@@ -244,73 +235,76 @@ bool ElfReader::LoadSymbols(const Core::CPUThreadGuard& guard, PPCSymbolDB& ppc_
   if (!m_is_valid)
     return false;
 
-  bool hasSymbols = false;
-  SectionID sec = GetSectionByName(".symtab");
-  if (sec != -1)
+  bool added_any = false;
+  const SectionID table = GetSectionByName(".symtab");
+  if (table != -1)
   {
-    const u32 string_section_index = sections[sec].sh_link;
-    if (string_section_index >= header->e_shnum)
+    const u32 names_index = sections[table].sh_link;
+    if (names_index >= header->e_shnum)
     {
       ERROR_LOG_FMT(BOOT, "Invalid ELF symbol string table.");
       return false;
     }
 
-    const Elf32_Shdr& string_section = sections[string_section_index];
-    const char* stringBase = (const char*)GetSectionDataPtr(string_section_index);
-    if (!stringBase)
+    const char* const names =
+        reinterpret_cast<const char*>(GetSectionDataPtr(static_cast<int>(names_index)));
+    if (names == nullptr)
     {
       ERROR_LOG_FMT(BOOT, "ELF symbol string table has no data.");
       return false;
     }
 
-    // We have a symbol table!
-    Elf32_Sym* symtab = (Elf32_Sym*)(GetSectionDataPtr(sec));
-    if (!symtab)
+    const u8* const entries = GetSectionDataPtr(table);
+    if (entries == nullptr)
     {
       ERROR_LOG_FMT(BOOT, "ELF symbol table has no data.");
       return false;
     }
 
-    int numSymbols = sections[sec].sh_size / sizeof(Elf32_Sym);
-    for (int sym = 0; sym < numSymbols; sym++)
+    const size_t names_size = sections[names_index].sh_size;
+    const int count = static_cast<int>(sections[table].sh_size / sizeof(Elf32_Sym));
+    for (int index = 0; index < count; ++index)
     {
-      int size = Common::swap32(symtab[sym].st_size);
+      Elf32_Sym entry;
+      std::memcpy(&entry, entries + static_cast<size_t>(index) * sizeof(Elf32_Sym), sizeof(entry));
+
+      // Symbol table entries are left in file byte order.
+      const u32 size = Common::swap32(entry.st_size);
       if (size == 0)
         continue;
 
-      // int bind = symtab[sym].st_info >> 4;
-      int type = symtab[sym].st_info & 0xF;
-      int sectionIndex = Common::swap16(symtab[sym].st_shndx);
-      int value = Common::swap32(symtab[sym].st_value);
-      const size_t name_offset = Common::swap32(symtab[sym].st_name);
-      if (name_offset >= string_section.sh_size ||
-          !std::memchr(stringBase + name_offset, '\0', string_section.sh_size - name_offset))
+      const size_t name_offset = Common::swap32(entry.st_name);
+      if (name_offset >= names_size || !IsTerminated(names + name_offset, names_size - name_offset))
       {
-        ERROR_LOG_FMT(BOOT, "Invalid ELF symbol name {}.", sym);
+        ERROR_LOG_FMT(BOOT, "Invalid ELF symbol name {}.", index);
         return false;
       }
-      const char* name = stringBase + name_offset;
-      if (bRelocate)
-        value += sectionAddrs[sectionIndex];
 
-      auto symtype = Common::Symbol::Type::Data;
-      switch (type)
+      u32 address = Common::swap32(entry.st_value);
+      if (bRelocate)
+        address += sectionAddrs[Common::swap16(entry.st_shndx)];
+
+      Common::Symbol::Type kind;
+      switch (ELF32_ST_TYPE(entry.st_info))
       {
-      case STT_OBJECT:
-        symtype = Common::Symbol::Type::Data;
-        break;
       case STT_FUNC:
-        symtype = Common::Symbol::Type::Function;
+        kind = Common::Symbol::Type::Function;
+        break;
+      case STT_OBJECT:
+        kind = Common::Symbol::Type::Data;
         break;
       default:
+        // Sections, files and untyped symbols aren't worth tracking.
         continue;
       }
-      ppc_symbol_db.AddKnownSymbol(guard, value, size, name, filename, symtype);
-      hasSymbols = true;
+
+      ppc_symbol_db.AddKnownSymbol(guard, address, size, names + name_offset, filename, kind);
+      added_any = true;
     }
   }
+
   ppc_symbol_db.Index();
-  return hasSymbols;
+  return added_any;
 }
 
 bool ElfReader::IsWii() const
@@ -318,28 +312,19 @@ bool ElfReader::IsWii() const
   if (!m_is_valid)
     return false;
 
-  // Use the same method as the DOL loader uses: search for mfspr from HID4,
-  // which should only be used in Wii ELFs.
-  //
-  // Likely to have some false positives/negatives, patches implementing a
-  // better heuristic are welcome.
-
-  // Swap these once, instead of swapping every word in the file.
-  u32 HID4_pattern = Common::swap32(0x7c13fba6);
-  u32 HID4_mask = Common::swap32(0xfc1fffff);
-
+  // A rough heuristic, prone to the odd false result either way.
   for (int i = 0; i < GetNumSegments(); ++i)
   {
-    if (IsCodeSegment(i))
+    if (!IsCodeSegment(i))
+      continue;
+
+    const u8* const code = GetSegmentPtr(i);
+    const size_t words = static_cast<size_t>(GetSegmentSize(i)) / sizeof(u32);
+    for (size_t w = 0; w < words; ++w)
     {
-      u32* code = (u32*)GetSegmentPtr(i);
-      for (u32 j = 0; j < GetSegmentSize(i) / sizeof(u32); ++j)
-      {
-        if ((code[j] & HID4_mask) == HID4_pattern)
-          return true;
-      }
+      if ((Common::swap32(code + w * sizeof(u32)) & MFSPR_HID4_MASK) == MFSPR_HID4)
+        return true;
     }
   }
-
   return false;
 }

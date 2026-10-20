@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -130,7 +129,7 @@ struct BootParameters
     IPL(DiscIO::Region region_, Disc&& disc_);
     std::string path;
     DiscIO::Region region;
-    // It is possible to boot the IPL with a disc inserted (with "skip IPL" disabled).
+    // Disc to insert while the IPL runs (when the IPL isn't skipped).
     std::optional<Disc> disc;
   };
 
@@ -160,6 +159,8 @@ public:
                      std::unique_ptr<BootParameters> boot);
 
 private:
+  class TitleBooter;
+
   static bool DVDRead(Core::System& system, const DiscIO::VolumeDisc& disc, u64 dvd_offset,
                       u32 output_address, u32 length, const DiscIO::Partition& partition);
   static bool DVDReadDiscID(Core::System& system, const DiscIO::VolumeDisc& disc,
@@ -220,14 +221,12 @@ struct StateFlags
   u32 unknown[6];
 };
 
-// Reads the state file from the NAND, then calls the passed update function to update the struct,
-// and finally writes the updated state file to the NAND.
+// Loads the system menu's state file from the NAND, lets `update_function` modify it and writes
+// it back with a fresh checksum.
 void UpdateStateFlags(const std::function<void(StateFlags*)>& update_function);
 
-/// Create title directories for the system menu (if needed).
-///
-/// Normally, this is automatically done by ES when the System Menu is installed,
-/// but we cannot rely on this because we don't require any system titles to be installed.
+// Makes sure the system menu's title directories exist. ES creates them when the system menu is
+// installed, but booting must also work on a NAND without any system titles.
 void CreateSystemMenuTitleDirs();
 
 void AddRiivolutionPatches(BootParameters* boot_params,

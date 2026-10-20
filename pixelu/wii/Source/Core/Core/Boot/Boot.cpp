@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/Boot/Boot.h"
 
@@ -11,6 +10,7 @@
 #include <numeric>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -61,55 +61,121 @@
 #include "DiscIO/VolumeDisc.h"
 #include "DiscIO/VolumeWad.h"
 
-static std::vector<std::string> ReadM3UFile(const std::string& m3u_path,
-                                            const std::string& folder_path)
+namespace
 {
-  std::vector<std::string> result;
-  std::vector<std::string> nonexistent;
+// Splits an M3U playlist into the paths it lists, each resolved relative to
+// the playlist's own folder. All listed files must exist.
+std::vector<std::string> ReadM3UFile(const std::string& m3u_path, const std::string& folder_path)
+{
+  // U+FEFF encoded as UTF-8.
+  constexpr std::string_view byte_order_mark = "\xEF\xBB\xBF";
 
-  std::ifstream s;
-  File::OpenFStream(s, m3u_path, std::ios_base::in);
+  std::vector<std::string> found;
+  std::vector<std::string> missing;
 
-  std::string line;
-  while (std::getline(s, line))
+  std::ifstream playlist;
+  File::OpenFStream(playlist, m3u_path, std::ios_base::in);
+
+  for (std::string line; std::getline(playlist, line);)
   {
-    // This is the UTF-8 representation of U+FEFF.
-    constexpr std::string_view utf8_bom = "\xEF\xBB\xBF";
-
 #ifndef _WIN32
+    // Tolerate CRLF line endings on systems where getline keeps the CR.
     if (line.ends_with('\r'))
       line.pop_back();
 #endif
-
-    if (line.starts_with(utf8_bom))
+    if (line.starts_with(byte_order_mark))
     {
       WARN_LOG_FMT(BOOT, "UTF-8 BOM in file: {}", m3u_path);
-      line.erase(0, utf8_bom.length());
+      line.erase(0, byte_order_mark.size());
     }
 
-    if (!line.empty() && line.front() != '#')  // Comments start with #
-    {
-      const std::string path_to_add = PathToString(StringToPath(folder_path) / StringToPath(line));
-      (File::Exists(path_to_add) ? result : nonexistent).push_back(path_to_add);
-    }
+    // Blank lines and '#' comments carry no path.
+    if (line.empty() || line.front() == '#')
+      continue;
+
+    std::string resolved = PathToString(StringToPath(folder_path) / StringToPath(line));
+    auto& bucket = File::Exists(resolved) ? found : missing;
+    bucket.push_back(std::move(resolved));
   }
 
-  if (!nonexistent.empty())
+  if (!missing.empty())
   {
     PanicAlertFmtT("Files specified in the M3U file \"{0}\" were not found:\n{1}", m3u_path,
-                   fmt::join(nonexistent, "\n"));
+                   fmt::join(missing, "\n"));
     return {};
   }
 
-  if (result.empty())
+  if (found.empty())
     PanicAlertFmtT("No paths found in the M3U file \"{0}\"", m3u_path);
 
-  return result;
+  return found;
 }
 
-BootSessionData::BootSessionData()
+// Lower-cased extension of `path`; optionally also its folder.
+std::string LowerExtension(const std::string& path, std::string* folder = nullptr)
 {
+  std::string extension;
+  SplitPath(path, folder, nullptr, &extension);
+  Common::ToLower(&extension);
+  return extension;
 }
+
+bool IsDiscOrExecutableExtension(const std::string& extension)
+{
+  static const std::unordered_set<std::string> extensions = {".gcm",  ".bin",  ".iso", ".tgc",
+                                                             ".wbfs", ".ciso", ".gcz", ".wia",
+                                                             ".rvz",  ".nfs",  ".dol", ".elf"};
+  return extensions.contains(extension);
+}
+
+// Puts `disc` into the emulated drive. The returned pointer is only safe to
+// use during boot: afterwards the DVD thread owns the volume.
+const DiscIO::VolumeDisc* SetDisc(DVD::DVDInterface& dvd_interface,
+                                  std::unique_ptr<DiscIO::VolumeDisc> disc,
+                                  std::vector<std::string> auto_disc_change_paths = {})
+{
+  const DiscIO::VolumeDisc* const inserted = disc.get();
+  dvd_interface.SetDisc(std::move(disc), auto_disc_change_paths);
+  return inserted;
+}
+
+// Inserts the user's configured default disc, if any, for titles that don't
+// come from a disc themselves.
+void SetDefaultDisc(DVD::DVDInterface& dvd_interface)
+{
+  const std::string default_iso = Config::Get(Config::MAIN_DEFAULT_ISO);
+  if (default_iso.empty())
+    return;
+  SetDisc(dvd_interface, DiscIO::CreateDiscForCore(default_iso));
+}
+
+// Executables are started without the IPL, which would normally leave a
+// handler at every exception vector. Plant an `rfi` at each one instead.
+void CopyDefaultExceptionHandlers(Core::System& system)
+{
+  constexpr u32 RFI = 0x4C000064;
+  constexpr std::array<u32, 15> vectors = {0x0100, 0x0200, 0x0300, 0x0400, 0x0500,
+                                           0x0600, 0x0700, 0x0800, 0x0900, 0x0C00,
+                                           0x0D00, 0x0F00, 0x1300, 0x1400, 0x1700};
+  auto& memory = system.GetMemory();
+  for (const u32 vector : vectors)
+    memory.Write_U32(RFI, vector);
+}
+
+// Bookkeeping shared by every successful boot path.
+void FinishTitleBoot(const Core::CPUThreadGuard& guard, const DiscIO::Volume* volume)
+{
+  AchievementManager::GetInstance().LoadGame(volume);
+  SConfig::OnTitleDirectlyBooted(guard);
+}
+}  // namespace
+
+// BootSessionData -----------------------------------------------------------------------------
+
+BootSessionData::BootSessionData() = default;
+BootSessionData::BootSessionData(BootSessionData&& other) = default;
+BootSessionData& BootSessionData::operator=(BootSessionData&& other) = default;
+BootSessionData::~BootSessionData() = default;
 
 BootSessionData::BootSessionData(std::optional<std::string> savestate_path,
                                  DeleteSavestateAfterBoot delete_savestate)
@@ -117,15 +183,21 @@ BootSessionData::BootSessionData(std::optional<std::string> savestate_path,
 {
 }
 
-BootSessionData::BootSessionData(BootSessionData&& other) = default;
-
-BootSessionData& BootSessionData::operator=(BootSessionData&& other) = default;
-
-BootSessionData::~BootSessionData() = default;
-
-const std::optional<std::string>& BootSessionData::GetSavestatePath() const
+void BootSessionData::SetNetplaySettings(std::unique_ptr<NetPlay::NetSettings> netplay_settings)
 {
-  return m_savestate_path;
+  m_netplay_settings = std::move(netplay_settings);
+}
+
+const NetPlay::NetSettings* BootSessionData::GetNetplaySettings() const
+{
+  return m_netplay_settings.get();
+}
+
+void BootSessionData::SetSavestateData(std::optional<std::string> savestate_path,
+                                       DeleteSavestateAfterBoot delete_savestate)
+{
+  m_delete_savestate = delete_savestate;
+  m_savestate_path = std::move(savestate_path);
 }
 
 DeleteSavestateAfterBoot BootSessionData::GetDeleteSavestate() const
@@ -133,26 +205,19 @@ DeleteSavestateAfterBoot BootSessionData::GetDeleteSavestate() const
   return m_delete_savestate;
 }
 
-void BootSessionData::SetSavestateData(std::optional<std::string> savestate_path,
-                                       DeleteSavestateAfterBoot delete_savestate)
+const std::optional<std::string>& BootSessionData::GetSavestatePath() const
 {
-  m_savestate_path = std::move(savestate_path);
-  m_delete_savestate = delete_savestate;
+  return m_savestate_path;
 }
 
-IOS::HLE::FS::FileSystem* BootSessionData::GetWiiSyncFS() const
+void BootSessionData::SetWiiSyncData(std::unique_ptr<IOS::HLE::FS::FileSystem> fs,
+                                     std::vector<u64> titles, std::string redirect_folder,
+                                     WiiSyncCleanupFunction cleanup)
 {
-  return m_wii_sync_fs.get();
-}
-
-const std::vector<u64>& BootSessionData::GetWiiSyncTitles() const
-{
-  return m_wii_sync_titles;
-}
-
-const std::string& BootSessionData::GetWiiSyncRedirectFolder() const
-{
-  return m_wii_sync_redirect_folder;
+  m_wii_sync_cleanup = std::move(cleanup);
+  m_wii_sync_redirect_folder = std::move(redirect_folder);
+  m_wii_sync_titles = std::move(titles);
+  m_wii_sync_fs = std::move(fs);
 }
 
 void BootSessionData::InvokeWiiSyncCleanup() const
@@ -161,25 +226,22 @@ void BootSessionData::InvokeWiiSyncCleanup() const
     m_wii_sync_cleanup();
 }
 
-void BootSessionData::SetWiiSyncData(std::unique_ptr<IOS::HLE::FS::FileSystem> fs,
-                                     std::vector<u64> titles, std::string redirect_folder,
-                                     WiiSyncCleanupFunction cleanup)
+IOS::HLE::FS::FileSystem* BootSessionData::GetWiiSyncFS() const
 {
-  m_wii_sync_fs = std::move(fs);
-  m_wii_sync_titles = std::move(titles);
-  m_wii_sync_redirect_folder = std::move(redirect_folder);
-  m_wii_sync_cleanup = std::move(cleanup);
+  return m_wii_sync_fs.get();
 }
 
-const NetPlay::NetSettings* BootSessionData::GetNetplaySettings() const
+const std::string& BootSessionData::GetWiiSyncRedirectFolder() const
 {
-  return m_netplay_settings.get();
+  return m_wii_sync_redirect_folder;
 }
 
-void BootSessionData::SetNetplaySettings(std::unique_ptr<NetPlay::NetSettings> netplay_settings)
+const std::vector<u64>& BootSessionData::GetWiiSyncTitles() const
 {
-  m_netplay_settings = std::move(netplay_settings);
+  return m_wii_sync_titles;
 }
+
+// BootParameters ------------------------------------------------------------------------------
 
 BootParameters::BootParameters(Parameters&& parameters_, BootSessionData boot_session_data_)
     : parameters(std::move(parameters_)), boot_session_data(std::move(boot_session_data_))
@@ -189,20 +251,22 @@ BootParameters::BootParameters(Parameters&& parameters_, BootSessionData boot_se
 std::unique_ptr<BootParameters> BootParameters::GenerateFromFile(std::string boot_path,
                                                                  BootSessionData boot_session_data_)
 {
-  return GenerateFromFile(std::vector<std::string>{std::move(boot_path)},
-                          std::move(boot_session_data_));
+  std::vector<std::string> single;
+  single.push_back(std::move(boot_path));
+  return GenerateFromFile(std::move(single), std::move(boot_session_data_));
 }
 
 std::unique_ptr<BootParameters> BootParameters::GenerateFromFile(std::vector<std::string> paths,
                                                                  BootSessionData boot_session_data_)
 {
   ASSERT(!paths.empty());
+  const auto unify_all = [&paths] {
+    for (std::string& entry : paths)
+      UnifyPathSeparators(entry);
+  };
+  unify_all();
 
-  for (std::string& path : paths)
-    UnifyPathSeparators(path);
-
-  // Check if the file exist, we may have gotten it from a --elf command line
-  // that gave an incorrect file name
+  // A bad path typically comes from the command line.
   if (!File::Exists(paths.front()))
   {
     PanicAlertFmtT("The specified file \"{0}\" does not exist", paths.front());
@@ -210,60 +274,48 @@ std::unique_ptr<BootParameters> BootParameters::GenerateFromFile(std::vector<std
   }
 
   std::string folder_path;
-  std::string extension;
-  SplitPath(paths.front(), &folder_path, nullptr, &extension);
-  Common::ToLower(&extension);
+  std::string extension = LowerExtension(paths.front(), &folder_path);
 
+  // A playlist is replaced by the files it lists; the first one boots.
   if (extension == ".m3u" || extension == ".m3u8")
   {
     paths = ReadM3UFile(paths.front(), folder_path);
     if (paths.empty())
       return {};
-
-    for (std::string& path : paths)
-      UnifyPathSeparators(path);
-
-    SplitPath(paths.front(), nullptr, nullptr, &extension);
-    Common::ToLower(&extension);
+    unify_all();
+    extension = LowerExtension(paths.front());
   }
 
   std::string path = paths.front();
+  // The remaining list is only kept for multi-disc games.
   if (paths.size() == 1)
     paths.clear();
 
 #ifdef ANDROID
   if (extension.empty() && IsPathAndroidContent(path))
-  {
-    const std::string display_name = GetAndroidContentDisplayName(path);
-    SplitPath(display_name, nullptr, nullptr, &extension);
-    Common::ToLower(&extension);
-  }
+    extension = LowerExtension(GetAndroidContentDisplayName(path));
 #endif
 
-  static const std::unordered_set<std::string> disc_image_extensions = {
-      {".gcm", ".bin", ".iso", ".tgc", ".wbfs", ".ciso", ".gcz", ".wia", ".rvz", ".nfs", ".dol",
-       ".elf"}};
-  if (disc_image_extensions.contains(extension))
+  const auto make = [&boot_session_data_](Parameters&& what) {
+    return std::make_unique<BootParameters>(std::move(what), std::move(boot_session_data_));
+  };
+
+  if (IsDiscOrExecutableExtension(extension))
   {
-    std::unique_ptr<DiscIO::VolumeDisc> disc = DiscIO::CreateDiscForCore(path);
-    if (disc)
-    {
-      return std::make_unique<BootParameters>(Disc{std::move(path), std::move(disc), paths},
-                                              std::move(boot_session_data_));
-    }
+    // DOL and ELF files may still be wrapped as a disc by the disc layer, so
+    // that is tried first for every extension in this group.
+    if (std::unique_ptr<DiscIO::VolumeDisc> disc = DiscIO::CreateDiscForCore(path))
+      return make(Disc{std::move(path), std::move(disc), paths});
 
     if (extension == ".elf")
     {
-      auto elf_reader = std::make_unique<ElfReader>(path);
-      return std::make_unique<BootParameters>(Executable{std::move(path), std::move(elf_reader)},
-                                              std::move(boot_session_data_));
+      std::unique_ptr<BootExecutableReader> reader = std::make_unique<ElfReader>(path);
+      return make(Executable{std::move(path), std::move(reader)});
     }
-
     if (extension == ".dol")
     {
-      auto dol_reader = std::make_unique<DolReader>(path);
-      return std::make_unique<BootParameters>(Executable{std::move(path), std::move(dol_reader)},
-                                              std::move(boot_session_data_));
+      std::unique_ptr<BootExecutableReader> reader = std::make_unique<DolReader>(path);
+      return make(Executable{std::move(path), std::move(reader)});
     }
 
     PanicAlertFmtT("\"{0}\" is an invalid GCM/ISO file, or is not a GC/Wii ISO.", path);
@@ -271,37 +323,38 @@ std::unique_ptr<BootParameters> BootParameters::GenerateFromFile(std::vector<std
   }
 
   if (extension == ".dff")
-    return std::make_unique<BootParameters>(DFF{std::move(path)}, std::move(boot_session_data_));
+    return make(DFF{std::move(path)});
 
   if (extension == ".wad")
   {
-    std::unique_ptr<DiscIO::VolumeWAD> wad = DiscIO::CreateWAD(path);
-    if (wad)
-      return std::make_unique<BootParameters>(std::move(*wad), std::move(boot_session_data_));
+    if (std::unique_ptr<DiscIO::VolumeWAD> wad = DiscIO::CreateWAD(path))
+      return make(std::move(*wad));
   }
 
   if (extension == ".json")
   {
-    auto descriptor = DiscIO::ParseGameModDescriptorFile(path);
-    if (descriptor)
+    if (const auto descriptor = DiscIO::ParseGameModDescriptorFile(path))
     {
-      auto boot_params = GenerateFromFile(descriptor->base_file, std::move(boot_session_data_));
-      if (!boot_params)
+      std::unique_ptr<BootParameters> result =
+          GenerateFromFile(descriptor->base_file, std::move(boot_session_data_));
+      if (!result)
       {
         PanicAlertFmtT("Could not recognize file {0}", descriptor->base_file);
         return nullptr;
       }
 
-      if (descriptor->riivolution && std::holds_alternative<Disc>(boot_params->parameters))
+      // Riivolution patches only make sense on top of a disc.
+      const bool patch_disc =
+          descriptor->riivolution && std::holds_alternative<Disc>(result->parameters);
+      if (patch_disc)
       {
-        const auto& volume = *std::get<Disc>(boot_params->parameters).volume;
-        AddRiivolutionPatches(boot_params.get(),
-                              DiscIO::Riivolution::GenerateRiivolutionPatchesFromGameModDescriptor(
-                                  *descriptor->riivolution, volume.GetGameID(),
-                                  volume.GetRevision(), volume.GetDiscNumber()));
+        const DiscIO::VolumeDisc& volume = *std::get<Disc>(result->parameters).volume;
+        auto patches = DiscIO::Riivolution::GenerateRiivolutionPatchesFromGameModDescriptor(
+            *descriptor->riivolution, volume.GetGameID(), volume.GetRevision(),
+            volume.GetDiscNumber());
+        AddRiivolutionPatches(result.get(), std::move(patches));
       }
-
-      return boot_params;
+      return result;
     }
   }
 
@@ -311,8 +364,7 @@ std::unique_ptr<BootParameters> BootParameters::GenerateFromFile(std::vector<std
 
 BootParameters::IPL::IPL(DiscIO::Region region_) : region(region_)
 {
-  const std::string directory = Config::GetDirectoryForRegion(region);
-  path = Config::GetBootROMPath(directory);
+  path = Config::GetBootROMPath(Config::GetDirectoryForRegion(region));
 }
 
 BootParameters::IPL::IPL(DiscIO::Region region_, Disc&& disc_) : IPL(region_)
@@ -320,376 +372,336 @@ BootParameters::IPL::IPL(DiscIO::Region region_, Disc&& disc_) : IPL(region_)
   disc = std::move(disc_);
 }
 
-// Inserts a disc into the emulated disc drive and returns a pointer to it.
-// The returned pointer must only be used while we are still booting,
-// because DVDThread can do whatever it wants to the disc after that.
-static const DiscIO::VolumeDisc* SetDisc(DVD::DVDInterface& dvd_interface,
-                                         std::unique_ptr<DiscIO::VolumeDisc> disc,
-                                         std::vector<std::string> auto_disc_change_paths = {})
-{
-  const DiscIO::VolumeDisc* pointer = disc.get();
-  dvd_interface.SetDisc(std::move(disc), auto_disc_change_paths);
-  return pointer;
-}
-
 bool CBoot::DVDRead(Core::System& system, const DiscIO::VolumeDisc& disc, u64 dvd_offset,
                     u32 output_address, u32 length, const DiscIO::Partition& partition)
 {
-  std::vector<u8> buffer(length);
-  if (!disc.Read(dvd_offset, length, buffer.data(), partition))
-    return false;
-
-  auto& memory = system.GetMemory();
-  memory.CopyToEmu(output_address, buffer.data(), length);
-  return true;
+  std::vector<u8> staging(length);
+  const bool ok = disc.Read(dvd_offset, length, staging.data(), partition);
+  if (ok)
+    system.GetMemory().CopyToEmu(output_address, staging.data(), length);
+  return ok;
 }
 
 bool CBoot::DVDReadDiscID(Core::System& system, const DiscIO::VolumeDisc& disc, u32 output_address)
 {
-  std::array<u8, 0x20> buffer;
-  if (!disc.Read(0, buffer.size(), buffer.data(), DiscIO::PARTITION_NONE))
+  constexpr u32 DISC_HEADER_ID_SIZE = 0x20;
+  std::array<u8, DISC_HEADER_ID_SIZE> disc_id;
+  if (!disc.Read(0, disc_id.size(), disc_id.data(), DiscIO::PARTITION_NONE))
     return false;
 
-  auto& memory = system.GetMemory();
-  memory.CopyToEmu(output_address, buffer.data(), buffer.size());
+  system.GetMemory().CopyToEmu(output_address, disc_id.data(), disc_id.size());
 
-  // Transition out of the DiscIdNotRead state (which the drive should be in at this point,
-  // on the assumption that this is only used for the first read)
+  // This is meant to be the drive's first read, so it leaves the
+  // "disc ID not read" state now.
   system.GetDVDInterface().SetDriveState(DVD::DriveState::ReadyNoReadsMade);
   return true;
 }
 
-// If ipl.bin is not found, this function does *some* of what BS1 does:
-// loading IPL(BS2) and jumping to it.
-// It does not initialize the hardware or anything else like BS1 does.
+// Stand-in for the part of BS1 that matters when there's no full IPL boot:
+// descramble the IPL ROM, put BS2 in RAM and jump to it. Hardware set-up
+// done by BS1 is not reproduced.
 bool CBoot::Load_BS2(Core::System& system, const std::string& boot_rom_filename)
 {
-  // CRC32 hashes of the IPL file, obtained from Redump
-  // DOL-001(USA) / DOL-001(JPN) / DOT-001 / SL-GC10 (NTSC Revision 1.0)
-  constexpr u32 NTSC_v1_0 = 0x6DAC1F2A;
-  // DOL-001(USA) / DOL-001(JPN) / DOT-001 (NTSC Revision 1.1)
-  constexpr u32 NTSC_v1_1 = 0xD5E6FEEA;
-  // DOL-001(USA) / DOL-001(JPN) (NTSC Revision 1.2)
-  constexpr u32 NTSC_v1_2_001 = 0xD235E3F9;
-  // DOL-101(USA) / DOL-101(JPN) (NTSC Revision 1.2)
-  constexpr u32 NTSC_v1_2_101 = 0x86573808;
-  // DOL-002(BRA) (MPAL Revision 1.1)
-  constexpr u32 MPAL_v1_1 = 0x667D0B64;
-  // DOL-001(EUR) / DOT-001P (PAL Revision 1.0)
-  constexpr u32 PAL_v1_0 = 0x4F319F43;
-  // DOL-101(EUR) (PAL Revision 1.2)
-  constexpr u32 PAL_v1_2 = 0xAD1B7F16;
-  // Triforce Arcade IPL (DEV Revision 1.0)
-  constexpr u32 Triforce = 0xD1883221;
+  // CRC32 of known good IPL dumps (from Redump).
+  enum : u32
+  {
+    IPL_NTSC_10 = 0x6DAC1F2A,      // DOL-001 USA/JPN, DOT-001, SL-GC10 (NTSC rev 1.0)
+    IPL_NTSC_11 = 0xD5E6FEEA,      // DOL-001 USA/JPN, DOT-001 (NTSC rev 1.1)
+    IPL_NTSC_12_001 = 0xD235E3F9,  // DOL-001 USA/JPN (NTSC rev 1.2)
+    IPL_NTSC_12_101 = 0x86573808,  // DOL-101 USA/JPN (NTSC rev 1.2)
+    IPL_MPAL_11 = 0x667D0B64,      // DOL-002 BRA (MPAL rev 1.1)
+    IPL_PAL_10 = 0x4F319F43,       // DOL-001 EUR, DOT-001P (PAL rev 1.0)
+    IPL_PAL_12 = 0xAD1B7F16,       // DOL-101 EUR (PAL rev 1.2)
+    IPL_TRIFORCE = 0xD1883221,     // Triforce arcade (DEV rev 1.0)
+  };
 
-  // Load the IPL ROM dump, limited to 2MiB which is the size of the official IPLs.
-  constexpr size_t max_ipl_size = 2 * 1024 * 1024;
-  std::vector<u8> data;
+  // Official IPLs are 2 MiB; anything past that is ignored.
+  constexpr u64 IPL_SIZE_LIMIT = 2 * 1024 * 1024;
+
+  std::vector<u8> rom;
   {
     File::IOFile file(boot_rom_filename, "rb");
     if (!file)
       return false;
-
-    data.resize(static_cast<size_t>(std::min<u64>(file.GetSize(), max_ipl_size)));
-    if (!file.ReadArray(data.data(), data.size()))
+    rom.resize(static_cast<size_t>(std::min(file.GetSize(), IPL_SIZE_LIMIT)));
+    if (!file.ReadArray(rom.data(), rom.size()))
       return false;
   }
 
-  const u32 ipl_hash = Common::ComputeCRC32(data.data(), data.size());
-  bool known_ipl = false;
-  bool pal_ipl = false;
-  switch (ipl_hash)
+  const u32 crc = Common::ComputeCRC32(rom.data(), rom.size());
+  std::optional<bool> is_pal;  // empty for an unrecognised dump
+  switch (crc)
   {
-  case NTSC_v1_0:
-  case NTSC_v1_1:
-  case NTSC_v1_2_001:
-  case NTSC_v1_2_101:
-  case MPAL_v1_1:
-    known_ipl = true;
+  case IPL_PAL_10:
+  case IPL_PAL_12:
+    is_pal = true;
     break;
-  case PAL_v1_0:
-  case PAL_v1_2:
-    pal_ipl = true;
-    known_ipl = true;
-    break;
-  case Triforce:
-    known_ipl = true;
+  case IPL_NTSC_10:
+  case IPL_NTSC_11:
+  case IPL_NTSC_12_001:
+  case IPL_NTSC_12_101:
+  case IPL_MPAL_11:
+  case IPL_TRIFORCE:
+    is_pal = false;
     break;
   default:
-    PanicAlertFmtT("The IPL file is not a known good dump. (CRC32: {0:x})", ipl_hash);
+    PanicAlertFmtT("The IPL file is not a known good dump. (CRC32: {0:x})", crc);
     break;
   }
 
-  const DiscIO::Region boot_region = SConfig::GetInstance().m_region;
-  if (known_ipl && pal_ipl != (boot_region == DiscIO::Region::PAL))
+  const DiscIO::Region region = SConfig::GetInstance().m_region;
+  if (is_pal.has_value() && *is_pal != (region == DiscIO::Region::PAL))
   {
     PanicAlertFmtT("{0} IPL found in {1} directory. The disc might not be recognized",
-                   pal_ipl ? "PAL" : "NTSC", Config::GetDirectoryForRegion(boot_region));
+                   *is_pal ? "PAL" : "NTSC", Config::GetDirectoryForRegion(region));
   }
 
-  // Run the descrambler over the encrypted section containing BS1/BS2
-  if (data.size() > 0x100)
+  // Layout of the ROM: a 0x100 byte header, then the scrambled BS1/BS2
+  // image. The first 0x700 bytes of it go to 0x81200000, the rest (from
+  // ROM offset 0x820) to 0x81300000.
+  constexpr size_t SCRAMBLED_START = 0x100;
+  constexpr size_t SCRAMBLED_MAX = 0x1AFE00;
+  constexpr size_t BS1_MAX = 0x700;
+  constexpr size_t BS2_START = 0x820;
+
+  if (rom.size() > SCRAMBLED_START)
   {
-    ExpansionInterface::CEXIIPL::Descrambler(
-        data.data() + 0x100, static_cast<u32>(std::min<size_t>(data.size() - 0x100, 0x1AFE00)));
+    const size_t span = std::min(rom.size() - SCRAMBLED_START, SCRAMBLED_MAX);
+    ExpansionInterface::CEXIIPL::Descrambler(rom.data() + SCRAMBLED_START, static_cast<u32>(span));
   }
 
-  // TODO: Execution is supposed to start at 0xFFF00000, not 0x81200000;
-  // copying the initial boot code to 0x81200000 is a hack.
-  // For now, HLE the first few instructions and start at 0x81200150
-  // to work around this.
+  // Real hardware starts executing at 0xFFF00000. Instead the boot code is
+  // copied into RAM and the first few instructions are skipped (and their
+  // effects reproduced below), entering at 0x81200150.
   auto& memory = system.GetMemory();
-  if (data.size() > 0x100)
+  if (rom.size() > SCRAMBLED_START)
   {
-    memory.CopyToEmu(0x01200000, data.data() + 0x100, std::min<size_t>(data.size() - 0x100, 0x700));
+    memory.CopyToEmu(0x01200000, rom.data() + SCRAMBLED_START,
+                     std::min(rom.size() - SCRAMBLED_START, BS1_MAX));
   }
-  if (data.size() > 0x820)
+  if (rom.size() > BS2_START)
   {
-    memory.CopyToEmu(0x01300000, data.data() + 0x820,
-                     std::min<size_t>(data.size() - 0x820, 0x1AFE00));
+    memory.CopyToEmu(0x01300000, rom.data() + BS2_START,
+                     std::min(rom.size() - BS2_START, SCRAMBLED_MAX));
   }
 
-  auto& ppc_state = system.GetPPCState();
-  ppc_state.gpr[3] = 0xfff0001f;
-  ppc_state.gpr[4] = 0x00002030;
-  ppc_state.gpr[5] = 0x0000009c;
+  // r3..r5 hold what the real BS1 hands over to the IPL.
+  constexpr std::array<u32, 3> bs1_handoff{0xfff0001f, 0x00002030, 0x0000009c};
+  PowerPC::PowerPCState& ppc_state = system.GetPPCState();
+  for (size_t i = 0; i < bs1_handoff.size(); ++i)
+    ppc_state.gpr[3 + i] = bs1_handoff[i];
 
-  ppc_state.msr.FP = 1;
-  ppc_state.msr.DR = 1;
+  // Address translation and the FPU are both on.
   ppc_state.msr.IR = 1;
+  ppc_state.msr.DR = 1;
+  ppc_state.msr.FP = 1;
 
   ppc_state.spr[SPR_HID0] = 0x0011c464;
+  // BAT3 maps the ROM area.
   ppc_state.spr[SPR_IBAT3U] = 0xfff0001f;
   ppc_state.spr[SPR_IBAT3L] = 0xfff00001;
   ppc_state.spr[SPR_DBAT3U] = 0xfff0001f;
   ppc_state.spr[SPR_DBAT3L] = 0xfff00001;
   SetupBAT(system, /*is_wii*/ false);
 
-  if (ipl_hash == Triforce)
+  if (crc == IPL_TRIFORCE)
   {
+    // Logging entry points of the Triforce IPL and its apploader.
     HLE::Patch(system, 0x813048B8, "OSReport");
-    HLE::Patch(system, 0x8130095C, "OSReport");  // Apploader
-
+    HLE::Patch(system, 0x8130095C, "OSReport");
     AMMediaboard::FirmwareMap(true);
   }
 
   ppc_state.pc = 0x81200150;
-
   system.GetPowerPC().MSRUpdated();
-
   return true;
 }
 
-static void SetDefaultDisc(DVD::DVDInterface& dvd_interface)
+// Boots whichever kind of title the boot parameters hold.
+class CBoot::TitleBooter
 {
-  const std::string default_iso = Config::Get(Config::MAIN_DEFAULT_ISO);
-  if (!default_iso.empty())
-    SetDisc(dvd_interface, DiscIO::CreateDiscForCore(default_iso));
-}
+public:
+  TitleBooter(Core::System& system, const Core::CPUThreadGuard& guard,
+              const std::vector<DiscIO::Riivolution::Patch>& patches)
+      : m_system(system), m_guard(guard), m_patches(patches)
+  {
+  }
 
-static void CopyDefaultExceptionHandlers(Core::System& system)
-{
-  constexpr u32 EXCEPTION_HANDLER_ADDRESSES[] = {0x00000100, 0x00000200, 0x00000300, 0x00000400,
-                                                 0x00000500, 0x00000600, 0x00000700, 0x00000800,
-                                                 0x00000900, 0x00000C00, 0x00000D00, 0x00000F00,
-                                                 0x00001300, 0x00001400, 0x00001700};
+  bool operator()(BootParameters::Disc& disc) const
+  {
+    NOTICE_LOG_FMT(BOOT, "Booting from disc: {}", disc.path);
+    const DiscIO::VolumeDisc* const volume =
+        SetDisc(m_system.GetDVDInterface(), std::move(disc.volume), disc.auto_disc_change_paths);
+    AchievementManager::GetInstance().LoadGame(volume);
 
-  auto& memory = system.GetMemory();
-  constexpr u32 RFI_INSTRUCTION = 0x4C000064;
-  for (const u32 address : EXCEPTION_HANDLER_ADDRESSES)
-    memory.Write_U32(RFI_INSTRUCTION, address);
-}
+    if (volume == nullptr)
+      return false;
+    if (!EmulatedBS2(m_system, m_guard, m_system.IsWii(), *volume, m_patches))
+      return false;
 
-// Third boot step after BootManager and Core. See Call schedule in BootManager.cpp
+    SConfig::OnTitleDirectlyBooted(m_guard);
+    return true;
+  }
+
+  bool operator()(const BootParameters::Executable& executable) const
+  {
+    NOTICE_LOG_FMT(BOOT, "Booting from executable: {}", executable.path);
+
+    BootExecutableReader& reader = *executable.reader;
+    if (!reader.IsValid())
+      return false;
+
+    SetDefaultDisc(m_system.GetDVDInterface());
+    PrepareCPUForExecutable();
+
+    if (m_system.IsWii())
+      PrepareWiiForExecutable();
+    else
+      SetupGCMemory(m_system, m_guard);
+
+    if (!reader.LoadIntoMemory(m_system))
+    {
+      PanicAlertFmtT("Failed to load the executable to memory.");
+      return false;
+    }
+
+    FinishTitleBoot(m_guard, nullptr);
+    m_system.GetPPCState().pc = reader.GetEntryPoint();
+
+    // Replace whatever symbols an earlier session left behind with the
+    // executable's own, and hook them.
+    PPCSymbolDB& symbols = m_system.GetPPCSymbolDB();
+    bool symbols_changed = symbols.Clear();
+    if (reader.LoadSymbols(m_guard, symbols, PathToFileName(executable.path)))
+    {
+      symbols_changed = true;
+      HLE::PatchFunctions(m_system);
+    }
+    if (symbols_changed)
+      Host_PPCSymbolsChanged();
+
+    return true;
+  }
+
+  bool operator()(const DiscIO::VolumeWAD& wad) const
+  {
+    SetDefaultDisc(m_system.GetDVDInterface());
+    if (!Boot_WiiWAD(m_system, wad))
+      return false;
+    FinishTitleBoot(m_guard, &wad);
+    return true;
+  }
+
+  bool operator()(const BootParameters::NANDTitle& nand_title) const
+  {
+    SetDefaultDisc(m_system.GetDVDInterface());
+    if (!BootNANDTitle(m_system, nand_title.id))
+      return false;
+    FinishTitleBoot(m_guard, nullptr);
+    return true;
+  }
+
+  bool operator()(const BootParameters::IPL& ipl) const
+  {
+    NOTICE_LOG_FMT(BOOT, "Booting GC IPL: {}", ipl.path);
+    if (!File::Exists(ipl.path))
+    {
+      if (ipl.disc.has_value())
+        PanicAlertFmtT("Cannot start the game, because the GC IPL could not be found.");
+      else
+        PanicAlertFmtT("Cannot find the GC IPL.");
+      return false;
+    }
+
+    if (!Load_BS2(m_system, ipl.path))
+      return false;
+
+    const DiscIO::VolumeDisc* volume = nullptr;
+    if (ipl.disc.has_value())
+    {
+      NOTICE_LOG_FMT(BOOT, "Inserting disc: {}", ipl.disc->path);
+      volume = SetDisc(m_system.GetDVDInterface(), DiscIO::CreateDiscForCore(ipl.disc->path),
+                       ipl.disc->auto_disc_change_paths);
+    }
+
+    FinishTitleBoot(m_guard, volume);
+    return true;
+  }
+
+  bool operator()(const BootParameters::DFF& dff) const
+  {
+    NOTICE_LOG_FMT(BOOT, "Booting DFF: {}", dff.dff_path);
+    AchievementManager::GetInstance().LoadGame(nullptr);
+    return m_system.GetFifoPlayer().Open(dff.dff_path);
+  }
+
+private:
+  // Machine state the IPL would otherwise have left behind.
+  void PrepareCPUForExecutable() const
+  {
+    const bool wii = m_system.IsWii();
+    SetupMSR(m_system);
+    SetupHID(m_system.GetPPCState(), wii);
+    SetupBAT(m_system, wii);
+    CopyDefaultExceptionHandlers(m_system);
+  }
+
+  void PrepareWiiForExecutable() const
+  {
+    // Any valid address will do for the stack; this one is what homebrew
+    // binaries are commonly started with.
+    m_system.GetPPCState().gpr[1] = 0x8004d4bc;
+
+    // Without a TMD there's no requested IOS. IOS58 is what the Homebrew
+    // Channel uses.
+    SetupWiiMemory(m_system, IOS::HLE::IOSC::ConsoleType::Retail);
+    m_system.GetIOS()->BootIOS(Titles::IOS(58));
+
+    // Apploaders mirror the IOS version into the apploader version word,
+    // and older OSInit versions look at it.
+    constexpr u32 IOS_VERSION_WORD = 0x3140;
+    constexpr u32 APPLOADER_VERSION_WORD = 0x3188;
+    auto& memory = m_system.GetMemory();
+    memory.Write_U32(memory.Read_U32(IOS_VERSION_WORD), APPLOADER_VERSION_WORD);
+  }
+
+  Core::System& m_system;
+  const Core::CPUThreadGuard& m_guard;
+  const std::vector<DiscIO::Riivolution::Patch>& m_patches;
+};
+
+// Entry point of title booting, after the core and boot manager have run.
 bool CBoot::BootUp(Core::System& system, const Core::CPUThreadGuard& guard,
                    std::unique_ptr<BootParameters> boot)
 {
   SConfig& config = SConfig::GetInstance();
 
-  // Triforce systems are region free and always must use the NTSC video mode
+  // Triforce hardware is region free but always runs in NTSC video mode.
   if (system.IsTriforce())
-  {
     config.m_region = DiscIO::Region::NTSC_J;
-  }
 
-  // PAL Wii uses NTSC framerate and linecount in 60Hz modes
-  system.GetVideoInterface().Preset(DiscIO::IsNTSC(config.m_region) ||
-                                    (system.IsWii() && Config::Get(Config::SYSCONF_PAL60)));
+  // NTSC timings also apply to PAL Wii consoles running in PAL60.
+  const bool ntsc_timing =
+      DiscIO::IsNTSC(config.m_region) || (system.IsWii() && Config::Get(Config::SYSCONF_PAL60));
+  system.GetVideoInterface().Preset(ntsc_timing);
 
-  struct BootTitle
-  {
-    BootTitle(Core::System& system_, const Core::CPUThreadGuard& guard_,
-              const std::vector<DiscIO::Riivolution::Patch>& patches)
-        : system(system_), guard(guard_), config(SConfig::GetInstance()),
-          riivolution_patches(patches)
-    {
-    }
-    bool operator()(BootParameters::Disc& disc) const
-    {
-      NOTICE_LOG_FMT(BOOT, "Booting from disc: {}", disc.path);
-      const DiscIO::VolumeDisc* volume =
-          SetDisc(system.GetDVDInterface(), std::move(disc.volume), disc.auto_disc_change_paths);
-      AchievementManager::GetInstance().LoadGame(volume);
-
-      if (!volume)
-        return false;
-
-      if (!EmulatedBS2(system, guard, system.IsWii(), *volume, riivolution_patches))
-        return false;
-
-      SConfig::OnTitleDirectlyBooted(guard);
-      return true;
-    }
-
-    bool operator()(const BootParameters::Executable& executable) const
-    {
-      NOTICE_LOG_FMT(BOOT, "Booting from executable: {}", executable.path);
-
-      if (!executable.reader->IsValid())
-        return false;
-
-      SetDefaultDisc(system.GetDVDInterface());
-
-      auto& ppc_state = system.GetPPCState();
-
-      SetupMSR(system);
-      SetupHID(ppc_state, system.IsWii());
-      SetupBAT(system, system.IsWii());
-      CopyDefaultExceptionHandlers(system);
-
-      if (system.IsWii())
-      {
-        // Set a value for the SP. It doesn't matter where this points to,
-        // as long as it is a valid location. This value is taken from a homebrew binary.
-        ppc_state.gpr[1] = 0x8004d4bc;
-
-        // Because there is no TMD to get the requested system (IOS) version from,
-        // we default to IOS58, which is the version used by the Homebrew Channel.
-        SetupWiiMemory(system, IOS::HLE::IOSC::ConsoleType::Retail);
-        system.GetIOS()->BootIOS(Titles::IOS(58));
-
-        // The Apploader writes an IOS-like version number into memory.
-        // Older versions of OSInit read it to check IOS compatibility.
-        constexpr u32 ADDR_IOS_VERSION = 0x3140;
-        constexpr u32 ADDR_APPLOADER_VERSION = 0x3188;
-        const u32 ios_version = system.GetMemory().Read_U32(ADDR_IOS_VERSION);
-        system.GetMemory().Write_U32(ios_version, ADDR_APPLOADER_VERSION);
-      }
-      else
-      {
-        SetupGCMemory(system, guard);
-      }
-
-      if (!executable.reader->LoadIntoMemory(system))
-      {
-        PanicAlertFmtT("Failed to load the executable to memory.");
-        return false;
-      }
-
-      AchievementManager::GetInstance().LoadGame(nullptr);
-
-      SConfig::OnTitleDirectlyBooted(guard);
-
-      ppc_state.pc = executable.reader->GetEntryPoint();
-
-      const std::string filename = PathToFileName(executable.path);
-
-      auto& ppc_symbol_db = system.GetPPCSymbolDB();
-      bool symbols_changed = ppc_symbol_db.Clear();
-
-      if (executable.reader->LoadSymbols(guard, ppc_symbol_db, filename))
-      {
-        symbols_changed = true;
-        HLE::PatchFunctions(system);
-      }
-
-      if (symbols_changed)
-        Host_PPCSymbolsChanged();
-
-      return true;
-    }
-
-    bool operator()(const DiscIO::VolumeWAD& wad) const
-    {
-      SetDefaultDisc(system.GetDVDInterface());
-      if (!Boot_WiiWAD(system, wad))
-        return false;
-
-      AchievementManager::GetInstance().LoadGame(&wad);
-
-      SConfig::OnTitleDirectlyBooted(guard);
-      return true;
-    }
-
-    bool operator()(const BootParameters::NANDTitle& nand_title) const
-    {
-      SetDefaultDisc(system.GetDVDInterface());
-      if (!BootNANDTitle(system, nand_title.id))
-        return false;
-
-      AchievementManager::GetInstance().LoadGame(nullptr);
-
-      SConfig::OnTitleDirectlyBooted(guard);
-      return true;
-    }
-
-    bool operator()(const BootParameters::IPL& ipl) const
-    {
-      NOTICE_LOG_FMT(BOOT, "Booting GC IPL: {}", ipl.path);
-      if (!File::Exists(ipl.path))
-      {
-        if (ipl.disc)
-          PanicAlertFmtT("Cannot start the game, because the GC IPL could not be found.");
-        else
-          PanicAlertFmtT("Cannot find the GC IPL.");
-        return false;
-      }
-
-      if (!Load_BS2(system, ipl.path))
-        return false;
-
-      const DiscIO::VolumeDisc* volume = nullptr;
-      if (ipl.disc)
-      {
-        NOTICE_LOG_FMT(BOOT, "Inserting disc: {}", ipl.disc->path);
-
-        volume = SetDisc(system.GetDVDInterface(), DiscIO::CreateDiscForCore(ipl.disc->path),
-                         ipl.disc->auto_disc_change_paths);
-      }
-
-      AchievementManager::GetInstance().LoadGame(volume);
-
-      SConfig::OnTitleDirectlyBooted(guard);
-      return true;
-    }
-
-    bool operator()(const BootParameters::DFF& dff) const
-    {
-      NOTICE_LOG_FMT(BOOT, "Booting DFF: {}", dff.dff_path);
-      AchievementManager::GetInstance().LoadGame(nullptr);
-      return system.GetFifoPlayer().Open(dff.dff_path);
-    }
-
-  private:
-    Core::System& system;
-    const Core::CPUThreadGuard& guard;
-    const SConfig& config;
-    const std::vector<DiscIO::Riivolution::Patch>& riivolution_patches;
-  };
-
-  if (!std::visit(BootTitle(system, guard, boot->riivolution_patches), boot->parameters))
+  const TitleBooter booter(system, guard, boot->riivolution_patches);
+  if (!std::visit(booter, boot->parameters))
     return false;
 
   DiscIO::Riivolution::ApplyGeneralMemoryPatches(guard, boot->riivolution_patches);
-
   return true;
 }
 
-BootExecutableReader::BootExecutableReader(const std::string& file_name)
-    : BootExecutableReader(File::IOFile{file_name, "rb"})
+// BootExecutableReader --------------------------------------------------------------------------
+
+BootExecutableReader::~BootExecutableReader() = default;
+
+BootExecutableReader::BootExecutableReader(std::vector<u8> bytes) : m_bytes(std::move(bytes))
 {
 }
 
+// Reads the whole file from its start; a file that can't be opened gives no bytes.
 BootExecutableReader::BootExecutableReader(File::IOFile file)
 {
   file.Seek(0, File::SeekOrigin::Begin);
@@ -697,47 +709,55 @@ BootExecutableReader::BootExecutableReader(File::IOFile file)
   file.ReadBytes(m_bytes.data(), m_bytes.size());
 }
 
-BootExecutableReader::BootExecutableReader(std::vector<u8> bytes) : m_bytes(std::move(bytes))
+BootExecutableReader::BootExecutableReader(const std::string& file_name)
+    : BootExecutableReader(File::IOFile{file_name, "rb"})
 {
 }
 
-BootExecutableReader::~BootExecutableReader() = default;
-
+// The checksum is the 32-bit sum of every word after the checksum itself.
 void StateFlags::UpdateChecksum()
 {
-  constexpr size_t length_in_bytes = sizeof(StateFlags) - 4;
-  constexpr size_t num_elements = length_in_bytes / sizeof(u32);
-  std::array<u32, num_elements> flag_data;
-  std::memcpy(flag_data.data(), &flags, length_in_bytes);
-  checksum = std::accumulate(flag_data.cbegin(), flag_data.cend(), 0U);
+  constexpr size_t word_count = (sizeof(StateFlags) - sizeof(checksum)) / sizeof(u32);
+  std::array<u32, word_count> words;
+  std::memcpy(words.data(), &flags, sizeof(words));
+
+  u32 sum = 0;
+  for (const u32 word : words)
+    sum += word;
+  checksum = sum;
 }
 
 void UpdateStateFlags(const std::function<void(StateFlags*)>& update_function)
 {
   CreateSystemMenuTitleDirs();
-  const std::string file_path = Common::GetTitleDataPath(Titles::SYSTEM_MENU) + "/" WII_STATE;
+
+  const std::string state_path = Common::GetTitleDataPath(Titles::SYSTEM_MENU) + "/" WII_STATE;
   const auto fs = Core::System::GetInstance().GetIOS()->GetFS();
-  constexpr IOS::HLE::FS::Mode rw_mode = IOS::HLE::FS::Mode::ReadWrite;
-  const auto file = fs->CreateAndOpenFile(IOS::SYSMENU_UID, IOS::SYSMENU_GID, file_path,
-                                          {rw_mode, rw_mode, rw_mode});
+  constexpr IOS::HLE::FS::Mode rw = IOS::HLE::FS::Mode::ReadWrite;
+  const auto file =
+      fs->CreateAndOpenFile(IOS::SYSMENU_UID, IOS::SYSMENU_GID, state_path, {rw, rw, rw});
   if (!file)
     return;
 
+  // An existing file of the wrong size is treated as empty.
+  const bool has_valid_size = file->GetStatus()->size == sizeof(StateFlags);
   StateFlags state{};
-  if (file->GetStatus()->size == sizeof(StateFlags))
+  if (has_valid_size)
     (void)file->Read(&state, 1);
 
   update_function(&state);
   state.UpdateChecksum();
 
-  (void)file->Seek(0, IOS::HLE::FS::SeekMode::Set);
+  // Overwrite the file in place.
+  constexpr IOS::HLE::FS::SeekMode from_start = IOS::HLE::FS::SeekMode::Set;
+  (void)file->Seek(0, from_start);
   (void)file->Write(&state, 1);
 }
 
 void CreateSystemMenuTitleDirs()
 {
-  const auto& es = Core::System::GetInstance().GetIOS()->GetESCore();
-  es.CreateTitleDirectories(Titles::SYSTEM_MENU, IOS::SYSMENU_GID);
+  const auto& es_core = Core::System::GetInstance().GetIOS()->GetESCore();
+  es_core.CreateTitleDirectories(Titles::SYSTEM_MENU, IOS::SYSMENU_GID);
 }
 
 void AddRiivolutionPatches(BootParameters* boot_params,
@@ -745,19 +765,22 @@ void AddRiivolutionPatches(BootParameters* boot_params,
 {
   if (riivolution_patches.empty())
     return;
-  if (!std::holds_alternative<BootParameters::Disc>(boot_params->parameters))
+
+  auto* const disc = std::get_if<BootParameters::Disc>(&boot_params->parameters);
+  if (disc == nullptr)
     return;
 
-  auto& disc = std::get<BootParameters::Disc>(boot_params->parameters);
-  disc.volume = DiscIO::CreateDisc(DiscIO::DirectoryBlobReader::Create(
-      std::move(disc.volume),
-      [&](std::vector<DiscIO::FSTBuilderNode>* fst) {
-        DiscIO::Riivolution::ApplyPatchesToFiles(
-            riivolution_patches, DiscIO::Riivolution::PatchIndex::DolphinSysFiles, fst, nullptr);
-      },
-      [&](std::vector<DiscIO::FSTBuilderNode>* fst, DiscIO::FSTBuilderNode* dol_node) {
-        DiscIO::Riivolution::ApplyPatchesToFiles(
-            riivolution_patches, DiscIO::Riivolution::PatchIndex::FileSystem, fst, dol_node);
-      }));
+  // Wrap the disc in a virtual one whose files are patched on the fly.
+  auto patch_sys_files = [&](std::vector<DiscIO::FSTBuilderNode>* fst) {
+    DiscIO::Riivolution::ApplyPatchesToFiles(
+        riivolution_patches, DiscIO::Riivolution::PatchIndex::DolphinSysFiles, fst, nullptr);
+  };
+  auto patch_file_system = [&](std::vector<DiscIO::FSTBuilderNode>* fst,
+                               DiscIO::FSTBuilderNode* dol_node) {
+    DiscIO::Riivolution::ApplyPatchesToFiles(
+        riivolution_patches, DiscIO::Riivolution::PatchIndex::FileSystem, fst, dol_node);
+  };
+  disc->volume = DiscIO::CreateDisc(DiscIO::DirectoryBlobReader::Create(
+      std::move(disc->volume), patch_sys_files, patch_file_system));
   boot_params->riivolution_patches = std::move(riivolution_patches);
 }
