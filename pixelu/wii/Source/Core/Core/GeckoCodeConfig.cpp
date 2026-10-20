@@ -1,11 +1,12 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/GeckoCodeConfig.h"
 
+#include <locale>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "Common/HttpRequest.h"
@@ -15,256 +16,247 @@
 
 namespace Gecko
 {
-std::expected<std::vector<GeckoCode>, int> DownloadCodes(std::string_view gametdb_id)
+namespace
 {
-  // codes.rc24.xyz is a mirror of the now defunct geckocodes.org.
-  std::string endpoint{"https://codes.rc24.xyz/txt.php?txt=" + std::string(gametdb_id)};
-  Common::HttpRequest http;
-
-  // The server always redirects once to the same location.
-  http.FollowRedirects(1);
-
-  const Common::HttpRequest::Response response = http.Get(endpoint);
-  if (!response)
-    return std::unexpected{http.GetLastResponseCode()};
-
-  // temp vector containing parsed codes
-  std::vector<GeckoCode> gcodes;
-
-  // parse the codes
-  std::istringstream ss(std::string(response->begin(), response->end()));
-
-  std::string line;
-
-  // seek past the header, get to the first code
-  std::getline(ss, line);
-  std::getline(ss, line);
-  std::getline(ss, line);
-
-  int read_state = 0;
-  GeckoCode gcode;
-
-  while ((std::getline(ss, line).good()))
+// A code title is "Name [Creator]"; the creator part is optional. The name is trimmed, the creator
+// is kept as written (up to the closing bracket, or the end of the line).
+void ParseTitle(std::string_view title, GeckoCode* code)
+{
+  const std::size_t open = title.find('[');
+  code->name = StripWhitespace(title.substr(0, open));
+  if (open == std::string_view::npos)
   {
-    // Remove \r at the end of the line for files using windows line endings, std::getline only
-    // removes \n
-    line = StripWhitespace(line);
+    code->creator.clear();
+    return;
+  }
+  const std::string_view after = title.substr(open + 1);
+  code->creator = after.substr(0, after.find(']'));
+}
 
+std::string Title(const GeckoCode& code)
+{
+  std::string title = "$" + code.name;
+  if (!code.creator.empty())
+    title += " [" + code.creator + "]";
+  return title;
+}
+
+// A line of a downloaded list is a code line when its first two words are 8 characters each.
+// (Notes can start with hex digits too, so the length is what tells them apart.) The values are
+// read like a C++ stream reads hex numbers.
+std::optional<GeckoCode::Code> ParseDownloadedCodeLine(const std::string& line)
+{
+  std::istringstream words(line);
+  // Splitting on spaces must not depend on the user's locale.
+  words.imbue(std::locale::classic());
+  std::string first, second;
+  words >> first >> second;
+  if (first.size() != 8 || second.size() != 8)
+    return std::nullopt;
+
+  std::istringstream numbers(line);
+  numbers.imbue(std::locale::classic());
+  GeckoCode::Code code;
+  code.original_line = line;
+  numbers >> std::hex >> code.address >> code.data;
+  return code;
+}
+
+// The downloaded list: three header lines, then codes separated by blank lines. Each code is a
+// title line, code lines, then note lines (once a note starts, the rest of the block is notes).
+std::vector<GeckoCode> ParseDownloadedList(const std::string& text)
+{
+  enum class Expect
+  {
+    Title,
+    CodeLines,
+    Notes,
+  };
+
+  std::vector<GeckoCode> result;
+  std::istringstream input(text);
+  std::string raw;
+  for (int header = 0; header < 3; ++header)
+    std::getline(input, raw);
+
+  GeckoCode current;
+  Expect expect = Expect::Title;
+  auto finish_code = [&] {
+    if (!current.codes.empty())
+      result.push_back(current);
+    current = GeckoCode();
+    expect = Expect::Title;
+  };
+
+  // Only newline-terminated lines are read: a last line without a newline is ignored.
+  while (std::getline(input, raw) && !input.eof())
+  {
+    // Also drops the '\r' of Windows line endings.
+    const std::string line(StripWhitespace(raw));
     if (line.empty())
     {
-      // add the code
-      if (!gcode.codes.empty())
-        gcodes.push_back(gcode);
-      gcode = GeckoCode();
-      read_state = 0;
+      finish_code();
       continue;
     }
 
-    switch (read_state)
+    switch (expect)
     {
-    // read new code
-    case 0:
-    {
-      std::istringstream ssline(line);
-      // stop at [ character (beginning of contributor name)
-      std::getline(ssline, gcode.name, '[');
-      gcode.name = StripWhitespace(gcode.name);
-      gcode.user_defined = true;
-      // read the code creator name
-      std::getline(ssline, gcode.creator, ']');
-      read_state = 1;
-    }
-    break;
-
-    // read code lines
-    case 1:
-    {
-      std::istringstream ssline(line);
-      std::string addr, data;
-
-      // Some locales (e.g. fr_FR.UTF-8) don't split the string stream on space
-      // Use the C locale to workaround this behavior
-      ssline.imbue(std::locale::classic());
-
-      ssline >> addr >> data;
-      ssline.seekg(0);
-
-      // check if this line a code, silly, but the dumb txt file comment lines can start with
-      // valid hex chars :/
-      if (8 == addr.length() && 8 == data.length())
+    case Expect::Title:
+      ParseTitle(line, &current);
+      current.user_defined = true;
+      expect = Expect::CodeLines;
+      break;
+    case Expect::CodeLines:
+      if (std::optional<GeckoCode::Code> code = ParseDownloadedCodeLine(line))
       {
-        GeckoCode::Code new_code;
-        new_code.original_line = line;
-        ssline >> std::hex >> new_code.address >> new_code.data;
-        gcode.codes.push_back(new_code);
+        current.codes.push_back(std::move(*code));
+        break;
       }
-      else
-      {
-        gcode.notes.push_back(line);
-        read_state = 2;  // start reading comments
-      }
-    }
-    break;
-
-    // read comment lines
-    case 2:
-      // append comment line
-      gcode.notes.push_back(line);
+      expect = Expect::Notes;
+      current.notes.push_back(line);
+      break;
+    case Expect::Notes:
+      current.notes.push_back(line);
       break;
     }
   }
 
-  // add the last code
-  if (!gcode.codes.empty())
-    gcodes.push_back(gcode);
+  if (!current.codes.empty())
+    result.push_back(current);
+  return result;
+}
 
-  return gcodes;
+// Reads one ini's [Gecko] section and appends its codes. Lines:
+//   $Name [Creator]   starts a code (disabled)
+//   +$Name [Creator]  starts a code (enabled; the two leading characters are skipped)
+//   *text             a note
+//   anything else     a code line (kept as text if it doesn't parse)
+// Codes without a name are dropped.
+void ReadSection(const Common::IniFile& ini, bool user_defined, std::vector<GeckoCode>* codes)
+{
+  std::vector<std::string> lines;
+  ini.GetLines("Gecko", &lines, false);
+
+  std::optional<GeckoCode> current;
+  auto finish_code = [&] {
+    if (current && !current->name.empty())
+      codes->push_back(std::move(*current));
+    current.reset();
+  };
+
+  for (const std::string& line : lines)
+  {
+    if (line.empty() || line[0] == '#')
+      continue;
+
+    if (line[0] == '$' || line[0] == '+')
+    {
+      finish_code();
+      current.emplace();
+      current->enabled = line[0] == '+';
+      current->user_defined = user_defined;
+      const std::size_t skip = current->enabled ? 2 : 1;
+      if (skip <= line.size())
+        ParseTitle(std::string_view(line).substr(skip), &*current);
+      continue;
+    }
+
+    // Lines before the first title belong to a nameless code, which is dropped.
+    if (!current)
+      current.emplace();
+
+    if (line[0] == '*')
+    {
+      current->notes.push_back(line.substr(1));
+      continue;
+    }
+
+    if (std::optional<GeckoCode::Code> code = DeserializeLine(line))
+    {
+      current->codes.push_back(std::move(*code));
+    }
+    else
+    {
+      // TODO: Gecko option lines aren't supported; they're kept so they are saved back.
+      GeckoCode::Code unparsed;
+      unparsed.original_line = line;
+      current->codes.push_back(std::move(unparsed));
+    }
+  }
+  finish_code();
+}
+}  // namespace
+
+std::expected<std::vector<GeckoCode>, int> DownloadCodes(std::string_view gametdb_id)
+{
+  // A mirror of the old geckocodes.org database.
+  const std::string url = "https://codes.rc24.xyz/txt.php?txt=" + std::string(gametdb_id);
+
+  Common::HttpRequest request;
+  // The server answers with one redirect to the same address.
+  request.FollowRedirects(1);
+
+  const Common::HttpRequest::Response response = request.Get(url);
+  if (!response)
+    return std::unexpected{request.GetLastResponseCode()};
+
+  return ParseDownloadedList(std::string(response->begin(), response->end()));
 }
 
 std::vector<GeckoCode> LoadCodes(const Common::IniFile& globalIni, const Common::IniFile& localIni)
 {
-  std::vector<GeckoCode> gcodes;
+  std::vector<GeckoCode> codes;
 
-  for (const auto* ini : {&globalIni, &localIni})
-  {
-    std::vector<std::string> lines;
-    ini->GetLines("Gecko", &lines, false);
+  ReadSection(globalIni, false, &codes);
+  ReadEnabledAndDisabled(globalIni, "Gecko", &codes);
+  // What the global ini says is the default the local ini's lists are saved against.
+  for (GeckoCode& code : codes)
+    code.default_enabled = code.enabled;
 
-    GeckoCode gcode;
+  ReadSection(localIni, true, &codes);
+  ReadEnabledAndDisabled(localIni, "Gecko", &codes);
 
-    std::erase_if(lines, [](const auto& line) { return line.empty() || line[0] == '#'; });
-
-    for (auto& line : lines)
-    {
-      std::istringstream ss(line);
-
-      // Some locales (e.g. fr_FR.UTF-8) don't split the string stream on space
-      // Use the C locale to workaround this behavior
-      ss.imbue(std::locale::classic());
-
-      switch ((line)[0])
-      {
-      // enabled or disabled code
-      case '+':
-        ss.seekg(1);
-        [[fallthrough]];
-      case '$':
-        if (!gcode.name.empty())
-          gcodes.push_back(gcode);
-        gcode = GeckoCode();
-        gcode.enabled = (1 == ss.tellg());  // silly
-        gcode.user_defined = (ini == &localIni);
-        ss.seekg(1, std::ios_base::cur);
-        // read the code name
-        std::getline(ss, gcode.name, '[');  // stop at [ character (beginning of contributor name)
-        gcode.name = StripWhitespace(gcode.name);
-        // read the code creator name
-        std::getline(ss, gcode.creator, ']');
-        break;
-
-      // notes
-      case '*':
-        gcode.notes.push_back(std::string(++line.begin(), line.end()));
-        break;
-
-      // either part of the code, or an option choice
-      default:
-      {
-        GeckoCode::Code new_code;
-        // TODO: support options
-        if (std::optional<GeckoCode::Code> code = DeserializeLine(line))
-          new_code = *code;
-        else
-          new_code.original_line = line;
-        gcode.codes.push_back(new_code);
-      }
-      break;
-      }
-    }
-
-    // add the last code
-    if (!gcode.name.empty())
-    {
-      gcodes.push_back(gcode);
-    }
-
-    ReadEnabledAndDisabled(*ini, "Gecko", &gcodes);
-
-    if (ini == &globalIni)
-    {
-      for (GeckoCode& code : gcodes)
-        code.default_enabled = code.enabled;
-    }
-  }
-
-  return gcodes;
-}
-
-static std::string MakeGeckoCodeTitle(const GeckoCode& code)
-{
-  std::string title = '$' + code.name;
-
-  if (!code.creator.empty())
-  {
-    title += " [" + code.creator + ']';
-  }
-
-  return title;
-}
-
-// used by the SaveGeckoCodes function
-static void SaveGeckoCode(std::vector<std::string>& lines, const GeckoCode& gcode)
-{
-  if (!gcode.user_defined)
-    return;
-
-  lines.push_back(MakeGeckoCodeTitle(gcode));
-
-  // save all the code lines
-  for (const GeckoCode::Code& code : gcode.codes)
-  {
-    lines.push_back(code.original_line);
-  }
-
-  // save the notes
-  for (const std::string& note : gcode.notes)
-    lines.push_back('*' + note);
+  return codes;
 }
 
 void SaveCodes(Common::IniFile& inifile, std::span<const GeckoCode> gcodes)
 {
-  std::vector<std::string> lines;
-  std::vector<std::string> enabled_lines;
-  std::vector<std::string> disabled_lines;
+  std::vector<std::string> code_lines;
+  std::vector<std::string> turned_on;
+  std::vector<std::string> turned_off;
 
-  for (const GeckoCode& geckoCode : gcodes)
+  for (const GeckoCode& code : gcodes)
   {
-    if (geckoCode.enabled != geckoCode.default_enabled)
-      (geckoCode.enabled ? enabled_lines : disabled_lines).emplace_back('$' + geckoCode.name);
+    // Only changes from the default are stored.
+    if (code.enabled != code.default_enabled)
+      (code.enabled ? turned_on : turned_off).push_back("$" + code.name);
 
-    SaveGeckoCode(lines, geckoCode);
+    // Codes from the global ini are not copied into the user's ini.
+    if (!code.user_defined)
+      continue;
+
+    code_lines.push_back(Title(code));
+    for (const GeckoCode::Code& line : code.codes)
+      code_lines.push_back(line.original_line);
+    for (const std::string& note : code.notes)
+      code_lines.push_back("*" + note);
   }
 
-  inifile.SetLines("Gecko", lines);
-  inifile.SetLines("Gecko_Enabled", enabled_lines);
-  inifile.SetLines("Gecko_Disabled", disabled_lines);
+  inifile.SetLines("Gecko", std::move(code_lines));
+  inifile.SetLines("Gecko_Enabled", std::move(turned_on));
+  inifile.SetLines("Gecko_Disabled", std::move(turned_off));
 }
 
 std::optional<GeckoCode::Code> DeserializeLine(const std::string& line)
 {
-  std::vector<std::string> items = SplitString(line, ' ');
+  const std::vector<std::string> words = SplitString(line, ' ');
+  if (words.size() < 2)
+    return std::nullopt;
 
   GeckoCode::Code code;
   code.original_line = line;
-
-  if (items.size() < 2)
+  if (!TryParse(words[0], &code.address, 16) || !TryParse(words[1], &code.data, 16))
     return std::nullopt;
-
-  if (!TryParse(items[0], &code.address, 16))
-    return std::nullopt;
-  if (!TryParse(items[1], &code.data, 16))
-    return std::nullopt;
-
   return code;
 }
 

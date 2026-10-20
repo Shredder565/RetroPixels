@@ -1,31 +1,26 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-// -----------------------------------------------------------------------------------------
-// Partial Action Replay code system implementation.
-// Will never be able to support some AR codes - specifically those that patch the running
-// Action Replay engine itself - yes they do exist!!!
-// Action Replay actually is a small virtual machine with a limited number of commands.
-// It probably is Turing complete - but what does that matter when AR codes can write
-// actual PowerPC code...
-// -----------------------------------------------------------------------------------------
-
-// -------------------------------------------------------------------------------------------------------------
-// Code Types:
-// (Unconditional) Normal Codes (0): this one has subtypes inside
-// (Conditional) Normal Codes (1 - 7): these just compare values and set the line skip info
-// Zero Codes: any code with no address.  These codes are used to do special operations like memory
-// copy, etc
-// -------------------------------------------------------------------------------------------------------------
+// The Action Replay code engine.
+//
+// Each code line is an address word and a value word. The address word is split into fields:
+//   bits 0-24  address (relative to 0x80000000)
+//   bits 25-26 data size (8, 16, 32 bit, 32 bit float)
+//   bits 27-29 type (0 = write/pointer/add/master, 1-7 = comparisons)
+//   bits 30-31 subtype (for type 0: what to do; for comparisons: how many lines to skip)
+// An address word of 0 is a "zero code" whose kind is in the top 3 bits of the value word. Some
+// zero codes (fill and slide, memory copy) take their arguments from the line that follows.
+//
+// Every step is traced through LogStep(); the trace goes to the log and, when self logging is on,
+// to a buffer the cheats window shows. Its text is part of what users see, so it is stable.
 
 #include "Core/ActionReplay.h"
 
 #include <algorithm>
 #include <atomic>
 #include <bit>
-#include <iterator>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -36,6 +31,7 @@
 #include "Common/IniFile.h"
 #include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
+#include "Common/StringUtil.h"
 
 #include "Core/ARDecrypt.h"
 #include "Core/AchievementManager.h"
@@ -46,131 +42,781 @@
 
 namespace ActionReplay
 {
-enum
+namespace
 {
-  // Zero Code Types
-  ZCODE_END = 0x00,
-  ZCODE_NORM = 0x02,
-  ZCODE_ROW = 0x03,
-  ZCODE_04 = 0x04,
+// Guards the code lists and the trace buffer.
+std::mutex s_mutex;
+std::vector<ARCode> s_running;
+std::vector<ARCode> s_netplay_synced;
+std::vector<std::string> s_trace;
+std::atomic<bool> s_trace_enabled{false};
+// Code being run, for the names in error messages.
+const ARCode* s_running_code = nullptr;
+// Tracing stops after the first frame that runs the codes, until the codes change.
+bool s_trace_paused = false;
 
-  // Conditional Codes
-  CONDTIONAL_EQUAL = 0x01,
-  CONDTIONAL_NOT_EQUAL = 0x02,
-  CONDTIONAL_LESS_THAN_SIGNED = 0x03,
-  CONDTIONAL_GREATER_THAN_SIGNED = 0x04,
-  CONDTIONAL_LESS_THAN_UNSIGNED = 0x05,
-  CONDTIONAL_GREATER_THAN_UNSIGNED = 0x06,
-  CONDTIONAL_AND = 0x07,  // bitwise AND
+void VLogStep(std::string_view format, fmt::format_args args)
+{
+  if (s_trace_paused)
+    return;
 
-  // Conditional Line Counts
-  CONDTIONAL_ONE_LINE = 0x00,
-  CONDTIONAL_TWO_LINES = 0x01,
-  CONDTIONAL_ALL_LINES_UNTIL = 0x02,
-  CONDTIONAL_ALL_LINES = 0x03,
+  const bool keep = s_trace_enabled.load(std::memory_order_relaxed);
+  if constexpr (Common::Log::MAX_EFFECTIVE_LOGLEVEL < Common::Log::LogLevel::LINFO)
+  {
+    if (!keep)
+      return;
+  }
 
-  // Data Types
-  DATATYPE_8BIT = 0x00,
-  DATATYPE_16BIT = 0x01,
-  DATATYPE_32BIT = 0x02,
-  DATATYPE_32BIT_FLOAT = 0x03,
+  std::string line = fmt::vformat(format, args);
+  INFO_LOG_FMT(ACTIONREPLAY, "{}", line);
+  if (keep)
+    s_trace.push_back(line + '\n');
+}
 
-  // Normal Code 0 Subtypes
-  SUB_RAM_WRITE = 0x00,
-  SUB_WRITE_POINTER = 0x01,
-  SUB_ADD_CODE = 0x02,
-  SUB_MASTER_CODE = 0x03,
+template <typename... Args>
+void LogStep(std::string_view format, const Args&... args)
+{
+  VLogStep(format, fmt::make_format_args(args...));
+}
+
+const std::string& RunningName()
+{
+  return s_running_code->name;
+}
+
+// The fields of an address word.
+struct CodeWord
+{
+  explicit CodeWord(u32 raw) : word(raw) {}
+
+  u32 Offset() const { return word & 0x01FFFFFF; }
+  u32 Size() const { return (word >> 25) & 3; }
+  u32 Type() const { return (word >> 27) & 7; }
+  u32 Subtype() const { return word >> 30; }
+  u32 Target() const { return Offset() | 0x80000000; }
+
+  u32 word;
 };
 
-// General lock. Protects codes list and internal log.
-static std::mutex s_lock;
-static std::vector<ARCode> s_active_codes;
-static std::vector<ARCode> s_synced_codes;
-static std::vector<std::string> s_internal_log;
-static std::atomic<bool> s_use_internal_log{false};
-// pointer to the code currently being run, (used by log messages that include the code name)
-static const ARCode* s_current_code = nullptr;
-static bool s_disable_logging = false;
-
-struct ARAddr
+enum DataSize : u32
 {
-  union
+  Size8 = 0,
+  Size16 = 1,
+  Size32 = 2,
+  SizeFloat = 3,
+};
+
+// What a failed comparison skips (the subtype of a comparison code).
+enum SkipMode : u32
+{
+  SkipOneLine = 0,
+  SkipTwoLines = 1,
+  SkipUntilEndIf = 2,
+  SkipRest = 3,
+};
+
+u8 Read8(const Core::CPUThreadGuard& guard, u32 address)
+{
+  return PowerPC::MMU::HostRead<u8>(guard, address);
+}
+u16 Read16(const Core::CPUThreadGuard& guard, u32 address)
+{
+  return PowerPC::MMU::HostRead<u16>(guard, address);
+}
+u32 Read32(const Core::CPUThreadGuard& guard, u32 address)
+{
+  return PowerPC::MMU::HostRead<u32>(guard, address);
+}
+
+void InvalidSizeAlert(const char* where_text, u32 size, u32 address);
+
+class CodeRunner
+{
+public:
+  CodeRunner(const Core::CPUThreadGuard& guard, const ARCode& code) : m_guard(guard), m_code(code)
   {
-    u32 address;
-    struct
-    {
-      u32 gcaddr : 25;
-      u32 size : 2;
-      u32 type : 3;
-      u32 subtype : 2;
-    };
+  }
+
+  // Returns false if the code hit something it can't do; such codes are dropped.
+  bool Run();
+
+private:
+  enum class Pending
+  {
+    None,
+    FillAndSlide,
+    MemoryCopy,
   };
 
-  ARAddr(const u32 addr) : address(addr) {}
-  u32 GCAddress() const { return gcaddr | 0x80000000; }
-  operator u32() const { return address; }
+  // Returns 1 to continue with the next line, 0 to stop with success, -1 to stop with failure.
+  int Step(const AREntry& line);
+  bool SkipLine(const AREntry& line, bool* stop);
+  int ZeroCode(u32 value);
+
+  bool Write(CodeWord word, u32 value);
+  bool WriteThroughPointer(CodeWord word, u32 value);
+  bool Add(CodeWord word, u32 value);
+  bool Compare(CodeWord word, u32 value);
+  bool FillAndSlide(CodeWord word, u32 value);
+  bool MemoryCopy(CodeWord word, u32 value);
+
+  const Core::CPUThreadGuard& m_guard;
+  const ARCode& m_code;
+  Pending m_pending = Pending::None;
+  u32 m_pending_word = 0;
+  // Lines still to skip after a failed comparison (> 0), or a SkipMode as a negative number.
+  int m_skip = 0;
 };
 
-// ----------------------
-// AR Remote Functions
+bool CodeRunner::Run()
+{
+  s_running_code = &m_code;
+
+  LogStep("Code Name: {}", m_code.name);
+  LogStep("Number of codes: {}", m_code.ops.size());
+
+  for (const AREntry& line : m_code.ops)
+  {
+    const int result = Step(line);
+    if (result <= 0)
+      return result == 0;
+  }
+  return true;
+}
+
+bool CodeRunner::SkipLine(const AREntry& line, bool* stop)
+{
+  if (m_skip == 0)
+    return false;
+
+  if (m_skip > 0)
+  {
+    LogStep("Line skipped");
+    --m_skip;
+  }
+  else if (m_skip == -static_cast<int>(SkipRest))
+  {
+    LogStep("All Lines skipped");
+    *stop = true;
+  }
+  else if (m_skip == -static_cast<int>(SkipUntilEndIf))
+  {
+    LogStep("Line skipped");
+    // "00000000 40000000" ends the skipped block.
+    if (line.cmd_addr == 0 && line.value == 0x40000000)
+      m_skip = 0;
+  }
+  return true;
+}
+
+int CodeRunner::Step(const AREntry& line)
+{
+  bool stop = false;
+  if (SkipLine(line, &stop))
+    return stop ? 0 : 1;
+
+  const CodeWord word(line.cmd_addr);
+  const u32 value = line.value;
+
+  LogStep("--- Running Code: {:08x} {:08x} ---", word.word, value);
+
+  if (m_pending != Pending::None)
+  {
+    const Pending what = std::exchange(m_pending, Pending::None);
+    bool ok;
+    if (what == Pending::FillAndSlide)
+    {
+      LogStep("Doing Fill And Slide");
+      ok = FillAndSlide(word, value);
+    }
+    else
+    {
+      LogStep("Doing Memory Copy");
+      ok = MemoryCopy(word, value);
+    }
+    return ok ? 1 : -1;
+  }
+
+  if (word.word >= 0x00002000 && word.word < 0x00003000)
+  {
+    LogStep("This action replay simulator does not support codes that modify Action Replay itself.");
+    PanicAlertFmtT(
+        "This action replay simulator does not support codes that modify Action Replay itself.");
+    return -1;
+  }
+
+  if (word.word == 0)
+    return ZeroCode(value);
+
+  LogStep("Doing Normal Code {:08x}", word.Type());
+  LogStep("Subtype: {:08x}", word.Subtype());
+
+  if (word.Type() != 0)
+  {
+    LogStep("This Normal Code is a Conditional Code");
+    return Compare(word, value) ? 1 : -1;
+  }
+
+  switch (word.Subtype())
+  {
+  case 0:
+    LogStep("Doing Ram Write And Fill");
+    return Write(word, value) ? 1 : -1;
+  case 1:
+    LogStep("Doing Write To Pointer");
+    return WriteThroughPointer(word, value) ? 1 : -1;
+  case 2:
+    LogStep("Doing Add Code");
+    return Add(word, value) ? 1 : -1;
+  case 3:
+    LogStep("Doing Master Code And Write to CCXXXXXX (ncode not supported)");
+    PanicAlertFmtT("Action Replay Error: Master Code and Write To CCXXXXXX not implemented ({0})\n"
+                   "Master codes are not needed. Do not use master codes.",
+                   RunningName());
+    return -1;
+  default:
+    LogStep("Bad Subtype");
+    PanicAlertFmtT("Action Replay: Normal Code 0: Invalid Subtype {0:08x} ({1})", word.Subtype(),
+                   RunningName());
+    return -1;
+  }
+}
+
+int CodeRunner::ZeroCode(u32 value)
+{
+  const u32 kind = value >> 29;
+  LogStep("Doing Zero Code {:08x}", kind);
+
+  switch (kind)
+  {
+  case 0:
+    LogStep("ZCode: End Of Codes");
+    return 0;
+
+  case 2:
+    // Also covers the "00000000 40000000" end-if line outside of a skipped block.
+    LogStep("ZCode: Normal execution of codes, set register 1BB4 to 0 (zcode not supported)");
+    return 1;
+
+  case 3:
+    LogStep("ZCode: Executes all codes in the same row, Set register 1BB4 to 1 (zcode not "
+            "supported)");
+    PanicAlertFmtT("Zero 3 code not supported");
+    return -1;
+
+  case 4:
+    if (((value >> 25) & 3) == 3)
+    {
+      LogStep("ZCode: Memory Copy");
+      m_pending = Pending::MemoryCopy;
+    }
+    else
+    {
+      LogStep("ZCode: Fill And Slide");
+      m_pending = Pending::FillAndSlide;
+    }
+    m_pending_word = value;
+    return 1;
+
+  default:
+    LogStep("ZCode: Unknown");
+    PanicAlertFmtT("Zero code unknown to Dolphin: {0:08x}", kind);
+    return -1;
+  }
+}
+
+void InvalidSizeAlert(const char* where_text, u32 size, u32 address)
+{
+  LogStep("Bad Size");
+  const std::string_view where(where_text);
+  if (where == "Ram Write And Fill")
+  {
+    PanicAlertFmtT("Action Replay Error: Invalid size "
+                   "({0:08x} : address = {1:08x}) in Ram Write And Fill ({2})",
+                   size, address, RunningName());
+  }
+  else if (where == "Write To Pointer")
+  {
+    PanicAlertFmtT("Action Replay Error: Invalid size "
+                   "({0:08x} : address = {1:08x}) in Write To Pointer ({2})",
+                   size, address, RunningName());
+  }
+  else if (where == "Add Code")
+  {
+    PanicAlertFmtT("Action Replay Error: Invalid size "
+                   "({0:08x} : address = {1:08x}) in Add Code ({2})",
+                   size, address, RunningName());
+  }
+  else
+  {
+    PanicAlertFmtT(
+        "Action Replay Error: Invalid size ({0:08x} : address = {1:08x}) in Fill and Slide ({2})",
+        size, address, RunningName());
+  }
+}
+
+bool CodeRunner::Write(CodeWord word, u32 value)
+{
+  const u32 target = word.Target();
+  LogStep("Hardware Address: {:08x}", target);
+  LogStep("Size: {:08x}", word.Size());
+
+  switch (word.Size())
+  {
+  case Size8:
+  case Size16:
+  {
+    // The upper bits of the value give how many more copies follow the first one.
+    const bool bytes = word.Size() == Size8;
+    const unsigned width = bytes ? 1 : 2;
+    const u32 extra = bytes ? value >> 8 : value >> 16;
+    const u32 mask = bytes ? 0xFF : 0xFFFF;
+    LogStep(bytes ? "8-bit Write" : "16-bit Write");
+    LogStep("--------");
+    for (u32 n = 0; n <= extra; ++n)
+    {
+      const u32 address = target + n * width;
+      if (bytes)
+        ApplyMemoryPatch<u8>(m_guard, static_cast<u8>(value), address);
+      else
+        ApplyMemoryPatch<u16>(m_guard, static_cast<u16>(value), address);
+      LogStep("Wrote {:08x} to address {:08x}", value & mask, address);
+    }
+    LogStep("--------");
+    return true;
+  }
+  case Size32:
+  case SizeFloat:
+    LogStep("32-bit Write");
+    LogStep("--------");
+    ApplyMemoryPatch<u32>(m_guard, value, target);
+    LogStep("Wrote {:08x} to address {:08x}", value, target);
+    LogStep("--------");
+    return true;
+  default:
+    InvalidSizeAlert("Ram Write And Fill", word.Size(), word.Offset());
+    return false;
+  }
+}
+
+bool CodeRunner::WriteThroughPointer(CodeWord word, u32 value)
+{
+  const u32 target = word.Target();
+  const u32 pointer = Read32(m_guard, target);
+  LogStep("Hardware Address: {:08x}", target);
+  LogStep("Size: {:08x}", word.Size());
+
+  switch (word.Size())
+  {
+  case Size8:
+  case Size16:
+  {
+    const bool bytes = word.Size() == Size8;
+    const u32 small_value = bytes ? (value & 0xFF) : (value & 0xFFFF);
+    // The rest of the value is the offset from the pointer, in units of the data size.
+    const u32 offset = bytes ? value >> 8 : (value >> 16) << 1;
+    LogStep(bytes ? "Write 8-bit to pointer" : "Write 16-bit to pointer");
+    LogStep("--------");
+    LogStep("Pointer: {:08x}", pointer);
+    LogStep("Byte: {:08x}", small_value);
+    LogStep("Offset: {:08x}", offset);
+    if (bytes)
+      ApplyMemoryPatch<u8>(m_guard, static_cast<u8>(small_value), pointer + offset);
+    else
+      ApplyMemoryPatch<u16>(m_guard, static_cast<u16>(small_value), pointer + offset);
+    LogStep("Wrote {:08x} to address {:08x}", small_value, pointer + offset);
+    LogStep("--------");
+    return true;
+  }
+  case Size32:
+  case SizeFloat:
+    LogStep("Write 32-bit to pointer");
+    LogStep("--------");
+    ApplyMemoryPatch<u32>(m_guard, value, pointer);
+    LogStep("Wrote {:08x} to address {:08x}", value, pointer);
+    LogStep("--------");
+    return true;
+  default:
+    InvalidSizeAlert("Write To Pointer", word.Size(), word.Offset());
+    return false;
+  }
+}
+
+bool CodeRunner::Add(CodeWord word, u32 value)
+{
+  const u32 target = word.Target();
+  LogStep("Hardware Address: {:08x}", target);
+  LogStep("Size: {:08x}", word.Size());
+
+  switch (word.Size())
+  {
+  case Size8:
+    LogStep("8-bit Add");
+    LogStep("--------");
+    ApplyMemoryPatch<u8>(m_guard, static_cast<u8>(Read8(m_guard, target) + value), target);
+    LogStep("Wrote {:02x} to address {:08x}", Read8(m_guard, target), target);
+    LogStep("--------");
+    return true;
+  case Size16:
+    LogStep("16-bit Add");
+    LogStep("--------");
+    ApplyMemoryPatch<u16>(m_guard, static_cast<u16>(Read16(m_guard, target) + value), target);
+    LogStep("Wrote {:04x} to address {:08x}", Read16(m_guard, target), target);
+    LogStep("--------");
+    return true;
+  case Size32:
+    LogStep("32-bit Add");
+    LogStep("--------");
+    ApplyMemoryPatch<u32>(m_guard, Read32(m_guard, target) + value, target);
+    LogStep("Wrote {:08x} to address {:08x}", Read32(m_guard, target), target);
+    LogStep("--------");
+    return true;
+  case SizeFloat:
+  {
+    LogStep("32-bit floating Add");
+    LogStep("--------");
+    // The value is an integer that is added to the float in memory.
+    const u32 before = Read32(m_guard, target);
+    const float sum = std::bit_cast<float>(before) + static_cast<float>(value);
+    const u32 after = std::bit_cast<u32>(sum);
+    ApplyMemoryPatch<u32>(m_guard, after, target);
+    LogStep("Old Value {:08x}", before);
+    LogStep("Increment {:08x}", value);
+    LogStep("New value {:08x}", after);
+    LogStep("--------");
+    return true;
+  }
+  default:
+    InvalidSizeAlert("Add Code", word.Size(), word.Offset());
+    return false;
+  }
+}
+
+bool CodeRunner::Compare(CodeWord word, u32 value)
+{
+  const u32 target = word.Target();
+  LogStep("Size: {:08x}", word.Size());
+  LogStep("Hardware Address: {:08x}", target);
+
+  u32 current;
+  u32 wanted;
+  switch (word.Size())
+  {
+  case Size8:
+    current = Read8(m_guard, target);
+    wanted = value & 0xFF;
+    break;
+  case Size16:
+    current = Read16(m_guard, target);
+    wanted = value & 0xFFFF;
+    break;
+  case Size32:
+  case SizeFloat:
+    current = Read32(m_guard, target);
+    wanted = value;
+    break;
+  default:
+    LogStep("Bad Size");
+    PanicAlertFmtT("Action Replay: Conditional Code: Invalid Size {0:08x} ({1})", word.Size(),
+                   RunningName());
+    return false;
+  }
+
+  bool holds;
+  switch (word.Type())
+  {
+  case 1:
+    LogStep("Type 1: If Equal");
+    holds = current == wanted;
+    break;
+  case 2:
+    LogStep("Type 2: If Not Equal");
+    holds = current != wanted;
+    break;
+  case 3:
+    LogStep("Type 3: If Less Than (Signed)");
+    holds = static_cast<s32>(current) < static_cast<s32>(wanted);
+    break;
+  case 4:
+    LogStep("Type 4: If Greater Than (Signed)");
+    holds = static_cast<s32>(current) > static_cast<s32>(wanted);
+    break;
+  case 5:
+    LogStep("Type 5: If Less Than (Unsigned)");
+    holds = current < wanted;
+    break;
+  case 6:
+    LogStep("Type 6: If Greater Than (Unsigned)");
+    holds = current > wanted;
+    break;
+  case 7:
+    LogStep("Type 7: If And");
+    holds = (current & wanted) != 0;
+    break;
+  default:
+    LogStep("Unknown Compare type");
+    PanicAlertFmtT("Action Replay: Invalid Normal Code Type {0:08x} ({1})", word.Type(),
+                   RunningName());
+    holds = false;
+    break;
+  }
+
+  if (holds)
+    return true;
+
+  switch (word.Subtype())
+  {
+  case SkipOneLine:
+  case SkipTwoLines:
+    m_skip = static_cast<int>(word.Subtype()) + 1;
+    return true;
+  case SkipUntilEndIf:
+  case SkipRest:
+    m_skip = -static_cast<int>(word.Subtype());
+    return true;
+  default:
+    LogStep("Bad Subtype");
+    PanicAlertFmtT("Action Replay: Normal Code {0}: Invalid subtype {1:08x} ({2})", 1,
+                   word.Subtype(), RunningName());
+    return false;
+  }
+}
+
+// Writes a run of values, stepping both the address and the value. The zero code line holds the
+// start address and data size; this line's address word is the first value, and its value word
+// packs the value step (top byte), the count and the address step (low 16 bits, signed, in units
+// of the data size).
+bool CodeRunner::FillAndSlide(CodeWord word, u32 value)
+{
+  const CodeWord setup(m_pending_word);
+  const u32 start = setup.Target();
+  const u32 size = setup.Size();
+
+  const auto address_step = static_cast<s16>(value & 0xFFFF);
+  const auto value_step = static_cast<s8>(value >> 24);
+  const auto count = static_cast<u8>(value >> 16);
+
+  u32 current = word.word;
+  u32 address = start;
+
+  LogStep("Current Hardware Address: {:08x}", start);
+  LogStep("Size: {:08x}", word.Size());
+  LogStep("Write Num: {:08x}", count);
+  LogStep("Address Increment: {}", address_step);
+  LogStep("Value Increment: {}", s32{value_step});
+
+  if (size > Size32)
+  {
+    InvalidSizeAlert("Fill and Slide", size, start);
+    return false;
+  }
+
+  static constexpr const char* titles[] = {"8-bit Write", "16-bit Write", "32-bit Write"};
+  const int unit = 1 << size;
+  LogStep(titles[size]);
+  LogStep("--------");
+  for (int n = 0; n < count; ++n)
+  {
+    if (size == Size8)
+    {
+      // For bytes, the trace shows the stepped value and address (after the write).
+      ApplyMemoryPatch<u8>(m_guard, static_cast<u8>(current), address);
+      address += static_cast<u32>(address_step);
+      current += static_cast<u32>(value_step);
+      LogStep("Write {:08x} to address {:08x}", current & 0xFF, address);
+    }
+    else
+    {
+      if (size == Size16)
+      {
+        ApplyMemoryPatch<u16>(m_guard, static_cast<u16>(current), address);
+        LogStep("Write {:08x} to address {:08x}", current & 0xFFFF, address);
+      }
+      else
+      {
+        ApplyMemoryPatch<u32>(m_guard, current, address);
+        LogStep("Write {:08x} to address {:08x}", current, address);
+      }
+      address += static_cast<u32>(address_step * unit);
+      current += static_cast<u32>(value_step);
+    }
+    LogStep("Value Update: {:08x}", current);
+    LogStep("Current Hardware Address Update: {:08x}", address);
+  }
+  LogStep("--------");
+  return true;
+}
+
+// Copies bytes. The zero code line holds the destination; this line's address word is the source
+// and the low bits of its value word the byte count. A non-zero top byte makes both addresses
+// pointers to the real addresses.
+bool CodeRunner::MemoryCopy(CodeWord word, u32 value)
+{
+  const u32 destination = m_pending_word & ~0x06000000u;
+  const u32 source = word.Target();
+  const auto count = static_cast<u8>(value & 0x7FFF);
+
+  LogStep("Dest Address: {:08x}", destination);
+  LogStep("Src Address: {:08x}", source);
+  LogStep("Size: {:08x}", count);
+
+  if ((value & 0xFF0000) != 0)
+  {
+    LogStep("Bad Value");
+    PanicAlertFmtT("Action Replay Error: Invalid value ({0:08x}) in Memory Copy ({1})",
+                   value & 0xFFFF8000u, RunningName());
+    return false;
+  }
+
+  u32 from = source;
+  u32 to = destination;
+  if ((value >> 24) != 0)
+  {
+    LogStep("Memory Copy With Pointers Support");
+    LogStep("--------");
+    to = Read32(m_guard, destination);
+    LogStep("Resolved Dest Address to: {:08x}", to);
+    from = Read32(m_guard, source);
+    LogStep("Resolved Src Address to: {:08x}", from);
+  }
+  else
+  {
+    LogStep("Memory Copy Without Pointers Support");
+    LogStep("--------");
+  }
+
+  for (u32 n = 0; n < count; ++n)
+  {
+    ApplyMemoryPatch<u8>(m_guard, Read8(m_guard, from + n), to + n);
+    LogStep("Wrote {:08x} to address {:08x}", Read8(m_guard, from + n), to + n);
+  }
+  LogStep("--------");
+  return true;
+}
+
+// Codes collected for one ini section.
+class SectionReader
+{
+public:
+  SectionReader(std::vector<ARCode>& out, bool user_defined) : m_out(out), m_user(user_defined) {}
+
+  void Line(const std::string& line)
+  {
+    if (line.front() == '$')
+    {
+      // A new code starts; the previous one is finished.
+      FlushPlain();
+      FlushEncrypted();
+      m_code.name = line.substr(1);
+      m_code.user_defined = m_user;
+      return;
+    }
+
+    const auto parsed = DeserializeLine(line);
+    if (const auto* entry = std::get_if<AREntry>(&parsed))
+      m_code.ops.push_back(*entry);
+    else if (const auto* encrypted = std::get_if<EncryptedLine>(&parsed))
+      m_encrypted.push_back(*encrypted);
+    else
+      PanicAlertFmtT("Action Replay Error: invalid AR code line: {0}", line);
+  }
+
+  // The last code of the section. Unlike a code followed by another, its decrypted lines are
+  // added after its plain lines in a second copy of the code.
+  void Finish()
+  {
+    if (!m_code.ops.empty())
+      m_out.push_back(m_code);
+    if (!m_encrypted.empty())
+    {
+      DecryptARCode(m_encrypted, &m_code.ops);
+      m_out.push_back(m_code);
+    }
+  }
+
+private:
+  void FlushPlain()
+  {
+    if (m_code.ops.empty())
+      return;
+    m_out.push_back(m_code);
+    m_code.ops.clear();
+  }
+
+  void FlushEncrypted()
+  {
+    if (m_encrypted.empty())
+      return;
+    DecryptARCode(m_encrypted, &m_code.ops);
+    m_out.push_back(m_code);
+    m_code.ops.clear();
+    m_encrypted.clear();
+  }
+
+  std::vector<ARCode>& m_out;
+  const bool m_user;
+  ARCode m_code;
+  std::vector<std::string> m_encrypted;
+};
+}  // namespace
+
 void ApplyCodes(std::span<const ARCode> codes, const std::string& game_id, u16 revision)
 {
   if (!Config::AreCheatsEnabled())
     return;
 
-  std::lock_guard guard(s_lock);
-  s_disable_logging = false;
-  s_active_codes.clear();
-
-  const auto should_be_activated = [&game_id, &revision](const ARCode& code) {
-    return AchievementManager::GetInstance().ShouldARCodeBeActivated(code, game_id, revision);
-  };
-  std::copy_if(codes.begin(), codes.end(), std::back_inserter(s_active_codes), should_be_activated);
-  s_active_codes.shrink_to_fit();
+  std::lock_guard lock(s_mutex);
+  s_trace_paused = false;
+  s_running.clear();
+  for (const ARCode& code : codes)
+  {
+    if (AchievementManager::GetInstance().ShouldARCodeBeActivated(code, game_id, revision))
+      s_running.push_back(code);
+  }
+  s_running.shrink_to_fit();
 }
 
 void SetSyncedCodesAsActive()
 {
-  s_active_codes.clear();
-  s_active_codes.reserve(s_synced_codes.size());
-  s_active_codes = s_synced_codes;
+  s_running = s_netplay_synced;
 }
 
 void UpdateSyncedCodes(std::span<const ARCode> codes)
 {
-  s_synced_codes.clear();
-  s_synced_codes.reserve(codes.size());
-  std::copy_if(codes.begin(), codes.end(), std::back_inserter(s_synced_codes),
-               [](const ARCode& code) { return code.enabled; });
-  s_synced_codes.shrink_to_fit();
+  s_netplay_synced.clear();
+  for (const ARCode& code : codes)
+  {
+    if (code.enabled)
+      s_netplay_synced.push_back(code);
+  }
+  s_netplay_synced.shrink_to_fit();
 }
 
 std::vector<ARCode> ApplyAndReturnCodes(std::span<const ARCode> codes)
 {
   if (Config::AreCheatsEnabled())
   {
-    std::lock_guard guard(s_lock);
-    s_disable_logging = false;
-    s_active_codes.clear();
-    std::copy_if(codes.begin(), codes.end(), std::back_inserter(s_active_codes),
-                 [](const ARCode& code) { return code.enabled; });
+    std::lock_guard lock(s_mutex);
+    s_trace_paused = false;
+    s_running.clear();
+    for (const ARCode& code : codes)
+    {
+      if (code.enabled)
+        s_running.push_back(code);
+    }
   }
-  s_active_codes.shrink_to_fit();
-
-  return s_active_codes;
+  s_running.shrink_to_fit();
+  return s_running;
 }
 
 void AddCode(ARCode code)
 {
-  if (!Config::AreCheatsEnabled())
+  if (!Config::AreCheatsEnabled() || !code.enabled)
     return;
 
-  if (code.enabled)
-  {
-    std::lock_guard guard(s_lock);
-    s_disable_logging = false;
-    s_active_codes.emplace_back(std::move(code));
-  }
+  std::lock_guard lock(s_mutex);
+  s_trace_paused = false;
+  s_running.push_back(std::move(code));
 }
 
 size_t CountEnabledCodes()
@@ -178,8 +824,8 @@ size_t CountEnabledCodes()
   if (!Config::AreCheatsEnabled())
     return 0;
 
-  std::lock_guard guard(s_lock);
-  return s_active_codes.size();
+  std::lock_guard lock(s_mutex);
+  return s_running.size();
 }
 
 void LoadAndApplyCodes(const Common::IniFile& global_ini, const Common::IniFile& local_ini,
@@ -188,72 +834,28 @@ void LoadAndApplyCodes(const Common::IniFile& global_ini, const Common::IniFile&
   ApplyCodes(LoadCodes(global_ini, local_ini), game_id, revision);
 }
 
-// Parses the Action Replay section of a game ini file.
 std::vector<ARCode> LoadCodes(const Common::IniFile& global_ini, const Common::IniFile& local_ini)
 {
   std::vector<ARCode> codes;
 
-  for (const auto* ini : {&global_ini, &local_ini})
+  for (const Common::IniFile* ini : {&global_ini, &local_ini})
   {
+    const bool is_local = ini == &local_ini;
     std::vector<std::string> lines;
-    std::vector<std::string> encrypted_lines;
-    ARCode current_code;
-
     ini->GetLines("ActionReplay", &lines);
 
+    SectionReader reader(codes, is_local);
     for (const std::string& line : lines)
     {
-      if (line.empty())
-      {
-        continue;
-      }
-
-      // Check if the line is a name of the code
-      if (line[0] == '$')
-      {
-        if (!current_code.ops.empty())
-        {
-          codes.push_back(current_code);
-          current_code.ops.clear();
-        }
-        if (!encrypted_lines.empty())
-        {
-          DecryptARCode(encrypted_lines, &current_code.ops);
-          codes.push_back(current_code);
-          current_code.ops.clear();
-          encrypted_lines.clear();
-        }
-
-        current_code.name = line.substr(1, line.size() - 1);
-        current_code.user_defined = (ini == &local_ini);
-      }
-      else
-      {
-        const auto parse_result = DeserializeLine(line);
-
-        if (std::holds_alternative<AREntry>(parse_result))
-          current_code.ops.push_back(std::get<AREntry>(parse_result));
-        else if (std::holds_alternative<EncryptedLine>(parse_result))
-          encrypted_lines.emplace_back(std::get<EncryptedLine>(parse_result));
-        else
-          PanicAlertFmtT("Action Replay Error: invalid AR code line: {0}", line);
-      }
+      if (!line.empty())
+        reader.Line(line);
     }
-
-    // Handle the last code correctly.
-    if (!current_code.ops.empty())
-    {
-      codes.push_back(current_code);
-    }
-    if (!encrypted_lines.empty())
-    {
-      DecryptARCode(encrypted_lines, &current_code.ops);
-      codes.push_back(current_code);
-    }
+    reader.Finish();
 
     ReadEnabledAndDisabled(*ini, "ActionReplay", &codes);
 
-    if (ini == &global_ini)
+    // What the global ini switches on is the default.
+    if (!is_local)
     {
       for (ARCode& code : codes)
         code.default_enabled = code.enabled;
@@ -265,55 +867,43 @@ std::vector<ARCode> LoadCodes(const Common::IniFile& global_ini, const Common::I
 
 void SaveCodes(Common::IniFile* local_ini, std::span<const ARCode> codes)
 {
-  std::vector<std::string> lines;
-  std::vector<std::string> enabled_lines;
-  std::vector<std::string> disabled_lines;
+  std::vector<std::string> enabled;
+  std::vector<std::string> disabled;
+  std::vector<std::string> user_codes;
 
-  for (const ActionReplay::ARCode& code : codes)
+  for (const ARCode& code : codes)
   {
     if (code.enabled != code.default_enabled)
-      (code.enabled ? enabled_lines : disabled_lines).emplace_back('$' + code.name);
+      (code.enabled ? enabled : disabled).push_back('$' + code.name);
 
-    if (code.user_defined)
-    {
-      lines.emplace_back('$' + code.name);
-      for (const ActionReplay::AREntry& op : code.ops)
-      {
-        lines.emplace_back(SerializeLine(op));
-      }
-    }
+    if (!code.user_defined)
+      continue;
+
+    user_codes.push_back('$' + code.name);
+    for (const AREntry& op : code.ops)
+      user_codes.push_back(SerializeLine(op));
   }
 
-  local_ini->SetLines("ActionReplay_Enabled", enabled_lines);
-  local_ini->SetLines("ActionReplay_Disabled", disabled_lines);
-  local_ini->SetLines("ActionReplay", lines);
+  local_ini->SetLines("ActionReplay_Enabled", enabled);
+  local_ini->SetLines("ActionReplay_Disabled", disabled);
+  local_ini->SetLines("ActionReplay", user_codes);
 }
 
 std::variant<std::monostate, AREntry, EncryptedLine> DeserializeLine(const std::string& line)
 {
-  std::vector<std::string> pieces = SplitString(line, ' ');
-
-  // Decrypted AR code
-  if (pieces.size() == 2 && pieces[0].size() == 8 && pieces[1].size() == 8)
+  const std::vector<std::string> words = SplitString(line, ' ');
+  if (words.size() == 2 && words[0].size() == 8 && words[1].size() == 8)
   {
-    AREntry op;
-    bool success_addr = TryParse(pieces[0], &op.cmd_addr, 16);
-    bool success_val = TryParse(pieces[1], &op.value, 16);
-
-    if (success_addr && success_val)
-      return op;
+    AREntry entry;
+    if (TryParse(words[0], &entry.cmd_addr, 16) && TryParse(words[1], &entry.value, 16))
+      return entry;
   }
 
-  // Encrypted AR code
-  pieces = SplitString(line, '-');
-  if (pieces.size() == 3 && pieces[0].size() == 4 && pieces[1].size() == 4 && pieces[2].size() == 5)
-  {
-    // Decryption is done in "blocks", so we can't decrypt right away. Instead we push blocks into
-    // a vector, then send to decrypt when a new block is encountered, or if it's the last block.
-    return pieces[0] + pieces[1] + pieces[2];
-  }
+  // Encrypted lines are only decrypted once all lines of a code are known.
+  const std::vector<std::string> groups = SplitString(line, '-');
+  if (groups.size() == 3 && groups[0].size() == 4 && groups[1].size() == 4 && groups[2].size() == 5)
+    return groups[0] + groups[1] + groups[2];
 
-  // Parsing failed
   return std::monostate{};
 }
 
@@ -322,685 +912,26 @@ std::string SerializeLine(const AREntry& op)
   return fmt::format("{:08X} {:08X}", op.cmd_addr, op.value);
 }
 
-static void VLogInfo(std::string_view format, fmt::format_args args)
-{
-  if (s_disable_logging)
-    return;
-
-  const bool use_internal_log = s_use_internal_log.load(std::memory_order_relaxed);
-  if constexpr (Common::Log::MAX_EFFECTIVE_LOGLEVEL < Common::Log::LogLevel::LINFO)
-  {
-    if (!use_internal_log)
-      return;
-  }
-
-  std::string text = fmt::vformat(format, args);
-  INFO_LOG_FMT(ACTIONREPLAY, "{}", text);
-
-  if (use_internal_log)
-  {
-    text += '\n';
-    s_internal_log.emplace_back(std::move(text));
-  }
-}
-
-template <typename... Args>
-static void LogInfo(std::string_view format, const Args&... args)
-{
-  VLogInfo(format, fmt::make_format_args(args...));
-}
-
 void EnableSelfLogging(bool enable)
 {
-  s_use_internal_log.store(enable, std::memory_order_relaxed);
+  s_trace_enabled.store(enable, std::memory_order_relaxed);
 }
 
 std::vector<std::string> GetSelfLog()
 {
-  std::lock_guard guard(s_lock);
-  return s_internal_log;
+  std::lock_guard lock(s_mutex);
+  return s_trace;
 }
 
 void ClearSelfLog()
 {
-  std::lock_guard guard(s_lock);
-  s_internal_log.clear();
+  std::lock_guard lock(s_mutex);
+  s_trace.clear();
 }
 
 bool IsSelfLogging()
 {
-  return s_use_internal_log.load(std::memory_order_relaxed);
-}
-
-// ----------------------
-// Code Functions
-static bool Subtype_RamWriteAndFill(const Core::CPUThreadGuard& guard, const ARAddr& addr,
-                                    const u32 data)
-{
-  const u32 new_addr = addr.GCAddress();
-
-  LogInfo("Hardware Address: {:08x}", new_addr);
-  LogInfo("Size: {:08x}", addr.size);
-
-  switch (addr.size)
-  {
-  case DATATYPE_8BIT:
-  {
-    LogInfo("8-bit Write");
-    LogInfo("--------");
-    const u32 repeat = data >> 8;
-    for (u32 i = 0; i <= repeat; ++i)
-    {
-      ApplyMemoryPatch<u8>(guard, static_cast<u8>(data), new_addr + i);
-      LogInfo("Wrote {:08x} to address {:08x}", data & 0xFF, new_addr + i);
-    }
-    LogInfo("--------");
-    break;
-  }
-
-  case DATATYPE_16BIT:
-  {
-    LogInfo("16-bit Write");
-    LogInfo("--------");
-    const u32 repeat = data >> 16;
-    for (u32 i = 0; i <= repeat; ++i)
-    {
-      ApplyMemoryPatch<u16>(guard, static_cast<u16>(data), new_addr + i * 2);
-      LogInfo("Wrote {:08x} to address {:08x}", data & 0xFFFF, new_addr + i * 2);
-    }
-    LogInfo("--------");
-    break;
-  }
-
-  case DATATYPE_32BIT_FLOAT:
-  case DATATYPE_32BIT:  // Dword write
-    LogInfo("32-bit Write");
-    LogInfo("--------");
-    ApplyMemoryPatch<u32>(guard, data, new_addr);
-    LogInfo("Wrote {:08x} to address {:08x}", data, new_addr);
-    LogInfo("--------");
-    break;
-
-  default:
-    LogInfo("Bad Size");
-    PanicAlertFmtT("Action Replay Error: Invalid size "
-                   "({0:08x} : address = {1:08x}) in Ram Write And Fill ({2})",
-                   addr.size, addr.gcaddr, s_current_code->name);
-    return false;
-  }
-
-  return true;
-}
-
-static bool Subtype_WriteToPointer(const Core::CPUThreadGuard& guard, const ARAddr& addr,
-                                   const u32 data)
-{
-  const u32 new_addr = addr.GCAddress();
-  const u32 ptr = PowerPC::MMU::HostRead<u32>(guard, new_addr);
-
-  LogInfo("Hardware Address: {:08x}", new_addr);
-  LogInfo("Size: {:08x}", addr.size);
-
-  switch (addr.size)
-  {
-  case DATATYPE_8BIT:
-  {
-    LogInfo("Write 8-bit to pointer");
-    LogInfo("--------");
-    const u8 thebyte = static_cast<u8>(data);
-    const u32 offset = data >> 8;
-    LogInfo("Pointer: {:08x}", ptr);
-    LogInfo("Byte: {:08x}", thebyte);
-    LogInfo("Offset: {:08x}", offset);
-    ApplyMemoryPatch<u8>(guard, thebyte, ptr + offset);
-    LogInfo("Wrote {:08x} to address {:08x}", thebyte, ptr + offset);
-    LogInfo("--------");
-    break;
-  }
-
-  case DATATYPE_16BIT:
-  {
-    LogInfo("Write 16-bit to pointer");
-    LogInfo("--------");
-    const u16 theshort = static_cast<u16>(data);
-    const u32 offset = (data >> 16) << 1;
-    LogInfo("Pointer: {:08x}", ptr);
-    LogInfo("Byte: {:08x}", theshort);
-    LogInfo("Offset: {:08x}", offset);
-    ApplyMemoryPatch<u16>(guard, theshort, ptr + offset);
-    LogInfo("Wrote {:08x} to address {:08x}", theshort, ptr + offset);
-    LogInfo("--------");
-    break;
-  }
-
-  case DATATYPE_32BIT_FLOAT:
-  case DATATYPE_32BIT:
-    LogInfo("Write 32-bit to pointer");
-    LogInfo("--------");
-    ApplyMemoryPatch<u32>(guard, data, ptr);
-    LogInfo("Wrote {:08x} to address {:08x}", data, ptr);
-    LogInfo("--------");
-    break;
-
-  default:
-    LogInfo("Bad Size");
-    PanicAlertFmtT("Action Replay Error: Invalid size "
-                   "({0:08x} : address = {1:08x}) in Write To Pointer ({2})",
-                   addr.size, addr.gcaddr, s_current_code->name);
-    return false;
-  }
-  return true;
-}
-
-static bool Subtype_AddCode(const Core::CPUThreadGuard& guard, const ARAddr& addr, const u32 data)
-{
-  // Used to increment/decrement a value in memory
-  const u32 new_addr = addr.GCAddress();
-
-  LogInfo("Hardware Address: {:08x}", new_addr);
-  LogInfo("Size: {:08x}", addr.size);
-
-  switch (addr.size)
-  {
-  case DATATYPE_8BIT:
-    LogInfo("8-bit Add");
-    LogInfo("--------");
-    ApplyMemoryPatch<u8>(guard, PowerPC::MMU::HostRead<u8>(guard, new_addr) + data, new_addr);
-    LogInfo("Wrote {:02x} to address {:08x}", PowerPC::MMU::HostRead<u8>(guard, new_addr),
-            new_addr);
-    LogInfo("--------");
-    break;
-
-  case DATATYPE_16BIT:
-    LogInfo("16-bit Add");
-    LogInfo("--------");
-    ApplyMemoryPatch<u16>(guard, PowerPC::MMU::HostRead<u16>(guard, new_addr) + data, new_addr);
-    LogInfo("Wrote {:04x} to address {:08x}", PowerPC::MMU::HostRead<u16>(guard, new_addr),
-            new_addr);
-    LogInfo("--------");
-    break;
-
-  case DATATYPE_32BIT:
-    LogInfo("32-bit Add");
-    LogInfo("--------");
-    ApplyMemoryPatch<u32>(guard, PowerPC::MMU::HostRead<u32>(guard, new_addr) + data, new_addr);
-    LogInfo("Wrote {:08x} to address {:08x}", PowerPC::MMU::HostRead<u32>(guard, new_addr),
-            new_addr);
-    LogInfo("--------");
-    break;
-
-  case DATATYPE_32BIT_FLOAT:
-  {
-    LogInfo("32-bit floating Add");
-    LogInfo("--------");
-
-    const u32 read = PowerPC::MMU::HostRead<u32>(guard, new_addr);
-    const float read_float = std::bit_cast<float>(read);
-    // data contains an (unsigned?) integer value
-    const float fread = read_float + static_cast<float>(data);
-    const u32 newval = std::bit_cast<u32>(fread);
-    ApplyMemoryPatch<u32>(guard, newval, new_addr);
-    LogInfo("Old Value {:08x}", read);
-    LogInfo("Increment {:08x}", data);
-    LogInfo("New value {:08x}", newval);
-    LogInfo("--------");
-    break;
-  }
-
-  default:
-    LogInfo("Bad Size");
-    PanicAlertFmtT("Action Replay Error: Invalid size "
-                   "({0:08x} : address = {1:08x}) in Add Code ({2})",
-                   addr.size, addr.gcaddr, s_current_code->name);
-    return false;
-  }
-  return true;
-}
-
-static bool Subtype_MasterCodeAndWriteToCCXXXXXX(const ARAddr& addr, const u32 data)
-{
-  // code not yet implemented - TODO
-  // u32 new_addr = (addr & 0x01FFFFFF) | 0x80000000;
-  // u8  mcode_type = (data & 0xFF0000) >> 16;
-  // u8  mcode_count = (data & 0xFF00) >> 8;
-  // u8  mcode_number = data & 0xFF;
-  PanicAlertFmtT("Action Replay Error: Master Code and Write To CCXXXXXX not implemented ({0})\n"
-                 "Master codes are not needed. Do not use master codes.",
-                 s_current_code->name);
-  return false;
-}
-
-// This needs more testing
-static bool ZeroCode_FillAndSlide(const Core::CPUThreadGuard& guard, const u32 val_last,
-                                  const ARAddr& addr, const u32 data)
-{
-  const u32 new_addr = ARAddr(val_last).GCAddress();
-  const u8 size = ARAddr(val_last).size;
-
-  const s16 addr_incr = static_cast<s16>(data & 0xFFFF);
-  const s8 val_incr = static_cast<s8>(data >> 24);
-  const u8 write_num = static_cast<u8>((data & 0xFF0000) >> 16);
-
-  u32 val = addr;
-  u32 curr_addr = new_addr;
-
-  LogInfo("Current Hardware Address: {:08x}", new_addr);
-  LogInfo("Size: {:08x}", addr.size);
-  LogInfo("Write Num: {:08x}", write_num);
-  LogInfo("Address Increment: {}", addr_incr);
-  LogInfo("Value Increment: {}", s32{val_incr});
-
-  switch (size)
-  {
-  case DATATYPE_8BIT:
-    LogInfo("8-bit Write");
-    LogInfo("--------");
-    for (int i = 0; i < write_num; ++i)
-    {
-      ApplyMemoryPatch<u8>(guard, static_cast<u8>(val), curr_addr);
-      curr_addr += addr_incr;
-      val += val_incr;
-      LogInfo("Write {:08x} to address {:08x}", val & 0xFF, curr_addr);
-
-      LogInfo("Value Update: {:08x}", val);
-      LogInfo("Current Hardware Address Update: {:08x}", curr_addr);
-    }
-    LogInfo("--------");
-    break;
-
-  case DATATYPE_16BIT:
-    LogInfo("16-bit Write");
-    LogInfo("--------");
-    for (int i = 0; i < write_num; ++i)
-    {
-      ApplyMemoryPatch<u16>(guard, static_cast<u16>(val), curr_addr);
-      LogInfo("Write {:08x} to address {:08x}", val & 0xFFFF, curr_addr);
-      curr_addr += addr_incr * 2;
-      val += val_incr;
-      LogInfo("Value Update: {:08x}", val);
-      LogInfo("Current Hardware Address Update: {:08x}", curr_addr);
-    }
-    LogInfo("--------");
-    break;
-
-  case DATATYPE_32BIT:
-    LogInfo("32-bit Write");
-    LogInfo("--------");
-    for (int i = 0; i < write_num; ++i)
-    {
-      ApplyMemoryPatch<u32>(guard, val, curr_addr);
-      LogInfo("Write {:08x} to address {:08x}", val, curr_addr);
-      curr_addr += addr_incr * 4;
-      val += val_incr;
-      LogInfo("Value Update: {:08x}", val);
-      LogInfo("Current Hardware Address Update: {:08x}", curr_addr);
-    }
-    LogInfo("--------");
-    break;
-
-  default:
-    LogInfo("Bad Size");
-    PanicAlertFmtT(
-        "Action Replay Error: Invalid size ({0:08x} : address = {1:08x}) in Fill and Slide ({2})",
-        size, new_addr, s_current_code->name);
-    return false;
-  }
-  return true;
-}
-
-// kenobi's "memory copy" Z-code. Requires an additional master code
-// on a real AR device. Documented here:
-// https://github.com/dolphin-emu/dolphin/wiki/GameCube-Action-Replay-Code-Types#type-z4-size-3--memory-copy
-static bool ZeroCode_MemoryCopy(const Core::CPUThreadGuard& guard, const u32 val_last,
-                                const ARAddr& addr, const u32 data)
-{
-  const u32 addr_dest = val_last & ~0x06000000;
-  const u32 addr_src = addr.GCAddress();
-
-  const u8 num_bytes = data & 0x7FFF;
-
-  LogInfo("Dest Address: {:08x}", addr_dest);
-  LogInfo("Src Address: {:08x}", addr_src);
-  LogInfo("Size: {:08x}", num_bytes);
-
-  if ((data & 0xFF0000) == 0)
-  {
-    if ((data >> 24) != 0x0)
-    {  // Memory Copy With Pointers Support
-      LogInfo("Memory Copy With Pointers Support");
-      LogInfo("--------");
-      const u32 ptr_dest = PowerPC::MMU::HostRead<u32>(guard, addr_dest);
-      LogInfo("Resolved Dest Address to: {:08x}", ptr_dest);
-      const u32 ptr_src = PowerPC::MMU::HostRead<u32>(guard, addr_src);
-      LogInfo("Resolved Src Address to: {:08x}", ptr_src);
-      for (int i = 0; i < num_bytes; ++i)
-      {
-        ApplyMemoryPatch<u8>(guard, PowerPC::MMU::HostRead<u8>(guard, ptr_src + i), ptr_dest + i);
-        LogInfo("Wrote {:08x} to address {:08x}", PowerPC::MMU::HostRead<u8>(guard, ptr_src + i),
-                ptr_dest + i);
-      }
-      LogInfo("--------");
-    }
-    else
-    {  // Memory Copy Without Pointer Support
-      LogInfo("Memory Copy Without Pointers Support");
-      LogInfo("--------");
-      for (int i = 0; i < num_bytes; ++i)
-      {
-        ApplyMemoryPatch<u8>(guard, PowerPC::MMU::HostRead<u8>(guard, addr_src + i), addr_dest + i);
-        LogInfo("Wrote {:08x} to address {:08x}", PowerPC::MMU::HostRead<u8>(guard, addr_src + i),
-                addr_dest + i);
-      }
-      LogInfo("--------");
-      return true;
-    }
-  }
-  else
-  {
-    LogInfo("Bad Value");
-    PanicAlertFmtT("Action Replay Error: Invalid value ({0:08x}) in Memory Copy ({1})",
-                   (data & ~0x7FFF), s_current_code->name);
-    return false;
-  }
-  return true;
-}
-
-static bool NormalCode(const Core::CPUThreadGuard& guard, const ARAddr& addr, const u32 data)
-{
-  switch (addr.subtype)
-  {
-  case SUB_RAM_WRITE:  // Ram write (and fill)
-    LogInfo("Doing Ram Write And Fill");
-    if (!Subtype_RamWriteAndFill(guard, addr, data))
-      return false;
-    break;
-
-  case SUB_WRITE_POINTER:  // Write to pointer
-    LogInfo("Doing Write To Pointer");
-    if (!Subtype_WriteToPointer(guard, addr, data))
-      return false;
-    break;
-
-  case SUB_ADD_CODE:  // Increment Value
-    LogInfo("Doing Add Code");
-    if (!Subtype_AddCode(guard, addr, data))
-      return false;
-    break;
-
-  case SUB_MASTER_CODE:  // Master Code & Write to CCXXXXXX
-    LogInfo("Doing Master Code And Write to CCXXXXXX (ncode not supported)");
-    if (!Subtype_MasterCodeAndWriteToCCXXXXXX(addr, data))
-      return false;
-    break;
-
-  default:
-    LogInfo("Bad Subtype");
-    PanicAlertFmtT("Action Replay: Normal Code 0: Invalid Subtype {0:08x} ({1})", addr.subtype,
-                   s_current_code->name);
-    return false;
-  }
-
-  return true;
-}
-
-static bool CompareValues(const u32 val1, const u32 val2, const int type)
-{
-  switch (type)
-  {
-  case CONDTIONAL_EQUAL:
-    LogInfo("Type 1: If Equal");
-    return val1 == val2;
-
-  case CONDTIONAL_NOT_EQUAL:
-    LogInfo("Type 2: If Not Equal");
-    return val1 != val2;
-
-  case CONDTIONAL_LESS_THAN_SIGNED:
-    LogInfo("Type 3: If Less Than (Signed)");
-    return static_cast<s32>(val1) < static_cast<s32>(val2);
-
-  case CONDTIONAL_GREATER_THAN_SIGNED:
-    LogInfo("Type 4: If Greater Than (Signed)");
-    return static_cast<s32>(val1) > static_cast<s32>(val2);
-
-  case CONDTIONAL_LESS_THAN_UNSIGNED:
-    LogInfo("Type 5: If Less Than (Unsigned)");
-    return val1 < val2;
-
-  case CONDTIONAL_GREATER_THAN_UNSIGNED:
-    LogInfo("Type 6: If Greater Than (Unsigned)");
-    return val1 > val2;
-
-  case CONDTIONAL_AND:
-    LogInfo("Type 7: If And");
-    return !!(val1 & val2);  // bitwise AND
-
-  default:
-    LogInfo("Unknown Compare type");
-    PanicAlertFmtT("Action Replay: Invalid Normal Code Type {0:08x} ({1})", type,
-                   s_current_code->name);
-    return false;
-  }
-}
-
-static bool ConditionalCode(const Core::CPUThreadGuard& guard, const ARAddr& addr, const u32 data,
-                            int* const pSkipCount)
-{
-  const u32 new_addr = addr.GCAddress();
-
-  LogInfo("Size: {:08x}", addr.size);
-  LogInfo("Hardware Address: {:08x}", new_addr);
-
-  bool result = true;
-
-  switch (addr.size)
-  {
-  case DATATYPE_8BIT:
-    result = CompareValues(PowerPC::MMU::HostRead<u8>(guard, new_addr), (data & 0xFF), addr.type);
-    break;
-
-  case DATATYPE_16BIT:
-    result =
-        CompareValues(PowerPC::MMU::HostRead<u16>(guard, new_addr), (data & 0xFFFF), addr.type);
-    break;
-
-  case DATATYPE_32BIT_FLOAT:
-  case DATATYPE_32BIT:
-    result = CompareValues(PowerPC::MMU::HostRead<u32>(guard, new_addr), data, addr.type);
-    break;
-
-  default:
-    LogInfo("Bad Size");
-    PanicAlertFmtT("Action Replay: Conditional Code: Invalid Size {0:08x} ({1})", addr.size,
-                   s_current_code->name);
-    return false;
-  }
-
-  // if the comparison failed we need to skip some lines
-  if (false == result)
-  {
-    switch (addr.subtype)
-    {
-    case CONDTIONAL_ONE_LINE:
-    case CONDTIONAL_TWO_LINES:
-      *pSkipCount = addr.subtype + 1;  // Skip 1 or 2 lines
-      break;
-
-    // Skip all lines,
-    // Skip lines until a "00000000 40000000" line is reached
-    case CONDTIONAL_ALL_LINES:
-    case CONDTIONAL_ALL_LINES_UNTIL:
-      *pSkipCount = -static_cast<int>(addr.subtype);
-      break;
-
-    default:
-      LogInfo("Bad Subtype");
-      PanicAlertFmtT("Action Replay: Normal Code {0}: Invalid subtype {1:08x} ({2})", 1,
-                     addr.subtype, s_current_code->name);
-      return false;
-    }
-  }
-
-  return true;
-}
-
-// NOTE: Lock needed to give mutual exclusion to s_current_code and LogInfo
-static bool RunCodeLocked(const Core::CPUThreadGuard& guard, const ARCode& arcode)
-{
-  // The mechanism is different than what the real AR uses, so there may be compatibility problems.
-
-  bool do_fill_and_slide = false;
-  bool do_memory_copy = false;
-
-  // used for conditional codes
-  int skip_count = 0;
-
-  u32 val_last = 0;
-
-  s_current_code = &arcode;
-
-  LogInfo("Code Name: {}", arcode.name);
-  LogInfo("Number of codes: {}", arcode.ops.size());
-
-  for (const AREntry& entry : arcode.ops)
-  {
-    const ARAddr addr(entry.cmd_addr);
-    const u32 data = entry.value;
-
-    // after a conditional code, skip lines if needed
-    if (skip_count)
-    {
-      if (skip_count > 0)  // skip x lines
-      {
-        LogInfo("Line skipped");
-        --skip_count;
-      }
-      else if (-CONDTIONAL_ALL_LINES == skip_count)
-      {
-        // skip all lines
-        LogInfo("All Lines skipped");
-        return true;  // don't need to iterate through the rest of the ops
-      }
-      else if (-CONDTIONAL_ALL_LINES_UNTIL == skip_count)
-      {
-        // skip until a "00000000 40000000" line is reached
-        LogInfo("Line skipped");
-        if (addr == 0 && 0x40000000 == data)  // check for an endif line
-          skip_count = 0;
-      }
-
-      continue;
-    }
-
-    LogInfo("--- Running Code: {:08x} {:08x} ---", addr.address, data);
-
-    // Do Fill & Slide
-    if (do_fill_and_slide)
-    {
-      do_fill_and_slide = false;
-      LogInfo("Doing Fill And Slide");
-      if (false == ZeroCode_FillAndSlide(guard, val_last, addr, data))
-        return false;
-      continue;
-    }
-
-    // Memory Copy
-    if (do_memory_copy)
-    {
-      do_memory_copy = false;
-      LogInfo("Doing Memory Copy");
-      if (false == ZeroCode_MemoryCopy(guard, val_last, addr, data))
-        return false;
-      continue;
-    }
-
-    // ActionReplay program self modification codes
-    if (addr >= 0x00002000 && addr < 0x00003000)
-    {
-      LogInfo(
-          "This action replay simulator does not support codes that modify Action Replay itself.");
-      PanicAlertFmtT(
-          "This action replay simulator does not support codes that modify Action Replay itself.");
-      return false;
-    }
-
-    // skip these weird init lines
-    // TODO: Where are the "weird init lines"?
-    // if (iter == code.ops.begin() && cmd == 1)
-    // continue;
-
-    // Zero codes
-    if (0x0 == addr)  // Check if the code is a zero code
-    {
-      const u8 zcode = data >> 29;
-
-      LogInfo("Doing Zero Code {:08x}", zcode);
-
-      switch (zcode)
-      {
-      case ZCODE_END:  // END OF CODES
-        LogInfo("ZCode: End Of Codes");
-        return true;
-
-      // TODO: the "00000000 40000000"(end if) codes fall into this case, I don't think that is
-      // correct
-      case ZCODE_NORM:  // Normal execution of codes
-        // Todo: Set register 1BB4 to 0
-        LogInfo("ZCode: Normal execution of codes, set register 1BB4 to 0 (zcode not supported)");
-        break;
-
-      case ZCODE_ROW:  // Executes all codes in the same row
-        // Todo: Set register 1BB4 to 1
-        LogInfo("ZCode: Executes all codes in the same row, Set register 1BB4 to 1 (zcode not "
-                "supported)");
-        PanicAlertFmtT("Zero 3 code not supported");
-        return false;
-
-      case ZCODE_04:  // Fill & Slide or Memory Copy
-        if (0x3 == ((data >> 25) & 0x03))
-        {
-          LogInfo("ZCode: Memory Copy");
-          do_memory_copy = true;
-          val_last = data;
-        }
-        else
-        {
-          LogInfo("ZCode: Fill And Slide");
-          do_fill_and_slide = true;
-          val_last = data;
-        }
-        break;
-
-      default:
-        LogInfo("ZCode: Unknown");
-        PanicAlertFmtT("Zero code unknown to Dolphin: {0:08x}", zcode);
-        return false;
-      }
-
-      // done handling zero codes
-      continue;
-    }
-
-    // Normal codes
-    LogInfo("Doing Normal Code {:08x}", addr.type);
-    LogInfo("Subtype: {:08x}", addr.subtype);
-
-    switch (addr.type)
-    {
-    case 0x00:
-      if (false == NormalCode(guard, addr, data))
-        return false;
-      break;
-
-    default:
-      LogInfo("This Normal Code is a Conditional Code");
-      if (false == ConditionalCode(guard, addr, data, &skip_count))
-        return false;
-      break;
-    }
-  }
-
-  return true;
+  return s_trace_enabled.load(std::memory_order_relaxed);
 }
 
 void RunAllActive(const Core::CPUThreadGuard& cpu_guard)
@@ -1008,16 +939,13 @@ void RunAllActive(const Core::CPUThreadGuard& cpu_guard)
   if (!Config::AreCheatsEnabled())
     return;
 
-  // If the mutex is idle then acquiring it should be cheap, fast mutexes
-  // are only atomic ops unless contested. It should be rare for this to
-  // be contested.
-  std::lock_guard guard(s_lock);
-  std::erase_if(s_active_codes, [&cpu_guard](const ARCode& code) {
-    const bool success = RunCodeLocked(cpu_guard, code);
-    LogInfo("\n");
-    return !success;
+  std::lock_guard lock(s_mutex);
+  std::erase_if(s_running, [&cpu_guard](const ARCode& code) {
+    const bool keep = CodeRunner(cpu_guard, code).Run();
+    LogStep("\n");
+    return !keep;
   });
-  s_disable_logging = true;
+  s_trace_paused = true;
 }
 
 }  // namespace ActionReplay

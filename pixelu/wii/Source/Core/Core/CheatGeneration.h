@@ -1,5 +1,4 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -18,6 +17,7 @@ enum class GenerateActionReplayCodeErrorCode
   InvalidAddress,
 };
 
+// Turns cheat search result `index` into an AR code that writes the result's current value.
 std::expected<ActionReplay::ARCode, GenerateActionReplayCodeErrorCode>
 GenerateActionReplayCode(const Cheats::CheatSearchSessionBase& session, size_t index);
 }  // namespace Cheats

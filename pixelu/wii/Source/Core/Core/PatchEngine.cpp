@@ -1,19 +1,14 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-
-// PatchEngine
-// Supports simple memory patches, and has a partial Action Replay implementation
-// in ActionReplay.cpp/h.
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/PatchEngine.h"
 
 #include <algorithm>
 #include <array>
-#include <iterator>
 #include <mutex>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <fmt/format.h>
@@ -39,156 +34,246 @@
 
 namespace PatchEngine
 {
-constexpr std::array<const char*, 3> s_patch_type_strings{{
-    "byte",
-    "word",
-    "dword",
-}};
+namespace
+{
+// Indexed by PatchType.
+constexpr std::array<const char*, 3> kTypeNames{"byte", "word", "dword"};
 
-static std::vector<Patch> s_on_frame;
-static std::vector<std::size_t> s_on_frame_memory;
-static std::mutex s_on_frame_memory_mutex;
+std::vector<Patch> s_ini_patches;
+
+std::mutex s_debugger_patches_mutex;
+std::vector<std::size_t> s_debugger_patches;
+
+std::optional<PatchType> TypeFromName(std::string_view name)
+{
+  for (std::size_t i = 0; i < kTypeNames.size(); ++i)
+  {
+    if (name == kTypeNames[i])
+      return static_cast<PatchType>(i);
+  }
+  return std::nullopt;
+}
+
+// Writes `entry` if it is unconditional or memory currently holds its comparand (compared at the
+// entry's width).
+template <typename T>
+void ApplyEntry(const Core::CPUThreadGuard& guard, const PatchEntry& entry)
+{
+  const T value = static_cast<T>(entry.value);
+  if (entry.conditional &&
+      PowerPC::MMU::HostRead<T>(guard, entry.address) != static_cast<T>(entry.comparand))
+  {
+    return;
+  }
+  ApplyMemoryPatch<T>(guard, value, entry.address);
+}
+
+void ApplyIniPatches(const Core::CPUThreadGuard& guard, std::span<const Patch> patches)
+{
+  for (const Patch& patch : patches)
+  {
+    if (!patch.enabled)
+      continue;
+    for (const PatchEntry& entry : patch.entries)
+    {
+      if (entry.type == PatchType::Patch8Bit)
+        ApplyEntry<u8>(guard, entry);
+      else if (entry.type == PatchType::Patch16Bit)
+        ApplyEntry<u16>(guard, entry);
+      else if (entry.type == PatchType::Patch32Bit)
+        ApplyEntry<u32>(guard, entry);
+    }
+  }
+}
+
+void ApplyDebuggerPatches(const Core::CPUThreadGuard& guard)
+{
+  std::lock_guard lock(s_debugger_patches_mutex);
+  auto& debug_interface = guard.GetSystem().GetPowerPC().GetDebugInterface();
+  for (const std::size_t index : s_debugger_patches)
+    debug_interface.ApplyExistingPatch(guard, index);
+}
+
+// Patches are applied from the VI interrupt, which can land while the game is in an exception
+// handler or otherwise not running normal code. As a guess at "normal code", the stack must have
+// at least two sane frames and the saved return address must point at an instruction.
+// Expects address translation to be on.
+bool LooksLikeNormalCode(const Core::CPUThreadGuard& guard)
+{
+  const auto& ppc_state = guard.GetSystem().GetPPCState();
+  DEBUG_ASSERT(ppc_state.msr.DR && ppc_state.msr.IR);
+
+  const u32 stack = ppc_state.gpr[1];
+  if (!PowerPC::MMU::HostIsRAMAddress(guard, stack))
+    return false;
+
+  // The back chain must point further up the stack, at readable memory.
+  const u32 caller_frame = PowerPC::MMU::HostRead<u32>(guard, stack);
+  if (caller_frame <= stack)
+    return false;
+  if (!PowerPC::MMU::HostIsRAMAddress(guard, caller_frame) ||
+      !PowerPC::MMU::HostIsRAMAddress(guard, caller_frame + 4))
+  {
+    return false;
+  }
+
+  // The caller frame's LR save word.
+  const u32 return_address = PowerPC::MMU::HostRead<u32>(guard, caller_frame + 4);
+  if (!PowerPC::MMU::HostIsInstructionRAMAddress(guard, return_address))
+    return false;
+  return PowerPC::MMU::HostRead_Instruction(guard, return_address) != 0;
+}
+
+void LogRetryLater(const PowerPC::PowerPCState& ppc_state)
+{
+  DEBUG_LOG_FMT(ACTIONREPLAY,
+                "Need to retry later. CPU configuration is currently incorrect. PC = {:#010x}, "
+                "MSR = {:#010x}",
+                ppc_state.pc, ppc_state.msr.Hex);
+}
+
+bool TranslationEnabled(const PowerPC::PowerPCState& ppc_state)
+{
+  return ppc_state.msr.DR && ppc_state.msr.IR;
+}
+
+// Applies the ini patches right after (re)loading them, so they don't wait for the next frame.
+void ApplyAfterReload(Core::System& system)
+{
+  ASSERT(Core::IsCPUThread());
+  Core::CPUThreadGuard guard(system);
+
+  const auto& ppc_state = system.GetPPCState();
+  if (!TranslationEnabled(ppc_state))
+  {
+    LogRetryLater(ppc_state);
+    return;
+  }
+  ApplyIniPatches(guard, s_ini_patches);
+}
+}  // namespace
 
 const char* PatchTypeAsString(PatchType type)
 {
-  return s_patch_type_strings.at(static_cast<int>(type));
+  return kTypeNames.at(static_cast<std::size_t>(type));
 }
 
 std::optional<PatchEntry> DeserializeLine(std::string line)
 {
-  std::string::size_type loc = line.find('=');
-  if (loc != std::string::npos)
-    line[loc] = ':';
+  // "address=type:value" is accepted too.
+  if (const std::size_t equals = line.find('='); equals != std::string::npos)
+    line[equals] = ':';
 
-  const std::vector<std::string> items = SplitString(line, ':');
+  const std::vector<std::string> fields = SplitString(line, ':');
+  if (fields.size() < 3)
+    return std::nullopt;
+
   PatchEntry entry;
-
-  if (items.size() < 3)
+  if (!TryParse(fields[0], &entry.address) || !TryParse(fields[2], &entry.value))
     return std::nullopt;
-
-  if (!TryParse(items[0], &entry.address))
-    return std::nullopt;
-  if (!TryParse(items[2], &entry.value))
-    return std::nullopt;
-
-  if (items.size() >= 4)
+  if (fields.size() > 3)
   {
-    if (!TryParse(items[3], &entry.comparand))
+    if (!TryParse(fields[3], &entry.comparand))
       return std::nullopt;
     entry.conditional = true;
   }
 
-  const auto iter = std::ranges::find(s_patch_type_strings, items[1]);
-  if (iter == s_patch_type_strings.end())
+  const std::optional<PatchType> type = TypeFromName(fields[1]);
+  if (!type)
     return std::nullopt;
-  entry.type = static_cast<PatchType>(std::distance(s_patch_type_strings.begin(), iter));
-
+  entry.type = *type;
   return entry;
 }
 
 std::string SerializeLine(const PatchEntry& entry)
 {
+  std::string line =
+      fmt::format("0x{:08X}:{}:0x{:08X}", entry.address, PatchTypeAsString(entry.type), entry.value);
   if (entry.conditional)
-  {
-    return fmt::format("0x{:08X}:{}:0x{:08X}:0x{:08X}", entry.address,
-                       PatchEngine::PatchTypeAsString(entry.type), entry.value, entry.comparand);
-  }
-  else
-  {
-    return fmt::format("0x{:08X}:{}:0x{:08X}", entry.address,
-                       PatchEngine::PatchTypeAsString(entry.type), entry.value);
-  }
+    line += fmt::format(":0x{:08X}", entry.comparand);
+  return line;
 }
 
 void LoadPatchSection(const std::string& section, std::vector<Patch>* patches,
                       const Common::IniFile& globalIni, const Common::IniFile& localIni)
 {
-  for (const auto* ini : {&globalIni, &localIni})
-  {
+  // A section is "$Name" lines, each followed by its entry lines. Entry lines that don't parse are
+  // skipped, as are entries in front of the first name. A patch is kept even without entries,
+  // except the section's last one.
+  const auto read_ini = [&](const Common::IniFile& ini, bool user_defined) {
     std::vector<std::string> lines;
-    Patch currentPatch;
-    ini->GetLines(section, &lines);
+    ini.GetLines(section, &lines);
 
-    for (std::string& line : lines)
+    Patch pending;
+    for (const std::string& line : lines)
     {
       if (line.empty())
         continue;
 
-      if (line[0] == '$')
-      {
-        // Take care of the previous code
-        if (!currentPatch.name.empty())
-        {
-          patches->push_back(currentPatch);
-        }
-        currentPatch.entries.clear();
-
-        // Set name and whether the patch is user defined
-        currentPatch.name = line.substr(1, line.size() - 1);
-        currentPatch.user_defined = (ini == &localIni);
-      }
-      else
+      if (line[0] != '$')
       {
         if (std::optional<PatchEntry> entry = DeserializeLine(line))
-          currentPatch.entries.push_back(*entry);
+          pending.entries.push_back(*entry);
+        continue;
       }
-    }
 
-    if (!currentPatch.name.empty() && !currentPatch.entries.empty())
-    {
-      patches->push_back(currentPatch);
+      if (!pending.name.empty())
+        patches->push_back(pending);
+      pending.entries.clear();
+      pending.name = line.substr(1);
+      pending.user_defined = user_defined;
     }
+    if (!pending.name.empty() && !pending.entries.empty())
+      patches->push_back(std::move(pending));
 
-    ReadEnabledAndDisabled(*ini, section, patches);
+    ReadEnabledAndDisabled(ini, section, patches);
+  };
 
-    if (ini == &globalIni)
-    {
-      for (Patch& patch : *patches)
-        patch.default_enabled = patch.enabled;
-    }
-  }
+  read_ini(globalIni, false);
+  // The global ini decides the defaults; the local ini's lists are saved against them.
+  for (Patch& patch : *patches)
+    patch.default_enabled = patch.enabled;
+  read_ini(localIni, true);
 }
 
 void SavePatchSection(Common::IniFile* local_ini, std::span<const Patch> patches)
 {
-  std::vector<std::string> lines;
-  std::vector<std::string> lines_enabled;
-  std::vector<std::string> lines_disabled;
+  std::vector<std::string> turned_on;
+  std::vector<std::string> turned_off;
+  std::vector<std::string> user_patches;
 
-  for (const auto& patch : patches)
+  for (const Patch& patch : patches)
   {
     if (patch.enabled != patch.default_enabled)
-      (patch.enabled ? lines_enabled : lines_disabled).emplace_back('$' + patch.name);
+      (patch.enabled ? turned_on : turned_off).push_back("$" + patch.name);
 
+    // Shipped patches stay in the global ini.
     if (!patch.user_defined)
       continue;
-
-    lines.emplace_back('$' + patch.name);
-
+    user_patches.push_back("$" + patch.name);
     for (const PatchEntry& entry : patch.entries)
-      lines.emplace_back(SerializeLine(entry));
+      user_patches.push_back(SerializeLine(entry));
   }
 
-  local_ini->SetLines("OnFrame_Enabled", lines_enabled);
-  local_ini->SetLines("OnFrame_Disabled", lines_disabled);
-  local_ini->SetLines("OnFrame", lines);
+  local_ini->SetLines("OnFrame_Enabled", std::move(turned_on));
+  local_ini->SetLines("OnFrame_Disabled", std::move(turned_off));
+  local_ini->SetLines("OnFrame", std::move(user_patches));
 }
 
 void LoadPatches()
 {
-  const auto& sconfig = SConfig::GetInstance();
-  Common::IniFile merged = sconfig.LoadGameIni();
-  Common::IniFile globalIni = sconfig.LoadDefaultGameIni();
-  Common::IniFile localIni = sconfig.LoadLocalGameIni();
+  const SConfig& config = SConfig::GetInstance();
+  const Common::IniFile global_ini = config.LoadDefaultGameIni();
+  const Common::IniFile local_ini = config.LoadLocalGameIni();
 
-  LoadPatchSection("OnFrame", &s_on_frame, globalIni, localIni);
+  LoadPatchSection("OnFrame", &s_ini_patches, global_ini, local_ini);
 
 #ifdef USE_RETRO_ACHIEVEMENTS
-  AchievementManager::GetInstance().FilterApprovedPatches(s_on_frame, sconfig.GetGameID(),
-                                                          sconfig.GetRevision());
+  AchievementManager::GetInstance().FilterApprovedPatches(s_ini_patches, config.GetGameID(),
+                                                          config.GetRevision());
 #endif  // USE_RETRO_ACHIEVEMENTS
 
-  // Check if I'm syncing Codes
+  // During NetPlay with code syncing, the host's codes are used instead of this ini's.
   if (Config::Get(Config::SESSION_CODE_SYNC_OVERRIDE))
   {
     Gecko::SetSyncedCodesAsActive();
@@ -196,131 +281,35 @@ void LoadPatches()
   }
   else
   {
-    Gecko::SetActiveCodes(Gecko::LoadCodes(globalIni, localIni), sconfig.GetGameID(),
-                          sconfig.GetRevision());
-    ActionReplay::LoadAndApplyCodes(globalIni, localIni, sconfig.GetGameID(),
-                                    sconfig.GetRevision());
+    Gecko::SetActiveCodes(Gecko::LoadCodes(global_ini, local_ini), config.GetGameID(),
+                          config.GetRevision());
+    ActionReplay::LoadAndApplyCodes(global_ini, local_ini, config.GetGameID(),
+                                    config.GetRevision());
   }
 
-  const size_t enabled_patch_count =
-      std::ranges::count_if(s_on_frame, [](const Patch& patch) { return patch.enabled; });
-  if (enabled_patch_count > 0)
+  const auto patch_count =
+      std::ranges::count_if(s_ini_patches, [](const Patch& patch) { return patch.enabled; });
+  if (patch_count != 0)
   {
-    OSD::AddMessage(fmt::format("{} game patch(es) enabled", enabled_patch_count),
+    OSD::AddMessage(fmt::format("{} game patch(es) enabled", patch_count),
                     OSD::Duration::NORMAL);
   }
 
-  const size_t enabled_cheat_count = ActionReplay::CountEnabledCodes() + Gecko::CountEnabledCodes();
-  if (enabled_cheat_count > 0)
-    OSD::AddMessage(fmt::format("{} cheat(s) enabled", enabled_cheat_count), OSD::Duration::NORMAL);
-}
-
-static void ApplyPatches(const Core::CPUThreadGuard& guard, const std::vector<Patch>& patches)
-{
-  for (const Patch& patch : patches)
-  {
-    if (patch.enabled)
-    {
-      for (const PatchEntry& entry : patch.entries)
-      {
-        u32 addr = entry.address;
-        u32 value = entry.value;
-        u32 comparand = entry.comparand;
-        switch (entry.type)
-        {
-        case PatchType::Patch8Bit:
-          if (!entry.conditional ||
-              PowerPC::MMU::HostRead<u8>(guard, addr) == static_cast<u8>(comparand))
-          {
-            ApplyMemoryPatch<u8>(guard, static_cast<u8>(value), addr);
-          }
-          break;
-        case PatchType::Patch16Bit:
-          if (!entry.conditional ||
-              PowerPC::MMU::HostRead<u16>(guard, addr) == static_cast<u16>(comparand))
-          {
-            ApplyMemoryPatch<u16>(guard, static_cast<u16>(value), addr);
-          }
-          break;
-        case PatchType::Patch32Bit:
-          if (!entry.conditional || PowerPC::MMU::HostRead<u32>(guard, addr) == comparand)
-            ApplyMemoryPatch<u32>(guard, value, addr);
-          break;
-        default:
-          // unknown patchtype
-          break;
-        }
-      }
-    }
-  }
-}
-
-static void ApplyMemoryPatches(const Core::CPUThreadGuard& guard,
-                               std::span<const std::size_t> memory_patch_indices)
-{
-  std::lock_guard lock(s_on_frame_memory_mutex);
-  for (std::size_t index : memory_patch_indices)
-  {
-    guard.GetSystem().GetPowerPC().GetDebugInterface().ApplyExistingPatch(guard, index);
-  }
-}
-
-// Requires MSR.DR, MSR.IR
-// There's no perfect way to do this, it's just a heuristic.
-// We require at least 2 stack frames, if the stack is shallower than that then it won't work.
-static bool IsStackValid(const Core::CPUThreadGuard& guard)
-{
-  const auto& ppc_state = guard.GetSystem().GetPPCState();
-
-  DEBUG_ASSERT(ppc_state.msr.DR && ppc_state.msr.IR);
-
-  // Check the stack pointer
-  const u32 SP = ppc_state.gpr[1];
-  if (!PowerPC::MMU::HostIsRAMAddress(guard, SP))
-    return false;
-
-  // Read the frame pointer from the stack (find 2nd frame from top), assert that it makes sense
-  const u32 next_SP = PowerPC::MMU::HostRead<u32>(guard, SP);
-  if (next_SP <= SP || !PowerPC::MMU::HostIsRAMAddress(guard, next_SP) ||
-      !PowerPC::MMU::HostIsRAMAddress(guard, next_SP + 4))
-  {
-    return false;
-  }
-
-  // Check the link register makes sense (that it points to a valid IBAT address)
-  const u32 address = PowerPC::MMU::HostRead<u32>(guard, next_SP + 4);
-  return PowerPC::MMU::HostIsInstructionRAMAddress(guard, address) &&
-         0 != PowerPC::MMU::HostRead_Instruction(guard, address);
+  const std::size_t cheat_count = ActionReplay::CountEnabledCodes() + Gecko::CountEnabledCodes();
+  if (cheat_count != 0)
+    OSD::AddMessage(fmt::format("{} cheat(s) enabled", cheat_count), OSD::Duration::NORMAL);
 }
 
 void AddMemoryPatch(std::size_t index)
 {
-  std::lock_guard lock(s_on_frame_memory_mutex);
-  s_on_frame_memory.push_back(index);
+  std::lock_guard lock(s_debugger_patches_mutex);
+  s_debugger_patches.push_back(index);
 }
 
 void RemoveMemoryPatch(std::size_t index)
 {
-  std::lock_guard lock(s_on_frame_memory_mutex);
-  std::erase(s_on_frame_memory, index);
-}
-
-static void ApplyStartupPatches(Core::System& system)
-{
-  ASSERT(Core::IsCPUThread());
-  Core::CPUThreadGuard guard(system);
-
-  const auto& ppc_state = system.GetPPCState();
-  if (!ppc_state.msr.DR || !ppc_state.msr.IR)
-  {
-    DEBUG_LOG_FMT(ACTIONREPLAY,
-                  "Need to retry later. CPU configuration is currently incorrect. PC = {:#010x}, "
-                  "MSR = {:#010x}",
-                  ppc_state.pc, ppc_state.msr.Hex);
-    return;
-  }
-
-  ApplyPatches(guard, s_on_frame);
+  std::lock_guard lock(s_debugger_patches_mutex);
+  std::erase(s_debugger_patches, index);
 }
 
 bool ApplyFramePatches(Core::System& system)
@@ -330,32 +319,23 @@ bool ApplyFramePatches(Core::System& system)
   ASSERT(Core::IsCPUThread());
   Core::CPUThreadGuard guard(system);
 
-  // Because we're using the VI Interrupt to time this instead of patching the game with a
-  // callback hook we can end up catching the game in an exception vector.
-  // We deal with this by returning false so that SystemTimers will reschedule us in a few cycles
-  // where we can try again after the CPU hopefully returns back to the normal instruction flow.
-  if (!ppc_state.msr.DR || !ppc_state.msr.IR || !IsStackValid(guard))
+  // SystemTimers calls again a little later when this returns false.
+  if (!TranslationEnabled(ppc_state) || !LooksLikeNormalCode(guard))
   {
-    DEBUG_LOG_FMT(ACTIONREPLAY,
-                  "Need to retry later. CPU configuration is currently incorrect. PC = {:#010x}, "
-                  "MSR = {:#010x}",
-                  ppc_state.pc, ppc_state.msr.Hex);
+    LogRetryLater(ppc_state);
     return false;
   }
 
-  ApplyPatches(guard, s_on_frame);
-  ApplyMemoryPatches(guard, s_on_frame_memory);
-
-  // Run the Gecko code handler
+  ApplyIniPatches(guard, s_ini_patches);
+  ApplyDebuggerPatches(guard);
   Gecko::RunCodeHandler(guard);
   ActionReplay::RunAllActive(guard);
-
   return true;
 }
 
 void Shutdown()
 {
-  s_on_frame.clear();
+  s_ini_patches.clear();
   ActionReplay::ApplyCodes({}, "", 0);
   Gecko::Shutdown();
 }
@@ -364,7 +344,7 @@ void Reload(Core::System& system)
 {
   Shutdown();
   LoadPatches();
-  ApplyStartupPatches(system);
+  ApplyAfterReload(system);
 }
 
 }  // namespace PatchEngine

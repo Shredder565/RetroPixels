@@ -1,13 +1,12 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-
-// WC24PatchEngine
-// Allows for replacing URLs used in WC24 requests
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/WC24PatchEngine.h"
 
 #include <algorithm>
 #include <array>
+#include <string_view>
+#include <vector>
+
 #include <fmt/format.h>
 
 #include "Common/Contains.h"
@@ -21,142 +20,114 @@
 
 namespace WC24PatchEngine
 {
-static constexpr std::array<u64, 15> s_wc24_channels{
-    Titles::NINTENDO_CHANNEL_NTSC_U,
-    Titles::NINTENDO_CHANNEL_NTSC_J,
-    Titles::NINTENDO_CHANNEL_PAL,
-    Titles::FORECAST_CHANNEL_NTSC_U,
-    Titles::FORECAST_CHANNEL_NTSC_J,
-    Titles::FORECAST_CHANNEL_PAL,
-    Titles::NEWS_CHANNEL_NTSC_U,
-    Titles::NEWS_CHANNEL_NTSC_J,
-    Titles::NEWS_CHANNEL_PAL,
-    Titles::EVERYBODY_VOTES_CHANNEL_NTSC_U,
-    Titles::EVERYBODY_VOTES_CHANNEL_NTSC_J,
-    Titles::EVERYBODY_VOTES_CHANNEL_PAL,
-    Titles::REGION_SELECT_CHANNEL_NTSC_U,
-    Titles::REGION_SELECT_CHANNEL_NTSC_J,
+namespace
+{
+// Only these titles get patched.
+constexpr std::array<u64, 15> kPatchableTitles{
+    Titles::NINTENDO_CHANNEL_NTSC_U,        Titles::NINTENDO_CHANNEL_NTSC_J,
+    Titles::NINTENDO_CHANNEL_PAL,           Titles::FORECAST_CHANNEL_NTSC_U,
+    Titles::FORECAST_CHANNEL_NTSC_J,        Titles::FORECAST_CHANNEL_PAL,
+    Titles::NEWS_CHANNEL_NTSC_U,            Titles::NEWS_CHANNEL_NTSC_J,
+    Titles::NEWS_CHANNEL_PAL,               Titles::EVERYBODY_VOTES_CHANNEL_NTSC_U,
+    Titles::EVERYBODY_VOTES_CHANNEL_NTSC_J, Titles::EVERYBODY_VOTES_CHANNEL_PAL,
+    Titles::REGION_SELECT_CHANNEL_NTSC_U,   Titles::REGION_SELECT_CHANNEL_NTSC_J,
     Titles::REGION_SELECT_CHANNEL_PAL,
 };
 
-static std::vector<NetworkPatch> s_patches;
+constexpr std::string_view kHostHeader = "Host: ";
 
-static bool DeserializeLine(const std::string& line, NetworkPatch* patch)
-{
-  const std::vector<std::string> items = SplitString(line, ':');
+std::vector<NetworkPatch> s_patches;
 
-  if (items.size() != 3)
-    return false;
-
-  patch->source = items[0];
-  patch->replacement = items[1];
-
-  if (!TryParse(items[2], &patch->is_kd))
-    return false;
-
-  return patch;
-}
-
-static void LoadPatchSection(const Common::IniFile& ini)
+// Section lines: "$Name" names the following patches; "source:replacement:is_kd" adds a patch
+// under the current name.
+void ReadSection(const Common::IniFile& ini)
 {
   std::vector<std::string> lines;
-  NetworkPatch patch;
   ini.GetLines("WC24Patch", &lines);
 
+  std::string name;
   for (const std::string& line : lines)
   {
     if (line.empty())
       continue;
-
     if (line[0] == '$')
     {
-      patch.name = line.substr(1, line.size() - 1);
+      name = line.substr(1);
+      continue;
     }
-    else
-    {
-      if (DeserializeLine(line, &patch))
-      {
-        s_patches.push_back(patch);
-      }
-    }
+
+    const std::vector<std::string> fields = SplitString(line, ':');
+    if (fields.size() != 3)
+      continue;
+
+    NetworkPatch patch;
+    patch.name = name;
+    patch.source = fields[0];
+    patch.replacement = fields[1];
+    if (TryParse(fields[2], &patch.is_kd))
+      s_patches.push_back(std::move(patch));
   }
 
   ReadEnabledAndDisabled(ini, "WC24Patch", &s_patches);
 }
-
-static bool IsWC24Channel()
-{
-  const auto& sconfig = SConfig::GetInstance();
-  return Common::Contains(s_wc24_channels, sconfig.GetTitleID());
-}
-
-static void LoadPatches()
-{
-  const auto& sconfig = SConfig::GetInstance();
-  // We can only load WC24 Channels.
-  if (!IsWC24Channel())
-    return;
-
-  Common::IniFile ini;
-  // If WiiLink is enabled then we load the Default Ini as that has the WiiLink URLs.
-  if (Config::Get(Config::MAIN_WII_WIILINK_ENABLE))
-    ini = sconfig.LoadDefaultGameIni();
-  else
-    ini = sconfig.LoadLocalGameIni();
-
-  LoadPatchSection(ini);
-}
+}  // namespace
 
 void Reload()
 {
   s_patches.clear();
-  LoadPatches();
+
+  const SConfig& config = SConfig::GetInstance();
+  if (!Common::Contains(kPatchableTitles, config.GetTitleID()))
+    return;
+
+  // The shipped (default) ini holds the WiiLink addresses; without WiiLink the user's own ini is
+  // used.
+  const Common::IniFile ini = Config::Get(Config::MAIN_WII_WIILINK_ENABLE) ?
+                                  config.LoadDefaultGameIni() :
+                                  config.LoadLocalGameIni();
+  ReadSection(ini);
 }
 
 std::optional<std::string> GetNetworkPatch(std::string_view source, IsKD is_kd)
 {
-  const auto patch = std::ranges::find_if(s_patches, [&source, &is_kd](const NetworkPatch& p) {
-    return p.source == source && p.is_kd == is_kd && p.enabled;
-  });
-  if (patch == s_patches.end())
-    return std::nullopt;
-
-  return patch->replacement;
+  for (const NetworkPatch& patch : s_patches)
+  {
+    if (patch.enabled && patch.is_kd == is_kd && patch.source == source)
+      return patch.replacement;
+  }
+  return std::nullopt;
 }
 
-// When we patch for the Socket, we aren't given the URL. Instead, it is in a Host header
-// in the payload that the socket is going to send. We need to manually find which patch to apply.
 std::optional<std::string> GetNetworkPatchByPayload(std::string_view source)
 {
-  size_t pos{};
-  while (pos < source.size())
+  // Sockets hand over the whole request, so the host is found in its first "Host: " line (lines
+  // end with CRLF; the last line may not).
+  std::size_t line_start = 0;
+  while (line_start < source.size())
   {
-    const size_t end_of_line = source.find("\r\n", pos);
-    if (source.substr(pos).starts_with("Host: "))
+    const std::size_t line_end = source.find("\r\n", line_start);
+    const std::string_view line = source.substr(line_start, line_end == std::string_view::npos ?
+                                                                std::string_view::npos :
+                                                                line_end - line_start);
+    if (line.starts_with(kHostHeader))
     {
-      const std::string_view domain =
-          source.substr(pos + 6, end_of_line == std::string_view::npos ? std::string_view::npos :
-                                                                         (end_of_line - pos - 6));
-      for (const WC24PatchEngine::NetworkPatch& patch : s_patches)
-      {
-        if (patch.is_kd != WC24PatchEngine::IsKD{true} && domain == patch.source && patch.enabled)
-        {
-          return fmt::format("{}Host: {}{}", source.substr(0, pos), patch.replacement,
-                             end_of_line == std::string_view::npos ? "" :
-                                                                     source.substr(end_of_line));
-        }
-      }
+      const std::string_view host = line.substr(kHostHeader.size());
+      const auto match = std::ranges::find_if(s_patches, [&](const NetworkPatch& patch) {
+        return patch.enabled && patch.is_kd != IsKD{true} && patch.source == host;
+      });
+      if (match == s_patches.end())
+        return std::nullopt;
 
-      // No matching patch
-      return std::nullopt;
+      const std::string_view rest =
+          line_end == std::string_view::npos ? std::string_view{} : source.substr(line_end);
+      return fmt::format("{}{}{}{}", source.substr(0, line_start), kHostHeader, match->replacement,
+                         rest);
     }
 
-    if (end_of_line == std::string_view::npos)
+    if (line_end == std::string_view::npos)
       break;
-
-    pos = end_of_line + 2;
+    line_start = line_end + 2;
   }
-
   return std::nullopt;
 }
 }  // namespace WC24PatchEngine

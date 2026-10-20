@@ -1,5 +1,4 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -20,6 +19,8 @@ namespace Core
 class CPUThreadGuard;
 }
 
+// The memory scanner behind the cheat search window: find addresses whose value matches, then
+// narrow them down over later searches.
 namespace Cheats
 {
 enum class CompareType
@@ -39,6 +40,7 @@ enum class FilterType
   DoNotFilter,
 };
 
+// Same order as the alternatives of SearchValue::m_value.
 enum class DataType
 {
   U8,
@@ -72,10 +74,17 @@ struct SearchResult
   SearchResultValueState m_value_state;
   u32 m_address;
 
+  // A value was read (from either address space).
   bool IsValueValid() const
   {
-    return m_value_state == SearchResultValueState::ValueFromPhysicalMemory ||
-           m_value_state == SearchResultValueState::ValueFromVirtualMemory;
+    switch (m_value_state)
+    {
+    case SearchResultValueState::ValueFromPhysicalMemory:
+    case SearchResultValueState::ValueFromVirtualMemory:
+      return true;
+    default:
+      return false;
+    }
   }
 };
 
@@ -91,38 +100,35 @@ enum class SearchErrorCode
 {
   Success,
 
-  // No emulation is currently active.
+  // Emulation isn't running (or paused).
   NoEmulationActive,
 
-  // The parameter set given to the search function is bogus.
+  // The search can't run with the session's current settings (for example no value to compare
+  // with).
   InvalidParameters,
 
-  // This is returned if PowerPC::RequestedAddressSpace::Virtual is given but the MSR.DR flag is
-  // currently off in the emulated game.
+  // A virtual address search was asked for while the game has data translation (MSR.DR) off.
   VirtualAddressesCurrentlyNotAccessible,
 
-  // Cheats and memory reading are disabled in RetroAchievements hardcore mode.
+  // RetroAchievements hardcore mode forbids reading memory for cheats.
   DisabledInHardcoreMode,
 };
 
-// Returns the corresponding DataType enum for the value currently held by the given SearchValue.
 DataType GetDataType(const SearchValue& value);
 
-// Converts the given value to a std::vector<u8>, regardless of the actual stored value type.
-// Returned array is in big endian byte order, so it can be copied directly into emulated memory for
-// patches or action replay codes.
+// The value's bytes in big-endian (emulated memory) order.
 std::vector<u8> GetValueAsByteVector(const SearchValue& value);
 
-// Do a new search across the given memory region in the given address space, only keeping values
-// for which the given validator returns true.
+// Reads every T in `memory_ranges` (every byte, or only T-aligned addresses) and keeps those for
+// which `validator` returns true.
 template <typename T>
 std::expected<std::vector<SearchResult<T>>, SearchErrorCode>
 NewSearch(const Core::CPUThreadGuard& guard, std::span<const MemoryRange> memory_ranges,
           PowerPC::RequestedAddressSpace address_space, bool aligned,
           const std::function<bool(const T& value)>& validator);
 
-// Refresh the values for the given results in the given address space, only keeping values for
-// which the given validator returns true.
+// Reads the addresses of `previous_results` again and keeps those for which `validator` (new value,
+// previous value) returns true. Addresses that can't be read are kept, marked inaccessible.
 template <typename T>
 std::expected<std::vector<SearchResult<T>>, SearchErrorCode>
 NextSearch(const Core::CPUThreadGuard& guard, std::span<const SearchResult<T>> previous_results,
@@ -134,19 +140,17 @@ class CheatSearchSessionBase
 public:
   virtual ~CheatSearchSessionBase();
 
-  // Set the value comparison operation used by subsequent searches.
+  // How values are compared in later searches.
   virtual void SetCompareType(CompareType compare_type) = 0;
-
-  // Set the filtering value target used by subsequent searches.
+  // What values are compared with in later searches.
   virtual void SetFilterType(FilterType filter_type) = 0;
-
-  // Set the value of the CompareAgainstSpecificValue filter used by subsequent searches.
+  // The value for FilterType::CompareAgainstSpecificValue. Returns false if it doesn't parse.
   virtual bool SetValueFromString(const std::string& value_as_string, bool force_parse_as_hex) = 0;
 
-  // Resets the search results, causing the next search to act as a new search.
+  // Drops the results; the next search scans the memory ranges again.
   virtual void ResetResults() = 0;
 
-  // Run either a new search or a next search based on the current state of this session.
+  // A first search, or a search through the previous results.
   virtual SearchErrorCode RunSearch(const Core::CPUThreadGuard& guard) = 0;
 
   virtual size_t GetMemoryRangeCount() const = 0;
@@ -166,17 +170,14 @@ public:
   virtual SearchResultValueState GetResultValueState(size_t index) const = 0;
   virtual bool WasFirstSearchDone() const = 0;
 
+  // Writes the session's value to each address. False if any write failed.
   virtual bool WriteValue(const Core::CPUThreadGuard& guard, std::span<u32> addresses) const = 0;
 
-  // User can delete a search result.
   virtual void RemoveResult(size_t index) = 0;
 
-  // Create a complete copy of this search session.
   virtual std::unique_ptr<CheatSearchSessionBase> Clone() const = 0;
-
-  // Create a partial copy of this search session. Only the results with indices in the given range
-  // are copied. This is useful if you want to run a next search on only partial result data of a
-  // previous search.
+  // A copy holding only the results [begin_index, end_index), so a search can continue on part of
+  // the results.
   virtual std::unique_ptr<CheatSearchSessionBase> ClonePartial(size_t begin_index,
                                                                size_t end_index) const = 0;
 };
@@ -226,14 +227,14 @@ public:
                                                        size_t end_index) const override;
 
 private:
-  std::vector<SearchResult<T>> m_search_results;
-  std::vector<MemoryRange> m_memory_ranges;
-  PowerPC::RequestedAddressSpace m_address_space;
-  CompareType m_compare_type = CompareType::Equal;
-  FilterType m_filter_type = FilterType::DoNotFilter;
-  std::optional<T> m_value = std::nullopt;
+  std::vector<SearchResult<T>> m_results;
+  std::vector<MemoryRange> m_ranges;
+  PowerPC::RequestedAddressSpace m_space;
+  CompareType m_compare = CompareType::Equal;
+  FilterType m_filter = FilterType::DoNotFilter;
+  std::optional<T> m_target;
   bool m_aligned;
-  bool m_first_search_done = false;
+  bool m_has_results = false;
 };
 
 std::unique_ptr<CheatSearchSessionBase> MakeSession(std::vector<MemoryRange> memory_ranges,
