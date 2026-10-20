@@ -508,22 +508,22 @@ void CommonAsmRoutines::GenQuantizedSingleStores()
 
 const u8* CommonAsmRoutines::GenQuantizedLoadRuntime(bool single, EQuantizeType type)
 {
-  const u8* const region = GetCodePtr();
+  const u8* const routine_start = GetCodePtr();
   const u8* const entry = AlignCode4();
   GenQuantizedLoad(single, type, -1);
   RET();
-  Common::JitRegister::Register(region, GetCodePtr(), "JIT_QuantizedLoad_{}_{}",
+  Common::JitRegister::Register(routine_start, GetCodePtr(), "JIT_QuantizedLoad_{}_{}",
                                 std::to_underlying(type), single);
   return entry;
 }
 
 const u8* CommonAsmRoutines::GenQuantizedStoreRuntime(bool single, EQuantizeType type)
 {
-  const u8* const region = GetCodePtr();
+  const u8* const routine_start = GetCodePtr();
   const u8* const entry = AlignCode4();
   GenQuantizedStore(single, type, -1);
   RET();
-  Common::JitRegister::Register(region, GetCodePtr(), "JIT_QuantizedStore_{}_{}",
+  Common::JitRegister::Register(routine_start, GetCodePtr(), "JIT_QuantizedStore_{}_{}",
                                 std::to_underlying(type), single);
   return entry;
 }

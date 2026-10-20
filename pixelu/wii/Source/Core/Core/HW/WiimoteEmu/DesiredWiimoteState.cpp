@@ -245,9 +245,9 @@ bool DeserializeDesiredState(DesiredWiimoteState* state, const SerializedWiimote
     a.x = static_cast<u16>((d[high_pos] << 2) | (low_bits & 0b11));
     // Y and Z get their dropped bit back by repeating the bit above it.
     a.y =
-        Common::ExpandValue<u16>(static_cast<u16>((d[high_pos + 1] << 1) | BitAt(low_bits, 2)), 1);
+        Common::ExpandValue<u16>(static_cast<u16>((d[high_pos + 1] << 1) | (BitAt(low_bits, 2) ? 1 : 0)), 1);
     a.z =
-        Common::ExpandValue<u16>(static_cast<u16>((d[high_pos + 2] << 1) | BitAt(low_bits, 3)), 1);
+        Common::ExpandValue<u16>(static_cast<u16>((d[high_pos + 2] << 1) | (BitAt(low_bits, 3) ? 1 : 0)), 1);
     pos = high_pos + 3;
   }
 

@@ -48,7 +48,7 @@ void CEXIETHERNET::XLinkNetworkInterface::SendCommand(std::string_view command)
   const std::size_t size = std::min(command.size(), buffer.size());
   std::copy_n(command.begin(), size, buffer.begin());
   DEBUG_LOG_FMT(SP1, "SendCommandPayload {:x}\n{}", size, ArrayToString(buffer.data(), size, 0x10));
-  if (!SendDatagram(buffer.data(), size))
+  if (!SendDatagram(buffer.data(), static_cast<u32>(size)))
     ERROR_LOG_FMT(SP1, "Failed to send '{}' to the XLink Kai client", command.substr(0, 16));
 }
 
