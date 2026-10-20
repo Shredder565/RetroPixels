@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -7,12 +6,16 @@
 #include <map>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "Common/StringUtil.h"
 
 namespace Common
 {
+// An INI document: an ordered list of sections, each holding key/value pairs (in insertion
+// order, keys case-insensitive) and/or raw lines (used for codes and patches).
 class IniFile
 {
 public:
@@ -34,6 +37,7 @@ public:
       Set(key, ValueToString(std::forward<T>(new_value)));
     }
 
+    // Stores the value, or removes the key if the value equals the default.
     template <typename T>
     void Set(const std::string& key, T&& new_value, const std::common_type_t<T>& default_value)
     {
@@ -43,21 +47,24 @@ public:
         Delete(key);
     }
 
+    // True if the key exists, or if a default_value was passed (which is then returned).
     bool Get(std::string_view key, std::string* value,
              const std::string& default_value = NULL_STRING) const;
 
+    // True if the key exists and parses as T; otherwise *value = default_value.
     template <typename T>
     bool Get(std::string_view key, T* value, const std::common_type_t<T>& default_value = {}) const
     {
-      std::string temp;
-      bool retval = Get(key, &temp);
-      if (retval && TryParse(temp, value))
+      std::string text;
+      if (Get(key, &text) && TryParse(text, value))
         return true;
       *value = default_value;
       return false;
     }
 
     void SetLines(std::vector<std::string> lines);
+    // Appends the raw lines, whitespace-trimmed; with remove_comments, '#' comments are cut off
+    // and comment-only lines skipped.
     bool GetLines(std::vector<std::string>* lines, const bool remove_comments = true) const;
 
     bool operator<(const Section& other) const { return name < other.name; }
@@ -79,22 +86,15 @@ public:
   IniFile();
   ~IniFile();
 
-  /**
-   * Loads sections and keys.
-   * @param filename filename of the ini file which should be loaded
-   * @param keep_current_data If true, "extends" the currently loaded list of sections and keys with
-   * the loaded data (and replaces existing entries). If false, existing data will be erased.
-   * @warning Using any other operations than "Get*" and "Exists" is untested and will behave
-   * unexpectedly
-   * @todo This really is just a hack to support having two levels of gameinis (defaults and
-   * user-specified) and should eventually be replaced with a less stupid system.
-   */
+  // Reads a file. With keep_current_data, the file's sections and keys are merged into (and
+  // override) what is already loaded; this layering is only meant for read-only use, as with
+  // default + user game INIs.
   bool Load(const std::string& filename, bool keep_current_data = false);
 
+  // Writes the document atomically (temporary file + rename).
   bool Save(const std::string& filename);
 
   bool Exists(std::string_view section_name) const;
-  // Returns true if key exists in section
   bool Exists(std::string_view section_name, std::string_view key) const;
 
   template <typename T>
@@ -102,7 +102,6 @@ public:
   {
     if (Exists(section_name, key))
       return GetOrCreateSection(section_name)->Get(key, value);
-
     return false;
   }
 
@@ -111,29 +110,31 @@ public:
   {
     if (Exists(section_name, key))
       return GetOrCreateSection(section_name)->Get(key, value, default_value);
-
     *value = default_value;
     return false;
   }
 
+  // The section's keys in insertion order.
   bool GetKeys(std::string_view section_name, std::vector<std::string>* keys) const;
 
   void SetLines(std::string_view section_name, std::vector<std::string> lines);
+  // Replaces *lines with the section's raw lines (see Section::GetLines).
   bool GetLines(std::string_view section_name, std::vector<std::string>* lines,
                 bool remove_comments = true) const;
 
   bool DeleteKey(std::string_view section_name, std::string_view key);
   bool DeleteSection(std::string_view section_name);
 
+  // Orders sections by name (case-sensitive).
   void SortSections();
 
   Section* GetOrCreateSection(std::string_view section_name);
   const Section* GetSection(std::string_view section_name) const;
   Section* GetSection(std::string_view section_name);
 
-  // This function is related to parsing data from lines of INI files
-  // It's used outside of IniFile, which is why it is exposed publicly
-  // In particular it is used in PostProcessing for its configuration
+  // Splits "key = value" (trimmed, quotes removed from the value). Leaves the outputs untouched
+  // for empty lines, '#' comments and lines without '='. Also used outside IniFile, e.g. for
+  // post-processing shader options.
   static void ParseLine(std::string_view line, std::string* keyOut, std::string* valueOut);
 
   const std::list<Section>& GetSections() const { return sections; }
