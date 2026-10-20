@@ -645,15 +645,15 @@ void GCMemcardDirectory::FlushToFile()
 void GCMemcardDirectory::DoState(PointerWrap& p)
 {
   std::unique_lock lock(m_write_mutex);
+
+  // Loading replaces the saves, so the cached block pointer can't survive.
   m_last_block = -1;
   m_last_block_address = nullptr;
-  p.Do(m_save_directory);
-  p.Do(m_hdr);
-  p.Do(m_dir1);
-  p.Do(m_dir2);
-  p.Do(m_bat1);
-  p.Do(m_bat2);
-  p.DoEachElement(m_saves, [](PointerWrap& pw, Memcard::GCIFile& save) { save.DoState(pw); });
+
+  // Folder path, then the system area, then every save (savestate order).
+  const auto save_all = [&p](auto&... parts) { (p.Do(parts), ...); };
+  save_all(m_save_directory, m_hdr, m_dir1, m_dir2, m_bat1, m_bat2);
+  p.DoEachElement(m_saves, [](PointerWrap& pw, Memcard::GCIFile& gci) { gci.DoState(pw); });
 }
 
 void MigrateFromMemcardFile(const std::string& directory_name, ExpansionInterface::Slot card_slot,

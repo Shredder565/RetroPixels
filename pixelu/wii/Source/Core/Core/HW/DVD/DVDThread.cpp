@@ -113,16 +113,21 @@ u64 DVDThread::PartitionOffsetToRawOffset(u64 offset, const DiscIO::Partition& p
   return m_disc->PartitionOffsetToRawOffset(offset, partition);
 }
 
+// The TMD and ticket are read lazily through the volume, which the worker may
+// be using at the same moment, so these two wait for it first. Both return a
+// copy of the volume's cached object.
 IOS::ES::TMDReader DVDThread::GetTMD(const DiscIO::Partition& partition)
 {
   WaitUntilIdle();
-  return m_disc->GetTMD(partition);
+  const DiscIO::Volume& volume = *m_disc;
+  return volume.GetTMD(partition);
 }
 
 IOS::ES::TicketReader DVDThread::GetTicket(const DiscIO::Partition& partition)
 {
   WaitUntilIdle();
-  return m_disc->GetTicket(partition);
+  const DiscIO::Volume& volume = *m_disc;
+  return volume.GetTicket(partition);
 }
 
 bool DVDThread::IsInsertedDiscRunning()

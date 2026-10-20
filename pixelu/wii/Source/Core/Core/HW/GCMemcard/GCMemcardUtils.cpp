@@ -211,17 +211,13 @@ std::string GenerateFilename(const DEntry& entry)
 
 std::string GetDefaultExtension(SavefileFormat format)
 {
-  switch (format)
-  {
-  case SavefileFormat::GCI:
-    return ".gci";
-  case SavefileFormat::GCS:
-    return ".gcs";
-  case SavefileFormat::SAV:
-    return ".sav";
-  }
+  // Indexed by SavefileFormat.
+  static constexpr std::array<std::string_view, 3> extensions{".gci", ".gcs", ".sav"};
+  const auto slot = static_cast<size_t>(format);
+  if (slot < extensions.size())
+    return std::string(extensions[slot]);
   ASSERT(false);
-  return ".gci";
+  return std::string(extensions[0]);
 }
 
 std::vector<Savefile> GetSavefiles(const GCMemcard& card, std::span<const u8> file_indices)

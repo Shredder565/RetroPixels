@@ -132,35 +132,25 @@ DVDInterface::~DVDInterface() = default;
 
 void DVDInterface::DoState(PointerWrap& p)
 {
-  p.Do(m_DISR);
-  p.Do(m_DICVR);
+  // Field order is the savestate format; `save` handles its arguments left to
+  // right.
+  const auto save = [&p](auto&... fields) { (p.Do(fields), ...); };
+
+  // Registers.
+  save(m_DISR, m_DICVR);
   p.DoArray(m_DICMDBUF);
-  p.Do(m_DIMAR);
-  p.Do(m_DILENGTH);
-  p.Do(m_DICR);
-  p.Do(m_DIIMMBUF);
-  p.Do(m_DICFG);
+  save(m_DIMAR, m_DILENGTH, m_DICR, m_DIIMMBUF, m_DICFG);
 
-  p.Do(m_audio.playing);
-  p.Do(m_audio.stop_at_track_end);
-  p.Do(m_audio.position);
-  p.Do(m_audio.current_start);
-  p.Do(m_audio.current_length);
-  p.Do(m_audio.next_start);
-  p.Do(m_audio.next_length);
-  p.Do(m_audio.pending_blocks);
-  p.Do(m_audio.enabled);
-  p.Do(m_audio.buffer_length);
+  // Audio streaming.
+  save(m_audio.playing, m_audio.stop_at_track_end, m_audio.position, m_audio.current_start,
+       m_audio.current_length, m_audio.next_start, m_audio.next_length, m_audio.pending_blocks,
+       m_audio.enabled, m_audio.buffer_length);
 
-  p.Do(m_drive_state);
-  p.Do(m_error_code);
-
-  p.Do(m_read_ahead.start_time);
-  p.Do(m_read_ahead.end_time);
-  p.Do(m_read_ahead.start_offset);
-  p.Do(m_read_ahead.end_offset);
-
-  p.Do(m_disc_path_to_insert);
+  // Drive status, read-ahead window and any pending disc swap.
+  save(m_drive_state, m_error_code);
+  save(m_read_ahead.start_time, m_read_ahead.end_time, m_read_ahead.start_offset,
+       m_read_ahead.end_offset);
+  save(m_disc_path_to_insert);
 
   m_system.GetDVDThread().DoState(p);
   m_adpcm_decoder.DoState(p);
@@ -345,17 +335,18 @@ void DVDInterface::ChangeDisc(const Core::CPUThreadGuard& guard,
 // CPU thread only. Ejects now and inserts the new disc one emulated second later.
 void DVDInterface::ChangeDisc(const Core::CPUThreadGuard& guard, const std::string& new_path)
 {
-  if (!m_disc_path_to_insert.empty())
+  const bool swap_pending = !m_disc_path_to_insert.empty();
+  if (swap_pending)
   {
     PanicAlertFmtT("A disc is already about to be inserted.");
     return;
   }
 
   EjectDisc(guard, EjectCause::User);
-
   m_disc_path_to_insert = new_path;
-  m_system.GetCoreTiming().ScheduleEvent(m_system.GetSystemTimers().GetTicksPerSecond(),
-                                         m_insert_disc);
+
+  const auto one_second = m_system.GetSystemTimers().GetTicksPerSecond();
+  m_system.GetCoreTiming().ScheduleEvent(one_second, m_insert_disc);
   m_system.GetMovie().SignalDiscChange(new_path);
 
   // Keep the multi-disc list only if the new disc belongs to it.
