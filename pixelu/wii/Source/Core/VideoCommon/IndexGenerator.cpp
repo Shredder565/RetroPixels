@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/IndexGenerator.h"
 
@@ -7,348 +6,266 @@
 
 #include "Common/CommonTypes.h"
 #include "Common/Logging/Log.h"
+#include "Common/MsgHandler.h"
 #include "VideoCommon/OpcodeDecoding.h"
 #include "VideoCommon/VideoConfig.h"
 
 namespace
 {
-constexpr u16 s_primitive_restart = UINT16_MAX;
+// The index that ends a strip when primitive restart is on. It is never a vertex index.
+constexpr u16 RESTART = 0xffff;
 
-template <bool pr>
-u16* WriteTriangle(u16* index_ptr, u32 index1, u32 index2, u32 index3)
+// Appends indices; vertex numbers are relative to `first` and wrap to 16 bits.
+struct IndexWriter
 {
-  *index_ptr++ = index1;
-  *index_ptr++ = index2;
-  *index_ptr++ = index3;
-  if constexpr (pr)
-    *index_ptr++ = s_primitive_restart;
-  return index_ptr;
+  u16* out;
+  u32 first;
+
+  void Vertex(u32 n) { *out++ = static_cast<u16>(first + n); }
+  void Raw(u32 value) { *out++ = static_cast<u16>(value); }
+  void Restart() { *out++ = RESTART; }
+
+  // One triangle; as a strip of its own when restart is on.
+  void Triangle(bool restart, u32 a, u32 b, u32 c)
+  {
+    Vertex(a);
+    Vertex(b);
+    Vertex(c);
+    if (restart)
+      Restart();
+  }
+};
+
+void Triangles(IndexWriter& w, bool restart, u32 n)
+{
+  for (u32 v = 0; v + 3 <= n; v += 3)
+    w.Triangle(restart, v, v + 1, v + 2);
 }
 
-template <bool pr>
-u16* AddList(u16* index_ptr, u32 num_verts, u32 index)
+void TriangleStrip(IndexWriter& w, bool restart, u32 n)
 {
-  for (u32 i = 2; i < num_verts; i += 3)
+  if (restart)
   {
-    index_ptr = WriteTriangle<pr>(index_ptr, index + i - 2, index + i - 1, index + i);
+    // The strip as it is, then a restart (even when it has fewer than three vertices).
+    for (u32 v = 0; v < n; v++)
+      w.Vertex(v);
+    w.Restart();
+    return;
   }
-  return index_ptr;
+  // Every other triangle swaps its last two vertices to keep the winding.
+  for (u32 v = 0; v + 2 < n; v++)
+  {
+    if (v % 2 == 0)
+      w.Triangle(false, v, v + 1, v + 2);
+    else
+      w.Triangle(false, v, v + 2, v + 1);
+  }
 }
 
-template <bool pr>
-u16* AddStrip(u16* index_ptr, u32 num_verts, u32 index)
+// A fan around vertex 0. With restart, three fan triangles (0,k-1,k), (0,k,k+1), (0,k+1,k+2)
+// can be sent as the strip k-1, k, 0, k+1, k+2, and two as k-1, k, 0, k+1.
+void TriangleFan(IndexWriter& w, bool restart, u32 n)
 {
-  if constexpr (pr)
+  u32 k = 2;
+  if (restart)
   {
-    for (u32 i = 0; i < num_verts; ++i)
+    for (; k + 3 <= n; k += 3)
     {
-      *index_ptr++ = index + i;
+      w.Vertex(k - 1);
+      w.Vertex(k);
+      w.Vertex(0);
+      w.Vertex(k + 1);
+      w.Vertex(k + 2);
+      w.Restart();
     }
-    *index_ptr++ = s_primitive_restart;
-  }
-  else
-  {
-    bool wind = false;
-    for (u32 i = 2; i < num_verts; ++i)
+    for (; k + 2 <= n; k += 2)
     {
-      index_ptr = WriteTriangle<pr>(index_ptr, index + i - 2, index + i - !wind, index + i - wind);
-
-      wind ^= true;
+      w.Vertex(k - 1);
+      w.Vertex(k);
+      w.Vertex(0);
+      w.Vertex(k + 1);
+      w.Restart();
     }
   }
-  return index_ptr;
+  for (; k < n; k++)
+    w.Triangle(restart, 0, k - 1, k);
 }
 
-/**
- * FAN simulator:
- *
- *   2---3
- *  / \ / \
- * 1---0---4
- *
- * would generate this triangles:
- * 012, 023, 034
- *
- * rotated (for better striping):
- * 120, 302, 034
- *
- * as odd ones have to winded, following strip is fine:
- * 12034
- *
- * so we use 6 indices for 3 triangles
- */
-
-template <bool pr>
-u16* AddFan(u16* index_ptr, u32 num_verts, u32 index)
+// Quads a, b, c, d become (a, b, c) and (a, c, d), or the strip b, c, a, d. Three vertices
+// left over at the end still make a triangle (Wind Waker's sun rays rely on this).
+void Quads(IndexWriter& w, bool restart, u32 n)
 {
-  u32 i = 2;
-
-  if constexpr (pr)
+  u32 q = 0;
+  for (; q + 4 <= n; q += 4)
   {
-    for (; i + 3 <= num_verts; i += 3)
+    if (restart)
     {
-      *index_ptr++ = index + i - 1;
-      *index_ptr++ = index + i + 0;
-      *index_ptr++ = index;
-      *index_ptr++ = index + i + 1;
-      *index_ptr++ = index + i + 2;
-      *index_ptr++ = s_primitive_restart;
-    }
-
-    for (; i + 2 <= num_verts; i += 2)
-    {
-      *index_ptr++ = index + i - 1;
-      *index_ptr++ = index + i + 0;
-      *index_ptr++ = index;
-      *index_ptr++ = index + i + 1;
-      *index_ptr++ = s_primitive_restart;
-    }
-  }
-
-  for (; i < num_verts; ++i)
-  {
-    index_ptr = WriteTriangle<pr>(index_ptr, index, index + i - 1, index + i);
-  }
-  return index_ptr;
-}
-
-/*
- * QUAD simulator
- *
- * 0---1   4---5
- * |\  |   |\  |
- * | \ |   | \ |
- * |  \|   |  \|
- * 3---2   7---6
- *
- * 012,023, 456,467 ...
- * or 120,302, 564,746
- * or as strip: 1203, 5647
- *
- * Warning:
- * A simple triangle has to be rendered for three vertices.
- * ZWW do this for sun rays
- */
-template <bool pr>
-u16* AddQuads(u16* index_ptr, u32 num_verts, u32 index)
-{
-  u32 i = 3;
-  for (; i < num_verts; i += 4)
-  {
-    if constexpr (pr)
-    {
-      *index_ptr++ = index + i - 2;
-      *index_ptr++ = index + i - 1;
-      *index_ptr++ = index + i - 3;
-      *index_ptr++ = index + i - 0;
-      *index_ptr++ = s_primitive_restart;
+      w.Vertex(q + 1);
+      w.Vertex(q + 2);
+      w.Vertex(q);
+      w.Vertex(q + 3);
+      w.Restart();
     }
     else
     {
-      index_ptr = WriteTriangle<pr>(index_ptr, index + i - 3, index + i - 2, index + i - 1);
-      index_ptr = WriteTriangle<pr>(index_ptr, index + i - 3, index + i - 1, index + i - 0);
+      w.Triangle(false, q, q + 1, q + 2);
+      w.Triangle(false, q, q + 2, q + 3);
     }
   }
+  if (n - q == 3)
+    w.Triangle(restart, q, q + 1, q + 2);
+}
 
-  // three vertices remaining, so render a triangle
-  if (i == num_verts)
+// Line segments (pairs, or each consecutive pair of a strip) as host lines.
+void Lines(IndexWriter& w, u32 n, bool strip)
+{
+  const u32 step = strip ? 1 : 2;
+  for (u32 v = 0; v + 1 < n; v += step)
   {
-    index_ptr = WriteTriangle<pr>(index_ptr, index + num_verts - 3, index + num_verts - 2,
-                                  index + num_verts - 1);
+    w.Vertex(v);
+    w.Vertex(v + 1);
   }
-  return index_ptr;
 }
 
-template <bool pr>
-u16* AddQuads_nonstandard(u16* index_ptr, u32 num_verts, u32 index)
+// Vertex shader expansion: host vertex 4*v + corner stands for corner 0..3 of GX vertex v.
+// A line uses corners 0 and 1 of its first vertex and 2 and 3 of its second, drawn as a
+// two-triangle strip or as two triangles.
+void ExpandedLines(IndexWriter& w, bool restart, u32 n, bool strip)
 {
-  WARN_LOG_FMT(VIDEO, "Non-standard primitive drawing command GL_DRAW_QUADS_2");
-  return AddQuads<pr>(index_ptr, num_verts, index);
-}
-
-u16* AddLineList(u16* index_ptr, u32 num_verts, u32 index)
-{
-  for (u32 i = 1; i < num_verts; i += 2)
+  const u32 step = strip ? 1 : 2;
+  for (u32 v = 0; v + 1 < n; v += step)
   {
-    *index_ptr++ = index + i - 1;
-    *index_ptr++ = index + i;
-  }
-  return index_ptr;
-}
-
-// Shouldn't be used as strips as LineLists are much more common
-// so converting them to lists
-u16* AddLineStrip(u16* index_ptr, u32 num_verts, u32 index)
-{
-  for (u32 i = 1; i < num_verts; ++i)
-  {
-    *index_ptr++ = index + i - 1;
-    *index_ptr++ = index + i;
-  }
-  return index_ptr;
-}
-
-template <bool pr, bool linestrip>
-u16* AddLines_VSExpand(u16* index_ptr, u32 num_verts, u32 index)
-{
-  // VS Expand uses (index >> 2) as the base vertex
-  // Bit 0 indicates which side of the line (left/right for a vertical line)
-  // Bit 1 indicates which point of the line (top/bottom for a vertical line)
-  // VS Expand assumes the two points will be adjacent vertices
-  constexpr u32 advance = linestrip ? 1 : 2;
-  for (u32 i = 1; i < num_verts; i += advance)
-  {
-    u32 p0 = (index + i - 1) << 2;
-    u32 p1 = (index + i - 0) << 2;
-    if constexpr (pr)
+    const u32 a = (w.first + v) << 2;
+    const u32 b = (w.first + v + 1) << 2;
+    if (restart)
     {
-      *index_ptr++ = p0 + 0;
-      *index_ptr++ = p0 + 1;
-      *index_ptr++ = p1 + 2;
-      *index_ptr++ = p1 + 3;
-      *index_ptr++ = s_primitive_restart;
+      w.Raw(a);
+      w.Raw(a + 1);
+      w.Raw(b + 2);
+      w.Raw(b + 3);
+      w.Restart();
     }
     else
     {
-      *index_ptr++ = p0 + 0;
-      *index_ptr++ = p0 + 1;
-      *index_ptr++ = p1 + 2;
-      *index_ptr++ = p0 + 1;
-      *index_ptr++ = p1 + 2;
-      *index_ptr++ = p1 + 3;
+      w.Raw(a);
+      w.Raw(a + 1);
+      w.Raw(b + 2);
+      w.Raw(a + 1);
+      w.Raw(b + 2);
+      w.Raw(b + 3);
     }
   }
-  return index_ptr;
 }
 
-u16* AddPoints(u16* index_ptr, u32 num_verts, u32 index)
+void ExpandedPoints(IndexWriter& w, bool restart, u32 n)
 {
-  for (u32 i = 0; i != num_verts; ++i)
+  for (u32 v = 0; v < n; v++)
   {
-    *index_ptr++ = index + i;
-  }
-  return index_ptr;
-}
-
-template <bool pr>
-u16* AddPoints_VSExpand(u16* index_ptr, u32 num_verts, u32 index)
-{
-  // VS Expand uses (index >> 2) as the base vertex
-  // Bottom two bits indicate which of (TL, TR, BL, BR) this is
-  for (u32 i = 0; i < num_verts; ++i)
-  {
-    u32 base = (index + i) << 2;
-    if constexpr (pr)
+    const u32 corner0 = (w.first + v) << 2;
+    if (restart)
     {
-      *index_ptr++ = base + 0;
-      *index_ptr++ = base + 1;
-      *index_ptr++ = base + 2;
-      *index_ptr++ = base + 3;
-      *index_ptr++ = s_primitive_restart;
+      for (u32 c = 0; c < 4; c++)
+        w.Raw(corner0 + c);
+      w.Restart();
     }
     else
     {
-      *index_ptr++ = base + 0;
-      *index_ptr++ = base + 1;
-      *index_ptr++ = base + 2;
-      *index_ptr++ = base + 1;
-      *index_ptr++ = base + 2;
-      *index_ptr++ = base + 3;
+      w.Raw(corner0);
+      w.Raw(corner0 + 1);
+      w.Raw(corner0 + 2);
+      w.Raw(corner0 + 1);
+      w.Raw(corner0 + 2);
+      w.Raw(corner0 + 3);
     }
   }
-  return index_ptr;
 }
-}  // Anonymous namespace
+}  // namespace
 
 void IndexGenerator::Init()
 {
-  using OpcodeDecoder::Primitive;
-
-  if (g_backend_info.bSupportsPrimitiveRestart)
-  {
-    m_primitive_table[Primitive::GX_DRAW_QUADS] = AddQuads<true>;
-    m_primitive_table[Primitive::GX_DRAW_QUADS_2] = AddQuads_nonstandard<true>;
-    m_primitive_table[Primitive::GX_DRAW_TRIANGLES] = AddList<true>;
-    m_primitive_table[Primitive::GX_DRAW_TRIANGLE_STRIP] = AddStrip<true>;
-    m_primitive_table[Primitive::GX_DRAW_TRIANGLE_FAN] = AddFan<true>;
-  }
-  else
-  {
-    m_primitive_table[Primitive::GX_DRAW_QUADS] = AddQuads<false>;
-    m_primitive_table[Primitive::GX_DRAW_QUADS_2] = AddQuads_nonstandard<false>;
-    m_primitive_table[Primitive::GX_DRAW_TRIANGLES] = AddList<false>;
-    m_primitive_table[Primitive::GX_DRAW_TRIANGLE_STRIP] = AddStrip<false>;
-    m_primitive_table[Primitive::GX_DRAW_TRIANGLE_FAN] = AddFan<false>;
-  }
-  if (g_Config.UseVSForLinePointExpand())
-  {
-    if (g_backend_info.bSupportsPrimitiveRestart)
-    {
-      m_primitive_table[Primitive::GX_DRAW_LINES] = AddLines_VSExpand<true, false>;
-      m_primitive_table[Primitive::GX_DRAW_LINE_STRIP] = AddLines_VSExpand<true, true>;
-      m_primitive_table[Primitive::GX_DRAW_POINTS] = AddPoints_VSExpand<true>;
-    }
-    else
-    {
-      m_primitive_table[Primitive::GX_DRAW_LINES] = AddLines_VSExpand<false, false>;
-      m_primitive_table[Primitive::GX_DRAW_LINE_STRIP] = AddLines_VSExpand<false, true>;
-      m_primitive_table[Primitive::GX_DRAW_POINTS] = AddPoints_VSExpand<false>;
-    }
-  }
-  else
-  {
-    m_primitive_table[Primitive::GX_DRAW_LINES] = AddLineList;
-    m_primitive_table[Primitive::GX_DRAW_LINE_STRIP] = AddLineStrip;
-    m_primitive_table[Primitive::GX_DRAW_POINTS] = AddPoints;
-  }
+  m_restart = g_backend_info.bSupportsPrimitiveRestart;
+  m_vs_expand = g_Config.UseVSForLinePointExpand();
 }
 
 void IndexGenerator::Start(u16* index_ptr)
 {
-  m_index_buffer_current = index_ptr;
-  m_base_index_ptr = index_ptr;
-  m_base_index = 0;
+  m_cursor = index_ptr;
+  m_start = index_ptr;
+  m_next_vertex = 0;
 }
 
 void IndexGenerator::AddIndices(OpcodeDecoder::Primitive primitive, u32 num_vertices)
 {
-  m_index_buffer_current =
-      m_primitive_table[primitive](m_index_buffer_current, num_vertices, m_base_index);
-  m_base_index += num_vertices;
+  using OpcodeDecoder::Primitive;
+  IndexWriter w{m_cursor, m_next_vertex};
+  const u32 n = num_vertices;
+  switch (primitive)
+  {
+  case Primitive::GX_DRAW_QUADS_2:
+    WARN_LOG_FMT(VIDEO, "Non-standard primitive drawing command GL_DRAW_QUADS_2");
+    Quads(w, m_restart, n);
+    break;
+  case Primitive::GX_DRAW_QUADS:
+    Quads(w, m_restart, n);
+    break;
+  case Primitive::GX_DRAW_TRIANGLES:
+    Triangles(w, m_restart, n);
+    break;
+  case Primitive::GX_DRAW_TRIANGLE_STRIP:
+    TriangleStrip(w, m_restart, n);
+    break;
+  case Primitive::GX_DRAW_TRIANGLE_FAN:
+    TriangleFan(w, m_restart, n);
+    break;
+  case Primitive::GX_DRAW_LINES:
+  case Primitive::GX_DRAW_LINE_STRIP:
+  {
+    const bool strip = primitive == Primitive::GX_DRAW_LINE_STRIP;
+    if (m_vs_expand)
+      ExpandedLines(w, m_restart, n, strip);
+    else
+      Lines(w, n, strip);
+    break;
+  }
+  case Primitive::GX_DRAW_POINTS:
+    if (m_vs_expand)
+    {
+      ExpandedPoints(w, m_restart, n);
+    }
+    else
+    {
+      for (u32 v = 0; v < n; v++)
+        w.Vertex(v);
+    }
+    break;
+  }
+  m_cursor = w.out;
+  m_next_vertex += num_vertices;
 }
 
 void IndexGenerator::AddExternalIndices(const u16* indices, u32 num_indices, u32 num_vertices)
 {
-  std::memcpy(m_index_buffer_current, indices, sizeof(u16) * num_indices);
-  m_index_buffer_current += num_indices;
-  m_base_index += num_vertices;
+  std::memcpy(m_cursor, indices, sizeof(u16) * num_indices);
+  m_cursor += num_indices;
+  m_next_vertex += num_vertices;
 }
 
 u32 IndexGenerator::GetRemainingIndices(OpcodeDecoder::Primitive primitive) const
 {
-  u32 max_index = UINT16_MAX;
-
+  // Index 0xffff is the restart index, but it never has to be a vertex: a game sends at most
+  // 0xffff vertices in one draw, numbered 0..0xfffe from an empty batch (Pocoyo Racing sends
+  // exactly that many; https://bugs.dolphin-emu.org/issues/13136). Expanded lines and points
+  // use four host vertices per GX vertex.
+  u32 limit = 0xffff;
   if (g_Config.UseVSForLinePointExpand() && primitive >= OpcodeDecoder::Primitive::GX_DRAW_LINES)
-    max_index >>= 2;
+    limit >>= 2;
 
-  // Although we reserve UINT16_MAX for primitive restart, we aren't allowed to use that as an
-  // actual index. But, the maximum number of vertices a game can send is UINT16_MAX, so up to
-  // 0xffff indices will be used by the game. These indices would be 0x0000 through 0xfffe,
-  // and since m_base_index gets incremented for each index used, after that m_base_index
-  // would be 0xffff and no indices remain. If a game uses 0xfffe vertices, assuming m_base_index
-  // started at 0 it would end at 0xfffe and one more index could be used. So, we do not need to
-  // subtract 1 from max_index to correctly reserve one index for primitive restart.
-  //
-  // Pocoyo Racing uses a draw command with 0xffff vertices, which previously caused issues; see
-  // https://bugs.dolphin-emu.org/issues/13136 for details.
-
-  if (m_base_index > max_index) [[unlikely]]
+  if (m_next_vertex > limit) [[unlikely]]
   {
     PanicAlertFmt("GetRemainingIndices would overflow; we've already written too many indices? "
                   "base index {} > max index {}",
-                  m_base_index, max_index);
+                  m_next_vertex, limit);
     return 0;
   }
-
-  return max_index - m_base_index;
+  return limit - m_next_vertex;
 }

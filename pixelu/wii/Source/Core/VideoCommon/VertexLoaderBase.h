@@ -1,49 +1,37 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <array>
+#include <cstddef>
+#include <functional>
 #include <memory>
-#include <string>
-#include <vector>
 
 #include "Common/CommonTypes.h"
 #include "VideoCommon/CPMemory.h"
 #include "VideoCommon/NativeVertexFormat.h"
 
+// Identifies a vertex loader: the vertex descriptor (both halves) and one VAT entry, as raw
+// register words. Two draws with the same key can share a loader.
 class VertexLoaderUID
 {
-  std::array<u32, 5> vid{};
-  size_t hash = 0;
-
 public:
-  VertexLoaderUID() {}
+  VertexLoaderUID() = default;
   VertexLoaderUID(const TVtxDesc& vtx_desc, const VAT& vat)
+      : m_words{vtx_desc.low.Hex, vtx_desc.high.Hex, vat.g0.Hex, vat.g1.Hex, vat.g2.Hex}
   {
-    vid[0] = vtx_desc.low.Hex;
-    vid[1] = vtx_desc.high.Hex;
-    vid[2] = vat.g0.Hex;
-    vid[3] = vat.g1.Hex;
-    vid[4] = vat.g2.Hex;
-    hash = CalculateHash();
+    u64 acc = 0;
+    for (const u32 word : m_words)
+      acc = ((acc << 7) | (acc >> 57)) ^ (word * 0x9e3779b1ULL);
+    m_hash = static_cast<size_t>(acc);
   }
 
-  bool operator==(const VertexLoaderUID& rh) const { return vid == rh.vid; }
-  size_t GetHash() const { return hash; }
+  bool operator==(const VertexLoaderUID& other) const { return m_words == other.m_words; }
+  size_t GetHash() const { return m_hash; }
 
 private:
-  size_t CalculateHash() const
-  {
-    size_t h = SIZE_MAX;
-
-    for (auto word : vid)
-    {
-      h = h * 137 + word;
-    }
-
-    return h;
-  }
+  std::array<u32, 5> m_words{};
+  size_t m_hash = 0;
 };
 
 template <>
@@ -52,22 +40,30 @@ struct std::hash<VertexLoaderUID>
   size_t operator()(const VertexLoaderUID& uid) const noexcept { return uid.GetHash(); }
 };
 
+// A vertex loader converts GX vertices (described by a VCD and a VAT entry) into the host
+// layout in m_native_vtx_decl.
 class VertexLoaderBase
 {
 public:
+  // Bytes one GX vertex takes in the command stream.
   static u32 GetVertexSize(const TVtxDesc& vtx_desc, const VAT& vtx_attr);
+  // The VB_HAS_* mask for a vertex of this format.
   static u32 GetVertexComponents(const TVtxDesc& vtx_desc, const VAT& vtx_attr);
+  // Builds the loader the configuration asks for (C++, JIT, or both compared).
   static std::unique_ptr<VertexLoaderBase> CreateVertexLoader(const TVtxDesc& vtx_desc,
                                                               const VAT& vtx_attr);
-  virtual ~VertexLoaderBase() {}
+
+  virtual ~VertexLoaderBase() = default;
+
+  // Converts count vertices from src into dst. Returns how many vertices were written (indexed
+  // positions with an all-ones index drop their vertex).
   virtual int RunVertices(const u8* src, u8* dst, int count) = 0;
 
-  // per loader public state
   PortableVertexDeclaration m_native_vtx_decl{};
-  const u32 m_vertex_size;  // number of bytes of a raw GC vertex
+  const u32 m_vertex_size;
   const u32 m_native_components;
 
-  // used by VertexLoaderManager
+  // Set and read by VertexLoaderManager.
   NativeVertexFormat* m_native_vertex_format = nullptr;
   int m_numLoadedVertices = 0;
 
@@ -79,7 +75,6 @@ protected:
   {
   }
 
-  // GC vertex format
   const VAT m_VtxAttr;
   const TVtxDesc m_VtxDesc;
 };

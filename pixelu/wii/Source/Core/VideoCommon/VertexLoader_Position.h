@@ -1,68 +1,43 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include "Common/CommonTypes.h"
-#include "Common/EnumMap.h"
 #include "Common/Inline.h"
 
 #include "VideoCommon/CPMemory.h"
 #include "VideoCommon/VertexLoader.h"
 
+// Vertex positions: 2 or 3 components of any component format, direct or indexed.
 class VertexLoader_Position
 {
 public:
+  // Bytes the position takes in a GX vertex.
   static DOLPHIN_FORCE_INLINE u32 GetSize(VertexComponentFormat type, ComponentFormat format,
                                           CoordComponentCount elements)
   {
-    return s_table_size[type][format][elements];
+    switch (type)
+    {
+    case VertexComponentFormat::Direct:
+      return ElementBytes(format) * (elements == CoordComponentCount::XYZ ? 3u : 2u);
+    case VertexComponentFormat::Index8:
+      return 1;
+    case VertexComponentFormat::Index16:
+      return 2;
+    default:
+      return 0;
+    }
   }
 
-  static TPipelineFunction GetFunction(VertexComponentFormat type, ComponentFormat format,
-                                       CoordComponentCount elements);
+  // The C++ loader step that converts a position of this kind.
+  static VertexLoaderStep::Fn GetReader(VertexComponentFormat type, ComponentFormat format,
+                                        CoordComponentCount elements);
 
 private:
-  template <typename T, auto last_member>
-  using EnumMap = typename Common::EnumMap<T, last_member>;
-
-  using SizeTable =
-      EnumMap<EnumMap<EnumMap<u32, CoordComponentCount::XYZ>, ComponentFormat::InvalidFloat7>,
-              VertexComponentFormat::Index16>;
-
-  static constexpr SizeTable s_table_size = []() consteval {
-    SizeTable table{};
-
-    using VCF = VertexComponentFormat;
-    using FMT = ComponentFormat;
-
-    table[VCF::Direct][FMT::UByte] = {2, 3};
-    table[VCF::Direct][FMT::Byte] = {2, 3};
-    table[VCF::Direct][FMT::UShort] = {4, 6};
-    table[VCF::Direct][FMT::Short] = {4, 6};
-    table[VCF::Direct][FMT::Float] = {8, 12};
-    table[VCF::Direct][FMT::InvalidFloat5] = {8, 12};
-    table[VCF::Direct][FMT::InvalidFloat6] = {8, 12};
-    table[VCF::Direct][FMT::InvalidFloat7] = {8, 12};
-
-    table[VCF::Index8][FMT::UByte] = {1, 1};
-    table[VCF::Index8][FMT::Byte] = {1, 1};
-    table[VCF::Index8][FMT::UShort] = {1, 1};
-    table[VCF::Index8][FMT::Short] = {1, 1};
-    table[VCF::Index8][FMT::Float] = {1, 1};
-    table[VCF::Index8][FMT::InvalidFloat5] = {1, 1};
-    table[VCF::Index8][FMT::InvalidFloat6] = {1, 1};
-    table[VCF::Index8][FMT::InvalidFloat7] = {1, 1};
-
-    table[VCF::Index16][FMT::UByte] = {2, 2};
-    table[VCF::Index16][FMT::Byte] = {2, 2};
-    table[VCF::Index16][FMT::UShort] = {2, 2};
-    table[VCF::Index16][FMT::Short] = {2, 2};
-    table[VCF::Index16][FMT::Float] = {2, 2};
-    table[VCF::Index16][FMT::InvalidFloat5] = {2, 2};
-    table[VCF::Index16][FMT::InvalidFloat6] = {2, 2};
-    table[VCF::Index16][FMT::InvalidFloat7] = {2, 2};
-
-    return table;
-  }();
+  // Formats 5..7 are treated as float.
+  static constexpr u32 ElementBytes(ComponentFormat format)
+  {
+    const u32 code = static_cast<u32>(format);
+    return code >= 4 ? 4u : (code >= 2 ? 2u : 1u);
+  }
 };

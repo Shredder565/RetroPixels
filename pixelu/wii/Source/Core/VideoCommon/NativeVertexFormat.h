@@ -1,51 +1,56 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstring>
-#include <functional>  // for hash
+#include <functional>
+#include <type_traits>
 
 #include "Common/CommonTypes.h"
 #include "VideoCommon/CPMemory.h"
 
-// m_components
+// Bits of a loader's "native components" mask: which host vertex attributes a vertex carries.
+// The position is always there and has no bit.
 enum : u32
 {
-  VB_HAS_TEXMTXIDX0 = (1 << 0),
-  VB_HAS_TEXMTXIDX1 = (1 << 1),
-  VB_HAS_TEXMTXIDX2 = (1 << 2),
-  VB_HAS_TEXMTXIDX3 = (1 << 3),
-  VB_HAS_TEXMTXIDX4 = (1 << 4),
-  VB_HAS_TEXMTXIDX5 = (1 << 5),
-  VB_HAS_TEXMTXIDX6 = (1 << 6),
-  VB_HAS_TEXMTXIDX7 = (1 << 7),
-  VB_HAS_TEXMTXIDXALL = (0xff << 0),
+  // One bit per texture matrix index byte, in texture coordinate order.
+  VB_HAS_TEXMTXIDX0 = 1u << 0,
+  VB_HAS_TEXMTXIDX1 = 1u << 1,
+  VB_HAS_TEXMTXIDX2 = 1u << 2,
+  VB_HAS_TEXMTXIDX3 = 1u << 3,
+  VB_HAS_TEXMTXIDX4 = 1u << 4,
+  VB_HAS_TEXMTXIDX5 = 1u << 5,
+  VB_HAS_TEXMTXIDX6 = 1u << 6,
+  VB_HAS_TEXMTXIDX7 = 1u << 7,
+  VB_HAS_TEXMTXIDXALL = 0xffu << 0,
 
-  VB_HAS_POSMTXIDX = (1 << 8),
+  VB_HAS_POSMTXIDX = 1u << 8,
 
-  // VB_HAS_POS=0, // Implied, it always has pos! don't bother testing
-  VB_HAS_NORMAL = (1 << 9),
-  VB_HAS_TANGENT = (1 << 10),
-  VB_HAS_BINORMAL = (1 << 11),
+  VB_HAS_NORMAL = 1u << 9,
+  VB_HAS_TANGENT = 1u << 10,
+  VB_HAS_BINORMAL = 1u << 11,
 
   VB_COL_SHIFT = 12,
-  VB_HAS_COL0 = (1 << 12),
-  VB_HAS_COL1 = (1 << 13),
-  VB_HAS_SHARED = 0x3f << 8,
+  VB_HAS_COL0 = 1u << 12,
+  VB_HAS_COL1 = 1u << 13,
+  // Position matrix index, normal/tangent/binormal and both colours.
+  VB_HAS_SHARED = 0x3fu << 8,
 
-  VB_HAS_UV0 = (1 << 16),
-  VB_HAS_UV1 = (1 << 17),
-  VB_HAS_UV2 = (1 << 18),
-  VB_HAS_UV3 = (1 << 19),
-  VB_HAS_UV4 = (1 << 20),
-  VB_HAS_UV5 = (1 << 21),
-  VB_HAS_UV6 = (1 << 22),
-  VB_HAS_UV7 = (1 << 23),
-  VB_HAS_UVALL = (0xff << 16),
+  VB_HAS_UV0 = 1u << 16,
+  VB_HAS_UV1 = 1u << 17,
+  VB_HAS_UV2 = 1u << 18,
+  VB_HAS_UV3 = 1u << 19,
+  VB_HAS_UV4 = 1u << 20,
+  VB_HAS_UV5 = 1u << 21,
+  VB_HAS_UV6 = 1u << 22,
+  VB_HAS_UV7 = 1u << 23,
+  VB_HAS_UVALL = 0xffu << 16,
   VB_HAS_UVTEXMTXSHIFT = 16,
 };
 
+// Where one attribute sits in a host vertex and how the GPU should read it.
 struct AttributeFormat
 {
   ComponentFormat type;
@@ -55,6 +60,8 @@ struct AttributeFormat
   bool integer;
 };
 
+// The host vertex layout a vertex loader produces. Declarations are compared and hashed as raw
+// bytes, so every instance starts out all-zero, padding included.
 struct PortableVertexDeclaration
 {
   int stride;
@@ -65,78 +72,56 @@ struct PortableVertexDeclaration
   std::array<AttributeFormat, 8> texcoords;
   AttributeFormat posmtx;
 
-  // Make sure we initialize padding to 0 since padding is included in the == memcmp
-  PortableVertexDeclaration() { memset(this, 0, sizeof(*this)); }
+  PortableVertexDeclaration() { std::memset(static_cast<void*>(this), 0, sizeof(*this)); }
 
-  inline bool operator<(const PortableVertexDeclaration& b) const
+  bool operator<(const PortableVertexDeclaration& other) const
   {
-    return memcmp(this, &b, sizeof(PortableVertexDeclaration)) < 0;
+    return std::memcmp(this, &other, sizeof(*this)) < 0;
   }
-  inline bool operator==(const PortableVertexDeclaration& b) const
+  bool operator==(const PortableVertexDeclaration& other) const
   {
-    return memcmp(this, &b, sizeof(PortableVertexDeclaration)) == 0;
+    return std::memcmp(this, &other, sizeof(*this)) == 0;
   }
 };
 
 static_assert(std::is_trivially_copyable_v<PortableVertexDeclaration>,
-              "Make sure we can memset-initialize");
+              "declarations are zeroed and compared with memset/memcmp");
+static_assert(sizeof(PortableVertexDeclaration) % sizeof(u32) == 0);
 
 template <>
 struct std::hash<PortableVertexDeclaration>
 {
-  // Implementation from Wikipedia.
-  template <typename T>
-  static u32 Fletcher32(const T& data)
-  {
-    static_assert(sizeof(T) % sizeof(u16) == 0);
-
-    auto buf = reinterpret_cast<const u16*>(&data);
-    size_t len = sizeof(T) / sizeof(u16);
-    u32 sum1 = 0xffff, sum2 = 0xffff;
-
-    while (len)
-    {
-      size_t tlen = len > 360 ? 360 : len;
-      len -= tlen;
-
-      do
-      {
-        sum1 += *buf++;
-        sum2 += sum1;
-      } while (--tlen);
-
-      sum1 = (sum1 & 0xffff) + (sum1 >> 16);
-      sum2 = (sum2 & 0xffff) + (sum2 >> 16);
-    }
-
-    // Second reduction step to reduce sums to 16 bits
-    sum1 = (sum1 & 0xffff) + (sum1 >> 16);
-    sum2 = (sum2 & 0xffff) + (sum2 >> 16);
-    return (sum2 << 16 | sum1);
-  }
   size_t operator()(const PortableVertexDeclaration& decl) const noexcept
   {
-    return Fletcher32(decl);
+    // Mix the declaration a 32-bit word at a time (multiply-xorshift).
+    constexpr size_t word_count = sizeof(decl) / sizeof(u32);
+    std::array<u32, word_count> words;
+    std::memcpy(words.data(), &decl, sizeof(decl));
+
+    u64 acc = 0x51ed27d3a8b4f6c1ULL;
+    for (const u32 word : words)
+    {
+      acc = (acc ^ word) * 0x9e3779b97f4a7c15ULL;
+      acc ^= acc >> 29;
+    }
+    return static_cast<size_t>(acc);
   }
 };
 
-// The implementation of this class is specific for GL/DX, so NativeVertexFormat.cpp
-// is in the respective backend, not here in VideoCommon.
-
-// Note that this class can't just invent arbitrary vertex formats out of its input -
-// all the data loading code must always be made compatible.
+// A backend's vertex input layout object for one declaration. Backends derive from this; the
+// loaders only ever produce data matching the declaration they were built for.
 class NativeVertexFormat
 {
 public:
-  NativeVertexFormat(const PortableVertexDeclaration& vtx_decl) : m_decl(vtx_decl) {}
-  virtual ~NativeVertexFormat() {}
+  explicit NativeVertexFormat(const PortableVertexDeclaration& vtx_decl) : m_decl(vtx_decl) {}
+  virtual ~NativeVertexFormat() = default;
 
   NativeVertexFormat(const NativeVertexFormat&) = delete;
   NativeVertexFormat& operator=(const NativeVertexFormat&) = delete;
   NativeVertexFormat(NativeVertexFormat&&) = default;
   NativeVertexFormat& operator=(NativeVertexFormat&&) = default;
 
-  u32 GetVertexStride() const { return m_decl.stride; }
+  u32 GetVertexStride() const { return static_cast<u32>(m_decl.stride); }
   const PortableVertexDeclaration& GetVertexDeclaration() const { return m_decl; }
 
 protected:

@@ -1,18 +1,19 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include "Common/CommonTypes.h"
-#include "Common/EnumMap.h"
 #include "Common/Inline.h"
+#include "Common/MsgHandler.h"
 
 #include "VideoCommon/CPMemory.h"
 #include "VideoCommon/VertexLoader.h"
 
+// Vertex colours in the six GX colour formats, converted to RGBA8 (R in the lowest byte).
 class VertexLoader_Color
 {
 public:
+  // Bytes one colour takes in a GX vertex. Formats 6 and 7 do not exist and count as 0.
   static DOLPHIN_FORCE_INLINE u32 GetSize(VertexComponentFormat type, ColorFormat format)
   {
     if (format > ColorFormat::RGBA8888)
@@ -20,29 +21,35 @@ public:
       PanicAlertFmt("Invalid color format {}", format);
       return 0;
     }
-    return s_table_size[type][format];
+    switch (type)
+    {
+    case VertexComponentFormat::Direct:
+      return DirectBytes(format);
+    case VertexComponentFormat::Index8:
+      return 1;
+    case VertexComponentFormat::Index16:
+      return 2;
+    default:
+      return 0;
+    }
   }
 
-  static TPipelineFunction GetFunction(VertexComponentFormat type, ColorFormat format);
-
-  // It is important to synchronize colIndex, or else the wrong color array will be used
-  static TPipelineFunction GetDummyFunction();
+  // The C++ loader step that converts a colour of this kind (nullptr when absent or invalid).
+  static VertexLoaderStep::Fn GetReader(VertexComponentFormat type, ColorFormat format);
 
 private:
-  template <typename T, auto last_member>
-  using EnumMap = typename Common::EnumMap<T, last_member>;
-
-  using SizeTable = EnumMap<EnumMap<u32, ColorFormat::RGBA8888>, VertexComponentFormat::Index16>;
-
-  static constexpr SizeTable s_table_size = []() consteval {
-    SizeTable table{};
-
-    using VCF = VertexComponentFormat;
-
-    table[VCF::Direct] = {2u, 3u, 4u, 2u, 3u, 4u};
-    table[VCF::Index8] = {1u, 1u, 1u, 1u, 1u, 1u};
-    table[VCF::Index16] = {2u, 2u, 2u, 2u, 2u, 2u};
-
-    return table;
-  }();
+  static constexpr u32 DirectBytes(ColorFormat format)
+  {
+    switch (format)
+    {
+    case ColorFormat::RGB565:
+    case ColorFormat::RGBA4444:
+      return 2;
+    case ColorFormat::RGB888:
+    case ColorFormat::RGBA6666:
+      return 3;
+    default:
+      return 4;
+    }
+  }
 };

@@ -1,213 +1,123 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/VertexLoader_Color.h"
 
-#include <cstring>
-
 #include "Common/CommonTypes.h"
-#include "Common/EnumMap.h"
 #include "Common/MsgHandler.h"
-#include "Common/Swap.h"
 
 #include "VideoCommon/VertexLoader.h"
-#include "VideoCommon/VertexLoaderManager.h"
 #include "VideoCommon/VertexLoaderUtils.h"
 
 namespace
 {
-void Color_Read_Dummy(VertexLoader* loader)
+using VertexData::Source;
+
+constexpr u32 OPAQUE_ALPHA = 0xff000000;
+
+// Widens an n-bit channel to 8 bits by repeating its top bits below it.
+constexpr u32 Widen5(u32 v)
 {
-  loader->m_colIndex++;
+  return (v << 3) | (v >> 2);
+}
+constexpr u32 Widen6(u32 v)
+{
+  return (v << 2) | (v >> 4);
+}
+constexpr u32 Widen4(u32 v)
+{
+  return v * 0x11;
 }
 
-constexpr u32 alpha_mask = 0xFF000000;
-
-void SetCol(VertexLoader* loader, u32 val)
+constexpr u32 PackRGBA(u32 r, u32 g, u32 b, u32 a)
 {
-  DataWrite(val);
-  loader->m_colIndex++;
+  return r | (g << 8) | (b << 16) | (a << 24);
 }
 
-// Color comes in format BARG in 16 bits
-// BARG -> AABBGGRR
-void SetCol4444(VertexLoader* loader, u16 val_)
+// Each decoder turns the colour bytes at p into the host RGBA8 word.
+
+// 16-bit big-endian RRRRRGGG GGGBBBBB.
+u32 DecodeRGB565(const u8* p)
 {
-  u32 col, val = val_;
-  col = val & 0x00F0;           // col  = 000000R0;
-  col |= (val & 0x000F) << 12;  // col |= 0000G000;
-  col |= (val & 0xF000) << 8;   // col |= 00B00000;
-  col |= (val & 0x0F00) << 20;  // col |= A0000000;
-  col |= col >> 4;              // col  = A0B0G0R0 | 0A0B0G0R;
-  SetCol(loader, col);
+  const u32 v = VertexData::LoadBE<u16>(p);
+  return PackRGBA(Widen5(v >> 11), Widen6((v >> 5) & 0x3f), Widen5(v & 0x1f), 0xff);
 }
 
-// Color comes in format RGBA
-// RRRRRRGG GGGGBBBB BBAAAAAA
-void SetCol6666(VertexLoader* loader, u32 val)
+// R, G, B bytes. Four bytes are read, and the fourth is replaced by an opaque alpha.
+u32 DecodeRGB888(const u8* p)
 {
-  u32 col = (val >> 16) & 0x000000FC;
-  col |= (val >> 2) & 0x0000FC00;
-  col |= (val << 12) & 0x00FC0000;
-  col |= (val << 26) & 0xFC000000;
-  col |= (col >> 6) & 0x03030303;
-  SetCol(loader, col);
+  return VertexData::LoadRaw<u32>(p) | OPAQUE_ALPHA;
 }
 
-// Color comes in RGB
-// RRRRRGGG GGGBBBBB
-void SetCol565(VertexLoader* loader, u16 val_)
+// Bytes RRRRGGGG BBBBAAAA.
+u32 DecodeRGBA4444(const u8* p)
 {
-  u32 col, val = val_;
-  col = (val >> 8) & 0x0000F8;
-  col |= (val << 5) & 0x00FC00;
-  col |= (val << 19) & 0xF80000;
-  col |= (col >> 5) & 0x070007;
-  col |= (col >> 6) & 0x000300;
-  SetCol(loader, col | alpha_mask);
+  return PackRGBA(Widen4(p[0] >> 4), Widen4(p[0] & 0xfu), Widen4(p[1] >> 4), Widen4(p[1] & 0xfu));
 }
 
-u32 Read32(const u8* addr)
+// 24-bit big-endian RRRRRRGG GGGGBBBB BBAAAAAA.
+u32 DecodeRGBA6666(const u8* p)
 {
-  u32 value;
-  std::memcpy(&value, addr, sizeof(u32));
-  return value;
+  const u32 v = Common::swap24(p);
+  return PackRGBA(Widen6((v >> 18) & 0x3f), Widen6((v >> 12) & 0x3f), Widen6((v >> 6) & 0x3f),
+                  Widen6(v & 0x3f));
 }
 
-u32 Read24(const u8* addr)
+// R, G, B, A bytes as they are.
+u32 DecodeRGBA8888(const u8* p)
 {
-  return Read32(addr) | alpha_mask;
+  return VertexData::LoadRaw<u32>(p);
 }
 
-template <typename I>
-void Color_ReadIndex_16b_565(VertexLoader* loader)
+template <u32 (*Decode)(const u8*), u32 InlineBytes, Source S>
+void ReadColor(VertexLoaderCursor& cursor, const VertexLoaderStep& step)
 {
-  const auto index = DataRead<I>();
-  const u8* const address =
-      VertexLoaderManager::cached_arraybases[CPArray::Color0 + loader->m_colIndex] +
-      (index * g_main_cp_state.array_strides[CPArray::Color0 + loader->m_colIndex]);
-
-  u16 value;
-  std::memcpy(&value, address, sizeof(u16));
-
-  SetCol565(loader, Common::swap16(value));
+  const u8* data;
+  if constexpr (VertexData::IsIndexSource<S>)
+    data = VertexData::ArrayEntry(step.array, VertexData::TakeIndex<S>(cursor));
+  else
+    data = VertexData::TakeInline<S>(cursor, InlineBytes);
+  VertexData::Emit(cursor.dst, Decode(data));
 }
 
-template <typename I>
-void Color_ReadIndex_24b_888(VertexLoader* loader)
+template <Source S>
+VertexLoaderStep::Fn PickFormat(ColorFormat format)
 {
-  const auto index = DataRead<I>();
-  const u8* address = VertexLoaderManager::cached_arraybases[CPArray::Color0 + loader->m_colIndex] +
-                      (index * g_main_cp_state.array_strides[CPArray::Color0 + loader->m_colIndex]);
-  SetCol(loader, Read24(address));
+  switch (format)
+  {
+  case ColorFormat::RGB565:
+    return ReadColor<DecodeRGB565, 2, S>;
+  case ColorFormat::RGB888:
+    return ReadColor<DecodeRGB888, 3, S>;
+  case ColorFormat::RGB888x:
+    return ReadColor<DecodeRGB888, 4, S>;
+  case ColorFormat::RGBA4444:
+    return ReadColor<DecodeRGBA4444, 2, S>;
+  case ColorFormat::RGBA6666:
+    return ReadColor<DecodeRGBA6666, 3, S>;
+  case ColorFormat::RGBA8888:
+    return ReadColor<DecodeRGBA8888, 4, S>;
+  default:
+    return nullptr;
+  }
 }
+}  // namespace
 
-template <typename I>
-void Color_ReadIndex_32b_888x(VertexLoader* loader)
-{
-  const auto index = DataRead<I>();
-  const u8* address = VertexLoaderManager::cached_arraybases[CPArray::Color0 + loader->m_colIndex] +
-                      (index * g_main_cp_state.array_strides[CPArray::Color0 + loader->m_colIndex]);
-  SetCol(loader, Read24(address));
-}
-
-template <typename I>
-void Color_ReadIndex_16b_4444(VertexLoader* loader)
-{
-  const auto index = DataRead<I>();
-  const u8* const address =
-      VertexLoaderManager::cached_arraybases[CPArray::Color0 + loader->m_colIndex] +
-      (index * g_main_cp_state.array_strides[CPArray::Color0 + loader->m_colIndex]);
-
-  u16 value;
-  std::memcpy(&value, address, sizeof(u16));
-
-  SetCol4444(loader, value);
-}
-
-template <typename I>
-void Color_ReadIndex_24b_6666(VertexLoader* loader)
-{
-  const auto index = DataRead<I>();
-  const u8* data = VertexLoaderManager::cached_arraybases[CPArray::Color0 + loader->m_colIndex] +
-                   (index * g_main_cp_state.array_strides[CPArray::Color0 + loader->m_colIndex]);
-  const u32 val = Common::swap24(data);
-  SetCol6666(loader, val);
-}
-
-template <typename I>
-void Color_ReadIndex_32b_8888(VertexLoader* loader)
-{
-  const auto index = DataRead<I>();
-  const u8* address = VertexLoaderManager::cached_arraybases[CPArray::Color0 + loader->m_colIndex] +
-                      (index * g_main_cp_state.array_strides[CPArray::Color0 + loader->m_colIndex]);
-  SetCol(loader, Read32(address));
-}
-
-void Color_ReadDirect_24b_888(VertexLoader* loader)
-{
-  SetCol(loader, Read24(DataGetPosition()));
-  DataSkip(3);
-}
-
-void Color_ReadDirect_32b_888x(VertexLoader* loader)
-{
-  SetCol(loader, Read24(DataGetPosition()));
-  DataSkip(4);
-}
-
-void Color_ReadDirect_16b_565(VertexLoader* loader)
-{
-  SetCol565(loader, DataRead<u16>());
-}
-
-void Color_ReadDirect_16b_4444(VertexLoader* loader)
-{
-  u16 value;
-  std::memcpy(&value, DataGetPosition(), sizeof(u16));
-
-  SetCol4444(loader, value);
-  DataSkip(2);
-}
-
-void Color_ReadDirect_24b_6666(VertexLoader* loader)
-{
-  SetCol6666(loader, Common::swap24(DataGetPosition()));
-  DataSkip(3);
-}
-
-void Color_ReadDirect_32b_8888(VertexLoader* loader)
-{
-  SetCol(loader, DataReadU32Unswapped());
-}
-
-using Row = Common::EnumMap<TPipelineFunction, ColorFormat::RGBA8888>;
-using Table = Common::EnumMap<Row, VertexComponentFormat::Index16>;
-
-constexpr Table s_table_read_color = {
-    Row(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr),
-    Row(Color_ReadDirect_16b_565, Color_ReadDirect_24b_888, Color_ReadDirect_32b_888x,
-        Color_ReadDirect_16b_4444, Color_ReadDirect_24b_6666, Color_ReadDirect_32b_8888),
-    Row(Color_ReadIndex_16b_565<u8>, Color_ReadIndex_24b_888<u8>, Color_ReadIndex_32b_888x<u8>,
-        Color_ReadIndex_16b_4444<u8>, Color_ReadIndex_24b_6666<u8>, Color_ReadIndex_32b_8888<u8>),
-    Row(Color_ReadIndex_16b_565<u16>, Color_ReadIndex_24b_888<u16>, Color_ReadIndex_32b_888x<u16>,
-        Color_ReadIndex_16b_4444<u16>, Color_ReadIndex_24b_6666<u16>,
-        Color_ReadIndex_32b_8888<u16>),
-};
-
-}  // Anonymous namespace
-
-TPipelineFunction VertexLoader_Color::GetFunction(VertexComponentFormat type, ColorFormat format)
+VertexLoaderStep::Fn VertexLoader_Color::GetReader(VertexComponentFormat type, ColorFormat format)
 {
   if (format > ColorFormat::RGBA8888)
   {
     PanicAlertFmt("Invalid color format {}", format);
     return nullptr;
   }
-  return s_table_read_color[type][format];
-}
-
-TPipelineFunction VertexLoader_Color::GetDummyFunction()
-{
-  return Color_Read_Dummy;
+  switch (type)
+  {
+  case VertexComponentFormat::Direct:
+    return PickFormat<Source::Inline>(format);
+  case VertexComponentFormat::Index8:
+    return PickFormat<Source::Index8>(format);
+  case VertexComponentFormat::Index16:
+    return PickFormat<Source::Index16>(format);
+  default:
+    return nullptr;
+  }
 }

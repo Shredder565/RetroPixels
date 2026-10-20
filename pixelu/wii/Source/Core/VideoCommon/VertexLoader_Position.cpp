@@ -1,126 +1,86 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/VertexLoader_Position.h"
 
 #include <limits>
-#include <type_traits>
 
 #include "Common/CommonTypes.h"
-#include "Common/EnumMap.h"
-#include "Common/Swap.h"
 
 #include "VideoCommon/VertexLoader.h"
 #include "VideoCommon/VertexLoaderManager.h"
 #include "VideoCommon/VertexLoaderUtils.h"
-#include "VideoCommon/VideoCommon.h"
 
 namespace
 {
-template <typename T>
-constexpr float PosScale(T val, float scale)
-{
-  return val * scale;
-}
+using VertexData::Source;
 
-template <>
-constexpr float PosScale(float val, float /* scale */)
+// Reads `Count` components of type T and writes them as floats. The last three vertices of a
+// batch also go to the position cache (used for the z-freeze slope), except dropped ones.
+template <typename T, u32 Count, Source S>
+void ReadPosition(VertexLoaderCursor& cursor, const VertexLoaderStep& step)
 {
-  return val;
-}
-
-template <typename T, int N>
-void Pos_ReadDirect(VertexLoader* loader)
-{
-  static_assert(N <= 3, "N > 3 is not sane!");
-  const auto scale = loader->m_posScale;
-
-  for (int i = 0; i < N; ++i)
+  const u8* data;
+  if constexpr (VertexData::IsIndexSource<S>)
   {
-    const float value = PosScale(DataRead<T>(), scale);
-    if (loader->m_remaining < 3)
-      VertexLoaderManager::position_cache[loader->m_remaining][i] = value;
-    DataWrite(value);
+    const u32 index = VertexData::TakeIndex<S>(cursor);
+    cursor.drop_vertex = index == std::numeric_limits<VertexData::IndexType<S>>::max();
+    data = VertexData::ArrayEntry(step.array, index);
+  }
+  else
+  {
+    data = VertexData::TakeInline<S>(cursor, Count * sizeof(T));
   }
 
-  LOG_VTX();
-}
-
-template <typename I, typename T, int N>
-void Pos_ReadIndex(VertexLoader* loader)
-{
-  static_assert(std::is_unsigned<I>::value, "Only unsigned I is sane!");
-  static_assert(N <= 3, "N > 3 is not sane!");
-
-  const auto index = DataRead<I>();
-  loader->m_vertexSkip = index == std::numeric_limits<I>::max();
-  const auto data =
-      reinterpret_cast<const T*>(VertexLoaderManager::cached_arraybases[CPArray::Position] +
-                                 (index * g_main_cp_state.array_strides[CPArray::Position]));
-  const auto scale = loader->m_posScale;
-
-  for (int i = 0; i < N; ++i)
+  const bool cache = cursor.remaining < 3 && !cursor.drop_vertex;
+  for (u32 c = 0; c < Count; c++)
   {
-    const float value = PosScale(Common::FromBigEndian(data[i]), scale);
-    if (loader->m_remaining < 3 && !loader->m_vertexSkip)
-      VertexLoaderManager::position_cache[loader->m_remaining][i] = value;
-    DataWrite(value);
+    const float value = VertexData::Component<T>(data + c * sizeof(T), step.scale);
+    if (cache)
+      VertexLoaderManager::position_cache[static_cast<size_t>(cursor.remaining)][c] = value;
+    VertexData::Emit(cursor.dst, value);
   }
-
-  LOG_VTX();
 }
 
-using ComponentCountRow = Common::EnumMap<TPipelineFunction, CoordComponentCount::XYZ>;
-using ComponentFormatTable = Common::EnumMap<ComponentCountRow, ComponentFormat::InvalidFloat7>;
-using Table = Common::EnumMap<ComponentFormatTable, VertexComponentFormat::Index16>;
-
-constexpr Table s_table_read_position = {
-    ComponentFormatTable({
-        ComponentCountRow(nullptr, nullptr),
-        ComponentCountRow(nullptr, nullptr),
-        ComponentCountRow(nullptr, nullptr),
-        ComponentCountRow(nullptr, nullptr),
-        ComponentCountRow(nullptr, nullptr),
-        ComponentCountRow(nullptr, nullptr),
-        ComponentCountRow(nullptr, nullptr),
-        ComponentCountRow(nullptr, nullptr),
-    }),
-    ComponentFormatTable({
-        ComponentCountRow(Pos_ReadDirect<u8, 2>, Pos_ReadDirect<u8, 3>),
-        ComponentCountRow(Pos_ReadDirect<s8, 2>, Pos_ReadDirect<s8, 3>),
-        ComponentCountRow(Pos_ReadDirect<u16, 2>, Pos_ReadDirect<u16, 3>),
-        ComponentCountRow(Pos_ReadDirect<s16, 2>, Pos_ReadDirect<s16, 3>),
-        ComponentCountRow(Pos_ReadDirect<float, 2>, Pos_ReadDirect<float, 3>),
-        ComponentCountRow(Pos_ReadDirect<float, 2>, Pos_ReadDirect<float, 3>),
-        ComponentCountRow(Pos_ReadDirect<float, 2>, Pos_ReadDirect<float, 3>),
-        ComponentCountRow(Pos_ReadDirect<float, 2>, Pos_ReadDirect<float, 3>),
-    }),
-    ComponentFormatTable({
-        ComponentCountRow(Pos_ReadIndex<u8, u8, 2>, Pos_ReadIndex<u8, u8, 3>),
-        ComponentCountRow(Pos_ReadIndex<u8, s8, 2>, Pos_ReadIndex<u8, s8, 3>),
-        ComponentCountRow(Pos_ReadIndex<u8, u16, 2>, Pos_ReadIndex<u8, u16, 3>),
-        ComponentCountRow(Pos_ReadIndex<u8, s16, 2>, Pos_ReadIndex<u8, s16, 3>),
-        ComponentCountRow(Pos_ReadIndex<u8, float, 2>, Pos_ReadIndex<u8, float, 3>),
-        ComponentCountRow(Pos_ReadIndex<u8, float, 2>, Pos_ReadIndex<u8, float, 3>),
-        ComponentCountRow(Pos_ReadIndex<u8, float, 2>, Pos_ReadIndex<u8, float, 3>),
-        ComponentCountRow(Pos_ReadIndex<u8, float, 2>, Pos_ReadIndex<u8, float, 3>),
-    }),
-    ComponentFormatTable({
-        ComponentCountRow(Pos_ReadIndex<u16, u8, 2>, Pos_ReadIndex<u16, u8, 3>),
-        ComponentCountRow(Pos_ReadIndex<u16, s8, 2>, Pos_ReadIndex<u16, s8, 3>),
-        ComponentCountRow(Pos_ReadIndex<u16, u16, 2>, Pos_ReadIndex<u16, u16, 3>),
-        ComponentCountRow(Pos_ReadIndex<u16, s16, 2>, Pos_ReadIndex<u16, s16, 3>),
-        ComponentCountRow(Pos_ReadIndex<u16, float, 2>, Pos_ReadIndex<u16, float, 3>),
-        ComponentCountRow(Pos_ReadIndex<u16, float, 2>, Pos_ReadIndex<u16, float, 3>),
-        ComponentCountRow(Pos_ReadIndex<u16, float, 2>, Pos_ReadIndex<u16, float, 3>),
-        ComponentCountRow(Pos_ReadIndex<u16, float, 2>, Pos_ReadIndex<u16, float, 3>),
-    }),
-};
-}  // Anonymous namespace
-
-TPipelineFunction VertexLoader_Position::GetFunction(VertexComponentFormat type,
-                                                     ComponentFormat format,
-                                                     CoordComponentCount elements)
+template <typename T, Source S>
+VertexLoaderStep::Fn PickCount(CoordComponentCount elements)
 {
-  return s_table_read_position[type][format][elements];
+  return elements == CoordComponentCount::XYZ ? ReadPosition<T, 3, S> : ReadPosition<T, 2, S>;
+}
+
+template <Source S>
+VertexLoaderStep::Fn PickFormat(ComponentFormat format, CoordComponentCount elements)
+{
+  switch (format)
+  {
+  case ComponentFormat::UByte:
+    return PickCount<u8, S>(elements);
+  case ComponentFormat::Byte:
+    return PickCount<s8, S>(elements);
+  case ComponentFormat::UShort:
+    return PickCount<u16, S>(elements);
+  case ComponentFormat::Short:
+    return PickCount<s16, S>(elements);
+  default:
+    return PickCount<float, S>(elements);
+  }
+}
+}  // namespace
+
+VertexLoaderStep::Fn VertexLoader_Position::GetReader(VertexComponentFormat type,
+                                                      ComponentFormat format,
+                                                      CoordComponentCount elements)
+{
+  switch (type)
+  {
+  case VertexComponentFormat::Direct:
+    return PickFormat<Source::Inline>(format, elements);
+  case VertexComponentFormat::Index8:
+    return PickFormat<Source::Index8>(format, elements);
+  case VertexComponentFormat::Index16:
+    return PickFormat<Source::Index16>(format, elements);
+  default:
+    // A position the VCD leaves out is still converted from the bytes at the read position,
+    // which are not consumed (the JIT loader does the same).
+    return PickFormat<Source::Peek>(format, elements);
+  }
 }

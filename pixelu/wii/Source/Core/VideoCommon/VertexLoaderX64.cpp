@@ -1,15 +1,15 @@
-// Copyright 2015 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/VertexLoaderX64.h"
 
 #include <array>
+#include <bit>
+#include <cmath>
 #include <cstring>
 
-#include "Common/BitSet.h"
+#include "Common/Assert.h"
 #include "Common/CPUDetect.h"
 #include "Common/CommonTypes.h"
-#include "Common/Intrinsics.h"
 #include "Common/JitRegister.h"
 #include "Common/x64ABI.h"
 #include "Common/x64Emitter.h"
@@ -18,595 +18,602 @@
 
 using namespace Gen;
 
-static const X64Reg src_reg = ABI_PARAM1;
-static const X64Reg dst_reg = ABI_PARAM2;
-static const X64Reg scratch1 = RAX;
-static const X64Reg scratch2 = ABI_PARAM3;
-static const X64Reg scratch3 = ABI_PARAM4;
-// The remaining number of vertices to be processed.  Starts at count - 1, and the final loop has it
-// at 0.
-static const X64Reg remaining_reg = R10;
-static const X64Reg skipped_reg = R11;
-static const X64Reg base_reg = RBX;
-
-static const u8* memory_base_ptr = (u8*)&g_main_cp_state.array_strides;
-
-static OpArg MPIC(const void* ptr, X64Reg scale_reg, int scale = SCALE_1)
+namespace
 {
-  return MComplex(base_reg, scale_reg, scale, PtrOffset(ptr, memory_base_ptr));
+// Registers of the generated loop. All are caller-saved in both the Windows and the System V
+// conventions, so the loop saves nothing.
+constexpr X64Reg kSrc = R10;     // current GX vertex
+constexpr X64Reg kDst = R11;     // current host vertex
+constexpr X64Reg kLeft = R9;     // vertices after this one
+constexpr X64Reg kAnchor = RAX;  // base for addressing globals
+constexpr X64Reg kIndex = RCX;   // array index, then the offset of the entry
+constexpr X64Reg kArray = RDX;   // array base pointer
+constexpr X64Reg kTmp = R8;
+constexpr X64Reg kVec = XMM0;  // the attribute being converted
+constexpr X64Reg kVecTmp = XMM1;
+
+// Stack slots: the vertex count and the number of dropped vertices.
+constexpr int kFrameBytes = 8;
+constexpr int kSlotCount = 0;
+constexpr int kSlotDropped = 4;
+
+constexpr size_t kCodeBytes = 4096;
+constexpr u32 kPoolBytes = 512;
+
+// Globals are reached as [kAnchor + disp32]; they all live in the same image as this one.
+const u8* AnchorAddress()
+{
+  return reinterpret_cast<const u8*>(&VertexLoaderManager::cached_arraybases);
 }
 
-static OpArg MPIC(const void* ptr)
+// Colour conversion tables. Each GX colour byte contributes its own bits of the RGBA8 result
+// (R in the lowest byte); OR-ing the entries of all bytes gives the colour. Channel widening
+// (repeating the top bits below) splits cleanly between the bytes a channel spans.
+struct ColorTables
 {
-  return MDisp(base_reg, PtrOffset(ptr, memory_base_ptr));
+  std::array<u32, 256> rgb565_hi;   // RRRRRGGG
+  std::array<u32, 256> rgb565_lo;   // GGGBBBBB
+  std::array<u32, 256> rgba4444_hi;  // RRRRGGGG
+  std::array<u32, 256> rgba4444_lo;  // BBBBAAAA
+  std::array<u32, 256> rgba6666_0;  // RRRRRRGG
+  std::array<u32, 256> rgba6666_1;  // GGGGBBBB
+  std::array<u32, 256> rgba6666_2;  // BBAAAAAA
+};
+
+constexpr ColorTables BuildColorTables()
+{
+  ColorTables t{};
+  for (u32 b = 0; b < 256; b++)
+  {
+    const u32 r5 = b >> 3;
+    const u32 g3 = b & 7;
+    t.rgb565_hi[b] = ((r5 << 3) | (r5 >> 2)) | (((g3 << 5) | (g3 >> 1)) << 8) | 0xff000000u;
+    t.rgb565_lo[b] = ((b >> 5) << 2 << 8) | ((((b & 31) << 3) | ((b & 31) >> 2)) << 16);
+
+    t.rgba4444_hi[b] = ((b >> 4) * 0x11u) | (((b & 15) * 0x11u) << 8);
+    t.rgba4444_lo[b] = (((b >> 4) * 0x11u) << 16) | (((b & 15) * 0x11u) << 24);
+
+    const u32 r6 = b >> 2;
+    const u32 g2 = b & 3;
+    t.rgba6666_0[b] = ((r6 << 2) | (r6 >> 4)) | (((g2 << 6) | g2) << 8);
+    const u32 b4 = b & 15;
+    t.rgba6666_1[b] = ((b >> 4) << 2 << 8) | (((b4 << 4) | (b4 >> 2)) << 16);
+    const u32 a6 = b & 63;
+    t.rgba6666_2[b] = ((b >> 6) << 2 << 16) | (((a6 << 2) | (a6 >> 4)) << 24);
+  }
+  return t;
 }
+
+const ColorTables s_color_tables = BuildColorTables();
+
+bool IsFloatFormat(ComponentFormat format)
+{
+  return format >= ComponentFormat::Float;
+}
+
+// PSHUFB control that moves `count` big-endian elements to the 32-bit lanes: unsigned values
+// end up zero-extended, signed ones in the top of the lane (for an arithmetic shift down),
+// floats byte-reversed. Every other byte becomes zero.
+std::array<u8, 16> ElementShuffle(ComponentFormat format, int count)
+{
+  std::array<u8, 16> control;
+  control.fill(0x80);
+  const u32 size = GetElementSize(format);
+  const bool high = format == ComponentFormat::Byte || format == ComponentFormat::Short;
+  for (u32 lane = 0; lane < static_cast<u32>(count); lane++)
+  {
+    const u32 first = lane * size;
+    const u32 top = lane * 4 + (high ? 3u : size - 1);
+    for (u32 k = 0; k < size; k++)
+      control[top - k] = static_cast<u8>(first + k);
+  }
+  return control;
+}
+
+std::array<u8, 16> ScaleVector(u32 frac)
+{
+  const float scale = std::ldexp(1.0f, -static_cast<int>(frac));
+  std::array<u8, 16> bytes;
+  for (u32 i = 0; i < 4; i++)
+    std::memcpy(&bytes[i * 4], &scale, sizeof(scale));
+  return bytes;
+}
+
+// Normals are fixed-point with a fixed fraction per format.
+u32 NormalFrac(ComponentFormat format)
+{
+  switch (format)
+  {
+  case ComponentFormat::UByte:
+    return 7;
+  case ComponentFormat::Byte:
+    return 6;
+  case ComponentFormat::UShort:
+    return 15;
+  case ComponentFormat::Short:
+    return 14;
+  default:
+    return 0;
+  }
+}
+}  // namespace
 
 VertexLoaderX64::VertexLoaderX64(const TVtxDesc& vtx_desc, const VAT& vtx_att)
     : VertexLoaderBase(vtx_desc, vtx_att)
 {
-  AllocCodeSpace(4096);
+  AllocCodeSpace(kCodeBytes);
   ClearCodeSpace();
-  GenerateVertexLoader();
+  m_pool = region;
+  SetCodePtr(region + kPoolBytes, region + kCodeBytes);
+  Generate();
   WriteProtect(true);
 
-  Common::JitRegister::Register(region, GetCodePtr(), "VertexLoaderX64\nVtx desc: \n{}\nVAT:\n{}",
+  Common::JitRegister::Register(m_entry, GetCodePtr(), "VertexLoaderX64\nVtx desc: \n{}\nVAT:\n{}",
                                 vtx_desc, vtx_att);
 }
 
-OpArg VertexLoaderX64::GetVertexAddr(CPArray array, VertexComponentFormat attribute)
+OpArg VertexLoaderX64::Global(const void* address) const
 {
-  if (IsIndexed(attribute))
+  return MDisp(kAnchor, static_cast<int>(PtrOffset(address, AnchorAddress())));
+}
+
+const void* VertexLoaderX64::PoolConstant(const Constant& value)
+{
+  for (u32 at = 0; at < m_pool_used; at += 16)
   {
-    int bits = attribute == VertexComponentFormat::Index8 ? 8 : 16;
-    LoadAndSwap(bits, scratch1, MDisp(src_reg, m_src_ofs));
-    m_src_ofs += bits / 8;
-    if (array == CPArray::Position)
-    {
-      CMP(bits, R(scratch1), Imm8(-1));
-      m_skip_vertex = J_CC(CC_E, Jump::Near);
-    }
-    IMUL(32, scratch1, MPIC(&g_main_cp_state.array_strides[array]));
-    MOV(64, R(scratch2), MPIC(&VertexLoaderManager::cached_arraybases[array]));
-    return MRegSum(scratch1, scratch2);
+    if (std::memcmp(m_pool + at, value.data(), value.size()) == 0)
+      return m_pool + at;
   }
-  else
+  ASSERT(m_pool_used + 16 <= kPoolBytes);
+  u8* const slot = m_pool + m_pool_used;
+  std::memcpy(slot, value.data(), value.size());
+  m_pool_used += 16;
+  return slot;
+}
+
+OpArg VertexLoaderX64::AttributeData(CPArray array, VertexComponentFormat source, bool may_drop)
+{
+  if (!IsIndexed(source))
+    return MDisp(kSrc, static_cast<int>(m_in));
+
+  const bool wide = source == VertexComponentFormat::Index16;
+  LoadAndSwap(wide ? 16 : 8, kIndex, MDisp(kSrc, static_cast<int>(m_in)));
+  m_in += wide ? 2 : 1;
+  if (may_drop)
   {
-    return MDisp(src_reg, m_src_ofs);
+    CMP(32, R(kIndex), Imm32(wide ? 0xffffu : 0xffu));
+    m_drop_jumps.push_back(J_CC(CC_E, Jump::Near));
+  }
+  IMUL(32, kIndex, Global(&g_main_cp_state.array_strides[array]));
+  MOV(64, R(kArray), Global(&VertexLoaderManager::cached_arraybases[array]));
+  return MRegSum(kArray, kIndex);
+}
+
+void VertexLoaderX64::LoadVectorSSSE3(OpArg data, const VectorJob& job)
+{
+  const u32 bytes = GetElementSize(job.format) * static_cast<u32>(job.count_in);
+  if (bytes <= 4)
+    MOVD_xmm(kVec, data);
+  else if (bytes <= 8)
+    MOVQ_xmm(kVec, data);
+  else
+    MOVDQU(kVec, data);
+
+  PSHUFB(kVec, M(PoolConstant(ElementShuffle(job.format, job.count_in))));
+  if (job.format == ComponentFormat::Byte)
+    PSRAD(kVec, 24);
+  else if (job.format == ComponentFormat::Short)
+    PSRAD(kVec, 16);
+}
+
+void VertexLoaderX64::LoadVectorSSE2(OpArg data, const VectorJob& job)
+{
+  switch (job.format)
+  {
+  case ComponentFormat::UByte:
+    // Four source bytes, zero-extended to the four lanes.
+    MOVD_xmm(kVec, data);
+    PXOR(kVecTmp, R(kVecTmp));
+    PUNPCKLBW(kVec, R(kVecTmp));
+    PUNPCKLWD(kVec, R(kVecTmp));
+    break;
+  case ComponentFormat::Byte:
+    // Four source bytes, each moved to the top of its lane and shifted down signed.
+    MOVD_xmm(kVec, data);
+    PUNPCKLBW(kVec, R(kVec));
+    PUNPCKLWD(kVec, R(kVec));
+    PSRAD(kVec, 24);
+    break;
+  default:
+  {
+    // 16-bit elements go to the high half of their lanes, then shift down. Three elements also
+    // repeat the first one in the fourth lane.
+    PXOR(kVec, R(kVec));
+    const int lanes = job.count_in;
+    for (int lane = 0; lane < lanes; lane++)
+    {
+      OpArg element = data;
+      element.AddMemOffset(lane * 2);
+      LoadAndSwap(16, kTmp, element);
+      PINSRW(kVec, R(kTmp), static_cast<u8>(lane * 2 + 1));
+    }
+    if (lanes == 3)
+    {
+      LoadAndSwap(16, kTmp, data);
+      PINSRW(kVec, R(kTmp), 7);
+    }
+    if (job.format == ComponentFormat::Short)
+      PSRAD(kVec, 16);
+    else
+      PSRLD(kVec, 16);
+    break;
+  }
   }
 }
 
-void VertexLoaderX64::ReadVertex(OpArg data, VertexComponentFormat attribute,
-                                 ComponentFormat format, int count_in, int count_out,
-                                 bool dequantize, u8 scaling_exponent,
-                                 AttributeFormat* native_format)
+void VertexLoaderX64::StoreToCache(Cache cache)
 {
-  using ShuffleRow = std::array<__m128i, 3>;
-  static const Common::EnumMap<ShuffleRow, ComponentFormat::InvalidFloat7> shuffle_lut = {
-      ShuffleRow{_mm_set_epi32(0xFFFFFFFFL, 0xFFFFFFFFL, 0xFFFFFFFFL, 0xFFFFFF00L),   // 1x u8
-                 _mm_set_epi32(0xFFFFFFFFL, 0xFFFFFFFFL, 0xFFFFFF01L, 0xFFFFFF00L),   // 2x u8
-                 _mm_set_epi32(0xFFFFFFFFL, 0xFFFFFF02L, 0xFFFFFF01L, 0xFFFFFF00L)},  // 3x u8
-      ShuffleRow{_mm_set_epi32(0xFFFFFFFFL, 0xFFFFFFFFL, 0xFFFFFFFFL, 0x00FFFFFFL),   // 1x s8
-                 _mm_set_epi32(0xFFFFFFFFL, 0xFFFFFFFFL, 0x01FFFFFFL, 0x00FFFFFFL),   // 2x s8
-                 _mm_set_epi32(0xFFFFFFFFL, 0x02FFFFFFL, 0x01FFFFFFL, 0x00FFFFFFL)},  // 3x s8
-      ShuffleRow{_mm_set_epi32(0xFFFFFFFFL, 0xFFFFFFFFL, 0xFFFFFFFFL, 0xFFFF0001L),   // 1x u16
-                 _mm_set_epi32(0xFFFFFFFFL, 0xFFFFFFFFL, 0xFFFF0203L, 0xFFFF0001L),   // 2x u16
-                 _mm_set_epi32(0xFFFFFFFFL, 0xFFFF0405L, 0xFFFF0203L, 0xFFFF0001L)},  // 3x u16
-      ShuffleRow{_mm_set_epi32(0xFFFFFFFFL, 0xFFFFFFFFL, 0xFFFFFFFFL, 0x0001FFFFL),   // 1x s16
-                 _mm_set_epi32(0xFFFFFFFFL, 0xFFFFFFFFL, 0x0203FFFFL, 0x0001FFFFL),   // 2x s16
-                 _mm_set_epi32(0xFFFFFFFFL, 0x0405FFFFL, 0x0203FFFFL, 0x0001FFFFL)},  // 3x s16
-      ShuffleRow{_mm_set_epi32(0xFFFFFFFFL, 0xFFFFFFFFL, 0xFFFFFFFFL, 0x00010203L),   // 1x float
-                 _mm_set_epi32(0xFFFFFFFFL, 0xFFFFFFFFL, 0x04050607L, 0x00010203L),   // 2x float
-                 _mm_set_epi32(0xFFFFFFFFL, 0x08090A0BL, 0x04050607L, 0x00010203L)},  // 3x float
-      ShuffleRow{_mm_set_epi32(0xFFFFFFFFL, 0xFFFFFFFFL, 0xFFFFFFFFL, 0x00010203L),   // 1x invalid
-                 _mm_set_epi32(0xFFFFFFFFL, 0xFFFFFFFFL, 0x04050607L, 0x00010203L),   // 2x invalid
-                 _mm_set_epi32(0xFFFFFFFFL, 0x08090A0BL, 0x04050607L, 0x00010203L)},  // 3x invalid
-      ShuffleRow{_mm_set_epi32(0xFFFFFFFFL, 0xFFFFFFFFL, 0xFFFFFFFFL, 0x00010203L),   // 1x invalid
-                 _mm_set_epi32(0xFFFFFFFFL, 0xFFFFFFFFL, 0x04050607L, 0x00010203L),   // 2x invalid
-                 _mm_set_epi32(0xFFFFFFFFL, 0x08090A0BL, 0x04050607L, 0x00010203L)},  // 3x invalid
-      ShuffleRow{_mm_set_epi32(0xFFFFFFFFL, 0xFFFFFFFFL, 0xFFFFFFFFL, 0x00010203L),   // 1x invalid
-                 _mm_set_epi32(0xFFFFFFFFL, 0xFFFFFFFFL, 0x04050607L, 0x00010203L),   // 2x invalid
-                 _mm_set_epi32(0xFFFFFFFFL, 0x08090A0BL, 0x04050607L, 0x00010203L)},  // 3x invalid
-  };
-  static const __m128 scale_factors[32] = {
-      _mm_set_ps1(1. / (1u << 0)),  _mm_set_ps1(1. / (1u << 1)),  _mm_set_ps1(1. / (1u << 2)),
-      _mm_set_ps1(1. / (1u << 3)),  _mm_set_ps1(1. / (1u << 4)),  _mm_set_ps1(1. / (1u << 5)),
-      _mm_set_ps1(1. / (1u << 6)),  _mm_set_ps1(1. / (1u << 7)),  _mm_set_ps1(1. / (1u << 8)),
-      _mm_set_ps1(1. / (1u << 9)),  _mm_set_ps1(1. / (1u << 10)), _mm_set_ps1(1. / (1u << 11)),
-      _mm_set_ps1(1. / (1u << 12)), _mm_set_ps1(1. / (1u << 13)), _mm_set_ps1(1. / (1u << 14)),
-      _mm_set_ps1(1. / (1u << 15)), _mm_set_ps1(1. / (1u << 16)), _mm_set_ps1(1. / (1u << 17)),
-      _mm_set_ps1(1. / (1u << 18)), _mm_set_ps1(1. / (1u << 19)), _mm_set_ps1(1. / (1u << 20)),
-      _mm_set_ps1(1. / (1u << 21)), _mm_set_ps1(1. / (1u << 22)), _mm_set_ps1(1. / (1u << 23)),
-      _mm_set_ps1(1. / (1u << 24)), _mm_set_ps1(1. / (1u << 25)), _mm_set_ps1(1. / (1u << 26)),
-      _mm_set_ps1(1. / (1u << 27)), _mm_set_ps1(1. / (1u << 28)), _mm_set_ps1(1. / (1u << 29)),
-      _mm_set_ps1(1. / (1u << 30)), _mm_set_ps1(1. / (1u << 31)),
-  };
+  switch (cache)
+  {
+  case Cache::Position:
+  {
+    // Rows of four floats, for the last three vertices.
+    CMP(32, R(kLeft), Imm8(3));
+    const FixupBranch not_last_three = J_CC(CC_AE);
+    MOV(32, R(kTmp), R(kLeft));
+    SHL(32, R(kTmp), Imm8(4));
+    MOVUPS(MComplex(kAnchor, kTmp, SCALE_1,
+                    static_cast<int>(
+                        PtrOffset(VertexLoaderManager::position_cache.data(), AnchorAddress()))),
+           kVec);
+    SetJumpTarget(not_last_three);
+    break;
+  }
+  case Cache::Normal:
+  case Cache::Tangent:
+  {
+    TEST(32, R(kLeft), R(kLeft));
+    const FixupBranch not_last = J_CC(CC_NZ);
+    MOVUPS(Global(cache == Cache::Normal ? VertexLoaderManager::normal_cache.data() :
+                                           VertexLoaderManager::tangent_cache.data()),
+           kVec);
+    SetJumpTarget(not_last);
+    break;
+  }
+  case Cache::Binormal:
+    // The binormal cache is written for every vertex, so it ends up with the last vertex that
+    // was not dropped.
+    MOVUPS(Global(VertexLoaderManager::binormal_cache.data()), kVec);
+    break;
+  case Cache::None:
+    break;
+  }
+}
 
-  X64Reg coords = XMM0;
+void VertexLoaderX64::ConvertVector(OpArg data, const VectorJob& job, AttributeFormat* attr)
+{
+  attr->type = ComponentFormat::Float;
+  attr->components = job.count_out;
+  attr->offset = static_cast<int>(m_out);
+  attr->enable = true;
+  attr->integer = false;
 
-  const auto write_zfreeze = [&] {  // zfreeze
-    if (native_format == &m_native_vtx_decl.position)
-    {
-      CMP(32, R(remaining_reg), Imm8(3));
-      FixupBranch dont_store = J_CC(CC_AE);
-      // The position cache is composed of 3 rows of 4 floats each; since each float is 4 bytes,
-      // we need to scale by 4 twice to cover the 4 floats.
-      LEA(32, scratch3, MScaled(remaining_reg, SCALE_4, 0));
-      MOVUPS(MPIC(VertexLoaderManager::position_cache.data(), scratch3, SCALE_4), coords);
-      SetJumpTarget(dont_store);
-    }
-    else if (native_format == &m_native_vtx_decl.normals[0])
-    {
-      TEST(32, R(remaining_reg), R(remaining_reg));
-      FixupBranch dont_store = J_CC(CC_NZ);
-      // For similar reasons, the cached normal is 4 floats each
-      MOVUPS(MPIC(VertexLoaderManager::normal_cache.data()), coords);
-      SetJumpTarget(dont_store);
-    }
-    else if (native_format == &m_native_vtx_decl.normals[1])
-    {
-      TEST(32, R(remaining_reg), R(remaining_reg));
-      FixupBranch dont_store = J_CC(CC_NZ);
-      // For similar reasons, the cached tangent and binormal are 4 floats each
-      MOVUPS(MPIC(VertexLoaderManager::tangent_cache.data()), coords);
-      SetJumpTarget(dont_store);
-    }
-    else if (native_format == &m_native_vtx_decl.normals[2])
-    {
-      CMP(32, R(remaining_reg), R(remaining_reg));
-      FixupBranch dont_store = J_CC(CC_NZ);
-      // For similar reasons, the cached tangent and binormal are 4 floats each
-      MOVUPS(MPIC(VertexLoaderManager::binormal_cache.data()), coords);
-      SetJumpTarget(dont_store);
-    }
-  };
-
-  int elem_size = GetElementSize(format);
-  int load_bytes = elem_size * count_in;
-  OpArg dest = MDisp(dst_reg, m_dst_ofs);
-
-  native_format->components = count_out;
-  native_format->enable = true;
-  native_format->offset = m_dst_ofs;
-  native_format->type = ComponentFormat::Float;
-  native_format->integer = false;
-
-  m_dst_ofs += sizeof(float) * count_out;
-
-  if (attribute == VertexComponentFormat::Direct)
-    m_src_ofs += load_bytes;
+  OpArg dest = MDisp(kDst, static_cast<int>(m_out));
+  m_out += 4 * static_cast<u32>(job.count_out);
+  const u32 in_bytes = GetElementSize(job.format) * static_cast<u32>(job.count_in);
+  if (job.source == VertexComponentFormat::Direct)
+    m_in += in_bytes;
 
   if (cpu_info.bSSSE3)
   {
-    if (load_bytes > 8)
-      MOVDQU(coords, data);
-    else if (load_bytes > 4)
-      MOVQ_xmm(coords, data);
-    else
-      MOVD_xmm(coords, data);
-
-    PSHUFB(coords, MPIC(&shuffle_lut[format][count_in - 1]));
-
-    // Sign-extend.
-    if (format == ComponentFormat::Byte)
-      PSRAD(coords, 24);
-    if (format == ComponentFormat::Short)
-      PSRAD(coords, 16);
+    LoadVectorSSSE3(data, job);
+  }
+  else if (IsFloatFormat(job.format))
+  {
+    // Without PSHUFB, floats are swapped and copied one by one through a GPR. Only the vectors
+    // that feed the position, tangent and binormal caches are also gathered in kVec. The vector
+    // store below then goes after the copied floats, as it always has without SSSE3.
+    const bool gather = job.cache == Cache::Position || job.cache == Cache::Tangent ||
+                        job.cache == Cache::Binormal;
+    for (int i = 0; i < job.count_in; i++)
+    {
+      OpArg element = data;
+      element.AddMemOffset(i * 4);
+      LoadAndSwap(32, kTmp, element);
+      OpArg out = dest;
+      out.AddMemOffset(i * 4);
+      MOV(32, out, R(kTmp));
+      if (!gather)
+        continue;
+      if (cpu_info.bSSE4_1)
+      {
+        PINSRD(kVec, R(kTmp), static_cast<u8>(i));
+      }
+      else
+      {
+        PINSRW(kVec, R(kTmp), static_cast<u8>(2 * i));
+        SHR(32, R(kTmp), Imm8(16));
+        PINSRW(kVec, R(kTmp), static_cast<u8>(2 * i + 1));
+      }
+    }
+    dest.AddMemOffset(static_cast<int>(in_bytes));
   }
   else
   {
-    // SSE2
-    X64Reg temp = XMM1;
-    switch (format)
-    {
-    case ComponentFormat::UByte:
-      MOVD_xmm(coords, data);
-      PXOR(temp, R(temp));
-      PUNPCKLBW(coords, R(temp));
-      PUNPCKLWD(coords, R(temp));
-      break;
-    case ComponentFormat::Byte:
-      MOVD_xmm(coords, data);
-      PUNPCKLBW(coords, R(coords));
-      PUNPCKLWD(coords, R(coords));
-      PSRAD(coords, 24);
-      break;
-    case ComponentFormat::UShort:
-    case ComponentFormat::Short:
-      switch (count_in)
-      {
-      case 1:
-        LoadAndSwap(32, scratch3, data);
-        MOVD_xmm(coords, R(scratch3));  // ......X.
-        break;
-      case 2:
-        LoadAndSwap(32, scratch3, data);
-        MOVD_xmm(coords, R(scratch3));     // ......XY
-        PSHUFLW(coords, R(coords), 0x24);  // ....Y.X.
-        break;
-      case 3:
-        LoadAndSwap(64, scratch3, data);
-        MOVQ_xmm(coords, R(scratch3));     // ....XYZ.
-        PUNPCKLQDQ(coords, R(coords));     // ..Z.XYZ.
-        PSHUFLW(coords, R(coords), 0xAC);  // ..Z.Y.X.
-        break;
-      }
-      if (format == ComponentFormat::Short)
-        PSRAD(coords, 16);
-      else
-        PSRLD(coords, 16);
-      break;
-    case ComponentFormat::Float:
-    case ComponentFormat::InvalidFloat5:
-    case ComponentFormat::InvalidFloat6:
-    case ComponentFormat::InvalidFloat7:
-      // Floats don't need to be scaled or converted,
-      // so we can just load/swap/store them directly
-      // and return early.
-      // (In SSSE3 we still need to store them.)
-      for (int i = 0; i < count_in; i++)
-      {
-        LoadAndSwap(32, scratch3, data);
-        MOV(32, dest, R(scratch3));
-        data.AddMemOffset(sizeof(float));
-        dest.AddMemOffset(sizeof(float));
-
-        // zfreeze
-        if (native_format == &m_native_vtx_decl.position ||
-            native_format == &m_native_vtx_decl.normals[1] ||
-            native_format == &m_native_vtx_decl.normals[2])
-        {
-          if (cpu_info.bSSE4_1)
-          {
-            PINSRD(coords, R(scratch3), i);
-          }
-          else
-          {
-            PINSRW(coords, R(scratch3), 2 * i + 0);
-            SHR(32, R(scratch3), Imm8(16));
-            PINSRW(coords, R(scratch3), 2 * i + 1);
-          }
-        }
-      }
-
-      write_zfreeze();
-    }
+    LoadVectorSSE2(data, job);
   }
 
-  if (format < ComponentFormat::Float)
+  if (!IsFloatFormat(job.format))
   {
-    CVTDQ2PS(coords, R(coords));
-
-    if (dequantize && scaling_exponent)
-      MULPS(coords, MPIC(&scale_factors[scaling_exponent]));
+    CVTDQ2PS(kVec, R(kVec));
+    if (job.frac != 0)
+      MULPS(kVec, M(PoolConstant(ScaleVector(job.frac))));
   }
 
-  switch (count_out)
-  {
-  case 1:
-    MOVSS(dest, coords);
-    break;
-  case 2:
-    MOVLPS(dest, coords);
-    break;
-  case 3:
-    MOVUPS(dest, coords);
-    break;
-  }
+  if (job.count_out == 1)
+    MOVSS(dest, kVec);
+  else if (job.count_out == 2)
+    MOVLPS(dest, kVec);
+  else
+    MOVUPS(dest, kVec);
 
-  write_zfreeze();
+  StoreToCache(job.cache);
 }
 
-void VertexLoaderX64::ReadColor(OpArg data, VertexComponentFormat attribute, ColorFormat format)
+void VertexLoaderX64::ConvertColor(OpArg data, VertexComponentFormat source, ColorFormat format)
 {
-  int load_bytes = 0;
+  const OpArg dest = MDisp(kDst, static_cast<int>(m_out));
+  const auto table = [](const std::array<u32, 256>& entries, X64Reg byte) {
+    return MComplex(kAnchor, byte, SCALE_4,
+                    static_cast<int>(PtrOffset(entries.data(), AnchorAddress())));
+  };
+  OpArg second = data;
+  second.AddMemOffset(1);
+
+  u32 consumed = 0;
   switch (format)
   {
   case ColorFormat::RGB888:
   case ColorFormat::RGB888x:
   case ColorFormat::RGBA8888:
-    MOV(32, R(scratch1), data);
+    // Already R, G, B(, A) in memory order; four bytes are read even for RGB888.
+    MOV(32, R(kTmp), data);
     if (format != ColorFormat::RGBA8888)
-      OR(32, R(scratch1), Imm32(0xFF000000));
-    MOV(32, MDisp(dst_reg, m_dst_ofs), R(scratch1));
-    load_bytes = format == ColorFormat::RGB888 ? 3 : 4;
+      OR(32, R(kTmp), Imm32(0xff000000));
+    MOV(32, dest, R(kTmp));
+    consumed = format == ColorFormat::RGB888 ? 3 : 4;
     break;
 
   case ColorFormat::RGB565:
-    //                   RRRRRGGG GGGBBBBB
-    // AAAAAAAA BBBBBBBB GGGGGGGG RRRRRRRR
-    LoadAndSwap(16, scratch1, data);
-    if (cpu_info.bBMI1 && cpu_info.bBMI2FastParallelBitOps)
-    {
-      MOV(32, R(scratch2), Imm32(0x07C3F7C0));
-      PDEP(32, scratch3, scratch1, R(scratch2));
-
-      MOV(32, R(scratch2), Imm32(0xF8FCF800));
-      PDEP(32, scratch1, scratch1, R(scratch2));
-      ANDN(32, scratch2, scratch2, R(scratch3));
-
-      OR(32, R(scratch1), R(scratch2));
-    }
-    else
-    {
-      SHL(32, R(scratch1), Imm8(11));
-      LEA(32, scratch2, MScaled(scratch1, SCALE_4, 0));
-      LEA(32, scratch3, MScaled(scratch2, SCALE_8, 0));
-      AND(32, R(scratch1), Imm32(0x0000F800));
-      AND(32, R(scratch2), Imm32(0x00FC0000));
-      AND(32, R(scratch3), Imm32(0xF8000000));
-      OR(32, R(scratch1), R(scratch2));
-      OR(32, R(scratch1), R(scratch3));
-
-      MOV(32, R(scratch2), R(scratch1));
-      SHR(32, R(scratch1), Imm8(5));
-      AND(32, R(scratch1), Imm32(0x07000700));
-      OR(32, R(scratch1), R(scratch2));
-
-      SHR(32, R(scratch2), Imm8(6));
-      AND(32, R(scratch2), Imm32(0x00030000));
-      OR(32, R(scratch1), R(scratch2));
-    }
-    OR(32, R(scratch1), Imm32(0x000000FF));
-    SwapAndStore(32, MDisp(dst_reg, m_dst_ofs), scratch1);
-    load_bytes = 2;
-    break;
-
   case ColorFormat::RGBA4444:
-    //                   RRRRGGGG BBBBAAAA
-    // AAAAAAAA BBBBBBBB GGGGGGGG RRRRRRRR
-    LoadAndSwap(16, scratch1, data);
-    if (cpu_info.bBMI2FastParallelBitOps)
-    {
-      MOV(32, R(scratch2), Imm32(0x0F0F0F0F));
-      PDEP(32, scratch1, scratch1, R(scratch2));
-    }
-    else
-    {
-      MOV(32, R(scratch2), R(scratch1));
-      SHL(32, R(scratch1), Imm8(8));
-      OR(32, R(scratch1), R(scratch2));
-      AND(32, R(scratch1), Imm32(0x00FF00FF));
-
-      MOV(32, R(scratch2), R(scratch1));
-      SHL(32, R(scratch1), Imm8(4));
-      OR(32, R(scratch1), R(scratch2));
-      AND(32, R(scratch1), Imm32(0x0F0F0F0F));
-    }
-    MOV(32, R(scratch2), R(scratch1));
-    SHL(32, R(scratch1), Imm8(4));
-    OR(32, R(scratch1), R(scratch2));
-    SwapAndStore(32, MDisp(dst_reg, m_dst_ofs), scratch1);
-    load_bytes = 2;
+  {
+    const ColorTables& t = s_color_tables;
+    const bool is565 = format == ColorFormat::RGB565;
+    MOVZX(32, 8, kTmp, data);
+    MOVZX(32, 8, kIndex, second);
+    MOV(32, R(kTmp), table(is565 ? t.rgb565_hi : t.rgba4444_hi, kTmp));
+    OR(32, R(kTmp), table(is565 ? t.rgb565_lo : t.rgba4444_lo, kIndex));
+    MOV(32, dest, R(kTmp));
+    consumed = 2;
     break;
+  }
 
   case ColorFormat::RGBA6666:
-    //          RRRRRRGG GGGGBBBB BBAAAAAA
-    // AAAAAAAA BBBBBBBB GGGGGGGG RRRRRRRR
-    data.AddMemOffset(-1);  // subtract one from address so we can use a 32bit load and bswap
-    LoadAndSwap(32, scratch1, data);
-    if (cpu_info.bBMI2FastParallelBitOps)
-    {
-      MOV(32, R(scratch2), Imm32(0xFCFCFCFC));
-      PDEP(32, scratch1, scratch1, R(scratch2));
-      MOV(32, R(scratch2), R(scratch1));
-    }
-    else
-    {
-      LEA(32, scratch2, MScaled(scratch1, SCALE_4, 0));  // ______RR RRRRGGGG GGBBBBBB AAAAAA__
-      AND(32, R(scratch2), Imm32(0x00003FFC));           // ________ ________ __BBBBBB AAAAAA__
-      SHL(32, R(scratch1), Imm8(6));                     // __RRRRRR GGGGGGBB BBBBAAAA AA______
-      AND(32, R(scratch1), Imm32(0x3FFC0000));           // __RRRRRR GGGGGG__ ________ ________
-      OR(32, R(scratch1), R(scratch2));                  // __RRRRRR GGGGGG__ __BBBBBB AAAAAA__
-
-      LEA(32, scratch2, MScaled(scratch1, SCALE_4, 0));  // RRRRRRGG GGGG____ BBBBBBAA AAAA____
-      AND(32, R(scratch2), Imm32(0xFC00FC00));           // RRRRRR__ ________ BBBBBB__ ________
-      AND(32, R(scratch1), Imm32(0x00FC00FC));           // ________ GGGGGG__ ________ AAAAAA__
-      OR(32, R(scratch1), R(scratch2));                  // RRRRRR__ GGGGGG__ BBBBBB__ AAAAAA__
-      MOV(32, R(scratch2), R(scratch1));
-    }
-    SHR(32, R(scratch1), Imm8(6));
-    AND(32, R(scratch1), Imm32(0x03030303));
-    OR(32, R(scratch1), R(scratch2));
-    SwapAndStore(32, MDisp(dst_reg, m_dst_ofs), scratch1);
-    load_bytes = 3;
+  {
+    const ColorTables& t = s_color_tables;
+    LEA(64, kIndex, data);
+    MOVZX(32, 8, kTmp, MatR(kIndex));
+    MOVZX(32, 8, kArray, MDisp(kIndex, 1));
+    MOVZX(32, 8, kIndex, MDisp(kIndex, 2));
+    MOV(32, R(kTmp), table(t.rgba6666_0, kTmp));
+    OR(32, R(kTmp), table(t.rgba6666_1, kArray));
+    OR(32, R(kTmp), table(t.rgba6666_2, kIndex));
+    MOV(32, dest, R(kTmp));
+    consumed = 3;
     break;
   }
-  if (attribute == VertexComponentFormat::Direct)
-    m_src_ofs += load_bytes;
+
+  default:
+    // Formats 6 and 7 do not exist: nothing is read or written.
+    break;
+  }
+
+  if (source == VertexComponentFormat::Direct)
+    m_in += consumed;
 }
 
-void VertexLoaderX64::GenerateVertexLoader()
+void VertexLoaderX64::WriteTexMatrix(u32 index_offset, bool coordinate_present)
 {
-  BitSet32 regs = {src_reg,  dst_reg,       scratch1,    scratch2,
-                   scratch3, remaining_reg, skipped_reg, base_reg};
-  regs &= ABI_ALL_CALLEE_SAVED;
-  regs[RBP] = true;  // Give us a stack frame
-  ABI_PushRegistersAndAdjustStack(regs, 0);
-
-  // Backup count since we're going to count it down.
-  PUSH(32, R(ABI_PARAM3));
-
-  // ABI_PARAM3 is one of the lower registers, so free it for scratch2.
-  // We also have it end at a value of 0, to simplify indexing for zfreeze;
-  // this requires subtracting 1 at the start.
-  LEA(32, remaining_reg, MDisp(ABI_PARAM3, -1));
-
-  MOV(64, R(base_reg), R(ABI_PARAM4));
-
-  if (IsIndexed(m_VtxDesc.low.Position))
-    XOR(32, R(skipped_reg), R(skipped_reg));
-
-  // TODO: load constants into registers outside the main loop
-
-  const u8* loop_start = GetCodePtr();
-
-  if (m_VtxDesc.low.PosMatIdx)
+  // The matrix index byte is used as it is (no 6-bit mask), converted through kVec.
+  MOVZX(32, 8, kTmp, MDisp(kSrc, static_cast<int>(index_offset)));
+  const OpArg dest = MDisp(kDst, static_cast<int>(m_out));
+  if (coordinate_present)
   {
-    MOVZX(32, 8, scratch1, MDisp(src_reg, m_src_ofs));
-    AND(32, R(scratch1), Imm8(0x3F));
-    MOV(32, MDisp(dst_reg, m_dst_ofs), R(scratch1));
-
-    // zfreeze
-    CMP(32, R(remaining_reg), Imm8(3));
-    FixupBranch dont_store = J_CC(CC_AE);
-    MOV(32, MPIC(VertexLoaderManager::position_matrix_index_cache.data(), remaining_reg, SCALE_4),
-        R(scratch1));
-    SetJumpTarget(dont_store);
-
-    m_native_vtx_decl.posmtx.components = 4;
-    m_native_vtx_decl.posmtx.enable = true;
-    m_native_vtx_decl.posmtx.offset = m_dst_ofs;
-    m_native_vtx_decl.posmtx.type = ComponentFormat::UByte;
-    m_native_vtx_decl.posmtx.integer = true;
-    m_src_ofs += sizeof(u8);
-    m_dst_ofs += sizeof(u32);
-  }
-
-  std::array<u32, 8> texmatidx_ofs;
-  for (size_t i = 0; i < m_VtxDesc.low.TexMatIdx.Size(); i++)
-  {
-    if (m_VtxDesc.low.TexMatIdx[i])
-      texmatidx_ofs[i] = m_src_ofs++;
-  }
-
-  OpArg data = GetVertexAddr(CPArray::Position, m_VtxDesc.low.Position);
-  int pos_elements = m_VtxAttr.g0.PosElements == CoordComponentCount::XY ? 2 : 3;
-  ReadVertex(data, m_VtxDesc.low.Position, m_VtxAttr.g0.PosFormat, pos_elements, pos_elements,
-             m_VtxAttr.g0.ByteDequant, m_VtxAttr.g0.PosFrac, &m_native_vtx_decl.position);
-
-  if (m_VtxDesc.low.Normal != VertexComponentFormat::NotPresent)
-  {
-    static constexpr Common::EnumMap<u8, ComponentFormat::InvalidFloat7> SCALE_MAP = {7, 6, 15, 14,
-                                                                                      0, 0, 0,  0};
-    const u8 scaling_exponent = SCALE_MAP[m_VtxAttr.g0.NormalFormat];
-
-    // Normal
-    data = GetVertexAddr(CPArray::Normal, m_VtxDesc.low.Normal);
-    ReadVertex(data, m_VtxDesc.low.Normal, m_VtxAttr.g0.NormalFormat, 3, 3, true, scaling_exponent,
-               &m_native_vtx_decl.normals[0]);
-
-    if (m_VtxAttr.g0.NormalElements == NormalComponentCount::NTB)
-    {
-      const bool index3 = IsIndexed(m_VtxDesc.low.Normal) && m_VtxAttr.g0.NormalIndex3;
-      const int elem_size = GetElementSize(m_VtxAttr.g0.NormalFormat);
-      const int load_bytes = elem_size * 3;
-
-      // Tangent
-      // If in Index3 mode, and indexed components are used, replace the index with a new index.
-      if (index3)
-        data = GetVertexAddr(CPArray::Normal, m_VtxDesc.low.Normal);
-      // The tangent comes after the normal; even in index3 mode, this offset is applied.
-      // Note that this is different from adding 1 to the index, as the stride for indices may be
-      // different from the size of the tangent itself.
-      data.AddMemOffset(load_bytes);
-
-      ReadVertex(data, m_VtxDesc.low.Normal, m_VtxAttr.g0.NormalFormat, 3, 3, true,
-                 scaling_exponent, &m_native_vtx_decl.normals[1]);
-
-      // Undo the offset above so that data points to the normal instead of the tangent.
-      // This way, we can add 2*elem_size below to always point to the binormal, even if we replace
-      // data with a new index (which would point to the normal).
-      data.AddMemOffset(-load_bytes);
-
-      // Binormal
-      if (index3)
-        data = GetVertexAddr(CPArray::Normal, m_VtxDesc.low.Normal);
-      data.AddMemOffset(load_bytes * 2);
-
-      ReadVertex(data, m_VtxDesc.low.Normal, m_VtxAttr.g0.NormalFormat, 3, 3, true,
-                 scaling_exponent, &m_native_vtx_decl.normals[2]);
-    }
-  }
-
-  for (u8 i = 0; i < m_VtxDesc.low.Color.Size(); i++)
-  {
-    if (m_VtxDesc.low.Color[i] != VertexComponentFormat::NotPresent)
-    {
-      data = GetVertexAddr(CPArray::Color0 + i, m_VtxDesc.low.Color[i]);
-      ReadColor(data, m_VtxDesc.low.Color[i], m_VtxAttr.GetColorFormat(i));
-      m_native_vtx_decl.colors[i].components = 4;
-      m_native_vtx_decl.colors[i].enable = true;
-      m_native_vtx_decl.colors[i].offset = m_dst_ofs;
-      m_native_vtx_decl.colors[i].type = ComponentFormat::UByte;
-      m_native_vtx_decl.colors[i].integer = false;
-      m_dst_ofs += 4;
-    }
-  }
-
-  for (u8 i = 0; i < m_VtxDesc.high.TexCoord.Size(); i++)
-  {
-    int elements = m_VtxAttr.GetTexElements(i) == TexComponentCount::ST ? 2 : 1;
-    if (m_VtxDesc.high.TexCoord[i] != VertexComponentFormat::NotPresent)
-    {
-      data = GetVertexAddr(CPArray::TexCoord0 + i, m_VtxDesc.high.TexCoord[i]);
-      u8 scaling_exponent = m_VtxAttr.GetTexFrac(i);
-      ReadVertex(data, m_VtxDesc.high.TexCoord[i], m_VtxAttr.GetTexFormat(i), elements,
-                 m_VtxDesc.low.TexMatIdx[i] ? 2 : elements, m_VtxAttr.g0.ByteDequant,
-                 scaling_exponent, &m_native_vtx_decl.texcoords[i]);
-    }
-    if (m_VtxDesc.low.TexMatIdx[i])
-    {
-      m_native_vtx_decl.texcoords[i].components = 3;
-      m_native_vtx_decl.texcoords[i].enable = true;
-      m_native_vtx_decl.texcoords[i].type = ComponentFormat::Float;
-      m_native_vtx_decl.texcoords[i].integer = false;
-      MOVZX(64, 8, scratch1, MDisp(src_reg, texmatidx_ofs[i]));
-      if (m_VtxDesc.high.TexCoord[i] != VertexComponentFormat::NotPresent)
-      {
-        CVTSI2SS(XMM0, R(scratch1));
-        MOVSS(MDisp(dst_reg, m_dst_ofs), XMM0);
-        m_dst_ofs += sizeof(float);
-      }
-      else
-      {
-        m_native_vtx_decl.texcoords[i].offset = m_dst_ofs;
-        PXOR(XMM0, R(XMM0));
-        CVTSI2SS(XMM0, R(scratch1));
-        SHUFPS(XMM0, R(XMM0), 0x45);  // 000X -> 0X00
-        MOVUPS(MDisp(dst_reg, m_dst_ofs), XMM0);
-        m_dst_ofs += sizeof(float) * 3;
-      }
-    }
-  }
-
-  // Prepare for the next vertex.
-  ADD(64, R(dst_reg), Imm32(m_dst_ofs));
-  const u8* cont = GetCodePtr();
-  ADD(64, R(src_reg), Imm32(m_src_ofs));
-
-  SUB(32, R(remaining_reg), Imm8(1));
-  J_CC(CC_AE, loop_start);
-
-  // Get the original count.
-  POP(32, R(ABI_RETURN));
-
-  ABI_PopRegistersAndAdjustStack(regs, 0);
-
-  if (IsIndexed(m_VtxDesc.low.Position))
-  {
-    SUB(32, R(ABI_RETURN), R(skipped_reg));
-    RET();
-
-    SetJumpTarget(m_skip_vertex);
-    ADD(32, R(skipped_reg), Imm8(1));
-    JMP(cont);
+    CVTSI2SS(kVec, R(kTmp));
+    MOVSS(dest, kVec);
+    m_out += 4;
   }
   else
   {
-    RET();
+    // (0, 0, index) and a zero after it.
+    PXOR(kVec, R(kVec));
+    CVTSI2SS(kVec, R(kTmp));
+    PSLLDQ(kVec, 8);
+    MOVUPS(dest, kVec);
+    m_out += 12;
+  }
+}
+
+void VertexLoaderX64::Generate()
+{
+  const TVtxDesc& desc = m_VtxDesc;
+  const VAT& vat = m_VtxAttr;
+  PortableVertexDeclaration& decl = m_native_vtx_decl;
+
+  m_entry = GetCodePtr();
+
+  // Take the arguments into the loop registers, then keep the count and a dropped-vertex
+  // counter on the stack.
+  MOV(64, R(kSrc), R(ABI_PARAM1));
+  MOV(64, R(kDst), R(ABI_PARAM2));
+  MOV(64, R(kAnchor), R(ABI_PARAM4));
+  SUB(64, R(RSP), Imm8(kFrameBytes));
+  MOV(32, MDisp(RSP, kSlotCount), R(ABI_PARAM3));
+  MOV(32, MDisp(RSP, kSlotDropped), Imm32(0));
+  LEA(32, kLeft, MDisp(ABI_PARAM3, -1));
+
+  const u8* const vertex_start = GetCodePtr();
+
+  if (desc.low.PosMatIdx)
+  {
+    MOVZX(32, 8, kIndex, MDisp(kSrc, static_cast<int>(m_in)));
+    AND(32, R(kIndex), Imm8(0x3f));
+    MOV(32, MDisp(kDst, static_cast<int>(m_out)), R(kIndex));
+    CMP(32, R(kLeft), Imm8(3));
+    const FixupBranch not_last_three = J_CC(CC_AE);
+    MOV(32,
+        MComplex(kAnchor, kLeft, SCALE_4,
+                 static_cast<int>(PtrOffset(VertexLoaderManager::position_matrix_index_cache.data(),
+                                            AnchorAddress()))),
+        R(kIndex));
+    SetJumpTarget(not_last_three);
+
+    decl.posmtx.type = ComponentFormat::UByte;
+    decl.posmtx.components = 4;
+    decl.posmtx.offset = static_cast<int>(m_out);
+    decl.posmtx.enable = true;
+    decl.posmtx.integer = true;
+    m_in += 1;
+    m_out += 4;
   }
 
-  ASSERT_MSG(VIDEO, m_vertex_size == m_src_ofs,
+  std::array<u32, 8> texmtx_at{};
+  for (u32 i = 0; i < 8; i++)
+  {
+    if (desc.low.TexMatIdx[i])
+      texmtx_at[i] = m_in++;
+  }
+
+  // Position. Fixed-point positions are only scaled when ByteDequant is set.
+  {
+    const int n = vat.g0.PosElements == CoordComponentCount::XYZ ? 3 : 2;
+    const VectorJob job{desc.low.Position,
+                        vat.g0.PosFormat,
+                        n,
+                        n,
+                        vat.g0.ByteDequant ? static_cast<u32>(vat.g0.PosFrac) : 0u,
+                        Cache::Position};
+    ConvertVector(AttributeData(CPArray::Position, desc.low.Position, true), job,
+                  &decl.position);
+  }
+
+  // Normal, tangent, binormal. Each vector of an NTB record follows the previous one; with
+  // three indices each index picks its own record, still at the vector's own offset.
+  if (desc.low.Normal != VertexComponentFormat::NotPresent)
+  {
+    const VertexComponentFormat source = desc.low.Normal;
+    const ComponentFormat format = vat.g0.NormalFormat;
+    const u32 frac = NormalFrac(format);
+    const OpArg normal = AttributeData(CPArray::Normal, source, false);
+    ConvertVector(normal, VectorJob{source, format, 3, 3, frac, Cache::Normal}, &decl.normals[0]);
+
+    if (vat.g0.NormalElements == NormalComponentCount::NTB)
+    {
+      const bool three_indices = IsIndexed(source) && vat.g0.NormalIndex3;
+      const int vector_bytes = static_cast<int>(GetElementSize(format) * 3);
+
+      OpArg tangent = three_indices ? AttributeData(CPArray::Normal, source, false) : normal;
+      tangent.AddMemOffset(vector_bytes);
+      ConvertVector(tangent, VectorJob{source, format, 3, 3, frac, Cache::Tangent},
+                    &decl.normals[1]);
+
+      OpArg binormal = three_indices ? AttributeData(CPArray::Normal, source, false) : normal;
+      binormal.AddMemOffset(2 * vector_bytes);
+      ConvertVector(binormal, VectorJob{source, format, 3, 3, frac, Cache::Binormal},
+                    &decl.normals[2]);
+    }
+  }
+
+  for (u8 i = 0; i < 2; i++)
+  {
+    const VertexComponentFormat source = desc.low.Color[i];
+    if (source == VertexComponentFormat::NotPresent)
+      continue;
+    ConvertColor(AttributeData(CPArray::Color0 + i, source, false), source,
+                 vat.GetColorFormat(i));
+    AttributeFormat& color = decl.colors[i];
+    color.type = ComponentFormat::UByte;
+    color.components = 4;
+    color.offset = static_cast<int>(m_out);
+    color.enable = true;
+    color.integer = false;
+    m_out += 4;
+  }
+
+  // Texture coordinates. With a matrix index the coordinate is widened to (s, t, index).
+  for (u8 i = 0; i < 8; i++)
+  {
+    const VertexComponentFormat source = desc.high.TexCoord[i];
+    const bool present = source != VertexComponentFormat::NotPresent;
+    const bool has_matrix = desc.low.TexMatIdx[i];
+    AttributeFormat& tex = decl.texcoords[i];
+    if (present)
+    {
+      const int n = vat.GetTexElements(i) == TexComponentCount::ST ? 2 : 1;
+      const VectorJob job{source,
+                          vat.GetTexFormat(i),
+                          n,
+                          has_matrix ? 2 : n,
+                          vat.g0.ByteDequant ? static_cast<u32>(vat.GetTexFrac(i)) : 0u,
+                          Cache::None};
+      ConvertVector(AttributeData(CPArray::TexCoord0 + i, source, false), job, &tex);
+    }
+    if (has_matrix)
+    {
+      tex.type = ComponentFormat::Float;
+      tex.components = 3;
+      tex.enable = true;
+      tex.integer = false;
+      if (!present)
+        tex.offset = static_cast<int>(m_out);
+      WriteTexMatrix(texmtx_at[i], present);
+    }
+  }
+
+  // Next vertex.
+  ADD(64, R(kDst), Imm32(m_out));
+  const u8* const next_source = GetCodePtr();
+  ADD(64, R(kSrc), Imm32(m_in));
+  SUB(32, R(kLeft), Imm8(1));
+  J_CC(CC_NS, vertex_start);
+
+  MOV(32, R(EAX), MDisp(RSP, kSlotCount));
+  SUB(32, R(EAX), MDisp(RSP, kSlotDropped));
+  ADD(64, R(RSP), Imm8(kFrameBytes));
+  RET();
+
+  // Dropped vertices skip the rest of the vertex and leave the output position alone.
+  if (!m_drop_jumps.empty())
+  {
+    for (const FixupBranch& jump : m_drop_jumps)
+      SetJumpTarget(jump);
+    ADD(32, MDisp(RSP, kSlotDropped), Imm8(1));
+    JMP(next_source);
+  }
+
+  ASSERT_MSG(VIDEO, m_vertex_size == m_in,
              "Vertex size from vertex loader ({}) does not match expected vertex size ({})!\nVtx "
              "desc: {:08x} {:08x}\nVtx attr: {:08x} {:08x} {:08x}",
-             m_src_ofs, m_vertex_size, m_VtxDesc.low.Hex, m_VtxDesc.high.Hex, m_VtxAttr.g0.Hex,
-             m_VtxAttr.g1.Hex, m_VtxAttr.g2.Hex);
-  m_native_vtx_decl.stride = m_dst_ofs;
+             m_in, m_vertex_size, desc.low.Hex, desc.high.Hex, vat.g0.Hex, vat.g1.Hex, vat.g2.Hex);
+  decl.stride = static_cast<int>(m_out);
 }
 
 int VertexLoaderX64::RunVertices(const u8* src, u8* dst, int count)
 {
   m_numLoadedVertices += count;
-  return ((int (*)(const u8* src, u8* dst, int count, const void* base))region)(src, dst, count,
-                                                                                memory_base_ptr);
+  if (count <= 0)
+    return 0;
+  using LoopFn = int (*)(const u8* src, u8* dst, int count, const void* anchor);
+  const auto loop = reinterpret_cast<LoopFn>(const_cast<u8*>(m_entry));
+  return loop(src, dst, count, AnchorAddress());
 }

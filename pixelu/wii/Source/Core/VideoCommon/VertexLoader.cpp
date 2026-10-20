@@ -1,7 +1,8 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/VertexLoader.h"
+
+#include <cmath>
 
 #include "Common/Assert.h"
 #include "Common/CommonTypes.h"
@@ -12,264 +13,225 @@
 #include "VideoCommon/VertexLoader_Normal.h"
 #include "VideoCommon/VertexLoader_Position.h"
 #include "VideoCommon/VertexLoader_TextCoord.h"
-#include "VideoCommon/VideoCommon.h"
 
-// This pointer is used as the source/dst for all fixed function loader calls
-const u8* g_video_buffer_read_ptr;
-u8* g_vertex_manager_write_ptr;
-
-static void PosMtx_ReadDirect_UByte(VertexLoader* loader)
+namespace
 {
-  u32 posmtx = DataRead<u8>() & 0x3f;
-  if (loader->m_remaining < 3)
-    VertexLoaderManager::position_matrix_index_cache[loader->m_remaining] = posmtx;
-  DataWrite<u32>(posmtx);
-  PRIM_LOG("posmtx: {}, ", posmtx);
+// The position/normal matrix index byte (6 bits used), written as a 32-bit integer.
+void ReadPositionMatrix(VertexLoaderCursor& cursor, const VertexLoaderStep&)
+{
+  const u32 index = *cursor.src++ & 0x3fu;
+  if (cursor.remaining < 3)
+    VertexLoaderManager::position_matrix_index_cache[static_cast<size_t>(cursor.remaining)] = index;
+  VertexData::Emit(cursor.dst, index);
 }
 
-static void TexMtx_ReadDirect_UByte(VertexLoader* loader)
+// A texture matrix index byte. It is kept until its texture coordinate is written.
+void ReadTexMatrix(VertexLoaderCursor& cursor, const VertexLoaderStep& step)
 {
-  loader->m_curtexmtx[loader->m_texmtxread] = DataRead<u8>() & 0x3f;
-
-  PRIM_LOG("texmtx{}: {}, ", loader->m_texmtxread, loader->m_curtexmtx[loader->m_texmtxread]);
-  loader->m_texmtxread++;
+  cursor.texmtx[step.slot] = static_cast<u8>(*cursor.src++ & 0x3fu);
 }
 
-static void TexMtx_Write_Float(VertexLoader* loader)
+// With a texture matrix index, a texture coordinate becomes three floats: s, t and the index.
+// These fill in after the components that were read (none, s, or s and t).
+template <u32 Zeros>
+void WriteTexMatrix(VertexLoaderCursor& cursor, const VertexLoaderStep& step)
 {
-  DataWrite(float(loader->m_curtexmtx[loader->m_texmtxwrite++]));
+  for (u32 i = 0; i < Zeros; i++)
+    VertexData::Emit(cursor.dst, 0.0f);
+  VertexData::Emit(cursor.dst, static_cast<float>(cursor.texmtx[step.slot]));
 }
 
-static void TexMtx_Write_Float2(VertexLoader* loader)
+float FracScale(u32 frac_bits)
 {
-  DataWrite(0.f);
-  DataWrite(float(loader->m_curtexmtx[loader->m_texmtxwrite++]));
+  return std::ldexp(1.0f, -static_cast<int>(frac_bits));
 }
 
-static void TexMtx_Write_Float3(VertexLoader* loader)
+// Normals have fixed fractions: 6 bits for s8, 7 for u8, 14 for s16 and 15 for u16.
+float NormalScale(ComponentFormat format)
 {
-  DataWrite(0.f);
-  DataWrite(0.f);
-  DataWrite(float(loader->m_curtexmtx[loader->m_texmtxwrite++]));
-}
-
-static void SkipVertex(VertexLoader* loader)
-{
-  if (loader->m_vertexSkip)
+  switch (format)
   {
-    // reset the output buffer
-    g_vertex_manager_write_ptr -= loader->m_native_vtx_decl.stride;
-
-    loader->m_skippedVertices++;
+  case ComponentFormat::UByte:
+    return FracScale(7);
+  case ComponentFormat::Byte:
+    return FracScale(6);
+  case ComponentFormat::UShort:
+    return FracScale(15);
+  case ComponentFormat::Short:
+    return FracScale(14);
+  default:
+    return 1.0f;
   }
 }
+
+void SetAttribute(AttributeFormat& attr, ComponentFormat type, int components, int offset,
+                  bool integer)
+{
+  attr.type = type;
+  attr.components = components;
+  attr.offset = offset;
+  attr.enable = true;
+  attr.integer = integer;
+}
+}  // namespace
 
 VertexLoader::VertexLoader(const TVtxDesc& vtx_desc, const VAT& vtx_attr)
     : VertexLoaderBase(vtx_desc, vtx_attr)
 {
-  CompileVertexTranslator();
-
-  // generate frac factors
-  m_posScale = 1.0f / (1U << m_VtxAttr.g0.PosFrac);
-  for (u32 i = 0; i < 8; i++)
-    m_tcScale[i] = 1.0f / (1U << m_VtxAttr.GetTexFrac(i));
+  BuildSteps();
 }
 
-void VertexLoader::CompileVertexTranslator()
+void VertexLoader::AddStep(VertexLoaderStep::Fn fn, float scale, CPArray array, u8 slot)
 {
-  // Position in pc vertex format.
-  int nat_offset = 0;
+  m_steps.push_back(VertexLoaderStep{fn, scale, array, slot});
+}
 
-  // Position Matrix Index
-  if (m_VtxDesc.low.PosMatIdx)
+void VertexLoader::BuildSteps()
+{
+  const auto& desc = m_VtxDesc;
+  const auto& attr = m_VtxAttr;
+  PortableVertexDeclaration& decl = m_native_vtx_decl;
+  int offset = 0;
+
+  if (desc.low.PosMatIdx)
   {
-    WriteCall(PosMtx_ReadDirect_UByte);
-    m_native_vtx_decl.posmtx.components = 4;
-    m_native_vtx_decl.posmtx.enable = true;
-    m_native_vtx_decl.posmtx.offset = nat_offset;
-    m_native_vtx_decl.posmtx.type = ComponentFormat::UByte;
-    m_native_vtx_decl.posmtx.integer = true;
-    nat_offset += 4;
+    AddStep(ReadPositionMatrix);
+    SetAttribute(decl.posmtx, ComponentFormat::UByte, 4, offset, true);
+    offset += 4;
   }
 
-  for (auto texmtxidx : m_VtxDesc.low.TexMatIdx)
+  for (u8 slot = 0; slot < 8; slot++)
   {
-    if (texmtxidx)
-      WriteCall(TexMtx_ReadDirect_UByte);
+    if (desc.low.TexMatIdx[slot])
+      AddStep(ReadTexMatrix, 1.0f, CPArray::Position, slot);
   }
 
-  // Write vertex position loader
-  WriteCall(VertexLoader_Position::GetFunction(m_VtxDesc.low.Position, m_VtxAttr.g0.PosFormat,
-                                               m_VtxAttr.g0.PosElements));
+  const int position_components = attr.g0.PosElements == CoordComponentCount::XYZ ? 3 : 2;
+  AddStep(VertexLoader_Position::GetReader(desc.low.Position, attr.g0.PosFormat,
+                                           attr.g0.PosElements),
+          FracScale(attr.g0.PosFrac), CPArray::Position);
+  SetAttribute(decl.position, ComponentFormat::Float, position_components, offset, false);
+  offset += 4 * position_components;
+  m_position_indexed = IsIndexed(desc.low.Position);
 
-  int pos_elements = m_VtxAttr.g0.PosElements == CoordComponentCount::XY ? 2 : 3;
-  m_native_vtx_decl.position.components = pos_elements;
-  m_native_vtx_decl.position.enable = true;
-  m_native_vtx_decl.position.offset = nat_offset;
-  m_native_vtx_decl.position.type = ComponentFormat::Float;
-  m_native_vtx_decl.position.integer = false;
-  nat_offset += pos_elements * sizeof(float);
-
-  // Normals
-  if (m_VtxDesc.low.Normal != VertexComponentFormat::NotPresent)
+  if (desc.low.Normal != VertexComponentFormat::NotPresent)
   {
-    TPipelineFunction pFunc =
-        VertexLoader_Normal::GetFunction(m_VtxDesc.low.Normal, m_VtxAttr.g0.NormalFormat,
-                                         m_VtxAttr.g0.NormalElements, m_VtxAttr.g0.NormalIndex3);
-
-    if (pFunc == nullptr)
+    AddStep(VertexLoader_Normal::GetReader(desc.low.Normal, attr.g0.NormalFormat,
+                                           attr.g0.NormalElements, attr.g0.NormalIndex3),
+            NormalScale(attr.g0.NormalFormat), CPArray::Normal);
+    const size_t vectors = attr.g0.NormalElements == NormalComponentCount::NTB ? 3 : 1;
+    for (size_t v = 0; v < vectors; v++)
     {
-      PanicAlertFmt("VertexLoader_Normal::GetFunction({} {} {} {}) returned zero!",
-                    m_VtxDesc.low.Normal, m_VtxAttr.g0.NormalFormat, m_VtxAttr.g0.NormalElements,
-                    m_VtxAttr.g0.NormalIndex3);
-    }
-    WriteCall(pFunc);
-
-    for (int i = 0; i < (m_VtxAttr.g0.NormalElements == NormalComponentCount::NTB ? 3 : 1); i++)
-    {
-      m_native_vtx_decl.normals[i].components = 3;
-      m_native_vtx_decl.normals[i].enable = true;
-      m_native_vtx_decl.normals[i].offset = nat_offset;
-      m_native_vtx_decl.normals[i].type = ComponentFormat::Float;
-      m_native_vtx_decl.normals[i].integer = false;
-      nat_offset += 12;
+      SetAttribute(decl.normals[v], ComponentFormat::Float, 3, offset, false);
+      offset += 12;
     }
   }
 
-  for (size_t i = 0; i < m_VtxDesc.low.Color.Size(); i++)
+  for (u8 i = 0; i < 2; i++)
   {
-    m_native_vtx_decl.colors[i].components = 4;
-    m_native_vtx_decl.colors[i].type = ComponentFormat::UByte;
-    m_native_vtx_decl.colors[i].integer = false;
+    AttributeFormat& color = decl.colors[i];
+    color.type = ComponentFormat::UByte;
+    color.components = 4;
+    color.integer = false;
 
-    TPipelineFunction pFunc =
-        VertexLoader_Color::GetFunction(m_VtxDesc.low.Color[i], m_VtxAttr.GetColorFormat(i));
-
-    if (pFunc != nullptr)
-    {
-      WriteCall(pFunc);
-    }
+    const VertexComponentFormat source = desc.low.Color[i];
+    const VertexLoaderStep::Fn reader = VertexLoader_Color::GetReader(source, attr.GetColorFormat(i));
+    if (reader != nullptr)
+      AddStep(reader, 1.0f, CPArray::Color0 + i);
     else
-    {
-      ASSERT(m_VtxDesc.low.Color[i] == VertexComponentFormat::NotPresent);
-      // Keep colIndex in sync if color 0 is absent but color 1 is present
-      if (i == 0 && m_VtxDesc.low.Color[1] != VertexComponentFormat::NotPresent)
-        WriteCall(VertexLoader_Color::GetDummyFunction());
-    }
+      ASSERT(source == VertexComponentFormat::NotPresent);
 
-    if (m_VtxDesc.low.Color[i] != VertexComponentFormat::NotPresent)
+    if (source != VertexComponentFormat::NotPresent)
     {
-      m_native_vtx_decl.colors[i].offset = nat_offset;
-      m_native_vtx_decl.colors[i].enable = true;
-      nat_offset += 4;
+      color.offset = offset;
+      color.enable = true;
+      offset += 4;
     }
   }
 
-  // Texture matrix indices (remove if corresponding texture coordinate isn't enabled)
-  for (size_t i = 0; i < m_VtxDesc.high.TexCoord.Size(); i++)
+  offset = AppendTexCoords(offset);
+
+  m_native_vtx_decl.stride = offset;
+}
+
+int VertexLoader::AppendTexCoords(int offset)
+{
+  const auto& desc = m_VtxDesc;
+  const auto& attr = m_VtxAttr;
+
+  // Slots after the last one that has a coordinate or a matrix index are left out entirely, but
+  // the first absent slot still gets its offset and type written.
+  int last_used = -1;
+  for (u8 i = 0; i < 8; i++)
   {
-    m_native_vtx_decl.texcoords[i].offset = nat_offset;
-    m_native_vtx_decl.texcoords[i].type = ComponentFormat::Float;
-    m_native_vtx_decl.texcoords[i].integer = false;
+    if (desc.high.TexCoord[i] != VertexComponentFormat::NotPresent || desc.low.TexMatIdx[i])
+      last_used = i;
+  }
 
-    const auto tc = m_VtxDesc.high.TexCoord[i].Value();
-    const auto format = m_VtxAttr.GetTexFormat(i);
-    const auto elements = m_VtxAttr.GetTexElements(i);
+  for (u8 i = 0; i < 8; i++)
+  {
+    AttributeFormat& tex = m_native_vtx_decl.texcoords[i];
+    tex.offset = offset;
+    tex.type = ComponentFormat::Float;
+    tex.integer = false;
 
-    if (tc != VertexComponentFormat::NotPresent)
+    const VertexComponentFormat source = desc.high.TexCoord[i];
+    const bool present = source != VertexComponentFormat::NotPresent;
+    const ComponentFormat format = attr.GetTexFormat(i);
+    const bool two = attr.GetTexElements(i) == TexComponentCount::ST;
+
+    if (present)
     {
-      ASSERT_MSG(VIDEO, VertexComponentFormat::Direct <= tc && tc <= VertexComponentFormat::Index16,
-                 "Invalid texture coordinates!\n(tc = {})", tc);
-      ASSERT_MSG(VIDEO, ComponentFormat::UByte <= format && format <= ComponentFormat::Float,
+      ASSERT_MSG(VIDEO, format <= ComponentFormat::Float,
                  "Invalid texture coordinates format!\n(format = {})", format);
-      ASSERT_MSG(VIDEO, elements == TexComponentCount::S || elements == TexComponentCount::ST,
-                 "Invalid number of texture coordinates elements!\n(elements = {})", elements);
-
-      WriteCall(VertexLoader_TextCoord::GetFunction(tc, format, elements));
+      AddStep(VertexLoader_TextCoord::GetReader(source, format, attr.GetTexElements(i)),
+              FracScale(attr.GetTexFrac(i)), CPArray::TexCoord0 + i);
     }
 
-    if (m_VtxDesc.low.TexMatIdx[i])
+    if (desc.low.TexMatIdx[i])
     {
-      m_native_vtx_decl.texcoords[i].enable = true;
-      m_native_vtx_decl.texcoords[i].components = 3;
-      nat_offset += 12;
-      if (tc != VertexComponentFormat::NotPresent)
-      {
-        // if texmtx is included, texcoord will always be 3 floats, z will be the texmtx index
-        WriteCall(elements == TexComponentCount::ST ? TexMtx_Write_Float : TexMtx_Write_Float2);
-      }
-      else
-      {
-        WriteCall(TexMtx_Write_Float3);
-      }
+      tex.enable = true;
+      tex.components = 3;
+      offset += 12;
+      AddStep(!present ? WriteTexMatrix<2> : (two ? WriteTexMatrix<0> : WriteTexMatrix<1>), 1.0f,
+              CPArray::Position, i);
     }
-    else
+    else if (present)
     {
-      if (tc != VertexComponentFormat::NotPresent)
-      {
-        m_native_vtx_decl.texcoords[i].enable = true;
-        m_native_vtx_decl.texcoords[i].components = elements == TexComponentCount::ST ? 2 : 1;
-        nat_offset += 4 * (elements == TexComponentCount::ST ? 2 : 1);
-      }
+      tex.enable = true;
+      tex.components = two ? 2 : 1;
+      offset += two ? 8 : 4;
     }
 
-    if (tc == VertexComponentFormat::NotPresent)
-    {
-      // if there's more tex coords later, have to write a dummy call
-      bool has_more = false;
-      for (size_t j = i + 1; j < m_VtxDesc.high.TexCoord.Size(); ++j)
-      {
-        if (m_VtxDesc.high.TexCoord[j] != VertexComponentFormat::NotPresent)
-        {
-          has_more = true;
-          // Keep tcIndex in sync so that the correct array is used later
-          WriteCall(VertexLoader_TextCoord::GetDummyFunction());
-          break;
-        }
-        else if (m_VtxDesc.low.TexMatIdx[j])
-        {
-          has_more = true;
-        }
-      }
-      if (!has_more)
-      {
-        // no more tex coords and tex matrices, so exit loop
-        break;
-      }
-    }
+    if (!present && i >= last_used)
+      break;
   }
-
-  // indexed position formats may skip the vertex
-  if (IsIndexed(m_VtxDesc.low.Position))
-  {
-    WriteCall(SkipVertex);
-  }
-
-  m_native_vtx_decl.stride = nat_offset;
-}
-
-void VertexLoader::WriteCall(TPipelineFunction func)
-{
-  m_PipelineStages.push_back(func);
+  return offset;
 }
 
 int VertexLoader::RunVertices(const u8* src, u8* dst, int count)
 {
-  g_vertex_manager_write_ptr = dst;
-  g_video_buffer_read_ptr = src;
-
   m_numLoadedVertices += count;
-  m_skippedVertices = 0;
 
-  for (m_remaining = count - 1; m_remaining >= 0; m_remaining--)
+  VertexLoaderCursor cursor{};
+  cursor.src = src;
+  cursor.dst = dst;
+
+  const ptrdiff_t stride = m_native_vtx_decl.stride;
+  int dropped = 0;
+  for (int left = count - 1; left >= 0; left--)
   {
-    m_tcIndex = 0;
-    m_colIndex = 0;
-    m_texmtxwrite = m_texmtxread = 0;
-    for (TPipelineFunction& func : m_PipelineStages)
-      func(this);
-    PRIM_LOG("\n");
-  }
+    cursor.remaining = left;
+    cursor.drop_vertex = false;
+    for (const VertexLoaderStep& step : m_steps)
+      step.run(cursor, step);
 
-  return count - m_skippedVertices;
+    // A dropped vertex was converted like any other; the next one overwrites it.
+    if (m_position_indexed && cursor.drop_vertex)
+    {
+      cursor.dst -= stride;
+      dropped++;
+    }
+  }
+  return count - dropped;
 }

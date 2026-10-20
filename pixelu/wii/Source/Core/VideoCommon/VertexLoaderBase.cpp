@@ -1,8 +1,8 @@
-// Copyright 2014 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/VertexLoaderBase.h"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cstring>
@@ -21,251 +21,206 @@
 #include "VideoCommon/VertexLoader_Normal.h"
 #include "VideoCommon/VertexLoader_Position.h"
 #include "VideoCommon/VertexLoader_TextCoord.h"
+#include "VideoCommon/VertexLoaderX64.h"
 #include "VideoCommon/VideoConfig.h"
 
-#ifdef _M_X86_64
-#include "VideoCommon/VertexLoaderX64.h"
-#elif defined(_M_ARM_64)
-#include "VideoCommon/VertexLoaderARM64.h"
-#endif
+namespace
+{
+// Everything a loader leaves behind for z-freeze and the missing-normal workarounds.
+struct LoaderCaches
+{
+  std::array<u32, 3> posmtx;
+  std::array<std::array<float, 4>, 3> position;
+  std::array<float, 4> normal;
+  std::array<float, 4> tangent;
+  std::array<float, 4> binormal;
 
-// a hacky implementation to compare two vertex loaders
-class VertexLoaderTester : public VertexLoaderBase
+  static LoaderCaches Capture()
+  {
+    return {VertexLoaderManager::position_matrix_index_cache, VertexLoaderManager::position_cache,
+            VertexLoaderManager::normal_cache, VertexLoaderManager::tangent_cache,
+            VertexLoaderManager::binormal_cache};
+  }
+
+  void Restore() const
+  {
+    VertexLoaderManager::position_matrix_index_cache = posmtx;
+    VertexLoaderManager::position_cache = position;
+    VertexLoaderManager::normal_cache = normal;
+    VertexLoaderManager::tangent_cache = tangent;
+    VertexLoaderManager::binormal_cache = binormal;
+  }
+};
+
+// Compares floats by their bits, so NaNs (some games draw them) compare equal to themselves.
+bool SameBits(const float* x, const float* y, size_t n)
+{
+  for (size_t i = 0; i < n; i++)
+  {
+    if (std::bit_cast<u32>(x[i]) != std::bit_cast<u32>(y[i]))
+      return false;
+  }
+  return true;
+}
+
+// "Compare" mode: runs the C++ loader (the reference) and the native one on every batch and
+// reports any difference. The reference's output is the one used.
+class ComparingVertexLoader final : public VertexLoaderBase
 {
 public:
-  VertexLoaderTester(std::unique_ptr<VertexLoaderBase> a_, std::unique_ptr<VertexLoaderBase> b_,
-                     const TVtxDesc& vtx_desc, const VAT& vtx_attr)
-      : VertexLoaderBase(vtx_desc, vtx_attr), a(std::move(a_)), b(std::move(b_))
+  ComparingVertexLoader(std::unique_ptr<VertexLoaderBase> reference,
+                        std::unique_ptr<VertexLoaderBase> candidate, const TVtxDesc& vtx_desc,
+                        const VAT& vtx_attr)
+      : VertexLoaderBase(vtx_desc, vtx_attr), m_reference(std::move(reference)),
+        m_candidate(std::move(candidate))
   {
-    ASSERT(a && b);
-    if (a->m_vertex_size == b->m_vertex_size && a->m_native_components == b->m_native_components &&
-        a->m_native_vtx_decl.stride == b->m_native_vtx_decl.stride)
-    {
-      // These are generated from the VAT and vertex desc, so they should match.
-      // m_native_vtx_decl.stride isn't set yet, though.
-      ASSERT(m_vertex_size == a->m_vertex_size && m_native_components == a->m_native_components);
-
-      memcpy(&m_native_vtx_decl, &a->m_native_vtx_decl, sizeof(PortableVertexDeclaration));
-    }
-    else
+    ASSERT(m_reference && m_candidate);
+    const VertexLoaderBase& ref = *m_reference;
+    const VertexLoaderBase& cand = *m_candidate;
+    if (ref.m_vertex_size != cand.m_vertex_size ||
+        ref.m_native_components != cand.m_native_components ||
+        ref.m_native_vtx_decl.stride != cand.m_native_vtx_decl.stride)
     {
       PanicAlertFmt("Can't compare vertex loaders that expect different vertex formats!\n"
                     "a: m_vertex_size {}, m_native_components {:#010x}, stride {}\n"
                     "b: m_vertex_size {}, m_native_components {:#010x}, stride {}",
-                    a->m_vertex_size, a->m_native_components, a->m_native_vtx_decl.stride,
-                    b->m_vertex_size, b->m_native_components, b->m_native_vtx_decl.stride);
+                    ref.m_vertex_size, ref.m_native_components, ref.m_native_vtx_decl.stride,
+                    cand.m_vertex_size, cand.m_native_components, cand.m_native_vtx_decl.stride);
+      return;
     }
+    // Both come from the same VCD and VAT, so these always agree with ours.
+    ASSERT(m_vertex_size == ref.m_vertex_size && m_native_components == ref.m_native_components);
+    m_native_vtx_decl = ref.m_native_vtx_decl;
   }
+
   int RunVertices(const u8* src, u8* dst, int count) override
   {
-    buffer_a.resize(count * a->m_native_vtx_decl.stride + 4);
-    buffer_b.resize(count * b->m_native_vtx_decl.stride + 4);
+    const size_t n = static_cast<size_t>(count);
+    m_out_reference.resize(n * static_cast<size_t>(m_reference->m_native_vtx_decl.stride) + 4);
+    m_out_candidate.resize(n * static_cast<size_t>(m_candidate->m_native_vtx_decl.stride) + 4);
 
-    const std::array<u32, 3> old_position_matrix_index_cache =
-        VertexLoaderManager::position_matrix_index_cache;
-    const std::array<std::array<float, 4>, 3> old_position_cache =
-        VertexLoaderManager::position_cache;
-    const std::array<float, 4> old_normal_cache = VertexLoaderManager::normal_cache;
-    const std::array<float, 4> old_tangent_cache = VertexLoaderManager::tangent_cache;
-    const std::array<float, 4> old_binormal_cache = VertexLoaderManager::binormal_cache;
+    const LoaderCaches before = LoaderCaches::Capture();
+    const int ref_count = m_reference->RunVertices(src, m_out_reference.data(), count);
+    const LoaderCaches after_ref = LoaderCaches::Capture();
+    before.Restore();
+    const int cand_count = m_candidate->RunVertices(src, m_out_candidate.data(), count);
+    const LoaderCaches after_cand = LoaderCaches::Capture();
 
-    const int count_a = a->RunVertices(src, buffer_a.data(), count);
+    Check(ref_count, cand_count, after_ref, after_cand);
 
-    const std::array<u32, 3> a_position_matrix_index_cache =
-        VertexLoaderManager::position_matrix_index_cache;
-    const std::array<std::array<float, 4>, 3> a_position_cache =
-        VertexLoaderManager::position_cache;
-    const std::array<float, 4> a_normal_cache = VertexLoaderManager::normal_cache;
-    const std::array<float, 4> a_tangent_cache = VertexLoaderManager::tangent_cache;
-    const std::array<float, 4> a_binormal_cache = VertexLoaderManager::binormal_cache;
+    std::memcpy(dst, m_out_reference.data(),
+                static_cast<size_t>(ref_count) * static_cast<size_t>(m_native_vtx_decl.stride));
+    m_numLoadedVertices += count;
+    return ref_count;
+  }
 
-    // Reset state before running b
-    VertexLoaderManager::position_matrix_index_cache = old_position_matrix_index_cache;
-    VertexLoaderManager::position_cache = old_position_cache;
-    VertexLoaderManager::normal_cache = old_normal_cache;
-    VertexLoaderManager::tangent_cache = old_tangent_cache;
-    VertexLoaderManager::binormal_cache = old_binormal_cache;
-
-    const int count_b = b->RunVertices(src, buffer_b.data(), count);
-
-    const std::array<u32, 3> b_position_matrix_index_cache =
-        VertexLoaderManager::position_matrix_index_cache;
-    const std::array<std::array<float, 4>, 3> b_position_cache =
-        VertexLoaderManager::position_cache;
-    const std::array<float, 4> b_normal_cache = VertexLoaderManager::normal_cache;
-    const std::array<float, 4> b_tangent_cache = VertexLoaderManager::tangent_cache;
-    const std::array<float, 4> b_binormal_cache = VertexLoaderManager::binormal_cache;
-
-    ASSERT_MSG(VIDEO, count_a == count_b,
+private:
+  void Check(int ref_count, int cand_count, const LoaderCaches& a, const LoaderCaches& b) const
+  {
+    ASSERT_MSG(VIDEO, ref_count == cand_count,
                "The two vertex loaders have loaded a different amount of vertices (a: {}, b: {}).",
-               count_a, count_b);
+               ref_count, cand_count);
 
+    const size_t compared = static_cast<size_t>(std::min(ref_count, cand_count)) *
+                            static_cast<size_t>(m_native_vtx_decl.stride);
     ASSERT_MSG(VIDEO,
-               memcmp(buffer_a.data(), buffer_b.data(),
-                      std::min(count_a, count_b) * m_native_vtx_decl.stride) == 0,
+               std::memcmp(m_out_reference.data(), m_out_candidate.data(), compared) == 0,
                "The two vertex loaders have loaded different data.  Configuration:"
                "\nVertex desc:\n{}\n\nVertex attr:\n{}",
                m_VtxDesc, m_VtxAttr);
 
-    ASSERT_MSG(VIDEO, a_position_matrix_index_cache == b_position_matrix_index_cache,
+    ASSERT_MSG(VIDEO, a.posmtx == b.posmtx,
                "Expected matching position matrix caches after loading (a: {}; b: {})",
-               fmt::join(a_position_matrix_index_cache, ", "),
-               fmt::join(b_position_matrix_index_cache, ", "));
+               fmt::join(a.posmtx, ", "), fmt::join(b.posmtx, ", "));
 
-    // Some games (e.g. Donkey Kong Country Returns) have a few draws that contain NaN.
-    // Since NaN != NaN, we need to compare the bits instead.
-    const auto bit_equal = [](float val_a, float val_b) {
-      return std::bit_cast<u32>(val_a) == std::bit_cast<u32>(val_b);
-    };
-
-    // The last element is allowed to be garbage for SIMD overwrites.
-    // For XY, the last 2 are garbage.
-    const bool positions_match = [&] {
-      const size_t max_component = m_VtxAttr.g0.PosElements == CoordComponentCount::XYZ ? 3 : 2;
-      for (size_t vertex = 0; vertex < 3; vertex++)
-      {
-        if (!std::equal(a_position_cache[vertex].begin(),
-                        a_position_cache[vertex].begin() + max_component,
-                        b_position_cache[vertex].begin(), bit_equal))
-        {
-          return false;
-        }
-      }
-      return true;
-    }();
-
-    ASSERT_MSG(VIDEO, positions_match,
+    // Lanes past the position's own components may hold anything (the JIT stores whole SIMD
+    // registers), so only the real components are compared.
+    const size_t pos_lanes = m_VtxAttr.g0.PosElements == CoordComponentCount::XYZ ? 3 : 2;
+    bool positions_equal = true;
+    for (size_t v = 0; v < 3; v++)
+      positions_equal = positions_equal && SameBits(a.position[v].data(), b.position[v].data(), pos_lanes);
+    ASSERT_MSG(VIDEO, positions_equal,
                "Expected matching position caches after loading (a: {} / {} / {}; b: {} / {} / {})",
-               fmt::join(a_position_cache[0], ", "), fmt::join(a_position_cache[1], ", "),
-               fmt::join(a_position_cache[2], ", "), fmt::join(b_position_cache[0], ", "),
-               fmt::join(b_position_cache[1], ", "), fmt::join(b_position_cache[2], ", "));
+               fmt::join(a.position[0], ", "), fmt::join(a.position[1], ", "),
+               fmt::join(a.position[2], ", "), fmt::join(b.position[0], ", "),
+               fmt::join(b.position[1], ", "), fmt::join(b.position[2], ", "));
 
-    // The last element is allowed to be garbage for SIMD overwrites
-    ASSERT_MSG(VIDEO,
-               std::equal(a_normal_cache.begin(), a_normal_cache.begin() + 3,
-                          b_normal_cache.begin(), b_normal_cache.begin() + 3, bit_equal),
+    ASSERT_MSG(VIDEO, SameBits(a.normal.data(), b.normal.data(), 3),
                "Expected matching normal caches after loading (a: {}; b: {})",
-               fmt::join(a_normal_cache, ", "), fmt::join(b_normal_cache, ", "));
-
-    ASSERT_MSG(VIDEO,
-               std::equal(a_tangent_cache.begin(), a_tangent_cache.begin() + 3,
-                          b_tangent_cache.begin(), b_tangent_cache.begin() + 3, bit_equal),
+               fmt::join(a.normal, ", "), fmt::join(b.normal, ", "));
+    ASSERT_MSG(VIDEO, SameBits(a.tangent.data(), b.tangent.data(), 3),
                "Expected matching tangent caches after loading (a: {}; b: {})",
-               fmt::join(a_tangent_cache, ", "), fmt::join(b_tangent_cache, ", "));
-
-    ASSERT_MSG(VIDEO,
-               std::equal(a_binormal_cache.begin(), a_binormal_cache.begin() + 3,
-                          b_binormal_cache.begin(), b_binormal_cache.begin() + 3, bit_equal),
+               fmt::join(a.tangent, ", "), fmt::join(b.tangent, ", "));
+    ASSERT_MSG(VIDEO, SameBits(a.binormal.data(), b.binormal.data(), 3),
                "Expected matching binormal caches after loading (a: {}; b: {})",
-               fmt::join(a_binormal_cache, ", "), fmt::join(b_binormal_cache, ", "));
-
-    memcpy(dst, buffer_a.data(), count_a * m_native_vtx_decl.stride);
-    m_numLoadedVertices += count;
-    return count_a;
+               fmt::join(a.binormal, ", "), fmt::join(b.binormal, ", "));
   }
 
-private:
-  std::unique_ptr<VertexLoaderBase> a;
-  std::unique_ptr<VertexLoaderBase> b;
-
-  std::vector<u8> buffer_a;
-  std::vector<u8> buffer_b;
+  std::unique_ptr<VertexLoaderBase> m_reference;
+  std::unique_ptr<VertexLoaderBase> m_candidate;
+  std::vector<u8> m_out_reference;
+  std::vector<u8> m_out_candidate;
 };
+}  // namespace
 
 u32 VertexLoaderBase::GetVertexSize(const TVtxDesc& vtx_desc, const VAT& vtx_attr)
 {
-  u32 size = 0;
+  // One byte per matrix index (position/normal and the eight texture matrices).
+  u32 bytes = static_cast<u32>(std::popcount(vtx_desc.low.Hex & 0x1ffu));
 
-  // Each enabled TexMatIdx adds one byte, as does PosMatIdx
-  size += std::popcount(vtx_desc.low.Hex & 0x1FF);
-
-  const u32 pos_size = VertexLoader_Position::GetSize(vtx_desc.low.Position, vtx_attr.g0.PosFormat,
-                                                      vtx_attr.g0.PosElements);
-  size += pos_size;
-  const u32 norm_size =
-      VertexLoader_Normal::GetSize(vtx_desc.low.Normal, vtx_attr.g0.NormalFormat,
-                                   vtx_attr.g0.NormalElements, vtx_attr.g0.NormalIndex3);
-  size += norm_size;
-  for (u32 i = 0; i < vtx_desc.low.Color.Size(); i++)
+  bytes += VertexLoader_Position::GetSize(vtx_desc.low.Position, vtx_attr.g0.PosFormat,
+                                          vtx_attr.g0.PosElements);
+  bytes += VertexLoader_Normal::GetSize(vtx_desc.low.Normal, vtx_attr.g0.NormalFormat,
+                                        vtx_attr.g0.NormalElements, vtx_attr.g0.NormalIndex3);
+  for (u32 c = 0; c < 2; c++)
+    bytes += VertexLoader_Color::GetSize(vtx_desc.low.Color[c], vtx_attr.GetColorFormat(c));
+  for (u32 t = 0; t < 8; t++)
   {
-    const u32 color_size =
-        VertexLoader_Color::GetSize(vtx_desc.low.Color[i], vtx_attr.GetColorFormat(i));
-    size += color_size;
+    bytes += VertexLoader_TextCoord::GetSize(vtx_desc.high.TexCoord[t], vtx_attr.GetTexFormat(t),
+                                             vtx_attr.GetTexElements(t));
   }
-  for (u32 i = 0; i < vtx_desc.high.TexCoord.Size(); i++)
-  {
-    const u32 tc_size = VertexLoader_TextCoord::GetSize(
-        vtx_desc.high.TexCoord[i], vtx_attr.GetTexFormat(i), vtx_attr.GetTexElements(i));
-    size += tc_size;
-  }
-
-  return size;
+  return bytes;
 }
 
 u32 VertexLoaderBase::GetVertexComponents(const TVtxDesc& vtx_desc, const VAT& vtx_attr)
 {
-  u32 components = 0;
-  if (vtx_desc.low.PosMatIdx)
-    components |= VB_HAS_POSMTXIDX;
-  for (u32 i = 0; i < vtx_desc.low.TexMatIdx.Size(); i++)
-  {
-    if (vtx_desc.low.TexMatIdx[i])
-      components |= VB_HAS_TEXMTXIDX0 << i;
-  }
-  // Vertices always have positions; thus there is no VB_HAS_POS as it would always be set
+  // The low nine VCD bits are the matrix index flags: bit 0 the position matrix, bits 1..8 the
+  // texture matrices.
+  const u32 matrix_flags = vtx_desc.low.Hex & 0x1ffu;
+  u32 mask = ((matrix_flags & 1u) ? VB_HAS_POSMTXIDX : 0u) | (matrix_flags >> 1);
+
   if (vtx_desc.low.Normal != VertexComponentFormat::NotPresent)
   {
-    components |= VB_HAS_NORMAL;
+    mask |= VB_HAS_NORMAL;
     if (vtx_attr.g0.NormalElements == NormalComponentCount::NTB)
-      components |= VB_HAS_TANGENT | VB_HAS_BINORMAL;
+      mask |= VB_HAS_TANGENT | VB_HAS_BINORMAL;
   }
-  for (u32 i = 0; i < vtx_desc.low.Color.Size(); i++)
+  for (u32 c = 0; c < 2; c++)
   {
-    if (vtx_desc.low.Color[i] != VertexComponentFormat::NotPresent)
-      components |= VB_HAS_COL0 << i;
+    if (vtx_desc.low.Color[c] != VertexComponentFormat::NotPresent)
+      mask |= VB_HAS_COL0 << c;
   }
-  for (u32 i = 0; i < vtx_desc.high.TexCoord.Size(); i++)
+  for (u32 t = 0; t < 8; t++)
   {
-    if (vtx_desc.high.TexCoord[i] != VertexComponentFormat::NotPresent)
-      components |= VB_HAS_UV0 << i;
+    if (vtx_desc.high.TexCoord[t] != VertexComponentFormat::NotPresent)
+      mask |= VB_HAS_UV0 << t;
   }
-  return components;
+  return mask;
 }
 
 std::unique_ptr<VertexLoaderBase> VertexLoaderBase::CreateVertexLoader(const TVtxDesc& vtx_desc,
                                                                        const VAT& vtx_attr)
 {
-  const VertexLoaderType loader_type = g_ActiveConfig.vertex_loader_type;
-
-  if (loader_type == VertexLoaderType::Software)
-  {
+  const VertexLoaderType type = g_ActiveConfig.vertex_loader_type;
+  if (type == VertexLoaderType::Software)
     return std::make_unique<VertexLoader>(vtx_desc, vtx_attr);
-  }
 
-  std::unique_ptr<VertexLoaderBase> native_loader = nullptr;
-
-#if defined(_M_X86_64)
-  native_loader = std::make_unique<VertexLoaderX64>(vtx_desc, vtx_attr);
-#elif defined(_M_ARM_64)
-  native_loader = std::make_unique<VertexLoaderARM64>(vtx_desc, vtx_attr);
-#endif
-
-  // Use the software loader as a fallback
-  // (not currently applicable, as both VertexLoaderX64 and VertexLoaderARM64
-  // are always usable, but if a loader that only works on some CPUs is created
-  // then this fallback would be used)
-  if (!native_loader)
-  {
-    return std::make_unique<VertexLoader>(vtx_desc, vtx_attr);
-  }
-
-  if (loader_type == VertexLoaderType::Compare)
-  {
-    return std::make_unique<VertexLoaderTester>(
-        std::make_unique<VertexLoader>(vtx_desc, vtx_attr),  // the software one
-        std::move(native_loader),                            // the new one to compare
-        vtx_desc, vtx_attr);
-  }
-
-  return native_loader;
+  // The native loader is built first, then the reference (their constructors may report
+  // problems, and they do so in this order).
+  auto native = std::make_unique<VertexLoaderX64>(vtx_desc, vtx_attr);
+  if (type != VertexLoaderType::Compare)
+    return native;
+  auto reference = std::make_unique<VertexLoader>(vtx_desc, vtx_attr);
+  return std::make_unique<ComparingVertexLoader>(std::move(reference), std::move(native),
+                                                 vtx_desc, vtx_attr);
 }

@@ -1,21 +1,24 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "VideoCommon/VertexLoaderManager.h"
 
 #include <algorithm>
-#include <iterator>
+#include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
-#include <vector>
 
+#include <fmt/format.h>
+
+#include "Common/Assert.h"
 #include "Common/CommonTypes.h"
 #include "Common/EnumMap.h"
 #include "Common/Logging/Log.h"
+#include "Common/MsgHandler.h"
 
 #include "Core/DolphinAnalytics.h"
 #include "Core/HW/Memmap.h"
@@ -26,6 +29,7 @@
 #include "VideoCommon/CPMemory.h"
 #include "VideoCommon/DataReader.h"
 #include "VideoCommon/NativeVertexFormat.h"
+#include "VideoCommon/OpcodeDecoding.h"
 #include "VideoCommon/Statistics.h"
 #include "VideoCommon/VertexLoaderBase.h"
 #include "VideoCommon/VertexManagerBase.h"
@@ -35,31 +39,187 @@
 
 namespace VertexLoaderManager
 {
-// Used by zfreeze
 std::array<u32, 3> position_matrix_index_cache;
-// 3 vertices, 4 floats each to allow SIMD overwrite
-alignas(sizeof(std::array<float, 4>)) std::array<std::array<float, 4>, 3> position_cache;
-alignas(sizeof(std::array<float, 4>)) std::array<float, 4> normal_cache;
-alignas(sizeof(std::array<float, 4>)) std::array<float, 4> tangent_cache;
-alignas(sizeof(std::array<float, 4>)) std::array<float, 4> binormal_cache;
-
-static NativeVertexFormatMap s_native_vertex_map;
-static NativeVertexFormat* s_current_vtx_fmt;
-u32 g_current_components;
-
-typedef std::unordered_map<VertexLoaderUID, std::unique_ptr<VertexLoaderBase>> VertexLoaderMap;
-static std::mutex s_vertex_loader_map_lock;
-static VertexLoaderMap s_vertex_loader_map;
-// TODO - change into array of pointers. Keep a map of all seen so far.
+alignas(16) std::array<std::array<float, 4>, 3> position_cache;
+alignas(16) std::array<float, 4> normal_cache;
+alignas(16) std::array<float, 4> tangent_cache;
+alignas(16) std::array<float, 4> binormal_cache;
 
 Common::EnumMap<u8*, CPArray::TexCoord7> cached_arraybases;
 
+u32 g_current_components;
 BitSet8 g_main_vat_dirty;
 BitSet8 g_preprocess_vat_dirty;
-bool g_bases_dirty;  // Main only
+bool g_bases_dirty;
 std::array<VertexLoaderBase*, CP_NUM_VAT_REG> g_main_vertex_loaders;
 std::array<VertexLoaderBase*, CP_NUM_VAT_REG> g_preprocess_vertex_loaders;
 bool g_needs_cp_xf_consistency_check;
+
+namespace
+{
+NativeVertexFormatMap s_formats;
+NativeVertexFormat* s_current_format;
+
+// Loaders are shared between the GPU thread and the preprocessing (CPU) thread.
+std::mutex s_loaders_mutex;
+std::unordered_map<VertexLoaderUID, std::unique_ptr<VertexLoaderBase>> s_loaders;
+
+// A draw longer than this is cut into pieces for the primitives that can be cut anywhere on a
+// primitive boundary; 16380 vertices divide into whole triangles and whole quads.
+constexpr int SPLIT_RUN = 16380;
+
+bool CanSplit(OpcodeDecoder::Primitive primitive)
+{
+  using OpcodeDecoder::Primitive;
+  return primitive == Primitive::GX_DRAW_QUADS || primitive == Primitive::GX_DRAW_QUADS_2 ||
+         primitive == Primitive::GX_DRAW_TRIANGLES || primitive == Primitive::GX_DRAW_LINES ||
+         primitive == Primitive::GX_DRAW_POINTS;
+}
+
+// Resolves one array base if the current VCD reads the array through indices. A base outside
+// emulated memory (Burnout 2 sets some for arrays it never uses) keeps the old pointer.
+void ResolveArray(Memory::MemoryManager& memory, CPArray array, VertexComponentFormat usage)
+{
+  if (!IsIndexed(usage))
+    return;
+  u8* const host = memory.GetPointerForRange(g_main_cp_state.array_bases[array], sizeof(u32));
+  if (host != nullptr)
+    cached_arraybases[array] = host;
+}
+
+std::optional<u32> XFNormalCount(NormalCount count)
+{
+  switch (count)
+  {
+  case NormalCount::None:
+    return 0;
+  case NormalCount::Normal:
+    return 1;
+  case NormalCount::NormalTangentBinormal:
+  case NormalCount::Invalid:  // https://bugs.dolphin-emu.org/issues/13070
+    return 3;
+  }
+  return std::nullopt;
+}
+
+// Reports CP and XF settings that disagree, and VAT formats that do not exist. Only reports;
+// the draw goes ahead.
+void CheckCPConfiguration(int vtx_attr_group)
+{
+  const CPState& cp = g_main_cp_state;
+  const VAT& vat = cp.vtx_attr[static_cast<size_t>(vtx_attr_group)];
+  const auto is_present = [](VertexComponentFormat f) {
+    return f != VertexComponentFormat::NotPresent;
+  };
+
+  const u32 cp_colors =
+      static_cast<u32>(std::count_if(cp.vtx_desc.low.Color.begin(), cp.vtx_desc.low.Color.end(),
+                                     is_present));
+  const u32 cp_tex_coords = static_cast<u32>(std::count_if(
+      cp.vtx_desc.high.TexCoord.begin(), cp.vtx_desc.high.TexCoord.end(), is_present));
+  u32 cp_normals = 0;
+  if (cp.vtx_desc.low.Normal != VertexComponentFormat::NotPresent)
+    cp_normals = vat.g0.NormalElements == NormalComponentCount::NTB ? 3 : 1;
+  const std::optional<u32> xf_normals = XFNormalCount(xfmem.invtxspec.numnormals);
+
+  const bool colors_differ = cp_colors != xfmem.invtxspec.numcolors;
+  const bool normals_differ = cp_normals != xf_normals;
+  const bool tex_coords_differ = cp_tex_coords != xfmem.invtxspec.numtextures;
+  if (colors_differ || normals_differ || tex_coords_differ) [[unlikely]]
+  {
+    PanicAlertFmt("Mismatched configuration between CP and XF stages - {}/{} colors, {}/{} "
+                  "normals, {}/{} texture coordinates. Please report on the issue tracker.\n\n"
+                  "VCD: {:08x} {:08x}\nVAT {}: {:08x} {:08x} {:08x}\nXF vertex spec: {:08x}",
+                  cp_colors, xfmem.invtxspec.numcolors, cp_normals,
+                  xf_normals.has_value() ? fmt::to_string(*xf_normals) : "invalid",
+                  cp_tex_coords, xfmem.invtxspec.numtextures, cp.vtx_desc.low.Hex,
+                  cp.vtx_desc.high.Hex, vtx_attr_group, vat.g0.Hex, vat.g1.Hex, vat.g2.Hex,
+                  xfmem.invtxspec.hex);
+
+    // Reported so the games that do this can be found; real hardware seems to hang.
+    if (colors_differ)
+      DolphinAnalytics::Instance().ReportGameQuirk(GameQuirk::MismatchedGPUColorsBetweenCPAndXF);
+    if (normals_differ)
+      DolphinAnalytics::Instance().ReportGameQuirk(GameQuirk::MismatchedGPUNormalsBetweenCPAndXF);
+    if (tex_coords_differ)
+    {
+      DolphinAnalytics::Instance().ReportGameQuirk(
+          GameQuirk::MismatchedGPUTexCoordsBetweenCPAndXF);
+    }
+  }
+
+  if (cp.matrix_index_a.Hex != xfmem.MatrixIndexA.Hex ||
+      cp.matrix_index_b.Hex != xfmem.MatrixIndexB.Hex) [[unlikely]]
+  {
+    WARN_LOG_FMT(VIDEO,
+                 "Mismatched matrix index configuration between CP and XF stages - "
+                 "index A: {:08x}/{:08x}, index B {:08x}/{:08x}.",
+                 cp.matrix_index_a.Hex, xfmem.MatrixIndexA.Hex, cp.matrix_index_b.Hex,
+                 xfmem.MatrixIndexB.Hex);
+    DolphinAnalytics::Instance().ReportGameQuirk(
+        GameQuirk::MismatchedGPUMatrixIndicesBetweenCPAndXF);
+  }
+
+  if (vat.g0.PosFormat >= ComponentFormat::InvalidFloat5)
+  {
+    WARN_LOG_FMT(VIDEO, "Invalid position format {} for VAT {} - {:08x} {:08x} {:08x}",
+                 vat.g0.PosFormat, vtx_attr_group, vat.g0.Hex, vat.g1.Hex, vat.g2.Hex);
+    DolphinAnalytics::Instance().ReportGameQuirk(GameQuirk::InvalidPositionComponentFormat);
+  }
+  if (vat.g0.NormalFormat >= ComponentFormat::InvalidFloat5)
+  {
+    WARN_LOG_FMT(VIDEO, "Invalid normal format {} for VAT {} - {:08x} {:08x} {:08x}",
+                 vat.g0.NormalFormat, vtx_attr_group, vat.g0.Hex, vat.g1.Hex, vat.g2.Hex);
+    DolphinAnalytics::Instance().ReportGameQuirk(GameQuirk::InvalidNormalComponentFormat);
+  }
+  for (size_t t = 0; t < 8; t++)
+  {
+    if (vat.GetTexFormat(t) < ComponentFormat::InvalidFloat5)
+      continue;
+    WARN_LOG_FMT(VIDEO,
+                 "Invalid texture coordinate {} format {} for VAT {} - {:08x} {:08x} {:08x}", t,
+                 vat.GetTexFormat(t), vtx_attr_group, vat.g0.Hex, vat.g1.Hex, vat.g2.Hex);
+    DolphinAnalytics::Instance().ReportGameQuirk(
+        GameQuirk::InvalidTextureCoordinateComponentFormat);
+  }
+  for (size_t c = 0; c < 2; c++)
+  {
+    if (vat.GetColorFormat(c) <= ColorFormat::RGBA8888)
+      continue;
+    WARN_LOG_FMT(VIDEO, "Invalid color {} format {} for VAT {} - {:08x} {:08x} {:08x}", c,
+                 vat.GetColorFormat(c), vtx_attr_group, vat.g0.Hex, vat.g1.Hex, vat.g2.Hex);
+    DolphinAnalytics::Instance().ReportGameQuirk(GameQuirk::InvalidColorComponentFormat);
+  }
+}
+
+// Sets a dummy attribute: enabled, at offset 0.
+void FillDummy(AttributeFormat& attr, ComponentFormat type, int components, bool integer)
+{
+  attr.type = type;
+  attr.components = components;
+  attr.offset = 0;
+  attr.enable = true;
+  attr.integer = integer;
+}
+
+// Copies attr when it is enabled; otherwise sets the dummy.
+void CopyOrDummy(AttributeFormat& out, const AttributeFormat& attr, ComponentFormat type,
+                 int components, bool integer)
+{
+  if (attr.enable)
+  {
+    out.type = attr.type;
+    out.components = attr.components;
+    out.offset = attr.offset;
+    out.enable = attr.enable;
+    out.integer = attr.integer;
+  }
+  else
+  {
+    FillDummy(out, type, components, integer);
+  }
+}
+}  // namespace
 
 void Init()
 {
@@ -71,63 +231,26 @@ void Init()
 
 void Clear()
 {
-  std::lock_guard<std::mutex> lk(s_vertex_loader_map_lock);
-  s_vertex_loader_map.clear();
-  s_native_vertex_map.clear();
+  std::lock_guard<std::mutex> guard(s_loaders_mutex);
+  s_loaders.clear();
+  s_formats.clear();
 }
 
 void UpdateVertexArrayPointers()
 {
-  // Anything to update?
   if (!g_bases_dirty) [[likely]]
     return;
 
-  auto& system = Core::System::GetInstance();
-  auto& memory = system.GetMemory();
-
-  // Some games such as Burnout 2 can put invalid addresses into
-  // the array base registers. (see issue 8591)
-  // But the vertex arrays with invalid addresses aren't actually enabled.
-  // Note: Only array bases 0 through 11 are used by the Vertex loaders.
-  //       12 through 15 are used for loading data into xfmem.
-  // We also only update the array base if the vertex description states we are going to use it.
-  if (IsIndexed(g_main_cp_state.vtx_desc.low.Position))
-  {
-    u8* const base_pointer =
-        memory.GetPointerForRange(g_main_cp_state.array_bases[CPArray::Position], sizeof(u32));
-    if (base_pointer != nullptr)
-      cached_arraybases[CPArray::Position] = base_pointer;
-  }
-
-  if (IsIndexed(g_main_cp_state.vtx_desc.low.Normal))
-  {
-    u8* const base_pointer =
-        memory.GetPointerForRange(g_main_cp_state.array_bases[CPArray::Normal], sizeof(u32));
-    if (base_pointer != nullptr)
-      cached_arraybases[CPArray::Normal] = base_pointer;
-  }
-
-  for (u8 i = 0; i < g_main_cp_state.vtx_desc.low.Color.Size(); i++)
-  {
-    if (IsIndexed(g_main_cp_state.vtx_desc.low.Color[i]))
-    {
-      u8* const base_pointer =
-          memory.GetPointerForRange(g_main_cp_state.array_bases[CPArray::Color0 + i], sizeof(u32));
-      if (base_pointer != nullptr)
-        cached_arraybases[CPArray::Color0 + i] = base_pointer;
-    }
-  }
-
-  for (u8 i = 0; i < g_main_cp_state.vtx_desc.high.TexCoord.Size(); i++)
-  {
-    if (IsIndexed(g_main_cp_state.vtx_desc.high.TexCoord[i]))
-    {
-      u8* const base_pointer = memory.GetPointerForRange(
-          g_main_cp_state.array_bases[CPArray::TexCoord0 + i], sizeof(u32));
-      if (base_pointer != nullptr)
-        cached_arraybases[CPArray::TexCoord0 + i] = base_pointer;
-    }
-  }
+  // Only arrays 0-11 feed the loaders (12-15 are for indexed XF loads), and only those the VCD
+  // reads through indices are resolved.
+  auto& memory = Core::System::GetInstance().GetMemory();
+  const TVtxDesc& vcd = g_main_cp_state.vtx_desc;
+  ResolveArray(memory, CPArray::Position, vcd.low.Position);
+  ResolveArray(memory, CPArray::Normal, vcd.low.Normal);
+  for (u8 c = 0; c < 2; c++)
+    ResolveArray(memory, CPArray::Color0 + c, vcd.low.Color[c]);
+  for (u8 t = 0; t < 8; t++)
+    ResolveArray(memory, CPArray::TexCoord0 + t, vcd.high.TexCoord[t]);
 
   g_bases_dirty = false;
 }
@@ -142,73 +265,30 @@ void MarkAllDirty()
 
 NativeVertexFormat* GetOrCreateMatchingFormat(const PortableVertexDeclaration& decl)
 {
-  auto iter = s_native_vertex_map.find(decl);
-  if (iter == s_native_vertex_map.end())
-  {
-    std::unique_ptr<NativeVertexFormat> fmt = g_gfx->CreateNativeVertexFormat(decl);
-    auto ipair = s_native_vertex_map.emplace(decl, std::move(fmt));
-    iter = ipair.first;
-  }
-
-  return iter->second.get();
+  auto found = s_formats.find(decl);
+  if (found == s_formats.end())
+    found = s_formats.emplace(decl, g_gfx->CreateNativeVertexFormat(decl)).first;
+  return found->second.get();
 }
 
 NativeVertexFormat* GetUberVertexFormat(const PortableVertexDeclaration& decl)
 {
-  // The padding in the structs can cause the memcmp() in the map to create duplicates.
-  // Avoid this by initializing the padding to zero.
-  PortableVertexDeclaration new_decl;
+  // Built from a zeroed declaration so that padding cannot make equal layouts compare unequal.
+  PortableVertexDeclaration uber;
   static_assert(std::is_trivially_copyable_v<PortableVertexDeclaration>);
-  std::memset(static_cast<void*>(&new_decl), 0, sizeof(new_decl));
-  new_decl.stride = decl.stride;
+  std::memset(static_cast<void*>(&uber), 0, sizeof(uber));
+  uber.stride = decl.stride;
 
-  auto MakeDummyAttribute = [](AttributeFormat& attr, ComponentFormat type, int components,
-                               bool integer) {
-    attr.type = type;
-    attr.components = components;
-    attr.offset = 0;
-    attr.enable = true;
-    attr.integer = integer;
-  };
-  auto CopyAttribute = [](AttributeFormat& attr, const AttributeFormat& src) {
-    attr.type = src.type;
-    attr.components = src.components;
-    attr.offset = src.offset;
-    attr.enable = src.enable;
-    attr.integer = src.integer;
-  };
+  CopyOrDummy(uber.position, decl.position, ComponentFormat::Float, 1, false);
+  for (size_t i = 0; i < uber.normals.size(); i++)
+    CopyOrDummy(uber.normals[i], decl.normals[i], ComponentFormat::Float, 1, false);
+  for (size_t i = 0; i < uber.colors.size(); i++)
+    CopyOrDummy(uber.colors[i], decl.colors[i], ComponentFormat::UByte, 4, false);
+  for (size_t i = 0; i < uber.texcoords.size(); i++)
+    CopyOrDummy(uber.texcoords[i], decl.texcoords[i], ComponentFormat::Float, 1, false);
+  CopyOrDummy(uber.posmtx, decl.posmtx, ComponentFormat::UByte, 1, true);
 
-  if (decl.position.enable)
-    CopyAttribute(new_decl.position, decl.position);
-  else
-    MakeDummyAttribute(new_decl.position, ComponentFormat::Float, 1, false);
-  for (size_t i = 0; i < std::size(new_decl.normals); i++)
-  {
-    if (decl.normals[i].enable)
-      CopyAttribute(new_decl.normals[i], decl.normals[i]);
-    else
-      MakeDummyAttribute(new_decl.normals[i], ComponentFormat::Float, 1, false);
-  }
-  for (size_t i = 0; i < std::size(new_decl.colors); i++)
-  {
-    if (decl.colors[i].enable)
-      CopyAttribute(new_decl.colors[i], decl.colors[i]);
-    else
-      MakeDummyAttribute(new_decl.colors[i], ComponentFormat::UByte, 4, false);
-  }
-  for (size_t i = 0; i < std::size(new_decl.texcoords); i++)
-  {
-    if (decl.texcoords[i].enable)
-      CopyAttribute(new_decl.texcoords[i], decl.texcoords[i]);
-    else
-      MakeDummyAttribute(new_decl.texcoords[i], ComponentFormat::Float, 1, false);
-  }
-  if (decl.posmtx.enable)
-    CopyAttribute(new_decl.posmtx, decl.posmtx);
-  else
-    MakeDummyAttribute(new_decl.posmtx, ComponentFormat::UByte, 1, true);
-
-  return GetOrCreateMatchingFormat(new_decl);
+  return GetOrCreateMatchingFormat(uber);
 }
 
 namespace detail
@@ -216,184 +296,107 @@ namespace detail
 template <bool IsPreprocess>
 VertexLoaderBase* GetOrCreateLoader(int vtx_attr_group)
 {
-  constexpr CPState* state = IsPreprocess ? &g_preprocess_cp_state : &g_main_cp_state;
-  constexpr BitSet8& attr_dirty = IsPreprocess ? g_preprocess_vat_dirty : g_main_vat_dirty;
-  constexpr auto& vertex_loaders =
-      IsPreprocess ? g_preprocess_vertex_loaders : g_main_vertex_loaders;
+  const CPState& state = IsPreprocess ? g_preprocess_cp_state : g_main_cp_state;
+  const size_t group = static_cast<size_t>(vtx_attr_group);
+  const VAT& vat = state.vtx_attr[group];
 
+  std::lock_guard<std::mutex> guard(s_loaders_mutex);
+  const VertexLoaderUID key(state.vtx_desc, vat);
   VertexLoaderBase* loader;
-
-  // We are not allowed to create a native vertex format on preprocessing as this is on the wrong
-  // thread
-  bool check_for_native_format = !IsPreprocess;
-
-  VertexLoaderUID uid(state->vtx_desc, state->vtx_attr[vtx_attr_group]);
-  std::lock_guard<std::mutex> lk(s_vertex_loader_map_lock);
-  VertexLoaderMap::iterator iter = s_vertex_loader_map.find(uid);
-  if (iter != s_vertex_loader_map.end())
+  auto found = s_loaders.find(key);
+  if (found != s_loaders.end())
   {
-    loader = iter->second.get();
-    check_for_native_format &= !loader->m_native_vertex_format;
+    loader = found->second.get();
   }
   else
   {
-    auto [it, added] = s_vertex_loader_map.try_emplace(
-        uid,
-        VertexLoaderBase::CreateVertexLoader(state->vtx_desc, state->vtx_attr[vtx_attr_group]));
-    loader = it->second.get();
+    loader = s_loaders.try_emplace(key, VertexLoaderBase::CreateVertexLoader(state.vtx_desc, vat))
+                 .first->second.get();
     INCSTAT(g_stats.num_vertex_loaders);
   }
-  if (check_for_native_format)
+
+  // Backend objects may only be made on the GPU thread, so preprocessing leaves this alone.
+  if constexpr (!IsPreprocess)
   {
-    // search for a cached native vertex format
-    loader->m_native_vertex_format = GetOrCreateMatchingFormat(loader->m_native_vtx_decl);
+    if (loader->m_native_vertex_format == nullptr)
+      loader->m_native_vertex_format = GetOrCreateMatchingFormat(loader->m_native_vtx_decl);
   }
-  vertex_loaders[vtx_attr_group] = loader;
-  attr_dirty[vtx_attr_group] = false;
+
+  (IsPreprocess ? g_preprocess_vertex_loaders : g_main_vertex_loaders)[group] = loader;
+  (IsPreprocess ? g_preprocess_vat_dirty : g_main_vat_dirty)[group] = false;
   return loader;
 }
 
+template VertexLoaderBase* GetOrCreateLoader<false>(int vtx_attr_group);
+template VertexLoaderBase* GetOrCreateLoader<true>(int vtx_attr_group);
 }  // namespace detail
 
-static void CheckCPConfiguration(int vtx_attr_group)
+namespace
 {
-  // Validate that the XF input configuration matches the CP configuration
-  u32 num_cp_colors = std::count_if(
-      g_main_cp_state.vtx_desc.low.Color.begin(), g_main_cp_state.vtx_desc.low.Color.end(),
-      [](auto format) { return format != VertexComponentFormat::NotPresent; });
-  u32 num_cp_tex_coords = std::count_if(
-      g_main_cp_state.vtx_desc.high.TexCoord.begin(), g_main_cp_state.vtx_desc.high.TexCoord.end(),
-      [](auto format) { return format != VertexComponentFormat::NotPresent; });
-
-  u32 num_cp_normals;
-  if (g_main_cp_state.vtx_desc.low.Normal == VertexComponentFormat::NotPresent)
-    num_cp_normals = 0;
-  else if (g_main_cp_state.vtx_attr[vtx_attr_group].g0.NormalElements == NormalComponentCount::NTB)
-    num_cp_normals = 3;
-  else
-    num_cp_normals = 1;
-
-  std::optional<u32> num_xf_normals;
-  switch (xfmem.invtxspec.numnormals)
-  {
-  case NormalCount::None:
-    num_xf_normals = 0;
-    break;
-  case NormalCount::Normal:
-    num_xf_normals = 1;
-    break;
-  case NormalCount::NormalTangentBinormal:
-  case NormalCount::Invalid:  // see https://bugs.dolphin-emu.org/issues/13070
-    num_xf_normals = 3;
-    break;
-  }
-
-  if (num_cp_colors != xfmem.invtxspec.numcolors || num_cp_normals != num_xf_normals ||
-      num_cp_tex_coords != xfmem.invtxspec.numtextures) [[unlikely]]
-  {
-    PanicAlertFmt("Mismatched configuration between CP and XF stages - {}/{} colors, {}/{} "
-                  "normals, {}/{} texture coordinates. Please report on the issue tracker.\n\n"
-                  "VCD: {:08x} {:08x}\nVAT {}: {:08x} {:08x} {:08x}\nXF vertex spec: {:08x}",
-                  num_cp_colors, xfmem.invtxspec.numcolors, num_cp_normals,
-                  num_xf_normals.has_value() ? fmt::to_string(num_xf_normals.value()) : "invalid",
-                  num_cp_tex_coords, xfmem.invtxspec.numtextures, g_main_cp_state.vtx_desc.low.Hex,
-                  g_main_cp_state.vtx_desc.high.Hex, vtx_attr_group,
-                  g_main_cp_state.vtx_attr[vtx_attr_group].g0.Hex,
-                  g_main_cp_state.vtx_attr[vtx_attr_group].g1.Hex,
-                  g_main_cp_state.vtx_attr[vtx_attr_group].g2.Hex, xfmem.invtxspec.hex);
-
-    // Analytics reporting so we can discover which games have this problem, that way when we
-    // eventually simulate the behavior we have test cases for it.
-    if (num_cp_colors != xfmem.invtxspec.numcolors) [[unlikely]]
-    {
-      DolphinAnalytics::Instance().ReportGameQuirk(GameQuirk::MismatchedGPUColorsBetweenCPAndXF);
-    }
-    if (num_cp_normals != num_xf_normals) [[unlikely]]
-    {
-      DolphinAnalytics::Instance().ReportGameQuirk(GameQuirk::MismatchedGPUNormalsBetweenCPAndXF);
-    }
-    if (num_cp_tex_coords != xfmem.invtxspec.numtextures) [[unlikely]]
-    {
-      DolphinAnalytics::Instance().ReportGameQuirk(GameQuirk::MismatchedGPUTexCoordsBetweenCPAndXF);
-    }
-
-    // Don't bail out, though; we can still render something successfully
-    // (real hardware seems to hang in this case, though)
-  }
-
-  if (g_main_cp_state.matrix_index_a.Hex != xfmem.MatrixIndexA.Hex ||
-      g_main_cp_state.matrix_index_b.Hex != xfmem.MatrixIndexB.Hex) [[unlikely]]
-  {
-    WARN_LOG_FMT(VIDEO,
-                 "Mismatched matrix index configuration between CP and XF stages - "
-                 "index A: {:08x}/{:08x}, index B {:08x}/{:08x}.",
-                 g_main_cp_state.matrix_index_a.Hex, xfmem.MatrixIndexA.Hex,
-                 g_main_cp_state.matrix_index_b.Hex, xfmem.MatrixIndexB.Hex);
-    DolphinAnalytics::Instance().ReportGameQuirk(
-        GameQuirk::MismatchedGPUMatrixIndicesBetweenCPAndXF);
-  }
-
-  if (g_main_cp_state.vtx_attr[vtx_attr_group].g0.PosFormat >= ComponentFormat::InvalidFloat5)
-  {
-    WARN_LOG_FMT(VIDEO, "Invalid position format {} for VAT {} - {:08x} {:08x} {:08x}",
-                 g_main_cp_state.vtx_attr[vtx_attr_group].g0.PosFormat, vtx_attr_group,
-                 g_main_cp_state.vtx_attr[vtx_attr_group].g0.Hex,
-                 g_main_cp_state.vtx_attr[vtx_attr_group].g1.Hex,
-                 g_main_cp_state.vtx_attr[vtx_attr_group].g2.Hex);
-    DolphinAnalytics::Instance().ReportGameQuirk(GameQuirk::InvalidPositionComponentFormat);
-  }
-  if (g_main_cp_state.vtx_attr[vtx_attr_group].g0.NormalFormat >= ComponentFormat::InvalidFloat5)
-  {
-    WARN_LOG_FMT(VIDEO, "Invalid normal format {} for VAT {} - {:08x} {:08x} {:08x}",
-                 g_main_cp_state.vtx_attr[vtx_attr_group].g0.NormalFormat, vtx_attr_group,
-                 g_main_cp_state.vtx_attr[vtx_attr_group].g0.Hex,
-                 g_main_cp_state.vtx_attr[vtx_attr_group].g1.Hex,
-                 g_main_cp_state.vtx_attr[vtx_attr_group].g2.Hex);
-    DolphinAnalytics::Instance().ReportGameQuirk(GameQuirk::InvalidNormalComponentFormat);
-  }
-  for (size_t i = 0; i < 8; i++)
-  {
-    if (g_main_cp_state.vtx_attr[vtx_attr_group].GetTexFormat(i) >= ComponentFormat::InvalidFloat5)
-    {
-      WARN_LOG_FMT(VIDEO,
-                   "Invalid texture coordinate {} format {} for VAT {} - {:08x} {:08x} {:08x}", i,
-                   g_main_cp_state.vtx_attr[vtx_attr_group].GetTexFormat(i), vtx_attr_group,
-                   g_main_cp_state.vtx_attr[vtx_attr_group].g0.Hex,
-                   g_main_cp_state.vtx_attr[vtx_attr_group].g1.Hex,
-                   g_main_cp_state.vtx_attr[vtx_attr_group].g2.Hex);
-      DolphinAnalytics::Instance().ReportGameQuirk(
-          GameQuirk::InvalidTextureCoordinateComponentFormat);
-    }
-  }
-  for (size_t i = 0; i < 2; i++)
-  {
-    if (g_main_cp_state.vtx_attr[vtx_attr_group].GetColorFormat(i) > ColorFormat::RGBA8888)
-    {
-      WARN_LOG_FMT(VIDEO, "Invalid color {} format {} for VAT {} - {:08x} {:08x} {:08x}", i,
-                   g_main_cp_state.vtx_attr[vtx_attr_group].GetColorFormat(i), vtx_attr_group,
-                   g_main_cp_state.vtx_attr[vtx_attr_group].g0.Hex,
-                   g_main_cp_state.vtx_attr[vtx_attr_group].g1.Hex,
-                   g_main_cp_state.vtx_attr[vtx_attr_group].g2.Hex);
-      DolphinAnalytics::Instance().ReportGameQuirk(GameQuirk::InvalidColorComponentFormat);
-    }
-  }
-}
-
-static bool CanSplit(OpcodeDecoder::Primitive primitive)
+// The main-thread half of RunVertices: converts the draw into the vertex manager's buffers.
+void LoadDraw(VertexLoaderBase* loader, int vtx_attr_group, OpcodeDecoder::Primitive primitive,
+              int count, const u8* src)
 {
-  // Splitting is currently only implemented for the easy cases (individual lines/points/triangles)
-  switch (primitive)
+  if (g_needs_cp_xf_consistency_check) [[unlikely]]
   {
-  case OpcodeDecoder::Primitive::GX_DRAW_QUADS:
-  case OpcodeDecoder::Primitive::GX_DRAW_QUADS_2:
-  case OpcodeDecoder::Primitive::GX_DRAW_TRIANGLES:
-  case OpcodeDecoder::Primitive::GX_DRAW_LINES:
-  case OpcodeDecoder::Primitive::GX_DRAW_POINTS:
-    return true;
-  default:
-    return false;
+    CheckCPConfiguration(vtx_attr_group);
+    g_needs_cp_xf_consistency_check = false;
   }
+
+  // A different host layout or component set ends the current batch.
+  if (loader->m_native_vertex_format != s_current_format ||
+      loader->m_native_components != g_current_components) [[unlikely]]
+  {
+    g_vertex_manager->Flush();
+    s_current_format = loader->m_native_vertex_format;
+    g_current_components = loader->m_native_components;
+    Core::System::GetInstance().GetVertexShaderManager().SetVertexFormat(
+        loader->m_native_components, loader->m_native_vertex_format->GetVertexDeclaration());
+  }
+
+  // Triangles and quads with culling set to "all" are still loaded (the z-freeze slope needs
+  // their positions) but never drawn. CPU culling may do the same for a batch whose vertices
+  // all fall outside; that only helps when it would start a new batch.
+  const bool before_lines = primitive < OpcodeDecoder::Primitive::GX_DRAW_LINES;
+  bool try_cpu_cull =
+      g_ActiveConfig.bCPUCull && before_lines && !g_vertex_manager->HasSendableVertices();
+  const bool cull_all = bpmem.genMode.cull_mode == CullMode::All && before_lines;
+
+  const int stride = loader->m_native_vtx_decl.stride;
+  const u32 ustride = static_cast<u32>(stride);
+  const bool splittable = CanSplit(primitive);
+  int left = count;
+  do
+  {
+    const int run = (splittable && left > SPLIT_RUN) ? SPLIT_RUN : left;
+    left -= run;
+
+    DataReader out = g_vertex_manager->PrepareForAdditionalData(
+        primitive, static_cast<u32>(run), ustride, cull_all || try_cpu_cull);
+    const int loaded = loader->RunVertices(src, out.GetPointer(), run);
+    const u32 uloaded = static_cast<u32>(loaded);
+    // Steps a whole split run, even after the last (shorter) piece.
+    src += static_cast<size_t>(loader->m_vertex_size) * SPLIT_RUN;
+
+    if (try_cpu_cull && !cull_all)
+    {
+      if (!g_vertex_manager->AreAllVerticesCulled(loader, primitive, out.GetPointer(), uloaded))
+      {
+        DataReader drawn = g_vertex_manager->DisableCullAll(ustride);
+        std::memmove(drawn.GetPointer(), out.GetPointer(),
+                     static_cast<size_t>(loaded) * static_cast<size_t>(stride));
+        try_cpu_cull = false;
+      }
+    }
+
+    g_vertex_manager->AddIndices(primitive, uloaded);
+    g_vertex_manager->FlushData(uloaded, ustride);
+    ADDSTAT(g_stats.this_frame.num_prims, loaded);
+  } while (left != 0);
+
+  INCSTAT(g_stats.this_frame.num_primitive_joins);
 }
+}  // namespace
 
 template <bool IsPreprocess>
 int RunVertices(int vtx_attr_group, OpcodeDecoder::Primitive primitive, int count, const u8* src)
@@ -402,80 +405,11 @@ int RunVertices(int vtx_attr_group, OpcodeDecoder::Primitive primitive, int coun
     return 0;
   ASSERT(count > 0);
 
-  VertexLoaderBase* loader = RefreshLoader<IsPreprocess>(vtx_attr_group);
-
-  int size = count * loader->m_vertex_size;
-
+  VertexLoaderBase* const loader = RefreshLoader<IsPreprocess>(vtx_attr_group);
+  const int stream_bytes = count * static_cast<int>(loader->m_vertex_size);
   if constexpr (!IsPreprocess)
-  {
-    // Doing early return for the opposite case would be cleaner
-    // but triggers a false unreachable code warning in MSVC debug builds.
-
-    if (g_needs_cp_xf_consistency_check) [[unlikely]]
-    {
-      CheckCPConfiguration(vtx_attr_group);
-      g_needs_cp_xf_consistency_check = false;
-    }
-
-    // If the native vertex format changed, force a flush.
-    if (loader->m_native_vertex_format != s_current_vtx_fmt ||
-        loader->m_native_components != g_current_components) [[unlikely]]
-    {
-      g_vertex_manager->Flush();
-
-      s_current_vtx_fmt = loader->m_native_vertex_format;
-      g_current_components = loader->m_native_components;
-      auto& system = Core::System::GetInstance();
-      auto& vertex_shader_manager = system.GetVertexShaderManager();
-      vertex_shader_manager.SetVertexFormat(loader->m_native_components,
-                                            loader->m_native_vertex_format->GetVertexDeclaration());
-    }
-
-    // CPUCull's performance increase comes from encoding fewer GPU commands, not sending less data
-    // Therefore it's only useful to check if culling could remove a flush
-    bool can_cpu_cull = g_ActiveConfig.bCPUCull &&
-                        primitive < OpcodeDecoder::Primitive::GX_DRAW_LINES &&
-                        !g_vertex_manager->HasSendableVertices();
-
-    // if cull mode is CULL_ALL, tell VertexManager to skip triangles and quads.
-    // They still need to go through vertex loading, because we need to calculate a zfreeze
-    // reference slope.
-    const bool cullall = (bpmem.genMode.cull_mode == CullMode::All &&
-                          primitive < OpcodeDecoder::Primitive::GX_DRAW_LINES);
-
-    const int stride = loader->m_native_vtx_decl.stride;
-    do
-    {
-      const int max_vertices = 16380;  // Max is 16383, but 16380 is divisible by both 4 and 3
-      const int run = CanSplit(primitive) && count > max_vertices ? max_vertices : count;
-      count -= run;
-      DataReader dst = g_vertex_manager->PrepareForAdditionalData(primitive, run, stride,
-                                                                  cullall || can_cpu_cull);
-
-      const int num_loaded = loader->RunVertices(src, dst.GetPointer(), run);
-      src += loader->m_vertex_size * max_vertices;
-
-      if (can_cpu_cull && !cullall)
-      {
-        const bool all_culled =
-            g_vertex_manager->AreAllVerticesCulled(loader, primitive, dst.GetPointer(), num_loaded);
-        if (!all_culled)
-        {
-          DataReader new_dst = g_vertex_manager->DisableCullAll(stride);
-          memmove(new_dst.GetPointer(), dst.GetPointer(), num_loaded * stride);
-          can_cpu_cull = false;
-        }
-      }
-
-      g_vertex_manager->AddIndices(primitive, num_loaded);
-      g_vertex_manager->FlushData(num_loaded, stride);
-
-      ADDSTAT(g_stats.this_frame.num_prims, num_loaded);
-    } while (count);
-
-    INCSTAT(g_stats.this_frame.num_primitive_joins);
-  }
-  return size;
+    LoadDraw(loader, vtx_attr_group, primitive, count, src);
+  return stream_bytes;
 }
 
 template int RunVertices<false>(int vtx_attr_group, OpcodeDecoder::Primitive primitive, int count,
@@ -485,7 +419,7 @@ template int RunVertices<true>(int vtx_attr_group, OpcodeDecoder::Primitive prim
 
 NativeVertexFormat* GetCurrentVertexFormat()
 {
-  return s_current_vtx_fmt;
+  return s_current_format;
 }
 
 }  // namespace VertexLoaderManager

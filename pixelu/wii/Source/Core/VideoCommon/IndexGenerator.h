@@ -1,35 +1,36 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-
-// This is currently only used by the DX backend, but it may make sense to
-// use it in the GL backend or a future DX10 backend too.
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include "Common/CommonTypes.h"
-#include "Common/EnumMap.h"
 #include "VideoCommon/OpcodeDecoding.h"
 
+// Turns GX primitives into 16-bit index lists for the host's triangle, line and point
+// primitives. Vertices are numbered in the order they were added since Start().
 class IndexGenerator
 {
 public:
+  // Picks up the backend/config choices: primitive restart and vertex shader line/point
+  // expansion. Called again when the configuration changes.
   void Init();
+  // Starts a new batch writing indices to index_ptr.
   void Start(u16* index_ptr);
 
   void AddIndices(OpcodeDecoder::Primitive primitive, u32 num_vertices);
-
+  // Appends ready-made indices that refer to the next num_vertices vertices.
   void AddExternalIndices(const u16* indices, u32 num_indices, u32 num_vertices);
 
-  // returns numprimitives
-  u32 GetNumVerts() const { return m_base_index; }
-  u32 GetIndexLen() const { return static_cast<u32>(m_index_buffer_current - m_base_index_ptr); }
+  // Vertices added since Start().
+  u32 GetNumVerts() const { return m_next_vertex; }
+  // Indices written since Start().
+  u32 GetIndexLen() const { return static_cast<u32>(m_cursor - m_start); }
+  // How many more vertices of this primitive fit before indices run out of 16 bits.
   u32 GetRemainingIndices(OpcodeDecoder::Primitive primitive) const;
 
 private:
-  u16* m_index_buffer_current = nullptr;
-  u16* m_base_index_ptr = nullptr;
-  u32 m_base_index = 0;
-
-  using PrimitiveFunction = u16* (*)(u16*, u32, u32);
-  Common::EnumMap<PrimitiveFunction, OpcodeDecoder::Primitive::GX_DRAW_POINTS> m_primitive_table{};
+  u16* m_cursor = nullptr;
+  u16* m_start = nullptr;
+  u32 m_next_vertex = 0;
+  bool m_restart = false;
+  bool m_vs_expand = false;
 };
