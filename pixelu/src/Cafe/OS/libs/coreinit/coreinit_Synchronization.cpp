@@ -37,20 +37,19 @@ namespace coreinit
 
 	/* OSEvent */
 
-	void OSInitEvent(OSEvent* event, OSEvent::EVENT_STATE initialState, OSEvent::EVENT_MODE mode)
+	void OSInitEventEx(OSEvent* event, OSEvent::EVENT_STATE initialState, OSEvent::EVENT_MODE mode, void* userData)
 	{
 		event->magic = kEventMagic;
-		event->userData = nullptr;
 		event->ukn08 = 0;
-		event->state = initialState;
 		event->mode = mode;
+		event->state = initialState;
+		event->userData = userData;
 		OSInitThreadQueueEx(&event->threadQueue, event);
 	}
 
-	void OSInitEventEx(OSEvent* event, OSEvent::EVENT_STATE initialState, OSEvent::EVENT_MODE mode, void* userData)
+	void OSInitEvent(OSEvent* event, OSEvent::EVENT_STATE initialState, OSEvent::EVENT_MODE mode)
 	{
-		OSInitEvent(event, initialState, mode);
-		event->userData = userData;
+		OSInitEventEx(event, initialState, mode, nullptr);
 	}
 
 	void OSResetEvent(OSEvent* event)

@@ -267,14 +267,16 @@ void gx2Export_GX2CalcDRCSize(PPCInterpreter_t* hCPU)
 	const ScanSize dim = drcMode > 0 ? kDRCScanSize : ScanSize{ 0, 0 };
 	const uint32 size = ScanBufferSetSize(dim.width, dim.height, (Latte::E_GX2SURFFMT)format, bufferingMode, 1);
 
+	memory_writeU32(scaleNeededOut, 0); // never needs scaling
 	memory_writeU32(sizeOut, size);
-	memory_writeU32(scaleNeededOut, 0);
 	osLib_returnFromFunction(hCPU, 0);
 }
 
 void gx2Export_GX2SetDRCScale(PPCInterpreter_t* hCPU)
 {
-	cemuLog_log(LogType::GX2, "GX2SetDRCScale({},{})", hCPU->gpr[3], hCPU->gpr[4]);
+	// scaling is done by the renderer, the values are only logged
+	const uint32 scaleX = hCPU->gpr[3], scaleY = hCPU->gpr[4];
+	cemuLog_log(LogType::GX2, "GX2SetDRCScale({},{})", scaleX, scaleY);
 	osLib_returnFromFunction(hCPU, 0);
 }
 

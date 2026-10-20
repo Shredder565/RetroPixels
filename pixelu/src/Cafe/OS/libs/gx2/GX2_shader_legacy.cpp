@@ -167,8 +167,8 @@ static_assert(offsetof(GX2ComputeShader, rBuffer) == 0x74);
 
 void gx2Export_GX2SetComputeShader(PPCInterpreter_t* hCPU)
 {
-	ppcDefineParamTypePtr(computeShader, GX2ComputeShader, 0);
 	cemuLog_log(LogType::GX2, "GX2SetComputeShader(0x{:08x})", hCPU->gpr[3]);
+	ppcDefineParamTypePtr(computeShader, GX2ComputeShader, 0);
 	const bool direct = computeShader->programPtr != 0;
 	const MPTR program = direct ? (MPTR)computeShader->programPtr : computeShader->rBuffer.GetVirtualAddr();
 	const uint32 programSize = direct ? (uint32)computeShader->programSize : computeShader->rBuffer.GetSize();

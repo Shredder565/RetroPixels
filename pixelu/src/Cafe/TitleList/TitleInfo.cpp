@@ -388,27 +388,24 @@ bool TitleInfo::IsValid() const
 
 fs::path TitleInfo::GetPath() const
 {
-	if (!m_isValid)
-	{
-		cemu_assert_suspicious();
-		return {};
-	}
-	return m_fullPath;
+	if (m_isValid)
+		return m_fullPath;
+	cemu_assert_suspicious();
+	return {};
 }
 
 void TitleInfo::CalcUID()
 {
 	cemu_assert_debug(m_isValid);
-	if (!m_isValid)
+	uint64 uid = 0; // invalid titles have no uid
+	if (m_isValid)
 	{
-		m_uid = 0;
-		return;
+		// hash of the absolute, normalized location (relative paths are relative to the user data folder)
+		const fs::path location = m_fullPath.is_relative() ? ActiveSettings::GetUserDataPath() / m_fullPath : m_fullPath;
+		uid = fs::hash_value(location.lexically_normal());
+		if (m_format == TitleDataFormat::WIIU_ARCHIVE)
+			uid += std::hash<std::string_view>{}(m_subPath);
 	}
-	// hash of the absolute, normalized location (relative paths are relative to the user data folder)
-	fs::path location = m_fullPath.is_relative() ? ActiveSettings::GetUserDataPath() / m_fullPath : m_fullPath;
-	uint64 uid = fs::hash_value(location.lexically_normal());
-	if (m_format == TitleDataFormat::WIIU_ARCHIVE)
-		uid += std::hash<std::string_view>{}(m_subPath);
 	m_uid = uid;
 }
 

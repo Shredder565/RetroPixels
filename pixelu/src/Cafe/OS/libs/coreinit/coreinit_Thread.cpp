@@ -913,22 +913,16 @@ namespace coreinit
 		}
 	}
 
-	void OSSuspendThread(OSThread_t* thread)
-	{
-		__OSLockScheduler();
-		__OSSuspendThreadInternal(thread);
-		__OSUnlockScheduler();
-	}
-
+	// caller holds the scheduler lock
 	void __OSSuspendThreadNolock(OSThread_t* thread)
 	{
 		__OSSuspendThreadInternal(thread);
 	}
 
-	void OSSleepThread(OSThreadQueue* threadQueue)
+	void OSSuspendThread(OSThread_t* thread)
 	{
 		__OSLockScheduler();
-		threadQueue->queueAndWait(OSGetCurrentThread());
+		__OSSuspendThreadNolock(thread);
 		__OSUnlockScheduler();
 	}
 
@@ -936,6 +930,14 @@ namespace coreinit
 	{
 		__OSLockScheduler();
 		threadQueue->wakeupEntireWaitQueue(true);
+		__OSUnlockScheduler();
+	}
+
+	void OSSleepThread(OSThreadQueue* threadQueue)
+	{
+		OSThread_t* const self = OSGetCurrentThread();
+		__OSLockScheduler();
+		threadQueue->queueAndWait(self);
 		__OSUnlockScheduler();
 	}
 

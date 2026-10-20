@@ -461,9 +461,9 @@ namespace NAPI
 			return result;
 		}
 		std::string_view pidText = mapping.child_value("out_id");
+		result.apiError = NAPI_RESULT::SUCCESS;
 		result.isFound = !pidText.empty();
 		result.principalId = result.isFound ? StringHelpers::ToInt(pidText) : 0;
-		result.apiError = NAPI_RESULT::SUCCESS;
 		return result;
 	}
 

@@ -540,21 +540,23 @@ namespace H264
 
 	/* parameters */
 
-	H264DEC_STATUS H264DECSetParam_FPTR_OUTPUT(H264Context* ctx, void* outputFunc)
+	// each setter stores one field of the decoder's parameter block
+	H264DEC_STATUS H264DECSetParam_USER_MEMORY(H264Context* ctx, MEMPTR<void*>* userMemoryParamPtr)
 	{
-		ctx->Param.outputFunc = outputFunc;
+		ctx->Param.userMemoryParam = *userMemoryParamPtr;
 		return H264DEC_STATUS::SUCCESS;
 	}
 
 	H264DEC_STATUS H264DECSetParam_OUTPUT_PER_FRAME(H264Context* ctx, uint32 outputPerFrame)
 	{
-		ctx->Param.outputPerFrame = outputPerFrame != 0 ? 1 : 0;
+		const bool perFrame = outputPerFrame != 0; // stored as 0/1
+		ctx->Param.outputPerFrame = perFrame ? 1 : 0;
 		return H264DEC_STATUS::SUCCESS;
 	}
 
-	H264DEC_STATUS H264DECSetParam_USER_MEMORY(H264Context* ctx, MEMPTR<void*>* userMemoryParamPtr)
+	H264DEC_STATUS H264DECSetParam_FPTR_OUTPUT(H264Context* ctx, void* outputFunc)
 	{
-		ctx->Param.userMemoryParam = *userMemoryParamPtr;
+		ctx->Param.outputFunc = outputFunc;
 		return H264DEC_STATUS::SUCCESS;
 	}
 

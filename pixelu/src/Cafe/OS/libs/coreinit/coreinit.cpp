@@ -199,19 +199,21 @@ namespace coreinit
 		return Espresso::CORE_COUNT;
 	}
 
-	uint32 OSIsDebuggerInitialized()
+	uint32 OSGetConsoleType()
 	{
-		return 0;
+		constexpr uint32 kRetailConsole = 0x03000050;
+		return kRetailConsole;
 	}
 
+	// no debugger is ever attached to the emulated console
 	uint32 OSIsDebuggerPresent()
 	{
 		return 0;
 	}
 
-	uint32 OSGetConsoleType()
+	uint32 OSIsDebuggerInitialized()
 	{
-		return 0x03000050; // retail console
+		return OSIsDebuggerPresent();
 	}
 
 	uint32 OSGetMainCoreId()

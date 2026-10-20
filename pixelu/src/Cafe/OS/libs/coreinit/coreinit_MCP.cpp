@@ -304,22 +304,22 @@ namespace coreinit
 
 	uint32 MCP_GetEcoSettings(uint32 mcpHandle, uint32be* flagCaffeineEnable, uint32be* uknFlag2, uint32be* uknFlag3)
 	{
-		// Quick Start enabled, so the system menu skips its Quick Start setup dialog
-		*flagCaffeineEnable = 1;
 		*uknFlag2 = 0;
 		*uknFlag3 = 0;
-		return 0;
-	}
-
-	uint32 MCP_RightCheckLaunchable(uint32 mcpHandle, uint64 titleId, uint32be* launchableOut)
-	{
-		*launchableOut = 1;
+		// Quick Start enabled, so the system menu skips its Quick Start setup dialog
+		*flagCaffeineEnable = 1;
 		return 0;
 	}
 
 	uint32 MCP_GetTitleId(uint32 mcpHandle, uint64be* outTitleId)
 	{
 		*outTitleId = CafeSystem::GetForegroundTitleId();
+		return 0;
+	}
+
+	uint32 MCP_RightCheckLaunchable(uint32 mcpHandle, uint64 titleId, uint32be* launchableOut)
+	{
+		*launchableOut = 1; // every title may be launched
 		return 0;
 	}
 

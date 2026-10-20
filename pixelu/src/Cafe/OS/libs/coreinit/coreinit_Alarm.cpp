@@ -238,32 +238,31 @@ namespace coreinit
 		}
 	}
 
-	void OSInitAlarmQueue(OSAlarmQueue* queue)
-	{
-		queue->magic = ALARM_QUEUE_MAGIC;
-		queue->name = nullptr;
-		queue->ukn08 = 0;
-		OSInitThreadQueueEx(&queue->threadQueue, queue);
-		queue->head = nullptr;
-		queue->tail = nullptr;
-	}
-
 	void OSInitAlarmQueueEx(OSAlarmQueue* queue, const char* name)
 	{
-		OSInitAlarmQueue(queue);
+		queue->magic = ALARM_QUEUE_MAGIC;
+		queue->ukn08 = 0;
 		queue->name = name;
+		queue->tail = nullptr; // empty list
+		queue->head = nullptr;
+		OSInitThreadQueueEx(&queue->threadQueue, queue);
 	}
 
-	void OSCreateAlarm(OSAlarm_t* alarm)
+	void OSInitAlarmQueue(OSAlarmQueue* queue)
 	{
-		memset(alarm, 0, sizeof(OSAlarm_t));
-		alarm->setMagic();
+		OSInitAlarmQueueEx(queue, nullptr);
 	}
 
 	void OSCreateAlarmEx(OSAlarm_t* alarm, const char* alarmName)
 	{
-		OSCreateAlarm(alarm);
+		memset(alarm, 0, sizeof(OSAlarm_t)); // all fields zero, then the magic and the name
+		alarm->setMagic();
 		alarm->name = alarmName;
+	}
+
+	void OSCreateAlarm(OSAlarm_t* alarm)
+	{
+		OSCreateAlarmEx(alarm, nullptr);
 	}
 
 	// returns true if the alarm was armed or waiting in its alarm queue
@@ -355,36 +354,39 @@ namespace coreinit
 	bool OSGetAlarmFromQueue(OSAlarmQueue* queue, MEMPTR<OSAlarm_t>* alarmOut, MEMPTR<void>* contextOut, bool noWait)
 	{
 		__OSLockScheduler();
-		while (!queue->head)
+		OSAlarm_t* alarm;
+		for (;;)
 		{
-			if (noWait)
-			{
-				*alarmOut = nullptr;
-				*contextOut = nullptr;
-				__OSUnlockScheduler();
-				return false;
-			}
+			alarm = queue->head.GetPtr();
+			if (alarm != nullptr || noWait)
+				break;
 			queue->threadQueue.queueAndWait(OSGetCurrentThread());
 		}
-		OSAlarm_t* alarm = queue->head.GetPtr();
-		QueueRemove(alarm);
-		// a periodic alarm continues once it has left the queue
-		if (alarm->period != 0)
-			Arm(alarm, alarm->startTime, alarm->period, alarm->handler, true, queue);
+		if (alarm != nullptr)
+		{
+			QueueRemove(alarm);
+			// a periodic alarm continues once it has left the queue
+			if (alarm->period != 0)
+				Arm(alarm, alarm->startTime, alarm->period, alarm->handler, true, queue);
+			*contextOut = alarm->context;
+		}
+		else
+		{
+			*contextOut = nullptr;
+		}
 		*alarmOut = alarm;
-		*contextOut = alarm->context;
 		__OSUnlockScheduler();
-		return true;
-	}
-
-	void OSSetAlarmUserData(OSAlarm_t* alarm, uint32 userData)
-	{
-		alarm->userData = userData;
+		return alarm != nullptr;
 	}
 
 	uint32 OSGetAlarmUserData(OSAlarm_t* alarm)
 	{
 		return alarm->userData;
+	}
+
+	void OSSetAlarmUserData(OSAlarm_t* alarm, uint32 userData)
+	{
+		alarm->userData = userData;
 	}
 
 	void OSAlarm_Shutdown()

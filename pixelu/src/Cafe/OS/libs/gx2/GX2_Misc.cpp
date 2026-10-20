@@ -164,13 +164,14 @@ namespace GX2
 
 	void GX2Shutdown()
 	{
-		if (!LatteGPUState.gx2InitCalled)
+		uint32& initCount = LatteGPUState.gx2InitCalled;
+		if (initCount == 0)
 		{
 			cemuLog_logDebug(LogType::Force, "GX2Shutdown() called while not initialized");
 			return;
 		}
-		LatteGPUState.gx2InitCalled--;
-		if (LatteGPUState.gx2InitCalled != 0)
+		// only the call matching the first GX2Init tears the driver down
+		if (--initCount > 0)
 			return;
 		GX2DrawDone();
 		GX2Shutdown_commandBufferPool();
@@ -179,15 +180,17 @@ namespace GX2
 
 	void _GX2DriverReset()
 	{
-		LatteGPUState.gx2InitCalled = 0;
 		sGX2MainCoreIndex = 0;
+		LatteGPUState.gx2InitCalled = 0;
 		GX2CommandResetToDefaultState();
 		GX2EventResetToDefaultState();
 	}
 
 	sint32 GX2GetMainCoreId(PPCInterpreter_t* hCPU)
 	{
-		return LatteGPUState.gx2InitCalled != 0 ? (sint32)sGX2MainCoreIndex : -1;
+		if (LatteGPUState.gx2InitCalled == 0)
+			return -1; // GX2Init has not run on any core
+		return (sint32)sGX2MainCoreIndex;
 	}
 
 	void GX2ResetGPU(uint32 ukn)
@@ -202,42 +205,44 @@ namespace GX2
 		LatteGPUState.tvBufferUsesSRGB = HAS_FLAG((Latte::E_GX2SURFFMT)_surfaceFormat, Latte::E_GX2SURFFMT::FMT_BIT_SRGB);
 	}
 
-	void GX2SetTVGamma(float gamma)
-	{
-		LatteGPUState.tvGamma = 1.0f - gamma;
-	}
-
+	// the renderer applies gamma as an offset from 1.0
 	void GX2SetDRCGamma(float gamma)
 	{
 		LatteGPUState.drcGamma = 1.0f - gamma;
 	}
 
+	void GX2SetTVGamma(float gamma)
+	{
+		LatteGPUState.tvGamma = 1.0f - gamma;
+	}
+
 	// describes a 640x480 RGBA texture for the "last frame" (shown by the HOME menu)
 	bool GX2GetLastFrame(uint32 deviceId, GX2Texture* textureOut)
 	{
-		textureOut->viewFirstMip = 0;
-		textureOut->viewFirstSlice = 0;
-		textureOut->viewNumMips = 1;
-		textureOut->viewNumSlices = 1;
-		textureOut->compSel = 0x00010203; // RGBA
-
 		GX2Surface& s = textureOut->surface;
-		s.width = 640;
-		s.height = 480;
-		s.depth = 1;
 		s.dim = Latte::E_DIM::DIM_2D;
 		s.format = Latte::E_GX2SURFFMT::R8_G8_B8_A8_UNORM;
 		s.tileMode = Latte::E_GX2TILEMODE::TM_LINEAR_ALIGNED;
-		s.pitch = 0;
-		s.resFlag = 0;
 		s.aa = 0;
+		s.resFlag = 0;
+		s.width = 640;
+		s.height = 480;
+		s.depth = 1;
+		s.pitch = 0; // computed below
 		GX2CalcSurfaceSizeAndAlignment(&s);
 		s.imagePtr = _lastFrame.GetMPTR();
 
+		// one mip, one slice, components in RGBA order
+		textureOut->compSel = 0x00010203;
+		textureOut->viewFirstMip = 0;
+		textureOut->viewNumMips = 1;
+		textureOut->viewFirstSlice = 0;
+		textureOut->viewNumSlices = 1;
 		GX2InitTextureRegs(textureOut);
 		return true;
 	}
 
+	// the last frame is stored without gamma correction on either output
 	bool GX2GetLastFrameGammaA(uint32 deviceId, float32be* gamma)
 	{
 		*gamma = 1.0f;
@@ -246,8 +251,7 @@ namespace GX2
 
 	bool GX2GetLastFrameGammaB(uint32 deviceId, float32be* gamma)
 	{
-		*gamma = 1.0f;
-		return true;
+		return GX2GetLastFrameGammaA(deviceId, gamma);
 	}
 
 	uint64 GX2GPUTimeToCPUTime(uint64 gpuTime)

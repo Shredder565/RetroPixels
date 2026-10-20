@@ -42,13 +42,12 @@ namespace snd_core
 			sndGeneric.initParam.rendererFreq = rendererFreq;
 			sndGeneric.initParam.pipelineMode = pipelineMode;
 			// the voice pool takes the mixer default that is current before AXMix_Init
-			AXIst_Init();
-			AXOut_Init();
-			AXVPB_Init();
-			AXAux_Init();
-			AXMix_Init();
-			AXMultiVoice_Init();
-			AXIst_InitThread();
+			using InitStep = void (*)();
+			static constexpr InitStep s_initSteps[] = {
+				AXIst_Init, AXOut_Init, AXVPB_Init, AXAux_Init, AXMix_Init, AXMultiVoice_Init, AXIst_InitThread,
+			};
+			for (InitStep step : s_initSteps) // in this order
+				step();
 			sndGeneric.isInitialized = true;
 		}
 

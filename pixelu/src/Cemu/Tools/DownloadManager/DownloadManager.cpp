@@ -356,14 +356,8 @@ void DownloadManager::RunLogin()
 	m_loginState.store(LoginState::Succeeded);
 }
 
-void DownloadManager::connect(
-	std::string_view nnidAccountName,
-	const std::array<uint8, 32>& passwordHash,
-	CafeConsoleRegion region,
-	std::string_view country,
-	uint32 deviceId,
-	std::string_view serial,
-	std::string_view deviceCertBase64)
+void DownloadManager::connect(std::string_view nnidAccountName, const std::array<uint8, 32>& passwordHash, CafeConsoleRegion region,
+	std::string_view country, uint32 deviceId, std::string_view serial, std::string_view deviceCertBase64)
 {
 	StartWorker();
 	m_login.accountName = nnidAccountName;
