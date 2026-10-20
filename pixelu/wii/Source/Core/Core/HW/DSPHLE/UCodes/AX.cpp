@@ -1,11 +1,13 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/DSPHLE/UCodes/AX.h"
 
 #include <array>
+#include <cstddef>
 #include <cstring>
-#include <iterator>
+#include <limits>
+#include <string>
+#include <utility>
 
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
@@ -13,6 +15,7 @@
 #include "Common/Hash.h"
 #include "Common/IOFile.h"
 #include "Common/Logging/Log.h"
+#include "Common/MsgHandler.h"
 #include "Common/Swap.h"
 #include "Core/Core.h"
 #include "Core/DolphinAnalytics.h"
@@ -20,22 +23,70 @@
 #include "Core/HW/DSPHLE/DSPHLE.h"
 #include "Core/HW/DSPHLE/MailHandler.h"
 #include "Core/HW/DSPHLE/UCodes/AXStructs.h"
-#include "Core/HW/Memmap.h"
-
-#define AX_GC
 #include "Core/HW/DSPHLE/UCodes/AXVoice.h"
+#include "Core/HW/Memmap.h"
+#include "Core/System.h"
 
 namespace DSP::HLE
 {
-AXUCode::AXUCode(DSPHLE* dsphle, u32 crc, bool dummy) : UCodeInterface(dsphle, crc)
+using AXVoice::AddWrapped;
+using AXVoice::Clamp16;
+using AXVoice::Join16;
+
+namespace
+{
+// The oldest GameCube AX build: no lpf in its PBs, its own mixer_control encoding, and no
+// compressor command.
+constexpr u32 CRC_OLDEST_AX = 0x4e8a8b21;
+
+// GameCube command list opcodes.
+enum : u16
+{
+  CMD_SETUP = 0x00,
+  CMD_DL_AND_VOL_MIX = 0x01,
+  CMD_PB_ADDR = 0x02,
+  CMD_PROCESS = 0x03,
+  CMD_MIX_AUXA = 0x04,
+  CMD_MIX_AUXB = 0x05,
+  CMD_UPLOAD_LRS = 0x06,
+  CMD_SET_LR = 0x07,
+  CMD_UNK_08 = 0x08,
+  CMD_MIX_AUXB_NOWRITE = 0x09,
+  CMD_UNK_0A = 0x0A,
+  CMD_UNK_0B = 0x0B,
+  CMD_UNK_0C = 0x0C,
+  CMD_MORE = 0x0D,
+  CMD_OUTPUT = 0x0E,
+  CMD_END = 0x0F,
+  CMD_MIX_AUXB_LR = 0x10,
+  CMD_SET_OPPOSITE_LR = 0x11,
+  CMD_COMPRESSOR = 0x12,
+  CMD_SEND_AUX_AND_MIX = 0x13,
+};
+
+// Reads 32-bit big-endian sample `index` of a RAM buffer.
+s32 ReadSampleBE(const u8* buffer, size_t index)
+{
+  u32 raw;
+  std::memcpy(&raw, buffer + index * sizeof(u32), sizeof(raw));
+  return static_cast<s32>(Common::swap32(raw));
+}
+
+// A buffer of `count` 32-bit samples in RAM.
+const u8* SampleBuffer(const Memory::MemoryManager& memory, u32 address, size_t count)
+{
+  return memory.GetPointerForRange(address, count * sizeof(u32));
+}
+}  // namespace
+
+AXUCode::AXUCode(DSPHLE* dsphle, u32 crc, WiiVariant) : UCodeInterface(dsphle, crc)
 {
 }
 
-AXUCode::AXUCode(DSPHLE* dsphle, u32 crc) : AXUCode(dsphle, crc, false)
+AXUCode::AXUCode(DSPHLE* dsphle, u32 crc) : UCodeInterface(dsphle, crc)
 {
-  INFO_LOG_FMT(DSPHLE, "Instantiating AXUCode: crc={:08x}", crc);
-
-  m_accelerator = std::make_unique<HLEAccelerator>(dsphle->GetSystem().GetDSP());
+  INFO_LOG_FMT(DSPHLE, "AX (GameCube) ucode {:08x}", crc);
+  m_accelerator = std::make_unique<AXVoice::VoiceAccelerator<AXPB>>(dsphle->GetSystem().GetDSP());
 }
 
 AXUCode::~AXUCode() = default;
@@ -48,109 +99,77 @@ void AXUCode::Initialize()
 void AXUCode::InitializeShared()
 {
   m_mail_handler.PushMail(DSP_INIT, true);
-
   LoadResamplingCoefficients(false, 0);
 }
 
 bool AXUCode::LoadResamplingCoefficients(bool require_same_checksum, u32 desired_checksum)
 {
-  constexpr size_t raw_coeffs_size = 0x800 * 2;
-  m_coeffs_checksum = std::nullopt;
+  constexpr size_t FILE_SIZE = 0x800 * sizeof(s16);
+  m_coeffs_checksum.reset();
 
-  const std::array<std::string, 2> filenames{
+  const std::string candidates[] = {
       File::GetUserPath(D_GCUSER_IDX) + "dsp_coef.bin",
       File::GetSysDirectory() + "/GC/dsp_coef.bin",
   };
-
-  for (const std::string& filename : filenames)
+  for (const std::string& path : candidates)
   {
-    INFO_LOG_FMT(DSPHLE, "Checking for polyphase resampling coeffs at {}", filename);
-
-    if (File::GetSize(filename) != raw_coeffs_size)
+    INFO_LOG_FMT(DSPHLE, "Looking for polyphase resampling coefficients in {}", path);
+    if (File::GetSize(path) != FILE_SIZE)
       continue;
 
-    File::IOFile fp(filename, "rb");
-    std::array<u8, raw_coeffs_size> raw_coeffs;
-    fp.ReadBytes(raw_coeffs.data(), raw_coeffs_size);
+    std::array<u8, FILE_SIZE> raw{};
+    File::IOFile file(path, "rb");
+    file.ReadBytes(raw.data(), raw.size());
 
-    u32 checksum = Common::HashAdler32(raw_coeffs.data(), raw_coeffs_size);
+    const u32 checksum = Common::HashAdler32(raw.data(), raw.size());
     if (require_same_checksum && checksum != desired_checksum)
       continue;
 
-    std::memcpy(m_coeffs.data(), raw_coeffs.data(), raw_coeffs_size);
-    for (auto& coef : m_coeffs)
-      coef = Common::swap16(coef);
+    for (size_t i = 0; i < m_coeffs.size(); ++i)
+      m_coeffs[i] = static_cast<s16>((raw[2 * i] << 8) | raw[2 * i + 1]);
 
-    INFO_LOG_FMT(DSPHLE, "Using polyphase resampling coeffs from {}", filename);
+    INFO_LOG_FMT(DSPHLE, "Using polyphase resampling coefficients from {}", path);
     m_coeffs_checksum = checksum;
     return true;
   }
-
   return false;
 }
 
 void AXUCode::SignalWorkEnd()
 {
-  // Signal end of processing
-  // TODO: figure out how many cycles this is actually supposed to take
-
-  // The Clone Wars hangs upon initial boot if this interrupt happens too quickly after submitting a
-  // command list. When played in DSP-LLE, the interrupt lags by about 160,000 cycles, though any
-  // value greater than or equal to 814 will work here. In other games, the lag can be as small as
-  // 50,000 cycles (in Metroid Prime) and as large as 718,092 cycles (in Tales of Symphonia!).
-
-  // On the PowerPC side, hthh_ discovered that The Clone Wars tracks a "AXCommandListCycles"
-  // variable which matches the aforementioned 160,000 cycles. It's initialized to ~2500 cycles for
-  // a minimal, empty command list, so that should be a safe number for pretty much anything a game
-  // does.
-
-  // For more information, see https://bugs.dolphin-emu.org/issues/10265.
-  constexpr int AX_EMPTY_COMMAND_LIST_CYCLES = 2500;
-
-  m_mail_handler.PushMail(DSP_YIELD, true, AX_EMPTY_COMMAND_LIST_CYCLES);
+  // The interrupt must not come too soon after the command list (The Clone Wars hangs at boot
+  // otherwise). Real hardware takes from about 50,000 to over 700,000 cycles; games budget about
+  // 2,500 cycles for an empty list, which is a safe lower bound.
+  constexpr int EMPTY_COMMAND_LIST_CYCLES = 2500;
+  m_mail_handler.PushMail(DSP_YIELD, true, EMPTY_COMMAND_LIST_CYCLES);
 }
 
 void AXUCode::HandleCommandList()
 {
-  // Temp variables for addresses computation
-  u16 addr_hi, addr_lo;
-  u16 addr2_hi, addr2_lo;
-  u16 size;
-
   u32 pb_addr = 0;
+  CommandReader in(m_cmdlist);
 
-  u32 curr_idx = 0;
-  bool end = false;
-  while (!end)
+  while (!in.AtEnd())
   {
-    u16 cmd = m_cmdlist[curr_idx++];
-
+    const u16 cmd = in.Word();
     switch (cmd)
     {
-      // Some of these commands are unknown, or unused in this AX HLE.
-      // We still need to skip their arguments using "curr_idx += N".
-
     case CMD_SETUP:
-      addr_hi = m_cmdlist[curr_idx++];
-      addr_lo = m_cmdlist[curr_idx++];
-      SetupProcessing(HILO_TO_32(addr));
+      SetupProcessing(in.Address());
       break;
 
     case CMD_DL_AND_VOL_MIX:
     {
-      addr_hi = m_cmdlist[curr_idx++];
-      addr_lo = m_cmdlist[curr_idx++];
-      u16 vol_main = m_cmdlist[curr_idx++];
-      u16 vol_auxa = m_cmdlist[curr_idx++];
-      u16 vol_auxb = m_cmdlist[curr_idx++];
-      DownloadAndMixWithVolume(HILO_TO_32(addr), vol_main, vol_auxa, vol_auxb);
+      const u32 addr = in.Address();
+      const u16 vol_main = in.Word();
+      const u16 vol_auxa = in.Word();
+      const u16 vol_auxb = in.Word();
+      DownloadAndMixWithVolume(addr, vol_main, vol_auxa, vol_auxb);
       break;
     }
 
     case CMD_PB_ADDR:
-      addr_hi = m_cmdlist[curr_idx++];
-      addr_lo = m_cmdlist[curr_idx++];
-      pb_addr = HILO_TO_32(addr);
+      pb_addr = in.Address();
       break;
 
     case CMD_PROCESS:
@@ -159,548 +178,454 @@ void AXUCode::HandleCommandList()
 
     case CMD_MIX_AUXA:
     case CMD_MIX_AUXB:
-      // These two commands are handled almost the same internally.
-      addr_hi = m_cmdlist[curr_idx++];
-      addr_lo = m_cmdlist[curr_idx++];
-      addr2_hi = m_cmdlist[curr_idx++];
-      addr2_lo = m_cmdlist[curr_idx++];
-      MixAUXSamples(cmd - CMD_MIX_AUXA, HILO_TO_32(addr), HILO_TO_32(addr2));
+    {
+      const u32 write_addr = in.Address();
+      const u32 read_addr = in.Address();
+      MixAUXSamples(cmd == CMD_MIX_AUXA ? 0 : 1, write_addr, read_addr);
       break;
+    }
 
     case CMD_UPLOAD_LRS:
-      addr_hi = m_cmdlist[curr_idx++];
-      addr_lo = m_cmdlist[curr_idx++];
-      UploadLRS(HILO_TO_32(addr));
+      UploadLRS(in.Address());
       break;
 
     case CMD_SET_LR:
-      addr_hi = m_cmdlist[curr_idx++];
-      addr_lo = m_cmdlist[curr_idx++];
-      SetMainLR(HILO_TO_32(addr));
+      SetMainLR(in.Address());
       break;
 
     case CMD_UNK_08:
+      // Unknown, with ten words of arguments.
       DolphinAnalytics::Instance().ReportGameQuirk(GameQuirk::UsesUnimplementedAXCommand);
-      curr_idx += 10;
-      break;  // TODO: check
+      in.Skip(10);
+      break;
 
     case CMD_MIX_AUXB_NOWRITE:
-      addr_hi = m_cmdlist[curr_idx++];
-      addr_lo = m_cmdlist[curr_idx++];
-      MixAUXSamples(1, 0, HILO_TO_32(addr));
+      MixAUXSamples(1, 0, in.Address());
       break;
 
     case CMD_UNK_0A:
     case CMD_UNK_0B:
     case CMD_UNK_0C:
-      // nop in all 6 known ucodes we handle here
+      // No-ops in every known build.
       break;
 
     case CMD_MORE:
-      addr_hi = m_cmdlist[curr_idx++];
-      addr_lo = m_cmdlist[curr_idx++];
-      size = m_cmdlist[curr_idx++];
-
-      CopyCmdList(HILO_TO_32(addr), size);
-      curr_idx = 0;
+    {
+      // Continue with another list.
+      const u32 addr = in.Address();
+      const u16 size = in.Word();
+      CopyCmdList(addr, size);
+      in.Restart();
       break;
+    }
 
     case CMD_OUTPUT:
-      addr_hi = m_cmdlist[curr_idx++];
-      addr_lo = m_cmdlist[curr_idx++];
-      addr2_hi = m_cmdlist[curr_idx++];
-      addr2_lo = m_cmdlist[curr_idx++];
-      OutputSamples(HILO_TO_32(addr2), HILO_TO_32(addr));
+    {
+      const u32 surround_addr = in.Address();
+      const u32 lr_addr = in.Address();
+      OutputSamples(lr_addr, surround_addr);
       break;
+    }
 
     case CMD_END:
-      end = true;
-      break;
+      return;
 
     case CMD_MIX_AUXB_LR:
-      addr_hi = m_cmdlist[curr_idx++];
-      addr_lo = m_cmdlist[curr_idx++];
-      addr2_hi = m_cmdlist[curr_idx++];
-      addr2_lo = m_cmdlist[curr_idx++];
-      MixAUXBLR(HILO_TO_32(addr), HILO_TO_32(addr2));
+    {
+      const u32 upload_addr = in.Address();
+      const u32 download_addr = in.Address();
+      MixAUXBLR(upload_addr, download_addr);
       break;
+    }
 
     case CMD_SET_OPPOSITE_LR:
-      addr_hi = m_cmdlist[curr_idx++];
-      addr_lo = m_cmdlist[curr_idx++];
-      SetOppositeLR(HILO_TO_32(addr));
+      SetOppositeLR(in.Address());
       break;
 
     case CMD_COMPRESSOR:
     {
-      // 0x4e8a8b21 doesn't have this command, but it doesn't range-check
-      // the value properly and ends up jumping into a mixer function
-      ASSERT(m_crc != 0x4e8a8b21);
-      u16 threshold = m_cmdlist[curr_idx++];
-      u16 frames = m_cmdlist[curr_idx++];
-      addr_hi = m_cmdlist[curr_idx++];
-      addr_lo = m_cmdlist[curr_idx++];
-      RunCompressor(threshold, frames, HILO_TO_32(addr), 5);
+      // The oldest build has no such command (it jumps into a mixer routine instead).
+      ASSERT(m_crc != CRC_OLDEST_AX);
+      const u16 threshold = in.Word();
+      const u16 release_frames = in.Word();
+      const u32 table_addr = in.Address();
+      RunCompressor(threshold, release_frames, table_addr, 5);
       break;
     }
 
-    // Send the contents of AUXA LRS and AUXB S to RAM, and
-    // mix data to MAIN LR and AUXB LR.
     case CMD_SEND_AUX_AND_MIX:
     {
-      // Address for AUXA LRS upload
-      u16 auxa_lrs_up_hi = m_cmdlist[curr_idx++];
-      u16 auxa_lrs_up_lo = m_cmdlist[curr_idx++];
-
-      // Address for AUXB S upload
-      u16 auxb_s_up_hi = m_cmdlist[curr_idx++];
-      u16 auxb_s_up_lo = m_cmdlist[curr_idx++];
-
-      // Address to read data for Main L
-      u16 main_l_dl_hi = m_cmdlist[curr_idx++];
-      u16 main_l_dl_lo = m_cmdlist[curr_idx++];
-
-      // Address to read data for Main R
-      u16 main_r_dl_hi = m_cmdlist[curr_idx++];
-      u16 main_r_dl_lo = m_cmdlist[curr_idx++];
-
-      // Address to read data for AUXB L
-      u16 auxb_l_dl_hi = m_cmdlist[curr_idx++];
-      u16 auxb_l_dl_lo = m_cmdlist[curr_idx++];
-
-      // Address to read data for AUXB R
-      u16 auxb_r_dl_hi = m_cmdlist[curr_idx++];
-      u16 auxb_r_dl_lo = m_cmdlist[curr_idx++];
-
-      SendAUXAndMix(HILO_TO_32(auxa_lrs_up), HILO_TO_32(auxb_s_up), HILO_TO_32(main_l_dl),
-                    HILO_TO_32(main_r_dl), HILO_TO_32(auxb_l_dl), HILO_TO_32(auxb_r_dl));
+      const u32 auxa_lrs_up = in.Address();
+      const u32 auxb_s_up = in.Address();
+      const u32 main_l_dl = in.Address();
+      const u32 main_r_dl = in.Address();
+      const u32 auxb_l_dl = in.Address();
+      const u32 auxb_r_dl = in.Address();
+      SendAUXAndMix(auxa_lrs_up, auxb_s_up, main_l_dl, main_r_dl, auxb_l_dl, auxb_r_dl);
       break;
     }
 
     default:
-      ERROR_LOG_FMT(DSPHLE, "Unknown command in AX command list: {:04x}", cmd);
-      end = true;
-      break;
+      ERROR_LOG_FMT(DSPHLE, "AX: unknown command {:04x} in the command list", cmd);
+      return;
     }
   }
+  ERROR_LOG_FMT(DSPHLE, "AX: command list without an end command");
 }
 
-AXMixControl AXUCode::ConvertMixerControl(u32 mixer_control)
+u32 AXUCode::ConvertMixerControl(u16 mixer_control) const
 {
-  u32 ret = 0;
+  u32 mix = 0;
 
-  // TODO: find other UCode versions with different mixer_control values
-  if (m_crc == 0x4e8a8b21)
+  if (m_crc == CRC_OLDEST_AX)
   {
-    if (mixer_control & 0x0010)
+    // Main L/R are always on. Bit 4 selects Dolby Pro Logic II mixing, with its own meaning for
+    // the low bits; bit 3 turns on every ramp.
+    mix = MIX_MAIN_L | MIX_MAIN_R;
+    if ((mixer_control & 0x0010) != 0)
     {
-      // DPL2 mixing
-      ret |= MIX_MAIN_L | MIX_MAIN_R;
       if ((mixer_control & 0x0006) == 0)
-        ret |= MIX_AUXB_L | MIX_AUXB_R;
+        mix |= MIX_AUXB_L | MIX_AUXB_R;
       if ((mixer_control & 0x0007) == 1)
-        ret |= MIX_AUXA_L | MIX_AUXA_R | MIX_AUXA_S;
+        mix |= MIX_AUXA_L | MIX_AUXA_R | MIX_AUXA_S;
     }
     else
     {
-      // non-DPL2 mixing
-      ret |= MIX_MAIN_L | MIX_MAIN_R;
-      if (mixer_control & 0x0001)
-        ret |= MIX_AUXA_L | MIX_AUXA_R;
-      if (mixer_control & 0x0002)
-        ret |= MIX_AUXB_L | MIX_AUXB_R;
-      if (mixer_control & 0x0004)
+      if ((mixer_control & 0x0001) != 0)
+        mix |= MIX_AUXA_L | MIX_AUXA_R;
+      if ((mixer_control & 0x0002) != 0)
+        mix |= MIX_AUXB_L | MIX_AUXB_R;
+      if ((mixer_control & 0x0004) != 0)
       {
-        ret |= MIX_MAIN_S;
-        if (ret & MIX_AUXA_L)
-          ret |= MIX_AUXA_S;
-        if (ret & MIX_AUXB_L)
-          ret |= MIX_AUXB_S;
+        // Surround for main, and for whichever aux buses are on.
+        mix |= MIX_MAIN_S;
+        if ((mix & MIX_AUXA_L) != 0)
+          mix |= MIX_AUXA_S;
+        if ((mix & MIX_AUXB_L) != 0)
+          mix |= MIX_AUXB_S;
       }
     }
-    if (mixer_control & 0x0008)
-      ret |= MIX_ALL_RAMPS;
+    if ((mixer_control & 0x0008) != 0)
+      mix |= MIX_ALL_RAMPS;
+    return mix;
   }
-  else
+
+  // Later builds: one bit per send or ramp group. (0x4000, which picks the surround input of the
+  // aux B sends for Dolby Pro Logic II, is ignored.)
+  struct BitMeaning
   {
-    // newer GameCube ucodes
-    if (mixer_control & 0x0001)
-      ret |= MIX_MAIN_L;
-    if (mixer_control & 0x0002)
-      ret |= MIX_MAIN_R;
-    if (mixer_control & 0x0004)
-      ret |= MIX_MAIN_S;
-    if (mixer_control & 0x0008)
-      ret |= MIX_MAIN_L_RAMP | MIX_MAIN_R_RAMP | MIX_MAIN_S_RAMP;
-
-    if (mixer_control & 0x0010)
-      ret |= MIX_AUXA_L;
-    if (mixer_control & 0x0020)
-      ret |= MIX_AUXA_R;
-    if (mixer_control & 0x0040)
-      ret |= MIX_AUXA_L_RAMP | MIX_AUXA_R_RAMP;
-    if (mixer_control & 0x0080)
-      ret |= MIX_AUXA_S;
-    if (mixer_control & 0x0100)
-      ret |= MIX_AUXA_S_RAMP;
-
-    if (mixer_control & 0x0200)
-      ret |= MIX_AUXB_L;
-    if (mixer_control & 0x0400)
-      ret |= MIX_AUXB_R;
-    if (mixer_control & 0x0800)
-      ret |= MIX_AUXB_L_RAMP | MIX_AUXB_R_RAMP;
-    if (mixer_control & 0x1000)
-      ret |= MIX_AUXB_S;
-    if (mixer_control & 0x2000)
-      ret |= MIX_AUXB_S_RAMP;
-
-    // TODO: 0x4000 is used for Dolby Pro 2 sound mixing
-    // It selects the input surround channel for all AUXB mixing channels.
-    // This will only matter once we have ITD support.
+    u16 bit;
+    u32 flags;
+  };
+  static constexpr BitMeaning MEANINGS[] = {
+      {0x0001, MIX_MAIN_L},
+      {0x0002, MIX_MAIN_R},
+      {0x0004, MIX_MAIN_S},
+      {0x0008, MIX_MAIN_L_RAMP | MIX_MAIN_R_RAMP | MIX_MAIN_S_RAMP},
+      {0x0010, MIX_AUXA_L},
+      {0x0020, MIX_AUXA_R},
+      {0x0040, MIX_AUXA_L_RAMP | MIX_AUXA_R_RAMP},
+      {0x0080, MIX_AUXA_S},
+      {0x0100, MIX_AUXA_S_RAMP},
+      {0x0200, MIX_AUXB_L},
+      {0x0400, MIX_AUXB_R},
+      {0x0800, MIX_AUXB_L_RAMP | MIX_AUXB_R_RAMP},
+      {0x1000, MIX_AUXB_S},
+      {0x2000, MIX_AUXB_S_RAMP},
+  };
+  for (const BitMeaning& meaning : MEANINGS)
+  {
+    if ((mixer_control & meaning.bit) != 0)
+      mix |= meaning.flags;
   }
+  return mix;
+}
 
-  return (AXMixControl)ret;
+void AXUCode::InitBuffersFromRamps(u32 list_addr, const RampTarget* targets, size_t num_targets)
+{
+  std::array<u16, 3 * 32> words{};
+  const auto& memory = m_dsphle->GetSystem().GetMemory();
+  memory.CopyFromEmuSwapped(words.data(), list_addr, 3 * num_targets * sizeof(u16));
+
+  for (size_t i = 0; i < num_targets; ++i)
+  {
+    const RampTarget& target = targets[i];
+    const s32 start = static_cast<s32>(Join16(words[3 * i], words[3 * i + 1]));
+    const s16 delta = static_cast<s16>(words[3 * i + 2]);
+    if (start == 0)
+    {
+      std::fill_n(target.samples, target.count, 0);
+      continue;
+    }
+    for (size_t j = 0; j < target.count; ++j)
+      target.samples[j] = AddWrapped(start, static_cast<s64>(j) * delta);
+  }
 }
 
 void AXUCode::SetupProcessing(u32 init_addr)
 {
-  const std::array<BufferDesc, 9> buffers = {{
-      {m_samples_main_left, 32},
-      {m_samples_main_right, 32},
-      {m_samples_main_surround, 32},
-      {m_samples_auxA_left, 32},
-      {m_samples_auxA_right, 32},
-      {m_samples_auxA_surround, 32},
-      {m_samples_auxB_left, 32},
-      {m_samples_auxB_right, 32},
-      {m_samples_auxB_surround, 32},
-  }};
-  InitMixingBuffers<5 /*ms*/>(init_addr, buffers);
+  std::array<RampTarget, NUM_BUSES> targets;
+  for (size_t bus = 0; bus < NUM_BUSES; ++bus)
+    targets[bus] = {BusData(bus), BUS_SAMPLES};
+  InitBuffersFromRamps(init_addr, targets.data(), targets.size());
 }
 
 void AXUCode::DownloadAndMixWithVolume(u32 addr, u16 vol_main, u16 vol_auxa, u16 vol_auxb)
 {
-  int* buffers_main[3] = {m_samples_main_left, m_samples_main_right, m_samples_main_surround};
-  int* buffers_auxa[3] = {m_samples_auxA_left, m_samples_auxA_right, m_samples_auxA_surround};
-  int* buffers_auxb[3] = {m_samples_auxB_left, m_samples_auxB_right, m_samples_auxB_surround};
-  int** buffers[3] = {buffers_main, buffers_auxa, buffers_auxb};
-  u16 volumes[3] = {vol_main, vol_auxa, vol_auxb};
-
-  auto& memory = m_dsphle->GetSystem().GetMemory();
-  for (u32 i = 0; i < 3; ++i)
+  // The same three buffers (L, R, S) are mixed into main, aux A and aux B, each with its volume.
+  const u16 volumes[3] = {vol_main, vol_auxa, vol_auxb};
+  const auto& memory = m_dsphle->GetSystem().GetMemory();
+  for (size_t group = 0; group < 3; ++group)
   {
-    int* ptr = reinterpret_cast<int*>(memory.GetPointerForRange(addr, 3 * 5 * 32 * sizeof(int)));
-    u16 volume = volumes[i];
-    for (u32 j = 0; j < 3; ++j)
+    const u8* source = SampleBuffer(memory, addr, 3 * BUS_SAMPLES);
+    for (size_t channel = 0; channel < 3; ++channel)
     {
-      int* buffer = buffers[i][j];
-      for (u32 k = 0; k < 5 * 32; ++k)
+      int* bus = BusData(3 * group + channel);
+      for (size_t i = 0; i < BUS_SAMPLES; ++i)
       {
-        s64 sample = (s64)(s32)Common::swap32(*ptr++);
-        sample *= volume;
-        buffer[k] += (s32)(sample >> 15);
+        const s64 scaled = s64{ReadSampleBE(source, channel * BUS_SAMPLES + i)} * volumes[group];
+        bus[i] = AddWrapped(bus[i], static_cast<s32>(scaled >> 15));
       }
     }
   }
 }
 
-// Determines if this version of the UCode has a PBLowPassFilter in its AXPB layout.
-static bool HasLpf(u32 crc)
+bool AXUCode::PBHasLowPassFilter() const
 {
-  return crc != 0x4E8A8B21;
+  return m_crc != CRC_OLDEST_AX;
 }
 
-// Read a PB from MRAM/ARAM
-void AXUCode::ReadPB(Memory::MemoryManager& memory, u32 addr, AXPB& pb)
+void AXUCode::ReadPB(Memory::MemoryManager& memory, u32 addr, AXPB& pb) const
 {
-  if (HasLpf(m_crc))
+  u16* const words = reinterpret_cast<u16*>(&pb);
+  if (PBHasLowPassFilter())
   {
-    u16* dst = (u16*)&pb;
-    memory.CopyFromEmuSwapped<u16>(dst, addr, sizeof(pb));
+    memory.CopyFromEmuSwapped(words, addr, sizeof(pb));
+    return;
   }
-  else
-  {
-    // Skip lpf field.
 
-    char* dst = (char*)&pb;
-
-    constexpr size_t lpf_off = offsetof(AXPB, lpf);
-    constexpr size_t lc_off = offsetof(AXPB, loop_counter);
-
-    memory.CopyFromEmuSwapped<u16>((u16*)dst, addr, lpf_off);
-    memset(dst + lpf_off, 0, lc_off - lpf_off);
-    memory.CopyFromEmuSwapped<u16>((u16*)(dst + lc_off), addr + lpf_off, sizeof(pb) - lc_off);
-  }
+  // In RAM the PB goes straight from the loop info to loop_counter.
+  constexpr size_t lpf_begin = offsetof(AXPB, lpf);
+  constexpr size_t lpf_end = offsetof(AXPB, loop_counter);
+  memory.CopyFromEmuSwapped(words, addr, lpf_begin);
+  pb.lpf = {};
+  memory.CopyFromEmuSwapped(words + lpf_end / 2, addr + static_cast<u32>(lpf_begin),
+                            sizeof(pb) - lpf_end);
 }
 
-// Write a PB back to MRAM/ARAM
-void AXUCode::WritePB(Memory::MemoryManager& memory, u32 addr, const AXPB& pb)
+void AXUCode::WritePB(Memory::MemoryManager& memory, u32 addr, const AXPB& pb) const
 {
-  if (HasLpf(m_crc))
+  const u16* const words = reinterpret_cast<const u16*>(&pb);
+  if (PBHasLowPassFilter())
   {
-    const u16* src = (const u16*)&pb;
-    memory.CopyToEmuSwapped<u16>(addr, src, sizeof(pb));
+    memory.CopyToEmuSwapped(addr, words, sizeof(pb));
+    return;
   }
-  else
-  {
-    // We skip lpf in this layout.
 
-    const char* src = (const char*)&pb;
-    constexpr size_t lpf_off = offsetof(AXPB, lpf);
-    constexpr size_t lc_off = offsetof(AXPB, loop_counter);
-
-    memory.CopyToEmuSwapped<u16>(addr, (const u16*)src, lpf_off);
-    memory.CopyToEmuSwapped<u16>(addr + lpf_off, (const u16*)(src + lc_off), sizeof(pb) - lc_off);
-  }
+  constexpr size_t lpf_begin = offsetof(AXPB, lpf);
+  constexpr size_t lpf_end = offsetof(AXPB, loop_counter);
+  memory.CopyToEmuSwapped(addr, words, lpf_begin);
+  memory.CopyToEmuSwapped(addr + static_cast<u32>(lpf_begin), words + lpf_end / 2,
+                          sizeof(pb) - lpf_end);
 }
 
 void AXUCode::ProcessPBList(u32 pb_addr)
 {
-  // Samples per millisecond. In theory DSP sampling rate can be changed from
-  // 32KHz to 48KHz, but AX always process at 32KHz.
-  constexpr u32 spms = 32;
-
-  AXPB pb;
-
   auto& memory = m_dsphle->GetSystem().GetMemory();
-  while (pb_addr)
+  auto& accelerator = static_cast<AXVoice::VoiceAccelerator<AXPB>&>(*m_accelerator);
+
+  AXPB pb{};
+  while (pb_addr != 0)
   {
-    AXBuffers buffers = {{m_samples_main_left, m_samples_main_right, m_samples_main_surround,
-                          m_samples_auxA_left, m_samples_auxA_right, m_samples_auxA_surround,
-                          m_samples_auxB_left, m_samples_auxB_right, m_samples_auxB_surround}};
-
     ReadPB(memory, pb_addr, pb);
+    const PBUpdateData updates = AXVoice::FetchUpdateList(memory, pb);
 
-    PBUpdateData updates = LoadPBUpdates(memory, pb);
-
-    for (int curr_ms = 0; curr_ms < 5; ++curr_ms)
+    // The frame is rendered a millisecond at a time, applying that millisecond's updates first.
+    for (u32 ms = 0; ms < 5; ++ms)
     {
-      ApplyUpdatesForMs(curr_ms, pb, pb.updates.num_updates, updates);
+      AXVoice::ApplyUpdatesForMillisecond(pb, ms, updates);
 
-      ProcessVoice(static_cast<HLEAccelerator*>(m_accelerator.get()), pb, buffers, spms,
-                   ConvertMixerControl(pb.mixer_control),
-                   m_coeffs_checksum ? m_coeffs.data() : nullptr, false);
+      AXVoice::VoiceTargets<AXPB> targets;
+      for (size_t bus = 0; bus < NUM_BUSES; ++bus)
+        targets.buses[bus] = BusData(bus) + ms * SAMPLES_PER_MS;
 
-      // Forward the buffers
-      for (auto& ptr : buffers.ptrs)
-        ptr += spms;
+      AXVoice::RenderVoice(accelerator, pb, targets, SAMPLES_PER_MS,
+                           ConvertMixerControl(pb.mixer_control), CoefficientTables(), false);
     }
 
     WritePB(memory, pb_addr, pb);
-    pb_addr = HILO_TO_32(pb.next_pb);
+    pb_addr = Join16(pb.next_pb_hi, pb.next_pb_lo);
   }
 }
 
 void AXUCode::MixAUXSamples(int aux_id, u32 write_addr, u32 read_addr)
 {
-  int* buffers[3] = {nullptr};
-
-  switch (aux_id)
-  {
-  case 0:
-    buffers[0] = m_samples_auxA_left;
-    buffers[1] = m_samples_auxA_right;
-    buffers[2] = m_samples_auxA_surround;
-    break;
-
-  case 1:
-    buffers[0] = m_samples_auxB_left;
-    buffers[1] = m_samples_auxB_right;
-    buffers[2] = m_samples_auxB_surround;
-    break;
-  }
-
-  // First, we need to send the contents of our AUX buffers to the CPU.
   auto& memory = m_dsphle->GetSystem().GetMemory();
-  if (write_addr)
+  constexpr u32 BUS_BYTES = BUS_SAMPLES * sizeof(int);
+
+  // Send the aux bus (L, R, S) to the CPU for its effect, unless there is nowhere to send it...
+  const size_t aux_first = aux_id == 0 ? BUS_AUXA_L : BUS_AUXB_L;
+  if (write_addr != 0)
   {
-    for (auto& buffer : buffers)
-    {
-      memory.CopyToEmuSwapped(write_addr, buffer, 5 * 32 * sizeof(int));
-      write_addr += 5 * 32 * sizeof(int);
-    }
+    for (size_t i = 0; i < 3; ++i)
+      memory.CopyToEmuSwapped(write_addr + static_cast<u32>(i) * BUS_BYTES, BusData(aux_first + i),
+                              BUS_BYTES);
   }
 
-  // Then, we read the new temp from the CPU and add to our current
-  // temp.
-  int* ptr = reinterpret_cast<int*>(memory.GetPointerForRange(
-      read_addr, sizeof(m_samples_main_left) + sizeof(m_samples_main_right) +
-                     sizeof(m_samples_main_surround)));
-
-  for (auto& sample : m_samples_main_left)
-    sample += (int)Common::swap32(*ptr++);
-  for (auto& sample : m_samples_main_right)
-    sample += (int)Common::swap32(*ptr++);
-  for (auto& sample : m_samples_main_surround)
-    sample += (int)Common::swap32(*ptr++);
+  // ...and add the effect's output (L, R, S) to main.
+  const u8* returned = SampleBuffer(memory, read_addr, 3 * BUS_SAMPLES);
+  for (size_t channel = 0; channel < 3; ++channel)
+  {
+    int* bus = BusData(BUS_MAIN_L + channel);
+    for (size_t i = 0; i < BUS_SAMPLES; ++i)
+      bus[i] = AddWrapped(bus[i], ReadSampleBE(returned, channel * BUS_SAMPLES + i));
+  }
 }
 
 void AXUCode::UploadLRS(u32 dst_addr)
 {
   auto& memory = m_dsphle->GetSystem().GetMemory();
-
-  for (const auto& samples : {m_samples_main_left, m_samples_main_right, m_samples_main_surround})
+  constexpr u32 BUS_BYTES = BUS_SAMPLES * sizeof(int);
+  for (size_t i = 0; i < 3; ++i)
   {
-    memory.CopyToEmuSwapped(dst_addr, samples, 5 * 32 * sizeof(int));
-    dst_addr += 5 * 32 * sizeof(int);
+    memory.CopyToEmuSwapped(dst_addr + static_cast<u32>(i) * BUS_BYTES, BusData(BUS_MAIN_L + i),
+                            BUS_BYTES);
   }
 }
 
 void AXUCode::SetMainLR(u32 src_addr)
 {
-  auto& memory = m_dsphle->GetSystem().GetMemory();
-  int* ptr = reinterpret_cast<int*>(memory.GetPointerForRange(src_addr, 5 * 32 * sizeof(int)));
-  for (u32 i = 0; i < 5 * 32; ++i)
+  const u8* source = SampleBuffer(m_dsphle->GetSystem().GetMemory(), src_addr, BUS_SAMPLES);
+  for (size_t i = 0; i < BUS_SAMPLES; ++i)
   {
-    int samp = (int)Common::swap32(*ptr++);
-    m_samples_main_left[i] = samp;
-    m_samples_main_right[i] = samp;
-    m_samples_main_surround[i] = 0;
+    const s32 sample = ReadSampleBE(source, i);
+    m_buses[BUS_MAIN_L][i] = sample;
+    m_buses[BUS_MAIN_R][i] = sample;
+    m_buses[BUS_MAIN_S][i] = 0;
+  }
+}
+
+void AXUCode::SetOppositeLR(u32 src_addr)
+{
+  const u8* source = SampleBuffer(m_dsphle->GetSystem().GetMemory(), src_addr, BUS_SAMPLES);
+  for (size_t i = 0; i < BUS_SAMPLES; ++i)
+  {
+    const s32 sample = ReadSampleBE(source, i);
+    m_buses[BUS_MAIN_L][i] = static_cast<int>(0u - static_cast<u32>(sample));
+    m_buses[BUS_MAIN_R][i] = sample;
+    m_buses[BUS_MAIN_S][i] = 0;
   }
 }
 
 void AXUCode::RunCompressor(u16 threshold, u16 release_frames, u32 table_addr, u32 millis)
 {
-  // check for L/R samples exceeding the threshold
-  bool triggered = false;
-  for (u32 i = 0; i < 32 * millis; ++i)
-  {
-    if (std::abs(m_samples_main_left[i]) > int(threshold) ||
-        std::abs(m_samples_main_right[i]) > int(threshold))
-    {
-      triggered = true;
-      break;
-    }
-  }
+  const size_t count = SAMPLES_PER_MS * millis;
+  BusBuffer& left = m_buses[BUS_MAIN_L];
+  BusBuffer& right = m_buses[BUS_MAIN_R];
 
-  const u32 frame_byte_size = 32 * millis * sizeof(s16);
-  u32 table_offset = 0;
+  // |sample| > threshold, where (as with the ucode's 32-bit absolute value) INT_MIN stays
+  // negative and never counts as loud.
+  const s32 limit = threshold;
+  const auto too_loud = [limit](s32 sample) {
+    return sample != std::numeric_limits<s32>::min() && (sample > limit || sample < -limit);
+  };
+  bool triggered = false;
+  for (size_t i = 0; i < count && !triggered; ++i)
+    triggered = too_loud(left[i]) || too_loud(right[i]);
+
+  // The table holds one gain ramp per frame: 11 attack ramps, then the release ramps.
+  constexpr u32 ATTACK_RAMPS = 11;
+  const u32 ramp_bytes = static_cast<u32>(count * sizeof(u16));
+  u32 ramp_index;
   if (triggered)
   {
-    // one attack frame based on previous frame
-    table_offset = m_compressor_pos * frame_byte_size;
-    // next frame will start release
+    ramp_index = m_compressor_pos;
     m_compressor_pos = release_frames;
   }
-  else if (m_compressor_pos)
+  else if (m_compressor_pos != 0)
   {
-    // release
     --m_compressor_pos;
-    // the release ramps are located after the attack ramps
-    constexpr u32 ATTACK_ENTRY_COUNT = 11;
-    table_offset = (ATTACK_ENTRY_COUNT + m_compressor_pos) * frame_byte_size;
+    ramp_index = ATTACK_RAMPS + m_compressor_pos;
   }
   else
   {
     return;
   }
 
-  // apply the selected ramp
-  auto& memory = m_dsphle->GetSystem().GetMemory();
-  u16* ramp = reinterpret_cast<u16*>(
-      memory.GetPointerForRange(table_addr + table_offset, 32 * millis * sizeof(u16)));
-  for (u32 i = 0; i < 32 * millis; ++i)
+  const u8* ramp = m_dsphle->GetSystem().GetMemory().GetPointerForRange(
+      table_addr + ramp_index * ramp_bytes, ramp_bytes);
+  for (size_t i = 0; i < count; ++i)
   {
-    u16 coef = Common::swap16(*ramp++);
-    m_samples_main_left[i] = (s64(m_samples_main_left[i]) * coef) >> 15;
-    m_samples_main_right[i] = (s64(m_samples_main_right[i]) * coef) >> 15;
+    u16 gain;
+    std::memcpy(&gain, ramp + i * sizeof(u16), sizeof(gain));
+    gain = Common::swap16(gain);
+    left[i] = static_cast<int>((s64{left[i]} * gain) >> 15);
+    right[i] = static_cast<int>((s64{right[i]} * gain) >> 15);
   }
 }
 
 void AXUCode::OutputSamples(u32 lr_addr, u32 surround_addr)
 {
   auto& memory = m_dsphle->GetSystem().GetMemory();
-  memory.CopyToEmuSwapped(surround_addr, m_samples_main_surround, 5 * 32 * sizeof(int));
+  memory.CopyToEmuSwapped(surround_addr, BusData(BUS_MAIN_S), BUS_SAMPLES * sizeof(int));
 
-  // 32 samples per ms, 5 ms, 2 channels
-  short buffer[5 * 32 * 2];
-
-  // Output samples clamped to 16 bits and interlaced RLRLRLRLRL...
-  for (u32 i = 0; i < 5 * 32; ++i)
+  // Final output: 16-bit, interleaved right then left, big-endian.
+  std::array<u16, BUS_SAMPLES * 2> frame;
+  for (size_t i = 0; i < BUS_SAMPLES; ++i)
   {
-    s16 left = ClampS16(m_samples_main_left[i]);
-    s16 right = ClampS16(m_samples_main_right[i]);
-
-    buffer[2 * i + 0] = Common::swap16(right);
-    buffer[2 * i + 1] = Common::swap16(left);
+    frame[2 * i] = Common::swap16(static_cast<u16>(Clamp16(m_buses[BUS_MAIN_R][i])));
+    frame[2 * i + 1] = Common::swap16(static_cast<u16>(Clamp16(m_buses[BUS_MAIN_L][i])));
   }
-
-  memory.CopyToEmu(lr_addr, buffer, sizeof(buffer));
+  memory.CopyToEmu(lr_addr, frame.data(), sizeof(frame));
 }
 
 void AXUCode::MixAUXBLR(u32 ul_addr, u32 dl_addr)
 {
-  // Upload AUXB L/R
   auto& memory = m_dsphle->GetSystem().GetMemory();
-  memory.CopyToEmuSwapped(ul_addr, m_samples_auxB_left, sizeof(m_samples_auxB_left));
-  memory.CopyToEmuSwapped(ul_addr + sizeof(m_samples_auxB_left), m_samples_auxB_right,
-                          sizeof(m_samples_auxB_right));
+  constexpr u32 BUS_BYTES = BUS_SAMPLES * sizeof(int);
+  memory.CopyToEmuSwapped(ul_addr, BusData(BUS_AUXB_L), BUS_BYTES);
+  memory.CopyToEmuSwapped(ul_addr + BUS_BYTES, BusData(BUS_AUXB_R), BUS_BYTES);
 
-  // Mix AUXB L/R to MAIN L/R, and replace AUXB L/R
-  int* ptr = reinterpret_cast<int*>(memory.GetPointerForRange(dl_addr, 2 * 5 * 32 * sizeof(int)));
-  for (u32 i = 0; i < 5 * 32; ++i)
+  // The returned L/R replace aux B L/R and are added to main L/R.
+  const u8* returned = SampleBuffer(memory, dl_addr, 2 * BUS_SAMPLES);
+  for (size_t channel = 0; channel < 2; ++channel)
   {
-    int samp = Common::swap32(*ptr++);
-    m_samples_auxB_left[i] = samp;
-    m_samples_main_left[i] += samp;
-  }
-  for (u32 i = 0; i < 5 * 32; ++i)
-  {
-    int samp = Common::swap32(*ptr++);
-    m_samples_auxB_right[i] = samp;
-    m_samples_main_right[i] += samp;
-  }
-}
-
-void AXUCode::SetOppositeLR(u32 src_addr)
-{
-  auto& memory = m_dsphle->GetSystem().GetMemory();
-  int* ptr = reinterpret_cast<int*>(memory.GetPointerForRange(src_addr, 5 * 32 * sizeof(int)));
-  for (u32 i = 0; i < 5 * 32; ++i)
-  {
-    int inp = Common::swap32(*ptr++);
-    m_samples_main_left[i] = -inp;
-    m_samples_main_right[i] = inp;
-    m_samples_main_surround[i] = 0;
+    int* aux = BusData(BUS_AUXB_L + channel);
+    int* main = BusData(BUS_MAIN_L + channel);
+    for (size_t i = 0; i < BUS_SAMPLES; ++i)
+    {
+      const s32 sample = ReadSampleBE(returned, channel * BUS_SAMPLES + i);
+      aux[i] = sample;
+      main[i] = AddWrapped(main[i], sample);
+    }
   }
 }
 
 void AXUCode::SendAUXAndMix(u32 auxa_lrs_up, u32 auxb_s_up, u32 main_l_dl, u32 main_r_dl,
                             u32 auxb_l_dl, u32 auxb_r_dl)
 {
-  // Upload AUXA LRS
   auto& memory = m_dsphle->GetSystem().GetMemory();
-  memory.CopyToEmuSwapped(auxa_lrs_up, m_samples_auxA_left, 32 * 5 * sizeof(int));
-  memory.CopyToEmuSwapped(auxa_lrs_up + 32 * 5 * sizeof(int), m_samples_auxA_right,
-                          32 * 5 * sizeof(int));
-  memory.CopyToEmuSwapped(auxa_lrs_up + 2 * 32 * 5 * sizeof(int), m_samples_auxA_surround,
-                          32 * 5 * sizeof(int));
+  constexpr u32 BUS_BYTES = BUS_SAMPLES * sizeof(int);
 
-  // Upload AUXB S
-  memory.CopyToEmuSwapped(auxb_s_up, m_samples_auxB_surround, sizeof(m_samples_auxB_surround));
-
-  // Download buffers and addresses
-  const std::array<int*, 4> dl_buffers{
-      m_samples_main_left,
-      m_samples_main_right,
-      m_samples_auxB_left,
-      m_samples_auxB_right,
-  };
-  const std::array<u32, 4> dl_addrs{
-      main_l_dl,
-      main_r_dl,
-      auxb_l_dl,
-      auxb_r_dl,
-  };
-
-  // Download and mix
-  for (size_t i = 0; i < dl_buffers.size(); ++i)
+  for (size_t i = 0; i < 3; ++i)
   {
-    const int* dl_src =
-        reinterpret_cast<int*>(memory.GetPointerForRange(dl_addrs[i], 32 * 5 * sizeof(int)));
-    for (size_t j = 0; j < 32 * 5; ++j)
-      dl_buffers[i][j] += (int)Common::swap32(*dl_src++);
+    memory.CopyToEmuSwapped(auxa_lrs_up + static_cast<u32>(i) * BUS_BYTES, BusData(BUS_AUXA_L + i),
+                            BUS_BYTES);
+  }
+  memory.CopyToEmuSwapped(auxb_s_up, BusData(BUS_AUXB_S), BUS_BYTES);
+
+  const std::pair<u32, size_t> downloads[] = {
+      {main_l_dl, BUS_MAIN_L},
+      {main_r_dl, BUS_MAIN_R},
+      {auxb_l_dl, BUS_AUXB_L},
+      {auxb_r_dl, BUS_AUXB_R},
+  };
+  for (const auto& [address, bus_index] : downloads)
+  {
+    const u8* source = SampleBuffer(memory, address, BUS_SAMPLES);
+    int* bus = BusData(bus_index);
+    for (size_t i = 0; i < BUS_SAMPLES; ++i)
+      bus[i] = AddWrapped(bus[i], ReadSampleBE(source, i));
   }
 }
 
@@ -715,88 +640,74 @@ void AXUCode::HandleMail(u32 mail)
   switch (m_mail_state)
   {
   case MailState::WaitingForCmdListSize:
-    if ((mail & MAIL_CMDLIST_MASK) == MAIL_CMDLIST)
+    if ((mail & MAIL_CMDLIST_MASK) != MAIL_CMDLIST)
     {
-      // A command list address is going to be sent next.
-      m_cmdlist_size = static_cast<u16>(mail & ~MAIL_CMDLIST_MASK);
-      m_mail_state = MailState::WaitingForCmdListAddress;
+      ERROR_LOG_FMT(DSPHLE, "AX: expected a command list mail, got {:08x}", mail);
+      return;
     }
-    else
-    {
-      ERROR_LOG_FMT(DSPHLE, "Unknown mail sent to AX::HandleMail; expected command list: {:08x}",
-                    mail);
-    }
-    break;
+    m_cmdlist_size = mail & 0xFFFF;
+    m_mail_state = MailState::WaitingForCmdListAddress;
+    return;
 
   case MailState::WaitingForCmdListAddress:
-    CopyCmdList(mail, m_cmdlist_size);
+    CopyCmdList(mail, static_cast<u16>(m_cmdlist_size));
     HandleCommandList();
     m_cmdlist_size = 0;
     SignalWorkEnd();
     m_mail_state = MailState::WaitingForNextTask;
-    break;
+    return;
 
   case MailState::WaitingForNextTask:
-    if ((mail & TASK_MAIL_MASK) != TASK_MAIL_TO_DSP)
-    {
-      WARN_LOG_FMT(DSPHLE, "Rendering task without prefix CDD1: {:08x}", mail);
-      mail = TASK_MAIL_TO_DSP | (mail & ~TASK_MAIL_MASK);
-      // The actual uCode does not check for the CDD1 prefix.
-    }
+    break;
+  }
 
-    switch (mail)
-    {
-    case MAIL_RESUME:
-      // Acknowledge the resume request
-      m_mail_handler.PushMail(DSP_RESUME, true);
-      m_mail_state = MailState::WaitingForCmdListSize;
-      break;
+  // The ucode does not check the 0xCDD1 prefix.
+  if ((mail & TASK_MAIL_MASK) != TASK_MAIL_TO_DSP)
+  {
+    WARN_LOG_FMT(DSPHLE, "AX: task mail without the CDD1 prefix: {:08x}", mail);
+    mail = TASK_MAIL_TO_DSP | (mail & 0xFFFF);
+  }
 
-    case MAIL_NEW_UCODE:
-      m_upload_setup_in_progress = true;
-      // Relevant when this uCode is resumed after switching.
-      // The resume mail is sent via the NeedsResumeMail() check above
-      // (and the flag corresponding to it is set by PrepareBootUCode).
-      m_mail_state = MailState::WaitingForCmdListSize;
-      break;
-
-    case MAIL_RESET:
-      m_dsphle->SetUCode(UCODE_ROM);
-      break;
-
-    case MAIL_CONTINUE:
-      // We don't have to do anything here - the CPU does not wait for a ACK
-      // and sends a cmdlist mail just after.
-      m_mail_state = MailState::WaitingForCmdListSize;
-      break;
-
-    default:
-      WARN_LOG_FMT(DSPHLE, "Unknown task mail: {:08x}", mail);
-      break;
-    }
+  switch (mail)
+  {
+  case MAIL_RESUME:
+    m_mail_handler.PushMail(DSP_RESUME, true);
+    m_mail_state = MailState::WaitingForCmdListSize;
+    break;
+  case MAIL_NEW_UCODE:
+    // When we are switched back to later, Update() sends the resume mail.
+    m_upload_setup_in_progress = true;
+    m_mail_state = MailState::WaitingForCmdListSize;
+    break;
+  case MAIL_RESET:
+    m_dsphle->SetUCode(UCODE_ROM);
+    break;
+  case MAIL_CONTINUE:
+    // The CPU sends the next command list without waiting for anything.
+    m_mail_state = MailState::WaitingForCmdListSize;
+    break;
+  default:
+    WARN_LOG_FMT(DSPHLE, "AX: unknown task mail {:08x}", mail);
     break;
   }
 }
 
 void AXUCode::CopyCmdList(u32 addr, u16 size)
 {
-  if (size >= std::size(m_cmdlist))
+  if (size >= m_cmdlist.size())
   {
-    ERROR_LOG_FMT(DSPHLE, "Command list at {:08x} is too large: size={}", addr, size);
+    // Keeps the previous list.
+    ERROR_LOG_FMT(DSPHLE, "AX: command list at {:08x} too large ({} words)", addr, size);
     return;
   }
-
-  auto& memory = m_dsphle->GetSystem().GetMemory();
-  memory.CopyFromEmuSwapped(m_cmdlist, addr, size * sizeof(u16));
+  m_dsphle->GetSystem().GetMemory().CopyFromEmuSwapped(m_cmdlist.data(), addr,
+                                                       size * sizeof(u16));
 }
 
 void AXUCode::Update()
 {
-  // Used for UCode switching.
   if (NeedsResumeMail())
-  {
     m_mail_handler.PushMail(DSP_RESUME, true);
-  }
 }
 
 void AXUCode::DoAXState(PointerWrap& p)
@@ -804,22 +715,13 @@ void AXUCode::DoAXState(PointerWrap& p)
   p.Do(m_cmdlist);
   p.Do(m_cmdlist_size);
   p.Do(m_mail_state);
+  p.Do(m_buses);
 
-  p.Do(m_samples_main_left);
-  p.Do(m_samples_main_right);
-  p.Do(m_samples_main_surround);
-  p.Do(m_samples_auxA_left);
-  p.Do(m_samples_auxA_right);
-  p.Do(m_samples_auxA_surround);
-  p.Do(m_samples_auxB_left);
-  p.Do(m_samples_auxB_right);
-  p.Do(m_samples_auxB_surround);
-
-  auto old_checksum = m_coeffs_checksum;
+  const std::optional<u32> coefficients_before = m_coeffs_checksum;
   p.Do(m_coeffs_checksum);
-
-  if (p.IsReadMode() && m_coeffs_checksum && old_checksum != m_coeffs_checksum)
+  if (p.IsReadMode() && m_coeffs_checksum && m_coeffs_checksum != coefficients_before)
   {
+    // The state was made with other coefficient tables: find the same ones.
     if (!LoadResamplingCoefficients(true, *m_coeffs_checksum))
     {
       Core::DisplayMessage("Could not find the DSP polyphase resampling coefficients used by the "
@@ -831,7 +733,6 @@ void AXUCode::DoAXState(PointerWrap& p)
   }
 
   p.Do(m_compressor_pos);
-
   m_accelerator->DoState(p);
 }
 

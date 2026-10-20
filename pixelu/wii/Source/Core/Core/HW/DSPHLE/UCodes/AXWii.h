@@ -1,16 +1,26 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <array>
+#include <cstddef>
+
 #include "Common/CommonTypes.h"
 #include "Core/HW/DSPHLE/UCodes/AX.h"
+
+namespace Memory
+{
+class MemoryManager;
+}
 
 namespace DSP::HLE
 {
 struct AXPBWii;
 class DSPHLE;
 
+// HLE of the Wii AX ucode: 3 ms frames, a third aux bus (C), output volume ramps, and the four
+// Wii Remote speakers. Several builds are handled, which differ in their PB layout and command
+// numbering.
 class AXWiiUCode final : public AXUCode
 {
 public:
@@ -19,98 +29,77 @@ public:
   void Initialize() override;
   void DoState(PointerWrap& p) override;
 
-protected:
-  // Additional AUX buffers
-  int m_samples_auxC_left[32 * 3]{};
-  int m_samples_auxC_right[32 * 3]{};
-  int m_samples_auxC_surround[32 * 3]{};
+private:
+  static constexpr size_t FRAME_SAMPLES = 3 * SAMPLES_PER_MS;
+  // The Wii Remote speakers get 6 samples per millisecond.
+  static constexpr size_t REMOTE_SAMPLES_PER_MS = 6;
+  static constexpr size_t REMOTE_FRAME_SAMPLES = 3 * REMOTE_SAMPLES_PER_MS;
 
-  // Wiimote buffers
-  int m_samples_wm0[6 * 3]{};
-  int m_samples_aux0[6 * 3]{};
-  int m_samples_wm1[6 * 3]{};
-  int m_samples_aux1[6 * 3]{};
-  int m_samples_wm2[6 * 3]{};
-  int m_samples_aux2[6 * 3]{};
-  int m_samples_wm3[6 * 3]{};
-  int m_samples_aux3[6 * 3]{};
+  enum AuxCBus : size_t
+  {
+    AUXC_L,
+    AUXC_R,
+    AUXC_S,
+  };
 
-  // Are we implementing an old version of AXWii which still has updates?
-  bool m_old_axwii = false;
+  // What a command list entry does, independent of the build's opcode numbering.
+  enum class Op
+  {
+    Setup,
+    AddToLR,
+    SubToLR,
+    AddSubToLR,
+    SetPBAddr,
+    ProcessStoredPBs,
+    ProcessPBs,
+    MixAuxA,
+    MixAuxB,
+    MixAuxC,
+    UploadAuxAMixLRSC,
+    UploadAuxBMixLRSC,
+    Compressor,
+    Output,
+    OutputDPL2,
+    OutputRemotes,
+    End,
+    Ignored,
+  };
+  Op DecodeOp(u16 opcode) const;
 
-  // Late AXWii versions support Wiimote filtering and a biquad filter.
-  bool m_new_filter = false;
-
-  // Last volume values for MAIN and AUX. Used to generate volume ramps to
-  // interpolate nicely between old and new volume values.
-  u16 m_last_main_volume = 0;
-  u16 m_last_aux_volumes[3]{};
-
-  // Convert a mixer_control bitfield to our internal representation for that
-  // value. Required because that bitfield has a different meaning in some
-  // versions of AX.
-  static AXMixControl ConvertMixerControl(u32 mixer_control);
-
-  // Generate a volume ramp from vol1 to vol2, interpolating n volume values.
-  // Uses floating point arithmetic, which isn't exactly what the UCode does,
-  // but this gives better precision and nicer code.
-  static void GenerateVolumeRamp(u16* output, u16 vol1, u16 vol2, size_t nvals);
+  // Volume ramp from one frame's volume to the next. Uses float steps; the ucode's integer ramp
+  // is close but not identical.
+  static void GenerateVolumeRamp(u16* output, u16 from, u16 to, size_t count);
+  static u32 ConvertMixerControl(u32 mixer_control);
 
   void HandleCommandList() override;
+
+  int* AuxBus(int aux_id, size_t channel);
+  int* RemoteMain(size_t speaker) { return m_remote[speaker].data(); }
+  int* RemoteAux(size_t speaker) { return m_remote[4 + speaker].data(); }
 
   void SetupProcessing(u32 init_addr);
   void AddToLR(u32 val_addr, bool neg);
   void AddSubToLR(u32 val_addr);
   void ProcessPBList(u32 pb_addr);
   void MixAUXSamples(int aux_id, u32 write_addr, u32 read_addr, u16 volume);
-  void UploadAUXMixLRSC(int aux_id, u32* addresses, u16 volume);
+  void UploadAUXMixLRSC(int aux_id, const u32* addresses, u16 volume);
   void OutputSamples(u32 lr_addr, u32 surround_addr, u16 volume, bool upload_auxc);
-  void OutputWMSamples(u32* addresses);  // 4 addresses
+  void OutputWMSamples(const u32* addresses);
 
-private:
-  void ReadPB(Memory::MemoryManager& memory, u32 addr, AXPBWii& pb);
-  void WritePB(Memory::MemoryManager& memory, u32 addr, const AXPBWii& pb);
+  void ReadPB(Memory::MemoryManager& memory, u32 addr, AXPBWii& pb) const;
+  void WritePB(Memory::MemoryManager& memory, u32 addr, const AXPBWii& pb) const;
 
-  enum CmdType
-  {
-    CMD_SETUP = 0x00,
-    CMD_ADD_TO_LR = 0x01,
-    CMD_SUB_TO_LR = 0x02,
-    CMD_ADD_SUB_TO_LR = 0x03,
-    CMD_PROCESS = 0x04,
-    CMD_MIX_AUXA = 0x05,
-    CMD_MIX_AUXB = 0x06,
-    CMD_MIX_AUXC = 0x07,
-    CMD_UPL_AUXA_MIX_LRSC = 0x08,
-    CMD_UPL_AUXB_MIX_LRSC = 0x09,
-    CMD_COMPRESSOR = 0x0A,
-    CMD_OUTPUT = 0x0B,
-    CMD_OUTPUT_DPL2 = 0x0C,
-    CMD_WM_OUTPUT = 0x0D,
-    CMD_END = 0x0E,
-  };
+  std::array<std::array<int, FRAME_SAMPLES>, 3> m_auxc{};
+  // Main 0-3, then aux 0-3 (the savestate order).
+  std::array<std::array<int, REMOTE_FRAME_SAMPLES>, 8> m_remote{};
 
-  // A lot of these are similar to the new version, but there is an offset in
-  // the command ids due to the PB_ADDR command (which was removed from the
-  // new AXWii).
-  enum CmdTypeOld
-  {
-    CMD_SETUP_OLD = 0x00,
-    CMD_ADD_TO_LR_OLD = 0x01,
-    CMD_SUB_TO_LR_OLD = 0x02,
-    CMD_ADD_SUB_TO_LR_OLD = 0x03,
-    CMD_PB_ADDR_OLD = 0x04,
-    CMD_PROCESS_OLD = 0x05,
-    CMD_MIX_AUXA_OLD = 0x06,
-    CMD_MIX_AUXB_OLD = 0x07,
-    CMD_MIX_AUXC_OLD = 0x08,
-    CMD_UPL_AUXA_MIX_LRSC_OLD = 0x09,
-    CMD_UPL_AUXB_MIX_LRSC_OLD = 0x0a,
-    CMD_COMPRESSOR_OLD = 0x0B,
-    CMD_OUTPUT_OLD = 0x0C,  // no volume!
-    CMD_OUTPUT_DPL2_OLD = 0x0D,
-    CMD_WM_OUTPUT_OLD = 0x0E,
-    CMD_END_OLD = 0x0F
-  };
+  // Early builds: the old opcode numbering, and PB updates each millisecond.
+  bool m_old_axwii = false;
+  // Late builds: the biquad and Wii Remote filters.
+  bool m_new_filter = false;
+
+  // The previous frame's output and aux return volumes, where the next ramps start.
+  u16 m_last_main_volume = 0x8000;
+  std::array<u16, 3> m_last_aux_volumes{0x8000, 0x8000, 0x8000};
 };
 }  // namespace DSP::HLE

@@ -1,53 +1,69 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// Parameter block (PB) layouts of the AX ucodes, as the game's AX library lays them out in RAM
+// (all fields are big-endian 16-bit words there). The HLE ucodes copy a PB into one of these
+// structs, byte-swapping each word, and write it back after processing.
 
 #pragma once
+
+#include <array>
 
 #include "Common/CommonTypes.h"
 
 namespace DSP::HLE
 {
+// A volume and its per-sample change.
 struct VolumeData
 {
   u16 volume;
   u16 volume_delta;
 };
 
+// GameCube voice send levels. The surround sends come in the order auxB, main, auxA in RAM.
 struct PBMixer
 {
-  VolumeData main_left, main_right;
-  VolumeData auxA_left, auxA_right;
-  VolumeData auxB_left, auxB_right;
-  // This somewhat strange-looking order of surround channels
-  // allows the ucode to use the 2-channel IROM function mix_two_add()
-  // when mixing (auxb_s and main_s) or (main_s and auxa_s).
+  VolumeData main_left;
+  VolumeData main_right;
+  VolumeData auxA_left;
+  VolumeData auxA_right;
+  VolumeData auxB_left;
+  VolumeData auxB_right;
   VolumeData auxB_surround;
   VolumeData main_surround;
   VolumeData auxA_surround;
 };
 
+// Wii voice send levels, with a third aux bus.
 struct PBMixerWii
 {
-  VolumeData main_left, main_right;
-  VolumeData auxA_left, auxA_right;
-  VolumeData auxB_left, auxB_right;
-  // Note: the following elements usage changes a little in DPL2 mode
-  // TODO: implement and comment it in the mixer
-  VolumeData auxC_left, auxC_right;
+  VolumeData main_left;
+  VolumeData main_right;
+  VolumeData auxA_left;
+  VolumeData auxA_right;
+  VolumeData auxB_left;
+  VolumeData auxB_right;
+  VolumeData auxC_left;
+  VolumeData auxC_right;
   VolumeData main_surround;
   VolumeData auxA_surround;
   VolumeData auxB_surround;
   VolumeData auxC_surround;
 };
 
+// Send levels to the four Wii Remote speakers (main and aux each).
 struct PBMixerWM
 {
-  VolumeData main0, aux0;
-  VolumeData main1, aux1;
-  VolumeData main2, aux2;
-  VolumeData main3, aux3;
+  VolumeData main0;
+  VolumeData aux0;
+  VolumeData main1;
+  VolumeData aux1;
+  VolumeData main2;
+  VolumeData aux2;
+  VolumeData main3;
+  VolumeData aux3;
 };
 
+// Interaural time delay (not emulated).
 struct PBInitialTimeDelay
 {
   u16 on;
@@ -59,6 +75,7 @@ struct PBInitialTimeDelay
   u16 targetRight;
 };
 
+// One mid-frame PB change: write `new_value` to word `pb_offset` of the PB.
 struct PBUpdate
 {
   u16 pb_offset;
@@ -66,18 +83,16 @@ struct PBUpdate
 };
 using PBUpdateData = std::array<PBUpdate, 32>;
 
-// Update data - read these each 1ms subframe and use them!
-// It seems that to provide higher time precisions for MIDI events, some games
-// use this thing to update the parameter blocks per 1ms sub-block (a block is 5ms).
-// Using this data should fix games that are missing MIDI notes.
+// Mid-frame changes per millisecond (5 per GameCube frame), from a list in RAM. Games use them
+// for sample-accurate note timing.
 struct PBUpdates
 {
   u16 num_updates[5];
-  u16 data_hi;  // These point to main RAM.
+  u16 data_hi;
   u16 data_lo;
 };
 
-// Same for Wii, where frames are only 3 ms.
+// The Wii version, for 3 ms frames (only some AXWii builds have it).
 struct PBUpdatesWii
 {
   u16 num_updates[3];
@@ -85,19 +100,16 @@ struct PBUpdatesWii
   u16 data_lo;
 };
 
-// The DSP stores the final sample values for each voice after every frame of processing.
-// The values are then accumulated for all dropped voices, added to the next frame of audio,
-// and ramped down on a per-sample basis to provide a gentle "roll off."
+// Last sample sent to each bus in the frame. The AX library uses these to fade out voices it
+// stops ("depop").
 struct PBDpop
 {
   s16 main_left;
   s16 auxA_left;
   s16 auxB_left;
-
   s16 main_right;
   s16 auxA_right;
   s16 auxB_right;
-
   s16 main_surround;
   s16 auxA_surround;
   s16 auxB_surround;
@@ -109,12 +121,10 @@ struct PBDpopWii
   s16 auxA_left;
   s16 auxB_left;
   s16 auxC_left;
-
   s16 main_right;
   s16 auxA_right;
   s16 auxB_right;
   s16 auxC_right;
-
   s16 main_surround;
   s16 auxA_surround;
   s16 auxB_surround;
@@ -127,17 +137,17 @@ struct PBDpopWM
   s16 main1;
   s16 main2;
   s16 main3;
-
   s16 aux0;
   s16 aux1;
   s16 aux2;
   s16 aux3;
 };
 
+// Voice volume: the value at the start of the frame and its per-sample change.
 struct PBVolumeEnvelope
 {
-  s16 cur_volume;        // Volume at start of frame
-  s16 cur_volume_delta;  // Signed per sample delta (96 samples per frame)
+  s16 cur_volume;
+  s16 cur_volume_delta;
 };
 
 struct PBUnknown2
@@ -145,14 +155,15 @@ struct PBUnknown2
   u16 unknown_reserved[3];
 };
 
+// Sample addresses for the accelerator. One-shot voices point the loop at a shared silent
+// buffer; the end address is inclusive.
 struct PBAudioAddr
 {
   u16 looping;
   u16 sample_format;
-  u16 loop_addr_hi;  // Start of loop (this will point to a shared "zero" buffer if one-shot mode is
-                     // active)
+  u16 loop_addr_hi;
   u16 loop_addr_lo;
-  u16 end_addr_hi;  // End of sample (and loop), inclusive
+  u16 end_addr_hi;
   u16 end_addr_lo;
   u16 cur_addr_hi;
   u16 cur_addr_lo;
@@ -167,12 +178,12 @@ struct PBADPCMInfo
   s16 yn2;
 };
 
+// Sample rate conversion: ratio is input samples per output sample in 16.16 fixed point (1/512
+// to 4.0), cur_addr_frac the fractional input position, last_samples the input history.
 struct PBSampleRateConverter
 {
-  // ratio = (f32)ratio * 0x10000;
-  // valid range is 1/512 to 4.0000
-  u16 ratio_hi;  // integer part of sampling ratio
-  u16 ratio_lo;  // fraction part of sampling ratio
+  u16 ratio_hi;
+  u16 ratio_lo;
   u16 cur_addr_frac;
   s16 last_samples[4];
 };
@@ -183,6 +194,7 @@ struct PBSampleRateConverterWM
   s16 last_samples[4];
 };
 
+// ADPCM state to restore when a voice loops.
 struct PBADPCMLoopInfo
 {
   u16 pred_scale;
@@ -190,6 +202,7 @@ struct PBADPCMLoopInfo
   u16 yn2;
 };
 
+// One-pole low-pass filter: y = (a0 * x + b0 * y[-1]) >> 15.
 struct PBLowPassFilter
 {
   u16 on;
@@ -198,6 +211,7 @@ struct PBLowPassFilter
   s16 b0;
 };
 
+// GameCube PB. The oldest AX build (CRC 0x4e8a8b21) has no lpf field in RAM.
 struct AXPB
 {
   u16 next_pb_hi;
@@ -205,12 +219,12 @@ struct AXPB
   u16 this_pb_hi;
   u16 this_pb_lo;
 
-  u16 src_type;  // Type of sample rate converter (none, ?, linear)
+  u16 src_type;  // see SRCTYPE_*
   u16 coef_select;
   u16 mixer_control;
 
-  u16 running;    // 1 = playing, anything else = stopped
-  u16 is_stream;  // 1 = stream, anything else = one shot
+  u16 running;    // 1 = playing
+  u16 is_stream;  // 1 = streaming (looping ring buffer)
 
   PBMixer mixer;
   PBInitialTimeDelay initial_time_delay;
@@ -222,7 +236,7 @@ struct AXPB
   PBADPCMInfo adpcm;
   PBSampleRateConverter src;
   PBADPCMLoopInfo adpcm_loop_info;
-  PBLowPassFilter lpf;  // Skipped when writing to/reading from MRAM/ARAM for certain AX UCodes
+  PBLowPassFilter lpf;
   u16 loop_counter;
 
   u16 padding[24];
@@ -234,27 +248,31 @@ struct PBHighPassFilter
   u16 unk[3];
 };
 
+// y = (b0 x + b1 x[-1] + b2 x[-2] + a1 y[-1] + a2 y[-2]), coefficients in 2.14.
 struct PBBiquadFilter
 {
   u16 on;
-  s16 xn1;  // History data
+  s16 xn1;
   s16 xn2;
   s16 yn1;
   s16 yn2;
-  s16 b0;  // Filter coefficients
+  s16 b0;
   s16 b1;
   s16 b2;
   s16 a1;
   s16 a2;
 };
 
+// Wii Remote filter: off (0), biquad (2) or low-pass (anything else).
 union PBInfImpulseResponseWM
 {
-  u16 on;  // 0: off, 2: biquad, other: low-pass
+  u16 on;
   PBLowPassFilter lpf;
   PBBiquadFilter biquad;
 };
 
+// Wii PB, in its largest form. Some builds lack the updates field, and older ones have a
+// high-pass filter where newer ones have a (larger) biquad filter; see AXWiiUCode::ReadPB.
 struct AXPBWii
 {
   u16 next_pb_hi;
@@ -262,18 +280,18 @@ struct AXPBWii
   u16 this_pb_hi;
   u16 this_pb_lo;
 
-  u16 src_type;     // Type of sample rate converter (none, 4-tap, linear)
-  u16 coef_select;  // coef for the 4-tap src
+  u16 src_type;     // see SRCTYPE_*
+  u16 coef_select;  // which polyphase coefficient table
   u16 mixer_control_hi;
   u16 mixer_control_lo;
 
-  u16 running;    // 1=RUN   0=STOP
-  u16 is_stream;  // 1 = stream, 0 = one shot
+  u16 running;    // 1 = playing
+  u16 is_stream;  // 1 = streaming
 
   PBMixerWii mixer;
   PBInitialTimeDelay initial_time_delay;
   PBDpopWii dpop;
-  PBUpdatesWii updates;  // Not present in all versions of the struct.
+  PBUpdatesWii updates;
   PBVolumeEnvelope vol_env;
   PBAudioAddr audio_addr;
   PBADPCMInfo adpcm;
@@ -286,19 +304,18 @@ struct AXPBWii
     PBBiquadFilter biquad;
   };
 
-  // WIIMOTE :D
+  // Wii Remote speaker output.
   u16 remote;
   u16 remote_mixer_control;
-
   PBMixerWM remote_mixer;
   PBDpopWM remote_dpop;
   PBSampleRateConverterWM remote_src;
   PBInfImpulseResponseWM remote_iir;
 
-  u16 pad[2];  // align us, captain! (32B)
+  u16 pad[2];
 };
 
-// TODO: All these enums have changed a lot for Wii
+// Accelerator sample formats.
 enum
 {
   AUDIOFORMAT_ADPCM = 0,
@@ -306,6 +323,7 @@ enum
   AUDIOFORMAT_PCM16 = 0xA,
 };
 
+// Sample rate converters.
 enum
 {
   SRCTYPE_POLYPHASE = 0,
@@ -313,10 +331,13 @@ enum
   SRCTYPE_NEAREST = 2,
 };
 
-// Both may be used at once
+// Voice filters (may be combined).
 enum
 {
   FILTER_LOWPASS = 1,
   FILTER_BIQUAD = 2,
 };
+
+static_assert(sizeof(AXPB) == 244);
+static_assert(sizeof(AXPBWii) == 310);
 }  // namespace DSP::HLE

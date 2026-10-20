@@ -1,31 +1,30 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-// High-level emulation for the AX GameCube UCode.
+// HLE of the GameCube AX audio ucode. The CPU sends a command list each frame (5 ms); the ucode
+// renders every voice parameter block of the frame into 32 kHz mixing buses, runs the aux
+// effects round trips through RAM, and outputs the final stereo samples.
 //
-// TODO:
-//  * Depop support
-//  * ITD support
-//  * Polyphase sample interpolation support (not very useful)
-//  * Dolby Pro 2 mixing with recent AX versions
+// Not emulated: depop, interaural time delay, and Dolby Pro Logic II mixing in the AX builds
+// that have it.
 
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <memory>
 #include <optional>
 
-#include "Common/BitUtils.h"
 #include "Common/CommonTypes.h"
-#include "Common/Swap.h"
-#include "Core/HW/DSPHLE/DSPHLE.h"
 #include "Core/HW/DSPHLE/UCodes/UCodes.h"
-#include "Core/HW/Memmap.h"
-#include "Core/System.h"
 
 namespace DSP
 {
 class Accelerator;
+}
+
+namespace Memory
+{
+class MemoryManager;
 }
 
 namespace DSP::HLE
@@ -33,9 +32,8 @@ namespace DSP::HLE
 struct AXPB;
 class DSPHLE;
 
-// We can't directly use the mixer_control field from the PB because it does
-// not mean the same in all AX versions. The AX UCode converts the
-// mixer_control value to an AXMixControl bitfield.
+// The voice mixer settings in one form for every AX version (each version encodes the PB's
+// mixer_control differently): an enable bit and a ramp bit per send.
 enum AXMixControl
 {
   // clang-format off
@@ -45,33 +43,29 @@ enum AXMixControl
   MIX_MAIN_R_RAMP = 0x000008,
   MIX_MAIN_S      = 0x000010,
   MIX_MAIN_S_RAMP = 0x000020,
-
   MIX_AUXA_L      = 0x000040,
   MIX_AUXA_L_RAMP = 0x000080,
   MIX_AUXA_R      = 0x000100,
   MIX_AUXA_R_RAMP = 0x000200,
   MIX_AUXA_S      = 0x000400,
   MIX_AUXA_S_RAMP = 0x000800,
-
   MIX_AUXB_L      = 0x001000,
   MIX_AUXB_L_RAMP = 0x002000,
   MIX_AUXB_R      = 0x004000,
   MIX_AUXB_R_RAMP = 0x008000,
   MIX_AUXB_S      = 0x010000,
   MIX_AUXB_S_RAMP = 0x020000,
-
   MIX_AUXC_L      = 0x040000,
   MIX_AUXC_L_RAMP = 0x080000,
   MIX_AUXC_R      = 0x100000,
   MIX_AUXC_R_RAMP = 0x200000,
   MIX_AUXC_S      = 0x400000,
   MIX_AUXC_S_RAMP = 0x800000,
-
   MIX_ALL_RAMPS   = 0xAAAAAA,
   // clang-format on
 };
 
-class AXUCode /* not final: subclassed by AXWiiUCode */ : public UCodeInterface
+class AXUCode /* AXWiiUCode derives from it */ : public UCodeInterface
 {
 public:
   AXUCode(DSPHLE* dsphle, u32 crc);
@@ -83,27 +77,94 @@ public:
   void DoState(PointerWrap& p) override;
 
 protected:
-  // CPU sends 0xBABE0000 | cmdlist_size to the DSP
+  // 0xBABE0000 | size announces a command list; its address follows.
   static constexpr u32 MAIL_CMDLIST = 0xBABE0000;
   static constexpr u32 MAIL_CMDLIST_MASK = 0xFFFF0000;
 
-  // 32 * 5 because 32 samples per millisecond, for max 5 milliseconds.
-  int m_samples_main_left[32 * 5]{};
-  int m_samples_main_right[32 * 5]{};
-  int m_samples_main_surround[32 * 5]{};
-  int m_samples_auxA_left[32 * 5]{};
-  int m_samples_auxA_right[32 * 5]{};
-  int m_samples_auxA_surround[32 * 5]{};
-  int m_samples_auxB_left[32 * 5]{};
-  int m_samples_auxB_right[32 * 5]{};
-  int m_samples_auxB_surround[32 * 5]{};
+  // The mixing buses. A GameCube frame is 5 ms at 32 kHz, 160 samples; the Wii uses the first 96
+  // (3 ms) of each.
+  enum Bus : size_t
+  {
+    BUS_MAIN_L,
+    BUS_MAIN_R,
+    BUS_MAIN_S,
+    BUS_AUXA_L,
+    BUS_AUXA_R,
+    BUS_AUXA_S,
+    BUS_AUXB_L,
+    BUS_AUXB_R,
+    BUS_AUXB_S,
+    NUM_BUSES,
+  };
+  static constexpr size_t SAMPLES_PER_MS = 32;
+  static constexpr size_t BUS_SAMPLES = 5 * SAMPLES_PER_MS;
+  using BusBuffer = std::array<int, BUS_SAMPLES>;
 
-  u16 m_cmdlist[512]{};
+  struct WiiVariant
+  {
+  };
+  // For AXWiiUCode, which sets up its own accelerator.
+  AXUCode(DSPHLE* dsphle, u32 crc, WiiVariant);
+
+  int* BusData(size_t bus) { return m_buses[bus].data(); }
+
+  // Startup shared with the Wii version: DSP_INIT, then the resampling coefficients.
+  void InitializeShared();
+
+  // Looks for the polyphase coefficient tables (dsp_coef.bin, from the DSP ROM) in the user's
+  // GC folder, then in Sys. With require_same_checksum, only a file with that Adler-32 is used.
+  bool LoadResamplingCoefficients(bool require_same_checksum, u32 desired_checksum);
+  const s16* CoefficientTables() const { return m_coeffs_checksum ? m_coeffs.data() : nullptr; }
+
+  // Walks the command list. Reading past its end gives 0; AtEnd() then stops the walk.
+  class CommandReader
+  {
+  public:
+    explicit CommandReader(const std::array<u16, 512>& list) : m_list(list) {}
+
+    bool AtEnd() const { return m_pos >= m_list.size(); }
+    u16 Word() { return m_pos < m_list.size() ? m_list[m_pos++] : u16{0}; }
+    u32 Address()
+    {
+      const u32 hi = Word();
+      const u32 lo = Word();
+      return (hi << 16) | lo;
+    }
+    void Skip(size_t words) { m_pos += words; }
+    void Restart() { m_pos = 0; }
+
+  private:
+    const std::array<u16, 512>& m_list;
+    size_t m_pos = 0;
+  };
+
+  void CopyCmdList(u32 addr, u16 size);
+  virtual void HandleCommandList();
+  void SignalWorkEnd();
+
+  // Fills buffers from a RAM list of (32-bit start value, 16-bit per-sample delta) triplets,
+  // one per buffer; a zero start value clears the buffer.
+  struct RampTarget
+  {
+    int* samples;
+    size_t count;
+  };
+  void InitBuffersFromRamps(u32 list_addr, const RampTarget* targets, size_t num_targets);
+
+  // The frame compressor: gain ramps from a table in RAM, triggered when main L/R exceed the
+  // threshold, then released over `release_frames` frames.
+  void RunCompressor(u16 threshold, u16 release_frames, u32 table_addr, u32 millis);
+
+  // Saves the state shared with AXWii.
+  void DoAXState(PointerWrap& p);
+
+  std::array<BusBuffer, NUM_BUSES> m_buses{};
+
+  std::array<u16, 512> m_cmdlist{};
   u32 m_cmdlist_size = 0;
 
-  // Table of coefficients for polyphase sample rate conversion.
-  // The coefficients aren't always available (they are part of the DSP DROM)
-  // so we also need to know if they are valid or not.
+  // Polyphase coefficient tables (4 tables of 128 phases x 4 taps), present only when the file
+  // was found; the checksum identifies them in savestates.
   std::optional<u32> m_coeffs_checksum = std::nullopt;
   std::array<s16, 0x800> m_coeffs{};
 
@@ -111,103 +172,31 @@ protected:
 
   std::unique_ptr<Accelerator> m_accelerator;
 
-  // Constructs without any GC-specific state, so it can be used by the deriving AXWii.
-  AXUCode(DSPHLE* dsphle, u32 crc, bool dummy);
-
-  void InitializeShared();
-
-  bool LoadResamplingCoefficients(bool require_same_checksum, u32 desired_checksum);
-
-  // Copy a command list from memory to our temp buffer
-  void CopyCmdList(u32 addr, u16 size);
-
-  // Convert a mixer_control bitfield to our internal representation for that
-  // value. Required because that bitfield has a different meaning in some
-  // versions of AX.
-  AXMixControl ConvertMixerControl(u32 mixer_control);
-
-  virtual void HandleCommandList();
-  void SignalWorkEnd();
-
-  struct BufferDesc
-  {
-    int* ptr;
-    int samples_per_milli;
-  };
-
-  template <int Millis, size_t BufCount>
-  void InitMixingBuffers(u32 init_addr, const std::array<BufferDesc, BufCount>& buffers)
-  {
-    auto& system = m_dsphle->GetSystem();
-    auto& memory = system.GetMemory();
-    std::array<u16, 3 * BufCount> init_array;
-    memory.CopyFromEmuSwapped(init_array.data(), init_addr, sizeof(init_array));
-    for (size_t i = 0; i < BufCount; ++i)
-    {
-      const BufferDesc& buf = buffers[i];
-      s32 value = s32((u32(init_array[3 * i]) << 16) | init_array[3 * i + 1]);
-      s16 delta = init_array[3 * i + 2];
-      if (value == 0)
-      {
-        memset(buf.ptr, 0, Millis * buf.samples_per_milli * sizeof(int));
-      }
-      else
-      {
-        for (int j = 0; j < Millis * buf.samples_per_milli; ++j)
-          buf.ptr[j] = value + j * delta;
-      }
-    }
-  }
-  void SetupProcessing(u32 init_addr);
-  void DownloadAndMixWithVolume(u32 addr, u16 vol_main, u16 vol_auxa, u16 vol_auxb);
-  void ProcessPBList(u32 pb_addr);
-  void MixAUXSamples(int aux_id, u32 write_addr, u32 read_addr);
-  void UploadLRS(u32 dst_addr);
-  void SetMainLR(u32 src_addr);
-  void RunCompressor(u16 threshold, u16 release_stages, u32 table_addr, u32 millis);
-  void OutputSamples(u32 out_addr, u32 surround_addr);
-  void MixAUXBLR(u32 ul_addr, u32 dl_addr);
-  void SetOppositeLR(u32 src_addr);
-  void SendAUXAndMix(u32 main_auxa_up, u32 auxb_s_up, u32 main_l_dl, u32 main_r_dl, u32 auxb_l_dl,
-                     u32 auxb_r_dl);
-
-  // Handle save states for main AX.
-  void DoAXState(PointerWrap& p);
-
 private:
-  void ReadPB(Memory::MemoryManager& memory, u32 addr, AXPB& pb);
-  void WritePB(Memory::MemoryManager& memory, u32 addr, const AXPB& pb);
-
-  enum CmdType
-  {
-    CMD_SETUP = 0x00,
-    CMD_DL_AND_VOL_MIX = 0x01,
-    CMD_PB_ADDR = 0x02,
-    CMD_PROCESS = 0x03,
-    CMD_MIX_AUXA = 0x04,
-    CMD_MIX_AUXB = 0x05,
-    CMD_UPLOAD_LRS = 0x06,
-    CMD_SET_LR = 0x07,
-    CMD_UNK_08 = 0x08,
-    CMD_MIX_AUXB_NOWRITE = 0x09,
-    CMD_UNK_0A = 0x0A,
-    CMD_UNK_0B = 0x0B,
-    CMD_UNK_0C = 0x0C,
-    CMD_MORE = 0x0D,
-    CMD_OUTPUT = 0x0E,
-    CMD_END = 0x0F,
-    CMD_MIX_AUXB_LR = 0x10,
-    CMD_SET_OPPOSITE_LR = 0x11,
-    CMD_COMPRESSOR = 0x12,
-    CMD_SEND_AUX_AND_MIX = 0x13,
-  };
-
   enum class MailState
   {
     WaitingForCmdListSize,
     WaitingForCmdListAddress,
     WaitingForNextTask,
   };
+
+  u32 ConvertMixerControl(u16 mixer_control) const;
+  bool PBHasLowPassFilter() const;
+  void ReadPB(Memory::MemoryManager& memory, u32 addr, AXPB& pb) const;
+  void WritePB(Memory::MemoryManager& memory, u32 addr, const AXPB& pb) const;
+
+  // Command list operations.
+  void SetupProcessing(u32 init_addr);
+  void DownloadAndMixWithVolume(u32 addr, u16 vol_main, u16 vol_auxa, u16 vol_auxb);
+  void ProcessPBList(u32 pb_addr);
+  void MixAUXSamples(int aux_id, u32 write_addr, u32 read_addr);
+  void UploadLRS(u32 dst_addr);
+  void SetMainLR(u32 src_addr);
+  void OutputSamples(u32 lr_addr, u32 surround_addr);
+  void MixAUXBLR(u32 ul_addr, u32 dl_addr);
+  void SetOppositeLR(u32 src_addr);
+  void SendAUXAndMix(u32 auxa_lrs_up, u32 auxb_s_up, u32 main_l_dl, u32 main_r_dl, u32 auxb_l_dl,
+                     u32 auxb_r_dl);
 
   MailState m_mail_state = MailState::WaitingForCmdListSize;
 };

@@ -1,11 +1,10 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-//
-#define AX_WII  // Used in AXVoice.
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/HW/DSPHLE/UCodes/AXWii.h"
 
 #include <array>
+#include <cstddef>
+#include <cstring>
 
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
@@ -17,21 +16,97 @@
 #include "Core/HW/DSPHLE/UCodes/AXVoice.h"
 #include "Core/HW/DSPHLE/UCodes/UCodes.h"
 #include "Core/HW/Memmap.h"
+#include "Core/System.h"
 
 namespace DSP::HLE
 {
-AXWiiUCode::AXWiiUCode(DSPHLE* dsphle, u32 crc)
-    : AXUCode(dsphle, crc, false), m_last_main_volume(0x8000)
+using AXVoice::AddWrapped;
+using AXVoice::Clamp16;
+using AXVoice::Join16;
+
+namespace
 {
-  INFO_LOG_FMT(DSPHLE, "Instantiating AXWiiUCode: crc={:08x}", crc);
+// Builds by their PB layout:
+//  - Wii Sports (PAL) and the startup menu: old opcodes, PB updates, high-pass filter.
+//  - System Menu 1.0 and Elebits: no updates field, high-pass filter.
+//  - Raving Rabbids and Bleach: no updates field, biquad filter (and the new filters).
+constexpr u32 CRC_WII_SPORTS_PAL = 0xfa450138;
+constexpr u32 CRC_STARTUP_MENU = 0x7699af32;
+constexpr u32 CRC_SYSTEM_MENU_1_0 = 0xd9c4bf34;
+constexpr u32 CRC_ELEBITS = 0xadbc06bd;
+constexpr u32 CRC_RAVING_RABBIDS = 0x347112ba;
+constexpr u32 CRC_BLEACH = 0x4cc52064;
 
-  for (u16& volume : m_last_aux_volumes)
-    volume = 0x8000;
+enum class PBLayout
+{
+  UpdatesAndHighPass,
+  HighPassOnly,
+  BiquadOnly,
+  Unknown,
+};
 
-  m_old_axwii = crc == 0xfa450138 || crc == 0x7699af32;
-  m_new_filter = crc == 0x347112ba || crc == 0x4cc52064;
+PBLayout LayoutFor(u32 crc)
+{
+  switch (crc)
+  {
+  case CRC_WII_SPORTS_PAL:
+  case CRC_STARTUP_MENU:
+    return PBLayout::UpdatesAndHighPass;
+  case CRC_SYSTEM_MENU_1_0:
+  case CRC_ELEBITS:
+    return PBLayout::HighPassOnly;
+  case CRC_RAVING_RABBIDS:
+  case CRC_BLEACH:
+    return PBLayout::BiquadOnly;
+  default:
+    return PBLayout::Unknown;
+  }
+}
 
-  m_accelerator = std::make_unique<HLEAccelerator>(dsphle->GetSystem().GetDSP());
+// Byte ranges of the full AXPBWii struct that a layout leaves out in RAM (where the struct
+// gets zeros).
+constexpr size_t UPDATES_BEGIN = offsetof(AXPBWii, updates);
+constexpr size_t UPDATES_END = UPDATES_BEGIN + sizeof(PBUpdatesWii);
+constexpr size_t FILTER_GAP_BEGIN = offsetof(AXPBWii, hpf) + sizeof(PBHighPassFilter);
+constexpr size_t FILTER_GAP_END = offsetof(AXPBWii, biquad) + sizeof(PBBiquadFilter);
+
+struct Segment
+{
+  size_t begin;
+  size_t end;
+};
+
+// The parts of the struct that exist in RAM for a layout, in order.
+size_t PresentSegments(PBLayout layout, std::array<Segment, 3>& out)
+{
+  switch (layout)
+  {
+  case PBLayout::UpdatesAndHighPass:
+    out = {{{0, FILTER_GAP_BEGIN}, {FILTER_GAP_END, sizeof(AXPBWii)}}};
+    return 2;
+  case PBLayout::HighPassOnly:
+    out = {{{0, UPDATES_BEGIN},
+            {UPDATES_END, FILTER_GAP_BEGIN},
+            {FILTER_GAP_END, sizeof(AXPBWii)}}};
+    return 3;
+  case PBLayout::BiquadOnly:
+    out = {{{0, UPDATES_BEGIN}, {UPDATES_END, sizeof(AXPBWii)}}};
+    return 2;
+  case PBLayout::Unknown:
+    break;
+  }
+  return 0;
+}
+}  // namespace
+
+AXWiiUCode::AXWiiUCode(DSPHLE* dsphle, u32 crc) : AXUCode(dsphle, crc, WiiVariant{})
+{
+  INFO_LOG_FMT(DSPHLE, "AX (Wii) ucode {:08x}", crc);
+
+  m_old_axwii = crc == CRC_WII_SPORTS_PAL || crc == CRC_STARTUP_MENU;
+  m_new_filter = crc == CRC_RAVING_RABBIDS || crc == CRC_BLEACH;
+  m_accelerator =
+      std::make_unique<AXVoice::VoiceAccelerator<AXPBWii>>(dsphle->GetSystem().GetDSP());
 }
 
 void AXWiiUCode::Initialize()
@@ -39,601 +114,443 @@ void AXWiiUCode::Initialize()
   InitializeShared();
 }
 
+AXWiiUCode::Op AXWiiUCode::DecodeOp(u16 opcode) const
+{
+  // The early numbering has a separate "set PB address" command, which shifts everything after
+  // it by one; the output commands there take no volume.
+  static constexpr Op OLD_OPS[] = {
+      Op::Setup,          Op::AddToLR,           Op::SubToLR,           Op::AddSubToLR,
+      Op::SetPBAddr,      Op::ProcessStoredPBs,  Op::MixAuxA,           Op::MixAuxB,
+      Op::MixAuxC,        Op::UploadAuxAMixLRSC, Op::UploadAuxBMixLRSC, Op::Compressor,
+      Op::Output,         Op::OutputDPL2,        Op::OutputRemotes,     Op::End,
+  };
+  static constexpr Op NEW_OPS[] = {
+      Op::Setup,          Op::AddToLR,           Op::SubToLR,       Op::AddSubToLR,
+      Op::ProcessPBs,     Op::MixAuxA,           Op::MixAuxB,       Op::MixAuxC,
+      Op::UploadAuxAMixLRSC, Op::UploadAuxBMixLRSC, Op::Compressor, Op::Output,
+      Op::OutputDPL2,     Op::OutputRemotes,     Op::End,
+  };
+
+  if (m_old_axwii)
+    return opcode < std::size(OLD_OPS) ? OLD_OPS[opcode] : Op::Ignored;
+  return opcode < std::size(NEW_OPS) ? NEW_OPS[opcode] : Op::Ignored;
+}
+
 void AXWiiUCode::HandleCommandList()
 {
-  // Temp variables for addresses computation
-  u16 addr_hi, addr_lo;
-  u16 addr2_hi, addr2_lo;
-  u16 volume;
+  u32 stored_pb_addr = 0;
+  CommandReader in(m_cmdlist);
 
-  u32 pb_addr = 0;
-
-  u32 curr_idx = 0;
-  bool end = false;
-  while (!end)
+  while (!in.AtEnd())
   {
-    u16 cmd = m_cmdlist[curr_idx++];
-
-    if (m_old_axwii)
+    const Op op = DecodeOp(in.Word());
+    switch (op)
     {
-      switch (cmd)
-      {
-        // Some of these commands are unknown, or unused in this AX HLE.
-        // We still need to skip their arguments using "curr_idx += N".
+    case Op::Setup:
+      SetupProcessing(in.Address());
+      break;
 
-      case CMD_SETUP_OLD:
-        addr_hi = m_cmdlist[curr_idx++];
-        addr_lo = m_cmdlist[curr_idx++];
-        SetupProcessing(HILO_TO_32(addr));
-        break;
+    case Op::AddToLR:
+    case Op::SubToLR:
+      AddToLR(in.Address(), op == Op::SubToLR);
+      break;
 
-      case CMD_ADD_TO_LR_OLD:
-      case CMD_SUB_TO_LR_OLD:
-        addr_hi = m_cmdlist[curr_idx++];
-        addr_lo = m_cmdlist[curr_idx++];
-        AddToLR(HILO_TO_32(addr), cmd == CMD_SUB_TO_LR_OLD);
-        break;
+    case Op::AddSubToLR:
+      AddSubToLR(in.Address());
+      break;
 
-      case CMD_ADD_SUB_TO_LR_OLD:
-        addr_hi = m_cmdlist[curr_idx++];
-        addr_lo = m_cmdlist[curr_idx++];
-        AddSubToLR(HILO_TO_32(addr));
-        break;
+    case Op::SetPBAddr:
+      stored_pb_addr = in.Address();
+      break;
 
-      case CMD_PB_ADDR_OLD:
-        addr_hi = m_cmdlist[curr_idx++];
-        addr_lo = m_cmdlist[curr_idx++];
-        pb_addr = HILO_TO_32(addr);
-        break;
+    case Op::ProcessStoredPBs:
+      ProcessPBList(stored_pb_addr);
+      break;
 
-      case CMD_PROCESS_OLD:
-        ProcessPBList(pb_addr);
-        break;
+    case Op::ProcessPBs:
+      ProcessPBList(in.Address());
+      break;
 
-      case CMD_MIX_AUXA_OLD:
-      case CMD_MIX_AUXB_OLD:
-      case CMD_MIX_AUXC_OLD:
-        volume = m_cmdlist[curr_idx++];
-        addr_hi = m_cmdlist[curr_idx++];
-        addr_lo = m_cmdlist[curr_idx++];
-        addr2_hi = m_cmdlist[curr_idx++];
-        addr2_lo = m_cmdlist[curr_idx++];
-        MixAUXSamples(cmd - CMD_MIX_AUXA_OLD, HILO_TO_32(addr), HILO_TO_32(addr2), volume);
-        break;
-
-      case CMD_UPL_AUXA_MIX_LRSC_OLD:
-      case CMD_UPL_AUXB_MIX_LRSC_OLD:
-      {
-        volume = m_cmdlist[curr_idx++];
-        u32 addresses[6] = {
-            (u32)(m_cmdlist[curr_idx + 0] << 16) | m_cmdlist[curr_idx + 1],
-            (u32)(m_cmdlist[curr_idx + 2] << 16) | m_cmdlist[curr_idx + 3],
-            (u32)(m_cmdlist[curr_idx + 4] << 16) | m_cmdlist[curr_idx + 5],
-            (u32)(m_cmdlist[curr_idx + 6] << 16) | m_cmdlist[curr_idx + 7],
-            (u32)(m_cmdlist[curr_idx + 8] << 16) | m_cmdlist[curr_idx + 9],
-            (u32)(m_cmdlist[curr_idx + 10] << 16) | m_cmdlist[curr_idx + 11],
-        };
-        curr_idx += 12;
-        UploadAUXMixLRSC(cmd == CMD_UPL_AUXB_MIX_LRSC_OLD, addresses, volume);
-        break;
-      }
-
-      case CMD_COMPRESSOR_OLD:
-      {
-        u16 threshold = m_cmdlist[curr_idx++];
-        u16 frames = m_cmdlist[curr_idx++];
-        addr_hi = m_cmdlist[curr_idx++];
-        addr_lo = m_cmdlist[curr_idx++];
-        RunCompressor(threshold, frames, HILO_TO_32(addr), 3);
-        break;
-      }
-
-      case CMD_OUTPUT_OLD:
-      case CMD_OUTPUT_DPL2_OLD:
-        addr_hi = m_cmdlist[curr_idx++];
-        addr_lo = m_cmdlist[curr_idx++];
-        addr2_hi = m_cmdlist[curr_idx++];
-        addr2_lo = m_cmdlist[curr_idx++];
-        OutputSamples(HILO_TO_32(addr2), HILO_TO_32(addr), 0x8000, cmd == CMD_OUTPUT_DPL2_OLD);
-        break;
-
-      case CMD_WM_OUTPUT_OLD:
-      {
-        u32 addresses[4] = {
-            (u32)(m_cmdlist[curr_idx + 0] << 16) | m_cmdlist[curr_idx + 1],
-            (u32)(m_cmdlist[curr_idx + 2] << 16) | m_cmdlist[curr_idx + 3],
-            (u32)(m_cmdlist[curr_idx + 4] << 16) | m_cmdlist[curr_idx + 5],
-            (u32)(m_cmdlist[curr_idx + 6] << 16) | m_cmdlist[curr_idx + 7],
-        };
-        curr_idx += 8;
-        OutputWMSamples(addresses);
-        break;
-      }
-
-      case CMD_END_OLD:
-        end = true;
-        break;
-      }
-    }
-    else
+    case Op::MixAuxA:
+    case Op::MixAuxB:
+    case Op::MixAuxC:
     {
-      switch (cmd)
-      {
-        // Some of these commands are unknown, or unused in this AX HLE.
-        // We still need to skip their arguments using "curr_idx += N".
-
-      case CMD_SETUP:
-        addr_hi = m_cmdlist[curr_idx++];
-        addr_lo = m_cmdlist[curr_idx++];
-        SetupProcessing(HILO_TO_32(addr));
-        break;
-
-      case CMD_ADD_TO_LR:
-      case CMD_SUB_TO_LR:
-        addr_hi = m_cmdlist[curr_idx++];
-        addr_lo = m_cmdlist[curr_idx++];
-        AddToLR(HILO_TO_32(addr), cmd == CMD_SUB_TO_LR);
-        break;
-
-      case CMD_ADD_SUB_TO_LR:
-        addr_hi = m_cmdlist[curr_idx++];
-        addr_lo = m_cmdlist[curr_idx++];
-        AddSubToLR(HILO_TO_32(addr));
-        break;
-
-      case CMD_PROCESS:
-        addr_hi = m_cmdlist[curr_idx++];
-        addr_lo = m_cmdlist[curr_idx++];
-        ProcessPBList(HILO_TO_32(addr));
-        break;
-
-      case CMD_MIX_AUXA:
-      case CMD_MIX_AUXB:
-      case CMD_MIX_AUXC:
-        volume = m_cmdlist[curr_idx++];
-        addr_hi = m_cmdlist[curr_idx++];
-        addr_lo = m_cmdlist[curr_idx++];
-        addr2_hi = m_cmdlist[curr_idx++];
-        addr2_lo = m_cmdlist[curr_idx++];
-        MixAUXSamples(cmd - CMD_MIX_AUXA, HILO_TO_32(addr), HILO_TO_32(addr2), volume);
-        break;
-
-      case CMD_UPL_AUXA_MIX_LRSC:
-      case CMD_UPL_AUXB_MIX_LRSC:
-      {
-        volume = m_cmdlist[curr_idx++];
-        u32 addresses[6] = {
-            (u32)(m_cmdlist[curr_idx + 0] << 16) | m_cmdlist[curr_idx + 1],
-            (u32)(m_cmdlist[curr_idx + 2] << 16) | m_cmdlist[curr_idx + 3],
-            (u32)(m_cmdlist[curr_idx + 4] << 16) | m_cmdlist[curr_idx + 5],
-            (u32)(m_cmdlist[curr_idx + 6] << 16) | m_cmdlist[curr_idx + 7],
-            (u32)(m_cmdlist[curr_idx + 8] << 16) | m_cmdlist[curr_idx + 9],
-            (u32)(m_cmdlist[curr_idx + 10] << 16) | m_cmdlist[curr_idx + 11],
-        };
-        curr_idx += 12;
-        UploadAUXMixLRSC(cmd == CMD_UPL_AUXB_MIX_LRSC, addresses, volume);
-        break;
-      }
-
-      case CMD_COMPRESSOR:
-      {
-        u16 threshold = m_cmdlist[curr_idx++];
-        u16 frames = m_cmdlist[curr_idx++];
-        addr_hi = m_cmdlist[curr_idx++];
-        addr_lo = m_cmdlist[curr_idx++];
-        RunCompressor(threshold, frames, HILO_TO_32(addr), 3);
-        break;
-      }
-
-      case CMD_OUTPUT:
-      case CMD_OUTPUT_DPL2:
-        volume = m_crc == 0xd9c4bf34 ? 0x8000 : m_cmdlist[curr_idx++];
-        addr_hi = m_cmdlist[curr_idx++];
-        addr_lo = m_cmdlist[curr_idx++];
-        addr2_hi = m_cmdlist[curr_idx++];
-        addr2_lo = m_cmdlist[curr_idx++];
-        OutputSamples(HILO_TO_32(addr2), HILO_TO_32(addr), volume, cmd == CMD_OUTPUT_DPL2);
-        break;
-
-      case CMD_WM_OUTPUT:
-      {
-        u32 addresses[4] = {
-            (u32)(m_cmdlist[curr_idx + 0] << 16) | m_cmdlist[curr_idx + 1],
-            (u32)(m_cmdlist[curr_idx + 2] << 16) | m_cmdlist[curr_idx + 3],
-            (u32)(m_cmdlist[curr_idx + 4] << 16) | m_cmdlist[curr_idx + 5],
-            (u32)(m_cmdlist[curr_idx + 6] << 16) | m_cmdlist[curr_idx + 7],
-        };
-        curr_idx += 8;
-        OutputWMSamples(addresses);
-        break;
-      }
-
-      case CMD_END:
-        end = true;
-        break;
-      }
+      const u16 volume = in.Word();
+      const u32 write_addr = in.Address();
+      const u32 read_addr = in.Address();
+      const int aux_id = op == Op::MixAuxA ? 0 : op == Op::MixAuxB ? 1 : 2;
+      MixAUXSamples(aux_id, write_addr, read_addr, volume);
+      break;
     }
+
+    case Op::UploadAuxAMixLRSC:
+    case Op::UploadAuxBMixLRSC:
+    {
+      const u16 volume = in.Word();
+      u32 addresses[6];
+      for (u32& address : addresses)
+        address = in.Address();
+      UploadAUXMixLRSC(op == Op::UploadAuxBMixLRSC ? 1 : 0, addresses, volume);
+      break;
+    }
+
+    case Op::Compressor:
+    {
+      const u16 threshold = in.Word();
+      const u16 release_frames = in.Word();
+      const u32 table_addr = in.Address();
+      RunCompressor(threshold, release_frames, table_addr, 3);
+      break;
+    }
+
+    case Op::Output:
+    case Op::OutputDPL2:
+    {
+      // Early builds and System Menu 1.0 have no output volume.
+      const bool has_volume = !m_old_axwii && m_crc != CRC_SYSTEM_MENU_1_0;
+      const u16 volume = has_volume ? in.Word() : u16{0x8000};
+      const u32 surround_addr = in.Address();
+      const u32 lr_addr = in.Address();
+      OutputSamples(lr_addr, surround_addr, volume, op == Op::OutputDPL2);
+      break;
+    }
+
+    case Op::OutputRemotes:
+    {
+      u32 addresses[4];
+      for (u32& address : addresses)
+        address = in.Address();
+      OutputWMSamples(addresses);
+      break;
+    }
+
+    case Op::End:
+      return;
+
+    case Op::Ignored:
+      // Unknown words are skipped one at a time.
+      break;
+    }
+  }
+  ERROR_LOG_FMT(DSPHLE, "AXWii: command list without an end command");
+}
+
+int* AXWiiUCode::AuxBus(int aux_id, size_t channel)
+{
+  switch (aux_id)
+  {
+  case 0:
+    return BusData(BUS_AUXA_L + channel);
+  case 1:
+    return BusData(BUS_AUXB_L + channel);
+  default:
+    return m_auxc[AUXC_L + channel].data();
   }
 }
 
 void AXWiiUCode::SetupProcessing(u32 init_addr)
 {
-  const std::array<BufferDesc, 20> buffers = {{
-      {m_samples_main_left, 32}, {m_samples_main_right, 32}, {m_samples_main_surround, 32},
-      {m_samples_auxA_left, 32}, {m_samples_auxA_right, 32}, {m_samples_auxA_surround, 32},
-      {m_samples_auxB_left, 32}, {m_samples_auxB_right, 32}, {m_samples_auxB_surround, 32},
-      {m_samples_auxC_left, 32}, {m_samples_auxC_right, 32}, {m_samples_auxC_surround, 32},
-
-      {m_samples_wm0, 6},        {m_samples_aux0, 6},        {m_samples_wm1, 6},
-      {m_samples_aux1, 6},       {m_samples_wm2, 6},         {m_samples_aux2, 6},
-      {m_samples_wm3, 6},        {m_samples_aux3, 6},
-  }};
-  InitMixingBuffers<3 /*ms*/>(init_addr, buffers);
+  std::array<RampTarget, 20> targets;
+  size_t n = 0;
+  for (size_t bus = 0; bus < NUM_BUSES; ++bus)
+    targets[n++] = {BusData(bus), FRAME_SAMPLES};
+  for (auto& bus : m_auxc)
+    targets[n++] = {bus.data(), FRAME_SAMPLES};
+  for (size_t speaker = 0; speaker < 4; ++speaker)
+  {
+    targets[n++] = {RemoteMain(speaker), REMOTE_FRAME_SAMPLES};
+    targets[n++] = {RemoteAux(speaker), REMOTE_FRAME_SAMPLES};
+  }
+  InitBuffersFromRamps(init_addr, targets.data(), n);
 }
+
+namespace
+{
+s32 ReadSampleBE(const u8* buffer, size_t index)
+{
+  u32 raw;
+  std::memcpy(&raw, buffer + index * sizeof(u32), sizeof(raw));
+  return static_cast<s32>(Common::swap32(raw));
+}
+
+constexpr int Negate(s32 value)
+{
+  return static_cast<int>(0u - static_cast<u32>(value));
+}
+}  // namespace
 
 void AXWiiUCode::AddToLR(u32 val_addr, bool neg)
 {
-  auto& memory = m_dsphle->GetSystem().GetMemory();
-  int* ptr = reinterpret_cast<int*>(memory.GetPointerForRange(val_addr, 32 * 3 * sizeof(int)));
-  for (int i = 0; i < 32 * 3; ++i)
+  const u8* source = m_dsphle->GetSystem().GetMemory().GetPointerForRange(
+      val_addr, FRAME_SAMPLES * sizeof(u32));
+  int* left = BusData(BUS_MAIN_L);
+  int* right = BusData(BUS_MAIN_R);
+  for (size_t i = 0; i < FRAME_SAMPLES; ++i)
   {
-    int val = (int)Common::swap32(*ptr++);
-    if (neg)
-      val = -val;
-
-    m_samples_main_left[i] += val;
-    m_samples_main_right[i] += val;
+    const s32 sample = ReadSampleBE(source, i);
+    const s32 value = neg ? Negate(sample) : sample;
+    left[i] = AddWrapped(left[i], value);
+    right[i] = AddWrapped(right[i], value);
   }
 }
 
 void AXWiiUCode::AddSubToLR(u32 val_addr)
 {
-  auto& memory = m_dsphle->GetSystem().GetMemory();
-  int* ptr = reinterpret_cast<int*>(memory.GetPointerForRange(val_addr, 2 * 32 * 3 * sizeof(int)));
-  for (int i = 0; i < 32 * 3; ++i)
-  {
-    int val = (int)Common::swap32(*ptr++);
-    m_samples_main_left[i] += val;
-  }
-  for (int i = 0; i < 32 * 3; ++i)
-  {
-    int val = (int)Common::swap32(*ptr++);
-    m_samples_main_right[i] -= val;
-  }
+  const u8* source = m_dsphle->GetSystem().GetMemory().GetPointerForRange(
+      val_addr, 2 * FRAME_SAMPLES * sizeof(u32));
+  int* left = BusData(BUS_MAIN_L);
+  int* right = BusData(BUS_MAIN_R);
+  for (size_t i = 0; i < FRAME_SAMPLES; ++i)
+    left[i] = AddWrapped(left[i], ReadSampleBE(source, i));
+  for (size_t i = 0; i < FRAME_SAMPLES; ++i)
+    right[i] = AddWrapped(right[i], Negate(ReadSampleBE(source, FRAME_SAMPLES + i)));
 }
 
-AXMixControl AXWiiUCode::ConvertMixerControl(u32 mixer_control)
+u32 AXWiiUCode::ConvertMixerControl(u32 mixer_control)
 {
-  u32 ret = 0;
-
-  if (mixer_control & 0x00000001)
-    ret |= MIX_MAIN_L;
-  if (mixer_control & 0x00000002)
-    ret |= MIX_MAIN_R;
-  if (mixer_control & 0x00000004)
-    ret |= MIX_MAIN_L | MIX_MAIN_R | MIX_MAIN_L_RAMP | MIX_MAIN_R_RAMP;
-  if (mixer_control & 0x00000008)
-    ret |= MIX_MAIN_S;
-  if (mixer_control & 0x00000010)
-    ret |= MIX_MAIN_S | MIX_MAIN_S_RAMP;
-  if (mixer_control & 0x00010000)
-    ret |= MIX_AUXA_L;
-  if (mixer_control & 0x00020000)
-    ret |= MIX_AUXA_R;
-  if (mixer_control & 0x00040000)
-    ret |= MIX_AUXA_L | MIX_AUXA_R | MIX_AUXA_L_RAMP | MIX_AUXA_R_RAMP;
-  if (mixer_control & 0x00080000)
-    ret |= MIX_AUXA_S;
-  if (mixer_control & 0x00100000)
-    ret |= MIX_AUXA_S | MIX_AUXA_S_RAMP;
-  if (mixer_control & 0x00200000)
-    ret |= MIX_AUXB_L;
-  if (mixer_control & 0x00400000)
-    ret |= MIX_AUXB_R;
-  if (mixer_control & 0x00800000)
-    ret |= MIX_AUXB_L | MIX_AUXB_R | MIX_AUXB_L_RAMP | MIX_AUXB_R_RAMP;
-  if (mixer_control & 0x01000000)
-    ret |= MIX_AUXB_S;
-  if (mixer_control & 0x02000000)
-    ret |= MIX_AUXB_S | MIX_AUXB_S_RAMP;
-  if (mixer_control & 0x04000000)
-    ret |= MIX_AUXC_L;
-  if (mixer_control & 0x08000000)
-    ret |= MIX_AUXC_R;
-  if (mixer_control & 0x10000000)
-    ret |= MIX_AUXC_L | MIX_AUXC_R | MIX_AUXC_L_RAMP | MIX_AUXC_R_RAMP;
-  if (mixer_control & 0x20000000)
-    ret |= MIX_AUXC_S;
-  if (mixer_control & 0x40000000)
-    ret |= MIX_AUXC_S | MIX_AUXC_S_RAMP;
-
-  return (AXMixControl)ret;
+  // Each bus has "left", "right", "left+right with ramp", "surround" and "surround with ramp"
+  // bits; main in the low half, aux A/B/C in the high half.
+  struct BitMeaning
+  {
+    u32 bit;
+    u32 flags;
+  };
+  static constexpr BitMeaning MEANINGS[] = {
+      {0x00000001, MIX_MAIN_L},
+      {0x00000002, MIX_MAIN_R},
+      {0x00000004, MIX_MAIN_L | MIX_MAIN_R | MIX_MAIN_L_RAMP | MIX_MAIN_R_RAMP},
+      {0x00000008, MIX_MAIN_S},
+      {0x00000010, MIX_MAIN_S | MIX_MAIN_S_RAMP},
+      {0x00010000, MIX_AUXA_L},
+      {0x00020000, MIX_AUXA_R},
+      {0x00040000, MIX_AUXA_L | MIX_AUXA_R | MIX_AUXA_L_RAMP | MIX_AUXA_R_RAMP},
+      {0x00080000, MIX_AUXA_S},
+      {0x00100000, MIX_AUXA_S | MIX_AUXA_S_RAMP},
+      {0x00200000, MIX_AUXB_L},
+      {0x00400000, MIX_AUXB_R},
+      {0x00800000, MIX_AUXB_L | MIX_AUXB_R | MIX_AUXB_L_RAMP | MIX_AUXB_R_RAMP},
+      {0x01000000, MIX_AUXB_S},
+      {0x02000000, MIX_AUXB_S | MIX_AUXB_S_RAMP},
+      {0x04000000, MIX_AUXC_L},
+      {0x08000000, MIX_AUXC_R},
+      {0x10000000, MIX_AUXC_L | MIX_AUXC_R | MIX_AUXC_L_RAMP | MIX_AUXC_R_RAMP},
+      {0x20000000, MIX_AUXC_S},
+      {0x40000000, MIX_AUXC_S | MIX_AUXC_S_RAMP},
+  };
+  u32 mix = 0;
+  for (const BitMeaning& meaning : MEANINGS)
+  {
+    if ((mixer_control & meaning.bit) != 0)
+      mix |= meaning.flags;
+  }
+  return mix;
 }
 
-void AXWiiUCode::GenerateVolumeRamp(u16* output, u16 vol1, u16 vol2, size_t nvals)
+void AXWiiUCode::GenerateVolumeRamp(u16* output, u16 from, u16 to, size_t count)
 {
-  float curr = vol1;
-  for (size_t i = 0; i < nvals; ++i)
+  const float step = static_cast<float>(to - from) / static_cast<float>(count);
+  float level = from;
+  for (size_t i = 0; i < count; ++i)
   {
-    curr += (vol2 - vol1) / (float)nvals;
-    output[i] = (u16)curr;
+    level += step;
+    output[i] = static_cast<u16>(level);
   }
 }
 
-void AXWiiUCode::ReadPB(Memory::MemoryManager& memory, u32 addr, AXPBWii& pb)
+void AXWiiUCode::ReadPB(Memory::MemoryManager& memory, u32 addr, AXPBWii& pb) const
 {
-  // The Wii PB memory layout changed twice.
-  // For HLE, we use the largest struct version.
-  char* dst = (char*)&pb;
-  constexpr size_t updates_begin = offsetof(AXPBWii, updates);
-  constexpr size_t updates_end = offsetof(AXPBWii, updates) + sizeof(PBUpdatesWii);
-  constexpr size_t gap_begin = offsetof(AXPBWii, hpf) + sizeof(PBHighPassFilter);
-  constexpr size_t gap_end = offsetof(AXPBWii, biquad) + sizeof(PBBiquadFilter);
-  switch (m_crc)
+  std::array<Segment, 3> segments;
+  const size_t count = PresentSegments(LayoutFor(m_crc), segments);
+  if (count == 0)
+    return;
+
+  // Fields missing from this layout read as zero.
+  u8* const bytes = reinterpret_cast<u8*>(&pb);
+  size_t ram_offset = 0;
+  size_t struct_offset = 0;
+  for (size_t i = 0; i < count; ++i)
   {
-  case 0x7699af32:
-  case 0xfa450138:
-    // The hpf field is a bit smaller than the biquad. Skip the difference.
-    memory.CopyFromEmuSwapped<u16>((u16*)dst, addr, gap_begin);
-    memset(dst + gap_begin, 0, gap_end - gap_begin);
-    memory.CopyFromEmuSwapped<u16>((u16*)(dst + gap_end), addr + gap_begin, sizeof(pb) - gap_end);
-    break;
-  case 0xd9c4bf34:
-  case 0xadbc06bd:
-    // Skip updates field and skip gap after hpf.
-    memory.CopyFromEmuSwapped<u16>((u16*)dst, addr, updates_begin);
-    memset(dst + updates_begin, 0, sizeof(PBUpdatesWii));
-    memory.CopyFromEmuSwapped<u16>((u16*)(dst + updates_end), addr + updates_begin,
-                                   gap_begin - updates_end);
-    memset(dst + gap_begin, 0, gap_end - gap_begin);
-    memory.CopyFromEmuSwapped<u16>((u16*)(dst + gap_end), addr + gap_begin, sizeof(pb) - gap_end);
-    break;
-  case 0x347112ba:
-  case 0x4cc52064:
-    // Just skip updates field.
-    memory.CopyFromEmuSwapped<u16>((u16*)dst, addr, updates_begin);
-    memset(dst + updates_begin, 0, sizeof(PBUpdatesWii));
-    memory.CopyFromEmuSwapped<u16>((u16*)(dst + updates_end), addr + updates_begin,
-                                   sizeof(pb) - updates_end);
-    break;
+    const Segment& segment = segments[i];
+    std::memset(bytes + struct_offset, 0, segment.begin - struct_offset);
+    const size_t length = segment.end - segment.begin;
+    memory.CopyFromEmuSwapped(reinterpret_cast<u16*>(bytes + segment.begin),
+                              addr + static_cast<u32>(ram_offset), length);
+    ram_offset += length;
+    struct_offset = segment.end;
   }
 }
 
-void AXWiiUCode::WritePB(Memory::MemoryManager& memory, u32 addr, const AXPBWii& pb)
+void AXWiiUCode::WritePB(Memory::MemoryManager& memory, u32 addr, const AXPBWii& pb) const
 {
-  const char* src = (const char*)&pb;
-  constexpr size_t updates_begin = offsetof(AXPBWii, updates);
-  constexpr size_t updates_end = offsetof(AXPBWii, updates) + sizeof(PBUpdatesWii);
-  constexpr size_t gap_begin = offsetof(AXPBWii, hpf) + sizeof(PBHighPassFilter);
-  constexpr size_t gap_end = offsetof(AXPBWii, biquad) + sizeof(PBBiquadFilter);
-  switch (m_crc)
+  std::array<Segment, 3> segments;
+  const size_t count = PresentSegments(LayoutFor(m_crc), segments);
+
+  const u8* const bytes = reinterpret_cast<const u8*>(&pb);
+  size_t ram_offset = 0;
+  for (size_t i = 0; i < count; ++i)
   {
-  case 0x7699af32:
-  case 0xfa450138:
-    memory.CopyToEmuSwapped<u16>(addr, (const u16*)src, gap_begin);
-    memory.CopyToEmuSwapped<u16>(addr + gap_begin, (const u16*)(src + gap_end),
-                                 sizeof(pb) - gap_end);
-    break;
-  case 0xd9c4bf34:
-  case 0xadbc06bd:
-    memory.CopyToEmuSwapped<u16>(addr, (const u16*)src, updates_begin);
-    memory.CopyToEmuSwapped<u16>(addr + updates_begin, (const u16*)(src + updates_end),
-                                 gap_begin - updates_end);
-    memory.CopyToEmuSwapped<u16>(addr + gap_begin, (const u16*)(src + gap_end),
-                                 sizeof(pb) - gap_end);
-    break;
-  case 0x347112ba:
-  case 0x4cc52064:
-    memory.CopyToEmuSwapped<u16>(addr, (const u16*)src, updates_begin);
-    memory.CopyToEmuSwapped<u16>(addr + updates_begin, (const u16*)(src + updates_end),
-                                 sizeof(pb) - updates_end);
-    break;
+    const size_t length = segments[i].end - segments[i].begin;
+    memory.CopyToEmuSwapped(addr + static_cast<u32>(ram_offset),
+                            reinterpret_cast<const u16*>(bytes + segments[i].begin), length);
+    ram_offset += length;
   }
 }
 
 void AXWiiUCode::ProcessPBList(u32 pb_addr)
 {
-  // Samples per millisecond. In theory DSP sampling rate can be changed from
-  // 32KHz to 48KHz, but AX always process at 32KHz.
-  constexpr u32 spms = 32;
-
-  AXPBWii pb;
-
   auto& memory = m_dsphle->GetSystem().GetMemory();
-  while (pb_addr)
-  {
-    AXBuffers buffers = {{m_samples_main_left, m_samples_main_right, m_samples_main_surround,
-                          m_samples_auxA_left, m_samples_auxA_right, m_samples_auxA_surround,
-                          m_samples_auxB_left, m_samples_auxB_right, m_samples_auxB_surround,
-                          m_samples_auxC_left, m_samples_auxC_right, m_samples_auxC_surround,
-                          m_samples_wm0,       m_samples_aux0,       m_samples_wm1,
-                          m_samples_aux1,      m_samples_wm2,        m_samples_aux2,
-                          m_samples_wm3,       m_samples_aux3}};
+  auto& accelerator = static_cast<AXVoice::VoiceAccelerator<AXPBWii>&>(*m_accelerator);
 
+  // Buses for millisecond `ms` (0 for a whole frame).
+  const auto targets_from = [this](size_t ms) {
+    AXVoice::VoiceTargets<AXPBWii> targets;
+    for (size_t bus = 0; bus < NUM_BUSES; ++bus)
+      targets.buses[bus] = BusData(bus) + ms * SAMPLES_PER_MS;
+    for (size_t i = 0; i < 3; ++i)
+      targets.buses[NUM_BUSES + i] = m_auxc[i].data() + ms * SAMPLES_PER_MS;
+    for (size_t speaker = 0; speaker < 4; ++speaker)
+    {
+      targets.remote[2 * speaker] = RemoteMain(speaker) + ms * REMOTE_SAMPLES_PER_MS;
+      targets.remote[2 * speaker + 1] = RemoteAux(speaker) + ms * REMOTE_SAMPLES_PER_MS;
+    }
+    return targets;
+  };
+
+  AXPBWii pb{};
+  while (pb_addr != 0)
+  {
     ReadPB(memory, pb_addr, pb);
 
-    if (m_old_axwii &&
-        (pb.updates.num_updates[0] | pb.updates.num_updates[1] | pb.updates.num_updates[2]))
+    const bool has_updates = (pb.updates.num_updates[0] | pb.updates.num_updates[1] |
+                              pb.updates.num_updates[2]) != 0;
+    if (m_old_axwii && has_updates)
     {
-      PBUpdateData updates = LoadPBUpdates(memory, pb);
-      for (int curr_ms = 0; curr_ms < 3; ++curr_ms)
+      // Updates are per millisecond, so the frame is rendered a millisecond at a time.
+      const PBUpdateData updates = AXVoice::FetchUpdateList(memory, pb);
+      for (u32 ms = 0; ms < 3; ++ms)
       {
-        ApplyUpdatesForMs(curr_ms, pb, pb.updates.num_updates, updates);
-        ProcessVoice(static_cast<HLEAccelerator*>(m_accelerator.get()), pb, buffers, spms,
-                     ConvertMixerControl(HILO_TO_32(pb.mixer_control)),
-                     m_coeffs_checksum ? m_coeffs.data() : nullptr, m_new_filter);
-
-        // Forward the buffers
-        for (auto& ptr : buffers.regular_ptrs)
-          ptr += spms;
-        for (auto& ptr : buffers.wiimote_ptrs)
-          ptr += 6;
+        AXVoice::ApplyUpdatesForMillisecond(pb, ms, updates);
+        AXVoice::RenderVoice(accelerator, pb, targets_from(ms), SAMPLES_PER_MS,
+                             ConvertMixerControl(Join16(pb.mixer_control_hi, pb.mixer_control_lo)),
+                             CoefficientTables(), m_new_filter);
       }
     }
     else
     {
-      ProcessVoice(static_cast<HLEAccelerator*>(m_accelerator.get()), pb, buffers, 96,
-                   ConvertMixerControl(HILO_TO_32(pb.mixer_control)),
-                   m_coeffs_checksum ? m_coeffs.data() : nullptr, m_new_filter);
+      AXVoice::RenderVoice(accelerator, pb, targets_from(0), FRAME_SAMPLES,
+                           ConvertMixerControl(Join16(pb.mixer_control_hi, pb.mixer_control_lo)),
+                           CoefficientTables(), m_new_filter);
     }
 
     WritePB(memory, pb_addr, pb);
-    pb_addr = HILO_TO_32(pb.next_pb);
+    pb_addr = Join16(pb.next_pb_hi, pb.next_pb_lo);
   }
 }
 
 void AXWiiUCode::MixAUXSamples(int aux_id, u32 write_addr, u32 read_addr, u16 volume)
 {
-  std::array<u16, 96> volume_ramp;
-  GenerateVolumeRamp(volume_ramp.data(), m_last_aux_volumes[aux_id], volume, volume_ramp.size());
-  m_last_aux_volumes[aux_id] = volume;
+  std::array<u16, FRAME_SAMPLES> ramp;
+  GenerateVolumeRamp(ramp.data(), m_last_aux_volumes[static_cast<size_t>(aux_id)], volume, ramp.size());
+  m_last_aux_volumes[static_cast<size_t>(aux_id)] = volume;
 
-  std::array<int*, 3> main_buffers{
-      m_samples_main_left,
-      m_samples_main_right,
-      m_samples_main_surround,
-  };
-
-  std::array<const int*, 3> buffers{};
-  switch (aux_id)
-  {
-  case 0:
-    buffers = {
-        m_samples_auxA_left,
-        m_samples_auxA_right,
-        m_samples_auxA_surround,
-    };
-    break;
-
-  case 1:
-    buffers = {
-        m_samples_auxB_left,
-        m_samples_auxB_right,
-        m_samples_auxB_surround,
-    };
-    break;
-
-  case 2:
-    buffers = {
-        m_samples_auxC_left,
-        m_samples_auxC_right,
-        m_samples_auxC_surround,
-    };
-    break;
-  }
-
-  // Send the content of AUX buffers to the CPU
   auto& memory = m_dsphle->GetSystem().GetMemory();
-  if (write_addr)
+  constexpr u32 BUS_BYTES = FRAME_SAMPLES * sizeof(int);
+
+  // Send the aux bus to the CPU...
+  if (write_addr != 0)
   {
-    for (const auto& buffer : buffers)
+    for (size_t channel = 0; channel < 3; ++channel)
     {
-      memory.CopyToEmuSwapped(write_addr, buffer, 3 * 32 * sizeof(int));
-      write_addr += 3 * 32 * sizeof(int);
+      memory.CopyToEmuSwapped(write_addr + static_cast<u32>(channel) * BUS_BYTES,
+                              AuxBus(aux_id, channel), BUS_BYTES);
     }
   }
 
-  // Then read the buffers from the CPU and add to our main buffers.
-  const int* ptr = reinterpret_cast<int*>(
-      memory.GetPointerForRange(read_addr, main_buffers.size() * 3 * 32 * sizeof(int)));
-  for (auto& main_buffer : main_buffers)
+  // ...and add what comes back to main, through the volume ramp.
+  const u8* returned = memory.GetPointerForRange(read_addr, 3 * BUS_BYTES);
+  for (size_t channel = 0; channel < 3; ++channel)
   {
-    for (u32 j = 0; j < 3 * 32; ++j)
+    int* main = BusData(BUS_MAIN_L + channel);
+    for (size_t i = 0; i < FRAME_SAMPLES; ++i)
     {
-      s64 sample = (s64)(s32)Common::swap32(*ptr++);
-      sample *= volume_ramp[j];
-      main_buffer[j] += (s32)(sample >> 15);
+      const s64 scaled = s64{ReadSampleBE(returned, channel * FRAME_SAMPLES + i)} * ramp[i];
+      main[i] = AddWrapped(main[i], static_cast<s32>(scaled >> 15));
     }
   }
 }
 
-void AXWiiUCode::UploadAUXMixLRSC(int aux_id, u32* addresses, u16 volume)
+void AXWiiUCode::UploadAUXMixLRSC(int aux_id, const u32* addresses, u16 volume)
 {
-  int* aux_left = aux_id ? m_samples_auxB_left : m_samples_auxA_left;
-  int* aux_right = aux_id ? m_samples_auxB_right : m_samples_auxA_right;
-  int* aux_surround = aux_id ? m_samples_auxB_surround : m_samples_auxA_surround;
-  int* auxc_buffer = aux_id ? m_samples_auxC_surround : m_samples_auxC_right;
-
   auto& memory = m_dsphle->GetSystem().GetMemory();
-  memory.CopyToEmuSwapped(addresses[0], aux_left, 96 * sizeof(int));
-  memory.CopyToEmuSwapped(addresses[0] + 96 * sizeof(int), aux_right, 96 * sizeof(int));
-  memory.CopyToEmuSwapped(addresses[0] + 2 * 96 * sizeof(int), aux_surround, 96 * sizeof(int));
+  constexpr u32 BUS_BYTES = FRAME_SAMPLES * sizeof(int);
 
-  memory.CopyToEmuSwapped(addresses[1], auxc_buffer, 96 * sizeof(int));
-
-  u16 volume_ramp[96];
-  GenerateVolumeRamp(volume_ramp, m_last_aux_volumes[aux_id], volume, 96);
-  m_last_aux_volumes[aux_id] = volume;
-
-  int* mix_dest[4] = {m_samples_main_left, m_samples_main_right, m_samples_main_surround,
-                      m_samples_auxC_left};
-  for (u32 mix_i = 0; mix_i < 4; ++mix_i)
+  // Upload aux L/R/S, plus aux C R (for aux A) or aux C S (for aux B).
+  int* aux_left = AuxBus(aux_id, 0);
+  for (size_t channel = 0; channel < 3; ++channel)
   {
-    memory.CopyFromEmuSwapped(aux_left, addresses[2 + mix_i], 96 * sizeof(int));
+    memory.CopyToEmuSwapped(addresses[0] + static_cast<u32>(channel) * BUS_BYTES,
+                            AuxBus(aux_id, channel), BUS_BYTES);
+  }
+  memory.CopyToEmuSwapped(addresses[1], m_auxc[aux_id != 0 ? AUXC_S : AUXC_R].data(), BUS_BYTES);
 
-    for (u32 i = 0; i < 96; ++i)
+  std::array<u16, FRAME_SAMPLES> ramp;
+  GenerateVolumeRamp(ramp.data(), m_last_aux_volumes[static_cast<size_t>(aux_id)], volume, ramp.size());
+  m_last_aux_volumes[static_cast<size_t>(aux_id)] = volume;
+
+  // Four returned buffers mix into main L, R, S and aux C L. Each is downloaded into the aux L
+  // bus first, which therefore ends up holding the last one.
+  int* const destinations[4] = {BusData(BUS_MAIN_L), BusData(BUS_MAIN_R), BusData(BUS_MAIN_S),
+                                m_auxc[AUXC_L].data()};
+  for (size_t d = 0; d < 4; ++d)
+  {
+    memory.CopyFromEmuSwapped(aux_left, addresses[2 + d], BUS_BYTES);
+    for (size_t i = 0; i < FRAME_SAMPLES; ++i)
     {
-      s64 sample = (s64)(s32)aux_left[i];
-      sample *= volume_ramp[i];
-      mix_dest[mix_i][i] += (s32)(sample >> 15);
+      const s64 scaled = s64{aux_left[i]} * ramp[i];
+      destinations[d][i] = AddWrapped(destinations[d][i], static_cast<s32>(scaled >> 15));
     }
   }
 }
 
 void AXWiiUCode::OutputSamples(u32 lr_addr, u32 surround_addr, u16 volume, bool upload_auxc)
 {
-  std::array<u16, 96> volume_ramp;
-  GenerateVolumeRamp(volume_ramp.data(), m_last_main_volume, volume, volume_ramp.size());
+  std::array<u16, FRAME_SAMPLES> ramp;
+  GenerateVolumeRamp(ramp.data(), m_last_main_volume, volume, ramp.size());
   m_last_main_volume = volume;
 
   auto& memory = m_dsphle->GetSystem().GetMemory();
-  memory.CopyToEmuSwapped(surround_addr, m_samples_main_surround, 3 * 32 * sizeof(int));
-
+  constexpr u32 BUS_BYTES = FRAME_SAMPLES * sizeof(int);
+  memory.CopyToEmuSwapped(surround_addr, BusData(BUS_MAIN_S), BUS_BYTES);
   if (upload_auxc)
+    memory.CopyToEmuSwapped(surround_addr + BUS_BYTES, m_auxc[AUXC_L].data(), BUS_BYTES);
+
+  // The output volume is applied to main L/R in place, clamped to 16 bits.
+  int* left = BusData(BUS_MAIN_L);
+  int* right = BusData(BUS_MAIN_R);
+  std::array<u16, FRAME_SAMPLES * 2> frame;
+  for (size_t i = 0; i < FRAME_SAMPLES; ++i)
   {
-    memory.CopyToEmuSwapped(surround_addr + 3 * 32 * sizeof(int), m_samples_auxC_left,
-                            3 * 32 * sizeof(int));
+    left[i] = Clamp16((s64{left[i]} * ramp[i]) >> 15);
+    right[i] = Clamp16((s64{right[i]} * ramp[i]) >> 15);
+    frame[2 * i] = Common::swap16(static_cast<u16>(right[i]));
+    frame[2 * i + 1] = Common::swap16(static_cast<u16>(left[i]));
   }
+  memory.CopyToEmu(lr_addr, frame.data(), sizeof(frame));
 
-  // Clamp internal buffers to 16 bits.
-  for (size_t i = 0; i < volume_ramp.size(); ++i)
-  {
-    // Cast to s64 to avoid overflow.
-    s64 left = m_samples_main_left[i];
-    s64 right = m_samples_main_right[i];
-
-    // Apply global volume.
-    left = (left * volume_ramp[i]) >> 15;
-    right = (right * volume_ramp[i]) >> 15;
-
-    m_samples_main_left[i] = ClampS16(left);
-    m_samples_main_right[i] = ClampS16(right);
-  }
-
-  std::array<s16, 3 * 32 * 2> buffer;
-  for (size_t i = 0; i < 3 * 32; ++i)
-  {
-    buffer[2 * i] = Common::swap16(m_samples_main_right[i]);
-    buffer[2 * i + 1] = Common::swap16(m_samples_main_left[i]);
-  }
-
-  memory.CopyToEmu(lr_addr, buffer.data(), sizeof(buffer));
   m_mail_handler.PushMail(DSP_SYNC, true);
 }
 
-void AXWiiUCode::OutputWMSamples(u32* addresses)
+void AXWiiUCode::OutputWMSamples(const u32* addresses)
 {
-  int* buffers[] = {m_samples_wm0, m_samples_wm1, m_samples_wm2, m_samples_wm3};
-
   auto& memory = m_dsphle->GetSystem().GetMemory();
-  for (u32 i = 0; i < 4; ++i)
+  for (size_t speaker = 0; speaker < 4; ++speaker)
   {
-    int* in = buffers[i];
-    u16* out = reinterpret_cast<u16*>(memory.GetPointerForRange(addresses[i], 3 * 6 * sizeof(s16)));
-    for (u32 j = 0; j < 3 * 6; ++j)
+    const int* samples = RemoteMain(speaker);
+    u8* out = memory.GetPointerForRange(addresses[speaker], REMOTE_FRAME_SAMPLES * sizeof(u16));
+    for (size_t i = 0; i < REMOTE_FRAME_SAMPLES; ++i)
     {
-      s16 sample = ClampS16(in[j]);
-      out[j] = Common::swap16((u16)sample);
+      const u16 value = Common::swap16(static_cast<u16>(Clamp16(samples[i])));
+      std::memcpy(out + i * sizeof(u16), &value, sizeof(value));
     }
   }
 }
@@ -642,21 +559,8 @@ void AXWiiUCode::DoState(PointerWrap& p)
 {
   DoStateShared(p);
   DoAXState(p);
-
-  p.Do(m_samples_auxC_left);
-  p.Do(m_samples_auxC_right);
-  p.Do(m_samples_auxC_surround);
-
-  p.Do(m_samples_wm0);
-  p.Do(m_samples_wm1);
-  p.Do(m_samples_wm2);
-  p.Do(m_samples_wm3);
-
-  p.Do(m_samples_aux0);
-  p.Do(m_samples_aux1);
-  p.Do(m_samples_aux2);
-  p.Do(m_samples_aux3);
-
+  p.Do(m_auxc);
+  p.Do(m_remote);
   p.Do(m_last_main_volume);
   p.Do(m_last_aux_volumes);
 }
