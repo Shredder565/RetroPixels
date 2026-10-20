@@ -1,126 +1,72 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
-#include <array>
-#include <cctype>
-#include <cstdint>
-#include <optional>
+#include <algorithm>
+#include <initializer_list>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 namespace Common::GekkoAssembler::detail
 {
-// Hacky implementation of a case insensitive alphanumeric trie supporting extended entries
-// Standing in for std::map to support case-insensitive lookups while allowing string_views in
-// lookups
-template <typename V, char... ExtraMatches>
+// A small read-only map from names to values that ignores ASCII letter case.
+//
+// Keys may only contain ASCII letters, digits and the characters listed in `Extra`. Looking up a
+// string that contains any other character always fails, which lets callers pass raw token text
+// (for example "bt+") without pre-filtering it.
+template <typename V, char... Extra>
 class CaseInsensitiveDict
 {
 public:
-  CaseInsensitiveDict(const std::initializer_list<std::pair<std::string_view, V>>& il)
+  CaseInsensitiveDict(std::initializer_list<std::pair<std::string_view, V>> entries)
   {
-    for (auto&& [k, v] : il)
+    m_entries.reserve(entries.size());
+    for (const auto& [key, value] : entries)
     {
-      Add(k, v);
+      std::string folded;
+      if (Fold(key, &folded))
+        m_entries.emplace_back(std::move(folded), value);
     }
+    std::sort(m_entries.begin(), m_entries.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
   }
 
   template <typename T>
-  V const* Find(const T& key) const
+  const V* Find(const T& key) const
   {
-    auto&& [last_e, it] = TryFind(key);
-    if (it == key.cend() && last_e->_val)
-    {
-      return &*last_e->_val;
-    }
-    return nullptr;
+    std::string folded;
+    if (!Fold(std::string_view(key), &folded))
+      return nullptr;
+    const auto it = std::lower_bound(m_entries.begin(), m_entries.end(), folded,
+                                     [](const auto& e, const std::string& k) { return e.first < k; });
+    if (it == m_entries.end() || it->first != folded)
+      return nullptr;
+    return &it->second;
   }
-  static constexpr size_t NUM_CONNS = 36 + sizeof...(ExtraMatches);
-  static constexpr uint32_t INVALID_CONN = static_cast<uint32_t>(-1);
 
 private:
-  struct TrieEntry
+  static bool Allowed(char c)
   {
-    std::array<uint32_t, 36 + sizeof...(ExtraMatches)> _conns;
-    std::optional<V> _val;
-
-    TrieEntry() { _conns.fill(INVALID_CONN); }
-  };
-
-  constexpr size_t IndexOf(char c) const
-  {
-    size_t idx;
-    if (std::isalpha(c))
-    {
-      idx = std::tolower(c) - 'a';
-    }
-    else if (std::isdigit(c))
-    {
-      idx = c - '0' + 26;
-    }
-    else
-    {
-      idx = 36;
-      // Expands to an equivalent for loop over ExtraMatches
-      if constexpr (sizeof...(ExtraMatches) > 0)
-      {
-        (void)((c != ExtraMatches ? ++idx, true : false) && ...);
-      }
-    }
-    return idx;
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))
+      return true;
+    return ((c == Extra) || ...);
   }
 
-  template <typename T>
-  auto TryFind(const T& key) const -> std::pair<TrieEntry const*, decltype(key.cbegin())>
+  static bool Fold(std::string_view in, std::string* out)
   {
-    std::pair<TrieEntry const*, decltype(key.cbegin())> ret(&m_root_entry, key.cbegin());
-    const auto k_end = key.cend();
-
-    for (; ret.second != k_end; ret.second++)
+    out->clear();
+    out->reserve(in.size());
+    for (const char c : in)
     {
-      const size_t idx = IndexOf(*ret.second);
-      if (idx >= NUM_CONNS || ret.first->_conns[idx] == INVALID_CONN)
-      {
-        break;
-      }
-
-      ret.first = &m_entry_pool[ret.first->_conns[idx]];
+      if (!Allowed(c))
+        return false;
+      *out += (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
     }
-
-    return ret;
+    return true;
   }
 
-  template <typename T>
-  auto TryFind(const T& key) -> std::pair<TrieEntry*, decltype(key.cbegin())>
-  {
-    auto&& [e_const, it] =
-        const_cast<CaseInsensitiveDict<V, ExtraMatches...> const*>(this)->TryFind(key);
-    return {const_cast<TrieEntry*>(e_const), it};
-  }
-
-  void Add(std::string_view key, const V& val)
-  {
-    auto&& [last_e, it] = TryFind(key);
-    if (it != key.cend())
-    {
-      for (; it != key.cend(); it++)
-      {
-        const size_t idx = IndexOf(*it);
-        if (idx >= NUM_CONNS)
-        {
-          break;
-        }
-        last_e->_conns[idx] = static_cast<uint32_t>(m_entry_pool.size());
-        last_e = &m_entry_pool.emplace_back();
-      }
-    }
-    last_e->_val = val;
-  }
-
-  TrieEntry m_root_entry;
-  std::vector<TrieEntry> m_entry_pool;
+  std::vector<std::pair<std::string, V>> m_entries;
 };
 }  // namespace Common::GekkoAssembler::detail

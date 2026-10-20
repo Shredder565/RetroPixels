@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,6 +10,7 @@
 
 namespace Common::GekkoAssembler
 {
+// Machine code that belongs at one address.
 struct CodeBlock
 {
   CodeBlock(u32 address) : block_address(address) {}
@@ -21,9 +21,9 @@ struct CodeBlock
   std::vector<u8> instructions;
 };
 
-// Common::GekkoAssember::Assemble - Core routine for assembling Gekko/Broadway instructions
-// Supports the full Gekko ISA, as well as the extended mnemonics defined by the book "PowerPC
-// Microprocessor Family: The Programming Environments" The input assembly is fully parsed and
-// assembled with a base address specified by the base_virtual_address
+// Assembles Gekko/Broadway source, including paired-single instructions, the simplified
+// mnemonics of IBM's "PowerPC Microprocessor Family: The Programming Environments" and a small
+// set of GNU as style directives. The first output starts at `base_virtual_address`; .locate,
+// .skip and .align can start further blocks. Empty blocks are left out.
 FailureOr<std::vector<CodeBlock>> Assemble(std::string_view assembly, u32 base_virtual_address);
 }  // namespace Common::GekkoAssembler

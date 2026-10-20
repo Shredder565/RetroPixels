@@ -1,5 +1,4 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,6 +7,7 @@
 #include <string_view>
 
 #include "Common/Assembler/AssemblerShared.h"
+#include "Common/Assembler/AssemblerTables.h"
 #include "Common/Assembler/GekkoLexer.h"
 #include "Common/CommonTypes.h"
 
@@ -15,12 +15,16 @@ namespace Common::GekkoAssembler::detail
 {
 class ParsePlugin;
 
+// Everything a parse in progress owns. Plugins can look at the lexer to learn where the parser
+// is, and may record an error to stop the parse.
 struct ParseState
 {
   ParseState(std::string_view input_str, ParsePlugin& plugin);
 
   bool HasToken(TokenType tp) const;
+  // Consumes a token of type `tp`, or records an error if the next token is something else.
   void ParseToken(TokenType tp);
+  // Records an error at the next token.
   void EmitErrorHere(std::string&& message);
 
   Lexer lexer;
@@ -45,6 +49,7 @@ enum class AsmOp
   Not
 };
 
+// Kinds of leaf values in expressions.
 enum class Terminal
 {
   Hex,
@@ -69,12 +74,13 @@ enum class Terminal
 
 enum class ParenType
 {
-  Normal,
-  RelConv,
+  Normal,   // ( ... )
+  RelConv,  // ` ... `
 };
 
-// Overridable plugin class supporting a series of skeleton functions which get called when
-// the parser parses a given point of interest
+// Receives a callback at each point of interest while the parser walks the input. The default
+// implementations do nothing. Expressions are reported in postfix order: operands first, then
+// the operator.
 class ParsePlugin
 {
 public:
@@ -85,43 +91,38 @@ public:
   void ForwardError(AssemblerError&& err) { m_owner_error = std::move(err); }
   std::optional<AssemblerError>& Error() { return m_owner_error; }
 
+  // Runs once the whole input parsed without error.
   virtual void PostParseAction() {}
 
-  // Nonterminal callouts
-  // Pre occurs prior to the head nonterminal being parsed
-  // Post occurs after the nonterminal has been fully parsed
-  virtual void OnDirectivePre(GekkoDirective directive) {}
-  virtual void OnDirectivePost(GekkoDirective directive) {}
-  virtual void OnInstructionPre(const ParseInfo& mnemonic_info, bool extended) {}
-  virtual void OnInstructionPost(const ParseInfo& mnemonic_info, bool extended) {}
+  // "Pre" runs before the construct's first token is consumed, "Post" after its last.
+  virtual void OnDirectivePre(GekkoDirective) {}
+  virtual void OnDirectivePost(GekkoDirective) {}
+  virtual void OnInstructionPre(const ParseInfo&, bool) {}
+  virtual void OnInstructionPost(const ParseInfo&, bool) {}
   virtual void OnOperandPre() {}
   virtual void OnOperandPost() {}
   virtual void OnResolvedExprPre() {}
   virtual void OnResolvedExprPost() {}
 
-  // Operator callouts
-  // All occur after the relevant operands have been parsed
-  virtual void OnOperator(AsmOp operation) {}
+  // Runs after the operator's operands have been reported.
+  virtual void OnOperator(AsmOp) {}
 
-  // Individual token callouts
-  // All occur prior to the token being parsed
-  // Due to ambiguity of some tokens, an explicit operation is provided
-  virtual void OnTerminal(Terminal type, const AssemblerToken& val) {}
-  virtual void OnHiaddr(std::string_view id) {}
-  virtual void OnLoaddr(std::string_view id) {}
-  virtual void OnOpenParen(ParenType type) {}
-  virtual void OnCloseParen(ParenType type) {}
+  // Token callbacks run while the token is still the lexer's next token.
+  virtual void OnTerminal(Terminal, const AssemblerToken&) {}
+  virtual void OnHiaddr(std::string_view) {}
+  virtual void OnLoaddr(std::string_view) {}
+  virtual void OnOpenParen(ParenType) {}
+  virtual void OnCloseParen(ParenType) {}
   virtual void OnError() {}
-  virtual void OnLabelDecl(std::string_view name) {}
-  virtual void OnNumericLabelDecl(std::string_view name, u32 parse_num) {}
-  virtual void OnVarDecl(std::string_view name) {}
+  virtual void OnLabelDecl(std::string_view) {}
+  virtual void OnNumericLabelDecl(std::string_view, u32) {}
+  virtual void OnVarDecl(std::string_view) {}
 
 protected:
   ParseState* m_owner;
   std::optional<AssemblerError> m_owner_error;
 };
 
-// Parse the provided input with a plugin to handle what to do with certain points of interest
-// e.g. Convert to an IR for generating final machine code, picking up syntactical information
+// Parses `input`, reporting to `plugin`. Any error ends up in plugin->Error().
 void ParseWithPlugin(ParsePlugin* plugin, std::string_view input);
 }  // namespace Common::GekkoAssembler::detail

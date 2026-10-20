@@ -1,20 +1,20 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/Assembler/GekkoIRGen.h"
 
 #include <bit>
 #include <functional>
 #include <map>
-#include <numeric>
+#include <optional>
 #include <set>
-#include <stack>
-#include <variant>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include <fmt/format.h>
 
 #include "Common/Assembler/AssemblerShared.h"
+#include "Common/Assembler/GekkoLexer.h"
 #include "Common/Assembler/GekkoParser.h"
 #include "Common/Assert.h"
 
@@ -22,898 +22,649 @@ namespace Common::GekkoAssembler::detail
 {
 namespace
 {
-class GekkoIRPlugin : public ParsePlugin
+// One step of an instruction operand's expression, kept in postfix order so the operand can be
+// evaluated after the whole input (and so every label) is known.
+struct Step
 {
-public:
-  GekkoIRPlugin(GekkoIR& result, u32 base_addr)
-      : m_output_result(result), m_active_var(nullptr), m_operand_scan_begin(0)
+  enum class Kind : u8
   {
-    m_active_block = &m_output_result.blocks.emplace_back(base_addr);
-  }
-  ~GekkoIRPlugin() override = default;
-
-  void OnDirectivePre(GekkoDirective directive) override;
-  void OnDirectivePost(GekkoDirective directive) override;
-  void OnInstructionPre(const ParseInfo& mnemonic_info, bool extended) override;
-  void OnInstructionPost(const ParseInfo& mnemonic_info, bool extended) override;
-  void OnOperandPre() override;
-  void OnOperandPost() override;
-  void OnResolvedExprPost() override;
-  void OnOperator(AsmOp operation) override;
-  void OnTerminal(Terminal type, const AssemblerToken& val) override;
-  void OnHiaddr(std::string_view id) override;
-  void OnLoaddr(std::string_view id) override;
-  void OnCloseParen(ParenType type) override;
-  void OnLabelDecl(std::string_view name) override;
-  void OnNumericLabelDecl(std::string_view name, u32 num) override;
-  void OnVarDecl(std::string_view name) override;
-  void PostParseAction() override;
-
-  u32 CurrentAddress() const;
-  std::optional<u64> LookupVar(std::string_view lab);
-  std::optional<u32> LookupLabel(std::string_view lab);
-
-  template <typename T>
-  T& GetChunk();
-
-  template <typename T>
-  void AddBytes(T val);
-
-  void AddStringBytes(std::string_view str, bool null_term);
-
-  void PadAlign(u32 bits);
-  void PadSpace(size_t space);
-
-  void StartBlock(u32 address);
-  void StartBlockAlign(u32 bits);
-  void StartInstruction(size_t mnemonic_index, bool extended);
-  void FinishInstruction();
-  void SaveOperandFixup(size_t str_left, size_t str_right);
-
-  void AddBinaryEvaluator(u32 (*evaluator)(u32, u32));
-  void AddUnaryEvaluator(u32 (*evaluator)(u32));
-  void AddAbsoluteAddressConv();
-  void AddLiteral(u32 lit);
-  void AddSymbolResolve(std::string_view sym, bool absolute);
-  void AddNumLabelSymResolve(std::string_view sym, u32 num);
-
-  void RunFixups();
-
-  void EvalOperatorRel(AsmOp operation);
-  void EvalOperatorAbs(AsmOp operation);
-  void EvalTerminalRel(Terminal type, const AssemblerToken& tok);
-  void EvalTerminalAbs(Terminal type, const AssemblerToken& tok);
-
-private:
-  enum class EvalMode
-  {
-    RelAddrDoublePass,
-    AbsAddrSinglePass,
+    Value,         // push `value`
+    Symbol,        // push a label (relative to `value` unless `absolute`) or a constant
+    LocalForward,  // push the distance from `value` to the next local label `label_number`
+    Unary,
+    Binary,
+    Relative,  // pop x, push x - `value`
   };
 
-  GekkoIR& m_output_result;
-
-  IRBlock* m_active_block;
-  GekkoInstruction m_build_inst;
-  u64* m_active_var;
-  size_t m_operand_scan_begin;
-
-  // Ordered top-to-bottom, stores (label number, address)
-  std::vector<std::pair<u32, u32>> m_numlabs;
-  std::map<std::string, u32, std::less<>> m_labels;
-  std::map<std::string, u64, std::less<>> m_constants;
-  std::set<std::string> m_symset;
-
-  EvalMode m_evaluation_mode;
-
-  // For operand parsing
-  std::stack<std::function<u32()>> m_fixup_stack;
-  std::vector<std::function<u32()>> m_operand_fixups;
-  size_t m_operand_str_start;
-
-  // For directive parsing
-  std::vector<u64> m_eval_stack;
-  std::variant<std::vector<float>, std::vector<double>> m_floats_list;
-  std::string_view m_string_lit;
-  GekkoDirective m_active_directive;
+  Kind kind = Kind::Value;
+  AsmOp op = AsmOp::Add;
+  u32 value = 0;
+  bool absolute = false;
+  std::string_view name;
+  u32 label_number = 0;
+  size_t search_from = 0;
+  // What to report if this step cannot be evaluated.
+  std::optional<AssemblerError> failure;
 };
 
-///////////////
-// OVERRIDES //
-///////////////
+using Program = std::vector<Step>;
 
-void GekkoIRPlugin::OnDirectivePre(GekkoDirective directive)
+u32 ApplyBinary32(AsmOp op, u32 lhs, u32 rhs)
 {
-  m_evaluation_mode = EvalMode::AbsAddrSinglePass;
-  m_active_directive = directive;
-  m_eval_stack = std::vector<u64>{};
-
-  switch (directive)
-  {
-  case GekkoDirective::Float:
-    m_floats_list = std::vector<float>{};
-    break;
-  case GekkoDirective::Double:
-    m_floats_list = std::vector<double>{};
-    break;
-  default:
-    break;
-  }
-}
-
-void GekkoIRPlugin::OnDirectivePost(GekkoDirective directive)
-{
-  switch (directive)
-  {
-  // .nbyte directives are handled by OnResolvedExprPost
-  default:
-    break;
-
-  case GekkoDirective::Float:
-  case GekkoDirective::Double:
-    std::visit(
-        [this](auto&& vec) {
-          for (auto&& val : vec)
-          {
-            AddBytes(val);
-          }
-        },
-        m_floats_list);
-    break;
-
-  case GekkoDirective::DefVar:
-    ASSERT(m_active_var != nullptr);
-    *m_active_var = m_eval_stack.back();
-    m_active_var = nullptr;
-    break;
-
-  case GekkoDirective::Locate:
-    StartBlock(static_cast<u32>(m_eval_stack.back()));
-    break;
-
-  case GekkoDirective::Zeros:
-    PadSpace(static_cast<u32>(m_eval_stack.back()));
-    break;
-
-  case GekkoDirective::Skip:
-  {
-    const u32 skip_len = static_cast<u32>(m_eval_stack.back());
-    if (skip_len > 0)
-    {
-      StartBlock(CurrentAddress() + skip_len);
-    }
-    break;
-  }
-
-  case GekkoDirective::PadAlign:
-    PadAlign(static_cast<u32>(m_eval_stack.back()));
-    break;
-
-  case GekkoDirective::Align:
-    StartBlockAlign(static_cast<u32>(m_eval_stack.back()));
-    break;
-
-  case GekkoDirective::Ascii:
-    AddStringBytes(m_string_lit, false);
-    break;
-
-  case GekkoDirective::Asciz:
-    AddStringBytes(m_string_lit, true);
-    break;
-  }
-  m_eval_stack = {};
-}
-
-void GekkoIRPlugin::OnInstructionPre(const ParseInfo& mnemonic_info, bool extended)
-{
-  m_evaluation_mode = EvalMode::RelAddrDoublePass;
-  StartInstruction(mnemonic_info.mnemonic_index, extended);
-}
-
-void GekkoIRPlugin::OnInstructionPost(const ParseInfo&, bool)
-{
-  FinishInstruction();
-}
-
-void GekkoIRPlugin::OnOperandPre()
-{
-  m_operand_str_start = m_owner->lexer.ColNumber();
-}
-
-void GekkoIRPlugin::OnOperandPost()
-{
-  SaveOperandFixup(m_operand_str_start, m_owner->lexer.ColNumber());
-}
-
-void GekkoIRPlugin::OnResolvedExprPost()
-{
-  switch (m_active_directive)
-  {
-  case GekkoDirective::Byte:
-    AddBytes<u8>(static_cast<u8>(m_eval_stack.back()));
-    break;
-  case GekkoDirective::_2byte:
-    AddBytes<u16>(static_cast<u16>(m_eval_stack.back()));
-    break;
-  case GekkoDirective::_4byte:
-    AddBytes<u32>(static_cast<u32>(m_eval_stack.back()));
-    break;
-  case GekkoDirective::_8byte:
-    AddBytes<u64>(static_cast<u64>(m_eval_stack.back()));
-    break;
-  default:
-    return;
-  }
-  m_eval_stack.clear();
-}
-
-void GekkoIRPlugin::OnOperator(AsmOp operation)
-{
-  if (m_evaluation_mode == EvalMode::RelAddrDoublePass)
-  {
-    EvalOperatorRel(operation);
-  }
-  else
-  {
-    EvalOperatorAbs(operation);
-  }
-}
-
-void GekkoIRPlugin::OnTerminal(Terminal type, const AssemblerToken& val)
-{
-  if (type == Terminal::Str)
-  {
-    m_string_lit = val.token_val;
-  }
-  else if (m_evaluation_mode == EvalMode::RelAddrDoublePass)
-  {
-    EvalTerminalRel(type, val);
-  }
-  else
-  {
-    EvalTerminalAbs(type, val);
-  }
-}
-
-void GekkoIRPlugin::OnHiaddr(std::string_view id)
-{
-  if (m_evaluation_mode == EvalMode::RelAddrDoublePass)
-  {
-    AddSymbolResolve(id, true);
-    AddLiteral(16);
-    AddBinaryEvaluator([](u32 lhs, u32 rhs) { return lhs >> rhs; });
-    AddLiteral(0xffff);
-    AddBinaryEvaluator([](u32 lhs, u32 rhs) { return lhs & rhs; });
-  }
-  else
-  {
-    u32 base;
-    if (auto lbl = LookupLabel(id); lbl)
-    {
-      base = *lbl;
-    }
-    else if (auto var = LookupVar(id); var)
-    {
-      base = *var;
-    }
-    else
-    {
-      m_owner->EmitErrorHere(fmt::format("Undefined reference to Label/Constant '{}'", id));
-      return;
-    }
-    m_eval_stack.push_back((base >> 16) & 0xffff);
-  }
-}
-
-void GekkoIRPlugin::OnLoaddr(std::string_view id)
-{
-  if (m_evaluation_mode == EvalMode::RelAddrDoublePass)
-  {
-    AddSymbolResolve(id, true);
-    AddLiteral(0xffff);
-    AddBinaryEvaluator([](u32 lhs, u32 rhs) { return lhs & rhs; });
-  }
-  else
-  {
-    u32 base;
-    if (auto lbl = LookupLabel(id); lbl)
-    {
-      base = *lbl;
-    }
-    else if (auto var = LookupVar(id); var)
-    {
-      base = *var;
-    }
-    else
-    {
-      m_owner->EmitErrorHere(fmt::format("Undefined reference to Label/Constant '{}'", id));
-      return;
-    }
-
-    m_eval_stack.push_back(base & 0xffff);
-  }
-}
-
-void GekkoIRPlugin::OnCloseParen(ParenType type)
-{
-  if (type != ParenType::RelConv)
-  {
-    return;
-  }
-
-  if (m_evaluation_mode == EvalMode::RelAddrDoublePass)
-  {
-    AddAbsoluteAddressConv();
-  }
-  else
-  {
-    m_eval_stack.push_back(CurrentAddress());
-    EvalOperatorAbs(AsmOp::Sub);
-  }
-}
-
-void GekkoIRPlugin::OnLabelDecl(std::string_view name)
-{
-  const std::string name_str(name);
-  if (const bool inserted = m_symset.insert(name_str).second; !inserted)
-  {
-    m_owner->EmitErrorHere(fmt::format("Label/Constant {} is already defined", name));
-    return;
-  }
-
-  m_labels[name_str] = m_active_block->BlockEndAddress();
-}
-
-void GekkoIRPlugin::OnNumericLabelDecl(std::string_view, u32 num)
-{
-  m_numlabs.emplace_back(num, m_active_block->BlockEndAddress());
-}
-
-void GekkoIRPlugin::OnVarDecl(std::string_view name)
-{
-  const std::string name_str(name);
-  if (const bool inserted = m_symset.insert(name_str).second; !inserted)
-  {
-    m_owner->EmitErrorHere(fmt::format("Label/Constant {} is already defined", name));
-    return;
-  }
-
-  m_active_var = &m_constants[name_str];
-}
-
-void GekkoIRPlugin::PostParseAction()
-{
-  RunFixups();
-}
-
-//////////////////////
-// HELPER FUNCTIONS //
-//////////////////////
-
-u32 GekkoIRPlugin::CurrentAddress() const
-{
-  return m_active_block->BlockEndAddress();
-}
-
-std::optional<u64> GekkoIRPlugin::LookupVar(std::string_view var)
-{
-  auto var_it = m_constants.find(var);
-  return var_it == m_constants.end() ? std::nullopt : std::optional(var_it->second);
-}
-
-std::optional<u32> GekkoIRPlugin::LookupLabel(std::string_view lab)
-{
-  auto label_it = m_labels.find(lab);
-  return label_it == m_labels.end() ? std::nullopt : std::optional(label_it->second);
-}
-
-void GekkoIRPlugin::AddStringBytes(std::string_view str, bool null_term)
-{
-  ByteChunk& bytes = GetChunk<ByteChunk>();
-  ConvertStringLiteral(str, &bytes);
-  if (null_term)
-  {
-    bytes.push_back('\0');
-  }
-}
-
-template <typename T>
-T& GekkoIRPlugin::GetChunk()
-{
-  if (!m_active_block->chunks.empty() && std::holds_alternative<T>(m_active_block->chunks.back()))
-  {
-    return std::get<T>(m_active_block->chunks.back());
-  }
-
-  return std::get<T>(m_active_block->chunks.emplace_back(T{}));
-}
-
-template <typename T>
-void GekkoIRPlugin::AddBytes(T val)
-{
-  if constexpr (std::is_integral_v<T>)
-  {
-    ByteChunk& bytes = GetChunk<ByteChunk>();
-    for (size_t i = sizeof(T) - 1; i > 0; i--)
-    {
-      bytes.push_back((val >> (8 * i)) & 0xff);
-    }
-    bytes.push_back(val & 0xff);
-  }
-  else if constexpr (std::is_same_v<T, float>)
-  {
-    static_assert(sizeof(double) == sizeof(u64));
-    AddBytes(std::bit_cast<u32>(val));
-  }
-  else
-  {
-    // std::is_same_v<T, double>
-    static_assert(sizeof(double) == sizeof(u64));
-    AddBytes(std::bit_cast<u64>(val));
-  }
-}
-
-void GekkoIRPlugin::PadAlign(u32 bits)
-{
-  const u32 align_mask = (1 << bits) - 1;
-  const u32 current_addr = m_active_block->BlockEndAddress();
-  if (current_addr & align_mask)
-  {
-    PadChunk& current_pad = GetChunk<PadChunk>();
-    current_pad += (1 << bits) - (current_addr & align_mask);
-  }
-}
-
-void GekkoIRPlugin::PadSpace(size_t space)
-{
-  GetChunk<PadChunk>() += space;
-}
-
-void GekkoIRPlugin::StartBlock(u32 address)
-{
-  m_active_block = &m_output_result.blocks.emplace_back(address);
-}
-
-void GekkoIRPlugin::StartBlockAlign(u32 bits)
-{
-  const u32 align_mask = (1 << bits) - 1;
-  const u32 current_addr = m_active_block->BlockEndAddress();
-  if (current_addr & align_mask)
-  {
-    StartBlock((1 << bits) + (current_addr & ~align_mask));
-  }
-}
-
-void GekkoIRPlugin::StartInstruction(size_t mnemonic_index, bool extended)
-{
-  m_build_inst = GekkoInstruction{
-      .mnemonic_index = mnemonic_index,
-      .raw_text = m_owner->lexer.CurrentLine(),
-      .line_number = m_owner->lexer.LineNumber(),
-      .is_extended = extended,
-  };
-  m_operand_scan_begin = m_output_result.operand_pool.size();
-}
-
-void GekkoIRPlugin::AddBinaryEvaluator(u32 (*evaluator)(u32, u32))
-{
-  std::function<u32()> rhs = std::move(m_fixup_stack.top());
-  m_fixup_stack.pop();
-  std::function<u32()> lhs = std::move(m_fixup_stack.top());
-  m_fixup_stack.pop();
-  m_fixup_stack.emplace(
-      [evaluator, lhs = std::move(lhs), rhs = std::move(rhs)] { return evaluator(lhs(), rhs()); });
-}
-
-void GekkoIRPlugin::AddUnaryEvaluator(u32 (*evaluator)(u32))
-{
-  std::function<u32()> sub = std::move(m_fixup_stack.top());
-  m_fixup_stack.pop();
-  m_fixup_stack.emplace([evaluator, sub = std::move(sub)] { return evaluator(sub()); });
-}
-
-void GekkoIRPlugin::AddAbsoluteAddressConv()
-{
-  const u32 inst_address = m_active_block->BlockEndAddress();
-  std::function<u32()> sub = std::move(m_fixup_stack.top());
-  m_fixup_stack.pop();
-  m_fixup_stack.emplace([inst_address, sub = std::move(sub)] { return sub() - inst_address; });
-}
-
-void GekkoIRPlugin::AddLiteral(u32 lit)
-{
-  m_fixup_stack.emplace([lit] { return lit; });
-}
-
-void GekkoIRPlugin::AddSymbolResolve(std::string_view sym, bool absolute)
-{
-  const u32 source_address = m_active_block->BlockEndAddress();
-  AssemblerError err_on_fail = AssemblerError{
-      fmt::format("Unresolved symbol '{}'", sym),
-      m_owner->lexer.CurrentLine(),
-      m_owner->lexer.LineNumber(),
-      // Lexer should currently point to the label, as it hasn't been eaten yet
-      m_owner->lexer.ColNumber(),
-      sym.size(),
-  };
-
-  m_fixup_stack.emplace(
-      [this, sym, absolute, source_address, err_on_fail = std::move(err_on_fail)] mutable {
-        auto label_it = m_labels.find(sym);
-        if (label_it != m_labels.end())
-        {
-          if (absolute)
-          {
-            return label_it->second;
-          }
-          return label_it->second - source_address;
-        }
-
-        auto var_it = m_constants.find(sym);
-        if (var_it != m_constants.end())
-        {
-          return static_cast<u32>(var_it->second);
-        }
-
-        m_owner->error = std::move(err_on_fail);
-        return u32{0};
-      });
-}
-
-void GekkoIRPlugin::AddNumLabelSymResolve(std::string_view sym, u32 num)
-{
-  const u32 source_address = m_active_block->BlockEndAddress();
-  AssemblerError err_on_fail = AssemblerError{
-      fmt::format("No numeric label '{}' found below here", num),
-      m_owner->lexer.CurrentLine(),
-      m_owner->lexer.LineNumber(),
-      // Lexer should currently point to the label, as it hasn't been eaten yet
-      m_owner->lexer.ColNumber(),
-      sym.size(),
-  };
-
-  // Searching forward only
-  size_t search_start_idx = static_cast<size_t>(m_numlabs.size());
-  m_fixup_stack.emplace(
-      [this, num, source_address, search_start_idx, err_on_fail = std::move(err_on_fail)] mutable {
-        for (size_t i = search_start_idx; i < m_numlabs.size(); i++)
-        {
-          if (num == m_numlabs[i].first)
-          {
-            return m_numlabs[i].second - source_address;
-          }
-        }
-
-        m_owner->error = std::move(err_on_fail);
-        return u32{0};
-      });
-}
-
-void GekkoIRPlugin::SaveOperandFixup(size_t str_left, size_t str_right)
-{
-  m_operand_fixups.emplace_back(std::move(m_fixup_stack.top()));
-  m_fixup_stack.pop();
-  m_output_result.operand_pool.emplace_back(Interval{str_left, str_right - str_left}, 0);
-}
-
-void GekkoIRPlugin::RunFixups()
-{
-  for (size_t i = 0; i < m_operand_fixups.size(); i++)
-  {
-    ValueOf(m_output_result.operand_pool[i]) = m_operand_fixups[i]();
-    if (m_owner->error)
-    {
-      return;
-    }
-  }
-}
-
-void GekkoIRPlugin::FinishInstruction()
-{
-  m_build_inst.op_interval.begin = m_operand_scan_begin;
-  m_build_inst.op_interval.len = m_output_result.operand_pool.size() - m_operand_scan_begin;
-  GetChunk<InstChunk>().emplace_back(m_build_inst);
-  m_operand_scan_begin = 0;
-}
-
-void GekkoIRPlugin::EvalOperatorAbs(AsmOp operation)
-{
-#define EVAL_BINARY_OP(OPERATOR)                                                                   \
-  {                                                                                                \
-    u64 rhs = m_eval_stack.back();                                                                 \
-    m_eval_stack.pop_back();                                                                       \
-    m_eval_stack.back() = m_eval_stack.back() OPERATOR rhs;                                        \
-  }
-
-  switch (operation)
+  switch (op)
   {
   case AsmOp::Or:
-    EVAL_BINARY_OP(|);
-    break;
+    return lhs | rhs;
   case AsmOp::Xor:
-    EVAL_BINARY_OP(^);
-    break;
+    return lhs ^ rhs;
   case AsmOp::And:
-    EVAL_BINARY_OP(&);
-    break;
+    return lhs & rhs;
   case AsmOp::Lsh:
-    EVAL_BINARY_OP(<<);
-    break;
+    return lhs << (rhs & 31);
   case AsmOp::Rsh:
-    EVAL_BINARY_OP(>>);
-    break;
+    return lhs >> (rhs & 31);
   case AsmOp::Add:
-    EVAL_BINARY_OP(+);
-    break;
+    return lhs + rhs;
   case AsmOp::Sub:
-    EVAL_BINARY_OP(-);
-    break;
+    return lhs - rhs;
   case AsmOp::Mul:
-    EVAL_BINARY_OP(*);
-    break;
+    return lhs * rhs;
   case AsmOp::Div:
-    EVAL_BINARY_OP(/);
-    break;
-  case AsmOp::Neg:
-    m_eval_stack.back() = static_cast<u32>(-static_cast<s32>(m_eval_stack.back()));
-    break;
-  case AsmOp::Not:
-    m_eval_stack.back() = ~m_eval_stack.back();
-    break;
+    return rhs == 0 ? 0 : lhs / rhs;
+  default:
+    return 0;
   }
-#undef EVAL_BINARY_OP
-#undef EVAL_UNARY_OP
 }
 
-void GekkoIRPlugin::EvalOperatorRel(AsmOp operation)
+u64 ApplyBinary64(AsmOp op, u64 lhs, u64 rhs)
 {
-  switch (operation)
+  switch (op)
   {
   case AsmOp::Or:
-    AddBinaryEvaluator([](u32 lhs, u32 rhs) { return lhs | rhs; });
-    break;
+    return lhs | rhs;
   case AsmOp::Xor:
-    AddBinaryEvaluator([](u32 lhs, u32 rhs) { return lhs ^ rhs; });
-    break;
+    return lhs ^ rhs;
   case AsmOp::And:
-    AddBinaryEvaluator([](u32 lhs, u32 rhs) { return lhs & rhs; });
-    break;
+    return lhs & rhs;
   case AsmOp::Lsh:
-    AddBinaryEvaluator([](u32 lhs, u32 rhs) { return lhs << rhs; });
-    break;
+    return lhs << (rhs & 63);
   case AsmOp::Rsh:
-    AddBinaryEvaluator([](u32 lhs, u32 rhs) { return lhs >> rhs; });
-    break;
+    return lhs >> (rhs & 63);
   case AsmOp::Add:
-    AddBinaryEvaluator([](u32 lhs, u32 rhs) { return lhs + rhs; });
-    break;
+    return lhs + rhs;
   case AsmOp::Sub:
-    AddBinaryEvaluator([](u32 lhs, u32 rhs) { return lhs - rhs; });
-    break;
+    return lhs - rhs;
   case AsmOp::Mul:
-    AddBinaryEvaluator([](u32 lhs, u32 rhs) { return lhs * rhs; });
-    break;
+    return lhs * rhs;
   case AsmOp::Div:
-    AddBinaryEvaluator([](u32 lhs, u32 rhs) { return lhs / rhs; });
-    break;
-  case AsmOp::Neg:
-    AddUnaryEvaluator([](u32 val) { return static_cast<u32>(-static_cast<s32>(val)); });
-    break;
-  case AsmOp::Not:
-    AddUnaryEvaluator([](u32 val) { return ~val; });
-    break;
+    return rhs == 0 ? 0 : lhs / rhs;
+  default:
+    return 0;
   }
 }
 
-void GekkoIRPlugin::EvalTerminalRel(Terminal type, const AssemblerToken& tok)
+constexpr std::string_view kDivideByZero = "Division by zero";
+
+class IrBuilder final : public ParsePlugin
 {
-  switch (type)
+public:
+  IrBuilder(GekkoIR& out, u32 base_address) : m_ir(out) { m_ir.blocks.emplace_back(base_address); }
+
+  // --- statements ---------------------------------------------------------------------------
+
+  void OnLabelDecl(std::string_view name) override
   {
-  case Terminal::Hex:
-  case Terminal::Dec:
-  case Terminal::Oct:
-  case Terminal::Bin:
-  case Terminal::GPR:
-  case Terminal::FPR:
-  case Terminal::SPR:
-  case Terminal::CRField:
-  case Terminal::Lt:
-  case Terminal::Gt:
-  case Terminal::Eq:
-  case Terminal::So:
-  {
-    std::optional<u32> val = tok.EvalToken<u32>();
-    ASSERT(val.has_value());
-    AddLiteral(*val);
-    break;
+    if (!ClaimName(name))
+      return;
+    m_labels.emplace(std::string(name), Here());
   }
 
-  case Terminal::Dot:
-    AddLiteral(CurrentAddress());
-    break;
-
-  case Terminal::Id:
+  void OnNumericLabelDecl(std::string_view, u32 num) override
   {
-    if (auto label_it = m_labels.find(tok.token_val); label_it != m_labels.end())
-    {
-      AddLiteral(label_it->second - CurrentAddress());
-    }
-    else if (auto var_it = m_constants.find(tok.token_val); var_it != m_constants.end())
-    {
-      AddLiteral(var_it->second);
-    }
-    else
-    {
-      AddSymbolResolve(tok.token_val, false);
-    }
-    break;
+    m_local_labels.emplace_back(num, Here());
   }
 
-  case Terminal::NumLabFwd:
+  void OnVarDecl(std::string_view name) override
   {
-    std::optional<u32> val = tok.EvalToken<u32>();
-    ASSERT(val.has_value());
-    AddNumLabelSymResolve(tok.token_val, *val);
-    break;
+    if (!ClaimName(name))
+      return;
+    // The constant exists (as zero) while its own value is being evaluated.
+    m_constants[std::string(name)] = 0;
+    m_pending_var = std::string(name);
   }
 
-  case Terminal::NumLabBwd:
+  void OnInstructionPre(const ParseInfo& info, bool extended) override
   {
-    std::optional<u32> mval = tok.EvalToken<u32>();
-    ASSERT(mval.has_value());
-    u32 val = *mval;
-    if (auto label_it = std::find_if(m_numlabs.rbegin(), m_numlabs.rend(),
-                                     [val](std::pair<u32, u32> p) { return p.first == val; });
-        label_it != m_numlabs.rend())
+    m_in_instruction = true;
+    m_instr = IrInstruction{info.mnemonic_index, extended, Interval{m_ir.operand_pool.size(), 0},
+                            m_owner->lexer.CurrentLine(), m_owner->lexer.LineNumber()};
+  }
+
+  void OnInstructionPost(const ParseInfo&, bool) override
+  {
+    m_instr.operands.len = m_ir.operand_pool.size() - m_instr.operands.begin;
+    Block().items.emplace_back(m_instr);
+    Block().size += 4;
+  }
+
+  void OnOperandPre() override
+  {
+    m_operand_col = m_owner->lexer.ColNumber();
+    m_program.clear();
+  }
+
+  void OnOperandPost() override
+  {
+    const size_t end_col = m_owner->lexer.ColNumber();
+    m_ir.operand_pool.emplace_back(Interval{m_operand_col, end_col - m_operand_col}, 0);
+    m_operand_programs.push_back(std::move(m_program));
+    m_program = {};
+  }
+
+  void OnDirectivePre(GekkoDirective directive) override
+  {
+    m_in_instruction = false;
+    m_directive = directive;
+    m_values.clear();
+    m_floats.clear();
+  }
+
+  void OnResolvedExprPost() override
+  {
+    switch (m_directive)
     {
-      AddLiteral(label_it->second - CurrentAddress());
-    }
-    else
-    {
-      m_owner->EmitErrorHere(fmt::format("No numeric label '{}' found above here", val));
+    case GekkoDirective::Byte:
+      AppendBigEndian(m_values.back(), 1);
+      break;
+    case GekkoDirective::_2byte:
+      AppendBigEndian(m_values.back(), 2);
+      break;
+    case GekkoDirective::_4byte:
+      AppendBigEndian(m_values.back(), 4);
+      break;
+    case GekkoDirective::_8byte:
+      AppendBigEndian(m_values.back(), 8);
+      break;
+    default:
       return;
     }
-    break;
+    m_values.clear();
   }
 
-  // Parser should disallow this from happening
-  default:
-    ASSERT(false);
-    break;
-  }
-}
-
-void GekkoIRPlugin::EvalTerminalAbs(Terminal type, const AssemblerToken& tok)
-{
-  switch (type)
+  void OnDirectivePost(GekkoDirective directive) override
   {
-  case Terminal::Hex:
-  case Terminal::Dec:
-  case Terminal::Oct:
-  case Terminal::Bin:
-  case Terminal::GPR:
-  case Terminal::FPR:
-  case Terminal::SPR:
-  case Terminal::CRField:
-  case Terminal::Lt:
-  case Terminal::Gt:
-  case Terminal::Eq:
-  case Terminal::So:
-  {
-    std::optional<u64> val = tok.EvalToken<u64>();
-    ASSERT(val.has_value());
-    m_eval_stack.push_back(*val);
-    break;
-  }
-
-  case Terminal::Flt:
-  {
-    std::visit(
-        [&tok](auto&& vec) {
-          auto opt = tok.EvalToken<typename std::decay_t<decltype(vec)>::value_type>();
-          ASSERT(opt.has_value());
-          vec.push_back(*opt);
-        },
-        m_floats_list);
-    break;
-  }
-
-  case Terminal::Dot:
-    m_eval_stack.push_back(static_cast<u64>(CurrentAddress()));
-    break;
-
-  case Terminal::Id:
-  {
-    if (auto label_it = m_labels.find(tok.token_val); label_it != m_labels.end())
+    switch (directive)
     {
-      m_eval_stack.push_back(label_it->second);
+    case GekkoDirective::Float:
+      for (const double v : m_floats)
+        AppendBigEndian(std::bit_cast<u32>(static_cast<float>(v)), 4);
+      break;
+    case GekkoDirective::Double:
+      for (const double v : m_floats)
+        AppendBigEndian(std::bit_cast<u64>(v), 8);
+      break;
+    case GekkoDirective::DefVar:
+      m_constants[m_pending_var] = m_values.back();
+      m_pending_var.clear();
+      break;
+    case GekkoDirective::Locate:
+      NewBlock(static_cast<u32>(m_values.back()));
+      break;
+    case GekkoDirective::Zeros:
+      Pad(static_cast<u32>(m_values.back()));
+      break;
+    case GekkoDirective::Skip:
+      if (const u32 len = static_cast<u32>(m_values.back()); len != 0)
+        NewBlock(Here() + len);
+      break;
+    case GekkoDirective::PadAlign:
+    {
+      const u32 pad = AlignmentGap(static_cast<u32>(m_values.back()));
+      if (pad != 0)
+        Pad(pad);
+      break;
     }
-    else if (auto var_it = m_constants.find(tok.token_val); var_it != m_constants.end())
+    case GekkoDirective::Align:
     {
-      m_eval_stack.push_back(var_it->second);
+      const u32 pad = AlignmentGap(static_cast<u32>(m_values.back()));
+      if (pad != 0)
+        NewBlock(Here() + pad);
+      break;
+    }
+    case GekkoDirective::Ascii:
+    case GekkoDirective::Asciz:
+    {
+      IrBytes bytes;
+      ConvertStringLiteral(m_string, &bytes);
+      if (directive == GekkoDirective::Asciz)
+        bytes.push_back(0);
+      AppendBytes(bytes);
+      break;
+    }
+    default:
+      break;
+    }
+    m_values.clear();
+  }
+
+  // --- expressions --------------------------------------------------------------------------
+
+  void OnTerminal(Terminal type, const AssemblerToken& tok) override
+  {
+    if (type == Terminal::Str)
+    {
+      m_string = tok.token_val;
+      return;
+    }
+    if (m_in_instruction)
+      DeferredTerminal(type, tok);
+    else
+      ImmediateTerminal(type, tok);
+  }
+
+  void OnHiaddr(std::string_view id) override { AddressHalf(id, true); }
+  void OnLoaddr(std::string_view id) override { AddressHalf(id, false); }
+
+  void OnCloseParen(ParenType type) override
+  {
+    if (type != ParenType::RelConv)
+      return;
+    if (m_in_instruction)
+    {
+      Step s;
+      s.kind = Step::Kind::Relative;
+      s.value = Here();
+      m_program.push_back(std::move(s));
     }
     else
     {
+      m_values.back() -= Here();
+    }
+  }
+
+  void OnOperator(AsmOp op) override
+  {
+    const bool unary = op == AsmOp::Neg || op == AsmOp::Not;
+    if (m_in_instruction)
+    {
+      Step s;
+      s.kind = unary ? Step::Kind::Unary : Step::Kind::Binary;
+      s.op = op;
+      if (op == AsmOp::Div)
+        s.failure = ErrorAtNextToken(std::string(kDivideByZero));
+      m_program.push_back(std::move(s));
+      return;
+    }
+
+    if (unary)
+    {
+      u64& v = m_values.back();
+      v = op == AsmOp::Neg ? u64{0u - static_cast<u32>(v)} : ~v;
+      return;
+    }
+    const u64 rhs = m_values.back();
+    m_values.pop_back();
+    if (op == AsmOp::Div && rhs == 0)
+    {
+      m_owner->EmitErrorHere(std::string(kDivideByZero));
+      return;
+    }
+    m_values.back() = ApplyBinary64(op, m_values.back(), rhs);
+  }
+
+  // Evaluates every instruction operand now that all labels are known.
+  void PostParseAction() override
+  {
+    for (size_t i = 0; i < m_operand_programs.size(); i++)
+    {
+      std::optional<AssemblerError> failure;
+      const u32 value = Evaluate(m_operand_programs[i], &failure);
+      if (failure)
+      {
+        m_owner->error = std::move(failure);
+        return;
+      }
+      ValueOf(m_ir.operand_pool[i]) = value;
+    }
+  }
+
+private:
+  IrBlock& Block() { return m_ir.blocks.back(); }
+  u32 Here() { return Block().EndAddress(); }
+
+  void NewBlock(u32 address) { m_ir.blocks.emplace_back(address); }
+
+  // Bytes needed to bring the current address to a multiple of 2^bits.
+  u32 AlignmentGap(u32 bits)
+  {
+    const u32 unit = 1u << (bits & 31);
+    const u32 misalignment = Here() & (unit - 1);
+    return misalignment == 0 ? 0 : unit - misalignment;
+  }
+
+  void AppendBytes(const IrBytes& bytes)
+  {
+    IrBlock& b = Block();
+    if (b.items.empty() || !std::holds_alternative<IrBytes>(b.items.back()))
+      b.items.emplace_back(IrBytes{});
+    IrBytes& dst = std::get<IrBytes>(b.items.back());
+    dst.insert(dst.end(), bytes.begin(), bytes.end());
+    b.size += static_cast<u32>(bytes.size());
+  }
+
+  void AppendBigEndian(u64 value, size_t width)
+  {
+    IrBytes bytes(width);
+    for (size_t i = 0; i < width; i++)
+      bytes[i] = static_cast<u8>(value >> (8 * (width - 1 - i)));
+    AppendBytes(bytes);
+  }
+
+  void Pad(u32 count)
+  {
+    IrBlock& b = Block();
+    if (b.items.empty() || !std::holds_alternative<IrPadding>(b.items.back()))
+      b.items.emplace_back(IrPadding{0});
+    std::get<IrPadding>(b.items.back()) += count;
+    b.size += count;
+  }
+
+  bool ClaimName(std::string_view name)
+  {
+    if (m_names.insert(std::string(name)).second)
+      return true;
+    m_owner->EmitErrorHere(fmt::format("Label/Constant {} is already defined", name));
+    return false;
+  }
+
+  std::optional<u32> FindLabel(std::string_view name) const
+  {
+    const auto it = m_labels.find(name);
+    return it == m_labels.end() ? std::nullopt : std::optional(it->second);
+  }
+
+  std::optional<u64> FindConstant(std::string_view name) const
+  {
+    const auto it = m_constants.find(name);
+    return it == m_constants.end() ? std::nullopt : std::optional(it->second);
+  }
+
+  // Address of the closest local label `num` defined so far.
+  std::optional<u32> FindLocalBackward(u32 num) const
+  {
+    for (auto it = m_local_labels.rbegin(); it != m_local_labels.rend(); ++it)
+    {
+      if (it->first == num)
+        return it->second;
+    }
+    return std::nullopt;
+  }
+
+  // An error located at the parser's next token, `len` columns wide (default: the token).
+  AssemblerError ErrorAtNextToken(std::string message, std::optional<size_t> len = std::nullopt)
+  {
+    const Lexer& lex = m_owner->lexer;
+    const size_t width = len ? *len : lex.LookaheadRef().token_val.size();
+    return AssemblerError{std::move(message), lex.CurrentLine(), lex.LineNumber(),
+                          lex.ColNumber(), width};
+  }
+
+  void PushValue(u32 v)
+  {
+    Step s;
+    s.value = v;
+    m_program.push_back(std::move(s));
+  }
+
+  void PushSymbol(std::string_view name, bool absolute)
+  {
+    Step s;
+    s.kind = Step::Kind::Symbol;
+    s.name = name;
+    s.absolute = absolute;
+    s.value = Here();
+    s.failure = ErrorAtNextToken(fmt::format("Unresolved symbol '{}'", name), name.size());
+    m_program.push_back(std::move(s));
+  }
+
+  void PushBinary(AsmOp op)
+  {
+    Step s;
+    s.kind = Step::Kind::Binary;
+    s.op = op;
+    m_program.push_back(std::move(s));
+  }
+
+  // Operand of an instruction: labels are relative to the instruction unless resolved through
+  // @ha/@l, and anything defined later is looked up at the end.
+  void DeferredTerminal(Terminal type, const AssemblerToken& tok)
+  {
+    switch (type)
+    {
+    case Terminal::Dot:
+      PushValue(Here());
+      break;
+
+    case Terminal::Id:
+      if (const auto label = FindLabel(tok.token_val))
+        PushValue(*label - Here());
+      else if (const auto constant = FindConstant(tok.token_val))
+        PushValue(static_cast<u32>(*constant));
+      else
+        PushSymbol(tok.token_val, false);
+      break;
+
+    case Terminal::NumLabFwd:
+    {
+      const u32 num = tok.EvalToken<u32>().value_or(0);
+      Step s;
+      s.kind = Step::Kind::LocalForward;
+      s.label_number = num;
+      s.search_from = m_local_labels.size();
+      s.value = Here();
+      s.failure = ErrorAtNextToken(fmt::format("No numeric label '{}' found below here", num),
+                                   tok.token_val.size());
+      m_program.push_back(std::move(s));
+      break;
+    }
+
+    case Terminal::NumLabBwd:
+    {
+      const u32 num = tok.EvalToken<u32>().value_or(0);
+      if (const auto addr = FindLocalBackward(num))
+        PushValue(*addr - Here());
+      else
+        m_owner->EmitErrorHere(fmt::format("No numeric label '{}' found above here", num));
+      break;
+    }
+
+    default:
+    {
+      const std::optional<u32> v = tok.EvalToken<u32>();
+      ASSERT(v.has_value());
+      PushValue(v.value_or(0));
+      break;
+    }
+    }
+  }
+
+  // Directive argument: everything must be known already, and labels are absolute.
+  void ImmediateTerminal(Terminal type, const AssemblerToken& tok)
+  {
+    switch (type)
+    {
+    case Terminal::Flt:
+      if (m_directive == GekkoDirective::Float)
+        m_floats.push_back(tok.EvalToken<float>().value_or(0.0f));
+      else
+        m_floats.push_back(tok.EvalToken<double>().value_or(0.0));
+      break;
+
+    case Terminal::Dot:
+      m_values.push_back(Here());
+      break;
+
+    case Terminal::Id:
+      if (const auto label = FindLabel(tok.token_val))
+        m_values.push_back(*label);
+      else if (const auto constant = FindConstant(tok.token_val))
+        m_values.push_back(*constant);
+      else
+        m_owner->EmitErrorHere(
+            fmt::format("Undefined reference to Label/Constant '{}'", tok.ValStr()));
+      break;
+
+    case Terminal::NumLabFwd:
       m_owner->EmitErrorHere(
-          fmt::format("Undefined reference to Label/Constant '{}'", tok.ValStr()));
-      return;
+          "Forward label references not supported in fully resolved expressions");
+      break;
+
+    case Terminal::NumLabBwd:
+    {
+      const u32 num = tok.EvalToken<u32>().value_or(0);
+      if (const auto addr = FindLocalBackward(num))
+        m_values.push_back(*addr);
+      else
+        m_owner->EmitErrorHere(fmt::format("No numeric label '{}' found above here", num));
+      break;
     }
-    break;
+
+    default:
+    {
+      const std::optional<u64> v = tok.EvalToken<u64>();
+      ASSERT(v.has_value());
+      m_values.push_back(v.value_or(0));
+      break;
+    }
+    }
   }
 
-  case Terminal::NumLabFwd:
-    m_owner->EmitErrorHere(
-        fmt::format("Forward label references not supported in fully resolved expressions"));
-    break;
-
-  case Terminal::NumLabBwd:
+  void AddressHalf(std::string_view id, bool high)
   {
-    std::optional<u32> mval = tok.EvalToken<u32>();
-    ASSERT(mval.has_value());
-    u32 val = *mval;
-    if (auto label_it = std::find_if(m_numlabs.rbegin(), m_numlabs.rend(),
-                                     [val](std::pair<u32, u32> p) { return p.first == val; });
-        label_it != m_numlabs.rend())
+    if (m_in_instruction)
     {
-      m_eval_stack.push_back(label_it->second);
-    }
-    else
-    {
-      m_owner->EmitErrorHere(fmt::format("No numeric label '{}' found above here", val));
+      PushSymbol(id, true);
+      if (high)
+      {
+        PushValue(16);
+        PushBinary(AsmOp::Rsh);
+      }
+      PushValue(0xffff);
+      PushBinary(AsmOp::And);
       return;
     }
 
-    break;
+    std::optional<u32> base = FindLabel(id);
+    if (!base)
+    {
+      if (const auto constant = FindConstant(id))
+        base = static_cast<u32>(*constant);
+    }
+    if (!base)
+    {
+      m_owner->EmitErrorHere(fmt::format("Undefined reference to Label/Constant '{}'", id));
+      return;
+    }
+    m_values.push_back(high ? (*base >> 16) & 0xffff : *base & 0xffff);
   }
 
-  // Parser should disallow this from happening
-  default:
-    ASSERT(false);
-    break;
+  // Runs an operand program. Reports the first step that fails, in source order.
+  u32 Evaluate(const Program& program, std::optional<AssemblerError>* failure) const
+  {
+    const auto fail = [failure](const Step& s) {
+      if (!*failure && s.failure)
+        *failure = *s.failure;
+    };
+
+    std::vector<u32> stack;
+    for (const Step& s : program)
+    {
+      switch (s.kind)
+      {
+      case Step::Kind::Value:
+        stack.push_back(s.value);
+        break;
+
+      case Step::Kind::Symbol:
+        if (const auto label = FindLabel(s.name))
+          stack.push_back(s.absolute ? *label : *label - s.value);
+        else if (const auto constant = FindConstant(s.name))
+          stack.push_back(static_cast<u32>(*constant));
+        else
+        {
+          fail(s);
+          stack.push_back(0);
+        }
+        break;
+
+      case Step::Kind::LocalForward:
+      {
+        std::optional<u32> found;
+        for (size_t i = s.search_from; i < m_local_labels.size() && !found; i++)
+        {
+          if (m_local_labels[i].first == s.label_number)
+            found = m_local_labels[i].second - s.value;
+        }
+        if (!found)
+          fail(s);
+        stack.push_back(found.value_or(0));
+        break;
+      }
+
+      case Step::Kind::Unary:
+        stack.back() = s.op == AsmOp::Neg ? 0u - stack.back() : ~stack.back();
+        break;
+
+      case Step::Kind::Binary:
+      {
+        const u32 rhs = stack.back();
+        stack.pop_back();
+        if (s.op == AsmOp::Div && rhs == 0)
+          fail(s);
+        stack.back() = ApplyBinary32(s.op, stack.back(), rhs);
+        break;
+      }
+
+      case Step::Kind::Relative:
+        stack.back() -= s.value;
+        break;
+      }
+    }
+    return stack.empty() ? 0 : stack.back();
   }
-}
+
+  GekkoIR& m_ir;
+
+  // Symbols
+  std::set<std::string> m_names;
+  std::map<std::string, u32, std::less<>> m_labels;
+  std::map<std::string, u64, std::less<>> m_constants;
+  // Local (numeric) labels in definition order: (number, address).
+  std::vector<std::pair<u32, u32>> m_local_labels;
+
+  // Instructions
+  bool m_in_instruction = false;
+  IrInstruction m_instr;
+  size_t m_operand_col = 0;
+  Program m_program;
+  std::vector<Program> m_operand_programs;
+
+  // Directives
+  GekkoDirective m_directive = GekkoDirective::Byte;
+  std::vector<u64> m_values;
+  std::vector<double> m_floats;
+  std::string_view m_string;
+  std::string m_pending_var;
+};
 }  // namespace
-
-u32 IRBlock::BlockEndAddress() const
-{
-  return std::accumulate(chunks.begin(), chunks.end(), block_address,
-                         [](u32 acc, const ChunkVariant& chunk) {
-                           size_t size;
-                           if (std::holds_alternative<InstChunk>(chunk))
-                           {
-                             size = std::get<InstChunk>(chunk).size() * 4;
-                           }
-                           else if (std::holds_alternative<ByteChunk>(chunk))
-                           {
-                             size = std::get<ByteChunk>(chunk).size();
-                           }
-                           else if (std::holds_alternative<PadChunk>(chunk))
-                           {
-                             size = std::get<PadChunk>(chunk);
-                           }
-                           else
-                           {
-                             ASSERT(false);
-                             size = 0;
-                           }
-
-                           return acc + static_cast<u32>(size);
-                         });
-}
 
 FailureOr<GekkoIR> ParseToIR(std::string_view assembly, u32 base_virtual_address)
 {
-  GekkoIR ret;
-  GekkoIRPlugin plugin(ret, base_virtual_address);
-
-  ParseWithPlugin(&plugin, assembly);
-
-  if (plugin.Error())
-  {
-    return FailureOr<GekkoIR>(std::move(*plugin.Error()));
-  }
-
-  return std::move(ret);
+  GekkoIR ir;
+  IrBuilder builder(ir, base_virtual_address);
+  ParseWithPlugin(&builder, assembly);
+  if (builder.Error())
+    return std::move(*builder.Error());
+  return ir;
 }
-
 }  // namespace Common::GekkoAssembler::detail

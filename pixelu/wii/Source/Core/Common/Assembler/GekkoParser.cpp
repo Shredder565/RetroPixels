@@ -1,9 +1,10 @@
-// Copyright 2023 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/Assembler/GekkoParser.h"
 
 #include <array>
+#include <optional>
+#include <span>
 
 #include <fmt/format.h>
 
@@ -16,840 +17,556 @@ namespace Common::GekkoAssembler::detail
 {
 namespace
 {
-bool MatchOperandFirst(const AssemblerToken& tok)
+// Binary operators, loosest first. All are left associative.
+struct BinaryOp
 {
-  switch (tok.token_type)
+  TokenType token;
+  int level;
+  AsmOp op;
+};
+
+constexpr BinaryOp kBinaryOps[] = {
+    {TokenType::Pipe, 0, AsmOp::Or},  {TokenType::Caret, 1, AsmOp::Xor},
+    {TokenType::Ampersand, 2, AsmOp::And}, {TokenType::Lsh, 3, AsmOp::Lsh},
+    {TokenType::Rsh, 3, AsmOp::Rsh},  {TokenType::Plus, 4, AsmOp::Add},
+    {TokenType::Minus, 4, AsmOp::Sub}, {TokenType::Star, 5, AsmOp::Mul},
+    {TokenType::Slash, 5, AsmOp::Div},
+};
+
+const BinaryOp* FindBinaryOp(TokenType t)
+{
+  for (const BinaryOp& b : kBinaryOps)
+  {
+    if (b.token == t)
+      return &b;
+  }
+  return nullptr;
+}
+
+std::optional<Terminal> NumberTerminal(TokenType t)
+{
+  switch (t)
+  {
+  case TokenType::HexadecimalLit:
+    return Terminal::Hex;
+  case TokenType::DecimalLit:
+    return Terminal::Dec;
+  case TokenType::OctalLit:
+    return Terminal::Oct;
+  case TokenType::BinaryLit:
+    return Terminal::Bin;
+  default:
+    return std::nullopt;
+  }
+}
+
+std::optional<Terminal> BuiltinTerminal(TokenType t)
+{
+  switch (t)
+  {
+  case TokenType::GPR:
+    return Terminal::GPR;
+  case TokenType::FPR:
+    return Terminal::FPR;
+  case TokenType::SPR:
+    return Terminal::SPR;
+  case TokenType::CRField:
+    return Terminal::CRField;
+  case TokenType::Lt:
+    return Terminal::Lt;
+  case TokenType::Gt:
+    return Terminal::Gt;
+  case TokenType::Eq:
+    return Terminal::Eq;
+  case TokenType::So:
+    return Terminal::So;
+  default:
+    return std::nullopt;
+  }
+}
+
+// Tokens an expression can start with.
+bool StartsExpression(TokenType t)
+{
+  switch (t)
   {
   case TokenType::Minus:
   case TokenType::Tilde:
   case TokenType::Lparen:
   case TokenType::Grave:
   case TokenType::Identifier:
-  case TokenType::DecimalLit:
-  case TokenType::OctalLit:
-  case TokenType::HexadecimalLit:
-  case TokenType::BinaryLit:
   case TokenType::Dot:
+  case TokenType::NumLabFwd:
+  case TokenType::NumLabBwd:
     return true;
   default:
-    return false;
+    return NumberTerminal(t).has_value() || BuiltinTerminal(t).has_value();
   }
 }
 
-void ParseImm(ParseState* state)
+// What the operand list of each ParseAlg looks like.
+enum class Piece
 {
-  AssemblerToken tok = state->lexer.Lookahead();
-  switch (tok.token_type)
-  {
-  case TokenType::HexadecimalLit:
-    state->plugin.OnTerminal(Terminal::Hex, tok);
-    break;
-  case TokenType::DecimalLit:
-    state->plugin.OnTerminal(Terminal::Dec, tok);
-    break;
-  case TokenType::OctalLit:
-    state->plugin.OnTerminal(Terminal::Oct, tok);
-    break;
-  case TokenType::BinaryLit:
-    state->plugin.OnTerminal(Terminal::Bin, tok);
-    break;
-  default:
-    state->EmitErrorHere(fmt::format("Invalid {} with value '{}'", tok.TypeStr(), tok.ValStr()));
-    return;
-  }
-  if (state->error)
-  {
-    return;
-  }
-  state->lexer.Eat();
-}
+  Operand,
+  Comma,
+  OptionalComma,  // a comma and the rest, or nothing more
+  Open,
+  Close,
+};
 
-void ParseId(ParseState* state)
+std::span<const Piece> Layout(ParseAlg alg)
 {
-  AssemblerToken tok = state->lexer.Lookahead();
-  if (tok.token_type == TokenType::Identifier)
-  {
-    state->plugin.OnTerminal(Terminal::Id, tok);
-    if (state->error)
-    {
-      return;
-    }
-    state->lexer.Eat();
-  }
-  else
-  {
-    state->EmitErrorHere(fmt::format("Expected an identifier, but found '{}'", tok.ValStr()));
-  }
-}
-
-void ParseNumLocation(ParseState* state)
-{
-  AssemblerToken tok = state->lexer.Lookahead();
-  switch (tok.token_type)
-  {
-  case TokenType::NumLabFwd:
-    state->plugin.OnTerminal(Terminal::NumLabFwd, tok);
-    break;
-
-  case TokenType::NumLabBwd:
-    state->plugin.OnTerminal(Terminal::NumLabBwd, tok);
-    break;
-
-  default:
-    state->EmitErrorHere(fmt::format("Invalid {} with value '{}'", tok.TypeStr(), tok.ValStr()));
-    return;
-  }
-  state->lexer.Eat();
-}
-
-void ParseIdLocation(ParseState* state)
-{
-  std::array<AssemblerToken, 3> toks;
-  state->lexer.LookaheadN(&toks);
-
-  if (toks[1].token_type == TokenType::At)
-  {
-    if (toks[2].token_val == "ha")
-    {
-      state->plugin.OnHiaddr(toks[0].token_val);
-      if (state->error)
-      {
-        return;
-      }
-      state->lexer.EatN<3>();
-      return;
-    }
-    else if (toks[2].token_val == "l")
-    {
-      state->plugin.OnLoaddr(toks[0].token_val);
-      if (state->error)
-      {
-        return;
-      }
-      state->lexer.EatN<3>();
-      return;
-    }
-  }
-
-  ParseId(state);
-}
-
-void ParsePpcBuiltin(ParseState* state)
-{
-  AssemblerToken tok = state->lexer.Lookahead();
-  switch (tok.token_type)
-  {
-  case TokenType::GPR:
-    state->plugin.OnTerminal(Terminal::GPR, tok);
-    break;
-  case TokenType::FPR:
-    state->plugin.OnTerminal(Terminal::FPR, tok);
-    break;
-  case TokenType::SPR:
-    state->plugin.OnTerminal(Terminal::SPR, tok);
-    break;
-  case TokenType::CRField:
-    state->plugin.OnTerminal(Terminal::CRField, tok);
-    break;
-  case TokenType::Lt:
-    state->plugin.OnTerminal(Terminal::Lt, tok);
-    break;
-  case TokenType::Gt:
-    state->plugin.OnTerminal(Terminal::Gt, tok);
-    break;
-  case TokenType::Eq:
-    state->plugin.OnTerminal(Terminal::Eq, tok);
-    break;
-  case TokenType::So:
-    state->plugin.OnTerminal(Terminal::So, tok);
-    break;
-  default:
-    state->EmitErrorHere(
-        fmt::format("Unexpected token '{}' in ppc builtin", state->lexer.LookaheadRef().ValStr()));
-    break;
-  }
-  if (state->error)
-  {
-    return;
-  }
-  state->lexer.Eat();
-}
-
-void ParseBaseexpr(ParseState* state)
-{
-  TokenType tok = state->lexer.LookaheadType();
-  switch (tok)
-  {
-  case TokenType::HexadecimalLit:
-  case TokenType::DecimalLit:
-  case TokenType::OctalLit:
-  case TokenType::BinaryLit:
-    ParseImm(state);
-    break;
-
-  case TokenType::Identifier:
-    ParseIdLocation(state);
-    break;
-
-  case TokenType::GPR:
-  case TokenType::FPR:
-  case TokenType::SPR:
-  case TokenType::CRField:
-  case TokenType::Lt:
-  case TokenType::Gt:
-  case TokenType::Eq:
-  case TokenType::So:
-    ParsePpcBuiltin(state);
-    break;
-
-  case TokenType::NumLabFwd:
-  case TokenType::NumLabBwd:
-    ParseNumLocation(state);
-    break;
-
-  case TokenType::Dot:
-    state->plugin.OnTerminal(Terminal::Dot, state->lexer.Lookahead());
-    if (state->error)
-    {
-      return;
-    }
-    state->lexer.Eat();
-    break;
-
-  default:
-    state->EmitErrorHere(
-        fmt::format("Unexpected token '{}' in expression", state->lexer.LookaheadRef().ValStr()));
-    break;
-  }
-}
-
-void ParseBitor(ParseState* state);
-void ParseParen(ParseState* state)
-{
-  if (state->HasToken(TokenType::Lparen))
-  {
-    state->plugin.OnOpenParen(ParenType::Normal);
-    if (state->error)
-    {
-      return;
-    }
-
-    state->lexer.Eat();
-    ParseBitor(state);
-    if (state->error)
-    {
-      return;
-    }
-
-    if (state->HasToken(TokenType::Rparen))
-    {
-      state->plugin.OnCloseParen(ParenType::Normal);
-    }
-    state->ParseToken(TokenType::Rparen);
-  }
-  else if (state->HasToken(TokenType::Grave))
-  {
-    state->plugin.OnOpenParen(ParenType::RelConv);
-
-    state->lexer.Eat();
-    ParseBitor(state);
-    if (state->error)
-    {
-      return;
-    }
-
-    if (state->HasToken(TokenType::Grave))
-    {
-      state->plugin.OnCloseParen(ParenType::RelConv);
-    }
-    state->ParseToken(TokenType::Grave);
-  }
-  else
-  {
-    ParseBaseexpr(state);
-  }
-}
-
-void ParseUnary(ParseState* state)
-{
-  TokenType tok = state->lexer.LookaheadType();
-  if (tok == TokenType::Minus || tok == TokenType::Tilde)
-  {
-    state->lexer.Eat();
-    ParseUnary(state);
-    if (state->error)
-    {
-      return;
-    }
-
-    if (tok == TokenType::Minus)
-    {
-      state->plugin.OnOperator(AsmOp::Neg);
-    }
-    else
-    {
-      state->plugin.OnOperator(AsmOp::Not);
-    }
-  }
-  else
-  {
-    ParseParen(state);
-  }
-}
-
-void ParseMultiplication(ParseState* state)
-{
-  ParseUnary(state);
-  if (state->error)
-  {
-    return;
-  }
-
-  TokenType tok = state->lexer.LookaheadType();
-  while (tok == TokenType::Star || tok == TokenType::Slash)
-  {
-    state->lexer.Eat();
-    ParseUnary(state);
-    if (state->error)
-    {
-      return;
-    }
-
-    if (tok == TokenType::Star)
-    {
-      state->plugin.OnOperator(AsmOp::Mul);
-    }
-    else
-    {
-      state->plugin.OnOperator(AsmOp::Div);
-    }
-    tok = state->lexer.LookaheadType();
-  }
-}
-
-void ParseAddition(ParseState* state)
-{
-  ParseMultiplication(state);
-  if (state->error)
-  {
-    return;
-  }
-
-  TokenType tok = state->lexer.LookaheadType();
-  while (tok == TokenType::Plus || tok == TokenType::Minus)
-  {
-    state->lexer.Eat();
-    ParseMultiplication(state);
-    if (state->error)
-    {
-      return;
-    }
-
-    if (tok == TokenType::Plus)
-    {
-      state->plugin.OnOperator(AsmOp::Add);
-    }
-    else
-    {
-      state->plugin.OnOperator(AsmOp::Sub);
-    }
-    tok = state->lexer.LookaheadType();
-  }
-}
-
-void ParseShift(ParseState* state)
-{
-  ParseAddition(state);
-  if (state->error)
-  {
-    return;
-  }
-
-  TokenType tok = state->lexer.LookaheadType();
-  while (tok == TokenType::Lsh || tok == TokenType::Rsh)
-  {
-    state->lexer.Eat();
-    ParseAddition(state);
-    if (state->error)
-    {
-      return;
-    }
-
-    if (tok == TokenType::Lsh)
-    {
-      state->plugin.OnOperator(AsmOp::Lsh);
-    }
-    else
-    {
-      state->plugin.OnOperator(AsmOp::Rsh);
-    }
-    tok = state->lexer.LookaheadType();
-  }
-}
-
-void ParseBitand(ParseState* state)
-{
-  ParseShift(state);
-  if (state->error)
-  {
-    return;
-  }
-
-  while (state->HasToken(TokenType::Ampersand))
-  {
-    state->lexer.Eat();
-    ParseShift(state);
-    if (state->error)
-    {
-      return;
-    }
-
-    state->plugin.OnOperator(AsmOp::And);
-  }
-}
-
-void ParseBitxor(ParseState* state)
-{
-  ParseBitand(state);
-  if (state->error)
-  {
-    return;
-  }
-
-  while (state->HasToken(TokenType::Caret))
-  {
-    state->lexer.Eat();
-    ParseBitand(state);
-    if (state->error)
-    {
-      return;
-    }
-
-    state->plugin.OnOperator(AsmOp::Xor);
-  }
-}
-
-void ParseBitor(ParseState* state)
-{
-  ParseBitxor(state);
-  if (state->error)
-  {
-    return;
-  }
-
-  while (state->HasToken(TokenType::Pipe))
-  {
-    state->lexer.Eat();
-    ParseBitxor(state);
-    if (state->error)
-    {
-      return;
-    }
-
-    state->plugin.OnOperator(AsmOp::Or);
-  }
-}
-
-void ParseOperand(ParseState* state)
-{
-  state->plugin.OnOperandPre();
-  ParseBitor(state);
-  if (state->error)
-  {
-    return;
-  }
-  state->plugin.OnOperandPost();
-}
-
-void ParseOperandList(ParseState* state, ParseAlg alg)
-{
-  if (alg == ParseAlg::None)
-  {
-    return;
-  }
-  if (alg == ParseAlg::NoneOrOp1)
-  {
-    if (MatchOperandFirst(state->lexer.Lookahead()))
-    {
-      ParseOperand(state);
-    }
-    return;
-  }
-
-  enum ParseStep
-  {
-    _Operand,
-    _Comma,
-    _Lparen,
-    _Rparen,
-    _OptComma
-  };
-  std::vector<ParseStep> steps;
-
+  using P = Piece;
+  static constexpr P op1[] = {P::Operand};
+  static constexpr P op2[] = {P::Operand, P::Comma, P::Operand};
+  static constexpr P op3[] = {P::Operand, P::Comma, P::Operand, P::Comma, P::Operand};
+  static constexpr P op4[] = {P::Operand, P::Comma, P::Operand, P::Comma,
+                              P::Operand, P::Comma, P::Operand};
+  static constexpr P op5[] = {P::Operand, P::Comma, P::Operand, P::Comma, P::Operand,
+                              P::Comma,   P::Operand, P::Comma, P::Operand};
+  static constexpr P op1or2[] = {P::Operand, P::OptionalComma, P::Operand};
+  static constexpr P op2or3[] = {P::Operand, P::Comma, P::Operand, P::OptionalComma, P::Operand};
+  static constexpr P off[] = {P::Operand, P::Comma, P::Operand, P::Open, P::Operand, P::Close};
+  static constexpr P off_op2[] = {P::Operand, P::Comma, P::Operand, P::Open,  P::Operand,
+                                  P::Close,   P::Comma, P::Operand, P::Comma, P::Operand};
   switch (alg)
   {
   case ParseAlg::Op1:
-    steps = {_Operand};
-    break;
-  case ParseAlg::Op1Or2:
-    steps = {_Operand, _OptComma, _Operand};
-    break;
-  case ParseAlg::Op2Or3:
-    steps = {_Operand, _Comma, _Operand, _OptComma, _Operand};
-    break;
-  case ParseAlg::Op1Off1:
-    steps = {_Operand, _Comma, _Operand, _Lparen, _Operand, _Rparen};
-    break;
+    return op1;
   case ParseAlg::Op2:
-    steps = {_Operand, _Comma, _Operand};
-    break;
+    return op2;
   case ParseAlg::Op3:
-    steps = {_Operand, _Comma, _Operand, _Comma, _Operand};
-    break;
+    return op3;
   case ParseAlg::Op4:
-    steps = {_Operand, _Comma, _Operand, _Comma, _Operand, _Comma, _Operand};
-    break;
+    return op4;
   case ParseAlg::Op5:
-    steps = {_Operand, _Comma, _Operand, _Comma, _Operand, _Comma, _Operand, _Comma, _Operand};
-    break;
+    return op5;
+  case ParseAlg::Op1Or2:
+    return op1or2;
+  case ParseAlg::Op2Or3:
+    return op2or3;
+  case ParseAlg::Op1Off1:
+    return off;
   case ParseAlg::Op1Off1Op2:
-    steps = {_Operand, _Comma, _Operand, _Lparen, _Operand,
-             _Rparen,  _Comma, _Operand, _Comma,  _Operand};
-    break;
+    return off_op2;
   default:
-    ASSERT(false);
-    return;
+    return {};
   }
+}
 
-  for (ParseStep step : steps)
+class Parser
+{
+public:
+  explicit Parser(ParseState& state) : s(state), lex(state.lexer), cb(state.plugin) {}
+
+  void Program()
   {
-    bool stop_parse = false;
-    switch (step)
+    if (lex.LookaheadType() == TokenType::Eof)
     {
-    case _Operand:
-      ParseOperand(state);
-      break;
-    case _Comma:
-      state->ParseToken(TokenType::Comma);
-      break;
-    case _Lparen:
-      state->ParseToken(TokenType::Lparen);
-      break;
-    case _Rparen:
-      state->ParseToken(TokenType::Rparen);
-      break;
-    case _OptComma:
-      if (state->HasToken(TokenType::Comma))
+      s.eof = true;
+      return;
+    }
+    if (!Statement())
+      return;
+
+    while (!s.eof && !s.error)
+    {
+      const AssemblerToken next = lex.Lookahead();
+      if (next.token_type == TokenType::Eof)
       {
-        state->ParseToken(TokenType::Comma);
+        s.eof = true;
+      }
+      else if (next.token_type == TokenType::Eol)
+      {
+        lex.Eat();
+        if (!Statement())
+          return;
       }
       else
       {
-        stop_parse = true;
+        Fail(fmt::format("Unexpected token '{}' where line should have ended", next.ValStr()));
       }
-      break;
-    }
-    if (state->error)
-    {
-      return;
-    }
-    if (stop_parse)
-    {
-      break;
     }
   }
-}
 
-void ParseInstruction(ParseState* state)
-{
-  state->lexer.SetIdentifierMatchRule(Lexer::IdentifierMatchRule::Mnemonic);
+private:
+  bool Failed() const { return s.error.has_value(); }
+  void Fail(std::string message) { s.EmitErrorHere(std::move(message)); }
 
-  AssemblerToken mnemonic_token = state->lexer.Lookahead();
-  if (mnemonic_token.token_type != TokenType::Identifier)
+  // An optional label, then an optional instruction or directive. False on error.
+  bool Statement()
   {
-    state->lexer.SetIdentifierMatchRule(Lexer::IdentifierMatchRule::Typical);
-    return;
-  }
-
-  ParseInfo const* parse_info = mnemonic_tokens.Find(mnemonic_token.token_val);
-  bool is_extended = false;
-  if (parse_info == nullptr)
-  {
-    parse_info = extended_mnemonic_tokens.Find(mnemonic_token.token_val);
-    if (parse_info == nullptr)
+    Label();
+    if (Failed())
+      return false;
+    if (s.HasToken(TokenType::Dot))
     {
-      state->EmitErrorHere(
-          fmt::format("Unknown or unsupported mnemonic '{}'", mnemonic_token.ValStr()));
-      return;
-    }
-    is_extended = true;
-  }
-
-  state->plugin.OnInstructionPre(*parse_info, is_extended);
-
-  state->lexer.EatAndReset();
-
-  ParseOperandList(state, parse_info->parse_algorithm);
-  if (state->error)
-  {
-    return;
-  }
-
-  state->plugin.OnInstructionPost(*parse_info, is_extended);
-}
-
-void ParseLabel(ParseState* state)
-{
-  std::array<AssemblerToken, 2> tokens;
-  state->lexer.LookaheadN(&tokens);
-
-  if (tokens[0].token_type == TokenType::Identifier && tokens[1].token_type == TokenType::Colon)
-  {
-    state->plugin.OnLabelDecl(tokens[0].token_val);
-    if (state->error)
-    {
-      return;
-    }
-    state->lexer.EatN<2>();
-  }
-
-  if (tokens[0].token_type == TokenType::DecimalLit && tokens[1].token_type == TokenType::Colon)
-  {
-    std::optional<u32> labnum = tokens[0].EvalToken<u32>();
-    if (!labnum)
-    {
-      return;
-    }
-    state->plugin.OnNumericLabelDecl(tokens[0].token_val, *labnum);
-    if (state->error)
-    {
-      return;
-    }
-    state->lexer.EatN<2>();
-  }
-}
-
-void ParseResolvedExpr(ParseState* state)
-{
-  state->plugin.OnResolvedExprPre();
-  ParseBitor(state);
-  if (state->error)
-  {
-    return;
-  }
-  state->plugin.OnResolvedExprPost();
-}
-
-void ParseExpressionList(ParseState* state)
-{
-  ParseResolvedExpr(state);
-  if (state->error)
-  {
-    return;
-  }
-
-  while (state->HasToken(TokenType::Comma))
-  {
-    state->lexer.Eat();
-    ParseResolvedExpr(state);
-    if (state->error)
-    {
-      return;
-    }
-  }
-}
-
-void ParseFloat(ParseState* state)
-{
-  AssemblerToken flt_token = state->lexer.LookaheadFloat();
-  if (flt_token.token_type != TokenType::FloatLit)
-  {
-    state->EmitErrorHere("Invalid floating point literal");
-    return;
-  }
-  state->plugin.OnTerminal(Terminal::Flt, flt_token);
-  state->lexer.Eat();
-}
-
-void ParseFloatList(ParseState* state)
-{
-  ParseFloat(state);
-  if (state->error)
-  {
-    return;
-  }
-
-  while (state->HasToken(TokenType::Comma))
-  {
-    state->lexer.Eat();
-    ParseFloat(state);
-    if (state->error)
-    {
-      return;
-    }
-  }
-}
-
-void ParseDefvar(ParseState* state)
-{
-  AssemblerToken tok = state->lexer.Lookahead();
-  if (tok.token_type == TokenType::Identifier)
-  {
-    state->plugin.OnVarDecl(tok.token_val);
-    if (state->error)
-    {
-      return;
-    }
-    state->lexer.Eat();
-
-    state->ParseToken(TokenType::Comma);
-    if (state->error)
-    {
-      return;
-    }
-
-    ParseResolvedExpr(state);
-  }
-  else
-  {
-    state->EmitErrorHere(fmt::format("Expected an identifier, but found '{}'", tok.ValStr()));
-  }
-}
-
-void ParseString(ParseState* state)
-{
-  AssemblerToken tok = state->lexer.Lookahead();
-  if (tok.token_type == TokenType::StringLit)
-  {
-    state->plugin.OnTerminal(Terminal::Str, tok);
-    state->lexer.Eat();
-  }
-  else
-  {
-    state->EmitErrorHere(fmt::format("Expected a string literal, but found '{}'", tok.ValStr()));
-  }
-}
-
-void ParseDirective(ParseState* state)
-{
-  // TODO: test directives
-  state->lexer.SetIdentifierMatchRule(Lexer::IdentifierMatchRule::Directive);
-  AssemblerToken tok = state->lexer.Lookahead();
-  if (tok.token_type != TokenType::Identifier)
-  {
-    state->EmitErrorHere(fmt::format("Unexpected token '{}' in directive type", tok.ValStr()));
-    return;
-  }
-
-  GekkoDirective const* directive_enum = directives_map.Find(tok.token_val);
-  if (directive_enum == nullptr)
-  {
-    state->EmitErrorHere(fmt::format("Unknown assembler directive '{}'", tok.ValStr()));
-    return;
-  }
-
-  state->plugin.OnDirectivePre(*directive_enum);
-
-  state->lexer.EatAndReset();
-  switch (*directive_enum)
-  {
-  case GekkoDirective::Byte:
-  case GekkoDirective::_2byte:
-  case GekkoDirective::_4byte:
-  case GekkoDirective::_8byte:
-    ParseExpressionList(state);
-    break;
-
-  case GekkoDirective::Float:
-  case GekkoDirective::Double:
-    ParseFloatList(state);
-    break;
-
-  case GekkoDirective::Locate:
-  case GekkoDirective::Zeros:
-  case GekkoDirective::Skip:
-    ParseResolvedExpr(state);
-    break;
-
-  case GekkoDirective::PadAlign:
-  case GekkoDirective::Align:
-    ParseImm(state);
-    break;
-
-  case GekkoDirective::DefVar:
-    ParseDefvar(state);
-    break;
-
-  case GekkoDirective::Ascii:
-  case GekkoDirective::Asciz:
-    ParseString(state);
-    break;
-  }
-
-  if (state->error)
-  {
-    return;
-  }
-
-  state->plugin.OnDirectivePost(*directive_enum);
-}
-
-void ParseLine(ParseState* state)
-{
-  if (state->HasToken(TokenType::Dot))
-  {
-    state->ParseToken(TokenType::Dot);
-    ParseDirective(state);
-  }
-  else
-  {
-    ParseInstruction(state);
-  }
-}
-
-void ParseProgram(ParseState* state)
-{
-  AssemblerToken tok = state->lexer.Lookahead();
-  if (tok.token_type == TokenType::Eof)
-  {
-    state->eof = true;
-    return;
-  }
-  ParseLabel(state);
-  if (state->error)
-  {
-    return;
-  }
-  ParseLine(state);
-  if (state->error)
-  {
-    return;
-  }
-
-  while (!state->eof && !state->error)
-  {
-    tok = state->lexer.Lookahead();
-    if (tok.token_type == TokenType::Eof)
-    {
-      state->eof = true;
-    }
-    else if (tok.token_type == TokenType::Eol)
-    {
-      state->lexer.Eat();
-      ParseLabel(state);
-      if (state->error)
-      {
-        return;
-      }
-      ParseLine(state);
+      s.ParseToken(TokenType::Dot);
+      Directive();
     }
     else
     {
-      state->EmitErrorHere(
-          fmt::format("Unexpected token '{}' where line should have ended", tok.ValStr()));
+      Instruction();
+    }
+    return !Failed();
+  }
+
+  void Label()
+  {
+    std::array<AssemblerToken, 2> t;
+    lex.LookaheadN(&t);
+    if (t[1].token_type != TokenType::Colon)
+      return;
+
+    if (t[0].token_type == TokenType::Identifier)
+    {
+      cb.OnLabelDecl(t[0].token_val);
+    }
+    else if (t[0].token_type == TokenType::DecimalLit)
+    {
+      const std::optional<u32> number = t[0].EvalToken<u32>();
+      if (!number)
+        return;
+      cb.OnNumericLabelDecl(t[0].token_val, *number);
+    }
+    else
+    {
+      return;
+    }
+    if (!Failed())
+      lex.EatN<2>();
+  }
+
+  // --- instructions -------------------------------------------------------------------------
+
+  void Instruction()
+  {
+    lex.SetIdentifierMatchRule(Lexer::IdentifierMatchRule::Mnemonic);
+    const AssemblerToken mnemonic = lex.Lookahead();
+    if (mnemonic.token_type != TokenType::Identifier)
+    {
+      // Nothing (or not an instruction) on this line; let the caller deal with it.
+      lex.SetIdentifierMatchRule(Lexer::IdentifierMatchRule::Typical);
+      return;
+    }
+
+    bool extended = false;
+    const ParseInfo* info = FindMnemonic(mnemonic.token_val, &extended);
+    if (info == nullptr)
+    {
+      Fail(fmt::format("Unknown or unsupported mnemonic '{}'", mnemonic.ValStr()));
+      return;
+    }
+
+    cb.OnInstructionPre(*info, extended);
+    lex.EatAndReset();
+    Operands(info->parse_algorithm);
+    if (Failed())
+      return;
+    cb.OnInstructionPost(*info, extended);
+  }
+
+  void Operands(ParseAlg alg)
+  {
+    if (alg == ParseAlg::NoneOrOp1)
+    {
+      if (StartsExpression(lex.LookaheadType()))
+        Operand();
+      return;
+    }
+
+    for (const Piece piece : Layout(alg))
+    {
+      switch (piece)
+      {
+      case Piece::Operand:
+        Operand();
+        break;
+      case Piece::Comma:
+        s.ParseToken(TokenType::Comma);
+        break;
+      case Piece::Open:
+        s.ParseToken(TokenType::Lparen);
+        break;
+      case Piece::Close:
+        s.ParseToken(TokenType::Rparen);
+        break;
+      case Piece::OptionalComma:
+        if (!s.HasToken(TokenType::Comma))
+          return;
+        s.ParseToken(TokenType::Comma);
+        break;
+      }
+      if (Failed())
+        return;
     }
   }
-}
+
+  void Operand()
+  {
+    cb.OnOperandPre();
+    Expression(0);
+    if (!Failed())
+      cb.OnOperandPost();
+  }
+
+  // --- directives ---------------------------------------------------------------------------
+
+  void Directive()
+  {
+    lex.SetIdentifierMatchRule(Lexer::IdentifierMatchRule::Directive);
+    const AssemblerToken name = lex.Lookahead();
+    if (name.token_type != TokenType::Identifier)
+    {
+      Fail(fmt::format("Unexpected token '{}' in directive type", name.ValStr()));
+      return;
+    }
+    const GekkoDirective* directive = FindDirective(name.token_val);
+    if (directive == nullptr)
+    {
+      Fail(fmt::format("Unknown assembler directive '{}'", name.ValStr()));
+      return;
+    }
+
+    cb.OnDirectivePre(*directive);
+    lex.EatAndReset();
+    switch (*directive)
+    {
+    case GekkoDirective::Byte:
+    case GekkoDirective::_2byte:
+    case GekkoDirective::_4byte:
+    case GekkoDirective::_8byte:
+      CommaList([this] { ResolvedExpression(); });
+      break;
+    case GekkoDirective::Float:
+    case GekkoDirective::Double:
+      CommaList([this] { FloatValue(); });
+      break;
+    case GekkoDirective::Locate:
+    case GekkoDirective::Zeros:
+    case GekkoDirective::Skip:
+      ResolvedExpression();
+      break;
+    case GekkoDirective::PadAlign:
+    case GekkoDirective::Align:
+      Number();
+      break;
+    case GekkoDirective::DefVar:
+      VariableDefinition();
+      break;
+    case GekkoDirective::Ascii:
+    case GekkoDirective::Asciz:
+      StringValue();
+      break;
+    }
+    if (!Failed())
+      cb.OnDirectivePost(*directive);
+  }
+
+  template <typename F>
+  void CommaList(F item)
+  {
+    item();
+    while (!Failed() && s.HasToken(TokenType::Comma))
+    {
+      lex.Eat();
+      item();
+    }
+  }
+
+  void ResolvedExpression()
+  {
+    cb.OnResolvedExprPre();
+    Expression(0);
+    if (!Failed())
+      cb.OnResolvedExprPost();
+  }
+
+  void FloatValue()
+  {
+    const AssemblerToken tok = lex.LookaheadFloat();
+    if (tok.token_type != TokenType::FloatLit)
+    {
+      Fail("Invalid floating point literal");
+      return;
+    }
+    cb.OnTerminal(Terminal::Flt, tok);
+    lex.Eat();
+  }
+
+  void VariableDefinition()
+  {
+    const AssemblerToken name = lex.Lookahead();
+    if (name.token_type != TokenType::Identifier)
+    {
+      Fail(fmt::format("Expected an identifier, but found '{}'", name.ValStr()));
+      return;
+    }
+    cb.OnVarDecl(name.token_val);
+    if (Failed())
+      return;
+    lex.Eat();
+    s.ParseToken(TokenType::Comma);
+    if (Failed())
+      return;
+    ResolvedExpression();
+  }
+
+  void StringValue()
+  {
+    const AssemblerToken tok = lex.Lookahead();
+    if (tok.token_type != TokenType::StringLit)
+    {
+      Fail(fmt::format("Expected a string literal, but found '{}'", tok.ValStr()));
+      return;
+    }
+    cb.OnTerminal(Terminal::Str, tok);
+    lex.Eat();
+  }
+
+  // --- expressions --------------------------------------------------------------------------
+
+  // Parses operators of at least `min_level` binding strength (precedence climbing).
+  void Expression(int min_level)
+  {
+    Unary();
+    if (Failed())
+      return;
+    while (const BinaryOp* op = FindBinaryOp(lex.LookaheadType()))
+    {
+      if (op->level < min_level)
+        return;
+      lex.Eat();
+      Expression(op->level + 1);
+      if (Failed())
+        return;
+      cb.OnOperator(op->op);
+      if (Failed())
+        return;
+    }
+  }
+
+  void Unary()
+  {
+    const TokenType t = lex.LookaheadType();
+    if (t != TokenType::Minus && t != TokenType::Tilde)
+    {
+      Primary();
+      return;
+    }
+    lex.Eat();
+    Unary();
+    if (!Failed())
+      cb.OnOperator(t == TokenType::Minus ? AsmOp::Neg : AsmOp::Not);
+  }
+
+  void Primary()
+  {
+    if (s.HasToken(TokenType::Lparen))
+    {
+      cb.OnOpenParen(ParenType::Normal);
+      if (Failed())
+        return;
+      Bracketed(TokenType::Rparen, ParenType::Normal);
+    }
+    else if (s.HasToken(TokenType::Grave))
+    {
+      cb.OnOpenParen(ParenType::RelConv);
+      Bracketed(TokenType::Grave, ParenType::RelConv);
+    }
+    else
+    {
+      Leaf();
+    }
+  }
+
+  void Bracketed(TokenType closer, ParenType kind)
+  {
+    lex.Eat();
+    Expression(0);
+    if (Failed())
+      return;
+    if (s.HasToken(closer))
+      cb.OnCloseParen(kind);
+    s.ParseToken(closer);
+  }
+
+  void Leaf()
+  {
+    const AssemblerToken& tok = lex.LookaheadRef();
+    const TokenType t = tok.token_type;
+    if (NumberTerminal(t))
+    {
+      Number();
+    }
+    else if (t == TokenType::Identifier)
+    {
+      Symbol();
+    }
+    else if (const std::optional<Terminal> builtin = BuiltinTerminal(t))
+    {
+      cb.OnTerminal(*builtin, lex.Lookahead());
+      if (!Failed())
+        lex.Eat();
+    }
+    else if (t == TokenType::NumLabFwd || t == TokenType::NumLabBwd)
+    {
+      cb.OnTerminal(t == TokenType::NumLabFwd ? Terminal::NumLabFwd : Terminal::NumLabBwd,
+                    lex.Lookahead());
+      lex.Eat();
+    }
+    else if (t == TokenType::Dot)
+    {
+      cb.OnTerminal(Terminal::Dot, lex.Lookahead());
+      if (!Failed())
+        lex.Eat();
+    }
+    else
+    {
+      Fail(fmt::format("Unexpected token '{}' in expression", tok.ValStr()));
+    }
+  }
+
+  // A plain integer literal (also the argument of .align and .padalign).
+  void Number()
+  {
+    const AssemblerToken tok = lex.Lookahead();
+    const std::optional<Terminal> kind = NumberTerminal(tok.token_type);
+    if (!kind)
+    {
+      Fail(fmt::format("Invalid {} with value '{}'", tok.TypeStr(), tok.ValStr()));
+      return;
+    }
+    cb.OnTerminal(*kind, tok);
+    if (!Failed())
+      lex.Eat();
+  }
+
+  // An identifier, possibly with an @ha or @l suffix selecting half of its address.
+  void Symbol()
+  {
+    std::array<AssemblerToken, 3> t;
+    lex.LookaheadN(&t);
+    if (t[1].token_type == TokenType::At && (t[2].token_val == "ha" || t[2].token_val == "l"))
+    {
+      if (t[2].token_val == "ha")
+        cb.OnHiaddr(t[0].token_val);
+      else
+        cb.OnLoaddr(t[0].token_val);
+      if (!Failed())
+        lex.EatN<3>();
+      return;
+    }
+
+    cb.OnTerminal(Terminal::Id, t[0]);
+    if (!Failed())
+      lex.Eat();
+  }
+
+  ParseState& s;
+  Lexer& lex;
+  ParsePlugin& cb;
+};
 }  // namespace
 
 ParseState::ParseState(std::string_view input_str, ParsePlugin& p)
@@ -864,58 +581,40 @@ bool ParseState::HasToken(TokenType tp) const
 
 void ParseState::ParseToken(TokenType tp)
 {
-  AssemblerToken tok = lexer.LookaheadRef();
+  const AssemblerToken tok = lexer.LookaheadRef();
   if (tok.token_type == tp)
-  {
     lexer.Eat();
-  }
   else
-  {
     EmitErrorHere(fmt::format("Expected '{}' but found '{}'", TokenTypeToStr(tp), tok.ValStr()));
-  }
 }
 
 void ParseState::EmitErrorHere(std::string&& message)
 {
-  AssemblerToken cur_token = lexer.Lookahead();
-  if (cur_token.token_type == TokenType::Invalid)
+  const AssemblerToken tok = lexer.Lookahead();
+  AssemblerError err{std::move(message), lexer.CurrentLine(), lexer.LineNumber(),
+                     lexer.ColNumber(), tok.token_val.size()};
+  if (tok.token_type == TokenType::Invalid)
   {
-    error = AssemblerError{
-        std::string(cur_token.invalid_reason),
-        lexer.CurrentLine(),
-        lexer.LineNumber(),
-        lexer.ColNumber() + cur_token.invalid_region.begin,
-        cur_token.invalid_region.len,
-    };
+    // The lexer knows better what is wrong with a malformed token.
+    err.message = std::string(tok.invalid_reason);
+    err.col += tok.invalid_region.begin;
+    err.len = tok.invalid_region.len;
   }
-  else
-  {
-    error = AssemblerError{
-        std::move(message), lexer.CurrentLine(),        lexer.LineNumber(),
-        lexer.ColNumber(),  cur_token.token_val.size(),
-    };
-  }
+  error = std::move(err);
 }
 
 void ParseWithPlugin(ParsePlugin* plugin, std::string_view input)
 {
-  ParseState parse_state = ParseState(input, *plugin);
-  plugin->SetOwner(&parse_state);
-  ParseProgram(&parse_state);
+  ParseState state(input, *plugin);
+  plugin->SetOwner(&state);
 
-  if (parse_state.error)
+  Parser(state).Program();
+  if (!state.error)
+    plugin->PostParseAction();
+  if (state.error)
   {
     plugin->OnError();
-    plugin->ForwardError(std::move(*parse_state.error));
-  }
-  else
-  {
-    plugin->PostParseAction();
-    if (parse_state.error)
-    {
-      plugin->OnError();
-      plugin->ForwardError(std::move(*parse_state.error));
-    }
+    plugin->ForwardError(std::move(*state.error));
   }
 
   plugin->SetOwner(nullptr);
