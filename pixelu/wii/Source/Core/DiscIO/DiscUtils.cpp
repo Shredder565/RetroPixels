@@ -62,22 +62,23 @@ u64 BiggestOffsetInDirectory(const FileInfo& entry)
 
 std::string NameForPartitionType(u32 partition_type, bool include_prefix)
 {
-  switch (partition_type)
+  struct KnownType
   {
-  case PARTITION_DATA:
-    return "DATA";
-  case PARTITION_UPDATE:
-    return "UPDATE";
-  case PARTITION_CHANNEL:
-    return "CHANNEL";
-  case PARTITION_INSTALL:
-    // With the prefix the name is used for folder names, and wit does not know "INSTALL" there.
-    if (!include_prefix)
-      return "INSTALL";
-    break;
-  default:
-    break;
-  }
+    u32 type;
+    const char* name;
+  };
+  static constexpr KnownType KNOWN_TYPES[] = {
+      {PARTITION_DATA, "DATA"},
+      {PARTITION_UPDATE, "UPDATE"},
+      {PARTITION_CHANNEL, "CHANNEL"},
+      {PARTITION_INSTALL, "INSTALL"},
+  };
+  // With the prefix the name is used for folder names, and wit does not know "INSTALL" there,
+  // so that type falls through to the generic names below.
+  const bool use_generic = include_prefix && partition_type == PARTITION_INSTALL;
+  const auto known = std::ranges::find(KNOWN_TYPES, partition_type, &KnownType::type);
+  if (!use_generic && known != std::end(KNOWN_TYPES))
+    return known->name;
 
   // Other types are often four ASCII characters (like a game ID); otherwise use the number.
   std::string as_text(4, '\0');

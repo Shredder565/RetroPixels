@@ -53,6 +53,17 @@ u64 VolumeFileBlobReader::GetRawSize() const
   return m_file_size;
 }
 
+// Block layout and compression are those of the volume's underlying blob.
+std::optional<int> VolumeFileBlobReader::GetCompressionLevel() const
+{
+  return m_volume.GetBlobReader().GetCompressionLevel();
+}
+
+std::string VolumeFileBlobReader::GetCompressionMethod() const
+{
+  return m_volume.GetBlobReader().GetCompressionMethod();
+}
+
 u64 VolumeFileBlobReader::GetBlockSize() const
 {
   return m_volume.GetBlobReader().GetBlockSize();
@@ -61,16 +72,6 @@ u64 VolumeFileBlobReader::GetBlockSize() const
 bool VolumeFileBlobReader::HasFastRandomAccessInBlock() const
 {
   return m_volume.GetBlobReader().HasFastRandomAccessInBlock();
-}
-
-std::string VolumeFileBlobReader::GetCompressionMethod() const
-{
-  return m_volume.GetBlobReader().GetCompressionMethod();
-}
-
-std::optional<int> VolumeFileBlobReader::GetCompressionLevel() const
-{
-  return m_volume.GetBlobReader().GetCompressionLevel();
 }
 
 bool VolumeFileBlobReader::Read(u64 offset, u64 length, u8* out_ptr)

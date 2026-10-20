@@ -382,17 +382,15 @@ void ApplyFilePatch(const Patch& patch, const File& file, std::vector<FSTBuilder
     ApplyFileEntry(patch, file, target);
 }
 
+// Joins with exactly one '/' between the parts (one slash at the seam on either side is
+// dropped); an empty part leaves the other one unchanged.
 std::string JoinPath(std::string_view a, std::string_view b)
 {
-  if (a.empty())
-    return std::string(b);
-  if (b.empty())
-    return std::string(a);
-  if (a.ends_with('/'))
-    a.remove_suffix(1);
-  if (b.starts_with('/'))
-    b.remove_prefix(1);
-  return fmt::format("{}/{}", a, b);
+  if (a.empty() || b.empty())
+    return std::string(a.empty() ? b : a);
+  const size_t a_len = a.size() - (a.back() == '/' ? 1 : 0);
+  const size_t b_skip = b.front() == '/' ? 1 : 0;
+  return fmt::format("{}/{}", a.substr(0, a_len), b.substr(b_skip));
 }
 
 void ApplyFolderPatch(const Patch& patch, const Folder& folder, std::vector<FSTBuilderNode>* fst,

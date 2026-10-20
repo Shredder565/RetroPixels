@@ -55,23 +55,24 @@ bool SymbolDB::Clear(const char* prefix)
   if (m_functions.empty() && m_notes.empty())
     return false;
 
-  m_functions.clear();
-  m_notes.clear();
   m_checksum_to_function.clear();
+  m_notes.clear();
+  m_functions.clear();
   return true;
+}
+
+// Numbers the functions 0, 1, 2, ... in address order.
+void SymbolDB::Index(XFuncMap* functions)
+{
+  int index = 0;
+  for (auto& [address, symbol] : *functions)
+    symbol.index = index++;
 }
 
 void SymbolDB::Index()
 {
   std::lock_guard lock(m_mutex);
   Index(&m_functions);
-}
-
-void SymbolDB::Index(XFuncMap* functions)
-{
-  int next = 0;
-  for (auto& entry : *functions)
-    entry.second.index = next++;
 }
 
 const Symbol* SymbolDB::GetSymbolFromName(std::string_view name) const
