@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -22,8 +21,13 @@ namespace MMIO
 class Mapping;
 }
 
+// The DSP interface (0x0C005000): mailboxes and control register of the DSP,
+// the ARAM controller and its DMA engine, and the audio DMA that feeds the
+// mixer from RAM.
 namespace DSP
 {
+// Interrupt status bits in the control register; each one's enable bit is
+// the next bit up.
 enum DSPInterruptType
 {
   INT_DSP = 0x80,
@@ -31,38 +35,35 @@ enum DSPInterruptType
   INT_AID = 0x08,
 };
 
-// aram size and mask
+// GameCube ARAM.
 enum
 {
-  ARAM_SIZE = 0x01000000,  // 16 MB
+  ARAM_SIZE = 0x01000000,  // 16 MiB
   ARAM_MASK = 0x00FFFFFF,
 };
 
-// UDSPControl
+// Control register bits owned by the DSP emulator (reset, assert interrupt,
+// halt, init code, init).
 constexpr u16 DSP_CONTROL_MASK = 0x0C07;
+
+// DSP control register.
 union UDSPControl
 {
   u16 Hex;
   struct
   {
-    // DSP Control
-    u16 DSPReset : 1;  // Write 1 to reset and waits for 0
-    u16 DSPAssertInt : 1;
+    u16 DSPReset : 1;      // write 1 to reset; reads 1 until done
+    u16 DSPAssertInt : 1;  // CPU -> DSP interrupt
     u16 DSPHalt : 1;
-    // Interrupt for DMA to the AI/speakers
-    u16 AID : 1;
+    u16 AID : 1;  // audio DMA interrupt
     u16 AID_mask : 1;
-    // ARAM DMA interrupt
-    u16 ARAM : 1;
+    u16 ARAM : 1;  // ARAM DMA interrupt
     u16 ARAM_mask : 1;
-    // DSP DMA interrupt
-    u16 DSP : 1;
+    u16 DSP : 1;  // DSP -> CPU interrupt
     u16 DSP_mask : 1;
-    // Other ???
-    u16 DMAState : 1;     // DSPGetDMAStatus() uses this flag. __ARWaitForDMA() uses it too...maybe
-                          // it's just general DMA flag
-    u16 DSPInitCode : 1;  // Indicator that the DSP was initialized?
-    u16 DSPInit : 1;      // DSPInit() writes to this flag
+    u16 DMAState : 1;  // ARAM DMA in progress
+    u16 DSPInitCode : 1;
+    u16 DSPInit : 1;
     u16 pad : 4;
   };
   UDSPControl(u16 hex = 0) : Hex(hex) {}
@@ -88,17 +89,18 @@ public:
 
   void DoState(PointerWrap& p);
 
-  // TODO: Maybe rethink this? The timing is unpredictable.
+  // For the DSP emulator (any thread): raise a DSP interrupt later.
   void GenerateDSPInterruptFromDSPEmu(DSPInterruptType type, int cycles_into_future = 0);
 
-  // Audio/DSP Helper
+  // ARAM access for the DSP emulator.
   u8 ReadARAM(u32 address) const;
   void WriteARAM(u8 value, u32 address);
 
-  // Debugger Helper
+  // For the debugger.
   u8* GetARAMPtr() const;
   u32 GetARAMSize() const;
 
+  // Periodic work, driven by SystemTimers.
   void UpdateAudioDMA();
   void UpdateDSPSlice(int cycles);
 
@@ -109,76 +111,51 @@ private:
   static void GlobalCompleteARAM(Core::System& system, u64 userdata, s64 cyclesLate);
   void UpdateInterrupts();
   void Do_ARAM_DMA();
+  void WriteControl(u16 value);
+  void WriteAudioDMAControl(u16 value);
+  u16 ReadMailHigh(bool cpu_mailbox);
 
-  // UARAMCount
-  union UARAMCount
-  {
-    u32 Hex = 0;
-    struct
-    {
-      u32 count : 31;
-      u32 dir : 1;  // 0: MRAM -> ARAM 1: ARAM -> MRAM
-    };
-  };
+  // The structs below are stored in savestates as raw bytes; their layout
+  // must not change.
 
-  // Blocks are 32 bytes.
-  union UAudioDMAControl
-  {
-    u16 Hex = 0;
-    struct
-    {
-      u16 NumBlocks : 15;
-      u16 Enable : 1;
-    };
-  };
-
-  // AudioDMA
+  // Audio DMA. The control word holds the block count (32-byte blocks) in
+  // bits 0-14 and the enable flag in bit 15.
   struct AudioDMA
   {
     u32 current_source_address = 0;
     u16 remaining_blocks_count = 0;
-    u32 SourceAddress = 0;
-    UAudioDMAControl AudioDMAControl;
+    u32 source_address = 0;
+    u16 control = 0;
   };
 
-  // ARAM_DMA
-  struct ARAM_DMA
+  // ARAM DMA. The count word holds the byte count in bits 0-30 and the
+  // direction in bit 31 (1 = ARAM to main memory).
+  struct AramDMA
   {
-    u32 MMAddr = 0;
-    u32 ARAddr = 0;
-    UARAMCount Cnt;
+    u32 mm_address = 0;
+    u32 ar_address = 0;
+    u32 count = 0;
   };
 
-  // So we may abstract GC/Wii differences a little
-  struct ARAMInfo
+  // Where the auxiliary memory lives: ARAM on the GameCube, MEM2 on the Wii
+  // (owned by the memory manager and saved there).
+  struct AuxMemory
   {
-    bool wii_mode = false;  // Wii EXRAM is managed in Memory:: so we need to skip statesaving, etc
+    bool wii_mode = false;
     u32 size = ARAM_SIZE;
     u32 mask = ARAM_MASK;
-    u8* ptr = nullptr;  // aka audio ram, auxiliary ram, MEM2, EXRAM, etc...
+    u8* ptr = nullptr;
   };
 
-  union ARAM_Info
-  {
-    u16 Hex = 0;
-    struct
-    {
-      u16 size : 6;
-      u16 unk : 1;
-      u16 : 9;
-    };
-  };
-
-  ARAMInfo m_aram;
+  AuxMemory m_aram;
   AudioDMA m_audio_dma;
-  ARAM_DMA m_aram_dma;
+  AramDMA m_aram_dma;
   UDSPControl m_dsp_control;
-  ARAM_Info m_aram_info;
-  // Contains bitfields for some stuff we don't care about (and nothing ever reads):
-  //  CAS latency/burst length/addressing mode/write mode
-  // We care about the LSB tho. It indicates that the ARAM controller has finished initializing
+  u16 m_aram_info = 0;  // size configuration in bits 0-5, bit 6 unknown
+  // ARAM controller mode. Only bit 0 (controller ready) matters.
   u16 m_aram_mode = 0;
   u16 m_aram_refresh = 0;
+  // LLE: DSP cycles not yet run in the current slice.
   int m_dsp_slice = 0;
 
   std::unique_ptr<DSPEmulator> m_dsp_emulator;
