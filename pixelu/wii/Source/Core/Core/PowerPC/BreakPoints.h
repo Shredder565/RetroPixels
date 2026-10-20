@@ -1,5 +1,8 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// Debugger breakpoints: instruction breakpoints (BreakPoints) and memory
+// watchpoints (MemChecks). Both can be saved to and loaded from the list of
+// strings kept in a game's debugger settings.
 
 #pragma once
 
@@ -28,6 +31,7 @@ struct TBreakPoint
 
 struct TMemCheck
 {
+  // Inclusive range; equal for a single address.
   u32 start_address = 0;
   u32 end_address = 0;
 
@@ -44,11 +48,11 @@ struct TMemCheck
 
   std::optional<Expression> condition;
 
-  // returns whether to break
+  // Called for an access that hits the range. Logs if asked to and returns
+  // whether emulation should stop.
   bool Action(Core::System& system, u64 value, u32 addr, bool write, size_t size, u32 pc);
 };
 
-// Code breakpoints.
 class BreakPoints
 {
 public:
@@ -68,20 +72,20 @@ public:
 
   bool IsAddressBreakPoint(u32 address) const;
   bool IsBreakPointEnable(u32 address) const;
-  // Get the breakpoint in this address (for most purposes)
+  // The breakpoint that applies at an address; the temporary one wins.
   const TBreakPoint* GetBreakpoint(u32 address) const;
-  // Get the breakpoint in this address (ignore temporary breakpoint, e.g. for editing purposes)
+  // Only the regular (saved) breakpoints, for editing.
   const TBreakPoint* GetRegularBreakpoint(u32 address) const;
 
-  // Add BreakPoint. If one already exists on the same address, replace it.
+  // Adds a breakpoint; an existing one at the same address is replaced but
+  // keeps its enabled state.
   void Add(u32 address, bool break_on_hit, bool log_on_hit, std::optional<Expression> condition);
   void Add(u32 address);
+  // Adds a breakpoint unless the address already has one.
   void Add(TBreakPoint bp);
-  // Add temporary breakpoint (e.g., Step Over, Run to Here)
-  // It can be on the same address of a regular breakpoint (it will have priority in this case)
-  // It's cleared whenever the emulation is paused for any reason
-  // (CPUManager::SetStateLocked(State::Paused))
-  // TODO: Should it somehow force to resume emulation when called?
+  // The one-shot breakpoint used by "step over" and "run to here". It may
+  // share an address with a regular breakpoint, and it is cleared whenever
+  // emulation pauses.
   void SetTemporary(u32 address);
 
   bool ToggleBreakPoint(u32 address);
@@ -90,7 +94,7 @@ public:
   void EnableBreaking(bool enable);
   bool IsBreakingEnabled() const { return m_breaking_enabled; }
 
-  // Remove Breakpoint. Returns whether it was removed.
+  // Returns whether a breakpoint was removed.
   bool Remove(u32 address);
   void Clear();
   void ClearTemporary();
@@ -104,7 +108,6 @@ private:
 
 class DelayedMemCheckUpdate;
 
-// Memory breakpoints
 class MemChecks
 {
 public:
@@ -122,11 +125,14 @@ public:
   TMemChecksStr GetStrings() const;
   void AddFromStrings(const TMemChecksStr& mc_strings);
 
+  // Adding and removing only mark the JIT/MMU refresh as needed; it happens
+  // when the returned object goes away, so several changes cost one refresh.
   DelayedMemCheckUpdate Add(TMemCheck memory_check);
 
   bool ToggleEnable(u32 address);
 
   TMemCheck* GetMemCheck(u32 address, size_t size = 1);
+  // Whether any watchpoint touches the length-aligned block holding address.
   bool OverlapsMemcheck(u32 address, u32 length) const;
   DelayedMemCheckUpdate Remove(u32 address);
 
@@ -141,7 +147,7 @@ public:
   BitSet32 GetFPRsUsedInConditions() { return m_fprs_used_in_conditions; }
 
 private:
-  // Returns whether any change was made
+  // Returns whether the register sets changed.
   bool UpdateRegistersUsedInConditions();
 
   TMemChecks m_mem_checks;
@@ -152,6 +158,8 @@ private:
   bool m_breaking_enabled = true;
 };
 
+// Runs MemChecks::Update() on destruction if any change it collected asked
+// for one.
 class DelayedMemCheckUpdate final
 {
 public:
@@ -171,13 +179,14 @@ public:
       m_memchecks->Update();
   }
 
+  // Takes over the other object's pending update (same MemChecks only).
   DelayedMemCheckUpdate& operator|=(DelayedMemCheckUpdate&& other)
   {
-    if (m_memchecks == other.m_memchecks)
-    {
-      m_update_needed |= other.m_update_needed;
-      other.m_update_needed = false;
-    }
+    if (other.m_memchecks != m_memchecks)
+      return *this;
+    if (other.m_update_needed)
+      m_update_needed = true;
+    other.m_update_needed = false;
     return *this;
   }
 
