@@ -1,6 +1,6 @@
 name: PixelU (Wii U) test build
 
-# Builds PixelU, the Wii U emulator in pixelu/ (forked from Cemu, MPL-2.0),
+# Builds PixelU, RetroPixels' own Wii U emulator in pixelu/ (it began as a copy of Cemu),
 # for Windows. The result is a workflow artifact only: no release is made.
 
 on:
