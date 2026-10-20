@@ -32,6 +32,11 @@ constexpr int CPU_CYCLES_PER_DSP_CYCLE = 6;
 
 constexpr u32 MAIL_PENDING = 0x80000000;
 
+Mailbox SelectMailbox(bool cpu_mailbox)
+{
+  return cpu_mailbox ? Mailbox::CPU : Mailbox::DSP;
+}
+
 // Reads a big-endian ROM image of exactly size_in_bytes bytes.
 bool LoadDSPRom(u16* rom, const std::string& filename, u32 size_in_bytes)
 {
@@ -183,43 +188,41 @@ void DSPLLE::Shutdown()
   m_dsp_core.Shutdown();
 }
 
-u16 DSPLLE::DSP_WriteControlRegister(u16 value)
-{
-  m_dsp_core.GetInterpreter().WriteControlRegister(value);
-
-  if ((value & CR_EXTERNAL_INT) != 0)
-  {
-    if (m_threaded)
-    {
-      // Only the Zelda microcode raises this. Its frequent mail exchanges gain
-      // nothing from a thread, so leave threaded mode at the next update and let
-      // the thread take the interrupt meanwhile.
-      m_stop_threading_requested = true;
-      m_dsp_core.SetExternalInterrupt(true);
-    }
-    else
-    {
-      m_dsp_core.CheckExternalInterrupt();
-      m_dsp_core.CheckExceptions();
-    }
-  }
-
-  return DSP_ReadControlRegister();
-}
-
 u16 DSPLLE::DSP_ReadControlRegister()
 {
   return m_dsp_core.GetInterpreter().ReadControlRegister();
 }
 
+u16 DSPLLE::DSP_WriteControlRegister(u16 value)
+{
+  m_dsp_core.GetInterpreter().WriteControlRegister(value);
+
+  const bool raises_external_interrupt = (value & CR_EXTERNAL_INT) != 0;
+  if (raises_external_interrupt && m_threaded)
+  {
+    // Only the Zelda microcode raises this. Its frequent mail exchanges gain
+    // nothing from a thread, so leave threaded mode at the next update and let
+    // the thread take the interrupt meanwhile.
+    m_stop_threading_requested = true;
+    m_dsp_core.SetExternalInterrupt(true);
+  }
+  else if (raises_external_interrupt)
+  {
+    m_dsp_core.CheckExternalInterrupt();
+    m_dsp_core.CheckExceptions();
+  }
+
+  return DSP_ReadControlRegister();
+}
+
 u16 DSPLLE::DSP_ReadMailBoxHigh(bool cpu_mailbox)
 {
-  return m_dsp_core.ReadMailboxHigh(cpu_mailbox ? Mailbox::CPU : Mailbox::DSP);
+  return m_dsp_core.ReadMailboxHigh(SelectMailbox(cpu_mailbox));
 }
 
 u16 DSPLLE::DSP_ReadMailBoxLow(bool cpu_mailbox)
 {
-  return m_dsp_core.ReadMailboxLow(cpu_mailbox ? Mailbox::CPU : Mailbox::DSP);
+  return m_dsp_core.ReadMailboxLow(SelectMailbox(cpu_mailbox));
 }
 
 void DSPLLE::DSP_WriteMailBoxHigh(bool cpu_mailbox, u16 value)

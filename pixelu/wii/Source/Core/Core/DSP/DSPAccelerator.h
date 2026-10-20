@@ -38,13 +38,13 @@ public:
   void SetStartAddress(u32 address);
   void SetEndAddress(u32 address);
   void SetCurrentAddress(u32 address);
-  void SetSampleFormat(u16 format);
-  void SetGain(s16 gain);
-  void SetYn1(s16 yn1);
+  void SetSampleFormat(u16 format) { m_format = format; }
+  void SetGain(s16 gain) { m_gain = gain; }
+  void SetYn1(s16 yn1) { m_yn1 = yn1; }
   // Writing YN2 also lets reads resume after the end of the buffer was reached.
   void SetYn2(s16 yn2);
-  void SetPredScale(u16 pred_scale);
-  void SetInput(u16 input);
+  void SetPredScale(u16 pred_scale) { m_pred_scale = pred_scale & 0x7f; }
+  void SetInput(u16 input) { m_input = input; }
 
   void DoState(PointerWrap& p);
 

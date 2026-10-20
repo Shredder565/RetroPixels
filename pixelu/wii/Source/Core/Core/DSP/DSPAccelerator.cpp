@@ -262,34 +262,10 @@ void Accelerator::SetCurrentAddress(u32 address)
   m_current_address = address & CURRENT_MASK;
 }
 
-void Accelerator::SetSampleFormat(u16 format)
-{
-  m_format = format;
-}
-
-void Accelerator::SetGain(s16 gain)
-{
-  m_gain = gain;
-}
-
-void Accelerator::SetYn1(s16 yn1)
-{
-  m_yn1 = yn1;
-}
-
 void Accelerator::SetYn2(s16 yn2)
 {
   m_yn2 = yn2;
   m_reads_stopped = false;
 }
 
-void Accelerator::SetPredScale(u16 pred_scale)
-{
-  m_pred_scale = pred_scale & 0x7f;
-}
-
-void Accelerator::SetInput(u16 input)
-{
-  m_input = input;
-}
 }  // namespace DSP

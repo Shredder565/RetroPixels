@@ -450,23 +450,32 @@ public:
   void SetState(State new_state);
   State GetState() const;
 
-  void SetException(ExceptionType exception);
-  void SetExternalInterrupt(bool val);
-  void CheckExternalInterrupt();
+  // These forward to the DSP state (SDSP).
+  void SetException(ExceptionType exception) { m_dsp.SetException(exception); }
+  void SetExternalInterrupt(bool val) { m_dsp.SetExternalInterrupt(val); }
+  void CheckExternalInterrupt() { m_dsp.CheckExternalInterrupt(); }
+  // Out of line: the JIT calls it from generated code.
   bool CheckExceptions();
 
-  u16 ReadRegister(size_t reg) const;
-  void WriteRegister(size_t reg, u16 val);
+  u16 ReadRegister(size_t reg) const { return m_dsp.ReadRegister(reg); }
+  void WriteRegister(size_t reg, u16 val) { m_dsp.WriteRegister(reg, val); }
 
-  u32 PeekMailbox(Mailbox mailbox) const;
-  u16 ReadMailboxLow(Mailbox mailbox);
-  u16 ReadMailboxHigh(Mailbox mailbox);
-  void WriteMailboxLow(Mailbox mailbox, u16 value);
-  void WriteMailboxHigh(Mailbox mailbox, u16 value);
+  u32 PeekMailbox(Mailbox mailbox) const { return m_dsp.PeekMailbox(mailbox); }
+  u16 ReadMailboxLow(Mailbox mailbox) { return m_dsp.ReadMailboxLow(mailbox); }
+  u16 ReadMailboxHigh(Mailbox mailbox) { return m_dsp.ReadMailboxHigh(mailbox); }
+  void WriteMailboxLow(Mailbox mailbox, u16 value) { m_dsp.WriteMailboxLow(mailbox, value); }
+  void WriteMailboxHigh(Mailbox mailbox, u16 value) { m_dsp.WriteMailboxHigh(mailbox, value); }
 
-  void LogIFXRead(u16 address, u16 read_value);
-  void LogIFXWrite(u16 address, u16 written_value);
-  void LogDMA(u16 control, u32 gc_address, u16 dsp_address, u16 length, const u8* data);
+  // Forward to the capture logger.
+  void LogIFXRead(u16 address, u16 read_value) { m_dsp_cap->LogIFXRead(address, read_value); }
+  void LogIFXWrite(u16 address, u16 written_value)
+  {
+    m_dsp_cap->LogIFXWrite(address, written_value);
+  }
+  void LogDMA(u16 control, u32 gc_address, u16 dsp_address, u16 length, const u8* data)
+  {
+    m_dsp_cap->LogDMA(control, gc_address, dsp_address, length, data);
+  }
 
   bool IsJITCreated() const;
 
@@ -482,6 +491,9 @@ public:
   const Interpreter::Interpreter& GetInterpreter() const { return *m_dsp_interpreter; }
 
 private:
+  // The interpreter's side of RunCycles(); returns the cycles left over.
+  int RunInterpreter(int cycles);
+
   SDSP m_dsp;
   DSPBreakpoints m_dsp_breakpoints;
   State m_core_state = State::Stopped;

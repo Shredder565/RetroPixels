@@ -6,6 +6,7 @@
 #include <array>
 #include <cstring>
 #include <memory>
+#include <utility>
 
 #include "Common/Assert.h"
 #include "Common/ChunkFile.h"
@@ -243,126 +244,80 @@ bool SDSP::CheckExceptions()
   return false;
 }
 
-u16 SDSP::ReadRegister(size_t reg) const
+namespace
 {
+// Where register `reg` lives, for every register that is plain 16-bit storage.
+// The accumulator high parts are wider and are handled by the callers; anything
+// else (including nonexistent registers) gives nullptr.
+template <typename Regs>
+auto PlainRegister(Regs& regs, size_t reg) -> decltype(&regs.cr)
+{
+  const size_t index = reg & 3;
+  const size_t pair = reg & 1;
+  if (reg < 0x04)
+    return &regs.ar[index];
+  if (reg < 0x08)
+    return &regs.ix[index];
+  if (reg < 0x0c)
+    return &regs.wr[index];
   if (reg < 0x10)
-  {
-    // $0-$15 are four banks of four 16-bit registers.
-    const size_t slot = reg & 3;
-    switch (reg >> 2)
-    {
-    case 0:
-      return r.ar[slot];
-    case 1:
-      return r.ix[slot];
-    case 2:
-      return r.wr[slot];
-    default:
-      return r.st[slot];
-    }
-  }
+    return &regs.st[index];
 
   switch (reg)
   {
-  case DSP_REG_ACH0:
-  case DSP_REG_ACH1:
-    return static_cast<u16>(r.ac[reg - DSP_REG_ACH0].h);
   case DSP_REG_CR:
-    return r.cr;
+    return &regs.cr;
   case DSP_REG_SR:
-    return r.sr;
+    return &regs.sr;
   case DSP_REG_PRODL:
-    return r.prod.l;
+    return &regs.prod.l;
   case DSP_REG_PRODM:
-    return r.prod.m;
+    return &regs.prod.m;
   case DSP_REG_PRODH:
-    return r.prod.h;
+    return &regs.prod.h;
   case DSP_REG_PRODM2:
-    return r.prod.m2;
+    return &regs.prod.m2;
   case DSP_REG_AXL0:
   case DSP_REG_AXL1:
-    return r.ax[reg - DSP_REG_AXL0].l;
+    return &regs.ax[pair].l;
   case DSP_REG_AXH0:
   case DSP_REG_AXH1:
-    return r.ax[reg - DSP_REG_AXH0].h;
+    return &regs.ax[pair].h;
   case DSP_REG_ACL0:
   case DSP_REG_ACL1:
-    return r.ac[reg - DSP_REG_ACL0].l;
+    return &regs.ac[pair].l;
   case DSP_REG_ACM0:
   case DSP_REG_ACM1:
-    return r.ac[reg - DSP_REG_ACM0].m;
+    return &regs.ac[pair].m;
   default:
-    ASSERT_MSG(DSPLLE, false, "Read of nonexistent DSP register {}", reg);
-    return 0;
+    return nullptr;
   }
+}
+
+bool IsAccumulatorHigh(size_t reg)
+{
+  return reg == static_cast<size_t>(DSP_REG_ACH0) || reg == static_cast<size_t>(DSP_REG_ACH1);
+}
+}  // namespace
+
+u16 SDSP::ReadRegister(size_t reg) const
+{
+  if (IsAccumulatorHigh(reg))
+    return static_cast<u16>(r.ac[reg & 1].h);
+
+  if (const u16* const slot = PlainRegister(r, reg))
+    return *slot;
+
+  ASSERT_MSG(DSPLLE, false, "Read of nonexistent DSP register {}", reg);
+  return 0;
 }
 
 void SDSP::WriteRegister(size_t reg, u16 val)
 {
-  if (reg < 0x10)
-  {
-    const size_t slot = reg & 3;
-    switch (reg >> 2)
-    {
-    case 0:
-      r.ar[slot] = val;
-      break;
-    case 1:
-      r.ix[slot] = val;
-      break;
-    case 2:
-      r.wr[slot] = val;
-      break;
-    default:
-      r.st[slot] = val;
-      break;
-    }
-    return;
-  }
-
-  switch (reg)
-  {
-  case DSP_REG_ACH0:
-  case DSP_REG_ACH1:
-    r.ac[reg - DSP_REG_ACH0].h = val;
-    break;
-  case DSP_REG_CR:
-    r.cr = val;
-    break;
-  case DSP_REG_SR:
-    r.sr = val;
-    break;
-  case DSP_REG_PRODL:
-    r.prod.l = val;
-    break;
-  case DSP_REG_PRODM:
-    r.prod.m = val;
-    break;
-  case DSP_REG_PRODH:
-    r.prod.h = val;
-    break;
-  case DSP_REG_PRODM2:
-    r.prod.m2 = val;
-    break;
-  case DSP_REG_AXL0:
-  case DSP_REG_AXL1:
-    r.ax[reg - DSP_REG_AXL0].l = val;
-    break;
-  case DSP_REG_AXH0:
-  case DSP_REG_AXH1:
-    r.ax[reg - DSP_REG_AXH0].h = val;
-    break;
-  case DSP_REG_ACL0:
-  case DSP_REG_ACL1:
-    r.ac[reg - DSP_REG_ACL0].l = val;
-    break;
-  case DSP_REG_ACM0:
-  case DSP_REG_ACM1:
-    r.ac[reg - DSP_REG_ACM0].m = val;
-    break;
-  default:
-    break;
-  }
+  if (IsAccumulatorHigh(reg))
+    r.ac[reg & 1].h = val;
+  else if (u16* const slot = PlainRegister(r, reg))
+    *slot = val;
 }
 
 void SDSP::DoState(PointerWrap& p)
@@ -405,58 +360,64 @@ DSPCore::~DSPCore() = default;
 
 bool DSPCore::Initialize(const DSPInitOptions& opts)
 {
-  if (!m_dsp.Initialize(opts))
-    return false;
-
-  if (opts.core_type == DSPInitOptions::CoreType::JIT64)
-    m_dsp_jit = JIT::CreateDSPEmitter(*this);
-
-  m_dsp_cap.reset(opts.capture_logger);
-
-  m_core_state = State::Running;
-  return true;
+  const bool memories_ready = m_dsp.Initialize(opts);
+  if (memories_ready)
+  {
+    if (opts.core_type == DSPInitOptions::CoreType::JIT64)
+      m_dsp_jit = JIT::CreateDSPEmitter(*this);
+    m_dsp_cap.reset(opts.capture_logger);
+    m_core_state = State::Running;
+  }
+  return memories_ready;
 }
 
 void DSPCore::Shutdown()
 {
-  if (m_core_state == State::Stopped)
+  if (std::exchange(m_core_state, State::Stopped) == State::Stopped)
     return;
 
-  m_core_state = State::Stopped;
+  // The JIT refers to the DSP memories, so it goes first.
   m_dsp_jit.reset();
   m_dsp.Shutdown();
   m_dsp_cap.reset();
 }
 
+int DSPCore::RunInterpreter(int cycles)
+{
+  for (int left = cycles; left > 0;)
+  {
+    switch (m_core_state)
+    {
+    case State::Stepping:
+      // One instruction per Step() from the debugger.
+      m_step_event.Wait();
+      if (m_core_state != State::Stepping)
+        break;
+      m_dsp_interpreter->Step();
+      --left;
+      break;
+    case State::Running:
+#if defined(_DEBUG) || defined(DEBUGFAST)
+      left = m_dsp_interpreter->RunCyclesDebug(left);
+#else
+      left = m_dsp_interpreter->RunCycles(left);
+#endif
+      break;
+    default:
+      // Stopped: nothing runs until another thread changes the state.
+      break;
+    }
+    if (left <= 0)
+      return left;
+  }
+  return cycles;
+}
+
 int DSPCore::RunCycles(int cycles)
 {
-  if (m_dsp_jit)
+  if (m_dsp_jit != nullptr)
     return m_dsp_jit->RunCycles(static_cast<u16>(cycles));
-
-  while (cycles > 0)
-  {
-    if (m_core_state == State::Running)
-    {
-#if defined(_DEBUG) || defined(DEBUGFAST)
-      cycles = m_dsp_interpreter->RunCyclesDebug(cycles);
-#else
-      cycles = m_dsp_interpreter->RunCycles(cycles);
-#endif
-    }
-    else if (m_core_state == State::Stepping)
-    {
-      // Wait for the debugger to allow one instruction.
-      m_step_event.Wait();
-      if (m_core_state == State::Stepping)
-      {
-        m_dsp_interpreter->Step();
-        --cycles;
-      }
-    }
-    // A stopped core spins until another thread changes the state.
-  }
-
-  return cycles;
+  return RunInterpreter(cycles);
 }
 
 void DSPCore::Step()
@@ -491,74 +452,9 @@ State DSPCore::GetState() const
   return m_core_state;
 }
 
-void DSPCore::SetException(ExceptionType exception)
-{
-  m_dsp.SetException(exception);
-}
-
-void DSPCore::SetExternalInterrupt(bool val)
-{
-  m_dsp.SetExternalInterrupt(val);
-}
-
-void DSPCore::CheckExternalInterrupt()
-{
-  m_dsp.CheckExternalInterrupt();
-}
-
 bool DSPCore::CheckExceptions()
 {
   return m_dsp.CheckExceptions();
-}
-
-u16 DSPCore::ReadRegister(size_t reg) const
-{
-  return m_dsp.ReadRegister(reg);
-}
-
-void DSPCore::WriteRegister(size_t reg, u16 val)
-{
-  m_dsp.WriteRegister(reg, val);
-}
-
-u32 DSPCore::PeekMailbox(Mailbox mailbox) const
-{
-  return m_dsp.PeekMailbox(mailbox);
-}
-
-u16 DSPCore::ReadMailboxLow(Mailbox mailbox)
-{
-  return m_dsp.ReadMailboxLow(mailbox);
-}
-
-u16 DSPCore::ReadMailboxHigh(Mailbox mailbox)
-{
-  return m_dsp.ReadMailboxHigh(mailbox);
-}
-
-void DSPCore::WriteMailboxLow(Mailbox mailbox, u16 value)
-{
-  m_dsp.WriteMailboxLow(mailbox, value);
-}
-
-void DSPCore::WriteMailboxHigh(Mailbox mailbox, u16 value)
-{
-  m_dsp.WriteMailboxHigh(mailbox, value);
-}
-
-void DSPCore::LogIFXRead(u16 address, u16 read_value)
-{
-  m_dsp_cap->LogIFXRead(address, read_value);
-}
-
-void DSPCore::LogIFXWrite(u16 address, u16 written_value)
-{
-  m_dsp_cap->LogIFXWrite(address, written_value);
-}
-
-void DSPCore::LogDMA(u16 control, u32 gc_address, u16 dsp_address, u16 length, const u8* data)
-{
-  m_dsp_cap->LogDMA(control, gc_address, dsp_address, length, data);
 }
 
 bool DSPCore::IsJITCreated() const

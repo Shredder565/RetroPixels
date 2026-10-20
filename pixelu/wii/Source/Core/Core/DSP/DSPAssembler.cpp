@@ -27,33 +27,64 @@ namespace DSP
 {
 namespace
 {
-// Indexed by AssemblerError.
-constexpr std::array<const char*, 24> ERROR_TEXT = {
-    "",
-    "Unknown Error",
-    "Unknown opcode",
-    "Not enough parameters",
-    "Too many parameters",
-    "Wrong parameter",
-    "Expected parameter of type 'string'",
-    "Expected parameter of type 'value'",
-    "Expected parameter of type 'register'",
-    "Expected parameter of type 'memory pointer'",
-    "Expected parameter of type 'immediate'",
-    "Incorrect binary value",
-    "Incorrect hexadecimal value",
-    "Incorrect decimal value",
-    "Label already exists",
-    "Label not defined",
-    "No matching brackets",
-    "This opcode cannot be extended",
-    "Given extending params for non extensible opcode",
-    "Wrong parameter: must be accumulator register",
-    "Wrong parameter: must be mid accumulator register",
-    "Invalid register",
-    "Number out of range",
-    "Program counter out of range",
-};
+// The message printed for each error code.
+const char* ErrorText(AssemblerError error)
+{
+  using E = AssemblerError;
+  switch (error)
+  {
+  case E::OK:
+    return "";
+  case E::Unknown:
+    return "Unknown Error";
+  case E::UnknownOpcode:
+    return "Unknown opcode";
+  case E::NotEnoughParameters:
+    return "Not enough parameters";
+  case E::TooManyParameters:
+    return "Too many parameters";
+  case E::WrongParameter:
+    return "Wrong parameter";
+  case E::ExpectedParamStr:
+    return "Expected parameter of type 'string'";
+  case E::ExpectedParamVal:
+    return "Expected parameter of type 'value'";
+  case E::ExpectedParamReg:
+    return "Expected parameter of type 'register'";
+  case E::ExpectedParamMem:
+    return "Expected parameter of type 'memory pointer'";
+  case E::ExpectedParamImm:
+    return "Expected parameter of type 'immediate'";
+  case E::IncorrectBinary:
+    return "Incorrect binary value";
+  case E::IncorrectHex:
+    return "Incorrect hexadecimal value";
+  case E::IncorrectDecimal:
+    return "Incorrect decimal value";
+  case E::LabelAlreadyExists:
+    return "Label already exists";
+  case E::UnknownLabel:
+    return "Label not defined";
+  case E::NoMatchingBrackets:
+    return "No matching brackets";
+  case E::CantExtendOpcode:
+    return "This opcode cannot be extended";
+  case E::ExtensionParamsOnNonExtendableOpcode:
+    return "Given extending params for non extensible opcode";
+  case E::WrongParameterExpectedAccumulator:
+    return "Wrong parameter: must be accumulator register";
+  case E::WrongParameterExpectedMidAccumulator:
+    return "Wrong parameter: must be mid accumulator register";
+  case E::InvalidRegister:
+    return "Invalid register";
+  case E::NumberOutOfRange:
+    return "Number out of range";
+  case E::PCOutOfRange:
+    return "Program counter out of range";
+  }
+  return "";
+}
+
 
 // Splits a mutable C string into tokens the way the C library's strtok does: runs of
 // delimiters are skipped, the delimiter ending a token is overwritten with a NUL, and
@@ -281,7 +312,7 @@ void DSPAssembler::RecordError(AssemblerError error, const std::optional<std::st
   if (!m_settings.force)
     m_failed = true;
 
-  const char* const what = ERROR_TEXT[static_cast<size_t>(error)];
+  const char* const what = ErrorText(error);
   m_last_error_str = detail ? fmt::format("{}\nERROR: {}: {}\n\n", DescribePosition(), what, *detail) :
                               fmt::format("{}\nERROR: {}\n\n", DescribePosition(), what);
   fmt::print(stderr, "{}", m_last_error_str);
