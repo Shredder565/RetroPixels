@@ -326,7 +326,6 @@ private:
 
   void GenerateDSIException(u32 effective_address, bool write);
   void GenerateISIException(u32 effective_address);
-  void UnresolvedAccess(u32 address, bool write);
 
   void Memcheck(u32 address, u64 var, bool write, size_t size);
 
