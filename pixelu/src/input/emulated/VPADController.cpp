@@ -389,14 +389,17 @@ void VPADController::clear_rumble()
 
 bool VPADController::push_rumble(uint8* pattern, uint8 length)
 {
-	if (pattern == nullptr || length == 0)
+	// an empty pattern stops the motor
+	const bool stop = !pattern || length == 0;
+	if (stop)
 	{
 		clear_rumble();
 		return true;
 	}
 
+	constexpr size_t kMaxQueuedPatterns = 5;
 	std::scoped_lock lock(m_rumble_mutex);
-	if (m_rumble_queue.size() >= 5)
+	if (m_rumble_queue.size() >= kMaxQueuedPatterns)
 	{
 		cemuLog_logDebugOnce(LogType::Force, "VPADControlMotor(): Pattern too long");
 		return false;

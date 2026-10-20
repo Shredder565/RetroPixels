@@ -67,7 +67,8 @@ namespace
 		obj = nullptr;
 	}
 
-	// The GLSL text is part of what gets compiled, keep it unchanged.
+	// The GLSL text is part of what gets compiled; the builders below produce
+	// exactly the text these shaders always had.
 	const char* const s_copyVertexShader =
 		"#version 450\r\n"
 		"layout(location = 0) out ivec2 passSrcTexelOffset;\r\n"
@@ -77,41 +78,37 @@ namespace
 		"}uf_pushConstants;\r\n"
 		"\r\n"
 		"void main(){\r\n"
-		"vec2 tPOS;\r\n"
-		"switch(gl_VertexIndex)"
-		"{\r\n"
+		"vec2 tPOS;\r\n";
+
+	// the two triangles of the copy quad, as indices into vertexOffsets
+	constexpr int kQuadCorners[6] = {0, 1, 3, 0, 2, 3};
+
+	std::string BuildCopyVertexShader()
+	{
+		std::string source = s_copyVertexShader;
 		// a switch instead of indexing the push constant array, which some AMD drivers get wrong
-		"case 0: tPOS = uf_pushConstants.vertexOffsets[0].xy; break;\r\n"
-		"case 1: tPOS = uf_pushConstants.vertexOffsets[1].xy; break;\r\n"
-		"case 2: tPOS = uf_pushConstants.vertexOffsets[3].xy; break;\r\n"
-		"case 3: tPOS = uf_pushConstants.vertexOffsets[0].xy; break;\r\n"
-		"case 4: tPOS = uf_pushConstants.vertexOffsets[2].xy; break;\r\n"
-		"case 5: tPOS = uf_pushConstants.vertexOffsets[3].xy; break;\r\n"
-		"}"
-		"passSrcTexelOffset = uf_pushConstants.srcTexelOffset;\r\n"
-		"gl_Position = vec4(tPOS, 0, 1.0);\r\n"
-		"}\r\n";
+		source += "switch(gl_VertexIndex){\r\n";
+		for (int vertex = 0; vertex < 6; vertex++)
+			source += fmt::format("case {}: tPOS = uf_pushConstants.vertexOffsets[{}].xy; break;\r\n", vertex, kQuadCorners[vertex]);
+		source += "}passSrcTexelOffset = uf_pushConstants.srcTexelOffset;\r\n"
+				  "gl_Position = vec4(tPOS, 0, 1.0);\r\n"
+				  "}\r\n";
+		return source;
+	}
 
-	const char* const s_copyColorToDepthShader =
-		"#version 450\r\n"
-		"layout(location = 0) in flat ivec2 passSrcTexelOffset;\r\n"
-		"layout(binding = 0) uniform sampler2D textureSrc;\r\n"
-		"in vec4 gl_FragCoord;\r\n"
-		"\r\n"
-		"void main(){\r\n"
-		"gl_FragDepth = texelFetch(textureSrc, passSrcTexelOffset + ivec2(gl_FragCoord.xy), 0).r;\r\n"
-		"}\r\n";
-
-	const char* const s_copyDepthToColorShader =
-		"#version 450\r\n"
-		"layout(location = 0) in flat ivec2 passSrcTexelOffset;\r\n"
-		"layout(binding = 0) uniform sampler2D textureSrc;\r\n"
-		"layout(location = 0) out vec4 colorOut0;\r\n"
-		"in vec4 gl_FragCoord;\r\n"
-		"\r\n"
-		"void main(){\r\n"
-		"colorOut0.r = texelFetch(textureSrc, passSrcTexelOffset + ivec2(gl_FragCoord.xy), 0).r;\r\n"
-		"}\r\n";
+	// colour-to-depth writes gl_FragDepth, depth-to-colour writes the red channel of output 0
+	std::string BuildCopyFragmentShader(bool writeDepth)
+	{
+		std::string source = "#version 450\r\n"
+							 "layout(location = 0) in flat ivec2 passSrcTexelOffset;\r\n"
+							 "layout(binding = 0) uniform sampler2D textureSrc;\r\n";
+		if (!writeDepth)
+			source += "layout(location = 0) out vec4 colorOut0;\r\n";
+		source += "in vec4 gl_FragCoord;\r\n\r\nvoid main(){\r\n";
+		source += writeDepth ? "gl_FragDepth" : "colorOut0.r";
+		source += " = texelFetch(textureSrc, passSrcTexelOffset + ivec2(gl_FragCoord.xy), 0).r;\r\n}\r\n";
+		return source;
+	}
 
 	RendererShaderVk* CompileInternalShader(RendererShader::ShaderType type, const char* source)
 	{
@@ -224,9 +221,9 @@ CopySurfacePipelineInfo* VulkanRenderer::copySurface_getOrCreateGraphicsPipeline
 
 	if (!defaultShaders.copySurface_vs)
 	{
-		defaultShaders.copySurface_vs = CompileInternalShader(RendererShader::ShaderType::kVertex, s_copyVertexShader);
-		defaultShaders.copySurface_psColor2Depth = CompileInternalShader(RendererShader::ShaderType::kFragment, s_copyColorToDepthShader);
-		defaultShaders.copySurface_psDepth2Color = CompileInternalShader(RendererShader::ShaderType::kFragment, s_copyDepthToColorShader);
+		defaultShaders.copySurface_vs = CompileInternalShader(RendererShader::ShaderType::kVertex, BuildCopyVertexShader().c_str());
+		defaultShaders.copySurface_psColor2Depth = CompileInternalShader(RendererShader::ShaderType::kFragment, BuildCopyFragmentShader(true).c_str());
+		defaultShaders.copySurface_psDepth2Color = CompileInternalShader(RendererShader::ShaderType::kFragment, BuildCopyFragmentShader(false).c_str());
 	}
 
 	const bool srcDepth = state.sourceTexture->isDepth;

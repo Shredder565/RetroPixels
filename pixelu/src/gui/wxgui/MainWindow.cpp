@@ -674,11 +674,12 @@ void MainWindow::EndEmulation()
 	if (GetConfig().disable_screensaver)
 		ScreenSaver::SetInhibit(false);
 
-	if (m_toolWindow)
+	// the memory searcher only works on a running game
+	if (m_toolWindow != nullptr)
 	{
+		m_memorySearcherMenuItem->Enable(false);
 		m_toolWindow->Close();
 		m_toolWindow = nullptr;
-		m_memorySearcherMenuItem->Enable(false);
 	}
 
 	RecreateMenu();

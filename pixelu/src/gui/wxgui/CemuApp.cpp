@@ -372,12 +372,11 @@ bool CemuApp::OnInit()
 int CemuApp::OnExit()
 {
 #if BOOST_OS_MACOS
-	if (m_sdlEventPumpTimer)
+	if (wxTimer* pumpTimer = std::exchange(m_sdlEventPumpTimer, nullptr))
 	{
-		m_sdlEventPumpTimer->Stop();
+		pumpTimer->Stop();
 		Unbind(wxEVT_TIMER, &CemuApp::OnSDLEventPumpTimer, this);
-		delete m_sdlEventPumpTimer;
-		m_sdlEventPumpTimer = nullptr;
+		delete pumpTimer;
 	}
 #endif
 	wxApp::OnExit();
