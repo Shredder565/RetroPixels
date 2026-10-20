@@ -1,16 +1,26 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <array>
+
 #include "Common/CommonTypes.h"
 
-alignas(16) extern const u8 pbswapShuffle1x4[16];
-alignas(16) extern const u8 pbswapShuffle2x4[16];
-alignas(16) extern const float m_one[4];
-alignas(16) extern const float m_quantizeTableS[128];
-alignas(16) extern const float m_dequantizeTableS[128];
+// PSHUFB masks that byte-swap the first one or two 32-bit lanes and keep the rest.
+alignas(16) extern const std::array<u8, 16> pbswapShuffle1x4;
+alignas(16) extern const std::array<u8, 16> pbswapShuffle2x4;
 
+// {1.0f, 0, 0, 0}
+alignas(16) extern const std::array<float, 4> m_one;
+
+// Scale factors for paired-single quantization, indexed by 2 * (6-bit GQR
+// scale field) so each factor fills two adjacent lanes. The field is a signed
+// exponent: quantizing multiplies by 2^scale, dequantizing by 2^-scale.
+alignas(16) extern const std::array<float, 128> m_quantizeTableS;
+alignas(16) extern const std::array<float, 128> m_dequantizeTableS;
+
+// Entry points of the code shared by every block. Filled in by the backend's
+// routine generator.
 struct CommonAsmRoutinesBase
 {
   const u8* enter_code;
@@ -33,32 +43,12 @@ struct CommonAsmRoutinesBase
   const u8* fmadds_eft;
   const u8* ps_madd_eft;
 
-  // In: array index: GQR to use.
-  // In: ECX: Address to read from.
-  // Out: XMM0: Bottom two 32-bit slots hold the read value,
-  //            converted to a pair of floats.
-  // Trashes: all three RSCRATCH
-  // Note: Store PC if this could cause an exception
+  // Quantized load/store helpers, one per GQR load or store type and scale.
+  // Address in ECX; the value is returned in (or taken from) the low lane(s)
+  // of XMM0. They clobber all three scratch registers and may raise a guest
+  // exception, so the PC must be stored first when that matters.
   const u8** paired_load_quantized;
-
-  // In: array index: GQR to use.
-  // In: ECX: Address to read from.
-  // Out: XMM0: Bottom 32-bit slot holds the read value.
-  // Trashes: all three RSCRATCH
-  // Note: Store PC if this could cause an exception
   const u8** single_load_quantized;
-
-  // In: array index: GQR to use.
-  // In: ECX: Address to write to.
-  // In: XMM0: Bottom two 32-bit slots hold the pair of floats to be written.
-  // Out: Nothing.
-  // Trashes: all three RSCRATCH
-  // Note: Store PC if this could cause an exception
   const u8** paired_store_quantized;
-
-  // In: array index: GQR to use.
-  // In: ECX: Address to write to.
-  // In: XMM0: Bottom 32-bit slot holds the float to be written.
-  // Note: Store PC if this could cause an exception
   const u8** single_store_quantized;
 };

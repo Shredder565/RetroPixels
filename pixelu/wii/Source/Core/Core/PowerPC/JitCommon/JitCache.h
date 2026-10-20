@@ -1,18 +1,17 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <array>
-#include <bitset>
 #include <chrono>
-#include <cstring>
 #include <functional>
+#include <list>
 #include <map>
 #include <memory>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "Common/CommonTypes.h"
@@ -23,47 +22,40 @@
 
 class JitBase;
 
-// offsetof is only conditionally supported for non-standard layout types,
-// so this struct needs to have a standard layout.
+// The part of a block that generated code reads through offsetof, so it must
+// stay standard-layout. feature_flags and effectiveAddress are adjacent on
+// purpose: dispatchers compare both with one 64-bit load.
 struct JitBlockData
 {
-  // Memory range this code block takes up in near and far code caches.
+  // Host code of the block in the near and far caches, as [begin, end).
   u8* near_begin;
   u8* near_end;
   u8* far_begin;
   u8* far_end;
 
-  // The normal entry point for the block, returned by Dispatch().
+  // Where Dispatch() enters the block.
   u8* normalEntry;
 
-  // The features that this block was compiled with support for.
+  // MSR-derived features the block was compiled for.
   CPUEmuFeatureFlags feature_flags;
-  // The effective address (PC) for the beginning of the block.
+  // Guest PC of the first instruction.
   u32 effectiveAddress;
-  // The physical address of the code represented by this block.
-  // Various maps in the cache are indexed by this (block_map
-  // and valid_block in particular). This is useful because of
-  // of the way the instruction cache works on PowerPC.
+  // Translated address of the first instruction; blocks are indexed by it,
+  // which matches how the PowerPC instruction cache works.
   u32 physicalAddress;
-  // The number of PPC instructions represented by this block. Mostly
-  // useful for logging.
+  // Number of guest instructions compiled into the block.
   u32 originalSize;
-  // This tracks the position of this block within the fast block cache.
-  // We only allow each block to have one map entry.
+  // Slot in the fast lookup table that refers to this block.
   size_t fast_block_map_index;
 };
 static_assert(std::is_standard_layout_v<JitBlockData>, "JitBlockData must have a standard layout");
 
-// A JitBlock is a block of compiled code which corresponds to the PowerPC
-// code at a given address.
-//
-// The notion of the address of a block is a bit complicated because of the
-// way address translation works, but basically it's the combination of an
-// effective address, the address translation bits in MSR, and the physical
-// address.
+// Compiled host code for the guest code starting at one address. A block is
+// identified by its effective address, the translation-related MSR features
+// and its physical address together.
 struct JitBlock : public JitBlockData
 {
-  // Software profiling data for JIT block.
+  // Run statistics, kept only while profiling.
   struct ProfileData
   {
     using Clock = std::chrono::steady_clock;
@@ -86,25 +78,25 @@ struct JitBlock : public JitBlockData
 
   bool OverlapsPhysicalRange(u32 address, u32 length) const;
 
-  // Information about exits to a known address from this block.
-  // This is used to implement block linking.
+  // An exit of the block to a fixed guest address, which can be patched to
+  // jump straight into the target block.
   struct LinkData
   {
-    u8* exitPtrs;  // to be able to rewrite the exit jump
+    u8* exitPtrs;  // the patchable exit sequence
 #ifdef _M_ARM_64
     const u8* exitFarcode;
 #endif
     u32 exitAddress;
-    bool linkStatus;  // is it already linked?
-    bool call;
+    bool linkStatus;  // currently patched to a block
+    bool call;        // the exit is a call (guest bl), not a jump
   };
   std::vector<LinkData> linkData;
 
-  // This set stores all physical addresses of all occupied instructions.
+  // Physical addresses of every guest instruction in the block.
   Common::RangeSet<u32> physical_addresses;
 
-  // This is only available when debugging is enabled. It is a trimmed-down copy of the
-  // PPCAnalyst::CodeBuffer used to recompile this block, including repeat instructions.
+  // Debugging only: address and instruction of every analysed op (repeats
+  // included), for showing what the block was compiled from.
   std::vector<std::pair<u32, UGeckoInstruction>> original_buffer;
 
   std::unique_ptr<ProfileData> profile_data;
@@ -112,42 +104,42 @@ struct JitBlock : public JitBlockData
 
 typedef void (*CompiledCode)();
 
-// This is essentially just an std::bitset, but Visual Studia 2013's
-// implementation of std::bitset is slow.
+// One bit per 32-byte guest cache line of the 4 GiB physical space, set while
+// some block covers the line. Generated code tests it directly (bit n is bit
+// n % 32 of word n / 32).
 class ValidBlockBitSet final
 {
 public:
   enum
   {
-    // ValidBlockBitSet covers the whole 32-bit address-space in 32-byte
-    // chunks.
-    // FIXME: Maybe we can get away with less? There isn't any actual
-    // RAM in most of this space.
     VALID_BLOCK_MASK_SIZE = (1ULL << 32) / 32,
-    // The number of elements in the allocated array. Each u32 contains 32 bits.
     VALID_BLOCK_ALLOC_ELEMENTS = VALID_BLOCK_MASK_SIZE / 32
   };
-  // Directly accessed by Jit64.
-  std::unique_ptr<u32[]> m_valid_block;
 
-  ValidBlockBitSet()
-  {
-    m_valid_block.reset(new u32[VALID_BLOCK_ALLOC_ELEMENTS]);
-    ClearAll();
-  }
+  ValidBlockBitSet();
 
-  void Set(u32 bit) { m_valid_block[bit / 32] |= 1u << (bit % 32); }
-  void Clear(u32 bit) { m_valid_block[bit / 32] &= ~(1u << (bit % 32)); }
-  void ClearAll() { memset(m_valid_block.get(), 0, sizeof(u32) * VALID_BLOCK_ALLOC_ELEMENTS); }
-  bool Test(u32 bit) const { return (m_valid_block[bit / 32] & (1u << (bit % 32))) != 0; }
+  void Set(u32 bit) { m_words[bit >> 5] |= Bit(bit); }
+  void Clear(u32 bit) { m_words[bit >> 5] &= ~Bit(bit); }
+  void ClearAll();
+  bool Test(u32 bit) const { return (m_words[bit >> 5] & Bit(bit)) != 0; }
+
+  u32* Words() const { return m_words.get(); }
+
+private:
+  static constexpr u32 Bit(u32 bit) { return u32{1} << (bit & 31); }
+
+  std::unique_ptr<u32[]> m_words;
 };
 
+// Bookkeeping for compiled blocks: lookup by address, linking, and
+// invalidation when guest code changes. Backends supply the code patching.
 class JitBaseBlockCache
 {
 public:
-  // The size of the fast map is determined like this:
-  // ((4 GiB guest memory space) / (4-byte alignment) * sizeof(JitBlock*)) << (3 feature flag bits)
+  // Size of the direct lookup table: one host pointer per 4-byte guest
+  // address for each of the 8 feature-flag combinations.
   static constexpr u64 FAST_BLOCK_MAP_SIZE = 0x10'0000'0000;
+  // Hashed table used when the direct table could not be reserved.
   static constexpr u32 FAST_BLOCK_MAP_FALLBACK_ELEMENTS = 0x10000;
   static constexpr u32 FAST_BLOCK_MAP_FALLBACK_MASK = FAST_BLOCK_MAP_FALLBACK_ELEMENTS - 1;
 
@@ -159,27 +151,26 @@ public:
   void Clear();
   void Reset();
 
-  // Code Cache
+  // Direct table (null if not in use): entry points indexed by
+  // (feature_flags << 30) | (pc >> 2).
   u8** GetEntryPoints();
+  // Fallback table: blocks indexed by (pc >> 2) & FAST_BLOCK_MAP_FALLBACK_MASK.
   JitBlock** GetFastBlockMapFallback();
+
   void RunOnBlocks(const Core::CPUThreadGuard& guard,
                    const std::function<void(const JitBlock&)>& f) const;
   void WipeBlockProfilingData(const Core::CPUThreadGuard& guard);
-  std::size_t GetBlockCount() const { return block_map.size(); }
+  std::size_t GetBlockCount() const { return m_block_count; }
 
   JitBlock* AllocateBlock(u32 em_address);
   void FinalizeBlock(JitBlock& block, bool block_link, const PPCAnalyst::CodeBlock& code_block,
                      const PPCAnalyst::CodeBuffer& code_buffer);
 
-  // Look for the block in the slow but accurate way.
-  // This function shall be used if FastLookupIndexForAddress() failed.
-  // This might return nullptr if there is no such block.
+  // Exact lookup, used when the fast tables miss. Null if no such block.
   JitBlock* GetBlockFromStartAddress(u32 em_address, CPUEmuFeatureFlags feature_flags);
 
-  // Get the normal entry for the block associated with the current program
-  // counter. This will JIT code if necessary. (This is the reference
-  // implementation; high-performance JITs will want to use a custom
-  // assembly version.)
+  // Entry point for the current PC and features, or null when no block
+  // exists yet (C++ version of what the assembly dispatchers do).
   const u8* Dispatch();
 
   void InvalidateICache(u32 address, u32 length, bool forced);
@@ -198,43 +189,36 @@ private:
   virtual void WriteLinkBlock(const JitBlock::LinkData& source, const JitBlock* dest) = 0;
   virtual void WriteDestroyBlock(const JitBlock& block);
 
-  void LinkBlockExits(JitBlock& block);
-  void LinkBlock(JitBlock& block);
+  // Granularity of the physical-range index used for invalidation.
+  static constexpr u32 RANGE_BUCKET_SHIFT = 9;
+
+  size_t LookupSlot(u32 pc, u32 feature_flags) const;
+  void PublishBlock(JitBlock& block, size_t slot);
+  void RetractBlock(const JitBlock& block);
+  JitBlock* PromoteBlock(u32 pc, CPUEmuFeatureFlags feature_flags);
+
+  void ResolveExits(JitBlock& block);
+  void LinkNewBlock(JitBlock& block);
   void UnlinkBlock(const JitBlock& block);
-  void InvalidateICacheInternal(u32 physical_address, u32 address, u32 length, bool forced);
+  void InvalidatePhysical(u32 physical_address, u32 address, u32 length, bool forced);
 
-  JitBlock* MoveBlockIntoFastCache(u32 em_address, CPUEmuFeatureFlags feature_flags);
+  void IndexRanges(JitBlock& block);
+  void UnindexRanges(JitBlock& block, u32 keep_bucket);
+  bool RemoveFromBlockMap(const JitBlock& block);
 
-  // Fast but risky block lookup based on fast_block_map.
-  size_t FastLookupIndexForAddress(u32 address, u32 msr);
+  // Blocks by physical start address, in creation order for equal addresses.
+  std::map<u32, std::list<JitBlock>> m_blocks;
+  std::size_t m_block_count = 0;
 
-  // links_to hold all exit points of all valid blocks in a reverse way.
-  // It is used to query all blocks which links to an address.
-  std::unordered_map<u32, std::unordered_set<JitBlock*>> links_to;  // destination_PC -> number
+  // For every exit address, the blocks having an exit to it.
+  std::unordered_map<u32, std::unordered_set<JitBlock*>> m_incoming;
 
-  // Map indexed by the physical address of the entry point.
-  // This is used to query the block based on the current PC in a slow way.
-  std::multimap<u32, JitBlock> block_map;  // start_addr -> block
+  // Blocks touching each bucket of physical addresses.
+  std::map<u32, std::unordered_set<JitBlock*>> m_range_index;
 
-  // Range of overlapping code indexed by a masked physical address.
-  // This is used for invalidation of memory regions. The range is grouped
-  // in macro blocks of each 0x100 bytes.
-  static constexpr u32 BLOCK_RANGE_SIZE = 0x100;
-  static constexpr u32 BLOCK_RANGE_MAP_MASK = ~(BLOCK_RANGE_SIZE - 1);
-  std::map<u32, std::unordered_set<JitBlock*>> block_range_map;
+  ValidBlockBitSet m_valid_lines;
 
-  // This bitsets shows which cachelines overlap with any blocks.
-  // It is used to provide a fast way to query if no icache invalidation is needed.
-  ValidBlockBitSet valid_block;
-
-  // This contains the entry points for each block.
-  // It is used by the assembly dispatcher to quickly
-  // know where to jump based on pc and msr bits.
   Common::LazyMemoryRegion m_entry_points_arena;
   u8** m_entry_points_ptr = nullptr;
-
-  // An alternative for the above but without a shm segment
-  // in case the shm memory region couldn't be allocated.
-  std::array<JitBlock*, FAST_BLOCK_MAP_FALLBACK_ELEMENTS>
-      m_fast_block_map_fallback{};  // start_addr & mask -> number
+  std::array<JitBlock*, FAST_BLOCK_MAP_FALLBACK_ELEMENTS> m_fast_block_map_fallback{};
 };

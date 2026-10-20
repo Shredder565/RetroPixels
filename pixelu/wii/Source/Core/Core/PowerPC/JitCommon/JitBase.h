@@ -1,5 +1,4 @@
-// Copyright 2010 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -37,15 +36,10 @@ struct PowerPCState;
 }  // namespace PowerPC
 class PPCSymbolDB;
 
-// #define JIT_LOG_GENERATED_CODE  // Enables logging of generated code
-// #define JIT_LOG_GPR             // Enables logging of the PPC general purpose regs
-// #define JIT_LOG_FPR             // Enables logging of the PPC floating point regs
-
-// Use these to control the instruction selection
-// #define INSTRUCTION_START FallBackToInterpreter(inst); return;
-// #define INSTRUCTION_START PPCTables::CountInstruction(inst, m_ppc_state.pc);
+// Placed at the start of every instruction handler; empty in normal builds.
 #define INSTRUCTION_START
 
+// Hands the current instruction to the interpreter and leaves the handler.
 #define FALLBACK_IF(cond)                                                                          \
   do                                                                                               \
   {                                                                                                \
@@ -56,11 +50,14 @@ class PPCSymbolDB;
     }                                                                                              \
   } while (0)
 
+// Falls back when the whole JIT or the given instruction group is switched off.
 #define JITDISABLE(setting) FALLBACK_IF(bJITOff || setting)
 
+// State and settings shared by the recompiling CPU cores.
 class JitBase : public CPUCoreBase
 {
 protected:
+  // Where the guest carry bit currently lives while a block is compiled.
   enum class CarryFlag
   {
     InPPCState,
@@ -74,12 +71,17 @@ protected:
 #endif
   };
 
+  // Native stack budget for the BLR optimization (calls are mirrored on the
+  // host stack). A guard region sits GUARD_OFFSET bytes above the stack's
+  // lowest address; touching it disables the optimization, and the space below
+  // the guard is what C++ code may still use after that.
   static constexpr size_t SAFE_STACK_SIZE = 256 * 1024;
   static constexpr size_t MIN_UNSAFE_STACK_SIZE = 192 * 1024;
   static constexpr size_t MIN_STACK_SIZE = SAFE_STACK_SIZE + MIN_UNSAFE_STACK_SIZE;
   static constexpr size_t GUARD_SIZE = 64 * 1024;
   static constexpr size_t GUARD_OFFSET = SAFE_STACK_SIZE - GUARD_SIZE;
 
+  // Settings derived from the configuration when the cache is (re)built.
   struct JitOptions
   {
     bool enableBlocklink;
@@ -91,6 +93,8 @@ protected:
     bool fp_exceptions;
     bool div_by_zero_exceptions;
   };
+
+  // Per-block compiler state.
   struct JitState
   {
     u32 compilerPC;
@@ -99,10 +103,11 @@ protected:
     u32 downcountAmount;
     u32 numLoadStoreInst;
     u32 numFloatingPointInst;
-    // If this is set, we need to generate an exception handler for the fastmem load.
+
+    // Set by a fastmem access that needs an exception check after it.
     u8* fastmemLoadStore;
-    // If this is set, a load or store already prepared a jump to the exception handler for us,
-    // so just fixup that branch instead of testing for a DSI again.
+    // A load/store already branched to the exception path; the check after
+    // the instruction only has to bind exceptionHandler.
     bool fixupExceptionHandler;
     Gen::FixupBranch exceptionHandler;
 
@@ -114,6 +119,7 @@ protected:
     int skipInstructions;
     CarryFlag carryFlag;
 
+    // While a fastmem trampoline is generated: where its exception exit goes.
     bool generatingTrampoline = false;
     u8* trampolineExceptionHandler;
 
@@ -128,6 +134,8 @@ protected:
 
     JitBlock* curBlock;
 
+    // Instructions that turned out to need a slower but safer translation;
+    // they survive cache clears.
     std::unordered_set<u32> fifoWriteAddresses;
     std::unordered_set<u32> pairedQuantizeAddresses;
     std::unordered_set<u32> noSpeculativeConstantsAddresses;
@@ -138,6 +146,8 @@ protected:
   PPCAnalyst::PPCAnalyzer analyzer;
 
   CPUThreadConfigCallback::ConfigChangedCallbackID m_registered_config_callback_id;
+
+  // Debug switches: each sends one instruction group to the interpreter.
   bool bJITOff = false;
   bool bJITLoadStoreOff = false;
   bool bJITLoadStorelXzOff = false;
@@ -151,6 +161,7 @@ protected:
   bool bJITSystemRegistersOff = false;
   bool bJITBranchOff = false;
   bool bJITRegisterCacheOff = false;
+
   bool m_enable_profiling = false;
   bool m_enable_debugging = false;
   bool m_enable_branch_following = false;
@@ -168,6 +179,7 @@ protected:
   bool m_cleanup_after_stackfault = false;
   u8* m_stack_guard = nullptr;
 
+  // Every member above that mirrors a configuration value, with its setting.
   static const std::array<std::pair<bool JitBase::*, const Config::Info<bool>*>, 25> JIT_SETTINGS;
 
   bool DoesConfigNeedRefresh() const;
@@ -180,7 +192,10 @@ protected:
   void UnprotectStack();
   void CleanUpAfterStackFault();
 
+  // Whether the next `count` instructions can be compiled together with the
+  // current one (no stepping, no breakpoint in between, enough left).
   bool CanMergeNextInstructions(int count) const;
+
   bool HasConstantCarry() const
   {
 #ifdef _M_ARM_64
@@ -190,6 +205,7 @@ protected:
 #endif
   }
 
+  // Whether `op` must be followed by an FP exception check.
   bool ShouldHandleFPExceptionForInstruction(const PPCAnalyst::CodeOp* op) const;
 
 public:
@@ -204,10 +220,10 @@ public:
   bool IsDebuggingEnabled() const { return m_enable_debugging; }
   bool IsBranchWatchEnabled() const
   {
-    auto& branch_watch = m_system.GetPowerPC().GetBranchWatch();
-    return branch_watch.GetRecordingActive();
+    return m_system.GetPowerPC().GetBranchWatch().GetRecordingActive();
   }
 
+  // Called from generated code: the host address to continue at for PPC_PC.
   static const u8* Dispatch(JitBase& jit);
   virtual JitBaseBlockCache* GetBlockCache() = 0;
 
@@ -229,9 +245,9 @@ public:
   virtual bool HandleFault(uintptr_t access_address, SContext* ctx) = 0;
   bool HandleStackFault();
 
+  // Largest number of instructions analysed for one block.
   static constexpr std::size_t code_buffer_size = 32000;
 
-  // This should probably be removed from public:
   JitOptions jo{};
   JitState js{};
 
@@ -242,4 +258,5 @@ public:
   PPCSymbolDB& m_ppc_symbol_db;
 };
 
+// Called from generated code when no block exists for an address.
 void JitTrampoline(JitBase& jit, u32 em_address);
