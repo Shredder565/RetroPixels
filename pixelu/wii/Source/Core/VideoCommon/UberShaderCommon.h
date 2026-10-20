@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,8 +10,12 @@ union ShaderHostConfig;
 
 namespace UberShader
 {
-// Vertex lighting
+// CalculateLighting(): the contribution of one hardware light, with the attenuation and diffuse
+// functions chosen at run time.
 void WriteLightingFunction(ShaderCode& out);
+// The per-channel lighting loop of the ubershaders, reading the XF registers from uniforms. The
+// variable names say where the position, normal and vertex colours are and where the lit colours
+// go.
 void WriteVertexLighting(ShaderCode& out, APIType api_type, std::string_view world_pos_var,
                          std::string_view normal_var, std::string_view in_color_0_var,
                          std::string_view in_color_1_var, std::string_view out_color_0_var,
