@@ -1,5 +1,4 @@
-// Copyright 2011 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -12,6 +11,8 @@ namespace Core
 class CPUThreadGuard;
 }
 
+// Uniform byte-level views of the emulated address spaces, used by the
+// debugger's memory view and search.
 namespace AddressSpace
 {
 enum class Type
@@ -32,7 +33,7 @@ struct Accessors
   virtual u8 ReadU8(const Core::CPUThreadGuard& guard, u32 address) const = 0;
   virtual void WriteU8(const Core::CPUThreadGuard& guard, u32 address, u8 value) = 0;
 
-  // overridable naive implementations of below are defined
+  // The defaults below are built from ReadU8/WriteU8. Reads are big-endian.
   virtual u16 ReadU16(const Core::CPUThreadGuard& guard, u32 address) const;
   virtual void WriteU16(const Core::CPUThreadGuard& guard, u32 address, u16 value);
   virtual u32 ReadU32(const Core::CPUThreadGuard& guard, u32 address) const;
@@ -41,15 +42,19 @@ struct Accessors
   virtual void WriteU64(const Core::CPUThreadGuard& guard, u32 address, u64 value);
   virtual float ReadF32(const Core::CPUThreadGuard& guard, u32 address) const;
 
+  // Contiguous host memory behind the space, if there is any (else null).
   virtual iterator begin() const;
   virtual iterator end() const;
 
+  // Finds the needle starting at or after (forward) / before (backward) the
+  // given offset.
   virtual std::optional<u32> Search(const Core::CPUThreadGuard& guard, u32 haystack_offset,
                                     const u8* needle_start, std::size_t needle_size,
                                     bool forward) const;
   virtual ~Accessors();
 };
 
+// Never null; before Init() every space is empty.
 Accessors* GetAccessors(Type address_space);
 
 void Init();
