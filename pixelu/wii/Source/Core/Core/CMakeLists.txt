@@ -695,11 +695,6 @@ if (APPLE)
     ${IOK_LIBRARY}
     resolv
   )
-elseif (ANDROID)
-  target_link_libraries(core
-  PRIVATE
-    androidcommon
-  )
 endif()
 
 if(ENABLE_CUBEB)
@@ -757,12 +752,6 @@ elseif(UNIX)
   target_sources(core PRIVATE
     HW/EXI/BBA/TAP_Unix.cpp
   )
-  if(ANDROID)
-    target_sources(core PRIVATE
-      HW/WiimoteReal/IOAndroid.cpp
-      HW/WiimoteReal/IOAndroid.h
-    )
-  endif()
 endif()
 
 # Bluez doesn't support all the communication modes on FreeBSD, so only using it on Linux

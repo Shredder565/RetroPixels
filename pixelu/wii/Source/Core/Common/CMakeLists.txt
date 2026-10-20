@@ -217,21 +217,11 @@ elseif(WIN32)
   if (_M_X86_64)
     target_link_libraries(common PRIVATE opengl32.lib)
   endif()
-elseif (ANDROID)
-  target_link_libraries(common
-  PRIVATE
-    androidcommon
-  )
 elseif(HAIKU)
   target_link_libraries(common PRIVATE be GL)
 endif()
 
-if(ANDROID)
-  target_sources(common PRIVATE
-    Logging/ConsoleListenerDroid.cpp
-    MemArenaAndroid.cpp
-  )
-elseif(WIN32)
+if(WIN32)
   target_sources(common PRIVATE
     LdrWatcher.cpp
     LdrWatcher.h
@@ -272,12 +262,7 @@ if(ENABLE_EGL AND EGL_FOUND)
     GL/GLInterface/EGL.cpp
     GL/GLInterface/EGL.h
   )
-  if(ANDROID)
-    target_sources(common PRIVATE
-      GL/GLInterface/EGLAndroid.cpp
-      GL/GLInterface/EGLAndroid.h
-    )
-  elseif(ENABLE_X11 AND X11_FOUND)
+  if(ENABLE_X11 AND X11_FOUND)
     target_sources(common PRIVATE
       GL/GLInterface/EGLX11.cpp
       GL/GLInterface/EGLX11.h

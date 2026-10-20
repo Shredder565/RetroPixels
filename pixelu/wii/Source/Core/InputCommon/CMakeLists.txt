@@ -115,17 +115,6 @@ elseif(X11_FOUND)
     ControllerInterface/Xlib/XInput2.h
   )
   target_link_libraries(inputcommon PRIVATE PkgConfig::X11_INPUT)
-elseif(ANDROID)
-  target_compile_definitions(inputcommon PRIVATE -DCIFACE_USE_ANDROID)
-  target_sources(inputcommon PRIVATE
-    ControllerInterface/Android/Android.cpp
-    ControllerInterface/Android/Android.h
-    ControllerInterface/Touch/InputOverrider.cpp
-    ControllerInterface/Touch/InputOverrider.h
-  )
-  target_link_libraries(inputcommon PRIVATE
-    androidcommon
-  )
 endif()
 
 if(NOT ANDROID)
