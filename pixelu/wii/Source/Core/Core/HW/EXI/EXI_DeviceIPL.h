@@ -1,9 +1,9 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <array>
+#include <memory>
 #include <string>
 
 #include "Common/BitUtils.h"
@@ -13,6 +13,11 @@ class PointerWrap;
 
 namespace ExpansionInterface
 {
+// The "Mask ROM" chip on channel 0, chip select 1 (Macronix on the GameCube). It holds the boot
+// ROM with the system fonts, the battery-backed SRAM and real time clock, a debug UART, and on
+// the Wii a byte of RTC flags. Every access starts with a 32-bit command word: bit 31 selects
+// write, bits 6-30 the address; the data bytes follow, and the address auto-increments within
+// the ROM and SRAM.
 class CEXIIPL : public IEXIDevice
 {
 public:
@@ -29,61 +34,40 @@ public:
   static u32 GetEmulatedTime(Core::System& system, u32 epoch);
   static u64 NetPlay_GetEmulatedTime();
 
+  // Removes the boot ROM's scrambling (it is its own inverse).
   static void Descrambler(u8* data, u32 size);
 
   static bool HasIPLDump();
 
 private:
-  std::unique_ptr<u8[]> m_rom;
-
-  // TODO these ranges are highly suspect
-  enum
-  {
-    ROM_BASE = 0,
-    ROM_SIZE = 0x200000,
-    SRAM_BASE = 0x800000,
-    SRAM_SIZE = 0x44,
-    UART_BASE = 0x800400,
-    UART_SIZE = 0x50,
-    WII_RTC_BASE = 0x840000,
-    WII_RTC_SIZE = 0x40,
-    EUART_BASE = 0xc00000,
-    EUART_SIZE = 8,
-  };
-
-  struct
-  {
-    bool is_write() const { return (value >> 31) & 1; }
-    // TODO this is definitely a guess
-    // Also, the low 6 bits are completely ignored
-    u32 address() const { return (value >> 6) & 0x1ffffff; }
-    u32 low_bits() const { return value & 0x3f; }
-    u32 value;
-  } m_command{};
-  u32 m_command_bytes_received{};
-  // Technically each device has it's own state, but we assume the selected
-  // device will not change without toggling cs, and that each device has at
-  // most 1 interesting position to keep track of.
-  u32 m_cursor{};
-
-  std::string m_buffer;
-  bool m_fonts_loaded{};
-
-  void UpdateRTC();
-
   void TransferByte(u8& data) override;
+
+  void AccessROM(u8& data);
+  void AccessSRAM(u8& data);
+  void AccessUART(u8& data);
+
+  bool CommandIsWrite() const { return (m_command >> 31) != 0; }
+  u32 CommandAddress() const { return (m_command >> 6) & 0x1ffffff; }
 
   bool LoadFileToIPL(const std::string& filename, u32 offset);
   void LoadFontFile(const std::string& filename, u32 offset);
-
   static std::string FindIPLDump(const std::string& path_prefix);
+
+  std::unique_ptr<u8[]> m_rom;
+
+  // Saved in this order (after the SRAM and the RTC flags).
+  u32 m_command = 0;
+  u32 m_command_bytes = 0;
+  // Offset from the command's address. One cursor serves whichever region the command
+  // addresses; software re-selects the chip between commands.
+  u32 m_cursor = 0;
+  // Characters written to the UART that have not formed a full line yet.
+  std::string m_uart_line;
+  bool m_fonts_loaded = false;
 };
 
-// Used to indicate disc changes on the Wii, as insane as that sounds.
-// However, the name is definitely RTCFlag, as the code that gets it is __OSGetRTCFlags and
-// __OSClearRTCFlags in OSRtc.o (based on symbols from Kirby's Dream Collection)
-// This may simply be a single byte that gets repeated 4 times by some EXI quirk,
-// as reading it gives the value repeated 4 times but code only checks the first bit.
+// The Wii's RTC flags byte, read and cleared by __OSGetRTCFlags/__OSClearRTCFlags. Reads return
+// the byte repeated in all four lanes, hence the repeated patterns.
 enum class RTCFlag : u32
 {
   EjectButton = 0x01010101,

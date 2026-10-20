@@ -84,7 +84,7 @@ CEXIChannel::CEXIChannel(Core::System& system, u32 channel_id,
     m_param |= u32{1} << PARAM_CS_SHIFT;
 
   for (std::unique_ptr<IEXIDevice>& slot : m_devices)
-    slot = EXIDevice_Create(system, EXIDeviceType::None, m_channel_id, m_memcard_header_data);
+    slot = EXIDevice_Create(system, EXIDeviceType::None, ChannelNumber(), m_memcard_header_data);
 }
 
 CEXIChannel::~CEXIChannel()
@@ -212,7 +212,7 @@ void CEXIChannel::RemoveDevices()
 
 void CEXIChannel::AddDevice(const EXIDeviceType device_type, const int device_num)
 {
-  AddDevice(EXIDevice_Create(m_system, device_type, m_channel_id, m_memcard_header_data),
+  AddDevice(EXIDevice_Create(m_system, device_type, ChannelNumber(), m_memcard_header_data),
             device_num);
 }
 
@@ -292,7 +292,7 @@ void CEXIChannel::DoState(PointerWrap& p)
       // The savestate has a different device here: build one of that type, load it, and put
       // it in without telling software (the state already reflects it).
       std::unique_ptr<IEXIDevice> loaded =
-          EXIDevice_Create(m_system, saved_type, m_channel_id, m_memcard_header_data);
+          EXIDevice_Create(m_system, saved_type, ChannelNumber(), m_memcard_header_data);
       loaded->DoState(p);
       AddDevice(std::move(loaded), index, false);
     }

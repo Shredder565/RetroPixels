@@ -58,6 +58,7 @@ private:
   void RunTransfer(IEXIDevice& device);
 
   bool HasExternalInterruptLine() const { return m_channel_id != 2; }
+  int ChannelNumber() const { return static_cast<int>(m_channel_id); }
 
   Core::System& m_system;
 
