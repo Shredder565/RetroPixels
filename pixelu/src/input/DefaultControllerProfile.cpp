@@ -1,7 +1,4 @@
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
-
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "input/DefaultControllerProfile.h"
 #include "input/InputManager.h"
 #include "input/ControllerFactory.h"
@@ -13,158 +10,187 @@
 
 namespace
 {
-	// keyboard: left stick WASD, D-pad arrow keys, right stick TFGH, face buttons IJKL laid out like the GamePad's
-	// (keyboard button ids are the platform's raw key codes, as KeyboardController reports them)
-	struct KeyBinding
-	{
-		VPADController::ButtonId mapping;
-		uint32 key;
-	};
+	using Clock = std::chrono::steady_clock;
+	using std::chrono::milliseconds;
+
+	// ---- keyboard layout ----
+	// Left stick on WASD, right stick on TFGH, D-pad on the arrow keys and the
+	// face buttons on IJKL in the GamePad's diamond. The numbers are the raw key
+	// codes KeyboardController reports on each platform.
 #if BOOST_OS_WINDOWS
-	constexpr uint32 kKeyLeft = 0x25, kKeyUp = 0x26, kKeyRight = 0x27, kKeyDown = 0x28; // VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN
-	constexpr uint32 kKeyEnter = 0x0D, kKeyBackspace = 0x08, kKeyHome = 0x24; // VK_RETURN, VK_BACK, VK_HOME
-	constexpr uint32 Letter(char c) { return (uint32)c; } // VK codes of letters are the upper case ASCII codes
+	// Windows virtual-key codes; letters use their upper case ASCII value
+	constexpr uint32 KeyCode(char letter) { return (uint32)letter; }
+	constexpr uint32 kArrowLeft = 0x25, kArrowUp = 0x26, kArrowRight = 0x27, kArrowDown = 0x28;
+	constexpr uint32 kReturn = 0x0D, kBackspace = 0x08, kHomeKey = 0x24;
+	#define PIXELU_DEFAULT_KEYBOARD 1
 #elif BOOST_OS_LINUX || BOOST_OS_BSD
-	constexpr uint32 kKeyLeft = 0xff51, kKeyUp = 0xff52, kKeyRight = 0xff53, kKeyDown = 0xff54; // GDK_KEY_Left ...
-	constexpr uint32 kKeyEnter = 0xff0d, kKeyBackspace = 0xff08, kKeyHome = 0xff50; // GDK_KEY_Return, GDK_KEY_BackSpace, GDK_KEY_Home
-	constexpr uint32 Letter(char c) { return (uint32)(c - 'A' + 'a'); } // GDK keyvals of letters are the lower case ASCII codes
+	// GDK key values; letters use their lower case ASCII value
+	constexpr uint32 KeyCode(char letter) { return (uint32)(letter + ('a' - 'A')); }
+	constexpr uint32 kArrowLeft = 0xff51, kArrowUp = 0xff52, kArrowRight = 0xff53, kArrowDown = 0xff54;
+	constexpr uint32 kReturn = 0xff0d, kBackspace = 0xff08, kHomeKey = 0xff50;
+	#define PIXELU_DEFAULT_KEYBOARD 1
 #endif
 
-#if BOOST_OS_WINDOWS || BOOST_OS_LINUX || BOOST_OS_BSD
-	constexpr KeyBinding kKeyboardBindings[] =
+#ifdef PIXELU_DEFAULT_KEYBOARD
+	struct KeyAssignment
 	{
-		{VPADController::kButtonId_A, Letter('L')},
-		{VPADController::kButtonId_B, Letter('K')},
-		{VPADController::kButtonId_X, Letter('I')},
-		{VPADController::kButtonId_Y, Letter('J')},
+		VPADController::ButtonId button;
+		uint32 keyCode;
+	};
 
-		{VPADController::kButtonId_L, Letter('Q')},
-		{VPADController::kButtonId_R, Letter('O')},
-		{VPADController::kButtonId_ZL, Letter('E')},
-		{VPADController::kButtonId_ZR, Letter('U')},
-
-		{VPADController::kButtonId_Plus, kKeyEnter},
-		{VPADController::kButtonId_Minus, kKeyBackspace},
-		{VPADController::kButtonId_Home, kKeyHome},
-
-		{VPADController::kButtonId_Up, kKeyUp},
-		{VPADController::kButtonId_Down, kKeyDown},
-		{VPADController::kButtonId_Left, kKeyLeft},
-		{VPADController::kButtonId_Right, kKeyRight},
-
-		{VPADController::kButtonId_StickL, Letter('C')},
-		{VPADController::kButtonId_StickR, Letter('M')},
-
-		{VPADController::kButtonId_StickL_Up, Letter('W')},
-		{VPADController::kButtonId_StickL_Down, Letter('S')},
-		{VPADController::kButtonId_StickL_Left, Letter('A')},
-		{VPADController::kButtonId_StickL_Right, Letter('D')},
-
-		{VPADController::kButtonId_StickR_Up, Letter('T')},
-		{VPADController::kButtonId_StickR_Down, Letter('G')},
-		{VPADController::kButtonId_StickR_Left, Letter('F')},
-		{VPADController::kButtonId_StickR_Right, Letter('H')},
+	constexpr KeyAssignment kKeys[] = {
+		// face buttons
+		{VPADController::kButtonId_A, KeyCode('L')},
+		{VPADController::kButtonId_B, KeyCode('K')},
+		{VPADController::kButtonId_X, KeyCode('I')},
+		{VPADController::kButtonId_Y, KeyCode('J')},
+		// shoulders and triggers
+		{VPADController::kButtonId_L, KeyCode('Q')},
+		{VPADController::kButtonId_R, KeyCode('O')},
+		{VPADController::kButtonId_ZL, KeyCode('E')},
+		{VPADController::kButtonId_ZR, KeyCode('U')},
+		// system buttons
+		{VPADController::kButtonId_Plus, kReturn},
+		{VPADController::kButtonId_Minus, kBackspace},
+		{VPADController::kButtonId_Home, kHomeKey},
+		// D-pad
+		{VPADController::kButtonId_Up, kArrowUp},
+		{VPADController::kButtonId_Down, kArrowDown},
+		{VPADController::kButtonId_Left, kArrowLeft},
+		{VPADController::kButtonId_Right, kArrowRight},
+		// stick clicks
+		{VPADController::kButtonId_StickL, KeyCode('C')},
+		{VPADController::kButtonId_StickR, KeyCode('M')},
+		// left stick
+		{VPADController::kButtonId_StickL_Up, KeyCode('W')},
+		{VPADController::kButtonId_StickL_Down, KeyCode('S')},
+		{VPADController::kButtonId_StickL_Left, KeyCode('A')},
+		{VPADController::kButtonId_StickL_Right, KeyCode('D')},
+		// right stick
+		{VPADController::kButtonId_StickR_Up, KeyCode('T')},
+		{VPADController::kButtonId_StickR_Down, KeyCode('G')},
+		{VPADController::kButtonId_StickR_Left, KeyCode('F')},
+		{VPADController::kButtonId_StickR_Right, KeyCode('H')},
 	};
 #endif
 
-	std::vector<ControllerPtr> ConnectedControllers(InputAPI::Type api)
+	// controllers an input API sees right now (none if the API is missing or fails)
+	std::vector<ControllerPtr> ListControllers(InputAPI::Type api)
 	{
-		auto& manager = InputManager::instance();
-		if (!manager.is_api_available(api))
+		InputManager& input = InputManager::instance();
+		if (!input.is_api_available(api))
 			return {};
 		try
 		{
-			return manager.get_api_provider(api)->get_controllers();
+			return input.get_api_provider(api)->get_controllers();
 		}
-		catch (const std::exception& ex)
+		catch (const std::exception& e)
 		{
-			cemuLog_log(LogType::Force, "Default controller profile: can't list {} controllers: {}", InputAPI::to_string(api), ex.what());
+			cemuLog_log(LogType::Force, "Default controller profile: listing {} controllers failed: {}", InputAPI::to_string(api), e.what());
 			return {};
 		}
 	}
 
-	std::vector<ControllerPtr> ConnectedSDLControllers()
+	// SDL is started on another thread and reports pads a little after that, so
+	// on this first start wait up to 2.5 s for SDL and then up to 0.75 s for a pad
+	std::vector<ControllerPtr> ListSDLControllers()
 	{
 #ifdef HAS_SDL
 		if (!InputManager::instance().is_api_available(InputAPI::SDLController))
 			return {};
-		// SDL starts on its own thread and finds the connected pads shortly after: give it a moment (first start only)
-		const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2500);
-		while (SDL_WasInit(SDL_INIT_GAMEPAD) == 0 && std::chrono::steady_clock::now() < deadline)
-			std::this_thread::sleep_for(std::chrono::milliseconds(20));
-		if (SDL_WasInit(SDL_INIT_GAMEPAD) == 0)
-			return {};
-		const auto padDeadline = std::min(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(750));
-		while (true)
+		const Clock::time_point giveUp = Clock::now() + milliseconds(2500);
+		for (;;)
 		{
-			auto controllers = ConnectedControllers(InputAPI::SDLController);
-			if (!controllers.empty() || std::chrono::steady_clock::now() >= padDeadline)
-				return controllers;
-			std::this_thread::sleep_for(std::chrono::milliseconds(50));
+			if (SDL_WasInit(SDL_INIT_GAMEPAD) != 0)
+				break;
+			if (Clock::now() >= giveUp)
+				return {};
+			std::this_thread::sleep_for(milliseconds(20));
+		}
+		const Clock::time_point padGiveUp = std::min(giveUp, Clock::now() + milliseconds(750));
+		for (;;)
+		{
+			std::vector<ControllerPtr> pads = ListControllers(InputAPI::SDLController);
+			if (!pads.empty() || Clock::now() >= padGiveUp)
+				return pads;
+			std::this_thread::sleep_for(milliseconds(50));
 		}
 #else
 		return {};
 #endif
 	}
 
-	// the game controller for player 1, or none
-	ControllerPtr ChooseGamepad()
+	ControllerPtr MakeController(InputAPI::Type api, const ControllerPtr& found)
 	{
-		// Xbox pads (and pads that act like one): XInput by slot, so any such pad works, also one plugged in later
-		if (auto xinput = ConnectedControllers(InputAPI::XInput); !xinput.empty())
-			return ControllerFactory::CreateController(InputAPI::XInput, xinput.front()->uuid(), xinput.front()->display_name());
-		// PlayStation, Switch and other pads: SDL (bound to that kind of pad, as Cemu's input settings do)
-		if (auto sdl = ConnectedSDLControllers(); !sdl.empty())
-			return ControllerFactory::CreateController(InputAPI::SDLController, sdl.front()->uuid(), sdl.front()->display_name());
-		// nothing connected yet: the first XInput slot, which picks up an Xbox pad as soon as one is plugged in
+		return ControllerFactory::CreateController(api, found->uuid(), found->display_name());
+	}
+
+	// player 1's game controller: a connected XInput pad, else a connected SDL
+	// pad, else XInput slot 0 so an Xbox pad plugged in later works too
+	ControllerPtr PickGamepad()
+	{
+		const std::vector<ControllerPtr> xinputPads = ListControllers(InputAPI::XInput);
+		if (!xinputPads.empty())
+			return MakeController(InputAPI::XInput, xinputPads.front());
+		const std::vector<ControllerPtr> sdlPads = ListSDLControllers();
+		if (!sdlPads.empty())
+			return MakeController(InputAPI::SDLController, sdlPads.front());
 		if (InputManager::instance().is_api_available(InputAPI::XInput))
 			return ControllerFactory::CreateController(InputAPI::XInput, "0", "Controller 1");
 		return {};
+	}
+
+	// true when a profile exists, or when that cannot be determined
+	bool ProfileMayExist(const fs::path& file)
+	{
+		std::error_code ec;
+		const bool exists = fs::exists(file, ec);
+		return exists || ec;
 	}
 }
 
 void DefaultControllerProfile_CreateIfMissing()
 {
-	std::error_code ec;
-	const fs::path profile = ActiveSettings::GetConfigPath("controllerProfiles/controller0.xml");
-	const fs::path legacyProfile = ActiveSettings::GetConfigPath("controllerProfiles/controller0.txt");
-	if (fs::exists(profile, ec) || ec || fs::exists(legacyProfile, ec) || ec)
-		return; // the user's own profile (or we can't tell): leave it alone
+	const fs::path profileFile = ActiveSettings::GetConfigPath("controllerProfiles/controller0.xml");
+	if (ProfileMayExist(profileFile) || ProfileMayExist(ActiveSettings::GetConfigPath("controllerProfiles/controller0.txt")))
+		return;
 
 	try
 	{
-		auto& manager = InputManager::instance();
-		auto vpad = ControllerFactory::CreateEmulatedController(0, EmulatedController::Type::VPAD);
+		InputManager& input = InputManager::instance();
+		auto gamepadEmulation = ControllerFactory::CreateEmulatedController(0, EmulatedController::Type::VPAD);
 
-		if (const auto gamepad = ChooseGamepad())
+		if (ControllerPtr pad = PickGamepad())
 		{
-			vpad->add_controller(gamepad);
-			vpad->set_default_mapping(gamepad); // Cemu's own layout for this API (A/B/X/Y, L/R, ZL/ZR on the triggers, sticks, D-pad, +/- on Start/Back)
-			if (gamepad->api() == InputAPI::SDLController)
-				vpad->set_mapping(VPADController::kButtonId_Home, gamepad, kButton5); // SDL_GAMEPAD_BUTTON_GUIDE (XInput doesn't report it)
-			cemuLog_log(LogType::Force, "Default controller profile: GamePad on {} {} ({})", InputAPI::to_string(gamepad->api()), gamepad->uuid(), gamepad->display_name());
+			gamepadEmulation->add_controller(pad);
+			// the input API's standard layout (face buttons, shoulders, triggers, sticks, D-pad, Start/Back as +/-)
+			gamepadEmulation->set_default_mapping(pad);
+			// SDL reports the guide button (button 5), XInput does not
+			if (pad->api() == InputAPI::SDLController)
+				gamepadEmulation->set_mapping(VPADController::kButtonId_Home, pad, kButton5);
+			cemuLog_log(LogType::Force, "Default controller profile: GamePad on {} {} ({})", InputAPI::to_string(pad->api()), pad->uuid(), pad->display_name());
 		}
 
-#if BOOST_OS_WINDOWS || BOOST_OS_LINUX || BOOST_OS_BSD
-		if (manager.is_api_available(InputAPI::Keyboard))
+#ifdef PIXELU_DEFAULT_KEYBOARD
+		if (input.is_api_available(InputAPI::Keyboard))
 		{
-			const auto keyboard = ControllerFactory::CreateController(InputAPI::Keyboard, "keyboard", "Keyboard");
-			vpad->add_controller(keyboard);
-			for (const auto& binding : kKeyboardBindings)
-				vpad->add_mapping(binding.mapping, keyboard, binding.key);
+			ControllerPtr keys = ControllerFactory::CreateController(InputAPI::Keyboard, "keyboard", "Keyboard");
+			gamepadEmulation->add_controller(keys);
+			for (const KeyAssignment& k : kKeys)
+				gamepadEmulation->add_mapping(k.button, keys, k.keyCode);
 		}
 #endif
 
-		if (vpad->get_controllers().empty())
-			return;
-		manager.set_controller(vpad);
-		if (manager.save(0))
-			cemuLog_log(LogType::Force, "Default controller profile written: {}", _pathToUtf8(profile));
+		if (gamepadEmulation->get_controllers().empty())
+			return; // nothing to drive it with
+		input.set_controller(gamepadEmulation);
+		if (input.save(0))
+			cemuLog_log(LogType::Force, "Default controller profile saved to {}", _pathToUtf8(profileFile));
 		else
-			cemuLog_log(LogType::Force, "Default controller profile: can't write {}", _pathToUtf8(profile));
+			cemuLog_log(LogType::Force, "Default controller profile: could not save {}", _pathToUtf8(profileFile));
 	}
-	catch (const std::exception& ex)
+	catch (const std::exception& e)
 	{
-		cemuLog_log(LogType::Force, "Default controller profile: {}", ex.what());
+		cemuLog_log(LogType::Force, "Default controller profile: {}", e.what());
 	}
 }

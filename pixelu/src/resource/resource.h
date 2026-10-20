@@ -1,19 +1,12 @@
-//{{NO_DEPENDENCIES}}
-// Microsoft Visual C++ generated include file.
-// Used by cemu.rc
-//
-#include "Common/version.h"
-#define IDI_ICON2                       102
-#define IDI_ICON3                       103
-#define IDR_FONTAWESOME                 116
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// Numeric resource ids shared by cemu.rc and the code (Windows resources).
+#ifndef PIXELU_RESOURCE_IDS_H
+#define PIXELU_RESOURCE_IDS_H
 
-// Next default values for new objects
-// 
-#ifdef APSTUDIO_INVOKED
-#ifndef APSTUDIO_READONLY_SYMBOLS
-#define _APS_NEXT_RESOURCE_VALUE        118
-#define _APS_NEXT_COMMAND_VALUE         40001
-#define _APS_NEXT_CONTROL_VALUE         1001
-#define _APS_NEXT_SYMED_VALUE           101
-#endif
+#include "Common/version.h" /* EMULATOR_VERSION_* for the version block in cemu.rc */
+
+#define IDI_ICON2 102
+#define IDI_ICON3 103
+#define IDR_FONTAWESOME 116 /* fontawesome-webfont.ttf as RCDATA, loaded by imgui_extension.cpp */
+
 #endif
