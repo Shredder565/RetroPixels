@@ -1,5 +1,4 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -17,149 +16,139 @@ namespace DiscIO
 struct GameModDescriptorRiivolution;
 }
 
+// The data model of a Riivolution patch XML (<wiidisc version="1">) and of a Riivolution config
+// XML (<riivolution version="2">), which stores the user's option choices.
 namespace DiscIO::Riivolution
 {
 class FileDataLoader;
 
-// Data to determine the game patches are valid for.
+// The <id> element: which games a patch XML applies to. Unset fields match anything.
 struct GameFilter
 {
-  std::optional<std::string> m_game;
-  std::optional<std::string> m_developer;
+  std::optional<std::string> m_game;       // prefix of the game ID
+  std::optional<std::string> m_developer;  // two-character maker code
   std::optional<int> m_disc;
   std::optional<int> m_version;
-  std::optional<std::vector<std::string>> m_regions;
+  std::optional<std::vector<std::string>> m_regions;  // one-character region codes
 };
 
-// Which patches will get activated by selecting a Choice in the Riivolution GUI.
+// A <patch id="..."> reference inside a choice, with the parameters it is given.
 struct PatchReference
 {
   std::string m_id;
   std::map<std::string, std::string> m_params;
 };
 
-// A single choice within an Option in the Riivolution GUI.
+// One selectable value of an option.
 struct Choice
 {
   std::string m_name;
   std::vector<PatchReference> m_patch_references;
 };
 
-// A single option presented to the user in the Riivolution GUI.
+// One user-visible setting.
 struct Option
 {
   std::string m_name;
   std::string m_id;
   std::vector<Choice> m_choices;
 
-  // The currently selected patch choice in the m_choices vector.
-  // Note that this index is 1-based; 0 means no choice is selected and this Option is disabled.
+  // 1-based index into m_choices. 0 = disabled.
   u32 m_selected_choice = 0;
 };
 
-// A single page of options presented to the user in the Riivolution GUI.
+// A named group of options.
 struct Section
 {
   std::string m_name;
   std::vector<Option> m_options;
 };
 
-// Replaces, adds, or modifies a file on disc.
+// <file>: replaces, extends or creates a file of the disc's file system.
 struct File
 {
-  // Path of the file on disc to modify.
+  // Disc path. A leading '/' names an exact path; otherwise the first file with this name is used
+  // ("main.dol" means the main executable).
   std::string m_disc;
 
-  // Path of the file on SD card to use for modification.
+  // Path of the replacement data on the SD card.
   std::string m_external;
 
-  // If true, the file on the disc is truncated if the external file end is before the disc file
-  // end. If false, the bytes after the external file end stay as they were.
+  // true: the disc file ends where the patch data ends. false: the disc file never shrinks.
   bool m_resize = true;
 
-  // If true, a new file is created if it does not already exist at the disc path. Otherwise this
-  // modification is ignored if the file does not exist on disc.
+  // Create the disc file if it does not exist (only for exact paths).
   bool m_create = false;
 
-  // Offset of where to start replacing bytes in the on-disc file.
+  // Where the patch data starts in the disc file.
   u32 m_offset = 0;
 
-  // Offset of where to start reading bytes in the external file.
+  // Where to start reading the external file.
   u32 m_fileoffset = 0;
 
-  // Amount of bytes to copy from the external file to the disc file.
-  // If left zero, the entire file (starting at fileoffset) is used.
+  // How many bytes to place. 0 = everything from m_fileoffset to the end of the external file.
   u32 m_length = 0;
 };
 
-// Adds or modifies a folder on disc.
+// <folder>: applies every file of an SD card folder as a <file> patch.
 struct Folder
 {
-  // Path of the folder on disc to modify.
-  // Can be left empty to replace files matching the filename without specifying the folder.
+  // Disc folder. Empty means each file is matched by name anywhere on the disc.
   std::string m_disc;
 
-  // Path of the folder on SD card to use for modification.
+  // SD card folder.
   std::string m_external;
 
-  // Like File::m_resize but for each file in the folder.
+  // m_resize, m_create and m_length are given to every file; see File.
   bool m_resize = true;
-
-  // Like File::m_create but for each file in the folder.
   bool m_create = false;
 
-  // Whether to also traverse subdirectories. (TODO: of the disc folder? external folder? both?)
+  // Also apply the subfolders of the SD card folder.
   bool m_recursive = true;
 
-  // Like File::m_length but for each file in the folder.
   u32 m_length = 0;
 };
 
-// Redirects the save file from the Wii NAND to a folder on SD card.
+// <savegame>: keeps the game's save data in an SD card folder instead of the NAND.
 struct Savegame
 {
-  // The folder on SD card to use for the save files. Is created if it does not exist.
+  // The SD card folder. Created when missing.
   std::string m_external;
 
-  // If this is set to true and the external folder is empty or does not exist, the existing save on
-  // NAND is copied to the new folder on game boot.
+  // Copy the NAND save into the folder when the folder is empty or missing.
   bool m_clone = true;
 };
 
-// Modifies the game RAM right before jumping into the game executable.
+// <memory>: changes RAM just before the game's executable starts.
 struct Memory
 {
-  // Memory address where this modification takes place.
+  // Target address.
   u32 m_offset = 0;
 
-  // Bytes to write to that address.
+  // Bytes to write.
   std::vector<u8> m_value;
 
-  // Like m_value, but read the bytes from a file instead.
+  // SD card file to take the bytes from instead of m_value.
   std::string m_valuefile;
 
-  // If set, the memory at that address will be checked before the value is written, and the
-  // replacement value only written if the bytes there match this.
+  // If not empty, the write only happens when RAM currently holds these bytes.
   std::vector<u8> m_original;
 
-  // If true, this memory patch is an ocarina-style patch.
+  // Ocarina style: find m_value in the loaded code and turn the next blr into a branch to
+  // m_offset.
   bool m_ocarina = false;
 
-  // If true, the offset is not known, and instead we should search for the m_original bytes in
-  // memory and replace them where found. Only searches in MEM1, and only replaces the first match.
+  // Search MEM1 for m_original (at multiples of m_align) and patch the first hit.
   bool m_search = false;
 
-  // For m_search. The byte stride between search points.
   u32 m_align = 1;
 };
 
 struct Patch
 {
-  // Internal name of this patch.
   std::string m_id;
 
-  // Defines a SD card path that all other paths are relative to.
-  // For actually loading file data Dolphin uses the loader below instead.
+  // The patch's 'root' attribute. Paths are resolved through m_file_data_loader.
   std::string m_root;
 
   std::shared_ptr<FileDataLoader> m_file_data_loader;
@@ -176,45 +165,40 @@ struct Patch
 
 struct Disc
 {
-  // Riivolution version. Only '1' exists at time of writing.
+  // Format version from the XML. Only 1 is accepted.
   int m_version = 0;
 
-  // Info about which game and revision these patches are for.
   GameFilter m_game_filter;
 
-  // The options shown to the user in the UI.
   std::vector<Section> m_sections;
 
-  // The actual patch instructions.
+  // Every <patch> of the XML, selected or not.
   std::vector<Patch> m_patches;
 
-  // The path to the parsed XML file.
+  // Where the XML was loaded from.
   std::string m_xml_path;
 
-  // Checks whether these patches are valid for the given game.
+  // Whether m_game_filter accepts this game.
   bool IsValidForGame(const std::string& game_id, std::optional<u16> revision,
                       std::optional<u8> disc_number) const;
 
-  // Transforms an abstract XML-parsed patch set into a concrete one, with only the selected
-  // patches applied and all placeholders replaced.
+  // Copies of the patches that the selected choices refer to, with {$name} placeholders replaced.
   std::vector<Patch> GeneratePatches(const std::string& game_id) const;
 };
 
-// Config format that remembers which patches are enabled/disabled for the next run.
-// Some patches ship with pre-made config XMLs instead of baking their defaults into the actual
-// patch XMLs, so it makes sense to support this format directly.
+// One remembered choice in a config XML.
 struct ConfigOption
 {
-  // The identifier for the referenced Option.
+  // The option's ID, or section name + option name for options without an ID.
   std::string m_id;
 
-  // The selected Choice index.
+  // The chosen value (same numbering as Option::m_selected_choice).
   u32 m_default = 0;
 };
 
 struct Config
 {
-  // Config version. Riivolution itself only accepts '2' here.
+  // Format version. Only 2 is accepted.
   int m_version = 2;
   std::vector<ConfigOption> m_options;
 };

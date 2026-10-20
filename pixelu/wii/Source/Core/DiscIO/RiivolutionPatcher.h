@@ -1,5 +1,4 @@
-// Copyright 2021 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -17,6 +16,8 @@ namespace Core
 class CPUThreadGuard;
 }
 
+// Applies parsed Riivolution patches: file and folder patches to a DirectoryBlob file tree,
+// memory patches to emulated RAM, and savegame redirects to the NAND setup.
 namespace DiscIO::Riivolution
 {
 struct SavegameRedirect
@@ -25,6 +26,7 @@ struct SavegameRedirect
   bool m_clone;
 };
 
+// Supplies the external (SD card) data that a patch refers to. Paths are as written in the XML.
 class FileDataLoader
 {
 public:
@@ -45,12 +47,13 @@ public:
   ResolveSavegameRedirectPath(std::string_view external_relative_path) = 0;
 };
 
+// Loads external data from a host folder that plays the part of the SD card.
 class FileDataLoaderHostFS final : public FileDataLoader
 {
 public:
-  // sd_root should be an absolute path to the folder representing our virtual SD card
-  // xml_path should be an absolute path to the parsed XML file
-  // patch_root should be the 'root' attribute given in the 'patch' or 'wiiroot' XML element
+  // sd_root: absolute host path of the SD card folder.
+  // xml_path: absolute host path of the patch XML.
+  // patch_root: the 'root' attribute of the patch (may be empty).
   FileDataLoaderHostFS(std::string sd_root, const std::string& xml_path,
                        std::string_view patch_root);
 
@@ -65,6 +68,7 @@ public:
   ResolveSavegameRedirectPath(std::string_view external_relative_path) override;
 
 private:
+  // Turns an XML path into a host path, or nullopt if it is not allowed.
   std::optional<std::string>
   MakeAbsoluteFromRelative(std::string_view external_relative_path) const;
 
@@ -72,6 +76,8 @@ private:
   std::string m_patch_root;
 };
 
+// Which file patches to apply: the ones for the game's file system, or the dolphin_sys_* ones for
+// the partition's system files.
 enum class PatchIndex
 {
   FileSystem,
