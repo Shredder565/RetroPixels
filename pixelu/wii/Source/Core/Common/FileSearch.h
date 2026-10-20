@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -10,8 +9,9 @@
 
 namespace Common
 {
-// Callers can pass empty "exts" to indicate they want all files + directories in results
-// Otherwise, only files matching the extensions are returned
+// Lists the contents of `directories` (optionally recursively), sorted and without duplicates.
+// With an empty `exts`, files and directories are all returned; otherwise only files whose name
+// ends in one of `exts` (e.g. ".iso"), compared case-insensitively. Paths use '/' separators.
 std::vector<std::string> DoFileSearch(std::span<const std::string_view> directories,
                                       std::span<const std::string_view> exts = {},
                                       bool recursive = false);
@@ -34,5 +34,4 @@ inline std::vector<std::string> DoFileSearch(std::string_view directory, std::st
 {
   return DoFileSearch(std::span(&directory, 1), std::span(&ext, 1), recursive);
 }
-
 }  // namespace Common

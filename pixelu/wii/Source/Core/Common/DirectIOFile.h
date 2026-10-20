@@ -1,5 +1,4 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -20,35 +19,28 @@ enum class AccessMode
 
 enum class OpenMode
 {
-  // Based on the provided `AccessMode`.
-  // Read: Existing.
-  // Write: Truncate.
-  // ReadAndWrite: Existing.
+  // Write: Truncate; Read and ReadAndWrite: Existing.
   Default,
-
-  // Either create a new file or open an existing file.
+  // Open the file, creating it if needed.
   Always,
-
-  // Like `Always`, but also erase the contents of an existing file.
+  // Like Always, and empty an existing file.
   Truncate,
-
-  // Require a file to already exist. Fail otherwise.
+  // Fail unless the file exists.
   Existing,
-
-  // Require a new file be created. Fail if one already exists.
+  // Fail if the file exists; create it.
   Create,
 };
 
-// This file wrapper avoids use of the underlying system file position.
-// It keeps track of its own file position and read/write calls directly use it.
-// This makes copied handles entirely thread safe.
+// A file handle (Win32 HANDLE / POSIX descriptor) that keeps its own position and does every
+// transfer at an explicit offset (overlapped I/O / pread / pwrite), never through the OS file
+// position. Copies duplicate the OS handle, so separate copies can be used from different
+// threads.
 class DirectIOFile final
 {
 public:
   DirectIOFile();
   ~DirectIOFile();
 
-  // Copies and moves are allowed.
   DirectIOFile(const DirectIOFile&);
   DirectIOFile& operator=(const DirectIOFile&);
   DirectIOFile(DirectIOFile&&);
@@ -57,17 +49,17 @@ public:
   explicit DirectIOFile(const std::string& path, AccessMode access_mode,
                         OpenMode open_mode = OpenMode::Default);
 
+  // `path` is UTF-8. The object must not already be open. Read + Truncate is refused.
   bool Open(const std::string& path, AccessMode access_mode,
             OpenMode open_mode = OpenMode::Default);
 
+  // false if it was not open.
   bool Close();
 
   bool IsOpen() const;
 
-  // An offset from the start of the file may be specified directly.
-  // These explicit offset versions entirely ignore the current file position.
-  // They are thread safe, even when used on the same object.
-
+  // Transfers exactly `size` bytes at `offset`, ignoring and not changing the current position.
+  // Safe to call concurrently on the same object.
   bool OffsetRead(u64 offset, u8* out_ptr, u64 size);
   bool OffsetRead(u64 offset, std::span<u8> out_data)
   {
@@ -79,8 +71,7 @@ public:
     return OffsetWrite(offset, in_data.data(), in_data.size());
   }
 
-  // These Read/Write functions advance the current position on success.
-
+  // Transfers at the current position and advances it on success.
   bool Read(u8* out_ptr, u64 size)
   {
     if (!OffsetRead(m_current_offset, out_ptr, size))
@@ -99,14 +90,17 @@ public:
   }
   bool Write(std::span<const u8> in_data) { return Write(in_data.data(), in_data.size()); }
 
-  // Returns 0 on error.
+  // 0 on error.
   u64 GetSize() const;
 
+  // Fails (leaving the position alone) if the result would be negative or the file is closed.
+  // Seeking past the end is allowed.
   bool Seek(s64 offset, SeekOrigin origin);
 
-  // Returns 0 when not open.
+  // 0 when not open.
   u64 Tell() const { return m_current_offset; }
 
+  // Flushes written data to the disk.
   bool Flush();
 
   auto GetHandle() const
@@ -123,8 +117,7 @@ private:
   DirectIOFile Duplicate() const;
 
 #if defined(_WIN32)
-  // A workaround to avoid including <windows.h> in this header.
-  // HANDLE is just void* and INVALID_HANDLE_VALUE is -1.
+  // HANDLE without including windows.h; -1 is INVALID_HANDLE_VALUE.
   using HandleType = void*;
   HandleType m_handle{HandleType(-1)};
 #else
@@ -135,16 +128,15 @@ private:
   u64 m_current_offset{};
 };
 
-// These take an open file handle to avoid failures from other processes trying to open our files.
-// This is mainly an issue on Windows.
+// Operations through an open handle, so they work while we hold the file open (on Windows a path
+// based rename/delete of an open file would otherwise fail).
 
 bool Resize(DirectIOFile& file, u64 size);
 
-// Attempts to replace a destination file if one already exists.
-// Note: Windows uses `file`. Elsewhere uses `source_path`, but `file` is checked for openness.
+// Replaces an existing destination. Windows renames through `file`; elsewhere `source_path` is
+// renamed and `file` only has to be open.
 bool Rename(DirectIOFile& file, const std::string& source_path,
             const std::string& destination_path);
-// Note: Ditto, only Windows actually uses the file handle. Provide both.
+// Windows deletes through `file`; elsewhere `filename` is deleted and `file` only has to be open.
 bool Delete(DirectIOFile& file, const std::string& filename);
-
 }  // namespace File

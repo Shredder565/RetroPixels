@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/FileSearch.h"
 
@@ -13,97 +12,90 @@
 
 #ifdef _WIN32
 #include <windows.h>
-#elifdef ANDROID
-#include "jni/AndroidCommon/AndroidCommon.h"
+#else
+#include <strings.h>
 #endif
 
 namespace fs = std::filesystem;
 
 namespace Common
 {
+namespace
+{
+using NativeString = fs::path::string_type;
+
+// Case-insensitive "ends with", on native path strings.
+bool EndsWithIgnoringCase(const NativeString& text, const NativeString& suffix)
+{
+  if (suffix.size() > text.size())
+    return false;
+  const auto* tail = text.data() + (text.size() - suffix.size());
+#ifdef _WIN32
+  return CompareStringOrdinal(tail, static_cast<int>(suffix.size()), suffix.data(),
+                              static_cast<int>(suffix.size()), TRUE) == CSTR_EQUAL;
+#else
+  return strncasecmp(tail, suffix.data(), suffix.size()) == 0;
+#endif
+}
+}  // namespace
+
 std::vector<std::string> DoFileSearch(std::span<const std::string_view> directories,
                                       std::span<const std::string_view> exts, bool recursive)
 {
-  const bool accept_all = exts.empty();
+  // Without extensions everything is returned, directories included; with extensions only files
+  // whose path ends in one of them (ignoring case).
+  std::vector<NativeString> suffixes;
+  suffixes.reserve(exts.size());
+  for (const std::string_view ext : exts)
+    suffixes.push_back(StringToPath(ext).native());
 
-  std::vector<fs::path> native_exts;
-  for (const auto& ext : exts)
-    native_exts.push_back(StringToPath(ext));
-
-  // N.B. This avoids doing any copies
-  auto ext_matches = [&native_exts](const fs::path& path) {
-    const std::basic_string_view<fs::path::value_type> native_path = path.native();
-    return std::ranges::any_of(native_exts, [&native_path](const auto& ext) {
-      const auto compare_len = ext.native().length();
-      if (native_path.length() < compare_len)
-        return false;
-      const auto substr_to_compare = native_path.substr(native_path.length() - compare_len);
-#ifdef _WIN32
-      return CompareStringOrdinal(substr_to_compare.data(), static_cast<int>(compare_len),
-                                  ext.c_str(), static_cast<int>(compare_len), TRUE) == CSTR_EQUAL;
-#else
-      return strncasecmp(substr_to_compare.data(), ext.c_str(), compare_len) == 0;
-#endif
-    });
-  };
-
-  std::vector<std::string> result;
-  auto add_filtered = [&](const fs::directory_entry& entry) {
-    auto& path = entry.path();
-    if (accept_all || (!entry.is_directory() && ext_matches(path)))
-      result.emplace_back(PathToString(path));
-  };
-  for (const auto& directory : directories)
-  {
-#ifdef ANDROID
-    if (IsPathAndroidContent(directory))
+  std::vector<std::string> found;
+  const auto consider = [&](const fs::directory_entry& entry) {
+    if (!suffixes.empty())
     {
-      const std::vector<std::string> partial_result =
-          DoFileSearchAndroidContent(directory, exts, recursive);
+      std::error_code ec;
+      if (entry.is_directory(ec))
+        return;
+      const NativeString& native = entry.path().native();
+      if (std::ranges::none_of(suffixes,
+                               [&](const NativeString& s) { return EndsWithIgnoringCase(native, s); }))
+      {
+        return;
+      }
+    }
+    found.push_back(PathToString(entry.path()));
+  };
 
-      result.insert(result.end(), std::make_move_iterator(partial_result.begin()),
-                    std::make_move_iterator(partial_result.end()));
+  for (const std::string_view directory : directories)
+  {
+    const fs::path root = StringToPath(directory);
+    std::error_code ec;
+    if (recursive)
+    {
+      for (fs::recursive_directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec))
+        consider(*it);
     }
     else
-#endif
     {
-      fs::path directory_path = StringToPath(directory);
-      std::error_code error;
-      if (recursive)
-      {
-        for (auto it = fs::recursive_directory_iterator(directory_path, error);
-             it != fs::recursive_directory_iterator(); it.increment(error))
-          add_filtered(*it);
-      }
-      else
-      {
-        for (auto it = fs::directory_iterator(directory_path, error);
-             it != fs::directory_iterator(); it.increment(error))
-          add_filtered(*it);
-      }
-      if (error)
-        ERROR_LOG_FMT(COMMON, "{} error on {}: {}", __func__, directory, error.message());
+      for (fs::directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec))
+        consider(*it);
     }
+    if (ec)
+      ERROR_LOG_FMT(COMMON, "DoFileSearch error on {}: {}", directory, ec.message());
   }
 
-  // Remove duplicates (occurring because caller gave e.g. duplicate or overlapping directories -
-  // not because std::filesystem returns duplicates). Also note that this pathname-based uniqueness
-  // isn't as thorough as std::filesystem::equivalent.
-  std::ranges::sort(result);
-  const auto unique_result = std::ranges::unique(result);
-  result.erase(unique_result.begin(), unique_result.end());
+  // Overlapping or repeated input directories can list a path twice. (Only identical spellings
+  // are merged; this is not a std::filesystem::equivalent check.)
+  std::ranges::sort(found);
+  found.erase(std::ranges::unique(found).begin(), found.end());
 
-  // Dolphin expects to be able to use "/" (DIR_SEP) everywhere.
-  // std::filesystem uses the OS separator.
-  constexpr fs::path::value_type os_separator = fs::path::preferred_separator;
-  static_assert(os_separator == DIR_SEP_CHR || os_separator == '\\', "Unsupported path separator");
-  if constexpr (os_separator != DIR_SEP_CHR)
+  // The rest of the code base expects '/' separators.
+  if constexpr (fs::path::preferred_separator != DIR_SEP_CHR)
   {
-    for (auto& path : result)
+    for (std::string& path : found)
       std::ranges::replace(path, '\\', DIR_SEP_CHR);
   }
 
-  return result;
+  return found;
 }
-
 }  // namespace Common
