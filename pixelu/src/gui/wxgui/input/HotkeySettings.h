@@ -1,11 +1,13 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include <wx/wx.h>
 #include "wxCemuConfig.h"
 #include "input/api/Controller.h"
 
-class HotkeyEntry;
-
+// Global hotkeys (fullscreen, screenshot, fast-forward, quit) for keyboard and
+// controller, and the window that edits them. Init() builds the lookup tables
+// from the config; CaptureInput() is fed every key press / controller poll.
 class HotkeySettings : public wxFrame
 {
 public:
@@ -18,43 +20,32 @@ public:
 	~HotkeySettings();
 
 private:
-	inline static class MainWindow* s_mainWindow = nullptr;
-	static std::unordered_map<sHotkeyCfg*, std::function<void(void)>> s_cfgHotkeyToFuncMap;
-	inline static std::unordered_map<uint16, std::function<void(void)>> s_keyboardHotkeyToFuncMap{};
-	inline static std::unordered_map<uint16, std::function<void(void)>> s_controllerHotkeyToFuncMap{};
-	inline static auto& s_cfgHotkeys = GetWxGUIConfig().hotkeys;
+	enum class Device
+	{
+		Keyboard,
+		Controller,
+	};
+
+	wxButton* AddRow(const wxString& label, sHotkeyCfg& hotkey);
+	wxString KeyboardText(uKeyboardHotkey hotkey) const;
+	wxString ControllerText(ControllerHotkey_t hotkey) const;
+	bool PickController();
+
+	void BeginCapture(wxButton* button, Device device);
+	void EndCapture();
+	void ShowBinding(wxButton* button, Device device);
+	void ClearBinding(wxButton* button, Device device);
+
+	void OnCaptureKeyUp(wxKeyEvent& event);
+	void OnControllerPoll(wxTimerEvent& event);
 
 	wxPanel* m_panel;
-	wxFlexGridSizer* m_sizer;
-	wxButton* m_activeInputButton{ nullptr };
-	wxTimer* m_controllerTimer{ nullptr };
-	const wxSize m_minButtonSize{ 250, 45 };
-	const wxString m_disabledHotkeyText{ _("----") };
-	const wxString m_editModeHotkeyText{ "" };
+	wxFlexGridSizer* m_grid;
+	wxTimer* m_controllerPoll{nullptr};
 
-	std::vector<HotkeyEntry> m_hotkeys;
-	std::weak_ptr<ControllerBase> m_activeController{};
-	bool m_needToSave = false;
+	wxButton* m_capturing{nullptr}; // button waiting for input, if any
+	Device m_capturingDevice = Device::Keyboard;
 
-	/* helpers */
-	void CreateColumnHeaders(void);
-	void CreateHotkeyRow(const wxString& label, sHotkeyCfg& cfgHotkey);
-	wxString To_wxString(uKeyboardHotkey hotkey);
-	wxString To_wxString(ControllerHotkey_t hotkey);
-	bool IsValidKeycodeUp(int keycode);
-	bool SetActiveController(void);
-
-	template<typename T>
-	void FinalizeInput(wxButton* inputButton);
-
-	template <typename T>
-	void RestoreInputButton(void);
-
-	/* events */
-	void OnKeyboardHotkeyInputLeftClick(wxCommandEvent& event);
-	void OnControllerHotkeyInputLeftClick(wxCommandEvent& event);
-	void OnKeyboardHotkeyInputRightClick(wxMouseEvent& event);
-	void OnControllerHotkeyInputRightClick(wxMouseEvent& event);
-	void OnKeyUp(wxKeyEvent& event);
-	void OnControllerTimer(wxTimerEvent& event);
+	std::weak_ptr<ControllerBase> m_controller{}; // labels and capture use this controller
+	bool m_dirty = false;
 };
