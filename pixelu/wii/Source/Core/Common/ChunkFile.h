@@ -248,12 +248,13 @@ public:
   }
 
   // Any trivially copyable value is stored as its raw bytes (this also covers unions containing
-  // BitFields, which can't simply be assigned).
+  // BitFields, which can't simply be assigned). T may be const: save-only code passes const
+  // values, which are only read from in Write, Measure and Verify modes.
   template <typename T>
   requires(std::is_trivially_copyable_v<T> && !std::is_pointer_v<T>)
   void Do(T& x)
   {
-    DoVoid(static_cast<void*>(std::addressof(x)), sizeof(x));
+    DoVoid(const_cast<void*>(static_cast<const volatile void*>(std::addressof(x))), sizeof(x));
   }
 
   // Always one byte, whatever sizeof(bool) is.
