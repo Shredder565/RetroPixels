@@ -1,105 +1,94 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/CPUDetect.h"
 
-#ifdef _WIN32
-#include <windows.h>
-#include <processthreadsapi.h>
-#endif
-
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <fmt/format.h>
 #include <fmt/ranges.h>
 
 #include "Common/CommonTypes.h"
 #include "Common/StringUtil.h"
+
 #ifdef _WIN32
+#include <windows.h>
+#include <processthreadsapi.h>
+
 #include "Common/MsgHandler.h"
 #endif
 
-#ifndef _WIN32
-
-#ifdef __FreeBSD__
-#include <unistd.h>
-
-#include <machine/cpufunc.h>
-#include <sys/types.h>
+#ifdef _MSC_VER
+#include <intrin.h>
+#else
+#include <cpuid.h>
 #endif
 
-static inline void __cpuidex(int info[4], int function_id, int subfunction_id)
+namespace
 {
-#ifdef __FreeBSD__
-  // Despite the name, this is just do_cpuid() with ECX as second input.
-  cpuid_count((u_int)function_id, (u_int)subfunction_id, (u_int*)info);
+struct Regs
+{
+  u32 eax = 0, ebx = 0, ecx = 0, edx = 0;
+};
+
+Regs Cpuid(u32 leaf, u32 subleaf = 0)
+{
+  Regs r;
+#ifdef _MSC_VER
+  int out[4];
+  __cpuidex(out, static_cast<int>(leaf), static_cast<int>(subleaf));
+  r = {static_cast<u32>(out[0]), static_cast<u32>(out[1]), static_cast<u32>(out[2]),
+       static_cast<u32>(out[3])};
 #else
-  info[0] = function_id;     // eax
-  info[2] = subfunction_id;  // ecx
-  __asm__("cpuid"
-          : "=a"(info[0]), "=b"(info[1]), "=c"(info[2]), "=d"(info[3])
-          : "a"(function_id), "c"(subfunction_id));
+  __cpuid_count(leaf, subleaf, r.eax, r.ebx, r.ecx, r.edx);
+#endif
+  return r;
+}
+
+// XCR0: which register states the OS saves on context switches.
+u64 ReadXCR0()
+{
+#ifdef _MSC_VER
+  return _xgetbv(0);
+#else
+  u32 lo, hi;
+  __asm__ __volatile__("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
+  return (u64{hi} << 32) | lo;
 #endif
 }
 
-constexpr u32 XCR_XFEATURE_ENABLED_MASK = 0;
-
-static u64 xgetbv(u32 index)
+constexpr bool Bit(u32 value, int bit)
 {
-  u32 eax, edx;
-  __asm__ __volatile__("xgetbv" : "=a"(eax), "=d"(edx) : "c"(index));
-  return ((u64)edx << 32) | eax;
+  return ((value >> bit) & 1) != 0;
 }
 
-#else
-
-constexpr u32 XCR_XFEATURE_ENABLED_MASK = _XCR_XFEATURE_ENABLED_MASK;
-
-static u64 xgetbv(u32 index)
+#ifdef _WIN32
+// Windows 11 on ARM runs x64 programs under emulation; tell the user a native build exists.
+void WarnIfRunningUnderEmulation()
 {
-  return _xgetbv(index);
-}
-
-static void WarnIfRunningUnderEmulation()
-{
-  // Starting with win11, arm64 windows can run x64 processes under emulation.
-  // This detects such a scenario and informs the user they probably want to run a native build.
-  PROCESS_MACHINE_INFORMATION info{};
-  if (!GetProcessInformation(GetCurrentProcess(), ProcessMachineTypeInfo, &info, sizeof(info)))
+  PROCESS_MACHINE_INFORMATION machine{};
+  if (!GetProcessInformation(GetCurrentProcess(), ProcessMachineTypeInfo, &machine,
+                             sizeof(machine)))
   {
-    // Possibly we are running on version of windows which doesn't support ProcessMachineTypeInfo.
-    return;
+    return;  // older Windows without this query, and without x64 emulation either
   }
-  if (info.MachineAttributes & MACHINE_ATTRIBUTES::KernelEnabled)
-  {
-    // KernelEnabled will be set if process arch matches the kernel arch - how we want people to run
-    // dolphin.
+  // KernelEnabled means the process architecture is the machine's native one.
+  if (machine.MachineAttributes & MACHINE_ATTRIBUTES::KernelEnabled)
     return;
-  }
 
-  // The process is not native; could use IsWow64Process2 to get native machine type, but for now
-  // we can assume it is arm64.
   PanicAlertFmtT("This build of Dolphin is not natively compiled for your CPU.\n"
                  "Please run the ARM64 build of Dolphin for a better experience.");
 }
+#endif
 
-#endif  // ifdef _WIN32
-
-struct CPUIDResult
-{
-  u32 eax{}, ebx{}, ecx{}, edx{};
-};
-static_assert(sizeof(CPUIDResult) == sizeof(u32) * 4);
-
-static inline CPUIDResult cpuid(int function_id, int subfunction_id = 0)
-{
-  CPUIDResult info;
-  __cpuidex((int*)&info, function_id, subfunction_id);
-  return info;
-}
+// Intel Atom family-6 models (Bonnell through Airmont).
+constexpr std::array<u32, 10> ATOM_MODELS = {0x1C, 0x26, 0x27, 0x35, 0x36,
+                                             0x37, 0x4A, 0x4D, 0x5A, 0x5D};
+}  // namespace
 
 CPUInfo cpu_info;
 
@@ -114,23 +103,17 @@ void CPUInfo::Detect()
   WarnIfRunningUnderEmulation();
 #endif
 
-  // This should be much more reliable and easier than trying to get the number of cores out of the
-  // CPUID data ourselves.
   num_cores = std::max(static_cast<int>(std::thread::hardware_concurrency()), 1);
 
-  // Assume CPU supports the CPUID instruction. Those that don't can barely
-  // boot modern OS anyway.
-
-  // Detect CPU's CPUID capabilities and grab vendor string.
-  auto info = cpuid(0);
-  const u32 func_id_max = info.eax;
-
-  std::string vendor_id;
-  vendor_id.resize(sizeof(u32) * 3);
-  std::memcpy(&vendor_id[0], &info.ebx, sizeof(u32));
-  std::memcpy(&vendor_id[4], &info.edx, sizeof(u32));
-  std::memcpy(&vendor_id[8], &info.ecx, sizeof(u32));
+  // Leaf 0: highest standard leaf and the vendor string (EBX, EDX, ECX order).
+  const Regs leaf0 = Cpuid(0);
+  const u32 max_leaf = leaf0.eax;
+  std::string vendor_id(12, '\0');
+  std::memcpy(vendor_id.data() + 0, &leaf0.ebx, 4);
+  std::memcpy(vendor_id.data() + 4, &leaf0.edx, 4);
+  std::memcpy(vendor_id.data() + 8, &leaf0.ecx, 4);
   TruncateToCString(&vendor_id);
+
   if (vendor_id == "GenuineIntel")
     vendor = CPUVendor::Intel;
   else if (vendor_id == "AuthenticAMD")
@@ -138,144 +121,97 @@ void CPUInfo::Detect()
   else
     vendor = CPUVendor::Other;
 
-  // Detect family and other misc stuff.
-  bool is_amd_family_17 = false;
   bool has_sse = false;
-  if (func_id_max >= 1)
-  {
-    info = cpuid(1);
-    const u32 version = info.eax;
-    const u32 family = ((version >> 8) & 0xf) + ((version >> 20) & 0xff);
-    const u32 model = ((version >> 4) & 0xf) + ((version >> 12) & 0xf0);
-    const u32 stepping = version & 0xf;
+  bool zen1_or_zen2 = false;
 
+  if (max_leaf >= 1)
+  {
+    const Regs leaf1 = Cpuid(1);
+    const u32 signature = leaf1.eax;
+    const u32 family = ((signature >> 8) & 0xF) + ((signature >> 20) & 0xFF);
+    const u32 model = ((signature >> 4) & 0xF) + ((signature >> 12) & 0xF0);
+    const u32 stepping = signature & 0xF;
     cpu_id = fmt::format("{:02X}:{:02X}:{:X}", family, model, stepping);
 
-    // Detect people unfortunate enough to be running Dolphin on an Atom
-    if (vendor == CPUVendor::Intel && family == 6 &&
-        (model == 0x1C || model == 0x26 || model == 0x27 || model == 0x35 || model == 0x36 ||
-         model == 0x37 || model == 0x4A || model == 0x4D || model == 0x5A || model == 0x5D))
-      bAtom = true;
+    if (vendor == CPUVendor::Intel && family == 6)
+      bAtom = std::ranges::find(ATOM_MODELS, model) != ATOM_MODELS.end();
 
-    // Detect AMD Zen1, Zen1+ and Zen2
-    if (vendor == CPUVendor::AMD && family == 0x17)
-      is_amd_family_17 = true;
+    // Family 17h: Zen, Zen+ and Zen 2, whose PDEP/PEXT are microcoded and very slow.
+    zen1_or_zen2 = vendor == CPUVendor::AMD && family == 0x17;
 
-    // AMD CPUs before Zen faked this flag and didn't actually
-    // implement simultaneous multithreading (SMT; Intel calls it HTT)
-    // but rather some weird middle-ground between 1-2 cores
-    const bool ht = (info.edx >> 28) & 1;
-    HTT = ht && (vendor == CPUVendor::Intel || (vendor == CPUVendor::AMD && family >= 0x17));
+    // Pre-Zen AMD parts set the HTT bit without having real SMT.
+    HTT = Bit(leaf1.edx, 28) &&
+          (vendor == CPUVendor::Intel || (vendor == CPUVendor::AMD && family >= 0x17));
 
-    if ((info.edx >> 25) & 1)
-      has_sse = true;
-    if (info.ecx & 1)
-      bSSE3 = true;
-    if ((info.ecx >> 9) & 1)
-      bSSSE3 = true;
-    if ((info.ecx >> 19) & 1)
-      bSSE4_1 = true;
-    if ((info.ecx >> 20) & 1)
-      bSSE4_2 = true;
-    if ((info.ecx >> 22) & 1)
-      bMOVBE = true;
-    if ((info.ecx >> 25) & 1)
-      bAES = true;
+    has_sse = Bit(leaf1.edx, 25);
+    bSSE3 = Bit(leaf1.ecx, 0);
+    bSSSE3 = Bit(leaf1.ecx, 9);
+    bSSE4_1 = Bit(leaf1.ecx, 19);
+    bSSE4_2 = Bit(leaf1.ecx, 20);
+    bMOVBE = Bit(leaf1.ecx, 22);
+    bAES = Bit(leaf1.ecx, 25);
 
-    // AVX support requires 3 separate checks:
-    //  - Is the AVX bit set in CPUID?
-    //  - Is the XSAVE bit set in CPUID?
-    //  - XGETBV result has the XCR bit set.
-    if (((info.ecx >> 28) & 1) && ((info.ecx >> 27) & 1))
+    // AVX is only usable if the CPU has it, has XSAVE enabled by the OS (OSXSAVE), and the OS
+    // saves both SSE and AVX state (XCR0 bits 1 and 2).
+    const bool avx = Bit(leaf1.ecx, 28);
+    const bool osxsave = Bit(leaf1.ecx, 27);
+    if (avx && osxsave && (ReadXCR0() & 0b110) == 0b110)
     {
-      // Check that XSAVE can be used for SSE and AVX
-      if ((xgetbv(XCR_XFEATURE_ENABLED_MASK) & 0b110) == 0b110)
-      {
-        bAVX = true;
-        if ((info.ecx >> 12) & 1)
-          bFMA = true;
-      }
+      bAVX = true;
+      bFMA = Bit(leaf1.ecx, 12);
     }
 
-    if (func_id_max >= 7)
+    if (max_leaf >= 7)
     {
-      info = cpuid(7);
-      if ((info.ebx >> 3) & 1)
-        bBMI1 = true;
-      if ((info.ebx >> 8) & 1)
-        bBMI2 = true;
-      if ((info.ebx >> 29) & 1)
-        bSHA1 = bSHA2 = true;
+      const Regs leaf7 = Cpuid(7, 0);
+      bBMI1 = Bit(leaf7.ebx, 3);
+      bBMI2 = Bit(leaf7.ebx, 8);
+      bSHA1 = bSHA2 = Bit(leaf7.ebx, 29);
     }
   }
 
-  info = cpuid(0x80000000);
-  const u32 ext_func_id_max = info.eax;
-  if (ext_func_id_max >= 0x80000004)
+  const u32 max_ext_leaf = Cpuid(0x80000000).eax;
+  if (max_ext_leaf >= 0x80000004)
   {
-    // Extract CPU model string
-    model_name.resize(sizeof(info) * 3);
-    for (u32 i = 0; i < 3; i++)
+    // The brand string: 48 bytes from leaves 0x80000002..4.
+    model_name.assign(48, '\0');
+    for (u32 i = 0; i < 3; ++i)
     {
-      info = cpuid(0x80000002 + i);
-      memcpy(&model_name[sizeof(info) * i], &info, sizeof(info));
+      const Regs part = Cpuid(0x80000002 + i);
+      std::memcpy(model_name.data() + i * 16, &part, 16);
     }
     TruncateToCString(&model_name);
     model_name = StripSpaces(model_name);
   }
-  if (ext_func_id_max >= 0x80000001)
+  if (max_ext_leaf >= 0x80000001)
   {
-    // Check for more features.
-    info = cpuid(0x80000001);
-    if ((info.ecx >> 5) & 1)
-      bLZCNT = true;
-    if ((info.ecx >> 16) & 1)
-      bFMA4 = true;
+    const Regs ext1 = Cpuid(0x80000001);
+    bLZCNT = Bit(ext1.ecx, 5);
+    bFMA4 = Bit(ext1.ecx, 16);
   }
 
-  // Computed flags
-  bFlushToZero = has_sse;
-  bBMI2FastParallelBitOps = bBMI2 && !is_amd_family_17;
+  bFlushToZero = has_sse;  // MXCSR FTZ/DAZ
+  bBMI2FastParallelBitOps = bBMI2 && !zen1_or_zen2;
   bCRC32 = bSSE4_2;
 
+  // Summarize() separates fields with commas.
   model_name = ReplaceAll(model_name, ",", "_");
   cpu_id = ReplaceAll(cpu_id, ",", "_");
 }
 
 std::string CPUInfo::Summarize()
 {
-  std::vector<std::string> sum;
-  sum.push_back(model_name);
-  sum.push_back(cpu_id);
-
-  if (bSSE3)
-    sum.push_back("SSE3");
-  if (bSSSE3)
-    sum.push_back("SSSE3");
-  if (bSSE4_1)
-    sum.push_back("SSE4.1");
-  if (bSSE4_2)
-    sum.push_back("SSE4.2");
-  if (HTT)
-    sum.push_back("HTT");
-  if (bAVX)
-    sum.push_back("AVX");
-  if (bBMI1)
-    sum.push_back("BMI1");
-  if (bBMI2)
-    sum.push_back("BMI2");
-  if (bFMA)
-    sum.push_back("FMA");
-  if (bMOVBE)
-    sum.push_back("MOVBE");
-  if (bAES)
-    sum.push_back("AES");
-  if (bCRC32)
-    sum.push_back("CRC32");
-  if (bSHA1)
-    sum.push_back("SHA1");
-  if (bSHA2)
-    sum.push_back("SHA2");
-
-  return fmt::to_string(fmt::join(sum, ","));
+  std::vector<std::string> fields{model_name, cpu_id};
+  const std::pair<bool, const char*> flags[] = {
+      {bSSE3, "SSE3"},   {bSSSE3, "SSSE3"}, {bSSE4_1, "SSE4.1"}, {bSSE4_2, "SSE4.2"},
+      {HTT, "HTT"},      {bAVX, "AVX"},     {bBMI1, "BMI1"},     {bBMI2, "BMI2"},
+      {bFMA, "FMA"},     {bMOVBE, "MOVBE"}, {bAES, "AES"},       {bCRC32, "CRC32"},
+      {bSHA1, "SHA1"},   {bSHA2, "SHA2"},
+  };
+  for (const auto& [present, name] : flags)
+  {
+    if (present)
+      fields.emplace_back(name);
+  }
+  return fmt::to_string(fmt::join(fields, ","));
 }

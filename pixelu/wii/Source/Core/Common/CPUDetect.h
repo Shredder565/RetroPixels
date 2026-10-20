@@ -1,7 +1,5 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-// Detect the CPU, so we'll know which optimizations to use
 #pragma once
 
 #include <string>
@@ -14,51 +12,46 @@ enum class CPUVendor
   Other,
 };
 
+// Host CPU features, filled in once at start-up (see the global cpu_info).
 struct CPUInfo
 {
   CPUVendor vendor = CPUVendor::Other;
 
-  std::string cpu_id;
-  std::string model_name;
+  std::string cpu_id;      // "family:model:stepping" in hex
+  std::string model_name;  // marketing name, e.g. from the CPUID brand string
 
-  bool HTT = false;
-  int num_cores = 0;
+  bool HTT = false;  // real simultaneous multithreading
+  int num_cores = 0;  // logical processors
 
   bool bSSE3 = false;
   bool bSSSE3 = false;
   bool bSSE4_1 = false;
   bool bSSE4_2 = false;
   bool bLZCNT = false;
-  bool bAVX = false;
+  bool bAVX = false;  // and enabled by the OS
   bool bBMI1 = false;
   bool bBMI2 = false;
-  // PDEP and PEXT are ridiculously slow on AMD Zen1, Zen1+ and Zen2 (Family 17h)
+  // BMI2 with fast PDEP/PEXT (false on AMD family 17h, where they take hundreds of cycles).
   bool bBMI2FastParallelBitOps = false;
   bool bFMA = false;
   bool bFMA4 = false;
   bool bAES = false;
   bool bMOVBE = false;
-  // This flag indicates that the hardware supports some mode
-  // in which denormal inputs _and_ outputs are automatically set to (signed) zero.
+  // Some mode flushes denormal inputs and outputs to (signed) zero.
   bool bFlushToZero = false;
   bool bAtom = false;
   bool bCRC32 = false;
   bool bSHA1 = false;
   bool bSHA2 = false;
 
-  // ARMv8 specific
-  bool bAFP = false;  // Alternate floating-point behavior
+  // ARMv8 alternate floating-point behaviour (FEAT_AFP).
+  bool bAFP = false;
 
-  // Call Detect()
+  // Runs Detect().
   explicit CPUInfo();
 
-  // The returned string consists of "<model_name>,<cpu_id>,<flag...>"
-  // Where:
-  //  model_name and cpud_id may be zero-length
-  //  model_name is human-readable marketing name
-  //  cpu_id is ':'-delimited string of id info
-  //  flags are optionally included if the related feature is supported and reporting its enablement
-  //  seems useful to report
+  // "<model_name>,<cpu_id>,<FLAG>,<FLAG>,..." with the flags worth reporting that are present.
+  // model_name and cpu_id may be empty and contain no commas.
   std::string Summarize();
 
 private:
