@@ -1,0 +1,62 @@
+- Batch 14: all of `input` and `audio` rewritten as original code. Input:
+  the InputManager (controller slots, profile load/save including the .txt
+  migration, mouse/touch tracking for the GamePad touch screen, the update
+  thread), the ControllerFactory, the ControllerBase pipeline (calibration,
+  dead zone/range, axis buttons) and the controller state, the motion code
+  (Mahony fusion, motion handler, motion sample), the emulated controllers
+  (VPAD, Pro, Classic, Wiimote, WPAD and the shared EmulatedController with
+  its multi-controller main/extra mappings), and every host API: Keyboard,
+  XInput, DirectInput, SDL3 (event thread and sensor fusion), the DSU client
+  (messages, UDP reader/writer), GameCube adapter, and real Wii remotes (HID
+  report parsing, IR pointer, Nunchuk/Classic/MotionPlus, the hidapi and
+  BlueZ L2CAP transports). Audio: IAudioAPI and IAudioInputAPI, and the
+  Cubeb, Cubeb input, DirectSound, XAudio 2.8 and XAudio 2.7 backends.
+  Unchanged: input/DefaultControllerProfile.* (PixelU's own file, MPL),
+  audio/xaudio2_7/ (third party) and the CMake files.
+  File names, public interfaces, enum values, button ids, the controller
+  profile XML format (users' controllerProfiles/*.xml load the same and save
+  in the same layout), the IAudioAPI interface (including GeneralSettings2's
+  friend access to s_audioDelay; the recorder still taps snd_core), the
+  SDL InitSDL/ShutdownSDL/PumpSDLEvents entry points and the GamePad touch
+  from the main window's mouse/touch are unchanged.
+  Old-vs-new harnesses (ASan/UBSan) give identical output: profiles,
+  migration and emulated controllers 1500 iterations (327669 lines: random
+  profile XML round trips, VPAD/KPAD/WPAD reads from random raw states with
+  mouse/touch, and Mahony/motion fusion for Pro, Classic and Wiimote, 2334
+  motion samples); XInput (fake XInput functions), SDL3 (fake SDL with
+  scripted gamepads and sensor events), the DSU client against a local UDP
+  server with random, corrupted and unknown packets, and Wii remote HID
+  parsing through a scripted fake device (status, memory read replies,
+  acknowledgements, every data report, extension detection, IR, rumble/LED
+  output reports): 300 XInput iterations, 75 SDL rounds, 300 DSU packets
+  and 600 remote reports (25055 lines); audio with a fake cubeb (device
+  enumeration, stream setup, FeedBlock/NeedAdditionalBlocks/output callback
+  queueing, input recording/ConsumeBlock, play/stop/volume) 300 iterations
+  (85054 lines). g++/clang++ syntax checks of every changed file and its
+  callers match the pre-rewrite tree; mingw checks of all Windows backends
+  pass except XAudio27API.cpp, which fails on the DirectX 2010 header before
+  and after and was reviewed by hand.
+  Fixes and deliberate differences: profile mapping entries are saved sorted
+  by mapping id (the old order was hash order; loading is order
+  independent). The Classic Controller's SDL default layout is used for SDL
+  pads (it fell through to the XInput layout). The GamePad's right-mouse
+  rotation is kept per controller instead of in a function static. SDL
+  rumble is not sent to a disconnected pad (it was called with a null
+  gamepad). The DSU writer queue owns plain byte copies (the old queue
+  deleted derived messages through a base pointer, flagged by ASan), and
+  the receive buffer is zeroed per packet so a short packet is checked
+  against zeros instead of stale bytes. Wii remote button and 16-bit
+  fields are read bytewise (no misaligned loads), the BlueZ candidate map
+  uses a strict weak ordering (its comparator returned bacmp, true for both
+  orders), an oversized L2CAP write is clamped, and the hidapi probe
+  tolerates a missing product string. The GameCube controller sets buttons
+  through SetButtonState (the old code called a non-existent buttons.set()
+  and could not compile with HAS_GAMECUBE). XAudio2API::GetType returns
+  XAudio2 (it returned XAudio27; nothing reads it). XAudio2 frees and
+  forgets a DLL without XAudio2Create, and clears the WMI VARIANTs it
+  reads; DirectSound checks the initial buffer lock; a device description
+  of the wrong backend throws instead of being dereferenced as null. Unused
+  structs (BasicIR, ExtendedIR, IRCamera globals), unused friends and the
+  four duplicate AI.h includes in DSUController.h were dropped; the cubeb
+  output drop message names cubeb instead of direct sound. Window, stream
+  and context names ("Cemu Cubeb output" etc.) are unchanged.
