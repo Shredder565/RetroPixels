@@ -1,71 +1,370 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-
-// Logic and structures are largely taken from Linux source:
-// drivers/bluetooth/btusb.c
-// drivers/bluetooth/btrtl.c
-// drivers/bluetooth/btrtl.h
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+//
+// Many Realtek USB Bluetooth adapters start with a ROM firmware that needs a patch uploaded
+// before they work. The patches are Realtek's own redistributable files from the
+// linux-firmware repository (rtl_bt/rtlXXXX_fw.bin and the optional rtlXXXX_config.bin). The
+// "epatch" container and the Realtek vendor commands used here are the ones documented by the
+// public Linux btrtl driver.
 
 #include "Core/IOS/USB/Bluetooth/RealtekFirmwareLoader.h"
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstring>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
-#include "Common/BitUtils.h"
+#include "Common/Buffer.h"
 #include "Common/FileUtil.h"
 #include "Common/HttpRequest.h"
 #include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
 
 #include "Core/IOS/USB/Bluetooth/LibUSBBluetoothAdapter.h"
+#include "Core/IOS/USB/Bluetooth/hci.h"
 
 namespace
 {
-constexpr u16 RTL_ROM_LMP_8723A = 0x1200;
-constexpr u16 RTL_ROM_LMP_8723B = 0x8723;
-constexpr u16 RTL_ROM_LMP_8821A = 0x8821;
-constexpr u16 RTL_ROM_LMP_8761A = 0x8761;
-constexpr u16 RTL_ROM_LMP_8822B = 0x8822;
-constexpr u16 RTL_ROM_LMP_8852A = 0x8852;
-constexpr u16 RTL_ROM_LMP_8851B = 0x8851;
-constexpr u16 RTL_ROM_LMP_8922A = 0x8922;
+// LMP subversions of the ROM firmware of each chip family.
+constexpr u16 LMP_8723A = 0x1200;
+constexpr u16 LMP_8723B = 0x8723;
+constexpr u16 LMP_8821A = 0x8821;
+constexpr u16 LMP_8761A = 0x8761;
+constexpr u16 LMP_8822B = 0x8822;
+constexpr u16 LMP_8851B = 0x8851;
+constexpr u16 LMP_8852A = 0x8852;
+constexpr u16 LMP_8922A = 0x8922;
 
-constexpr std::string_view RTL_EPATCH_SIGNATURE = "Realtech";
-constexpr std::string_view RTL_EPATCH_SIGNATURE_V2 = "RTBTCore";
+// Realtek vendor commands.
+constexpr u16 OPCODE_DOWNLOAD = 0xfc20;
+constexpr u16 OPCODE_READ_ROM_VERSION = 0xfc6d;
 
-#pragma pack(push, 1)
-struct rtl_vendor_cmd
-{
-  std::array<u8, 5> data;
-};
-static_assert(sizeof(rtl_vendor_cmd) == 5);
-struct rtl_epatch_header
-{
-  std::array<u8, 8> signature;
-  u32 fw_version;
-  u16 num_patches;
-};
-static_assert(sizeof(rtl_epatch_header) == 8 + 4 + 2);
-struct rtl_download_cmd
-{
-  static constexpr int DATA_LEN = 252;
+// A download command carries a sequence byte and up to this many bytes of the image.
+constexpr std::size_t DOWNLOAD_CHUNK = 252;
 
-  u8 index;
-  std::array<u8, DATA_LEN> data;
-};
-static_assert(sizeof(rtl_download_cmd) == 253);
-struct rtl_download_response
+// The epatch container: an 8-byte signature, the firmware version (u32) and the number of
+// patches (u16), then per patch a chip ID (u16), a length (u16) and an offset (u32), each as
+// its own array. The file ends with an "extension" section, read backwards.
+constexpr std::string_view EPATCH_MAGIC = "Realtech";
+constexpr std::string_view EPATCH_MAGIC_V2 = "RTBTCore";
+constexpr std::size_t EPATCH_HEADER_SIZE = 14;
+constexpr std::array<u8, 4> EXTENSION_MAGIC{0x51, 0x04, 0xfd, 0x77};
+
+struct VersionInfo
 {
   u8 status;
-  u8 index;
+  u8 hci_version;
+  u16 hci_revision;
+  u16 lmp_subversion;
 };
-static_assert(sizeof(rtl_download_response) == 2);
-struct rtl_rom_version_evt
+
+u16 ReadLE16(std::span<const u8> bytes, std::size_t offset)
 {
-  u8 status;
-  u8 version;
+  return static_cast<u16>(bytes[offset] | (bytes[offset + 1] << 8));
+}
+
+u32 ReadLE32(std::span<const u8> bytes, std::size_t offset)
+{
+  return static_cast<u32>(ReadLE16(bytes, offset)) |
+         (static_cast<u32>(ReadLE16(bytes, offset + 2)) << 16);
+}
+
+std::span<const u8> AsBytes(std::string_view text)
+{
+  return {reinterpret_cast<const u8*>(text.data()), text.size()};
+}
+
+// Adapters that use the Realtek driver without Realtek's own vendor ID, plus Realtek-ID
+// adapters whose firmware needs loading. Grouped by vendor ID.
+struct KnownVendor
+{
+  u16 vid;
+  std::vector<u16> pids;
 };
-static_assert(sizeof(rtl_rom_version_evt) == 2);
-#pragma pack(pop)
+
+const std::vector<KnownVendor>& KnownRealtekAdapters()
+{
+  static const std::vector<KnownVendor> s_adapters = {
+      {0x0489, {0xe085, 0xe08b, 0xe112, 0xe122, 0xe123, 0xe125, 0xe12f, 0xe130}},
+      {0x04bb, {0x0a15}},
+      {0x04c5, {0x161f, 0x165c, 0x1675}},
+      {0x04ca, {0x4005, 0x4006, 0x4007}},
+      {0x04f2, {0xb49f}},
+      {0x0930, {0x021d}},
+      {0x0b05, {0x17dc, 0x185c, 0x18ef, 0x190e}},
+      {0x0bda, {0x2550, 0x2852, 0x385a, 0x4852, 0x4853, 0x8520, 0x876e, 0x8771, 0x877b,
+                0x877c, 0x887b, 0x8922, 0xa725, 0xa729, 0xb009, 0xb00c, 0xb850, 0xb85b,
+                0xc123, 0xc822, 0xc852, 0xd922, 0xd923}},
+      {0x0cb5, {0xc547}},
+      {0x0cb8, {0xc549, 0xc558, 0xc559}},
+      {0x1358, {0xc123}},
+      {0x13d3, {0x3394, 0x3410, 0x3414, 0x3416, 0x3458, 0x3459, 0x3461, 0x3462, 0x3494,
+                0x3526, 0x3529, 0x3533, 0x3548, 0x3549, 0x3553, 0x3555, 0x3570, 0x3571,
+                0x3572, 0x3586, 0x3587, 0x3591, 0x3592, 0x3600, 0x3601, 0x3612, 0x3616,
+                0x3617, 0x3618, 0x3619}},
+      {0x2001, {0x332a}},
+      {0x2357, {0x0604, 0x0607}},
+      {0x2550, {0x8761}},
+      {0x2b89, {0x3cfa, 0x6275, 0x8761}},
+      {0x2c0a, {0x8761}},
+      {0x2c4e, {0x0115, 0x0128}},
+      {0x2ff8, {0x3051, 0xb011}},
+      {0x3188, {0x8771}},
+      {0x33f2, {0x1688}},
+      {0x3625, {0x010b}},
+      {0x37ad, {0x0600}},
+      {0x6655, {0x8771}},
+      {0x7392, {0xa611, 0xc611, 0xe611}},
+  };
+  return s_adapters;
+}
+
+// Each patch in a file names the project it was built for, which must match the chip family.
+struct ProjectFamily
+{
+  u8 project_id;
+  u16 lmp_subversion;
+};
+constexpr ProjectFamily PROJECT_FAMILIES[] = {
+    {1, LMP_8723B},  {2, LMP_8821A},  {3, LMP_8761A},  {8, LMP_8822B},  {9, LMP_8723B},
+    {10, LMP_8821A}, {13, LMP_8822B}, {14, LMP_8761A}, {18, LMP_8852A}, {20, LMP_8852A},
+    {25, LMP_8852A}, {36, LMP_8851B}, {44, LMP_8922A}, {47, LMP_8852A},
+};
+
+// The firmware file name for a chip, by LMP subversion, HCI revision and HCI version.
+struct FirmwareName
+{
+  u16 lmp_subversion;
+  u16 hci_revision;
+  u8 hci_version;
+  std::string_view name;
+};
+constexpr FirmwareName FIRMWARE_NAMES[] = {
+    {LMP_8723A, 0x000b, 0x6, "8723a"},   {LMP_8723B, 0x000b, 0x6, "8723b"},
+    {LMP_8723B, 0x000d, 0x8, "8723d"},   {LMP_8761A, 0x000a, 0x6, "8761a"},
+    {LMP_8761A, 0x000b, 0xa, "8761bu"},  {LMP_8821A, 0x000a, 0x6, "8821a"},
+    {LMP_8821A, 0x000c, 0x8, "8821c"},   {LMP_8822B, 0x000c, 0xa, "8822cu"},
+    {LMP_8822B, 0x000b, 0x7, "8822b"},   {LMP_8851B, 0x000b, 0xc, "8851bu"},
+    {LMP_8852A, 0x000a, 0xb, "8852au"},  {LMP_8852A, 0x000b, 0xb, "8852bu"},
+    {LMP_8852A, 0x000c, 0xc, "8852cu"},  {LMP_8852A, 0x0087, 0xc, "8852btu"},
+    {LMP_8922A, 0x000a, 0xc, "8922au"},
+};
+
+std::string_view FindFirmwareName(const VersionInfo& version)
+{
+  for (const FirmwareName& entry : FIRMWARE_NAMES)
+  {
+    if (entry.lmp_subversion == version.lmp_subversion &&
+        entry.hci_revision == version.hci_revision && entry.hci_version == version.hci_version)
+    {
+      return entry.name;
+    }
+  }
+  return {};
+}
+
+// Walks the extension section backwards from its signature. Each instruction is stored as
+// data, length, opcode (reading backwards); opcode 0 with one byte of data is the project ID
+// and opcode 0xff ends the list. The walk steps over one byte more than the data length,
+// exactly as Realtek's own loaders do.
+int FindProjectID(std::span<const u8> file)
+{
+  std::ptrdiff_t pos = static_cast<std::ptrdiff_t>(file.size() - EXTENSION_MAGIC.size());
+  constexpr std::ptrdiff_t lowest = static_cast<std::ptrdiff_t>(EPATCH_HEADER_SIZE + 3);
+  while (pos >= lowest)
+  {
+    const u8 opcode = file[static_cast<std::size_t>(pos - 1)];
+    const u8 length = file[static_cast<std::size_t>(pos - 2)];
+    const u8 value = file[static_cast<std::size_t>(pos - 3)];
+    pos -= 3;
+
+    if (opcode == 0xff)
+      return -1;
+    if (length == 0)
+    {
+      ERROR_LOG_FMT(IOS_WIIMOTE, "Realtek firmware: zero-length extension entry");
+      return -2;
+    }
+    if (opcode == 0x00 && length == 1)
+      return value;
+    pos -= length;
+  }
+  return -1;
+}
+
+// Builds the image to upload: the patch for this ROM version, whose last four bytes are
+// replaced by the file's firmware version, followed by the config file. Empty on error.
+Common::UniqueBuffer<u8> BuildImage(std::span<const u8> file, std::span<const u8> config,
+                                    const VersionInfo& version, u8 rom_version)
+{
+  if (file.size() < EPATCH_HEADER_SIZE)
+  {
+    ERROR_LOG_FMT(IOS_WIIMOTE, "Realtek firmware file is too small");
+    return {};
+  }
+
+  const auto magic = file.first(EPATCH_MAGIC.size());
+  if (!std::ranges::equal(magic, AsBytes(EPATCH_MAGIC)))
+  {
+    if (std::ranges::equal(magic, AsBytes(EPATCH_MAGIC_V2)))
+      ERROR_LOG_FMT(IOS_WIIMOTE, "Realtek EPATCH v2 files are not supported yet");
+    else
+      ERROR_LOG_FMT(IOS_WIIMOTE, "Realtek firmware file has no EPATCH signature");
+    return {};
+  }
+
+  const u32 fw_version = ReadLE32(file, 8);
+  const u16 patch_count = ReadLE16(file, 12);
+  INFO_LOG_FMT(IOS_WIIMOTE, "Realtek firmware version {}, {} patches", fw_version, patch_count);
+
+  if (!std::ranges::equal(file.last(EXTENSION_MAGIC.size()), EXTENSION_MAGIC))
+  {
+    ERROR_LOG_FMT(IOS_WIIMOTE, "Realtek firmware file has no extension section");
+    return {};
+  }
+
+  const int project_id = FindProjectID(file);
+  if (project_id == -2)
+    return {};
+  const auto family = std::ranges::find(PROJECT_FAMILIES, project_id, [](const ProjectFamily& f) {
+    return static_cast<int>(f.project_id);
+  });
+  if (family == std::end(PROJECT_FAMILIES) || family->lmp_subversion != version.lmp_subversion)
+  {
+    ERROR_LOG_FMT(IOS_WIIMOTE, "Realtek firmware is for another chip (project {})", project_id);
+    return {};
+  }
+
+  const std::size_t chip_ids = EPATCH_HEADER_SIZE;
+  const std::size_t lengths = chip_ids + 2 * std::size_t{patch_count};
+  const std::size_t offsets = lengths + 2 * std::size_t{patch_count};
+  if (file.size() < offsets + 4 * std::size_t{patch_count})
+  {
+    ERROR_LOG_FMT(IOS_WIIMOTE, "Realtek firmware patch table is truncated");
+    return {};
+  }
+
+  for (std::size_t i = 0; i < patch_count; ++i)
+  {
+    if (ReadLE16(file, chip_ids + 2 * i) != rom_version + 1)
+      continue;
+
+    const u16 length = ReadLE16(file, lengths + 2 * i);
+    const u32 offset = ReadLE32(file, offsets + 4 * i);
+    INFO_LOG_FMT(IOS_WIIMOTE, "Realtek patch: {} bytes at {}", length, offset);
+
+    if (u64{offset} + length > file.size() || length < sizeof(fw_version))
+    {
+      ERROR_LOG_FMT(IOS_WIIMOTE, "Realtek firmware patch does not fit the file");
+      return {};
+    }
+
+    Common::UniqueBuffer<u8> image{length + config.size()};
+    const std::size_t code_size = length - sizeof(fw_version);
+    std::copy_n(file.begin() + static_cast<std::ptrdiff_t>(offset), code_size, image.data());
+    for (std::size_t b = 0; b < sizeof(fw_version); ++b)
+      image[code_size + b] = static_cast<u8>(fw_version >> (8 * b));
+    std::ranges::copy(config, image.data() + length);
+    return image;
+  }
+
+  ERROR_LOG_FMT(IOS_WIIMOTE, "Realtek firmware has no patch for ROM version {}", rom_version);
+  return {};
+}
+
+// Uploads an image in DOWNLOAD_CHUNK pieces. The sequence byte counts 0..0x7f and then wraps
+// to 1; the last piece has bit 7 set.
+bool UploadImage(LibUSBBluetoothAdapter& adapter, std::span<const u8> image)
+{
+  if (image.empty())
+  {
+    ERROR_LOG_FMT(IOS_WIIMOTE, "No Realtek firmware to upload");
+    return false;
+  }
+  INFO_LOG_FMT(IOS_WIIMOTE, "Uploading {} bytes of Realtek firmware", image.size());
+
+  // Command header (opcode, length), sequence byte, data.
+  std::array<u8, 4 + DOWNLOAD_CHUNK> command{};
+  command[0] = static_cast<u8>(OPCODE_DOWNLOAD);
+  command[1] = static_cast<u8>(OPCODE_DOWNLOAD >> 8);
+  u8 sequence = 0;
+
+  std::size_t done = 0;
+  while (true)
+  {
+    const std::size_t chunk = std::min(image.size() - done, DOWNLOAD_CHUNK);
+    const bool is_last = done + chunk == image.size();
+
+    command[2] = static_cast<u8>(1 + chunk);
+    command[3] = is_last ? static_cast<u8>(sequence | 0x80) : sequence;
+    std::copy_n(image.begin() + static_cast<std::ptrdiff_t>(done), chunk, command.begin() + 4);
+
+    // Return parameters: status, sequence byte.
+    std::array<u8, 2> reply{};
+    if (!adapter.SendBlockingCommand(std::span{command}.first(4 + chunk), reply))
+      return false;
+    if (reply[0] != 0x00)
+    {
+      ERROR_LOG_FMT(IOS_WIIMOTE, "Realtek firmware upload failed with status {:#04x}", reply[0]);
+      return false;
+    }
+
+    if (is_last)
+      break;
+    done += chunk;
+    sequence = sequence == 0x7f ? 1 : static_cast<u8>(sequence + 1);
+  }
+
+  NOTICE_LOG_FMT(IOS_WIIMOTE, "Realtek firmware uploaded");
+  return true;
+}
+
+std::string FirmwareDirectory()
+{
+  return File::GetUserPath(D_FIRMWARE_IDX) + "rtl_bt/";
+}
+
+bool SaveDownload(Common::HttpRequest& request, const std::string& file_name, bool is_optional)
+{
+  // linux-firmware's mirror on gitlab.com (git.kernel.org hosts the same files).
+  const std::string url =
+      "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main/rtl_bt/" + file_name;
+  const auto response = request.Get(url);
+  if (!response)
+  {
+    if (is_optional && request.GetLastResponseCode() == 404)
+    {
+      // Plenty of chips have no config file, but the common 8761B does, so it is still
+      // mentioned.
+      PanicAlertFmtT("File {0} was not found on the server.\n\nThis might be normal.\n\n"
+                     "Not all devices expect this file.",
+                     file_name);
+    }
+    else
+    {
+      PanicAlertFmtT("HTTP GET {0}\n\nError: {1}", url, request.GetLastResponseCode());
+    }
+    return false;
+  }
+
+  File::WriteStringToFile(
+      FirmwareDirectory() + file_name,
+      std::string_view{reinterpret_cast<const char*>(response->data()), response->size()});
+  return true;
+}
+
+void DownloadFirmware(const std::string& fw_file, const std::string& config_file)
+{
+  Common::HttpRequest request;
+  request.FollowRedirects(1);
+  File::CreateFullPath(FirmwareDirectory());
+  if (SaveDownload(request, fw_file, false))
+    SaveDownload(request, config_file, true);
+}
 }  // namespace
 
 bool IsRealtekVID(u16 vid)
@@ -75,535 +374,100 @@ bool IsRealtekVID(u16 vid)
 
 bool IsKnownRealtekBluetoothDevice(u16 vid, u16 pid)
 {
-  // This list comes mostly from Linux source: drivers/bluetooth/btusb.c
-  constexpr std::pair<u16, u16> realtek_ids[] = {
-      // Realtek 8821CE Bluetooth devices
-      {0x13d3, 0x3529},
-      {0x13d3, 0x3533},
-      // Realtek 8822CE Bluetooth devices
-      {0x0bda, 0xb00c},
-      {0x0bda, 0xc822},
-      // Realtek 8822CU Bluetooth devices
-      {0x13d3, 0x3549},
-      // Realtek 8851BE Bluetooth devices
-      {0x0bda, 0xb850},
-      {0x13d3, 0x3600},
-      {0x13d3, 0x3601},
-      {0x0489, 0xe112},
-      // Realtek 8851BU Bluetooth devices
-      {0x3625, 0x010b},
-      {0x2001, 0x332a},
-      {0x7392, 0xe611},
-      {0x2c4e, 0x0128},
-      // Realtek 8852AE Bluetooth devices
-      {0x0bda, 0x2852},
-      {0x0bda, 0xc852},
-      {0x0bda, 0x385a},
-      {0x0bda, 0x4852},
-      {0x04c5, 0x165c},
-      {0x04ca, 0x4006},
-      {0x0cb8, 0xc549},
-      // Realtek 8852CE Bluetooth devices
-      {0x04ca, 0x4007},
-      {0x04c5, 0x1675},
-      {0x0cb8, 0xc558},
-      {0x13d3, 0x3587},
-      {0x13d3, 0x3586},
-      {0x13d3, 0x3592},
-      {0x13d3, 0x3612},
-      {0x0489, 0xe122},
-      // Realtek 8852BE Bluetooth devices
-      {0x0cb8, 0xc559},
-      {0x0bda, 0x4853},
-      {0x0bda, 0x887b},
-      {0x0bda, 0xb85b},
-      {0x13d3, 0x3570},
-      {0x13d3, 0x3571},
-      {0x13d3, 0x3572},
-      {0x13d3, 0x3591},
-      {0x0489, 0xe123},
-      {0x0489, 0xe125},
-      // Realtek 8852BT/8852BE-VT Bluetooth devices
-      {0x0bda, 0x8520},
-      {0x0489, 0xe12f},
-      {0x13d3, 0x3618},
-      {0x13d3, 0x3619},
-      // Realtek 8922AE Bluetooth devices
-      {0x0bda, 0x8922},
-      {0x0bda, 0xd922},
-      {0x0bda, 0xd923},
-      {0x13d3, 0x3617},
-      {0x13d3, 0x3616},
-      {0x0489, 0xe130},
-      // Additional Realtek 8723AE Bluetooth devices
-      {0x0930, 0x021d},
-      {0x13d3, 0x3394},
-      // Additional Realtek 8723BE Bluetooth devices
-      {0x0489, 0xe085},
-      {0x0489, 0xe08b},
-      {0x04f2, 0xb49f},
-      {0x13d3, 0x3410},
-      {0x13d3, 0x3416},
-      {0x13d3, 0x3459},
-      {0x13d3, 0x3494},
-      // Additional Realtek 8723BU Bluetooth devices
-      {0x7392, 0xa611},
-      {0x2c0a, 0x8761},
-      // Additional Realtek 8723DE Bluetooth devices
-      {0x0bda, 0xb009},
-      {0x2ff8, 0xb011},
-      // Additional Realtek 8761BUV Bluetooth devices
-      {0x04bb, 0x0a15},
-      {0x2c4e, 0x0115},
-      {0x2357, 0x0604},
-      {0x2357, 0x0607},
-      {0x0b05, 0x190e},
-      {0x2550, 0x8761},
-      {0x0bda, 0x2550},
-      {0x0bda, 0x876e},
-      {0x0bda, 0x8771},
-      {0x0bda, 0x877b},
-      {0x0bda, 0x877c},
-      {0x0bda, 0xa725},
-      {0x0bda, 0xa729},
-      {0x2357, 0x0604},
-      {0x2550, 0x8761},
-      {0x2b89, 0x3cfa},
-      {0x2b89, 0x6275},
-      {0x2b89, 0x8761},
-      {0x2c0a, 0x8761},
-      {0x2c4e, 0x0115},  // Mercusys MA530 Adapter
-      {0x3188, 0x8771},
-      {0x33f2, 0x1688},
-      {0x6655, 0x8771},
-      {0x7392, 0xc611},
-      {0x2b89, 0x8761},
-      {0x2b89, 0x6275},
-      {0x37ad, 0x0600},
-      // Additional Realtek 8821AE Bluetooth devices
-      {0x0b05, 0x17dc},
-      {0x13d3, 0x3414},
-      {0x13d3, 0x3458},
-      {0x13d3, 0x3461},
-      {0x13d3, 0x3462},
-      // Additional Realtek 8822BE Bluetooth devices
-      {0x13d3, 0x3526},
-      {0x0b05, 0x185c},
-      // Additional Realtek 8822CE Bluetooth devices
-      {0x04ca, 0x4005},
-      {0x04c5, 0x161f},
-      {0x0b05, 0x18ef},
-      {0x13d3, 0x3548},
-      {0x13d3, 0x3549},
-      {0x13d3, 0x3553},
-      {0x13d3, 0x3555},
-      {0x2ff8, 0x3051},
-      {0x1358, 0xc123},
-      {0x0bda, 0xc123},
-      {0x0cb5, 0xc547},
-  };
-
-  return std::ranges::find(realtek_ids, std::pair(vid, pid)) != std::end(realtek_ids);
-}
-
-// Returns the data to be loaded, or an empty buffer on error.
-static Common::UniqueBuffer<char> ParseFirmware(std::span<const char> fw_data,
-                                                std::span<const char> cfg_data,
-                                                const hci_read_local_ver_rp& local_ver,
-                                                u8 rom_version)
-{
-  if (fw_data.size() < sizeof(rtl_epatch_header))
+  for (const KnownVendor& vendor : KnownRealtekAdapters())
   {
-    ERROR_LOG_FMT(IOS_WIIMOTE, "Undersized firmware file");
-    return {};
+    if (vendor.vid == vid)
+      return std::ranges::find(vendor.pids, pid) != vendor.pids.end();
   }
-
-  const rtl_epatch_header epatch_info = Common::BitCastPtr<rtl_epatch_header>(fw_data.data());
-  if (std::memcmp(epatch_info.signature.data(), RTL_EPATCH_SIGNATURE.data(),
-                  epatch_info.signature.size()) != 0)
-  {
-    if (std::memcmp(epatch_info.signature.data(), RTL_EPATCH_SIGNATURE_V2.data(),
-                    epatch_info.signature.size()) == 0)
-    {
-      ERROR_LOG_FMT(IOS_WIIMOTE, "EPATCH v2 not implemented. Please report device to developers.");
-    }
-    else
-    {
-      ERROR_LOG_FMT(IOS_WIIMOTE, "Bad EPATCH signature");
-    }
-    return {};
-  }
-
-  const auto fw_version = epatch_info.fw_version;
-  const auto num_patches = epatch_info.num_patches;
-
-  INFO_LOG_FMT(IOS_WIIMOTE, "fw_version={} num_patches={}", epatch_info.fw_version, num_patches);
-
-  static constexpr u8 EXTENSION_SIGNATURE[] = {0x51, 0x04, 0xfd, 0x77};
-  const auto extension = fw_data.last(std::size(EXTENSION_SIGNATURE));
-  if (std::memcmp(extension.data(), EXTENSION_SIGNATURE, extension.size()) != 0)
-  {
-    ERROR_LOG_FMT(IOS_WIIMOTE, "Bad extension section signature");
-    return {};
-  }
-
-  // Look for the project ID starting from the end of the file.
-  int project_id = -1;
-  for (auto iter = extension.begin(); iter >= fw_data.begin() + (sizeof(rtl_epatch_header) + 3);)
-  {
-    const u8 opcode = *--iter;
-    const u8 length = *--iter;
-    const u8 data = *--iter;
-
-    // EOF
-    if (opcode == 0xff)
-      break;
-
-    if (length == 0)
-    {
-      ERROR_LOG_FMT(IOS_WIIMOTE, "Found instruction with length 0");
-      return {};
-    }
-
-    if (opcode == 0 && length == 1)
-    {
-      project_id = data;
-      break;
-    }
-
-    iter -= length;
-  }
-
-  struct LMPSubverProjectID
-  {
-    u16 lmp_subver;
-    u8 project_id;
-  };
-
-  constexpr LMPSubverProjectID subver_project_ids[] = {
-      {RTL_ROM_LMP_8723B, 1},  {RTL_ROM_LMP_8821A, 2},  {RTL_ROM_LMP_8761A, 3},
-      {RTL_ROM_LMP_8822B, 8},  {RTL_ROM_LMP_8723B, 9},  {RTL_ROM_LMP_8821A, 10},
-      {RTL_ROM_LMP_8822B, 13}, {RTL_ROM_LMP_8761A, 14}, {RTL_ROM_LMP_8852A, 18},
-      {RTL_ROM_LMP_8852A, 20}, {RTL_ROM_LMP_8852A, 25}, {RTL_ROM_LMP_8851B, 36},
-      {RTL_ROM_LMP_8922A, 44}, {RTL_ROM_LMP_8852A, 47},
-  };
-
-  // Verify that the project ID is what we expect for our LMP subversion.
-  const auto* const it =
-      std::ranges::find(subver_project_ids, project_id, &LMPSubverProjectID::project_id);
-  if (it == std::end(subver_project_ids) || it->lmp_subver != local_ver.lmp_subversion)
-  {
-    ERROR_LOG_FMT(IOS_WIIMOTE, "Unexpected project_id: {}", project_id);
-    return {};
-  }
-
-  // Structure is:
-  // u16 chip_ids[num_patches]; u16 patch_lengths[num_patches]; u32 patch_offsets[num_patches];
-  if (fw_data.size() <
-      sizeof(rtl_epatch_header) + num_patches * (sizeof(u16) + sizeof(u16) + sizeof(u32)))
-  {
-    ERROR_LOG_FMT(IOS_WIIMOTE, "Undersized firmware file");
-    return {};
-  }
-  const auto* chip_id_base = fw_data.data() + sizeof(rtl_epatch_header);
-  const auto* const patch_length_base = chip_id_base + (sizeof(u16) * num_patches);
-  const auto* const patch_offset_base = patch_length_base + (sizeof(u16) * num_patches);
-  for (int i = 0; i != num_patches; ++i)
-  {
-    const u16 chip_id = Common::BitCastPtr<u16>(chip_id_base + (i * sizeof(u16)));
-    if (chip_id == rom_version + 1)
-    {
-      const u16 patch_length = Common::BitCastPtr<u16>(patch_length_base + (i * sizeof(u16)));
-      const u32 patch_offset = Common::BitCastPtr<u32>(patch_offset_base + (i * sizeof(u32)));
-
-      INFO_LOG_FMT(IOS_WIIMOTE, "Patch length:{} offset:{}", patch_length, patch_offset);
-
-      if (patch_offset + patch_length > fw_data.size())
-      {
-        ERROR_LOG_FMT(IOS_WIIMOTE, "Undersized firmware file");
-        return {};
-      }
-
-      auto result = Common::UniqueBuffer<char>{patch_length + cfg_data.size()};
-      std::copy_n(fw_data.data() + patch_offset, patch_length - sizeof(fw_version), result.data());
-
-      // The last 4 bytes are replaced with fw_version.
-      std::memcpy(result.data() + patch_length - sizeof(fw_version), &fw_version,
-                  sizeof(fw_version));
-
-      // Append the config binary.
-      std::ranges::copy(cfg_data, result.data() + patch_length);
-
-      return result;
-    }
-  }
-
-  ERROR_LOG_FMT(IOS_WIIMOTE, "Patch not found");
-  return {};
-}
-
-// Loads the provided data on the adapter.
-static bool LoadFirmware(LibUSBBluetoothAdapter& adapter, std::span<const char> data)
-{
-  if (data.empty())
-  {
-    ERROR_LOG_FMT(IOS_WIIMOTE, "Firmware data is empty");
-    return false;
-  }
-
-  INFO_LOG_FMT(IOS_WIIMOTE, "Loading firmware, total size: {}", data.size());
-
-  HCICommandPayload<0xfc20, rtl_download_cmd> payload{};
-
-  const auto write_block = [&](std::span<const u8> block) {
-    rtl_download_response result{};
-    if (!adapter.SendBlockingCommand(block, Common::AsWritableU8Span(result)))
-      return false;
-
-    if (result.status != 0x00)
-    {
-      ERROR_LOG_FMT(IOS_WIIMOTE, "Bad load firmware status: 0x{:02x}", result.status);
-      return false;
-    }
-
-    return true;
-  };
-
-  // Write all blocks except the last one.
-  auto block_iter = data.begin();
-  while (data.end() - block_iter > rtl_download_cmd::DATA_LEN)
-  {
-    const auto block_end = block_iter + rtl_download_cmd::DATA_LEN;
-    std::copy(block_iter, block_end, payload.command.data.data());
-
-    if (!write_block(Common::AsU8Span(payload)))
-      return false;
-
-    if (++payload.command.index == 0x80)
-      payload.command.index = 1;
-
-    block_iter = block_end;
-  }
-
-  // Write the last block.
-  const auto last_block_size = data.end() - block_iter;
-  const auto bytes_short_of_full_block = rtl_download_cmd::DATA_LEN - last_block_size;
-
-  // Mark data end.
-  payload.command.index |= 0x80u;
-  payload.header.length -= bytes_short_of_full_block;
-  std::copy(block_iter, data.end(), payload.command.data.data());
-
-  if (!write_block(Common::AsU8Span(payload).first(sizeof(payload) - bytes_short_of_full_block)))
-    return false;
-
-  NOTICE_LOG_FMT(IOS_WIIMOTE, "Loading firmware complete");
-  return true;
-}
-
-static constexpr u64 LocalVerUID(u16 lmp_subversion, u16 hci_revision, u8 hci_version)
-{
-  return u64(lmp_subversion) | (u64(hci_revision) << 16u) | (u64(hci_version) << 32u);
-}
-
-// Returns the firmware name for a given local version.
-static std::string GetFirmwareName(const hci_read_local_ver_rp& local_ver)
-{
-  // This list comes from Linux source: drivers/bluetooth/btrtl.c
-  switch (LocalVerUID(local_ver.lmp_subversion, local_ver.hci_revision, local_ver.hci_version))
-  {
-  case LocalVerUID(RTL_ROM_LMP_8723A, 0xb, 0x6):
-    return "8723a";
-  case LocalVerUID(RTL_ROM_LMP_8723B, 0xb, 0x6):
-    return "8723b";
-  case LocalVerUID(RTL_ROM_LMP_8723B, 0xd, 0x8):
-    return "8723d";
-  case LocalVerUID(RTL_ROM_LMP_8761A, 0xa, 0x6):
-    return "8761a";
-  case LocalVerUID(RTL_ROM_LMP_8761A, 0xb, 0xa):
-    return "8761bu";
-  case LocalVerUID(RTL_ROM_LMP_8821A, 0xa, 0x6):
-    return "8821a";
-  case LocalVerUID(RTL_ROM_LMP_8821A, 0xc, 0x8):
-    return "8821c";
-  case LocalVerUID(RTL_ROM_LMP_8822B, 0xc, 0xa):
-    return "8822cu";
-  case LocalVerUID(RTL_ROM_LMP_8822B, 0xb, 0x7):
-    return "8822b";
-  case LocalVerUID(RTL_ROM_LMP_8851B, 0xb, 0xc):
-    return "8851bu";
-  case LocalVerUID(RTL_ROM_LMP_8852A, 0xa, 0xb):
-    return "8852au";
-  case LocalVerUID(RTL_ROM_LMP_8852A, 0xb, 0xb):
-    return "8852bu";
-  case LocalVerUID(RTL_ROM_LMP_8852A, 0xc, 0xc):
-    return "8852cu";
-  case LocalVerUID(RTL_ROM_LMP_8852A, 0x87, 0xc):
-    return "8852btu";
-  case LocalVerUID(RTL_ROM_LMP_8922A, 0xa, 0xc):
-    return "8922au";
-  default:
-    return {};
-  }
-}
-
-static std::string GetFirmwareLoadPath()
-{
-  return File::GetUserPath(D_FIRMWARE_IDX) + "rtl_bt/";
-}
-
-static void DownloadFirmwareFilesFromInternet(const std::string& fw_filename,
-                                              const std::string& config_filename)
-{
-  // Gitlab seems to be an appropriate source.
-  // An alternative could be kernel.org
-  // https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/plain/rtl_bt/
-  constexpr auto base_url = "https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main/rtl_bt/";
-
-  Common::HttpRequest request;
-  request.FollowRedirects(1);
-
-  const auto firmware_load_path = GetFirmwareLoadPath();
-  File::CreateFullPath(firmware_load_path);
-
-  // _fw.bin
-  {
-    const auto fw_url = base_url + fw_filename;
-    const auto response = request.Get(fw_url);
-    if (!response)
-    {
-      PanicAlertFmtT("HTTP GET {0}\n\nError: {1}", fw_url, request.GetLastResponseCode());
-      return;
-    }
-
-    File::WriteStringToFile(
-        firmware_load_path + fw_filename,
-        std::string_view{reinterpret_cast<const char*>(response->data()), response->size()});
-  }
-
-  // _config.bin
-  {
-    const auto config_url = base_url + config_filename;
-    const auto response = request.Get(config_url);
-    if (!response)
-    {
-      if (request.GetLastResponseCode() == 404)
-      {
-        // Some devices don't have this _config.bin.
-        // But the very popular 8761B does, so I suppose it makes sense to show this error.
-        PanicAlertFmtT("File {0} was not found on the server.\n\nThis might be normal.\n\n"
-                       "Not all devices expect this file.",
-                       config_filename);
-      }
-      else
-      {
-        PanicAlertFmtT("HTTP GET {0}\n\nError: {1}", config_url, request.GetLastResponseCode());
-      }
-      return;
-    }
-
-    File::WriteStringToFile(
-        firmware_load_path + config_filename,
-        std::string_view{reinterpret_cast<const char*>(response->data()), response->size()});
-  }
-}
-
-static void ShowFirmwareReadError(std::string_view fw_path)
-{
-  PanicAlertFmtT("Bluetooth passthrough failed to read firmware file from:\n"
-                 "{0}\n\n"
-                 "Refer to https://wiki.dolphin-emu.org/index.php?title=Bluetooth_Passthrough "
-                 "for instructions.",
-                 fw_path);
+  return false;
 }
 
 bool InitializeRealtekBluetoothDevice(LibUSBBluetoothAdapter& adapter)
 {
-  // Read local version.
-  hci_read_local_ver_rp local_ver{};
+  // Read Local Version Information.
+  constexpr u16 read_version = BluetoothHCI::Opcode::READ_LOCAL_VERSION;
+  const std::array<u8, 3> version_command{static_cast<u8>(read_version),
+                                          static_cast<u8>(read_version >> 8), 0};
+  BluetoothHCI::ReadLocalVersionReply version_reply{};
   if (!adapter.SendBlockingCommand(
-          Common::AsU8Span(hci_cmd_hdr_t{.opcode = HCI_CMD_READ_LOCAL_VER, .length = 0}),
-          Common::AsWritableU8Span(local_ver)))
+          version_command,
+          std::span{reinterpret_cast<u8*>(&version_reply), sizeof(version_reply)}))
   {
     return false;
   }
-  if (local_ver.status != 0x00)
+  if (version_reply.status != 0x00)
   {
-    ERROR_LOG_FMT(IOS_WIIMOTE, "Bad local version status: 0x{:02x}", local_ver.status);
+    ERROR_LOG_FMT(IOS_WIIMOTE, "Realtek: Read Local Version failed with status {:#04x}",
+                  version_reply.status);
     return false;
   }
+  const VersionInfo version{version_reply.status, version_reply.hci_version,
+                            version_reply.hci_revision, version_reply.lmp_subversion};
 
-  const auto firmware_name = GetFirmwareName(local_ver);
-  // If firmware has already been loaded then the subversion changes and we won't find a match.
-  if (firmware_name.empty())
+  // A chip that already runs a patch reports another subversion and is left alone.
+  const std::string_view chip = FindFirmwareName(version);
+  if (chip.empty())
   {
-    INFO_LOG_FMT(IOS_WIIMOTE, "Assuming no firmware load is needed");
+    INFO_LOG_FMT(IOS_WIIMOTE, "Realtek adapter needs no firmware");
     return true;
   }
 
-  // A name like "8761bu" is turned into "rtl8761bu_fw.bin"
-  const auto base_filename = "rtl" + firmware_name;
-  const auto fw_filename = base_filename + "_fw.bin";
-  const auto config_filename = base_filename + "_config.bin";
+  const std::string base_name = "rtl" + std::string{chip};
+  const std::string fw_file = base_name + "_fw.bin";
+  const std::string config_file = base_name + "_config.bin";
+  const std::string fw_path = FirmwareDirectory() + fw_file;
+  const std::string config_path = FirmwareDirectory() + config_file;
+  NOTICE_LOG_FMT(IOS_WIIMOTE, "Realtek adapter needs {}", base_name);
 
-  const auto firmware_load_path = GetFirmwareLoadPath();
-
-  const auto fw_path = firmware_load_path + fw_filename;
-  const auto config_path = firmware_load_path + config_filename;
-
-  NOTICE_LOG_FMT(IOS_WIIMOTE, "Loading firmware: {}", base_filename);
-
-  if (!File::Exists(fw_path))
+  if (!File::Exists(fw_path) &&
+      AskYesNoFmtT("Bluetooth passthrough requires missing firmware: {0}\n\n"
+                   "Automatically download from gitlab.com now?",
+                   base_name))
   {
-    const bool should_download =
-        AskYesNoFmtT("Bluetooth passthrough requires missing firmware: {0}\n\n"
-                     "Automatically download from gitlab.com now?",
-                     base_filename);
-
-    if (should_download)
-      DownloadFirmwareFilesFromInternet(fw_filename, config_filename);
+    DownloadFirmware(fw_file, config_file);
   }
 
   std::string fw_data;
   if (!File::ReadFileToString(fw_path, fw_data))
   {
-    ShowFirmwareReadError(fw_path);
+    PanicAlertFmtT("Bluetooth passthrough failed to read firmware file from:\n"
+                   "{0}\n\n"
+                   "Refer to https://wiki.dolphin-emu.org/index.php?title=Bluetooth_Passthrough "
+                   "for instructions.",
+                   fw_path);
     return false;
   }
 
-  // 8723A is old and the binary is loaded as-is without "parsing".
-  if (local_ver.lmp_subversion == RTL_ROM_LMP_8723A)
+  // The old 8723A takes its file as it is, which must not be an epatch container.
+  if (version.lmp_subversion == LMP_8723A)
   {
-    // File should *not* have the epatch signature.
-    if (fw_data.starts_with(RTL_EPATCH_SIGNATURE))
+    if (fw_data.starts_with(EPATCH_MAGIC))
     {
-      ERROR_LOG_FMT(IOS_WIIMOTE, "Unexpected EPATCH signature");
+      ERROR_LOG_FMT(IOS_WIIMOTE, "Realtek 8723A firmware must not be an EPATCH file");
       return false;
     }
-
-    return LoadFirmware(adapter, fw_data);
+    return UploadImage(adapter, AsBytes(fw_data));
   }
 
-  // Read ROM version.
-  rtl_rom_version_evt read_rom_ver{};
-  if (!adapter.SendBlockingCommand(Common::AsU8Span(hci_cmd_hdr_t{.opcode = 0xfc6d, .length = 0}),
-                                   Common::AsWritableU8Span(read_rom_ver)))
+  const std::array<u8, 3> rom_command{static_cast<u8>(OPCODE_READ_ROM_VERSION),
+                                      static_cast<u8>(OPCODE_READ_ROM_VERSION >> 8), 0};
+  // Return parameters: status, ROM version.
+  std::array<u8, 2> rom_reply{};
+  if (!adapter.SendBlockingCommand(rom_command, rom_reply))
+    return false;
+  if (rom_reply[0] != 0x00)
   {
+    ERROR_LOG_FMT(IOS_WIIMOTE, "Realtek: Read ROM Version failed with status {:#04x}",
+                  rom_reply[0]);
     return false;
   }
-  if (read_rom_ver.status != 0x00)
-  {
-    ERROR_LOG_FMT(IOS_WIIMOTE, "Bad ROM version status: 0x{:02x}", read_rom_ver.status);
-    return false;
-  }
+  const u8 rom_version = rom_reply[1];
+  INFO_LOG_FMT(IOS_WIIMOTE, "Realtek ROM version {:#04x}", rom_version);
 
-  const u8 rom_version = read_rom_ver.version;
-  INFO_LOG_FMT(IOS_WIIMOTE, "ROM version: 0x{:02x}", rom_version);
-
-  // Apparently only certain devices require the config binary. We load it whenever present.
+  // Only some chips have a config file; it is used whenever it is there.
   std::string config_data;
   File::ReadFileToString(config_path, config_data);
 
-  const auto firmware = ParseFirmware(fw_data, config_data, local_ver, rom_version);
-  return LoadFirmware(adapter, firmware);
+  const auto image = BuildImage(AsBytes(fw_data), AsBytes(config_data), version, rom_version);
+  return UploadImage(adapter, std::span<const u8>{image.data(), image.size()});
 }

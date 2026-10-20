@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -9,7 +8,9 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <queue>
+#include <span>
 #include <string>
 
 #include "Common/CommonTypes.h"
@@ -25,18 +26,22 @@ class PointerWrap;
 
 namespace IOS::HLE
 {
+// The red sync button on the console.
 enum class SyncButtonState
 {
   Unpressed,
   Held,
   Pressed,
   LongPressed,
-  // On a real Wii, after a long press, the button release is ignored and doesn't trigger a sync.
+  // A real Wii ignores the release that ends a long press: it triggers no sync.
   Ignored,
 };
 
 using linkkey_t = std::array<u8, 16>;
 
+// /dev/usb/oh1/57e/305 with Bluetooth passthrough: the emulated software's HCI traffic goes to a
+// real USB Bluetooth adapter. A few things are patched along the way so that adapters other
+// than the Wii's own module behave like it.
 class BluetoothRealDevice final : public BluetoothBaseDevice
 {
 public:
@@ -55,43 +60,44 @@ public:
 
 private:
   using BufferType = LibUSBBluetoothAdapter::BufferType;
+  // Writes a made-up event into the software's event buffer and answers it.
+  using FakeEvent = std::function<void(USB::V0IntrMessage&)>;
 
-  std::unique_ptr<LibUSBBluetoothAdapter> m_lib_usb_bt_adapter;
-
+  // Holding the button this long resets the console's pairings.
   static constexpr u32 SYNC_BUTTON_HOLD_MS_TO_RESET = 10000;
 
+  std::unique_ptr<LibUSBBluetoothAdapter> m_adapter;
+
   std::atomic<SyncButtonState> m_sync_button_state{SyncButtonState::Unpressed};
-  Common::Timer m_sync_button_held_timer;
+  Common::Timer m_sync_button_timer;
 
-  // Enqueued when we observe a command to which we need to fake a reply.
-  std::queue<std::function<void(USB::V0IntrMessage&)>> m_fake_replies;
+  // Replies to commands that are not sent to the adapter, in order.
+  std::queue<FakeEvent> m_fake_events;
 
-  // This stores the address of paired devices and associated link keys.
-  // It is needed because some adapters forget all stored link keys when they are reset,
-  // which breaks pairings because the Wii relies on the Bluetooth module to remember them.
+  // The link keys of paired devices. The Wii expects its Bluetooth module to remember them, but
+  // some adapters forget them on reset, so they are kept here (and in the settings) as well.
   std::map<bdaddr_t, linkkey_t> m_link_keys;
 
-  // Endpoints provided by the emulated software.
+  // Buffers given by the emulated software.
   std::unique_ptr<USB::V0IntrMessage> m_hci_endpoint;
   std::unique_ptr<USB::V0BulkMessage> m_acl_endpoint;
 
-  // Used for proper Bluetooth packet timing, especially for Wii remote speaker data.
+  // When data sent now should reach the adapter, which keeps e.g. speaker data evenly timed.
   TimePoint GetTargetTime() const;
 
+  void HandleCommand(const USB::V0CtrlMessage& command);
   void TryToFillHCIEndpoint();
   void TryToFillACLEndpoint();
+  [[nodiscard]] BufferType ProcessHCIEvent(BufferType event);
 
-  [[nodiscard]] BufferType ProcessHCIEvent(BufferType buffer);
+  void SendCommand(std::span<const u8> command);
+  void SendReset();
+  void SendDeleteAllLinkKeys();
+  void SendStoredLinkKeys();
 
-  void SendHCIResetCommand();
-  void SendHCIDeleteLinkKeyCommand();
-  bool SendHCIStoreLinkKeyCommand();
-
-  void FakeVendorCommandReply(u16 opcode, USB::V0IntrMessage& ctrl);
-
-  void FakeSyncButtonEvent(USB::V0IntrMessage& ctrl, std::span<const u8> payload);
-  void FakeSyncButtonPressedEvent(USB::V0IntrMessage& ctrl);
-  void FakeSyncButtonHeldEvent(USB::V0IntrMessage& ctrl);
+  void WriteEvent(USB::V0IntrMessage& endpoint, u8 code, std::span<const u8> params);
+  void FakeVendorCommandReply(u16 opcode, USB::V0IntrMessage& endpoint);
+  void FakeSyncButtonEvent(USB::V0IntrMessage& endpoint, u8 kind);
 
   void LoadLinkKeys();
   void SaveLinkKeys();

@@ -1,164 +1,137 @@
-// Copyright 2025 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
+#include <cstddef>
+#include <deque>
 #include <map>
+#include <mutex>
 #include <queue>
 #include <span>
 #include <string>
 
 #include "Common/Buffer.h"
+#include "Common/CommonTypes.h"
+#include "Common/SPSCQueue.h"
 #include "Common/Timer.h"
 #include "Common/WorkQueueThread.h"
 
 #include "Core/IOS/USB/Bluetooth/hci.h"
 #include "Core/LibusbUtils.h"
 
+struct libusb_device;
 struct libusb_device_handle;
 struct libusb_device_descriptor;
 struct libusb_transfer;
 
-template <u16 Opcode, typename CommandType>
-struct HCICommandPayload
-{
-  hci_cmd_hdr_t header{Opcode, sizeof(CommandType)};
-  CommandType command{};
-};
-
+// A USB Bluetooth adapter driven through libusb for Bluetooth passthrough. HCI events and ACL
+// data are read continuously into queues; commands and ACL data are sent from a worker thread
+// at the time the emulated console sent them, and commands obey the controller's flow control
+// (Num_HCI_Command_Packets).
 class LibUSBBluetoothAdapter
 {
 public:
   using BufferType = Common::UniqueBuffer<u8>;
 
+  // Whether the user picked this adapter (by VID/PID) in the settings.
   static bool IsConfiguredBluetoothDevice(u16 vid, u16 pid);
   static bool IsBluetoothDevice(const libusb_device_descriptor& descriptor);
   static bool HasConfiguredBluetoothDevice();
 
-  // Public interface is intended to be used by a single thread.
+  // Everything below is meant to be called from a single thread.
 
   LibUSBBluetoothAdapter();
   ~LibUSBBluetoothAdapter();
 
-  // Return a packet at the front of the queue, or an empty buffer when nothing is queued.
-  // ReceiveHCIEvent is expected to be called regularly to do some internal processing.
+  LibUSBBluetoothAdapter(const LibUSBBluetoothAdapter&) = delete;
+  LibUSBBluetoothAdapter& operator=(const LibUSBBluetoothAdapter&) = delete;
+
+  // The oldest received packet, or an empty buffer. ReceiveHCIEvent also does the flow control
+  // bookkeeping, so it must be called regularly.
   [[nodiscard]] BufferType ReceiveHCIEvent();
   [[nodiscard]] BufferType ReceiveACLData();
 
-  // Schedule a transfer to submit at a specific time.
+  // Sends the data at `target_time`.
   void ScheduleBulkTransfer(u8 endpoint, std::span<const u8> data, TimePoint target_time);
   void ScheduleControlTransfer(u8 type, u8 request, u8 value, u8 index, std::span<const u8> data,
                                TimePoint target_time);
 
-  // Schedule a transfer to be submitted as soon as possible.
+  // Sends an HCI command as soon as possible.
   void SendControlTransfer(std::span<const u8> data);
 
-  // Blocks and eats events until a command complete event of the correct opcode is received.
-  // Returns true on success or false on error or timeout.
-  // The written response does not include the event header or command complete data.
+  // Sends an HCI command and waits (eating other events) for its Command Complete event. The
+  // return parameters are copied to `response`. Returns false on error or timeout.
   bool SendBlockingCommand(std::span<const u8> data, std::span<u8> response);
 
+  // Whether the adapter is a Wii's own Bluetooth module (057e:0305).
   bool IsWiiBTModule() const;
 
 private:
-  // Inputs will be dropped when queue is full.
-  static constexpr std::size_t MAX_INPUT_QUEUE_SIZE = 100;
-
-  static constexpr u8 INTERFACE = 0x00;
-
-  std::string m_last_open_error;
-
-  LibusbUtils::Context m_context;
-  libusb_device_handle* m_handle = nullptr;
-
-  // Protects run-flag and Push'ing to the completed transfer queue.
-  std::mutex m_transfers_mutex;
-
-  bool m_run_input_transfers = true;
-
-  // callback/worker threads push transfers here that are ready for clean up.
-  // This avoids locking around m_transfer_buffers.
-  Common::WaitableSPSCQueue<libusb_transfer*> m_transfers_to_free;
-
-  // Incoming packets Push'd from libusb callback thread.
-  Common::SPSCQueue<BufferType> m_hci_event_queue;
-  Common::SPSCQueue<BufferType> m_acl_data_queue;
-
-  // All transfers are alloc'd and kept here until complete.
-  std::map<libusb_transfer*, Common::UniqueBuffer<u8>> m_transfer_buffers;
-
   struct TimedTransfer
   {
     libusb_transfer* transfer{};
     TimePoint target_time{};
   };
 
-  // Outgoing data is submitted on a worker thread.
-  // This allows proper packet timing without throttling the core thread.
-  Common::WorkQueueThreadSP<TimedTransfer> m_output_worker;
-
-  // Used by the output worker.
-  Common::PrecisionTimer m_precision_timer;
-
-  // Set to reduce OSD and log spam.
-  bool m_showed_failed_transfer = false;
-  bool m_showed_long_queue_drop = false;
-
-  u16 m_device_vid = 0;
-  u16 m_device_pid = 0;
-
-  // Bluetooth spec's Num_HCI_Command_Packets.
-  // This is the number of hci commands that the host is allowed to send.
-  // We track this to send commands only when the controller is ready.
-  u8 m_num_hci_command_packets = 1;
-
-  // HCI commands are queued when the controller isn't ready for them.
-  // They will be sent after COMMAND_COMPL or COMMAND_STATUS signal readiness.
-  std::queue<TimedTransfer> m_pending_hci_transfers;
-
-  struct OutstandingCommand
+  // A command sent to the controller that has not been acknowledged yet.
+  struct SentCommand
   {
     u16 opcode{};
     TimePoint submit_time{};
   };
 
-  // Sent HCI commands that have yet to receive a COMMAND_COMPL or COMMAND_STATUS response.
-  // Container size will be small, around 2.
-  std::deque<OutstandingCommand> m_unacknowledged_commands;
+  static constexpr std::size_t MAX_INPUT_QUEUE_SIZE = 100;
+  static constexpr u8 INTERFACE = 0x00;
 
-  bool IsControllerReadyForCommand() const;
-  bool AreCommandsPendingResponse() const;
+  LibusbUtils::Context m_context;
+  libusb_device_handle* m_handle = nullptr;
+  u16 m_device_vid = 0;
+  u16 m_device_pid = 0;
+  std::string m_last_open_error;
 
-  // Give the transfer to the worker and track the command appropriately.
-  // This should only be used when IsControllerReadyForCommand is true.
-  void PushHCICommand(TimedTransfer);
+  // Every transfer and its buffer, until the transfer is freed.
+  std::map<libusb_transfer*, BufferType> m_transfer_buffers;
+  // Finished transfers, handed back by the callbacks (and the worker) to be freed here.
+  Common::WaitableSPSCQueue<libusb_transfer*> m_transfers_to_free;
+  // Guards m_keep_reading and pushes to m_transfers_to_free.
+  std::mutex m_transfers_mutex;
+  bool m_keep_reading = true;
 
-  template <typename EventType>
-  void AcknowledgeCommand(std::span<const u8> buffer);
+  // Filled by the input transfer callbacks.
+  Common::SPSCQueue<BufferType> m_hci_events;
+  Common::SPSCQueue<BufferType> m_acl_data;
 
-  libusb_transfer* AllocateTransfer(std::size_t buffer_size);
-  void FreeTransfer(libusb_transfer*);
-  void CleanCompletedTransfers();
+  Common::WorkQueueThreadSP<TimedTransfer> m_output_worker;
+  Common::PrecisionTimer m_precision_timer;
 
-  // Do some HCI logic and clean up completed transfers.
-  void Update();
+  // Commands the controller can take right now (the last Num_HCI_Command_Packets it sent).
+  u8 m_command_credits = 1;
+  std::queue<TimedTransfer> m_waiting_commands;
+  std::deque<SentCommand> m_sent_commands;
 
-  // Sleep until the target time and then submit the transfer.
-  // Used by worker thread.
-  void SubmitTimedTransfer(TimedTransfer);
+  // Limits repeated warnings.
+  bool m_reported_transfer_failure = false;
+  bool m_reported_full_queue = false;
 
-  // Immediately submit transfer with libusb.
-  void SubmitTransfer(libusb_transfer*);
-
-  // Start repetitive transfers to fill the hci-event and acl-data queues.
+  bool OpenDevice(const libusb_device_descriptor& descriptor, libusb_device* device);
   void StartInputTransfers();
 
-  // LibUSB callbacks. Invoked from the LibUSB context thread.
-  void HandleOutputTransfer(libusb_transfer*);
-  void HandleInputTransfer(libusb_transfer*);
+  bool CanSendCommand() const;
+  bool HasCommandsInFlight() const;
+  void SendCommand(TimedTransfer transfer);
+  void OnCommandAcknowledged(u16 opcode, u8 credits);
+  void ProcessFlowControl();
 
-  // Error logging.
-  void HandleTransferError(libusb_transfer*);
+  libusb_transfer* AllocateTransfer(std::size_t buffer_size);
+  void FreeFinishedTransfers();
+  void ReleaseTransfer(libusb_transfer* transfer);
 
-  bool OpenDevice(const libusb_device_descriptor& device_descriptor, libusb_device* device);
+  // Run on the worker thread.
+  void SubmitWhenDue(TimedTransfer transfer);
+  void Submit(libusb_transfer* transfer);
+
+  // Run on the libusb event thread.
+  void OnOutputDone(libusb_transfer* transfer);
+  void OnInputDone(libusb_transfer* transfer);
+  void ReportTransferStatus(const libusb_transfer* transfer);
 };
