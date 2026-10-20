@@ -238,12 +238,6 @@ elseif(WIN32)
     Logging/ConsoleListenerWin.cpp
     MemArenaWin.cpp
   )
-elseif(APPLE)
-  target_sources(common PRIVATE
-    CommonFuncsObjC.mm
-    Logging/ConsoleListenerNix.cpp
-    MemArenaDarwin.cpp
-  )
 else()
   target_sources(common PRIVATE
     Logging/ConsoleListenerNix.cpp
@@ -301,11 +295,6 @@ if(WIN32)
     WindowsDevice.cpp
     WindowsDevice.h
     WindowsRegistry.cpp
-  )
-elseif(APPLE)
-  target_sources(common PRIVATE
-    GL/GLInterface/AGL.h
-    GL/GLInterface/AGL.mm
   )
 elseif(HAIKU)
   target_sources(common PRIVATE

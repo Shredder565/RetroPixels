@@ -753,11 +753,6 @@ if(WIN32)
     iphlpapi.lib
   )
   target_compile_definitions(core PRIVATE "-D_WINSOCK_DEPRECATED_NO_WARNINGS")
-elseif(APPLE)
-  target_sources(core PRIVATE
-    HW/EXI/BBA/TAP_Apple.cpp
-  )
-  target_link_libraries(core PUBLIC ${IOB_LIBRARY})
 elseif(UNIX)
   target_sources(core PRIVATE
     HW/EXI/BBA/TAP_Unix.cpp
