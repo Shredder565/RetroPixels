@@ -54,21 +54,21 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 199176 | 76.8% |
-| Cemu, untouched | 20546 | 7.9% |
+| Original (RetroPixels) | 199714 | 81.5% |
+| Cemu, untouched | 6056 | 2.5% |
 | Cemu, with PixelU changes | 0 | 0.0% |
-| PixelU-added files (MPL-2.0 header) | 182 | 0.1% |
-| Third-party | 39404 | 15.2% |
-| **All** | **259308** | 100% |
+| PixelU-added files (MPL-2.0 header) | 0 | 0.0% |
+| Third-party | 39404 | 16.1% |
+| **All** | **245174** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
 | (top level: main.cpp, mainLLE.cpp) | 335 | 335 | original |
 | audio | 2861 | 1803 | mixed (63% original), 1058 lines third-party |
-| Cafe (CafeSystem, GamePatch) | 1559 | 1559 | original |
+| Cafe (CafeSystem, GamePatch) | 1547 | 1547 | original |
 | Cafe/Account | 696 | 696 | original |
 | Cafe/Filesystem | 3355 | 3355 | original |
-| Cafe/GameProfile | 375 | 375 | original |
+| Cafe/GameProfile | 345 | 345 | original |
 | Cafe/GraphicPack | 2835 | 2835 | original |
 | Cafe/HW/ACR | 42 | 42 | original |
 | Cafe/HW/AI | 8 | 8 | original |
@@ -78,12 +78,11 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cafe/HW/Espresso/Interpreter | 3252 | 3252 | original |
 | Cafe/HW/Espresso/Recompiler | 7818 | 7818 | original |
 | Cafe/HW/Latte/Common | 3130 | 3130 | original |
-| Cafe/HW/Latte/Core | 14100 | 14100 | original |
+| Cafe/HW/Latte/Core | 13964 | 13964 | original |
 | Cafe/HW/Latte/ISA | 2618 | 2618 | original |
 | Cafe/HW/Latte/LatteAddrLib | 1249 | 1249 | original |
-| Cafe/HW/Latte/LegacyShaderDecompiler | 11423 | 5976 | mixed (52% original) |
-| Cafe/HW/Latte/Renderer | 1028 | 995 | mixed (97% original) |
-| Cafe/HW/Latte/Renderer/Metal | 7309 | 0 | Cemu |
+| Cafe/HW/Latte/LegacyShaderDecompiler | 5914 | 5914 | original |
+| Cafe/HW/Latte/Renderer | 899 | 899 | original |
 | Cafe/HW/Latte/Renderer/OpenGL | 4531 | 4531 | original |
 | Cafe/HW/Latte/Renderer/Vulkan | 11861 | 11861 | original |
 | Cafe/HW/Latte/ShaderInfo | 70 | 70 | original |
@@ -158,10 +157,10 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | Cemu/PPCAssembler | 1893 | 1893 | original |
 | Cemu/Tools | 1590 | 1590 | original |
 | Common | 31625 | 3311 | mixed (10% original), 28314 lines third-party |
-| config | 2969 | 2132 | mixed (72% original) |
+| config | 2805 | 2805 | original |
 | gui/interface | 140 | 140 | original |
-| gui/wxgui (top level) | 12082 | 12082 | original |
-| gui/wxgui/canvas | 372 | 372 | original |
+| gui/wxgui (top level) | 11953 | 11953 | original |
+| gui/wxgui/canvas | 294 | 294 | original |
 | gui/wxgui/components | 4015 | 4015 | original |
 | gui/wxgui/debugger | 3207 | 3207 | original |
 | gui/wxgui/dialogs | 656 | 656 | original |
@@ -170,13 +169,13 @@ Totals (lines in pixelu/src, h/hpp/c/cpp/mm/S files):
 | gui/wxgui/input | 3351 | 3351 | original |
 | gui/wxgui/windows | 675 | 675 | original |
 | gui/wxgui/wxcomponents | 581 | 581 | original |
-| imgui | 2110 | 1471 | mixed (70% original) |
-| input (top level) | 1243 | 1061 | mixed (85% original) |
+| imgui | 1471 | 1471 | original |
+| input (top level) | 1266 | 1266 | original |
 | input/api | 5342 | 5342 | original |
 | input/emulated | 2426 | 2426 | original |
 | input/motion | 354 | 354 | original |
-| resource | 3594 | 0 | Cemu |
-| tools | 145 | 0 | Cemu |
+| resource | 3617 | 103 | mixed (3% original) |
+| tools | 100 | 100 | original |
 | util (top level) | 54 | 54 | original |
 | util/boost | 65 | 65 | original |
 | util/bootSound | 88 | 88 | original |
@@ -1436,3 +1435,61 @@ Done:
   any ticket of a title as the download ticket, does not free download
   records on reset, and keeps the cemu_ prefix of download folders so
   unfinished downloads from older versions are still found.
+
+- Batch 16: the last Cemu files outside the Dolphin part. Removed the
+  macOS-only Metal backend: Cafe/HW/Latte/Renderer/Metal, the MSL emitter
+  (LatteDecompilerEmitMSL*.cpp/.hpp), imgui_impl_metal.h/.mm, MetalCanvas
+  and every ENABLE_METAL block (config, game profile, settings and profile
+  windows, main window and GamePad view, shader cache, fetch shader,
+  decompiler, output shaders, CafeSystem) plus the ENABLE_METAL option.
+  None of it was compiled on Windows. GraphicAPI::kMetal and
+  RendererAPI::Metal stay, so stored settings keep their numbers and graphic
+  packs or _msl shaders written for Metal stay disabled; the mtlDevice key
+  is still read and written. The Metal-only keys (ForceMeshShaders,
+  GPUCaptureDir, FramebufferFetch, metalBufferCacheMode2) were never read on
+  Windows and are ignored as before. The unused Metal resource mapping of the
+  decompiler, the Metal output shader sources, MetalBufferCacheMode and the
+  manual vertex fetch flag were dropped with it.
+  Rewritten as original code: config/ConfigValue.h and config/XMLConfig.h;
+  input/DefaultControllerProfile.cpp/.h (PixelU's own, it carried an MPL
+  header); resource/embedded/resources.cpp/.h, resource/resource.h and the
+  two fontawesome .S stubs; tools/ShaderCacheMerger.cpp (not built);
+  Cafe/HW/Latte/Renderer/MetalView.h/.mm (the CAMetalLayer view the macOS
+  Vulkan surface uses; not compilable here); and the CMake build:
+  pixelu/CMakeLists.txt, src/CMakeLists.txt, every src/*/CMakeLists.txt and
+  cmake/ECMFindModuleHelpersStub.cmake. The other files in cmake/ carry
+  their own licences (KDE BSD-3, ISC) and were left alone.
+  File names, the ConfigValue/ConfigValueBounds/XMLConfigParser/XMLConfig/
+  XMLChildConfig/XMLDataConfig interfaces, the settings.xml format, resource
+  ids and symbols, CMake target names, options and cache variables are
+  unchanged.
+  Checks: g++ and clang++ (GTK) and clang for mingw (MSW) on the files the
+  Metal removal and the header rewrites touch (every CemuConfig.h includer),
+  against the untouched tree: no new errors. XMLConfig/ConfigValue harness,
+  old and new headers on the same inputs (release build, ASan/UBSan): probe
+  files for every get/get_attribute/value/set/set_attribute overload (bool,
+  float, sint32, uint32, sint64, uint64, uint16, enums with int and uint8
+  underlying types, strings, fs::path, byte arrays incl. bad and short hex,
+  atomics, bounds), sibling iteration, invalid cursors, malformed and
+  missing files, child sections and the standalone wrapper; and the real
+  CemuConfig::Load/Save on a full settings.xml (game paths and cache, both
+  graphic pack layouts, account services, every section) plus
+  network_services.xml: stdout and every written file byte-identical. CMake:
+  the old and new build files configured against stub packages on Linux and
+  for mingw/Windows, each with and without the vcpkg path; the file-API code
+  models (targets, artifacts, sources, flags, defines, includes, PCH, link
+  command lines, dependencies) and the option cache are identical except
+  the added header files and four folder names that were listed as sources.
+  Fixes and defined behaviour: the array reader no longer reads past a short
+  hex string (it throws std::invalid_argument as before); the shader cache
+  merger checks both caches opened (it dereferenced a null cache) and only
+  looks for the Vulkan and GLSL cache names; the manifest is referenced by
+  its real name (Cemu.manifest), which also matters on case-sensitive file
+  systems. The CMake project is named PixelU.
+  Kept on purpose: a cursor whose element is missing looks among the top
+  level elements of the document (also when writing), values of
+  unsupported types (uint16, double, enums with an 8-bit type) come back as
+  the default, so the DSUC port attribute is never read from settings.xml;
+  uint64 is written signed; the declared value, not the current one, is the
+  default when a key is missing; Save reports success when the document was
+  written even if the final rename fails.
