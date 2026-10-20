@@ -176,6 +176,7 @@ func (g *Genesis) LoadState(b []byte) error {
 	var err error
 	t.cpu = m68k.New(bus{g})
 	t.cpu.TASWrites = false
+	t.cpu.BranchHooks = g.cpu.BranchHooks
 	if r.b, err = t.cpu.LoadState(r.b); err != nil {
 		return errBadState
 	}

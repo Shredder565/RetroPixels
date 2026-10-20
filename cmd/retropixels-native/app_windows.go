@@ -40,6 +40,7 @@ const (
 	cmdSharp       = 350
 	cmdSmooth      = 351
 	cmdMousePaddle = 360
+	cmdFileTypes   = 370
 	cmdRecord      = 400
 	cmdRecFolder   = 401
 	cmdAbout       = 500
@@ -113,6 +114,9 @@ var theApp *app
 
 func runApp() {
 	runtime.LockOSThread()
+	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") && handToRunningCopy(os.Args[1]) {
+		return // the RetroPixels Native already open plays it
+	}
 	// If the program ever crashes, the reason goes to crash.log next to the settings.
 	if os.MkdirAll(appDir(), 0o755) == nil {
 		if f, err := os.Create(filepath.Join(appDir(), "crash.log")); err == nil {
@@ -135,7 +139,7 @@ func runApp() {
 		a.snd = noSound{}
 	}
 
-	cls := u16("RetroPixelsNative")
+	cls := u16(mainClass)
 	icon := call(pLoadImageW, a.hinst, 1, 1, 0, 0, 0x40|0x8000) // IMAGE_ICON, LR_DEFAULTSIZE|LR_SHARED
 	small := call(pLoadImageW, a.hinst, 1, 1, 16, 16, 0x8000)   // LR_SHARED
 	wc := wndClassEx{
@@ -166,6 +170,7 @@ func runApp() {
 	call(pShowWindow, a.hwnd, swShow)
 	call(pUpdateWindow, a.hwnd)
 	call(pSetTimer, a.hwnd, timerTitle, 250, 0)
+	go registerFileTypes(false)
 	a.dolStartup()
 	a.apStartup()
 
@@ -267,6 +272,8 @@ func (a *app) buildMenu() {
 	appendMenu(a.optMenu, mfString, cmdSmooth, "Smoot&h pixels")
 	appendMenu(a.optMenu, mfSeparator, 0, "")
 	appendMenu(a.optMenu, mfString, cmdMousePaddle, "Mouse turns the &paddle (Atari 2600)")
+	appendMenu(a.optMenu, mfSeparator, 0, "")
+	appendMenu(a.optMenu, mfString, cmdFileTypes, "Open game files with RetroPixels &Native…")
 	a.uiOptionsMenu()
 	appendMenu(a.menu, mfPopup, a.optMenu, "&Options")
 
@@ -382,6 +389,10 @@ func wndProc(hwnd, m, wp, lp uintptr) uintptr {
 		a.uiPopup(wp)
 		a.updateMenus()
 		return 0
+	case wmCopyData:
+		if a.copyDataOpen(lp) {
+			return 1
+		}
 	case wmDropFiles:
 		buf := make([]uint16, 32768)
 		n := call(pDragQueryFileW, wp, 0, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
@@ -770,6 +781,8 @@ func (a *app) handleEvents() {
 			a.xin.stopRumble()
 			messageBox(a.hwnd, "The game stopped: "+e.detail+"\n\nYou can load a save state (F4), reset (Ctrl+R) or open another game.",
 				"RetroPixels Native", mbIconError)
+		case "open": // a game double-clicked while this window was open
+			a.openPath(e.detail)
 		case "pad-save":
 			a.command(cmdSaveState)
 		case "pad-load":
@@ -832,6 +845,8 @@ func (a *app) command(id int) {
 		if p := a.openDialog(); p != "" {
 			a.openPath(p)
 		}
+	case id == cmdFileTypes:
+		a.chooseFileTypes()
 	case id == cmdExit:
 		call(pPostMessageW, a.hwnd, wmClose, 0, 0)
 	case id == cmdCloseGame:

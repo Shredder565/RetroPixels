@@ -53,6 +53,13 @@ func eaOk(mode, reg int, cls eaClass) bool {
 func buildTable() *[65536]opFunc {
 	t := new([65536]opFunc)
 	illegal := func(c *CPU) {
+		if c.BranchHooks && (c.op>>12 == 0xa || c.op>>12 == 0xf) && c.op>>8&0xf != 1 {
+			if d := int8(c.op); d < 0 && d != -1 {
+				c.op = 0x6000 | c.op&0x0fff
+				c.table[c.op](c)
+				return
+			}
+		}
 		switch c.op >> 12 {
 		case 0xa:
 			c.illegal(10)
