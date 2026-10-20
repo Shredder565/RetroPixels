@@ -1,7 +1,4 @@
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this
-// file, You can obtain one at https://mozilla.org/MPL/2.0/.
-
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "wxgui/wxgui.h"
 #include "wxgui/RPEmbed.h"
 #include "config/LaunchSettings.h"
@@ -11,6 +8,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 
 bool RPEmbed::Enabled()
 {
@@ -21,60 +19,86 @@ long RPEmbed::FrameStyle(long defaultStyle)
 {
 	if (!Enabled())
 		return defaultStyle;
-	// a plain resizable window: no minimize/maximize buttons, nothing else in the title bar
-	long style = wxCAPTION | wxSYSTEM_MENU | wxCLOSE_BOX | wxRESIZE_BORDER | wxCLIP_CHILDREN;
+	// resizable, with a caption and a close button only
+	long embedStyle = wxCAPTION | wxSYSTEM_MENU | wxCLOSE_BOX | wxRESIZE_BORDER | wxCLIP_CHILDREN;
 #if BOOST_OS_WINDOWS
-	// WS_EX_TOOLWINDOW: no taskbar button and not in Alt+Tab while it waits to be docked
-	// (it also makes wxWidgets show it without activating it)
-	style |= wxFRAME_TOOL_WINDOW;
+	// WS_EX_TOOLWINDOW keeps it out of the taskbar and Alt+Tab while it waits to be docked,
+	// and wxWidgets then shows it without activating it
+	embedStyle |= wxFRAME_TOOL_WINDOW;
 #endif
-	return style;
+	return embedStyle;
 }
 
 #if BOOST_OS_WINDOWS
 namespace
 {
-	constexpr int kOffscreen = -32000;
-	constexpr auto kDockWait = std::chrono::seconds(20);
+	using SteadyClock = std::chrono::steady_clock;
 
-	std::atomic<HWND> s_hwnd{nullptr}; // the main frame
-	wxFrame* s_frame = nullptr;
-	std::atomic<std::chrono::steady_clock::time_point::rep> s_dockDeadline{0};
-	std::atomic_bool s_onScreen{false}; // not docked in time, shown as a normal window
+	constexpr int kOffscreenPos = -32000;
+	constexpr auto kDockTimeout = std::chrono::seconds(20);
+	constexpr int kPollMs = 100;
 
-	// docked: a child window inside RetroPixels' window, or (for the Vulkan picture, which a child
-	// window of RetroPixels' Edge/Chrome window can't show) a frameless window owned by it, kept over its page
-	bool OwnedByOtherProcess(HWND hwnd)
+	// the main frame, once AttachToParent or BeforeShow saw it
+	wxFrame* s_mainFrame = nullptr;
+	std::atomic<HWND> s_mainHwnd{nullptr};
+	// steady_clock ticks after which an undocked window gives up waiting (0 = no wait)
+	std::atomic<SteadyClock::rep> s_giveUpAt{0};
+	// set once the window was put on screen as an ordinary window
+	std::atomic_bool s_standalone{false};
+
+	void Remember(wxFrame* frame, HWND hwnd)
+	{
+		s_mainFrame = frame;
+		s_mainHwnd = hwnd;
+	}
+
+	bool WaitTimedOut()
+	{
+		return SteadyClock::now().time_since_epoch().count() >= s_giveUpAt.load();
+	}
+
+	// For the Vulkan picture RetroPixels cannot use a child window inside its Edge/Chrome based window;
+	// it makes PixelU's window a frameless window owned by its own window instead, kept above the page.
+	HWND OwnerInOtherProcess(HWND hwnd)
 	{
 		const HWND owner = GetWindow(hwnd, GW_OWNER);
-		DWORD ownerPid = 0;
-		return owner && GetWindowThreadProcessId(owner, &ownerPid) && ownerPid != GetCurrentProcessId();
+		if (!owner)
+			return nullptr;
+		DWORD ownerProcess = 0;
+		if (!GetWindowThreadProcessId(owner, &ownerProcess) || ownerProcess == GetCurrentProcessId())
+			return nullptr;
+		return owner;
 	}
 
-	bool IsChildWindow(HWND hwnd)
+	// docked: a child window (WS_CHILD or any parent but the desktop) or owned by another process' window
+	bool IsDockedWindow(HWND hwnd)
 	{
-		return (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CHILD) != 0 || GetAncestor(hwnd, GA_PARENT) != GetDesktopWindow() ||
-			   OwnedByOtherProcess(hwnd);
+		if ((GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CHILD) != 0)
+			return true;
+		if (GetAncestor(hwnd, GA_PARENT) != GetDesktopWindow())
+			return true;
+		return OwnerInOtherProcess(hwnd) != nullptr;
 	}
 
-	HWND DockHost(HWND hwnd)
+	// the window PixelU is docked into
+	HWND HostOf(HWND hwnd)
 	{
-		return OwnedByOtherProcess(hwnd) ? GetWindow(hwnd, GW_OWNER) : GetAncestor(hwnd, GA_PARENT);
+		if (const HWND owner = OwnerInOtherProcess(hwnd))
+			return owner;
+		return GetAncestor(hwnd, GA_PARENT);
 	}
 
-	bool DockDeadlinePassed()
+	// Nobody docked it in time: make it the window it would be without --rp-embed (centred, on screen,
+	// with a taskbar button). Only once.
+	void BecomeStandalone()
 	{
-		return std::chrono::steady_clock::now().time_since_epoch().count() >= s_dockDeadline.load();
-	}
-
-	// nobody docked it: show it as the normal window it would be without --rp-embed, on screen and in the taskbar
-	void ShowOnScreen()
-	{
-		wxFrame* frame = s_frame;
-		const HWND hwnd = s_hwnd.load();
-		if (!frame || !hwnd || frame->IsBeingDeleted() || IsChildWindow(hwnd) || s_onScreen.exchange(true))
+		wxFrame* frame = s_mainFrame;
+		const HWND hwnd = s_mainHwnd.load();
+		if (!frame || !hwnd || frame->IsBeingDeleted() || IsDockedWindow(hwnd))
 			return;
-		cemuLog_log(LogType::Force, "--rp-embed: the window wasn't docked within {} seconds, showing it on its own", (int)kDockWait.count());
+		if (s_standalone.exchange(true))
+			return;
+		cemuLog_log(LogType::Force, "--rp-embed: the window wasn't docked within {} seconds, showing it on its own", (int)kDockTimeout.count());
 		frame->Hide();
 		frame->SetWindowStyleFlag(frame->GetWindowStyleFlag() & ~wxFRAME_TOOL_WINDOW);
 		frame->Centre();
@@ -82,58 +106,84 @@ namespace
 		frame->Raise();
 	}
 
-	// wait until the game window is docked (or shown on its own instead). On the window's own thread
-	// the messages SetParent/SetWindowPos send from RetroPixels are answered meanwhile (only those:
-	// no wx events run in between).
-	void WaitForDock(HWND hwnd, bool ownThread)
+	// Blocks until the window is docked, shown standalone, gone or the wait timed out. On the window's own
+	// thread it keeps answering the messages RetroPixels sends while docking it (SetParent, SetWindowPos),
+	// and nothing else: no wx events are dispatched meanwhile.
+	void BlockUntilDocked(HWND hwnd, bool onWindowThread)
 	{
-		while (IsWindow(hwnd) && !IsChildWindow(hwnd) && !s_onScreen && !DockDeadlinePassed())
+		while (IsWindow(hwnd) && !IsDockedWindow(hwnd) && !s_standalone && !WaitTimedOut())
 		{
-			if (ownThread)
+			if (!onWindowThread)
 			{
-				MsgWaitForMultipleObjects(0, nullptr, FALSE, 20, QS_SENDMESSAGE);
-				MSG msg;
-				PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
-			}
-			else
 				Sleep(20);
+				continue;
+			}
+			MsgWaitForMultipleObjects(0, nullptr, FALSE, 20, QS_SENDMESSAGE);
+			MSG peeked;
+			PeekMessageW(&peeked, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
 		}
-		if (ownThread && IsWindow(hwnd) && !IsChildWindow(hwnd))
-			ShowOnScreen();
+		if (onWindowThread && IsWindow(hwnd) && !IsDockedWindow(hwnd))
+			BecomeStandalone();
 	}
 
-	void ShowMessageEmbedded(const wxString& message, const wxString& caption, long style, bool deferred)
+	UINT MessageBoxIcon(long style)
 	{
-		const HWND hwnd = s_hwnd.load();
-		if (!hwnd || !IsWindow(hwnd))
-			return; // no game window (yet): only the log, PixelU doesn't show a window by itself
-		const bool ownThread = GetWindowThreadProcessId(hwnd, nullptr) == GetCurrentThreadId();
-		if (ownThread && !IsWindowVisible(hwnd) && !deferred && wxTheApp)
-		{
-			// the game window isn't shown yet (called while it is made): once it is
-			wxTheApp->CallAfter([message, caption, style]() { ShowMessageEmbedded(message, caption, style, true); });
-			return;
-		}
-		WaitForDock(hwnd, ownThread);
-		UINT type = MB_OK | MB_SETFOREGROUND;
 		if (style & wxICON_INFORMATION)
-			type |= MB_ICONINFORMATION;
-		else if (style & wxICON_WARNING)
-			type |= MB_ICONWARNING;
-		else
-			type |= MB_ICONERROR;
-		::MessageBoxW(hwnd, message.wc_str(), caption.wc_str(), type);
+			return MB_ICONINFORMATION;
+		if (style & wxICON_WARNING)
+			return MB_ICONWARNING;
+		return MB_ICONERROR;
 	}
 
-	void FitToParent(HWND hwnd, HWND parent)
+	void ShowOwnedMessageBox(const wxString& message, const wxString& caption, long style, bool alreadyDeferred)
 	{
-		RECT parentRect{}, ownRect{};
-		if (!GetClientRect(parent, &parentRect) || !GetWindowRect(hwnd, &ownRect))
+		const HWND hwnd = s_mainHwnd.load();
+		if (!hwnd || !IsWindow(hwnd))
+			return; // no game window yet: the log line is all there is
+		const bool onWindowThread = GetWindowThreadProcessId(hwnd, nullptr) == GetCurrentThreadId();
+		if (onWindowThread && !alreadyDeferred && !IsWindowVisible(hwnd) && wxTheApp)
+		{
+			// called while the game window is still being created: show it once the window is up
+			wxTheApp->CallAfter([message, caption, style]() { ShowOwnedMessageBox(message, caption, style, true); });
 			return;
-		MapWindowPoints(HWND_DESKTOP, parent, (LPPOINT)&ownRect, 2);
-		if (ownRect.left == 0 && ownRect.top == 0 && ownRect.right == parentRect.right && ownRect.bottom == parentRect.bottom)
+		}
+		BlockUntilDocked(hwnd, onWindowThread);
+		::MessageBoxW(hwnd, message.wc_str(), caption.wc_str(), MB_OK | MB_SETFOREGROUND | MessageBoxIcon(style));
+	}
+
+	// move/size hwnd to fill the client area of parent, unless it already does
+	void FillParent(HWND hwnd, HWND parent)
+	{
+		RECT client{};
+		RECT current{};
+		if (!GetClientRect(parent, &client) || !GetWindowRect(hwnd, &current))
 			return;
-		SetWindowPos(hwnd, nullptr, 0, 0, parentRect.right, parentRect.bottom, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+		MapWindowPoints(HWND_DESKTOP, parent, reinterpret_cast<LPPOINT>(&current), 2);
+		const bool fits = current.left == 0 && current.top == 0 && current.right == client.right && current.bottom == client.bottom;
+		if (!fits)
+			SetWindowPos(hwnd, nullptr, 0, 0, client.right, client.bottom, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+	}
+
+	// Calls tick(timer) every kPollMs on the frame's thread until tick stops the timer. onDestroy runs
+	// when the frame is destroyed (the timer is stopped first).
+	void Poll(wxFrame* frame, std::function<void(wxTimer&)> tick, std::function<void()> onDestroy = {})
+	{
+		const int id = wxWindow::NewControlId();
+		auto* timer = new wxTimer(frame, id);
+		frame->Bind(wxEVT_TIMER, [frame, timer, tick](wxTimerEvent&) {
+			if (!frame->IsBeingDeleted())
+				tick(*timer);
+		}, id);
+		frame->Bind(wxEVT_DESTROY, [frame, timer, onDestroy](wxWindowDestroyEvent& event) {
+			if (event.GetEventObject() == frame)
+			{
+				timer->Stop();
+				if (onDestroy)
+					onDestroy();
+			}
+			event.Skip();
+		});
+		timer->Start(kPollMs);
 	}
 }
 #endif
@@ -141,60 +191,46 @@ namespace
 void RPEmbed::AttachToParent(wxFrame* frame)
 {
 #if BOOST_OS_WINDOWS
-	const auto parentValue = LaunchSettings::GetRPParentWindow();
-	if (!parentValue || !frame)
+	const std::optional<uint64> parentId = LaunchSettings::GetRPParentWindow();
+	if (!parentId || !frame)
 		return;
-	const HWND parent = (HWND)(uintptr_t)*parentValue;
+	const HWND parent = (HWND)(uintptr_t)*parentId;
 	const HWND hwnd = (HWND)frame->GetHWND();
-	s_frame = frame;
-	s_hwnd = hwnd;
+	Remember(frame, hwnd);
 	if (!IsWindow(parent))
 	{
-		cemuLog_log(LogType::Force, "--rp-parent: window {:#x} doesn't exist, PixelU stays in its own window", *parentValue);
+		cemuLog_log(LogType::Force, "--rp-parent: window {:#x} doesn't exist, PixelU stays in its own window", *parentId);
 		return;
 	}
 
-	// a borderless child window (style changes before SetParent, as the SetParent docs ask)
-	LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-	style &= ~(LONG_PTR)(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
-	style |= WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
-	SetWindowLongPtrW(hwnd, GWL_STYLE, style);
-	LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-	exStyle &= ~(LONG_PTR)(WS_EX_APPWINDOW | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME | WS_EX_STATICEDGE);
-	SetWindowLongPtrW(hwnd, GWL_EXSTYLE, exStyle);
+	// borderless child window; the styles change before SetParent, as its documentation asks
+	constexpr LONG_PTR kFrameStyles = WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+	constexpr LONG_PTR kFrameExStyles = WS_EX_APPWINDOW | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME | WS_EX_STATICEDGE;
+	const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+	SetWindowLongPtrW(hwnd, GWL_STYLE, (style & ~kFrameStyles) | WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN);
+	const LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+	SetWindowLongPtrW(hwnd, GWL_EXSTYLE, exStyle & ~kFrameExStyles);
 	if (!SetParent(hwnd, parent))
 	{
 		cemuLog_log(LogType::Force, "--rp-parent: SetParent failed ({}), PixelU stays in its own window", GetLastError());
 		return;
 	}
-	RECT parentRect{};
-	GetClientRect(parent, &parentRect);
-	SetWindowPos(hwnd, HWND_TOP, 0, 0, parentRect.right, parentRect.bottom, SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-	cemuLog_log(LogType::Force, "--rp-parent: shown inside window {:#x}", *parentValue);
+	RECT client{};
+	GetClientRect(parent, &client);
+	SetWindowPos(hwnd, HWND_TOP, 0, 0, client.right, client.bottom, SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+	cemuLog_log(LogType::Force, "--rp-parent: shown inside window {:#x}", *parentId);
 
-	// the parent belongs to another process, so follow its size by looking at it now and then;
-	// when it is gone (RetroPixels closed) PixelU closes too
-	const int timerId = wxWindow::NewControlId();
-	auto* timer = new wxTimer(frame, timerId);
-	frame->Bind(wxEVT_TIMER, [frame, timer, hwnd, parent](wxTimerEvent&)
-	{
-		if (frame->IsBeingDeleted())
-			return;
-		if (!IsWindow(parent))
+	// The parent belongs to another process, so its size is followed by looking at it now and then.
+	// When it is gone (RetroPixels closed) PixelU closes too.
+	Poll(frame, [frame, hwnd, parent](wxTimer& timer) {
+		if (IsWindow(parent))
 		{
-			timer->Stop();
-			frame->Close(true);
+			FillParent(hwnd, parent);
 			return;
 		}
-		FitToParent(hwnd, parent);
-	}, timerId);
-	frame->Bind(wxEVT_DESTROY, [frame, timer](wxWindowDestroyEvent& event)
-	{
-		if (event.GetEventObject() == frame)
-			timer->Stop();
-		event.Skip();
+		timer.Stop();
+		frame->Close(true);
 	});
-	timer->Start(100);
 #endif
 }
 
@@ -204,54 +240,41 @@ void RPEmbed::BeforeShow(wxFrame* frame)
 	if (!Enabled() || !frame)
 		return;
 	const HWND hwnd = (HWND)frame->GetHWND();
-	s_frame = frame;
-	s_hwnd = hwnd;
-	if (IsChildWindow(hwnd))
-		return; // --rp-parent: already inside RetroPixels' window
-	LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-	SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (exStyle | WS_EX_TOOLWINDOW) & ~(LONG_PTR)WS_EX_APPWINDOW);
-	// off-screen but "visible" at its full size, so RetroPixels finds it (its largest visible top-level
-	// window) and the renderer gets a normal surface; RetroPixels' SetParent/SetWindowPos then moves it in
-	SetWindowPos(hwnd, nullptr, kOffscreen, kOffscreen, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-	s_dockDeadline = (std::chrono::steady_clock::now() + kDockWait).time_since_epoch().count();
+	Remember(frame, hwnd);
+	if (IsDockedWindow(hwnd))
+		return; // --rp-parent already put it inside RetroPixels' window
 
-	const int timerId = wxWindow::NewControlId();
-	auto* timer = new wxTimer(frame, timerId);
-	frame->Bind(wxEVT_TIMER, [frame, timer, hwnd](wxTimerEvent&)
-	{
-		if (frame->IsBeingDeleted())
-			return;
-		if (IsChildWindow(hwnd))
-		{
-			timer->Stop();
-			cemuLog_log(LogType::Force, "--rp-embed: docked into window {:#x}", (uintptr_t)DockHost(hwnd));
-			return;
-		}
-		if (DockDeadlinePassed())
-		{
-			timer->Stop();
-			ShowOnScreen();
-		}
-	}, timerId);
-	frame->Bind(wxEVT_DESTROY, [frame, timer](wxWindowDestroyEvent& event)
-	{
-		if (event.GetEventObject() == frame)
-		{
-			timer->Stop();
-			s_frame = nullptr;
-			s_hwnd = nullptr;
-		}
-		event.Skip();
-	});
-	timer->Start(100);
+	const LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+	SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (exStyle | WS_EX_TOOLWINDOW) & ~(LONG_PTR)WS_EX_APPWINDOW);
+	// Off-screen but visible at full size: RetroPixels looks for its largest visible top-level window and
+	// the renderer gets a normal surface. RetroPixels' SetParent/SetWindowPos then moves it into place.
+	SetWindowPos(hwnd, nullptr, kOffscreenPos, kOffscreenPos, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+	s_giveUpAt = (SteadyClock::now() + kDockTimeout).time_since_epoch().count();
+
+	Poll(frame,
+		 [hwnd](wxTimer& timer) {
+			 if (IsDockedWindow(hwnd))
+			 {
+				 timer.Stop();
+				 cemuLog_log(LogType::Force, "--rp-embed: docked into window {:#x}", (uintptr_t)HostOf(hwnd));
+			 }
+			 else if (WaitTimedOut())
+			 {
+				 timer.Stop();
+				 BecomeStandalone();
+			 }
+		 },
+		 []() { Remember(nullptr, nullptr); });
 #endif
 }
 
 bool RPEmbed::IsDocked()
 {
 #if BOOST_OS_WINDOWS
-	const HWND hwnd = s_hwnd.load();
-	return Enabled() && hwnd && IsChildWindow(hwnd);
+	if (!Enabled())
+		return false;
+	const HWND hwnd = s_mainHwnd.load();
+	return hwnd && IsDockedWindow(hwnd);
 #else
 	return false;
 #endif
@@ -266,7 +289,7 @@ void RPEmbed::ShowMessage(const wxString& message, const wxString& caption, long
 	}
 	cemuLog_log(LogType::Force, "{}: {}", caption.utf8_string(), message.utf8_string());
 #if BOOST_OS_WINDOWS
-	ShowMessageEmbedded(message, caption, style, false);
+	ShowOwnedMessageBox(message, caption, style, false);
 #else
 	wxMessageBox(message, caption, style);
 #endif
@@ -274,9 +297,10 @@ void RPEmbed::ShowMessage(const wxString& message, const wxString& caption, long
 
 namespace
 {
-	class RPEmbedLog : public wxLog
+	// wxWidgets log target that writes to PixelU's log instead of showing anything
+	class LogToFile : public wxLog
 	{
-	protected:
+	  protected:
 		void DoLogTextAtLevel(wxLogLevel level, const wxString& msg) override
 		{
 			cemuLog_log(LogType::Force, "wxWidgets: {}", msg.utf8_string());
@@ -286,6 +310,7 @@ namespace
 
 void RPEmbed::RouteWxLog()
 {
-	if (Enabled())
-		delete wxLog::SetActiveTarget(new RPEmbedLog());
+	if (!Enabled())
+		return;
+	delete wxLog::SetActiveTarget(new LogToFile());
 }

@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include "Cemu/Logging/CemuLogging.h"
@@ -9,6 +10,9 @@
 
 class wxLogEvent;
 
+// Debug > Logging window: shows log lines as they are written, optionally only those of one category
+// (and with "Filter messages", only lines containing the filter text). Receives the log through the
+// logging callbacks while it is open.
 class LoggingWindow : public wxFrame, public LoggingCallbacks
 {
   public:

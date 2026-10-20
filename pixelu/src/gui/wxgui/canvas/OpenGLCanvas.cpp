@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "wxgui/canvas/OpenGLCanvas.h"
 
 #include "wxgui/canvas/IRenderCanvas.h"
@@ -7,173 +8,137 @@
 #include "config/CemuConfig.h"
 
 #include "Common/GLInclude/GLInclude.h"
-#include <wx/glcanvas.h> // this includes GL/gl.h, avoid using this in a header because it would contaminate our own OpenGL definitions (GLInclude)
+// wx/glcanvas.h pulls in the system GL/gl.h, which clashes with GLInclude's definitions: only here, never in a header
+#include <wx/glcanvas.h>
 
-static const int g_gl_attribute_list[] =
+namespace
 {
-	WX_GL_RGBA,
-	WX_GL_DOUBLEBUFFER,
-	WX_GL_DEPTH_SIZE, 16,
+	// RGBA8 double-buffered surface with 16-bit depth and 8-bit stencil
+	const int kPixelFormat[] = {
+		WX_GL_RGBA,
+		WX_GL_DOUBLEBUFFER,
+		WX_GL_DEPTH_SIZE, 16,
+		WX_GL_MIN_RED, 8,
+		WX_GL_MIN_GREEN, 8,
+		WX_GL_MIN_BLUE, 8,
+		WX_GL_MIN_ALPHA, 8,
+		WX_GL_STENCIL_SIZE, 8,
+		0,
+	};
 
-	WX_GL_MIN_RED, 8,
-	WX_GL_MIN_GREEN, 8,
-	WX_GL_MIN_BLUE, 8,
-	WX_GL_MIN_ALPHA, 8,
+	class OpenGLCanvas;
 
-	WX_GL_STENCIL_SIZE, 8,
-
-	//WX_GL_MAJOR_VERSION, 4,
-	//WX_GL_MINOR_VERSION, 1,
-	//wx_GL_COMPAT_PROFILE,
-
-	0, // end of list
-};
-
-class OpenGLCanvas;
-
-class GLCanvasManager : public OpenGLCanvasCallbacks
-{
-  public:
-	GLCanvasManager()
+	// One GL context shared by the TV canvas and the GamePad canvas. The OpenGL renderer reaches
+	// the canvases through these callbacks (installed for the lifetime of the program).
+	class SharedGLContext final : public OpenGLCanvasCallbacks
 	{
-		SetOpenGLCanvasCallbacks(this);
-	}
+	  public:
+		SharedGLContext() { SetOpenGLCanvasCallbacks(this); }
+		~SharedGLContext() override { ClearOpenGLCanvasCallbacks(); }
 
-	~GLCanvasManager()
-	{
-		ClearOpenGLCanvasCallbacks();
-	}
-
-	void SetTVView(OpenGLCanvas* canvas)
-	{
-		m_tvView = canvas;
-	}
-
-	void SetPadView(OpenGLCanvas* canvas)
-	{
-		m_padView = canvas;
-	}
-
-	void SetGLContext(wxGLContext* context)
-	{
-		m_glContext = context;
-	}
-
-	void DeleteGLContext()
-	{
-		if (m_tvView == nullptr && m_padView == nullptr && m_glContext)
+		void Attach(OpenGLCanvas* canvas, bool isTV)
 		{
-			delete m_glContext;
-			m_glContext = nullptr;
-		}
-	}
-
-	bool HasPadViewOpen() const
-	{
-		return m_padView != nullptr;
-	}
-
-	bool MakeCurrent(bool padView);
-
-	void SwapBuffers(bool swapTV, bool swapDRC);
-
-  private:
-	wxGLContext* m_glContext = nullptr;
-	OpenGLCanvas* m_tvView = nullptr;
-	OpenGLCanvas* m_padView = nullptr;
-} s_glCanvasManager;
-
-class OpenGLCanvas : public IRenderCanvas, public wxGLCanvas
-{
-public:
-	OpenGLCanvas(wxWindow* parent, const wxSize& size, bool is_main_window)
-		: IRenderCanvas(is_main_window), wxGLCanvas(parent, wxID_ANY, g_gl_attribute_list, wxDefaultPosition, size, wxFULL_REPAINT_ON_RESIZE | wxWANTS_CHARS)
-	{
-		if (m_is_main_window)
-		{
-			s_glCanvasManager.SetTVView(this);
-			s_glCanvasManager.SetGLContext(new wxGLContext(this));
-
-			g_renderer = std::make_unique<OpenGLRenderer>();
-		}
-		else
-		{
-			s_glCanvasManager.SetPadView(this);
+			(isTV ? m_tv : m_pad) = canvas;
 		}
 
-		wxWindow::EnableTouchEvents(wxTOUCH_PAN_GESTURES);
-	}
-
-	~OpenGLCanvas() override
-	{
-		// todo - if this is the main window, make sure the renderer has been shut down
-
-		if (m_is_main_window)
-			s_glCanvasManager.SetTVView(nullptr);
-		else
-			s_glCanvasManager.SetPadView(nullptr);
-
-		s_glCanvasManager.DeleteGLContext();
-	}
-
-	void UpdateVSyncState()
-	{
-		int configValue = GetConfig().vsync.GetValue();
-		configValue = configValue > 0 ? 1 : 0;
-		if(m_activeVSyncState != configValue)
+		void Detach(bool isTV)
 		{
-#if BOOST_OS_WINDOWS
-			if(wglSwapIntervalEXT)
-				wglSwapIntervalEXT(configValue); // 1 = enabled, 0 = disabled
-#elif BOOST_OS_LINUX || BOOST_OS_BSD
-			if (eglSwapInterval)
+			(isTV ? m_tv : m_pad) = nullptr;
+			// the context goes once neither canvas is left
+			if (!m_tv && !m_pad)
 			{
-				if (eglSwapInterval(eglGetCurrentDisplay(), configValue) == EGL_FALSE)
-				{
-					cemuLog_log(LogType::Force, "Failed to set vsync using EGL");
-				}
+				delete m_context;
+				m_context = nullptr;
 			}
-#else
-			cemuLog_log(LogType::Force, "OpenGL vsync not implemented");
-#endif
-			m_activeVSyncState = configValue;
 		}
+
+		void CreateContext(wxGLCanvas* canvas)
+		{
+			m_context = new wxGLContext(canvas);
+		}
+
+		bool HasPadViewOpen() const override { return m_pad != nullptr; }
+		bool MakeCurrent(bool padView) override;
+		void SwapBuffers(bool swapTV, bool swapDRC) override;
+
+	  private:
+		wxGLContext* m_context = nullptr;
+		OpenGLCanvas* m_tv = nullptr;
+		OpenGLCanvas* m_pad = nullptr;
+	};
+
+	SharedGLContext s_sharedContext;
+
+	class OpenGLCanvas : public IRenderCanvas, public wxGLCanvas
+	{
+	  public:
+		OpenGLCanvas(wxWindow* parent, const wxSize& size, bool is_main_window)
+			: IRenderCanvas(is_main_window),
+			  wxGLCanvas(parent, wxID_ANY, kPixelFormat, wxDefaultPosition, size, wxFULL_REPAINT_ON_RESIZE | wxWANTS_CHARS)
+		{
+			s_sharedContext.Attach(this, m_is_main_window);
+			if (m_is_main_window)
+			{
+				// the TV canvas owns the renderer
+				s_sharedContext.CreateContext(this);
+				g_renderer = std::make_unique<OpenGLRenderer>();
+			}
+			wxWindow::EnableTouchEvents(wxTOUCH_PAN_GESTURES);
+		}
+
+		~OpenGLCanvas() override
+		{
+			s_sharedContext.Detach(m_is_main_window);
+		}
+
+		// apply the vsync setting (any value above 0 means on) when it changed since the last frame
+		void ApplyVSync()
+		{
+			const int wanted = GetConfig().vsync.GetValue() > 0 ? 1 : 0;
+			if (wanted == m_vsync)
+				return;
+#if BOOST_OS_WINDOWS
+			if (wglSwapIntervalEXT)
+				wglSwapIntervalEXT(wanted);
+#elif BOOST_OS_LINUX || BOOST_OS_BSD
+			if (eglSwapInterval && eglSwapInterval(eglGetCurrentDisplay(), wanted) == EGL_FALSE)
+				cemuLog_log(LogType::Force, "OpenGL: could not change vsync through EGL");
+#else
+			cemuLog_log(LogType::Force, "OpenGL: vsync is not supported on this platform");
+#endif
+			m_vsync = wanted;
+		}
+
+	  private:
+		int m_vsync = -1; // unknown until the first frame
+	};
+
+	bool SharedGLContext::MakeCurrent(bool padView)
+	{
+		OpenGLCanvas* target = padView ? m_pad : m_tv;
+		if (target == nullptr)
+			return false;
+		m_context->SetCurrent(*target);
+		return true;
 	}
 
-private:
-	int m_activeVSyncState = -1;
-	//wxGLContext* m_context = nullptr;
-};
+	void SharedGLContext::SwapBuffers(bool swapTV, bool swapDRC)
+	{
+		const std::pair<bool, OpenGLCanvas*> targets[] = {{swapTV, m_tv}, {swapDRC, m_pad}};
+		for (size_t i = 0; i < std::size(targets); i++)
+		{
+			auto [wanted, canvas] = targets[i];
+			if (!wanted || !canvas)
+				continue;
+			MakeCurrent(i == 1);
+			canvas->SwapBuffers();
+			canvas->ApplyVSync();
+		}
+		MakeCurrent(false);
+	}
+}
 
 wxWindow* GLCanvas_Create(wxWindow* parent, const wxSize& size, bool is_main_window)
 {
 	return new OpenGLCanvas(parent, size, is_main_window);
-}
-
-void GLCanvasManager::SwapBuffers(bool swapTV, bool swapDRC)
-{
-	if (swapTV && m_tvView)
-	{
-		MakeCurrent(false);
-		m_tvView->SwapBuffers();
-		m_tvView->UpdateVSyncState();
-	}
-
-	if (swapDRC && m_padView)
-	{
-		MakeCurrent(true);
-		m_padView->SwapBuffers();
-		m_padView->UpdateVSyncState();
-	}
-
-	MakeCurrent(false);
-}
-
-bool GLCanvasManager::MakeCurrent(bool padView)
-{
-	OpenGLCanvas* canvas = padView ? m_padView : m_tvView;
-	if (!canvas)
-		return false;
-	m_glContext->SetCurrent(*canvas);
-	return true;
 }

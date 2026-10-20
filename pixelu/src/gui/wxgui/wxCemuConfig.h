@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include "config/XMLConfig.h"
@@ -5,6 +6,10 @@
 
 #include "wxgui.h"
 
+// Settings that belong to the wxWidgets GUI only. They live in their own section of settings.xml,
+// next to the emulator settings of CemuConfig.
+
+// game list column widths used when settings.xml has none
 namespace DefaultColumnSize
 {
 	enum : uint32
@@ -19,6 +24,7 @@ namespace DefaultColumnSize
 	};
 };
 
+// Windows only: light, dark or follow the system
 enum class MSWThemeOption : int
 {
 	kAuto = 0,
@@ -27,11 +33,12 @@ enum class MSWThemeOption : int
 };
 ENABLE_ENUM_ITERATORS(MSWThemeOption, MSWThemeOption::kAuto, MSWThemeOption::kDark);
 
+// a keyboard shortcut packed into 16 bits: wxWidgets key code plus modifier flags
 typedef union
 {
 	struct
 	{
-		uint16 key : 13; // enough bits for all keycodes
+		uint16 key : 13;
 		uint16 alt : 1;
 		uint16 ctrl : 1;
 		uint16 shift : 1;
@@ -39,24 +46,28 @@ typedef union
 	uint16 raw;
 } uKeyboardHotkey;
 
+// controller button index of a hotkey, -1 for none
 typedef sint16 ControllerHotkey_t;
 
+// one hotkey: a keyboard shortcut and/or a controller button.
+// In settings.xml it is written as "<keyboard raw> <controller button>".
 struct sHotkeyCfg
 {
 	static constexpr uint8 keyboardNone{WXK_NONE};
-	static constexpr sint8 controllerNone{-1}; // no enums to work with, but buttons start from 0
+	static constexpr sint8 controllerNone{-1};
 
 	uKeyboardHotkey keyboard{keyboardNone};
 	ControllerHotkey_t controller{controllerNone};
 
-	/* for defaults */
-	sHotkeyCfg(const uKeyboardHotkey& keyboard = {keyboardNone}, const ControllerHotkey_t& controller = {controllerNone}) : keyboard(keyboard), controller(controller) {};
+	sHotkeyCfg(const uKeyboardHotkey& keyboard = {keyboardNone}, const ControllerHotkey_t& controller = {controllerNone})
+		: keyboard(keyboard), controller(controller) {};
 
-	/* for reading from xml */
+	// from the settings.xml text
 	sHotkeyCfg(const char* xml_values)
 	{
-		std::istringstream iss(xml_values);
-		iss >> keyboard.raw >> controller;
+		std::istringstream text(xml_values);
+		text >> keyboard.raw;
+		text >> controller;
 	}
 };
 
@@ -66,29 +77,32 @@ struct fmt::formatter<sHotkeyCfg> : formatter<string_view>
 	template<typename FormatContext>
 	auto format(const sHotkeyCfg c, FormatContext& ctx) const
 	{
-		std::string xml_values = fmt::format("{} {}", c.keyboard.raw, c.controller);
-		return formatter<string_view>::format(xml_values, ctx);
+		const std::string text = fmt::format("{} {}", c.keyboard.raw, c.controller);
+		return formatter<string_view>::format(text, ctx);
 	}
 };
 
 struct wxCemuConfig
 {
+	// general
 	ConfigValue<sint32> language{wxLANGUAGE_DEFAULT};
-	ConfigValue<int> msw_theme { static_cast<int>(MSWThemeOption::kAuto) };
+	ConfigValue<int> msw_theme{static_cast<int>(MSWThemeOption::kAuto)};
 	ConfigValue<bool> use_discord_presence{true};
-	ConfigValue<bool> fullscreen{ false };
+	ConfigValue<bool> fullscreen{false};
 	ConfigValue<bool> fullscreen_menubar{false};
 	ConfigValue<bool> feral_gamemode{false};
 
-	// max 15 entries
+	// most recent first, at most kMaxRecentEntries each
 	static constexpr size_t kMaxRecentEntries = 15;
 	std::vector<std::string> recent_launch_files;
 	std::vector<std::string> recent_nfc_files;
 
+	// main window geometry (-1 = not saved yet)
 	Vector2i window_position{-1, -1};
 	Vector2i window_size{-1, -1};
 	ConfigValue<bool> window_maximized;
 
+	// GamePad window
 	ConfigValue<bool> pad_open;
 	Vector2i pad_position{-1, -1};
 	Vector2i pad_size{-1, -1};
@@ -98,12 +112,13 @@ struct wxCemuConfig
 	ConfigValue<bool> receive_untested_updates{false};
 	ConfigValue<bool> save_screenshot{true};
 
+	// one-time notices
 	ConfigValue<bool> did_show_vulkan_warning{false};
-	ConfigValue<bool> did_show_graphic_pack_download{false}; // no longer used but we keep the config value around in case people downgrade Cemu. Despite the name this was used for the Getting Started dialog
-	ConfigValue<bool> did_show_macos_disclaimer{false}; // no longer used
+	ConfigValue<bool> did_show_graphic_pack_download{false}; // unused, kept so older versions find it (it marked the Getting Started dialog as seen)
+	ConfigValue<bool> did_show_macos_disclaimer{false};		 // unused
 
+	// game list
 	ConfigValue<bool> show_icon_column{true};
-
 	int game_list_style = 0;
 	std::string game_list_column_order;
 	struct
@@ -117,7 +132,6 @@ struct wxCemuConfig
 		uint32 title_id = 0;
 	} column_width{};
 
-	// hotkeys
 	struct
 	{
 		sHotkeyCfg modifiers;
@@ -132,6 +146,7 @@ struct wxCemuConfig
 #endif
 	} hotkeys{};
 
+	// put file first in its list (removing an older entry of it), dropping the oldest beyond the limit
 	void AddRecentlyLaunchedFile(std::string_view file);
 	void AddRecentNfcFile(std::string_view file);
 
@@ -150,5 +165,5 @@ inline XMLWxCemuConfig_t& GetWxGuiConfigHandle()
 
 inline wxCemuConfig& GetWxGUIConfig()
 {
-	return GetWxGuiConfigHandle().Data();
+	return g_wxConfig.Data();
 }

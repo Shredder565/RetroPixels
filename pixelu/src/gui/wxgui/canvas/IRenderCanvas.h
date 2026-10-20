@@ -1,8 +1,10 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include <wx/wxprec.h>
 
-// base class for all render interfaces
+// Shared part of the render canvases (OpenGL, Vulkan, Metal): whether this canvas shows the TV picture
+// in the main window (true) or the GamePad picture in its own window (false).
 class IRenderCanvas
 {
 public:

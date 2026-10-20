@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 #include <wx/string.h>
 #include <wx/bitmap.h>
@@ -5,35 +6,35 @@
 
 namespace wxHelper
 {
-    inline fs::path MakeFSPath(const wxString& str)
-    {
-        auto tmpUtf8 = str.ToUTF8();
-        auto sv = std::basic_string_view<char8_t>((const char8_t*)tmpUtf8.data(), tmpUtf8.length());
-        return fs::path(sv);
-    }
+	// wxString (any encoding) to a filesystem path, going through UTF-8
+	inline fs::path MakeFSPath(const wxString& str)
+	{
+		const auto utf8 = str.ToUTF8();
+		return fs::path(std::u8string_view(reinterpret_cast<const char8_t*>(utf8.data()), utf8.length()));
+	}
 
+	// filesystem path to a wxString, going through UTF-8
 	inline wxString FromPath(const fs::path& path)
 	{
-		std::string str = _pathToUtf8(path);
-		return wxString::FromUTF8(str);
+		return wxString::FromUTF8(_pathToUtf8(path));
 	}
 
+	// Colour for every second row of a list drawn on bgColour: a bit lighter on dark backgrounds, a bit
+	// darker on light ones; on almost white backgrounds a light blue-grey instead.
 	inline wxColour CalculateAccentColour(const wxColour& bgColour)
 	{
-		const uint32 bgLightness = (bgColour.GetRed() + bgColour.GetGreen() + bgColour.GetBlue()) / 3;
-		const bool isDarkTheme = bgLightness < 128;
-		wxColour bgColourSecondary = bgColour.ChangeLightness(isDarkTheme ? 110 : 90); // color for even rows
-		// for very light themes we'll use a blue tint to match the older Windows Cemu look
-		if (bgLightness > 250)
-			bgColourSecondary = wxColour(bgColour.Red() - 13, bgColour.Green() - 6, bgColour.Blue() - 2);
-		return bgColourSecondary;
+		const uint32 brightness = ((uint32)bgColour.Red() + bgColour.Green() + bgColour.Blue()) / 3;
+		if (brightness > 250)
+			return wxColour(bgColour.Red() - 13, bgColour.Green() - 6, bgColour.Blue() - 2);
+		return bgColour.ChangeLightness(brightness < 128 ? 110 : 90);
 	}
 
+	// Decodes a PNG and replaces its pure black pixels with tint (icons that follow the theme's text colour)
 	static wxBitmap LoadThemedBitmapFromPNG(const uint8* data, size_t size, const wxColour& tint)
-    {
-    	wxMemoryInputStream strm(data, size);
-    	wxImage img(strm, wxBITMAP_TYPE_PNG);
-    	img.Replace(0x00, 0x00, 0x00, tint.Red(), tint.Green(), tint.Blue());
-    	return wxBitmap(img);
-    }
+	{
+		wxMemoryInputStream input(data, size);
+		wxImage image(input, wxBITMAP_TYPE_PNG);
+		image.Replace(0, 0, 0, tint.Red(), tint.Green(), tint.Blue());
+		return wxBitmap(image);
+	}
 };

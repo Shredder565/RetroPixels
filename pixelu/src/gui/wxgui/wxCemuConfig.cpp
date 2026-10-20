@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #include "wxCemuConfig.h"
 #include "Common/precompiled.h"
 #include "config/CemuConfig.h"
@@ -7,24 +8,79 @@
 
 XMLWxCemuConfig_t g_wxConfig(&GetConfigHandle);
 
+namespace
+{
+	// file goes first, later copies of any entry are dropped, the list is cut to its maximum
+	void PushRecent(std::vector<std::string>& list, std::string_view file)
+	{
+		std::vector<std::string> updated;
+		updated.reserve(list.size() + 1);
+		updated.emplace_back(file);
+		for (auto& entry : list)
+		{
+			if (std::find(updated.begin(), updated.end(), entry) == updated.end())
+				updated.emplace_back(std::move(entry));
+		}
+		if (updated.size() > wxCemuConfig::kMaxRecentEntries)
+			updated.resize(wxCemuConfig::kMaxRecentEntries);
+		list = std::move(updated);
+	}
+
+	// <section><Entry>path</Entry>...</section>, empty entries skipped
+	void LoadPathList(XMLConfigParser& parent, const char* section, std::vector<std::string>& list, const char* what)
+	{
+		list.clear();
+		auto node = parent.get(section);
+		for (auto entry = node.get("Entry"); entry.valid(); entry = node.get("Entry", entry))
+		{
+			std::string path = entry.value("");
+			if (path.empty())
+				continue;
+			try
+			{
+				list.emplace_back(std::move(path));
+			}
+			catch (const std::exception&)
+			{
+				cemuLog_log(LogType::Force, "settings.xml: skipped a recent {} entry that could not be loaded", what);
+			}
+		}
+	}
+
+	void SavePathList(XMLConfigParser& parent, const char* section, const std::vector<std::string>& list)
+	{
+		auto node = parent.set(section);
+		for (const std::string& path : list)
+			node.set("Entry", path.c_str());
+	}
+
+	void LoadXY(XMLConfigParser& parent, const char* name, Vector2i& value)
+	{
+		value.x = parent.get(name).get("x", -1);
+		value.y = parent.get(name).get("y", -1);
+	}
+
+	void SaveXY(XMLConfigParser& parent, const char* name, const Vector2i& value)
+	{
+		auto node = parent.set(name);
+		node.set<sint32>("x", value.x);
+		node.set<sint32>("y", value.y);
+	}
+}
+
 void wxCemuConfig::AddRecentlyLaunchedFile(std::string_view file)
 {
-	recent_launch_files.insert(recent_launch_files.begin(), std::string(file));
-	RemoveDuplicatesKeepOrder(recent_launch_files);
-	while (recent_launch_files.size() > kMaxRecentEntries)
-		recent_launch_files.pop_back();
+	PushRecent(recent_launch_files, file);
 }
 
 void wxCemuConfig::AddRecentNfcFile(std::string_view file)
 {
-	recent_nfc_files.insert(recent_nfc_files.begin(), std::string(file));
-	RemoveDuplicatesKeepOrder(recent_nfc_files);
-	while (recent_nfc_files.size() > kMaxRecentEntries)
-		recent_nfc_files.pop_back();
+	PushRecent(recent_nfc_files, file);
 }
 
 void wxCemuConfig::Load(XMLConfigParser& parser)
 {
+	// defaults come from each value's initial value
 	language = parser.get<sint32>("language", wxLANGUAGE_DEFAULT);
 	msw_theme = parser.get<sint32>("msw_theme", msw_theme);
 	use_discord_presence = parser.get("use_discord_presence", true);
@@ -38,92 +94,55 @@ void wxCemuConfig::Load(XMLConfigParser& parser)
 	did_show_macos_disclaimer = parser.get("macos_disclaimer", did_show_macos_disclaimer);
 	fullscreen = parser.get("fullscreen", fullscreen);
 
-	window_position.x = parser.get("window_position").get("x", -1);
-	window_position.y = parser.get("window_position").get("y", -1);
-
-	window_size.x = parser.get("window_size").get("x", -1);
-	window_size.y = parser.get("window_size").get("y", -1);
+	LoadXY(parser, "window_position", window_position);
+	LoadXY(parser, "window_size", window_size);
 	window_maximized = parser.get("window_maximized", false);
 
 	pad_open = parser.get("open_pad", false);
-	pad_position.x = parser.get("pad_position").get("x", -1);
-	pad_position.y = parser.get("pad_position").get("y", -1);
-
-	pad_size.x = parser.get("pad_size").get("x", -1);
-	pad_size.y = parser.get("pad_size").get("y", -1);
+	LoadXY(parser, "pad_position", pad_position);
+	LoadXY(parser, "pad_size", pad_size);
 	pad_maximized = parser.get("pad_maximized", false);
 
-	auto gamelist = parser.get("GameList");
-	game_list_style = gamelist.get("style", 0);
-	game_list_column_order = gamelist.get("order", "");
+	auto gameList = parser.get("GameList");
+	game_list_style = gameList.get("style", 0);
+	game_list_column_order = gameList.get("order", "");
 
 	show_icon_column = parser.get("show_icon_column", true);
 
-	// return default width if value in config file out of range
-	auto loadColumnSize = [&gamelist](const char* name, uint32 defaultWidth) {
-		sint64 val = gamelist.get(name, defaultWidth);
-		if (val < 0 || val > (sint64)std::numeric_limits<uint32>::max)
-			return defaultWidth;
-		return static_cast<uint32>(val);
+	auto width = [&gameList](const char* name, uint32 fallback) -> uint32 { return gameList.get(name, fallback); };
+	column_width.name = width("name_width", DefaultColumnSize::name);
+	column_width.version = width("version_width", DefaultColumnSize::version);
+	column_width.dlc = width("dlc_width", DefaultColumnSize::dlc);
+	column_width.game_time = width("game_time_width", DefaultColumnSize::game_time);
+	column_width.game_started = width("game_started_width", DefaultColumnSize::game_started);
+	column_width.region = width("region_width", DefaultColumnSize::region);
+	column_width.title_id = width("title_id", DefaultColumnSize::title_id);
+
+	LoadPathList(parser, "RecentLaunchFiles", recent_launch_files, "game");
+	LoadPathList(parser, "RecentNFCFiles", recent_nfc_files, "NFC file");
+
+	auto keys = parser.get("Hotkeys");
+	auto shortcut = [](uint16 key, bool alt = false) {
+		uKeyboardHotkey combo{};
+		combo.key = key;
+		combo.alt = alt ? 1 : 0;
+		return sHotkeyCfg{combo};
 	};
-	column_width.name = loadColumnSize("name_width", DefaultColumnSize::name);
-	column_width.version = loadColumnSize("version_width", DefaultColumnSize::version);
-	column_width.dlc = loadColumnSize("dlc_width", DefaultColumnSize::dlc);
-	column_width.game_time = loadColumnSize("game_time_width", DefaultColumnSize::game_time);
-	column_width.game_started = loadColumnSize("game_started_width", DefaultColumnSize::game_started);
-	column_width.region = loadColumnSize("region_width", DefaultColumnSize::region);
-	column_width.title_id = loadColumnSize("title_id", DefaultColumnSize::title_id);
-
-	recent_launch_files.clear();
-	auto launch_parser = parser.get("RecentLaunchFiles");
-	for (auto element = launch_parser.get("Entry"); element.valid(); element = launch_parser.get("Entry", element))
-	{
-		const std::string path = element.value("");
-		if (path.empty())
-			continue;
-
-		try
-		{
-			recent_launch_files.emplace_back(path);
-		} catch (const std::exception&)
-		{
-			cemuLog_log(LogType::Force, "config load error: can't load recently launched game file: {}", path);
-		}
-	}
-
-	recent_nfc_files.clear();
-	auto nfc_parser = parser.get("RecentNFCFiles");
-	for (auto element = nfc_parser.get("Entry"); element.valid(); element = nfc_parser.get("Entry", element))
-	{
-		const std::string path = element.value("");
-		if (path.empty())
-			continue;
-		try
-		{
-			recent_nfc_files.emplace_back(path);
-		} catch (const std::exception&)
-		{
-			cemuLog_log(LogType::Force, "config load error: can't load recently launched nfc file: {}", path);
-		}
-	}
-
-	// hotkeys
-	auto xml_hotkeys = parser.get("Hotkeys");
-	hotkeys.modifiers = xml_hotkeys.get("modifiers", sHotkeyCfg{});
-	hotkeys.exitFullscreen = xml_hotkeys.get("ExitFullscreen", sHotkeyCfg{uKeyboardHotkey{WXK_ESCAPE}});
-	hotkeys.toggleFullscreen = xml_hotkeys.get("ToggleFullscreen", sHotkeyCfg{uKeyboardHotkey{WXK_F11}});
-	hotkeys.toggleFullscreenAlt = xml_hotkeys.get("ToggleFullscreenAlt", sHotkeyCfg{uKeyboardHotkey{WXK_CONTROL_M, true}}); // ALT+ENTER
-	hotkeys.takeScreenshot = xml_hotkeys.get("TakeScreenshot", sHotkeyCfg{uKeyboardHotkey{WXK_F12}});
-	hotkeys.toggleFastForward = xml_hotkeys.get("ToggleFastForward", sHotkeyCfg{});
-	hotkeys.exitApplication = xml_hotkeys.get("ExitApplication", sHotkeyCfg{});
+	hotkeys.modifiers = keys.get("modifiers", sHotkeyCfg{});
+	hotkeys.exitFullscreen = keys.get("ExitFullscreen", shortcut(WXK_ESCAPE));
+	hotkeys.toggleFullscreen = keys.get("ToggleFullscreen", shortcut(WXK_F11));
+	hotkeys.toggleFullscreenAlt = keys.get("ToggleFullscreenAlt", shortcut(WXK_CONTROL_M, true)); // Alt+Enter
+	hotkeys.takeScreenshot = keys.get("TakeScreenshot", shortcut(WXK_F12));
+	hotkeys.toggleFastForward = keys.get("ToggleFastForward", sHotkeyCfg{});
+	hotkeys.exitApplication = keys.get("ExitApplication", sHotkeyCfg{});
 #ifdef CEMU_DEBUG_ASSERT
-	hotkeys.endEmulation = xml_hotkeys.get("EndEmulation", sHotkeyCfg{uKeyboardHotkey{WXK_F5}});
+	hotkeys.endEmulation = keys.get("EndEmulation", shortcut(WXK_F5));
 #endif
 }
 
 void wxCemuConfig::Save(XMLConfigParser& config)
 {
-	// general settings
+	// the element order is the order settings.xml has always had
 	config.set<sint32>("language", language);
 	config.set<sint32>("msw_theme", msw_theme);
 	config.set<bool>("use_discord_presence", use_discord_presence);
@@ -137,54 +156,36 @@ void wxCemuConfig::Save(XMLConfigParser& config)
 	config.set<bool>("macos_disclaimer", did_show_macos_disclaimer);
 	config.set<bool>("fullscreen", fullscreen);
 
-	auto wpos = config.set("window_position");
-	wpos.set<sint32>("x", window_position.x);
-	wpos.set<sint32>("y", window_position.y);
-	auto wsize = config.set("window_size");
-	wsize.set<sint32>("x", window_size.x);
-	wsize.set<sint32>("y", window_size.y);
+	SaveXY(config, "window_position", window_position);
+	SaveXY(config, "window_size", window_size);
 	config.set<bool>("window_maximized", window_maximized);
 
 	config.set<bool>("open_pad", pad_open);
-	auto ppos = config.set("pad_position");
-	ppos.set<sint32>("x", pad_position.x);
-	ppos.set<sint32>("y", pad_position.y);
-	auto psize = config.set("pad_size");
-	psize.set<sint32>("x", pad_size.x);
-	psize.set<sint32>("y", pad_size.y);
+	SaveXY(config, "pad_position", pad_position);
+	SaveXY(config, "pad_size", pad_size);
 	config.set<bool>("pad_maximized", pad_maximized);
 	config.set<bool>("show_icon_column", show_icon_column);
 
-	auto gamelist = config.set("GameList");
-	gamelist.set("style", game_list_style);
-	gamelist.set("order", game_list_column_order);
-	gamelist.set("name_width", column_width.name);
-	gamelist.set("version_width", column_width.version);
-	gamelist.set("dlc_width", column_width.dlc);
-	gamelist.set("game_time_width", column_width.game_time);
-	gamelist.set("game_started_width", column_width.game_started);
-	gamelist.set("region_width", column_width.region);
-	gamelist.set("title_id", column_width.title_id);
+	auto gameList = config.set("GameList");
+	gameList.set("style", game_list_style);
+	gameList.set("order", game_list_column_order);
+	gameList.set("name_width", column_width.name);
+	gameList.set("version_width", column_width.version);
+	gameList.set("dlc_width", column_width.dlc);
+	gameList.set("game_time_width", column_width.game_time);
+	gameList.set("game_started_width", column_width.game_started);
+	gameList.set("region_width", column_width.region);
+	gameList.set("title_id", column_width.title_id);
 
-	auto launch_files_parser = config.set("RecentLaunchFiles");
-	for (const auto& entry : recent_launch_files)
-	{
-		launch_files_parser.set("Entry", entry.c_str());
-	}
+	SavePathList(config, "RecentLaunchFiles", recent_launch_files);
+	SavePathList(config, "RecentNFCFiles", recent_nfc_files);
 
-	auto nfc_files_parser = config.set("RecentNFCFiles");
-	for (const auto& entry : recent_nfc_files)
-	{
-		nfc_files_parser.set("Entry", entry.c_str());
-	}
-
-	// hotkeys
-	auto xml_hotkeys = config.set("Hotkeys");
-	xml_hotkeys.set("modifiers", hotkeys.modifiers);
-	xml_hotkeys.set("ExitFullscreen", hotkeys.exitFullscreen);
-	xml_hotkeys.set("ToggleFullscreen", hotkeys.toggleFullscreen);
-	xml_hotkeys.set("ToggleFullscreenAlt", hotkeys.toggleFullscreenAlt);
-	xml_hotkeys.set("TakeScreenshot", hotkeys.takeScreenshot);
-	xml_hotkeys.set("ToggleFastForward", hotkeys.toggleFastForward);
-	xml_hotkeys.set("ExitApplication", hotkeys.exitApplication);
+	auto keys = config.set("Hotkeys");
+	keys.set("modifiers", hotkeys.modifiers);
+	keys.set("ExitFullscreen", hotkeys.exitFullscreen);
+	keys.set("ToggleFullscreen", hotkeys.toggleFullscreen);
+	keys.set("ToggleFullscreenAlt", hotkeys.toggleFullscreenAlt);
+	keys.set("TakeScreenshot", hotkeys.takeScreenshot);
+	keys.set("ToggleFastForward", hotkeys.toggleFastForward);
+	keys.set("ExitApplication", hotkeys.exitApplication);
 }

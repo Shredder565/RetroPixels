@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include <wx/wx.h>
@@ -27,16 +28,17 @@ class wxLaunchGameEvent;
 wxDECLARE_EVENT(wxEVT_LAUNCH_GAME, wxLaunchGameEvent);
 wxDECLARE_EVENT(wxEVT_SET_WINDOW_TITLE, wxCommandEvent);
 
+// "start this game file", posted to the main window from wherever a launch is requested
 class wxLaunchGameEvent : public wxCommandEvent
 {
 public:
 	enum class INITIATED_BY
 	{
-		MENU, // via file menu
+		MENU,
 		DRAG_AND_DROP,
 		GAME_LIST,
 		TITLE_MANAGER,
-		COMMAND_LINE, // -g parameter
+		COMMAND_LINE, // -g / -t
 	};
 
 	wxLaunchGameEvent(fs::path path, INITIATED_BY initiatedBy)
@@ -52,6 +54,9 @@ private:
 	INITIATED_BY m_initiatedBy;
 };
 
+// The main window: menu bar, game list and, once a game runs, the TV picture. It also owns the
+// optional GamePad window and the tool windows opened from the menu.
+// Under --rp-embed it only ever shows the game picture (see RPEmbed.h).
 class MainWindow : public wxFrame, public CafeSystem::SystemImplementation
 {
 	friend class CemuApp;
@@ -60,12 +65,14 @@ public:
 	MainWindow();
 	~MainWindow();
 
-    void CreateGameListAndStatusBar();
-    void DestroyGameListAndStatusBar();
+	// game list and info bar, shown while no game runs
+	void CreateGameListAndStatusBar();
+	void DestroyGameListAndStatusBar();
 
 	void UpdateSettingsAfterGameLaunch();
 	void RestoreSettingsAfterGameExited();
 
+	// prepares and starts a game, an update folder or a standalone RPX/ELF; false (after telling the user) on failure
 	bool FileLoad(const fs::path launchPath, wxLaunchGameEvent::INITIATED_BY initiatedBy);
 
 	[[nodiscard]] bool IsGameLaunched() const { return m_game_launched; }
@@ -85,19 +92,19 @@ public:
 
 	PadViewFrame* GetPadView() const { return m_padView; }
 
+	// window events
 	void OnSizeEvent(wxSizeEvent& event);
 	void OnDPIChangedEvent(wxDPIChangedEvent& event);
 	void OnMove(wxMoveEvent& event);
-
+	void OnClose(wxCloseEvent& event);
 	void OnDebuggerClose(wxCloseEvent& event);
 	void OnPadClose(wxCloseEvent& event);
 	void OnMemorySearcherClose(wxCloseEvent& event);
-	void OnMouseWheel(wxMouseEvent& event);
-	void OnClose(wxCloseEvent& event);
+
+	// menu commands
 	void OnFileMenu(wxCommandEvent& event);
 	void OnOpenFolder(wxCommandEvent& event);
 	void OnClearSpotPassCache(wxCommandEvent& event);
-	void OnLaunchFromFile(wxLaunchGameEvent& event);
 	void OnInstallUpdate(wxCommandEvent& event);
 	void OnFileExit(wxCommandEvent& event);
 	void OnNFCMenu(wxCommandEvent& event);
@@ -116,24 +123,29 @@ public:
 	void OnDebugViewPPCDebugger(wxCommandEvent& event);
 	void OnDebugViewAudioDebugger(wxCommandEvent& event);
 	void OnDebugViewTextureRelations(wxCommandEvent& event);
-	void OnMouseMove(wxMouseEvent& event);
-	void OnMouseLeft(wxMouseEvent& event);
-	void OnMouseRight(wxMouseEvent& event);
+	void OnToolsInput(wxCommandEvent& event);
+
+	// requests from other windows and threads
+	void OnLaunchFromFile(wxLaunchGameEvent& event);
 	void OnGameListBeginUpdate(wxCommandEvent& event);
 	void OnGameListEndUpdate(wxCommandEvent& event);
 	void OnAccountListRefresh(wxCommandEvent& event);
 	void OnRequestGameListRefresh(wxCommandEvent& event);
 	void OnSetWindowTitle(wxCommandEvent& event);
 
+	// input on the render canvas
+	void OnMouseMove(wxMouseEvent& event);
+	void OnMouseLeft(wxMouseEvent& event);
+	void OnMouseRight(wxMouseEvent& event);
+	void OnMouseWheel(wxMouseEvent& event);
 	void OnKeyUp(wxKeyEvent& event);
 	void OnKeyDown(wxKeyEvent& event);
 	void OnChar(wxKeyEvent& event);
-
-	void OnToolsInput(wxCommandEvent& event);
 	void OnGesturePan(wxPanGestureEvent& event);
 
 	void OnGameLoaded();
 
+	// sets the title from any thread
 	void AsyncSetTitle(std::string_view windowTitle);
 
 	void CreateCanvas();
@@ -143,10 +155,12 @@ public:
 
 	uintptr_t GetRenderCanvasHWND();
 
+	// thread-safe requests to the main window
 	static void RequestGameListRefresh();
 	static void RequestLaunchGame(fs::path filePath, wxLaunchGameEvent::INITIATED_BY initiatedBy);
 
 private:
+	void BindEvents();
 	bool FullscreenEnabled() const;
 	void RecreateMenu();
 	void UpdateChildWindowTitleRunningState();
@@ -156,7 +170,7 @@ private:
 
 	void OnTimer(wxTimerEvent& event);
 
-	// CafeSystem implementation
+	// CafeSystem::SystemImplementation
 	void CafeRecreateCanvas() override;
 	void CafePPCProcessExit() override;
 
@@ -164,85 +178,69 @@ private:
 	void OnRequestRecreateCanvas(wxCommandEvent& event);
 	void OnRequestGameExit(wxCommandEvent& event);
 
+	// geometry of the display the window is mostly on
 	wxRect GetDesktopRect();
 
-	MemorySearcherTool* m_toolWindow = nullptr;
-	TitleManager* m_title_manager = nullptr;
-	EmulatedUSBDeviceFrame* m_usb_devices = nullptr;
-	PadViewFrame* m_padView = nullptr;
-	GraphicPacksWindow2* m_graphic_pack_window = nullptr;
-
-	wxTimer* m_timer;
-	wxPoint m_mouse_position{};
-	std::chrono::steady_clock::time_point m_last_mouse_move_time;
-	wxSize m_restored_size;
-	wxPoint m_restored_position;
-
-	bool m_menu_visible = false;
-	bool m_game_launched = false;
-
-	#ifdef ENABLE_DISCORD_RPC
-	std::unique_ptr<DiscordPresence> m_discord;
-	#endif
-
-	std::string m_launched_game_name;
-
-	wxMenuItem* m_gdbstub_toggle{};
-	DebuggerWindow2* m_debugger_window = nullptr;
-	LoggingWindow* m_logging_window = nullptr;
-
-	std::future<bool> m_update_available;
-
-	wxMenuItem* m_check_update_menu{};
 	void LoadSettings();
 	void SaveSettings();
 
 	void OnGraphicWindowClose(wxCloseEvent& event);
 	void OnGraphicWindowOpen(wxTitleIdEvent& event);
 
-	// panels
-	wxPanel* m_main_panel{}, * m_game_panel{};
+	// tool windows (null while closed)
+	MemorySearcherTool* m_toolWindow = nullptr;
+	TitleManager* m_title_manager = nullptr;
+	EmulatedUSBDeviceFrame* m_usb_devices = nullptr;
+	PadViewFrame* m_padView = nullptr;
+	GraphicPacksWindow2* m_graphic_pack_window = nullptr;
+	DebuggerWindow2* m_debugger_window = nullptr;
+	LoggingWindow* m_logging_window = nullptr;
 
-	// rendering
+	// cursor hiding in fullscreen and the update notice
+	wxTimer* m_timer;
+	wxPoint m_mouse_position{};
+	std::chrono::steady_clock::time_point m_last_mouse_move_time;
+	std::future<bool> m_update_available;
+
+	// size and position while neither maximized nor fullscreen
+	wxSize m_restored_size;
+	wxPoint m_restored_position;
+
+	bool m_menu_visible = false;
+	bool m_game_launched = false;
+	std::string m_launched_game_name;
+
+#ifdef ENABLE_DISCORD_RPC
+	std::unique_ptr<DiscordPresence> m_discord;
+#endif
+
+	// contents
+	wxPanel* m_main_panel{};
+	wxPanel* m_game_panel{};
 	wxWindow* m_render_canvas{};
-
-	// gamelist
 	wxGameList* m_game_list{};
 	wxInfoBar* m_info_bar{};
 
-	// menu
+	// menu bar and the items that change state
 	wxMenuBar* m_menuBar{};
-
-	// file
 	wxMenu* m_fileMenu{};
 	wxMenuItem* m_fileMenuSeparator0{};
 	wxMenuItem* m_fileMenuSeparator1{};
 	wxMenuItem* m_loadMenuItem{};
 	wxMenuItem* m_installUpdateMenuItem{};
 	wxMenuItem* m_exitMenuItem{};
-
-	// options
 	wxMenu* m_optionsAccountMenu{};
-
 	wxMenuItem* m_fullscreenMenuItem{};
 	wxMenuItem* m_padViewMenuItem{};
-
-	// tools
 	wxMenuItem* m_memorySearcherMenuItem{};
-
-	// cpu
 	wxMenu* m_cpuTimerSubmenu{};
-
-	// nfc
 	wxMenu* m_nfcMenu{};
 	wxMenuItem* m_nfcMenuSeparator0{};
-
-	// debug
 	wxMenu* m_debugMenu{};
 	wxMenu* m_loggingSubmenu{};
 	wxMenuItem* m_asyncCompile{};
-
-wxDECLARE_EVENT_TABLE();
+	wxMenuItem* m_gdbstub_toggle{};
+	wxMenuItem* m_check_update_menu{};
 };
 
 extern MainWindow* g_mainFrame;

@@ -1,3 +1,6 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
+// The wxWidgets implementation of the WindowSystem interface the emulator core uses.
+
 #include "input/HotkeySettings.h"
 #include "interface/WindowSystem.h"
 
@@ -32,8 +35,8 @@
 
 WindowSystem::WindowInfo g_window_info{};
 
-std::shared_mutex g_mutex;
-MainWindow* g_mainFrame = nullptr;
+std::shared_mutex g_mutex;			// guards g_mainFrame against the window going away
+MainWindow* g_mainFrame = nullptr;	// set by MainWindow itself
 
 #if BOOST_OS_WINDOWS
 void _wxLaunch()
@@ -47,31 +50,29 @@ void WindowSystem::Create()
 {
 	SetThreadName("cemu");
 #if BOOST_OS_WINDOWS
-	// on Windows wxWidgets there is a bug where wxDirDialog->ShowModal will deadlock in Windows internals somehow
-	// moving the UI thread off the main thread fixes this
-	std::thread t = std::thread(_wxLaunch);
-	t.join();
+	// The GUI runs on a thread of its own on Windows: with wxWidgets on the process' first thread,
+	// the folder picker (wxDirDialog::ShowModal) can hang inside the shell.
+	std::thread guiThread(_wxLaunch);
+	guiThread.join();
 #else
-	int argc = 0;
-	char* argv[1]{};
-	wxEntry(argc, argv);
+	char* noArgs[1] = {nullptr};
+	int argCount = 0;
+	wxEntry(argCount, noArgs);
 #endif
 }
 
 void WindowSystem::ShowErrorDialog(std::string_view message, std::string_view title, std::optional<WindowSystem::ErrorCategory> errorCategory)
 {
-	if (errorCategory == WindowSystem::ErrorCategory::GRAPHIC_PACKS && LaunchSettings::RPEmbedEnabled())
+	// PixelU: a graphic pack error does not stop the game, so under --rp-embed it only goes to the log
+	// (no extra window next to the docked game)
+	if (LaunchSettings::RPEmbedEnabled() && errorCategory == WindowSystem::ErrorCategory::GRAPHIC_PACKS)
 	{
-		// PixelU: no extra window next to the docked game for this one, the game keeps running
 		cemuLog_log(LogType::Force, "{}", message);
 		return;
 	}
-	wxString caption;
-	if (title.empty())
-		caption = wxASCII_STR(wxMessageBoxCaptionStr);
-	else
-		caption = wxString::FromUTF8(title);
-	RPEmbed::ShowMessage(wxString::FromUTF8(message), caption, wxOK | wxCENTRE | wxICON_ERROR); // PixelU: inside RetroPixels under --rp-embed
+	const wxString caption = title.empty() ? wxString(wxASCII_STR(wxMessageBoxCaptionStr)) : wxString::FromUTF8(title);
+	// PixelU: shown inside RetroPixels under --rp-embed
+	RPEmbed::ShowMessage(wxString::FromUTF8(message), caption, wxOK | wxCENTRE | wxICON_ERROR);
 }
 
 WindowSystem::WindowInfo& WindowSystem::GetWindowInfo()
@@ -79,104 +80,100 @@ WindowSystem::WindowInfo& WindowSystem::GetWindowInfo()
 	return g_window_info;
 }
 
+namespace
+{
+	const char* RendererTag()
+	{
+		if (!g_renderer)
+			return "";
+		switch (g_renderer->GetType())
+		{
+		case RendererAPI::OpenGL: return "[OpenGL]";
+		case RendererAPI::Vulkan: return "[Vulkan]";
+		case RendererAPI::Metal: return "[Metal]";
+		default: return "";
+		}
+	}
+
+	const char* GpuVendorTag()
+	{
+		switch (LatteGPUState.glVendor)
+		{
+		case GLVENDOR_AMD: return "[AMD GPU]";
+		case GLVENDOR_INTEL: return "[Intel GPU]";
+		case GLVENDOR_NVIDIA: return "[NVIDIA GPU]";
+		case GLVENDOR_APPLE: return "[Apple GPU]";
+		default: return "[Generic]";
+		}
+	}
+
+	std::string OnlineTag()
+	{
+		if (!ActiveSettings::IsOnlineEnabled())
+			return {};
+		switch (ActiveSettings::GetNetworkService())
+		{
+		case NetworkService::Nintendo: return " [Online]";
+		case NetworkService::Pretendo: return " [Online-Pretendo]";
+		case NetworkService::Custom: return " [Online-" + GetNetworkConfig().networkname.GetValue() + "]";
+		default: return {};
+		}
+	}
+
+	std::string RegionTag(CafeConsoleRegion region, uint16 version)
+	{
+		const char* prefix = "";
+		if (region == CafeConsoleRegion::JPN)
+			prefix = "JP ";
+		else if (region == CafeConsoleRegion::USA)
+			prefix = "US ";
+		else if (region == CafeConsoleRegion::EUR)
+			prefix = "EU ";
+		return fmt::format(" [{}v{}]", prefix, version);
+	}
+}
+
 void WindowSystem::UpdateWindowTitles(bool isIdle, bool isLoading, double fps)
 {
 	if (LaunchSettings::RPEmbedEnabled())
 	{
-		// PixelU: "PixelU - <game name>", nothing else (RetroPixels shows it)
-		std::string title = EMULATOR_NAME;
+		// PixelU: RetroPixels shows the details itself, the title is only "PixelU - <game name>"
+		std::string embedTitle(EMULATOR_NAME);
 		if (!isIdle)
 		{
-			const std::string name = CafeSystem::GetForegroundTitleName();
-			if (!name.empty())
-				title.append(" - ").append(name);
+			const std::string gameName = CafeSystem::GetForegroundTitleName();
+			if (!gameName.empty())
+				embedTitle += " - " + gameName;
 		}
-		std::shared_lock lock(g_mutex);
+		std::shared_lock guard(g_mutex);
+		if (g_mainFrame)
+			g_mainFrame->AsyncSetTitle(embedTitle);
+		return;
+	}
+
+	std::string title(BUILD_VERSION_WITH_NAME_STRING);
+	if (isIdle || isLoading)
+	{
+		if (isLoading && !isIdle)
+			title += " - Loading...";
 		if (g_mainFrame)
 			g_mainFrame->AsyncSetTitle(title);
 		return;
 	}
 
-	std::string windowText;
-	windowText = BUILD_VERSION_WITH_NAME_STRING;
-
-	if (isIdle)
-	{
-		if (g_mainFrame)
-			g_mainFrame->AsyncSetTitle(windowText);
-		return;
-	}
-	if (isLoading)
-	{
-		windowText.append(" - Loading...");
-		if (g_mainFrame)
-			g_mainFrame->AsyncSetTitle(windowText);
-		return;
-	}
-
-	const char* renderer = "";
-	if (g_renderer)
-	{
-		switch (g_renderer->GetType())
-		{
-		case RendererAPI::OpenGL:
-			renderer = "[OpenGL]";
-			break;
-		case RendererAPI::Vulkan:
-			renderer = "[Vulkan]";
-			break;
-		case RendererAPI::Metal:
-			renderer = "[Metal]";
-			break;
-		default: break;
-		}
-	}
-
-	// get GPU vendor/mode
-	const char* graphicMode = "[Generic]";
-	if (LatteGPUState.glVendor == GLVENDOR_AMD)
-		graphicMode = "[AMD GPU]";
-	else if (LatteGPUState.glVendor == GLVENDOR_INTEL)
-		graphicMode = "[Intel GPU]";
-	else if (LatteGPUState.glVendor == GLVENDOR_NVIDIA)
-		graphicMode = "[NVIDIA GPU]";
-	else if (LatteGPUState.glVendor == GLVENDOR_APPLE)
-		graphicMode = "[Apple GPU]";
-
 	const uint64 titleId = CafeSystem::GetForegroundTitleId();
-	windowText.append(fmt::format(" - FPS: {:.2f} {} {} [TitleId: {:08x}-{:08x}]", (double)fps, renderer, graphicMode, (uint32)(titleId >> 32), (uint32)(titleId & 0xFFFFFFFF)));
+	title += fmt::format(" - FPS: {:.2f} {} {} [TitleId: {:08x}-{:08x}]", fps, RendererTag(), GpuVendorTag(), (uint32)(titleId >> 32), (uint32)titleId);
+	title += OnlineTag();
+	title += ' ';
+	title += CafeSystem::GetForegroundTitleName();
+	title += RegionTag(CafeSystem::GetForegroundTitleRegion(), CafeSystem::GetForegroundTitleVersion());
 
-	if (ActiveSettings::IsOnlineEnabled())
-	{
-		if (ActiveSettings::GetNetworkService() == NetworkService::Nintendo)
-			windowText.append(" [Online]");
-		else if (ActiveSettings::GetNetworkService() == NetworkService::Pretendo)
-			windowText.append(" [Online-Pretendo]");
-		else if (ActiveSettings::GetNetworkService() == NetworkService::Custom)
-			windowText.append(" [Online-" + GetNetworkConfig().networkname.GetValue() + "]");
-	}
-	windowText.append(" ");
-	windowText.append(CafeSystem::GetForegroundTitleName());
-	// append region
-	CafeConsoleRegion region = CafeSystem::GetForegroundTitleRegion();
-	uint16 titleVersion = CafeSystem::GetForegroundTitleVersion();
-	if (region == CafeConsoleRegion::JPN)
-		windowText.append(fmt::format(" [JP v{}]", titleVersion));
-	else if (region == CafeConsoleRegion::USA)
-		windowText.append(fmt::format(" [US v{}]", titleVersion));
-	else if (region == CafeConsoleRegion::EUR)
-		windowText.append(fmt::format(" [EU v{}]", titleVersion));
-	else
-		windowText.append(fmt::format(" [v{}]", titleVersion));
-
-	std::shared_lock lock(g_mutex);
-	if (g_mainFrame)
-	{
-		g_mainFrame->AsyncSetTitle(windowText);
-		auto* pad = g_mainFrame->GetPadView();
-		if (pad)
-			pad->AsyncSetTitle(fmt::format("{} - FPS: {:.02f}", _("GamePad View").utf8_string(), fps));
-	}
+	std::shared_lock guard(g_mutex);
+	if (!g_mainFrame)
+		return;
+	g_mainFrame->AsyncSetTitle(title);
+	if (PadViewFrame* padWindow = g_mainFrame->GetPadView())
+		padWindow->AsyncSetTitle(fmt::format("{} - FPS: {:.02f}", _("GamePad View").utf8_string(), fps));
 }
 
 void WindowSystem::GetWindowSize(int& w, int& h)
@@ -187,16 +184,9 @@ void WindowSystem::GetWindowSize(int& w, int& h)
 
 void WindowSystem::GetPadWindowSize(int& w, int& h)
 {
-	if (g_window_info.pad_open)
-	{
-		w = g_window_info.pad_width;
-		h = g_window_info.pad_height;
-	}
-	else
-	{
-		w = 0;
-		h = 0;
-	}
+	const bool open = g_window_info.pad_open;
+	w = open ? g_window_info.pad_width.load() : 0;
+	h = open ? g_window_info.pad_height.load() : 0;
 }
 
 void WindowSystem::GetWindowPhysSize(int& w, int& h)
@@ -207,16 +197,9 @@ void WindowSystem::GetWindowPhysSize(int& w, int& h)
 
 void WindowSystem::GetPadWindowPhysSize(int& w, int& h)
 {
-	if (g_window_info.pad_open)
-	{
-		w = g_window_info.phys_pad_width;
-		h = g_window_info.phys_pad_height;
-	}
-	else
-	{
-		w = 0;
-		h = 0;
-	}
+	const bool open = g_window_info.pad_open;
+	w = open ? g_window_info.phys_pad_width.load() : 0;
+	h = open ? g_window_info.phys_pad_height.load() : 0;
 }
 
 double WindowSystem::GetWindowDPIScale()
@@ -226,7 +209,9 @@ double WindowSystem::GetWindowDPIScale()
 
 double WindowSystem::GetPadDPIScale()
 {
-	return g_window_info.pad_open ? g_window_info.pad_dpi_scale.load() : 1.0;
+	if (!g_window_info.pad_open)
+		return 1.0;
+	return g_window_info.pad_dpi_scale.load();
 }
 
 bool WindowSystem::IsPadWindowOpen()
@@ -239,94 +224,55 @@ bool WindowSystem::IsKeyDown(uint32 key)
 	return g_window_info.get_keystate(key);
 }
 
+namespace
+{
+	// platform key code of a PlatformKeyCodes value, 0 if there is none
+	uint32 NativeKeyCode(WindowSystem::PlatformKeyCodes key)
+	{
+		using K = WindowSystem::PlatformKeyCodes;
+#if BOOST_OS_WINDOWS
+		constexpr uint32 lctrl = VK_LCONTROL, rctrl = VK_RCONTROL, tab = VK_TAB, esc = VK_ESCAPE;
+#elif BOOST_OS_LINUX || BOOST_OS_BSD
+		constexpr uint32 lctrl = GDK_KEY_Control_L, rctrl = GDK_KEY_Control_R, tab = GDK_KEY_Tab, esc = GDK_KEY_Escape;
+#elif BOOST_OS_MACOS
+		constexpr uint32 lctrl = kVK_Control, rctrl = kVK_RightControl, tab = kVK_Tab, esc = kVK_Escape;
+#else
+		constexpr uint32 lctrl = 0, rctrl = 0, tab = 0, esc = 0;
+#endif
+		switch (key)
+		{
+		case K::LCONTROL: return lctrl;
+		case K::RCONTROL: return rctrl;
+		case K::TAB: return tab;
+		case K::ESCAPE: return esc;
+		}
+		return 0;
+	}
+}
+
 bool WindowSystem::IsKeyDown(PlatformKeyCodes platformKey)
 {
-	uint32 key = 0;
-
-	switch (platformKey)
-	{
-#if BOOST_OS_WINDOWS
-	case PlatformKeyCodes::LCONTROL:
-		key = VK_LCONTROL;
-		break;
-	case PlatformKeyCodes::RCONTROL:
-		key = VK_RCONTROL;
-		break;
-	case PlatformKeyCodes::TAB:
-		key = VK_TAB;
-		break;
-	case PlatformKeyCodes::ESCAPE:
-		key = VK_ESCAPE;
-		break;
-#elif BOOST_OS_LINUX || BOOST_OS_BSD
-	case PlatformKeyCodes::LCONTROL:
-		key = GDK_KEY_Control_L;
-		break;
-	case PlatformKeyCodes::RCONTROL:
-		key = GDK_KEY_Control_R;
-		break;
-	case PlatformKeyCodes::TAB:
-		key = GDK_KEY_Tab;
-		break;
-	case PlatformKeyCodes::ESCAPE:
-		key = GDK_KEY_Escape;
-		break;
-#elif BOOST_OS_MACOS
-	case PlatformKeyCodes::LCONTROL:
-		key = kVK_Control;
-		break;
-	case PlatformKeyCodes::RCONTROL:
-		key = kVK_RightControl;
-		break;
-	case PlatformKeyCodes::TAB:
-		key = kVK_Tab;
-		break;
-	case PlatformKeyCodes::ESCAPE:
-		key = kVK_Escape;
-		break;
-#endif
-	default:
+	const uint32 code = NativeKeyCode(platformKey);
+	if (code == 0)
 		return false;
-	}
-
-	return WindowSystem::IsKeyDown(key);
+	return IsKeyDown(code);
 }
 
 std::string WindowSystem::GetKeyCodeName(uint32 button)
 {
 #if BOOST_OS_WINDOWS
-	LONG scan_code = MapVirtualKeyA((UINT)button, MAPVK_VK_TO_VSC_EX);
-	if (HIBYTE(scan_code))
-		scan_code |= 0x100;
-
-	// because MapVirtualKey strips the extended bit for some keys
-	switch (button)
-	{
-	case VK_LEFT:
-	case VK_UP:
-	case VK_RIGHT:
-	case VK_DOWN: // arrow keys
-	case VK_PRIOR:
-	case VK_NEXT: // page up and page down
-	case VK_END:
-	case VK_HOME:
-	case VK_INSERT:
-	case VK_DELETE:
-	case VK_DIVIDE: // numpad slash
-	case VK_NUMLOCK:
-	{
-		scan_code |= 0x100; // set extended bit
-		break;
-	}
-	}
-
-	scan_code <<= 16;
-
-	char key_name[128];
-	if (GetKeyNameTextA(scan_code, key_name, std::size(key_name)) != 0)
-		return key_name;
-	else
-		return fmt::format("key_{}", button);
+	LONG scanCode = MapVirtualKeyA((UINT)button, MAPVK_VK_TO_VSC_EX);
+	if (HIBYTE(scanCode))
+		scanCode |= 0x100;
+	// MapVirtualKey loses the extended-key flag of these, GetKeyNameText needs it to name them right
+	static constexpr UINT s_extendedKeys[] = {VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN, VK_PRIOR, VK_NEXT, VK_END,
+											  VK_HOME, VK_INSERT, VK_DELETE, VK_DIVIDE, VK_NUMLOCK};
+	if (std::find(std::begin(s_extendedKeys), std::end(s_extendedKeys), (UINT)button) != std::end(s_extendedKeys))
+		scanCode |= 0x100;
+	char name[128];
+	if (GetKeyNameTextA(scanCode << 16, name, (int)std::size(name)) != 0)
+		return name;
+	return fmt::format("key_{}", button);
 #elif BOOST_OS_LINUX || BOOST_OS_BSD
 	return gdk_keyval_name(button);
 #else
@@ -341,28 +287,25 @@ bool WindowSystem::InputConfigWindowHasFocus()
 
 void WindowSystem::NotifyGameLoaded()
 {
-	std::shared_lock lock(g_mutex);
-	if (g_mainFrame)
-	{
-		g_mainFrame->OnGameLoaded();
-		g_mainFrame->UpdateSettingsAfterGameLaunch();
-	}
+	std::shared_lock guard(g_mutex);
+	if (!g_mainFrame)
+		return;
+	g_mainFrame->OnGameLoaded();
+	g_mainFrame->UpdateSettingsAfterGameLaunch();
 }
 
 void WindowSystem::NotifyGameExited()
 {
-	std::shared_lock lock(g_mutex);
+	std::shared_lock guard(g_mutex);
 	if (g_mainFrame)
 		g_mainFrame->RestoreSettingsAfterGameExited();
 }
 
 void WindowSystem::RefreshGameList()
 {
-	std::shared_lock lock(g_mutex);
+	std::shared_lock guard(g_mutex);
 	if (g_mainFrame)
-	{
 		g_mainFrame->RequestGameListRefresh();
-	}
 }
 
 void WindowSystem::CaptureInput(const ControllerState& currentState, const ControllerState& lastState)
