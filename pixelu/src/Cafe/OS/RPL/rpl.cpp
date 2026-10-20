@@ -1331,7 +1331,7 @@ void RPLLoader_AddDependency(std::string_view name, bool isMainExecutable)
 			(moduleName == "erreula" && !fsc_doesFileExist("vol/storage_mlc01/sys/title/0005001b/10051000/content/00/erreula/erreula.pack"));
 		if (missingResources)
 		{
-			cemuLog_log(LogType::Force, "Game tried to load {}.rpl from cafeLibs/ but the necessary MLC data files are not present. Using Cemu's implementation instead", moduleName);
+			cemuLog_log(LogType::Force, "Game tried to load {}.rpl from cafeLibs/ but the necessary MLC data files are not present. Using PixelU's implementation instead", moduleName);
 			useHLE = true;
 		}
 	}

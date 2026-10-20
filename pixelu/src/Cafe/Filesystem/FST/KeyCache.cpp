@@ -48,7 +48,7 @@ namespace
 		std::unique_ptr<FileStream> file(FileStream::createFile2(path));
 		if (!file)
 		{
-			WindowSystem::ShowErrorDialog(_tr("Unable to create file keys.txt\nThis can happen if Cemu does not have write permission to its own directory, the disk is full or if anti-virus software is blocking Cemu."), _tr("Error"), WindowSystem::ErrorCategory::KEYS_TXT_CREATION);
+			WindowSystem::ShowErrorDialog(_tr("Unable to create file keys.txt\nThis can happen if PixelU does not have write permission to its own directory, the disk is full or if anti-virus software is blocking PixelU."), _tr("Error"), WindowSystem::ErrorCategory::KEYS_TXT_CREATION);
 			return;
 		}
 		file->writeString(kNewKeysFile);

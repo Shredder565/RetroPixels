@@ -67,7 +67,7 @@ CubebAPI::CubebAPI(cubeb_devid devid, uint32 samplerate, uint32 channels, uint32
 	m_bufferLimit = (size_t)m_bytesPerBlock * kBlockCount;
 	m_buffer.reserve(m_bufferLimit);
 
-	if (cubeb_stream_init(s_context, &m_stream, "Cemu Cubeb output", nullptr, nullptr, devid, &params, latency,
+	if (cubeb_stream_init(s_context, &m_stream, "PixelU audio output", nullptr, nullptr, devid, &params, latency,
 	                      &CubebAPI::FillOutput, &OnStreamState, this) != CUBEB_OK)
 		throw std::runtime_error("can't initialize cubeb device");
 }
@@ -121,7 +121,7 @@ void CubebAPI::SetVolume(sint32 volume)
 
 bool CubebAPI::InitializeStatic()
 {
-	if (cubeb_init(&s_context, "Cemu Cubeb", nullptr) != CUBEB_OK)
+	if (cubeb_init(&s_context, "PixelU", nullptr) != CUBEB_OK)
 	{
 		cemuLog_log(LogType::Force, "can't create cubeb audio api");
 		return false;

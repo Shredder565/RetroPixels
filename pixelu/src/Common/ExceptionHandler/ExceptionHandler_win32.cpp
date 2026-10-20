@@ -130,7 +130,7 @@ namespace
 			else
 				cemuLog_writePlainToLog(fmt::format("Exception 0x{:08x} at 0x{:x}\n", (uint32)record->ExceptionCode, address));
 		}
-		cemuLog_writePlainToLog(fmt::format("cemu.exe at 0x{:x}\n", (uint64)GetModuleHandle(nullptr)));
+		cemuLog_writePlainToLog(fmt::format("PixelU.exe at 0x{:x}\n", (uint64)GetModuleHandle(nullptr)));
 
 		cemuLog_writePlainToLog("\n");
 #if defined(_M_X64)
