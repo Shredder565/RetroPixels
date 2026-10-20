@@ -19,30 +19,11 @@ CEXIModem::TAPServerNetworkInterface::TAPServerNetworkInterface(CEXIModem* modem
 {
 }
 
-bool CEXIModem::TAPServerNetworkInterface::Activate()
-{
-  return m_tapserver_if.Activate();
-}
+// Receiving: frames from the server are appended to the modem's receive buffer as they arrive.
 
-void CEXIModem::TAPServerNetworkInterface::Deactivate()
+void CEXIModem::TAPServerNetworkInterface::HandleReceivedFrame(std::string&& data)
 {
-  m_tapserver_if.Deactivate();
-}
-
-bool CEXIModem::TAPServerNetworkInterface::IsActivated()
-{
-  return m_tapserver_if.IsActivated();
-}
-
-bool CEXIModem::TAPServerNetworkInterface::SendAndRemoveAllHDLCFrames(std::string* send_buffer)
-{
-  const std::size_t pending_before = send_buffer->size();
-  if (!m_tapserver_if.SendAndRemoveAllHDLCFrames(send_buffer))
-    return false;
-  // Tell the modem when at least one frame went out.
-  if (send_buffer->size() < pending_before)
-    m_modem_ref->SendComplete();
-  return true;
+  m_modem_ref->AddToReceiveBuffer(std::move(data));
 }
 
 bool CEXIModem::TAPServerNetworkInterface::RecvInit()
@@ -60,9 +41,34 @@ void CEXIModem::TAPServerNetworkInterface::RecvStop()
   m_tapserver_if.RecvStop();
 }
 
-void CEXIModem::TAPServerNetworkInterface::HandleReceivedFrame(std::string&& data)
+// Sending: every complete HDLC frame in the buffer goes out and is removed from it.
+
+bool CEXIModem::TAPServerNetworkInterface::SendAndRemoveAllHDLCFrames(std::string* send_buffer)
 {
-  m_modem_ref->AddToReceiveBuffer(std::move(data));
+  const std::size_t pending_before = send_buffer->size();
+  if (!m_tapserver_if.SendAndRemoveAllHDLCFrames(send_buffer))
+    return false;
+  // Tell the modem when at least one frame went out.
+  if (send_buffer->size() < pending_before)
+    m_modem_ref->SendComplete();
+  return true;
+}
+
+// Connection lifetime.
+
+bool CEXIModem::TAPServerNetworkInterface::IsActivated()
+{
+  return m_tapserver_if.IsActivated();
+}
+
+bool CEXIModem::TAPServerNetworkInterface::Activate()
+{
+  return m_tapserver_if.Activate();
+}
+
+void CEXIModem::TAPServerNetworkInterface::Deactivate()
+{
+  m_tapserver_if.Deactivate();
 }
 
 }  // namespace ExpansionInterface
