@@ -380,29 +380,10 @@ std::vector<u32> VolumeWii::GetBanner(u32* width, u32* height) const
   return WiiSaveBanner(*title_id).GetBanner(width, height);
 }
 
-Platform VolumeWii::GetVolumeType() const
+// Size and format questions are answered by the blob the volume reads from.
+const BlobReader& VolumeWii::GetBlobReader() const
 {
-  return Platform::WiiDisc;
-}
-
-bool VolumeWii::IsDatelDisc() const
-{
-  return m_game_partition == PARTITION_NONE;
-}
-
-BlobType VolumeWii::GetBlobType() const
-{
-  return m_reader->GetBlobType();
-}
-
-u64 VolumeWii::GetDataSize() const
-{
-  return m_reader->GetDataSize();
-}
-
-DataSizeType VolumeWii::GetDataSizeType() const
-{
-  return m_reader->GetDataSizeType();
+  return *m_reader;
 }
 
 u64 VolumeWii::GetRawSize() const
@@ -410,9 +391,30 @@ u64 VolumeWii::GetRawSize() const
   return m_reader->GetRawSize();
 }
 
-const BlobReader& VolumeWii::GetBlobReader() const
+DataSizeType VolumeWii::GetDataSizeType() const
 {
-  return *m_reader;
+  return m_reader->GetDataSizeType();
+}
+
+u64 VolumeWii::GetDataSize() const
+{
+  return m_reader->GetDataSize();
+}
+
+BlobType VolumeWii::GetBlobType() const
+{
+  return m_reader->GetBlobType();
+}
+
+// Datel's unlicensed discs have no partition a game could boot from.
+bool VolumeWii::IsDatelDisc() const
+{
+  return m_game_partition == PARTITION_NONE;
+}
+
+Platform VolumeWii::GetVolumeType() const
+{
+  return Platform::WiiDisc;
 }
 
 std::array<u8, 20> VolumeWii::GetSyncHash() const

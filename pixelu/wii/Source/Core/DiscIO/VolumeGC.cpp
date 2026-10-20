@@ -132,19 +132,10 @@ std::vector<u32> VolumeGC::GetBanner(u32* width, u32* height) const
   return banner.pixels;
 }
 
-BlobType VolumeGC::GetBlobType() const
+// Size and format questions go to the blob the disc is read from.
+const BlobReader& VolumeGC::GetBlobReader() const
 {
-  return m_reader->GetBlobType();
-}
-
-u64 VolumeGC::GetDataSize() const
-{
-  return m_reader->GetDataSize();
-}
-
-DataSizeType VolumeGC::GetDataSizeType() const
-{
-  return m_reader->GetDataSizeType();
+  return *m_reader;
 }
 
 u64 VolumeGC::GetRawSize() const
@@ -152,9 +143,19 @@ u64 VolumeGC::GetRawSize() const
   return m_reader->GetRawSize();
 }
 
-const BlobReader& VolumeGC::GetBlobReader() const
+DataSizeType VolumeGC::GetDataSizeType() const
 {
-  return *m_reader;
+  return m_reader->GetDataSizeType();
+}
+
+u64 VolumeGC::GetDataSize() const
+{
+  return m_reader->GetDataSize();
+}
+
+BlobType VolumeGC::GetBlobType() const
+{
+  return m_reader->GetBlobType();
 }
 
 Platform VolumeGC::GetVolumeType() const

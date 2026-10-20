@@ -284,9 +284,10 @@ std::optional<u16> VolumeWAD::GetRevision(const Partition& partition) const
   return m_tmd.GetTitleVersion();
 }
 
-Platform VolumeWAD::GetVolumeType() const
+// A WAD is never a Datel disc or an NKit image.
+bool VolumeWAD::IsNKit() const
 {
-  return Platform::WiiWAD;
+  return false;
 }
 
 bool VolumeWAD::IsDatelDisc() const
@@ -294,9 +295,9 @@ bool VolumeWAD::IsDatelDisc() const
   return false;
 }
 
-bool VolumeWAD::IsNKit() const
+Platform VolumeWAD::GetVolumeType() const
 {
-  return false;
+  return Platform::WiiWAD;
 }
 
 std::map<Language, std::string> VolumeWAD::GetLongNames() const
@@ -325,19 +326,10 @@ std::vector<u32> VolumeWAD::GetBanner(u32* width, u32* height) const
   return WiiSaveBanner(*title_id).GetBanner(width, height);
 }
 
-BlobType VolumeWAD::GetBlobType() const
+// The blob the WAD is read from answers the size and format questions.
+const BlobReader& VolumeWAD::GetBlobReader() const
 {
-  return m_reader->GetBlobType();
-}
-
-u64 VolumeWAD::GetDataSize() const
-{
-  return m_reader->GetDataSize();
-}
-
-DataSizeType VolumeWAD::GetDataSizeType() const
-{
-  return m_reader->GetDataSizeType();
+  return *m_reader;
 }
 
 u64 VolumeWAD::GetRawSize() const
@@ -345,9 +337,19 @@ u64 VolumeWAD::GetRawSize() const
   return m_reader->GetRawSize();
 }
 
-const BlobReader& VolumeWAD::GetBlobReader() const
+DataSizeType VolumeWAD::GetDataSizeType() const
 {
-  return *m_reader;
+  return m_reader->GetDataSizeType();
+}
+
+u64 VolumeWAD::GetDataSize() const
+{
+  return m_reader->GetDataSize();
+}
+
+BlobType VolumeWAD::GetBlobType() const
+{
+  return m_reader->GetBlobType();
 }
 
 std::array<u8, 20> VolumeWAD::GetSyncHash() const
