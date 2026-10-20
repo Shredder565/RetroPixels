@@ -1,5 +1,9 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// Owner of the active recompiler (Jit64, JitArm64 or the cached
+// interpreter) and the one entry point the rest of the core uses to reach
+// it. Every call is a no-op (or returns an empty result) when no recompiler
+// is active.
 
 #pragma once
 
@@ -40,8 +44,11 @@ public:
   JitInterface& operator=(JitInterface&&) = delete;
   ~JitInterface();
 
+  // Loading a state throws away all compiled code.
   void DoState(PointerWrap& p);
 
+  // Creates and initialises the recompiler for core. Returns null (and has
+  // no recompiler) for cores that are not recompilers.
   CPUCoreBase* InitJitCore(PowerPC::CPUCore core);
   CPUCoreBase* GetCore() const;
 
@@ -51,45 +58,50 @@ public:
   bool WantsPageTableMappings() const;
 #endif
 
+  // Points PowerPCState::mem_ptr at the view matching MSR[DR] and the
+  // recompiler's fastmem mode.
   void UpdateMembase();
+  // Writes one tab-separated line per block (with profiling data if enabled).
   void JitBlockLogDump(const Core::CPUThreadGuard& guard, std::FILE* file) const;
   void WipeBlockProfilingData(const Core::CPUThreadGuard& guard);
   void RunOnBlocks(const Core::CPUThreadGuard& guard,
                    const std::function<void(const JitBlock&)>& f) const;
   std::size_t GetBlockCount() const;
 
-  // Memory Utilities
+  // Host fault handling for fastmem accesses and stack guard pages.
   bool HandleFault(uintptr_t access_address, SContext* ctx);
   bool HandleStackFault();
 
-  // Clearing CodeCache
+  // Discards all compiled code.
   void ClearCache(const Core::CPUThreadGuard& guard);
 
-  // This clear is "safe" in the sense that it's okay to run from
-  // inside a JIT'ed block: it clears the instruction cache, but not
-  // the JIT'ed code.
+  // Forgets the compiled blocks without freeing their code, so it may be
+  // called from inside compiled code.
   void ClearSafe();
 
-  // DolphinQt's JITWidget needs EraseSingleBlock. Nothing else (from outside of the Core) should
-  // use it, or else JitBlockTableModel will contain a dangling reference. If something else from
-  // outside of the Core *must* use this, consider reworking the logic in JITWidget.
+  // For the debugger's JIT block view only: removing blocks from elsewhere
+  // would leave that view with dangling references.
   void EraseSingleBlock(const JitBlock& block);
 
-  // Memory region name, free size, and fragmentation ratio
+  // Per code region: name, free bytes, fragmentation ratio.
   using MemoryStats = std::pair<std::string_view, std::pair<std::size_t, double>>;
   std::vector<MemoryStats> GetMemoryStats() const;
 
-  // Disassemble the recompiled code from a JIT block. Returns the disassembled instruction count.
+  // Disassemble a block's host code; return the instruction count.
   std::size_t DisassembleNearCode(const JitBlock& block, std::ostream& stream) const;
   std::size_t DisassembleFarCode(const JitBlock& block, std::ostream& stream) const;
 
-  // If "forced" is true, a recompile is being requested on code that hasn't been modified.
+  // Drops blocks overlapping the range. forced: recompile even though the
+  // code did not change (e.g. to add an exception check).
   void InvalidateICache(u32 address, u32 size, bool forced);
   void InvalidateICacheLine(u32 address);
+  // count consecutive 32-byte lines starting at address (0 = all of memory).
   void InvalidateICacheLines(u32 address, u32 count);
   static void InvalidateICacheLineFromJIT(JitInterface& jit_interface, u32 address);
   static void InvalidateICacheLinesFromJIT(JitInterface& jit_interface, u32 address, u32 count);
 
+  // Run-time discoveries that make the instruction at PC need a slower,
+  // checked code path; its block is recompiled with it.
   enum class ExceptionType
   {
     FIFOWrite,
@@ -99,7 +111,7 @@ public:
   void CompileExceptionCheck(ExceptionType type);
   static void CompileExceptionCheckFromJIT(JitInterface& jit_interface, ExceptionType type);
 
-  /// used for the page fault unit test, don't use outside of tests!
+  // Test hook (page fault unit test).
   void SetJit(std::unique_ptr<JitBase> jit);
 
   void Shutdown();
