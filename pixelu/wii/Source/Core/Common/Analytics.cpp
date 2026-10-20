@@ -1,73 +1,66 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Common/Analytics.h"
 
-#include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
-#include <type_traits>
 
 #include "Common/CommonTypes.h"
 #include "Common/StringUtil.h"
 #include "Common/Thread.h"
 
+// Wire format (what the analytics server parses):
+//
+//   report := version:u8(=1) (key value)*      a key is a STRING value
+//   value  := type:u8 payload
+//     STRING (0): varint length, then the bytes
+//     BOOL   (1): one byte, 0xFF or 0x00
+//     UINT   (2): varint
+//     SINT   (3): sign byte (0xFF if >= 0, else 0x00), varint of the magnitude
+//     FLOAT  (4): the 4 raw bytes of the float (native order)
+//     UINT|ARRAY (0x82): varint count, then that many varints
+//   varint := little-endian groups of 7 bits, high bit set on every byte but the last
+
 namespace Common
 {
 namespace
 {
-// Format version number, used as the first byte of every report sent.
-// Increment for any change to the wire format.
-constexpr u8 WIRE_FORMAT_VERSION = 1;
+constexpr char WIRE_FORMAT_VERSION = 1;
 
-// Identifiers for the value types supported by the analytics reporting wire
-// format.
-enum class TypeId : u8
+enum TypeTag : u8
 {
-  STRING = 0,
-  BOOL = 1,
-  UINT = 2,
-  SINT = 3,
-  FLOAT = 4,
-
-  // Flags which can be combined with other types.
-  ARRAY = 0x80,
+  TAG_STRING = 0,
+  TAG_BOOL = 1,
+  TAG_UINT = 2,
+  TAG_SINT = 3,
+  TAG_FLOAT = 4,
+  TAG_ARRAY_FLAG = 0x80,
 };
 
-TypeId operator|(TypeId l, TypeId r)
+void PutTag(std::string* out, u8 tag)
 {
-  using ut = std::underlying_type_t<TypeId>;
-  return static_cast<TypeId>(static_cast<ut>(l) | static_cast<ut>(r));
+  out->push_back(static_cast<char>(tag));
 }
 
-void AppendBool(std::string* out, bool v)
+void PutFlag(std::string* out, bool value)
 {
-  out->push_back(v ? '\xFF' : '\x00');
+  out->push_back(value ? '\xFF' : '\x00');
 }
 
-void AppendVarInt(std::string* out, u64 v)
+void PutVarInt(std::string* out, u64 value)
 {
-  do
+  for (;;)
   {
-    u8 current_byte = v & 0x7F;
-    v >>= 7;
-    current_byte |= (!!v) << 7;
-    out->push_back(current_byte);
-  } while (v);
-}
-
-void AppendBytes(std::string* out, const u8* bytes, u32 length, bool encode_length = true)
-{
-  if (encode_length)
-  {
-    AppendVarInt(out, length);
+    const u8 low = value & 0x7F;
+    value >>= 7;
+    if (value == 0)
+    {
+      out->push_back(static_cast<char>(low));
+      return;
+    }
+    out->push_back(static_cast<char>(low | 0x80));
   }
-  out->append(reinterpret_cast<const char*>(bytes), length);
-}
-
-void AppendType(std::string* out, TypeId type)
-{
-  out->push_back(static_cast<u8>(type));
 }
 }  // namespace
 
@@ -78,14 +71,11 @@ AnalyticsReportBuilder::AnalyticsReportBuilder()
 
 void AnalyticsReportBuilder::AppendSerializedValue(std::string* report, std::string_view v)
 {
-  AppendType(report, TypeId::STRING);
-  AppendBytes(report, reinterpret_cast<const u8*>(v.data()), static_cast<u32>(v.size()));
+  PutTag(report, TAG_STRING);
+  PutVarInt(report, static_cast<u32>(v.size()));
+  report->append(v.data(), static_cast<u32>(v.size()));
 }
 
-// We can't remove this overload despite the string_view overload due to the fact that
-// pointers can implicitly convert to bool, so if we removed the overload, then all
-// const char strings passed in would begin forwarding to the bool overload,
-// which is definitely not what we want to occur.
 void AnalyticsReportBuilder::AppendSerializedValue(std::string* report, const char* v)
 {
   AppendSerializedValue(report, std::string_view(v));
@@ -93,21 +83,23 @@ void AnalyticsReportBuilder::AppendSerializedValue(std::string* report, const ch
 
 void AnalyticsReportBuilder::AppendSerializedValue(std::string* report, bool v)
 {
-  AppendType(report, TypeId::BOOL);
-  AppendBool(report, v);
+  PutTag(report, TAG_BOOL);
+  PutFlag(report, v);
 }
 
 void AnalyticsReportBuilder::AppendSerializedValue(std::string* report, u64 v)
 {
-  AppendType(report, TypeId::UINT);
-  AppendVarInt(report, v);
+  PutTag(report, TAG_UINT);
+  PutVarInt(report, v);
 }
 
 void AnalyticsReportBuilder::AppendSerializedValue(std::string* report, s64 v)
 {
-  AppendType(report, TypeId::SINT);
-  AppendBool(report, v >= 0);
-  AppendVarInt(report, static_cast<u64>(std::abs(v)));
+  PutTag(report, TAG_SINT);
+  PutFlag(report, v >= 0);
+  // Magnitude computed in unsigned arithmetic so INT64_MIN works too.
+  const u64 bits = static_cast<u64>(v);
+  PutVarInt(report, v >= 0 ? bits : ~bits + 1);
 }
 
 void AnalyticsReportBuilder::AppendSerializedValue(std::string* report, u32 v)
@@ -122,27 +114,30 @@ void AnalyticsReportBuilder::AppendSerializedValue(std::string* report, s32 v)
 
 void AnalyticsReportBuilder::AppendSerializedValue(std::string* report, float v)
 {
-  AppendType(report, TypeId::FLOAT);
-  AppendBytes(report, reinterpret_cast<u8*>(&v), sizeof(v), false);
+  PutTag(report, TAG_FLOAT);
+  char bytes[sizeof(v)];
+  std::memcpy(bytes, &v, sizeof(v));
+  report->append(bytes, sizeof(bytes));
 }
 
 void AnalyticsReportBuilder::AppendSerializedValueVector(std::string* report,
                                                          const std::vector<u32>& v)
 {
-  AppendType(report, TypeId::UINT | TypeId::ARRAY);
-  AppendVarInt(report, v.size());
-  for (u32 x : v)
-    AppendVarInt(report, x);
+  PutTag(report, TAG_UINT | TAG_ARRAY_FLAG);
+  PutVarInt(report, v.size());
+  for (const u32 element : v)
+    PutVarInt(report, element);
 }
 
 AnalyticsReporter::AnalyticsReporter()
 {
-  m_reporter_thread = std::thread(&AnalyticsReporter::ThreadProc, this);
+  // Started here rather than in the initialiser list: the thread uses members declared after
+  // m_reporter_thread.
+  m_reporter_thread = std::thread([this] { ThreadProc(); });
 }
 
 AnalyticsReporter::~AnalyticsReporter()
 {
-  // Set the exit request flag and wait for the thread to honor it.
   m_reporter_stop_request.Set();
   m_reporter_event.Set();
   m_reporter_thread.join();
@@ -151,55 +146,48 @@ AnalyticsReporter::~AnalyticsReporter()
 void AnalyticsReporter::Send(AnalyticsReportBuilder&& report)
 {
 #if defined(USE_ANALYTICS) && USE_ANALYTICS
-  // Put a bound on the size of the queue to avoid uncontrolled memory growth.
-  constexpr u32 QUEUE_SIZE_LIMIT = 25;
-  if (m_reports_queue.Size() < QUEUE_SIZE_LIMIT)
-  {
-    m_reports_queue.Push(report.Consume());
-    m_reporter_event.Set();
-  }
+  // Don't let reports pile up without bound (e.g. while no backend is set).
+  constexpr std::size_t MAX_QUEUED_REPORTS = 25;
+  if (m_reports_queue.Size() >= MAX_QUEUED_REPORTS)
+    return;
+  m_reports_queue.Push(report.Consume());
+  m_reporter_event.Set();
+#else
+  static_cast<void>(report);
 #endif
 }
 
 void AnalyticsReporter::ThreadProc()
 {
-  Common::SetCurrentThreadName("Analytics");
-  while (true)
+  SetCurrentThreadName("Analytics");
+
+  for (;;)
   {
     m_reporter_event.Wait();
     if (m_reporter_stop_request.IsSet())
-    {
       return;
-    }
 
+    // Without a backend, reports stay queued until one is set.
     while (!m_reports_queue.Empty())
     {
-      std::shared_ptr<AnalyticsReportingBackend> backend(m_backend);
-
-      if (backend)
-      {
-        std::string report;
-        m_reports_queue.Pop(report);
-        backend->Send(std::move(report));
-      }
-      else
-      {
+      const std::shared_ptr<AnalyticsReportingBackend> backend = m_backend;
+      if (!backend)
         break;
-      }
 
-      // Recheck after each report sent.
+      std::string report;
+      m_reports_queue.Pop(report);
+      backend->Send(std::move(report));
+
       if (m_reporter_stop_request.IsSet())
-      {
         return;
-      }
     }
   }
 }
 
 void StdoutAnalyticsBackend::Send(std::string report)
 {
-  printf("Analytics report sent:\n%s",
-         HexDump(reinterpret_cast<const u8*>(report.data()), report.size()).c_str());
+  std::printf("Analytics report sent:\n%s",
+              HexDump(reinterpret_cast<const u8*>(report.data()), report.size()).c_str());
 }
 
 HttpAnalyticsBackend::HttpAnalyticsBackend(std::string endpoint) : m_endpoint(std::move(endpoint))

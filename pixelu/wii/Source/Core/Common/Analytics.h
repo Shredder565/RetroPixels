@@ -1,10 +1,10 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <chrono>
 #include <memory>
+#include <mutex>
 #include <shared_mutex>
 #include <string>
 #include <string_view>
@@ -18,40 +18,27 @@
 #include "Common/HttpRequest.h"
 #include "Common/SPSCQueue.h"
 
-// Utilities for analytics reporting in Dolphin. This reporting is designed to
-// provide anonymous data about how well Dolphin performs in the wild. It also
-// allows developers to declare trace points in Dolphin's source code and get
-// information about what games trigger these conditions.
+// Anonymous usage/performance reports.
 //
-// This unfortunately implements Yet Another Serialization Framework within
-// Dolphin. We cannot really use ChunkFile because there is precedents for
-// backwards incompatible changes in the ChunkFile format. We could use
-// something like protobuf but setting up external dependencies is Hard™.
+// A report is a flat sequence of key/value pairs in a small binary wire format (see
+// Analytics.cpp), built with AnalyticsReportBuilder and handed to an AnalyticsReporter, which
+// sends it from a background thread through a pluggable backend:
 //
-// Example usage:
+//   reporter.Send(reporter.Builder().AddData("my_key", 42).AddData("other_key", false));
 //
-// static auto s_reporter = std::make_unique<AnalyticsReporter>();
-// if (user_gave_consent)
-// {
-//     s_reporter->SetBackend(std::make_unique<MyReportingBackend>());
-// }
-// s_reporter->Send(s_reporter->Builder()
-//     .AddData("my_key", 42)
-//     .AddData("other_key", false));
+// Nothing is sent unless a backend was set, which requires the user's consent.
 
 namespace Common
 {
-// Generic interface for an analytics reporting backends. The main
-// implementation used in Dolphin can be found in Core/DolphinAnalytics.h.
 class AnalyticsReportingBackend
 {
 public:
   virtual ~AnalyticsReportingBackend() = default;
-  // Called from the AnalyticsReporter backend thread.
+  // Runs on the reporter thread.
   virtual void Send(std::string report) = 0;
 };
 
-// Builder object for an analytics report.
+// Accumulates serialised key/value pairs. Thread-safe.
 class AnalyticsReportBuilder
 {
 public:
@@ -65,27 +52,27 @@ public:
   {
     if (this != &other)
     {
-      std::string other_report = other.Get();
-      std::lock_guard lk{m_lock};
-      m_report = std::move(other_report);
+      std::string copy = other.Get();
+      std::lock_guard guard{m_lock};
+      m_report = std::move(copy);
     }
     return *this;
   }
 
-  // Append another builder to this one.
+  // Appends the other builder's pairs (its version byte included, as the format expects).
   AnalyticsReportBuilder& AddBuilder(const AnalyticsReportBuilder& other)
   {
-    // Get before locking the object to avoid deadlocks with this += this.
-    std::string other_report = other.Get();
-    std::lock_guard lk{m_lock};
-    m_report += other_report;
+    // Copy first: `other` may be *this.
+    std::string addition = other.Get();
+    std::lock_guard guard{m_lock};
+    m_report += addition;
     return *this;
   }
 
   template <typename T>
   AnalyticsReportBuilder& AddData(std::string_view key, const T& value)
   {
-    std::lock_guard lk{m_lock};
+    std::lock_guard guard{m_lock};
     AppendSerializedValue(&m_report, key);
     AppendSerializedValue(&m_report, value);
     return *this;
@@ -94,7 +81,7 @@ public:
   template <typename T>
   AnalyticsReportBuilder& AddData(std::string_view key, const std::vector<T>& value)
   {
-    std::lock_guard lk{m_lock};
+    std::lock_guard guard{m_lock};
     AppendSerializedValue(&m_report, key);
     AppendSerializedValueVector(&m_report, value);
     return *this;
@@ -102,19 +89,20 @@ public:
 
   std::string Get() const
   {
-    std::shared_lock lk{m_lock};
+    std::shared_lock guard{m_lock};
     return m_report;
   }
 
-  // More efficient version of Get().
+  // Takes the serialised report out of the builder.
   std::string Consume()
   {
-    std::lock_guard lk{m_lock};
+    std::lock_guard guard{m_lock};
     return std::move(m_report);
   }
 
 protected:
   static void AppendSerializedValue(std::string* report, std::string_view v);
+  // Needed so string literals don't pick the bool overload.
   static void AppendSerializedValue(std::string* report, const char* v);
   static void AppendSerializedValue(std::string* report, bool v);
   static void AppendSerializedValue(std::string* report, u64 v);
@@ -129,30 +117,28 @@ protected:
   std::string m_report;
 };
 
+// Queues reports and sends them on its own thread.
 class AnalyticsReporter
 {
 public:
   AnalyticsReporter();
   ~AnalyticsReporter();
 
-  // Sets a reporting backend and enables sending reports. Do not set a remote
-  // backend without user consent.
+  // Enables sending (queued reports go out now). Only with the user's consent.
   void SetBackend(std::unique_ptr<AnalyticsReportingBackend> backend)
   {
     m_backend = std::move(backend);
-    m_reporter_event.Set();  // In case reports are waiting queued.
+    m_reporter_event.Set();
   }
 
-  // Gets the base report builder which is closed for each subsequent report
-  // being sent. DO NOT use this builder to send a report. Only use it to add
-  // new fields that should be globally available.
+  // Fields added here are copied into every report made with Builder(). Don't send this one.
   AnalyticsReportBuilder& BaseBuilder() { return m_base_builder; }
-  // Gets a cloned builder that can be used to send a report.
+  // A copy of the base builder to fill in and send.
   AnalyticsReportBuilder Builder() const { return m_base_builder; }
-  // Enqueues a report for sending. Consumes the report builder.
-  void Send(AnalyticsReportBuilder&& report);
 
-  // For convenience.
+  // Queues the report (consuming the builder). Dropped if too many are already waiting, and
+  // always dropped in builds without USE_ANALYTICS.
+  void Send(AnalyticsReportBuilder&& report);
   void Send(AnalyticsReportBuilder& report) { Send(std::move(report)); }
 
 protected:
@@ -167,16 +153,14 @@ protected:
   SPSCQueue<std::string> m_reports_queue;
 };
 
-// Analytics backend to be used for debugging purpose, which dumps reports to
-// stdout.
+// Prints a hex dump of each report to stdout (for debugging).
 class StdoutAnalyticsBackend : public AnalyticsReportingBackend
 {
 public:
   void Send(std::string report) override;
 };
 
-// Analytics backend that POSTs data to a remote HTTP(s) endpoint. WARNING:
-// remember to get explicit user consent before using.
+// POSTs each report to an HTTP(S) endpoint.
 class HttpAnalyticsBackend : public AnalyticsReportingBackend
 {
 public:
