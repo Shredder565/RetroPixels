@@ -99,12 +99,12 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 
 | Kind | Lines | Share |
 |---|---:|---:|
-| Original (RetroPixels) | 63967 | 14.8% |
-| Dolphin, untouched | 359457 | 82.9% |
+| Original (RetroPixels) | 69357 | 16.0% |
+| Dolphin, untouched | 353211 | 81.7% |
 | Dolphin, with PixelU changes | 4224 | 1.0% |
 | PixelU-added files (no original mark) | 0 | 0.0% |
 | Third-party | 5763 | 1.3% |
-| **All** | **433411** | 100% |
+| **All** | **432555** | 100% |
 
 | Module | Lines | Original lines | Status |
 |---|---:|---:|---|
@@ -129,9 +129,9 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/HW (top level) | 11546 | 0 | Dolphin |
 | Core/Core/HW/DSPHLE | 7731 | 0 | Dolphin |
 | Core/Core/HW/DSPLLE | 573 | 0 | Dolphin |
-| Core/Core/HW/DVD | 5354 | 0 | Dolphin |
+| Core/Core/HW/DVD | 4942 | 2244 | mixed (45% original) |
 | Core/Core/HW/EXI | 8449 | 0 | Dolphin, 91 lines third-party |
-| Core/Core/HW/GCMemcard | 3590 | 0 | Dolphin |
+| Core/Core/HW/GCMemcard | 3145 | 3145 | original |
 | Core/Core/HW/HSP | 1053 | 0 | Dolphin |
 | Core/Core/HW/MagCard | 1368 | 0 | Dolphin |
 | Core/Core/HW/SI | 3611 | 0 | Dolphin |
@@ -156,7 +156,7 @@ Totals (lines in pixelu/wii/Source, h/hpp/c/cpp/mm/m/inc/inl/S files):
 | Core/Core/IOS/WFS | 1346 | 0 | Dolphin |
 | Core/Core/PowerPC (top level) | 9959 | 9959 | original |
 | Core/Core/PowerPC/CachedInterpreter | 1083 | 1083 | original |
-| Core/Core/PowerPC/Interpreter | 4390 | 4390 | original |
+| Core/Core/PowerPC/Interpreter | 4391 | 4391 | original |
 | Core/Core/PowerPC/Jit64 | 10326 | 0 | Dolphin |
 | Core/Core/PowerPC/Jit64Common | 2549 | 0 | Dolphin |
 | Core/Core/PowerPC/JitCommon | 2294 | 0 | Dolphin |
@@ -235,10 +235,10 @@ batch rewrites them.
 | W5 | DiscIO: blob formats and compression | 7584 | 7584 | original |
 | W6 | DiscIO: volumes, filesystems, verifier, Riivolution, NAND import | 8290 | 8290 | original |
 | W7 | PowerPC: CPU state, MMU, caches, analyst, tables, symbols, breakpoints, GDB stub | 10740 | 10740 | original |
-| W8 | PowerPC: interpreter and cached interpreter | 5473 | 5473 | original |
+| W8 | PowerPC: interpreter and cached interpreter | 5474 | 5474 | original |
 | W9 | PowerPC: JIT common and Jit64 | 15169 | 0 | Dolphin |
 | W10 | HW: memory map, MMIO, CPU/PI/MI/VI/AI/DSP interfaces, timers, IPC, CoreTiming | 9898 | 0 | Dolphin |
-| W11 | HW: DVD and GameCube memory cards | 8944 | 0 | Dolphin |
+| W11 | HW: DVD and GameCube memory cards | 8087 | 5389 | mixed (67% original) |
 | W12 | HW: EXI devices (memory card slots, BBA, mic, modem, IPL) | 8358 | 0 | Dolphin |
 | W13 | HW: SI, pads, keyboard, GBA link, HSP, Triforce, MagCard | 11839 | 0 | Dolphin |
 | W14 | HW: Wii Remote (common, emulated, real) | 12108 | 0 | Dolphin |
@@ -990,3 +990,110 @@ the third-party Externals directly) before the submodule can go.
     - tools/verbatim-audit.py (min run 8): the only runs left in W8 files
       are in headers: the handler declaration list, the class
       declarations and the operand structs. No function body is flagged.
+
+- W11 log: rewrote 19 of the 21 W11 files, the DVD drive and memory card
+  code (5389 lines now, from 6246): `DVD/DVDInterface`, `DVD/DVDMath`,
+  `DVD/DVDThread`, `DVD/FileMonitor`, `GCMemcard/GCIFile`,
+  `GCMemcard/GCMemcard`, `GCMemcard/GCMemcardBase.h`,
+  `GCMemcard/GCMemcardDirectory`, `GCMemcard/GCMemcardRaw` and
+  `GCMemcard/GCMemcardUtils`. Every rewritten file starts with the
+  original-code header and has no Dolphin copyright or SPDX line. File names,
+  public declarations, the DI register unions, the `ReadRequest` layout
+  (stored raw in savestates), savestate `DoState` order and bytes, the
+  CoreTiming event names and their registration order, the DVD command
+  handling and error codes, the DVDMath numbers, the memory card on-disk
+  formats and all translatable strings are unchanged.
+  - `DVDMath`: seek and read timing from the disc geometry (inner/outer
+    radius, track pitch, layer size) with one throughput-curve table for GC
+    and Wii discs. The results are bit-identical to the old code.
+  - `DVDInterface`: register MMIO, command decoding (reads, disc ID,
+    inquiry, seek, request error, audio stream and status, stop motor,
+    audio buffer config, the Wii-only commands), error codes, interrupt
+    flags and masks, lid/cover handling, disc change and auto change, DTK
+    audio streaming and the read-ahead timing model. The streaming and
+    read-ahead state are grouped into two private structs, but are still
+    saved field by field in the old order.
+  - `DVDThread`: worker thread, read queue, result map, the timing of read
+    completion events, and the disc-not-found and read-failure messages.
+    `FileMonitor`: same FILEMON lines and log levels, same skipping of
+    repeats.
+  - `GCMemcard`: header, directory and BAT structures, checksums, serial
+    numbers, format/create/open (with the same error bits for every kind of
+    damage), import/export/delete, save data access, comments, banner and
+    animated icon decoding, and the PSO and F-Zero GX re-signing.
+    `GCMemcardUtils`: GCI/GCS/SAV reading and writing from one table of
+    container layouts, identity checks and default names.
+  - `GCMemcardRaw`: the raw image card and its flush thread.
+    `GCMemcardDirectory`: the GCI folder card (choosing which saves to load,
+    building the system area, block mapping for reads and writes, keeping
+    the saves in step with directory writes, flushing to .gci files and
+    renaming deleted saves to .deleted, migration from a raw card,
+    NetPlay file lists). `GCIFile` and `GCMemcardBase.h`.
+  - Deliberate differences (bug fixes, nothing a game sees):
+    - `BlockAlloc::ClearBlocks` stops after BAT_SIZE steps, so a BAT with
+      a cycle no longer hangs.
+    - `GCMemcard::GetSaveData` refuses a block chain that leaves the card
+      (the old code read past the data blocks).
+    - `GCMemcard::ImportFile` pads a save whose block list is shorter than
+      its entry's block count with erased blocks (the old code read past
+      the vector, so the card got heap garbage). If the BAT runs out in the
+      middle of an import it reports OUTOFBLOCKS with a "Fatal Error" panic
+      instead of writing out of bounds.
+    - `GCMemcard::PSO_MakeSaveGameValid` does nothing for a PSO save with
+      fewer than 2 blocks (the old code wrote out of bounds).
+    - Log and debug messages that users don't see are reworded or merged.
+      `GCMemcardDirectory::Write` no longer logs every write whose length
+      isn't 0x80. The compiled-out `_WRITE_MC_HEADER` debug code is gone.
+  - Checked: old and new code side by side on the same inputs, using the
+    untouched W10 files on both sides, with identical output streams (only
+    hashes were kept):
+    - DVDMath over grids of offsets/distances/speeds: 4,809,145 values
+      bit-identical at -O0, -O2 and -O2 with FMA.
+    - DVD: a fake system (CoreTiming queue, memory, MMIO, synthetic GC and
+      Wii discs, file monitor) running random DI command sequences:
+      registers, interrupts, scheduled event cycles, DMA bytes, DTK
+      samples, panics/OSD messages and savestate bytes after each step, plus
+      a savestate load round trip. 400 seeds, about 7M lines.
+    - Memory card, about 1,180 seeds over five scenarios:
+      - static and member Format.
+      - Header/Directory/BAT operations and their checksums and error bits.
+      - Create plus random import/remove/export/query sequences (including
+        PSO and F-Zero saves, TITLEPRESENT, out of blocks/entries, banner,
+        animation and comment decoding), Save and Open.
+      - 12 kinds of damaged cards (bit flips in each area, bad sizes, free
+        count, data in the unused area, dir/BAT inconsistency, size field,
+        counters), opened and used.
+      - GCI/GCS/SAV write/read round trips and damaged or random files,
+        identity checks.
+      - GCI folders with valid, duplicate, oversized, truncated and
+        other-game saves, both CurrentGameOnly settings and MC_SYSTEM_AREA
+        files, driven by game-like write sequences: GetFileNamesForGameID,
+        card reads, ClearBlock, savestate bytes and load round trips, the
+        output folder after each flush and at destruction, and migration.
+      - Raw cards (new, existing and odd-sized files): read/write/clear
+        with valid and invalid addresses, savestate bytes and the file
+        written at shutdown.
+      The harness keeps block lists matching their block counts, because
+      the old code has undefined behaviour otherwise (see above).
+  - Compile check: the 10 W11 .cpp files and the 20 non-Qt files that include
+    W11 headers (boot, config, EXI, SI, Triforce, IOS DI/MIOS, Movie,
+    NetPlay, System, HW), with g++ and with clang for x86_64-w64-windows-gnu.
+    The rewritten files (headers included) are clean under clang with
+    `-Wall -Wextra -Wconversion -Wsign-compare -Wshadow`. Integer
+    narrowing, sign changes and int/float conversions are written as
+    explicit casts, keeping the same values (MSVC /W4 with warnings as
+    errors). Other failures match
+    the base tree exactly (missing SFML/glslang/UnixUtil headers here, and
+    MinGW's missing `std::expected`). The DolphinQt users (GCMemcardManager,
+    GCMemcardCreateNewDialog, GameCubePane, ...) can't be compiled here
+    because there are no Qt headers. They only use declarations that are
+    unchanged.
+  - Verbatim audit (`verbatim-audit.py wii 8`): the runs left in W11 files
+    are all public declarations in headers (struct/class layouts, enums,
+    member lists). No run is left inside a function body.
+  - Not rewritten: `DVD/AMMediaboard.cpp/.h` (Triforce media board, 2698
+    lines). It emulates an undocumented, reverse-engineered protocol
+    (network sockets, the media board's command set and memory map). The
+    only description of its behaviour is the existing code, so it can't be
+    rewritten clean-room, and it can't be tested here without Triforce
+    software. It is unchanged and keeps its original header.
