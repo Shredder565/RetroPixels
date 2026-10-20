@@ -463,17 +463,19 @@ bool VolumeVerifier::CheckPartition(const Partition& partition)
     return false;
   }
 
-  // How bad a broken partition is depends on what it is for.
-  Severity severity = Severity::Medium;
-  if (*type == PARTITION_DATA || *type == PARTITION_INSTALL)
-    severity = Severity::High;
-  else if (*type == PARTITION_UPDATE)
-    severity = Severity::Low;
-
+  // How bad a broken partition is depends on what it is for: the game itself matters most, a
+  // system update least.
+  const auto severity = [t = *type] {
+    if (t == PARTITION_UPDATE)
+      return Severity::Low;
+    return t == PARTITION_DATA || t == PARTITION_INSTALL ? Severity::High : Severity::Medium;
+  }();
   const std::string name = GetPartitionName(type);
 
-  if (partition.offset % VolumeWii::BLOCK_TOTAL_SIZE != 0 ||
-      m_volume.PartitionOffsetToRawOffset(0, partition) % VolumeWii::BLOCK_TOTAL_SIZE != 0)
+  // Both where the partition starts and where its data starts must be on a block boundary.
+  const auto on_boundary = [](u64 offset) { return offset % VolumeWii::BLOCK_TOTAL_SIZE == 0; };
+  if (!on_boundary(partition.offset) ||
+      !on_boundary(m_volume.PartitionOffsetToRawOffset(0, partition)))
   {
     AddProblem(Severity::Medium,
                Common::FmtFormatT("The {0} partition is not properly aligned.", name));
@@ -679,7 +681,10 @@ void VolumeVerifier::CheckVolumeSize()
   u64 size = m_volume.GetDataSize();
   bool size_known = m_data_size_type != DataSizeType::UpperBound;
 
-  if (dual_layer_game && m_biggest_referenced_offset <= SL_DVD_R_SIZE)
+  // A dual-layer game whose data all fits on one layer has had content removed.
+  const bool squeezed_onto_one_layer =
+      dual_layer_game && m_biggest_referenced_offset <= SL_DVD_R_SIZE;
+  if (squeezed_onto_one_layer)
   {
     AddProblem(Severity::Medium,
                Common::GetStringT(
@@ -688,7 +693,8 @@ void VolumeVerifier::CheckVolumeSize()
                    "This problem generally only exists in illegal copies of games."));
   }
 
-  if (m_data_size_type != DataSizeType::Accurate)
+  const bool size_is_stored = m_data_size_type == DataSizeType::Accurate;
+  if (!size_is_stored)
   {
     AddProblem(Severity::Low,
                Common::GetStringT("The format that the disc image is saved in does not "
