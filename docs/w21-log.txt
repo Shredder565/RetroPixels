@@ -1,0 +1,90 @@
+- W21 log: rewrote all 69 W21 files, boot, configuration, debugger, FIFO
+  player and HLE (13197 lines now, from 13282): `Core/Boot`, `Core/Config`,
+  `Core/ConfigLoaders`, `Core/Debugger`, `Core/FifoPlayer` and `Core/HLE`.
+  Every rewritten file starts with the original-code header and has no
+  Dolphin copyright or SPDX line. File names, public declarations and
+  layouts, config keys (section, system, name, default and type of every
+  setting), boot memory contents, register/SPR/MSR values, boot failure
+  messages, the DFF file format, debugger and FIFO results, the HLE hook
+  table (all 23 entries, same order, names, types and flags) and hook
+  addresses, savestate/NetPlay/movie hooks and all translatable strings are
+  unchanged.
+  - `Config`: Main, Graphics, Netplay, SYSCONF, FreeLook, UI, Session,
+    Achievement and Wiimote settings, and DefaultLocale (system language,
+    country and region guesses from the host locale).
+  - `ConfigLoaders`: base INI/SYSCONF layer, game INI layers (game ID,
+    revision and region fallbacks, controller profiles), NetPlay and movie
+    layers, and IsSettingSaveable.
+  - `Debugger`: BranchWatch, CodeTrace, Debugger_SymbolMap, Dump, OSThread,
+    PPCDebugInterface and RSO.
+  - `FifoPlayer`: FifoDataFile (DFF load/save, same alerts), FifoPlayer
+    (frame and object ranges, register and texture memory loading, BAT
+    setup, frame partitioning and timing) and FifoRecorder.
+  - `HLE`: hook table, patching and unpatching, the OSReport/printf-style
+    hooks with the same quirks for odd conversions (`*` widths and
+    precisions, `%.0s`, `%n`), and the SVR4 va_list walker.
+  - `Boot`: file type detection and M3U handling, BS2/IPL loading with the
+    same known-dump CRC checks, the emulated BS2 for GC and Wii (BAT setup,
+    apploader, low-memory globals, SYSCONF/setting.txt, IOS boot), WAD and
+    NAND title boot, state flags, Riivolution patches, and the DOL (with
+    Wii U ancast images) and ELF readers.
+  - Deliberate differences (bug fixes, nothing a game sees):
+    - `Config::GetInfoForWiimoteSource`: an index outside 0-4 returns the
+      balance board entry instead of reading out of range.
+    - DefaultLocale: an unreachable fallback branch is gone.
+    - Movie config loader: the video backend name is read with strnlen,
+      so a full (unterminated) 16-byte field no longer reads past the
+      header.
+    - `RSOView::LoadInternals`/`LoadExternals` fill the internals and
+      externals views (the old code appended both tables to the imports
+      view).
+    - `CDump::Read32` returns UINT32_MAX for a word past the end of a
+      truncated record instead of reading out of bounds.
+    - FifoDataFile writes the reserved/padding bytes of the header, frame
+      and memory-update entries as zero (they were uninitialised), and
+      zero-initialises a memory-update entry before reading it, so a failed
+      read no longer leaves indeterminate fields.
+    - DolReader initialises `m_is_valid` and `m_is_wii` to false
+      (`m_is_wii` was uninitialised for files shorter than 0x100 bytes).
+    - Assert expression texts differ.
+  - Checked: old and new code side by side on synthetic inputs only (no
+    game data), using the base versions of all non-W21 files on both
+    sides, comparing hashes of the output streams:
+    - Config: all 450 declared settings dumped under 38 locale
+      configurations, plus 200 random sequences over the path, region,
+      ISO and USB helpers.
+    - ConfigLoaders: 300 seeds (8 cases each) of random INI trees, SYSCONF
+      stores, game IDs/revisions, controller profiles, NetPlay settings and
+      DTM headers; layer contents, saved files, SYSCONF writes and DTM
+      output.
+    - Debugger: 1100 seeds of random BranchWatch, CodeTrace, OSThread,
+      RSO, call stack, PPCDebugInterface and Dump sequences over fake RAM.
+    - FifoPlayer: 400 seeds of synthetic DFF files (valid, truncated and
+      damaged) and command streams through load, save, playback (with
+      looping, frame/object ranges, early memory updates) and recording;
+      RAM, texture memory, registers, BATs and alerts.
+    - HLE: 500 seeds fuzzing format strings, va_list walks, hook-table
+      operation sequences and every hook body against synthetic guest
+      state.
+    - Boot: 400 seeds of synthetic DOL (including ancast), ELF, M3U, IPL
+      and WAD-style inputs through the readers, GenerateFromFile and
+      BootUp for 7 boot kinds, with a fake apploader, file system, disc and
+      IOS: guest memory, registers, SPRs, MSR, logs, alerts and NAND
+      writes. The harness skips `IsWii`/entry point for DOLs shorter than
+      0x100 bytes because the old value is uninitialised (see above).
+  - Compile check: the W21 .cpp files are clean with clang `-Wall -Wextra
+    -Wconversion -Wsign-compare -Wshadow-all -Wshorten-64-to-32`, on Linux
+    and for x86_64-w64-windows-gnu. The 44 other files that include W21
+    headers (BootManager, ConfigManager, Core, Movie, NetPlay client and
+    server, IOS, WiiRoot, PatchEngine, ActionReplay, HW, the PowerPC
+    interpreters, JITs, breakpoints and symbol DB, Riivolution, VideoCommon
+    BP/opcode/texture cache, three DolphinQt files) compile or fail file
+    for file exactly as on the base tree, on both targets (15 and 17
+    failures, from headers that are missing here, such as Qt and some
+    third-party libraries).
+  - Verbatim audit (`verbatim-audit.py wii 8`): no run of 8 or more lines
+    is left in any W21 .cpp file. The runs left in W21 headers are public
+    declarations (settings lists, struct layouts, enums, member lists).
+  - Not rewritten: nothing. The ancast AES keys and IV in DolReader.cpp were
+    already in the base tree and are unchanged; no keys, firmware or game
+    data were added.
