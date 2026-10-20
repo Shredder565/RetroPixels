@@ -1,10 +1,11 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DiscIO/VolumeFileBlobReader.h"
 
 #include <memory>
+#include <string>
 #include <string_view>
+#include <utility>
 
 #include "DiscIO/Filesystem.h"
 #include "DiscIO/Volume.h"
@@ -19,39 +20,37 @@ std::unique_ptr<VolumeFileBlobReader> VolumeFileBlobReader::Create(const Volume&
   if (!file_system)
     return nullptr;
 
-  std::unique_ptr<FileInfo> file_info = file_system->FindFileInfo(file_path);
-  if (!file_info || file_info->IsDirectory())
+  const std::unique_ptr<FileInfo> info = file_system->FindFileInfo(file_path);
+  if (!info || info->IsDirectory())
     return nullptr;
 
-  return std::unique_ptr<VolumeFileBlobReader>{
-      new VolumeFileBlobReader(volume, partition, std::move(file_info))};
+  return std::unique_ptr<VolumeFileBlobReader>(new VolumeFileBlobReader(
+      volume, partition, std::string(file_path), info->GetOffset(), info->GetSize()));
 }
 
 VolumeFileBlobReader::VolumeFileBlobReader(const Volume& volume, const Partition& partition,
-                                           std::unique_ptr<FileInfo> file_info)
-    : m_volume(volume), m_partition(partition), m_file_info(std::move(file_info))
+                                           std::string file_path, u64 file_offset, u64 file_size)
+    : m_volume(volume), m_partition(partition), m_file_path(std::move(file_path)),
+      m_file_offset(file_offset), m_file_size(file_size)
 {
 }
 
-// This is defined here instead of the header so that the definition of FileInfo is visible when
-// m_file_info is destroyed, preventing a compile error caused by calling unique_ptr's destructor
-// with an incomplete type.
 VolumeFileBlobReader::~VolumeFileBlobReader() = default;
 
 std::unique_ptr<BlobReader> VolumeFileBlobReader::CopyReader() const
 {
-  ASSERT_MSG(DISCIO, false, "Unimplemented");
-  return nullptr;
+  return std::unique_ptr<BlobReader>(
+      new VolumeFileBlobReader(m_volume, m_partition, m_file_path, m_file_offset, m_file_size));
 }
 
 u64 VolumeFileBlobReader::GetDataSize() const
 {
-  return m_file_info->GetSize();
+  return m_file_size;
 }
 
 u64 VolumeFileBlobReader::GetRawSize() const
 {
-  return GetDataSize();
+  return m_file_size;
 }
 
 u64 VolumeFileBlobReader::GetBlockSize() const
@@ -76,9 +75,9 @@ std::optional<int> VolumeFileBlobReader::GetCompressionLevel() const
 
 bool VolumeFileBlobReader::Read(u64 offset, u64 length, u8* out_ptr)
 {
-  if (offset + length > m_file_info->GetSize())
+  if (offset + length > m_file_size)
     return false;
-
-  return m_volume.Read(m_file_info->GetOffset() + offset, length, out_ptr, m_partition);
+  return m_volume.Read(m_file_offset + offset, length, out_ptr, m_partition);
 }
+
 }  // namespace DiscIO

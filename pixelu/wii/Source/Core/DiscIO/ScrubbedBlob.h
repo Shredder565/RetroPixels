@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -11,40 +10,38 @@
 
 namespace DiscIO
 {
-// This class wraps another BlobReader and zeroes out data that has been
-// identified by DiscScrubber as unused.
+// Reads a disc image as it would look with every unused cluster (as found by DiscScrubber)
+// replaced by zeroes. Everything else is passed through to the underlying reader.
 class ScrubbedBlob final : public BlobReader
 {
 public:
+  // Null if the image can't be opened or its file systems can't be walked.
   static std::unique_ptr<ScrubbedBlob> Create(const std::string& path);
 
-  BlobType GetBlobType() const override { return m_blob_reader->GetBlobType(); }
+  BlobType GetBlobType() const override { return m_inner->GetBlobType(); }
   std::unique_ptr<BlobReader> CopyReader() const override;
 
-  u64 GetRawSize() const override { return m_blob_reader->GetRawSize(); }
-  u64 GetDataSize() const override { return m_blob_reader->GetDataSize(); }
-  DataSizeType GetDataSizeType() const override { return m_blob_reader->GetDataSizeType(); }
+  u64 GetRawSize() const override { return m_inner->GetRawSize(); }
+  u64 GetDataSize() const override { return m_inner->GetDataSize(); }
+  DataSizeType GetDataSizeType() const override { return m_inner->GetDataSizeType(); }
 
-  u64 GetBlockSize() const override { return m_blob_reader->GetBlockSize(); }
+  u64 GetBlockSize() const override { return m_inner->GetBlockSize(); }
   bool HasFastRandomAccessInBlock() const override
   {
-    return m_blob_reader->HasFastRandomAccessInBlock();
+    return m_inner->HasFastRandomAccessInBlock();
   }
-  std::string GetCompressionMethod() const override
-  {
-    return m_blob_reader->GetCompressionMethod();
-  }
+  std::string GetCompressionMethod() const override { return m_inner->GetCompressionMethod(); }
   std::optional<int> GetCompressionLevel() const override
   {
-    return m_blob_reader->GetCompressionLevel();
+    return m_inner->GetCompressionLevel();
   }
 
   bool Read(u64 offset, u64 size, u8* out_ptr) override;
 
 private:
-  ScrubbedBlob(std::unique_ptr<BlobReader> blob_reader, DiscScrubber scrubber);
+  ScrubbedBlob(std::unique_ptr<BlobReader> inner, DiscScrubber scrubber);
 
-  std::unique_ptr<BlobReader> m_blob_reader;
+  std::unique_ptr<BlobReader> m_inner;
   DiscScrubber m_scrubber;
 };
 

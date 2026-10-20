@@ -1,19 +1,10 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
-
-// DiscScrubber removes the pseudorandom padding data from discs
-
-// Note: the technique is inspired by Wiiscrubber, but much simpler - intentionally :)
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
 #include <vector>
-#include "Common/CommonTypes.h"
 
-namespace File
-{
-class IOFile;
-}
+#include "Common/CommonTypes.h"
 
 namespace DiscIO
 {
@@ -21,32 +12,38 @@ class FileInfo;
 class Volume;
 struct Partition;
 
+// Works out which 32 KiB clusters of a disc hold nothing the game can reach (padding and junk
+// between files), so that converters and caches can skip them.
 class DiscScrubber final
 {
 public:
   DiscScrubber();
 
+  // Walks the disc's headers and file systems. Returns false (and scrubs nothing) when some
+  // part of the disc couldn't be understood.
   bool SetupScrub(const Volume& disc);
 
-  // Returns true if the specified 32 KiB block only contains unused data
+  // True if the cluster containing `offset` is unused. Always false before a successful
+  // SetupScrub.
   bool CanBlockBeScrubbed(u64 offset) const;
 
   static constexpr size_t CLUSTER_SIZE = 0x8000;
 
 private:
-  void MarkAsUsed(u64 offset, u64 size);
-  void MarkAsUsedE(u64 partition_data_offset, u64 offset, u64 size);
-  u64 ToClusterOffset(u64 offset) const;
-  bool ReadFromVolume(const Volume& disc, u64 offset, u32& buffer, const Partition& partition);
-  bool ReadFromVolume(const Volume& disc, u64 offset, u64& buffer, const Partition& partition);
-  bool ParseDisc(const Volume& disc);
-  bool ParsePartitionData(const Volume& disc, const Partition& partition);
-  void ParseFileSystemData(u64 partition_data_offset, const FileInfo& directory);
+  bool WalkDisc(const Volume& disc);
+  bool WalkPartition(const Volume& disc, const Partition& partition);
+  void WalkDirectory(u64 data_start, const FileInfo& directory);
 
-  std::vector<u8> m_free_table;
-  u64 m_file_size = 0;
-  bool m_has_wii_hashes = false;
-  bool m_is_scrubbing = false;
+  // Marks raw disc bytes [offset, offset + size) as used.
+  void UseRaw(u64 offset, u64 size);
+  // Marks bytes of a partition's (decrypted) data as used. data_start is the raw offset where
+  // the partition's data begins, or 0 for a disc without partitions.
+  void UseData(u64 data_start, u64 offset, u64 size);
+
+  std::vector<bool> m_used;
+  u64 m_disc_size = 0;
+  bool m_hashed = false;  // partition data is stored as 0x7C00 bytes per cluster
+  bool m_ready = false;
 };
 
 }  // namespace DiscIO

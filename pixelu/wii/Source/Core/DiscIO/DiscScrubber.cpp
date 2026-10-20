@@ -1,5 +1,4 @@
-// Copyright 2009 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "DiscIO/DiscScrubber.h"
 
@@ -7,7 +6,6 @@
 #include <optional>
 #include <vector>
 
-#include "Common/Align.h"
 #include "Common/CommonTypes.h"
 #include "Common/Logging/Log.h"
 
@@ -17,214 +15,160 @@
 
 namespace DiscIO
 {
+namespace
+{
+// Bytes of payload per cluster in hashed Wii partition data (the rest is the hash block).
+constexpr u64 HASHED_PAYLOAD = 0x7C00;
+
+// Everything below the first partition (disc header, partition tables, region data...).
+constexpr u64 WII_HEADER_AREA = 0x50000;
+// Partition header: ticket and the size/offset fields that follow it.
+constexpr u64 PARTITION_HEADER_SIZE = 0x2C0;
+constexpr u64 PARTITION_DATA_OFFSET_ADDRESS = 0x2B8;
+
+// Within the boot area of a partition (or a GameCube disc).
+constexpr u64 APPLOADER_START = 0x2440;
+constexpr u64 APPLOADER_SIZE_ADDRESS = APPLOADER_START + 0x14;
+constexpr u64 APPLOADER_TRAILER_SIZE_ADDRESS = APPLOADER_START + 0x18;
+}  // namespace
+
 DiscScrubber::DiscScrubber() = default;
 
 bool DiscScrubber::SetupScrub(const Volume& disc)
 {
-  m_file_size = disc.GetDataSize();
-  m_has_wii_hashes = disc.HasWiiHashes();
+  m_disc_size = disc.GetDataSize();
+  m_hashed = disc.HasWiiHashes();
+  m_used.assign((m_disc_size + CLUSTER_SIZE - 1) / CLUSTER_SIZE, false);
 
-  // Round up when diving by CLUSTER_SIZE, otherwise MarkAsUsed might write out of bounds
-  const size_t num_clusters = static_cast<size_t>((m_file_size + CLUSTER_SIZE - 1) / CLUSTER_SIZE);
-
-  // Table of free blocks
-  m_free_table.resize(num_clusters, 1);
-
-  // Fill out table of free blocks
-  const bool success = ParseDisc(disc);
-
-  m_is_scrubbing = success;
-  return success;
+  m_ready = WalkDisc(disc);
+  return m_ready;
 }
 
 bool DiscScrubber::CanBlockBeScrubbed(u64 offset) const
 {
-  if (!m_is_scrubbing)
+  if (!m_ready)
     return false;
-
-  const u64 cluster_index = offset / CLUSTER_SIZE;
-  return cluster_index >= m_free_table.size() || m_free_table[cluster_index];
+  const u64 cluster = offset / CLUSTER_SIZE;
+  return cluster >= m_used.size() || !m_used[cluster];
 }
 
-void DiscScrubber::MarkAsUsed(u64 offset, u64 size)
+void DiscScrubber::UseRaw(u64 offset, u64 size)
 {
-  u64 current_offset = Common::AlignDown(offset, CLUSTER_SIZE);
-  const u64 end_offset = offset + size;
-
-  DEBUG_LOG_FMT(DISCIO, "Marking {:#018x} - {:#018x} as used", offset, end_offset);
-
-  while (current_offset < end_offset && current_offset < m_file_size)
+  const u64 end = offset + size;
+  for (u64 pos = offset - offset % CLUSTER_SIZE; pos < end && pos < m_disc_size;
+       pos += CLUSTER_SIZE)
   {
-    m_free_table[current_offset / CLUSTER_SIZE] = 0;
-    current_offset += CLUSTER_SIZE;
+    m_used[pos / CLUSTER_SIZE] = true;
   }
 }
 
-void DiscScrubber::MarkAsUsedE(u64 partition_data_offset, u64 offset, u64 size)
+void DiscScrubber::UseData(u64 data_start, u64 offset, u64 size)
 {
-  if (partition_data_offset == 0)
+  if (data_start == 0)
   {
-    MarkAsUsed(offset, size);
+    UseRaw(offset, size);
+    return;
   }
-  else
+
+  // Data offset -> raw offset of the cluster that holds it.
+  const auto cluster_start = [this](u64 data_offset) {
+    return m_hashed ? data_offset / HASHED_PAYLOAD * CLUSTER_SIZE :
+                      data_offset - data_offset % CLUSTER_SIZE;
+  };
+
+  const u64 first = data_start + cluster_start(offset);
+  const u64 end = size == 0 ? first : data_start + cluster_start(offset + size - 1) + CLUSTER_SIZE;
+  UseRaw(first, end - first);
+}
+
+bool DiscScrubber::WalkDisc(const Volume& disc)
+{
+  const std::vector<Partition> partitions = disc.GetPartitions();
+  if (partitions.empty())
+    return WalkPartition(disc, PARTITION_NONE);
+
+  UseRaw(0, WII_HEADER_AREA);
+
+  for (const Partition& partition : partitions)
   {
-    u64 first_cluster_start = ToClusterOffset(offset) + partition_data_offset;
-
-    u64 last_cluster_end;
-    if (size == 0)
-    {
-      // Without this special case, a size of 0 can be rounded to 1 cluster instead of 0
-      last_cluster_end = first_cluster_start;
-    }
-    else
-    {
-      last_cluster_end = ToClusterOffset(offset + size - 1) + CLUSTER_SIZE + partition_data_offset;
-    }
-
-    MarkAsUsed(first_cluster_start, last_cluster_end - first_cluster_start);
-  }
-}
-
-// Compensate for 0x400 (SHA-1) per 0x8000 (cluster), and round to whole clusters
-u64 DiscScrubber::ToClusterOffset(u64 offset) const
-{
-  if (m_has_wii_hashes)
-    return offset / 0x7c00 * CLUSTER_SIZE;
-  else
-    return Common::AlignDown(offset, CLUSTER_SIZE);
-}
-
-// Helper functions for reading the BE volume
-bool DiscScrubber::ReadFromVolume(const Volume& disc, u64 offset, u32& buffer,
-                                  const Partition& partition)
-{
-  std::optional<u32> value = disc.ReadSwapped<u32>(offset, partition);
-  if (value)
-    buffer = *value;
-  return value.has_value();
-}
-
-bool DiscScrubber::ReadFromVolume(const Volume& disc, u64 offset, u64& buffer,
-                                  const Partition& partition)
-{
-  std::optional<u64> value = disc.ReadSwappedAndShifted(offset, partition);
-  if (value)
-    buffer = *value;
-  return value.has_value();
-}
-
-bool DiscScrubber::ParseDisc(const Volume& disc)
-{
-  if (disc.GetPartitions().empty())
-    return ParsePartitionData(disc, PARTITION_NONE);
-
-  // Mark the header as used - it's mostly 0s anyways
-  MarkAsUsed(0, 0x50000);
-
-  for (const Partition& partition : disc.GetPartitions())
-  {
-    u32 tmd_size;
-    u64 tmd_offset;
-    u32 cert_chain_size;
-    u64 cert_chain_offset;
-    u64 h3_offset;
-    // The H3 size is always 0x18000
-
-    if (!ReadFromVolume(disc, partition.offset + WII_PARTITION_TMD_SIZE_ADDRESS, tmd_size,
-                        PARTITION_NONE) ||
-        !ReadFromVolume(disc, partition.offset + WII_PARTITION_TMD_OFFSET_ADDRESS, tmd_offset,
-                        PARTITION_NONE) ||
-        !ReadFromVolume(disc, partition.offset + WII_PARTITION_CERT_CHAIN_SIZE_ADDRESS,
-                        cert_chain_size, PARTITION_NONE) ||
-        !ReadFromVolume(disc, partition.offset + WII_PARTITION_CERT_CHAIN_OFFSET_ADDRESS,
-                        cert_chain_offset, PARTITION_NONE) ||
-        !ReadFromVolume(disc, partition.offset + WII_PARTITION_H3_OFFSET_ADDRESS, h3_offset,
-                        PARTITION_NONE))
-    {
+    const u64 base = partition.offset;
+    const std::optional<u32> tmd_size =
+        disc.ReadSwapped<u32>(base + WII_PARTITION_TMD_SIZE_ADDRESS, PARTITION_NONE);
+    const std::optional<u64> tmd_offset =
+        disc.ReadSwappedAndShifted(base + WII_PARTITION_TMD_OFFSET_ADDRESS, PARTITION_NONE);
+    const std::optional<u32> cert_size =
+        disc.ReadSwapped<u32>(base + WII_PARTITION_CERT_CHAIN_SIZE_ADDRESS, PARTITION_NONE);
+    const std::optional<u64> cert_offset =
+        disc.ReadSwappedAndShifted(base + WII_PARTITION_CERT_CHAIN_OFFSET_ADDRESS, PARTITION_NONE);
+    const std::optional<u64> h3_offset =
+        disc.ReadSwappedAndShifted(base + WII_PARTITION_H3_OFFSET_ADDRESS, PARTITION_NONE);
+    if (!tmd_size || !tmd_offset || !cert_size || !cert_offset || !h3_offset)
       return false;
-    }
 
-    MarkAsUsed(partition.offset, 0x2c0);
+    UseRaw(base, PARTITION_HEADER_SIZE);
+    UseRaw(base + *tmd_offset, *tmd_size);
+    UseRaw(base + *cert_offset, *cert_size);
+    UseRaw(base + *h3_offset, WII_PARTITION_H3_SIZE);
 
-    MarkAsUsed(partition.offset + tmd_offset, tmd_size);
-    MarkAsUsed(partition.offset + cert_chain_offset, cert_chain_size);
-    MarkAsUsed(partition.offset + h3_offset, WII_PARTITION_H3_SIZE);
-
-    // Parse Data! This is where the big gain is
-    if (!ParsePartitionData(disc, partition))
+    if (!WalkPartition(disc, partition))
       return false;
   }
-
   return true;
 }
 
-// Operations dealing with encrypted space are done here
-bool DiscScrubber::ParsePartitionData(const Volume& disc, const Partition& partition)
+bool DiscScrubber::WalkPartition(const Volume& disc, const Partition& partition)
 {
-  const FileSystem* filesystem = disc.GetFileSystem(partition);
-  if (!filesystem)
+  const FileSystem* file_system = disc.GetFileSystem(partition);
+  if (!file_system)
   {
-    ERROR_LOG_FMT(DISCIO, "Failed to read file system for the partition at {:#x}",
-                  partition.offset);
+    ERROR_LOG_FMT(DISCIO, "Scrubber: no file system in the partition at {:#x}", partition.offset);
     return false;
   }
 
-  u64 partition_data_offset;
-  if (partition == PARTITION_NONE)
+  u64 data_start = 0;
+  if (partition != PARTITION_NONE)
   {
-    partition_data_offset = 0;
-  }
-  else
-  {
-    u64 data_offset;
-    if (!ReadFromVolume(disc, partition.offset + 0x2b8, data_offset, PARTITION_NONE))
+    const std::optional<u64> data_offset =
+        disc.ReadSwappedAndShifted(partition.offset + PARTITION_DATA_OFFSET_ADDRESS, PARTITION_NONE);
+    if (!data_offset)
       return false;
-
-    partition_data_offset = partition.offset + data_offset;
+    data_start = partition.offset + *data_offset;
   }
 
-  // Mark things as used which are not in the filesystem
-  // Header, Header Information, Apploader
-  u32 apploader_size;
-  u32 apploader_trailer_size;
-  if (!ReadFromVolume(disc, 0x2440 + 0x14, apploader_size, partition) ||
-      !ReadFromVolume(disc, 0x2440 + 0x18, apploader_trailer_size, partition))
-  {
+  // Disc header, BI2 and apploader. The sum is 32-bit like the fields it's made of.
+  const std::optional<u32> apploader_size = disc.ReadSwapped<u32>(APPLOADER_SIZE_ADDRESS, partition);
+  const std::optional<u32> trailer_size =
+      disc.ReadSwapped<u32>(APPLOADER_TRAILER_SIZE_ADDRESS, partition);
+  if (!apploader_size || !trailer_size)
     return false;
-  }
-  MarkAsUsedE(partition_data_offset, 0, 0x2440 + apploader_size + apploader_trailer_size);
+  UseData(data_start, 0, static_cast<u32>(APPLOADER_START + *apploader_size + *trailer_size));
 
-  // DOL
   const std::optional<u64> dol_offset = GetBootDOLOffset(disc, partition);
   if (!dol_offset)
     return false;
-  const std::optional<u64> dol_size = GetBootDOLSize(disc, partition, *dol_offset);
+  const std::optional<u32> dol_size = GetBootDOLSize(disc, partition, *dol_offset);
   if (!dol_size)
     return false;
-  MarkAsUsedE(partition_data_offset, *dol_offset, *dol_size);
+  UseData(data_start, *dol_offset, *dol_size);
 
-  // FST
   const std::optional<u64> fst_offset = GetFSTOffset(disc, partition);
   const std::optional<u64> fst_size = GetFSTSize(disc, partition);
   if (!fst_offset || !fst_size)
     return false;
-  MarkAsUsedE(partition_data_offset, *fst_offset, *fst_size);
+  UseData(data_start, *fst_offset, *fst_size);
 
-  // Go through the filesystem and mark entries as used
-  ParseFileSystemData(partition_data_offset, filesystem->GetRoot());
-
+  WalkDirectory(data_start, file_system->GetRoot());
   return true;
 }
 
-void DiscScrubber::ParseFileSystemData(u64 partition_data_offset, const FileInfo& directory)
+void DiscScrubber::WalkDirectory(u64 data_start, const FileInfo& directory)
 {
-  for (const FileInfo& file_info : directory)
+  for (const FileInfo& entry : directory)
   {
-    DEBUG_LOG_FMT(DISCIO, "Scrubbing {}", file_info.GetPath());
-    if (file_info.IsDirectory())
-      ParseFileSystemData(partition_data_offset, file_info);
+    if (entry.IsDirectory())
+      WalkDirectory(data_start, entry);
     else
-      MarkAsUsedE(partition_data_offset, file_info.GetOffset(), file_info.GetSize());
+      UseData(data_start, entry.GetOffset(), entry.GetSize());
   }
 }
 
