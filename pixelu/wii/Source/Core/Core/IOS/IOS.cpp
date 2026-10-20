@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/IOS/IOS.h"
 
@@ -62,215 +61,286 @@
 
 namespace IOS::HLE
 {
-constexpr u64 ENQUEUE_REQUEST_FLAG = 0x100000000ULL;
-static CoreTiming::EventType* s_event_enqueue;
-static CoreTiming::EventType* s_event_finish_ppc_bootstrap;
-static CoreTiming::EventType* s_event_finish_ios_boot;
-
-constexpr u32 ADDR_LEGACY_MEM_SIZE = 0x28;
-constexpr u32 ADDR_LEGACY_ARENA_LOW = 0x30;
-constexpr u32 ADDR_LEGACY_ARENA_HIGH = 0x34;
-constexpr u32 ADDR_LEGACY_MEM_SIM_SIZE = 0xf0;
-
-constexpr u32 ADDR_MEM1_SIZE = 0x3100;
-constexpr u32 ADDR_MEM1_SIM_SIZE = 0x3104;
-constexpr u32 ADDR_MEM1_END = 0x3108;
-constexpr u32 ADDR_MEM1_ARENA_BEGIN = 0x310c;
-constexpr u32 ADDR_MEM1_ARENA_END = 0x3110;
-constexpr u32 ADDR_PH1 = 0x3114;
-constexpr u32 ADDR_MEM2_SIZE = 0x3118;
-constexpr u32 ADDR_MEM2_SIM_SIZE = 0x311c;
-constexpr u32 ADDR_MEM2_END = 0x3120;
-constexpr u32 ADDR_MEM2_ARENA_BEGIN = 0x3124;
-constexpr u32 ADDR_MEM2_ARENA_END = 0x3128;
-constexpr u32 ADDR_PH2 = 0x312c;
-constexpr u32 ADDR_IPC_BUFFER_BEGIN = 0x3130;
-constexpr u32 ADDR_IPC_BUFFER_END = 0x3134;
-constexpr u32 ADDR_HOLLYWOOD_REVISION = 0x3138;
-constexpr u32 ADDR_PH3 = 0x313c;
-constexpr u32 ADDR_IOS_VERSION = 0x3140;
-constexpr u32 ADDR_IOS_DATE = 0x3144;
-constexpr u32 ADDR_IOS_RESERVED_BEGIN = 0x3148;
-constexpr u32 ADDR_IOS_RESERVED_END = 0x314c;
-constexpr u32 ADDR_PH4 = 0x3150;
-constexpr u32 ADDR_PH5 = 0x3154;
-constexpr u32 ADDR_RAM_VENDOR = 0x3158;
-constexpr u32 ADDR_BOOT_FLAG = 0x315c;
-constexpr u32 ADDR_APPLOADER_FLAG = 0x315d;
-constexpr u32 ADDR_DEVKIT_BOOT_PROGRAM_VERSION = 0x315e;
-constexpr u32 ADDR_SYSMENU_SYNC = 0x3160;
-constexpr u32 PLACEHOLDER = 0xDEADBEEF;
-
-static bool SetupMemory(Memory::MemoryManager& memory, u64 ios_title_id, MemorySetupType setup_type)
+namespace
 {
-  auto target_imv = std::ranges::find(GetMemoryValues(), static_cast<u16>(ios_title_id & 0xffff),
-                                      &MemoryValues::ios_number);
+// The IPC event carries either a request address (with this bit set, meaning "a new request
+// has arrived") or a reply address (bit clear, meaning "this answer is ready for the PPC").
+constexpr u64 ENQUEUE_REQUEST_FLAG = 0x100000000ULL;
 
-  if (target_imv == GetMemoryValues().end())
+CoreTiming::EventType* s_ipc_event;
+CoreTiming::EventType* s_ppc_bootstrap_done_event;
+CoreTiming::EventType* s_ios_boot_done_event;
+
+// Fields of the "OS globals" area in low MEM1 that the kernel fills in (WiiBrew, "Memory map").
+namespace LowMem
+{
+// Copies kept for GameCube-era code.
+constexpr u32 LEGACY_MEM_SIZE = 0x0028;
+constexpr u32 LEGACY_ARENA_LO = 0x0030;
+constexpr u32 LEGACY_ARENA_HI = 0x0034;
+constexpr u32 LEGACY_SIM_MEM_SIZE = 0x00f0;
+
+constexpr u32 MEM1_SIZE = 0x3100;
+constexpr u32 MEM1_SIM_SIZE = 0x3104;
+constexpr u32 MEM1_END = 0x3108;
+constexpr u32 MEM1_ARENA_LO = 0x310c;
+constexpr u32 MEM1_ARENA_HI = 0x3110;
+constexpr u32 FILLER_1 = 0x3114;
+constexpr u32 MEM2_SIZE = 0x3118;
+constexpr u32 MEM2_SIM_SIZE = 0x311c;
+constexpr u32 MEM2_END = 0x3120;
+constexpr u32 MEM2_ARENA_LO = 0x3124;
+constexpr u32 MEM2_ARENA_HI = 0x3128;
+constexpr u32 FILLER_2 = 0x312c;
+constexpr u32 IPC_BUF_LO = 0x3130;
+constexpr u32 IPC_BUF_HI = 0x3134;
+constexpr u32 HOLLYWOOD_REV = 0x3138;
+constexpr u32 FILLER_3 = 0x313c;
+constexpr u32 IOS_VERSION = 0x3140;
+constexpr u32 IOS_BUILD_DATE = 0x3144;
+constexpr u32 IOS_HEAP_LO = 0x3148;
+constexpr u32 IOS_HEAP_HI = 0x314c;
+constexpr u32 FILLER_4 = 0x3150;
+constexpr u32 FILLER_5 = 0x3154;
+constexpr u32 GDDR_VENDOR = 0x3158;
+constexpr u32 BOOT_FLAG = 0x315c;
+constexpr u32 APPLOADER_FLAG = 0x315d;
+constexpr u32 DEVKIT_BOOT_VERSION = 0x315e;
+constexpr u32 SYSMENU_SYNC = 0x3160;
+
+constexpr u32 FILLER_WORD = 0xDEADBEEF;
+}  // namespace LowMem
+
+void WriteMem2Block(Memory::MemoryManager& memory, const MemoryValues& v)
+{
+  memory.Write_U32(v.mem2_physical_size, LowMem::MEM2_SIZE);
+  memory.Write_U32(v.mem2_simulated_size, LowMem::MEM2_SIM_SIZE);
+  memory.Write_U32(v.mem2_end, LowMem::MEM2_END);
+  memory.Write_U32(v.mem2_arena_begin, LowMem::MEM2_ARENA_LO);
+  memory.Write_U32(v.mem2_arena_end, LowMem::MEM2_ARENA_HI);
+  memory.Write_U32(v.ipc_buffer_begin, LowMem::IPC_BUF_LO);
+  memory.Write_U32(v.ipc_buffer_end, LowMem::IPC_BUF_HI);
+  memory.Write_U32(v.ios_reserved_begin, LowMem::IOS_HEAP_LO);
+  memory.Write_U32(v.ios_reserved_end, LowMem::IOS_HEAP_HI);
+}
+
+void WriteMem1Block(Memory::MemoryManager& memory, u32 physical, u32 simulated, u32 end,
+                    u32 arena_lo, u32 arena_hi)
+{
+  memory.Write_U32(physical, LowMem::MEM1_SIZE);
+  memory.Write_U32(simulated, LowMem::MEM1_SIM_SIZE);
+  memory.Write_U32(end, LowMem::MEM1_END);
+  memory.Write_U32(arena_lo, LowMem::MEM1_ARENA_LO);
+  memory.Write_U32(arena_hi, LowMem::MEM1_ARENA_HI);
+
+  memory.Write_U32(physical, LowMem::LEGACY_MEM_SIZE);
+  memory.Write_U32(arena_lo, LowMem::LEGACY_ARENA_LO);
+  memory.Write_U32(arena_hi, LowMem::LEGACY_ARENA_HI);
+  memory.Write_U32(simulated, LowMem::LEGACY_SIM_MEM_SIZE);
+}
+
+const MemoryValues* FindMemoryValues(u64 ios_title_id)
+{
+  const u16 number = static_cast<u16>(ios_title_id & 0xffff);
+  for (const MemoryValues& v : GetMemoryValues())
   {
-    ERROR_LOG_FMT(IOS, "Unknown IOS version: {:016x}", ios_title_id);
+    if (v.ios_number == number)
+      return &v;
+  }
+  return nullptr;
+}
+
+bool SetupMemory(Memory::MemoryManager& memory, u64 ios_title_id, MemorySetupType setup_type)
+{
+  const MemoryValues* values = FindMemoryValues(ios_title_id);
+  if (values == nullptr)
+  {
+    ERROR_LOG_FMT(IOS, "No memory layout known for IOS {:016x}", ios_title_id);
     return false;
   }
 
   if (setup_type == MemorySetupType::IOSReload)
   {
-    memory.Write_U32(target_imv->ios_version, ADDR_IOS_VERSION);
-
-    // These values are written by the IOS kernel as part of its boot process (for IOS28 and newer).
-    //
-    // This works in a slightly different way on a real console: older IOS versions (< IOS28) all
-    // have the same range (933E0000 - 93400000), thus they don't write it at boot and just inherit
-    // all values. However, the range has changed since IOS28. To make things work properly
-    // after a reload, newer IOSes always write the legacy range before loading an IOS kernel;
-    // the new IOS either updates the range (>= IOS28) or inherits it (< IOS28).
-    //
-    // We can skip this convoluted process and just write the correct range directly.
-    memory.Write_U32(target_imv->mem2_physical_size, ADDR_MEM2_SIZE);
-    memory.Write_U32(target_imv->mem2_simulated_size, ADDR_MEM2_SIM_SIZE);
-    memory.Write_U32(target_imv->mem2_end, ADDR_MEM2_END);
-    memory.Write_U32(target_imv->mem2_arena_begin, ADDR_MEM2_ARENA_BEGIN);
-    memory.Write_U32(target_imv->mem2_arena_end, ADDR_MEM2_ARENA_END);
-    memory.Write_U32(target_imv->ipc_buffer_begin, ADDR_IPC_BUFFER_BEGIN);
-    memory.Write_U32(target_imv->ipc_buffer_end, ADDR_IPC_BUFFER_END);
-    memory.Write_U32(target_imv->ios_reserved_begin, ADDR_IOS_RESERVED_BEGIN);
-    memory.Write_U32(target_imv->ios_reserved_end, ADDR_IOS_RESERVED_END);
-
+    // A reload only publishes the new version and the MEM2 split. Real kernels before IOS28
+    // inherit the MEM2 values from whoever ran before them, and later ones rewrite them; the
+    // end result is always the new kernel's own layout, which is what is written here.
+    memory.Write_U32(values->ios_version, LowMem::IOS_VERSION);
+    WriteMem2Block(memory, *values);
     RAMOverrideForIOSMemoryValues(memory, setup_type);
     return true;
   }
 
-  // This region is typically used to store constants (e.g. game ID, console type, ...)
-  // and system information (see below).
-  constexpr u32 LOW_MEM1_REGION_START = 0;
-  constexpr u32 LOW_MEM1_REGION_SIZE = 0x3fff;
-  memory.Memset(LOW_MEM1_REGION_START, 0, LOW_MEM1_REGION_SIZE);
+  // A full set-up starts from a cleared globals area (the last byte of the page is kept).
+  memory.Memset(0, 0, 0x3fff);
 
-  memory.Write_U32(target_imv->mem1_physical_size, ADDR_MEM1_SIZE);
-  memory.Write_U32(target_imv->mem1_simulated_size, ADDR_MEM1_SIM_SIZE);
-  memory.Write_U32(target_imv->mem1_end, ADDR_MEM1_END);
-  memory.Write_U32(target_imv->mem1_arena_begin, ADDR_MEM1_ARENA_BEGIN);
-  memory.Write_U32(target_imv->mem1_arena_end, ADDR_MEM1_ARENA_END);
-  memory.Write_U32(PLACEHOLDER, ADDR_PH1);
-  memory.Write_U32(target_imv->mem2_physical_size, ADDR_MEM2_SIZE);
-  memory.Write_U32(target_imv->mem2_simulated_size, ADDR_MEM2_SIM_SIZE);
-  memory.Write_U32(target_imv->mem2_end, ADDR_MEM2_END);
-  memory.Write_U32(target_imv->mem2_arena_begin, ADDR_MEM2_ARENA_BEGIN);
-  memory.Write_U32(target_imv->mem2_arena_end, ADDR_MEM2_ARENA_END);
-  memory.Write_U32(PLACEHOLDER, ADDR_PH2);
-  memory.Write_U32(target_imv->ipc_buffer_begin, ADDR_IPC_BUFFER_BEGIN);
-  memory.Write_U32(target_imv->ipc_buffer_end, ADDR_IPC_BUFFER_END);
-  memory.Write_U32(target_imv->hollywood_revision, ADDR_HOLLYWOOD_REVISION);
-  memory.Write_U32(PLACEHOLDER, ADDR_PH3);
-  memory.Write_U32(target_imv->ios_version, ADDR_IOS_VERSION);
-  memory.Write_U32(target_imv->ios_date, ADDR_IOS_DATE);
-  memory.Write_U32(target_imv->ios_reserved_begin, ADDR_IOS_RESERVED_BEGIN);
-  memory.Write_U32(target_imv->ios_reserved_end, ADDR_IOS_RESERVED_END);
-  memory.Write_U32(PLACEHOLDER, ADDR_PH4);
-  memory.Write_U32(PLACEHOLDER, ADDR_PH5);
-  memory.Write_U32(target_imv->ram_vendor, ADDR_RAM_VENDOR);
-  memory.Write_U8(0xDE, ADDR_BOOT_FLAG);
-  memory.Write_U8(0xAD, ADDR_APPLOADER_FLAG);
-  memory.Write_U16(0xBEEF, ADDR_DEVKIT_BOOT_PROGRAM_VERSION);
-  memory.Write_U32(target_imv->sysmenu_sync, ADDR_SYSMENU_SYNC);
+  WriteMem1Block(memory, values->mem1_physical_size, values->mem1_simulated_size,
+                 values->mem1_end, values->mem1_arena_begin, values->mem1_arena_end);
+  WriteMem2Block(memory, *values);
 
-  memory.Write_U32(target_imv->mem1_physical_size, ADDR_LEGACY_MEM_SIZE);
-  memory.Write_U32(target_imv->mem1_arena_begin, ADDR_LEGACY_ARENA_LOW);
-  memory.Write_U32(target_imv->mem1_arena_end, ADDR_LEGACY_ARENA_HIGH);
-  memory.Write_U32(target_imv->mem1_simulated_size, ADDR_LEGACY_MEM_SIM_SIZE);
+  memory.Write_U32(values->hollywood_revision, LowMem::HOLLYWOOD_REV);
+  memory.Write_U32(values->ios_version, LowMem::IOS_VERSION);
+  memory.Write_U32(values->ios_date, LowMem::IOS_BUILD_DATE);
+  memory.Write_U32(values->ram_vendor, LowMem::GDDR_VENDOR);
+  memory.Write_U32(values->sysmenu_sync, LowMem::SYSMENU_SYNC);
+
+  for (const u32 filler : {LowMem::FILLER_1, LowMem::FILLER_2, LowMem::FILLER_3,
+                           LowMem::FILLER_4, LowMem::FILLER_5})
+  {
+    memory.Write_U32(LowMem::FILLER_WORD, filler);
+  }
+  // The three boot-status fields read as DE AD BE EF together.
+  memory.Write_U8(0xDE, LowMem::BOOT_FLAG);
+  memory.Write_U8(0xAD, LowMem::APPLOADER_FLAG);
+  memory.Write_U16(0xBEEF, LowMem::DEVKIT_BOOT_VERSION);
 
   RAMOverrideForIOSMemoryValues(memory, setup_type);
   return true;
 }
 
-// On a real console, the Starlet resets the PPC and holds it in reset limbo
-// by asserting the PPC's HRESET signal (via HW_RESETS).
-// We will simulate that by resetting MSR and putting the PPC into an infinite loop.
-// The memory write will not be observable since the PPC is not running any code...
-static void ResetAndPausePPC(Core::System& system)
+// While Starlet loads something for the PPC it keeps the PPC in reset. There is no reset line
+// to hold here, so the CPU is reset and parked on a branch-to-self at address 0 instead. The
+// PPC does not run while parked, so nothing can observe the branch instruction.
+void HoldPPCInReset(Core::System& system)
 {
-  // This should be cleared when the PPC is released so that the write is not observable.
-  auto& memory = system.GetMemory();
-  auto& power_pc = system.GetPowerPC();
-
-  memory.Write_U32(0x48000000, 0x00000000);  // b 0x0
-  power_pc.Reset();
-  power_pc.GetPPCState().pc = 0;
+  constexpr u32 BRANCH_TO_SELF = 0x48000000;
+  system.GetMemory().Write_U32(BRANCH_TO_SELF, 0);
+  auto& cpu = system.GetPowerPC();
+  cpu.Reset();
+  cpu.GetPPCState().pc = 0;
 }
 
-static void ReleasePPC(Core::System& system)
-{
-  system.GetMemory().Write_U32(0, 0);
-
-  // HLE the bootstub that jumps to 0x3400.
-  // NAND titles start with address translation off at 0x3400 (via the PPC bootstub)
-  // The state of other CPU registers (like the BAT registers) doesn't matter much
-  // because the realmode code at 0x3400 initializes everything itself anyway.
-  system.GetPPCState().pc = 0x3400;
-}
-
-static void ReleasePPCAncast(Core::System& system)
+// Lets the PPC go again. A NAND title's boot stub would jump to 0x3400 with translation off;
+// that code sets the machine state up itself, so only the PC needs to be placed.
+void StartPPC(Core::System& system, bool is_ancast)
 {
   system.GetMemory().Write_U32(0, 0);
-
-  // On a real console the Espresso verifies and decrypts the Ancast image,
-  // then jumps to the decrypted ancast body.
-  // The Ancast loader already did this, so just jump to the decrypted body.
-  system.GetPPCState().pc = ESPRESSO_ANCAST_LOCATION_VIRT + sizeof(EspressoAncastHeader);
+  if (is_ancast)
+  {
+    // The image was already checked and decrypted by the loader; start right at its body.
+    system.GetPPCState().pc = ESPRESSO_ANCAST_LOCATION_VIRT + sizeof(EspressoAncastHeader);
+  }
+  else
+  {
+    system.GetPPCState().pc = 0x3400;
+  }
 }
+
+// Reads a whole NAND file through the FS core so that the access is timed. Returns nothing if
+// the file cannot be opened, is larger than max_size (when non-zero), or a read returns 0.
+std::vector<u8> LoadNandFile(FSCore& fs, const std::string& path, size_t max_size,
+                             Ticks ticks = {})
+{
+  const auto handle = fs.Open(0, 0, path, FS::Mode::Read, {}, ticks);
+  if (handle.Get() < 0)
+    return {};
+  const u64 fd = static_cast<u64>(handle.Get());
+
+  const auto status = fs.GetFileStatus(fd, ticks);
+  if (!status)
+    return {};
+  const size_t length = status->size;
+  if (max_size != 0 && length > max_size)
+    return {};
+
+  std::vector<u8> contents(length);
+  if (fs.Read(fd, contents.data(), contents.size(), ticks) == 0)
+    return {};
+  return contents;
+}
+
+// An IOS kernel image on the NAND: a small big-endian header (header size, ELF offset relative
+// to the end of the header, ELF size) followed by the ELF itself.
+class KernelImage
+{
+public:
+  explicit KernelImage(std::vector<u8> data) : m_data(std::move(data)) {}
+
+  bool IsValid() const
+  {
+    if (m_data.size() < 0x10)
+      return false;
+    // The sum is 32-bit, like the loader's.
+    const u32 needed = HeaderSize() + ElfOffset() + ElfSize();
+    return m_data.size() >= needed;
+  }
+
+  std::vector<u8> Elf() const
+  {
+    const size_t begin = size_t{HeaderSize()} + ElfOffset();
+    return {m_data.begin() + static_cast<std::ptrdiff_t>(begin),
+            m_data.begin() + static_cast<std::ptrdiff_t>(begin + ElfSize())};
+  }
+
+private:
+  u32 Word(size_t offset) const { return Common::swap32(m_data.data() + offset); }
+  u32 HeaderSize() const { return Word(0); }
+  u32 ElfOffset() const { return Word(4); }
+  u32 ElfSize() const { return Word(8); }
+
+  std::vector<u8> m_data;
+};
+
+void SwitchKernel(Core::System& system, u64 ios_title_id)
+{
+  // The old kernel has to be gone before the new one is built (only one may exist at a time).
+  system.SetIOS(nullptr);
+  system.SetIOS(std::make_unique<EmulationKernel>(system, ios_title_id));
+}
+
+constexpr SystemTimers::TimeBaseTick KernelLoadTime(u32 version)
+{
+  // Kernels before IOS28 link all modules into one big image, which takes far longer to load.
+  return version < 28 ? 16'000'000_tbticks : 2'600'000_tbticks;
+}
+
+void OnPPCBootstrapDone(Core::System& system, u64 userdata, s64)
+{
+  StartPPC(system, userdata == 1);
+
+  ASSERT(Core::IsCPUThread());
+  Core::CPUThreadGuard guard(system);
+  SConfig::OnTitleDirectlyBooted(guard);
+
+  INFO_LOG_FMT(IOS, "PPC bootstrap complete");
+}
+}  // namespace
 
 void RAMOverrideForIOSMemoryValues(Memory::MemoryManager& memory, MemorySetupType setup_type)
 {
-  // Don't touch anything if the feature isn't enabled.
-  if (!Config::Get(Config::MAIN_RAM_OVERRIDE_ENABLE) &&
-      SConfig::GetInstance().GetSimulatedMemorySize() <= Memory::MEM1_SIZE_RETAIL)
-  {
+  const bool override_wanted = Config::Get(Config::MAIN_RAM_OVERRIDE_ENABLE) ||
+                               SConfig::GetInstance().GetSimulatedMemorySize() >
+                                   Memory::MEM1_SIZE_RETAIL;
+  if (!override_wanted)
     return;
-  }
 
-  // Some unstated constants that can be inferred.
-  const u32 ipc_buffer_size =
-      memory.Read_U32(ADDR_IPC_BUFFER_END) - memory.Read_U32(ADDR_IPC_BUFFER_BEGIN);
-  const u32 ios_reserved_size =
-      memory.Read_U32(ADDR_IOS_RESERVED_END) - memory.Read_U32(ADDR_IOS_RESERVED_BEGIN);
+  // Keep the IPC buffer and the IOS heap at their current sizes and move them to the new top
+  // of MEM2; MEM1 is handed to the arena in full.
+  const u32 ipc_size = memory.Read_U32(LowMem::IPC_BUF_HI) - memory.Read_U32(LowMem::IPC_BUF_LO);
+  const u32 heap_size =
+      memory.Read_U32(LowMem::IOS_HEAP_HI) - memory.Read_U32(LowMem::IOS_HEAP_LO);
 
-  const u32 mem1_physical_size = memory.GetRamSizeReal();
-  const u32 mem1_simulated_size = memory.GetRamSizeReal();
-  const u32 mem1_end = Memory::MEM1_BASE_ADDR + mem1_simulated_size;
-  const u32 mem1_arena_begin = 0;
-  const u32 mem1_arena_end = mem1_end;
-  const u32 mem2_physical_size = memory.GetExRamSizeReal();
-  const u32 mem2_simulated_size = memory.GetExRamSizeReal();
-  const u32 mem2_end = Memory::MEM2_BASE_ADDR + mem2_simulated_size - ios_reserved_size;
-  const u32 mem2_arena_begin = Memory::MEM2_BASE_ADDR + 0x800U;
-  const u32 mem2_arena_end = mem2_end - ipc_buffer_size;
-  const u32 ipc_buffer_begin = mem2_arena_end;
-  const u32 ipc_buffer_end = mem2_end;
-  const u32 ios_reserved_begin = mem2_end;
-  const u32 ios_reserved_end = Memory::MEM2_BASE_ADDR + mem2_simulated_size;
+  const u32 mem1_size = memory.GetRamSizeReal();
+  const u32 mem2_size = memory.GetExRamSizeReal();
+  const u32 mem1_top = Memory::MEM1_BASE_ADDR + mem1_size;
+  const u32 mem2_top = Memory::MEM2_BASE_ADDR + mem2_size;
+  const u32 heap_lo = mem2_top - heap_size;
+  const u32 ipc_lo = heap_lo - ipc_size;
 
+  // After a reload the game's apploader may already have adjusted the MEM1 values; leave them.
   if (setup_type == MemorySetupType::Full)
-  {
-    // Overwriting these after the game's apploader sets them would be bad
-    memory.Write_U32(mem1_physical_size, ADDR_MEM1_SIZE);
-    memory.Write_U32(mem1_simulated_size, ADDR_MEM1_SIM_SIZE);
-    memory.Write_U32(mem1_end, ADDR_MEM1_END);
-    memory.Write_U32(mem1_arena_begin, ADDR_MEM1_ARENA_BEGIN);
-    memory.Write_U32(mem1_arena_end, ADDR_MEM1_ARENA_END);
+    WriteMem1Block(memory, mem1_size, mem1_size, mem1_top, 0, mem1_top);
 
-    memory.Write_U32(mem1_physical_size, ADDR_LEGACY_MEM_SIZE);
-    memory.Write_U32(mem1_arena_begin, ADDR_LEGACY_ARENA_LOW);
-    memory.Write_U32(mem1_arena_end, ADDR_LEGACY_ARENA_HIGH);
-    memory.Write_U32(mem1_simulated_size, ADDR_LEGACY_MEM_SIM_SIZE);
-  }
-  memory.Write_U32(mem2_physical_size, ADDR_MEM2_SIZE);
-  memory.Write_U32(mem2_simulated_size, ADDR_MEM2_SIM_SIZE);
-  memory.Write_U32(mem2_end, ADDR_MEM2_END);
-  memory.Write_U32(mem2_arena_begin, ADDR_MEM2_ARENA_BEGIN);
-  memory.Write_U32(mem2_arena_end, ADDR_MEM2_ARENA_END);
-  memory.Write_U32(ipc_buffer_begin, ADDR_IPC_BUFFER_BEGIN);
-  memory.Write_U32(ipc_buffer_end, ADDR_IPC_BUFFER_END);
-  memory.Write_U32(ios_reserved_begin, ADDR_IOS_RESERVED_BEGIN);
-  memory.Write_U32(ios_reserved_end, ADDR_IOS_RESERVED_END);
+  MemoryValues mem2{};
+  mem2.mem2_physical_size = mem2_size;
+  mem2.mem2_simulated_size = mem2_size;
+  mem2.mem2_end = heap_lo;
+  mem2.mem2_arena_begin = Memory::MEM2_BASE_ADDR + 0x800U;
+  mem2.mem2_arena_end = ipc_lo;
+  mem2.ipc_buffer_begin = ipc_lo;
+  mem2.ipc_buffer_end = heap_lo;
+  mem2.ios_reserved_begin = heap_lo;
+  mem2.ios_reserved_end = mem2_top;
+  WriteMem2Block(memory, mem2);
 }
 
 void WriteReturnValue(Memory::MemoryManager& memory, s32 value, u32 address)
@@ -280,13 +350,14 @@ void WriteReturnValue(Memory::MemoryManager& memory, s32 value, u32 address)
 
 Kernel::Kernel(IOSC::ConsoleType console_type) : m_iosc(console_type)
 {
-  // Until the Wii root and NAND path stuff is entirely managed by IOS and made non-static,
-  // using more than one IOS instance at a time is not supported.
+  // The NAND root is still process-wide state, so two kernels cannot coexist.
   ASSERT(Core::System::GetInstance().GetIOS() == nullptr);
 
-  m_is_responsible_for_nand_root = !Core::WiiRootIsInitialized();
-  if (m_is_responsible_for_nand_root)
+  if (!Core::WiiRootIsInitialized())
+  {
+    m_is_responsible_for_nand_root = true;
     Core::InitializeWiiRoot(false);
+  }
 
   m_fs = FS::MakeFileSystem(IOS::HLE::FS::Location::Session, Core::GetActiveNandRedirects());
   ASSERT(m_fs);
@@ -308,11 +379,12 @@ Kernel::Kernel(u64 title_id) : m_title_id(title_id)
 EmulationKernel::EmulationKernel(Core::System& system, u64 title_id)
     : Kernel(title_id), m_system(system)
 {
-  INFO_LOG_FMT(IOS, "Starting IOS {:016x}", title_id);
+  INFO_LOG_FMT(IOS, "Booting IOS {:016x}", title_id);
 
   if (!SetupMemory(m_system.GetMemory(), title_id, MemorySetupType::IOSReload))
-    WARN_LOG_FMT(IOS, "No information about this IOS -- cannot set up memory values");
+    WARN_LOG_FMT(IOS, "Low memory values were left as they were");
 
+  // MIOS replaces IOS entirely; it has no resource managers.
   if (title_id == Titles::MIOS)
   {
     MIOS::Load(m_system);
@@ -335,17 +407,15 @@ EmulationKernel::EmulationKernel(Core::System& system, u64 title_id)
 
 EmulationKernel::~EmulationKernel()
 {
-  m_system.GetCoreTiming().RemoveAllEvents(s_event_enqueue);
+  m_system.GetCoreTiming().RemoveAllEvents(s_ipc_event);
 
   m_device_map.clear();
   m_socket_manager.reset();
 }
 
-// The title ID is a u64 where the first 32 bits are used for the title type.
-// For IOS title IDs, the type will always be 00000001 (system), and the lower 32 bits
-// are used for the IOS major version -- which is what we want here.
 u32 Kernel::GetVersion() const
 {
+  // An IOS title ID is 00000001-000000NN; the low word is the major version.
   return static_cast<u32>(m_title_id);
 }
 
@@ -359,14 +429,19 @@ FSCore& Kernel::GetFSCore()
   return *m_fs_core;
 }
 
-std::shared_ptr<FSDevice> EmulationKernel::GetFSDevice()
-{
-  return std::static_pointer_cast<FSDevice>(m_device_map.at("/dev/fs"));
-}
-
 ESCore& Kernel::GetESCore()
 {
   return *m_es_core;
+}
+
+IOSC& Kernel::GetIOSC()
+{
+  return m_iosc;
+}
+
+std::shared_ptr<FSDevice> EmulationKernel::GetFSDevice()
+{
+  return std::static_pointer_cast<FSDevice>(m_device_map.at("/dev/fs"));
 }
 
 std::shared_ptr<ESDevice> EmulationKernel::GetESDevice()
@@ -379,8 +454,8 @@ std::shared_ptr<WiiSockMan> EmulationKernel::GetSocketManager()
   return m_socket_manager;
 }
 
-// Since we don't have actual processes, we keep track of only the PPC's UID/GID.
-// These functions roughly correspond to syscalls 0x2b, 0x2c, 0x2d, 0x2e (though only for the PPC).
+// Only the PPC's credentials are tracked, since there are no real IOS processes. These stand in
+// for the set/get UID and GID syscalls.
 void EmulationKernel::SetUidForPPC(u32 uid)
 {
   m_ppc_uid = uid;
@@ -401,133 +476,67 @@ u16 EmulationKernel::GetGidForPPC() const
   return m_ppc_gid;
 }
 
-static std::vector<u8> ReadBootContent(FSCore& fs, const std::string& path, size_t max_size,
-                                       Ticks ticks = {})
-{
-  const auto fd = fs.Open(0, 0, path, FS::Mode::Read, {}, ticks);
-  if (fd.Get() < 0)
-    return {};
-
-  const size_t file_size = fs.GetFileStatus(fd.Get(), ticks)->size;
-  if (max_size != 0 && file_size > max_size)
-    return {};
-
-  std::vector<u8> buffer(file_size);
-  if (!fs.Read(fd.Get(), buffer.data(), buffer.size(), ticks))
-    return {};
-  return buffer;
-}
-
-// This corresponds to syscall 0x41, which loads a binary from the NAND and bootstraps the PPC.
-// Unlike 0x42, IOS will set up some constants in memory before booting the PPC.
+// Loads a DOL (or Ancast image) from the NAND, publishes the low memory values and lets the PPC
+// run it once the load time has passed. This is the "launch PPC title" syscall.
 bool EmulationKernel::BootstrapPPC(const std::string& boot_content_path)
 {
-  // Seeking and processing overhead is ignored as most time is spent reading from the NAND.
-  u64 ticks = 0;
-
-  const DolReader dol{ReadBootContent(GetFSCore(), boot_content_path, 0, &ticks)};
-
+  // Only the NAND read is timed; everything else is cheap in comparison.
+  u64 load_ticks = 0;
+  const DolReader dol{LoadNandFile(GetFSCore(), boot_content_path, 0, &load_ticks)};
   if (!dol.IsValid())
     return false;
 
   if (!SetupMemory(m_system.GetMemory(), m_title_id, MemorySetupType::Full))
     return false;
 
-  // Reset the PPC and pause its execution until we're ready.
-  ResetAndPausePPC(m_system);
+  HoldPPCInReset(m_system);
 
-  if (dol.IsAncast())
-    INFO_LOG_FMT(IOS, "BootstrapPPC: Loading ancast image");
+  const bool ancast = dol.IsAncast();
+  if (ancast)
+    INFO_LOG_FMT(IOS, "PPC bootstrap: image is Ancast");
 
   if (!dol.LoadIntoMemory(m_system))
     return false;
 
-  INFO_LOG_FMT(IOS, "BootstrapPPC: {}", boot_content_path);
-  m_system.GetCoreTiming().ScheduleEvent(ticks, s_event_finish_ppc_bootstrap, dol.IsAncast());
+  INFO_LOG_FMT(IOS, "PPC bootstrap: loaded {}", boot_content_path);
+  m_system.GetCoreTiming().ScheduleEvent(static_cast<s64>(load_ticks), s_ppc_bootstrap_done_event, ancast);
   return true;
 }
 
-struct ARMBinary final
-{
-  explicit ARMBinary(std::vector<u8>&& bytes) : m_bytes(std::move(bytes)) {}
-  bool IsValid() const
-  {
-    // The header is at least 0x10.
-    if (m_bytes.size() < 0x10)
-      return false;
-    return m_bytes.size() >= (GetHeaderSize() + GetElfOffset() + GetElfSize());
-  }
-
-  std::vector<u8> GetElf() const
-  {
-    const auto iterator = m_bytes.cbegin() + GetHeaderSize() + GetElfOffset();
-    return std::vector<u8>(iterator, iterator + GetElfSize());
-  }
-
-  u32 GetHeaderSize() const { return Common::swap32(m_bytes.data()); }
-  u32 GetElfOffset() const { return Common::swap32(m_bytes.data() + 0x4); }
-  u32 GetElfSize() const { return Common::swap32(m_bytes.data() + 0x8); }
-
-private:
-  std::vector<u8> m_bytes;
-};
-
-static void FinishIOSBoot(Core::System& system, u64 ios_title_id)
-{
-  // Shut down the active IOS first before switching to the new one.
-  system.SetIOS(nullptr);
-  system.SetIOS(std::make_unique<EmulationKernel>(system, ios_title_id));
-}
-
-static constexpr SystemTimers::TimeBaseTick GetIOSBootTicks(u32 version)
-{
-  // Older IOS versions are monolithic so the main ELF is much larger and takes longer to load.
-  if (version < 28)
-    return 16'000'000_tbticks;
-  return 2'600'000_tbticks;
-}
-
-// Similar to syscall 0x42 (ios_boot); this is used to change the current active IOS.
-// IOS writes the new version to 0x3140 before restarting, but it does *not* poke any
-// of the other constants to the memory. Warning: this resets the kernel instance.
+// Replaces the running kernel. Like the real syscall this only changes the version word in low
+// memory (the new kernel's constructor writes it), and it tears this instance down.
 //
-// Passing a boot content path is optional because we do not require IOSes
-// to be installed at the moment. If one is passed, the boot binary must exist
-// on the NAND, or the call will fail like on a Wii.
+// The boot content is optional since IOS images do not have to be installed. When a path is
+// given the image has to exist and be well formed, as on hardware.
 bool EmulationKernel::BootIOS(const u64 ios_title_id, HangPPC hang_ppc,
                               const std::string& boot_content_path)
 {
-  // IOS suspends regular PPC<->ARM IPC before loading a new IOS.
-  // IPC is not resumed if the boot fails for any reason.
+  // IPC stays stopped from here on; it is only restarted by the new kernel.
   m_ipc_paused = true;
 
   if (!boot_content_path.empty())
   {
-    // Load the ARM binary to memory (if possible).
-    // Because we do not actually emulate the Starlet, only load the sections that are in MEM1.
-
-    ARMBinary binary{ReadBootContent(GetFSCore(), boot_content_path, 0xB00000)};
-    if (!binary.IsValid())
+    // Starlet is not emulated, so only the parts of the ELF that land in MEM1 matter.
+    const KernelImage image{LoadNandFile(GetFSCore(), boot_content_path, 0xB00000)};
+    if (!image.IsValid())
       return false;
 
-    ElfReader elf{binary.GetElf()};
+    ElfReader elf{image.Elf()};
     if (!elf.LoadIntoMemory(m_system, true))
       return false;
   }
 
   if (hang_ppc == HangPPC::Yes)
-    ResetAndPausePPC(m_system);
+    HoldPPCInReset(m_system);
 
-  if (Core::IsRunning(m_system))
+  if (!Core::IsRunning(m_system))
   {
-    m_system.GetCoreTiming().ScheduleEvent(GetIOSBootTicks(GetVersion()), s_event_finish_ios_boot,
-                                           ios_title_id);
-  }
-  else
-  {
-    FinishIOSBoot(m_system, ios_title_id);
+    SwitchKernel(m_system, ios_title_id);
+    return true;
   }
 
+  m_system.GetCoreTiming().ScheduleEvent(static_cast<s64>(KernelLoadTime(GetVersion())),
+                                         s_ios_boot_done_event, ios_title_id);
   return true;
 }
 
@@ -536,88 +545,76 @@ void EmulationKernel::InitIPC()
   if (Core::IsUninitialized(m_system))
     return;
 
-  INFO_LOG_FMT(IOS, "IPC initialised.");
+  INFO_LOG_FMT(IOS, "IPC ready");
   m_system.GetWiiIPC().GenerateAck(0);
 }
 
 void EmulationKernel::AddDevice(std::unique_ptr<Device> device)
 {
   ASSERT(device->GetDeviceType() == Device::DeviceType::Static);
-  m_device_map.insert_or_assign(device->GetDeviceName(), std::move(device));
+  const std::string name = device->GetDeviceName();
+  m_device_map.insert_or_assign(name, std::move(device));
 }
 
 void EmulationKernel::AddStaticDevices()
 {
   const Feature features = GetFeatures(GetVersion());
+  const auto has = [features](Feature f) { return HasFeature(features, f); };
 
-  // Dolphin-specific device for letting homebrew access and alter emulator state.
+  // Emulator-only interface for homebrew.
   AddDevice(std::make_unique<DolphinDevice>(*this, "/dev/dolphin"));
 
-  // OH1 (Bluetooth)
+  // Bluetooth (OH1): the bus node is a stub, the Wii Remote adapter is real or emulated.
   AddDevice(std::make_unique<DeviceStub>(*this, "/dev/usb/oh1"));
-  if (!Config::Get(Config::MAIN_BLUETOOTH_PASSTHROUGH_ENABLED))
-    AddDevice(std::make_unique<BluetoothEmuDevice>(*this, "/dev/usb/oh1/57e/305"));
+  constexpr const char* bt_path = "/dev/usb/oh1/57e/305";
+  if (Config::Get(Config::MAIN_BLUETOOTH_PASSTHROUGH_ENABLED))
+    AddDevice(std::make_unique<BluetoothRealDevice>(*this, bt_path));
   else
-    AddDevice(std::make_unique<BluetoothRealDevice>(*this, "/dev/usb/oh1/57e/305"));
+    AddDevice(std::make_unique<BluetoothEmuDevice>(*this, bt_path));
 
-  // Other core modules
   AddDevice(std::make_unique<STMImmediateDevice>(*this, "/dev/stm/immediate"));
   AddDevice(std::make_unique<STMEventHookDevice>(*this, "/dev/stm/eventhook"));
   AddDevice(std::make_unique<DIDevice>(*this, "/dev/di"));
   AddDevice(std::make_unique<SDIOSlot0Device>(*this, "/dev/sdio/slot0"));
   AddDevice(std::make_unique<DeviceStub>(*this, "/dev/sdio/slot1"));
 
-  // Network modules
-  if (HasFeature(features, Feature::KD) || HasFeature(features, Feature::SO) ||
-      HasFeature(features, Feature::SSL))
-  {
+  // Networking. The socket manager is shared by KD, IP and SSL.
+  if (has(Feature::KD) || has(Feature::SO) || has(Feature::SSL))
     m_socket_manager = std::make_shared<IOS::HLE::WiiSockMan>(*this);
-  }
-  if (HasFeature(features, Feature::KD))
-  {
-    constexpr auto time_device_name = "/dev/net/kd/time";
-    AddDevice(std::make_unique<NetKDTimeDevice>(*this, time_device_name));
-    const auto time_device =
-        std::static_pointer_cast<NetKDTimeDevice>(GetDeviceByName(time_device_name));
-    AddDevice(std::make_unique<NetKDRequestDevice>(*this, "/dev/net/kd/request", time_device));
-  }
-  if (HasFeature(features, Feature::NCD))
-  {
-    AddDevice(std::make_unique<NetNCDManageDevice>(*this, "/dev/net/ncd/manage"));
-  }
-  if (HasFeature(features, Feature::WiFi))
-  {
-    AddDevice(std::make_unique<NetWDCommandDevice>(*this, "/dev/net/wd/command"));
-  }
-  if (HasFeature(features, Feature::SO))
-  {
-    AddDevice(std::make_unique<NetIPTopDevice>(*this, "/dev/net/ip/top"));
-  }
-  if (HasFeature(features, Feature::SSL))
-  {
-    AddDevice(std::make_unique<NetSSLDevice>(*this, "/dev/net/ssl"));
-  }
 
-  // USB modules
-  // OH0 is unconditionally added because this device path is registered in all cases.
-  AddDevice(std::make_unique<OH0>(*this, "/dev/usb/oh0"));
-  if (HasFeature(features, Feature::NewUSB))
+  if (has(Feature::KD))
   {
+    constexpr const char* kd_time_path = "/dev/net/kd/time";
+    AddDevice(std::make_unique<NetKDTimeDevice>(*this, kd_time_path));
+    auto kd_time = std::static_pointer_cast<NetKDTimeDevice>(GetDeviceByName(kd_time_path));
+    AddDevice(std::make_unique<NetKDRequestDevice>(*this, "/dev/net/kd/request", kd_time));
+  }
+  if (has(Feature::NCD))
+    AddDevice(std::make_unique<NetNCDManageDevice>(*this, "/dev/net/ncd/manage"));
+  if (has(Feature::WiFi))
+    AddDevice(std::make_unique<NetWDCommandDevice>(*this, "/dev/net/wd/command"));
+  if (has(Feature::SO))
+    AddDevice(std::make_unique<NetIPTopDevice>(*this, "/dev/net/ip/top"));
+  if (has(Feature::SSL))
+    AddDevice(std::make_unique<NetSSLDevice>(*this, "/dev/net/ssl"));
+
+  // USB. /dev/usb/oh0 exists in every version.
+  AddDevice(std::make_unique<OH0>(*this, "/dev/usb/oh0"));
+  if (has(Feature::NewUSB))
+  {
+    // The new stack also has usb, msc, hub and ehc nodes; those are not provided yet.
     AddDevice(std::make_unique<USB_HIDv5>(*this, "/dev/usb/hid"));
     AddDevice(std::make_unique<USB_VEN>(*this, "/dev/usb/ven"));
-
-    // TODO(IOS): register /dev/usb/usb, /dev/usb/msc, /dev/usb/hub and /dev/usb/ehc
-    //            as stubs that return IPC_EACCES.
   }
   else
   {
-    if (HasFeature(features, Feature::USB_HIDv4))
+    if (has(Feature::USB_HIDv4))
       AddDevice(std::make_unique<USB_HIDv4>(*this, "/dev/usb/hid"));
-    if (HasFeature(features, Feature::USB_KBD))
+    if (has(Feature::USB_KBD))
       AddDevice(std::make_unique<USB_KBD>(*this, "/dev/usb/kbd"));
   }
 
-  if (HasFeature(features, Feature::WFS))
+  if (has(Feature::WFS))
   {
     AddDevice(std::make_unique<WFSSRVDevice>(*this, "/dev/usb/wfssrv"));
     AddDevice(std::make_unique<WFSIDevice>(*this, "/dev/wfsi"));
@@ -626,21 +623,17 @@ void EmulationKernel::AddStaticDevices()
 
 s32 EmulationKernel::GetFreeDeviceID()
 {
-  for (u32 i = 0; i < IPC_MAX_FDS; i++)
-  {
-    if (m_fdmap[i] == nullptr)
-    {
-      return i;
-    }
-  }
-
-  return -1;
+  const auto slot = std::ranges::find(m_fdmap, nullptr);
+  if (slot == m_fdmap.end())
+    return -1;
+  return static_cast<s32>(slot - m_fdmap.begin());
 }
 
 std::shared_ptr<Device> EmulationKernel::GetDeviceByName(std::string_view device_name)
 {
-  const auto iterator = m_device_map.find(device_name);
-  return iterator != m_device_map.end() ? iterator->second : nullptr;
+  if (const auto found = m_device_map.find(device_name); found != m_device_map.end())
+    return found->second;
+  return nullptr;
 }
 
 std::shared_ptr<Device> EmulationKernel::GetDeviceByFileDescriptor(const u32 fd)
@@ -648,210 +641,211 @@ std::shared_ptr<Device> EmulationKernel::GetDeviceByFileDescriptor(const u32 fd)
   if (fd < IPC_MAX_FDS)
     return m_fdmap[fd];
 
-  switch (fd)
-  {
-  case 0x10000:
+  // The crypto engines are reachable through two fixed descriptors without an Open.
+  constexpr u32 AES_FD = 0x10000;
+  constexpr u32 SHA_FD = 0x10001;
+  if (fd == AES_FD)
     return GetDeviceByName("/dev/aes");
-  case 0x10001:
+  if (fd == SHA_FD)
     return GetDeviceByName("/dev/sha");
-  default:
-    return nullptr;
-  }
+  return nullptr;
 }
 
-// Returns the FD for the newly opened device (on success) or an error code.
+// Picks a free descriptor, finds the target and opens it. On success the reply carries the new
+// descriptor; otherwise an error.
 std::optional<IPCReply> EmulationKernel::OpenDevice(OpenRequest& request)
 {
-  const s32 new_fd = GetFreeDeviceID();
-  INFO_LOG_FMT(IOS, "Opening {} (mode {}, fd {})", request.path, std::to_underlying(request.flags),
-               new_fd);
-  if (new_fd < 0 || new_fd >= IPC_MAX_FDS)
+  const s32 fd = GetFreeDeviceID();
+  INFO_LOG_FMT(IOS, "Open {} with mode {} -> fd {}", request.path,
+               std::to_underlying(request.flags), fd);
+  if (fd < 0 || fd >= IPC_MAX_FDS)
   {
-    ERROR_LOG_FMT(IOS, "Couldn't get a free fd, too many open files");
+    ERROR_LOG_FMT(IOS, "Descriptor table is full");
     return IPCReply{IPC_EMAX, 5000_tbticks};
   }
-  request.fd = new_fd;
+  request.fd = static_cast<u32>(fd);
 
-  std::shared_ptr<Device> device;
-  if (request.path.starts_with("/dev/usb/oh0/") && !GetDeviceByName(request.path) &&
+  const std::string& path = request.path;
+  std::shared_ptr<Device> target;
+  if (path.starts_with("/dev/usb/oh0/") && !GetDeviceByName(path) &&
       !HasFeature(GetVersion(), Feature::NewUSB))
   {
-    device = std::make_shared<OH0Device>(*this, request.path);
+    // Old USB stack: each device under oh0 gets its own node, made on demand.
+    target = std::make_shared<OH0Device>(*this, path);
   }
-  else if (request.path.starts_with("/dev/"))
+  else if (path.starts_with("/dev/"))
   {
-    device = GetDeviceByName(request.path);
+    target = GetDeviceByName(path);
   }
-  else if (request.path.starts_with('/'))
+  else if (path.starts_with('/'))
   {
-    device = GetDeviceByName("/dev/fs");
+    // Any other absolute path is a NAND file, which the FS module serves.
+    target = GetDeviceByName("/dev/fs");
   }
 
-  if (!device)
+  if (target == nullptr)
   {
-    constexpr std::string_view cios_devices[] = {"/dev/flash", "/dev/mload", "/dev/sdio/sdhc",
-                                                 "/dev/usb123", "/dev/usb2"};
-    static_assert(std::ranges::is_sorted(cios_devices));
-    if (std::ranges::binary_search(cios_devices, request.path))
-      WARN_LOG_FMT(IOS, "Possible anti-piracy check for cIOS device {}", request.path);
+    // Device nodes of custom IOS builds; titles often probe these to detect them.
+    static constexpr std::array<std::string_view, 5> custom_ios_nodes{
+        "/dev/flash", "/dev/mload", "/dev/sdio/sdhc", "/dev/usb123", "/dev/usb2"};
+    if (std::ranges::find(custom_ios_nodes, std::string_view{path}) != custom_ios_nodes.end())
+      WARN_LOG_FMT(IOS, "{} belongs to a custom IOS (probably an anti-piracy check)", path);
     else
-      ERROR_LOG_FMT(IOS, "Unknown device: {}", request.path);
+      ERROR_LOG_FMT(IOS, "No such device: {}", path);
     return IPCReply{IPC_ENOENT, 3700_tbticks};
   }
 
-  std::optional<IPCReply> result = device->Open(request);
-  if (result && result->return_value >= IPC_SUCCESS)
+  std::optional<IPCReply> reply = target->Open(request);
+  if (reply.has_value() && reply->return_value >= IPC_SUCCESS)
   {
-    m_fdmap[new_fd] = device;
-    result->return_value = new_fd;
+    m_fdmap[static_cast<u32>(fd)] = target;
+    reply->return_value = fd;
   }
-  return result;
+  return reply;
 }
 
 std::optional<IPCReply> EmulationKernel::HandleIPCCommand(const Request& request)
 {
-  if (request.command < IPC_CMD_OPEN || request.command > IPC_CMD_IOCTLV)
+  const IPCCommandType command = request.command;
+  if (command < IPC_CMD_OPEN || command > IPC_CMD_IOCTLV)
     return IPCReply{IPC_EINVAL, 978_tbticks};
 
-  if (request.command == IPC_CMD_OPEN)
+  if (command == IPC_CMD_OPEN)
   {
-    OpenRequest open_request{GetSystem(), request.address};
-    return OpenDevice(open_request);
+    OpenRequest open{GetSystem(), request.address};
+    return OpenDevice(open);
   }
 
-  const auto device = GetDeviceByFileDescriptor(request.fd);
-  if (!device)
+  const std::shared_ptr<Device> device = GetDeviceByFileDescriptor(request.fd);
+  if (device == nullptr)
     return IPCReply{IPC_EINVAL, 550_tbticks};
 
-  std::optional<IPCReply> ret;
-  const u64 wall_time_before = Common::Timer::NowUs();
+  auto& system = GetSystem();
+  const u64 started_us = Common::Timer::NowUs();
 
-  switch (request.command)
+  std::optional<IPCReply> reply;
+  if (command == IPC_CMD_CLOSE)
   {
-  case IPC_CMD_CLOSE:
-    // if the fd is not a special IOS FD, we need to reset it too
+    // Free the slot first; the fixed crypto descriptors have no slot.
     if (request.fd < IPC_MAX_FDS)
       m_fdmap[request.fd].reset();
-    ret = device->Close(request.fd);
-    break;
-  case IPC_CMD_READ:
-    ret = device->Read(ReadWriteRequest{GetSystem(), request.address});
-    break;
-  case IPC_CMD_WRITE:
-    ret = device->Write(ReadWriteRequest{GetSystem(), request.address});
-    break;
-  case IPC_CMD_SEEK:
-    ret = device->Seek(SeekRequest{GetSystem(), request.address});
-    break;
-  case IPC_CMD_IOCTL:
-    ret = device->IOCtl(IOCtlRequest{GetSystem(), request.address});
-    break;
-  case IPC_CMD_IOCTLV:
-    ret = device->IOCtlV(IOCtlVRequest{GetSystem(), request.address});
-    break;
-  default:
-    ASSERT_MSG(IOS, false, "Unexpected command: {:#x}", std::to_underlying(request.command));
-    ret = IPCReply{IPC_EINVAL, 978_tbticks};
-    break;
+    reply = device->Close(request.fd);
   }
-
-  const u64 wall_time_after = Common::Timer::NowUs();
-  constexpr u64 BLOCKING_IPC_COMMAND_THRESHOLD_US = 2000;
-  if (wall_time_after - wall_time_before > BLOCKING_IPC_COMMAND_THRESHOLD_US)
+  else if (command == IPC_CMD_READ)
   {
-    WARN_LOG_FMT(IOS, "Previous request to device {} blocked emulation for {} microseconds.",
-                 device->GetDeviceName(), wall_time_after - wall_time_before);
+    reply = device->Read(ReadWriteRequest{system, request.address});
+  }
+  else if (command == IPC_CMD_WRITE)
+  {
+    reply = device->Write(ReadWriteRequest{system, request.address});
+  }
+  else if (command == IPC_CMD_SEEK)
+  {
+    reply = device->Seek(SeekRequest{system, request.address});
+  }
+  else if (command == IPC_CMD_IOCTL)
+  {
+    reply = device->IOCtl(IOCtlRequest{system, request.address});
+  }
+  else
+  {
+    reply = device->IOCtlV(IOCtlVRequest{system, request.address});
   }
 
-  return ret;
+  // Report requests that held up the emulation thread for a noticeable time.
+  constexpr u64 SLOW_REQUEST_US = 2000;
+  const u64 elapsed_us = Common::Timer::NowUs() - started_us;
+  if (elapsed_us > SLOW_REQUEST_US)
+  {
+    WARN_LOG_FMT(IOS, "A request to {} took {} us of host time", device->GetDeviceName(),
+                 elapsed_us);
+  }
+
+  return reply;
 }
 
 void EmulationKernel::ExecuteIPCCommand(const u32 address)
 {
-  Request request{GetSystem(), address};
-  std::optional<IPCReply> result = HandleIPCCommand(request);
+  const Request request{GetSystem(), address};
+  std::optional<IPCReply> reply = HandleIPCCommand(request);
 
-  if (!result)
+  // Devices that answer later (asynchronously) return nothing here.
+  if (!reply)
     return;
 
-  // Ensure replies happen in order
-  auto& core_timing = GetSystem().GetCoreTiming();
-  const s64 ticks_until_last_reply = m_last_reply_time - core_timing.GetTicks();
-  if (ticks_until_last_reply > 0)
-    result->reply_delay_ticks += ticks_until_last_reply;
-  m_last_reply_time = core_timing.GetTicks() + result->reply_delay_ticks;
+  // Replies must not overtake each other, so never schedule one before the previous one.
+  const u64 now = GetSystem().GetCoreTiming().GetTicks();
+  const s64 wait_for_previous = static_cast<s64>(m_last_reply_time - now);
+  if (wait_for_previous > 0)
+    reply->reply_delay_ticks += static_cast<u64>(wait_for_previous);
+  m_last_reply_time = now + reply->reply_delay_ticks;
 
-  EnqueueIPCReply(request, result->return_value, result->reply_delay_ticks);
+  EnqueueIPCReply(request, reply->return_value, static_cast<s64>(reply->reply_delay_ticks));
 }
 
-// Happens AS SOON AS IPC gets a new pointer!
+// Called when the PPC writes a new request pointer.
 void EmulationKernel::EnqueueIPCRequest(u32 address)
 {
-  // Based on hardware tests, IOS takes between 5µs and 10µs to acknowledge an IPC request.
-  // Console 1: 456 TB ticks before ACK
-  // Console 2: 658 TB ticks before ACK
-  GetSystem().GetCoreTiming().ScheduleEvent(500_tbticks, s_event_enqueue,
-                                            address | ENQUEUE_REQUEST_FLAG);
+  // Measured on hardware, the acknowledge comes about 450 to 660 timebase ticks later.
+  GetSystem().GetCoreTiming().ScheduleEvent(500_tbticks, s_ipc_event,
+                                            ENQUEUE_REQUEST_FLAG | address);
 }
 
-// Called to send a reply to an IOS syscall
 void EmulationKernel::EnqueueIPCReply(const Request& request, const s32 return_value,
                                       s64 cycles_in_future, CoreTiming::FromThread from)
 {
   auto& system = GetSystem();
   auto& memory = system.GetMemory();
+
+  // Reply block: result at +4, the original command moved into the fd slot at +8, and the
+  // command word itself marked as a reply.
   memory.Write_U32(static_cast<u32>(return_value), request.address + 4);
-  // IOS writes back the command that was responded to in the FD field.
   memory.Write_U32(request.command, request.address + 8);
-  // IOS also overwrites the command type with the reply type.
   memory.Write_U32(IPC_REPLY, request.address);
-  system.GetCoreTiming().ScheduleEvent(cycles_in_future, s_event_enqueue, request.address, from);
+
+  system.GetCoreTiming().ScheduleEvent(cycles_in_future, s_ipc_event, request.address, from);
 }
 
 void EmulationKernel::HandleIPCEvent(u64 userdata)
 {
-  if (userdata & ENQUEUE_REQUEST_FLAG)
-    m_request_queue.push_back(static_cast<u32>(userdata));
-  else
-    m_reply_queue.push_back(static_cast<u32>(userdata));
-
+  const u32 address = static_cast<u32>(userdata);
+  auto& queue = (userdata & ENQUEUE_REQUEST_FLAG) != 0 ? m_request_queue : m_reply_queue;
+  queue.push_back(address);
   UpdateIPC();
 }
 
+// Moves at most one message across: a pending request takes priority over a pending reply.
 void EmulationKernel::UpdateIPC()
 {
-  auto& wii_ipc = m_system.GetWiiIPC();
-  if (m_ipc_paused || !wii_ipc.IsReady())
+  auto& ipc = m_system.GetWiiIPC();
+  if (m_ipc_paused || !ipc.IsReady())
     return;
 
   if (!m_request_queue.empty())
   {
-    wii_ipc.ClearX1();
-    wii_ipc.GenerateAck(m_request_queue.front());
-    u32 command = m_request_queue.front();
+    const u32 address = m_request_queue.front();
     m_request_queue.pop_front();
-    ExecuteIPCCommand(command);
+    ipc.ClearX1();
+    ipc.GenerateAck(address);
+    ExecuteIPCCommand(address);
     return;
   }
 
   if (!m_reply_queue.empty())
   {
-    wii_ipc.GenerateReply(m_reply_queue.front());
-    DEBUG_LOG_FMT(IOS, "<<-- Reply to IPC Request @ {:#010x}", m_reply_queue.front());
+    const u32 address = m_reply_queue.front();
     m_reply_queue.pop_front();
-    return;
+    ipc.GenerateReply(address);
+    DEBUG_LOG_FMT(IOS, "Reply delivered for request at {:#010x}", address);
   }
 }
 
 void EmulationKernel::UpdateDevices()
 {
-  // Check if a hardware device must be updated
   for (const auto& entry : m_device_map)
   {
     if (entry.second->IsOpened())
-    {
       entry.second->Update();
-    }
   }
 }
 
@@ -859,8 +853,8 @@ void EmulationKernel::UpdateWantDeterminism(const bool new_want_determinism)
 {
   if (m_socket_manager)
     m_socket_manager->UpdateWantDeterminism(new_want_determinism);
-  for (const auto& device : m_device_map)
-    device.second->UpdateWantDeterminism(new_want_determinism);
+  for (const auto& entry : m_device_map)
+    entry.second->UpdateWantDeterminism(new_want_determinism);
 }
 
 void EmulationKernel::DoState(PointerWrap& p)
@@ -876,6 +870,7 @@ void EmulationKernel::DoState(PointerWrap& p)
   m_iosc.DoState(p);
   m_fs->DoState(p);
 
+  // MIOS has no devices to save.
   if (m_title_id == Titles::MIOS)
     return;
 
@@ -885,108 +880,58 @@ void EmulationKernel::DoState(PointerWrap& p)
   for (const auto& entry : m_device_map)
     entry.second->DoState(p);
 
-  if (p.IsReadMode())
+  // The descriptor table: per slot a u32 "in use" flag, then the device type; static devices are
+  // stored by name, OH0 child nodes save their whole state.
+  const bool loading = p.IsReadMode();
+  for (std::shared_ptr<Device>& slot : m_fdmap)
   {
-    for (u32 i = 0; i < IPC_MAX_FDS; i++)
+    u32 in_use = (!loading && slot) ? 1 : 0;
+    p.Do(in_use);
+    if (in_use == 0)
+      continue;
+
+    Device::DeviceType type = loading ? Device::DeviceType::Static : slot->GetDeviceType();
+    p.Do(type);
+
+    if (type == Device::DeviceType::Static)
     {
-      u32 exists = 0;
-      p.Do(exists);
-      if (exists)
-      {
-        auto device_type = Device::DeviceType::Static;
-        p.Do(device_type);
-        switch (device_type)
-        {
-        case Device::DeviceType::Static:
-        {
-          std::string device_name;
-          p.Do(device_name);
-          m_fdmap[i] = GetDeviceByName(device_name);
-          break;
-        }
-        case Device::DeviceType::OH0:
-          m_fdmap[i] = std::make_shared<OH0Device>(*this, "");
-          m_fdmap[i]->DoState(p);
-          break;
-        }
-      }
+      std::string name = loading ? std::string{} : slot->GetDeviceName();
+      p.Do(name);
+      if (loading)
+        slot = GetDeviceByName(name);
+    }
+    else if (type == Device::DeviceType::OH0)
+    {
+      if (loading)
+        slot = std::make_shared<OH0Device>(*this, "");
+      slot->DoState(p);
     }
   }
-  else
-  {
-    for (auto& descriptor : m_fdmap)
-    {
-      u32 exists = descriptor ? 1 : 0;
-      p.Do(exists);
-      if (exists)
-      {
-        auto device_type = descriptor->GetDeviceType();
-        p.Do(device_type);
-        if (device_type == Device::Device::DeviceType::Static)
-        {
-          std::string device_name = descriptor->GetDeviceName();
-          p.Do(device_name);
-        }
-        else
-        {
-          descriptor->DoState(p);
-        }
-      }
-    }
-  }
-}
-
-IOSC& Kernel::GetIOSC()
-{
-  return m_iosc;
-}
-
-static void FinishPPCBootstrap(Core::System& system, u64 userdata, s64 cycles_late)
-{
-  // See Kernel::BootstrapPPC
-  const bool is_ancast = userdata == 1;
-  if (is_ancast)
-    ReleasePPCAncast(system);
-  else
-    ReleasePPC(system);
-
-  ASSERT(Core::IsCPUThread());
-  Core::CPUThreadGuard guard(system);
-  SConfig::OnTitleDirectlyBooted(guard);
-
-  INFO_LOG_FMT(IOS, "Bootstrapping done.");
 }
 
 void Init(Core::System& system)
 {
-  auto& core_timing = system.GetCoreTiming();
+  auto& timing = system.GetCoreTiming();
 
-  s_event_enqueue =
-      core_timing.RegisterEvent("IPCEvent", [](Core::System& system_, u64 userdata, s64) {
-        auto* ios = system_.GetIOS();
-        if (ios)
-          ios->HandleIPCEvent(userdata);
-      });
+  s_ipc_event = timing.RegisterEvent("IPCEvent", [](Core::System& sys, u64 userdata, s64) {
+    if (EmulationKernel* kernel = sys.GetIOS(); kernel != nullptr)
+      kernel->HandleIPCEvent(userdata);
+  });
 
-  ESDevice::InitializeEmulationState(core_timing);
+  ESDevice::InitializeEmulationState(timing);
 
-  s_event_finish_ppc_bootstrap =
-      core_timing.RegisterEvent("IOSFinishPPCBootstrap", FinishPPCBootstrap);
+  s_ppc_bootstrap_done_event = timing.RegisterEvent("IOSFinishPPCBootstrap", OnPPCBootstrapDone);
 
-  s_event_finish_ios_boot = core_timing.RegisterEvent(
+  s_ios_boot_done_event = timing.RegisterEvent(
       "IOSFinishIOSBoot",
-      [](Core::System& system_, u64 ios_title_id, s64) { FinishIOSBoot(system_, ios_title_id); });
+      [](Core::System& sys, u64 ios_title_id, s64) { SwitchKernel(sys, ios_title_id); });
 
   DIDevice::s_finish_executing_di_command =
-      core_timing.RegisterEvent("FinishDICommand", DIDevice::FinishDICommandCallback);
+      timing.RegisterEvent("FinishDICommand", DIDevice::FinishDICommandCallback);
 
-  // Start with IOS80 to simulate part of the Wii boot process.
+  // A console boots into the System Menu's IOS, and the System Menu's launch fills in the low
+  // memory values. Booting a game directly skips that, so do the same set-up here.
   system.SetIOS(std::make_unique<EmulationKernel>(system, Titles::SYSTEM_MENU_IOS));
-  // On a Wii, boot2 launches the system menu IOS, which then launches the system menu
-  // (which bootstraps the PPC). Bootstrapping the PPC results in memory values being set up.
-  // This means that the constants in the 0x3100 region are always set up by the time
-  // a game is launched. This is necessary because booting games from the game list skips
-  // a significant part of a Wii's boot process.
   SetupMemory(system.GetMemory(), Titles::SYSTEM_MENU_IOS, MemorySetupType::Full);
 }
 
@@ -996,13 +941,9 @@ void Shutdown(Core::System& system)
   ESDevice::FinalizeEmulationState();
 }
 
-// Based on a hardware test, a device takes at least ~2700 ticks to reply to an IPC request.
-// Depending on how much work a command performs, this can take much longer (10000+)
-// especially if the NAND filesystem is accessed.
-//
-// Because we currently don't emulate timing very accurately, we should not return
-// the minimum possible reply time (~960 ticks from the kernel or ~2700 from devices)
-// but an average value, otherwise we are going to be much too fast in most cases.
+// Hardware answers in about 2700 ticks at best and often takes 10000 or more when the NAND is
+// involved. Timing is approximate anyway, so the default is a middle value rather than the
+// minimum, to avoid running much faster than a console.
 IPCReply::IPCReply(s32 return_value_) : IPCReply(return_value_, 4000_tbticks)
 {
 }

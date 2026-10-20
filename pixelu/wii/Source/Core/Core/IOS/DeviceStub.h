@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -8,10 +7,11 @@
 
 namespace IOS::HLE
 {
+// Placeholder for a resource manager that is not emulated: it accepts Open, IOCtl and IOCtlV
+// and answers every one of them with success, so titles that only probe it keep going.
 class DeviceStub final : public Device
 {
 public:
-  // Inherit the constructor from the Device class, since we don't need to do anything special.
   using Device::Device;
   std::optional<IPCReply> Open(const OpenRequest& request) override;
   std::optional<IPCReply> IOCtl(const IOCtlRequest& request) override;

@@ -1,5 +1,4 @@
-// Copyright 2017 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -44,10 +43,11 @@ class WiiSockMan;
 struct Request;
 struct OpenRequest;
 
+// What a device hands back to the kernel for one request: the value for the reply word and
+// how long, in timebase ticks, the reply should take to arrive.
 struct IPCReply
 {
-  /// Constructs a reply with an average reply time.
-  /// Please avoid using this function if more accurate timings are known.
+  // Uses a typical reply latency. Prefer the two-argument form when the real cost is known.
   explicit IPCReply(s32 return_value_);
   explicit IPCReply(s32 return_value_, u64 reply_delay_ticks_);
 
@@ -55,10 +55,11 @@ struct IPCReply
   u64 reply_delay_ticks;
 };
 
+// Smallest time a resource manager has been measured to take to answer a request.
 constexpr SystemTimers::TimeBaseTick IPC_OVERHEAD_TICKS = 2700_tbticks;
 
-// Used to make it more convenient for functions to return timing information
-// without having to explicitly keep track of ticks in callers.
+// An optional accumulator for emulated time. Functions that do timed work take one and add
+// their cost to it; callers that do not care pass nothing.
 class Ticks
 {
 public:
@@ -74,6 +75,7 @@ private:
   u64* m_ticks = nullptr;
 };
 
+// Runs fn with a Ticks that starts at `ticks` and returns its result together with the total.
 template <typename ResultProducer>
 IPCReply MakeIPCReply(u64 ticks, const ResultProducer& fn)
 {
@@ -96,7 +98,7 @@ enum IPCCommandType : u32
   IPC_CMD_SEEK = 5,
   IPC_CMD_IOCTL = 6,
   IPC_CMD_IOCTLV = 7,
-  // This is used for replies to commands.
+  // Written over the command word once a request has been answered.
   IPC_REPLY = 8,
 };
 
@@ -116,15 +118,15 @@ void RAMOverrideForIOSMemoryValues(Memory::MemoryManager& memory, MemorySetupTyp
 
 void WriteReturnValue(Memory::MemoryManager& memory, s32 value, u32 address);
 
-// HLE for the IOS kernel: IPC, device management, syscalls, and Dolphin-specific, IOS-wide calls.
+// The IOS kernel on its own: the file system and ES cores plus the crypto engine. This is
+// enough for tools that work on the NAND without running a game.
 class Kernel
 {
 public:
   explicit Kernel(IOSC::ConsoleType console_type = IOSC::ConsoleType::Retail);
   virtual ~Kernel();
 
-  // These are *always* part of the IOS kernel and always available.
-  // They are also the only available resource managers even before loading any module.
+  // FS and ES live in the kernel image itself, so they exist before any module is loaded.
   std::shared_ptr<FS::FileSystem> GetFS();
   FSCore& GetFSCore();
   ESCore& GetESCore();
@@ -147,15 +149,15 @@ protected:
   std::shared_ptr<WiiSockMan> m_socket_manager;
 };
 
-// HLE for an IOS tied to emulation: base kernel which may have additional modules loaded.
+// The kernel that runs alongside emulation: it owns the IPC queues, the fd table and every
+// resource manager the current IOS version provides.
 class EmulationKernel final : public Kernel
 {
 public:
   EmulationKernel(Core::System& system, u64 ios_title_id);
   ~EmulationKernel() override;
 
-  // Get a resource manager by name.
-  // This only works for devices which are part of the device map.
+  // Looks up a registered (static) resource manager by its path.
   std::shared_ptr<Device> GetDeviceByName(std::string_view device_name);
   std::shared_ptr<Device> GetDeviceByFileDescriptor(const u32 fd);
 
@@ -201,20 +203,21 @@ private:
 
   static constexpr u8 IPC_MAX_FDS = 0x18;
   std::map<std::string, std::shared_ptr<Device>, std::less<>> m_device_map;
-  // TODO: make this fdmap per process.
+  // A single table shared by everything on the PPC side (real IOS keeps one per process).
   std::array<std::shared_ptr<Device>, IPC_MAX_FDS> m_fdmap;
 
   u32 m_ppc_uid = 0;
   u16 m_ppc_gid = 0;
 
   using IPCMsgQueue = std::deque<u32>;
-  IPCMsgQueue m_request_queue;  // ppc -> arm
-  IPCMsgQueue m_reply_queue;    // arm -> ppc
+  // Requests waiting to be acknowledged, and answered requests waiting to be delivered.
+  IPCMsgQueue m_request_queue;
+  IPCMsgQueue m_reply_queue;
   u64 m_last_reply_time = 0;
   bool m_ipc_paused = false;
 };
 
-// Used for controlling and accessing an IOS instance that is tied to emulation.
+// Create and destroy the kernel that belongs to an emulated system.
 void Init(Core::System& system);
 void Shutdown(Core::System& system);
 

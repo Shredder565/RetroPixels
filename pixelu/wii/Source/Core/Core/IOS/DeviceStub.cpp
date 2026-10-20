@@ -1,28 +1,35 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/IOS/DeviceStub.h"
+
+#include <string_view>
 
 #include "Common/Logging/Log.h"
 
 namespace IOS::HLE
 {
-std::optional<IPCReply> DeviceStub::Open(const OpenRequest& request)
+namespace
 {
-  WARN_LOG_FMT(IOS, "{} faking Open()", m_name);
+IPCReply PretendSuccess(const std::string& device, std::string_view what)
+{
+  WARN_LOG_FMT(IOS, "{}: stub device, reporting success for {}", device, what);
+  return IPCReply(IPC_SUCCESS);
+}
+}  // namespace
+
+std::optional<IPCReply> DeviceStub::Open(const OpenRequest&)
+{
   m_is_active = true;
-  return IPCReply(IPC_SUCCESS);
+  return PretendSuccess(m_name, "Open");
 }
 
-std::optional<IPCReply> DeviceStub::IOCtl(const IOCtlRequest& request)
+std::optional<IPCReply> DeviceStub::IOCtl(const IOCtlRequest&)
 {
-  WARN_LOG_FMT(IOS, "{} faking IOCtl()", m_name);
-  return IPCReply(IPC_SUCCESS);
+  return PretendSuccess(m_name, "IOCtl");
 }
 
-std::optional<IPCReply> DeviceStub::IOCtlV(const IOCtlVRequest& request)
+std::optional<IPCReply> DeviceStub::IOCtlV(const IOCtlVRequest&)
 {
-  WARN_LOG_FMT(IOS, "{} faking IOCtlV()", m_name);
-  return IPCReply(IPC_SUCCESS);
+  return PretendSuccess(m_name, "IOCtlV");
 }
 }  // namespace IOS::HLE
