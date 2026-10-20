@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/PowerPC/PowerPC.h"
 
@@ -32,6 +31,75 @@
 
 namespace PowerPC
 {
+namespace
+{
+// Processor version register values: Gekko 2.4e (retail GameCube) and
+// Broadway (retail Wii).
+constexpr u32 PVR_GEKKO = 0x00083214;
+constexpr u32 PVR_BROADWAY = 0x00087102;
+
+// MSR bits copied to SRR1 when an interrupt is taken, and the bits an
+// interrupt clears: POW, EE, PR, FP, FE0, SE, BE, FE1, IR, DR, PM and RI.
+// ME, ILE and IP are kept, and LE is loaded from ILE.
+constexpr u32 SRR1_MSR_BITS = 0x87C0FFFF;
+constexpr u32 MSR_CLEARED_ON_INTERRUPT = 0x0004EF36;
+
+// SRR1 bit 1 (IBM numbering) for an ISI: the translation was not found.
+constexpr u32 SRR1_ISI_PAGE_FAULT = 1u << 30;
+
+// Interrupt vectors (with MSR[IP] = 0).
+constexpr u32 VECTOR_DSI = 0x00000300;
+constexpr u32 VECTOR_ISI = 0x00000400;
+constexpr u32 VECTOR_EXTERNAL = 0x00000500;
+constexpr u32 VECTOR_ALIGNMENT = 0x00000600;
+constexpr u32 VECTOR_PROGRAM = 0x00000700;
+constexpr u32 VECTOR_FP_UNAVAILABLE = 0x00000800;
+constexpr u32 VECTOR_DECREMENTER = 0x00000900;
+constexpr u32 VECTOR_SYSCALL = 0x00000C00;
+constexpr u32 VECTOR_PERFORMANCE_MONITOR = 0x00000F00;
+
+void InvalidateCacheThreadSafe(Core::System& system, u64 userdata, s64)
+{
+  system.GetPPCState().iCache.Invalidate(system.GetMemory(), system.GetJitInterface(),
+                                         static_cast<u32>(userdata));
+  Host_JitCacheInvalidation();
+}
+
+// The part every interrupt shares: save the return address and MSR, switch
+// to the handler's MSR and jump to the vector.
+void EnterInterrupt(PowerPCState& state, u32 return_address, u32 srr1, u32 vector)
+{
+  SRR0(state) = return_address;
+  SRR1(state) = srr1;
+  state.msr.LE = state.msr.ILE;
+  state.msr.Hex &= ~MSR_CLEARED_ON_INTERRUPT;
+  state.pc = vector;
+  state.npc = vector;
+}
+
+u32 SavedMSR(const PowerPCState& state)
+{
+  return state.msr.Hex & SRR1_MSR_BITS;
+}
+
+// MSR[DR] and MSR[IR] are bits 4 and 5; the feature flags put them at bits
+// 0 and 1.
+static_assert(UReg_MSR{}.DR.StartBit() == 4);
+static_assert(UReg_MSR{}.IR.StartBit() == 5);
+static_assert(FEATURE_FLAG_MSR_DR == 1 << 0);
+static_assert(FEATURE_FLAG_MSR_IR == 1 << 1);
+
+u32 TranslationFlags(const PowerPCState& state)
+{
+  return (state.msr.Hex >> 4) & (FEATURE_FLAG_MSR_DR | FEATURE_FLAG_MSR_IR);
+}
+
+bool PerformanceMonitorActive(const PowerPCState& state)
+{
+  return state.spr[SPR_MMCR0] != 0 || state.spr[SPR_MMCR1] != 0;
+}
+}  // namespace
+
 double PairedSingle::PS0AsDouble() const
 {
   return std::bit_cast<double>(ps0);
@@ -52,13 +120,6 @@ void PairedSingle::SetPS1(double value)
   ps1 = std::bit_cast<u64>(value);
 }
 
-static void InvalidateCacheThreadSafe(Core::System& system, u64 userdata, s64 cyclesLate)
-{
-  system.GetPPCState().iCache.Invalidate(system.GetMemory(), system.GetJitInterface(),
-                                         static_cast<u32>(userdata));
-  Host_JitCacheInvalidation();
-}
-
 PowerPCManager::PowerPCManager(Core::System& system)
     : m_breakpoints(system), m_memchecks(system), m_debug_interface(system, m_symbol_db),
       m_system(system)
@@ -69,17 +130,9 @@ PowerPCManager::~PowerPCManager() = default;
 
 void PowerPCManager::DoState(PointerWrap& p)
 {
-  // some of this code has been disabled, because
-  // it changes registers even in Mode::Measure (which is suspicious and seems like it could cause
-  // desyncs)
-  // and because the values it's changing have been added to CoreTiming::DoState, so it might
-  // conflict to mess with them here.
-
-  // m_ppc_state.spr[SPR_DEC] = SystemTimers::GetFakeDecrementer();
-  // *((u64 *)&TL(m_ppc_state)) = SystemTimers::GetFakeTimeBase(); //works since we are little
-  // endian and TL comes first :)
-
-  const std::array<u32, 16> old_sr = m_ppc_state.sr;
+  // The decrementer and time base are saved by CoreTiming/SystemTimers, not
+  // here.
+  const std::array<u32, 16> segments_before = m_ppc_state.sr;
 
   p.DoArray(m_ppc_state.gpr);
   p.Do(m_ppc_state.pc);
@@ -99,7 +152,6 @@ void PowerPCManager::DoState(PointerWrap& p)
   p.Do(m_ppc_state.pagetable_base);
   p.Do(m_ppc_state.pagetable_mask);
   p.Do(m_ppc_state.pagetable_update_pending);
-
   p.Do(m_ppc_state.reserve);
   p.Do(m_ppc_state.reserve_address);
 
@@ -108,10 +160,15 @@ void PowerPCManager::DoState(PointerWrap& p)
   m_ppc_state.dCache.DoState(memory, p);
 
   auto& mmu = m_system.GetMMU();
-  if (p.IsReadMode())
+  if (!p.IsReadMode())
   {
-    mmu.DoState(p, old_sr != m_ppc_state.sr);
+    mmu.DoState(p, false);
+  }
+  else
+  {
+    mmu.DoState(p, segments_before != m_ppc_state.sr);
 
+    // A state saved with the data cache on may be loaded with it off.
     if (!m_ppc_state.m_enable_dcache)
     {
       INFO_LOG_FMT(POWERPC, "Flushing data cache");
@@ -124,13 +181,6 @@ void PowerPCManager::DoState(PointerWrap& p)
     mmu.IBATUpdated();
     mmu.DBATUpdated();
   }
-  else
-  {
-    mmu.DoState(p, false);
-  }
-
-  // SystemTimers::DecrementerSet();
-  // SystemTimers::TimeBaseSet();
 
   m_system.GetJitInterface().DoState(p);
 }
@@ -138,30 +188,14 @@ void PowerPCManager::DoState(PointerWrap& p)
 void PowerPCManager::ResetRegisters()
 {
   std::ranges::fill(m_ppc_state.ps, PairedSingle{});
-  std::ranges::fill(m_ppc_state.sr, 0U);
-  std::ranges::fill(m_ppc_state.gpr, 0U);
-  std::ranges::fill(m_ppc_state.spr, 0U);
+  std::ranges::fill(m_ppc_state.sr, 0u);
+  std::ranges::fill(m_ppc_state.gpr, 0u);
+  std::ranges::fill(m_ppc_state.spr, 0u);
 
-  // Gamecube:
-  // 0x00080200 = lonestar 2.0
-  // 0x00088202 = lonestar 2.2
-  // 0x70000100 = gekko 1.0
-  // 0x00080100 = gekko 2.0
-  // 0x00083203 = gekko 2.3a
-  // 0x00083213 = gekko 2.3b
-  // 0x00083204 = gekko 2.4
-  // 0x00083214 = gekko 2.4e (8SE) - retail HW2
-  // Wii:
-  // 0x00087102 = broadway retail hw
-  if (m_system.IsWii())
-  {
-    m_ppc_state.spr[SPR_PVR] = 0x00087102;
-  }
-  else
-  {
-    m_ppc_state.spr[SPR_PVR] = 0x00083214;
-  }
-  m_ppc_state.spr[SPR_HID1] = 0x80000000;  // We're running at 3x the bus clock
+  m_ppc_state.spr[SPR_PVR] = m_system.IsWii() ? PVR_BROADWAY : PVR_GEKKO;
+  // HID1 reports the PLL configuration: core clock at three times the bus.
+  m_ppc_state.spr[SPR_HID1] = 0x80000000;
+  // The chip ID (ECID) of one real console.
   m_ppc_state.spr[SPR_ECID_U] = 0x0d96e200;
   m_ppc_state.spr[SPR_ECID_M] = 0x1840c00d;
   m_ppc_state.spr[SPR_ECID_L] = 0x82bb08e8;
@@ -174,10 +208,9 @@ void PowerPCManager::ResetRegisters()
   m_ppc_state.reserve = false;
   m_ppc_state.reserve_address = 0;
 
-  for (auto& v : m_ppc_state.cr.fields)
-  {
-    v = 0x8000000000000001;
-  }
+  // Every CR field starts out with LT, GT, EQ and SO clear: negative (not
+  // GT), low half non-zero (not EQ), bits 62 and 59 clear.
+  std::ranges::fill(m_ppc_state.cr.fields, u64{0x8000000000000001});
   m_ppc_state.SetXER({});
 
   auto& mmu = m_system.GetMMU();
@@ -189,7 +222,8 @@ void PowerPCManager::ResetRegisters()
   TU(m_ppc_state) = 0;
   system_timers.TimeBaseSet();
 
-  // MSR should be 0x40, but we don't emulate BS1, so it would never be turned off :}
+  // Real hardware comes out of reset with MSR[IP] set, but the boot ROM that
+  // would clear it is not run, so start with 0.
   m_ppc_state.msr.Hex = 0;
   m_ppc_state.spr[SPR_DEC] = 0xFFFFFFFF;
   system_timers.DecrementerSet();
@@ -200,26 +234,25 @@ void PowerPCManager::ResetRegisters()
 
 void PowerPCManager::InitializeCPUCore(CPUCore cpu_core)
 {
-  // We initialize the interpreter because
-  // it is used on boot and code window independently.
+  // The interpreter is always set up: boot code and the debugger use it
+  // whatever the main engine is.
   auto& interpreter = m_system.GetInterpreter();
   interpreter.Init();
 
-  switch (cpu_core)
+  if (cpu_core == CPUCore::Interpreter)
   {
-  case CPUCore::Interpreter:
     m_cpu_core_base = &interpreter;
-    break;
-
-  default:
-    m_cpu_core_base = m_system.GetJitInterface().InitJitCore(cpu_core);
-    if (!m_cpu_core_base)  // Handle Situations where JIT core isn't available
+  }
+  else
+  {
+    auto& jit = m_system.GetJitInterface();
+    m_cpu_core_base = jit.InitJitCore(cpu_core);
+    if (m_cpu_core_base == nullptr)
     {
       WARN_LOG_FMT(POWERPC, "CPU core {} not available. Falling back to default.",
                    static_cast<int>(cpu_core));
-      m_cpu_core_base = m_system.GetJitInterface().InitJitCore(DefaultCPUCore());
+      m_cpu_core_base = jit.InitJitCore(DefaultCPUCore());
     }
-    break;
   }
 
   m_mode = m_cpu_core_base == &interpreter ? CoreMode::Interpreter : CoreMode::JIT;
@@ -227,25 +260,20 @@ void PowerPCManager::InitializeCPUCore(CPUCore cpu_core)
 
 std::span<const CPUCore> AvailableCPUCores()
 {
-  static constexpr auto cpu_cores = {
+  static constexpr std::array cores{
 #ifdef _M_X86_64
       CPUCore::JIT64,
-#elif defined(_M_ARM_64)
-      CPUCore::JITARM64,
 #endif
       CPUCore::CachedInterpreter,
       CPUCore::Interpreter,
   };
-
-  return cpu_cores;
+  return cores;
 }
 
 CPUCore DefaultCPUCore()
 {
 #ifdef _M_X86_64
   return CPUCore::JIT64;
-#elif defined(_M_ARM_64)
-  return CPUCore::JITARM64;
 #else
   return CPUCore::CachedInterpreter;
 #endif
@@ -253,11 +281,11 @@ CPUCore DefaultCPUCore()
 
 void PowerPCManager::RefreshConfig()
 {
-  const bool old_enable_dcache = m_ppc_state.m_enable_dcache;
-
+  const bool was_enabled = m_ppc_state.m_enable_dcache;
   m_ppc_state.m_enable_dcache = Config::Get(Config::MAIN_ACCURATE_CPU_CACHE);
 
-  if (old_enable_dcache && !m_ppc_state.m_enable_dcache)
+  // Turning the data cache off must not lose writes that only live in it.
+  if (was_enabled && !m_ppc_state.m_enable_dcache)
   {
     INFO_LOG_FMT(POWERPC, "Flushing data cache");
     m_ppc_state.dCache.FlushAll(m_system.GetMemory());
@@ -296,19 +324,16 @@ void PowerPCManager::Reset()
 
 void PowerPCManager::ScheduleInvalidateCacheThreadSafe(u32 address)
 {
-  auto& cpu = m_system.GetCPU();
-
-  if (cpu.GetState() == CPU::State::Running && !Core::IsCPUThread())
+  const bool running = m_system.GetCPU().GetState() == CPU::State::Running;
+  if (running && !Core::IsCPUThread())
   {
     m_system.GetCoreTiming().ScheduleEvent(0, m_invalidate_cache_thread_safe, address,
                                            CoreTiming::FromThread::NON_CPU);
+    return;
   }
-  else
-  {
-    m_ppc_state.iCache.Invalidate(m_system.GetMemory(), m_system.GetJitInterface(),
-                                  static_cast<u32>(address));
-    Host_JitCacheInvalidation();
-  }
+
+  m_ppc_state.iCache.Invalidate(m_system.GetMemory(), m_system.GetJitInterface(), address);
+  Host_JitCacheInvalidation();
 }
 
 void PowerPCManager::Shutdown()
@@ -322,40 +347,35 @@ void PowerPCManager::Shutdown()
 
 CoreMode PowerPCManager::GetMode() const
 {
-  return !m_cpu_core_base_is_injected ? m_mode : CoreMode::Interpreter;
+  return m_cpu_core_base_is_injected ? CoreMode::Interpreter : m_mode;
 }
 
 void PowerPCManager::ApplyMode()
 {
   auto& interpreter = m_system.GetInterpreter();
-
-  switch (m_mode)
+  if (m_mode == CoreMode::JIT)
   {
-  case CoreMode::Interpreter:  // Switching from JIT to interpreter
-    m_cpu_core_base = &interpreter;
-    break;
-
-  case CoreMode::JIT:  // Switching from interpreter to JIT.
-    // Don't really need to do much. It'll work, the cache will refill itself.
+    // The JIT's block cache simply fills up again from here.
     m_cpu_core_base = m_system.GetJitInterface().GetCore();
-    if (!m_cpu_core_base)  // Has a chance to not get a working JIT core if one isn't active on host
+    if (m_cpu_core_base == nullptr)
       m_cpu_core_base = &interpreter;
-    break;
+  }
+  else
+  {
+    m_cpu_core_base = &interpreter;
   }
 }
 
 void PowerPCManager::SetMode(CoreMode new_mode)
 {
   if (new_mode == m_mode)
-    return;  // We don't need to do anything.
+    return;
 
   m_mode = new_mode;
 
-  // If we're using an external CPU core implementation then don't do anything.
-  if (m_cpu_core_base_is_injected)
-    return;
-
-  ApplyMode();
+  // An injected core stays in charge; the mode applies once it is removed.
+  if (!m_cpu_core_base_is_injected)
+    ApplyMode();
 }
 
 const char* PowerPCManager::GetCPUName() const
@@ -365,12 +385,10 @@ const char* PowerPCManager::GetCPUName() const
 
 void PowerPCManager::InjectExternalCPUCore(CPUCoreBase* new_cpu)
 {
-  // Previously injected.
   if (m_cpu_core_base_is_injected)
     m_cpu_core_base->Shutdown();
 
-  // nullptr means just remove
-  if (!new_cpu)
+  if (new_cpu == nullptr)
   {
     if (m_cpu_core_base_is_injected)
     {
@@ -398,6 +416,8 @@ void PowerPCManager::RunLoop()
 
 u64 PowerPCManager::ReadFullTimeBaseValue() const
 {
+  // TBL and TBU are adjacent SPRs (268, 269), so on a little-endian host
+  // they form the 64-bit time base directly.
   u64 value;
   std::memcpy(&value, &TL(m_ppc_state), sizeof(value));
   return value;
@@ -411,169 +431,92 @@ void PowerPCManager::WriteFullTimeBaseValue(u64 value)
 void UpdatePerformanceMonitor(u32 cycles, u32 num_load_stores, u32 num_fp_inst,
                               PowerPCState& ppc_state)
 {
-  switch (MMCR0(ppc_state).PMC1SELECT)
-  {
-  case 0:  // No change
-    break;
-  case 1:  // Processor cycles
+  // Only the events games are known to use are counted: event 1 (processor
+  // cycles) on every counter, event 11 on PMC2 (completed loads/stores) and
+  // PMC3 (completed FPU instructions).
+  const UReg_MMCR0 mmcr0 = MMCR0(ppc_state);
+  const UReg_MMCR1 mmcr1 = MMCR1(ppc_state);
+
+  if (mmcr0.PMC1SELECT == 1)
     ppc_state.spr[SPR_PMC1] += cycles;
-    break;
-  default:
-    break;
-  }
 
-  switch (MMCR0(ppc_state).PMC2SELECT)
-  {
-  case 0:  // No change
-    break;
-  case 1:  // Processor cycles
+  if (mmcr0.PMC2SELECT == 1)
     ppc_state.spr[SPR_PMC2] += cycles;
-    break;
-  case 11:  // Number of loads and stores completed
+  else if (mmcr0.PMC2SELECT == 11)
     ppc_state.spr[SPR_PMC2] += num_load_stores;
-    break;
-  default:
-    break;
-  }
 
-  switch (MMCR1(ppc_state).PMC3SELECT)
-  {
-  case 0:  // No change
-    break;
-  case 1:  // Processor cycles
+  if (mmcr1.PMC3SELECT == 1)
     ppc_state.spr[SPR_PMC3] += cycles;
-    break;
-  case 11:  // Number of FPU instructions completed
+  else if (mmcr1.PMC3SELECT == 11)
     ppc_state.spr[SPR_PMC3] += num_fp_inst;
-    break;
-  default:
-    break;
-  }
 
-  switch (MMCR1(ppc_state).PMC4SELECT)
-  {
-  case 0:  // No change
-    break;
-  case 1:  // Processor cycles
+  if (mmcr1.PMC4SELECT == 1)
     ppc_state.spr[SPR_PMC4] += cycles;
-    break;
-  default:
-    break;
-  }
 
-  if ((MMCR0(ppc_state).PMC1INTCONTROL && (ppc_state.spr[SPR_PMC1] & 0x80000000) != 0) ||
-      (MMCR0(ppc_state).PMCINTCONTROL && (ppc_state.spr[SPR_PMC2] & 0x80000000) != 0) ||
-      (MMCR0(ppc_state).PMCINTCONTROL && (ppc_state.spr[SPR_PMC3] & 0x80000000) != 0) ||
-      (MMCR0(ppc_state).PMCINTCONTROL && (ppc_state.spr[SPR_PMC4] & 0x80000000) != 0))
-  {
+  // A counter whose top bit is set raises the interrupt if enabled: PMC1
+  // through PMC1INTCONTROL, the others through PMCINTCONTROL.
+  const auto negative = [&](int spr) { return (ppc_state.spr[spr] & 0x80000000) != 0; };
+  const bool pmc1 = mmcr0.PMC1INTCONTROL && negative(SPR_PMC1);
+  const bool others = mmcr0.PMCINTCONTROL &&
+                      (negative(SPR_PMC2) || negative(SPR_PMC3) || negative(SPR_PMC4));
+  if (pmc1 || others)
     ppc_state.Exceptions |= EXCEPTION_PERFORMANCE_MONITOR;
-  }
 }
 
 void PowerPCManager::CheckExceptions()
 {
-  u32 exceptions = m_ppc_state.Exceptions;
+  // Only one exception is taken per call, in this fixed order (which is not
+  // the order the 750CL documents, but is what the emulator has always
+  // done). External interrupts are left to CheckExternalExceptions.
+  PowerPCState& s = m_ppc_state;
+  const u32 pending = s.Exceptions;
 
-  // Example procedure:
-  // Set SRR0 to either PC or NPC
-  // SRR0 = NPC;
-  //
-  // Save specified MSR bits
-  // SRR1 = MSR.Hex & 0x87C0FFFF;
-  //
-  // Copy ILE bit to LE
-  // MSR.LE = MSR.ILE;
-  //
-  // Clear MSR as specified
-  // MSR.Hex &= ~0x04EF36; // 0x04FF36 also clears ME (only for machine check exception)
-  //
-  // Set to exception type entry point
-  // NPC = 0x00000x00;
-
-  // TODO(delroth): Exception priority is completely wrong here: depending on
-  // the instruction class, exceptions should be executed in a given order,
-  // which is very different from the one arbitrarily chosen here. See §6.1.5
-  // in 6xx_pem.pdf.
-
-  if (exceptions & EXCEPTION_ISI)
+  if (pending & EXCEPTION_ISI)
   {
-    SRR0(m_ppc_state) = m_ppc_state.npc;
-    // Page fault occurred
-    SRR1(m_ppc_state) = (m_ppc_state.msr.Hex & 0x87C0FFFF) | (1 << 30);
-    m_ppc_state.msr.LE = m_ppc_state.msr.ILE;
-    m_ppc_state.msr.Hex &= ~0x04EF36;
-    m_ppc_state.pc = m_ppc_state.npc = 0x00000400;
-
+    EnterInterrupt(s, s.npc, SavedMSR(s) | SRR1_ISI_PAGE_FAULT, VECTOR_ISI);
     DEBUG_LOG_FMT(POWERPC, "EXCEPTION_ISI");
-    m_ppc_state.Exceptions &= ~EXCEPTION_ISI;
+    s.Exceptions &= ~EXCEPTION_ISI;
   }
-  else if (exceptions & EXCEPTION_PROGRAM)
+  else if (pending & EXCEPTION_PROGRAM)
   {
-    SRR0(m_ppc_state) = m_ppc_state.pc;
-    // SRR1 was partially set by GenerateProgramException, so bitwise or is used here
-    SRR1(m_ppc_state) |= m_ppc_state.msr.Hex & 0x87C0FFFF;
-    m_ppc_state.msr.LE = m_ppc_state.msr.ILE;
-    m_ppc_state.msr.Hex &= ~0x04EF36;
-    m_ppc_state.pc = m_ppc_state.npc = 0x00000700;
-
+    // The cause bits of SRR1 were already set when the exception was raised.
+    EnterInterrupt(s, s.pc, SRR1(s) | SavedMSR(s), VECTOR_PROGRAM);
     DEBUG_LOG_FMT(POWERPC, "EXCEPTION_PROGRAM");
-    m_ppc_state.Exceptions &= ~EXCEPTION_PROGRAM;
+    s.Exceptions &= ~EXCEPTION_PROGRAM;
   }
-  else if (exceptions & EXCEPTION_SYSCALL)
+  else if (pending & EXCEPTION_SYSCALL)
   {
-    SRR0(m_ppc_state) = m_ppc_state.npc;
-    SRR1(m_ppc_state) = m_ppc_state.msr.Hex & 0x87C0FFFF;
-    m_ppc_state.msr.LE = m_ppc_state.msr.ILE;
-    m_ppc_state.msr.Hex &= ~0x04EF36;
-    m_ppc_state.pc = m_ppc_state.npc = 0x00000C00;
-
-    DEBUG_LOG_FMT(POWERPC, "EXCEPTION_SYSCALL (PC={:08x})", m_ppc_state.pc);
-    m_ppc_state.Exceptions &= ~EXCEPTION_SYSCALL;
+    EnterInterrupt(s, s.npc, SavedMSR(s), VECTOR_SYSCALL);
+    DEBUG_LOG_FMT(POWERPC, "EXCEPTION_SYSCALL (PC={:08x})", s.pc);
+    s.Exceptions &= ~EXCEPTION_SYSCALL;
   }
-  else if (exceptions & EXCEPTION_FPU_UNAVAILABLE)
+  else if (pending & EXCEPTION_FPU_UNAVAILABLE)
   {
-    // This happens a lot - GameCube OS uses deferred FPU context switching
-    SRR0(m_ppc_state) = m_ppc_state.pc;  // re-execute the instruction
-    SRR1(m_ppc_state) = m_ppc_state.msr.Hex & 0x87C0FFFF;
-    m_ppc_state.msr.LE = m_ppc_state.msr.ILE;
-    m_ppc_state.msr.Hex &= ~0x04EF36;
-    m_ppc_state.pc = m_ppc_state.npc = 0x00000800;
-
+    // Common: the OS switches FPU contexts lazily. The instruction is retried.
+    EnterInterrupt(s, s.pc, SavedMSR(s), VECTOR_FP_UNAVAILABLE);
     DEBUG_LOG_FMT(POWERPC, "EXCEPTION_FPU_UNAVAILABLE");
-    m_ppc_state.Exceptions &= ~EXCEPTION_FPU_UNAVAILABLE;
+    s.Exceptions &= ~EXCEPTION_FPU_UNAVAILABLE;
   }
-  else if (exceptions & EXCEPTION_FAKE_MEMCHECK_HIT)
+  else if (pending & EXCEPTION_FAKE_MEMCHECK_HIT)
   {
-    m_ppc_state.Exceptions &= ~EXCEPTION_DSI & ~EXCEPTION_FAKE_MEMCHECK_HIT;
+    // A watchpoint stopped the access; there is no guest-visible exception.
+    s.Exceptions &= ~(EXCEPTION_DSI | EXCEPTION_FAKE_MEMCHECK_HIT);
   }
-  else if (exceptions & EXCEPTION_DSI)
+  else if (pending & EXCEPTION_DSI)
   {
-    SRR0(m_ppc_state) = m_ppc_state.pc;
-    SRR1(m_ppc_state) = m_ppc_state.msr.Hex & 0x87C0FFFF;
-    m_ppc_state.msr.LE = m_ppc_state.msr.ILE;
-    m_ppc_state.msr.Hex &= ~0x04EF36;
-    m_ppc_state.pc = m_ppc_state.npc = 0x00000300;
-    // DSISR and DAR regs are changed in GenerateDSIException()
-
+    // DSISR and DAR were filled in when the fault was raised.
+    EnterInterrupt(s, s.pc, SavedMSR(s), VECTOR_DSI);
     DEBUG_LOG_FMT(POWERPC, "EXCEPTION_DSI");
-    m_ppc_state.Exceptions &= ~EXCEPTION_DSI;
+    s.Exceptions &= ~EXCEPTION_DSI;
   }
-  else if (exceptions & EXCEPTION_ALIGNMENT)
+  else if (pending & EXCEPTION_ALIGNMENT)
   {
-    SRR0(m_ppc_state) = m_ppc_state.pc;
-    SRR1(m_ppc_state) = m_ppc_state.msr.Hex & 0x87C0FFFF;
-    m_ppc_state.msr.LE = m_ppc_state.msr.ILE;
-    m_ppc_state.msr.Hex &= ~0x04EF36;
-    m_ppc_state.pc = m_ppc_state.npc = 0x00000600;
-
-    // TODO crazy amount of DSISR options to check out
-
+    EnterInterrupt(s, s.pc, SavedMSR(s), VECTOR_ALIGNMENT);
     DEBUG_LOG_FMT(POWERPC, "EXCEPTION_ALIGNMENT");
-    m_ppc_state.Exceptions &= ~EXCEPTION_ALIGNMENT;
+    s.Exceptions &= ~EXCEPTION_ALIGNMENT;
   }
   else
   {
-    // EXTERNAL INTERRUPT
     CheckExternalExceptions();
     return;
   }
@@ -583,108 +526,90 @@ void PowerPCManager::CheckExceptions()
 
 void PowerPCManager::CheckExternalExceptions()
 {
-  const u32 exceptions = m_ppc_state.Exceptions;
+  PowerPCState& s = m_ppc_state;
+  const u32 pending = s.Exceptions;
 
-  // EXTERNAL INTERRUPT
-  // Handling is delayed until MSR.EE=1.
-  if (exceptions == 0 || !m_ppc_state.msr.EE)
+  // Asynchronous interrupts wait until MSR[EE] is set.
+  if (pending == 0 || !s.msr.EE)
     return;
 
-  u32 exception_vector = 0;
-
-  if (exceptions & EXCEPTION_EXTERNAL_INT)
+  u32 vector;
+  if (pending & EXCEPTION_EXTERNAL_INT)
   {
-    // Pokemon gets this "too early", it hasn't a handler yet
-
     DEBUG_LOG_FMT(POWERPC, "EXCEPTION_EXTERNAL_INT");
-    DEBUG_ASSERT_MSG(POWERPC, m_ppc_state.msr.RI, "EXTERNAL_INT unrecoverable???");
-
-    exception_vector = 0x00000500;
-    m_ppc_state.Exceptions &= ~EXCEPTION_EXTERNAL_INT;
+    DEBUG_ASSERT_MSG(POWERPC, s.msr.RI, "EXTERNAL_INT unrecoverable???");
+    vector = VECTOR_EXTERNAL;
+    s.Exceptions &= ~EXCEPTION_EXTERNAL_INT;
   }
-  else if (exceptions & EXCEPTION_PERFORMANCE_MONITOR)
+  else if (pending & EXCEPTION_PERFORMANCE_MONITOR)
   {
     DEBUG_LOG_FMT(POWERPC, "EXCEPTION_PERFORMANCE_MONITOR");
-
-    exception_vector = 0x00000F00;
-    m_ppc_state.Exceptions &= ~EXCEPTION_PERFORMANCE_MONITOR;
+    vector = VECTOR_PERFORMANCE_MONITOR;
+    s.Exceptions &= ~EXCEPTION_PERFORMANCE_MONITOR;
   }
-  else if (exceptions & EXCEPTION_DECREMENTER)
+  else if (pending & EXCEPTION_DECREMENTER)
   {
     DEBUG_LOG_FMT(POWERPC, "EXCEPTION_DECREMENTER");
-
-    exception_vector = 0x00000900;
-    m_ppc_state.Exceptions &= ~EXCEPTION_DECREMENTER;
+    vector = VECTOR_DECREMENTER;
+    s.Exceptions &= ~EXCEPTION_DECREMENTER;
   }
   else
   {
-    DEBUG_ASSERT_MSG(POWERPC, 0, "Unknown EXT interrupt: Exceptions == {:08x}", exceptions);
+    DEBUG_ASSERT_MSG(POWERPC, 0, "Unknown EXT interrupt: Exceptions == {:08x}", pending);
     ERROR_LOG_FMT(POWERPC, "Unknown EXTERNAL INTERRUPT exception: Exceptions == {:08x}",
-                  exceptions);
+                  pending);
     return;
   }
 
-  SRR0(m_ppc_state) = m_ppc_state.npc;
-  SRR1(m_ppc_state) = m_ppc_state.msr.Hex & 0x87C0FFFF;
-  m_ppc_state.msr.LE = m_ppc_state.msr.ILE;
-  m_ppc_state.msr.Hex &= ~0x04EF36;
-  m_ppc_state.pc = m_ppc_state.npc = exception_vector;
-
+  EnterInterrupt(s, s.npc, SavedMSR(s), vector);
   MSRUpdated();
 }
 
 bool PowerPCManager::CheckBreakPoints()
 {
-  const TBreakPoint* bp = m_breakpoints.GetBreakpoint(m_ppc_state.pc);
-
-  if (!m_breakpoints.IsBreakingEnabled() || !bp || !bp->is_enabled ||
-      !EvaluateCondition(m_system, bp->condition))
+  const u32 pc = m_ppc_state.pc;
+  const TBreakPoint* bp = m_breakpoints.GetBreakpoint(pc);
+  if (!m_breakpoints.IsBreakingEnabled() || bp == nullptr || !bp->is_enabled)
+    return false;
+  if (!EvaluateCondition(m_system, bp->condition))
     return false;
 
   if (bp->log_on_hit)
   {
+    const auto& r = m_ppc_state.gpr;
     NOTICE_LOG_FMT(MEMMAP,
                    "BP {:08x} {}({:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} {:08x} "
                    "{:08x}) LR={:08x}",
-                   m_ppc_state.pc, m_symbol_db.GetDescription(m_ppc_state.pc), m_ppc_state.gpr[3],
-                   m_ppc_state.gpr[4], m_ppc_state.gpr[5], m_ppc_state.gpr[6], m_ppc_state.gpr[7],
-                   m_ppc_state.gpr[8], m_ppc_state.gpr[9], m_ppc_state.gpr[10], m_ppc_state.gpr[11],
-                   m_ppc_state.gpr[12], LR(m_ppc_state));
+                   pc, m_symbol_db.GetDescription(pc), r[3], r[4], r[5], r[6], r[7], r[8], r[9],
+                   r[10], r[11], r[12], LR(m_ppc_state));
   }
-  if (bp->break_on_hit)
-    return true;
-  return false;
+  return bp->break_on_hit;
 }
 
 bool PowerPCManager::CheckAndHandleBreakPoints()
 {
-  if (CheckBreakPoints())
-  {
-    m_system.GetCPU().Break();
-    if (GDBStub::IsActive())
-      GDBStub::TakeControl();
-    return true;
-  }
-  return false;
+  if (!CheckBreakPoints())
+    return false;
+
+  m_system.GetCPU().Break();
+  if (GDBStub::IsActive())
+    GDBStub::TakeControl();
+  return true;
 }
 
 void PowerPCManager::MSRUpdated()
 {
-  static_assert(UReg_MSR{}.DR.StartBit() == 4);
-  static_assert(UReg_MSR{}.IR.StartBit() == 5);
-  static_assert(FEATURE_FLAG_MSR_DR == 1 << 0);
-  static_assert(FEATURE_FLAG_MSR_IR == 1 << 1);
+  const u32 perfmon = m_ppc_state.feature_flags & FEATURE_FLAG_PERFMON;
+  m_ppc_state.feature_flags =
+      static_cast<CPUEmuFeatureFlags>(perfmon | TranslationFlags(m_ppc_state));
 
-  m_ppc_state.feature_flags = static_cast<CPUEmuFeatureFlags>(
-      (m_ppc_state.feature_flags & FEATURE_FLAG_PERFMON) | ((m_ppc_state.msr.Hex >> 4) & 0x3));
-
+  // Page table writes made while translation was off are acted on once it
+  // is back on.
   if (m_ppc_state.msr.DR && m_ppc_state.pagetable_update_pending)
     m_system.GetMMU().PageTableUpdated();
 
   m_system.GetJitInterface().UpdateMembase();
 }
-
-// FPSCR update functions
 
 void PowerPCState::UpdateFPRFDouble(double dvalue)
 {
@@ -698,7 +623,7 @@ void PowerPCState::UpdateFPRFSingle(float fvalue)
 
 void RoundingModeUpdated(PowerPCState& ppc_state)
 {
-  // The rounding mode is separate for each thread, so this must run on the CPU thread
+  // The host's rounding mode is per thread.
   ASSERT(Core::IsCPUThread());
 
   Common::FPU::SetSIMDMode(ppc_state.fpscr.RN, ppc_state.fpscr.NI);
@@ -706,21 +631,18 @@ void RoundingModeUpdated(PowerPCState& ppc_state)
 
 void MMCRUpdated(PowerPCState& ppc_state)
 {
-  const bool perfmon = ppc_state.spr[SPR_MMCR0] || ppc_state.spr[SPR_MMCR1];
-  ppc_state.feature_flags = static_cast<CPUEmuFeatureFlags>(
-      (ppc_state.feature_flags & ~FEATURE_FLAG_PERFMON) | (perfmon ? FEATURE_FLAG_PERFMON : 0));
+  u32 flags = ppc_state.feature_flags & ~FEATURE_FLAG_PERFMON;
+  if (PerformanceMonitorActive(ppc_state))
+    flags |= FEATURE_FLAG_PERFMON;
+  ppc_state.feature_flags = static_cast<CPUEmuFeatureFlags>(flags);
 }
 
 void RecalculateAllFeatureFlags(PowerPCState& ppc_state)
 {
-  static_assert(UReg_MSR{}.DR.StartBit() == 4);
-  static_assert(UReg_MSR{}.IR.StartBit() == 5);
-  static_assert(FEATURE_FLAG_MSR_DR == 1 << 0);
-  static_assert(FEATURE_FLAG_MSR_IR == 1 << 1);
-
-  const bool perfmon = ppc_state.spr[SPR_MMCR0] || ppc_state.spr[SPR_MMCR1];
-  ppc_state.feature_flags = static_cast<CPUEmuFeatureFlags>(((ppc_state.msr.Hex >> 4) & 0x3) |
-                                                            (perfmon ? FEATURE_FLAG_PERFMON : 0));
+  u32 flags = TranslationFlags(ppc_state);
+  if (PerformanceMonitorActive(ppc_state))
+    flags |= FEATURE_FLAG_PERFMON;
+  ppc_state.feature_flags = static_cast<CPUEmuFeatureFlags>(flags);
 }
 
 void CheckExceptionsFromJIT(PowerPCManager& power_pc)

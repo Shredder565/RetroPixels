@@ -25,13 +25,10 @@ constexpr u32 NO_WAY = 0xFF;
 // The pseudo-LRU state of a set is a three-level binary tree over the eight
 // ways, stored in seven bits:
 //
-//                 bit 0
-//            /            \
-//        bit 1            bit 2
-//       /     \          /     \
-//    bit 3   bit 4    bit 5   bit 6
-//    /  \    /  \     /  \    /  \
-//   w0  w1  w2  w3   w4  w5  w6  w7
+//   level 0:  bit 0 chooses ways 0-3 (0) or 4-7 (1)
+//   level 1:  bit 1 chooses 0-1 / 2-3,  bit 2 chooses 4-5 / 6-7
+//   level 2:  bit 3 chooses 0 / 1, bit 4 chooses 2 / 3,
+//             bit 5 chooses 4 / 5, bit 6 chooses 6 / 7
 //
 // A zero bit points to the left subtree, a one bit to the right. The victim
 // is found by following the bits from the root. Using a way flips the three

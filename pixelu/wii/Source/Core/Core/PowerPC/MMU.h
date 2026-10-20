@@ -1,5 +1,11 @@
-// Copyright 2018 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// The CPU's view of memory: address translation (block address translation
+// through the BAT registers, page address translation through the segment
+// registers, the hashed page table and a software TLB), the physical memory
+// map (RAM, MEM2, locked L1, EFB, MMIO, the write-gather pipe), and the
+// bookkeeping that keeps the fastmem arena's page-table mappings in step
+// with the guest's page table.
 
 #pragma once
 
@@ -35,19 +41,18 @@ struct PowerPCState;
 
 enum class RequestedAddressSpace
 {
-  Effective,  // whatever the current MMU state is
-  Physical,   // as if the MMU was turned off
-  Virtual,    // specifically want MMU turned on, fails if off
+  Effective,  // translate if the MMU is currently on
+  Physical,   // never translate
+  Virtual,    // always translate; fails if the MMU is off
 };
 
 template <typename T>
 struct ReadResult
 {
-  // whether the address had to be translated (given address was treated as virtual) or not (given
-  // address was treated as physical)
+  // Whether the address was translated (treated as virtual) or used as a
+  // physical address.
   bool translated;
 
-  // the actual value that was read
   T value;
 
   ReadResult(bool translated_, T&& value_) : translated(translated_), value(std::forward<T>(value_))
@@ -58,30 +63,34 @@ struct ReadResult
 
 struct WriteResult
 {
-  // whether the address had to be translated (given address was treated as virtual) or not (given
-  // address was treated as physical)
+  // Whether the address was translated (treated as virtual) or used as a
+  // physical address.
   bool translated;
 
   explicit WriteResult(bool translated_) : translated(translated_) {}
 };
 
+// The BAT lookup tables have one entry per 128 KiB block of the effective
+// address space: the translated block address in the upper bits plus the
+// flag bits below. The JITs read these tables directly.
 constexpr int BAT_INDEX_SHIFT = 17;
 constexpr u32 BAT_PAGE_SIZE = 1 << BAT_INDEX_SHIFT;
 constexpr u32 BAT_PAGE_COUNT = 1 << (32 - BAT_INDEX_SHIFT);
-constexpr u32 BAT_MAPPED_BIT = 0x1;
-constexpr u32 BAT_PHYSICAL_BIT = 0x2;
-constexpr u32 BAT_WI_BIT = 0x4;
+constexpr u32 BAT_MAPPED_BIT = 0x1;    // a BAT covers this block
+constexpr u32 BAT_PHYSICAL_BIT = 0x2;  // ... and fastmem may access it directly
+constexpr u32 BAT_WI_BIT = 0x4;        // ... and it is write-through or cache-inhibited
 constexpr u32 BAT_RESULT_MASK = UINT32_C(~0x7);
-using BatTable = std::array<u32, BAT_PAGE_COUNT>;  // 128 KB
+using BatTable = std::array<u32, BAT_PAGE_COUNT>;  // 128 KiB
 
 constexpr size_t HW_PAGE_SIZE = 4096;
 constexpr size_t HW_PAGE_MASK = HW_PAGE_SIZE - 1;
 constexpr u32 HW_PAGE_INDEX_SHIFT = 12;
 constexpr u32 HW_PAGE_INDEX_MASK = 0x3f;
 
+// The smallest hashed page table (HTABMASK = 0) is 64 KiB.
 constexpr u32 PAGE_TABLE_MIN_SIZE = 0x10000;
 
-// Return value of MMU::TryReadInstruction().
+// Result of MMU::TryReadInstruction().
 struct TryReadInstResult
 {
   bool valid;
@@ -90,7 +99,7 @@ struct TryReadInstResult
   u32 physical_address;
 };
 
-// Return value of MMU::JitCache_TranslateAddress().
+// Result of MMU::JitCache_TranslateAddress().
 struct TranslateResult
 {
   bool valid = false;
@@ -106,6 +115,9 @@ struct TranslateResult
   }
 };
 
+// The kind of access a translation is for. The "NoException" kinds are for
+// the debugger and other host-side code: they never raise exceptions and
+// leave the TLB and the page table's R/C bits alone.
 enum class XCheckTLBFlag
 {
   NoException,
@@ -128,14 +140,13 @@ public:
   void Reset();
   void DoState(PointerWrap& p, bool sr_changed);
 
-  // Routines for debugger UI, cheats, etc. to access emulated memory from the
-  // perspective of the CPU.  Not for use by core emulation routines.
-  // Use "Host" prefix.
+  // ---- Host access (debugger, cheats, HLE, ...) --------------------------
+  // These go through the current translation settings like the CPU would,
+  // but never raise guest exceptions. They are not for emulating guest
+  // accesses.
 
-  // Reads a value from emulated memory using the currently active MMU settings.
-  // If the read fails (eg. address does not correspond to a mapped address in the current address
-  // space), a PanicAlert will be shown to the user and zero (or an empty string for the string
-  // case) will be returned.
+  // Reads through the current translation. On failure a panic alert is shown
+  // and 0 (or an empty string) is returned.
   template <std::unsigned_integral T>
   static T HostRead(const Core::CPUThreadGuard& guard, u32 address);
   template <typename T>
@@ -152,10 +163,8 @@ public:
   static std::u16string HostGetU16String(const Core::CPUThreadGuard& guard, u32 address,
                                          size_t size = 0);
 
-  // Try to read a value from emulated memory at the given address in the given memory space.
-  // If the read succeeds, the returned value will be present and the ReadResult contains the read
-  // value and information on whether the given address had to be translated or not. Unlike the
-  // HostRead functions, this does not raise a user-visible alert on failure.
+  // Reads from the requested address space without any alert; returns
+  // nothing if the address is not RAM there.
   template <std::unsigned_integral T>
   static std::optional<ReadResult<T>>
   HostTryRead(const Core::CPUThreadGuard& guard, u32 address,
@@ -177,9 +186,7 @@ public:
   HostTryReadString(const Core::CPUThreadGuard& guard, u32 address, size_t size = 0,
                     RequestedAddressSpace space = RequestedAddressSpace::Effective);
 
-  // Writes a value to emulated memory using the currently active MMU settings.
-  // If the write fails (eg. address does not correspond to a mapped address in the current address
-  // space), a PanicAlert will be shown to the user.
+  // Writes through the current translation; a failure shows a panic alert.
   template <std::unsigned_integral T>
   static void HostWrite(const Core::CPUThreadGuard& guard, Common::MakeAtLeastU32<T> var,
                         u32 address);
@@ -192,10 +199,8 @@ public:
     return HostWrite<U>(guard, cast_var, address);
   }
 
-  // Try to a write a value to memory at the given address in the given memory space.
-  // If the write succeeds, the returned TryWriteResult contains information on whether the given
-  // address had to be translated or not. Unlike the HostWrite functions, this does not raise a
-  // user-visible alert on failure.
+  // Writes to the requested address space without any alert; returns
+  // nothing if the address is not RAM there.
   template <std::unsigned_integral T>
   static std::optional<WriteResult>
   HostTryWrite(const Core::CPUThreadGuard& guard, Common::MakeAtLeastU32<T> var, u32 address,
@@ -211,19 +216,18 @@ public:
     return HostTryWrite<U>(guard, cast_var, address, space);
   }
 
-  // Returns whether a read or write to the given address will resolve to a RAM access in the given
-  // address space.
+  // Whether an access at the address ends up in RAM (MEM1, MEM2, fake VMEM
+  // or the locked L1), using the data / instruction translation.
   static bool HostIsRAMAddress(const Core::CPUThreadGuard& guard, u32 address,
                                RequestedAddressSpace space = RequestedAddressSpace::Effective);
-
-  // Same as HostIsRAMAddress, but uses IBAT instead of DBAT.
   static bool
   HostIsInstructionRAMAddress(const Core::CPUThreadGuard& guard, u32 address,
                               RequestedAddressSpace space = RequestedAddressSpace::Effective);
 
-  // Routines for the CPU core to access memory.
+  // ---- Guest access (interpreter, JIT slow paths) ------------------------
 
-  // Used by interpreter to read instructions, uses iCache
+  // Instruction fetch through the instruction cache; raises an ISI on a
+  // translation miss.
   u32 Read_Opcode(u32 address);
   TryReadInstResult TryReadInstruction(u32 address);
 
@@ -237,16 +241,18 @@ public:
   void Write_U32_Swap(u32 var, u32 address);
   void Write_U64_Swap(u64 var, u32 address);
 
+  // Locked-cache DMA, in 32-byte blocks.
   void DMA_LCToMemory(u32 mem_address, u32 cache_address, u32 num_blocks);
   void DMA_MemoryToLC(u32 cache_address, u32 mem_address, u32 num_blocks);
 
-  void ClearDCacheLine(u32 address);  // Zeroes 32 bytes; address should be 32-byte-aligned
+  // Data cache block instructions.
+  void ClearDCacheLine(u32 address);  // dcbz: zeroes 32 bytes at a 32-byte aligned address
   void StoreDCacheLine(u32 address);
   void InvalidateDCacheLine(u32 address);
   void FlushDCacheLine(u32 address);
   void TouchDCacheLine(u32 address, bool store);
 
-  // TLB functions
+  // Translation state changes.
   void SDRUpdated();
   void SRUpdated();
   void InvalidateTLBEntry(u32 address);
@@ -255,9 +261,8 @@ public:
   void DBATUpdated();
   void IBATUpdated();
 
-  // Result changes based on the BAT registers and MSR.DR.  Returns whether
-  // it's safe to optimize a read or write to this address to an unguarded
-  // memory access.  Does not consider page tables.
+  // Whether the JIT may turn an access into a plain fastmem access: this
+  // depends on the BATs and MSR[DR], and never on the page table.
   bool IsOptimizableRAMAddress(u32 address, u32 access_size) const;
   u32 IsOptimizableMMIOAccess(u32 address, u32 access_size) const;
   bool IsOptimizableGatherPipeWrite(u32 address) const;
@@ -270,112 +275,102 @@ public:
   BatTable& GetDBATTable() { return m_dbat_table; }
 
 private:
-  enum class TranslateAddressResultEnum : u8
+  enum class Translation : u8
   {
-    BAT_TRANSLATED,
-    PAGE_TABLE_TRANSLATED,
-    DIRECT_STORE_SEGMENT,
-    PAGE_FAULT,
+    Block,
+    Page,
+    DirectStore,
+    Fault,
   };
 
-  struct TranslateAddressResult
+  struct Translated
   {
+    Translation kind;
     u32 address;
-    TranslateAddressResultEnum result;
-    bool wi;  // Set to true if the view of memory is either write-through or cache-inhibited
+    // Write-through or cache-inhibited.
+    bool wi;
 
-    TranslateAddressResult(TranslateAddressResultEnum result_, u32 address_, bool wi_ = false)
-        : address(address_), result(result_), wi(wi_)
-    {
-    }
-    bool Success() const { return result <= TranslateAddressResultEnum::PAGE_TABLE_TRANSLATED; }
+    bool Succeeded() const { return kind == Translation::Block || kind == Translation::Page; }
   };
 
-  union EffectiveAddress
+  // What the fastmem bookkeeping knows about one virtual page that some
+  // valid PTE maps.
+  struct PageMapping
   {
-    BitField<0, 12, u32> offset;
-    BitField<12, 16, u32> page_index;
-    BitField<22, 6, u32> API;
-    BitField<28, 4, u32> SR;
+    u32 rpn = 0;
+    // 0-7: slot in a primary PTEG, 8-15: slot in a secondary PTEG. Lower
+    // wins, as the hardware's search order would pick it first.
+    u32 priority = 0;
+    // Whether the page may be (or is) mapped into the fastmem arena.
+    bool host_mapping = false;
 
-    u32 Hex = 0;
-
-    EffectiveAddress() = default;
-    explicit EffectiveAddress(u32 address) : Hex{address} {}
+    bool operator==(const PageMapping&) const = default;
   };
 
-  union PageMapping
-  {
-    // A small priority number wins over a larger priority number.
-    BitField<0, 11, u32> priority;
-    // Whether we're allowed to create a host mapping for this mapping.
-    BitField<11, 1, u32> host_mapping;
-    // The physical address of the page.
-    BitField<12, 20, u32> RPN;
-
-    u32 Hex = 0;
-
-    PageMapping() = default;
-    PageMapping(u32 RPN_, bool host_mapping_, u32 priority_)
-    {
-      RPN = RPN_;
-      host_mapping = host_mapping_;
-      priority = priority_;
-    }
-  };
-
-  template <const XCheckTLBFlag flag>
-  TranslateAddressResult TranslateAddress(u32 address);
-
-  template <const XCheckTLBFlag flag>
-  TranslateAddressResult TranslatePageAddress(EffectiveAddress address, bool* wi);
-
-  void GenerateDSIException(u32 effective_address, bool write);
-  void GenerateISIException(u32 effective_address);
-
-  void Memcheck(u32 address, u64 var, bool write, size_t size);
-
-  void ClearPageTable();
-  void ReloadPageTable();
-  void PageTableUpdated(std::span<const u8> page_table);
-
-  void UpdateBATs(BatTable& bat_table, u32 base_spr);
-  void UpdateFakeMMUBat(BatTable& bat_table, u32 start_addr);
+  template <XCheckTLBFlag flag>
+  Translated Translate(u32 address);
+  template <XCheckTLBFlag flag>
+  Translated TranslateThroughPageTable(u32 address);
 
   template <XCheckTLBFlag flag, std::unsigned_integral T, bool never_translate = false>
   T ReadFromHardware(u32 em_address);
   template <XCheckTLBFlag flag, bool never_translate = false>
   void WriteToHardware(u32 em_address, u32 data, u32 size);
+
   template <XCheckTLBFlag flag>
   bool IsEffectiveRAMAddress(u32 address);
   bool IsPhysicalRAMAddress(u32 address) const;
+
+  template <XCheckTLBFlag flag>
+  bool PrepareDCacheOp(u32* address, bool fault_raises_dsi);
+
+  void GenerateDSIException(u32 effective_address, bool write);
+  void GenerateISIException(u32 effective_address);
+  void UnresolvedAccess(u32 address, bool write);
+
+  void Memcheck(u32 address, u64 var, bool write, size_t size);
+
+  // Page-table mirroring for fastmem.
+  void ClearPageTable();
+  void ReloadPageTable();
+  void ApplyPageTable(std::span<const u8> page_table);
+  std::optional<u32> PageAddressFromPTE(u32 pte_word0, u32 pteg_index) const;
+  void ForgetPTE(u32 pte_word0, u32 offset, std::span<const u8> page_table,
+                 bool* needs_secondary_pass);
+  void RecheckShadowedPTE(u32 pte_word0, u32 offset, std::span<const u8> page_table,
+                          bool* needs_secondary_pass);
+  void LearnPTE(u32 pte_word0, u32 pte_word1, u32 offset);
+  void UpdateHostMappingForRC(u32 page_address, u32 pteg_address, u32 pte_word0, u32 pte_word1);
+
+  void UpdateBATs(BatTable& bat_table, u32 base_spr);
+  void UpdateFakeMMUBat(BatTable& bat_table, u32 start_addr);
+  void RebuildBATTable(BatTable& bat_table, u32 base_spr, u32 extended_base_spr);
 
   Core::System& m_system;
   Memory::MemoryManager& m_memory;
   PowerPC::PowerPCManager& m_power_pc;
   PowerPC::PowerPCState& m_ppc_state;
 
-  // STATE_TO_SAVE
+  // The guest page table as it was last processed (saved in savestates).
   std::vector<u8> m_page_table;
-  // END STATE_TO_SAVE
 
-  // This keeps track of all valid page table mappings in m_page_table.
-  // The key is the logical address.
+  // Every virtual page that a valid PTE of m_page_table maps, by page
+  // address.
   std::map<u32, PageMapping> m_page_mappings;
 
-  // These are kept around just for their memory allocations. They are always cleared before use.
-  std::vector<u8> m_temp_page_table;
-  std::set<u32> m_removed_mappings;
-  std::map<u32, u32> m_added_readonly_mappings;
-  std::map<u32, u32> m_added_readwrite_mappings;
+  // Scratch space reused between updates.
+  std::vector<u8> m_scratch_page_table;
+  std::set<u32> m_mappings_to_remove;
+  std::map<u32, u32> m_readonly_mappings_to_add;
+  std::map<u32, u32> m_readwrite_mappings_to_add;
 
   BatTable m_ibat_table;
   BatTable m_dbat_table;
 };
 
 void ClearDCacheLineFromJit(MMU& mmu, u32 address);
+// Returns the value zero-extended.
 template <std::unsigned_integral T>
-// Returns zero-extended value
 Common::MakeAtLeastU32<T> ReadFromJit(MMU& mmu, u32 address);
 template <std::unsigned_integral T>
 void WriteFromJit(MMU& mmu, Common::MakeAtLeastU32<T> var, u32 address);

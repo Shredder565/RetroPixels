@@ -1,5 +1,9 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// The emulated CPU: its architectural state (PowerPCState, which the JITs
+// address by offset) and PowerPCManager, which owns the state, the debugger
+// objects tied to it, and the active execution engine, and which delivers
+// exceptions.
 
 #pragma once
 
@@ -30,8 +34,9 @@ struct EventType;
 
 namespace PowerPC
 {
-// The gaps in the CPUCore numbering are from cores that only existed in the past.
-// We avoid re-numbering cores so that settings will be compatible across versions.
+// Execution engines. The numbers are stored in users' configuration, so
+// they never change; the missing ones belonged to engines that no longer
+// exist.
 enum class CPUCore
 {
   Interpreter = 0,
@@ -46,7 +51,8 @@ enum class CoreMode
   JIT,
 };
 
-// TLB cache
+// Software TLB: separate data and instruction TLBs, each two-way set
+// associative with 64 sets (128 entries).
 constexpr size_t TLB_SIZE = 128;
 constexpr size_t NUM_TLBS = 2;
 constexpr size_t TLB_WAYS = 2;
@@ -63,11 +69,14 @@ struct TLBEntry
   WayArray paddr{};
   WayArray vsid{};
   WayArray pte{};
+  // Which way was used last (the other one is replaced next).
   u32 recent = 0;
 
   void Invalidate() { tag.fill(INVALID_TAG); }
 };
 
+// One floating-point register. ps0 is the full 64-bit double; ps1 is the
+// second paired-single slot, also kept as a double.
 struct PairedSingle
 {
   u64 PS0AsU64() const { return ps0; }
@@ -102,88 +111,72 @@ struct PairedSingle
   u64 ps0 = 0;
   u64 ps1 = 0;
 };
-// Paired single must be standard layout in order for offsetof to work, which is used by the JITs
-static_assert(std::is_standard_layout<PairedSingle>(), "PairedSingle must be standard layout");
+// The JITs use offsetof on it.
+static_assert(std::is_standard_layout_v<PairedSingle>, "PairedSingle must be standard layout");
 
-// This contains the entire state of the emulated PowerPC "Gekko" CPU.
+// The whole architectural state of the CPU.
 //
-// To minimize code size on x86, we want as much useful stuff in the first 256 bytes as possible.
-// ps needs to be relatively late in the struct due to it being larger than 256 bytes in itself.
-//
-// On AArch64, most load/store instructions support fairly large immediate offsets,
-// but not LDP/STP, which we want to use for accessing certain things.
-// These must be in the first 260 bytes: pc, npc
-// These must be in the first 520 bytes: gather_pipe_ptr, gather_pipe_base_ptr
-// Better code is generated if these are in the first 260 bytes: gpr
-// Better code is generated if these are in the first 520 bytes: ps
-// Unfortunately not all of those fit in 520 bytes, but we can fit most of ps and all of the rest.
+// The x64 JIT keeps a pointer to this struct (biased by 0x80) in a register
+// and reaches fields with one-byte displacements where it can, so the fields
+// it touches most (pc, npc, gpr, cr, msr, fpscr, the XER bytes, downcount,
+// Exceptions, ...) sit in the first 256 bytes, and the 512-byte FPR array
+// starts right after them. The layout is pinned by the static_asserts below
+// the struct.
 struct PowerPCState
 {
-  u32 pc = 0;  // program counter
+  u32 pc = 0;
   u32 npc = 0;
 
-  // Storage for the stack pointer of the BLR optimization.
+  // Host stack pointer saved by the JIT's BLR optimisation.
   u8* stored_stack_pointer = nullptr;
 
-  // gather pipe pointer for JIT access
+  // Write-gather pipe position and buffer, for the JIT's fast path.
   u8* gather_pipe_ptr = nullptr;
   u8* gather_pipe_base_ptr = nullptr;
 
-  u32 gpr[32]{};  // General purpose registers. r1 = stack pointer.
-
-#ifndef _M_X86_64
-  // The paired singles are strange : PS0 is stored in the full 64 bits of each FPR
-  // but ps calculations are only done in 32-bit precision, and PS1 is only 32 bits.
-  // Since we want to use SIMD, SSE2 is the only viable alternative - 2x double.
-  alignas(16) PairedSingle ps[32];
-#endif
+  u32 gpr[32]{};
 
   ConditionRegister cr{};
 
-  UReg_MSR msr;      // machine state register
-  UReg_FPSCR fpscr;  // floating point flags/status bits
+  UReg_MSR msr;
+  UReg_FPSCR fpscr;
 
   CPUEmuFeatureFlags feature_flags;
 
-  // Exception management.
+  // Pending EXCEPTION_* bits.
   u32 Exceptions = 0;
 
-  // Downcount for determining when we need to do timing
-  // This isn't quite the right location for it, but it is here to accelerate the ARM JIT
-  // This variable should be inside of the CoreTiming namespace if we wanted to be correct.
+  // Cycles left until the next CoreTiming event (kept here so the JIT can
+  // reach it cheaply).
   int downcount = 0;
 
-  // XER, reformatted into byte fields for easier access.
+  // XER is kept split up: the carry, the SO/OV pair as (SO << 1) | OV, and
+  // the string byte count/compare bits (Broadway implements bits 16-23 even
+  // without lscbx).
   u8 xer_ca = 0;
-  u8 xer_so_ov = 0;  // format: (SO << 1) | OV
-  // The Broadway CPU implements bits 16-23 of the XER register... even though it doesn't support
-  // lscbx
+  u8 xer_so_ov = 0;
   u16 xer_stringctrl = 0;
 
-  // Reservation monitor for lwarx and its friend stwcxd. These two don't really need to be
-  // this early in the struct, but due to how the padding works out, they fit nicely here.
+  // lwarx/stwcx. reservation.
   u32 reserve_address;
   bool reserve;
 
   bool pagetable_update_pending = false;
   bool m_enable_dcache = false;
 
-#ifdef _M_X86_64
-  // This member exists only for the purpose of an assertion that its offset <= 0x100.
-  std::tuple<> above_fits_in_first_0x100;
-
+  // The FPRs, as pairs of doubles (SSE-friendly).
   alignas(16) PairedSingle ps[32];
-#endif
 
-  std::array<u32, 16> sr{};  // Segment registers.
+  std::array<u32, 16> sr{};
 
-  // special purpose registers - controls quantizers, DMA, and lots of other misc extensions.
-  // also for power management, but we don't care about that.
-  // JitArm64 needs 64-bit alignment for SPR_TL.
+  // All SPRs, indexed by SPR number. 8-byte aligned so TBL/TBU can be read
+  // as one 64-bit value.
   alignas(8) u32 spr[1024]{};
 
+  // Base of the fastmem view currently in use.
   u8* mem_ptr = nullptr;
 
+  // Decoded SDR1.
   u32 pagetable_base = 0;
   u32 pagetable_mask = 0;
 
@@ -192,9 +185,11 @@ struct PowerPCState
   InstructionCache iCache;
   Cache dCache;
 
+  // CR1 after a floating-point instruction with Rc set: FX, FEX, VX, OX.
   void UpdateCR1()
   {
-    cr.SetField(1, (fpscr.FX << 3) | (fpscr.FEX << 2) | (fpscr.VX << 1) | fpscr.OX);
+    const u32 field = (fpscr.FX << 3) | (fpscr.FEX << 2) | (fpscr.VX << 1) | fpscr.OX;
+    cr.SetField(1, field);
   }
 
   void SetCarry(u32 ca) { xer_ca = ca; }
@@ -203,29 +198,29 @@ struct PowerPCState
 
   UReg_XER GetXER() const
   {
-    u32 xer = 0;
-    xer |= xer_stringctrl;
-    xer |= xer_ca << XER_CA_SHIFT;
-    xer |= xer_so_ov << XER_OV_SHIFT;
-    return UReg_XER{xer};
+    const u32 value = u32{xer_stringctrl} | (u32{xer_ca} << XER_CA_SHIFT) |
+                      (u32{xer_so_ov} << XER_OV_SHIFT);
+    return UReg_XER{value};
   }
 
   void SetXER(UReg_XER new_xer)
   {
-    xer_stringctrl = new_xer.BYTE_COUNT + (new_xer.BYTE_CMP << 8);
-    xer_ca = new_xer.CA;
-    xer_so_ov = (new_xer.SO << 1) + new_xer.OV;
+    xer_stringctrl = static_cast<u16>(new_xer.BYTE_COUNT | (new_xer.BYTE_CMP << 8));
+    xer_ca = static_cast<u8>(new_xer.CA);
+    xer_so_ov = static_cast<u8>((new_xer.SO << 1) | new_xer.OV);
   }
 
   u32 GetXER_SO() const { return xer_so_ov >> 1; }
 
-  void SetXER_SO(bool value) { xer_so_ov |= static_cast<u32>(value) << 1; }
+  // SO is sticky: this can only set it.
+  void SetXER_SO(bool value) { xer_so_ov |= static_cast<u8>(value) << 1; }
 
-  u32 GetXER_OV() const { return xer_so_ov & 1; }
+  u32 GetXER_OV() const { return xer_so_ov & XER_OV_MASK; }
 
+  // Setting OV also sets SO.
   void SetXER_OV(bool value)
   {
-    xer_so_ov = (xer_so_ov & 0xFE) | static_cast<u32>(value);
+    xer_so_ov = static_cast<u8>((xer_so_ov & ~XER_OV_MASK) | static_cast<u8>(value));
     SetXER_SO(value);
   }
 
@@ -233,16 +228,46 @@ struct PowerPCState
   void UpdateFPRFSingle(float fvalue);
 };
 
-#ifdef _M_X86_64
 #ifdef __GNUC__
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Winvalid-offsetof"
 #endif
-static_assert(offsetof(PowerPC::PowerPCState, above_fits_in_first_0x100) <= 0x100,
-              "top of PowerPCState too big");
+// Field offsets the JITs and savestates were built around.
+static_assert(offsetof(PowerPCState, pc) == 0);
+static_assert(offsetof(PowerPCState, npc) == 4);
+static_assert(offsetof(PowerPCState, stored_stack_pointer) == 8);
+static_assert(offsetof(PowerPCState, gather_pipe_ptr) == 16);
+static_assert(offsetof(PowerPCState, gather_pipe_base_ptr) == 24);
+static_assert(offsetof(PowerPCState, gpr) == 32);
+static_assert(offsetof(PowerPCState, cr) == 160);
+static_assert(offsetof(PowerPCState, msr) == 224);
+static_assert(offsetof(PowerPCState, fpscr) == 228);
+static_assert(offsetof(PowerPCState, feature_flags) == 232);
+static_assert(offsetof(PowerPCState, Exceptions) == 236);
+static_assert(offsetof(PowerPCState, downcount) == 240);
+static_assert(offsetof(PowerPCState, xer_ca) == 244);
+static_assert(offsetof(PowerPCState, xer_so_ov) == 245);
+static_assert(offsetof(PowerPCState, xer_stringctrl) == 246);
+static_assert(offsetof(PowerPCState, reserve_address) == 248);
+static_assert(offsetof(PowerPCState, reserve) == 252);
+static_assert(offsetof(PowerPCState, pagetable_update_pending) == 253);
+static_assert(offsetof(PowerPCState, m_enable_dcache) == 254);
+static_assert(offsetof(PowerPCState, ps) == 256);
+static_assert(offsetof(PowerPCState, sr) == 768);
+static_assert(offsetof(PowerPCState, spr) == 832);
+static_assert(offsetof(PowerPCState, mem_ptr) == 4928);
+static_assert(offsetof(PowerPCState, pagetable_base) == 4936);
+static_assert(offsetof(PowerPCState, pagetable_mask) == 4940);
+static_assert(offsetof(PowerPCState, tlb) == 4944);
+static_assert(offsetof(PowerPCState, iCache) == 9552);
+static_assert(offsetof(PowerPCState, dCache) ==
+              offsetof(PowerPCState, iCache) + sizeof(InstructionCache));
+static_assert(alignof(PowerPCState) == 16);
+static_assert(sizeof(ConditionRegister) == 64);
+static_assert(sizeof(PairedSingle) == 16);
+static_assert(sizeof(TLBEntry) == 36);
 #ifdef __GNUC__
 #pragma GCC diagnostic pop
-#endif
 #endif
 
 std::span<const CPUCore> AvailableCPUCores();
@@ -262,36 +287,37 @@ public:
   void Reset();
   void Shutdown();
   void DoState(PointerWrap& p);
+  // icbi from a thread other than the CPU thread: done on the CPU thread
+  // through CoreTiming while emulation runs.
   void ScheduleInvalidateCacheThreadSafe(u32 address);
 
   CoreMode GetMode() const;
-  // [NOT THREADSAFE] CPU Thread or CPU::PauseAndLock or Core::State::Uninitialized
+  // CPU thread only, or with the CPU paused (CPU::PauseAndLock) or not yet
+  // started.
   void SetMode(CoreMode _coreType);
   const char* GetCPUName() const;
 
-  // Set the current CPU Core to the given implementation until removed.
-  // Remove the current injected CPU Core by passing nullptr.
-  // While an external CPUCoreBase is injected, GetMode() will return CoreMode::Interpreter.
-  // Init() will be called when added and Shutdown() when removed.
-  // [Threadsafety: Same as SetMode(), except it cannot be called from inside the CPU
-  //  run loop on the CPU Thread - it doesn't make sense for a CPU to remove itself
-  //  while it is in State::Running]
+  // Replaces the execution engine with an outside one until called again
+  // with nullptr. The injected core is Init()ed when added and Shutdown()
+  // when removed, and GetMode() reports Interpreter meanwhile. Same thread
+  // rules as SetMode(), and never from inside the CPU run loop itself.
   void InjectExternalCPUCore(CPUCoreBase* core);
 
-  // Stepping requires the CPU Execution lock (CPU::PauseAndLock or CPU Thread)
-  // It's not threadsafe otherwise.
+  // These need the CPU execution lock (CPU thread or CPU::PauseAndLock).
   void SingleStep();
   void CheckExceptions();
   void CheckExternalExceptions();
-  // Evaluate the breakpoints in order to log. Returns whether it would break.
+  // Logs a breakpoint hit at PC if asked to; returns whether it would stop.
   bool CheckBreakPoints();
-  // Evaluate the breakpoints in order to log and/or break. Returns whether it breaks.
+  // Same, and actually stops emulation (and hands control to GDB if
+  // attached). Returns whether it stopped.
   bool CheckAndHandleBreakPoints();
   void RunLoop();
 
   u64 ReadFullTimeBaseValue() const;
   void WriteFullTimeBaseValue(u64 value);
 
+  // Call after anything changes MSR.
   void MSRUpdated();
 
   PowerPCState& GetPPCState() { return m_ppc_state; }
@@ -335,11 +361,12 @@ private:
 void UpdatePerformanceMonitor(u32 cycles, u32 num_load_stores, u32 num_fp_inst,
                               PowerPCState& ppc_state);
 
+// Plain functions the JITs can call.
 void CheckExceptionsFromJIT(PowerPCManager& power_pc);
 void CheckExternalExceptionsFromJIT(PowerPCManager& power_pc);
 void CheckAndHandleBreakPointsFromJIT(PowerPCManager& power_pc);
 
-// Easy register access macros.
+// Typed views of SPRs.
 #define HID0(ppc_state) ((UReg_HID0&)(ppc_state).spr[SPR_HID0])
 #define HID2(ppc_state) ((UReg_HID2&)(ppc_state).spr[SPR_HID2])
 #define HID4(ppc_state) ((UReg_HID4&)(ppc_state).spr[SPR_HID4])
