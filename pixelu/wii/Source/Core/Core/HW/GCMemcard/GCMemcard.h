@@ -1,5 +1,15 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// The GameCube memory card file system, as described in YAGCD chapter 12
+// (memory card format) and the public libogc card headers.
+//
+// A card is a run of 8 KiB blocks:
+//   block 0      header (serial, format time, size, encoding, checksums)
+//   blocks 1, 2  two copies of the directory (127 entries of 64 bytes)
+//   blocks 3, 4  two copies of the block allocation table (BAT)
+//   blocks 5..   file data
+// Each directory and BAT copy carries an update counter; the copy with the
+// higher counter is the live one, and a change is written to the other copy.
 
 #pragma once
 
@@ -67,6 +77,8 @@ enum class GCMemcardValidityIssues
   COUNT
 };
 
+// A set of GCMemcardValidityIssues. DATA_IN_UNUSED_AREA is the only one that
+// does not make a card unusable.
 class GCMemcardErrorCode
 {
 public:
@@ -85,30 +97,26 @@ struct GCMemcardAnimationFrameRGBA8
   u8 delay = 0;
 };
 
-// size of a single memory card block in bytes
 constexpr u32 BLOCK_SIZE = 0x2000;
 
-// the amount of memory card blocks in a megabit of data
+// Blocks per megabit of card capacity (16).
 constexpr u32 MBIT_TO_BLOCKS = (1024 * 1024) / (BLOCK_SIZE * 8);
 
-// number of metadata and filesystem blocks before the actual user data blocks
+// Header, two directories and two BATs.
 constexpr u32 MC_FST_BLOCKS = 0x05;
 
-// maximum number of saves that can be stored on a single memory card
+// Directory entries per card.
 constexpr u8 DIRLEN = 0x7F;
 
-// maximum size of a single memory card file comment in bytes
+// Length of each of the two comment strings, and of a file name.
 constexpr u32 DENTRY_STRLEN = 0x20;
 
-// size of a single entry in the Directory in bytes
 constexpr u32 DENTRY_SIZE = 0x40;
 
-// number of block entries in the BAT; one entry uses 2 bytes
+// BAT entries (u16 each): one per possible data block.
 constexpr u16 BAT_SIZE = 0xFFB;
 
-// possible sizes of memory cards in megabits
-// TODO: Do memory card sizes have to be power of two?
-// TODO: Are these all of them? A 4091 block card should work in theory at least.
+// Card capacities in megabits. The names give the number of usable blocks.
 constexpr u16 MBIT_SIZE_MEMORY_CARD_59 = 0x04;
 constexpr u16 MBIT_SIZE_MEMORY_CARD_123 = 0x08;
 constexpr u16 MBIT_SIZE_MEMORY_CARD_251 = 0x10;
@@ -116,28 +124,21 @@ constexpr u16 MBIT_SIZE_MEMORY_CARD_507 = 0x20;
 constexpr u16 MBIT_SIZE_MEMORY_CARD_1019 = 0x40;
 constexpr u16 MBIT_SIZE_MEMORY_CARD_2043 = 0x80;
 
-// width and height of a save file's banner in pixels
+// Banner image: 96x32, CI8 or RGB5A3 (low two bits of m_banner_and_icon_flags).
 constexpr u32 MEMORY_CARD_BANNER_WIDTH = 96;
 constexpr u32 MEMORY_CARD_BANNER_HEIGHT = 32;
-
-// color format of banner as stored in the lowest two bits of m_banner_and_icon_flags
 constexpr u8 MEMORY_CARD_BANNER_FORMAT_CI8 = 1;
 constexpr u8 MEMORY_CARD_BANNER_FORMAT_RGB5A3 = 2;
 
-// width and height of a save file's icon in pixels
+// Icon: up to 8 frames of 32x32, format two bits per frame in m_icon_format.
 constexpr u32 MEMORY_CARD_ICON_WIDTH = 32;
 constexpr u32 MEMORY_CARD_ICON_HEIGHT = 32;
-
-// maximum number of frames a save file's icon animation can have
 constexpr u32 MEMORY_CARD_ICON_ANIMATION_MAX_FRAMES = 8;
-
-// color format of icon frame as stored in m_icon_format (two bits per frame)
 constexpr u8 MEMORY_CARD_ICON_FORMAT_CI8_SHARED_PALETTE = 1;
 constexpr u8 MEMORY_CARD_ICON_FORMAT_RGB5A3 = 2;
 constexpr u8 MEMORY_CARD_ICON_FORMAT_CI8_UNIQUE_PALETTE = 3;
 
-// number of palette entries in a CI8 palette of a banner or icon
-// each palette entry is 16 bits in RGB5A3 format
+// A CI8 palette has 256 RGB5A3 (u16) colours.
 constexpr u32 MEMORY_CARD_CI8_PALETTE_ENTRIES = 256;
 
 constexpr u32 MbitToFreeBlocks(u16 size_mb)
@@ -145,6 +146,7 @@ constexpr u32 MbitToFreeBlocks(u16 size_mb)
   return size_mb * MBIT_TO_BLOCKS - MC_FST_BLOCKS;
 }
 
+// One 8 KiB block; a new block is erased (all 0xFF), like flash.
 struct GCMBlock
 {
   GCMBlock();
@@ -155,35 +157,33 @@ static_assert(sizeof(GCMBlock) == BLOCK_SIZE);
 static_assert(std::is_trivially_copyable_v<GCMBlock>);
 
 #pragma pack(push, 1)
-// split off from Header to have a small struct with all the data needed to regenerate the header
-// for GCI folders
+// The meaningful start of the header block. GCI folders store only this and
+// rebuild the rest of the header from it.
 struct HeaderData
 {
-  // NOTE: libogc refers to 'Serial' as the first 0x20 bytes of the header,
-  // so the data from m_serial until m_dtv_status (inclusive)
-
-  // 12 bytes at 0x0000
+  // 0x00: card serial. (libogc calls the first 0x20 bytes, up to and
+  // including m_dtv_status, the serial.)
   std::array<u8, 12> m_serial;
 
-  // 8 bytes at 0x000c: Time of format (OSTime value)
+  // 0x0c: OSTime of formatting
   Common::BigEndianValue<u64> m_format_time;
 
-  // 4 bytes at 0x0014; SRAM bias at time of format
+  // 0x14: RTC bias from SRAM when formatted
   u32 m_sram_bias;
 
-  // 4 bytes at 0x0018: SRAM language
+  // 0x18: SRAM language
   Common::BigEndianValue<u32> m_sram_language;
 
-  // 4 bytes at 0x001c: VI DTV status register value (u16 from 0xCC00206E)
+  // 0x1c: video DTV status at format time
   u32 m_dtv_status;
 
-  // 2 bytes at 0x0020: 0 if formatted in slot A, 1 if formatted in slot B
+  // 0x20: slot the card was formatted in (0 = A, 1 = B)
   Common::BigEndianValue<u16> m_device_id;
 
-  // 2 bytes at 0x0022: Size of memcard in Mbits
+  // 0x22: capacity in megabits
   Common::BigEndianValue<u16> m_size_mb;
 
-  // 2 bytes at 0x0024: Encoding (Windows-1252 or Shift JIS)
+  // 0x24: 0 = Windows-1252, 1 = Shift JIS
   Common::BigEndianValue<u16> m_encoding;
 };
 static_assert(std::is_trivially_copyable_v<HeaderData>);
@@ -197,33 +197,30 @@ struct Header
 {
   HeaderData m_data;
 
-  // 468 bytes at 0x0026: Unused (0xff)
+  // 0x26: unused, 0xFF
   std::array<u8, 468> m_unused_1;
 
-  // 2 bytes at 0x01fa: Update Counter (?, probably unused)
-  // TODO: This seems to be 0xFFFF in all my memory cards, might still be part of m_unused_1.
+  // 0x1fa: update counter (normally 0xFFFF; unused in practice)
   u16 m_update_counter;
 
-  // 2 bytes at 0x01fc: Additive Checksum
+  // 0x1fc: checksum and inverse checksum over 0x000-0x1fb
   u16 m_checksum;
-
-  // 2 bytes at 0x01fe: Inverse Checksum
   u16 m_checksum_inv;
 
-  // 0x1e00 bytes at 0x0200: Unused (0xff)
+  // 0x200: unused, 0xFF
   std::array<u8, 7680> m_unused_2;
 
-  // initialize an unformatted header block
+  // An unformatted (all 0xFF) header.
   explicit Header();
 
-  // initialize a formatted header block
+  // A freshly formatted header.
   explicit Header(const CardFlashId& flash_id, u16 size_mbits, bool shift_jis, u32 rtc_bias,
                   u32 sram_language, u64 format_time);
 
-  // initialize a header block from existing HeaderData
+  // A header rebuilt from saved HeaderData.
   explicit Header(const HeaderData& data);
 
-  // Calculates the card serial numbers used for encrypting some save files.
+  // The two serial words some games use to bind their saves to a card.
   std::pair<u32, u32> CalculateSerial() const;
 
   void FixChecksums();
@@ -236,76 +233,57 @@ struct Header
 static_assert(sizeof(Header) == BLOCK_SIZE);
 static_assert(std::is_trivially_copyable_v<Header>);
 
+// One directory entry; also the 64-byte header of a .gci file.
 struct DEntry
 {
   DEntry();
 
   static constexpr std::array<u8, 4> UNINITIALIZED_GAMECODE{{0xFF, 0xFF, 0xFF, 0xFF}};
 
-  // 4 bytes at 0x00: Gamecode
+  // 0x00
   std::array<u8, 4> m_gamecode;
 
-  // 2 bytes at 0x04: Makercode
+  // 0x04
   std::array<u8, 2> m_makercode;
 
-  // 1 byte at 0x06: reserved/unused (always 0xff, has no effect)
+  // 0x06: unused, 0xFF
   u8 m_unused_1;
 
-  // 1 byte at 0x07: banner gfx format and icon animation (Image Key)
-  // First two bits are used for the banner format.
-  // YAGCD is wrong about the meaning of these.
-  // '0' and '3' both mean no banner.
-  // '1' means paletted (8 bits per pixel palette entry + 16 bit color palette in RGB5A3)
-  // '2' means direct color (16 bits per pixel in RGB5A3)
-  // Third bit is icon animation frame order, 0 for loop (abcabcabc), 1 for ping-pong (abcbabcba).
-  // Remaining bits seem unused.
+  // 0x07: bits 0-1 banner format (1 = CI8, 2 = RGB5A3, 0 or 3 = none);
+  // bit 2 icon animation order (0 = loop, 1 = ping-pong).
   u8 m_banner_and_icon_flags;
 
-  // 0x20 bytes at 0x08: Filename
+  // 0x08
   std::array<u8, DENTRY_STRLEN> m_filename;
 
-  // 4 bytes at 0x28: Time of file's last modification in seconds since 12am, January 1st, 2000
+  // 0x28: seconds since 2000-01-01 00:00
   Common::BigEndianValue<u32> m_modification_time;
 
-  // 4 bytes at 0x2c: image data offset
+  // 0x2c: offset of the banner/icon data in the file
   Common::BigEndianValue<u32> m_image_offset;
 
-  // 2 bytes at 0x30: icon gfx format (2bits per icon)
-  //      Bits    Description
-  //      00      No icon
-  //      01      CI8 with a shared color palette after the last frame
-  //      10      RGB5A3
-  //      11      CI8 with a unique color palette after itself
+  // 0x30: icon format, two bits per frame (MEMORY_CARD_ICON_FORMAT_*)
   Common::BigEndianValue<u16> m_icon_format;
 
-  // 2 bytes at 0x32: Animation speed (2bits per icon)
-  //      Bits    Description
-  //      00      No icon
-  //      01      Icon lasts for 4 frames
-  //      10      Icon lasts for 8 frames
-  //      11      Icon lasts for 12 frames
+  // 0x32: frame duration, two bits per frame (0 = end, 1/2/3 = 4/8/12 frames)
   Common::BigEndianValue<u16> m_animation_speed;
 
-  // 1 byte at 0x34: File-permissions
-  //      Bit Permission  Description
-  //      4   no move     File cannot be moved by the IPL
-  //      3   no copy     File cannot be copied by the IPL
-  //      2   public      Can be read by any game
+  // 0x34: bit 2 public, bit 3 no copy, bit 4 no move
   u8 m_file_permissions;
 
-  // 1 byte at 0x35: Copy counter
+  // 0x35
   u8 m_copy_counter;
 
-  // 2 bytes at 0x36: Block number of first block of file (0 == offset 0)
+  // 0x36: first block of the file (absolute block number)
   Common::BigEndianValue<u16> m_first_block;
 
-  // 2 bytes at 0x38: File-length (number of blocks in file)
+  // 0x38: length in blocks
   Common::BigEndianValue<u16> m_block_count;
 
-  // 2 bytes at 0x3a: Reserved/unused (always 0xffff, has no effect)
+  // 0x3a: unused, 0xFFFF
   std::array<u8, 2> m_unused_2;
 
-  // 4 bytes at 0x3c: Address of the two comments within the file data
+  // 0x3c: offset of the two comment strings in the file
   Common::BigEndianValue<u32> m_comments_address;
 };
 static_assert(sizeof(DEntry) == DENTRY_SIZE);
@@ -315,26 +293,22 @@ struct BlockAlloc;
 
 struct Directory
 {
-  // 127 files of 0x40 bytes each
   std::array<DEntry, DIRLEN> m_dir_entries;
 
-  // 0x3a bytes at 0x1fc0: Unused, always 0xFF
+  // 0x1fc0: unused, 0xFF
   std::array<u8, 0x3a> m_padding;
 
-  // 2 bytes at 0x1ffa: Update Counter
+  // 0x1ffa
   Common::BigEndianValue<s16> m_update_counter;
 
-  // 2 bytes at 0x1ffc: Additive Checksum
+  // 0x1ffc: checksums over 0x0000-0x1ffb
   u16 m_checksum;
-
-  // 2 bytes at 0x1ffe: Inverse Checksum
   u16 m_checksum_inv;
 
-  // Constructs an empty Directory block.
+  // An empty directory.
   Directory();
 
-  // Replaces the file metadata at the given index (range 0-126)
-  // with the given DEntry data.
+  // Stores `entry` at `index` (0-126) and updates the checksums.
   bool Replace(const DEntry& entry, size_t index);
 
   void FixChecksums();
@@ -349,26 +323,26 @@ static_assert(std::is_trivially_copyable_v<Directory>);
 
 struct BlockAlloc
 {
-  // 2 bytes at 0x0000: Additive Checksum
+  // 0x0000: checksums over 0x0004-0x1fff
   u16 m_checksum;
-
-  // 2 bytes at 0x0002: Inverse Checksum
   u16 m_checksum_inv;
 
-  // 2 bytes at 0x0004: Update Counter
+  // 0x0004
   Common::BigEndianValue<s16> m_update_counter;
 
-  // 2 bytes at 0x0006: Free Blocks
+  // 0x0006
   Common::BigEndianValue<u16> m_free_blocks;
 
-  // 2 bytes at 0x0008: Last allocated Block
+  // 0x0008
   Common::BigEndianValue<u16> m_last_allocated_block;
 
-  // 0x1ff8 bytes at 0x000a: Map of allocated Blocks
+  // 0x000a: one entry per data block (block 5 first): 0 = free, 0xFFFF = last
+  // block of a file, otherwise the next block of the file.
   std::array<Common::BigEndianValue<u16>, BAT_SIZE> m_map;
 
   explicit BlockAlloc(u16 size_mbits = MBIT_SIZE_MEMORY_CARD_2043);
 
+  // Block numbers here are absolute (5 = first data block).
   u16 GetNextBlock(u16 block) const;
   u16 NextFreeBlock(u16 max_block, u16 starting_block = MC_FST_BLOCKS) const;
   bool ClearBlocks(u16 starting_block, u16 block_count);
@@ -389,6 +363,7 @@ struct Savefile
   std::vector<GCMBlock> blocks;
 };
 
+// A whole raw card image, loaded into memory.
 class GCMemcard
 {
 private:
@@ -440,51 +415,41 @@ public:
 
   bool FixChecksums();
 
-  // get number of file entries in the directory
+  // Number of used directory entries.
   u8 GetNumFiles() const;
+  // Directory index of the fileNumber-th used entry, or 0xFF.
   u8 GetFileIndex(u8 fileNumber) const;
 
-  // get the free blocks from bat
   u16 GetFreeBlocks() const;
 
-  // Returns index of the save with the same identity as the given DEntry, or nullopt if no save
-  // with that identity exists in this card.
+  // Directory index of a save with the same identity as `d`, if any.
   std::optional<u8> TitlePresent(const DEntry& d) const;
 
-  // DEntry functions, all take u8 index < DIRLEN (127)
+  // Per-entry accessors; index is a directory index below DIRLEN.
   bool DEntry_IsPingPong(u8 index) const;
-  // get first block for file
   u16 DEntry_FirstBlock(u8 index) const;
-  // get file length in blocks
   u16 DEntry_BlockCount(u8 index) const;
 
   std::optional<std::vector<u8>>
   GetSaveDataBytes(u8 save_index, size_t offset = 0,
                    size_t length = std::numeric_limits<size_t>::max()) const;
 
-  // Returns, if available, the two strings shown on the save file in the GC BIOS, in UTF8.
-  // The first is the big line on top, usually the game title, and the second is the smaller line
-  // next to the block size, often a progress indicator or subtitle.
+  // The two comment lines the IPL shows for a save (title, then detail),
+  // converted to UTF-8.
   std::optional<std::pair<std::string, std::string>> GetSaveComments(u8 index) const;
 
-  // Fetches a DEntry from the given file index.
   std::optional<DEntry> GetDEntry(u8 index) const;
 
   GCMemcardGetSaveDataRetVal GetSaveData(u8 index, std::vector<GCMBlock>& saveBlocks) const;
 
-  // Adds the given savefile to the memory card, if possible.
   GCMemcardImportFileRetVal ImportFile(const Savefile& savefile);
 
-  // Fetches the savefile at the given directory index, if any.
   std::optional<Savefile> ExportFile(u8 index) const;
 
-  // delete a file from the directory
   GCMemcardRemoveFileRetVal RemoveFile(u8 index);
 
-  // reads the banner image
   std::optional<std::vector<u32>> ReadBannerRGBA8(u8 index) const;
 
-  // reads the animation frames
   std::optional<std::vector<GCMemcardAnimationFrameRGBA8>> ReadAnimRGBA8(u8 index) const;
 };
 }  // namespace Memcard
