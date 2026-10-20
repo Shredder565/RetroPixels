@@ -1,5 +1,4 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/IOS/USB/Bluetooth/BTBase.h"
 
@@ -7,7 +6,6 @@
 #include <vector>
 
 #include "Common/CommonPaths.h"
-#include "Common/CommonTypes.h"
 #include "Common/FileUtil.h"
 #include "Common/IOFile.h"
 #include "Common/Logging/Log.h"
@@ -15,37 +13,53 @@
 
 namespace IOS::HLE
 {
+namespace
+{
+constexpr const char* DINF_ENTRY = "BT.DINF";
+
+std::string BackupPath()
+{
+  return File::GetUserPath(D_CONFIG_IDX) + DIR_SEP WII_BTDINF_BACKUP;
+}
+}  // namespace
+
 void BackUpBTInfoSection(const SysConf* sysconf)
 {
-  const std::string filename = File::GetUserPath(D_CONFIG_IDX) + DIR_SEP WII_BTDINF_BACKUP;
-  if (File::Exists(filename))
-    return;
-  File::IOFile backup(filename, "wb");
+  const std::string path = BackupPath();
 
-  const SysConf::Entry* btdinf = sysconf->GetEntry("BT.DINF");
-  if (!btdinf)
+  // An existing backup is the user's original list; never overwrite it.
+  if (File::Exists(path))
     return;
 
-  const std::vector<u8>& section = btdinf->bytes;
-  if (!backup.WriteBytes(section.data(), section.size()))
-    ERROR_LOG_FMT(IOS_WIIMOTE, "Failed to back up BT.DINF section");
+  // The file is created even when there is nothing to back up.
+  File::IOFile file(path, "wb");
+  const SysConf::Entry* entry = sysconf->GetEntry(DINF_ENTRY);
+  if (entry == nullptr)
+    return;
+
+  if (!file.WriteBytes(entry->bytes.data(), entry->bytes.size()))
+    ERROR_LOG_FMT(IOS_WIIMOTE, "Could not write the BT.DINF backup");
 }
 
 void RestoreBTInfoSection(SysConf* sysconf)
 {
-  const std::string filename = File::GetUserPath(D_CONFIG_IDX) + DIR_SEP WII_BTDINF_BACKUP;
+  const std::string path = BackupPath();
+
   {
-    File::IOFile backup(filename, "rb");
-    if (!backup)
+    File::IOFile file(path, "rb");
+    if (!file)
       return;
-    auto& section = sysconf->GetOrAddEntry("BT.DINF", SysConf::Entry::Type::BigArray)->bytes;
-    if (!backup.ReadBytes(section.data(), section.size()))
+
+    std::vector<u8>& bytes =
+        sysconf->GetOrAddEntry(DINF_ENTRY, SysConf::Entry::Type::BigArray)->bytes;
+    if (!file.ReadBytes(bytes.data(), bytes.size()))
     {
-      ERROR_LOG_FMT(IOS_WIIMOTE, "Failed to read backed up BT.DINF section");
+      // Keep the backup so that a later run can try again.
+      ERROR_LOG_FMT(IOS_WIIMOTE, "Could not read the BT.DINF backup");
       return;
     }
   }
 
-  File::Delete(filename);
+  File::Delete(path);
 }
 }  // namespace IOS::HLE

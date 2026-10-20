@@ -1,11 +1,9 @@
-// Copyright 2016 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
-#include <string>
+#include <optional>
 
-#include "Common/CommonTypes.h"
 #include "Core/IOS/IOS.h"
 #include "Core/IOS/USB/Bluetooth/BTBase.h"
 
@@ -13,6 +11,7 @@ class PointerWrap;
 
 namespace IOS::HLE
 {
+// Stands in for Bluetooth passthrough in builds without libusb: opening it fails.
 class BluetoothStubDevice final : public BluetoothBaseDevice
 {
 public:
