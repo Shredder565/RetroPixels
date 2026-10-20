@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #ifdef SUPPORTS_WIIMOTE
@@ -14,6 +15,8 @@ class wxStaticText;
 class wxCheckBox;
 class wxInputDraw;
 
+// Settings for a real Wiimote: rumble, motion, packet delay and the stick
+// tuning of whichever extension is plugged in (polled while open).
 class WiimoteControllerSettings : public wxDialog
 {
 public:
@@ -21,41 +24,31 @@ public:
 	~WiimoteControllerSettings();
 
 private:
-	void update_settings();
+	void Apply();
+	void OnPoll(wxTimerEvent& event);
+	void OnCloseWindow(wxCloseEvent& event);
+	void OnRumbleToggled(wxCommandEvent& event);
+	void ShowExtension();
 
 	std::shared_ptr<NativeWiimoteController> m_controller;
 	ControllerBase::Settings m_settings;
-	float m_rumble_backup;
-	uint32 m_packet_delay_backup;
+	float m_savedRumble;
+	uint32 m_savedPacketDelay;
 
-	wxTimer* m_timer;
-	std::optional<std::chrono::steady_clock::time_point> m_rumble_time{};
+	wxTimer* m_poll;
+	std::optional<std::chrono::steady_clock::time_point> m_rumbleStarted{};
 
-	wxStaticText* m_extension_text;
-
-	wxSlider* m_package_delay;
+	wxStaticText* m_extensionName;
+	wxSlider* m_packetDelay;
 	wxCheckBox* m_rumble = nullptr;
-	wxCheckBox* m_use_motion = nullptr;
+	wxCheckBox* m_motion = nullptr;
 
-	wxStaticBox* m_nunchuck_settings;
-	wxSlider* m_nunchuck_deadzone, * m_nunchuck_range;
-	wxInputDraw* m_nunchuck_draw;
+	wxStaticBox* m_nunchuckBox;
+	wxInputDraw* m_nunchuckStick;
 
-	wxStaticBox* m_classic_settings;
-	wxSlider* m_classic_axis_deadzone, * m_classic_axis_range;
-	wxInputDraw* m_classic_axis_draw;
-	wxSlider* m_classic_rotation_deadzone, * m_classic_rotation_range;
-	wxInputDraw* m_classic_rotation_draw;
-
-	
-
-	
-
-	void on_timer(wxTimerEvent& event);
-	void on_close(wxCloseEvent& event);
-	void on_slider_change(wxCommandEvent& event);
-	void on_rumble_change(wxCommandEvent& event);
-	void on_delay_change(wxCommandEvent& event);
+	wxStaticBox* m_classicBox;
+	wxInputDraw* m_classicLeftStick;
+	wxInputDraw* m_classicRightStick;
 };
 
 #endif

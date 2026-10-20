@@ -1,3 +1,4 @@
+// Original code for RetroPixels (PixelU). Not derived from Cemu.
 #pragma once
 
 #include <wx/dialog.h>
@@ -9,6 +10,8 @@
 class wxCheckBox;
 class wxInputDraw;
 
+// Per-controller tuning: deadzone and range of the sticks/triggers, rumble
+// strength and motion. Edits stay local until OK (or closing the window).
 class DefaultControllerSettings : public wxDialog
 {
 public:
@@ -16,27 +19,20 @@ public:
 	~DefaultControllerSettings();
 
 private:
-	void update_settings();
+	void Apply();
+	void OnPoll(wxTimerEvent& event);
+	void OnCloseWindow(wxCloseEvent& event);
+	void PreviewRumble(int percent);
 
 	ControllerPtr m_controller;
 	ControllerBase::Settings m_settings;
-	float m_rumble_backup;
+	float m_savedRumble;
 
-	wxTimer* m_timer;
-	std::optional<std::chrono::steady_clock::time_point> m_rumble_time{};
+	wxTimer* m_poll;
+	std::optional<std::chrono::steady_clock::time_point> m_rumbleStarted{};
 
-	wxSlider* m_axis_deadzone, *m_axis_range;
-	wxSlider* m_rotation_deadzone, *m_rotation_range;
-	wxSlider* m_trigger_deadzone, *m_trigger_range;
-	wxSlider* m_rumble;
-
-	wxCheckBox* m_use_motion = nullptr;
-
-	wxInputDraw* m_axis_draw, * m_rotation_draw, *m_trigger_draw;
-
-	void on_timer(wxTimerEvent& event);
-	void on_close(wxCloseEvent& event);
-	void on_deadzone_change(wxCommandEvent& event);
-	void on_range_change(wxCommandEvent& event);
-	void on_rumble_change(wxCommandEvent& event);
+	wxCheckBox* m_motion = nullptr;
+	wxInputDraw* m_axisPreview;
+	wxInputDraw* m_rotationPreview;
+	wxInputDraw* m_triggerPreview;
 };
