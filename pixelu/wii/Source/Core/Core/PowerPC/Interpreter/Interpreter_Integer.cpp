@@ -125,7 +125,8 @@ void Interpreter::subfic(Interpreter& interpreter, UGeckoInstruction inst)
   auto& ppc_state = interpreter.m_ppc_state;
   const u32 a = ppc_state.gpr[inst.RA];
   const u32 imm = static_cast<u32>(static_cast<s32>(inst.SIMM_16));
-  const u64 wide = u64{~a} + imm + 1;
+  const u32 not_a = ~a;
+  const u64 wide = u64{not_a} + imm + 1;
   ppc_state.gpr[inst.RD] = static_cast<u32>(wide);
   ppc_state.SetCarry(static_cast<u32>(wide >> 32));
 }
