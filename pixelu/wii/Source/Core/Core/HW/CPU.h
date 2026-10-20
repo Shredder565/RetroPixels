@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -23,8 +22,11 @@ namespace PowerPC
 enum class CPUCore;
 }
 
+// The CPU thread's run state and the ways other threads control it:
+// stepping, breaking, pausing with a lock held, queued jobs.
 namespace CPU
 {
+// The JITs read this through GetStatePtr(), so the values must stay.
 enum class State
 {
   Running = 0,
@@ -42,65 +44,49 @@ public:
   CPUManager& operator=(CPUManager&& other) = delete;
   ~CPUManager();
 
-  // Init
   void Init(PowerPC::CPUCore cpu_core);
-
-  // Shutdown
   void Shutdown();
 
-  // Starts the CPU
-  // To be called by the CPU Thread.
+  // The CPU thread's main loop; returns after Stop().
   void Run();
 
-  // Causes shutdown
-  // Once started, State::PowerDown cannot be stopped.
-  // Synchronizes with the CPU Thread (waits for CPU::Run to exit).
+  // Enters State::PowerDown for good and waits until the CPU thread is idle.
   void Stop();
 
-  // Reset [NOT IMPLEMENTED]
+  // Does nothing.
   void Reset();
 
-  // StepOpcode (Steps one Opcode)
+  // Executes one instruction while stepping. `event` is set once done (or
+  // at once when not stepping).
   void StepOpcode(Common::Event* event = nullptr);
 
-  // Enable or Disable Stepping.
+  // Enters or leaves stepping. Entering waits for the CPU thread to idle.
   void SetStepping(bool stepping);
 
-  // Breakpoint activation for system threads. Similar to SetStepping(true).
-  // NOTE: Unlike SetStepping, this does NOT synchronize with the CPU Thread
-  //   which enables it to avoid deadlocks but also makes it less safe so it
-  //   should not be used by the Host.
+  // Enters stepping without waiting for the CPU thread, for breakpoints hit
+  // on emulator threads. Not for the host: nothing is synchronised.
   void Break();
 
-  // This should only be called from the CPU thread
+  // Leaves stepping; CPU thread only.
   void Continue();
 
-  // Shorthand for GetState() == State::Stepping.
-  // WARNING: State::PowerDown will return false, not just State::Running.
+  // True only for State::Stepping (not for PowerDown).
   bool IsStepping() const;
 
-  // Get current CPU Thread State
   State GetState() const;
 
-  // Direct State Access (Raw pointer for embedding into JIT Blocks)
-  // Strictly read-only. A lock is required to change the value.
+  // For JIT code to read the state. Never write through it.
   const State* GetStatePtr() const;
 
-  // Locks the CPU Thread (waiting for it to become idle). While this lock is held, the CPU Thread
-  // will not perform any action so it is safe to access PowerPC, CoreTiming, etc. without racing
-  // the CPU Thread.
-  //
-  // Cannot be used recursively. Cannot be used by System threads as it will deadlock. It is
-  // threadsafe otherwise.
-  //
-  // Each call to PauseAndLock must be paired with a call to RestoreStateAndUnlock. The return value
-  // for PauseAndLock is whether the state was State::Running or not and should be passed as the
-  // argument to RestoreStateAndUnlock.
+  // Stops the CPU thread and keeps it idle until RestoreStateAndUnlock(),
+  // so the caller may touch emulator state. Not recursive; must not be
+  // called from emulator threads (deadlock). Returns whether the CPU was
+  // running; pass that to RestoreStateAndUnlock().
   bool PauseAndLock();
   void RestoreStateAndUnlock(bool unpause_on_unlock);
 
-  // Adds a job to be executed during on the CPU thread. This should be combined with
-  // PauseAndLock(), as while the CPU is in the run loop, it won't execute the function.
+  // Queues a function for the CPU thread, which runs it when it is not in
+  // the run loop (use together with PauseAndLock()).
   void AddCPUThreadJob(Common::MoveOnlyFunction<void()> function);
 
 private:
@@ -110,32 +96,31 @@ private:
   void RunAdjacentSystems(bool running);
   bool SetStateLocked(State s);
 
-  // CPU Thread execution state.
-  // Requires m_state_change_lock to modify the value.
-  // Read access is unsynchronized.
+  void RunUntilStopped(std::unique_lock<std::mutex>& state_lock);
+  bool StepRequestedOrResumed(std::unique_lock<std::mutex>& state_lock,
+                              Common::Event& gdb_step_event);
+  void ServiceStepping(std::unique_lock<std::mutex>& state_lock, Common::Event& gdb_step_event);
+  void MarkCPUThreadIdle();
+  void WaitForCPUThreadIdle(std::unique_lock<std::mutex>& state_lock);
+
+  // Written with m_state_change_lock held; read without it.
   State m_state = State::PowerDown;
 
-  // Synchronizes SetStepping and PauseAndLock so only one instance can be
-  // active at a time. Simplifies code by eliminating several edge cases where
-  // the SetStepping(true)/PauseAndLock(true) case must release the state lock
-  // and wait for the CPU Thread which would otherwise require additional flags.
-  // NOTE: When using the stepping lock, it must always be acquired first. If
-  //   the lock is acquired after the state lock then that is guaranteed to
-  //   deadlock because of the order inversion. (A -> X,Y; B -> Y,X; A waits for
-  //   B, B waits for A)
+  // Serialises SetStepping and PauseAndLock. Lock order: this lock first,
+  // then m_state_change_lock, never the other way round.
   std::mutex m_stepping_lock;
-  // Protected by m_stepping_lock.
+  // Set when PauseAndLock made the calling thread the CPU thread.
   bool m_have_fake_cpu_thread = false;
 
-  // Primary lock. Protects changing m_state, requesting instruction stepping and
-  // pause-and-locking.
+  // Guards the state and the requests below.
   std::mutex m_state_change_lock;
-  // When m_state_cpu_thread_active changes to false
+  // Signalled when the CPU thread becomes idle.
   std::condition_variable m_state_cpu_idle_cvar;
-  // When m_state changes / m_state_paused_and_locked becomes false (for CPU Thread only)
+  // Signalled for the CPU thread: state change, step request, unlock.
   std::condition_variable m_state_cpu_cvar;
   bool m_state_cpu_thread_active = false;
   bool m_state_paused_and_locked = false;
+  // A Break() arrived while paused; overrides unpausing on unlock.
   bool m_state_system_request_stepping = false;
   bool m_state_cpu_step_instruction = false;
   Common::Event* m_state_cpu_step_instruction_sync = nullptr;
