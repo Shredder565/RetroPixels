@@ -1,5 +1,4 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/Debugger/OSThread.h"
 
@@ -9,100 +8,129 @@
 
 namespace Core::Debug
 {
-// Context offsets based on the following functions:
-//  - OSSaveContext
-//  - OSSaveFPUContext
-//  - OSDumpContext
-//  - OSClearContext
-//  - OSExceptionVector
+namespace
+{
+// Reads consecutive big-endian fields of a guest structure. The structures below are declared
+// in guest order, so filling them field by field follows the guest layout (the offsets are
+// checked by the static_asserts in the header).
+class GuestCursor
+{
+public:
+  GuestCursor(const Core::CPUThreadGuard& guard, u32 address) : m_guard(guard), m_address(address)
+  {
+  }
+
+  template <typename T> T Next()
+  {
+    const T value = PowerPC::MMU::HostRead<T>(m_guard, m_address);
+    m_address += static_cast<u32>(sizeof(T));
+    return value;
+  }
+
+  // Signed fields are stored as their two's complement bit pattern.
+  s32 NextSigned() { return static_cast<s32>(Next<u32>()); }
+
+  template <typename T, size_t N> void Fill(std::array<T, N>& out)
+  {
+    for (T& element : out)
+      element = Next<T>();
+  }
+
+  void Skip(u32 bytes) { m_address += bytes; }
+
+private:
+  const Core::CPUThreadGuard& m_guard;
+  u32 m_address;
+};
+
+template <class C> void ReadLink(GuestCursor& cursor, OSLink<C>& link)
+{
+  link.next = cursor.Next<u32>();
+  link.prev = cursor.Next<u32>();
+}
+
+template <class C> void ReadQueue(GuestCursor& cursor, OSQueue<C>& queue)
+{
+  queue.head = cursor.Next<u32>();
+  queue.tail = cursor.Next<u32>();
+}
+
+// The context layout follows what OSSaveContext / OSLoadContext and the exception vectors store.
+void ReadContext(GuestCursor& cursor, OSContext& context)
+{
+  cursor.Fill(context.gpr);
+  context.cr = cursor.Next<u32>();
+  context.lr = cursor.Next<u32>();
+  context.ctr = cursor.Next<u32>();
+  context.xer = cursor.Next<u32>();
+  cursor.Fill(context.fpr);
+  context.fpscr = cursor.Next<u64>();
+  context.srr0 = cursor.Next<u32>();
+  context.srr1 = cursor.Next<u32>();
+  context.dummy = cursor.Next<u16>();
+  context.state = static_cast<OSContext::State>(cursor.Next<u16>());
+  cursor.Fill(context.gqr);
+  // The word in front of the paired singles only aligns them; it isn't read.
+  context.psf_padding = 0;
+  cursor.Skip(4);
+  cursor.Fill(context.psf);
+}
+}  // namespace
+
 void OSContext::Read(const Core::CPUThreadGuard& guard, u32 addr)
 {
-  for (std::size_t i = 0; i < gpr.size(); i++)
-    gpr[i] = PowerPC::MMU::HostRead<u32>(guard, addr + u32(i * sizeof(int)));
-  cr = PowerPC::MMU::HostRead<u32>(guard, addr + 0x80);
-  lr = PowerPC::MMU::HostRead<u32>(guard, addr + 0x84);
-  ctr = PowerPC::MMU::HostRead<u32>(guard, addr + 0x88);
-  xer = PowerPC::MMU::HostRead<u32>(guard, addr + 0x8C);
-  for (std::size_t i = 0; i < fpr.size(); i++)
-    fpr[i] = PowerPC::MMU::HostRead<double>(guard, addr + 0x90 + u32(i * sizeof(double)));
-  fpscr = PowerPC::MMU::HostRead<u64>(guard, addr + 0x190);
-  srr0 = PowerPC::MMU::HostRead<u32>(guard, addr + 0x198);
-  srr1 = PowerPC::MMU::HostRead<u32>(guard, addr + 0x19c);
-  dummy = PowerPC::MMU::HostRead<u16>(guard, addr + 0x1a0);
-  state = static_cast<OSContext::State>(PowerPC::MMU::HostRead<u16>(guard, addr + 0x1a2));
-  for (std::size_t i = 0; i < gqr.size(); i++)
-    gqr[i] = PowerPC::MMU::HostRead<u32>(guard, addr + 0x1a4 + u32(i * sizeof(int)));
-  psf_padding = 0;
-  for (std::size_t i = 0; i < psf.size(); i++)
-    psf[i] = PowerPC::MMU::HostRead<double>(guard, addr + 0x1c8 + u32(i * sizeof(double)));
+  GuestCursor cursor(guard, addr);
+  ReadContext(cursor, *this);
 }
 
-// Mutex offsets based on the following functions:
-//  - OSInitMutex
-//  - OSLockMutex
-//  - __OSUnlockAllMutex
+// Layout as used by OSInitMutex, OSLockMutex and __OSUnlockAllMutex.
 void OSMutex::Read(const Core::CPUThreadGuard& guard, u32 addr)
 {
-  thread_queue.head = PowerPC::MMU::HostRead<u32>(guard, addr);
-  thread_queue.tail = PowerPC::MMU::HostRead<u32>(guard, addr + 0x4);
-  owner_addr = PowerPC::MMU::HostRead<u32>(guard, addr + 0x8);
-  lock_count = PowerPC::MMU::HostRead<u32>(guard, addr + 0xc);
-  link.next = PowerPC::MMU::HostRead<u32>(guard, addr + 0x10);
-  link.prev = PowerPC::MMU::HostRead<u32>(guard, addr + 0x14);
+  GuestCursor cursor(guard, addr);
+  ReadQueue(cursor, thread_queue);
+  owner_addr = cursor.Next<u32>();
+  lock_count = cursor.NextSigned();
+  ReadLink(cursor, link);
 }
 
-// Thread offsets based on the following functions:
-//  - OSCreateThread
-//  - OSIsThreadTerminated
-//  - OSJoinThread
-//  - OSSuspendThread
-//  - OSSetPriority
-//  - OSExitThread
-//  - OSLockMutex
-//  - __OSUnlockAllMutex
-//  - __OSThreadInit
-//  - OSSetThreadSpecific
-//  - SOInit (for errno)
+// Layout as used by the thread functions of the OS library (OSCreateThread, OSJoinThread,
+// OSSetThreadSpecific, ...) and by the socket library for errno.
 void OSThread::Read(const Core::CPUThreadGuard& guard, u32 addr)
 {
-  context.Read(guard, addr);
-  state = PowerPC::MMU::HostRead<u16>(guard, addr + 0x2c8);
-  is_detached = PowerPC::MMU::HostRead<u16>(guard, addr + 0x2ca);
-  suspend = PowerPC::MMU::HostRead<u32>(guard, addr + 0x2cc);
-  effective_priority = PowerPC::MMU::HostRead<u32>(guard, addr + 0x2d0);
-  base_priority = PowerPC::MMU::HostRead<u32>(guard, addr + 0x2d4);
-  exit_code_addr = PowerPC::MMU::HostRead<u32>(guard, addr + 0x2d8);
+  GuestCursor cursor(guard, addr);
+  ReadContext(cursor, context);
 
-  queue_addr = PowerPC::MMU::HostRead<u32>(guard, addr + 0x2dc);
-  queue_link.next = PowerPC::MMU::HostRead<u32>(guard, addr + 0x2e0);
-  queue_link.prev = PowerPC::MMU::HostRead<u32>(guard, addr + 0x2e4);
+  state = cursor.Next<u16>();
+  is_detached = cursor.Next<u16>();
+  suspend = cursor.NextSigned();
+  effective_priority = cursor.NextSigned();
+  base_priority = cursor.NextSigned();
+  exit_code_addr = cursor.Next<u32>();
 
-  join_queue.head = PowerPC::MMU::HostRead<u32>(guard, addr + 0x2e8);
-  join_queue.tail = PowerPC::MMU::HostRead<u32>(guard, addr + 0x2ec);
+  queue_addr = cursor.Next<u32>();
+  ReadLink(cursor, queue_link);
+  ReadQueue(cursor, join_queue);
 
-  mutex_addr = PowerPC::MMU::HostRead<u32>(guard, addr + 0x2f0);
-  mutex_queue.head = PowerPC::MMU::HostRead<u32>(guard, addr + 0x2f4);
-  mutex_queue.tail = PowerPC::MMU::HostRead<u32>(guard, addr + 0x2f8);
+  mutex_addr = cursor.Next<u32>();
+  ReadQueue(cursor, mutex_queue);
+  ReadLink(cursor, thread_link);
 
-  thread_link.next = PowerPC::MMU::HostRead<u32>(guard, addr + 0x2fc);
-  thread_link.prev = PowerPC::MMU::HostRead<u32>(guard, addr + 0x300);
-
-  stack_addr = PowerPC::MMU::HostRead<u32>(guard, addr + 0x304);
-  stack_end = PowerPC::MMU::HostRead<u32>(guard, addr + 0x308);
-  error = PowerPC::MMU::HostRead<u32>(guard, addr + 0x30c);
-  specific[0] = PowerPC::MMU::HostRead<u32>(guard, addr + 0x310);
-  specific[1] = PowerPC::MMU::HostRead<u32>(guard, addr + 0x314);
+  stack_addr = cursor.Next<u32>();
+  stack_end = cursor.Next<u32>();
+  error = cursor.NextSigned();
+  cursor.Fill(specific);
 }
 
 bool OSThread::IsValid(const Core::CPUThreadGuard& guard) const
 {
-  return PowerPC::MMU::HostIsRAMAddress(guard, stack_end) &&
-         PowerPC::MMU::HostRead<u32>(guard, stack_end) == STACK_MAGIC;
+  // A live thread has the magic word at the far end of its stack.
+  if (!PowerPC::MMU::HostIsRAMAddress(guard, stack_end))
+    return false;
+  return PowerPC::MMU::HostRead<u32>(guard, stack_end) == STACK_MAGIC;
 }
 
-OSThreadView::OSThreadView(const Core::CPUThreadGuard& guard, u32 addr)
+OSThreadView::OSThreadView(const Core::CPUThreadGuard& guard, u32 addr) : m_address(addr)
 {
-  m_address = addr;
   m_thread.Read(guard, addr);
 }
 
@@ -111,28 +139,32 @@ const OSThread& OSThreadView::Data() const
   return m_thread;
 }
 
+bool OSThreadView::IsValid(const Core::CPUThreadGuard& guard) const
+{
+  return m_thread.IsValid(guard);
+}
+
 Common::Debug::PartialContext OSThreadView::GetContext(const Core::CPUThreadGuard& guard) const
 {
-  Common::Debug::PartialContext context;
-
+  Common::Debug::PartialContext out;
   if (!IsValid(guard))
-    return context;
+    return out;
 
-  context.gpr = m_thread.context.gpr;
-  context.cr = m_thread.context.cr;
-  context.lr = m_thread.context.lr;
-  context.ctr = m_thread.context.ctr;
-  context.xer = m_thread.context.xer;
-  context.fpr = m_thread.context.fpr;
-  context.fpscr = m_thread.context.fpscr;
-  context.srr0 = m_thread.context.srr0;
-  context.srr1 = m_thread.context.srr1;
-  context.dummy = m_thread.context.dummy;
-  context.state = static_cast<u16>(m_thread.context.state);
-  context.gqr = m_thread.context.gqr;
-  context.psf = m_thread.context.psf;
-
-  return context;
+  const OSContext& saved = m_thread.context;
+  out.gpr = saved.gpr;
+  out.cr = saved.cr;
+  out.lr = saved.lr;
+  out.ctr = saved.ctr;
+  out.xer = saved.xer;
+  out.fpr = saved.fpr;
+  out.fpscr = saved.fpscr;
+  out.srr0 = saved.srr0;
+  out.srr1 = saved.srr1;
+  out.dummy = saved.dummy;
+  out.state = static_cast<u16>(saved.state);
+  out.gqr = saved.gqr;
+  out.psf = saved.psf;
+  return out;
 }
 
 u32 OSThreadView::GetAddress() const
@@ -145,19 +177,15 @@ u16 OSThreadView::GetState() const
   return m_thread.state;
 }
 
-bool OSThreadView::IsSuspended() const
-{
-  return m_thread.suspend > 0;
-}
-
 bool OSThreadView::IsDetached() const
 {
   return m_thread.is_detached != 0;
 }
 
-s32 OSThreadView::GetBasePriority() const
+bool OSThreadView::IsSuspended() const
 {
-  return m_thread.base_priority;
+  // The suspend count can go negative on resume without a matching suspend.
+  return m_thread.suspend > 0;
 }
 
 s32 OSThreadView::GetEffectivePriority() const
@@ -165,6 +193,17 @@ s32 OSThreadView::GetEffectivePriority() const
   return m_thread.effective_priority;
 }
 
+s32 OSThreadView::GetBasePriority() const
+{
+  return m_thread.base_priority;
+}
+
+s32 OSThreadView::GetErrno() const
+{
+  return m_thread.error;
+}
+
+// The stack grows down from stack_addr towards stack_end.
 u32 OSThreadView::GetStackStart() const
 {
   return m_thread.stack_addr;
@@ -177,31 +216,21 @@ u32 OSThreadView::GetStackEnd() const
 
 std::size_t OSThreadView::GetStackSize() const
 {
-  return GetStackStart() - GetStackEnd();
-}
-
-s32 OSThreadView::GetErrno() const
-{
-  return m_thread.error;
+  return m_thread.stack_addr - m_thread.stack_end;
 }
 
 std::string OSThreadView::GetSpecific(const Core::CPUThreadGuard& guard) const
 {
-  std::string specific;
-
-  for (u32 addr : m_thread.specific)
+  // Thread-specific pointers often point at a name. List them until the first one that doesn't
+  // point into RAM.
+  std::string text;
+  for (const u32 pointer : m_thread.specific)
   {
-    if (!PowerPC::MMU::HostIsRAMAddress(guard, addr))
-      break;
-    specific += fmt::format("{:08x} \"{}\"\n", addr, PowerPC::MMU::HostGetString(guard, addr));
+    if (!PowerPC::MMU::HostIsRAMAddress(guard, pointer))
+      return text;
+    text += fmt::format("{:08x} \"{}\"\n", pointer, PowerPC::MMU::HostGetString(guard, pointer));
   }
-
-  return specific;
-}
-
-bool OSThreadView::IsValid(const Core::CPUThreadGuard& guard) const
-{
-  return m_thread.IsValid(guard);
+  return text;
 }
 
 }  // namespace Core::Debug

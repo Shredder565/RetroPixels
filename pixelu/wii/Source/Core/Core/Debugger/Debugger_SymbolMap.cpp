@@ -1,8 +1,8 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/Debugger/Debugger_SymbolMap.h"
 
+#include <algorithm>
 #include <functional>
 #include <string>
 
@@ -19,123 +19,123 @@
 
 namespace Dolphin_Debugger
 {
-// Returns true if the address is not a valid RAM address or NULL.
-static bool IsStackBottom(const Core::CPUThreadGuard& guard, u32 addr)
+namespace
 {
-  return !addr || !PowerPC::MMU::HostIsRAMAddress(guard, addr);
+// Frames further up than this are not reported (and a corrupt chain can't loop forever).
+constexpr int MAX_STACK_FRAMES = 20;
+
+// The PowerPC EABI back chain ends at a null pointer or anything outside RAM.
+bool IsEndOfChain(const Core::CPUThreadGuard& guard, u32 address)
+{
+  return address == 0 || !PowerPC::MMU::HostIsRAMAddress(guard, address);
 }
 
-static void WalkTheStack(const Core::CPUThreadGuard& guard,
-                         const std::function<void(u32)>& stack_step)
+// Visits the saved return address (LR save word at back chain + 4) of every frame on the
+// emulated stack, innermost first.
+void ForEachSavedReturnAddress(const Core::CPUThreadGuard& guard,
+                               const std::function<void(u32)>& visit)
 {
-  const auto& ppc_state = guard.GetSystem().GetPPCState();
+  const u32 stack_pointer = guard.GetSystem().GetPPCState().gpr[1];
+  if (IsEndOfChain(guard, stack_pointer))
+    return;
 
-  if (!IsStackBottom(guard, ppc_state.gpr[1]))
+  u32 frame = PowerPC::MMU::HostRead<u32>(guard, stack_pointer);
+  int visited = 0;
+  while (visited < MAX_STACK_FRAMES && !IsEndOfChain(guard, frame + 4))
   {
-    u32 addr = PowerPC::MMU::HostRead<u32>(guard, ppc_state.gpr[1]);  // SP
-
-    // Walk the stack chain
-    for (int count = 0; !IsStackBottom(guard, addr + 4) && (count < 20); ++count)
-    {
-      u32 func_addr = PowerPC::MMU::HostRead<u32>(guard, addr + 4);
-      stack_step(func_addr);
-
-      if (IsStackBottom(guard, addr))
-        break;
-
-      addr = PowerPC::MMU::HostRead<u32>(guard, addr);
-    }
+    visit(PowerPC::MMU::HostRead<u32>(guard, frame + 4));
+    ++visited;
+    if (IsEndOfChain(guard, frame))
+      return;
+    frame = PowerPC::MMU::HostRead<u32>(guard, frame);
   }
 }
 
-// Returns callstack "formatted for debugging" - meaning that it
-// includes LR as the last item, and all items are the last step,
-// instead of "pointing ahead"
+std::string DescribeCaller(const PPCSymbolDB& symbols, u32 address)
+{
+  std::string description = symbols.GetDescription(address);
+  if (description.empty() || description == "Invalid")
+    return "(unknown)";
+  return description;
+}
+}  // namespace
+
 bool GetCallstack(const Core::CPUThreadGuard& guard, std::vector<CallstackEntry>& output)
 {
-  auto& system = guard.GetSystem();
-  auto& power_pc = system.GetPowerPC();
-  const auto& ppc_state = power_pc.GetPPCState();
+  Core::System& system = guard.GetSystem();
+  PowerPC::PowerPCManager& cpu = system.GetPowerPC();
+  const PowerPC::PowerPCState& state = cpu.GetPPCState();
 
-  if (!Core::IsRunning(system) || !PowerPC::MMU::HostIsRAMAddress(guard, ppc_state.gpr[1]))
+  if (!Core::IsRunning(system))
+    return false;
+  if (!PowerPC::MMU::HostIsRAMAddress(guard, state.gpr[1]))
     return false;
 
-  if (LR(ppc_state) == 0)
+  const u32 link = LR(state);
+  if (link == 0)
   {
-    output.push_back({
-        .Name = "(error: LR=0)",
-        .vAddress = 0,
-    });
+    output.push_back(CallstackEntry{.Name = "(error: LR=0)", .vAddress = 0});
     return false;
   }
 
-  auto& ppc_symbol_db = power_pc.GetSymbolDB();
-
-  output.push_back({
-      .Name = fmt::format(" * {} [ LR = {:08x} ]\n", ppc_symbol_db.GetDescription(LR(ppc_state)),
-                          LR(ppc_state) - 4),
-      .vAddress = LR(ppc_state) - 4,
+  // Every entry points at the call instruction itself, i.e. one instruction before the return
+  // address. The link register is the innermost caller.
+  const PPCSymbolDB& symbols = cpu.GetSymbolDB();
+  output.push_back(CallstackEntry{
+      .Name = fmt::format(" * {} [ LR = {:08x} ]\n", symbols.GetDescription(link), link - 4),
+      .vAddress = link - 4,
   });
 
-  WalkTheStack(guard, [&output, &ppc_symbol_db](u32 func_addr) {
-    std::string func_desc = ppc_symbol_db.GetDescription(func_addr);
-    if (func_desc.empty() || func_desc == "Invalid")
-      func_desc = "(unknown)";
-
-    output.push_back({
-        .Name = fmt::format(" * {} [ addr = {:08x} ]\n", func_desc, func_addr - 4),
-        .vAddress = func_addr - 4,
+  ForEachSavedReturnAddress(guard, [&](u32 return_address) {
+    const u32 call_site = return_address - 4;
+    output.push_back(CallstackEntry{
+        .Name = fmt::format(" * {} [ addr = {:08x} ]\n", DescribeCaller(symbols, return_address),
+                            call_site),
+        .vAddress = call_site,
     });
   });
-
   return true;
 }
 
 void PrintCallstack(const Core::CPUThreadGuard& guard, Common::Log::LogType type,
                     Common::Log::LogLevel level)
 {
-  auto& power_pc = guard.GetSystem().GetPowerPC();
-  const auto& ppc_state = power_pc.GetPPCState();
-  auto& ppc_symbol_db = power_pc.GetSymbolDB();
+  PowerPC::PowerPCManager& cpu = guard.GetSystem().GetPowerPC();
+  const PowerPC::PowerPCState& state = cpu.GetPPCState();
+  const PPCSymbolDB& symbols = cpu.GetSymbolDB();
+  const u32 link = LR(state);
 
-  GENERIC_LOG_FMT(type, level, "== STACK TRACE - SP = {:08x} ==", ppc_state.gpr[1]);
-
-  if (LR(ppc_state) == 0)
-  {
+  GENERIC_LOG_FMT(type, level, "== STACK TRACE - SP = {:08x} ==", state.gpr[1]);
+  if (link == 0)
     GENERIC_LOG_FMT(type, level, " LR = 0 - this is bad");
-  }
 
-  if (const std::string lr_desc = ppc_symbol_db.GetDescription(LR(ppc_state));
-      lr_desc != ppc_symbol_db.GetDescription(ppc_state.pc))
-  {
-    GENERIC_LOG_FMT(type, level, " * {}  [ LR = {:08x} ]", lr_desc, LR(ppc_state));
-  }
+  // The link register is only worth a line if it lies outside the current function.
+  const std::string link_description = symbols.GetDescription(link);
+  if (link_description != symbols.GetDescription(state.pc))
+    GENERIC_LOG_FMT(type, level, " * {}  [ LR = {:08x} ]", link_description, link);
 
-  WalkTheStack(guard, [type, level, &ppc_symbol_db](u32 func_addr) {
-    std::string func_desc = ppc_symbol_db.GetDescription(func_addr);
-    if (func_desc.empty() || func_desc == "Invalid")
-      func_desc = "(unknown)";
-    GENERIC_LOG_FMT(type, level, " * {} [ addr = {:08x} ]", func_desc, func_addr);
+  ForEachSavedReturnAddress(guard, [&](u32 return_address) {
+    GENERIC_LOG_FMT(type, level, " * {} [ addr = {:08x} ]", DescribeCaller(symbols, return_address),
+                    return_address);
   });
 }
 
 void PrintDataBuffer(const Core::System& system, Common::Log::LogType type, u32 address, u32 size,
                      std::string_view title)
 {
-  const u8* data = system.GetMemory().GetPointerForRange(address, size);
+  const u8* const bytes = system.GetMemory().GetPointerForRange(address, size);
 
   GENERIC_LOG_FMT(type, Common::Log::LogLevel::LDEBUG, "{}", title);
-  for (u32 j = 0; j < size;)
-  {
-    std::string hex_line;
-    for (int i = 0; i < 16; i++)
-    {
-      hex_line += fmt::format("{:02x} ", data[j++]);
 
-      if (j >= size)
-        break;
-    }
-    GENERIC_LOG_FMT(type, Common::Log::LogLevel::LDEBUG, "   Data: {}", hex_line);
+  // Sixteen bytes per line, each followed by a space.
+  constexpr u32 BYTES_PER_LINE = 16;
+  for (u32 line_start = 0; line_start < size; line_start += BYTES_PER_LINE)
+  {
+    const u32 line_end = std::min(size, line_start + BYTES_PER_LINE);
+    std::string line;
+    for (u32 offset = line_start; offset < line_end; ++offset)
+      line += fmt::format("{:02x} ", bytes[offset]);
+    GENERIC_LOG_FMT(type, Common::Log::LogLevel::LDEBUG, "   Data: {}", line);
   }
 }
 

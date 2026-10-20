@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -25,13 +24,13 @@ class PPCSymbolDB;
 void ApplyMemoryPatch(const Core::CPUThreadGuard& guard, std::span<u8> value, const u32 address,
                       bool store_existing_value = true);
 
+// Writes an integer in guest (big-endian) byte order.
 template <std::unsigned_integral T>
 void ApplyMemoryPatch(const Core::CPUThreadGuard& guard, T value, const u32 address)
 {
-  Common::BigEndianValue<T> big_endian{value};
-  auto data =
-      std::span<u8, sizeof(T)>{reinterpret_cast<u8*>(std::addressof(big_endian)), sizeof(T)};
-  ApplyMemoryPatch(guard, data, address);
+  Common::BigEndianValue<T> guest_order{value};
+  u8* const first_byte = reinterpret_cast<u8*>(std::addressof(guest_order));
+  ApplyMemoryPatch(guard, std::span<u8>{first_byte, sizeof(T)}, address);
 }
 
 class PPCPatches final : public Common::Debug::MemoryPatches
@@ -44,7 +43,8 @@ private:
   void UnPatch(std::size_t index) override;
 };
 
-// wrapper between disasm control and Dolphin debugger
+// The debugger front end's view of the emulated PowerPC: memory, code, breakpoints,
+// watches and patches.
 
 class PPCDebugInterface final : public Core::DebugInterface
 {
@@ -52,7 +52,7 @@ public:
   explicit PPCDebugInterface(Core::System& system, PPCSymbolDB& ppc_symbol_db);
   ~PPCDebugInterface() override;
 
-  // Watches
+  // Watch list.
   std::size_t SetWatch(u32 address, std::string name = "") override;
   const Common::Debug::Watch& GetWatch(std::size_t index) const override;
   const std::vector<Common::Debug::Watch>& GetWatches() const override;
@@ -69,7 +69,7 @@ public:
   std::vector<std::string> SaveWatchesToStrings() const override;
   void ClearWatches() override;
 
-  // Memory Patches
+  // Patch list.
   void SetPatch(const Core::CPUThreadGuard& guard, u32 address, u32 value) override;
   void SetPatch(const Core::CPUThreadGuard& guard, u32 address, std::vector<u8> value) override;
   void SetFramePatch(const Core::CPUThreadGuard& guard, u32 address, u32 value) override;
@@ -84,7 +84,7 @@ public:
   void ClearPatches(const Core::CPUThreadGuard& guard) override;
   void ApplyExistingPatch(const Core::CPUThreadGuard& guard, std::size_t index) override;
 
-  // Threads
+  // Guest OS threads.
   Common::Debug::Threads GetThreads(const Core::CPUThreadGuard& guard) const override;
 
   std::string Disassemble(const Core::CPUThreadGuard* guard, u32 address) const override;

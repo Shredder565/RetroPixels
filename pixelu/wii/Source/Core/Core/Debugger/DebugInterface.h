@@ -1,5 +1,4 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -28,7 +27,7 @@ protected:
   virtual ~DebugInterface() = default;
 
 public:
-  // Watches
+  // Memory watches (named addresses shown in the watch view).
   virtual std::size_t SetWatch(u32 address, std::string name = "") = 0;
   virtual const Common::Debug::Watch& GetWatch(std::size_t index) const = 0;
   virtual const std::vector<Common::Debug::Watch>& GetWatches() const = 0;
@@ -45,7 +44,7 @@ public:
   virtual std::vector<std::string> SaveWatchesToStrings() const = 0;
   virtual void ClearWatches() = 0;
 
-  // Memory Patches
+  // Memory patches made from the debugger.
   virtual void SetPatch(const CPUThreadGuard& guard, u32 address, u32 value) = 0;
   virtual void SetPatch(const CPUThreadGuard& guard, u32 address, std::vector<u8> value) = 0;
   virtual void SetFramePatch(const CPUThreadGuard& guard, u32 address, u32 value) = 0;
@@ -59,7 +58,7 @@ public:
   virtual void ClearPatches(const CPUThreadGuard& guard) = 0;
   virtual void ApplyExistingPatch(const CPUThreadGuard& guard, std::size_t index) = 0;
 
-  // Threads
+  // Guest OS threads.
   virtual Common::Debug::Threads GetThreads(const CPUThreadGuard& guard) const = 0;
 
   virtual std::string Disassemble(const CPUThreadGuard* /*guard*/, u32 /*address*/) const

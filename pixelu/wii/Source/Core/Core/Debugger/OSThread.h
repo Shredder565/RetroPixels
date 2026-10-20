@@ -1,5 +1,6 @@
-// Copyright 2020 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// Host-side copies of the GameCube/Wii OS thread structures, for the debugger's thread view.
 
 #pragma once
 
@@ -17,14 +18,12 @@ class CPUThreadGuard;
 
 namespace Core::Debug
 {
-template <class C>
-struct OSQueue
+template <class C> struct OSQueue
 {
   u32 head;
   u32 tail;
 };
-template <class C>
-struct OSLink
+template <class C> struct OSLink
 {
   u32 next;
   u32 prev;
@@ -75,30 +74,29 @@ struct OSThread
 {
   OSContext context;
 
-  u16 state;               // Thread state (ready, running, waiting, moribund)
-  u16 is_detached;         // Is thread detached
-  s32 suspend;             // Suspended if greater than zero
-  s32 effective_priority;  // Effective priority
-  s32 base_priority;       // Base priority
-  u32 exit_code_addr;      // Exit value address
+  u16 state;               // OS_THREAD_STATE_* (1 ready, 2 running, 4 waiting, 8 moribund)
+  u16 is_detached;         // nonzero once OSDetachThread was called
+  s32 suspend;             // suspend count; the thread only runs at 0 or below
+  s32 effective_priority;  // priority after inheritance from mutex waiters
+  s32 base_priority;       // priority it was created with
+  u32 exit_code_addr;      // where OSExitThread stores the exit value
 
-  u32 queue_addr;           // Address of the queue the thread is on
-  OSThreadLink queue_link;  // Used to traverse the thread queue
-  // OSSleepThread uses it to insert the current thread at the end of the thread queue
+  u32 queue_addr;           // queue (ready/sleep) the thread sits in
+  OSThreadLink queue_link;  // neighbours in that queue
 
-  OSThreadQueue join_queue;  // Threads waiting to be joined
+  OSThreadQueue join_queue;  // threads blocked in OSJoinThread on this one
 
-  u32 mutex_addr;            // Mutex waiting
-  OSMutexQueue mutex_queue;  // Mutex owned
+  u32 mutex_addr;            // mutex the thread is blocked on
+  OSMutexQueue mutex_queue;  // mutexes the thread holds
 
-  OSThreadLink thread_link;  // Link containing all active threads
+  OSThreadLink thread_link;  // neighbours in the list of all threads
 
-  // The STACK_MAGIC is written at stack_end
+  // Stack bounds; STACK_MAGIC sits at stack_end while the thread exists.
   u32 stack_addr;
   u32 stack_end;
 
-  s32 error;                    // errno value
-  std::array<u32, 2> specific;  // Pointers to data (can be used to store thread names)
+  s32 error;                    // errno of the network library
+  std::array<u32, 2> specific;  // OSSetThreadSpecific slots (often a name)
 
   static constexpr u32 STACK_MAGIC = 0xDEADBABE;
   void Read(const Core::CPUThreadGuard& guard, u32 addr);
@@ -114,11 +112,10 @@ static_assert(offsetof(OSThread, specific) == 0x310);
 
 struct OSMutex
 {
-  OSThreadQueue thread_queue;  // Threads waiting to own the mutex
-  u32 owner_addr;              // Thread owning the mutex
-  s32 lock_count;              // Mutex lock count
-  OSMutexLink link;            // Used to traverse the thread's mutex queue
-  // OSLockMutex uses it to insert the acquired mutex at the end of the queue
+  OSThreadQueue thread_queue;  // threads blocked on the mutex
+  u32 owner_addr;              // current owner
+  s32 lock_count;              // recursion depth
+  OSMutexLink link;            // neighbours in the owner's mutex list
 
   void Read(const Core::CPUThreadGuard& guard, u32 addr);
 };

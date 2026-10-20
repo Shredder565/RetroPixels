@@ -1,9 +1,7 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
-// Purpose: uncompress the dumps from costis GC-Debugger tool
-//
-//
+// Reader for register trace files written by an external GameCube debugger: one fixed-size
+// record of registers per traced step.
 #pragma once
 
 #include <string>

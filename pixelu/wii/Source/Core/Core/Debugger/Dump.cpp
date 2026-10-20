@@ -1,65 +1,61 @@
-// Copyright 2008 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #include "Core/Debugger/Dump.h"
 
-#include <cstdio>
+#include <cstdint>
 #include <string>
 
 #include "Common/CommonTypes.h"
 #include "Common/IOFile.h"
 
+// A trace file is a sequence of fixed-size records, one per executed step, each holding the
+// register file as big-endian words.
+
 CDump::CDump(const std::string& filename)
 {
-  File::IOFile pStream(filename, "rb");
-  if (pStream)
-  {
-    m_size = (size_t)pStream.GetSize();
+  File::IOFile file(filename, "rb");
+  if (!file)
+    return;
 
-    m_pData = new u8[m_size];
-
-    pStream.ReadArray(m_pData, m_size);
-  }
+  m_size = static_cast<size_t>(file.GetSize());
+  m_pData = new u8[m_size];
+  file.ReadArray(m_pData, m_size);
 }
 
 CDump::~CDump()
 {
-  if (m_pData != nullptr)
-  {
-    delete[] m_pData;
-    m_pData = nullptr;
-  }
+  delete[] m_pData;
 }
 
 int CDump::GetNumberOfSteps()
 {
-  return (int)(m_size / STRUCTUR_SIZE);
+  return static_cast<int>(m_size / STRUCTUR_SIZE);
 }
 
 u32 CDump::GetGPR(int _step, int _gpr)
 {
-  u32 offset = _step * STRUCTUR_SIZE;
-
-  if (offset >= m_size)
+  const u32 record = static_cast<u32>(_step) * STRUCTUR_SIZE;
+  if (record >= m_size)
     return UINT32_MAX;
-
-  return Read32(offset + OFFSET_GPR + (_gpr * 4));
+  return Read32(record + OFFSET_GPR + static_cast<u32>(_gpr) * 4);
 }
 
 u32 CDump::GetPC(int _step)
 {
-  u32 offset = _step * STRUCTUR_SIZE;
-
-  if (offset >= m_size)
+  const u32 record = static_cast<u32>(_step) * STRUCTUR_SIZE;
+  if (record >= m_size)
     return UINT32_MAX;
-
-  return Read32(offset + OFFSET_PC);
+  return Read32(record + OFFSET_PC);
 }
 
 u32 CDump::Read32(u32 _pos)
 {
-  u32 result = (m_pData[_pos + 0] << 24) | (m_pData[_pos + 1] << 16) | (m_pData[_pos + 2] << 8) |
-               (m_pData[_pos + 3] << 0);
+  // A truncated last record has no data to return.
+  if (static_cast<size_t>(_pos) + 4 > m_size)
+    return UINT32_MAX;
 
-  return result;
+  u32 word = 0;
+  for (u32 i = 0; i < 4; ++i)
+    word = (word << 8) | m_pData[_pos + i];
+  return word;
 }

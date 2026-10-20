@@ -1,5 +1,7 @@
-// Copyright 2024 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
+
+// Branch Watch records every branch the CPU takes (or doesn't take) together with the
+// instruction, so that the debugger can narrow them down to the few that react to some input.
 
 #pragma once
 
@@ -7,6 +9,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <functional>
+#include <initializer_list>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -24,6 +27,7 @@ class CPUThreadGuard;
 
 namespace Core
 {
+// Origin and destination packed into one 64-bit value, so the JITs can pass both in one register.
 struct FakeBranchWatchCollectionKey
 {
   u32 origin_addr;
@@ -42,12 +46,13 @@ struct BranchWatchCollectionValue
 };
 }  // namespace Core
 
-template <>
-struct std::hash<Core::BranchWatchCollectionKey>
+template <> struct std::hash<Core::BranchWatchCollectionKey>
 {
-  std::size_t operator()(const Core::BranchWatchCollectionKey& s) const noexcept
+  std::size_t operator()(const Core::BranchWatchCollectionKey& key) const noexcept
   {
-    return std::hash<u64>{}(static_cast<const Core::FakeBranchWatchCollectionKey&>(s));
+    // The instruction is left out: the same branch site practically never changes instruction.
+    const u64 addresses = static_cast<const Core::FakeBranchWatchCollectionKey&>(key);
+    return std::hash<u64>{}(addresses);
   }
 };
 
@@ -56,8 +61,10 @@ namespace Core
 inline bool operator==(const BranchWatchCollectionKey& lhs,
                        const BranchWatchCollectionKey& rhs) noexcept
 {
-  const std::hash<BranchWatchCollectionKey> hash;
-  return hash(lhs) == hash(rhs) && lhs.original_inst.hex == rhs.original_inst.hex;
+  if (lhs.original_inst.hex != rhs.original_inst.hex)
+    return false;
+  const std::hash<BranchWatchCollectionKey> key_hash{};
+  return key_hash(lhs) == key_hash(rhs);
 }
 
 enum class BranchWatchSelectionInspection : u8
@@ -66,7 +73,7 @@ enum class BranchWatchSelectionInspection : u8
   SetDestinBLR = 1u << 1,
   SetOriginSymbolBLR = 1u << 2,
   SetDestinSymbolBLR = 1u << 3,
-  InvertBranchOption = 1u << 4,  // Used for both conditions and decrement checks.
+  InvertBranchOption = 1u << 4,  // flips the condition and/or the CTR test
   MakeUnconditional = 1u << 5,
   EndOfEnumeration,
 };
@@ -101,7 +108,7 @@ struct BranchWatchSelectionValueType
   BranchWatchCollection::value_type* collection_ptr;
   bool is_virtual;
   bool condition;
-  // This is more so a GUI thing, but it works best in the Core code for multiple reasons.
+  // What the user did to this branch from the GUI; kept here so it is saved with the snapshot.
   Inspection inspection;
 };
 
@@ -125,8 +132,8 @@ public:
   void SetRecordingActive(const CPUThreadGuard& guard, bool active)
   {
     m_recording_active = active;
-    auto& system = guard.GetSystem();
-    system.GetJitInterface().ClearCache(guard);
+    // JIT blocks are compiled with or without the recording calls, so they must be rebuilt.
+    guard.GetSystem().GetJitInterface().ClearCache(guard);
   }
   void Clear(const CPUThreadGuard& guard);
 
@@ -146,114 +153,97 @@ public:
 
   std::size_t GetCollectionSize() const
   {
-    return m_collection_vt.size() + m_collection_vf.size() + m_collection_pt.size() +
-           m_collection_pf.size();
+    std::size_t total = 0;
+    for (const Collection* part :
+         {&m_collection_vt, &m_collection_vf, &m_collection_pt, &m_collection_pf})
+      total += part->size();
+    return total;
   }
   std::size_t GetBlacklistSize() const { return m_blacklist_size; }
   Phase GetRecordingPhase() const { return m_recording_phase; }
 
-  // An empty selection in reduction mode can't be reconstructed when loading from a file.
-  bool CanSave() const { return !(m_recording_phase == Phase::Reduction && m_selection.empty()); }
+  // A snapshot only stores selected entries in the reduction phase, so a reduction phase with
+  // nothing selected would load back as a blacklist phase.
+  bool CanSave() const { return m_recording_phase != Phase::Reduction || !m_selection.empty(); }
 
-  // All Hit member functions are for the CPUThread only. The static ones are static to remain
-  // compatible with the JITs' ABI_CallFunction function, which doesn't support non-static member
-  // functions. HitXX_fk are optimized for when origin and destination can be passed in one register
-  // easily as a Core::FakeBranchWatchCollectionKey (abbreviated as "fk"). HitXX_fk_n are the same,
-  // but also increment the total_hits by N (see dcbx JIT code).
+  // The Hit functions run on the CPU thread. The JITs call the static ones directly (they can't
+  // call member functions), and the _fk variants take origin and destination as one packed
+  // FakeBranchWatchCollectionKey. The _n variants count n hits at once (used by the dcbx code).
+  // There are no false-path _n variants because nothing needs them.
   static void HitVirtualTrue_fk(BranchWatch* branch_watch, u64 fake_key, u32 inst)
   {
-    branch_watch->m_collection_vt[{std::bit_cast<FakeBranchWatchCollectionKey>(fake_key), inst}]
-        .total_hits += 1;
+    Count(branch_watch->m_collection_vt, fake_key, inst, 1);
   }
-
-  static void HitPhysicalTrue_fk(BranchWatch* branch_watch, u64 fake_key, u32 inst)
-  {
-    branch_watch->m_collection_pt[{std::bit_cast<FakeBranchWatchCollectionKey>(fake_key), inst}]
-        .total_hits += 1;
-  }
-
   static void HitVirtualFalse_fk(BranchWatch* branch_watch, u64 fake_key, u32 inst)
   {
-    branch_watch->m_collection_vf[{std::bit_cast<FakeBranchWatchCollectionKey>(fake_key), inst}]
-        .total_hits += 1;
+    Count(branch_watch->m_collection_vf, fake_key, inst, 1);
   }
-
+  static void HitPhysicalTrue_fk(BranchWatch* branch_watch, u64 fake_key, u32 inst)
+  {
+    Count(branch_watch->m_collection_pt, fake_key, inst, 1);
+  }
   static void HitPhysicalFalse_fk(BranchWatch* branch_watch, u64 fake_key, u32 inst)
   {
-    branch_watch->m_collection_pf[{std::bit_cast<FakeBranchWatchCollectionKey>(fake_key), inst}]
-        .total_hits += 1;
+    Count(branch_watch->m_collection_pf, fake_key, inst, 1);
   }
-
   static void HitVirtualTrue_fk_n(BranchWatch* branch_watch, u64 fake_key, u32 inst, u32 n)
   {
-    branch_watch->m_collection_vt[{std::bit_cast<FakeBranchWatchCollectionKey>(fake_key), inst}]
-        .total_hits += n;
+    Count(branch_watch->m_collection_vt, fake_key, inst, n);
   }
-
   static void HitPhysicalTrue_fk_n(BranchWatch* branch_watch, u64 fake_key, u32 inst, u32 n)
   {
-    branch_watch->m_collection_pt[{std::bit_cast<FakeBranchWatchCollectionKey>(fake_key), inst}]
-        .total_hits += n;
+    Count(branch_watch->m_collection_pt, fake_key, inst, n);
   }
-
-  // HitVirtualFalse_fk_n and HitPhysicalFalse_fk_n are never used, so they are omitted here.
 
   static void HitVirtualTrue(BranchWatch* branch_watch, u32 origin, u32 destination, u32 inst)
   {
-    HitVirtualTrue_fk(branch_watch, FakeBranchWatchCollectionKey{origin, destination}, inst);
+    Count(branch_watch->m_collection_vt, Pack(origin, destination), inst, 1);
   }
-
-  static void HitPhysicalTrue(BranchWatch* branch_watch, u32 origin, u32 destination, u32 inst)
-  {
-    HitPhysicalTrue_fk(branch_watch, FakeBranchWatchCollectionKey{origin, destination}, inst);
-  }
-
   static void HitVirtualFalse(BranchWatch* branch_watch, u32 origin, u32 destination, u32 inst)
   {
-    HitVirtualFalse_fk(branch_watch, FakeBranchWatchCollectionKey{origin, destination}, inst);
+    Count(branch_watch->m_collection_vf, Pack(origin, destination), inst, 1);
   }
-
+  static void HitPhysicalTrue(BranchWatch* branch_watch, u32 origin, u32 destination, u32 inst)
+  {
+    Count(branch_watch->m_collection_pt, Pack(origin, destination), inst, 1);
+  }
   static void HitPhysicalFalse(BranchWatch* branch_watch, u32 origin, u32 destination, u32 inst)
   {
-    HitPhysicalFalse_fk(branch_watch, FakeBranchWatchCollectionKey{origin, destination}, inst);
+    Count(branch_watch->m_collection_pf, Pack(origin, destination), inst, 1);
   }
 
+  // `translate` tells whether the addresses are effective (virtual) or physical ones.
   void HitTrue(u32 origin, u32 destination, UGeckoInstruction inst, bool translate)
   {
-    if (translate)
-      HitVirtualTrue(this, origin, destination, inst.hex);
-    else
-      HitPhysicalTrue(this, origin, destination, inst.hex);
+    Count(translate ? m_collection_vt : m_collection_pt, Pack(origin, destination), inst.hex, 1);
   }
-
   void HitFalse(u32 origin, u32 destination, UGeckoInstruction inst, bool translate)
   {
-    if (translate)
-      HitVirtualFalse(this, origin, destination, inst.hex);
-    else
-      HitPhysicalFalse(this, origin, destination, inst.hex);
+    Count(translate ? m_collection_vf : m_collection_pf, Pack(origin, destination), inst.hex, 1);
   }
 
 private:
+  static constexpr u64 Pack(u32 origin, u32 destination)
+  {
+    return FakeBranchWatchCollectionKey{origin, destination};
+  }
+  static void Count(Collection& collection, u64 fake_key, u32 inst, u32 hits)
+  {
+    const BranchWatchCollectionKey key{std::bit_cast<FakeBranchWatchCollectionKey>(fake_key), inst};
+    collection[key].total_hits += hits;
+  }
+
   Collection& GetCollectionV(bool condition)
   {
-    if (condition)
-      return m_collection_vt;
-    return m_collection_vf;
+    return condition ? m_collection_vt : m_collection_vf;
   }
-
   Collection& GetCollectionP(bool condition)
   {
-    if (condition)
-      return m_collection_pt;
-    return m_collection_pf;
+    return condition ? m_collection_pt : m_collection_pf;
   }
-
   Collection& GetCollection(bool is_virtual, bool condition)
   {
-    if (is_virtual)
-      return GetCollectionV(condition);
-    return GetCollectionP(condition);
+    return is_virtual ? GetCollectionV(condition) : GetCollectionP(condition);
   }
 
   void IsolateOverwrittenShared(const CPUThreadGuard& guard,
@@ -262,10 +252,11 @@ private:
   std::size_t m_blacklist_size = 0;
   Phase m_recording_phase = Phase::Blacklist;
   bool m_recording_active = false;
-  Collection m_collection_vt;  // virtual address space | true path
-  Collection m_collection_vf;  // virtual address space | false path
-  Collection m_collection_pt;  // physical address space | true path
-  Collection m_collection_pf;  // physical address space | false path
+  // One collection per address space (virtual/physical) and outcome (taken/not taken).
+  Collection m_collection_vt;
+  Collection m_collection_vf;
+  Collection m_collection_pt;
+  Collection m_collection_pf;
   Selection m_selection;
 };
 }  // namespace Core

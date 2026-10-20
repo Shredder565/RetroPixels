@@ -1,5 +1,4 @@
-// Copyright 2022 Dolphin Emulator Project
-// SPDX-License-Identifier: GPL-2.0-or-later
+// Original code for RetroPixels (PixelU-Wii). Not derived from Dolphin.
 
 #pragma once
 
@@ -47,14 +46,14 @@ struct AutoStepResults
 
 enum class HitType : u32
 {
-  SKIP = (1 << 0),       // Not a hit
-  OVERWRITE = (1 << 1),  // Tracked value gets overwritten by untracked. Typically skipped.
-  MOVED = (1 << 2),      // Target duplicated to another register, unchanged.
-  SAVELOAD = (1 << 3),   // Target saved or loaded. Priority over Pointer.
-  POINTER = (1 << 4),    // Target used as pointer/offset for save or load
-  PASSIVE = (1 << 5),    // Conditional, etc, but not pointer. Unchanged
-  ACTIVE = (1 << 6),     // Math, etc. Changed.
-  UPDATED = (1 << 7),    // Masked or math without changing register.
+  SKIP = (1 << 0),       // irrelevant to the tracked value
+  OVERWRITE = (1 << 1),  // tracked location replaced by an untracked value
+  MOVED = (1 << 2),      // copied unchanged to another register
+  SAVELOAD = (1 << 3),   // stored to or loaded from memory (wins over POINTER)
+  POINTER = (1 << 4),    // used as the address or index of an access
+  PASSIVE = (1 << 5),    // read (compares and the like) without being changed
+  ACTIVE = (1 << 6),     // used to compute a new value in another register
+  UPDATED = (1 << 7),    // modified in place in the same register
 };
 
 class CodeTrace
